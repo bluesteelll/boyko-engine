@@ -168,9 +168,12 @@ fn ssao_spv_byte_identical() {
     // its single source: the eDSL-generated span + the hand-written glue, with one baked preset.
     //
     // The keystone no-op proof: the MEDIUM variant (`SSAO_PRESETS[1]` == today's shipped
-    // consts) must be byte-identical to BOTH (a) the committed base `sdf_ssao.comp.spv` and
-    // (b) the committed base `sdf_ssao.comp.hlsl`. If Medium drifts, the parameterization
-    // changed something it must not have.
+    // consts) must be byte-identical to (a) a fresh re-DXC of its own `.hlsl` (the per-variant
+    // gate below, shared with Low/High) and (b) the committed base `sdf_ssao.comp.hlsl`. The
+    // pre-Q2 redundant base `sdf_ssao.comp.spv` was RETIRED (the Medium variant `.spv` replaces it
+    // as the byte-identity authority — the engine loads the per-variant `.spv`, not the base);
+    // the byte-identity claim is now self-contained PER VARIANT (each variant's `.spv` == its own
+    // re-DXC), so the base `.hlsl` (the single-source glue template) is all the base contributes.
     let Some(dxc) = find_dxc() else {
         eprintln!(
             "ssao_edsl_sync: dxc not found (no C:/VulkanSDK/.../dxc.exe, no $VULKAN_SDK/Bin, \
@@ -189,10 +192,6 @@ fn ssao_spv_byte_identical() {
             base_hlsl_path.display()
         )
     });
-    let base_spv = std::fs::read(dir.join("sdf_ssao.comp.spv")).unwrap_or_else(|e| {
-        panic!("missing committed base SSAO SPIR-V (compile + commit it): {e}")
-    });
-
     for quality in SsaoQuality::ALL {
         let stem = format!("sdf_ssao_{}.comp", quality.suffix());
         let hlsl_name = format!("{stem}.hlsl");
@@ -251,14 +250,20 @@ fn ssao_spv_byte_identical() {
             committed_spv.len()
         );
 
-        // (4) The MEDIUM `.spv` must equal the committed BASE `.spv` byte-for-byte (the no-op
-        //     proof, `.spv` level): Medium == today's pipeline, end-to-end through DXC.
+        // (4) The MEDIUM no-op proof, `.spv` level: the Medium variant `.spv` must be the EXACT
+        //     re-DXC of the MEDIUM `.hlsl`, which (per step (2)) is byte-identical to the base
+        //     `.hlsl`. Step (3) above already asserted `committed_spv == regenerated` for Medium,
+        //     and `regenerated` is the re-DXC of a `.hlsl` proven equal to the base `.hlsl` — so
+        //     `committed_spv` IS "today's pipeline end-to-end through DXC" from the base text. The
+        //     pre-Q2 base `sdf_ssao.comp.spv` was retired, so there is no separate base blob to
+        //     diff; the per-variant re-DXC + the `.hlsl`-equals-base proof carry the no-op claim.
         if quality == SsaoQuality::Medium {
             assert_eq!(
-                committed_spv, base_spv,
-                "MEDIUM variant `.spv` is NOT byte-identical to the committed base \
-                 sdf_ssao.comp.spv — the Medium pre-compiled variant must reproduce today's \
-                 shipped shader exactly (the no-op proof). STOP and audit the parameterization."
+                committed_hlsl,
+                base_hlsl.replace("\r\n", "\n"),
+                "MEDIUM variant `.hlsl` must equal the base `.hlsl` for the `.spv`-level no-op \
+                 proof to hold (its re-DXC at step (3) is the committed `.spv`). STOP and audit \
+                 the parameterization."
             );
         }
     }
@@ -300,7 +305,17 @@ fn ssao_horizon_step_host_matches_edsl_eval() {
         // Feed hc = 0 (the half-slice accumulator's seed) AND a non-zero hc (a mid-march value)
         // to exercise both the `max(0, …)` and the `max(prev, …)` branches.
         for &hc_seed in &[0.0_f32, 0.37_f32] {
-            let host = boyko_rhi_vulkan::compute::ssao_horizon_step(hc_seed, *p, *pp, *n);
+            // Render P7-Q2: the host tap now reads `params.radius`/`params.eps`; the eDSL Eval
+            // body spells `SSAO_RADIUS`/`SSAO_EPS` (the module consts == the Medium row). Feed the
+            // host the Medium params (`SsaoParams::default()`) so both read the SAME radius/eps and
+            // the bit-equality holds (Medium == today's shipped consts == the eDSL Eval scalars).
+            let host = boyko_rhi_vulkan::compute::ssao_horizon_step(
+                hc_seed,
+                *p,
+                *pp,
+                *n,
+                &boyko_rhi_vulkan::compute::SsaoParams::default(),
+            );
             let edsl = ssao::ssao_horizon_step_body::<EvalCf>(*p, *pp, *n, hc_seed);
             assert_eq!(
                 host.to_bits(),
@@ -342,5 +357,45 @@ fn ssao_consts_host_match_edsl() {
         host::SSAO_SLICES_F,
         ssao::SSAO_SLICES as f32,
         "SSAO_SLICES_F host vs eDSL slice count"
+    );
+}
+
+#[test]
+fn ssao_params_table_host_match_edsl() {
+    // Render P7-Q2: the host quality-preset table (`compute::SSAO_PARAMS`, the AO oracle's variant
+    // tuning) must equal the eDSL source of truth (`boyko_shaderdsl::ssao::SSAO_PRESETS`, the table
+    // the pre-compiled `.spv` variants bake) ROW-FOR-ROW. A host-only edit of a variant's tap
+    // budget / radius / strength would silently fork the oracle from the shipped variant `.spv`;
+    // this catches it host-side, before any GPU run. The host `SsaoParams` cannot reference the
+    // eDSL type (the lib has no dev-dep on it), so compare field-by-field.
+    use boyko_rhi_vulkan::compute as host;
+    assert_eq!(
+        host::SSAO_PARAMS.len(),
+        ssao::SSAO_PRESETS.len(),
+        "SSAO_PARAMS row count host vs eDSL"
+    );
+    for (q, e) in host::SSAO_PARAMS.iter().zip(ssao::SSAO_PRESETS.iter()) {
+        assert_eq!(q.radius, e.radius, "SSAO_PARAMS radius host vs eDSL");
+        assert_eq!(q.slices, e.slices, "SSAO_PARAMS slices host vs eDSL");
+        assert_eq!(q.steps, e.steps, "SSAO_PARAMS steps host vs eDSL");
+        assert_eq!(q.strength, e.strength, "SSAO_PARAMS strength host vs eDSL");
+        assert_eq!(q.eps, e.eps, "SSAO_PARAMS eps host vs eDSL");
+    }
+    // The MEDIUM row IS today's shipped module consts (the no-op proof, host-side).
+    let medium = host::SSAO_PARAMS[host::SSAO_QUALITY_MEDIUM];
+    assert_eq!(medium.radius, host::SSAO_RADIUS, "Medium radius == SSAO_RADIUS");
+    assert_eq!(medium.slices, host::SSAO_SLICES, "Medium slices == SSAO_SLICES");
+    assert_eq!(medium.steps, host::SSAO_STEPS, "Medium steps == SSAO_STEPS");
+    assert_eq!(
+        medium.strength,
+        host::SSAO_STRENGTH,
+        "Medium strength == SSAO_STRENGTH"
+    );
+    assert_eq!(medium.eps, host::SSAO_EPS, "Medium eps == SSAO_EPS");
+    // `SsaoParams::default()` must BE the Medium row.
+    assert_eq!(
+        host::SsaoParams::default(),
+        medium,
+        "SsaoParams::default() must equal the Medium preset"
     );
 }

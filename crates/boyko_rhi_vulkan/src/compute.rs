@@ -277,16 +277,36 @@ static SDF_TILE_CULL_SPV: SpirvBlob<10304> = SpirvBlob(*include_bytes!(concat!(
     "/shaders/sdf_tile_cull.comp.spv"
 )));
 
-/// The committed Render P7 SSAO (HBAO-lite, no-trig) SPIR-V (`shaders/sdf_ssao.comp.hlsl`,
-/// GROUP A). One invocation per pixel gathers a horizon-based ambient-occlusion factor from
-/// the FROZEN G-buffer and stores it into the `R8_UNORM` `ssao` lane the deferred resolve
-/// combines under `ssao_mode != 0`. Bound to a DEDICATED 5-binding SSAO set: gNormal @0 (R,
-/// oct + id), gMaterial @1 (R, `.b` = mask), gViewT @2 (R, surface `t`), the `ssao` out @3 (W),
-/// the 80-byte camera UBO @4. `gAlbedo` is NOT bound. The host oracle is
-/// [`golden_ssao_attributes`] (Stage-2 gather over the [`golden_gbuffer`] Stage-1 map).
-static SDF_SSAO_SPV: SpirvBlob<44060> = SpirvBlob(*include_bytes!(concat!(
+// The committed Render P7-Q2 SSAO (HBAO-lite, no-trig) quality-VARIANT SPIR-V — one PRE-COMPILED
+// `.spv` per `boyko_shaderdsl::ssao::SSAO_PRESETS` row (Mechanism C: a variant is selected at
+// runtime by binding a different pipeline, NEVER by a dynamic loop bound, so every `[unroll]`
+// slice/step loop stays fully unrolled with ZERO per-pixel runtime cost). All three share the
+// IDENTICAL 5-binding SSAO interface (`shaders/sdf_ssao.comp.hlsl`, GROUP A): gNormal @0 (R,
+// oct + id), gMaterial @1 (R, `.b` = mask), gViewT @2 (R, surface `t`), the `ssao` out @3 (W), the
+// 80-byte camera UBO @4 (`gAlbedo` is NOT bound) — so ONE bind-group layout drives all three. Each
+// `.spv` is a DISTINCT size (the baked-const unroll counts differ), so each is its own
+// `SpirvBlob<N>` `static` (a heterogeneous `[_; 3]` array would force a large-variant enum); the
+// `sdf_ssao_spirv_variant(q)` selector matches `q` to the right blob. Each `N` is that
+// `include_bytes!`'s own const-asserted size — a drifted variant `.spv` fails the length at compile
+// time. The host oracle is [`golden_ssao_attributes`] fed the matching [`SSAO_PARAMS`] row.
+
+/// `SSAO_PARAMS[SSAO_QUALITY_LOW]` — `sdf_ssao_low.comp.spv` (2 slices × 3 steps × 2 = 12 taps).
+static SDF_SSAO_LOW_SPV: SpirvBlob<34628> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/shaders/sdf_ssao.comp.spv"
+    "/shaders/sdf_ssao_low.comp.spv"
+)));
+
+/// `SSAO_PARAMS[SSAO_QUALITY_MEDIUM]` — `sdf_ssao_medium.comp.spv` (2 slices × 4 steps × 2 = 16
+/// taps; == today's shipped consts, byte-identical to the pre-Q2 base `sdf_ssao.comp.spv`).
+static SDF_SSAO_MEDIUM_SPV: SpirvBlob<44060> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/sdf_ssao_medium.comp.spv"
+)));
+
+/// `SSAO_PARAMS[SSAO_QUALITY_HIGH]` — `sdf_ssao_high.comp.spv` (3 slices × 6 steps × 2 = 36 taps).
+static SDF_SSAO_HIGH_SPV: SpirvBlob<89252> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/sdf_ssao_high.comp.spv"
 )));
 
 /// A 4-byte-aligned wrapper around a committed SPIR-V byte blob so its address is
@@ -464,17 +484,57 @@ pub fn sdf_tile_cull_spirv() -> &'static [u32] {
 /// The committed Render P7 SSAO (HBAO-lite) SPIR-V as a `u32` word stream, ready for
 /// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
 ///
-/// One invocation per pixel; bound to the dedicated 5-binding SSAO set { gNormal @0 (R),
-/// gMaterial @1 (R), gViewT @2 (R), `ssao` out @3 (W), camera UBO @4 }. It gathers the
-/// horizon-based ambient-occlusion factor from the FROZEN G-buffer and STOREs it into the
-/// `R8_UNORM` `ssao` lane the deferred resolve combines under `ssao_mode != 0`. Dispatched 1D
-/// over the SAME pixel count as the marcher/resolve, BETWEEN the marcher→resolve store-to-load
-/// barrier and the resolve (with a COMPUTE→COMPUTE barrier on `ssao` so the resolve's
-/// `gSsao.Load` sees the store). The host mirror is [`golden_ssao_attributes`].
+/// Returns the MEDIUM quality variant (`SSAO_PARAMS[1]` == today's shipped consts — byte-identical
+/// to the pre-Q2 base shader) — the default the harnesses use unless they select a variant via
+/// [`sdf_ssao_spirv_variant`]. One invocation per pixel; bound to the dedicated 5-binding SSAO set
+/// { gNormal @0 (R), gMaterial @1 (R), gViewT @2 (R), `ssao` out @3 (W), camera UBO @4 }. It gathers
+/// the horizon-based ambient-occlusion factor from the FROZEN G-buffer and STOREs it into the
+/// `R8_UNORM` `ssao` lane the deferred resolve combines under `ssao_mode != 0`. Dispatched 1D over
+/// the SAME pixel count as the marcher/resolve, BETWEEN the marcher→resolve store-to-load barrier and
+/// the resolve (with a COMPUTE→COMPUTE barrier on `ssao` so the resolve's `gSsao.Load` sees the
+/// store). The host mirror is [`golden_ssao_attributes`].
 #[inline]
 pub fn sdf_ssao_spirv() -> &'static [u32] {
-    SDF_SSAO_SPV.as_words()
+    sdf_ssao_spirv_variant(SSAO_QUALITY_MEDIUM)
 }
+
+/// The committed Render P7-Q2 SSAO SPIR-V for quality variant `q` (an index into [`SSAO_PARAMS`] /
+/// the [`SSAO_QUALITY_LOW`]/[`SSAO_QUALITY_MEDIUM`]/[`SSAO_QUALITY_HIGH`] constants), as a `u32` word
+/// stream ready for [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// All three variants share the SAME 5-binding SSAO interface (so one bind-group layout drives any
+/// of them); only the BAKED `static const` tap budget (the `[unroll]` loop counts) differs — the
+/// host selects a variant by binding its pipeline (Mechanism C, ZERO per-pixel runtime cost). Feed
+/// the matching `SSAO_PARAMS[q]` row to [`golden_ssao_attributes`] for the bit-comparable host oracle.
+///
+/// # Panics
+///
+/// Panics (debug + release) if `q` is not a valid `SSAO_QUALITY_*` index ([`SSAO_QUALITY_LOW`] /
+/// [`SSAO_QUALITY_MEDIUM`] / [`SSAO_QUALITY_HIGH`]); a caller passing an out-of-range quality is a bug.
+#[inline]
+pub fn sdf_ssao_spirv_variant(q: usize) -> &'static [u32] {
+    match q {
+        SSAO_QUALITY_LOW => SDF_SSAO_LOW_SPV.as_words(),
+        SSAO_QUALITY_MEDIUM => SDF_SSAO_MEDIUM_SPV.as_words(),
+        SSAO_QUALITY_HIGH => SDF_SSAO_HIGH_SPV.as_words(),
+        _ => ssao_variant_out_of_range(q),
+    }
+}
+
+/// The cold out-of-range arm of [`sdf_ssao_spirv_variant`] (an invalid `SSAO_QUALITY_*` index is a
+/// caller bug). Split out + `#[cold]` so the variant selector's hot path stays a compact jump table.
+#[cold]
+#[inline(never)]
+fn ssao_variant_out_of_range(q: usize) -> ! {
+    panic!(
+        "invariant: SSAO quality variant index {q} out of range (must be one of \
+         SSAO_QUALITY_LOW/MEDIUM/HIGH = 0..{SSAO_QUALITY_COUNT})"
+    )
+}
+
+/// The number of pre-compiled SSAO quality variants (the valid `SSAO_QUALITY_*` / [`SSAO_PARAMS`]
+/// index range, `0..SSAO_QUALITY_COUNT`).
+pub const SSAO_QUALITY_COUNT: usize = 3;
 
 /// Errors from the compute-pipeline flow. `VkError` carries the failing command
 /// name + the raw `VkResult`; `Memory` forwards a buffer/allocation failure.
@@ -626,6 +686,68 @@ pub const SSAO_EPS: f32 = 1.0e-4;
 /// The mesh/SDF G-buffer background sentinel (`SSAO_VIEWT_BG`) — a `view_t` at or above this
 /// is a non-lit / mesh / background pixel (mirrors the marcher's `gViewT` `1.0e30` sentinel).
 pub const SSAO_VIEWT_BG: f32 = 1.0e30;
+
+/// Render P7-Q2 — ONE SSAO quality preset, the host-side mirror of
+/// `boyko_shaderdsl::ssao::SsaoParams` (the lib cannot import the eDSL: `boyko_shaderdsl` is a
+/// DEV-dependency only, so this struct re-states the same five scalars the pre-compiled `.spv`
+/// variants bake). The host AO oracle [`golden_ssao_attributes`] reads these IN PLACE OF the module
+/// `SSAO_*` consts, so feeding [`SSAO_PARAMS`]`[q]` reproduces variant `q`'s GPU result bit-for-bit.
+///
+/// The module `SSAO_RADIUS`/`SSAO_SLICES`/`SSAO_STEPS`/`SSAO_STRENGTH`/`SSAO_EPS` consts remain the
+/// SINGLE SOURCE of the Medium row (`SSAO_PARAMS[1]` == today's shipped scalars, the no-op proof)
+/// AND the `ssao_consts_host_match_edsl` eDSL cross-check anchor. The `ssao_variants_match_host`
+/// golden pins the host table to `boyko_shaderdsl::ssao::SSAO_PRESETS` (the eDSL source of truth).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SsaoParams {
+    /// The world-space sampling radius (`SSAO_RADIUS`). Beyond it a tap's `falloff` zeroes it.
+    pub radius: f32,
+    /// The number of rotated screen-space slices (`SSAO_SLICES`); the `occ / N` divisor (`N` as a
+    /// float) is `slices as f32`.
+    pub slices: u32,
+    /// The number of forward steps per half-slice (`SSAO_STEPS`).
+    pub steps: u32,
+    /// The occlusion strength multiplier (`SSAO_STRENGTH`).
+    pub strength: f32,
+    /// The `length(delta)` divide-by-zero guard (`SSAO_EPS`).
+    pub eps: f32,
+}
+
+impl Default for SsaoParams {
+    /// The MEDIUM preset (`SSAO_PARAMS[1]`) — today's shipped consts (the no-op proof). Equal to
+    /// `SSAO_PARAMS[SSAO_QUALITY_MEDIUM]`.
+    #[inline]
+    fn default() -> Self {
+        SSAO_PARAMS[SSAO_QUALITY_MEDIUM]
+    }
+}
+
+/// The Render P7-Q2 SSAO quality-preset table (host mirror of `boyko_shaderdsl::ssao::SSAO_PRESETS`).
+/// One row per pre-compiled `.spv` variant (selected by binding its pipeline, NEVER a dynamic loop
+/// bound — Mechanism C). Indexed by the `SSAO_QUALITY_*` constants. The MEDIUM row equals today's
+/// shipped module consts (the no-op proof); `ssao_variants_match_host` pins the whole table to the
+/// eDSL `SSAO_PRESETS`.
+pub const SSAO_PARAMS: [SsaoParams; 3] = [
+    // Low — the cheapest tap budget (2 slices × 3 steps × 2 = 12 taps).
+    SsaoParams { radius: 0.5, slices: 2, steps: 3, strength: 2.5, eps: 1.0e-4 },
+    // Medium — IDENTICAL to today's shipped consts (2 slices × 4 steps × 2 = 16 taps).
+    SsaoParams {
+        radius: SSAO_RADIUS,
+        slices: SSAO_SLICES,
+        steps: SSAO_STEPS,
+        strength: SSAO_STRENGTH,
+        eps: SSAO_EPS,
+    },
+    // High — the widest tap budget (3 slices × 6 steps × 2 = 36 taps).
+    SsaoParams { radius: 0.5, slices: 3, steps: 6, strength: 2.5, eps: 1.0e-4 },
+];
+
+/// The LOW SSAO quality variant index into [`SSAO_PARAMS`] / [`sdf_ssao_spirv_variant`].
+pub const SSAO_QUALITY_LOW: usize = 0;
+/// The MEDIUM SSAO quality variant index (== today's shipped consts; [`sdf_ssao_spirv`]'s default).
+pub const SSAO_QUALITY_MEDIUM: usize = 1;
+/// The HIGH SSAO quality variant index into [`SSAO_PARAMS`] / [`sdf_ssao_spirv_variant`].
+pub const SSAO_QUALITY_HIGH: usize = 2;
+
 /// The perspective screen-pixel radius clamp minimum (`SSAO_RADIUS_PIX_MIN`) — keeps taps
 /// from collapsing onto one texel.
 pub const SSAO_RADIUS_PIX_MIN: f32 = 2.0;
@@ -4515,14 +4637,20 @@ pub fn golden_marcher_attributes(
 /// A flat surface (`delta ⊥ N` → `elev = 0`) raises no horizon (AO = 1); a crevice
 /// (neighbours rising above the tangent → `dot(delta,N) > 0`) does (AO < 1). `dot` is INLINE
 /// component-reads + mul/add; `length = sqrt(dot(delta,delta))`.
-pub fn ssao_horizon_step(hc: f32, p: [f32; 3], pp: [f32; 3], n: [f32; 3]) -> f32 {
+///
+/// Render P7-Q2: `params` carries the active variant's `radius`/`eps` (the only two scalars this tap
+/// reads). The arithmetic is UNCHANGED — feeding [`SsaoParams::default`] (== the Medium row == the
+/// module `SSAO_RADIUS`/`SSAO_EPS` consts) reproduces the pre-Q2 result bit-for-bit. The variant
+/// `.spv` spells `SSAO_RADIUS`/`SSAO_EPS` symbolically (the baked `static const` header supplies the
+/// values), so this host scalar swap mirrors the GPU's swapped header exactly.
+pub fn ssao_horizon_step(hc: f32, p: [f32; 3], pp: [f32; 3], n: [f32; 3], params: &SsaoParams) -> f32 {
     // float3 delta = P' - P;
     let delta = [pp[0] - p[0], pp[1] - p[1], pp[2] - p[2]];
     // dot(delta, delta) (INLINE).
     let d2 = delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2];
     // float r2 = SSAO_RADIUS * SSAO_RADIUS;  (a named temp — the divisor prints `d2 / r2`,
     // NOT the precedence-wrong `(d2 / R) * R`; mirror the eDSL `temp_float("r2", ...)`).
-    let r2 = SSAO_RADIUS * SSAO_RADIUS;
+    let r2 = params.radius * params.radius;
     // float falloff = clamp(1.0 - d2 / r2, 0.0, 1.0);
     let falloff = (1.0 - d2 / r2).clamp(0.0, 1.0);
     // dot(delta, N) (INLINE) — the unnormalized elevation against the center surface normal.
@@ -4531,7 +4659,7 @@ pub fn ssao_horizon_step(hc: f32, p: [f32; 3], pp: [f32; 3], n: [f32; 3]) -> f32
     // elevation above the tangent, clamped non-negative (neighbours below the tangent do not
     // occlude). `length(delta) = sqrt(d2)` reuses the `d2` value so the sqrt operand is
     // bit-identical to the GPU.
-    let elev = (dn / d2.sqrt().max(SSAO_EPS)).max(0.0);
+    let elev = (dn / d2.sqrt().max(params.eps)).max(0.0);
     // hc = max(hc, elev * falloff);
     hc.max(elev * falloff)
 }
@@ -4591,6 +4719,13 @@ pub fn golden_gbuffer<M: Fn(u32, u32) -> f32>(
 /// position is reconstructed FORWARD via the SAME [`composite_ray`] the marcher uses (no
 /// proj-matrix inverse); an out-of-bounds or non-lit tap reconstructs `Pp = P` (zero
 /// contribution). The rotation slot is the INTEGER hash (bit-exact vs the GPU `uint`).
+///
+/// Render P7-Q2: `params` selects the quality variant the GPU bound — its `radius`/`slices`/`steps`/
+/// `strength`/`eps` REPLACE the module `SSAO_*` consts in the gather (the pix-radius, the slice/step
+/// loop bounds, the `occ → ao` strength/slice-divisor fold, and the per-tap [`ssao_horizon_step`]).
+/// The arithmetic is UNCHANGED: feeding [`SsaoParams::default`] (== `SSAO_PARAMS[SSAO_QUALITY_MEDIUM]`
+/// == today's shipped consts) reproduces the pre-Q2 golden BIT-FOR-BIT. Feed `SSAO_PARAMS[q]` to
+/// mirror the variant `q` `.spv`.
 pub fn golden_ssao_attributes(
     gbuf: &[MarcherAttributes],
     px: u32,
@@ -4598,6 +4733,7 @@ pub fn golden_ssao_attributes(
     img_w: u32,
     img_h: u32,
     camera: CompositeCamera,
+    params: &SsaoParams,
 ) -> f32 {
     debug_assert_eq!(
         gbuf.len(),
@@ -4641,14 +4777,14 @@ pub fn golden_ssao_attributes(
             let z_view = rd[0] * forward[0] + rd[1] * forward[1] + rd[2] * forward[2];
             let z = (z_view * view_t).max(1.0e-3);
             // pr = R * (h/2) / (z * tan(fovY/2)); clamp(pr, MIN, MAX).
-            let pr = SSAO_RADIUS * ((img_h as f32) * 0.5) / (z * tan_half_fov);
+            let pr = params.radius * ((img_h as f32) * 0.5) / (z * tan_half_fov);
             pr.clamp(SSAO_RADIUS_PIX_MIN, SSAO_RADIUS_PIX_MAX)
         }
         CompositeCamera::Ortho => {
             // The view maps the [-HALF_EXTENT, HALF_EXTENT] span across h/2 pixels, so R spans
             // R*(h/2)/HALF_EXTENT. `SDF_HALF_EXTENT` IS the shader's `RAYGEN_HALF_EXTENT` (the
             // ortho half-extent `composite_ray` already uses — reuse it, do NOT hardcode a copy).
-            SSAO_RADIUS * ((img_h as f32) * 0.5) / SDF_HALF_EXTENT
+            params.radius * ((img_h as f32) * 0.5) / SDF_HALF_EXTENT
         }
     };
 
@@ -4688,41 +4824,46 @@ pub fn golden_ssao_attributes(
         p
     };
 
+    // The variant tap budget — the slice/step `[unroll]` bounds the matching `.spv` bakes.
+    let steps_f = params.steps as f32;
     let mut occ = 0.0_f32;
-    for sl in 0..SSAO_SLICES {
-        // The base slice axis (two slices -> (1,0), (0,1)) rotated by the per-pixel `rot`. This
-        // 2D screen axis picks the neighbour PIXEL (the tap offset); the horizon math measures
-        // elevation against the center surface normal `center_n`, NOT this direction.
+    for sl in 0..params.slices {
+        // The base slice axis: slice 0 -> (1,0), EVERY other slice -> (0,1) before rotation —
+        // the EXACT `(sl == 0u) ? float2(1,0) : float2(0,1)` the shader bakes (so the High
+        // variant's slices 1 & 2 both start from (0,1), differing only by the per-pixel `rot`,
+        // matching the GPU bit-for-bit). The 2D screen axis picks the neighbour PIXEL (the tap
+        // offset); the horizon math measures elevation against the center normal, NOT this axis.
         let base = if sl == 0 { (1.0_f32, 0.0) } else { (0.0, 1.0) };
         let sdir2 = (
             base.0 * rot.0 - base.1 * rot.1,
             base.0 * rot.1 + base.1 * rot.0,
         );
 
-        // The + half-slice: SSAO_STEPS forward taps, tracking the horizon max `hc`. The screen
+        // The + half-slice: `params.steps` forward taps, tracking the horizon max `hc`. The screen
         // offset advances along +sdir2; elevation is measured against the center normal.
         let mut hc_pos = 0.0_f32;
-        for sp in 0..SSAO_STEPS {
-            let advance = (sp as f32 + radial_phase) * pix_radius / (SSAO_STEPS as f32);
+        for sp in 0..params.steps {
+            let advance = (sp as f32 + radial_phase) * pix_radius / steps_f;
             let pp = reconstruct(sdir2, advance, 1.0);
-            hc_pos = ssao_horizon_step(hc_pos, p, pp, center_n);
+            hc_pos = ssao_horizon_step(hc_pos, p, pp, center_n, params);
         }
 
-        // The - half-slice: SSAO_STEPS forward taps along the negated screen offset. Same
+        // The - half-slice: `params.steps` forward taps along the negated screen offset. Same
         // center normal (both half-slices measure elevation against the surface tangent).
         let mut hc_neg = 0.0_f32;
-        for sn in 0..SSAO_STEPS {
-            let advance = (sn as f32 + radial_phase) * pix_radius / (SSAO_STEPS as f32);
+        for sn in 0..params.steps {
+            let advance = (sn as f32 + radial_phase) * pix_radius / steps_f;
             let pp = reconstruct(sdir2, advance, -1.0);
-            hc_neg = ssao_horizon_step(hc_neg, p, pp, center_n);
+            hc_neg = ssao_horizon_step(hc_neg, p, pp, center_n, params);
         }
 
         occ += hc_pos + hc_neg;
     }
 
     // The final occlusion complement (the eDSL `ssao_estimate` tail): the mean per-slice
-    // horizon cosine scaled by strength, complemented, then squared (the integer self-mul).
-    let ao = (1.0 - SSAO_STRENGTH * occ / SSAO_SLICES_F).clamp(0.0, 1.0);
+    // horizon cosine scaled by strength, complemented, then squared (the integer self-mul). The
+    // `occ / N` divisor reads `params.slices as f32` (the `SSAO_SLICES_F` the variant bakes).
+    let ao = (1.0 - params.strength * occ / params.slices as f32).clamp(0.0, 1.0);
     ao * ao
 }
 
@@ -9092,7 +9233,8 @@ mod ssao_resolve_combine_tests {
 #[cfg(test)]
 mod ssao_gather_tests {
     use super::{
-        oct_decode, CompositeCamera, MarcherAttributes, golden_ssao_attributes, SSAO_VIEWT_BG,
+        oct_decode, CompositeCamera, MarcherAttributes, SsaoParams, golden_ssao_attributes,
+        SSAO_VIEWT_BG,
     };
 
     const W: u32 = 64;
@@ -9159,7 +9301,7 @@ mod ssao_gather_tests {
             let view_t = view_t0 + (n[0] / n[2]) * (xw - x0) + (n[1] / n[2]) * (yw - y0);
             (true, view_t)
         });
-        let ao = golden_ssao_attributes(&gbuf, CX, CY, W, H, CompositeCamera::Ortho);
+        let ao = golden_ssao_attributes(&gbuf, CX, CY, W, H, CompositeCamera::Ortho, &SsaoParams::default());
         assert!(ao.is_finite(), "a flat surface must not produce NaN, got ao = {ao}");
         assert!(
             ao > 0.99,
@@ -9181,7 +9323,7 @@ mod ssao_gather_tests {
             let r = (dx * dx + dy * dy).sqrt();
             (true, 1.5 - 0.01 * r)
         });
-        let ao = golden_ssao_attributes(&gbuf, CX, CY, W, H, CompositeCamera::Ortho);
+        let ao = golden_ssao_attributes(&gbuf, CX, CY, W, H, CompositeCamera::Ortho, &SsaoParams::default());
         assert!(
             ao < 0.5,
             "a deep crevice (neighbours above the tangent) must darken AO clearly below 1.0, \
@@ -9197,7 +9339,7 @@ mod ssao_gather_tests {
         // tap reconstructs Pp = P (the seam's out-of-bounds / non-lit skip) -> delta == 0 ->
         // elev == 0 (guarded by SSAO_EPS, no divide-by-zero NaN) -> occ == 0 -> AO == 1.
         let gbuf = synthetic_gbuffer(|x, y| (x == CX as i32 && y == CY as i32, 1.5));
-        let ao = golden_ssao_attributes(&gbuf, CX, CY, W, H, CompositeCamera::Ortho);
+        let ao = golden_ssao_attributes(&gbuf, CX, CY, W, H, CompositeCamera::Ortho, &SsaoParams::default());
         assert!(ao.is_finite(), "a seam must not produce NaN, got ao = {ao}");
         assert!(
             (ao - 1.0).abs() < 1.0e-6,
@@ -9210,7 +9352,7 @@ mod ssao_gather_tests {
         // A non-lit center (background): the gather returns the neutral 1.0 before any march,
         // so the resolve's `min(class_ao, ssao)` leaves the pixel unchanged.
         let gbuf = synthetic_gbuffer(|_x, _y| (false, 0.0));
-        let ao = golden_ssao_attributes(&gbuf, CX, CY, W, H, CompositeCamera::Ortho);
+        let ao = golden_ssao_attributes(&gbuf, CX, CY, W, H, CompositeCamera::Ortho, &SsaoParams::default());
         assert_eq!(ao, 1.0, "a non-lit center pixel must return the neutral AO 1.0");
     }
 

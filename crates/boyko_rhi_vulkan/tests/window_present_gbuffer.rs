@@ -71,7 +71,10 @@ use boyko_rhi_vulkan::compute::{
     encode_edit_list, deferred_pbr_spirv, golden_composite_pixel_ex, golden_deferred_resolve,
     golden_marcher_attributes, composite_pixel_ray, GoldenMaterial, DEFAULT_MARCHER_OMEGA,
     LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, DEFAULT_LIGHT_DIR, mesh_depth_for_z,
-    sdf_gbuffer_composite_spirv, sdf_op, sdf_ssao_spirv, sdf_tile_cull_spirv, tile_grid_extent,
+    sdf_gbuffer_composite_spirv, sdf_op, sdf_ssao_spirv_variant, sdf_tile_cull_spirv,
+    tile_grid_extent,
+    // Render P7-Q2: the SSAO quality-variant indices the ladder showcase selects between.
+    SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM, SSAO_QUALITY_HIGH,
 };
 use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
@@ -2296,6 +2299,13 @@ fn read_bmp_dimensions(bytes: &[u8]) -> Option<(i32, i32)> {
 /// (A2 == 1.0) visibly receives the sphere's contact AO, which the A2 SDF-march cannot give it.
 const SSAO_MESH_BMP: &str = r"D:\tmp\engine_ssao_mesh_512.bmp";
 
+/// Render P7-Q2 — the SSAO quality-LADDER BMP dump paths (the SAME mesh+SDF scene rendered with SSAO
+/// OFF / Low / Medium / High, so the orchestrator converts + shows the owner the quality ladder).
+const SSAO_LADDER_OFF_BMP: &str = r"D:\tmp\engine_ssao_off.bmp";
+const SSAO_LADDER_LOW_BMP: &str = r"D:\tmp\engine_ssao_low.bmp";
+const SSAO_LADDER_MEDIUM_BMP: &str = r"D:\tmp\engine_ssao_medium.bmp";
+const SSAO_LADDER_HIGH_BMP: &str = r"D:\tmp\engine_ssao_high.bmp";
+
 /// The per-showcase variable scene: the SDF edit list, the marcher/resolve camera push, the light
 /// table (header + elements), and the RASTER MESH (vertices + MVP). The shared [`run_showcase_dump`]
 /// body holds everything else (pipelines, barriers, the dump tail) constant. Built by the per-test
@@ -2317,20 +2327,29 @@ struct ShowcaseConfig {
     /// The raster MVP push (the ORTHO `ortho_mvp_bytes` — its `(CAM_Z - z)/T_MAX` depth is the
     /// convention the marcher's `t_mesh = md * T_MAX` ownership/gViewT decode reconstructs exactly).
     mvp: [u8; MVP_BYTES as usize],
+    /// Render P7-Q2 — the SSAO state: `Some(quality)` records the SSAO pass binding that variant's
+    /// pre-compiled `.spv` (an `SSAO_QUALITY_*` index) AND arms `ssao_mode == 1`; `None` is SSAO OFF
+    /// (no SSAO pass recorded — `scene.ssao = None` — AND `ssao_mode == 0`, the byte-identical 0%-gate
+    /// reference for the ladder's `_off` frame). The builder sets the `ssao_mode` on `light_header`.
+    ssao_quality: Option<usize>,
 }
 
 /// The default all-SDF perspective showcase config (the historical [`run_showcase_dump`] scene):
 /// the SDF floor + bodies, the down-looking [`showcase_camera`], the multi-light table, and the
-/// DEGENERATE zero-area raster mesh (so the marcher owns the whole frame).
-fn showcase_config() -> ShowcaseConfig {
+/// DEGENERATE zero-area raster mesh (so the marcher owns the whole frame). `ssao_quality`:
+/// `Some(SSAO_QUALITY_*)` arms the SSAO pass at that variant; `None` is SSAO OFF (the 0%-gate
+/// reference — `ssao_mode == 0`, no SSAO pass).
+fn showcase_config(ssao_quality: Option<usize>) -> ShowcaseConfig {
     let (light_header, light_elems) = showcase_light_table();
+    let ssao_mode = if ssao_quality.is_some() { 1 } else { 0 };
     ShowcaseConfig {
         sdf: showcase_sdf_scene(),
         camera: showcase_camera(),
-        light_header: light_header.with_ssao_mode(1),
+        light_header: light_header.with_ssao_mode(ssao_mode),
         light_elems,
         vertices: showcase_quad_vertices(),
         mvp: ortho_mvp_bytes(),
+        ssao_quality,
     }
 }
 
@@ -2348,7 +2367,11 @@ fn showcase_config() -> ShowcaseConfig {
 #[test]
 #[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the screenshot"]
 fn engine_showcase_512_screenshot_dump() {
-    run_showcase_dump("boyko_engine showcase 512", SHOWCASE_BMP, showcase_config());
+    run_showcase_dump(
+        "boyko_engine showcase 512",
+        SHOWCASE_BMP,
+        showcase_config(Some(SSAO_QUALITY_MEDIUM)),
+    );
 }
 
 /// **Engine SSAO showcase — the SAME crisp 512×512-native scene WITH SSAO ON, dumped to
@@ -2361,7 +2384,11 @@ fn engine_showcase_512_screenshot_dump() {
 #[test]
 #[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the SSAO screenshot"]
 fn engine_ssao_512_screenshot_dump() {
-    run_showcase_dump("boyko_engine SSAO 512", SSAO_BMP, showcase_config());
+    run_showcase_dump(
+        "boyko_engine SSAO 512",
+        SSAO_BMP,
+        showcase_config(Some(SSAO_QUALITY_MEDIUM)),
+    );
 }
 
 /// **Render P7 Unlock-2 — engine MESH-FLOOR SSAO showcase (the visual).** A REAL RASTER MESH quad
@@ -2384,7 +2411,55 @@ fn engine_ssao_512_screenshot_dump() {
 #[test]
 #[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the mesh-floor SSAO screenshot"]
 fn engine_ssao_mesh_512_screenshot_dump() {
-    run_showcase_dump("boyko_engine SSAO mesh floor 512", SSAO_MESH_BMP, mesh_ssao_config());
+    run_showcase_dump(
+        "boyko_engine SSAO mesh floor 512",
+        SSAO_MESH_BMP,
+        mesh_ssao_config(Some(SSAO_QUALITY_MEDIUM)),
+    );
+}
+
+/// **Render P7-Q2 — engine SSAO QUALITY-LADDER screenshot dump (the visual oracle).** Renders the
+/// SAME mesh+SDF SSAO scene ([`mesh_ssao_config`] — the raster mesh quad floor + the SDF sphere in
+/// front) FOUR times and dumps a TRUE 512×512 BMP per quality so the orchestrator converts + shows
+/// the owner the ladder:
+///   - [`SSAO_LADDER_OFF_BMP`] — SSAO OFF (`scene.ssao = None`, `ssao_mode == 0`, the 0%-gate frame).
+///   - [`SSAO_LADDER_LOW_BMP`] — the Low variant pipeline (2×3×2 = 12 taps).
+///   - [`SSAO_LADDER_MEDIUM_BMP`] — the Medium variant (2×4×2 = 16 taps; == today's shipped path).
+///   - [`SSAO_LADDER_HIGH_BMP`] — the High variant (3×6×2 = 36 taps).
+///
+/// Each is a fresh windowed render (`run_showcase_dump` boots + tears down its own device per call),
+/// so the ladder is four independent frames the owner compares side-by-side (the mesh contact-AO ring
+/// sharpens / spreads with the tap budget; OFF is the no-AO baseline).
+///
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`.
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the SSAO quality ladder"]
+fn engine_ssao_ladder_off_dump() {
+    // ONE window/context per process: a windowed boot only survives the FIRST showcase dump in a
+    // process (later boots hit "swapchain kept recreating"), so each ladder rung is its OWN test —
+    // the orchestrator runs them in separate processes.
+    run_showcase_dump("boyko_engine SSAO ladder OFF", SSAO_LADDER_OFF_BMP, mesh_ssao_config(None));
+}
+
+/// SSAO ladder rung — LOW (2x3). See [`engine_ssao_ladder_off_dump`] for the one-per-process note.
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU"]
+fn engine_ssao_ladder_low_dump() {
+    run_showcase_dump("boyko_engine SSAO ladder LOW", SSAO_LADDER_LOW_BMP, mesh_ssao_config(Some(SSAO_QUALITY_LOW)));
+}
+
+/// SSAO ladder rung — MEDIUM (2x4, == today). See [`engine_ssao_ladder_off_dump`].
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU"]
+fn engine_ssao_ladder_medium_dump() {
+    run_showcase_dump("boyko_engine SSAO ladder MEDIUM", SSAO_LADDER_MEDIUM_BMP, mesh_ssao_config(Some(SSAO_QUALITY_MEDIUM)));
+}
+
+/// SSAO ladder rung — HIGH (3x6). See [`engine_ssao_ladder_off_dump`].
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU"]
+fn engine_ssao_ladder_high_dump() {
+    run_showcase_dump("boyko_engine SSAO ladder HIGH", SSAO_LADDER_HIGH_BMP, mesh_ssao_config(Some(SSAO_QUALITY_HIGH)));
 }
 
 /// The unlock-2 SDF occluder sphere for the mesh-floor showcase: ONE sphere standing in FRONT of
@@ -2395,19 +2470,22 @@ fn mesh_ssao_sphere() -> Vec<SdfEdit> {
     vec![SdfEdit::sphere([0.0, 0.0, 0.95], 0.60, sdf_op::UNION, 0.0)]
 }
 
-/// The ORTHO mesh-floor SSAO showcase config (Render P7 Unlock-2): the real raster mesh quad floor
-/// + the SDF sphere in front, the ORTHO camera, and the SSAO-armed showcase light table.
-fn mesh_ssao_config() -> ShowcaseConfig {
+/// The ORTHO mesh-floor SSAO showcase config (Render P7 Unlock-2): the real raster mesh quad floor,
+/// the SDF sphere in front, the ORTHO camera, and the SSAO-armed showcase light table.
+/// `ssao_quality`: `Some(SSAO_QUALITY_*)` arms the SSAO pass at that variant; `None` is SSAO OFF.
+fn mesh_ssao_config(ssao_quality: Option<usize>) -> ShowcaseConfig {
     let (light_header, light_elems) = showcase_light_table();
+    let ssao_mode = if ssao_quality.is_some() { 1 } else { 0 };
     ShowcaseConfig {
         sdf: mesh_ssao_sphere(),
         camera: CompositePushConstants::ortho(COMPOSITE_W, COMPOSITE_H),
-        light_header: light_header.with_ssao_mode(1),
+        light_header: light_header.with_ssao_mode(ssao_mode),
         light_elems,
         // A REAL floor quad (NOT the degenerate all-SDF mesh): its A2 == 1.0, so the contact AO is
         // pure SSAO. The ORTHO MVP lands it exactly where the marcher's `t_mesh` decode expects.
         vertices: quad_vertices(),
         mvp: ortho_mvp_bytes(),
+        ssao_quality,
     }
 }
 
@@ -2802,7 +2880,11 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
     // from the G-buffer and stores it into the `ssao` lane the resolve combines under `ssao_mode
     // != 0` (armed via `light_header.with_ssao_mode(1)` above). `GBufferTargets` writes the
     // `ssao_set` against THIS layout, pointing at the per-extent G-buffer + `ssao` images. ---
-    let ssao_cs = RhiDevice::create_shader_module(device, sdf_ssao_spirv())
+    // Render P7-Q2: bind the SELECTED quality variant's pre-compiled `.spv` (Mechanism C). When SSAO
+    // is OFF (`cfg.ssao_quality == None`) the pipeline is still created (and destroyed) — harmless —
+    // but `scene.ssao` below is set to `None`, so the recorder records NO SSAO pass (the 0%-gate).
+    let ssao_variant = cfg.ssao_quality.unwrap_or(SSAO_QUALITY_MEDIUM);
+    let ssao_cs = RhiDevice::create_shader_module(device, sdf_ssao_spirv_variant(ssao_variant))
         .expect("Render P7 SSAO compute shader module");
     let ssao_entries = [
         BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
@@ -2892,10 +2974,14 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         // The sun direction (`L`, direction TO the light) — MUST equal the primary directional in
         // `showcase_light_table` so the marched cast shadow lands where the resolve lights from.
         light_dir: SHOWCASE_SUN_DIR,
-        // Render P7: SSAO ON — the recorder records the SSAO pass (BETWEEN the marcher→resolve
-        // barrier and the resolve) that writes the `ssao` lane the resolve combines (`ssao_mode ==
-        // 1`, armed on `light_header` above). The contact creases / floor-body junctions darken.
-        ssao: Some(SsaoActivation { pipeline: &ssao_pipeline, layout: &ssao_layout }),
+        // Render P7 / P7-Q2: SSAO is ON only when `cfg.ssao_quality` selected a variant — the
+        // recorder then records the SSAO pass (BETWEEN the marcher→resolve barrier and the resolve)
+        // that writes the `ssao` lane the resolve combines (`ssao_mode == 1`, armed on `light_header`
+        // above), and the contact creases / floor-body junctions darken. `None` = SSAO OFF: NO SSAO
+        // pass + `ssao_mode == 0` (the byte-identical 0%-gate `_off` reference for the quality ladder).
+        ssao: cfg
+            .ssao_quality
+            .map(|_| SsaoActivation { pipeline: &ssao_pipeline, layout: &ssao_layout }),
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };

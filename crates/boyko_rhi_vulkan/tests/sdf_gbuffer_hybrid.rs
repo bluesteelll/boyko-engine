@@ -58,8 +58,11 @@ use boyko_rhi_vulkan::compute::{
     golden_deferred_resolve_table_shadowed, MAX_SDF_SHADOW_CASTERS_PER_PIXEL,
     // Render P7 SSAO: the SSAO compute SPIR-V + the host two-stage oracle (Stage-1 G-buffer map +
     // Stage-2 gather) + the SSAO-aware resolve mirrors (`min(class_ao, ssao)` combine).
-    sdf_ssao_spirv, golden_gbuffer, golden_ssao_attributes, golden_ssao_blur,
+    golden_gbuffer, golden_ssao_attributes, golden_ssao_blur,
     golden_deferred_resolve_table_shadowed_ssao,
+    // Render P7-Q2: the quality-VARIANT SSAO `.spv` selector + the host preset table.
+    sdf_ssao_spirv_variant, SSAO_PARAMS,
+    SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM, SSAO_QUALITY_HIGH,
     GoldenLight, GoldenLightHeader, GoldenMaterial, GOLDEN_LIGHT_HEADER_BASE_WORDS,
     composite_pixel_ray, deferred_pbr_spirv, mesh_depth_for_z,
     pack_rgba, pixel_world_xy,
@@ -1542,6 +1545,11 @@ fn run_gbuffer_hybrid_m4(
 /// GENERAL→GENERAL barrier on `ssao` orders its store before the resolve's `gSsao.Load`. The
 /// resolve set binds the SSAO image at @11 (the C1 interface). The host oracle is
 /// [`golden_ssao_attributes`] (AO channel) + [`golden_deferred_resolve_table_shadowed_ssao`] (lit).
+///
+/// Render P7-Q2: `quality` selects which pre-compiled SSAO variant pipeline to bind (an index into
+/// `SSAO_PARAMS` / the `SSAO_QUALITY_*` constants — the SAME 5-binding layout drives any variant,
+/// so only the loaded `.spv` differs). Feed `SSAO_PARAMS[quality]` to [`golden_ssao_attributes`] for
+/// the matching host oracle. `SSAO_QUALITY_MEDIUM` == today's shipped path (byte-identical to pre-Q2).
 #[allow(clippy::too_many_arguments)]
 fn run_gbuffer_hybrid_ssao(
     ctx: &VulkanContext,
@@ -1549,6 +1557,7 @@ fn run_gbuffer_hybrid_ssao(
     lighting_flags: u32,
     light_dir: [f32; 3],
     light_table_words: &[u32],
+    quality: usize,
 ) -> (Vec<u8>, Vec<u8>) {
     let device: &VulkanContext = ctx;
     let queue = ctx.rhi_queue();
@@ -1760,7 +1769,9 @@ fn run_gbuffer_hybrid_ssao(
     let fs = device.create_shader_module(MRT_FS_SPV.as_words()).expect("mesh-MRT fs");
     let cs = device.create_shader_module(sdf_gbuffer_composite_spirv()).expect("marcher cs");
     let resolve_cs = device.create_shader_module(deferred_pbr_spirv()).expect("resolve cs");
-    let ssao_cs = device.create_shader_module(sdf_ssao_spirv()).expect("SSAO cs");
+    let ssao_cs = device
+        .create_shader_module(sdf_ssao_spirv_variant(quality))
+        .expect("SSAO cs");
 
     let attributes = [
         VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
@@ -6714,7 +6725,8 @@ fn ssao_ao_channel_matches_host_oracle() {
     let table = pack_light_table(&header, &lights);
 
     for (name, edits) in p4b_scenes() {
-        let (_lit, ssao) = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table);
+        let (_lit, ssao) =
+            run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table, SSAO_QUALITY_MEDIUM);
         assert_eq!(ssao.len(), PIXELS as usize, "[{name}] SSAO R8 readback size");
 
         let gbuf = ssao_host_gbuffer(&edits, flags, DEFAULT_LIGHT_DIR);
@@ -6727,7 +6739,10 @@ fn ssao_ao_channel_matches_host_oracle() {
                     continue; // only SDF-lit pixels carry a meaningful AO factor
                 }
                 lit_px += 1;
-                let host = golden_ssao_attributes(&gbuf, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                let host = golden_ssao_attributes(
+                    &gbuf, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho,
+                    &SSAO_PARAMS[SSAO_QUALITY_MEDIUM],
+                );
                 let want = (host * 255.0).round() as i32;
                 let got = ssao[idx] as i32;
                 let d = (got - want).abs();
@@ -6763,7 +6778,8 @@ fn ssao_combined_lit_matches_host() {
     let materials = host_material_table();
 
     for (name, edits) in p4b_scenes() {
-        let (lit, _ssao) = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table);
+        let (lit, _ssao) =
+            run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table, SSAO_QUALITY_MEDIUM);
         assert_eq!(lit.len(), READBACK_BYTES as usize);
 
         let gbuf = ssao_host_gbuffer(&edits, flags, DEFAULT_LIGHT_DIR);
@@ -6778,7 +6794,10 @@ fn ssao_combined_lit_matches_host() {
             .map(|i| {
                 let px = i % SDF_IMG_W;
                 let py = i / SDF_IMG_W;
-                let a = golden_ssao_attributes(&gbuf, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                let a = golden_ssao_attributes(
+                    &gbuf, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho,
+                    &SSAO_PARAMS[SSAO_QUALITY_MEDIUM],
+                );
                 (a * 255.0).round() as u8
             })
             .collect();
@@ -6819,6 +6838,108 @@ fn ssao_combined_lit_matches_host() {
     }
 }
 
+/// **Render P7-Q2 golden — EVERY pre-compiled SSAO quality variant matches its host oracle.** For
+/// each of Low / Medium / High (Mechanism C — the host binds a different pre-compiled `.spv`, ZERO
+/// per-pixel runtime cost), bind that variant's pipeline ([`run_gbuffer_hybrid_ssao`]`(.., quality)`)
+/// and assert:
+///   1. **The GPU `ssao` AO channel == [`golden_ssao_attributes`] fed `SSAO_PARAMS[quality]`** within
+///      ±[`SSAO_AO_TOL`]/255 over the SDF-lit pixels — the per-variant host oracle (the parameterized
+///      gather) reproduces the variant `.spv`'s baked tap budget.
+///   2. **The combined LIT == the SSAO-aware resolve oracle** fed the BLURRED per-variant host SSAO
+///      term within ±[`DEFERRED_ARM1_TOL`]/255 — the end-to-end frame matches per variant.
+///
+/// The MEDIUM arm is also the no-op proof at the pixel level (its host params == today's shipped
+/// consts), so it must reproduce the pre-Q2 `ssao_ao_channel_matches_host_oracle` /
+/// `ssao_combined_lit_matches_host` results bit-for-bit. The Low/High arms prove the variant
+/// pipelines are wired AND the parameterized oracle tracks each baked budget. The orchestrator runs
+/// this on the RTX.
+#[test]
+fn ssao_variants_match_host() {
+    let Some(ctx) = boot_render_or_skip("ssao_variants_match_host") else {
+        return;
+    };
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    let (header, lights) = ssao_light_table();
+    let table = pack_light_table(&header, &lights);
+    let materials = host_material_table();
+
+    for quality in [SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM, SSAO_QUALITY_HIGH] {
+        let params = &SSAO_PARAMS[quality];
+        for (name, edits) in p4b_scenes() {
+            let (lit, ssao) =
+                run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table, quality);
+            assert_eq!(ssao.len(), PIXELS as usize, "[q{quality} {name}] SSAO R8 readback size");
+            assert_eq!(lit.len(), READBACK_BYTES as usize, "[q{quality} {name}] LIT readback size");
+
+            let gbuf = ssao_host_gbuffer(&edits, flags, DEFAULT_LIGHT_DIR);
+
+            // (1) The AO channel == the parameterized host oracle (variant-matched), and build the
+            // RAW host SSAO byte image (the SAME quantization the AO golden asserts) for the blur.
+            let mut raw_ssao = vec![0u8; PIXELS as usize];
+            let mut max_ao_delta = 0i32;
+            let mut lit_px = 0u64;
+            for py in 0..SDF_IMG_H {
+                for px in 0..SDF_IMG_W {
+                    let idx = (py * SDF_IMG_W + px) as usize;
+                    let host = golden_ssao_attributes(
+                        &gbuf, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, params,
+                    );
+                    raw_ssao[idx] = (host * 255.0).round() as u8;
+                    if gbuf[idx].mask != 1 {
+                        continue; // only SDF-lit pixels carry a meaningful AO factor
+                    }
+                    lit_px += 1;
+                    let want = (host * 255.0).round() as i32;
+                    let got = ssao[idx] as i32;
+                    let d = (got - want).abs();
+                    if d > max_ao_delta {
+                        max_ao_delta = d;
+                    }
+                    assert!(
+                        d <= SSAO_AO_TOL,
+                        "[q{quality} {name}] SSAO AO texel ({px},{py}) got {got}/255 want \
+                         {want}/255 (variant host oracle) exceeds ±{SSAO_AO_TOL}/255 (delta {d})"
+                    );
+                }
+            }
+            assert!(lit_px > 0, "[q{quality} {name}] SSAO AO channel: no SDF-lit pixel (vacuous)");
+
+            // (2) The combined LIT == the SSAO-aware resolve oracle fed the BLURRED per-variant SSAO
+            // term (the resolve blur is variant-independent: a fixed 7×7 depth-gated box).
+            let mut max_lit_delta = 0i32;
+            for py in 0..SDF_IMG_H {
+                for px in 0..SDF_IMG_W {
+                    let idx = (py * SDF_IMG_W + px) as usize;
+                    let attrs = gbuf[idx];
+                    let (ro, rd) =
+                        composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                    let ao = golden_ssao_blur(&raw_ssao, &gbuf, px, py, SDF_IMG_W, SDF_IMG_H);
+                    let want = unpack_packed_rgb(golden_deferred_resolve_table_shadowed_ssao(
+                        attrs, ro, rd, &materials, &header, &lights,
+                        &|q: [f32; 3]| boyko_sdf_math::sdf_edit_list(&edits, q), ao,
+                    ));
+                    let got = albedo_rgb(&lit, px, py);
+                    let d = (0..3).map(|c| (got[c] - want[c]).abs()).max().unwrap();
+                    if d > max_lit_delta {
+                        max_lit_delta = d;
+                    }
+                    assert!(
+                        d <= DEFERRED_ARM1_TOL,
+                        "[q{quality} {name}] SSAO combined LIT texel ({px},{py}) got {got:?} want \
+                         {want:?} (variant SSAO oracle) exceeds ±{DEFERRED_ARM1_TOL}/255 (delta {d})"
+                    );
+                }
+            }
+            println!(
+                "[q{quality} {name}] variant SSAO == host: AO max delta {max_ao_delta}/255 (tol \
+                 {SSAO_AO_TOL}), LIT max delta {max_lit_delta}/255 (tol {DEFERRED_ARM1_TOL}); \
+                 {lit_px} SDF-lit px (slices={} steps={})",
+                params.slices, params.steps
+            );
+        }
+    }
+}
+
 /// **C2 golden — SSAO OFF is BYTE-IDENTICAL to the pre-SSAO LIT (the 0%-gate).** The SAME scene
 /// with `ssao_mode == 0` + `scene.ssao = None` (here: the pre-SSAO `run_gbuffer_hybrid_lit_table`)
 /// must produce a LIT readback BYTE-FOR-BYTE equal to the SSAO harness run with `ssao_mode == 0`.
@@ -6842,8 +6963,9 @@ fn ssao_off_lit_is_byte_identical() {
         // The SSAO harness with the header DISARMED (`ssao_mode == 0`): the SSAO pass still RUNS +
         // writes the image, but the resolve never reads it (the structural `if` is false), so the
         // lit output must be byte-for-byte the pre-SSAO image.
-        let (with_pass, _ssao) =
-            run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table_off);
+        let (with_pass, _ssao) = run_gbuffer_hybrid_ssao(
+            &ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table_off, SSAO_QUALITY_MEDIUM,
+        );
         assert_eq!(pre.len(), with_pass.len());
         assert_eq!(
             pre, with_pass,
@@ -6871,8 +6993,8 @@ fn ssao_flat_region_invariance() {
 
     let (h_on, l_on) = ssao_light_table();
     let (h_off, l_off) = ssao_light_table_off();
-    let on = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_on, &l_on)).0;
-    let off = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_off, &l_off)).0;
+    let on = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_on, &l_on), SSAO_QUALITY_MEDIUM).0;
+    let off = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_off, &l_off), SSAO_QUALITY_MEDIUM).0;
 
     // The interior band: lit SDF pixels strictly inside the box footprint (≥ FLAT_MARGIN px from
     // the silhouette), where the surface is flat and SSAO must not darken.
@@ -6944,8 +7066,8 @@ fn ssao_darkens_a_concavity() {
 
     let (h_on, l_on) = ssao_light_table();
     let (h_off, l_off) = ssao_light_table_off();
-    let (on, ssao) = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_on, &l_on));
-    let off = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_off, &l_off)).0;
+    let (on, ssao) = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_on, &l_on), SSAO_QUALITY_MEDIUM);
+    let off = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_off, &l_off), SSAO_QUALITY_MEDIUM).0;
 
     let gbuf = ssao_host_gbuffer(&edits, flags, DEFAULT_LIGHT_DIR);
     // The AO floor that proves a real occlusion (1.0 = no occlusion; 0.85 = a meaningful crevice).
@@ -7061,7 +7183,10 @@ fn probe_mesh_ssao_geometry() {
                         continue;
                     }
                     mesh_px += 1;
-                    let ao = golden_ssao_attributes(&gbuf, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                    let ao = golden_ssao_attributes(
+                        &gbuf, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho,
+                        &SSAO_PARAMS[SSAO_QUALITY_MEDIUM],
+                    );
                     let a = (ao * 255.0).round() as u8;
                     if a < min_ssao {
                         min_ssao = a;
@@ -7109,7 +7234,8 @@ fn ssao_darkens_mesh_near_sdf_occluder() {
     let table = pack_light_table(&header, &lights);
     let edits = mesh_ssao_occluder();
 
-    let (_lit, ssao) = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table);
+    let (_lit, ssao) =
+        run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table, SSAO_QUALITY_MEDIUM);
     assert_eq!(ssao.len(), PIXELS as usize, "SSAO R8 readback size");
 
     let gbuf = ssao_host_gbuffer(&edits, flags, DEFAULT_LIGHT_DIR);
@@ -7141,7 +7267,10 @@ fn ssao_darkens_mesh_near_sdf_occluder() {
             );
 
             // (2) GPU ssao == the host SSAO oracle (the host now models mesh SSAO via t_mesh).
-            let host = golden_ssao_attributes(&gbuf, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+            let host = golden_ssao_attributes(
+                &gbuf, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho,
+                &SSAO_PARAMS[SSAO_QUALITY_MEDIUM],
+            );
             let want = (host * 255.0).round() as i32;
             let got = ssao[idx] as i32;
             let d = (got - want).abs();
