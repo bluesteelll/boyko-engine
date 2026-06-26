@@ -435,6 +435,7 @@ static const float SHADOW_MINT      = 16.0 * GRAD_H; // march start offset (repl
 static const float SHADOW_MINT_STEP = 16.0 * GRAD_H; // minimum per-step advance (floor on d/L)
 static const float SHADOW_HIT_EPS   = 2.0 * EPS;    // occluder-hit threshold
 static const float SHADOW_NDOTL_EPS = 0.0;          // signed n.L grazing/back-face cutoff
+static const float SHADOW_NORMAL_BIAS = 0.02;       // normal-offset march-origin lift (anti grazing-acne)
 
 // A2 tuning (owner defaults). Mirror the host consts.
 static const float AO_STEP     = 0.1;   // step between the 5 taps along the normal
@@ -1634,7 +1635,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
         if (pc.lighting_flags != 0u) {
             float3 light = normalize(pc.light_dir);
             if (pc.lighting_flags & LIGHTING_FLAG_SHADOWS) {
-                shadow = sdf_soft_shadow(p, n, light);
+                // Normal-offset start bias: lift the march origin off the surface so grazing
+                // (near-tangent) rays clear the curved surface instead of false-occluding it
+                // (the terminator "flame" acne). The GENERATED span marches `p_arg + L*t`, so
+                // lifting the first arg lifts the whole march. Mirrors host_shade's `pb`.
+                shadow = sdf_soft_shadow(p + n * SHADOW_NORMAL_BIAS, n, light);
             }
             if (pc.lighting_flags & LIGHTING_FLAG_AO) {
                 ao = sdf_ao(p, n);

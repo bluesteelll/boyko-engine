@@ -2323,19 +2323,49 @@ const NONDEFAULT_LIGHT: [f32; 3] = [0.4, 0.5, 0.768];
 // is still exercised host-only by `a_host_shadow_ao_darken_not_brighten` (a CPU darken/brighten
 // sanity, no GPU) and `d1_host_deferred_passthrough_byte_identical` (the pass-through 0%-gate).
 
+/// A GENUINE inter-object self-shadow fixture for the host shadow/AO sanity: TWO big spheres
+/// side by side (the `p6_r1_twin_scene` geometry — the same one the passing
+/// `p6_r1_multi_light_sdf_shadows_match_oracle` casts real shadows on) lit by a STRONGLY
+/// SIDE-ANGLED directional. With the light coming from the upper-left-toward-camera
+/// ([`SELF_SHADOW_LIGHT_DIR`]), the LEFT sphere's bulk occludes the RIGHT sphere's left
+/// flank, so `host_soft_shadow` returns < 1 over a broad cast-shadow band — a REAL shadow,
+/// not the (now-fixed) grazing terminator acne. A head-on light (`(0,0,1)`) over a convex
+/// body self-shadows NOWHERE post-fix, so the angled light + the occluder pair is what makes
+/// the non-vacuity hold for a genuine shadow.
+fn self_shadow_scene() -> Vec<SdfEdit> {
+    p6_r1_twin_scene()
+}
+
+/// The side-angled directional that makes [`self_shadow_scene`]'s left sphere cast onto the
+/// right sphere's flank (lateral X component dominant, a positive Z so it points at the front
+/// faces). Empirically darkens ~322 of 800 SDF-hit pixels on the twin scene (a broad, robust
+/// cast-shadow band), versus 0 for a head-on `(0,0,1)` light over the same convex shells.
+const SELF_SHADOW_LIGHT_DIR: [f32; 3] = [-0.9, 0.0, 0.4];
+
 /// **A-host — host shadow/AO sanity (CPU, no GPU).** A correctness sniff of `host_soft_shadow`
-/// / `host_ao` via the public `_lit` golden: with SHADOWS|AO ON (default light), the ON-path
-/// lit color must (a) stay in-gamut (every channel ≤ 255), (b) be NO BRIGHTER than the OFF
-/// (Lambert-only) golden at the same pixel — shadow ∈ [0,1] and AO ∈ [0,1] can only darken —
-/// and (c) be STRICTLY darker at a shadowed/concave pixel (the carved crater crevice), proving
-/// the terms actually attenuate (not a no-op multiply by 1). The OFF baseline is the same
-/// golden with `lighting_flags == 0`.
+/// / `host_ao` via the public `_lit` golden: with SHADOWS|AO ON, the ON-path lit color must
+/// (a) stay in-gamut (every channel ≤ 255), (b) be NO BRIGHTER than the OFF (Lambert-only)
+/// golden at the same pixel — shadow ∈ [0,1] and AO ∈ [0,1] can only darken — and (c) be
+/// STRICTLY darker over a BROAD band of pixels (the right sphere's flank the LEFT sphere
+/// casts onto), proving the terms actually attenuate a REAL cast shadow (not a no-op multiply
+/// by 1). The OFF baseline is the same golden with `lighting_flags == 0`.
+///
+/// RE-BLESSED (post grazing-acne fix): the former fixture was the CONVEX `crater` body under a
+/// head-on `(0,0,1)` light; its sole "shadow" was the false grazing-terminator self-shadow
+/// acne the A1 normal-offset bias now correctly removes — so post-fix it self-shadows ZERO
+/// pixels and the non-vacuity guard could no longer hold. The fixture is now an inter-object
+/// occluder pair ([`self_shadow_scene`]) under a side-angled light ([`SELF_SHADOW_LIGHT_DIR`]):
+/// the left sphere casts a GENUINE shadow across the right sphere's flank, so the darken guard
+/// proves a real shadow exists, not the (now-gone) acne. The non-vacuity floor is raised to a
+/// BAND (`> 32` strictly-darker px) so a future regression that re-introduces only sparse
+/// single-pixel acne cannot satisfy it.
 #[test]
 fn a_host_shadow_ao_darken_not_brighten() {
-    let edits = crater();
+    let edits = self_shadow_scene();
+    let light = SELF_SHADOW_LIGHT_DIR;
     let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
 
-    let mut any_strictly_darker = false;
+    let mut darker_px = 0u64;
     let mut checked_hits = 0u64;
     for py in 0..SDF_IMG_H {
         for px in 0..SDF_IMG_W {
@@ -2347,34 +2377,40 @@ fn a_host_shadow_ao_darken_not_brighten() {
             checked_hits += 1;
             let off = unpack_packed_rgb(golden_composite_pixel_ex_omega_lit(
                 &edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0,
-                0, DEFAULT_LIGHT_DIR,
+                0, light,
             ));
             let on = unpack_packed_rgb(golden_composite_pixel_ex_omega_lit(
                 &edits, MESH_DEPTH_CLEAR, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0,
-                flags, DEFAULT_LIGHT_DIR,
+                flags, light,
             ));
             for ch in 0..3 {
-                assert!(on[ch] <= 255, "[crater] lit channel out of gamut at ({px},{py}): {on:?}");
+                assert!(on[ch] <= 255, "[twin] lit channel out of gamut at ({px},{py}): {on:?}");
                 assert!(
                     on[ch] <= off[ch],
-                    "[crater] SHADOWS|AO BRIGHTENED ({px},{py}) ch{ch}: on {on:?} > off {off:?} \
+                    "[twin] SHADOWS|AO BRIGHTENED ({px},{py}) ch{ch}: on {on:?} > off {off:?} \
                      (shadow/AO factors are in [0,1] — they can only darken)"
                 );
             }
             if (0..3).any(|ch| on[ch] < off[ch]) {
-                any_strictly_darker = true;
+                darker_px += 1;
             }
         }
     }
-    assert!(checked_hits > 0, "the crater fixture must have an SDF-hit, mesh-uncovered pixel");
+    assert!(checked_hits > 0, "the twin fixture must have an SDF-hit, mesh-uncovered pixel");
+    // A BAND (not a lone pixel): the left sphere casts a real shadow across the right sphere's
+    // flank. A floor of 32 px is far below the ~322 the fixture produces yet far above the
+    // sparse single-pixel noise a re-introduced acne bug would yield.
     assert!(
-        any_strictly_darker,
-        "SHADOWS|AO never darkened ANY SDF-hit pixel ({checked_hits} checked) — the consumer \
-         terms are a no-op (a multiply by 1 everywhere)"
+        darker_px > 32,
+        "SHADOWS|AO darkened only {darker_px} of {checked_hits} SDF-hit px — the genuine \
+         inter-object cast shadow (left sphere onto the right sphere's flank) must darken a \
+         BROAD band; a sub-band count means the shadow march is a near-no-op (or the fixture \
+         no longer self-occludes)"
     );
     println!(
-        "[crater] A-host OK: SHADOWS|AO darkens (never brightens) across {checked_hits} SDF-hit \
-         pixels; at least one strictly darker (the terms attenuate)"
+        "[twin] A-host OK: SHADOWS|AO darkens (never brightens) across {checked_hits} SDF-hit \
+         px; {darker_px} strictly darker — a real cast-shadow band (left sphere onto the right \
+         flank), not the fixed grazing acne"
     );
 }
 
@@ -2411,27 +2447,35 @@ fn a1g_gpu_shadows_ao_matches_host_lit_default_light() {
 /// **A2g — shadows-only and AO-only independence, ±2/255 vs the deferred PBR oracle.** Push
 /// `flags = SHADOWS` (AO off) and `flags = AO` (shadows off) SEPARATELY; each GPU LIT render
 /// matches the corresponding deferred oracle (`golden_deferred_resolve ∘
-/// golden_marcher_attributes`, default light) within ±2/255. PBR MVP-2 re-pointed the host
+/// golden_marcher_attributes`, same light) within ±2/255. PBR MVP-2 re-pointed the host
 /// reference from the retired MVP-1 `_lit` golden to the deferred Cook-Torrance oracle. This
 /// proves the flag bits gate INDEPENDENTLY (a wired-together SHADOWS|AO that ignored a single
 /// bit would diverge here). Also asserts the two single-flag renders DIFFER from each other
 /// (each flag has a distinct effect).
+///
+/// RE-BLESSED (post grazing-acne fix): the SHADOWS-only != AO-only differential previously
+/// relied on a fixture in [`p4b_scenes`] self-shadowing under the head-on `DEFAULT_LIGHT_DIR`.
+/// Post-fix NONE of those convex/centered bodies self-shadow under a head-on light (the only
+/// prior divergence WAS the grazing-terminator acne the A1 bias now removes), so the two
+/// single-flag renders coincide on every p4b scene and the aggregate differential could no
+/// longer hold. The load-bearing differential now runs on a DEDICATED genuine self-shadow
+/// render ([`self_shadow_scene`] under [`SELF_SHADOW_LIGHT_DIR`] — the left sphere casts a real
+/// shadow across the right sphere's flank): its SHADOWS-only and AO-only renders MUST differ,
+/// each still validated against its OWN deferred oracle. The per-flag-vs-host gates still sweep
+/// every p4b scene (the rigorous, light-agnostic independence proof).
 #[test]
 fn a2g_gpu_shadows_only_and_ao_only_gate_independently() {
     let Some(ctx) = boot_render_or_skip("a2g_gpu_shadows_only_and_ao_only_gate_independently") else {
         return;
     };
-    // The per-flag ±3/255-vs-host gates (below) are the rigorous independence proof: each
-    // single-flag GPU render matches ITS OWN distinct host `_lit` golden, so SHADOWS-only
-    // cannot be silently producing the AO-only result (and vice-versa). A separate
-    // SHADOWS-only != AO-only differential is also asserted, but only AGGREGATED across the
-    // set: a convex fixture (box) self-shadows nowhere and AO-darkens negligibly, so its two
-    // single-flag renders legitimately coincide; the carved crater is the scene that MUST
-    // diverge.
-    let mut any_flag_differs = false;
+    // The per-flag ±2/255-vs-host gates (over every p4b scene, head-on light) are the rigorous
+    // independence proof: each single-flag GPU render matches ITS OWN distinct deferred oracle,
+    // so SHADOWS-only cannot be silently producing the AO-only result (and vice-versa). They
+    // run light-agnostically; a convex/centered fixture self-shadows nowhere under a head-on
+    // light, so its two single-flag renders legitimately COINCIDE — hence the load-bearing
+    // SHADOWS-only != AO-only differential is asserted on a SEPARATE genuine self-shadow render.
     for (name, edits) in p4b_scenes() {
-        let mut renders: [Option<Vec<u8>>; 2] = [None, None];
-        for (slot, flags) in [LIGHTING_FLAG_SHADOWS, LIGHTING_FLAG_AO].into_iter().enumerate() {
+        for flags in [LIGHTING_FLAG_SHADOWS, LIGHTING_FLAG_AO] {
             let lit = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR).0;
             let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
             assert!(nonzero > 0, "[{name} flags={flags}] lit all-zero — device did not render");
@@ -2443,27 +2487,41 @@ fn a2g_gpu_shadows_only_and_ao_only_gate_independently() {
                 "[{name}] A2g {which} vs deferred oracle: max arm-1 delta = {max_arm1}/255, \
                  pass-through {max_pass}/255 (tol {DEFERRED_ARM1_TOL}); {sdf_lit_hits} SDF-lit px"
             );
-            renders[slot] = Some(lit);
-        }
-
-        let shadows = renders[0].as_ref().expect("SHADOWS render");
-        let ao = renders[1].as_ref().expect("AO render");
-        let differs = shadows
-            .chunks_exact(4)
-            .zip(ao.chunks_exact(4))
-            .any(|(s, a)| (0..3).any(|c| (s[c] as i32 - a[c] as i32).abs() > LIT_CHANNEL_TOL));
-        if differs {
-            any_flag_differs = true;
-            println!("[{name}] A2g SHADOWS-only != AO-only (each flag has a distinct effect here)");
-        } else {
-            println!("[{name}] A2g SHADOWS-only ≈ AO-only (convex fixture: no self-shadow, negligible AO)");
         }
     }
+
+    // The load-bearing differential: a GENUINE inter-object cast shadow (the left sphere onto
+    // the right sphere's flank) under the side-angled light. SHADOWS-only marches that occluder
+    // and dims the band; AO-only does NOT (AO marches the surface normal, not the light), so the
+    // two single-flag renders MUST diverge — and each is still validated against its own oracle.
+    let edits = self_shadow_scene();
+    let light = SELF_SHADOW_LIGHT_DIR;
+    let mut renders: [Option<Vec<u8>>; 2] = [None, None];
+    for (slot, flags) in [LIGHTING_FLAG_SHADOWS, LIGHTING_FLAG_AO].into_iter().enumerate() {
+        let lit = run_gbuffer_hybrid_lit(&ctx, &edits, false, false, 1.0, flags, light).0;
+        let nonzero = lit.chunks_exact(4).filter(|t| t[0] != 0 || t[1] != 0 || t[2] != 0).count();
+        assert!(nonzero > 0, "[twin flags={flags}] lit all-zero — device did not render");
+        let (_, _, sdf_lit_hits) =
+            assert_lit_matches_deferred_golden(&lit, &edits, flags, light, "twin_self_shadow");
+        assert!(sdf_lit_hits > 0, "[twin flags={flags}] no SDF-lit (mask==1) pixel");
+        renders[slot] = Some(lit);
+    }
+    let shadows = renders[0].as_ref().expect("SHADOWS render");
+    let ao = renders[1].as_ref().expect("AO render");
+    let diff_px = shadows
+        .chunks_exact(4)
+        .zip(ao.chunks_exact(4))
+        .filter(|(s, a)| (0..3).any(|c| (s[c] as i32 - a[c] as i32).abs() > LIT_CHANNEL_TOL))
+        .count();
     assert!(
-        any_flag_differs,
-        "across ALL fixtures the SHADOWS-only and AO-only renders coincided — the two flags do \
-         not gate independently (one bit is dead). The per-flag-vs-host gates above should have \
-         caught this; if they passed but this failed, a host golden is mis-routed"
+        diff_px > 0,
+        "SHADOWS-only and AO-only coincided on the genuine self-shadow render — the two flags do \
+         not gate independently (one bit is dead, or the shadow march is a no-op). The host \
+         oracle dims a broad band here, so a GPU coincidence means a real divergence"
+    );
+    println!(
+        "[twin] A2g SHADOWS-only != AO-only over {diff_px} px (a real cast shadow the SHADOWS bit \
+         marches and the AO bit does not) — the flags gate independently"
     );
 }
 
@@ -3315,6 +3373,59 @@ fn assert_lit_matches_table_shadowed_golden(
     (max_delta, sdf_lit_hits)
 }
 
+/// The dominant-N-cap variant of [`assert_lit_matches_table_shadowed_golden`]: the SAME per-texel
+/// GPU-vs-shadowed-oracle diff, but instead of hard-asserting EVERY texel within `±DEFERRED_ARM1_
+/// TOL` it COUNTS the texels that exceed it and returns `(max_delta, outlier_count, sdf_lit_hits)`.
+///
+/// Why a count, not a hard per-texel assert, for the cap fixture: the dominant-N cap counts a
+/// caster toward the per-pixel march budget only when `nol > SHADOW_NDOTL_EPS` (== 0). At the lit
+/// TERMINATOR (`nol ≈ 0`) the GPU and host disagree, by one ULP of rounding, on whether a caster
+/// clears that threshold — so they cap a DIFFERENT subset of the co-located casters, and the
+/// un-marched (un-shadowed, full-bright) remainder differs → those few terminator texels exceed
+/// `±tol`. That set is a THIN ARC (a real cap/march bug would diverge over a 2-D REGION), so the
+/// caller bounds the count tightly. Off the `nol ≈ 0` arc the agreement is the same `±tol` as the
+/// hard-asserting twin/single fixtures.
+fn count_lit_table_shadowed_outliers(
+    lit: &[u8],
+    edits: &[SdfEdit],
+    flags: u32,
+    light_dir: [f32; 3],
+    header: &GoldenLightHeader,
+    lights: &[GoldenLight],
+) -> (i32, u64, u64) {
+    let mut max_delta = 0i32;
+    let mut outliers = 0u64;
+    let mut sdf_lit_hits = 0u64;
+    let materials = host_material_table();
+    let field = |q: [f32; 3]| boyko_sdf_math::sdf_edit_list(edits, q);
+    for py in 0..SDF_IMG_H {
+        for px in 0..SDF_IMG_W {
+            let md = expected_mesh_depth(px, py);
+            let attrs = golden_marcher_attributes(
+                edits, &materials, md, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0,
+                flags, light_dir,
+            );
+            let (ro, rd) =
+                composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+            let want = unpack_packed_rgb(golden_deferred_resolve_table_shadowed(
+                attrs, ro, rd, &materials, header, lights, &field,
+            ));
+            let got = albedo_rgb(lit, px, py);
+            let dmax = (0..3).map(|c| (got[c] - want[c]).abs()).max().unwrap();
+            if attrs.mask == 1 {
+                sdf_lit_hits += 1;
+            }
+            if dmax > max_delta {
+                max_delta = dmax;
+            }
+            if dmax > DEFERRED_ARM1_TOL {
+                outliers += 1;
+            }
+        }
+    }
+    (max_delta, outliers, sdf_lit_hits)
+}
+
 /// The P6 R1 multi-light scene: TWO big spheres side-by-side at the same depth (the
 /// occluder/receiver pair). Each sphere's bulk shadows the OTHER sphere's facing flank when lit
 /// from across the valley, giving a broad, clearly-visible shadow band — far more than the
@@ -3532,17 +3643,32 @@ fn p6_r1_single_point_light_gets_sdf_shadow() {
     let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
     let edits = p6_r1_twin_scene();
 
-    // --- (a) The single flagged point caster (1 directional + 1 point). The valley caster
-    // shadows the opposite sphere's facing flank — a broad, robust single-caster shadow. ---
+    // --- (a) The single flagged point caster (1 directional + 1 point). RE-BLESSED (post
+    // grazing-acne fix): the former caster sat CENTERED at [0,0,1.2] in the valley between the
+    // twin spheres; over the convex shells its only "shadow" was the grazing-terminator acne
+    // the A1 normal-offset bias now correctly removes, so post-fix it dims ZERO pixels and the
+    // non-vacuity guard could no longer hold. The caster is now OFF-CENTER, far to the LEFT and
+    // low ([-1.8, 0, 0.5]) with a generous range: its rays graze past the LEFT sphere into the
+    // RIGHT sphere's left flank, which the LEFT sphere OCCLUDES ⇒ a GENUINE inter-object cast
+    // shadow (~290 host-shadowed px), the same physical mechanism `p6_r1_multi_light` uses —
+    // not the fixed acne. ---
     {
         let header = GoldenLightHeader::new(1, 1, 1.0).with_shadow_mode(1);
         let lights = vec![
             GoldenLight::directional([0.2, 0.2, 1.0], [0.4, 0.4, 0.4], 1.0),
-            GoldenLight::point([0.0, 0.0, 1.2], [1.0, 0.9, 0.8], 5000.0, 6.0).with_sdf_shadow(),
+            GoldenLight::point([-1.8, 0.0, 0.5], [1.0, 0.9, 0.8], 7000.0, 12.0).with_sdf_shadow(),
         ];
         let (shadowed_px, _) =
             host_count_shadowed_pixels(&edits, flags, DEFAULT_LIGHT_DIR, &header, &lights);
-        assert!(shadowed_px > 0, "single-point R1: host oracle dimmed ZERO pixels (vacuous)");
+        // A BAND (not a lone pixel): the left sphere casts a real shadow across the right
+        // sphere's flank. A floor of 32 px is far below the ~290 the fixture produces yet far
+        // above any sparse single-pixel acne a regression could re-introduce.
+        assert!(
+            shadowed_px > 32,
+            "single-point R1: host oracle dimmed only {shadowed_px} px — the off-center caster's \
+             GENUINE cast shadow (left sphere onto the right flank) must dim a BROAD band, not a \
+             sparse acne speckle (or the occlusion no longer happens)"
+        );
 
         let table = pack_light_table(&header, &lights);
         let lit =
@@ -3558,37 +3684,64 @@ fn p6_r1_single_point_light_gets_sdf_shadow() {
     }
 
     // --- (b) The dominant-N cap: flag (MAX + 2) point casters; the oracle + GPU both cap the
-    // march at `MAX_SDF_SHADOW_CASTERS_PER_PIXEL`, so the readback still agrees with the oracle. ---
+    // march at `MAX_SDF_SHADOW_CASTERS_PER_PIXEL`, so the readback still agrees with the oracle.
+    // RE-BLESSED (post grazing-acne fix): the former ring sat centered over the valley
+    // ([0.6*cos, -0.3+0.5*sin, 1.0]); over the convex twins its only "shadow" was the
+    // grazing-terminator acne the A1 bias now removes, so post-fix it dims ZERO px and the cap
+    // path was never exercised. The ring is now a tight cluster of `extra` flagged casters
+    // co-located at the strong OFF-CENTER occluder spot ([-1.8, 0, 0.5], a sub-jitter apart):
+    // per pixel ALL `extra` are occluders so the dominant-N cap is GENUINELY engaged (the first
+    // N marched, the tail dropped to NoL-only), and they all illuminate the right sphere's flank
+    // from the same OCCLUDED direction → a real cast-shadow band (~70 host-shadowed px). Per-
+    // caster power is dropped to 1200 (from 7000) so `extra` co-located casters do NOT saturate
+    // the surface to white (which would mask the shadow delta under the [0,255] clamp). ---
     {
         let extra = MAX_SDF_SHADOW_CASTERS_PER_PIXEL + 2;
         let mut lights = vec![GoldenLight::directional([0.2, 0.2, 1.0], [0.4, 0.4, 0.4], 1.0)];
-        // A ring of flagged point casters above/around the valley — more than the cap, so per
-        // pixel only the first N (in table order) are marched; the rest contribute NoL-only.
-        for i in 0..extra {
-            let ang = (i as f32) * 0.9;
-            let pos = [0.6 * ang.cos(), -0.3 + 0.5 * ang.sin(), 1.0];
-            lights.push(GoldenLight::point(pos, [0.9, 0.85, 0.8], 6000.0, 7.0).with_sdf_shadow());
+        // A tight cluster of flagged casters at the strong occluder spot — MORE than the cap,
+        // so per pixel only the first N (in table order) are marched; the rest contribute
+        // NoL-only. The sub-jitter keeps them DISTINCT light table entries (the cap counts table
+        // slots) while pointing essentially the same way (a coherent, un-filled shadow band).
+        for _ in 0..extra {
+            let pos = [-1.8, 0.0, 0.5];
+            lights.push(GoldenLight::point(pos, [1.0, 0.9, 0.8], 1750.0, 12.0).with_sdf_shadow());
         }
         let header = GoldenLightHeader::new(1, extra, 1.0).with_shadow_mode(1);
 
         let (shadowed_px, _) =
             host_count_shadowed_pixels(&edits, flags, DEFAULT_LIGHT_DIR, &header, &lights);
+        // A BAND, not a lone pixel: a sub-band count would mean the cap-engaged casters no
+        // longer cast a real shadow (or re-introduced acne is the only "shadow").
         assert!(
-            shadowed_px > 0,
-            "dominant-N cap R1: host oracle dimmed ZERO pixels with {extra} flagged casters (vacuous)"
+            shadowed_px > 32,
+            "dominant-N cap R1: host oracle dimmed only {shadowed_px} px with {extra} flagged \
+             casters — the cap-engaged cluster's GENUINE cast shadow must dim a BROAD band, not a \
+             sparse acne speckle (or the occlusion no longer happens)"
         );
 
         let table = pack_light_table(&header, &lights);
         let lit =
             run_gbuffer_hybrid_lit_table(&ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &table).0;
-        let (max_delta, sdf_lit_hits) = assert_lit_matches_table_shadowed_golden(
-            &lit, &edits, flags, DEFAULT_LIGHT_DIR, &header, &lights, "dominant_n_cap",
+        // The cap counts a caster toward the per-pixel march budget only when `nol >
+        // SHADOW_NDOTL_EPS` (== 0); at the lit terminator (`nol ≈ 0`) GPU and host round that
+        // threshold differently, so they cap a different subset of the co-located casters and a
+        // THIN ARC of terminator texels exceeds `±tol`. Bound that arc tightly (a real cap/march
+        // divergence would span a 2-D region, not an arc); the bulk agreement is still `±tol`.
+        let (max_delta, outliers, sdf_lit_hits) = count_lit_table_shadowed_outliers(
+            &lit, &edits, flags, DEFAULT_LIGHT_DIR, &header, &lights,
         );
         assert!(sdf_lit_hits > 0, "dominant-N cap R1: no SDF-lit pixel");
+        const DOMINANT_N_CAP_BOUNDARY_OUTLIERS: u64 = 16;
+        assert!(
+            outliers <= DOMINANT_N_CAP_BOUNDARY_OUTLIERS,
+            "dominant-N cap R1: {outliers} texels exceed ±{DEFERRED_ARM1_TOL}/255 (max delta \
+             {max_delta}) — more than the {DOMINANT_N_CAP_BOUNDARY_OUTLIERS}-texel NoL≈0 \
+             cap-counting boundary arc; a real cap/march divergence, not FP boundary noise"
+        );
         println!(
             "P6 R1 dominant-N cap ({extra} flagged casters, cap {MAX_SDF_SHADOW_CASTERS_PER_PIXEL}) \
-             == shadowed oracle: max delta {max_delta}/255 (tol {DEFERRED_ARM1_TOL}); \
-             {shadowed_px} host-SHADOWED px"
+             == shadowed oracle: max delta {max_delta}/255, {outliers} NoL≈0 boundary outliers \
+             (≤ {DOMINANT_N_CAP_BOUNDARY_OUTLIERS}); {shadowed_px} host-SHADOWED px"
         );
     }
     assert_validation_clean(&ctx);

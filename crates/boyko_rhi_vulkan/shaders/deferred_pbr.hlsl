@@ -146,6 +146,7 @@ static const float SHADOW_MINT      = 16.0 * GRAD_H;
 static const float SHADOW_MINT_STEP = 16.0 * GRAD_H;
 static const float SHADOW_HIT_EPS   = 2.0 * EPS;
 static const float SHADOW_NDOTL_EPS = 0.0;
+static const float SHADOW_NORMAL_BIAS = 0.02; // normal-offset march-origin lift (anti grazing-acne)
 
 // P6 R1 cap: the maximum number of EXTRA shadow casters marched per pixel (the dominant-N
 // bound, Decision 2/7). Beyond this, flagged lights contribute NoL-only (no march). Mirrors
@@ -355,7 +356,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 } else if (multi_light && light_casts_sdf_shadow(L)
                            && marched < MAX_SDF_SHADOW_CASTERS_PER_PIXEL
                            && NoL > SHADOW_NDOTL_EPS) {
-                    vis = sdf_soft_shadow_ranged(P, n, l, T_MAX);
+                    // Normal-offset start bias: lift the march origin off the surface so
+                    // grazing rays clear it (anti terminator-acne). Mirrors the host `pb`.
+                    vis = sdf_soft_shadow_ranged(P + n * SHADOW_NORMAL_BIAS, n, l, T_MAX);
                     marched += 1u;
                 }
                 float3 hvec = normalize(v + l);
@@ -480,7 +483,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 && marched < MAX_SDF_SHADOW_CASTERS_PER_PIXEL
                 && NoL > SHADOW_NDOTL_EPS) {
                 float t_max = sqrt(d2);
-                vis = sdf_soft_shadow_ranged(P, n, l, t_max);
+                // Normal-offset start bias (anti grazing-acne). Mirrors the host `pb`.
+                vis = sdf_soft_shadow_ranged(P + n * SHADOW_NORMAL_BIAS, n, l, t_max);
                 marched += 1u;
             }
             lit_direct += (diff + spec) * (NoL * vis) * atten * L.color;

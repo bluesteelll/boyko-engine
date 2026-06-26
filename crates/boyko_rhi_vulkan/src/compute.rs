@@ -180,8 +180,12 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// early-return); gViewT stays ALWAYS-written with its value forced to the `1.0e30` sentinel on a
 /// `!own_pixel` pixel (Decision 3, exactly-once). On a NO-MESH scene `has_mesh` is always false so
 /// `own_pixel` is always true and every write path is byte-identical (the 0%-gate); the `.spv` grows
-/// by the two gate branches → 122812 bytes.
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<122812> = SpirvBlob(*include_bytes!(concat!(
+/// by the two gate branches → 122812 bytes. The GRAZING-SHADOW-ACNE fix then lifted the A1
+/// soft-shadow march origin off the surface by `n * SHADOW_NORMAL_BIAS` at the (hand-written)
+/// `sdf_soft_shadow` CALL SITE (`sdf_soft_shadow(p + n*SHADOW_NORMAL_BIAS, n, light)`) so grazing
+/// (near-tangent) terminator rays clear the curved surface instead of false-occluding — the
+/// GENERATED march span + `shadow.rs` stay byte-frozen; the new const + the per-component add → 122868 bytes.
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<122868> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
 )));
@@ -225,8 +229,11 @@ static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<122812> = SpirvBlob(*include_bytes!(
 /// shadow (the primary directional KEEPS `gMaterial.r`). The host mirror is
 /// [`golden_deferred_resolve_table`] (clustered via [`golden_cluster_cull`] +
 /// [`golden_deferred_resolve_clustered`]); the shadowed multi-light path is mirrored by the
-/// `_shadowed` variants.
-static DEFERRED_PBR_SPV: SpirvBlob<24728> = SpirvBlob(*include_bytes!(concat!(
+/// `_shadowed` variants. The GRAZING-SHADOW-ACNE fix then lifted the per-light ranged-march
+/// origin by `n * SHADOW_NORMAL_BIAS` at the two (hand-written) `sdf_soft_shadow_ranged` CALL
+/// SITES (`sdf_soft_shadow_ranged(P + n*SHADOW_NORMAL_BIAS, n, l, t_max)`) so grazing terminator
+/// rays clear the surface — the GENERATED ranged span stays byte-frozen; 24728 → 24824 bytes.
+static DEFERRED_PBR_SPV: SpirvBlob<24824> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/deferred_pbr.comp.spv"
 )));
@@ -534,6 +541,16 @@ pub const SHADOW_HIT_EPS: f32 = 2.0 * SDF_EPS;
 /// A1 grazing/back-face cutoff on signed `n·L`: at or below this the surface faces
 /// away from the light ⇒ fully shadowed (return `0`), which also skips the march.
 pub const SHADOW_NDOTL_EPS: f32 = 0.0;
+/// A1 normal-offset start bias: the shadow march origin is lifted `n * SHADOW_NORMAL_BIAS`
+/// off the surface before marching toward the light. At GRAZING angles (`n·L` small but
+/// positive — the lit terminator) the tangent ray's first sample `p + L * SHADOW_MINT`
+/// stays within ~`t² / (2R)` of a curved surface, so `field_distance` reads below
+/// `SHADOW_HIT_EPS` and the march FALSE-occludes the point (black "flame" acne on the
+/// terminator). Lifting the origin along the normal clears that self-intersection. Tuned
+/// large enough to kill the grazing acne, small enough that contact shadows do not
+/// visibly detach (peter-panning). Applied at the CALL SITES (the marcher + the resolve +
+/// the host mirrors) so the eDSL-generated march span stays byte-frozen.
+pub const SHADOW_NORMAL_BIAS: f32 = 0.02;
 
 /// A2 fixed step between the 5 AO taps along the surface normal.
 pub const AO_STEP: f32 = 0.1;
@@ -668,7 +685,15 @@ fn host_shade<F: Fn([f32; 3]) -> f32>(
     }
     let mut shadow = 1.0_f32;
     if lighting_flags & LIGHTING_FLAG_SHADOWS != 0 {
-        shadow = host_soft_shadow(p, n, l, field);
+        // Normal-offset start bias: lift the march origin off the surface so grazing
+        // (near-tangent) rays clear the curved surface instead of false-occluding.
+        // MIRRORS the shader's `sdf_soft_shadow(p + n*SHADOW_NORMAL_BIAS, n, light)`.
+        let pb = [
+            p[0] + n[0] * SHADOW_NORMAL_BIAS,
+            p[1] + n[1] * SHADOW_NORMAL_BIAS,
+            p[2] + n[2] * SHADOW_NORMAL_BIAS,
+        ];
+        shadow = host_soft_shadow(pb, n, l, field);
     }
     let mut ao = 1.0_f32;
     if lighting_flags & LIGHTING_FLAG_AO != 0 {
@@ -4255,7 +4280,14 @@ pub fn golden_marcher_attributes(
             let field = |q: [f32; 3]| sdf_edit_list(edits, q);
             let mut shadow = 1.0_f32;
             if lighting_flags & LIGHTING_FLAG_SHADOWS != 0 {
-                shadow = host_soft_shadow(p, n, l, &field);
+                // Normal-offset start bias (mirrors the marcher's
+                // `sdf_soft_shadow(p + n*SHADOW_NORMAL_BIAS, n, light)`).
+                let pb = [
+                    p[0] + n[0] * SHADOW_NORMAL_BIAS,
+                    p[1] + n[1] * SHADOW_NORMAL_BIAS,
+                    p[2] + n[2] * SHADOW_NORMAL_BIAS,
+                ];
+                shadow = host_soft_shadow(pb, n, l, &field);
             }
             let mut ao = 1.0_f32;
             if lighting_flags & LIGHTING_FLAG_AO != 0 {
@@ -4652,6 +4684,14 @@ pub fn golden_deferred_resolve_table_shadowed<F: Fn([f32; 3]) -> f32>(
         ro[1] + rd[1] * attrs.view_t,
         ro[2] + rd[2] * attrs.view_t,
     ];
+    // Normal-offset start bias for the per-light ranged shadow march: lift the origin off
+    // the surface so grazing rays clear it (mirrors the resolve's
+    // `sdf_soft_shadow_ranged(P + n*SHADOW_NORMAL_BIAS, n, l, t_max)`).
+    let pb = [
+        p[0] + n[0] * SHADOW_NORMAL_BIAS,
+        p[1] + n[1] * SHADOW_NORMAL_BIAS,
+        p[2] + n[2] * SHADOW_NORMAL_BIAS,
+    ];
     let mut marched = 0u32;
 
     let mut lit_direct = [0.0_f32; 3];
@@ -4673,7 +4713,7 @@ pub fn golden_deferred_resolve_table_shadowed<F: Fn([f32; 3]) -> f32>(
                     && marched < MAX_SDF_SHADOW_CASTERS_PER_PIXEL
                     && nol > SHADOW_NDOTL_EPS
                 {
-                    vis = host_soft_shadow_ranged(p, n, l, SDF_T_MAX, field);
+                    vis = host_soft_shadow_ranged(pb, n, l, SDF_T_MAX, field);
                     marched += 1;
                 }
                 let hvec = v_normalize([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
@@ -4747,7 +4787,7 @@ pub fn golden_deferred_resolve_table_shadowed<F: Fn([f32; 3]) -> f32>(
             && nol > SHADOW_NDOTL_EPS
         {
             let t_max = d2.sqrt();
-            vis = host_soft_shadow_ranged(p, n, l, t_max, field);
+            vis = host_soft_shadow_ranged(pb, n, l, t_max, field);
             marched += 1;
         }
         for c in 0..3 {
@@ -5183,6 +5223,13 @@ pub fn golden_deferred_resolve_clustered_shadowed<F: Fn([f32; 3]) -> f32>(
         ro[1] + rd[1] * attrs.view_t,
         ro[2] + rd[2] * attrs.view_t,
     ];
+    // Normal-offset start bias for the per-light ranged shadow march (mirrors the resolve's
+    // `sdf_soft_shadow_ranged(P + n*SHADOW_NORMAL_BIAS, n, l, t_max)`).
+    let pb = [
+        p[0] + n[0] * SHADOW_NORMAL_BIAS,
+        p[1] + n[1] * SHADOW_NORMAL_BIAS,
+        p[2] + n[2] * SHADOW_NORMAL_BIAS,
+    ];
     let mut marched = 0u32;
 
     let mut lit_direct = [0.0_f32; 3];
@@ -5202,7 +5249,7 @@ pub fn golden_deferred_resolve_clustered_shadowed<F: Fn([f32; 3]) -> f32>(
                     && marched < MAX_SDF_SHADOW_CASTERS_PER_PIXEL
                     && nol > SHADOW_NDOTL_EPS
                 {
-                    vis = host_soft_shadow_ranged(p, n, l, SDF_T_MAX, field);
+                    vis = host_soft_shadow_ranged(pb, n, l, SDF_T_MAX, field);
                     marched += 1;
                 }
                 let hvec = v_normalize([v[0] + l[0], v[1] + l[1], v[2] + l[2]]);
@@ -5277,7 +5324,7 @@ pub fn golden_deferred_resolve_clustered_shadowed<F: Fn([f32; 3]) -> f32>(
             && nol > SHADOW_NDOTL_EPS
         {
             let t_max = d2.sqrt();
-            vis = host_soft_shadow_ranged(p, n, l, t_max, field);
+            vis = host_soft_shadow_ranged(pb, n, l, t_max, field);
             marched += 1;
         }
         for c in 0..3 {
@@ -5857,6 +5904,141 @@ pub fn golden_composite_pixel_culled_omega_lit(
         SDF_BACKGROUND
     };
     pack_rgba(color)
+}
+
+#[cfg(test)]
+mod grazing_shadow_tests {
+    //! STEP-1 confirmation + STEP-3 regression for the GRAZING-ANGLE SHADOW-ACNE fix.
+    //!
+    //! The SDF soft-shadow march starts at the surface point `p`, samples
+    //! `field_distance(p + L*t)` from `t = SHADOW_MINT`, and returns `0` (occluder hit) as
+    //! soon as `d < SHADOW_HIT_EPS`. At a GRAZING angle (the light `L` nearly tangent to the
+    //! surface — the lit terminator, `n·L` small but POSITIVE so the point passes the
+    //! `SHADOW_NDOTL_EPS` gate) the tangent ray's first samples stay within `~t²/(2R)` of a
+    //! curved surface, so `d` reads below `SHADOW_HIT_EPS` and the march FALSE-occludes the
+    //! point — the black "flame" acne on the terminator. The fix lifts the march ORIGIN by
+    //! `n * SHADOW_NORMAL_BIAS` (applied at the call sites, mirrored host + GPU).
+    //!
+    //! These tests use the host soft-shadow mirror over a single analytic SPHERE (the same
+    //! `sdf_sphere` the GPU `sdf_sphere` mirrors) so they are GPU-free and deterministic.
+
+    use super::{
+        SHADOW_HIT_EPS, SHADOW_K, SHADOW_MINT, SHADOW_MINT_STEP, SHADOW_NORMAL_BIAS, SDF_MAX_IT,
+        SDF_SPHERE_CENTER, SDF_SPHERE_RADIUS, SDF_T_MAX, host_soft_shadow, host_soft_shadow_ranged,
+        sdf_normal, sdf_sphere,
+    };
+    use boyko_sdf_math::{v_dot, v_normalize};
+
+    // The march's Lipschitz step divisor — kept in sync with `host_soft_shadow`'s
+    // `FIELD_LIPSCHITZ_L` (the committed shader literal). Used ONLY by the inline UNBIASED
+    // reference march below (the bias-free reproduction of the pre-fix behavior).
+    #[allow(clippy::approx_constant, clippy::excessive_precision)]
+    const FIELD_LIPSCHITZ_L: f32 = 1.41421356;
+
+    /// A bit-for-bit copy of the soft-shadow march WITHOUT the normal-offset start bias —
+    /// the pre-fix behavior, kept here ONLY to reproduce the grazing acne for STEP 1. It
+    /// marches from the RAW surface point `p` (no `n` lift), exactly as the host/GPU march
+    /// did before this fix.
+    fn unbiased_soft_shadow<F: Fn([f32; 3]) -> f32>(p: [f32; 3], l: [f32; 3], field: &F) -> f32 {
+        let mut res = 1.0_f32;
+        let mut t = SHADOW_MINT;
+        for _ in 0..SDF_MAX_IT {
+            let q = [p[0] + l[0] * t, p[1] + l[1] * t, p[2] + l[2] * t];
+            let d = field(q);
+            res = res.min(SHADOW_K * d / t);
+            if d < SHADOW_HIT_EPS {
+                return 0.0;
+            }
+            t += (d / FIELD_LIPSCHITZ_L).max(SHADOW_MINT_STEP);
+            if t > SDF_T_MAX {
+                break;
+            }
+        }
+        res.clamp(0.0, 1.0)
+    }
+
+    /// A lit surface point near the terminator: pick a point on the sphere whose normal
+    /// makes a small POSITIVE angle's-cosine with the light (`n·L` small but > 0, so the
+    /// point is LIT and passes the `SHADOW_NDOTL_EPS` grazing gate). Returns `(p, n, l)`.
+    ///
+    /// The light points along +Z. A point near the equator (relative to +Z) has its normal
+    /// nearly perpendicular to `L` ⇒ `n·L` small ⇒ grazing. We choose a polar angle so that
+    /// `n·L ≈ 0.06` (well inside the lit half, clearly grazing).
+    fn grazing_lit_point() -> ([f32; 3], [f32; 3], [f32; 3]) {
+        let l = v_normalize([0.0, 0.0, 1.0]);
+        // n·L = cos(theta) where theta is the angle of the surface point off the +Z pole.
+        // theta ≈ 86.6° ⇒ cos ≈ 0.06 (grazing but lit).
+        let cos_t = 0.06_f32;
+        let sin_t = (1.0 - cos_t * cos_t).sqrt();
+        // The surface point on the unit-radius sphere (radius SDF_SPHERE_RADIUS): the normal
+        // direction times the radius, offset by the center.
+        let dir = [sin_t, 0.0, cos_t];
+        let p = [
+            SDF_SPHERE_CENTER[0] + dir[0] * SDF_SPHERE_RADIUS,
+            SDF_SPHERE_CENTER[1] + dir[1] * SDF_SPHERE_RADIUS,
+            SDF_SPHERE_CENTER[2] + dir[2] * SDF_SPHERE_RADIUS,
+        ];
+        // The analytic normal via the SAME central-difference gradient the marcher uses.
+        let n = sdf_normal(p);
+        (p, n, l)
+    }
+
+    /// STEP 1: the UNBIASED march FALSE-occludes a lit grazing point (`res ≈ 0`). This is
+    /// the acne. If this assert ever fails, the diagnosis is wrong — STOP and re-investigate.
+    #[test]
+    fn step1_unbiased_march_false_occludes_grazing_terminator() {
+        let (p, n, l) = grazing_lit_point();
+        // The point is LIT (passes the grazing gate) — this is the precondition.
+        let ndotl = v_dot(n, l);
+        assert!(
+            ndotl > 0.0,
+            "test setup bug: the grazing point must be LIT (n·L > 0), got {ndotl}"
+        );
+        let field = |q: [f32; 3]| sdf_sphere(q);
+        let res = unbiased_soft_shadow(p, l, &field);
+        assert!(
+            res < 1.0e-3,
+            "expected the UNBIASED march to FALSE-occlude the lit grazing point (acne, \
+             res ≈ 0), got res = {res} — the diagnosis may be wrong"
+        );
+    }
+
+    /// STEP 3: the BIASED march (the host mirror, called with `p + n*SHADOW_NORMAL_BIAS`,
+    /// exactly as `host_shade` now calls it) keeps the lit grazing point LIT (`res > 0`):
+    /// the acne is GONE.
+    #[test]
+    fn step3_normal_bias_clears_grazing_acne() {
+        let (p, n, l) = grazing_lit_point();
+        let pb = [
+            p[0] + n[0] * SHADOW_NORMAL_BIAS,
+            p[1] + n[1] * SHADOW_NORMAL_BIAS,
+            p[2] + n[2] * SHADOW_NORMAL_BIAS,
+        ];
+        let field = |q: [f32; 3]| sdf_sphere(q);
+        let res = host_soft_shadow(pb, n, l, &field);
+        assert!(
+            res > 0.1,
+            "the normal-offset bias must keep the lit grazing point LIT (res > 0), got {res}"
+        );
+    }
+
+    /// STEP 3 (ranged): the ranged host mirror — the resolve's per-light march — is ALSO
+    /// freed from the grazing acne by the same bias.
+    #[test]
+    fn step3_normal_bias_clears_grazing_acne_ranged() {
+        let (p, n, l) = grazing_lit_point();
+        let pb = [
+            p[0] + n[0] * SHADOW_NORMAL_BIAS,
+            p[1] + n[1] * SHADOW_NORMAL_BIAS,
+            p[2] + n[2] * SHADOW_NORMAL_BIAS,
+        ];
+        let field = |q: [f32; 3]| sdf_sphere(q);
+        let res = host_soft_shadow_ranged(pb, n, l, SDF_T_MAX, &field);
+        assert!(
+            res > 0.1,
+            "the ranged normal-offset bias must keep the lit grazing point LIT, got {res}"
+        );
+    }
 }
 
 #[cfg(test)]
