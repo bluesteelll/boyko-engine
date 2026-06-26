@@ -3842,9 +3842,14 @@ pub struct UiPass<'a> {
     pub ortho_bytes: &'a [u8],
 }
 
-/// The byte size of the marcher's MVP push constant (a `float4x4`), pushed to the
-/// mesh-raster pipeline's `VERTEX` range each on-screen G-buffer frame (Render P1c).
-pub const GBUFFER_MVP_BYTES: usize = 64;
+/// The byte size of the mesh-raster pipeline's `VERTEX` push, pushed each on-screen
+/// G-buffer frame. The hybrid-mesh-room PERSPECTIVE step widened it from a bare
+/// `float4x4 mvp` (64 B) to `{ float4x4 mvp; float4 cam_eye }` (80 B): `cam_eye.xyz` is
+/// the world eye + `cam_eye.w` the camera mode (0 ortho / 1 perspective), which
+/// `gbuffer_mrt.{vs,fs}` use to write the marcher-aligned `SV_Depth` (euclidean under
+/// perspective, axial under ortho). ORTHO scenes append a zeroed `cam_eye` (mode 0), so
+/// their `SV_Position.z` depth — and the ortho goldens — are byte-identical.
+pub const GBUFFER_MVP_BYTES: usize = 80;
 
 /// The byte size of the marcher's COMPUTE push constant — DERIVED from the
 /// [`FineMarcherPush`](crate::compute::FineMarcherPush) `#[repr(C)]` struct (Render A1/A2
@@ -3991,7 +3996,9 @@ pub struct GBufferScene<'a> {
     pub vertex_buffer: &'a BoundBuffer,
     /// The number of vertices to `draw` (the mesh quad's vertex count, e.g. 6).
     pub vertex_count: u32,
-    /// The 64-byte `float4x4` MVP pushed to `raster_pipeline`'s `VERTEX` range.
+    /// The 80-byte `{ float4x4 mvp; float4 cam_eye }` push to `raster_pipeline`'s
+    /// `VERTEX` range (see [`GBUFFER_MVP_BYTES`]). ORTHO scenes append a zeroed `cam_eye`
+    /// (mode 0); PERSPECTIVE scenes write the world eye + mode 1.
     pub mvp: [u8; GBUFFER_MVP_BYTES],
     /// The P1b SDF G-buffer marcher compute pipeline (its layout declares
     /// `vocab_layout` at `set 0`). Byte-untouched from P1b (pass B).

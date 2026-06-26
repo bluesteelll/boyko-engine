@@ -153,17 +153,20 @@ const VK_B: usize = 0x42;
 /// color formats match the bound albedo/normal/material attachments.
 const RASTER_COLOR_FORMAT: Format = Format::R8G8B8A8Unorm;
 
-/// One vertex: a `Float32x3` position (offset 0) + a `Float32x4` color (offset 12), the
-/// rung-3/4 vertex layout reused. `#[repr(C)]` for the exact 28-byte stride.
+/// One vertex: a `Float32x3` position (offset 0), a `Float32x3` world normal (offset 12),
+/// and a `Float32x4` color (offset 24). `#[repr(C)]` for the exact 40-byte stride. The
+/// per-vertex normal feeds the mesh-MRT producer's G-buffer normal target (multi-object
+/// meshes carry real face normals — the +Z constant the VS used to bake is gone).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Vertex {
     position: [f32; 3],
+    normal: [f32; 3],
     color: [f32; 4],
 }
 
 const VERTEX_STRIDE: u32 = core::mem::size_of::<Vertex>() as u32;
-const _: () = assert!(VERTEX_STRIDE == 28, "Vertex must be tightly packed at 28 bytes");
+const _: () = assert!(VERTEX_STRIDE == 40, "Vertex must be tightly packed at 40 bytes");
 
 /// The MVP byte size (a `float4x4`). Must equal [`GBUFFER_MVP_BYTES`].
 const MVP_BYTES: u32 = GBUFFER_MVP_BYTES as u32;
@@ -185,16 +188,17 @@ impl<const N: usize> SpirvBlob<N> {
 }
 
 /// Render P5-r0: the mesh-MRT G-buffer PRODUCER vertex SPIR-V (`gbuffer_mrt.vs.spv`).
-/// Same pos+color vertex layout as `triangle_mvp.vs`; passes through the LINEAR color +
-/// a constant world normal (the fronto-parallel quad's +Z).
-static MRT_VS_SPV: SpirvBlob<1044> = SpirvBlob(*include_bytes!(concat!(
+/// Vertex layout: position (loc 0, offset 0) + color (loc 1, offset 24) + per-vertex world
+/// normal (loc 2, offset 12); passes the LINEAR color + the per-vertex normal through.
+static MRT_VS_SPV: SpirvBlob<1480> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/gbuffer_mrt.vs.spv"
 )));
 
 /// Render P5-r0: the mesh-MRT G-buffer PRODUCER fragment SPIR-V (`gbuffer_mrt.fs.spv`):
-/// writes albedo/normal/material as 3 MRT in the marcher's exact encoding (mask=1).
-static MRT_FS_SPV: SpirvBlob<1756> = SpirvBlob(*include_bytes!(concat!(
+/// writes albedo/normal/material as 3 MRT in the marcher's exact encoding (mask=1) + the
+/// marcher-aligned `SV_Depth` (euclidean under perspective, axial under ortho).
+static MRT_FS_SPV: SpirvBlob<2252> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/gbuffer_mrt.fs.spv"
 )));
@@ -228,9 +232,12 @@ fn swapchain_readback_is_bgra(vk_format: i32) -> Option<bool> {
     }
 }
 
-/// The orthographic MVP for the rung-3 vertex shader, uploaded COLUMN-MAJOR (the
-/// VERIFIED transpose). Maps a fronto-parallel world vertex so the stored depth is
-/// `(CAM_Z - worldZ) / T_MAX`. Mirrors the packed/P1b `ortho_mvp_bytes`.
+/// The orthographic MVP push for the mesh-MRT vertex shader, uploaded COLUMN-MAJOR (the
+/// VERIFIED transpose). Maps a fronto-parallel world vertex so the rasterized
+/// `SV_Position.z` is the AXIAL `(CAM_Z - worldZ) / T_MAX` — the depth the fragment writes
+/// back unchanged under ortho (`cam_mode == 0`), byte-identical to step 1. The trailing
+/// 16 bytes are the `cam_eye` push field: `[0, 0, 0, 0]` (mode 0 = ortho; the eye is
+/// unused since the ortho fragment keeps `SV_Position.z`). Mirrors the packed/P1b convention.
 #[rustfmt::skip]
 fn ortho_mvp_bytes() -> [u8; MVP_BYTES as usize] {
     let h = SDF_VIEW_HALF_EXTENT;
@@ -242,6 +249,7 @@ fn ortho_mvp_bytes() -> [u8; MVP_BYTES as usize] {
         0.0,     0.0,      -1.0 / tmax,  0.0,
         0.0,     0.0,      cam / tmax,   1.0,
     ];
+    // `[0u8; MVP_BYTES]` leaves the trailing cam_eye (bytes 64..80) at [0,0,0,0] => mode 0.
     let mut out = [0u8; MVP_BYTES as usize];
     for (i, f) in mt.iter().enumerate() {
         out[i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
@@ -249,15 +257,139 @@ fn ortho_mvp_bytes() -> [u8; MVP_BYTES as usize] {
     out
 }
 
+/// The PERSPECTIVE MVP push (`proj * view`, column-major) FOLLOWED by the `cam_eye`
+/// float4 (`xyz = eye`, `w = 1.0` = perspective mode), for the mesh-MRT vertex shader.
+///
+/// The 80-byte layout MUST match `gbuffer_mrt.vs.hlsl`'s `{ float4x4 mvp; float4 cam_eye }`
+/// push. The `proj * view` is built from the SAME eye / basis / fov / aspect the marcher's
+/// perspective ray-gen (`ray_gen.hlsli`) + `CompositePushConstants::perspective` use, so a
+/// mesh vertex projects to the SAME pixel the marcher's ray through that pixel reaches at
+/// that world point (screen-space alignment is the load-bearing requirement).
+///
+/// Convention matched to the marcher (`ray_gen.hlsli` PERSPECTIVE arm):
+///   * `view`  : a right-handed look-along-`forward` frame. The marcher builds the ray
+///     direction as `forward + right*(ndc_x*aspect*tan) + up*(ndc_y*tan)` and marches from
+///     `eye` along it; the equivalent view matrix rows are `right`, `up`, `-forward` with
+///     the eye translation, mapping a world point to camera space where camera looks down
+///     `-z_cam` (`z_cam = -dot(forward, P - eye)`, the positive depth in front).
+///   * `proj`  : maps camera `x_cam / (z_cam * aspect * tan)` and `y_cam / (z_cam * tan)`
+///     to clip x/y (the inverse of the marcher's NDC->dir scaling). The marcher flips
+///     NDC-y (`ndc_y = -(...)`), so the projection negates the camera-up axis to land a
+///     `+y` world point in the upper half of the image, matching the ortho `-1/h` row.
+///   * depth   : Vulkan clip `z ∈ [0, w]`; the EXACT clip-z is IRRELEVANT to correctness
+///     here because the FRAGMENT overwrites depth via `SV_Depth = length(eye_rel)/T_MAX`.
+///     A simple `z_clip = z_cam`, `w_clip = z_cam` (=> SV_Position.z = 1, unused) keeps the
+///     vertex in front of the near plane (`z_cam > 0`) so it is not clipped.
+///
+/// The mesh and the marcher therefore agree in screen x/y; the per-pixel mesh depth comes
+/// from the fragment's euclidean `length(cam_eye - P)`, NOT from this matrix's z.
+#[rustfmt::skip]
+fn perspective_mvp_bytes(
+    eye: [f32; 3],
+    forward: [f32; 3],
+    right: [f32; 3],
+    up: [f32; 3],
+    fov_y_radians: f32,
+    aspect: f32,
+) -> [u8; MVP_BYTES as usize] {
+    let tan = (fov_y_radians * 0.5).tan();
+    // view: world -> camera. Rows are the basis; the camera looks down -forward, so
+    // z_cam = -dot(forward, P - eye) = +depth in front. (right, up, forward) is right-handed.
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let (rx, ry, rz) = (right[0], right[1], right[2]);
+    let (ux, uy, uz) = (up[0], up[1], up[2]);
+    let (fx, fy, fz) = (forward[0], forward[1], forward[2]);
+    let tx = -dot(right, eye);
+    let ty = -dot(up, eye);
+    let tz = dot(forward, eye); // forward·eye; the in-front view depth is z_cam = forward·(P-eye) = forward·P - tz
+    // proj * view, ROW-MAJOR math rows below; uploaded column-major (transposed) to match
+    // `ortho_mvp_bytes`. clip.x = x_cam/(aspect*tan); clip.y = -y_cam/tan (flip to match the
+    // marcher's `ndc_y = -(...)`); clip.z = clip.w = z_cam = forward·(P-eye) (POSITIVE in front, so
+    // the perspective divide is well-defined). `forward` points INTO the scene (= the marcher's ray
+    // direction `rd` in `ray_gen.hlsli`), so the basis row is `+forward`, NOT `-forward` — a flipped
+    // sign here warps every vertex by a depth-dependent amount (`-2·forward·P`), which a flat quad
+    // survives but a multi-depth cube cracks into black wedges (BUG fixed: was `[-fx,-fy,-fz,-tz]`).
+    let sx = 1.0 / (aspect * tan);
+    let sy = -1.0 / tan;
+    // pv row r = proj_scale_r · view_row_r  (view_row = [basis | translation]).
+    let pv: [[f32; 4]; 4] = [
+        [sx * rx, sx * ry, sx * rz, sx * tx], // clip.x
+        [sy * ux, sy * uy, sy * uz, sy * ty], // clip.y (flipped)
+        [fx,      fy,      fz,      -tz     ], // clip.z = z_cam = forward·(P-eye) = forward·P - tz
+        [fx,      fy,      fz,      -tz     ], // clip.w = z_cam (perspective divide)
+    ];
+    // Upload COLUMN-MAJOR: out[col*4 + row] holds pv[row][col] (the verified transpose).
+    let mut out = [0u8; MVP_BYTES as usize];
+    for col in 0..4 {
+        for row in 0..4 {
+            let b = pv[row][col].to_le_bytes();
+            out[(col * 4 + row) * 4..(col * 4 + row) * 4 + 4].copy_from_slice(&b);
+        }
+    }
+    // cam_eye push field (bytes 64..80): xyz = eye, w = 1.0 (perspective mode).
+    let cam_eye = [eye[0], eye[1], eye[2], 1.0_f32];
+    for (i, f) in cam_eye.iter().enumerate() {
+        out[64 + i * 4..64 + i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+    }
+    out
+}
+
 /// The mesh quad as two triangles spanning the world-XY footprint at world Z [`MESH_Z`].
+/// The quad faces the camera (`+Z`), so every vertex carries the outward normal `[0, 0, 1]`.
 fn quad_vertices() -> [Vertex; 6] {
     let z = MESH_Z;
     let c = [1.0_f32, 1.0, 1.0, 1.0];
-    let bl = Vertex { position: [QUAD_X_MIN, QUAD_Y_MIN, z], color: c };
-    let br = Vertex { position: [QUAD_X_MAX, QUAD_Y_MIN, z], color: c };
-    let tr = Vertex { position: [QUAD_X_MAX, QUAD_Y_MAX, z], color: c };
-    let tl = Vertex { position: [QUAD_X_MIN, QUAD_Y_MAX, z], color: c };
+    let n = [0.0_f32, 0.0, 1.0];
+    let bl = Vertex { position: [QUAD_X_MIN, QUAD_Y_MIN, z], normal: n, color: c };
+    let br = Vertex { position: [QUAD_X_MAX, QUAD_Y_MIN, z], normal: n, color: c };
+    let tr = Vertex { position: [QUAD_X_MAX, QUAD_Y_MAX, z], normal: n, color: c };
+    let tl = Vertex { position: [QUAD_X_MIN, QUAD_Y_MAX, z], normal: n, color: c };
     [bl, br, tr, bl, tr, tl]
+}
+
+/// Emits one mesh quad face as two CCW triangles `(a, b, c)` + `(a, c, d)`, every vertex
+/// carrying the supplied outward world `normal` `n` and `color`. `corners` are the four
+/// quad corners in CCW order as seen from the `+n` side (matching [`quad_vertices`]'s
+/// `bl, br, tr, tl` winding for the `+Z` face). Culling is OFF (`rhi_impl.rs`), so the
+/// winding is cosmetic, but it is kept consistent for correctness.
+fn mesh_quad(corners: [[f32; 3]; 4], n: [f32; 3], color: [f32; 4]) -> [Vertex; 6] {
+    let [a, b, c, d] = corners;
+    let v = |p: [f32; 3]| Vertex { position: p, normal: n, color };
+    [v(a), v(b), v(c), v(a), v(c), v(d)]
+}
+
+/// A solid axis-aligned mesh box centered at `center` with per-axis half-extents `half`,
+/// as 6 faces × 2 triangles = 36 vertices. Each face carries its outward axis normal
+/// (`±X`, `±Y`, `±Z`), with its 4 corners ordered CCW as seen from outside the box. The
+/// per-vertex normals feed the G-buffer normal target so the box's faces shade distinctly.
+fn mesh_box(center: [f32; 3], half: [f32; 3], color: [f32; 4]) -> Vec<Vertex> {
+    let [cx, cy, cz] = center;
+    let [hx, hy, hz] = half;
+    let (x0, x1) = (cx - hx, cx + hx);
+    let (y0, y1) = (cy - hy, cy + hy);
+    let (z0, z1) = (cz - hz, cz + hz);
+
+    // Each face lists its 4 corners CCW from the outward normal's side.
+    let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
+        // +Z (front): looking toward -Z, CCW = bl, br, tr, tl in the +Z plane.
+        ([0.0, 0.0, 1.0], [[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]]),
+        // -Z (back): looking toward +Z, CCW winds the opposite way in X.
+        ([0.0, 0.0, -1.0], [[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]]),
+        // +X (right): looking toward -X, CCW in the +X plane.
+        ([1.0, 0.0, 0.0], [[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]]),
+        // -X (left): looking toward +X.
+        ([-1.0, 0.0, 0.0], [[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]]),
+        // +Y (top): looking toward -Y.
+        ([0.0, 1.0, 0.0], [[x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0]]),
+        // -Y (bottom): looking toward +Y.
+        ([0.0, -1.0, 0.0], [[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]]),
+    ];
+
+    let mut verts = Vec::with_capacity(36);
+    for (n, corners) in faces {
+        verts.extend_from_slice(&mesh_quad(corners, n, color));
+    }
+    verts
 }
 
 /// The ORTHO world-XY of pixel `(px, py)`'s ray at the COMPOSITE extent — the
@@ -893,7 +1025,8 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         .expect("mesh-MRT fragment shader module");
     let attributes = [
         VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
-        VertexAttribute { location: 1, offset: 12, format: VertexFormat::Float32x4 },
+        VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
+        VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
     ];
     let raster_pipeline = RhiDevice::create_graphics_pipeline(
         device,
@@ -1738,7 +1871,8 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         .expect("mesh-MRT fragment shader module");
     let attributes = [
         VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
-        VertexAttribute { location: 1, offset: 12, format: VertexFormat::Float32x4 },
+        VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
+        VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
     ];
     let raster_pipeline = RhiDevice::create_graphics_pipeline(
         device,
@@ -2224,9 +2358,9 @@ fn showcase_camera() -> CompositePushConstants {
 /// floor. Six identical vertices ⇒ two zero-area triangles ⇒ NO fragments ⇒ the raster pass only
 /// clears the depth attachment to far (`MESH_DEPTH_CLEAR`), so `has_mesh == false` for every pixel
 /// and the marcher OWNS the whole frame (the SDF floor + bodies).
-fn showcase_quad_vertices() -> [Vertex; 6] {
-    let v = Vertex { position: [0.0, 0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0] };
-    [v, v, v, v, v, v]
+fn showcase_quad_vertices() -> Vec<Vertex> {
+    let v = Vertex { position: [0.0, 0.0, 0.0], normal: [0.0, 0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0] };
+    vec![v, v, v, v, v, v]
 }
 
 /// The showcase light table: a single warm-white directional **sun** (the PRIMARY directional —
@@ -2306,6 +2440,11 @@ const SSAO_LADDER_LOW_BMP: &str = r"D:\tmp\engine_ssao_low.bmp";
 const SSAO_LADDER_MEDIUM_BMP: &str = r"D:\tmp\engine_ssao_medium.bmp";
 const SSAO_LADDER_HIGH_BMP: &str = r"D:\tmp\engine_ssao_high.bmp";
 
+/// The fixed dump path for the ORTHO HYBRID-ROOM showcase (multi-object mesh + SDF, step 1 of
+/// the hybrid-mesh-room build): a mesh backdrop wall + mesh cubes in front + SDF bodies casting
+/// the marcher's analytic shadow/AO onto the mesh. The orchestrator runs the GPU test + converts.
+const HYBRID_BMP: &str = r"D:\tmp\engine_hybrid_room.bmp";
+
 /// The per-showcase variable scene: the SDF edit list, the marcher/resolve camera push, the light
 /// table (header + elements), and the RASTER MESH (vertices + MVP). The shared [`run_showcase_dump`]
 /// body holds everything else (pipelines, barriers, the dump tail) constant. Built by the per-test
@@ -2322,8 +2461,9 @@ struct ShowcaseConfig {
     /// The light table elements (directional + sky [+ point/spot]).
     light_elems: Vec<GoldenLight>,
     /// The raster mesh vertices (DEGENERATE zero-area for the all-SDF showcase; a real floor quad
-    /// for the mesh-floor showcase).
-    vertices: [Vertex; 6],
+    /// for the mesh-floor showcase; an arbitrary multi-object mesh for the hybrid room). A `Vec`
+    /// so any vertex count is supported — the draw is length-driven (`vertex_count == len`).
+    vertices: Vec<Vertex>,
     /// The raster MVP push (the ORTHO `ortho_mvp_bytes` — its `(CAM_Z - z)/T_MAX` depth is the
     /// convention the marcher's `t_mesh = md * T_MAX` ownership/gViewT decode reconstructs exactly).
     mvp: [u8; MVP_BYTES as usize],
@@ -2462,6 +2602,20 @@ fn engine_ssao_ladder_high_dump() {
     run_showcase_dump("boyko_engine SSAO ladder HIGH", SSAO_LADDER_HIGH_BMP, mesh_ssao_config(Some(SSAO_QUALITY_HIGH)));
 }
 
+/// **Hybrid-room screenshot dump (step 1 of the hybrid-mesh-room build).** Renders the ORTHO
+/// hybrid room ([`hybrid_room_config`]: an arbitrary multi-object mesh — a backdrop wall + 3 cubes
+/// with per-vertex face normals — plus several SDF bodies standing in front so the marcher's
+/// analytic shadows + AO fall on the mesh) at the native 512×512 composite extent and writes a
+/// TRUE 512 BMP to [`HYBRID_BMP`]. Proves the multi-object-mesh + per-vertex-normal infra on the
+/// PROVEN ORTHO path (the orchestrator adds the perspective camera in step 2).
+///
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`.
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the hybrid-room screenshot"]
+fn engine_hybrid_room_512_screenshot_dump() {
+    run_showcase_dump("boyko_engine hybrid room 512", HYBRID_BMP, hybrid_room_config());
+}
+
 /// The unlock-2 SDF occluder sphere for the mesh-floor showcase: ONE sphere standing in FRONT of
 /// the mesh quad (`MESH_Z == 1.0`) — center at `+Z`, near pole at `z == 1.55 > MESH_Z`, so the SDF
 /// wins ownership where it covers and the mesh stands elsewhere (the SAME geometry as the offscreen
@@ -2483,9 +2637,183 @@ fn mesh_ssao_config(ssao_quality: Option<usize>) -> ShowcaseConfig {
         light_elems,
         // A REAL floor quad (NOT the degenerate all-SDF mesh): its A2 == 1.0, so the contact AO is
         // pure SSAO. The ORTHO MVP lands it exactly where the marcher's `t_mesh` decode expects.
-        vertices: quad_vertices(),
+        vertices: quad_vertices().to_vec(),
         mvp: ortho_mvp_bytes(),
         ssao_quality,
+    }
+}
+
+// === The 3D hybrid room — PERSPECTIVE step-2 named consts (orchestrator-tunable). ===
+// All positions are world-space, y-up. The mesh floor (y = 0) + back wall (z = -4) +
+// 2 mesh cubes RESTING on the floor form the room; 3 SDF bodies rest on the floor in
+// front and cast the marcher's analytic shadow/AO onto the mesh.
+
+/// The room camera EYE (world). Above + in front, looking down into the room.
+const ROOM_CAM_EYE: [f32; 3] = [0.0, 3.2, 4.5];
+/// The room camera LOOK-AT target (world).
+const ROOM_CAM_TARGET: [f32; 3] = [0.0, 0.8, -1.5];
+/// The room camera vertical FOV (radians) — 50°.
+const ROOM_CAM_FOV_Y: f32 = 50.0 * core::f32::consts::PI / 180.0;
+/// The room camera right-handed basis, precomputed from EYE/TARGET (verified orthonormal by
+/// the `debug_assert!` in [`room_camera`]). forward = normalize(target - eye);
+/// right = normalize(cross(forward, +Y)); up = cross(right, forward).
+const ROOM_CAM_FORWARD: [f32; 3] = [0.0, -0.371391, -0.928477];
+const ROOM_CAM_RIGHT: [f32; 3] = [1.0, 0.0, 0.0];
+const ROOM_CAM_UP: [f32; 3] = [0.0, 0.928477, -0.371391];
+
+/// The 2 mesh cubes resting on the floor: center / half-extent / color. Each bottom face sits a
+/// hair (0.01) ABOVE the floor plane (y=0) — a coplanar bottom would Z-fight the floor under
+/// `LESS` with no depth bias (the jagged contact line). 0.01 is sub-pixel at this camera distance.
+const ROOM_CUBE_A: ([f32; 3], [f32; 3], [f32; 4]) =
+    ([-1.6, 0.51, -1.5], [0.5, 0.5, 0.5], [0.80, 0.34, 0.28, 1.0]); // warm terracotta
+const ROOM_CUBE_B: ([f32; 3], [f32; 3], [f32; 4]) =
+    ([1.4, 0.36, -2.2], [0.35, 0.35, 0.35], [0.28, 0.46, 0.78, 1.0]); // cool blue
+
+/// The 3 SDF bodies resting on the floor (center.y = radius / half-height): a hero sphere,
+/// a smaller sphere, and a box. HARD unions (4th arg `0.0` = SMOOTHNESS, mid-gray material 0).
+const ROOM_SDF_SPHERE_A: ([f32; 3], f32) = ([0.0, 0.7, -1.0], 0.7);
+const ROOM_SDF_SPHERE_B: ([f32; 3], f32) = ([1.5, 0.5, -0.5], 0.5);
+const ROOM_SDF_BOX: ([f32; 3], [f32; 3]) = ([-1.2, 0.51, 0.2], [0.5, 0.5, 0.5]); // bottom 0.01 above the floor: a coplanar bottom Z-fought the mesh floor (the "strange front shadow")
+
+/// The mesh floor + wall colors (neutral grays; the wall a touch different so the corner reads).
+const ROOM_FLOOR_COLOR: [f32; 4] = [0.55, 0.55, 0.57, 1.0];
+const ROOM_WALL_COLOR: [f32; 4] = [0.45, 0.46, 0.50, 1.0];
+
+/// The room camera push: a PERSPECTIVE [`CompositePushConstants`] matching the
+/// [`perspective_mvp_bytes`] the raster mesh uses (same eye / basis / fov / aspect). The
+/// `debug_assert!` guards the precomputed basis (unit, orthogonal, right-handed) against an
+/// edit of the EYE/TARGET consts that forgets to recompute the basis.
+fn room_camera() -> CompositePushConstants {
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let (f, r, u) = (ROOM_CAM_FORWARD, ROOM_CAM_RIGHT, ROOM_CAM_UP);
+    // The precomputed `forward` must equal normalize(TARGET - EYE) (guards an EYE/TARGET edit
+    // that forgets to recompute), and the basis must be orthonormal + right-handed.
+    let raw = [
+        ROOM_CAM_TARGET[0] - ROOM_CAM_EYE[0],
+        ROOM_CAM_TARGET[1] - ROOM_CAM_EYE[1],
+        ROOM_CAM_TARGET[2] - ROOM_CAM_EYE[2],
+    ];
+    let inv_len = 1.0 / dot(raw, raw).sqrt();
+    let fwd = [raw[0] * inv_len, raw[1] * inv_len, raw[2] * inv_len];
+    debug_assert!(
+        (f[0] - fwd[0]).abs() < 1e-3
+            && (f[1] - fwd[1]).abs() < 1e-3
+            && (f[2] - fwd[2]).abs() < 1e-3
+            && (dot(f, f) - 1.0).abs() < 1e-3
+            && (dot(r, r) - 1.0).abs() < 1e-3
+            && (dot(u, u) - 1.0).abs() < 1e-3
+            && dot(f, r).abs() < 1e-3
+            && dot(f, u).abs() < 1e-3
+            && dot(r, u).abs() < 1e-3,
+        "invariant: ROOM_CAM_* basis must be orthonormal + match normalize(TARGET - EYE) \
+         (recompute the basis consts after editing EYE/TARGET)"
+    );
+    CompositePushConstants::perspective(
+        ROOM_CAM_EYE,
+        ROOM_CAM_FORWARD,
+        ROOM_CAM_RIGHT,
+        ROOM_CAM_UP,
+        ROOM_CAM_FOV_Y,
+        COMPOSITE_W,
+        COMPOSITE_H,
+    )
+}
+
+/// The 3D-room SDF bodies (step 2, PERSPECTIVE): a sphere + a smaller sphere + a box, each
+/// RESTING on the mesh floor (`center.y == radius / half-height`), standing in the room so the
+/// marcher's analytic soft shadow + contact AO fall on the mesh floor, wall, and cubes. HARD
+/// unions (4th arg `0.0` is SMOOTHNESS, not a material — the bodies are mid-gray material 0).
+fn hybrid_room_sdf_scene() -> Vec<SdfEdit> {
+    // SHADOW-CASTER PROXY for a mesh cube: a HARD-union SDF box at the cube's exact center,
+    // shrunk by `PROXY_MARGIN` per axis. It is NEVER rendered — the raster mesh cube (larger) wins
+    // the marcher ownership at every shared pixel (the mesh surface is `PROXY_MARGIN` in FRONT of
+    // the proxy), so the visible cube stays polygonal. But the proxy IS in the FROZEN field, so
+    // every OTHER surface's analytic soft-shadow march toward the light hits it → the mesh cube
+    // casts a clean SDF shadow onto the floor/wall. This is the MAX-PERF mesh-shadow path in an
+    // SDF-first engine: it piggybacks the already-running march (+1 edit each) instead of adding a
+    // whole separate shadow-map pass. The `SHADOW_NORMAL_BIAS` lift keeps the cube's OWN lit faces
+    // clear of self-shadow (the march starts outside the proxy and travels away from it).
+    const PROXY_MARGIN: f32 = 0.02;
+    let proxy = |center: [f32; 3], half: [f32; 3]| {
+        SdfEdit::box_shape(
+            center,
+            [half[0] - PROXY_MARGIN, half[1] - PROXY_MARGIN, half[2] - PROXY_MARGIN],
+            sdf_op::UNION,
+            0.0,
+        )
+    };
+    vec![
+        SdfEdit::sphere(ROOM_SDF_SPHERE_A.0, ROOM_SDF_SPHERE_A.1, sdf_op::UNION, 0.0),
+        SdfEdit::sphere(ROOM_SDF_SPHERE_B.0, ROOM_SDF_SPHERE_B.1, sdf_op::UNION, 0.0),
+        SdfEdit::box_shape(ROOM_SDF_BOX.0, ROOM_SDF_BOX.1, sdf_op::UNION, 0.0),
+        // Invisible shadow-caster proxies under the 2 mesh cubes (≤ MAX_SDF_EDITS: 5 edits total).
+        proxy(ROOM_CUBE_A.0, ROOM_CUBE_A.1),
+        proxy(ROOM_CUBE_B.0, ROOM_CUBE_B.1),
+    ]
+}
+
+/// The 3D-room MESH geometry (step 2, PERSPECTIVE): a horizontal FLOOR quad at y = 0 (outward
+/// normal `+Y`), a vertical BACK-WALL quad at z = -4 (outward normal `+Z`), and 2 mesh CUBES
+/// resting on the floor (distinct positions / sizes / colors). All concatenated into one
+/// `Vec<Vertex>` — the draw is length-driven. The cubes + floor + wall carry real per-vertex
+/// face normals for the G-buffer; the SDF bodies ([`hybrid_room_sdf_scene`]) shadow them.
+fn hybrid_room_mesh() -> Vec<Vertex> {
+    let mut verts = Vec::new();
+
+    // Floor: a horizontal quad at y = 0 spanning x[-3,3] z[-4,1], outward normal +Y. Corners
+    // CCW as seen from +Y (above): looking down the -Y axis.
+    verts.extend_from_slice(&mesh_quad(
+        [[-3.0, 0.0, 1.0], [3.0, 0.0, 1.0], [3.0, 0.0, -4.0], [-3.0, 0.0, -4.0]],
+        [0.0, 1.0, 0.0],
+        ROOM_FLOOR_COLOR,
+    ));
+
+    // Back wall: a vertical quad at z = -4 spanning x[-3,3] y[0,4], outward normal +Z. Corners
+    // CCW as seen from +Z (in front of the wall).
+    verts.extend_from_slice(&mesh_quad(
+        [[-3.0, 0.0, -4.0], [3.0, 0.0, -4.0], [3.0, 4.0, -4.0], [-3.0, 4.0, -4.0]],
+        [0.0, 0.0, 1.0],
+        ROOM_WALL_COLOR,
+    ));
+
+    // 2 cubes resting on the floor (bottom at y = 0).
+    verts.extend(mesh_box(ROOM_CUBE_A.0, ROOM_CUBE_A.1, ROOM_CUBE_A.2));
+    verts.extend(mesh_box(ROOM_CUBE_B.0, ROOM_CUBE_B.1, ROOM_CUBE_B.2));
+
+    verts
+}
+
+/// **Hybrid-room showcase — a PERSPECTIVE 3D room (step 2 of the hybrid-mesh-room build).**
+/// A real 3D room: a mesh FLOOR + BACK WALL + 2 mesh cubes ([`hybrid_room_mesh`]) under a
+/// PERSPECTIVE camera ([`room_camera`], matched by the [`perspective_mvp_bytes`] raster MVP),
+/// with 3 SDF bodies ([`hybrid_room_sdf_scene`]) resting on the floor that cast the marcher's
+/// analytic SHADOWS + AO onto the mesh. Analytic path: `ssao_quality: None`, `lighting_flags`
+/// SHADOWS|AO (set by [`run_showcase_dump`]'s shared body), 1 directional sun ([`SHOWCASE_SUN_DIR`])
+/// + 1 dim sky.
+fn hybrid_room_config() -> ShowcaseConfig {
+    let header = GoldenLightHeader::new(2, 0, 1.0).with_ssao_mode(0);
+    let lights = vec![
+        // The sun: the recorder's hardcoded `SHOWCASE_SUN_DIR` so the marcher's shadow march
+        // matches the resolve's primary directional. Strong illuminance.
+        GoldenLight::directional(SHOWCASE_SUN_DIR, [1.0, 0.97, 0.92], 3.0),
+        // A dim neutral sky/hemisphere fill so the shadowed floor reads off pure black.
+        GoldenLight::sky([0.05, 0.05, 0.05], [0.05, 0.05, 0.05]),
+    ];
+    ShowcaseConfig {
+        sdf: hybrid_room_sdf_scene(),
+        camera: room_camera(),
+        light_header: header,
+        light_elems: lights,
+        vertices: hybrid_room_mesh(),
+        mvp: perspective_mvp_bytes(
+            ROOM_CAM_EYE,
+            ROOM_CAM_FORWARD,
+            ROOM_CAM_RIGHT,
+            ROOM_CAM_UP,
+            ROOM_CAM_FOV_Y,
+            COMPOSITE_W as f32 / COMPOSITE_H as f32,
+        ),
+        ssao_quality: None,
     }
 }
 
@@ -2697,9 +3025,11 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         write_words(mapped, &light_words);
     }
 
-    // --- The mesh quad's vertex buffer (the showcase floor backdrop). ---
+    // --- The mesh's vertex buffer (the showcase floor / hybrid-room geometry). ---
     let vertices = cfg.vertices;
-    let vertex_bytes = core::mem::size_of_val(&vertices) as u64;
+    // `vertices` is a `Vec`, so the byte length is the slice's footprint (NOT `size_of_val`
+    // of the `Vec` handle, which is the 24-byte struct, not the heap buffer).
+    let vertex_bytes = core::mem::size_of_val(vertices.as_slice()) as u64;
     let vertex_buffer = RhiDevice::create_buffer(
         device,
         &BufferDesc {
@@ -2712,8 +3042,9 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
     {
         let vb_ptr = RhiDevice::buffer_mapped_ptr(device, &vertex_buffer)
             .expect("host-visible vertex buffer is mapped");
-        // SAFETY: `vb_ptr` points to `vertex_bytes` mapped host-coherent bytes; `vertices` is a
-        // distinct stack array of `vertex_bytes` bytes; the write completes before any submit.
+        // SAFETY: `vb_ptr` points to `vertex_bytes` mapped host-coherent bytes; `vertices`'s heap
+        // buffer is a distinct `vertex_bytes`-byte region (`vertex_bytes == len * stride`); the
+        // write completes before any submit.
         unsafe {
             core::ptr::copy_nonoverlapping(
                 vertices.as_ptr().cast::<u8>(),
@@ -2743,7 +3074,8 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         .expect("mesh-MRT fragment shader module");
     let attributes = [
         VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
-        VertexAttribute { location: 1, offset: 12, format: VertexFormat::Float32x4 },
+        VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
+        VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
     ];
     let raster_pipeline = RhiDevice::create_graphics_pipeline(
         device,

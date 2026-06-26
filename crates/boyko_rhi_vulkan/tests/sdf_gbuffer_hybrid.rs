@@ -119,20 +119,25 @@ const DEPTH_CLEAR: f32 = MESH_DEPTH_CLEAR;
 /// STORAGE-image store target whose support the [`DeviceCaps`] boot fail-fast asserts.
 const GBUFFER_FORMAT: Format = Format::R8G8B8A8Unorm;
 
-/// One vertex: a `Float32x3` position (offset 0) + a `Float32x4` color (offset 12), the
-/// rung-3/4 vertex layout reused. `#[repr(C)]` for the exact 28-byte stride.
+/// One vertex: a `Float32x3` position (offset 0), a `Float32x3` world normal (offset 12),
+/// and a `Float32x4` color (offset 24). `#[repr(C)]` for the exact 40-byte stride. The
+/// per-vertex normal feeds the mesh-MRT producer's G-buffer normal target (the shared
+/// `gbuffer_mrt.vs` consumes location 2 now — the +Z constant it used to bake is gone).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Vertex {
     position: [f32; 3],
+    normal: [f32; 3],
     color: [f32; 4],
 }
 
 const VERTEX_STRIDE: u32 = core::mem::size_of::<Vertex>() as u32;
-const _: () = assert!(VERTEX_STRIDE == 28, "Vertex must be tightly packed at 28 bytes");
+const _: () = assert!(VERTEX_STRIDE == 40, "Vertex must be tightly packed at 40 bytes");
 
-/// The MVP byte size (a `float4x4`).
-const MVP_BYTES: u32 = 64;
+/// The mesh-raster VERTEX push size: `{ float4x4 mvp; float4 cam_eye }` (the hybrid-mesh-room
+/// PERSPECTIVE step widened it 64 -> 80). The offscreen ORTHO goldens append a zeroed `cam_eye`
+/// (mode 0), so their `SV_Position.z` depth is byte-identical.
+const MVP_BYTES: u32 = 80;
 
 /// PBR MVP-2: the std430 word-packing of a ONE-element material table holding the engine
 /// default material (mid-gray dielectric: base 0.8/0.8/0.8/1, metallic 0, roughness 0.5,
@@ -193,18 +198,18 @@ impl<const N: usize> SpirvBlob<N> {
 }
 
 /// Render P5-r0: the mesh-MRT G-buffer PRODUCER vertex SPIR-V (`gbuffer_mrt.vs.spv`):
-/// passes through the LINEAR vertex color + a constant world normal (the fronto-parallel
-/// quad's +Z). Same pos+color vertex layout as `triangle_mvp.vs`.
-static MRT_VS_SPV: SpirvBlob<1044> = SpirvBlob(*include_bytes!(concat!(
+/// passes through the LINEAR vertex color + the PER-VERTEX world normal (loc 2, offset 12).
+/// Vertex layout: position (loc 0, offset 0) + color (loc 1, offset 24) + normal (loc 2, offset 12).
+static MRT_VS_SPV: SpirvBlob<1480> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/gbuffer_mrt.vs.spv"
 )));
 
 /// Render P5-r0: the mesh-MRT G-buffer PRODUCER fragment SPIR-V (`gbuffer_mrt.fs.spv`):
-/// writes albedo/normal/material as 3 MRT in the marcher's exact encoding (mask=1), with
-/// the eDSL-spliced `oct_encode` / `pack_material_id_ba` (guarded by
-/// `gbuffer_mrt_edsl_sync.rs`).
-static MRT_FS_SPV: SpirvBlob<1756> = SpirvBlob(*include_bytes!(concat!(
+/// writes albedo/normal/material as 3 MRT in the marcher's exact encoding (mask=1) + the
+/// marcher-aligned `SV_Depth`, with the eDSL-spliced `oct_encode` / `pack_material_id_ba`
+/// (guarded by `gbuffer_mrt_edsl_sync.rs`).
+static MRT_FS_SPV: SpirvBlob<2252> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/gbuffer_mrt.fs.spv"
 )));
@@ -268,9 +273,12 @@ fn coarse_group_count_x() -> u32 {
     tile_count().div_ceil(LOCAL_SIZE_X)
 }
 
-/// The orthographic MVP for the rung-3 vertex shader, uploaded COLUMN-MAJOR (the
+/// The orthographic MVP for the mesh-MRT vertex shader, uploaded COLUMN-MAJOR (the
 /// VERIFIED transpose — see `run_hybrid`'s `ortho_mvp_bytes`). Maps a fronto-parallel
-/// world vertex so the stored depth is `(CAM_Z - worldZ) / T_MAX`.
+/// world vertex so the rasterized `SV_Position.z` is the axial `(CAM_Z - worldZ) / T_MAX`,
+/// which the fragment writes back unchanged under ortho (`cam_mode == 0`). The trailing 16
+/// bytes (`[0u8; MVP_BYTES]` leaves them zeroed) are the `cam_eye` push field = [0,0,0,0]
+/// (mode 0 = ortho; the eye is unused since the ortho fragment keeps `SV_Position.z`).
 #[rustfmt::skip]
 fn ortho_mvp_bytes() -> [u8; MVP_BYTES as usize] {
     let h = SDF_VIEW_HALF_EXTENT;
@@ -295,10 +303,11 @@ fn ortho_mvp_bytes() -> [u8; MVP_BYTES as usize] {
 fn quad_vertices() -> [Vertex; 6] {
     let z = MESH_Z;
     let c = [1.0_f32, 1.0, 1.0, 1.0];
-    let bl = Vertex { position: [QUAD_X_MIN, QUAD_Y_MIN, z], color: c };
-    let br = Vertex { position: [QUAD_X_MAX, QUAD_Y_MIN, z], color: c };
-    let tr = Vertex { position: [QUAD_X_MAX, QUAD_Y_MAX, z], color: c };
-    let tl = Vertex { position: [QUAD_X_MIN, QUAD_Y_MAX, z], color: c };
+    let n = [0.0_f32, 0.0, 1.0]; // the fronto-parallel quad faces +Z
+    let bl = Vertex { position: [QUAD_X_MIN, QUAD_Y_MIN, z], normal: n, color: c };
+    let br = Vertex { position: [QUAD_X_MAX, QUAD_Y_MIN, z], normal: n, color: c };
+    let tr = Vertex { position: [QUAD_X_MAX, QUAD_Y_MAX, z], normal: n, color: c };
+    let tl = Vertex { position: [QUAD_X_MIN, QUAD_Y_MAX, z], normal: n, color: c };
     [bl, br, tr, bl, tr, tl]
 }
 
@@ -921,7 +930,8 @@ fn run_gbuffer_hybrid_m4(
     // push + a declared depth_format).
     let attributes = [
         VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
-        VertexAttribute { location: 1, offset: 12, format: VertexFormat::Float32x4 },
+        VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
+        VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
     ];
     let gfx = device
         .create_graphics_pipeline(&GraphicsPipelineDesc {
@@ -1775,7 +1785,8 @@ fn run_gbuffer_hybrid_ssao(
 
     let attributes = [
         VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
-        VertexAttribute { location: 1, offset: 12, format: VertexFormat::Float32x4 },
+        VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
+        VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
     ];
     let gfx = device
         .create_graphics_pipeline(&GraphicsPipelineDesc {
@@ -4819,7 +4830,8 @@ fn run_gbuffer_hybrid_lit_clustered(
     // --- The mesh-MRT G-buffer producer graphics pipeline (Render P5-r0). ---
     let attributes = [
         VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
-        VertexAttribute { location: 1, offset: 12, format: VertexFormat::Float32x4 },
+        VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
+        VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
     ];
     let gfx = device
         .create_graphics_pipeline(&GraphicsPipelineDesc {

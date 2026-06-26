@@ -41,16 +41,26 @@
 // note in the header for why this is a constant, not a fragment push, in r0.
 static const uint DEFAULT_MESH_MATERIAL_ID = 0u;
 
+// The marcher's ray-range normalizer: it decodes a mesh pixel's depth as
+// `t_mesh = md * T_MAX` (`sdf_gbuffer_composite.hlsl`), so this fragment MUST write
+// `md = t / T_MAX` with the IDENTICAL constant. Mirrors `compute::SDF_T_MAX` /
+// `SDF_TRACE_T_MAX` (= 10.0). The raster shaders `#include` nothing, so the literal is
+// duplicated here; it is load-bearing that it equals the marcher's `T_MAX`.
+static const float T_MAX = 10.0;
+
 struct PsIn {
     float4 position : SV_Position;
     float4 color    : COLOR0;
     float3 normal   : NORMAL;
+    float3 eye_rel  : WORLDDIST;   // cam_eye.xyz - world position (perspective-correct)
+    float  cam_mode : CAMMODE;     // 0 = ortho, 1 = perspective
 };
 
 struct PsOut {
     float4 albedo   : SV_Target0;  // -> gAlbedo
     float4 normal   : SV_Target1;  // -> gNormal
     float4 material : SV_Target2;  // -> gMaterial
+    float  depth    : SV_Depth;    // -> the shared D32 depth the marcher samples as `md`
 };
 
 // Octahedral-encode a unit normal `n` into [0,1]^2, the marcher/resolve's exact fold.
@@ -91,5 +101,13 @@ PsOut main(PsIn input) {
     // gMaterial: shadow = 1, ao = 1, mask = 1 (SDF-lit -> Cook-Torrance in the resolve).
     // Analytic mesh shadow/AO via the SDF march is a charted follow-up, NOT P5.
     output.material = float4(1.0, 1.0, 1.0, 1.0);
+    // SV_Depth: the shared depth the marcher samples as `md` and decodes `t_mesh = md*T_MAX`.
+    //   * PERSPECTIVE (cam_mode == 1): `rd` is UNIT, so the marcher's `P = ro + rd*t_mesh`
+    //     wants `t_mesh` = the EUCLIDEAN eye->surface distance => md = length(eye_rel)/T_MAX.
+    //   * ORTHO (cam_mode == 0): the marcher's per-pixel `ro.xy == P.xy` with `rd = (0,0,-1)`,
+    //     so `t_mesh` is the AXIAL `CAM_Z - z`, which the MVP already encodes into the
+    //     rasterized SV_Position.z (= `(CAM_Z - z)/T_MAX`). Writing it back unchanged is
+    //     byte-identical to NOT writing SV_Depth — the 41 ortho goldens are preserved.
+    output.depth = (input.cam_mode > 0.5) ? (length(input.eye_rel) / T_MAX) : input.position.z;
     return output;
 }
