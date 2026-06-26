@@ -2291,6 +2291,49 @@ fn read_bmp_dimensions(bytes: &[u8]) -> Option<(i32, i32)> {
     Some((w, h.abs()))
 }
 
+/// The fixed dump path for the 512-native engine MESH-floor SSAO showcase frame (Render P7
+/// Unlock-2): a flat RASTER MESH quad + an SDF sphere standing in front, SSAO ON — the mesh
+/// (A2 == 1.0) visibly receives the sphere's contact AO, which the A2 SDF-march cannot give it.
+const SSAO_MESH_BMP: &str = r"D:\tmp\engine_ssao_mesh_512.bmp";
+
+/// The per-showcase variable scene: the SDF edit list, the marcher/resolve camera push, the light
+/// table (header + elements), and the RASTER MESH (vertices + MVP). The shared [`run_showcase_dump`]
+/// body holds everything else (pipelines, barriers, the dump tail) constant. Built by the per-test
+/// builders so the all-SDF perspective showcase and the ORTHO mesh-floor SSAO showcase share ONE
+/// recorder/dump body without duplicating its ~400 lines.
+struct ShowcaseConfig {
+    /// The SDF edit list (the marcher field + the resolve per-caster shadow march).
+    sdf: Vec<SdfEdit>,
+    /// The marcher + resolve + SSAO camera push (perspective for the all-SDF showcase; ORTHO for
+    /// the mesh-floor showcase, whose `md * T_MAX == t_mesh` decode the raster MVP below matches).
+    camera: CompositePushConstants,
+    /// The light table (already `ssao_mode`-armed by the builder).
+    light_header: GoldenLightHeader,
+    /// The light table elements (directional + sky [+ point/spot]).
+    light_elems: Vec<GoldenLight>,
+    /// The raster mesh vertices (DEGENERATE zero-area for the all-SDF showcase; a real floor quad
+    /// for the mesh-floor showcase).
+    vertices: [Vertex; 6],
+    /// The raster MVP push (the ORTHO `ortho_mvp_bytes` — its `(CAM_Z - z)/T_MAX` depth is the
+    /// convention the marcher's `t_mesh = md * T_MAX` ownership/gViewT decode reconstructs exactly).
+    mvp: [u8; MVP_BYTES as usize],
+}
+
+/// The default all-SDF perspective showcase config (the historical [`run_showcase_dump`] scene):
+/// the SDF floor + bodies, the down-looking [`showcase_camera`], the multi-light table, and the
+/// DEGENERATE zero-area raster mesh (so the marcher owns the whole frame).
+fn showcase_config() -> ShowcaseConfig {
+    let (light_header, light_elems) = showcase_light_table();
+    ShowcaseConfig {
+        sdf: showcase_sdf_scene(),
+        camera: showcase_camera(),
+        light_header: light_header.with_ssao_mode(1),
+        light_elems,
+        vertices: showcase_quad_vertices(),
+        mvp: ortho_mvp_bytes(),
+    }
+}
+
 /// **Engine showcase — a CRISP 512×512-NATIVE multi-light SDF-shadow screenshot.**
 ///
 /// Renders the production windowed present (the raster-PBR mesh + the SDF twin-sphere body)
@@ -2305,7 +2348,7 @@ fn read_bmp_dimensions(bytes: &[u8]) -> Option<(i32, i32)> {
 #[test]
 #[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the screenshot"]
 fn engine_showcase_512_screenshot_dump() {
-    run_showcase_dump("boyko_engine showcase 512", SHOWCASE_BMP);
+    run_showcase_dump("boyko_engine showcase 512", SHOWCASE_BMP, showcase_config());
 }
 
 /// **Engine SSAO showcase — the SAME crisp 512×512-native scene WITH SSAO ON, dumped to
@@ -2318,13 +2361,61 @@ fn engine_showcase_512_screenshot_dump() {
 #[test]
 #[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the SSAO screenshot"]
 fn engine_ssao_512_screenshot_dump() {
-    run_showcase_dump("boyko_engine SSAO 512", SSAO_BMP);
+    run_showcase_dump("boyko_engine SSAO 512", SSAO_BMP, showcase_config());
+}
+
+/// **Render P7 Unlock-2 — engine MESH-FLOOR SSAO showcase (the visual).** A REAL RASTER MESH quad
+/// floor (the ORTHO [`quad_vertices`] at `MESH_Z == 1.0`, whose A2 `gMaterial.g` == 1.0 — the
+/// raster has no analytic SDF AO) + an SDF sphere standing IN FRONT of it ([`mesh_ssao_sphere`],
+/// near pole at `z == 1.55 > MESH_Z`), lit + SSAO ON. The sphere casts CONTACT AO onto the mesh
+/// around its silhouette — darkening the A2 SDF-march CANNOT produce on the mesh (its A2 == 1.0,
+/// so SSAO is its only AO). Dumps a TRUE 512×512 BMP to [`SSAO_MESH_BMP`].
+///
+/// This is the ORTHO camera (matching the offscreen non-vacuity gate
+/// `ssao_darkens_mesh_near_sdf_occluder`), so the raster MVP's `(CAM_Z - z)/T_MAX` depth is exactly
+/// the convention the marcher's `t_mesh = md * T_MAX` ownership + gViewT decode reconstructs — no
+/// perspective-MVP-vs-ray-gen alignment is needed. (The full PERSPECTIVE mesh-floor MVP is deferred:
+/// the marcher decodes mesh depth as `md * T_MAX`, a LINEAR-in-ray-distance convention a standard
+/// perspective projection's nonlinear NDC depth does not satisfy, so a perspective mesh floor would
+/// need a custom depth-writing VS or a marcher decode change — both out of this pass's scope. The
+/// ORTHO mesh floor delivers the same mesh-receives-SSAO visual with an exactly aligned gate.)
+///
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`.
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the mesh-floor SSAO screenshot"]
+fn engine_ssao_mesh_512_screenshot_dump() {
+    run_showcase_dump("boyko_engine SSAO mesh floor 512", SSAO_MESH_BMP, mesh_ssao_config());
+}
+
+/// The unlock-2 SDF occluder sphere for the mesh-floor showcase: ONE sphere standing in FRONT of
+/// the mesh quad (`MESH_Z == 1.0`) — center at `+Z`, near pole at `z == 1.55 > MESH_Z`, so the SDF
+/// wins ownership where it covers and the mesh stands elsewhere (the SAME geometry as the offscreen
+/// `ssao_darkens_mesh_near_sdf_occluder` gate, lifted to the 512 composite).
+fn mesh_ssao_sphere() -> Vec<SdfEdit> {
+    vec![SdfEdit::sphere([0.0, 0.0, 0.95], 0.60, sdf_op::UNION, 0.0)]
+}
+
+/// The ORTHO mesh-floor SSAO showcase config (Render P7 Unlock-2): the real raster mesh quad floor
+/// + the SDF sphere in front, the ORTHO camera, and the SSAO-armed showcase light table.
+fn mesh_ssao_config() -> ShowcaseConfig {
+    let (light_header, light_elems) = showcase_light_table();
+    ShowcaseConfig {
+        sdf: mesh_ssao_sphere(),
+        camera: CompositePushConstants::ortho(COMPOSITE_W, COMPOSITE_H),
+        light_header: light_header.with_ssao_mode(1),
+        light_elems,
+        // A REAL floor quad (NOT the degenerate all-SDF mesh): its A2 == 1.0, so the contact AO is
+        // pure SSAO. The ORTHO MVP lands it exactly where the marcher's `t_mesh` decode expects.
+        vertices: quad_vertices(),
+        mvp: ortho_mvp_bytes(),
+    }
 }
 
 /// The shared 512×512-native multi-light SDF-shadow + SSAO showcase dump body. `window_title` is
-/// the window caption; `bmp_path` is the TRUE 512×512 24-bit BMP destination (no upscale). SSAO is
-/// ON (the scene arms `ssao_mode == 1` + `scene.ssao = Some(..)`).
-fn run_showcase_dump(window_title: &str, bmp_path: &str) {
+/// the window caption; `bmp_path` is the TRUE 512×512 24-bit BMP destination (no upscale); `cfg`
+/// supplies the variable scene (SDF edits, camera, light table, raster mesh + MVP). SSAO is ON (the
+/// `cfg` builder arms `ssao_mode == 1`; `scene.ssao = Some(..)` records the pass that writes it).
+fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
     let mut window = match Window::open(window_title, WIDTH, HEIGHT) {
         Ok(w) => w,
         Err(e) => {
@@ -2396,7 +2487,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str) {
     let mut renderer =
         Renderer::new(&ctx, &surface, &swapchain).expect("renderer (command pool + sync) creation");
     let device: &VulkanContext = &ctx;
-    let sdf = showcase_sdf_scene();
+    let sdf = &cfg.sdf;
 
     // --- The edit-list SSBO (binding 0), host-seeded ONCE. The resolve binds the SAME buffer
     // at binding 10 for the per-caster shadow march. ---
@@ -2411,7 +2502,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str) {
     .expect("edit-list storage buffer");
     {
         let mut header = vec![0u32; EDITLIST_BUFFER_WORDS];
-        encode_edit_list(&mut header, &sdf);
+        encode_edit_list(&mut header, sdf);
         let mapped = RhiDevice::buffer_mapped_ptr(device, &edit_list)
             .expect("host-visible edit-list buffer is mapped");
         write_words(mapped, &header);
@@ -2432,7 +2523,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str) {
     )
     .expect("camera uniform buffer");
     {
-        let pc = showcase_camera();
+        let pc = &cfg.camera;
         assert_eq!(pc.count, PIXELS);
         let mapped = RhiDevice::buffer_mapped_ptr(device, &camera_uniform)
             .expect("host-visible uniform buffer is mapped");
@@ -2482,7 +2573,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str) {
     let field = {
         use boyko_sdf_math::SdfEditField;
         let mut f = SdfEditField::new();
-        for e in &sdf {
+        for e in sdf {
             assert!(f.push(*e), "showcase scene must fit MAX_SDF_EDITS");
         }
         f.bump_gen();
@@ -2492,12 +2583,12 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str) {
         .expect("brick clip-map (showcase scene) — create + bake + upload");
 
     // --- The Lighting light table SSBO (resolve binding 6): the SHOWCASE multi-light shadow
-    // table (`shadow_mode == 1`, NON-CLUSTERED) + its staging source. Render P7: ARMED with
-    // `ssao_mode == 1` (header word 11) so the resolve combines the SSAO term (`scene.ssao =
-    // Some(..)` records the SSAO pass that writes it). ---
-    let (light_header, light_elems) = showcase_light_table();
-    let light_header = light_header.with_ssao_mode(1);
-    let light_words = pack_showcase_light_table(&light_header, &light_elems);
+    // table (`shadow_mode == 1`, NON-CLUSTERED) + its staging source. Render P7: the `cfg` builder
+    // already ARMED `ssao_mode == 1` (header word 11) so the resolve combines the SSAO term
+    // (`scene.ssao = Some(..)` records the SSAO pass that writes it). ---
+    let light_header = cfg.light_header;
+    let light_elems = &cfg.light_elems;
+    let light_words = pack_showcase_light_table(&light_header, light_elems);
     let light_table_bytes = (light_words.len() as u64) * 4;
     let light_table = RhiDevice::create_buffer(
         device,
@@ -2529,7 +2620,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str) {
     }
 
     // --- The mesh quad's vertex buffer (the showcase floor backdrop). ---
-    let vertices = showcase_quad_vertices();
+    let vertices = cfg.vertices;
     let vertex_bytes = core::mem::size_of_val(&vertices) as u64;
     let vertex_buffer = RhiDevice::create_buffer(
         device,
@@ -2751,7 +2842,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str) {
         RhiDevice::destroy_shader_module(device, vs);
     }
 
-    let mvp = ortho_mvp_bytes();
+    let mvp = cfg.mvp;
     let scene = GBufferScene {
         raster_pipeline: &raster_pipeline,
         vertex_buffer: &vertex_buffer,

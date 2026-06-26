@@ -6981,9 +6981,191 @@ fn ssao_darkens_a_concavity() {
          LIT-darker than SSAO-OFF — SSAO genuinely occludes a concavity",
         min_ssao
     );
-    // TODO(P7-C2b): mesh-AO (a mesh quad in a concave corner → ≥N mesh pixels final_ao ≤ 0.85,
-    // today exactly 1.0 there) + the mesh↔SDF cross-rep proof (a mesh box touching an SDF sphere →
-    // contact-crevice pixels darker than the march-only gMaterial.g). These need a raster-mesh +
-    // SDF co-located scene the current offscreen harness does not expose as a controllable mesh
-    // quad in a corner; left for a follow-up with a dedicated mesh-corner fixture.
+    // P7-C2b (Render P7 Unlock-2): the mesh-AO proof now lives in
+    // `ssao_darkens_mesh_near_sdf_occluder` — a flat RASTER MESH quad + an SDF sphere standing IN
+    // FRONT of it; the mesh pixels around the sphere silhouette receive SSAO the A2 SDF-march
+    // cannot give them (their A2 == 1.0). The geometry was host-probed via
+    // `probe_mesh_ssao_geometry` (the printed min_ssao / occluded-count sweep).
+}
+
+/// The world Z of the unlock-2 SDF occluder sphere's near pole — chosen so the sphere stands IN
+/// FRONT of the mesh quad (`MESH_Z == 1.0`): the sphere center sits at `+Z` and its surface near
+/// pole reaches `MESH_SSAO_SPHERE_Z + MESH_SSAO_SPHERE_R > 1.0`, so the SDF WINS ownership where
+/// it covers (`t_sdf = CAM_Z - surface_z < t_mesh = CAM_Z - MESH_Z`) and the mesh stands elsewhere.
+const MESH_SSAO_SPHERE_CZ: f32 = 0.95;
+/// The unlock-2 occluder sphere radius. With `CZ + R = 1.55 > MESH_Z` the near pole pokes ~0.55
+/// world units toward the camera above the mesh plane — a steep wall that rises above the nearby
+/// mesh pixels' (`+Z`) tangent well within the SSAO 0.5-unit radius around the silhouette.
+const MESH_SSAO_SPHERE_R: f32 = 0.60;
+
+/// The unlock-2 SDF occluder: ONE sphere standing in front of the mesh quad (see the `CZ`/`R`
+/// const docs). Shared by the host probe and the GPU non-vacuity gate so they march the SAME field.
+fn mesh_ssao_occluder() -> Vec<SdfEdit> {
+    vec![SdfEdit::sphere([0.0, 0.0, MESH_SSAO_SPHERE_CZ], MESH_SSAO_SPHERE_R, sdf_op::UNION, 0.0)]
+}
+
+/// `true` if pixel `(px,py)` is MESH-owned in the host Stage-1 G-buffer `gbuf`: the raster quad
+/// covered it AND the SDF did NOT win ownership there, so the marcher stored the mesh surface
+/// (`view_t == t_mesh`, `ao == 255` from the raster's A2 == 1.0, `mask == 1`). The robust
+/// classifier the unlock-2 gate uses to separate mesh pixels from SDF-lit ones: `view_t` equals
+/// `t_mesh` to within an epsilon (an SDF hit stores `view_t = t_sdf < t_mesh`). `t_mesh` is the
+/// constant `depth_to_t(mesh_depth_for_z(MESH_Z))` the raster producer + the host oracle share.
+fn host_mesh_owned(gbuf: &[boyko_rhi_vulkan::compute::MarcherAttributes], px: u32, py: u32) -> bool {
+    let idx = (py * SDF_IMG_W + px) as usize;
+    let a = gbuf[idx];
+    if a.mask != 1 {
+        return false;
+    }
+    let t_mesh = boyko_rhi_vulkan::compute::depth_to_t(mesh_depth_for_z(MESH_Z));
+    // The mesh arm stores ao == 255 (raster A2 == 1.0) AND view_t == t_mesh; the SDF arm stores a
+    // smaller view_t (the marched hit) + a generally < 255 ao. `view_t ~= t_mesh` is the clean cut.
+    a.ao == 255 && (a.view_t - t_mesh).abs() < 1.0e-4
+}
+
+/// **Host probe (NO GPU) — find a mesh+SDF arrangement that produces mesh-pixel SSAO occlusion.**
+/// Builds the host Stage-1 G-buffer for a sweep of sphere depths/radii (the SAME `expected_mesh_
+/// depth` fixed quad the harness rasters), runs `golden_ssao_attributes` over the MESH-owned
+/// pixels (`host_mesh_owned`), and prints `min_ssao` + the count below 0.85 for each candidate.
+/// Pure host math — it runs on a device-less box. Kept as the documented record of how the
+/// `ssao_darkens_mesh_near_sdf_occluder` geometry was chosen (the printed sweep is in the report).
+#[test]
+fn probe_mesh_ssao_geometry() {
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    const OCCLUDED_AO: u8 = (0.85 * 255.0) as u8;
+    println!("mesh-SSAO geometry probe (mesh quad MESH_Z=1.0, X∈[-1,0.2] Y∈[-1,1], R=0.5 world):");
+    for &cz in &[0.75_f32, 0.85, 0.95, 1.05, 1.15] {
+        for &r in &[0.45_f32, 0.55, 0.60, 0.70] {
+            let edits = vec![SdfEdit::sphere([0.0, 0.0, cz], r, sdf_op::UNION, 0.0)];
+            let gbuf = ssao_host_gbuffer(&edits, flags, DEFAULT_LIGHT_DIR);
+            let mut mesh_px = 0u64;
+            let mut occluded = 0u64;
+            let mut min_ssao = 255u8;
+            for py in 0..SDF_IMG_H {
+                for px in 0..SDF_IMG_W {
+                    if !host_mesh_owned(&gbuf, px, py) {
+                        continue;
+                    }
+                    mesh_px += 1;
+                    let ao = golden_ssao_attributes(&gbuf, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                    let a = (ao * 255.0).round() as u8;
+                    if a < min_ssao {
+                        min_ssao = a;
+                    }
+                    if a < OCCLUDED_AO {
+                        occluded += 1;
+                    }
+                }
+            }
+            println!(
+                "  cz={cz:.2} r={r:.2} (near pole z={:.2}): mesh_px={mesh_px} min_ssao={min_ssao}/255 occluded(<0.85)={occluded}",
+                cz + r
+            );
+        }
+    }
+}
+
+/// **Render P7 Unlock-2 — the offscreen MESH+SDF SSAO non-vacuity golden (the headline).** PROVES
+/// the SSAO mesh-AO value the gViewT unlock (the marcher writes `gViewT = t_mesh` for mesh-owned
+/// pixels) enabled: SSAO darkens RASTER MESH pixels — AO the A2 SDF-march CANNOT produce, since the
+/// mesh carries no field (its A2 `gMaterial.g` == 1.0).
+///
+/// The scene: the harness's flat raster mesh quad (`MESH_Z == 1.0`, the fixed `expected_mesh_depth`
+/// footprint) + an SDF sphere ([`mesh_ssao_occluder`]) standing IN FRONT of it — center at `+Z`,
+/// near pole at `z == 1.55 > MESH_Z`, so the SDF WINS ownership where it covers (`t_sdf < t_mesh`)
+/// and the mesh stands elsewhere. The sphere wall rises above the nearby mesh pixels' (`+Z`) tangent
+/// well within the SSAO 0.5-unit radius around the silhouette → a mesh-pixel occlusion ring.
+///
+/// Asserts, over the MESH-OWNED pixels ([`host_mesh_owned`] — the raster won, `view_t == t_mesh`,
+/// `ao == 255`):
+///   1. **≥ `MESH_SSAO_MIN_OCCLUDED` mesh pixels have GPU `ssao < 0.85`** — the structural mesh-AO
+///      win (the A2 march gives these `ao == 1.0`; SSAO is their ONLY AO). Host-probed: this
+///      geometry yields ~577 such mesh pixels (`min_ssao ~31/255`); `N == 100` is well below.
+///   2. **GPU `ssao` == host `golden_ssao_attributes` within ±`SSAO_AO_TOL`/255** over the mesh
+///      region — the host now models mesh SSAO via the unlocked `t_mesh`.
+///   3. **The control:** the SAME mesh pixels' A2 (`gbuf.ao`) == 255 — proving the darkening is
+///      SSAO, not the A2 SDF-march (which cannot touch a mesh pixel).
+#[test]
+fn ssao_darkens_mesh_near_sdf_occluder() {
+    let Some(ctx) = boot_render_or_skip("ssao_darkens_mesh_near_sdf_occluder") else {
+        return;
+    };
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    let (header, lights) = ssao_light_table();
+    let table = pack_light_table(&header, &lights);
+    let edits = mesh_ssao_occluder();
+
+    let (_lit, ssao) = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table);
+    assert_eq!(ssao.len(), PIXELS as usize, "SSAO R8 readback size");
+
+    let gbuf = ssao_host_gbuffer(&edits, flags, DEFAULT_LIGHT_DIR);
+
+    /// The AO floor proving a real occlusion (1.0 = unoccluded; 0.85 = a meaningful occlusion).
+    const OCCLUDED_AO: u8 = (0.85 * 255.0) as u8;
+    /// The minimum number of MESH-owned pixels the SSAO must darken below 0.85 — well below the
+    /// host-probed ~577 (this geometry), so GPU↔host fp drift cannot make the gate vacuous.
+    const MESH_SSAO_MIN_OCCLUDED: u64 = 100;
+
+    let mut mesh_px = 0u64;
+    let mut occluded_px = 0u64;
+    let mut min_ssao = 255u8;
+    let mut max_ao_delta = 0i32;
+    for py in 0..SDF_IMG_H {
+        for px in 0..SDF_IMG_W {
+            if !host_mesh_owned(&gbuf, px, py) {
+                continue;
+            }
+            let idx = (py * SDF_IMG_W + px) as usize;
+            mesh_px += 1;
+
+            // (3) The control: the host A2 for this mesh pixel is exactly 255 (the raster's
+            // gMaterial.g == 1.0) — the SDF march produced NO AO here, so any darkening is SSAO.
+            assert_eq!(
+                gbuf[idx].ao, 255,
+                "mesh pixel ({px},{py}) must carry A2 == 255 (raster ao = 1.0); a non-255 A2 means \
+                 the classifier mis-tagged an SDF pixel as mesh"
+            );
+
+            // (2) GPU ssao == the host SSAO oracle (the host now models mesh SSAO via t_mesh).
+            let host = golden_ssao_attributes(&gbuf, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+            let want = (host * 255.0).round() as i32;
+            let got = ssao[idx] as i32;
+            let d = (got - want).abs();
+            if d > max_ao_delta {
+                max_ao_delta = d;
+            }
+            assert!(
+                d <= SSAO_AO_TOL,
+                "mesh SSAO texel ({px},{py}) got {got}/255 want {want}/255 (host oracle) exceeds \
+                 ±{SSAO_AO_TOL}/255 (delta {d})"
+            );
+
+            // (1) The structural mesh-AO win: count the mesh pixels the GPU darkened below 0.85.
+            let a = ssao[idx];
+            if a < min_ssao {
+                min_ssao = a;
+            }
+            if a < OCCLUDED_AO {
+                occluded_px += 1;
+            }
+        }
+    }
+
+    assert!(
+        mesh_px > 0,
+        "mesh-SSAO non-vacuity: no MESH-owned pixel — the sphere filled the view or the classifier \
+         is wrong (the gate is vacuous)"
+    );
+    assert!(
+        occluded_px >= MESH_SSAO_MIN_OCCLUDED,
+        "mesh-SSAO non-vacuity: only {occluded_px} MESH-owned px with ssao < 0.85 (min ssao \
+         {min_ssao}/255, {mesh_px} mesh px) — expected ≥ {MESH_SSAO_MIN_OCCLUDED}. The gViewT \
+         unlock did not reach the SSAO mesh path (the marcher's mesh `gViewT = t_mesh` write or the \
+         SSAO `view_t < SSAO_VIEWT_BG` gate regressed) — a real bug, NOT a geometry tweak"
+    );
+    println!(
+        "mesh-SSAO non-vacuity: {occluded_px}/{mesh_px} MESH-owned px with ssao < 0.85 (min \
+         {min_ssao}/255), GPU↔host max AO delta {max_ao_delta}/255 (tol {SSAO_AO_TOL}) — SSAO \
+         darkens RASTER MESH pixels the A2 SDF-march cannot (their A2 == 255). The gViewT unlock \
+         reaches the SSAO mesh path."
+    );
 }
