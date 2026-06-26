@@ -1129,6 +1129,9 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         // The on-screen demo renders with soft shadows (A1) + AO (A2) — its existing lighting
         // validation is unchanged (byte-identical push to the pre-`lighting_flags`-field stream).
         lighting_flags: LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
+        // The legacy head-on shadow direction (`[0,0,1]`) — byte-identical to the pre-`light_dir`-
+        // field marcher push (this golden present asserts the existing stream).
+        light_dir: DEFAULT_LIGHT_DIR,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -1937,6 +1940,9 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         // rim), so the cull-ON vs cull-OFF comparison is now asserted at the real lit flags — proving
         // the on-screen cull adds NO visible rim.
         lighting_flags: LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
+        // The legacy head-on shadow direction (`[0,0,1]`): the cull-ON vs cull-OFF comparison must
+        // hold the marcher push fixed, so this stays the pre-`light_dir`-field default.
+        light_dir: DEFAULT_LIGHT_DIR,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -2138,66 +2144,85 @@ fn p0_windowed_coarse_cull_matches_uncull() {
 /// The fixed dump path for the 512-native engine showcase frame.
 const SHOWCASE_BMP: &str = r"D:\tmp\engine_showcase_512.bmp";
 
-/// The showcase SDF body: TWO unit spheres side-by-side (an occluder/receiver pair) in the
-/// central band of the ortho view (X ∈ [-1, 1]). Each sphere's bulk shadows the OTHER's
-/// facing flank when lit from across the valley, giving a BROAD, clearly-visible colored
-/// shadow band — far more than the thin self-shadow terminator a single convex body casts.
-/// The ORTHO camera marches +Z → origin, so both front faces sit at z ≈ +0.5 (in front of
-/// the mesh backdrop at z = 0, so the SDF wins the shared-depth test over the spheres).
+/// The showcase sun direction (`L`, the un-normalized "direction TO the light"): upper-LEFT and
+/// slightly toward the camera, ~57° elevation. Used BOTH as the marcher's `scene.light_dir` (the
+/// A1 cast-shadow march direction) AND the primary directional in [`showcase_light_table`] — they
+/// MUST match so the shadow the marcher bakes into `gMaterial.r` lands where the resolve lights
+/// from. With this `+y`-dominant `L` the up-facing floor is well-lit (NoL ≈ 0.85) and the
+/// sphere/box throw a clear elongated shadow back-and-right across the floor, visible to the
+/// down-looking camera.
+const SHOWCASE_SUN_DIR: [f32; 3] = [-0.45, 0.82, 0.36];
+
+/// The showcase SDF body: a clean, realistic studio scene — a wide flat **floor slab** with a
+/// **sphere**, a **cube**, and a smaller **sphere** RESTING on it (each primitive's base sits at
+/// the slab's top face, `y = -0.5`). The perspective camera ([`showcase_camera`]) looks down at the
+/// floor from the front, the warm directional sun ([`SHOWCASE_SUN_DIR`]) rakes from the upper-left,
+/// and the marcher's A1 soft shadow casts each body's shadow ACROSS the floor — the floor-and-cast-
+/// shadow composition a head-on ortho twin-sphere scene cannot show. Mid-gray dielectric (material
+/// slot 0) throughout, so the shape reads from lighting + shadow, not color.
 fn showcase_sdf_scene() -> Vec<SdfEdit> {
     vec![
-        SdfEdit::sphere([-0.45, 0.10, 0.0], 0.50, sdf_op::UNION, 0.0),
-        SdfEdit::sphere([0.45, 0.10, 0.0], 0.50, sdf_op::UNION, 0.0),
+        // The floor: a wide thin slab centered below the origin; its top face is at y = -0.5.
+        SdfEdit::box_shape([0.0, -1.0, 0.0], [5.0, 0.5, 4.0], sdf_op::UNION, 0.0),
+        // The hero sphere, resting on the floor (center y = -0.5 + r), a touch toward the camera.
+        SdfEdit::sphere([0.0, 0.0, 0.2], 0.50, sdf_op::UNION, 0.0),
+        // A cube to the left, resting on the floor (center y = -0.5 + half).
+        SdfEdit::box_shape([-1.30, -0.18, -0.40], [0.32, 0.32, 0.32], sdf_op::UNION, 0.0),
+        // A smaller sphere to the right, resting on the floor.
+        SdfEdit::sphere([1.30, -0.22, -0.30], 0.28, sdf_op::UNION, 0.0),
     ]
 }
 
-/// The showcase raster-PBR mesh: a backdrop floor strip across the LOWER band of the view
-/// at world Z 0 (BEHIND the spheres' z ≈ +0.5 front faces, so it never occludes them — the
-/// shared-depth test keeps the SDF in front where they overlap; outside the spheres the flat
-/// lit raster mesh shows as a "floor"). Spans the full view in x, the bottom third in y.
-fn showcase_quad_vertices() -> [Vertex; 6] {
-    const FLOOR_Z: f32 = 0.0;
-    const X_MIN: f32 = -1.0;
-    const X_MAX: f32 = 1.0;
-    const Y_MIN: f32 = -1.0;
-    const Y_MAX: f32 = -0.55;
-    let c = [1.0_f32, 1.0, 1.0, 1.0];
-    let bl = Vertex { position: [X_MIN, Y_MIN, FLOOR_Z], color: c };
-    let br = Vertex { position: [X_MAX, Y_MIN, FLOOR_Z], color: c };
-    let tr = Vertex { position: [X_MAX, Y_MAX, FLOOR_Z], color: c };
-    let tl = Vertex { position: [X_MIN, Y_MAX, FLOOR_Z], color: c };
-    [bl, br, tr, bl, tr, tl]
+/// The showcase perspective camera: eye in FRONT and ABOVE the scene (`+Z`, `+Y`), looking DOWN at
+/// the floor and the hero sphere — so the floor recedes, the bodies sit on it, and their cast
+/// shadows are visible. 50° vertical FOV. The basis is the standard non-rolled right-handed frame
+/// (`right = [1,0,0]`, `up = right × forward`). The whole scene sits within the marcher's
+/// `SDF_TRACE_T_MAX` (≈10) ray range so the finite floor's far edge renders against the dark
+/// background.
+fn showcase_camera() -> CompositePushConstants {
+    // eye = [0, 1.9, 4.0], target = [0, -0.15, -0.30] → forward = normalize(target - eye).
+    let forward = [0.0_f32, -0.43035, -0.90266];
+    let right = [1.0_f32, 0.0, 0.0];
+    let up = [0.0_f32, 0.90266, -0.43035]; // right × forward (unit)
+    CompositePushConstants::perspective(
+        [0.0, 1.9, 4.0],
+        forward,
+        right,
+        up,
+        core::f32::consts::FRAC_PI_3 * 5.0 / 6.0, // 50° vertical FOV (π/3 · 5/6)
+        COMPOSITE_W,
+        COMPOSITE_H,
+    )
 }
 
-/// The showcase multi-light table: a gentle NEUTRAL primary directional (un-flagged — it
-/// keeps the marcher's `gMaterial.r`, byte-stable across the 1→N transition) + TWO
-/// shadow-flagged POINT casters of DISTINCT colors straddling the valley between the
-/// [`showcase_sdf_scene`] spheres. Each caster (low + toward the camera, offset in x) lights
-/// the FAR sphere's near flank, but the NEAR sphere occludes it ⇒ `vis < 1` over a broad
-/// colored band — a WARM ORANGE shadow region from the left caster and a COOL BLUE one from
-/// the right. The header is NON-CLUSTERED ([`GoldenLightHeader::new`], `cluster_params == 0`
-/// ⇒ `clusters_enabled == false`) with `shadow_mode == 1`. Mirrors the offscreen
-/// `p6_r1_multi_light_table` recipe, recolored for a vivid showcase.
+/// The showcase raster mesh is DEGENERATE (zero-area): the realistic showcase is ALL-SDF — the
+/// floor is an SDF slab marched by the perspective camera, so a raster floor (which the harness
+/// projects with the ORTHO `ortho_mvp_bytes` MVP) would land in the wrong place and double the
+/// floor. Six identical vertices ⇒ two zero-area triangles ⇒ NO fragments ⇒ the raster pass only
+/// clears the depth attachment to far (`MESH_DEPTH_CLEAR`), so `has_mesh == false` for every pixel
+/// and the marcher OWNS the whole frame (the SDF floor + bodies).
+fn showcase_quad_vertices() -> [Vertex; 6] {
+    let v = Vertex { position: [0.0, 0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0] };
+    [v, v, v, v, v, v]
+}
+
+/// The showcase light table: a single warm-white directional **sun** (the PRIMARY directional —
+/// its visibility reads the marcher's `gMaterial.r`, i.e. the A1 soft shadow the marcher marched
+/// toward [`SHOWCASE_SUN_DIR`], so the bodies cast a real shadow across the floor) + a soft
+/// **sky/hemisphere ambient** fill that lifts the shadowed floor off pure black and tints it
+/// cool (sky) vs the warm sun — the warm-key/cool-fill contrast of a realistic render. NON-
+/// CLUSTERED, `shadow_mode == 0` (no per-caster march — the cast shadow is the primary
+/// directional's `gMaterial.r`). `l0a_count == 2` (sun + sky), `point_spot_count == 0`.
 fn showcase_light_table() -> (GoldenLightHeader, Vec<GoldenLight>) {
-    // l0a_count = 1 (the primary directional); point_spot_count = 2 (the two flagged casters).
-    // The two COLORED point casters are the DOMINANT lights (so their tint reads strongly on the
-    // lit surface AND its absence reads as a colored shadow); the directional is only a very dim
-    // neutral fill so the deepest shadow is not pure black. The prior over-bright bake (power
-    // 7000) saturated the spheres to gray-white and washed out all color — these moderate powers
-    // keep the surface in the colored, non-saturated range.
-    let header = GoldenLightHeader::new(1, 2, 1.0).with_shadow_mode(1);
+    let header = GoldenLightHeader::new(2, 0, 1.0);
     let lights = vec![
-        // Dim neutral directional fill (un-flagged): keeps the marcher's `gMaterial.r`, lifts the
-        // deepest shadow off pure black so the body stays readable.
-        GoldenLight::directional([0.0, 0.2, 1.0], [0.10, 0.10, 0.12], 1.0),
-        // Warm ORANGE point caster, LEFT + toward the camera: lights the LEFT sphere warm and the
-        // RIGHT sphere's left flank, which the LEFT sphere occludes ⇒ a warm-lit body with a cool
-        // shadow band where only the blue caster reaches.
-        GoldenLight::point([-1.1, 0.2, 1.1], [1.0, 0.45, 0.12], 70.0, 8.0).with_sdf_shadow(),
-        // Cool BLUE point caster, RIGHT + toward the camera: the symmetric counterpart ⇒ a
-        // blue-lit body with a warm shadow band on the opposite flank. Where BOTH casters are
-        // occluded (the deep valley) only the dim fill remains ⇒ a near-black core.
-        GoldenLight::point([1.1, 0.2, 1.1], [0.15, 0.45, 1.0], 70.0, 8.0).with_sdf_shadow(),
+        // The sun: warm white, raking from the upper-left ([`SHOWCASE_SUN_DIR`] — the SAME vector
+        // as `scene.light_dir`, so the marched cast shadow matches the lit direction). Illuminance
+        // tuned so the mid-gray floor lights to ~0.7 without clipping to white.
+        GoldenLight::directional(SHOWCASE_SUN_DIR, [1.0, 0.96, 0.90], 2.8),
+        // Sky/hemisphere ambient: a cool-blue sky over a warm-dark ground, so the cast shadow is a
+        // readable cool gray (not black) and the contact AO still darkens it.
+        GoldenLight::sky([0.26, 0.32, 0.42], [0.12, 0.11, 0.10]),
     ];
     (header, lights)
 }
@@ -2352,9 +2377,11 @@ fn engine_showcase_512_screenshot_dump() {
         write_words(mapped, &header);
     }
 
-    // --- The camera/extent UBO (binding 5), host-seeded ONCE at the COMPOSITE ORTHO extent.
-    // The M4 tail stays zero (brick is held OFF for the showcase — the analytic marcher is the
-    // crisp reference path; bindings 9..=14 still need VALID descriptors below). ---
+    // --- The camera/extent UBO (binding 5), host-seeded ONCE at the COMPOSITE PERSPECTIVE extent
+    // ([`showcase_camera`] — a down-looking front camera so the SDF floor + bodies + their cast
+    // shadows read as a 3D scene). The M4 tail stays zero (brick is held OFF for the showcase —
+    // the analytic marcher is the crisp reference path; bindings 9..=14 still need VALID
+    // descriptors below). ---
     let camera_uniform = RhiDevice::create_buffer(
         device,
         &BufferDesc {
@@ -2365,7 +2392,7 @@ fn engine_showcase_512_screenshot_dump() {
     )
     .expect("camera uniform buffer");
     {
-        let pc = CompositePushConstants::ortho(COMPOSITE_W, COMPOSITE_H);
+        let pc = showcase_camera();
         assert_eq!(pc.count, PIXELS);
         let mapped = RhiDevice::buffer_mapped_ptr(device, &camera_uniform)
             .expect("host-visible uniform buffer is mapped");
@@ -2687,10 +2714,13 @@ fn engine_showcase_512_screenshot_dump() {
         brick: None,
         coarse: None,
         coarse_mode: CoarseMode::EmptySkipOnly,
-        // The real on-screen lit flags: A1 soft shadows + A2 AO. The per-caster multi-light
-        // SDF shadow march is gated by the table's `shadow_mode == 1` + each caster's
-        // `casts_sdf_shadow` flag (set in `showcase_light_table`), independent of these flags.
+        // The real on-screen lit flags: A1 soft shadows + A2 AO. The marcher marches the A1 soft
+        // shadow toward `light_dir` (the sun) into `gMaterial.r`, which the resolve's PRIMARY
+        // directional consumes — so the sphere/box cast a real shadow ACROSS the SDF floor.
         lighting_flags: LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
+        // The sun direction (`L`, direction TO the light) — MUST equal the primary directional in
+        // `showcase_light_table` so the marched cast shadow lands where the resolve lights from.
+        light_dir: SHOWCASE_SUN_DIR,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };

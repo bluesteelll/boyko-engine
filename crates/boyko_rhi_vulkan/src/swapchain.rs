@@ -39,8 +39,7 @@ use boyko_rhi::{
 };
 
 use crate::compute::{
-    CoarseMode, DEFAULT_LIGHT_DIR, DEFAULT_MARCHER_OMEGA, FineMarcherPush, LOCAL_SIZE_X,
-    tile_grid_extent,
+    CoarseMode, DEFAULT_MARCHER_OMEGA, FineMarcherPush, LOCAL_SIZE_X, tile_grid_extent,
 };
 use crate::device::{DeviceFns, SurfaceInstanceFns, SwapchainDeviceFns, VulkanContext};
 use crate::ffi::*;
@@ -2919,7 +2918,10 @@ impl<'ctx> Renderer<'ctx> {
             coarse_mode,
             DEFAULT_MARCHER_OMEGA,
             scene.lighting_flags,
-            DEFAULT_LIGHT_DIR,
+            // The marcher marches the A1 soft shadow toward the SCENE's primary directional `L`
+            // (NOT a hardcoded head-on `[0,0,1]`), so an angled sun casts a real shadow that the
+            // resolve's primary directional then consumes via `gMaterial.r`. See `light_dir`.
+            scene.light_dir,
         );
         let marcher_push = match scene.brick {
             Some(a) => base
@@ -4139,6 +4141,16 @@ pub struct GBufferScene<'a> {
     /// unlit one. Exposing `lighting_flags` lets a cull-transparency test compare under the proven
     /// (`0`) condition while the on-screen present keeps shadows + AO.
     pub lighting_flags: u32,
+    /// The directional-light direction (the un-normalized "direction TO the light", `L`) the
+    /// marcher marches the A1 soft shadow toward — stamped into the marcher's [`FineMarcherPush`]
+    /// `light_dir` (offset 16) THIS frame. It MUST equal the resolve's PRIMARY directional light
+    /// direction (the first directional in the light table, the one whose `vis` reads
+    /// `gMaterial.r`): the marcher bakes the cast shadow toward `light_dir`, and the resolve
+    /// consumes it as the primary directional's visibility — a mismatch detaches the shadow from
+    /// the light. A per-frame push field (no re-record on a change). For a head-on scene use the
+    /// legacy [`DEFAULT_LIGHT_DIR`](crate::compute::DEFAULT_LIGHT_DIR) `[0, 0, 1]`; an angled /
+    /// floor-and-object scene supplies the real sun direction so a real cast shadow lands.
+    pub light_dir: [f32; 3],
 }
 
 /// The per-extent on-screen G-buffer targets for [`Renderer::render_gbuffer_frame`]:
