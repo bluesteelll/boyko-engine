@@ -13,13 +13,16 @@
 // # The horizon reducer (HBAO-lite, no trig)
 //
 // For each of `SSAO_SLICES` rotated screen-space slices, march `SSAO_STEPS` forward-
-// projected neighbour taps in each of the two `±dir` half-slices, tracking the maximum
-// horizon cosine `hc`; fold the two half-slice maxes into a per-slice occlusion, sum over
-// slices, and complement: `ao = clamp01(1 - SSAO_STRENGTH * occ / SSAO_SLICES)` then
-// `ao = ao*ao`. The horizon step needs only `dot`/`max`/`sqrt`/`div` — NO `sin`/`cos`/
-// `acos` (GTAO's arc integral, which has an irreducible GPU↔CPU transcendental ULP gap)
-// and NO `fract` rotation (an integer-boundary discontinuity under FMA). The horizon-step
-// MATH is the eDSL-GENERATED span (see the sentinels below).
+// projected neighbour taps in each of the two half-slices, tracking the maximum neighbour
+// ELEVATION ABOVE THE SURFACE TANGENT PLANE `hc` (the sine of the elevation against the
+// center surface normal N, clamped non-negative); fold the two half-slice maxes into a
+// per-slice occlusion, sum over slices, and complement: `ao = clamp01(1 - SSAO_STRENGTH *
+// occ / SSAO_SLICES)` then `ao = ao*ao`. The horizon step needs only `dot`/`max`/`sqrt`/
+// `div` — NO `sin`/`cos`/`acos` (GTAO's arc integral, which has an irreducible GPU↔CPU
+// transcendental ULP gap) and NO `fract` rotation (an integer-boundary discontinuity under
+// FMA). A flat lit surface (delta perpendicular to N) raises NO horizon (AO = 1.0); a
+// crevice (neighbours rising above the tangent) does. The horizon-step MATH is the
+// eDSL-GENERATED span (see the sentinels below).
 //
 // # The eDSL-generated span (single-source — `boyko_shaderdsl::ssao`)
 //
@@ -29,10 +32,11 @@
 // committed span to the generator (`.contains` drift gate) AND re-DXCs this whole file to
 // assert it is byte-identical to the committed `sdf_ssao.comp.spv`. A hand-edit of the span
 // fails CI. ZERO new eDSL leaves: `dot` is inline component-reads + mul/add, `length =
-// sqrt(dot(d,d))`, the `ao*ao` power an integer self-mul — so the frozen marcher/field/
-// shadow/brick/resolve `.spv` physically cannot fork. The forward neighbour reconstruct,
-// the `[unroll]` slice/step loops, the rotation-table direction, and the `occ → ao` fold
-// are HAND-WRITTEN glue (framing b) — the host oracle is the full `ssao_estimate_body`.
+// sqrt(dot(d,d))`, the elevation clamp the existing `max`, the `ao*ao` power an integer
+// self-mul — so the frozen marcher/field/shadow/brick/resolve `.spv` physically cannot fork.
+// The forward neighbour reconstruct, the `[unroll]` slice/step loops, the rotation-table tap
+// offset, the center-normal decode, and the `occ → ao` fold are HAND-WRITTEN glue (framing b)
+// — the host oracle is the full `ssao_estimate_body`.
 //
 // # The integer-hash rotation (bit-exact GPU↔host)
 //
@@ -124,6 +128,18 @@ static const float2 SSAO_ROT[4] = {
     float2( 0.38268343,   0.92387953  ),  // 67.5 deg
 };
 
+// --- Octahedral decode (BYTE-IDENTICAL to the resolve's `oct_decode` in deferred_pbr.hlsl;
+// the inverse of the marcher's oct_encode). gNormal.rg carries the octahedral normal; the
+// horizon step measures the neighbour's elevation above the tangent plane this normal defines.
+float3 oct_decode(float2 e) {
+    e = e * 2.0 - 1.0;                          // [0,1] -> [-1,1]
+    float3 n = float3(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+    float t = saturate(-n.z);
+    n.x += n.x >= 0.0 ? -t : t;
+    n.y += n.y >= 0.0 ? -t : t;
+    return normalize(n);
+}
+
 [numthreads(64, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
     uint idx = tid.x;
@@ -154,6 +170,12 @@ void main(uint3 tid : SV_DispatchThreadID) {
         generate_ray(px, py, w, h, camera_mode, cam_eye.xyz, cam_forward, cam_right, cam_up.xyz, ro, rd);
         float3 P = ro + rd * center_view_t;
 
+        // Decode the center surface normal ONCE (gNormal.rg = octahedral). The horizon step
+        // measures each neighbour's ELEVATION ABOVE THE TANGENT PLANE this normal defines — a
+        // flat lit surface (delta perpendicular to N) raises no horizon (AO = 1), a crevice
+        // (neighbours above the tangent) does. CONSTANT across all slices/taps.
+        float3 N = oct_decode(gNormal.Load(coord).rg);
+
         // The screen-pixel march radius. PERSPECTIVE: a world radius R at view-depth z spans
         // ~ R*(h/2)/(z*tan(fovY/2)) pixels (clamped to a sane band). ORTHO: the view maps the
         // [-HALF_EXTENT, HALF_EXTENT] world span across h/2 pixels, so R spans R*(h/2)/HALF_EXTENT.
@@ -180,20 +202,19 @@ void main(uint3 tid : SV_DispatchThreadID) {
             // 3D in-screen direction along the camera right/up basis (PERSPECTIVE) or the
             // world x/y plane (ORTHO; right=+x, up=+y) — the same basis ray-gen builds from.
             float2 base = (sl == 0u) ? float2(1.0, 0.0) : float2(0.0, 1.0);
-            // Rotate the base axis by the per-pixel rotation: (c -s; s c) * base.
+            // Rotate the base axis by the per-pixel rotation: (c -s; s c) * base. This 2D screen
+            // axis picks the neighbour PIXEL (the tap offset); the horizon math measures
+            // elevation against the center surface normal N, NOT this direction.
             float2 sdir2 = float2(base.x * rot.x - base.y * rot.y,
                                   base.x * rot.y + base.y * rot.x);
-            float3 sdir3 = (camera_mode == RAYGEN_CAM_PERSPECTIVE)
-                         ? (cam_right.xyz * sdir2.x + cam_up.xyz * sdir2.y)
-                         : float3(sdir2.x, sdir2.y, 0.0);
 
-            // The +dir half-slice: SSAO_STEPS forward taps, tracking the horizon max `hc`. Its
-            // own brace scope so `hc`/`dir` (the names the generated span writes) do not collide
-            // with the -dir half-slice's. `step_sign` flips the screen offset per half-slice.
+            // The + half-slice: SSAO_STEPS forward taps, tracking the horizon max `hc`. Its own
+            // brace scope so `hc`/`n` (the names the generated span writes) do not collide with
+            // the - half-slice's. The screen offset advances along +sdir2 here.
             float hc_pos = 0.0;
             {
                 float hc = 0.0;
-                float3 dir = sdir3;
+                float3 n = N;
                 [unroll]
                 for (uint sp = 0u; sp < SSAO_STEPS; ++sp) {
                     // Forward neighbour reconstruct (hand-written seam): offset in SCREEN pixels,
@@ -219,19 +240,20 @@ void main(uint3 tid : SV_DispatchThreadID) {
                     float d2 = delta.x * delta.x + delta.y * delta.y + delta.z * delta.z;
                     float r2 = SSAO_RADIUS * SSAO_RADIUS;
                     float falloff = clamp(1.0 - d2 / r2, 0.0, 1.0);
-                    float sampleCos = (delta.x * dir.x + delta.y * dir.y + delta.z * dir.z) / max(sqrt(d2), SSAO_EPS);
-                    hc = max(hc, sampleCos * falloff);
+                    float elev = max((delta.x * n.x + delta.y * n.y + delta.z * n.z) / max(sqrt(d2), SSAO_EPS), 0.0);
+                    hc = max(hc, elev * falloff);
                     // === GENERATED ssao_horizon_step END ===
                 }
                 hc_pos = hc;
             }
 
-            // The -dir half-slice: SSAO_STEPS forward taps along the negated direction. Same
-            // brace-scoped `hc`/`dir`; the screen offset is subtracted (`-sdir2`).
+            // The - half-slice: SSAO_STEPS forward taps along the negated screen offset. Same
+            // brace-scoped `hc`/`n`; the screen offset is subtracted (`-sdir2`). The elevation
+            // reference is the SAME center normal N (both half-slices measure against the tangent).
             float hc_neg = 0.0;
             {
                 float hc = 0.0;
-                float3 dir = sdir3 * -1.0;
+                float3 n = N;
                 [unroll]
                 for (uint sn = 0u; sn < SSAO_STEPS; ++sn) {
                     float advance = (float)(sn + 1u) * pix_radius / (float)SSAO_STEPS;
@@ -254,8 +276,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
                     float d2 = delta.x * delta.x + delta.y * delta.y + delta.z * delta.z;
                     float r2 = SSAO_RADIUS * SSAO_RADIUS;
                     float falloff = clamp(1.0 - d2 / r2, 0.0, 1.0);
-                    float sampleCos = (delta.x * dir.x + delta.y * dir.y + delta.z * dir.z) / max(sqrt(d2), SSAO_EPS);
-                    hc = max(hc, sampleCos * falloff);
+                    float elev = max((delta.x * n.x + delta.y * n.y + delta.z * n.z) / max(sqrt(d2), SSAO_EPS), 0.0);
+                    hc = max(hc, elev * falloff);
                     // === GENERATED ssao_horizon_step END ===
                 }
                 hc_neg = hc;

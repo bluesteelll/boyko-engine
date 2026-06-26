@@ -287,8 +287,8 @@ fn main() {
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_sdf_soft_shadow_ranged());
     // The Render P7 GROUP A SSAO horizon-step span (HBAO-lite, no-trig): ONE forward
     // horizon tap's math — `delta = P' - P`, the squared-distance `falloff` range gate, the
-    // `sampleCos = dot(delta,dir) / max(length(delta), SSAO_EPS)` horizon cosine, and the
-    // `hc = max(hc, sampleCos * falloff)` running horizon max — generated from
+    // `elev = max(dot(delta,N) / max(length(delta), SSAO_EPS), 0)` elevation above the tangent
+    // plane, and the `hc = max(hc, elev * falloff)` running horizon max — generated from
     // `boyko_shaderdsl::ssao::ssao_horizon_step_body` over the `Emit` + `EmitCf` backends.
     // ZERO new eDSL leaves (`dot` is INLINE component reads + mul/add; `length = sqrt(dot)`),
     // so the frozen marcher/field/shadow/brick/resolve `.spv` cannot fork. Spliced between

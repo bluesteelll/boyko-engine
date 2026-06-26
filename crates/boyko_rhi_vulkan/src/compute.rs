@@ -559,6 +559,57 @@ pub const AO_FALLOFF: f32 = 0.95;
 /// A2 overall occlusion strength (scales the accumulated deficit before clamping).
 pub const AO_STRENGTH: f32 = 1.0;
 
+// --- Render P7 GROUP B: SSAO host oracle tuning (mirror `shaders/sdf_ssao.comp.hlsl` +
+//     `boyko_shaderdsl::ssao` EXACTLY — the `ssao_edsl_sync` cross-check pins these to the
+//     eDSL `pub const`s, and the pixel goldens pin them to the GPU). -------------------------
+
+/// The world-space SSAO sampling radius (`SSAO_RADIUS` in the shader). Beyond it a tap's
+/// `falloff` zeroes its contribution. Equals `boyko_shaderdsl::ssao::SSAO_RADIUS`.
+pub const SSAO_RADIUS: f32 = 0.5;
+/// The number of rotated screen-space slices (`SSAO_SLICES`). Equals
+/// `boyko_shaderdsl::ssao::SSAO_SLICES`.
+pub const SSAO_SLICES: u32 = 2;
+/// The slice count as a float — the `occ / N` divisor (`SSAO_SLICES_F`). Mirrors the shader's
+/// dedicated `SSAO_SLICES_F` const so the host complement rounds bit-identically to the GPU.
+pub const SSAO_SLICES_F: f32 = 2.0;
+/// The number of forward steps per half-slice (`SSAO_STEPS`). Equals
+/// `boyko_shaderdsl::ssao::SSAO_STEPS`.
+pub const SSAO_STEPS: u32 = 4;
+/// The occlusion strength multiplier (`SSAO_STRENGTH`). Equals
+/// `boyko_shaderdsl::ssao::SSAO_STRENGTH`.
+pub const SSAO_STRENGTH: f32 = 1.0;
+/// The `length(delta)` divide-by-zero guard (`SSAO_EPS`). Equals
+/// `boyko_shaderdsl::ssao::SSAO_EPS`.
+pub const SSAO_EPS: f32 = 1.0e-4;
+/// The mesh/SDF G-buffer background sentinel (`SSAO_VIEWT_BG`) — a `view_t` at or above this
+/// is a non-lit / mesh / background pixel (mirrors the marcher's `gViewT` `1.0e30` sentinel).
+pub const SSAO_VIEWT_BG: f32 = 1.0e30;
+/// The perspective screen-pixel radius clamp minimum (`SSAO_RADIUS_PIX_MIN`) — keeps taps
+/// from collapsing onto one texel.
+pub const SSAO_RADIUS_PIX_MIN: f32 = 2.0;
+/// The perspective screen-pixel radius clamp maximum (`SSAO_RADIUS_PIX_MAX`) — keeps taps
+/// inside a sane neighbourhood.
+pub const SSAO_RADIUS_PIX_MAX: f32 = 24.0;
+/// The integer-hash rotation table size (`SSAO_ROT_N`); the per-pixel slot is `hash %
+/// SSAO_ROT_N` (NO float `fract`/`floor`, so the host and GPU pick the SAME rotation).
+pub const SSAO_ROT_N: u32 = 4;
+/// The pre-baked `(cos, sin)` rotation table for the four evenly-spaced angles (0°, 22.5°,
+/// 45°, 67.5°), BYTE-IDENTICAL to the shader's `SSAO_ROT[4]` so the host picks the same slot.
+//
+// These literals are LOAD-BEARING: each must round to the EXACT `f32` the shader's
+// `float2(...)` literal carries (the integer-hash rotation slot must agree bit-for-bit
+// between the host oracle and the GPU). `clippy::approx_constant` (the `0.70710678` ==
+// `FRAC_1_SQRT_2`) and `clippy::excessive_precision` would have us swap in the std constant
+// or truncate digits — either DIVERGES the host literal from the frozen shader table, the
+// exact drift this oracle exists to prevent. The `ssao_edsl_sync` cross-check pins the math.
+#[allow(clippy::approx_constant, clippy::excessive_precision)]
+pub const SSAO_ROT: [(f32, f32); 4] = [
+    (1.0, 0.0),
+    (0.92387953, 0.38268343),
+    (0.70710678, 0.70710678),
+    (0.38268343, 0.92387953),
+];
+
 /// The A1 host mirror of `sdf_soft_shadow`: a clamped-step Quilez BASIC cone-trace
 /// (NO `sqrt` — minimal FP-parity surface) from the lit point `p` toward the
 /// normalized light `l`, returning a soft visibility in `[0, 1]` (1 = fully lit,
@@ -3975,6 +4026,26 @@ impl GoldenLightHeader {
         self.sky_diffuse[3].to_bits()
     }
 
+    /// Sets the Render P7 `ssao_mode` (header WORD 11 = `sky_spec.w`, read RAW by the
+    /// resolve's `load_ssao_mode` — stored BIT-CAST, NOT as a float value, EXACTLY as
+    /// [`with_shadow_mode`](Self::with_shadow_mode) does for word 7). `0` = SSAO OFF (the
+    /// resolve combine is `ao_final == gMaterial.g`, the BYTE-IDENTICAL 0%-gate); a non-zero
+    /// value arms the `ao_final = min(class_ao, gSsao)` cross-representation combine. Word 11
+    /// (`sky_spec.w`) was previously always `0.0` (carried unused), so every pre-P7 scene's
+    /// `ssao_mode()` reads 0 automatically. The builder the P7 SSAO goldens use.
+    #[inline]
+    pub fn with_ssao_mode(mut self, ssao_mode: u32) -> Self {
+        self.sky_spec[3] = f32::from_bits(ssao_mode);
+        self
+    }
+
+    /// The Render P7 `ssao_mode` (header word 11, bit-cast back from `sky_spec.w`). 0 on every
+    /// pre-P7 scene (the 0%-gate), mirroring [`shadow_mode`](Self::shadow_mode) (word 7).
+    #[inline]
+    pub fn ssao_mode(&self) -> u32 {
+        self.sky_spec[3].to_bits()
+    }
+
     /// Builds the L1 CLUSTERED header (mirrors `LightHeaderGpu::new_clustered`): the
     /// `cluster_params` lane carries `[z_scale, z_bias, bitcast(packed_dims),
     /// bitcast(clusters_enabled=1)]`. The packed dims are `dim_x | dim_y<<8 | dim_z<<16`.
@@ -4350,6 +4421,225 @@ pub fn golden_marcher_attributes(
             view_t: 1.0e30,
         }
     }
+}
+
+/// Render P7 GROUP B: the ONE forward SSAO horizon tap — the eDSL-GENERATED span
+/// (`// === GENERATED ssao_horizon_step BEGIN/END ===` in `shaders/sdf_ssao.comp.hlsl`)
+/// re-derived as plain Rust. Factored out (matching the leaf shape of
+/// `boyko_shaderdsl::ssao::ssao_horizon_step_body`) so the `ssao_edsl_sync` cross-check can
+/// assert this host math == the eDSL `<EvalCf>` Eval before any GPU run.
+///
+/// Accumulates one tapped neighbour world position `pp` (`P'`, supplied by the forward-
+/// reconstruct seam in [`golden_ssao_attributes`]) into the running per-half-slice horizon
+/// max `hc`. `p` is the center world position (`P`), `n` the CENTER SURFACE NORMAL (`N`, the
+/// elevation reference). The HBAO horizon step measures the neighbour's ELEVATION ABOVE THE
+/// TANGENT PLANE (NO `sin`/`cos`/`acos`, NO `fract` — bit-comparable to the GPU):
+///   `delta   = P' - P`
+///   `falloff = clamp01(1 - dot(delta,delta) / (R*R))`   (the squared-distance range gate)
+///   `elev    = max(dot(delta, N) / max(length(delta), SSAO_EPS), 0.0)`
+///   `hc      = max(hc, elev * falloff)`
+/// A flat surface (`delta ⊥ N` → `elev = 0`) raises no horizon (AO = 1); a crevice
+/// (neighbours rising above the tangent → `dot(delta,N) > 0`) does (AO < 1). `dot` is INLINE
+/// component-reads + mul/add; `length = sqrt(dot(delta,delta))`.
+pub fn ssao_horizon_step(hc: f32, p: [f32; 3], pp: [f32; 3], n: [f32; 3]) -> f32 {
+    // float3 delta = P' - P;
+    let delta = [pp[0] - p[0], pp[1] - p[1], pp[2] - p[2]];
+    // dot(delta, delta) (INLINE).
+    let d2 = delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2];
+    // float r2 = SSAO_RADIUS * SSAO_RADIUS;  (a named temp — the divisor prints `d2 / r2`,
+    // NOT the precedence-wrong `(d2 / R) * R`; mirror the eDSL `temp_float("r2", ...)`).
+    let r2 = SSAO_RADIUS * SSAO_RADIUS;
+    // float falloff = clamp(1.0 - d2 / r2, 0.0, 1.0);
+    let falloff = (1.0 - d2 / r2).clamp(0.0, 1.0);
+    // dot(delta, N) (INLINE) — the unnormalized elevation against the center surface normal.
+    let dn = delta[0] * n[0] + delta[1] * n[1] + delta[2] * n[2];
+    // float elev = max(dot(delta, N) / max(sqrt(d2), SSAO_EPS), 0.0);  the sine of the
+    // elevation above the tangent, clamped non-negative (neighbours below the tangent do not
+    // occlude). `length(delta) = sqrt(d2)` reuses the `d2` value so the sqrt operand is
+    // bit-identical to the GPU.
+    let elev = (dn / d2.sqrt().max(SSAO_EPS)).max(0.0);
+    // hc = max(hc, elev * falloff);
+    hc.max(elev * falloff)
+}
+
+/// Render P7 GROUP B: Stage-1 of the SSAO host oracle — the FROZEN G-buffer the SSAO gather
+/// reads, built ONCE by mapping [`golden_marcher_attributes`] over every pixel of the
+/// `img_w × img_h` extent (row-major, `idx = py * img_w + px`, the SAME dispatch index the
+/// shader's `idx % w` / `idx / w` decode). [`golden_ssao_attributes`] reads `mask` +
+/// `view_t` + the center pixel's `oct_rg` normal from this buffer. The per-pixel
+/// arguments match `golden_marcher_attributes` exactly — the scene (`edits`/`mesh_depth`),
+/// the marcher tuning (`omega`), and the lighting gate (`lighting_flags`/`light_dir`) are
+/// the same across the whole frame. `mesh_depth_of(px, py)` supplies the per-pixel mesh
+/// depth (the raster producer's covered-pixel depth, or `MESH_DEPTH_CLEAR` for none).
+#[allow(clippy::too_many_arguments)]
+pub fn golden_gbuffer<M: Fn(u32, u32) -> f32>(
+    edits: &[SdfEdit],
+    materials: &[GoldenMaterial],
+    mesh_depth_of: M,
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    omega: f32,
+    lighting_flags: u32,
+    light_dir: [f32; 3],
+) -> Vec<MarcherAttributes> {
+    let mut gbuf = Vec::with_capacity((img_w as usize) * (img_h as usize));
+    for py in 0..img_h {
+        for px in 0..img_w {
+            gbuf.push(golden_marcher_attributes(
+                edits,
+                materials,
+                mesh_depth_of(px, py),
+                px,
+                py,
+                img_w,
+                img_h,
+                camera,
+                omega,
+                lighting_flags,
+                light_dir,
+            ));
+        }
+    }
+    gbuf
+}
+
+/// Render P7 GROUP B: the host oracle for one SSAO output pixel — the line-for-line plain-
+/// Rust translation of `shaders/sdf_ssao.comp.hlsl`'s `main()` `center_lit` path. Returns
+/// the AO factor in `[0, 1]` (`1.0` = unoccluded; the resolve combines via
+/// `min(class_ao, ssao)`). `gbuf` is the Stage-1 G-buffer ([`golden_gbuffer`], row-major).
+///
+/// The HBAO-lite reducer (NO trig, NO `fract`): for each of [`SSAO_SLICES`] rotated screen-
+/// space slices, march [`SSAO_STEPS`] forward-projected neighbour taps in each `±dir` half-
+/// slice tracking the horizon max via [`ssao_horizon_step`], fold the two half-slice maxes
+/// into a per-slice occlusion, sum, then complement + square. A non-lit center pixel
+/// (`mask <= 0.5 || view_t >= SSAO_VIEWT_BG`) returns the neutral `1.0`. The neighbour world
+/// position is reconstructed FORWARD via the SAME [`composite_ray`] the marcher uses (no
+/// proj-matrix inverse); an out-of-bounds or non-lit tap reconstructs `Pp = P` (zero
+/// contribution). The rotation slot is the INTEGER hash (bit-exact vs the GPU `uint`).
+pub fn golden_ssao_attributes(
+    gbuf: &[MarcherAttributes],
+    px: u32,
+    py: u32,
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+) -> f32 {
+    debug_assert_eq!(
+        gbuf.len(),
+        (img_w as usize) * (img_h as usize),
+        "invariant: SSAO gbuf length must equal img_w * img_h"
+    );
+    // Read the center pixel's class. `mask == 1` is stored as a byte; test the decoded flag.
+    let center = gbuf[(py as usize) * (img_w as usize) + (px as usize)];
+    let center_lit = center.mask > 0 && center.view_t < SSAO_VIEWT_BG;
+    if !center_lit {
+        // A non-lit pixel carries no surface — the neutral factor; `min(class_ao, ssao)`
+        // leaves it unchanged.
+        return 1.0;
+    }
+
+    // Reconstruct the center world position P = ro + rd * view_t via the shared ray-gen.
+    let (ro, rd) = composite_ray(px, py, img_w, img_h, camera);
+    let view_t = center.view_t;
+    let p = [
+        ro[0] + rd[0] * view_t,
+        ro[1] + rd[1] * view_t,
+        ro[2] + rd[2] * view_t,
+    ];
+
+    // Decode the center surface normal ONCE (the same `oct_decode` the resolve mirror uses on
+    // `gNormal.rg`). The horizon step measures each neighbour's elevation above the tangent
+    // plane this normal defines — CONSTANT across all slices/taps.
+    let center_n = oct_decode([
+        center.oct_rg[0] as f32 / 255.0,
+        center.oct_rg[1] as f32 / 255.0,
+    ]);
+
+    // The screen-pixel march radius (clamped band on PERSPECTIVE; the fixed ortho span).
+    let pix_radius = match camera {
+        CompositeCamera::Perspective {
+            forward,
+            tan_half_fov,
+            ..
+        } => {
+            // z = max(dot(rd, cam_forward.xyz) * view_t, 1e-3).
+            let z_view = rd[0] * forward[0] + rd[1] * forward[1] + rd[2] * forward[2];
+            let z = (z_view * view_t).max(1.0e-3);
+            // pr = R * (h/2) / (z * tan(fovY/2)); clamp(pr, MIN, MAX).
+            let pr = SSAO_RADIUS * ((img_h as f32) * 0.5) / (z * tan_half_fov);
+            pr.clamp(SSAO_RADIUS_PIX_MIN, SSAO_RADIUS_PIX_MAX)
+        }
+        CompositeCamera::Ortho => {
+            // The view maps the [-HALF_EXTENT, HALF_EXTENT] span across h/2 pixels, so R spans
+            // R*(h/2)/HALF_EXTENT. `SDF_HALF_EXTENT` IS the shader's `RAYGEN_HALF_EXTENT` (the
+            // ortho half-extent `composite_ray` already uses — reuse it, do NOT hardcode a copy).
+            SSAO_RADIUS * ((img_h as f32) * 0.5) / SDF_HALF_EXTENT
+        }
+    };
+
+    // The integer-hash rotation slot (bit-exact vs HLSL `uint`: wrapping mul/add, then `% N`).
+    let hsh = px
+        .wrapping_mul(1103515245)
+        .wrapping_add(py.wrapping_mul(12345));
+    let slot = (hsh % SSAO_ROT_N) as usize;
+    let rot = SSAO_ROT[slot];
+
+    // The forward neighbour reconstruct (the hand-written seam): offset in SCREEN pixels along
+    // `sdir2 * sign`, round, bounds-clamp, reconstruct Pp = nro + nrd * nview_t; else Pp = P.
+    let reconstruct = |sdir2: (f32, f32), advance: f32, sign: f32| -> [f32; 3] {
+        let npx = ((px as f32) + sign * sdir2.0 * advance).round() as i32;
+        let npy = ((py as f32) + sign * sdir2.1 * advance).round() as i32;
+        if npx >= 0 && npy >= 0 && npx < (img_w as i32) && npy < (img_h as i32) {
+            let n = gbuf[(npy as usize) * (img_w as usize) + (npx as usize)];
+            if n.mask > 0 && n.view_t < SSAO_VIEWT_BG {
+                let (nro, nrd) = composite_ray(npx as u32, npy as u32, img_w, img_h, camera);
+                return [
+                    nro[0] + nrd[0] * n.view_t,
+                    nro[1] + nrd[1] * n.view_t,
+                    nro[2] + nrd[2] * n.view_t,
+                ];
+            }
+        }
+        p
+    };
+
+    let mut occ = 0.0_f32;
+    for sl in 0..SSAO_SLICES {
+        // The base slice axis (two slices -> (1,0), (0,1)) rotated by the per-pixel `rot`. This
+        // 2D screen axis picks the neighbour PIXEL (the tap offset); the horizon math measures
+        // elevation against the center surface normal `center_n`, NOT this direction.
+        let base = if sl == 0 { (1.0_f32, 0.0) } else { (0.0, 1.0) };
+        let sdir2 = (
+            base.0 * rot.0 - base.1 * rot.1,
+            base.0 * rot.1 + base.1 * rot.0,
+        );
+
+        // The + half-slice: SSAO_STEPS forward taps, tracking the horizon max `hc`. The screen
+        // offset advances along +sdir2; elevation is measured against the center normal.
+        let mut hc_pos = 0.0_f32;
+        for sp in 0..SSAO_STEPS {
+            let advance = ((sp + 1) as f32) * pix_radius / (SSAO_STEPS as f32);
+            let pp = reconstruct(sdir2, advance, 1.0);
+            hc_pos = ssao_horizon_step(hc_pos, p, pp, center_n);
+        }
+
+        // The - half-slice: SSAO_STEPS forward taps along the negated screen offset. Same
+        // center normal (both half-slices measure elevation against the surface tangent).
+        let mut hc_neg = 0.0_f32;
+        for sn in 0..SSAO_STEPS {
+            let advance = ((sn + 1) as f32) * pix_radius / (SSAO_STEPS as f32);
+            let pp = reconstruct(sdir2, advance, -1.0);
+            hc_neg = ssao_horizon_step(hc_neg, p, pp, center_n);
+        }
+
+        occ += hc_pos + hc_neg;
+    }
+
+    // The final occlusion complement (the eDSL `ssao_estimate` tail): the mean per-slice
+    // horizon cosine scaled by strength, complemented, then squared (the integer self-mul).
+    let ao = (1.0 - SSAO_STRENGTH * occ / SSAO_SLICES_F).clamp(0.0, 1.0);
+    ao * ao
 }
 
 /// The CPU mirror of the `deferred_pbr` RESOLVE (PBR MVP-2): given the marcher's
@@ -8364,5 +8654,192 @@ mod m4_clipmap_tests {
     fn m4_level_params_is_48_bytes() {
         assert_eq!(core::mem::size_of::<M4LevelParams>(), 48);
         assert_eq!(core::mem::size_of::<M4GridParams>(), brick::BRICK_LEVELS * 48);
+    }
+}
+
+/// Render P7 GROUP B — the `GoldenLightHeader` `ssao_mode` (header word 11) accessor
+/// round-trip + the 0%-gate default. The SSAO host-oracle gather tests (the deep-crevice /
+/// flat / seam AO bands) live in [`ssao_gather_tests`] below: the lib re-derives the SSAO
+/// math as PLAIN RUST ([`super::golden_ssao_attributes`]), since `boyko_shaderdsl` is a
+/// dev-dependency only and the shipped backend must not link the eDSL. The `ssao_edsl_sync`
+/// integration test (which HAS the dev-dep) cross-checks the plain-Rust per-tap horizon
+/// against `boyko_shaderdsl::ssao::ssao_horizon_step_body::<EvalCf>` before any GPU run.
+#[cfg(test)]
+mod ssao_header_tests {
+    use super::GoldenLightHeader;
+
+    /// `ssao_mode` (header word 11 = `sky_spec.w`) reads 0 on a freshly-built header — the
+    /// automatic 0%-gate: every pre-P7 scene carries `sky_spec.w == 0.0`, so the resolve's
+    /// `if (ssao_mode != 0u)` combine is skipped and `ao_final == gMaterial.g` byte-for-byte.
+    #[test]
+    fn ssao_mode_defaults_to_zero() {
+        let h = GoldenLightHeader::new(1, 0, 1.0);
+        assert_eq!(h.ssao_mode(), 0, "ssao_mode (word 11) must be 0 by default (the 0%-gate)");
+        // The clustered constructor writes the cluster_params lane (words 12..15), NOT sky_spec
+        // — so word 11 must still read 0.
+        let cfg = super::GoldenClusterConfig {
+            dim_x: 16,
+            dim_y: 9,
+            dim_z: 24,
+            max_lights_per_cluster: 64,
+            z_near: 0.1,
+            z_far: 100.0,
+        };
+        let hc = GoldenLightHeader::new_clustered(1, 0, 1.0, &cfg);
+        assert_eq!(hc.ssao_mode(), 0, "new_clustered must not disturb ssao_mode (word 11)");
+    }
+
+    /// `with_ssao_mode(m)` round-trips through `ssao_mode()` for every representative `m`
+    /// (stored BIT-CAST in `sky_spec.w`, exactly like `with_shadow_mode`/`shadow_mode` for
+    /// word 7), and does NOT disturb the shadow_mode word (word 7).
+    #[test]
+    fn ssao_mode_round_trips_through_with_ssao_mode() {
+        for m in [0u32, 1, 2, 0xFFFF_FFFF] {
+            let h = GoldenLightHeader::new(1, 0, 1.0).with_ssao_mode(m);
+            assert_eq!(h.ssao_mode(), m, "with_ssao_mode({m}) must round-trip through ssao_mode()");
+        }
+        // Independence: setting ssao_mode (word 11) leaves shadow_mode (word 7) untouched and
+        // vice-versa — the two are distinct header words (sky_spec.w vs sky_diffuse.w).
+        let both = GoldenLightHeader::new(1, 0, 1.0)
+            .with_shadow_mode(1)
+            .with_ssao_mode(1);
+        assert_eq!(both.shadow_mode(), 1, "with_ssao_mode must not clobber shadow_mode (word 7)");
+        assert_eq!(both.ssao_mode(), 1, "with_shadow_mode must not clobber ssao_mode (word 11)");
+    }
+}
+
+/// Render P7 GROUP B — the SSAO host-oracle gather bands. Builds a SYNTHETIC G-buffer
+/// (`Vec<MarcherAttributes>`; [`golden_ssao_attributes`] reads `mask` + `view_t` + the
+/// center pixel's `oct_rg` normal) at the legacy `64×64` ORTHO extent and asserts the
+/// signature AO regimes for the FIXED horizon math (elevation above the tangent plane):
+/// a FLAT lit surface (in-plane neighbours, `delta ⊥ N`) stays at AO ≈ 1 (the bug's
+/// regression guard — the old screen-direction math BLACKENED it), a deep crevice
+/// (neighbours rising above the tangent toward the camera) darkens AO below 1, and a seam
+/// (all neighbours background) is fully unoccluded with no NaN. The math is PLAIN RUST (the
+/// lib does not link the `boyko_shaderdsl` dev-dep); the `ssao_edsl_sync` integration test
+/// cross-checks the per-tap horizon against the eDSL Eval.
+#[cfg(test)]
+mod ssao_gather_tests {
+    use super::{
+        oct_decode, CompositeCamera, MarcherAttributes, golden_ssao_attributes, SSAO_VIEWT_BG,
+    };
+
+    const W: u32 = 64;
+    const H: u32 = 64;
+    const CX: u32 = 32;
+    const CY: u32 = 32;
+    /// The octahedral-quantized center normal the synthetic gbuffer stamps. `[128, 128]`
+    /// decodes to ~`+z` (toward the ORTHO camera, which looks down `-z`) — the surface faces
+    /// the viewer, the realistic lit-pixel normal.
+    const OCT_RG: [u8; 2] = [128, 128];
+
+    /// The decoded center surface normal `N` (the same `oct_decode` the gather reads). The
+    /// flat-surface fixture builds a plane PERPENDICULAR to this `N` so `delta ⊥ N` exactly.
+    fn center_normal() -> [f32; 3] {
+        oct_decode([OCT_RG[0] as f32 / 255.0, OCT_RG[1] as f32 / 255.0])
+    }
+
+    /// Builds a `W×H` synthetic G-buffer from a per-pixel `(lit, view_t)` field. The center
+    /// pixel's normal is `OCT_RG` (the gather decodes it as the elevation reference); the rest
+    /// of the per-pixel normal is irrelevant (the gather reads only the CENTER normal).
+    fn synthetic_gbuffer<F: Fn(i32, i32) -> (bool, f32)>(field: F) -> Vec<MarcherAttributes> {
+        let mut gbuf = Vec::with_capacity((W as usize) * (H as usize));
+        for py in 0..H {
+            for px in 0..W {
+                let (lit, view_t) = field(px as i32, py as i32);
+                gbuf.push(MarcherAttributes {
+                    base_rgb: [0, 0, 0],
+                    oct_rg: OCT_RG,
+                    mat_id: 0,
+                    shadow: 255,
+                    ao: 255,
+                    mask: if lit { 1 } else { 0 },
+                    view_t: if lit { view_t } else { SSAO_VIEWT_BG },
+                });
+            }
+        }
+        gbuf
+    }
+
+    /// The ORTHO world `(x, y)` of a pixel center (mirrors `composite_ray`'s ORTHO arm:
+    /// `u = ((px+0.5)/W)*2-1`, `v = -(((py+0.5)/H)*2-1)`, scaled by `SDF_HALF_EXTENT == 1`).
+    fn ortho_xy(px: i32, py: i32) -> (f32, f32) {
+        let u = (((px as f32) + 0.5) / (W as f32)) * 2.0 - 1.0;
+        let v = -((((py as f32) + 0.5) / (H as f32)) * 2.0 - 1.0);
+        (u * super::SDF_HALF_EXTENT, v * super::SDF_HALF_EXTENT)
+    }
+
+    #[test]
+    fn flat_surface_keeps_ao_near_one() {
+        // THE BUG'S REGRESSION GUARD. A literally flat lit plane PERPENDICULAR to the center
+        // normal `N`: every neighbour lies in the tangent plane (`delta ⊥ N`), so the
+        // elevation `dot(delta, N) == 0` -> no horizon is raised -> occ == 0 -> AO ≈ 1.0. The
+        // ORTHO world z is `SDF_CAM_Z - view_t`; to put the surface in the plane through the
+        // center perpendicular to `N = (a, a, c)`, solve `N·(P - P0) = 0` for `view_t`:
+        // `view_t = view_t0 + (a/c) * (Δx + Δy)`. Under the OLD screen-direction math an
+        // in-plane neighbour parallel to the slice axis gave `sampleCos ≈ 1` and BLACKENED
+        // this flat lit surface (AO → ~0). The fix makes it AO ≈ 1.
+        let n = center_normal();
+        let view_t0 = 1.5_f32;
+        let (x0, y0) = ortho_xy(CX as i32, CY as i32);
+        let gbuf = synthetic_gbuffer(|x, y| {
+            let (xw, yw) = ortho_xy(x, y);
+            // The tangent-plane depth so delta lands exactly in the plane perpendicular to N.
+            let view_t = view_t0 + (n[0] / n[2]) * (xw - x0) + (n[1] / n[2]) * (yw - y0);
+            (true, view_t)
+        });
+        let ao = golden_ssao_attributes(&gbuf, CX, CY, W, H, CompositeCamera::Ortho);
+        assert!(ao.is_finite(), "a flat surface must not produce NaN, got ao = {ao}");
+        assert!(
+            ao > 0.99,
+            "a FLAT lit surface (delta perpendicular to N) must leave AO ≈ 1.0 (the SSAO \
+             horizon bug regression guard), got ao = {ao}"
+        );
+    }
+
+    #[test]
+    fn deep_crevice_darkens_ao() {
+        // A V-valley: the surface RISES toward the camera (world z grows, i.e. view_t SHRINKS)
+        // as the radius from the center grows, so every neighbour sits ABOVE the center's
+        // tangent plane (`dot(delta, N) > 0`) and stays well within SSAO_RADIUS. Each tap's
+        // elevation is strongly positive inside the falloff -> the per-slice horizon max is
+        // high -> occ is large -> AO clearly < 1.
+        let gbuf = synthetic_gbuffer(|x, y| {
+            let dx = (x - CX as i32) as f32;
+            let dy = (y - CY as i32) as f32;
+            let r = (dx * dx + dy * dy).sqrt();
+            (true, 1.5 - 0.01 * r)
+        });
+        let ao = golden_ssao_attributes(&gbuf, CX, CY, W, H, CompositeCamera::Ortho);
+        assert!(
+            ao < 0.5,
+            "a deep crevice (neighbours above the tangent) must darken AO clearly below 1.0, \
+             got ao = {ao}"
+        );
+        assert!(ao >= 0.0, "AO is clamped to [0, 1], got ao = {ao}");
+        assert!(ao.is_finite(), "AO must be finite, got ao = {ao}");
+    }
+
+    #[test]
+    fn isolated_seam_is_fully_unoccluded_no_nan() {
+        // A seam: a single lit center pixel, every neighbour is background (mask == 0). Every
+        // tap reconstructs Pp = P (the seam's out-of-bounds / non-lit skip) -> delta == 0 ->
+        // elev == 0 (guarded by SSAO_EPS, no divide-by-zero NaN) -> occ == 0 -> AO == 1.
+        let gbuf = synthetic_gbuffer(|x, y| (x == CX as i32 && y == CY as i32, 1.5));
+        let ao = golden_ssao_attributes(&gbuf, CX, CY, W, H, CompositeCamera::Ortho);
+        assert!(ao.is_finite(), "a seam must not produce NaN, got ao = {ao}");
+        assert!(
+            (ao - 1.0).abs() < 1.0e-6,
+            "an all-background seam must be fully unoccluded (ao = 1.0), got ao = {ao}"
+        );
+    }
+
+    #[test]
+    fn non_lit_center_returns_neutral_one() {
+        // A non-lit center (background): the gather returns the neutral 1.0 before any march,
+        // so the resolve's `min(class_ao, ssao)` leaves the pixel unchanged.
+        let gbuf = synthetic_gbuffer(|_x, _y| (false, 0.0));
+        let ao = golden_ssao_attributes(&gbuf, CX, CY, W, H, CompositeCamera::Ortho);
+        assert_eq!(ao, 1.0, "a non-lit center pixel must return the neutral AO 1.0");
     }
 }

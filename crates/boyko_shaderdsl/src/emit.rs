@@ -4111,21 +4111,22 @@ pub fn emit_hlsl_ssao() -> String {
     STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
 
     // Seed the span's inputs:
-    //   P   → Vec3Param(0) (vec_in[0] = "P")   — the center world position
-    //   Pp  → Vec3Param(1) (vec_in[1] = "Pp")  — the forward-reconstructed neighbour `P'`
-    //   dir → Vec3Param(2) (vec_in[2] = "dir") — the in-slice (±) screen direction
+    //   P   → Vec3Param(0) (vec_in[0] = "P")  — the center world position
+    //   Pp  → Vec3Param(1) (vec_in[1] = "Pp") — the forward-reconstructed neighbour `P'`
+    //   n   → Vec3Param(2) (vec_in[2] = "n")  — the center surface normal `N` (the
+    //                                            elevation reference; CONSTANT per pixel)
     // `hc` is the running horizon max the hand-written half-slice loop declared (`float
     // hc_pos = 0.0;` etc.); seeded as a SUPPRESSED-DECL `float` param (bound by NAME, no
     // recorded decl) so `set_var`/`get_var` spell `hc = ...;` with NO `float hc = ...;`
     // redecl. The `_init` seed is unused on Emit (a param is bound by name).
     let p = Emit(push(Node::Vec3Param(0)));
     let pp = Emit(push(Node::Vec3Param(1)));
-    let dir = Emit(push(Node::Vec3Param(2)));
+    let n = Emit(push(Node::Vec3Param(2)));
     let hc = EmitCf::decl_param("hc", Emit::lit(0.0));
 
     // Record `hc = <horizon step>;` — the generated span is the `delta`/`d2`/`falloff`/
-    // `sampleCos` temps + this assign.
-    let updated = ssao::ssao_horizon_step_body::<EmitCf>(p, pp, dir, EmitCf::get_var(&hc));
+    // `elev` temps + this assign.
+    let updated = ssao::ssao_horizon_step_body::<EmitCf>(p, pp, n, EmitCf::get_var(&hc));
     EmitCf::set_var(&hc, updated);
 
     // Pop the function body block and print it.
@@ -4136,7 +4137,7 @@ pub fn emit_hlsl_ssao() -> String {
     });
 
     let float_in: [&str; 0] = [];
-    let vec_in = ["P", "Pp", "dir"];
+    let vec_in = ["P", "Pp", "n"];
     let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
     let vars = VARS.with(|v| v.borrow().clone());
     let names = Names {
