@@ -15,8 +15,8 @@
 use core::f32::consts::PI;
 
 use boyko_rhi_vulkan::compute::{
-    golden_deferred_resolve_table, golden_marcher_attributes, sdf_op, CompositeCamera, GoldenLight,
-    GoldenLightHeader, GoldenMaterial, MarcherAttributes, SdfEdit, LIGHTING_FLAG_AO,
+    depth_to_t, golden_deferred_resolve_table, golden_marcher_attributes, sdf_op, CompositeCamera,
+    GoldenLight, GoldenLightHeader, GoldenMaterial, MarcherAttributes, SdfEdit, LIGHTING_FLAG_AO,
     LIGHTING_FLAG_SHADOWS, MESH_DEPTH_CLEAR, PBR_SKY_DIFFUSE, SDF_IMG_H, SDF_IMG_W,
 };
 
@@ -193,8 +193,10 @@ fn p_reconstruction_uses_ro_plus_rd_times_view_t() {
 fn every_real_pixel_writes_a_finite_or_sentinel_view_t() {
     // C2 EXACTLY-ONCE coverage (host mirror of the full-frame gViewT golden): for every
     // real pixel the marcher attribute oracle assigns `view_t` exactly once — the REAL
-    // marched `t` (finite, > 0) on the SDF-lit arm (mask == 1), the `1.0e30` sentinel on
-    // mesh / background (mask == 0). NO pixel is left with an uninitialized / NaN lane.
+    // marched `t` (finite, > 0) on the SDF-lit arm (mask == 1), and (with NO mesh fed here)
+    // the `1.0e30` sentinel on the pure-background arm. NO pixel is left with an
+    // uninitialized / NaN lane. (The mesh arm's `view_t == t_mesh` is covered by
+    // `mesh_owned_pixel_carries_t_mesh_not_sentinel`.)
     let mats = vec![GoldenMaterial::default()];
     let scene: Vec<SdfEdit> = vec![
         SdfEdit::sphere([0.0, 0.0, 0.0], 0.5, sdf_op::UNION, 0.0),
@@ -230,4 +232,47 @@ fn every_real_pixel_writes_a_finite_or_sentinel_view_t() {
     }
     assert!(sdf_hits > 0, "the scene must produce at least one SDF-lit pixel");
     assert!(bg_hits > 0, "the scene must produce at least one background pixel");
+}
+
+#[test]
+fn mesh_owned_pixel_carries_t_mesh_not_sentinel() {
+    // Render P7/P5-r1b UNLOCK: a mesh-covered pixel the SDF does NOT win is raster-owned, and
+    // the marcher now stores the MESH surface ray-t `t_mesh` (= `depth_to_t(mesh_depth)`) into
+    // gViewT instead of the old `1.0e30` sentinel — so the deferred resolve reconstructs the
+    // real mesh `P` (in-range point/spot lighting) AND the SSAO pass processes the mesh pixel.
+    // The host mirror `golden_marcher_attributes` must emit the SAME value (host == GPU).
+    let mats = vec![GoldenMaterial::default()];
+    // An EMPTY scene (no edits) — the SDF can never win, so EVERY mesh-covered pixel is
+    // raster-owned and a pixel with the clear depth is pure background.
+    let scene: Vec<SdfEdit> = Vec::new();
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+
+    // A finite mesh depth strictly less than the far-plane clear -> `has_mesh == true`.
+    let mesh_depth = 0.5_f32;
+    assert!(mesh_depth < MESH_DEPTH_CLEAR, "the probe depth must be in front of the clear");
+    let expected_t = depth_to_t(mesh_depth);
+
+    let mesh = golden_marcher_attributes(
+        &scene, &mats, mesh_depth, 12, 17, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0,
+        flags, [0.0, 0.0, 1.0],
+    );
+    assert_eq!(
+        mesh.view_t, expected_t,
+        "a mesh-owned pixel must carry t_mesh = depth_to_t(mesh_depth) = {expected_t}, got {}",
+        mesh.view_t
+    );
+    assert_eq!(mesh.mask, 1, "the raster-PBR mesh producer is mask == 1");
+    assert!(mesh.view_t.is_finite(), "t_mesh must be finite (it drives P reconstruction + SSAO)");
+
+    // The same scene at the CLEAR depth (no mesh, SDF empty -> miss) keeps the `1.0e30` sentinel.
+    let bg = golden_marcher_attributes(
+        &scene, &mats, MESH_DEPTH_CLEAR, 12, 17, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, 1.0,
+        flags, [0.0, 0.0, 1.0],
+    );
+    assert_eq!(bg.mask, 0, "a pure-background pixel is mask == 0");
+    assert_eq!(
+        bg.view_t, 1.0e30,
+        "a pure-background pixel must keep the 1.0e30 sentinel, got {}",
+        bg.view_t
+    );
 }

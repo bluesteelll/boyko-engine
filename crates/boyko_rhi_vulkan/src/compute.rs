@@ -185,7 +185,13 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// `sdf_soft_shadow` CALL SITE (`sdf_soft_shadow(p + n*SHADOW_NORMAL_BIAS, n, light)`) so grazing
 /// (near-tangent) terminator rays clear the curved surface instead of false-occluding — the
 /// GENERATED march span + `shadow.rs` stay byte-frozen; the new const + the per-component add → 122868 bytes.
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<122868> = SpirvBlob(*include_bytes!(concat!(
+/// Render P7/P5-r1b (mesh gViewT UNLOCK) then made a mesh-covered raster-owned pixel store the mesh
+/// surface ray-t `t_mesh` (= md * T_MAX) instead of the `1.0e30` sentinel at BOTH terminal gViewT
+/// write sites (Site B's main terminus + Site A's empty-tile early-return), so the deferred resolve
+/// reconstructs the real mesh `P` (in-range point/spot lighting) AND the SSAO pass processes mesh
+/// pixels. The SDF-hit branch (real `t`) and the pure-background branch (no mesh → `1.0e30`) are
+/// UNCHANGED; the two new `has_mesh ? t_mesh : 1.0e30` selects + the empty-tile select add → 122988 bytes.
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<122988> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
 )));
@@ -1092,12 +1098,14 @@ pub const MESH_COLOR: [f32; 3] = [0.15, 0.65, 0.25];
 /// `mask = 0` is the pre-P5 behavior; it is retained only for the docs/inline-composite
 /// `golden_composite_pixel_*` oracles that model the marcher's own mesh arm.)
 ///
-/// NOTE: the marcher does NOT write `gViewT` for a `!own_pixel` mesh pixel — it stores the
-/// `1.0e30` sentinel there (`sdf_gbuffer_composite.hlsl`, the `own_pixel && mask == 1.0`
-/// guard), and the raster pass writes only the 3 attribute MRT (no `gViewT`). So a mesh
-/// pixel's reconstructed `P = ro + rd * 1.0e30` is at infinity → every point/spot light is
-/// range-culled → a mesh pixel receives the directional + sky terms only. The oracle mirrors
-/// this by emitting the sentinel `view_t` on the raster-PBR mesh arm.
+/// NOTE (Render P7/P5-r1b UNLOCK): the raster pass writes only the 3 attribute MRT (no
+/// `gViewT`), so the MARCHER is the single writer of a `!own_pixel` mesh pixel's `gViewT`. It now
+/// stores the mesh surface ray-t `t_mesh` (= `depth_to_t(mesh_depth)`, the bound the ownership
+/// gate marched against) there — NOT the old `1.0e30` sentinel (`sdf_gbuffer_composite.hlsl`, the
+/// `(own_pixel && mask == 1.0) ? t : (has_mesh ? t_mesh : 1.0e30)` guard at both terminal write
+/// sites). So a mesh pixel's reconstructed `P = ro + rd * t_mesh` is the REAL mesh surface: in-
+/// range point/spot lights light the mesh AND the SSAO pass processes it (`view_t < SSAO_VIEWT_BG`).
+/// The oracle mirrors this by emitting `t_mesh` as `view_t` on the raster-PBR mesh arm.
 pub const MESH_RASTER_ALBEDO: [f32; 3] = [1.0, 1.0, 1.0];
 
 /// Word offset of the per-pixel mesh-depth region (immediately after the edit
@@ -4421,10 +4429,13 @@ pub fn golden_marcher_attributes(
         //   - gNormal = oct_encode((0, 0, 1)) (the fronto-parallel quad's +Z) + mat_id 0.
         //   - gMaterial = (shadow = 1, ao = 1, mask = 1) — the raster has no analytic SDF
         //     shadow/AO (a charted follow-up), so both are unoccluded.
-        //   - gViewT: the marcher writes the 1.0e30 SENTINEL for a `!own_pixel` pixel (the
-        //     raster MRT carry no gViewT lane), so the resolve reconstructs P at infinity and
-        //     range-culls every point/spot — a mesh pixel gets the directional + sky terms
-        //     only. Mirror that with the sentinel `view_t`.
+        //   - gViewT: Render P7/P5-r1b UNLOCK — the marcher writes the mesh surface ray-t
+        //     `t_mesh` (= `depth_to_t(mesh_depth)`, the same value the ownership gate marched
+        //     against) for a `!own_pixel` mesh pixel, NOT the old `1.0e30` sentinel. The resolve
+        //     reconstructs the REAL mesh surface position `P = ro + rd * t_mesh`, so in-range
+        //     point/spot lights now light the mesh (instead of being range-culled at infinity)
+        //     AND the SSAO pass processes the mesh pixel (`view_t < SSAO_VIEWT_BG`). Mirror that
+        //     with `t_mesh` so the host oracle == the GPU on every equivalence golden.
         let n = [0.0_f32, 0.0, 1.0];
         let oct = oct_encode(n);
         MarcherAttributes {
@@ -4434,7 +4445,7 @@ pub fn golden_marcher_attributes(
             shadow: 255,
             ao: 255,
             mask: 1,
-            view_t: 1.0e30,
+            view_t: t_mesh,
         }
     } else {
         // Pure background / empty (NO mesh, SDF missed): mask == 0 pass-through. gNormal/id/
@@ -4764,10 +4775,12 @@ pub fn golden_deferred_resolve(
 /// `ssao` is the per-pixel SSAO term (`gSsao` texel, `[0,1]`).
 ///
 /// When `ssao_mode == 0` the `ssao` argument is IGNORED and `ao` is returned UNCHANGED — the
-/// BYTE-IDENTICAL 0%-gate (every pre-P7 scene). When armed, a mesh pixel (`view_t >= 1e30`
-/// sentinel) takes pure SSAO (`class_ao == 1.0`); an SDF pixel takes `min(ao, ssao)` (the
-/// most-occluded wins, cross-representation). The op-order mirrors the shader exactly (the
-/// `min` and the sentinel compare are plain IEEE).
+/// BYTE-IDENTICAL 0%-gate (every pre-P7 scene). When armed, this `view_t >= 1e30` branch forces
+/// `class_ao = 1.0` for the PURE-BACKGROUND sentinel pixel; an SDF or (Render P7/P5-r1b) a now-
+/// finite-`view_t` MESH pixel takes `min(ao, ssao)` — for the mesh pixel `ao == 1.0` (no analytic
+/// SDF AO), so that reduces to pure SSAO, while an SDF pixel takes the most-occluded of the two
+/// (cross-representation). The op-order mirrors the shader exactly (the `min` and the sentinel
+/// compare are plain IEEE); this RESOLVE-side function is unchanged by the gViewT unlock.
 #[inline]
 fn ssao_combine(ssao_mode: u32, ao: f32, view_t: f32, ssao: f32) -> f32 {
     if ssao_mode == 0 {

@@ -3508,8 +3508,11 @@ fn assert_lit_matches_deferred_golden_omega(
             // white vertex color, Cook-Torrance lit) stands, NOT the old flat MESH_COLOR
             // (mask=0) pass-through. `golden_marcher_attributes` now MODELS that raster-PBR
             // producer exactly (mask=1, base=MESH_RASTER_ALBEDO, n=(0,0,1), shadow=ao=1,
-            // view_t=sentinel), so the deferred oracle predicts the mesh pixel too and it is
-            // asserted on the SAME ±2/255 budget as every other pixel — no skip.
+            // view_t=t_mesh — Render P7/P5-r1b: the mesh surface ray-t, NOT the old sentinel),
+            // so the deferred oracle predicts the mesh pixel too and it is asserted on the SAME
+            // ±2/255 budget as every other pixel — no skip. This `golden_deferred_resolve` is the
+            // directional+sky BASE resolve (no point/spot, no view_t consumption), so the mesh
+            // lit value is unchanged by the gViewT unlock — the equivalence stays GPU == host.
             let (_, rd) = composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
             let want = unpack_packed_rgb(golden_deferred_resolve(attrs, rd, &materials));
             let got = albedo_rgb(lit, px, py);
@@ -5828,11 +5831,15 @@ fn sdf_m1_brick_offscreen_matches_golden_and_analytic() {
 //   sdf_m2_brick_trilinear_offscreen -- --ignored --nocapture`
 // ===========================================================================================
 
-/// The gViewT non-hit sentinel (the marcher stores `1.0e30` on a mesh / background / empty pixel;
-/// a finite value is a real surface `t`). Mirrors the shader's `FAR`-class sentinel.
+/// The gViewT non-hit sentinel (the marcher stores `1.0e30` on a pure-background / empty pixel;
+/// a finite value is a real surface `t`). Mirrors the shader's `FAR`-class sentinel. NOTE
+/// (Render P7/P5-r1b): a MESH-covered raster-owned pixel now carries the finite mesh ray-t
+/// `t_mesh` (NOT the sentinel), so `gpu_is_hit` is only meaningful in the PURE-SDF region — every
+/// caller below restricts to `!mesh_covers_pixel(px, py)` for exactly this reason.
 const VIEWT_NO_HIT: f32 = 1.0e30;
 
 /// A GPU pixel is an SDF surface hit iff its gViewT lane carries a finite (non-sentinel) `t`.
+/// Callers MUST restrict to the pure-SDF region (a mesh pixel's finite `t_mesh` is not an SDF hit).
 fn gpu_is_hit(viewt: &[f32], px: u32, py: u32) -> bool {
     let t = viewt[(py * SDF_IMG_W + px) as usize];
     t.is_finite() && t < VIEWT_NO_HIT * 0.5
@@ -6496,10 +6503,13 @@ fn sdf_m4_clipmap_far_field_screenshot_dump() {
 /// spans the world-XY footprint at `MESH_Z`, occluding the LEFT portion of the crater), under
 /// a colorful L0b light table (1 directional + 1 point (warm) + 1 spot (cool)) so the lit
 /// shading is visible. The mesh-covered pixels now show a PBR-LIT WHITE quad (the white
-/// vertex albedo run through full Cook-Torrance: directional + sky ambient — point/spot are
-/// range-culled by the mesh's sentinel `gViewT`); the SDF-covered pixels show the lit crater.
-/// The owner eyeballs that the mesh region is a shaded white surface (not a flat green
-/// `[38,166,64]` = the old MESH_COLOR), proving the P5 raster-PBR producer is on-screen.
+/// vertex albedo run through full Cook-Torrance). Render P7/P5-r1b UNLOCK: the marcher now writes
+/// the mesh surface ray-t `t_mesh` into gViewT (not the old `1.0e30` sentinel), so the resolve
+/// reconstructs the real mesh `P` and IN-RANGE point/spot lights now light the mesh (the warm
+/// point + cool spot reach the quad) — NOT just directional + sky as before; the SDF-covered
+/// pixels show the lit crater. The owner eyeballs that the mesh region is a shaded white surface
+/// (not a flat green `[38,166,64]` = the old MESH_COLOR), proving the P5 raster-PBR producer is
+/// on-screen — and that the mesh now picks up the punctual lights' warm/cool tint.
 ///
 /// Writes the LIT image to `D:/tmp/p5_mesh_sdf.bmp` (created if absent). `#[ignore]` because
 /// it needs the RTX (no CPU oracle assert — it is a visual dump).

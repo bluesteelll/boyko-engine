@@ -1332,13 +1332,16 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 gNormal[uint2(px, py)] = float4(0.5, 0.5, 0.0, 0.0);   // neutral oct, id = 0
                 gMaterial[uint2(px, py)] = float4(1.0, 1.0, 0.0, 1.0); // shadow=1, ao=1, mask=0
             }
-            // Lighting L0b (C2) / Decision 3: this EMPTY-tile early-return is a SEPARATE
-            // terminal exit BEFORE the final block, so gViewT must be written here too — the
-            // `1.0e30` sentinel (mask == 0, never read on a non-lit pixel), ALWAYS written
-            // (the gate controls only the three attribute lanes). Omitting it would leave an
-            // EMPTY pixel's gViewT lane unwritten this frame. EXACTLY-ONCE: this thread
-            // returns immediately after.
-            gViewT[uint2(px, py)] = 1.0e30;
+            // Lighting L0b (C2) / Decision 3 + Render P7/P5-r1b UNLOCK: this EMPTY-tile
+            // early-return is a SEPARATE terminal exit BEFORE the final block, so gViewT must be
+            // written here too — ALWAYS written (the gate controls only the three attribute
+            // lanes). Symmetric with Site B's three-way store: a mesh-covered EMPTY pixel is
+            // raster-owned, so it carries the mesh surface ray-t `t_mesh` (= md * T_MAX) — the
+            // resolve reconstructs the real mesh `P` (point/spot lighting) and the SSAO pass
+            // processes it. A no-mesh EMPTY pixel keeps the `1.0e30` sentinel (mask == 0, never
+            // read on a non-lit pixel). Omitting the write would leave the lane unwritten this
+            // frame. EXACTLY-ONCE: this thread returns immediately after.
+            gViewT[uint2(px, py)] = has_mesh ? t_mesh : 1.0e30;
             return;
         }
         // FULL mode (1) ONLY seeds the prefix; EmptySkipOnly (2) leaves `t_seed = 0.0`
@@ -1675,13 +1678,21 @@ void main(uint3 tid : SV_DispatchThreadID) {
         gNormal[uint2(px, py)] = float4(oct.x, oct.y, id_ba.x, id_ba.y);
         gMaterial[uint2(px, py)] = float4(shadow, ao, mask, 1.0);
     }
-    // Lighting L0b (C2) / Decision 3: gViewT is the third + last terminal write site and is
-    // ALWAYS written (the exactly-once contract is structurally separate from the attribute
-    // gate). On an own_pixel SDF-lit pixel store the REAL marched ray param `t` (the same `t`
-    // the SDF-hit arm's `p = ro + rd * t` used, in scope here); on every other case (own
-    // mesh/background, or a raster-owned `!own_pixel` pixel) store the `1.0e30` sentinel
-    // (never read on a non-lit pixel — the resolve gates its gViewT read inside `mask == 1`).
-    // `own_pixel && mask == 1.0` is the only lit case; a `!own_pixel` pixel is necessarily
-    // mask == 0 in the marcher (the mesh arm), so the sentinel is correct.
-    gViewT[uint2(px, py)] = (own_pixel && mask == 1.0) ? t : 1.0e30;
+    // Lighting L0b (C2) / Decision 3 + Render P7/P5-r1b UNLOCK: gViewT is the third + last
+    // terminal write site and is ALWAYS written (the exactly-once contract is structurally
+    // separate from the attribute gate). Three cases:
+    //   * own_pixel SDF-lit (`mask == 1.0`): the REAL marched ray param `t` (the same `t` the
+    //     SDF-hit arm's `p = ro + rd * t` used, in scope here).
+    //   * a mesh-covered pixel (`has_mesh`) the SDF did NOT win — raster-owned (`!own_pixel`):
+    //     the mesh surface ray-t `t_mesh` (= md * T_MAX, the bound the gate marched against).
+    //     This makes the resolve reconstruct the REAL mesh surface position `P = ro + rd*t_mesh`
+    //     (so in-range point/spot lights light the mesh) AND the SSAO pass process the mesh
+    //     pixel (`view_t < SSAO_VIEWT_BG`), instead of the old `1.0e30` that placed P at
+    //     infinity (range-culling every punctual light + skipping SSAO). The raster MRT carries
+    //     no gViewT lane, so the marcher is the single writer of this mesh-pixel `t`.
+    //   * pure background / empty (no mesh, SDF missed): the `1.0e30` sentinel (never read — the
+    //     resolve gates its gViewT read inside `mask == 1`).
+    // `own_pixel && mask == 1.0` is the only SDF-lit case; a `!own_pixel` pixel is necessarily a
+    // mesh-covered raster-owned pixel (mask == 0 in the marcher, but the raster wrote mask == 1).
+    gViewT[uint2(px, py)] = (own_pixel && mask == 1.0) ? t : (has_mesh ? t_mesh : 1.0e30);
 }
