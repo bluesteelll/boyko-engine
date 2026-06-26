@@ -71,7 +71,7 @@ use boyko_rhi_vulkan::compute::{
     encode_edit_list, deferred_pbr_spirv, golden_composite_pixel_ex, golden_deferred_resolve,
     golden_marcher_attributes, composite_pixel_ray, GoldenMaterial, DEFAULT_MARCHER_OMEGA,
     LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, DEFAULT_LIGHT_DIR, mesh_depth_for_z,
-    sdf_gbuffer_composite_spirv, sdf_op, sdf_tile_cull_spirv, tile_grid_extent,
+    sdf_gbuffer_composite_spirv, sdf_op, sdf_ssao_spirv, sdf_tile_cull_spirv, tile_grid_extent,
 };
 use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
@@ -79,7 +79,8 @@ use boyko_rhi_vulkan::ffi::{
     VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VkExtent2D,
 };
 use boyko_rhi_vulkan::swapchain::{
-    BrickActivation, GBUFFER_MVP_BYTES, GBufferFrame, GBufferScene, Renderer, Surface, Swapchain,
+    BrickActivation, GBUFFER_MVP_BYTES, GBufferFrame, GBufferScene, Renderer, SsaoActivation,
+    Surface, Swapchain,
 };
 use boyko_rhi_vulkan::window::{CapturedMsg, Window};
 
@@ -1137,6 +1138,9 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         // The legacy head-on shadow direction (`[0,0,1]`) — byte-identical to the pre-`light_dir`-
         // field marcher push (this golden present asserts the existing stream).
         light_dir: DEFAULT_LIGHT_DIR,
+        // Render P7: SSAO OFF (the default) — NO SSAO pass recorded, byte-identical to the pre-P7
+        // stream (the 0%-gate). These golden/cull-comparison presents assert the existing stream.
+        ssao: None,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -1952,6 +1956,9 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         // The legacy head-on shadow direction (`[0,0,1]`): the cull-ON vs cull-OFF comparison must
         // hold the marcher push fixed, so this stays the pre-`light_dir`-field default.
         light_dir: DEFAULT_LIGHT_DIR,
+        // Render P7: SSAO OFF (the default) — NO SSAO pass recorded, byte-identical to the pre-P7
+        // stream (the 0%-gate). These golden/cull-comparison presents assert the existing stream.
+        ssao: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -2153,6 +2160,10 @@ fn p0_windowed_coarse_cull_matches_uncull() {
 /// The fixed dump path for the 512-native engine showcase frame.
 const SHOWCASE_BMP: &str = r"D:\tmp\engine_showcase_512.bmp";
 
+/// The fixed dump path for the 512-native engine SSAO showcase frame (the SAME scene with SSAO
+/// ON, dumped under an SSAO-labelled path the orchestrator converts + shows the owner).
+const SSAO_BMP: &str = r"D:\tmp\engine_ssao_512.bmp";
+
 /// The showcase sun direction (`L`, the un-normalized "direction TO the light"): upper-LEFT and
 /// slightly toward the camera, ~57° elevation. Used BOTH as the marcher's `scene.light_dir` (the
 /// A1 cast-shadow march direction) AND the primary directional in [`showcase_light_table`] — they
@@ -2294,7 +2305,27 @@ fn read_bmp_dimensions(bytes: &[u8]) -> Option<(i32, i32)> {
 #[test]
 #[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the screenshot"]
 fn engine_showcase_512_screenshot_dump() {
-    let mut window = match Window::open("boyko_engine showcase 512", WIDTH, HEIGHT) {
+    run_showcase_dump("boyko_engine showcase 512", SHOWCASE_BMP);
+}
+
+/// **Engine SSAO showcase — the SAME crisp 512×512-native scene WITH SSAO ON, dumped to
+/// [`SSAO_BMP`].** Identical to [`engine_showcase_512_screenshot_dump`] (the showcase already
+/// arms `ssao_mode == 1` + `scene.ssao = Some(..)`, so the SSAO contact-crease darkening is in the
+/// frame) — this sibling writes the SSAO-labelled BMP path the orchestrator converts + shows the
+/// owner for the SSAO A/B visual sign-off.
+///
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`.
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the SSAO screenshot"]
+fn engine_ssao_512_screenshot_dump() {
+    run_showcase_dump("boyko_engine SSAO 512", SSAO_BMP);
+}
+
+/// The shared 512×512-native multi-light SDF-shadow + SSAO showcase dump body. `window_title` is
+/// the window caption; `bmp_path` is the TRUE 512×512 24-bit BMP destination (no upscale). SSAO is
+/// ON (the scene arms `ssao_mode == 1` + `scene.ssao = Some(..)`).
+fn run_showcase_dump(window_title: &str, bmp_path: &str) {
+    let mut window = match Window::open(window_title, WIDTH, HEIGHT) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("SKIP engine_showcase_512: cannot open a window ({e:?})");
@@ -2461,8 +2492,11 @@ fn engine_showcase_512_screenshot_dump() {
         .expect("brick clip-map (showcase scene) — create + bake + upload");
 
     // --- The Lighting light table SSBO (resolve binding 6): the SHOWCASE multi-light shadow
-    // table (`shadow_mode == 1`, NON-CLUSTERED) + its staging source. ---
+    // table (`shadow_mode == 1`, NON-CLUSTERED) + its staging source. Render P7: ARMED with
+    // `ssao_mode == 1` (header word 11) so the resolve combines the SSAO term (`scene.ssao =
+    // Some(..)` records the SSAO pass that writes it). ---
     let (light_header, light_elems) = showcase_light_table();
+    let light_header = light_header.with_ssao_mode(1);
     let light_words = pack_showcase_light_table(&light_header, &light_elems);
     let light_table_bytes = (light_words.len() as u64) * 4;
     let light_table = RhiDevice::create_buffer(
@@ -2672,12 +2706,45 @@ fn engine_showcase_512_screenshot_dump() {
     )
     .expect("present-blit fullscreen-sample pipeline");
 
+    // --- Render P7: the SSAO compute pass (dedicated 5-binding set { gNormal @0, gMaterial @1,
+    // gViewT @2 (R), the `ssao` out @3 (W), camera UBO @4 }). It gathers a horizon-based AO factor
+    // from the G-buffer and stores it into the `ssao` lane the resolve combines under `ssao_mode
+    // != 0` (armed via `light_header.with_ssao_mode(1)` above). `GBufferTargets` writes the
+    // `ssao_set` against THIS layout, pointing at the per-extent G-buffer + `ssao` images. ---
+    let ssao_cs = RhiDevice::create_shader_module(device, sdf_ssao_spirv())
+        .expect("Render P7 SSAO compute shader module");
+    let ssao_entries = [
+        BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+    ];
+    let ssao_layout = RhiDevice::create_bind_group_layout(
+        device,
+        &BindGroupLayoutDesc { entries: &ssao_entries },
+    )
+    .expect("Render P7 SSAO bind-group layout");
+    let ssao_pipeline = RhiDevice::create_compute_pipeline(
+        device,
+        &ComputePipelineDesc {
+            module: &ssao_cs,
+            entry: c"main",
+            // The SSAO shader pushes NO constant (camera is the UBO @4), but the create contract
+            // requires a non-empty (multiple-of-4) range; declare the shared range (unused).
+            push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: Some(&ssao_layout),
+        },
+    )
+    .expect("Render P7 SSAO compute pipeline");
+
     // The shader modules are consumed by pipeline creation; destroy them now.
     // SAFETY: every module was created on `ctx` above + is no longer needed once its pipeline
     // is created; each is destroyed exactly once.
     unsafe {
         RhiDevice::destroy_shader_module(device, sample_fs);
         RhiDevice::destroy_shader_module(device, sample_vs);
+        RhiDevice::destroy_shader_module(device, ssao_cs);
         RhiDevice::destroy_shader_module(device, resolve_cs);
         RhiDevice::destroy_shader_module(device, cs);
         RhiDevice::destroy_shader_module(device, fs);
@@ -2734,6 +2801,10 @@ fn engine_showcase_512_screenshot_dump() {
         // The sun direction (`L`, direction TO the light) — MUST equal the primary directional in
         // `showcase_light_table` so the marched cast shadow lands where the resolve lights from.
         light_dir: SHOWCASE_SUN_DIR,
+        // Render P7: SSAO ON — the recorder records the SSAO pass (BETWEEN the marcher→resolve
+        // barrier and the resolve) that writes the `ssao` lane the resolve combines (`ssao_mode ==
+        // 1`, armed on `light_header` above). The contact creases / floor-body junctions darken.
+        ssao: Some(SsaoActivation { pipeline: &ssao_pipeline, layout: &ssao_layout }),
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -2834,10 +2905,10 @@ fn engine_showcase_512_screenshot_dump() {
                 (COMPOSITE_W, COMPOSITE_H),
                 "the readback must be the native {COMPOSITE_W}x{COMPOSITE_H} composite (no upscale)"
             );
-            write_bmp(SHOWCASE_BMP, &rgba, w, h)
-                .unwrap_or_else(|e| panic!("failed to write {SHOWCASE_BMP}: {e:?}"));
-            let bytes = std::fs::read(SHOWCASE_BMP)
-                .unwrap_or_else(|e| panic!("failed to re-read {SHOWCASE_BMP} for header verification: {e:?}"));
+            write_bmp(bmp_path, &rgba, w, h)
+                .unwrap_or_else(|e| panic!("failed to write {bmp_path}: {e:?}"));
+            let bytes = std::fs::read(bmp_path)
+                .unwrap_or_else(|e| panic!("failed to re-read {bmp_path} for header verification: {e:?}"));
             let (bw, bh) = read_bmp_dimensions(&bytes)
                 .expect("the dumped showcase must be a valid BM 54-byte-header BMP");
             assert_eq!(
@@ -2845,7 +2916,7 @@ fn engine_showcase_512_screenshot_dump() {
                 (COMPOSITE_W as i32, COMPOSITE_H as i32),
                 "the dumped BMP header must report {COMPOSITE_W}x{COMPOSITE_H} native dimensions"
             );
-            println!("engine showcase dump -> {SHOWCASE_BMP} ({bw}x{bh} native, multi-light SDF shadows)");
+            println!("engine showcase dump -> {bmp_path} ({bw}x{bh} native, multi-light SDF shadows + SSAO)");
         }
         None => {
             eprintln!(
@@ -2864,6 +2935,8 @@ fn engine_showcase_512_screenshot_dump() {
         RhiDevice::destroy_buffer(device, staging);
         RhiDevice::destroy_graphics_pipeline(device, present_pipeline);
         RhiDevice::destroy_bind_group_layout(device, present_layout);
+        RhiDevice::destroy_compute_pipeline(device, ssao_pipeline);
+        RhiDevice::destroy_bind_group_layout(device, ssao_layout);
         RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
         RhiDevice::destroy_bind_group_layout(device, resolve_layout);
         RhiDevice::destroy_compute_pipeline(device, marcher);

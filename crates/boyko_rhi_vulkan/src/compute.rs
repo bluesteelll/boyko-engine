@@ -266,6 +266,18 @@ static SDF_TILE_CULL_SPV: SpirvBlob<10304> = SpirvBlob(*include_bytes!(concat!(
     "/shaders/sdf_tile_cull.comp.spv"
 )));
 
+/// The committed Render P7 SSAO (HBAO-lite, no-trig) SPIR-V (`shaders/sdf_ssao.comp.hlsl`,
+/// GROUP A). One invocation per pixel gathers a horizon-based ambient-occlusion factor from
+/// the FROZEN G-buffer and stores it into the `R8_UNORM` `ssao` lane the deferred resolve
+/// combines under `ssao_mode != 0`. Bound to a DEDICATED 5-binding SSAO set: gNormal @0 (R,
+/// oct + id), gMaterial @1 (R, `.b` = mask), gViewT @2 (R, surface `t`), the `ssao` out @3 (W),
+/// the 80-byte camera UBO @4. `gAlbedo` is NOT bound. The host oracle is
+/// [`golden_ssao_attributes`] (Stage-2 gather over the [`golden_gbuffer`] Stage-1 map).
+static SDF_SSAO_SPV: SpirvBlob<43204> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/sdf_ssao.comp.spv"
+)));
+
 /// A 4-byte-aligned wrapper around a committed SPIR-V byte blob so its address is
 /// a valid `*const u32` and it can be re-viewed as a `&[u32]` word stream.
 #[repr(C, align(4))]
@@ -436,6 +448,21 @@ pub fn cluster_cull_spirv() -> &'static [u32] {
 #[inline]
 pub fn sdf_tile_cull_spirv() -> &'static [u32] {
     SDF_TILE_CULL_SPV.as_words()
+}
+
+/// The committed Render P7 SSAO (HBAO-lite) SPIR-V as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// One invocation per pixel; bound to the dedicated 5-binding SSAO set { gNormal @0 (R),
+/// gMaterial @1 (R), gViewT @2 (R), `ssao` out @3 (W), camera UBO @4 }. It gathers the
+/// horizon-based ambient-occlusion factor from the FROZEN G-buffer and STOREs it into the
+/// `R8_UNORM` `ssao` lane the deferred resolve combines under `ssao_mode != 0`. Dispatched 1D
+/// over the SAME pixel count as the marcher/resolve, BETWEEN the marcher→resolve store-to-load
+/// barrier and the resolve (with a COMPUTE→COMPUTE barrier on `ssao` so the resolve's
+/// `gSsao.Load` sees the store). The host mirror is [`golden_ssao_attributes`].
+#[inline]
+pub fn sdf_ssao_spirv() -> &'static [u32] {
+    SDF_SSAO_SPV.as_words()
 }
 
 /// Errors from the compute-pipeline flow. `VkError` carries the failing command

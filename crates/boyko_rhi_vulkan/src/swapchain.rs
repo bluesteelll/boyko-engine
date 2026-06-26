@@ -3019,6 +3019,86 @@ impl<'ctx> Renderer<'ctx> {
             }
         }
 
+        // === Render P7: the SSAO compute pass. Recorded ONLY when the scene wires the SSAO
+        // activation (`scene.ssao.is_some()`); otherwise skipped entirely — NO bind, NO dispatch,
+        // NO barrier — so the command stream is byte-identical to the pre-P7 windowed path (the
+        // 0%-gate; the `ssao` image is always allocated + transitioned by C1's batch regardless of
+        // this branch). The SSAO pass gathers a horizon-based AO factor from the G-buffer (gNormal/
+        // gMaterial/gViewT, READ) and STORES it into the `ssao` lane the resolve combines under
+        // `ssao_mode != 0`. Its inputs are already SHADER_READ-visible: the marcher→resolve
+        // store-to-load barrier above (5a) covers gNormal/gMaterial/gViewT (the SSAO reads the same
+        // three the resolve reads), so NO new input barrier is needed. After the dispatch, a NEW
+        // COMPUTE→COMPUTE / SHADER_WRITE→SHADER_READ / GENERAL→GENERAL barrier on `ssao` orders the
+        // SSAO store before the resolve's `gSsao.Load` (the cull→resolve barrier shape, on the
+        // `ssao` image). The SSAO pass reads its camera from the UBO bound at the SSAO set's binding
+        // 4, so it pushes NO constant (unlike the marcher). ===
+        if let Some(activation) = &scene.ssao {
+            let ssao_set = targets
+                .ssao_set
+                .as_ref()
+                .expect("invariant: scene.ssao is Some ⇒ GBufferTargets::create wrote ssao_set");
+            // SAFETY: recording is open; the SSAO pipeline + its layout (declaring the SSAO set
+            // layout at set 0 + the shared 80-byte COMPUTE push range) are live on this device
+            // (caller contract); `ssao_set` binds the now-stored (SHADER_READ-visible, GENERAL)
+            // gNormal/gMaterial/gViewT + the `ssao` out (GENERAL) images + the scene's camera UBO;
+            // `dispatch_group_count_x` covers `present_extent`'s pixel count (the same grid the
+            // marcher/resolve dispatch); `&ssao_set.descriptor_set` is a single-element local alive
+            // for the call (first_set 0, count 1, zero dynamic offsets). The SSAO shader reads its
+            // camera from the UBO @4, so no push constant is recorded.
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    activation.pipeline.pipeline,
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    activation.pipeline.layout,
+                    0,
+                    1,
+                    &ssao_set.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+            }
+
+            // Order the SSAO pass's `ssao` WRITES (COMPUTE/SHADER_WRITE) before the resolve's
+            // `gSsao.Load` READS (COMPUTE/SHADER_READ) — a COMPUTE→COMPUTE, GENERAL→GENERAL image
+            // barrier on `ssao` (the cull→resolve barrier shape, on the `ssao` image).
+            let ssao_store_to_load = VkImageMemoryBarrier {
+                s_type: VkStructureType::ImageMemoryBarrier,
+                p_next: ptr::null(),
+                src_access_mask: VK_ACCESS_SHADER_WRITE_BIT,
+                dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
+                old_layout: VK_IMAGE_LAYOUT_GENERAL,
+                new_layout: VK_IMAGE_LAYOUT_GENERAL,
+                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                image: targets.ssao.image,
+                subresource_range: COLOR_SUBRESOURCE_RANGE,
+            };
+            // SAFETY: recording is open; one image barrier on the live `ssao` image (the SSAO pass
+            // just wrote it); COMPUTE_SHADER→COMPUTE_SHADER with SHADER_WRITE→SHADER_READ +
+            // GENERAL→GENERAL makes the SSAO store available + visible to the resolve's
+            // `gSsao.Load`; `&ssao_store_to_load` outlives the call.
+            unsafe {
+                (self.fns.cmd_pipeline_barrier)(
+                    cmd,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0,
+                    0,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    1,
+                    (&ssao_store_to_load as *const VkImageMemoryBarrier).cast(),
+                );
+            }
+        }
+
         // === Lighting L1: the clustered froxel light-cull pass (Decision 6). Recorded ONLY
         // when the scene wires the cull pipeline + cull set; otherwise skipped entirely (the
         // resolve's `clusters_enabled` header gate then loops the flat table — the L1 OFF /
@@ -3862,6 +3942,42 @@ pub struct BrickActivation {
 /// 0`; `present_pipeline`'s `color_formats[0]` MUST equal the swapchain format and
 /// its layout MUST declare `present_layout` (one COMBINED_IMAGE_SAMPLER) — or the
 /// validation layer faults at record/draw time.
+/// The Render P7 SSAO compute pass activation: the SSAO pipeline + its DEDICATED 5-binding
+/// bind-group LAYOUT, threaded into [`GBufferScene::ssao`] as `Some` to turn the SSAO pass ON.
+///
+/// `None` on [`GBufferScene::ssao`] is the OFF path: the recorder records NOTHING new (no SSAO
+/// descriptor-set write in [`GBufferTargets::create`], no transition / dispatch / barrier in
+/// [`Renderer::record_gbuffer`]), so the command stream is BYTE-IDENTICAL to the pre-P7 path
+/// (the 0%-gate — proven by C1, since the `ssao` image is always allocated + transitioned
+/// regardless of this field). The resolve's `ssao_mode` header gate must be set in lock-step:
+/// `Some` ⇒ the scene's light table carries `ssao_mode != 0`; `None` ⇒ `ssao_mode == 0` (the
+/// resolve then never reads the SSAO image, so the un-written contents are irrelevant).
+///
+/// # Borrow bundle (like the marcher / resolve pipelines)
+///
+/// The caller OWNS the SSAO pipeline + layout and tears them down; the `'a` lifetime ties this
+/// activation to those borrows for the frame call. [`GBufferTargets`] writes a 5-binding
+/// `ssao_set` against [`Self::layout`] ONCE per extent in [`GBufferTargets::sync_gbuffer`] —
+/// binding { gNormal @0 (R), gMaterial @1 (R), gViewT @2 (R), the `ssao` out image @3 (W), the
+/// camera UBO @4 } — exactly the SSAO shader's interface (`sdf_ssao.comp.hlsl`).
+///
+/// `#[derive(Clone, Copy)]` — a pair of borrows the caller flips between frames with no re-record.
+#[derive(Clone, Copy)]
+pub struct SsaoActivation<'a> {
+    /// The Render P7 SSAO compute pipeline (`sdf_ssao.comp` / [`crate::compute::sdf_ssao_spirv`]):
+    /// its layout declares [`Self::layout`] at `set 0` + the 80-byte COMPUTE push range (the
+    /// shared `CompositePushConstants` range — the SSAO pass reads its camera from the UBO @4, so
+    /// it pushes NO constant, but the layout's range must match for create-time validity). The
+    /// recorder binds it + dispatches `dispatch_group_count_x` BEFORE the resolve.
+    pub pipeline: &'a ComputePipeline,
+    /// The DEDICATED 5-binding SSAO bind-group LAYOUT { gNormal STORAGE image @0, gMaterial
+    /// STORAGE image @1, gViewT STORAGE image @2, the `ssao` out STORAGE image @3, the camera
+    /// UNIFORM buffer @4 } — matching `sdf_ssao.comp`'s set 0. The renderer writes a `ssao_set`
+    /// against it once per extent (pointing at the per-extent G-buffer + `ssao` images + the
+    /// scene's camera UBO).
+    pub layout: &'a VulkanBindGroupLayout,
+}
+
 pub struct GBufferScene<'a> {
     /// The mesh-raster graphics pipeline (pass A). Render P5-r0: a 3-MRT G-buffer
     /// PRODUCER — the fronto-parallel quad is drawn into the D32 depth image AND the three
@@ -4156,6 +4272,16 @@ pub struct GBufferScene<'a> {
     /// legacy [`DEFAULT_LIGHT_DIR`](crate::compute::DEFAULT_LIGHT_DIR) `[0, 0, 1]`; an angled /
     /// floor-and-object scene supplies the real sun direction so a real cast shadow lands.
     pub light_dir: [f32; 3],
+    /// The Render P7 SSAO compute pass activation. `None` = the OFF path (the default): the
+    /// recorder records NOTHING new (no SSAO set-write, no transition / dispatch / barrier), so
+    /// the command stream is BYTE-IDENTICAL to the pre-P7 path (the 0%-gate — the `ssao` image is
+    /// allocated + transitioned regardless, C1). `Some(_)` = the ON path: [`GBufferTargets`]
+    /// writes the 5-binding `ssao_set` against the activation's layout, and BEFORE the resolve the
+    /// recorder binds the SSAO pipeline + that set, dispatches [`Self::dispatch_group_count_x`],
+    /// and barriers the `ssao` image (COMPUTE→COMPUTE, GENERAL) so the resolve's `gSsao.Load` sees
+    /// the store. The caller MUST set the scene's light table `ssao_mode` in lock-step (`!= 0` ON,
+    /// `0` OFF) — the resolve's structural gate that decides whether the combine reads the image.
+    pub ssao: Option<SsaoActivation<'a>>,
 }
 
 /// The per-extent on-screen G-buffer targets for [`Renderer::render_gbuffer_frame`]:
@@ -4231,6 +4357,12 @@ pub struct GBufferTargets {
     /// @2, `LightIndexList` SSBO @3, `LightIndexAlloc` SSBO @4) — `None` when L1 is off
     /// ([`GBufferScene::cluster_cull`] is `None`). NO per-frame update.
     cull_set: Option<VulkanBindGroup>,
+    /// The Render P7 SSAO descriptor set, written ONCE against [`SsaoActivation::layout`]
+    /// (5 bindings: gNormal @0, gMaterial @1, gViewT @2 STORAGE images READ, the `ssao` out
+    /// STORAGE image @3 WRITE, the camera UBO @4) — `None` when SSAO is off
+    /// ([`GBufferScene::ssao`] is `None`). The recorder then skips the SSAO pass entirely (the
+    /// 0%-gate, byte-identical command stream). NO per-frame update.
+    ssao_set: Option<VulkanBindGroup>,
     /// The present-blit descriptor set, written ONCE against
     /// [`GBufferScene::present_layout`] (one COMBINED_IMAGE_SAMPLER pointing at
     /// `lit` + the scene's present sampler). NO per-frame update.
@@ -4639,6 +4771,51 @@ impl GBufferTargets {
             _ => None,
         };
 
+        // Render P7: the SSAO set, written ONCE here when the SSAO pass is wired (gNormal @0,
+        // gMaterial @1, gViewT @2 STORAGE images READ, the `ssao` out STORAGE image @3 WRITE, the
+        // camera UBO @4) — matching `sdf_ssao.comp`'s set 0. `None` when the scene does not supply
+        // the SSAO activation (the default OFF path); the recorder then skips the SSAO pass
+        // entirely (the 0%-gate, byte-identical command stream). The `ssao` image is the SAME one
+        // the resolve set binds at @11 — the SSAO pass WRITES it, the resolve READS it (ordered by
+        // the recorder's COMPUTE→COMPUTE barrier on the SSAO ON path).
+        let ssao_set = match scene.ssao {
+            Some(activation) => {
+                let entries = [
+                    BindGroupEntry::StorageImage { texture: &normal },
+                    BindGroupEntry::StorageImage { texture: &material },
+                    BindGroupEntry::StorageImage { texture: &viewt },
+                    BindGroupEntry::StorageImage { texture: &ssao },
+                    BindGroupEntry::UniformBuffer { buffer: scene.camera_uniform },
+                ];
+                let desc = BindGroupDesc::<Vulkan> { layout: activation.layout, entries: &entries };
+                match RhiDevice::create_bind_group(ctx, &desc) {
+                    Ok(g) => Some(g),
+                    Err(e) => {
+                        // SAFETY: the resolve + vocabulary sets + the (optional) cull set + the
+                        // eight textures above were created on `ctx`; referenced by no submission;
+                        // each destroyed exactly once on this error path (reverse acquisition
+                        // order). The cull set is `Option`-guarded (only when L1 wired).
+                        unsafe {
+                            if let Some(cs) = cull_set {
+                                RhiDevice::destroy_bind_group(ctx, cs);
+                            }
+                            RhiDevice::destroy_bind_group(ctx, resolve_set);
+                            RhiDevice::destroy_bind_group(ctx, vocab_set);
+                            RhiDevice::destroy_texture(ctx, ssao);
+                            RhiDevice::destroy_texture(ctx, viewt);
+                            RhiDevice::destroy_texture(ctx, lit);
+                            RhiDevice::destroy_texture(ctx, material);
+                            RhiDevice::destroy_texture(ctx, normal);
+                            RhiDevice::destroy_texture(ctx, albedo);
+                            RhiDevice::destroy_texture(ctx, depth);
+                        }
+                        return Err(SwapchainError::DepthImage(e));
+                    }
+                }
+            }
+            None => None,
+        };
+
         // The present-blit set, written ONCE here: one COMBINED_IMAGE_SAMPLER pointing
         // at the LIT image (the resolve's output) + the scene's present sampler.
         let present_set = {
@@ -4653,11 +4830,15 @@ impl GBufferTargets {
             match RhiDevice::create_bind_group(ctx, &desc) {
                 Ok(g) => g,
                 Err(e) => {
-                    // SAFETY: the eight textures + the vocabulary, resolve & (optional) cull
-                    // sets above were created on `ctx`; referenced by no submission; each
-                    // destroyed exactly once on this error path (reverse acquisition order:
-                    // sets → images). The cull set is `Option`-guarded (only when L1 wired).
+                    // SAFETY: the eight textures + the vocabulary, resolve, (optional) cull &
+                    // (optional) SSAO sets above were created on `ctx`; referenced by no
+                    // submission; each destroyed exactly once on this error path (reverse
+                    // acquisition order: sets → images). The cull & SSAO sets are `Option`-guarded
+                    // (present only when L1 / SSAO are wired).
                     unsafe {
+                        if let Some(ss) = ssao_set {
+                            RhiDevice::destroy_bind_group(ctx, ss);
+                        }
                         if let Some(cs) = cull_set {
                             RhiDevice::destroy_bind_group(ctx, cs);
                         }
@@ -4687,6 +4868,7 @@ impl GBufferTargets {
             vocab_set,
             resolve_set,
             cull_set,
+            ssao_set,
             present_set,
             extent,
         })
@@ -4752,10 +4934,13 @@ impl GBufferTargets {
     unsafe fn destroy(self, ctx: &VulkanContext) {
         // SAFETY: per the contract `ctx` is live and nothing references these
         // resources; each was created on `ctx` and is destroyed exactly once, in
-        // reverse acquisition order (sets → images). The cull set is `Option`-guarded
-        // (present only when L1 was wired).
+        // reverse acquisition order (sets → images). The cull & SSAO sets are
+        // `Option`-guarded (present only when L1 / SSAO were wired).
         unsafe {
             RhiDevice::destroy_bind_group(ctx, self.present_set);
+            if let Some(ss) = self.ssao_set {
+                RhiDevice::destroy_bind_group(ctx, ss);
+            }
             if let Some(cs) = self.cull_set {
                 RhiDevice::destroy_bind_group(ctx, cs);
             }

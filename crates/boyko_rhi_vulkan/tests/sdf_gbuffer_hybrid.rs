@@ -56,6 +56,10 @@ use boyko_rhi_vulkan::compute::{
     // P6 R1 multi-light SDF shadows: the `shadow_mode == 1` host oracle + the per-pixel
     // dominant-N caster cap (mirrors the shader's `MAX_SDF_SHADOW_CASTERS_PER_PIXEL`).
     golden_deferred_resolve_table_shadowed, MAX_SDF_SHADOW_CASTERS_PER_PIXEL,
+    // Render P7 SSAO: the SSAO compute SPIR-V + the host two-stage oracle (Stage-1 G-buffer map +
+    // Stage-2 gather) + the SSAO-aware resolve mirrors (`min(class_ao, ssao)` combine).
+    sdf_ssao_spirv, golden_gbuffer, golden_ssao_attributes,
+    golden_deferred_resolve_table_shadowed_ssao,
     GoldenLight, GoldenLightHeader, GoldenMaterial, GOLDEN_LIGHT_HEADER_BASE_WORDS,
     composite_pixel_ray, deferred_pbr_spirv, mesh_depth_for_z,
     pack_rgba, pixel_world_xy,
@@ -1524,6 +1528,616 @@ fn run_gbuffer_hybrid_m4(
     }
 
     (out, tiles_out, viewt_out)
+}
+
+/// Render P7 — the SSAO-enabled OFFSCREEN harness. The no-brick / no-cull marcher → **SSAO** →
+/// resolve path (a self-contained sibling of [`run_gbuffer_hybrid_m4`]'s OFF path), recording the
+/// dedicated 5-binding SSAO compute pass BETWEEN the marcher→resolve store-to-load barrier and the
+/// resolve. Returns `(lit, ssao_r8)`: the LIT R8G8B8A8 readback AND the raw `ssao` R8_UNORM lane
+/// readback (`PIXELS` bytes, one AO factor per pixel). The light table is `light_table_words`
+/// (the caller arms `with_ssao_mode(1)`); `lighting_flags`/`light_dir` drive A1/A2 as usual.
+///
+/// The SSAO pass binds { gNormal @0, gMaterial @1, gViewT @2 (R), the `ssao` out @3 (W), the
+/// camera UBO @4 } and dispatches at the SAME grid the marcher used; a COMPUTE→COMPUTE
+/// GENERAL→GENERAL barrier on `ssao` orders its store before the resolve's `gSsao.Load`. The
+/// resolve set binds the SSAO image at @11 (the C1 interface). The host oracle is
+/// [`golden_ssao_attributes`] (AO channel) + [`golden_deferred_resolve_table_shadowed_ssao`] (lit).
+#[allow(clippy::too_many_arguments)]
+fn run_gbuffer_hybrid_ssao(
+    ctx: &VulkanContext,
+    edits: &[SdfEdit],
+    lighting_flags: u32,
+    light_dir: [f32; 3],
+    light_table_words: &[u32],
+) -> (Vec<u8>, Vec<u8>) {
+    let device: &VulkanContext = ctx;
+    let queue = ctx.rhi_queue();
+
+    // --- The edit-list SSBO (binding 0 + resolve @10), seeded with the packed header. ---
+    let buffer = device
+        .create_buffer(&BufferDesc {
+            size: (EDITLIST_BUFFER_WORDS as u64) * 4,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("edit-list storage buffer");
+    {
+        let mut header = vec![0u32; EDITLIST_BUFFER_WORDS];
+        encode_edit_list(&mut header, edits);
+        let mapped = device
+            .buffer_mapped_ptr(&buffer)
+            .expect("host-visible buffer is mapped");
+        write_words(mapped, &header);
+    }
+
+    // --- The camera/extent UNIFORM buffer (vocab @5 + resolve @5 + SSAO @4): the 80-byte ORTHO
+    // camera block + the (zeroed, brick-OFF) M4 tail, sized to the widened M4 UBO. ---
+    let camera_uniform = device
+        .create_buffer(&BufferDesc {
+            size: B5_CAMERA_UBO_BYTES_M4 as u64,
+            usage: BufferUsage::UNIFORM,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("camera uniform buffer");
+    {
+        let pc = CompositePushConstants::ortho(SDF_IMG_W, SDF_IMG_H);
+        debug_assert_eq!(pc.count, PIXELS);
+        let mapped = device
+            .buffer_mapped_ptr(&camera_uniform)
+            .expect("host-visible uniform buffer is mapped");
+        let bytes = pc.as_bytes();
+        debug_assert_eq!(bytes.len(), M2_GRID_PARAMS_OFFSET, "camera block must be 80 B");
+        // SAFETY: `mapped` points to `B5_CAMERA_UBO_BYTES_M4` (224) mapped host-coherent bytes; the
+        // 80-byte camera block is written at offset 0 (the M4 tail stays zero — brick OFF for SSAO).
+        // No GPU work is in flight yet, so the host write is unsynchronized-safe.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+        }
+    }
+
+    // --- The material table SSBO (vocab @7 + resolve @4). ---
+    let material_table = device
+        .create_buffer(&BufferDesc {
+            size: (DEFAULT_MATERIAL_TABLE.len() as u64) * 4,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("PBR material table storage buffer");
+    {
+        let mapped = device
+            .buffer_mapped_ptr(&material_table)
+            .expect("host-visible material table is mapped");
+        write_words(mapped, &DEFAULT_MATERIAL_TABLE);
+    }
+
+    // --- The light table SSBO (resolve @6), seeded with the caller's words (ssao_mode armed). ---
+    let light_table = device
+        .create_buffer(&BufferDesc {
+            size: (light_table_words.len() as u64) * 4,
+            usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("Lighting light table storage buffer");
+    {
+        let mapped = device
+            .buffer_mapped_ptr(&light_table)
+            .expect("host-visible light table is mapped");
+        write_words(mapped, light_table_words);
+    }
+
+    // --- The bound-but-unread coarse-cull tile SSBO (vocab @6) + the brick placeholder grid
+    // (vocab @9). The SSAO harness runs the marcher with the cull + brick gated OFF. ---
+    let tiles_buffer = device
+        .create_buffer(&BufferDesc {
+            size: (tile_count() as u64) * (TILE_BOUND_BYTES as u64),
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("P4b coarse-cull tile-bound storage buffer");
+    let pointer_grid_buffer = device
+        .create_buffer(&BufferDesc {
+            size: 4,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("M1 pointer-grid placeholder buffer");
+    {
+        let mapped = device
+            .buffer_mapped_ptr(&pointer_grid_buffer)
+            .expect("host-visible pointer-grid placeholder is mapped");
+        write_words(mapped, &[0u32]);
+    }
+
+    // --- The brick atlas (vocab @10 + the duplicate level slots @12/@14): baked from `edits`,
+    // bound-but-unread (`brick_trilinear == 0`, `brick_levels == 1`). ---
+    let brick_atlas = {
+        use boyko_sdf_math::SdfEditField;
+        let mut field = SdfEditField::new();
+        for e in edits {
+            assert!(field.push(*e), "scene must fit MAX_SDF_EDITS");
+        }
+        field.bump_gen();
+        BrickAtlas::create(ctx, &field).expect("M2 brick atlas (bound-but-unread) — create + bake")
+    };
+
+    // --- The depth IMAGE + the MRT G-buffer + lit + gViewT + ssao images. ---
+    let depth = device
+        .create_texture(&TextureDesc {
+            width: SDF_IMG_W,
+            height: SDF_IMG_H,
+            depth: 1,
+            format: Format::D32Sfloat,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
+        })
+        .expect("offscreen depth texture (sampled)");
+    let make_gbuf = |usage: ImageUsage, label: &str| {
+        device
+            .create_texture(&TextureDesc {
+                width: SDF_IMG_W,
+                height: SDF_IMG_H,
+                depth: 1,
+                format: GBUFFER_FORMAT,
+                dimension: TextureDimension::D2,
+                usage,
+            })
+            .unwrap_or_else(|e| panic!("{label}: {e:?}"))
+    };
+    let albedo = make_gbuf(ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT, "G-buffer albedo");
+    let normal = make_gbuf(ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT, "G-buffer normal");
+    let material = make_gbuf(ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT, "G-buffer material");
+    let lit = make_gbuf(ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC, "resolve lit image");
+    let viewt = device
+        .create_texture(&TextureDesc {
+            width: SDF_IMG_W,
+            height: SDF_IMG_H,
+            depth: 1,
+            format: Format::R32Sfloat,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE,
+        })
+        .expect("Lighting L0b gViewT storage image");
+    // The SSAO term `gSsao` — R8_UNORM STORAGE, the SSAO pass WRITES it + the resolve READS it; it
+    // additionally carries TRANSFER_SRC so the AO-channel golden reads the raw factor back.
+    let ssao = device
+        .create_texture(&TextureDesc {
+            width: SDF_IMG_W,
+            height: SDF_IMG_H,
+            depth: 1,
+            format: Format::R8Unorm,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+        })
+        .expect("Render P7 SSAO gSsao storage image");
+
+    let sampler = device
+        .create_sampler(&SamplerDesc::default())
+        .expect("depth sampler (ignored by .Load)");
+
+    // The readback buffers: LIT (4 B/px) + the raw SSAO factor (1 B/px).
+    let readback = device
+        .create_buffer(&BufferDesc {
+            size: READBACK_BYTES,
+            usage: BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("host-visible lit readback buffer");
+    let ssao_readback = device
+        .create_buffer(&BufferDesc {
+            size: PIXELS as u64,
+            usage: BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("host-visible ssao readback buffer");
+
+    // The quad vertex buffer (the mesh backdrop).
+    let vertices = quad_vertices();
+    let vertex_bytes = core::mem::size_of_val(&vertices) as u64;
+    let vertex_buffer = device
+        .create_buffer(&BufferDesc {
+            size: vertex_bytes,
+            usage: BufferUsage::VERTEX,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("host-visible vertex buffer");
+    {
+        let vb_ptr = device
+            .buffer_mapped_ptr(&vertex_buffer)
+            .expect("host-visible vertex buffer is mapped");
+        // SAFETY: `vb_ptr` points to `vertex_bytes` mapped host-coherent bytes; `vertices` is a
+        // distinct stack array of `vertex_bytes` bytes; the write completes before any submit.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                vertices.as_ptr().cast::<u8>(),
+                vb_ptr.as_ptr(),
+                vertex_bytes as usize,
+            );
+        }
+    }
+
+    // --- Modules + pipelines: the mesh-MRT producer, the marcher, the resolve, and the SSAO pass. ---
+    let vs = device.create_shader_module(MRT_VS_SPV.as_words()).expect("mesh-MRT vs");
+    let fs = device.create_shader_module(MRT_FS_SPV.as_words()).expect("mesh-MRT fs");
+    let cs = device.create_shader_module(sdf_gbuffer_composite_spirv()).expect("marcher cs");
+    let resolve_cs = device.create_shader_module(deferred_pbr_spirv()).expect("resolve cs");
+    let ssao_cs = device.create_shader_module(sdf_ssao_spirv()).expect("SSAO cs");
+
+    let attributes = [
+        VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
+        VertexAttribute { location: 1, offset: 12, format: VertexFormat::Float32x4 },
+    ];
+    let gfx = device
+        .create_graphics_pipeline(&GraphicsPipelineDesc {
+            vertex_module: &vs,
+            vertex_entry: c"main",
+            fragment_module: &fs,
+            fragment_entry: c"main",
+            color_formats: &[GBUFFER_FORMAT, GBUFFER_FORMAT, GBUFFER_FORMAT],
+            depth_format: Some(Format::D32Sfloat),
+            topology: PrimitiveTopology::TriangleList,
+            vertex_layout: Some(VertexBufferLayout { stride: VERTEX_STRIDE, attributes: &attributes }),
+            push_constant_bytes: MVP_BYTES,
+            bind_group_layout: None,
+            blend: None,
+        })
+        .expect("mesh-MRT G-buffer producer graphics pipeline");
+
+    // The 15-binding vocabulary layout (the marcher's full interface, brick @9..=14 bound-but-unread).
+    let vocab_kinds = [
+        DescriptorKind::StorageBuffer, DescriptorKind::SampledImage, DescriptorKind::StorageImage,
+        DescriptorKind::StorageImage, DescriptorKind::StorageImage, DescriptorKind::UniformBuffer,
+        DescriptorKind::StorageBuffer, DescriptorKind::StorageBuffer, DescriptorKind::StorageImage,
+        DescriptorKind::StorageBuffer, DescriptorKind::CombinedImageSampler, DescriptorKind::StorageBuffer,
+        DescriptorKind::CombinedImageSampler, DescriptorKind::StorageBuffer, DescriptorKind::CombinedImageSampler,
+    ];
+    let vocab_layout_entries: Vec<BindGroupLayoutEntry> = vocab_kinds
+        .iter()
+        .enumerate()
+        .map(|(i, &kind)| BindGroupLayoutEntry { binding: i as u32, count: 1, kind, stage: ShaderStage::COMPUTE })
+        .collect();
+    let bind_layout = device
+        .create_bind_group_layout(&BindGroupLayoutDesc { entries: &vocab_layout_entries })
+        .expect("vocabulary bind-group layout");
+    let compute = device
+        .create_compute_pipeline(&ComputePipelineDesc {
+            module: &cs,
+            entry: c"main",
+            push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: Some(&bind_layout),
+        })
+        .expect("G-buffer marcher compute pipeline");
+
+    let bind_group = device
+        .create_bind_group(&BindGroupDesc {
+            layout: &bind_layout,
+            entries: &[
+                BindGroupEntry::StorageBuffer { buffer: &buffer },
+                BindGroupEntry::SampledImage { texture: &depth, sampler: &sampler },
+                BindGroupEntry::StorageImage { texture: &albedo },
+                BindGroupEntry::StorageImage { texture: &normal },
+                BindGroupEntry::StorageImage { texture: &material },
+                BindGroupEntry::UniformBuffer { buffer: &camera_uniform },
+                BindGroupEntry::StorageBuffer { buffer: &tiles_buffer },
+                BindGroupEntry::StorageBuffer { buffer: &material_table },
+                BindGroupEntry::StorageImage { texture: &viewt },
+                BindGroupEntry::StorageBuffer { buffer: &pointer_grid_buffer },
+                BindGroupEntry::CombinedImage { texture: brick_atlas.texture(), sampler: brick_atlas.sampler() },
+                BindGroupEntry::StorageBuffer { buffer: &pointer_grid_buffer },
+                BindGroupEntry::CombinedImage { texture: brick_atlas.texture(), sampler: brick_atlas.sampler() },
+                BindGroupEntry::StorageBuffer { buffer: &pointer_grid_buffer },
+                BindGroupEntry::CombinedImage { texture: brick_atlas.texture(), sampler: brick_atlas.sampler() },
+            ],
+        })
+        .expect("vocabulary bind group");
+
+    // The 12-binding resolve layout (gSsao @11 = the C1 interface).
+    let resolve_kinds = [
+        DescriptorKind::StorageImage, DescriptorKind::StorageImage, DescriptorKind::StorageImage,
+        DescriptorKind::StorageImage, DescriptorKind::StorageBuffer, DescriptorKind::UniformBuffer,
+        DescriptorKind::StorageBuffer, DescriptorKind::StorageImage, DescriptorKind::StorageBuffer,
+        DescriptorKind::StorageBuffer, DescriptorKind::StorageBuffer, DescriptorKind::StorageImage,
+    ];
+    let resolve_layout_entries: Vec<BindGroupLayoutEntry> = resolve_kinds
+        .iter()
+        .enumerate()
+        .map(|(i, &kind)| BindGroupLayoutEntry { binding: i as u32, count: 1, kind, stage: ShaderStage::COMPUTE })
+        .collect();
+    let resolve_layout = device
+        .create_bind_group_layout(&BindGroupLayoutDesc { entries: &resolve_layout_entries })
+        .expect("deferred resolve bind-group layout");
+    let resolve_compute = device
+        .create_compute_pipeline(&ComputePipelineDesc {
+            module: &resolve_cs,
+            entry: c"main",
+            push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: Some(&resolve_layout),
+        })
+        .expect("deferred resolve compute pipeline");
+    let resolve_bind_group = device
+        .create_bind_group(&BindGroupDesc {
+            layout: &resolve_layout,
+            entries: &[
+                BindGroupEntry::StorageImage { texture: &albedo },
+                BindGroupEntry::StorageImage { texture: &normal },
+                BindGroupEntry::StorageImage { texture: &material },
+                BindGroupEntry::StorageImage { texture: &lit },
+                BindGroupEntry::StorageBuffer { buffer: &material_table },
+                BindGroupEntry::UniformBuffer { buffer: &camera_uniform },
+                BindGroupEntry::StorageBuffer { buffer: &light_table },
+                BindGroupEntry::StorageImage { texture: &viewt },
+                BindGroupEntry::StorageBuffer { buffer: &light_table },
+                BindGroupEntry::StorageBuffer { buffer: &light_table },
+                BindGroupEntry::StorageBuffer { buffer: &buffer },
+                // Render P7: the SSAO term `gSsao` @11 — the SAME image the SSAO pass writes.
+                BindGroupEntry::StorageImage { texture: &ssao },
+            ],
+        })
+        .expect("deferred resolve bind group");
+
+    // The dedicated 5-binding SSAO layout + pipeline + set.
+    let ssao_kinds = [
+        DescriptorKind::StorageImage, DescriptorKind::StorageImage, DescriptorKind::StorageImage,
+        DescriptorKind::StorageImage, DescriptorKind::UniformBuffer,
+    ];
+    let ssao_layout_entries: Vec<BindGroupLayoutEntry> = ssao_kinds
+        .iter()
+        .enumerate()
+        .map(|(i, &kind)| BindGroupLayoutEntry { binding: i as u32, count: 1, kind, stage: ShaderStage::COMPUTE })
+        .collect();
+    let ssao_layout = device
+        .create_bind_group_layout(&BindGroupLayoutDesc { entries: &ssao_layout_entries })
+        .expect("SSAO bind-group layout");
+    let ssao_compute = device
+        .create_compute_pipeline(&ComputePipelineDesc {
+            module: &ssao_cs,
+            entry: c"main",
+            push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: Some(&ssao_layout),
+        })
+        .expect("SSAO compute pipeline");
+    let ssao_bind_group = device
+        .create_bind_group(&BindGroupDesc {
+            layout: &ssao_layout,
+            entries: &[
+                BindGroupEntry::StorageImage { texture: &normal },
+                BindGroupEntry::StorageImage { texture: &material },
+                BindGroupEntry::StorageImage { texture: &viewt },
+                BindGroupEntry::StorageImage { texture: &ssao },
+                BindGroupEntry::UniformBuffer { buffer: &camera_uniform },
+            ],
+        })
+        .expect("SSAO bind group");
+
+    let fence = device.create_fence(false).expect("fence");
+    let mut encoder = device.create_command_encoder().expect("command encoder");
+    encoder.begin().expect("begin");
+
+    // --- Raster pass A: clear + draw the quad into the 3-MRT G-buffer (mask=1). ---
+    for tex in [&albedo, &normal, &material] {
+        encoder.image_barrier(&ImageBarrierDesc {
+            texture: tex,
+            src_stage: BarrierStage::TOP_OF_PIPE,
+            dst_stage: BarrierStage::COLOR_ATTACHMENT_OUTPUT,
+            src_access: BarrierAccess::NONE,
+            dst_access: BarrierAccess::COLOR_ATTACHMENT_WRITE,
+            old_layout: ImageLayout::Undefined,
+            new_layout: ImageLayout::ColorAttachmentOptimal,
+            range: ImageSubresourceRange::COLOR,
+        });
+    }
+    encoder.image_barrier(&ImageBarrierDesc {
+        texture: &depth,
+        src_stage: BarrierStage::TOP_OF_PIPE,
+        dst_stage: BarrierStage::EARLY_FRAGMENT_TESTS | BarrierStage::LATE_FRAGMENT_TESTS,
+        src_access: BarrierAccess::NONE,
+        dst_access: BarrierAccess::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        old_layout: ImageLayout::Undefined,
+        new_layout: ImageLayout::DepthAttachmentOptimal,
+        range: ImageSubresourceRange::DEPTH,
+    });
+    let full = RenderArea { x: 0, y: 0, width: SDF_IMG_W, height: SDF_IMG_H };
+    let color_attachments = [
+        RenderingAttachment { texture: &albedo, layout: ImageLayout::ColorAttachmentOptimal, load_op: LoadOp::Clear, store_op: StoreOp::Store, clear_color: [0.05, 0.05, 0.1, 1.0] },
+        RenderingAttachment { texture: &normal, layout: ImageLayout::ColorAttachmentOptimal, load_op: LoadOp::Clear, store_op: StoreOp::Store, clear_color: [0.5, 0.5, 0.0, 0.0] },
+        RenderingAttachment { texture: &material, layout: ImageLayout::ColorAttachmentOptimal, load_op: LoadOp::Clear, store_op: StoreOp::Store, clear_color: [1.0, 1.0, 0.0, 1.0] },
+    ];
+    encoder.begin_rendering(&RenderingDesc {
+        render_area: full,
+        colors: &color_attachments,
+        depth: Some(DepthAttachment { texture: &depth, layout: ImageLayout::DepthAttachmentOptimal, load_op: LoadOp::Clear, store_op: StoreOp::Store, clear_depth: DEPTH_CLEAR }),
+    });
+    encoder.bind_graphics_pipeline(&gfx);
+    encoder.push_graphics_constants(&gfx, ShaderStage::VERTEX, 0, &ortho_mvp_bytes());
+    encoder.bind_vertex_buffer(&vertex_buffer, 0, 0);
+    encoder.set_viewport(&Viewport { x: 0.0, y: 0.0, width: SDF_IMG_W as f32, height: SDF_IMG_H as f32, min_depth: 0.0, max_depth: 1.0 });
+    encoder.set_scissor(&full);
+    encoder.draw(6, 1, 0, 0);
+    encoder.end_rendering();
+
+    encoder.image_barrier(&ImageBarrierDesc {
+        texture: &depth,
+        src_stage: BarrierStage::EARLY_FRAGMENT_TESTS | BarrierStage::LATE_FRAGMENT_TESTS,
+        dst_stage: BarrierStage::COMPUTE_SHADER,
+        src_access: BarrierAccess::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        dst_access: BarrierAccess::SHADER_READ,
+        old_layout: ImageLayout::DepthAttachmentOptimal,
+        new_layout: ImageLayout::ShaderReadOnlyOptimal,
+        range: ImageSubresourceRange::DEPTH,
+    });
+    for tex in [&albedo, &normal, &material] {
+        encoder.image_barrier(&ImageBarrierDesc {
+            texture: tex,
+            src_stage: BarrierStage::COLOR_ATTACHMENT_OUTPUT,
+            dst_stage: BarrierStage::COMPUTE_SHADER,
+            src_access: BarrierAccess::COLOR_ATTACHMENT_WRITE,
+            dst_access: BarrierAccess::SHADER_READ | BarrierAccess::SHADER_WRITE,
+            old_layout: ImageLayout::ColorAttachmentOptimal,
+            new_layout: ImageLayout::General,
+            range: ImageSubresourceRange::COLOR,
+        });
+    }
+    // lit + gViewT + ssao: UNDEFINED → GENERAL (the marcher stores gViewT, the resolve stores lit,
+    // the SSAO pass stores ssao — all in GENERAL).
+    for tex in [&lit, &viewt, &ssao] {
+        encoder.image_barrier(&ImageBarrierDesc {
+            texture: tex,
+            src_stage: BarrierStage::TOP_OF_PIPE,
+            dst_stage: BarrierStage::COMPUTE_SHADER,
+            src_access: BarrierAccess::NONE,
+            dst_access: BarrierAccess::SHADER_WRITE,
+            old_layout: ImageLayout::Undefined,
+            new_layout: ImageLayout::General,
+            range: ImageSubresourceRange::COLOR,
+        });
+    }
+
+    // --- Marcher dispatch (brick + cull OFF, byte-identical to the pre-brick marcher). ---
+    encoder.bind_compute_pipeline(&compute);
+    encoder.bind_descriptor_set_compute(&bind_group, &compute);
+    let push = FineMarcherPush::new(false, 1.0, lighting_flags, light_dir).with_brick_levels(1);
+    encoder.push_compute_constants(&compute, ShaderStage::COMPUTE, 0, push.as_bytes());
+    encoder.dispatch(group_count_x(), 1, 1);
+
+    // --- (5a) marcher → resolve store-to-load barrier (covers gNormal/gMaterial/gViewT — the
+    // SAME three the SSAO pass reads, so NO additional input barrier is needed for SSAO). ---
+    for tex in [&albedo, &normal, &material, &viewt] {
+        encoder.image_barrier(&ImageBarrierDesc {
+            texture: tex,
+            src_stage: BarrierStage::COMPUTE_SHADER,
+            dst_stage: BarrierStage::COMPUTE_SHADER,
+            src_access: BarrierAccess::SHADER_WRITE,
+            dst_access: BarrierAccess::SHADER_READ,
+            old_layout: ImageLayout::General,
+            new_layout: ImageLayout::General,
+            range: ImageSubresourceRange::COLOR,
+        });
+    }
+
+    // --- Render P7: the SSAO pass — read gNormal/gMaterial/gViewT, WRITE ssao. Then a
+    // COMPUTE→COMPUTE GENERAL→GENERAL barrier on ssao so the resolve's `gSsao.Load` sees it. ---
+    encoder.bind_compute_pipeline(&ssao_compute);
+    encoder.bind_descriptor_set_compute(&ssao_bind_group, &ssao_compute);
+    encoder.dispatch(group_count_x(), 1, 1);
+    encoder.image_barrier(&ImageBarrierDesc {
+        texture: &ssao,
+        src_stage: BarrierStage::COMPUTE_SHADER,
+        dst_stage: BarrierStage::COMPUTE_SHADER,
+        src_access: BarrierAccess::SHADER_WRITE,
+        dst_access: BarrierAccess::SHADER_READ,
+        old_layout: ImageLayout::General,
+        new_layout: ImageLayout::General,
+        range: ImageSubresourceRange::COLOR,
+    });
+
+    // --- Resolve dispatch (consumes the SSAO term under `ssao_mode != 0`). ---
+    encoder.bind_compute_pipeline(&resolve_compute);
+    encoder.bind_descriptor_set_compute(&resolve_bind_group, &resolve_compute);
+    encoder.dispatch(group_count_x(), 1, 1);
+
+    // --- Readbacks: LIT (GENERAL → TRANSFER_SRC) + ssao (GENERAL → TRANSFER_SRC). ---
+    encoder.image_barrier(&ImageBarrierDesc {
+        texture: &lit,
+        src_stage: BarrierStage::COMPUTE_SHADER,
+        dst_stage: BarrierStage::TRANSFER,
+        src_access: BarrierAccess::SHADER_WRITE,
+        dst_access: BarrierAccess::TRANSFER_READ,
+        old_layout: ImageLayout::General,
+        new_layout: ImageLayout::TransferSrcOptimal,
+        range: ImageSubresourceRange::COLOR,
+    });
+    let regions = [BufferImageCopy {
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        aspect: ImageAspect::COLOR,
+        mip_level: 0,
+        base_array_layer: 0,
+        layer_count: 1,
+        image_offset_x: 0,
+        image_offset_y: 0,
+        image_offset_z: 0,
+        image_extent_w: SDF_IMG_W,
+        image_extent_h: SDF_IMG_H,
+        image_extent_d: 1,
+    }];
+    encoder.copy_image_to_buffer(&lit, ImageLayout::TransferSrcOptimal, &readback, &regions);
+    // The SSAO pass WROTE ssao (the SSAO→resolve barrier already made it COMPUTE-readable). The
+    // resolve only READ it, so it is still GENERAL; transition to TRANSFER_SRC for the copy
+    // (`src = COMPUTE_SHADER` — the SSAO store is the source dependency).
+    encoder.image_barrier(&ImageBarrierDesc {
+        texture: &ssao,
+        src_stage: BarrierStage::COMPUTE_SHADER,
+        dst_stage: BarrierStage::TRANSFER,
+        src_access: BarrierAccess::SHADER_WRITE,
+        dst_access: BarrierAccess::TRANSFER_READ,
+        old_layout: ImageLayout::General,
+        new_layout: ImageLayout::TransferSrcOptimal,
+        range: ImageSubresourceRange::COLOR,
+    });
+    encoder.copy_image_to_buffer(&ssao, ImageLayout::TransferSrcOptimal, &ssao_readback, &regions);
+
+    encoder.end().expect("end");
+    queue.submit(&encoder, &fence).expect("submit");
+    device.wait_fence(&fence, u64::MAX).expect("wait_fence");
+
+    let mut lit_out = vec![0u8; READBACK_BYTES as usize];
+    {
+        let dst = device.buffer_mapped_ptr(&readback).expect("lit readback mapped");
+        // SAFETY: `dst` points to `READBACK_BYTES` mapped host-coherent bytes; the fence wait
+        // preceded this read, so the copy is complete + coherent; `lit_out` is a distinct alloc.
+        unsafe { core::ptr::copy_nonoverlapping(dst.as_ptr(), lit_out.as_mut_ptr(), READBACK_BYTES as usize) };
+    }
+    let mut ssao_out = vec![0u8; PIXELS as usize];
+    {
+        let dst = device.buffer_mapped_ptr(&ssao_readback).expect("ssao readback mapped");
+        // SAFETY: `dst` points to `PIXELS` mapped host-coherent bytes (sized so above); the fence
+        // wait preceded this read; `ssao_out` is a distinct alloc; an R8 texel is a valid `u8`.
+        unsafe { core::ptr::copy_nonoverlapping(dst.as_ptr(), ssao_out.as_mut_ptr(), PIXELS as usize) };
+    }
+
+    assert_validation_clean(ctx);
+
+    // SAFETY: every resource was created on `device`; the last submission completed (fence-waited
+    // above), so none is in use; each is destroyed exactly once.
+    unsafe {
+        device.destroy_command_encoder(encoder);
+        device.destroy_fence(fence);
+        device.destroy_bind_group(ssao_bind_group);
+        device.destroy_bind_group(resolve_bind_group);
+        device.destroy_bind_group(bind_group);
+        device.destroy_compute_pipeline(ssao_compute);
+        device.destroy_compute_pipeline(resolve_compute);
+        device.destroy_compute_pipeline(compute);
+        device.destroy_bind_group_layout(ssao_layout);
+        device.destroy_bind_group_layout(resolve_layout);
+        device.destroy_bind_group_layout(bind_layout);
+        device.destroy_graphics_pipeline(gfx);
+        device.destroy_shader_module(ssao_cs);
+        device.destroy_shader_module(resolve_cs);
+        device.destroy_shader_module(cs);
+        device.destroy_shader_module(fs);
+        device.destroy_shader_module(vs);
+        device.destroy_buffer(vertex_buffer);
+        device.destroy_buffer(ssao_readback);
+        device.destroy_buffer(readback);
+        device.destroy_sampler(sampler);
+        device.destroy_texture(ssao);
+        device.destroy_texture(viewt);
+        device.destroy_texture(lit);
+        device.destroy_texture(material);
+        device.destroy_texture(normal);
+        device.destroy_texture(albedo);
+        device.destroy_texture(depth);
+        device.destroy_buffer(pointer_grid_buffer);
+        device.destroy_buffer(tiles_buffer);
+        device.destroy_buffer(light_table);
+        device.destroy_buffer(material_table);
+        device.destroy_buffer(camera_uniform);
+        device.destroy_buffer(buffer);
+        brick_atlas.destroy(device);
+    }
+
+    (lit_out, ssao_out)
 }
 
 /// The rung-9/10 "crater" CSG scene (base sphere minus a smaller sphere).
@@ -6016,4 +6630,350 @@ fn p6_multilight_shadows_screenshot_dump() {
         path.display()
     );
     assert_validation_clean(&ctx);
+}
+
+// ============================================================================
+// Render P7 GROUP C2 — SSAO GPU goldens (offscreen). The marcher → SSAO → resolve path on
+// hardware, verified against the host two-stage oracle:
+//   - Stage 1: `golden_gbuffer(...)` builds the host G-buffer ONCE (the marcher mirror).
+//   - Stage 2: `golden_ssao_attributes(gbuf, px, py, ..)` gathers the per-pixel AO factor.
+//   - the combine: `golden_deferred_resolve_table_shadowed_ssao(.., ssao)` mirrors the resolve's
+//     `ao_final = min(class_ao, gSsao)` under `ssao_mode != 0`.
+// The light table arms `with_ssao_mode(1)`; every golden is `boot_render_or_skip`-gated and runs
+// under `BOYKO_DISABLE_VALIDATION=1` on the dev box (the orchestrator runs them on the RTX).
+// ============================================================================
+
+/// The SSAO AO-channel tolerance (consumer-side `sqrt`/`div` ULP budget, the plan's ±6/255). The
+/// AO factor is R8-quantized on store; the host `golden_ssao_attributes` runs the SAME no-trig
+/// reducer (integer rotation + integer step-rounding are bit-exact), so the only divergence is the
+/// last-ULP `sqrt`/`div` the parity `composite_ray` already relies on + the ±1/255 oct-normal byte
+/// disagreement propagated linearly through `dot(N, slice_dir)`.
+const SSAO_AO_TOL: i32 = 6;
+
+/// The default SSAO light table fixture (`ssao_mode == 1`): one directional + one sky (so the
+/// ambient the SSAO modulates is non-trivial), NON-CLUSTERED, `shadow_mode == 0`. Mirrors the
+/// L0a/L0b degenerate spirit but with a real sky term + the SSAO mode armed.
+fn ssao_light_table() -> (GoldenLightHeader, Vec<GoldenLight>) {
+    let header = GoldenLightHeader::new(2, 0, 1.0).with_ssao_mode(1);
+    let lights = vec![
+        GoldenLight::directional([0.0, 0.0, 1.0], [1.0, 1.0, 1.0], 1.0),
+        // A real sky/hemisphere ambient — the term `ao_final` modulates (so SSAO is observable).
+        GoldenLight::sky([0.30, 0.36, 0.46], [0.14, 0.13, 0.12]),
+    ];
+    (header, lights)
+}
+
+/// The same fixture with SSAO DISARMED (`ssao_mode == 0`) — for the byte-identity 0%-gate (the
+/// resolve never reads the SSAO image, so the lit output equals the pre-SSAO `_lit_table` path).
+fn ssao_light_table_off() -> (GoldenLightHeader, Vec<GoldenLight>) {
+    let (h, l) = ssao_light_table();
+    (h.with_ssao_mode(0), l)
+}
+
+/// Builds the host Stage-1 G-buffer for the ORTHO SSAO fixture (the marcher mirror at the golden
+/// 64×64 extent), shared by all per-pixel Stage-2 gathers (NOT O(N²)).
+fn ssao_host_gbuffer(
+    edits: &[SdfEdit],
+    flags: u32,
+    light_dir: [f32; 3],
+) -> Vec<boyko_rhi_vulkan::compute::MarcherAttributes> {
+    let materials = host_material_table();
+    golden_gbuffer(
+        edits,
+        &materials,
+        expected_mesh_depth,
+        SDF_IMG_W,
+        SDF_IMG_H,
+        CompositeCamera::Ortho,
+        1.0,
+        flags,
+        light_dir,
+    )
+}
+
+/// **C2 golden — the SSAO AO channel == the host oracle (±6/255).** The GPU `ssao` R8 readback
+/// must match `golden_ssao_attributes` (Stage-2 over the Stage-1 host gbuf) within ±6/255 over all
+/// SDF-lit pixels. Prints the max delta + the lit-pixel count.
+#[test]
+fn ssao_ao_channel_matches_host_oracle() {
+    let Some(ctx) = boot_render_or_skip("ssao_ao_channel_matches_host_oracle") else {
+        return;
+    };
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    let (header, lights) = ssao_light_table();
+    let table = pack_light_table(&header, &lights);
+
+    for (name, edits) in p4b_scenes() {
+        let (_lit, ssao) = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table);
+        assert_eq!(ssao.len(), PIXELS as usize, "[{name}] SSAO R8 readback size");
+
+        let gbuf = ssao_host_gbuffer(&edits, flags, DEFAULT_LIGHT_DIR);
+        let mut max_delta = 0i32;
+        let mut lit_px = 0u64;
+        for py in 0..SDF_IMG_H {
+            for px in 0..SDF_IMG_W {
+                let idx = (py * SDF_IMG_W + px) as usize;
+                if gbuf[idx].mask != 1 {
+                    continue; // only SDF-lit pixels carry a meaningful AO factor
+                }
+                lit_px += 1;
+                let host = golden_ssao_attributes(&gbuf, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                let want = (host * 255.0).round() as i32;
+                let got = ssao[idx] as i32;
+                let d = (got - want).abs();
+                if d > max_delta {
+                    max_delta = d;
+                }
+                assert!(
+                    d <= SSAO_AO_TOL,
+                    "[{name}] SSAO AO texel ({px},{py}) got {got}/255 want {want}/255 \
+                     (host oracle) exceeds ±{SSAO_AO_TOL}/255 (delta {d})"
+                );
+            }
+        }
+        assert!(lit_px > 0, "[{name}] SSAO AO channel: no SDF-lit pixel — the gate is vacuous");
+        println!(
+            "[{name}] SSAO AO channel == host oracle: max delta {max_delta}/255 (tol \
+             {SSAO_AO_TOL}); {lit_px} SDF-lit px"
+        );
+    }
+}
+
+/// **C2 golden — the combined LIT == the host SSAO-aware resolve oracle (±2/255).** The GPU LIT
+/// readback (SSAO ON) must match `golden_deferred_resolve_table_shadowed_ssao` fed the per-pixel
+/// host SSAO term, within the EXISTING ±2/255 (AO modulates only ambient — no relaxation).
+#[test]
+fn ssao_combined_lit_matches_host() {
+    let Some(ctx) = boot_render_or_skip("ssao_combined_lit_matches_host") else {
+        return;
+    };
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    let (header, lights) = ssao_light_table();
+    let table = pack_light_table(&header, &lights);
+    let materials = host_material_table();
+
+    for (name, edits) in p4b_scenes() {
+        let (lit, _ssao) = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table);
+        assert_eq!(lit.len(), READBACK_BYTES as usize);
+
+        let gbuf = ssao_host_gbuffer(&edits, flags, DEFAULT_LIGHT_DIR);
+        let field = |q: [f32; 3]| boyko_sdf_math::sdf_edit_list(&edits, q);
+        let mut max_delta = 0i32;
+        let mut lit_hits = 0u64;
+        for py in 0..SDF_IMG_H {
+            for px in 0..SDF_IMG_W {
+                let idx = (py * SDF_IMG_W + px) as usize;
+                let attrs = gbuf[idx];
+                let (ro, rd) = composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                // The per-pixel host SSAO term (the SAME oracle the AO-channel golden asserts the
+                // GPU `ssao` against), fed into the SSAO-aware resolve mirror.
+                let ao = golden_ssao_attributes(&gbuf, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                let want = unpack_packed_rgb(golden_deferred_resolve_table_shadowed_ssao(
+                    attrs, ro, rd, &materials, &header, &lights, &field, ao,
+                ));
+                let got = albedo_rgb(&lit, px, py);
+                let d = (0..3).map(|c| (got[c] - want[c]).abs()).max().unwrap();
+                if attrs.mask == 1 {
+                    lit_hits += 1;
+                }
+                if d > max_delta {
+                    max_delta = d;
+                }
+                assert!(
+                    d <= DEFERRED_ARM1_TOL,
+                    "[{name}] SSAO combined LIT texel ({px},{py}) got {got:?} want {want:?} \
+                     (SSAO oracle) exceeds ±{DEFERRED_ARM1_TOL}/255 (delta {d})"
+                );
+            }
+        }
+        assert!(lit_hits > 0, "[{name}] SSAO combined LIT: no SDF-lit pixel — the gate is vacuous");
+        println!(
+            "[{name}] SSAO combined LIT == host SSAO oracle: max delta {max_delta}/255 (tol \
+             {DEFERRED_ARM1_TOL}); {lit_hits} SDF-lit px"
+        );
+    }
+}
+
+/// **C2 golden — SSAO OFF is BYTE-IDENTICAL to the pre-SSAO LIT (the 0%-gate).** The SAME scene
+/// with `ssao_mode == 0` + `scene.ssao = None` (here: the pre-SSAO `run_gbuffer_hybrid_lit_table`)
+/// must produce a LIT readback BYTE-FOR-BYTE equal to the SSAO harness run with `ssao_mode == 0`.
+/// Proves the SSAO image being written + the combine being compiled in change NOTHING when the
+/// header gate is 0.
+#[test]
+fn ssao_off_lit_is_byte_identical() {
+    let Some(ctx) = boot_render_or_skip("ssao_off_lit_is_byte_identical") else {
+        return;
+    };
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    let (header_off, lights_off) = ssao_light_table_off();
+    let table_off = pack_light_table(&header_off, &lights_off);
+
+    for (name, edits) in p4b_scenes() {
+        // The pre-SSAO path (NO SSAO pass recorded): the canonical reference.
+        let pre = run_gbuffer_hybrid_lit_table(
+            &ctx, &edits, false, false, 1.0, flags, DEFAULT_LIGHT_DIR, &table_off,
+        )
+        .0;
+        // The SSAO harness with the header DISARMED (`ssao_mode == 0`): the SSAO pass still RUNS +
+        // writes the image, but the resolve never reads it (the structural `if` is false), so the
+        // lit output must be byte-for-byte the pre-SSAO image.
+        let (with_pass, _ssao) =
+            run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table_off);
+        assert_eq!(pre.len(), with_pass.len());
+        assert_eq!(
+            pre, with_pass,
+            "[{name}] ssao_mode==0: the SSAO-pass LIT must be BYTE-IDENTICAL to the pre-SSAO LIT \
+             (the 0%-gate — the written-but-unread SSAO image must not perturb the resolve)"
+        );
+        println!("[{name}] SSAO OFF 0%-gate: LIT byte-identical to the pre-SSAO path ({} bytes)", pre.len());
+    }
+}
+
+/// **C2 golden — a broad flat lit region is INVARIANT under SSAO (±2/255).** The key correctness
+/// proof of the GROUP-B normal-elevation fix: SSAO must NOT darken open flat surfaces. A single
+/// large flat SDF box fills the view; the SSAO-ON lit pixels in its interior (away from the
+/// silhouette edge) must be within ±2/255 of the SSAO-OFF lit. (A naive SSAO that measured raw
+/// depth deltas — not elevation above the tangent — would darken the whole flat face.)
+#[test]
+fn ssao_flat_region_invariance() {
+    let Some(ctx) = boot_render_or_skip("ssao_flat_region_invariance") else {
+        return;
+    };
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    // A big fronto-parallel box: its front face is a broad FLAT lit region (constant normal +Z),
+    // exactly the surface SSAO must leave untouched.
+    let edits = vec![SdfEdit::box_shape([0.0, 0.0, 0.0], [0.7, 0.7, 0.2], sdf_op::UNION, 0.0)];
+
+    let (h_on, l_on) = ssao_light_table();
+    let (h_off, l_off) = ssao_light_table_off();
+    let on = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_on, &l_on)).0;
+    let off = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_off, &l_off)).0;
+
+    // The interior band: lit SDF pixels strictly inside the box footprint (≥ FLAT_MARGIN px from
+    // the silhouette), where the surface is flat and SSAO must not darken.
+    const FLAT_MARGIN: u32 = 6;
+    let gbuf = ssao_host_gbuffer(&edits, flags, DEFAULT_LIGHT_DIR);
+    let mut checked = 0u64;
+    let mut max_delta = 0i32;
+    for py in FLAT_MARGIN..(SDF_IMG_H - FLAT_MARGIN) {
+        for px in FLAT_MARGIN..(SDF_IMG_W - FLAT_MARGIN) {
+            let idx = (py * SDF_IMG_W + px) as usize;
+            if gbuf[idx].mask != 1 {
+                continue;
+            }
+            // Require the whole FLAT_MARGIN neighbourhood to be lit SDF too (so the pixel is a true
+            // interior flat-region pixel, not a near-edge one whose taps cross the silhouette).
+            let interior = (py - FLAT_MARGIN..=py + FLAT_MARGIN).all(|qy| {
+                (px - FLAT_MARGIN..=px + FLAT_MARGIN)
+                    .all(|qx| gbuf[(qy * SDF_IMG_W + qx) as usize].mask == 1)
+            });
+            if !interior {
+                continue;
+            }
+            checked += 1;
+            let g_on = albedo_rgb(&on, px, py);
+            let g_off = albedo_rgb(&off, px, py);
+            let d = (0..3).map(|c| (g_on[c] - g_off[c]).abs()).max().unwrap();
+            if d > max_delta {
+                max_delta = d;
+            }
+            assert!(
+                d <= CHANNEL_TOL,
+                "SSAO flat-region invariance: interior flat texel ({px},{py}) SSAO-ON {g_on:?} vs \
+                 SSAO-OFF {g_off:?} differs by {d}/255 (> ±{CHANNEL_TOL}) — SSAO darkened an open \
+                 flat surface (the normal-elevation reducer regressed)"
+            );
+        }
+    }
+    assert!(
+        checked > 32,
+        "SSAO flat-region invariance: only {checked} interior flat pixels found — the box fixture \
+         must present a broad flat lit region (the gate is near-vacuous)"
+    );
+    println!(
+        "SSAO flat-region invariance: {checked} interior flat px within ±{CHANNEL_TOL}/255 \
+         (max delta {max_delta}/255) — SSAO leaves open flat surfaces unchanged"
+    );
+}
+
+/// **C2 golden — SSAO genuinely DARKENS a concavity (non-vacuity).** A real crevice (two SDF
+/// spheres meeting at a contact seam) must have ≥N SDF-lit crevice pixels with GPU `ssao < 0.85`
+/// (SSAO genuinely occludes), AND those crevice lit pixels darker than the SSAO-OFF lit by ≥ a few
+/// /255. Without this, a flat-invariance pass alone could be vacuously satisfied by an all-1.0 AO.
+#[test]
+fn ssao_darkens_a_concavity() {
+    let Some(ctx) = boot_render_or_skip("ssao_darkens_a_concavity") else {
+        return;
+    };
+    let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
+    // A DEEP front-facing bowl: a large sphere with a smaller sphere SUBTRACTED toward the camera
+    // (+z), carving a deeply concave cavity whose walls rise above the bowl-floor tangent within
+    // the SSAO radius — the canonical SSAO occluder. (A shallow / side-offset crater or a sphere-
+    // union SEAM is too shallow at the 0.5-unit radius to clear the horizon — host-probed: those
+    // produce min_ssao 255/255, whereas this bowl produces min_ssao ~105/255 with ~100 occluded
+    // px. The depth, not the mere presence of a concavity, is what the horizon gather needs.)
+    let edits = vec![
+        SdfEdit::sphere([0.0, 0.0, 0.0], 0.55, sdf_op::UNION, 0.0),
+        SdfEdit::sphere([0.0, 0.0, 0.45], 0.40, sdf_op::SUBTRACT, 0.0),
+    ];
+
+    let (h_on, l_on) = ssao_light_table();
+    let (h_off, l_off) = ssao_light_table_off();
+    let (on, ssao) = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_on, &l_on));
+    let off = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_off, &l_off)).0;
+
+    let gbuf = ssao_host_gbuffer(&edits, flags, DEFAULT_LIGHT_DIR);
+    // The AO floor that proves a real occlusion (1.0 = no occlusion; 0.85 = a meaningful crevice).
+    const OCCLUDED_AO: u8 = (0.85 * 255.0) as u8;
+    // The minimum darkening of the lit image at an occluded crevice pixel (a few /255 survives the
+    // ambient-only modulation + double-quant).
+    const MIN_LIT_DARKEN: i32 = 2;
+    let mut occluded_px = 0u64;
+    let mut darkened_px = 0u64;
+    let mut min_ssao = 255u8;
+    for py in 0..SDF_IMG_H {
+        for px in 0..SDF_IMG_W {
+            let idx = (py * SDF_IMG_W + px) as usize;
+            if gbuf[idx].mask != 1 {
+                continue;
+            }
+            let a = ssao[idx];
+            if a < min_ssao {
+                min_ssao = a;
+            }
+            if a < OCCLUDED_AO {
+                occluded_px += 1;
+                // The lit crevice pixel must be darker than the SSAO-OFF lit (SSAO modulated the
+                // ambient down). A monotone darkening COUNT (not a per-pixel edge match).
+                let g_on = albedo_rgb(&on, px, py);
+                let g_off = albedo_rgb(&off, px, py);
+                // OFF brighter than ON on at least one channel by ≥ MIN_LIT_DARKEN.
+                let darken = (0..3).map(|c| g_off[c] - g_on[c]).max().unwrap();
+                if darken >= MIN_LIT_DARKEN {
+                    darkened_px += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        occluded_px >= 8,
+        "SSAO non-vacuity: only {occluded_px} crevice px with ssao < 0.85 (min ssao {}/255) — the \
+         concavity fixture did not produce a real occluded region (SSAO is vacuously ~1.0)",
+        min_ssao
+    );
+    assert!(
+        darkened_px >= 4,
+        "SSAO non-vacuity: {occluded_px} occluded crevice px but only {darkened_px} are LIT-darker \
+         than SSAO-OFF by ≥{MIN_LIT_DARKEN}/255 — the SSAO term did not modulate the ambient down"
+    );
+    println!(
+        "SSAO non-vacuity: {occluded_px} crevice px with ssao < 0.85 (min {}/255), {darkened_px} \
+         LIT-darker than SSAO-OFF — SSAO genuinely occludes a concavity",
+        min_ssao
+    );
+    // TODO(P7-C2b): mesh-AO (a mesh quad in a concave corner → ≥N mesh pixels final_ao ≤ 0.85,
+    // today exactly 1.0 there) + the mesh↔SDF cross-rep proof (a mesh box touching an SDF sphere →
+    // contact-crevice pixels darker than the march-only gMaterial.g). These need a raster-mesh +
+    // SDF co-located scene the current offscreen harness does not expose as a controllable mesh
+    // quad in a corner; left for a follow-up with a dedicated mesh-corner fixture.
 }
