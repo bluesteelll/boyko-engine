@@ -251,6 +251,11 @@ pub enum Format {
     /// the SNORM `127/127 = 1.0`. The whole M2 cubic was degenerate (corners 0.498× too
     /// small, no sign change → no root → dead branch). The real `VK_FORMAT_R8_SNORM` is 10.
     R8Snorm = 10,
+    /// `VK_FORMAT_R8_UNORM` — a single unsigned-normalized 8-bit channel mapping the byte
+    /// range onto `[0, 1]` (Render P7: the SSAO term `gSsao` — a full-res `R8_UNORM` STORAGE
+    /// image the deferred resolve loads under the `ssao_mode != 0` gate; OFF every pre-P7
+    /// scene, so the image is allocated-but-unread). `VK_FORMAT_R8_UNORM` is 9.
+    R8Unorm = 9,
     /// `VK_FORMAT_R16_SFLOAT` — a compact single-channel float (deferred SDF use).
     R16Sfloat = 76,
     /// `VK_FORMAT_R32_SFLOAT` — a single 32-bit float (Lighting L0b: the `gViewT`

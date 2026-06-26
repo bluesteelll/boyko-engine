@@ -233,7 +233,11 @@ static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<122868> = SpirvBlob(*include_bytes!(
 /// origin by `n * SHADOW_NORMAL_BIAS` at the two (hand-written) `sdf_soft_shadow_ranged` CALL
 /// SITES (`sdf_soft_shadow_ranged(P + n*SHADOW_NORMAL_BIAS, n, l, t_max)`) so grazing terminator
 /// rays clear the surface — the GENERATED ranged span stays byte-frozen; 24728 → 24824 bytes.
-static DEFERRED_PBR_SPV: SpirvBlob<24824> = SpirvBlob(*include_bytes!(concat!(
+/// Render P7 GROUP C1: the resolve gains `gSsao @11` (`R8_UNORM` STORAGE) + the structural-`if`
+/// `ao_final = min(class_ao, gSsao)` combine gated by `load_ssao_mode` (header word 11). On every
+/// pre-P7 scene `ssao_mode == 0`, so `gSsao` is never read and the lit PIXELS are byte-identical;
+/// the `.spv` itself grows (the gate + the new binding are compiled in); 24824 → 25280 bytes.
+static DEFERRED_PBR_SPV: SpirvBlob<25280> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/deferred_pbr.comp.spv"
 )));
@@ -4726,6 +4730,26 @@ pub fn golden_deferred_resolve(
     pack_rgba(lit)
 }
 
+/// The host mirror of the resolve's Render P7 SSAO ambient-AO combine (`deferred_pbr.hlsl`):
+/// the structural `if (ssao_mode != 0u) { ao_final = min((view_t >= 1e30 ? 1.0 : ao), ssao); }`
+/// gate. `ssao_mode` is `GoldenLightHeader::ssao_mode()` (header word 11); `ao` is the A2 SDF
+/// march (`gMaterial.g`, `attrs.ao / 255`); `view_t` is the `gViewT` lane (`attrs.view_t`);
+/// `ssao` is the per-pixel SSAO term (`gSsao` texel, `[0,1]`).
+///
+/// When `ssao_mode == 0` the `ssao` argument is IGNORED and `ao` is returned UNCHANGED — the
+/// BYTE-IDENTICAL 0%-gate (every pre-P7 scene). When armed, a mesh pixel (`view_t >= 1e30`
+/// sentinel) takes pure SSAO (`class_ao == 1.0`); an SDF pixel takes `min(ao, ssao)` (the
+/// most-occluded wins, cross-representation). The op-order mirrors the shader exactly (the
+/// `min` and the sentinel compare are plain IEEE).
+#[inline]
+fn ssao_combine(ssao_mode: u32, ao: f32, view_t: f32, ssao: f32) -> f32 {
+    if ssao_mode == 0 {
+        return ao;
+    }
+    let ao_class = if view_t >= 1.0e30 { 1.0 } else { ao };
+    ao_class.min(ssao)
+}
+
 /// The CPU mirror of the `deferred_pbr` RESOLVE driven by the L0a + L0b light TABLE
 /// (Lighting L0a/L0b). Identical to [`golden_deferred_resolve`] except the single
 /// compiled-in directional + the `SKY_*` ambient constants are replaced by:
@@ -4757,6 +4781,31 @@ pub fn golden_deferred_resolve_table(
     materials: &[GoldenMaterial],
     header: &GoldenLightHeader,
     lights: &[GoldenLight],
+) -> u32 {
+    // Render P7: delegate to the SSAO-aware variant with a no-op `ssao = 1.0`. On a
+    // `ssao_mode() == 0` scene (every pre-P7 scene) the `ssao_combine` gate is never taken,
+    // so `ao_final == attrs.ao` and the result is BYTE-IDENTICAL to the pre-P7 code path.
+    golden_deferred_resolve_table_ssao(attrs, ro, rd, materials, header, lights, 1.0)
+}
+
+/// The Render P7 SSAO-aware mirror of [`golden_deferred_resolve_table`]: identical EXCEPT the
+/// ambient `ao` is replaced by [`ssao_combine`]`(header.ssao_mode(), attrs.ao, attrs.view_t,
+/// ssao)` — the host mirror of the resolve's structural `ao_final = min(class_ao, gSsao)` gate.
+/// `ssao` is the per-pixel SSAO term (`[0,1]`, the GPU's `gSsao` texel) the SSAO golden feeds.
+///
+/// On a `header.ssao_mode() == 0` scene (every pre-P7 scene) the combine returns `attrs.ao`
+/// UNCHANGED (the `ssao` argument is IGNORED), so this is BYTE-IDENTICAL to
+/// [`golden_deferred_resolve_table`] — which is why the latter delegates here with `ssao = 1.0`
+/// and every existing caller stays byte-stable.
+#[allow(clippy::too_many_arguments)]
+pub fn golden_deferred_resolve_table_ssao(
+    attrs: MarcherAttributes,
+    ro: [f32; 3],
+    rd: [f32; 3],
+    materials: &[GoldenMaterial],
+    header: &GoldenLightHeader,
+    lights: &[GoldenLight],
+    ssao: f32,
 ) -> u32 {
     let base = [
         attrs.base_rgb[0] as f32 / 255.0,
@@ -4795,6 +4844,10 @@ pub fn golden_deferred_resolve_table(
     let nov = v_dot(n, v).max(1e-4);
     let shadow = attrs.shadow as f32 / 255.0;
     let ao = attrs.ao as f32 / 255.0;
+    // Render P7: the SSAO combine (the host mirror of the resolve's structural `if`). On a
+    // `ssao_mode() == 0` scene `ao_final == ao` (the 0%-gate); when armed, a mesh pixel takes
+    // pure SSAO and an SDF pixel takes `min(march, ssao)`.
+    let ao_final = ssao_combine(header.ssao_mode(), ao, attrs.view_t, ssao);
     let pi = core::f32::consts::PI;
     // The hemisphere "up" the sky lerp interpolates against (world up).
     const UP: [f32; 3] = [0.0, 1.0, 0.0];
@@ -4829,7 +4882,7 @@ pub fn golden_deferred_resolve_table(
                     let hemi_c = ground[c] + (sky[c] - ground[c]) * hemi;
                     let spec_ambient = (f0[c] * dfg[0] + dfg[1]) * sky[c];
                     let diff_ambient = diffuse_color[c] * hemi_c;
-                    ambient[c] += (spec_ambient + diff_ambient) * ao;
+                    ambient[c] += (spec_ambient + diff_ambient) * ao_final;
                 }
             }
             // Point/spot (kinds 1/2) are the L0b block (handled after this loop).
@@ -4927,6 +4980,31 @@ pub fn golden_deferred_resolve_table_shadowed<F: Fn([f32; 3]) -> f32>(
     lights: &[GoldenLight],
     field: &F,
 ) -> u32 {
+    // Render P7: delegate to the SSAO-aware variant with a no-op `ssao = 1.0`. On a
+    // `ssao_mode() == 0` scene the `ssao_combine` gate is never taken, so this is
+    // BYTE-IDENTICAL to the pre-P7 multi-light shadow path.
+    golden_deferred_resolve_table_shadowed_ssao(attrs, ro, rd, materials, header, lights, field, 1.0)
+}
+
+/// The Render P7 SSAO-aware mirror of [`golden_deferred_resolve_table_shadowed`]: identical
+/// EXCEPT the ambient `ao` is replaced by [`ssao_combine`]`(header.ssao_mode(), attrs.ao,
+/// attrs.view_t, ssao)`. `ssao` is the per-pixel SSAO term (`gSsao` texel, `[0,1]`).
+///
+/// On a `header.ssao_mode() == 0` scene the combine returns `attrs.ao` UNCHANGED (the `ssao`
+/// argument is IGNORED), so this is BYTE-IDENTICAL to
+/// [`golden_deferred_resolve_table_shadowed`] — which delegates here with `ssao = 1.0`,
+/// keeping every existing caller byte-stable.
+#[allow(clippy::too_many_arguments)]
+pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
+    attrs: MarcherAttributes,
+    ro: [f32; 3],
+    rd: [f32; 3],
+    materials: &[GoldenMaterial],
+    header: &GoldenLightHeader,
+    lights: &[GoldenLight],
+    field: &F,
+    ssao: f32,
+) -> u32 {
     let base = [
         attrs.base_rgb[0] as f32 / 255.0,
         attrs.base_rgb[1] as f32 / 255.0,
@@ -4962,6 +5040,9 @@ pub fn golden_deferred_resolve_table_shadowed<F: Fn([f32; 3]) -> f32>(
     let nov = v_dot(n, v).max(1e-4);
     let shadow = attrs.shadow as f32 / 255.0;
     let ao = attrs.ao as f32 / 255.0;
+    // Render P7: the SSAO combine (host mirror of the resolve's structural `if`). On a
+    // `ssao_mode() == 0` scene `ao_final == ao` (the 0%-gate).
+    let ao_final = ssao_combine(header.ssao_mode(), ao, attrs.view_t, ssao);
     let pi = core::f32::consts::PI;
     const UP: [f32; 3] = [0.0, 1.0, 0.0];
     let hemi = v_dot(n, UP) * 0.5 + 0.5;
@@ -5026,7 +5107,7 @@ pub fn golden_deferred_resolve_table_shadowed<F: Fn([f32; 3]) -> f32>(
                     let hemi_c = ground[c] + (sky[c] - ground[c]) * hemi;
                     let spec_ambient = (f0[c] * dfg[0] + dfg[1]) * sky[c];
                     let diff_ambient = diffuse_color[c] * hemi_c;
-                    ambient[c] += (spec_ambient + diff_ambient) * ao;
+                    ambient[c] += (spec_ambient + diff_ambient) * ao_final;
                 }
             }
             _ => {}
@@ -8705,6 +8786,152 @@ mod ssao_header_tests {
             .with_ssao_mode(1);
         assert_eq!(both.shadow_mode(), 1, "with_ssao_mode must not clobber shadow_mode (word 7)");
         assert_eq!(both.ssao_mode(), 1, "with_shadow_mode must not clobber ssao_mode (word 11)");
+    }
+}
+
+/// Render P7 GROUP C1 — the resolve SSAO combine 0%-gate. Proves that on a `ssao_mode() == 0`
+/// scene (every pre-P7 scene) the SSAO-aware resolve mirrors
+/// ([`golden_deferred_resolve_table_ssao`] / [`golden_deferred_resolve_table_shadowed_ssao`])
+/// return BYTE-IDENTICAL output for ANY `ssao` argument — i.e. the combine is never taken and
+/// `ao_final == attrs.ao`, so wiring the SSAO term in is a true 0%-gate. A positive control
+/// asserts that `ssao_mode == 1` with a darkening SSAO term DOES change a lit SDF pixel (the
+/// combine is actually wired, not dead).
+#[cfg(test)]
+mod ssao_resolve_combine_tests {
+    use super::{
+        golden_deferred_resolve_table, golden_deferred_resolve_table_shadowed,
+        golden_deferred_resolve_table_shadowed_ssao, golden_deferred_resolve_table_ssao,
+        ssao_combine, GoldenLight, GoldenLightHeader, GoldenMaterial, MarcherAttributes,
+        PBR_SKY_DIFFUSE,
+    };
+
+    const RO_ZERO: [f32; 3] = [0.0, 0.0, 0.0];
+
+    /// A representative one-material table (slot 0 = a textured dielectric).
+    fn materials() -> Vec<GoldenMaterial> {
+        vec![GoldenMaterial::new([0.8, 0.6, 0.4, 1.0], 0.0, 0.5, 0.5, [0.0, 0.0, 0.0])]
+    }
+
+    /// The degenerate directional + sky table at `exposure`, with the supplied `ssao_mode`
+    /// (header word 11). The sky entry drives the ambient term the AO modulates.
+    fn table(ssao_mode: u32) -> (GoldenLightHeader, Vec<GoldenLight>) {
+        let header = GoldenLightHeader::new(2, 0, 1.0).with_ssao_mode(ssao_mode);
+        let lights = vec![
+            GoldenLight::directional([0.0, 0.0, 1.0], [1.0, 1.0, 1.0], 1.0),
+            GoldenLight::sky(PBR_SKY_DIFFUSE, PBR_SKY_DIFFUSE),
+        ];
+        (header, lights)
+    }
+
+    /// A small sweep of SDF-lit + mesh-sentinel attributes (the combine reads `mask`, `ao`,
+    /// and the `view_t >= 1e30` mesh sentinel).
+    fn sweep() -> Vec<MarcherAttributes> {
+        let mut v = Vec::new();
+        for &mask in &[1u8, 0u8] {
+            for &ao in &[0u8, 90u8, 200u8, 255u8] {
+                for &view_t in &[2.5_f32, 1.0e30] {
+                    v.push(MarcherAttributes {
+                        base_rgb: [180, 120, 90],
+                        oct_rg: [200, 60],
+                        mat_id: 0,
+                        shadow: 200,
+                        ao,
+                        mask,
+                        view_t,
+                    });
+                }
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn ssao_combine_is_identity_when_off() {
+        // The pure host combine: `ssao_mode == 0` returns `ao` regardless of `view_t`/`ssao`.
+        for &ao in &[0.0_f32, 0.35, 1.0] {
+            for &view_t in &[2.5_f32, 1.0e30] {
+                for &ssao in &[0.0_f32, 0.5, 1.0] {
+                    assert_eq!(
+                        ssao_combine(0, ao, view_t, ssao),
+                        ao,
+                        "ssao_mode==0 must return ao unchanged (the 0%-gate)"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_table_ssao_off_is_byte_identical() {
+        // The SSAO-aware resolve with `ssao_mode == 0` is byte-identical to the pre-P7 fn for
+        // EVERY `ssao` argument and EVERY swept attribute — the resolve 0%-gate.
+        let mats = materials();
+        let (header, lights) = table(0);
+        let rd = [0.1, 0.05, -0.99];
+        for attrs in sweep() {
+            let baseline = golden_deferred_resolve_table(attrs, RO_ZERO, rd, &mats, &header, &lights);
+            for &ssao in &[0.0_f32, 0.25, 0.7, 1.0] {
+                let got = golden_deferred_resolve_table_ssao(
+                    attrs, RO_ZERO, rd, &mats, &header, &lights, ssao,
+                );
+                assert_eq!(
+                    got, baseline,
+                    "ssao_mode==0 resolve must be byte-identical for any ssao ({ssao})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_table_shadowed_ssao_off_is_byte_identical() {
+        // The SHADOWED SSAO-aware resolve with `ssao_mode == 0` (AND `shadow_mode == 0`, so no
+        // march fires) is byte-identical to the pre-P7 shadowed fn for every `ssao`.
+        let mats = materials();
+        let (header, lights) = table(0);
+        let rd = [0.1, 0.05, -0.99];
+        // A trivial field (never marched on the `shadow_mode == 0` / `ssao_mode == 0` path).
+        let field = |_q: [f32; 3]| 1.0_f32;
+        for attrs in sweep() {
+            let baseline = golden_deferred_resolve_table_shadowed(
+                attrs, RO_ZERO, rd, &mats, &header, &lights, &field,
+            );
+            for &ssao in &[0.0_f32, 0.25, 0.7, 1.0] {
+                let got = golden_deferred_resolve_table_shadowed_ssao(
+                    attrs, RO_ZERO, rd, &mats, &header, &lights, &field, ssao,
+                );
+                assert_eq!(
+                    got, baseline,
+                    "ssao_mode==0 shadowed resolve must be byte-identical for any ssao ({ssao})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_table_ssao_on_darkens_a_lit_sdf_pixel() {
+        // Positive control: `ssao_mode == 1` with a strongly-occluding SSAO term (0.0) must
+        // darken a fully-unoccluded lit SDF pixel (ao = 255, view_t finite) — the combine is
+        // wired, not dead. A mesh pixel (view_t sentinel) takes `min(1.0, ssao) == ssao`.
+        let mats = materials();
+        let (header, lights) = table(1);
+        let rd = [0.1, 0.05, -0.99];
+        let attrs = MarcherAttributes {
+            base_rgb: [180, 120, 90],
+            oct_rg: [200, 60],
+            mat_id: 0,
+            shadow: 255,
+            ao: 255,
+            mask: 1,
+            view_t: 2.5,
+        };
+        let unoccluded =
+            golden_deferred_resolve_table_ssao(attrs, RO_ZERO, rd, &mats, &header, &lights, 1.0);
+        let occluded =
+            golden_deferred_resolve_table_ssao(attrs, RO_ZERO, rd, &mats, &header, &lights, 0.0);
+        assert_ne!(
+            occluded, unoccluded,
+            "ssao_mode==1 with a darkening SSAO term must change the lit pixel (combine wired)"
+        );
     }
 }
 

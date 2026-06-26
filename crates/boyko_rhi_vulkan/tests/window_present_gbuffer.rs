@@ -998,6 +998,11 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         // P6 R1: the SDF edit-list `Buf` SSBO @10 (the resolve's `sdf_soft_shadow_ranged`
         // analytic march reads it read-only; the SAME buffer the marcher binds @0).
         BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        // Render P7: the SSAO term `gSsao` STORAGE image @11 (the resolve reads it under
+        // `ssao_mode != 0`; OFF here, so it is a bound-but-unread descriptor). The production
+        // `GBufferTargets` binds the SSAO image at @11, so the resolve layout MUST declare it or
+        // bind-group creation trips the entry-count check (the P6 R1 binding-10 discipline).
+        BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -1822,6 +1827,10 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         // sdf_soft_shadow_ranged march reads it). The production `record_gbuffer` binds it, so the
         // resolve layout MUST declare it or bind-group creation trips the entry-count check.
         BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        // Render P7: the SSAO term `gSsao` STORAGE image @11 (read under `ssao_mode != 0`; OFF
+        // here, bound-but-unread). The production `GBufferTargets` binds the SSAO image at @11,
+        // so the resolve layout MUST declare it (the P6 R1 binding-10 discipline).
+        BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -2607,6 +2616,10 @@ fn engine_showcase_512_screenshot_dump() {
         BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         // P6 R1: the SDF edit-list `Buf` @10 (the `sdf_soft_shadow_ranged` march reads it).
         BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        // Render P7: the SSAO term `gSsao` STORAGE image @11 (read under `ssao_mode != 0`; OFF
+        // here, bound-but-unread). The production `GBufferTargets` binds the SSAO image at @11,
+        // so the resolve layout MUST declare it (the P6 R1 binding-10 discipline).
+        BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,

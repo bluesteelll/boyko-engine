@@ -765,6 +765,10 @@ pub const VK_FORMAT_UNDEFINED: i32 = 0;
 /// decoded to 0.498 instead of 1.0). The `abi_guard` assert passed only because the
 /// `Format::R8Snorm` enum discriminant carried the SAME wrong value.
 pub const VK_FORMAT_R8_SNORM: i32 = 10;
+/// `VkFormat::VK_FORMAT_R8_UNORM` — a single unsigned-normalized 8-bit channel mapping the
+/// byte range onto `[0, 1]` (Render P7: the SSAO term `gSsao` — a full-res STORAGE image the
+/// resolve loads under the `ssao_mode != 0` gate). `VK_FORMAT_R8_UNORM` is 9.
+pub const VK_FORMAT_R8_UNORM: i32 = 9;
 /// `VkFormat::VK_FORMAT_R16_SFLOAT` — a single 16-bit (half) float (SDF brick-atlas
 /// campaign M2: the D8 atlas fallback when `R8_SNORM` lacks the linear-filter feature;
 /// half-float carries the narrow-band distance with NO quantization, so the `EPSILON_Q`

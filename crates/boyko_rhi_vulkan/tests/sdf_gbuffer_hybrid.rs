@@ -822,6 +822,20 @@ fn run_gbuffer_hybrid_m4(
             usage: viewt_usage,
         })
         .expect("Lighting L0b gViewT storage image");
+    // Render P7 GROUP C1: the SSAO term `gSsao` — an R8_UNORM STORAGE image bound at resolve
+    // binding 11. ALWAYS allocated so the resolve descriptor interface is stable; no SSAO pass
+    // writes it (C2 adds that) and `ssao_mode == 0` here, so the resolve never reads it (a
+    // bound-but-unread valid descriptor — the byte-identical 0%-gate).
+    let ssao = device
+        .create_texture(&TextureDesc {
+            width: SDF_IMG_W,
+            height: SDF_IMG_H,
+            depth: 1,
+            format: Format::R8Unorm,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE,
+        })
+        .expect("Render P7 SSAO gSsao storage image");
 
     // The depth is SAMPLED via `.Load` (OpImageFetch, no sampler), but the RHI
     // `BindGroupEntry::SampledImage` requires a sampler handle; a nearest/clamp sampler
@@ -1073,6 +1087,11 @@ fn run_gbuffer_hybrid_m4(
         // analytic march reads it read-only; the SAME buffer the marcher binds @0). 11 ≤ 12
         // (no cap raise — the orchestrator's R1=(A) decision drops the brick atlas binds).
         BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        // Render P7 GROUP C1: the SSAO term `gSsao` STORAGE image @11 (read under
+        // `ssao_mode != 0`; OFF here, so bound-but-unread). The recompiled `deferred_pbr.comp`
+        // STATICALLY declares `gSsao @11`, so the layout MUST declare it or the pipeline create
+        // trips the binding-count check (the P6 R1 binding-10 discipline).
+        BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &resolve_layout_entries })
@@ -1107,6 +1126,9 @@ fn run_gbuffer_hybrid_m4(
                 BindGroupEntry::StorageBuffer { buffer: &light_table },
                 // P6 R1: the SDF edit-list `Buf` @10 (the marcher's vocab @0 SSBO).
                 BindGroupEntry::StorageBuffer { buffer: &buffer },
+                // Render P7 GROUP C1: the SSAO term `gSsao` @11 (bound-but-unread — `ssao_mode`
+                // is 0 here, so the resolve never loads it; present only to satisfy the layout).
+                BindGroupEntry::StorageImage { texture: &ssao },
             ],
         })
         .expect("deferred resolve bind group");
@@ -1233,9 +1255,10 @@ fn run_gbuffer_hybrid_m4(
         });
     }
 
-    // --- The lit output + the Lighting-L0b gViewT lane: UNDEFINED → GENERAL (r0 does NOT
-    // rasterize into these — they stay wholly marcher/resolve-produced). ---
-    for tex in [&lit, &viewt] {
+    // --- The lit output + the Lighting-L0b gViewT lane + the Render P7 SSAO term: UNDEFINED →
+    // GENERAL (r0 does NOT rasterize into these — they stay wholly marcher/resolve-produced;
+    // `ssao` lives in GENERAL its whole life like `viewt`, bound-but-unread under ssao_mode 0). ---
+    for tex in [&lit, &viewt, &ssao] {
         encoder.image_barrier(&ImageBarrierDesc {
             texture: tex,
             src_stage: BarrierStage::TOP_OF_PIPE,
@@ -1482,6 +1505,7 @@ fn run_gbuffer_hybrid_m4(
         device.destroy_buffer(readback);
         device.destroy_buffer(viewt_readback);
         device.destroy_sampler(sampler);
+        device.destroy_texture(ssao);
         device.destroy_texture(viewt);
         device.destroy_texture(lit);
         device.destroy_texture(material);
@@ -4076,6 +4100,19 @@ fn run_gbuffer_hybrid_lit_clustered(
             usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
         })
         .expect("Lighting L0b gViewT storage image");
+    // Render P7 GROUP C1: the SSAO term `gSsao` — an R8_UNORM STORAGE image bound at resolve
+    // binding 11. ALWAYS allocated (the resolve descriptor interface is stable); `ssao_mode == 0`
+    // here, so the resolve never reads it (a bound-but-unread valid descriptor, the 0%-gate).
+    let ssao = device
+        .create_texture(&TextureDesc {
+            width: SDF_IMG_W,
+            height: SDF_IMG_H,
+            depth: 1,
+            format: Format::R8Unorm,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE,
+        })
+        .expect("Render P7 SSAO gSsao storage image");
 
     let sampler = device
         .create_sampler(&SamplerDesc::default())
@@ -4313,6 +4350,11 @@ fn run_gbuffer_hybrid_lit_clustered(
         // analytic march reads it read-only; the SAME buffer the marcher binds @0). 11 ≤ 12
         // (no cap raise — the orchestrator's R1=(A) decision drops the brick atlas binds).
         BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        // Render P7 GROUP C1: the SSAO term `gSsao` STORAGE image @11 (read under
+        // `ssao_mode != 0`; OFF here, bound-but-unread). The recompiled `deferred_pbr.comp`
+        // STATICALLY declares `gSsao @11`, so the layout MUST declare it or the pipeline create
+        // trips the binding-count check (the P6 R1 binding-10 discipline).
+        BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &resolve_layout_entries })
@@ -4342,6 +4384,9 @@ fn run_gbuffer_hybrid_lit_clustered(
                 BindGroupEntry::StorageBuffer { buffer: &light_index },
                 // P6 R1: the SDF edit-list `Buf` @10 (the marcher's vocab @0 SSBO).
                 BindGroupEntry::StorageBuffer { buffer: &buffer },
+                // Render P7 GROUP C1: the SSAO term `gSsao` @11 (bound-but-unread — `ssao_mode`
+                // is 0 here, so the resolve never loads it; present only to satisfy the layout).
+                BindGroupEntry::StorageImage { texture: &ssao },
             ],
         })
         .expect("deferred resolve bind group");
@@ -4455,8 +4500,9 @@ fn run_gbuffer_hybrid_lit_clustered(
         });
     }
 
-    // --- The lit + gViewT images: UNDEFINED → GENERAL (not rasterized into in r0). ---
-    for tex in [&lit, &viewt] {
+    // --- The lit + gViewT + Render P7 SSAO images: UNDEFINED → GENERAL (not rasterized into in
+    // r0; `ssao` lives in GENERAL its whole life, bound-but-unread under ssao_mode 0). ---
+    for tex in [&lit, &viewt, &ssao] {
         encoder.image_barrier(&ImageBarrierDesc {
             texture: tex,
             src_stage: BarrierStage::TOP_OF_PIPE,
@@ -4703,6 +4749,7 @@ fn run_gbuffer_hybrid_lit_clustered(
         device.destroy_buffer(viewt_readback);
         device.destroy_buffer(readback);
         device.destroy_sampler(sampler);
+        device.destroy_texture(ssao);
         device.destroy_texture(viewt);
         device.destroy_texture(lit);
         device.destroy_texture(material);

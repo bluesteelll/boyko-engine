@@ -34,12 +34,16 @@
 //               ({offset,count} per froxel; read on the cluster path).
 //   binding 9 : StructuredBuffer<uint> (READ-ONLY)   — the Lighting-L1 LightIndexList
 //               (the per-froxel light-index slices; the resolve loops the pixel's slice).
+//   binding 10: StructuredBuffer<uint> (READ-ONLY)   — the P6 R1 SDF edit-list `Buf` (the
+//               per-light `sdf_soft_shadow_ranged` analytic march; decl + contract below).
+//   binding 11: RWTexture2D<float> (STORAGE, r8)     — the Render P7 SSAO term `gSsao`,
+//               read ONLY when `load_ssao_mode(LightBuf) != 0` (the 0%-gate; decl below).
 //
-// 10 STORAGE/uniform bindings — within the 12-binding cap (2 free; the cap was raised
-// 8 → 12 in the Lighting L0 plan). All five images are consumed in GENERAL (the marcher's
-// STORAGE views, kept in GENERAL after a memory-only COMPUTE→COMPUTE barrier) and `gLit`
-// is a storage store. `[[vk::image_format("rgba8")]]` pins each `OpTypeImage` to `Rgba8`
-// (shaderStorageImageWriteWithoutFormat is OFF).
+// 12 STORAGE/uniform/buffer bindings (0..=11) — within the resolve binding cap. The G-buffer
+// images are consumed in GENERAL (the marcher's STORAGE views, kept in GENERAL after a
+// memory-only COMPUTE→COMPUTE barrier) and `gLit` is a storage store. `[[vk::image_format
+// ("rgba8")]]` pins each G-buffer `OpTypeImage` to `Rgba8` (shaderStorageImageWriteWithoutFormat
+// is OFF); `gViewT` is pinned `r32f` and `gSsao` `r8`.
 //
 // # BRDF (the Filament/Karis real-time convergence — single scatter)
 //
@@ -122,6 +126,16 @@ StructuredBuffer<uint> LightIndexList : register(t9);
 // the orchestrator's R1=(A) analytic-march decision drops the brick-atlas binds). The
 // resolve is a strict FIELD-CONSUMER: it CALLS `field_distance` read-only, never edits.
 [[vk::binding(10)]] StructuredBuffer<uint> Buf : register(t0);
+
+// binding 11 (Render P7): the SSAO term — a full-res `R8_UNORM` STORAGE image carrying the
+// per-pixel HBAO-lite ambient occlusion the (C2) SSAO pass writes. READ ONLY inside the
+// `is_sdf_lit` ambient combine when `load_ssao_mode(LightBuf) != 0u` (the structural 0%-gate):
+// on a `ssao_mode == 0` scene (every pre-P7 scene) `gSsao.Load` is never executed and the
+// binding is a harmless valid descriptor, so the resolve is arithmetically byte-identical to
+// today. `[[vk::image_format("r8")]]` pins the `OpTypeImage` to `R8` (matching the R8_UNORM
+// view; the SSAO pass / placeholder both bind an R8 image). The descriptor is present on
+// EVERY resolve layout (the interface is stable regardless of DXC dead-code elimination).
+[[vk::image_format("r8")]] RWTexture2D<float> gSsao : register(u11);
 
 // Shared camera ray-gen (the SAME header the marcher includes — ONE ray-gen, no drift).
 #include "ray_gen.hlsli"
@@ -335,6 +349,21 @@ void main(uint3 tid : SV_DispatchThreadID) {
         float3 P = ro + rd * view_t;
         uint marched = 0u;
 
+        // Render P7: the SSAO combine (a structural `if`, the 0%-gate). `ao` is the A2 SDF
+        // march (`gMaterial.g`). When `ssao_mode == 0` (every pre-P7 scene) `ao_final == ao`
+        // and `gSsao` is never read → arithmetically byte-identical to today. When armed, the
+        // per-pixel class uses the ALREADY-loaded `view_t` (no extra fetch): a mesh pixel
+        // (`view_t >= 1e30` sentinel) has NO field AO so it takes pure SSAO; an SDF pixel keeps
+        // the exact march unless SSAO sees a cross-representation occluder (`min` — most-occluded
+        // wins). (The SSAO PASS that writes `gSsao` is Render P7 GROUP C2; on a `ssao_mode == 0`
+        // scene the image is never read, so its undefined contents are irrelevant.)
+        float ao_final = ao;
+        uint ssao_mode = load_ssao_mode(LightBuf);
+        if (ssao_mode != SSAO_MODE_OFF) {
+            float ao_class = (view_t >= 1.0e30) ? 1.0 : ao;
+            ao_final = min(ao_class, gSsao.Load(coord).r);
+        }
+
         float3 lit_direct = float3(0.0, 0.0, 0.0);
         float3 ambient = float3(0.0, 0.0, 0.0);
         bool primary_dir_seen = false;
@@ -378,7 +407,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 float3 hemi_color = lerp(ground_color, sky_color, hemi);
                 float3 spec_ambient = (f0 * dfg.x + dfg.y) * sky_color;
                 float3 diff_ambient = diffuse_color * hemi_color;
-                ambient += (spec_ambient + diff_ambient) * ao;
+                ambient += (spec_ambient + diff_ambient) * ao_final;
             }
             // Point/spot (kinds 1/2) are the L0b block — not in the L0a front block.
         }

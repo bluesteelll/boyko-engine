@@ -35,7 +35,7 @@ use crate::ffi::{
     VK_FILTER_NEAREST, VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM,
     VK_FORMAT_D32_SFLOAT, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT,
     VK_FORMAT_R32G32B32_SFLOAT, VK_FORMAT_R32_SFLOAT, VK_FORMAT_R8G8B8A8_SRGB,
-    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8_SNORM,
+    VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8_SNORM, VK_FORMAT_R8_UNORM,
     VK_FORMAT_UNDEFINED,
     VK_IMAGE_ASPECT_COLOR_BIT,
     VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -215,6 +215,11 @@ const _: () = assert!(
 const _: () = assert!(
     Format::R8Snorm.as_i32() == VK_FORMAT_R8_SNORM,
     "Format::R8Snorm must equal VK_FORMAT_R8_SNORM"
+);
+// Render P7: the SSAO term `gSsao` format (`as_i32()` mapped in `create_texture`).
+const _: () = assert!(
+    Format::R8Unorm.as_i32() == VK_FORMAT_R8_UNORM,
+    "Format::R8Unorm must equal VK_FORMAT_R8_UNORM"
 );
 // SDF brick-atlas campaign M2: the D8 atlas fallback format (`as_i32()` mapped in
 // `create_texture`; chosen by the `atlas_linear_filter_ok` probe when `R8_SNORM` lacks

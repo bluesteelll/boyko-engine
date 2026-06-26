@@ -2709,7 +2709,12 @@ impl<'ctx> Renderer<'ctx> {
         // albedo/normal/material moved to the COLOR_ATTACHMENT_OPTIMAL→GENERAL barrier-out
         // (3b) above, since pass A now rasterizes into them; gViewT stays UNDEFINED→GENERAL
         // because r0 does NOT rasterize into it — it is still wholly marcher-produced.)
-        for tex in [&targets.lit, &targets.viewt] {
+        // Render P7: `targets.ssao` (R8_UNORM) joins this batch — it lives in GENERAL its whole
+        // life like `viewt` (no SSAO pass writes it yet, C2 adds that; the resolve reads it only
+        // under `ssao_mode != 0`, so on every pre-P7 scene this is a valid GENERAL image the
+        // resolve never reads — byte-identical PIXELS, one extra harmless transition that does
+        // NOT alter the OFF arithmetic).
+        for tex in [&targets.lit, &targets.viewt, &targets.ssao] {
             let to_general = VkImageMemoryBarrier {
                 s_type: VkStructureType::ImageMemoryBarrier,
                 p_next: ptr::null(),
@@ -4197,6 +4202,15 @@ pub struct GBufferTargets {
     /// the resolve set (binding 7). Transitioned UNDEFINED→GENERAL with the other G-buffer
     /// images and joins the marcher store → resolve load barrier.
     viewt: VulkanTexture,
+    /// The Render P7 SSAO term `gSsao` (R8_UNORM STORAGE): the per-pixel HBAO-lite ambient
+    /// occlusion the (C2) SSAO pass writes and the deferred resolve reads under the
+    /// `ssao_mode != 0` gate. Bound as an INPUT on the resolve set (binding 11). ALWAYS
+    /// allocated (the resolve descriptor interface is stable regardless of `ssao_mode`);
+    /// transitioned UNDEFINED→GENERAL with `lit`/`viewt` and kept in GENERAL its whole life.
+    /// No SSAO pass writes it yet (C2 adds that) — with `ssao_mode == 0` the resolve never
+    /// reads it, so its undefined contents are irrelevant (the 0%-gate is the byte-identical
+    /// PIXELS + command stream, which the always-allocate preserves).
+    ssao: VulkanTexture,
     /// The marcher vocabulary descriptor set, written ONCE against
     /// [`GBufferScene::vocab_layout`] (pointing at `depth`/`albedo`/`normal`/`material`
     /// + the scene's SSBO/UBO/sampler + the M1 `pointer_grid` SSBO @9). NO per-frame update.
@@ -4205,9 +4219,12 @@ pub struct GBufferTargets {
     /// [`GBufferScene::resolve_layout`] (10 bindings: `albedo` @0, `normal` @1, `material`
     /// @2, `lit` @3 STORAGE images, the material SSBO @4, the camera UBO @5, the L0a light
     /// table SSBO @6, the L0b `gViewT` STORAGE image @7, the L1 `ClusterGrid` SSBO @8, the L1
-    /// `LightIndexList` SSBO @9). When L1 is off the scene's `cluster_grid`/`light_index` are
-    /// `None`, so @8/@9 bind the light table as a harmless valid placeholder (the resolve's
-    /// `clusters_enabled` header gate never reads them on the OFF path). NO per-frame update.
+    /// `LightIndexList` SSBO @9, the P6 R1 SDF edit-list `Buf` SSBO @10, the Render P7 SSAO
+    /// term `gSsao` STORAGE image @11). When L1 is off the scene's `cluster_grid`/`light_index`
+    /// are `None`, so @8/@9 bind the light table as a harmless valid placeholder (the resolve's
+    /// `clusters_enabled` header gate never reads them on the OFF path). `gSsao` @11 is always
+    /// bound; the resolve reads it only under `ssao_mode != 0` (0 every pre-P7 scene). NO
+    /// per-frame update.
     resolve_set: VulkanBindGroup,
     /// The Lighting-L1 CULL descriptor set, written ONCE against
     /// [`GBufferScene::cull_layout`] (camera UBO @0, light table SSBO @1, `ClusterGrid` SSBO
@@ -4235,6 +4252,14 @@ const GBUFFER_FORMAT: Format = Format::R8G8B8A8Unorm;
 /// attenuation/cone banding a low-precision `t` would cause. W2: `STORAGE_IMAGE` support
 /// on this format is fail-fast-checked at device boot.
 const GVIEWT_FORMAT: Format = Format::R32Sfloat;
+
+/// The Render P7 SSAO term `gSsao` format: `R8_UNORM`, a single 8-bit ambient-occlusion lane
+/// the (C2) SSAO pass stores and the deferred resolve loads under the `ssao_mode != 0` gate.
+/// 8 bits is the engine AO tolerance (the A2 march lands in `gMaterial.g`, also 8-bit). P7:
+/// `R8_UNORM`/`STORAGE_IMAGE` support is fail-fast-checked at device boot
+/// ([`crate::device::DeviceCaps::r8_unorm_storage_ok`]), so the SSAO image create can never
+/// fault on an unsupported format.
+const SSAO_FORMAT: Format = Format::R8Unorm;
 
 impl GBufferTargets {
     /// Creates a 2D `R8G8B8A8_UNORM` storage image at `extent` with `usage`. A small
@@ -4270,6 +4295,27 @@ impl GBufferTargets {
             height: extent.height,
             depth: 1,
             format: GVIEWT_FORMAT,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE,
+        };
+        RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
+    }
+
+    /// Creates the Render P7 SSAO term `gSsao`: a 2D `R8_UNORM` STORAGE image at `extent`
+    /// (the per-pixel HBAO-lite ambient occlusion). A separate helper from
+    /// [`Self::create_gbuffer_image`] because the lane is `R8_UNORM`, not the RGBA8
+    /// [`GBUFFER_FORMAT`]. P7: `R8_UNORM`/`STORAGE_IMAGE` support is fail-fast-checked at
+    /// device boot ([`crate::device::DeviceCaps::r8_unorm_storage_ok`]), so this create can
+    /// never fault on an unsupported format.
+    fn create_ssao_image(
+        ctx: &VulkanContext,
+        extent: VkExtent2D,
+    ) -> Result<VulkanTexture, SwapchainError> {
+        let desc = TextureDesc {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+            format: SSAO_FORMAT,
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE,
         };
@@ -4394,6 +4440,25 @@ impl GBufferTargets {
                 return Err(e);
             }
         };
+        // Render P7: the R8_UNORM `gSsao` term (ALWAYS allocated — the resolve descriptor
+        // interface is stable regardless of `ssao_mode`; no SSAO pass writes it yet, C2 adds
+        // that). Read by the resolve only under `ssao_mode != 0` (0 every pre-P7 scene).
+        let ssao = match Self::create_ssao_image(ctx, extent) {
+            Ok(t) => t,
+            Err(e) => {
+                // SAFETY: the six textures above were created on `ctx`; referenced by
+                // no submission; each destroyed exactly once on this error path.
+                unsafe {
+                    RhiDevice::destroy_texture(ctx, viewt);
+                    RhiDevice::destroy_texture(ctx, lit);
+                    RhiDevice::destroy_texture(ctx, material);
+                    RhiDevice::destroy_texture(ctx, normal);
+                    RhiDevice::destroy_texture(ctx, albedo);
+                    RhiDevice::destroy_texture(ctx, depth);
+                }
+                return Err(e);
+            }
+        };
 
         // The marcher vocabulary set, written ONCE here (NO per-frame update). The
         // entry order matches the layout: SSBO @0, sampled depth @1, storage albedo @2,
@@ -4458,9 +4523,10 @@ impl GBufferTargets {
             match RhiDevice::create_bind_group(ctx, &desc) {
                 Ok(g) => g,
                 Err(e) => {
-                    // SAFETY: the seven textures above were created on `ctx`; referenced
+                    // SAFETY: the eight textures above were created on `ctx`; referenced
                     // by no submission; each destroyed exactly once on this error path.
                     unsafe {
+                        RhiDevice::destroy_texture(ctx, ssao);
                         RhiDevice::destroy_texture(ctx, viewt);
                         RhiDevice::destroy_texture(ctx, lit);
                         RhiDevice::destroy_texture(ctx, material);
@@ -4473,7 +4539,7 @@ impl GBufferTargets {
             }
         };
 
-        // The deferred RESOLVE set, written ONCE here (10 bindings, ≤ 12): gAlbedo @0,
+        // The deferred RESOLVE set, written ONCE here (12 bindings, 0..=11): gAlbedo @0,
         // gNormal @1, gMaterial @2, lit @3 (STORAGE images), material SSBO @4, camera UBO
         // @5, light table SSBO @6 (Lighting L0a), gViewT @7 (Lighting L0b), ClusterGrid @8 +
         // LightIndexList @9 (Lighting L1) — matching `deferred_pbr.comp`'s set 0. When L1 is
@@ -4504,6 +4570,11 @@ impl GBufferTargets {
                 // (a strict field-CONSUMER); on a `shadow_mode==0` scene the march is never
                 // executed, so the binding is a harmless valid descriptor (the 0%-gate).
                 BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
+                // Render P7: the SSAO term `gSsao` @11 — ALWAYS bound (the resolve descriptor
+                // interface is stable regardless of `ssao_mode`). The resolve reads it only under
+                // `ssao_mode != 0` (0 every pre-P7 scene), so the binding is a harmless valid
+                // descriptor (the 0%-gate); no SSAO pass writes it yet (C2 adds that).
+                BindGroupEntry::StorageImage { texture: &ssao },
             ];
             let desc = BindGroupDesc::<Vulkan> {
                 layout: scene.resolve_layout,
@@ -4512,11 +4583,12 @@ impl GBufferTargets {
             match RhiDevice::create_bind_group(ctx, &desc) {
                 Ok(g) => g,
                 Err(e) => {
-                    // SAFETY: the seven textures + the vocabulary set above were created on
+                    // SAFETY: the eight textures + the vocabulary set above were created on
                     // `ctx`; referenced by no submission; each destroyed exactly once on
                     // this error path (reverse acquisition order: set → images).
                     unsafe {
                         RhiDevice::destroy_bind_group(ctx, vocab_set);
+                        RhiDevice::destroy_texture(ctx, ssao);
                         RhiDevice::destroy_texture(ctx, viewt);
                         RhiDevice::destroy_texture(ctx, lit);
                         RhiDevice::destroy_texture(ctx, material);
@@ -4546,12 +4618,13 @@ impl GBufferTargets {
                 match RhiDevice::create_bind_group(ctx, &desc) {
                     Ok(g) => Some(g),
                     Err(e) => {
-                        // SAFETY: the resolve + vocabulary sets + the seven textures above
+                        // SAFETY: the resolve + vocabulary sets + the eight textures above
                         // were created on `ctx`; referenced by no submission; each destroyed
                         // exactly once on this error path (reverse acquisition order).
                         unsafe {
                             RhiDevice::destroy_bind_group(ctx, resolve_set);
                             RhiDevice::destroy_bind_group(ctx, vocab_set);
+                            RhiDevice::destroy_texture(ctx, ssao);
                             RhiDevice::destroy_texture(ctx, viewt);
                             RhiDevice::destroy_texture(ctx, lit);
                             RhiDevice::destroy_texture(ctx, material);
@@ -4580,7 +4653,7 @@ impl GBufferTargets {
             match RhiDevice::create_bind_group(ctx, &desc) {
                 Ok(g) => g,
                 Err(e) => {
-                    // SAFETY: the seven textures + the vocabulary, resolve & (optional) cull
+                    // SAFETY: the eight textures + the vocabulary, resolve & (optional) cull
                     // sets above were created on `ctx`; referenced by no submission; each
                     // destroyed exactly once on this error path (reverse acquisition order:
                     // sets → images). The cull set is `Option`-guarded (only when L1 wired).
@@ -4590,6 +4663,7 @@ impl GBufferTargets {
                         }
                         RhiDevice::destroy_bind_group(ctx, resolve_set);
                         RhiDevice::destroy_bind_group(ctx, vocab_set);
+                        RhiDevice::destroy_texture(ctx, ssao);
                         RhiDevice::destroy_texture(ctx, viewt);
                         RhiDevice::destroy_texture(ctx, lit);
                         RhiDevice::destroy_texture(ctx, material);
@@ -4609,6 +4683,7 @@ impl GBufferTargets {
             material,
             lit,
             viewt,
+            ssao,
             vocab_set,
             resolve_set,
             cull_set,
@@ -4686,6 +4761,7 @@ impl GBufferTargets {
             }
             RhiDevice::destroy_bind_group(ctx, self.resolve_set);
             RhiDevice::destroy_bind_group(ctx, self.vocab_set);
+            RhiDevice::destroy_texture(ctx, self.ssao);
             RhiDevice::destroy_texture(ctx, self.viewt);
             RhiDevice::destroy_texture(ctx, self.lit);
             RhiDevice::destroy_texture(ctx, self.material);

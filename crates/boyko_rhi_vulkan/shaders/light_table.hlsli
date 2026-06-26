@@ -71,6 +71,24 @@ uint load_shadow_mode(StructuredBuffer<uint> LightBuf) {
     return LightBuf[7];
 }
 
+// === Render P7 — the resolve ssao_mode, sourced from a SPARE header word ===============
+//
+// Header word 11 (`sky_spec.w` — NEVER read by the L0a sky ambient, which uses only
+// words 8..10 for the spec hemisphere) carries the Render P7 `ssao_mode`, mirroring
+// `load_shadow_mode` (word 7) EXACTLY (the same `LightBuf[N]` raw word accessor):
+//   0 = SSAO OFF (the resolve combine is `ao_final == gMaterial.g` — the BYTE-IDENTICAL
+//       0%-gate; word 11 is 0 on every pre-P7 scene).
+//   1 = SSAO ON: the resolve arms the `ao_final = min(class_ao, gSsao)` cross-representation
+//       combine (mesh pixels take pure SSAO; SDF pixels take the most-occluded of the exact
+//       A2 march and SSAO).
+// Sourced from a header word (not the marcher push) so the FROZEN marcher is untouched.
+static const uint SSAO_MODE_OFF = 0u;
+static const uint SSAO_MODE_ON  = 1u;
+
+uint load_ssao_mode(StructuredBuffer<uint> LightBuf) {
+    return LightBuf[11];
+}
+
 // The decoded header (read once per dispatch — a wave-uniform broadcast).
 struct LightHeader {
     uint   light_count;

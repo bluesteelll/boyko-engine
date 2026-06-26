@@ -93,6 +93,13 @@ pub enum BootError {
     /// any conformant GPU; the fail-fast mirrors [`Self::GbufferStorageFormatUnsupported`]
     /// so the producer can never fault as a device-lost on an unsupported usage.
     GbufferColorAttachmentFormatUnsupported,
+    /// The GPU does not advertise `STORAGE_IMAGE` on the Render P7 SSAO term format
+    /// (`R8_UNORM`, OPTIMAL tiling) — the resolve binds `gSsao` (and the SSAO pass stores it)
+    /// as a STORAGE image. `R8_UNORM` storage-image support is broadly available (core-
+    /// guaranteed on the RTX 3060 / any desktop GPU); the fail-fast mirrors
+    /// [`Self::GbufferStorageFormatUnsupported`] so the SSAO image can never fault on an
+    /// unsupported format.
+    SsaoStorageFormatUnsupported,
 }
 
 /// Bootstrap options for the instance.
@@ -149,6 +156,11 @@ pub struct DeviceCaps {
     /// attachments). Always `true` on a booted context — boot fails with
     /// [`BootError::GbufferColorAttachmentFormatUnsupported`] otherwise.
     pub gbuffer_color_attachment_format_ok: bool,
+    /// Whether `R8_UNORM` supports `STORAGE_IMAGE` under OPTIMAL tiling (Render P7: the SSAO
+    /// term `gSsao` is a full-res STORAGE-image the resolve loads + the SSAO pass stores).
+    /// Always `true` on a booted context — boot fails with
+    /// [`BootError::SsaoStorageFormatUnsupported`] otherwise.
+    pub r8_unorm_storage_ok: bool,
     /// Whether `R8_SNORM` supports `SAMPLED_IMAGE_FILTER_LINEAR` under OPTIMAL tiling (SDF
     /// brick-atlas campaign M2): the hardware trilinear fetch of the quantized narrow-band
     /// brick atlas needs `VK_FILTER_LINEAR` on the sampled `R8_SNORM` 3D image. RECORDED
@@ -560,6 +572,12 @@ impl VulkanContext {
         // color-attachment renderability is mandatory in Vulkan (core-guaranteed on the RTX).
         if !device_caps.gbuffer_color_attachment_format_ok {
             fail!(BootError::GbufferColorAttachmentFormatUnsupported);
+        }
+        // Render P7: the SSAO term `gSsao` is an R8_UNORM STORAGE image (resolve load + SSAO-
+        // pass store) — fail-fast here (mirroring the storage checks) so the SSAO image can
+        // never fault on an unsupported format. Core-guaranteed on the RTX 3060.
+        if !device_caps.r8_unorm_storage_ok {
+            fail!(BootError::SsaoStorageFormatUnsupported);
         }
 
         // --- 6. Create the logical device + retrieve the queue. ---
@@ -1989,6 +2007,29 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
     let gbuffer_color_attachment_format_ok =
         (gbuffer_color_props.optimal_tiling_features & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) != 0;
 
+    // --- r8_unorm_storage_ok (Render P7): STORAGE_IMAGE on R8_UNORM, OPTIMAL tiling. The
+    // SSAO term `gSsao` is a full-res R8_UNORM STORAGE image (resolve load + SSAO-pass store);
+    // mirror the `gbuffer_storage_format_ok` check exactly for the new format so the caller can
+    // fail-fast before the SSAO image is created. (R8_UNORM storage-image support is broadly
+    // available, so this passes universally — the gate is the fail-fast discipline.)
+    let mut ssao_props = VkFormatProperties {
+        linear_tiling_features: 0,
+        optimal_tiling_features: 0,
+        buffer_features: 0,
+    };
+    // SAFETY: `physical_device` is valid; `R8_UNORM` is a valid `VkFormat`;
+    // `&mut ssao_props` is a valid out-pointer for the `#[repr(C)]` `VkFormatProperties`
+    // the driver fully overwrites.
+    unsafe {
+        (fns.get_physical_device_format_properties)(
+            physical_device,
+            VK_FORMAT_R8_UNORM,
+            &mut ssao_props,
+        )
+    };
+    let r8_unorm_storage_ok =
+        (ssao_props.optimal_tiling_features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+
     // --- atlas_linear_filter_ok (M2): SAMPLED_IMAGE_FILTER_LINEAR on R8_SNORM, OPTIMAL
     // tiling. The SDF brick atlas is a SAMPLED `R8_SNORM` 3D image the marcher fetches with
     // a hardware trilinear filter; mirror the storage-format checks for the new feature bit.
@@ -2018,6 +2059,7 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         gbuffer_storage_format_ok,
         viewt_storage_format_ok,
         gbuffer_color_attachment_format_ok,
+        r8_unorm_storage_ok,
         atlas_linear_filter_ok,
     }
 }

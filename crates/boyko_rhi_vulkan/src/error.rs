@@ -143,7 +143,8 @@ impl From<VulkanError> for RhiError {
                 | BootError::WindowingUnavailable
                 | BootError::GbufferStorageFormatUnsupported
                 | BootError::ViewtStorageFormatUnsupported
-                | BootError::GbufferColorAttachmentFormatUnsupported => {
+                | BootError::GbufferColorAttachmentFormatUnsupported
+                | BootError::SsaoStorageFormatUnsupported => {
                     RhiError::BackendError("vulkan boot failed")
                 }
                 BootError::VkError(_cmd, result) => match result {
