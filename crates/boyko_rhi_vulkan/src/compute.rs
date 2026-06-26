@@ -284,7 +284,7 @@ static SDF_TILE_CULL_SPV: SpirvBlob<10304> = SpirvBlob(*include_bytes!(concat!(
 /// oct + id), gMaterial @1 (R, `.b` = mask), gViewT @2 (R, surface `t`), the `ssao` out @3 (W),
 /// the 80-byte camera UBO @4. `gAlbedo` is NOT bound. The host oracle is
 /// [`golden_ssao_attributes`] (Stage-2 gather over the [`golden_gbuffer`] Stage-1 map).
-static SDF_SSAO_SPV: SpirvBlob<44044> = SpirvBlob(*include_bytes!(concat!(
+static SDF_SSAO_SPV: SpirvBlob<44060> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_ssao.comp.spv"
 )));
@@ -619,7 +619,7 @@ pub const SSAO_SLICES_F: f32 = 2.0;
 pub const SSAO_STEPS: u32 = 4;
 /// The occlusion strength multiplier (`SSAO_STRENGTH`). Equals
 /// `boyko_shaderdsl::ssao::SSAO_STRENGTH`.
-pub const SSAO_STRENGTH: f32 = 1.0;
+pub const SSAO_STRENGTH: f32 = 2.5;
 /// The `length(delta)` divide-by-zero guard (`SSAO_EPS`). Equals
 /// `boyko_shaderdsl::ssao::SSAO_EPS`.
 pub const SSAO_EPS: f32 = 1.0e-4;

@@ -65,7 +65,7 @@ pub const SSAO_STEPS: usize = 4;
 /// The occlusion strength multiplier (`SSAO_STRENGTH`) — scales the mean per-slice horizon
 /// cosine before the `ao = 1 - strength*occ` complement. Spelled SYMBOLICALLY
 /// (`SSAO_STRENGTH`).
-pub const SSAO_STRENGTH: f32 = 1.0;
+pub const SSAO_STRENGTH: f32 = 2.5;
 
 /// The `length(delta)` divide-by-zero guard (`SSAO_EPS`) — `elev = max(dot(delta,N) /
 /// max(length(delta), SSAO_EPS), 0)`. Spelled SYMBOLICALLY (`SSAO_EPS`).

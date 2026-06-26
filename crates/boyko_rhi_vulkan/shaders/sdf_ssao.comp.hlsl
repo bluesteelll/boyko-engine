@@ -111,7 +111,7 @@ static const float SSAO_RADIUS   = 0.5;     // world-space sampling radius
 static const uint  SSAO_SLICES   = 2u;      // rotated screen-space slices
 static const float SSAO_SLICES_F = 2.0;     // the slice count as a float (the `occ / N` divisor)
 static const uint  SSAO_STEPS    = 4u;      // forward steps per half-slice
-static const float SSAO_STRENGTH = 1.0;     // occlusion strength multiplier
+static const float SSAO_STRENGTH = 2.5;     // occlusion strength multiplier
 static const float SSAO_EPS      = 1.0e-4;  // length(delta) divide-by-zero guard
 
 // The mesh/SDF G-buffer sentinel (mirror the marcher's gViewT `1.0e30` background sentinel).
