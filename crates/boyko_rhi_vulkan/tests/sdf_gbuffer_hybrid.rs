@@ -58,7 +58,7 @@ use boyko_rhi_vulkan::compute::{
     golden_deferred_resolve_table_shadowed, MAX_SDF_SHADOW_CASTERS_PER_PIXEL,
     // Render P7 SSAO: the SSAO compute SPIR-V + the host two-stage oracle (Stage-1 G-buffer map +
     // Stage-2 gather) + the SSAO-aware resolve mirrors (`min(class_ao, ssao)` combine).
-    sdf_ssao_spirv, golden_gbuffer, golden_ssao_attributes,
+    sdf_ssao_spirv, golden_gbuffer, golden_ssao_attributes, golden_ssao_blur,
     golden_deferred_resolve_table_shadowed_ssao,
     GoldenLight, GoldenLightHeader, GoldenMaterial, GOLDEN_LIGHT_HEADER_BASE_WORDS,
     composite_pixel_ray, deferred_pbr_spirv, mesh_depth_for_z,
@@ -6768,6 +6768,20 @@ fn ssao_combined_lit_matches_host() {
 
         let gbuf = ssao_host_gbuffer(&edits, flags, DEFAULT_LIGHT_DIR);
         let field = |q: [f32; 3]| boyko_sdf_math::sdf_edit_list(&edits, q);
+        // Render P7 POLISH: the resolve now BLURS `gSsao` (a 7×7 depth-gated box) before the
+        // combine, so the host must feed the SSAO-aware resolve mirror the BLURRED per-pixel
+        // term, NOT the raw single tap. Build the RAW host SSAO byte image ONCE — the SAME
+        // `(host * 255).round() as u8` quantization the AO-channel golden asserts the GPU
+        // `gSsao` against — then `golden_ssao_blur` over it per pixel mirrors the resolve's
+        // inline gather exactly (so GPU == host within ±2/255 holds despite the blur).
+        let raw_ssao: Vec<u8> = (0..PIXELS)
+            .map(|i| {
+                let px = i % SDF_IMG_W;
+                let py = i / SDF_IMG_W;
+                let a = golden_ssao_attributes(&gbuf, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                (a * 255.0).round() as u8
+            })
+            .collect();
         let mut max_delta = 0i32;
         let mut lit_hits = 0u64;
         for py in 0..SDF_IMG_H {
@@ -6775,9 +6789,10 @@ fn ssao_combined_lit_matches_host() {
                 let idx = (py * SDF_IMG_W + px) as usize;
                 let attrs = gbuf[idx];
                 let (ro, rd) = composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
-                // The per-pixel host SSAO term (the SAME oracle the AO-channel golden asserts the
-                // GPU `ssao` against), fed into the SSAO-aware resolve mirror.
-                let ao = golden_ssao_attributes(&gbuf, px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
+                // The per-pixel BLURRED host SSAO term (the 7×7 depth-gated box over the raw
+                // host SSAO image — the exact mirror of the resolve's inline blur), fed into the
+                // SSAO-aware resolve mirror.
+                let ao = golden_ssao_blur(&raw_ssao, &gbuf, px, py, SDF_IMG_W, SDF_IMG_H);
                 let want = unpack_packed_rgb(golden_deferred_resolve_table_shadowed_ssao(
                     attrs, ro, rd, &materials, &header, &lights, &field, ao,
                 ));

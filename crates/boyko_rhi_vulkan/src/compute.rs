@@ -243,7 +243,12 @@ static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<122988> = SpirvBlob(*include_bytes!(
 /// `ao_final = min(class_ao, gSsao)` combine gated by `load_ssao_mode` (header word 11). On every
 /// pre-P7 scene `ssao_mode == 0`, so `gSsao` is never read and the lit PIXELS are byte-identical;
 /// the `.spv` itself grows (the gate + the new binding are compiled in); 24824 → 25280 bytes.
-static DEFERRED_PBR_SPV: SpirvBlob<25280> = SpirvBlob(*include_bytes!(concat!(
+/// Render P7 POLISH: the single `gSsao` center tap becomes an inline 7×7 (`R == 3`) depth-gated
+/// box blur (`gViewT` bilateral gate at `SSAO_BLUR_DEPTH_TOL == 0.1`) to kill the discrete-step
+/// SSAO RINGS — still inside the SAME `ssao_mode != 0` combine (NO new pass; the 0%-gate holds,
+/// `ssao_mode == 0` never executes the loop). The host mirror is `golden_ssao_blur`; the gather
+/// order/bounds/gate are byte-mirrored so GPU == host within ±2/255; 25280 → 26608 bytes.
+static DEFERRED_PBR_SPV: SpirvBlob<26608> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/deferred_pbr.comp.spv"
 )));
@@ -646,6 +651,19 @@ pub const SSAO_ROT: [(f32, f32); 4] = [
     (0.70710678, 0.70710678),
     (0.38268343, 0.92387953),
 ];
+
+/// Render P7 POLISH — the SSAO depth-aware box-blur half-kernel radius (`SSAO_BLUR_R` in the
+/// resolve). `R == 3` is a 7×7 box: the inline blur of `gSsao` INSIDE the resolve's `ssao_mode
+/// != 0` combine that smooths the discrete-step HBAO RINGS. The host mirror [`golden_ssao_blur`]
+/// uses the SAME radius so the GPU and host averages agree texel-for-texel.
+pub const SSAO_BLUR_R: i32 = 3;
+/// Render P7 POLISH — the SSAO blur's bilateral DEPTH gate (`SSAO_BLUR_DEPTH_TOL` in the
+/// resolve), in `view_t` (world-distance) units. A neighbour tap is averaged in ONLY when
+/// `|tap.view_t - center.view_t| <= SSAO_BLUR_DEPTH_TOL`; this keeps the blur WITHIN a flat
+/// surface (the mesh floor has near-constant `view_t`) while REJECTING the mesh↔SDF silhouette
+/// (where `view_t` jumps far more than the tol), so AO never bleeds across the edge. `0.1` was
+/// chosen to sit comfortably inside that band. Mirrored bit-for-bit by [`golden_ssao_blur`].
+pub const SSAO_BLUR_DEPTH_TOL: f32 = 0.1;
 
 /// The A1 host mirror of `sdf_soft_shadow`: a clamped-step Quilez BASIC cone-trace
 /// (NO `sqrt` — minimal FP-parity surface) from the lit point `p` toward the
@@ -4682,6 +4700,68 @@ pub fn golden_ssao_attributes(
     // horizon cosine scaled by strength, complemented, then squared (the integer self-mul).
     let ao = (1.0 - SSAO_STRENGTH * occ / SSAO_SLICES_F).clamp(0.0, 1.0);
     ao * ao
+}
+
+/// Render P7 POLISH — the EXACT host mirror of the resolve's inline SSAO depth-aware box blur
+/// (`deferred_pbr.hlsl`, inside the `ssao_mode != 0` combine). Given the RAW per-pixel SSAO
+/// byte image (`ssao` — exactly what the GPU `gSsao` R8_UNORM holds; the C2 host builds it via
+/// [`golden_ssao_attributes`] quantized to `u8` by `(x * 255).round()`) and the host G-buffer
+/// (`gbuf`, for the per-pixel `view_t` depth gate), returns the blurred AO factor `[0,1]` at
+/// `(px, py)`.
+///
+/// The gather is the byte-for-byte mirror of the shader: average the `(2*R+1)²` neighbour taps
+/// (`R == `[`SSAO_BLUR_R`]) whose `gbuf[c].view_t` is within [`SSAO_BLUR_DEPTH_TOL`] of the
+/// center's, bounds-clamped to the image; the center always passes its own gate so the count is
+/// `≥ 1` (no divide-by-zero). The op-set is integer / `abs` / compare / the same
+/// `byte / 255.0` UNORM decode — NO transcendental — so the host average rounds bit-identically
+/// to the GPU's. The depth gate is the silhouette guard: a neighbour across the mesh↔SDF edge
+/// has a far `view_t` and is rejected, so the blur never bleeds AO over the silhouette.
+pub fn golden_ssao_blur(
+    ssao: &[u8],
+    gbuf: &[MarcherAttributes],
+    px: u32,
+    py: u32,
+    img_w: u32,
+    img_h: u32,
+) -> f32 {
+    let w = img_w as i32;
+    let h = img_h as i32;
+    debug_assert_eq!(
+        ssao.len(),
+        (img_w as usize) * (img_h as usize),
+        "invariant: SSAO blur raw image length must equal img_w * img_h"
+    );
+    debug_assert_eq!(
+        gbuf.len(),
+        (img_w as usize) * (img_h as usize),
+        "invariant: SSAO blur gbuf length must equal img_w * img_h"
+    );
+
+    // The center's `view_t` (the gate reference) — the SAME `gViewT.Load(coord)` the resolve
+    // reads. The center always passes `|view_t - view_t| == 0 <= tol`, so `cnt >= 1`.
+    let center_view_t = gbuf[(py as i32 * w + px as i32) as usize].view_t;
+
+    let mut sum = 0.0_f32;
+    let mut cnt = 0.0_f32;
+    // Mirror the shader's nested `for (dy) for (dx)` order/bounds/gate EXACTLY.
+    for dy in -SSAO_BLUR_R..=SSAO_BLUR_R {
+        for dx in -SSAO_BLUR_R..=SSAO_BLUR_R {
+            let cx = px as i32 + dx;
+            let cy = py as i32 + dy;
+            if cx < 0 || cy < 0 || cx >= w || cy >= h {
+                continue; // bounds
+            }
+            let idx = (cy * w + cx) as usize;
+            let vt = gbuf[idx].view_t;
+            if (vt - center_view_t).abs() > SSAO_BLUR_DEPTH_TOL {
+                continue; // silhouette gate (far-depth neighbour)
+            }
+            // The GPU reads `gSsao.Load(c).r` — the R8_UNORM decode of the raw byte.
+            sum += ssao[idx] as f32 / 255.0;
+            cnt += 1.0;
+        }
+    }
+    sum / cnt.max(1.0)
 }
 
 /// The CPU mirror of the `deferred_pbr` RESOLVE (PBR MVP-2): given the marcher's
@@ -9108,5 +9188,129 @@ mod ssao_gather_tests {
         let gbuf = synthetic_gbuffer(|_x, _y| (false, 0.0));
         let ao = golden_ssao_attributes(&gbuf, CX, CY, W, H, CompositeCamera::Ortho);
         assert_eq!(ao, 1.0, "a non-lit center pixel must return the neutral AO 1.0");
+    }
+}
+
+/// Render P7 POLISH — the SSAO depth-aware box-blur host mirror ([`golden_ssao_blur`]) tests.
+/// Proves the inline resolve blur on the host side: (1) a sharp AO RING is smoothed toward its
+/// neighbourhood mean, and (2) the bilateral DEPTH gate prevents bleed across a silhouette (a
+/// `view_t` jump > [`SSAO_BLUR_DEPTH_TOL`]). Pure host math; runs device-less.
+#[cfg(test)]
+mod ssao_blur_tests {
+    use super::{
+        golden_ssao_blur, MarcherAttributes, SSAO_BLUR_DEPTH_TOL, SSAO_BLUR_R, SSAO_VIEWT_BG,
+    };
+
+    const W: u32 = 32;
+    const H: u32 = 32;
+
+    /// A `W×H` synthetic G-buffer from a per-pixel `(ssao_byte, view_t)` field. Only the
+    /// `view_t` lane (the blur's depth gate) is meaningful here; `mask`/the rest are inert (the
+    /// blur reads neither). Returns `(raw_ssao_bytes, gbuf)`.
+    fn build<F: Fn(i32, i32) -> (u8, f32)>(field: F) -> (Vec<u8>, Vec<MarcherAttributes>) {
+        let mut ssao = Vec::with_capacity((W * H) as usize);
+        let mut gbuf = Vec::with_capacity((W * H) as usize);
+        for py in 0..H {
+            for px in 0..W {
+                let (byte, view_t) = field(px as i32, py as i32);
+                ssao.push(byte);
+                gbuf.push(MarcherAttributes {
+                    base_rgb: [0, 0, 0],
+                    oct_rg: [128, 128],
+                    mat_id: 0,
+                    shadow: 255,
+                    ao: 255,
+                    mask: 1,
+                    view_t,
+                });
+            }
+        }
+        (ssao, gbuf)
+    }
+
+    #[test]
+    fn sharp_ring_is_smoothed() {
+        // A constant-depth flat surface (every neighbour passes the depth gate) with a SHARP AO
+        // discontinuity: the left half is fully-dark (byte 0), the right half fully-bright
+        // (byte 255). At the seam column the raw value is a hard step; the 7×7 box blur of a
+        // pixel ON the seam must land near the neighbourhood mean (~0.5), STRICTLY between the
+        // two raw extremes — i.e. the discontinuity is smoothed, not preserved.
+        const SEAM: i32 = 16;
+        let (ssao, gbuf) = build(|x, _y| (if x < SEAM { 0 } else { 255 }, 1.5));
+
+        // A pixel just inside the bright half, within R of the seam: its raw byte is 255 → 1.0,
+        // but the blur pulls it down toward the mean because the dark half is in-kernel.
+        let px = (SEAM + 1) as u32;
+        let py = 16;
+        let raw = ssao[(py * W + px) as usize] as f32 / 255.0;
+        let blurred = golden_ssao_blur(&ssao, &gbuf, px, py, W, H);
+        assert!(
+            blurred < raw - 0.05 && blurred > 0.1,
+            "the box blur must smooth the sharp ring: raw {raw} blurred {blurred} \
+             (expected strictly between the dark and bright extremes)"
+        );
+        // The exact 7×7 mean at the seam pixel: columns [px-R, px+R] = [SEAM-2, SEAM+4]; of the
+        // 7 columns, (SEAM-2, SEAM-1) are dark (0.0) and (SEAM..SEAM+4) are bright (1.0), each ×
+        // 7 rows → mean = 5/7. Confirms the gather order/bounds/center-counts arithmetic.
+        let expected = 5.0_f32 / 7.0;
+        assert!(
+            (blurred - expected).abs() < 1.0e-6,
+            "the 7×7 box mean must be exactly 5/7 at the seam pixel, got {blurred}"
+        );
+    }
+
+    #[test]
+    fn depth_gate_prevents_silhouette_bleed() {
+        // A silhouette: the left half is a NEAR surface (`view_t = 1.5`, dark AO byte 40) and the
+        // right half is a FAR surface (`view_t = 1.5 + 10*tol`, bright AO byte 255) — a `view_t`
+        // jump far beyond the gate. A near-surface pixel ON the boundary must blur ONLY with its
+        // near-side (in-tol) neighbours, so its blurred AO stays near the dark value and is NOT
+        // pulled up by the far-side bright taps (no cross-silhouette bleed).
+        const SEAM: i32 = 16;
+        const DARK: u8 = 40;
+        let near_t = 1.5_f32;
+        let far_t = 1.5_f32 + 10.0 * SSAO_BLUR_DEPTH_TOL;
+        let (ssao, gbuf) = build(|x, _y| {
+            if x < SEAM {
+                (DARK, near_t)
+            } else {
+                (255, far_t)
+            }
+        });
+
+        // The last near-side column (within R of the seam, so far-side taps ARE inside the
+        // kernel window but must be REJECTED by the depth gate).
+        let px = (SEAM - 1) as u32;
+        let py = 16;
+        let blurred = golden_ssao_blur(&ssao, &gbuf, px, py, W, H);
+        let dark = DARK as f32 / 255.0;
+        assert!(
+            (blurred - dark).abs() < 1.0e-6,
+            "the depth gate must reject far-side taps: a near-surface pixel must blur to the \
+             near AO {dark} (got {blurred}), NOT bleed the far-side bright AO across the \
+             silhouette"
+        );
+    }
+
+    #[test]
+    fn center_always_counts_no_divide_by_zero() {
+        // An ISOLATED lit pixel surrounded by a far background (every neighbour fails the depth
+        // gate): the blur must still count the CENTER (cnt ≥ 1) and return the center's own raw
+        // AO — never a 0/0 NaN.
+        let (ssao, gbuf) = build(|x, y| {
+            if x == 16 && y == 16 {
+                (90, 1.5)
+            } else {
+                (255, SSAO_VIEWT_BG) // far background — rejected by the gate
+            }
+        });
+        let blurred = golden_ssao_blur(&ssao, &gbuf, 16, 16, W, H);
+        assert!(blurred.is_finite(), "the center always counts — never 0/0 NaN, got {blurred}");
+        assert!(
+            (blurred - 90.0 / 255.0).abs() < 1.0e-6,
+            "an isolated pixel (all neighbours gated out) must blur to its OWN raw AO, got {blurred}"
+        );
+        // Sanity: the radius constant is the one the resolve compiles in.
+        assert_eq!(SSAO_BLUR_R, 3, "the host blur radius must mirror the shader's SSAO_BLUR_R");
     }
 }
