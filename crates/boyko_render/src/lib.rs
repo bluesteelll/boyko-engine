@@ -69,6 +69,8 @@ pub mod light_reconcile;
 pub mod light_system;
 pub mod material;
 pub mod render3d_plugin;
+pub mod ssao_config;
+pub mod ssao_plugin;
 pub mod ui;
 pub mod view;
 
@@ -97,6 +99,8 @@ pub use light_system::{
     set_light_enabled_now, write_light_table,
 };
 pub use material::{MATERIAL_GPU_WORDS, MaterialGpu, MaterialId};
+pub use ssao_config::{ResolvedSsao, SsaoConfig, SsaoQuality, resolve_ssao, resolve_ssao_policy};
+pub use ssao_plugin::SsaoPlugin;
 pub use view::{
     composite_from_view, composite_perspective_from_view, demo_view_proj_from_view,
     view_proj_columns,
