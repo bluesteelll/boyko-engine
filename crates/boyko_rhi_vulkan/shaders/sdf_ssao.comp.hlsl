@@ -38,11 +38,17 @@
 // offset, the center-normal decode, and the `occ → ao` fold are HAND-WRITTEN glue (framing b)
 // — the host oracle is the full `ssao_estimate_body`.
 //
-// # The integer-hash rotation (bit-exact GPU↔host)
+// # The integer-hash dither (bit-exact GPU↔host) — Q1: rotation + radial step-phase
 //
-// The per-pixel slice rotation is an INTEGER hash (`h = px*1103515245u + py*12345u; slot =
-// h % SSAO_ROT_N;`) into a pre-baked `(cos, sin)` rotation table — integer-only, so the
-// GPU and the host oracle pick the SAME rotation bit-exactly (no float `fract`/`floor`).
+// Two INTEGER hashes (no float `fract`/`floor`, no trig) decorrelate the discrete-step
+// pattern into high-frequency noise the depth-aware resolve blur removes:
+//   (1) the per-pixel slice ROTATION — `h = px*1103515245u + py*12345u; slot = h & 15u` into a
+//       16-entry pre-baked `(cos, sin)` table (Q1 widened 4 -> 16 to break the angular banding);
+//   (2) the per-pixel radial STEP-PHASE — a SECOND hash with distinct primes
+//       (`hr = px*374761393u + py*668265263u; radial_phase = ((hr & 255u)+1)/256.0` in
+//       [1/256, 1.0]) added to the step index so EVERY pixel marches a different set of step
+//       radii (the concentric-ring fix). Both are integer-indexed / exact-divide, so the GPU
+//       and the host oracle pick the SAME dither bit-exactly.
 //
 // # The forward neighbour reconstruct (no proj-matrix inverse)
 //
@@ -117,15 +123,30 @@ static const float SSAO_RADIUS_PIX_MIN = 2.0;
 static const float SSAO_RADIUS_PIX_MAX = 24.0;
 
 // --- The integer-hash rotation table (bit-exact GPU↔host) ---------------------------------
-// A pre-baked `(cos, sin)` table for SSAO_ROT_N evenly-spaced angles. The per-pixel slot is
-// chosen by the integer hash `h % SSAO_ROT_N` (NO float `fract`/`floor`), so the GPU and the
-// host oracle pick the SAME rotation bit-exactly. The host mirror bakes the IDENTICAL values.
-static const uint SSAO_ROT_N = 4u;
-static const float2 SSAO_ROT[4] = {
-    float2( 1.0,          0.0         ),  // 0   deg
-    float2( 0.92387953,   0.38268343  ),  // 22.5 deg
-    float2( 0.70710678,   0.70710678  ),  // 45  deg
-    float2( 0.38268343,   0.92387953  ),  // 67.5 deg
+// A pre-baked `(cos, sin)` table for SSAO_ROT_N evenly-spaced angles over [0, pi): angle k =
+// k*(pi/16) for k = 0..15 (degrees 0, 11.25, 22.5, ..., 168.75). The per-pixel slot is chosen
+// by the integer hash `h & 15u` (NO float `fract`/`floor`), so the GPU and the host oracle pick
+// the SAME rotation bit-exactly. Q1 widened the table 4 -> 16 to decorrelate the angular
+// banding into high-frequency noise the depth-aware blur removes. The host mirror bakes the
+// IDENTICAL `f32`-rounded values (byte-value-identical literals).
+static const uint SSAO_ROT_N = 16u;
+static const float2 SSAO_ROT[16] = {
+    float2(  1.00000000,  0.00000000 ),  //   0.00 deg
+    float2(  0.98078525,  0.19509032 ),  //  11.25 deg
+    float2(  0.92387950,  0.38268343 ),  //  22.50 deg
+    float2(  0.83146960,  0.55557024 ),  //  33.75 deg
+    float2(  0.70710677,  0.70710677 ),  //  45.00 deg
+    float2(  0.55557024,  0.83146960 ),  //  56.25 deg
+    float2(  0.38268343,  0.92387950 ),  //  67.50 deg
+    float2(  0.19509032,  0.98078525 ),  //  78.75 deg
+    float2(  0.00000000,  1.00000000 ),  //  90.00 deg
+    float2( -0.19509032,  0.98078525 ),  // 101.25 deg
+    float2( -0.38268343,  0.92387950 ),  // 112.50 deg
+    float2( -0.55557024,  0.83146960 ),  // 123.75 deg
+    float2( -0.70710677,  0.70710677 ),  // 135.00 deg
+    float2( -0.83146960,  0.55557024 ),  // 146.25 deg
+    float2( -0.92387950,  0.38268343 ),  // 157.50 deg
+    float2( -0.98078525,  0.19509032 ),  // 168.75 deg
 };
 
 // --- Octahedral decode (BYTE-IDENTICAL to the resolve's `oct_decode` in deferred_pbr.hlsl;
@@ -188,10 +209,21 @@ void main(uint3 tid : SV_DispatchThreadID) {
             pix_radius = SSAO_RADIUS * ((float)h * 0.5) / RAYGEN_HALF_EXTENT;
         }
 
-        // The integer-hash rotation slot (bit-exact; NO float fract/floor).
+        // The integer-hash rotation slot (bit-exact; NO float fract/floor). `& 15u` selects one
+        // of the 16 evenly-spaced angles (the table is a power-of-two size, so the mask == `% N`).
         uint hsh = px * 1103515245u + py * 12345u;
-        uint slot = hsh % SSAO_ROT_N;
+        uint slot = hsh & 15u;
         float2 rot = SSAO_ROT[slot];
+
+        // Q1 radial step-phase jitter (the concentric-ring fix): a SECOND integer hash with
+        // distinct primes, reduced to a per-pixel phase. `(hr & 255u) + 1` maps to [1, 256], so
+        // `radial_phase` lands in [1/256, 1.0] — STRICTLY positive, so the nearest tap (`sp == 0`)
+        // never advances to 0 (no center self-tap), and the farthest tap (`sp == STEPS-1`) at
+        // phase 1.0 reaches exactly `pix_radius` (the prior outer reach). Integer hash + exact
+        // `/256.0` ⇒ bit-exact GPU↔host, NO `fract`, NO trig. The per-pixel phase decorrelates the
+        // step radii so the rings become high-frequency noise the depth-aware blur removes.
+        uint hr = px * 374761393u + py * 668265263u;
+        float radial_phase = (float)((hr & 255u) + 1u) / 256.0;
 
         float occ = 0.0;
         [unroll]
@@ -220,7 +252,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
                     // Forward neighbour reconstruct (hand-written seam): offset in SCREEN pixels,
                     // round to integer, bounds-clamp, reconstruct Pp = ro' + rd' * view_t'. A tap
                     // out of bounds or onto a non-lit pixel reconstructs Pp = P (zero falloff).
-                    float advance = (float)(sp + 1u) * pix_radius / (float)SSAO_STEPS;
+                    float advance = ((float)sp + radial_phase) * pix_radius / (float)SSAO_STEPS;
                     int npx = (int)round((float)px + sdir2.x * advance);
                     int npy = (int)round((float)py + sdir2.y * advance);
                     float3 Pp = P;
@@ -256,7 +288,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 float3 n = N;
                 [unroll]
                 for (uint sn = 0u; sn < SSAO_STEPS; ++sn) {
-                    float advance = (float)(sn + 1u) * pix_radius / (float)SSAO_STEPS;
+                    float advance = ((float)sn + radial_phase) * pix_radius / (float)SSAO_STEPS;
                     int npx = (int)round((float)px - sdir2.x * advance);
                     int npy = (int)round((float)py - sdir2.y * advance);
                     float3 Pp = P;

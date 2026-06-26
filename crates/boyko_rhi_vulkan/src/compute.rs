@@ -284,7 +284,7 @@ static SDF_TILE_CULL_SPV: SpirvBlob<10304> = SpirvBlob(*include_bytes!(concat!(
 /// oct + id), gMaterial @1 (R, `.b` = mask), gViewT @2 (R, surface `t`), the `ssao` out @3 (W),
 /// the 80-byte camera UBO @4. `gAlbedo` is NOT bound. The host oracle is
 /// [`golden_ssao_attributes`] (Stage-2 gather over the [`golden_gbuffer`] Stage-1 map).
-static SDF_SSAO_SPV: SpirvBlob<43204> = SpirvBlob(*include_bytes!(concat!(
+static SDF_SSAO_SPV: SpirvBlob<44044> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_ssao.comp.spv"
 )));
@@ -632,24 +632,38 @@ pub const SSAO_RADIUS_PIX_MIN: f32 = 2.0;
 /// The perspective screen-pixel radius clamp maximum (`SSAO_RADIUS_PIX_MAX`) — keeps taps
 /// inside a sane neighbourhood.
 pub const SSAO_RADIUS_PIX_MAX: f32 = 24.0;
-/// The integer-hash rotation table size (`SSAO_ROT_N`); the per-pixel slot is `hash %
-/// SSAO_ROT_N` (NO float `fract`/`floor`, so the host and GPU pick the SAME rotation).
-pub const SSAO_ROT_N: u32 = 4;
-/// The pre-baked `(cos, sin)` rotation table for the four evenly-spaced angles (0°, 22.5°,
-/// 45°, 67.5°), BYTE-IDENTICAL to the shader's `SSAO_ROT[4]` so the host picks the same slot.
+/// The integer-hash rotation table size (`SSAO_ROT_N`); the per-pixel slot is `hash &
+/// (SSAO_ROT_N - 1)` (a power-of-two mask == `% N`; NO float `fract`/`floor`, so the host and
+/// GPU pick the SAME rotation). Q1 widened this 4 -> 16 to decorrelate the angular banding.
+pub const SSAO_ROT_N: u32 = 16;
+/// The pre-baked `(cos, sin)` rotation table for the 16 evenly-spaced angles over [0, π):
+/// angle k = k·(π/16) for k = 0..15 (degrees 0, 11.25, 22.5, …, 168.75), BYTE-IDENTICAL to the
+/// shader's `SSAO_ROT[16]` so the host picks the same slot.
 //
 // These literals are LOAD-BEARING: each must round to the EXACT `f32` the shader's
 // `float2(...)` literal carries (the integer-hash rotation slot must agree bit-for-bit
-// between the host oracle and the GPU). `clippy::approx_constant` (the `0.70710678` ==
+// between the host oracle and the GPU). `clippy::approx_constant` (the `0.70710677` ==
 // `FRAC_1_SQRT_2`) and `clippy::excessive_precision` would have us swap in the std constant
 // or truncate digits — either DIVERGES the host literal from the frozen shader table, the
 // exact drift this oracle exists to prevent. The `ssao_edsl_sync` cross-check pins the math.
 #[allow(clippy::approx_constant, clippy::excessive_precision)]
-pub const SSAO_ROT: [(f32, f32); 4] = [
-    (1.0, 0.0),
-    (0.92387953, 0.38268343),
-    (0.70710678, 0.70710678),
-    (0.38268343, 0.92387953),
+pub const SSAO_ROT: [(f32, f32); 16] = [
+    (1.00000000, 0.00000000),
+    (0.98078525, 0.19509032),
+    (0.92387950, 0.38268343),
+    (0.83146960, 0.55557024),
+    (0.70710677, 0.70710677),
+    (0.55557024, 0.83146960),
+    (0.38268343, 0.92387950),
+    (0.19509032, 0.98078525),
+    (0.00000000, 1.00000000),
+    (-0.19509032, 0.98078525),
+    (-0.38268343, 0.92387950),
+    (-0.55557024, 0.83146960),
+    (-0.70710677, 0.70710677),
+    (-0.83146960, 0.55557024),
+    (-0.92387950, 0.38268343),
+    (-0.98078525, 0.19509032),
 ];
 
 /// Render P7 POLISH — the SSAO depth-aware box-blur half-kernel radius (`SSAO_BLUR_R` in the
@@ -4638,12 +4652,22 @@ pub fn golden_ssao_attributes(
         }
     };
 
-    // The integer-hash rotation slot (bit-exact vs HLSL `uint`: wrapping mul/add, then `% N`).
+    // The integer-hash rotation slot (bit-exact vs HLSL `uint`: wrapping mul/add, then a
+    // power-of-two mask `& 15` == `% SSAO_ROT_N` over the 16-entry table).
     let hsh = px
         .wrapping_mul(1103515245)
         .wrapping_add(py.wrapping_mul(12345));
-    let slot = (hsh % SSAO_ROT_N) as usize;
+    let slot = (hsh & (SSAO_ROT_N - 1)) as usize;
     let rot = SSAO_ROT[slot];
+
+    // Q1 radial step-phase jitter (mirror the shader): a SECOND integer hash with distinct
+    // primes, reduced to `radial_phase` in [1/256, 1.0] via `((hr & 255) + 1) / 256.0`. Strictly
+    // positive ⇒ the nearest tap never advances to 0 (no center self-tap); at phase 1.0 the
+    // farthest tap reaches exactly `pix_radius`. Integer hash + exact `/256.0` ⇒ bit-exact.
+    let hr = px
+        .wrapping_mul(374761393)
+        .wrapping_add(py.wrapping_mul(668265263));
+    let radial_phase = ((hr & 255) + 1) as f32 / 256.0;
 
     // The forward neighbour reconstruct (the hand-written seam): offset in SCREEN pixels along
     // `sdir2 * sign`, round, bounds-clamp, reconstruct Pp = nro + nrd * nview_t; else Pp = P.
@@ -4679,7 +4703,7 @@ pub fn golden_ssao_attributes(
         // offset advances along +sdir2; elevation is measured against the center normal.
         let mut hc_pos = 0.0_f32;
         for sp in 0..SSAO_STEPS {
-            let advance = ((sp + 1) as f32) * pix_radius / (SSAO_STEPS as f32);
+            let advance = (sp as f32 + radial_phase) * pix_radius / (SSAO_STEPS as f32);
             let pp = reconstruct(sdir2, advance, 1.0);
             hc_pos = ssao_horizon_step(hc_pos, p, pp, center_n);
         }
@@ -4688,7 +4712,7 @@ pub fn golden_ssao_attributes(
         // center normal (both half-slices measure elevation against the surface tangent).
         let mut hc_neg = 0.0_f32;
         for sn in 0..SSAO_STEPS {
-            let advance = ((sn + 1) as f32) * pix_radius / (SSAO_STEPS as f32);
+            let advance = (sn as f32 + radial_phase) * pix_radius / (SSAO_STEPS as f32);
             let pp = reconstruct(sdir2, advance, -1.0);
             hc_neg = ssao_horizon_step(hc_neg, p, pp, center_n);
         }
@@ -9188,6 +9212,93 @@ mod ssao_gather_tests {
         let gbuf = synthetic_gbuffer(|_x, _y| (false, 0.0));
         let ao = golden_ssao_attributes(&gbuf, CX, CY, W, H, CompositeCamera::Ortho);
         assert_eq!(ao, 1.0, "a non-lit center pixel must return the neutral AO 1.0");
+    }
+
+    /// The EXACT per-pixel dither the gather applies (mirror of the `golden_ssao_attributes`
+    /// integer hashes, which are private to the function): the rotation slot `& 15` over the
+    /// 16-entry table and the radial step-phase `((hr & 255) + 1) / 256.0`. Returned as
+    /// `(rot_slot, radial_phase)` so the Q1 determinism + decorrelation test can assert both.
+    fn dither(px: u32, py: u32) -> (usize, f32) {
+        let hsh = px
+            .wrapping_mul(1103515245)
+            .wrapping_add(py.wrapping_mul(12345));
+        let slot = (hsh & (super::SSAO_ROT_N - 1)) as usize;
+        let hr = px
+            .wrapping_mul(374761393)
+            .wrapping_add(py.wrapping_mul(668265263));
+        let radial_phase = ((hr & 255) + 1) as f32 / 256.0;
+        (slot, radial_phase)
+    }
+
+    #[test]
+    fn q1_dither_is_deterministic_in_range_and_decorrelated() {
+        // Q1: the per-pixel dither (rotation slot + radial step-phase) is the concentric-ring
+        // fix. It must be (1) DETERMINISTIC (the same pixel always yields the same dither — the
+        // host oracle and the GPU agree), (2) IN RANGE (slot in [0, 16), radial_phase strictly
+        // in (0, 1] so the nearest tap never advances to 0 — no center self-tap), and (3)
+        // DECORRELATED (distinct pixels get a SPREAD of (slot, phase) pairs — the property that
+        // turns the coherent rings into high-frequency noise the depth-aware blur removes).
+        use std::collections::HashSet;
+
+        let mut seen_slots: HashSet<usize> = HashSet::new();
+        let mut seen_phase_bins: HashSet<u32> = HashSet::new();
+        let mut seen_pairs: HashSet<(usize, u32)> = HashSet::new();
+
+        for py in 0..64u32 {
+            for px in 0..64u32 {
+                let (slot, phase) = dither(px, py);
+
+                // (1) determinism: a re-evaluation is bit-identical.
+                let (slot2, phase2) = dither(px, py);
+                assert_eq!(slot, slot2, "rotation slot must be deterministic at ({px},{py})");
+                assert_eq!(
+                    phase.to_bits(),
+                    phase2.to_bits(),
+                    "radial_phase must be bit-deterministic at ({px},{py})"
+                );
+
+                // (2) range: slot in [0, 16); phase strictly in (0, 1] (no self-tap, no overshoot).
+                assert!(slot < (super::SSAO_ROT_N as usize), "slot {slot} out of [0,16)");
+                assert!(
+                    phase > 0.0 && phase <= 1.0,
+                    "radial_phase {phase} must be in (0, 1] (strictly positive ⇒ no center \
+                     self-tap; ≤ 1 ⇒ the farthest tap reaches at most pix_radius)"
+                );
+
+                seen_slots.insert(slot);
+                seen_phase_bins.insert((phase * 256.0).round() as u32);
+                seen_pairs.insert((slot, (phase * 256.0).round() as u32));
+            }
+        }
+
+        // (3) decorrelation: over a 64×64 block the dither spreads across the table and the phase
+        // band, and produces MANY distinct (slot, phase) pairs — proving neighbouring pixels do
+        // NOT march the same step radii (the coherent-ring root cause).
+        assert!(
+            seen_slots.len() >= 8,
+            "the 16-entry rotation must exercise a spread of slots over a 64×64 block (saw {}), \
+             else the angular banding stays coherent",
+            seen_slots.len()
+        );
+        assert!(
+            seen_phase_bins.len() >= 64,
+            "the radial step-phase must spread across its [1/256, 1] band over a 64×64 block \
+             (saw {} bins), else the concentric rings stay coherent",
+            seen_phase_bins.len()
+        );
+        assert!(
+            seen_pairs.len() >= 256,
+            "the (rotation, radial-phase) dither must yield many distinct pairs over a 64×64 \
+             block (saw {}), proving the per-pixel decorrelation",
+            seen_pairs.len()
+        );
+
+        // A direct sanity pair: two distinct pixels get DIFFERENT dither (the decorrelation core).
+        assert_ne!(
+            dither(0, 0),
+            dither(1, 0),
+            "adjacent pixels must get a different (slot, radial_phase) dither"
+        );
     }
 }
 

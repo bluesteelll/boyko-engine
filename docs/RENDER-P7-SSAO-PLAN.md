@@ -192,6 +192,36 @@ side; the `sqrt`/`div` ULP budget). Combined resolve pixel (lit RGBA8) keeps the
 10. **{6}** `boyko_render`/`boyko_demo`: expose the SSAO pipeline + `ssao_mode` toggle for a windowed
     A/B. Owner visual oracle (BMP→PNG) before commit.
 
+## P7-Q — proper banding removal + user-configurable quality (owner-driven follow-up)
+
+Research synthesis (deep-research `wf_6ac48831-c72`; XeGTAO / HBAO+ / Jimenez-IGN / Godot / Unity):
+production few-sample SSAO removes ring banding by a **per-pixel-varied DITHER** (so the
+coherent banding becomes high-frequency NOISE) + a **depth-aware bilateral blur** (which REMOVES
+noise, vs only attenuating a coherent pattern). The dither is **integer-reproducible** (XeGTAO =
+a Hilbert-curve integer index → R2 sequence; IGN = a pure coord arithmetic) so a deterministic
+CPU oracle survives. No-TAA is a supported path (XeGTAO's 5×5 spatial denoiser is the PRIMARY
+smoother; the dither is held STATIC across frames). The ROOT of our rings: our dither varies only
+the ROTATION (4 angles) and NOT the radial step phase → every pixel marches the SAME step radii →
+the concentric rings are fully coherent.
+
+**THE FIX (integer-reproducible, NO trig → the bit-exact host oracle + the ±6/255 AO golden stay):**
+1. **Radial step-phase jitter** (the concentric-ring fix): `advance = (sp + radial_phase) *
+   pix_radius / STEPS`, `radial_phase = float(hash_r(px,py) & 255) / 256.0` (a SECOND integer hash,
+   distinct primes from the rotation hash). Integer hash + exact `/256` ⇒ bit-exact CPU↔GPU, no
+   `fract` boundary issue. Shifts each pixel's step radii ⇒ the rings decorrelate into noise.
+2. **Finer rotation**: a 16-entry precomputed `(cos,sin)` table indexed by `hash_rot(px,py) & 15`
+   (16 orientations vs 4). Precomputed (no runtime trig), integer-indexed (bit-exact).
+3. The existing inline depth-aware bilateral blur now REMOVES the resulting high-freq noise.
+4. **User-configurable quality** (a Principle-9 selector, ECS-native): expose intensity
+   (`FinalValuePower`-style), world radius, slice/step counts, denoise (blur radius), half-res — as
+   a runtime config + named presets (Off / Low / Medium / High / Ultra). XeGTAO default anchors:
+   radius-mult 1.457, falloff 0.615, sample-distribution-power 2.0, final-value-power 2.2.
+
+Implementation order: **P7-Q1** = the dither fix (1+2, verify the rings are gone on the 512 demo) →
+**P7-Q2** = the configurable params + presets. Keep all goldens bit-exact (integer dither); the AO
+channel stays ±6/255 (already a tolerance), the host==eDSL horizon cross-check is unaffected (the
+dither is in the glue, not the horizon-step span).
+
 ## Constraints (HARD)
 
 - Shaders via the eDSL (byte-identical `.spv` + Eval mirror + sync pins). ZERO unsafe in
