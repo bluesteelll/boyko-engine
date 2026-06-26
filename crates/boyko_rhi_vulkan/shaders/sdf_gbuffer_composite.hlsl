@@ -493,6 +493,19 @@ float sdf_ao(float3 p, float3 n) {
     return clamp(1.0 - AO_STRENGTH * occ, 0.0, 1.0);
 }
 
+// Octahedral normal DECODE (the inverse of `oct_encode`; BYTE-IDENTICAL to the resolve's
+// `oct_decode` in deferred_pbr.hlsl and the SSAO pass). Render P7-r2 reads the RASTER mesh
+// normal back from gNormal.RG for a mesh-owned pixel so the SDF can cast its analytic
+// soft-shadow + AO onto the mesh surface (the noise-free replacement for screen-space SSAO).
+float3 oct_decode(float2 e) {
+    e = e * 2.0 - 1.0;                          // [0,1] -> [-1,1]
+    float3 n = float3(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+    float t = saturate(-n.z);
+    n.x += n.x >= 0.0 ? -t : t;
+    n.y += n.y >= 0.0 ? -t : t;
+    return normalize(n);
+}
+
 // --- PBR MVP-2: G-buffer attribute packing + material attribution (CONSUMER-side) ---
 //
 // All three helpers below are strict CONSUMERS of the surface hit; NONE touches the
@@ -1677,6 +1690,32 @@ void main(uint3 tid : SV_DispatchThreadID) {
         gAlbedo[uint2(px, py)] = float4(clamp(base, 0.0, 1.0), 1.0);
         gNormal[uint2(px, py)] = float4(oct.x, oct.y, id_ba.x, id_ba.y);
         gMaterial[uint2(px, py)] = float4(shadow, ao, mask, 1.0);
+    } else if (has_mesh) {
+        // Render P7-r2: the SDF casts a CLEAN ANALYTIC soft shadow + contact AO onto the RASTER
+        // mesh — noise-free by construction (the marcher's own sdf_soft_shadow/sdf_ao over the
+        // FROZEN field), the SDF-native replacement for the screen-space SSAO on mesh pixels. The
+        // raster owns gAlbedo/gNormal (untouched here); we write ONLY gMaterial.RG — the resolve
+        // applies R -> the primary directional (the CAST SHADOW) and G -> the ambient (the CONTACT
+        // AO), with mask staying the raster's 1.0. Reads the raster mesh normal back from the
+        // already-bound gNormal (no new descriptor; the raster->marcher barrier makes it visible).
+        // Gated by `lighting_flags` — the 0%-gate: flags == 0 writes (1,1,1,1), byte-identical to
+        // the raster's (shadow=1, ao=1, mask=1) default this branch would otherwise leave standing.
+        float mesh_shadow = 1.0;
+        float mesh_ao = 1.0;
+        if (pc.lighting_flags != 0u) {
+            float3 P_mesh = ro + rd * t_mesh;
+            float3 N_mesh = oct_decode(gNormal[uint2(px, py)].rg);
+            float3 light = normalize(pc.light_dir);
+            if (pc.lighting_flags & LIGHTING_FLAG_SHADOWS) {
+                // Lift the march origin off the mesh surface (mirror the SDF arm's `pb` bias) so a
+                // grazing light does not self-occlude the wall at the contact rim.
+                mesh_shadow = sdf_soft_shadow(P_mesh + N_mesh * SHADOW_NORMAL_BIAS, N_mesh, light);
+            }
+            if (pc.lighting_flags & LIGHTING_FLAG_AO) {
+                mesh_ao = sdf_ao(P_mesh, N_mesh);
+            }
+        }
+        gMaterial[uint2(px, py)] = float4(mesh_shadow, mesh_ao, 1.0, 1.0);
     }
     // Lighting L0b (C2) / Decision 3 + Render P7/P5-r1b UNLOCK: gViewT is the third + last
     // terminal write site and is ALWAYS written (the exactly-once contract is structurally

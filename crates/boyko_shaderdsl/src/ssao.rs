@@ -63,8 +63,12 @@ pub const SSAO_SLICES: usize = 2;
 pub const SSAO_STEPS: usize = 4;
 
 /// The occlusion strength multiplier (`SSAO_STRENGTH`) — scales the mean per-slice horizon
-/// cosine before the `ao = 1 - strength*occ` complement. Spelled SYMBOLICALLY
-/// (`SSAO_STRENGTH`).
+/// cosine before the `ao = 1 - strength*occ` complement. Spelled SYMBOLICALLY (`SSAO_STRENGTH`).
+/// Held at 2.5 (the precision-safe value GPU↔host agree on within ±6/255). The screen-space SSAO
+/// is the SECONDARY AO path now — for mesh-vs-mesh contact where no SDF field exists; for
+/// SDF-occludes-mesh the marcher's ANALYTIC `sdf_ao` (noise-free by construction) is the clean
+/// PRIMARY, so the SSAO strength no longer needs to carry the contact-shadow intensity. The
+/// Hilbert+R2 low-discrepancy dither keeps this path clean.
 pub const SSAO_STRENGTH: f32 = 2.5;
 
 /// The `length(delta)` divide-by-zero guard (`SSAO_EPS`) — `elev = max(dot(delta,N) /

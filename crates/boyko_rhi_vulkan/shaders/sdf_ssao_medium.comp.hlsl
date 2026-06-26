@@ -38,17 +38,21 @@
 // offset, the center-normal decode, and the `occ → ao` fold are HAND-WRITTEN glue (framing b)
 // — the host oracle is the full `ssao_estimate_body`.
 //
-// # The integer-hash dither (bit-exact GPU↔host) — Q1: rotation + radial step-phase
+// # The PCG-hash dither (bit-exact GPU↔host) — rotation + radial step-phase
 //
 // Two INTEGER hashes (no float `fract`/`floor`, no trig) decorrelate the discrete-step
-// pattern into high-frequency noise the depth-aware resolve blur removes:
-//   (1) the per-pixel slice ROTATION — `h = px*1103515245u + py*12345u; slot = h & 15u` into a
-//       16-entry pre-baked `(cos, sin)` table (Q1 widened 4 -> 16 to break the angular banding);
-//   (2) the per-pixel radial STEP-PHASE — a SECOND hash with distinct primes
-//       (`hr = px*374761393u + py*668265263u; radial_phase = ((hr & 255u)+1)/256.0` in
-//       [1/256, 1.0]) added to the step index so EVERY pixel marches a different set of step
-//       radii (the concentric-ring fix). Both are integer-indexed / exact-divide, so the GPU
-//       and the host oracle pick the SAME dither bit-exactly.
+// pattern into high-frequency noise the depth-aware resolve blur removes. Both go through the
+// NON-LINEAR `ssao_pcg`/`ssao_hash2` avalanche: a LINEAR `px*A + py*B` hash has DIAGONAL
+// iso-lines (collinear pixels hash to the SAME slot/phase), so its dither was itself diagonally
+// COHERENT and the blur left faint diagonal STRIPES — PCG mixing scatters them away:
+//   (1) the per-pixel slice ROTATION — `slot = ssao_hash2(px, py) & 15u` into a 16-entry
+//       pre-baked `(cos, sin)` table (16 evenly-spaced angles break the angular banding);
+//   (2) the per-pixel radial STEP-PHASE — the SAME hash seeded distinctly
+//       (`hr = ssao_hash2(px ^ 0x68bc21ebu, py ^ 0x02e5be93u); radial_phase =
+//       ((hr & 255u)+1)/256.0` in [1/256, 1.0]) added to the step index so EVERY pixel marches
+//       a different set of step radii (the concentric-ring fix), decorrelated from the rotation.
+//       Both are integer-indexed / exact-divide, so the GPU and the host oracle pick the SAME
+//       dither bit-exactly.
 //
 // # The forward neighbour reconstruct (no proj-matrix inverse)
 //
@@ -161,6 +165,40 @@ float3 oct_decode(float2 e) {
     return normalize(n);
 }
 
+// --- Hilbert-curve + R2 low-discrepancy dither (BIT-IDENTICAL to host `ssao_hilbert`/`ssao_r2`
+// in compute.rs). The prior per-pixel WHITE-NOISE hash put UNCORRELATED values on adjacent
+// pixels; white noise has energy at ALL spatial frequencies, so the depth-aware blur (a low-pass)
+// strips the highs but leaves low-frequency NOISY BLOBS — the "pixelated" look. The production fix
+// (Intel XeGTAO's no-TAA noise basis, NVIDIA HBAO+) is a LOW-DISCREPANCY / blue-noise pattern whose
+// energy is HIGH-frequency ONLY, which the SAME blur removes cleanly. We map (px,py) to a 64x64
+// Hilbert-curve index (a locality-preserving 2D->1D order) and drive Martin Roberts' R2 quasi-random
+// sequence from it (the XeGTAO recipe). Made BIT-EXACT GPU<->host via INTEGER fixed point:
+// `r2 = (index * ALPHA_24) & 0xFFFFFF` is `frac(index * alpha)` in Q0.24, and a `uint` multiply
+// wraps mod 2^32 IDENTICALLY on GPU and host (the low 24 bits are untouched by the wrap) — so there
+// is NO `frac`/trig and the host oracle and GPU pick the SAME dither bit-for-bit.
+static const uint SSAO_HILBERT_W = 64u;        // the Hilbert tile edge (XeGTAO uses level 6 = 64)
+// R2 plastic-number reciprocals 1/phi, 1/phi^2 (phi = 1.32471795724474602596...) in Q0.24 fixed
+// point: round(0.75487766624669276 * 2^24), round(0.56984029099805327 * 2^24).
+static const uint SSAO_R2_ALPHA1 = 12664746u;
+static const uint SSAO_R2_ALPHA2 = 9560334u;
+// The locality-preserving 2D->1D Hilbert index over an n x n tile (n a power of two). Pure integer
+// bit-twiddling (the canonical `xy2d`) -> bit-exact GPU<->host.
+uint ssao_hilbert(uint n, uint x, uint y) {
+    uint d = 0u;
+    for (uint s = n / 2u; s > 0u; s /= 2u) {
+        uint rx = ((x & s) > 0u) ? 1u : 0u;
+        uint ry = ((y & s) > 0u) ? 1u : 0u;
+        d += s * s * ((3u * rx) ^ ry);
+        if (ry == 0u) {
+            if (rx == 1u) { x = n - 1u - x; y = n - 1u - y; }
+            uint t = x; x = y; y = t;
+        }
+    }
+    return d;
+}
+// The R2 fractional part in Q0.24 fixed point (the dither value), bit-exact via `uint` wrap.
+uint ssao_r2(uint index, uint alpha) { return (index * alpha) & 0xFFFFFFu; }
+
 [numthreads(64, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
     uint idx = tid.x;
@@ -209,21 +247,25 @@ void main(uint3 tid : SV_DispatchThreadID) {
             pix_radius = SSAO_RADIUS * ((float)h * 0.5) / RAYGEN_HALF_EXTENT;
         }
 
-        // The integer-hash rotation slot (bit-exact; NO float fract/floor). `& 15u` selects one
-        // of the 16 evenly-spaced angles (the table is a power-of-two size, so the mask == `% N`).
-        uint hsh = px * 1103515245u + py * 12345u;
-        uint slot = hsh & 15u;
+        // The Hilbert+R2 rotation slot (bit-exact; NO float fract/floor/trig). ONE 64x64 Hilbert
+        // index per pixel drives two R2 channels: ALPHA1 -> the rotation slot, ALPHA2 -> the radial
+        // phase. `slot = (r2 * SSAO_ROT_N) >> 24` maps the Q0.24 fraction into [0, ROT_N) by an
+        // integer scale (a power-of-two table, so this is the top bits of r2). Because R2 is
+        // low-discrepancy, adjacent pixels get well-SPREAD (not random) slots — the dither lives in
+        // HIGH frequencies and the depth-aware blur removes it cleanly, unlike the prior white-noise
+        // hash whose low-frequency component survived the blur as "pixelated" blobs.
+        uint hindex = ssao_hilbert(SSAO_HILBERT_W, px & (SSAO_HILBERT_W - 1u), py & (SSAO_HILBERT_W - 1u));
+        uint slot = (ssao_r2(hindex, SSAO_R2_ALPHA1) * SSAO_ROT_N) >> 24u;
         float2 rot = SSAO_ROT[slot];
 
-        // Q1 radial step-phase jitter (the concentric-ring fix): a SECOND integer hash with
-        // distinct primes, reduced to a per-pixel phase. `(hr & 255u) + 1` maps to [1, 256], so
-        // `radial_phase` lands in [1/256, 1.0] — STRICTLY positive, so the nearest tap (`sp == 0`)
-        // never advances to 0 (no center self-tap), and the farthest tap (`sp == STEPS-1`) at
-        // phase 1.0 reaches exactly `pix_radius` (the prior outer reach). Integer hash + exact
-        // `/256.0` ⇒ bit-exact GPU↔host, NO `fract`, NO trig. The per-pixel phase decorrelates the
-        // step radii so the rings become high-frequency noise the depth-aware blur removes.
-        uint hr = px * 374761393u + py * 668265263u;
-        float radial_phase = (float)((hr & 255u) + 1u) / 256.0;
+        // The radial step-phase jitter from the SECOND R2 channel (decorrelated from the rotation):
+        // the top 8 bits of the Q0.24 fraction map to [1, 256] -> [1/256, 1.0] — STRICTLY positive,
+        // so the nearest tap (`sp == 0`) never self-samples the center and the farthest tap reaches
+        // exactly `pix_radius` (the prior outer reach). Integer + one exact `/256.0` ⇒ bit-exact
+        // GPU↔host, NO `fract`, NO trig. The low-discrepancy phase spreads the step radii so any
+        // residual ringing is high-frequency noise the depth-aware blur removes.
+        uint r2_rad = ssao_r2(hindex, SSAO_R2_ALPHA2);
+        float radial_phase = (float)((r2_rad >> 16u) + 1u) / 256.0;
 
         float occ = 0.0;
         [unroll]

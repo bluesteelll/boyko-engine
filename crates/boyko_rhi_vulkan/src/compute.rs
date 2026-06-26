@@ -191,7 +191,7 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// reconstructs the real mesh `P` (in-range point/spot lighting) AND the SSAO pass processes mesh
 /// pixels. The SDF-hit branch (real `t`) and the pure-background branch (no mesh → `1.0e30`) are
 /// UNCHANGED; the two new `has_mesh ? t_mesh : 1.0e30` selects + the empty-tile select add → 122988 bytes.
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<122988> = SpirvBlob(*include_bytes!(concat!(
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<131720> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
 )));
@@ -291,20 +291,20 @@ static SDF_TILE_CULL_SPV: SpirvBlob<10304> = SpirvBlob(*include_bytes!(concat!(
 // time. The host oracle is [`golden_ssao_attributes`] fed the matching [`SSAO_PARAMS`] row.
 
 /// `SSAO_PARAMS[SSAO_QUALITY_LOW]` — `sdf_ssao_low.comp.spv` (2 slices × 3 steps × 2 = 12 taps).
-static SDF_SSAO_LOW_SPV: SpirvBlob<34628> = SpirvBlob(*include_bytes!(concat!(
+static SDF_SSAO_LOW_SPV: SpirvBlob<35536> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_ssao_low.comp.spv"
 )));
 
 /// `SSAO_PARAMS[SSAO_QUALITY_MEDIUM]` — `sdf_ssao_medium.comp.spv` (2 slices × 4 steps × 2 = 16
 /// taps; == today's shipped consts, byte-identical to the pre-Q2 base `sdf_ssao.comp.spv`).
-static SDF_SSAO_MEDIUM_SPV: SpirvBlob<44060> = SpirvBlob(*include_bytes!(concat!(
+static SDF_SSAO_MEDIUM_SPV: SpirvBlob<44968> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_ssao_medium.comp.spv"
 )));
 
 /// `SSAO_PARAMS[SSAO_QUALITY_HIGH]` — `sdf_ssao_high.comp.spv` (3 slices × 6 steps × 2 = 36 taps).
-static SDF_SSAO_HIGH_SPV: SpirvBlob<89252> = SpirvBlob(*include_bytes!(concat!(
+static SDF_SSAO_HIGH_SPV: SpirvBlob<90160> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_ssao_high.comp.spv"
 )));
@@ -678,7 +678,10 @@ pub const SSAO_SLICES_F: f32 = 2.0;
 /// `boyko_shaderdsl::ssao::SSAO_STEPS`.
 pub const SSAO_STEPS: u32 = 4;
 /// The occlusion strength multiplier (`SSAO_STRENGTH`). Equals
-/// `boyko_shaderdsl::ssao::SSAO_STRENGTH`.
+/// `boyko_shaderdsl::ssao::SSAO_STRENGTH`. Held at 2.5 (the precision-safe value GPU↔host agree on
+/// within ±6/255). The screen-space SSAO is now the SECONDARY AO path (mesh-vs-mesh); for
+/// SDF-occludes-mesh the marcher's analytic `sdf_ao` is the clean PRIMARY, so SSAO strength no
+/// longer carries the contact-shadow intensity. The Hilbert+R2 dither keeps this path clean.
 pub const SSAO_STRENGTH: f32 = 2.5;
 /// The `length(delta)` divide-by-zero guard (`SSAO_EPS`). Equals
 /// `boyko_shaderdsl::ssao::SSAO_EPS`.
@@ -4581,23 +4584,54 @@ pub fn golden_marcher_attributes(
         //   - gAlbedo = saturate(LINEAR vertex color) = MESH_RASTER_ALBEDO (the harness quad
         //     is white; `saturate` is the identity).
         //   - gNormal = oct_encode((0, 0, 1)) (the fronto-parallel quad's +Z) + mat_id 0.
-        //   - gMaterial = (shadow = 1, ao = 1, mask = 1) — the raster has no analytic SDF
-        //     shadow/AO (a charted follow-up), so both are unoccluded.
+        //   - gMaterial = (shadow, ao, mask = 1) — Render P7-r2: the SDF now casts a CLEAN
+        //     ANALYTIC soft shadow + contact AO onto the mesh (the marcher's `else if (has_mesh)`
+        //     arm marches `sdf_soft_shadow`/`sdf_ao` over the FROZEN field, the noise-free
+        //     SDF-native replacement for the screen-space SSAO). Mirror that march here.
         //   - gViewT: Render P7/P5-r1b UNLOCK — the marcher writes the mesh surface ray-t
         //     `t_mesh` (= `depth_to_t(mesh_depth)`, the same value the ownership gate marched
         //     against) for a `!own_pixel` mesh pixel, NOT the old `1.0e30` sentinel. The resolve
         //     reconstructs the REAL mesh surface position `P = ro + rd * t_mesh`, so in-range
-        //     point/spot lights now light the mesh (instead of being range-culled at infinity)
-        //     AND the SSAO pass processes the mesh pixel (`view_t < SSAO_VIEWT_BG`). Mirror that
-        //     with `t_mesh` so the host oracle == the GPU on every equivalence golden.
+        //     point/spot lights now light the mesh (instead of being range-culled at infinity).
+        //     Mirror that with `t_mesh` so the host oracle == the GPU on every equivalence golden.
+        //
+        // The harness quad is fronto-parallel (+Z); the GPU reads the raster normal back from
+        // gNormal and `oct_decode`s it, and the oct round-trip of (0,0,1) is EXACT, so the host
+        // normal == the GPU's decoded normal bit-for-bit. `P_mesh = ro + rd * t_mesh` mirrors the
+        // marcher's reconstruct.
         let n = [0.0_f32, 0.0, 1.0];
         let oct = oct_encode(n);
+        let p_mesh = [
+            ro[0] + rd[0] * t_mesh,
+            ro[1] + rd[1] * t_mesh,
+            ro[2] + rd[2] * t_mesh,
+        ];
+        let (shadow, ao) = if lighting_flags == 0 {
+            (1.0_f32, 1.0_f32)
+        } else {
+            let l = v_normalize(light_dir);
+            let field = |q: [f32; 3]| sdf_edit_list(edits, q);
+            let mut shadow = 1.0_f32;
+            if lighting_flags & LIGHTING_FLAG_SHADOWS != 0 {
+                let pb = [
+                    p_mesh[0] + n[0] * SHADOW_NORMAL_BIAS,
+                    p_mesh[1] + n[1] * SHADOW_NORMAL_BIAS,
+                    p_mesh[2] + n[2] * SHADOW_NORMAL_BIAS,
+                ];
+                shadow = host_soft_shadow(pb, n, l, &field);
+            }
+            let mut ao = 1.0_f32;
+            if lighting_flags & LIGHTING_FLAG_AO != 0 {
+                ao = host_ao(p_mesh, n, &field);
+            }
+            (shadow.clamp(0.0, 1.0), ao.clamp(0.0, 1.0))
+        };
         MarcherAttributes {
             base_rgb: base_bytes(MESH_RASTER_ALBEDO),
             oct_rg: [q8(oct[0]), q8(oct[1])],
             mat_id: 0,
-            shadow: 255,
-            ao: 255,
+            shadow: q8(shadow),
+            ao: q8(ao),
             mask: 1,
             view_t: t_mesh,
         }
@@ -4706,6 +4740,53 @@ pub fn golden_gbuffer<M: Fn(u32, u32) -> f32>(
     gbuf
 }
 
+/// The Hilbert tile edge (`SSAO_HILBERT_W`; XeGTAO uses level 6 = 64) — the host mirror of the
+/// shader const. The per-pixel dither index is `ssao_hilbert(64, px & 63, py & 63)`.
+const SSAO_HILBERT_W: u32 = 64;
+/// R2 plastic-number reciprocals `1/phi`, `1/phi^2` (phi = 1.32471795724474602596...) in Q0.24
+/// fixed point — the host mirrors of the shader consts `SSAO_R2_ALPHA1`/`SSAO_R2_ALPHA2`:
+/// `round(0.75487766624669276 * 2^24)`, `round(0.56984029099805327 * 2^24)`.
+const SSAO_R2_ALPHA1: u32 = 12_664_746;
+const SSAO_R2_ALPHA2: u32 = 9_560_334;
+
+/// The locality-preserving 2D->1D Hilbert index over an `n x n` tile (`n` a power of two) — the
+/// host mirror of the shader's `ssao_hilbert(uint, uint, uint)`. Pure integer bit-twiddling (the
+/// canonical `xy2d`), so it is bit-exact vs the SPIR-V `uint` arithmetic.
+///
+/// Replaces the prior per-pixel WHITE-NOISE PCG hash. White noise has energy at ALL spatial
+/// frequencies, so the depth-aware blur (a low-pass) strips the highs but leaves low-frequency
+/// noisy BLOBS (the "pixelated" look). Driving Martin Roberts' R2 sequence from a Hilbert index
+/// is a LOW-DISCREPANCY / blue-noise basis (the XeGTAO no-TAA recipe) whose energy is HIGH
+/// frequency only — the SAME blur removes it cleanly.
+#[inline]
+fn ssao_hilbert(n: u32, mut x: u32, mut y: u32) -> u32 {
+    let mut d = 0u32;
+    let mut s = n / 2;
+    while s > 0 {
+        let rx = if (x & s) > 0 { 1u32 } else { 0 };
+        let ry = if (y & s) > 0 { 1u32 } else { 0 };
+        d = d.wrapping_add(s.wrapping_mul(s).wrapping_mul((3u32.wrapping_mul(rx)) ^ ry));
+        if ry == 0 {
+            if rx == 1 {
+                x = n - 1 - x;
+                y = n - 1 - y;
+            }
+            std::mem::swap(&mut x, &mut y);
+        }
+        s /= 2;
+    }
+    d
+}
+
+/// The R2 fractional part in Q0.24 fixed point (the dither value) — the host mirror of the
+/// shader's `ssao_r2(uint, uint)`. `(index * alpha) & 0xFFFFFF` is `frac(index * alpha)` in Q0.24;
+/// the `u32` multiply wraps mod 2^32 identically on host and GPU (the low 24 bits are untouched by
+/// the wrap), so there is NO `frac`/trig and the host oracle and GPU pick the SAME dither bit-for-bit.
+#[inline]
+fn ssao_r2(index: u32, alpha: u32) -> u32 {
+    index.wrapping_mul(alpha) & 0x00FF_FFFF
+}
+
 /// Render P7 GROUP B: the host oracle for one SSAO output pixel — the line-for-line plain-
 /// Rust translation of `shaders/sdf_ssao.comp.hlsl`'s `main()` `center_lit` path. Returns
 /// the AO factor in `[0, 1]` (`1.0` = unoccluded; the resolve combines via
@@ -4788,22 +4869,20 @@ pub fn golden_ssao_attributes(
         }
     };
 
-    // The integer-hash rotation slot (bit-exact vs HLSL `uint`: wrapping mul/add, then a
-    // power-of-two mask `& 15` == `% SSAO_ROT_N` over the 16-entry table).
-    let hsh = px
-        .wrapping_mul(1103515245)
-        .wrapping_add(py.wrapping_mul(12345));
-    let slot = (hsh & (SSAO_ROT_N - 1)) as usize;
+    // The Hilbert+R2 rotation slot (bit-exact vs HLSL: ONE 64x64 Hilbert index drives two R2
+    // channels). `slot = (r2 * SSAO_ROT_N) >> 24` maps the Q0.24 fraction into [0, ROT_N) by an
+    // integer scale (a power-of-two table). R2 is low-discrepancy, so adjacent pixels get well-
+    // spread (not random) slots — the dither lives in HIGH frequencies the blur removes cleanly.
+    let hindex = ssao_hilbert(SSAO_HILBERT_W, px & (SSAO_HILBERT_W - 1), py & (SSAO_HILBERT_W - 1));
+    let slot = ((ssao_r2(hindex, SSAO_R2_ALPHA1).wrapping_mul(SSAO_ROT_N)) >> 24) as usize;
     let rot = SSAO_ROT[slot];
 
-    // Q1 radial step-phase jitter (mirror the shader): a SECOND integer hash with distinct
-    // primes, reduced to `radial_phase` in [1/256, 1.0] via `((hr & 255) + 1) / 256.0`. Strictly
-    // positive ⇒ the nearest tap never advances to 0 (no center self-tap); at phase 1.0 the
-    // farthest tap reaches exactly `pix_radius`. Integer hash + exact `/256.0` ⇒ bit-exact.
-    let hr = px
-        .wrapping_mul(374761393)
-        .wrapping_add(py.wrapping_mul(668265263));
-    let radial_phase = ((hr & 255) + 1) as f32 / 256.0;
+    // The radial step-phase jitter from the SECOND R2 channel (mirror the shader): the top 8 bits
+    // of the Q0.24 fraction map to [1, 256] -> [1/256, 1.0]. Strictly positive ⇒ the nearest tap
+    // never self-samples the center; at phase 1.0 the farthest tap reaches exactly `pix_radius`.
+    // Integer + one exact `/256.0` ⇒ bit-exact.
+    let r2_rad = ssao_r2(hindex, SSAO_R2_ALPHA2);
+    let radial_phase = ((r2_rad >> 16) + 1) as f32 / 256.0;
 
     // The forward neighbour reconstruct (the hand-written seam): offset in SCREEN pixels along
     // `sdir2 * sign`, round, bounds-clamp, reconstruct Pp = nro + nrd * nview_t; else Pp = P.
@@ -9357,18 +9436,20 @@ mod ssao_gather_tests {
     }
 
     /// The EXACT per-pixel dither the gather applies (mirror of the `golden_ssao_attributes`
-    /// integer hashes, which are private to the function): the rotation slot `& 15` over the
-    /// 16-entry table and the radial step-phase `((hr & 255) + 1) / 256.0`. Returned as
-    /// `(rot_slot, radial_phase)` so the Q1 determinism + decorrelation test can assert both.
+    /// Hilbert+R2 low-discrepancy basis): ONE 64x64 Hilbert index drives two R2 channels — ALPHA1
+    /// -> the rotation slot `(r2 * ROT_N) >> 24` over the 16-entry table, ALPHA2 -> the radial
+    /// step-phase `((r2 >> 16) + 1) / 256.0`. Returned as `(rot_slot, radial_phase)` so the
+    /// determinism + decorrelation test can assert both.
     fn dither(px: u32, py: u32) -> (usize, f32) {
-        let hsh = px
-            .wrapping_mul(1103515245)
-            .wrapping_add(py.wrapping_mul(12345));
-        let slot = (hsh & (super::SSAO_ROT_N - 1)) as usize;
-        let hr = px
-            .wrapping_mul(374761393)
-            .wrapping_add(py.wrapping_mul(668265263));
-        let radial_phase = ((hr & 255) + 1) as f32 / 256.0;
+        let hindex = super::ssao_hilbert(
+            super::SSAO_HILBERT_W,
+            px & (super::SSAO_HILBERT_W - 1),
+            py & (super::SSAO_HILBERT_W - 1),
+        );
+        let slot =
+            ((super::ssao_r2(hindex, super::SSAO_R2_ALPHA1).wrapping_mul(super::SSAO_ROT_N)) >> 24) as usize;
+        let r2_rad = super::ssao_r2(hindex, super::SSAO_R2_ALPHA2);
+        let radial_phase = ((r2_rad >> 16) + 1) as f32 / 256.0;
         (slot, radial_phase)
     }
 
