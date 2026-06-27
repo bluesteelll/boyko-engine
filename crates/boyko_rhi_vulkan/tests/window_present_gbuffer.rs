@@ -1534,9 +1534,10 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         // Render P7: SSAO OFF (the default) — NO SSAO pass recorded, byte-identical to the pre-P7
         // stream (the 0%-gate). These golden/cull-comparison presents assert the existing stream.
         ssao: None,
-        // M2: the LEGACY merged draw (no instanced mesh) — `record_gbuffer` keeps
-        // `vkCmdDraw(vertex_count, 1, 0, 0)`, byte-identical to the pre-M2 stream.
-        mesh_draw: None,
+        // M3: the LEGACY merged draw (no instanced mesh — an EMPTY batch slice) —
+        // `record_gbuffer` keeps `vkCmdDraw(vertex_count, 1, 0, 0)`, byte-identical to the
+        // pre-M2 stream.
+        mesh_draw: &[],
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -2380,9 +2381,10 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         // Render P7: SSAO OFF (the default) — NO SSAO pass recorded, byte-identical to the pre-P7
         // stream (the 0%-gate). These golden/cull-comparison presents assert the existing stream.
         ssao: None,
-        // M2: the LEGACY merged draw (no instanced mesh) — `record_gbuffer` keeps
-        // `vkCmdDraw(vertex_count, 1, 0, 0)`, byte-identical to the pre-M2 stream.
-        mesh_draw: None,
+        // M3: the LEGACY merged draw (no instanced mesh — an EMPTY batch slice) —
+        // `record_gbuffer` keeps `vkCmdDraw(vertex_count, 1, 0, 0)`, byte-identical to the
+        // pre-M2 stream.
+        mesh_draw: &[],
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -2597,6 +2599,13 @@ const SSAO_BMP: &str = r"D:\tmp\engine_ssao_512.bmp";
 /// mesh + an N-affine instance SSBO) co-scened with an SDF sphere so the depth-ownership between
 /// the instanced raster boxes and the SDF sphere is the C2 visual proof.
 const INSTANCED_PERSP_BMP: &str = r"D:\tmp\engine_instanced_persp.bmp";
+
+/// Mesh foundation M3 — the multi-mesh instanced screenshot path. TWO distinct meshes (a
+/// small `u16`-indexed box + a higher-poly `u32`-indexed box), each at several distinct
+/// transforms, drawn through the recorder's BATCH LOOP: mesh A at `base_instance == 0`, mesh
+/// B at a NONZERO `base_instance` (the C1 GPU proof). If mesh B's instances render at mesh A's
+/// positions, the `base_instance` mechanism is broken and the screenshot shows it.
+const MULTIMESH_PERSP_BMP: &str = r"D:\tmp\engine_multimesh.bmp";
 
 /// The showcase sun direction (`L`, the un-normalized "direction TO the light"): upper-LEFT and
 /// slightly toward the camera, ~57° elevation. Used BOTH as the marcher's `scene.light_dir` (the
@@ -2821,17 +2830,65 @@ struct ShowcaseConfig {
     instanced: Option<InstancedMesh>,
 }
 
-/// Mesh foundation M2 — the instanced-draw spec a [`ShowcaseConfig`] carries: ONE model-space
-/// mesh (`vertices` + triangle `indices`, registered into a [`MeshRegistry`]) drawn by `affines`
-/// non-identity 3x4 ROW-MAJOR instance matrices through the `use_model_matrix == 1` arm.
+/// Mesh foundation M2/M3 — the instanced-draw spec a [`ShowcaseConfig`] carries: a LIST of
+/// model-space meshes, each registered into a [`MeshRegistry`]-shaped table and drawn by its
+/// own `affines` non-identity 3x4 ROW-MAJOR instance matrices through the
+/// `use_model_matrix == 1` arm. M2 carries ONE mesh (a 1-batch list); M3 carries ≥2 distinct
+/// meshes to exercise the recorder's batch loop + the nonzero `base_instance` (the C1 GPU
+/// proof) + mixed `u16`/`u32` index width (O3).
 struct InstancedMesh {
-    /// The model-space mesh vertices (registered into the [`MeshRegistry`]).
+    /// The per-mesh draw specs, in registration order. The shared instance ring is built by
+    /// concatenating each mesh's affines in this order (mesh 0 at base 0, mesh 1 at base
+    /// `meshes[0].affines.len()`, …), so mesh `k`'s `base_instance` is the prefix-sum of the
+    /// prior meshes' instance counts — NONZERO for every mesh after the first.
+    meshes: Vec<InstancedMeshEntry>,
+}
+
+/// One mesh in an [`InstancedMesh`] batch list: its model-space geometry + the per-instance
+/// affines that place its copies. The host mirrors the M3 gather's per-mesh bucket: the build
+/// concatenates `affines` into the shared ring at this mesh's prefix-sum offset.
+struct InstancedMeshEntry {
+    /// The model-space mesh vertices (registered into the mesh table).
     vertices: Vec<Vertex>,
     /// The mesh's triangle index list (`0..vertices.len()`).
     indices: Vec<u32>,
-    /// The per-instance 3x4 row-major affines (one [`InstanceModelCol`] each); the draw issues
-    /// `instance_count == affines.len()` instances.
+    /// This mesh's per-instance 3x4 row-major affines (one [`InstanceModelCol`] each); the
+    /// mesh's batch issues `instance_count == affines.len()` instances at its `base_instance`.
     affines: Vec<[f32; 12]>,
+}
+
+/// Mesh foundation M3 — the BUILT GPU resources for an [`InstancedMesh`] batch list: the
+/// per-mesh draw entries + the ONE shared instance SSBO (the concatenated ring) the recorder
+/// binds once. The `run_showcase_dump` builds it inline (no `boyko_render` dep), borrows
+/// `GBufferMeshDraw`s from `batches` for the scene, and tears it down explicitly.
+struct InstancedGpu {
+    /// The per-mesh GPU draw entries, in registration order (mesh 0's `base_instance == 0`,
+    /// mesh 1's `== meshes[0].instance_count`, …). The recorder issues one indexed draw each.
+    batches: Vec<InstancedGpuBatch>,
+    /// The ONE shared N-instance model SSBO holding every mesh's affines concatenated; the
+    /// VS indexes it by `base_instance + SV_InstanceID`. Bound once via `instance_bind_group`.
+    instance_ssbo: BoundBuffer,
+    /// The shared SSBO's bind group on the gbuffer set-0 layout (bound once for the batch list).
+    instance_bind_group: VulkanBindGroup,
+}
+
+/// One built per-mesh draw entry in an [`InstancedGpu`]: the mesh's GPU buffers + the
+/// `GBufferMeshDraw` metadata (`index_count` / `index_type` / `base_instance` /
+/// `instance_count`). The scene's `mesh_draw` slice is built by borrowing these.
+struct InstancedGpuBatch {
+    /// The mesh's model-space vertex buffer.
+    vertex_buffer: BoundBuffer,
+    /// The mesh's index buffer (`index_type`-wide).
+    index_buffer: BoundBuffer,
+    /// The mesh's index count.
+    index_count: u32,
+    /// The mesh's bound index width as the agnostic `i32` (O3 mixed `Uint16`/`Uint32`).
+    index_type: i32,
+    /// This mesh's bucket start in the shared ring (the prefix-sum offset — NONZERO for every
+    /// mesh after the first, the C1 GPU proof).
+    base_instance: u32,
+    /// This mesh's instance count (its bucket length).
+    instance_count: u32,
 }
 
 /// A static mesh's `(positions, triangle_indices)` — the MDF Stage-2c shadow-caster geometry the
@@ -3257,7 +3314,9 @@ fn instanced_persp_config() -> ShowcaseConfig {
         mvp: instanced_room_mvp_bytes(),
         ssao_quality: None,
         mesh_sdf: None,
-        instanced: Some(InstancedMesh { vertices: verts, indices, affines }),
+        instanced: Some(InstancedMesh {
+            meshes: vec![InstancedMeshEntry { vertices: verts, indices, affines }],
+        }),
     }
 }
 
@@ -3276,6 +3335,141 @@ fn engine_instanced_persp_screenshot_dump() {
         "boyko_engine instanced perspective 512",
         INSTANCED_PERSP_BMP,
         instanced_persp_config(),
+    );
+}
+
+// === Mesh foundation M3 — the multi-mesh batch-loop + nonzero-base + mixed-width demo. ===
+
+/// A MODEL-SPACE box at the origin with per-axis half-extents `half`, each face SUBDIVIDED into
+/// `seg × seg` quads — `(seg+1)² × 6` UNIQUE vertices + `seg² × 6 × 6` indices. Used to push the
+/// unique-vertex count ABOVE [`U16_INDEX_VERTEX_LIMIT`] so the registry's O3 width pick mints
+/// `Uint32` indices (the mixed-width proof): at `seg = 120` the count is `121² × 6 = 87 846 >
+/// 65 536`. Visually a box; geometrically a high-poly mesh forcing the wide index path.
+fn mesh_box_model_subdivided(half: [f32; 3], color: [f32; 4], seg: u32) -> (Vec<Vertex>, Vec<u32>) {
+    assert!(seg >= 1, "a subdivided box face needs at least one segment");
+    let [hx, hy, hz] = half;
+    // One subdivided face: outward `normal`, the two in-plane axes (`u`, `v`) spanning
+    // [-h, +h], and the fixed out-of-plane `center`. CCW from outside matches
+    // `mesh_box_model`'s winding.
+    type FaceSpec = ([f32; 3], [f32; 3], [f32; 3], [f32; 3]);
+    let faces: [FaceSpec; 6] = [
+        // +Z: u = +X, v = +Y, plane z = +hz.
+        ([0.0, 0.0, 1.0], [hx, 0.0, 0.0], [0.0, hy, 0.0], [0.0, 0.0, hz]),
+        // -Z: u = -X, v = +Y, plane z = -hz.
+        ([0.0, 0.0, -1.0], [-hx, 0.0, 0.0], [0.0, hy, 0.0], [0.0, 0.0, -hz]),
+        // +X: u = -Z, v = +Y, plane x = +hx.
+        ([1.0, 0.0, 0.0], [0.0, 0.0, -hz], [0.0, hy, 0.0], [hx, 0.0, 0.0]),
+        // -X: u = +Z, v = +Y, plane x = -hx.
+        ([-1.0, 0.0, 0.0], [0.0, 0.0, hz], [0.0, hy, 0.0], [-hx, 0.0, 0.0]),
+        // +Y: u = +X, v = -Z, plane y = +hy.
+        ([0.0, 1.0, 0.0], [hx, 0.0, 0.0], [0.0, 0.0, -hz], [0.0, hy, 0.0]),
+        // -Y: u = +X, v = +Z, plane y = -hy.
+        ([0.0, -1.0, 0.0], [hx, 0.0, 0.0], [0.0, 0.0, hz], [0.0, -hy, 0.0]),
+    ];
+
+    let row = seg + 1;
+    let per_face = (row * row) as usize;
+    let mut verts: Vec<Vertex> = Vec::with_capacity(per_face * 6);
+    let mut indices: Vec<u32> = Vec::with_capacity((seg * seg * 6 * 6) as usize);
+    for (n, u, v, c) in faces {
+        let face_base = verts.len() as u32;
+        for iy in 0..row {
+            for ix in 0..row {
+                // Barycentric in [-1, +1] along each in-plane axis.
+                let su = (ix as f32 / seg as f32) * 2.0 - 1.0;
+                let sv = (iy as f32 / seg as f32) * 2.0 - 1.0;
+                let p = [
+                    c[0] + u[0] * su + v[0] * sv,
+                    c[1] + u[1] * su + v[1] * sv,
+                    c[2] + u[2] * su + v[2] * sv,
+                ];
+                verts.push(Vertex { position: p, normal: n, color });
+            }
+        }
+        for iy in 0..seg {
+            for ix in 0..seg {
+                let a = face_base + iy * row + ix;
+                let b = a + 1;
+                let cc = a + row;
+                let d = cc + 1;
+                // Two CCW triangles per quad: (a, b, d) + (a, d, cc).
+                indices.extend_from_slice(&[a, b, d, a, d, cc]);
+            }
+        }
+    }
+    (verts, indices)
+}
+
+/// **Mesh foundation M3 — the multi-mesh instanced config.** TWO distinct registered meshes
+/// drawn through the recorder's BATCH LOOP under the [`room_camera`] perspective:
+///
+///   * **Mesh A** — a small model-space box ([`mesh_box_model`], 24 unique verts ⇒ O3
+///     `Uint16` indices), 3 instances at `base_instance == 0`.
+///   * **Mesh B** — a SUBDIVIDED box ([`mesh_box_model_subdivided`], `seg = 120` ⇒ 87 846
+///     unique verts ⇒ O3 `Uint32` indices — the mixed-width proof), 2 instances at a NONZERO
+///     `base_instance` (== mesh A's instance count, 3 — the C1 GPU proof).
+///
+/// The two meshes are placed at DISTINCT world X/Z/yaw so per-instance + per-mesh placement is
+/// visible. If mesh B's instances render at mesh A's positions, the recorder ignored
+/// `base_instance` and the C1 mechanism is broken — the screenshot will show it. Co-scened with
+/// an SDF sphere (the C2 depth-ownership backdrop).
+fn multimesh_persp_config() -> ShowcaseConfig {
+    let header = GoldenLightHeader::new(2, 0, 1.0).with_ssao_mode(0);
+    let lights = vec![
+        GoldenLight::directional(SHOWCASE_SUN_DIR, [1.0, 0.97, 0.92], 3.0),
+        GoldenLight::sky([0.05, 0.05, 0.05], [0.05, 0.05, 0.05]),
+    ];
+    let sdf = vec![SdfEdit::sphere([1.6, 0.6, -0.6], 0.6, sdf_op::UNION, 0.0)];
+
+    // Mesh A: a small u16-indexed box (warm orange). THREE instances on the LEFT.
+    let (a_verts, a_indices) = mesh_box_model([0.4, 0.4, 0.4], [0.82, 0.45, 0.30, 1.0]);
+    let a_affines = vec![
+        instance_affine(0.0, 1.0, [-2.0, 0.42, -0.6]),
+        instance_affine(0.5, 0.85, [-1.6, 0.36, -1.8]),
+        instance_affine(-0.4, 1.1, [-2.2, 0.50, -3.0]),
+    ];
+
+    // Mesh B: a high-poly SUBDIVIDED box (cool teal) — `seg = 120` forces O3 Uint32 indices.
+    // TWO instances on the RIGHT at a NONZERO `base_instance` (== mesh A's 3 instances).
+    let (b_verts, b_indices) =
+        mesh_box_model_subdivided([0.45, 0.45, 0.45], [0.25, 0.62, 0.70, 1.0], 120);
+    let b_affines = vec![
+        instance_affine(0.3, 1.05, [0.4, 0.45, -1.4]),
+        instance_affine(-0.6, 0.9, [0.9, 0.40, -2.8]),
+    ];
+
+    ShowcaseConfig {
+        sdf,
+        camera: room_camera(),
+        light_header: header,
+        light_elems: lights,
+        vertices: showcase_quad_vertices(),
+        mvp: instanced_room_mvp_bytes(),
+        ssao_quality: None,
+        mesh_sdf: None,
+        instanced: Some(InstancedMesh {
+            meshes: vec![
+                InstancedMeshEntry { vertices: a_verts, indices: a_indices, affines: a_affines },
+                InstancedMeshEntry { vertices: b_verts, indices: b_indices, affines: b_affines },
+            ],
+        }),
+    }
+}
+
+/// **Mesh foundation M3 — the multi-mesh batch-loop screenshot.** Drives TWO distinct meshes
+/// (a u16-indexed box + a u32-indexed subdivided box) through the recorder's batch loop: mesh A
+/// at `base_instance == 0`, mesh B at a NONZERO base — the C1 GPU proof — with mixed index width
+/// (O3). Dumps a TRUE 512×512 BMP to [`MULTIMESH_PERSP_BMP`] for the owner's RTX sign-off.
+///
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
+/// orchestrator runs it on the GPU to dump the screenshot.
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the multi-mesh screenshot"]
+fn engine_multimesh_persp_screenshot_dump() {
+    run_showcase_dump(
+        "boyko_engine multi-mesh perspective 512",
+        MULTIMESH_PERSP_BMP,
+        multimesh_persp_config(),
     );
 }
 
@@ -3621,7 +3815,6 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
     let sdf = &cfg.sdf;
     // M2: the instanced draw's instance count (captured before `cfg.vertices` is moved below).
     // `0` when there is no instanced mesh (the legacy path leaves `scene.mesh_draw == None`).
-    let cfg_instance_count = cfg.instanced.as_ref().map_or(0, |i| i.affines.len() as u32);
 
     // --- The edit-list SSBO (binding 0), host-seeded ONCE. The resolve binds the SAME buffer
     // at binding 10 for the per-caster shadow march. ---
@@ -3847,15 +4040,28 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
     // declare it + a valid buffer MUST be bound; the legacy draw never reads it).
     let (instance_layout, instance_buffer, instance_bind_group) = create_identity_instance(device);
 
-    // M2: when the config carries an instanced mesh, build its GPU resources — the model-space
-    // mesh's vertex + index buffers (the SAME buffers `boyko_render::MeshRegistry::register_mesh`
-    // mints; `boyko_rhi_vulkan` cannot name `boyko_render` without a dep cycle, so the GPU test
-    // builds them inline) + the N-instance model SSBO bind group on the gbuffer set-0 layout.
-    // `None` (every legacy scene) leaves these absent and `scene.mesh_draw == None`.
-    let instanced_gpu: Option<(BoundBuffer, BoundBuffer, u32, i32, BoundBuffer, VulkanBindGroup)> =
-        cfg.instanced.as_ref().map(|inst| {
+    // M3: when the config carries instanced meshes, build their GPU resources — each mesh's
+    // model-space vertex + index buffers (the SAME buffers
+    // `boyko_render::MeshRegistry::register_mesh` mints; `boyko_rhi_vulkan` cannot name
+    // `boyko_render` without a dep cycle, so the GPU test builds them inline) + ONE SHARED
+    // N-instance model SSBO holding every mesh's affines concatenated in mesh order (mesh 0 at
+    // base 0, mesh 1 at base `meshes[0].affines.len()`, …). This MIRRORS the M3 gather's
+    // count→prefix-sum→scatter on the host (the algorithm itself is proven by the
+    // `boyko_render` step-4 unit test); this GPU demo proves the RECORDER's batch loop + the
+    // nonzero `base_instance` (C1) + mixed index width (O3). `None` (legacy scenes) leaves
+    // these absent and `scene.mesh_draw` an empty slice.
+    let instanced_gpu: Option<InstancedGpu> = cfg.instanced.as_ref().map(|inst| {
+        // The shared instance ring: every mesh's affines concatenated in mesh order. Mesh k's
+        // `base_instance` is the running offset BEFORE its affines are appended (the prefix-sum
+        // of the prior meshes' instance counts — NONZERO for every mesh after the first).
+        let mut ring: Vec<[f32; 12]> = Vec::new();
+        let mut batches: Vec<InstancedGpuBatch> = Vec::with_capacity(inst.meshes.len());
+        for entry in &inst.meshes {
+            let base_instance = ring.len() as u32;
+            ring.extend_from_slice(&entry.affines);
+
             // Vertex buffer (model-space).
-            let vbytes = core::mem::size_of_val(inst.vertices.as_slice()) as u64;
+            let vbytes = core::mem::size_of_val(entry.vertices.as_slice()) as u64;
             let mvb = RhiDevice::create_buffer(
                 device,
                 &BufferDesc {
@@ -3864,33 +4070,33 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
                     location: MemoryLocation::HostVisibleCoherent,
                 },
             )
-            .expect("M2 instanced mesh vertex buffer");
+            .expect("M3 instanced mesh vertex buffer");
             {
                 let p = RhiDevice::buffer_mapped_ptr(device, &mvb)
                     .expect("host-visible instanced vertex buffer is mapped");
-                // SAFETY: `p` points to `vbytes` mapped host-coherent bytes; `inst.vertices` is a
-                // distinct `vbytes`-byte slice; the copy completes before any submit.
+                // SAFETY: `p` points to `vbytes` mapped host-coherent bytes; `entry.vertices` is
+                // a distinct `vbytes`-byte slice; the copy completes before any submit.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
-                        inst.vertices.as_ptr().cast::<u8>(),
+                        entry.vertices.as_ptr().cast::<u8>(),
                         p.as_ptr(),
                         vbytes as usize,
                     );
                 }
             }
             // Index buffer: O3 width pick (Uint16 when the unique vertex count fits a u16).
-            let index_type = if inst.vertices.len() <= u16::MAX as usize + 1 {
+            let index_type = if entry.vertices.len() <= u16::MAX as usize + 1 {
                 IndexType::Uint16
             } else {
                 IndexType::Uint32
             };
             let idx_bytes: Vec<u8> = match index_type {
-                IndexType::Uint16 => inst
+                IndexType::Uint16 => entry
                     .indices
                     .iter()
                     .flat_map(|&i| (i as u16).to_le_bytes())
                     .collect(),
-                IndexType::Uint32 => inst.indices.iter().flat_map(|&i| i.to_le_bytes()).collect(),
+                IndexType::Uint32 => entry.indices.iter().flat_map(|&i| i.to_le_bytes()).collect(),
             };
             let mib = RhiDevice::create_buffer(
                 device,
@@ -3900,7 +4106,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
                     location: MemoryLocation::HostVisibleCoherent,
                 },
             )
-            .expect("M2 instanced mesh index buffer");
+            .expect("M3 instanced mesh index buffer");
             {
                 let p = RhiDevice::buffer_mapped_ptr(device, &mib)
                     .expect("host-visible instanced index buffer is mapped");
@@ -3910,10 +4116,20 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
                     core::ptr::copy_nonoverlapping(idx_bytes.as_ptr(), p.as_ptr(), idx_bytes.len());
                 }
             }
-            // The N-instance model SSBO + its bind group on the gbuffer set-0 layout.
-            let (ssbo, bg) = create_instance_buffer(device, &instance_layout, &inst.affines);
-            (mvb, mib, inst.indices.len() as u32, index_type.as_i32(), ssbo, bg)
-        });
+            batches.push(InstancedGpuBatch {
+                vertex_buffer: mvb,
+                index_buffer: mib,
+                index_count: entry.indices.len() as u32,
+                index_type: index_type.as_i32(),
+                base_instance,
+                instance_count: entry.affines.len() as u32,
+            });
+        }
+        // ONE shared N-instance model SSBO + its bind group on the gbuffer set-0 layout, holding
+        // the concatenated ring (the recorder binds this ONCE for the whole batch list).
+        let (ssbo, bg) = create_instance_buffer(device, &instance_layout, &ring);
+        InstancedGpu { batches, instance_ssbo: ssbo, instance_bind_group: bg }
+    });
 
     let raster_pipeline = RhiDevice::create_graphics_pipeline(
         device,
@@ -4100,15 +4316,41 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         RhiDevice::destroy_shader_module(device, vs);
     }
 
+    // M3: build the per-mesh draw batch LIST (one `GBufferMeshDraw` per registered mesh,
+    // carrying its `base_instance` bucket offset + O3 index width), borrowing each mesh's GPU
+    // buffers from `instanced_gpu`. Empty (the legacy path) ⇒ `scene.mesh_draw == &[]` ⇒ the
+    // recorder keeps the byte-identical `cmd_draw`. The slice is built BEFORE the scene so the
+    // scene's `mesh_draw: &[..]` borrow is valid for the frame call.
+    let mesh_draws: Vec<GBufferMeshDraw> = instanced_gpu
+        .as_ref()
+        .map(|g| {
+            g.batches
+                .iter()
+                .map(|b| GBufferMeshDraw {
+                    vertex_buffer: &b.vertex_buffer,
+                    index_buffer: &b.index_buffer,
+                    index_count: b.index_count,
+                    index_type: b.index_type,
+                    base_instance: b.base_instance,
+                    instance_count: b.instance_count,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mvp = cfg.mvp;
     let scene = GBufferScene {
         raster_pipeline: &raster_pipeline,
         vertex_buffer: &vertex_buffer,
         vertex_count: vertices.len() as u32,
         mvp,
-        // M1: the legacy merged draw binds the 1-element identity instance SSBO at set 0
-        // (bound-but-unread — the `use_model_matrix == 0` push selects the VS's legacy arm).
-        instance_bind_group: &instance_bind_group,
+        // M3: the SHARED instance SSBO bind group — the gather-filled N-instance ring on the
+        // instanced path (the recorder binds it ONCE, every batch indexes `base_instance +
+        // SV_InstanceID`), or the 1-element identity dummy on the legacy path (bound-but-unread,
+        // `use_model_matrix == 0`).
+        instance_bind_group: instanced_gpu
+            .as_ref()
+            .map_or(&instance_bind_group, |g| &g.instance_bind_group),
         marcher: &marcher,
         vocab_layout: &vocab_layout,
         edit_list: &edit_list,
@@ -4172,20 +4414,12 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         ssao: cfg
             .ssao_quality
             .map(|_| SsaoActivation { pipeline: &ssao_pipeline, layout: &ssao_layout }),
-        // M2: when the config carried an instanced mesh, pass A switches to an INSTANCED INDEXED
-        // draw of the registered model-space mesh placed by N affines (the `use_model_matrix == 1`
-        // arm — `cfg.mvp` set its byte 84). Every legacy scene leaves `instanced == None`, so this
-        // is `None` and `record_gbuffer` keeps the byte-identical legacy `cmd_draw`.
-        mesh_draw: instanced_gpu.as_ref().map(|(vb, ib, icount, itype, _ssbo, bg)| {
-            GBufferMeshDraw {
-                vertex_buffer: vb,
-                index_buffer: ib,
-                index_count: *icount,
-                index_type: *itype,
-                instance_count: cfg_instance_count,
-                instance_bind_group: bg,
-            }
-        }),
+        // M3: when the config carried instanced meshes, pass A runs the batch loop — one
+        // INSTANCED INDEXED draw per registered mesh, each at its `base_instance` bucket
+        // (the `use_model_matrix == 1` arm — `cfg.mvp` set its byte 84). Every legacy scene
+        // leaves `instanced == None` ⇒ an EMPTY slice ⇒ `record_gbuffer` keeps the
+        // byte-identical legacy `cmd_draw`.
+        mesh_draw: &mesh_draws,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -4323,13 +4557,18 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         RhiDevice::destroy_compute_pipeline(device, marcher);
         RhiDevice::destroy_bind_group_layout(device, vocab_layout);
         RhiDevice::destroy_graphics_pipeline(device, raster_pipeline);
-        // M2 instanced-mesh resources (the bind group → its SSBO → the mesh's index + vertex
-        // buffers), destroyed before the shared `instance_layout` the bind group used.
-        if let Some((mvb, mib, _, _, ssbo, bg)) = instanced_gpu {
-            RhiDevice::destroy_bind_group(device, bg);
-            RhiDevice::destroy_buffer(device, ssbo);
-            RhiDevice::destroy_buffer(device, mib);
-            RhiDevice::destroy_buffer(device, mvb);
+        // M3 instanced-mesh resources: the per-mesh draw batches (each mesh's index + vertex
+        // buffers) + the shared instance SSBO + its bind group, destroyed before the shared
+        // `instance_layout` the bind group used. `mesh_draws` borrowed `instanced_gpu`, so it is
+        // dropped first (the scene that used it was consumed by the frame call above).
+        drop(mesh_draws);
+        if let Some(g) = instanced_gpu {
+            RhiDevice::destroy_bind_group(device, g.instance_bind_group);
+            RhiDevice::destroy_buffer(device, g.instance_ssbo);
+            for b in g.batches {
+                RhiDevice::destroy_buffer(device, b.index_buffer);
+                RhiDevice::destroy_buffer(device, b.vertex_buffer);
+            }
         }
         // M1 instance-model resources (bind group → buffer → layout, after the pipeline).
         RhiDevice::destroy_bind_group(device, instance_bind_group);

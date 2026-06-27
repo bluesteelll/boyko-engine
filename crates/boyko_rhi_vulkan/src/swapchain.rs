@@ -2593,14 +2593,15 @@ impl<'ctx> Renderer<'ctx> {
         // `GBUFFER_PUSH_BYTES` at offset 0 into the VERTEX range (M1: its trailing
         // `use_model_matrix` selects the VS arm — `0` legacy / `1` instanced). A VALID set 0
         // is bound before the draw to satisfy the VS's static `instances` reference:
-        // `scene.instance_bind_group` (the 1-element identity dummy, bound-but-unread) on the
-        // LEGACY arm, or `mesh_draw.instance_bind_group` (the caller's N-instance model SSBO)
-        // on the M2 INSTANCED arm. `vertex_offset`/`raster_viewport`/`raster_area` locals
-        // outlive the bracketed calls. On the legacy arm `draw(vertex_count, 1, 0, 0)` reads
-        // the merged vertex buffer; on the M2 arm `draw_indexed(index_count, instance_count,
-        // 0, 0, 0)` reads `mesh_draw`'s bound vertex + index buffers (created on this device,
-        // carrying VERTEX/INDEX usage; `index_type` a valid `VkIndexType`). Begin/End bracket
-        // pass A exactly.
+        // `scene.instance_bind_group` (the shared N-instance SSBO — the 1-element identity
+        // dummy on the legacy empty-slice arm, the gather-filled ring on the M3 instanced
+        // arm), bound ONCE for both arms. `vertex_offset`/`raster_viewport`/`raster_area`
+        // locals outlive the bracketed calls. On the legacy arm `draw(vertex_count, 1, 0, 0)`
+        // reads the merged vertex buffer; on the M3 arm the batch loop re-pushes each batch's
+        // `base_instance` (4 bytes at offset 80, in-range of the declared 88-byte VERTEX push)
+        // then `draw_indexed(index_count, instance_count, 0, 0, 0)` reads that batch's bound
+        // vertex + index buffers (created on this device, carrying VERTEX/INDEX usage;
+        // `index_type` a valid `VkIndexType`). Begin/End bracket pass A exactly.
         unsafe {
             (self.fns.cmd_begin_rendering)(cmd, &raster_rendering);
             (self.fns.cmd_bind_pipeline)(
@@ -2608,20 +2609,19 @@ impl<'ctx> Renderer<'ctx> {
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
                 scene.raster_pipeline.pipeline,
             );
-            // M2: the instanced arm binds the caller's N-instance model SSBO (set 0); the
-            // legacy arm binds the 1-element identity dummy (bound-but-unread). Both bind a
-            // VALID set 0 so the VS's static `instances` reference is satisfied.
-            let instance_set = match &scene.mesh_draw {
-                Some(mesh_draw) => mesh_draw.instance_bind_group.descriptor_set,
-                None => scene.instance_bind_group.descriptor_set,
-            };
+            // M3: the instanced batch loop binds the SHARED N-instance model SSBO ONCE
+            // (set 0); the legacy (empty-slice) arm binds the 1-element identity dummy
+            // (bound-but-unread). Both bind a VALID set 0 so the VS's static `instances`
+            // reference is satisfied. The shared SSBO is `scene.instance_bind_group` for
+            // both arms (M3 repurposed it as the gather-filled N-instance ring on the
+            // instanced path); every batch indexes it by `base_instance + SV_InstanceID`.
             (self.fns.cmd_bind_descriptor_sets)(
                 cmd,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
                 scene.raster_pipeline.layout,
                 0,
                 1,
-                &instance_set,
+                &scene.instance_bind_group.descriptor_set,
                 0,
                 ptr::null(),
             );
@@ -2635,46 +2635,58 @@ impl<'ctx> Renderer<'ctx> {
             );
             (self.fns.cmd_set_viewport)(cmd, 0, 1, &raster_viewport);
             (self.fns.cmd_set_scissor)(cmd, 0, 1, &raster_area);
-            match &scene.mesh_draw {
-                // M2 INSTANCED arm: bind the mesh's vertex + index buffers and issue an
-                // instanced INDEXED draw. `scene.mvp`'s `use_model_matrix == 1` (caller
-                // contract) selects the VS arm that reads `instances[0 + SV_InstanceID]`,
-                // so each of `instance_count` instances places the SAME model-space mesh by
-                // its own affine. `base_instance == 0` (the M3 ECS gather adds buckets).
-                Some(mesh_draw) => {
+            if scene.mesh_draw.is_empty() {
+                // LEGACY arm: byte-identical to the pre-M2 stream — a non-indexed,
+                // single-instance draw over the scene's merged vertex buffer. The shared
+                // set 0 + the `use_model_matrix == 0` push (caller contract) make the bound
+                // SSBO bound-but-unread.
+                (self.fns.cmd_bind_vertex_buffers)(
+                    cmd,
+                    0,
+                    1,
+                    &scene.vertex_buffer.buffer,
+                    &vertex_offset,
+                );
+                (self.fns.cmd_draw)(cmd, scene.vertex_count, 1, 0, 0);
+            } else {
+                // M3 INSTANCED batch loop: one indexed draw per registered mesh. `scene.
+                // mvp`'s `use_model_matrix == 1` (caller contract) selects the VS arm that
+                // reads `instances[base_instance + SV_InstanceID]`. Each batch overwrites
+                // the push's `base_instance` word (offset 80, 4 bytes) with its bucket
+                // offset — NONZERO for every mesh after the first (the C1 proof) — then
+                // binds its own vertex+index buffers (with its O3 index width) and draws
+                // its instance bucket.
+                for batch in scene.mesh_draw {
+                    let base = batch.base_instance;
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        scene.raster_pipeline.layout,
+                        VK_SHADER_STAGE_VERTEX_BIT,
+                        GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
+                        4,
+                        (&base as *const u32).cast(),
+                    );
                     (self.fns.cmd_bind_vertex_buffers)(
                         cmd,
                         0,
                         1,
-                        &mesh_draw.vertex_buffer.buffer,
+                        &batch.vertex_buffer.buffer,
                         &vertex_offset,
                     );
                     (self.fns.cmd_bind_index_buffer)(
                         cmd,
-                        mesh_draw.index_buffer.buffer,
+                        batch.index_buffer.buffer,
                         0,
-                        mesh_draw.index_type,
+                        batch.index_type,
                     );
                     (self.fns.cmd_draw_indexed)(
                         cmd,
-                        mesh_draw.index_count,
-                        mesh_draw.instance_count,
+                        batch.index_count,
+                        batch.instance_count,
                         0,
                         0,
                         0,
                     );
-                }
-                // LEGACY arm: byte-identical to the pre-M2 stream — a non-indexed,
-                // single-instance draw over the scene's merged vertex buffer.
-                None => {
-                    (self.fns.cmd_bind_vertex_buffers)(
-                        cmd,
-                        0,
-                        1,
-                        &scene.vertex_buffer.buffer,
-                        &vertex_offset,
-                    );
-                    (self.fns.cmd_draw)(cmd, scene.vertex_count, 1, 0, 0);
                 }
             }
             (self.fns.cmd_end_rendering)(cmd);
@@ -3926,6 +3938,13 @@ pub struct UiPass<'a> {
 /// offset 0, VERTEX stage).
 pub const GBUFFER_PUSH_BYTES: usize = 88;
 
+/// The byte offset of the `gbuffer_mrt.vs` push's `uint base_instance` field within the
+/// 88-byte VERTEX push range (M3). The instanced batch loop re-pushes JUST this 4-byte
+/// word per [`GBufferMeshDraw`] (after the once-per-pass full-`mvp` push) so each mesh's
+/// draw indexes its own instance bucket (`instances[base_instance + SV_InstanceID]`).
+/// Equals the `base_instance` field's offset documented on [`GBUFFER_PUSH_BYTES`] (80).
+const GBUFFER_PUSH_BASE_INSTANCE_OFFSET: u32 = 80;
+
 /// The byte size of ONE [`gbuffer_mrt.vs`'s `InstanceModelCol`] record (M1): a 3x4
 /// ROW-MAJOR affine, 12 `f32` = 48 B (`std430` `StructuredBuffer` element, 16-B aligned).
 /// The instance SSBO the gbuffer raster pipeline binds at `set 0` binding 0 holds an array
@@ -3947,21 +3966,24 @@ pub const GBUFFER_IDENTITY_INSTANCE: [f32; 12] = [
     0.0, 0.0, 1.0, 0.0, // r2: rotation row 2 | translation.z
 ];
 
-/// Mesh foundation M2: the OPTIONAL INSTANCED-ARM draw spec for pass A's mesh-MRT
-/// G-buffer producer. [`GBufferScene::mesh_draw`] `== None` keeps the LEGACY merged draw
-/// (`vkCmdDraw(vertex_count, 1, 0, 0)` over [`GBufferScene::vertex_buffer`], the
-/// `use_model_matrix == 0` arm) BYTE-IDENTICAL — every pre-M2 scene takes that path.
-/// `Some(_)` switches pass A to an INSTANCED INDEXED draw of ONE registered mesh:
+/// Mesh foundation M3: ONE per-mesh INSTANCED-ARM draw in pass A's mesh-MRT G-buffer
+/// producer batch list ([`GBufferScene::mesh_draw`]). An EMPTY slice keeps the LEGACY
+/// merged draw (`vkCmdDraw(vertex_count, 1, 0, 0)` over [`GBufferScene::vertex_buffer`],
+/// the `use_model_matrix == 0` arm) BYTE-IDENTICAL — every pre-M2 scene takes that path.
+/// A NON-empty slice switches pass A to a batch loop: the shared instance SSBO
+/// ([`GBufferScene::instance_bind_group`]) is bound ONCE at set 0, then each batch:
 ///
-///   * binds [`Self::instance_bind_group`] (the caller's N-instance model SSBO, replacing
-///     the 1-element identity dummy) at set 0,
-///   * binds [`Self::vertex_buffer`] + [`Self::index_buffer`] (the mesh's GPU buffers),
-///   * issues `vkCmdDrawIndexed(index_count, instance_count, 0, 0, 0)` (`base_instance ==
-///     0`; the M3 ECS gather adds nonzero buckets).
+///   * binds [`Self::vertex_buffer`] + [`Self::index_buffer`] (the mesh's GPU buffers,
+///     with [`Self::index_type`] — O3 mixed `Uint16`/`Uint32` width),
+///   * pushes [`Self::base_instance`] (the M3 gather's per-mesh bucket offset — NONZERO
+///     for every mesh after the first, the C1 proof) + `use_model_matrix == 1`,
+///   * issues `vkCmdDrawIndexed(index_count, instance_count, 0, 0, 0)`.
 ///
-/// The caller MUST have built [`GBufferScene::mvp`] with `use_model_matrix == 1` so the
-/// VS reads the per-instance affine from the bound SSBO (`instances[0 + SV_InstanceID]`).
-/// The mesh vertices are MODEL-SPACE; each instance's affine places + orients them.
+/// The VS reads `instances[base_instance + SV_InstanceID]` from the shared SSBO, so each
+/// batch draws its mesh's contiguous instance bucket. The mesh vertices are MODEL-SPACE;
+/// each instance's affine places + orients them. The caller MUST have built
+/// [`GBufferScene::mvp`] with `use_model_matrix == 1` (its byte 84) when the slice is
+/// non-empty; the recorder OVERWRITES the push's `base_instance` word per batch.
 pub struct GBufferMeshDraw<'a> {
     /// The mesh's MODEL-SPACE vertex buffer (position\@0 / normal\@12 / color\@24, the
     /// gbuffer raster pipeline's 40-byte stride). Bound at vertex binding 0 for pass A.
@@ -3971,13 +3993,19 @@ pub struct GBufferMeshDraw<'a> {
     /// The number of indices to draw (`vkCmdDrawIndexed`'s `index_count`).
     pub index_count: u32,
     /// The bound index width (`VK_INDEX_TYPE_UINT16`/`UINT32` as the agnostic `i32`).
+    /// O3: each batch carries its OWN width, so a `u16`-indexed mesh and a `u32`-indexed
+    /// mesh draw correctly in the same pass.
     pub index_type: i32,
-    /// The number of instances to draw (`vkCmdDrawIndexed`'s `instance_count`); the
-    /// instance SSBO bound at set 0 MUST hold at least this many `InstanceModelCol`s.
+    /// This mesh's bucket start in the shared instance SSBO (the M3 gather's
+    /// `base_instance` prefix-sum offset). Pushed into the VERTEX push constant's
+    /// `base_instance` word (offset 80) per batch; the VS reads
+    /// `instances[base_instance + SV_InstanceID]`. NONZERO for every batch after the
+    /// first (the C1 nonzero-base proof).
+    pub base_instance: u32,
+    /// The number of instances of this mesh to draw (`vkCmdDrawIndexed`'s
+    /// `instance_count`); the shared SSBO MUST hold at least `base_instance +
+    /// instance_count` `InstanceModelCol`s.
     pub instance_count: u32,
-    /// The per-instance model SSBO bind group (set 0) — the caller's N-instance affine
-    /// array. Replaces [`GBufferScene::instance_bind_group`] for the instanced draw.
-    pub instance_bind_group: &'a VulkanBindGroup,
 }
 
 /// The byte size of the marcher's COMPUTE push constant — DERIVED from the
@@ -4464,15 +4492,18 @@ pub struct GBufferScene<'a> {
     /// the store. The caller MUST set the scene's light table `ssao_mode` in lock-step (`!= 0` ON,
     /// `0` OFF) — the resolve's structural gate that decides whether the combine reads the image.
     pub ssao: Option<SsaoActivation<'a>>,
-    /// Mesh foundation M2: the OPTIONAL instanced-arm draw. `None` (every pre-M2 scene)
-    /// records the LEGACY pass-A draw — `vkCmdDraw(vertex_count, 1, 0, 0)` over
-    /// [`Self::vertex_buffer`] binding [`Self::instance_bind_group`] (the identity dummy),
-    /// the `use_model_matrix == 0` arm — BYTE-IDENTICAL to the pre-M2 stream (the 0%-gate).
-    /// `Some(_)` records an INSTANCED INDEXED draw of one registered mesh (its own vertex +
-    /// index buffers + the caller's N-instance model SSBO), exercising the VS's
-    /// `use_model_matrix == 1` arm under perspective. See [`GBufferMeshDraw`]. The caller
-    /// MUST build [`Self::mvp`] with `use_model_matrix == 1` when this is `Some`.
-    pub mesh_draw: Option<GBufferMeshDraw<'a>>,
+    /// Mesh foundation M3: the per-mesh instanced-arm draw BATCH LIST. An EMPTY slice
+    /// (every pre-M2 scene) records the LEGACY pass-A draw — `vkCmdDraw(vertex_count, 1,
+    /// 0, 0)` over [`Self::vertex_buffer`] binding [`Self::instance_bind_group`] (the
+    /// identity dummy), the `use_model_matrix == 0` arm — BYTE-IDENTICAL to the pre-M2
+    /// stream (the 0%-gate). A NON-empty slice records the M3 batch loop: [`Self::
+    /// instance_bind_group`] (now the SHARED N-instance model SSBO the gather filled) is
+    /// bound ONCE at set 0, then one INSTANCED INDEXED draw per [`GBufferMeshDraw`] — each
+    /// binding its mesh's vertex+index buffers (with its O3 index width) and pushing its
+    /// `base_instance` bucket offset. The caller MUST build [`Self::mvp`] with
+    /// `use_model_matrix == 1` (its byte 84) when the slice is non-empty; the recorder
+    /// overwrites the push's `base_instance` word per batch. See [`GBufferMeshDraw`].
+    pub mesh_draw: &'a [GBufferMeshDraw<'a>],
 }
 
 /// The per-extent on-screen G-buffer targets for [`Renderer::render_gbuffer_frame`]:

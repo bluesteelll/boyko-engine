@@ -66,12 +66,21 @@ pub mod gpu3d_instance;
 pub mod gpu3d_system;
 pub mod gpu_column;
 pub mod gpu_system;
+/// The per-entity 48-byte model-affine instance column (mesh foundation M3):
+/// [`InstanceModelCol`](instance_model::InstanceModelCol), the exact SSBO layout the
+/// M1/M2 gbuffer VS reads, + its `GlobalTransform` pack system.
+pub mod instance_model;
 pub mod light;
 pub mod light_plugin;
 pub mod light_policy;
 pub mod light_reconcile;
 pub mod light_system;
 pub mod material;
+/// The ECS-native bucketed instance gather (mesh foundation M3): the
+/// [`MeshRenderScratch`](mesh_draw::MeshRenderScratch) reused resource, the
+/// per-mesh [`DrawBatch`](mesh_draw::DrawBatch), and the
+/// count→prefix-sum→scatter [`gather_mesh_draws`](mesh_draw::gather_mesh_draws) system.
+pub mod mesh_draw;
 /// The renderer-owned mesh asset table (mesh foundation M2): [`MeshRegistry`] /
 /// [`MeshGpu`] / [`Vertex`], the GPU vertex+index buffers a `MeshHandle` indexes.
 pub mod mesh_registry;
@@ -86,6 +95,8 @@ pub use bundles::{DirectionalLightObject, PointLightObject, SpotLightObject};
 pub use error::GpuColumnError;
 pub use gpu3d_instance::{GPU3D_INSTANCE_SIZE, Gpu3dInstance};
 pub use gpu3d_system::sync_gpu_3d_instances;
+pub use instance_model::{INSTANCE_MODEL_COL_BYTES, InstanceModelCol, sync_instance_model_cols};
+pub use mesh_draw::{DrawBatch, MeshRenderScratch, gather_mesh_draws};
 pub use light_plugin::LightingPlugin;
 pub use light_reconcile::light_reconcile;
 pub use render3d_plugin::Render3dPlugin;
