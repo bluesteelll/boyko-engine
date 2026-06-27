@@ -240,7 +240,12 @@ impl PhysicalInput {
     pub fn apply(&mut self, ev: &RawInputEvent) {
         match *ev {
             RawInputEvent::Key { code, state, repeat } => {
-                if repeat {
+                // Skip OS auto-repeat PRESSES (not a new edge; the level is already held). A
+                // RELEASE is never a repeat and must ALWAYS clear the level — dropping it here
+                // (the prior unconditional `if repeat`) stuck the key forever, since `WM_KEYUP`
+                // carries the `KF_REPEAT` bit (now gated to Pressed in `win32::key_event`, but
+                // this stays robust to any source that still flags a release `repeat`).
+                if repeat && matches!(state, ButtonState::Pressed) {
                     return;
                 }
                 if let Some(idx) = code.dense_index() {
@@ -582,17 +587,24 @@ mod tests {
     }
 
     #[test]
-    fn physical_repeat_release_is_filtered_too() {
-        // OS auto-repeat only fires Pressed-with-repeat, but guard the symmetric
-        // case: a repeat-flagged event of any state is a no-op.
+    fn physical_release_clears_level_even_if_flagged_repeat() {
+        // REGRESSION: a RELEASE must ALWAYS clear the held level + set the just-released
+        // edge, even if a source mislabels it `repeat: true` (every `WM_KEYUP` carries the
+        // `KF_REPEAT` bit). The prior `if repeat { return; }` dropped repeat-flagged events
+        // of ANY state, so a release was swallowed and the key STUCK held forever (the
+        // interactive-viewer "camera flies, can't stop" bug). Only Pressed repeats are skipped.
         let mut p = PhysicalInput::new();
+        let i = KeyCode::KeyW.dense_index().unwrap();
+        p.apply(&key(KeyCode::KeyW, ButtonState::Pressed));
+        assert!(p.keys_pressed.get(i), "the press held the level");
+        p.begin_frame();
         p.apply(&RawInputEvent::Key {
             code: KeyCode::KeyW,
             state: ButtonState::Released,
             repeat: true,
         });
-        let i = KeyCode::KeyW.dense_index().unwrap();
-        assert!(!p.keys_just_released.get(i), "repeat events never produce edges");
+        assert!(!p.keys_pressed.get(i), "a release clears the held level even if repeat-flagged");
+        assert!(p.keys_just_released.get(i), "a release sets the just-released edge even if repeat-flagged");
     }
 
     #[test]

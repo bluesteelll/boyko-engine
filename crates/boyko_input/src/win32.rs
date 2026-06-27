@@ -234,7 +234,13 @@ pub fn translate_raw_mouse(dx: i32, dy: i32) -> RawInputEvent {
 fn key_event(lparam: isize, state: ButtonState) -> RawInputEvent {
     let scancode = ((lparam & KEY_LPARAM_SCANCODE_MASK) >> KEY_LPARAM_SCANCODE_SHIFT) as u8;
     let extended = (lparam & KEY_LPARAM_EXTENDED_BIT) != 0;
-    let repeat = (lparam & KEY_LPARAM_REPEAT_BIT) != 0;
+    // `KF_EXTENDED`/`KF_REPEAT` live in `lParam`. `KF_REPEAT` (bit 30) means "the previous key
+    // state was down" — for `WM_KEYDOWN` that is an OS AUTO-REPEAT, but for `WM_KEYUP` it is
+    // ALWAYS set (you are releasing a held key), where it is NOT a repeat. Reading it
+    // unconditionally marked every release `repeat = true`; a consumer that drops repeats
+    // (`PhysicalInput::apply`'s `if repeat { return; }`) then NEVER saw the release and the key
+    // STUCK (held forever). `repeat` is a press-only concept — gate it to `Pressed`.
+    let repeat = matches!(state, ButtonState::Pressed) && (lparam & KEY_LPARAM_REPEAT_BIT) != 0;
     RawInputEvent::Key {
         code: keycode_from_scancode(scancode, extended),
         state,
@@ -376,6 +382,23 @@ mod tests {
             ev,
             Some(RawInputEvent::Key {
                 code: KeyCode::AltLeft,
+                state: ButtonState::Released,
+                repeat: false,
+            })
+        );
+    }
+
+    #[test]
+    fn keyup_with_repeat_bit_is_not_a_repeat() {
+        // REGRESSION: `WM_KEYUP` ALWAYS carries `KF_REPEAT` (bit 30 = "previous state was
+        // down", always true for a release). It must NOT be reported as `repeat`, else a
+        // consumer that drops repeats (`PhysicalInput::apply`) never observes the release and
+        // the key sticks held forever (the interactive-viewer "camera flies, can't stop" bug).
+        let ev = translate(WM_KEYUP, 0, key_lparam(0x11, false, true));
+        assert_eq!(
+            ev,
+            Some(RawInputEvent::Key {
+                code: KeyCode::KeyW,
                 state: ButtonState::Released,
                 repeat: false,
             })
