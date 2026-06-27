@@ -440,6 +440,13 @@ static const float3 MESH_COLOR = float3(0.15, 0.65, 0.25);
 static const float EPS    = 0.001;  // hit threshold on |sdf|
 static const float T_MAX  = 10.0;   // miss distance bound (= depth-1.0 far plane)
 static const uint  MAX_IT = 128u;   // max march steps per ray (the §S2 ceiling)
+// The PERSPECTIVE mesh-depth normalizer — DECOUPLED from the marcher's `T_MAX` so raster mesh
+// geometry can stand far past the SDF ray-miss horizon (a long floor / back wall) without its
+// depth saturating to the no-mesh clear. A perspective mesh pixel is decoded `t_mesh = md *
+// MESH_DEPTH_T_MAX` (the normalizer cancels the `gbuffer_mrt.fs` encode → `t_mesh ==
+// length(eye_rel)`). The ORTHO arm keeps `md * T_MAX` (the ortho MVP bakes the marcher `T_MAX`,
+// and the 41 ortho goldens depend on it). Mirrors `compute::MESH_DEPTH_T_MAX`.
+static const float MESH_DEPTH_T_MAX = 64.0;
 // NOTE: the field-eval tuning consts (GRAD_H, FAR) + the field-layout contract +
 // the field functions (Edit/load_edit/sd_*/edit_distance/smin/smax/combine/sdf/
 // sdf_normal) live in `sdf_field.hlsli` (included below) — the determinism-frozen
@@ -1426,7 +1433,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // depth * T_MAX (the ortho convention).
     float md = gDepth.Load(int3((int)px, (int)py, 0)).r;
     bool has_mesh = (md < DEPTH_CLEAR);          // strictly less than the far-plane clear
-    float t_mesh = has_mesh ? (md * T_MAX) : 1.0e30; // a finite bound only when covered
+    // The mesh-depth normalizer DECOUPLES from the marcher `T_MAX` on the PERSPECTIVE arm so far
+    // raster geometry doesn't saturate to the no-mesh clear (CSM/lighting on a long floor / far
+    // casters). The ORTHO arm keeps `T_MAX` (its MVP bakes it; the 41 ortho goldens depend on it).
+    float mesh_norm = (camera_mode == CAM_PERSPECTIVE) ? MESH_DEPTH_T_MAX : T_MAX;
+    float t_mesh = has_mesh ? (md * mesh_norm) : 1.0e30; // a finite bound only when covered
 
     // --- Render P4b: the GATED coarse-cull prefix (Algorithm B). `coarse_enabled` is a
     // THREE-VALUE mode (host `CoarseMode`):
@@ -1638,6 +1649,20 @@ void main(uint3 tid : SV_DispatchThreadID) {
         if (d < EPS) {
             hit = true;
             exhausted = false;       // converged — NOT budget exhaustion
+            // BUG-B1-HOLE-4 (silhouette dark-ring): near the silhouette the chord through the
+            // surface is SHORT, so an over-relaxed step (omega > 1) can jump clear past the NEAR
+            // surface and land closer to the FAR wall. The signed accept-refine below converges to
+            // the NEAREST surface FROM ITS SEED — seeded at that overshot (inside) point it settles
+            // on the FAR surface, whose normal points away → wrong shadow/AO → a thin DARK RING at
+            // the grazing band (~70-80% radius). Re-seed the refine at `safe_t` (the last OUTSIDE
+            // probe, `d >= EPS`), from which a forward sphere-trace lands on the NEAR surface.
+            // `safe_t` is written ONLY inside the `omega > 1` SOR block; at omega == 1 the plain
+            // march never overshoots so `d` is never < 0 here → this retreat is unreachable → the
+            // omega == 1 path stays byte-identical (the 0%-gate). Raising M2_REFINE_ITERS (the prior
+            // attempt) could not fix this — more iterations converge HARDER onto the wrong surface.
+            if (d < 0.0) {
+                t = safe_t;
+            }
             // B1 over-relaxation accept-refine (mirror the brick `m2_surface_hit` signed
             // refine). `d < EPS` is a ONE-SIDED upper bound: an over-relaxed step (`omega > 1`)
             // can jump from outside to DEEP inside in one stride, so the accepted `d` may be

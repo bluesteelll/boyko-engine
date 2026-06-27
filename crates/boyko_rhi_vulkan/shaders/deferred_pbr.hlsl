@@ -429,8 +429,19 @@ float3 safe_normalize(float3 a) {
 // O1 MAJORNESS: `gCascades[c].view_proj` is the SAME column-major matrix the depth VS pushed at
 // `@0` for cascade `c`, so `mul(view_proj, float4(P_off,1))` here reprojects EXACTLY as the depth
 // VS projected the caster — the host matrix golden (compute.rs) pins this agreement.
-float csm_sample_cascade(uint c, float3 P, float3 n) {
-    float3 P_off = P + n * (gCascades[c].texel_size * CSM_NORMAL_BIAS);
+// Slope-scaled shadow normal-offset multiplier. A near-GRAZING receiver (small NoL — a vertical
+// face under a steep light) needs a LARGER along-normal offset to clear the per-texel light-space
+// depth slope, the source of self-shadow ACNE (the dark band on the column / the diagonal wedge on
+// the CSM caster box). A head-on receiver (NoL ~ 1) keeps the minimal offset so contact shadows do
+// not PETER-PAN (light leak at the base). `1/NoL` is the standard slope term, floored at the light
+// horizon and capped so a silhouette pixel cannot offset unboundedly. Shared by CSM + spot + point.
+static const float SHADOW_GRAZING_BIAS_MAX = 6.0;
+float shadow_grazing_scale(float nol) {
+    return clamp(1.0 / max(nol, 1.0e-3), 1.0, SHADOW_GRAZING_BIAS_MAX);
+}
+
+float csm_sample_cascade(uint c, float3 P, float3 n, float nol) {
+    float3 P_off = P + n * (gCascades[c].texel_size * CSM_NORMAL_BIAS * shadow_grazing_scale(nol));
     float4 clip = mul(gCascades[c].view_proj, float4(P_off, 1.0));
     if (clip.w <= 0.0) {
         return 1.0;                        // behind the light plane — treat as lit (no shadow data)
@@ -474,7 +485,7 @@ float csm_sample_cascade(uint c, float3 P, float3 n) {
 // (matching `split_far`), so the seam fades over a constant-depth slice.
 //
 // Returns the blended VISIBILITY in [0,1]. Host mirror: `csm_host_select_blend` (the demo test).
-float csm_visibility(float3 P, float3 n, float view_z) {
+float csm_visibility(float3 P, float3 n, float view_z, float nol) {
     if (gCsmActive == 0u) {
         return 1.0;                        // no cascades fitted — fully lit (defensive; gated above)
     }
@@ -494,7 +505,7 @@ float csm_visibility(float3 P, float3 n, float view_z) {
         return 1.0;
     }
 
-    float vis_sel = csm_sample_cascade(sel, P, n);
+    float vis_sel = csm_sample_cascade(sel, P, n, nol);
 
     // BLEND band: the trailing `overlap * range` of the selected cascade's view-z range. Outside
     // the band `band_t == 0` (one-cascade common case); inside it ramps 0→1 to `sel + 1`.
@@ -507,7 +518,7 @@ float csm_visibility(float3 P, float3 n, float view_z) {
     float has_next = (sel + 1u < gCsmActive) ? 1.0 : 0.0;
     band_t *= has_next;
     uint next = min(sel + 1u, gCsmActive - 1u);            // clamp the index (multiplied out if !has_next)
-    float vis_next = csm_sample_cascade(next, P, n);
+    float vis_next = csm_sample_cascade(next, P, n, nol);
     return lerp(vis_sel, vis_next, band_t);
 }
 
@@ -526,8 +537,8 @@ float csm_visibility(float3 P, float3 n, float view_z) {
 //
 // SPOT (Inc 1) uses the perspective NDC-z directly; POINT (Inc 2) will branch on `gFaces[s].inv_range`
 // + `light_pos`, not added here (the spot-only increment).
-float spot_atlas_visibility(uint s, float3 P, float3 n) {
-    float3 P_off = P + n * SPOT_SHADOW_NORMAL_BIAS;
+float spot_atlas_visibility(uint s, float3 P, float3 n, float nol) {
+    float3 P_off = P + n * (SPOT_SHADOW_NORMAL_BIAS * shadow_grazing_scale(nol));
     float4 clip = mul(gFaces[s].view_proj, float4(P_off, 1.0));
     if (clip.w <= 0.0) {
         return 1.0;                        // behind the light plane — treat as lit (no shadow data)
@@ -569,8 +580,8 @@ float spot_atlas_visibility(uint s, float3 P, float3 n) {
 // `Affine3A::look_at_rh(eye, eye + axis, +Y)`), the SAME `point_host_project` mirror the matrix
 // golden asserts. A normal-offset bias (`P + n * SPOT_SHADOW_NORMAL_BIAS`) on the distance origin
 // guards grazing self-shadow acne, exactly like the spot path.
-float punctual_atlas_visibility(uint base, float3 P, float3 n) {
-    float3 P_off = P + n * SPOT_SHADOW_NORMAL_BIAS;
+float punctual_atlas_visibility(uint base, float3 P, float3 n, float nol) {
+    float3 P_off = P + n * (SPOT_SHADOW_NORMAL_BIAS * shadow_grazing_scale(nol));
     float3 light_pos = gFaces[base].light_pos;
     float inv_range = gFaces[base].inv_range;
     float3 dir = P_off - light_pos;                       // light -> receiver
@@ -902,7 +913,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
                         float csm_view_z = (camera_mode == RAYGEN_CAM_PERSPECTIVE)
                                          ? (dot(rd, cam_forward.xyz) * view_t)
                                          : view_t;
-                        vis = min(vis, csm_visibility(P, n, csm_view_z));
+                        vis = min(vis, csm_visibility(P, n, csm_view_z, NoL));
                     }
                 } else if (multi_light && light_casts_sdf_shadow(L)
                            && marched < MAX_SDF_SHADOW_CASTERS_PER_PIXEL
@@ -1026,11 +1037,14 @@ void main(uint3 tid : SV_DispatchThreadID) {
             if (punctual_shadow_mode != PUNCTUAL_SHADOW_MODE_OFF) {
                 uint slot = light_atlas_slot(L.kind);
                 if (slot != SLOT_NONE) {
+                    // The receiver's NoL for THIS punctual light (`l` = surface->light); drives the
+                    // slope-scaled normal offset that suppresses grazing self-shadow acne.
+                    float pnol = max(dot(n, l), 0.0);
                     if (light_kind(L) == LIGHT_KIND_SPOT) {
-                        punctual_shadow = spot_atlas_visibility(slot, P, n);
+                        punctual_shadow = spot_atlas_visibility(slot, P, n, pnol);
                     } else if (light_kind(L) == LIGHT_KIND_POINT) {
                         // `slot` is the cube's slot BASE `b`; the six faces are `b..b+6`.
-                        punctual_shadow = punctual_atlas_visibility(slot, P, n);
+                        punctual_shadow = punctual_atlas_visibility(slot, P, n, pnol);
                     }
                 }
             }

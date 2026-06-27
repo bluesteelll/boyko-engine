@@ -3116,6 +3116,14 @@ const MULTIMESH_PERSP_BMP: &str = r"D:\tmp\engine_multimesh.bmp";
 /// is correct; with the old `mul(m3, normal)` the same faces are over-bright / wrongly shaded.
 const NONUNIFORM_NORMALS_BMP: &str = r"D:\tmp\engine_nonuniform_normals.bmp";
 
+/// **The GRAND flagship showcase** — the BMP path for the single-frame scene that combines the
+/// MAXIMUM of the engine's shipped rendering: HYBRID SDF+raster mesh in one room, a warm
+/// directional sun driving BOTH the CSM hardware cascaded shadow (on the raster boxes) AND the
+/// marcher's analytic SDF soft shadow (on the SDF spheres), a cool point light driving the omni
+/// POINT cube hardware shadow (on the raster boxes), instancing, and PBR — all in a clean,
+/// understandable room. The orchestrator runs the GPU test + converts the BMP for the owner.
+const GRAND_SHOWCASE_BMP: &str = r"D:\tmp\engine_grand_showcase.bmp";
+
 /// The showcase sun direction (`L`, the un-normalized "direction TO the light"): upper-LEFT and
 /// slightly toward the camera, ~57° elevation. Used BOTH as the marcher's `scene.light_dir` (the
 /// A1 cast-shadow march direction) AND the primary directional in [`showcase_light_table`] — they
@@ -3428,6 +3436,11 @@ struct InstancedMesh {
     /// `meshes[0].affines.len()`, …), so mesh `k`'s `base_instance` is the prefix-sum of the
     /// prior meshes' instance counts — NONZERO for every mesh after the first.
     meshes: Vec<InstancedMeshEntry>,
+    /// Batch indices into [`meshes`](Self::meshes) that are RECEIVER-ONLY — visible + shadowed in
+    /// the main pass but EXCLUDED from the shadow DEPTH passes (they do not cast). Use for a room
+    /// shell (floor/walls) so it does not stamp a spurious shadow over the scene. Empty = every
+    /// mesh casts (the prior all-casters behavior, byte-identical).
+    non_casters: Vec<usize>,
 }
 
 /// One mesh in an [`InstancedMesh`] batch list: its model-space geometry + the per-instance
@@ -3475,6 +3488,8 @@ struct InstancedGpuBatch {
     base_instance: u32,
     /// This mesh's instance count (its bucket length).
     instance_count: u32,
+    /// Whether this batch CASTS shadows (false = receiver-only: rasterized + shadowed in the main pass, skipped in the shadow depth passes). Mirrors the source `InstancedMesh::non_casters`.
+    casts_shadow: bool,
 }
 
 /// A static mesh's `(positions, triangle_indices)` — the MDF Stage-2c shadow-caster geometry the
@@ -3917,6 +3932,7 @@ fn instanced_persp_config() -> ShowcaseConfig {
         mesh_sdf: None,
         instanced: Some(InstancedMesh {
             meshes: vec![InstancedMeshEntry { vertices: verts, indices, affines }],
+            non_casters: vec![],
         }),
         // CSM Increment 1b: OFF for this showcase (the 0%-gate — no cascade depth pass).
         csm: None,
@@ -4395,6 +4411,7 @@ fn csm_shadow_config() -> ShowcaseConfig {
                 InstancedMeshEntry { vertices: floor_v, indices: floor_i, affines: vec![floor_affine] },
                 InstancedMeshEntry { vertices: slab_v, indices: slab_i, affines },
             ],
+            non_casters: vec![],
         }),
         // CSM ON (Rung A): ONE cascade fit to the sun, looking at the scene center near the caster.
         // `split_far` is large (covers the whole scene) so the single cascade always SELECTs.
@@ -4580,6 +4597,7 @@ fn spot_shadow_config() -> ShowcaseConfig {
                 InstancedMeshEntry { vertices: floor_v, indices: floor_i, affines: vec![floor_affine] },
                 InstancedMeshEntry { vertices: slab_v, indices: slab_i, affines },
             ],
+            non_casters: vec![],
         }),
         // CSM OFF (this is the SPOT demo — the directional cascade path stays off).
         csm: None,
@@ -4757,6 +4775,7 @@ fn point_shadow_config() -> ShowcaseConfig {
                 InstancedMeshEntry { vertices: wall_right_v, indices: wall_right_i, affines: vec![wall_right_affine] },
                 InstancedMeshEntry { vertices: slab_v, indices: slab_i, affines: caster_affines },
             ],
+            non_casters: vec![],
         }),
         // CSM OFF (this is the POINT demo).
         csm: None,
@@ -4900,6 +4919,161 @@ fn point_matrix_golden_face_select_and_distance_agree() {
     assert!(point.casts_sdf_shadow(), "a real cube slot must set the casts-shadow bit");
 }
 
+// === The GRAND flagship showcase — the MAXIMUM-capability single-frame scene. ============
+//
+// One clean room that combines, in ONE frame, the engine's full shipped rendering stack:
+//   - HYBRID: SDF spheres (sphere-traced by the marcher) + raster mesh boxes (instanced gbuffer
+//     arm) co-rendered with correct depth ownership in the same room.
+//   - The WARM directional SUN drives TWO shadow systems at once: the marcher's ANALYTIC SDF soft
+//     shadow on the SDF spheres + floor (`gMaterial.r`, A1, the SDF-native path) AND the hardware
+//     CSM cascaded shadow on the raster boxes (`csm_mode == 1`, the cascade depth pass).
+//   - A COOL point light drives the omni POINT-cube HARDWARE shadow on the raster boxes
+//     (`punctual_shadow_mode == 1`, the six-face atlas depth pass).
+//   - The SAME instanced caster batches feed BOTH hardware depth passes (build-once-consume-N).
+//   - PBR + the sky/hemisphere ambient fill so nothing is pure black.
+//
+// `run_showcase_dump` records BOTH depth passes independently: `with_csm_mode(cfg.csm.is_some())`
+// + `with_punctual_shadow_mode(cfg.spot_atlas.is_some())` arm the two header bits, and
+// `cfg.csm.map(..)` / `cfg.spot_atlas.map(..)` build the two `Option` activations the recorder
+// renders separately into the cascade texture (@12/@13) + the atlas texture (@14/@15). Both
+// resolve bindings are ALWAYS bound; ON makes the resolve `min`-combine the cascade onto the sun's
+// visibility and MULTIPLY the cube into the point's contribution.
+
+/// The grand showcase room's cool POINT light — above and to the RIGHT of the raster mesh casters,
+/// so its omni cube shadow of the boxes lands on the floor + the back/side walls. Cool blue to
+/// contrast the warm sun (so the two shadow systems read as distinct lights).
+const GRAND_POINT_POS: [f32; 3] = [2.0, 2.6, -0.8];
+/// The grand showcase point light's range (the cube far plane / cull radius) — wide enough to
+/// cover the mesh casters + the surrounding walls/floor.
+const GRAND_POINT_RANGE: f32 = 9.0;
+/// The grand showcase's CSM cascade count (3) + the shadow distance the inline PSSM fit partitions
+/// over the camera frustum's near→far view-z (mirrors `csm_cascades_config`).
+const GRAND_CSM_COUNT: usize = 3;
+const GRAND_CSM_FAR: f32 = 16.0;
+/// The grand showcase's mesh-box materials — a WARM terracotta for the raster casters so the
+/// raster-vs-SDF split reads (the SDF spheres are a light dielectric); a mid-gray floor/wall.
+const GRAND_BOX_COLOR: [f32; 4] = [0.82, 0.42, 0.30, 1.0];
+
+/// **The GRAND flagship showcase config — the MAXIMUM-capability single-frame scene.** A clean
+/// room (raster floor + back wall + two short side walls) with TWO SDF spheres on the LEFT
+/// (sphere-traced; the sun's analytic SDF soft shadow falls on them + the floor) and TWO raster
+/// mesh boxes on the RIGHT (an asymmetric box + a tall slab; the CSM + point HARDWARE casters),
+/// under the perspective [`room_camera`]. Lights `[sun, sky, point]` with `new(2, 1, ..)`. BOTH
+/// `csm` (3 PSSM cascades fit to the sun) AND `spot_atlas` (the point's six-face cube fit) are
+/// `Some`, so `run_showcase_dump` records both hardware depth passes; the resolve `min`-combines
+/// the cascade onto the sun and multiplies the cube into the point.
+fn grand_showcase_config() -> ShowcaseConfig {
+    // The LIGHT TABLE order is [L0a directional, L0a sky, L0b point]: `new(2, 1, ..)` = 2 L0a + 1
+    // L0b. The punctual MUST come AFTER the L0a lights or the resolve mis-reads it (the spot-demo
+    // lesson). The point's `dir_kind.w` carries the cube atlas slot base 0 (`with_atlas_slot(0)`).
+    let header = GoldenLightHeader::new(2, 1, 1.0).with_ssao_mode(0);
+    let lights = vec![
+        // L0a[0]: the WARM directional SUN — drives the CSM hardware cascades (the raster boxes)
+        // AND the marcher's analytic SDF shadow (the SDF spheres; `light_dir == SHOWCASE_SUN_DIR`).
+        GoldenLight::directional(SHOWCASE_SUN_DIR, [1.0, 0.95, 0.88], 3.0),
+        // L0a[1]: a soft cool-sky / warm-ground hemisphere ambient so the shadows read off black.
+        GoldenLight::sky([0.22, 0.27, 0.36], [0.10, 0.09, 0.08]),
+        // L0b[0]: the COOL point light — drives the omni POINT cube hardware shadow on the boxes.
+        // Packs cube atlas slot base 0 to match the `point_cube_fit` faces below.
+        GoldenLight::point(GRAND_POINT_POS, [0.55, 0.70, 1.0], 300.0, GRAND_POINT_RANGE)
+            .with_atlas_slot(0),
+    ];
+
+    // LEFT — TWO SDF spheres resting on the floor (the marcher sphere-traces them; the sun's A1
+    // analytic soft shadow falls on them + the floor). 2 edits ≤ MAX_SDF_EDITS. A light dielectric
+    // (material 0) so the raster-vs-SDF split reads.
+    let sdf = vec![
+        SdfEdit::sphere([-1.8, 0.7, -1.0], 0.7, sdf_op::UNION, 0.0),
+        SdfEdit::sphere([-0.9, 0.4, -0.1], 0.4, sdf_op::UNION, 0.0),
+    ];
+
+    // RIGHT — TWO raster mesh boxes (the CSM + point HARDWARE casters): an asymmetric box + a tall
+    // slab. They are distinct model-space meshes (distinct half-extents), each its own instanced
+    // batch. The SAME batches feed BOTH the CSM cascade depth pass AND the point cube depth pass.
+    let (box_v, box_i) = mesh_box_model([0.45, 0.45, 0.45], GRAND_BOX_COLOR);
+    let box_affines = vec![instance_affine(0.5, 1.0, [1.6, 0.46, -1.2])]; // the box, yawed
+    // The tall SLAB is a separately scaled box (a non-uniform stretch) so the two casters differ.
+    let (slab_v, slab_i) = mesh_box_model([0.30, 0.95, 0.40], GRAND_BOX_COLOR);
+    let slab_affines = vec![instance_affine(-0.3, 1.0, [2.0, 0.95, -2.6])];
+
+    // The ROOM — a raster floor + a back wall + two short side walls, all instanced mesh boxes so
+    // BOTH the CSM cascade shadow + the point cube shadow land on real raster surfaces (mask=1).
+    let (floor_v, floor_i) = mesh_box_model([5.0, 0.05, 5.0], ROOM_FLOOR_COLOR);
+    let floor_affine = instance_affine(0.0, 1.0, [0.0, -0.05, -1.5]);
+    let (wall_back_v, wall_back_i) = mesh_box_model([5.0, 2.6, 0.06], ROOM_WALL_COLOR);
+    let wall_back_affine = instance_affine(0.0, 1.0, [0.0, 2.6, -5.0]); // far -Z wall
+    let (wall_left_v, wall_left_i) = mesh_box_model([0.06, 2.6, 3.5], ROOM_WALL_COLOR);
+    let wall_left_affine = instance_affine(0.0, 1.0, [-4.5, 2.6, -1.5]); // -X wall
+    let (wall_right_v, wall_right_i) = mesh_box_model([0.06, 2.6, 3.5], ROOM_WALL_COLOR);
+    let wall_right_affine = instance_affine(0.0, 1.0, [4.5, 2.6, -1.5]); // +X wall
+
+    ShowcaseConfig {
+        sdf,
+        camera: room_camera(),
+        light_header: header,
+        light_elems: lights,
+        // The degenerate legacy mesh (the recorder draws the instanced batches instead).
+        vertices: showcase_quad_vertices(),
+        // The instanced-arm MVP (`use_model_matrix == 1`, push byte 84).
+        mvp: instanced_room_mvp_bytes(),
+        // PBR-lit, no screen-space SSAO pass (the SDF analytic AO + the two hardware shadows are
+        // the deliverable; SSAO is orthogonal and adds noise to a clean read).
+        ssao_quality: None,
+        mesh_sdf: None,
+        instanced: Some(InstancedMesh {
+            meshes: vec![
+                // The room shells (batches 0..4, each a single affine) + the two raster casters.
+                InstancedMeshEntry { vertices: floor_v, indices: floor_i, affines: vec![floor_affine] },
+                InstancedMeshEntry { vertices: wall_back_v, indices: wall_back_i, affines: vec![wall_back_affine] },
+                InstancedMeshEntry { vertices: wall_left_v, indices: wall_left_i, affines: vec![wall_left_affine] },
+                InstancedMeshEntry { vertices: wall_right_v, indices: wall_right_i, affines: vec![wall_right_affine] },
+                InstancedMeshEntry { vertices: box_v, indices: box_i, affines: box_affines },
+                InstancedMeshEntry { vertices: slab_v, indices: slab_i, affines: slab_affines },
+            ],
+            non_casters: vec![1, 2, 3],
+        }),
+        // CSM ON: 3 PSSM cascades fit to the sun over the camera frustum's near→far range. The
+        // casters are the SAME instanced batches above (build-once-consume-N: the cascade depth
+        // pass renders them from the sun POV; the resolve `min`-combines the hard shadow).
+        csm: Some(csm_demo_cascades(
+            SHOWCASE_SUN_DIR,
+            ROOM_CAM_EYE,
+            ROOM_CAM_FORWARD,
+            ROOM_CAM_RIGHT,
+            ROOM_CAM_UP,
+            ROOM_CAM_FOV_Y,
+            COMPOSITE_W as f32 / COMPOSITE_H as f32,
+            CSM_DEMO_NEAR,
+            GRAND_CSM_FAR,
+            GRAND_CSM_COUNT,
+        )),
+        // POINT ON: the six-face cube fit to the point (slot base 0). The depth pass renders the
+        // SAME instanced batches into atlas layers 0..6 from the point POV; the resolve major-axis-
+        // selects + does the linear-distance compare, multiplying the cube into the point's term.
+        spot_atlas: Some(point_cube_fit(GRAND_POINT_POS, GRAND_POINT_RANGE)),
+    }
+}
+
+/// **The GRAND flagship showcase screenshot.** Renders the single-frame maximum-capability room —
+/// HYBRID SDF spheres + raster mesh boxes, the warm sun driving BOTH the marcher's analytic SDF
+/// shadow (on the spheres) AND the CSM hardware cascade shadow (on the boxes), the cool point light
+/// driving the omni POINT cube hardware shadow (on the boxes), instancing + PBR + sky ambient — at
+/// the native 512×512 composite extent, dumping a TRUE 512×512 BMP to [`GRAND_SHOWCASE_BMP`] for the
+/// owner's RTX visual sign-off. Both hardware depth passes run before the resolve; both resolve
+/// bindings sample.
+///
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
+/// orchestrator runs it on the GPU to dump the screenshot.
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the grand showcase screenshot"]
+fn engine_grand_showcase_512_screenshot_dump() {
+    run_showcase_dump(
+        "boyko_engine grand showcase 512",
+        GRAND_SHOWCASE_BMP,
+        grand_showcase_config(),
+    );
+}
+
 // === CSM Increment 3 — Rung B: the N-cascade (multi-distance) demo + the select+blend golden. ===
 
 /// CSM Increment 3 (Rung B): the demo's cascade count (3) + the view-z range the inline fit
@@ -4971,6 +5145,7 @@ fn csm_cascades_config() -> ShowcaseConfig {
                 InstancedMeshEntry { vertices: floor_v, indices: floor_i, affines: vec![floor_affine] },
                 InstancedMeshEntry { vertices: slab_v, indices: slab_i, affines },
             ],
+            non_casters: vec![],
         }),
         // CSM ON (Rung B): 3 cascades PSSM-fit over the floor's near→far range.
         csm: Some(csm_cascades_fit()),
@@ -5169,6 +5344,7 @@ fn multimesh_persp_config() -> ShowcaseConfig {
                 InstancedMeshEntry { vertices: a_verts, indices: a_indices, affines: a_affines },
                 InstancedMeshEntry { vertices: b_verts, indices: b_indices, affines: b_affines },
             ],
+            non_casters: vec![],
         }),
         // CSM Increment 1b: OFF for this showcase (the 0%-gate — no cascade depth pass).
         csm: None,
@@ -5246,6 +5422,7 @@ fn nonuniform_normals_config() -> ShowcaseConfig {
         mesh_sdf: None,
         instanced: Some(InstancedMesh {
             meshes: vec![InstancedMeshEntry { vertices: verts, indices, affines }],
+            non_casters: vec![],
         }),
         // CSM Increment 1b: OFF for this showcase (the 0%-gate — no cascade depth pass).
         csm: None,
@@ -5877,7 +6054,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         // of the prior meshes' instance counts — NONZERO for every mesh after the first).
         let mut ring: Vec<[f32; 12]> = Vec::new();
         let mut batches: Vec<InstancedGpuBatch> = Vec::with_capacity(inst.meshes.len());
-        for entry in &inst.meshes {
+        for (batch_idx, entry) in inst.meshes.iter().enumerate() {
             let base_instance = ring.len() as u32;
             ring.extend_from_slice(&entry.affines);
 
@@ -5944,6 +6121,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
                 index_type: index_type.as_i32(),
                 base_instance,
                 instance_count: entry.affines.len() as u32,
+                casts_shadow: !inst.non_casters.contains(&batch_idx),
             });
         }
         // ONE shared N-instance model SSBO + its bind group on the gbuffer set-0 layout, holding
@@ -6232,6 +6410,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
                     index_type: b.index_type,
                     base_instance: b.base_instance,
                     instance_count: b.instance_count,
+                    casts_shadow: b.casts_shadow,
                 })
                 .collect()
         })

@@ -203,7 +203,7 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// so the 41 `sdf_gbuffer_hybrid` goldens (no MDF scene) stay byte-exact → 155024 bytes (VulkanSDK
 /// 1.4.350.0 dxc; the +96 over 154928 is the `mesh_self_skip` self-shadow START-offset in
 /// `sdf_soft_shadow_mesh`, anti mesh-self-acne — see the shader's MESH_SELF_SHADOW_SKIP_VOXELS).
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<155040> = SpirvBlob(*include_bytes!(concat!(
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<155124> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
 )));
@@ -284,7 +284,7 @@ static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<155040> = SpirvBlob(*include_bytes!(
 /// → 48472 bytes. Shadow Phase 5 Inc-2 (POINT cube): a POINT light with a real slot BASE instead
 /// reads `punctual_atlas_visibility(base, P, n)` (major-axis cube face-select + LINEAR-distance
 /// compare over the six contiguous layers `base..base+6`); 48472 → 50976 bytes.
-static DEFERRED_PBR_SPV: SpirvBlob<50976> = SpirvBlob(*include_bytes!(concat!(
+static DEFERRED_PBR_SPV: SpirvBlob<51360> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/deferred_pbr.comp.spv"
 )));
@@ -737,9 +737,23 @@ const SDF_MAX_IT: u32 = 128;
 /// The default Render B1 over-relaxation factor the harness pushes when a caller does
 /// not specify one. Keinert's sphere-tracing speed-up steps `t += omega * d`; values in
 /// `(1, 2)` accelerate convergence on shallow-grazing rays while the in-shader
-/// exact-retreat safeguard preserves correctness. `1.2` is the conservative default; the
-/// host runtime clamp is `[1.0, 1.99]` (the soundness ceiling sits at `omega == 2`).
-pub const DEFAULT_MARCHER_OMEGA: f32 = 1.2;
+/// exact-retreat safeguard preserves the hit-SET (no holes).
+///
+/// **Default `1.0` (over-relaxation OFF) — a measured VISUAL-QUALITY decision.** At
+/// `omega > 1` the over-relaxed march diverges from the plain march by a SUB-PIXEL amount
+/// in a thin annulus at the silhouette (the grazing band): the over-relaxed step overshoots
+/// the SHORT chord near the rim, and the accept lands on a slightly different `t` than the
+/// plain march (accept-slop) — plus the Lipschitz SOR-retreat resumes plain mid-ray on a
+/// different `t`. The net is a faint ~1px DARK RING at ~70-80% of an SDF sphere's screen
+/// radius (owner-flagged, recurring). The accept-refine `safe_t` retreat below kills the
+/// deep-overshoot BLACK case and most of the ring, but a dotted sub-pixel residual remains.
+/// The speed-up it buys is marginal — it only helps the thin grazing annulus (~5-15% of hit
+/// pixels at ~17% fewer steps → ~5-7% of marcher time on a typical analytic scene), which is
+/// not worth a visible flagship artifact. So the harness default is `1.0` (the plain march,
+/// provably ring-free per the GPU oracle). The over-relaxation MACHINERY stays intact and
+/// hole-proof — a caller that MEASURES a real win on a heavy-CSG scene can still pass an
+/// explicit `omega > 1` (the host clamp is `[1.0, 1.99]`; the soundness ceiling is `2`).
+pub const DEFAULT_MARCHER_OMEGA: f32 = 1.0;
 
 // ---------------------------------------------------------------------------
 // Render A1 (SDF cone-trace soft shadows) + A2 (SDF 5-tap AO) tuning constants
@@ -1447,6 +1461,19 @@ pub const SDF_VIEW_HALF_EXTENT: f32 = SDF_HALF_EXTENT;
 /// Public mirror of the private `SDF_T_MAX` (the rung-10 test's ortho MVP maps
 /// `worldZ = CAM_Z - T_MAX` to stored depth `1.0`).
 pub const SDF_TRACE_T_MAX: f32 = SDF_T_MAX;
+
+/// The PERSPECTIVE mesh-depth normalizer (`gbuffer_mrt.fs` encodes `md =
+/// length(eye_rel) / MESH_DEPTH_T_MAX`; the marcher decodes `t_mesh = md *
+/// MESH_DEPTH_T_MAX` on the CAM_PERSPECTIVE arm). DECOUPLED from the marcher's
+/// ray-miss bound [`SDF_TRACE_T_MAX`] (= 10): raster mesh geometry can stand far past
+/// the SDF horizon (a long floor / back wall), and a small normalizer would saturate
+/// its depth to the no-mesh clear (1.0) so the marcher reads it as background → broken
+/// CSM/lighting on the far geometry (the 3-cascade demo's receding floor + far casters).
+/// The normalizer CANCELS in encode→decode, so every in-range perspective scene is
+/// byte-identical; only formerly-saturated far geometry changes (it now reconstructs).
+/// `64` covers any room-scale eye distance with float32 headroom. The
+/// `instanced_vs_host_mirror` sync-pin asserts the `gbuffer_mrt.fs` literal == this.
+pub const MESH_DEPTH_T_MAX: f32 = 64.0;
 
 /// The world-space XY a pixel's orthographic ray passes through (the ray origin's
 /// xy), mirroring the camera reconstruction in [`golden_composite_pixel`]. The
@@ -4842,6 +4869,16 @@ pub fn golden_marcher_attributes(
         if d < SDF_EPS {
             hit = true;
             exhausted = false;
+            // BUG-B1-HOLE-4 (silhouette dark-ring) — re-seed the refine at `safe_t` on an
+            // over-relaxed OVERSHOOT (d < 0). The signed refine converges to the NEAREST surface
+            // from its seed; seeded at the overshot (inside) `t` near the silhouette it can settle
+            // on the FAR surface → wrong normal → a thin dark ring at the grazing band. `safe_t`
+            // (the last outside probe) forward-traces to the NEAR surface. Unreachable at omega == 1
+            // (no overshoot → d >= 0 here) → the omega == 1 output is byte-unchanged (the 0%-gate).
+            // Mirrors the shader's hand-written retreat.
+            if d < 0.0 {
+                t = safe_t;
+            }
             // B1 over-relaxation accept-refine — the HOST MIRROR of the shader's analytic accept
             // (`sdf_gbuffer_composite.hlsl`). `d < SDF_EPS` is a one-sided upper bound: an
             // over-relaxed step (`omega > 1`) can overshoot DEEP inside the surface in one stride,

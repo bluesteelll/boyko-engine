@@ -3453,11 +3453,16 @@ impl<'ctx> Renderer<'ctx> {
                     );
                     (self.fns.cmd_set_viewport)(cmd, 0, 1, &csm_viewport);
                     (self.fns.cmd_set_scissor)(cmd, 0, 1, &csm_area);
-                    // The caster batches: the SAME instanced mesh draws the main pass rasterizes
-                    // (the demo's boxes). A real app gathers a `With<ShadowCaster>` subset; the
-                    // inline demo reuses the full list. An EMPTY list records the depth scope with
-                    // no draw (a cleared cascade — every receiver fully lit, the `min` a no-op).
+                    // The caster batches: the instanced mesh draws the main pass rasterizes,
+                    // FILTERED to `casts_shadow` (the `With<ShadowCaster>` subset). A RECEIVER-only
+                    // mesh (room floor/wall) is skipped so it does not stamp itself into the cascade
+                    // and cast a spurious shadow over the scene. An EMPTY list (or all-receivers)
+                    // records the depth scope with no draw (a cleared cascade — every receiver fully
+                    // lit, the `min` a no-op).
                     for batch in scene.mesh_draw {
+                        if !batch.casts_shadow {
+                            continue;
+                        }
                         let base = batch.base_instance;
                         csm_push[GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize
                             ..GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4]
@@ -3720,11 +3725,15 @@ impl<'ctx> Renderer<'ctx> {
                     );
                     (self.fns.cmd_set_viewport)(cmd, 0, 1, &atlas_viewport);
                     (self.fns.cmd_set_scissor)(cmd, 0, 1, &atlas_area);
-                    // The caster batches: the SAME instanced mesh draws the main pass rasterizes. A
-                    // real app gathers a `With<ShadowCaster>` subset; the inline demo reuses the full
-                    // list. An EMPTY list records the depth scope with no draw (a cleared slot — every
-                    // receiver in that cone fully lit).
+                    // The caster batches: the instanced mesh draws the main pass rasterizes,
+                    // FILTERED to `casts_shadow` (the `With<ShadowCaster>` subset). A RECEIVER-only
+                    // mesh (room floor/wall) is skipped so it does not stamp itself into this slot and
+                    // cast a spurious omni/cone shadow. An EMPTY list (or all-receivers) records the
+                    // depth scope with no draw (a cleared slot — every receiver in that cone fully lit).
                     for batch in scene.mesh_draw {
+                        if !batch.casts_shadow {
+                            continue;
+                        }
                         let base = batch.base_instance;
                         atlas_push[GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize
                             ..GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4]
@@ -4516,6 +4525,12 @@ pub struct GBufferMeshDraw<'a> {
     /// `instance_count`); the shared SSBO MUST hold at least `base_instance +
     /// instance_count` `InstanceModelCol`s.
     pub instance_count: u32,
+    /// Whether this mesh CASTS shadows. The main G-buffer pass rasterizes every mesh
+    /// regardless (all meshes are visible + RECEIVE shadows); the CSM cascade + punctual
+    /// cube/spot DEPTH passes skip a batch with `casts_shadow == false`, so a RECEIVER-only
+    /// mesh (a room floor / wall) does not stamp itself into the shadow maps and cast a
+    /// spurious shadow over the scene. `true` reproduces the prior all-casters behavior.
+    pub casts_shadow: bool,
 }
 
 /// The byte size of the marcher's COMPUTE push constant — DERIVED from the

@@ -41,12 +41,21 @@
 // note in the header for why this is a constant, not a fragment push, in r0.
 static const uint DEFAULT_MESH_MATERIAL_ID = 0u;
 
-// The marcher's ray-range normalizer: it decodes a mesh pixel's depth as
-// `t_mesh = md * T_MAX` (`sdf_gbuffer_composite.hlsl`), so this fragment MUST write
-// `md = t / T_MAX` with the IDENTICAL constant. Mirrors `compute::SDF_T_MAX` /
-// `SDF_TRACE_T_MAX` (= 10.0). The raster shaders `#include` nothing, so the literal is
-// duplicated here; it is load-bearing that it equals the marcher's `T_MAX`.
-static const float T_MAX = 10.0;
+// The PERSPECTIVE mesh-depth normalizer: this fragment writes `md = length(eye_rel) /
+// MESH_DEPTH_T_MAX`, and the marcher decodes the SAME pixel as `t_mesh = md *
+// MESH_DEPTH_T_MAX` (`sdf_gbuffer_composite.hlsl`, the CAM_PERSPECTIVE arm). The
+// normalizer CANCELS in the encode→decode round-trip, so `t_mesh == length(eye_rel)`
+// regardless of its value — it only sets the [0,1] depth-buffer RANGE the encode can
+// represent. It is DECOUPLED from the marcher's ray-miss bound `T_MAX` (= 10, the SDF
+// trace length): raster mesh geometry can stand far past the SDF horizon (a long floor /
+// back wall), so a small `T_MAX` would SATURATE the depth to the no-mesh clear (1.0) and
+// the marcher would read that far geometry as background → broken CSM/lighting on it (the
+// 3-cascade demo's receding floor + far casters). `64` covers any room-scale eye distance
+// with float32 headroom. Mirrors `compute::MESH_DEPTH_T_MAX`; the raster shaders `#include`
+// nothing, so the literal is duplicated here (the `instanced_vs_host_mirror` sync-pin
+// asserts host == this). The ORTHO arm below does NOT use this — it writes the MVP's
+// `position.z` (encoded with the marcher `T_MAX` the ortho projection bakes in).
+static const float MESH_DEPTH_T_MAX = 64.0;
 
 struct PsIn {
     float4 position : SV_Position;
@@ -101,13 +110,15 @@ PsOut main(PsIn input) {
     // gMaterial: shadow = 1, ao = 1, mask = 1 (SDF-lit -> Cook-Torrance in the resolve).
     // Analytic mesh shadow/AO via the SDF march is a charted follow-up, NOT P5.
     output.material = float4(1.0, 1.0, 1.0, 1.0);
-    // SV_Depth: the shared depth the marcher samples as `md` and decodes `t_mesh = md*T_MAX`.
+    // SV_Depth: the shared depth the marcher samples as `md`.
     //   * PERSPECTIVE (cam_mode == 1): `rd` is UNIT, so the marcher's `P = ro + rd*t_mesh`
-    //     wants `t_mesh` = the EUCLIDEAN eye->surface distance => md = length(eye_rel)/T_MAX.
+    //     wants `t_mesh` = the EUCLIDEAN eye->surface distance => md = length(eye_rel) /
+    //     MESH_DEPTH_T_MAX (decoded `t_mesh = md * MESH_DEPTH_T_MAX`, the normalizer cancels).
     //   * ORTHO (cam_mode == 0): the marcher's per-pixel `ro.xy == P.xy` with `rd = (0,0,-1)`,
     //     so `t_mesh` is the AXIAL `CAM_Z - z`, which the MVP already encodes into the
-    //     rasterized SV_Position.z (= `(CAM_Z - z)/T_MAX`). Writing it back unchanged is
-    //     byte-identical to NOT writing SV_Depth — the 41 ortho goldens are preserved.
-    output.depth = (input.cam_mode > 0.5) ? (length(input.eye_rel) / T_MAX) : input.position.z;
+    //     rasterized SV_Position.z (= `(CAM_Z - z)/T_MAX`, the marcher `T_MAX`). Writing it
+    //     back unchanged is byte-identical to NOT writing SV_Depth — the 41 ortho goldens
+    //     are preserved (the composite decodes the ortho arm with the marcher `T_MAX`).
+    output.depth = (input.cam_mode > 0.5) ? (length(input.eye_rel) / MESH_DEPTH_T_MAX) : input.position.z;
     return output;
 }

@@ -17,13 +17,16 @@
 //! under perspective. This test runs unconditionally under `cargo test -p
 //! boyko_rhi_vulkan` (no window, no device).
 
-use boyko_rhi_vulkan::compute::SDF_TRACE_T_MAX;
+use boyko_rhi_vulkan::compute::MESH_DEPTH_T_MAX;
 
-/// The host mirror of the gbuffer fragment shader's `static const float T_MAX = 10.0`. It
-/// MUST equal the marcher's [`SDF_TRACE_T_MAX`] (the C2 sync-pin) — asserted directly in
-/// [`t_max_sync_pin_matches_marcher`] below, and structurally relied on by the round-trip
-/// tests (they decode with `SDF_TRACE_T_MAX` but the FS encodes with this).
-const GBUFFER_T_MAX: f32 = 10.0;
+/// The host mirror of the gbuffer fragment shader's `static const float MESH_DEPTH_T_MAX =
+/// 64.0` (the PERSPECTIVE mesh-depth normalizer). It MUST equal the marcher's PERSPECTIVE
+/// decode constant [`MESH_DEPTH_T_MAX`] (the C2 sync-pin) — asserted directly in
+/// [`mesh_t_max_sync_pin_matches_marcher`] below, and structurally relied on by the round-trip
+/// tests (they encode AND decode with this). NOTE: this is DECOUPLED from the marcher's
+/// ray-miss bound `SDF_TRACE_T_MAX` (= 10) — the normalizer only sets the depth-buffer range
+/// (it cancels in encode→decode), so raster mesh can stand far past the SDF horizon.
+const GBUFFER_MESH_T_MAX: f32 = 64.0;
 
 // --- small vec3 helpers (the same arithmetic the HLSL does, scalarized) ---
 
@@ -149,7 +152,7 @@ fn instanced_world(model: [[f32; 4]; 3], local: [f32; 3]) -> [f32; 3] {
 /// The perspective FS depth: `length(cam_eye - world) / T_MAX` (the euclidean ray-t the
 /// fragment writes into `SV_Depth` under `cam_mode == 1`).
 fn fs_perspective_depth(cam_eye: [f32; 3], world: [f32; 3]) -> f32 {
-    length(sub(cam_eye, world)) / GBUFFER_T_MAX
+    length(sub(cam_eye, world)) / GBUFFER_MESH_T_MAX
 }
 
 /// A row-major 3x4 affine: a Y-axis rotation by `yaw` (radians), a uniform `scale`, and a
@@ -164,14 +167,14 @@ fn yaw_scale_translate(yaw: f32, scale_s: f32, t: [f32; 3]) -> [[f32; 4]; 3] {
     ]
 }
 
-/// The C2 sync-pin: the FS depth normalizer equals the marcher's ray-t decode constant. A
-/// drift between the two hand-written HLSL literals breaks every perspective mesh pixel's
-/// depth ownership.
+/// The C2 sync-pin: the FS perspective depth normalizer equals the marcher's perspective ray-t
+/// decode constant. A drift between the two hand-written HLSL literals breaks every perspective
+/// mesh pixel's depth ownership.
 #[test]
-fn t_max_sync_pin_matches_marcher() {
+fn mesh_t_max_sync_pin_matches_marcher() {
     assert_eq!(
-        GBUFFER_T_MAX, SDF_TRACE_T_MAX,
-        "the gbuffer fragment's T_MAX must equal the marcher's SDF_TRACE_T_MAX decode constant"
+        GBUFFER_MESH_T_MAX, MESH_DEPTH_T_MAX,
+        "the gbuffer fragment's MESH_DEPTH_T_MAX must equal the marcher's perspective decode constant"
     );
 }
 
@@ -198,20 +201,21 @@ fn instanced_depth_round_trips_to_world_point() {
         // The VS varying + FS depth (perspective arm).
         let eye_rel = sub(cam_eye, world);
         let depth = fs_perspective_depth(cam_eye, world);
-        // Self-consistency: the depth is exactly the euclidean eye->world distance / T_MAX.
+        // Self-consistency: the depth is exactly the euclidean eye->world distance / normalizer.
         let euclid = length(eye_rel);
         assert!(
-            (depth * GBUFFER_T_MAX - euclid).abs() < 1e-4,
-            "FS depth must encode the euclidean eye->surface distance: depth*T_MAX={} euclid={}",
-            depth * GBUFFER_T_MAX,
+            (depth * GBUFFER_MESH_T_MAX - euclid).abs() < 1e-4,
+            "FS depth must encode the euclidean eye->surface distance: depth*MESH_T_MAX={} euclid={}",
+            depth * GBUFFER_MESH_T_MAX,
             euclid
         );
 
         // The marcher's ray for THIS pixel: ro = eye, rd = unit dir toward the world point.
         let ro = cam_eye;
         let rd = normalize(sub(world, cam_eye));
-        // Decode t_mesh with the MARCHER's constant (md * T_MAX), then reconstruct P.
-        let t_mesh = depth * SDF_TRACE_T_MAX;
+        // Decode t_mesh with the marcher's PERSPECTIVE constant (md * MESH_DEPTH_T_MAX), then
+        // reconstruct P. The normalizer cancels the FS encode, so `t_mesh == length(eye_rel)`.
+        let t_mesh = depth * MESH_DEPTH_T_MAX;
         let reconstructed = add(ro, scale(rd, t_mesh));
 
         let err = length(sub(reconstructed, world));
