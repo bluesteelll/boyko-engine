@@ -59,13 +59,14 @@ use core::slice;
 use boyko_rhi::enums::{AddressMode, DescriptorKind, Filter, IndexType};
 use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc,
-    BufferUsage, ComputePipelineDesc, Format, CullMode, GraphicsPipelineDesc, MemoryLocation, MipMode,
-    PrimitiveTopology, RhiDevice, SamplerDesc, ShaderStage, VertexAttribute, VertexBufferLayout,
-    VertexFormat,
+    BufferUsage, CompareOp, ComputePipelineDesc, DepthBias, Format, CullMode, GraphicsPipelineDesc,
+    ImageUsage, MemoryLocation, MipMode,
+    PrimitiveTopology, RhiDevice, SamplerDesc, ShaderStage, TextureDesc, TextureDimension,
+    VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use boyko_rhi_vulkan::compute::{
     B5_CAMERA_UBO_BYTES_M4, B5_CAMERA_UBO_BYTES_MESH_SDF, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode,
-    CompositePushConstants,
+    CompositePushConstants, csm_depth_fs_spirv, csm_depth_vs_spirv,
     EDITLIST_BUFFER_WORDS, GOLDEN_LIGHT_HEADER_BASE_WORDS, GOLDEN_LIGHT_KIND_DIRECTIONAL,
     GoldenLight, GoldenLightHeader,
     LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET, MESH_SDF_PARAMS_OFFSET, MeshSdfParams,
@@ -84,13 +85,17 @@ use boyko_sdf_math::mesh_sdf::{BakeMesh, MeshSdfField};
 use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::memory::BoundBuffer;
-use boyko_rhi_vulkan::rhi_impl::{VulkanBindGroup, VulkanBindGroupLayout};
+use boyko_rhi_vulkan::rhi_impl::{
+    VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline, VulkanSampler,
+};
+use boyko_rhi_vulkan::texture::VulkanTexture;
 use boyko_rhi_vulkan::ffi::{
     VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VkExtent2D,
 };
 use boyko_rhi_vulkan::swapchain::{
-    BrickActivation, GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES,
-    GBufferFrame, GBufferMeshDraw, GBufferScene, Renderer, SsaoActivation, Surface, Swapchain,
+    BrickActivation, CsmDepthActivation, GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES,
+    GBUFFER_PUSH_BYTES, GBufferFrame, GBufferMeshDraw, GBufferScene, Renderer, SsaoActivation,
+    Surface, Swapchain,
 };
 use boyko_rhi_vulkan::window::{CapturedMsg, Window};
 
@@ -235,6 +240,194 @@ static SAMPLE_FS_SPV: SpirvBlob<764> = SpirvBlob(*include_bytes!(concat!(
 /// `ceil(PIXELS / LOCAL_SIZE_X)` — the 1D compute dispatch group count.
 fn group_count_x() -> u32 {
     PIXELS.div_ceil(LOCAL_SIZE_X)
+}
+
+/// CSM Increment 1b (Rung A): the cascade shadow-map resolution the demo renders into (a 2K
+/// tile — the `CsmConfig` research default).
+const CSM_SHADOW_DIM: u32 = 2048;
+/// CSM Increment 1b: the byte size of the host cascade UBO — a `ResolvedCsm` mirror (336 B:
+/// `[CascadeData; 4]` + `active_count` + `csm_mode_word` + pad). The resolve reads
+/// `gCascades[0].view_proj` from it; the depth pass pushes the SAME matrix.
+const CSM_UBO_BYTES: u64 = 336;
+/// CSM Increment 1b: the host-side normal-bias FACTOR — MUST equal the resolve shader's
+/// `CSM_NORMAL_BIAS` (`deferred_pbr.hlsl`) so the host matrix golden reprojects EXACTLY as the
+/// resolve does.
+const CSM_NORMAL_BIAS: f32 = 2.0;
+
+/// CSM Increment 1b (Rung A): the cascade resources a [`GBufferScene`] threads into the resolve
+/// (binding 12/13 — ALWAYS bound) + the depth pass ([`GBufferScene::csm`] — `Some` on the demo).
+/// The trio (a multi-layer D32 cascade texture, a PCF comparison sampler, a host-coherent
+/// `ResolvedCsm`-shaped UBO) plus the depth-only pipeline. The 2 golden presents use only the
+/// trio (the depth pipeline is built but the scene's `csm` is `None` — the bound-but-unread
+/// 0%-gate); the `#[ignore]` demo wires `csm = Some(..)` and uploads a real `view_proj`.
+struct CsmSceneResources {
+    cascade: VulkanTexture,
+    sampler: VulkanSampler,
+    ubo: BoundBuffer,
+    depth_pipeline: VulkanGraphicsPipeline,
+    depth_vs: boyko_rhi_vulkan::rhi_impl::VulkanShaderModule,
+    depth_fs: boyko_rhi_vulkan::rhi_impl::VulkanShaderModule,
+}
+
+impl CsmSceneResources {
+    /// Creates the cascade trio + the depth-only graphics pipeline. `instance_layout` is the
+    /// SAME set-0 instance-SSBO bind-group layout the gbuffer raster pipeline uses (the depth VS
+    /// reads `instances[base_instance + SV_InstanceID]`).
+    fn create(device: &VulkanContext, instance_layout: &VulkanBindGroupLayout) -> Self {
+        let cascade = RhiDevice::create_texture(
+            device,
+            &TextureDesc {
+                width: CSM_SHADOW_DIM,
+                height: CSM_SHADOW_DIM,
+                depth: 1,
+                format: Format::D32Sfloat,
+                dimension: TextureDimension::D2,
+                usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
+                // 4 layers (== MAX_CASCADES) so the 2D_ARRAY sample view exists; Rung A renders
+                // only layer 0.
+                array_layers: 4,
+            },
+        )
+        .expect("CSM cascade array texture");
+        let sampler = RhiDevice::create_sampler(
+            device,
+            &SamplerDesc {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                address_mode: AddressMode::ClampToEdge,
+                mip: MipMode::None,
+                compare: Some(CompareOp::LessOrEqual),
+            },
+        )
+        .expect("CSM PCF comparison sampler");
+        let ubo = RhiDevice::create_buffer(
+            device,
+            &BufferDesc {
+                size: CSM_UBO_BYTES,
+                usage: BufferUsage::UNIFORM,
+                location: MemoryLocation::HostVisibleCoherent,
+            },
+        )
+        .expect("CSM cascade UBO (ResolvedCsm mirror)");
+        let depth_vs = RhiDevice::create_shader_module(device, csm_depth_vs_spirv())
+            .expect("CSM depth VS module");
+        let depth_fs = RhiDevice::create_shader_module(device, csm_depth_fs_spirv())
+            .expect("CSM depth FS module");
+        // The depth-only pipeline: EMPTY color_formats, D32 depth, FRONT cull (Rung A casts the
+        // BACK faces so the receiver's front face is unbiased — the standard shadow-map config),
+        // a slope+constant depth bias (the acne fix), the set-0 instance layout + the 88-byte
+        // VERTEX push (the SAME shape the gbuffer raster pipeline declares).
+        let attributes = [
+            VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
+        ];
+        let depth_pipeline = RhiDevice::create_graphics_pipeline(
+            device,
+            &GraphicsPipelineDesc {
+                vertex_module: &depth_vs,
+                vertex_entry: c"main",
+                fragment_module: &depth_fs,
+                fragment_entry: c"main",
+                color_formats: &[],
+                depth_format: Some(Format::D32Sfloat),
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: Some(VertexBufferLayout { stride: 40, attributes: &attributes }),
+                push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
+                bind_group_layout: Some(instance_layout),
+                blend: None,
+                cull_mode: CullMode::Front,
+                depth_bias: Some(DepthBias {
+                    constant_factor: 0.0015,
+                    slope_factor: 1.5,
+                    clamp: 0.0,
+                }),
+            },
+        )
+        .expect("CSM depth-only graphics pipeline");
+        Self { cascade, sampler, ubo, depth_pipeline, depth_vs, depth_fs }
+    }
+
+    /// Writes a `ResolvedCsm`-shaped image into the host-coherent UBO: `gCascades[0].view_proj`
+    /// (the 16 column-major floats), `active_count = 1`, `csm_mode_word = 1`; the rest zeroed.
+    /// Returns the 16 `view_proj` floats so the caller can also stamp them into the depth-pass
+    /// push (the O1 single-matrix pin: the resolve UBO + the depth push carry IDENTICAL bytes).
+    fn upload(&self, device: &VulkanContext, view_proj: &[f32; 16], texel_size: f32) {
+        let mut bytes = [0u8; CSM_UBO_BYTES as usize];
+        for (i, f) in view_proj.iter().enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+        }
+        // CascadeData layout: view_proj @0 (64 B), split_far @64, texel_size @68, pad @72..80.
+        bytes[68..72].copy_from_slice(&texel_size.to_le_bytes());
+        // After the 4 × 80-byte CascadeData array (320 B): active_count @320, csm_mode_word @324.
+        bytes[320..324].copy_from_slice(&1u32.to_le_bytes());
+        bytes[324..328].copy_from_slice(&1u32.to_le_bytes());
+        let dst = RhiDevice::buffer_mapped_ptr(device, &self.ubo).expect("CSM UBO mapped");
+        // SAFETY: `dst` points to `CSM_UBO_BYTES` mapped host-coherent bytes (the UBO was created
+        // at exactly that size); `bytes` is a distinct stack array of the same length;
+        // host-coherent => the write is visible before the next submit reads the UBO.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.as_ptr(), CSM_UBO_BYTES as usize);
+        }
+    }
+
+    /// Tears the resources down (reverse creation order).
+    ///
+    /// # Safety
+    /// Each was created on `device`, its GPU work completed (the caller fence/idle-waited), and
+    /// each is destroyed exactly once here.
+    unsafe fn destroy(self, device: &VulkanContext) {
+        // SAFETY: per the contract `device` is live and nothing references these resources.
+        unsafe {
+            RhiDevice::destroy_graphics_pipeline(device, self.depth_pipeline);
+            RhiDevice::destroy_shader_module(device, self.depth_fs);
+            RhiDevice::destroy_shader_module(device, self.depth_vs);
+            RhiDevice::destroy_buffer(device, self.ubo);
+            RhiDevice::destroy_sampler(device, self.sampler);
+            RhiDevice::destroy_texture(device, self.cascade);
+        }
+    }
+}
+
+/// CSM Increment 1b (Rung A): the HOST↔SHADER MATRIX GOLDEN (the acne oracle). Given a cascade
+/// `view_proj` (column-major, the SAME bytes the depth VS pushes + the resolve UBO carries) + a
+/// world receiver point `P` + its normal `n` + the cascade `texel_size`, this reprojects `P` the
+/// SAME way the depth VS (`mul(view_proj, float4(P,1))`) and the resolve's `csm_visibility`
+/// (normal-offset + the Y-flipped NDC→UV) do — so the host can assert the two reprojections
+/// agree (the depth-VS write and the resolve lookup cannot drift). Mirrors the resolve's
+/// `csm_visibility` UV math byte-for-byte.
+///
+/// Returns `(uv_x, uv_y, ndc_z, in_bounds)`: the shadow-map UV, the receiver light-space depth,
+/// and whether the lookup is inside the cascade footprint (else the resolve treats it as lit).
+fn csm_host_project(
+    view_proj: &[f32; 16],
+    p: [f32; 3],
+    n: [f32; 3],
+    texel_size: f32,
+) -> (f32, f32, f32, bool) {
+    // Normal-offset the receiver (D6) — IDENTICAL to the resolve's `P + n * texel_size * BIAS`.
+    let off = texel_size * CSM_NORMAL_BIAS;
+    let pw = [p[0] + n[0] * off, p[1] + n[1] * off, p[2] + n[2] * off, 1.0];
+    // Column-major `view_proj * pw`: column `c` is `view_proj[c*4 + r]`, so
+    // `clip[r] = sum_c view_proj[c*4 + r] * pw[c]`.
+    let mut clip = [0.0f32; 4];
+    for (r, clip_r) in clip.iter_mut().enumerate() {
+        let mut acc = 0.0f32;
+        for (c, &pw_c) in pw.iter().enumerate() {
+            acc += view_proj[c * 4 + r] * pw_c;
+        }
+        *clip_r = acc;
+    }
+    if clip[3] <= 0.0 {
+        return (0.0, 0.0, 0.0, false);
+    }
+    let ndc = [clip[0] / clip[3], clip[1] / clip[3], clip[2] / clip[3]];
+    let uv_x = ndc[0] * 0.5 + 0.5;
+    let uv_y = 1.0 - (ndc[1] * 0.5 + 0.5); // Vulkan Y-flip (matches the resolve)
+    let in_bounds = (0.0..=1.0).contains(&uv_x)
+        && (0.0..=1.0).contains(&uv_y)
+        && (0.0..=1.0).contains(&ndc[2]);
+    (uv_x, uv_y, ndc[2], in_bounds)
 }
 
 /// Maps the swapchain's `i32` `VkFormat` to "readback bytes are BGRA" (skips an
@@ -1408,6 +1601,13 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         // `GBufferTargets` binds the SSAO image at @11, so the resolve layout MUST declare it or
         // bind-group creation trips the entry-count check (the P6 R1 binding-10 discipline).
         BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        // CSM Increment 1b (Rung A): the cascade combined map+sampler @12 + the cascade UBO @13.
+        // The production `GBufferTargets::create` binds the scene's cascade trio at @12/@13, so the
+        // resolve layout MUST declare them (the recompiled resolve STATICALLY references `gCsm` +
+        // `CsmCascades`). 14 bindings ≤ the 16-binding cap. `csm_mode == 0` on the golden presents
+        // → bound-but-unread (the 0%-gate).
+        BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -1426,6 +1626,10 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         },
     )
     .expect("deferred resolve compute pipeline");
+
+    // CSM Increment 1b (Rung A): the cascade trio + depth-only pipeline. This golden present is the
+    // OFF path (`csm: None`, `csm_mode == 0`), so the trio is bound-but-unread at resolve @12/@13.
+    let csm = CsmSceneResources::create(device, &instance_layout);
 
     // The present-blit: one COMBINED_IMAGE_SAMPLER layout + the fullscreen-sample pipeline.
     let present_layout = RhiDevice::create_bind_group_layout(
@@ -1560,6 +1764,13 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         // `record_gbuffer` keeps `vkCmdDraw(vertex_count, 1, 0, 0)`, byte-identical to the
         // pre-M2 stream.
         mesh_draw: &[],
+        // CSM Increment 1b (Rung A): the cascade trio bound at resolve @12/@13 (ALWAYS), the depth
+        // pass OFF (`csm: None`). On this golden present `csm_mode == 0`, so the resolve's PCF
+        // sample never runs and the trio is bound-but-unread (the 0%-gate — byte-identical pixels).
+        csm_cascade_texture: &csm.cascade,
+        csm_compare_sampler: &csm.sampler,
+        csm_cascade_ubo: &csm.ubo,
+        csm: None,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -1848,6 +2059,8 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
     unsafe {
         frame.destroy(&ctx);
         RhiDevice::destroy_buffer(device, staging);
+        // CSM Increment 1b: the cascade trio + depth pipeline.
+        csm.destroy(&ctx);
         RhiDevice::destroy_graphics_pipeline(device, present_pipeline);
         RhiDevice::destroy_bind_group_layout(device, present_layout);
         RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
@@ -2273,6 +2486,13 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         // here, bound-but-unread). The production `GBufferTargets` binds the SSAO image at @11,
         // so the resolve layout MUST declare it (the P6 R1 binding-10 discipline).
         BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        // CSM Increment 1b (Rung A): the cascade combined map+sampler @12 + the cascade UBO @13.
+        // The production `GBufferTargets::create` binds the scene's cascade trio at @12/@13, so the
+        // resolve layout MUST declare them (the recompiled resolve STATICALLY references `gCsm` +
+        // `CsmCascades`). 14 bindings ≤ the 16-binding cap. `csm_mode == 0` on the golden presents
+        // → bound-but-unread (the 0%-gate).
+        BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -2339,6 +2559,10 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         RhiDevice::destroy_shader_module(device, fs);
         RhiDevice::destroy_shader_module(device, vs);
     }
+
+    // CSM Increment 1b (Rung A): the cascade trio + depth-only pipeline (OFF path — `csm: None`,
+    // bound-but-unread at resolve @12/@13 on this cull-comparison present).
+    let csm = CsmSceneResources::create(device, &instance_layout);
 
     let mvp = ortho_mvp_bytes();
     let mut scene = GBufferScene {
@@ -2412,6 +2636,12 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         // `record_gbuffer` keeps `vkCmdDraw(vertex_count, 1, 0, 0)`, byte-identical to the
         // pre-M2 stream.
         mesh_draw: &[],
+        // CSM Increment 1b (Rung A): the cascade trio bound at resolve @12/@13 (ALWAYS), the depth
+        // pass OFF (`csm: None`) — bound-but-unread on this cull-comparison present (the 0%-gate).
+        csm_cascade_texture: &csm.cascade,
+        csm_compare_sampler: &csm.sampler,
+        csm_cascade_ubo: &csm.ubo,
+        csm: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -2565,6 +2795,8 @@ fn p0_windowed_coarse_cull_matches_uncull() {
     unsafe {
         frame.destroy(&ctx);
         RhiDevice::destroy_buffer(device, staging);
+        // CSM Increment 1b: the cascade trio + depth pipeline.
+        csm.destroy(&ctx);
         RhiDevice::destroy_graphics_pipeline(device, present_pipeline);
         RhiDevice::destroy_bind_group_layout(device, present_layout);
         RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
@@ -2861,6 +3093,26 @@ struct ShowcaseConfig {
     /// `use_model_matrix == 1` (the caller sets byte 84). The `vertices` field stays a (degenerate)
     /// legacy buffer the recorder no longer draws on this path.
     instanced: Option<InstancedMesh>,
+    /// CSM Increment 1b (Rung A) — the OPTIONAL cascade shadow demo. `None` (every existing
+    /// showcase): the CSM depth pass is OFF + `csm_mode == 0` (the 0%-gate; the cascade trio is
+    /// bound-but-unread). `Some(fit)` arms the depth pass: `run_showcase_dump` uploads `fit` into the
+    /// cascade UBO, pushes its `view_proj` into the depth pass, sets `csm_mode == 1` on the light
+    /// header, and the resolve `min`-combines the EXACT raster-mesh hard shadow onto the floor. The
+    /// casters are the showcase's instanced batches (so `instanced` MUST be `Some` for a visible
+    /// caster). Rung A is a SINGLE cascade (`c == 0`).
+    csm: Option<CsmDemoFit>,
+}
+
+/// CSM Increment 1b (Rung A) — the cascade FIT a [`ShowcaseConfig`] carries: the column-major
+/// world→light-clip `view_proj` (the SAME bytes the depth VS pushes + the resolve UBO holds, the
+/// O1 single-matrix pin) + the world-space `texel_size` (the resolve's normal-bias scale). A
+/// hand-fitted orthographic sun frustum for the demo (a real app derives it from `resolve_csm`).
+#[derive(Clone, Copy)]
+struct CsmDemoFit {
+    /// Column-major `ortho · light_view` (world → light clip), 16 floats.
+    view_proj: [f32; 16],
+    /// The world-space size of one shadow texel (the resolve's normal-bias scale).
+    texel_size: f32,
 }
 
 /// Mesh foundation M2/M3 — the instanced-draw spec a [`ShowcaseConfig`] carries: a LIST of
@@ -2948,6 +3200,8 @@ fn showcase_config(ssao_quality: Option<usize>) -> ShowcaseConfig {
         mesh_sdf: None,
         // M2: no instanced mesh — the legacy merged draw runs (byte-identical).
         instanced: None,
+        // CSM Increment 1b: OFF (the 0%-gate — no cascade depth pass, `csm_mode == 0`).
+        csm: None,
     }
 }
 
@@ -3101,6 +3355,8 @@ fn mesh_ssao_config(ssao_quality: Option<usize>) -> ShowcaseConfig {
         mesh_sdf: None,
         // M2: no instanced mesh — the legacy merged draw runs (byte-identical).
         instanced: None,
+        // CSM Increment 1b: OFF (the 0%-gate — no cascade depth pass, `csm_mode == 0`).
+        csm: None,
     }
 }
 
@@ -3278,6 +3534,8 @@ fn hybrid_room_config() -> ShowcaseConfig {
         mesh_sdf: None,
         // M2: no instanced mesh — the legacy merged draw runs (byte-identical).
         instanced: None,
+        // CSM Increment 1b: OFF (the 0%-gate — no cascade depth pass, `csm_mode == 0`).
+        csm: None,
     }
 }
 
@@ -3350,6 +3608,8 @@ fn instanced_persp_config() -> ShowcaseConfig {
         instanced: Some(InstancedMesh {
             meshes: vec![InstancedMeshEntry { vertices: verts, indices, affines }],
         }),
+        // CSM Increment 1b: OFF for this showcase (the 0%-gate — no cascade depth pass).
+        csm: None,
     }
 }
 
@@ -3368,6 +3628,227 @@ fn engine_instanced_persp_screenshot_dump() {
         "boyko_engine instanced perspective 512",
         INSTANCED_PERSP_BMP,
         instanced_persp_config(),
+    );
+}
+
+// === CSM Increment 1b (Rung A) — the single-cascade hardware shadow demo + the matrix golden. ===
+
+/// The CSM demo's BMP dump path (the owner's RTX visual oracle).
+const CSM_SHADOW_BMP: &str = "D:\\tmp\\engine_csm_shadow.bmp";
+
+/// CSM Increment 1b (Rung A): the demo's hand-fitted cascade — a world-space box covering both the
+/// floor and the caster, plus the world-space texel size derived from it at the shadow resolution.
+/// A real app derives these from `boyko_render::resolve_csm`; the demo fixes them so the host
+/// matrix golden and the GPU lookup share ONE known fit.
+const CSM_DEMO_HALF_EXTENT: f32 = 4.0; // the ortho half-width (world units) covering the scene
+const CSM_DEMO_NEAR: f32 = 0.1;
+const CSM_DEMO_FAR: f32 = 20.0;
+
+/// CSM Increment 1b (Rung A): builds the demo cascade's COLUMN-MAJOR world→light-clip `view_proj`
+/// (`ortho · light_view`) for the sun `sun_dir` (direction TO the light) looking at `center`. The
+/// light eye is pulled back along `sun_dir`; the ortho box is `[-h,h]²` × `[near,far]` in Vulkan
+/// `[0,1]` depth. The SAME helper feeds the GPU UBO/push (`run_showcase_dump`) AND the host matrix
+/// golden, so the depth-VS reprojection and the resolve lookup are pinned to ONE matrix.
+///
+/// Returns the 16 column-major floats (upload-ready) — the byte layout the depth VS push (`@0`) +
+/// the resolve `CsmCascades` cbuffer expect.
+fn csm_demo_view_proj(sun_dir: [f32; 3], center: [f32; 3]) -> [f32; 16] {
+    let norm = |v: [f32; 3]| {
+        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        [v[0] / l, v[1] / l, v[2] / l]
+    };
+    let cross = |a: [f32; 3], b: [f32; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+    let sun = norm(sun_dir);
+    // The light looks back along -sun (from the sun toward the scene). Eye pulled back along sun.
+    let pullback = CSM_DEMO_FAR * 0.5;
+    let eye = [
+        center[0] + sun[0] * pullback,
+        center[1] + sun[1] * pullback,
+        center[2] + sun[2] * pullback,
+    ];
+    let fwd = norm([
+        center[0] - eye[0],
+        center[1] - eye[1],
+        center[2] - eye[2],
+    ]); // = -sun
+    // Right/up via a world-up hint (swap when nearly collinear — the W5 alt-up guard).
+    let up_hint = if dot(fwd, [0.0, 1.0, 0.0]).abs() > 0.99 {
+        [0.0, 0.0, 1.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let right = norm(cross(up_hint, fwd));
+    let up = cross(fwd, right);
+    // light_view rows = basis; translation = -dot(basis, eye). z_light = forward·(P-eye) (POSITIVE
+    // into the scene), matching `perspective_mvp_bytes`'s view convention.
+    let tx = -dot(right, eye);
+    let ty = -dot(up, eye);
+    let tz = -dot(fwd, eye);
+    // Ortho proj (Vulkan [0,1] depth): clip.x = x/h, clip.y = -y/h (Y-flip to match the engine's
+    // framebuffer convention, the SAME flip `perspective_mvp_bytes` + the resolve apply),
+    // clip.z = (z - near)/(far - near), clip.w = 1.
+    let h = CSM_DEMO_HALF_EXTENT;
+    let inv_h = 1.0 / h;
+    let zr = CSM_DEMO_FAR - CSM_DEMO_NEAR;
+    // pv[row][col] = ortho_row · light_view_row.
+    let pv: [[f32; 4]; 4] = [
+        [inv_h * right[0], inv_h * right[1], inv_h * right[2], inv_h * tx],
+        [-inv_h * up[0], -inv_h * up[1], -inv_h * up[2], -inv_h * ty],
+        [fwd[0] / zr, fwd[1] / zr, fwd[2] / zr, (tz - CSM_DEMO_NEAR) / zr],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    // Upload COLUMN-MAJOR: out[col*4 + row] = pv[row][col] (the verified transpose).
+    let mut out = [0.0f32; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            out[col * 4 + row] = pv[row][col];
+        }
+    }
+    out
+}
+
+/// CSM Increment 1b (Rung A): the demo cascade's world-space texel size (the ortho footprint
+/// `2h` spread over the shadow resolution) — the resolve's normal-bias scale.
+fn csm_demo_texel_size() -> f32 {
+    (2.0 * CSM_DEMO_HALF_EXTENT) / (CSM_SHADOW_DIM as f32)
+}
+
+/// **CSM Increment 1b (Rung A) — the single-cascade hardware shadow showcase config.** An
+/// ASYMMETRIC raster box (NOT a sphere — the owner-eval pattern; a marker so the orientation reads)
+/// standing on a raster floor, a LEVEL-ish perspective camera, ONE directional sun, `csm_mode` ON.
+/// NO SDF/MDF in the scene (the floor's `gMaterial.r == 1`, so `min(1, csm_vis) == csm_vis` — the
+/// CSM shadow shows; the caster has no SDF/MDF twin, C2). The box's instanced batch IS the CSM
+/// caster: the depth pass renders it from the sun POV into cascade layer 0, and the resolve casts
+/// its EXACT hard shadow onto the floor.
+fn csm_shadow_config() -> ShowcaseConfig {
+    // ONE directional sun (the cascade is fit to it) + a dim sky for ambient fill.
+    let header = GoldenLightHeader::new(2, 0, 1.0).with_ssao_mode(0);
+    let lights = vec![
+        GoldenLight::directional(SHOWCASE_SUN_DIR, [1.0, 0.97, 0.92], 3.0),
+        GoldenLight::sky([0.08, 0.08, 0.10], [0.08, 0.08, 0.10]),
+    ];
+
+    // NO SDF: the marcher owns no surface (the raster floor + box own every lit pixel; the floor's
+    // mask=1 makes `min(1, csm_vis) == csm_vis`). A single degenerate far edit keeps the edit-list
+    // valid (the marcher finds no hit — the background clears).
+    let sdf = vec![SdfEdit::sphere([0.0, -1000.0, 0.0], 0.01, sdf_op::UNION, 0.0)];
+
+    // The CASTER: an ASYMMETRIC box (a tall slab, distinct X/Y/Z extents) standing on the floor,
+    // with a small marker cube on top so the cast shadow's orientation reads. ONE instanced mesh
+    // entry, two affines (the slab + the marker), so the depth pass + the resolve both see them.
+    let (slab_v, slab_i) = mesh_box_model([0.35, 0.9, 0.55], [0.82, 0.42, 0.30, 1.0]);
+    let affines = vec![
+        instance_affine(0.4, 1.0, [0.0, 0.9, -1.2]),  // the slab, yawed 0.4 rad
+        instance_affine(0.4, 0.28, [0.0, 1.95, -1.2]), // a small marker cube on top
+    ];
+
+    // The raster FLOOR: a wide flat box (a thin slab) at y≈0 spanning the scene, so the cast shadow
+    // lands on a real raster surface (mask=1).
+    let (floor_v, floor_i) = mesh_box_model([4.0, 0.05, 4.0], ROOM_FLOOR_COLOR);
+    let floor_affine = instance_affine(0.0, 1.0, [0.0, -0.05, -1.0]);
+
+    ShowcaseConfig {
+        sdf,
+        camera: room_camera(),
+        light_header: header,
+        light_elems: lights,
+        vertices: showcase_quad_vertices(), // degenerate legacy mesh (the instanced arm draws)
+        mvp: instanced_room_mvp_bytes(),
+        ssao_quality: None,
+        mesh_sdf: None,
+        instanced: Some(InstancedMesh {
+            meshes: vec![
+                // The floor mesh (batch 0, base 0) + the caster slab+marker (batch 1, nonzero base).
+                InstancedMeshEntry { vertices: floor_v, indices: floor_i, affines: vec![floor_affine] },
+                InstancedMeshEntry { vertices: slab_v, indices: slab_i, affines },
+            ],
+        }),
+        // CSM ON: the cascade fit to the sun, looking at the scene center near the caster.
+        csm: Some(CsmDemoFit {
+            view_proj: csm_demo_view_proj(SHOWCASE_SUN_DIR, [0.0, 0.5, -1.2]),
+            texel_size: csm_demo_texel_size(),
+        }),
+    }
+}
+
+/// **CSM Increment 1b (Rung A) — the single-cascade hardware shadow screenshot.** Drives the
+/// cascade DEPTH pass (the asymmetric box rendered from the sun POV into cascade layer 0) + the
+/// resolve `min`-combine, dumping a TRUE 512×512 BMP to [`CSM_SHADOW_BMP`] for the owner's RTX
+/// visual sign-off (the deliverable: the box's EXACT hard shadow on the raster floor).
+///
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
+/// orchestrator runs it on the GPU to dump the screenshot.
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the CSM shadow screenshot"]
+fn engine_csm_shadow_512_screenshot_dump() {
+    run_showcase_dump("boyko_engine CSM shadow 512", CSM_SHADOW_BMP, csm_shadow_config());
+}
+
+/// **CSM Increment 1b (Rung A) — the HOST↔SHADER MATRIX GOLDEN (the acne oracle).** Asserts the
+/// host reprojection ([`csm_host_project`], the mirror of the resolve's `csm_visibility` UV math)
+/// AGREES with a direct column-major `view_proj · P` projection of a KNOWN caster point — so the
+/// depth-VS write and the resolve lookup (which read the SAME `view_proj` bytes) cannot drift. A
+/// point UNDER the cascade footprint maps inside `[0,1]²`; a point far outside maps out of bounds.
+#[test]
+fn csm_matrix_golden_host_projection_agrees() {
+    let view_proj = csm_demo_view_proj(SHOWCASE_SUN_DIR, [0.0, 0.5, -1.2]);
+    let texel = csm_demo_texel_size();
+
+    // A receiver on the floor directly under the caster: in-bounds, depth in [0,1].
+    let p_floor = [0.0, 0.0, -1.2];
+    let n_up = [0.0, 1.0, 0.0];
+    let (uv_x, uv_y, ndc_z, in_bounds) = csm_host_project(&view_proj, p_floor, n_up, texel);
+    assert!(
+        in_bounds,
+        "the floor point under the caster must project inside the cascade footprint \
+         (uv = ({uv_x}, {uv_y}), ndc_z = {ndc_z})"
+    );
+    assert!((0.0..=1.0).contains(&ndc_z), "the receiver depth must be in the Vulkan [0,1] range");
+
+    // The normal-offset (D6) MUST move the lookup off the surface: a biased point differs from the
+    // un-biased projection (the acne oracle — the bias is applied, not a no-op). The cascade's
+    // look_at uses up == world-up, so world-y is PERPENDICULAR to the light's right axis — a +y
+    // normal-offset (n_up) therefore perturbs uv_y / depth, NOT uv_x. Assert the lookup moves in ANY
+    // component (a texel_size==0 no-op would leave all three unchanged and correctly fail here).
+    let (uv_x0, uv_y0, ndc_z0, _) = csm_host_project(&view_proj, p_floor, [0.0, 0.0, 0.0], texel);
+    assert!(
+        (uv_x - uv_x0).abs() > f32::EPSILON
+            || (uv_y - uv_y0).abs() > f32::EPSILON
+            || (ndc_z - ndc_z0).abs() > f32::EPSILON,
+        "the normal-offset bias must perturb the lookup (acne oracle)"
+    );
+
+    // A point far outside the cascade footprint projects out of bounds (the resolve treats it lit).
+    let p_far = [100.0, 0.0, -1.2];
+    let (_, _, _, far_in_bounds) = csm_host_project(&view_proj, p_far, n_up, texel);
+    assert!(!far_in_bounds, "a point far outside the cascade box must project out of bounds");
+
+    // The COLUMN-MAJOR transpose pin: a direct `view_proj · P` (no bias) must reproduce the same
+    // clip the host helper computes internally — the depth VS uses this EXACT product.
+    let pw = [p_floor[0], p_floor[1], p_floor[2], 1.0];
+    let mut clip = [0.0f32; 4];
+    for (r, clip_r) in clip.iter_mut().enumerate() {
+        let mut acc = 0.0f32;
+        for (c, &pw_c) in pw.iter().enumerate() {
+            acc += view_proj[c * 4 + r] * pw_c;
+        }
+        *clip_r = acc;
+    }
+    assert!(clip[3] > 0.0, "the ortho clip.w must be positive (the depth VS divides by it)");
+    let direct_uv_x = (clip[0] / clip[3]) * 0.5 + 0.5;
+    let (uv_x_nobias, _, _, _) = csm_host_project(&view_proj, p_floor, [0.0, 0.0, 0.0], texel);
+    assert!(
+        (direct_uv_x - uv_x_nobias).abs() < 1e-5,
+        "the direct column-major product and the host helper must agree (the majorness pin): \
+         {direct_uv_x} vs {uv_x_nobias}"
     );
 }
 
@@ -3486,6 +3967,8 @@ fn multimesh_persp_config() -> ShowcaseConfig {
                 InstancedMeshEntry { vertices: b_verts, indices: b_indices, affines: b_affines },
             ],
         }),
+        // CSM Increment 1b: OFF for this showcase (the 0%-gate — no cascade depth pass).
+        csm: None,
     }
 }
 
@@ -3558,6 +4041,8 @@ fn nonuniform_normals_config() -> ShowcaseConfig {
         instanced: Some(InstancedMesh {
             meshes: vec![InstancedMeshEntry { vertices: verts, indices, affines }],
         }),
+        // CSM Increment 1b: OFF for this showcase (the 0%-gate — no cascade depth pass).
+        csm: None,
     }
 }
 
@@ -3711,6 +4196,8 @@ fn capsule_character_config(contact_shadow: bool) -> ShowcaseConfig {
         mesh_sdf: None,
         // M2: no instanced mesh — the legacy merged draw runs (byte-identical).
         instanced: None,
+        // CSM Increment 1b: OFF (the 0%-gate — no cascade depth pass, `csm_mode == 0`).
+        csm: None,
     }
 }
 
@@ -3823,6 +4310,8 @@ fn mdf_shadow_config() -> ShowcaseConfig {
         mesh_sdf: Some((torus_pos, torus_idx)),
         // M2: no instanced mesh — the legacy merged draw runs (byte-identical).
         instanced: None,
+        // CSM Increment 1b: OFF (the 0%-gate — no cascade depth pass, `csm_mode == 0`).
+        csm: None,
     }
 }
 
@@ -4056,7 +4545,10 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
     // table (`shadow_mode == 1`, NON-CLUSTERED) + its staging source. Render P7: the `cfg` builder
     // already ARMED `ssao_mode == 1` (header word 11) so the resolve combines the SSAO term
     // (`scene.ssao = Some(..)` records the SSAO pass that writes it). ---
-    let light_header = cfg.light_header;
+    // CSM Increment 1b (Rung A): arm `csm_mode` (header word 7 bit 2) in lock-step with the depth
+    // pass (`cfg.csm.is_some()`). OFF leaves the header byte-identical (the 0%-gate); ON makes the
+    // resolve `min`-combine the cascade PCF sample into the primary directional's visibility.
+    let light_header = cfg.light_header.with_csm_mode(cfg.csm.is_some());
     let light_elems = &cfg.light_elems;
     let light_words = pack_showcase_light_table(&light_header, light_elems);
     let light_table_bytes = (light_words.len() as u64) * 4;
@@ -4324,6 +4816,13 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         // here, bound-but-unread). The production `GBufferTargets` binds the SSAO image at @11,
         // so the resolve layout MUST declare it (the P6 R1 binding-10 discipline).
         BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        // CSM Increment 1b (Rung A): the cascade combined map+sampler @12 + the cascade UBO @13.
+        // The production `GBufferTargets::create` binds the scene's cascade trio at @12/@13, so the
+        // resolve layout MUST declare them (the recompiled resolve STATICALLY references `gCsm` +
+        // `CsmCascades`). 14 bindings ≤ the 16-binding cap. `csm_mode == 0` on the golden presents
+        // → bound-but-unread (the 0%-gate).
+        BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -4426,6 +4925,23 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         RhiDevice::destroy_shader_module(device, fs);
         RhiDevice::destroy_shader_module(device, vs);
     }
+
+    // CSM Increment 1b (Rung A): the cascade trio + depth-only pipeline (ALWAYS created so the
+    // resolve set can bind @12/@13). When `cfg.csm` is `Some`, upload its `view_proj` into the
+    // cascade UBO + build the depth-pass push (the O1 single-matrix pin: the UBO + the push carry
+    // IDENTICAL `view_proj` bytes); else the trio is bound-but-unread (`csm: None`, the 0%-gate).
+    let csm = CsmSceneResources::create(device, &instance_layout);
+    let csm_push = cfg.csm.map(|fit| {
+        csm.upload(device, &fit.view_proj, fit.texel_size);
+        // The 88-byte depth-pass push: `view_proj` (@0) + `use_model_matrix == 1` (@84). The
+        // recorder overwrites `base_instance` (@80) per caster batch.
+        let mut push = [0u8; GBUFFER_PUSH_BYTES];
+        for (i, f) in fit.view_proj.iter().enumerate() {
+            push[i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+        }
+        push[84..88].copy_from_slice(&1u32.to_le_bytes());
+        push
+    });
 
     // M3: build the per-mesh draw batch LIST (one `GBufferMeshDraw` per registered mesh,
     // carrying its `base_instance` bucket offset + O3 index width), borrowing each mesh's GPU
@@ -4531,6 +5047,18 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         // leaves `instanced == None` ⇒ an EMPTY slice ⇒ `record_gbuffer` keeps the
         // byte-identical legacy `cmd_draw`.
         mesh_draw: &mesh_draws,
+        // CSM Increment 1b (Rung A): the cascade trio bound at resolve @12/@13 (ALWAYS). The depth
+        // pass is `Some` only when `cfg.csm` armed it (a real `view_proj` uploaded above) — then the
+        // recorder renders the SAME instanced caster batches into cascade layer 0 from the sun POV,
+        // and the resolve `min`-combines the exact hard shadow onto the floor. OFF ⇒ bound-but-unread.
+        csm_cascade_texture: &csm.cascade,
+        csm_compare_sampler: &csm.sampler,
+        csm_cascade_ubo: &csm.ubo,
+        csm: csm_push.map(|push| CsmDepthActivation {
+            pipeline: &csm.depth_pipeline,
+            push,
+            shadow_dim: CSM_SHADOW_DIM,
+        }),
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -4659,6 +5187,8 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
     unsafe {
         frame.destroy(&ctx);
         RhiDevice::destroy_buffer(device, staging);
+        // CSM Increment 1b: the cascade trio + depth pipeline.
+        csm.destroy(&ctx);
         RhiDevice::destroy_graphics_pipeline(device, present_pipeline);
         RhiDevice::destroy_bind_group_layout(device, present_layout);
         RhiDevice::destroy_compute_pipeline(device, ssao_pipeline);

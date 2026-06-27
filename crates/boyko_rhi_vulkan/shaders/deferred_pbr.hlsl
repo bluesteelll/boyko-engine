@@ -137,6 +137,64 @@ StructuredBuffer<uint> LightIndexList : register(t9);
 // EVERY resolve layout (the interface is stable regardless of DXC dead-code elimination).
 [[vk::image_format("r8")]] RWTexture2D<float> gSsao : register(u11);
 
+// === CSM Increment 1b — Rung A: the cascade shadow map + comparison sampler + cascade UBO =====
+//
+// bindings 12/13 (the resolve set grows 12 → 14 bindings; the 16-binding cap leaves 2 free — see
+// the W4 `debug_assert` on the layout build). Both are BOUND-BUT-UNREAD on the OFF path
+// (`load_csm_mode(LightBuf) == 0`, every pre-CSM scene): the resolve `.spv` STATICALLY references
+// them, so the layout MUST declare + a valid descriptor MUST be bound (a 1×1×1 D32 array dummy +
+// the comparison sampler as ONE combined descriptor + a zeroed cascade UBO), but the
+// `SampleCmpLevelZero` only executes inside the `csm_mode != 0` structural `if`, so on the OFF path
+// the dummies are never sampled → the lit PIXELS are byte-identical to today (the gSsao precedent;
+// the 0%-gate).
+//
+// binding 12 (t12 + s12): the cascade shadow-map ARRAY (Rung A: 1 layer) BUNDLED with its PCF
+// COMPARISON sampler as ONE `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER`. `gCsm` (t12) +
+// `gCsmCmp` (s12) share the SAME register NUMBER, so DXC collapses them into one combined
+// descriptor at binding 12 — the EXACT precedent the marcher's `BrickAtlas`(t10)+`BrickSampler`(s10)
+// uses. DEVIATION from the Inc-1b plan's "binding 13 = a separate comparison-sampler descriptor":
+// the in-house RHI's `BindGroupEntry` vocabulary has no SAMPLER-only variant (only
+// `CombinedImage`), and adding one is a cross-cutting RHI change beyond this task's edit surface;
+// the combined descriptor is functionally identical (a PCF `SampleCmpLevelZero` over the array
+// layer) and keeps the resolve set within the cap. `gCsm` is `Texture2DArray<float>` (the depth
+// pass renders cascade `c` into layer `c`; the resolve PCF-samples `float3(uv, c)`; Rung A uses
+// ONLY `c == 0`); the sampler is `compareEnable = VK_TRUE` / `LessOrEqual` (Inc-0
+// `SamplerDesc.compare = Some(LessOrEqual)`).
+Texture2DArray<float> gCsm : register(t12);
+SamplerComparisonState gCsmCmp : register(s12);
+
+// One cascade's GPU-ready record — MUST byte-mirror `boyko_render::CascadeData` (80 B): the
+// COLUMN-MAJOR world→light-clip `view_proj` (O1: SAME majorness as the depth VS push — DXC default,
+// NO `row_major`) + the VIEW-space `split_far` + the world-space `texel_size` + 8 B pad to the
+// 16-byte cbuffer-array stride. The HLSL `float4x4` is 64 B (4 × 16) and the trailing 3 scalars +
+// pad fill one final 16-B row → 80 B, identical to the `#[repr(C)]` host struct.
+struct CascadeData {
+    float4x4 view_proj;   // column-major world→light-clip (O1 majorness pin)
+    float    split_far;   // VIEW-space far distance of this cascade (Rung B selection boundary)
+    float    texel_size;  // world-space size of one shadow texel (the normal-bias scale)
+    float2   _pad;        // pad to the 16-byte cbuffer-array stride
+};
+
+// binding 13 (b13): the cascade UBO — byte-mirrors `boyko_render::ResolvedCsm` (336 B): the inline
+// `CascadeData[MAX_CASCADES]` (4 × 80 = 320 B) + `active_count` + `csm_mode_word` + 8 B pad. The
+// host uploads `ResolvedCsm` verbatim each frame. `gCsmMode` mirrors `csm_mode_word` (a redundant
+// copy of the header bit, carried for completeness); the resolve gates on the HEADER's
+// `load_csm_mode` (the single source of truth), NOT this field.
+static const uint MAX_CASCADES = 4u;
+cbuffer CsmCascades : register(b13) {
+    CascadeData gCascades[MAX_CASCADES];
+    uint gCsmActive;   // number of valid cascades (0 = disabled); mirrors ResolvedCsm.active_count
+    uint gCsmMode;     // mirrors ResolvedCsm.csm_mode_word (the resolve gates on the header bit)
+    uint2 _gCsmPad;    // pad to the 336-byte ResolvedCsm stride
+};
+
+// CSM Rung-A normal-offset bias FACTOR (D6): the receiver lookup is pushed off the surface by
+// `n * gCascades[0].texel_size * CSM_NORMAL_BIAS` so a grazing receiver does not self-shadow
+// (acne). Kept LOW because the term is `min`-combined with the analytic SDF visibility — a slight
+// acne is preferred over peter-panning (a too-large offset would lift the contact shadow off the
+// floor and read as a floating caster). Owner-retunable; mirrors the host matrix golden's bias.
+static const float CSM_NORMAL_BIAS = 2.0;
+
 // Shared camera ray-gen (the SAME header the marcher includes — ONE ray-gen, no drift).
 #include "ray_gen.hlsli"
 // Shared light-table std430 decode (ONE source of truth, included by the resolve + cull).
@@ -292,6 +350,48 @@ float3 safe_normalize(float3 a) {
         return float3(0.0, 0.0, 0.0);
     }
     return a / len;
+}
+
+// === CSM Increment 1b — Rung A: the cascade shadow-map visibility sample =====================
+//
+// Projects the receiver world point `P` (normal-offset by `n` along `gCascades[0].texel_size *
+// CSM_NORMAL_BIAS`, D6) into cascade 0's light-clip space, builds the shadow-map UV (Y-FLIPPED to
+// match the engine's framebuffer convention — see below), and PCF-compares the receiver's
+// light-space depth against the stored cascade depth via `gCsm.SampleCmpLevelZero`. Returns the
+// VISIBILITY in [0,1] (1 = lit, 0 = fully shadowed). Rung A samples ONLY cascade `c == 0`; the
+// N-cascade select + cross-fade is Rung B / Inc 3.
+//
+// UV Y-FLIP CONVENTION: the cascade depth pass renders with the SAME negative-viewport-free,
+// Vulkan-default top-left framebuffer origin as the main raster pass; clip→NDC maps `clip.y` to
+// the [-1,1] NDC Y, and the framebuffer's texel row 0 is NDC Y = -1's projection AFTER the
+// Vulkan Y-down convention. The engine's other reprojection (`project_to_screen`, the SSCS inverse)
+// applies a `(-ndc_y) * 0.5 + 0.5` flip to convert NDC→UV; this CSM lookup applies the IDENTICAL
+// flip (`uv.y = 1 - (clip.y/clip.w * 0.5 + 0.5)`) so the cascade UV addresses the same texel the
+// depth pass wrote. (Rung A's ortho light projection has `clip.w == 1`, so the perspective divide
+// is a no-op, but it is kept for generality.)
+//
+// O1 MAJORNESS: `gCascades[0].view_proj` is the SAME column-major matrix the depth VS pushed at
+// `@0`, so `mul(view_proj, float4(P_off,1))` here reprojects EXACTLY as the depth VS projected the
+// caster — the host matrix golden (compute.rs) pins this agreement so the two cannot drift.
+float csm_visibility(float3 P, float3 n) {
+    float3 P_off = P + n * (gCascades[0].texel_size * CSM_NORMAL_BIAS);
+    float4 clip = mul(gCascades[0].view_proj, float4(P_off, 1.0));
+    if (clip.w <= 0.0) {
+        return 1.0;                        // behind the light plane — treat as lit (no shadow data)
+    }
+    float3 ndc = clip.xyz / clip.w;
+    float2 uv;
+    uv.x = ndc.x * 0.5 + 0.5;
+    uv.y = 1.0 - (ndc.y * 0.5 + 0.5);      // Vulkan framebuffer Y-flip (matches project_to_screen)
+    // Outside the cascade footprint there is no shadow data — treat as lit (Rung A has no fallback
+    // cascade). `ref` is the receiver's light-space NDC depth (Vulkan [0,1] depth range).
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        return 1.0;
+    }
+    float ref = ndc.z;
+    // PCF: hardware 2×2 comparison (LessOrEqual) — the lit fraction of the footprint whose stored
+    // depth is >= the (biased) receiver depth. Cascade layer 0 (Rung A).
+    return gCsm.SampleCmpLevelZero(gCsmCmp, float3(uv, 0.0), ref);
 }
 
 // Karis "mobile" analytic environment BRDF approximation (no DFG LUT). Returns the
@@ -495,6 +595,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // scene → the per-light `sscs_march` block never runs → byte-identical to today). Read
         // ONCE here, alongside `ssao_mode`, then consumed at both `vis` sites below.
         uint contact_mode = load_contact_shadow_mode(LightBuf);
+        // CSM Increment 1b (Rung A): the cascade-shadow gate (header word 7 bit 2; OFF on every
+        // pre-CSM scene → the `csm_visibility` sample never runs → the bound-but-unread cascade
+        // map/sampler/UBO are never sampled → byte-identical to today, the 0%-gate). Read ONCE
+        // here, consumed at the primary-directional `vis` site below.
+        uint csm_mode = load_csm_mode(LightBuf);
         float view_t = gViewT.Load(coord);
         float3 P = ro + rd * view_t;
         uint marched = 0u;
@@ -555,6 +660,16 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 float vis = shadow;
                 if (!primary_dir_seen) {
                     primary_dir_seen = true;      // the primary KEEPS gMaterial.r (vis=shadow)
+                    // CSM Increment 1b (Rung A): MIN-COMBINE the cascade hard-shadow into the
+                    // primary directional's analytic visibility. The exact raster-mesh shadow
+                    // (a hardware depth-map PCF) and the analytic SDF term are independent
+                    // occluders — `min` keeps the MOST-occluded (a pixel shadowed by EITHER is
+                    // shadowed). Gated by the header bit + a front-facing receiver (a
+                    // back-faced surface is already `NoL == 0`, so the cascade lookup would be
+                    // wasted). OFF on every pre-CSM scene → byte-identical (the 0%-gate).
+                    if (csm_mode != CSM_MODE_OFF && NoL > 0.0) {
+                        vis = min(vis, csm_visibility(P, n));
+                    }
                 } else if (multi_light && light_casts_sdf_shadow(L)
                            && marched < MAX_SDF_SHADOW_CASTERS_PER_PIXEL
                            && NoL > SHADOW_NDOTL_EPS) {

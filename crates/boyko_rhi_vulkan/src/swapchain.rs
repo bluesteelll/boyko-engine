@@ -35,7 +35,8 @@
 use core::ptr;
 
 use boyko_rhi::{
-    BindGroupDesc, BindGroupEntry, Format, ImageUsage, RhiDevice, TextureDesc, TextureDimension,
+    BindGroupDesc, BindGroupEntry, Format, ImageUsage, MAX_BIND_GROUP_BINDINGS, RhiDevice,
+    TextureDesc, TextureDimension,
 };
 
 use crate::compute::{
@@ -3293,6 +3294,221 @@ impl<'ctx> Renderer<'ctx> {
             }
         }
 
+        // === CSM Increment 1b (Rung A): the cascade DEPTH pass (W5 — a NEW recorder bracket,
+        // NOT record_gbuffer's main raster). Recorded ONLY when the scene wires the depth
+        // activation (`scene.csm.is_some()`); otherwise skipped entirely — NO barrier, NO
+        // rendering — so the command stream is byte-identical to the pre-CSM path (the 0%-gate;
+        // the cascade map/sampler/UBO are bound-but-unread). Renders the SAME caster batches
+        // (`scene.mesh_draw` + `scene.instance_bind_group`) from the SUN's POV into cascade
+        // layer 0, so the resolve can `min`-combine the exact hard shadow. RUN BEFORE the
+        // resolve dispatch (5b) so the cascade depth is SHADER_READ-visible to the resolve. ===
+        if let Some(csm) = &scene.csm {
+            let cascade = scene.csm_cascade_texture;
+            // (CSM-0) Barrier-in: the cascade image UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL (the
+            // depth-write access, DEPTH aspect). The whole array is re-`UNDEFINED`'d (Rung A
+            // renders only layer 0; the unused layers carry no content the resolve reads).
+            let to_depth = VkImageMemoryBarrier {
+                s_type: VkStructureType::ImageMemoryBarrier,
+                p_next: ptr::null(),
+                src_access_mask: 0,
+                dst_access_mask: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                image: cascade.image,
+                subresource_range: DEPTH_SUBRESOURCE_RANGE,
+            };
+            // SAFETY: recording is open; one image barrier on the live cascade depth image;
+            // TOP_OF_PIPE→(EARLY|LATE)_FRAGMENT_TESTS with UNDEFINED→DEPTH is the superset-correct
+            // first depth transition (mirrors record_gbuffer's main depth barrier-in); `&to_depth`
+            // outlives the call.
+            unsafe {
+                (self.fns.cmd_pipeline_barrier)(
+                    cmd,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                        | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                    0,
+                    0,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    1,
+                    (&to_depth as *const VkImageMemoryBarrier).cast(),
+                );
+            }
+
+            // (CSM-1) Depth-only dynamic rendering into cascade layer 0's render view: NO color
+            // attachment (`color_attachment_count == 0`), one depth attachment (CLEAR to the far
+            // plane / STORE). The render area is the shadow-map resolution (the cascade image's
+            // own square extent — NOT the swapchain/composite extent).
+            let cascade_extent = VkExtent2D {
+                width: csm.shadow_dim,
+                height: csm.shadow_dim,
+            };
+            let csm_depth_attachment = VkRenderingAttachmentInfo {
+                s_type: VkStructureType::RenderingAttachmentInfo,
+                p_next: ptr::null(),
+                image_view: cascade.layer_render_view(0),
+                image_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                resolve_mode: 0,
+                resolve_image_view: VkImageView::NULL,
+                resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+                store_op: VK_ATTACHMENT_STORE_OP_STORE,
+                clear_value: VkClearValue {
+                    depth_stencil: VkClearDepthStencilValue {
+                        depth: 1.0,
+                        stencil: 0,
+                    },
+                },
+            };
+            let csm_area = VkRect2D {
+                offset: VkOffset2D { x: 0, y: 0 },
+                extent: cascade_extent,
+            };
+            let csm_rendering = VkRenderingInfo {
+                s_type: VkStructureType::RenderingInfo,
+                p_next: ptr::null(),
+                flags: 0,
+                render_area: csm_area,
+                layer_count: 1,
+                view_mask: 0,
+                color_attachment_count: 0,
+                p_color_attachments: ptr::null(),
+                p_depth_attachment: (&csm_depth_attachment as *const VkRenderingAttachmentInfo)
+                    .cast(),
+                p_stencil_attachment: ptr::null(),
+            };
+            let csm_viewport = VkViewport {
+                x: 0.0,
+                y: 0.0,
+                width: cascade_extent.width as f32,
+                height: cascade_extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            };
+            let mut csm_push = csm.push;
+            // SAFETY: recording is open; `csm_rendering` is fully initialized — its depth
+            // attachment names the live cascade layer-0 render view (now
+            // DEPTH_ATTACHMENT_OPTIMAL), NO color attachment (depth-only); the depth-only
+            // pipeline (declaring an EMPTY `color_formats` + `depth_format = D32Sfloat` +
+            // `cull_mode: Front` + a depth bias + the set-0 instance layout) belongs to this
+            // device (caller contract). The SAME instance SSBO (`scene.instance_bind_group`) the
+            // main pass binds is bound at set 0 to satisfy the depth VS's static `instances`
+            // reference; the 88-byte push carries the cascade `view_proj` (`@0`) +
+            // `use_model_matrix == 1` (`@84`), and per caster batch the recorder re-pushes its
+            // `base_instance` (4 bytes @80, in-range of the 88-byte VERTEX push) then
+            // `draw_indexed` reads that batch's bound vertex+index buffers (created on this device
+            // with VERTEX/INDEX usage). The locals outlive the bracketed calls. Begin/End bracket
+            // the depth pass exactly.
+            unsafe {
+                (self.fns.cmd_begin_rendering)(cmd, &csm_rendering);
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    csm.pipeline.pipeline,
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    csm.pipeline.layout,
+                    0,
+                    1,
+                    &scene.instance_bind_group.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    csm.pipeline.layout,
+                    VK_SHADER_STAGE_VERTEX_BIT,
+                    0,
+                    csm_push.len() as u32,
+                    csm_push.as_ptr().cast(),
+                );
+                (self.fns.cmd_set_viewport)(cmd, 0, 1, &csm_viewport);
+                (self.fns.cmd_set_scissor)(cmd, 0, 1, &csm_area);
+                // The caster batches: the SAME instanced mesh draws the main pass rasterizes (the
+                // demo's box). A real app gathers a `With<ShadowCaster>` subset; the inline demo
+                // reuses the full list. An EMPTY list records the depth scope with no draw (a
+                // cleared cascade — every receiver fully lit, the resolve `min`-combine a no-op).
+                for batch in scene.mesh_draw {
+                    let base = batch.base_instance;
+                    csm_push[GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize
+                        ..GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4]
+                        .copy_from_slice(&base.to_le_bytes());
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        csm.pipeline.layout,
+                        VK_SHADER_STAGE_VERTEX_BIT,
+                        GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
+                        4,
+                        (&base as *const u32).cast(),
+                    );
+                    (self.fns.cmd_bind_vertex_buffers)(
+                        cmd,
+                        0,
+                        1,
+                        &batch.vertex_buffer.buffer,
+                        &vertex_offset,
+                    );
+                    (self.fns.cmd_bind_index_buffer)(
+                        cmd,
+                        batch.index_buffer.buffer,
+                        0,
+                        batch.index_type,
+                    );
+                    (self.fns.cmd_draw_indexed)(
+                        cmd,
+                        batch.index_count,
+                        batch.instance_count,
+                        0,
+                        0,
+                        0,
+                    );
+                }
+                (self.fns.cmd_end_rendering)(cmd);
+            }
+
+            // (CSM-2) The dual-use depth barrier: DEPTH_ATTACHMENT_OPTIMAL →
+            // SHADER_READ_ONLY_OPTIMAL (reusing the marcher's depth-barrier shape). Depth WRITES
+            // happen at LATE_FRAGMENT_TESTS; the resolve PCF-SAMPLES at COMPUTE_SHADER. This one
+            // barrier (DEPTH aspect) makes the cascade depth available + visible to the resolve's
+            // `SampleCmpLevelZero` and transitions the layout for sampling.
+            let csm_to_sampled = VkImageMemoryBarrier {
+                s_type: VkStructureType::ImageMemoryBarrier,
+                p_next: ptr::null(),
+                src_access_mask: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
+                old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                image: cascade.image,
+                subresource_range: DEPTH_SUBRESOURCE_RANGE,
+            };
+            // SAFETY: recording is open; (EARLY|LATE)_FRAGMENT_TESTS→COMPUTE_SHADER with
+            // DEPTH_WRITE→SHADER_READ and DEPTH→SHADER_READ_ONLY makes the cascade depth available
+            // + visible to the resolve's PCF sample; `&csm_to_sampled` outlives the call.
+            unsafe {
+                (self.fns.cmd_pipeline_barrier)(
+                    cmd,
+                    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                        | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0,
+                    0,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    1,
+                    (&csm_to_sampled as *const VkImageMemoryBarrier).cast(),
+                );
+            }
+        }
+
         // (5b) Deferred RESOLVE pass: bind the resolve pipeline + the resolve set (gAlbedo
         // @0, gMaterial @1, lit @2 — all STORAGE in GENERAL), dispatch at the SAME grid the
         // marcher used (1:1 the marched pixels). It composites `lit = mask ? base*vis : base`.
@@ -4505,6 +4721,64 @@ pub struct GBufferScene<'a> {
     /// `use_model_matrix == 1` (its byte 84) when the slice is non-empty; the recorder
     /// overwrites the push's `base_instance` word per batch. See [`GBufferMeshDraw`].
     pub mesh_draw: &'a [GBufferMeshDraw<'a>],
+    /// CSM Increment 1b (Rung A): the cascade shadow-map ARRAY texture (a D32 array; Rung A
+    /// renders ONLY layer 0). ALWAYS supplied (a real cascade map when CSM is on, a 1×1×1 D32
+    /// array DUMMY when off) so the resolve set can ALWAYS bind binding 12 — the resolve `.spv`
+    /// statically references `gCsm`, so the descriptor MUST be valid even on the OFF path
+    /// (bound-but-unread; the `SampleCmpLevelZero` runs only under the `csm_mode != 0` gate). The
+    /// scene OWNS it; the depth pass (when [`Self::csm`] is `Some`) renders into
+    /// `layer_render_view(0)`, the resolve PCF-samples through the array sample view bundled with
+    /// [`Self::csm_compare_sampler`].
+    pub csm_cascade_texture: &'a VulkanTexture,
+    /// CSM Increment 1b (Rung A): the PCF COMPARISON sampler (`compareEnable = VK_TRUE`,
+    /// `LessOrEqual` — Inc-0 `SamplerDesc.compare = Some(LessOrEqual)`), BUNDLED with
+    /// [`Self::csm_cascade_texture`] as the resolve's binding-12 combined image+sampler. ALWAYS
+    /// supplied (bound-but-unread on the OFF path).
+    pub csm_compare_sampler: &'a VulkanSampler,
+    /// CSM Increment 1b (Rung A): the cascade UBO (host-coherent), a 336-byte byte-mirror of
+    /// `boyko_render::ResolvedCsm` (the inline `[CascadeData; 4]` plus `active_count`,
+    /// `csm_mode_word`, and pad). The host uploads `ResolvedCsm` verbatim before the frame; the
+    /// resolve reads `gCascades[0].view_proj` (Rung A) through binding 13. ALWAYS supplied — a
+    /// ZEROED UBO on the OFF path (bound-but-unread). The depth pass pushes the SAME
+    /// `gCascades[0].view_proj`, so the host writes it once into this UBO and the recorder reads it
+    /// back for the depth-pass push.
+    pub csm_cascade_ubo: &'a BoundBuffer,
+    /// CSM Increment 1b (Rung A): the cascade DEPTH-PASS activation. `None` = the OFF path (the
+    /// default, byte-identical command stream): NO depth pass is recorded, the resolve's `csm_mode`
+    /// header gate is 0, and the always-bound cascade map/sampler/UBO are bound-but-unread.
+    /// `Some(_)` = the ON path: BEFORE the resolve dispatch the recorder runs [`record_csm_depth`]
+    /// — barriers the cascade image, renders the caster batches (the SAME [`Self::mesh_draw`] +
+    /// [`Self::instance_bind_group`] the main pass uses) into `layer_render_view(0)` with the
+    /// cascade `view_proj` pushed, then barriers the image to `SHADER_READ_ONLY_OPTIMAL` for the
+    /// resolve sample. The caller MUST set the scene's light-header `csm_mode` in lock-step
+    /// (`with_csm_mode(true)`).
+    pub csm: Option<CsmDepthActivation<'a>>,
+}
+
+/// CSM Increment 1b (Rung A): the cascade DEPTH-PASS activation threaded into
+/// [`GBufferScene::csm`] to turn the depth pass ON. Mirrors [`SsaoActivation`]'s borrow-bundle
+/// shape: a per-frame `Copy` pair the caller flips between frames with no re-record.
+///
+/// The casters are the SAME instanced [`GBufferMeshDraw`] batches the main pass rasterizes
+/// ([`GBufferScene::mesh_draw`]) — the depth pass renders them from the SUN's point of view into
+/// the cascade's depth layer. A real app would gather a `With<ShadowCaster>` subset; the inline
+/// demo reuses the full mesh batch list (its single box is the caster).
+#[derive(Clone, Copy)]
+pub struct CsmDepthActivation<'a> {
+    /// The depth-only graphics pipeline (`csm_depth.vs/fs`): EMPTY `color_formats`, `depth_format
+    /// = Some(D32Sfloat)`, `cull_mode: Front`, `depth_bias: Some(slope/constant)`, the set-0
+    /// instance SSBO layout. Bound by [`record_csm_depth`].
+    pub pipeline: &'a VulkanGraphicsPipeline,
+    /// The 88-byte VERTEX push for the depth pass: `view_proj = cascade.view_proj` (`@0`,
+    /// column-major), `use_model_matrix == 1` (`@84`). The recorder overwrites the `base_instance`
+    /// word (`@80`) per caster batch. The leading 64 bytes MUST equal the cascade UBO's
+    /// `gCascades[0].view_proj` bytes (the O1 majorness pin: the depth VS + the resolve read the
+    /// SAME matrix).
+    pub push: [u8; GBUFFER_PUSH_BYTES],
+    /// The cascade shadow-map resolution (texels per side — the map is square, e.g. 2048). The
+    /// depth pass's render area + viewport. MUST equal the resolution
+    /// [`GBufferScene::csm_cascade_texture`] was created at.
+    pub shadow_dim: u32,
 }
 
 /// The per-extent on-screen G-buffer targets for [`Renderer::render_gbuffer_frame`]:
@@ -4945,7 +5219,33 @@ impl GBufferTargets {
                 // `ssao_mode != 0` (0 every pre-P7 scene), so the binding is a harmless valid
                 // descriptor (the 0%-gate); no SSAO pass writes it yet (C2 adds that).
                 BindGroupEntry::StorageImage { texture: &ssao },
+                // CSM Increment 1b (Rung A): the cascade shadow-map ARRAY + its PCF comparison
+                // sampler as ONE combined descriptor @12 (DXC collapsed `gCsm`(t12)+`gCsmCmp`(s12)
+                // — the BrickAtlas precedent). The cascade UBO @13 (mirrors `ResolvedCsm`). BOTH
+                // ALWAYS bound (the resolve `.spv` statically references `gCsm`/`CsmCascades`), so
+                // the layout MUST declare them and a valid descriptor MUST be present even on the
+                // OFF path; the resolve PCF-samples ONLY under `csm_mode != 0` (0 every pre-CSM
+                // scene), so the bound-but-unread cascade map/sampler/UBO are never sampled (the
+                // 0%-gate). The combined-image entry needs the cascade ARRAY SAMPLE view + the
+                // comparison sampler; both come from the scene's always-supplied resources (a real
+                // cascade map when CSM is on, a 1×1×1 D32 array dummy + a zeroed UBO when off).
+                BindGroupEntry::CombinedImage {
+                    texture: scene.csm_cascade_texture,
+                    sampler: scene.csm_compare_sampler,
+                },
+                BindGroupEntry::UniformBuffer {
+                    buffer: scene.csm_cascade_ubo,
+                },
             ];
+            // W4: the resolve set now declares 14 bindings (0..=13) — within the 16-binding cap
+            // (`MAX_BIND_GROUP_BINDINGS`), with 2 free. CSM Rung A adds the combined cascade
+            // map+sampler @12 + the cascade UBO @13 (the plan's separate-comparison-sampler @13 was
+            // collapsed into the combined @12 — the in-house RHI has no SAMPLER-only BindGroupEntry;
+            // see the resolve shader's deviation note).
+            debug_assert!(
+                entries.len() <= MAX_BIND_GROUP_BINDINGS,
+                "invariant: the resolve set's binding count must stay within the descriptor cap"
+            );
             let desc = BindGroupDesc::<Vulkan> {
                 layout: scene.resolve_layout,
                 entries: &entries,

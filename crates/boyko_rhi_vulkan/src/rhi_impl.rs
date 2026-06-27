@@ -1078,9 +1078,20 @@ impl RhiDevice<Vulkan> for VulkanContext {
                     p_image_info = (&image_infos[i] as *const VkDescriptorImageInfo).cast();
                 }
                 BindGroupEntry::CombinedImage { texture, sampler } => {
+                    // CSM Increment 1b: a MULTI-LAYER texture (array_view != NULL) binds its
+                    // `VK_IMAGE_VIEW_TYPE_2D_ARRAY` sample view so a shader `Texture2DArray`
+                    // resolves correctly (the cascade shadow map @ resolve binding 12). A
+                    // single-layer texture has `array_view == NULL` → falls back to the
+                    // full-subresource `.view`, BYTE-IDENTICAL to every existing combined-image
+                    // caller (all bind single-layer images: present-blit, brick atlas, mesh-SDF).
+                    let image_view = if texture.array_view != VkImageView::NULL {
+                        texture.array_view
+                    } else {
+                        texture.view
+                    };
                     image_infos[i] = VkDescriptorImageInfo {
                         sampler: sampler.sampler,
-                        image_view: texture.view,
+                        image_view,
                         image_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                     };
                     p_image_info = (&image_infos[i] as *const VkDescriptorImageInfo).cast();

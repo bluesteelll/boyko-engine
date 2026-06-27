@@ -88,6 +88,24 @@ uint load_contact_shadow_mode(StructuredBuffer<uint> LightBuf) {
     return (LightBuf[7] >> 1) & 1u;
 }
 
+// === CSM Increment 1b — the resolve `csm_mode`, packed in word 7 BIT 2 ========================
+//
+// Cascaded Shadow Maps (a hardware DEPTH shadow map `min`-combined into the analytic SDF
+// visibility) are gated by BIT 2 of the SAME header word 7 that carries `shadow_mode` (BIT 0)
+// and `contact_shadow_mode` (BIT 1). BIT-2 INDEPENDENCE PIN: the mask `>> 2 & 1` reads ONLY
+// bit 2, so a scene that also sets bits 0/1 (multi-light SDF shadows + SSCS) never perturbs
+// `csm_mode`, and vice-versa — the three flags coexist in one full header word with no
+// re-encoding of `LIGHT_HEADER_BASE`. On every pre-CSM scene word 7's bit 2 is 0 →
+// `csm_mode == OFF` → the resolve's CSM sample block (a structural `if`) never runs → the
+// bound-but-unread cascade map/sampler/UBO are never sampled → byte-identical to today (the
+// 0%-gate). Host writer: `compute.rs::GoldenLightHeader::with_csm_mode`.
+static const uint CSM_MODE_OFF = 0u;
+static const uint CSM_MODE_ON  = 1u;
+
+uint load_csm_mode(StructuredBuffer<uint> LightBuf) {
+    return (LightBuf[7] >> 2) & 1u;
+}
+
 // === Render P7 — the resolve ssao_mode, sourced from a SPARE header word ===============
 //
 // Header word 11 (`sky_spec.w` — NEVER read by the L0a sky ambient, which uses only

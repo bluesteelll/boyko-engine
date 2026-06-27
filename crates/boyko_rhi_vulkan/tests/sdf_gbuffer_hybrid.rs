@@ -36,10 +36,11 @@ use core::slice;
 use boyko_rhi::descriptor::{BarrierDesc, BufferBarrier};
 use boyko_rhi::enums::{BarrierAccess, BarrierStage};
 use boyko_rhi::{
-    BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc,
-    BufferImageCopy, BufferUsage, ComputePipelineDesc, DepthAttachment, DescriptorKind, Format,
+    AddressMode, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
+    BufferDesc, BufferImageCopy, BufferUsage, CompareOp, ComputePipelineDesc, DepthAttachment,
+    DescriptorKind, Filter, Format,
     CullMode, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc, ImageLayout, ImageSubresourceRange,
-    ImageUsage, LoadOp, MemoryLocation, PrimitiveTopology, RenderArea, RenderingAttachment,
+    ImageUsage, LoadOp, MemoryLocation, MipMode, PrimitiveTopology, RenderArea, RenderingAttachment,
     RenderingDesc, RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc, ShaderStage, StoreOp,
     TextureDesc, TextureDimension, VertexAttribute, VertexBufferLayout, VertexFormat, Viewport,
 };
@@ -82,7 +83,80 @@ use boyko_rhi_vulkan::compute::{
 use boyko_rhi_vulkan::brick_atlas::{BrickAtlas, BrickClipmap};
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::memory::BoundBuffer;
-use boyko_rhi_vulkan::rhi_impl::{VulkanBindGroup, VulkanBindGroupLayout};
+use boyko_rhi_vulkan::rhi_impl::{VulkanBindGroup, VulkanBindGroupLayout, VulkanSampler};
+use boyko_rhi_vulkan::texture::VulkanTexture;
+
+/// CSM Increment 1b (Rung A): the OFF-path cascade descriptor TRIO every resolve set must bind
+/// bound-but-unread. The recompiled `deferred_pbr.comp` STATICALLY references `gCsm` (combined
+/// image+sampler @12) + the `CsmCascades` UBO (@13), so EVERY resolve layout MUST declare those
+/// two bindings and EVERY resolve set MUST bind a valid descriptor — even when `csm_mode == 0`
+/// (every test scene), where the resolve's `SampleCmpLevelZero` never runs (the 0%-gate; the
+/// dummies are never sampled). The trio: a 4-layer 1×1 D32 array texture (so its
+/// `VK_IMAGE_VIEW_TYPE_2D_ARRAY` sample view resolves `Texture2DArray`), a `LessOrEqual` PCF
+/// comparison sampler, and a zeroed 336-byte cascade UBO mirroring `ResolvedCsm`.
+struct CsmResolveDummies {
+    cascade: VulkanTexture,
+    sampler: VulkanSampler,
+    ubo: BoundBuffer,
+}
+
+impl CsmResolveDummies {
+    /// Creates the OFF-path trio on `device`. The cascade is `array_layers = 4` (== `MAX_CASCADES`)
+    /// so the array sample view exists (a 1-layer image has none); 1×1 keeps it tiny.
+    fn create(device: &VulkanContext) -> Self {
+        let cascade = device
+            .create_texture(&TextureDesc {
+                width: 1,
+                height: 1,
+                depth: 1,
+                format: Format::D32Sfloat,
+                dimension: TextureDimension::D2,
+                usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
+                array_layers: 4,
+            })
+            .expect("CSM dummy cascade array texture");
+        let sampler = device
+            .create_sampler(&SamplerDesc {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                address_mode: AddressMode::ClampToEdge,
+                mip: MipMode::None,
+                compare: Some(CompareOp::LessOrEqual),
+            })
+            .expect("CSM dummy PCF comparison sampler");
+        let ubo = device
+            .create_buffer(&BufferDesc {
+                size: 336,
+                usage: BufferUsage::UNIFORM,
+                location: MemoryLocation::HostVisibleCoherent,
+            })
+            .expect("CSM dummy cascade UBO (zeroed ResolvedCsm)");
+        Self { cascade, sampler, ubo }
+    }
+
+    /// The two resolve LAYOUT entries CSM Rung A adds: binding 12 (combined image+sampler) +
+    /// binding 13 (uniform buffer).
+    fn layout_entries() -> [BindGroupLayoutEntry; 2] {
+        [
+            BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+            BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        ]
+    }
+
+    /// Tears the trio down (reverse creation order).
+    ///
+    /// # Safety
+    /// Each resource was created on `device`, its GPU work completed (the caller fence-waited),
+    /// and each is destroyed exactly once here.
+    unsafe fn destroy(self, device: &VulkanContext) {
+        // SAFETY: per the contract `device` is the live context and nothing references the trio.
+        unsafe {
+            device.destroy_buffer(self.ubo);
+            device.destroy_sampler(self.sampler);
+            device.destroy_texture(self.cascade);
+        }
+    }
+}
 
 /// Total pixel count (the compute UBO `count`; the shader bounds `idx < count`).
 const PIXELS: u32 = SDF_IMG_W * SDF_IMG_H;
@@ -1201,7 +1275,14 @@ fn run_gbuffer_hybrid_m4(
         // STATICALLY declares `gSsao @11`, so the layout MUST declare it or the pipeline create
         // trips the binding-count check (the P6 R1 binding-10 discipline).
         BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        // CSM Increment 1b (Rung A): the cascade combined image+sampler @12 + the cascade UBO @13
+        // (`csm_mode == 0` here → bound-but-unread; the recompiled resolve STATICALLY references
+        // both, so the layout MUST declare them).
+        CsmResolveDummies::layout_entries()[0],
+        CsmResolveDummies::layout_entries()[1],
     ];
+    // CSM Increment 1b: the OFF-path cascade trio bound at resolve @12/@13 (bound-but-unread).
+    let csm_dummies = CsmResolveDummies::create(device);
     let resolve_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &resolve_layout_entries })
         .expect("deferred resolve bind-group layout");
@@ -1238,6 +1319,13 @@ fn run_gbuffer_hybrid_m4(
                 // Render P7 GROUP C1: the SSAO term `gSsao` @11 (bound-but-unread — `ssao_mode`
                 // is 0 here, so the resolve never loads it; present only to satisfy the layout).
                 BindGroupEntry::StorageImage { texture: &ssao },
+                // CSM Increment 1b (Rung A): the cascade combined map+sampler @12 + UBO @13
+                // (bound-but-unread — `csm_mode == 0` here, so the resolve's PCF sample never runs).
+                BindGroupEntry::CombinedImage {
+                    texture: &csm_dummies.cascade,
+                    sampler: &csm_dummies.sampler,
+                },
+                BindGroupEntry::UniformBuffer { buffer: &csm_dummies.ubo },
             ],
         })
         .expect("deferred resolve bind group");
@@ -1607,6 +1695,8 @@ fn run_gbuffer_hybrid_m4(
         device.destroy_compute_pipeline(compute);
         device.destroy_bind_group_layout(resolve_layout);
         device.destroy_bind_group_layout(bind_layout);
+        // CSM Increment 1b: the OFF-path cascade trio bound at resolve @12/@13.
+        csm_dummies.destroy(device);
         device.destroy_graphics_pipeline(gfx);
         // M1 instance-model resources (bind group → buffer → layout, after the pipeline).
         device.destroy_bind_group(instance_bind_group);
@@ -1966,18 +2056,22 @@ fn run_gbuffer_hybrid_ssao(
         })
         .expect("vocabulary bind group");
 
-    // The 12-binding resolve layout (gSsao @11 = the C1 interface).
+    // The 14-binding resolve layout (gSsao @11 = the C1 interface; CSM cascade @12/@13).
     let resolve_kinds = [
         DescriptorKind::StorageImage, DescriptorKind::StorageImage, DescriptorKind::StorageImage,
         DescriptorKind::StorageImage, DescriptorKind::StorageBuffer, DescriptorKind::UniformBuffer,
         DescriptorKind::StorageBuffer, DescriptorKind::StorageImage, DescriptorKind::StorageBuffer,
         DescriptorKind::StorageBuffer, DescriptorKind::StorageBuffer, DescriptorKind::StorageImage,
+        // CSM Increment 1b (Rung A): the cascade combined map+sampler @12 + the cascade UBO @13.
+        DescriptorKind::CombinedImageSampler, DescriptorKind::UniformBuffer,
     ];
     let resolve_layout_entries: Vec<BindGroupLayoutEntry> = resolve_kinds
         .iter()
         .enumerate()
         .map(|(i, &kind)| BindGroupLayoutEntry { binding: i as u32, count: 1, kind, stage: ShaderStage::COMPUTE })
         .collect();
+    // CSM Increment 1b: the OFF-path cascade trio bound at resolve @12/@13 (bound-but-unread).
+    let csm_dummies = CsmResolveDummies::create(device);
     let resolve_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &resolve_layout_entries })
         .expect("deferred resolve bind-group layout");
@@ -2006,6 +2100,13 @@ fn run_gbuffer_hybrid_ssao(
                 BindGroupEntry::StorageBuffer { buffer: &buffer },
                 // Render P7: the SSAO term `gSsao` @11 — the SAME image the SSAO pass writes.
                 BindGroupEntry::StorageImage { texture: &ssao },
+                // CSM Increment 1b (Rung A): the cascade combined map+sampler @12 + UBO @13
+                // (bound-but-unread — `csm_mode == 0` here, so the resolve's PCF sample never runs).
+                BindGroupEntry::CombinedImage {
+                    texture: &csm_dummies.cascade,
+                    sampler: &csm_dummies.sampler,
+                },
+                BindGroupEntry::UniformBuffer { buffer: &csm_dummies.ubo },
             ],
         })
         .expect("deferred resolve bind group");
@@ -2250,6 +2351,8 @@ fn run_gbuffer_hybrid_ssao(
         device.destroy_bind_group_layout(ssao_layout);
         device.destroy_bind_group_layout(resolve_layout);
         device.destroy_bind_group_layout(bind_layout);
+        // CSM Increment 1b: the OFF-path cascade trio bound at resolve @12/@13.
+        csm_dummies.destroy(device);
         device.destroy_graphics_pipeline(gfx);
         // M1 instance-model resources (bind group → buffer → layout, after the pipeline).
         device.destroy_bind_group(instance_bind_group);
@@ -5139,7 +5242,14 @@ fn run_gbuffer_hybrid_lit_clustered(
         // STATICALLY declares `gSsao @11`, so the layout MUST declare it or the pipeline create
         // trips the binding-count check (the P6 R1 binding-10 discipline).
         BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        // CSM Increment 1b (Rung A): the cascade combined map+sampler @12 + the cascade UBO @13
+        // (`csm_mode == 0` here → bound-but-unread; the recompiled resolve STATICALLY references
+        // both).
+        CsmResolveDummies::layout_entries()[0],
+        CsmResolveDummies::layout_entries()[1],
     ];
+    // CSM Increment 1b: the OFF-path cascade trio bound at resolve @12/@13 (bound-but-unread).
+    let csm_dummies = CsmResolveDummies::create(device);
     let resolve_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &resolve_layout_entries })
         .expect("deferred resolve bind-group layout");
@@ -5171,6 +5281,13 @@ fn run_gbuffer_hybrid_lit_clustered(
                 // Render P7 GROUP C1: the SSAO term `gSsao` @11 (bound-but-unread — `ssao_mode`
                 // is 0 here, so the resolve never loads it; present only to satisfy the layout).
                 BindGroupEntry::StorageImage { texture: &ssao },
+                // CSM Increment 1b (Rung A): the cascade combined map+sampler @12 + UBO @13
+                // (bound-but-unread — `csm_mode == 0` here, so the resolve's PCF sample never runs).
+                BindGroupEntry::CombinedImage {
+                    texture: &csm_dummies.cascade,
+                    sampler: &csm_dummies.sampler,
+                },
+                BindGroupEntry::UniformBuffer { buffer: &csm_dummies.ubo },
             ],
         })
         .expect("deferred resolve bind group");
@@ -5525,6 +5642,8 @@ fn run_gbuffer_hybrid_lit_clustered(
         device.destroy_bind_group_layout(resolve_layout);
         device.destroy_bind_group_layout(cull_layout);
         device.destroy_bind_group_layout(bind_layout);
+        // CSM Increment 1b: the OFF-path cascade trio bound at resolve @12/@13.
+        csm_dummies.destroy(device);
         device.destroy_graphics_pipeline(gfx);
         // M1 instance-model resources (bind group → buffer → layout, after the pipeline).
         device.destroy_bind_group(instance_bind_group);

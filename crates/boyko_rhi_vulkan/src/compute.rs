@@ -264,8 +264,14 @@ static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<155040> = SpirvBlob(*include_bytes!(
 /// `generate_ray` inverse) + `sscs_march` (an unrolled 8-step screen-space depth march) multiplied
 /// into the per-light `vis` at both lighting sites, gated by `contact_shadow_mode` (header word 7
 /// bit 1; OFF on every pre-Phase-3 scene → the march block never runs → byte-identical, the
-/// 0%-gate); 26608 → 40652 bytes.
-static DEFERRED_PBR_SPV: SpirvBlob<40652> = SpirvBlob(*include_bytes!(concat!(
+/// 0%-gate); 26608 → 40652 bytes. CSM Increment 1b (Rung A) then added the cascade shadow-map
+/// SAMPLE: bindings 12/13/14 (`Texture2DArray<float> gCsm` + `SamplerComparisonState gCsmCmp` +
+/// the `CsmCascades` cbuffer mirroring `ResolvedCsm`) + the `csm_visibility` PCF helper +
+/// (gated by header word 7 bit 2 via `load_csm_mode`; OFF on every pre-CSM scene → the
+/// `SampleCmpLevelZero` never runs → the bound-but-unread cascade map/sampler/UBO are never
+/// sampled → byte-identical, the 0%-gate) the `vis = min(vis, csm_visibility(P, n))` combine on
+/// the primary directional; 40652 → 43316 bytes.
+static DEFERRED_PBR_SPV: SpirvBlob<43316> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/deferred_pbr.comp.spv"
 )));
@@ -324,6 +330,28 @@ static SDF_SSAO_MEDIUM_SPV: SpirvBlob<44968> = SpirvBlob(*include_bytes!(concat!
 static SDF_SSAO_HIGH_SPV: SpirvBlob<90160> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_ssao_high.comp.spv"
+)));
+
+/// The committed CSM Increment-1b Rung-A cascade DEPTH-PASS vertex SPIR-V
+/// (`shaders/csm_depth.vs.hlsl`). A GRAPHICS (`vs_6_0`) stage — the FIRST non-compute blob
+/// hosted here, so the resolve/depth-pass shaders live behind ONE `compute::*_spirv()`
+/// vocabulary. It reads the SAME set-0 binding-0 `InstanceModelCol` SSBO + the SAME 88-byte
+/// VERTEX push as `gbuffer_mrt.vs.hlsl`'s instanced arm, but projects by the CASCADE's
+/// world→light-clip matrix (push `@0`) instead of the camera view-proj, and outputs ONLY
+/// `SV_Position` (depth-only). Paired with [`csm_depth_fs_spirv`] in a depth-only graphics
+/// pipeline (EMPTY `color_formats`, `cull_mode: Front`, a slope+constant depth bias).
+static CSM_DEPTH_VS_SPV: SpirvBlob<2256> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/csm_depth.vs.spv"
+)));
+
+/// The committed CSM Increment-1b Rung-A cascade DEPTH-PASS fragment SPIR-V
+/// (`shaders/csm_depth.fs.hlsl`). An EMPTY (`ps_6_0`) stage: the cascade pass is depth-only
+/// (no color attachment), so the fragment writes nothing — the rasterizer's interpolated
+/// `SV_Position.z` is the cascade depth. Paired with [`csm_depth_vs_spirv`].
+static CSM_DEPTH_FS_SPV: SpirvBlob<156> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/csm_depth.fs.spv"
 )));
 
 /// A 4-byte-aligned wrapper around a committed SPIR-V byte blob so its address is
@@ -496,6 +524,29 @@ pub fn cluster_cull_spirv() -> &'static [u32] {
 #[inline]
 pub fn sdf_tile_cull_spirv() -> &'static [u32] {
     SDF_TILE_CULL_SPV.as_words()
+}
+
+/// The committed CSM Increment-1b Rung-A cascade DEPTH-PASS vertex SPIR-V as a `u32` word
+/// stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// Bound into a depth-only graphics pipeline (paired with [`csm_depth_fs_spirv`]); reads the
+/// foundation's set-0 `InstanceModelCol` SSBO + the 88-byte VERTEX push, projecting each
+/// caster instance into one cascade's light-clip space. The recorder pushes the cascade
+/// `view_proj` (`CascadeData.view_proj`, column-major) at offset 0 + `use_model_matrix == 1`.
+#[inline]
+pub fn csm_depth_vs_spirv() -> &'static [u32] {
+    CSM_DEPTH_VS_SPV.as_words()
+}
+
+/// The committed CSM Increment-1b Rung-A cascade DEPTH-PASS fragment SPIR-V as a `u32` word
+/// stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// EMPTY (depth-only); paired with [`csm_depth_vs_spirv`] in the cascade depth pipeline.
+#[inline]
+pub fn csm_depth_fs_spirv() -> &'static [u32] {
+    CSM_DEPTH_FS_SPV.as_words()
 }
 
 /// The committed Render P7 SSAO (HBAO-lite) SPIR-V as a `u32` word stream, ready for
@@ -4391,6 +4442,36 @@ impl GoldenLightHeader {
     #[inline]
     pub fn contact_shadow_mode(&self) -> u32 {
         (self.sky_diffuse[3].to_bits() >> 1) & 1
+    }
+
+    /// Sets the CSM Increment-1b `csm_mode` — Cascaded Shadow Maps — packed into BIT 2 of header
+    /// WORD 7 (`sky_diffuse.w`), the SAME word [`with_shadow_mode`](Self::with_shadow_mode) packs
+    /// `shadow_mode` (BIT 0) and [`with_contact_shadow_mode`](Self::with_contact_shadow_mode)
+    /// packs `contact_shadow_mode` (BIT 1) into. The header is FULL (16 words / 4 vec4), so a
+    /// spare BIT is used rather than a new word (which would shift `LIGHT_HEADER_BASE` and
+    /// re-encode every golden). `on` ORs/clears ONLY bit 2, preserving bits 0/1, so the three
+    /// flags are independent and order-agnostic. `false` leaves word 7 unchanged on a fresh
+    /// header (BIT 2 already 0 — the 0%-gate: every pre-CSM scene reads `csm_mode == 0`, so the
+    /// resolve's CSM sample block is never run and the bound-but-unread cascade map/sampler/UBO
+    /// are never sampled). Read GPU-side by `light_table.hlsli::load_csm_mode` (`(word7 >> 2) &
+    /// 1`).
+    #[inline]
+    pub fn with_csm_mode(mut self, on: bool) -> Self {
+        let mut word7 = self.sky_diffuse[3].to_bits();
+        if on {
+            word7 |= 0b100;
+        } else {
+            word7 &= !0b100;
+        }
+        self.sky_diffuse[3] = f32::from_bits(word7);
+        self
+    }
+
+    /// The CSM Increment-1b `csm_mode` (header word 7 BIT 2, bit-cast back from `sky_diffuse.w`).
+    /// 0 on every pre-CSM scene (the 0%-gate); 1 when the cascade shadow map is armed.
+    #[inline]
+    pub fn csm_mode(&self) -> u32 {
+        (self.sky_diffuse[3].to_bits() >> 2) & 1
     }
 
     /// Sets the Render P7 `ssao_mode` (header WORD 11 = `sky_spec.w`, read RAW by the
