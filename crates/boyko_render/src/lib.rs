@@ -102,6 +102,19 @@ pub mod mesh_draw;
 /// [`MeshGpu`] / [`Vertex`], the GPU vertex+index buffers a `MeshHandle` indexes.
 pub mod mesh_registry;
 pub mod render3d_plugin;
+/// Shadow Inc-1 — the sparse spot/point shadow-atlas slot-assignment policy
+/// ([`ShadowConfig`](shadow_atlas::ShadowConfig) +
+/// [`ResolvedShadowAtlas`](shadow_atlas::ResolvedShadowAtlas) Resources + the pure
+/// [`resolve_shadow_atlas_spots`](shadow_atlas::resolve_shadow_atlas_spots) top-K fit + the
+/// cold [`resolve_shadow_atlas`](shadow_atlas::resolve_shadow_atlas) policy +
+/// [`pack_atlas_slot`](shadow_atlas::pack_atlas_slot) light-table packing).
+pub mod shadow_atlas;
+/// Shadow Inc-1 — the structural per-LIGHT
+/// [`CastsPunctualShadow`](shadow_marker::CastsPunctualShadow) exact-shadow capability marker.
+pub mod shadow_marker;
+/// Shadow Inc-1 — the [`ShadowAtlasPlugin`](shadow_plugin::ShadowAtlasPlugin) that seeds the
+/// config substrate and schedules the cold slot-assignment policy.
+pub mod shadow_plugin;
 pub mod ssao_config;
 pub mod ssao_plugin;
 pub mod ui;
@@ -144,6 +157,13 @@ pub use material::{MATERIAL_GPU_WORDS, MaterialGpu, MaterialId};
 pub use mesh_registry::{
     MeshGpu, MeshRegistry, U16_INDEX_VERTEX_LIMIT, VERTEX_STRIDE as MESH_VERTEX_STRIDE, Vertex,
 };
+pub use shadow_atlas::{
+    ATLAS_SLOT_MASK, ATLAS_SLOT_SHIFT, CASTS_SHADOW_BIT, FaceTransform, M_SLOTS,
+    ResolvedShadowAtlas, SHADOW_DIM, SLOT_NONE, ShadowConfig, SpotShadowInput, light_atlas_slot,
+    pack_atlas_slot, resolve_shadow_atlas, resolve_shadow_atlas_spots, spot_priority,
+};
+pub use shadow_marker::CastsPunctualShadow;
+pub use shadow_plugin::ShadowAtlasPlugin;
 pub use ssao_config::{ResolvedSsao, SsaoConfig, SsaoQuality, resolve_ssao, resolve_ssao_policy};
 pub use ssao_plugin::SsaoPlugin;
 pub use view::{
