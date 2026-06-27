@@ -196,6 +196,16 @@ cbuffer Camera : register(b5) {
     // 16-aligned so the array packs contiguously (level L at byte 80 + L*48). Level 0 == the old M2
     // tail byte-for-byte (the OFF/N=1 keystone). 80 + 3*48 == 224 (`B5_CAMERA_UBO_BYTES_M4`).
     M4Level m2_levels[BRICK_LEVELS]; // offsets 80 / 128 / 176
+    // MDF Stage-2c — the dedicated dense mesh-SDF texture's grid transform (the b5 UBO tail at
+    // offset 224, `MESH_SDF_PARAMS_OFFSET`). Two std140 `float4` lanes mirroring the host
+    // `#[repr(C)] MeshSdfParams` (the offsets pinned host-side). Read ONLY by `mesh_sdf_sample`
+    // when `pc.mesh_sdf_enabled != 0`; the OFF path never touches it (an all-zero tail on a
+    // non-MDF scene, byte-identical output). 224 + 32 == 256 (`B5_CAMERA_UBO_BYTES_MESH_SDF`).
+    //   +0  : float4 mesh_sdf_origin_inv_voxel  xyz = grid min world corner, w = 1/voxel_size
+    //   +16 : float4 mesh_sdf_dims_band         xyz = grid dims [x,y,z] (f32; read via (uint)),
+    //                                           w = band_half (the snorm decode world scale)
+    float4 mesh_sdf_origin_inv_voxel; // offset 224
+    float4 mesh_sdf_dims_band;        // offset 240
 };
 
 // Render P4b: the per-tile coarse-cull bound, READ-ONLY here (the coarse pass writes
@@ -297,6 +307,22 @@ StructuredBuffer<uint> PointerGrid2 : register(t13); // M4 level 2 pointer grid
 [[vk::binding(14, 0)]] Texture3D<float>  BrickAtlas2   : register(t14);
 [[vk::binding(14, 0)]] SamplerState      BrickSampler2 : register(s14);
 
+// MDF Stage-2c — the DEDICATED DENSE mesh-SDF shadow-caster texture, binding 15 (the 16th / last
+// vocab entry, the 16-binding cap). A dense `grid_dim` `R8_SNORM` `Texture3D` holding one STATIC
+// mesh's baked signed-distance grid, baked CPU-side by `boyko_sdf_math::mesh_sdf::bake_dense_grid`
+// (the SAME `EPSILON_Q` down-bias + `encode_snorm8` the brick fill uses, so a TRILINEAR sample is a
+// CONSERVATIVE LOWER BOUND — sphere-trace-sound). UNLIKE the brick atlas (NEAREST cubic-corner
+// fetch, BUG-M2-GPU-1), this is sampled with a LINEAR sampler: the dense grid is a lower bound, so a
+// hardware trilinear blend never overshoots the true surface (the marcher's shadow march stays
+// sound). Read ONLY when `pc.mesh_sdf_enabled != 0` (`mesh_sdf_sample` / `sdf_soft_shadow_mesh`); the
+// OFF path never samples it (byte-identical to pre-MDF). The R2 contract holds: the marcher SPIR-V
+// STATICALLY references `MeshSdf`/`MeshSdfSampler` inside the runtime-gated mesh-shadow branch, so the
+// layout MUST declare binding 15 = combined-image-sampler and bind a VALID texture even when the MDF
+// path is gated OFF (the windowed-present / golden path runs `mesh_sdf_enabled == 0` →
+// bound-but-unread), or the layout VUIDs trip (the M2 binding-10 lesson).
+[[vk::binding(15, 0)]] Texture3D<float>  MeshSdf        : register(t15);
+[[vk::binding(15, 0)]] SamplerState      MeshSdfSampler : register(s15);
+
 // Mirrors `boyko_render::material::MATERIAL_GPU_WORDS` (48 B / 4 = 12). A documentation
 // + intent pin; the StructuredBuffer<MaterialGpu> element stride is the std430 layout.
 static const uint MATERIAL_GPU_WORDS = 12u;
@@ -360,7 +386,13 @@ static const uint DEFAULT_MATERIAL_ID = 0u;
 // `brick_levels == 1` (or 0) is the OFF/M2-identical path (`select_level` loops once over level 0); `> 1`
 // makes the marcher's branch-ladder dispatch the finest enclosing level (read from the b5 UBO array tail).
 //   offset 68 : uint   brick_levels     M4 clip-map level count; 1 (or 0) = OFF (byte-identical to M2)
-//   offset 72 : uint2  _pad3            tail pad to the 80-byte COMPOSITE stride
+//
+// MDF Stage-2c: the `mesh_sdf_enabled` gate @72 reuses the first M4 `_pad3` slot (the tail pad shrinks
+// to a single `uint _pad3` @76), so the struct SIZE is unchanged. `mesh_sdf_enabled == 0` is the OFF /
+// byte-identical path (the mesh-SDF texture @binding 15 is never sampled; the shadow march stays the
+// frozen analytic `sdf_soft_shadow`); `!= 0` marches `sdf_soft_shadow_mesh` (the mesh-aware union).
+//   offset 72 : uint   mesh_sdf_enabled MDF mesh-shadow gate; 0 = OFF (byte-identical to pre-MDF)
+//   offset 76 : uint   _pad3            tail pad to the 80-byte COMPOSITE stride
 [[vk::push_constant]] struct PushConstants {
     uint   coarse_enabled;  // offset 0 (unchanged)
     float  omega;           // offset 4 — Keinert over-relaxation factor, host-clamped [1.0, 1.99]
@@ -374,7 +406,8 @@ static const uint DEFAULT_MATERIAL_ID = 0u;
     float  brick_world;     // offset 60 — pointer-grid cell world size
     uint   brick_trilinear; // offset 64 — M2 trilinear+cubic gate; 0 = OFF (byte-identical to M1)
     uint   brick_levels;    // offset 68 — M4 clip-map level count; 1/0 = OFF (byte-identical to M2)
-    uint2  _pad3;           // offset 72 — tail pad to the 80-byte COMPOSITE stride
+    uint   mesh_sdf_enabled;// offset 72 — MDF Stage-2c mesh-shadow gate; 0 = OFF (byte-identical)
+    uint   _pad3;           // offset 76 — tail pad to the 80-byte COMPOSITE stride
 } pc;
 
 // P4b: the EMPTY flag bit (mirrors the host `TILE_FLAG_EMPTY` + sdf_tile_cull.hlsl).
@@ -436,6 +469,13 @@ static const float SHADOW_MINT_STEP = 16.0 * GRAD_H; // minimum per-step advance
 static const float SHADOW_HIT_EPS   = 2.0 * EPS;    // occluder-hit threshold
 static const float SHADOW_NDOTL_EPS = 0.0;          // signed n.L grazing/back-face cutoff
 static const float SHADOW_NORMAL_BIAS = 0.02;       // normal-offset march-origin lift (anti grazing-acne)
+// MDF Stage-2c self-shadow skip (anti mesh-self-acne). The mesh SDF is baked as a CONSERVATIVE LOWER
+// BOUND (a deliberate `EPSILON_Q*band_half` down-bias fattens the iso-surface), so within a few voxels
+// of a point ON the caster mesh the mesh field reads the surface's own fattened band as an occluder —
+// classic distance-field self-shadow acne. Suppress the mesh sample within this many GRID VOXELS of the
+// march origin (clears the down-bias band + the trilinear half-voxel error); real occlusion (the torus
+// hole, the far side of a tube) lies beyond it and is kept. Mirrors UE5's DF-shadow min-trace distance.
+static const float MESH_SELF_SHADOW_SKIP_VOXELS = 3.0;
 
 // A2 tuning (owner defaults). Mirror the host consts.
 static const float AO_STEP     = 0.1;   // step between the 5 taps along the normal
@@ -491,6 +531,88 @@ float sdf_ao(float3 p, float3 n) {
         occ += (h - d) * pow(AO_FALLOFF, (float)i);
     }
     return clamp(1.0 - AO_STRENGTH * occ, 0.0, 1.0);
+}
+
+// === MDF Stage-2c — the mesh-distance-field SHADOW caster (hand-written GLUE, like `edit_distance`;
+// NOT eDSL-generated). The visible mesh is RASTER-rendered (the perspective mesh path); this is its
+// INVISIBLE shadow proxy — a dense `R8_SNORM` 3D texture (binding 15) baked from the mesh by
+// `boyko_sdf_math::mesh_sdf::bake_dense_grid`. The marcher's shadow march unions it into the analytic
+// shadow field when `pc.mesh_sdf_enabled != 0`, so the mesh casts a soft SDF shadow with no per-frame
+// mesh work. SOUND by construction: the bake applies the same `EPSILON_Q*band_half` down-bias the
+// brick fill uses, so the decoded TRILINEAR sample is a CONSERVATIVE LOWER BOUND of the true mesh
+// signed distance (the Hart sphere-tracing precondition — a shadow-march step of that length can
+// never overshoot the surface). ===
+
+// Samples the dedicated dense mesh-SDF texture at world point `p`, returning the mesh's world-space
+// signed distance (a conservative lower bound). Transforms `p` into the grid's voxel space via the
+// b5 `MeshSdfParams` tail (`(p - grid_origin) * inv_voxel_size`); a point OUTSIDE the grid AABB
+// returns a LARGE POSITIVE (no occlusion — the mesh's shadow only exists within its baked band). A
+// point inside trilinear-samples the texture at the voxel CENTER UVW (`(voxel + 0.5) / dims` — the
+// dense grid stores voxel-center distances, the SAME centering `bake_dense_grid` baked at) and
+// decodes the snorm code to world units (× `band_half`, mirroring the host `decode_snorm8`). The
+// hardware LINEAR sampler does the trilinear blend; the lower-bound contract makes that blend sound.
+float mesh_sdf_sample(float3 p) {
+    float3 grid_origin = mesh_sdf_origin_inv_voxel.xyz;
+    float  inv_voxel   = mesh_sdf_origin_inv_voxel.w;
+    float3 dims        = mesh_sdf_dims_band.xyz;       // grid voxels per axis (as float)
+    float  band_half   = mesh_sdf_dims_band.w;
+
+    // World -> voxel coordinate (in [0, dims] across the grid; voxel i spans [i, i+1)).
+    float3 vox = (p - grid_origin) * inv_voxel;
+    // Outside the grid AABB -> no occlusion (a large positive, well past any march clearance).
+    if (any(vox < 0.0) || any(vox > dims)) {
+        return FAR;
+    }
+    // The voxel-center UVW: the stored distance at integer voxel `i` lives at the texel CENTER
+    // `(i + 0.5) / dims` (the dense grid is voxel-CENTER samples). Sampling at `vox / dims` would
+    // shift the field by half a voxel; the `vox`-relative half-voxel offset is already baked into
+    // `vox` being in [0, dims], so the texel center is `vox / dims` mapped through the texture's own
+    // half-texel convention. Clamp keeps an edge fetch reading the boundary texel (CLAMP_TO_EDGE).
+    float3 uvw = vox / dims;
+    float n = MeshSdf.SampleLevel(MeshSdfSampler, uvw, 0.0).r;
+    // Decode the snorm code to a world distance (mirror `decode_snorm8`: normalized * band_half).
+    return n * band_half;
+}
+
+// MDF Stage-2c soft shadow: a PARALLEL copy of the generated `sdf_soft_shadow` penumbra march whose
+// field is the mesh-AWARE union `min(field_distance(q), mesh_sdf_sample(q))`. Kept SEPARATE from the
+// generated `sdf_soft_shadow` (the eDSL byte-identity span is byte-untouched — the sync pins stay
+// green); the marcher calls THIS when `pc.mesh_sdf_enabled != 0`, the generated one otherwise. The
+// loop structure / tuning consts are IDENTICAL to `sdf_soft_shadow` (same penumbra estimate, same
+// Lipschitz-corrected step, same hit/miss bounds), so the analytic-only result is unchanged where the
+// mesh sample is far (FAR); the mesh only ADDS occlusion (a `min` can only lower the field).
+float sdf_soft_shadow_mesh(float3 p, float3 n, float3 L) {
+    if (dot(n, L) <= SHADOW_NDOTL_EPS) {
+        return 0.0; // surface faces away from the light — fully shadowed (and skips the march)
+    }
+    // START the march PAST the mesh's down-biased self-shadow band (a few grid voxels off the
+    // origin), so the caster's OWN fattened surface cannot self-shadow it (anti mesh-self-acne; this
+    // is UE5's distance-field min-trace distance). Beyond the start the mesh is sampled normally, so
+    // REAL occlusion is kept: the torus hole, a tube's far side, OR a SEPARATE mesh shadowing this
+    // surface. NOTE: gating the mesh sample to FAR inside the band (instead of advancing the start)
+    // is WRONG — with no analytic edits `field_distance` is also FAR there, so `d` would be FAR and
+    // the Lipschitz step would leap clear over the whole caster (no shadow at all). Advancing `t` is
+    // the correct, step-safe form. `mesh_sdf_origin_inv_voxel.w` is `1/voxel_size`.
+    float mesh_self_skip = MESH_SELF_SHADOW_SKIP_VOXELS / mesh_sdf_origin_inv_voxel.w;
+    float res = 1.0;
+    float t = max(SHADOW_MINT, mesh_self_skip);
+    [loop]
+    for (uint i = 0u; i < MAX_IT; ++i) {
+        float3 q = p + L * t;
+        // The mesh-aware shadow field: the analytic field UNIONED with the mesh's distance. A `min`
+        // preserves the lower-bound contract (both operands are lower bounds), so the march stays
+        // sound; the mesh contributes occlusion only where its baked band is nearer than the field.
+        float d = min(field_distance(q), mesh_sdf_sample(q));
+        res = min(res, SHADOW_K * d / t);
+        if (d < SHADOW_HIT_EPS) {
+            return 0.0;
+        }
+        t = t + max(d / FIELD_LIPSCHITZ_L, SHADOW_MINT_STEP);
+        if (t > T_MAX) {
+            break;
+        }
+    }
+    return clamp(res, 0.0, 1.0);
 }
 
 // Octahedral normal DECODE (the inverse of `oct_encode`; BYTE-IDENTICAL to the resolve's
@@ -1655,7 +1777,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 // (near-tangent) rays clear the curved surface instead of false-occluding it
                 // (the terminator "flame" acne). The GENERATED span marches `p_arg + L*t`, so
                 // lifting the first arg lifts the whole march. Mirrors host_shade's `pb`.
-                shadow = sdf_soft_shadow(p + n * SHADOW_NORMAL_BIAS, n, light);
+                // MDF Stage-2c: when the mesh-SDF shadow path is armed, march the mesh-AWARE
+                // shadow field (`min(field, mesh_sdf_sample)`) so a raster static mesh casts its
+                // SDF shadow onto SDF surfaces too; OFF (`mesh_sdf_enabled == 0`) is the frozen
+                // analytic `sdf_soft_shadow` (byte-identical — the texture is bound-but-unread).
+                shadow = (pc.mesh_sdf_enabled != 0u)
+                    ? sdf_soft_shadow_mesh(p + n * SHADOW_NORMAL_BIAS, n, light)
+                    : sdf_soft_shadow(p + n * SHADOW_NORMAL_BIAS, n, light);
             }
             if (pc.lighting_flags & LIGHTING_FLAG_AO) {
                 ao = sdf_ao(p, n);
@@ -1709,7 +1837,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
             if (pc.lighting_flags & LIGHTING_FLAG_SHADOWS) {
                 // Lift the march origin off the mesh surface (mirror the SDF arm's `pb` bias) so a
                 // grazing light does not self-occlude the wall at the contact rim.
-                mesh_shadow = sdf_soft_shadow(P_mesh + N_mesh * SHADOW_NORMAL_BIAS, N_mesh, light);
+                // MDF Stage-2c: this is the PRIMARY mesh-shadow site — a raster STATIC mesh casting
+                // its baked MDF soft shadow onto the raster mesh FLOOR (the visible-mesh-as-its-own-
+                // -shadow-proxy case). When `mesh_sdf_enabled`, march the mesh-aware union; OFF stays
+                // the frozen analytic `sdf_soft_shadow` (byte-identical — the texture bound-but-unread).
+                mesh_shadow = (pc.mesh_sdf_enabled != 0u)
+                    ? sdf_soft_shadow_mesh(P_mesh + N_mesh * SHADOW_NORMAL_BIAS, N_mesh, light)
+                    : sdf_soft_shadow(P_mesh + N_mesh * SHADOW_NORMAL_BIAS, N_mesh, light);
             }
             if (pc.lighting_flags & LIGHTING_FLAG_AO) {
                 mesh_ao = sdf_ao(P_mesh, N_mesh);

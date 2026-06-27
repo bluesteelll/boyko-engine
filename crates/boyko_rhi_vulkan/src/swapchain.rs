@@ -2934,7 +2934,12 @@ impl<'ctx> Renderer<'ctx> {
                 .with_brick_trilinear(true)
                 .with_brick_levels(a.levels),
             None => base.with_brick_levels(1),
-        };
+        }
+        // MDF Stage-2c: arm the mesh-distance-field SHADOW path. `false` (the default for every
+        // non-MDF scene) leaves the push byte-identical — the mesh-SDF texture @binding 15 is
+        // bound-but-unread, the shadow march stays the frozen analytic `sdf_soft_shadow` (the
+        // 0%-gate keeping the 41 hybrid goldens byte-exact). `true` marches `sdf_soft_shadow_mesh`.
+        .with_mesh_sdf(scene.mesh_sdf_enabled);
         // SAFETY: recording is open; the marcher pipeline + its layout (declaring
         // `vocab_layout` at set 0 AND the 80-byte COMPUTE push range) are live on this
         // device (caller contract); the vocabulary set binds the SSBO/UBO + the
@@ -4043,6 +4048,13 @@ pub struct GBufferScene<'a> {
     /// (DXC keeps them past the `brick_levels` gate), so the layout + set must bind VALID descriptors
     /// even on the OFF/N=1 path (`brick_levels == 1` takes only the lvl==0 arm → bound-but-unread).
     /// 6 brick bindings total (9..=14) under the 16-binding cap (`MAX_BIND_GROUP_BINDINGS`).
+    ///
+    /// The caller MUST likewise declare binding 15 = `DescriptorKind::CombinedImageSampler` (MDF
+    /// Stage-2c): the recompiled marcher SPIR-V STATICALLY references the dense mesh-SDF
+    /// `Texture3D MeshSdf : register(t15)` + `SamplerState MeshSdfSampler : register(s15)` inside the
+    /// runtime-gated `mesh_sdf_enabled` branch, so the layout + set must bind a VALID combined
+    /// image+sampler there even when the MDF path is gated OFF (`mesh_sdf_enabled == false` →
+    /// bound-but-unread). Binding 15 is the 16th / LAST slot under the 16-binding cap.
     pub vocab_layout: &'a VulkanBindGroupLayout,
     /// The edit-list StorageBuffer (binding 0), host-seeded ONCE before the loop.
     pub edit_list: &'a BoundBuffer,
@@ -4115,6 +4127,33 @@ pub struct GBufferScene<'a> {
     /// [`Self::level_atlases`]). NEAREST / clamp-to-edge / no-mip like [`Self::atlas_sampler`]. With no
     /// clipmap, bind level 0's sampler; `[0]` = level 1, `[1]` = level 2.
     pub level_atlas_samplers: [&'a VulkanSampler; 2],
+    /// MDF Stage-2c: the DEDICATED DENSE mesh-SDF shadow-caster 3D image (vocab binding 15): a static
+    /// mesh's baked `R8_SNORM` signed-distance grid ([`crate::mesh_sdf_texture::MeshSdfTexture`]'s
+    /// texture). Bound as a `COMBINED_IMAGE_SAMPLER` at binding 15 (with [`Self::mesh_sdf_sampler`]):
+    /// the recompiled marcher SPIR-V STATICALLY references `Texture3D MeshSdf : register(t15)` +
+    /// `SamplerState MeshSdfSampler : register(s15)` inside the runtime-gated `mesh_sdf_enabled`
+    /// branch, so the layout MUST declare binding 15 = `DescriptorKind::CombinedImageSampler` and bind a
+    /// VALID texture here even when the MDF path is gated OFF (`mesh_sdf_enabled == false` → bound-but-
+    /// unread, byte-identical output), or `vkCreateComputePipelines`/`vkCmdDispatch` trip the layout
+    /// VUIDs (the M2 binding-10 R2 lesson). For a non-MDF scene, bind a benign placeholder (e.g.
+    /// [`Self::atlas`] as a duplicate). Activating the MDF path is the per-frame
+    /// [`Self::mesh_sdf_enabled`] gate.
+    pub mesh_sdf: &'a VulkanTexture,
+    /// MDF Stage-2c: the mesh-SDF LINEAR / clamp-to-edge / no-mip sampler (vocab binding 15, alongside
+    /// [`Self::mesh_sdf`] in the combined-image-sampler). LINEAR is sound — the dense grid is a
+    /// conservative lower bound (a trilinear blend never overshoots). Pass
+    /// [`MeshSdfTexture::sampler`](crate::mesh_sdf_texture::MeshSdfTexture::sampler); for a non-MDF
+    /// scene a benign placeholder (e.g. [`Self::atlas_sampler`]).
+    pub mesh_sdf_sampler: &'a VulkanSampler,
+    /// MDF Stage-2c: the per-frame mesh-distance-field SHADOW gate stamped into the marcher's
+    /// [`FineMarcherPush`] `mesh_sdf_enabled` (offset 72). `false` (the default for every non-MDF
+    /// scene) keeps the push + output BYTE-IDENTICAL to pre-MDF — the mesh-SDF texture is
+    /// bound-but-unread, the shadow march stays the frozen analytic `sdf_soft_shadow` (the 0%-gate).
+    /// `true` marches `sdf_soft_shadow_mesh` (the mesh-aware union), so a raster static mesh casts its
+    /// baked MDF soft shadow. The caller MUST have written the b5 UBO's
+    /// [`MeshSdfParams`](crate::compute::MeshSdfParams) tail (the grid transform) when this is `true`.
+    /// A per-frame push field (no re-record on a flip).
+    pub mesh_sdf_enabled: bool,
     /// The sampler bound alongside the depth image at binding 1 (ignored by the
     /// marcher's unfiltered `.Load`, but the SAMPLED_IMAGE descriptor requires one).
     pub depth_sampler: &'a VulkanSampler,
@@ -4653,6 +4692,17 @@ impl GBufferTargets {
                 BindGroupEntry::CombinedImage {
                     texture: scene.level_atlases[1],
                     sampler: scene.level_atlas_samplers[1],
+                },
+                // MDF Stage-2c: the dedicated dense mesh-SDF shadow-caster image @15 as a
+                // COMBINED_IMAGE_SAMPLER (the marcher's trilinear `.SampleLevel` needs the sampler).
+                // Statically referenced by the recompiled marcher SPIR-V (`register(t15)` +
+                // `register(s15)`, collapsed to one combined descriptor by DXC) inside the
+                // runtime-gated `mesh_sdf_enabled` branch; a non-MDF scene gates the read OFF
+                // (`mesh_sdf_enabled == false`), so it is bound-but-unread (byte-identical output, the
+                // R2 contract). A non-MDF scene binds a benign placeholder (e.g. the brick atlas).
+                BindGroupEntry::CombinedImage {
+                    texture: scene.mesh_sdf,
+                    sampler: scene.mesh_sdf_sampler,
                 },
             ];
             let desc = BindGroupDesc::<Vulkan> {

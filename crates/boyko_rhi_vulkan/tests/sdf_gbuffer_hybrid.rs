@@ -992,6 +992,11 @@ fn run_gbuffer_hybrid_m4(
         BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        // MDF Stage-2c: the dedicated dense mesh-SDF shadow-caster texture @15 (the 16th / last vocab
+        // entry under the 16-binding cap). The recompiled marcher SPIR-V statically references
+        // `MeshSdf`@t15 + `MeshSdfSampler`@s15 inside the runtime-gated `mesh_sdf_enabled` branch, so
+        // the layout MUST declare binding 15 — bound-but-unread on the OFF golden path (no MDF scene).
+        BindGroupLayoutEntry { binding: 15, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
     ];
     let bind_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &layout_entries })
@@ -1071,6 +1076,12 @@ fn run_gbuffer_hybrid_m4(
                 BindGroupEntry::CombinedImage {
                     texture: level_atlas_tex(2),
                     sampler: level_atlas_smp(2),
+                },
+                // MDF Stage-2c @15: bind level 0's atlas as a benign placeholder (no MDF scene here);
+                // the marcher gates the read OFF (`mesh_sdf_enabled == 0`) → bound-but-unread (R2).
+                BindGroupEntry::CombinedImage {
+                    texture: level_atlas_tex(0),
+                    sampler: level_atlas_smp(0),
                 },
             ],
         })
@@ -1804,13 +1815,15 @@ fn run_gbuffer_hybrid_ssao(
         })
         .expect("mesh-MRT G-buffer producer graphics pipeline");
 
-    // The 15-binding vocabulary layout (the marcher's full interface, brick @9..=14 bound-but-unread).
+    // The 16-binding vocabulary layout (the marcher's full interface, brick @9..=14 bound-but-unread,
+    // mesh-SDF @15 bound-but-unread under the runtime-gated `mesh_sdf_enabled == 0` branch).
     let vocab_kinds = [
         DescriptorKind::StorageBuffer, DescriptorKind::SampledImage, DescriptorKind::StorageImage,
         DescriptorKind::StorageImage, DescriptorKind::StorageImage, DescriptorKind::UniformBuffer,
         DescriptorKind::StorageBuffer, DescriptorKind::StorageBuffer, DescriptorKind::StorageImage,
         DescriptorKind::StorageBuffer, DescriptorKind::CombinedImageSampler, DescriptorKind::StorageBuffer,
         DescriptorKind::CombinedImageSampler, DescriptorKind::StorageBuffer, DescriptorKind::CombinedImageSampler,
+        DescriptorKind::CombinedImageSampler,
     ];
     let vocab_layout_entries: Vec<BindGroupLayoutEntry> = vocab_kinds
         .iter()
@@ -1847,6 +1860,10 @@ fn run_gbuffer_hybrid_ssao(
                 BindGroupEntry::StorageBuffer { buffer: &pointer_grid_buffer },
                 BindGroupEntry::CombinedImage { texture: brick_atlas.texture(), sampler: brick_atlas.sampler() },
                 BindGroupEntry::StorageBuffer { buffer: &pointer_grid_buffer },
+                BindGroupEntry::CombinedImage { texture: brick_atlas.texture(), sampler: brick_atlas.sampler() },
+                // MDF Stage-2c @15: bind the brick atlas as a benign placeholder (no MDF scene here);
+                // the marcher gates the read OFF (`mesh_sdf_enabled == 0`), so it is bound-but-unread —
+                // the R2 contract (a VALID descriptor at the statically-referenced binding 15).
                 BindGroupEntry::CombinedImage { texture: brick_atlas.texture(), sampler: brick_atlas.sampler() },
             ],
         })
@@ -4886,6 +4903,11 @@ fn run_gbuffer_hybrid_lit_clustered(
         BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        // MDF Stage-2c: the dedicated dense mesh-SDF shadow-caster texture @15 (the 16th / last vocab
+        // entry under the 16-binding cap). The recompiled marcher SPIR-V statically references
+        // `MeshSdf`@t15 + `MeshSdfSampler`@s15 inside the runtime-gated `mesh_sdf_enabled` branch, so
+        // the layout MUST declare binding 15 — bound-but-unread on the OFF golden path (no MDF scene).
+        BindGroupLayoutEntry { binding: 15, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
     ];
     let bind_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &layout_entries })
@@ -4930,6 +4952,12 @@ fn run_gbuffer_hybrid_lit_clustered(
                     sampler: brick_atlas.sampler(),
                 },
                 BindGroupEntry::StorageBuffer { buffer: &material_table },
+                BindGroupEntry::CombinedImage {
+                    texture: brick_atlas.texture(),
+                    sampler: brick_atlas.sampler(),
+                },
+                // MDF Stage-2c @15: the brick atlas as a benign placeholder (no MDF scene); the marcher
+                // gates the read OFF (`mesh_sdf_enabled == 0`) → bound-but-unread (the R2 contract).
                 BindGroupEntry::CombinedImage {
                     texture: brick_atlas.texture(),
                     sampler: brick_atlas.sampler(),

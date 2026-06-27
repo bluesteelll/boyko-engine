@@ -63,9 +63,11 @@ use boyko_rhi::{
     SamplerDesc, ShaderStage, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use boyko_rhi_vulkan::compute::{
-    B5_CAMERA_UBO_BYTES_M4, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, CompositePushConstants,
-    EDITLIST_BUFFER_WORDS, GOLDEN_LIGHT_HEADER_BASE_WORDS, GoldenLight, GoldenLightHeader,
-    LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET,
+    B5_CAMERA_UBO_BYTES_M4, B5_CAMERA_UBO_BYTES_MESH_SDF, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode,
+    CompositePushConstants,
+    EDITLIST_BUFFER_WORDS, GOLDEN_LIGHT_HEADER_BASE_WORDS, GOLDEN_LIGHT_KIND_DIRECTIONAL,
+    GoldenLight, GoldenLightHeader,
+    LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET, MESH_SDF_PARAMS_OFFSET, MeshSdfParams,
     MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_TRACE_T_MAX,
     SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, CompositeCamera,
     encode_edit_list, deferred_pbr_spirv, golden_composite_pixel_ex, golden_deferred_resolve,
@@ -76,6 +78,8 @@ use boyko_rhi_vulkan::compute::{
     // Render P7-Q2: the SSAO quality-variant indices the ladder showcase selects between.
     SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM, SSAO_QUALITY_HIGH,
 };
+use boyko_rhi_vulkan::mesh_sdf_texture::MeshSdfTexture;
+use boyko_sdf_math::mesh_sdf::{BakeMesh, MeshSdfField};
 use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::ffi::{
@@ -390,6 +394,68 @@ fn mesh_box(center: [f32; 3], half: [f32; 3], color: [f32; 4]) -> Vec<Vertex> {
         verts.extend_from_slice(&mesh_quad(corners, n, color));
     }
     verts
+}
+
+/// A procedural TRIANGULATED TORUS centered at `center`, major radius `r_major` (ring), minor
+/// radius `r_minor` (tube), with `rings × sides` quads. The torus axis is +Z (the ring lies in the
+/// XY plane facing the ORTHO camera) — an ASYMMETRIC shape (a hole + a ring) so its cast shadow
+/// reads clearly on the floor. Returns BOTH the raster `Vertex` list (per-vertex outward normals for
+/// the G-buffer) AND the `(positions, indices)` the MDF baker consumes (the SAME geometry — the
+/// raster mesh IS its own shadow proxy). Used by the MDF Stage-2c demo.
+#[allow(clippy::type_complexity)]
+fn torus_mesh(
+    center: [f32; 3],
+    r_major: f32,
+    r_minor: f32,
+    rings: u32,
+    sides: u32,
+    color: [f32; 4],
+) -> (Vec<Vertex>, Vec<[f32; 3]>, Vec<[u32; 3]>) {
+    use core::f32::consts::PI;
+    // The (positions, normals) lattice: `(rings+1) × (sides+1)` so the seam wraps cleanly.
+    let row = sides + 1;
+    let mut pos: Vec<[f32; 3]> = Vec::with_capacity(((rings + 1) * row) as usize);
+    let mut nrm: Vec<[f32; 3]> = Vec::with_capacity(((rings + 1) * row) as usize);
+    for i in 0..=rings {
+        let u = 2.0 * PI * i as f32 / rings as f32; // around the ring (the major circle)
+        let (su, cu) = (u.sin(), u.cos());
+        for j in 0..=sides {
+            let v = 2.0 * PI * j as f32 / sides as f32; // around the tube (the minor circle)
+            let (sv, cv) = (v.sin(), v.cos());
+            // The tube-center on the major circle (in the XY plane, axis +Z).
+            let ring_x = r_major * cu;
+            let ring_y = r_major * su;
+            // The surface point: the tube offset by `r_minor` in the (radial, +Z) frame.
+            let p = [
+                center[0] + (ring_x + r_minor * cv * cu),
+                center[1] + (ring_y + r_minor * cv * su),
+                center[2] + r_minor * sv,
+            ];
+            // The outward normal = the surface point minus the tube center, normalized.
+            let n = [cv * cu, cv * su, sv];
+            pos.push(p);
+            nrm.push(n);
+        }
+    }
+
+    // The index list (two CCW triangles per quad) for BOTH the raster draw and the baker.
+    let mut verts: Vec<Vertex> = Vec::with_capacity((rings * sides * 6) as usize);
+    let mut indices: Vec<[u32; 3]> = Vec::with_capacity((rings * sides * 2) as usize);
+    for i in 0..rings {
+        for j in 0..sides {
+            let a = i * row + j;
+            let b = a + 1;
+            let c = (i + 1) * row + j;
+            let d = c + 1;
+            indices.push([a, c, b]);
+            indices.push([b, c, d]);
+            for &k in &[a, c, b, b, c, d] {
+                let k = k as usize;
+                verts.push(Vertex { position: pos[k], normal: nrm[k], color });
+            }
+        }
+    }
+    (verts, pos, indices)
 }
 
 /// The ORTHO world-XY of pixel `(px, py)`'s ray at the COMPOSITE extent — the
@@ -1094,6 +1160,12 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        // MDF Stage-2c: the dedicated dense mesh-SDF shadow-caster texture @15 (the 16th / last vocab
+        // entry under the 16-binding cap). The recompiled marcher SPIR-V statically references
+        // `MeshSdf`@t15 + `MeshSdfSampler`@s15 inside the runtime-gated `mesh_sdf_enabled` branch, so
+        // the layout MUST declare binding 15 — a VALID combined image+sampler must be bound even on
+        // the OFF path (`mesh_sdf_enabled == false` → bound-but-unread, byte-identical output).
+        BindGroupLayoutEntry { binding: 15, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
     ];
     let vocab_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -1229,6 +1301,12 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         level_grids: [clipmap.grid_buffer(1), clipmap.grid_buffer(2)],
         level_atlases: [clipmap.atlas(1).texture(), clipmap.atlas(2).texture()],
         level_atlas_samplers: [clipmap.sampler(1), clipmap.sampler(2)],
+        // MDF Stage-2c (binding 15): a non-MDF scene binds the brick atlas (level 0) as a benign
+        // placeholder + gates the mesh-shadow path OFF — the texture is bound-but-unread (the R2
+        // contract: a VALID descriptor must be bound, the read is gated by `mesh_sdf_enabled`).
+        mesh_sdf: clipmap.atlas(0).texture(),
+        mesh_sdf_sampler: clipmap.sampler(0),
+        mesh_sdf_enabled: false,
         depth_sampler: &depth_sampler,
         material_table: &material_table,
         light_table: &light_table,
@@ -1917,6 +1995,12 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        // MDF Stage-2c: the dedicated dense mesh-SDF shadow-caster texture @15 (the 16th / last vocab
+        // entry under the 16-binding cap). The recompiled marcher SPIR-V statically references
+        // `MeshSdf`@t15 + `MeshSdfSampler`@s15 inside the runtime-gated `mesh_sdf_enabled` branch, so
+        // the layout MUST declare binding 15 — a VALID combined image+sampler must be bound even on
+        // the OFF path (`mesh_sdf_enabled == false` → bound-but-unread, byte-identical output).
+        BindGroupLayoutEntry { binding: 15, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
     ];
     let vocab_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -2054,6 +2138,12 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         level_grids: [clipmap.grid_buffer(1), clipmap.grid_buffer(2)],
         level_atlases: [clipmap.atlas(1).texture(), clipmap.atlas(2).texture()],
         level_atlas_samplers: [clipmap.sampler(1), clipmap.sampler(2)],
+        // MDF Stage-2c (binding 15): a non-MDF scene binds the brick atlas (level 0) as a benign
+        // placeholder + gates the mesh-shadow path OFF — the texture is bound-but-unread (the R2
+        // contract: a VALID descriptor must be bound, the read is gated by `mesh_sdf_enabled`).
+        mesh_sdf: clipmap.atlas(0).texture(),
+        mesh_sdf_sampler: clipmap.sampler(0),
+        mesh_sdf_enabled: false,
         depth_sampler: &depth_sampler,
         material_table: &material_table,
         light_table: &light_table,
@@ -2384,6 +2474,20 @@ fn showcase_light_table() -> (GoldenLightHeader, Vec<GoldenLight>) {
     (header, lights)
 }
 
+/// The marcher's cast-shadow direction (`L`, direction TO the light) = the FIRST DIRECTIONAL light in
+/// the showcase's table, so the marched cast shadow lands where the resolve lights from (single
+/// source: the light table — no separate hardcoded sun vector to drift). Every existing showcase puts
+/// its `SHOWCASE_SUN_DIR` directional at element 0, so this is byte-identical to the prior
+/// `light_dir: SHOWCASE_SUN_DIR`; the MDF demo swaps in its own angled directional and this tracks it.
+/// Falls back to `SHOWCASE_SUN_DIR` if a table somehow carries no directional.
+fn marcher_light_dir(lights: &[GoldenLight]) -> [f32; 3] {
+    lights
+        .iter()
+        .find(|l| l.kind() == GOLDEN_LIGHT_KIND_DIRECTIONAL)
+        .map(|l| [l.dir_kind[0], l.dir_kind[1], l.dir_kind[2]])
+        .unwrap_or(SHOWCASE_SUN_DIR)
+}
+
 /// Packs a `GoldenLightHeader` + `GoldenLight[]` into the std430 light-table SSBO word stream
 /// (`[header (16 words) || GpuLight[] (12 words each)]`) the resolve reads at binding 6.
 /// Host mirror of `boyko_render::light`'s packing; identical to the offscreen test's
@@ -2458,6 +2562,13 @@ const CAPSULE_CHARACTER_BMP: &str = r"D:\tmp\engine_capsule_character.bmp";
 const CONTACT_SHADOW_OFF_BMP: &str = r"D:\tmp\engine_contact_shadow_off.bmp";
 const CONTACT_SHADOW_ON_BMP: &str = r"D:\tmp\engine_contact_shadow.bmp";
 
+/// MDF Stage-2c — the Mesh-Distance-Field shadow screenshot path: a PROCEDURAL static TORUS (an
+/// asymmetric shape — a ring with a hole, so its cast shadow reads) RASTER-rendered standing in
+/// front of the mesh floor, baked into the dedicated dense `MeshSdfTexture`, casting its baked MDF
+/// soft shadow onto the raster floor (the visible mesh IS its own invisible shadow proxy). The
+/// orchestrator runs the GPU test + converts the BMP.
+const MDF_SHADOW_BMP: &str = r"D:\tmp\engine_mdf_shadow.bmp";
+
 /// The per-showcase variable scene: the SDF edit list, the marcher/resolve camera push, the light
 /// table (header + elements), and the RASTER MESH (vertices + MVP). The shared [`run_showcase_dump`]
 /// body holds everything else (pipelines, barriers, the dump tail) constant. Built by the per-test
@@ -2485,7 +2596,20 @@ struct ShowcaseConfig {
     /// (no SSAO pass recorded — `scene.ssao = None` — AND `ssao_mode == 0`, the byte-identical 0%-gate
     /// reference for the ladder's `_off` frame). The builder sets the `ssao_mode` on `light_header`.
     ssao_quality: Option<usize>,
+    /// MDF Stage-2c — the mesh-distance-field SHADOW caster. `None` = no MDF (every existing
+    /// showcase): the marcher binds the brick atlas as a binding-15 placeholder + gates the
+    /// mesh-shadow path OFF (byte-identical). `Some((positions, indices))` = a static raster mesh
+    /// whose dense SDF is baked + uploaded into the [`crate::mesh_sdf_texture::MeshSdfTexture`] @15;
+    /// `run_showcase_dump` writes the [`MeshSdfParams`] b5 UBO tail + arms `mesh_sdf_enabled` so the
+    /// mesh casts its baked MDF soft shadow onto the raster floor. The mesh is the SAME geometry the
+    /// `vertices` raster draw renders (the visible mesh IS its own invisible shadow proxy).
+    mesh_sdf: Option<MeshSdfCaster>,
 }
+
+/// A static mesh's `(positions, triangle_indices)` — the MDF Stage-2c shadow-caster geometry the
+/// dense `MeshSdfTexture` baker consumes (a `type` alias so the `ShowcaseConfig` field + `torus_mesh`
+/// return stay readable — clippy::type_complexity).
+type MeshSdfCaster = (Vec<[f32; 3]>, Vec<[u32; 3]>);
 
 /// The default all-SDF perspective showcase config (the historical [`run_showcase_dump`] scene):
 /// the SDF floor + bodies, the down-looking [`showcase_camera`], the multi-light table, and the
@@ -2503,6 +2627,7 @@ fn showcase_config(ssao_quality: Option<usize>) -> ShowcaseConfig {
         vertices: showcase_quad_vertices(),
         mvp: ortho_mvp_bytes(),
         ssao_quality,
+        mesh_sdf: None,
     }
 }
 
@@ -2653,6 +2778,7 @@ fn mesh_ssao_config(ssao_quality: Option<usize>) -> ShowcaseConfig {
         vertices: quad_vertices().to_vec(),
         mvp: ortho_mvp_bytes(),
         ssao_quality,
+        mesh_sdf: None,
     }
 }
 
@@ -2827,6 +2953,7 @@ fn hybrid_room_config() -> ShowcaseConfig {
             COMPOSITE_W as f32 / COMPOSITE_H as f32,
         ),
         ssao_quality: None,
+        mesh_sdf: None,
     }
 }
 
@@ -2959,6 +3086,7 @@ fn capsule_character_config(contact_shadow: bool) -> ShowcaseConfig {
             COMPOSITE_W as f32 / COMPOSITE_H as f32,
         ),
         ssao_quality: None,
+        mesh_sdf: None,
     }
 }
 
@@ -3012,6 +3140,80 @@ fn engine_contact_shadow_on_512_screenshot_dump() {
         CONTACT_SHADOW_ON_BMP,
         capsule_character_config(true),
     );
+}
+
+/// The MDF Stage-2c showcase config (ORTHO mesh-floor frame): the raster mesh-floor quad + a
+/// PROCEDURAL TORUS standing in FRONT of it (between the floor at `MESH_Z == 1.0` and the camera at
+/// `SDF_CAMERA_Z == 2.0`), both RASTER-rendered, with the torus baked into the dedicated dense
+/// `MeshSdfTexture` and casting its MDF soft shadow onto the floor (the marcher's
+/// `sdf_soft_shadow_mesh` over the uploaded grid). NO SDF edits (the field is empty — the floor +
+/// torus are raster, and the SHADOW comes purely from the mesh SDF texture). `mesh_sdf_enabled` is
+/// armed by `run_showcase_dump` because `mesh_sdf` is `Some`.
+fn mdf_shadow_config() -> ShowcaseConfig {
+    // The shared raking upper-left sun (`SHOWCASE_SUN_DIR`, low +z) — `marcher_light_dir` feeds the
+    // SAME vector to the marcher push, so the cast shadow direction matches the lit direction. A
+    // raking (not head-on) sun is ESSENTIAL here: the torus faces the ORTHO camera and the floor is
+    // parallel to the image plane, so a +z-dominant (near-camera) light would cast the shadow almost
+    // straight BEHIND the torus — hidden by the torus's own silhouette ("flash photography"). The low
+    // +z (0.36) casts a LONG shadow offset down-and-right; the torus is parked HIGH-LEFT (below) so
+    // that long shadow lands fully on the open lower-right floor, clear of the torus.
+    let (light_header, light_elems) = showcase_light_table();
+
+    // The torus: parked HIGH-LEFT, axis +Z (the ring faces the ORTHO camera). Major radius 0.35
+    // (the ring), minor 0.14 (the tube — ~3.5 voxels across at the 0.04 bake voxel, well-resolved);
+    // 32 rings × 16 sides is smooth. Its raking-sun shadow casts down-right onto the open floor.
+    let torus_center = [-0.2, 0.5, 1.45];
+    let (torus_verts, torus_pos, torus_idx) =
+        torus_mesh(torus_center, 0.35, 0.14, 32, 16, [0.85, 0.55, 0.20, 1.0]);
+
+    // A FULL-FRAME floor wall at MESH_Z. The ORTHO view maps world [-1, 1] → screen [0, 512] on both
+    // axes, so a [-1.05, 1.05] quad overscans the frame edges — wherever the down-left cast shadow
+    // lands, it falls on LIT floor (the shared `quad_vertices` floor stops at x = 0.2, short of the
+    // shadow). White so the cool cast shadow is high-contrast.
+    let floor = mesh_quad(
+        [
+            [-1.05, -1.05, MESH_Z],
+            [1.05, -1.05, MESH_Z],
+            [1.05, 1.05, MESH_Z],
+            [-1.05, 1.05, MESH_Z],
+        ],
+        [0.0, 0.0, 1.0],
+        [1.0, 1.0, 1.0, 1.0],
+    );
+    // The raster geometry: the full-frame floor (faces +Z at MESH_Z) + the torus, drawn as ONE mesh.
+    let mut vertices = floor.to_vec();
+    vertices.extend_from_slice(&torus_verts);
+
+    ShowcaseConfig {
+        // No SDF edits — the scene is pure mesh (floor + torus raster) + the MDF shadow caster.
+        sdf: Vec::new(),
+        camera: CompositePushConstants::ortho(COMPOSITE_W, COMPOSITE_H),
+        // SSAO OFF (the deliverable is the cast MDF shadow, not ambient occlusion).
+        light_header: light_header.with_ssao_mode(0),
+        light_elems,
+        vertices,
+        mvp: ortho_mvp_bytes(),
+        ssao_quality: None,
+        // The MDF caster geometry the baker turns into the dense `MeshSdfTexture` — the SAME torus
+        // the raster draw renders (the visible mesh is its own invisible shadow proxy).
+        mesh_sdf: Some((torus_pos, torus_idx)),
+    }
+}
+
+/// **MDF Stage-2c — the mesh-distance-field shadow screenshot dump (the visual oracle).** Renders
+/// the ORTHO mesh floor + a raster TORUS standing in front of it ([`mdf_shadow_config`]), with the
+/// torus baked into the dedicated dense `MeshSdfTexture` and casting its baked MDF SOFT SHADOW onto
+/// the floor (the marcher's `sdf_soft_shadow_mesh` over the uploaded grid, `mesh_sdf_enabled`). The
+/// deliverable is the torus's ring+hole shadow reading on the floor — proof the dense mesh-SDF
+/// upload + the marcher's mesh-aware shadow march work end-to-end.
+///
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1` so the
+/// (broken-on-this-box) validation layer does not crash the process; the screenshot is the
+/// deliverable, not a golden assertion.
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the MDF-shadow screenshot"]
+fn engine_mdf_shadow_512_screenshot_dump() {
+    run_showcase_dump("boyko_engine MDF shadow 512", MDF_SHADOW_BMP, mdf_shadow_config());
 }
 
 /// The shared 512×512-native multi-light SDF-shadow + SSAO showcase dump body. `window_title` is
@@ -3116,10 +3318,30 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
     // shadows read as a 3D scene). The M4 tail stays zero (brick is held OFF for the showcase —
     // the analytic marcher is the crisp reference path; bindings 9..=14 still need VALID
     // descriptors below). ---
+    // MDF Stage-2c: when the showcase carries a mesh-SDF caster, bake its dense grid + upload the
+    // dedicated `MeshSdfTexture` (binding 15) and lay out its grid descriptor (the `MeshSdfField`
+    // the b5 `MeshSdfParams` tail mirrors). `None` (every other showcase) keeps the texture absent —
+    // the brick atlas placeholder is bound at 15 + the mesh-shadow path is gated OFF.
+    let mesh_sdf_texture: Option<MeshSdfTexture> = cfg.mesh_sdf.as_ref().map(|(pos, idx)| {
+        let mesh = BakeMesh::new(pos, idx);
+        // A voxel fine enough that the P2 lower-bound budget holds (`for_mesh` asserts it). The
+        // demo torus tube radius (~0.18) is well-resolved at this scale.
+        let field = MeshSdfField::for_mesh(&mesh, 0.04);
+        MeshSdfTexture::create(&ctx, &mesh, &field).expect("MDF mesh-SDF texture create + upload")
+    });
+    let mesh_sdf_enabled = mesh_sdf_texture.is_some();
+
+    // The b5 camera UBO is sized to 256 (`B5_CAMERA_UBO_BYTES_MESH_SDF`) when the MDF tail is
+    // written, else the 224-byte M4 size (the MDF tail then stays absent — bound-but-unread).
+    let ubo_bytes = if mesh_sdf_enabled {
+        B5_CAMERA_UBO_BYTES_MESH_SDF
+    } else {
+        B5_CAMERA_UBO_BYTES_M4
+    };
     let camera_uniform = RhiDevice::create_buffer(
         device,
         &BufferDesc {
-            size: B5_CAMERA_UBO_BYTES_M4 as u64,
+            size: ubo_bytes as u64,
             usage: BufferUsage::UNIFORM,
             location: MemoryLocation::HostVisibleCoherent,
         },
@@ -3132,11 +3354,28 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
             .expect("host-visible uniform buffer is mapped");
         let bytes = pc.as_bytes();
         debug_assert_eq!(bytes.len(), M2_GRID_PARAMS_OFFSET, "camera block must be 80 B");
-        // SAFETY: `mapped` points to `B5_CAMERA_UBO_BYTES_M4` (224) mapped host-coherent bytes;
-        // the 80-byte camera block is written at offset 0 (the M4 tail stays zero — brick OFF).
-        // No GPU work is in flight yet, so the host write is unsynchronized-safe.
+        // SAFETY: `mapped` points to `ubo_bytes` (224 or 256) mapped host-coherent bytes; the
+        // 80-byte camera block is written at offset 0 (the M4 tail stays zero — brick OFF). No GPU
+        // work is in flight yet, so the host write is unsynchronized-safe.
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+        }
+        // MDF Stage-2c: write the `MeshSdfParams` grid transform at offset 224 so the marcher's
+        // `mesh_sdf_sample` maps a world point into the texture's UVW + decodes to a world distance.
+        if let Some(tex) = mesh_sdf_texture.as_ref() {
+            let params = MeshSdfParams::from_field(tex.field());
+            let pbytes = params.as_bytes();
+            debug_assert_eq!(MESH_SDF_PARAMS_OFFSET + pbytes.len(), ubo_bytes);
+            // SAFETY: the buffer is `ubo_bytes` (256) here; the 32-byte block is written at
+            // `MESH_SDF_PARAMS_OFFSET` (224), entirely within the mapped range; unique host writer
+            // before any GPU work.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    pbytes.as_ptr(),
+                    mapped.as_ptr().add(MESH_SDF_PARAMS_OFFSET),
+                    pbytes.len(),
+                );
+            }
         }
     }
 
@@ -3314,6 +3553,12 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        // MDF Stage-2c: the dedicated dense mesh-SDF shadow-caster texture @15 (the 16th / last vocab
+        // entry under the 16-binding cap). The recompiled marcher SPIR-V statically references
+        // `MeshSdf`@t15 + `MeshSdfSampler`@s15 inside the runtime-gated `mesh_sdf_enabled` branch, so
+        // the layout MUST declare binding 15 — a VALID combined image+sampler must be bound even on
+        // the OFF path (`mesh_sdf_enabled == false` → bound-but-unread, byte-identical output).
+        BindGroupLayoutEntry { binding: 15, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
     ];
     let vocab_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -3470,6 +3715,16 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         level_grids: [clipmap.grid_buffer(1), clipmap.grid_buffer(2)],
         level_atlases: [clipmap.atlas(1).texture(), clipmap.atlas(2).texture()],
         level_atlas_samplers: [clipmap.sampler(1), clipmap.sampler(2)],
+        // MDF Stage-2c (binding 15): bind the REAL mesh-SDF texture when the showcase carries one
+        // (and arm `mesh_sdf_enabled` so the marcher marches `sdf_soft_shadow_mesh`); else bind the
+        // brick atlas as a benign placeholder + gate OFF (bound-but-unread — the R2 contract).
+        mesh_sdf: mesh_sdf_texture
+            .as_ref()
+            .map_or_else(|| clipmap.atlas(0).texture(), |t| t.texture()),
+        mesh_sdf_sampler: mesh_sdf_texture
+            .as_ref()
+            .map_or_else(|| clipmap.sampler(0), |t| t.sampler()),
+        mesh_sdf_enabled,
         depth_sampler: &depth_sampler,
         material_table: &material_table,
         light_table: &light_table,
@@ -3500,9 +3755,10 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         // shadow toward `light_dir` (the sun) into `gMaterial.r`, which the resolve's PRIMARY
         // directional consumes — so the sphere/box cast a real shadow ACROSS the SDF floor.
         lighting_flags: LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
-        // The sun direction (`L`, direction TO the light) — MUST equal the primary directional in
-        // `showcase_light_table` so the marched cast shadow lands where the resolve lights from.
-        light_dir: SHOWCASE_SUN_DIR,
+        // The sun direction (`L`, direction TO the light) — the table's first directional, so the
+        // marched cast shadow lands where the resolve lights from (`marcher_light_dir`; byte-identical
+        // to the prior hardcoded `SHOWCASE_SUN_DIR` for every showcase that uses it).
+        light_dir: marcher_light_dir(&cfg.light_elems),
         // Render P7 / P7-Q2: SSAO is ON only when `cfg.ssao_quality` selected a variant — the
         // recorder then records the SSAO pass (BETWEEN the marcher→resolve barrier and the resolve)
         // that writes the `ssao` lane the resolve combines (`ssao_mode == 1`, armed on `light_header`
@@ -3652,6 +3908,11 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         RhiDevice::destroy_sampler(device, depth_sampler);
         RhiDevice::destroy_buffer(device, vertex_buffer);
         RhiDevice::destroy_buffer(device, tiles_buffer);
+        // MDF Stage-2c: destroy the mesh-SDF texture (if the showcase created one). The device is
+        // idle (the renderer's Drop waited), so no submission still samples it.
+        if let Some(t) = mesh_sdf_texture {
+            t.destroy(&ctx);
+        }
         clipmap.destroy(&ctx);
         RhiDevice::destroy_buffer(device, light_staging);
         RhiDevice::destroy_buffer(device, light_table);

@@ -89,6 +89,7 @@ pub mod device;
 pub mod error;
 pub mod ffi;
 pub mod memory;
+pub mod mesh_sdf_texture;
 pub mod rhi_impl;
 pub mod suballocator;
 pub mod swapchain;

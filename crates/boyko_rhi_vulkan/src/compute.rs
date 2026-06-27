@@ -66,6 +66,7 @@ use boyko_sdf_math::brick::{
     dirty_world_aabb, fill_brick, for_each_revealed_cell, snapped_level_origin,
     snapped_level_origin_cell, toroidal_slot, voxel_size_at_level,
 };
+use boyko_sdf_math::mesh_sdf::MeshSdfField;
 use boyko_sdf_math::{BrickClass, SDF_EDIT_BAND_HALF, SdfEditAabb, SdfEditField};
 
 use crate::ffi::VkResult;
@@ -191,7 +192,18 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// reconstructs the real mesh `P` (in-range point/spot lighting) AND the SSAO pass processes mesh
 /// pixels. The SDF-hit branch (real `t`) and the pure-background branch (no mesh → `1.0e30`) are
 /// UNCHANGED; the two new `has_mesh ? t_mesh : 1.0e30` selects + the empty-tile select add → 122988 bytes.
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<143584> = SpirvBlob(*include_bytes!(concat!(
+/// (Later SSAO + quality-ladder work grew it to 143584.) MDF Stage-2c (mesh-distance-field shadows)
+/// then added: the `cbuffer Camera` b5 `MeshSdfParams` tail (2 `float4` lanes @224/240), the dedicated
+/// dense mesh-SDF `Texture3D MeshSdf`/`SamplerState MeshSdfSampler` @binding 15, the hand-written
+/// `mesh_sdf_sample` glue (world→UVW transform + LINEAR fetch + snorm decode) + the parallel
+/// `sdf_soft_shadow_mesh` march (the generated `sdf_soft_shadow` span byte-UNTOUCHED — the eDSL pins
+/// stay green), and the `pc.mesh_sdf_enabled ? sdf_soft_shadow_mesh : sdf_soft_shadow` select at the
+/// TWO shadow call sites (the SDF-surface arm + the mesh-floor arm). `mesh_sdf_enabled == 0` keeps the
+/// OFF path byte-identical (the texture is bound-but-unread, the analytic march stands — the 0%-gate),
+/// so the 41 `sdf_gbuffer_hybrid` goldens (no MDF scene) stay byte-exact → 155024 bytes (VulkanSDK
+/// 1.4.350.0 dxc; the +96 over 154928 is the `mesh_self_skip` self-shadow START-offset in
+/// `sdf_soft_shadow_mesh`, anti mesh-self-acne — see the shader's MESH_SELF_SHADOW_SKIP_VOXELS).
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<155024> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
 )));
@@ -1613,9 +1625,16 @@ pub struct FineMarcherPush {
     ///
     /// [`with_brick_levels`]: Self::with_brick_levels
     pub brick_levels: u32,
-    /// std430 tail padding (offsets 72/76) to the 80-byte COMPOSITE push stride. Mirrors the
-    /// shader's `uint2 _pad3`. Don't-care (the shader never reads it).
-    pub _pad3: [u32; 2],
+    /// MDF Stage-2c: the mesh-distance-field SHADOW gate (offset 72). Non-zero makes the
+    /// marcher's shadow march union the mesh SDF texture (binding 15) into the analytic
+    /// shadow field (`min(field_distance(q), mesh_sdf_sample(q))` via `sdf_soft_shadow_mesh`).
+    /// `0` = the OFF path (byte-identical to pre-MDF — the texture is bound-but-unread, the
+    /// shadow march stays the frozen analytic `sdf_soft_shadow`). Reuses the first M4 `_pad3`
+    /// slot, so the struct SIZE is unchanged. Set via [`with_mesh_sdf`](Self::with_mesh_sdf).
+    pub mesh_sdf_enabled: u32,
+    /// std430 tail padding (offset 76) to the 80-byte COMPOSITE push stride. Mirrors the
+    /// shader's trailing `uint _pad3`. Don't-care (the shader never reads it).
+    pub _pad3: u32,
 }
 
 /// Byte size of [`FineMarcherPush`] — the marcher's COMPUTE push range (80 bytes), exactly the
@@ -1648,7 +1667,12 @@ const _: () = assert!(core::mem::offset_of!(FineMarcherPush, brick_trilinear) ==
 // to `[u32; 2]` @72/76), so the struct stays EXACTLY the declared 80-byte COMPOSITE push range. A
 // non-default `brick_levels` GPU test catches a packing slip the way the brick_trilinear@64 pin does.
 const _: () = assert!(core::mem::offset_of!(FineMarcherPush, brick_levels) == 68);
-const _: () = assert!(core::mem::offset_of!(FineMarcherPush, _pad3) == 72);
+// MDF Stage-2c: the `mesh_sdf_enabled` gate @72 reuses the first M4 `_pad3` slot (the tail pad
+// shrinks to a single `u32` @76), so the struct stays EXACTLY the declared 80-byte COMPOSITE
+// range. A non-default `mesh_sdf_enabled` GPU test catches a packing slip the way the
+// brick_levels@68 pin does.
+const _: () = assert!(core::mem::offset_of!(FineMarcherPush, mesh_sdf_enabled) == 72);
+const _: () = assert!(core::mem::offset_of!(FineMarcherPush, _pad3) == 76);
 const _: () = assert!(GBUFFER_MARCHER_PUSH_BYTES == 80, "FineMarcherPush must be 80 bytes");
 const _: () = assert!(
     GBUFFER_MARCHER_PUSH_BYTES == COMPOSITE_PUSH_CONSTANT_BYTES,
@@ -1704,7 +1728,8 @@ impl FineMarcherPush {
             brick_world: 0.0,
             brick_trilinear: 0,
             brick_levels: 0,
-            _pad3: [0, 0],
+            mesh_sdf_enabled: 0,
+            _pad3: 0,
         }
     }
 
@@ -1758,11 +1783,27 @@ impl FineMarcherPush {
         self
     }
 
+    /// Enables the MDF Stage-2c mesh-distance-field SHADOW path: turns on `mesh_sdf_enabled`. The
+    /// marcher's shadow march then unions the mesh SDF texture (binding 15) into the analytic
+    /// shadow field (`min(field_distance(q), mesh_sdf_sample(q))` via `sdf_soft_shadow_mesh`), so a
+    /// raster-rendered static mesh casts a soft SDF shadow without any per-frame mesh work. The grid
+    /// transform the sample needs (`grid_origin`, `inv_voxel_size`, `grid_dim`, `band_half`) lives in
+    /// the b5 camera UBO tail ([`MeshSdfParams`]), NOT the push, so this gate carries no extra fields.
+    /// The other gates (`coarse_enabled` / `omega` / lighting / the brick gates) are preserved.
+    ///
+    /// `enabled == false` leaves the push byte-identical to the prior state (the OFF path — the mesh
+    /// SDF texture is never sampled, the shadow march stays the frozen analytic `sdf_soft_shadow`).
+    #[inline]
+    pub const fn with_mesh_sdf(mut self, enabled: bool) -> Self {
+        self.mesh_sdf_enabled = enabled as u32;
+        self
+    }
+
     /// Re-views the push constants as their raw 80-byte slice for `push_constants`.
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {
-        // SAFETY: `Self` is `#[repr(C)]` with only `u32` / `f32` / `[f32; 3]` / `[u32; 3]` /
-        // `[u32; 2]` fields (all `Copy`, every offset + the 80-byte total pinned by the const-asserts
+        // SAFETY: `Self` is `#[repr(C)]` with only `u32` / `f32` / `[f32; 3]` / `[u32; 3]`
+        // fields (all `Copy`, every offset + the 80-byte total pinned by the const-asserts
         // above, no uninit padding — the explicit `_pad`/`_pad2`/`brick_levels`/`_pad3` fields cover
         // the std430 holes), so its `size_of` bytes are a fully-initialized, alignment-valid POD bit
         // pattern. The `&self` borrow keeps the struct alive for the slice's lifetime; the slice is
@@ -2665,6 +2706,95 @@ impl M4GridParams {
         };
         bytes.copy_from_slice(src);
         bytes
+    }
+}
+
+// ===========================================================================
+// MDF Stage-2c — the MESH-DISTANCE-FIELD grid transform UBO TAIL ([`MeshSdfParams`]): the
+// b5 camera-UBO tail block carrying the dedicated dense mesh-SDF texture's world transform,
+// appended AFTER the M4 clip-map array (at [`MESH_SDF_PARAMS_OFFSET`]). The marcher's
+// `mesh_sdf_sample` reads it to map a world point into the texture's `[0,1]³` UVW and decode
+// the snorm sample to a world distance. Written ONLY when the MDF shadow path is active; the
+// OFF path leaves it zero (the texture is bound-but-unread — byte-identical output).
+// ===========================================================================
+
+/// The byte offset of the [`MeshSdfParams`] block inside the b5 camera UBO, right after the
+/// 224-byte M4 clip-map tail ([`B5_CAMERA_UBO_BYTES_M4`]). The host writes
+/// `MeshSdfParams::from_field(field).as_bytes()` here when the MDF shadow path is armed.
+pub const MESH_SDF_PARAMS_OFFSET: usize = B5_CAMERA_UBO_BYTES_M4;
+
+/// The grid-transform block the marcher's `mesh_sdf_sample` reads to fetch the dedicated dense
+/// mesh-SDF texture (MDF Stage-2c). `#[repr(C)]`, 32 bytes — two std140 `vec4` lanes mirroring
+/// the shader's `cbuffer Camera` `MeshSdfParams` fields:
+///
+/// - lane 0 `origin_inv_voxel` — `xyz` = the grid min world corner (`grid_origin`), `w` =
+///   `1.0 / voxel_size` (the world→voxel scale the sample multiplies the offset by).
+/// - lane 1 `dims_band` — `xyz` = the grid dims `[x, y, z]` as `f32` (read as `uint3` via a
+///   `(uint)` cast — an exact small-integer round trip), `w` = `band_half` (the snorm decode
+///   world scale, `decode_snorm8`'s `× band_half` step).
+///
+/// The grid voxel CENTER of voxel `i` is `grid_origin + (i + 0.5) * voxel_size`, so the
+/// texture-space UVW of a world point `p` is `((p - grid_origin) * inv_voxel_size) / dims`
+/// (the marcher applies the `/ dims` to land on `[0,1]³` for the hardware trilinear fetch). The
+/// offsets are pinned by the const-asserts below so a host/shader desync is a build error.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeshSdfParams {
+    /// Lane 0: `xyz` = the grid min world corner, `w` = `1.0 / voxel_size`.
+    pub origin_inv_voxel: [f32; 4],
+    /// Lane 1: `xyz` = the grid dims `[x, y, z]` as `f32` (read as `uint3`), `w` = `band_half`.
+    pub dims_band: [f32; 4],
+}
+
+/// Byte size of [`MeshSdfParams`] — two std140 `vec4` lanes (32 B), the b5 UBO MDF tail.
+pub const MESH_SDF_PARAMS_BYTES: usize = core::mem::size_of::<MeshSdfParams>();
+
+/// The b5 camera-UBO byte size widened for the MDF Stage-2c grid transform: the 224-byte M4 UBO
+/// ([`B5_CAMERA_UBO_BYTES_M4`]) + the 32-byte [`MeshSdfParams`] tail (`= 256`). The MDF demo
+/// write path uses this; the M4 write site keeps [`B5_CAMERA_UBO_BYTES_M4`] (the MDF block is
+/// zero / bound-but-unread on the non-MDF path).
+pub const B5_CAMERA_UBO_BYTES_MESH_SDF: usize = MESH_SDF_PARAMS_OFFSET + MESH_SDF_PARAMS_BYTES;
+
+const _: () = assert!(core::mem::offset_of!(MeshSdfParams, origin_inv_voxel) == 0);
+const _: () = assert!(core::mem::offset_of!(MeshSdfParams, dims_band) == 16);
+const _: () = assert!(MESH_SDF_PARAMS_BYTES == 32, "MeshSdfParams must be 32 bytes (2 vec4 lanes)");
+const _: () = assert!(
+    B5_CAMERA_UBO_BYTES_MESH_SDF == 256,
+    "the MDF block must extend the b5 UBO to 256 bytes (224 + 32)"
+);
+
+impl MeshSdfParams {
+    /// Builds the MDF grid-transform block from a baked [`MeshSdfField`] (Stage-2a), the SAME
+    /// descriptor the [`crate::mesh_sdf_texture::MeshSdfTexture`] was baked + uploaded with.
+    #[inline]
+    pub fn from_field(field: &MeshSdfField) -> Self {
+        Self {
+            origin_inv_voxel: [
+                field.grid_origin[0],
+                field.grid_origin[1],
+                field.grid_origin[2],
+                1.0 / field.voxel_size,
+            ],
+            dims_band: [
+                field.grid_dim[0] as f32,
+                field.grid_dim[1] as f32,
+                field.grid_dim[2] as f32,
+                field.band_half,
+            ],
+        }
+    }
+
+    /// Re-views the block as its raw 32-byte slice for the b5 UBO write (at
+    /// [`MESH_SDF_PARAMS_OFFSET`]).
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `Self` is `#[repr(C)]` with only `[f32; 4]` fields (all `Copy`, every offset +
+        // the 32-byte total pinned by the const-asserts above, no uninit padding — two packed
+        // vec4 lanes), so its `size_of` bytes are a fully-initialized, alignment-valid POD bit
+        // pattern. The `&self` borrow keeps the struct alive for the slice's lifetime; read-only.
+        unsafe {
+            slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
+        }
     }
 }
 

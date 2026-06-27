@@ -764,6 +764,77 @@ pub fn fill_brick_from_mesh(
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// bake_dense_grid — the MDF Stage-2c DENSE grid (a non-sparse analog of
+// fill_brick_from_mesh for the dedicated R8_SNORM 3D shadow texture).
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Bakes the WHOLE [`MeshSdfField`] grid as a DENSE row-major `R8_SNORM` byte image —
+/// the MDF Stage-2c shadow-caster texture (one static mesh at 64-128³ does not need
+/// the sparse brick-atlas; a dense 3D texture is a legitimate GPU buffer, principle 0).
+///
+/// IDENTICAL distance/bias/encode contract to [`fill_brick_from_mesh`], walked over the
+/// DENSE `field.grid_dim` lattice instead of one apron'd brick: per voxel the sample is
+/// taken at the voxel WORLD CENTER `grid_origin + (i + 0.5) * voxel_size`, biased DOWN by
+/// the SAME `EPSILON_Q * band_half` slack, and quantized with the SAME
+/// [`encode_snorm8`](crate::brick::encode_snorm8). The output is row-major
+/// `x + y*W + z*W*H` (`W = grid_dim.x`, `H = grid_dim.y`) — the layout a `VK_IMAGE_TYPE_3D`
+/// `copy_buffer_to_image` consumes tightly-packed, and the SAME order the GPU
+/// `mesh_sdf_sample` trilinear fetch addresses.
+///
+/// The down-bias keeps the DECODED TRILINEAR reconstruction `<=` the true mesh signed
+/// distance at every interior point (the C2 conservative-lower-bound contract — a plain
+/// trilinear sample of this grid is sphere-trace-sound, the Hart precondition the marcher's
+/// shadow march relies on). A prebuilt [`TriBvh`] over `mesh` is reused across every voxel.
+///
+/// Returns a heap `Vec<i8>` of `grid_dim.x * grid_dim.y * grid_dim.z` bytes (bake-time
+/// only — never the marcher's hot path; the GPU samples the uploaded texture).
+pub fn bake_dense_grid(mesh: &BakeMesh, field: &MeshSdfField) -> Vec<i8> {
+    let bvh = build_tri_bvh(mesh);
+    bake_dense_grid_with_bvh(mesh, &bvh, field)
+}
+
+/// [`bake_dense_grid`] with a CALLER-OWNED prebuilt [`TriBvh`] (build it once, reuse it
+/// across the dense bake AND any brick bakes). The distance/bias/encode/layout contract is
+/// identical; this split keeps the BVH construction out of the inner loop and testable in
+/// isolation.
+pub fn bake_dense_grid_with_bvh(mesh: &BakeMesh, bvh: &TriBvh, field: &MeshSdfField) -> Vec<i8> {
+    // The SAME P2 dominance assert fill_brick_from_mesh runs — a mis-sized grid trips at
+    // bake time, not as a silent over-reporting (light-leaking) field.
+    debug_assert!(
+        EPSILON_Q * field.band_half
+            >= field.voxel_size * field.voxel_size * field.c_max / 8.0 + field.band_half / 254.0,
+        "EPSILON_Q under-bounds curvature+quant at this (voxel, band, c_max) — the dense \
+         grid's per-voxel lower-bound budget is broken for this mesh band"
+    );
+
+    let bias = EPSILON_Q * field.band_half;
+    let [w, h, d] = field.grid_dim;
+    let (w, h, d) = (w as usize, h as usize, d as usize);
+
+    let mut out = Vec::with_capacity(w * h * d);
+    for z in 0..d {
+        for y in 0..h {
+            for x in 0..w {
+                // The voxel WORLD CENTER: `grid_origin + (i + 0.5) * voxel_size`. No apron
+                // here — the dense grid IS the whole lattice, so its outer voxels are the
+                // texture edges (the GPU sampler's CLAMP_TO_EDGE handles an out-of-grid fetch).
+                let p = [
+                    field.grid_origin[0] + (x as f32 + 0.5) * field.voxel_size,
+                    field.grid_origin[1] + (y as f32 + 0.5) * field.voxel_size,
+                    field.grid_origin[2] + (z as f32 + 0.5) * field.voxel_size,
+                ];
+                let dist = mesh_signed_distance_bvh(bvh, mesh, p);
+                // Conservative store: subtract the slack so decode <= true distance. The
+                // SAME encoder fill_brick_from_mesh uses (single-source byte-parallelism).
+                out.push(crate::brick::encode_snorm8(dist - bias, field.band_half));
+            }
+        }
+    }
+    debug_assert_eq!(out.len(), w * h * d, "dense grid must be grid_dim.x*y*z bytes");
+    out
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // classify_brick_from_mesh — BYTE-PARALLEL to brick.rs::classify_brick.
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -1073,6 +1144,66 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn bake_dense_grid_is_a_conservative_lower_bound() {
+        // The MDF Stage-2c soundness gate: the dense grid's DECODED + BIASED value must be
+        // a CONSERVATIVE LOWER BOUND of the true mesh signed distance over a voxel-center
+        // sweep — so a plain trilinear sample of it is sphere-trace-sound (the Hart
+        // precondition the marcher's shadow march relies on). Mirrors
+        // `fill_brick_from_mesh_is_a_conservative_lower_bound_box` for the whole dense grid.
+        let center = [0.0, 0.0, 0.0];
+        let h = [0.6, 0.5, 0.7];
+        let (pos, idx) = box_mesh(center, h);
+        let mesh = BakeMesh::new(&pos, &idx);
+
+        // A voxel fine enough that the P2 budget holds (`for_mesh` asserts it on construct).
+        let field = MeshSdfField::for_mesh(&mesh, 0.125);
+        let grid = bake_dense_grid(&mesh, &field);
+
+        let [w, hh, _d] = field.grid_dim;
+        let (w, hh) = (w as usize, hh as usize);
+        let band_half = field.band_half;
+
+        for z in 0..field.grid_dim[2] as usize {
+            for y in 0..hh {
+                for x in 0..w {
+                    let p = [
+                        field.grid_origin[0] + (x as f32 + 0.5) * field.voxel_size,
+                        field.grid_origin[1] + (y as f32 + 0.5) * field.voxel_size,
+                        field.grid_origin[2] + (z as f32 + 0.5) * field.voxel_size,
+                    ];
+                    let decoded = decode_snorm8(grid[x + y * w + z * w * hh], band_half);
+                    let truth = mesh_signed_distance(&mesh, p);
+                    // Only the in-band samples are a meaningful bound (saturated codes sit at
+                    // ±band_half, trivially below a far true |d|). +1e-4 absorbs fp rounding
+                    // of the two distance paths (well under one snorm step).
+                    if truth.abs() < band_half {
+                        assert!(
+                            decoded <= truth + 1e-4,
+                            "dense lower-bound violated at {p:?}: decoded={decoded} > \
+                             truth={truth}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bake_dense_grid_has_grid_dim_byte_count() {
+        // The dense grid is exactly `grid_dim.x * y * z` bytes, row-major — the byte count a
+        // tightly-packed 3D `copy_buffer_to_image` upload depends on.
+        let center = [0.0, 0.0, 0.0];
+        let h = [0.4, 0.4, 0.4];
+        let (pos, idx) = box_mesh(center, h);
+        let mesh = BakeMesh::new(&pos, &idx);
+        let field = MeshSdfField::for_mesh(&mesh, 0.2);
+        let grid = bake_dense_grid(&mesh, &field);
+        let expected =
+            field.grid_dim[0] as usize * field.grid_dim[1] as usize * field.grid_dim[2] as usize;
+        assert_eq!(grid.len(), expected, "dense grid byte count != grid_dim product");
     }
 
     #[test]
