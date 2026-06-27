@@ -38,10 +38,22 @@ use crate::error::VulkanError;
 use crate::ffi::*;
 use crate::memory::select_memory_type;
 
-/// The maximum number of array layers a multi-layer (CSM) depth texture may carry —
-/// the fixed inline capacity of the per-layer render-view set (CSM Increment 0).
-/// Sized for the cascaded-shadow-map cascade count.
+/// The maximum number of array layers ANY multi-layer depth texture may carry — the fixed inline
+/// capacity of the per-layer render-view set. Sized for the LARGEST consumer: the Shadow Phase 5
+/// Inc-1-GPU spot/point shadow ATLAS ([`boyko_render::shadow_atlas::M_SLOTS`] == 16 layers). The CSM
+/// cascade texture (4 layers ≤ 16) shares this same view set — the unused tail views are `NULL`
+/// (negligible cost). A `desc.array_layers` must be in `1..=MAX_TEXTURE_LAYERS`.
+pub const MAX_TEXTURE_LAYERS: usize = 16;
+
+/// The cascaded-shadow-map cascade count (CSM Increment 0/3). Retained as the CSM-specific layer
+/// budget (the CSM texture is created with `array_layers == MAX_CASCADES`); it MUST be
+/// `<= MAX_TEXTURE_LAYERS` so the cascade views fit the shared inline view set.
 pub const MAX_CASCADES: usize = 4;
+
+const _: () = assert!(
+    MAX_CASCADES <= MAX_TEXTURE_LAYERS,
+    "invariant: the CSM cascade count must fit the shared per-layer render-view set"
+);
 
 /// An owned device-local image (color, or depth for a `DEPTH_STENCIL_ATTACHMENT`
 /// usage) + its view(s) + the dedicated `VkDeviceMemory` it is bound to
@@ -73,10 +85,12 @@ pub struct VulkanTexture {
     pub(crate) memory: VkDeviceMemory,
     /// The per-layer `VK_IMAGE_VIEW_TYPE_2D` RENDER views (CSM Increment 0): slot `i`
     /// is the view of array layer `i` (`baseArrayLayer = i`, `layerCount = 1`), so a
-    /// shadow pass renders cascade `i` into it. Only the first `active_layers` slots
-    /// are valid (`NULL` tail). For a single-layer image slot 0 == `view`.
-    pub(crate) layer_views: [VkImageView; MAX_CASCADES],
-    /// The number of valid `layer_views` (`1..=MAX_CASCADES`). `1` for every
+    /// shadow pass renders cascade / atlas-slot `i` into it. Only the first
+    /// `active_layers` slots are valid (`NULL` tail). For a single-layer image slot 0 ==
+    /// `view`. Sized to [`MAX_TEXTURE_LAYERS`] (the shadow-atlas's 16-layer max; the
+    /// 4-layer CSM texture leaves the tail `NULL`).
+    pub(crate) layer_views: [VkImageView; MAX_TEXTURE_LAYERS],
+    /// The number of valid `layer_views` (`1..=MAX_TEXTURE_LAYERS`). `1` for every
     /// single-layer image.
     pub(crate) active_layers: u32,
     /// The `VK_IMAGE_VIEW_TYPE_2D_ARRAY` SAMPLE view over all `active_layers` layers
@@ -114,13 +128,13 @@ impl VulkanTexture {
             "invariant: texture extent must be non-zero in every dimension"
         );
         debug_assert!(
-            desc.array_layers >= 1 && (desc.array_layers as usize) <= MAX_CASCADES,
-            "invariant: texture array_layers must be in 1..=MAX_CASCADES"
+            desc.array_layers >= 1 && (desc.array_layers as usize) <= MAX_TEXTURE_LAYERS,
+            "invariant: texture array_layers must be in 1..=MAX_TEXTURE_LAYERS"
         );
-        // Release-safe clamp: the inline view set never exceeds `MAX_CASCADES`, and a
+        // Release-safe clamp: the inline view set never exceeds `MAX_TEXTURE_LAYERS`, and a
         // floor of 1 keeps the single-view path valid even if a (debug-asserted)
         // out-of-range count slipped through a release build.
-        let layers = (desc.array_layers as usize).clamp(1, MAX_CASCADES) as u32;
+        let layers = (desc.array_layers as usize).clamp(1, MAX_TEXTURE_LAYERS) as u32;
         let is_array = layers > 1;
 
         let image_type = desc.dimension.as_i32();
@@ -249,7 +263,7 @@ impl VulkanTexture {
         // `baseArrayLayer = i`, `layerCount = 1` — every cascade renders into its own
         // layer. On any view's failure, every view created so far + the image + memory
         // are torn down in reverse order (no leak).
-        let mut layer_views = [VkImageView::NULL; MAX_CASCADES];
+        let mut layer_views = [VkImageView::NULL; MAX_TEXTURE_LAYERS];
         for i in 0..layers as usize {
             let view_info = VkImageViewCreateInfo {
                 s_type: VkStructureType::ImageViewCreateInfo,

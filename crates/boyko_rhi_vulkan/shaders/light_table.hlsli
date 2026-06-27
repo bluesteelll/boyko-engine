@@ -106,6 +106,46 @@ uint load_csm_mode(StructuredBuffer<uint> LightBuf) {
     return (LightBuf[7] >> 2) & 1u;
 }
 
+// === Shadow Phase 5 Inc-1-GPU — the resolve `punctual_shadow_mode`, packed in word 7 BIT 3 ====
+//
+// Sparse SPOT (Inc 1) / POINT (Inc 2) hardware shadow maps — a perspective depth map per light,
+// `min`/multiply-combined into the light's analytic visibility — are gated by BIT 3 of the SAME
+// header word 7 that carries `shadow_mode` (BIT 0), `contact_shadow_mode` (BIT 1), and `csm_mode`
+// (BIT 2). BIT-3 INDEPENDENCE PIN: the mask `>> 3 & 1` reads ONLY bit 3, so a scene that also sets
+// bits 0/1/2 (multi-light SDF shadows + SSCS + CSM) never perturbs `punctual_shadow_mode`, and
+// vice-versa — the four flags coexist in one full header word with no re-encoding of
+// `LIGHT_HEADER_BASE`. On every pre-Inc-1 scene word 7's bit 3 is 0 → `punctual_shadow_mode == OFF`
+// → the resolve's spot-atlas sample block (a structural `if`) never runs → the bound-but-unread
+// shadow-atlas map/sampler/UBO are never sampled → byte-identical to today (the 0%-gate). Host
+// writer: `compute.rs::GoldenLightHeader::with_punctual_shadow_mode`.
+static const uint PUNCTUAL_SHADOW_MODE_OFF = 0u;
+static const uint PUNCTUAL_SHADOW_MODE_ON  = 1u;
+
+uint load_punctual_shadow_mode(StructuredBuffer<uint> LightBuf) {
+    return (LightBuf[7] >> 3) & 1u;
+}
+
+// === Shadow Phase 5 Inc-1-GPU — the per-light atlas-slot field, packed in the kind word ========
+//
+// A shadowed punctual light's atlas LAYER index lives in bits `17..22` (5 bits) of its kind word
+// (element lane-0 `.w`, decoded into `LightElem.kind`), directly above the `casts_sdf_shadow` flag
+// (BIT 16) and the 16-bit kind tag (bits 0..16). MIRRORS the Rust `boyko_render::shadow_atlas`:
+// `ATLAS_SLOT_SHIFT == 17`, `ATLAS_SLOT_MASK == 0x1F`, `SLOT_NONE == 0x1F`. A light not assigned a
+// map carries `SLOT_NONE` (0x1F) — distinct from every real layer `[0, M_SLOTS)` (M_SLOTS == 16 ≤
+// 31). The slot field NEVER collides with the kind tag or the casts-shadow bit (proven host-side by
+// `pack_atlas_slot_never_collides`); on every pre-Inc-1 light the field is 0 — but the resolve only
+// reads it under `punctual_shadow_mode != 0` AND `casts_shadow`, so a 0 slot is never sampled.
+static const uint ATLAS_SLOT_SHIFT = 17u;
+static const uint ATLAS_SLOT_MASK  = 0x1Fu;
+static const uint SLOT_NONE        = 0x1Fu;
+
+// Unpacks the 5-bit atlas-slot index from a light's kind word (`dir_kind.w` raw bits) — the inverse
+// of the host `pack_atlas_slot`. Returns the layer index `[0, M_SLOTS)` or `SLOT_NONE`. Pass the
+// RAW kind word (`L.kind`), NOT `light_kind(L)` (which masks the slot field off).
+uint light_atlas_slot(uint kind_word) {
+    return (kind_word >> ATLAS_SLOT_SHIFT) & ATLAS_SLOT_MASK;
+}
+
 // === Render P7 — the resolve ssao_mode, sourced from a SPARE header word ===============
 //
 // Header word 11 (`sky_spec.w` — NEVER read by the L0a sky ambient, which uses only

@@ -98,11 +98,24 @@ struct CsmResolveDummies {
     cascade: VulkanTexture,
     sampler: VulkanSampler,
     ubo: BoundBuffer,
+    // Shadow Phase 5 Inc-1-GPU: the OFF-path SPOT/POINT shadow-ATLAS trio bound bound-but-unread at
+    // resolve @14/@15. The recompiled `deferred_pbr.comp` STATICALLY references `gShadowAtlas`
+    // (combined image+sampler @14) + the `ShadowAtlas` UBO (@15), so EVERY resolve layout MUST
+    // declare those two bindings and EVERY resolve set MUST bind a valid descriptor — even when
+    // `punctual_shadow_mode == 0` (every test scene), where the resolve's `SampleCmpLevelZero` never
+    // runs (the 0%-gate). The trio: a 16-layer (`M_SLOTS`) 1×1 D32 array texture (so its
+    // `VK_IMAGE_VIEW_TYPE_2D_ARRAY` sample view resolves `Texture2DArray`), a `LessOrEqual` PCF
+    // comparison sampler, and a zeroed 1296-byte atlas UBO mirroring `ResolvedShadowAtlas`.
+    atlas: VulkanTexture,
+    atlas_sampler: VulkanSampler,
+    atlas_ubo: BoundBuffer,
 }
 
 impl CsmResolveDummies {
-    /// Creates the OFF-path trio on `device`. The cascade is `array_layers = 4` (== `MAX_CASCADES`)
-    /// so the array sample view exists (a 1-layer image has none); 1×1 keeps it tiny.
+    /// Creates the OFF-path CSM trio + the Shadow Inc-1-GPU atlas trio on `device`. The cascade is
+    /// `array_layers = 4` (== `MAX_CASCADES`) and the atlas `array_layers = 16` (== `M_SLOTS`) so
+    /// each `VK_IMAGE_VIEW_TYPE_2D_ARRAY` sample view exists (a 1-layer image has none); 1×1 keeps
+    /// them tiny.
     fn create(device: &VulkanContext) -> Self {
         let cascade = device
             .create_texture(&TextureDesc {
@@ -131,26 +144,59 @@ impl CsmResolveDummies {
                 location: MemoryLocation::HostVisibleCoherent,
             })
             .expect("CSM dummy cascade UBO (zeroed ResolvedCsm)");
-        Self { cascade, sampler, ubo }
+        let atlas = device
+            .create_texture(&TextureDesc {
+                width: 1,
+                height: 1,
+                depth: 1,
+                format: Format::D32Sfloat,
+                dimension: TextureDimension::D2,
+                usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
+                array_layers: 16,
+            })
+            .expect("shadow-atlas dummy array texture (M_SLOTS layers)");
+        let atlas_sampler = device
+            .create_sampler(&SamplerDesc {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                address_mode: AddressMode::ClampToEdge,
+                mip: MipMode::None,
+                compare: Some(CompareOp::LessOrEqual),
+            })
+            .expect("shadow-atlas dummy PCF comparison sampler");
+        let atlas_ubo = device
+            .create_buffer(&BufferDesc {
+                size: 1296,
+                usage: BufferUsage::UNIFORM,
+                location: MemoryLocation::HostVisibleCoherent,
+            })
+            .expect("shadow-atlas dummy UBO (zeroed ResolvedShadowAtlas)");
+        Self { cascade, sampler, ubo, atlas, atlas_sampler, atlas_ubo }
     }
 
-    /// The two resolve LAYOUT entries CSM Rung A adds: binding 12 (combined image+sampler) +
-    /// binding 13 (uniform buffer).
-    fn layout_entries() -> [BindGroupLayoutEntry; 2] {
+    /// The four resolve LAYOUT entries the shadow stack adds: binding 12 (CSM combined image+sampler),
+    /// 13 (CSM uniform buffer), 14 (atlas combined image+sampler), 15 (atlas uniform buffer). The
+    /// leading 12 entries (bindings 0 through 11) plus these 4 give 16 — the descriptor cap.
+    fn layout_entries() -> [BindGroupLayoutEntry; 4] {
         [
             BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
             BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+            BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+            BindGroupLayoutEntry { binding: 15, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
         ]
     }
 
-    /// Tears the trio down (reverse creation order).
+    /// Tears both trios down (reverse creation order).
     ///
     /// # Safety
     /// Each resource was created on `device`, its GPU work completed (the caller fence-waited),
     /// and each is destroyed exactly once here.
     unsafe fn destroy(self, device: &VulkanContext) {
-        // SAFETY: per the contract `device` is the live context and nothing references the trio.
+        // SAFETY: per the contract `device` is the live context and nothing references the trios.
         unsafe {
+            device.destroy_buffer(self.atlas_ubo);
+            device.destroy_sampler(self.atlas_sampler);
+            device.destroy_texture(self.atlas);
             device.destroy_buffer(self.ubo);
             device.destroy_sampler(self.sampler);
             device.destroy_texture(self.cascade);
@@ -1275,13 +1321,17 @@ fn run_gbuffer_hybrid_m4(
         // STATICALLY declares `gSsao @11`, so the layout MUST declare it or the pipeline create
         // trips the binding-count check (the P6 R1 binding-10 discipline).
         BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
-        // CSM Increment 1b (Rung A): the cascade combined image+sampler @12 + the cascade UBO @13
-        // (`csm_mode == 0` here → bound-but-unread; the recompiled resolve STATICALLY references
-        // both, so the layout MUST declare them).
+        // CSM Increment 1b (Rung A): the cascade combined image+sampler @12 + the cascade UBO @13.
+        // Shadow Inc-1-GPU: the atlas combined image+sampler @14 + the atlas UBO @15 (the resolve set
+        // hits 16/16). All `*_mode == 0` here → bound-but-unread; the recompiled resolve STATICALLY
+        // references all four, so the layout MUST declare them.
         CsmResolveDummies::layout_entries()[0],
         CsmResolveDummies::layout_entries()[1],
+        CsmResolveDummies::layout_entries()[2],
+        CsmResolveDummies::layout_entries()[3],
     ];
-    // CSM Increment 1b: the OFF-path cascade trio bound at resolve @12/@13 (bound-but-unread).
+    // CSM Increment 1b + Shadow Inc-1-GPU: the OFF-path cascade trio @12/@13 + atlas trio @14/@15
+    // (bound-but-unread).
     let csm_dummies = CsmResolveDummies::create(device);
     let resolve_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &resolve_layout_entries })
@@ -1326,6 +1376,14 @@ fn run_gbuffer_hybrid_m4(
                     sampler: &csm_dummies.sampler,
                 },
                 BindGroupEntry::UniformBuffer { buffer: &csm_dummies.ubo },
+                // Shadow Inc-1-GPU: the atlas combined map+sampler @14 + UBO @15 (bound-but-unread —
+                // `punctual_shadow_mode == 0` here, so the resolve's spot PCF sample never runs). The
+                // 15th + 16th entries — the resolve set hits 16/16.
+                BindGroupEntry::CombinedImage {
+                    texture: &csm_dummies.atlas,
+                    sampler: &csm_dummies.atlas_sampler,
+                },
+                BindGroupEntry::UniformBuffer { buffer: &csm_dummies.atlas_ubo },
             ],
         })
         .expect("deferred resolve bind group");
@@ -2056,13 +2114,16 @@ fn run_gbuffer_hybrid_ssao(
         })
         .expect("vocabulary bind group");
 
-    // The 14-binding resolve layout (gSsao @11 = the C1 interface; CSM cascade @12/@13).
+    // The 16-binding resolve layout (gSsao @11 = the C1 interface; CSM cascade @12/@13; shadow
+    // atlas @14/@15 — the resolve set hits 16/16, the descriptor cap).
     let resolve_kinds = [
         DescriptorKind::StorageImage, DescriptorKind::StorageImage, DescriptorKind::StorageImage,
         DescriptorKind::StorageImage, DescriptorKind::StorageBuffer, DescriptorKind::UniformBuffer,
         DescriptorKind::StorageBuffer, DescriptorKind::StorageImage, DescriptorKind::StorageBuffer,
         DescriptorKind::StorageBuffer, DescriptorKind::StorageBuffer, DescriptorKind::StorageImage,
         // CSM Increment 1b (Rung A): the cascade combined map+sampler @12 + the cascade UBO @13.
+        DescriptorKind::CombinedImageSampler, DescriptorKind::UniformBuffer,
+        // Shadow Inc-1-GPU: the atlas combined map+sampler @14 + the atlas UBO @15.
         DescriptorKind::CombinedImageSampler, DescriptorKind::UniformBuffer,
     ];
     let resolve_layout_entries: Vec<BindGroupLayoutEntry> = resolve_kinds
@@ -2107,6 +2168,14 @@ fn run_gbuffer_hybrid_ssao(
                     sampler: &csm_dummies.sampler,
                 },
                 BindGroupEntry::UniformBuffer { buffer: &csm_dummies.ubo },
+                // Shadow Inc-1-GPU: the atlas combined map+sampler @14 + UBO @15 (bound-but-unread —
+                // `punctual_shadow_mode == 0` here, so the resolve's spot PCF sample never runs). The
+                // 15th + 16th entries — the resolve set hits 16/16.
+                BindGroupEntry::CombinedImage {
+                    texture: &csm_dummies.atlas,
+                    sampler: &csm_dummies.atlas_sampler,
+                },
+                BindGroupEntry::UniformBuffer { buffer: &csm_dummies.atlas_ubo },
             ],
         })
         .expect("deferred resolve bind group");
@@ -5247,8 +5316,11 @@ fn run_gbuffer_hybrid_lit_clustered(
         // both).
         CsmResolveDummies::layout_entries()[0],
         CsmResolveDummies::layout_entries()[1],
+        CsmResolveDummies::layout_entries()[2],
+        CsmResolveDummies::layout_entries()[3],
     ];
-    // CSM Increment 1b: the OFF-path cascade trio bound at resolve @12/@13 (bound-but-unread).
+    // CSM Increment 1b + Shadow Inc-1-GPU: the OFF-path cascade trio @12/@13 + atlas trio @14/@15
+    // (bound-but-unread).
     let csm_dummies = CsmResolveDummies::create(device);
     let resolve_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &resolve_layout_entries })
@@ -5288,6 +5360,14 @@ fn run_gbuffer_hybrid_lit_clustered(
                     sampler: &csm_dummies.sampler,
                 },
                 BindGroupEntry::UniformBuffer { buffer: &csm_dummies.ubo },
+                // Shadow Inc-1-GPU: the atlas combined map+sampler @14 + UBO @15 (bound-but-unread —
+                // `punctual_shadow_mode == 0` here, so the resolve's spot PCF sample never runs). The
+                // 15th + 16th entries — the resolve set hits 16/16.
+                BindGroupEntry::CombinedImage {
+                    texture: &csm_dummies.atlas,
+                    sampler: &csm_dummies.atlas_sampler,
+                },
+                BindGroupEntry::UniformBuffer { buffer: &csm_dummies.atlas_ubo },
             ],
         })
         .expect("deferred resolve bind group");

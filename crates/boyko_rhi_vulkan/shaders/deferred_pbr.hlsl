@@ -195,6 +195,54 @@ cbuffer CsmCascades : register(b13) {
 // floor and read as a floating caster). Owner-retunable; mirrors the host matrix golden's bias.
 static const float CSM_NORMAL_BIAS = 2.0;
 
+// === Shadow Phase 5 Inc-1-GPU — the sparse SPOT/POINT atlas (binding 14 + 15) ==================
+//
+// binding 14 (t14/s14): the shadow-atlas array map + its PCF COMPARISON sampler as ONE combined
+// `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER` (the `gCsm` precedent). `gShadowAtlas` (t14) +
+// `gShadowAtlasCmp` (s14) share the SAME register NUMBER, so DXC collapses them into one combined
+// descriptor — keeping the resolve set at 16/16 (the cap). `gShadowAtlas` is
+// `Texture2DArray<float>` (the depth pass renders spot slot `s` into layer `s`; the resolve
+// PCF-samples `float3(uv, s)`); the sampler is `compareEnable = VK_TRUE` / `LessOrEqual`. ALWAYS
+// bound (the resolve `.spv` STATICALLY references it); the `SampleCmpLevelZero` only executes inside
+// the `punctual_shadow_mode != 0` structural `if`, so on the OFF path the bound-but-unread dummy is
+// never sampled (the 0%-gate; the `gCsm`/`gSsao` precedent).
+Texture2DArray<float> gShadowAtlas : register(t14);
+SamplerComparisonState gShadowAtlasCmp : register(s14);
+
+// The shadow-atlas slot budget — MUST equal `boyko_render::shadow_atlas::M_SLOTS` (16) and the
+// depth target's `array_layers`. Bounds the `gFaces` array + the `light_atlas_slot` range.
+static const uint M_SLOTS = 16u;
+
+// One atlas layer's GPU-ready transform — MUST byte-mirror `boyko_render::FaceTransform` (80 B): the
+// COLUMN-MAJOR world→light-clip `view_proj` (O1: SAME majorness as the depth-pass push — DXC
+// default, NO `row_major`) + the POINT-shared `light_pos` (Inc-2 cube distance-compare; unused by
+// the SPOT NDC-z compare) + `inv_range` + 8 B pad to the 16-byte cbuffer-array stride. Identical
+// shape + stride to `CascadeData`, so the shared shadow upload path treats a cascade and an atlas
+// face identically.
+struct FaceTransform {
+    float4x4 view_proj;   // column-major world→light-clip (O1 majorness pin)
+    float3   light_pos;   // world light position (Inc-2 POINT cube; unused by SPOT NDC-z)
+    float    inv_range;   // reciprocal range (Inc-2 POINT normalized-distance; unused by SPOT)
+};
+
+// binding 15 (b15): the shadow-atlas UBO — byte-mirrors `boyko_render::ResolvedShadowAtlas` (1296
+// B): the inline `FaceTransform[M_SLOTS]` (16 × 80 = 1280 B) + `active_layers` + `mode_word` + 8 B
+// pad. The host uploads `ResolvedShadowAtlas` verbatim each frame. `gAtlasMode` mirrors `mode_word`
+// (a redundant copy of the header bit, carried for completeness); the resolve gates on the HEADER's
+// `load_punctual_shadow_mode` (the single source of truth), NOT this field.
+cbuffer ShadowAtlas : register(b15) {
+    FaceTransform gFaces[M_SLOTS];
+    uint gAtlasActive; // number of valid atlas layers (mirrors ResolvedShadowAtlas.active_layers)
+    uint gAtlasMode;   // mirrors ResolvedShadowAtlas.mode_word (the resolve gates on the header bit)
+    uint2 _gAtlasPad;  // pad to the 1296-byte ResolvedShadowAtlas stride
+};
+
+// Shadow Phase 5 Inc-1-GPU normal-offset bias FACTOR — the spot receiver lookup is pushed off the
+// surface by `n * SPOT_SHADOW_NORMAL_BIAS` so a grazing receiver does not self-shadow (acne). A
+// world-space constant (the spot map has no per-cascade `texel_size`); owner-retunable. Mirrors the
+// host spot matrix golden's bias.
+static const float SPOT_SHADOW_NORMAL_BIAS = 0.02;
+
 // CSM Increment 3 — Rung B cross-fade band WIDTH (D7), as a PROPORTION of the SELECTED cascade's
 // VIEW-Z range [prev_split, split_far]. Inside the trailing `overlap*range` slice the resolve ALSO
 // samples cascade `c+1` and `mix`es the two visibilities so the cascade boundary is a smooth
@@ -463,6 +511,43 @@ float csm_visibility(float3 P, float3 n, float view_z) {
     return lerp(vis_sel, vis_next, band_t);
 }
 
+// === Shadow Phase 5 Inc-1-GPU — the SPOT atlas shadow-map visibility sample =====================
+//
+// Projects the receiver world point `P` (normal-offset by `n * SPOT_SHADOW_NORMAL_BIAS`, the acne
+// guard) into atlas slot `s`'s light-clip space, builds the shadow-map UV (Y-FLIPPED to match the
+// engine's framebuffer convention — IDENTICAL to `csm_sample_cascade`), and PCF-compares the
+// receiver's light-space depth against the stored spot depth via
+// `gShadowAtlas.SampleCmpLevelZero(float3(uv, s))`. Returns the VISIBILITY in [0,1] (1 = lit, 0 =
+// fully shadowed). One LAYER of the atlas array.
+//
+// O1 MAJORNESS: `gFaces[s].view_proj` is the SAME column-major matrix the depth pass pushed at `@0`
+// for slot `s`, so `mul(view_proj, float4(P_off,1))` here reprojects EXACTLY as the depth pass
+// projected the caster — the host spot matrix golden pins this agreement.
+//
+// SPOT (Inc 1) uses the perspective NDC-z directly; POINT (Inc 2) will branch on `gFaces[s].inv_range`
+// + `light_pos`, not added here (the spot-only increment).
+float spot_atlas_visibility(uint s, float3 P, float3 n) {
+    float3 P_off = P + n * SPOT_SHADOW_NORMAL_BIAS;
+    float4 clip = mul(gFaces[s].view_proj, float4(P_off, 1.0));
+    if (clip.w <= 0.0) {
+        return 1.0;                        // behind the light plane — treat as lit (no shadow data)
+    }
+    float3 ndc = clip.xyz / clip.w;
+    float2 uv;
+    uv.x = ndc.x * 0.5 + 0.5;
+    uv.y = 1.0 - (ndc.y * 0.5 + 0.5);      // Vulkan framebuffer Y-flip (matches csm_sample_cascade)
+    // Outside this spot's cone footprint there is no shadow data — treat as lit (the cone falloff
+    // already drove the contribution to 0 at the edge). `ref` is the receiver's light-space NDC
+    // depth (Vulkan [0,1] depth range).
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
+        return 1.0;
+    }
+    float ref = ndc.z;
+    // PCF: hardware 2×2 comparison (LessOrEqual) — the lit fraction of the footprint whose stored
+    // depth is >= the (biased) receiver depth, at array layer `s`.
+    return gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, float3(uv, (float)s), ref);
+}
+
 // Karis "mobile" analytic environment BRDF approximation (no DFG LUT). Returns the
 // (scale, bias) the split-sum specular IBL needs: `spec_env = f0*scale + bias`.
 float2 env_brdf_approx(float roughness, float NoV) {
@@ -669,6 +754,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // map/sampler/UBO are never sampled → byte-identical to today, the 0%-gate). Read ONCE
         // here, consumed at the primary-directional `vis` site below.
         uint csm_mode = load_csm_mode(LightBuf);
+        // Shadow Phase 5 Inc-1-GPU: the sparse SPOT/POINT atlas gate (header word 7 bit 3; OFF on
+        // every pre-Inc-1 scene → the per-spot `spot_atlas_visibility` sample never runs → the
+        // bound-but-unread atlas map/sampler/UBO are never sampled → byte-identical to today, the
+        // 0%-gate). Read ONCE here, consumed at the per-spot `vis` site in the point/spot loop below.
+        uint punctual_shadow_mode = load_punctual_shadow_mode(LightBuf);
         float view_t = gViewT.Load(coord);
         float3 P = ro + rd * view_t;
         uint marched = 0u;
@@ -856,6 +946,22 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 float tt = saturate((cosA - cones.y) / denom);
                 atten *= tt * tt;
             }
+            // Shadow Phase 5 Inc-1-GPU: the SPOT atlas hard-shadow term. Gated by the header bit
+            // (`punctual_shadow_mode`) AND a real assigned slot (`light_atlas_slot(L.kind) !=
+            // SLOT_NONE`) AND this being a SPOT (Inc 1 — POINT cube maps are Inc 2). The exact
+            // raster-mesh shadow (a hardware depth-map PCF) modulates THIS light's contribution
+            // multiplicatively (it is the visibility of the spot's direct light at `P`). OFF on
+            // every pre-Inc-1 scene → the bound-but-unread atlas is never sampled → byte-identical
+            // (the 0%-gate). Pass the RAW kind word `L.kind` (NOT `light_kind(L)`) so the slot field
+            // survives the unpack.
+            float spot_shadow = 1.0;
+            if (punctual_shadow_mode != PUNCTUAL_SHADOW_MODE_OFF
+                && light_kind(L) == LIGHT_KIND_SPOT) {
+                uint slot = light_atlas_slot(L.kind);
+                if (slot != SLOT_NONE) {
+                    spot_shadow = spot_atlas_visibility(slot, P, n);
+                }
+            }
             // The SAME Cook-Torrance direct term as the directional path, scaled by the
             // distance/cone attenuation and the light's canonical (baked-I) color. The
             // half-vector uses `safe_normalize` (host `v_normalize` parity): at a back-facing
@@ -893,7 +999,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
             if (contact_mode == CONTACT_SHADOW_MODE_ON && NoL > 0.0) {
                 vis *= sscs_march(P, n, l, sqrt(d2), NoL, px, py, w, h);
             }
-            lit_direct += (diff + spec) * (NoL * vis) * atten * L.color;
+            lit_direct += (diff + spec) * (NoL * vis * spot_shadow) * atten * L.color;
         }
 
         // O3: exposure is the FINAL multiply on the accumulated LINEAR radiance.

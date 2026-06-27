@@ -275,8 +275,14 @@ static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<155040> = SpirvBlob(*include_bytes!(
 /// SELECTS the cascade by VIEW-Z (a branch-light compare-chain over `gCsmActive`) then cross-fades
 /// across the trailing `CSM_OVERLAP_PROPORTION` band into `c+1` (the analytic, no-dither seam blend).
 /// Still under the SAME `csm_mode != 0` gate → byte-identical PIXELS on every pre-CSM scene (the
-/// 0%-gate; the `.spv` grows with the select/blend); 43316 → 46008 bytes.
-static DEFERRED_PBR_SPV: SpirvBlob<46008> = SpirvBlob(*include_bytes!(concat!(
+/// 0%-gate; the `.spv` grows with the select/blend); 43316 → 46008 bytes. Shadow Phase 5 Inc-1-GPU
+/// adds the sparse SPOT atlas sample: under `punctual_shadow_mode != 0` (header word 7 bit 3; OFF
+/// on every pre-Inc-1 scene → the `SampleCmpLevelZero` never runs → the bound-but-unread shadow
+/// atlas map/sampler/UBO are never sampled → byte-identical, the 0%-gate) a SPOT light with a real
+/// `light_atlas_slot` multiplies its contribution by `spot_atlas_visibility(slot, P, n)` (bindings
+/// 14 combined map+sampler + 15 the `ResolvedShadowAtlas` UBO — the resolve set hits 16/16); 46008
+/// → 48472 bytes.
+static DEFERRED_PBR_SPV: SpirvBlob<48472> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/deferred_pbr.comp.spv"
 )));
@@ -4237,7 +4243,51 @@ impl GoldenLight {
         self.dir_kind[3] = f32::from_bits(bits);
         self
     }
+
+    /// Packs a Shadow Phase 5 Inc-1-GPU atlas-SLOT index into bits `17..22` of the kind word — the
+    /// host mirror of `boyko_render::shadow_atlas::pack_atlas_slot` (the SAME bit layout the resolve
+    /// reads via `light_table.hlsli::light_atlas_slot`). The kind tag (bits 0..16) is preserved; a
+    /// real slot (`slot != GOLDEN_SLOT_NONE`) also sets [`GOLDEN_LIGHT_FLAG_CASTS_SHADOW`] (bit 16),
+    /// so the resolve branches onto the map sample. `slot` MUST be `< 16` (the layer budget) or
+    /// exactly [`GOLDEN_SLOT_NONE`]; a debug build asserts it. The demo hand-builds the light table,
+    /// so it stamps the slot directly with this builder; the real-app path is the
+    /// `resolve_shadow_atlas` → light-table-assembly seam (`boyko_render::shadow_atlas`).
+    #[inline]
+    pub fn with_atlas_slot(mut self, slot: u32) -> Self {
+        debug_assert!(
+            slot < 16 || slot == GOLDEN_SLOT_NONE,
+            "invariant: atlas slot must be a real layer (< M_SLOTS == 16) or GOLDEN_SLOT_NONE"
+        );
+        let base = self.dir_kind[3].to_bits()
+            & !(GOLDEN_ATLAS_SLOT_MASK << GOLDEN_ATLAS_SLOT_SHIFT)
+            & !GOLDEN_LIGHT_FLAG_CASTS_SHADOW;
+        let with_slot = base | ((slot & GOLDEN_ATLAS_SLOT_MASK) << GOLDEN_ATLAS_SLOT_SHIFT);
+        let bits = if slot == GOLDEN_SLOT_NONE {
+            with_slot
+        } else {
+            with_slot | GOLDEN_LIGHT_FLAG_CASTS_SHADOW
+        };
+        self.dir_kind[3] = f32::from_bits(bits);
+        self
+    }
+
+    /// The Shadow Phase 5 Inc-1-GPU atlas-slot index packed in the kind word (bits `17..22`) — the
+    /// host mirror of `light_table.hlsli::light_atlas_slot`. Returns the layer index `[0, 16)` or
+    /// [`GOLDEN_SLOT_NONE`].
+    #[inline]
+    pub fn atlas_slot(&self) -> u32 {
+        (self.dir_kind[3].to_bits() >> GOLDEN_ATLAS_SLOT_SHIFT) & GOLDEN_ATLAS_SLOT_MASK
+    }
 }
+
+/// The bit offset of the 5-bit atlas-slot field in [`GoldenLight::dir_kind`]`.w` — mirrors
+/// `boyko_render::shadow_atlas::ATLAS_SLOT_SHIFT` and the shader's `ATLAS_SLOT_SHIFT`.
+pub const GOLDEN_ATLAS_SLOT_SHIFT: u32 = 17;
+/// The 5-bit mask for the atlas-slot field — mirrors `boyko_render::shadow_atlas::ATLAS_SLOT_MASK`.
+pub const GOLDEN_ATLAS_SLOT_MASK: u32 = 0x1F;
+/// The "no map" 5-bit sentinel (`0x1F == 31`) — a light on the analytic fallback. Mirrors
+/// `boyko_render::shadow_atlas::SLOT_NONE` and the shader's `SLOT_NONE`.
+pub const GOLDEN_SLOT_NONE: u32 = 0x1F;
 
 /// The kind-enum mask (low 16 bits) — mirrors the shader's `LIGHT_KIND_MASK`. The P6 R1
 /// `casts_sdf_shadow` flag occupies bit 16, so the enum + the flag coexist in one word.
@@ -4477,6 +4527,38 @@ impl GoldenLightHeader {
     #[inline]
     pub fn csm_mode(&self) -> u32 {
         (self.sky_diffuse[3].to_bits() >> 2) & 1
+    }
+
+    /// Sets the Shadow Phase 5 Inc-1-GPU `punctual_shadow_mode` — sparse SPOT/POINT hardware shadow
+    /// maps — packed into BIT 3 of header WORD 7 (`sky_diffuse.w`), the SAME word
+    /// [`with_shadow_mode`](Self::with_shadow_mode) packs `shadow_mode` (BIT 0),
+    /// [`with_contact_shadow_mode`](Self::with_contact_shadow_mode) packs `contact_shadow_mode`
+    /// (BIT 1), and [`with_csm_mode`](Self::with_csm_mode) packs `csm_mode` (BIT 2) into. The header
+    /// is FULL (16 words / 4 vec4), so a spare BIT is used rather than a new word (which would shift
+    /// `LIGHT_HEADER_BASE` and re-encode every golden). `on` ORs/clears ONLY bit 3, preserving bits
+    /// 0/1/2, so the four flags are independent and order-agnostic. `false` leaves word 7 unchanged
+    /// on a fresh header (BIT 3 already 0 — the 0%-gate: every pre-Inc-1 scene reads
+    /// `punctual_shadow_mode == 0`, so the resolve's spot-atlas sample block is never run and the
+    /// bound-but-unread atlas map/sampler/UBO are never sampled). Read GPU-side by
+    /// `light_table.hlsli::load_punctual_shadow_mode` (`(word7 >> 3) & 1`).
+    #[inline]
+    pub fn with_punctual_shadow_mode(mut self, on: bool) -> Self {
+        let mut word7 = self.sky_diffuse[3].to_bits();
+        if on {
+            word7 |= 0b1000;
+        } else {
+            word7 &= !0b1000;
+        }
+        self.sky_diffuse[3] = f32::from_bits(word7);
+        self
+    }
+
+    /// The Shadow Phase 5 Inc-1-GPU `punctual_shadow_mode` (header word 7 BIT 3, bit-cast back from
+    /// `sky_diffuse.w`). 0 on every pre-Inc-1 scene (the 0%-gate); 1 when the sparse spot/point
+    /// shadow atlas is armed.
+    #[inline]
+    pub fn punctual_shadow_mode(&self) -> u32 {
+        (self.sky_diffuse[3].to_bits() >> 3) & 1
     }
 
     /// Sets the Render P7 `ssao_mode` (header WORD 11 = `sky_spec.w`, read RAW by the

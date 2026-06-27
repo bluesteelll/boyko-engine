@@ -49,7 +49,7 @@ use crate::rhi_impl::{
     ComputePipeline, Vulkan, VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline,
     VulkanSampler,
 };
-use crate::texture::{MAX_CASCADES, VulkanTexture};
+use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS, VulkanTexture};
 
 /// The number of frames the [`Renderer`] keeps in flight (double-buffered CPU↔GPU
 /// overlap). Per-frame: an acquire semaphore + an in-flight fence; render-finished
@@ -3535,6 +3535,238 @@ impl<'ctx> Renderer<'ctx> {
             }
         }
 
+        // === Shadow Phase 5 Inc-1-GPU: the sparse SPOT atlas DEPTH pass (a NEW recorder bracket,
+        // a CLONE of the CSM depth pass above). Recorded ONLY when the scene wires the activation
+        // (`scene.atlas_punctual.is_some()`); otherwise skipped entirely — NO barrier, NO rendering
+        // — so the command stream is byte-identical to the pre-Inc-1 path (the 0%-gate; the atlas
+        // map/sampler/UBO are bound-but-unread). Renders the SAME caster batches (`scene.mesh_draw` +
+        // `scene.instance_bind_group`) from each SPOT's POV into atlas layer `s`, so the resolve can
+        // multiply the exact hard shadow into that spot's contribution. RUN BEFORE the resolve
+        // dispatch (5b) so the atlas depth is SHADER_READ-visible to the resolve. ===
+        if let Some(atlas_act) = &scene.atlas_punctual {
+            let atlas = scene.shadow_atlas_texture;
+            // The number of atlas LAYERS to render — clamped to the backend cap so an out-of-range
+            // `active_layers` cannot drive `layer_render_view` / the barrier range past the array
+            // bounds. `1` reproduces the single-spot path.
+            let active = (atlas_act.active_layers as usize).clamp(1, MAX_TEXTURE_LAYERS) as u32;
+            // The WHOLE-ARRAY depth subresource range (`[0..active)` layers, DEPTH aspect): ONE
+            // barrier-in + ONE barrier-out span every rendered slot (mirrors the CSM range).
+            let atlas_layers_range = VkImageSubresourceRange {
+                aspect_mask: VK_IMAGE_ASPECT_DEPTH_BIT,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: active,
+            };
+            // Barrier-in: the atlas image UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL (depth-write access,
+            // DEPTH aspect) over ALL `[0..active)` layers. Each is re-`UNDEFINED`'d (the prior frame's
+            // content is discarded before this frame's depth pass).
+            let to_depth = VkImageMemoryBarrier {
+                s_type: VkStructureType::ImageMemoryBarrier,
+                p_next: ptr::null(),
+                src_access_mask: 0,
+                dst_access_mask: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                image: atlas.image,
+                subresource_range: atlas_layers_range,
+            };
+            // SAFETY: recording is open; one image barrier on the live atlas depth image;
+            // TOP_OF_PIPE→(EARLY|LATE)_FRAGMENT_TESTS with UNDEFINED→DEPTH is the superset-correct
+            // first depth transition (mirrors the CSM depth barrier-in); `&to_depth` outlives the call.
+            unsafe {
+                (self.fns.cmd_pipeline_barrier)(
+                    cmd,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                        | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                    0,
+                    0,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    1,
+                    (&to_depth as *const VkImageMemoryBarrier).cast(),
+                );
+            }
+
+            // Depth-only dynamic rendering, LOOPED over the `[0..active)` atlas slots. The render
+            // area / viewport / scissor are slot-INDEPENDENT (the square shadow-map resolution), so
+            // they are built ONCE; only the per-slot render view + the pushed `view_proj` change.
+            let atlas_extent = VkExtent2D {
+                width: atlas_act.shadow_dim,
+                height: atlas_act.shadow_dim,
+            };
+            let atlas_area = VkRect2D {
+                offset: VkOffset2D { x: 0, y: 0 },
+                extent: atlas_extent,
+            };
+            let atlas_viewport = VkViewport {
+                x: 0.0,
+                y: 0.0,
+                width: atlas_extent.width as f32,
+                height: atlas_extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            };
+            let mut atlas_push = atlas_act.push;
+            // BUILD-ONCE-CONSUME-N-VIEWS: the SAME caster batches + instance SSBO are rendered into
+            // each atlas layer; only slot `s`'s `view_proj` differs. Loop the active slots.
+            for s in 0..active {
+                // Stamp slot `s`'s COLUMN-MAJOR `view_proj` (64 B) into the push's leading matrix
+                // bytes (byte-equal to the resolve UBO's `gFaces[s].view_proj`). The trailing words
+                // are unchanged; `base_instance @80` is re-pushed per batch below.
+                atlas_push[0..64].copy_from_slice(&atlas_act.face_view_proj[s as usize]);
+                let atlas_depth_attachment = VkRenderingAttachmentInfo {
+                    s_type: VkStructureType::RenderingAttachmentInfo,
+                    p_next: ptr::null(),
+                    image_view: atlas.layer_render_view(s),
+                    image_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                    resolve_mode: 0,
+                    resolve_image_view: VkImageView::NULL,
+                    resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                    load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+                    store_op: VK_ATTACHMENT_STORE_OP_STORE,
+                    clear_value: VkClearValue {
+                        depth_stencil: VkClearDepthStencilValue {
+                            depth: 1.0,
+                            stencil: 0,
+                        },
+                    },
+                };
+                let atlas_rendering = VkRenderingInfo {
+                    s_type: VkStructureType::RenderingInfo,
+                    p_next: ptr::null(),
+                    flags: 0,
+                    render_area: atlas_area,
+                    layer_count: 1,
+                    view_mask: 0,
+                    color_attachment_count: 0,
+                    p_color_attachments: ptr::null(),
+                    p_depth_attachment: (&atlas_depth_attachment as *const VkRenderingAttachmentInfo)
+                        .cast(),
+                    p_stencil_attachment: ptr::null(),
+                };
+                // SAFETY: recording is open; `atlas_rendering` is fully initialized — its depth
+                // attachment names the live atlas layer-`s` render view (now DEPTH_ATTACHMENT_OPTIMAL;
+                // `s < active <= MAX_TEXTURE_LAYERS` so `layer_render_view(s)` is in bounds), NO color
+                // attachment (depth-only); the depth-only pipeline (the SAME CSM `csm_depth.vs/fs`
+                // pipeline — EMPTY `color_formats` + `depth_format = D32Sfloat` + `cull_mode: Front` +
+                // a depth bias + the set-0 instance layout) belongs to this device (caller contract).
+                // The SAME instance SSBO (`scene.instance_bind_group`) the main pass binds is bound at
+                // set 0 to satisfy the depth VS's static `instances` reference; the 88-byte push
+                // carries slot `s`'s `view_proj` (`@0`) + `use_model_matrix == 1` (`@84`), and per
+                // caster batch the recorder re-pushes its `base_instance` (4 bytes @80, in-range of
+                // the 88-byte VERTEX push) then `draw_indexed` reads that batch's bound vertex+index
+                // buffers (created on this device with VERTEX/INDEX usage). The locals outlive the
+                // bracketed calls. Begin/End bracket each slot.
+                unsafe {
+                    (self.fns.cmd_begin_rendering)(cmd, &atlas_rendering);
+                    (self.fns.cmd_bind_pipeline)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        atlas_act.pipeline.pipeline,
+                    );
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        atlas_act.pipeline.layout,
+                        0,
+                        1,
+                        &scene.instance_bind_group.descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        atlas_act.pipeline.layout,
+                        VK_SHADER_STAGE_VERTEX_BIT,
+                        0,
+                        atlas_push.len() as u32,
+                        atlas_push.as_ptr().cast(),
+                    );
+                    (self.fns.cmd_set_viewport)(cmd, 0, 1, &atlas_viewport);
+                    (self.fns.cmd_set_scissor)(cmd, 0, 1, &atlas_area);
+                    // The caster batches: the SAME instanced mesh draws the main pass rasterizes. A
+                    // real app gathers a `With<ShadowCaster>` subset; the inline demo reuses the full
+                    // list. An EMPTY list records the depth scope with no draw (a cleared slot — every
+                    // receiver in that cone fully lit).
+                    for batch in scene.mesh_draw {
+                        let base = batch.base_instance;
+                        atlas_push[GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize
+                            ..GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4]
+                            .copy_from_slice(&base.to_le_bytes());
+                        (self.fns.cmd_push_constants)(
+                            cmd,
+                            atlas_act.pipeline.layout,
+                            VK_SHADER_STAGE_VERTEX_BIT,
+                            GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
+                            4,
+                            (&base as *const u32).cast(),
+                        );
+                        (self.fns.cmd_bind_vertex_buffers)(
+                            cmd,
+                            0,
+                            1,
+                            &batch.vertex_buffer.buffer,
+                            &vertex_offset,
+                        );
+                        (self.fns.cmd_bind_index_buffer)(
+                            cmd,
+                            batch.index_buffer.buffer,
+                            0,
+                            batch.index_type,
+                        );
+                        (self.fns.cmd_draw_indexed)(
+                            cmd,
+                            batch.index_count,
+                            batch.instance_count,
+                            0,
+                            0,
+                            0,
+                        );
+                    }
+                    (self.fns.cmd_end_rendering)(cmd);
+                }
+            }
+
+            // The dual-use depth barrier: DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL over
+            // ALL `[0..active)` atlas layers in ONE barrier. Depth WRITES happen at
+            // LATE_FRAGMENT_TESTS; the resolve PCF-SAMPLES at COMPUTE_SHADER.
+            let atlas_to_sampled = VkImageMemoryBarrier {
+                s_type: VkStructureType::ImageMemoryBarrier,
+                p_next: ptr::null(),
+                src_access_mask: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
+                old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                image: atlas.image,
+                subresource_range: atlas_layers_range,
+            };
+            // SAFETY: recording is open; (EARLY|LATE)_FRAGMENT_TESTS→COMPUTE_SHADER with
+            // DEPTH_WRITE→SHADER_READ and DEPTH→SHADER_READ_ONLY makes the atlas depth available +
+            // visible to the resolve's PCF sample; `&atlas_to_sampled` outlives the call.
+            unsafe {
+                (self.fns.cmd_pipeline_barrier)(
+                    cmd,
+                    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
+                        | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    0,
+                    0,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    1,
+                    (&atlas_to_sampled as *const VkImageMemoryBarrier).cast(),
+                );
+            }
+        }
+
         // (5b) Deferred RESOLVE pass: bind the resolve pipeline + the resolve set (gAlbedo
         // @0, gMaterial @1, lit @2 — all STORAGE in GENERAL), dispatch at the SAME grid the
         // marcher used (1:1 the marched pixels). It composites `lit = mask ? base*vis : base`.
@@ -4779,6 +5011,38 @@ pub struct GBufferScene<'a> {
     /// barriers the whole array to `SHADER_READ_ONLY_OPTIMAL` for the resolve sample. The caller
     /// MUST set the scene's light-header `csm_mode` in lock-step (`with_csm_mode(true)`).
     pub csm: Option<CsmDepthActivation<'a>>,
+    /// Shadow Phase 5 Inc-1-GPU: the sparse SPOT/POINT shadow-ATLAS array texture (a D32 array;
+    /// `array_layers == boyko_render::shadow_atlas::M_SLOTS == 16`). ALWAYS supplied (a real atlas
+    /// when sparse shadows are on, a 1×1×1 D32 array DUMMY when off) so the resolve set can ALWAYS
+    /// bind binding 14 — the resolve `.spv` statically references `gShadowAtlas`, so the descriptor
+    /// MUST be valid even on the OFF path (bound-but-unread; the `SampleCmpLevelZero` runs only under
+    /// the `punctual_shadow_mode != 0` gate). The scene OWNS it; the depth pass (when
+    /// [`Self::atlas_punctual`] is `Some`) renders into `layer_render_view(s)` per spot slot, the
+    /// resolve PCF-samples through the array sample view bundled with [`Self::shadow_atlas_sampler`].
+    pub shadow_atlas_texture: &'a VulkanTexture,
+    /// Shadow Phase 5 Inc-1-GPU: the PCF COMPARISON sampler (`compareEnable = VK_TRUE`,
+    /// `LessOrEqual`), BUNDLED with [`Self::shadow_atlas_texture`] as the resolve's binding-14
+    /// combined image+sampler. ALWAYS supplied (bound-but-unread on the OFF path).
+    pub shadow_atlas_sampler: &'a VulkanSampler,
+    /// Shadow Phase 5 Inc-1-GPU: the shadow-atlas UBO (host-coherent), a 1296-byte byte-mirror of
+    /// `boyko_render::ResolvedShadowAtlas` (the inline `[FaceTransform; M_SLOTS]` plus
+    /// `active_layers`, `mode_word`, and pad). The host uploads `ResolvedShadowAtlas` verbatim before
+    /// the frame; the resolve reads `gFaces[slot].view_proj` through binding 15. ALWAYS supplied — a
+    /// ZEROED UBO on the OFF path (bound-but-unread). The depth pass pushes the SAME
+    /// `gFaces[slot].view_proj`, so the host writes it once into this UBO and the recorder reads it
+    /// back for the depth-pass push.
+    pub shadow_atlas_ubo: &'a BoundBuffer,
+    /// Shadow Phase 5 Inc-1-GPU: the sparse spot/point DEPTH-PASS activation. `None` = the OFF path
+    /// (the default, byte-identical command stream): NO depth pass is recorded, the resolve's
+    /// `punctual_shadow_mode` header gate is 0, and the always-bound atlas map/sampler/UBO are
+    /// bound-but-unread. `Some(_)` = the ON path: BEFORE the resolve dispatch the recorder runs the
+    /// punctual depth pass — barriers the atlas image, LOOPS the `[0..active_layers)` slots,
+    /// rendering the SAME caster batches ([`Self::mesh_draw`] + [`Self::instance_bind_group`],
+    /// build-once-consume-N-views) into `layer_render_view(s)` with slot `s`'s `view_proj` pushed,
+    /// then barriers the whole array to `SHADER_READ_ONLY_OPTIMAL` for the resolve sample. The caller
+    /// MUST set the scene's light-header `punctual_shadow_mode` in lock-step
+    /// (`with_punctual_shadow_mode(true)`).
+    pub atlas_punctual: Option<PunctualDepthActivation<'a>>,
 }
 
 /// CSM Increment 1b (Rung A): the cascade DEPTH-PASS activation threaded into
@@ -4814,6 +5078,44 @@ pub struct CsmDepthActivation<'a> {
     /// The cascade shadow-map resolution (texels per side — the map is square, e.g. 2048). The
     /// depth pass's render area + viewport. MUST equal the resolution
     /// [`GBufferScene::csm_cascade_texture`] was created at.
+    pub shadow_dim: u32,
+}
+
+/// Shadow Phase 5 Inc-1-GPU: the sparse SPOT/POINT atlas DEPTH-PASS activation threaded into
+/// [`GBufferScene::atlas_punctual`] to turn the punctual depth pass ON. Mirrors
+/// [`CsmDepthActivation`]'s borrow-bundle shape EXACTLY (the depth-only pipeline + push template +
+/// per-layer matrices + the layer count); the ONLY difference is the layer budget
+/// ([`MAX_TEXTURE_LAYERS`] = 16, the atlas's `M_SLOTS`, vs `MAX_CASCADES` = 4 for CSM).
+///
+/// The casters are the SAME instanced [`GBufferMeshDraw`] batches the main pass rasterizes
+/// ([`GBufferScene::mesh_draw`]) — the depth pass renders them from each spot's point of view into
+/// the atlas's depth layer. A real app would gather a `With<ShadowCaster>` subset; the inline demo
+/// reuses the full mesh batch list.
+#[derive(Clone, Copy)]
+pub struct PunctualDepthActivation<'a> {
+    /// The depth-only graphics pipeline (`csm_depth.vs/fs` VERBATIM — SPOT uses NDC-z like a CSM
+    /// cascade, so the cascade depth pipeline works unchanged): EMPTY `color_formats`, `depth_format
+    /// = Some(D32Sfloat)`, `cull_mode: Front`, `depth_bias: Some(slope/constant)`, the set-0
+    /// instance SSBO layout. Bound by the punctual depth pass.
+    pub pipeline: &'a VulkanGraphicsPipeline,
+    /// The 88-byte VERTEX push TEMPLATE for the depth pass: the trailing words (`use_model_matrix
+    /// == 1` `@84`; the recorder overwrites the `base_instance` word `@80` per caster batch). The
+    /// leading 64 bytes (the `view_proj` matrix) are OVERWRITTEN per atlas slot from
+    /// [`Self::face_view_proj`].
+    pub push: [u8; GBUFFER_PUSH_BYTES],
+    /// The per-slot COLUMN-MAJOR `view_proj` matrices (64 bytes each), `[0..active_layers)` valid.
+    /// The depth pass loops slots, stamping `face_view_proj[s]` into the push's leading 64 bytes and
+    /// rendering the casters into `layer_render_view(s)`. Each matrix MUST byte-equal the resolve
+    /// UBO's `gFaces[s].view_proj` (the O1 single-matrix pin: the depth VS + the resolve read the
+    /// SAME per-slot matrix).
+    pub face_view_proj: [[u8; 64]; MAX_TEXTURE_LAYERS],
+    /// The number of atlas layers to render (`1..=MAX_TEXTURE_LAYERS`); mirrors the atlas UBO's
+    /// `active_layers` / `ResolvedShadowAtlas::active_layers`. The depth pass renders layers
+    /// `[0..active_layers)`.
+    pub active_layers: u32,
+    /// The shadow-atlas resolution (texels per side — the map is square, e.g. 512). The depth pass's
+    /// render area + viewport. MUST equal the resolution [`GBufferScene::shadow_atlas_texture`] was
+    /// created at.
     pub shadow_dim: u32,
 }
 
@@ -5272,15 +5574,32 @@ impl GBufferTargets {
                 BindGroupEntry::UniformBuffer {
                     buffer: scene.csm_cascade_ubo,
                 },
+                // Shadow Phase 5 Inc-1-GPU: the sparse spot/point shadow-ATLAS array + its PCF
+                // comparison sampler as ONE combined descriptor @14 (DXC collapsed `gShadowAtlas`(t14)
+                // + `gShadowAtlasCmp`(s14) — the `gCsm` precedent). The atlas UBO @15 (mirrors
+                // `ResolvedShadowAtlas`, 1296 B). BOTH ALWAYS bound (the resolve `.spv` statically
+                // references `gShadowAtlas`/`ShadowAtlas`), so the layout MUST declare them and a valid
+                // descriptor MUST be present even on the OFF path; the resolve PCF-samples ONLY under
+                // `punctual_shadow_mode != 0` (0 every pre-Inc-1 scene), so the bound-but-unread atlas
+                // map/sampler/UBO are never sampled (the 0%-gate). These are the 15th + 16th entries —
+                // the resolve set now hits 16/16, the descriptor cap (`MAX_BIND_GROUP_BINDINGS`).
+                BindGroupEntry::CombinedImage {
+                    texture: scene.shadow_atlas_texture,
+                    sampler: scene.shadow_atlas_sampler,
+                },
+                BindGroupEntry::UniformBuffer {
+                    buffer: scene.shadow_atlas_ubo,
+                },
             ];
-            // W4: the resolve set now declares 14 bindings (0..=13) — within the 16-binding cap
-            // (`MAX_BIND_GROUP_BINDINGS`), with 2 free. CSM Rung A adds the combined cascade
-            // map+sampler @12 + the cascade UBO @13 (the plan's separate-comparison-sampler @13 was
-            // collapsed into the combined @12 — the in-house RHI has no SAMPLER-only BindGroupEntry;
-            // see the resolve shader's deviation note).
+            // The resolve set now declares 16 bindings (0..=15) — EXACTLY the 16-binding cap
+            // (`MAX_BIND_GROUP_BINDINGS`), 0 free. CSM Rung A added the combined cascade map+sampler
+            // @12 + the cascade UBO @13; Shadow Inc-1-GPU adds the combined atlas map+sampler @14 +
+            // the atlas UBO @15 (both via the combined-image collapse — the in-house RHI has no
+            // SAMPLER-only `BindGroupEntry`). Assert the EXACT cap hit (16/16): a future binding has
+            // no room without raising the cap.
             debug_assert!(
-                entries.len() <= MAX_BIND_GROUP_BINDINGS,
-                "invariant: the resolve set's binding count must stay within the descriptor cap"
+                entries.len() == MAX_BIND_GROUP_BINDINGS,
+                "invariant: the resolve set must fill EXACTLY the 16-binding descriptor cap (16/16)"
             );
             let desc = BindGroupDesc::<Vulkan> {
                 layout: scene.resolve_layout,

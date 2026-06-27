@@ -68,6 +68,7 @@ use boyko_rhi_vulkan::compute::{
     B5_CAMERA_UBO_BYTES_M4, B5_CAMERA_UBO_BYTES_MESH_SDF, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode,
     CompositePushConstants, csm_depth_fs_spirv, csm_depth_vs_spirv,
     EDITLIST_BUFFER_WORDS, GOLDEN_LIGHT_HEADER_BASE_WORDS, GOLDEN_LIGHT_KIND_DIRECTIONAL,
+    GOLDEN_LIGHT_KIND_SPOT,
     GoldenLight, GoldenLightHeader,
     LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET, MESH_SDF_PARAMS_OFFSET, MeshSdfParams,
     MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_TRACE_T_MAX,
@@ -88,13 +89,14 @@ use boyko_rhi_vulkan::memory::BoundBuffer;
 use boyko_rhi_vulkan::rhi_impl::{
     VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline, VulkanSampler,
 };
-use boyko_rhi_vulkan::texture::VulkanTexture;
+use boyko_rhi_vulkan::texture::{MAX_TEXTURE_LAYERS, VulkanTexture};
 use boyko_rhi_vulkan::ffi::{
     VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VkExtent2D,
 };
 use boyko_rhi_vulkan::swapchain::{
     BrickActivation, CsmDepthActivation, GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES,
-    GBUFFER_PUSH_BYTES, GBufferFrame, GBufferMeshDraw, GBufferScene, Renderer, SsaoActivation,
+    GBUFFER_PUSH_BYTES, GBufferFrame, GBufferMeshDraw, GBufferScene, PunctualDepthActivation,
+    Renderer, SsaoActivation,
     Surface, Swapchain,
 };
 use boyko_rhi_vulkan::window::{CapturedMsg, Window};
@@ -258,6 +260,21 @@ const CSM_UBO_BYTES: u64 = 336;
 /// resolve does.
 const CSM_NORMAL_BIAS: f32 = 2.0;
 
+/// Shadow Phase 5 Inc-1-GPU: the sparse SPOT/POINT shadow-atlas resolution (a 512 tile — the
+/// `boyko_render::shadow_atlas::SHADOW_DIM` default).
+const SPOT_SHADOW_DIM: u32 = 512;
+/// Shadow Phase 5 Inc-1-GPU: the atlas layer budget — mirrors `boyko_render::shadow_atlas::M_SLOTS`
+/// (16) and the atlas texture's `array_layers`. The demo uses ONE layer (slot 0).
+const SPOT_ATLAS_SLOTS: u32 = 16;
+/// Shadow Phase 5 Inc-1-GPU: the byte size of the host atlas UBO — a `ResolvedShadowAtlas` mirror
+/// (1296 B: `[FaceTransform; M_SLOTS]` + `active_layers` + `mode_word` + pad). The resolve reads
+/// `gFaces[slot].view_proj` from it; the depth pass pushes the SAME matrix.
+const SPOT_ATLAS_UBO_BYTES: u64 = 1296;
+/// Shadow Phase 5 Inc-1-GPU: the host-side spot normal-bias FACTOR — MUST equal the resolve shader's
+/// `SPOT_SHADOW_NORMAL_BIAS` (`deferred_pbr.hlsl`) so the host spot matrix golden reprojects EXACTLY
+/// as the resolve does.
+const SPOT_SHADOW_NORMAL_BIAS: f32 = 0.02;
+
 /// CSM Increment 1b (Rung A): the cascade resources a [`GBufferScene`] threads into the resolve
 /// (binding 12/13 — ALWAYS bound) + the depth pass ([`GBufferScene::csm`] — `Some` on the demo).
 /// The trio (a multi-layer D32 cascade texture, a PCF comparison sampler, a host-coherent
@@ -271,6 +288,15 @@ struct CsmSceneResources {
     depth_pipeline: VulkanGraphicsPipeline,
     depth_vs: boyko_rhi_vulkan::rhi_impl::VulkanShaderModule,
     depth_fs: boyko_rhi_vulkan::rhi_impl::VulkanShaderModule,
+    // Shadow Phase 5 Inc-1-GPU: the sparse SPOT/POINT atlas trio (a 16-layer D32 atlas texture, a
+    // PCF comparison sampler, a host-coherent `ResolvedShadowAtlas`-shaped UBO). ALWAYS supplied to
+    // the resolve @14/@15 (bound-but-unread on the 2 golden presents, where the scene's
+    // `atlas_punctual` is `None` / `punctual_shadow_mode == 0`); the `#[ignore]` spot demo wires
+    // `atlas_punctual = Some(..)` + uploads a real spot `view_proj`. The depth pass reuses the SAME
+    // `depth_pipeline` (SPOT uses NDC-z like a CSM cascade — `csm_depth.vs/fs` verbatim).
+    atlas: VulkanTexture,
+    atlas_sampler: VulkanSampler,
+    atlas_ubo: BoundBuffer,
 }
 
 impl CsmSceneResources {
@@ -349,7 +375,88 @@ impl CsmSceneResources {
             },
         )
         .expect("CSM depth-only graphics pipeline");
-        Self { cascade, sampler, ubo, depth_pipeline, depth_vs, depth_fs }
+        // Shadow Phase 5 Inc-1-GPU: the atlas trio (16 layers == M_SLOTS so the 2D_ARRAY sample view
+        // exists; the demo renders only slot 0).
+        let atlas = RhiDevice::create_texture(
+            device,
+            &TextureDesc {
+                width: SPOT_SHADOW_DIM,
+                height: SPOT_SHADOW_DIM,
+                depth: 1,
+                format: Format::D32Sfloat,
+                dimension: TextureDimension::D2,
+                usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
+                array_layers: SPOT_ATLAS_SLOTS,
+            },
+        )
+        .expect("shadow-atlas array texture");
+        let atlas_sampler = RhiDevice::create_sampler(
+            device,
+            &SamplerDesc {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                address_mode: AddressMode::ClampToEdge,
+                mip: MipMode::None,
+                compare: Some(CompareOp::LessOrEqual),
+            },
+        )
+        .expect("shadow-atlas PCF comparison sampler");
+        let atlas_ubo = RhiDevice::create_buffer(
+            device,
+            &BufferDesc {
+                size: SPOT_ATLAS_UBO_BYTES,
+                usage: BufferUsage::UNIFORM,
+                location: MemoryLocation::HostVisibleCoherent,
+            },
+        )
+        .expect("shadow-atlas UBO (ResolvedShadowAtlas mirror)");
+        Self {
+            cascade,
+            sampler,
+            ubo,
+            depth_pipeline,
+            depth_vs,
+            depth_fs,
+            atlas,
+            atlas_sampler,
+            atlas_ubo,
+        }
+    }
+
+    /// Shadow Phase 5 Inc-1-GPU: writes a `ResolvedShadowAtlas`-shaped image into the host-coherent
+    /// atlas UBO from a [`SpotDemoFit`]: slot `s`'s `view_proj` (16 column-major floats) + the
+    /// POINT-shared `light_pos`/`inv_range` lanes into `gFaces[s]`, then `active_layers`/`mode_word`
+    /// in the trailing words. The trailing `[active_layers..M_SLOTS)` faces stay zero
+    /// (bound-but-unread). The per-slot `view_proj` bytes are the SAME ones the depth pass stamps
+    /// (the O1 single-matrix pin).
+    fn upload_atlas(&self, device: &VulkanContext, fit: &SpotDemoFit) {
+        let mut bytes = [0u8; SPOT_ATLAS_UBO_BYTES as usize];
+        for (s, face) in fit.faces.iter().enumerate().take(fit.active_layers as usize) {
+            let base = s * 80; // FaceTransform stride (== CascadeData stride)
+            for (i, f) in face.view_proj.iter().enumerate() {
+                bytes[base + i * 4..base + i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+            }
+            // FaceTransform layout: view_proj @0 (64 B), light_pos @64 (12 B), inv_range @76, then
+            // 8 B pad to the 80 B stride is part of the next 16-B cbuffer row (pad @64+12..80 here).
+            bytes[base + 64..base + 68].copy_from_slice(&face.light_pos[0].to_le_bytes());
+            bytes[base + 68..base + 72].copy_from_slice(&face.light_pos[1].to_le_bytes());
+            bytes[base + 72..base + 76].copy_from_slice(&face.light_pos[2].to_le_bytes());
+            bytes[base + 76..base + 80].copy_from_slice(&face.inv_range.to_le_bytes());
+        }
+        // After the 16 × 80-byte FaceTransform array (1280 B): active_layers @1280, mode_word @1284.
+        bytes[1280..1284].copy_from_slice(&fit.active_layers.to_le_bytes());
+        bytes[1284..1288].copy_from_slice(&1u32.to_le_bytes());
+        let dst = RhiDevice::buffer_mapped_ptr(device, &self.atlas_ubo).expect("atlas UBO mapped");
+        // SAFETY: `dst` points to `SPOT_ATLAS_UBO_BYTES` mapped host-coherent bytes (the UBO was
+        // created at exactly that size); `bytes` is a distinct stack array of the same length;
+        // host-coherent => the write is visible before the next submit reads the UBO.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                dst.as_ptr(),
+                SPOT_ATLAS_UBO_BYTES as usize,
+            );
+        }
     }
 
     /// CSM Increment 3 (Rung B): writes a `ResolvedCsm`-shaped image into the host-coherent UBO
@@ -389,6 +496,9 @@ impl CsmSceneResources {
     unsafe fn destroy(self, device: &VulkanContext) {
         // SAFETY: per the contract `device` is live and nothing references these resources.
         unsafe {
+            RhiDevice::destroy_buffer(device, self.atlas_ubo);
+            RhiDevice::destroy_sampler(device, self.atlas_sampler);
+            RhiDevice::destroy_texture(device, self.atlas);
             RhiDevice::destroy_graphics_pipeline(device, self.depth_pipeline);
             RhiDevice::destroy_shader_module(device, self.depth_fs);
             RhiDevice::destroy_shader_module(device, self.depth_vs);
@@ -1665,6 +1775,13 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         // → bound-but-unread (the 0%-gate).
         BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        // Shadow Phase 5 Inc-1-GPU: the sparse spot/point shadow-atlas combined map+sampler @14 + the
+        // atlas UBO @15. The production `GBufferTargets::create` binds the scene's atlas trio at
+        // @14/@15, so the resolve layout MUST declare them (the recompiled resolve STATICALLY
+        // references `gShadowAtlas` + `ShadowAtlas`). 16 bindings == the 16-binding cap (16/16);
+        // `punctual_shadow_mode == 0` on the golden presents → bound-but-unread (the 0%-gate).
+        BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 15, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -1828,6 +1945,14 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         csm_compare_sampler: &csm.sampler,
         csm_cascade_ubo: &csm.ubo,
         csm: None,
+        // Shadow Phase 5 Inc-1-GPU: the atlas trio bound at resolve @14/@15 (ALWAYS), the punctual
+        // depth pass OFF (`atlas_punctual: None`). On this golden present `punctual_shadow_mode == 0`,
+        // so the resolve's spot PCF sample never runs and the trio is bound-but-unread (the 0%-gate —
+        // byte-identical pixels).
+        shadow_atlas_texture: &csm.atlas,
+        shadow_atlas_sampler: &csm.atlas_sampler,
+        shadow_atlas_ubo: &csm.atlas_ubo,
+        atlas_punctual: None,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -2550,6 +2675,13 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         // → bound-but-unread (the 0%-gate).
         BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        // Shadow Phase 5 Inc-1-GPU: the sparse spot/point shadow-atlas combined map+sampler @14 + the
+        // atlas UBO @15. The production `GBufferTargets::create` binds the scene's atlas trio at
+        // @14/@15, so the resolve layout MUST declare them (the recompiled resolve STATICALLY
+        // references `gShadowAtlas` + `ShadowAtlas`). 16 bindings == the 16-binding cap (16/16);
+        // `punctual_shadow_mode == 0` on the golden presents → bound-but-unread (the 0%-gate).
+        BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 15, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -2699,6 +2831,14 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         csm_compare_sampler: &csm.sampler,
         csm_cascade_ubo: &csm.ubo,
         csm: None,
+        // Shadow Phase 5 Inc-1-GPU: the atlas trio bound at resolve @14/@15 (ALWAYS), the punctual
+        // depth pass OFF (`atlas_punctual: None`). On this golden present `punctual_shadow_mode == 0`,
+        // so the resolve's spot PCF sample never runs and the trio is bound-but-unread (the 0%-gate —
+        // byte-identical pixels).
+        shadow_atlas_texture: &csm.atlas,
+        shadow_atlas_sampler: &csm.atlas_sampler,
+        shadow_atlas_ubo: &csm.atlas_ubo,
+        atlas_punctual: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -3158,6 +3298,43 @@ struct ShowcaseConfig {
     /// casters are the showcase's instanced batches (so `instanced` MUST be `Some` for a visible
     /// caster). Rung A is a SINGLE cascade (`c == 0`).
     csm: Option<CsmDemoFit>,
+    /// Shadow Phase 5 Inc-1-GPU — the OPTIONAL sparse SPOT shadow demo. `None` (every existing
+    /// showcase): the punctual depth pass is OFF + `punctual_shadow_mode == 0` (the 0%-gate; the
+    /// atlas trio is bound-but-unread). `Some(fit)` arms the depth pass: `run_showcase_dump` uploads
+    /// `fit` into the atlas UBO, pushes its `view_proj` into the depth pass, sets
+    /// `punctual_shadow_mode == 1` on the light header (+ the spot's `dir_kind.w` slot=0 packed into
+    /// the light table), and the resolve MULTIPLIES the EXACT raster-mesh hard shadow into the spot's
+    /// contribution INSIDE the cone. The casters are the showcase's instanced batches (so `instanced`
+    /// MUST be `Some` for a visible caster). Inc 1 is a SINGLE spot (slot 0).
+    spot_atlas: Option<SpotDemoFit>,
+}
+
+/// Shadow Phase 5 Inc-1-GPU — one fitted atlas face in a [`SpotDemoFit`]: the column-major
+/// world→light-clip `view_proj` (the SAME bytes the depth pass pushes + the resolve UBO holds, the
+/// O1 single-matrix pin), plus the POINT-shared `light_pos`/`inv_range` lanes (unused by the SPOT
+/// NDC-z compare). Mirrors `boyko_render::FaceTransform`.
+#[derive(Clone, Copy)]
+struct SpotFace {
+    /// Column-major `perspective · light_view` (world → light clip), 16 floats.
+    view_proj: [f32; 16],
+    /// World-space light position (Inc-2 POINT cube; unused by the SPOT NDC-z compare).
+    light_pos: [f32; 3],
+    /// Reciprocal of the light range (Inc-2 POINT; unused by SPOT).
+    inv_range: f32,
+}
+
+/// Shadow Phase 5 Inc-1-GPU — the atlas FIT a [`ShowcaseConfig`] carries: up to
+/// [`SPOT_ATLAS_SLOTS`] fitted faces + the active count. A real app derives these from
+/// `boyko_render::resolve_shadow_atlas`; the demo hand-fits ONE spot face (slot 0). Inc 1 is
+/// `active_layers == 1`.
+#[derive(Clone, Copy)]
+struct SpotDemoFit {
+    /// The fitted atlas faces; only `[0..active_layers)` are valid (the rest zeroed,
+    /// bound-but-unread).
+    faces: [SpotFace; SPOT_ATLAS_SLOTS as usize],
+    /// The number of valid atlas layers (`1..=SPOT_ATLAS_SLOTS`) — mirrors
+    /// `ResolvedShadowAtlas::active_layers`.
+    active_layers: u32,
 }
 
 /// CSM Increment 3 (Rung B) — one hand-fitted cascade in a [`CsmDemoFit`]: the column-major
@@ -3274,6 +3451,9 @@ fn showcase_config(ssao_quality: Option<usize>) -> ShowcaseConfig {
         instanced: None,
         // CSM Increment 1b: OFF (the 0%-gate — no cascade depth pass, `csm_mode == 0`).
         csm: None,
+        // Shadow Phase 5 Inc-1-GPU: no sparse spot shadow (the 0%-gate — no punctual depth pass,
+        // `punctual_shadow_mode == 0`).
+        spot_atlas: None,
     }
 }
 
@@ -3429,6 +3609,9 @@ fn mesh_ssao_config(ssao_quality: Option<usize>) -> ShowcaseConfig {
         instanced: None,
         // CSM Increment 1b: OFF (the 0%-gate — no cascade depth pass, `csm_mode == 0`).
         csm: None,
+        // Shadow Phase 5 Inc-1-GPU: no sparse spot shadow (the 0%-gate — no punctual depth pass,
+        // `punctual_shadow_mode == 0`).
+        spot_atlas: None,
     }
 }
 
@@ -3608,6 +3791,9 @@ fn hybrid_room_config() -> ShowcaseConfig {
         instanced: None,
         // CSM Increment 1b: OFF (the 0%-gate — no cascade depth pass, `csm_mode == 0`).
         csm: None,
+        // Shadow Phase 5 Inc-1-GPU: no sparse spot shadow (the 0%-gate — no punctual depth pass,
+        // `punctual_shadow_mode == 0`).
+        spot_atlas: None,
     }
 }
 
@@ -3682,6 +3868,9 @@ fn instanced_persp_config() -> ShowcaseConfig {
         }),
         // CSM Increment 1b: OFF for this showcase (the 0%-gate — no cascade depth pass).
         csm: None,
+        // Shadow Phase 5 Inc-1-GPU: no sparse spot shadow (the 0%-gate — no punctual depth pass,
+        // `punctual_shadow_mode == 0`).
+        spot_atlas: None,
     }
 }
 
@@ -3730,6 +3919,125 @@ const CSM_DEMO_FAR: f32 = 20.0;
 fn csm_demo_view_proj(sun_dir: [f32; 3], center: [f32; 3]) -> [f32; 16] {
     // Rung A delegates to the parameterized Rung-B builder at the demo's fixed footprint/z-range.
     csm_cascade_view_proj(sun_dir, center, CSM_DEMO_HALF_EXTENT, CSM_DEMO_NEAR, CSM_DEMO_FAR)
+}
+
+/// Shadow Phase 5 Inc-1-GPU: the spot shadow near plane (view-space) — mirrors
+/// `boyko_render::shadow_atlas::SPOT_SHADOW_NEAR`.
+const SPOT_DEMO_NEAR: f32 = 0.05;
+
+/// Shadow Phase 5 Inc-1-GPU: builds the demo SPOT's COLUMN-MAJOR world→light-clip `view_proj`
+/// (`perspective · light_view`) for a spot at `eye` shining along `axis` (the world direction the
+/// light points), full FOV `2·outer_rad`, near [`SPOT_DEMO_NEAR`], far `range`. The look-at uses a
+/// right-handed convention with a +Y world-up (swapped to +Z when nearly collinear). The SAME helper
+/// feeds the GPU UBO/push AND the host spot matrix golden, so the depth-pass reprojection and the
+/// resolve lookup are pinned to ONE matrix.
+///
+/// Mirrors `boyko_render::shadow_atlas::spot_face`'s `view_proj` math but in plain `[f32; 16]`
+/// arrays (no `boyko_render`/`boyko_math` dep here), and emits Vulkan `[0,1]` depth with the
+/// engine's framebuffer Y-flip (`clip.y = -y_proj`), the SAME convention `csm_cascade_view_proj`
+/// uses (so the resolve's shared Y-flipped NDC→UV addresses the right texel).
+fn spot_demo_view_proj(eye: [f32; 3], axis: [f32; 3], outer_rad: f32, range: f32) -> [f32; 16] {
+    let norm = |v: [f32; 3]| {
+        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        [v[0] / l, v[1] / l, v[2] / l]
+    };
+    let cross = |a: [f32; 3], b: [f32; 3]| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+    // The look direction is the cone axis (the world direction the light shines along).
+    let fwd = norm(axis);
+    let up_hint = if dot(fwd, [0.0, 1.0, 0.0]).abs() > 0.99 {
+        [0.0, 0.0, 1.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let right = norm(cross(up_hint, fwd));
+    let up = cross(fwd, right);
+    // light_view rows = basis; translation = -dot(basis, eye). z_light = forward·(P-eye) (POSITIVE
+    // into the scene), matching `csm_cascade_view_proj`'s view convention.
+    let tx = -dot(right, eye);
+    let ty = -dot(up, eye);
+    let tz = -dot(fwd, eye);
+
+    // Perspective proj (Vulkan [0,1] depth, square aspect): full FOV = 2·outer.
+    let near = SPOT_DEMO_NEAR;
+    let far = range.max(SPOT_DEMO_NEAR + 1.0e-3);
+    let f = 1.0 / (outer_rad).tan(); // cot(half_fov); half_fov = outer_rad
+    // Standard RH perspective (Vulkan [0,1]): clip.x = f/aspect·x, clip.y = -f·y (Y-flip to match
+    // the engine framebuffer), clip.z = far/(far-near)·z - far·near/(far-near), clip.w = z.
+    // aspect == 1 (square map). pv[row][col] = proj_row · light_view.
+    let zr = far - near;
+    let pv: [[f32; 4]; 4] = [
+        [f * right[0], f * right[1], f * right[2], f * tx],
+        [-f * up[0], -f * up[1], -f * up[2], -f * ty],
+        [
+            (far / zr) * fwd[0],
+            (far / zr) * fwd[1],
+            (far / zr) * fwd[2],
+            (far / zr) * tz - far * near / zr,
+        ],
+        [fwd[0], fwd[1], fwd[2], tz],
+    ];
+    // Upload COLUMN-MAJOR: out[col*4 + row] = pv[row][col].
+    let mut out = [0.0f32; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            out[col * 4 + row] = pv[row][col];
+        }
+    }
+    out
+}
+
+/// Shadow Phase 5 Inc-1-GPU: a one-spot [`SpotDemoFit`] (slot 0) from a fitted spot `view_proj` +
+/// the spot's world position + range. The trailing `[1..SPOT_ATLAS_SLOTS)` faces stay zero
+/// (bound-but-unread).
+fn spot_single_face(view_proj: [f32; 16], light_pos: [f32; 3], range: f32) -> SpotDemoFit {
+    let mut faces = [SpotFace { view_proj: [0.0; 16], light_pos: [0.0; 3], inv_range: 0.0 };
+        SPOT_ATLAS_SLOTS as usize];
+    faces[0] = SpotFace {
+        view_proj,
+        light_pos,
+        inv_range: if range > 0.0 { range.recip() } else { 0.0 },
+    };
+    SpotDemoFit { faces, active_layers: 1 }
+}
+
+/// Shadow Phase 5 Inc-1-GPU: the HOST↔SHADER SPOT MATRIX GOLDEN (the acne oracle). Given a spot
+/// `view_proj` (column-major, the SAME bytes the depth pass pushes + the resolve UBO carries) + a
+/// world receiver point `P` + its normal `n`, this reprojects `P` the SAME way the depth pass
+/// (`mul(view_proj, float4(P,1))`) and the resolve's `spot_atlas_visibility` (normal-offset by
+/// `n * SPOT_SHADOW_NORMAL_BIAS` + the Y-flipped NDC→UV) do — so the host can assert the two
+/// reprojections agree (the depth write and the resolve lookup cannot drift). Mirrors the resolve's
+/// `spot_atlas_visibility` UV math byte-for-byte. Returns `(uv_x, uv_y, ndc_z, in_bounds)`.
+fn spot_host_project(view_proj: &[f32; 16], p: [f32; 3], n: [f32; 3]) -> (f32, f32, f32, bool) {
+    // Normal-offset the receiver — IDENTICAL to the resolve's `P + n * SPOT_SHADOW_NORMAL_BIAS`.
+    let off = SPOT_SHADOW_NORMAL_BIAS;
+    let pw = [p[0] + n[0] * off, p[1] + n[1] * off, p[2] + n[2] * off, 1.0];
+    // Column-major `view_proj * pw`: `clip[r] = sum_c view_proj[c*4 + r] * pw[c]`.
+    let mut clip = [0.0f32; 4];
+    for (r, clip_r) in clip.iter_mut().enumerate() {
+        let mut acc = 0.0f32;
+        for (c, &pw_c) in pw.iter().enumerate() {
+            acc += view_proj[c * 4 + r] * pw_c;
+        }
+        *clip_r = acc;
+    }
+    if clip[3] <= 0.0 {
+        return (0.0, 0.0, 0.0, false);
+    }
+    let ndc = [clip[0] / clip[3], clip[1] / clip[3], clip[2] / clip[3]];
+    let uv_x = ndc[0] * 0.5 + 0.5;
+    let uv_y = 1.0 - (ndc[1] * 0.5 + 0.5); // Vulkan Y-flip (matches the resolve)
+    let in_bounds = (0.0..=1.0).contains(&uv_x)
+        && (0.0..=1.0).contains(&uv_y)
+        && (0.0..=1.0).contains(&ndc[2]);
+    (uv_x, uv_y, ndc[2], in_bounds)
 }
 
 /// CSM Increment 3 (Rung B): builds ONE cascade's COLUMN-MAJOR world→light-clip `view_proj`
@@ -3996,6 +4304,8 @@ fn csm_shadow_config() -> ShowcaseConfig {
             ),
             active_count: 1,
         }),
+        // This is the CSM (directional) demo — the sparse SPOT path stays OFF here.
+        spot_atlas: None,
     }
 }
 
@@ -4072,6 +4382,203 @@ fn csm_matrix_golden_host_projection_agrees() {
     );
 }
 
+// === Shadow Phase 5 Inc-1-GPU — the sparse SPOT hardware-shadow demo + the spot matrix golden. ===
+
+/// Shadow Phase 5 Inc-1-GPU: the BMP the spot-shadow demo dumps for the owner's RTX visual sign-off.
+const SPOT_SHADOW_BMP: &str = "D:\\tmp\\engine_spot_shadow.bmp";
+
+/// Shadow Phase 5 Inc-1-GPU: the demo SPOT's world position (the cone apex / perspective eye) —
+/// above-and-to-the-side of the caster so the cone covers the box + the floor under it.
+const SPOT_DEMO_POS: [f32; 3] = [1.3, 3.0, 0.4];
+/// Shadow Phase 5 Inc-1-GPU: the point the spot aims at (the scene center near the caster) — the
+/// cone axis is `normalize(SPOT_DEMO_TARGET - SPOT_DEMO_POS)`.
+const SPOT_DEMO_TARGET: [f32; 3] = [0.0, 0.4, -1.2];
+/// Shadow Phase 5 Inc-1-GPU: the spot's outer cone HALF-angle (degrees) — wide enough to cover the
+/// caster + a floor patch, narrow enough that the shadow stays INSIDE the cone (no shadow outside).
+const SPOT_DEMO_OUTER_DEG: f32 = 28.0;
+/// Shadow Phase 5 Inc-1-GPU: the spot's inner cone half-angle (degrees) — the falloff start.
+const SPOT_DEMO_INNER_DEG: f32 = 20.0;
+/// Shadow Phase 5 Inc-1-GPU: the spot's range (the cone far plane / cull radius).
+const SPOT_DEMO_RANGE: f32 = 8.0;
+
+/// Shadow Phase 5 Inc-1-GPU: the cone axis (the world direction the spot shines along) =
+/// `normalize(SPOT_DEMO_TARGET - SPOT_DEMO_POS)`. Used for both the perspective fit + the
+/// `GoldenLight::spot` direction (which expects "direction TO the light" = `-axis`).
+fn spot_demo_axis() -> [f32; 3] {
+    let d = [
+        SPOT_DEMO_TARGET[0] - SPOT_DEMO_POS[0],
+        SPOT_DEMO_TARGET[1] - SPOT_DEMO_POS[1],
+        SPOT_DEMO_TARGET[2] - SPOT_DEMO_POS[2],
+    ];
+    let l = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+    [d[0] / l, d[1] / l, d[2] / l]
+}
+
+/// Shadow Phase 5 Inc-1-GPU: the SPOT-shadow showcase. ONE spot light (with its `dir_kind.w` slot
+/// packed to 0 via `with_atlas_slot`) + a dim sky for fill, an ASYMMETRIC raster box caster + a
+/// marker cube on a raster floor. The spot casts the box's EXACT silhouette shadow onto the floor
+/// INSIDE the cone (no shadow outside the cone).
+fn spot_shadow_config() -> ShowcaseConfig {
+    // ONE spot (the atlas is fit to it; slot 0) + a dim sky for ambient fill. The spot's
+    // `dir_kind.w` carries atlas slot 0 (`with_atlas_slot(0)`) so the resolve reads
+    // `light_atlas_slot(L.kind) == 0` and samples `gFaces[0]`. The spot illuminates the scene and
+    // is the ONLY shadow-casting punctual.
+    let header = GoldenLightHeader::new(1, 1, 1.0).with_ssao_mode(0);
+    let axis = spot_demo_axis();
+    // The table LAYOUT is [L0a (directional/sky)..., L0b (point/spot)...]: with l0a_count=1 the sky
+    // MUST be element 0 (the L0a block) and the spot element 1 (the L0b clustered punctual). The
+    // reversed order ([spot, sky]) made the resolve read the spot as the L0a light + the sky as the
+    // punctual → the spot was never clustered → the scene rendered black.
+    let lights = vec![
+        // L0a: a dim sky for ambient fill.
+        GoldenLight::sky([0.06, 0.06, 0.08], [0.05, 0.05, 0.06]),
+        // L0b: the spot. The resolve's cone test is `dot(-l, L.dir)` (in-cone when L.dir aligns with
+        // light->surface), so L.dir is the SHINE direction = `axis` (NOT -axis). Its `dir_kind.w`
+        // carries atlas slot 0 (`with_atlas_slot(0)`) so the resolve samples `gFaces[0]`.
+        GoldenLight::spot(
+            SPOT_DEMO_POS,
+            axis,
+            [1.0, 0.96, 0.88],
+            220.0,
+            SPOT_DEMO_RANGE,
+            SPOT_DEMO_INNER_DEG,
+            SPOT_DEMO_OUTER_DEG,
+        )
+        .with_atlas_slot(0),
+    ];
+
+    // NO SDF: the raster floor + box own every lit pixel (the floor's mask=1 makes the spot's
+    // multiply land on a real surface). A single degenerate far edit keeps the edit-list valid.
+    let sdf = vec![SdfEdit::sphere([0.0, -1000.0, 0.0], 0.01, sdf_op::UNION, 0.0)];
+
+    // The CASTER: an ASYMMETRIC box (a tall slab, distinct X/Y/Z extents) standing on the floor,
+    // with a small marker cube on top so the cast shadow's orientation reads. ONE instanced mesh
+    // entry, two affines (the slab + the marker), so the depth pass + the resolve both see them.
+    let (slab_v, slab_i) = mesh_box_model([0.35, 0.9, 0.55], [0.82, 0.42, 0.30, 1.0]);
+    let affines = vec![
+        instance_affine(0.4, 1.0, [0.0, 0.9, -1.2]),  // the slab, yawed 0.4 rad
+        instance_affine(0.4, 0.28, [0.0, 1.95, -1.2]), // a small marker cube on top
+    ];
+
+    // The raster FLOOR: a wide flat box (a thin slab) at y≈0 spanning the scene.
+    let (floor_v, floor_i) = mesh_box_model([4.0, 0.05, 4.0], ROOM_FLOOR_COLOR);
+    let floor_affine = instance_affine(0.0, 1.0, [0.0, -0.05, -1.0]);
+
+    ShowcaseConfig {
+        sdf,
+        camera: room_camera(),
+        light_header: header,
+        light_elems: lights,
+        vertices: showcase_quad_vertices(),
+        mvp: instanced_room_mvp_bytes(),
+        ssao_quality: None,
+        mesh_sdf: None,
+        instanced: Some(InstancedMesh {
+            meshes: vec![
+                InstancedMeshEntry { vertices: floor_v, indices: floor_i, affines: vec![floor_affine] },
+                InstancedMeshEntry { vertices: slab_v, indices: slab_i, affines },
+            ],
+        }),
+        // CSM OFF (this is the SPOT demo — the directional cascade path stays off).
+        csm: None,
+        // SPOT ON (Inc 1): ONE atlas face fit to the spot (slot 0), looking from the apex along the
+        // cone axis, FOV `2·outer`. The resolve multiplies its PCF sample into the spot's contribution.
+        spot_atlas: Some(spot_single_face(
+            spot_demo_view_proj(SPOT_DEMO_POS, axis, SPOT_DEMO_OUTER_DEG.to_radians(), SPOT_DEMO_RANGE),
+            SPOT_DEMO_POS,
+            SPOT_DEMO_RANGE,
+        )),
+    }
+}
+
+/// **Shadow Phase 5 Inc-1-GPU — the sparse SPOT hardware shadow screenshot.** Drives the spot DEPTH
+/// pass (the asymmetric box rendered from the spot POV into atlas layer 0) + the resolve per-spot
+/// multiply, dumping a TRUE 512×512 BMP to [`SPOT_SHADOW_BMP`] for the owner's RTX visual sign-off
+/// (the deliverable: the box's EXACT hard shadow on the raster floor, contained inside the cone).
+///
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
+/// orchestrator runs it on the GPU to dump the screenshot.
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the spot shadow screenshot"]
+fn engine_spot_shadow_512_screenshot_dump() {
+    run_showcase_dump("boyko_engine spot shadow 512", SPOT_SHADOW_BMP, spot_shadow_config());
+}
+
+/// **Shadow Phase 5 Inc-1-GPU — the HOST↔SHADER SPOT MATRIX GOLDEN (the acne oracle).** Asserts the
+/// host reprojection ([`spot_host_project`], the mirror of the resolve's `spot_atlas_visibility` UV
+/// math) AGREES with a direct column-major `view_proj · P` projection of a KNOWN caster point — so
+/// the depth-pass write and the resolve lookup (which read the SAME `view_proj` bytes) cannot drift.
+/// A point under the spot cone maps inside `[0,1]²`; a point far outside maps out of bounds.
+#[test]
+fn spot_matrix_golden_host_projection_agrees() {
+    let axis = spot_demo_axis();
+    let view_proj =
+        spot_demo_view_proj(SPOT_DEMO_POS, axis, SPOT_DEMO_OUTER_DEG.to_radians(), SPOT_DEMO_RANGE);
+
+    // A receiver on the floor under the spot's aim point: in-bounds, depth in [0,1].
+    let p_floor = SPOT_DEMO_TARGET;
+    let n_up = [0.0, 1.0, 0.0];
+    let (uv_x, uv_y, ndc_z, in_bounds) = spot_host_project(&view_proj, p_floor, n_up);
+    assert!(
+        in_bounds,
+        "the floor point under the spot must project inside the cone footprint \
+         (uv = ({uv_x}, {uv_y}), ndc_z = {ndc_z})"
+    );
+    assert!((0.0..=1.0).contains(&ndc_z), "the receiver depth must be in the Vulkan [0,1] range");
+
+    // The normal-offset bias MUST move the lookup off the surface (the acne oracle — the bias is
+    // applied, not a no-op): a biased point differs from the un-biased projection in SOME component.
+    let (uv_x0, uv_y0, ndc_z0, _) = spot_host_project(&view_proj, p_floor, [0.0, 0.0, 0.0]);
+    assert!(
+        (uv_x - uv_x0).abs() > f32::EPSILON
+            || (uv_y - uv_y0).abs() > f32::EPSILON
+            || (ndc_z - ndc_z0).abs() > f32::EPSILON,
+        "the normal-offset bias must perturb the lookup (acne oracle)"
+    );
+
+    // A point far outside the cone footprint projects out of bounds (the resolve treats it lit).
+    let p_far = [100.0, 0.0, -1.2];
+    let (_, _, _, far_in_bounds) = spot_host_project(&view_proj, p_far, n_up);
+    assert!(!far_in_bounds, "a point far outside the spot cone must project out of bounds");
+
+    // The COLUMN-MAJOR transpose pin: a direct `view_proj · P` (no bias) must reproduce the same
+    // clip the host helper computes internally — the depth pass uses this EXACT product.
+    let pw = [p_floor[0], p_floor[1], p_floor[2], 1.0];
+    let mut clip = [0.0f32; 4];
+    for (r, clip_r) in clip.iter_mut().enumerate() {
+        let mut acc = 0.0f32;
+        for (c, &pw_c) in pw.iter().enumerate() {
+            acc += view_proj[c * 4 + r] * pw_c;
+        }
+        *clip_r = acc;
+    }
+    assert!(clip[3] > 0.0, "the perspective clip.w must be positive (the depth pass divides by it)");
+    let direct_uv_x = (clip[0] / clip[3]) * 0.5 + 0.5;
+    let (uv_x_nobias, _, _, _) = spot_host_project(&view_proj, p_floor, [0.0, 0.0, 0.0]);
+    assert!(
+        (direct_uv_x - uv_x_nobias).abs() < 1e-5,
+        "the direct column-major product and the host helper must agree (the majorness pin): \
+         {direct_uv_x} vs {uv_x_nobias}"
+    );
+
+    // The atlas-slot pack/unpack pin: `GoldenLight::spot(..).with_atlas_slot(0)` round-trips through
+    // `atlas_slot()` to 0 (the demo packs slot 0; the resolve reads `light_atlas_slot(L.kind)`), and
+    // the kind tag survives (still SPOT). A `GOLDEN_SLOT_NONE` light has the casts bit clear.
+    let spot = GoldenLight::spot(
+        SPOT_DEMO_POS,
+        [-axis[0], -axis[1], -axis[2]],
+        [1.0, 1.0, 1.0],
+        100.0,
+        SPOT_DEMO_RANGE,
+        SPOT_DEMO_INNER_DEG,
+        SPOT_DEMO_OUTER_DEG,
+    )
+    .with_atlas_slot(0);
+    assert_eq!(spot.atlas_slot(), 0, "with_atlas_slot(0) must round-trip through atlas_slot()");
+    assert_eq!(spot.kind(), GOLDEN_LIGHT_KIND_SPOT, "the kind tag must survive the slot pack");
+    assert!(spot.casts_sdf_shadow(), "a real slot must set the casts-shadow bit");
+}
+
 // === CSM Increment 3 — Rung B: the N-cascade (multi-distance) demo + the select+blend golden. ===
 
 /// CSM Increment 3 (Rung B): the demo's cascade count (3) + the view-z range the inline fit
@@ -4146,6 +4653,8 @@ fn csm_cascades_config() -> ShowcaseConfig {
         }),
         // CSM ON (Rung B): 3 cascades PSSM-fit over the floor's near→far range.
         csm: Some(csm_cascades_fit()),
+        // This is the CSM (directional) cascades demo — the sparse SPOT path stays OFF here.
+        spot_atlas: None,
     }
 }
 
@@ -4342,6 +4851,9 @@ fn multimesh_persp_config() -> ShowcaseConfig {
         }),
         // CSM Increment 1b: OFF for this showcase (the 0%-gate — no cascade depth pass).
         csm: None,
+        // Shadow Phase 5 Inc-1-GPU: no sparse spot shadow (the 0%-gate — no punctual depth pass,
+        // `punctual_shadow_mode == 0`).
+        spot_atlas: None,
     }
 }
 
@@ -4416,6 +4928,9 @@ fn nonuniform_normals_config() -> ShowcaseConfig {
         }),
         // CSM Increment 1b: OFF for this showcase (the 0%-gate — no cascade depth pass).
         csm: None,
+        // Shadow Phase 5 Inc-1-GPU: no sparse spot shadow (the 0%-gate — no punctual depth pass,
+        // `punctual_shadow_mode == 0`).
+        spot_atlas: None,
     }
 }
 
@@ -4571,6 +5086,9 @@ fn capsule_character_config(contact_shadow: bool) -> ShowcaseConfig {
         instanced: None,
         // CSM Increment 1b: OFF (the 0%-gate — no cascade depth pass, `csm_mode == 0`).
         csm: None,
+        // Shadow Phase 5 Inc-1-GPU: no sparse spot shadow (the 0%-gate — no punctual depth pass,
+        // `punctual_shadow_mode == 0`).
+        spot_atlas: None,
     }
 }
 
@@ -4685,6 +5203,9 @@ fn mdf_shadow_config() -> ShowcaseConfig {
         instanced: None,
         // CSM Increment 1b: OFF (the 0%-gate — no cascade depth pass, `csm_mode == 0`).
         csm: None,
+        // Shadow Phase 5 Inc-1-GPU: no sparse spot shadow (the 0%-gate — no punctual depth pass,
+        // `punctual_shadow_mode == 0`).
+        spot_atlas: None,
     }
 }
 
@@ -4921,7 +5442,14 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
     // CSM Increment 1b (Rung A): arm `csm_mode` (header word 7 bit 2) in lock-step with the depth
     // pass (`cfg.csm.is_some()`). OFF leaves the header byte-identical (the 0%-gate); ON makes the
     // resolve `min`-combine the cascade PCF sample into the primary directional's visibility.
-    let light_header = cfg.light_header.with_csm_mode(cfg.csm.is_some());
+    // Shadow Phase 5 Inc-1-GPU: arm `punctual_shadow_mode` (header word 7 bit 3) in lock-step with
+    // the punctual depth pass (`cfg.spot_atlas.is_some()`). OFF leaves the header byte-identical (the
+    // 0%-gate); ON makes the resolve MULTIPLY the spot atlas PCF sample into the SPOT's contribution
+    // (the spot's `dir_kind.w` carries slot 0, packed in `spot_shadow_config` via `with_atlas_slot`).
+    let light_header = cfg
+        .light_header
+        .with_csm_mode(cfg.csm.is_some())
+        .with_punctual_shadow_mode(cfg.spot_atlas.is_some());
     let light_elems = &cfg.light_elems;
     let light_words = pack_showcase_light_table(&light_header, light_elems);
     let light_table_bytes = (light_words.len() as u64) * 4;
@@ -5196,6 +5724,13 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         // → bound-but-unread (the 0%-gate).
         BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        // Shadow Phase 5 Inc-1-GPU: the sparse spot/point shadow-atlas combined map+sampler @14 + the
+        // atlas UBO @15. The production `GBufferTargets::create` binds the scene's atlas trio at
+        // @14/@15, so the resolve layout MUST declare them (the recompiled resolve STATICALLY
+        // references `gShadowAtlas` + `ShadowAtlas`). 16 bindings == the 16-binding cap (16/16);
+        // `punctual_shadow_mode == 0` on the golden presents → bound-but-unread (the 0%-gate).
+        BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 15, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -5327,6 +5862,29 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         (push, cascade_view_proj, fit.active_count)
     });
 
+    // Shadow Phase 5 Inc-1-GPU: upload the spot atlas fit into the atlas UBO, then build the punctual
+    // depth-pass activation — the per-slot `view_proj` byte blocks (the depth loop stamps `[s]` into
+    // the push @0) + the active layer count. The push TEMPLATE carries `use_model_matrix == 1` (@84);
+    // its leading 64 bytes are overwritten per slot so they are left zero here. The `csm.atlas*`
+    // resources are ALWAYS created (the resolve binds @14/@15); `atlas_punctual` is `Some` only when
+    // `cfg.spot_atlas` armed it.
+    let spot_activation = cfg.spot_atlas.map(|fit| {
+        csm.upload_atlas(device, &fit);
+        let mut face_view_proj = [[0u8; 64]; MAX_TEXTURE_LAYERS];
+        for (dst, src) in face_view_proj
+            .iter_mut()
+            .zip(fit.faces.iter())
+            .take(fit.active_layers as usize)
+        {
+            for (i, f) in src.view_proj.iter().enumerate() {
+                dst[i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+            }
+        }
+        let mut push = [0u8; GBUFFER_PUSH_BYTES];
+        push[84..88].copy_from_slice(&1u32.to_le_bytes());
+        (push, face_view_proj, fit.active_layers)
+    });
+
     // M3: build the per-mesh draw batch LIST (one `GBufferMeshDraw` per registered mesh,
     // carrying its `base_instance` bucket offset + O3 index width), borrowing each mesh's GPU
     // buffers from `instanced_gpu`. Empty (the legacy path) ⇒ `scene.mesh_draw == &[]` ⇒ the
@@ -5444,6 +6002,24 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
             cascade_view_proj,
             active_count,
             shadow_dim: CSM_SHADOW_DIM,
+        }),
+        // Shadow Phase 5 Inc-1-GPU: the atlas trio bound at resolve @14/@15 (ALWAYS). The punctual
+        // depth pass is `Some` only when `cfg.spot_atlas` armed it (a real `view_proj` uploaded
+        // above) — then the recorder renders the SAME instanced caster batches into atlas layer 0
+        // from the SPOT POV, and the resolve MULTIPLIES the exact hard shadow into the spot's
+        // contribution INSIDE the cone. OFF ⇒ bound-but-unread. The depth pass reuses the CSM
+        // `depth_pipeline` (SPOT uses NDC-z like a cascade — `csm_depth.vs/fs` verbatim).
+        shadow_atlas_texture: &csm.atlas,
+        shadow_atlas_sampler: &csm.atlas_sampler,
+        shadow_atlas_ubo: &csm.atlas_ubo,
+        atlas_punctual: spot_activation.map(|(push, face_view_proj, active_layers)| {
+            PunctualDepthActivation {
+                pipeline: &csm.depth_pipeline,
+                push,
+                face_view_proj,
+                active_layers,
+                shadow_dim: SPOT_SHADOW_DIM,
+            }
         }),
     };
 
