@@ -58,6 +58,10 @@ pub mod barrier;
 /// depends on scene.
 pub mod bundles;
 pub mod error;
+/// The gbuffer ⇄ marcher linear-depth contract (mesh foundation M2): the host
+/// [`GBUFFER_T_MAX`](gbuffer_depth::GBUFFER_T_MAX) mirror + the C2 drift guard
+/// pinning it to the marcher's `SDF_TRACE_T_MAX`.
+pub mod gbuffer_depth;
 pub mod gpu3d_instance;
 pub mod gpu3d_system;
 pub mod gpu_column;
@@ -68,6 +72,9 @@ pub mod light_policy;
 pub mod light_reconcile;
 pub mod light_system;
 pub mod material;
+/// The renderer-owned mesh asset table (mesh foundation M2): [`MeshRegistry`] /
+/// [`MeshGpu`] / [`Vertex`], the GPU vertex+index buffers a `MeshHandle` indexes.
+pub mod mesh_registry;
 pub mod render3d_plugin;
 pub mod ssao_config;
 pub mod ssao_plugin;
@@ -98,7 +105,11 @@ pub use light_system::{
     SetLightEnabledById, collect_lights, evict_light, fold_light_table, light_seed_state,
     set_light_enabled_now, write_light_table,
 };
+pub use gbuffer_depth::{GBUFFER_T_MAX, assert_gbuffer_marcher_t_max_agree};
 pub use material::{MATERIAL_GPU_WORDS, MaterialGpu, MaterialId};
+pub use mesh_registry::{
+    MeshGpu, MeshRegistry, U16_INDEX_VERTEX_LIMIT, VERTEX_STRIDE as MESH_VERTEX_STRIDE, Vertex,
+};
 pub use ssao_config::{ResolvedSsao, SsaoConfig, SsaoQuality, resolve_ssao, resolve_ssao_policy};
 pub use ssao_plugin::SsaoPlugin;
 pub use view::{
