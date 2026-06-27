@@ -48,6 +48,91 @@ fn normalize(a: [f32; 3]) -> [f32; 3] {
     scale(a, inv)
 }
 
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+// --- the 3x3 linear part of the instanced affine, mirroring the HLSL `m3` ---
+
+/// The ROW-MAJOR 3x3 linear part of the instanced affine: `m3[i] = model[i].xyz` (the rotation/
+/// scale rows, dropping each row's `.w` translation). Mirrors `float3x3 m3 = float3x3(model.r0.xyz,
+/// model.r1.xyz, model.r2.xyz)` in `gbuffer_mrt.vs.hlsl`.
+fn m3_of(model: [[f32; 4]; 3]) -> [[f32; 3]; 3] {
+    [
+        [model[0][0], model[0][1], model[0][2]],
+        [model[1][0], model[1][1], model[1][2]],
+        [model[2][0], model[2][1], model[2][2]],
+    ]
+}
+
+/// `mul(m, v)` for a row-major 3x3 (each `m[i]` is a row): `out[i] = dot(m[i], v)`. Matches the
+/// HLSL `mul(float3x3, float3)` the instanced arm uses for both the position and the normal.
+fn mul3(m: [[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
+    [dot(m[0], v), dot(m[1], v), dot(m[2], v)]
+}
+
+/// The determinant of a row-major 3x3. Mirrors the HLSL `det3x3` feeding the W4 degeneracy guard.
+fn det3x3(m: [[f32; 3]; 3]) -> f32 {
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+}
+
+/// The cofactor (adjugate / determinant) inverse of a row-major 3x3. Mirrors the HLSL
+/// `inverse3x3` BYTE-FOR-BYTE in arithmetic (same cofactor expansion, same adjugate transpose)
+/// so the host proof and the GPU shader compute the same normal matrix. No |det| clamp here —
+/// the caller (the normal-matrix builder) applies the W4 guard via [`det3x3`].
+fn inverse3x3(m: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    let c0 = [
+        m[1][1] * m[2][2] - m[1][2] * m[2][1],
+        m[1][2] * m[2][0] - m[1][0] * m[2][2],
+        m[1][0] * m[2][1] - m[1][1] * m[2][0],
+    ];
+    let c1 = [
+        m[0][2] * m[2][1] - m[0][1] * m[2][2],
+        m[0][0] * m[2][2] - m[0][2] * m[2][0],
+        m[0][1] * m[2][0] - m[0][0] * m[2][1],
+    ];
+    let c2 = [
+        m[0][1] * m[1][2] - m[0][2] * m[1][1],
+        m[0][2] * m[1][0] - m[0][0] * m[1][2],
+        m[0][0] * m[1][1] - m[0][1] * m[1][0],
+    ];
+    let det = m[0][0] * c0[0] + m[0][1] * c0[1] + m[0][2] * c0[2];
+    let inv_det = 1.0 / det;
+    // Adjugate rows = cofactor columns, each scaled by 1/det (mirrors the HLSL assembly).
+    [
+        [c0[0] * inv_det, c1[0] * inv_det, c2[0] * inv_det],
+        [c0[1] * inv_det, c1[1] * inv_det, c2[1] * inv_det],
+        [c0[2] * inv_det, c1[2] * inv_det, c2[2] * inv_det],
+    ]
+}
+
+/// The transpose of a row-major 3x3.
+fn transpose3x3(m: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    [
+        [m[0][0], m[1][0], m[2][0]],
+        [m[0][1], m[1][1], m[2][1]],
+        [m[0][2], m[1][2], m[2][2]],
+    ]
+}
+
+/// The instanced VS normal output, mirroring the M4 instanced arm EXACTLY: under
+/// `|det(m3)| >= DET_EPS` it is `transpose(inverse3x3(m3)) * normal` (the inverse-transpose);
+/// otherwise the W4 guard falls back to `mul(m3, normal)` (the M3 behavior). The guard makes a
+/// zero-scale / mirror-singular transform yield a FINITE normal instead of NaN/Inf.
+fn instanced_vs_normal(model: [[f32; 4]; 3], normal: [f32; 3]) -> [f32; 3] {
+    const DET_EPS: f32 = 1e-8;
+    let m3 = m3_of(model);
+    let det = det3x3(m3);
+    if det.abs() < DET_EPS {
+        mul3(m3, normal)
+    } else {
+        let nm = transpose3x3(inverse3x3(m3));
+        mul3(nm, normal)
+    }
+}
+
 /// The instanced VS transform: a 3x4 ROW-MAJOR affine (`r0`, `r1`, `r2`, each a `[f32; 4]`
 /// whose `.xyz` is the rotation/scale row and `.w` the translation component, exactly the
 /// `InstanceModelCol` the SSBO carries) applied to a model-space `local` position. Mirrors
@@ -152,5 +237,113 @@ fn identity_instance_reproduces_local_position() {
     for local in [[1.0_f32, 2.0, 3.0], [-0.5, 0.5, -0.25], [0.0, 0.0, 0.0]] {
         let world = instanced_world(identity, local);
         assert_eq!(world, local, "identity affine must leave the model-space position unchanged");
+    }
+}
+
+// === Mesh foundation M4 — the inverse-transpose normal correctness gate (CPU). ===
+
+/// A row-major 3x4 affine: a NON-UNIFORM per-axis scale `(sx, sy, sz)` composed with a Y-axis
+/// rotation by `yaw` (radians) and a translation `t`. The non-uniform scale is exactly what
+/// makes `mul(m3, normal)` skew the normal off the surface — the M4 inverse-transpose corrects
+/// it. The model is `T * R * S` (scale, then rotate, then translate), so the 3x3 linear part is
+/// `R * S` (a rotation of a non-uniform diagonal — genuinely non-orthogonal).
+fn nonuniform_yaw_translate(yaw: f32, s: [f32; 3], t: [f32; 3]) -> [[f32; 4]; 3] {
+    let (sin, cos) = yaw.sin_cos();
+    // R (row-major) * diag(sx, sy, sz): scale each COLUMN j of R by s[j].
+    [
+        [cos * s[0], 0.0, sin * s[2], t[0]],
+        [0.0, s[1], 0.0, t[1]],
+        [-sin * s[0], 0.0, cos * s[2], t[2]],
+    ]
+}
+
+/// The M4 correctness proof: under NON-UNIFORM scale, the inverse-transpose normal
+/// (`transpose(inverse3x3(m3)) * n`) stays PERPENDICULAR to the transformed surface, whereas the
+/// naive `mul(m3, n)` does NOT. The witness: an orthonormal `(n, t1, t2)` triple (a surface
+/// patch with normal `n` and two in-plane tangents). After the affine, the surface is spanned by
+/// `m3*t1`, `m3*t2`; the correct transformed normal must be ⟂ to BOTH. We assert the
+/// inverse-transpose normal satisfies this to tight tolerance AND that the naive `mul(m3, n)`
+/// FAILS it (proving the non-uniform scale genuinely skews the naive transform — the test would
+/// be vacuous if the chosen scale happened to be uniform). The normals are deliberately OBLIQUE
+/// (diagonals mixing the unequally-scaled axes), because an axis-aligned box face is the special
+/// case where the naive transform stays perpendicular by accident.
+#[test]
+fn inverse_transpose_normal_stays_perpendicular_under_nonuniform_scale() {
+    // A non-uniform squash/stretch (2x wide, 1x tall, 0.5x deep) + a rotation + an offset.
+    let model = nonuniform_yaw_translate(0.7, [2.0, 1.0, 0.5], [0.3, -0.4, 1.1]);
+    let m3 = m3_of(model);
+
+    // Surface bases whose normal is NOT aligned to a single scale axis. With axis-aligned box
+    // faces the naive `mul(m3, n)` would stay perpendicular by accident (the scaled basis columns
+    // are still mutually orthogonal — `dot(s_i*R_i, s_j*R_j) = s_i*s_j*dot(R_i,R_j) = 0`), so the
+    // skew the inverse-transpose corrects only shows on OBLIQUE surfaces. Each entry is an
+    // orthonormal `(n, t1, t2)` triple whose normal mixes the unequally-scaled axes.
+    let inv_sqrt2 = 1.0_f32 / 2.0_f32.sqrt();
+    let inv_sqrt3 = 1.0_f32 / 3.0_f32.sqrt();
+    let faces: [([f32; 3], [f32; 3], [f32; 3]); 3] = [
+        // Normal along the X/Z diagonal (the 2x and 0.5x axes mixed) — the strongest skew.
+        ([inv_sqrt2, 0.0, inv_sqrt2], [inv_sqrt2, 0.0, -inv_sqrt2], [0.0, 1.0, 0.0]),
+        // Normal along the X/Y diagonal (2x and 1x mixed).
+        ([inv_sqrt2, inv_sqrt2, 0.0], [-inv_sqrt2, inv_sqrt2, 0.0], [0.0, 0.0, 1.0]),
+        // Normal along the full XYZ diagonal — all three scales mixed.
+        (
+            [inv_sqrt3, inv_sqrt3, inv_sqrt3],
+            [inv_sqrt2, -inv_sqrt2, 0.0],
+            [inv_sqrt2 * inv_sqrt3, inv_sqrt2 * inv_sqrt3, -2.0 * inv_sqrt2 * inv_sqrt3],
+        ),
+    ];
+
+    for (n, t1, t2) in faces {
+        // The transformed surface tangents span the post-affine face plane.
+        let bt1 = mul3(m3, t1);
+        let bt2 = mul3(m3, t2);
+
+        // The M4 normal (inverse-transpose) — normalize so the dot tolerance is scale-free.
+        let n_correct = normalize(instanced_vs_normal(model, n));
+        let perp1 = dot(n_correct, bt1) / length(bt1);
+        let perp2 = dot(n_correct, bt2) / length(bt2);
+        assert!(
+            perp1.abs() < 1e-5 && perp2.abs() < 1e-5,
+            "inverse-transpose normal must stay perpendicular to the transformed surface: \
+             n_correct={n_correct:?} perp1={perp1} perp2={perp2}"
+        );
+
+        // The naive `mul(m3, n)` is NOT perpendicular under this non-uniform scale (the bug M4
+        // fixes). If it WERE perpendicular, the test scene would be effectively uniform-scale and
+        // the proof vacuous — so we assert the naive transform measurably fails.
+        let n_naive = normalize(mul3(m3, n));
+        let naive_perp1 = dot(n_naive, bt1) / length(bt1);
+        let naive_perp2 = dot(n_naive, bt2) / length(bt2);
+        assert!(
+            naive_perp1.abs() > 1e-2 || naive_perp2.abs() > 1e-2,
+            "the naive mul(m3, n) must SKEW off the surface under non-uniform scale (else the \
+             test is vacuous): n_naive={n_naive:?} naive_perp1={naive_perp1} naive_perp2={naive_perp2}"
+        );
+    }
+}
+
+/// The W4 degeneracy guard: a near-singular model (a zero on one scale axis ⇒ `det ≈ 0`) yields
+/// a FINITE normal, never NaN/Inf. Without the `abs(det) < DET_EPS` fallback, `inverse3x3`
+/// divides by ~0 and the normal MRT is poisoned (black/garbage lighting). The guard substitutes
+/// the M3 `mul(m3, n)`, which is finite. We test a fully-collapsed Z axis (det == 0) and a
+/// barely-collapsed one (|det| below DET_EPS).
+#[test]
+fn degenerate_model_yields_finite_normal() {
+    let degenerates = [
+        // Z axis fully flattened (det == 0 exactly).
+        nonuniform_yaw_translate(0.4, [1.5, 0.9, 0.0], [0.0, 0.0, 0.0]),
+        // Z axis collapsed below DET_EPS (det ≈ 1.5 * 0.9 * 5e-9 ≈ 6.75e-9 < 1e-8).
+        nonuniform_yaw_translate(0.4, [1.5, 0.9, 5e-9], [0.0, 0.0, 0.0]),
+    ];
+    for model in degenerates {
+        let det = det3x3(m3_of(model));
+        assert!(det.abs() < 1e-8, "test setup: the model must be degenerate (|det|={det})");
+        for n in [[0.0_f32, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            let out = instanced_vs_normal(model, n);
+            assert!(
+                out.iter().all(|c| c.is_finite()),
+                "the W4 guard must keep the normal finite on a degenerate model: n={n:?} out={out:?}"
+            );
+        }
     }
 }

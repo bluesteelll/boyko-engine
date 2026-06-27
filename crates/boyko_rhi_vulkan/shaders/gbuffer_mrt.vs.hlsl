@@ -39,8 +39,15 @@
 //     affine `model` from `instances[pc.base_instance + SV_InstanceID]`, transforms the
 //     vertex into world space, and recomputes `eye_rel` from the WORLD position. M1 ships
 //     the capability only; no scene drives it yet (M2+).
-// The normal is transformed by the affine's 3x3 part (`mul(m3, normal)`) — adequate for
-// uniform scale; the inverse-transpose normal column is a later rung (M4), NOT added here.
+// M4 (correct non-uniform-scale normals) replaces the instanced arm's `mul(m3, normal)` —
+// which only stays perpendicular to the surface under rotation + UNIFORM scale — with the
+// inverse-transpose normal matrix `transpose(inverse3x3(m3))`, computed PER-VERTEX from the
+// model column the instanced arm already reads. NO second SSBO binding and NO normal column:
+// the `InstanceModelCol` stays 48 B (a future CSM depth pass reads only the 48 B model data,
+// the W2 goal), and a 3x3 inverse per vertex is negligible at this scale. A degeneracy guard
+// (`abs(det) < DET_EPS`) falls back to the M3 `mul(m3, normal)` so a zero-scale / mirror-
+// singular transform cannot poison the normal MRT with NaN/Inf. The LEGACY arm
+// (`use_model_matrix == 0`) is UNCHANGED (the bit-identity gate).
 //
 // Compiled offline (hermetic build — no SDK at `cargo build` time) with:
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T vs_6_0 -E main \
@@ -84,6 +91,46 @@ struct VsOut {
     float  cam_mode : CAMMODE;      // 0 = ortho (use SV_Position.z), 1 = perspective (use eye_rel)
 };
 
+// The degeneracy threshold for the instanced normal matrix. Below this |det| the 3x3 inverse
+// is numerically unstable (zero-scale collapse, a near-singular mirror), so the instanced arm
+// falls back to the M3 `mul(m3, normal)` rather than dividing by ~0.
+static const float DET_EPS = 1e-8;
+
+// The cofactor (adjugate / determinant) inverse of a 3x3 matrix. `m` is built row-major from
+// the affine rows (`m[i]` is `model.r{i}.xyz`), matching how the instanced arm constructs `m3`.
+// The caller guards |det| via DET_EPS before transposing this into the normal matrix, so this
+// helper itself does NOT clamp — it returns the raw adjugate/det.
+float3x3 inverse3x3(float3x3 m) {
+    // Cofactors of each entry (the adjugate is the transpose of the cofactor matrix).
+    float3 c0 = float3(
+        m[1][1] * m[2][2] - m[1][2] * m[2][1],
+        m[1][2] * m[2][0] - m[1][0] * m[2][2],
+        m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    float3 c1 = float3(
+        m[0][2] * m[2][1] - m[0][1] * m[2][2],
+        m[0][0] * m[2][2] - m[0][2] * m[2][0],
+        m[0][1] * m[2][0] - m[0][0] * m[2][1]);
+    float3 c2 = float3(
+        m[0][1] * m[1][2] - m[0][2] * m[1][1],
+        m[0][2] * m[1][0] - m[0][0] * m[1][2],
+        m[0][0] * m[1][1] - m[0][1] * m[1][0]);
+    float det = m[0][0] * c0[0] + m[0][1] * c0[1] + m[0][2] * c0[2];
+    float inv_det = 1.0 / det;
+    // The adjugate rows are the cofactor COLUMNS; assemble the inverse directly.
+    return float3x3(
+        c0[0] * inv_det, c1[0] * inv_det, c2[0] * inv_det,
+        c0[1] * inv_det, c1[1] * inv_det, c2[1] * inv_det,
+        c0[2] * inv_det, c1[2] * inv_det, c2[2] * inv_det);
+}
+
+// The determinant of a 3x3 built from the affine's three rows (the degeneracy test feeds the
+// W4 guard before any inverse is taken).
+float det3x3(float3x3 m) {
+    return m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+         - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+         + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+}
+
 VsOut main(VsIn input, uint instance_id : SV_InstanceID) {
     VsOut output;
     output.color = input.color;
@@ -108,8 +155,22 @@ VsOut main(VsIn input, uint instance_id : SV_InstanceID) {
         // eye_rel is recomputed from the WORLD position (NOT input.position) so the
         // perspective ray-t the fragment writes reconstructs the instanced surface point.
         output.eye_rel = pc.cam_eye.xyz - world;
-        // Uniform-scale-adequate normal transform (the inverse-transpose column is M4).
-        output.normal = mul(m3, input.normal);
+        // M4 — correct normal under NON-UNIFORM scale via the inverse-transpose matrix. Under a
+        // non-uniform `m3`, `mul(m3, normal)` skews the normal off the surface (it scales the
+        // normal like a tangent), so the lit shading on stretched/squashed faces is wrong;
+        // `transpose(inverse3x3(m3)) * normal` stays perpendicular to the transformed surface.
+        float det = det3x3(m3);
+        // W4 degeneracy guard: an unguarded 3x3 inverse on a degenerate transform (zero-scale
+        // collapse, a near-singular mirror) divides by ~0 → NaN/Inf normals → black/garbage
+        // lighting in the normal MRT. Below DET_EPS, fall back to the M3 `mul(m3, normal)`,
+        // which is finite (and as correct as anything is when the basis has collapsed). The
+        // branch is a per-vertex `if`; it is wave-coherent for any single uniform-det instance.
+        if (abs(det) < DET_EPS) {
+            output.normal = mul(m3, input.normal);
+        } else {
+            float3x3 nm = transpose(inverse3x3(m3));
+            output.normal = mul(nm, input.normal);
+        }
     }
     return output;
 }

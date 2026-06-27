@@ -205,7 +205,9 @@ impl<const N: usize> SpirvBlob<N> {
 /// Render P5-r0: the mesh-MRT G-buffer PRODUCER vertex SPIR-V (`gbuffer_mrt.vs.spv`):
 /// passes through the LINEAR vertex color + the PER-VERTEX world normal (loc 2, offset 12).
 /// Vertex layout: position (loc 0, offset 0) + color (loc 1, offset 24) + normal (loc 2, offset 12).
-static MRT_VS_SPV: SpirvBlob<3068> = SpirvBlob(*include_bytes!(concat!(
+/// M4 grew the blob 3068 -> 4480 B (the instanced arm's per-vertex inverse-transpose normal
+/// matrix + the W4 degeneracy guard); the legacy `use_model_matrix == 0` arm is untouched.
+static MRT_VS_SPV: SpirvBlob<4480> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/gbuffer_mrt.vs.spv"
 )));

@@ -202,8 +202,10 @@ impl<const N: usize> SpirvBlob<N> {
 /// Vertex layout: position (loc 0, offset 0) + color (loc 1, offset 24) + per-vertex world
 /// normal (loc 2, offset 12); passes the LINEAR color + the per-vertex normal through. M1
 /// grew the blob 1480 -> 3068 B (the `use_model_matrix` instanced-arm branch + the set-0
-/// instance SSBO); the legacy arm (`use_model_matrix == 0`) rasterizes byte-identical pixels.
-static MRT_VS_SPV: SpirvBlob<3068> = SpirvBlob(*include_bytes!(concat!(
+/// instance SSBO); M4 grew it 3068 -> 4480 B (the per-vertex inverse-transpose normal matrix +
+/// the W4 degeneracy guard in the instanced arm). The legacy arm (`use_model_matrix == 0`)
+/// rasterizes byte-identical pixels (it is untouched — the bit-identity gate).
+static MRT_VS_SPV: SpirvBlob<4480> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/gbuffer_mrt.vs.spv"
 )));
@@ -469,6 +471,21 @@ fn instance_affine(yaw: f32, scale: f32, t: [f32; 3]) -> [f32; 12] {
         c * scale, 0.0, s * scale, t[0],
         0.0, scale, 0.0, t[1],
         -s * scale, 0.0, c * scale, t[2],
+    ]
+}
+
+/// Mesh foundation M4: a 3x4 row-major affine with a NON-UNIFORM per-axis scale `(sx, sy, sz)`
+/// composed with a Y-axis rotation by `yaw` and a translation `t` — i.e. `T * R * S`, so the 3x3
+/// linear part is `R * diag(s)` (a non-orthogonal basis). This is the placement the M4
+/// inverse-transpose normal arm needs: under `sx != sy != sz` the naive `mul(m3, normal)` skews
+/// normals off the surface, so the demo makes the inverse-transpose vs naive difference visible.
+fn instance_affine_nonuniform(yaw: f32, s: [f32; 3], t: [f32; 3]) -> [f32; 12] {
+    let (sin, cos) = yaw.sin_cos();
+    // R (row-major) * diag(sx, sy, sz): scale COLUMN j of R by s[j].
+    [
+        cos * s[0], 0.0, sin * s[2], t[0],
+        0.0, s[1], 0.0, t[1],
+        -sin * s[0], 0.0, cos * s[2], t[2],
     ]
 }
 
@@ -2607,6 +2624,12 @@ const INSTANCED_PERSP_BMP: &str = r"D:\tmp\engine_instanced_persp.bmp";
 /// positions, the `base_instance` mechanism is broken and the screenshot shows it.
 const MULTIMESH_PERSP_BMP: &str = r"D:\tmp\engine_multimesh.bmp";
 
+/// Mesh foundation M4 — the NON-UNIFORM-scale normal screenshot path. Boxes squashed flat and
+/// stretched tall, drawn through the `use_model_matrix == 1` instanced arm under directional
+/// light. With the M4 inverse-transpose normal the lit shading on the stretched/squashed faces
+/// is correct; with the old `mul(m3, normal)` the same faces are over-bright / wrongly shaded.
+const NONUNIFORM_NORMALS_BMP: &str = r"D:\tmp\engine_nonuniform_normals.bmp";
+
 /// The showcase sun direction (`L`, the un-normalized "direction TO the light"): upper-LEFT and
 /// slightly toward the camera, ~57° elevation. Used BOTH as the marcher's `scene.light_dir` (the
 /// A1 cast-shadow march direction) AND the primary directional in [`showcase_light_table`] — they
@@ -3470,6 +3493,79 @@ fn engine_multimesh_persp_screenshot_dump() {
         "boyko_engine multi-mesh perspective 512",
         MULTIMESH_PERSP_BMP,
         multimesh_persp_config(),
+    );
+}
+
+// === Mesh foundation M4 — the non-uniform-scale normal demo (inverse-transpose vs mul(m3)). ===
+
+/// **Mesh foundation M4 — the NON-UNIFORM-scale normal config.** ONE registered model-space box
+/// drawn through the `use_model_matrix == 1` instanced arm by affines with deliberately
+/// NON-UNIFORM per-axis scale: a box squashed flat (wide + thin), a box stretched tall, and a
+/// wide-thin slab — placed under a single directional sun so the lit shading on the
+/// stretched/squashed faces is the M4 visual proof. With the M4 inverse-transpose normal the
+/// faces shade correctly (the normals stay perpendicular to the deformed surface); with the old
+/// `mul(m3, normal)` the same faces are over-bright / wrongly lit because the skewed normals
+/// tilt toward/away from the sun. Co-scened with an SDF sphere (the C2 depth backdrop).
+///
+/// The `vertices` legacy field is the degenerate zero-area mesh (the recorder draws the instanced
+/// mesh instead). `lighting_flags` SHADOWS|AO is set by the shared body.
+fn nonuniform_normals_config() -> ShowcaseConfig {
+    // One directional sun (raking, so the per-face normal genuinely modulates the shading) + a
+    // dim sky fill. A grazing sun makes the inverse-transpose vs mul(m3) difference pronounced.
+    let header = GoldenLightHeader::new(2, 0, 1.0).with_ssao_mode(0);
+    let lights = vec![
+        GoldenLight::directional(SHOWCASE_SUN_DIR, [1.0, 0.97, 0.92], 3.0),
+        GoldenLight::sky([0.05, 0.05, 0.05], [0.05, 0.05, 0.05]),
+    ];
+
+    // The C2 depth backdrop: a hero SDF sphere resting on the floor.
+    let sdf = vec![SdfEdit::sphere([1.7, 0.6, -0.6], 0.6, sdf_op::UNION, 0.0)];
+
+    // The model-space unit box (half-extent 0.4) registered ONCE; the non-uniform affines below
+    // squash/stretch it per-axis so the inverse-transpose normal correction is exercised.
+    let (verts, indices) = mesh_box_model([0.4, 0.4, 0.4], [0.78, 0.50, 0.32, 1.0]);
+
+    // THREE non-uniform placements (the y of `t` lifts each so its base rests near the floor):
+    //   * a SQUASHED slab — wide in X, thin in Y, mid in Z (a flattened pancake).
+    //   * a STRETCHED column — thin in X/Z, tall in Y (a pillar).
+    //   * a wide-thin SHARD — very wide in X, thin in Z, mid in Y, yawed so a deformed face
+    //     rakes the sun.
+    let affines = vec![
+        instance_affine_nonuniform(0.0, [2.4, 0.35, 1.3], [-1.9, 0.14, -0.8]),
+        instance_affine_nonuniform(0.4, [0.40, 2.6, 0.40], [-0.5, 1.04, -1.9]),
+        instance_affine_nonuniform(0.8, [2.2, 0.45, 0.35], [0.8, 0.18, -3.0]),
+    ];
+
+    ShowcaseConfig {
+        sdf,
+        camera: room_camera(),
+        light_header: header,
+        light_elems: lights,
+        vertices: showcase_quad_vertices(),
+        mvp: instanced_room_mvp_bytes(),
+        ssao_quality: None,
+        mesh_sdf: None,
+        instanced: Some(InstancedMesh {
+            meshes: vec![InstancedMeshEntry { vertices: verts, indices, affines }],
+        }),
+    }
+}
+
+/// **Mesh foundation M4 — the non-uniform-scale normal screenshot.** Drives the instanced arm
+/// (`use_model_matrix == 1`) with NON-UNIFORM-scale affines so the M4 inverse-transpose normal
+/// path is exercised end-to-end on the GPU: squashed + stretched boxes under a raking directional
+/// sun, where the inverse-transpose-vs-`mul(m3)` shading difference is visible on the deformed
+/// faces. Dumps a TRUE 512×512 BMP to [`NONUNIFORM_NORMALS_BMP`] for the owner's RTX sign-off.
+///
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
+/// orchestrator runs it on the GPU to dump the screenshot.
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the non-uniform-normals screenshot"]
+fn engine_nonuniform_normals_screenshot_dump() {
+    run_showcase_dump(
+        "boyko_engine non-uniform normals 512",
+        NONUNIFORM_NORMALS_BMP,
+        nonuniform_normals_config(),
     );
 }
 
