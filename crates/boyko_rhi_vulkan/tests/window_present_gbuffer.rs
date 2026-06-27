@@ -5136,6 +5136,46 @@ fn vnorm_or_zero(a: [f32; 3]) -> [f32; 3] {
     }
 }
 
+/// Packs a [`GoldenMaterial`] into the 12-word (`3×vec4` std430) table element the marcher's
+/// `MaterialGpu` reads: lane 0 `base_color`, lane 1 `mrr`, lane 2 `emissive` — all LINEAR, each
+/// `f32` bitcast to its `u32` word.
+#[inline]
+fn pack_material(m: GoldenMaterial) -> [u32; 12] {
+    let mut w = [0u32; 12];
+    for c in 0..4 {
+        w[c] = m.base_color[c].to_bits();
+        w[4 + c] = m.mrr[c].to_bits();
+        w[8 + c] = m.emissive[c].to_bits();
+    }
+    w
+}
+
+/// The showcase / interactive-viewer material table (3 slots): slot 0 = the default gray dielectric
+/// (every SDF + mesh surface), slot 1 = a COOL-BLUE EMISSIVE (the point-light marker GLOWS), slot 2
+/// = a WARM-YELLOW EMISSIVE (the sun-direction marker GLOWS). Emissive is ADDED to the lit color, so
+/// the markers read as light sources from every angle (a plain dielectric marker at the point's own
+/// center is self-shadowed and reads dim). Non-viewer scenes tag every edit material 0, so slots 1/2
+/// are unused and those scenes' pixels stay byte-identical.
+fn showcase_material_table() -> [u32; 36] {
+    let mut t = [0u32; 36];
+    t[0..12].copy_from_slice(&pack_material(GoldenMaterial::default()));
+    t[12..24].copy_from_slice(&pack_material(GoldenMaterial::new(
+        [0.05, 0.10, 0.18, 1.0],
+        0.0,
+        0.5,
+        0.5,
+        [0.35, 0.85, 2.6],
+    )));
+    t[24..36].copy_from_slice(&pack_material(GoldenMaterial::new(
+        [0.18, 0.14, 0.05, 1.0],
+        0.0,
+        0.5,
+        0.5,
+        [2.8, 2.0, 0.6],
+    )));
+    t
+}
+
 /// The interactive viewer scene: the [`grand_showcase_config`] room with the directional CSM turned
 /// OFF (camera-INDEPENDENT so flying around stays correct — the CSM cascade fit follows the camera
 /// frustum and would shadow-shift as the eye moves) and bright SDF light MARKERS added so the owner
@@ -5156,8 +5196,12 @@ fn viewer_config() -> ShowcaseConfig {
     //   * a "sun" marker UP toward the directional: `ROOM_CAM_TARGET + SHOWCASE_SUN_DIR · 5` (the sun
     //     is directional/infinite, so this is a finite stand-in showing which way the sun comes from).
     let sun_marker = vadd(ROOM_CAM_TARGET, vscale(SHOWCASE_SUN_DIR, 5.0));
-    cfg.sdf.push(SdfEdit::sphere(GRAND_POINT_POS, 0.18, sdf_op::UNION, 0.0));
-    cfg.sdf.push(SdfEdit::sphere(sun_marker, 0.18, sdf_op::UNION, 0.0));
+    // EMISSIVE markers (material 1 = cool-blue glow at the POINT light, material 2 = warm-yellow glow
+    // for the SUN direction) so each light reads as a glowing orb from every angle.
+    cfg.sdf
+        .push(SdfEdit::sphere(GRAND_POINT_POS, 0.22, sdf_op::UNION, 0.0).with_material(1));
+    cfg.sdf
+        .push(SdfEdit::sphere(sun_marker, 0.22, sdf_op::UNION, 0.0).with_material(2));
     debug_assert!(
         cfg.sdf.len() <= boyko_sdf_math::MAX_SDF_EDITS,
         "viewer SDF edits ({}) must fit MAX_SDF_EDITS ({})",
@@ -6187,10 +6231,13 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
 
     // --- The PBR material table SSBO (vocab binding 7 + resolve binding 4): the default
     // mid-gray dielectric (the showcase edits carry no material id ⇒ every SDF hit picks 0). ---
+    // The 3-slot table (slot 0 default + slots 1/2 emissive light markers — see
+    // `showcase_material_table`). Non-viewer scenes use only slot 0, so they stay byte-identical.
+    let mat_table = showcase_material_table();
     let material_table = RhiDevice::create_buffer(
         device,
         &BufferDesc {
-            size: (DEFAULT_MATERIAL_TABLE.len() as u64) * 4,
+            size: (mat_table.len() as u64) * 4,
             usage: BufferUsage::STORAGE,
             location: MemoryLocation::HostVisibleCoherent,
         },
@@ -6199,7 +6246,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
     {
         let mapped = RhiDevice::buffer_mapped_ptr(device, &material_table)
             .expect("host-visible material table is mapped");
-        write_words(mapped, &DEFAULT_MATERIAL_TABLE);
+        write_words(mapped, &mat_table);
     }
 
     // --- The brick clip-map: brick is held OFF for the showcase, but the marcher SPIR-V
