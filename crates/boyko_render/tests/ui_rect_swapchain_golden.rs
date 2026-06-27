@@ -60,7 +60,7 @@ use core::slice;
 use boyko_rhi::enums::{AddressMode, BarrierAccess, BarrierStage, DescriptorKind, Filter};
 use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc,
-    BufferImageCopy, BufferUsage, Format, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc,
+    BufferImageCopy, BufferUsage, Format, CullMode, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc,
     ImageLayout, ImageSubresourceRange, ImageUsage, MemoryLocation, PrimitiveTopology, RhiDevice,
     SamplerDesc, ShaderStage, TextureDesc, TextureDimension,
 };
@@ -383,6 +383,7 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
             format: Format::R8G8B8A8Unorm,
             dimension: TextureDimension::D2,
             usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
+            array_layers: 1,
         },
     )
     .expect("SAMPLED composite scene texture");
@@ -395,6 +396,7 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
             min_filter: Filter::Nearest,
             address_mode: AddressMode::ClampToEdge,
             mip: boyko_rhi::MipMode::None,
+            compare: None,
         },
     )
     .expect("nearest/clamp sampler");
@@ -428,6 +430,8 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
             push_constant_bytes: 0,
             bind_group_layout: Some(&composite_layout),
             blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
         },
     )
     .expect("fullscreen-sample pipeline (swapchain format)");

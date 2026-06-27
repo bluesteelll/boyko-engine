@@ -3779,6 +3779,7 @@ impl Scene {
             format: Format::D32Sfloat,
             dimension: TextureDimension::D2,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+            array_layers: 1,
         };
         let texture = RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)?;
 
@@ -4630,6 +4631,7 @@ impl GBufferTargets {
             format: GBUFFER_FORMAT,
             dimension: TextureDimension::D2,
             usage,
+            array_layers: 1,
         };
         RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
     }
@@ -4651,6 +4653,7 @@ impl GBufferTargets {
             format: GVIEWT_FORMAT,
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE,
+            array_layers: 1,
         };
         RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
     }
@@ -4672,6 +4675,7 @@ impl GBufferTargets {
             format: SSAO_FORMAT,
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE,
+            array_layers: 1,
         };
         RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
     }
@@ -4698,6 +4702,7 @@ impl GBufferTargets {
                 format: Format::D32Sfloat,
                 dimension: TextureDimension::D2,
                 usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
+                array_layers: 1,
             };
             RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)?
         };

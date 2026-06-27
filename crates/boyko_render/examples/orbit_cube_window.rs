@@ -54,7 +54,7 @@ use boyko_ecs::ecs::core::system::Commands;
 use boyko_macros::Bundle;
 
 use boyko_rhi::{
-    BufferDesc, BufferUsage, Format, GraphicsPipelineDesc, MemoryLocation, PrimitiveTopology,
+    BufferDesc, BufferUsage, Format, CullMode, GraphicsPipelineDesc, MemoryLocation, PrimitiveTopology,
     RhiDevice, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
@@ -511,6 +511,8 @@ fn main() {
             push_constant_bytes: SCENE_MVP_BYTES as u32,
             bind_group_layout: None,
             blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
         },
     )
     .expect("depth-testing graphics pipeline (swapchain color format)");

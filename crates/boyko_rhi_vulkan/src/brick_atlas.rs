@@ -141,6 +141,7 @@ impl BrickAtlas {
                 format,
                 dimension: TextureDimension::D3,
                 usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
+                array_layers: 1,
             },
         )?;
 
@@ -156,6 +157,7 @@ impl BrickAtlas {
                 min_filter: Filter::Nearest,
                 address_mode: boyko_rhi::AddressMode::ClampToEdge,
                 mip: MipMode::None,
+                compare: None,
             },
         ) {
             Ok(s) => s,

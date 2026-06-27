@@ -37,7 +37,7 @@ use core::slice;
 use boyko_rhi::enums::{BarrierAccess, BarrierStage, DescriptorKind};
 use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc,
-    BufferImageCopy, BufferUsage, Format, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc,
+    BufferImageCopy, BufferUsage, Format, CullMode, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc,
     ImageLayout, ImageSubresourceRange, ImageUsage, LoadOp, MemoryLocation, PrimitiveTopology,
     RenderArea, RenderingAttachment, RenderingDesc, RhiCommandEncoder, RhiDevice, RhiQueue,
     ShaderStage, StoreOp, TextureDesc, TextureDimension, Viewport,
@@ -189,6 +189,7 @@ fn render_probe(device: &VulkanContext) -> Vec<u8> {
             format: Format::R8G8B8A8Unorm,
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+            array_layers: 1,
         })
         .expect("output texture O (COLOR_ATTACHMENT | TRANSFER_SRC)");
 
@@ -277,6 +278,8 @@ fn render_probe(device: &VulkanContext) -> Vec<u8> {
             push_constant_bytes: size_of::<Ortho>() as u32,
             bind_group_layout: Some(&bind_group_layout),
             blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
         })
         .expect("SSBO-graphics pipeline");
 

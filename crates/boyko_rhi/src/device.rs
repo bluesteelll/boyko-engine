@@ -10,7 +10,8 @@
 use crate::api::RhiApi;
 use crate::descriptor::{BufferDesc, ComputePipelineDesc, GraphicsPipelineDesc};
 use crate::enums::{
-    AddressMode, DescriptorKind, Filter, Format, ImageUsage, ShaderStage, TextureDimension,
+    AddressMode, CompareOp, DescriptorKind, Filter, Format, ImageUsage, ShaderStage,
+    TextureDimension,
 };
 use crate::error::RhiError;
 
@@ -52,6 +53,34 @@ pub struct TextureDesc {
     pub dimension: TextureDimension,
     /// The usage bits the image must support.
     pub usage: ImageUsage,
+    /// The number of array layers in the image (CSM Increment 0). `1` (the default)
+    /// is today's single-layer image with one full-subresource view — byte-identical
+    /// to every existing texture. `> 1` (a `DEPTH`-format image) makes the backend
+    /// create the image with `arrayLayers = N` plus a VIEW SET: one
+    /// `VK_IMAGE_VIEW_TYPE_2D` per-layer RENDER view (each cascade renders into its
+    /// own layer) and one `VK_IMAGE_VIEW_TYPE_2D_ARRAY` SAMPLE view (the resolve
+    /// samples `float3(uv, layer)`). Capped at the backend's `MAX_CASCADES`.
+    pub array_layers: u32,
+}
+
+impl Default for TextureDesc {
+    /// A single-layer (`array_layers == 1`) texture — the byte-identical default for
+    /// every non-array image. The extent/format/dimension/usage fields have no
+    /// universal default and MUST be set by the caller; this impl exists so a caller
+    /// can spread `..TextureDesc::default()` to pick up `array_layers: 1` (and so the
+    /// CSM array texture is the only site that overrides it).
+    #[inline]
+    fn default() -> Self {
+        TextureDesc {
+            width: 1,
+            height: 1,
+            depth: 1,
+            format: Format::Undefined,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::NONE,
+            array_layers: 1,
+        }
+    }
 }
 
 /// The mip/LOD sampling mode (GUI P5b Decision T4-D).
@@ -92,11 +121,19 @@ pub struct SamplerDesc {
     pub address_mode: AddressMode,
     /// The mip/LOD mode (GUI P5b Decision T4-D). P5b uses [`MipMode::None`].
     pub mip: MipMode,
+    /// The optional hardware depth-comparison op (CSM Increment 0). `None` (the
+    /// default) leaves `compareEnable = VK_FALSE` — byte-identical to every existing
+    /// sampler. `Some(op)` builds a COMPARISON sampler (`compareEnable = VK_TRUE`,
+    /// `compareOp = op`) so a shadow-map PCF read returns the filtered pass/fail of
+    /// `reference (op) stored_depth` rather than the raw depth; PCF uses
+    /// [`CompareOp::LessOrEqual`].
+    pub compare: Option<CompareOp>,
 }
 
 impl Default for SamplerDesc {
     /// The deterministic 1:1 rung-5 default: nearest mag/min + clamp-to-edge + no
-    /// mips (the existing behavior, now an explicit [`MipMode::None`]).
+    /// mips + no compare (the existing behavior, now an explicit [`MipMode::None`] +
+    /// `compare: None`).
     #[inline]
     fn default() -> Self {
         SamplerDesc {
@@ -104,6 +141,7 @@ impl Default for SamplerDesc {
             min_filter: Filter::Nearest,
             address_mode: AddressMode::ClampToEdge,
             mip: MipMode::None,
+            compare: None,
         }
     }
 }

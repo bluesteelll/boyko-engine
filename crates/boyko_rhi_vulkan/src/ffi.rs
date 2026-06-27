@@ -672,6 +672,11 @@ pub const VK_POLYGON_MODE_FILL: i32 = 0;
 /// `VkCullModeFlagBits::VK_CULL_MODE_NONE` (rung 2 disables culling so the
 /// triangle rasterizes regardless of winding).
 pub const VK_CULL_MODE_NONE: VkFlags = 0;
+/// `VkCullModeFlagBits::VK_CULL_MODE_FRONT_BIT` (CSM Increment 0: a shadow-map depth
+/// pass renders back faces by culling front faces).
+pub const VK_CULL_MODE_FRONT_BIT: VkFlags = 0x0000_0001;
+/// `VkCullModeFlagBits::VK_CULL_MODE_BACK_BIT` (CSM Increment 0).
+pub const VK_CULL_MODE_BACK_BIT: VkFlags = 0x0000_0002;
 /// `VkFrontFace::VK_FRONT_FACE_COUNTER_CLOCKWISE`.
 pub const VK_FRONT_FACE_COUNTER_CLOCKWISE: i32 = 0;
 /// `VkDynamicState::VK_DYNAMIC_STATE_VIEWPORT`.
@@ -916,6 +921,9 @@ pub const VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR: VkFlags = 0x0000_0001;
 
 /// `VkImageViewType::VK_IMAGE_VIEW_TYPE_2D`.
 pub const VK_IMAGE_VIEW_TYPE_2D: i32 = 1;
+/// `VkImageViewType::VK_IMAGE_VIEW_TYPE_2D_ARRAY` (CSM Increment 0: the array SAMPLE
+/// view over a multi-layer depth texture — the resolve samples `float3(uv, layer)`).
+pub const VK_IMAGE_VIEW_TYPE_2D_ARRAY: i32 = 5;
 
 /// `VkImageAspectFlagBits::VK_IMAGE_ASPECT_COLOR_BIT`.
 pub const VK_IMAGE_ASPECT_COLOR_BIT: VkFlags = 0x0000_0001;
@@ -958,6 +966,13 @@ pub const VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT: VkFlags = 0x0000_0400;
 /// `VkCompareOp::VK_COMPARE_OP_LESS` — the rung-4 depth-test compare op (a smaller
 /// fragment `z` passes, i.e. nearer geometry wins).
 pub const VK_COMPARE_OP_LESS: i32 = 1;
+/// `VkCompareOp::VK_COMPARE_OP_LESS_OR_EQUAL` (CSM Increment 0: the comparison
+/// sampler's PCF op — `reference <= stored_depth` passes, so a fragment at the stored
+/// depth is lit, not self-shadowed).
+pub const VK_COMPARE_OP_LESS_OR_EQUAL: i32 = 3;
+/// `VkCompareOp::VK_COMPARE_OP_ALWAYS` (CSM Increment 0: pinned in `abi_guard.rs` for
+/// the agnostic [`CompareOp::Always`](boyko_rhi::enums::CompareOp) discriminant).
+pub const VK_COMPARE_OP_ALWAYS: i32 = 7;
 
 /// `VkAttachmentLoadOp` / `VkAttachmentStoreOp` discriminants for dynamic rendering.
 pub const VK_ATTACHMENT_LOAD_OP_LOAD: i32 = 0;

@@ -14,9 +14,9 @@
 //! `push_constants`, `pipeline_barrier`) is covered.
 
 use boyko_rhi::enums::{
-    AddressMode, BarrierAccess, BarrierStage, BlendFactor, BlendOp, BufferUsage, DescriptorKind,
-    Filter, Format, ImageAspect, ImageLayout, ImageUsage, IndexType, LoadOp, PrimitiveTopology,
-    ShaderStage, StoreOp, TextureDimension, VertexFormat,
+    AddressMode, BarrierAccess, BarrierStage, BlendFactor, BlendOp, BufferUsage, CompareOp,
+    CullMode, DescriptorKind, Filter, Format, ImageAspect, ImageLayout, ImageUsage, IndexType,
+    LoadOp, PrimitiveTopology, ShaderStage, StoreOp, TextureDimension, VertexFormat,
 };
 
 use crate::ffi::{
@@ -29,7 +29,9 @@ use crate::ffi::{
     VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
     VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_COMPARE_OP_ALWAYS, VK_COMPARE_OP_LESS,
+    VK_COMPARE_OP_LESS_OR_EQUAL, VK_COMPARE_OP_NEVER, VK_CULL_MODE_BACK_BIT, VK_CULL_MODE_FRONT_BIT,
+    VK_CULL_MODE_NONE, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
     VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_FILTER_LINEAR,
     VK_FILTER_NEAREST, VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM,
@@ -473,4 +475,48 @@ const _: () = assert!(
 const _: () = assert!(
     DescriptorKind::StorageBuffer.as_i32() == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
     "DescriptorKind::StorageBuffer must equal VK_DESCRIPTOR_TYPE_STORAGE_BUFFER"
+);
+
+// ===========================================================================
+// CSM Increment 0 contracts. The comparison sampler maps `CompareOp` `as_i32()` in
+// `create_sampler` (the `VkSamplerCreateInfo.compareOp`); the configurable graphics
+// pipeline maps `CullMode` `as_u32()` in `create_graphics_pipeline` (the
+// `VkPipelineRasterizationStateCreateInfo.cullMode`) by a trivial cast — so their
+// discriminants MUST equal the matching `VK_COMPARE_OP_*` / `VK_CULL_MODE_*`
+// constants. These pin that equality; any drift breaks the build instead of writing
+// the wrong compare op / cull mode. (The depth-array texture's `VK_IMAGE_VIEW_TYPE_*`
+// view types are backend-only constants the agnostic surface never names, so they
+// have no agnostic counterpart to assert.)
+// ===========================================================================
+
+// --- CompareOp `as_i32()` (mapped in `create_sampler`). ---
+const _: () = assert!(
+    CompareOp::Never.as_i32() == VK_COMPARE_OP_NEVER,
+    "CompareOp::Never must equal VK_COMPARE_OP_NEVER"
+);
+const _: () = assert!(
+    CompareOp::Less.as_i32() == VK_COMPARE_OP_LESS,
+    "CompareOp::Less must equal VK_COMPARE_OP_LESS"
+);
+const _: () = assert!(
+    CompareOp::LessOrEqual.as_i32() == VK_COMPARE_OP_LESS_OR_EQUAL,
+    "CompareOp::LessOrEqual must equal VK_COMPARE_OP_LESS_OR_EQUAL"
+);
+const _: () = assert!(
+    CompareOp::Always.as_i32() == VK_COMPARE_OP_ALWAYS,
+    "CompareOp::Always must equal VK_COMPARE_OP_ALWAYS"
+);
+
+// --- CullMode `as_u32()` (mapped in `create_graphics_pipeline`). ---
+const _: () = assert!(
+    CullMode::None.as_u32() == VK_CULL_MODE_NONE,
+    "CullMode::None must equal VK_CULL_MODE_NONE"
+);
+const _: () = assert!(
+    CullMode::Front.as_u32() == VK_CULL_MODE_FRONT_BIT,
+    "CullMode::Front must equal VK_CULL_MODE_FRONT_BIT"
+);
+const _: () = assert!(
+    CullMode::Back.as_u32() == VK_CULL_MODE_BACK_BIT,
+    "CullMode::Back must equal VK_CULL_MODE_BACK_BIT"
 );

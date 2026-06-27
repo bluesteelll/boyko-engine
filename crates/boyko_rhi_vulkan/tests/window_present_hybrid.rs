@@ -58,7 +58,7 @@ use boyko_rhi::enums::{AddressMode, BarrierAccess, BarrierStage, DescriptorKind,
 use boyko_rhi::{
     BarrierDesc, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BufferBarrier, BufferDesc, BufferImageCopy, BufferUsage, ComputePipelineDesc, DepthAttachment,
-    Format, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc, ImageLayout, ImageSubresourceRange,
+    Format, CullMode, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc, ImageLayout, ImageSubresourceRange,
     ImageUsage, LoadOp, MemoryLocation, MipMode, PrimitiveTopology, RenderArea, RenderingAttachment,
     RenderingDesc, RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc, ShaderStage, StoreOp,
     TextureDesc, TextureDimension, VertexAttribute, VertexBufferLayout, VertexFormat, Viewport,
@@ -365,6 +365,7 @@ fn run_composite(device: &VulkanContext, edits: &[SdfEdit], buffer: &boyko_rhi_v
             format: Format::D32Sfloat,
             dimension: TextureDimension::D2,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+            array_layers: 1,
         })
         .expect("offscreen depth texture");
 
@@ -377,6 +378,7 @@ fn run_composite(device: &VulkanContext, edits: &[SdfEdit], buffer: &boyko_rhi_v
             format: RASTER_COLOR_FORMAT,
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT,
+            array_layers: 1,
         })
         .expect("throwaway color texture");
 
@@ -435,6 +437,8 @@ fn run_composite(device: &VulkanContext, edits: &[SdfEdit], buffer: &boyko_rhi_v
             push_constant_bytes: MVP_BYTES,
             bind_group_layout: None,
             blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
         })
         .expect("depth-testing graphics pipeline");
 
@@ -815,6 +819,7 @@ fn windowed_hybrid_composite_present_is_validation_clean_and_renders_composite()
             format: Format::R8G8B8A8Unorm,
             dimension: TextureDimension::D2,
             usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
+            array_layers: 1,
         },
     )
     .expect("SAMPLED composite texture (R8G8B8A8_UNORM)");
@@ -826,6 +831,7 @@ fn windowed_hybrid_composite_present_is_validation_clean_and_renders_composite()
             min_filter: Filter::Nearest,
             address_mode: AddressMode::ClampToEdge,
             mip: MipMode::None,
+            compare: None,
         },
     )
     .expect("nearest/clamp sampler");
@@ -861,6 +867,8 @@ fn windowed_hybrid_composite_present_is_validation_clean_and_renders_composite()
             push_constant_bytes: 0,
             bind_group_layout: Some(&bind_group_layout),
             blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
         },
     )
     .expect("fullscreen-sample pipeline (swapchain color format)");

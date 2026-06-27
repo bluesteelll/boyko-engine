@@ -145,6 +145,7 @@ fn p1a_vocabulary_set_creates_clean_host() {
             format: Format::R8G8B8A8Unorm,
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+            array_layers: 1,
         })
         .expect("R8G8B8A8 storage image");
 
@@ -320,6 +321,7 @@ fn p1a_vocabulary_storage_image_matches_golden() {
             format: Format::R8G8B8A8Unorm,
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+            array_layers: 1,
         })
         .expect("R8G8B8A8 storage image");
 

@@ -578,6 +578,68 @@ impl DescriptorKind {
     }
 }
 
+/// A depth/comparison operation (the `VkCompareOp` `i32` family, CSM Increment 0).
+///
+/// `#[repr(i32)]` with discriminants equal to the matching `VkCompareOp` constants
+/// (asserted backend-side in `abi_guard.rs`), so the backend lowers it with a
+/// trivial `as i32` cast — no per-op translation table. Surfaced for the comparison
+/// sampler ([`crate::device::SamplerDesc::compare`]): a shadow-map PCF read needs
+/// [`Self::LessOrEqual`] (a depth-array texel passes the hardware compare iff the
+/// reference depth is `<=` the stored depth). Only the ops the foundation needs are
+/// defined; the family grows per phase.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CompareOp {
+    /// `VK_COMPARE_OP_NEVER` — the test never passes.
+    Never = 0,
+    /// `VK_COMPARE_OP_LESS` — passes iff `reference < stored`.
+    Less = 1,
+    /// `VK_COMPARE_OP_LESS_OR_EQUAL` — passes iff `reference <= stored` (PCF shadow
+    /// comparison: a fragment at the stored depth is lit, not self-shadowed).
+    LessOrEqual = 3,
+    /// `VK_COMPARE_OP_ALWAYS` — the test always passes.
+    Always = 7,
+}
+
+impl CompareOp {
+    /// The raw `i32` discriminant — equal to the matching `VkCompareOp` constant.
+    #[inline]
+    pub const fn as_i32(self) -> i32 {
+        self as i32
+    }
+}
+
+/// A triangle face-culling mode (the `VkCullModeFlags` `u32` family, CSM
+/// Increment 0).
+///
+/// `#[repr(u32)]` with discriminants equal to the matching `VK_CULL_MODE_*`
+/// constants (asserted backend-side in `abi_guard.rs`), so the backend lowers it
+/// with a trivial `as u32` (= `VkFlags`) cast. Surfaced on
+/// [`crate::descriptor::GraphicsPipelineDesc::cull_mode`]: [`Self::None`] is the
+/// engine default (every existing pipeline — byte-identical to today's hardcoded
+/// `VK_CULL_MODE_NONE`); a shadow-map depth pass selects [`Self::Front`] to reduce
+/// peter-panning by rendering back faces. The variant set covers the single-bit
+/// modes; `FRONT_AND_BACK` is intentionally omitted (it discards all geometry).
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CullMode {
+    /// `VK_CULL_MODE_NONE` — no culling (the engine default; today's hardcoded value).
+    None = 0,
+    /// `VK_CULL_MODE_FRONT_BIT` — cull front-facing triangles.
+    Front = 1,
+    /// `VK_CULL_MODE_BACK_BIT` — cull back-facing triangles.
+    Back = 2,
+}
+
+impl CullMode {
+    /// The raw `u32` discriminant — equal to the matching `VkCullModeFlags` bits
+    /// (`VkFlags`).
+    #[inline]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+}
+
 /// A color-blend factor (the `VkBlendFactor` `i32` family, GUI P5a Decision 3).
 ///
 /// `#[repr(i32)]` with discriminants equal to the matching `VkBlendFactor`

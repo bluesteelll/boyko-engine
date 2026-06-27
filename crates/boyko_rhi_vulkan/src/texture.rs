@@ -18,6 +18,16 @@
 //! encodes "destroyed exactly once". Teardown is reverse creation order: view →
 //! image → memory. The originating [`VulkanContext`](crate::device::VulkanContext) must still be alive when the
 //! texture is destroyed (the destroy goes through the context's device fn-table).
+//!
+//! # Array depth textures (CSM Increment 0)
+//!
+//! When [`TextureDesc::array_layers`](boyko_rhi::TextureDesc::array_layers) `> 1`
+//! (a DEPTH-format image), the texture owns a VIEW SET instead of a single view:
+//! `N` per-layer `VK_IMAGE_VIEW_TYPE_2D` RENDER views (each cascade renders into its
+//! own layer) plus ONE `VK_IMAGE_VIEW_TYPE_2D_ARRAY` SAMPLE view (the resolve samples
+//! `float3(uv, layer)`). For `array_layers == 1` (every existing texture) the path is
+//! byte-identical: `view` is the single full-subresource view, the render-view set
+//! holds that same view in slot 0, and `array_view` is `NULL` (no array view created).
 
 use core::ptr;
 
@@ -28,9 +38,19 @@ use crate::error::VulkanError;
 use crate::ffi::*;
 use crate::memory::select_memory_type;
 
+/// The maximum number of array layers a multi-layer (CSM) depth texture may carry —
+/// the fixed inline capacity of the per-layer render-view set (CSM Increment 0).
+/// Sized for the cascaded-shadow-map cascade count.
+pub const MAX_CASCADES: usize = 4;
+
 /// An owned device-local image (color, or depth for a `DEPTH_STENCIL_ATTACHMENT`
-/// usage) + its full-subresource view + the dedicated `VkDeviceMemory` it is bound
-/// to ([`RhiApi::Texture`](boyko_rhi::RhiApi::Texture)).
+/// usage) + its view(s) + the dedicated `VkDeviceMemory` it is bound to
+/// ([`RhiApi::Texture`](boyko_rhi::RhiApi::Texture)).
+///
+/// For a single-layer image (`array_layers == 1`, every existing texture) this is
+/// today's shape: one `image`, one full-subresource `view`, one `memory`. For a
+/// multi-layer depth image (`array_layers > 1`, CSM Increment 0) it additionally owns
+/// the per-layer RENDER view set + the array SAMPLE view (see the module docs).
 ///
 /// # Safety
 ///
@@ -43,16 +63,38 @@ pub struct VulkanTexture {
     /// `image_barrier` / `copy_image_to_buffer`.
     pub(crate) image: VkImage,
     /// The full-subresource `VkImageView`; destroyed before the image. Read by the
-    /// encoder's `begin_rendering` (the color attachment).
+    /// encoder's `begin_rendering` (the color/depth attachment). For a single-layer
+    /// image this is the only view; for a multi-layer image it ALIASES
+    /// `layer_views[0]` (the layer-0 render view), so the existing `.view` read stays
+    /// valid (it samples/renders layer 0) — it is NOT destroyed separately (the
+    /// `layer_views` teardown owns it).
     pub(crate) view: VkImageView,
     /// The dedicated device-local allocation backing the image; freed last.
     pub(crate) memory: VkDeviceMemory,
+    /// The per-layer `VK_IMAGE_VIEW_TYPE_2D` RENDER views (CSM Increment 0): slot `i`
+    /// is the view of array layer `i` (`baseArrayLayer = i`, `layerCount = 1`), so a
+    /// shadow pass renders cascade `i` into it. Only the first `active_layers` slots
+    /// are valid (`NULL` tail). For a single-layer image slot 0 == `view`.
+    pub(crate) layer_views: [VkImageView; MAX_CASCADES],
+    /// The number of valid `layer_views` (`1..=MAX_CASCADES`). `1` for every
+    /// single-layer image.
+    pub(crate) active_layers: u32,
+    /// The `VK_IMAGE_VIEW_TYPE_2D_ARRAY` SAMPLE view over all `active_layers` layers
+    /// (CSM Increment 0): the resolve samples `float3(uv, layer)` through it. `NULL`
+    /// for a single-layer image (no array view is created there).
+    pub(crate) array_view: VkImageView,
 }
 
 impl VulkanTexture {
     /// Creates a 2D/3D image per `desc` (color, or depth when the usage carries
     /// `DEPTH_STENCIL_ATTACHMENT`), allocates + binds a dedicated device-local
-    /// block, and creates one full-subresource view with the matching aspect.
+    /// block, and creates the view(s).
+    ///
+    /// For `desc.array_layers == 1` (every existing texture): one full-subresource
+    /// view (byte-identical to the prior path). For `desc.array_layers > 1` (a
+    /// multi-layer DEPTH image, CSM Increment 0): `N` per-layer
+    /// `VK_IMAGE_VIEW_TYPE_2D` RENDER views + one `VK_IMAGE_VIEW_TYPE_2D_ARRAY` SAMPLE
+    /// view (see the module docs).
     ///
     /// On any partial failure every object created so far is torn down in reverse
     /// order before the error returns (no leak on the error path).
@@ -71,13 +113,17 @@ impl VulkanTexture {
             desc.width > 0 && desc.height > 0 && desc.depth > 0,
             "invariant: texture extent must be non-zero in every dimension"
         );
+        debug_assert!(
+            desc.array_layers >= 1 && (desc.array_layers as usize) <= MAX_CASCADES,
+            "invariant: texture array_layers must be in 1..=MAX_CASCADES"
+        );
+        // Release-safe clamp: the inline view set never exceeds `MAX_CASCADES`, and a
+        // floor of 1 keeps the single-view path valid even if a (debug-asserted)
+        // out-of-range count slipped through a release build.
+        let layers = (desc.array_layers as usize).clamp(1, MAX_CASCADES) as u32;
+        let is_array = layers > 1;
 
         let image_type = desc.dimension.as_i32();
-        let view_type = match image_type {
-            VK_IMAGE_TYPE_3D => VK_IMAGE_VIEW_TYPE_3D,
-            // `VK_IMAGE_TYPE_2D` (the rung-1 path) and any other 2D-shaped value.
-            _ => VK_IMAGE_VIEW_TYPE_2D,
-        };
         let format = desc.format.as_i32();
         // The agnostic `ImageUsage` bits equal the `VK_IMAGE_USAGE_*` bits (identity
         // cast, asserted in `abi_guard.rs`).
@@ -94,6 +140,14 @@ impl VulkanTexture {
             VK_IMAGE_ASPECT_COLOR_BIT
         };
 
+        // The full-subresource (single-layer) view type. A multi-layer image's
+        // per-layer render views are always `VK_IMAGE_VIEW_TYPE_2D` (one layer each).
+        let view_type = match image_type {
+            VK_IMAGE_TYPE_3D => VK_IMAGE_VIEW_TYPE_3D,
+            // `VK_IMAGE_TYPE_2D` (the rung-1 path) and any other 2D-shaped value.
+            _ => VK_IMAGE_VIEW_TYPE_2D,
+        };
+
         let image_info = VkImageCreateInfo {
             s_type: VkStructureType::ImageCreateInfo,
             p_next: ptr::null(),
@@ -106,7 +160,7 @@ impl VulkanTexture {
                 depth: desc.depth,
             },
             mip_levels: 1,
-            array_layers: 1,
+            array_layers: layers,
             samples: VK_SAMPLE_COUNT_1_BIT,
             tiling: VK_IMAGE_TILING_OPTIMAL,
             usage,
@@ -181,53 +235,160 @@ impl VulkanTexture {
             return Err(VulkanError::Vk("vkBindImageMemory", result));
         }
 
-        // One full-subresource view with the format's aspect (COLOR or DEPTH;
-        // mirrors the swapchain image-view path for the color case).
-        let view_info = VkImageViewCreateInfo {
-            s_type: VkStructureType::ImageViewCreateInfo,
-            p_next: ptr::null(),
-            flags: 0,
-            image,
-            view_type,
-            format,
-            components: VkComponentMapping {
-                r: VK_COMPONENT_SWIZZLE_IDENTITY,
-                g: VK_COMPONENT_SWIZZLE_IDENTITY,
-                b: VK_COMPONENT_SWIZZLE_IDENTITY,
-                a: VK_COMPONENT_SWIZZLE_IDENTITY,
-            },
-            subresource_range: VkImageSubresourceRange {
-                aspect_mask,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            },
+        // The view components are identity for both the single-layer and array paths.
+        let components = VkComponentMapping {
+            r: VK_COMPONENT_SWIZZLE_IDENTITY,
+            g: VK_COMPONENT_SWIZZLE_IDENTITY,
+            b: VK_COMPONENT_SWIZZLE_IDENTITY,
+            a: VK_COMPONENT_SWIZZLE_IDENTITY,
         };
-        let mut view = VkImageView::NULL;
-        // SAFETY: `device` is live; `view_info` names the live `image`; `&mut view`
-        // is a valid out-pointer; NULL allocator.
-        let raw = unsafe { (fns.create_image_view)(device, &view_info, ptr::null(), &mut view) };
-        let result = VkResult::from_raw(raw);
-        if !result.is_success() {
-            // SAFETY: the image + its memory are bound; tear them down in reverse
-            // order (memory then image), each once, on this error path.
-            unsafe {
-                (fns.free_memory)(device, memory, ptr::null());
-                (fns.destroy_image)(device, image, ptr::null());
+
+        // The per-layer RENDER views. For `layers == 1` this is exactly today's path:
+        // one full-subresource `VK_IMAGE_VIEW_TYPE_2D` view (`baseArrayLayer = 0`,
+        // `layerCount = 1`). For `layers > 1` it is `layers` per-layer views, each
+        // `baseArrayLayer = i`, `layerCount = 1` — every cascade renders into its own
+        // layer. On any view's failure, every view created so far + the image + memory
+        // are torn down in reverse order (no leak).
+        let mut layer_views = [VkImageView::NULL; MAX_CASCADES];
+        for i in 0..layers as usize {
+            let view_info = VkImageViewCreateInfo {
+                s_type: VkStructureType::ImageViewCreateInfo,
+                p_next: ptr::null(),
+                flags: 0,
+                image,
+                view_type,
+                format,
+                components,
+                subresource_range: VkImageSubresourceRange {
+                    aspect_mask,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: i as u32,
+                    layer_count: 1,
+                },
+            };
+            let mut layer_view = VkImageView::NULL;
+            // SAFETY: `device` is live; `view_info` names the live `image` with a
+            // single-layer range at `baseArrayLayer = i < layers` (within the image's
+            // `arrayLayers`); `&mut layer_view` is a valid out-pointer; NULL allocator.
+            let raw =
+                unsafe { (fns.create_image_view)(device, &view_info, ptr::null(), &mut layer_view) };
+            let result = VkResult::from_raw(raw);
+            if !result.is_success() {
+                // SAFETY: tear down the `i` views created so far, then the bound image
+                // + memory, each once, in reverse order on this error path.
+                unsafe {
+                    for v in layer_views.iter().take(i) {
+                        (fns.destroy_image_view)(device, *v, ptr::null());
+                    }
+                    (fns.free_memory)(device, memory, ptr::null());
+                    (fns.destroy_image)(device, image, ptr::null());
+                }
+                return Err(VulkanError::Vk("vkCreateImageView(texture layer)", result));
             }
-            return Err(VulkanError::Vk("vkCreateImageView(texture)", result));
+            layer_views[i] = layer_view;
         }
+
+        // The array SAMPLE view (`VK_IMAGE_VIEW_TYPE_2D_ARRAY`, all `layers` layers) —
+        // ONLY for a multi-layer image (CSM Increment 0). A single-layer image keeps
+        // `array_view == NULL` (no array view), so its path is byte-identical to today.
+        let array_view = if is_array {
+            let array_view_info = VkImageViewCreateInfo {
+                s_type: VkStructureType::ImageViewCreateInfo,
+                p_next: ptr::null(),
+                flags: 0,
+                image,
+                view_type: VK_IMAGE_VIEW_TYPE_2D_ARRAY,
+                format,
+                components,
+                subresource_range: VkImageSubresourceRange {
+                    aspect_mask,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: layers,
+                },
+            };
+            let mut av = VkImageView::NULL;
+            // SAFETY: `device` is live; `array_view_info` names the live `image` with a
+            // `layerCount = layers` range from `baseArrayLayer = 0` (the whole array);
+            // `&mut av` is a valid out-pointer; NULL allocator.
+            let raw =
+                unsafe { (fns.create_image_view)(device, &array_view_info, ptr::null(), &mut av) };
+            let result = VkResult::from_raw(raw);
+            if !result.is_success() {
+                // SAFETY: tear down every per-layer view, then the bound image +
+                // memory, each once, in reverse order on this error path.
+                unsafe {
+                    for v in layer_views.iter().take(layers as usize) {
+                        (fns.destroy_image_view)(device, *v, ptr::null());
+                    }
+                    (fns.free_memory)(device, memory, ptr::null());
+                    (fns.destroy_image)(device, image, ptr::null());
+                }
+                return Err(VulkanError::Vk("vkCreateImageView(texture array)", result));
+            }
+            av
+        } else {
+            VkImageView::NULL
+        };
 
         Ok(Self {
             image,
-            view,
+            // `view` is layer 0's render view (== the full-subresource view for a
+            // single-layer image): the existing `.view` reads stay byte-identical.
+            view: layer_views[0],
             memory,
+            layer_views,
+            active_layers: layers,
+            array_view,
         })
     }
 
-    /// Tears down the view, image, and dedicated allocation in reverse creation
-    /// order, consuming `self`.
+    /// The array SAMPLE view (`VK_IMAGE_VIEW_TYPE_2D_ARRAY`) over all layers — for a
+    /// multi-layer depth texture the resolve samples `float3(uv, layer)` through it.
+    /// Returns `NULL` for a single-layer image (CSM Increment 0).
+    ///
+    /// `#[allow(dead_code)]`: this accessor is the CSM Increment-0 RHI capability; the
+    /// resolve's array sample wires to it in Increment 1+. The capability is validated
+    /// now by the array-texture unit test.
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn array_sample_view(&self) -> VkImageView {
+        self.array_view
+    }
+
+    /// The per-layer `VK_IMAGE_VIEW_TYPE_2D` RENDER view for array layer `i` — a
+    /// shadow pass renders cascade `i` into it (CSM Increment 0).
+    ///
+    /// `#[allow(dead_code)]`: this accessor is the CSM Increment-0 RHI capability; the
+    /// shadow depth pass renders into each layer via it in Increment 1+. The
+    /// capability is validated now by the array-texture + depth-only-draw unit tests.
+    ///
+    /// # Panics (debug)
+    /// `i` must be `< active_layers` (a `debug_assert!`); in release an out-of-range
+    /// `i` returns the `NULL` tail slot rather than reading out of bounds.
+    #[allow(dead_code)]
+    #[inline]
+    pub(crate) fn layer_render_view(&self, i: u32) -> VkImageView {
+        debug_assert!(
+            i < self.active_layers,
+            "invariant: layer index must be < active_layers"
+        );
+        self.layer_views
+            .get(i as usize)
+            .copied()
+            .unwrap_or(VkImageView::NULL)
+    }
+
+    /// Tears down every view (the array sample view + each per-layer render view),
+    /// the image, and the dedicated allocation in reverse creation order, consuming
+    /// `self`.
+    ///
+    /// `self.view` is NOT destroyed separately: it aliases `layer_views[0]`, which the
+    /// per-layer loop already destroys. The `array_view` is `NULL` (skipped) for a
+    /// single-layer image, so that path destroys exactly the one view it created —
+    /// byte-identical to the prior single-`view` teardown.
     ///
     /// # Safety
     ///
@@ -235,11 +396,17 @@ impl VulkanTexture {
     /// work referencing the image is in flight (caller fence-waited / `wait_idle`);
     /// it is destroyed exactly once (the by-value `self` enforces the latter).
     pub(crate) unsafe fn destroy(self, device: VkDevice, fns: &DeviceFns) {
-        // SAFETY: per the contract `device` is live and nothing references the
-        // image; destroy the view, then the image, then free the dedicated
-        // allocation — each exactly once in reverse creation order.
+        // SAFETY: per the contract `device` is live and nothing references the image.
+        // Destroy the array sample view (NULL for a single-layer image — `vkDestroy*`
+        // on `VK_NULL_HANDLE` is a defined no-op), then every per-layer render view
+        // (`active_layers` valid slots; the `view` field aliases slot 0 and is NOT
+        // destroyed again), then the image, then free the dedicated allocation — each
+        // exactly once in reverse creation order.
         unsafe {
-            (fns.destroy_image_view)(device, self.view, ptr::null());
+            (fns.destroy_image_view)(device, self.array_view, ptr::null());
+            for v in self.layer_views.iter().take(self.active_layers as usize) {
+                (fns.destroy_image_view)(device, *v, ptr::null());
+            }
             (fns.destroy_image)(device, self.image, ptr::null());
             (fns.free_memory)(device, self.memory, ptr::null());
         }

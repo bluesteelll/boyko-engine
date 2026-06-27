@@ -735,6 +735,17 @@ impl RhiDevice<Vulkan> for VulkanContext {
         let (mipmap_mode, min_lod, max_lod) = match desc.mip {
             MipMode::None => (VK_SAMPLER_MIPMAP_MODE_NEAREST, 0.0, 0.0),
         };
+        // CSM Increment 0: lower the optional hardware depth-comparison op. `None`
+        // keeps `compareEnable = VK_FALSE` + `compareOp = VK_COMPARE_OP_NEVER` —
+        // byte-identical to every existing sampler. `Some(op)` builds a COMPARISON
+        // sampler (`compareEnable = VK_TRUE`, `compareOp = op`) so a shadow-map PCF
+        // read returns the filtered pass/fail of `reference (op) stored_depth`. The
+        // agnostic `CompareOp` discriminant equals the `VkCompareOp` constant (asserted
+        // in `abi_guard.rs`), so the lowering is an `as_i32()` no-op.
+        let (compare_enable, compare_op) = match desc.compare {
+            None => (VK_FALSE, VK_COMPARE_OP_NEVER),
+            Some(op) => (VK_TRUE, op.as_i32()),
+        };
         let info = VkSamplerCreateInfo {
             s_type: VkStructureType::SamplerCreateInfo,
             p_next: ptr::null(),
@@ -748,8 +759,8 @@ impl RhiDevice<Vulkan> for VulkanContext {
             mip_lod_bias: 0.0,
             anisotropy_enable: VK_FALSE,
             max_anisotropy: 1.0,
-            compare_enable: VK_FALSE,
-            compare_op: VK_COMPARE_OP_NEVER,
+            compare_enable,
+            compare_op,
             min_lod,
             max_lod,
             border_color: VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
@@ -1482,6 +1493,19 @@ impl RhiDevice<Vulkan> for VulkanContext {
             p_scissors: ptr::null(),
         };
 
+        // CSM Increment 0: lower the configurable cull mode + optional depth bias.
+        // `CullMode::None` == `VK_CULL_MODE_NONE` and `depth_bias: None` ==
+        // `depthBiasEnable = VK_FALSE` + zeroed factors — byte-identical to the prior
+        // hardcoded rasterization state, so every existing pipeline (which passes those
+        // defaults) re-emits the SAME bytes. The agnostic `CullMode` discriminant
+        // equals the `VkCullModeFlags` bits (asserted in `abi_guard.rs`), so the cull
+        // lowering is an `as_u32()` no-op. A shadow-map depth pass selects
+        // `CullMode::Front` + `Some(DepthBias { .. })`.
+        let cull_mode: VkFlags = desc.cull_mode.as_u32();
+        let (depth_bias_enable, db_constant, db_slope, db_clamp) = match desc.depth_bias {
+            None => (VK_FALSE, 0.0, 0.0, 0.0),
+            Some(b) => (VK_TRUE, b.constant_factor, b.slope_factor, b.clamp),
+        };
         let rasterization = VkPipelineRasterizationStateCreateInfo {
             s_type: VkStructureType::PipelineRasterizationStateCreateInfo,
             p_next: ptr::null(),
@@ -1489,12 +1513,12 @@ impl RhiDevice<Vulkan> for VulkanContext {
             depth_clamp_enable: VK_FALSE,
             rasterizer_discard_enable: VK_FALSE,
             polygon_mode: VK_POLYGON_MODE_FILL,
-            cull_mode: VK_CULL_MODE_NONE,
+            cull_mode,
             front_face: VK_FRONT_FACE_COUNTER_CLOCKWISE,
-            depth_bias_enable: VK_FALSE,
-            depth_bias_constant_factor: 0.0,
-            depth_bias_clamp: 0.0,
-            depth_bias_slope_factor: 0.0,
+            depth_bias_enable,
+            depth_bias_constant_factor: db_constant,
+            depth_bias_clamp: db_clamp,
+            depth_bias_slope_factor: db_slope,
             line_width: 1.0,
         };
 
@@ -1517,9 +1541,15 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // == 1`). The count MUST equal the dynamic-rendering format count below, or the
         // driver rejects the pipeline. The first `color_attachment_count` entries are
         // identical opaque states; the inline tail is never read (the count bounds it).
+        //
+        // CSM Increment 0: an EMPTY `color_formats` is the DEPTH-ONLY path —
+        // `colorAttachmentCount = 0`, a null color-blend attachment array, and a null
+        // `pColorAttachmentFormats` below (a depth-only shadow-map pass). A depth-only
+        // pipeline then REQUIRES a depth format (validation rejects a pipeline with
+        // neither color nor depth); the relaxed assert pins that.
         debug_assert!(
-            !desc.color_formats.is_empty(),
-            "invariant: a graphics pipeline needs >= 1 color attachment format"
+            !desc.color_formats.is_empty() || desc.depth_format.is_some(),
+            "invariant: a graphics pipeline needs >= 1 color attachment format OR a depth format (depth-only)"
         );
         debug_assert!(
             desc.color_formats.len() <= MAX_COLOR_ATTACHMENTS,
@@ -1565,6 +1595,13 @@ impl RhiDevice<Vulkan> for VulkanContext {
                     | VK_COLOR_COMPONENT_B_BIT
                     | VK_COLOR_COMPONENT_A_BIT,
             });
+        // CSM Increment 0: a non-empty `color_formats` keeps the prior
+        // `p_attachments = blend_attachments.as_ptr()` (byte-identical). An EMPTY
+        // (depth-only) pipeline has `attachment_count = 0` + a null `p_attachments`,
+        // and the WHOLE color-blend state is omitted (`p_color_blend_state = null`
+        // below) — Vulkan allows a null color-blend state when there are no color
+        // attachments.
+        let has_color = color_attachment_count > 0;
         let color_blend = VkPipelineColorBlendStateCreateInfo {
             s_type: VkStructureType::PipelineColorBlendStateCreateInfo,
             p_next: ptr::null(),
@@ -1572,8 +1609,17 @@ impl RhiDevice<Vulkan> for VulkanContext {
             logic_op_enable: VK_FALSE,
             logic_op: 0,
             attachment_count: color_attachment_count as u32,
-            p_attachments: blend_attachments.as_ptr(),
+            p_attachments: if has_color {
+                blend_attachments.as_ptr()
+            } else {
+                ptr::null()
+            },
             blend_constants: [0.0; 4],
+        };
+        let p_color_blend_state: *const VkPipelineColorBlendStateCreateInfo = if has_color {
+            &color_blend
+        } else {
+            ptr::null()
         };
 
         let dynamic_states = [VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR];
@@ -1638,7 +1684,13 @@ impl RhiDevice<Vulkan> for VulkanContext {
             p_next: ptr::null(),
             view_mask: 0,
             color_attachment_count: color_attachment_count as u32,
-            p_color_attachment_formats: color_formats.as_ptr(),
+            // CSM Increment 0: null the format array for the depth-only path
+            // (`color_attachment_count == 0`); the non-empty path is byte-identical.
+            p_color_attachment_formats: if has_color {
+                color_formats.as_ptr()
+            } else {
+                ptr::null()
+            },
             depth_attachment_format,
             stencil_attachment_format: VK_FORMAT_UNDEFINED,
         };
@@ -1657,7 +1709,7 @@ impl RhiDevice<Vulkan> for VulkanContext {
             p_rasterization_state: &rasterization,
             p_multisample_state: &multisample,
             p_depth_stencil_state,
-            p_color_blend_state: &color_blend,
+            p_color_blend_state,
             p_dynamic_state: &dynamic_state,
             layout,
             // Dynamic rendering: no render pass object (OQ-6, CLOSED).
@@ -1686,9 +1738,11 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // `p_color_blend_state` points at the `color_blend` local whose
         // `p_attachments` is the `blend_attachments` inline array (alive for the call),
         // its first `color_attachment_count` entries (= the format count below) read by
-        // the driver. The dynamic-rendering format chain's `p_color_attachment_formats`
+        // the driver — OR is null for the DEPTH-ONLY path (`color_attachment_count == 0`),
+        // valid because Vulkan permits a null color-blend state with no color
+        // attachments. The dynamic-rendering format chain's `p_color_attachment_formats`
         // is the `color_formats` inline array (alive for the call), first
-        // `color_attachment_count` entries valid.
+        // `color_attachment_count` entries valid — OR null for the depth-only path.
         //
         // FORMAT CONTRACT (W2-b): `rendering_info.p_color_attachment_formats` declares
         // `desc.color_formats` (count + per-index format) and `.depth_attachment_format`

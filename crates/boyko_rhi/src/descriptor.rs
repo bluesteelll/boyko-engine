@@ -6,8 +6,8 @@
 
 use crate::api::RhiApi;
 use crate::enums::{
-    BarrierAccess, BarrierStage, BlendState, BufferUsage, Format, ImageAspect, ImageLayout, LoadOp,
-    MemoryLocation, PrimitiveTopology, StoreOp, VertexFormat,
+    BarrierAccess, BarrierStage, BlendState, BufferUsage, CullMode, Format, ImageAspect,
+    ImageLayout, LoadOp, MemoryLocation, PrimitiveTopology, StoreOp, VertexFormat,
 };
 
 /// Parameters for [`crate::device::RhiDevice::create_buffer`].
@@ -109,6 +109,28 @@ pub struct VertexBufferLayout<'a> {
     pub attributes: &'a [VertexAttribute],
 }
 
+/// Depth-bias (polygon-offset) state for a graphics pipeline (CSM Increment 0).
+///
+/// `#[repr(C)]` POD with an explicit field order so a backend reads it without
+/// depending on Rust's default field reordering — it lowers onto a
+/// `VkPipelineRasterizationStateCreateInfo`'s `(depthBiasConstantFactor,
+/// depthBiasSlopeFactor, depthBiasClamp)` (with `depthBiasEnable = VK_TRUE`).
+/// Carried as `Option<DepthBias>` on [`GraphicsPipelineDesc::depth_bias`]: `None`
+/// keeps `depthBiasEnable = VK_FALSE` for every existing pipeline (byte-identical to
+/// today); `Some(b)` enables the offset, which a shadow-map depth pass uses to push
+/// occluder depth away from the light and kill shadow acne.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DepthBias {
+    /// The constant depth offset added to every fragment (in depth-format units).
+    pub constant_factor: f32,
+    /// The offset scaled by the fragment's maximum depth slope.
+    pub slope_factor: f32,
+    /// The maximum (or minimum, if negative) depth bias applied; `0.0` disables the
+    /// clamp.
+    pub clamp: f32,
+}
+
 /// Parameters for [`crate::device::RhiDevice::create_graphics_pipeline`]
 /// (Phase-6 S0 rung 2: a Vulkan 1.3 dynamic-rendering graphics pipeline).
 ///
@@ -151,8 +173,13 @@ pub struct GraphicsPipelineDesc<'a, A: RhiApi> {
     /// The color attachments' formats, one per MRT target (the
     /// `VkPipelineRenderingCreateInfo` formats — see the format contract above). A
     /// one-element slice is the no-MRT path; the G-buffer geometry pass passes two
-    /// (albedo + normal). Borrowed for the `create_graphics_pipeline` call only;
-    /// must be non-empty.
+    /// (albedo + normal). Borrowed for the `create_graphics_pipeline` call only.
+    ///
+    /// **EMPTY** is the DEPTH-ONLY path (CSM Increment 0): a `&[]` slice builds a
+    /// pipeline with `colorAttachmentCount = 0` (null color-blend + null
+    /// `pColorAttachmentFormats`) — a depth-only shadow-map pass that writes depth
+    /// only. A depth-only pipeline REQUIRES a `depth_format` (validation rejects a
+    /// pipeline with neither color nor depth).
     pub color_formats: &'a [Format],
     /// The depth attachment's format, or `None` for a depth-less pipeline (rungs
     /// 1..3). `Some(fmt)` (rung 4: [`Format::D32Sfloat`]) enables the pipeline's
@@ -183,6 +210,15 @@ pub struct GraphicsPipelineDesc<'a, A: RhiApi> {
     /// attachments (P5a UI is single-target; per-target MRT blend is a future
     /// widening of `Option<BlendState>` → a per-target slice).
     pub blend: Option<BlendState>,
+    /// The triangle face-culling mode (CSM Increment 0). [`CullMode::None`] (the
+    /// default) is byte-identical to today's hardcoded `VK_CULL_MODE_NONE`, so every
+    /// existing pipeline re-emits an identical rasterization state; a shadow-map depth
+    /// pass selects [`CullMode::Front`].
+    pub cull_mode: CullMode,
+    /// The optional depth-bias (polygon-offset) state (CSM Increment 0). `None` (the
+    /// default) keeps `depthBiasEnable = VK_FALSE` — byte-identical to today; `Some(b)`
+    /// enables the offset for a shadow-map depth pass (kills shadow acne).
+    pub depth_bias: Option<DepthBias>,
 }
 
 /// A single buffer's access transition inside a [`BarrierDesc`].

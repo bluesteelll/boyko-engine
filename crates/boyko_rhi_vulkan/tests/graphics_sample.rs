@@ -43,7 +43,7 @@ use core::slice;
 use boyko_rhi::enums::{AddressMode, BarrierAccess, BarrierStage, DescriptorKind, Filter};
 use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc,
-    BufferImageCopy, BufferUsage, Format, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc,
+    BufferImageCopy, BufferUsage, Format, CullMode, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc,
     ImageLayout, ImageSubresourceRange, ImageUsage, LoadOp, MemoryLocation, MipMode,
     PrimitiveTopology, RenderArea, RenderingAttachment, RenderingDesc, RhiCommandEncoder, RhiDevice,
     RhiQueue, SamplerDesc, ShaderStage, StoreOp, TextureDesc, TextureDimension, Viewport,
@@ -190,6 +190,7 @@ fn render_sampled(device: &VulkanContext) -> Vec<u8> {
             format: Format::R8G8B8A8Unorm,
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+            array_layers: 1,
         })
         .expect("source texture T (COLOR_ATTACHMENT | SAMPLED)");
 
@@ -203,6 +204,7 @@ fn render_sampled(device: &VulkanContext) -> Vec<u8> {
             format: Format::R8G8B8A8Unorm,
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+            array_layers: 1,
         })
         .expect("output texture O (COLOR_ATTACHMENT | TRANSFER_SRC)");
 
@@ -227,6 +229,8 @@ fn render_sampled(device: &VulkanContext) -> Vec<u8> {
             push_constant_bytes: 0,
             bind_group_layout: None,
             blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
         })
         .expect("pass-1 source pipeline");
 
@@ -239,6 +243,7 @@ fn render_sampled(device: &VulkanContext) -> Vec<u8> {
             min_filter: Filter::Nearest,
             address_mode: AddressMode::ClampToEdge,
             mip: MipMode::None,
+            compare: None,
         })
         .expect("sampler");
     let bind_group_layout = device
@@ -274,6 +279,8 @@ fn render_sampled(device: &VulkanContext) -> Vec<u8> {
             push_constant_bytes: 0,
             bind_group_layout: Some(&bind_group_layout),
             blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
         })
         .expect("pass-2 sample pipeline");
 

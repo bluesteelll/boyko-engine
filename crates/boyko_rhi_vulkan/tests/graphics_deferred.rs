@@ -49,7 +49,7 @@ use core::slice;
 use boyko_rhi::enums::{AddressMode, BarrierAccess, BarrierStage, DescriptorKind, Filter};
 use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc,
-    BufferImageCopy, BufferUsage, Format, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc,
+    BufferImageCopy, BufferUsage, Format, CullMode, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc,
     ImageLayout, ImageSubresourceRange, ImageUsage, LoadOp, MemoryLocation, MipMode,
     PrimitiveTopology, RenderArea, RenderingAttachment, RenderingDesc, RhiCommandEncoder, RhiDevice,
     RhiQueue, SamplerDesc, ShaderStage, StoreOp, TextureDesc, TextureDimension, VertexAttribute,
@@ -276,6 +276,7 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
             format: Format::R8G8B8A8Unorm,
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+            array_layers: 1,
         })
         .expect("G-buffer albedo texture");
     let normal_tex = device
@@ -286,6 +287,7 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
             format: Format::R8G8B8A8Unorm,
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+            array_layers: 1,
         })
         .expect("G-buffer normal texture");
 
@@ -298,6 +300,7 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
             format: Format::D32Sfloat,
             dimension: TextureDimension::D2,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+            array_layers: 1,
         })
         .expect("G-buffer depth texture");
 
@@ -311,6 +314,7 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
             format: Format::R8G8B8A8Unorm,
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+            array_layers: 1,
         })
         .expect("final output texture O");
 
@@ -385,6 +389,8 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
             push_constant_bytes: MVP_BYTES,
             bind_group_layout: None,
             blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
         })
         .expect("geometry MRT pipeline");
 
@@ -396,6 +402,7 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
             min_filter: Filter::Nearest,
             address_mode: AddressMode::ClampToEdge,
             mip: MipMode::None,
+            compare: None,
         })
         .expect("sampler");
     let light_layout = device
@@ -436,6 +443,8 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
             push_constant_bytes: 0,
             bind_group_layout: Some(&light_layout),
             blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
         })
         .expect("deferred lighting pipeline");
 

@@ -53,7 +53,7 @@ use core::slice;
 use boyko_rhi::enums::{BarrierAccess, BarrierStage};
 use boyko_rhi::{
     BarrierDesc, BufferBarrier, BufferDesc, BufferImageCopy, BufferUsage, ComputePipelineDesc,
-    DepthAttachment, Format, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc, ImageLayout,
+    DepthAttachment, Format, CullMode, GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc, ImageLayout,
     ImageSubresourceRange, ImageUsage, LoadOp, MemoryLocation, PrimitiveTopology, RenderArea,
     RenderingAttachment, RenderingDesc, RhiCommandEncoder, RhiDevice, RhiQueue, ShaderStage, StoreOp,
     TextureDesc, TextureDimension, VertexAttribute, VertexBufferLayout, VertexFormat, Viewport,
@@ -430,6 +430,7 @@ fn run_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> (Vec<u32>, Vec<f32>) {
             format: Format::D32Sfloat,
             dimension: TextureDimension::D2,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+            array_layers: 1,
         })
         .expect("offscreen depth texture");
 
@@ -443,6 +444,7 @@ fn run_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> (Vec<u32>, Vec<f32>) {
             format: COLOR_FORMAT,
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT,
+            array_layers: 1,
         })
         .expect("throwaway color texture");
 
@@ -505,6 +507,8 @@ fn run_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> (Vec<u32>, Vec<f32>) {
             push_constant_bytes: MVP_BYTES,
             bind_group_layout: None,
             blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
         })
         .expect("depth-testing graphics pipeline");
 

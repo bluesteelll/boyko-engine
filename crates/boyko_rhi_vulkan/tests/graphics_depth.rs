@@ -50,7 +50,7 @@ use core::slice;
 
 use boyko_rhi::enums::{BarrierAccess, BarrierStage};
 use boyko_rhi::{
-    BufferDesc, BufferImageCopy, BufferUsage, DepthAttachment, Format, GraphicsPipelineDesc,
+    BufferDesc, BufferImageCopy, BufferUsage, DepthAttachment, Format, CullMode, GraphicsPipelineDesc,
     ImageAspect, ImageBarrierDesc, ImageLayout, ImageSubresourceRange, ImageUsage, LoadOp,
     MemoryLocation, PrimitiveTopology, RenderArea, RenderingAttachment, RenderingDesc,
     RhiCommandEncoder, RhiDevice, RhiQueue, ShaderStage, StoreOp, TextureDesc, TextureDimension,
@@ -246,6 +246,7 @@ fn render_two_triangles(
             format: Format::R8G8B8A8Unorm,
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+            array_layers: 1,
         })
         .expect("offscreen color texture");
 
@@ -260,6 +261,7 @@ fn render_two_triangles(
             format: Format::D32Sfloat,
             dimension: TextureDimension::D2,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+            array_layers: 1,
         })
         .expect("offscreen depth texture");
 
@@ -327,6 +329,8 @@ fn render_two_triangles(
             // Rung 4 binds no descriptor sets (the rung-5 bind-group-layout seam).
             bind_group_layout: None,
             blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
         })
         .expect("depth-testing graphics pipeline");
 

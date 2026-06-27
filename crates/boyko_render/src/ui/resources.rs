@@ -25,7 +25,7 @@ use boyko_rhi::enums::{
 };
 use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc,
-    BufferImageCopy, BufferUsage, GraphicsPipelineDesc, ImageBarrierDesc, ImageSubresourceRange,
+    BufferImageCopy, BufferUsage, CullMode, GraphicsPipelineDesc, ImageBarrierDesc, ImageSubresourceRange,
     MemoryLocation, MipMode, PrimitiveTopology, RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc,
     TextureDesc,
 };
@@ -235,6 +235,8 @@ impl UiRenderResources {
             push_constant_bytes: UI_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&layout),
             blend: Some(BlendState::PREMULTIPLIED_ALPHA),
+            cull_mode: CullMode::None,
+            depth_bias: None,
         }) {
             Ok(p) => p,
             Err(e) => {
@@ -467,6 +469,7 @@ impl UiRenderResources {
             format: Format::R8G8B8A8Unorm,
             dimension: TextureDimension::D2,
             usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
+            array_layers: 1,
         })?;
 
         // The bilinear, clamp-to-edge, NO-MIP sampler (Decision T4-D).
@@ -475,6 +478,7 @@ impl UiRenderResources {
             min_filter: Filter::Linear,
             address_mode: AddressMode::ClampToEdge,
             mip: MipMode::None,
+            compare: None,
         }) {
             Ok(s) => s,
             Err(e) => {

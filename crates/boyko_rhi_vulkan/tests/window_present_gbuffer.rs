@@ -59,7 +59,7 @@ use core::slice;
 use boyko_rhi::enums::{AddressMode, DescriptorKind, Filter, IndexType};
 use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc,
-    BufferUsage, ComputePipelineDesc, Format, GraphicsPipelineDesc, MemoryLocation, MipMode,
+    BufferUsage, ComputePipelineDesc, Format, CullMode, GraphicsPipelineDesc, MemoryLocation, MipMode,
     PrimitiveTopology, RhiDevice, SamplerDesc, ShaderStage, VertexAttribute, VertexBufferLayout,
     VertexFormat,
 };
@@ -1267,6 +1267,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
             min_filter: Filter::Nearest,
             address_mode: AddressMode::ClampToEdge,
             mip: MipMode::None,
+            compare: None,
         },
     )
     .expect("present nearest/clamp sampler");
@@ -1306,6 +1307,8 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
             push_constant_bytes: MVP_BYTES,
             bind_group_layout: Some(&instance_layout),
             blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
         },
     )
     .expect("depth-prepass graphics pipeline");
@@ -1455,6 +1458,8 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
             push_constant_bytes: 0,
             bind_group_layout: Some(&present_layout),
             blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
         },
     )
     .expect("present-blit fullscreen-sample pipeline (swapchain color format)");
@@ -2142,6 +2147,7 @@ fn p0_windowed_coarse_cull_matches_uncull() {
             min_filter: Filter::Nearest,
             address_mode: AddressMode::ClampToEdge,
             mip: MipMode::None,
+            compare: None,
         },
     )
     .expect("present nearest/clamp sampler");
@@ -2180,6 +2186,8 @@ fn p0_windowed_coarse_cull_matches_uncull() {
             push_constant_bytes: MVP_BYTES,
             bind_group_layout: Some(&instance_layout),
             blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
         },
     )
     .expect("depth-prepass graphics pipeline");
@@ -2313,6 +2321,8 @@ fn p0_windowed_coarse_cull_matches_uncull() {
             push_constant_bytes: 0,
             bind_group_layout: Some(&present_layout),
             blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
         },
     )
     .expect("present-blit fullscreen-sample pipeline");
@@ -4117,6 +4127,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
             min_filter: Filter::Nearest,
             address_mode: AddressMode::ClampToEdge,
             mip: MipMode::None,
+            compare: None,
         },
     )
     .expect("present nearest/clamp sampler");
@@ -4244,6 +4255,8 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
             push_constant_bytes: MVP_BYTES,
             bind_group_layout: Some(&instance_layout),
             blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
         },
     )
     .expect("mesh-MRT graphics pipeline");
@@ -4359,6 +4372,8 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
             push_constant_bytes: 0,
             bind_group_layout: Some(&present_layout),
             blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
         },
     )
     .expect("present-blit fullscreen-sample pipeline");

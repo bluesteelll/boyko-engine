@@ -40,7 +40,7 @@
 use core::slice;
 
 use boyko_rhi::{
-    BufferDesc, BufferImageCopy, BufferUsage, Format, GraphicsPipelineDesc, ImageAspect,
+    BufferDesc, BufferImageCopy, BufferUsage, Format, CullMode, GraphicsPipelineDesc, ImageAspect,
     ImageBarrierDesc, ImageLayout, ImageSubresourceRange, ImageUsage, LoadOp, MemoryLocation,
     PrimitiveTopology, RenderArea, RenderingAttachment, RenderingDesc, RhiCommandEncoder,
     RhiDevice, RhiQueue, StoreOp, TextureDesc, Viewport,
@@ -160,6 +160,7 @@ fn triangle_draw_golden_round_trip() {
             format: Format::R8G8B8A8Unorm,
             dimension: boyko_rhi::TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+            array_layers: 1,
         })
         .expect("offscreen color texture");
 
@@ -188,6 +189,8 @@ fn triangle_draw_golden_round_trip() {
             // Rung 2 binds no descriptor sets (the rung-5 bind-group-layout seam).
             bind_group_layout: None,
             blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
         })
         .expect("graphics pipeline");
 

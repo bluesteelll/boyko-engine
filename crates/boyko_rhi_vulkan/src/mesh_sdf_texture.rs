@@ -91,6 +91,7 @@ impl MeshSdfTexture {
                 format: Format::R8Snorm,
                 dimension: TextureDimension::D3,
                 usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
+                array_layers: 1,
             },
         )?;
 
@@ -105,6 +106,7 @@ impl MeshSdfTexture {
                 min_filter: Filter::Linear,
                 address_mode: AddressMode::ClampToEdge,
                 mip: MipMode::None,
+                compare: None,
             },
         ) {
             Ok(s) => s,
