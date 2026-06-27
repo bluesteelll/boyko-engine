@@ -57,6 +57,17 @@ pub mod barrier;
 /// components with this crate's light components (std-lib S6). Cycle-free: render
 /// depends on scene.
 pub mod bundles;
+/// CSM Inc-1a — the cascade-fit ECS policy ([`CsmConfig`](csm_config::CsmConfig) +
+/// [`ResolvedCsm`](csm_config::ResolvedCsm) Resources + the pure
+/// [`resolve_csm`](csm_config::resolve_csm) fit + the cold
+/// [`resolve_csm_cascades`](csm_config::resolve_csm_cascades) policy).
+pub mod csm_config;
+/// CSM Inc-1a — the structural [`ShadowCaster`](csm_marker::ShadowCaster) capability
+/// marker (CSM-casting vs SDF/MDF-occlusion are mutually exclusive by presence).
+pub mod csm_marker;
+/// CSM Inc-1a — the [`CsmPlugin`](csm_plugin::CsmPlugin) that seeds the config
+/// substrate and schedules the cold cascade-fit policy.
+pub mod csm_plugin;
 pub mod error;
 /// The gbuffer ⇄ marcher linear-depth contract (mesh foundation M2): the host
 /// [`GBUFFER_T_MAX`](gbuffer_depth::GBUFFER_T_MAX) mirror + the C2 drift guard
@@ -92,6 +103,11 @@ pub mod view;
 
 pub use barrier::{PlannedBarrier, lower_barriers};
 pub use bundles::{DirectionalLightObject, PointLightObject, SpotLightObject};
+pub use csm_config::{
+    CascadeData, CsmConfig, MAX_CASCADES, ResolvedCsm, resolve_csm, resolve_csm_cascades,
+};
+pub use csm_marker::ShadowCaster;
+pub use csm_plugin::CsmPlugin;
 pub use error::GpuColumnError;
 pub use gpu3d_instance::{GPU3D_INSTANCE_SIZE, Gpu3dInstance};
 pub use gpu3d_system::sync_gpu_3d_instances;
