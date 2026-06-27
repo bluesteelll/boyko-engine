@@ -203,7 +203,7 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// so the 41 `sdf_gbuffer_hybrid` goldens (no MDF scene) stay byte-exact → 155024 bytes (VulkanSDK
 /// 1.4.350.0 dxc; the +96 over 154928 is the `mesh_self_skip` self-shadow START-offset in
 /// `sdf_soft_shadow_mesh`, anti mesh-self-acne — see the shader's MESH_SELF_SHADOW_SKIP_VOXELS).
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<155024> = SpirvBlob(*include_bytes!(concat!(
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<155040> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
 )));
@@ -2426,7 +2426,7 @@ pub const M2_GRID_PARAMS_OFFSET: usize = 80;
 /// The number of analytic refine steps the M2 surface-hit fallback sphere-traces from the cubic
 /// candidate when the analytic residual exceeds [`M2_CREASE_EPS`] (mirror the shader's
 /// `M2_REFINE_ITERS`).
-const M2_REFINE_ITERS: u32 = 8;
+const M2_REFINE_ITERS: u32 = 32; // BUG-B1-HOLE-4 ring fix (see the shader const) — host mirror
 
 /// The under-relaxation factor of the SIGNED M2 refine step (`rt += M2_REFINE_RELAX * d`). The refine
 /// is a unit-gradient SDF Newton step (`rt += d` is exact on a flat surface); under-relaxing damps

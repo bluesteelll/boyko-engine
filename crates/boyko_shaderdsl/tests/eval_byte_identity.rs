@@ -1823,7 +1823,7 @@ fn ranged_at_t_max_eq_frozen_t_max_matches_unranged() {
 const FROZEN_M2_REFINE_RELAX: f32 = 0.8;
 const FROZEN_M2_SURFACE_EPS: f32 = 0.001;
 const FROZEN_M2_SURFACE_T_MAX: f32 = 10.0;
-const FROZEN_M2_REFINE_ITERS: usize = 8;
+const FROZEN_M2_REFINE_ITERS: usize = 32;
 
 /// Verbatim hand-mirror of the committed `m2_surface_hit` REFINE LOOP+TAIL span (the L1184-1205
 /// statements), threading a host `field` closure (`ro + rd * rt -> distance`). Returns the
@@ -1983,7 +1983,7 @@ fn m2_surface_hit_refine_miss_leaves_hit_t_at_default() {
 // The committed tuning consts (mirror `boyko_shaderdsl::refine`'s values).
 const FROZEN_B1_REFINE_RELAX: f32 = 0.8;
 const FROZEN_B1_REFINE_EPS: f32 = 0.001;
-const FROZEN_B1_REFINE_ITERS: usize = 8;
+const FROZEN_B1_REFINE_ITERS: usize = 32;
 
 /// Verbatim hand-mirror of the committed B1 accept-refine LOOP span (the L1442-1452 statements),
 /// threading a host `field` closure (`ro + rd * t -> distance`). Returns the settled `t`. The

@@ -812,7 +812,14 @@ static const float M2_CREASE_EPS     = 0.0192;
 // candidate, used to settle a crease/divergence onto the EXACT field from EITHER side (the
 // exact-CSG fallback). The signed step pulls an inside candidate (`d < 0`, the EPSILON_Q down-bias)
 // BACK toward the surface; a forward-only step could not.
-static const uint  M2_REFINE_ITERS   = 8u;
+// BUG-B1-HOLE-4 (the off-center-sphere dark-ring fix): an over-relaxed step (omega > 1) can land
+// DEEP inside the surface, so the accept-refine must walk a large signed distance back ONTO the
+// surface. The under-relaxed step converges at rate |1 - M2_REFINE_RELAX*cos(incidence)|, which is
+// slow at oblique incidences — 8 iters left the hit still inside on a ~30-deg-incidence band of an
+// off-center/distant sphere, so sdf_soft_shadow/sdf_ao sampled INSIDE the field -> shadow==ao==0 ->
+// a black RING. 32 iters settle it (the loop breaks early on |sdf| < EPS, so the common shallow case
+// pays nothing — only deep overshoots use the extra budget). Mirrors the host + eDSL M2_REFINE_ITERS.
+static const uint  M2_REFINE_ITERS   = 32u;
 // The under-relaxation factor of the signed refine step (`rt += M2_REFINE_RELAX * d`). `rt += d` is
 // the exact unit-gradient SDF Newton step; under-relaxing damps overshoot at a CSG crease. Mirrors
 // the host `M2_REFINE_RELAX` bit-for-bit.

@@ -65,7 +65,7 @@ pub const EPS: f32 = 0.001;
 /// The fixed refine budget — the accept-refine `[loop]` trip count, the BOUND SYMBOL the
 /// for-header carries. Mirrors the GPU's `M2_REFINE_ITERS` (`sdf_gbuffer_composite.hlsl:675`).
 /// Spelled SYMBOLICALLY in the emitted HLSL header (`M2_REFINE_ITERS`, NOT `8u`).
-pub const M2_REFINE_ITERS: usize = 8;
+pub const M2_REFINE_ITERS: usize = 32;
 
 /// Settles the B1 over-relaxation ACCEPT `t` onto the EXACT surface by a SIGNED, under-relaxed
 /// sphere-trace, mutating the carried `t` in place and returning its final value. Authored ONCE

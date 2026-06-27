@@ -71,7 +71,7 @@ pub const T_MAX: f32 = 10.0;
 /// The fixed refine budget — `m2_surface_hit`'s `[loop]` trip count, the BOUND SYMBOL the
 /// for-header carries. Mirrors the GPU's `M2_REFINE_ITERS` (`sdf_gbuffer_composite.hlsl:675`).
 /// Spelled SYMBOLICALLY in the emitted HLSL header (`M2_REFINE_ITERS`, NOT `8u`).
-pub const M2_REFINE_ITERS: usize = 8;
+pub const M2_REFINE_ITERS: usize = 32;
 
 /// Refines the cubic candidate `cand_t` onto the EXACT field by a SIGNED, under-relaxed
 /// sphere-trace, depositing the refined hit `t` into `hit_out` and returning `true` (converged,
