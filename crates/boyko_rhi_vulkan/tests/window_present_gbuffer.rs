@@ -3542,6 +3542,7 @@ fn engine_showcase_512_screenshot_dump() {
         "boyko_engine showcase 512",
         SHOWCASE_BMP,
         showcase_config(Some(SSAO_QUALITY_MEDIUM)),
+        false,
     );
 }
 
@@ -3559,6 +3560,7 @@ fn engine_ssao_512_screenshot_dump() {
         "boyko_engine SSAO 512",
         SSAO_BMP,
         showcase_config(Some(SSAO_QUALITY_MEDIUM)),
+        false,
     );
 }
 
@@ -3586,6 +3588,7 @@ fn engine_ssao_mesh_512_screenshot_dump() {
         "boyko_engine SSAO mesh floor 512",
         SSAO_MESH_BMP,
         mesh_ssao_config(Some(SSAO_QUALITY_MEDIUM)),
+        false,
     );
 }
 
@@ -3609,28 +3612,28 @@ fn engine_ssao_ladder_off_dump() {
     // ONE window/context per process: a windowed boot only survives the FIRST showcase dump in a
     // process (later boots hit "swapchain kept recreating"), so each ladder rung is its OWN test —
     // the orchestrator runs them in separate processes.
-    run_showcase_dump("boyko_engine SSAO ladder OFF", SSAO_LADDER_OFF_BMP, mesh_ssao_config(None));
+    run_showcase_dump("boyko_engine SSAO ladder OFF", SSAO_LADDER_OFF_BMP, mesh_ssao_config(None), false);
 }
 
 /// SSAO ladder rung — LOW (2x3). See [`engine_ssao_ladder_off_dump`] for the one-per-process note.
 #[test]
 #[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU"]
 fn engine_ssao_ladder_low_dump() {
-    run_showcase_dump("boyko_engine SSAO ladder LOW", SSAO_LADDER_LOW_BMP, mesh_ssao_config(Some(SSAO_QUALITY_LOW)));
+    run_showcase_dump("boyko_engine SSAO ladder LOW", SSAO_LADDER_LOW_BMP, mesh_ssao_config(Some(SSAO_QUALITY_LOW)), false);
 }
 
 /// SSAO ladder rung — MEDIUM (2x4, == today). See [`engine_ssao_ladder_off_dump`].
 #[test]
 #[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU"]
 fn engine_ssao_ladder_medium_dump() {
-    run_showcase_dump("boyko_engine SSAO ladder MEDIUM", SSAO_LADDER_MEDIUM_BMP, mesh_ssao_config(Some(SSAO_QUALITY_MEDIUM)));
+    run_showcase_dump("boyko_engine SSAO ladder MEDIUM", SSAO_LADDER_MEDIUM_BMP, mesh_ssao_config(Some(SSAO_QUALITY_MEDIUM)), false);
 }
 
 /// SSAO ladder rung — HIGH (3x6). See [`engine_ssao_ladder_off_dump`].
 #[test]
 #[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU"]
 fn engine_ssao_ladder_high_dump() {
-    run_showcase_dump("boyko_engine SSAO ladder HIGH", SSAO_LADDER_HIGH_BMP, mesh_ssao_config(Some(SSAO_QUALITY_HIGH)));
+    run_showcase_dump("boyko_engine SSAO ladder HIGH", SSAO_LADDER_HIGH_BMP, mesh_ssao_config(Some(SSAO_QUALITY_HIGH)), false);
 }
 
 /// **Hybrid-room screenshot dump (step 1 of the hybrid-mesh-room build).** Renders the ORTHO
@@ -3644,7 +3647,7 @@ fn engine_ssao_ladder_high_dump() {
 #[test]
 #[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the hybrid-room screenshot"]
 fn engine_hybrid_room_512_screenshot_dump() {
-    run_showcase_dump("boyko_engine hybrid room 512", HYBRID_BMP, hybrid_room_config());
+    run_showcase_dump("boyko_engine hybrid room 512", HYBRID_BMP, hybrid_room_config(), false);
 }
 
 /// The unlock-2 SDF occluder sphere for the mesh-floor showcase: ONE sphere standing in FRONT of
@@ -3961,6 +3964,7 @@ fn engine_instanced_persp_screenshot_dump() {
         "boyko_engine instanced perspective 512",
         INSTANCED_PERSP_BMP,
         instanced_persp_config(),
+        false,
     );
 }
 
@@ -4442,7 +4446,7 @@ fn csm_shadow_config() -> ShowcaseConfig {
 #[test]
 #[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the CSM shadow screenshot"]
 fn engine_csm_shadow_512_screenshot_dump() {
-    run_showcase_dump("boyko_engine CSM shadow 512", CSM_SHADOW_BMP, csm_shadow_config());
+    run_showcase_dump("boyko_engine CSM shadow 512", CSM_SHADOW_BMP, csm_shadow_config(), false);
 }
 
 /// **CSM Increment 1b (Rung A) — the HOST↔SHADER MATRIX GOLDEN (the acne oracle).** Asserts the
@@ -4625,7 +4629,7 @@ fn spot_shadow_config() -> ShowcaseConfig {
 #[test]
 #[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the spot shadow screenshot"]
 fn engine_spot_shadow_512_screenshot_dump() {
-    run_showcase_dump("boyko_engine spot shadow 512", SPOT_SHADOW_BMP, spot_shadow_config());
+    run_showcase_dump("boyko_engine spot shadow 512", SPOT_SHADOW_BMP, spot_shadow_config(), false);
 }
 
 /// **Shadow Phase 5 Inc-1-GPU — the HOST↔SHADER SPOT MATRIX GOLDEN (the acne oracle).** Asserts the
@@ -4801,7 +4805,7 @@ fn point_shadow_config() -> ShowcaseConfig {
 #[test]
 #[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the point shadow screenshot"]
 fn engine_point_shadow_512_screenshot_dump() {
-    run_showcase_dump("boyko_engine point shadow 512", POINT_SHADOW_BMP, point_shadow_config());
+    run_showcase_dump("boyko_engine point shadow 512", POINT_SHADOW_BMP, point_shadow_config(), false);
 }
 
 /// Shadow Phase 5 Inc-2 (POINT cube): the HOST↔SHADER POINT FACE-SELECT + LINEAR-DISTANCE GOLDEN
@@ -5079,6 +5083,273 @@ fn engine_grand_showcase_512_screenshot_dump() {
         "boyko_engine grand showcase 512",
         GRAND_SHOWCASE_BMP,
         grand_showcase_config(),
+        false,
+    );
+}
+
+// === INTERACTIVE VIEWER — fly around the SDF+mesh scene (replaces the screenshot ping-pong). ===
+
+/// The interactive fly-camera's initial pitch (radians). At `yaw == 0` the FPS basis maps
+/// `forward == [sin(yaw)·cos(pitch), sin(pitch), -cos(yaw)·cos(pitch)]`, so this pitch reproduces
+/// [`ROOM_CAM_FORWARD`] (`[0, -0.371, -0.928]`) — the same down-into-the-room framing the static
+/// showcase uses, so the viewer opens on the familiar shot before the owner flies off it.
+const VIEWER_INITIAL_PITCH: f32 = -0.3805;
+/// The fly-camera move speed (world units / second) and mouse-look sensitivity (radians / raw count).
+const VIEWER_MOVE_SPEED: f32 = 3.5;
+const VIEWER_LOOK_SENS: f32 = 0.0035;
+/// The pitch clamp (radians) — just shy of ±π/2 so the FPS basis never degenerates (looking
+/// straight up/down makes `cross(forward, world_up)` undefined).
+const VIEWER_PITCH_LIMIT: f32 = 1.5533;
+/// The viewer's fixed per-frame timestep (the loop presents uncapped; movement integrates at a
+/// fixed 1/60 s so fly speed is frame-rate independent enough for inspection).
+const VIEWER_DT: f32 = 1.0 / 60.0;
+
+#[inline]
+fn vadd(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+#[inline]
+fn vsub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+#[inline]
+fn vscale(a: [f32; 3], s: f32) -> [f32; 3] {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+#[inline]
+fn vcross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+/// Normalizes `a`, or returns `[0, 0, 0]` for a (near-)zero vector — used for the WASD move
+/// vector (no input ⇒ no motion) and for the basis vectors (a degenerate cross stays zero).
+#[inline]
+fn vnorm_or_zero(a: [f32; 3]) -> [f32; 3] {
+    let len2 = a[0] * a[0] + a[1] * a[1] + a[2] * a[2];
+    if len2 > 1e-12 {
+        vscale(a, 1.0 / len2.sqrt())
+    } else {
+        [0.0, 0.0, 0.0]
+    }
+}
+
+/// The interactive viewer scene: the [`grand_showcase_config`] room with the directional CSM turned
+/// OFF (camera-INDEPENDENT so flying around stays correct — the CSM cascade fit follows the camera
+/// frustum and would shadow-shift as the eye moves) and bright SDF light MARKERS added so the owner
+/// sees where each light sits. The point cube shadow ([`point_cube_fit`]) is camera-independent and
+/// stays on.
+fn viewer_config() -> ShowcaseConfig {
+    let mut cfg = grand_showcase_config();
+
+    // Camera-independence: drop the directional CSM (its PSSM cascades are fit to the live camera
+    // frustum, so the directional hard shadow would slide as the eye flies — wrong for free-look).
+    // The marcher's ANALYTIC SDF soft shadow toward the sun (driven by `light_dir`, NOT the CSM) is
+    // camera-independent and STAYS, so the SDF spheres still cast a correct shadow from any angle.
+    cfg.csm = None;
+
+    // LIGHT MARKERS (bright SDF spheres so each light's position reads from every side). Appended to
+    // the marched edit list ≤ MAX_SDF_EDITS (grand starts at 2 SDF edits; +2 markers = 4 total).
+    //   * the POINT light at `GRAND_POINT_POS` — a small sphere right where the cube-shadow light is.
+    //   * a "sun" marker UP toward the directional: `ROOM_CAM_TARGET + SHOWCASE_SUN_DIR · 5` (the sun
+    //     is directional/infinite, so this is a finite stand-in showing which way the sun comes from).
+    let sun_marker = vadd(ROOM_CAM_TARGET, vscale(SHOWCASE_SUN_DIR, 5.0));
+    cfg.sdf.push(SdfEdit::sphere(GRAND_POINT_POS, 0.18, sdf_op::UNION, 0.0));
+    cfg.sdf.push(SdfEdit::sphere(sun_marker, 0.18, sdf_op::UNION, 0.0));
+    debug_assert!(
+        cfg.sdf.len() <= boyko_sdf_math::MAX_SDF_EDITS,
+        "viewer SDF edits ({}) must fit MAX_SDF_EDITS ({})",
+        cfg.sdf.len(),
+        boyko_sdf_math::MAX_SDF_EDITS
+    );
+
+    cfg
+}
+
+/// The interactive fly-camera loop (the heart of `engine_interactive_viewer`).
+///
+/// Drains the window's captured raw input each frame into a [`PhysicalInput`] snapshot, integrates
+/// a free-look FPS camera (mouse-look + WASD + Space/Ctrl vertical fly), rebuilds the b5 camera UBO
+/// (the 80-byte [`CompositePushConstants`] block at offset 0) + `scene.mvp` from the live camera,
+/// and presents one frame. Runs until the window closes (`WM_QUIT`) or `Escape` is pressed.
+///
+/// All heavy resources are owned by the caller ([`run_showcase_dump`]); this borrows them. The
+/// camera UBO is written through `scene.camera_uniform` (the host-coherent mapped buffer the scene
+/// already binds), so the write lands in the SAME memory the marcher samples.
+#[allow(clippy::too_many_arguments)]
+fn run_interactive_viewer<'ctx>(
+    ctx: &VulkanContext,
+    surface: &Surface<'_>,
+    swapchain: &mut Swapchain<'ctx>,
+    renderer: &mut Renderer<'ctx>,
+    window: &mut Window,
+    scene: &mut GBufferScene<'_>,
+    frame: &mut GBufferFrame,
+) {
+    use boyko_input::{
+        translate_win32, translate_win32_raw_mouse, KeyCode, PhysicalInput, RawInputQueue,
+    };
+
+    let world_up = [0.0_f32, 1.0, 0.0];
+    let mut eye = ROOM_CAM_EYE;
+    let mut yaw: f32 = 0.0;
+    let mut pitch: f32 = VIEWER_INITIAL_PITCH;
+
+    let mut queue = RawInputQueue::with_capacity(1024);
+    let mut physical = PhysicalInput::new();
+    let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
+    let clear = [0.02_f32, 0.02, 0.03, 1.0];
+
+    // `pump_events` returns false on WM_QUIT (the window closed) — exit then.
+    while window.pump_events() {
+        physical.begin_frame();
+        queue.begin_frame();
+        // Drain this frame's captured Win32 messages, mapping each at the edge into a RawInputEvent.
+        window.drain_input(|m| match m {
+            CapturedMsg::Raw { msg, wparam, lparam } => {
+                if let Some(ev) = translate_win32(msg, wparam, lparam) {
+                    queue.push_raw(ev);
+                }
+            }
+            CapturedMsg::RawMouse { dx, dy } => {
+                queue.push_raw(translate_win32_raw_mouse(dx, dy));
+            }
+        });
+        while let Some(ev) = queue.pop() {
+            physical.apply(&ev);
+        }
+
+        // Mouse-look (raw relative delta; `mouse_delta` is f64, cast to f32 for the basis math).
+        yaw += physical.mouse_delta[0] as f32 * VIEWER_LOOK_SENS;
+        pitch -= physical.mouse_delta[1] as f32 * VIEWER_LOOK_SENS;
+        pitch = pitch.clamp(-VIEWER_PITCH_LIMIT, VIEWER_PITCH_LIMIT);
+
+        // FPS basis: forward at (yaw=0, pitch=0) is [0, 0, -1] (matches ROOM_CAM_FORWARD's -Z look).
+        let (sy, cy) = yaw.sin_cos();
+        let (sp, cp) = pitch.sin_cos();
+        let forward = vnorm_or_zero([sy * cp, sp, -cy * cp]);
+        let right = vnorm_or_zero(vcross(forward, world_up));
+        let up = vcross(right, forward);
+
+        // A `pressed(KeyCode)` helper over the snapshot's level bitset (dense-index addressed).
+        let pressed = |code: KeyCode| {
+            code.dense_index()
+                .is_some_and(|i| physical.keys_pressed.get(i))
+        };
+        if pressed(KeyCode::Escape) {
+            break;
+        }
+
+        // WASD planar move + Space/Ctrl vertical fly (Q/E also lower/raise as a fallback).
+        let mut mv = [0.0_f32; 3];
+        if pressed(KeyCode::KeyW) {
+            mv = vadd(mv, forward);
+        }
+        if pressed(KeyCode::KeyS) {
+            mv = vsub(mv, forward);
+        }
+        if pressed(KeyCode::KeyD) {
+            mv = vadd(mv, right);
+        }
+        if pressed(KeyCode::KeyA) {
+            mv = vsub(mv, right);
+        }
+        if pressed(KeyCode::Space) {
+            mv = vadd(mv, world_up);
+        }
+        if pressed(KeyCode::ControlLeft) || pressed(KeyCode::KeyQ) {
+            mv = vsub(mv, world_up);
+        }
+        if pressed(KeyCode::KeyE) {
+            mv = vadd(mv, world_up);
+        }
+        eye = vadd(eye, vscale(vnorm_or_zero(mv), VIEWER_MOVE_SPEED * VIEWER_DT));
+
+        // Rebuild the camera: the b5 UBO 80-byte block (the marcher's ray-gen) + `scene.mvp` (the
+        // raster mesh's perspective MVP). Both must agree in screen x/y (the hybrid alignment), so
+        // both come from the SAME live eye/basis/fov/aspect.
+        let cam = CompositePushConstants::perspective(
+            eye,
+            forward,
+            right,
+            up,
+            ROOM_CAM_FOV_Y,
+            COMPOSITE_W,
+            COMPOSITE_H,
+        );
+        let mut mvp = perspective_mvp_bytes(
+            eye,
+            forward,
+            right,
+            up,
+            ROOM_CAM_FOV_Y,
+            COMPOSITE_W as f32 / COMPOSITE_H as f32,
+        );
+        // The instanced-arm selector (byte 84 = use_model_matrix == 1) the grand room mesh needs.
+        mvp[84] = 1;
+        scene.mvp = mvp;
+
+        // Upload the 80-byte camera block to the SAME host-coherent buffer the scene binds at b5.
+        if let Some(mapped) = RhiDevice::buffer_mapped_ptr(ctx, scene.camera_uniform) {
+            let bytes = cam.as_bytes();
+            // SAFETY: `mapped` points to the camera UBO's host-coherent mapped range (≥ 224 B); the
+            // 80-byte camera block is written at offset 0 (the M4 tail stays as seeded — brick OFF).
+            // The previous frame's GPU read completed before this write: `render_gbuffer_frame` waits
+            // this slot's in-flight fence at its start, but to be strict the write precedes the
+            // submit below within one serial loop iteration, and the buffer is per-`run_showcase_dump`
+            // (no other writer). `bytes.len()` (80) ≤ the mapped size.
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+            }
+        }
+
+        // Present one frame. `Ok(false)` = the swapchain went OUT_OF_DATE and was recreated inside
+        // the call — skip this frame and try again next loop. `Err` = a fatal device error: stop.
+        // SAFETY: `ctx`/`surface`/`swapchain`/`renderer` share one device; every `scene` resource is
+        // live (owned by the caller); `present_extent` + `scene.dispatch_group_count_x` + the camera
+        // UBO `count` all cover the composite extent; no readback requested (we present to the window).
+        let r = unsafe {
+            renderer.render_gbuffer_frame(
+                ctx,
+                surface,
+                swapchain,
+                scene,
+                frame,
+                window.width(),
+                window.height(),
+                clear,
+                present_extent,
+                None,
+            )
+        };
+        match r {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("interactive viewer: render error, exiting ({e:?})");
+                break;
+            }
+        }
+        window.refresh_size();
+    }
+}
+
+/// **The INTERACTIVE engine viewer.** Opens a window and lets the owner FLY around the live
+/// HYBRID SDF+mesh room (the [`grand_showcase_config`] scene, CSM off + light markers added) with
+/// mouse-look + WASD + Space/Ctrl(Q/E) vertical fly, ESC to exit — inspecting objects, lighting,
+/// and the SDF light markers from every side. Replaces the offscreen-screenshot ping-pong.
+///
+/// `#[ignore]`: opens a BLOCKING window and needs a real RTX windowed device. Run with
+/// `BOYKO_DISABLE_VALIDATION=1`; the orchestrator launches it on the GPU.
+#[test]
+#[ignore = "interactive: opens a window; fly with WASD + mouse-look, ESC to exit"]
+fn engine_interactive_viewer() {
+    run_showcase_dump(
+        "boyko_engine interactive viewer",
+        GRAND_SHOWCASE_BMP,
+        viewer_config(),
+        true,
     );
 }
 
@@ -5173,7 +5444,7 @@ fn csm_cascades_config() -> ShowcaseConfig {
 #[test]
 #[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the CSM cascades screenshot"]
 fn engine_csm_cascades_512_screenshot_dump() {
-    run_showcase_dump("boyko_engine CSM cascades 512", CSM_CASCADES_BMP, csm_cascades_config());
+    run_showcase_dump("boyko_engine CSM cascades 512", CSM_CASCADES_BMP, csm_cascades_config(), false);
 }
 
 /// **CSM Increment 3 (Rung B) — the cascade SELECT + BLEND host golden.** Pins the resolve's
@@ -5376,6 +5647,7 @@ fn engine_multimesh_persp_screenshot_dump() {
         "boyko_engine multi-mesh perspective 512",
         MULTIMESH_PERSP_BMP,
         multimesh_persp_config(),
+        false,
     );
 }
 
@@ -5455,6 +5727,7 @@ fn engine_nonuniform_normals_screenshot_dump() {
         "boyko_engine non-uniform normals 512",
         NONUNIFORM_NORMALS_BMP,
         nonuniform_normals_config(),
+        false,
     );
 }
 
@@ -5614,6 +5887,7 @@ fn engine_capsule_character_512_screenshot_dump() {
         "boyko_engine capsule character 512",
         CAPSULE_CHARACTER_BMP,
         capsule_character_config(false),
+        false,
     );
 }
 
@@ -5637,6 +5911,7 @@ fn engine_contact_shadow_off_512_screenshot_dump() {
         "boyko_engine contact shadow OFF 512",
         CONTACT_SHADOW_OFF_BMP,
         capsule_character_config(false),
+        false,
     );
 }
 
@@ -5647,6 +5922,7 @@ fn engine_contact_shadow_on_512_screenshot_dump() {
         "boyko_engine contact shadow ON 512",
         CONTACT_SHADOW_ON_BMP,
         capsule_character_config(true),
+        false,
     );
 }
 
@@ -5728,14 +6004,14 @@ fn mdf_shadow_config() -> ShowcaseConfig {
 #[test]
 #[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the MDF-shadow screenshot"]
 fn engine_mdf_shadow_512_screenshot_dump() {
-    run_showcase_dump("boyko_engine MDF shadow 512", MDF_SHADOW_BMP, mdf_shadow_config());
+    run_showcase_dump("boyko_engine MDF shadow 512", MDF_SHADOW_BMP, mdf_shadow_config(), false);
 }
 
 /// The shared 512×512-native multi-light SDF-shadow + SSAO showcase dump body. `window_title` is
 /// the window caption; `bmp_path` is the TRUE 512×512 24-bit BMP destination (no upscale); `cfg`
 /// supplies the variable scene (SDF edits, camera, light table, raster mesh + MVP). SSAO is ON (the
 /// `cfg` builder arms `ssao_mode == 1`; `scene.ssao = Some(..)` records the pass that writes it).
-fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
+fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, interactive: bool) {
     let mut window = match Window::open(window_title, WIDTH, HEIGHT) {
         Ok(w) => w,
         Err(e) => {
@@ -6425,7 +6701,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         .unwrap_or_default();
 
     let mvp = cfg.mvp;
-    let scene = GBufferScene {
+    let mut scene = GBufferScene {
         raster_pipeline: &raster_pipeline,
         vertex_buffer: &vertex_buffer,
         vertex_count: vertices.len() as u32,
@@ -6558,6 +6834,74 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
     .expect("host-visible readback staging buffer");
     let alloc_extent = swapchain.extent();
     let mut frame = GBufferFrame::new();
+
+    // INTERACTIVE BRANCH (engine_interactive_viewer): instead of the one-shot readback dump, fly
+    // around the live scene with WASD + mouse-look. The heavy setup above is SHARED verbatim; this
+    // branch only rebuilds the camera (the b5 UBO @0 + `scene.mvp`) per frame and presents to the
+    // window in a loop, then falls through to the SAME teardown below. `present_extent`/`staging`
+    // are created right after this block, so the interactive loop builds its own present extent.
+    if interactive {
+        run_interactive_viewer(
+            &ctx,
+            &surface,
+            &mut swapchain,
+            &mut renderer,
+            &mut window,
+            &mut scene,
+            &mut frame,
+        );
+        // Skip the dump path entirely; fall through to teardown. `scene` borrows `mesh_draws` + the
+        // instanced GPU buffers; its last use is the `run_interactive_viewer` call above, so NLL ends
+        // those borrows here and the teardown is free to move/destroy them. (`GBufferScene` is not
+        // `Drop`, so an explicit `drop(scene)` would only flag clippy's `drop_non_drop`.)
+        drop(renderer);
+        // SAFETY: identical contract to the dump path's teardown — the renderer was dropped above
+        // (its `Drop` waits the device idle), so no submission references these resources; `ctx` is
+        // still alive; each is destroyed exactly once, in reverse dependency order.
+        unsafe {
+            frame.destroy(&ctx);
+            csm.destroy(&ctx);
+            RhiDevice::destroy_graphics_pipeline(device, present_pipeline);
+            RhiDevice::destroy_bind_group_layout(device, present_layout);
+            RhiDevice::destroy_compute_pipeline(device, ssao_pipeline);
+            RhiDevice::destroy_bind_group_layout(device, ssao_layout);
+            RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
+            RhiDevice::destroy_bind_group_layout(device, resolve_layout);
+            RhiDevice::destroy_compute_pipeline(device, marcher);
+            RhiDevice::destroy_bind_group_layout(device, vocab_layout);
+            RhiDevice::destroy_graphics_pipeline(device, raster_pipeline);
+            drop(mesh_draws);
+            if let Some(g) = instanced_gpu {
+                RhiDevice::destroy_bind_group(device, g.instance_bind_group);
+                RhiDevice::destroy_buffer(device, g.instance_ssbo);
+                for b in g.batches {
+                    RhiDevice::destroy_buffer(device, b.index_buffer);
+                    RhiDevice::destroy_buffer(device, b.vertex_buffer);
+                }
+            }
+            RhiDevice::destroy_bind_group(device, instance_bind_group);
+            RhiDevice::destroy_buffer(device, instance_buffer);
+            RhiDevice::destroy_bind_group_layout(device, instance_layout);
+            RhiDevice::destroy_sampler(device, present_sampler);
+            RhiDevice::destroy_sampler(device, depth_sampler);
+            RhiDevice::destroy_buffer(device, vertex_buffer);
+            RhiDevice::destroy_buffer(device, tiles_buffer);
+            if let Some(t) = mesh_sdf_texture {
+                t.destroy(&ctx);
+            }
+            clipmap.destroy(&ctx);
+            RhiDevice::destroy_buffer(device, light_staging);
+            RhiDevice::destroy_buffer(device, light_table);
+            RhiDevice::destroy_buffer(device, material_table);
+            RhiDevice::destroy_buffer(device, camera_uniform);
+            RhiDevice::destroy_buffer(device, edit_list);
+        }
+        drop(swapchain);
+        drop(surface);
+        drop(ctx);
+        drop(window);
+        return;
+    }
 
     // Render ONE readback frame, then drain so the staging buffer is host-coherent (the same
     // FRAMES_IN_FLIGHT==2 / 3-drain discipline the existing windowed dumps use). The readback is

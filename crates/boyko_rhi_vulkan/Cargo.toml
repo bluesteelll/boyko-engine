@@ -49,3 +49,9 @@ proptest = "1"
 # the committed `shaders/sdf_field.hlsli` still matches them (no by-hand drift).
 # Zero third-party deps; `emit` is dev-only so the shipped backend never links it.
 boyko_shaderdsl = { path = "../boyko_shaderdsl", features = ["emit"] }
+# Test-only. The source-agnostic input layer drives the INTERACTIVE viewer test
+# (`engine_interactive_viewer`): the window crate captures raw Win32 `(msg, wparam,
+# lparam)` triples + raw-mouse deltas, and this crate's `translate_win32` /
+# `translate_win32_raw_mouse` edge maps them into `RawInputEvent`s a `PhysicalInput`
+# snapshot folds for WASD + mouse-look. DEV-only — the shipped backend never links it.
+boyko-input = { path = "../boyko_input" }
