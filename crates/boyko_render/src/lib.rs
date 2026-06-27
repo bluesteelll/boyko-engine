@@ -158,9 +158,10 @@ pub use mesh_registry::{
     MeshGpu, MeshRegistry, U16_INDEX_VERTEX_LIMIT, VERTEX_STRIDE as MESH_VERTEX_STRIDE, Vertex,
 };
 pub use shadow_atlas::{
-    ATLAS_SLOT_MASK, ATLAS_SLOT_SHIFT, CASTS_SHADOW_BIT, FaceTransform, M_SLOTS,
-    ResolvedShadowAtlas, SHADOW_DIM, SLOT_NONE, ShadowConfig, SpotShadowInput, light_atlas_slot,
-    pack_atlas_slot, resolve_shadow_atlas, resolve_shadow_atlas_spots, spot_priority,
+    ATLAS_SLOT_MASK, ATLAS_SLOT_SHIFT, CASTS_SHADOW_BIT, FaceTransform, M_SLOTS, POINT_FACE_COUNT,
+    PointShadowInput, ResolvedShadowAtlas, SHADOW_DIM, SLOT_NONE, ShadowConfig, SpotShadowInput,
+    light_atlas_slot, pack_atlas_slot, resolve_shadow_atlas, resolve_shadow_atlas_inputs,
+    resolve_shadow_atlas_spots, spot_priority,
 };
 pub use shadow_marker::CastsPunctualShadow;
 pub use shadow_plugin::ShadowAtlasPlugin;

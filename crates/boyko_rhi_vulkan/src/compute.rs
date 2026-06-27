@@ -281,8 +281,10 @@ static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<155040> = SpirvBlob(*include_bytes!(
 /// atlas map/sampler/UBO are never sampled → byte-identical, the 0%-gate) a SPOT light with a real
 /// `light_atlas_slot` multiplies its contribution by `spot_atlas_visibility(slot, P, n)` (bindings
 /// 14 combined map+sampler + 15 the `ResolvedShadowAtlas` UBO — the resolve set hits 16/16); 46008
-/// → 48472 bytes.
-static DEFERRED_PBR_SPV: SpirvBlob<48472> = SpirvBlob(*include_bytes!(concat!(
+/// → 48472 bytes. Shadow Phase 5 Inc-2 (POINT cube): a POINT light with a real slot BASE instead
+/// reads `punctual_atlas_visibility(base, P, n)` (major-axis cube face-select + LINEAR-distance
+/// compare over the six contiguous layers `base..base+6`); 48472 → 50976 bytes.
+static DEFERRED_PBR_SPV: SpirvBlob<50976> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/deferred_pbr.comp.spv"
 )));
@@ -363,6 +365,29 @@ static CSM_DEPTH_VS_SPV: SpirvBlob<2256> = SpirvBlob(*include_bytes!(concat!(
 static CSM_DEPTH_FS_SPV: SpirvBlob<156> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/csm_depth.fs.spv"
+)));
+
+/// The committed Shadow Phase 5 Increment-2 (POINT cube) punctual DEPTH-PASS vertex SPIR-V
+/// (`shaders/punctual_depth.vs.hlsl`). A GRAPHICS (`vs_6_0`) stage: reads the SAME set-0
+/// `InstanceModelCol` SSBO + the 88-byte VERTEX push as [`csm_depth_vs_spirv`], projects each
+/// caster instance into one cube FACE's light-clip space (push `@0`), AND forwards the WORLD
+/// position to the fragment so the matching FS can write the linear radial distance. Paired with
+/// [`punctual_depth_fs_spirv`] in a depth-WRITE (no early-Z) graphics pipeline.
+static PUNCTUAL_DEPTH_VS_SPV: SpirvBlob<2376> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/punctual_depth.vs.spv"
+)));
+
+/// The committed Shadow Phase 5 Increment-2 (POINT cube) punctual DEPTH-PASS fragment SPIR-V
+/// (`shaders/punctual_depth.fs.hlsl`). A `ps_6_0` stage that writes `SV_Depth =
+/// saturate(length(world - light_pos) * inv_range)` — the LINEAR radial distance from the point
+/// light (face-independent, so all six cube faces share ONE comparison scale; the resolve compares
+/// the receiver's own `length(P - light_pos) * inv_range` against it). `light_pos`/`inv_range` ride
+/// in the DEAD `cam_eye@64` push lane (the pipeline push range covers `VERTEX | FRAGMENT`). Paired
+/// with [`punctual_depth_vs_spirv`].
+static PUNCTUAL_DEPTH_FS_SPV: SpirvBlob<1084> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/punctual_depth.fs.spv"
 )));
 
 /// A 4-byte-aligned wrapper around a committed SPIR-V byte blob so its address is
@@ -558,6 +583,32 @@ pub fn csm_depth_vs_spirv() -> &'static [u32] {
 #[inline]
 pub fn csm_depth_fs_spirv() -> &'static [u32] {
     CSM_DEPTH_FS_SPV.as_words()
+}
+
+/// The committed Shadow Phase 5 Increment-2 (POINT cube) punctual DEPTH-PASS vertex SPIR-V as a
+/// `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// Bound into a depth-WRITE graphics pipeline (paired with [`punctual_depth_fs_spirv`]); reads the
+/// foundation's set-0 `InstanceModelCol` SSBO + the 88-byte VERTEX push, projecting each caster
+/// instance into one cube FACE's light-clip space + forwarding the world position to the FS. The
+/// recorder pushes the face `view_proj` (`FaceTransform.view_proj`, column-major) at offset 0 +
+/// `cam_eye.xyz = light_pos` / `cam_eye.w = inv_range` (@64) + `use_model_matrix == 1`.
+#[inline]
+pub fn punctual_depth_vs_spirv() -> &'static [u32] {
+    PUNCTUAL_DEPTH_VS_SPV.as_words()
+}
+
+/// The committed Shadow Phase 5 Increment-2 (POINT cube) punctual DEPTH-PASS fragment SPIR-V as a
+/// `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// Writes the LINEAR radial distance (`SV_Depth`); paired with [`punctual_depth_vs_spirv`] in the
+/// point cube depth pipeline. Reads `light_pos`/`inv_range` from the `cam_eye@64` push lane, so the
+/// pipeline's push range MUST cover the `FRAGMENT` stage.
+#[inline]
+pub fn punctual_depth_fs_spirv() -> &'static [u32] {
+    PUNCTUAL_DEPTH_FS_SPV.as_words()
 }
 
 /// The committed Render P7 SSAO (HBAO-lite) SPIR-V as a `u32` word stream, ready for

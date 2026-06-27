@@ -67,8 +67,9 @@ use boyko_rhi::{
 use boyko_rhi_vulkan::compute::{
     B5_CAMERA_UBO_BYTES_M4, B5_CAMERA_UBO_BYTES_MESH_SDF, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode,
     CompositePushConstants, csm_depth_fs_spirv, csm_depth_vs_spirv,
+    punctual_depth_fs_spirv, punctual_depth_vs_spirv,
     EDITLIST_BUFFER_WORDS, GOLDEN_LIGHT_HEADER_BASE_WORDS, GOLDEN_LIGHT_KIND_DIRECTIONAL,
-    GOLDEN_LIGHT_KIND_SPOT,
+    GOLDEN_LIGHT_KIND_POINT, GOLDEN_LIGHT_KIND_SPOT,
     GoldenLight, GoldenLightHeader,
     LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET, MESH_SDF_PARAMS_OFFSET, MeshSdfParams,
     MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_TRACE_T_MAX,
@@ -297,6 +298,13 @@ struct CsmSceneResources {
     atlas: VulkanTexture,
     atlas_sampler: VulkanSampler,
     atlas_ubo: BoundBuffer,
+    // Shadow Phase 5 Inc-2 (POINT cube): the POINT depth-WRITE pipeline (`punctual_depth.vs/fs` —
+    // the FS writes the linear radial distance `SV_Depth`) + its two shader modules. A SEPARATE
+    // pipeline from `depth_pipeline` (the SPOT NDC-z path); the punctual depth pass binds it for
+    // POINT-face layers. Bound-but-unbound on the 2 golden presents (`atlas_punctual` is `None`).
+    point_depth_pipeline: VulkanGraphicsPipeline,
+    point_depth_vs: boyko_rhi_vulkan::rhi_impl::VulkanShaderModule,
+    point_depth_fs: boyko_rhi_vulkan::rhi_impl::VulkanShaderModule,
 }
 
 impl CsmSceneResources {
@@ -410,6 +418,39 @@ impl CsmSceneResources {
             },
         )
         .expect("shadow-atlas UBO (ResolvedShadowAtlas mirror)");
+        // Shadow Phase 5 Inc-2 (POINT cube): the POINT depth-WRITE pipeline (`punctual_depth.vs/fs`).
+        // Same EMPTY color_formats / D32 depth / FRONT cull / depth-bias / set-0 instance layout /
+        // 88-byte push as the SPOT pipeline; the ONLY difference is the shader pair — the POINT FS
+        // writes `SV_Depth = saturate(length(world - light_pos) * inv_range)` (the linear radial
+        // distance). Because the FS writes depth it has no early-Z, but the pipeline state is
+        // otherwise identical, so it reuses the SAME `attributes` + bias values.
+        let point_depth_vs = RhiDevice::create_shader_module(device, punctual_depth_vs_spirv())
+            .expect("punctual point depth VS module");
+        let point_depth_fs = RhiDevice::create_shader_module(device, punctual_depth_fs_spirv())
+            .expect("punctual point depth FS module");
+        let point_depth_pipeline = RhiDevice::create_graphics_pipeline(
+            device,
+            &GraphicsPipelineDesc {
+                vertex_module: &point_depth_vs,
+                vertex_entry: c"main",
+                fragment_module: &point_depth_fs,
+                fragment_entry: c"main",
+                color_formats: &[],
+                depth_format: Some(Format::D32Sfloat),
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: Some(VertexBufferLayout { stride: 40, attributes: &attributes }),
+                push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
+                bind_group_layout: Some(instance_layout),
+                blend: None,
+                cull_mode: CullMode::Front,
+                depth_bias: Some(DepthBias {
+                    constant_factor: 0.0015,
+                    slope_factor: 1.5,
+                    clamp: 0.0,
+                }),
+            },
+        )
+        .expect("punctual point depth-write graphics pipeline");
         Self {
             cascade,
             sampler,
@@ -420,6 +461,9 @@ impl CsmSceneResources {
             atlas,
             atlas_sampler,
             atlas_ubo,
+            point_depth_pipeline,
+            point_depth_vs,
+            point_depth_fs,
         }
     }
 
@@ -496,6 +540,9 @@ impl CsmSceneResources {
     unsafe fn destroy(self, device: &VulkanContext) {
         // SAFETY: per the contract `device` is live and nothing references these resources.
         unsafe {
+            RhiDevice::destroy_graphics_pipeline(device, self.point_depth_pipeline);
+            RhiDevice::destroy_shader_module(device, self.point_depth_fs);
+            RhiDevice::destroy_shader_module(device, self.point_depth_vs);
             RhiDevice::destroy_buffer(device, self.atlas_ubo);
             RhiDevice::destroy_sampler(device, self.atlas_sampler);
             RhiDevice::destroy_texture(device, self.atlas);
@@ -3321,6 +3368,11 @@ struct SpotFace {
     light_pos: [f32; 3],
     /// Reciprocal of the light range (Inc-2 POINT; unused by SPOT).
     inv_range: f32,
+    /// Shadow Phase 5 Inc-2: the per-layer TYPE — `true` = a POINT cube face (the depth pass binds
+    /// the `point_depth_pipeline` + stamps the `cam_eye@64` `light_pos`/`inv_range` lane), `false` =
+    /// a SPOT face (the NDC-z `depth_pipeline`). A SPOT fit is all-`false`; a POINT fit is six
+    /// contiguous `true` faces.
+    is_point: bool,
 }
 
 /// Shadow Phase 5 Inc-1-GPU — the atlas FIT a [`ShowcaseConfig`] carries: up to
@@ -3994,18 +4046,68 @@ fn spot_demo_view_proj(eye: [f32; 3], axis: [f32; 3], outer_rad: f32, range: f32
     out
 }
 
+/// Shadow Phase 5 Inc-2 (POINT cube): builds ONE cube FACE's COLUMN-MAJOR world→light-clip
+/// `view_proj` for a point at `eye` looking down `dir`, full FOV 90° (`π/2`), near
+/// [`SPOT_DEMO_NEAR`], far `range`. Mirrors `boyko_render::shadow_atlas::point_faces`'s per-face
+/// math (a right-handed look-at + a Vulkan-[0,1] perspective with the engine Y-flip) — the SAME
+/// convention `spot_demo_view_proj` uses, just at a 90° FOV down an explicit axis. The depth-pass
+/// raster footprint comes from this matrix; the STORED depth is the FS's linear radial distance.
+fn point_face_view_proj(eye: [f32; 3], dir: [f32; 3], range: f32) -> [f32; 16] {
+    // The point cube uses a 90° full FOV per face (outer half-angle = 45°). Delegate to the SAME
+    // perspective+look-at builder the spot path uses, so the host fit and the resolve agree.
+    spot_demo_view_proj(eye, dir, core::f32::consts::FRAC_PI_4, range)
+}
+
 /// Shadow Phase 5 Inc-1-GPU: a one-spot [`SpotDemoFit`] (slot 0) from a fitted spot `view_proj` +
 /// the spot's world position + range. The trailing `[1..SPOT_ATLAS_SLOTS)` faces stay zero
 /// (bound-but-unread).
 fn spot_single_face(view_proj: [f32; 16], light_pos: [f32; 3], range: f32) -> SpotDemoFit {
-    let mut faces = [SpotFace { view_proj: [0.0; 16], light_pos: [0.0; 3], inv_range: 0.0 };
-        SPOT_ATLAS_SLOTS as usize];
+    let mut faces = [SPOT_FACE_ZERO; SPOT_ATLAS_SLOTS as usize];
     faces[0] = SpotFace {
         view_proj,
         light_pos,
         inv_range: if range > 0.0 { range.recip() } else { 0.0 },
+        is_point: false,
     };
     SpotDemoFit { faces, active_layers: 1 }
+}
+
+/// Shadow Phase 5 Inc-2 (POINT cube): a zeroed [`SpotFace`] for the unused trailing atlas slots
+/// (bound-but-unread; `active_layers` bounds the valid prefix).
+const SPOT_FACE_ZERO: SpotFace = SpotFace {
+    view_proj: [0.0; 16],
+    light_pos: [0.0; 3],
+    inv_range: 0.0,
+    is_point: false,
+};
+
+/// Shadow Phase 5 Inc-2 (POINT cube): builds a six-face POINT cube [`SpotDemoFit`] (slot base 0)
+/// from the light world position + range. Mirrors `boyko_render::shadow_atlas::point_faces`'s
+/// `view_proj` math (the `[+X, -X, +Y, -Y, +Z, -Z]` 90°-FOV faces) but in plain `[f32; 16]` arrays.
+/// The depth pass renders the casters into layers `0..6` with each face's `view_proj` + the shared
+/// `light_pos`/`inv_range` (stamped into the FS's `cam_eye@64` lane); the resolve major-axis-selects
+/// among the six. The trailing `[6..SPOT_ATLAS_SLOTS)` faces stay zero (bound-but-unread).
+fn point_cube_fit(light_pos: [f32; 3], range: f32) -> SpotDemoFit {
+    let mut faces = [SPOT_FACE_ZERO; SPOT_ATLAS_SLOTS as usize];
+    let inv_range = if range > 0.0 { range.recip() } else { 0.0 };
+    // The six cube-face look directions, in the host fit order `[+X, -X, +Y, -Y, +Z, -Z]`.
+    let dirs: [[f32; 3]; 6] = [
+        [1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, -1.0],
+    ];
+    for (i, dir) in dirs.iter().enumerate() {
+        faces[i] = SpotFace {
+            view_proj: point_face_view_proj(light_pos, *dir, range),
+            light_pos,
+            inv_range,
+            is_point: true,
+        };
+    }
+    SpotDemoFit { faces, active_layers: 6 }
 }
 
 /// Shadow Phase 5 Inc-1-GPU: the HOST↔SHADER SPOT MATRIX GOLDEN (the acne oracle). Given a spot
@@ -4577,6 +4679,225 @@ fn spot_matrix_golden_host_projection_agrees() {
     assert_eq!(spot.atlas_slot(), 0, "with_atlas_slot(0) must round-trip through atlas_slot()");
     assert_eq!(spot.kind(), GOLDEN_LIGHT_KIND_SPOT, "the kind tag must survive the slot pack");
     assert!(spot.casts_sdf_shadow(), "a real slot must set the casts-shadow bit");
+}
+
+// === Shadow Phase 5 Increment 2 (POINT cube) — the OMNI point shadow demo + the host golden. =====
+
+/// Shadow Phase 5 Inc-2 (POINT cube): the BMP dump path for the omni point shadow screenshot.
+const POINT_SHADOW_BMP: &str = "D:\\tmp\\engine_point_shadow.bmp";
+
+/// Shadow Phase 5 Inc-2 (POINT cube): the point light world position — the SCENE CENTER, slightly
+/// above the floor, so its omni shadow of the central caster falls on the surrounding walls (every
+/// cube face exercised).
+const POINT_DEMO_POS: [f32; 3] = [0.0, 1.4, -1.0];
+/// Shadow Phase 5 Inc-2: the point's range (the cube far plane / cull radius) — wide enough to
+/// cover the floor + the four walls around the caster.
+const POINT_DEMO_RANGE: f32 = 9.0;
+
+/// Shadow Phase 5 Inc-2 (POINT cube): the OMNI point-shadow showcase. ONE point light (its
+/// `dir_kind.w` slot packed to the cube BASE 0 via `with_atlas_slot`) + a dim sky for fill, an
+/// ASYMMETRIC raster slab caster at the scene center RINGED by four walls + a floor. The point
+/// casts the slab's silhouette onto MULTIPLE walls (all six cube faces are produced; the visible
+/// walls show the omni shadow). NO SDF.
+fn point_shadow_config() -> ShowcaseConfig {
+    // The table LAYOUT is [L0a (sky)..., L0b (point)...]: sky at element 0 (L0a), the point at
+    // element 1 (the L0b clustered punctual). The point's `dir_kind.w` carries the cube slot BASE 0
+    // (`with_atlas_slot(0)`) so the resolve reads `light_atlas_slot(L.kind) == 0` then major-axis-
+    // selects `gFaces[0..6]`.
+    let header = GoldenLightHeader::new(1, 1, 1.0).with_ssao_mode(0);
+    let lights = vec![
+        // L0a: a dim sky for ambient fill.
+        GoldenLight::sky([0.05, 0.05, 0.07], [0.04, 0.04, 0.05]),
+        // L0b: the omni point at the scene center, packing cube slot base 0.
+        GoldenLight::point(POINT_DEMO_POS, [1.0, 0.95, 0.88], 320.0, POINT_DEMO_RANGE)
+            .with_atlas_slot(0),
+    ];
+
+    // NO SDF: a single degenerate far edit keeps the edit-list valid; the raster floor/walls/caster
+    // own every lit pixel.
+    let sdf = vec![SdfEdit::sphere([0.0, -1000.0, 0.0], 0.01, sdf_op::UNION, 0.0)];
+
+    // The CASTER: an ASYMMETRIC slab (distinct X/Y/Z extents) standing at the scene center, just
+    // BELOW the point light, with a small marker cube on top so the cast shadow's orientation reads.
+    // ONE instanced mesh entry, two affines (the slab + the marker).
+    let (slab_v, slab_i) = mesh_box_model([0.30, 0.55, 0.18], [0.85, 0.40, 0.28, 1.0]);
+    let caster_affines = vec![
+        instance_affine(0.5, 1.0, [0.0, 0.55, -1.0]),  // the slab, yawed 0.5 rad
+        instance_affine(0.5, 0.25, [0.0, 1.15, -1.0]), // a small marker cube on top
+    ];
+
+    // The raster FLOOR: a wide flat box (a thin slab) at y≈0 spanning the room.
+    let (floor_v, floor_i) = mesh_box_model([4.0, 0.05, 4.0], ROOM_FLOOR_COLOR);
+    let floor_affine = instance_affine(0.0, 1.0, [0.0, -0.05, -1.0]);
+
+    // FOUR WALLS ringing the caster (thin vertical slabs) at ±X and ±Z around the scene center, so
+    // the point's omni shadow lands on whichever walls the marcher's camera can see. Each is one
+    // instanced entry (its own non-uniform affine via `mesh_box_model`'s pre-scaled half-extents).
+    let (wall_back_v, wall_back_i) = mesh_box_model([3.2, 2.2, 0.06], ROOM_WALL_COLOR);
+    let wall_back_affine = instance_affine(0.0, 1.0, [0.0, 2.2, -4.0]); // far -Z wall
+    let (wall_left_v, wall_left_i) = mesh_box_model([0.06, 2.2, 3.2], ROOM_WALL_COLOR);
+    let wall_left_affine = instance_affine(0.0, 1.0, [-3.4, 2.2, -1.0]); // -X wall
+    let (wall_right_v, wall_right_i) = mesh_box_model([0.06, 2.2, 3.2], ROOM_WALL_COLOR);
+    let wall_right_affine = instance_affine(0.0, 1.0, [3.4, 2.2, -1.0]); // +X wall
+
+    ShowcaseConfig {
+        sdf,
+        camera: room_camera(),
+        light_header: header,
+        light_elems: lights,
+        vertices: showcase_quad_vertices(),
+        mvp: instanced_room_mvp_bytes(),
+        ssao_quality: None,
+        mesh_sdf: None,
+        instanced: Some(InstancedMesh {
+            meshes: vec![
+                InstancedMeshEntry { vertices: floor_v, indices: floor_i, affines: vec![floor_affine] },
+                InstancedMeshEntry { vertices: wall_back_v, indices: wall_back_i, affines: vec![wall_back_affine] },
+                InstancedMeshEntry { vertices: wall_left_v, indices: wall_left_i, affines: vec![wall_left_affine] },
+                InstancedMeshEntry { vertices: wall_right_v, indices: wall_right_i, affines: vec![wall_right_affine] },
+                InstancedMeshEntry { vertices: slab_v, indices: slab_i, affines: caster_affines },
+            ],
+        }),
+        // CSM OFF (this is the POINT demo).
+        csm: None,
+        // POINT ON (Inc 2): a six-face cube fit to the point (slot base 0), the standard
+        // `[+X, -X, +Y, -Y, +Z, -Z]` 90°-FOV faces. The resolve major-axis-selects + does the
+        // linear-distance compare; the depth pass renders each face into layers 0..6.
+        spot_atlas: Some(point_cube_fit(POINT_DEMO_POS, POINT_DEMO_RANGE)),
+    }
+}
+
+/// **Shadow Phase 5 Inc-2 (POINT cube) — the omni point hardware shadow screenshot.** Drives the
+/// six-face POINT cube DEPTH pass (the asymmetric slab rendered from the point POV into atlas layers
+/// 0..6 with the linear-distance FS) + the resolve per-point major-axis face-select + distance
+/// compare, dumping a TRUE 512×512 BMP to [`POINT_SHADOW_BMP`] for the owner's RTX visual sign-off
+/// (the deliverable: the slab's OMNI shadow on the surrounding walls).
+///
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
+/// orchestrator runs it on the GPU to dump the screenshot.
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the point shadow screenshot"]
+fn engine_point_shadow_512_screenshot_dump() {
+    run_showcase_dump("boyko_engine point shadow 512", POINT_SHADOW_BMP, point_shadow_config());
+}
+
+/// Shadow Phase 5 Inc-2 (POINT cube): the HOST↔SHADER POINT FACE-SELECT + LINEAR-DISTANCE GOLDEN
+/// (the cube oracle, the mirror of the resolve's `punctual_atlas_visibility`). Given the light
+/// position + range + a world receiver point `P`, this picks the SAME cube face the resolve's
+/// major-axis select picks and computes the SAME normalized radial distance `ref`, so the depth-FS
+/// write and the resolve lookup (which share `light_pos`/`inv_range`) cannot drift. Returns
+/// `(face, uv_x, uv_y, ref)`: the selected cube face index `[0,6)` (host order `[+X,-X,+Y,-Y,+Z,-Z]`),
+/// the resolve's per-face UV (`uvc = (right.d, -(up.d))` + the engine Y-flip), and the receiver's
+/// normalized radial distance — so a golden can also assert the UV equals the depth pass's
+/// `view_proj`-rasterized UV (the no-drift pin).
+fn point_host_project(light_pos: [f32; 3], range: f32, p: [f32; 3]) -> (u32, f32, f32, f32) {
+    let inv_range = if range > 0.0 { range.recip() } else { 0.0 };
+    let dir = [p[0] - light_pos[0], p[1] - light_pos[1], p[2] - light_pos[2]];
+    let a = [dir[0].abs(), dir[1].abs(), dir[2].abs()];
+    // Major-axis face select + the per-face (sc, tc) minor coords — IDENTICAL to the resolve's pick.
+    let (face, ma, uvc): (u32, f32, [f32; 2]) = if a[0] >= a[1] && a[0] >= a[2] {
+        if dir[0] >= 0.0 {
+            (0, a[0], [-dir[2], -dir[1]])
+        } else {
+            (1, a[0], [dir[2], -dir[1]])
+        }
+    } else if a[1] >= a[0] && a[1] >= a[2] {
+        if dir[1] >= 0.0 {
+            (2, a[1], [-dir[0], -dir[2]])
+        } else {
+            (3, a[1], [dir[0], -dir[2]])
+        }
+    } else if dir[2] >= 0.0 {
+        (4, a[2], [dir[0], -dir[1]])
+    } else {
+        (5, a[2], [-dir[0], -dir[1]])
+    };
+    let inv_ma = if ma > 1e-8 { 1.0 / ma } else { 0.0 };
+    let uv_x = uvc[0] * inv_ma * 0.5 + 0.5;
+    let uv_y = 1.0 - (uvc[1] * inv_ma * 0.5 + 0.5);
+    let dist = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+    let r = (dist * inv_range).clamp(0.0, 1.0);
+    (face, uv_x, uv_y, r)
+}
+
+/// **Shadow Phase 5 Inc-2 (POINT cube) — the HOST↔SHADER POINT MATRIX/FACE GOLDEN.** Asserts the
+/// host face-select + linear-distance mirror ([`point_host_project`]) picks the EXPECTED cube face
+/// for a known (light, receiver) pair AND that the per-face `view_proj` (`point_face_view_proj`,
+/// the bytes the depth pass pushes + the resolve UBO carries) projects the matching axis sample
+/// in-bounds — so the depth-pass write and the resolve lookup cannot drift.
+#[test]
+fn point_matrix_golden_face_select_and_distance_agree() {
+    let lp = POINT_DEMO_POS;
+    let range = POINT_DEMO_RANGE;
+
+    // A receiver straight UP from the light maps to the +Y face (2); its normalized distance is
+    // `dist / range`, in [0,1] for a receiver inside the range.
+    let up = [lp[0], lp[1] + 2.0, lp[2]];
+    let (face_up, _, _, ref_up) = point_host_project(lp, range, up);
+    assert_eq!(face_up, 2, "a receiver straight up must select the +Y cube face");
+    assert!((ref_up - 2.0 / range).abs() < 1e-5, "the +Y ref must be dist/range");
+    assert!((0.0..=1.0).contains(&ref_up), "the ref must be in the [0,1] depth range");
+
+    // A receiver along -X selects the -X face (1); along +Z selects the +Z face (4).
+    let (face_xn, _, _, _) = point_host_project(lp, range, [lp[0] - 3.0, lp[1] + 0.1, lp[2]]);
+    assert_eq!(face_xn, 1, "a receiver toward -X must select the -X cube face");
+    let (face_zp, _, _, _) = point_host_project(lp, range, [lp[0], lp[1] + 0.1, lp[2] + 3.0]);
+    assert_eq!(face_zp, 4, "a receiver toward +Z must select the +Z cube face");
+
+    // The NO-DRIFT PIN: for an OFF-AXIS receiver (a non-trivial UV), the resolve's per-face UV
+    // (`point_host_project`, the mirror of `punctual_atlas_visibility`) MUST equal the UV the depth
+    // pass rasterized this point at through the SAME face `view_proj` (the cube oracle). A drift in
+    // the face-select sign convention vs the look-at basis would make the two disagree → a
+    // wrong-texel shadow. Sample a point biased toward +X and a little +Y/+Z (still +X-major).
+    let fit = point_cube_fit(lp, range);
+    let off = [lp[0] + 2.0, lp[1] + 0.6, lp[2] + 0.4];
+    let (face_off, uvx_off, uvy_off, _) = point_host_project(lp, range, off);
+    assert_eq!(face_off, 0, "the +X-major off-axis sample must select the +X face");
+    // The depth pass's rasterized UV: project `off` through face 0's view_proj, divide, Y-flip.
+    let vp0 = &fit.faces[face_off as usize].view_proj;
+    let pw_off = [off[0], off[1], off[2], 1.0];
+    let mut clip_off = [0.0f32; 4];
+    for (r, clip_r) in clip_off.iter_mut().enumerate() {
+        let mut acc = 0.0f32;
+        for (c, &pw_c) in pw_off.iter().enumerate() {
+            acc += vp0[c * 4 + r] * pw_c;
+        }
+        *clip_r = acc;
+    }
+    assert!(clip_off[3] > 0.0, "the off-axis +X sample must be in front of the light");
+    let rast_uv_x = (clip_off[0] / clip_off[3]) * 0.5 + 0.5;
+    let rast_uv_y = 1.0 - ((clip_off[1] / clip_off[3]) * 0.5 + 0.5);
+    assert!(
+        (uvx_off - rast_uv_x).abs() < 1e-4 && (uvy_off - rast_uv_y).abs() < 1e-4,
+        "the resolve UV ({uvx_off}, {uvy_off}) must equal the depth-pass rasterized UV \
+         ({rast_uv_x}, {rast_uv_y}) — the cube face-select / look-at basis cannot drift"
+    );
+
+    // The selected face's `view_proj` must project the on-axis sample in front of the eye
+    // (clip.w > 0) and inside the NDC box — the depth pass rendered that face with this matrix.
+    // +Y face (index 2): a point 2 units up from the light projects in-bounds in face 2.
+    let vp = &fit.faces[2].view_proj;
+    let pw = [up[0], up[1], up[2], 1.0];
+    let mut clip = [0.0f32; 4];
+    for (r, clip_r) in clip.iter_mut().enumerate() {
+        let mut acc = 0.0f32;
+        for (c, &pw_c) in pw.iter().enumerate() {
+            acc += vp[c * 4 + r] * pw_c;
+        }
+        *clip_r = acc;
+    }
+    assert!(clip[3] > 0.0, "the +Y face sample must be in front of the light (w > 0)");
+    let ndc_x = clip[0] / clip[3];
+    let ndc_y = clip[1] / clip[3];
+    assert!(ndc_x.abs() <= 1.0 + 1e-4, "the +Y face sample x must be in NDC bounds, got {ndc_x}");
+    assert!(ndc_y.abs() <= 1.0 + 1e-4, "the +Y face sample y must be in NDC bounds, got {ndc_y}");
+
+    // The atlas-slot pack pin: a point with `with_atlas_slot(0)` round-trips its cube BASE 0 and
+    // keeps the POINT kind tag + the casts bit.
+    let point = GoldenLight::point(lp, [1.0, 1.0, 1.0], 100.0, range).with_atlas_slot(0);
+    assert_eq!(point.atlas_slot(), 0, "the point cube base 0 must round-trip");
+    assert_eq!(point.kind(), GOLDEN_LIGHT_KIND_POINT, "the POINT kind tag must survive the slot pack");
+    assert!(point.casts_sdf_shadow(), "a real cube slot must set the casts-shadow bit");
 }
 
 // === CSM Increment 3 — Rung B: the N-cascade (multi-distance) demo + the select+blend golden. ===
@@ -5871,18 +6192,27 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
     let spot_activation = cfg.spot_atlas.map(|fit| {
         csm.upload_atlas(device, &fit);
         let mut face_view_proj = [[0u8; 64]; MAX_TEXTURE_LAYERS];
-        for (dst, src) in face_view_proj
-            .iter_mut()
-            .zip(fit.faces.iter())
-            .take(fit.active_layers as usize)
-        {
+        // Shadow Phase 5 Inc-2: the per-layer TYPE flag + the per-POINT-face `cam_eye@64` lane bytes
+        // (`light_pos.xyz` + `inv_range`). A SPOT face leaves `face_is_point == false` (the lane
+        // unused); a POINT face sets it `true` + stamps the lane so the FS computes the radial
+        // distance. The demo's fits are already type-grouped (a SPOT fit is all-spot, a POINT cube
+        // fit is six contiguous point faces), so the recorder binds each pipeline at most once.
+        let mut face_is_point = [false; MAX_TEXTURE_LAYERS];
+        let mut face_light = [[0u8; 16]; MAX_TEXTURE_LAYERS];
+        for (slot, src) in fit.faces.iter().enumerate().take(fit.active_layers as usize) {
             for (i, f) in src.view_proj.iter().enumerate() {
-                dst[i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+                face_view_proj[slot][i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
             }
+            face_is_point[slot] = src.is_point;
+            // cam_eye lane: xyz = light_pos, w = inv_range.
+            face_light[slot][0..4].copy_from_slice(&src.light_pos[0].to_le_bytes());
+            face_light[slot][4..8].copy_from_slice(&src.light_pos[1].to_le_bytes());
+            face_light[slot][8..12].copy_from_slice(&src.light_pos[2].to_le_bytes());
+            face_light[slot][12..16].copy_from_slice(&src.inv_range.to_le_bytes());
         }
         let mut push = [0u8; GBUFFER_PUSH_BYTES];
         push[84..88].copy_from_slice(&1u32.to_le_bytes());
-        (push, face_view_proj, fit.active_layers)
+        (push, face_view_proj, face_is_point, face_light, fit.active_layers)
     });
 
     // M3: build the per-mesh draw batch LIST (one `GBufferMeshDraw` per registered mesh,
@@ -6012,15 +6342,20 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         shadow_atlas_texture: &csm.atlas,
         shadow_atlas_sampler: &csm.atlas_sampler,
         shadow_atlas_ubo: &csm.atlas_ubo,
-        atlas_punctual: spot_activation.map(|(push, face_view_proj, active_layers)| {
-            PunctualDepthActivation {
-                pipeline: &csm.depth_pipeline,
-                push,
-                face_view_proj,
-                active_layers,
-                shadow_dim: SPOT_SHADOW_DIM,
-            }
-        }),
+        atlas_punctual: spot_activation.map(
+            |(push, face_view_proj, face_is_point, face_light, active_layers)| {
+                PunctualDepthActivation {
+                    pipeline: &csm.depth_pipeline,
+                    point_pipeline: &csm.point_depth_pipeline,
+                    push,
+                    face_view_proj,
+                    face_is_point,
+                    face_light,
+                    active_layers,
+                    shadow_dim: SPOT_SHADOW_DIM,
+                }
+            },
+        ),
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };

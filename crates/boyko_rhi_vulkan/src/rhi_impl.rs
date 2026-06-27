@@ -1360,8 +1360,16 @@ impl RhiDevice<Vulkan> for VulkanContext {
         //     the error returns (reverse-order rollback). The `push_range` +
         //     `set_layout` locals must outlive the create call, so they are bound
         //     here (the layout-info pointers below reference them). ---
+        // The push range spans `VERTEX | FRAGMENT`: every existing graphics shader pushes from the
+        // VERTEX stage only (the gbuffer/cascade/spot pipelines), and a fragment stage that declares
+        // no push block simply ignores the range — so widening the visibility is byte-neutral for
+        // them. The Shadow Phase 5 Inc-2 POINT depth FS (`punctual_depth.fs`) READS the `cam_eye@64`
+        // lane (`light_pos`/`inv_range`), which requires the range to cover `FRAGMENT`. Push-constant
+        // stage flags are part of the pipeline LAYOUT, not the recorded command stream, and the
+        // recorders keep pushing with `VK_SHADER_STAGE_VERTEX_BIT` (a subset), so the rendered output
+        // of every pre-Inc-2 pipeline is unchanged (the 0%-gate holds).
         let push_range = VkPushConstantRange {
-            stage_flags: VK_SHADER_STAGE_VERTEX_BIT,
+            stage_flags: VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
             offset: 0,
             size: desc.push_constant_bytes,
         };

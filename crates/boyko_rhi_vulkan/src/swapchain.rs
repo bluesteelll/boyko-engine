@@ -3613,12 +3613,35 @@ impl<'ctx> Renderer<'ctx> {
             };
             let mut atlas_push = atlas_act.push;
             // BUILD-ONCE-CONSUME-N-VIEWS: the SAME caster batches + instance SSBO are rendered into
-            // each atlas layer; only slot `s`'s `view_proj` differs. Loop the active slots.
+            // each atlas layer; only slot `s`'s `view_proj` (+ the POINT `cam_eye` lane) differs. The
+            // active layers are GROUPED by type in the activation (spot-faces then point-faces, or
+            // vice versa), so binding the per-slot pipeline only when it CHANGES costs at most TWO
+            // pipeline binds. `bound_point` tracks which pipeline is currently bound (`None` = none
+            // yet).
+            let mut bound_point: Option<bool> = None;
             for s in 0..active {
+                // Shadow Phase 5 Inc-2: select this layer's pipeline by its TYPE. A SPOT face uses
+                // the `csm_depth` NDC-z pipeline; a POINT cube face uses the `punctual_depth`
+                // linear-distance pipeline (a depth-WRITE FS). Both share the SAME pipeline LAYOUT
+                // (the set-0 instance SSBO + the 88-byte push), so the descriptor set + push stamps
+                // are identical; only the bound pipeline object differs.
+                let is_point = atlas_act.face_is_point[s as usize];
+                let face_pipeline = if is_point {
+                    atlas_act.point_pipeline
+                } else {
+                    atlas_act.pipeline
+                };
                 // Stamp slot `s`'s COLUMN-MAJOR `view_proj` (64 B) into the push's leading matrix
                 // bytes (byte-equal to the resolve UBO's `gFaces[s].view_proj`). The trailing words
                 // are unchanged; `base_instance @80` is re-pushed per batch below.
                 atlas_push[0..64].copy_from_slice(&atlas_act.face_view_proj[s as usize]);
+                // Shadow Phase 5 Inc-2: for a POINT face, stamp the `cam_eye@64` lane (16 B) =
+                // `light_pos.xyz` + `inv_range` so the FS computes `length(world - light_pos) *
+                // inv_range`. For a SPOT face this lane is unused (the empty NDC-z FS), so it is left
+                // as the template default.
+                if is_point {
+                    atlas_push[64..80].copy_from_slice(&atlas_act.face_light[s as usize]);
+                }
                 let atlas_depth_attachment = VkRenderingAttachmentInfo {
                     s_type: VkStructureType::RenderingAttachmentInfo,
                     p_next: ptr::null(),
@@ -3652,37 +3675,45 @@ impl<'ctx> Renderer<'ctx> {
                 // SAFETY: recording is open; `atlas_rendering` is fully initialized — its depth
                 // attachment names the live atlas layer-`s` render view (now DEPTH_ATTACHMENT_OPTIMAL;
                 // `s < active <= MAX_TEXTURE_LAYERS` so `layer_render_view(s)` is in bounds), NO color
-                // attachment (depth-only); the depth-only pipeline (the SAME CSM `csm_depth.vs/fs`
-                // pipeline — EMPTY `color_formats` + `depth_format = D32Sfloat` + `cull_mode: Front` +
-                // a depth bias + the set-0 instance layout) belongs to this device (caller contract).
-                // The SAME instance SSBO (`scene.instance_bind_group`) the main pass binds is bound at
-                // set 0 to satisfy the depth VS's static `instances` reference; the 88-byte push
-                // carries slot `s`'s `view_proj` (`@0`) + `use_model_matrix == 1` (`@84`), and per
-                // caster batch the recorder re-pushes its `base_instance` (4 bytes @80, in-range of
-                // the 88-byte VERTEX push) then `draw_indexed` reads that batch's bound vertex+index
-                // buffers (created on this device with VERTEX/INDEX usage). The locals outlive the
+                // attachment (depth-only); the selected depth-only pipeline (the SPOT `csm_depth` or
+                // the POINT `punctual_depth` pipeline — both EMPTY `color_formats` + `depth_format =
+                // D32Sfloat` + `cull_mode: Front` + the set-0 instance layout) belongs to this device
+                // (caller contract) and shares the SAME pipeline layout. The SAME instance SSBO
+                // (`scene.instance_bind_group`) the main pass binds is bound at set 0 to satisfy the
+                // depth VS's static `instances` reference; the 88-byte push carries slot `s`'s
+                // `view_proj` (`@0`) + (POINT only) the `cam_eye@64` `light_pos`/`inv_range` lane +
+                // `use_model_matrix == 1` (`@84`), pushed for `VERTEX | FRAGMENT` (the POINT FS reads
+                // `cam_eye`; the layout declares that range), and per caster batch the recorder
+                // re-pushes its `base_instance` (4 bytes @80, in-range of the 88-byte push) then
+                // `draw_indexed` reads that batch's bound vertex+index buffers (created on this device
+                // with VERTEX/INDEX usage). The pipeline + descriptor set are (re)bound only when the
+                // face TYPE changes (the layers are grouped), so at most two binds occur; the push is
+                // re-stamped every slot (the per-slot `view_proj` differs). The locals outlive the
                 // bracketed calls. Begin/End bracket each slot.
                 unsafe {
                     (self.fns.cmd_begin_rendering)(cmd, &atlas_rendering);
-                    (self.fns.cmd_bind_pipeline)(
-                        cmd,
-                        VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        atlas_act.pipeline.pipeline,
-                    );
-                    (self.fns.cmd_bind_descriptor_sets)(
-                        cmd,
-                        VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        atlas_act.pipeline.layout,
-                        0,
-                        1,
-                        &scene.instance_bind_group.descriptor_set,
-                        0,
-                        ptr::null(),
-                    );
+                    if bound_point != Some(is_point) {
+                        (self.fns.cmd_bind_pipeline)(
+                            cmd,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            face_pipeline.pipeline,
+                        );
+                        (self.fns.cmd_bind_descriptor_sets)(
+                            cmd,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            face_pipeline.layout,
+                            0,
+                            1,
+                            &scene.instance_bind_group.descriptor_set,
+                            0,
+                            ptr::null(),
+                        );
+                        bound_point = Some(is_point);
+                    }
                     (self.fns.cmd_push_constants)(
                         cmd,
-                        atlas_act.pipeline.layout,
-                        VK_SHADER_STAGE_VERTEX_BIT,
+                        face_pipeline.layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0,
                         atlas_push.len() as u32,
                         atlas_push.as_ptr().cast(),
@@ -3698,9 +3729,13 @@ impl<'ctx> Renderer<'ctx> {
                         atlas_push[GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize
                             ..GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4]
                             .copy_from_slice(&base.to_le_bytes());
+                        // The `base_instance` lane (@80) is read only by the VS, so a VERTEX-stage
+                        // push is sufficient (a subset of the layout's `VERTEX | FRAGMENT` range).
+                        // Both pipelines share the SAME layout, so `face_pipeline.layout` is correct
+                        // for either face type.
                         (self.fns.cmd_push_constants)(
                             cmd,
-                            atlas_act.pipeline.layout,
+                            face_pipeline.layout,
                             VK_SHADER_STAGE_VERTEX_BIT,
                             GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
                             4,
@@ -5093,15 +5128,22 @@ pub struct CsmDepthActivation<'a> {
 /// reuses the full mesh batch list.
 #[derive(Clone, Copy)]
 pub struct PunctualDepthActivation<'a> {
-    /// The depth-only graphics pipeline (`csm_depth.vs/fs` VERBATIM — SPOT uses NDC-z like a CSM
-    /// cascade, so the cascade depth pipeline works unchanged): EMPTY `color_formats`, `depth_format
-    /// = Some(D32Sfloat)`, `cull_mode: Front`, `depth_bias: Some(slope/constant)`, the set-0
-    /// instance SSBO layout. Bound by the punctual depth pass.
+    /// The SPOT depth-only graphics pipeline (`csm_depth.vs/fs` VERBATIM — SPOT uses NDC-z like a
+    /// CSM cascade, so the cascade depth pipeline works unchanged): EMPTY `color_formats`,
+    /// `depth_format = Some(D32Sfloat)`, `cull_mode: Front`, `depth_bias: Some(slope/constant)`, the
+    /// set-0 instance SSBO layout. Bound for SPOT-face layers (`face_is_point[s] == false`).
     pub pipeline: &'a VulkanGraphicsPipeline,
+    /// Shadow Phase 5 Inc-2 (POINT cube): the POINT depth-WRITE graphics pipeline
+    /// (`punctual_depth.vs/fs`): the FS writes `SV_Depth = saturate(length(world - light_pos) *
+    /// inv_range)` (the linear radial distance), so it is a SEPARATE pipeline from the SPOT one (the
+    /// SPOT FS is empty NDC-z). Bound for POINT-face layers (`face_is_point[s] == true`); the layers
+    /// are grouped so at most ONE bind of each pipeline is recorded.
+    pub point_pipeline: &'a VulkanGraphicsPipeline,
     /// The 88-byte VERTEX push TEMPLATE for the depth pass: the trailing words (`use_model_matrix
     /// == 1` `@84`; the recorder overwrites the `base_instance` word `@80` per caster batch). The
     /// leading 64 bytes (the `view_proj` matrix) are OVERWRITTEN per atlas slot from
-    /// [`Self::face_view_proj`].
+    /// [`Self::face_view_proj`]; the `cam_eye@64` lane (16 B) is OVERWRITTEN per POINT slot from
+    /// [`Self::face_light`] (`light_pos.xyz` + `inv_range` in `.w`) and left as-is for SPOT slots.
     pub push: [u8; GBUFFER_PUSH_BYTES],
     /// The per-slot COLUMN-MAJOR `view_proj` matrices (64 bytes each), `[0..active_layers)` valid.
     /// The depth pass loops slots, stamping `face_view_proj[s]` into the push's leading 64 bytes and
@@ -5109,6 +5151,16 @@ pub struct PunctualDepthActivation<'a> {
     /// UBO's `gFaces[s].view_proj` (the O1 single-matrix pin: the depth VS + the resolve read the
     /// SAME per-slot matrix).
     pub face_view_proj: [[u8; 64]; MAX_TEXTURE_LAYERS],
+    /// Shadow Phase 5 Inc-2 (POINT cube): per-layer TYPE — `true` = a POINT cube face (the
+    /// `point_pipeline` + the `face_light` push), `false` = a SPOT face (the SPOT `pipeline`,
+    /// `cam_eye` unused). The recorder GROUPS the active layers by this flag (spot-faces then
+    /// point-faces, or vice versa) so it binds each pipeline at most once.
+    pub face_is_point: [bool; MAX_TEXTURE_LAYERS],
+    /// Shadow Phase 5 Inc-2 (POINT cube): per-POINT-face `cam_eye@64` push bytes — `light_pos.xyz`
+    /// (12 B) + `inv_range` (4 B), 16 B. Stamped into the push's `@64..80` lane before a POINT-face
+    /// layer renders, so the FS reads `cam_eye.xyz == light_pos` / `cam_eye.w == inv_range`. The six
+    /// faces of one point share identical bytes (one cube center). Unused for SPOT-face layers.
+    pub face_light: [[u8; 16]; MAX_TEXTURE_LAYERS],
     /// The number of atlas layers to render (`1..=MAX_TEXTURE_LAYERS`); mirrors the atlas UBO's
     /// `active_layers` / `ResolvedShadowAtlas::active_layers`. The depth pass renders layers
     /// `[0..active_layers)`.

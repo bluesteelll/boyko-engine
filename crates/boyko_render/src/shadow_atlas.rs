@@ -21,13 +21,17 @@
 //! world that never inserts a non-default [`ShadowConfig`] carries the disabled selection and
 //! no render path is touched.
 //!
-//! # SPOT-only (Increment 1)
+//! # SPOT + POINT (Increment 1 + 2)
 //!
 //! A spot is ONE atlas layer (a single perspective shadow map of the cone, NDC-z — exactly
-//! like a CSM cascade). POINT cube maps (6 faces / light) are Increment 2; the
-//! [`FaceTransform`] carries the per-face `light_pos` / `inv_range` lanes the cube-map
-//! distance-compare needs so the shared layout is fixed now (unused by the SPOT NDC-z
-//! compare).
+//! like a CSM cascade). A POINT (Increment 2) is SIX CONTIGUOUS atlas layers (the ±X/±Y/±Z
+//! cube faces), each a 90°-FOV perspective looking down one axis; the resolve does a
+//! major-axis face-select + a LINEAR-DISTANCE compare (`dist(frag, light_pos) * inv_range`
+//! vs the stored normalized radial distance), so the [`FaceTransform`] carries the per-face
+//! `light_pos` / `inv_range` lanes the cube distance-compare reads (unused by the SPOT NDC-z
+//! compare). Points and spots are RANKED TOGETHER by the same priority proxy and
+//! bump-allocated (a selected point takes 6 layers, a selected spot 1) until the
+//! [`M_SLOTS`]-layer pool is full; over-budget sources get [`SLOT_NONE`].
 
 use boyko_macros::Resource;
 
@@ -37,7 +41,7 @@ use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_math::{Affine3A, Mat4, Vec3, Vec4};
 use boyko_scene::{GlobalTransform, ViewUniform};
 
-use crate::light::SpotLight;
+use crate::light::{PointLight, SpotLight};
 use crate::shadow_marker::CastsPunctualShadow;
 
 // ---- constants -----------------------------------------------------------------------
@@ -93,6 +97,30 @@ const MIN_SPOT_FAR: f32 = SPOT_SHADOW_NEAR + 1.0e-3;
 
 /// The spot map's aspect ratio — `1.0` (a square depth tile, [`SHADOW_DIM`] each side).
 const SPOT_ASPECT: f32 = 1.0;
+
+/// The number of cube faces a POINT light consumes — six contiguous atlas layers (±X, ±Y, ±Z).
+/// A selected point bump-allocates this many layers; a slot base `b` is valid only when
+/// `b + POINT_FACE_COUNT <= M_SLOTS`.
+pub const POINT_FACE_COUNT: usize = 6;
+
+/// The point cube face near plane (view-space) — the same small positive front clip the spot map
+/// uses, so the per-face perspective stays well-conditioned. The radial-distance FS compare does
+/// not read NDC-z, but the projection must still be non-singular for the depth-pass rasterizer.
+const POINT_SHADOW_NEAR: f32 = SPOT_SHADOW_NEAR;
+
+/// The minimum point cube far plane (the light range) — floors a zero/negative range so the
+/// per-face `near < far` invariant holds.
+const MIN_POINT_FAR: f32 = MIN_SPOT_FAR;
+
+/// The point cube face FOV — 90° (`π/2`) full vertical FOV, so the six square faces exactly tile
+/// the full sphere of directions around the light (the standard cube-map fit).
+const POINT_FACE_FOV_Y: f32 = core::f32::consts::FRAC_PI_2;
+
+// A point's slot base `b` is packed into the 5-bit atlas-slot field, so the maximum base (the
+// last layer a point can start at, `M_SLOTS - POINT_FACE_COUNT`) MUST fit in `[0, ATLAS_SLOT_MASK)`
+// and stay distinct from `SLOT_NONE`. `16 - 6 == 10 < 31` — proven at compile time.
+const _: () = assert!((M_SLOTS - POINT_FACE_COUNT) < (ATLAS_SLOT_MASK as usize));
+const _: () = assert!((M_SLOTS - POINT_FACE_COUNT) != (SLOT_NONE as usize));
 
 /// Rec. 709 luminance weights (linear RGB → relative luminance) for the priority proxy.
 const LUMA_R: f32 = 0.2126;
@@ -302,6 +330,22 @@ pub struct SpotShadowInput {
     pub priority: f32,
 }
 
+/// A point's world inputs for the cube fit: the light world position (the shared cube center /
+/// per-face perspective eye), the range (each face's far plane + the `inv_range` distance
+/// normalizer), and the priority proxy. Decoupled from `PointLight` / `GlobalTransform` so the
+/// pure core is testable with plain data.
+#[derive(Clone, Copy, Debug)]
+pub struct PointShadowInput {
+    /// The light world position — the shared center of the six cube faces (each face's eye) and
+    /// the `light_pos` the resolve's distance-compare reads.
+    pub position: [f32; 3],
+    /// The light range (each cube face's far plane, floored to keep `near < far`; its reciprocal
+    /// is `inv_range`, the distance normalizer both the depth FS and the resolve compare share).
+    pub range: f32,
+    /// The screen-coverage priority proxy (higher ⇒ assigned the six contiguous layers first).
+    pub priority: f32,
+}
+
 /// Fits the spot atlas faces + assigns slots — the PURE, unit-testable shadow-atlas resolve
 /// (the spot analogue of [`resolve_csm`](crate::csm_config::resolve_csm), the core the cold
 /// system wraps). Returns the derived [`ResolvedShadowAtlas`] AND, in `out_slots`, the per-spot
@@ -328,74 +372,139 @@ pub fn resolve_shadow_atlas_spots(
     spots: &[SpotShadowInput],
     out_slots: &mut [u32],
 ) -> ResolvedShadowAtlas {
-    debug_assert_eq!(
-        spots.len(),
-        out_slots.len(),
-        "invariant: one output slot per spot"
-    );
+    // The spot-only entry point delegates to the unified core with an empty point set, so the
+    // Inc-1 SPOT path (and its goldens) keep their exact contract.
+    let mut no_points: [u32; 0] = [];
+    resolve_shadow_atlas_inputs(cfg, spots, &[], out_slots, &mut no_points)
+}
 
-    // Default every spot to the analytic fallback; the selected ones overwrite their slot below.
-    for s in out_slots.iter_mut() {
+/// A combined punctual source for the unified top-K rank — a spot or a point, indexed back into
+/// its own input slice. The priority lane drives the descending select; the layer COST (`1` for a
+/// spot, [`POINT_FACE_COUNT`] for a point) drives the bump-allocate budget check.
+#[derive(Clone, Copy)]
+enum PunctualRef {
+    Spot(usize),
+    Point(usize),
+}
+
+/// Fits the spot + point atlas faces + assigns slots — the PURE, unit-testable unified shadow-atlas
+/// resolve. Points and spots are RANKED TOGETHER by [`SpotShadowInput::priority`] /
+/// [`PointShadowInput::priority`]; a selected SPOT bump-allocates ONE layer and a selected POINT
+/// six CONTIGUOUS layers ([`POINT_FACE_COUNT`]), in descending-priority order, until a source no
+/// longer fits the remaining `[next..M_SLOTS)` budget — that source and every lower-priority one get
+/// [`SLOT_NONE`]. Returns the derived [`ResolvedShadowAtlas`] AND, in `out_spot_slots` /
+/// `out_point_slots`, each source's assigned slot (the LAYER for a spot, the slot BASE `b` for a
+/// point — its six faces occupy `b..b+POINT_FACE_COUNT`).
+///
+/// `out_spot_slots.len() == spots.len()` and `out_point_slots.len() == points.len()`; a debug build
+/// asserts both.
+///
+/// Disabled (`!cfg.enabled()`) or no eligible sources ⇒ [`ResolvedShadowAtlas::DISABLED`] and every
+/// `out_*_slots[i] == SLOT_NONE`.
+pub fn resolve_shadow_atlas_inputs(
+    cfg: &ShadowConfig,
+    spots: &[SpotShadowInput],
+    points: &[PointShadowInput],
+    out_spot_slots: &mut [u32],
+    out_point_slots: &mut [u32],
+) -> ResolvedShadowAtlas {
+    debug_assert_eq!(spots.len(), out_spot_slots.len(), "invariant: one slot per spot");
+    debug_assert_eq!(points.len(), out_point_slots.len(), "invariant: one slot per point");
+
+    // Default every source to the analytic fallback; selected ones overwrite their slot below.
+    for s in out_spot_slots.iter_mut() {
+        *s = SLOT_NONE;
+    }
+    for s in out_point_slots.iter_mut() {
         *s = SLOT_NONE;
     }
 
-    if !cfg.enabled() || spots.is_empty() {
+    if !cfg.enabled() || (spots.is_empty() && points.is_empty()) {
         return ResolvedShadowAtlas::DISABLED;
     }
 
     // ---- top-K partial selection into a fixed stack scratch (no heap, no sort) ----
     //
-    // `top` holds the up-to-K highest-priority `(priority, spot_index)` pairs seen so far, kept
-    // descending by priority. A new candidate is inserted iff it beats the current weakest
-    // (the last slot once `top` is full); an insertion shifts the tail down by one. K == M_SLOTS
-    // is tiny, so the O(K) shifted-insert is cheaper than any heap and allocates nothing.
-    let mut top: [(f32, usize); M_SLOTS] = [(f32::NEG_INFINITY, usize::MAX); M_SLOTS];
+    // `top` holds the up-to-K highest-priority `(priority, ref)` pairs seen so far, kept descending
+    // by priority. K is bounded by the source count a full atlas can hold: at most `M_SLOTS` spots
+    // (1 layer each), so `M_SLOTS` candidate entries always suffice (a point costs 6 layers, so
+    // even fewer points fit). A candidate is inserted iff it beats the current weakest; an
+    // insertion shifts the tail down by one. The O(K) shifted-insert is cheaper than any heap and
+    // allocates nothing. The bump-allocate below applies the per-source LAYER COST against the
+    // 16-layer budget, so the rank is over ALL sources but the fit stops when the budget is spent.
+    let mut top: [(f32, PunctualRef); M_SLOTS] = [(f32::NEG_INFINITY, PunctualRef::Spot(usize::MAX)); M_SLOTS];
     let mut filled: usize = 0;
 
-    for (i, spot) in spots.iter().enumerate() {
-        let p = spot.priority;
-        // Skip non-positive (or NaN) priority spots (zero luminance / zero range): they would
-        // never beat a real candidate and must not be assigned a layer.
+    let consider = |p: f32, r: PunctualRef, top: &mut [(f32, PunctualRef); M_SLOTS], filled: &mut usize| {
+        // Skip non-positive (or NaN) priority sources (zero luminance / zero range).
         if p <= 0.0 || p.is_nan() {
-            continue;
+            return;
         }
         // If the buffer is full and this candidate cannot beat the weakest kept, drop it.
-        if filled == M_SLOTS && p <= top[M_SLOTS - 1].0 {
-            continue;
+        if *filled == M_SLOTS && p <= top[M_SLOTS - 1].0 {
+            return;
         }
         // Find the insertion point (first slot whose priority is strictly less than `p`).
-        let mut pos = filled.min(M_SLOTS - 1);
+        let mut pos = (*filled).min(M_SLOTS - 1);
         while pos > 0 && top[pos - 1].0 < p {
             pos -= 1;
         }
         // Shift the tail down by one (drop the weakest when full), then place the candidate.
-        let end = if filled < M_SLOTS { filled } else { M_SLOTS - 1 };
+        let end = if *filled < M_SLOTS { *filled } else { M_SLOTS - 1 };
         let mut j = end;
         while j > pos {
             top[j] = top[j - 1];
             j -= 1;
         }
-        top[pos] = (p, i);
-        if filled < M_SLOTS {
-            filled += 1;
+        top[pos] = (p, r);
+        if *filled < M_SLOTS {
+            *filled += 1;
+        }
+    };
+
+    for (i, spot) in spots.iter().enumerate() {
+        consider(spot.priority, PunctualRef::Spot(i), &mut top, &mut filled);
+    }
+    for (i, point) in points.iter().enumerate() {
+        consider(point.priority, PunctualRef::Point(i), &mut top, &mut filled);
+    }
+
+    // ---- bump-allocate the layers in descending-priority order + fit each source's faces ----
+    //
+    // A spot takes 1 layer; a point takes 6 CONTIGUOUS layers. A source is placed only if its full
+    // layer cost fits the remaining `[next..M_SLOTS)` budget; the first source that does not fit
+    // (and every lower-priority source after it) stays on the analytic fallback (`SLOT_NONE`).
+    let mut faces = [FaceTransform::ZERO; M_SLOTS];
+    let mut next: usize = 0;
+    for &(_, r) in top.iter().take(filled) {
+        match r {
+            PunctualRef::Spot(idx) => {
+                if next + 1 > M_SLOTS {
+                    continue; // a smaller source might still fit a 1-layer gap — keep scanning
+                }
+                faces[next] = spot_face(&spots[idx]);
+                out_spot_slots[idx] = next as u32;
+                next += 1;
+            }
+            PunctualRef::Point(idx) => {
+                if next + POINT_FACE_COUNT > M_SLOTS {
+                    continue;
+                }
+                let cube = point_faces(&points[idx]);
+                faces[next..next + POINT_FACE_COUNT].copy_from_slice(&cube);
+                out_point_slots[idx] = next as u32;
+                next += POINT_FACE_COUNT;
+            }
         }
     }
 
-    // ---- bump-allocate one layer per selected spot + fit its perspective view_proj ----
-    let mut faces = [FaceTransform::ZERO; M_SLOTS];
-    for (layer, &(_, spot_idx)) in top.iter().enumerate().take(filled) {
-        let spot = &spots[spot_idx];
-        faces[layer] = spot_face(spot);
-        out_slots[spot_idx] = layer as u32;
-    }
-
-    if filled == 0 {
+    if next == 0 {
         return ResolvedShadowAtlas::DISABLED;
     }
 
     ResolvedShadowAtlas {
         faces,
-        active_layers: filled as u32,
+        active_layers: next as u32,
         mode_word: 1,
         _pad: [0; 2],
     }
@@ -442,6 +551,50 @@ fn spot_face(spot: &SpotShadowInput) -> FaceTransform {
         light_pos: spot.position,
         inv_range,
     }
+}
+
+/// Builds a POINT light's six cube-face atlas faces: for each of the ±X/±Y/±Z axes, a 90°-FOV
+/// perspective `view_proj` looking from the light position down that axis, with the shared
+/// `light_pos` (the cube center, the resolve's distance-compare origin) + `inv_range` (the radial
+/// distance normalizer). The face ORDER is `[+X, -X, +Y, -Y, +Z, -Z]` — the standard cube-map
+/// major-axis order the resolve's face-select indexes (axis `0..3`, then the sign within the axis).
+///
+/// Each face is a square (aspect 1) perspective, near [`POINT_SHADOW_NEAR`], far
+/// `max(range, MIN_POINT_FAR)`, column-major. The far plane only conditions the rasterizer
+/// projection; the stored depth is the LINEAR radial distance the FS writes (`SV_Depth`), so the
+/// resolve compares `dist(P, light_pos) * inv_range` against it (NOT the perspective NDC-z).
+#[inline]
+fn point_faces(point: &PointShadowInput) -> [FaceTransform; POINT_FACE_COUNT] {
+    let eye = Vec3::new(point.position[0], point.position[1], point.position[2]);
+    let far = point.range.max(MIN_POINT_FAR);
+    let inv_range = if point.range > 0.0 { point.range.recip() } else { 0.0 };
+    let proj = Mat4::perspective_rh(POINT_FACE_FOV_Y, SPOT_ASPECT, POINT_SHADOW_NEAR, far);
+
+    // The six face look directions, in `[+X, -X, +Y, -Y, +Z, -Z]` order. For the ±Y faces the
+    // standard +Y world-up is collinear with the look axis; `Affine3A::look_at_rh` swaps to a valid
+    // fallback when `up ∥ axis`, so a ±Y face stays non-singular without a per-axis up table.
+    const DIRS: [Vec3; POINT_FACE_COUNT] = [
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(-1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::new(0.0, -1.0, 0.0),
+        Vec3::new(0.0, 0.0, 1.0),
+        Vec3::new(0.0, 0.0, -1.0),
+    ];
+    let world_up = Vec3::new(0.0, 1.0, 0.0);
+
+    let mut out = [FaceTransform::ZERO; POINT_FACE_COUNT];
+    for (face, &dir) in out.iter_mut().zip(DIRS.iter()) {
+        let light_world = Affine3A::look_at_rh(eye, eye + dir, world_up);
+        let light_view = light_world.inverse().unwrap_or(Affine3A::IDENTITY);
+        let view_proj = proj.mul_mat4(light_view.to_mat4());
+        *face = FaceTransform {
+            view_proj: mat4_to_cols_array(view_proj),
+            light_pos: point.position,
+            inv_range,
+        };
+    }
+    out
 }
 
 /// Decomposes a column-major [`Mat4`] into the `[[f32; 4]; 4]` column array
@@ -517,6 +670,7 @@ pub fn resolve_shadow_atlas(
     cfg: Res<ShadowConfig>,
     view: Res<ViewUniform>,
     spots: Query<(&SpotLight, &GlobalTransform), With<CastsPunctualShadow>>,
+    points: Query<(&PointLight, &GlobalTransform), With<CastsPunctualShadow>>,
     mut out: ResMut<ResolvedShadowAtlas>,
 ) {
     if !cfg.enabled() {
@@ -527,40 +681,75 @@ pub fn resolve_shadow_atlas(
     let cam = view.camera_pos.xyz();
     let camera_pos = [cam.x, cam.y, cam.z];
 
-    // Gather the eligible spots into a FIXED stack scratch bounded by `M_SLOTS` (Principle 1/5
-    // — no heap, no per-frame `Vec`). The live spot count can exceed the layer budget, so the
-    // gather itself keeps only the top-`M_SLOTS` by priority via a weakest-slot replacement: a
-    // candidate past capacity displaces the current weakest only when it is stronger. This is
-    // the same top-K rule the pure core applies; doing it over the GATHER bounds the `inputs`
-    // buffer to `M_SLOTS` without an unbounded intermediate. The core then fits + assigns slots
-    // over this bounded set (a no-op second top-K when `count <= M_SLOTS`).
-    let mut inputs: [SpotShadowInput; M_SLOTS] = [SPOT_INPUT_ZERO; M_SLOTS];
-    let mut slots: [u32; M_SLOTS] = [SLOT_NONE; M_SLOTS];
-    let mut count = 0usize;
+    // Gather the eligible spots + points into FIXED stack scratches bounded by `M_SLOTS`
+    // (Principle 1/5 — no heap, no per-frame `Vec`). The live source count can exceed the layer
+    // budget, so each gather keeps only the top-`M_SLOTS` by priority via a weakest-slot
+    // replacement: a candidate past capacity displaces the current weakest only when it is
+    // stronger. A point costs 6 layers, so at most `M_SLOTS / POINT_FACE_COUNT` points and
+    // `M_SLOTS` spots can be SELECTED; bounding each gather buffer at `M_SLOTS` is a safe upper
+    // bound (the core's bump-allocate applies the real per-source layer cost). The core then
+    // ranks points + spots TOGETHER + fits + assigns slots over the bounded set.
+    let mut spot_inputs: [SpotShadowInput; M_SLOTS] = [SPOT_INPUT_ZERO; M_SLOTS];
+    let mut spot_slots: [u32; M_SLOTS] = [SLOT_NONE; M_SLOTS];
+    let mut spot_count = 0usize;
     for (spot, gt) in spots.iter() {
         let priority = spot_priority(spot.color, spot.range, spot.position, camera_pos);
         if priority <= 0.0 || priority.is_nan() {
             continue;
         }
         let input = spot_input_from(spot, gt, priority);
-        if count < M_SLOTS {
-            inputs[count] = input;
-            count += 1;
+        if spot_count < M_SLOTS {
+            spot_inputs[spot_count] = input;
+            spot_count += 1;
             continue;
         }
-        // At capacity: replace the weakest kept input iff this candidate beats it.
         let mut weakest = 0usize;
         for k in 1..M_SLOTS {
-            if inputs[k].priority < inputs[weakest].priority {
+            if spot_inputs[k].priority < spot_inputs[weakest].priority {
                 weakest = k;
             }
         }
-        if priority > inputs[weakest].priority {
-            inputs[weakest] = input;
+        if priority > spot_inputs[weakest].priority {
+            spot_inputs[weakest] = input;
         }
     }
 
-    *out = resolve_shadow_atlas_spots(&cfg, &inputs[..count], &mut slots[..count]);
+    let mut point_inputs: [PointShadowInput; M_SLOTS] = [POINT_INPUT_ZERO; M_SLOTS];
+    let mut point_slots: [u32; M_SLOTS] = [SLOT_NONE; M_SLOTS];
+    let mut point_count = 0usize;
+    for (point, _gt) in points.iter() {
+        let priority = spot_priority(point.color, point.range, point.position, camera_pos);
+        if priority <= 0.0 || priority.is_nan() {
+            continue;
+        }
+        let input = PointShadowInput {
+            position: point.position,
+            range: point.range,
+            priority,
+        };
+        if point_count < M_SLOTS {
+            point_inputs[point_count] = input;
+            point_count += 1;
+            continue;
+        }
+        let mut weakest = 0usize;
+        for k in 1..M_SLOTS {
+            if point_inputs[k].priority < point_inputs[weakest].priority {
+                weakest = k;
+            }
+        }
+        if priority > point_inputs[weakest].priority {
+            point_inputs[weakest] = input;
+        }
+    }
+
+    *out = resolve_shadow_atlas_inputs(
+        &cfg,
+        &spot_inputs[..spot_count],
+        &point_inputs[..point_count],
+        &mut spot_slots[..spot_count],
+        &mut point_slots[..point_count],
+    );
 }
 
 /// A zero [`SpotShadowInput`] for the fixed gather scratch (overwritten before use; never read
@@ -569,6 +758,14 @@ const SPOT_INPUT_ZERO: SpotShadowInput = SpotShadowInput {
     position: [0.0; 3],
     axis: [0.0, 0.0, -1.0],
     outer_rad: 0.0,
+    range: 0.0,
+    priority: 0.0,
+};
+
+/// A zero [`PointShadowInput`] for the fixed gather scratch (overwritten before use; never read
+/// while zero because `count` bounds the valid prefix).
+const POINT_INPUT_ZERO: PointShadowInput = PointShadowInput {
+    position: [0.0; 3],
     range: 0.0,
     priority: 0.0,
 };
@@ -762,6 +959,128 @@ mod tests {
             assert_eq!(light_atlas_slot(none), SLOT_NONE, "SLOT_NONE must round-trip");
             assert_eq!(none & CASTS_SHADOW_BIT, 0, "SLOT_NONE must leave CASTS_SHADOW_BIT clear");
             assert_eq!(none & 0xFFFF, kind, "kind tag must be preserved for SLOT_NONE");
+        }
+    }
+
+    /// A point input with explicit priority (at the origin, range 10).
+    fn point(priority: f32) -> PointShadowInput {
+        PointShadowInput { position: [0.0, 0.0, 0.0], range: 10.0, priority }
+    }
+
+    /// Projects a world direction `dir` through face `f`'s `view_proj` (column-major) and returns
+    /// the post-perspective-divide NDC plus the clip `w` — used to assert each cube face covers its
+    /// own axis direction (a ray down `dir` lands in-bounds in the matching face).
+    fn project_face(view_proj: &[[f32; 4]; 4], p: [f32; 3]) -> ([f32; 3], f32) {
+        let pw = [p[0], p[1], p[2], 1.0];
+        let mut clip = [0.0f32; 4];
+        for (r, clip_r) in clip.iter_mut().enumerate() {
+            *clip_r = view_proj[0][r] * pw[0]
+                + view_proj[1][r] * pw[1]
+                + view_proj[2][r] * pw[2]
+                + view_proj[3][r] * pw[3];
+        }
+        if clip[3].abs() < 1e-12 {
+            return ([0.0; 3], clip[3]);
+        }
+        ([clip[0] / clip[3], clip[1] / clip[3], clip[2] / clip[3]], clip[3])
+    }
+
+    #[test]
+    fn point_consumes_six_contiguous_layers_with_light_pos_and_inv_range() {
+        // One point (range 10) at a known position consumes exactly 6 contiguous layers [0..6),
+        // each face finite + carrying the shared light_pos + inv_range = 1/range.
+        let pos = [1.0, 2.0, -3.0];
+        let pts = [PointShadowInput { position: pos, range: 10.0, priority: 5.0 }];
+        let mut spot_none: [u32; 0] = [];
+        let mut pslots = [SLOT_NONE; 1];
+        let r = resolve_shadow_atlas_inputs(&enabled_cfg(), &[], &pts, &mut spot_none, &mut pslots);
+
+        assert_eq!(r.active_layers, POINT_FACE_COUNT as u32);
+        assert_eq!(pslots[0], 0, "the point's slot base is layer 0");
+        for f in r.faces.iter().take(POINT_FACE_COUNT) {
+            assert!(all_finite(&f.view_proj), "every cube face view_proj must be finite");
+            assert_eq!(f.light_pos, pos, "every face shares the light position");
+            assert!((f.inv_range - 0.1).abs() < 1e-6, "inv_range == 1/range");
+        }
+        // The faces past the cube stay zero (bound-but-unread).
+        for f in r.faces.iter().skip(POINT_FACE_COUNT) {
+            assert_eq!(*f, FaceTransform::ZERO);
+        }
+    }
+
+    #[test]
+    fn point_cube_faces_cover_all_six_axis_directions() {
+        // A ray a short distance down each ±axis must project IN-BOUNDS in the matching face
+        // (the union of the six 90°-FOV faces covers the full sphere of directions).
+        let pts = [point(5.0)];
+        let mut spot_none: [u32; 0] = [];
+        let mut pslots = [SLOT_NONE; 1];
+        let r = resolve_shadow_atlas_inputs(&enabled_cfg(), &[], &pts, &mut spot_none, &mut pslots);
+
+        // Face order: [+X, -X, +Y, -Y, +Z, -Z]; sample 2 units down each axis from the origin.
+        let samples: [[f32; 3]; POINT_FACE_COUNT] = [
+            [2.0, 0.0, 0.0],
+            [-2.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, -2.0, 0.0],
+            [0.0, 0.0, 2.0],
+            [0.0, 0.0, -2.0],
+        ];
+        for (face, sample) in samples.iter().enumerate() {
+            let (ndc, w) = project_face(&r.faces[face].view_proj, *sample);
+            assert!(w > 0.0, "face {face}: the axis sample must be in front (w > 0), got {w}");
+            assert!(ndc[0].abs() <= 1.0 + 1e-4, "face {face}: ndc.x in bounds, got {}", ndc[0]);
+            assert!(ndc[1].abs() <= 1.0 + 1e-4, "face {face}: ndc.y in bounds, got {}", ndc[1]);
+        }
+    }
+
+    #[test]
+    fn priority_interleaves_points_and_spots() {
+        // A point (priority 100) outranks a spot (priority 1): the point takes layers [0..6) and the
+        // spot takes layer 6. Reversing the priorities flips which gets the leading layers.
+        let spots = [spot(1.0)];
+        let pts = [point(100.0)];
+        let mut sslots = [SLOT_NONE; 1];
+        let mut pslots = [SLOT_NONE; 1];
+        let r = resolve_shadow_atlas_inputs(&enabled_cfg(), &spots, &pts, &mut sslots, &mut pslots);
+        assert_eq!(r.active_layers, POINT_FACE_COUNT as u32 + 1);
+        assert_eq!(pslots[0], 0, "the higher-priority point gets the leading 6 layers");
+        assert_eq!(sslots[0], POINT_FACE_COUNT as u32, "the spot follows at layer 6");
+
+        let spots2 = [spot(100.0)];
+        let pts2 = [point(1.0)];
+        let mut sslots2 = [SLOT_NONE; 1];
+        let mut pslots2 = [SLOT_NONE; 1];
+        let r2 = resolve_shadow_atlas_inputs(&enabled_cfg(), &spots2, &pts2, &mut sslots2, &mut pslots2);
+        assert_eq!(sslots2[0], 0, "the higher-priority spot now leads at layer 0");
+        assert_eq!(pslots2[0], 1, "the point follows at layer 1 (base of its 6-face cube)");
+        assert_eq!(r2.active_layers, POINT_FACE_COUNT as u32 + 1);
+    }
+
+    #[test]
+    fn over_budget_points_get_slot_none() {
+        // Three points each cost 6 layers (18 > M_SLOTS == 16): only the two highest-priority fit
+        // (12 layers); the lowest-priority point is over budget → SLOT_NONE.
+        let pts = [point(30.0), point(20.0), point(10.0)];
+        let mut spot_none: [u32; 0] = [];
+        let mut pslots = [SLOT_NONE; 3];
+        let r = resolve_shadow_atlas_inputs(&enabled_cfg(), &[], &pts, &mut spot_none, &mut pslots);
+
+        assert_eq!(r.active_layers, (2 * POINT_FACE_COUNT) as u32);
+        assert_eq!(pslots[0], 0, "the strongest point leads at layer 0");
+        assert_eq!(pslots[1], POINT_FACE_COUNT as u32, "the next point at layer 6");
+        assert_eq!(pslots[2], SLOT_NONE, "the over-budget point falls back to SLOT_NONE");
+    }
+
+    #[test]
+    fn point_slot_base_packs_round_trips() {
+        // A point's slot base (its cube starts at `b`, faces b..b+6) packs into the 5-bit slot field
+        // and round-trips — the resolve reads `base` then offsets by the per-face index.
+        for base in [0u32, 6, 10] {
+            let word = pack_atlas_slot(LIGHT_KIND_POINT, base);
+            assert_eq!(light_atlas_slot(word), base, "point slot base {base} must round-trip");
+            assert_ne!(word & CASTS_SHADOW_BIT, 0, "a real point slot sets CASTS_SHADOW_BIT");
+            assert_eq!(word & 0xFFFF, LIGHT_KIND_POINT, "the POINT kind tag is preserved");
         }
     }
 
