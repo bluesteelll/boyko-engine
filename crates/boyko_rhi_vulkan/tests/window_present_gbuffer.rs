@@ -2451,6 +2451,13 @@ const HYBRID_BMP: &str = r"D:\tmp\engine_hybrid_room.bmp";
 /// silhouette. The orchestrator runs the GPU test + converts the BMP.
 const CAPSULE_CHARACTER_BMP: &str = r"D:\tmp\engine_capsule_character.bmp";
 
+/// Render Shadow Phase 3 — the Screen-Space Contact Shadows (SSCS) A/B screenshot paths: the
+/// SAME capsule character feet-on-floor scene, dumped with `contact_shadow_mode` OFF (the A/B
+/// reference + the 0%-gate visual proof) and ON (the contact-shadow tightening visible where
+/// the feet meet the floor). The orchestrator runs the GPU test + converts the BMPs.
+const CONTACT_SHADOW_OFF_BMP: &str = r"D:\tmp\engine_contact_shadow_off.bmp";
+const CONTACT_SHADOW_ON_BMP: &str = r"D:\tmp\engine_contact_shadow.bmp";
+
 /// The per-showcase variable scene: the SDF edit list, the marcher/resolve camera push, the light
 /// table (header + elements), and the RASTER MESH (vertices + MVP). The shared [`run_showcase_dump`]
 /// body holds everything else (pipelines, barriers, the dump tail) constant. Built by the per-test
@@ -2918,8 +2925,14 @@ fn capsule_character_mesh() -> Vec<Vertex> {
 /// showcase sun + a dim sky, casting an analytic SDF shadow onto the floor/wall mesh.
 /// Analytic path (`ssao_quality: None`); HARD unions (smoothness 0.0). The 6 capsules are
 /// ≤ MAX_SDF_EDITS with room to spare (no cube proxies — the figure stands on a clean floor).
-fn capsule_character_config() -> ShowcaseConfig {
-    let header = GoldenLightHeader::new(2, 0, 1.0).with_ssao_mode(0);
+///
+/// `contact_shadow` arms Render Shadow Phase 3's Screen-Space Contact Shadows (`with_contact_
+/// shadow_mode` — header word 7 bit 1). `false` is the byte-identical 0%-gate (the SSCS march
+/// block never runs); `true` tightens the shadow where the feet meet the floor.
+fn capsule_character_config(contact_shadow: bool) -> ShowcaseConfig {
+    let header = GoldenLightHeader::new(2, 0, 1.0)
+        .with_ssao_mode(0)
+        .with_contact_shadow_mode(contact_shadow);
     let lights = vec![
         GoldenLight::directional(SHOWCASE_SUN_DIR, [1.0, 0.97, 0.92], 3.0),
         GoldenLight::sky([0.05, 0.05, 0.05], [0.05, 0.05, 0.05]),
@@ -2964,7 +2977,40 @@ fn engine_capsule_character_512_screenshot_dump() {
     run_showcase_dump(
         "boyko_engine capsule character 512",
         CAPSULE_CHARACTER_BMP,
-        capsule_character_config(),
+        capsule_character_config(false),
+    );
+}
+
+/// **Render Shadow Phase 3 — Screen-Space Contact Shadows A/B screenshot dump (the visual
+/// oracle).** The SAME capsule character feet-on-floor scene as
+/// [`engine_capsule_character_512_screenshot_dump`], rendered TWICE: once with
+/// `contact_shadow_mode` OFF (dumped to [`CONTACT_SHADOW_OFF_BMP`] — the A/B reference AND the
+/// 0%-gate visual proof, since the SSCS march block is structurally skipped) and once with it ON
+/// (dumped to [`CONTACT_SHADOW_ON_BMP`] — the contact-shadow tightening where the feet meet the
+/// floor). Two windowed renders (each boots + tears down its own device).
+///
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1` so the
+/// (broken-on-this-box) validation layer does not crash the process; the screenshots are the
+/// deliverable, not a golden assertion.
+/// `#[ignore]`: needs a real RTX windowed device. SPLIT into two ONE-render-per-process tests —
+/// a second windowed render in the same process trips the swapchain-recreate path and never dumps.
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator dumps the contact-shadow OFF screenshot"]
+fn engine_contact_shadow_off_512_screenshot_dump() {
+    run_showcase_dump(
+        "boyko_engine contact shadow OFF 512",
+        CONTACT_SHADOW_OFF_BMP,
+        capsule_character_config(false),
+    );
+}
+
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator dumps the contact-shadow ON screenshot"]
+fn engine_contact_shadow_on_512_screenshot_dump() {
+    run_showcase_dump(
+        "boyko_engine contact shadow ON 512",
+        CONTACT_SHADOW_ON_BMP,
+        capsule_character_config(true),
     );
 }
 

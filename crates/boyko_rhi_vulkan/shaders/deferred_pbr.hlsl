@@ -167,6 +167,19 @@ static const float SHADOW_NORMAL_BIAS = 0.02; // normal-offset march-origin lift
 // the host `MAX_SDF_SHADOW_CASTERS_PER_PIXEL`. Owner-retunable.
 static const uint MAX_SDF_SHADOW_CASTERS_PER_PIXEL = 4u;
 
+// === Render Shadow Phase 3 — Screen-Space Contact Shadows (SSCS) tuning =====================
+//
+// A short ray-march in SCREEN SPACE along the light direction `l`, sampling the depth G-buffer
+// (`gViewT`) to detect a near occluder the SDF/analytic shadow misses (fine contact gaps where
+// a foot meets the floor, etc.). Multiplied INTO the per-light `vis` factor at both lighting
+// sites, gated by `contact_shadow_mode` (header word 7 bit 1; OFF on every pre-Phase-3 scene →
+// the structural-`if` block never runs → byte-identical to today). Hand-written, owner-retunable.
+static const uint  SSCS_STEPS           = 8u;    // march sample count along `l`
+static const float SSCS_CONTACT_LENGTH  = 0.25;  // world-space march length (the contact reach)
+static const float SSCS_THICKNESS_FLOOR = 0.07;  // min occluder-thickness tolerance (anti light-leak)
+static const float SSCS_EDGE_FADE_K     = 6.0;   // HDRP screen-edge vignette steepness
+static const float SSCS_DISTANCE_FADE   = 50.0;  // disable SSCS past this view depth (far surfaces)
+
 // Render P7 POLISH: the SSAO depth-aware box-blur kernel. The raw `gSsao` is a no-blur
 // HBAO-lite gather (2 slices × 4 discrete step radii) → VISIBLE CONCENTRIC RINGS on a broad
 // contact-AO region (a mesh floor around an SDF occluder). The fix is an inline NxN box blur
@@ -291,6 +304,125 @@ float2 env_brdf_approx(float roughness, float NoV) {
     return float2(-1.04, 1.04) * a004 + r.zw;
 }
 
+// === Render Shadow Phase 3 — SSCS screen-space march ========================================
+
+// Interleaved-Gradient Noise (Jorge Jimenez) — a cheap per-pixel hash in [0,1), used to
+// dither the SSCS start offset so the discrete step pattern reads as noise (later resolvable
+// by the existing depth-aware blur) rather than banding. Deterministic in (px,py).
+float ign(uint px, uint py) {
+    float3 magic = float3(0.06711056, 0.00583715, 52.9829189);
+    return frac(magic.z * frac(dot(float2((float)px, (float)py), magic.xy)));
+}
+
+// Projects a world point `Pm` to screen pixel coords + camera-space (view) depth. The EXACT
+// INVERSE of `generate_ray` (`ray_gen.hlsli`): the perspective branch inverts the NDC→dir
+// basis combine (Y-flip undone); the ortho branch inverts the linear `u/v` map. `cam_forward`
+// is contractually NORMALIZED so `dot(rel, cam_forward.xyz)` is the true view depth.
+//   out sx,sy  : pixel center coords (the `+0.5` of generate_ray undone via `-0.5`)
+//   out view_z : camera-space depth (> 0 in front of the eye/plane)
+//   return     : valid flag (view_z > 0 AND the projected pixel is in [0,w)×[0,h))
+bool project_to_screen(float3 Pm, uint w, uint h, out float sx, out float sy, out float view_z) {
+    if (camera_mode == RAYGEN_CAM_PERSPECTIVE) {
+        float3 rel = Pm - cam_eye.xyz;
+        float vz = dot(rel, cam_forward.xyz);    // camera-space depth (forward normalized)
+        float vx = dot(rel, cam_right.xyz);
+        float vy = dot(rel, cam_up.xyz);
+        view_z = vz;
+        if (vz <= 0.0) { sx = 0.0; sy = 0.0; return false; }
+        float tan_half_fov = cam_forward.w;      // tan(fovY / 2)
+        float aspect       = cam_right.w;        // W / H
+        float ndc_x = (vx / vz) / (aspect * tan_half_fov);
+        float ndc_y = (vy / vz) / tan_half_fov;
+        sx = ((ndc_x * 0.5 + 0.5) * (float)w) - 0.5;
+        sy = (((-ndc_y) * 0.5 + 0.5) * (float)h) - 0.5; // undo the generate_ray Y-flip
+    } else {
+        // ORTHO: the linear inverse of the `u/v` ray-origin map. View depth grows from the
+        // RAYGEN_CAM_Z camera plane toward -Z (the ray travels (0,0,-1)).
+        float u = Pm.x / RAYGEN_HALF_EXTENT;
+        float v = Pm.y / RAYGEN_HALF_EXTENT;
+        view_z = RAYGEN_CAM_Z - Pm.z;
+        sx = ((u * 0.5 + 0.5) * (float)w) - 0.5;
+        sy = (((-v) * 0.5 + 0.5) * (float)h) - 0.5; // undo the Y-flip
+    }
+    bool in_bounds = (sx >= 0.0) && (sy >= 0.0) && (sx <= (float)(w - 1u)) && (sy <= (float)(h - 1u));
+    return (view_z > 0.0) && in_bounds;
+}
+
+// Screen-space contact-shadow march from surface point `P` (world) with normal `n` toward the
+// light direction `l` (TO the light). `t_max` bounds the world march length (the to-light
+// distance for a punctual caster, a big number for a directional). Returns the contact
+// VISIBILITY in [0,1] (1 = fully lit, < 1 = a near occluder was found in screen space).
+//
+// Each `[unroll]` step advances `step = SSCS_CONTACT_LENGTH/SSCS_STEPS` world units along `l`
+// (dithered by `ign`), projects the marched point to screen, reconstructs the SCENE surface
+// there from the depth G-buffer via the SHARED `generate_ray` (so the depth reconstruction can
+// never drift from the marcher), and compares the marched view depth to the scene view depth.
+// An occluder is `0 < depth_diff < compare_tol` (a slope-scaled, thickness-floored tolerance so
+// a thin sliver in front is a hit but a far background is NOT a leak). An HDRP screen-edge
+// vignette + a far-distance fade taper the term to 0 where SSCS is unreliable.
+float sscs_march(float3 P, float3 n, float3 l, float t_max, float NoL, uint px, uint py, uint w, uint h) {
+    // Distance fade: disable SSCS on far surfaces (the screen-space depth gather is unreliable
+    // and the contact gap is sub-pixel there). The center pixel's own view depth.
+    float sx0, sy0, vz0;
+    bool ok0 = project_to_screen(P, w, h, sx0, sy0, vz0);
+    if (!ok0 || vz0 > SSCS_DISTANCE_FADE) {
+        return 1.0;
+    }
+
+    // Cap the total march length to the to-light distance `t_max` (an occluder past the light
+    // cannot shadow the surface), then split it into the fixed step count.
+    float march_len = min(SSCS_CONTACT_LENGTH, t_max);
+    float step = march_len / (float)SSCS_STEPS;
+
+    float ign_dither = ign(px, py);
+    // Normal-offset the march origin off the surface to clear self-intersection (anti-acne),
+    // reusing the existing analytic-shadow bias const.
+    float3 origin = P + n * SHADOW_NORMAL_BIAS;
+
+    float occlusion = 0.0;
+    [unroll]
+    for (uint k = 1u; k <= SSCS_STEPS; ++k) {
+        float t = ((float)k - 0.5 + ign_dither) * step;
+        float3 Pm = origin + l * t;
+
+        float sx, sy, vz_marched;
+        bool valid = project_to_screen(Pm, w, h, sx, sy, vz_marched);
+        if (!valid) {
+            continue;                              // off-screen sample contributes 0 (edge fade)
+        }
+
+        int2 sc = int2((int)round(sx), (int)round(sy));
+        float view_t_s = gViewT.Load(sc);
+        if (view_t_s >= 1.0e30) {
+            continue;                              // background / empty sentinel — no occluder
+        }
+        // Reconstruct the SCENE surface at the sampled pixel via the SHARED ray-gen (no drift),
+        // then its camera-space depth (the SAME `dot(.,cam_forward)` project_to_screen uses).
+        float3 ro_s, rd_s;
+        generate_ray((uint)sc.x, (uint)sc.y, w, h, camera_mode, cam_eye.xyz, cam_forward, cam_right, cam_up.xyz, ro_s, rd_s);
+        float3 Ps = ro_s + rd_s * view_t_s;
+        float vz_scene = dot(Ps - cam_eye.xyz, cam_forward.xyz);
+
+        float depth_diff = vz_marched - vz_scene;  // > 0 ⇒ the march is BEHIND the scene surface
+        // Slope-scaled, thickness-floored tolerance: a grazing light (low NoL) needs a wider
+        // window (its march steps span more depth per pixel) — without it grazing rays leak.
+        float step_frac = step;
+        float compare_tol = max(SSCS_THICKNESS_FLOOR, step_frac) * (1.0 + (1.0 - NoL));
+        if (depth_diff > 0.0 && depth_diff < compare_tol) {
+            occlusion += 1.0 / (float)SSCS_STEPS;  // a near occluder along the light ray
+        }
+    }
+
+    // HDRP screen-edge vignette: fade the term out near the frame border, where a marched
+    // sample leaves the screen and the gather is one-sided. `ndc` of the CENTER pixel.
+    float2 ndc = float2(((float)px + 0.5) / (float)w, ((float)py + 0.5) / (float)h) * 2.0 - 1.0;
+    float2 vfade = max(SSCS_EDGE_FADE_K * abs(ndc) - (SSCS_EDGE_FADE_K - 1.0), 0.0.xx);
+    float edge_fade = saturate(1.0 - dot(vfade, vfade));
+    occlusion *= edge_fade;
+
+    return saturate(1.0 - occlusion);
+}
+
 [numthreads(64, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
     uint idx = tid.x;
@@ -359,6 +491,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // per-pixel march to `MAX_SDF_SHADOW_CASTERS_PER_PIXEL` dominant casters (Decision 2).
         uint shadow_mode = load_shadow_mode(LightBuf);
         bool multi_light = shadow_mode != SHADOW_MODE_LEGACY;
+        // Render Shadow Phase 3: the SSCS gate (header word 7 bit 1; OFF on every pre-Phase-3
+        // scene → the per-light `sscs_march` block never runs → byte-identical to today). Read
+        // ONCE here, alongside `ssao_mode`, then consumed at both `vis` sites below.
+        uint contact_mode = load_contact_shadow_mode(LightBuf);
         float view_t = gViewT.Load(coord);
         float3 P = ro + rd * view_t;
         uint marched = 0u;
@@ -426,6 +562,12 @@ void main(uint3 tid : SV_DispatchThreadID) {
                     // grazing rays clear it (anti terminator-acne). Mirrors the host `pb`.
                     vis = sdf_soft_shadow_ranged(P + n * SHADOW_NORMAL_BIAS, n, l, T_MAX);
                     marched += 1u;
+                }
+                // Render Shadow Phase 3: multiply the screen-space CONTACT factor into `vis`
+                // (the directional caster reaches everywhere — a big `t_max`). Gated by the
+                // header bit + a front-facing surface; OFF on every pre-Phase-3 scene.
+                if (contact_mode == CONTACT_SHADOW_MODE_ON && NoL > 0.0) {
+                    vis *= sscs_march(P, n, l, T_MAX, NoL, px, py, w, h);
                 }
                 float3 hvec = normalize(v + l);
                 float NoH = saturate(dot(n, hvec));
@@ -552,6 +694,12 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 // Normal-offset start bias (anti grazing-acne). Mirrors the host `pb`.
                 vis = sdf_soft_shadow_ranged(P + n * SHADOW_NORMAL_BIAS, n, l, t_max);
                 marched += 1u;
+            }
+            // Render Shadow Phase 3: the screen-space CONTACT factor — `t_max` is the to-light
+            // DISTANCE (`sqrt(d2)`) so the contact ray stops AT the light (an occluder past the
+            // light cannot shadow). Gated by the header bit + a front-facing surface.
+            if (contact_mode == CONTACT_SHADOW_MODE_ON && NoL > 0.0) {
+                vis *= sscs_march(P, n, l, sqrt(d2), NoL, px, py, w, h);
             }
             lit_direct += (diff + spec) * (NoL * vis) * atten * L.color;
         }

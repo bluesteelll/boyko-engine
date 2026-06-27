@@ -248,7 +248,12 @@ static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<143584> = SpirvBlob(*include_bytes!(
 /// SSAO RINGS — still inside the SAME `ssao_mode != 0` combine (NO new pass; the 0%-gate holds,
 /// `ssao_mode == 0` never executes the loop). The host mirror is `golden_ssao_blur`; the gather
 /// order/bounds/gate are byte-mirrored so GPU == host within ±2/255; 25280 → 26608 bytes.
-static DEFERRED_PBR_SPV: SpirvBlob<26608> = SpirvBlob(*include_bytes!(concat!(
+/// Render Shadow Phase 3: Screen-Space Contact Shadows (SSCS) add `project_to_screen` (the exact
+/// `generate_ray` inverse) + `sscs_march` (an unrolled 8-step screen-space depth march) multiplied
+/// into the per-light `vis` at both lighting sites, gated by `contact_shadow_mode` (header word 7
+/// bit 1; OFF on every pre-Phase-3 scene → the march block never runs → byte-identical, the
+/// 0%-gate); 26608 → 40652 bytes.
+static DEFERRED_PBR_SPV: SpirvBlob<40652> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/deferred_pbr.comp.spv"
 )));
@@ -4204,22 +4209,58 @@ impl GoldenLightHeader {
         self.counts_exposure[1]
     }
 
-    /// Sets the P6 R1 `shadow_mode` (header WORD 7 = `sky_diffuse.w`, read RAW by the shader's
-    /// `load_shadow_mode` — so it is stored bit-cast, NOT as a float value). 0 =
-    /// single-directional legacy (the BYTE-IDENTICAL 0%-gate); 1 = multi-light (the primary
-    /// directional keeps `gMaterial.r`, every extra flagged caster gets a `sdf_soft_shadow_
-    /// ranged` march). The builder the multi-light goldens use.
+    /// Sets the P6 R1 `shadow_mode` into BIT 0 of header WORD 7 (`sky_diffuse.w`), read by the
+    /// shader's `load_shadow_mode` (which masks to bit 0). 0 = single-directional legacy (the
+    /// BYTE-IDENTICAL 0%-gate); 1 = multi-light (the primary directional keeps `gMaterial.r`,
+    /// every extra flagged caster gets a `sdf_soft_shadow_ranged` march). The builder the
+    /// multi-light goldens use. Only BIT 0 is written — the Render Shadow Phase 3
+    /// `contact_shadow_mode` (BIT 1, see [`with_contact_shadow_mode`]) in the same word is
+    /// PRESERVED, so the two are order-independent. Byte-identical for every existing caller
+    /// (all pass `shadow_mode ∈ {0,1}` on a fresh header whose word 7 is 0, so `0 | s == s`).
+    ///
+    /// [`with_contact_shadow_mode`]: Self::with_contact_shadow_mode
     #[inline]
     pub fn with_shadow_mode(mut self, shadow_mode: u32) -> Self {
-        self.sky_diffuse[3] = f32::from_bits(shadow_mode);
+        let word7 = (self.sky_diffuse[3].to_bits() & !1) | (shadow_mode & 1);
+        self.sky_diffuse[3] = f32::from_bits(word7);
         self
     }
 
-    /// The P6 R1 `shadow_mode` (header word 7, bit-cast back from `sky_diffuse.w`). 0 on every
-    /// pre-P6 scene (the 0%-gate).
+    /// The P6 R1 `shadow_mode` (header word 7, bit-cast back from `sky_diffuse.w`, masked to
+    /// BIT 0 — the contact-shadow flag lives in BIT 1, see [`with_contact_shadow_mode`]). 0 on
+    /// every pre-P6 scene (the 0%-gate).
+    ///
+    /// [`with_contact_shadow_mode`]: Self::with_contact_shadow_mode
     #[inline]
     pub fn shadow_mode(&self) -> u32 {
-        self.sky_diffuse[3].to_bits()
+        self.sky_diffuse[3].to_bits() & 1
+    }
+
+    /// Sets the Render Shadow Phase 3 `contact_shadow_mode` — Screen-Space Contact Shadows
+    /// (SSCS) — packed into BIT 1 of header WORD 7 (`sky_diffuse.w`), the SAME word
+    /// [`with_shadow_mode`](Self::with_shadow_mode) packs the `shadow_mode` into (BIT 0). The
+    /// header is FULL (16 words / 4 vec4), so a spare BIT is used rather than a new word (which
+    /// would shift `LIGHT_HEADER_BASE` and re-encode every golden). `on` ORs/clears ONLY bit 1,
+    /// preserving the `shadow_mode` bit, so the two are independent. `false` leaves word 7
+    /// unchanged on a fresh header (BIT 1 already 0 — the 0%-gate: every pre-Phase-3 scene reads
+    /// `contact_shadow_mode == 0`, so the resolve's SSCS march block is never run).
+    #[inline]
+    pub fn with_contact_shadow_mode(mut self, on: bool) -> Self {
+        let mut word7 = self.sky_diffuse[3].to_bits();
+        if on {
+            word7 |= 0b10;
+        } else {
+            word7 &= !0b10;
+        }
+        self.sky_diffuse[3] = f32::from_bits(word7);
+        self
+    }
+
+    /// The Render Shadow Phase 3 `contact_shadow_mode` (header word 7 BIT 1, bit-cast back from
+    /// `sky_diffuse.w`). 0 on every pre-Phase-3 scene (the 0%-gate); 1 when SSCS is armed.
+    #[inline]
+    pub fn contact_shadow_mode(&self) -> u32 {
+        (self.sky_diffuse[3].to_bits() >> 1) & 1
     }
 
     /// Sets the Render P7 `ssao_mode` (header WORD 11 = `sky_spec.w`, read RAW by the
@@ -9150,6 +9191,42 @@ mod ssao_header_tests {
             .with_ssao_mode(1);
         assert_eq!(both.shadow_mode(), 1, "with_ssao_mode must not clobber shadow_mode (word 7)");
         assert_eq!(both.ssao_mode(), 1, "with_shadow_mode must not clobber ssao_mode (word 11)");
+    }
+
+    /// Render Shadow Phase 3 — the `contact_shadow_mode` (header word 7 BIT 1) builder + reader.
+    /// Proves: `with_contact_shadow_mode(true)` round-trips to `contact_shadow_mode() == 1`;
+    /// `with_shadow_mode(1).with_contact_shadow_mode(true)` keeps BOTH bits independent
+    /// (`shadow_mode() == 1 && contact_shadow_mode() == 1`); and `with_contact_shadow_mode(false)`
+    /// leaves word 7 unchanged on a fresh header (the 0%-gate proof — BIT 1 already 0).
+    #[test]
+    fn contact_shadow_mode_packs_into_word7_bit1() {
+        let on = GoldenLightHeader::new(1, 0, 1.0).with_contact_shadow_mode(true);
+        assert_eq!(on.contact_shadow_mode(), 1, "with_contact_shadow_mode(true) must read back 1");
+
+        // Bit independence: shadow_mode (bit 0) and contact_shadow_mode (bit 1) coexist in word 7.
+        let both = GoldenLightHeader::new(1, 0, 1.0)
+            .with_shadow_mode(1)
+            .with_contact_shadow_mode(true);
+        assert_eq!(both.shadow_mode(), 1, "contact bit must not clobber shadow_mode (word 7 bit 0)");
+        assert_eq!(both.contact_shadow_mode(), 1, "shadow_mode bit must not clobber contact (bit 1)");
+
+        // Order independence: setting contact first then shadow_mode keeps both.
+        let both_rev = GoldenLightHeader::new(1, 0, 1.0)
+            .with_contact_shadow_mode(true)
+            .with_shadow_mode(1);
+        assert_eq!(both_rev.shadow_mode(), 1, "with_shadow_mode must preserve the contact bit");
+        assert_eq!(both_rev.contact_shadow_mode(), 1, "the contact bit must survive with_shadow_mode");
+
+        // 0%-gate: `with_contact_shadow_mode(false)` on a fresh header leaves word 7 byte-unchanged
+        // (BIT 1 was already 0), so every pre-Phase-3 scene reads contact_shadow_mode() == 0.
+        let fresh = GoldenLightHeader::new(1, 0, 1.0);
+        let off = fresh.with_contact_shadow_mode(false);
+        assert_eq!(
+            off.sky_diffuse[3].to_bits(),
+            fresh.sky_diffuse[3].to_bits(),
+            "with_contact_shadow_mode(false) must leave word 7 unchanged (the 0%-gate)"
+        );
+        assert_eq!(off.contact_shadow_mode(), 0, "a fresh header reads contact_shadow_mode() == 0");
     }
 }
 

@@ -67,8 +67,25 @@ static const uint LIGHT_FLAG_CASTS_SHADOW = 0x10000u; // bit 16: this light cast
 static const uint SHADOW_MODE_LEGACY     = 0u;
 static const uint SHADOW_MODE_MULTI_LIGHT = 1u;
 
+// The `shadow_mode` lives in BIT 0 of header word 7 (masked off so a contact-shadow-on scene,
+// which sets BIT 1, never reads `shadow_mode == 3`). Arithmetically inert for every existing
+// golden whose word 7 ∈ {0,1} (`x & 1 == x`).
 uint load_shadow_mode(StructuredBuffer<uint> LightBuf) {
-    return LightBuf[7];
+    return LightBuf[7] & 1u;
+}
+
+// === Render Shadow Phase 3 — the resolve `contact_shadow_mode`, packed in word 7 BIT 1 ========
+//
+// Screen-Space Contact Shadows (SSCS) are gated by BIT 1 of the SAME header word 7 that carries
+// `shadow_mode` in BIT 0. The header is FULL (16 words / 4 vec4), so a spare BIT in an existing
+// word is used rather than a new word (which would shift `LIGHT_HEADER_BASE` and re-encode every
+// golden). On every pre-Phase-3 scene word 7 ∈ {0,1} → BIT 1 is 0 → `contact_shadow_mode == OFF`
+// → the SSCS march block (a structural `if`) never runs → byte-identical to today (the 0%-gate).
+static const uint CONTACT_SHADOW_MODE_OFF = 0u;
+static const uint CONTACT_SHADOW_MODE_ON  = 1u;
+
+uint load_contact_shadow_mode(StructuredBuffer<uint> LightBuf) {
+    return (LightBuf[7] >> 1) & 1u;
 }
 
 // === Render P7 — the resolve ssao_mode, sourced from a SPARE header word ===============
