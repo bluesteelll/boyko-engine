@@ -3687,8 +3687,12 @@ fn mesh_ssao_config(ssao_quality: Option<usize>) -> ShowcaseConfig {
 // 2 mesh cubes RESTING on the floor form the room; 3 SDF bodies rest on the floor in
 // front and cast the marcher's analytic shadow/AO onto the mesh.
 
-/// The room camera EYE (world). Above + in front, looking down into the room.
-const ROOM_CAM_EYE: [f32; 3] = [0.0, 3.2, 4.5];
+/// The room camera EYE (world). Above + in front, looking down into the room. Pulled back
+/// 2.5 units along -forward from the original `[0, 3.2, 4.5]` (owner: the framing was too
+/// tight) — moving along the view axis keeps `ROOM_CAM_FORWARD`/`RIGHT`/`UP` unchanged (the
+/// orthonormal-basis assert in `room_camera` still holds) and the CSM cascade fit reads this
+/// same eye, so the cascades follow the wider frustum automatically.
+const ROOM_CAM_EYE: [f32; 3] = [0.0, 4.128478, 6.821193];
 /// The room camera LOOK-AT target (world).
 const ROOM_CAM_TARGET: [f32; 3] = [0.0, 0.8, -1.5];
 /// The room camera vertical FOV (radians) — 50°.
@@ -5030,7 +5034,11 @@ fn grand_showcase_config() -> ShowcaseConfig {
                 InstancedMeshEntry { vertices: box_v, indices: box_i, affines: box_affines },
                 InstancedMeshEntry { vertices: slab_v, indices: slab_i, affines: slab_affines },
             ],
-            non_casters: vec![1, 2, 3],
+            // RECEIVER-ONLY: the room shell — floor (batch 0) + the 3 walls (1,2,3). The floor MUST
+            // be excluded too: a flat floor casts no real shadow (nothing is below it) but, left in
+            // the depth maps, it stamps its own top face as the nearest occluder and SELF-shadows
+            // (acne / a dim wash, worst under the omni POINT 2.6 units straight above it).
+            non_casters: vec![0, 1, 2, 3],
         }),
         // CSM ON: 3 PSSM cascades fit to the sun over the camera frustum's near→far range. The
         // casters are the SAME instanced batches above (build-once-consume-N: the cascade depth
