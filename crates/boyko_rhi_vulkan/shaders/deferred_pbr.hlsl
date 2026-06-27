@@ -195,6 +195,15 @@ cbuffer CsmCascades : register(b13) {
 // floor and read as a floating caster). Owner-retunable; mirrors the host matrix golden's bias.
 static const float CSM_NORMAL_BIAS = 2.0;
 
+// CSM Increment 3 — Rung B cross-fade band WIDTH (D7), as a PROPORTION of the SELECTED cascade's
+// VIEW-Z range [prev_split, split_far]. Inside the trailing `overlap*range` slice the resolve ALSO
+// samples cascade `c+1` and `mix`es the two visibilities so the cascade boundary is a smooth
+// gradient instead of a hard resolution seam. No TAA on this engine => an ANALYTIC ramp, not a
+// dither (a dither would shimmer without temporal accumulation). `0.2` = the band is the last 20%
+// of each cascade — wide enough to hide the seam, narrow enough that the common pixel samples ONE
+// cascade. Owner-retunable; mirrors the host `csm_select_blend` golden's constant.
+static const float CSM_OVERLAP_PROPORTION = 0.2;
+
 // Shared camera ray-gen (the SAME header the marcher includes — ONE ray-gen, no drift).
 #include "ray_gen.hlsli"
 // Shared light-table std430 decode (ONE source of truth, included by the resolve + cull).
@@ -352,14 +361,13 @@ float3 safe_normalize(float3 a) {
     return a / len;
 }
 
-// === CSM Increment 1b — Rung A: the cascade shadow-map visibility sample =====================
+// === CSM Increment 1b/3 — the cascade shadow-map visibility sample (Rung B: N cascades) =======
 //
-// Projects the receiver world point `P` (normal-offset by `n` along `gCascades[0].texel_size *
-// CSM_NORMAL_BIAS`, D6) into cascade 0's light-clip space, builds the shadow-map UV (Y-FLIPPED to
+// Projects the receiver world point `P` (normal-offset by `n` along `gCascades[c].texel_size *
+// CSM_NORMAL_BIAS`, D6) into cascade `c`'s light-clip space, builds the shadow-map UV (Y-FLIPPED to
 // match the engine's framebuffer convention — see below), and PCF-compares the receiver's
-// light-space depth against the stored cascade depth via `gCsm.SampleCmpLevelZero`. Returns the
-// VISIBILITY in [0,1] (1 = lit, 0 = fully shadowed). Rung A samples ONLY cascade `c == 0`; the
-// N-cascade select + cross-fade is Rung B / Inc 3.
+// light-space depth against the stored cascade depth via `gCsm.SampleCmpLevelZero(float3(uv, c))`.
+// Returns the VISIBILITY in [0,1] (1 = lit, 0 = fully shadowed). One LAYER of the cascade array.
 //
 // UV Y-FLIP CONVENTION: the cascade depth pass renders with the SAME negative-viewport-free,
 // Vulkan-default top-left framebuffer origin as the main raster pass; clip→NDC maps `clip.y` to
@@ -367,15 +375,15 @@ float3 safe_normalize(float3 a) {
 // Vulkan Y-down convention. The engine's other reprojection (`project_to_screen`, the SSCS inverse)
 // applies a `(-ndc_y) * 0.5 + 0.5` flip to convert NDC→UV; this CSM lookup applies the IDENTICAL
 // flip (`uv.y = 1 - (clip.y/clip.w * 0.5 + 0.5)`) so the cascade UV addresses the same texel the
-// depth pass wrote. (Rung A's ortho light projection has `clip.w == 1`, so the perspective divide
-// is a no-op, but it is kept for generality.)
+// depth pass wrote. (The ortho light projection has `clip.w == 1`, so the perspective divide is a
+// no-op, but it is kept for generality.)
 //
-// O1 MAJORNESS: `gCascades[0].view_proj` is the SAME column-major matrix the depth VS pushed at
-// `@0`, so `mul(view_proj, float4(P_off,1))` here reprojects EXACTLY as the depth VS projected the
-// caster — the host matrix golden (compute.rs) pins this agreement so the two cannot drift.
-float csm_visibility(float3 P, float3 n) {
-    float3 P_off = P + n * (gCascades[0].texel_size * CSM_NORMAL_BIAS);
-    float4 clip = mul(gCascades[0].view_proj, float4(P_off, 1.0));
+// O1 MAJORNESS: `gCascades[c].view_proj` is the SAME column-major matrix the depth VS pushed at
+// `@0` for cascade `c`, so `mul(view_proj, float4(P_off,1))` here reprojects EXACTLY as the depth
+// VS projected the caster — the host matrix golden (compute.rs) pins this agreement.
+float csm_sample_cascade(uint c, float3 P, float3 n) {
+    float3 P_off = P + n * (gCascades[c].texel_size * CSM_NORMAL_BIAS);
+    float4 clip = mul(gCascades[c].view_proj, float4(P_off, 1.0));
     if (clip.w <= 0.0) {
         return 1.0;                        // behind the light plane — treat as lit (no shadow data)
     }
@@ -383,15 +391,76 @@ float csm_visibility(float3 P, float3 n) {
     float2 uv;
     uv.x = ndc.x * 0.5 + 0.5;
     uv.y = 1.0 - (ndc.y * 0.5 + 0.5);      // Vulkan framebuffer Y-flip (matches project_to_screen)
-    // Outside the cascade footprint there is no shadow data — treat as lit (Rung A has no fallback
-    // cascade). `ref` is the receiver's light-space NDC depth (Vulkan [0,1] depth range).
+    // Outside this cascade's footprint there is no shadow data for it — treat as lit (the SELECT
+    // already picked the tightest in-range cascade; a footprint miss here means fully lit). `ref`
+    // is the receiver's light-space NDC depth (Vulkan [0,1] depth range).
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z < 0.0 || ndc.z > 1.0) {
         return 1.0;
     }
     float ref = ndc.z;
     // PCF: hardware 2×2 comparison (LessOrEqual) — the lit fraction of the footprint whose stored
-    // depth is >= the (biased) receiver depth. Cascade layer 0 (Rung A).
-    return gCsm.SampleCmpLevelZero(gCsmCmp, float3(uv, 0.0), ref);
+    // depth is >= the (biased) receiver depth, at array layer `c`.
+    return gCsm.SampleCmpLevelZero(gCsmCmp, float3(uv, (float)c), ref);
+}
+
+// === CSM Increment 3 — Rung B: the cascade SELECT + smooth cross-fade band (D7) ===============
+//
+// SELECT (the interval compare-chain): `view_z` is the receiver's VIEW-SPACE depth (`dot(P -
+// cam_eye, cam_forward)` for PERSP, `view_t` for ORTHO — the SAME quantity the L1 froxel slice
+// uses), and the PSSM `split_far` boundaries are ALSO view-space (the resolve fits them that way),
+// so the SELECT runs in VIEW-Z LINEAR space (the critic's open Q4 answer). The chosen cascade is
+// the FIRST `c` whose `view_z < gCascades[c].split_far` — i.e. the tightest cascade still covering
+// the pixel. Past the LAST active split → no cascade covers the pixel → fully lit (return 1).
+//
+// The chain is BRANCH-LIGHT (Principle 1, this is a hot compute path): the selected index is the
+// COUNT of splits `view_z` has already passed — `sel = sum_c step(split_far[c], view_z)` over a
+// single bounded loop with uniform control flow (no per-lane early `return`; every lane walks the
+// same `gCsmActive` iterations). `sel == gCsmActive` ⇔ past every split ⇔ uncovered (fully lit).
+//
+// BLEND (the analytic cross-fade): inside the trailing `CSM_OVERLAP_PROPORTION * range` slice of
+// the selected cascade's view-z range `[prev_split, split_far]`, ALSO sample cascade `sel+1` (when
+// it exists) and `lerp` the two visibilities, `band_t` ramping 0→1 across the band. The COMMON case
+// (outside the band, or the last cascade) samples ONE cascade — `band_t == 0` so the second sample
+// is multiplied out (`lerp(a, b, 0) == a`); the `sel+1` sample is taken unconditionally inside the
+// `csm_mode` block but is cheap and never read when `band_t == 0`. Blend space: VIEW-Z LINEAR
+// (matching `split_far`), so the seam fades over a constant-depth slice.
+//
+// Returns the blended VISIBILITY in [0,1]. Host mirror: `csm_host_select_blend` (the demo test).
+float csm_visibility(float3 P, float3 n, float view_z) {
+    if (gCsmActive == 0u) {
+        return 1.0;                        // no cascades fitted — fully lit (defensive; gated above)
+    }
+    // SELECT: the selected cascade index = the number of splits the pixel has passed. `prev_split`
+    // tracks the near edge of the selected cascade (the previous cascade's far, 0 for cascade 0).
+    uint sel = 0u;
+    float prev_split = 0.0;
+    for (uint c = 0u; c < gCsmActive; ++c) {
+        float far_c = gCascades[c].split_far;
+        float passed = step(far_c, view_z);  // 1 when view_z >= this split (the pixel is beyond it)
+        prev_split = prev_split + passed * (far_c - prev_split); // latch the near edge as splits pass
+        sel += (uint)passed;
+    }
+    // Past the last active split (`sel == gCsmActive`): no cascade covers this pixel → fully lit (no
+    // shadow data beyond the shadow distance).
+    if (sel >= gCsmActive) {
+        return 1.0;
+    }
+
+    float vis_sel = csm_sample_cascade(sel, P, n);
+
+    // BLEND band: the trailing `overlap * range` of the selected cascade's view-z range. Outside
+    // the band `band_t == 0` (one-cascade common case); inside it ramps 0→1 to `sel + 1`.
+    float far_sel = gCascades[sel].split_far;
+    float range = max(far_sel - prev_split, 1.0e-4);      // guard a degenerate (zero-width) cascade
+    float band_start = far_sel - CSM_OVERLAP_PROPORTION * range;
+    float band_t = saturate((view_z - band_start) / max(far_sel - band_start, 1.0e-4));
+    // Only blend toward a NEXT cascade that exists; the last cascade has no successor → no fade-out
+    // (its far edge is the shadow distance, beyond which `sel >= gCsmActive` already returned lit).
+    float has_next = (sel + 1u < gCsmActive) ? 1.0 : 0.0;
+    band_t *= has_next;
+    uint next = min(sel + 1u, gCsmActive - 1u);            // clamp the index (multiplied out if !has_next)
+    float vis_next = csm_sample_cascade(next, P, n);
+    return lerp(vis_sel, vis_next, band_t);
 }
 
 // Karis "mobile" analytic environment BRDF approximation (no DFG LUT). Returns the
@@ -668,7 +737,15 @@ void main(uint3 tid : SV_DispatchThreadID) {
                     // back-faced surface is already `NoL == 0`, so the cascade lookup would be
                     // wasted). OFF on every pre-CSM scene → byte-identical (the 0%-gate).
                     if (csm_mode != CSM_MODE_OFF && NoL > 0.0) {
-                        vis = min(vis, csm_visibility(P, n));
+                        // CSM Increment 3 (Rung B): the cascade SELECT needs the receiver's
+                        // VIEW-SPACE depth — the SAME quantity the L1 froxel slice uses (`dot(rd,
+                        // cam_forward) * view_t` for PERSP, `view_t` for ORTHO; `cam_forward.xyz` is
+                        // contractually NORMALIZED, O1). The PSSM `split_far` boundaries are
+                        // view-space too, so the SELECT runs in VIEW-Z LINEAR space.
+                        float csm_view_z = (camera_mode == RAYGEN_CAM_PERSPECTIVE)
+                                         ? (dot(rd, cam_forward.xyz) * view_t)
+                                         : view_t;
+                        vis = min(vis, csm_visibility(P, n, csm_view_z));
                     }
                 } else if (multi_light && light_casts_sdf_shadow(L)
                            && marched < MAX_SDF_SHADOW_CASTERS_PER_PIXEL

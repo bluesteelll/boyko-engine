@@ -245,6 +245,10 @@ fn group_count_x() -> u32 {
 /// CSM Increment 1b (Rung A): the cascade shadow-map resolution the demo renders into (a 2K
 /// tile — the `CsmConfig` research default).
 const CSM_SHADOW_DIM: u32 = 2048;
+/// CSM Increment 3 (Rung B): the cascade-array cap — mirrors `boyko_rhi_vulkan::texture::
+/// MAX_CASCADES` (the per-layer-view array bound + the resolve's `MAX_CASCADES`). Local alias so
+/// the demo fit array + the host golden are sized from one source.
+const CSM_MAX_CASCADES: usize = boyko_rhi_vulkan::texture::MAX_CASCADES;
 /// CSM Increment 1b: the byte size of the host cascade UBO — a `ResolvedCsm` mirror (336 B:
 /// `[CascadeData; 4]` + `active_count` + `csm_mode_word` + pad). The resolve reads
 /// `gCascades[0].view_proj` from it; the depth pass pushes the SAME matrix.
@@ -348,19 +352,25 @@ impl CsmSceneResources {
         Self { cascade, sampler, ubo, depth_pipeline, depth_vs, depth_fs }
     }
 
-    /// Writes a `ResolvedCsm`-shaped image into the host-coherent UBO: `gCascades[0].view_proj`
-    /// (the 16 column-major floats), `active_count = 1`, `csm_mode_word = 1`; the rest zeroed.
-    /// Returns the 16 `view_proj` floats so the caller can also stamp them into the depth-pass
-    /// push (the O1 single-matrix pin: the resolve UBO + the depth push carry IDENTICAL bytes).
-    fn upload(&self, device: &VulkanContext, view_proj: &[f32; 16], texel_size: f32) {
+    /// CSM Increment 3 (Rung B): writes a `ResolvedCsm`-shaped image into the host-coherent UBO
+    /// from a [`CsmDemoFit`]: each cascade `c`'s `view_proj` (16 column-major floats), `split_far`,
+    /// and `texel_size` into `gCascades[c]`, then `active_count`/`csm_mode_word` in the header. The
+    /// trailing `[active_count..4)` cascade slots stay zero (bound-but-unread; the resolve SELECT
+    /// loops only `[0..active_count)`). The per-cascade `view_proj` bytes are the SAME ones the
+    /// depth pass stamps (the O1 single-matrix pin).
+    fn upload(&self, device: &VulkanContext, fit: &CsmDemoFit) {
         let mut bytes = [0u8; CSM_UBO_BYTES as usize];
-        for (i, f) in view_proj.iter().enumerate() {
-            bytes[i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+        for (c, cascade) in fit.cascades.iter().enumerate().take(fit.active_count as usize) {
+            let base = c * 80; // CascadeData stride
+            for (i, f) in cascade.view_proj.iter().enumerate() {
+                bytes[base + i * 4..base + i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+            }
+            // CascadeData layout: view_proj @0 (64 B), split_far @64, texel_size @68, pad @72..80.
+            bytes[base + 64..base + 68].copy_from_slice(&cascade.split_far.to_le_bytes());
+            bytes[base + 68..base + 72].copy_from_slice(&cascade.texel_size.to_le_bytes());
         }
-        // CascadeData layout: view_proj @0 (64 B), split_far @64, texel_size @68, pad @72..80.
-        bytes[68..72].copy_from_slice(&texel_size.to_le_bytes());
         // After the 4 × 80-byte CascadeData array (320 B): active_count @320, csm_mode_word @324.
-        bytes[320..324].copy_from_slice(&1u32.to_le_bytes());
+        bytes[320..324].copy_from_slice(&fit.active_count.to_le_bytes());
         bytes[324..328].copy_from_slice(&1u32.to_le_bytes());
         let dst = RhiDevice::buffer_mapped_ptr(device, &self.ubo).expect("CSM UBO mapped");
         // SAFETY: `dst` points to `CSM_UBO_BYTES` mapped host-coherent bytes (the UBO was created
@@ -428,6 +438,53 @@ fn csm_host_project(
         && (0.0..=1.0).contains(&uv_y)
         && (0.0..=1.0).contains(&ndc[2]);
     (uv_x, uv_y, ndc[2], in_bounds)
+}
+
+/// CSM Increment 3 (Rung B): the host-side normal-bias band overlap PROPORTION — MUST equal the
+/// resolve shader's `CSM_OVERLAP_PROPORTION` (`deferred_pbr.hlsl`) so the host select+blend golden
+/// computes the SAME `band_t` the GPU does.
+const CSM_OVERLAP_PROPORTION: f32 = 0.2;
+
+/// CSM Increment 3 (Rung B): the HOST MIRROR of the resolve's `csm_visibility` SELECT + BLEND
+/// control flow (the arithmetic that decides WHICH cascade(s) a `view_z` reads and the cross-fade
+/// weight) — NOT the PCF sample itself (the GPU owns the texture). Given the fit + a receiver
+/// `view_z`, returns `(selected, next, band_t, covered)`:
+///   * `selected` — the cascade index the SELECT picks (the first `c` with `view_z < split_far[c]`),
+///   * `next`     — `selected + 1` clamped to the last active cascade (the blend partner),
+///   * `band_t`   — the cross-fade weight in `[0,1]` (0 outside the band / on the last cascade),
+///   * `covered`  — `false` when `view_z` is past every active split (the resolve returns fully lit).
+///
+/// Byte-mirrors the shader's branch-light chain so the golden pins the SELECT boundaries to
+/// `split_far` and the blend ramp to the band — the host and GPU cannot drift.
+fn csm_host_select_blend(fit: &CsmDemoFit, view_z: f32) -> (usize, usize, f32, bool) {
+    let active = fit.active_count as usize;
+    // SELECT: the selected cascade = the COUNT of splits view_z has passed (the shader's
+    // `sum_c step(split_far[c], view_z)`); `prev_split` latches the selected cascade's near edge.
+    let mut selected = 0usize;
+    let mut prev_split = 0.0f32;
+    for cascade in fit.cascades.iter().take(active) {
+        let far_c = cascade.split_far;
+        if view_z >= far_c {
+            prev_split = far_c;
+            selected += 1;
+        }
+    }
+    if selected >= active {
+        // Past the last split — uncovered (the resolve returns fully lit). Clamp `selected` for the
+        // returned index (the caller treats `covered == false` as authoritative).
+        return (active.saturating_sub(1), active.saturating_sub(1), 0.0, false);
+    }
+    // BLEND: the trailing `overlap * range` of the selected cascade's view-z range.
+    let far_sel = fit.cascades[selected].split_far;
+    let range = (far_sel - prev_split).max(1.0e-4);
+    let band_start = far_sel - CSM_OVERLAP_PROPORTION * range;
+    let mut band_t = ((view_z - band_start) / (far_sel - band_start).max(1.0e-4)).clamp(0.0, 1.0);
+    let has_next = selected + 1 < active;
+    if !has_next {
+        band_t = 0.0;
+    }
+    let next = (selected + 1).min(active.saturating_sub(1));
+    (selected, next, band_t, true)
 }
 
 /// Maps the swapchain's `i32` `VkFormat` to "readback bytes are BGRA" (skips an
@@ -3103,16 +3160,31 @@ struct ShowcaseConfig {
     csm: Option<CsmDemoFit>,
 }
 
-/// CSM Increment 1b (Rung A) — the cascade FIT a [`ShowcaseConfig`] carries: the column-major
+/// CSM Increment 3 (Rung B) — one hand-fitted cascade in a [`CsmDemoFit`]: the column-major
 /// world→light-clip `view_proj` (the SAME bytes the depth VS pushes + the resolve UBO holds, the
-/// O1 single-matrix pin) + the world-space `texel_size` (the resolve's normal-bias scale). A
-/// hand-fitted orthographic sun frustum for the demo (a real app derives it from `resolve_csm`).
+/// O1 single-matrix pin), the VIEW-SPACE `split_far` (the cascade-SELECT boundary), and the
+/// world-space `texel_size` (the resolve's normal-bias scale). Mirrors `boyko_render::CascadeData`.
 #[derive(Clone, Copy)]
-struct CsmDemoFit {
+struct CsmDemoCascade {
     /// Column-major `ortho · light_view` (world → light clip), 16 floats.
     view_proj: [f32; 16],
+    /// The VIEW-SPACE far distance of this cascade — the SELECT boundary (`view_z < split_far`).
+    split_far: f32,
     /// The world-space size of one shadow texel (the resolve's normal-bias scale).
     texel_size: f32,
+}
+
+/// CSM Increment 3 (Rung B) — the N-cascade FIT a [`ShowcaseConfig`] carries: up to
+/// [`CSM_MAX_CASCADES`] hand-fitted cascades + the active count. A real app derives these from
+/// `boyko_render::resolve_csm`; the demo hand-fits N split planes covering the floor's near→far
+/// range so casters at increasing distance land in cascades 0, 1, 2 (the SELECT) and the cascade
+/// boundaries cross-fade (the BLEND). Rung A is `active_count == 1` (the original single cascade).
+#[derive(Clone, Copy)]
+struct CsmDemoFit {
+    /// The fitted cascades; only `[0..active_count)` are valid (the rest zeroed, bound-but-unread).
+    cascades: [CsmDemoCascade; CSM_MAX_CASCADES],
+    /// The number of valid cascades (`1..=CSM_MAX_CASCADES`) — mirrors `ResolvedCsm::active_count`.
+    active_count: u32,
 }
 
 /// Mesh foundation M2/M3 — the instanced-draw spec a [`ShowcaseConfig`] carries: a LIST of
@@ -3635,6 +3707,9 @@ fn engine_instanced_persp_screenshot_dump() {
 
 /// The CSM demo's BMP dump path (the owner's RTX visual oracle).
 const CSM_SHADOW_BMP: &str = "D:\\tmp\\engine_csm_shadow.bmp";
+/// CSM Increment 3 (Rung B): the N-cascade demo's BMP dump path (the owner's RTX visual oracle —
+/// the smooth multi-distance cascade transition).
+const CSM_CASCADES_BMP: &str = "D:\\tmp\\engine_csm_cascades.bmp";
 
 /// CSM Increment 1b (Rung A): the demo's hand-fitted cascade — a world-space box covering both the
 /// floor and the caster, plus the world-space texel size derived from it at the shadow resolution.
@@ -3653,6 +3728,23 @@ const CSM_DEMO_FAR: f32 = 20.0;
 /// Returns the 16 column-major floats (upload-ready) — the byte layout the depth VS push (`@0`) +
 /// the resolve `CsmCascades` cbuffer expect.
 fn csm_demo_view_proj(sun_dir: [f32; 3], center: [f32; 3]) -> [f32; 16] {
+    // Rung A delegates to the parameterized Rung-B builder at the demo's fixed footprint/z-range.
+    csm_cascade_view_proj(sun_dir, center, CSM_DEMO_HALF_EXTENT, CSM_DEMO_NEAR, CSM_DEMO_FAR)
+}
+
+/// CSM Increment 3 (Rung B): builds ONE cascade's COLUMN-MAJOR world→light-clip `view_proj`
+/// (`ortho · light_view`) for the sun `sun_dir` (direction TO the light) looking at `center`, with
+/// an orthographic half-extent `half` and light-space z-range `[z_near, z_far]` (Vulkan `[0,1]`
+/// depth). The light eye is pulled back along `sun_dir` by `z_far*0.5`. Generalizes the Rung-A fit
+/// (which fixed `half`/`z` to demo constants) so each cascade can size its own footprint. Returns
+/// the 16 column-major floats (the byte layout the depth VS push `@0` + the resolve cbuffer expect).
+fn csm_cascade_view_proj(
+    sun_dir: [f32; 3],
+    center: [f32; 3],
+    half: f32,
+    z_near: f32,
+    z_far: f32,
+) -> [f32; 16] {
     let norm = |v: [f32; 3]| {
         let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
         [v[0] / l, v[1] / l, v[2] / l]
@@ -3668,7 +3760,7 @@ fn csm_demo_view_proj(sun_dir: [f32; 3], center: [f32; 3]) -> [f32; 16] {
 
     let sun = norm(sun_dir);
     // The light looks back along -sun (from the sun toward the scene). Eye pulled back along sun.
-    let pullback = CSM_DEMO_FAR * 0.5;
+    let pullback = z_far * 0.5;
     let eye = [
         center[0] + sun[0] * pullback,
         center[1] + sun[1] * pullback,
@@ -3695,14 +3787,13 @@ fn csm_demo_view_proj(sun_dir: [f32; 3], center: [f32; 3]) -> [f32; 16] {
     // Ortho proj (Vulkan [0,1] depth): clip.x = x/h, clip.y = -y/h (Y-flip to match the engine's
     // framebuffer convention, the SAME flip `perspective_mvp_bytes` + the resolve apply),
     // clip.z = (z - near)/(far - near), clip.w = 1.
-    let h = CSM_DEMO_HALF_EXTENT;
-    let inv_h = 1.0 / h;
-    let zr = CSM_DEMO_FAR - CSM_DEMO_NEAR;
+    let inv_h = 1.0 / half;
+    let zr = z_far - z_near;
     // pv[row][col] = ortho_row · light_view_row.
     let pv: [[f32; 4]; 4] = [
         [inv_h * right[0], inv_h * right[1], inv_h * right[2], inv_h * tx],
         [-inv_h * up[0], -inv_h * up[1], -inv_h * up[2], -inv_h * ty],
-        [fwd[0] / zr, fwd[1] / zr, fwd[2] / zr, (tz - CSM_DEMO_NEAR) / zr],
+        [fwd[0] / zr, fwd[1] / zr, fwd[2] / zr, (tz - z_near) / zr],
         [0.0, 0.0, 0.0, 1.0],
     ];
     // Upload COLUMN-MAJOR: out[col*4 + row] = pv[row][col] (the verified transpose).
@@ -3715,10 +3806,134 @@ fn csm_demo_view_proj(sun_dir: [f32; 3], center: [f32; 3]) -> [f32; 16] {
     out
 }
 
+/// CSM Increment 3 (Rung B): the PSSM split distance for split `idx` of `n` (`idx ∈ 1..=n`) — the
+/// HOST mirror of `boyko_render::csm_config::pssm_split`: `λ·log + (1−λ)·uniform`, `log =
+/// near·(far/near)^(idx/n)`, `uniform = near + (far−near)·(idx/n)`. `idx == n` returns `far`.
+fn csm_pssm_split(near: f32, far: f32, lambda: f32, idx: usize, n: f32) -> f32 {
+    let t = idx as f32 / n;
+    let log = near * (far / near).powf(t);
+    let uniform = near + (far - near) * t;
+    lambda * log + (1.0 - lambda) * uniform
+}
+
+/// CSM Increment 3 (Rung B): hand-fits `count` cascades over the camera frustum's `[near, far]`
+/// VIEW-Z range, PSSM-partitioned (mirrors `resolve_csm`). For each cascade the view-z slice
+/// `[near_i, split_i]` is bounded by a world-space sphere (center = mean of the 8 slice corners,
+/// radius = max corner distance); the cascade's ortho footprint = the sphere diameter, its
+/// `texel_size = diameter / CSM_SHADOW_DIM`, its `split_far = split_i` (the SELECT boundary). A
+/// real app calls `boyko_render::resolve_csm`; the demo inlines it (no `boyko_render` dep here).
+///
+/// `eye`/`fwd`/`right`/`up` are the ORTHONORMAL camera basis (forward normalized); `fov_y` radians,
+/// `aspect = W/H`. Cascades `[0..count)` are valid; the rest are zeroed.
+#[allow(clippy::too_many_arguments)]
+fn csm_demo_cascades(
+    sun_dir: [f32; 3],
+    eye: [f32; 3],
+    fwd: [f32; 3],
+    right: [f32; 3],
+    up: [f32; 3],
+    fov_y: f32,
+    aspect: f32,
+    near: f32,
+    far: f32,
+    count: usize,
+) -> CsmDemoFit {
+    debug_assert!(
+        (1..=CSM_MAX_CASCADES).contains(&count),
+        "cascade count must be in 1..=MAX_CASCADES"
+    );
+    let n = count as f32;
+    let half_tan = (fov_y * 0.5).tan();
+    // The 4 corner ray directions (world space) at the frustum's NDC corners — scaled by view-z to
+    // reach the slice planes. Matches `ray_gen`'s perspective dir combine (`fwd + right*aspect*tan*x
+    // + up*tan*y`), so the cascade footprint covers exactly what the camera sees.
+    let corner_dir = |sx: f32, sy: f32| {
+        [
+            fwd[0] + right[0] * (sx * aspect * half_tan) + up[0] * (sy * half_tan),
+            fwd[1] + right[1] * (sx * aspect * half_tan) + up[1] * (sy * half_tan),
+            fwd[2] + right[2] * (sx * aspect * half_tan) + up[2] * (sy * half_tan),
+        ]
+    };
+    let corners = [
+        corner_dir(-1.0, -1.0),
+        corner_dir(1.0, -1.0),
+        corner_dir(-1.0, 1.0),
+        corner_dir(1.0, 1.0),
+    ];
+
+    let mut cascades = [CsmDemoCascade {
+        view_proj: [0.0; 16],
+        split_far: 0.0,
+        texel_size: 0.0,
+    }; CSM_MAX_CASCADES];
+
+    let lambda = 0.5; // PSSM blend (mirror the CsmConfig research default)
+    let mut near_i = near;
+    for (i, slot) in cascades.iter_mut().enumerate().take(count) {
+        let split_i = csm_pssm_split(near, far, lambda, i + 1, n);
+        // The 8 world-space slice corners (near plane at `near_i`, far at `split_i`). A corner at
+        // view-z `z` is `eye + dir * z` where `dir` already has unit forward component (`fwd` is
+        // normalized and orthonormal to right/up), so `dot(dir, fwd) == 1` and `dir*z` lands on the
+        // z-plane.
+        let mut pts = [[0.0f32; 3]; 8];
+        for (k, d) in corners.iter().enumerate() {
+            for (p, &z) in [near_i, split_i].iter().enumerate() {
+                pts[k * 2 + p] = [eye[0] + d[0] * z, eye[1] + d[1] * z, eye[2] + d[2] * z];
+            }
+        }
+        // Bounding sphere: center = mean, radius = max corner distance (the resolve's sphere fit).
+        let mut center = [0.0f32; 3];
+        for p in &pts {
+            center[0] += p[0];
+            center[1] += p[1];
+            center[2] += p[2];
+        }
+        center = [center[0] / 8.0, center[1] / 8.0, center[2] / 8.0];
+        let mut radius = 0.0f32;
+        for p in &pts {
+            let dx = p[0] - center[0];
+            let dy = p[1] - center[1];
+            let dz = p[2] - center[2];
+            radius = radius.max((dx * dx + dy * dy + dz * dz).sqrt());
+        }
+        let diameter = (2.0 * radius).max(1.0);
+        let half = diameter * 0.5;
+        let texel_size = diameter / CSM_SHADOW_DIM as f32;
+        // The light z-range spans the sphere plus the pullback margin (the eye is pulled back
+        // `z_far*0.5`); a generous far keeps the caster inside the ortho box.
+        let z_far = diameter * 2.0;
+        *slot = CsmDemoCascade {
+            view_proj: csm_cascade_view_proj(sun_dir, center, half, CSM_DEMO_NEAR, z_far),
+            split_far: split_i,
+            texel_size,
+        };
+        near_i = split_i;
+    }
+
+    CsmDemoFit { cascades, active_count: count as u32 }
+}
+
 /// CSM Increment 1b (Rung A): the demo cascade's world-space texel size (the ortho footprint
 /// `2h` spread over the shadow resolution) — the resolve's normal-bias scale.
 fn csm_demo_texel_size() -> f32 {
     (2.0 * CSM_DEMO_HALF_EXTENT) / (CSM_SHADOW_DIM as f32)
+}
+
+/// CSM Increment 3 (Rung B): packs ONE Rung-A cascade into a `[CsmDemoCascade; MAX]` (slot 0; the
+/// rest zeroed) so the single-cascade demo + the host golden reuse the N-cascade plumbing. The
+/// `split_far` is set large enough that the lone cascade always SELECTs (Rung A had no select).
+fn csm_single_cascade(
+    view_proj: [f32; 16],
+    texel_size: f32,
+    split_far: f32,
+) -> [CsmDemoCascade; CSM_MAX_CASCADES] {
+    let mut cascades = [CsmDemoCascade {
+        view_proj: [0.0; 16],
+        split_far: 0.0,
+        texel_size: 0.0,
+    }; CSM_MAX_CASCADES];
+    cascades[0] = CsmDemoCascade { view_proj, split_far, texel_size };
+    cascades
 }
 
 /// **CSM Increment 1b (Rung A) — the single-cascade hardware shadow showcase config.** An
@@ -3771,10 +3986,15 @@ fn csm_shadow_config() -> ShowcaseConfig {
                 InstancedMeshEntry { vertices: slab_v, indices: slab_i, affines },
             ],
         }),
-        // CSM ON: the cascade fit to the sun, looking at the scene center near the caster.
+        // CSM ON (Rung A): ONE cascade fit to the sun, looking at the scene center near the caster.
+        // `split_far` is large (covers the whole scene) so the single cascade always SELECTs.
         csm: Some(CsmDemoFit {
-            view_proj: csm_demo_view_proj(SHOWCASE_SUN_DIR, [0.0, 0.5, -1.2]),
-            texel_size: csm_demo_texel_size(),
+            cascades: csm_single_cascade(
+                csm_demo_view_proj(SHOWCASE_SUN_DIR, [0.0, 0.5, -1.2]),
+                csm_demo_texel_size(),
+                CSM_DEMO_FAR,
+            ),
+            active_count: 1,
         }),
     }
 }
@@ -3850,6 +4070,159 @@ fn csm_matrix_golden_host_projection_agrees() {
         "the direct column-major product and the host helper must agree (the majorness pin): \
          {direct_uv_x} vs {uv_x_nobias}"
     );
+}
+
+// === CSM Increment 3 — Rung B: the N-cascade (multi-distance) demo + the select+blend golden. ===
+
+/// CSM Increment 3 (Rung B): the demo's cascade count (3) + the view-z range the inline fit
+/// partitions. The camera looks down a LONG raster floor; three PSSM cascades cover near→far so the
+/// receding caster boxes land in cascades 0, 1, 2 and the boundaries cross-fade.
+const CSM_CASCADES_COUNT: usize = 3;
+const CSM_CASCADES_FAR: f32 = 18.0; // the shadow distance (the last cascade's far)
+
+/// CSM Increment 3 (Rung B): builds the demo's 3-cascade fit from the room camera basis + the sun.
+/// The cascades PSSM-partition the camera frustum's `[near, CSM_CASCADES_FAR]` view-z range (the
+/// inline mirror of `boyko_render::resolve_csm`), so the SELECT picks the tightest cascade per pixel
+/// and the boundaries blend.
+fn csm_cascades_fit() -> CsmDemoFit {
+    csm_demo_cascades(
+        SHOWCASE_SUN_DIR,
+        ROOM_CAM_EYE,
+        ROOM_CAM_FORWARD,
+        ROOM_CAM_RIGHT,
+        ROOM_CAM_UP,
+        ROOM_CAM_FOV_Y,
+        COMPOSITE_W as f32 / COMPOSITE_H as f32,
+        CSM_DEMO_NEAR,
+        CSM_CASCADES_FAR,
+        CSM_CASCADES_COUNT,
+    )
+}
+
+/// **CSM Increment 3 (Rung B) — the N-cascade (multi-distance) showcase config.** Several ASYMMETRIC
+/// caster boxes RECEDING into the distance down a LONG raster floor, a perspective room camera, ONE
+/// directional sun, `cascade_count == 3`. The near boxes' shadows (cascade 0, dense) + the far boxes'
+/// shadows (cascade 1/2) all render, with a SMOOTH transition at the cascade boundaries (the blend
+/// band — no hard seam). NO SDF (the floor's `gMaterial.r == 1`, so `min(1, csm_vis) == csm_vis`).
+fn csm_cascades_config() -> ShowcaseConfig {
+    // ONE directional sun (the cascades are fit to it) + a dim sky for ambient fill.
+    let header = GoldenLightHeader::new(2, 0, 1.0).with_ssao_mode(0);
+    let lights = vec![
+        GoldenLight::directional(SHOWCASE_SUN_DIR, [1.0, 0.97, 0.92], 3.0),
+        GoldenLight::sky([0.08, 0.08, 0.10], [0.08, 0.08, 0.10]),
+    ];
+
+    // NO SDF: the marcher owns no surface; a single degenerate far edit keeps the edit-list valid.
+    let sdf = vec![SdfEdit::sphere([0.0, -1000.0, 0.0], 0.01, sdf_op::UNION, 0.0)];
+
+    // The CASTERS: asymmetric slabs receding down the floor (increasing -Z), so they fall into
+    // cascades 0 (near), 1 (mid), 2 (far). A yaw makes each shadow's orientation read.
+    let (slab_v, slab_i) = mesh_box_model([0.35, 0.9, 0.55], [0.82, 0.42, 0.30, 1.0]);
+    let affines = vec![
+        instance_affine(0.4, 1.0, [-1.0, 0.9, -1.5]), // near — cascade 0
+        instance_affine(-0.3, 1.0, [0.8, 0.9, -5.0]), // mid  — cascade 1
+        instance_affine(0.6, 1.0, [-0.6, 0.9, -10.0]), // far  — cascade 2
+    ];
+
+    // The raster FLOOR: a LONG flat slab spanning near→far so every cast shadow lands on it (mask=1).
+    let (floor_v, floor_i) = mesh_box_model([5.0, 0.05, 12.0], ROOM_FLOOR_COLOR);
+    let floor_affine = instance_affine(0.0, 1.0, [0.0, -0.05, -7.0]);
+
+    ShowcaseConfig {
+        sdf,
+        camera: room_camera(),
+        light_header: header,
+        light_elems: lights,
+        vertices: showcase_quad_vertices(),
+        mvp: instanced_room_mvp_bytes(),
+        ssao_quality: None,
+        mesh_sdf: None,
+        instanced: Some(InstancedMesh {
+            meshes: vec![
+                // The floor (batch 0, base 0) + the 3 receding casters (batch 1, nonzero base).
+                InstancedMeshEntry { vertices: floor_v, indices: floor_i, affines: vec![floor_affine] },
+                InstancedMeshEntry { vertices: slab_v, indices: slab_i, affines },
+            ],
+        }),
+        // CSM ON (Rung B): 3 cascades PSSM-fit over the floor's near→far range.
+        csm: Some(csm_cascades_fit()),
+    }
+}
+
+/// **CSM Increment 3 (Rung B) — the N-cascade hardware shadow screenshot.** Drives the cascade
+/// DEPTH loop (the 3 receding boxes rendered from the sun POV into cascade layers 0/1/2) + the
+/// resolve SELECT + blend, dumping a TRUE 512×512 BMP to [`CSM_CASCADES_BMP`] for the owner's RTX
+/// visual sign-off (the deliverable: all three boxes' shadows render with a SMOOTH cascade
+/// transition — no hard seam).
+///
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
+/// orchestrator runs it on the GPU to dump the screenshot.
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the CSM cascades screenshot"]
+fn engine_csm_cascades_512_screenshot_dump() {
+    run_showcase_dump("boyko_engine CSM cascades 512", CSM_CASCADES_BMP, csm_cascades_config());
+}
+
+/// **CSM Increment 3 (Rung B) — the cascade SELECT + BLEND host golden.** Pins the resolve's
+/// `csm_visibility` control flow ([`csm_host_select_blend`], its mirror): a NEAR point picks cascade
+/// 0, a MID point picks cascade 1, a FAR point picks cascade 2, the SELECT boundaries match
+/// `split_far`, the band picks the blend (`band_t` ramps 0→1), and a point past the last split is
+/// fully lit (not covered). The host mirror is the same arithmetic the GPU runs under the `csm_mode`
+/// gate, so a drift would break the on-screen cascade transition.
+#[test]
+fn csm_cascade_select_blend_golden() {
+    let fit = csm_cascades_fit();
+    assert_eq!(fit.active_count as usize, CSM_CASCADES_COUNT);
+    let s0 = fit.cascades[0].split_far;
+    let s1 = fit.cascades[1].split_far;
+    let s2 = fit.cascades[2].split_far;
+    assert!(s0 < s1 && s1 < s2, "PSSM splits must be monotone: {s0} < {s1} < {s2}");
+
+    // A NEAR receiver (view_z < s0, outside the band) selects cascade 0, no blend.
+    let near_z = s0 * 0.5;
+    let (sel, _next, band_t, covered) = csm_host_select_blend(&fit, near_z);
+    assert!(covered, "a near point must be covered");
+    assert_eq!(sel, 0, "view_z {near_z} (< split0 {s0}) must select cascade 0");
+    assert_eq!(band_t, 0.0, "a near point outside the band must not blend");
+
+    // A MID receiver between s0 and s1 (outside the band) selects cascade 1.
+    let mid_z = s0 + (s1 - s0) * 0.5;
+    let (sel, _n, band_mid, _c) = csm_host_select_blend(&fit, mid_z);
+    assert_eq!(sel, 1, "view_z {mid_z} (split0 {s0}..split1 {s1}) must select cascade 1");
+    assert_eq!(band_mid, 0.0, "the mid-cascade center must not blend");
+
+    // A FAR receiver between s1 and s2 selects cascade 2 (the last cascade — never blends out).
+    let far_z = s1 + (s2 - s1) * 0.5;
+    let (sel, _n, band_far, _c) = csm_host_select_blend(&fit, far_z);
+    assert_eq!(sel, 2, "view_z {far_z} (split1 {s1}..split2 {s2}) must select the last cascade 2");
+    assert_eq!(band_far, 0.0, "the last cascade has no successor → no fade-out");
+
+    // The SELECT boundary pin: a view_z JUST below split0 selects 0; just above selects 1.
+    let (sel_lo, ..) = csm_host_select_blend(&fit, s0 - 1.0e-3);
+    let (sel_hi, ..) = csm_host_select_blend(&fit, s0 + 1.0e-3);
+    assert_eq!(sel_lo, 0, "just below split0 selects cascade 0");
+    assert_eq!(sel_hi, 1, "just above split0 crosses to cascade 1");
+
+    // The BLEND band: a view_z INSIDE cascade 0's trailing overlap band yields band_t in (0,1) and
+    // blends toward cascade 1. At the band start band_t == 0; at split0 band_t == 1.
+    let range0 = s0; // cascade 0's range is [0, s0]
+    let band_start = s0 - CSM_OVERLAP_PROPORTION * range0;
+    let (sel_b, next_b, band_mid_b, _c) =
+        csm_host_select_blend(&fit, band_start + (s0 - band_start) * 0.5);
+    assert_eq!(sel_b, 0, "the band still selects cascade 0");
+    assert_eq!(next_b, 1, "the band blends toward cascade 1");
+    assert!(
+        (0.0..=1.0).contains(&band_mid_b) && band_mid_b > 0.0,
+        "mid-band band_t must be in (0,1]: {band_mid_b}"
+    );
+    let (_s, _n, band_at_start, _c) = csm_host_select_blend(&fit, band_start + 1.0e-4);
+    let (_s, _n, band_at_split, _c) = csm_host_select_blend(&fit, s0 - 1.0e-4);
+    assert!(band_at_start < 0.05, "band_t ~0 at the band start: {band_at_start}");
+    assert!(band_at_split > 0.95, "band_t ~1 at the split: {band_at_split}");
+
+    // Past the last split → NOT covered (the resolve returns fully lit, no shadow data).
+    let (_s, _n, _b, covered_far) = csm_host_select_blend(&fit, s2 + 5.0);
+    assert!(!covered_far, "a point past the shadow distance must be uncovered (fully lit)");
 }
 
 // === Mesh foundation M3 — the multi-mesh batch-loop + nonzero-base + mixed-width demo. ===
@@ -4931,16 +5304,27 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
     // cascade UBO + build the depth-pass push (the O1 single-matrix pin: the UBO + the push carry
     // IDENTICAL `view_proj` bytes); else the trio is bound-but-unread (`csm: None`, the 0%-gate).
     let csm = CsmSceneResources::create(device, &instance_layout);
-    let csm_push = cfg.csm.map(|fit| {
-        csm.upload(device, &fit.view_proj, fit.texel_size);
-        // The 88-byte depth-pass push: `view_proj` (@0) + `use_model_matrix == 1` (@84). The
-        // recorder overwrites `base_instance` (@80) per caster batch.
-        let mut push = [0u8; GBUFFER_PUSH_BYTES];
-        for (i, f) in fit.view_proj.iter().enumerate() {
-            push[i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+    // CSM Increment 3 (Rung B): upload the N-cascade fit into the UBO, then build the depth-pass
+    // activation — the per-cascade `view_proj` byte blocks (the depth loop stamps `[c]` into the
+    // push @0) + the active count. The push TEMPLATE carries `use_model_matrix == 1` (@84); its
+    // leading 64 bytes are overwritten per cascade so they are left zero here.
+    let csm_activation = cfg.csm.map(|fit| {
+        csm.upload(device, &fit);
+        let mut cascade_view_proj = [[0u8; 64]; CSM_MAX_CASCADES];
+        for (dst, src) in cascade_view_proj
+            .iter_mut()
+            .zip(fit.cascades.iter())
+            .take(fit.active_count as usize)
+        {
+            for (i, f) in src.view_proj.iter().enumerate() {
+                dst[i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+            }
         }
+        // The 88-byte depth-pass push TEMPLATE: `use_model_matrix == 1` (@84). The recorder
+        // overwrites `view_proj` (@0..64) per cascade + `base_instance` (@80) per caster batch.
+        let mut push = [0u8; GBUFFER_PUSH_BYTES];
         push[84..88].copy_from_slice(&1u32.to_le_bytes());
-        push
+        (push, cascade_view_proj, fit.active_count)
     });
 
     // M3: build the per-mesh draw batch LIST (one `GBufferMeshDraw` per registered mesh,
@@ -5054,9 +5438,11 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         csm_cascade_texture: &csm.cascade,
         csm_compare_sampler: &csm.sampler,
         csm_cascade_ubo: &csm.ubo,
-        csm: csm_push.map(|push| CsmDepthActivation {
+        csm: csm_activation.map(|(push, cascade_view_proj, active_count)| CsmDepthActivation {
             pipeline: &csm.depth_pipeline,
             push,
+            cascade_view_proj,
+            active_count,
             shadow_dim: CSM_SHADOW_DIM,
         }),
     };

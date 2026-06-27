@@ -270,8 +270,13 @@ static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<155040> = SpirvBlob(*include_bytes!(
 /// (gated by header word 7 bit 2 via `load_csm_mode`; OFF on every pre-CSM scene → the
 /// `SampleCmpLevelZero` never runs → the bound-but-unread cascade map/sampler/UBO are never
 /// sampled → byte-identical, the 0%-gate) the `vis = min(vis, csm_visibility(P, n))` combine on
-/// the primary directional; 40652 → 43316 bytes.
-static DEFERRED_PBR_SPV: SpirvBlob<43316> = SpirvBlob(*include_bytes!(concat!(
+/// the primary directional; 40652 → 43316 bytes. CSM Increment 3 (Rung B) extends the single-cascade
+/// sample to N cascades: `csm_sample_cascade(c, ..)` PCF-samples array layer `c`, and `csm_visibility`
+/// SELECTS the cascade by VIEW-Z (a branch-light compare-chain over `gCsmActive`) then cross-fades
+/// across the trailing `CSM_OVERLAP_PROPORTION` band into `c+1` (the analytic, no-dither seam blend).
+/// Still under the SAME `csm_mode != 0` gate → byte-identical PIXELS on every pre-CSM scene (the
+/// 0%-gate; the `.spv` grows with the select/blend); 43316 → 46008 bytes.
+static DEFERRED_PBR_SPV: SpirvBlob<46008> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/deferred_pbr.comp.spv"
 )));

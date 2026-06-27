@@ -49,7 +49,7 @@ use crate::rhi_impl::{
     ComputePipeline, Vulkan, VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline,
     VulkanSampler,
 };
-use crate::texture::VulkanTexture;
+use crate::texture::{MAX_CASCADES, VulkanTexture};
 
 /// The number of frames the [`Renderer`] keeps in flight (double-buffered CPU↔GPU
 /// overlap). Per-frame: an acquire semaphore + an in-flight fence; render-finished
@@ -3304,9 +3304,23 @@ impl<'ctx> Renderer<'ctx> {
         // resolve dispatch (5b) so the cascade depth is SHADER_READ-visible to the resolve. ===
         if let Some(csm) = &scene.csm {
             let cascade = scene.csm_cascade_texture;
+            // CSM Increment 3 (Rung B): the number of cascade LAYERS to render — clamped to the
+            // backend cap so an out-of-range `active_count` cannot drive `layer_render_view` /
+            // the barrier range past the array bounds. `1` reproduces the Rung-A single-cascade path.
+            let active = (csm.active_count as usize).clamp(1, MAX_CASCADES) as u32;
+            // The WHOLE-ARRAY depth subresource range (`[0..active)` layers, DEPTH aspect): the
+            // Rung-A `DEPTH_SUBRESOURCE_RANGE` covers ONLY layer 0, so Rung B barriers the active
+            // layers explicitly. ONE barrier-in + ONE barrier-out span every rendered cascade.
+            let csm_layers_range = VkImageSubresourceRange {
+                aspect_mask: VK_IMAGE_ASPECT_DEPTH_BIT,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: active,
+            };
             // (CSM-0) Barrier-in: the cascade image UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL (the
-            // depth-write access, DEPTH aspect). The whole array is re-`UNDEFINED`'d (Rung A
-            // renders only layer 0; the unused layers carry no content the resolve reads).
+            // depth-write access, DEPTH aspect) over ALL `[0..active)` layers. Each is re-
+            // `UNDEFINED`'d (the prior frame's content is discarded before this frame's depth pass).
             let to_depth = VkImageMemoryBarrier {
                 s_type: VkStructureType::ImageMemoryBarrier,
                 p_next: ptr::null(),
@@ -3317,7 +3331,7 @@ impl<'ctx> Renderer<'ctx> {
                 src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
                 dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
                 image: cascade.image,
-                subresource_range: DEPTH_SUBRESOURCE_RANGE,
+                subresource_range: csm_layers_range,
             };
             // SAFETY: recording is open; one image barrier on the live cascade depth image;
             // TOP_OF_PIPE→(EARLY|LATE)_FRAGMENT_TESTS with UNDEFINED→DEPTH is the superset-correct
@@ -3339,47 +3353,18 @@ impl<'ctx> Renderer<'ctx> {
                 );
             }
 
-            // (CSM-1) Depth-only dynamic rendering into cascade layer 0's render view: NO color
-            // attachment (`color_attachment_count == 0`), one depth attachment (CLEAR to the far
-            // plane / STORE). The render area is the shadow-map resolution (the cascade image's
-            // own square extent — NOT the swapchain/composite extent).
+            // (CSM-1) Depth-only dynamic rendering, LOOPED over the `[0..active)` cascades (Rung B).
+            // The render area / viewport / scissor are cascade-INDEPENDENT (the square shadow-map
+            // resolution — NOT the swapchain/composite extent), so they are built ONCE; only the
+            // per-layer render view + the pushed `view_proj` change per cascade. NO color attachment
+            // (`color_attachment_count == 0`), one depth attachment (CLEAR to far / STORE).
             let cascade_extent = VkExtent2D {
                 width: csm.shadow_dim,
                 height: csm.shadow_dim,
             };
-            let csm_depth_attachment = VkRenderingAttachmentInfo {
-                s_type: VkStructureType::RenderingAttachmentInfo,
-                p_next: ptr::null(),
-                image_view: cascade.layer_render_view(0),
-                image_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                resolve_mode: 0,
-                resolve_image_view: VkImageView::NULL,
-                resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
-                load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
-                store_op: VK_ATTACHMENT_STORE_OP_STORE,
-                clear_value: VkClearValue {
-                    depth_stencil: VkClearDepthStencilValue {
-                        depth: 1.0,
-                        stencil: 0,
-                    },
-                },
-            };
             let csm_area = VkRect2D {
                 offset: VkOffset2D { x: 0, y: 0 },
                 extent: cascade_extent,
-            };
-            let csm_rendering = VkRenderingInfo {
-                s_type: VkStructureType::RenderingInfo,
-                p_next: ptr::null(),
-                flags: 0,
-                render_area: csm_area,
-                layer_count: 1,
-                view_mask: 0,
-                color_attachment_count: 0,
-                p_color_attachments: ptr::null(),
-                p_depth_attachment: (&csm_depth_attachment as *const VkRenderingAttachmentInfo)
-                    .cast(),
-                p_stencil_attachment: ptr::null(),
             };
             let csm_viewport = VkViewport {
                 x: 0.0,
@@ -3390,93 +3375,134 @@ impl<'ctx> Renderer<'ctx> {
                 max_depth: 1.0,
             };
             let mut csm_push = csm.push;
-            // SAFETY: recording is open; `csm_rendering` is fully initialized — its depth
-            // attachment names the live cascade layer-0 render view (now
-            // DEPTH_ATTACHMENT_OPTIMAL), NO color attachment (depth-only); the depth-only
-            // pipeline (declaring an EMPTY `color_formats` + `depth_format = D32Sfloat` +
-            // `cull_mode: Front` + a depth bias + the set-0 instance layout) belongs to this
-            // device (caller contract). The SAME instance SSBO (`scene.instance_bind_group`) the
-            // main pass binds is bound at set 0 to satisfy the depth VS's static `instances`
-            // reference; the 88-byte push carries the cascade `view_proj` (`@0`) +
-            // `use_model_matrix == 1` (`@84`), and per caster batch the recorder re-pushes its
-            // `base_instance` (4 bytes @80, in-range of the 88-byte VERTEX push) then
-            // `draw_indexed` reads that batch's bound vertex+index buffers (created on this device
-            // with VERTEX/INDEX usage). The locals outlive the bracketed calls. Begin/End bracket
-            // the depth pass exactly.
-            unsafe {
-                (self.fns.cmd_begin_rendering)(cmd, &csm_rendering);
-                (self.fns.cmd_bind_pipeline)(
-                    cmd,
-                    VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    csm.pipeline.pipeline,
-                );
-                (self.fns.cmd_bind_descriptor_sets)(
-                    cmd,
-                    VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    csm.pipeline.layout,
-                    0,
-                    1,
-                    &scene.instance_bind_group.descriptor_set,
-                    0,
-                    ptr::null(),
-                );
-                (self.fns.cmd_push_constants)(
-                    cmd,
-                    csm.pipeline.layout,
-                    VK_SHADER_STAGE_VERTEX_BIT,
-                    0,
-                    csm_push.len() as u32,
-                    csm_push.as_ptr().cast(),
-                );
-                (self.fns.cmd_set_viewport)(cmd, 0, 1, &csm_viewport);
-                (self.fns.cmd_set_scissor)(cmd, 0, 1, &csm_area);
-                // The caster batches: the SAME instanced mesh draws the main pass rasterizes (the
-                // demo's box). A real app gathers a `With<ShadowCaster>` subset; the inline demo
-                // reuses the full list. An EMPTY list records the depth scope with no draw (a
-                // cleared cascade — every receiver fully lit, the resolve `min`-combine a no-op).
-                for batch in scene.mesh_draw {
-                    let base = batch.base_instance;
-                    csm_push[GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize
-                        ..GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4]
-                        .copy_from_slice(&base.to_le_bytes());
+            // BUILD-ONCE-CONSUME-N-VIEWS: the SAME caster batches + instance SSBO are rendered into
+            // each cascade layer; only cascade `c`'s `view_proj` differs. Loop the active cascades.
+            for c in 0..active {
+                // Stamp cascade `c`'s COLUMN-MAJOR `view_proj` (64 B) into the push's leading
+                // matrix bytes (the O1 single-matrix pin — byte-equal to the resolve UBO's
+                // `gCascades[c].view_proj`). The trailing words (`use_model_matrix @84`) are
+                // unchanged from the template; `base_instance @80` is re-pushed per batch below.
+                csm_push[0..64].copy_from_slice(&csm.cascade_view_proj[c as usize]);
+                let csm_depth_attachment = VkRenderingAttachmentInfo {
+                    s_type: VkStructureType::RenderingAttachmentInfo,
+                    p_next: ptr::null(),
+                    image_view: cascade.layer_render_view(c),
+                    image_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                    resolve_mode: 0,
+                    resolve_image_view: VkImageView::NULL,
+                    resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                    load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+                    store_op: VK_ATTACHMENT_STORE_OP_STORE,
+                    clear_value: VkClearValue {
+                        depth_stencil: VkClearDepthStencilValue {
+                            depth: 1.0,
+                            stencil: 0,
+                        },
+                    },
+                };
+                let csm_rendering = VkRenderingInfo {
+                    s_type: VkStructureType::RenderingInfo,
+                    p_next: ptr::null(),
+                    flags: 0,
+                    render_area: csm_area,
+                    layer_count: 1,
+                    view_mask: 0,
+                    color_attachment_count: 0,
+                    p_color_attachments: ptr::null(),
+                    p_depth_attachment: (&csm_depth_attachment as *const VkRenderingAttachmentInfo)
+                        .cast(),
+                    p_stencil_attachment: ptr::null(),
+                };
+                // SAFETY: recording is open; `csm_rendering` is fully initialized — its depth
+                // attachment names the live cascade layer-`c` render view (now
+                // DEPTH_ATTACHMENT_OPTIMAL; `c < active <= MAX_CASCADES` so `layer_render_view(c)`
+                // is in bounds), NO color attachment (depth-only); the depth-only pipeline
+                // (declaring an EMPTY `color_formats` + `depth_format = D32Sfloat` + `cull_mode:
+                // Front` + a depth bias + the set-0 instance layout) belongs to this device (caller
+                // contract). The SAME instance SSBO (`scene.instance_bind_group`) the main pass
+                // binds is bound at set 0 to satisfy the depth VS's static `instances` reference;
+                // the 88-byte push carries cascade `c`'s `view_proj` (`@0`) + `use_model_matrix ==
+                // 1` (`@84`), and per caster batch the recorder re-pushes its `base_instance` (4
+                // bytes @80, in-range of the 88-byte VERTEX push) then `draw_indexed` reads that
+                // batch's bound vertex+index buffers (created on this device with VERTEX/INDEX
+                // usage). The locals outlive the bracketed calls. Begin/End bracket each cascade.
+                unsafe {
+                    (self.fns.cmd_begin_rendering)(cmd, &csm_rendering);
+                    (self.fns.cmd_bind_pipeline)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        csm.pipeline.pipeline,
+                    );
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        csm.pipeline.layout,
+                        0,
+                        1,
+                        &scene.instance_bind_group.descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
                     (self.fns.cmd_push_constants)(
                         cmd,
                         csm.pipeline.layout,
                         VK_SHADER_STAGE_VERTEX_BIT,
-                        GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
-                        4,
-                        (&base as *const u32).cast(),
+                        0,
+                        csm_push.len() as u32,
+                        csm_push.as_ptr().cast(),
                     );
-                    (self.fns.cmd_bind_vertex_buffers)(
-                        cmd,
-                        0,
-                        1,
-                        &batch.vertex_buffer.buffer,
-                        &vertex_offset,
-                    );
-                    (self.fns.cmd_bind_index_buffer)(
-                        cmd,
-                        batch.index_buffer.buffer,
-                        0,
-                        batch.index_type,
-                    );
-                    (self.fns.cmd_draw_indexed)(
-                        cmd,
-                        batch.index_count,
-                        batch.instance_count,
-                        0,
-                        0,
-                        0,
-                    );
+                    (self.fns.cmd_set_viewport)(cmd, 0, 1, &csm_viewport);
+                    (self.fns.cmd_set_scissor)(cmd, 0, 1, &csm_area);
+                    // The caster batches: the SAME instanced mesh draws the main pass rasterizes
+                    // (the demo's boxes). A real app gathers a `With<ShadowCaster>` subset; the
+                    // inline demo reuses the full list. An EMPTY list records the depth scope with
+                    // no draw (a cleared cascade — every receiver fully lit, the `min` a no-op).
+                    for batch in scene.mesh_draw {
+                        let base = batch.base_instance;
+                        csm_push[GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize
+                            ..GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4]
+                            .copy_from_slice(&base.to_le_bytes());
+                        (self.fns.cmd_push_constants)(
+                            cmd,
+                            csm.pipeline.layout,
+                            VK_SHADER_STAGE_VERTEX_BIT,
+                            GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
+                            4,
+                            (&base as *const u32).cast(),
+                        );
+                        (self.fns.cmd_bind_vertex_buffers)(
+                            cmd,
+                            0,
+                            1,
+                            &batch.vertex_buffer.buffer,
+                            &vertex_offset,
+                        );
+                        (self.fns.cmd_bind_index_buffer)(
+                            cmd,
+                            batch.index_buffer.buffer,
+                            0,
+                            batch.index_type,
+                        );
+                        (self.fns.cmd_draw_indexed)(
+                            cmd,
+                            batch.index_count,
+                            batch.instance_count,
+                            0,
+                            0,
+                            0,
+                        );
+                    }
+                    (self.fns.cmd_end_rendering)(cmd);
                 }
-                (self.fns.cmd_end_rendering)(cmd);
             }
 
             // (CSM-2) The dual-use depth barrier: DEPTH_ATTACHMENT_OPTIMAL →
-            // SHADER_READ_ONLY_OPTIMAL (reusing the marcher's depth-barrier shape). Depth WRITES
-            // happen at LATE_FRAGMENT_TESTS; the resolve PCF-SAMPLES at COMPUTE_SHADER. This one
-            // barrier (DEPTH aspect) makes the cascade depth available + visible to the resolve's
-            // `SampleCmpLevelZero` and transitions the layout for sampling.
+            // SHADER_READ_ONLY_OPTIMAL (reusing the marcher's depth-barrier shape) over ALL
+            // `[0..active)` cascade layers in ONE barrier. Depth WRITES happen at
+            // LATE_FRAGMENT_TESTS; the resolve PCF-SAMPLES at COMPUTE_SHADER. This barrier (DEPTH
+            // aspect, the full-array range) makes every rendered cascade's depth available +
+            // visible to the resolve's `SampleCmpLevelZero(float3(uv, c))` and transitions the
+            // layout for sampling.
             let csm_to_sampled = VkImageMemoryBarrier {
                 s_type: VkStructureType::ImageMemoryBarrier,
                 p_next: ptr::null(),
@@ -3487,7 +3513,7 @@ impl<'ctx> Renderer<'ctx> {
                 src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
                 dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
                 image: cascade.image,
-                subresource_range: DEPTH_SUBRESOURCE_RANGE,
+                subresource_range: csm_layers_range,
             };
             // SAFETY: recording is open; (EARLY|LATE)_FRAGMENT_TESTS→COMPUTE_SHADER with
             // DEPTH_WRITE→SHADER_READ and DEPTH→SHADER_READ_ONLY makes the cascade depth available
@@ -4747,11 +4773,11 @@ pub struct GBufferScene<'a> {
     /// default, byte-identical command stream): NO depth pass is recorded, the resolve's `csm_mode`
     /// header gate is 0, and the always-bound cascade map/sampler/UBO are bound-but-unread.
     /// `Some(_)` = the ON path: BEFORE the resolve dispatch the recorder runs [`record_csm_depth`]
-    /// — barriers the cascade image, renders the caster batches (the SAME [`Self::mesh_draw`] +
-    /// [`Self::instance_bind_group`] the main pass uses) into `layer_render_view(0)` with the
-    /// cascade `view_proj` pushed, then barriers the image to `SHADER_READ_ONLY_OPTIMAL` for the
-    /// resolve sample. The caller MUST set the scene's light-header `csm_mode` in lock-step
-    /// (`with_csm_mode(true)`).
+    /// — barriers the cascade image, LOOPS the `[0..active_count)` cascades (Rung B: N), rendering
+    /// the SAME caster batches ([`Self::mesh_draw`] + [`Self::instance_bind_group`], build-once-
+    /// consume-N-views) into `layer_render_view(c)` with cascade `c`'s `view_proj` pushed, then
+    /// barriers the whole array to `SHADER_READ_ONLY_OPTIMAL` for the resolve sample. The caller
+    /// MUST set the scene's light-header `csm_mode` in lock-step (`with_csm_mode(true)`).
     pub csm: Option<CsmDepthActivation<'a>>,
 }
 
@@ -4769,12 +4795,22 @@ pub struct CsmDepthActivation<'a> {
     /// = Some(D32Sfloat)`, `cull_mode: Front`, `depth_bias: Some(slope/constant)`, the set-0
     /// instance SSBO layout. Bound by [`record_csm_depth`].
     pub pipeline: &'a VulkanGraphicsPipeline,
-    /// The 88-byte VERTEX push for the depth pass: `view_proj = cascade.view_proj` (`@0`,
-    /// column-major), `use_model_matrix == 1` (`@84`). The recorder overwrites the `base_instance`
-    /// word (`@80`) per caster batch. The leading 64 bytes MUST equal the cascade UBO's
-    /// `gCascades[0].view_proj` bytes (the O1 majorness pin: the depth VS + the resolve read the
-    /// SAME matrix).
+    /// The 88-byte VERTEX push TEMPLATE for the depth pass: the trailing words (`use_model_matrix
+    /// == 1` `@84`; the recorder overwrites the `base_instance` word `@80` per caster batch). The
+    /// leading 64 bytes (the `view_proj` matrix) are OVERWRITTEN per cascade from
+    /// [`Self::cascade_view_proj`] — so this template carries the NON-matrix words only (its
+    /// `@0..64` are unused on the depth path, stamped over each iteration).
     pub push: [u8; GBUFFER_PUSH_BYTES],
+    /// CSM Increment 3 (Rung B): the per-cascade COLUMN-MAJOR `view_proj` matrices (64 bytes each),
+    /// `[0..active_count)` valid. The depth pass loops cascades, stamping `cascade_view_proj[c]`
+    /// into the push's leading 64 bytes and rendering the casters into `layer_render_view(c)`. Each
+    /// matrix MUST byte-equal the resolve UBO's `gCascades[c].view_proj` (the O1 single-matrix pin:
+    /// the depth VS + the resolve read the SAME per-cascade matrix).
+    pub cascade_view_proj: [[u8; 64]; MAX_CASCADES],
+    /// CSM Increment 3 (Rung B): the number of cascades to render (`1..=MAX_CASCADES`); mirrors the
+    /// cascade UBO's `active_count` / the scene's CSM activation. Rung A is `1`; Rung B is N. The
+    /// depth pass renders layers `[0..active_count)`; the resolve SELECTs among the same set.
+    pub active_count: u32,
     /// The cascade shadow-map resolution (texels per side — the map is square, e.g. 2048). The
     /// depth pass's render area + viewport. MUST equal the resolution
     /// [`GBufferScene::csm_cascade_texture`] was created at.
