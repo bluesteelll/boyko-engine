@@ -50,8 +50,14 @@ static const uint SDF_EDIT_WORDS = 12u;       // size_of::<SdfEdit>() / 4
 static const uint HEADER_BASE    = 4u;        // edit array word offset (count padded to 16 B)
 
 // Primitive kinds.
-static const uint KIND_SPHERE = 0u;
-static const uint KIND_BOX    = 1u;
+static const uint KIND_SPHERE  = 0u;
+static const uint KIND_BOX     = 1u;
+static const uint KIND_CAPSULE = 2u; // center.xyz = endpoint a, params.xyz = endpoint b, params.w = radius
+
+// The `dot(ba, ba)` floor in `sd_capsule` guarding the degenerate `a == b` (zero-length
+// capsule → collapses to a sphere of radius r at a; no 0/0 == NaN). Mirrors the host
+// `boyko_sdf_math::CAPSULE_DENOM_EPS` and the eDSL `field::CAPSULE_DENOM_EPS`.
+static const float CAPSULE_DENOM_EPS = 1.0e-8;
 
 // Boolean ops.
 static const uint OP_UNION     = 0u;
@@ -60,11 +66,12 @@ static const uint OP_INTERSECT = 2u;
 
 // One decoded edit (the in-register form of the packed std430 element).
 struct Edit {
-    float3 center;
-    float3 params;     // radius (sphere) or half-extents (box)
+    float3 center;     // primitive center; also the capsule endpoint a
+    float3 params;     // radius (sphere) or half-extents (box); also the capsule endpoint b
     uint   kind;
     uint   op;
     float  smoothness;
+    float  radius;     // capsule cap radius (params.w); 0 for sphere/box (they never read it)
 };
 
 // Reads `asfloat`/`asuint` of the i-th packed edit out of the header region.
@@ -72,9 +79,9 @@ Edit load_edit(uint i) {
     uint base = HEADER_BASE + i * SDF_EDIT_WORDS;
     Edit e;
     e.center     = float3(asfloat(Buf[base + 0u]), asfloat(Buf[base + 1u]), asfloat(Buf[base + 2u]));
-    // word base+3 = center.w (unused)
+    // word base+3 = center.w (the material lane; unread by the field)
     e.params     = float3(asfloat(Buf[base + 4u]), asfloat(Buf[base + 5u]), asfloat(Buf[base + 6u]));
-    // word base+7 = params.w (unused)
+    e.radius     = asfloat(Buf[base + 7u]); // params.w = capsule cap radius (0 for sphere/box)
     e.kind       = Buf[base + 8u];
     e.op         = Buf[base + 9u];
     e.smoothness = asfloat(Buf[base + 10u]);
@@ -96,10 +103,31 @@ float sd_box(float3 p, float3 c, float3 h) {
     return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
 }
 
-// One edit's primitive distance at `p`.
+// Capsule: distance to a swept sphere of radius `r` along the segment [a, b]
+// (the IQ exact capsule SDF). BOTH dot products are spelled as the EXPLICIT
+// left-associated scalar fold `pa.x*ba.x + pa.y*ba.y + pa.z*ba.z` — NOT the HLSL
+// `dot()` intrinsic — to byte-match the host `boyko_sdf_math::v_dot` operand order
+// (DXC may lower `dot()` to a reassociated FMA / `OpDot` that would fork the host f32
+// from the GPU bytes). `length()` stays the intrinsic (proven byte-stable by the
+// sphere/box primitives). `max(dot(ba,ba), EPS)` guards the degenerate a == b: the
+// projection `h` then clamps to 0 and the capsule collapses to a sphere of radius `r`
+// at `a` (no 0/0 == NaN).
+float sd_capsule(float3 p, float3 a, float3 b, float r) {
+    float3 pa = p - a;
+    float3 ba = b - a;
+    float paba = pa.x * ba.x + pa.y * ba.y + pa.z * ba.z;
+    float baba = ba.x * ba.x + ba.y * ba.y + ba.z * ba.z;
+    float h = clamp(paba / max(baba, CAPSULE_DENOM_EPS), 0.0, 1.0);
+    return length(pa - ba * h) - r;
+}
+
+// One edit's primitive distance at `p`. BOX is the first branch and SPHERE the final
+// `else` (frozen order); CAPSULE is appended between them.
 float edit_distance(Edit e, float3 p) {
     if (e.kind == KIND_BOX) {
         return sd_box(p, e.center, e.params);
+    } else if (e.kind == KIND_CAPSULE) {
+        return sd_capsule(p, e.center, e.params, e.radius);
     }
     return sd_sphere(p, e.center, e.params.x);
 }

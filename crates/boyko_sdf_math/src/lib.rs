@@ -74,6 +74,9 @@ pub mod sdf_kind {
     pub const SPHERE: u32 = 0;
     /// An axis-aligned box primitive — `params.xyz` are the half-extents.
     pub const BOX: u32 = 1;
+    /// A capsule primitive — `center.xyz` is endpoint `a`, `params.xyz` is endpoint `b`,
+    /// `params.w` is the cap radius. APPEND-only (sphere/box are frozen).
+    pub const CAPSULE: u32 = 2;
 }
 
 /// SDF boolean-op discriminant. Matches the shader's `OP_*` constants.
@@ -99,6 +102,12 @@ pub const SDF_GRAD_H: f32 = 0.0005;
 /// Fixed capacity of the edit-list (the §S2 ceiling, scaled for the basic slice).
 /// Matches the shader's `MAX_SDF_EDITS`.
 pub const MAX_SDF_EDITS: usize = 16;
+
+/// The `dot(ba, ba)` floor in [`sd_capsule`] guarding the degenerate `a == b` segment
+/// (a zero-length capsule collapses to a sphere of radius `r`, no `0/0 == NaN`).
+/// Re-exported from [`boyko_shaderdsl::field::CAPSULE_DENOM_EPS`] so the host and the
+/// generic field share one constant; mirrors the shader's `CAPSULE_DENOM_EPS`.
+pub use boyko_shaderdsl::field::CAPSULE_DENOM_EPS;
 
 /// One SDF edit: a primitive + a uniform transform (center) + size (params) + a
 /// boolean op + an optional smoothness factor.
@@ -155,6 +164,29 @@ impl SdfEdit {
             center: [center[0], center[1], center[2], 0.0],
             params: [half_extents[0], half_extents[1], half_extents[2], 0.0],
             kind: sdf_kind::BOX,
+            op,
+            smoothness,
+            _pad: 0,
+        }
+    }
+
+    /// A capsule edit: a swept sphere of radius `r` along the segment from endpoint `a`
+    /// to endpoint `b`, combined by `op` with `smoothness`.
+    ///
+    /// Packs into the FROZEN 48-byte layout with NO stride change: `a` → `center.xyz`,
+    /// `b` → `params.xyz`, `r` → `params.w` (the verified-free lane — sphere reads only
+    /// `params.x`, box only `params.xyz`, neither reads `params.w`). `center.w` stays
+    /// the material lane ([`SdfEdit::with_material`]).
+    ///
+    /// A degenerate `a == b` collapses to a sphere of radius `r` at `a` (see
+    /// [`boyko_shaderdsl::field::CAPSULE_DENOM_EPS`]).
+    #[inline]
+    pub fn capsule(a: [f32; 3], b: [f32; 3], r: f32, op: u32, smoothness: f32) -> Self {
+        debug_assert!(r > 0.0, "invariant: capsule radius must be positive");
+        Self {
+            center: [a[0], a[1], a[2], 0.0],
+            params: [b[0], b[1], b[2], r],
+            kind: sdf_kind::CAPSULE,
             op,
             smoothness,
             _pad: 0,
@@ -603,6 +635,16 @@ pub fn sd_box(p: [f32; 3], c: [f32; 3], h: [f32; 3]) -> f32 {
     boyko_shaderdsl::field::sd_box::<f32>(p, c, h)
 }
 
+/// The exact IQ capsule distance: a swept sphere of radius `r` along the segment from
+/// endpoint `a` to endpoint `b` (mirrors the shader's `sd_capsule`). DELEGATES to
+/// [`boyko_shaderdsl::field::sd_capsule`] over the `f32` Eval backend (byte-identical:
+/// both dot products use the EXPLICIT scalar fold, not the HLSL `dot()` intrinsic, so
+/// the host and GPU bytes match). A degenerate `a == b` collapses to a sphere at `a`.
+#[inline]
+pub fn sd_capsule(p: [f32; 3], a: [f32; 3], b: [f32; 3], r: f32) -> f32 {
+    boyko_shaderdsl::field::sd_capsule::<f32>(p, a, b, r)
+}
+
 /// One edit's primitive distance at `p` (mirrors the shader's `edit_distance`).
 /// Adapts the `SdfEdit`'s f32 fields into a `boyko_shaderdsl::field::EditView<f32>`
 /// and DELEGATES to [`boyko_shaderdsl::field::edit_distance`] (byte-identical).
@@ -651,6 +693,9 @@ fn edit_view(e: &SdfEdit) -> boyko_shaderdsl::field::EditView<f32> {
         kind: e.kind,
         op: e.op,
         smoothness: e.smoothness,
+        // `params.w` — the capsule cap radius (the verified-free lane). Sphere/box leave
+        // it `0.0` and never read it; only the CAPSULE arm of `edit_distance` does.
+        radius: e.params[3],
     }
 }
 
@@ -688,6 +733,7 @@ const DEFAULT_EDIT_VIEW: boyko_shaderdsl::field::EditView<f32> =
         kind: 0,
         op: 0,
         smoothness: 0.0,
+        radius: 0.0,
     };
 
 /// Surface normal via central differences of [`sdf_edit_list`] (the gradient of
@@ -760,5 +806,85 @@ mod tests {
         let n = sdf_edit_list_normal(&edits, [0.0, 0.0, 0.0]);
         assert_eq!(n, [0.0, 0.0, 0.0]);
         assert!(n.iter().all(|c| c.is_finite()));
+    }
+
+    /// The capsule geometric truth-table for a unit x-axis capsule (a=(-1,0,0)..b=(1,0,0),
+    /// r=0.5): the on-axis midpoint is `-r` inside; a point `1.0` perpendicular off the
+    /// midpoint is `1.0 - r`; an endpoint cap is `-r`; a point beyond an endpoint clamps to
+    /// the cap (NOT the infinite line). Mirrors the eDSL `sd_capsule_geometric_landmarks`.
+    #[test]
+    fn sd_capsule_landmarks() {
+        let a = [-1.0f32, 0.0, 0.0];
+        let b = [1.0f32, 0.0, 0.0];
+        let r = 0.5f32;
+        let eps = 1.0e-5f32;
+        assert!((sd_capsule([0.0, 0.0, 0.0], a, b, r) - (-r)).abs() < eps, "midpoint = -r");
+        assert!((sd_capsule([0.0, 1.0, 0.0], a, b, r) - (1.0 - r)).abs() < eps, "perp = 1 - r");
+        assert!((sd_capsule(b, a, b, r) - (-r)).abs() < eps, "endpoint cap = -r");
+        // 2.0 beyond endpoint b (at x=3): clamps to the cap at b -> 2.0 - r.
+        assert!((sd_capsule([3.0, 0.0, 0.0], a, b, r) - (2.0 - r)).abs() < eps, "beyond-b = 2 - r");
+    }
+
+    /// A degenerate `a == b` capsule collapses to a sphere of radius `r` at `a` (the
+    /// `CAPSULE_DENOM_EPS` guard makes `h == 0`), byte-identical to `sd_sphere` — no NaN.
+    #[test]
+    fn sd_capsule_degenerate_a_eq_b_is_sphere() {
+        let a = [0.5f32, -1.2, 2.3];
+        let r = 0.75f32;
+        for p in [[0.0, 0.0, 0.0], [1.0, 2.0, 3.0], [0.5, -1.2, 2.3], [-4.0, 5.0, -6.0]] {
+            let cap = sd_capsule(p, a, a, r);
+            assert_eq!(
+                cap.to_bits(),
+                sd_sphere(p, a, r).to_bits(),
+                "a==b capsule must equal sd_sphere at a (byte-identical)"
+            );
+            assert!(cap.is_finite(), "a==b capsule must be finite (the EPS denom guard, no 0/0)");
+        }
+    }
+
+    /// The sphere-tracing SOUNDNESS gate: the capsule distance must never OVER-report the
+    /// true Euclidean distance to the swept-sphere surface (an over-report would let the
+    /// marcher overshoot a hit). Verified numerically against a dense segment sampling.
+    #[test]
+    fn sd_capsule_is_a_lower_bound() {
+        let cases: &[([f32; 3], [f32; 3], f32)] = &[
+            ([-1.0, 0.0, 0.0], [1.0, 0.0, 0.0], 0.5),
+            ([0.0, -2.0, 1.0], [0.0, 2.0, 1.0], 0.3),
+            ([1.0, 1.0, 1.0], [-1.0, -1.0, -1.0], 0.8),
+            ([0.0, 0.0, 0.0], [3.0, 0.5, -1.5], 0.25),
+        ];
+        for &(a, b, r) in cases {
+            for px in [-3.0f32, -1.0, 0.0, 0.7, 2.5] {
+                for py in [-2.0f32, 0.3, 1.5] {
+                    for pz in [-1.5f32, 0.0, 2.0] {
+                        let p = [px, py, pz];
+                        let reported = sd_capsule(p, a, b, r);
+                        // Brute-force the true nearest distance to the segment, minus r.
+                        let mut true_d = f32::INFINITY;
+                        let steps = 4096;
+                        for i in 0..=steps {
+                            let t = i as f32 / steps as f32;
+                            let s = [
+                                a[0] + (b[0] - a[0]) * t,
+                                a[1] + (b[1] - a[1]) * t,
+                                a[2] + (b[2] - a[2]) * t,
+                            ];
+                            let d = ((p[0] - s[0]).powi(2)
+                                + (p[1] - s[1]).powi(2)
+                                + (p[2] - s[2]).powi(2))
+                            .sqrt();
+                            true_d = true_d.min(d);
+                        }
+                        let true_surface = true_d - r;
+                        let slack = 1.0e-3 * (1.0 + true_d.abs());
+                        assert!(
+                            reported <= true_surface + slack,
+                            "capsule OVER-reported (unsound): reported={reported}, \
+                             true_surface≈{true_surface}, a={a:?}, b={b:?}, p={p:?}, r={r}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

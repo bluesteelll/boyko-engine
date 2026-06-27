@@ -2445,6 +2445,12 @@ const SSAO_LADDER_HIGH_BMP: &str = r"D:\tmp\engine_ssao_high.bmp";
 /// the marcher's analytic shadow/AO onto the mesh. The orchestrator runs the GPU test + converts.
 const HYBRID_BMP: &str = r"D:\tmp\engine_hybrid_room.bmp";
 
+/// Render Shadow Phase 1 — the capsule-character screenshot path: a coarse 6-capsule
+/// humanoid (a character capsule-proxy) standing on the mesh floor in front of the back
+/// wall, casting the marcher's analytic SDF shadow onto the mesh as a readable humanoid
+/// silhouette. The orchestrator runs the GPU test + converts the BMP.
+const CAPSULE_CHARACTER_BMP: &str = r"D:\tmp\engine_capsule_character.bmp";
+
 /// The per-showcase variable scene: the SDF edit list, the marcher/resolve camera push, the light
 /// table (header + elements), and the RASTER MESH (vertices + MVP). The shared [`run_showcase_dump`]
 /// body holds everything else (pipelines, barriers, the dump tail) constant. Built by the per-test
@@ -2815,6 +2821,151 @@ fn hybrid_room_config() -> ShowcaseConfig {
         ),
         ssao_quality: None,
     }
+}
+
+// === Render Shadow Phase 1 — the capsule-character proxy demo. ===
+
+/// The capsule cap radius for the character limbs (a coarse humanoid; the torso uses a
+/// thicker radius below). Small enough that 6 capsules read as a stick-figure silhouette.
+const CHAR_LIMB_RADIUS: f32 = 0.09;
+/// The torso cap radius — thicker than the limbs so the body reads as a trunk.
+const CHAR_TORSO_RADIUS: f32 = 0.16;
+/// The head cap radius.
+const CHAR_HEAD_RADIUS: f32 = 0.17;
+
+/// A COARSE 6-capsule humanoid character proxy standing on the floor (feet at y = 0),
+/// rooted at world `root` (the feet midpoint), scaled to total `height`, facing the
+/// `facing` heading (radians about +Y; 0 faces +Z toward the camera). An ASYMMETRIC pose
+/// — one leg forward / one back, one arm out / one down — so the cast SDF shadow reads
+/// unmistakably as a humanoid rather than a blob.
+///
+/// The 6 capsules: torso (hip→shoulder), head (neck→crown), left+right legs (hip→foot),
+/// left+right arms (shoulder→hand). HARD unions, smoothness 0.0 (a crisp silhouette).
+/// `≤ MAX_SDF_EDITS` (6 edits) with room to spare.
+fn character_capsules(root: [f32; 3], height: f32, facing: f32) -> Vec<SdfEdit> {
+    // Proportions as fractions of `height` (a coarse 7.5-head canon, simplified).
+    let hip_y = 0.50 * height; // pelvis
+    let shoulder_y = 0.82 * height;
+    let neck_y = 0.84 * height;
+    let crown_y = 1.00 * height;
+    let foot_y = 0.0; // on the floor
+    let hand_y = 0.42 * height;
+
+    // The facing basis in the xz-plane: `fwd` is the heading, `side` is its right-hand
+    // perpendicular. The asymmetric pose offsets are expressed in (side, fwd) and rotated
+    // into world xz so the whole figure turns with `facing`.
+    let (s, c) = facing.sin_cos();
+    // fwd = (sin, cos), side = (cos, -sin)  (right-handed about +Y, 0 -> +Z).
+    let place = |side: f32, fwd: f32| -> [f32; 2] { [side * c + fwd * s, -side * s + fwd * c] };
+
+    // Lateral half-stance (hips/shoulders), the forward/back leg split, and the arm reach.
+    let hip_dx = 0.10 * height;
+    let shoulder_dx = 0.17 * height;
+    let leg_fwd = 0.14 * height; // right leg forward, left leg back (asymmetric stride)
+    let arm_out = 0.26 * height; // right arm raised out to the side; left arm hangs down
+
+    let p = |side: f32, fwd: f32, y: f32| -> [f32; 3] {
+        let xz = place(side, fwd);
+        [root[0] + xz[0], root[1] + y, root[2] + xz[1]]
+    };
+
+    // Hips and shoulders.
+    let hip_l = p(-hip_dx, 0.0, hip_y);
+    let hip_r = p(hip_dx, 0.0, hip_y);
+    let hip_c = p(0.0, 0.0, hip_y);
+    let sh_l = p(-shoulder_dx, 0.0, shoulder_y);
+    let sh_r = p(shoulder_dx, 0.0, shoulder_y);
+
+    vec![
+        // Torso: hip center -> shoulder center (thick).
+        SdfEdit::capsule(hip_c, p(0.0, 0.0, shoulder_y), CHAR_TORSO_RADIUS, sdf_op::UNION, 0.0),
+        // Head: neck -> crown.
+        SdfEdit::capsule(p(0.0, 0.0, neck_y), p(0.0, 0.0, crown_y), CHAR_HEAD_RADIUS, sdf_op::UNION, 0.0),
+        // Right leg: hip -> foot, planted FORWARD (the asymmetric stride).
+        SdfEdit::capsule(hip_r, p(hip_dx, leg_fwd, foot_y), CHAR_LIMB_RADIUS, sdf_op::UNION, 0.0),
+        // Left leg: hip -> foot, planted BACK.
+        SdfEdit::capsule(hip_l, p(-hip_dx, -leg_fwd, foot_y), CHAR_LIMB_RADIUS, sdf_op::UNION, 0.0),
+        // Right arm: shoulder -> hand, raised OUT to the side (reads as a wave).
+        SdfEdit::capsule(sh_r, p(shoulder_dx + arm_out, 0.0, shoulder_y + 0.06 * height), CHAR_LIMB_RADIUS, sdf_op::UNION, 0.0),
+        // Left arm: shoulder -> hand, hanging DOWN.
+        SdfEdit::capsule(sh_l, p(-shoulder_dx, 0.04 * height, hand_y), CHAR_LIMB_RADIUS, sdf_op::UNION, 0.0),
+    ]
+}
+
+/// The capsule-character backdrop mesh: just the FLOOR quad (y = 0) + the BACK-WALL quad
+/// (z = -4), NO cubes — so the SDF scene is the 6 character capsules ALONE (no shadow
+/// proxies needed) and the humanoid shadow falls on a clean floor/wall. Reuses the proven
+/// `hybrid_room_mesh` floor/wall geometry (the cubes are intentionally dropped).
+fn capsule_character_mesh() -> Vec<Vertex> {
+    let mut verts = Vec::new();
+    // Floor: y = 0, outward normal +Y (CCW from above), spanning x[-3,3] z[-4,1].
+    verts.extend_from_slice(&mesh_quad(
+        [[-3.0, 0.0, 1.0], [3.0, 0.0, 1.0], [3.0, 0.0, -4.0], [-3.0, 0.0, -4.0]],
+        [0.0, 1.0, 0.0],
+        ROOM_FLOOR_COLOR,
+    ));
+    // Back wall: z = -4, outward normal +Z, spanning x[-3,3] y[0,4].
+    verts.extend_from_slice(&mesh_quad(
+        [[-3.0, 0.0, -4.0], [3.0, 0.0, -4.0], [3.0, 4.0, -4.0], [-3.0, 4.0, -4.0]],
+        [0.0, 0.0, 1.0],
+        ROOM_WALL_COLOR,
+    ));
+    verts
+}
+
+/// The capsule-character showcase config (Render Shadow Phase 1): the 6-capsule humanoid
+/// proxy standing on the mesh floor under the [`room_camera`] perspective, lit by the
+/// showcase sun + a dim sky, casting an analytic SDF shadow onto the floor/wall mesh.
+/// Analytic path (`ssao_quality: None`); HARD unions (smoothness 0.0). The 6 capsules are
+/// ≤ MAX_SDF_EDITS with room to spare (no cube proxies — the figure stands on a clean floor).
+fn capsule_character_config() -> ShowcaseConfig {
+    let header = GoldenLightHeader::new(2, 0, 1.0).with_ssao_mode(0);
+    let lights = vec![
+        GoldenLight::directional(SHOWCASE_SUN_DIR, [1.0, 0.97, 0.92], 3.0),
+        GoldenLight::sky([0.05, 0.05, 0.05], [0.05, 0.05, 0.05]),
+    ];
+    // The humanoid stands a little behind the room center, facing the camera (+Z) so its
+    // front is lit and the shadow rakes back/aside onto the floor and wall.
+    let character = character_capsules([0.0, 0.0, -1.0], 1.8, 0.0);
+    debug_assert!(
+        character.len() <= boyko_sdf_math::MAX_SDF_EDITS,
+        "invariant: the character must fit the edit-list budget"
+    );
+    ShowcaseConfig {
+        sdf: character,
+        camera: room_camera(),
+        light_header: header,
+        light_elems: lights,
+        vertices: capsule_character_mesh(),
+        mvp: perspective_mvp_bytes(
+            ROOM_CAM_EYE,
+            ROOM_CAM_FORWARD,
+            ROOM_CAM_RIGHT,
+            ROOM_CAM_UP,
+            ROOM_CAM_FOV_Y,
+            COMPOSITE_W as f32 / COMPOSITE_H as f32,
+        ),
+        ssao_quality: None,
+    }
+}
+
+/// **Render Shadow Phase 1 — the capsule-character screenshot dump (the visual oracle).**
+/// Renders the 6-capsule humanoid proxy ([`character_capsules`]) standing on the mesh
+/// floor+wall ([`capsule_character_mesh`]) under the [`room_camera`] perspective, lit by the
+/// showcase sun + a dim sky, and dumps a TRUE 512×512 24-bit BMP to [`CAPSULE_CHARACTER_BMP`].
+/// The deliverable is the cast SDF shadow reading as a humanoid silhouette on the floor.
+///
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1` so the
+/// (broken-on-this-box) validation layer does not crash the process; the screenshot is the
+/// deliverable, not a golden assertion.
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the capsule-character screenshot"]
+fn engine_capsule_character_512_screenshot_dump() {
+    run_showcase_dump(
+        "boyko_engine capsule character 512",
+        CAPSULE_CHARACTER_BMP,
+        capsule_character_config(),
+    );
 }
 
 /// The shared 512×512-native multi-light SDF-shadow + SSAO showcase dump body. `window_title` is

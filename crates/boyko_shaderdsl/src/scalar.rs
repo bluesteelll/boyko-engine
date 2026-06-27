@@ -209,6 +209,27 @@ pub fn v_max0<S: FieldScalar<Vec3 = [S; 3]>>(a: [S; 3]) -> [S; 3] {
     [a[0].max(zero), a[1].max(zero), a[2].max(zero)]
 }
 
+/// `dot(a, b)` — the 3-component dot product, written as the EXPLICIT left-associated
+/// scalar fold `(a.x*b.x + a.y*b.y) + a.z*b.z`. Mirrors `boyko_sdf_math::v_dot`
+/// (lib.rs:544-545) operand-for-operand.
+///
+/// The capsule distance ([`crate::field::sd_capsule`]) needs two dot products. They are
+/// spelled with this EXPLICIT scalar fold — NOT the HLSL `dot()` intrinsic — on BOTH
+/// backends: DXC may lower `dot()` to an `OpDot` / a reassociated FMA chain that forks
+/// the host f32 result from the GPU bytes, so the hand-written `sd_capsule` in
+/// `sdf_field.hlsli` spells the same explicit `pa.x*ba.x + pa.y*ba.y + pa.z*ba.z` and
+/// the two stay byte-identical (the `eval_byte_identity` + `field_probe_gate` tripwires).
+#[inline]
+pub fn v_dot<S: FieldScalar<Vec3 = [S; 3]>>(a: [S; 3], b: [S; 3]) -> S {
+    a[0].mul(b[0]).add(a[1].mul(b[1])).add(a[2].mul(b[2]))
+}
+
+/// `a * s` — component-wise scalar multiply (the capsule's `ba * h` projection step).
+#[inline]
+pub fn v_scale<S: FieldScalar<Vec3 = [S; 3]>>(a: [S; 3], s: S) -> [S; 3] {
+    [a[0].mul(s), a[1].mul(s), a[2].mul(s)]
+}
+
 // ---- The Eval backend: `impl FieldScalar for f32` (byte-mirror of lib.rs) -------
 
 impl FieldScalar for f32 {

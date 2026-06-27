@@ -34,10 +34,16 @@ mod frozen_op {
 }
 mod frozen_kind {
     pub const BOX: u32 = 1;
+    pub const CAPSULE: u32 = 2;
 }
 
+/// The `dot(ba, ba)` floor in `frozen_sd_capsule` (mirrors the host/eDSL
+/// `CAPSULE_DENOM_EPS`): guards the degenerate `a == b` (collapses to a sphere, no NaN).
+const FROZEN_CAPSULE_DENOM_EPS: f32 = 1.0e-8;
+
 /// The reference edit, mirroring the relevant `SdfEdit` fields (center.xyz +
-/// params.xyz + kind/op/smoothness — the field never reads center.w/params.w/_pad).
+/// params.xyz + kind/op/smoothness + the capsule radius lane params.w — the field
+/// never reads center.w/_pad).
 #[derive(Clone, Copy)]
 struct FrozenEdit {
     center: [f32; 3],
@@ -45,6 +51,8 @@ struct FrozenEdit {
     kind: u32,
     op: u32,
     smoothness: f32,
+    /// The capsule cap radius (the `params.w` lane). 0 for sphere/box (unread).
+    radius: f32,
 }
 
 fn frozen_sqrt(x: f32) -> f32 {
@@ -71,10 +79,28 @@ fn frozen_sd_box(p: [f32; 3], c: [f32; 3], h: [f32; 3]) -> f32 {
     let inside = q[0].max(q[1].max(q[2])).min(0.0);
     outside + inside
 }
+// The EXPLICIT left-associated dot fold `(a.x*b.x + a.y*b.y) + a.z*b.z` — NOT the HLSL
+// `dot()` intrinsic — matching `boyko_sdf_math::v_dot`'s operand order so the frozen
+// capsule reference is byte-identical to the eDSL/host path.
+fn frozen_v_dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+fn frozen_v_scale(a: [f32; 3], s: f32) -> [f32; 3] {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+fn frozen_sd_capsule(p: [f32; 3], a: [f32; 3], b: [f32; 3], r: f32) -> f32 {
+    let pa = frozen_v_sub(p, a);
+    let ba = frozen_v_sub(b, a);
+    let denom = frozen_v_dot(ba, ba).max(FROZEN_CAPSULE_DENOM_EPS);
+    let h = (frozen_v_dot(pa, ba) / denom).clamp(0.0, 1.0);
+    frozen_v_len(frozen_v_sub(pa, frozen_v_scale(ba, h))) - r
+}
 fn frozen_edit_distance(e: &FrozenEdit, p: [f32; 3]) -> f32 {
     let center = [e.center[0], e.center[1], e.center[2]];
     if e.kind == frozen_kind::BOX {
         frozen_sd_box(p, center, [e.params[0], e.params[1], e.params[2]])
+    } else if e.kind == frozen_kind::CAPSULE {
+        frozen_sd_capsule(p, center, [e.params[0], e.params[1], e.params[2]], e.radius)
     } else {
         frozen_sd_sphere(p, center, e.params[0])
     }
@@ -136,6 +162,7 @@ fn to_view(e: &FrozenEdit) -> EditView<f32> {
         kind: e.kind,
         op: e.op,
         smoothness: e.smoothness,
+        radius: e.radius,
     }
 }
 
@@ -191,8 +218,16 @@ impl Lcg {
             }
         }
     }
+    /// A PLAIN bounded float in `[-range, range]` — NO non-finite / `f32::MAX` draws.
+    /// Used by the geometric capsule tests (the collapse-to-sphere identity is a
+    /// finite-geometry claim that an overflow-prone `f32::MAX` operand would void; the
+    /// non-finite domain is locked separately by the `next_f32` random sweeps).
+    fn next_f32_bounded(&mut self, range: f32) -> f32 {
+        let u = (self.next_u32() as f32) / (u32::MAX as f32); // [0,1]
+        (u * 2.0 - 1.0) * range
+    }
     fn next_kind(&mut self) -> u32 {
-        self.next_u32() % 2 // SPHERE | BOX
+        self.next_u32() % 3 // SPHERE | BOX | CAPSULE
     }
     fn next_op(&mut self) -> u32 {
         self.next_u32() % 3 // UNION | SUBTRACT | INTERSECT
@@ -216,6 +251,10 @@ impl Lcg {
             kind: self.next_kind(),
             op: self.next_op(),
             smoothness: self.next_smoothness(),
+            // The capsule radius lane (`params.w`). The LCG mixes non-finite / ±0 draws
+            // in so the capsule arm is swept across degenerate radii too; sphere/box
+            // ignore it (their arms never read `radius`).
+            radius: self.next_f32(5.0),
         }
     }
 }
@@ -377,7 +416,7 @@ fn each_op_each_smoothness_byte_identical() {
     // Exhaustively cross each op with hard (k=0) and smooth (k>0), each kind.
     let ops = [0u32, frozen_op::SUBTRACT, frozen_op::INTERSECT];
     let ks = [0.0f32, 0.5, 1.5, -1.0];
-    let kinds = [0u32, frozen_kind::BOX];
+    let kinds = [0u32, frozen_kind::BOX, frozen_kind::CAPSULE];
     let mut lcg = Lcg::new(0xFACE_CAFE);
     for &op in &ops {
         for &k in &ks {
@@ -389,6 +428,7 @@ fn each_op_each_smoothness_byte_identical() {
                     kind: 0,
                     op: 0,
                     smoothness: 0.0,
+                    radius: 0.0,
                 };
                 let e = FrozenEdit {
                     center: [lcg.next_f32(3.0), lcg.next_f32(3.0), lcg.next_f32(3.0)],
@@ -400,6 +440,9 @@ fn each_op_each_smoothness_byte_identical() {
                     kind,
                     op,
                     smoothness: k,
+                    // A positive capsule cap radius (the `params.w` lane; ignored by the
+                    // sphere/box arms).
+                    radius: lcg.next_f32(2.0).abs() + 0.1,
                 };
                 let edits = [seed, e];
                 for _ in 0..64 {
@@ -412,6 +455,154 @@ fn each_op_each_smoothness_byte_identical() {
                 }
             }
         }
+    }
+}
+
+// ======================================================================
+// CAPSULE — the `sd_capsule` primitive byte-identity (the new IQ capsule arm).
+//
+// The eDSL `boyko_shaderdsl::field::sd_capsule::<f32>` vs the FROZEN reference
+// `frozen_sd_capsule` (the snapshot of the formulation the hand-written
+// `sdf_field.hlsli` `sd_capsule` mirrors), swept to-bits over random segments/points/
+// radii with the LCG's non-finite + signed-zero draws mixed in. The EXPLICIT scalar
+// dot fold (not the HLSL `dot()` intrinsic) is the operand order under test; a
+// reassociated dot would shift a ULP and trip the to-bits assert.
+// ======================================================================
+
+/// The eDSL capsule primitive over the `f32` Eval backend.
+fn refactored_sd_capsule(p: [f32; 3], a: [f32; 3], b: [f32; 3], r: f32) -> f32 {
+    field::sd_capsule::<f32>(p, a, b, r)
+}
+
+#[test]
+fn sd_capsule_primitive_random_sweep_byte_identical() {
+    // Random segment ends `a`/`b`, query points `p`, and radii `r`, with the LCG's
+    // NaN/Inf/±0/MAX/MIN draws mixed into every operand (so the dot folds + the denom
+    // guard + the `length` must propagate the bit pattern identically).
+    let mut lcg = Lcg::new(0xCA95_01E0_DEAD_BEEF);
+    for _ in 0..20_000 {
+        let a = [lcg.next_f32(8.0), lcg.next_f32(8.0), lcg.next_f32(8.0)];
+        let b = [lcg.next_f32(8.0), lcg.next_f32(8.0), lcg.next_f32(8.0)];
+        let p = [lcg.next_f32(12.0), lcg.next_f32(12.0), lcg.next_f32(12.0)];
+        let r = lcg.next_f32(4.0);
+        assert_bits(
+            refactored_sd_capsule(p, a, b, r),
+            frozen_sd_capsule(p, a, b, r),
+            "sd-capsule-sweep",
+        );
+    }
+}
+
+#[test]
+fn sd_capsule_degenerate_a_eq_b_equals_sphere_byte_identical() {
+    // A zero-length capsule (`a == b`): the `max(dot(ba,ba), EPS)` denom guard makes the
+    // projection `h == 0`, so the capsule collapses to `length(p - a) - r` — the sphere
+    // at `a`. Asserted to-bits against `frozen_sd_sphere` (NOT NaN). The `EPS` guard is
+    // load-bearing: without it `0/0` would poison the field.
+    //
+    // The collapse identity (`a==b capsule == sphere at a`) is a GEOMETRIC claim that holds
+    // for FINITE `a`: there `ba = a - a` is EXACTLY `[0,0,0]` so `h` clamps to 0. With a
+    // NON-finite `a`, `ba = a - a` is `NaN` (Inf - Inf), so the capsule and the sphere take
+    // different op trees and legitimately diverge in the NaN/Inf domain — that divergence is
+    // NOT a bug and is already locked (eDSL == frozen) by the random sweep above. So this
+    // geometric test draws FINITE `a`/`p` only.
+    let mut lcg = Lcg::new(0x5EED_0CA5_0FF0_0001);
+    for _ in 0..4_000 {
+        // PLAIN bounded operands (no non-finite / overflow-prone f32::MAX draws): with a
+        // finite, non-overflowing `a` the zero-length `ba` is EXACTLY [0,0,0] and the
+        // collapse identity holds. (The non-finite domain is the random sweep's job.)
+        let a = [lcg.next_f32_bounded(6.0), lcg.next_f32_bounded(6.0), lcg.next_f32_bounded(6.0)];
+        let p = [lcg.next_f32_bounded(8.0), lcg.next_f32_bounded(8.0), lcg.next_f32_bounded(8.0)];
+        let r = lcg.next_f32_bounded(3.0).abs() + 0.05;
+        let cap = refactored_sd_capsule(p, a, a, r); // a == b
+        assert_bits(cap, frozen_sd_sphere(p, a, r), "capsule-degenerate-vs-sphere-frozen");
+        // And the eDSL host `sd_capsule` is finite on this degenerate FINITE input (no 0/0 NaN
+        // — the EPS denom guard caught the zero-length segment).
+        assert!(cap.is_finite(), "a==b capsule must NOT be NaN (the EPS denom guard)");
+    }
+}
+
+#[test]
+fn sd_capsule_geometric_landmarks() {
+    // Geometric truth-table for a unit capsule on the x-axis: segment a=(-1,0,0)..b=(1,0,0),
+    // radius r=0.5.
+    let a = [-1.0f32, 0.0, 0.0];
+    let b = [1.0f32, 0.0, 0.0];
+    let r = 0.5f32;
+    let eps = 1.0e-5f32;
+
+    // On-axis midpoint (0,0,0): inside the swept sphere -> distance == -r.
+    let mid = refactored_sd_capsule([0.0, 0.0, 0.0], a, b, r);
+    assert!((mid - (-r)).abs() < eps, "midpoint must be -r (={}, got {mid})", -r);
+
+    // Perpendicular, distance 1.0 off the axis at the midpoint: distance == 1.0 - r.
+    let perp = refactored_sd_capsule([0.0, 1.0, 0.0], a, b, r);
+    assert!((perp - (1.0 - r)).abs() < eps, "perp must be 1.0 - r (got {perp})");
+
+    // At an endpoint cap (exactly on `b`): inside -> -r.
+    let cap_b = refactored_sd_capsule(b, a, b, r);
+    assert!((cap_b - (-r)).abs() < eps, "endpoint b must be -r (got {cap_b})");
+
+    // A point 2.0 BEYOND endpoint b along +x (at x=3): clamps to the cap at `b`, so the
+    // distance is the cap distance `2.0 - r` (NOT a projection onto the infinite line).
+    let beyond = refactored_sd_capsule([3.0, 0.0, 0.0], a, b, r);
+    assert!((beyond - (2.0 - r)).abs() < eps, "beyond-b must be 2.0 - r (got {beyond})");
+
+    // Every landmark is byte-identical to the frozen reference too.
+    for &p in &[[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], b, [3.0, 0.0, 0.0]] {
+        assert_bits(
+            refactored_sd_capsule(p, a, b, r),
+            frozen_sd_capsule(p, a, b, r),
+            "capsule-landmark-vs-frozen",
+        );
+    }
+}
+
+#[test]
+fn sd_capsule_is_a_lower_bound_on_euclidean_distance() {
+    // The sphere-tracing SOUNDNESS gate (the field lower-bound invariant, sdf_field.hlsli
+    // D7): the reported capsule distance must NEVER over-report the true Euclidean distance
+    // to the swept-sphere surface (an over-report would let the marcher overshoot a hit).
+    // The capsule is EXACT, so the bound is tight; we verify it numerically by sampling the
+    // segment densely and confirming `reported <= min_k(|p - seg_k|) - r + slack`.
+    let mut lcg = Lcg::new(0x10E2_B0DD_0CA5_1234);
+    for _ in 0..4_000 {
+        let a = [lcg.next_f32(5.0), lcg.next_f32(5.0), lcg.next_f32(5.0)];
+        let b = [lcg.next_f32(5.0), lcg.next_f32(5.0), lcg.next_f32(5.0)];
+        // Finite, well-separated points only (the invariant is about real geometry; the
+        // non-finite propagation is covered by the random sweep above).
+        if !a.iter().chain(b.iter()).all(|c| c.is_finite()) {
+            continue;
+        }
+        let p = [lcg.next_f32(7.0), lcg.next_f32(7.0), lcg.next_f32(7.0)];
+        if !p.iter().all(|c| c.is_finite()) {
+            continue;
+        }
+        let r = lcg.next_f32(2.0).abs() + 0.05;
+        let reported = refactored_sd_capsule(p, a, b, r);
+        if !reported.is_finite() {
+            continue;
+        }
+        // Brute-force the true nearest distance to the segment surface: min over a fine
+        // sampling of the segment, minus `r`.
+        let mut true_d = f32::INFINITY;
+        let steps = 2048;
+        for i in 0..=steps {
+            let t = i as f32 / steps as f32;
+            let s = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+            let d = ((p[0] - s[0]).powi(2) + (p[1] - s[1]).powi(2) + (p[2] - s[2]).powi(2)).sqrt();
+            true_d = true_d.min(d);
+        }
+        let true_surface = true_d - r;
+        // The reported distance is a LOWER bound on the true Euclidean distance. A small
+        // positive slack absorbs the segment-sampling discretization error (the brute force
+        // can slightly OVER-estimate the true nearest point between samples).
+        let slack = 1.0e-3 * (1.0 + true_d.abs());
+        assert!(
+            reported <= true_surface + slack,
+            "capsule OVER-reported the distance (unsound for sphere-tracing): reported={reported}, \
+             true_surface≈{true_surface}, slack={slack}, a={a:?}, b={b:?}, p={p:?}, r={r}"
+        );
     }
 }
 

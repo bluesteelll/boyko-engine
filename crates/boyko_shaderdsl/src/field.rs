@@ -24,6 +24,15 @@ pub const SDF_FAR: f32 = 1.0e9;
 /// (`sdf_field.hlsli:48`) and `boyko_sdf_math`'s `MAX_SDF_EDITS` (lib.rs:101).
 pub const MAX_SDF_EDITS: usize = 16;
 
+/// The `dot(ba, ba)` floor in [`sd_capsule`] — guards the degenerate `a == b` segment
+/// (a zero-length capsule). With `a == b` the segment direction `ba` is the zero vector
+/// and `dot(ba, ba)` is `0`; clamping the denominator to this epsilon makes the
+/// projection parameter `h = 0`, so the capsule cleanly collapses to a sphere of radius
+/// `r` at `a` (`length(p - a) - r`) instead of producing `0/0 == NaN`. Mirrors the
+/// shader's `CAPSULE_DENOM_EPS` (`sdf_field.hlsli`) and `boyko_sdf_math`'s
+/// `CAPSULE_DENOM_EPS`.
+pub const CAPSULE_DENOM_EPS: f32 = 1.0e-8;
+
 /// SDF boolean-op discriminants. Mirror the shader's `OP_*` (`sdf_field.hlsli:57`)
 /// and `boyko_sdf_math::sdf_op` (lib.rs:80).
 pub mod op {
@@ -42,6 +51,10 @@ pub mod kind {
     pub const SPHERE: u32 = 0;
     /// An axis-aligned box primitive — `params.xyz` are the half-extents.
     pub const BOX: u32 = 1;
+    /// A capsule primitive — `center.xyz` is endpoint `a`, `params.xyz` is endpoint `b`,
+    /// `params.w` (lifted into [`EditView::radius`]) is the cap radius. APPEND-only
+    /// (sphere=0, box=1 are frozen).
+    pub const CAPSULE: u32 = 2;
 }
 
 /// One edit's parameters lifted into the backend scalar `S`.
@@ -53,9 +66,9 @@ pub mod kind {
 /// host `u32` (they drive HOST control flow, not traced arithmetic).
 #[derive(Clone, Copy)]
 pub struct EditView<S: FieldScalar<Vec3 = [S; 3]>> {
-    /// The primitive center (xyz).
+    /// The primitive center (xyz) — also the capsule's endpoint `a`.
     pub center: [S; 3],
-    /// The radius (sphere) or half-extents (box).
+    /// The radius (sphere) or half-extents (box) — also the capsule's endpoint `b`.
     pub params: [S; 3],
     /// Primitive kind ([`kind`]). A HOST discriminant (selects which distance).
     pub kind: u32,
@@ -63,6 +76,9 @@ pub struct EditView<S: FieldScalar<Vec3 = [S; 3]>> {
     pub op: u32,
     /// Smooth-blend radius (0 = hard op).
     pub smoothness: S,
+    /// The capsule cap radius (the `params.w` lane). Unused by sphere/box (they pass
+    /// `0`); read only by the [`kind::CAPSULE`] arm of [`edit_distance`].
+    pub radius: S,
 }
 
 /// Polynomial smooth-min (IQ `smin`). Mirrors `sdf_field.hlsli:110-113` and
@@ -141,17 +157,53 @@ pub fn sd_box<S: FieldScalar<Vec3 = [S; 3]>>(p: [S; 3], c: [S; 3], h: [S; 3]) ->
     outside.add(inside)
 }
 
+/// The exact IQ capsule distance for a segment `[a, b]` with cap radius `r`:
+///
+/// ```text
+/// pa = p - a;  ba = b - a;
+/// h  = clamp(dot(pa, ba) / max(dot(ba, ba), CAPSULE_DENOM_EPS), 0, 1);
+/// return length(pa - ba * h) - r;
+/// ```
+///
+/// Mirrors the hand-written `sd_capsule` in `sdf_field.hlsli` and
+/// `boyko_sdf_math::sd_capsule`. Both dot products are spelled via [`scalar::v_dot`]
+/// (the EXPLICIT left-associated scalar fold, NOT the HLSL `dot()` intrinsic) so the
+/// host f32 and GPU bytes cannot fork. `max(dot(ba,ba), EPS)` guards the `a == b`
+/// degenerate (a zero-length capsule collapses to a sphere of radius `r` at `a`).
+///
+/// # Lower-bound invariant (the sphere-tracing precondition)
+///
+/// The capsule is the EXACT Euclidean distance to the swept-sphere surface (`length`
+/// to the nearest point on the segment, minus `r`), so it is a TIGHT bound — it never
+/// over-reports the true distance. It therefore preserves the field's
+/// conservative-lower-bound contract (`sdf_field.hlsli` D7), so the marcher never
+/// overshoots.
+#[inline]
+pub fn sd_capsule<S: FieldScalar<Vec3 = [S; 3]>>(p: [S; 3], a: [S; 3], b: [S; 3], r: S) -> S {
+    let pa = scalar::v_sub(p, a);
+    let ba = scalar::v_sub(b, a);
+    // h = clamp(dot(pa, ba) / max(dot(ba, ba), CAPSULE_DENOM_EPS), 0, 1)
+    let denom = scalar::v_dot(ba, ba).max(S::lit(CAPSULE_DENOM_EPS));
+    let h = scalar::v_dot(pa, ba).div(denom).clamp01();
+    // length(pa - ba * h) - r
+    scalar::v_len(scalar::v_sub(pa, scalar::v_scale(ba, h))).sub(r)
+}
+
 /// One edit's primitive distance at `p`. Mirrors `sdf_field.hlsli:100-105` and
 /// `boyko_sdf_math::edit_distance` (lib.rs:616-623).
 ///
 /// The kind test is a HOST branch over the `u32` discriminant (exactly the frozen
-/// `if (e.kind == KIND_BOX)`): it selects WHICH distance function to fold, not a
-/// traced value, so it is not a `select` (the two primitives have different op
-/// trees — only one is recorded per edit, matching the GPU's per-edit branch).
+/// `if (e.kind == KIND_BOX) ... else if (e.kind == KIND_CAPSULE) ... else sphere`): it
+/// selects WHICH distance function to fold, not a traced value, so it is not a
+/// `select` (the primitives have different op trees — only one is recorded per edit,
+/// matching the GPU's per-edit branch). BOX stays the first branch and SPHERE the
+/// final `else` (frozen); CAPSULE is appended between them.
 #[inline]
 pub fn edit_distance<S: FieldScalar<Vec3 = [S; 3]>>(e: &EditView<S>, p: [S; 3]) -> S {
     if e.kind == kind::BOX {
         sd_box(p, e.center, e.params)
+    } else if e.kind == kind::CAPSULE {
+        sd_capsule(p, e.center, e.params, e.radius)
     } else {
         sd_sphere(p, e.center, e.params[0])
     }

@@ -191,7 +191,7 @@ static SDF_EDITLIST_STORAGE_IMAGE_SPV: SpirvBlob<24092> = SpirvBlob(*include_byt
 /// reconstructs the real mesh `P` (in-range point/spot lighting) AND the SSAO pass processes mesh
 /// pixels. The SDF-hit branch (real `t`) and the pure-background branch (no mesh → `1.0e30`) are
 /// UNCHANGED; the two new `has_mesh ? t_mesh : 1.0e30` selects + the empty-tile select add → 122988 bytes.
-static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<131720> = SpirvBlob(*include_bytes!(concat!(
+static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<143584> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_gbuffer_composite.comp.spv"
 )));
