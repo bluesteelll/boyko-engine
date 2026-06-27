@@ -2589,10 +2589,13 @@ impl<'ctx> Renderer<'ctx> {
         // calls; dynamic rendering is enabled on this device. The raster pipeline (declaring
         // 3 matching color formats + 3 blend states, P5-r0) + its VERTEX push range + the
         // vertex buffer all belong to this device (caller contract) and the pipeline's
-        // declared color/depth formats equal the bound attachments'. The MVP push is
-        // `GBUFFER_MVP_BYTES` at offset 0 into the VERTEX range;
-        // `vertex_offset`/`raster_viewport`/`raster_area` locals outlive the bracketed
-        // calls; `draw(vertex_count, 1, 0, 0)` reads the bound vertices. Begin/End
+        // declared color/depth formats equal the bound attachments'. The 88-byte push is
+        // `GBUFFER_PUSH_BYTES` at offset 0 into the VERTEX range (M1: its trailing
+        // `use_model_matrix == 0` makes the VS take the legacy arm — byte-identical pixels);
+        // `scene.instance_bind_group` (set 0 = the 1-element identity instance SSBO) is bound
+        // before the draw to satisfy the VS's static `instances` reference (bound-but-unread on
+        // the legacy arm); `vertex_offset`/`raster_viewport`/`raster_area` locals outlive the
+        // bracketed calls; `draw(vertex_count, 1, 0, 0)` reads the bound vertices. Begin/End
         // bracket pass A exactly.
         unsafe {
             (self.fns.cmd_begin_rendering)(cmd, &raster_rendering);
@@ -2600,6 +2603,16 @@ impl<'ctx> Renderer<'ctx> {
                 cmd,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
                 scene.raster_pipeline.pipeline,
+            );
+            (self.fns.cmd_bind_descriptor_sets)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                scene.raster_pipeline.layout,
+                0,
+                1,
+                &scene.instance_bind_group.descriptor_set,
+                0,
+                ptr::null(),
             );
             (self.fns.cmd_push_constants)(
                 cmd,
@@ -3854,7 +3867,40 @@ pub struct UiPass<'a> {
 /// `gbuffer_mrt.{vs,fs}` use to write the marcher-aligned `SV_Depth` (euclidean under
 /// perspective, axial under ortho). ORTHO scenes append a zeroed `cam_eye` (mode 0), so
 /// their `SV_Position.z` depth — and the ortho goldens — are byte-identical.
-pub const GBUFFER_MVP_BYTES: usize = 80;
+///
+/// M1 (instanced-capable raster) WIDENS it 80 -> 88 B, appending the `gbuffer_mrt.vs`
+/// instanced-arm selectors: `uint base_instance` (offset 80, the SSBO bucket base) +
+/// `uint use_model_matrix` (offset 84). The legacy merged draw pushes
+/// `use_model_matrix == 0` + `base_instance == 0`, which makes the VS take the LEGACY arm
+/// (`mul(view_proj, p)`) — BYTE-IDENTICAL pixels to the pre-M1 80-byte push (the leading
+/// 64-byte `view_proj` IS the old `mvp` field, same bytes). The first 80 bytes of every
+/// existing push builder are unchanged; the 8 trailing bytes are both zero.
+///
+/// The descriptor set (set 0 = the per-instance model SSBO) and the push range occupy
+/// DISJOINT pipeline-layout slots — adding the set does NOT move the push range (still
+/// offset 0, VERTEX stage).
+pub const GBUFFER_PUSH_BYTES: usize = 88;
+
+/// The byte size of ONE [`gbuffer_mrt.vs`'s `InstanceModelCol`] record (M1): a 3x4
+/// ROW-MAJOR affine, 12 `f32` = 48 B (`std430` `StructuredBuffer` element, 16-B aligned).
+/// The instance SSBO the gbuffer raster pipeline binds at `set 0` binding 0 holds an array
+/// of these; M1 binds a 1-element dummy (the identity affine — see
+/// [`GBUFFER_IDENTITY_INSTANCE`]) for every legacy draw, which the legacy arm never reads.
+pub const GBUFFER_INSTANCE_MODEL_BYTES: usize = 48;
+
+/// The IDENTITY [`gbuffer_mrt.vs`'s `InstanceModelCol`] affine (M1): a 3x4 row-major
+/// `[r0, r1, r2]` with `r0 = (1,0,0,0)`, `r1 = (0,1,0,0)`, `r2 = (0,0,1,0)` — the rotation
+/// is identity and the translation zero. Uploaded ONCE into the dummy 1-element instance
+/// SSBO every legacy gbuffer draw binds at `set 0` binding 0. The legacy arm
+/// (`use_model_matrix == 0`) NEVER reads it; it exists only to satisfy the pipeline
+/// layout's static reference to the instance buffer (the MDF binding-15 bound-but-unread
+/// precedent). The instanced arm (M2+) would mul by this and reproduce the legacy world
+/// position exactly.
+pub const GBUFFER_IDENTITY_INSTANCE: [f32; 12] = [
+    1.0, 0.0, 0.0, 0.0, // r0: rotation row 0 | translation.x
+    0.0, 1.0, 0.0, 0.0, // r1: rotation row 1 | translation.y
+    0.0, 0.0, 1.0, 0.0, // r2: rotation row 2 | translation.z
+];
 
 /// The byte size of the marcher's COMPUTE push constant — DERIVED from the
 /// [`FineMarcherPush`](crate::compute::FineMarcherPush) `#[repr(C)]` struct (Render A1/A2
@@ -4001,10 +4047,22 @@ pub struct GBufferScene<'a> {
     pub vertex_buffer: &'a BoundBuffer,
     /// The number of vertices to `draw` (the mesh quad's vertex count, e.g. 6).
     pub vertex_count: u32,
-    /// The 80-byte `{ float4x4 mvp; float4 cam_eye }` push to `raster_pipeline`'s
-    /// `VERTEX` range (see [`GBUFFER_MVP_BYTES`]). ORTHO scenes append a zeroed `cam_eye`
-    /// (mode 0); PERSPECTIVE scenes write the world eye + mode 1.
-    pub mvp: [u8; GBUFFER_MVP_BYTES],
+    /// The 88-byte `{ float4x4 view_proj; float4 cam_eye; uint base_instance; uint
+    /// use_model_matrix }` push to `raster_pipeline`'s `VERTEX` range (see
+    /// [`GBUFFER_PUSH_BYTES`]). The leading 64 bytes are the (renamed) `view_proj` matrix
+    /// (the old `mvp`); ORTHO scenes append a zeroed `cam_eye` (mode 0), PERSPECTIVE scenes
+    /// the world eye + mode 1. M1: every legacy merged draw appends
+    /// `base_instance == 0` + `use_model_matrix == 0`, so the VS takes the LEGACY arm —
+    /// BYTE-IDENTICAL pixels to the pre-M1 80-byte push (the bit-identity gate).
+    pub mvp: [u8; GBUFFER_PUSH_BYTES],
+    /// M1: the per-instance model SSBO bind group bound at the raster pipeline's `set 0`
+    /// before the pass-A draw — a 1-element [`gbuffer_mrt.vs`'s `InstanceModelCol`] holding
+    /// the [`GBUFFER_IDENTITY_INSTANCE`] affine. The legacy merged draw
+    /// (`use_model_matrix == 0`) NEVER reads it; it exists only to satisfy the pipeline
+    /// layout's static reference to `StructuredBuffer<InstanceModelCol> instances`
+    /// (binding 0). The scene OWNS the underlying buffer + bind group; the recorder binds
+    /// `instance_bind_group.descriptor_set` once before the draw.
+    pub instance_bind_group: &'a VulkanBindGroup,
     /// The P1b SDF G-buffer marcher compute pipeline (its layout declares
     /// `vocab_layout` at `set 0`). Byte-untouched from P1b (pass B).
     pub marcher: &'a ComputePipeline,

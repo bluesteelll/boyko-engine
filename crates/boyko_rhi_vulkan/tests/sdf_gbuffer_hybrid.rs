@@ -81,6 +81,8 @@ use boyko_rhi_vulkan::compute::{
 };
 use boyko_rhi_vulkan::brick_atlas::{BrickAtlas, BrickClipmap};
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
+use boyko_rhi_vulkan::memory::BoundBuffer;
+use boyko_rhi_vulkan::rhi_impl::{VulkanBindGroup, VulkanBindGroupLayout};
 
 /// Total pixel count (the compute UBO `count`; the shader bounds `idx < count`).
 const PIXELS: u32 = SDF_IMG_W * SDF_IMG_H;
@@ -134,10 +136,13 @@ struct Vertex {
 const VERTEX_STRIDE: u32 = core::mem::size_of::<Vertex>() as u32;
 const _: () = assert!(VERTEX_STRIDE == 40, "Vertex must be tightly packed at 40 bytes");
 
-/// The mesh-raster VERTEX push size: `{ float4x4 mvp; float4 cam_eye }` (the hybrid-mesh-room
-/// PERSPECTIVE step widened it 64 -> 80). The offscreen ORTHO goldens append a zeroed `cam_eye`
-/// (mode 0), so their `SV_Position.z` depth is byte-identical.
-const MVP_BYTES: u32 = 80;
+/// The mesh-raster VERTEX push size: `{ float4x4 view_proj; float4 cam_eye; uint base_instance;
+/// uint use_model_matrix }`. The hybrid-mesh-room PERSPECTIVE step widened it 64 -> 80; M1
+/// (instanced-capable raster) widened it 80 -> 88, appending the `gbuffer_mrt.vs` instanced-arm
+/// selectors. The offscreen ORTHO goldens append a zeroed `cam_eye` (mode 0) + zero selectors
+/// (`use_model_matrix == 0` => the VS's legacy arm), so their `SV_Position.z` depth is
+/// byte-identical.
+const MVP_BYTES: u32 = 88;
 
 /// PBR MVP-2: the std430 word-packing of a ONE-element material table holding the engine
 /// default material (mid-gray dielectric: base 0.8/0.8/0.8/1, metallic 0, roughness 0.5,
@@ -200,7 +205,7 @@ impl<const N: usize> SpirvBlob<N> {
 /// Render P5-r0: the mesh-MRT G-buffer PRODUCER vertex SPIR-V (`gbuffer_mrt.vs.spv`):
 /// passes through the LINEAR vertex color + the PER-VERTEX world normal (loc 2, offset 12).
 /// Vertex layout: position (loc 0, offset 0) + color (loc 1, offset 24) + normal (loc 2, offset 12).
-static MRT_VS_SPV: SpirvBlob<1480> = SpirvBlob(*include_bytes!(concat!(
+static MRT_VS_SPV: SpirvBlob<3068> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/gbuffer_mrt.vs.spv"
 )));
@@ -276,9 +281,11 @@ fn coarse_group_count_x() -> u32 {
 /// The orthographic MVP for the mesh-MRT vertex shader, uploaded COLUMN-MAJOR (the
 /// VERIFIED transpose — see `run_hybrid`'s `ortho_mvp_bytes`). Maps a fronto-parallel
 /// world vertex so the rasterized `SV_Position.z` is the axial `(CAM_Z - worldZ) / T_MAX`,
-/// which the fragment writes back unchanged under ortho (`cam_mode == 0`). The trailing 16
-/// bytes (`[0u8; MVP_BYTES]` leaves them zeroed) are the `cam_eye` push field = [0,0,0,0]
-/// (mode 0 = ortho; the eye is unused since the ortho fragment keeps `SV_Position.z`).
+/// which the fragment writes back unchanged under ortho (`cam_mode == 0`). Bytes 64..80
+/// (`[0u8; MVP_BYTES]` leaves them zeroed) are the `cam_eye` push field = [0,0,0,0] (mode 0 =
+/// ortho; the eye is unused since the ortho fragment keeps `SV_Position.z`); bytes 80..88 are
+/// the M1 instanced-arm selectors, left zero (`base_instance == 0`, `use_model_matrix == 0`
+/// => the VS's legacy arm — byte-identical pixels).
 #[rustfmt::skip]
 fn ortho_mvp_bytes() -> [u8; MVP_BYTES as usize] {
     let h = SDF_VIEW_HALF_EXTENT;
@@ -297,6 +304,64 @@ fn ortho_mvp_bytes() -> [u8; MVP_BYTES as usize] {
         out[i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
     }
     out
+}
+
+/// M1: creates the gbuffer raster pipeline's `set 0` per-instance model resources — a
+/// 1-binding `StorageBuffer` layout (binding 0, VERTEX stage), a 1-element host-visible
+/// instance SSBO seeded with the identity 3x4 affine, and a bind group pointing the layout
+/// at the buffer. The gbuffer VS statically references `StructuredBuffer<InstanceModelCol>
+/// instances`, so the layout MUST be in the pipeline layout and a valid buffer MUST be bound
+/// for the draw; the legacy arm (`use_model_matrix == 0`) never reads it (bound-but-unread).
+/// The caller OWNS all three and tears them down (`destroy_bind_group` → `destroy_buffer` →
+/// `destroy_bind_group_layout`). Mirrors `window_present_gbuffer::create_identity_instance`.
+fn create_identity_instance(
+    device: &VulkanContext,
+) -> (VulkanBindGroupLayout, BoundBuffer, VulkanBindGroup) {
+    // The IDENTITY 3x4 row-major affine: r0=(1,0,0,0), r1=(0,1,0,0), r2=(0,0,1,0). 12 f32 =
+    // 48 B (matches the production `GBUFFER_IDENTITY_INSTANCE` / `GBUFFER_INSTANCE_MODEL_BYTES`).
+    const IDENTITY: [f32; 12] = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+    ];
+    const INSTANCE_BYTES: u64 = 48;
+    let layout = device
+        .create_bind_group_layout(&BindGroupLayoutDesc {
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                count: 1,
+                kind: DescriptorKind::StorageBuffer,
+                stage: ShaderStage::VERTEX,
+            }],
+        })
+        .expect("M1 instance-model bind-group layout");
+    let buffer = device
+        .create_buffer(&BufferDesc {
+            size: INSTANCE_BYTES,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("M1 identity instance SSBO");
+    {
+        let mapped = device
+            .buffer_mapped_ptr(&buffer)
+            .expect("host-visible identity instance buffer is mapped");
+        let mut bytes = [0u8; INSTANCE_BYTES as usize];
+        for (i, f) in IDENTITY.iter().enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+        }
+        // SAFETY: `mapped` points to `INSTANCE_BYTES` (48) mapped host-coherent bytes; `bytes`
+        // is exactly that length and copied in full, in-bounds. No GPU work references this
+        // buffer yet (the encoder records the draw after), so the write is unsynchronized-safe.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+        }
+    }
+    let bind_group = device
+        .create_bind_group(&BindGroupDesc {
+            layout: &layout,
+            entries: &[BindGroupEntry::StorageBuffer { buffer: &buffer }],
+        })
+        .expect("M1 identity instance bind group");
+    (layout, buffer, bind_group)
 }
 
 /// The mesh quad as two triangles spanning the world-XY footprint at world Z [`MESH_Z`].
@@ -933,6 +998,11 @@ fn run_gbuffer_hybrid_m4(
         VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
         VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
     ];
+    // M1: the per-instance model SSBO layout + 1-element identity dummy + its bind group.
+    // The gbuffer VS statically references `instances` at set 0 binding 0, so the pipeline
+    // layout MUST declare it + a valid buffer MUST be bound for the draw (the legacy arm,
+    // `use_model_matrix == 0`, never reads it — bound-but-unread).
+    let (instance_layout, instance_buffer, instance_bind_group) = create_identity_instance(device);
     let gfx = device
         .create_graphics_pipeline(&GraphicsPipelineDesc {
             vertex_module: &vs,
@@ -949,7 +1019,7 @@ fn run_gbuffer_hybrid_m4(
                 attributes: &attributes,
             }),
             push_constant_bytes: MVP_BYTES,
-            bind_group_layout: None,
+            bind_group_layout: Some(&instance_layout),
             blend: None,
         })
         .expect("mesh-MRT G-buffer producer graphics pipeline");
@@ -1232,6 +1302,9 @@ fn run_gbuffer_hybrid_m4(
         }),
     });
     encoder.bind_graphics_pipeline(&gfx);
+    // M1: bind the 1-element identity instance SSBO at set 0 (bound-but-unread — the
+    // `use_model_matrix == 0` push selects the VS's legacy arm, byte-identical pixels).
+    encoder.bind_descriptor_set(&instance_bind_group, &gfx);
     encoder.push_graphics_constants(&gfx, ShaderStage::VERTEX, 0, &ortho_mvp_bytes());
     encoder.bind_vertex_buffer(&vertex_buffer, 0, 0);
     encoder.set_viewport(&Viewport {
@@ -1524,6 +1597,10 @@ fn run_gbuffer_hybrid_m4(
         device.destroy_bind_group_layout(resolve_layout);
         device.destroy_bind_group_layout(bind_layout);
         device.destroy_graphics_pipeline(gfx);
+        // M1 instance-model resources (bind group → buffer → layout, after the pipeline).
+        device.destroy_bind_group(instance_bind_group);
+        device.destroy_buffer(instance_buffer);
+        device.destroy_bind_group_layout(instance_layout);
         device.destroy_shader_module(resolve_cs);
         device.destroy_shader_module(coarse_cs);
         device.destroy_shader_module(cs);
@@ -1799,6 +1876,9 @@ fn run_gbuffer_hybrid_ssao(
         VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
         VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
     ];
+    // M1: the per-instance model SSBO layout + 1-element identity dummy + its bind group (the
+    // VS statically references `instances` at set 0 binding 0; the legacy arm never reads it).
+    let (instance_layout, instance_buffer, instance_bind_group) = create_identity_instance(device);
     let gfx = device
         .create_graphics_pipeline(&GraphicsPipelineDesc {
             vertex_module: &vs,
@@ -1810,7 +1890,7 @@ fn run_gbuffer_hybrid_ssao(
             topology: PrimitiveTopology::TriangleList,
             vertex_layout: Some(VertexBufferLayout { stride: VERTEX_STRIDE, attributes: &attributes }),
             push_constant_bytes: MVP_BYTES,
-            bind_group_layout: None,
+            bind_group_layout: Some(&instance_layout),
             blend: None,
         })
         .expect("mesh-MRT G-buffer producer graphics pipeline");
@@ -1986,6 +2066,9 @@ fn run_gbuffer_hybrid_ssao(
         depth: Some(DepthAttachment { texture: &depth, layout: ImageLayout::DepthAttachmentOptimal, load_op: LoadOp::Clear, store_op: StoreOp::Store, clear_depth: DEPTH_CLEAR }),
     });
     encoder.bind_graphics_pipeline(&gfx);
+    // M1: bind the 1-element identity instance SSBO at set 0 (bound-but-unread — the
+    // `use_model_matrix == 0` push selects the VS's legacy arm, byte-identical pixels).
+    encoder.bind_descriptor_set(&instance_bind_group, &gfx);
     encoder.push_graphics_constants(&gfx, ShaderStage::VERTEX, 0, &ortho_mvp_bytes());
     encoder.bind_vertex_buffer(&vertex_buffer, 0, 0);
     encoder.set_viewport(&Viewport { x: 0.0, y: 0.0, width: SDF_IMG_W as f32, height: SDF_IMG_H as f32, min_depth: 0.0, max_depth: 1.0 });
@@ -2151,6 +2234,10 @@ fn run_gbuffer_hybrid_ssao(
         device.destroy_bind_group_layout(resolve_layout);
         device.destroy_bind_group_layout(bind_layout);
         device.destroy_graphics_pipeline(gfx);
+        // M1 instance-model resources (bind group → buffer → layout, after the pipeline).
+        device.destroy_bind_group(instance_bind_group);
+        device.destroy_buffer(instance_buffer);
+        device.destroy_bind_group_layout(instance_layout);
         device.destroy_shader_module(ssao_cs);
         device.destroy_shader_module(resolve_cs);
         device.destroy_shader_module(cs);
@@ -4850,6 +4937,9 @@ fn run_gbuffer_hybrid_lit_clustered(
         VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
         VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
     ];
+    // M1: the per-instance model SSBO layout + 1-element identity dummy + its bind group (the
+    // VS statically references `instances` at set 0 binding 0; the legacy arm never reads it).
+    let (instance_layout, instance_buffer, instance_bind_group) = create_identity_instance(device);
     let gfx = device
         .create_graphics_pipeline(&GraphicsPipelineDesc {
             vertex_module: &vs,
@@ -4865,7 +4955,7 @@ fn run_gbuffer_hybrid_lit_clustered(
                 attributes: &attributes,
             }),
             push_constant_bytes: MVP_BYTES,
-            bind_group_layout: None,
+            bind_group_layout: Some(&instance_layout),
             blend: None,
         })
         .expect("mesh-MRT G-buffer producer graphics pipeline");
@@ -5127,6 +5217,9 @@ fn run_gbuffer_hybrid_lit_clustered(
         }),
     });
     encoder.bind_graphics_pipeline(&gfx);
+    // M1: bind the 1-element identity instance SSBO at set 0 (bound-but-unread — the
+    // `use_model_matrix == 0` push selects the VS's legacy arm, byte-identical pixels).
+    encoder.bind_descriptor_set(&instance_bind_group, &gfx);
     encoder.push_graphics_constants(&gfx, ShaderStage::VERTEX, 0, &ortho_mvp_bytes());
     encoder.bind_vertex_buffer(&vertex_buffer, 0, 0);
     encoder.set_viewport(&Viewport {
@@ -5407,6 +5500,10 @@ fn run_gbuffer_hybrid_lit_clustered(
         device.destroy_bind_group_layout(cull_layout);
         device.destroy_bind_group_layout(bind_layout);
         device.destroy_graphics_pipeline(gfx);
+        // M1 instance-model resources (bind group → buffer → layout, after the pipeline).
+        device.destroy_bind_group(instance_bind_group);
+        device.destroy_buffer(instance_buffer);
+        device.destroy_bind_group_layout(instance_layout);
         device.destroy_shader_module(resolve_cs);
         device.destroy_shader_module(cull_cs);
         device.destroy_shader_module(cs);

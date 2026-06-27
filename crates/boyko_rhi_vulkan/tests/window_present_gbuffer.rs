@@ -58,9 +58,10 @@ use core::slice;
 
 use boyko_rhi::enums::{AddressMode, DescriptorKind, Filter};
 use boyko_rhi::{
-    BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc, BufferUsage, ComputePipelineDesc,
-    Format, GraphicsPipelineDesc, MemoryLocation, MipMode, PrimitiveTopology, RhiDevice,
-    SamplerDesc, ShaderStage, VertexAttribute, VertexBufferLayout, VertexFormat,
+    BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc,
+    BufferUsage, ComputePipelineDesc, Format, GraphicsPipelineDesc, MemoryLocation, MipMode,
+    PrimitiveTopology, RhiDevice, SamplerDesc, ShaderStage, VertexAttribute, VertexBufferLayout,
+    VertexFormat,
 };
 use boyko_rhi_vulkan::compute::{
     B5_CAMERA_UBO_BYTES_M4, B5_CAMERA_UBO_BYTES_MESH_SDF, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode,
@@ -82,12 +83,14 @@ use boyko_rhi_vulkan::mesh_sdf_texture::MeshSdfTexture;
 use boyko_sdf_math::mesh_sdf::{BakeMesh, MeshSdfField};
 use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
+use boyko_rhi_vulkan::memory::BoundBuffer;
+use boyko_rhi_vulkan::rhi_impl::{VulkanBindGroup, VulkanBindGroupLayout};
 use boyko_rhi_vulkan::ffi::{
     VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VkExtent2D,
 };
 use boyko_rhi_vulkan::swapchain::{
-    BrickActivation, GBUFFER_MVP_BYTES, GBufferFrame, GBufferScene, Renderer, SsaoActivation,
-    Surface, Swapchain,
+    BrickActivation, GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES,
+    GBufferFrame, GBufferScene, Renderer, SsaoActivation, Surface, Swapchain,
 };
 use boyko_rhi_vulkan::window::{CapturedMsg, Window};
 
@@ -172,8 +175,12 @@ struct Vertex {
 const VERTEX_STRIDE: u32 = core::mem::size_of::<Vertex>() as u32;
 const _: () = assert!(VERTEX_STRIDE == 40, "Vertex must be tightly packed at 40 bytes");
 
-/// The MVP byte size (a `float4x4`). Must equal [`GBUFFER_MVP_BYTES`].
-const MVP_BYTES: u32 = GBUFFER_MVP_BYTES as u32;
+/// The mesh-raster VERTEX push byte size. Must equal [`GBUFFER_PUSH_BYTES`] (88: the
+/// 80-byte `{ view_proj; cam_eye }` block + the M1 `{ base_instance; use_model_matrix }`
+/// tail). The `mvp` builders (`ortho_mvp_bytes` / `perspective_mvp_bytes`) write the first
+/// 80 bytes exactly as before and append two zero `u32`s — `use_model_matrix == 0` selects
+/// the VS's legacy arm (byte-identical pixels).
+const MVP_BYTES: u32 = GBUFFER_PUSH_BYTES as u32;
 
 /// A 4-byte-aligned wrapper around a committed SPIR-V byte blob so its address is a
 /// valid `*const u32` and it can be re-viewed as a `&[u32]` word stream.
@@ -193,8 +200,10 @@ impl<const N: usize> SpirvBlob<N> {
 
 /// Render P5-r0: the mesh-MRT G-buffer PRODUCER vertex SPIR-V (`gbuffer_mrt.vs.spv`).
 /// Vertex layout: position (loc 0, offset 0) + color (loc 1, offset 24) + per-vertex world
-/// normal (loc 2, offset 12); passes the LINEAR color + the per-vertex normal through.
-static MRT_VS_SPV: SpirvBlob<1480> = SpirvBlob(*include_bytes!(concat!(
+/// normal (loc 2, offset 12); passes the LINEAR color + the per-vertex normal through. M1
+/// grew the blob 1480 -> 3068 B (the `use_model_matrix` instanced-arm branch + the set-0
+/// instance SSBO); the legacy arm (`use_model_matrix == 0`) rasterizes byte-identical pixels.
+static MRT_VS_SPV: SpirvBlob<3068> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/gbuffer_mrt.vs.spv"
 )));
@@ -239,9 +248,11 @@ fn swapchain_readback_is_bgra(vk_format: i32) -> Option<bool> {
 /// The orthographic MVP push for the mesh-MRT vertex shader, uploaded COLUMN-MAJOR (the
 /// VERIFIED transpose). Maps a fronto-parallel world vertex so the rasterized
 /// `SV_Position.z` is the AXIAL `(CAM_Z - worldZ) / T_MAX` — the depth the fragment writes
-/// back unchanged under ortho (`cam_mode == 0`), byte-identical to step 1. The trailing
-/// 16 bytes are the `cam_eye` push field: `[0, 0, 0, 0]` (mode 0 = ortho; the eye is
-/// unused since the ortho fragment keeps `SV_Position.z`). Mirrors the packed/P1b convention.
+/// back unchanged under ortho (`cam_mode == 0`), byte-identical to step 1. Bytes 64..80 are
+/// the `cam_eye` push field: `[0, 0, 0, 0]` (mode 0 = ortho; the eye is unused since the
+/// ortho fragment keeps `SV_Position.z`). Bytes 80..88 are the M1 instanced-arm selectors,
+/// left zero (`base_instance == 0`, `use_model_matrix == 0` => the VS's legacy arm).
+/// Mirrors the packed/P1b convention.
 #[rustfmt::skip]
 fn ortho_mvp_bytes() -> [u8; MVP_BYTES as usize] {
     let h = SDF_VIEW_HALF_EXTENT;
@@ -264,8 +275,10 @@ fn ortho_mvp_bytes() -> [u8; MVP_BYTES as usize] {
 /// The PERSPECTIVE MVP push (`proj * view`, column-major) FOLLOWED by the `cam_eye`
 /// float4 (`xyz = eye`, `w = 1.0` = perspective mode), for the mesh-MRT vertex shader.
 ///
-/// The 80-byte layout MUST match `gbuffer_mrt.vs.hlsl`'s `{ float4x4 mvp; float4 cam_eye }`
-/// push. The `proj * view` is built from the SAME eye / basis / fov / aspect the marcher's
+/// The leading 80-byte layout MUST match `gbuffer_mrt.vs.hlsl`'s `{ float4x4 view_proj;
+/// float4 cam_eye }`; bytes 80..88 are the M1 instanced-arm selectors, left zero
+/// (`base_instance == 0`, `use_model_matrix == 0` => the legacy arm). The `proj * view` is
+/// built from the SAME eye / basis / fov / aspect the marcher's
 /// perspective ray-gen (`ray_gen.hlsli`) + `CompositePushConstants::perspective` use, so a
 /// mesh vertex projects to the SAME pixel the marcher's ray through that pixel reaches at
 /// that world point (screen-space alignment is the load-bearing requirement).
@@ -336,6 +349,63 @@ fn perspective_mvp_bytes(
         out[64 + i * 4..64 + i * 4 + 4].copy_from_slice(&f.to_le_bytes());
     }
     out
+}
+
+/// M1: creates the gbuffer raster pipeline's `set 0` per-instance model resources — a
+/// 1-binding `StorageBuffer` layout (binding 0, VERTEX stage), a 1-element host-visible
+/// instance SSBO seeded with the [`GBUFFER_IDENTITY_INSTANCE`] affine, and a bind group
+/// pointing the layout at the buffer. The gbuffer VS statically references
+/// `StructuredBuffer<InstanceModelCol> instances`, so the layout MUST be in the pipeline
+/// layout and a valid buffer MUST be bound for every draw; the legacy merged draw
+/// (`use_model_matrix == 0`) never reads it (bound-but-unread). The caller OWNS all three
+/// and tears them down (`destroy_bind_group` → `destroy_buffer` → `destroy_bind_group_layout`).
+fn create_identity_instance(
+    device: &VulkanContext,
+) -> (VulkanBindGroupLayout, BoundBuffer, VulkanBindGroup) {
+    let layout = RhiDevice::create_bind_group_layout(
+        device,
+        &BindGroupLayoutDesc {
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                count: 1,
+                kind: DescriptorKind::StorageBuffer,
+                stage: ShaderStage::VERTEX,
+            }],
+        },
+    )
+    .expect("M1 instance-model bind-group layout");
+    let buffer = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: GBUFFER_INSTANCE_MODEL_BYTES as u64,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("M1 identity instance SSBO");
+    {
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &buffer)
+            .expect("host-visible identity instance buffer is mapped");
+        let mut bytes = [0u8; GBUFFER_INSTANCE_MODEL_BYTES];
+        for (i, f) in GBUFFER_IDENTITY_INSTANCE.iter().enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+        }
+        // SAFETY: `mapped` points to `GBUFFER_INSTANCE_MODEL_BYTES` (48) mapped host-coherent
+        // bytes; `bytes` is exactly that length and copied in full, in-bounds. No GPU work is
+        // in flight yet (the present loop follows), so the write is unsynchronized-safe.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+        }
+    }
+    let bind_group = RhiDevice::create_bind_group(
+        device,
+        &BindGroupDesc {
+            layout: &layout,
+            entries: &[BindGroupEntry::StorageBuffer { buffer: &buffer }],
+        },
+    )
+    .expect("M1 identity instance bind group");
+    (layout, buffer, bind_group)
 }
 
 /// The mesh quad as two triangles spanning the world-XY footprint at world Z [`MESH_Z`].
@@ -1094,6 +1164,11 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
         VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
     ];
+    // M1: the per-instance model SSBO layout + 1-element identity dummy + its bind group.
+    // The gbuffer VS statically references `StructuredBuffer<InstanceModelCol> instances` at
+    // set 0 binding 0, so the pipeline layout MUST declare it and every draw MUST bind a valid
+    // buffer; the legacy merged draw (`use_model_matrix == 0`) never reads it (bound-but-unread).
+    let (instance_layout, instance_buffer, instance_bind_group) = create_identity_instance(device);
     let raster_pipeline = RhiDevice::create_graphics_pipeline(
         device,
         &GraphicsPipelineDesc {
@@ -1111,7 +1186,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
                 attributes: &attributes,
             }),
             push_constant_bytes: MVP_BYTES,
-            bind_group_layout: None,
+            bind_group_layout: Some(&instance_layout),
             blend: None,
         },
     )
@@ -1285,6 +1360,9 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         vertex_buffer: &vertex_buffer,
         vertex_count: vertices.len() as u32,
         mvp,
+        // M1: the legacy merged draw binds the 1-element identity instance SSBO at set 0
+        // (bound-but-unread — the `use_model_matrix == 0` push selects the VS's legacy arm).
+        instance_bind_group: &instance_bind_group,
         marcher: &marcher,
         vocab_layout: &vocab_layout,
         edit_list: &edit_list,
@@ -1650,6 +1728,10 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         RhiDevice::destroy_compute_pipeline(device, marcher);
         RhiDevice::destroy_bind_group_layout(device, vocab_layout);
         RhiDevice::destroy_graphics_pipeline(device, raster_pipeline);
+        // M1 instance-model resources (bind group → buffer → layout, after the pipeline).
+        RhiDevice::destroy_bind_group(device, instance_bind_group);
+        RhiDevice::destroy_buffer(device, instance_buffer);
+        RhiDevice::destroy_bind_group_layout(device, instance_layout);
         RhiDevice::destroy_sampler(device, present_sampler);
         RhiDevice::destroy_sampler(device, depth_sampler);
         RhiDevice::destroy_buffer(device, vertex_buffer);
@@ -1952,6 +2034,11 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
         VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
     ];
+    // M1: the per-instance model SSBO layout + 1-element identity dummy + its bind group.
+    // The gbuffer VS statically references `StructuredBuffer<InstanceModelCol> instances` at
+    // set 0 binding 0, so the pipeline layout MUST declare it and every draw MUST bind a valid
+    // buffer; the legacy merged draw (`use_model_matrix == 0`) never reads it (bound-but-unread).
+    let (instance_layout, instance_buffer, instance_bind_group) = create_identity_instance(device);
     let raster_pipeline = RhiDevice::create_graphics_pipeline(
         device,
         &GraphicsPipelineDesc {
@@ -1969,7 +2056,7 @@ fn p0_windowed_coarse_cull_matches_uncull() {
                 attributes: &attributes,
             }),
             push_constant_bytes: MVP_BYTES,
-            bind_group_layout: None,
+            bind_group_layout: Some(&instance_layout),
             blend: None,
         },
     )
@@ -2127,6 +2214,9 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         vertex_buffer: &vertex_buffer,
         vertex_count: vertices.len() as u32,
         mvp,
+        // M1: the legacy merged draw binds the 1-element identity instance SSBO at set 0
+        // (bound-but-unread — the `use_model_matrix == 0` push selects the VS's legacy arm).
+        instance_bind_group: &instance_bind_group,
         marcher: &marcher,
         vocab_layout: &vocab_layout,
         edit_list: &edit_list,
@@ -2347,6 +2437,10 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         RhiDevice::destroy_compute_pipeline(device, marcher);
         RhiDevice::destroy_bind_group_layout(device, vocab_layout);
         RhiDevice::destroy_graphics_pipeline(device, raster_pipeline);
+        // M1 instance-model resources (bind group → buffer → layout, after the pipeline).
+        RhiDevice::destroy_bind_group(device, instance_bind_group);
+        RhiDevice::destroy_buffer(device, instance_buffer);
+        RhiDevice::destroy_bind_group_layout(device, instance_layout);
         RhiDevice::destroy_sampler(device, present_sampler);
         RhiDevice::destroy_sampler(device, depth_sampler);
         RhiDevice::destroy_buffer(device, vertex_buffer);
@@ -3513,6 +3607,10 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
         VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
     ];
+    // M1: the per-instance model SSBO layout + 1-element identity dummy + its bind group
+    // (the gbuffer VS statically references `instances` at set 0 binding 0 — the layout MUST
+    // declare it + a valid buffer MUST be bound; the legacy draw never reads it).
+    let (instance_layout, instance_buffer, instance_bind_group) = create_identity_instance(device);
     let raster_pipeline = RhiDevice::create_graphics_pipeline(
         device,
         &GraphicsPipelineDesc {
@@ -3528,7 +3626,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
                 attributes: &attributes,
             }),
             push_constant_bytes: MVP_BYTES,
-            bind_group_layout: None,
+            bind_group_layout: Some(&instance_layout),
             blend: None,
         },
     )
@@ -3704,6 +3802,9 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         vertex_buffer: &vertex_buffer,
         vertex_count: vertices.len() as u32,
         mvp,
+        // M1: the legacy merged draw binds the 1-element identity instance SSBO at set 0
+        // (bound-but-unread — the `use_model_matrix == 0` push selects the VS's legacy arm).
+        instance_bind_group: &instance_bind_group,
         marcher: &marcher,
         vocab_layout: &vocab_layout,
         edit_list: &edit_list,
@@ -3904,6 +4005,10 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig) {
         RhiDevice::destroy_compute_pipeline(device, marcher);
         RhiDevice::destroy_bind_group_layout(device, vocab_layout);
         RhiDevice::destroy_graphics_pipeline(device, raster_pipeline);
+        // M1 instance-model resources (bind group → buffer → layout, after the pipeline).
+        RhiDevice::destroy_bind_group(device, instance_bind_group);
+        RhiDevice::destroy_buffer(device, instance_buffer);
+        RhiDevice::destroy_bind_group_layout(device, instance_layout);
         RhiDevice::destroy_sampler(device, present_sampler);
         RhiDevice::destroy_sampler(device, depth_sampler);
         RhiDevice::destroy_buffer(device, vertex_buffer);
