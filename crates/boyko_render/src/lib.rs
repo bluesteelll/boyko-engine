@@ -62,6 +62,12 @@ pub mod bundles;
 /// [`resolve_csm`](csm_config::resolve_csm) fit + the cold
 /// [`resolve_csm_cascades`](csm_config::resolve_csm_cascades) policy).
 pub mod csm_config;
+/// CSM Increment 2 — the ECS-native shadow-caster gather
+/// ([`CsmCasterScratch`](csm_caster::CsmCasterScratch) reused resource +
+/// [`gather_shadow_casters`](csm_caster::gather_shadow_casters), the
+/// `With<ShadowCaster>`-filtered count→prefix-sum→scatter that produces the cascade
+/// depth-pass caster batches, reusing the M3 `gather_into` core).
+pub mod csm_caster;
 /// CSM Inc-1a — the structural [`ShadowCaster`](csm_marker::ShadowCaster) capability
 /// marker (CSM-casting vs SDF/MDF-occlusion are mutually exclusive by presence).
 pub mod csm_marker;
@@ -106,6 +112,7 @@ pub use bundles::{DirectionalLightObject, PointLightObject, SpotLightObject};
 pub use csm_config::{
     CascadeData, CsmConfig, MAX_CASCADES, ResolvedCsm, resolve_csm, resolve_csm_cascades,
 };
+pub use csm_caster::{CsmCasterScratch, gather_shadow_casters};
 pub use csm_marker::ShadowCaster;
 pub use csm_plugin::CsmPlugin;
 pub use error::GpuColumnError;

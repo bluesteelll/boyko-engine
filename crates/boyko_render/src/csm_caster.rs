@@ -1,0 +1,377 @@
+//! CSM Increment 2 — the ECS-native shadow-caster gather (the cascade depth-pass
+//! caster batches).
+//!
+//! This is the Principle-0 production caster-selection path: the CSM depth pass draws
+//! the casters of SPAWNED ENTITIES — every visible `(MeshHandle, InstanceModelCol)`
+//! that ALSO carries the structural [`ShadowCaster`](crate::csm_marker::ShadowCaster)
+//! marker — read through an ECS [`Query`], NOT a hand-built inline batch. It mirrors
+//! the mesh foundation's main instance gather
+//! ([`gather_mesh_draws`](crate::mesh_draw::gather_mesh_draws)) exactly, with ONE
+//! structural difference: a `With<ShadowCaster>` term on the filter, so a non-caster
+//! row never enters a cascade bucket.
+//!
+//! # Reuse, not duplication (REUSE `gather_into`)
+//!
+//! The count → prefix-sum → scatter core is NOT re-implemented here — it is
+//! [`MeshRenderScratch::gather_into`](crate::mesh_draw::MeshRenderScratch::gather_into)
+//! called VERBATIM, with the `With<ShadowCaster>`-filtered query passed as the
+//! re-iteration closure. [`CsmCasterScratch`] is a newtype over
+//! [`MeshRenderScratch`](crate::mesh_draw::MeshRenderScratch) so the caster batches +
+//! ring live in a SEPARATE [`Resource`] from the main gather's (they must not collide:
+//! the main pass draws ALL visible meshes, the depth pass draws ONLY casters — a
+//! different bucket set with different `base_instance`s), while sharing the foundation's
+//! cleared-not-reallocated, grow-POW2 discipline (Principle 5) byte-for-byte.
+//!
+//! # The output seam (how the caster batches reach the recorder)
+//!
+//! [`gather_shadow_casters`] fills `CsmCasterScratch`'s
+//! [`batches`](crate::mesh_draw::MeshRenderScratch::batches) (one [`DrawBatch`] per
+//! caster mesh — Principle-1 one `vkCmdDrawIndexed` per mesh) +
+//! [`ring`](crate::mesh_draw::MeshRenderScratch::ring) (the contiguous caster
+//! instance ring the depth VS indexes by `base_instance + SV_InstanceID`). That pair is
+//! exactly the shape `record_csm_depth` consumes for each cascade — the SAME shape the
+//! inline CSM demo hand-builds. A real app reaches the recorder via the render scene
+//! (the extract path): `gather_shadow_casters` → `CsmCasterScratch.batches`/`.ring` →
+//! extract → the recorder. `boyko_rhi_vulkan` CANNOT depend on `boyko_render`, so the
+//! app/extract layer passes the gathered batches across the crate boundary — exactly as
+//! the main `MeshRenderScratch` batches reach the gbuffer recorder.
+//!
+//! # C2 — the caster ⇄ SDF/MDF-occluder exclusivity (scene-authoring contract)
+//!
+//! A `ShadowCaster` raster mesh must NOT also be an SDF/MDF occluder: were a single mesh
+//! both, its shadow would be double-counted (once by this raster depth pass, once by the
+//! field marcher) and a hard/soft penumbra seam would appear where the two estimators
+//! disagree. The critic's C2 exclusivity is structural — keyed by COMPONENT PRESENCE,
+//! exactly as
+//! [`csm_marker`](crate::csm_marker) documents. But SDF/MDF occluders are NOT ECS
+//! components: they are an EDIT LIST
+//! (`boyko_sdf_math`'s `SdfEditField` / `sdf_edit_list`), a separate authority the field
+//! marcher folds — there is no occluder Component to test against, so the exclusivity
+//! CANNOT be a runtime `debug_assert!` in this gather. It is therefore a SCENE-AUTHORING
+//! CONTRACT: the [`ShadowCaster`](crate::csm_marker::ShadowCaster) marker is added ONLY
+//! to raster meshes that have NO SDF/MDF twin in the edit list. When SDF occluders later
+//! become ECS components (a `SdfOccluder` marker), this gather should gain a
+//! `debug_assert!` that no gathered caster also carries that marker (and the query a
+//! `Without<SdfOccluder>` term to make the exclusion structural, not just asserted).
+
+use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
+use boyko_ecs::ecs::core::iters::query::{Query, With};
+use boyko_ecs::ecs::core::system::{NonSendRes, ResMut};
+use boyko_macros::Resource;
+use boyko_scene::render_caps::{MeshHandle, RenderEnabled};
+
+use crate::csm_marker::ShadowCaster;
+use crate::instance_model::InstanceModelCol;
+use crate::mesh_draw::{DrawBatch, MeshRenderScratch};
+use crate::mesh_registry::MeshRegistry;
+
+/// The reused per-frame shadow-caster gather scratch (CSM Inc 2) — a SEPARATE
+/// [`Resource`] from the main [`MeshRenderScratch`](crate::mesh_draw::MeshRenderScratch)
+/// so the cascade depth-pass caster batches do not collide with the gbuffer pass's
+/// batches.
+///
+/// A newtype over [`MeshRenderScratch`](crate::mesh_draw::MeshRenderScratch): it REUSES
+/// the foundation's `gather_into` core, its per-mesh lanes + instance ring, and its
+/// cleared-not-reallocated grow-POW2 discipline (Principle 5) VERBATIM — only the
+/// resource IDENTITY differs (the ECS keys a `Resource` by type, so the wrapper gives
+/// the caster gather its own slot). The gather is filtered on
+/// [`ShadowCaster`](crate::csm_marker::ShadowCaster), so the batches + ring hold ONLY
+/// the structural casters.
+#[derive(Resource, Default)]
+pub struct CsmCasterScratch(pub MeshRenderScratch);
+
+impl CsmCasterScratch {
+    /// The number of distinct caster meshes with at least one visible instance this
+    /// frame (`batches.len()`) — the Principle-1 one-draw-per-caster-mesh count.
+    #[inline]
+    pub fn batch_count(&self) -> usize {
+        self.0.batch_count()
+    }
+
+    /// The total number of scattered caster instances (== the caster ring length).
+    #[inline]
+    pub fn instance_count(&self) -> usize {
+        self.0.instance_count()
+    }
+
+    /// The emitted per-caster-mesh [`DrawBatch`]es (one per non-empty caster mesh, in
+    /// mesh-id order) — the depth-pass recorder issues one
+    /// `vkCmdDrawIndexed` per batch into each cascade.
+    #[inline]
+    pub fn batches(&self) -> &[DrawBatch] {
+        &self.0.batches
+    }
+
+    /// The contiguous caster instance ring — every gathered caster's 48-byte
+    /// [`InstanceModelCol`] scattered into its mesh's bucket. The depth pass uploads
+    /// this slice into ONE shared instance SSBO bound once for the whole caster batch
+    /// list; the depth VS indexes `ring[base_instance + SV_InstanceID]`.
+    #[inline]
+    pub fn ring(&self) -> &[InstanceModelCol] {
+        &self.0.ring
+    }
+}
+
+/// The ECS-native CSM Inc-2 shadow-caster gather SYSTEM: buckets every visible
+/// `(MeshHandle, InstanceModelCol)` entity that ALSO carries
+/// [`ShadowCaster`](crate::csm_marker::ShadowCaster) into per-caster-mesh
+/// [`DrawBatch`]es + the shared caster instance ring, reusing the [`CsmCasterScratch`]
+/// resource (Principle 0 — casters from spawned entities via the query, not an inline
+/// batch).
+///
+/// # The structural filter
+///
+/// The query filter is `(Enabled<RenderEnabled>, With<ShadowCaster>)` — a tuple-AND:
+/// - `Enabled<RenderEnabled>` is the `Visibility::Hidden` per-row gate (the SAME term
+///   [`gather_mesh_draws`](crate::mesh_draw::gather_mesh_draws) uses), so a hidden caster
+///   never enters a cascade bucket.
+/// - `With<ShadowCaster>` is the structural caster term — a non-caster row is excluded at
+///   iteration (capability-is-presence), so the depth pass draws ONLY casters. This is
+///   the WHOLE difference from the main gather.
+///
+/// # Reuse of the foundation core
+///
+/// The count → prefix-sum → scatter is
+/// [`MeshRenderScratch::gather_into`](crate::mesh_draw::MeshRenderScratch::gather_into)
+/// called verbatim: the `With<ShadowCaster>`-filtered `q.iter()` is the re-iteration
+/// closure, the [`MeshRegistry`] supplies the mesh count (sizes the lanes, O2) + each
+/// batch's `(index_count, index_type)`. One `vkCmdDrawIndexed` per caster mesh
+/// (Principle 1).
+///
+/// # 0%-gate
+///
+/// A world with no `ShadowCaster` row (or no `InstanceModelCol` column) yields zero
+/// matching rows, so the gather emits zero caster batches + an empty caster ring — the
+/// depth pass then draws nothing, byte-identical to a CSM-disabled frame.
+///
+/// # Registration — unwired-API (matches `gather_mesh_draws`)
+///
+/// This system is NOT registered in [`CsmPlugin`](crate::csm_plugin::CsmPlugin) (nor any
+/// plugin), exactly as
+/// [`gather_mesh_draws`](crate::mesh_draw::gather_mesh_draws) is an unwired exported API:
+/// it requires the `MeshRegistry` `NonSend` resource + the `InstanceModelCol`/`MeshHandle`
+/// columns the inline CSM demos do not yet spawn, and its output must be co-registered
+/// `.before` the depth-pass consumer at the OWNING app's call site (so the
+/// `.before(record_csm_depth)` edge is expressible there — the same add-order discipline
+/// `CsmPlugin` documents for the resolve/consumer ordering). The app registers it
+/// alongside [`gather_mesh_draws`](crate::mesh_draw::gather_mesh_draws) and inserts the
+/// [`CsmCasterScratch`] resource when it wires the real CSM caster path.
+// The `Query<D, F>` IS the declarative system signature; the `(Enabled<RenderEnabled>,
+// With<ShadowCaster>)` tuple-AND filter is the whole point of this gather (the structural
+// caster term), so factoring it behind a `type` alias would hide the load-bearing intent.
+#[allow(clippy::type_complexity, clippy::needless_pass_by_value)]
+pub fn gather_shadow_casters(
+    q: Query<(&MeshHandle, &InstanceModelCol), (Enabled<RenderEnabled>, With<ShadowCaster>)>,
+    registry: NonSendRes<MeshRegistry>,
+    mut scratch: ResMut<CsmCasterScratch>,
+) {
+    let mesh_count = registry.len();
+    scratch.0.gather_into(
+        mesh_count,
+        |mesh_id| {
+            let m = registry.get(MeshHandle(mesh_id));
+            (m.index_count, m.index_type)
+        },
+        |emit| {
+            for (h, col) in q.iter() {
+                emit(h.0, col);
+            }
+        },
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use boyko_rhi::enums::IndexType;
+
+    /// A distinct-per-instance affine whose translation encodes `(mesh_id, ordinal)` so
+    /// a misplaced scatter is detectable by value (mirrors the `mesh_draw` test scaffold).
+    fn affine(mesh_id: u32, ordinal: u32) -> InstanceModelCol {
+        InstanceModelCol {
+            rows: [
+                [1.0, 0.0, 0.0, mesh_id as f32],
+                [0.0, 1.0, 0.0, ordinal as f32],
+                [0.0, 0.0, 1.0, 0.0],
+            ],
+        }
+    }
+
+    /// A fake registry `meta`: mesh `m` has `index_count = 6 * (m + 1)` and alternating
+    /// index width — identical to the `mesh_draw` scaffold so the caster gather is proven
+    /// to carry the same O3 mixed-width batch fields.
+    fn meta(mesh_id: u32) -> (u32, IndexType) {
+        let width = if mesh_id.is_multiple_of(2) {
+            IndexType::Uint16
+        } else {
+            IndexType::Uint32
+        };
+        (6 * (mesh_id + 1), width)
+    }
+
+    /// One `(mesh_id, &InstanceModelCol)` input plus its `is_caster` structural flag —
+    /// the test stands in for the `With<ShadowCaster>` archetypal filter by emitting ONLY
+    /// the casters into the re-iteration closure (the gather never sees a non-caster row,
+    /// exactly as the real query's filter excludes it at iteration).
+    struct Row {
+        mesh_id: u32,
+        col: InstanceModelCol,
+        is_caster: bool,
+    }
+
+    /// Runs the SAME `gather_into` core the system runs, fed ONLY the rows whose
+    /// `is_caster` is set — the CPU mirror of `Query<.., With<ShadowCaster>>`.
+    fn gather_casters(scratch: &mut CsmCasterScratch, mesh_count: usize, rows: &[Row]) {
+        scratch.0.gather_into(mesh_count, meta, |emit| {
+            for r in rows.iter().filter(|r| r.is_caster) {
+                emit(r.mesh_id, &r.col);
+            }
+        });
+    }
+
+    /// THE Inc-2 gate: a mixed set where SOME entities carry `ShadowCaster` and some do
+    /// not. The gather must produce caster batches for ONLY the casters — the non-casters
+    /// are EXCLUDED by the structural filter — with correct
+    /// `base_instance`/`instance_count`/contiguity and one batch per caster mesh.
+    #[test]
+    fn casters_only_excludes_non_casters_contiguous() {
+        // Mesh 0: 2 casters + 1 non-caster.  Mesh 1: 1 caster + 1 non-caster.
+        // Mesh 2: 0 casters (1 non-caster only) — it must produce NO batch.
+        let m0c0 = affine(0, 0);
+        let m0c1 = affine(0, 1);
+        let m0n = affine(0, 99); // non-caster — must be excluded
+        let m1c0 = affine(1, 0);
+        let m1n = affine(1, 99); // non-caster — must be excluded
+        let m2n = affine(2, 99); // non-caster on a mesh with NO casters — no batch
+
+        // Interleave casters + non-casters so the scatter (not the input order) produces
+        // contiguous buckets, and a non-caster between casters cannot leak into a bucket.
+        let rows = [
+            Row { mesh_id: 0, col: m0c0, is_caster: true },
+            Row { mesh_id: 0, col: m0n, is_caster: false },
+            Row { mesh_id: 1, col: m1c0, is_caster: true },
+            Row { mesh_id: 2, col: m2n, is_caster: false },
+            Row { mesh_id: 0, col: m0c1, is_caster: true },
+            Row { mesh_id: 1, col: m1n, is_caster: false },
+        ];
+
+        let mut scratch = CsmCasterScratch::default();
+        gather_casters(&mut scratch, 3, &rows);
+
+        // Only meshes 0 and 1 have casters => exactly 2 batches (mesh 2 excluded — it has
+        // only a non-caster instance).
+        assert_eq!(
+            scratch.batch_count(),
+            2,
+            "only ShadowCaster meshes produce batches; the non-caster-only mesh is excluded"
+        );
+
+        // Batch 0 = caster mesh 0: base 0, 2 caster instances (the non-caster NOT counted).
+        let b0 = scratch.batches()[0];
+        assert_eq!(b0.mesh_id, 0);
+        assert_eq!(b0.base_instance, 0, "first caster bucket => base 0");
+        assert_eq!(b0.instance_count, 2, "2 casters of mesh 0 (the non-caster excluded)");
+        assert_eq!(b0.index_count, 6);
+        assert_eq!(b0.index_type, IndexType::Uint16);
+
+        // Batch 1 = caster mesh 1: base == count(mesh-0 casters) == 2 (NONZERO), 1 caster.
+        let b1 = scratch.batches()[1];
+        assert_eq!(b1.mesh_id, 1);
+        assert_eq!(b1.base_instance, 2, "mesh 1's base == caster count of mesh 0 == 2");
+        assert_eq!(b1.instance_count, 1, "1 caster of mesh 1 (its non-caster excluded)");
+        assert_eq!(b1.index_count, 12);
+        assert_eq!(b1.index_type, IndexType::Uint32);
+
+        // The caster ring holds exactly the 3 casters (no non-caster value present).
+        assert_eq!(scratch.instance_count(), 3, "the ring holds only the 3 casters");
+        // Mesh 0's 2 casters contiguous at [0..2), mesh 1's 1 caster at [2..3) — each slot
+        // holds the EXPECTED caster (its translation encodes (mesh, ord)), proving no
+        // non-caster (ordinal 99) leaked in.
+        assert_eq!(scratch.ring()[0], affine(0, 0));
+        assert_eq!(scratch.ring()[1], affine(0, 1));
+        assert_eq!(scratch.ring()[2], affine(1, 0));
+        // The excluded non-caster value (ordinal 99) is nowhere in the ring.
+        assert!(
+            !scratch.ring().contains(&affine(0, 99))
+                && !scratch.ring().contains(&affine(1, 99))
+                && !scratch.ring().contains(&affine(2, 99)),
+            "no non-caster instance leaked into the caster ring"
+        );
+    }
+
+    /// A world with ZERO casters (every entity is a non-caster) emits zero caster batches
+    /// + an empty ring — the depth-pass 0%-gate (byte-identical to a CSM-disabled frame).
+    #[test]
+    fn no_casters_yields_no_batches() {
+        let n0 = affine(0, 0);
+        let n1 = affine(1, 0);
+        let rows = [
+            Row { mesh_id: 0, col: n0, is_caster: false },
+            Row { mesh_id: 1, col: n1, is_caster: false },
+        ];
+        let mut scratch = CsmCasterScratch::default();
+        gather_casters(&mut scratch, 2, &rows);
+        assert_eq!(scratch.batch_count(), 0, "no ShadowCaster => no caster batches");
+        assert_eq!(scratch.instance_count(), 0, "no ShadowCaster => empty caster ring");
+    }
+
+    /// Every entity is a caster — the caster gather degenerates to the SAME result the
+    /// main `gather_mesh_draws` would produce (the `With<ShadowCaster>` term is a no-op
+    /// when all rows carry the marker), proving the reuse of `gather_into` is faithful.
+    #[test]
+    fn all_casters_matches_unfiltered_gather() {
+        let a0 = affine(0, 0);
+        let a1 = affine(0, 1);
+        let b0 = affine(1, 0);
+        let rows = [
+            Row { mesh_id: 0, col: a0, is_caster: true },
+            Row { mesh_id: 1, col: b0, is_caster: true },
+            Row { mesh_id: 0, col: a1, is_caster: true },
+        ];
+
+        let mut casters = CsmCasterScratch::default();
+        gather_casters(&mut casters, 2, &rows);
+
+        // The same inputs through the foundation's gather_into directly (no filter).
+        let mut main = MeshRenderScratch::default();
+        main.gather_into(2, meta, |emit| {
+            for r in &rows {
+                emit(r.mesh_id, &r.col);
+            }
+        });
+
+        assert_eq!(casters.batch_count(), main.batch_count());
+        assert_eq!(casters.batches(), main.batches.as_slice());
+        assert_eq!(casters.ring(), main.ring.as_slice());
+    }
+
+    /// Re-running the caster gather REUSES the scratch's capacity (Principle 5): a large
+    /// frame then a smaller one yields the correct smaller result without losing the
+    /// reserved ring capacity.
+    #[test]
+    fn caster_gather_reuses_capacity_across_frames() {
+        let mut scratch = CsmCasterScratch::default();
+
+        // Frame 1: 4 casters across 2 meshes.
+        let big: Vec<InstanceModelCol> = (0..4).map(|i| affine(i % 2, i)).collect();
+        let big_rows: Vec<Row> = big
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| Row { mesh_id: (i as u32) % 2, col: c, is_caster: true })
+            .collect();
+        gather_casters(&mut scratch, 2, &big_rows);
+        assert_eq!(scratch.instance_count(), 4);
+        let ring_cap_after_big = scratch.0.ring.capacity();
+
+        // Frame 2: 1 caster of mesh 0.
+        let small = affine(0, 0);
+        let small_rows = [Row { mesh_id: 0, col: small, is_caster: true }];
+        gather_casters(&mut scratch, 2, &small_rows);
+        assert_eq!(scratch.batch_count(), 1);
+        assert_eq!(scratch.instance_count(), 1);
+        assert!(
+            scratch.0.ring.capacity() >= ring_cap_after_big,
+            "the caster ring retains its reserved capacity across a smaller frame"
+        );
+    }
+}
