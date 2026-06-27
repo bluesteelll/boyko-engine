@@ -316,6 +316,30 @@ pub trait RhiCommandEncoder<A: RhiApi> {
         // Phase-6 S0 default seam: overridden by the Vulkan backend.
     }
 
+    /// Records an indexed draw of `index_count` indices in `instance_count`
+    /// instances, starting at `first_index` in the bound index buffer; each fetched
+    /// index has `vertex_offset` (signed) added before the vertex-buffer lookup, and
+    /// instancing starts at `first_instance` (mesh M0).
+    ///
+    /// Requires a bound index buffer ([`Self::bind_index_buffer`]) and the vertex
+    /// buffer(s) the indices reference ([`Self::bind_vertex_buffer`]); records
+    /// `vkCmdDrawIndexed`. This is the indexed counterpart of [`Self::draw`].
+    ///
+    /// The default body is a no-op marked `#[cold] #[inline(never)]`; the Vulkan
+    /// backend overrides it (`vkCmdDrawIndexed`).
+    #[cold]
+    #[inline(never)]
+    fn draw_indexed(
+        &mut self,
+        _index_count: u32,
+        _instance_count: u32,
+        _first_index: u32,
+        _vertex_offset: i32,
+        _first_instance: u32,
+    ) {
+        // Mesh M0 default seam: overridden by the Vulkan backend.
+    }
+
     // ===== DEFERRED SEAM (Phase 6+) =====
 
     /// Records an indirect compute dispatch reading group counts from `buffer` at

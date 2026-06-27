@@ -2716,6 +2716,18 @@ pub type PfnVkCmdDraw = unsafe extern "system" fn(
     first_instance: u32,
 );
 
+/// `PFN_vkCmdDrawIndexed` — an indexed draw. Records `vkCmdDrawIndexed`; requires a
+/// bound index buffer (`vkCmdBindIndexBuffer`). `vertex_offset` is `i32` (added to the
+/// fetched index before vertex lookup, per the Vulkan spec).
+pub type PfnVkCmdDrawIndexed = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    vertex_offset: i32,
+    first_instance: u32,
+);
+
 /// `PFN_vkCmdBindVertexBuffers` — binds `binding_count` vertex buffers starting at
 /// `first_binding` (rung 3 binds one).
 pub type PfnVkCmdBindVertexBuffers = unsafe extern "system" fn(

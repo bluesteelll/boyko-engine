@@ -2741,6 +2741,37 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
         }
     }
 
+    fn draw_indexed(
+        &mut self,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        vertex_offset: i32,
+        first_instance: u32,
+    ) {
+        // A zero `index_count`/`instance_count` is a legal Vulkan no-op (as in `draw`)
+        // — a culled or GPU-driven-indirect path may legitimately issue one — so the
+        // RHI deliberately permits it rather than asserting non-zero.
+        // SAFETY: recording is open and inside a `begin_rendering` scope with a bound
+        // graphics pipeline + a set dynamic viewport/scissor, a bound index buffer
+        // (`bind_index_buffer`) and the vertex buffer(s) the indices reference (caller
+        // contract); `vkCmdDrawIndexed` reads `index_count` indices from `first_index`
+        // in the bound index buffer, adds `vertex_offset` per index, and issues the
+        // indexed draw. `self.fns` points into the context's boxed fn-table (alive per
+        // the type contract).
+        let fns = unsafe { &*self.fns };
+        unsafe {
+            (fns.cmd_draw_indexed)(
+                self.command_buffer,
+                index_count,
+                instance_count,
+                first_index,
+                vertex_offset,
+                first_instance,
+            );
+        }
+    }
+
     fn copy_image_to_buffer(
         &mut self,
         src: &VulkanTexture,

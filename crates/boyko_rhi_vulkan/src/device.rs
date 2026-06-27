@@ -312,6 +312,10 @@ pub struct DeviceFns {
     pub cmd_set_viewport: PfnVkCmdSetViewport,
     pub cmd_set_scissor: PfnVkCmdSetScissor,
     pub cmd_draw: PfnVkCmdDraw,
+    /// `vkCmdDrawIndexed` — the indexed-draw counterpart of `cmd_draw` (mesh M0;
+    /// requires a bound index buffer via `cmd_bind_index_buffer`; Vulkan 1.0 core,
+    /// always present).
+    pub cmd_draw_indexed: PfnVkCmdDrawIndexed,
     // --- Phase-6 S0 rung-3 vertex/index buffer bind commands, Vulkan 1.0 core,
     //     always loaded. ---
     pub cmd_bind_vertex_buffers: PfnVkCmdBindVertexBuffers,
@@ -1350,6 +1354,7 @@ fn load_device_fns(
             cmd_set_viewport: load_device_command(gdpa, device, c"vkCmdSetViewport")?,
             cmd_set_scissor: load_device_command(gdpa, device, c"vkCmdSetScissor")?,
             cmd_draw: load_device_command(gdpa, device, c"vkCmdDraw")?,
+            cmd_draw_indexed: load_device_command(gdpa, device, c"vkCmdDrawIndexed")?,
             // Phase-6 S0 rung-3 vertex/index buffer bind commands (Vulkan 1.0 core).
             cmd_bind_vertex_buffers: load_device_command(
                 gdpa,

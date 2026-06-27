@@ -328,7 +328,10 @@ const _: () = assert!(
     "VertexFormat::Float32x4 must equal VK_FORMAT_R32G32B32A32_SFLOAT"
 );
 
-// --- IndexType `as_i32()` (mapped in `bind_index_buffer`). ---
+// --- IndexType `as_i32()` (mapped in `bind_index_buffer`; the indexed-draw
+//     `draw_indexed`/`vkCmdDrawIndexed` consumes the index buffer bound under this
+//     discriminant — its remaining params are plain `u32`/`i32` with no agnostic
+//     mapping, so the index-type equality is the whole ABI surface to pin). ---
 const _: () = assert!(
     IndexType::Uint16.as_i32() == VK_INDEX_TYPE_UINT16,
     "IndexType::Uint16 must equal VK_INDEX_TYPE_UINT16"
