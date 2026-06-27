@@ -67,6 +67,7 @@ fn sqrt(x: f32) -> f32 {
 }
 
 pub mod brick;
+pub mod mesh_sdf;
 
 /// SDF primitive kind discriminant. Matches the shader's `KIND_*` constants.
 pub mod sdf_kind {

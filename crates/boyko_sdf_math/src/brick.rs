@@ -1059,9 +1059,11 @@ pub fn decode_snorm8(q: i8, band_half: f32) -> f32 {
 
 /// Encodes a world-space distance into an `R8_SNORM` narrow-band code (round to
 /// nearest), clamped to the band. Internal — [`fill_brick`] applies the
-/// conservative bias BEFORE calling this.
+/// conservative bias BEFORE calling this. `pub(crate)` so the mesh baker
+/// ([`crate::mesh_sdf::fill_brick_from_mesh`]) reuses the SAME encoder (byte-parallel
+/// brick fill — the single-source contract, principle 0).
 #[inline]
-fn encode_snorm8(d: f32, band_half: f32) -> i8 {
+pub(crate) fn encode_snorm8(d: f32, band_half: f32) -> i8 {
     let n = (d / band_half).clamp(-1.0, 1.0);
     let scaled = n * 127.0;
     // Round half away from zero (matches the snorm hardware round-to-nearest).
