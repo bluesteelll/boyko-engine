@@ -1,7 +1,12 @@
 # Industrial Frame System — Render Dependency Graph + Sim/Render Interpolation (PLAN)
 
-> **STATUS: BUILDING (owner `/goal делай весь RDG по плану`, 2026-07-02).**
-> Architect→critic loop converged (2026-06-28); owner greenlit the whole 1a→1f sequence.
+> **STATUS: ✅ PILLAR A COMPLETE (1a–1f), committed + pushed (`bae13a0`, origin/ecs), 2026-07-02.**
+> Architect→critic loop converged (2026-06-28); owner greenlit + visually confirmed; the framegraph
+> now unconditionally drives every barrier in `record_gbuffer` — verified BYTE-IDENTICAL to the retired
+> hand path across all 20 windowed GPU dump configs (SHA256). Deviations from the literal 1f: the
+> G-buffer ring STAYS (the `[fi]` resolver binds `ring[fi]`; deleting it = a future history-rotation
+> change), and "unify the 4 skeletons" is DEFERRED as tangential cleanup. Remaining tracks (not
+> started): Pillar B (interpolation), Phase 2 (transient aliasing), Phase 3 (async compute).
 >
 > ## BUILD LOG
 > - **Step 1a — DONE (impl + static-verified; visual-OK gate still owner's).** Array-batched the 5
