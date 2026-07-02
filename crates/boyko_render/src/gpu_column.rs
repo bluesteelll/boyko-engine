@@ -41,6 +41,7 @@ use boyko_rhi::{
 use boyko_rhi::enums::{BarrierAccess, BarrierStage};
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::rhi_impl::Vulkan;
+use boyko_rhi_vulkan::swapchain::FrameWriteToken;
 
 use crate::barrier::PlannedBarrier;
 use crate::error::GpuColumnError;
@@ -219,16 +220,19 @@ impl RhiContext {
         Ok(())
     }
 
-    /// Frame path (GUI P5a Rung 3 / A1 steps 4-6): ensures slot `frame_index`'s
+    /// Frame path (GUI P5a Rung 3 / A1 steps 4-6): ensures slot `token.slot()`'s
     /// capacity (grow pow2 + rebuild that slot's bind-group on overflow), memcpys the
     /// packed `instances` into the mapped current-FIF ring, and returns the by-value
     /// [`UiFramePlan`] (no borrow escapes — Decision 9).
     ///
     /// `instances` is the packed, z-sorted scratch; its byte image is uploaded via
     /// the no-bytemuck POD view. `ortho` is the pixel→NDC transform for the swapchain
-    /// extent the UI pass renders into. The returned plan borrows NO RHI handle, so
-    /// it is sound to stash across the dispatcher token drop; the swapchain recorder
-    /// re-resolves the pipeline + bind-group by `frame_index` via
+    /// extent the UI pass renders into. `token` is the per-slot write proof
+    /// (`Renderer::wait_frame_in_flight`, or [`FrameWriteToken::forge_unfenced`] at
+    /// setup time): the memcpy targets `token.slot()` and cannot be issued for a slot
+    /// whose in-flight fence was not waited. The returned plan borrows NO RHI handle,
+    /// so it is sound to stash across the dispatcher token drop; the swapchain
+    /// recorder re-resolves the pipeline + bind-group by `frame_index` via
     /// [`ui_handles`](Self::ui_handles) (MF-7).
     ///
     /// # Errors
@@ -238,8 +242,9 @@ impl RhiContext {
         &mut self,
         instances: &[UiInstance],
         ortho: UiOrtho,
-        frame_index: usize,
+        token: FrameWriteToken,
     ) -> Result<UiFramePlan, GpuColumnError> {
+        let frame_index = token.slot();
         let instance_count = instances.len() as u32;
         let packed = UiInstance::slice_as_bytes(instances);
         // Disjoint-field split: borrow the device (`context`) immutably while

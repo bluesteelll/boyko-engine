@@ -79,9 +79,10 @@ use boyko_rhi_vulkan::ffi::{
     VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VkExtent2D,
 };
 use boyko_rhi_vulkan::swapchain::{
-    BrickActivation, CsmDepthActivation, FRAMES_IN_FLIGHT, GBUFFER_IDENTITY_INSTANCE,
-    GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferFrame, GBufferMeshDraw, GBufferScene,
-    InterpActivation, PunctualDepthActivation, Renderer, SsaoActivation, Surface, Swapchain,
+    BrickActivation, CsmDepthActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
+    GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferFrame,
+    GBufferMeshDraw, GBufferScene, InterpActivation, PunctualDepthActivation, Renderer,
+    SsaoActivation, Surface, Swapchain,
 };
 use boyko_rhi_vulkan::window::{CapturedMsg, Window};
 
@@ -1086,8 +1087,10 @@ impl InterpGpu {
 
     /// Writes the `count` pairs into this frame slot's pair SSBO (host-coherent). Called each
     /// frame the pose changed (a substep ran or the count changed); the alpha slides every
-    /// frame via the push constant regardless.
-    fn write_pairs(&self, device: &VulkanContext, fi: usize, pairs: &[InterpPair]) {
+    /// frame via the push constant regardless. `token` is the per-slot write proof — the
+    /// memcpy targets `token.slot()` and cannot precede that slot's fence wait.
+    fn write_pairs(&self, device: &VulkanContext, token: FrameWriteToken, pairs: &[InterpPair]) {
+        let fi = token.slot();
         debug_assert_eq!(pairs.len(), self.count as usize, "pair count must equal the built count");
         let mapped = RhiDevice::buffer_mapped_ptr(device, &self.pairs[fi])
             .expect("host-visible interp pair SSBO is mapped");
@@ -1097,9 +1100,9 @@ impl InterpGpu {
         }
         // SAFETY: `mapped` points to `count * 96` mapped host-coherent bytes (the buffer this
         // slot was sized to); `bytes` is exactly that length and copied in full, in-bounds.
-        // CALLER CONTRACT: slot `fi`'s in-flight fence was waited THIS frame before the call
-        // (`Renderer::wait_frame_in_flight`) — or no submission references the slot yet (the
-        // pre-loop seeding) — so the slot's previous occupant no longer reads the buffer.
+        // The `token` proves slot `fi` is host-writable: its in-flight fence was waited THIS
+        // frame (`Renderer::wait_frame_in_flight`) or nothing submitted references the slot
+        // yet (`forge_unfenced` at seeding) — the previous occupant no longer reads the buffer.
         unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len()) };
     }
 
@@ -5575,11 +5578,11 @@ fn viewer_config() -> ShowcaseConfig {
     // cascade so the dolly run can A/B "3 identical cascades + view-z SELECT" against
     // "no SELECT at all" — if a camera-distance shadow flip vanishes here, the cascade
     // LAYERS (or the select) differ in practice despite the identical world-fixed fit.
-    if std::env::var_os("BOYKO_DOLLY_CASCADES").is_some_and(|v| v == "1") {
-        if let Some(fit) = cfg.csm.as_mut() {
-            fit.active_count = 1;
-            fit.cascades[0].split_far = 100.0; // one cascade covers every room view-z
-        }
+    if std::env::var_os("BOYKO_DOLLY_CASCADES").is_some_and(|v| v == "1")
+        && let Some(fit) = cfg.csm.as_mut()
+    {
+        fit.active_count = 1;
+        fit.cascades[0].split_far = 100.0; // one cascade covers every room view-z
     }
 
     cfg
@@ -5658,7 +5661,10 @@ fn run_interactive_viewer<'ctx, 's>(
     }
     if let Some(interp) = interp_gpu {
         for fi in 0..FRAMES_IN_FLIGHT {
-            interp.write_pairs(ctx, fi, &pairs);
+            // SAFETY: setup-time seeding — the pair rings were created this call and the
+            // present loop has not started, so no submitted GPU work references slot `fi`.
+            let token = unsafe { FrameWriteToken::forge_unfenced(fi) };
+            interp.write_pairs(ctx, token, &pairs);
         }
     }
     // Per-slot "snapshot outdated" flags for the D5 substep-gated upload (see the loop body).
@@ -5794,10 +5800,13 @@ fn run_interactive_viewer<'ctx, 's>(
         // camera makes the in-flight frame's lighting read a camera 2 frames NEWER than its
         // G-buffer raster — the motion-only whole-face shadow flip the shadow-lag diagnostic pins.
         let s = renderer.frame_index();
-        if renderer.wait_frame_in_flight().is_err() {
-            eprintln!("interactive viewer: slot fence wait failed, exiting");
-            break;
-        }
+        let token = match renderer.wait_frame_in_flight() {
+            Ok(t) => t,
+            Err(_) => {
+                eprintln!("interactive viewer: slot fence wait failed, exiting");
+                break;
+            }
+        };
 
         // Pillar B B3: the inline fixed-timestep loop for the bouncing box (interp ON). Accumulate
         // the real frame delta (clamped to MAX_ACCUM — the engine's 250 ms spiral clamp), expend
@@ -5840,7 +5849,7 @@ fn run_interactive_viewer<'ctx, 's>(
                 pair_dirty = [true; FRAMES_IN_FLIGHT];
             }
             if pair_dirty[s] {
-                interp.write_pairs(ctx, s, &pairs);
+                interp.write_pairs(ctx, token, &pairs);
                 pair_dirty[s] = false;
             }
             // Bind THIS frame slot's draw SSBO as the raster/shadow VS instance source, and arm the
@@ -5939,10 +5948,10 @@ fn ab_set_pose(ctx: &VulkanContext, renderer: &Renderer<'_>, scene: &mut GBuffer
     );
     mvp[84] = 1;
     scene.mvp = mvp;
-    let s = renderer.frame_index();
-    renderer
+    let s = renderer
         .wait_frame_in_flight()
-        .expect("invariant: slot fence wait precedes the per-slot camera write");
+        .expect("invariant: slot fence wait precedes the per-slot camera write")
+        .slot();
     if let Some(mapped) = RhiDevice::buffer_mapped_ptr(ctx, &scene.camera_ring[s]) {
         let bytes = cam.as_bytes();
         // SAFETY: identical contract to `run_interactive_viewer`'s per-frame camera write — the
@@ -6497,11 +6506,11 @@ fn run_interp_smoke<'ctx, 's>(
     // borrow to share the scene's `'s` lifetime, which a closure cannot express.
     macro_rules! present_interp {
         ($alpha:expr, $readback:expr) => {{
-            let fi = renderer.frame_index();
-            renderer
+            let token = renderer
                 .wait_frame_in_flight()
                 .expect("invariant: slot fence wait precedes the per-slot pair write");
-            interp.write_pairs(ctx, fi, &moved);
+            let fi = token.slot();
+            interp.write_pairs(ctx, token, &moved);
             scene.instance_bind_group = &interp.draw_bg[fi];
             scene.interp = Some(interp.activation(fi, $alpha));
             ab_set_pose(ctx, renderer, scene, pose);

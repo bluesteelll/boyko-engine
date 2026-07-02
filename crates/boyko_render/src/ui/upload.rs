@@ -54,7 +54,7 @@ use boyko_ecs::ecs::core::system::dispatcher_token::{DispatcherToken, WorldView}
 use boyko_ecs::ecs::core::system::system::System;
 use boyko_ecs::ecs::core::system::system_meta::SystemMeta;
 use boyko_ecs::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
-use boyko_rhi_vulkan::swapchain::Renderer;
+use boyko_rhi_vulkan::swapchain::{FrameWriteToken, Renderer};
 
 use crate::error::GpuColumnError;
 use crate::gpu_column::RhiContext;
@@ -123,8 +123,8 @@ impl UiUploadSystem {
 
     /// The world-AGNOSTIC pack → stable z-sort → upload core (A1 steps 2-6). Drives
     /// the whole per-frame UI build given the visible nodes (in any order), the reused
-    /// `scratch`, the `ortho` for the swapchain extent, the current `frame_index`, and
-    /// the `&mut RhiContext` that owns the rings.
+    /// `scratch`, the `ortho` for the swapchain extent, the [`FrameWriteToken`] write
+    /// proof for the target slot, and the `&mut RhiContext` that owns the rings.
     ///
     /// - **pack**: `scratch.pack.clear()` + `extend` one [`UiInstance`] per node
     ///   (preallocated; never `Vec::new`), folding `scale_factor` + premultiply +
@@ -152,7 +152,7 @@ impl UiUploadSystem {
         scratch: &mut UiRenderScratch,
         gather: &mut Vec<UiInstance>,
         ortho: UiOrtho,
-        frame_index: usize,
+        token: FrameWriteToken,
         ctx: &mut RhiContext,
     ) -> Result<UiFramePlan, GpuColumnError> {
         // (2) pack — clear + extend into the preallocated scratch, never Vec::new.
@@ -168,7 +168,7 @@ impl UiUploadSystem {
 
         // (4)+(5) upload the contiguous packed bytes into the current-FIF ring and
         // return the POD-by-value plan (no RHI handle escapes — Decision 9).
-        let plan = ctx.ui_upload(&scratch.pack, ortho, frame_index)?;
+        let plan = ctx.ui_upload(&scratch.pack, ortho, token)?;
         scratch.last_count = plan.instance_count;
         Ok(plan)
     }
@@ -177,14 +177,14 @@ impl UiUploadSystem {
     /// render host makes each frame BEFORE [`Renderer::present_sampled`]. It ties the
     /// whole upload path together correctly, in order:
     ///
-    /// 1. reads the swapchain's NEXT frame-in-flight slot
-    ///    ([`Renderer::frame_index`]),
-    /// 2. **fences that slot** ([`Renderer::wait_frame_in_flight`]) so the GPU's last
-    ///    read of that per-frame UI ring (the submit two presents back) is complete —
-    ///    closing the write-after-read race on the persistently-mapped, host-coherent
-    ///    ring (the upload's documented caller contract), and
-    /// 3. drives [`pack_sort_upload`](Self::pack_sort_upload) (pack → stable z-sort →
-    ///    memcpy into that slot) for the SAME `frame_index`.
+    /// 1. **fences the swapchain's NEXT frame-in-flight slot**
+    ///    ([`Renderer::wait_frame_in_flight`]) so the GPU's last read of that
+    ///    per-frame UI ring (the submit two presents back) is complete — closing the
+    ///    write-after-read race on the persistently-mapped, host-coherent ring — and
+    ///    minting the [`FrameWriteToken`] write proof for that slot, and
+    /// 2. drives [`pack_sort_upload`](Self::pack_sort_upload) (pack → stable z-sort →
+    ///    memcpy into that slot) with the token — the upload cannot name any other
+    ///    slot.
     ///
     /// The host then calls [`RhiContext::ui_pass`](crate::RhiContext::ui_pass) on the
     /// returned plan to build the concrete
@@ -209,13 +209,13 @@ impl UiUploadSystem {
         renderer: &Renderer<'_>,
         ctx: &mut RhiContext,
     ) -> Result<UiFramePlan, GpuColumnError> {
-        let frame_index = renderer.frame_index();
-        // (2) Fence the slot BEFORE the memcpy — the GPU finished reading this ring
+        // (1) Fence the slot BEFORE the memcpy — the GPU finished reading this ring
         // slot two presents back; uploading before its in-flight fence signals would
-        // race the GPU's read (the upload's caller contract).
-        renderer.wait_frame_in_flight()?;
-        // (3) pack → sort → upload into the now-free slot.
-        self.pack_sort_upload(nodes, scratch, gather, ortho, frame_index, ctx)
+        // race the GPU's read. The returned token is the write proof the upload
+        // requires (and the only source of the slot index).
+        let token = renderer.wait_frame_in_flight()?;
+        // (2) pack → sort → upload into the now-free slot.
+        self.pack_sort_upload(nodes, scratch, gather, ortho, token, ctx)
     }
 
     /// Host-drivable per-frame upload that gathers the visible UI nodes from the

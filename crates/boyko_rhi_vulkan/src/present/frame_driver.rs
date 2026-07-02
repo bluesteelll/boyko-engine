@@ -260,9 +260,14 @@ impl<'ctx> Renderer<'ctx> {
     /// `present_sampled`'s own discipline (an already-signalled fence wait returns
     /// immediately).
     ///
+    /// Returns the [`FrameWriteToken`] write proof for the fenced slot — the
+    /// required key for every per-slot host-write API (`RhiContext::ui_upload`,
+    /// the interp pair ring): the write cannot be issued without the fence proof
+    /// and cannot target a different slot than the one fenced.
+    ///
     /// # Errors
     /// [`SwapchainError::VkError`] if `vkWaitForFences` fails.
-    pub fn wait_frame_in_flight(&self) -> Result<(), SwapchainError> {
+    pub fn wait_frame_in_flight(&self) -> Result<FrameWriteToken, SwapchainError> {
         let fence = self.frames[self.frame_index].in_flight;
         // SAFETY: `device` is live for `'ctx`; `&fence` names the current frame slot's
         // in-flight fence (created signalled in `new`, kept signalled between presents);
@@ -275,7 +280,7 @@ impl<'ctx> Renderer<'ctx> {
         if !result.is_success() {
             return Err(SwapchainError::VkError("vkWaitForFences", result));
         }
-        Ok(())
+        Ok(FrameWriteToken { slot: self.frame_index })
     }
 
     /// The one shared acquire→record→submit→present skeleton behind every public
@@ -820,6 +825,47 @@ impl<'ctx> Renderer<'ctx> {
         }
         self.frame_index = 0;
         Ok(())
+    }
+}
+
+/// Compile-time proof that ONE frames-in-flight slot is currently safe to
+/// host-write: its in-flight fence was waited THIS frame
+/// ([`Renderer::wait_frame_in_flight`]), or nothing submitted can reference it
+/// yet ([`Self::forge_unfenced`]).
+///
+/// Per-slot host-write APIs (the UI instance ring, the interp pair ring, the
+/// camera UBO ring) take this token INSTEAD of a raw slot index — the
+/// `DispatcherToken` pattern: the write cannot be issued without the fence
+/// proof, and it cannot target a different slot than the one fenced. Zero
+/// runtime cost (a `Copy` of one `usize` the caller already had); the fence
+/// discipline becomes unforgeable instead of a documented convention. A write
+/// placed before the fence wait does not race the SIBLING in-flight frame (it
+/// binds slot `s ^ 1`) but the slot's PREVIOUS OCCUPANT (frame N−2 under
+/// `FRAMES_IN_FLIGHT == 2`) — the motion-only whole-face shadow flip the
+/// `shadow_lag_dump` diagnostic pins.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameWriteToken {
+    slot: usize,
+}
+
+impl FrameWriteToken {
+    /// The fenced frame slot — the ONLY ring slot the holder may host-write.
+    #[inline]
+    pub fn slot(self) -> usize {
+        self.slot
+    }
+
+    /// Forges the write proof WITHOUT a fence wait — for setup-time seeding only.
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees NO submitted GPU work can still reference slot
+    /// `slot`'s per-frame resources: the buffers were just created, the present
+    /// loop has not started, or the device was idled (`device_wait_idle` /
+    /// swapchain recreate).
+    #[inline]
+    pub unsafe fn forge_unfenced(slot: usize) -> Self {
+        Self { slot }
     }
 }
 

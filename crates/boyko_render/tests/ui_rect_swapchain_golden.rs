@@ -66,7 +66,7 @@ use boyko_rhi::{
 };
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::ffi::{VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM};
-use boyko_rhi_vulkan::swapchain::{Renderer, SampledComposite, Surface, Swapchain};
+use boyko_rhi_vulkan::swapchain::{FrameWriteToken, Renderer, SampledComposite, Surface, Swapchain};
 use boyko_rhi_vulkan::window::Window;
 
 use boyko_render::{
@@ -547,8 +547,11 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
     let mut plans: [Option<boyko_render::UiFramePlan>; boyko_render::UI_FRAMES_IN_FLIGHT] =
         [None; boyko_render::UI_FRAMES_IN_FLIGHT];
     for (fif, slot) in plans.iter_mut().enumerate() {
+        // SAFETY: setup-time seeding — the present loop has not started, so no submitted
+        // GPU work references either FIF ring slot.
+        let token = unsafe { FrameWriteToken::forge_unfenced(fif) };
         let plan = rhi
-            .ui_upload(&instances, ortho, fif)
+            .ui_upload(&instances, ortho, token)
             .expect("ui_upload into the FIF ring slot");
         assert_eq!(plan.instance_count, instances.len() as u32, "all instances uploaded");
         assert_eq!(plan.frame_index, fif, "the plan carries the FIF slot index");

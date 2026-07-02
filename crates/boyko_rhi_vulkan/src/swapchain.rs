@@ -6,8 +6,9 @@
 //! public surface of [`crate::present`] unchanged.
 
 pub use crate::present::{
-    BrickActivation, CsmDepthActivation, FRAMES_IN_FLIGHT, GBUFFER_IDENTITY_INSTANCE,
-    GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferFrame, GBufferMeshDraw, GBufferScene,
-    GBufferTargets, InterpActivation, PunctualDepthActivation, Renderer, SCENE_MVP_BYTES,
-    SampledComposite, Scene, SsaoActivation, Surface, Swapchain, SwapchainError, UiPass,
+    BrickActivation, CsmDepthActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
+    GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferFrame,
+    GBufferMeshDraw, GBufferScene, GBufferTargets, InterpActivation, PunctualDepthActivation,
+    Renderer, SCENE_MVP_BYTES, SampledComposite, Scene, SsaoActivation, Surface, Swapchain,
+    SwapchainError, UiPass,
 };

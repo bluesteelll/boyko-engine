@@ -246,9 +246,11 @@ fn render_text_golden(rhi: &mut RhiContext) -> Vec<u8> {
         glyph_quad(40.0, 8.0, 16.0, 16.0, FG, uv_b),
     ];
     let ortho = UiOrtho::for_extent(WIDTH, HEIGHT);
-    let frame_index = 0usize;
+    // SAFETY: the per-FIF rings were just created by `ui_setup`; nothing was ever
+    // submitted against them, so slot 0 is free to host-write unfenced.
+    let token = unsafe { boyko_rhi_vulkan::swapchain::FrameWriteToken::forge_unfenced(0) };
     let plan = rhi
-        .ui_upload(&instances, ortho, frame_index)
+        .ui_upload(&instances, ortho, token)
         .expect("ui_upload (memcpy into the FIF ring + POD UiFramePlan)");
     assert_eq!(plan.instance_count, 2, "two glyph instances uploaded");
 

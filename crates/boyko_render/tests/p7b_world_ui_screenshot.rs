@@ -876,9 +876,11 @@ mod gpu {
         .expect("ui_setup (UI pipeline + atlas upload + per-FIF rings)");
 
         let ortho = UiOrtho::for_extent(w, h);
-        let frame_index = 0usize;
+        // SAFETY: the per-FIF rings were just created by `ui_setup`; nothing was ever
+        // submitted against them, so slot 0 is free to host-write unfenced.
+        let token = unsafe { boyko_rhi_vulkan::swapchain::FrameWriteToken::forge_unfenced(0) };
         let plan = rhi
-            .ui_upload(instances, ortho, frame_index)
+            .ui_upload(instances, ortho, token)
             .expect("ui_upload (memcpy into the FIF ring + POD UiFramePlan)");
         debug_assert_eq!(
             plan.instance_count as usize,

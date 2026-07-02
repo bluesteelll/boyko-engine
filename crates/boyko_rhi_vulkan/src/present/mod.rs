@@ -44,7 +44,7 @@ mod surface;
 mod swapchain;
 mod targets;
 
-pub use frame_driver::Renderer;
+pub use frame_driver::{FrameWriteToken, Renderer};
 pub use scene_types::{
     BrickActivation, CsmDepthActivation, GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES,
     GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene, InterpActivation, PunctualDepthActivation,

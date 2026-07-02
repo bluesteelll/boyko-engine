@@ -150,12 +150,14 @@ fn render_ui_golden(rhi: &mut RhiContext) -> Vec<u8> {
         opaque_rect(40.0, 40.0, 16.0, 16.0, GREEN),
     ];
     let ortho = UiOrtho::for_extent(WIDTH, HEIGHT);
-    let frame_index = 0usize;
+    // SAFETY: the per-FIF rings were just created by `ui_setup`; nothing was ever
+    // submitted against them, so slot 0 is free to host-write unfenced.
+    let token = unsafe { boyko_rhi_vulkan::swapchain::FrameWriteToken::forge_unfenced(0) };
     let plan = rhi
-        .ui_upload(&instances, ortho, frame_index)
+        .ui_upload(&instances, ortho, token)
         .expect("ui_upload (memcpy into the current-FIF ring + POD UiFramePlan)");
     assert_eq!(plan.instance_count, 2, "two instances uploaded");
-    assert_eq!(plan.frame_index, frame_index, "the plan carries the slot index");
+    assert_eq!(plan.frame_index, 0, "the plan carries the slot index");
 
     // --- 3. RE-RESOLVE the current-frame handles by frame_index (MF-7). ---
     let (pipeline, bind_group) = rhi

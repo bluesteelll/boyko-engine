@@ -328,7 +328,9 @@ impl UiRenderResources {
     /// # Caller contract (the write-after-read fence — GUI P5a)
     ///
     /// The caller MUST have waited slot `frame_index`'s present in-flight fence
-    /// (`Renderer::wait_frame_in_flight` for the SAME `frame_index`) BEFORE this call,
+    /// BEFORE this call — enforced one level up: `RhiContext::ui_upload` derives
+    /// `frame_index` from the `FrameWriteToken` minted by
+    /// `Renderer::wait_frame_in_flight` (or forged unsafely at setup time) —
     /// so the GPU's last read of this persistently-mapped, host-coherent ring slot (the
     /// submit two presents back, with `FRAMES_IN_FLIGHT == 2`) is complete. Without
     /// that wait the memcpy below is a write-after-read race on a buffer the GPU may
