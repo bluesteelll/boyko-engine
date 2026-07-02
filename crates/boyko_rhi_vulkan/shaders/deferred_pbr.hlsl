@@ -440,6 +440,76 @@ float shadow_grazing_scale(float nol) {
     return clamp(1.0 / max(nol, 1.0e-3), 1.0, SHADOW_GRAZING_BIAS_MAX);
 }
 
+// === Shadow-edge PCF (anti-scintillation) =======================================================
+//
+// A single-tap shadow-map compare leaves the shadow boundary a 1-2 screen-pixel STEP that
+// requantizes under sub-pixel camera motion: the edge pixels flip 0<->1 every frame while the
+// camera moves, so the (world-fixed!) shadow visibly "dances" in motion and is rock-stable when
+// stopped. Proven by the shadow-motion A/B harness (`shadow_motion_ab_dump`): the frame is a pure
+// function of the camera pose (no cross-frame race), and a 3 mrad yaw flips shadow-edge pixels at
+// near-full swing (max channel delta 226/255).
+//
+// The fix is SPATIAL, not temporal (this engine deliberately has NO TAA — the analytic-ramp
+// convention, see CSM_OVERLAP_PROPORTION): widen the binary edge into a ~4-texel tent ramp so
+// sub-pixel motion produces proportional visibility deltas instead of full flips.
+//
+// 13-tap TENT DISC over the hardware 2x2 comparison taps, all with COMPILE-TIME texel offsets
+// (the `int2` offset overload — SPIR-V ConstOffset caps offsets at [-8, 7]; no dimension query,
+// no per-tap UV math; offsets clamp at the map edge per the sampler address mode). Taps: center
+// (w 4), the ±2 ring of 8 (w 2), the ±4 axis ring of 4 (w 1) — sum 24. With the hardware 2x2
+// bilinear under each tap the kernel integrates a smooth ~10-texel footprint (2048-map texel =
+// 0.0078 wu ⇒ ~0.08 wu penumbra ≈ 2-3 screen px at room viewing distance — wide enough that a
+// 1-2 px/frame camera drift moves the edge by a FRACTION of its ramp, killing the crawl, while
+// the sun shadow still reads crisp). The A/B harness verified the 3x3 (1-px ramp) variant was
+// NOT wide enough: shadow-edge flip counts barely moved; ramp width must exceed the per-frame
+// image drift by 2-3x.
+//
+// The tap pattern is FIXED (no per-pixel rotation/noise): screen-anchored noise would reintroduce
+// exactly the temporal boil this kernel removes (the no-TAA analytic-ramp convention again).
+// Cost: +12 comparison taps per shadowed sample, only inside the csm_mode / shadow_mode
+// structural gates (the 0%-gate scenes never run any of this).
+//
+// Two sibling helpers (not one) because HLSL < 6.6 cannot pass texture/sampler objects as
+// arguments portably; each hardcodes its own combined-descriptor pair.
+
+float csm_pcf_disc(float2 uv, float layer, float ref) {
+    float3 c = float3(uv, layer);
+    float v;
+    v  = gCsm.SampleCmpLevelZero(gCsmCmp, c, ref) * (4.0 / 24.0);
+    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2(-2,  0)) * (2.0 / 24.0);
+    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 2,  0)) * (2.0 / 24.0);
+    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 0, -2)) * (2.0 / 24.0);
+    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 0,  2)) * (2.0 / 24.0);
+    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2(-2, -2)) * (2.0 / 24.0);
+    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 2, -2)) * (2.0 / 24.0);
+    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2(-2,  2)) * (2.0 / 24.0);
+    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 2,  2)) * (2.0 / 24.0);
+    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2(-4,  0)) * (1.0 / 24.0);
+    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 4,  0)) * (1.0 / 24.0);
+    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 0, -4)) * (1.0 / 24.0);
+    v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 0,  4)) * (1.0 / 24.0);
+    return v;
+}
+
+float atlas_pcf_disc(float2 uv, float layer, float ref) {
+    float3 c = float3(uv, layer);
+    float v;
+    v  = gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref) * (4.0 / 24.0);
+    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2(-2,  0)) * (2.0 / 24.0);
+    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2( 2,  0)) * (2.0 / 24.0);
+    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2( 0, -2)) * (2.0 / 24.0);
+    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2( 0,  2)) * (2.0 / 24.0);
+    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2(-2, -2)) * (2.0 / 24.0);
+    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2( 2, -2)) * (2.0 / 24.0);
+    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2(-2,  2)) * (2.0 / 24.0);
+    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2( 2,  2)) * (2.0 / 24.0);
+    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2(-4,  0)) * (1.0 / 24.0);
+    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2( 4,  0)) * (1.0 / 24.0);
+    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2( 0, -4)) * (1.0 / 24.0);
+    v += gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, c, ref, int2( 0,  4)) * (1.0 / 24.0);
+    return v;
+}
+
 float csm_sample_cascade(uint c, float3 P, float3 n, float nol) {
     float3 P_off = P + n * (gCascades[c].texel_size * CSM_NORMAL_BIAS * shadow_grazing_scale(nol));
     float4 clip = mul(gCascades[c].view_proj, float4(P_off, 1.0));
@@ -463,9 +533,10 @@ float csm_sample_cascade(uint c, float3 P, float3 n, float nol) {
         return 1.0;
     }
     float ref = ndc.z;
-    // PCF: hardware 2×2 comparison (LessOrEqual) — the lit fraction of the footprint whose stored
-    // depth is >= the (biased) receiver depth, at array layer `c`.
-    return gCsm.SampleCmpLevelZero(gCsmCmp, float3(uv, (float)c), ref);
+    // PCF: 13-tap tent disc over the hardware 2x2 comparisons (LessOrEqual) — the tent-weighted
+    // lit fraction of a ~10-texel footprint at array layer `c` (anti-scintillation, see
+    // `csm_pcf_disc`).
+    return csm_pcf_disc(uv, (float)c, ref);
 }
 
 // === CSM Increment 3 — Rung B: the cascade SELECT + smooth cross-fade band (D7) ===============
@@ -563,9 +634,10 @@ float spot_atlas_visibility(uint s, float3 P, float3 n, float nol) {
         return 1.0;
     }
     float ref = ndc.z;
-    // PCF: hardware 2×2 comparison (LessOrEqual) — the lit fraction of the footprint whose stored
-    // depth is >= the (biased) receiver depth, at array layer `s`.
-    return gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, float3(uv, (float)s), ref);
+    // PCF: 13-tap tent disc over the hardware 2x2 comparisons (LessOrEqual) — the tent-weighted
+    // lit fraction of a ~10-texel footprint at array layer `s` (anti-scintillation, see
+    // `atlas_pcf_disc`).
+    return atlas_pcf_disc(uv, (float)s, ref);
 }
 
 // === Shadow Phase 5 Inc-2 (POINT cube) — the OMNI point atlas shadow-map visibility sample =======
@@ -637,7 +709,10 @@ float punctual_atlas_visibility(uint base, float3 P, float3 n, float nol) {
     // the LessOrEqual compare is apples-to-apples. Saturated to the [0,1] depth range.
     float ref = saturate(length(dir) * inv_range);
     uint layer = base + face;
-    return gShadowAtlas.SampleCmpLevelZero(gShadowAtlasCmp, float3(uv, (float)layer), ref);
+    // PCF: 13-tap tent disc (see `atlas_pcf_disc`). Taps that cross a cube-face UV edge clamp to
+    // the face border texel; the stored value is the RADIAL distance (continuous across faces), so
+    // the clamped tap reads a near-correct neighbor — an acceptable few-texel seam approximation.
+    return atlas_pcf_disc(uv, (float)layer, ref);
 }
 
 // Karis "mobile" analytic environment BRDF approximation (no DFG LUT). Returns the

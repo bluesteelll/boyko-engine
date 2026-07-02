@@ -283,8 +283,10 @@ static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<155124> = SpirvBlob(*include_bytes!(
 /// 14 combined map+sampler + 15 the `ResolvedShadowAtlas` UBO — the resolve set hits 16/16); 46008
 /// → 48472 bytes. Shadow Phase 5 Inc-2 (POINT cube): a POINT light with a real slot BASE instead
 /// reads `punctual_atlas_visibility(base, P, n)` (major-axis cube face-select + LINEAR-distance
-/// compare over the six contiguous layers `base..base+6`); 48472 → 50976 bytes.
-static DEFERRED_PBR_SPV: SpirvBlob<51384> = SpirvBlob(*include_bytes!(concat!(
+/// compare over the six contiguous layers `base..base+6`); 48472 → 50976 bytes. Shadow
+/// anti-scintillation: the CSM/atlas tail compares widened to the 13-tap tent-disc PCF
+/// (`csm_pcf_disc`/`atlas_pcf_disc`, ConstOffset taps); 50976 → 57928 bytes.
+static DEFERRED_PBR_SPV: SpirvBlob<57928> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/deferred_pbr.comp.spv"
 )));
