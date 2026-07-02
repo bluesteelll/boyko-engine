@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 21 — Multi-world hardening — RESULTS
 
 **Branch:** `ecs`. Closes direction #3 (multi-world). Design basis: the

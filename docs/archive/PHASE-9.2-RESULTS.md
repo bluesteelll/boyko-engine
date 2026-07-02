@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 9.2 — Results: executor `Scope` is Tree-Borrows-GREEN (outcome i)
 
 Branch `ecs`. Phase 9.2 turned the work-stealing `Scope` fork/join from Phase 9.1's

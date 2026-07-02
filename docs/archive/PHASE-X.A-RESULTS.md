@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase X.A — Results
 
 **Status:** ✅ LANDED. 9 waves, 9 commits (architect → critic ↔ developer

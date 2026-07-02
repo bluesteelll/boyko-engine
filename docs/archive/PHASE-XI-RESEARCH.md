@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase X.I — ComponentPool Row-Capacity Growth: Code Inventory
 
 Project-analyst inventory at `fb7cf1e`. The engine's LAST hard ceiling: every pool is

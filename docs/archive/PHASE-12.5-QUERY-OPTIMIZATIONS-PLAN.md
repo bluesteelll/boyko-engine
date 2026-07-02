@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 12.5 Track B — Query Iteration Optimisations — Architectural Plan (Round 4)
 
 **Branch:** `ecs`

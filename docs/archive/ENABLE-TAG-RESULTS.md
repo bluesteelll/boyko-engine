@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # EnableTag — Results (enable-bit, non-fragmenting tag backend)
 
 Branch `ecs`. EnableTag is the **second tag storage backend** alongside the
@@ -11,8 +13,8 @@ tags (the bit carries no per-row tick).
 Authoritative design: [`ENABLE-TAG-PLAN.md`](ENABLE-TAG-PLAN.md) +
 [`ENABLE-TAG-PLAN-AMENDMENT-D7.md`](ENABLE-TAG-PLAN-AMENDMENT-D7.md)
 (bounded data-less global scan in v1). Subsystem catalog:
-[`SYSTEMS.md` §3.8](SYSTEMS.md), [`FEATURE_MAP.md`](FEATURE_MAP.md),
-[`ARCHITECTURE.md` decision 14](ARCHITECTURE.md).
+[`SYSTEMS.md` §3.8](../SYSTEMS.md), [`FEATURE_MAP.md`](../FEATURE_MAP.md),
+[`ARCHITECTURE.md` decision 14](../ARCHITECTURE.md).
 
 ## Status: COMPLETE
 
@@ -109,7 +111,7 @@ back-to-back run first.
 ## Deferred follow-ups (filed, NOT done here)
 
 - **Beat-Bevy perf-gap closure** — design APPROVED
-  ([`PERF-GAP-BEAT-BEVY-PLAN.md`](PERF-GAP-BEAT-BEVY-PLAN.md)); sequenced after
+  ([`PERF-GAP-BEAT-BEVY-PLAN.md`](../PERF-GAP-BEAT-BEVY-PLAN.md)); sequenced after
   EnableTag.
 - **Positive-term archetype cull** — `cull_enable_archetypes` is a deliberate
   NO-OP today; a positive-term `Query<&D, Enabled<A>>` filters per-row instead

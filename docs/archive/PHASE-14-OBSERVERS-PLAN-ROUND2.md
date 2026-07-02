@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Architecture: Phase 14a — Component Lifecycle Hooks (Round 2 Revision)
 
 > **Revision of** [`PHASE-14-OBSERVERS-PLAN.md`](PHASE-14-OBSERVERS-PLAN.md) in

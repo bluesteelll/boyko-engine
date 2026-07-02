@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase X.F — Arena Growth: Research + Code Inventory
 
 Two inputs for the architect: (A) external practice survey, (B) exact in-repo inventory.

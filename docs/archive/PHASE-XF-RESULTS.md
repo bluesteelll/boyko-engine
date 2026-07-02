@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase X.F — Arena Growth: Results
 
 Branch `ecs`. Plan: [PHASE-XF-PLAN.md](PHASE-XF-PLAN.md) (R3-final). Research:

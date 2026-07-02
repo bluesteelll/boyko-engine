@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 14a — F4 deferred finding: pre-existing remove-migration Tree-Borrows UB
 
 **Status:** ✅ RESOLVED (Phase F4 fix — `UnsafeCell`-rooted archetype slab). The
@@ -241,7 +243,7 @@ error: memory leaked: alloc... (Rust heap, size: 8, align: 8), allocated here:
   in isolation — no UB, no TB violation. The 8-byte allocation is leaked at
   *process exit*, not during the test.
 * The allocation is an `&'static [InlandPoolId]` produced by
-  [`BundleColumnCache::resolve_and_cache`](../crates/boyko_ecs/src/ecs/core/bundle/bundle_column_cache.rs)
+  [`BundleColumnCache::resolve_and_cache`](../../crates/boyko_ecs/src/ecs/core/bundle/bundle_column_cache.rs)
   via an **intentional `Box::leak`** (the method's own doc: *"Leak the
   canonical-sorted slice to `&'static` … memory leak by design; bounded by
   SBO6"*). The Phase-12.5 static bundle cache deliberately leaks one slice per

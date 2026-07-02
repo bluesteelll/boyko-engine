@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 9.3 — ThreadPool Shutdown: break the worker↔pool Arc cycle so Drop runs and workers join
 
 **Status:** PLAN (architect delivered; pending critic → developer). Read-only investigation complete.

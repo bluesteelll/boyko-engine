@@ -2,7 +2,7 @@
 
 > **HISTORICAL (pre-Phase-7, `master`-era).** Every item below has since been
 > superseded by a landed phase; kept only as a record. Current planning lives
-> in [PHASE-13-ROADMAP.md](PHASE-13-ROADMAP.md) (all phases DONE) and the
+> in [PHASE-13-ROADMAP.md](archive/PHASE-13-ROADMAP.md) (all phases DONE) and the
 > per-phase PLAN/RESULTS docs.
 
 ## Memory

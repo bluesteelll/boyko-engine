@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 14b — Results: Component Lifecycle Observers
 
 Branch `ecs`. **Status: COMPLETE + SOUND.** Observers are the

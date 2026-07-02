@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase X.B — Results: ComponentPool `Vec<Unit>` parallel-storage elimination
 
 Branch `ecs`. PERF refactor of `crates/boyko_ecs/src/ecs/memory/component_pool.rs`. Full pipeline:

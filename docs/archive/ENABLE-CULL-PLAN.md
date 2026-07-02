@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # EnableTag positive-term archetype cull (task #5) — resolved plan
 
 Branch `ecs`, 2026-06-16. Closes the deferred `cull_enable_archetypes` NO-OP

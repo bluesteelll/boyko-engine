@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase X.A Research — Batched / Chunked Query Iteration API
 
 This document is the researcher's input to the architect for designing

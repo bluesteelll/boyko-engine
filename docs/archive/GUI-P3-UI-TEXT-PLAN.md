@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 Confirmed: `query_entities` allocates a fresh `Vec` every call (Major valid — must early-return before any tree read). The cascade reads live `Children` at apply-time and the unlink is itself deferred; ordering between a same-window reparent unlink and the doomed parent's cascade is NOT guaranteed safe — the robust fix is `clear_children`/`remove_children` on doomed parents (or `despawn_without_children` + explicit subtree handling). I have all facts I need to revise. Writing the full revised plan now.
 
 # Architecture: GUI Phase P3 — the `.ui` text format + hot-reload

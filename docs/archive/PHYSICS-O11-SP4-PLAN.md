@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Physics O11 SP4 — Colored-Parallel Soft-Body Solve (PLAN, critic round 1 resolved)
 
 > Status: architect plan, revised after architecture-critic CHANGES-REQUESTED (C1–C4 + W1–W4 resolved in-line). Pending critic re-review, then implementation. Structure (D1–D5) was APPROVED; this revision hardens the determinism spec.

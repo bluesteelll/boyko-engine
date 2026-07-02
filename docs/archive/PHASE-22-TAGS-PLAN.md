@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 All round-3 claims verified against source: `add_observer(kind, cid: ComponentId, ...)` at `ecs_master.rs:2135` (public, `ComponentId`-typed); `query_state.rs` bypasses at `:99` (`iter`, pub), `:247` (`iter_cached`, pub(crate)), `:215`/`:221` (`len`/`is_empty`, pub), `:307` (`matched_ids_mut`, pub(crate)), accessor `matched_ids` at `:227`; `legacy_query.rs` five sites `:152/:166/:184/:204/:214`; `POOL_MAX_ROWS = 16_777_216` (2^24) at `constants.rs:72` with a cfg-gated `262_144` variant at `:77`. The revised plan follows.
 
 ---

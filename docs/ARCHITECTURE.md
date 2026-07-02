@@ -19,17 +19,23 @@
 - Minimal per-entity / per-component footprint.
 - Zero-cost generics — no dynamic dispatch in the hot path.
 
-**Non-goals (current stage):** scripting (Lua/Wasm scripting), component
-hot-reload, serialization (deferred until the model stabilizes), cross-platform
-beyond x86_64 (wasm32 compiles but is not the perf target).
+**Non-goals (current stage):** scripting (Lua/Wasm scripting), code / component
+hot-reload of native systems (distinct from the shipped `.ui` asset hot-reload in
+`boyko_ui`), cross-platform beyond x86_64 (wasm32 compiles but is not the perf
+target). Custom binary world serialization is **no longer a non-goal**: it shipped
+through `boyko_serialize` (Phases S1–S3 — save/load, per-component
+`format_version`, loader fuzz; S4 mmap / S5 parallel are deferred).
 
 ## Workspace layout
 
-The workspace is six crates (`Cargo.toml` `members`):
+The workspace is **18 crates** (`Cargo.toml` `members`). The ECS kernel
+(`boyko_ecs` + its `boyko_macros` / `boyko_utils` / `boyko_threadpool` support
+crates) is documented in depth below; the std-lib / sim and render / UI crates
+that grew on top of it are one-lined here and cataloged in [SYSTEMS.md](SYSTEMS.md).
 
 ```
 boyko-engine/
-├── Cargo.toml                            # workspace (6 members) + [profile.bench] + thin binary
+├── Cargo.toml                            # workspace (18 members) + [profile.bench] + thin binary
 ├── src/main.rs                           # entry point (library-shaped project)
 ├── crates/
 │   ├── boyko_ecs/                        # ECS core
@@ -70,6 +76,24 @@ boyko-engine/
 │   │   └── src/{bit_mask/, sparse_map/, identifiers/}
 │   ├── boyko_threadpool/                 # Chase-Lev work-stealing pool (on crossbeam-deque)
 │   │   └── src/{thread_pool, scope, worker, tls, sync}.rs
+│   │
+│   │   # ── std-lib / simulation (built ON the kernel) ──────────────
+│   ├── boyko_math/                       # SIMD-aligned POD math (Vec2/3/4, Quat, Mat3/4, Affine3A); bit-deterministic (exact sqrt, no FMA)
+│   ├── boyko_scene/                      # spatial vocabulary: Transform / GlobalTransform + propagate_transforms over ChildOf/Children
+│   ├── boyko_sdf_math/                   # no_std leaf: analytic SDF edit-list field + std430 model (shared by GPU golden + CPU physics; zero deps)
+│   ├── boyko_physics/                    # in-house 3D TGS-Soft solver + narrowphase + Manifold seam; components as ECS columns
+│   ├── boyko_input/                      # source-agnostic rebindable action mapping (raw → action); no windowing dep on the engine path
+│   ├── boyko_serialize/                  # custom binary world save/load (codegen, not reflection); POB column-blit + ViaFn; S1–S3
+│   │
+│   │   # ── render / UI / shaders ──────────────────────────────────
+│   ├── boyko_rhi/                        # backend-agnostic RHI trait surface (static-dispatch, no dyn/Box/HashMap, FFI-free)
+│   ├── boyko_rhi_vulkan/                 # raw hand-FFI Vulkan backend (loader/device/suballocator, swapchain, compute, framegraph RDG)
+│   ├── boyko_render/                     # bridge: GPU-resident ECS columns (DeviceLocal pools) + lighting/SDF; names both ECS + RHI
+│   ├── boyko_shaderdsl/                  # in-house Rust shader eDSL: field math authored once → f32 Eval mirror + HLSL Emit (byte-identical .spv)
+│   ├── boyko_fontbake/                   # load-time MTSDF font baker → .bfont (off the render hot path)
+│   ├── boyko_ui/                         # ECS-native UI (widgets = entities; layout = systems; MSDF text; world-space/diegetic HUD)
+│   │
+│   │   # ── apps / benches ───────────────────────────────────────────
 │   ├── boyko_demo/                       # wgpu+egui sandbox (dogfoods the API; wasm32-capable)
 │   └── bench_bevy_vs_boyko/              # cross-engine comparison benches (pulls bevy)
 └── docs/                                 # internal documentation
@@ -77,17 +101,61 @@ boyko-engine/
 
 ## Inter-crate dependencies
 
+### Kernel
+
 ```
 boyko-engine (thin binary)
     ├── boyko_ecs
     │       ├── boyko_utils
     │       └── boyko_threadpool ──→ crossbeam-deque, crossbeam-utils
-    ├── boyko_macros ──→ boyko_ecs        (for the ::boyko_ecs::… paths the derives emit)
+    ├── boyko_macros                     (proc-macro; no workspace dep — see below)
     └── boyko_utils
 
 boyko_ecs (dev-dependencies): boyko_macros, criterion, proptest, trybuild, rand
-boyko_demo ──→ boyko_ecs, boyko_macros, wgpu, eframe/egui
+boyko_demo ──→ boyko_ecs, boyko_macros, boyko_threadpool, wgpu, eframe/egui
 bench_bevy_vs_boyko ──→ boyko_ecs, boyko_macros, bevy, criterion
+```
+
+`boyko_macros` is a **pure proc-macro crate with NO workspace dependency**. Its
+derives expand to fully-qualified `::boyko_ecs::…` paths, but a proc-macro emits
+those paths as *tokens* — token emission needs no compile-time dependency on the
+target crate. `boyko_ecs` therefore keeps `boyko_macros` as a **dev-dependency**
+only (used in tests/benches); the derives are re-exported for downstream crates
+(`boyko_physics`, `boyko_scene`, `boyko_ui`, …), which depend on `boyko_macros`
+normally.
+
+### Std-lib / simulation
+
+These build on the public `boyko_ecs` API (Component / Resource / Bundle /
+Query / Schedule) plus `boyko_macros` for the derives. The edges are acyclic:
+
+```
+boyko_math       ──→ (leaf: no workspace deps)
+boyko_sdf_math   ──→ boyko_shaderdsl               (no_std leaf; delegates f32 field bodies)
+boyko_scene      ──→ boyko_ecs, boyko_math, boyko_macros, boyko_utils
+boyko_input      ──→ boyko_ecs, boyko_macros, boyko_utils
+boyko_serialize  ──→ boyko_ecs
+boyko_physics    ──→ boyko_ecs, boyko_macros, boyko_utils, boyko_threadpool,
+                     boyko_math, boyko_scene, boyko_sdf_math
+```
+
+### Render / UI / shaders
+
+`boyko_render` is the single bridge crate allowed to name BOTH the ECS surface
+and the RHI surface; `boyko_rhi` itself does NOT depend on `boyko_ecs` (so no
+cycle). `boyko_ui` produces render-agnostic glyph-quad / instance descriptors and
+takes **no** render dependency.
+
+```
+boyko_rhi         ──→ boyko_utils                          (FFI-free trait surface)
+boyko_rhi_vulkan  ──→ boyko_rhi, boyko_sdf_math            (raw hand-FFI Vulkan; framegraph RDG)
+boyko_shaderdsl   ──→ (leaf: no workspace deps)
+boyko_fontbake    ──→ boyko_math, boyko_threadpool         (load-time tool)
+boyko_render      ──→ boyko_ecs, boyko_macros, boyko_utils,
+                      boyko_rhi, boyko_rhi_vulkan,
+                      boyko_scene, boyko_math, boyko_fontbake
+boyko_ui          ──→ boyko_ecs, boyko_macros, boyko_utils,
+                      boyko_input, boyko_scene, boyko_math, boyko_fontbake
 ```
 
 External runtime deps of `boyko_ecs`: `fixedbitset` (scheduler conflict/condition
@@ -96,12 +164,16 @@ bitsets), `crossbeam-queue` / `crossbeam-utils`, `static_assertions` (compile-ti
 `mmap`/`mprotect` for `VmReservation`). **`anyhow` and `ctor` were removed**
 (C-019 / lazy-mint ID model).
 
-> **The `boyko-macros` cycle (Phase 18).** `boyko_macros` depends on `boyko_ecs`
-> (its derives expand to `::boyko_ecs::…` paths), so `boyko_ecs` can only keep it
-> as a **dev-dependency** — a normal dependency would form a cycle. Therefore the
-> derives are unusable inside `boyko_ecs` lib code (`AppExit` hand-impls
-> `Resource`) and the public `prelude` omits them (users
-> `use boyko_macros::{Component, …}` directly).
+> **The `boyko-macros` dev-dependency (Phase 18).** `boyko_macros` is a pure
+> proc-macro crate with **no workspace dependency** — its derives expand to
+> fully-qualified `::boyko_ecs::…` paths, but a proc-macro emits those paths as
+> *tokens*, which needs no compile-time dependency on `boyko_ecs`. `boyko_ecs`
+> keeps `boyko_macros` as a **dev-dependency** (used in tests/benches). Therefore
+> the derives are unavailable inside `boyko_ecs` lib code itself (`AppExit`
+> hand-impls `Resource`) and the public `prelude` omits them (users
+> `use boyko_macros::{Component, …}` directly). Downstream crates
+> (`boyko_physics`, `boyko_scene`, `boyko_ui`, …) depend on `boyko_macros`
+> normally and use the derives freely.
 
 ## Architecture layers
 
@@ -193,7 +265,7 @@ these runs per frame in the binding D1 order: ① `Time::advance_with` →
 (0..16 Fixed `Schedule::run`s at the defaults) → ⑤ the Main run below. Each
 run stays an opaque unit; all inter-run work holds the dispatcher's
 `&mut EcsMaster` with zero workers in flight. Driver cost: 14 ns/frame +
-5 ns/substep ([PHASE-20-RESULTS.md](PHASE-20-RESULTS.md)).
+5 ns/substep ([PHASE-20-RESULTS.md](archive/PHASE-20-RESULTS.md)).
 
 ```
 App::run / Schedule::run(&mut world)
@@ -254,7 +326,7 @@ and access uses `unsafe { &*(ptr as *const T) }` with a SAFETY comment.
 live-row count. Net-removes `unsafe`, saves 8 B/row + one alloc/pool, zero
 read-path cost. **Phase 10** then added the parallel `added_ticks` /
 `changed_ticks` columns (`Box<[UnsafeCell<Tick>]>`). See
-[PHASE-XB-RESULTS.md](PHASE-XB-RESULTS.md).
+[PHASE-XB-RESULTS.md](archive/PHASE-XB-RESULTS.md).
 
 ### 3. Inline per-archetype column table (Phase 7 fast random access)
 
@@ -285,8 +357,8 @@ taught the shared Arena lazy commit, X.F gave it the huge reserve + frontier
 slabs, X.G extracted `VmReservation` for the entity `InlandStore`, X.I gave
 every `ComponentPool` its own `[data|added|changed]` reservation — and X.J
 **deleted the then-client-less shared Arena** (+ `MemFreeBlockMaster`)
-outright. See [PHASE-XI-RESULTS.md](PHASE-XI-RESULTS.md) +
-[PHASE-XJ-RESULTS.md](PHASE-XJ-RESULTS.md).
+outright. See [PHASE-XI-RESULTS.md](archive/PHASE-XI-RESULTS.md) +
+[PHASE-XJ-RESULTS.md](archive/PHASE-XJ-RESULTS.md).
 
 ### 5. Global `ComponentRegistry` / `EventRegistry` / `ResourceRegistry` (lazy IDs)
 
@@ -318,7 +390,7 @@ Four fields: `free_entity_ids` (LIFO recycle), `next_entity_id: AtomicUsize`,
 net-removing `unsafe` and shedding −12 B/entity. `Generation` bumps on
 deallocation (the ABA defence). Workers touch only `next_entity_id` (via the
 `EntityCounter` atomic-RMW newtype); all other mutation is dispatcher-`&mut self`
-inside the apply window. See [PHASE-XD-RESULTS.md](PHASE-XD-RESULTS.md).
+inside the apply window. See [PHASE-XD-RESULTS.md](archive/PHASE-XD-RESULTS.md).
 
 ### 7. Domain error type `EcsError`
 
@@ -372,8 +444,8 @@ that anchored the historical wording was retired in X.J — the SEND1
 justification is updated in place). The whole pool + `Scope`
 fork/join + parallel `Schedule::run` is proven sound and Tree-Borrows-clean
 (Phase 9.1/9.2/9.3 — loom + Miri). See
-[PHASE-9-PARALLEL-SCHEDULER-PLAN.md](PHASE-9-PARALLEL-SCHEDULER-PLAN.md),
-[PHASE-9.2-RESULTS.md](PHASE-9.2-RESULTS.md), [PHASE-9.3c-RESULTS.md](PHASE-9.3c-RESULTS.md).
+[PHASE-9-PARALLEL-SCHEDULER-PLAN.md](archive/PHASE-9-PARALLEL-SCHEDULER-PLAN.md),
+[PHASE-9.2-RESULTS.md](archive/PHASE-9.2-RESULTS.md), [PHASE-9.3c-RESULTS.md](archive/PHASE-9.3c-RESULTS.md).
 
 ### 11. Bevy-shape ergonomic system API (Phases 8a–8d, 11, 12, 13)
 
@@ -453,8 +525,8 @@ archetype (2 MiB cfg fallback) — zero resident until commit.
 [ecs_master/enable_tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs),
 [query/filter_enable.rs](../crates/boyko_ecs/src/ecs/core/iters/query/filter_enable.rs)
 + [query/enable_terms.rs](../crates/boyko_ecs/src/ecs/core/iters/query/enable_terms.rs).
-Design: [ENABLE-TAG-PLAN.md](ENABLE-TAG-PLAN.md) +
-[ENABLE-TAG-PLAN-AMENDMENT-D7.md](ENABLE-TAG-PLAN-AMENDMENT-D7.md).
+Design: [ENABLE-TAG-PLAN.md](archive/ENABLE-TAG-PLAN.md) +
+[ENABLE-TAG-PLAN-AMENDMENT-D7.md](archive/ENABLE-TAG-PLAN-AMENDMENT-D7.md).
 
 The **second tag storage path** alongside decision 13's signature/table backend.
 A component id is classified once at registration as `StorageKind::{Table,
@@ -518,8 +590,8 @@ Constraints, by construction:
 
 ## Performance posture (vs Bevy, measured)
 
-Per [PHASE-12.6-RESULTS.md](PHASE-12.6-RESULTS.md) +
-[PHASE-X.A-RESULTS.md](PHASE-X.A-RESULTS.md), on the comparison harness in
+Per [PHASE-12.6-RESULTS.md](archive/PHASE-12.6-RESULTS.md) +
+[PHASE-X.A-RESULTS.md](archive/PHASE-X.A-RESULTS.md), on the comparison harness in
 [crates/bench_bevy_vs_boyko/](../crates/bench_bevy_vs_boyko/):
 
 | Workload | Result |

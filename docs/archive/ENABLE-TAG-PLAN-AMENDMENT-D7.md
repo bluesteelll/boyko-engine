@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 <!-- AMENDMENT to docs/ENABLE-TAG-PLAN.md (brief-owner directive 2026-06-15: global scan Query<(),Enabled/Disabled<A>> IN v1, was out-of-scope). Delta only; supersedes the round-7 C4 narrowing. APPROVED by architecture-critic round 2 (0 CRITICAL). Bounded by the EnablePresence candidate set (popcount), provably never a full-world scan. Wave 3 implements the main plan AS AMENDED here. -->
 
 I now have the key facts verified:

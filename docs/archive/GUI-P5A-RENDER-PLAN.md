@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Architecture: GUI Phase P5a — Render UI Rects (instanced rounded-rect SDF)
 
 > **Implementation status (2026-06-21).** The first commit lands **P5a FOUNDATION

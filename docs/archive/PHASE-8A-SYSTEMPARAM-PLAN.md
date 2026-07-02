@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 8a â€” `SystemParam` trait + Resource subsystem (architectural plan)
 
 **Status:** Round 3 â€” addresses architecture-critic findings on Round 2 (3 new criticals, 5 new majors). Implementation depends on Phase 7 (landed) and on this plan being approved.

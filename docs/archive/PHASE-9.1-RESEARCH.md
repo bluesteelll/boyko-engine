@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 9.1 — Research digest: loom + Miri verification of the parallel executor
 
 Goal: turn the `boyko_threadpool` Chase-Lev work-stealing pool + `Scope` fork/join

@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Architecture: Phase 9.2 REVISION — multi-drain-safe `Scope` free (Candidate U: unpark-before-decrement)
 
 The following is the complete replacement content for `docs/PHASE-9.2-PLAN.md` (English). The orchestrator must persist it verbatim, overwriting the current stale/broken-handshake plan. My agent tool set exposes no file-write capability; the content is delivered in full below.

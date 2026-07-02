@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # GUI / HUD System — Plan (ECS-native, code-authorable, LLM-friendly)
 
 > Research + format proposal + phased plan. INVIOLABLE: GUI is ECS-native — widgets = ENTITIES, layout/style/state/binding = COMPONENTS, the tree = the existing `ChildOf`/`Children`, layout = a SYSTEM over the ECS. NO parallel data system (no Taffy/yoga parallel tree, no egui parallel context). In-house only (no serde/winit/egui on the engine path).

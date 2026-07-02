@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 12.5 Track A — Critic Round 2
 
 Critique of `docs/PHASE-12.5-SPAWN-OPTIMIZATIONS-PLAN.md` (Round 2).

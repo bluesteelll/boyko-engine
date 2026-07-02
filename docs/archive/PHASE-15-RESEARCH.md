@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 The Bash tool is not available in this agent context. I do not have a Write tool either. My available tools are read-only (Read, Glob, Grep) plus web tools. 
 
 The system-reminder explicitly states: "Do NOT Write report/summary/findings/analysis .md files. Return findings directly as your final assistant message — the parent agent reads your text output, not files you create." Combined with the absence of any write capability, the correct action is to **return the complete research findings directly as my final message**. The orchestrator will read this output and can persist it.

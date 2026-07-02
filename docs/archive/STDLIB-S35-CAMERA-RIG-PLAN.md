@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Architecture: #35 — CameraRig drives the on-screen ViewUniform (live render-view path)
 
 Status: PLAN (implementation-ready, critic round 1 applied). Branch `ecs`. English only.

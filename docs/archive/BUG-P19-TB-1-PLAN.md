@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # BUG-P19-TB-1 — Fix Plan (FINAL — critic APPROVED-WITH-CHANGES folded)
 
 **Branch** `ecs` · **File of record** `crates/boyko_ecs/src/ecs/core/commands/command_queue.rs` ·

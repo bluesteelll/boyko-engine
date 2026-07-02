@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 20 — Results: Fixed Timestep + Multi-Schedule App
 
 Branch `ecs`. Implementation `d8f5386` (W1-W3), test matrix + demo migration

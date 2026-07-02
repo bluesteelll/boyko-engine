@@ -21,10 +21,20 @@ piece of functionality lives, start here, then go to
 > record is its `docs/PHASE-*-RESULTS.md`. Line numbers below are verified
 > against the current source; if one drifts, the file path is still correct.
 
-> **Crate layout:** `boyko_ecs` (core) · `boyko_macros` (derives) ·
-> `boyko_utils` (collections) · `boyko_threadpool` (Chase-Lev work-stealing
-> pool, on crossbeam-deque primitives) · `boyko_demo` (wgpu+egui sandbox,
-> dogfoods the public API) · `bench_bevy_vs_boyko` (comparison benches).
+> **Crate layout (18 members).** *Kernel:* `boyko_ecs` (core) · `boyko_macros`
+> (derives) · `boyko_utils` (collections) · `boyko_threadpool` (Chase-Lev
+> work-stealing pool, on crossbeam-deque primitives). *Std-lib / sim:*
+> `boyko_math` (SIMD POD math) · `boyko_scene` (Transform / Camera) ·
+> `boyko_sdf_math` (analytic SDF field leaf) · `boyko_physics` (in-house 3D
+> TGS-Soft) · `boyko_input` (action mapping) · `boyko_serialize` (binary
+> save/load). *Render / UI / shaders:* `boyko_rhi` (RHI trait surface) ·
+> `boyko_rhi_vulkan` (raw-FFI Vulkan backend + framegraph) · `boyko_render`
+> (GPU-resident columns, lighting, SDF) · `boyko_shaderdsl` (Rust shader eDSL) ·
+> `boyko_fontbake` (MTSDF atlas baker) · `boyko_ui` (ECS-native UI). *Apps /
+> bench:* `boyko_demo` (wgpu+egui sandbox, dogfoods the public API) ·
+> `bench_bevy_vs_boyko` (comparison benches). This file catalogs the ECS kernel
+> in depth; the std-lib and render/UI subsystems are indexed below and detailed
+> per-crate in [SYSTEMS.md](SYSTEMS.md).
 
 ---
 
@@ -56,6 +66,36 @@ piece of functionality lives, start here, then go to
 | Shared global data | [Resources](#resources) |
 | Low-level component byte storage | [Type-erased component storage](#type-erased-component-storage) |
 | Reserve/commit raw memory | [Memory and allocation](#memory-and-allocation) |
+
+### Std-lib / simulation subsystems
+
+| I want to … | Crate + key files |
+|-------------|-------------------|
+| SIMD-aligned POD math (Vec2/3/4, Quat, Mat3/4, Affine3A, Ray) | `boyko_math` — [vec.rs](../crates/boyko_math/src/vec.rs) · [quat.rs](../crates/boyko_math/src/quat.rs) · [mat.rs](../crates/boyko_math/src/mat.rs) · [affine.rs](../crates/boyko_math/src/affine.rs) · [ray.rs](../crates/boyko_math/src/ray.rs) |
+| Transform / GlobalTransform + hierarchy propagation | `boyko_scene` — [transform.rs](../crates/boyko_scene/src/transform.rs) · [propagation.rs](../crates/boyko_scene/src/propagation.rs) |
+| Camera / camera rig / ViewUniform / visibility | `boyko_scene` — [camera.rs](../crates/boyko_scene/src/camera.rs) · [camera_plugin.rs](../crates/boyko_scene/src/camera_plugin.rs) · [visibility_sync.rs](../crates/boyko_scene/src/visibility_sync.rs) · [render_caps.rs](../crates/boyko_scene/src/render_caps.rs) |
+| Rigid-body physics (3D TGS-Soft solver, narrowphase, contacts) | `boyko_physics` — [solver/](../crates/boyko_physics/src/solver/) · [soft/](../crates/boyko_physics/src/soft/) · [narrowphase/](../crates/boyko_physics/src/narrowphase/) · [components.rs](../crates/boyko_physics/src/components.rs) · [plugin.rs](../crates/boyko_physics/src/plugin.rs) |
+| Body-vs-SDF collision (CPU field query, zero readback) | `boyko_physics` — [sdf_query.rs](../crates/boyko_physics/src/sdf_query.rs) + `boyko_sdf_math` |
+| Analytic SDF edit-list field (shared GPU golden + CPU physics) | `boyko_sdf_math` — [lib.rs](../crates/boyko_sdf_math/src/lib.rs) · [brick.rs](../crates/boyko_sdf_math/src/brick.rs) · [mesh_sdf.rs](../crates/boyko_sdf_math/src/mesh_sdf.rs) |
+| Rebindable input actions (raw events → typed actions) | `boyko_input` — [raw/](../crates/boyko_input/src/raw/) · [action/](../crates/boyko_input/src/action/) · [win32.rs](../crates/boyko_input/src/win32.rs) · [plugin.rs](../crates/boyko_input/src/plugin.rs) |
+| Save / load a world (custom binary; codegen not reflection) | `boyko_serialize` — [save.rs](../crates/boyko_serialize/src/save.rs) · [load.rs](../crates/boyko_serialize/src/load.rs) · [format.rs](../crates/boyko_serialize/src/format.rs) |
+
+### Render / UI / shader subsystems
+
+| I want to … | Crate + key files |
+|-------------|-------------------|
+| Backend-agnostic RHI (device / buffers / pipelines / encoder) | `boyko_rhi` — [api.rs](../crates/boyko_rhi/src/api.rs) · [device.rs](../crates/boyko_rhi/src/device.rs) · [encoder.rs](../crates/boyko_rhi/src/encoder.rs) · [handle.rs](../crates/boyko_rhi/src/handle.rs) |
+| Raw-FFI Vulkan backend (loader/device/suballocator/swapchain) | `boyko_rhi_vulkan` — [rhi_impl.rs](../crates/boyko_rhi_vulkan/src/rhi_impl.rs) · [device.rs](../crates/boyko_rhi_vulkan/src/device.rs) · [suballocator.rs](../crates/boyko_rhi_vulkan/src/suballocator.rs) · [swapchain.rs](../crates/boyko_rhi_vulkan/src/swapchain.rs) · [compute.rs](../crates/boyko_rhi_vulkan/src/compute.rs) |
+| Render Dependency Graph (declare → compile barriers → execute) | `boyko_rhi_vulkan` — [framegraph/](../crates/boyko_rhi_vulkan/src/framegraph/) |
+| GPU-resident ECS component columns (DeviceLocal VRAM pools) | `boyko_render` — [gpu_column.rs](../crates/boyko_render/src/gpu_column.rs) · [gpu_system.rs](../crates/boyko_render/src/gpu_system.rs) |
+| GPU instancing / mesh draw / 3D instances | `boyko_render` — [mesh_draw.rs](../crates/boyko_render/src/mesh_draw.rs) · [gpu3d_instance.rs](../crates/boyko_render/src/gpu3d_instance.rs) · [gpu3d_system.rs](../crates/boyko_render/src/gpu3d_system.rs) |
+| Lighting (directional / point / spot / clustered cull) | `boyko_render` — [light.rs](../crates/boyko_render/src/light.rs) · [light_system.rs](../crates/boyko_render/src/light_system.rs) · [light_plugin.rs](../crates/boyko_render/src/light_plugin.rs) |
+| Shadows (CSM cascades + punctual atlas) | `boyko_render` — [csm_config.rs](../crates/boyko_render/src/csm_config.rs) · [csm_caster.rs](../crates/boyko_render/src/csm_caster.rs) · [shadow_atlas.rs](../crates/boyko_render/src/shadow_atlas.rs) |
+| Author shader math once (Rust eDSL → f32 mirror + HLSL) | `boyko_shaderdsl` — [field.rs](../crates/boyko_shaderdsl/src/field.rs) · [marcher.rs](../crates/boyko_shaderdsl/src/marcher.rs) · [emit.rs](../crates/boyko_shaderdsl/src/emit.rs) · [scalar.rs](../crates/boyko_shaderdsl/src/scalar.rs) |
+| Bake an MTSDF font atlas → .bfont | `boyko_fontbake` — [face.rs](../crates/boyko_fontbake/src/face.rs) · [extract.rs](../crates/boyko_fontbake/src/extract.rs) · [msdf/](../crates/boyko_fontbake/src/msdf/) · [atlas.rs](../crates/boyko_fontbake/src/atlas.rs) |
+| ECS-native UI (widgets = entities; layout systems; MSDF text) | `boyko_ui` — [layout.rs](../crates/boyko_ui/src/layout.rs) · [components.rs](../crates/boyko_ui/src/components.rs) · [text/](../crates/boyko_ui/src/text/) · [widgets.rs](../crates/boyko_ui/src/widgets.rs) · [interaction/](../crates/boyko_ui/src/interaction/) |
+| World-space / diegetic 3D HUD (cursor-ray pick, depth-occlude) | `boyko_ui` — [world/](../crates/boyko_ui/src/world/) |
+| Data-bind UI to ECS state / hot-reload `.ui` markup | `boyko_ui` — [binding/](../crates/boyko_ui/src/binding/) · [reload/](../crates/boyko_ui/src/reload/) · [text/](../crates/boyko_ui/src/text/) (`.ui` format) |
 
 ---
 
@@ -129,14 +169,14 @@ at the crate root: `boyko_ecs::{App, Plugin, Plugins, AppExit}`.
 | Event swap policy | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `set_event_update_policy(EventUpdatePolicy::{WaitForFixed, EveryFrame})` — auto-resolved at `finish()` (Phase 20 D6); see the `WaitForFixed` pause-hold hazard doc |
 | Drive the rhythm without an App (wasm / hand-rolled) | [time/fixed_loop.rs](../crates/boyko_ecs/src/ecs/core/time/fixed_loop.rs) ✅ | `Time::advance_with(raw)` then `fixed_advance(world, \|w\| …)` exactly once per frame — insert `Time`/`FixedTime` manually first (the wasm demo runner's path) |
 | The plugin trait | [plugin.rs](../crates/boyko_ecs/src/ecs/core/app/plugin.rs) ✅ | `trait Plugin { fn build(&self, &mut App); fn name(&self) -> &'static str }` — `'static`, NOT `Send + Sync`; consumed at build |
-| Exit signal | [app_exit.rs](../crates/boyko_ecs/src/ecs/core/app/app_exit.rs) ✅ | `AppExit(bool)` resource (hand-impls `Resource` — see [PHASE-18-RESULTS.md](PHASE-18-RESULTS.md) macro-cycle note) |
+| Exit signal | [app_exit.rs](../crates/boyko_ecs/src/ecs/core/app/app_exit.rs) ✅ | `AppExit(bool)` resource (hand-impls `Resource` — see [PHASE-18-RESULTS.md](archive/PHASE-18-RESULTS.md) macro-cycle note) |
 
 `App` is `!Send + !Sync` (single-threaded-owned). Multi-schedule landed in
 Phase 20 as the CLOSED `CoreSchedule` set — a user-mintable label map remains
 deliberately rejected (D5; no `HashMap` on the frame path). Still DEFERRED:
 SubApps, `PluginGroup`/`DefaultPlugins`, `set_runner`,
-`App::with_world` (Phase 20.1) — see [PHASE-18-RESULTS.md](PHASE-18-RESULTS.md)
-+ [PHASE-20-RESULTS.md](PHASE-20-RESULTS.md).
+`App::with_world` (Phase 20.1) — see [PHASE-18-RESULTS.md](archive/PHASE-18-RESULTS.md)
++ [PHASE-20-RESULTS.md](archive/PHASE-20-RESULTS.md).
 
 ---
 
@@ -178,8 +218,8 @@ copies/writes NOTHING), `next_entity_id: AtomicUsize`, `live_count: usize`,
 = 16 B `{ archetype_ptr: *mut Archetype, unit_index: u32, generation: u32 }`
 — a **direct slab pointer** (no `SparseMap` indirection on the hot read path);
 `NULL` is all-zero bytes (demand-zero pages = free NULL fill, invariant J).
-See [SYSTEMS.md §4](SYSTEMS.md) + [PHASE-XD-RESULTS.md](PHASE-XD-RESULTS.md) +
-[PHASE-XG-RESULTS.md](PHASE-XG-RESULTS.md).
+See [SYSTEMS.md §4](SYSTEMS.md) + [PHASE-XD-RESULTS.md](archive/PHASE-XD-RESULTS.md) +
+[PHASE-XG-RESULTS.md](archive/PHASE-XG-RESULTS.md).
 
 The `id`/`generation` pair is the ABA defence at the entity layer.
 `SparseSlotMap` (boyko_utils) has a parallel slot-layer ABA fix (M-016).
@@ -253,8 +293,8 @@ deferred drain** (flecs `CanToggle` semantics) — the right backend for
 high-churn transient flags (`Stunned`, `Visible`, `Sleeping`). The trade-off:
 no per-row tick storage, so `Added<T>`/`Changed<T>` are compile-rejected on a
 bitset tag (the "compile-but-lie" guard). Authoritative design:
-[ENABLE-TAG-PLAN.md](ENABLE-TAG-PLAN.md) +
-[ENABLE-TAG-PLAN-AMENDMENT-D7.md](ENABLE-TAG-PLAN-AMENDMENT-D7.md). Details +
+[ENABLE-TAG-PLAN.md](archive/ENABLE-TAG-PLAN.md) +
+[ENABLE-TAG-PLAN-AMENDMENT-D7.md](archive/ENABLE-TAG-PLAN-AMENDMENT-D7.md). Details +
 invariants: [SYSTEMS.md §3.8](SYSTEMS.md).
 
 | What you want to do | Where | How |
@@ -295,7 +335,7 @@ plan's named test ranges.
 
 Tuple bundles were intentionally dropped (Phase 8.5) — named `#[derive(Bundle)]`
 structs only, so the column cache has a stable per-type address. See
-[PHASE-8.5-STATIC-BUNDLE-CACHE-PLAN.md](PHASE-8.5-STATIC-BUNDLE-CACHE-PLAN.md).
+[PHASE-8.5-STATIC-BUNDLE-CACHE-PLAN.md](archive/PHASE-8.5-STATIC-BUNDLE-CACHE-PLAN.md).
 
 Phase 22 additions: `MAX_BUNDLE_ARITY` raised **8 → 16**
 ([migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):55
@@ -346,7 +386,7 @@ back-compat. New code uses the typed `Query<D, F>`.
 | Archetypal-filter bound | [query/filter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/filter.rs):1681 ✅ | `ArchetypalQueryFilter` (`With`/`Without`/`Or`/tuples) |
 
 `for_each_chunk` lands a credible multi-component SIMD win (boyko 1.28–1.34×
-Bevy, native-SIMD) — see [PHASE-X.A-RESULTS.md](PHASE-X.A-RESULTS.md).
+Bevy, native-SIMD) — see [PHASE-X.A-RESULTS.md](archive/PHASE-X.A-RESULTS.md).
 
 ---
 
@@ -422,7 +462,7 @@ barrier.
 9.1/9.2/9.3 — loom + Miri). Structural allocation (frontier commits, container
 growth) is restricted to the dispatcher + `ScheduleBuilder::build` (ALLOC1 TLS
 discipline).
-See [PHASE-9.2-RESULTS.md](PHASE-9.2-RESULTS.md), [PHASE-9.3c-RESULTS.md](PHASE-9.3c-RESULTS.md).
+See [PHASE-9.2-RESULTS.md](archive/PHASE-9.2-RESULTS.md), [PHASE-9.3c-RESULTS.md](archive/PHASE-9.3c-RESULTS.md).
 
 ### System ordering & sets
 
@@ -434,7 +474,7 @@ See [PHASE-9.2-RESULTS.md](PHASE-9.2-RESULTS.md), [PHASE-9.3c-RESULTS.md](PHASE-
 | Build diagnostics | [schedule/schedule_builder.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs):330 ✅ | `try_build()` → `ScheduleBuildError` (`OrderingCycle` B9001, `SetHierarchyCycle` B9002, …) |
 | Topo / Tarjan plumbing | [schedule/ordering.rs](../crates/boyko_ecs/src/ecs/core/schedule/ordering.rs) ✅ | `OrderingEdge` / `SystemKey` (Phase 9 scaffold completed in Phase 15) |
 
-See [PHASE-15-RESULTS.md](PHASE-15-RESULTS.md).
+See [PHASE-15-RESULTS.md](archive/PHASE-15-RESULTS.md).
 
 ### Run conditions (`.run_if`)
 
@@ -449,8 +489,8 @@ short-circuit). Tick-aware conditions (`Changed`/`Added`/`Ref`) work correctly
 since Phase 16.1 ✅: a condition's window advances only on a frame it is
 evaluated, and a gated system's ticks advance only on a frame it runs, so
 dormant changes are never silently missed (Bevy "since-last-actual-run"
-parity). See [PHASE-16-RESULTS.md](PHASE-16-RESULTS.md) +
-[PHASE-16.1-RESULTS.md](PHASE-16.1-RESULTS.md).
+parity). See [PHASE-16-RESULTS.md](archive/PHASE-16-RESULTS.md) +
+[PHASE-16.1-RESULTS.md](archive/PHASE-16.1-RESULTS.md).
 
 ---
 
@@ -469,7 +509,7 @@ Application/game states layered on the single `Schedule` (Phase 17).
 | Generic-resource id trap fix | [state/state_resource_registry.rs](../crates/boyko_ecs/src/ecs/core/state/state_resource_registry.rs) ✅ | `TypeId`-keyed registry (avoids the rust#22991 `State<S>`-aliases-one-slot trap) |
 | Builder / world entry | builder `init_state`/`insert_state`; `EcsMaster::{insert_state, init_state, state, set_next_state}` ✅ | see [App](#app--plugin-facade) + [EcsMaster](#high-level-facade-ecsmaster) |
 
-See [PHASE-17-RESULTS.md](PHASE-17-RESULTS.md).
+See [PHASE-17-RESULTS.md](archive/PHASE-17-RESULTS.md).
 
 ---
 
@@ -483,7 +523,7 @@ and zero allocation ("0% when unused").
 
 | What you want to do | Where | How |
 |---------------------|-------|-----|
-| **Hooks** — ONE write-once callback per component *type* | [core/component/hooks/](../crates/boyko_ecs/src/ecs/core/component/hooks/) ✅ | `#[component(on_add = path, …)]` derive XOR runtime `EcsMaster::register_component_hooks::<C>()` (Phase 14a — [PHASE-14-RESULTS.md](PHASE-14-RESULTS.md)) |
+| **Hooks** — ONE write-once callback per component *type* | [core/component/hooks/](../crates/boyko_ecs/src/ecs/core/component/hooks/) ✅ | `#[component(on_add = path, …)]` derive XOR runtime `EcsMaster::register_component_hooks::<C>()` (Phase 14a — [PHASE-14-RESULTS.md](archive/PHASE-14-RESULTS.md)) |
 | **Observers** — `add`/`remove`-able LIST per `(kind, component)` | [core/component/observers/mod.rs](../crates/boyko_ecs/src/ecs/core/component/observers/mod.rs):136 ✅ | `EcsMaster::observe_on_{add,insert,replace,remove}::<C>(runner)` (Phase 14b) |
 | Register an observer by `ComponentId` | [core/ecs_master/ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):2104 ✅ | `add_observer(kind, cid, runner) -> ObserverId` |
 | Remove an observer | [core/ecs_master/ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):2121 ✅ | `remove_observer(id) -> bool` (recomputes archetype bits on last-of-kind removal) |
@@ -527,14 +567,14 @@ documented footgun (only self-ref is checked). Sibling order is unspecified
 (`swap_remove`); an emptied `Children` is retained (no archetype thrash). The
 net new `unsafe` for the whole feature is **one** (the `MaybeUninit` cascade
 buffer). DEFERRED: transform propagation, parallel tree walk, `iter_descendants`,
-a generic `Relationship` trait. See [PHASE-19-RESULTS.md](PHASE-19-RESULTS.md).
+a generic `Relationship` trait. See [PHASE-19-RESULTS.md](archive/PHASE-19-RESULTS.md).
 
 > The cascade exposed **BUG-P19-TB-1**, a pre-existing latent Tree-Borrows UB in
 > the deferred command-queue re-entrant drain (`commands/command_queue.rs`
 > `apply_via_raw_twin` cached a `NonNull<Vec>` foreign-written by a re-entrant
 > `push`). Fixed by walking a stack-local `mem::take`'d copy of the queue (the
 > audited `apply` on a disjoint allocation). See
-> [BUG-P19-TB-1-PLAN.md](BUG-P19-TB-1-PLAN.md).
+> [BUG-P19-TB-1-PLAN.md](archive/BUG-P19-TB-1-PLAN.md).
 
 ---
 
@@ -553,7 +593,7 @@ Bevy-style per-row tick storage (Phase 10).
 | Frame bump + wraparound scan | [change_detection/check_ticks.rs](../crates/boyko_ecs/src/ecs/core/change_detection/check_ticks.rs) ✅ | `run_check_ticks_scan`; `EcsMaster::change_tick: AtomicU32` bumped per `Schedule::run` |
 
 0% measurable overhead on queries that use no change detection. See
-[PHASE-10-CHANGE-DETECTION-PLAN.md](PHASE-10-CHANGE-DETECTION-PLAN.md).
+[PHASE-10-CHANGE-DETECTION-PLAN.md](archive/PHASE-10-CHANGE-DETECTION-PLAN.md).
 
 ---
 
@@ -580,7 +620,7 @@ these docs said "no dispatcher" — that is now stale; the dispatcher exists.
 
 Events sit OUTSIDE the conflict graph (Option A) — parallel writers of the same
 `E` are OK via per-lane TLS routing. See [PHASE-12-RESULTS via memory] and
-[PHASE-6-EVENT-DISPATCH-PLAN.md](PHASE-6-EVENT-DISPATCH-PLAN.md).
+[PHASE-6-EVENT-DISPATCH-PLAN.md](archive/PHASE-6-EVENT-DISPATCH-PLAN.md).
 
 ---
 
@@ -616,7 +656,7 @@ fix (Phase 5c). `MAX_ARCHETYPES = 1024`.
 | What you want to do | Where | Method |
 |---------------------|-------|--------|
 | Create a pool | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `ComponentPool::new(component_id, reserve_rows)` — explicit row ceiling EXACTLY, clamp-bypass by design (★R1-9; X.J collapsed the legacy `(arena, id, n, m)` shape, `reserve_rows = n × m`); `with_default_sizes(component_id)` = byte-targeted clamp sizing |
-| Grow a pool (automatic) | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `#[cold] grow_rows` — per-pool `VmReservation [data\|added\|changed]`, slab doubling 64 KiB…64 MiB, ticks lockstep, idempotent, O(1) in live rows, bases never move (Phase X.I). 1M-entity single-archetype ramp **2.24× faster than Bevy**, worst-batch spike **0.022×** ([PHASE-XI-RESULTS.md](PHASE-XI-RESULTS.md)) |
+| Grow a pool (automatic) | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `#[cold] grow_rows` — per-pool `VmReservation [data\|added\|changed]`, slab doubling 64 KiB…64 MiB, ticks lockstep, idempotent, O(1) in live rows, bases never move (Phase X.I). 1M-entity single-archetype ramp **2.24× faster than Bevy**, worst-batch spike **0.022×** ([PHASE-XI-RESULTS.md](archive/PHASE-XI-RESULTS.md)) |
 | Committed-rows frontier (diagnostics) | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `committed_rows()`; `capacity()` = reserve ceiling |
 | Append a component (raw bytes) | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `add(&[u8])` |
 | Append a component (typed, TypeId-guarded) | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `add_typed::<T>(value)` |
@@ -637,7 +677,7 @@ per-row tick columns; **Phase X.I** moved them into the pool's own reservation
 (`[data | added | changed]` sub-regions), made the pool self-growing, and
 DELETED the chunk machinery (`memory/chunk.rs` — the dirty flags were
 written-never-read; a per-mutation `udiv` died with them). See
-[PHASE-XB-RESULTS.md](PHASE-XB-RESULTS.md), [PHASE-XI-RESULTS.md](PHASE-XI-RESULTS.md).
+[PHASE-XB-RESULTS.md](archive/PHASE-XB-RESULTS.md), [PHASE-XI-RESULTS.md](archive/PHASE-XI-RESULTS.md).
 
 ---
 
@@ -657,8 +697,8 @@ per-pool `VmReservation`). Backing acquisition: reserve-only syscall
 Unix) + lazy geometric slab commits at the frontier (`MEM_COMMIT` /
 `mprotect`); Miri / wasm32 / exotic targets eagerly `alloc_zeroed` the full
 reserve (commit = no-op). `Drop` uses the per-cfg-arm matching deallocator
-(M-001). See [PHASE-XI-RESULTS.md](PHASE-XI-RESULTS.md) +
-[PHASE-XJ-RESULTS.md](PHASE-XJ-RESULTS.md).
+(M-001). See [PHASE-XI-RESULTS.md](archive/PHASE-XI-RESULTS.md) +
+[PHASE-XJ-RESULTS.md](archive/PHASE-XJ-RESULTS.md).
 
 ---
 
@@ -701,7 +741,7 @@ GPU-side `mix(prev_pos, pos, alpha)` interpolation off the 24 B `GpuInstance`
 
 **Files:** [crates/boyko_demo/src/](../crates/boyko_demo/src/) — `app.rs`,
 `sim/` (systems, grid, modes, runner), `render/`, `ui/`. See
-[DEMO-PLAN.md](DEMO-PLAN.md) + [DEMO-DOGFOODING.md](DEMO-DOGFOODING.md).
+[DEMO-PLAN.md](archive/DEMO-PLAN.md) + [DEMO-DOGFOODING.md](DEMO-DOGFOODING.md).
 
 ---
 
@@ -713,9 +753,9 @@ GPU-side `mix(prev_pos, pos, alpha)` interpolation off the 24 B `GpuInstance`
 | ~~Non-fragmenting tag toggle (enable bits)~~ | ✅ LANDED — the EnableTag enable-bit backend (`#[component(storage = "bitset")]` / `register_enable_tag` + `Enabled`/`Disabled` filters); see [EnableTag](#enabletag-enable-bit-non-fragmenting-tag-backend). v1 toggle is `&mut`; the `&self` worker-marking toggle (D7) is the deferred seam |
 | Typed `Added`/`Changed` for dynamic tags | 📋 follow-up (`DynAdded(TagId)` term — ticks already maintained, no storage change needed) |
 | `Option<Res<R>>` SystemParam → `resource_exists` condition | 📋 deferred (Phase 16 residual) |
-| ~~Tick-aware run conditions (`Changed`/`Added`)~~ | ✅ LANDED — Phase 16.1 (dormancy-correct ticks, [PHASE-16.1-RESULTS.md](PHASE-16.1-RESULTS.md)) |
+| ~~Tick-aware run conditions (`Changed`/`Added`)~~ | ✅ LANDED — Phase 16.1 (dormancy-correct ticks, [PHASE-16.1-RESULTS.md](archive/PHASE-16.1-RESULTS.md)) |
 | `for_each_chunk` with `Changed`/`Added`/`Ref`/`Mut` | ❌ gated out at compile time; use `iter()` — Phase 13.X `ChunkedTickedQueryData` |
-| ~~Multi-schedule~~ | ✅ LANDED — Phase 20, as the closed `CoreSchedule { Main, Fixed }` set ([PHASE-20-RESULTS.md](PHASE-20-RESULTS.md)); a user-mintable label map stays ❌ rejected (D5) |
+| ~~Multi-schedule~~ | ✅ LANDED — Phase 20, as the closed `CoreSchedule { Main, Fixed }` set ([PHASE-20-RESULTS.md](archive/PHASE-20-RESULTS.md)); a user-mintable label map stays ❌ rejected (D5) |
 | SubApps / `PluginGroup` / `App::with_world` | 📋 deferred (Phase 18 boundaries; `with_world` filed as Phase 20.1) |
 | Single-dep prelude including derives | 📋 deferred — needs the `boyko-macros` cycle refactor (Phase 18) |
 | 5× `for_each_chunk` headline on a wide/SIMD-heavy workload | 📋 Phase X.A.2 (credible 1.3× multi-component win already landed) |
@@ -726,10 +766,13 @@ GPU-side `mix(prev_pos, pos, alpha)` interpolation off the 24 B `GpuInstance`
 
 ## Tests / benchmarks at a glance
 
-Per the latest phase results, the `boyko-ecs` test suite is ~918 passing debug /
-903 release (`cargo test -p boyko-ecs`, Phase 19 baseline; ~983 workspace) across
-in-module `#[cfg(test)]` units + the integration files under
-`crates/boyko_ecs/tests/`. Miri (`-Zmiri-tree-borrows`, `-Zmiri-ignore-leaks` for
+The workspace now carries **3600+ test functions** across the 18 crates (raw
+`#[test]` / `#[tokio::test]` sites; the authoritative per-run pass count is the
+CI job, since proptest/loom cases and feature-gated GPU tests expand further).
+The `boyko-ecs` kernel alone is ~918 passing debug / 903 release
+(`cargo test -p boyko-ecs`, Phase 19 baseline) across in-module `#[cfg(test)]`
+units + the integration files under `crates/boyko_ecs/tests/`; the render / sim /
+UI crates add the balance. Miri (`-Zmiri-tree-borrows`, `-Zmiri-ignore-leaks` for
 the spawn-reaching suites) is clean for the change-detection / hooks / observers /
 hierarchies / states / executor-soundness suites. For the exact gate per phase,
 read the relevant `docs/PHASE-*-RESULTS.md`.

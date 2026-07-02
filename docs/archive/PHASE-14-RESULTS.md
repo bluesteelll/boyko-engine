@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 14a — Results (Component Lifecycle Hooks)
 
 **Status:** ✅ COMPLETE (uncommitted on branch `ecs`, ready to commit per-wave).

@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 4 — The Four Abstract Core ECS Seams (GPU-Capability Without Graphics)
 
 > **Status: REVISED (architect → 3-lens critic panel → architect revise; all CRITICAL/IMPORTANT findings
@@ -6,7 +8,7 @@
 > rationale/context; the revisions correct stale line refs, the Send model, the SCH15 form, the `PoolBacking`
 > shape, the residency scan sites, the NonSend SystemParam surface, and turn every layout claim into a
 > compile-time pin). Implement from the revisions where they overlap.
-> Implements [docs/RENDER-PHYSICS-GPU-PLAN.md](RENDER-PHYSICS-GPU-PLAN.md) §5 (the four seams), §2 (CPU/GPU
+> Implements [docs/RENDER-PHYSICS-GPU-PLAN.md](../RENDER-PHYSICS-GPU-PLAN.md) §5 (the four seams), §2 (CPU/GPU
 > population partition), §1 (perf model), §6 (validation), §10 (metrics). The SINGLE sanctioned touch of
 > `boyko_ecs` core. Conforms to Phase 1 ([docs/RHI-TRAIT-PLAN.md](RHI-TRAIT-PLAN.md)): the opaque
 > `DeviceColumnHandle(u64)` is defined HERE in `boyko_ecs` (graphics-pure bare-`u64` newtype); `boyko_ecs`

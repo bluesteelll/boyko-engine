@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 16.1 — Tick-Aware Run Conditions: Results
 
 Branch `ecs`, commits `df17528` (trybuild re-bless) + `579c738` (feature).

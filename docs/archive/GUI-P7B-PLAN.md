@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # GUI P7b — World-space / diegetic UI: 3D cursor-ray pick + depth-test occlusion
 
 Status: PLAN (implementation-ready, critic round 1 applied). Branch `ecs`. Builds on

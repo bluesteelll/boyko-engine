@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 All claims are now verified against the actual code. Critical findings confirmed:
 
 1. **`get_component`** returns `Option<&T>` (no tick); `get_component_mut` returns `Mut<T>` (bumps changed tick on DerefMut). No `get_component_ref` / `get_component_with_tick`. `read_changed_tick` is `pub(crate)`, row-index-keyed. → Decision 5 needs a new boyko_ecs public read-with-tick accessor, OR source-side `Changed<C>`.

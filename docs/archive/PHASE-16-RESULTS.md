@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 16 — Results (Run Conditions `.run_if`)
 
 **Status:** ✅ COMPLETE (committed locally on branch `ecs`). Touches the

@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 9.3b — Results: ThreadPool shutdown / break the worker↔pool Arc cycle
 
 Branch `ecs`. Committed locally as **`b094936`** (author Celtokisa, no `Co-Authored-By`,

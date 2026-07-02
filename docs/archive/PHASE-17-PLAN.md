@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 17 — States / State Transitions
 
 > Branch `ecs`. Bevy-style application/game states layered on the existing single `Schedule`. Implements the boyko-native **shape (b)**: enter/exit logic is ordinary condition-gated systems in the one schedule, fed by a built-in per-frame transition pass. Composes with Phase 15 (sets/ordering) and Phase 16 (run conditions) with **zero executor hot-path changes**.

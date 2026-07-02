@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 15 Plan — Explicit System Ordering & Schedule Sets (Completing the Phase 9 Scaffold)
 
 **Status:** Architecture plan, pre-implementation. **Branch:** `ecs`. **Author role:** lead architect.

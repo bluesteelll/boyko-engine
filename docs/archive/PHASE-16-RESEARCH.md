@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 16 Research — Run Conditions (`.run_if(predicate)`)
 
 Researcher deliverable (condensed by orchestrator from the full agent report;

@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase X.I — Results: ComponentPool Row-Capacity Growth
 
 Branch `ecs`. Implementation `f9fb5a0` (W1-W3), test matrix `868d741` (W4-W5),

@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase X.A — Post-Landing Critic Review (Round 3)
 
 This review was run AFTER Phase X.A landed (commits `5499855`→`e2cd17b`),

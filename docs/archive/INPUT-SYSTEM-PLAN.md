@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # boyko_input — Source-Agnostic Rebindable Action Mapping (System Design Plan)
 
 > Intended path: `docs/INPUT-SYSTEM-PLAN.md`

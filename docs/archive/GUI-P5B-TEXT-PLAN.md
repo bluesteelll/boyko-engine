@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Architecture: GUI Phase P5b — Full MSDF Text Rendering (in-house generation, riding the P5a quad path)
 
 ## Goal

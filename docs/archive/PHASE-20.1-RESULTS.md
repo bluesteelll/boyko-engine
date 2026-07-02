@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 20.1 — Results: Interpolated GPU Mirror
 
 Binding spec: [PHASE-20.1-PLAN.md](PHASE-20.1-PLAN.md) (critic Round 1 folded — ★R1-1…★R1-5, ★n6…★n11; see the plan's "Critic Round 1 — resolutions"). Branch `ecs`, on top of `45ae291`. Scope held: **`crates/boyko_demo` only + docs — zero engine diffs.**

@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 14 Research — Observers / Component Lifecycle Hooks
 
 Researcher's input to the architect. Sources: Bevy `archetype.rs` /

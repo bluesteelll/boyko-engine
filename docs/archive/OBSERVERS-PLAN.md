@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Entity-targeted observers + custom triggers + propagation + on_despawn (Feature 2 of 3) — resolved plan
 
 Branch `ecs`, 2026-06-16. Extends the Phase-14b `(kind, component)` component-observer

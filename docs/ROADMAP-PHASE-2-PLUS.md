@@ -2,7 +2,7 @@
 
 > **SUPERSEDED (2026-06-10).** This roadmap predates the phase-based planning that
 > followed (Phases 6-19, X.A-X.E, F4 - all landed; see
-> [PHASE-13-ROADMAP.md](PHASE-13-ROADMAP.md) for the final status). Live audit
+> [PHASE-13-ROADMAP.md](archive/PHASE-13-ROADMAP.md) for the final status). Live audit
 > findings were either fixed in later phases or re-triaged in the post-14b
 > bug-backlog cleanup. Kept as a historical record of the 2026-05-23 audit
 > sequencing - do NOT use it as a source of "what's next".

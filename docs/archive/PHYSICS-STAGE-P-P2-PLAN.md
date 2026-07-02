@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Physics Stage P — P2 Plan: Rigid Colored Solver `ContactColumns` -> `ScratchColumn` Migration (C3 BuildView/SolveView split)
 
 Status: APPROVED (architect -> architecture-critic loop closed; two non-blocking notes O1/O2 recorded, two open implementation items tracked).

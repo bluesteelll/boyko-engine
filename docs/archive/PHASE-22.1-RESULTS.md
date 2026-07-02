@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 22.1 — Results
 
 Zero-term-state query cursors (lock-free term prefilter) + ZST spawn-column

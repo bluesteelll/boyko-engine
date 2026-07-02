@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase X.A — Architecture Critic, Round 1
 
 **Verdict:** APPROVED WITH MINOR CHANGES — the plan is structurally

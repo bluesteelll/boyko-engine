@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Architecture review: Phase 11 EntityCommands chaining + despawn (Round 2)
 
 ## Verdict

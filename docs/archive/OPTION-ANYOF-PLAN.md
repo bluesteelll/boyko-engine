@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Option<&T> / AnyOf<(...)> query data (task #9) — resolved plan
 
 Branch `ecs`, 2026-06-16. P0 query ergonomics: optional, non-filtering query data.

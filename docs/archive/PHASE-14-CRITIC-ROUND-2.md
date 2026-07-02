@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 14a — Architecture Critic, Round 2
 
 **Verdict: REVISE.** The Round 2 revision (`PHASE-14-OBSERVERS-PLAN-ROUND2.md`)

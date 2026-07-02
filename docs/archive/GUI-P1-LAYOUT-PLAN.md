@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 The codebase facts confirm the critics' findings. I have enough verified context (exclusive system is `FnMut(&mut EcsMaster)`, the consistency window, the hierarchy model). I'll now produce the full revised plan addressing every critical and major finding.
 
 The key redesigns:

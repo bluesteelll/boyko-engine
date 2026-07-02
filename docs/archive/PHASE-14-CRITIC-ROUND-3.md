@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 14a — Architecture Critic, Round 3 (focused confirmation) + resolution
 
 **Round 3 verdict (on the §8 Round 2 patches P1-P5): REVISE** — 4/5 patches

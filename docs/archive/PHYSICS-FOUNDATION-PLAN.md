@@ -1,10 +1,12 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # `boyko_physics` Foundation — the Manifold Currency + Swappable `RigidSolver` Seam
 
 > **Status: REVISED (architect → critic APPROVED_WITH_NITS → revise; 3 IMPORTANT must-fixes resolved).**
 > Branch `ecs`, 2026-06-17. **The "Post-Critic Binding Revisions" section at the BOTTOM is AUTHORITATIVE**
 > where it conflicts with the decisions below (it pins the write-back addressing scheme, the determinism
 > precondition, and the Phase-4 rebase dependency).
-> Implements [docs/RENDER-PHYSICS-GPU-PLAN.md](RENDER-PHYSICS-GPU-PLAN.md) §8 (physics) + §10 (metrics).
+> Implements [docs/RENDER-PHYSICS-GPU-PLAN.md](../RENDER-PHYSICS-GPU-PLAN.md) §8 (physics) + §10 (metrics).
 > **FOUNDATION/SEAM ONLY** per the binding directive "render/physics = only base, foundation for extension".
 > ADD-ONLY: a new `boyko_ecs`-dependent crate, **zero core edit** (unlike the GPU Phase-4 seams).
 

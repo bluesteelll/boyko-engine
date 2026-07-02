@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 9.3c — Results: completion-channel Tree-Borrows hardening
 
 Branch `ecs`. Code fix committed locally as **`09a1204`** (author Celtokisa, no `Co-Authored-By`,

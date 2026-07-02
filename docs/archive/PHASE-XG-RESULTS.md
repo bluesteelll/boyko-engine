@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase X.G — entities_inland Address-Stable Growth: Results
 
 Branch `ecs`. Plan: [PHASE-XG-PLAN.md](PHASE-XG-PLAN.md) (R2-final). Research/inventory:

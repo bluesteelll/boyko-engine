@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 5 — `GpuColumn` + one `GpuSystem` + the `boyko_render` crate
 
 > **Status: REVISED (architect → 3-lens critic panel [REVISE×3, vs merged code] → architect revise; all 8
@@ -5,7 +7,7 @@
 > is AUTHORITATIVE** where it conflicts with the decisions below. Core realization: Phase 4 reserved the seam
 > TYPES but NOT the production WIRING — Phase 5 ADDS the wiring (it touches `boyko_ecs` core MORE than this
 > plan originally implied; see the boyko_ecs-additions list). Implements
-> [docs/RENDER-PHYSICS-GPU-PLAN.md](RENDER-PHYSICS-GPU-PLAN.md) §7 Phase 5 + §0/§1/§2/§5/§6. Consumes the
+> [docs/RENDER-PHYSICS-GPU-PLAN.md](../RENDER-PHYSICS-GPU-PLAN.md) §7 Phase 5 + §0/§1/§2/§5/§6. Consumes the
 > Phase-4 core seams ([docs/PHASE4-CORE-SEAMS-PLAN.md](PHASE4-CORE-SEAMS-PLAN.md)) + the Phase-1 RHI
 > ([docs/RHI-TRAIT-PLAN.md](RHI-TRAIT-PLAN.md)).
 

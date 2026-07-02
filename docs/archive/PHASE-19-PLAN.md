@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 19 — Hierarchies / Parent-Child (CORE) — Architect Plan
 
 Implementation-ready plan. Research: `docs/PHASE-19-RESEARCH.md`. Builds on the 14a/14b hook substrate.

@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 12.5 Profile — Spawn 10k
 
 Per-stage breakdown of the `Commands::spawn × 10 000` hot path on the

@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 20 — Fixed Timestep + Multi-Schedule: Research
 
 Pre-design research for boyko-engine "direction #2". Branch `ecs`. All local file references verified against the working tree on 2026-06-11; all external references fetched from primary sources (Bevy `main` branch ≈ 0.18-dev, flecs `master`, Unity Entities 1.0 docs, Godot stable docs).

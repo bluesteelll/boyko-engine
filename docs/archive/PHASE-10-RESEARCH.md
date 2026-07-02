@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Research: Change Detection in ECS Engines (Phase 10)
 
 ## §1 Executive Summary

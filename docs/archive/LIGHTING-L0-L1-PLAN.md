@@ -1,8 +1,10 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Architecture: Lighting L0 + L1 (ECS Light Entities → GPU Light Table → Clustered Multi-Light Resolve)
 
 > FINALIZED implementation reference. This document is self-contained and verbatim-complete:
 > the `developer` and `GPU-tester` follow it directly. It supersedes the L0/L1 rows of
-> [docs/LIGHTING-PLAN.md](LIGHTING-PLAN.md) with the concrete data structures, std430
+> [docs/LIGHTING-PLAN.md](../LIGHTING-PLAN.md) with the concrete data structures, std430
 > offsets, shader edits, descriptor wiring, rung split, per-rung GPU goldens, and 0%-gates.
 >
 > **INVIOLABLE constraints (carried from the engine principles + [CLAUDE.md](../CLAUDE.md) principle 0):**

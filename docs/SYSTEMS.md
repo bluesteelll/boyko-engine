@@ -17,9 +17,15 @@ for cross-crate architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 > Line numbers are verified against current source; treat the file path as the
 > stable anchor if a line drifts.
 
-> **Crates:** `boyko_ecs` (core) · `boyko_macros` (proc-macros) · `boyko_utils`
-> (collections) · `boyko_threadpool` (Chase-Lev work-stealing pool over
-> crossbeam-deque) · `boyko_demo` (wgpu+egui sandbox) · `bench_bevy_vs_boyko`.
+> **Crates (18 members).** *Kernel:* `boyko_ecs` (core) · `boyko_macros`
+> (proc-macros) · `boyko_utils` (collections) · `boyko_threadpool` (Chase-Lev
+> work-stealing pool over crossbeam-deque). *Std-lib / sim:* `boyko_math` ·
+> `boyko_scene` · `boyko_sdf_math` · `boyko_physics` · `boyko_input` ·
+> `boyko_serialize`. *Render / UI / shaders:* `boyko_rhi` · `boyko_rhi_vulkan` ·
+> `boyko_render` · `boyko_shaderdsl` · `boyko_fontbake` · `boyko_ui`. *Apps /
+> bench:* `boyko_demo` (wgpu+egui sandbox) · `bench_bevy_vs_boyko`. Sections
+> 1–21 catalog the ECS kernel; sections 22–33 catalog the std-lib and
+> render/UI crates.
 
 ---
 
@@ -46,6 +52,24 @@ for cross-crate architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 19. [Macros](#19-derive--attribute-macros-)
 20. [Constants](#20-constants-)
 21. [boyko_demo](#21-boyko_demo-)
+
+**Std-lib / simulation crates**
+
+22. [boyko_math](#22-boyko_math-) — SIMD-aligned POD math vocabulary
+23. [boyko_scene](#23-boyko_scene-) — Transform / GlobalTransform / Camera / propagation
+24. [boyko_sdf_math](#24-boyko_sdf_math-) — analytic SDF edit-list field leaf
+25. [boyko_physics](#25-boyko_physics-) — in-house 3D TGS-Soft solver
+26. [boyko_input](#26-boyko_input-) — source-agnostic rebindable action mapping
+27. [boyko_serialize](#27-boyko_serialize-) — custom binary world save/load
+
+**Render / UI / shader crates**
+
+28. [boyko_rhi](#28-boyko_rhi-) — backend-agnostic RHI trait surface
+29. [boyko_rhi_vulkan](#29-boyko_rhi_vulkan-) — raw-FFI Vulkan backend + framegraph
+30. [boyko_render](#30-boyko_render-) — GPU-resident columns, lighting, shadows, SDF
+31. [boyko_shaderdsl](#31-boyko_shaderdsl-) — in-house Rust shader eDSL
+32. [boyko_fontbake](#32-boyko_fontbake-) — load-time MTSDF font baker
+33. [boyko_ui](#33-boyko_ui-) — ECS-native UI
 
 ---
 
@@ -154,7 +178,7 @@ constructor `new(component_id, reserve_rows)` = exact ceiling, clamp-bypass by
 design (★R1-9 — also the small-ceiling test knob). Phase X.J collapsed the
 legacy `new(arena, id, n, m)` shape (`reserve_rows = n × m` EXACTLY, the D2
 mapping) when it retired the Arena. See
-[PHASE-XI-RESULTS.md](PHASE-XI-RESULTS.md).
+[PHASE-XI-RESULTS.md](archive/PHASE-XI-RESULTS.md).
 
 **API:**
 - Raw byte: `add(&[u8])` (399), `set_component(idx, &[u8])`, `get_raw(idx)`,
@@ -173,7 +197,7 @@ provably `buffer + i*stride`), replacing it with the computed `row_ptr` + an
 explicit `len`. This net-removed `unsafe` (the `commit_units` raw-write loop is
 gone) and shrank the Miri surface. The hot read/iter paths (`column.ptr.add`,
 `fetch.base.add`) never used `units`, so iteration is unaffected. See
-[PHASE-XB-RESULTS.md](PHASE-XB-RESULTS.md).
+[PHASE-XB-RESULTS.md](archive/PHASE-XB-RESULTS.md).
 
 **Phase 10** added the per-row `added` / `changed` tick columns; **Phase X.I**
 moved them from heap `Box<[UnsafeCell<Tick>]>`es into the pool's own
@@ -221,12 +245,12 @@ master-era compaction class), and the dead `ChunkId` / `InlandChunkId` ids;
 `ARENA_COMMIT_GRANULE` was renamed `COMMIT_GRANULE`.
 `ArchetypeMaster::new` / `with_capacity` are no longer `unsafe` (the
 contract existed only for the arena pointer). Net −2,999 LOC. See
-[PHASE-XJ-RESULTS.md](PHASE-XJ-RESULTS.md).
+[PHASE-XJ-RESULTS.md](archive/PHASE-XJ-RESULTS.md).
 
 ### 2.5. Row addressing — no `Unit` (removed Phase X.B) ✅
 
 Rows are computed arithmetic from the pool's stable, write-once reservation base. The
-`Unit { ptr }` wrapper and `id_unit.rs` are gone. See §2.3 + [PHASE-XB-RESULTS.md](PHASE-XB-RESULTS.md).
+`Unit { ptr }` wrapper and `id_unit.rs` are gone. See §2.3 + [PHASE-XB-RESULTS.md](archive/PHASE-XB-RESULTS.md).
 
 ---
 
@@ -307,7 +331,7 @@ Files: [core/component/hooks/](../crates/boyko_ecs/src/ecs/core/component/hooks/
 `trigger_on_*`, `deferred_master.rs` = the read-only `DeferredEcsMaster`
 view, `builder.rs` = `ComponentHooksBuilder`, `scope.rs` = the deferred-drain
 depth guard, `archetype_flags.rs` = the bit definitions). See
-[PHASE-14-RESULTS.md](PHASE-14-RESULTS.md).
+[PHASE-14-RESULTS.md](archive/PHASE-14-RESULTS.md).
 
 **Observers (Phase 14b)** — the runtime-mutable sibling: an `add`/`remove`-able
 *list* of fn-ptrs keyed by `(kind, component)`, stored **per-world** (not
@@ -407,7 +431,7 @@ migration paths — counted against this ledger per the Phase-14b lesson):
 The plan's original "6 fire sites" undercounted: Phase 14a also fires at the 4
 deferred-command apply sites (rows 4–7), so observers were silent for
 the entire `Commands` API until the tester wrote tests against the user-facing
-API. See [PHASE-14B-RESULTS.md](PHASE-14B-RESULTS.md).
+API. See [PHASE-14B-RESULTS.md](archive/PHASE-14B-RESULTS.md).
 
 **Id-keyed hook registration (Phase 22 D8)** —
 `register_hooks_by_id(component_id: ComponentId, hooks: ComponentHooks) ->
@@ -517,8 +541,8 @@ structural-generation bump, no hook/observer fire, no deferred drain** (flecs
 `CanToggle`). The cost: no per-row tick storage, so `Added<T>`/`Changed<T>` are
 compile-rejected on a bitset tag (the Phase-22 "compile-but-lie" lesson). Use it
 for high-churn transient flags (`Stunned`, `Visible`, `Sleeping`). Authoritative
-design: [ENABLE-TAG-PLAN.md](ENABLE-TAG-PLAN.md) +
-[ENABLE-TAG-PLAN-AMENDMENT-D7.md](ENABLE-TAG-PLAN-AMENDMENT-D7.md).
+design: [ENABLE-TAG-PLAN.md](archive/ENABLE-TAG-PLAN.md) +
+[ENABLE-TAG-PLAN-AMENDMENT-D7.md](archive/ENABLE-TAG-PLAN-AMENDMENT-D7.md).
 
 **Storage model (D1)** — three layers in
 [component/enable/enable_store.rs](../crates/boyko_ecs/src/ecs/core/component/enable/enable_store.rs):
@@ -772,8 +796,8 @@ all-zero 16 B; demand-zero pages ARE the NULL fill — invariant J). The
 Phase-7 hot lookup codegen-identical; `ensure(n)` replaced every
 `resize(n, NULL)`. Production spawn path got **15–54% faster** (the per-batch
 resize-fill died); the g7b entity-store doubling spikes are GONE. See
-[PHASE-XD-RESULTS.md](PHASE-XD-RESULTS.md) +
-[PHASE-XG-RESULTS.md](PHASE-XG-RESULTS.md).
+[PHASE-XD-RESULTS.md](archive/PHASE-XD-RESULTS.md) +
+[PHASE-XG-RESULTS.md](archive/PHASE-XG-RESULTS.md).
 
 **API:**
 - `allocate_entity() -> Entity` (102) — recycles from `free_entity_ids`, else
@@ -1002,7 +1026,7 @@ event buffers, states) is world-owned. Rules:
 - SubApp / extract-style world-to-world transfer = future work.
 
 Suite: [tests/multi_world.rs](../crates/boyko_ecs/tests/multi_world.rs);
-results: [PHASE-21-RESULTS.md](PHASE-21-RESULTS.md).
+results: [PHASE-21-RESULTS.md](archive/PHASE-21-RESULTS.md).
 
 ---
 
@@ -1031,8 +1055,8 @@ pub trait Bundle: sealed::BundleSealed + Send + Sync + Unpin + 'static {
   sub-nanosecond warm spawn lookups. `Unpin` + `Send` pins are asserted at
   compile time via `static_assertions` (SBO-UNPIN).
 
-See [PHASE-8.5-STATIC-BUNDLE-CACHE-PLAN.md](PHASE-8.5-STATIC-BUNDLE-CACHE-PLAN.md)
-+ [PHASE-12.5-RESULTS.md](PHASE-12.5-RESULTS.md).
+See [PHASE-8.5-STATIC-BUNDLE-CACHE-PLAN.md](archive/PHASE-8.5-STATIC-BUNDLE-CACHE-PLAN.md)
++ [PHASE-12.5-RESULTS.md](archive/PHASE-12.5-RESULTS.md).
 
 ---
 
@@ -1059,7 +1083,7 @@ pub struct QueryView<'w, D: QueryData, F: QueryFilter = ()> { /* direct API */ }
   `ReadOnlyQueryData`) → `QueryIter` / `QueryIterMut`
   ([query/iter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/iter.rs):83/306).
 - The hot row walk is one `column.ptr.add(row * stride)` + deref per element
-  (byte-identical to Bevy in asm — see [PHASE-12.6-RESEARCH-QUERY-BEAT.md](PHASE-12.6-RESEARCH-QUERY-BEAT.md)).
+  (byte-identical to Bevy in asm — see [PHASE-12.6-RESEARCH-QUERY-BEAT.md](archive/PHASE-12.6-RESEARCH-QUERY-BEAT.md)).
 
 ### 8.2. QueryData / QueryFilter
 
@@ -1095,7 +1119,7 @@ pub unsafe trait QueryFilter: Sized { /* filter.rs:74 */ }
 
 `for_each_chunk` lands a credible multi-component SIMD win (boyko 1.28–1.34×
 Bevy, native-SIMD) — the 5× headline is filed as Phase X.A.2. See
-[PHASE-X.A-RESULTS.md](PHASE-X.A-RESULTS.md).
+[PHASE-X.A-RESULTS.md](archive/PHASE-X.A-RESULTS.md).
 
 ### 8.4. QueryState cache + dedup bitset (Phase 5c)
 
@@ -1325,10 +1349,10 @@ pub struct Commands<'s> { /* commands.rs:95 */ }
   Opt-A1).
 - The `migrate_entity_insert` path was rewritten in Phase 14b to consume bundle
   bytes INSIDE the `for_each_component_bytes` closure (fixing a dangling-slice
-  UAF that Miri caught — see [PHASE-14B-RESULTS.md](PHASE-14B-RESULTS.md)).
+  UAF that Miri caught — see [PHASE-14B-RESULTS.md](archive/PHASE-14B-RESULTS.md)).
 
-See [PHASE-8CD-INTOSYSTEM-COMMANDS-PLAN.md](PHASE-8CD-INTOSYSTEM-COMMANDS-PLAN.md)
-+ [PHASE-11-ENTITY-COMMANDS-PLAN.md](PHASE-11-ENTITY-COMMANDS-PLAN.md).
+See [PHASE-8CD-INTOSYSTEM-COMMANDS-PLAN.md](archive/PHASE-8CD-INTOSYSTEM-COMMANDS-PLAN.md)
++ [PHASE-11-ENTITY-COMMANDS-PLAN.md](archive/PHASE-11-ENTITY-COMMANDS-PLAN.md).
 
 ---
 
@@ -1379,8 +1403,8 @@ The dispatcher loop: drain pending applies under the barrier (gate proves
 `Scope` → park with a 100 µs backstop. **Soundness:** proven via loom + Miri
 (Phase 9.1/9.2/9.3); structural allocation (frontier commits, container growth)
 stays restricted to the dispatcher + build via the ALLOC1 TLS discipline. See
-[PHASE-9-PARALLEL-SCHEDULER-PLAN.md](PHASE-9-PARALLEL-SCHEDULER-PLAN.md),
-[PHASE-9.2-RESULTS.md](PHASE-9.2-RESULTS.md), [PHASE-9.3c-RESULTS.md](PHASE-9.3c-RESULTS.md).
+[PHASE-9-PARALLEL-SCHEDULER-PLAN.md](archive/PHASE-9-PARALLEL-SCHEDULER-PLAN.md),
+[PHASE-9.2-RESULTS.md](archive/PHASE-9.2-RESULTS.md), [PHASE-9.3c-RESULTS.md](archive/PHASE-9.3c-RESULTS.md).
 
 ### 11.3. System ordering & sets (Phase 15)
 
@@ -1404,7 +1428,7 @@ stays restricted to the dispatcher + build via the ALLOC1 TLS discipline. See
   B9002, `SetsOrderedButIntersect` B9004, `UnknownSystemKey` B9005) + warning
   `boyko-W1501` for a never-joined ordered set.
 
-See [PHASE-15-RESULTS.md](PHASE-15-RESULTS.md).
+See [PHASE-15-RESULTS.md](archive/PHASE-15-RESULTS.md).
 
 ### 11.4. Run conditions (Phase 16)
 
@@ -1431,8 +1455,8 @@ See [PHASE-15-RESULTS.md](PHASE-15-RESULTS.md).
   the tick source — not `world.current_tick()`, which reads `this_run + 1`
   after the #56 apply-window bump.
 
-See [PHASE-16-RESULTS.md](PHASE-16-RESULTS.md) +
-[PHASE-16.1-RESULTS.md](PHASE-16.1-RESULTS.md).
+See [PHASE-16-RESULTS.md](archive/PHASE-16-RESULTS.md) +
+[PHASE-16.1-RESULTS.md](archive/PHASE-16.1-RESULTS.md).
 
 ---
 
@@ -1478,7 +1502,7 @@ Bevy-style per-row tick storage (Phase 10). Module:
 
 0% measurable overhead on queries that use no change detection (`NEEDS_CHANGE_DETECTION`
 const elision, Phase 12.5 NCD6). See
-[PHASE-10-CHANGE-DETECTION-PLAN.md](PHASE-10-CHANGE-DETECTION-PLAN.md).
+[PHASE-10-CHANGE-DETECTION-PLAN.md](archive/PHASE-10-CHANGE-DETECTION-PLAN.md).
 
 ---
 
@@ -1515,7 +1539,7 @@ Application/game states layered on the single `Schedule` (Phase 17). Module:
 - The Phase-17 IS2 identity `IntoSystem` blanket lets the conditions (returning
   `impl System<Out = bool>`) flow through `.run_if`.
 
-Zero new `unsafe`. See [PHASE-17-RESULTS.md](PHASE-17-RESULTS.md).
+Zero new `unsafe`. See [PHASE-17-RESULTS.md](archive/PHASE-17-RESULTS.md).
 
 ---
 
@@ -1590,8 +1614,8 @@ participant-filtered dispatch use case yet).
 lazy `event_id()`; `MAX_EVENTS = 256` (line 51). Same startup warm-up contract as
 ComponentId.
 
-See [PHASE-6-EVENT-DISPATCH-PLAN.md](PHASE-6-EVENT-DISPATCH-PLAN.md) +
-[PHASE-12-EVENTS-SYSTEMPARAM-PLAN.md](PHASE-12-EVENTS-SYSTEMPARAM-PLAN.md).
+See [PHASE-6-EVENT-DISPATCH-PLAN.md](archive/PHASE-6-EVENT-DISPATCH-PLAN.md) +
+[PHASE-12-EVENTS-SYSTEMPARAM-PLAN.md](archive/PHASE-12-EVENTS-SYSTEMPARAM-PLAN.md).
 
 ---
 
@@ -1652,12 +1676,12 @@ the ONE shared catch-up driver: App, the wasm demo runner, and Miri tests
 traverse the identical integer-ns accumulate/expend path (timestep snapshotted
 at loop entry, ★M3; ≤ 16 substeps/frame at the defaults). Step counts are
 bit-deterministic for a given dt script (P20-B4). See
-[PHASE-20-RESULTS.md](PHASE-20-RESULTS.md).
+[PHASE-20-RESULTS.md](archive/PHASE-20-RESULTS.md).
 
 `AppExit(bool)` ([app/app_exit.rs](../crates/boyko_ecs/src/ecs/core/app/app_exit.rs))
 **hand-impls `Resource`** — the derive is unusable inside `boyko-ecs` lib code
 because `boyko-macros` is only a dev-dependency (the macro-cycle constraint;
-the prelude likewise omits the derives). See [PHASE-18-RESULTS.md](PHASE-18-RESULTS.md).
+the prelude likewise omits the derives). See [PHASE-18-RESULTS.md](archive/PHASE-18-RESULTS.md).
 
 ---
 
@@ -1752,8 +1776,8 @@ API) is hand-rolled to fit the scheduler's contracts. Exports:
 breaks the worker↔pool cycle). The whole pool + `Scope` fork/join + parallel
 `Schedule::run` is proven sound and Tree-Borrows-clean (Phase 9.1/9.2/9.3 —
 loom 4/4 + stress + Miri). Deps: `crossbeam-deque`, `crossbeam-utils` (+ `loom`
-under `--cfg loom`). See [PHASE-9.1-RESULTS.md](PHASE-9.1-RESULTS.md),
-[PHASE-9.2-RESULTS.md](PHASE-9.2-RESULTS.md).
+under `--cfg loom`). See [PHASE-9.1-RESULTS.md](archive/PHASE-9.1-RESULTS.md),
+[PHASE-9.2-RESULTS.md](archive/PHASE-9.2-RESULTS.md).
 
 ---
 
@@ -1824,9 +1848,247 @@ delivered through the 80 B camera uniform. `sync_gpu_instance`
 would kill prev maintenance. Layout: `app.rs`, `sim/`
 (`systems/`, `grid.rs`, `modes.rs`, `runner.rs`, `bundles.rs`, `components.rs`,
 `resources.rs`), `render/`, `ui/`. Compiles for wasm32 (webgl backend; 28
-pointer-width const-asserts gated to 64-bit). See [DEMO-PLAN.md](DEMO-PLAN.md) +
+pointer-width const-asserts gated to 64-bit). See [DEMO-PLAN.md](archive/DEMO-PLAN.md) +
 [DEMO-DOGFOODING.md](DEMO-DOGFOODING.md) +
-[PHASE-20.1-RESULTS.md](PHASE-20.1-RESULTS.md).
+[PHASE-20.1-RESULTS.md](archive/PHASE-20.1-RESULTS.md).
+
+---
+
+# Std-lib / simulation crates
+
+These build on the public `boyko_ecs` API (components / resources / systems /
+schedule) — every durable store is an ECS column or a `Resource`-owned buffer
+(Principle 0). They are the standard-library layer a game composes on top of the
+kernel.
+
+## 22. boyko_math ✅
+
+**Crate:** [crates/boyko_math/](../crates/boyko_math/) — the single SIMD-aligned
+POD math vocabulary for the whole engine. Every type is `#[repr(C)]` plain-old-data
+(`Copy`, no `Drop`, no interior pointers), SIMD-aligned where it matters.
+
+**Modules:**
+- [vec.rs](../crates/boyko_math/src/vec.rs) — `Vec2` / `Vec3` / `Vec4`.
+- [quat.rs](../crates/boyko_math/src/quat.rs) — `Quat` (rotation).
+- [mat.rs](../crates/boyko_math/src/mat.rs) — `Mat3` (row-major) / `Mat4` (column-major).
+- [affine.rs](../crates/boyko_math/src/affine.rs) — `Affine3A`, the packed world-pose transform.
+- [ray.rs](../crates/boyko_math/src/ray.rs) — `Ray` + `ray_aabb` / `ray_sphere` intersection.
+
+**Bit-determinism (INVIOLABLE):** `Vec3` / `Quat` / `Mat3` are lifted *verbatim*
+(instruction-identical) from the physics foundation so migrated physics stays
+bit-for-bit unchanged — normalization is exact `sqrt().recip()` (NOT hardware
+`rsqrt`), and there is **no** `mul_add` / FMA / fast-math anywhere. New ops for the
+new types follow the same discipline (every multiply-then-add is separate
+statements so codegen does not contract into an FMA). It is a workspace leaf (no
+intra-workspace deps).
+
+## 23. boyko_scene ✅
+
+**Crate:** [crates/boyko_scene/](../crates/boyko_scene/) — the engine's spatial
+vocabulary and transform propagation (std-lib Phase S2). Sits one layer above the
+kernel and owns the spatial components every world-space subsystem builds on.
+
+**Key types + entry points:**
+- [transform.rs](../crates/boyko_scene/src/transform.rs) — `Transform` (LOCAL,
+  decomposed, designer-facing pose) and `GlobalTransform` (cached WORLD pose, a
+  packed `Affine3A`).
+- [propagation.rs](../crates/boyko_scene/src/propagation.rs) —
+  `propagate_transforms` composes each entity's `GlobalTransform` along the
+  `ChildOf` / `Children` chain, alloc-free and dirty-gated (`TransformPropagationScratch`).
+- [camera.rs](../crates/boyko_scene/src/camera.rs) / [camera_plugin.rs](../crates/boyko_scene/src/camera_plugin.rs) — camera components + the rig → on-screen `ViewUniform`.
+- [visibility_sync.rs](../crates/boyko_scene/src/visibility_sync.rs) / [render_caps.rs](../crates/boyko_scene/src/render_caps.rs) — `Visibility` / `RenderEnabled` + `MeshHandle` / `MaterialHandle` render capabilities.
+- [identity.rs](../crates/boyko_scene/src/identity.rs) — interned `Name` / `NameId`.
+
+Principle 0: no parallel pose store — `Transform`/`GlobalTransform` are ordinary
+ECS columns. Plugins: `TransformPlugin`, `CameraPlugin`.
+
+## 24. boyko_sdf_math ✅
+
+**Crate:** [crates/boyko_sdf_math/](../crates/boyko_sdf_math/) — the analytic SDF
+edit-list field math + std430 data model, extracted as a `#![no_std]` leaf with
+**zero dependencies** (only `core`). It is the SINGLE source of truth shared by two
+consumers that must NOT depend on each other: `boyko_rhi_vulkan` (the GPU golden
+mirror of the HLSL field) and `boyko_physics` (the CPU SDF-collision narrowphase),
+guaranteeing both fold bit-identical arithmetic.
+
+**Modules:**
+- [lib.rs](../crates/boyko_sdf_math/src/lib.rs) — `SdfEdit`, `sdf_edit_list` (folds
+  the ordered primitive/op list per point), `sdf_kind` / `sdf_op` constants.
+- [brick.rs](../crates/boyko_sdf_math/src/brick.rs) — the brick-atlas data model.
+- [mesh_sdf.rs](../crates/boyko_sdf_math/src/mesh_sdf.rs) — mesh-derived SDF queries.
+
+It DELEGATES its f32 field bodies to `boyko_shaderdsl::field::*::<f32>` (the Eval
+backend), so the CPU field and the HLSL emitter share one authored source.
+
+## 25. boyko_physics ✅
+
+**Crate:** [crates/boyko_physics/](../crates/boyko_physics/) — the in-house 3D
+physics: the universal contact currency (`Manifold`), a swappable zero-`dyn`-on-the-
+hot-path `RigidSolver` trait, and the real TGS-Soft solver. All bodies / colliders /
+contacts are ordinary `#[derive(Component)]` columns with a Phase-10-ready hot/cold
+split (no parallel data system — the SP4 race remediation put both solvers on kernel
+`ScratchColumn`).
+
+**Modules:**
+- [components.rs](../crates/boyko_physics/src/components.rs) — `RigidBody` / `Collider` / `Contact` columns; `bundles.rs` — `DynamicBody` / `Trigger`.
+- [manifold.rs](../crates/boyko_physics/src/manifold.rs) — `Manifold` / `ContactPoint` (the contact currency, `SDF_SENTINEL`).
+- [narrowphase/](../crates/boyko_physics/src/narrowphase/) — convex contact generators (`sphere_box`, `box_box` with a feature-id-stable OBB cache in `axis_cache.rs`).
+- [solver/](../crates/boyko_physics/src/solver/) — `SoftStepSolver` / `ColoredSoftStepSolver` / `NoopSolver` (`soft_step.rs`, `warm_start.rs`, `contact.rs`, `simd.rs`, `colored.rs`).
+- [soft/](../crates/boyko_physics/src/soft/) — soft-body (`component.rs`, `collide.rs`, `self_collision.rs`, `coupling.rs`, `colored.rs`).
+- [sdf_query.rs](../crates/boyko_physics/src/sdf_query.rs) — body-vs-SDF via `boyko_sdf_math` (zero readback, zero graphics deps).
+- [scene_sync.rs](../crates/boyko_physics/src/scene_sync.rs) — `boyko_scene` `Transform` ↔ body sync.
+
+**Entry point:** `add_physics_systems` (+ `_soft` / `_soft_colored` / `_sdf` /
+`_with_scene_sync` variants) adds the fixed-step pipeline to a `ScheduleBuilder`.
+Deterministic, Miri-clean; broadphase auto-selected (`select_broadphase`).
+
+## 26. boyko_input ✅
+
+**Crate:** [crates/boyko_input/](../crates/boyko_input/) — source-agnostic,
+rebindable action mapping. Turns raw keyboard/mouse events from ANY source (native
+raw-FFI Win32 window, egui demo, synthetic test stream) into typed rebindable
+**actions** consumed by ECS systems. The engine path depends on NO windowing library
+(winit/Win32/eframe live behind feature-gated edge adapters), so it compiles on every
+target including wasm.
+
+**Layers:**
+- [raw/](../crates/boyko_input/src/raw/) — canonical physical enums (`keycode.rs`), the
+  seam event (`event.rs::RawInputEvent`), the ring buffer + per-frame snapshot
+  (`queue.rs::RawInputQueue` / `PhysicalInput`), scancode tables (`scancode.rs`).
+- [action/](../crates/boyko_input/src/action/) — typed `Actionlike` (`actionlike.rs`),
+  the binding map (`map.rs::InputMap`), the SoA `ActionState` (`state.rs`), per-frame
+  aggregation (`process.rs`), rebind sessions (`rebind.rs`), clash resolution
+  (`clash.rs`), name interning (`names.rs`).
+- [win32.rs](../crates/boyko_input/src/win32.rs) — a PURE Win32 message → `RawInputEvent`
+  edge adapter (no FFI, no windowing dep).
+- [persist/](../crates/boyko_input/src/persist/) — keybind save/load.
+
+**Entry point:** `InputPlugin` + the `GameplaySet`.
+
+## 27. boyko_serialize ✅
+
+**Crate:** [crates/boyko_serialize/](../crates/boyko_serialize/) — custom binary
+world save/load. **Codegen, not reflection**: serialization is driven through the
+per-`ComponentId` fn-ptr table in `boyko_ecs`'s cold registry (`SERIALIZE`) plus a
+raw-blit fast path for `PlainOldBytes` columns. Never depends on any reflection crate.
+
+**Modules:**
+- [format.rs](../crates/boyko_serialize/src/format.rs) — the `#[repr(C)]` on-disk types (`SaveHeader`, `TypeTableEntry`, `ArchetypeBlock`, `ColumnRegion`, `VarRef`) with const-asserted layouts (the bytes ARE the wire contract).
+- [save.rs](../crates/boyko_serialize/src/save.rs) — `save_world` / `save_world_to_file`, the two-pass save (Pass 1 sizes + lays out offsets + grows once; Pass 2 blits POB columns and encodes `SerializeViaFn`).
+- [load.rs](../crates/boyko_serialize/src/load.rs) — `load_world` / `load_world_from_file`, the `CopyIntoWorld` + `Remap` loader (validate header, resolve the type table once, blit/decode per fresh archetype, remap saved→fresh entity ids incl. `ChildOf`).
+
+**Status:** Phases S1–S3 shipped (save/load, per-component `format_version`, loader
+fuzz: Err-or-valid-never-UB). S4 (mmap) / S5 (parallel) deferred. Spec:
+[SERIALIZATION-PLAN.md](SERIALIZATION-PLAN.md).
+
+---
+
+# Render / UI / shader crates
+
+The render stack: an FFI-free RHI trait surface, a raw hand-FFI Vulkan backend, a
+single ECS↔RHI bridge crate, the shader eDSL that single-sources the SDF shader math,
+the font baker, and the ECS-native UI. Per the HYBRID-perf principle, render choices
+are decided by measurement (mesh vs SDF vs hybrid), not representation-consistency.
+
+## 28. boyko_rhi ✅
+
+**Crate:** [crates/boyko_rhi/](../crates/boyko_rhi/) — the backend-agnostic Render
+Hardware Interface trait surface (wgpu-hal-shaped, **FFI-free**). An umbrella `RhiApi`
+trait with associated owned-resource types, separate operational traits (`RhiDevice`,
+`RhiQueue`, `RhiCommandEncoder`), thin enums/descriptors, and a generational handle
+registry (`ResourceRegistry`). Backends implement these over their own resources via
+**static dispatch** — every call monomorphizes to a direct non-virtual call, zero
+abstraction overhead. `RhiApi` is intentionally NOT object-safe; there is no `dyn`,
+`Box`, or `HashMap` anywhere.
+
+**Modules:** [api.rs](../crates/boyko_rhi/src/api.rs) (`RhiApi`), [device.rs](../crates/boyko_rhi/src/device.rs), [queue.rs](../crates/boyko_rhi/src/queue.rs), [encoder.rs](../crates/boyko_rhi/src/encoder.rs), [descriptor.rs](../crates/boyko_rhi/src/descriptor.rs), [enums.rs](../crates/boyko_rhi/src/enums.rs), [handle.rs](../crates/boyko_rhi/src/handle.rs), [error.rs](../crates/boyko_rhi/src/error.rs). Depends only on `boyko_utils`.
+
+## 29. boyko_rhi_vulkan ✅
+
+**Crate:** [crates/boyko_rhi_vulkan/](../crates/boyko_rhi_vulkan/) — the raw
+hand-FFI Vulkan backend (std-only, no third-party crates; the FFI mirrors
+`boyko_ecs`'s `vm.rs` style). Implements the `boyko_rhi` traits over real Vulkan.
+
+**Modules:**
+- [ffi.rs](../crates/boyko_rhi_vulkan/src/ffi.rs) / [device.rs](../crates/boyko_rhi_vulkan/src/device.rs) / [debug.rs](../crates/boyko_rhi_vulkan/src/debug.rs) — hand loader, `VkInstance` / `VkDevice`, validation messenger.
+- [memory.rs](../crates/boyko_rhi_vulkan/src/memory.rs) / [suballocator.rs](../crates/boyko_rhi_vulkan/src/suballocator.rs) — a `VkDeviceMemory` free-list sub-allocator with coalescing.
+- [rhi_impl.rs](../crates/boyko_rhi_vulkan/src/rhi_impl.rs) — the `RhiApi` impl (device / queue / `VulkanCommandEncoder` with `pipeline_barrier` lowering).
+- [compute.rs](../crates/boyko_rhi_vulkan/src/compute.rs) — compute dispatch + the `golden_*` CPU oracles.
+- [swapchain.rs](../crates/boyko_rhi_vulkan/src/swapchain.rs) / [window.rs](../crates/boyko_rhi_vulkan/src/window.rs) / [texture.rs](../crates/boyko_rhi_vulkan/src/texture.rs) — the on-screen path (surface / swapchain / present / image barriers).
+- [framegraph/](../crates/boyko_rhi_vulkan/src/framegraph/) — the Render Dependency Graph (declare → compile auto-barriers → execute), the single sync authority replacing the hand-barrier path.
+- [brick_atlas.rs](../crates/boyko_rhi_vulkan/src/brick_atlas.rs) / [mesh_sdf_texture.rs](../crates/boyko_rhi_vulkan/src/mesh_sdf_texture.rs) — SDF brick-atlas + mesh-SDF textures.
+
+Depends on `boyko_rhi` + `boyko_sdf_math` (the golden mirror folds the shared field).
+The `shaders/` directory holds the frozen `.hlsl` + committed `.spv` (the eDSL emits
+byte-identical SPIR-V; see §31).
+
+## 30. boyko_render ✅
+
+**Crate:** [crates/boyko_render/](../crates/boyko_render/) — the bridge between the
+graphics-pure ECS core and the RHI. The ONLY crate that may name both `boyko_ecs` and
+the RHI surface, so the orphan-rule impls (`RhiContext: NonSendResource`) and the
+graphics-aware types live here, never in the kernel. GPU access is compiler-enforced
+`!Send`.
+
+**Areas:**
+- GPU columns: [gpu_column.rs](../crates/boyko_render/src/gpu_column.rs) mints `DeviceLocal` (VRAM) component pools behind the RHI registry and drives the kernel A2 device-mint seam; [gpu_system.rs](../crates/boyko_render/src/gpu_system.rs) dispatches compute with zero per-frame readback.
+- 3D instancing / meshes: [gpu3d_instance.rs](../crates/boyko_render/src/gpu3d_instance.rs) / [gpu3d_system.rs](../crates/boyko_render/src/gpu3d_system.rs) / [mesh_draw.rs](../crates/boyko_render/src/mesh_draw.rs) / [mesh_registry.rs](../crates/boyko_render/src/mesh_registry.rs) / [instance_model.rs](../crates/boyko_render/src/instance_model.rs) / [material.rs](../crates/boyko_render/src/material.rs).
+- Lighting: [light.rs](../crates/boyko_render/src/light.rs) / [light_system.rs](../crates/boyko_render/src/light_system.rs) / [light_reconcile.rs](../crates/boyko_render/src/light_reconcile.rs) / [light_policy.rs](../crates/boyko_render/src/light_policy.rs) (directional / point / spot + clustered froxel cull).
+- Shadows: [csm_config.rs](../crates/boyko_render/src/csm_config.rs) / [csm_caster.rs](../crates/boyko_render/src/csm_caster.rs) / [shadow_atlas.rs](../crates/boyko_render/src/shadow_atlas.rs) (CSM cascades + punctual atlas) + `ssao_*`.
+- View: [view.rs](../crates/boyko_render/src/view.rs) consumes the engine-derived `ViewUniform` (from `boyko_scene`) as the single view source.
+
+Plugins: `Render3dPlugin` (+ `light_plugin`, `csm_plugin`, `shadow_plugin`,
+`ssao_plugin`). Depends on `boyko_ecs` + `boyko_rhi` + `boyko_rhi_vulkan` +
+`boyko_scene` + `boyko_math` + `boyko_fontbake` + `boyko_utils`.
+
+## 31. boyko_shaderdsl ✅
+
+**Crate:** [crates/boyko_shaderdsl/](../crates/boyko_shaderdsl/) — the in-house Rust
+shader eDSL (zero third-party deps; NO rust-gpu / naga / spirv-builder). Author the
+SDF shader math ONCE, generic over a `FieldScalar` backend, and instantiate it two
+ways: `S = f32` is the **Eval** backend (each op is one `core` f32 instruction,
+byte-identical to `boyko_sdf_math`) and `S = Emit` is the **HLSL SSA recorder** (each
+op pushes one SSA node; the printer walks the arena into HLSL textually equivalent to
+the frozen `.hlsli`). There is NO runtime AST and NO transpiler — the generic body is
+ordinary monomorphized Rust; the byte-identity gate re-DXCs the emitted HLSL and
+compares against the frozen `.spv`.
+
+**Modules:** [field.rs](../crates/boyko_shaderdsl/src/field.rs) (the authored field math), [marcher.rs](../crates/boyko_shaderdsl/src/marcher.rs) (sphere-trace control flow), [brick.rs](../crates/boyko_shaderdsl/src/brick.rs) / [cubic_hit.rs](../crates/boyko_shaderdsl/src/cubic_hit.rs) / [levels.rs](../crates/boyko_shaderdsl/src/levels.rs) (brick atlas), [normal.rs](../crates/boyko_shaderdsl/src/normal.rs) / [oct.rs](../crates/boyko_shaderdsl/src/oct.rs) / [pack.rs](../crates/boyko_shaderdsl/src/pack.rs) (G-buffer pack), [shadow.rs](../crates/boyko_shaderdsl/src/shadow.rs) / [ssao.rs](../crates/boyko_shaderdsl/src/ssao.rs), [scalar.rs](../crates/boyko_shaderdsl/src/scalar.rs) (`FieldScalar`), [emit.rs](../crates/boyko_shaderdsl/src/emit.rs) (`feature = "emit"`, the SSA arena + printer). This killed ~5 field-drift bugs by single-sourcing the shader math.
+
+## 32. boyko_fontbake ✅
+
+**Crate:** [crates/boyko_fontbake/](../crates/boyko_fontbake/) — the load-time MTSDF
+font baker for GUI text (P5b). A **build/setup tool**, NEVER on the render hot path:
+ingests a font, extracts glyph outlines/metrics, generates a multi-channel SDF atlas
+entirely in-house, packs the glyphs, and serializes to a `.bfont` the runtime loads
+with a thin POD reader.
+
+**Modules:**
+- [face.rs](../crates/boyko_fontbake/src/face.rs) — the in-house `FontFace` / `OutlineSink` traits + a `ttf-parser` adapter (`TtfFace`). The engine depends on the trait, not the backend.
+- [extract.rs](../crates/boyko_fontbake/src/extract.rs) — glyph outlines (line/quad/cubic, em-normalized) + metrics.
+- [msdf/](../crates/boyko_fontbake/src/msdf/) — the in-house MSDF generator (edge coloring, per-channel signed pseudo-distance, scanline sign-correction, error-correction).
+- [atlas.rs](../crates/boyko_fontbake/src/atlas.rs) — skyline atlas packing + `.bfont` serialization.
+
+Depends on `boyko_math` + `boyko_threadpool` only (off the hot path).
+
+## 33. boyko_ui ✅
+
+**Crate:** [crates/boyko_ui/](../crates/boyko_ui/) — ECS-native UI. Widgets ARE
+entities; layout inputs/outputs are components; the tree is `ChildOf`/`Children`
+(Phase 19); layout is systems over the ECS. No parallel data system — props/outputs
+are ECS columns, per-frame scratch is a `Resource`-owned buffer (reset every frame).
+
+**Areas:**
+- Layout: [layout.rs](../crates/boyko_ui/src/layout.rs) — `ui_layout_discovery` (a scheduled `FunctionSystem` where `Changed`/`Added` change detection lives, sets a `dirty` flag in `LayoutScratch`) + `ui_layout_apply` (an exclusive `&mut EcsMaster` system that re-lays-out root subtrees when dirty). [components.rs](../crates/boyko_ui/src/components.rs) / [units.rs](../crates/boyko_ui/src/units.rs) / [anchor.rs](../crates/boyko_ui/src/anchor.rs) — layout components.
+- Text: [text/](../crates/boyko_ui/src/text/) — the `.ui` markup format (`parser.rs`, `ast.rs`, `lower.rs`, `emit.rs`), MSDF glyph measurement/emission (`measure.rs`, `font.rs`, `dispatch.rs`), `UI_FORMAT_VERSION`.
+- Widgets: [widgets.rs](../crates/boyko_ui/src/widgets.rs) — the widget bundles/spawners.
+- Interaction: [interaction/](../crates/boyko_ui/src/interaction/) — hit-testing, `focus.rs`, dispatch, and the `Interaction` → input `action.rs` edge.
+- World-space HUD: [world/](../crates/boyko_ui/src/world/) — diegetic 3D UI (`pick.rs` cursor-ray pick, `project.rs`, `visibility.rs` CPU-proxy depth occlusion).
+- Binding + reload: [binding/](../crates/boyko_ui/src/binding/) (`Bindable` data-binding to ECS state) + [reload/](../crates/boyko_ui/src/reload/) (`.ui` markup hot-reload).
+
+Depends on `boyko_ecs` + `boyko_macros` + `boyko_utils` + `boyko_input` +
+`boyko_scene` + `boyko_math` + `boyko_fontbake` (no render dependency — it emits
+render-agnostic glyph-quad / instance descriptors). Plugin: `UiPlugin`; macro: `ui!`.
 
 ---
 

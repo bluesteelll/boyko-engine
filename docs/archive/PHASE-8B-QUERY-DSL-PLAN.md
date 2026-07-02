@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 8b — `Query<D, F>` typed DSL (architectural plan)
 
 **Status:** Round 2 (revised after architecture-critic Round 1 review). Implementation depends on Phase 7 (landed), Phase 8a (landed). Builds on the SystemParam trait scaffolding plus Phase 7's column-table fast read path.

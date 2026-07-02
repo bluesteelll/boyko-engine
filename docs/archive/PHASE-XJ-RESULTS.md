@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase X.J — Retire the Client-less Arena: Results
 
 Branch `ecs`, commit `1ee2c46`. No standalone plan doc — X.J executed the

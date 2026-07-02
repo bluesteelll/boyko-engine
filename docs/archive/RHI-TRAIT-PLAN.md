@@ -1,8 +1,10 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # `boyko_rhi` — Backend-Agnostic RHI Trait Crate (Render Foundation Phase 1)
 
 > **Status: REVISED (architect → critic gate complete; all CRITICAL/IMPORTANT findings resolved below).**
 > Branch `ecs`, 2026-06-16.
-> Conforms to [docs/RENDER-PHYSICS-GPU-PLAN.md](RENDER-PHYSICS-GPU-PLAN.md) §3 (crate topology), §4 (in-house
+> Conforms to [docs/RENDER-PHYSICS-GPU-PLAN.md](../RENDER-PHYSICS-GPU-PLAN.md) §3 (crate topology), §4 (in-house
 > RHI + Vulkan backend), §5.4 (`PoolBacking` + opaque `u64` handle), §5.5 (barrier lowering: conflict graph =
 > ordering only; explicit caller-side barriers), §7 Phase 1-3, §11.
 >

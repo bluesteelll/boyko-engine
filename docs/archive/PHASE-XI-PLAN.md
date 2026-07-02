@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Architecture: Phase X.I — ComponentPool Row-Capacity Growth
 
 Companion to `docs/PHASE-XI-RESEARCH.md` (cited R-§1..§8; background NOT repeated). Branch `ecs`, tree `fb7cf1e`.

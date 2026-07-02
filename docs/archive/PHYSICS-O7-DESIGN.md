@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Architecture: Physics O7 — SIMD-Batched Colored Solve (lane = manifold-group, 8-wide AVX2)
 
 ## Goal

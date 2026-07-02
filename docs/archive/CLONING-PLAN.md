@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Entity cloning / EntityCloner (Feature 3 of 3) — resolved plan
 
 Branch `ecs`, 2026-06-16. A per-entity clone primitive: materialize a new entity (or

@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 All verification reads done — `get_param(state: &'s mut Self::State, ...)` confirmed (query.rs:451-455), `Bundle::for_each_component_bytes` trait method confirmed (bundle/bundle.rs:274), hand-written `Bundle` impls confirmed (self_bundle.rs:85,155; spawn_batch_command.rs:210 stub; Phase-19 hierarchy newtypes), spawn_batch closure at spawn_batch_command.rs:355.
 
 ---

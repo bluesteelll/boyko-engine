@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 12 — Events as SystemParam (`EventReader<E>` / `EventWriter<E>`)
 
 > **Status**: Round 2 (post-critic, addresses C1+C2+C3+W1+W2+W3+O1+O2+all open questions).

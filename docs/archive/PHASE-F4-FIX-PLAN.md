@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase F4 — `UnsafeCell`-rooted archetype slab (Tree-Borrows soundness fix)
 
 Architecture plan for bug A-2/F4. Soundness-only (no behavior change). Acceptance:

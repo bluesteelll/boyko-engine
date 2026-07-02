@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Architecture: Phase 20.1 — Interpolated GPU Mirror (fixed-step sim, display-rate smoothness)
 
 Companion to `docs/PHASE-20.1-RESEARCH.md`. Branch `ecs`, HEAD `45ae291`. Format reference: `docs/PHASE-20-PLAN.md`.

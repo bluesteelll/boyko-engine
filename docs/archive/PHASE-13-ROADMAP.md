@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 13+ Roadmap
 
 After closing Phase 12.5 + Phase 12.6, the boyko-engine ECS is in a state

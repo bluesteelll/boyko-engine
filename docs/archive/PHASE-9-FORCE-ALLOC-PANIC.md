@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 9 — `force_alloc_panic` Release-Mode Allocation Discipline
 
 **Branch:** `ecs`

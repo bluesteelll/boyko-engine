@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 <!-- Enable-Bit (sparse, non-fragmenting) tag backend - 'EnableTag'. APPROVED by architecture-critic round 7 (0 CRITICAL / 0 MAJOR) after 7 rounds. The round cap was removed mid-design (user directive); a 3-round cap would have shipped 3 unresolved CRITICALs. See docs/PERF-GAP-BEAT-BEVY.md context. -->
 
 The critique confirms two real bugs in my round-6 plan. Both CRITICAL claims are verified against source:

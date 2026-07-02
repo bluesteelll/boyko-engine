@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # boyko_demo — Architecture & Implementation Plan
 
 > Status: design (implementation-ready). Target branch: `ecs`.

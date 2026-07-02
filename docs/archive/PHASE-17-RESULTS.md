@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 17 — States / State Transitions — Results
 
 Branch `ecs`. Bevy-style application/game states layered on the existing single

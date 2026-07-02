@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 16.1 — Tick-Aware Run Conditions (COMPLETION) — Architect Plan (R2-FINAL, LANDED)
 
 > Status: **LANDED** as `579c738` — see [PHASE-16.1-RESULTS.md](PHASE-16.1-RESULTS.md)

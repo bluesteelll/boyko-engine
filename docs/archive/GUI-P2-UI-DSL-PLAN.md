@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 Both critical claims confirmed against the actual code:
 
 1. **Baseline uses `ec.set_parent(p)`** inside the child's own spawn chain (common/mod.rs:127), NOT `add_child` post-children.

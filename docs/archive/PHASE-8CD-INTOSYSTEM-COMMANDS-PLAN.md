@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Architecture: Phase 8c + 8d — `IntoSystem`/`FunctionSystem` + `Commands` deferred mutation buffer
 
 ## Changes from Round 3 (Round 4 editorial cleanup pass)

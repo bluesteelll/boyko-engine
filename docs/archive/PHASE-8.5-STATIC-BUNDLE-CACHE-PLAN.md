@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 8.5 — Static Bundle Cache — Architectural Plan (Round 3)
 
 ## Round 3 changelog (vs Round 2)

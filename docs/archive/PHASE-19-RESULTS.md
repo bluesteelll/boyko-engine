@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 19 — Hierarchies / Parent-Child (CORE) — Results
 
 Branch `ecs`. Status: **LANDED + verified.** Full pipeline: research → architect (R1+R2) → critic (R1)

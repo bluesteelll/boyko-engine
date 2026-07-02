@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Architecture: Phase 20 — Fixed Timestep + Multi-Schedule
 
 Companion to `docs/PHASE-20-RESEARCH.md` (cited R-§…; background NOT repeated). Branch `ecs`. Format reference: `docs/PHASE-XI-PLAN.md`.

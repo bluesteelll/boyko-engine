@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 All critical claims are now verified:
 - `#[require(...)]` is already shipped (macro parses it, full test suite exists) — S8 confirmed mis-scoped.
 - Lifecycle hooks exist (on_add/on_insert at structural sites) — usable for the dynamic-body-root guard.

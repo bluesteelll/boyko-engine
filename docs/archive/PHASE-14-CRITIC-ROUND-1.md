@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 14a — Architecture Critic, Round 1
 
 **Verdict: NEEDS REWORK.** One critical soundness gap in Q3 (C1), one

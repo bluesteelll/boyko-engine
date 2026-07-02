@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase X.D — Results: EntityMaster slot reduction (`active_ids` + `sparse_to_active` elimination)
 
 Branch `ecs`. PERF + simplification refactor of `EntityMaster`. Full pipeline:

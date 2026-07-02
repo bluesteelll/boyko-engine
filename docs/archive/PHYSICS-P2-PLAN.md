@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Physics P2 — In-house Soft-Step 3D rigid contact RESOLVE + CPU SDF-collision queries
 
 Status: **design APPROVED** (architect → architecture-critic → revision delta; all 3 CRITICAL + 5 MAJOR

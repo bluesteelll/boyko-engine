@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Phase 16 Plan — Run Conditions (`.run_if(predicate)`)
 
 Lead architect deliverable. Save to `docs/PHASE-16-PLAN.md`. All claims grounded in the `ecs`-branch code (file:line). No implementation code — pseudo-code/signatures only.

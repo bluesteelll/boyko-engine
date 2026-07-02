@@ -1,3 +1,5 @@
+> STATUS: COMPLETED — archived 2026-07; implemented on branch `ecs`. See git history + the phase/feature RESULTS docs for the authoritative record.
+
 # Architecture: Generic Relations API (`Relationship` / `RelationshipTarget`)
 
 Status: PLAN (pre-implementation). Author: architect. Branch: `ecs`.
