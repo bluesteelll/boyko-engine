@@ -946,6 +946,10 @@ pub const VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL: i32 = 1_000_241_000;
 
 /// `VkPipelineStageFlagBits` used by the present barriers / submit wait stage.
 pub const VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT: VkFlags = 0x0000_0001;
+/// `VK_PIPELINE_STAGE_VERTEX_SHADER_BIT` (Pillar B B3: the interp draw SSBO is READ by the
+/// raster + shadow VERTEX shaders — the destination stage of the COMPUTE→VERTEX RAW barrier
+/// the framegraph derives after the interp compute writes the interpolated model columns).
+pub const VK_PIPELINE_STAGE_VERTEX_SHADER_BIT: VkFlags = 0x0000_0008;
 /// `VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT` (Phase-6 S0 rung 5: the COLOR → SHADER_READ
 /// barrier's destination stage — the sampling draw's fragment stage waits on it).
 pub const VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT: VkFlags = 0x0000_0080;

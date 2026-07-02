@@ -6,7 +6,8 @@
 use core::ptr;
 
 use crate::compute::{
-    CoarseMode, DEFAULT_MARCHER_OMEGA, FineMarcherPush, LOCAL_SIZE_X, tile_grid_extent,
+    CoarseMode, DEFAULT_MARCHER_OMEGA, FineMarcherPush, INTERP_INSTANCES_PUSH_BYTES, LOCAL_SIZE_X,
+    tile_grid_extent,
 };
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
@@ -133,6 +134,83 @@ impl Renderer<'_> {
             .gbuffer_pass_plan
             .as_ref()
             .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
+
+        // === Pillar B B3: the per-instance TRS INTERPOLATION compute PRE-PASS. Recorded ONLY
+        // when the scene wires the activation (`scene.interp.is_some()`); otherwise skipped
+        // entirely — NO bind, NO dispatch, NO barrier — so the command stream is BYTE-IDENTICAL
+        // to the interp-OFF (dump) path. Runs FIRST (before the raster pass): one invocation per
+        // instance reads its prev/curr TRS pair (bound at the interp set @0), interpolates at the
+        // frame-wide `alpha`, and STORES the interpolated 48-byte model column into the draw SSBO
+        // (bound at @1). The raster + shadow VS then read that draw SSBO as `instances[...]`
+        // (the caller set `scene.instance_bind_group` to the SAME draw-SSBO slot), so the drawn
+        // geometry tracks the interpolated pose. The COMPUTE→VERTEX RAW barrier ordering the
+        // interp WRITE before the raster VS READ is derived by the graph at the raster pass (the
+        // draw reader), emitted by the `record_graph_pass(plan.raster)` just below — after this
+        // dispatch's write. A `count == 0` frame records NO dispatch (an empty scene skips it). ===
+        if let Some(interp) = &scene.interp
+            && interp.instance_count > 0
+        {
+            let interp_pass = plan
+                .interp
+                .expect("invariant: scene.interp.is_some() ⇒ interp pass declared");
+            // The interp pass's INPUT barriers are DRIVEN by the graph's "interp" pass,
+            // recorded HERE before the dispatch. On the current declaration it derives NONE
+            // (the pair read is a first touch on a frame-private slot), so this emits zero
+            // `vkCmdPipelineBarrier` calls — but it keeps the per-pass record symmetric with
+            // every other pass and future-proofs an added interp input hazard.
+            // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+            // input barriers (currently none) for the "interp" pass into `cmd`.
+            self.record_graph_pass(interp_pass, cmd, targets, scene, fi);
+            let groups = interp.instance_count.div_ceil(LOCAL_SIZE_X);
+            let mut push = [0u8; INTERP_INSTANCES_PUSH_BYTES as usize];
+            push[0..4].copy_from_slice(&interp.instance_count.to_le_bytes());
+            push[4..8].copy_from_slice(&interp.alpha.to_le_bytes());
+            // SAFETY: recording is open; the interp pipeline + its layout (declaring the
+            // 2-binding interp set at set 0 + the 8-byte COMPUTE push range) are live on this
+            // device (caller contract); `interp.interp_set` binds this frame slot's pair SSBO
+            // @0 (the host-written prev/curr pairs) + the draw SSBO @1 (the compute write
+            // target, the SAME buffer the raster VS reads); `groups` covers `instance_count`
+            // at the 64-wide group; `&interp.interp_set.descriptor_set` is a single-element
+            // local alive for the call (first_set 0, count 1, zero dynamic offsets); the push
+            // is exactly `INTERP_INSTANCES_PUSH_BYTES` (8) at offset 0 and `push` outlives
+            // the call. The interp pass reads a frame-private pair slot (a first touch — the
+            // graph derives NO input barrier), so no barrier is recorded before this dispatch.
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    interp.pipeline.pipeline,
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    interp.pipeline.layout,
+                    0,
+                    1,
+                    &interp.interp_set.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    interp.pipeline.layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    INTERP_INSTANCES_PUSH_BYTES,
+                    push.as_ptr().cast(),
+                );
+                (self.fns.cmd_dispatch)(cmd, groups, 1, 1);
+            }
+            // The interp pass's draw-SSBO WRITES (COMPUTE/SHADER_WRITE) are ordered before
+            // the raster VS's READS (VERTEX/SHADER_READ) by the graph: it derives the
+            // COMPUTE→VERTEX RAW `interp_draw` barrier at the raster pass (the draw reader),
+            // so `record_graph_pass(plan.raster)` below emits it BEFORE the raster begins —
+            // still AFTER this dispatch's write. NOT recorded here.
+        }
+
+        // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+        // barriers for the "raster" pass into `cmd` against the live G-buffer targets. When the
+        // interp pass ran, this also emits the COMPUTE→VERTEX RAW barrier on the interp draw SSBO.
         self.record_graph_pass(plan.raster, cmd, targets, scene, fi);
 
         // (2) Dynamic rendering at the marcher's extent: 3 MRT color attachments

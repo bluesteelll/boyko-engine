@@ -64,7 +64,7 @@ use boyko_rhi::{
     PrimitiveTopology, RhiDevice, SamplerDesc, ShaderStage, TextureDesc, TextureDimension,
     VertexAttribute, VertexBufferLayout, VertexFormat,
 };
-use boyko_rhi_vulkan::compute::{B5_CAMERA_UBO_BYTES_M4, B5_CAMERA_UBO_BYTES_MESH_SDF, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, CompositePushConstants, csm_depth_fs_spirv, csm_depth_vs_spirv, punctual_depth_fs_spirv, punctual_depth_vs_spirv, EDITLIST_BUFFER_WORDS, GOLDEN_LIGHT_HEADER_BASE_WORDS, GOLDEN_LIGHT_KIND_DIRECTIONAL, GOLDEN_LIGHT_KIND_POINT, GOLDEN_LIGHT_KIND_SPOT, LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET, MESH_SDF_PARAMS_OFFSET, MeshSdfParams, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_TRACE_T_MAX, SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, CompositeCamera, encode_edit_list, deferred_pbr_spirv, composite_pixel_ray, DEFAULT_MARCHER_OMEGA, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, DEFAULT_LIGHT_DIR, mesh_depth_for_z, sdf_gbuffer_composite_spirv, sdf_op, sdf_ssao_spirv_variant, sdf_tile_cull_spirv, tile_grid_extent, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM, SSAO_QUALITY_HIGH};
+use boyko_rhi_vulkan::compute::{B5_CAMERA_UBO_BYTES_M4, B5_CAMERA_UBO_BYTES_MESH_SDF, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, CompositePushConstants, csm_depth_fs_spirv, csm_depth_vs_spirv, punctual_depth_fs_spirv, punctual_depth_vs_spirv, EDITLIST_BUFFER_WORDS, GOLDEN_LIGHT_HEADER_BASE_WORDS, GOLDEN_LIGHT_KIND_DIRECTIONAL, GOLDEN_LIGHT_KIND_POINT, GOLDEN_LIGHT_KIND_SPOT, INTERP_INSTANCES_PUSH_BYTES, interp_instances_spirv, LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET, MESH_SDF_PARAMS_OFFSET, MeshSdfParams, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_TRACE_T_MAX, SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, CompositeCamera, encode_edit_list, deferred_pbr_spirv, composite_pixel_ray, DEFAULT_MARCHER_OMEGA, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, DEFAULT_LIGHT_DIR, mesh_depth_for_z, sdf_gbuffer_composite_spirv, sdf_op, sdf_ssao_spirv_variant, sdf_tile_cull_spirv, tile_grid_extent, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM, SSAO_QUALITY_HIGH};
 use boyko_rhi_vulkan::goldens::{GoldenLight, GoldenLightHeader, golden_composite_pixel_ex, golden_deferred_resolve, golden_marcher_attributes, GoldenMaterial};
 use boyko_rhi_vulkan::mesh_sdf_texture::MeshSdfTexture;
 use boyko_sdf_math::mesh_sdf::{BakeMesh, MeshSdfField};
@@ -72,7 +72,7 @@ use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::memory::BoundBuffer;
 use boyko_rhi_vulkan::rhi_impl::{
-    VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline, VulkanSampler,
+    ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline, VulkanSampler,
 };
 use boyko_rhi_vulkan::texture::{MAX_TEXTURE_LAYERS, VulkanTexture};
 use boyko_rhi_vulkan::ffi::{
@@ -81,7 +81,7 @@ use boyko_rhi_vulkan::ffi::{
 use boyko_rhi_vulkan::swapchain::{
     BrickActivation, CsmDepthActivation, FRAMES_IN_FLIGHT, GBUFFER_IDENTITY_INSTANCE,
     GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferFrame, GBufferMeshDraw, GBufferScene,
-    PunctualDepthActivation, Renderer, SsaoActivation, Surface, Swapchain,
+    InterpActivation, PunctualDepthActivation, Renderer, SsaoActivation, Surface, Swapchain,
 };
 use boyko_rhi_vulkan::window::{CapturedMsg, Window};
 
@@ -885,6 +885,261 @@ fn instance_affine(yaw: f32, scale: f32, t: [f32; 3]) -> [f32; 12] {
         0.0, scale, 0.0, t[1],
         -s * scale, 0.0, c * scale, t[2],
     ]
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Pillar B B3 — the interpolation compute PRE-PASS resources + inline TRS.
+//
+// `boyko_rhi_vulkan` cannot depend on `boyko_render` (which owns `GpuTransform3D` /
+// `pack_gpu_transforms` / `gather_mesh_draw_pairs`) — `boyko_render` depends UPWARD on
+// this crate, so a dev-dep would cycle. The B1 host mirror is therefore reproduced INLINE
+// here (a few lines: the 96-byte `TransformPair` pack + a trivial Euler falling-box
+// integrator), driving the REAL production interp GPU pass (`interp_instances.comp` +
+// `InterpActivation` + the framegraph COMPUTE→VERTEX barrier). The eDSL byte-identity of
+// the shader itself is proven by `tests/interp_edsl_sync.rs`; this file proves the wired
+// GPU pass moves the drawn geometry per the interpolated pose.
+// ════════════════════════════════════════════════════════════════════════════
+
+/// The 96-byte `TransformPair` the interp pre-pass reads (byte-mirror of the B2 shader's
+/// `TransformPair` / `boyko_render::GpuTransform3D`): `prev` TRS at byte 0, `curr` at 48.
+/// Each TRS is `pos.xyzw`(pad w) @0, `rot.xyzw` quaternion @16, `scale.xyzw`(pad w) @32.
+#[derive(Clone, Copy)]
+struct InterpPair {
+    prev: [f32; 12],
+    curr: [f32; 12],
+}
+
+impl InterpPair {
+    /// Serializes to the 96 packed bytes the pair SSBO stride declares (prev@0, curr@48).
+    fn to_bytes(self) -> [u8; 96] {
+        let mut out = [0u8; 96];
+        write_trs(&mut out[0..48], &self.prev);
+        write_trs(&mut out[48..96], &self.curr);
+        out
+    }
+}
+
+/// Decomposes a 3×4 ROW-MAJOR affine (an `InstanceModelCol`: `rows[i] = [Rx|Ry|Rz|Tx]`) into the
+/// interp shader's `Trs` (`pos.xyzw` + unit-quaternion `rot.xyzw` + `scale.xyzw`), so the viewer's
+/// hand-built room affines can be routed through the pair path (a still instance seeds `prev ==
+/// curr` → the B2 keystone renders it bitwise-stable, reproducing its placement). The scale is the
+/// per-axis COLUMN norm of the linear 3×3; the rotation is the quaternion of the normalized (pure-
+/// rotation) 3×3; the translation is the last column. Handles the Y-rotation + (non)uniform scale
+/// the room's `instance_affine{,_nonuniform}` produce (any pure T·R·S with a right-handed R).
+fn trs_from_affine(a: &[f32; 12]) -> [f32; 12] {
+    // Column vectors of the linear 3×3 (row-major: a[row*4 + col]).
+    let col = |c: usize| [a[c], a[4 + c], a[8 + c]];
+    let (c0, c1, c2) = (col(0), col(1), col(2));
+    let norm = |v: [f32; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    let (sx, sy, sz) = (norm(c0), norm(c1), norm(c2));
+    // Normalized rotation columns (guard a zero-scale axis with the identity basis vector).
+    let unit = |v: [f32; 3], s: f32, fallback: [f32; 3]| {
+        if s > 1e-6 { [v[0] / s, v[1] / s, v[2] / s] } else { fallback }
+    };
+    let r0 = unit(c0, sx, [1.0, 0.0, 0.0]);
+    let r1 = unit(c1, sy, [0.0, 1.0, 0.0]);
+    let r2 = unit(c2, sz, [0.0, 0.0, 1.0]);
+    // Rotation-matrix → quaternion (Shepperd's method, the numerically stable branch pick). The
+    // matrix columns r0/r1/r2 form R (m[row][col] = r{col}[row]).
+    let m = [
+        [r0[0], r1[0], r2[0]],
+        [r0[1], r1[1], r2[1]],
+        [r0[2], r1[2], r2[2]],
+    ];
+    let trace = m[0][0] + m[1][1] + m[2][2];
+    let (qx, qy, qz, qw) = if trace > 0.0 {
+        let s = (trace + 1.0).sqrt() * 2.0;
+        (
+            (m[2][1] - m[1][2]) / s,
+            (m[0][2] - m[2][0]) / s,
+            (m[1][0] - m[0][1]) / s,
+            0.25 * s,
+        )
+    } else if m[0][0] > m[1][1] && m[0][0] > m[2][2] {
+        let s = (1.0 + m[0][0] - m[1][1] - m[2][2]).sqrt() * 2.0;
+        (
+            0.25 * s,
+            (m[0][1] + m[1][0]) / s,
+            (m[0][2] + m[2][0]) / s,
+            (m[2][1] - m[1][2]) / s,
+        )
+    } else if m[1][1] > m[2][2] {
+        let s = (1.0 + m[1][1] - m[0][0] - m[2][2]).sqrt() * 2.0;
+        (
+            (m[0][1] + m[1][0]) / s,
+            0.25 * s,
+            (m[1][2] + m[2][1]) / s,
+            (m[0][2] - m[2][0]) / s,
+        )
+    } else {
+        let s = (1.0 + m[2][2] - m[0][0] - m[1][1]).sqrt() * 2.0;
+        (
+            (m[0][2] + m[2][0]) / s,
+            (m[1][2] + m[2][1]) / s,
+            0.25 * s,
+            (m[1][0] - m[0][1]) / s,
+        )
+    };
+    [a[3], a[7], a[11], 0.0, qx, qy, qz, qw, sx, sy, sz, 0.0]
+}
+
+/// Writes one 48-byte `Trs` (12 `f32`) into `dst`.
+fn write_trs(dst: &mut [u8], trs: &[f32; 12]) {
+    for (i, f) in trs.iter().enumerate() {
+        dst[i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+    }
+}
+
+/// The built Pillar-B B3 interpolation pre-pass GPU resources: the compute pipeline + its
+/// 2-binding set layout, and the FRAMES_IN_FLIGHT-ringed pair / draw SSBOs (frame-private,
+/// like the G-buffer ring) with their per-slot bind groups. The host writes this frame's
+/// `pairs[fi]`, the compute reads it + writes `draw[fi]`, and the raster VS reads `draw[fi]`
+/// via `draw_bg[fi]` (bound as `GBufferScene::instance_bind_group`). The caller OWNS all of
+/// it and tears it down via [`Self::destroy`].
+struct InterpGpu {
+    pipeline: ComputePipeline,
+    layout: VulkanBindGroupLayout,
+    /// FIF ring of pair SSBOs (host-written, COMPUTE-read); capacity = `count` × 96 B.
+    pairs: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// FIF ring of draw SSBOs (COMPUTE-written, VERTEX-read); capacity = `count` × 48 B.
+    draw: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// FIF ring of interp bind groups { pairs[fi] @0, draw[fi] @1 } on [`Self::layout`].
+    interp_bg: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// FIF ring of draw-read bind groups { draw[fi] @0 } on the gbuffer set-0 instance
+    /// layout — the SAME shape the raster VS reads as `instances[...]`.
+    draw_bg: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// The interpolated instance count (the dispatch bound + the push `count`).
+    count: u32,
+}
+
+impl InterpGpu {
+    /// Builds the interp pipeline + the FIF-ringed pair/draw SSBOs + their bind groups for a
+    /// draw list of exactly `count` instances. `instance_layout` is the gbuffer set-0 layout
+    /// (1 STORAGE buffer @0, VERTEX) the raster VS reads — the draw-read bind groups bind the
+    /// draw SSBO on it, so passing `draw_bg[fi]` as `scene.instance_bind_group` needs no new
+    /// pipeline. `count` must be ≥ 1.
+    fn create(device: &VulkanContext, instance_layout: &VulkanBindGroupLayout, count: u32) -> Self {
+        assert!(count >= 1, "the interp pass needs at least one instance");
+        let cs = RhiDevice::create_shader_module(device, interp_instances_spirv())
+            .expect("B3 interp compute shader module");
+        let layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("B3 interp bind-group layout");
+        let pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &cs,
+                entry: c"main",
+                push_constant_bytes: INTERP_INSTANCES_PUSH_BYTES,
+                bind_group_layout: Some(&layout),
+            },
+        )
+        .expect("B3 interp compute pipeline");
+
+        let pair_bytes = count as u64 * 96;
+        let draw_bytes = count as u64 * GBUFFER_INSTANCE_MODEL_BYTES as u64;
+        let make_buf = |size: u64, what: &str| {
+            RhiDevice::create_buffer(
+                device,
+                &BufferDesc { size, usage: BufferUsage::STORAGE, location: MemoryLocation::HostVisibleCoherent },
+            )
+            .unwrap_or_else(|e| panic!("B3 interp {what} SSBO: {e:?}"))
+        };
+        // Each ring slot is a distinct frame-private SSBO (host-coherent so the pairs write +
+        // the readback of the draw output need no explicit flush).
+        let pairs: [BoundBuffer; FRAMES_IN_FLIGHT] =
+            core::array::from_fn(|_| make_buf(pair_bytes, "pairs"));
+        let draw: [BoundBuffer; FRAMES_IN_FLIGHT] =
+            core::array::from_fn(|_| make_buf(draw_bytes, "draw"));
+        let interp_bg: [VulkanBindGroup; FRAMES_IN_FLIGHT] = core::array::from_fn(|fi| {
+            RhiDevice::create_bind_group(
+                device,
+                &BindGroupDesc {
+                    layout: &layout,
+                    entries: &[
+                        BindGroupEntry::StorageBuffer { buffer: &pairs[fi] },
+                        BindGroupEntry::StorageBuffer { buffer: &draw[fi] },
+                    ],
+                },
+            )
+            .expect("B3 interp bind group")
+        });
+        let draw_bg: [VulkanBindGroup; FRAMES_IN_FLIGHT] = core::array::from_fn(|fi| {
+            RhiDevice::create_bind_group(
+                device,
+                &BindGroupDesc {
+                    layout: instance_layout,
+                    entries: &[BindGroupEntry::StorageBuffer { buffer: &draw[fi] }],
+                },
+            )
+            .expect("B3 interp draw-read bind group")
+        });
+        Self { pipeline, layout, pairs, draw, interp_bg, draw_bg, count }
+    }
+
+    /// Writes the `count` pairs into this frame slot's pair SSBO (host-coherent). Called each
+    /// frame the pose changed (a substep ran or the count changed); the alpha slides every
+    /// frame via the push constant regardless.
+    fn write_pairs(&self, device: &VulkanContext, fi: usize, pairs: &[InterpPair]) {
+        debug_assert_eq!(pairs.len(), self.count as usize, "pair count must equal the built count");
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &self.pairs[fi])
+            .expect("host-visible interp pair SSBO is mapped");
+        let mut bytes = vec![0u8; pairs.len() * 96];
+        for (i, p) in pairs.iter().enumerate() {
+            bytes[i * 96..(i + 1) * 96].copy_from_slice(&p.to_bytes());
+        }
+        // SAFETY: `mapped` points to `count * 96` mapped host-coherent bytes (the buffer this
+        // slot was sized to); `bytes` is exactly that length and copied in full, in-bounds.
+        // The per-slot fence (waited before this frame binds slot `fi`) freed the prior use.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len()) };
+    }
+
+    /// The [`InterpActivation`] for this frame slot: the interp set (pairs@0 + draw@1 for slot
+    /// `fi`) + the instance count + this frame's overstep `alpha`.
+    fn activation(&self, fi: usize, alpha: f32) -> InterpActivation<'_> {
+        InterpActivation {
+            pipeline: &self.pipeline,
+            interp_set: &self.interp_bg[fi],
+            pair_buffer: &self.pairs[fi],
+            draw_buffer: &self.draw[fi],
+            instance_count: self.count,
+            alpha,
+        }
+    }
+
+    /// Tears down every owned resource (bind groups → buffers → pipeline → layout), reverse
+    /// dependency order. Call after the renderer is dropped (device idle).
+    ///
+    /// # Safety
+    ///
+    /// No submission may reference these resources (the renderer's `Drop` waited the device
+    /// idle); each is destroyed exactly once.
+    unsafe fn destroy(self, device: &VulkanContext) {
+        // SAFETY: the caller guarantees device-idle + single teardown (this fn's contract).
+        unsafe {
+            for bg in self.draw_bg {
+                RhiDevice::destroy_bind_group(device, bg);
+            }
+            for bg in self.interp_bg {
+                RhiDevice::destroy_bind_group(device, bg);
+            }
+            for b in self.draw {
+                RhiDevice::destroy_buffer(device, b);
+            }
+            for b in self.pairs {
+                RhiDevice::destroy_buffer(device, b);
+            }
+            RhiDevice::destroy_compute_pipeline(device, self.pipeline);
+            RhiDevice::destroy_bind_group_layout(device, self.layout);
+        }
+    }
 }
 
 /// Mesh foundation M4: a 3x4 row-major affine with a NON-UNIFORM per-axis scale `(sx, sy, sz)`
@@ -2015,6 +2270,9 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         shadow_atlas_sampler: &csm.atlas_sampler,
         shadow_atlas_ubo: &csm.atlas_ubo,
         atlas_punctual: None,
+        // Pillar B B3: the interpolation pre-pass is OFF for every dump/offscreen golden — the
+        // raster VS reads the hand-affine SSBO directly (byte-identical command stream + pixels).
+        interp: None,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -2911,6 +3169,8 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         shadow_atlas_sampler: &csm.atlas_sampler,
         shadow_atlas_ubo: &csm.atlas_ubo,
         atlas_punctual: None,
+        // Pillar B B3: the interpolation pre-pass is OFF for every dump/offscreen golden.
+        interp: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -5158,9 +5418,6 @@ const VIEWER_LOOK_SENS: f32 = 0.0035;
 /// The pitch clamp (radians) — just shy of ±π/2 so the FPS basis never degenerates (looking
 /// straight up/down makes `cross(forward, world_up)` undefined).
 const VIEWER_PITCH_LIMIT: f32 = 1.5533;
-/// The viewer's fixed per-frame timestep (the loop presents uncapped; movement integrates at a
-/// fixed 1/60 s so fly speed is frame-rate independent enough for inspection).
-const VIEWER_DT: f32 = 1.0 / 60.0;
 
 #[inline]
 fn vadd(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -5328,16 +5585,27 @@ fn viewer_config() -> ShowcaseConfig {
 /// reads a DIFFERENT slot — the lock-free write-after-read fix (no fence stall). The directional CSM
 /// is WORLD-FIXED ([`viewer_csm_fit`], seeded once at build), so the sun-shadow stays glued to the
 /// world as the camera flies (a per-frame camera-fit cascade swims for a free-fly camera).
+/// `interp_gpu` (Pillar B B3) turns the interpolation pre-pass ON: the loop runs a REAL-dt fixed
+/// accumulator (mirroring the engine's `Time::advance_with` + `fixed_advance`, reproduced inline
+/// since `boyko_rhi_vulkan` cannot depend on `boyko_ecs`/`boyko_physics`), stepping a simple
+/// gravity-driven bouncing box (instance 0) at a fixed 64 Hz substep, and feeds the fixed-loop
+/// overstep fraction as the interp `alpha` — so the box renders SMOOTHLY between substeps. `base_pairs`
+/// is the room's decomposed still-pose pair list (index 0 = the bouncing box). `None` interp keeps
+/// the legacy hand-affine draw (no interpolation).
 #[allow(clippy::too_many_arguments)]
-fn run_interactive_viewer<'ctx>(
+fn run_interactive_viewer<'ctx, 's>(
     ctx: &VulkanContext,
     surface: &Surface<'_>,
     swapchain: &mut Swapchain<'ctx>,
     renderer: &mut Renderer<'ctx>,
     window: &mut Window,
-    scene: &mut GBufferScene<'_>,
+    scene: &mut GBufferScene<'s>,
     frame: &mut GBufferFrame,
+    interp_gpu: Option<&'s InterpGpu>,
+    base_pairs: &[InterpPair],
 ) {
+    use std::time::Instant;
+
     use boyko_input::{
         translate_win32, translate_win32_raw_mouse, KeyCode, PhysicalInput, RawInputQueue,
     };
@@ -5352,10 +5620,44 @@ fn run_interactive_viewer<'ctx>(
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
     let clear = [0.02_f32, 0.02, 0.03, 1.0];
 
-    eprintln!("[viewer] WASD+Space/Ctrl fly, mouse look, Esc quit.");
+    // Pillar B B3 fixed-loop state (inline — no boyko_ecs dep). The bouncing box (instance 0) uses a
+    // fixed 64 Hz substep + a real-dt accumulator clamped to 250 ms (the engine's `Time::advance_with`
+    // spiral clamp, reproduced here so a hitch cannot spiral). Each substep integrates gravity + a
+    // floor bounce and shuffles the interp pair (`prev = old curr`, `curr = new pose`); the alpha is
+    // `overstep / dt` (the overstep fraction). The box is instance 0 of the room's pair list; the base
+    // pair holds its rest pose (its X/Z + orientation stay put, only Y bobs). A still room instance
+    // keeps `prev == curr` (the B2 keystone renders it bitwise-stable, so the room does not shimmer).
+    const FIXED_DT: f32 = 1.0 / 64.0;
+    const MAX_ACCUM: f32 = 0.25; // the 250 ms spiral clamp (Time::advance_with).
+    let mut pairs: Vec<InterpPair> = base_pairs.to_vec();
+    let box_base_y = pairs.first().map_or(0.0, |p| p.curr[1]);
+    let mut box_y = box_base_y + 3.0; // drop the box from 3 units up.
+    let mut box_vy = 0.0_f32;
+    let mut accum = 0.0_f32;
+    let mut last = Instant::now();
+    // Seed instance 0's pair at the initial dropped height (prev == curr so frame 0 is a no-op
+    // interpolation) and prime BOTH FIF pair slots so a fresh slot never reads uninitialized bytes.
+    if let Some(p0) = pairs.first_mut() {
+        p0.prev[1] = box_y;
+        p0.curr[1] = box_y;
+    }
+    if let Some(interp) = interp_gpu {
+        for fi in 0..FRAMES_IN_FLIGHT {
+            interp.write_pairs(ctx, fi, &pairs);
+        }
+    }
+
+    eprintln!(
+        "[viewer] WASD+Space/Ctrl fly, mouse look, Esc quit.{}",
+        if interp_gpu.is_some() { " (interp ON: a bouncing box)" } else { "" }
+    );
 
     // `pump_events` returns false on WM_QUIT (the window closed) — exit then.
     while window.pump_events() {
+        // Real frame delta (clamped by the accumulator below), the interp `alpha` source.
+        let now = Instant::now();
+        let frame_dt = (now - last).as_secs_f32();
+        last = now;
         physical.begin_frame();
         queue.begin_frame();
         // Drain this frame's captured Win32 messages, mapping each at the edge into a RawInputEvent.
@@ -5417,7 +5719,9 @@ fn run_interactive_viewer<'ctx>(
         if pressed(KeyCode::KeyE) {
             mv = vadd(mv, world_up);
         }
-        eye = vadd(eye, vscale(vnorm_or_zero(mv), VIEWER_MOVE_SPEED * VIEWER_DT));
+        // Camera movement uses the REAL frame delta (Pillar B, plan item 4 — replacing the former
+        // fixed 1/60 s VIEWER_DT): a fast machine flies proportionally, a slow one does not overshoot.
+        eye = vadd(eye, vscale(vnorm_or_zero(mv), VIEWER_MOVE_SPEED * frame_dt));
 
         // Rebuild the camera: the b5 UBO 80-byte block (the marcher's ray-gen) + `scene.mvp` (the
         // raster mesh's perspective MVP). Both must agree in screen x/y (the hybrid alignment), so
@@ -5455,6 +5759,49 @@ fn run_interactive_viewer<'ctx>(
         // sibling in-flight frame binds + reads `ring[s ^ 1]`, so these writes are race-free with NO
         // fence wait. (The accessor lives on `Renderer`, not `Swapchain` — same round-robin counter.)
         let s = renderer.frame_index();
+
+        // Pillar B B3: the inline fixed-timestep loop for the bouncing box (interp ON). Accumulate
+        // the real frame delta (clamped to MAX_ACCUM — the engine's 250 ms spiral clamp), expend
+        // whole FIXED_DT substeps, integrating the box's gravity + floor bounce and shuffling its
+        // interp pair per substep (`prev = old curr`, `curr = new pose` — the D3 single-site
+        // discipline). The leftover `accum / FIXED_DT` is the overstep fraction fed as `alpha`, so the
+        // box renders SMOOTHLY between substeps. A frame with no substep still slides `alpha`.
+        if let Some(interp) = interp_gpu {
+            accum = (accum + frame_dt).min(MAX_ACCUM);
+            let mut stepped = false;
+            while accum >= FIXED_DT {
+                accum -= FIXED_DT;
+                stepped = true;
+                // Semi-implicit Euler under gravity with a floor bounce at the box's rest height.
+                box_vy -= 9.8 * FIXED_DT;
+                box_y += box_vy * FIXED_DT;
+                if box_y < box_base_y {
+                    box_y = box_base_y;
+                    box_vy = -box_vy * 0.72; // 0.72 restitution (a lively but decaying bounce).
+                    if box_vy < 1.5 {
+                        box_vy = 6.5; // re-launch so the demo keeps bouncing indefinitely.
+                    }
+                }
+                // D3 shuffle on instance 0's pair: prev = old curr, curr = the new Y pose (X/Z + the
+                // decomposed orientation/scale stay put — only the height bobs).
+                if let Some(p0) = pairs.first_mut() {
+                    p0.prev = p0.curr;
+                    p0.curr[1] = box_y;
+                }
+            }
+            let alpha = if FIXED_DT > 0.0 { (accum / FIXED_DT).clamp(0.0, 1.0) } else { 0.0 };
+            // Re-upload the pairs when a substep changed the pose (D5 substep-gated discipline); the
+            // alpha slides every frame via the push constant regardless. On the FIRST frame (no
+            // substep yet) still write so the fresh slot holds valid pairs.
+            if stepped {
+                interp.write_pairs(ctx, s, &pairs);
+            }
+            // Bind THIS frame slot's draw SSBO as the raster/shadow VS instance source, and arm the
+            // interp pass with this frame's overstep alpha. The interp compute writes `draw[s]` (which
+            // this bind group reads), and the framegraph orders the COMPUTE→VERTEX barrier.
+            scene.instance_bind_group = &interp.draw_bg[s];
+            scene.interp = Some(interp.activation(s, alpha));
+        }
 
         // Upload the 80-byte camera block to THIS frame's camera-ring slot (the b5 UBO @5).
         if let Some(mapped) = RhiDevice::buffer_mapped_ptr(ctx, &scene.camera_ring[s]) {
@@ -5778,6 +6125,143 @@ fn run_shadow_motion_ab<'ctx>(
     dump("diff_a_vs_b_x8", &ab_diff_map(&a, &b));
     dump("diff_a_vs_c_x8", &ab_diff_map(&a, &c));
     dump("diff_a_vs_d_x8", &ab_diff_map(&a, &d));
+}
+
+/// Pillar B B3 GPU KEYSTONE (`BOYKO_INTERP_SMOKE=1`). Proves the WIRED interp compute pre-pass
+/// moves the drawn geometry per the interpolated pose, on real GPU:
+///
+///   1. Renders the production scene through the interp pass at `alpha = 0.0` with instance 0 given
+///      a MOVING pair (`prev` = its base pose, `curr` = base + a visible +X/+Y delta) and every other
+///      instance STILL (`prev == curr`). At `alpha = 0` the interpolated pose == `prev` == the base
+///      pose (instance 0 unmoved).
+///   2. Renders again at `alpha ≈ 0.5` with the SAME pairs — instance 0's interpolated pose is now
+///      halfway to `curr` (visibly shifted); every still instance is bitwise-unchanged (the B2
+///      keystone: `mix(prev, curr, a) == prev == curr`).
+///   3. Asserts the two captures DIFFER (the moving instance shifted → some pixels changed) — the
+///      interp pass IS driving the draw — and dumps both + an ×8 diff map for the owner.
+///
+/// The alpha is scripted (not `overstep_fraction()`) so the proof is deterministic; the production
+/// wiring feeds the real overstep in `run_interactive_viewer`. Runs on the SAME production path
+/// (`render_gbuffer_frame` + the framegraph COMPUTE→VERTEX barrier), so a green run validates the
+/// whole B3 GPU chain. The interp draw SSBO the compute writes IS the SSBO the raster VS reads
+/// (`scene.instance_bind_group = interp.draw_bg[fi]` each frame).
+#[allow(clippy::too_many_arguments)]
+fn run_interp_smoke<'ctx, 's>(
+    ctx: &VulkanContext,
+    surface: &Surface<'_>,
+    swapchain: &mut Swapchain<'ctx>,
+    renderer: &mut Renderer<'ctx>,
+    window: &mut Window,
+    scene: &mut GBufferScene<'s>,
+    frame: &mut GBufferFrame,
+    staging: &BoundBuffer,
+    is_bgra: bool,
+    interp: &'s InterpGpu,
+    base_pairs: &[InterpPair],
+) {
+    // The scripted move on instance 0: `curr = prev + delta` (a visible in-plane shift). The room's
+    // first instanced entry is the moving subject; every other instance stays still (prev == curr).
+    let delta = [0.9_f32, 0.6, 0.0];
+    let mut moved: Vec<InterpPair> = base_pairs.to_vec();
+    if let Some(p0) = moved.first_mut() {
+        p0.curr[0] += delta[0];
+        p0.curr[1] += delta[1];
+        p0.curr[2] += delta[2];
+    }
+
+    let pose = AbPose { eye: ROOM_CAM_EYE, yaw: 0.0, pitch: VIEWER_INITIAL_PITCH };
+
+    // Binds THIS frame slot's interp set + draw-read instance bind group + the pose, then presents
+    // one frame (optionally with readback). A macro (not a closure) so it drives the outer `scene`
+    // directly — assigning `scene.instance_bind_group = &interp.draw_bg[fi]` needs the `interp`
+    // borrow to share the scene's `'s` lifetime, which a closure cannot express.
+    macro_rules! present_interp {
+        ($alpha:expr, $readback:expr) => {{
+            let fi = renderer.frame_index();
+            interp.write_pairs(ctx, fi, &moved);
+            scene.instance_bind_group = &interp.draw_bg[fi];
+            scene.interp = Some(interp.activation(fi, $alpha));
+            ab_set_pose(ctx, renderer, scene, pose);
+            ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, $readback)
+        }};
+    }
+    // Captures one readback frame at `alpha`: 1 readback + 3 drain presents (the FRAMES_IN_FLIGHT==2
+    // fence discipline), each re-wiring interp for the slot the upcoming present binds. Yields the
+    // normalized RGBA + dims, or `None` (window close / swapchain recreate — the run is void).
+    macro_rules! capture_at {
+        ($alpha:expr) => {{
+            if !present_interp!($alpha, Some(staging)) {
+                None
+            } else {
+                let extent = swapchain.extent();
+                let mut ok = true;
+                for _ in 0..3 {
+                    if !present_interp!($alpha, None) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if !ok {
+                    None
+                } else {
+                    let (w, h) = (extent.width, extent.height);
+                    let byte_count = (w * h * 4) as usize;
+                    let ptr = RhiDevice::buffer_mapped_ptr(ctx, staging)
+                        .expect("host-visible readback staging buffer is mapped");
+                    let mut raw = vec![0u8; byte_count];
+                    // SAFETY: `ptr` maps ≥ `byte_count` host-coherent staging bytes; the readback
+                    // frame's slot fence was re-waited by the 3 drain presents (3 > FRAMES_IN_FLIGHT
+                    // == 2), so the copy completed; `raw` is a fresh non-overlapping allocation.
+                    unsafe { core::ptr::copy_nonoverlapping(ptr.as_ptr(), raw.as_mut_ptr(), byte_count) };
+                    Some((readback_to_rgba(&raw, w, h, is_bgra), w, h))
+                }
+            }
+        }};
+    }
+
+    // Warm-up so the swapchain/pipelines settle (the dumps' discipline).
+    for _ in 0..4 {
+        if !present_interp!(0.0_f32, None) {
+            eprintln!("SKIP interp-smoke: window closed / swapchain recreated during warm-up");
+            return;
+        }
+    }
+
+    let Some((a0, w, h)) = capture_at!(0.0_f32) else {
+        eprintln!("SKIP interp-smoke: window closed / swapchain recreated during alpha=0 capture");
+        return;
+    };
+    let Some((a5, ..)) = capture_at!(0.5_f32) else {
+        eprintln!("SKIP interp-smoke: window closed / swapchain recreated during alpha=0.5 capture");
+        return;
+    };
+
+    let (n_diff, max_d) = ab_compare("interp alpha=0 vs alpha=0.5 (moving instance)", &a0, &a5);
+    // Dump artifacts for the owner's visual confirmation.
+    let dump = |name: &str, rgba: &[u8]| {
+        let path = format!(r"D:\tmp\interp_smoke_{name}.bmp");
+        match write_bmp(&path, rgba, w, h) {
+            Ok(()) => println!("[interp-smoke] wrote {path}"),
+            Err(e) => eprintln!("[interp-smoke] failed to write {path}: {e:?}"),
+        }
+    };
+    dump("alpha0", &a0);
+    dump("alpha5", &a5);
+    dump("diff_x8", &ab_diff_map(&a0, &a5));
+
+    // THE KEYSTONE: the interpolated pose at alpha=0.5 moved instance 0, so the two captures DIFFER.
+    // (If interp were a no-op, or the barrier were missing and the VS read a stale/empty draw SSBO,
+    // the two frames would be identical — a zero-diff FAIL.)
+    assert!(
+        n_diff > 0,
+        "interp GPU keystone: alpha=0 and alpha=0.5 captures are IDENTICAL — the interp pre-pass \
+         did NOT move the drawn geometry (the wired compute pass / COMPUTE→VERTEX barrier is dead). \
+         Expected the moving instance's pixels to differ (max channel delta was {max_d})."
+    );
+    println!(
+        "[interp-smoke] PASS: interp pre-pass drives the draw — {n_diff} px differ between alpha=0 \
+         and alpha=0.5 (max channel delta {max_d})."
+    );
 }
 
 /// **The INTERACTIVE engine viewer.** Opens a window and lets the owner FLY around the live
@@ -7301,6 +7785,10 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
                 }
             },
         ),
+        // Pillar B B3: interp OFF at construction. Every DUMP path leaves it None (byte-
+        // identical command stream). The INTERACTIVE branch below rebuilds `scene.interp =
+        // Some(..)` per frame with the current-slot draw-SSBO set + this frame's overstep alpha.
+        interp: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -7323,6 +7811,30 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
     // window in a loop, then falls through to the SAME teardown below. `present_extent`/`staging`
     // are created right after this block, so the interactive loop builds its own present extent.
     if interactive {
+        // Pillar B B3: build the interpolation pre-pass resources for the viewer's instanced room.
+        // Every rendered instance is routed through the pair path: the room's hand affines are
+        // decomposed into `Trs` and seeded `prev == curr` (a STILL instance the B2 keystone renders
+        // bitwise-stable), and the interactive loop / smoke moves a chosen instance by advancing its
+        // `curr`. `None` when there is no instanced mesh (the legacy identity-dummy path — interp
+        // would have nothing to interpolate). The interp draw SSBO the compute writes IS what the
+        // raster/shadow VS reads (bound as `scene.instance_bind_group` per frame slot).
+        let base_pairs: Vec<InterpPair> = cfg
+            .instanced
+            .as_ref()
+            .map(|inst| {
+                inst.meshes
+                    .iter()
+                    .flat_map(|m| m.affines.iter())
+                    .map(|a| {
+                        let trs = trs_from_affine(a);
+                        InterpPair { prev: trs, curr: trs }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let interp_gpu = (!base_pairs.is_empty())
+            .then(|| InterpGpu::create(device, &instance_layout, base_pairs.len() as u32));
+
         // Shadow-motion A/B diagnostic: `BOYKO_SHADOW_AB=1` swaps the input-driven loop for the
         // scripted-camera capture protocol (static-arrival vs motion-arrival byte comparison at
         // one pose — see `run_shadow_motion_ab`). The heavy setup above + teardown below are
@@ -7339,6 +7851,19 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
                 &staging,
                 is_bgra,
             );
+        } else if std::env::var_os("BOYKO_INTERP_SMOKE").is_some() {
+            // Pillar B B3 GPU KEYSTONE (`BOYKO_INTERP_SMOKE=1`): the scripted 2-alpha readback proof
+            // of the wired interp pass. Renders the SAME production scene through the interp pre-pass
+            // at alpha=0.0 then alpha≈0.5, with instance 0 given a MOVING pair (prev != curr) and the
+            // rest STILL, and asserts the moving instance's pixels DIFFER between alphas while a still
+            // instance's pixels are bitwise-IDENTICAL — the B2 keystone on GPU.
+            let interp = interp_gpu
+                .as_ref()
+                .expect("BOYKO_INTERP_SMOKE needs an instanced scene (the viewer_config supplies one)");
+            run_interp_smoke(
+                &ctx, &surface, &mut swapchain, &mut renderer, &mut window, &mut scene, &mut frame,
+                &staging, is_bgra, interp, &base_pairs,
+            );
         } else {
             run_interactive_viewer(
                 &ctx,
@@ -7348,6 +7873,8 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
                 &mut window,
                 &mut scene,
                 &mut frame,
+                interp_gpu.as_ref(),
+                &base_pairs,
             );
         }
         // Skip the dump path entirely; fall through to teardown. `scene` borrows `mesh_draws` + the
@@ -7359,6 +7886,11 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
         // (its `Drop` waits the device idle), so no submission references these resources; `ctx` is
         // still alive; each is destroyed exactly once, in reverse dependency order.
         unsafe {
+            // Pillar B B3: tear down the interp pipeline + FIF-ringed pair/draw SSBOs + bind groups
+            // FIRST (they reference no other resource here; the renderer drop above idled the device).
+            if let Some(interp) = interp_gpu {
+                interp.destroy(&ctx);
+            }
             frame.destroy(&ctx);
             csm.destroy(&ctx);
             RhiDevice::destroy_graphics_pipeline(device, present_pipeline);

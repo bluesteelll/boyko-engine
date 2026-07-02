@@ -519,6 +519,62 @@ pub struct SsaoActivation<'a> {
     pub layout: &'a VulkanBindGroupLayout,
 }
 
+/// Pillar B increment B3: the per-instance TRS interpolation compute PRE-PASS activation
+/// threaded into [`GBufferScene::interp`] to turn the interp pass ON. Mirrors
+/// [`SsaoActivation`]'s borrow-bundle shape: a per-frame `Copy` bundle the caller rebuilds
+/// each frame (the CURRENT frame slot's bind group + this frame's overstep alpha).
+///
+/// `None` (the default for every dump/offscreen scene) keeps the command stream
+/// BYTE-IDENTICAL to the pre-B3 path — NO interp dispatch, NO interp barrier is recorded,
+/// and the raster/shadow VS read whatever `instance_bind_group` the caller supplies (the
+/// legacy hand-affine SSBO). `Some(_)` records the interp dispatch BEFORE the raster pass,
+/// writing this frame's interpolated model columns into the draw SSBO the raster + shadow
+/// vertex shaders read; the graph derives the COMPUTE→VERTEX RAW barrier.
+///
+/// # The draw-SSBO ring contract (the caller's responsibility)
+///
+/// When interp is ON the caller MUST make [`GBufferScene::instance_bind_group`] the CURRENT
+/// frame slot's DRAW-SSBO bind group — the SAME buffer this pass's [`Self::interp_set`]
+/// writes at binding 1 — so the raster + CSM + atlas vertex shaders read the freshly
+/// interpolated columns. Both the pair SSBO (this frame's host-written pairs) and the draw
+/// SSBO are FIF-ringed (frame-private, like the G-buffer ring), so no cross-frame barrier is
+/// needed beyond the intra-frame COMPUTE→VERTEX dependency the graph derives.
+#[derive(Clone, Copy)]
+pub struct InterpActivation<'a> {
+    /// The B2 interp compute pipeline (`interp_instances.comp` /
+    /// [`crate::compute::interp_instances_spirv`]): its layout declares [`Self::interp_set`]'s
+    /// layout at `set 0` + the 8-byte COMPUTE push range
+    /// ([`crate::compute::INTERP_INSTANCES_PUSH_BYTES`] — `{ uint count; float alpha }`). The
+    /// recorder binds it + dispatches `ceil(count / LOCAL_SIZE_X)` groups BEFORE the raster pass.
+    pub pipeline: &'a ComputePipeline,
+    /// The CURRENT frame slot's interp bind group { `StructuredBuffer<TransformPair>` @0 (the
+    /// host-written pair SSBO, read), `RWStructuredBuffer<InterpModel>` @1 (the draw SSBO,
+    /// written) }. A ring the caller rebuilds/selects per frame (the pair slot the host just
+    /// wrote + the draw slot the raster VS will read — both `frame_index()`).
+    pub interp_set: &'a VulkanBindGroup,
+    /// The CURRENT frame slot's PAIR SSBO physical buffer (bound at [`Self::interp_set`] @0).
+    /// The framegraph resolves the interp pass's declared pair read to this handle; that read
+    /// is a first touch on a frame-private slot, so no barrier is derived (the handle is
+    /// declared for completeness). Same `frame_index()` slot the host wrote this frame.
+    pub pair_buffer: &'a BoundBuffer,
+    /// The CURRENT frame slot's DRAW SSBO physical buffer (bound at [`Self::interp_set`] @1 for
+    /// the compute WRITE, and at [`GBufferScene::instance_bind_group`] @0 for the raster/shadow
+    /// VS READ). The framegraph resolves the COMPUTE→VERTEX RAW barrier on the draw SSBO to
+    /// this handle — the barrier the raster pass emits so the VS reads the freshly interpolated
+    /// columns. Same `frame_index()` slot as [`Self::interp_set`]'s @1 target.
+    pub draw_buffer: &'a BoundBuffer,
+    /// The number of interpolated instances this frame — the compute dispatch element count
+    /// (`ceil(count / LOCAL_SIZE_X)` groups) AND the push's `count` bounds guard. `0` records
+    /// NO dispatch (an empty frame skips the pass entirely, byte-identical to interp OFF for
+    /// that frame).
+    pub instance_count: u32,
+    /// This frame's fixed-timestep overstep fraction (`FixedTime::overstep_fraction()`, in
+    /// `[0, 1)`) — pushed as the interp `alpha`. Updates EVERY frame (a per-frame push, no
+    /// re-record); the pair SSBO is re-uploaded only on a substep or count change, but the
+    /// alpha slides every frame so the interpolated pose advances smoothly between substeps.
+    pub alpha: f32,
+}
+
 pub struct GBufferScene<'a> {
     /// The mesh-raster graphics pipeline (pass A). Render P5-r0: a 3-MRT G-buffer
     /// PRODUCER — the fronto-parallel quad is drawn into the D32 depth image AND the three
@@ -968,6 +1024,19 @@ pub struct GBufferScene<'a> {
     /// MUST set the scene's light-header `punctual_shadow_mode` in lock-step
     /// (`with_punctual_shadow_mode(true)`).
     pub atlas_punctual: Option<PunctualDepthActivation<'a>>,
+    /// Pillar B increment B3: the per-instance TRS interpolation compute PRE-PASS activation.
+    /// `None` = the OFF path (the default for every dump/offscreen scene, byte-identical
+    /// command stream): NO interp dispatch, NO interp barrier is recorded, and the raster +
+    /// shadow vertex shaders read the caller-supplied [`Self::instance_bind_group`] (the
+    /// legacy hand-affine or M3-gather SSBO) unchanged. `Some(_)` = the ON path: BEFORE the
+    /// raster pass the recorder binds the interp pipeline + the activation's current-slot set,
+    /// dispatches `ceil(instance_count / LOCAL_SIZE_X)` groups (interpolating each entity's
+    /// prev/curr pair at `alpha` into the draw SSBO), and the graph derives the COMPUTE→VERTEX
+    /// RAW barrier so the raster/CSM/atlas VS reads the freshly interpolated columns. When
+    /// `Some`, the caller MUST set [`Self::instance_bind_group`] to the SAME current frame
+    /// slot's draw-SSBO bind group the activation's set writes at binding 1 (see
+    /// [`InterpActivation`]).
+    pub interp: Option<InterpActivation<'a>>,
 }
 
 /// CSM Increment 1b (Rung A): the cascade DEPTH-PASS activation threaded into

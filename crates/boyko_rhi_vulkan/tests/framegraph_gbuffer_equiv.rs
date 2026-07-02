@@ -18,6 +18,7 @@ use boyko_rhi_vulkan::ffi::{
     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
     VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
 };
 use boyko_rhi_vulkan::framegraph::{BufBarrier, FrameGraph, ImgBarrier, ResId, ResSync, SubRange};
 
@@ -492,4 +493,108 @@ fn compile_is_idempotent_and_reset_reuses_capacity() {
     // A fresh frame (reset + re-declare) reproduces the same plan — no stale SoA.
     let f2 = build_maximal_frame();
     assert_eq!(f2.g.img_barriers(), first.as_slice(), "reset/rebuild diverged");
+}
+
+/// Pillar B B3: the interp-ON path is PURELY ADDITIVE. With the interpolation pre-pass
+/// wired (the two FIF-ringed `interp_pairs` / `interp_draw` SSBOs + the interp compute pass
+/// that reads pairs → writes draw, then the raster VS reads draw at VERTEX), the graph
+/// derives EXACTLY TWO new buffer barriers, both on the interp SSBOs and NONE on the core
+/// resources:
+///   1. the `interp_pairs` first-touch visibility barrier (`TOP_OF_PIPE → COMPUTE`, no src
+///      access) — a benign execution-only barrier making the freshly host-written,
+///      frame-private pair slot visible to the interp compute read (the buffer analogue of
+///      an image's first-touch UNDEFINED→layout; costs nothing since host-coherent writes
+///      are already ordered by the submit);
+///   2. the `interp_draw` COMPUTE(WRITE)→VERTEX(READ) RAW at the raster (the draw reader) —
+///      the load-bearing barrier ordering the interp write before the raster/shadow VS read.
+///
+/// The interp SSBOs are `add_buffer` (undefined, frame-private), so there is NO cross-frame
+/// WAR/WAW seed; the CORE raster/marcher/resolve barriers are byte-unperturbed. This is the
+/// ON-path B-002-style line-by-line pin mirroring `declare_gbuffer_graph`'s interp arm; the
+/// OFF path stays the `build_maximal_frame` pins (23 img / 10 buf / 22 calls), unchanged.
+#[test]
+fn interp_prepass_adds_exactly_the_compute_to_vertex_draw_barrier() {
+    const RW_ATTR: u32 = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+
+    let mut g = FrameGraph::with_capacity(8, 8, 32);
+    // The core images the raster/marcher/resolve/present touch (as in the additive test).
+    let albedo = g.add_image("albedo");
+    let normal = g.add_image("normal");
+    let material = g.add_image("material");
+    let depth = g.add_image("depth");
+    let viewt = g.add_image("viewt");
+    let lit = g.add_image("lit");
+    // The B3 interp SSBOs: FIF-ringed / frame-private ⇒ `add_buffer` (undefined seed), so no
+    // cross-frame ordering — only the intra-frame COMPUTE→VERTEX RAW is derived. ResIds are
+    // declared BEFORE the interp pass (which accesses them), mirroring `declare_gbuffer_graph`.
+    let interp_pairs = g.add_buffer("interp_pairs");
+    let interp_draw = g.add_buffer("interp_draw");
+
+    // Pass `interp` — runs FIRST: reads pairs (first touch), writes draw.
+    g.add_pass("interp");
+    g.buffer_access(interp_pairs, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    g.buffer_access(interp_draw, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
+
+    // Pass `raster` — reads the interp draw SSBO at VERTEX (the VS indexes `instances[...]`),
+    // then the usual 3-MRT + depth writes.
+    g.add_pass("raster");
+    g.buffer_access(interp_draw, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    for &c in &[albedo, normal, material] {
+        g.image_access(c, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, SubRange::COLOR);
+    }
+    g.image_access(depth, FRAG, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, SubRange::DEPTH);
+
+    // Pass `marcher` → `resolve` → `present_blit` (the core tail, as in the additive test).
+    g.add_pass("marcher");
+    g.image_access(depth, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, SubRange::DEPTH);
+    for &c in &[albedo, normal, material, viewt] {
+        g.image_access(c, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, RW_ATTR, VK_IMAGE_LAYOUT_GENERAL, SubRange::COLOR);
+    }
+    g.add_pass("resolve");
+    for &c in &[albedo, normal, material, viewt] {
+        g.image_access(c, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, SubRange::COLOR);
+    }
+    g.image_access(lit, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL, SubRange::COLOR);
+    g.add_pass("present_blit");
+    g.image_access(lit, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, SubRange::COLOR);
+
+    g.compile();
+    let buf = g.buf_barriers();
+
+    // (2) The load-bearing barrier: the interp draw COMPUTE(WRITE) → VERTEX(READ) RAW.
+    assert!(
+        has_buf(
+            buf,
+            interp_draw,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        ),
+        "interp draw COMPUTE→VERTEX RAW barrier (the interp write → raster VS read) missing"
+    );
+    // (1) The `interp_pairs` first-touch visibility barrier: TOP_OF_PIPE → COMPUTE, no src
+    // access (a benign execution-only barrier on the freshly host-written, frame-private slot).
+    assert!(
+        has_buf(
+            buf,
+            interp_pairs,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0,
+            VK_ACCESS_SHADER_READ_BIT,
+        ),
+        "interp pairs first-touch TOP_OF_PIPE→COMPUTE visibility barrier missing"
+    );
+    // EXACTLY two buffer barriers — both on the interp SSBOs; the frame-private (undefined)
+    // seed adds no cross-frame WAR/WAW, and no core buffer is touched.
+    assert_eq!(
+        buf.len(),
+        2,
+        "interp adds exactly TWO buffer barriers (pairs first-touch + draw RAW)"
+    );
+
+    // The CORE image barriers are byte-unperturbed: albedo/normal/material 3 each, depth 2,
+    // viewt 2, lit 2 → 15, identical to `optional_passes_are_additive_core_barriers_unperturbed`.
+    assert_eq!(g.img_barriers().len(), 15, "interp does not perturb the core image barriers");
 }
