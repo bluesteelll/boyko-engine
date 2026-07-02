@@ -559,28 +559,19 @@ pub struct Renderer<'ctx> {
     render_finished: Vec<VkSemaphore>,
     /// The current frame-in-flight slot (round-robin).
     frame_index: usize,
-    /// The in-house Render Dependency Graph. Step 1c pre-compiled it ONCE (leading
-    /// raster subset); Steps 1d/1e (here) re-declare it PER FRAME over the WHOLE
+    /// The in-house Render Dependency Graph. Re-declared PER FRAME over the WHOLE
     /// G-buffer frame in [`render_gbuffer_frame`](Self::render_gbuffer_frame) (a
-    /// zero-alloc `reset`+re-declare+`compile`) and store the resulting
-    /// [`GbufferPassPlan`] in [`gbuffer_pass_plan`](Self::gbuffer_pass_plan). Behind
-    /// [`use_framegraph`](Self::use_framegraph) it then DRIVES every G-buffer /
-    /// shadow / buffer barrier of `record_gbuffer` (the swapchain WSI barriers stay
-    /// hand-recorded); OFF (the default) the hand path runs unchanged.
+    /// zero-alloc `reset`+re-declare+`compile`) and stored as the resulting
+    /// [`GbufferPassPlan`] in [`gbuffer_pass_plan`](Self::gbuffer_pass_plan). It then
+    /// DRIVES every G-buffer / shadow / buffer barrier of `record_gbuffer`
+    /// unconditionally (the swapchain WSI barriers stay hand-recorded).
     frame_graph: crate::framegraph::FrameGraph,
     /// The PER-FRAME map from each declared G-buffer pass to its [`PassId`] in
-    /// [`frame_graph`](Self::frame_graph), set by
-    /// [`render_gbuffer_frame`](Self::render_gbuffer_frame) when
-    /// [`use_framegraph`](Self::use_framegraph) is ON (else stale/`None`). Optional
-    /// members are `None` when their pass was config-gated off this frame, so
-    /// `record_gbuffer` records that pass's graph barriers only when it also records
-    /// the pass body. `None` when the flag is OFF (never read on the hand path).
+    /// [`frame_graph`](Self::frame_graph), set every frame by
+    /// [`render_gbuffer_frame`](Self::render_gbuffer_frame). Optional members are
+    /// `None` when their pass was config-gated off this frame, so `record_gbuffer`
+    /// records that pass's graph barriers only when it also records the pass body.
     gbuffer_pass_plan: Option<GbufferPassPlan>,
-    /// Whether [`record_gbuffer`](Self::record_gbuffer)'s G-buffer / shadow / buffer
-    /// barriers are driven by [`frame_graph`](Self::frame_graph) (Steps 1c–1e).
-    /// DEFAULT OFF — the flag-OFF command stream is byte-identical to the pre-1c hand
-    /// path. The swapchain WSI barriers (sites 7/9) stay hand-recorded either way.
-    use_framegraph: bool,
 }
 
 /// The per-frame [`PassId`](crate::framegraph::PassId) of each G-buffer pass declared
@@ -896,9 +887,9 @@ impl<'ctx> Renderer<'ctx> {
         // Preallocated for the MAXIMAL whole-frame declaration (14 resources: 9 images
         // + 5 buffers; ~11 passes; ~38 accesses — see `render_gbuffer_frame`). Sized
         // generously so the per-frame `reset`+re-declare is zero-alloc. This leading-
-        // raster compile is a valid initial state; when `use_framegraph` is ON
-        // `render_gbuffer_frame` OVERWRITES it every frame with the whole-frame plan
-        // (declaration order pins the ResIds albedo=0..depth=3, etc.). The single
+        // raster compile is a valid initial state; `render_gbuffer_frame` OVERWRITES
+        // it every frame with the whole-frame plan (declaration order pins the ResIds
+        // albedo=0..depth=3, etc.). The single
         // "raster" pass records, per its declared accesses, the two batched barriers the
         // hand path emits: the 3 color images UNDEFINED→COLOR_ATTACHMENT_OPTIMAL at
         // TOP_OF_PIPE→COLOR_ATTACHMENT_OUTPUT, then depth UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL
@@ -951,18 +942,7 @@ impl<'ctx> Renderer<'ctx> {
             frame_index: 0,
             frame_graph,
             gbuffer_pass_plan: None,
-            use_framegraph: false,
         })
-    }
-
-    /// Toggle whether [`record_gbuffer`](Self::record_gbuffer)'s leading-raster
-    /// barrier-in block is driven by the compiled [`FrameGraph`](crate::framegraph::FrameGraph)
-    /// (Step 1c). DEFAULT OFF; the OFF path is byte-identical to the hand code.
-    /// ON is behaviourally equivalent (same batched barriers) but must be visually
-    /// confirmed on a real GPU before it becomes the default.
-    #[inline]
-    pub fn set_use_framegraph(&mut self, on: bool) {
-        self.use_framegraph = on;
     }
 
     /// The frame-in-flight slot index the NEXT [`present_sampled`](Self::present_sampled)
@@ -2550,15 +2530,12 @@ impl<'ctx> Renderer<'ctx> {
         let render_finished = self.render_finished[image_index as usize];
         let acquire = self.frames[self.frame_index].acquire;
 
-        // Steps 1d/1e: when the framegraph drives the frame, re-declare the WHOLE
-        // G-buffer frame (config-gated from `scene`) into `self.frame_graph` and store
-        // the resulting `GbufferPassPlan` — BEFORE the `&self` `record_gbuffer` borrow,
-        // which then reads the compiled per-pass barrier plan through it. Zero-alloc
-        // (`reset` retains capacity); a per-frame `compile` is cheap for a ~11-pass line.
-        // OFF: skipped entirely (`gbuffer_pass_plan` stays `None`; the hand path runs).
-        if self.use_framegraph {
-            self.declare_gbuffer_graph(scene);
-        }
+        // The framegraph drives the frame: re-declare the WHOLE G-buffer frame
+        // (config-gated from `scene`) into `self.frame_graph` and store the resulting
+        // `GbufferPassPlan` — BEFORE the `&self` `record_gbuffer` borrow, which then
+        // reads the compiled per-pass barrier plan through it. Zero-alloc (`reset`
+        // retains capacity); a per-frame `compile` is cheap for a ~11-pass line.
+        self.declare_gbuffer_graph(scene);
 
         let targets = frame
             .targets
@@ -2640,8 +2617,8 @@ impl<'ctx> Renderer<'ctx> {
     /// Steps 1d/1e: re-declare the WHOLE G-buffer frame into `self.frame_graph`
     /// (`reset` + declare + `compile`), config-gated from `scene`, and store the
     /// per-pass [`GbufferPassPlan`] in `self.gbuffer_pass_plan`. Called by
-    /// `render_gbuffer_frame` when `use_framegraph` is ON, immediately before the
-    /// `&self` `record_gbuffer`, which drives each pass's derived barriers through it.
+    /// `render_gbuffer_frame` every frame, immediately before the `&self`
+    /// `record_gbuffer`, which drives each pass's derived barriers through it.
     ///
     /// The declared accesses MUST mirror `record_gbuffer`'s real `(stage, access,
     /// layout, subresource)` for the MAXIMAL permutation — this is the reference
@@ -3124,85 +3101,18 @@ impl<'ctx> Renderer<'ctx> {
         // so ONE array-form `vkCmdPipelineBarrier` is byte-identical GPU semantics to the
         // former three `count=1` calls — same masks/layouts/subresource, fewer API calls.
         //
-        // Steps 1c–1e: behind `use_framegraph` (DEFAULT OFF) the same two batched
-        // barriers are DRIVEN by `frame_graph`'s "raster" pass — the graph derives the
-        // identical color + depth transitions, and `GbufferBarrierSink` records them
-        // into the identical two `vkCmdPipelineBarrier` calls. OFF keeps the hand code
-        // below verbatim (byte-identical command stream). The per-frame plan is set by
-        // `declare_gbuffer_graph` just before this record (Step 1d); every barrier site
-        // below fetches it the same way when the flag is ON.
-        if self.use_framegraph {
-            let plan = self
-                .gbuffer_pass_plan
-                .as_ref()
-                .expect("invariant: use_framegraph ON ⇒ declare_gbuffer_graph ran");
-            self.record_graph_pass(plan.raster, cmd, targets, scene, fi);
-        } else {
-            let to_color = [&targets.albedo[fi], &targets.normal[fi], &targets.material[fi]].map(
-                |tex| VkImageMemoryBarrier {
-                    s_type: VkStructureType::ImageMemoryBarrier,
-                    p_next: ptr::null(),
-                    src_access_mask: 0,
-                    dst_access_mask: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                    old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
-                    new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                    image: tex.image,
-                    subresource_range: COLOR_SUBRESOURCE_RANGE,
-                },
-            );
-            // SAFETY: recording is open; 3 image barriers on live, distinct G-buffer images;
-            // TOP_OF_PIPE→COLOR_ATTACHMENT_OUTPUT with UNDEFINED→COLOR is the superset-correct
-            // first transition; `to_color` (a stack array) outlives the call; count == len.
-            unsafe {
-                (self.fns.cmd_pipeline_barrier)(
-                    cmd,
-                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    0,
-                    0,
-                    ptr::null(),
-                    0,
-                    ptr::null(),
-                    to_color.len() as u32,
-                    to_color.as_ptr().cast(),
-                );
-            }
-
-            // Barrier (depth): UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL at the
-            // early/late-fragment-test stage (the depth-write access, DEPTH aspect).
-            let to_depth = VkImageMemoryBarrier {
-                s_type: VkStructureType::ImageMemoryBarrier,
-                p_next: ptr::null(),
-                src_access_mask: 0,
-                dst_access_mask: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
-                new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                image: targets.depth[fi].image,
-                subresource_range: DEPTH_SUBRESOURCE_RANGE,
-            };
-            // SAFETY: recording is open; one image barrier on the live depth image;
-            // TOP_OF_PIPE→(EARLY|LATE)_FRAGMENT_TESTS with UNDEFINED→DEPTH is the
-            // superset-correct first depth transition; `&to_depth` outlives the call.
-            unsafe {
-                (self.fns.cmd_pipeline_barrier)(
-                    cmd,
-                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                    VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
-                        | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                    0,
-                    0,
-                    ptr::null(),
-                    0,
-                    ptr::null(),
-                    1,
-                    (&to_depth as *const VkImageMemoryBarrier).cast(),
-                );
-            }
-        }
+        // These two batched barriers are DRIVEN by `frame_graph`'s "raster" pass — the
+        // graph derives the color + depth transitions, and `GbufferBarrierSink` records
+        // them into the two `vkCmdPipelineBarrier` calls. The per-frame plan is set by
+        // `declare_gbuffer_graph` just before this record; every barrier site below
+        // fetches it the same way.
+        // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+        // barriers for the "raster" pass into `cmd` against the live G-buffer targets.
+        let plan = self
+            .gbuffer_pass_plan
+            .as_ref()
+            .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
+        self.record_graph_pass(plan.raster, cmd, targets, scene, fi);
 
         // (2) Dynamic rendering at the marcher's extent: 3 MRT color attachments
         // (albedo@0, normal@1, material@2; CLEAR/STORE) + the depth attachment (CLEAR to
@@ -3424,149 +3334,15 @@ impl<'ctx> Renderer<'ctx> {
             (self.fns.cmd_end_rendering)(cmd);
         }
 
-        // Steps 1d/1e: the marcher's INPUT barriers — sites (3) depth→sampled, (3b)
-        // color→general, (4) lit/viewt/ssao first-touch — are DRIVEN by the graph's
-        // "marcher" pass when the flag is ON, but that `record_pass` is emitted just
-        // BEFORE the marcher DISPATCH (site 5), NOT here. This is REQUIRED for the
-        // coarse-ON case: the graph derives the `tiles` cull→marcher barrier at the
-        // marcher (the reader), so it must fire AFTER the coarse dispatch WRITES tiles —
-        // recording the marcher pass here (before the coarse dispatch) would order a
-        // not-yet-issued write. (The hand path front-loads depth→sampled/color→general at
-        // this site because it hand-authored the tiles barrier separately, after the
-        // coarse dispatch.) So when the flag is ON this site records NOTHING; OFF keeps
-        // all THREE hand blocks below verbatim (byte-identical command stream). The graph
+        // The marcher's INPUT barriers — depth→sampled, color→general, lit/viewt/ssao
+        // first-touch — are DRIVEN by the graph's "marcher" pass, but that `record_pass`
+        // is emitted just BEFORE the marcher DISPATCH (site 5), NOT here. This is
+        // REQUIRED for the coarse-ON case: the graph derives the `tiles` cull→marcher
+        // barrier at the marcher (the reader), so it must fire AFTER the coarse dispatch
+        // WRITES tiles — recording the marcher pass here (before the coarse dispatch)
+        // would order a not-yet-issued write. So this site records NOTHING; the graph
         // re-orders lit/ssao's first-touch to their true first-use (resolve / ssao) — a
         // sound superset the equivalence tests lock in.
-        if !self.use_framegraph {
-        // (3) THE single depth dual-use barrier: DEPTH_ATTACHMENT_OPTIMAL →
-        // SHADER_READ_ONLY_OPTIMAL. Depth WRITES happen at LATE_FRAGMENT_TESTS; the
-        // marcher SAMPLES at COMPUTE_SHADER. This one barrier (DEPTH aspect) makes the
-        // write available + visible to the shader-read and transitions the layout for
-        // sampling. It REPLACES the packed path's depth→buffer copy + its two transfer
-        // barriers — there is NO copy_image_to_buffer(depth) here.
-        let depth_to_sampled = VkImageMemoryBarrier {
-            s_type: VkStructureType::ImageMemoryBarrier,
-            p_next: ptr::null(),
-            src_access_mask: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-            dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
-            old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-            new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-            dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-            image: targets.depth[fi].image,
-            subresource_range: DEPTH_SUBRESOURCE_RANGE,
-        };
-        // SAFETY: recording is open; (EARLY|LATE)_FRAGMENT_TESTS→COMPUTE_SHADER with
-        // DEPTH_WRITE→SHADER_READ and DEPTH→SHADER_READ_ONLY makes the rasterized depth
-        // available + visible to the marcher's sample; `&depth_to_sampled` outlives the
-        // call.
-        unsafe {
-            (self.fns.cmd_pipeline_barrier)(
-                cmd,
-                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
-                    | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                0,
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                1,
-                (&depth_to_sampled as *const VkImageMemoryBarrier).cast(),
-            );
-        }
-
-        // (3b) Render P5-r0 barrier-out: the 3 RGBA8 G-buffer images
-        // COLOR_ATTACHMENT_OPTIMAL → GENERAL, handing pass A's rasterized mesh fragments to
-        // the marcher. This is a GENUINE raster-write hand-off (NOT the old throwaway
-        // UNDEFINED→GENERAL shape): `src=COLOR_ATTACHMENT_OUTPUT/COLOR_ATTACHMENT_WRITE`
-        // makes the raster's color writes AVAILABLE, `dst=COMPUTE_SHADER/SHADER_READ|
-        // SHADER_WRITE` makes them VISIBLE to the marcher's reads/writes (and, post-r1, the
-        // resolve's reads). The marcher then (under the r1 ownership gate) does NOT write a
-        // mesh-owned texel, so the raster's value survives to the resolve — single producer
-        // per texel across the barrier. On a no-mesh / clear-only pass a CLEAR is a color
-        // write, correctly made available by the same source half.
-        // Step 1a (sync1 array-batching): the 3 hand-off barriers share one global
-        // COLOR_ATTACHMENT_OUTPUT→COMPUTE_SHADER scope over independent images → ONE
-        // array-form call, byte-identical GPU semantics to the former three `count=1` calls.
-        let color_to_general = [&targets.albedo[fi], &targets.normal[fi], &targets.material[fi]]
-            .map(|tex| VkImageMemoryBarrier {
-                s_type: VkStructureType::ImageMemoryBarrier,
-                p_next: ptr::null(),
-                src_access_mask: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                dst_access_mask: VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-                old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                new_layout: VK_IMAGE_LAYOUT_GENERAL,
-                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                image: tex.image,
-                subresource_range: COLOR_SUBRESOURCE_RANGE,
-            });
-        // SAFETY: recording is open; 3 image barriers on live, distinct G-buffer images;
-        // COLOR_ATTACHMENT_OUTPUT→COMPUTE_SHADER with COLOR_ATTACHMENT_WRITE→
-        // SHADER_READ|SHADER_WRITE and COLOR_ATTACHMENT_OPTIMAL→GENERAL makes pass A's
-        // rasterized fragments available + visible to the marcher; `color_to_general` (a
-        // stack array) outlives the call; count == len.
-        unsafe {
-            (self.fns.cmd_pipeline_barrier)(
-                cmd,
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                0,
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                color_to_general.len() as u32,
-                color_to_general.as_ptr().cast(),
-            );
-        }
-
-        // (4) The lit output + the Lighting-L0b gViewT lane: UNDEFINED → GENERAL. The
-        // marcher stores gViewT and the resolve stores lit — both in GENERAL. (Render P5-r0:
-        // albedo/normal/material moved to the COLOR_ATTACHMENT_OPTIMAL→GENERAL barrier-out
-        // (3b) above, since pass A now rasterizes into them; gViewT stays UNDEFINED→GENERAL
-        // because r0 does NOT rasterize into it — it is still wholly marcher-produced.)
-        // Render P7: `targets.ssao` (R8_UNORM) joins this batch — it lives in GENERAL its whole
-        // life like `viewt` (no SSAO pass writes it yet, C2 adds that; the resolve reads it only
-        // under `ssao_mode != 0`, so on every pre-P7 scene this is a valid GENERAL image the
-        // resolve never reads — byte-identical PIXELS, one extra harmless transition that does
-        // NOT alter the OFF arithmetic).
-        // Step 1a (sync1 array-batching): the 3 storage-image barriers share one global
-        // TOP_OF_PIPE→COMPUTE_SHADER scope over independent images → ONE array-form call,
-        // byte-identical GPU semantics to the former three `count=1` calls.
-        let to_general = [&targets.lit[fi], &targets.viewt[fi], &targets.ssao[fi]].map(|tex| {
-            VkImageMemoryBarrier {
-                s_type: VkStructureType::ImageMemoryBarrier,
-                p_next: ptr::null(),
-                src_access_mask: 0,
-                dst_access_mask: VK_ACCESS_SHADER_WRITE_BIT,
-                old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
-                new_layout: VK_IMAGE_LAYOUT_GENERAL,
-                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                image: tex.image,
-                subresource_range: COLOR_SUBRESOURCE_RANGE,
-            }
-        });
-        // SAFETY: recording is open; 3 image barriers on live, distinct G-buffer images;
-        // TOP_OF_PIPE→COMPUTE_SHADER with UNDEFINED→GENERAL is the superset-correct first
-        // storage-image transition; `to_general` (a stack array) outlives the call; count == len.
-        unsafe {
-            (self.fns.cmd_pipeline_barrier)(
-                cmd,
-                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                0,
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                to_general.len() as u32,
-                to_general.as_ptr().cast(),
-            );
-        }
-        } // end !use_framegraph (hand marcher-input barriers; sites 3/3b/4)
 
         // === Lighting L0-r0: ASYNC light-table re-upload (C3), recorded only on a dirty
         // frame, BEFORE the marcher/resolve reads. A staging→device `cmd_copy_buffer` +
@@ -3581,30 +3357,11 @@ impl<'ctx> Renderer<'ctx> {
                 dst_offset: 0,
                 size: scene.light_upload_bytes,
             };
-            let to_shader_read = VkBufferMemoryBarrier {
-                s_type: VkStructureType::BufferMemoryBarrier,
-                p_next: ptr::null(),
-                src_access_mask: VK_ACCESS_TRANSFER_WRITE_BIT,
-                dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
-                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                buffer: scene.light_table.buffer,
-                offset: 0,
-                size: scene.light_upload_bytes,
-            };
-            // SAFETY: recording is open; `light_staging` (host-coherent, the collection
-            // wrote `light_upload_bytes` into its mapped bytes this frame) and
-            // `light_table` (device-local, TRANSFER_DST | STORAGE) are live buffers on
-            // this device; the copy region + barrier span `[0, light_upload_bytes)` ≤ both
-            // buffer sizes (caller contract — the table is sized for MAX_LIGHTS); the
-            // barrier orders the TRANSFER write before the COMPUTE_SHADER reads (the
-            // marcher/resolve) on the GPU timeline, fence-free; `&region`/`&to_shader_read`
-            // outlive the calls.
             // SAFETY: recording is open; the copy names the live host-coherent staging +
             // device-local table buffers; the copy region spans `[0, light_upload_bytes)`
-            // ≤ both buffer sizes (caller contract). The COPY is GPU work (not a barrier),
-            // so it runs unconditionally — only the following buffer barrier is graph-
-            // driven when the flag is ON. `&region` outlives the call.
+            // ≤ both buffer sizes (caller contract — the table is sized for MAX_LIGHTS).
+            // The COPY is GPU work (not a barrier), so it runs unconditionally — only the
+            // following buffer barrier is graph-driven. `&region` outlives the call.
             unsafe {
                 (self.fns.cmd_copy_buffer)(
                     cmd,
@@ -3614,40 +3371,22 @@ impl<'ctx> Renderer<'ctx> {
                     &region,
                 );
             }
-            // Steps 1d/1e: the TRANSFER_WRITE→SHADER_READ barrier is DRIVEN by the graph's
-            // "light_upload" pass when ON (this branch runs iff `light_dirty &&
+            // The TRANSFER_WRITE→SHADER_READ barrier is DRIVEN by the graph's
+            // "light_upload" pass (this branch runs iff `light_dirty &&
             // light_upload_bytes > 0`, the same gate that declared the pass). The graph
-            // barrier spans the WHOLE buffer (a sound superset of the hand `[0,
-            // light_upload_bytes)` range); OFF keeps the hand barrier verbatim.
-            if self.use_framegraph {
-                let plan = self
-                    .gbuffer_pass_plan
-                    .as_ref()
-                    .expect("invariant: use_framegraph ON ⇒ declare_gbuffer_graph ran");
-                let light_upload = plan
-                    .light_upload
-                    .expect("invariant: light_dirty ⇒ light_upload pass declared");
-                self.record_graph_pass(light_upload, cmd, targets, scene, fi);
-            } else {
-                // SAFETY: recording is open; TRANSFER→COMPUTE_SHADER with
-                // TRANSFER_WRITE→SHADER_READ orders the copy's write before the
-                // marcher/resolve reads on the GPU timeline, fence-free; `&to_shader_read`
-                // outlives the call.
-                unsafe {
-                    (self.fns.cmd_pipeline_barrier)(
-                        cmd,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        0,
-                        0,
-                        ptr::null(),
-                        1,
-                        (&to_shader_read as *const VkBufferMemoryBarrier).cast(),
-                        0,
-                        ptr::null(),
-                    );
-                }
-            }
+            // barrier spans the WHOLE buffer (a sound superset of the `[0,
+            // light_upload_bytes)` range).
+            // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+            // TRANSFER→COMPUTE_SHADER buffer barrier for the "light_upload" pass, ordering
+            // the copy's write before the marcher/resolve reads on the GPU timeline.
+            let plan = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
+            let light_upload = plan
+                .light_upload
+                .expect("invariant: light_dirty ⇒ light_upload pass declared");
+            self.record_graph_pass(light_upload, cmd, targets, scene, fi);
         }
 
         // === Render P0: the P4b COARSE-CULL pass (Decision: mirror the offscreen
@@ -3668,23 +3407,22 @@ impl<'ctx> Renderer<'ctx> {
             // group per `LOCAL_SIZE_X` tiles, mirroring the offscreen `coarse_group_count_x`.
             let (tw, th) = tile_grid_extent(present_extent.width, present_extent.height);
             let coarse_groups = (tw * th).div_ceil(LOCAL_SIZE_X);
-            // Steps 1d/1e: when ON, the coarse pass's INPUT barrier (depth→sampled — the
-            // coarse pass is the graph's FIRST COMPUTE depth reader, so it owns the
-            // DEPTH_ATTACHMENT_OPTIMAL→SHADER_READ_ONLY transition site (3)) is DRIVEN by
-            // the graph's "coarse" pass, recorded HERE, immediately before the coarse
-            // dispatch that samples depth. The `tiles` cull→marcher barrier is derived at
-            // the marcher (the reader), so it is emitted later by `record_pass(marcher)`
-            // (after this dispatch writes tiles) — NOT here. OFF: the hand path recorded
-            // depth→sampled unconditionally at site (3) above.
-            if self.use_framegraph {
-                let coarse = self
-                    .gbuffer_pass_plan
-                    .as_ref()
-                    .expect("invariant: use_framegraph ON ⇒ declare_gbuffer_graph ran")
-                    .coarse
-                    .expect("invariant: scene.coarse.is_some() ⇒ coarse pass declared");
-                self.record_graph_pass(coarse, cmd, targets, scene, fi);
-            }
+            // The coarse pass's INPUT barrier (depth→sampled — the coarse pass is the
+            // graph's FIRST COMPUTE depth reader, so it owns the
+            // DEPTH_ATTACHMENT_OPTIMAL→SHADER_READ_ONLY transition) is DRIVEN by the
+            // graph's "coarse" pass, recorded HERE, immediately before the coarse dispatch
+            // that samples depth. The `tiles` cull→marcher barrier is derived at the
+            // marcher (the reader), so it is emitted later by `record_pass(marcher)`
+            // (after this dispatch writes tiles) — NOT here.
+            // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+            // depth→sampled barrier for the "coarse" pass into `cmd`.
+            let coarse = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .coarse
+                .expect("invariant: scene.coarse.is_some() ⇒ coarse pass declared");
+            self.record_graph_pass(coarse, cmd, targets, scene, fi);
             // SAFETY: recording is open; the coarse pipeline + its layout (declaring
             // `vocab_layout` at set 0 + the shared COMPUTE push range) are live on this device
             // (caller contract); the vocabulary set binds the SSBO/UBO + the now-transitioned
@@ -3713,43 +3451,11 @@ impl<'ctx> Renderer<'ctx> {
                 (self.fns.cmd_dispatch)(cmd, coarse_groups, 1, 1);
             }
 
-            // Order the coarse pass's `TileBound` WRITES (binding 6, COMPUTE/SHADER_WRITE)
-            // before the fine marcher's READS (COMPUTE/SHADER_READ) — a COMPUTE→COMPUTE buffer
-            // barrier on `tiles_buffer` (mirrors the offscreen inter-dispatch barrier).
-            // Steps 1d/1e: when ON, the graph derives this at the marcher (the `tiles`
-            // reader), so `record_pass(marcher)` emits it just before the marcher dispatch
-            // (still after this coarse dispatch's write) — this hand barrier runs OFF only.
-            if !self.use_framegraph {
-                let tiles_barrier = VkBufferMemoryBarrier {
-                    s_type: VkStructureType::BufferMemoryBarrier,
-                    p_next: ptr::null(),
-                    src_access_mask: VK_ACCESS_SHADER_WRITE_BIT,
-                    dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
-                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                    buffer: scene.tiles_buffer.buffer,
-                    offset: 0,
-                    size: VK_WHOLE_SIZE,
-                };
-                // SAFETY: recording is open; `tiles_buffer` is a live STORAGE buffer on this device
-                // (the cull just wrote it); COMPUTE_SHADER→COMPUTE_SHADER with
-                // SHADER_WRITE→SHADER_READ makes the cull's tile-bound writes available + visible to
-                // the marcher's reads on the GPU timeline; `&tiles_barrier` outlives the call.
-                unsafe {
-                    (self.fns.cmd_pipeline_barrier)(
-                        cmd,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        0,
-                        0,
-                        ptr::null(),
-                        1,
-                        (&tiles_barrier as *const VkBufferMemoryBarrier).cast(),
-                        0,
-                        ptr::null(),
-                    );
-                }
-            }
+            // The coarse pass's `TileBound` WRITES (binding 6, COMPUTE/SHADER_WRITE) are
+            // ordered before the fine marcher's READS (COMPUTE/SHADER_READ) by the graph:
+            // it derives this COMPUTE→COMPUTE `tiles_buffer` barrier at the marcher (the
+            // `tiles` reader), so `record_pass(marcher)` emits it just before the marcher
+            // dispatch (still after this coarse dispatch's write) — NOT here.
         }
 
         // === Pass B: the marcher SAMPLES the depth image, STORES the G-buffer. ===
@@ -3824,21 +3530,22 @@ impl<'ctx> Renderer<'ctx> {
         // `GBUFFER_MARCHER_PUSH_BYTES` (80) bytes at offset 0, exactly the declared 80-byte range,
         // and the backing `marcher_push` local outlives the call.
         let marcher_push_bytes = marcher_push.as_bytes();
-        // Steps 1d/1e: the marcher's INPUT barriers are DRIVEN by the graph's "marcher"
-        // pass, recorded HERE, immediately before the marcher dispatch (the collapse of
-        // hand sites 3/3b/4). It emits color→general + viewt first-touch UNDEFINED→GENERAL
-        // and, on the coarse-ON path, the `tiles` cull→marcher COMPUTE→COMPUTE barrier
-        // (correctly AFTER the coarse dispatch wrote tiles). depth→sampled is free here
-        // (the coarse pass — or, coarse-OFF, this pass would own it: the graph derives it
-        // wherever depth is first COMPUTE-read). OFF: the hand sites 3/3b/4 above ran.
-        if self.use_framegraph {
-            let marcher = self
-                .gbuffer_pass_plan
-                .as_ref()
-                .expect("invariant: use_framegraph ON ⇒ declare_gbuffer_graph ran")
-                .marcher;
-            self.record_graph_pass(marcher, cmd, targets, scene, fi);
-        }
+        // The marcher's INPUT barriers are DRIVEN by the graph's "marcher" pass, recorded
+        // HERE, immediately before the marcher dispatch (the collapse of the former hand
+        // depth→sampled / color→general / lit·viewt·ssao first-touch sites). It emits
+        // color→general + viewt first-touch UNDEFINED→GENERAL and, on the coarse-ON path,
+        // the `tiles` cull→marcher COMPUTE→COMPUTE barrier (correctly AFTER the coarse
+        // dispatch wrote tiles). depth→sampled is free here (the coarse pass — or,
+        // coarse-OFF, this pass would own it: the graph derives it wherever depth is first
+        // COMPUTE-read).
+        // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+        // input barriers for the "marcher" pass into `cmd` against the live G-buffer targets.
+        let marcher = self
+            .gbuffer_pass_plan
+            .as_ref()
+            .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+            .marcher;
+        self.record_graph_pass(marcher, cmd, targets, scene, fi);
         unsafe {
             (self.fns.cmd_bind_pipeline)(
                 cmd,
@@ -3875,49 +3582,11 @@ impl<'ctx> Renderer<'ctx> {
         // Step 1a (sync1 array-batching): the 4 store-to-load barriers share one global
         // COMPUTE_SHADER→COMPUTE_SHADER scope over independent images → ONE array-form call,
         // byte-identical GPU semantics to the former four `count=1` calls.
-        // Steps 1d/1e: when ON, the graph derives each attribute's store→load at its FIRST
-        // reader — normal/material/viewt at `record_pass(ssao)` (before the SSAO dispatch)
-        // when SSAO is on, and albedo (+ any not read by SSAO) at `record_pass(resolve)`
-        // (before the resolve dispatch). So this single hand batch is split across those
-        // two pass records; it runs OFF only.
-        if !self.use_framegraph {
-            let store_to_load = [
-                &targets.albedo[fi],
-                &targets.normal[fi],
-                &targets.material[fi],
-                &targets.viewt[fi],
-            ]
-            .map(|tex| VkImageMemoryBarrier {
-                s_type: VkStructureType::ImageMemoryBarrier,
-                p_next: ptr::null(),
-                src_access_mask: VK_ACCESS_SHADER_WRITE_BIT,
-                dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
-                old_layout: VK_IMAGE_LAYOUT_GENERAL,
-                new_layout: VK_IMAGE_LAYOUT_GENERAL,
-                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                image: tex.image,
-                subresource_range: COLOR_SUBRESOURCE_RANGE,
-            });
-            // SAFETY: recording is open; 4 image barriers on live, distinct G-buffer images;
-            // COMPUTE_SHADER→COMPUTE_SHADER with SHADER_WRITE→SHADER_READ + GENERAL→GENERAL
-            // makes the marcher's attribute store available + visible to the resolve's load;
-            // `store_to_load` (a stack array) outlives the call; count == len.
-            unsafe {
-                (self.fns.cmd_pipeline_barrier)(
-                    cmd,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    0,
-                    0,
-                    ptr::null(),
-                    0,
-                    ptr::null(),
-                    store_to_load.len() as u32,
-                    store_to_load.as_ptr().cast(),
-                );
-            }
-        }
+        // The graph derives each attribute's store→load at its FIRST reader —
+        // normal/material/viewt at `record_pass(ssao)` (before the SSAO dispatch) when
+        // SSAO is on, and albedo (+ any not read by SSAO) at `record_pass(resolve)`
+        // (before the resolve dispatch). So the former single hand batch is split across
+        // those two pass records; nothing is recorded here.
 
         // === Render P7: the SSAO compute pass. Recorded ONLY when the scene wires the SSAO
         // activation (`scene.ssao.is_some()`); otherwise skipped entirely — NO bind, NO dispatch,
@@ -3939,22 +3608,21 @@ impl<'ctx> Renderer<'ctx> {
                 .as_ref()
                 .expect("invariant: scene.ssao is Some ⇒ GBufferTargets::create wrote ssao_set")
                 [self.frame_index];
-            // Steps 1d/1e: when ON, the SSAO pass's INPUT barriers are DRIVEN by the
-            // graph's "ssao" pass, recorded HERE, before the SSAO dispatch: the
-            // normal/material/viewt marcher store→load (SSAO is their FIRST reader) + the
-            // `ssao` first-touch UNDEFINED→GENERAL (the SSAO write). The `ssao` store→load
+            // The SSAO pass's INPUT barriers are DRIVEN by the graph's "ssao" pass,
+            // recorded HERE, before the SSAO dispatch: the normal/material/viewt marcher
+            // store→load (SSAO is their FIRST reader) + the `ssao` first-touch
+            // UNDEFINED→GENERAL (the SSAO write). The `ssao` store→load
             // (SSAO-write→resolve-read) is derived at the resolve (the reader), so it is
-            // emitted later by `record_pass(resolve)` — NOT here. OFF: the hand (5a) batch
-            // above covered the inputs (ssao's transition was in the site-(4) batch).
-            if self.use_framegraph {
-                let ssao_pass = self
-                    .gbuffer_pass_plan
-                    .as_ref()
-                    .expect("invariant: use_framegraph ON ⇒ declare_gbuffer_graph ran")
-                    .ssao
-                    .expect("invariant: scene.ssao.is_some() ⇒ ssao pass declared");
-                self.record_graph_pass(ssao_pass, cmd, targets, scene, fi);
-            }
+            // emitted later by `record_pass(resolve)` — NOT here.
+            // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+            // input barriers for the "ssao" pass into `cmd`.
+            let ssao_pass = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .ssao
+                .expect("invariant: scene.ssao.is_some() ⇒ ssao pass declared");
+            self.record_graph_pass(ssao_pass, cmd, targets, scene, fi);
             // SAFETY: recording is open; the SSAO pipeline + its layout (declaring the SSAO set
             // layout at set 0 + the shared 80-byte COMPUTE push range) are live on this device
             // (caller contract); `ssao_set` binds the now-stored (SHADER_READ-visible, GENERAL)
@@ -3982,44 +3650,11 @@ impl<'ctx> Renderer<'ctx> {
                 (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
             }
 
-            // Order the SSAO pass's `ssao` WRITES (COMPUTE/SHADER_WRITE) before the resolve's
-            // `gSsao.Load` READS (COMPUTE/SHADER_READ) — a COMPUTE→COMPUTE, GENERAL→GENERAL image
-            // barrier on `ssao` (the cull→resolve barrier shape, on the `ssao` image).
-            // Steps 1d/1e: when ON, the graph derives this at the resolve (the `ssao`
-            // reader), so `record_pass(resolve)` emits it before the resolve dispatch
-            // (still after this SSAO dispatch's write) — this hand barrier runs OFF only.
-            if !self.use_framegraph {
-                let ssao_store_to_load = VkImageMemoryBarrier {
-                    s_type: VkStructureType::ImageMemoryBarrier,
-                    p_next: ptr::null(),
-                    src_access_mask: VK_ACCESS_SHADER_WRITE_BIT,
-                    dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
-                    old_layout: VK_IMAGE_LAYOUT_GENERAL,
-                    new_layout: VK_IMAGE_LAYOUT_GENERAL,
-                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                    image: targets.ssao[fi].image,
-                    subresource_range: COLOR_SUBRESOURCE_RANGE,
-                };
-                // SAFETY: recording is open; one image barrier on the live `ssao` image (the SSAO pass
-                // just wrote it); COMPUTE_SHADER→COMPUTE_SHADER with SHADER_WRITE→SHADER_READ +
-                // GENERAL→GENERAL makes the SSAO store available + visible to the resolve's
-                // `gSsao.Load`; `&ssao_store_to_load` outlives the call.
-                unsafe {
-                    (self.fns.cmd_pipeline_barrier)(
-                        cmd,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        0,
-                        0,
-                        ptr::null(),
-                        0,
-                        ptr::null(),
-                        1,
-                        (&ssao_store_to_load as *const VkImageMemoryBarrier).cast(),
-                    );
-                }
-            }
+            // The SSAO pass's `ssao` WRITES (COMPUTE/SHADER_WRITE) are ordered before the
+            // resolve's `gSsao.Load` READS (COMPUTE/SHADER_READ) by the graph: it derives
+            // this COMPUTE→COMPUTE, GENERAL→GENERAL image barrier on `ssao` at the resolve
+            // (the `ssao` reader), so `record_pass(resolve)` emits it before the resolve
+            // dispatch (still after this SSAO dispatch's write) — NOT here.
         }
 
         // === Lighting L1: the clustered froxel light-cull pass (Decision 6). Recorded ONLY
@@ -4030,7 +3665,10 @@ impl<'ctx> Renderer<'ctx> {
         // ClusterGrid + LightIndexList; the resolve reads them, so a COMPUTE→COMPUTE buffer
         // barrier orders the cull WRITE before the resolve READ. The cull does NOT depend on
         // gViewT (it is geometric), so it can run after the marcher without further sync. ===
-        if let (Some(cull_pipeline), Some(cull_set), Some(grid), Some(index), Some(alloc)) = (
+        // `_grid` / `_index` are matched only to GATE this L1 block on the cluster
+        // buffers being wired; the graph's `light_cull` / `resolve` passes read them via
+        // `scene`, so the bindings themselves are unused here.
+        if let (Some(cull_pipeline), Some(cull_set), Some(_grid), Some(_index), Some(alloc)) = (
             scene.cluster_cull,
             // The lock-free per-frame ring: bind this present's slot (`frame_index`).
             targets.cull_set.as_ref().map(|s| &s[self.frame_index]),
@@ -4047,50 +3685,21 @@ impl<'ctx> Renderer<'ctx> {
             unsafe {
                 (self.fns.cmd_fill_buffer)(cmd, alloc.buffer, 0, VK_WHOLE_SIZE, 0);
             }
-            // Steps 1d/1e: when ON, the alloc TRANSFER→COMPUTE(RW) barrier (+ the light-
-            // table TRANSFER→COMPUTE flush, if `light_upload` left one pending — the cull
-            // is the first COMPUTE reader of the table) is DRIVEN by the graph's
-            // "light_cull" pass, recorded HERE, before the cull dispatch. The cull's grid/
-            // index writes are ordered to the resolve by `record_pass(resolve)` (the
-            // reader) — NOT here. OFF keeps the hand barrier verbatim.
-            if self.use_framegraph {
-                let light_cull = self
-                    .gbuffer_pass_plan
-                    .as_ref()
-                    .expect("invariant: use_framegraph ON ⇒ declare_gbuffer_graph ran")
-                    .light_cull
-                    .expect("invariant: cull wired ⇒ light_cull pass declared");
-                self.record_graph_pass(light_cull, cmd, targets, scene, fi);
-            } else {
-                let alloc_reset_barrier = VkBufferMemoryBarrier {
-                    s_type: VkStructureType::BufferMemoryBarrier,
-                    p_next: ptr::null(),
-                    src_access_mask: VK_ACCESS_TRANSFER_WRITE_BIT,
-                    dst_access_mask: VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                    buffer: alloc.buffer,
-                    offset: 0,
-                    size: VK_WHOLE_SIZE,
-                };
-                // SAFETY: recording is open; the barrier orders the fill's TRANSFER write
-                // before the cull's COMPUTE atomics on the GPU timeline;
-                // `&alloc_reset_barrier` outlives the call.
-                unsafe {
-                    (self.fns.cmd_pipeline_barrier)(
-                        cmd,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        0,
-                        0,
-                        ptr::null(),
-                        1,
-                        (&alloc_reset_barrier as *const VkBufferMemoryBarrier).cast(),
-                        0,
-                        ptr::null(),
-                    );
-                }
-            }
+            // The alloc TRANSFER→COMPUTE(RW) barrier (+ the light-table TRANSFER→COMPUTE
+            // flush, if `light_upload` left one pending — the cull is the first COMPUTE
+            // reader of the table) is DRIVEN by the graph's "light_cull" pass, recorded
+            // HERE, before the cull dispatch. The cull's grid/index writes are ordered to
+            // the resolve by `record_pass(resolve)` (the reader) — NOT here.
+            // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+            // TRANSFER→COMPUTE barrier for the "light_cull" pass into `cmd`, ordering the
+            // fill's TRANSFER write before the cull's COMPUTE atomics on the GPU timeline.
+            let light_cull = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .light_cull
+                .expect("invariant: cull wired ⇒ light_cull pass declared");
+            self.record_graph_pass(light_cull, cmd, targets, scene, fi);
 
             // (L1-1) Bind the cull pipeline + the cull set (written ONCE at sync_gbuffer),
             // push the 16-byte ClusterCullPush, dispatch over CLUSTER_COUNT froxels.
@@ -4128,45 +3737,11 @@ impl<'ctx> Renderer<'ctx> {
                 (self.fns.cmd_dispatch)(cmd, cull_groups, 1, 1);
             }
 
-            // (L1-2) Make the cull's ClusterGrid + LightIndexList writes available + visible to
-            // the resolve's reads (COMPUTE→COMPUTE, SHADER_WRITE→SHADER_READ) on both buffers.
-            // Step 1a (sync1 array-batching): the 2 buffer barriers share one global
-            // COMPUTE_SHADER→COMPUTE_SHADER scope over independent SSBOs → ONE array-form
-            // call, byte-identical GPU semantics to the former two `count=1` calls.
-            // Steps 1d/1e: when ON, the graph derives these at the resolve (the grid/index
-            // reader), so `record_pass(resolve)` emits them before the resolve dispatch
-            // (still after this cull dispatch's writes) — this hand barrier runs OFF only.
-            if !self.use_framegraph {
-                let cull_to_resolve = [grid, index].map(|buf| VkBufferMemoryBarrier {
-                    s_type: VkStructureType::BufferMemoryBarrier,
-                    p_next: ptr::null(),
-                    src_access_mask: VK_ACCESS_SHADER_WRITE_BIT,
-                    dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
-                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                    buffer: buf.buffer,
-                    offset: 0,
-                    size: VK_WHOLE_SIZE,
-                });
-                // SAFETY: recording is open; 2 buffer barriers on live, distinct cluster SSBOs;
-                // COMPUTE_SHADER→COMPUTE_SHADER with SHADER_WRITE→SHADER_READ makes the cull's
-                // grid/index store available + visible to the resolve's load on the GPU timeline;
-                // `cull_to_resolve` (a stack array) outlives the call; buffer count == len.
-                unsafe {
-                    (self.fns.cmd_pipeline_barrier)(
-                        cmd,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        0,
-                        0,
-                        ptr::null(),
-                        cull_to_resolve.len() as u32,
-                        cull_to_resolve.as_ptr().cast(),
-                        0,
-                        ptr::null(),
-                    );
-                }
-            }
+            // (L1-2) The cull's ClusterGrid + LightIndexList writes are made available +
+            // visible to the resolve's reads by the graph: it derives these
+            // COMPUTE→COMPUTE, SHADER_WRITE→SHADER_READ buffer barriers at the resolve
+            // (the grid/index reader), so `record_pass(resolve)` emits them before the
+            // resolve dispatch (still after this cull dispatch's writes) — NOT here.
         }
 
         // === CSM Increment 1b (Rung A): the cascade DEPTH pass (W5 — a NEW recorder bracket,
@@ -4183,65 +3758,25 @@ impl<'ctx> Renderer<'ctx> {
             // backend cap so an out-of-range `active_count` cannot drive `layer_render_view` /
             // the barrier range past the array bounds. `1` reproduces the Rung-A single-cascade path.
             let active = (csm.active_count as usize).clamp(1, MAX_CASCADES) as u32;
-            // The WHOLE-ARRAY depth subresource range (`[0..active)` layers, DEPTH aspect): the
-            // Rung-A `DEPTH_SUBRESOURCE_RANGE` covers ONLY layer 0, so Rung B barriers the active
-            // layers explicitly. ONE barrier-in + ONE barrier-out span every rendered cascade.
-            let csm_layers_range = VkImageSubresourceRange {
-                aspect_mask: VK_IMAGE_ASPECT_DEPTH_BIT,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: active,
-            };
             // (CSM-0) Barrier-in: the cascade image UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL (the
             // depth-write access, DEPTH aspect) over ALL `[0..active)` layers. Each is re-
             // `UNDEFINED`'d (the prior frame's content is discarded before this frame's depth pass).
-            // Steps 1d/1e: when ON, the graph's "csm" pass (declaring the cascade layered
-            // DEPTH_WRITE over `depth_layers(active)`) DRIVES this barrier-in, recorded
-            // HERE, before the cascade depth loop. Its barrier-OUT (→SHADER_READ_ONLY) is
-            // derived at the resolve (the cascade reader), so `record_pass(resolve)` emits
-            // it — NOT here. OFF keeps the hand barrier verbatim.
-            if self.use_framegraph {
-                let csm_pass = self
-                    .gbuffer_pass_plan
-                    .as_ref()
-                    .expect("invariant: use_framegraph ON ⇒ declare_gbuffer_graph ran")
-                    .csm
-                    .expect("invariant: scene.csm.is_some() ⇒ csm pass declared");
-                self.record_graph_pass(csm_pass, cmd, targets, scene, fi);
-            } else {
-                let to_depth = VkImageMemoryBarrier {
-                    s_type: VkStructureType::ImageMemoryBarrier,
-                    p_next: ptr::null(),
-                    src_access_mask: 0,
-                    dst_access_mask: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                    old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
-                    new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                    image: cascade.image,
-                    subresource_range: csm_layers_range,
-                };
-                // SAFETY: recording is open; one image barrier on the live cascade depth image;
-                // TOP_OF_PIPE→(EARLY|LATE)_FRAGMENT_TESTS with UNDEFINED→DEPTH is the superset-correct
-                // first depth transition (mirrors record_gbuffer's main depth barrier-in); `&to_depth`
-                // outlives the call.
-                unsafe {
-                    (self.fns.cmd_pipeline_barrier)(
-                        cmd,
-                        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
-                            | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                        0,
-                        0,
-                        ptr::null(),
-                        0,
-                        ptr::null(),
-                        1,
-                        (&to_depth as *const VkImageMemoryBarrier).cast(),
-                    );
-                }
-            }
+            // The graph derives the layered subresource range internally; the former hand
+            // barriers spanned `[0..active)` explicitly (the Rung-A `DEPTH_SUBRESOURCE_RANGE`
+            // covers only layer 0).
+            // The graph's "csm" pass (declaring the cascade layered DEPTH_WRITE over
+            // `depth_layers(active)`) DRIVES this barrier-in, recorded HERE, before the
+            // cascade depth loop. Its barrier-OUT (→SHADER_READ_ONLY) is derived at the
+            // resolve (the cascade reader), so `record_pass(resolve)` emits it — NOT here.
+            // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+            // UNDEFINED→DEPTH barrier-in for the "csm" pass into `cmd`.
+            let csm_pass = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .csm
+                .expect("invariant: scene.csm.is_some() ⇒ csm pass declared");
+            self.record_graph_pass(csm_pass, cmd, targets, scene, fi);
 
             // (CSM-1) Depth-only dynamic rendering, LOOPED over the `[0..active)` cascades (Rung B).
             // The render area / viewport / scissor are cascade-INDEPENDENT (the square shadow-map
@@ -4398,41 +3933,9 @@ impl<'ctx> Renderer<'ctx> {
             // aspect, the full-array range) makes every rendered cascade's depth available +
             // visible to the resolve's `SampleCmpLevelZero(float3(uv, c))` and transitions the
             // layout for sampling.
-            // Steps 1d/1e: when ON, the graph derives this at the resolve (the cascade
-            // reader), so `record_pass(resolve)` emits it before the resolve dispatch
-            // (still after this cascade depth loop) — this hand barrier runs OFF only.
-            if !self.use_framegraph {
-                let csm_to_sampled = VkImageMemoryBarrier {
-                    s_type: VkStructureType::ImageMemoryBarrier,
-                    p_next: ptr::null(),
-                    src_access_mask: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                    dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
-                    old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                    new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                    image: cascade.image,
-                    subresource_range: csm_layers_range,
-                };
-                // SAFETY: recording is open; (EARLY|LATE)_FRAGMENT_TESTS→COMPUTE_SHADER with
-                // DEPTH_WRITE→SHADER_READ and DEPTH→SHADER_READ_ONLY makes the cascade depth available
-                // + visible to the resolve's PCF sample; `&csm_to_sampled` outlives the call.
-                unsafe {
-                    (self.fns.cmd_pipeline_barrier)(
-                        cmd,
-                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
-                            | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        0,
-                        0,
-                        ptr::null(),
-                        0,
-                        ptr::null(),
-                        1,
-                        (&csm_to_sampled as *const VkImageMemoryBarrier).cast(),
-                    );
-                }
-            }
+            // The graph derives this →SHADER_READ_ONLY barrier-out at the resolve (the
+            // cascade reader), so `record_pass(resolve)` emits it before the resolve
+            // dispatch (still after this cascade depth loop) — NOT here.
         }
 
         // === Shadow Phase 5 Inc-1-GPU: the sparse SPOT atlas DEPTH pass (a NEW recorder bracket,
@@ -4449,63 +3952,23 @@ impl<'ctx> Renderer<'ctx> {
             // `active_layers` cannot drive `layer_render_view` / the barrier range past the array
             // bounds. `1` reproduces the single-spot path.
             let active = (atlas_act.active_layers as usize).clamp(1, MAX_TEXTURE_LAYERS) as u32;
-            // The WHOLE-ARRAY depth subresource range (`[0..active)` layers, DEPTH aspect): ONE
-            // barrier-in + ONE barrier-out span every rendered slot (mirrors the CSM range).
-            let atlas_layers_range = VkImageSubresourceRange {
-                aspect_mask: VK_IMAGE_ASPECT_DEPTH_BIT,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: active,
-            };
             // Barrier-in: the atlas image UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL (depth-write access,
             // DEPTH aspect) over ALL `[0..active)` layers. Each is re-`UNDEFINED`'d (the prior frame's
-            // content is discarded before this frame's depth pass).
-            // Steps 1d/1e: when ON, the graph's "atlas_depth" pass (declaring the atlas
-            // layered DEPTH_WRITE over `depth_layers(active)`) DRIVES this barrier-in,
-            // recorded HERE, before the atlas depth loop. Its barrier-OUT (→SHADER_READ_
-            // ONLY) is derived at the resolve (the atlas reader) — NOT here. OFF keeps the
-            // hand barrier verbatim.
-            if self.use_framegraph {
-                let atlas_pass = self
-                    .gbuffer_pass_plan
-                    .as_ref()
-                    .expect("invariant: use_framegraph ON ⇒ declare_gbuffer_graph ran")
-                    .atlas
-                    .expect("invariant: scene.atlas_punctual.is_some() ⇒ atlas pass declared");
-                self.record_graph_pass(atlas_pass, cmd, targets, scene, fi);
-            } else {
-                let to_depth = VkImageMemoryBarrier {
-                    s_type: VkStructureType::ImageMemoryBarrier,
-                    p_next: ptr::null(),
-                    src_access_mask: 0,
-                    dst_access_mask: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                    old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
-                    new_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                    image: atlas.image,
-                    subresource_range: atlas_layers_range,
-                };
-                // SAFETY: recording is open; one image barrier on the live atlas depth image;
-                // TOP_OF_PIPE→(EARLY|LATE)_FRAGMENT_TESTS with UNDEFINED→DEPTH is the superset-correct
-                // first depth transition (mirrors the CSM depth barrier-in); `&to_depth` outlives the call.
-                unsafe {
-                    (self.fns.cmd_pipeline_barrier)(
-                        cmd,
-                        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
-                            | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                        0,
-                        0,
-                        ptr::null(),
-                        0,
-                        ptr::null(),
-                        1,
-                        (&to_depth as *const VkImageMemoryBarrier).cast(),
-                    );
-                }
-            }
+            // content is discarded before this frame's depth pass). The graph derives the
+            // layered subresource range internally.
+            // The graph's "atlas_depth" pass (declaring the atlas layered DEPTH_WRITE over
+            // `depth_layers(active)`) DRIVES this barrier-in, recorded HERE, before the
+            // atlas depth loop. Its barrier-OUT (→SHADER_READ_ONLY) is derived at the
+            // resolve (the atlas reader) — NOT here.
+            // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+            // UNDEFINED→DEPTH barrier-in for the "atlas_depth" pass into `cmd`.
+            let atlas_pass = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .atlas
+                .expect("invariant: scene.atlas_punctual.is_some() ⇒ atlas pass declared");
+            self.record_graph_pass(atlas_pass, cmd, targets, scene, fi);
 
             // Depth-only dynamic rendering, LOOPED over the `[0..active)` atlas slots. The render
             // area / viewport / scissor are slot-INDEPENDENT (the square shadow-map resolution), so
@@ -4686,62 +4149,28 @@ impl<'ctx> Renderer<'ctx> {
                 }
             }
 
-            // The dual-use depth barrier: DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL over
-            // ALL `[0..active)` atlas layers in ONE barrier. Depth WRITES happen at
-            // LATE_FRAGMENT_TESTS; the resolve PCF-SAMPLES at COMPUTE_SHADER.
-            // Steps 1d/1e: when ON, the graph derives this at the resolve (the atlas
-            // reader), so `record_pass(resolve)` emits it before the resolve dispatch
-            // (still after this atlas depth loop) — this hand barrier runs OFF only.
-            if !self.use_framegraph {
-                let atlas_to_sampled = VkImageMemoryBarrier {
-                    s_type: VkStructureType::ImageMemoryBarrier,
-                    p_next: ptr::null(),
-                    src_access_mask: VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                    dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
-                    old_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                    new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                    image: atlas.image,
-                    subresource_range: atlas_layers_range,
-                };
-                // SAFETY: recording is open; (EARLY|LATE)_FRAGMENT_TESTS→COMPUTE_SHADER with
-                // DEPTH_WRITE→SHADER_READ and DEPTH→SHADER_READ_ONLY makes the atlas depth available +
-                // visible to the resolve's PCF sample; `&atlas_to_sampled` outlives the call.
-                unsafe {
-                    (self.fns.cmd_pipeline_barrier)(
-                        cmd,
-                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT
-                            | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        0,
-                        0,
-                        ptr::null(),
-                        0,
-                        ptr::null(),
-                        1,
-                        (&atlas_to_sampled as *const VkImageMemoryBarrier).cast(),
-                    );
-                }
-            }
+            // The graph derives the dual-use depth barrier-out
+            // (DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL over ALL `[0..active)`
+            // atlas layers) at the resolve (the atlas reader), so `record_pass(resolve)`
+            // emits it before the resolve dispatch (still after this atlas depth loop) —
+            // NOT here.
         }
 
-        // Steps 1d/1e: the RESOLVE's INPUT barriers — the albedo store→load, the ssao
-        // store→load, the L1 grid/index cull→resolve, the layered cascade/atlas →sampled,
-        // and the lit first-touch UNDEFINED→GENERAL — are all DRIVEN by the graph's
-        // "resolve" pass, recorded HERE, immediately before the resolve dispatch. The
-        // graph derives each at its true first-use (the resolve is the first reader of
-        // albedo / ssao / grid / index / cascade / atlas, and the writer of lit), so this
-        // single `record_pass` replaces the hand batches those producers deferred to their
-        // consumers. OFF: those hand barriers ran at their producer sites above.
-        if self.use_framegraph {
-            let resolve = self
-                .gbuffer_pass_plan
-                .as_ref()
-                .expect("invariant: use_framegraph ON ⇒ declare_gbuffer_graph ran")
-                .resolve;
-            self.record_graph_pass(resolve, cmd, targets, scene, fi);
-        }
+        // The RESOLVE's INPUT barriers — the albedo store→load, the ssao store→load, the
+        // L1 grid/index cull→resolve, the layered cascade/atlas →sampled, and the lit
+        // first-touch UNDEFINED→GENERAL — are all DRIVEN by the graph's "resolve" pass,
+        // recorded HERE, immediately before the resolve dispatch. The graph derives each
+        // at its true first-use (the resolve is the first reader of albedo / ssao / grid /
+        // index / cascade / atlas, and the writer of lit), so this single `record_pass`
+        // emits the barriers those producers deferred to their consumers.
+        // SAFETY: recording is open; `record_graph_pass` records the graph's derived input
+        // barriers for the "resolve" pass into `cmd` against the live G-buffer targets.
+        let resolve = self
+            .gbuffer_pass_plan
+            .as_ref()
+            .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+            .resolve;
+        self.record_graph_pass(resolve, cmd, targets, scene, fi);
 
         // (5b) Deferred RESOLVE pass: bind the resolve pipeline + the resolve set (gAlbedo
         // @0, gMaterial @1, lit @2 — all STORAGE in GENERAL), dispatch at the SAME grid the
@@ -4775,49 +4204,19 @@ impl<'ctx> Renderer<'ctx> {
         // present now samples LIT (the resolve's output), NOT albedo (the deletion target
         // of the old step-6 albedo→SHADER_READ_ONLY barrier — albedo stays GENERAL,
         // consumed only by the resolve as a STORAGE-in-GENERAL load).
-        // Steps 1d/1e: when ON, the graph's "present_sample" pass (declaring `lit`
+        // The graph's "present_sample" pass (declaring `lit`
         // FRAGMENT/SHADER_READ/SHADER_READ_ONLY) DRIVES this transition. The SWAPCHAIN WSI
-        // barriers below (sites 7/9) stay HAND-recorded either way — the acquired
-        // presentable image is not a graph resource here. OFF keeps the hand barrier verbatim.
-        if self.use_framegraph {
-            let present_sample = self
-                .gbuffer_pass_plan
-                .as_ref()
-                .expect("invariant: use_framegraph ON ⇒ declare_gbuffer_graph ran")
-                .present_sample;
-            self.record_graph_pass(present_sample, cmd, targets, scene, fi);
-        } else {
-            let lit_to_sampled = VkImageMemoryBarrier {
-                s_type: VkStructureType::ImageMemoryBarrier,
-                p_next: ptr::null(),
-                src_access_mask: VK_ACCESS_SHADER_WRITE_BIT,
-                dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
-                old_layout: VK_IMAGE_LAYOUT_GENERAL,
-                new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-                image: targets.lit[fi].image,
-                subresource_range: COLOR_SUBRESOURCE_RANGE,
-            };
-            // SAFETY: recording is open; COMPUTE_SHADER→FRAGMENT_SHADER with
-            // SHADER_WRITE→SHADER_READ and GENERAL→SHADER_READ_ONLY makes the resolve's lit
-            // store available + visible to the present-blit's sample (the present set @fi binds
-            // `lit[fi]`, the SAME slot); `&lit_to_sampled` outlives the call.
-            unsafe {
-                (self.fns.cmd_pipeline_barrier)(
-                    cmd,
-                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                    0,
-                    0,
-                    ptr::null(),
-                    0,
-                    ptr::null(),
-                    1,
-                    (&lit_to_sampled as *const VkImageMemoryBarrier).cast(),
-                );
-            }
-        }
+        // barriers below (sites 7/9) stay HAND-recorded — the acquired presentable image
+        // is not a graph resource here.
+        // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+        // GENERAL→SHADER_READ_ONLY barrier for the "present_sample" pass into `cmd`,
+        // making the resolve's lit store available + visible to the present-blit's sample.
+        let present_sample = self
+            .gbuffer_pass_plan
+            .as_ref()
+            .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+            .present_sample;
+        self.record_graph_pass(present_sample, cmd, targets, scene, fi);
 
         // === Pass C: present-blit the LIT image (the resolve's output) into the swapchain. ===
 

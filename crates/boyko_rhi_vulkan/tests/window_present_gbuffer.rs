@@ -5363,24 +5363,12 @@ fn run_interactive_viewer<'ctx>(
     let mut yaw: f32 = 0.0;
     let mut pitch: f32 = VIEWER_INITIAL_PITCH;
 
-    // RDG Steps 1c–1e visual gate: press `G` to TOGGLE the framegraph-driven barrier path
-    // (default OFF = the hand-authored barriers; ON = the auto-derived graph drives every
-    // barrier). Flip it live while flying — the frame must render IDENTICALLY in both modes
-    // (the graph is sound-superset: same dependencies, same pixels). Watch the console for any
-    // Vulkan validation-layer errors when ON. Edge-detected so a held key toggles once.
-    let mut use_framegraph = false;
-    let mut prev_g = false;
-
     let mut queue = RawInputQueue::with_capacity(1024);
     let mut physical = PhysicalInput::new();
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
     let clear = [0.02_f32, 0.02, 0.03, 1.0];
 
-    eprintln!(
-        "[viewer] WASD+Space/Ctrl fly, mouse look, Esc quit.  \
-         G = toggle RDG framegraph barriers (currently OFF = hand path). \
-         Flip G while flying: the image must look IDENTICAL, console must stay validation-clean."
-    );
+    eprintln!("[viewer] WASD+Space/Ctrl fly, mouse look, Esc quit.");
 
     // `pump_events` returns false on WM_QUIT (the window closed) — exit then.
     while window.pump_events() {
@@ -5421,19 +5409,6 @@ fn run_interactive_viewer<'ctx>(
         if pressed(KeyCode::Escape) {
             break;
         }
-
-        // Edge-detected `G` toggle: flip the framegraph-driven barrier path live so the owner
-        // can A/B the graph-ON vs hand-OFF frame for pixel identity + validation cleanliness.
-        let g_now = pressed(KeyCode::KeyG);
-        if g_now && !prev_g {
-            use_framegraph = !use_framegraph;
-            renderer.set_use_framegraph(use_framegraph);
-            eprintln!(
-                "[framegraph] use_framegraph = {use_framegraph}  ({})",
-                if use_framegraph { "GRAPH drives barriers" } else { "HAND path" }
-            );
-        }
-        prev_g = g_now;
 
         // WASD planar move + Space/Ctrl vertical fly (Q/E also lower/raise as a fallback).
         let mut mv = [0.0_f32; 3];
