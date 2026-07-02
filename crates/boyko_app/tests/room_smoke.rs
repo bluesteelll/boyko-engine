@@ -15,6 +15,21 @@ use boyko_app::prelude::*;
 use boyko_ecs::prelude::*;
 use boyko_macros::Resource;
 use boyko_render::{MeshRenderScratch, RhiContext};
+use boyko_scene::ViewUniform;
+
+/// The room camera's authored eye — must survive spawn → propagate → resolve.
+const EYE: [f32; 3] = [0.0, 1.7, 6.0];
+/// normalize(target − eye) for target = origin: (0, −1.7, −6) / |(0, 1.7, 6)|.
+const FORWARD: [f32; 3] = [0.0, -0.272_31, -0.962_21];
+
+/// Asserts a `ViewUniform` xyz lane is within `1e-3` of the authored vector.
+fn assert_lane_near(x: f32, y: f32, z: f32, expected: [f32; 3], what: &str) {
+    let d = Vec3::new(x - expected[0], y - expected[1], z - expected[2]).length();
+    assert!(
+        d < 1.0e-3,
+        "{what}: expected ~{expected:?}, got ({x}, {y}, {z}) — |delta| = {d}"
+    );
+}
 
 /// Frames left before the test requests exit. Decremented once per Main run.
 #[derive(Resource)]
@@ -86,6 +101,23 @@ fn room_smoke_ten_frames_then_clean_teardown() {
     let scratch = app.world().resource::<MeshRenderScratch>();
     assert_eq!(scratch.batch_count(), 2, "floor + cube => two draw batches");
     assert_eq!(scratch.instance_count(), 5, "1 floor + 4 cubes => five instances");
+
+    // The camera CHAIN resolved the AUTHORED pose (R3 regression: a startup-
+    // spawned camera whose `GlobalTransform` never left identity rendered the
+    // room from the origin; `fov_y` alone cannot catch that — it is written
+    // even when the pose stays identity). `ViewUniform` is derived from the
+    // propagated `GlobalTransform` by `resolve_active_camera` every frame, so a
+    // wrong camera pose can never pass this smoke again.
+    let view = *app.world().resource::<ViewUniform>();
+    assert!(view.fov_y > 0.0, "an ACTIVE camera resolved (fov_y > 0)");
+    assert_lane_near(
+        view.camera_pos.x, view.camera_pos.y, view.camera_pos.z,
+        EYE, "ViewUniform camera_pos (authored eye)",
+    );
+    assert_lane_near(
+        view.cam_forward.x, view.cam_forward.y, view.cam_forward.z,
+        FORWARD, "ViewUniform cam_forward (authored look direction)",
+    );
 
     // The one-frame-stale WindowInfo was published post-present.
     let info = *app.world().resource::<WindowInfo>();

@@ -165,6 +165,33 @@ fn quat_z_90() -> Quat {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// Gate 0 — a FRESH-WORLD spawn at world tick 0 composes on the FIRST run
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Regression for the R3 room-camera bug — the exact gap the sibling gates
+/// masked: every other gate calls [`advance_tick`] BEFORE its first spawn
+/// ("lift the tick off the `Tick::ZERO` sentinel"), so no row in this suite was
+/// ever stamped at world tick 0 — yet that is precisely where an `App` startup
+/// system's `Commands` spawn lands. With the propagation `last_run` baseline at
+/// literal `Tick::ZERO`, the `(last_run, this_run]` window's EXCLUSIVE lower
+/// bound hid those rows forever: a startup-spawned camera kept its identity
+/// `GlobalTransform` and the room rendered from the origin. This gate spawns
+/// WITHOUT the tick warm-up and requires the FIRST propagate run to compose the
+/// pose (the TICK8 never-run baseline, `current_tick - MAX_CHANGE_AGE`).
+#[test]
+fn fresh_world_tick_zero_spawn_composes_on_first_run() {
+    let mut app = ticker(); // NO advance_tick: the spawn stamps at world tick 0.
+    let t = Transform {
+        translation: Vec3::new(0.0, 1.7, 6.0),
+        rotation: quat_z_90(),
+        scale: Vec3::ONE,
+    };
+    let e = spawn_spatial(app.world_mut(), t);
+    propagate(&mut app);
+    assert_affine_eq(global_of(app.world(), e), t.to_affine(), "tick-0 root spawn");
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // Gate 1 — identity Transform → identity GlobalTransform
 // ════════════════════════════════════════════════════════════════════════════
 

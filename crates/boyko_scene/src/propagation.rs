@@ -47,7 +47,7 @@
 
 use std::sync::OnceLock;
 
-use boyko_ecs::ecs::core::change_detection::Tick;
+use boyko_ecs::ecs::core::change_detection::{MAX_CHANGE_AGE, Tick};
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::component::hooks::deferred_master::DeferredEcsMaster;
 use boyko_ecs::ecs::core::component::observers::{ObserverContext, ObserverFn};
@@ -133,8 +133,16 @@ pub struct TransformPropagationScratch {
     detached: Vec<Entity>,
     /// The change-tick horizon of the previous run. A node is "dirty" when its
     /// `Transform`'s (or `ChildOf`'s) `changed_tick` is newer than this.
-    /// `Tick::ZERO` on the first run makes every node dirty (full initial
-    /// compose).
+    ///
+    /// Initialized to the kernel's TICK8 never-run baseline
+    /// (`current_tick - MAX_CHANGE_AGE`, exactly what `SystemMeta::new` does)
+    /// so the FIRST run sees every stamped row as dirty — including rows
+    /// stamped at world tick 0 (an `App` startup spawn). A literal
+    /// `Tick::ZERO` here is WRONG: `is_newer_than`'s lower bound is
+    /// exclusive, so a row whose `changed_tick` is `Tick(0)` would never
+    /// enter the `(Tick(0), this_run]` window and a startup-spawned camera /
+    /// mesh would keep its identity `GlobalTransform` forever (the R3
+    /// room-camera bug).
     last_run: Tick,
     /// World-local "the F1 `ChildOf` `on_remove` observer is installed" flag.
     /// Lives here (rather than a process-global `static`) so each world installs
@@ -150,7 +158,12 @@ impl Default for TransformPropagationScratch {
             stack: Vec::new(),
             dirty: Vec::new(),
             detached: Vec::new(),
-            last_run: Tick::ZERO,
+            // TICK8 never-run baseline anchored at tick 0 (`0 - MAX_CHANGE_AGE`,
+            // wrapping) — NOT `Tick::ZERO`, whose exclusive lower bound hides
+            // rows stamped at world tick 0. `scratch_mut` refits this from the
+            // world's ACTUAL current tick on the lazy insert; this value covers
+            // direct `insert_resource(..::default())` callers on young worlds.
+            last_run: Tick::new(0u32.wrapping_sub(MAX_CHANGE_AGE)),
             detach_observer_installed: OnceLock::new(),
         }
     }
@@ -491,10 +504,20 @@ fn root_ancestor(world: &EcsMaster, entity: Entity, child_of_id: ComponentId) ->
 }
 
 /// Resolves (or lazily inserts) the propagation scratch resource on `world`.
+///
+/// On the lazy insert the `last_run` baseline is refit to
+/// `current_tick - MAX_CHANGE_AGE` — the kernel's TICK8 never-run horizon
+/// (`SystemMeta::new` parity) — so the first propagate run observes EVERY
+/// stamped row as dirty regardless of the world's age, including rows stamped
+/// at world tick 0 (`App` startup spawns).
 #[inline]
 fn scratch_mut(world: &mut EcsMaster) -> &mut TransformPropagationScratch {
     if world.try_resource::<TransformPropagationScratch>().is_none() {
-        world.insert_resource(TransformPropagationScratch::default());
+        let scratch = TransformPropagationScratch {
+            last_run: Tick::new(world.current_tick().get().wrapping_sub(MAX_CHANGE_AGE)),
+            ..TransformPropagationScratch::default()
+        };
+        world.insert_resource(scratch);
     }
     world
         .try_resource_mut::<TransformPropagationScratch>()
