@@ -23,10 +23,10 @@ ttf-parser = "0.21"
 [dev-dependencies]
 # Property-based tests for the MSDF/atlas math + serialization round-trip
 # (random inputs, invariant checks). Workspace-standard pin.
-proptest = "1"
+proptest.workspace = true
 # Microbenchmarks for the load-time bake hot paths (per-glyph MSDF generation,
 # atlas packing, .bfont serialization). Off the engine runtime hot path.
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion.workspace = true
 
 [[bench]]
 name = "bake"

@@ -9,6 +9,30 @@ members = ["crates/boyko_ecs", "crates/boyko_macros", "crates/boyko_utils", "cra
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
+# Shared third-party version pins (W2 workspace hygiene). Member crates opt in
+# with `<dep>.workspace = true` so a version bump happens in ONE place instead of
+# being re-declared per crate. Per-crate feature selections are preserved: the
+# workspace entry carries the common feature base, and a crate adds extras via a
+# local `features = [...]` (Cargo unions them). `mimalloc` and `bevy_ecs` are
+# deliberately NOT hoisted — each lives in a single crate with a load-bearing
+# per-crate comment.
+[workspace.dependencies]
+# Bench harness — every crate that ships criterion benches pins the same 0.5 with
+# `html_reports`.
+criterion = { version = "0.5", features = ["html_reports"] }
+# Property-based test framework — dev-only across the workspace.
+proptest = "1"
+# POD cast + derive for GPU-instance columns.
+bytemuck = { version = "1", features = ["derive"] }
+# Official MS raw Win32 bindings for the OS windowing/input FFI. The workspace
+# base carries the feature every consumer needs (`Win32_UI_WindowsAndMessaging`);
+# boyko_rhi_vulkan adds its Raw-Input / HID features on top locally.
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
+# Unix mmap/mprotect/munmap FFI for the VmReservation lazy-commit backing store.
+libc = "0.2"
+# loom model-checker atomics shim — pulled in ONLY under `--cfg loom`.
+loom = "0.7"
+
 # Phase X.E — deterministic bench codegen.
 # A single codegen unit removes the cross-build codegen-layout variance that
 # otherwise perturbs A/B bench deltas, and it hardens the "0%-gate /
@@ -28,5 +52,3 @@ edition = "2024"
 boyko-ecs = { path = "crates/boyko_ecs" }
 boyko-macros = { path = "crates/boyko_macros" }
 boyko-utils = { path = "crates/boyko_utils" }
-rand = "0.9.0"
-chrono = "0.4.40"

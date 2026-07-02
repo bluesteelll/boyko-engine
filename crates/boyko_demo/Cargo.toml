@@ -24,7 +24,7 @@ boyko-threadpool = { path = "../boyko_threadpool" }
 # (plan §2.3, H1/H2). `default-features = false` drops the glow (GL) renderer;
 # keep `wgpu` + `default_fonts`.
 eframe = { version = "0.34", default-features = false, features = ["wgpu", "default_fonts"] }
-bytemuck = { version = "1", features = ["derive"] }
+bytemuck.workspace = true
 log = "0.4"
 rand = "0.9"
 
@@ -35,8 +35,8 @@ env_logger = "0.11"
 # check graph never resolves them: criterion drives `benches/gpu_pack.rs` (the
 # G2 pack-cost gate), proptest the T7 prev-invariant property test.
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-proptest = "1"
+criterion.workspace = true
+proptest.workspace = true
 
 # Phase 20.1 G2 — 16 B baseline vs 24 B interpolated pack mirror (★R1-4:
 # baseline measured FIRST; gate = 24 B <= 5 ns/row absolute if baseline <= 3,

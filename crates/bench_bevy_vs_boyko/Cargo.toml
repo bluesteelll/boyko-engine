@@ -7,11 +7,12 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+# W2 workspace hygiene: this crate is a 2-line doc-stub lib whose real payload is
+# its benches (dev targets). The bevy tree + the boyko path deps were NORMAL
+# dependencies, so every `cargo check/build --workspace` compiled the whole Bevy
+# dependency graph. Moving them to `[dev-dependencies]` keeps them out of the
+# non-bench build graph while the benches still see them.
 [dependencies]
-boyko-ecs = { path = "../boyko_ecs" }
-boyko-macros = { path = "../boyko_macros" }
-boyko-threadpool = { path = "../boyko_threadpool" }
-bevy_ecs = { version = "0.18.1", features = ["std", "multi_threaded"] }
 # Phase X.E — optional bench-only global allocator, gated behind the
 # `bench-alloc` feature (OFF by default). Cargo forbids `optional = true` on
 # dev-dependencies, so the bench allocator lives here as a normal optional
@@ -21,7 +22,11 @@ bevy_ecs = { version = "0.18.1", features = ["std", "multi_threaded"] }
 mimalloc = { version = "0.1", optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+boyko-ecs = { path = "../boyko_ecs" }
+boyko-macros = { path = "../boyko_macros" }
+boyko-threadpool = { path = "../boyko_threadpool" }
+bevy_ecs = { version = "0.18.1", features = ["std", "multi_threaded"] }
+criterion.workspace = true
 
 [features]
 # Opt-in flag for benches that require nightly-only intrinsics (e.g.

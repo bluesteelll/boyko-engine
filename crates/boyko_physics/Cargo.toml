@@ -37,9 +37,9 @@ boyko-math = { path = "../boyko_math" }
 boyko-scene = { path = "../boyko_scene" }
 
 [dev-dependencies]
-proptest = "1"
+proptest.workspace = true
 # Workspace-pinned criterion 0.5 (same major as every other crate's bench).
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion.workspace = true
 
 [[bench]]
 # O2 A/B: the grid broadphase vs the shipped all-pairs loop at {100, 1k, 10k}

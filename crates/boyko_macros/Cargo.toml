@@ -7,7 +7,12 @@ edition = "2024"
 proc-macro = true
 
 [dependencies]
-boyko-ecs = { path = "../boyko_ecs" }
+# NOTE: this proc-macro crate does NOT depend on `boyko-ecs`. Every
+# `boyko_ecs::…` occurrence in `src/lib.rs` is an emitted TOKEN inside `quote!`
+# (a path resolved in the DOWNSTREAM crate, which brings its own `boyko-ecs`),
+# not a compile-time reference here. A normal `boyko-ecs` dep (W2 removed it)
+# only serialized the whole workspace build graph — every crate waited for the
+# boyko_ecs host build before its proc-macros could compile.
 syn = { version = "2.0.100", features = ["full"] }
 quote = "1.0.39"
 proc-macro2 = "1.0.93"

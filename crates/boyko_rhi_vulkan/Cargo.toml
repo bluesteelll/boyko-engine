@@ -28,12 +28,14 @@ boyko_sdf_math = { path = "../boyko_sdf_math" }
 # Vulkan FFI stays 100% in-house (the INVIOLABLE no-ash/no-vulkano rule is
 # untouched: this dep covers OS windowing/input, never `vk*`). Target-gated to
 # `cfg(windows)` so non-Windows / wasm builds pull nothing.
+# The workspace `windows-sys` pin carries the base `Win32_UI_WindowsAndMessaging`
+# feature; this crate's windowing + Raw-Input FFI adds the Foundation / Raw-Input /
+# HID features on top locally (Cargo unions them with the workspace base).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
+windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_UI_Input",
     "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_UI_WindowsAndMessaging",
     "Win32_Devices_HumanInterfaceDevice",
 ] }
 

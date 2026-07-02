@@ -28,8 +28,11 @@ use syn::{
 /// ```
 ///
 /// The example is `ignore`'d because proc-macro crates cannot consume their own
-/// macros, and `boyko-macros` cannot depend on `boyko-ecs` (that would create a
-/// cycle). Real usage lives in `boyko-ecs` integration tests.
+/// macros. `boyko-macros` has NO dependency on `boyko-ecs`: every `boyko_ecs::…`
+/// path the derives produce is emitted as a TOKEN inside `quote!` and resolved in
+/// the downstream crate (which brings its own `boyko-ecs`), so the proc-macro
+/// crate needs no such dependency of its own. Real usage lives in `boyko-ecs`
+/// integration tests.
 ///
 /// # Lifecycle hooks (Phase 14a)
 ///

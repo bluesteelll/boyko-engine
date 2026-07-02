@@ -14,10 +14,14 @@ name = "boyko_render"
 
 [features]
 # The TEST-ONLY device→host readback path (`GpuColumnManager::readback_for_test`).
-# Enabled by default so the GPU round-trip integration test can reach it under a
-# plain `cargo test`; a production consumer drops it via `default-features =
-# false` (steady state does ZERO readback — D2). Not part of the frame path.
-default = ["test-readback"]
+# W2: inverted OFF by default so a production/default build ships ZERO readback
+# code (steady state does ZERO readback — D2), instead of every default build
+# carrying the test-only round-trip. The crate's OWN integration tests still
+# reach it: the self-referential dev-dependency below (`boyko-render` with
+# `features = ["test-readback"]`) enables it whenever the test targets compile,
+# because the integration tests are separate crates where the lib's `cfg(test)`
+# guard is NOT active.
+default = []
 test-readback = []
 
 [dependencies]
@@ -43,9 +47,18 @@ boyko-fontbake = { path = "../boyko_fontbake" }
 # S4: the 3D GPU instance (`Gpu3dInstance`) is a `bytemuck::Pod` component whose
 # column uploads zero-copy via `cast_slice` (same discipline as the demo's 2D
 # `GpuInstance`). The `derive` feature gives the `Pod` / `Zeroable` derives.
-bytemuck = { version = "1", features = ["derive"] }
+bytemuck.workspace = true
 
 [dev-dependencies]
+# W2: self-referential dev-dependency that turns the `test-readback` feature ON
+# for THIS crate's integration tests (now that it is OFF by default). The
+# integration tests in `tests/*.rs` compile against `boyko_render` as an external
+# crate — the lib's `#[cfg(any(test, feature = "test-readback"))]` guard sees no
+# `cfg(test)` there, so the readback API (`readback_for_test`, `readback_count`,
+# …) is only reachable via the feature. This edge is the canonical Cargo pattern
+# for "expose a test-only API to my own integration tests without shipping it by
+# default"; it introduces no production dependency.
+boyko-render = { path = ".", features = ["test-readback"] }
 # std-lib S6 cross-crate INTEGRATION gate ONLY: the `DynamicBody`-falls +
 # `Gpu3dInstance`-packs test names `boyko_physics` (DynamicBody / RigidBody / the
 # fixed-step pipeline) alongside this crate's `Gpu3dInstance` / `sync_gpu_3d_instances`.

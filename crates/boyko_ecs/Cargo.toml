@@ -29,14 +29,14 @@ mimalloc = { version = "0.1", optional = true }
 # unifies with zero new compilation. Not pulled in on Windows/wasm32 (the
 # cfg-gated arms there use `VirtualAlloc` / the global allocator).
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc.workspace = true
 
 # Phase 22.1: loom is pulled in ONLY under `--cfg loom` (mirrors
 # boyko_threadpool's Phase-9.1 setup). `term_list.rs` aliases its atomics to
 # `loom::sync::atomic` under `cfg(loom)` so the loom harness drives the REAL
 # resolve/reclaim protocol; the normal build graph never lists loom.
 [target.'cfg(loom)'.dependencies]
-loom = "0.7"
+loom.workspace = true
 
 [features]
 default = []
@@ -53,8 +53,8 @@ bench-alloc = ["dep:mimalloc"]
 [dev-dependencies]
 boyko-macros = { path = "../boyko_macros" }
 trybuild = "1"
-criterion = { version = "0.5", features = ["html_reports"] }
-proptest = "1"
+criterion.workspace = true
+proptest.workspace = true
 # `rand` is used only by tests/benches (the single `src/` reference is inside a
 # `#[cfg(test)] mod tests` in `schedule/bitset_intersects.rs`), so it lives in
 # dev-dependencies. This keeps its `getrandom` dependency out of the normal

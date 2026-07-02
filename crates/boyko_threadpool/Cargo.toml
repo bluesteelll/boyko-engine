@@ -9,7 +9,7 @@ crossbeam-deque = "0.8"
 crossbeam-utils = "0.8"
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion.workspace = true
 
 # loom is pulled in ONLY under `--cfg loom` (Phase 9.1 D1/M3/M4). It is a
 # normal (non-dev) dependency because the loom-shim lives in the library
@@ -18,7 +18,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # graph entirely: `cargo tree -p boyko-threadpool` without `--cfg loom` must
 # not list it.
 [target.'cfg(loom)'.dependencies]
-loom = "0.7"
+loom.workspace = true
 
 [features]
 default = []

@@ -22,7 +22,8 @@ boyko-macros = { path = "../boyko_macros" }
 # message-id / bit values from MS instead of hand-transcribing them. TARGET-GATED
 # to `cfg(windows)` so the INVIOLABLE leaf boundary holds: wasm / non-Windows
 # builds pull NOTHING and `win32.rs` itself is `#[cfg(windows)]`-only (see lib.rs).
+# The workspace `windows-sys` pin already carries `Win32_UI_WindowsAndMessaging`
+# (the only feature this crate's pure-constant `win32::translate` needs), so no
+# local `features` addition is required here.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = [
-    "Win32_UI_WindowsAndMessaging",
-] }
+windows-sys.workspace = true
