@@ -32,7 +32,7 @@ use boyko_ecs::ecs::core::time::FixedTime;
 use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
 
 use boyko_physics::bundles::DynamicBody;
-use boyko_physics::components::{Collider, ColliderShape, RigidBody, RigidBodyMass};
+use boyko_physics::components::{Collider, ColliderShape, RigidBody, RigidBodyMass, Simulated};
 use boyko_physics::math::{Mat3, Quat, Vec3};
 use boyko_physics::plugin::add_physics_systems_with_scene_sync;
 use boyko_physics::resources::PhysicsConfig;
@@ -83,9 +83,14 @@ fn dynamic_body_at_start() -> DynamicBody {
     }
 }
 
-/// Spawns a `DynamicBody` bundle, then attaches the render layer's `Gpu3dInstance`
-/// column (zeroed) + the per-frame `RenderEnabled` bit — exactly as the
-/// implementation documents ("the render layer attaches them after spawning").
+/// Spawns a `DynamicBody` bundle, enables its `Simulated` bit (so the body
+/// actually integrates — Decision 6: the bundle carries the `RigidBody` column
+/// but a body SIMULATES only once its `Simulated` bit is set, and the bit is a
+/// bitset tag so it cannot be a bundle field), then attaches the render layer's
+/// `Gpu3dInstance` column (zeroed) + the per-frame `RenderEnabled` bit — exactly
+/// as the implementation documents ("the render layer attaches them after
+/// spawning"; the physics `Simulated` bit is the same "attach after spawn"
+/// contract, or use the `spawn_dynamic` helper which does it in one call).
 fn spawn_renderable_dynamic_body(world: &mut EcsMaster) -> Entity {
     let sink: Arc<std::sync::Mutex<Option<Entity>>> = Arc::new(std::sync::Mutex::new(None));
     let probe = Arc::clone(&sink);
@@ -94,6 +99,7 @@ fn spawn_renderable_dynamic_body(world: &mut EcsMaster) -> Entity {
             .spawn(dynamic_body_at_start())
             .insert(Gpu3dInstance::zeroed())
             .enable::<RenderEnabled>()
+            .enable::<Simulated>()
             .id();
         *probe.lock().expect("probe") = Some(e);
     });
