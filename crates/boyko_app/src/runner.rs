@@ -215,6 +215,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         width: cw,
         height: ch,
     };
+    // The env-gated frame dump (`BOYKO_HOST_DUMP` — the host's diagnostic /
+    // owner-eval channel, see `host_dump`). `None` on the steady path.
+    let mut dump = crate::host_dump::HostDump::from_env(host.swapchain.format());
     let mut last = Instant::now();
     loop {
         // 1. Pump the OS queue; `false` = WM_QUIT (the window closed).
@@ -277,6 +280,12 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // exactly once inside the block (definite-initialization, no dead seed).
         let mut frame_light_uploaded = false;
         let frame_csm_armed;
+        // The dump's readback request (cold; `None` without the env knob). The
+        // returned borrow holds `dump` until the render call consumes it.
+        let readback = match dump.as_mut() {
+            Some(d) => d.request(ctx, host.swapchain.extent()),
+            None => None,
+        };
         let mut draws = host.draw_scratch.take();
         let presented = {
             let world = app.world();
@@ -433,7 +442,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // `host.gpu` / the World's `MeshRegistry`, both outliving the
             // call); `present_extent` == the composite extent the camera
             // push `count`, `dispatch_group_count_x`, and the G-buffer targets
-            // are sized to (all boot-fixed, plan D7); no readback requested.
+            // are sized to (all boot-fixed, plan D7); a `Some(readback)` is
+            // the dump's host-visible staging, sized to the current swapchain
+            // extent by `HostDump::request` (`None` on the steady path).
             unsafe {
                 host.renderer.render_gbuffer_frame(
                     token,
@@ -446,12 +457,13 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     host.window.height(),
                     CLEAR_COLOR,
                     present_extent,
-                    None,
+                    readback,
                 )
             }
         };
         host.draw_scratch.put(draws);
 
+        let presented_ok = matches!(&presented, Ok(true));
         match presented {
             // Presented normally, or the swapchain was (re)created this call
             // (frame skipped; the size refresh below feeds the next attempt) —
@@ -463,6 +475,21 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 eprintln!("boyko_app: terminal render error - exiting ({e:?})");
                 return;
             }
+        }
+
+        // Diagnostic dump (cold): advance settle → request → drain; once the
+        // drained readback is host-readable, print the frame-stream state the
+        // GPU actually consumed beside the image, write it, and exit the loop.
+        let dump_ready = match dump.as_mut() {
+            Some(d) => d.after_present(presented_ok),
+            None => false,
+        };
+        if dump_ready {
+            dump_diagnostics(app);
+            dump.take()
+                .expect("invariant: the dump just reported ready")
+                .finish(ctx);
+            return;
         }
 
         // 8. Re-observe the client size and publish it: Main readers observe
@@ -481,6 +508,68 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             stats.csm_armed_frames += u64::from(frame_csm_armed);
         }
     }
+}
+
+/// One-shot frame-stream diagnostics printed beside the dump image — the
+/// values the GPU consumed on the captured frame stream: the live CSM
+/// selection, the staged light-table header + rows, and the host stats.
+#[cfg(windows)]
+#[cold]
+#[inline(never)]
+fn dump_diagnostics(app: &App) {
+    let world = app.world();
+
+    let csm = world.resource::<ResolvedCsm>();
+    eprintln!(
+        "boyko_app: dump csm_mode={} active={}",
+        csm.csm_mode_word, csm.active_count
+    );
+    for (c, data) in csm
+        .cascades
+        .iter()
+        .enumerate()
+        .take(csm.active_count as usize)
+    {
+        let m = &data.view_proj;
+        eprintln!(
+            "boyko_app: dump cascade[{c}] split_far={:.3} texel={:.4} col3=[{:.3}, {:.3}, {:.3}, {:.3}]",
+            data.split_far, data.texel_size, m[3][0], m[3][1], m[3][2], m[3][3]
+        );
+    }
+
+    let staged = world.resource::<LightTableStaging>();
+    let bytes = staged.bytes();
+    let word = |i: usize| -> u32 {
+        u32::from_le_bytes(
+            bytes[i * 4..i * 4 + 4]
+                .try_into()
+                .expect("invariant: the staged table holds whole words"),
+        )
+    };
+    let lane = |i: usize| f32::from_bits(word(i));
+    // Header: counts_exposure (words 0..4), the word-7 gate lane, and the sky
+    // lanes (words 4..12).
+    eprintln!(
+        "boyko_app: dump header counts_exposure=[{:.3}, {:.3}, {:.3}, {:.3}] word7={:#010x}",
+        lane(0), lane(1), lane(2), lane(3), word(7)
+    );
+    // 16 header words, then 12-word GpuLight rows: dir_kind | pos_range | color_cone.
+    let rows = (bytes.len().saturating_sub(64)) / 48;
+    for r in 0..rows {
+        let base = 16 + r * 12;
+        eprintln!(
+            "boyko_app: dump light[{r}] dir_kind=[{:.3}, {:.3}, {:.3}, {:.3}] pos_range=[{:.2}, {:.2}, {:.2}, {:.2}] color_cone=[{:.2}, {:.2}, {:.2}, {:.2}]",
+            lane(base), lane(base + 1), lane(base + 2), lane(base + 3),
+            lane(base + 4), lane(base + 5), lane(base + 6), lane(base + 7),
+            lane(base + 8), lane(base + 9), lane(base + 10), lane(base + 11)
+        );
+    }
+
+    let stats = world.resource::<HostFrameStats>();
+    eprintln!(
+        "boyko_app: dump stats frames={} light_uploads={} csm_armed={}",
+        stats.frames, stats.light_uploads, stats.csm_armed_frames
+    );
 }
 
 /// The D2 teardown steps 1–3 — a named, ordered sequence; every step is

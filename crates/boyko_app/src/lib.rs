@@ -36,6 +36,8 @@ mod device;
 mod gpu_scene;
 #[cfg(windows)]
 mod host;
+#[cfg(windows)]
+mod host_dump;
 mod runner;
 mod window_info;
 
