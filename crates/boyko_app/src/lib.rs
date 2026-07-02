@@ -39,9 +39,13 @@ mod host;
 mod runner;
 mod window_info;
 
+/// The host half of the light-table generation protocol (host plan D5/R4):
+/// the pure per-slot [`light_upload_due`](light_gate::light_upload_due) gate
+/// the runner drives its staging-ring rewrites with.
+pub mod light_gate;
 pub mod plugins;
 pub mod prelude;
 
 pub use device::GpuDevice;
 pub use plugins::EnginePlugins;
-pub use window_info::WindowInfo;
+pub use window_info::{HostFrameStats, WindowInfo};

@@ -16,13 +16,14 @@
 
 use core::ptr::NonNull;
 
-use boyko_rhi::enums::{AddressMode, DescriptorKind, Filter};
+use boyko_rhi::enums::{AddressMode, BarrierAccess, BarrierStage, DescriptorKind, Filter};
 use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc,
     BufferUsage, CompareOp, ComputePipelineDesc, CullMode, DepthBias, Format,
-    GraphicsPipelineDesc, ImageUsage, MemoryLocation, MipMode, PrimitiveTopology, RhiDevice,
-    SamplerDesc, ShaderStage, TextureDesc, TextureDimension, VertexAttribute, VertexBufferLayout,
-    VertexFormat,
+    GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc, ImageLayout, ImageSubresourceRange,
+    ImageUsage, MemoryLocation, MipMode, PrimitiveTopology, RhiCommandEncoder, RhiDevice,
+    RhiQueue, SamplerDesc, ShaderStage, TextureDesc, TextureDimension, VertexAttribute,
+    VertexBufferLayout, VertexFormat,
 };
 use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
 use boyko_rhi_vulkan::compute::{
@@ -40,16 +41,16 @@ use boyko_rhi_vulkan::rhi_impl::{
     VulkanSampler, VulkanShaderModule,
 };
 use boyko_rhi_vulkan::swapchain::{
-    FRAMES_IN_FLIGHT, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw,
-    GBufferScene,
+    CsmDepthActivation, FRAMES_IN_FLIGHT, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES,
+    GBufferMeshDraw, GBufferScene,
 };
 use boyko_rhi_vulkan::texture::VulkanTexture;
 use boyko_sdf_math::SdfEdit;
 
 use boyko_render::{
-    DirectionalLight, GPU_LIGHT_WORDS, GpuLight, LIGHT_HEADER_BASE_WORDS, LightHeaderGpu,
-    LightingConfig, M_SLOTS, MaterialGpu, RESOLVED_CSM_BYTES, RESOLVED_SHADOW_ATLAS_BYTES,
-    SHADOW_DIM, SkyLight, Vertex,
+    GPU_LIGHT_BYTES, GPU_LIGHT_WORDS, GpuLight, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_BYTES,
+    LightHeaderGpu, LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialGpu, RESOLVED_CSM_BYTES,
+    RESOLVED_SHADOW_ATLAS_BYTES, ResolvedCsm, SHADOW_DIM, Vertex,
 };
 
 /// The boot instance budget: the per-slot instance-model SSBO holds this many
@@ -62,20 +63,33 @@ pub(crate) const INSTANCE_CAPACITY: usize = 1024;
 /// `GBUFFER_FORMAT` (`R8G8B8A8_UNORM`), the same pin the showcase carries.
 const RASTER_COLOR_FORMAT: Format = Format::R8G8B8A8Unorm;
 
-/// The default engine sun (direction TO the light) — element 0 of the boot
-/// light table AND the marcher's cast-shadow direction (one source, no drift).
-/// Mirrors the showcase's `SHOWCASE_SUN_DIR`. Replaced by the ECS light path
-/// in host plan R4.
+/// The MARCHER's cast-shadow direction (`L`, direction TO the light) — the A1
+/// analytic SDF soft-shadow march lane of the marcher push. The host's SDF edit
+/// list is EMPTY in v1 (no pixel takes the SDF path), so this lane is
+/// bound-but-inert; it mirrors the showcase's `SHOWCASE_SUN_DIR` so a future
+/// SDF instance path (host plan R7) starts from the familiar sun. The RESOLVE's
+/// lighting is ECS-owned since host plan R4 (the light table uploads from
+/// `LightTableStaging`); this constant no longer seeds any light-table row.
 const DEFAULT_SUN_DIR: [f32; 3] = [-0.45, 0.82, 0.36];
+
+/// The full staged-light-table capacity (`[LightHeaderGpu || GpuLight[MAX_LIGHTS]]`)
+/// — the size of the device light table AND each staging ring slot, so ANY table
+/// `collect_lights` stages (its scratch is preallocated to exactly this) fits the
+/// recorded staging→table copy.
+const LIGHT_TABLE_CAPACITY: u64 =
+    (LIGHT_HEADER_BYTES + (MAX_LIGHTS as usize) * GPU_LIGHT_BYTES) as u64;
 
 // ── CSM / shadow-atlas constants. The UBO byte sizes come from the OWNING
 // `boyko_render` mirror structs (`ResolvedCsm` / `ResolvedShadowAtlas` — the
 // exact shapes R4 uploads into these buffers), NOT hand copies; the dim/slot
 // values likewise reuse the render crate's exports where they exist. ──
 
-/// Cascade shadow-map resolution (the `CsmConfig` research default; no
-/// exported constant exists for it yet — R4's config path owns the real knob).
-const CSM_SHADOW_DIM: u32 = 2048;
+/// Cascade shadow-map resolution — the boot-fixed size of the host's cascade
+/// array texture AND the depth-pass viewport (`CsmDepthActivation::shadow_dim`).
+/// Matches `CsmConfig`'s default `resolution` (2048), and the runner
+/// debug-asserts the owner keeps them equal when arming (a diverging owner-set
+/// resolution would skew the fit's `texel_size` against the real map).
+pub(crate) const CSM_SHADOW_DIM: u32 = 2048;
 /// Byte size of one host cascade-UBO ring slot — `size_of::<ResolvedCsm>()`
 /// via [`RESOLVED_CSM_BYTES`] (the resolve's binding-13 shape).
 const CSM_UBO_BYTES: u64 = RESOLVED_CSM_BYTES as u64;
@@ -132,8 +146,9 @@ fn pack_material(m: &MaterialGpu) -> [u32; 12] {
 
 /// Packs a header + light list into the std430 light-table word stream
 /// (`[LightHeaderGpu (16 words) || GpuLight[] (12 words each)]`) the resolve
-/// reads at binding 6 — the PRODUCTION `boyko_render` types, boot-seeded once.
-/// R4 replaces this seed with the ECS light reconcile path.
+/// reads at binding 6 — the PRODUCTION `boyko_render` types. Since host plan R4
+/// this only seeds the EMPTY (count-0) boot placeholder; the live table uploads
+/// from `LightTableStaging` through the generation protocol.
 fn pack_light_table(header: &LightHeaderGpu, lights: &[GpuLight]) -> Vec<u32> {
     let mut words = vec![0u32; LIGHT_HEADER_BASE_WORDS + lights.len() * GPU_LIGHT_WORDS];
     let lanes = [
@@ -165,9 +180,15 @@ fn pack_light_table(header: &LightHeaderGpu, lights: &[GpuLight]) -> Vec<u32> {
 /// The CSM + shadow-atlas trio (host lift of the showcase's `CsmSceneResources`):
 /// ALWAYS created so the resolve set can bind @12/@13 (cascade map + UBO) and
 /// @14/@15 (atlas map + UBO) — the resolve SPIR-V statically references them.
-/// R3 keeps both depth passes OFF (`GBufferScene::csm == None`,
-/// `atlas_punctual == None`) and both UBOs ZERO-seeded (`csm_mode` /
-/// `mode_word` == 0 ⇒ bound-but-unread); R4 arms them from the ECS light path.
+/// Since host plan R4 the CASCADE side is live: the runner memcpys the frame's
+/// `ResolvedCsm` into `ubo[token.slot()]` and `scene()` arms the depth pass when
+/// the ECS predicate holds (zero-seeded UBOs = the boot OFF state). Both depth
+/// maps are one-shot BOOT-TRANSITIONED to `SHADER_READ_ONLY_OPTIMAL` (review
+/// R4-W1 — see [`Self::seed_boot_layouts`]), so a resolve that reaches them
+/// under a stale header gate before any depth pass ever recorded samples a
+/// DEFINED layout. The punctual ATLAS side stays OFF (`atlas_punctual == None`,
+/// `mode_word == 0` ⇒ bound-but-unread) — the shadowed-punctual composition is
+/// a later rung.
 struct CsmResources {
     cascade: VulkanTexture,
     sampler: VulkanSampler,
@@ -329,6 +350,22 @@ impl CsmResources {
         )
         .expect("invariant: punctual point depth-write graphics pipeline create");
 
+        // ── One-time BOOT LAYOUT SEED (review R4-W1): transition the cascade array
+        // + the shadow atlas from their created UNDEFINED layout to
+        // SHADER_READ_ONLY_OPTIMAL, fence-waited, before any frame is recorded.
+        // The resolve set binds both as combined image+samplers whose descriptors
+        // expect SHADER_READ_ONLY_OPTIMAL; on the armed path the depth pass
+        // transitions them every frame, but the header CSM gate can lag the arming
+        // predicate by a frame (cross-plugin ordering is unconstrained), so a
+        // multi-coincidence exists where the resolve samples the cascade on a frame
+        // stream where the depth pass NEVER ran — this seed closes that
+        // never-rendered class categorically (a sample then reads undefined VALUES
+        // at a DEFINED layout: a benign 1–2 frame shadow artifact, never an invalid
+        // access). The graph's armed-frame transition is unaffected: its seeded
+        // model uses `oldLayout = UNDEFINED` (content re-rendered, discard-legal
+        // from ANY actual layout).
+        Self::seed_boot_layouts(device, &cascade, &atlas);
+
         Self {
             cascade,
             sampler,
@@ -342,6 +379,54 @@ impl CsmResources {
             point_depth_pipeline,
             point_depth_vs,
             point_depth_fs,
+        }
+    }
+
+    /// Records + submits the one-shot boot transition of the cascade array +
+    /// shadow atlas to `SHADER_READ_ONLY_OPTIMAL` (see the call-site comment in
+    /// [`Self::create`]), fence-waited; the encoder + fence are setup-class
+    /// transients torn down here (the `BrickClipmap::upload_region` boot-submit
+    /// shape). Panics on any RHI failure — a setup-stage failure by design.
+    fn seed_boot_layouts(device: &VulkanContext, cascade: &VulkanTexture, atlas: &VulkanTexture) {
+        let mut encoder = RhiDevice::create_command_encoder(device)
+            .expect("invariant: CSM boot-layout command encoder create");
+        let fence = RhiDevice::create_fence(device, false)
+            .expect("invariant: CSM boot-layout fence create");
+        encoder.begin().expect("invariant: CSM boot-layout encoder begin");
+        for (texture, layer_count) in [(cascade, 4u32), (atlas, SPOT_ATLAS_SLOTS)] {
+            encoder.image_barrier(&ImageBarrierDesc {
+                texture,
+                src_stage: BarrierStage::TOP_OF_PIPE,
+                dst_stage: BarrierStage::COMPUTE_SHADER,
+                src_access: BarrierAccess::NONE,
+                dst_access: BarrierAccess::SHADER_READ,
+                old_layout: ImageLayout::Undefined,
+                new_layout: ImageLayout::ShaderReadOnlyOptimal,
+                range: ImageSubresourceRange {
+                    aspect: ImageAspect::DEPTH,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count,
+                },
+            });
+        }
+        encoder.end().expect("invariant: CSM boot-layout encoder end");
+        device
+            .rhi_queue()
+            .submit(&encoder, &fence)
+            .expect("invariant: CSM boot-layout submit");
+        RhiDevice::wait_fence(device, &fence, u64::MAX)
+            .expect("invariant: CSM boot-layout fence wait");
+        // SAFETY: `encoder` and `fence` were created on `device` above; the
+        // encoder's ONLY submission completed (the fence wait just returned), so
+        // no GPU work references either; each is moved by value ⇒ destroyed
+        // exactly once. Boot-stage: no other submission is in flight (the scene
+        // boot runs before the first frame, and the only earlier boot submit —
+        // the brick clip-map bake — is itself fence-waited).
+        unsafe {
+            RhiDevice::destroy_command_encoder(device, encoder);
+            RhiDevice::destroy_fence(device, fence);
         }
     }
 
@@ -411,9 +496,14 @@ pub(crate) struct GpuSceneBundles {
     resolve_pipeline: ComputePipeline,
     resolve_layout: VulkanBindGroupLayout,
     material_table: BoundBuffer,
+    /// The device light table (resolve binding 6), [`LIGHT_TABLE_CAPACITY`] bytes.
+    /// The recorder copies `light_upload_bytes` from the fenced slot's staging into
+    /// it on a dirty frame (the rung L0-r0 async re-upload).
     light_table: BoundBuffer,
-    light_staging: BoundBuffer,
-    light_table_bytes: u64,
+    /// The per-in-flight-slot light STAGING ring (host plan R4 — see the boot
+    /// comment for the race pin). The runner writes slot `token.slot()` through
+    /// `boyko_render::upload_light_table` iff its uploaded generation lags.
+    pub(crate) light_staging: [BoundBuffer; FRAMES_IN_FLIGHT],
     light_dir: [f32; 3],
     // ── Present (pass D) ─────────────────────────────────────────────────────
     present_pipeline: VulkanGraphicsPipeline,
@@ -528,24 +618,30 @@ impl GpuSceneBundles {
         let clipmap = BrickClipmap::create(ctx, &field, [0.0, 0.0, 0.0])
             .expect("invariant: brick clip-map (empty field) create + bake + upload");
 
-        // ── The light table (resolve binding 6) + staging: ONE warm directional
-        // sun + a cool sky fill so meshes are lit (R4 replaces this with the ECS
-        // light path). All header mode gates (shadow/csm/punctual/ssao) stay 0.
-        let light_header = LightHeaderGpu::new(2, 0, &LightingConfig::default());
-        let lights = [
-            GpuLight::from_directional(&DirectionalLight::new(
-                DEFAULT_SUN_DIR,
-                [1.0, 0.96, 0.90],
-                2.8,
-            )),
-            GpuLight::from_sky(&SkyLight::new([0.26, 0.32, 0.42], [0.12, 0.11, 0.10])),
-        ];
-        let light_words = pack_light_table(&light_header, &lights);
-        let light_table_bytes = (light_words.len() as u64) * 4;
+        // ── The light table (resolve binding 6) + its per-slot STAGING RING
+        // (host plan R4): ECS owns lighting — the generation protocol uploads
+        // the reconciled `LightTableStaging` bytes into staging slot
+        // `token.slot()` and the recorder copies staging→table on dirty frames.
+        // Both sides are sized at the FULL `[header || MAX_LIGHTS]` capacity
+        // (the exact preallocation `collect_lights`' scratch carries), so any
+        // staged table fits. Seeded with the EMPTY header (count 0 —
+        // byte-identical to `LightTableStaging::default()`'s seed, the golden
+        // empty-table anchor: zero lights, all word-7 gates 0): visible only to
+        // a world with no lights, since the host's `light_uploaded_gen`
+        // (`u64::MAX`) forces a first-frame upload of the real ECS table.
+        //
+        // The staging is a RING, not a single instance (the R4 race pin): both
+        // in-flight slots re-upload on the two consecutive frames after a
+        // change, and rewriting a SINGLE staging on frame N+1 would race frame
+        // N's still-in-flight recorded copy (host-write-vs-GPU-transfer-read).
+        // Slot `s`'s staging is only read by frames occupying slot `s`, whose
+        // fence the write token proves waited.
+        let empty_light_words =
+            pack_light_table(&LightHeaderGpu::new(0, 0, &LightingConfig::default()), &[]);
         let light_table = RhiDevice::create_buffer(
             device,
             &BufferDesc {
-                size: light_table_bytes,
+                size: LIGHT_TABLE_CAPACITY,
                 usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
                 location: MemoryLocation::HostVisibleCoherent,
             },
@@ -554,22 +650,25 @@ impl GpuSceneBundles {
         {
             let mapped = RhiDevice::buffer_mapped_ptr(device, &light_table)
                 .expect("invariant: host-visible light table is mapped");
-            write_words(mapped, &light_words);
+            zero_fill(mapped, LIGHT_TABLE_CAPACITY as usize);
+            write_words(mapped, &empty_light_words);
         }
-        let light_staging = RhiDevice::create_buffer(
-            device,
-            &BufferDesc {
-                size: light_table_bytes,
-                usage: BufferUsage::TRANSFER_SRC,
-                location: MemoryLocation::HostVisibleCoherent,
-            },
-        )
-        .expect("invariant: light staging buffer create");
-        {
-            let mapped = RhiDevice::buffer_mapped_ptr(device, &light_staging)
+        let light_staging: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            let b = RhiDevice::create_buffer(
+                device,
+                &BufferDesc {
+                    size: LIGHT_TABLE_CAPACITY,
+                    usage: BufferUsage::TRANSFER_SRC,
+                    location: MemoryLocation::HostVisibleCoherent,
+                },
+            )
+            .expect("invariant: light staging ring slot create");
+            let mapped = RhiDevice::buffer_mapped_ptr(device, &b)
                 .expect("invariant: host-visible light staging is mapped");
-            write_words(mapped, &light_words);
-        }
+            zero_fill(mapped, LIGHT_TABLE_CAPACITY as usize);
+            write_words(mapped, &empty_light_words);
+            b
+        });
 
         // ── The DEGENERATE legacy vertex buffer (6 identical vertices ⇒ two
         // zero-area triangles ⇒ no fragments): pass A's target on empty-gather
@@ -848,7 +947,6 @@ impl GpuSceneBundles {
             material_table,
             light_table,
             light_staging,
-            light_table_bytes,
             light_dir: DEFAULT_SUN_DIR,
             present_pipeline,
             present_layout,
@@ -863,16 +961,32 @@ impl GpuSceneBundles {
     /// refs, zero alloc): the static bundles + this frame's `mvp` push, the
     /// fenced slot's instance bind group, and the gathered draw batch list.
     ///
-    /// R3 wiring: SDF empty, brick/coarse/SSAO/CSM/atlas/interp all OFF (their
-    /// always-bound resources are valid placeholders); `light_dirty == false`
-    /// (the table was seeded at boot — no per-frame copy until the R4 ECS light
-    /// path).
+    /// R4 wiring: SDF empty, brick/coarse/SSAO/atlas/interp OFF (their
+    /// always-bound resources are valid placeholders); lighting is ECS-owned —
+    /// `light_upload` is `Some(staged_bytes)` on a frame whose staging slot was
+    /// just rewritten (the recorder then records the staging→table copy), and
+    /// `csm` is `Some(resolved)` when the runner's arming predicate holds (a
+    /// fitted sun AND live caster batches — the SAME predicate
+    /// `sync_csm_light_gate` drives the light-header gate with, so the resolve
+    /// samples the cascades only on frame streams where this depth pass runs).
+    ///
+    /// # The O1 single-matrix pin
+    ///
+    /// The depth-pass push matrices built here are byte-images of the SAME
+    /// `resolved.cascades[c].view_proj` floats `upload_csm_ring` memcpys into
+    /// the slot's cascade UBO — one fit, two byte-identical consumers.
     pub(crate) fn scene<'a>(
         &'a self,
         mvp: [u8; GBUFFER_PUSH_BYTES],
         slot: usize,
         mesh_draw: &'a [GBufferMeshDraw<'a>],
+        light_upload: Option<u64>,
+        csm: Option<&ResolvedCsm>,
     ) -> GBufferScene<'a> {
+        debug_assert!(
+            light_upload.unwrap_or(0) <= LIGHT_TABLE_CAPACITY,
+            "invariant: the staged light table fits the device table capacity"
+        );
         GBufferScene {
             raster_pipeline: &self.raster_pipeline,
             vertex_buffer: &self.vertex_buffer,
@@ -903,9 +1017,10 @@ impl GpuSceneBundles {
             present_sampler: &self.present_sampler,
             material_table: &self.material_table,
             light_table: &self.light_table,
-            light_staging: &self.light_staging,
-            light_upload_bytes: self.light_table_bytes,
-            light_dirty: false,
+            // The FENCED slot's staging (the ring the R4 race pin demands).
+            light_staging: &self.light_staging[slot],
+            light_upload_bytes: light_upload.unwrap_or(0),
+            light_dirty: light_upload.is_some(),
             cluster_cull: None,
             cull_layout: None,
             cluster_grid: None,
@@ -926,13 +1041,55 @@ impl GpuSceneBundles {
             csm_cascade_texture: &self.csm.cascade,
             csm_compare_sampler: &self.csm.sampler,
             csm_cascade_ring: &self.csm.ubo,
-            csm: None,
+            // The cascade depth-pass activation (host plan R4): built from the
+            // SAME ResolvedCsm the runner memcpys into this slot's cascade UBO
+            // (the O1 single-matrix pin — LE float bytes == the in-memory f32s
+            // the UBO copy carries on x86_64).
+            csm: csm.map(|resolved| {
+                debug_assert!(
+                    resolved.csm_mode_word == 1 && resolved.active_count > 0,
+                    "invariant: the csm arming predicate passes a fitted selection"
+                );
+                let count = (resolved.active_count as usize).min(resolved.cascades.len());
+                let mut cascade_view_proj = [[0u8; 64]; 4];
+                for (dst, src) in
+                    cascade_view_proj.iter_mut().zip(resolved.cascades.iter()).take(count)
+                {
+                    for (col, column) in src.view_proj.iter().enumerate() {
+                        for (row, f) in column.iter().enumerate() {
+                            let at = col * 16 + row * 4;
+                            dst[at..at + 4].copy_from_slice(&f.to_le_bytes());
+                        }
+                    }
+                }
+                // The 88-byte depth-pass push TEMPLATE: `use_model_matrix == 1`
+                // (@84). The recorder overwrites `view_proj` (@0..64) per
+                // cascade + `base_instance` (@80) per caster batch.
+                let mut push = [0u8; GBUFFER_PUSH_BYTES];
+                push[84..88].copy_from_slice(&1u32.to_le_bytes());
+                CsmDepthActivation {
+                    pipeline: &self.csm.depth_pipeline,
+                    push,
+                    cascade_view_proj,
+                    active_count: count as u32,
+                    shadow_dim: CSM_SHADOW_DIM,
+                }
+            }),
             shadow_atlas_texture: &self.csm.atlas,
             shadow_atlas_sampler: &self.csm.atlas_sampler,
             shadow_atlas_ubo: &self.csm.atlas_ubo,
             atlas_punctual: None,
             interp: None,
         }
+    }
+
+    /// The FENCED slot's cascade-UBO ring buffer — the write target of the
+    /// runner's per-frame `boyko_render::upload_csm_ring` (the resolve binds the
+    /// same slot at binding 13, so the sibling in-flight frame reads the OTHER
+    /// slot — the lock-free write-after-read discipline the ring exists for).
+    #[inline]
+    pub(crate) fn csm_ubo_slot(&self, slot: usize) -> &BoundBuffer {
+        &self.csm.ubo[slot]
     }
 
     /// Tears every bundle down in reverse dependency order — the showcase
@@ -969,7 +1126,9 @@ impl GpuSceneBundles {
             RhiDevice::destroy_buffer(ctx, self.vertex_buffer);
             RhiDevice::destroy_buffer(ctx, self.tiles_buffer);
             self.clipmap.destroy(ctx);
-            RhiDevice::destroy_buffer(ctx, self.light_staging);
+            for slot in self.light_staging {
+                RhiDevice::destroy_buffer(ctx, slot);
+            }
             RhiDevice::destroy_buffer(ctx, self.light_table);
             RhiDevice::destroy_buffer(ctx, self.material_table);
             for slot in self.camera_ring {

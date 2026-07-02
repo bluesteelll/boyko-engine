@@ -24,8 +24,9 @@ for cross-crate architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 > `boyko_serialize`. *Render / UI / shaders:* `boyko_rhi` · `boyko_rhi_vulkan` ·
 > `boyko_render` · `boyko_shaderdsl` · `boyko_fontbake` · `boyko_ui`. *Host /
 > apps / bench:* `boyko_app` (the windowed host — `EnginePlugins`, the
-> device-singleton boot, the token-fenced G-buffer runner + `GpuSceneBundles`;
-> host plan R2/R3, [APP-HOST-PLAN.md](APP-HOST-PLAN.md)) · `boyko_demo`
+> device-singleton boot, the token-fenced G-buffer runner + `GpuSceneBundles`,
+> ECS-owned lighting + CSM arming via the D5 light-table generation gate;
+> host plan R2/R3/R4, [APP-HOST-PLAN.md](APP-HOST-PLAN.md)) · `boyko_demo`
 > (wgpu+egui sandbox) · `bench_bevy_vs_boyko`. Sections 1–21 catalog the ECS
 > kernel; sections 22–33 catalog the std-lib and render/UI crates.
 
@@ -2035,8 +2036,9 @@ graphics-aware types live here, never in the kernel. GPU access is compiler-enfo
 **Areas:**
 - GPU columns: [gpu_column.rs](../crates/boyko_render/src/gpu_column.rs) mints `DeviceLocal` (VRAM) component pools behind the RHI registry and drives the kernel A2 device-mint seam; [gpu_system.rs](../crates/boyko_render/src/gpu_system.rs) dispatches compute with zero per-frame readback.
 - 3D instancing / meshes: [gpu3d_instance.rs](../crates/boyko_render/src/gpu3d_instance.rs) / [gpu3d_system.rs](../crates/boyko_render/src/gpu3d_system.rs) / [mesh_draw.rs](../crates/boyko_render/src/mesh_draw.rs) / [mesh_registry.rs](../crates/boyko_render/src/mesh_registry.rs) / [instance_model.rs](../crates/boyko_render/src/instance_model.rs) / [material.rs](../crates/boyko_render/src/material.rs).
-- Lighting: [light.rs](../crates/boyko_render/src/light.rs) / [light_system.rs](../crates/boyko_render/src/light_system.rs) / [light_reconcile.rs](../crates/boyko_render/src/light_reconcile.rs) / [light_policy.rs](../crates/boyko_render/src/light_policy.rs) (directional / point / spot + clustered froxel cull).
-- Shadows: [csm_config.rs](../crates/boyko_render/src/csm_config.rs) / [csm_caster.rs](../crates/boyko_render/src/csm_caster.rs) / [shadow_atlas.rs](../crates/boyko_render/src/shadow_atlas.rs) (CSM cascades + punctual atlas) + `ssao_*`.
+- Lighting: [light.rs](../crates/boyko_render/src/light.rs) / [light_system.rs](../crates/boyko_render/src/light_system.rs) / [light_reconcile.rs](../crates/boyko_render/src/light_reconcile.rs) / [light_policy.rs](../crates/boyko_render/src/light_policy.rs) (directional / point / spot + clustered froxel cull). Host plan R4: `LightTableGeneration` (the D5 writer-side staging generation `collect_lights` bumps per actual rewrite) + the light-header word-7 CSM gate (`LightingConfig::csm_shadows`, packed by `LightHeaderGpu::new`).
+- Shadows: [csm_config.rs](../crates/boyko_render/src/csm_config.rs) / [csm_caster.rs](../crates/boyko_render/src/csm_caster.rs) / [shadow_atlas.rs](../crates/boyko_render/src/shadow_atlas.rs) (CSM cascades + punctual atlas) + `ssao_*`. Host plan R4: `sync_csm_light_gate` (csm_caster.rs) keeps the header gate in lock-step with the depth-pass arming predicate (fitted sun AND live casters).
+- Token-typed uploads: [upload.rs](../crates/boyko_render/src/upload.rs) — `upload_camera_ring` / `upload_instance_models` (R3) + `upload_light_table` (per-slot staging ring — the R4 host-write-vs-GPU-copy race pin) / `upload_csm_ring` (the 336 B `ResolvedCsm` mirror, unconditional per frame).
 - View: [view.rs](../crates/boyko_render/src/view.rs) consumes the engine-derived `ViewUniform` (from `boyko_scene`) as the single view source.
 
 Plugins: `Render3dPlugin` (+ `light_plugin`, `csm_plugin`, `shadow_plugin`,

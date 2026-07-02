@@ -56,12 +56,14 @@
 
 use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
 use boyko_ecs::ecs::core::iters::query::{Query, With};
-use boyko_ecs::ecs::core::system::{NonSendRes, ResMut};
+use boyko_ecs::ecs::core::system::{NonSendRes, Res, ResMut};
 use boyko_macros::Resource;
 use boyko_scene::render_caps::{MeshHandle, RenderEnabled};
 
+use crate::csm_config::ResolvedCsm;
 use crate::csm_marker::ShadowCaster;
 use crate::instance_model::InstanceModelCol;
+use crate::light::{LightTableDirty, LightingConfig};
 use crate::mesh_draw::{DrawBatch, MeshRenderScratch};
 use crate::mesh_registry::MeshRegistry;
 
@@ -174,6 +176,72 @@ pub fn gather_shadow_casters(
         },
         || q.iter().map(|(h, col)| (h.0, col)),
     );
+}
+
+/// Keeps the light-header CSM sample gate ([`LightingConfig::csm_shadows`] → header
+/// word 7 bit [`CSM_MODE_BIT`](crate::light::CSM_MODE_BIT)) in LOCK-STEP with the
+/// cascade depth-pass activation predicate (host plan R4):
+///
+/// ```text
+/// gate = ResolvedCsm.csm_mode_word == 1  AND  CsmCasterScratch has >= 1 caster batch
+/// ```
+///
+/// which is EXACTLY the predicate the windowed host arms `GBufferScene::csm` with —
+/// one predicate, two consumers, no drift. On a flip the light table is marked dirty
+/// ([`LightTableDirty`]) so `collect_lights` rebuilds the header with the new gate word
+/// and the staged-table generation advances (the host re-uploads both ring slots).
+///
+/// # Why the lock-step is layout-sound under ordering staggers (review R4-W1)
+///
+/// This system's ordering against `resolve_csm_cascades` / `collect_lights` is
+/// registration-site-dependent (cross-plugin edges are not expressible), so the header
+/// gate can lag the predicate by a frame in EITHER direction — and because this
+/// system's `ResolvedCsm` term can itself be one frame stale, a multi-coincidence
+/// exists (the sun unfits exactly as casters first appear, latching the gate ON from
+/// stale terms; then re-fits exactly as they vanish, inside the header-flip lag) in
+/// which the resolve sees the gate ON and an armed cascade UBO on a frame whose depth
+/// pass did not record — in the extreme, on a stream where it NEVER recorded.
+/// Soundness therefore does NOT rest on this system's timing; it rests on two host
+/// guarantees:
+///
+/// 1. **The never-rendered class is closed by the BOOT LAYOUT**: the windowed host
+///    one-shot-transitions the cascade array (and shadow atlas) to
+///    `SHADER_READ_ONLY_OPTIMAL` at scene boot, so a gate-ON resolve on a stream
+///    where the depth pass never ran samples undefined VALUES at a DEFINED layout —
+///    a benign 1–2 frame shadow transient, never an invalid access.
+/// 2. **Stale divergence (1–2 frames) is benign**: the host uploads the CURRENT
+///    `ResolvedCsm` into the fenced cascade-UBO slot every frame, so a DISABLED fit
+///    reaches the resolve as `active_count == 0` (the shader's early-out — no sample
+///    at all), and a stale-armed fit samples a valid-layout cascade whose content is
+///    at worst one re-render old.
+///
+/// The gate/dirty mechanics below therefore only bound WHEN the header bit flips
+/// (within 1–2 frames of the predicate), not the safety of any interleaving.
+///
+/// # Value-gated write
+///
+/// `cfg.csm_shadows` is written only on an actual flip, so a static frame does zero
+/// work and never dirties the light table.
+///
+/// # Registration — app-wired (matches [`gather_shadow_casters`])
+///
+/// NOT registered by any plugin here: it bridges `CsmPlugin`'s [`ResolvedCsm`] and
+/// `LightingPlugin`'s [`LightingConfig`] / [`LightTableDirty`], so only the composing
+/// app (which adds BOTH plugins) may register it — `.after(gather_shadow_casters)` in
+/// the same builder closure, so the caster half of the predicate is this frame's.
+#[allow(clippy::needless_pass_by_value)]
+pub fn sync_csm_light_gate(
+    resolved: Res<ResolvedCsm>,
+    casters: Res<CsmCasterScratch>,
+    mut cfg: ResMut<LightingConfig>,
+    mut dirty: ResMut<LightTableDirty>,
+) {
+    let on = resolved.csm_mode_word == 1 && casters.batch_count() > 0;
+    // Value gate BEFORE the `DerefMut`: flip-only write, flip-only table dirtying.
+    if cfg.csm_shadows != on {
+        cfg.csm_shadows = on;
+        dirty.0 = true;
+    }
 }
 
 #[cfg(test)]

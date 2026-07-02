@@ -38,6 +38,20 @@ pub const LIGHT_HEADER_BYTES: usize = core::mem::size_of::<LightHeaderGpu>();
 /// The byte size of one `GpuLight` table element (48 B).
 pub const GPU_LIGHT_BYTES: usize = core::mem::size_of::<GpuLight>();
 
+/// The staged-light-table WRITE GENERATION (host plan D5) — a monotonic counter
+/// bumped by [`collect_lights`] exactly once per ACTUAL staging rewrite (the rebuild is
+/// `Changed` + [`LightTableDirty`]-gated, so a static frame never bumps it).
+///
+/// # The host protocol (writer-side, deterministic)
+///
+/// A ringed host keeps `light_uploaded_gen: [u64; FRAMES_IN_FLIGHT]` (seeded
+/// `u64::MAX`) and rewrites in-flight slot `s`'s staging iff
+/// `light_uploaded_gen[s] != generation` — so BOTH slots catch up over the two frames
+/// following a change and an unchanged frame writes nothing. `u64` never wraps in
+/// practice (2⁶⁴ rebuilds); `wrapping_add` documents the intent regardless.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LightTableGeneration(pub u64);
+
 /// The reused light-table staging scratch + the on-change dirty flag (Principle 0).
 ///
 /// `scratch` holds the contiguous `[LightHeaderGpu || GpuLight[]]` bytes the GPU table
@@ -319,6 +333,7 @@ pub fn collect_lights(
     cfg: Res<LightingConfig>,
     mut staging: ResMut<LightTableStaging>,
     mut dirty: ResMut<LightTableDirty>,
+    mut generation: ResMut<LightTableGeneration>,
 ) {
     // Rebuild gate: rebuild iff a light component's Changed tick advanced OR the
     // structural `LightTableDirty` channel is set. Changed alone CANNOT see two events:
@@ -358,6 +373,10 @@ pub fn collect_lights(
     // Consume the structural-change signal — always reached on every rebuild, so a set
     // bit is never stranded (W2).
     dirty.0 = false;
+    // Host plan D5: the writer-side deterministic generation — bumped exactly once per
+    // actual staging rewrite (this line is reached only past the rebuild gate above),
+    // so the host's per-slot `light_uploaded_gen` compare is exact, never a hash.
+    generation.0 = generation.0.wrapping_add(1);
 }
 
 /// Cross-frame state for the light-seed pass ([`seed`](Self::seed)): the eight CACHED

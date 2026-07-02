@@ -1,9 +1,16 @@
-//! R3 windowed smoke: drives the FULL room path headlessly — device singleton
-//! boot → `WindowHost` boot (composite + G-buffer scene bundles) → startup
-//! mesh registration + ECS spawns → ~10 presented G-buffer frames (camera +
-//! instance uploads every frame) → D2 teardown — with the exit requested by an
-//! ordinary `AppExit`-setting system. Asserts a clean run, the gather actually
-//! bucketed the room, and the World is GPU-evicted afterward.
+//! R3+R4 windowed smoke: drives the FULL room path headlessly — device
+//! singleton boot → `WindowHost` boot (composite + G-buffer scene bundles) →
+//! startup mesh registration + ECS spawns (meshes, casters, sun + sky + point
+//! lights) → ~10 presented G-buffer frames (camera + instance uploads every
+//! frame; gen-gated light uploads; CSM armed) → D2 teardown — with the exit
+//! requested by an ordinary `AppExit`-setting system. Asserts a clean run, the
+//! gathers actually bucketed the room + casters, the light generation protocol
+//! gated the uploads, the CSM lock-step armed, and the World is GPU-evicted
+//! afterward.
+//!
+//! SINGLE-TEST BINARY: `EnginePlugins` composes `LightingPlugin`, whose light
+//! eviction hooks are process-global — do not co-locate a second
+//! light-archetyping test here.
 //!
 //! Windowed-test conventions: `#[ignore]` (needs a real windowed GPU device),
 //! graceful SKIP when boot fails, run with `BOYKO_DISABLE_VALIDATION=1` and
@@ -14,7 +21,8 @@
 use boyko_app::prelude::*;
 use boyko_ecs::prelude::*;
 use boyko_macros::Resource;
-use boyko_render::{MeshRenderScratch, RhiContext};
+use boyko_render::light_system::LightTableGeneration;
+use boyko_render::{CsmCasterScratch, LightingConfig, MeshRenderScratch, ResolvedCsm, RhiContext};
 use boyko_scene::ViewUniform;
 
 /// The room camera's authored eye — must survive spawn → propagate → resolve.
@@ -45,15 +53,46 @@ fn exit_after_budget(mut budget: ResMut<FrameBudget>, mut exit: ResMut<AppExit>)
     }
 }
 
-/// The room scene of `examples/room.rs`, spawned at startup (the device is
-/// present — the runner inserts `GpuDevice` + `MeshRegistry` before finish).
+/// The sun direction TO the light — mirrors `examples/room.rs`.
+const SUN_DIR: [f32; 3] = [-0.45, 0.82, 0.36];
+
+/// The room scene of `examples/room.rs` (R4 form: casters + sun + sky + point),
+/// spawned at startup (the device is present — the runner inserts `GpuDevice` +
+/// `MeshRegistry` before finish).
 fn setup(mut commands: Commands, mut meshes: NonSendResMut<MeshRegistry>, dev: NonSendRes<GpuDevice>) {
     let floor = meshes.plane(dev.get(), 12.0);
     let cube = meshes.cube(dev.get(), 1.0);
+    // Floor = receiver-only (no ShadowCaster); cubes = structural casters.
     commands.spawn(MeshBundle::new(floor, Transform::IDENTITY));
     for (x, z) in [(-2.0, -1.0), (0.0, -2.5), (1.8, -0.6), (0.9, 1.2)] {
-        commands.spawn(MeshBundle::new(cube, Transform::from_translation(Vec3::new(x, 0.5, z))));
+        commands
+            .spawn(MeshBundle::new(cube, Transform::from_translation(Vec3::new(x, 0.5, z))))
+            .insert(ShadowCaster);
     }
+
+    // ECS lighting (R4): the angled sun (transform-oriented so the reconcile
+    // derives the same direction), a sky fill, a warm point accent.
+    let sun_pose = Affine3A::look_at_rh(
+        Vec3::ZERO,
+        Vec3::new(SUN_DIR[0], SUN_DIR[1], SUN_DIR[2]),
+        Vec3::new(0.0, 1.0, 0.0),
+    );
+    commands.spawn(DirectionalLightObject {
+        transform: Transform {
+            translation: Vec3::ZERO,
+            rotation: Quat::from_mat3(sun_pose.matrix3),
+            scale: Vec3::ONE,
+        },
+        global: GlobalTransform::IDENTITY,
+        light: DirectionalLight::new(SUN_DIR, [1.0, 0.96, 0.90], 2.8),
+    });
+    commands.spawn(SkyLight::new([0.26, 0.32, 0.42], [0.12, 0.11, 0.10]));
+    commands.spawn(PointLightObject {
+        transform: Transform::from_translation(Vec3::new(0.6, 1.6, -0.8)),
+        global: GlobalTransform::IDENTITY,
+        light: PointLight::new([0.6, 1.6, -0.8], [1.0, 0.72, 0.45], 220.0, 7.0),
+    });
+
     let pose = Affine3A::look_at_rh(Vec3::new(0.0, 1.7, 6.0), Vec3::ZERO, Vec3::new(0.0, 1.0, 0.0));
     commands.spawn(CameraRig {
         transform: Transform {
@@ -81,7 +120,10 @@ fn room_smoke_ten_frames_then_clean_teardown() {
     app.insert_resource(FrameBudget(BUDGET));
     app.add_systems(exit_after_budget);
     app.add_startup_system(setup);
-    app.add_plugins(EnginePlugins::window("boyko_app R3 room smoke", 320, 240));
+    app.add_plugins(EnginePlugins::window("boyko_app R4 room smoke", 320, 240));
+    // Enable CSM (the owner-set knob; the plugin default is DISABLED). Inserted
+    // AFTER add_plugins so it overwrites CsmPlugin's default.
+    app.insert_resource(CsmConfig { cascade_count: 3, ..CsmConfig::default() });
 
     let exit = app.run();
     assert!(exit.0, "the windowed runner returns AppExit(true)");
@@ -122,6 +164,47 @@ fn room_smoke_ten_frames_then_clean_teardown() {
     // The one-frame-stale WindowInfo was published post-present.
     let info = *app.world().resource::<WindowInfo>();
     assert!(info.width > 0 && info.height > 0, "WindowInfo published post-present");
+
+    // ── R4: ECS lighting drove the frame. ───────────────────────────────────
+
+    // The staged light table was actually rebuilt from the spawned lights: the
+    // writer-side generation advanced past the boot 0.
+    let generation = app.world().resource::<LightTableGeneration>().0;
+    assert!(generation > 0, "LightTableGeneration advanced past boot (lights were collected)");
+
+    // The caster gather bucketed EXACTLY the casters: 4 cube instances of one
+    // mesh (the receiver-only floor is structurally excluded).
+    let casters = app.world().resource::<CsmCasterScratch>();
+    assert_eq!(casters.batch_count(), 1, "one caster mesh (the cube) => one caster batch");
+    assert_eq!(casters.instance_count(), 4, "4 ShadowCaster cubes; the floor is excluded");
+
+    // The CSM chain resolved and stayed in lock-step: the fit is armed (a sun +
+    // an enabled CsmConfig), and the header gate the resolve samples under was
+    // synced ON by `sync_csm_light_gate` (same predicate the runner armed the
+    // depth pass with).
+    let resolved = app.world().resource::<ResolvedCsm>();
+    assert_eq!(resolved.csm_mode_word, 1, "ResolvedCsm armed (sun + enabled config)");
+    assert_eq!(resolved.active_count, 3, "the owner-set 3-cascade fit");
+    assert!(
+        app.world().resource::<LightingConfig>().csm_shadows,
+        "the light-header CSM gate synced ON (lock-step with the armed depth pass)"
+    );
+
+    // The host probe: the depth pass was armed on presented frames, and the
+    // light-upload gate actually GATED — a bounded number of catch-up uploads
+    // (2 boot slots + 2 per writer-side bump), strictly fewer than frames.
+    // The budget's LAST decrement requests exit at step 3 (before that frame
+    // presents), so presented frames == BUDGET - 1.
+    let stats = *app.world().resource::<HostFrameStats>();
+    assert_eq!(stats.frames, u64::from(BUDGET) - 1, "the probe counted the presented frames");
+    assert!(stats.csm_armed_frames > 0, "scene.csm was armed on at least one frame");
+    assert!(stats.light_uploads >= 2, "both in-flight slots caught up at least once");
+    assert!(
+        stats.light_uploads < stats.frames,
+        "the generation gate closed on steady-state frames ({} uploads / {} frames)",
+        stats.light_uploads,
+        stats.frames
+    );
 
     // D2 teardown left the World GPU-evicted: no device-referencing NonSend
     // resident may survive `destroy_singleton` (the `'static` fiction ended).

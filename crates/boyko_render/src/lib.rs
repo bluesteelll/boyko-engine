@@ -128,8 +128,9 @@ pub mod shadow_plugin;
 pub mod ssao_config;
 pub mod ssao_plugin;
 pub mod ui;
-/// Token-typed per-slot ring uploads (host plan R3): the fence-proved camera +
-/// instance-model memcpys the windowed host runs each frame.
+/// Token-typed per-slot ring uploads (host plan R3/R4): the fence-proved camera +
+/// instance-model + light-table-staging + CSM-cascade-UBO memcpys the windowed host
+/// runs each frame.
 pub mod upload;
 pub mod view;
 
@@ -139,7 +140,7 @@ pub use csm_config::{
     CascadeData, CsmConfig, MAX_CASCADES, RESOLVED_CSM_BYTES, ResolvedCsm, resolve_csm,
     resolve_csm_cascades,
 };
-pub use csm_caster::{CsmCasterScratch, gather_shadow_casters};
+pub use csm_caster::{CsmCasterScratch, gather_shadow_casters, sync_csm_light_gate};
 pub use csm_marker::ShadowCaster;
 pub use csm_plugin::CsmPlugin;
 pub use error::GpuColumnError;
@@ -158,17 +159,17 @@ pub use gpu_column::{GpuColumnManager, GpuColumnMeta, LOCAL_SIZE_X, ResolvedColu
 pub use gpu_system::{GpuSystem, gpu_integrate_spirv};
 pub use light::{
     CLUSTER_COUNT, CLUSTER_DIM_X, CLUSTER_DIM_Y, CLUSTER_DIM_Z, CLUSTER_FAR_DEFAULT,
-    CLUSTER_NEAR_DEFAULT, ClusterCell, ClusterConfig, ClusterSelectMode, DirectionalLight,
-    GPU_LIGHT_WORDS, GpuLight, INDEX_LIST_CAP, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_WORDS,
-    LIGHT_KIND_DIRECTIONAL, LIGHT_KIND_POINT, LIGHT_KIND_SKY, LIGHT_KIND_SPOT, LightEnabled,
-    LightHeaderGpu, LightTableDirty, LightingConfig, MAX_LIGHTS, MAX_LIGHTS_PER_CLUSTER, PointLight,
-    SPOT_COS_OUTER_MAX, SkyLight, SpotLight, cluster_index,
+    CLUSTER_NEAR_DEFAULT, CSM_MODE_BIT, ClusterCell, ClusterConfig, ClusterSelectMode,
+    DirectionalLight, GPU_LIGHT_WORDS, GpuLight, INDEX_LIST_CAP, LIGHT_HEADER_BASE_WORDS,
+    LIGHT_HEADER_WORDS, LIGHT_KIND_DIRECTIONAL, LIGHT_KIND_POINT, LIGHT_KIND_SKY, LIGHT_KIND_SPOT,
+    LightEnabled, LightHeaderGpu, LightTableDirty, LightingConfig, MAX_LIGHTS,
+    MAX_LIGHTS_PER_CLUSTER, PointLight, SPOT_COS_OUTER_MAX, SkyLight, SpotLight, cluster_index,
 };
 pub use light_policy::{CLUSTER_HI, CLUSTER_LO, LightStats, select_lighting_cull};
 pub use light_system::{
-    GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightSeedState, LightTableStaging,
-    SetLightEnabledById, collect_lights, evict_light, fold_light_table, light_seed_state,
-    set_light_enabled_now, write_light_table,
+    GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightSeedState, LightTableGeneration,
+    LightTableStaging, SetLightEnabledById, collect_lights, evict_light, fold_light_table,
+    light_seed_state, set_light_enabled_now, write_light_table,
 };
 pub use gbuffer_depth::{GBUFFER_T_MAX, assert_gbuffer_marcher_t_max_agree};
 pub use material::{MATERIAL_GPU_WORDS, MaterialGpu, MaterialId};
@@ -185,7 +186,9 @@ pub use shadow_marker::CastsPunctualShadow;
 pub use shadow_plugin::ShadowAtlasPlugin;
 pub use ssao_config::{ResolvedSsao, SsaoConfig, SsaoQuality, resolve_ssao, resolve_ssao_policy};
 pub use ssao_plugin::SsaoPlugin;
-pub use upload::{upload_camera_ring, upload_instance_models};
+pub use upload::{
+    upload_camera_ring, upload_csm_ring, upload_instance_models, upload_light_table,
+};
 pub use view::{
     composite_from_view, composite_perspective_from_view, demo_view_proj_from_view,
     gbuffer_push_from_view, view_proj_columns,

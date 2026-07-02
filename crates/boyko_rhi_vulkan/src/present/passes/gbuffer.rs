@@ -444,13 +444,41 @@ impl Renderer<'_> {
         // sound superset the equivalence tests lock in.
 
         // === Lighting L0-r0: ASYNC light-table re-upload (C3), recorded only on a dirty
-        // frame, BEFORE the marcher/resolve reads. A staging→device `cmd_copy_buffer` +
-        // a TRANSFER_WRITE→SHADER_READ buffer barrier (TRANSFER→COMPUTE_SHADER) into the
-        // SAME `cmd` — fence-free, no readback (mirroring the store-to-load image barrier
-        // below). An idle (non-dirty) frame records NOTHING — byte-identical command
+        // frame, BEFORE the marcher/resolve reads. The graph-driven pre-copy barrier +
+        // a staging→device `cmd_copy_buffer` into the SAME `cmd` — fence-free, no
+        // readback. An idle (non-dirty) frame records NOTHING — byte-identical command
         // stream to before (the rung L0-r0 0%-gate). The collection system wrote the new
         // table into `light_staging`'s mapped bytes and set `light_dirty`. ===
         if scene.light_dirty && scene.light_upload_bytes > 0 {
+            // The barrier group in the "light_upload" pass's range is the CROSS-FRAME
+            // SEED-WAR: src = the SIBLING in-flight frame's still-pipelined
+            // COMPUTE_SHADER/SHADER_READ of the light table (the
+            // `add_buffer_seeded(seeded_readers(COMPUTE_SHADER, SHADER_READ))`
+            // declaration — the table is a SINGLE instance shared by both frames),
+            // dst = this copy's TRANSFER write. A `vkCmdPipelineBarrier` orders only
+            // commands recorded BEFORE it against commands recorded AFTER it, so this
+            // group MUST be emitted BEFORE the copy below (every other pass emits its
+            // input barriers before its work — coarse, csm; this site had them
+            // inverted, review R4-C1): emitted after the copy, the copy could race
+            // frame N−1's in-flight resolve read (torn header/table bytes — and the D5
+            // generation protocol makes dirty frames arrive in consecutive slot pairs,
+            // so the race window was COMMON, not exotic). The TRANSFER_WRITE→
+            // SHADER_READ flush is NOT in this group: the graph derives it at the
+            // READERS' own ranges (the marcher/resolve passes) and their
+            // `record_graph_pass` calls emit it before their dispatches.
+            // SAFETY: recording is open; `record_graph_pass` records the graph's
+            // derived COMPUTE→TRANSFER seed-WAR buffer barrier for the "light_upload"
+            // pass into `cmd`, ahead of the copy it guards. The pass gate here is the
+            // SAME predicate that declared the pass, so the plan slot is `Some`.
+            let plan = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
+            let light_upload = plan
+                .light_upload
+                .expect("invariant: light_dirty ⇒ light_upload pass declared");
+            self.record_graph_pass(light_upload, cmd, targets, scene, fi);
+
             let region = VkBufferCopy {
                 src_offset: 0,
                 dst_offset: 0,
@@ -459,8 +487,9 @@ impl Renderer<'_> {
             // SAFETY: recording is open; the copy names the live host-coherent staging +
             // device-local table buffers; the copy region spans `[0, light_upload_bytes)`
             // ≤ both buffer sizes (caller contract — the table is sized for MAX_LIGHTS).
-            // The COPY is GPU work (not a barrier), so it runs unconditionally — only the
-            // following buffer barrier is graph-driven. `&region` outlives the call.
+            // The seed-WAR barrier recorded ABOVE orders this transfer write after the
+            // sibling frame's pipelined table reads; the readers' own graph passes order
+            // the marcher/resolve reads after this write. `&region` outlives the call.
             unsafe {
                 (self.fns.cmd_copy_buffer)(
                     cmd,
@@ -470,22 +499,6 @@ impl Renderer<'_> {
                     &region,
                 );
             }
-            // The TRANSFER_WRITE→SHADER_READ barrier is DRIVEN by the graph's
-            // "light_upload" pass (this branch runs iff `light_dirty &&
-            // light_upload_bytes > 0`, the same gate that declared the pass). The graph
-            // barrier spans the WHOLE buffer (a sound superset of the `[0,
-            // light_upload_bytes)` range).
-            // SAFETY: recording is open; `record_graph_pass` records the graph's derived
-            // TRANSFER→COMPUTE_SHADER buffer barrier for the "light_upload" pass, ordering
-            // the copy's write before the marcher/resolve reads on the GPU timeline.
-            let plan = self
-                .gbuffer_pass_plan
-                .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
-            let light_upload = plan
-                .light_upload
-                .expect("invariant: light_dirty ⇒ light_upload pass declared");
-            self.record_graph_pass(light_upload, cmd, targets, scene, fi);
         }
 
         // === Render P0: the P4b COARSE-CULL pass (Decision: mirror the offscreen

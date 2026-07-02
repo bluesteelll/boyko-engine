@@ -358,6 +358,13 @@ pub enum ClusterSelectMode {
     Auto,
 }
 
+/// The bit position of the resolve's `csm_mode` gate inside light-header word 7
+/// (`sky_diffuse.w`, never read by the L0a sky ambient). Mirrors the shader's
+/// `load_csm_mode` (`light_table.hlsli`: `(LightBuf[7] >> 2) & 1`); bits 0/1/3 of the
+/// same word carry `shadow_mode` / `contact_shadow_mode` / `punctual_shadow_mode`,
+/// which have no production ECS writer yet (they stay 0).
+pub const CSM_MODE_BIT: u32 = 2;
+
 /// The global lighting config (Decision 3) — a `World`-singleton resource. `exposure`
 /// defaults to identity (`1.0`) and `sky_*` default to the resolve's old `SKY_*`
 /// constants, so a world that never inserts a non-default config reproduces today's
@@ -378,6 +385,24 @@ pub struct LightingConfig {
     /// Who owns `clusters_enabled` (P1). DEFAULT [`ClusterSelectMode::Manual`] → the
     /// gate stays owner-controlled and the policy is a no-op (the 0%-gate).
     pub cluster_select: ClusterSelectMode,
+    /// The resolve's CSM sample gate — packed into light-header word 7 bit
+    /// [`CSM_MODE_BIT`] by [`LightHeaderGpu::new`]. DEFAULT `false` (word 7 stays 0.0 —
+    /// the byte-identical 0%-gate).
+    ///
+    /// # Single-writer / lock-step contract (host plan R4)
+    ///
+    /// This is DERIVED state, not owner state: when the CSM composition is wired
+    /// (`CsmPlugin` + the caster gather), its single writer is
+    /// [`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate), which keeps the
+    /// header gate in lock-step with the depth-pass activation predicate ("a fitted sun
+    /// AND live casters exist") to within 1–2 frames. Layout soundness under that lag
+    /// does NOT come from timing (review R4-W1): the windowed host boot-transitions the
+    /// cascade map to `SHADER_READ_ONLY_OPTIMAL` once at scene boot (closing the
+    /// gate-ON-but-never-rendered class) and uploads the CURRENT `ResolvedCsm` UBO
+    /// every frame (a DISABLED fit early-outs the resolve) — see the sync system's
+    /// layout-soundness note. Set this manually only in hosts that hold the same two
+    /// guarantees (the showcase harness discipline).
+    pub csm_shadows: bool,
 }
 
 impl Default for LightingConfig {
@@ -390,7 +415,18 @@ impl Default for LightingConfig {
             sky_spec: [0.10, 0.10, 0.12],
             clusters_enabled: false,
             cluster_select: ClusterSelectMode::Manual,
+            csm_shadows: false,
         }
+    }
+}
+
+impl LightingConfig {
+    /// Packs the header's word-7 shadow-gate bits from this config. Only the CSM bit
+    /// has a production writer today; a default config returns 0 (word 7 == 0.0 — the
+    /// 0%-gate anchor every pre-R4 golden pins).
+    #[inline]
+    pub const fn shadow_gate_word(&self) -> u32 {
+        (self.csm_shadows as u32) << CSM_MODE_BIT
     }
 }
 
@@ -704,7 +740,9 @@ impl LightHeaderGpu {
     /// laid out `[no-P front block || point/spot]` and
     /// `light_count = l0a_count + point_spot_count`. `exposure` + `sky_*` come from
     /// `cfg`. The L1 `cluster_params` are zero in L0 (`clusters_enabled` reflects `cfg`,
-    /// but the dims stay 0 until L1 mints the grid).
+    /// but the dims stay 0 until L1 mints the grid). Word 7 (`sky_diffuse.w`) carries
+    /// the shadow-gate bits ([`LightingConfig::shadow_gate_word`] — CSM bit
+    /// [`CSM_MODE_BIT`]; 0 for a default config, the 0%-gate).
     #[inline]
     pub fn new(l0a_count: u32, point_spot_count: u32, cfg: &LightingConfig) -> Self {
         debug_assert!(cfg.exposure > 0.0 && cfg.exposure.is_finite(), "invariant: exposure > 0");
@@ -717,7 +755,12 @@ impl LightHeaderGpu {
                 f32::from_bits(l0a_count),
                 f32::from_bits(point_spot_count),
             ],
-            sky_diffuse: [cfg.sky_diffuse[0], cfg.sky_diffuse[1], cfg.sky_diffuse[2], 0.0],
+            sky_diffuse: [
+                cfg.sky_diffuse[0],
+                cfg.sky_diffuse[1],
+                cfg.sky_diffuse[2],
+                f32::from_bits(cfg.shadow_gate_word()),
+            ],
             sky_spec: [cfg.sky_spec[0], cfg.sky_spec[1], cfg.sky_spec[2], 0.0],
             // L0: clusters off (dims zero); `clusters_enabled` is reported for the resolve
             // gate but the L1 grid is not minted until the L1 rung.
@@ -776,6 +819,14 @@ impl LightHeaderGpu {
     #[inline]
     pub fn point_spot_count(&self) -> u32 {
         self.counts_exposure[3].to_bits()
+    }
+
+    /// Whether the resolve's CSM sample gate is armed (word 7 bit [`CSM_MODE_BIT`],
+    /// bit-cast back from `sky_diffuse.w`) — the host mirror of the shader's
+    /// `load_csm_mode`.
+    #[inline]
+    pub fn csm_mode(&self) -> bool {
+        (self.sky_diffuse[3].to_bits() >> CSM_MODE_BIT) & 1 != 0
     }
 
     /// Whether the L1 cluster path is enabled (`cluster_params.w` bit-cast `!= 0`). `false`

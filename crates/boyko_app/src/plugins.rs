@@ -8,7 +8,11 @@
 use boyko_ecs::ecs::core::app::CoreSchedule;
 use boyko_ecs::{App, Plugin};
 use boyko_render::instance_model::sync_instance_model_cols;
-use boyko_render::{MeshRenderScratch, Render3dPlugin, gather_mesh_draws};
+use boyko_render::light_system::LightTableStaging;
+use boyko_render::{
+    CsmCasterScratch, CsmPlugin, LightingConfig, LightingPlugin, MeshRenderScratch,
+    Render3dPlugin, gather_mesh_draws, gather_shadow_casters, sync_csm_light_gate,
+};
 use boyko_scene::{CameraPlugin, FixedSet};
 
 use crate::runner::{self, WindowDesc};
@@ -31,8 +35,20 @@ use crate::runner::{self, WindowDesc};
 /// that contract usually covers, `sync_instance_model_cols` is UNCONDITIONAL:
 /// a wrong order would be a PERMANENT one-frame pose lag, not a
 /// self-correcting stagger. The add-order here IS the pin; do not reorder.
-/// Do NOT also add `CameraPlugin` / `TransformPlugin` / `Render3dPlugin`
-/// yourself — a duplicate plugin panics.
+/// Do NOT also add `CameraPlugin` / `TransformPlugin` / `Render3dPlugin` /
+/// `LightingPlugin` / `CsmPlugin` yourself — a duplicate plugin panics.
+///
+/// # Lighting (host plan R4)
+///
+/// `EnginePlugins` composes [`LightingPlugin`] (light reconcile + table
+/// collection + the eviction hooks — so no light component may be archetyped
+/// before this plugin is added; spawn lights from startup systems) and
+/// [`CsmPlugin`] (the owner-set [`CsmConfig`](boyko_render::CsmConfig), default
+/// DISABLED — overwrite it after `add_plugins` to enable sun shadows). Entities
+/// carrying `ShadowCaster` cast into the cascades; receiver-only meshes (floors,
+/// walls) simply omit the marker. The runner uploads the reconciled light table
+/// through the D5 generation protocol and arms the cascade depth pass when a
+/// fitted sun and live casters exist.
 ///
 /// # The D4 seam
 ///
@@ -100,16 +116,50 @@ impl Plugin for EnginePlugins {
         app.add_plugin(CameraPlugin);
         app.add_plugin(Render3dPlugin);
 
+        // The R4 lighting stack. LightingPlugin registers the light eviction
+        // hooks as its FIRST action, inheriting its registration-first
+        // invariant: no light component may be archetyped before
+        // `EnginePlugins` is added (spawn lights from startup systems — they
+        // drain after `finish()`, well past this build). The staging + config
+        // inserts mirror the production wiring the lighting suite pins
+        // (`le_support::lighting_app`); `LightTableGeneration` /
+        // `LightTableDirty` are inserted by the plugin itself. CsmPlugin seeds
+        // the owner-set `CsmConfig` (default DISABLED — the 0%-gate; overwrite
+        // it AFTER `add_plugins` to enable sun shadows) + the derived
+        // `ResolvedCsm` its per-frame camera-fit policy writes. Add-order
+        // contract honored: LightingPlugin lands together with CameraPlugin
+        // (propagation before reconcile), CsmPlugin after both (camera resolve
+        // + sun reconcile before the cascade fit) — all Changed-gated, so the
+        // cross-plugin stagger is self-correcting per their type-level docs.
+        //
+        // SSAO is deliberately NOT composed: `SsaoPlugin` is config-only (no
+        // GPU cost at boot), but the windowed host creates no SSAO pipeline /
+        // targets yet, so composing it would ship a silently-dead
+        // `SsaoConfig` knob. It lands together with the host SSAO pass.
+        app.insert_resource(LightTableStaging::default());
+        app.insert_resource(LightingConfig::default());
+        app.add_plugin(LightingPlugin);
+        app.add_plugin(CsmPlugin);
+
         // The R3 mesh path: pack GlobalTransform → InstanceModelCol, then
         // bucket the visible instances into the reused MeshRenderScratch the
         // runner uploads from. The pack → gather edge is explicit; the
         // propagation → pack edge is the ADD-ORDER pin above (the pack is
         // UNCONDITIONAL, so a wrong order would be a permanent one-frame pose
         // lag — see the type-level Composition doc).
+        //
+        // R4 adds the caster half in the SAME closure so its edges are
+        // expressible: `gather_shadow_casters` (the `With<ShadowCaster>`
+        // production gather) runs after the pack, and `sync_csm_light_gate`
+        // (the header-gate ⇄ depth-pass lock-step) after the caster gather, so
+        // the gate's caster predicate is THIS frame's.
         app.insert_resource(MeshRenderScratch::default());
+        app.insert_resource(CsmCasterScratch::default());
         app.add_systems_cfg(|b| {
             let pack = b.add_system(sync_instance_model_cols).key();
             b.add_system(gather_mesh_draws).after(pack);
+            let casters = b.add_system(gather_shadow_casters).after(pack).key();
+            b.add_system(sync_csm_light_gate).after(casters);
         });
 
         // The D4 ordering seam: engine Fixed snapshots run AFTER user Fixed

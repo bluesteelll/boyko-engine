@@ -8,7 +8,7 @@ use boyko_ecs::ecs::core::app::{App, Plugin};
 use crate::light::{DirectionalLight, LightTableDirty, PointLight, SkyLight, SpotLight};
 use crate::light_policy::{LightStats, select_lighting_cull};
 use crate::light_reconcile::light_reconcile;
-use crate::light_system::{collect_lights, evict_light, light_seed_state};
+use crate::light_system::{LightTableGeneration, collect_lights, evict_light, light_seed_state};
 
 /// Registers [`light_reconcile`](crate::light_reconcile::light_reconcile) BEFORE
 /// [`collect_lights`](crate::light_system::collect_lights), plus the
@@ -70,6 +70,10 @@ impl Plugin for LightingPlugin {
         // The structural-change channel (Decision 2): catches tickless toggles and
         // removals/despawns that the `Changed` gate cannot see.
         app.insert_resource(LightTableDirty(false));
+
+        // Host plan D5: the writer-side staging generation `collect_lights` bumps on
+        // every actual rewrite; ringed hosts gate their per-slot staging writes on it.
+        app.insert_resource(LightTableGeneration(0));
 
         // P1: the cold cost-model carrier for the lighting StrategyPolicy. Default starts
         // the band OFF (matching `LightingConfig::clusters_enabled`'s `false` default), so

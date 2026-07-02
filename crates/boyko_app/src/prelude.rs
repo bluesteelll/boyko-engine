@@ -16,6 +16,14 @@ pub use boyko_math::{Affine3A, Quat, Vec3};
 // The mesh spawn surface: the drawable bundle + the registry it indexes.
 pub use boyko_render::{MeshBundle, MeshRegistry};
 
+// The lighting spawn surface (host plan R4): the light components + their
+// placed-object bundles, the structural CSM caster capability, and the
+// owner-set CSM config knob.
+pub use boyko_render::{
+    CsmConfig, DirectionalLight, DirectionalLightObject, PointLight, PointLightObject,
+    ShadowCaster, SkyLight, SpotLight, SpotLightObject,
+};
+
 // Spatial + camera components and the D4 Fixed ordering seam.
 pub use boyko_scene::{
     Camera, CameraRig, FixedSet, GlobalTransform, MaterialHandle, MeshHandle, Projection,
@@ -24,4 +32,4 @@ pub use boyko_scene::{
 
 pub use crate::device::GpuDevice;
 pub use crate::plugins::EnginePlugins;
-pub use crate::window_info::WindowInfo;
+pub use crate::window_info::{HostFrameStats, WindowInfo};

@@ -15,9 +15,12 @@ use std::time::Instant;
 #[cfg(windows)]
 use boyko_input::{ButtonState, KeyCode, RawInputEvent, translate_win32};
 #[cfg(windows)]
+use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
+#[cfg(windows)]
 use boyko_render::{
-    MeshRegistry, MeshRenderScratch, RhiContext, gbuffer_push_from_view, upload_camera_ring,
-    upload_instance_models,
+    CsmCasterScratch, MeshRegistry, MeshRenderScratch, ResolvedCsm, RhiContext,
+    gbuffer_push_from_view, upload_camera_ring, upload_csm_ring, upload_instance_models,
+    upload_light_table,
 };
 #[cfg(windows)]
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
@@ -37,7 +40,9 @@ use crate::device::GpuDevice;
 #[cfg(windows)]
 use crate::host::WindowHost;
 #[cfg(windows)]
-use crate::window_info::WindowInfo;
+use crate::light_gate::light_upload_due;
+#[cfg(windows)]
+use crate::window_info::{HostFrameStats, WindowInfo};
 
 /// Window description handed from [`EnginePlugins`](crate::plugins::EnginePlugins)
 /// to the runner (title + requested client size; `present_mode` etc. arrive
@@ -116,6 +121,9 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
         width: host.window.width(),
         height: host.window.height(),
     });
+    // The R4 host probe (WindowInfo-adjacent, same post-present publish step):
+    // lets headless smokes assert the light-upload gating + CSM arming decisions.
+    app.world_mut().insert_resource(HostFrameStats::default());
 
     // ── Windowed `AppExit` semantics: insert-IF-ABSENT (plan D6; the legacy
     // headless path keeps its unconditional insert).
@@ -178,19 +186,25 @@ pub(crate) fn run_windowed(_app: &mut App, _desc: WindowDesc) -> AppExit {
     AppExit(true)
 }
 
-/// The per-frame loop (host plan D6 / the runner-frame table, R3):
+/// The per-frame loop (host plan D6 / the runner-frame table, R3 + R4):
 ///
 /// 1. pump the OS queue + drain input (Escape only until R6);
 /// 2. `update_with_delta` — Time → events → Fixed×N → Main (propagation,
-///    camera resolve, `sync_instance_model_cols`, `gather_mesh_draws`);
+///    camera resolve, `sync_instance_model_cols`, `gather_mesh_draws`,
+///    `gather_shadow_casters`, light reconcile + collect, the CSM fit);
 /// 3. `AppExit` check;
 /// 4. `token = wait_frame_in_flight()` — the pacing point + the fence proof;
-/// 5. token-typed uploads: the b5 camera block + the instance-model ring
-///    (UNCONDITIONAL, plan D5) into slot `token.slot()`;
-/// 6. assemble `GBufferScene` on the stack (draw list from the gather output);
+/// 5. token-typed uploads into slot `token.slot()`: the b5 camera block + the
+///    instance-model ring (UNCONDITIONAL, plan D5) + the CSM cascade UBO
+///    (unconditional 336 B) + the light staging iff
+///    `light_uploaded_gen[s] != LightTableGeneration` (the D5 gate);
+/// 6. assemble `GBufferScene` on the stack (draw list from the gather output,
+///    `casts_shadow` from the caster gather, `csm` armed on "fitted sun AND
+///    live casters" — the `sync_csm_light_gate` predicate);
 /// 7. `render_gbuffer_frame(token, ..)` — consumes the token; `Ok(false)` ⇒
 ///    recreate-skip, `Err` ⇒ exit;
-/// 8. `refresh_size()`; write `WindowInfo` (one-frame-stale contract).
+/// 8. `refresh_size()`; write `WindowInfo` + `HostFrameStats` (one-frame-stale
+///    contract).
 ///
 /// Simulation fully precedes the fence wait (CPU/GPU overlap). A minimized
 /// window (0×0 client) skips 4–7 and keeps pumping.
@@ -258,6 +272,11 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // 5–7. Uploads + stack scene assembly + render. The draw list reuses
         // the host's parked allocation (0 alloc/frame after warmup); its
         // elements borrow the World's `MeshRegistry` buffers for this frame.
+        // The two flags feed the post-present `HostFrameStats` publish (step 8):
+        // the light flag is set on the gated branch; the csm flag is assigned
+        // exactly once inside the block (definite-initialization, no dead seed).
+        let mut frame_light_uploaded = false;
+        let frame_csm_armed;
         let mut draws = host.draw_scratch.take();
         let presented = {
             let world = app.world();
@@ -285,11 +304,68 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 upload_instance_models(&token, &host.gpu.instance_rings[s], scratch);
             }
 
+            // 5c. The light staging into slot `s` — GEN-GATED (plan D5, R4):
+            //     rewritten only when this slot's uploaded generation lags the
+            //     writer-side `LightTableGeneration` (`collect_lights` bumps it
+            //     once per actual staged rewrite). The staging is a per-slot
+            //     RING: a single instance rewritten on frame N+1 would race
+            //     frame N's still-in-flight recorded staging→table copy (the
+            //     host-write-vs-GPU-transfer-read class); slot `s`'s buffer is
+            //     only read by slot-`s` frames, whose fence the token proves.
+            let generation = world.resource::<LightTableGeneration>().0;
+            let light_upload = if light_upload_due(&mut host.light_uploaded_gen, s, generation)
+            {
+                let staged = world.resource::<LightTableStaging>();
+                let bytes = staged.bytes();
+                // SAFETY: `host.gpu.light_staging[s]` — same provenance
+                // contract as the camera slot above (boot-minted at the full
+                // table capacity, live until teardown, the fenced slot
+                // `s == token.slot()`); `bytes` is the staging resource's own
+                // preallocated scratch, sized <= that same capacity.
+                unsafe {
+                    upload_light_table(&token, &host.gpu.light_staging[s], bytes);
+                }
+                frame_light_uploaded = true;
+                Some(bytes.len() as u64)
+            } else {
+                None
+            };
+
+            // 5d. The CSM cascade UBO into slot `s` — UNCONDITIONAL every
+            //     frame (336 B; the fit is recomputed from the live camera by
+            //     `resolve_csm_cascades`, so a boot-seed would go stale — see
+            //     `upload_csm_ring`'s rationale). A DISABLED selection uploads
+            //     as all-zero, the bound-but-unread OFF state.
+            let resolved_csm = world.resource::<ResolvedCsm>();
+            // SAFETY: the cascade UBO ring slot — same provenance contract as
+            // the camera slot above (boot-minted at RESOLVED_CSM_BYTES, live
+            // until teardown, the fenced slot `s == token.slot()`).
+            unsafe {
+                upload_csm_ring(&token, host.gpu.csm_ubo_slot(s), resolved_csm);
+            }
+
             // 6a. DrawBatch → GBufferMeshDraw: resolve each batch's mesh to its
             //     registry GPU buffers (the showcase's ~8070 conversion, driven
-            //     by the ECS gather instead of a test-built list).
+            //     by the ECS gather instead of a test-built list). R4:
+            //     `casts_shadow` is driven by the PRODUCTION `ShadowCaster`
+            //     gather — a mesh whose batch appears in `CsmCasterScratch`
+            //     casts; a receiver-only mesh (no `ShadowCaster` row) does not
+            //     stamp itself into the cascades. Both batch lists are emitted
+            //     in ascending `mesh_id` order, so one merge walk (zero alloc)
+            //     resolves the flag. NOTE the recorder's per-BATCH granularity:
+            //     a mesh with ANY caster instance casts with ALL its visible
+            //     instances (mixed caster/receiver instances of one mesh are
+            //     not separable on this path — split the mesh id if needed).
             let registry = world.non_send_resource::<MeshRegistry>();
+            let casters = world.resource::<CsmCasterScratch>();
+            let caster_batches = casters.batches();
+            let mut ci = 0usize;
             for b in &scratch.batches {
+                while ci < caster_batches.len() && caster_batches[ci].mesh_id < b.mesh_id {
+                    ci += 1;
+                }
+                let casts_shadow =
+                    ci < caster_batches.len() && caster_batches[ci].mesh_id == b.mesh_id;
                 let mesh = registry.get(MeshHandle(b.mesh_id));
                 draws.push(GBufferMeshDraw {
                     vertex_buffer: &mesh.vertex_buffer,
@@ -298,11 +374,30 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     index_type: b.index_type.as_i32(),
                     base_instance: b.base_instance,
                     instance_count: b.instance_count,
-                    // Inert in R3 (both shadow depth passes are OFF — `csm` /
-                    // `atlas_punctual` are None); revisit at R4 when the ECS
-                    // light path arms them (`ShadowCaster`-driven).
-                    casts_shadow: true,
+                    casts_shadow,
                 });
+            }
+
+            // 6a'. The cascade depth-pass arming predicate (R4): a fitted sun
+            //      (`ResolvedCsm.csm_mode_word == 1` — CsmConfig enabled AND a
+            //      DirectionalLight exists) AND live caster batches. This is
+            //      the SAME predicate `sync_csm_light_gate` drives the light-
+            //      header csm gate with, so the resolve samples the cascades
+            //      only on frame streams where this depth pass transitioned
+            //      the cascade texture (capability = presence: no sun or no
+            //      casters ⇒ None ⇒ no depth pass recorded at all).
+            let csm_armed = resolved_csm.csm_mode_word == 1 && casters.batch_count() > 0;
+            frame_csm_armed = csm_armed;
+            #[cfg(debug_assertions)]
+            if csm_armed {
+                // The host cascade texture is boot-fixed at CSM_SHADOW_DIM; a
+                // diverging owner-set resolution would skew the fit's
+                // texel_size against the real map.
+                debug_assert_eq!(
+                    world.resource::<boyko_render::CsmConfig>().resolution,
+                    crate::gpu_scene::CSM_SHADOW_DIM,
+                    "invariant: CsmConfig.resolution matches the host cascade texture"
+                );
             }
 
             // 6b. The raster push from the SAME resolved view the camera upload
@@ -329,7 +424,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 }
                 zeroed
             };
-            let scene = host.gpu.scene(mvp, s, &draws);
+            let scene = host.gpu.scene(mvp, s, &draws, light_upload, csm_armed.then_some(resolved_csm));
 
             // 7. Render + present, consuming the token (the host-write window
             //    for slot `s` ends here — R0b).
@@ -372,12 +467,19 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
 
         // 8. Re-observe the client size and publish it: Main readers observe
         //    the PREVIOUS frame's size (the `WindowInfo` one-frame-stale
-        //    contract, documented on the type).
+        //    contract, documented on the type). The R4 host probe shares the
+        //    publish step (three integer stores — zero alloc).
         host.window.refresh_size();
         *app.world_mut().resource_mut::<WindowInfo>() = WindowInfo {
             width: host.window.width(),
             height: host.window.height(),
         };
+        {
+            let stats = app.world_mut().resource_mut::<HostFrameStats>();
+            stats.frames += 1;
+            stats.light_uploads += u64::from(frame_light_uploaded);
+            stats.csm_armed_frames += u64::from(frame_csm_armed);
+        }
     }
 }
 
@@ -410,6 +512,7 @@ fn teardown(app: &mut App, host: WindowHost, ctx: &VulkanContext) {
         gpu,
         draw_scratch: _,
         composite_extent: _,
+        light_uploaded_gen: _,
         swapchain,
         surface,
         window,

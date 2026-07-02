@@ -13,7 +13,9 @@
 use boyko_rhi::Format;
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::ffi::{VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM};
-use boyko_rhi_vulkan::swapchain::{GBufferFrame, Renderer, Surface, Swapchain, SwapchainError};
+use boyko_rhi_vulkan::swapchain::{
+    FRAMES_IN_FLIGHT, GBufferFrame, Renderer, Surface, Swapchain, SwapchainError,
+};
 use boyko_rhi_vulkan::window::{Window, WindowError};
 
 use crate::gpu_scene::{DrawListScratch, GpuSceneBundles};
@@ -91,6 +93,13 @@ pub(crate) struct WindowHost {
     /// recreates the swapchain only; the present blit clamps to
     /// `min(window, composite)`.
     pub(crate) composite_extent: (u32, u32),
+    /// Per-in-flight-slot record of the `LightTableGeneration` whose staged
+    /// bytes were last written into that slot's light staging (host plan D5/R4).
+    /// Seeded `u64::MAX` (≠ any real generation) so BOTH slots upload the real
+    /// ECS table on their first frames; thereafter slot `s` is rewritten iff
+    /// `light_uploaded_gen[s] != generation` (the deterministic writer-side
+    /// gate — see `crate::light_gate::light_upload_due`).
+    pub(crate) light_uploaded_gen: [u64; FRAMES_IN_FLIGHT],
     /// The swapchain + per-image views. Dropped after the explicit
     /// frame/gpu teardown (device idle by then).
     pub(crate) swapchain: Swapchain<'static>,
@@ -167,6 +176,9 @@ impl WindowHost {
             gpu,
             draw_scratch: DrawListScratch::new(),
             composite_extent,
+            // u64::MAX ≠ any real generation ⇒ both slots upload the ECS light
+            // table on their first frames (host plan D5/R4).
+            light_uploaded_gen: [u64::MAX; FRAMES_IN_FLIGHT],
             swapchain,
             surface,
             window,

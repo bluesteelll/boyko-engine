@@ -523,6 +523,20 @@ pub fn resolve_csm_cascades(
         return;
     };
 
+    // No RESOLVED perspective camera ⇒ the disabled selection (the structural mirror of
+    // the no-sun arm above). `fov_y == 0` is the engine sentinel for "orthographic or no
+    // active camera resolved yet" — the frustum-corner fit is undefined for it (the pure
+    // `resolve_csm` debug-asserts a perspective view, critic W3). This arm ALSO absorbs
+    // the documented cross-plugin add-order stagger: on the first frame this policy may
+    // run before `resolve_active_camera` has written `ViewUniform`, in which case the
+    // default (sentinel) view lands here, the frame carries the disabled selection, and
+    // the next frame's re-fit self-corrects (host plan R4 — without this arm the stagger
+    // was a debug-assert panic on a worker thread the moment CSM + a sun were live).
+    if view.fov_y == 0.0 {
+        *out = ResolvedCsm::DISABLED;
+        return;
+    }
+
     *out = resolve_csm(&cfg, &view, sun.direction);
 }
 
