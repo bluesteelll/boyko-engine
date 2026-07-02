@@ -83,6 +83,16 @@ pub mod gpu3d_instance;
 pub mod gpu3d_system;
 pub mod gpu_column;
 pub mod gpu_system;
+/// Pillar B B1 — the interpolation-pair dense component
+/// [`GpuTransform3D`](gpu_transform3d::GpuTransform3D) (the first production
+/// `#[component(storage = "dense")]` type), its [`TrsPacked`](gpu_transform3d::TrsPacked)
+/// TRS packing, and the byte-mirror of the B2 shader's `TransformPair` layout.
+pub mod gpu_transform3d;
+/// Pillar B B1 — the per-substep interpolation-pair pack system
+/// [`pack_gpu_transforms`](gpu_transform_pack::pack_gpu_transforms) (the single-site
+/// prev-shuffle) + its [`add_gpu_transform_pack`](gpu_transform_pack::add_gpu_transform_pack)
+/// wiring fn.
+pub mod gpu_transform_pack;
 /// The per-entity 48-byte model-affine instance column (mesh foundation M3):
 /// [`InstanceModelCol`](instance_model::InstanceModelCol), the exact SSBO layout the
 /// M1/M2 gbuffer VS reads, + its `GlobalTransform` pack system.
@@ -131,8 +141,12 @@ pub use csm_plugin::CsmPlugin;
 pub use error::GpuColumnError;
 pub use gpu3d_instance::{GPU3D_INSTANCE_SIZE, Gpu3dInstance};
 pub use gpu3d_system::sync_gpu_3d_instances;
+pub use gpu_transform3d::{
+    GPU_TRANSFORM3D_BYTES, GpuTransform3D, TRS_PACKED_BYTES, TrsPacked,
+};
+pub use gpu_transform_pack::{add_gpu_transform_pack, pack_gpu_transforms};
 pub use instance_model::{INSTANCE_MODEL_COL_BYTES, InstanceModelCol, sync_instance_model_cols};
-pub use mesh_draw::{DrawBatch, MeshRenderScratch, gather_mesh_draws};
+pub use mesh_draw::{DrawBatch, MeshRenderScratch, gather_mesh_draw_pairs, gather_mesh_draws};
 pub use light_plugin::LightingPlugin;
 pub use light_reconcile::light_reconcile;
 pub use render3d_plugin::Render3dPlugin;

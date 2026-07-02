@@ -35,6 +35,7 @@ use boyko_rhi::enums::IndexType;
 use boyko_scene::render_caps::{MeshHandle, RenderEnabled};
 use bytemuck::Zeroable;
 
+use crate::gpu_transform3d::GpuTransform3D;
 use crate::instance_model::InstanceModelCol;
 use crate::mesh_registry::MeshRegistry;
 
@@ -93,6 +94,15 @@ pub struct MeshRenderScratch {
     /// this slice into ONE shared instance SSBO bound once for the whole batch list.
     /// `clear()` + scatter, capacity persists.
     pub ring: Vec<InstanceModelCol>,
+    /// The contiguous interpolation-PAIR ring (Pillar B B1) — every visible
+    /// instance's 96-byte [`GpuTransform3D`] scattered into its mesh's bucket, in the
+    /// SAME batch order as [`ring`](Self::ring). The B2 interpolation compute pre-pass
+    /// reads this slice as its `TransformPair` input SSBO; its per-instance model
+    /// output lands in the [`ring`](Self::ring) layout, so the interpolated instances
+    /// are already draw-ordered. Populated by
+    /// [`gather_pairs_into`](Self::gather_pairs_into) (the sibling of
+    /// [`gather_into`](Self::gather_into)); `clear()` + scatter, capacity persists.
+    pub pair_ring: Vec<GpuTransform3D>,
 }
 
 /// Grows `v` to at least `min_len` using POW2 capacity steps (O2 — no fixed ceiling),
@@ -153,17 +163,111 @@ impl MeshRenderScratch {
     ///
     /// `debug_assert!`s catch an out-of-range `mesh_id` (a gather over a handle the
     /// registry never minted — a bundle/asset-binding bug).
-    pub fn gather_into<'a, M, F, I>(&mut self, mesh_count: usize, mut meta: M, iter_input: F)
+    pub fn gather_into<'a, M, F, I>(&mut self, mesh_count: usize, meta: M, iter_input: F)
     where
         M: FnMut(u32) -> (u32, IndexType),
         F: Fn() -> I,
         I: Iterator<Item = (u32, &'a InstanceModelCol)>,
     {
+        // Shared count → prefix-sum → batch-emit over the lanes; then scatter the
+        // 48-byte records into `ring`. `ring` is temporarily taken so the closure can
+        // borrow `&self.offsets`/`&mut self.cursors` disjointly from it.
+        let total = self.bucket_lanes(mesh_count, meta, &iter_input);
+        let mut ring = std::mem::take(&mut self.ring);
+        ring.clear();
+        ring.resize(total as usize, InstanceModelCol::zeroed());
+        {
+            let offsets = &self.offsets;
+            let cursors = &mut self.cursors;
+            for (mesh_id, col) in iter_input() {
+                let m = mesh_id as usize;
+                let slot = offsets[m] + cursors[m];
+                cursors[m] += 1;
+                ring[slot as usize] = *col;
+            }
+        }
+        debug_assert_eq!(
+            ring.len(),
+            total as usize,
+            "invariant: the ring holds exactly Σ instance_count instances"
+        );
+        self.ring = ring;
+    }
+
+    /// The pair-emitting sibling of [`gather_into`](Self::gather_into) (Pillar B B1):
+    /// identical count → prefix-sum → batch structure, but scatters the 96-byte
+    /// [`GpuTransform3D`] interpolation pairs into [`pair_ring`](Self::pair_ring)
+    /// instead of the 48-byte affines into [`ring`](Self::ring).
+    ///
+    /// The buckets are keyed on the SAME `mesh_id` and emitted in the SAME order, so
+    /// `pair_ring[base_instance .. base_instance + instance_count]` is mesh `m`'s
+    /// contiguous pair bucket — draw-ordered, mirroring the `ring` layout. Feeding
+    /// this ring through the B2 interpolation compute pre-pass yields per-instance
+    /// model columns already in draw order (the interp output lands draw-ready).
+    ///
+    /// The 48-byte `InstanceModelCol` [`ring`](Self::ring) is UNTOUCHED (it is the
+    /// interpolation-OFF path); a frame runs EITHER this pair gather (interp on) OR
+    /// [`gather_into`](Self::gather_into) (interp off), never both — but both leave the
+    /// [`batches`](Self::batches) invariant identical, so a switch is transparent to
+    /// the recorder.
+    ///
+    /// `iter_input` is the same twice-invoked iterator factory as
+    /// [`gather_into`](Self::gather_into), yielding `(mesh_id, &GpuTransform3D)`.
+    pub fn gather_pairs_into<'a, M, F, I>(&mut self, mesh_count: usize, meta: M, iter_input: F)
+    where
+        M: FnMut(u32) -> (u32, IndexType),
+        F: Fn() -> I,
+        I: Iterator<Item = (u32, &'a GpuTransform3D)>,
+    {
+        let total = self.bucket_lanes(mesh_count, meta, &iter_input);
+        let mut pair_ring = std::mem::take(&mut self.pair_ring);
+        pair_ring.clear();
+        pair_ring.resize(total as usize, GpuTransform3D::zeroed());
+        {
+            let offsets = &self.offsets;
+            let cursors = &mut self.cursors;
+            for (mesh_id, pair) in iter_input() {
+                let m = mesh_id as usize;
+                let slot = offsets[m] + cursors[m];
+                cursors[m] += 1;
+                pair_ring[slot as usize] = *pair;
+            }
+        }
+        debug_assert_eq!(
+            pair_ring.len(),
+            total as usize,
+            "invariant: the pair ring holds exactly Σ instance_count pairs"
+        );
+        self.pair_ring = pair_ring;
+    }
+
+    /// The shared count → prefix-sum → batch-emit core of both gather paths (Decision
+    /// 7, factored so the 48-byte affine and the 96-byte pair paths dedup it).
+    ///
+    /// Fills `counts` (pass 1), `offsets` (each mesh's `base_instance`), zeroed
+    /// `cursors` (the scatter write-heads the caller advances), and `batches` (one
+    /// [`DrawBatch`] per non-empty mesh, mesh-id order). Returns `Σ instance_count` —
+    /// the ring length the caller sizes its scatter to.
+    ///
+    /// `iter_input` is invoked ONCE here (the count pass); the caller invokes it a
+    /// second time for the scatter. Only the small `mesh_id` key is touched — the
+    /// record type `T` is never read, so this is generic over the two record shapes.
+    fn bucket_lanes<'a, M, F, I, T: 'a>(
+        &mut self,
+        mesh_count: usize,
+        mut meta: M,
+        iter_input: &F,
+    ) -> u32
+    where
+        M: FnMut(u32) -> (u32, IndexType),
+        F: Fn() -> I,
+        I: Iterator<Item = (u32, &'a T)>,
+    {
         // --- Pass 1: count per mesh (touches only the small MeshHandle key). ---
         fit_len(&mut self.counts, mesh_count, 0);
         {
             let counts = &mut self.counts;
-            for (mesh_id, _col) in iter_input() {
+            for (mesh_id, _rec) in iter_input() {
                 debug_assert!(
                     (mesh_id as usize) < mesh_count,
                     "invariant: a gathered mesh_id is in range of the registry"
@@ -193,27 +297,7 @@ impl MeshRenderScratch {
             }
             running += c;
         }
-
-        // --- Pass 2: scatter each instance's 48-byte affine into ring[offsets[m] +
-        // cursors[m]++] — contiguous per bucket, non-overlapping. ---
-        self.ring.clear();
-        self.ring.resize(running as usize, InstanceModelCol::zeroed());
-        {
-            let offsets = &self.offsets;
-            let cursors = &mut self.cursors;
-            let ring = &mut self.ring;
-            for (mesh_id, col) in iter_input() {
-                let m = mesh_id as usize;
-                let slot = offsets[m] + cursors[m];
-                cursors[m] += 1;
-                ring[slot as usize] = *col;
-            }
-        }
-        debug_assert_eq!(
-            self.ring.len(),
-            running as usize,
-            "invariant: the ring holds exactly Σ instance_count instances"
-        );
+        running
     }
 }
 
@@ -259,9 +343,48 @@ pub fn gather_mesh_draws(
     );
 }
 
+/// The pair-emitting sibling of [`gather_mesh_draws`] (Pillar B B1): buckets every
+/// visible `(MeshHandle, GpuTransform3D)` entity into per-mesh
+/// [`DrawBatch`](DrawBatch)es + the shared 96-byte interpolation-pair ring
+/// ([`pair_ring`](MeshRenderScratch::pair_ring)), reusing the same
+/// [`MeshRenderScratch`] and the shared count/prefix-sum core.
+///
+/// This is the INTERPOLATION-ON gather: the pairs it scatters (draw-ordered) feed the
+/// B2 compute pre-pass, whose per-instance model output lands in the `ring` layout.
+/// A frame runs EITHER this OR [`gather_mesh_draws`] (the 48-byte interp-off path),
+/// never both.
+///
+/// The query is a mixed table + dense join (`MeshHandle` is a table column,
+/// `GpuTransform3D` the dense column), filtered on `Enabled<RenderEnabled>` (the
+/// `Visibility::Hidden` gate) — a hidden row never enters a bucket, exactly as the
+/// affine gather does. The [`MeshRegistry`] supplies the mesh count + each batch's
+/// `(index_count, index_type)`.
+///
+/// # 0%-gate
+///
+/// A world with no `GpuTransform3D` column yields zero matching rows, so the gather
+/// emits zero batches + an empty pair ring.
+#[allow(clippy::needless_pass_by_value)]
+pub fn gather_mesh_draw_pairs(
+    q: Query<(&MeshHandle, &GpuTransform3D), Enabled<RenderEnabled>>,
+    registry: NonSendRes<MeshRegistry>,
+    mut scratch: ResMut<MeshRenderScratch>,
+) {
+    let mesh_count = registry.len();
+    scratch.gather_pairs_into(
+        mesh_count,
+        |mesh_id| {
+            let m = registry.get(MeshHandle(mesh_id));
+            (m.index_count, m.index_type)
+        },
+        || q.iter().map(|(h, pair)| (h.0, pair)),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gpu_transform3d::TrsPacked;
 
     /// A distinct-per-instance affine so a misplaced scatter is detectable by value.
     /// The translation encodes `(mesh_id, ordinal)` so the test can prove WHICH
@@ -414,6 +537,137 @@ mod tests {
         assert!(
             scratch.ring.capacity() >= ring_cap_after_big,
             "the ring retains its reserved capacity across a smaller frame"
+        );
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Pillar B B1 — the pair-emitting gather (96-byte GpuTransform3D ring).
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// A distinct-per-instance interpolation pair so a misplaced scatter is
+    /// detectable by value: `curr.pos` encodes `(mesh_id, ordinal)` and `prev.pos`
+    /// encodes them shifted, so a swapped prev/curr or a wrong slot is caught.
+    fn pair(mesh_id: u32, ordinal: u32) -> GpuTransform3D {
+        let trs = |bias: f32| TrsPacked {
+            pos: [mesh_id as f32 + bias, ordinal as f32 + bias, bias, 0.0],
+            rot: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0, 1.0, 1.0, 0.0],
+        };
+        GpuTransform3D {
+            prev: trs(-100.0),
+            curr: trs(0.0),
+        }
+    }
+
+    /// The pair gather mirrors the affine gather's bucketing: two meshes bucket into
+    /// one batch each, mesh B's `base_instance` is NONZERO and equals mesh A's count,
+    /// each bucket's PAIRS are contiguous + non-overlapping in `pair_ring`, and the
+    /// batch metadata is byte-identical to the affine path (the recorder is agnostic).
+    #[test]
+    fn pair_bucketing_two_meshes_nonzero_base_contiguous() {
+        let mesh_count = 2;
+        // Interleave so the scatter (not input order) produces contiguous buckets.
+        let a0 = pair(0, 0);
+        let a1 = pair(0, 1);
+        let a2 = pair(0, 2);
+        let b0 = pair(1, 0);
+        let b1 = pair(1, 1);
+        let inputs: Vec<(u32, &GpuTransform3D)> =
+            vec![(0, &a0), (1, &b0), (0, &a1), (1, &b1), (0, &a2)];
+
+        let mut scratch = MeshRenderScratch::default();
+        scratch.gather_pairs_into(mesh_count, meta, || inputs.iter().copied());
+
+        // Batch metadata identical to the affine path (mesh-A base 0 / 3, mesh-B base
+        // 3 / 2, alternating width).
+        assert_eq!(scratch.batch_count(), 2, "two distinct meshes => two batches");
+        let ba = scratch.batches[0];
+        assert_eq!((ba.mesh_id, ba.base_instance, ba.instance_count), (0, 0, 3));
+        assert_eq!((ba.index_count, ba.index_type), (6, IndexType::Uint16));
+        let bb = scratch.batches[1];
+        assert_eq!(
+            (bb.mesh_id, bb.base_instance, bb.instance_count),
+            (1, 3, 2),
+            "mesh B's base == count(A) == 3 (NONZERO — draw-ordered like the affine ring)"
+        );
+        assert_eq!((bb.index_count, bb.index_type), (12, IndexType::Uint32));
+
+        // The pair ring holds every pair, contiguous per bucket, each slot the
+        // EXPECTED pair (prev + curr both correct — no swap, no overlap).
+        assert_eq!(scratch.pair_ring.len(), 5, "the pair ring holds every pair");
+        for ord in 0..3u32 {
+            let slot = (ba.base_instance + ord) as usize;
+            assert_eq!(scratch.pair_ring[slot], pair(0, ord), "mesh A pair {ord}");
+        }
+        for ord in 0..2u32 {
+            let slot = (bb.base_instance + ord) as usize;
+            assert_eq!(scratch.pair_ring[slot], pair(1, ord), "mesh B pair {ord}");
+        }
+    }
+
+    /// The pair gather over an empty input emits zero batches + an empty pair ring
+    /// (the interp-off / no-instance 0%-gate).
+    #[test]
+    fn pair_bucketing_empty_yields_no_batches() {
+        let mut scratch = MeshRenderScratch::default();
+        let inputs: Vec<(u32, &GpuTransform3D)> = Vec::new();
+        scratch.gather_pairs_into(3, meta, || inputs.iter().copied());
+        assert_eq!(scratch.batch_count(), 0);
+        assert_eq!(scratch.pair_ring.len(), 0);
+    }
+
+    /// A gap mesh: mesh 1 has zero pairs, so mesh 2's `base_instance` skips its
+    /// (zero) bucket — the prefix-sum is over the actual counts, identical to the
+    /// affine path's `bucketing_skips_empty_mesh_in_the_middle`.
+    #[test]
+    fn pair_bucketing_skips_empty_mesh_in_the_middle() {
+        let a0 = pair(0, 0);
+        let a1 = pair(0, 1);
+        let c0 = pair(2, 0);
+        let inputs: Vec<(u32, &GpuTransform3D)> = vec![(0, &a0), (2, &c0), (0, &a1)];
+
+        let mut scratch = MeshRenderScratch::default();
+        scratch.gather_pairs_into(3, meta, || inputs.iter().copied());
+
+        assert_eq!(scratch.batch_count(), 2, "mesh 1 is empty => only 2 batches");
+        assert_eq!(
+            (scratch.batches[0].mesh_id, scratch.batches[0].base_instance),
+            (0, 0)
+        );
+        // Mesh 2's base == count(0) + count(1) == 2 + 0 == 2.
+        assert_eq!(
+            (scratch.batches[1].mesh_id, scratch.batches[1].base_instance),
+            (2, 2)
+        );
+        assert_eq!(scratch.pair_ring[2], pair(2, 0), "mesh 2's lone pair at slot 2");
+    }
+
+    /// The affine ring and the pair ring share the SAME lanes without corrupting each
+    /// other across successive gathers on ONE reused scratch: a pair gather then an
+    /// affine gather (or vice-versa) each produces the correct ring, and the OTHER
+    /// ring keeps its capacity (Principle 5 — both lanes persist).
+    #[test]
+    fn pair_and_affine_rings_coexist_on_one_scratch() {
+        let mut scratch = MeshRenderScratch::default();
+
+        // Pair gather: 3 pairs across 2 meshes.
+        let p: Vec<GpuTransform3D> = (0..3).map(|i| pair(i % 2, i)).collect();
+        let p_in: Vec<(u32, &GpuTransform3D)> =
+            p.iter().enumerate().map(|(i, r)| ((i as u32) % 2, r)).collect();
+        scratch.gather_pairs_into(2, meta, || p_in.iter().copied());
+        assert_eq!(scratch.pair_ring.len(), 3);
+        let pair_cap = scratch.pair_ring.capacity();
+
+        // Affine gather next on the SAME scratch: 2 affines of mesh 0.
+        let a0 = affine(0, 0);
+        let a1 = affine(0, 1);
+        let a_in: Vec<(u32, &InstanceModelCol)> = vec![(0, &a0), (0, &a1)];
+        scratch.gather_into(2, meta, || a_in.iter().copied());
+        assert_eq!(scratch.instance_count(), 2, "affine ring correct after a pair gather");
+        // The pair ring retained its reserved capacity (the lanes are independent).
+        assert!(
+            scratch.pair_ring.capacity() >= pair_cap,
+            "the pair ring retains its capacity across an affine gather"
         );
     }
 }
