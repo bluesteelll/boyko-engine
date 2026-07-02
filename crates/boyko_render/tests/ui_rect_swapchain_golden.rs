@@ -628,17 +628,27 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
         }
     }
 
-    // The oracle: a clean integrated UI present records ZERO validation messages.
-    let state = rhi
-        .context()
-        .debug_state()
-        .expect("validation enabled => a debug-messenger state is present");
-    assert_eq!(
-        state.total(),
-        0,
-        "validation reported {} message(s) during the integrated UI present — see [vk-validation]",
-        state.total()
-    );
+    // The oracle: a clean integrated UI present records ZERO validation messages. Gated on
+    // `validation_enabled()` (the window_present_gbuffer precedent) so the pixel golden below
+    // still runs under the BOYKO_DISABLE_VALIDATION escape hatch (no messenger exists then).
+    if rhi.context().validation_enabled() {
+        let state = rhi
+            .context()
+            .debug_state()
+            .expect("validation enabled => a debug-messenger state is present");
+        assert_eq!(
+            state.total(),
+            0,
+            "validation reported {} message(s) during the integrated UI present — see [vk-validation]",
+            state.total()
+        );
+    } else {
+        assert!(
+            std::env::var_os("BOYKO_DISABLE_VALIDATION").is_some(),
+            "validation must be active when enable_validation is set and the escape hatch is absent"
+        );
+        eprintln!("NOTE: validation disabled (BOYKO_DISABLE_VALIDATION) - messenger oracle skipped");
+    }
 
     // The golden: the readback frame's swapchain image must show the UI rects over the
     // preserved BLUE scene.

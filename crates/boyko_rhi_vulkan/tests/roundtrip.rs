@@ -345,6 +345,14 @@ fn validation_layer_clean_on_device_ops() {
     unsafe { device.destroy_buffer(buffer) };
 
     // The oracle: a clean run records zero validation messages.
+    if !ctx.validation_enabled() {
+        assert!(
+            std::env::var_os("BOYKO_DISABLE_VALIDATION").is_some(),
+            "validation must be active when enable_validation is set and the escape hatch is absent"
+        );
+        eprintln!("NOTE: validation disabled (BOYKO_DISABLE_VALIDATION) - messenger oracle skipped");
+        return;
+    }
     let state = ctx
         .debug_state()
         .expect("validation enabled => a debug-messenger state is present");

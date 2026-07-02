@@ -110,6 +110,14 @@ fn m2_brick_atlas_creates_and_uploads_on_device() {
     assert!(!noop, "an unchanged authority must not upload");
 
     // The validation messenger must be silent across the create + the full + the dirty uploads.
+    if !ctx.validation_enabled() {
+        assert!(
+            std::env::var_os("BOYKO_DISABLE_VALIDATION").is_some(),
+            "validation must be active when enable_validation is set and the escape hatch is absent"
+        );
+        eprintln!("NOTE: validation disabled (BOYKO_DISABLE_VALIDATION) - messenger oracle skipped");
+        return;
+    }
     let state = ctx
         .debug_state()
         .expect("invariant: validation enabled => a debug-messenger state is present");

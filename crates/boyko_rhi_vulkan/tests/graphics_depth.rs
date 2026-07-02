@@ -211,6 +211,14 @@ fn assert_validation_clean(ctx: &VulkanContext, variant: &str) {
         eprintln!("NOTE: validation disabled (BOYKO_DISABLE_VALIDATION) — skipping the {variant} clean-oracle assert");
         return;
     }
+    if !ctx.validation_enabled() {
+        assert!(
+            std::env::var_os("BOYKO_DISABLE_VALIDATION").is_some(),
+            "validation must be active when enable_validation is set and the escape hatch is absent"
+        );
+        eprintln!("NOTE: validation disabled (BOYKO_DISABLE_VALIDATION) - messenger oracle skipped");
+        return;
+    }
     let state = ctx
         .debug_state()
         .expect("validation enabled => a debug-messenger state is present");

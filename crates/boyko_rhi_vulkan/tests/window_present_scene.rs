@@ -382,6 +382,14 @@ fn windowed_scene_present_is_validation_clean_and_renders_geometry() {
 
     // The oracle: a clean windowed scene render+present records zero validation
     // messages across all frames.
+    if !ctx.validation_enabled() {
+        assert!(
+            std::env::var_os("BOYKO_DISABLE_VALIDATION").is_some(),
+            "validation must be active when enable_validation is set and the escape hatch is absent"
+        );
+        eprintln!("NOTE: validation disabled (BOYKO_DISABLE_VALIDATION) - messenger oracle skipped");
+        return;
+    }
     let state = ctx
         .debug_state()
         .expect("validation enabled => a debug-messenger state is present");
