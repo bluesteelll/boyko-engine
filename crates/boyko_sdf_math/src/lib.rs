@@ -334,6 +334,16 @@ pub struct SdfEditField {
     /// last mutation of edit `i` (the M3 union-dirty rule's old-location source).
     /// COLD: read only by the M3 dirty-set classifier, never by the hot fold.
     pub prev_aabb: [SdfEditAabb; MAX_SDF_EDITS],
+    /// The MAX `smoothness` over the LAST-BAKED (pre-mutation) edit list — snapshotted
+    /// by [`clear_dirty`](Self::clear_dirty) alongside `prev_aabb`. Load-bearing for the
+    /// M3 smooth-ripple cover: a smooth combine perturbs the WHOLE folded accumulator
+    /// (even where the smooth term is far, `smin`/`smax` shift the fold by ~1 f32 ULP —
+    /// enough to flip a snorm code anywhere a surface is near), so REMOVING the last
+    /// smooth op ripples across every edit's AABB. The current-state `max_smooth` alone
+    /// misses that (it is `0` after the removal), so [`crate::brick::dirty_world_aabb`]
+    /// takes the full-cover branch when EITHER the current OR this previous max smoothness
+    /// is `> 0`. COLD: read only by the M3 dirty-set classifier, never by the hot fold.
+    pub prev_max_smooth: f32,
 }
 
 /// Brick occupancy class — the result of [`crate::brick::classify_brick`].
@@ -425,6 +435,8 @@ impl SdfEditField {
             _pad: [0; 2],
             aabbs: [placeholder_aabb; MAX_SDF_EDITS],
             prev_aabb: [placeholder_aabb; MAX_SDF_EDITS],
+            // An empty (never-baked) field has no smooth op in its prior state.
+            prev_max_smooth: 0.0,
         }
     }
 
@@ -502,13 +514,34 @@ impl SdfEditField {
         self.set_edit(i, e);
     }
 
-    /// Re-snapshots `prev_aabb := aabbs` (clears the dirty set): after a bake has
-    /// consumed the dirty region, the previous-AABB ledger is brought current so the
-    /// NEXT mutation diffs against the freshly-baked state, not the stale pre-bake
-    /// one. The render path calls this right after a `rebake_dirty`.
+    /// Re-snapshots `prev_aabb := aabbs` and `prev_max_smooth := max smoothness`
+    /// (clears the dirty set): after a bake has consumed the dirty region, the
+    /// previous-state ledger is brought current so the NEXT mutation diffs against the
+    /// freshly-baked state, not the stale pre-bake one. The render path calls this right
+    /// after a `rebake_dirty`.
+    ///
+    /// `prev_max_smooth` captures the just-baked scene's max smoothness so the next
+    /// mutation that HARDENS the last smooth op still triggers the M3 full-cover branch
+    /// (the removed smooth ripple reaches every AABB — see
+    /// [`crate::brick::dirty_world_aabb`]).
     #[inline]
     pub fn clear_dirty(&mut self) {
         self.prev_aabb = self.aabbs;
+        self.prev_max_smooth = self.max_smoothness();
+    }
+
+    /// The maximum non-negative `smoothness` over the live edits (`0.0` for an empty or
+    /// purely-hard scene) — the scene's smooth-blend reach the M3 dirty-set cover keys on.
+    #[inline]
+    pub fn max_smoothness(&self) -> f32 {
+        let mut m = 0.0f32;
+        for e in self.edits() {
+            let s = e.smoothness.max(0.0);
+            if s > m {
+                m = s;
+            }
+        }
+        m
     }
 
     /// Whether edit `i` is dirty since the last [`clear_dirty`](Self::clear_dirty)

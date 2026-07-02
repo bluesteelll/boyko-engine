@@ -633,21 +633,25 @@ pub fn aabb_union(a: &SdfEditAabb, b: &SdfEditAabb) -> SdfEditAabb {
 ///
 /// # The conservative cover (bit-identical to a full bake — the proptest gate)
 ///
-/// For a PURELY-HARD scene (every `smoothness == 0`) this reduces to exactly the
-/// changed edits' `(new ∪ prev)` AABBs — TIGHT, no over-dirty (the localized-move
-/// perf test stays green). When the scene contains ANY smooth op the cover becomes
-/// the union of ALL live edits' AABBs (each already skinned by its own
-/// `band_half + smoothness` in [`crate::edit_aabb`]), additionally EXPANDED by the
-/// scene's MAXIMUM smoothness: a smooth combine couples the WHOLE folded surface, so
-/// changing any one edit can shift the field anywhere a smooth blend reaches, and the
-/// only region provably unaffected is where NO edit's band-influence touches at all
-/// (exactly the union of the per-edit AABBs, padded by the blend bulge). The M2 grid
-/// is `4³ = 64` cells with `<= 16` edits, so re-baking every SURFACE cell on a
-/// smooth-scene edit is cheap — correctness over the micro-optimization. A
-/// non-overlapping (provably EMPTY) cell is still skipped, so this never re-bakes a
-/// far EMPTY tile. (A tighter per-edit ripple bound under-covers by ~1 snorm code at
-/// a blend-zone corner — the proptest's bit-identity rejects it; the union-of-all is
-/// the simple, provably-exact cover.)
+/// For a PURELY-HARD scene — every CURRENT `smoothness == 0` AND the last-baked scene
+/// was hard too ([`SdfEditField::prev_max_smooth`] `== 0`) — this reduces to exactly the
+/// changed edits' `(new ∪ prev)` AABBs — TIGHT, no over-dirty (the localized-move perf
+/// test stays green). When the scene contains ANY smooth op in EITHER its current OR its
+/// pre-mutation state the cover becomes the union of ALL live edits' AABBs (each already
+/// skinned by its own `band_half + smoothness` in [`crate::edit_aabb`]), additionally
+/// EXPANDED by the `max` of the current and previous scene smoothness: a smooth combine
+/// couples the WHOLE folded accumulator (even a FAR smooth term shifts the fold by ~1 f32
+/// ULP through `smin`/`smax`), so changing any one edit — or REMOVING the last smooth op —
+/// can shift the field anywhere a blend reached, and the only region provably unaffected
+/// is where NO edit's band-influence touches at all (exactly the union of the per-edit
+/// AABBs, padded by the blend bulge). The M2 grid is `4³ = 64` cells with `<= 16` edits, so
+/// re-baking every SURFACE cell on a smooth-scene edit is cheap — correctness over the
+/// micro-optimization. A non-overlapping (provably EMPTY) cell is still skipped, so this
+/// never re-bakes a far EMPTY tile. (A tighter per-edit ripple bound under-covers by ~1
+/// snorm code at a blend-zone corner — the proptest's bit-identity rejects it; the
+/// union-of-all is the simple, provably-exact cover. Keying only on the CURRENT smoothness
+/// under-covers the SMOOTH→HARD transition, where the removed ripple survives past the
+/// mutation — hence the `prev_max_smooth` half of the trigger.)
 #[inline]
 pub fn dirty_world_aabb(field: &SdfEditField) -> Option<SdfEditAabb> {
     let n = field.count as usize;
@@ -667,17 +671,29 @@ pub fn dirty_world_aabb(field: &SdfEditField) -> Option<SdfEditAabb> {
         return None;
     }
 
-    // SMOOTH scene: a smooth combine couples the whole fold, so a change anywhere can
-    // shift the field anywhere a blend reaches. The provably-unaffected region is only
-    // where NO edit's band-influence touches — the union of every live edit's CURRENT
-    // AABB, padded by the blend bulge (`max_smooth`). Cheap on the 64-cell grid, and an
-    // EMPTY (non-overlapping) cell is still skipped, so no far tile is re-baked.
+    // The full-cover blend reach: the LARGER of the CURRENT and the PRE-MUTATION
+    // (`prev_max_smooth`, snapshotted at the last `clear_dirty`) scene smoothness. A
+    // mutation that REMOVES/HARDENS the last smooth op leaves `max_smooth == 0` but still
+    // ripples the fold everywhere the OLD smooth combine reached, so keying only on the
+    // current smoothness UNDER-covers (the M3 proptest's smooth-to-hard divergence). Using
+    // the max of both states covers the ripple whether the smooth op is being added, kept,
+    // or removed.
+    let cover_smooth = max_smooth.max(field.prev_max_smooth.max(0.0));
+
+    // SMOOTH scene (now OR before the mutation): a smooth combine couples the WHOLE fold —
+    // even where the smooth term is far, `smin`/`smax` perturb the folded accumulator by
+    // ~1 f32 ULP, enough to flip a snorm code anywhere a surface is near — so a change (or
+    // the removal of a smooth op) can shift the field anywhere a blend reached. The
+    // provably-unaffected region is only where NO edit's band-influence touches: the union
+    // of every live edit's CURRENT AABB, padded by the blend bulge (`cover_smooth`). Cheap
+    // on the 64-cell grid, and an EMPTY (non-overlapping) cell is still skipped, so no far
+    // tile is re-baked.
     //
     // The union-of-current alone would leave a GHOST at a moved/shrunk edit's OLD
     // location (a tile that was SURFACE and is now EMPTY but no current AABB reaches):
     // so ALSO union in the `prev_aabb` of every DIRTY edit (the union-dirty rule's
-    // old-location half), then expand the whole region by `max_smooth`.
-    if max_smooth > 0.0 {
+    // old-location half), then expand the whole region by `cover_smooth`.
+    if cover_smooth > 0.0 {
         let mut all: Option<SdfEditAabb> = None;
         for aabb in &field.aabbs[..n] {
             all = Some(match all {
@@ -695,7 +711,7 @@ pub fn dirty_world_aabb(field: &SdfEditField) -> Option<SdfEditAabb> {
             }
         }
         // `n >= 1` (a dirty edit exists), so `all` is `Some`.
-        return all.map(|a| expand_aabb(&a, max_smooth));
+        return all.map(|a| expand_aabb(&a, cover_smooth));
     }
 
     // HARD scene: the tight swept old+new union per changed edit (no ripple, no

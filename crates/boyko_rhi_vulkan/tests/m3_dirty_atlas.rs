@@ -564,6 +564,69 @@ fn m3_incremental_atlas_renders_identically_to_full_on_device() {
     println!("[M3-rtx] incremental + full atlas lifecycles validation-clean; staging parity holds");
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// 6. SMOOTH→HARD RIPPLE (the seed=0xcf72…b4c3 regression) — a hardened/removed
+//    smooth op ripples the WHOLE fold, so the dirty cover must span it too.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// A smooth combine perturbs the folded accumulator by ~1 f32 ULP everywhere a surface
+/// is near — even where the smooth term is far — so a snorm code can flip in a cell far
+/// from the smooth edit itself. When a mutation HARDENS (or removes) the last smooth op,
+/// that ripple must UNDO, and the incremental dirty set must re-bake every cell the ripple
+/// reached (the full-cover branch), not just the changed edit's own swept AABB.
+///
+/// The distilled repro of proptest seed `0xcf72f53697eab4c3` (step 4): a large hard sphere
+/// (edit 1) sits far from the origin so its surface occupies a distant cell; a tiny SMOOTH
+/// sphere (edit 2) at the origin ripples a ULP into that distant cell through the fold;
+/// hardening edit 2 (`smoothness 0.05 → 0.0`) flips a snorm code there. Keying the cover on
+/// the CURRENT smoothness alone (now `0`) takes the tight hard branch and MISSES the distant
+/// cell — the bit-identity assert catches it. `prev_max_smooth` keeps the full cover.
+#[test]
+fn dirty_atlas_smooth_to_hard_removal_covers_ripple() {
+    let mut field = field_with(&[
+        // A large HARD sphere far from the origin — its surface lands in a distant cell.
+        SdfEdit::sphere([3.0, 2.8, 1.05], 0.67, sdf_op::UNION, 0.0),
+        // A tiny SMOOTH sphere at the origin — its smooth combine ripples the whole fold.
+        SdfEdit::sphere([0.0, 0.0, 0.0], 0.15, sdf_op::UNION, 0.05),
+    ]);
+    let mut staging = full_bake(&field);
+    field.clear_dirty();
+
+    // Harden the smooth sphere: the ripple it imposed on the distant cell must UNDO.
+    field.set_edit(1, SdfEdit::sphere([0.0, 0.0, 0.0], 0.15, sdf_op::UNION, 0.0));
+    field.bump_gen();
+    rebake_dirty_into(&mut staging, &mut field);
+
+    let full = full_bake(&field);
+    assert_atlas_bit_identical(&staging, &full, 0xcf72_f536_97ea_b4c3, 0, "smooth_to_hard");
+}
+
+/// The direct dirty-set assertion: after HARDENING the only smooth op, the dirty world AABB
+/// must still be the full-cover union (it reaches the distant hard edit's cell), NOT the
+/// tight swept AABB of the changed origin edit alone. This pins the `prev_max_smooth` half
+/// of the cover trigger independently of the byte-identity oracle.
+#[test]
+fn dirty_world_aabb_covers_removed_smooth_ripple() {
+    use boyko_sdf_math::brick::dirty_world_aabb;
+
+    let mut field = field_with(&[
+        SdfEdit::sphere([3.0, 2.8, 1.05], 0.67, sdf_op::UNION, 0.0),
+        SdfEdit::sphere([0.0, 0.0, 0.0], 0.15, sdf_op::UNION, 0.05),
+    ]);
+    field.clear_dirty(); // prev_max_smooth := 0.05 (the just-baked smooth scene)
+
+    field.set_edit(1, SdfEdit::sphere([0.0, 0.0, 0.0], 0.15, sdf_op::UNION, 0.0));
+    field.bump_gen();
+
+    let dirty = dirty_world_aabb(&field).expect("hardening the smooth op is dirty");
+    // The distant hard edit's AABB max corner (~[4.57, 4.37, 2.62]) must lie inside the cover:
+    // the removed smooth ripple reached it, so the full-cover branch must include it.
+    assert!(
+        dirty.max[0] >= 4.0 && dirty.max[1] >= 4.0 && dirty.max[2] >= 2.0,
+        "the removed-smooth cover must span the distant hard edit's cell, got {dirty:?}"
+    );
+}
+
 // Silence the unused-import lint for SdfEditAabb when only used via fully-qualified paths elsewhere.
 #[allow(unused)]
 fn _aabb_marker(_: SdfEditAabb) {}
