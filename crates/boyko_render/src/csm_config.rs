@@ -38,7 +38,7 @@ use boyko_macros::Resource;
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 
-use boyko_math::{Affine3A, Mat4, Vec3, Vec4};
+use boyko_math::Vec3;
 use boyko_scene::ViewUniform;
 
 use crate::light::DirectionalLight;
@@ -54,11 +54,12 @@ use crate::light::DirectionalLight;
 /// couple the policy layer to a backend module), so it is re-declared here.
 pub const MAX_CASCADES: usize = 4;
 
-/// The light-space pullback applied to the light eye (in world units of `sun_dir`) so the
-/// orthographic near plane clears casters in FRONT of the fitted sphere. Dynamic-caster
-/// only (static occlusion stays analytic), so a modest bound suffices; the z-range still
-/// spans the full sphere either side of the snapped center.
-const LIGHT_PULLBACK: f32 = 1.0;
+/// The light-space near plane (world units along the light ray). The light eye is pulled
+/// back along `+sun_dir` by `z_far/2 = diameter`, so the depth range `[LIGHT_Z_NEAR,
+/// 2·diameter]` brackets the fitted sphere symmetrically (center depth ≈ 0.5) with a
+/// diameter-sized margin for casters between the sun and the slice. Mirrors the windowed
+/// harness's `CSM_DEMO_NEAR` — the value the committed SPIR-V was validated with.
+const LIGHT_Z_NEAR: f32 = 0.1;
 
 /// The `|dot(sun_dir, up)|` threshold above which the world-up hint is collinear enough
 /// with the light direction that the light-view right axis would be degenerate; past it the
@@ -262,13 +263,29 @@ pub use crate::csm_marker::ShadowCaster;
 ///    INVARIANT (the anti-shimmer body); `diameter` is the Bevy integer-stable
 ///    `max(body_diag, far_plane_diag).ceil()`, `texel_size = diameter / resolution`,
 ///    half-extent `r = diameter / 2`.
-/// 4. **Light view** — `look_at(center − sun_dir·pullback, center, up)` with the W5 alt-up
-///    guard (swap to `+Z` when `sun_dir ≈ ±up`).
-/// 5. **Texel snap** — snap the sphere center to whole `texel_size` in LIGHT-VIEW space
-///    (the anti-shimmer translation).
-/// 6. **`view_proj = ortho(-r, r, -r, r, z_near, z_far) · light_view`**, with the W5
-///    zero-radius floor (`diameter ≥ MIN_DIAMETER`) so a degenerate slice can't make the
-///    orthographic matrix singular.
+/// 4. **Light basis** — `fwd = -sun_dir` (the light looks FROM the sun toward the scene),
+///    `right = normalize(up_hint × fwd)`, `up = fwd × right`, with the W5 alt-up guard
+///    (swap the hint to `+Z` when `sun_dir ≈ ±world_up`).
+/// 5. **Texel snap** — quantize the sphere center's light-plane (`right`/`up`)
+///    coordinates to whole `texel_size` BEFORE the view is built (the anti-shimmer
+///    translation: the radius is rotation-invariant, so only the center moves frame to
+///    frame and each shadow texel keeps a stable world footprint).
+/// 6. **Matrix assembly** — the PROVEN on-screen convention (the exact form the committed
+///    depth-VS + resolve SPIR-V were validated against pixel-by-pixel in the windowed
+///    harness): the light eye is pulled back along `+sun_dir` by `z_far/2`
+///    (`z_far = 2·diameter`, bounding casters between the sun and the slice), and the
+///    combined `view_proj` maps world → light clip as `clip.x = x_lv/r`,
+///    `clip.y = -y_lv/r` (the engine's framebuffer Y-flip — the SAME flip the camera
+///    projection carries), `clip.z = (z_lv - z_near)/(z_far - z_near)` (Vulkan `[0,1]`,
+///    depth GROWING away from the sun into the scene), `clip.w = 1`. The W5 zero-radius
+///    floor (`diameter ≥ MIN_DIAMETER`) keeps a degenerate slice finite + non-singular.
+///
+/// Do NOT re-derive this matrix through generic `look_at`/`ortho` helpers: the depth
+/// direction, the eye side, and the Y-flip are SHADER CONTRACT, not style — an assembly
+/// that is self-consistent between the depth pass and the resolve can still disagree with
+/// the SPIR-V's hardcoded UV/compare conventions (the exact failure the R4 room shipped
+/// with: lit floors, self-shadowed casters, no cast shadows). The convention tests below
+/// pin all three axes.
 ///
 /// # Perspective-only (critic W3)
 ///
@@ -319,6 +336,21 @@ pub fn resolve_csm(cfg: &CsmConfig, view: &ViewUniform, sun_dir: [f32; 3]) -> Re
         aspect: view.aspect,
     };
 
+    // ── The light basis (constant across cascades — a function of the sun only), in the
+    // PROVEN on-screen convention (doc step 4): `fwd = -sun` (the light looks FROM the sun
+    // toward the scene). W5 alt-up guard: when the sun is (anti)parallel to world-up the
+    // right axis is degenerate — swap the up HINT to `+Z` (the cross ORDER is unchanged,
+    // so the basis chirality is identical to the nominal case).
+    let world_up = Vec3::new(0.0, 1.0, 0.0);
+    let up_hint = if sun.dot(world_up).abs() > UP_PARALLEL_THRESHOLD {
+        Vec3::new(0.0, 0.0, 1.0)
+    } else {
+        world_up
+    };
+    let fwd = sun * -1.0;
+    let light_right = up_hint.cross(fwd).normalize();
+    let light_up = fwd.cross(light_right);
+
     let mut cascades = [CascadeData::ZERO; MAX_CASCADES];
 
     let mut near_i = near;
@@ -338,44 +370,57 @@ pub fn resolve_csm(cfg: &CsmConfig, view: &ViewUniform, sun_dir: [f32; 3]) -> Re
         let texel_size = diameter / cfg.resolution.max(1) as f32;
         let r = diameter * 0.5;
 
-        // W5 alt-up guard: when the sun is (anti)parallel to world-up the light-view right
-        // axis is degenerate — swap to an alternate up orthogonal to it.
-        let world_up = Vec3::new(0.0, 1.0, 0.0);
-        let light_up = if sun.dot(world_up).abs() > UP_PARALLEL_THRESHOLD {
-            Vec3::new(0.0, 0.0, 1.0)
-        } else {
-            world_up
-        };
+        // Texel snap (anti-shimmer translation, doc step 5): quantize the center's
+        // light-plane (right/up) coordinates to whole texels BEFORE the view is built —
+        // the radius is rotation-invariant, so under camera motion only the center
+        // translates and each shadow texel keeps a stable world footprint.
+        let cx = light_right.dot(center);
+        let cy = light_up.dot(center);
+        let dx = (cx / texel_size).floor() * texel_size - cx;
+        let dy = (cy / texel_size).floor() * texel_size - cy;
+        let center = center + light_right * dx + light_up * dy;
 
-        // Light VIEW = inverse of the light WORLD look-at. `look_at_rh` returns the world
-        // transform; its inverse maps world → light-view (the space the snap + ortho act
-        // in). The pullback bounds dynamic casters in front of the sphere.
-        let light_eye = center - sun * (LIGHT_PULLBACK * r.max(1.0));
-        let light_world = Affine3A::look_at_rh(light_eye, center, light_up);
-        let light_view = light_world
-            .inverse()
-            .unwrap_or(Affine3A::IDENTITY);
+        // Matrix assembly (doc step 6 — the PROVEN on-screen convention; see the fn doc
+        // for why this must NOT be re-derived through generic look_at/ortho helpers).
+        // The light eye is pulled back along +sun by z_far/2 (= the sphere diameter).
+        let z_far = 2.0 * diameter;
+        let eye = center + sun * (z_far * 0.5);
+        let tx = -light_right.dot(eye);
+        let ty = -light_up.dot(eye);
+        let tz = -fwd.dot(eye);
 
-        // Texel snap (anti-shimmer translation): snap the center's light-view X/Y to whole
-        // texels, then translate the light view by the snap delta so the sphere is sampled
-        // on a stable grid as the camera moves.
-        let center_ls = light_view.transform_point(center);
-        let snapped_x = (center_ls.x / texel_size).floor() * texel_size;
-        let snapped_y = (center_ls.y / texel_size).floor() * texel_size;
-        let snap_offset = Vec3::new(snapped_x - center_ls.x, snapped_y - center_ls.y, 0.0);
-        let light_view = prepend_light_view_translation(light_view, snap_offset);
-
-        // Orthographic z-range spans the sphere either side of the (now snapped) center plus
-        // the pullback margin; a small epsilon keeps near < far on a min-diameter slice.
-        let z_span = r + LIGHT_PULLBACK * r.max(1.0);
-        let z_near = -z_span - MIN_DIAMETER;
-        let z_far = z_span + MIN_DIAMETER;
-        let ortho = Mat4::orthographic_rh(-r, r, -r, r, z_near, z_far);
-
-        let view_proj = ortho.mul_mat4(light_view.to_mat4());
+        // pv[row][col] = ortho_row · light_view_row: clip.x = x_lv/r, clip.y = -y_lv/r
+        // (the framebuffer Y-flip), clip.z = (z_lv - z_near)/(z_far - z_near) (depth
+        // growing away from the sun), clip.w = 1.
+        let inv_h = 1.0 / r;
+        let zr = z_far - LIGHT_Z_NEAR;
+        let pv: [[f32; 4]; 4] = [
+            [
+                inv_h * light_right.x,
+                inv_h * light_right.y,
+                inv_h * light_right.z,
+                inv_h * tx,
+            ],
+            [
+                -inv_h * light_up.x,
+                -inv_h * light_up.y,
+                -inv_h * light_up.z,
+                -inv_h * ty,
+            ],
+            [fwd.x / zr, fwd.y / zr, fwd.z / zr, (tz - LIGHT_Z_NEAR) / zr],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        // COLUMN-MAJOR storage (the byte layout the depth-VS push @0 and the resolve
+        // cbuffer expect): view_proj[col][row] = pv[row][col].
+        let mut view_proj = [[0.0f32; 4]; 4];
+        for (row, prow) in pv.iter().enumerate() {
+            for (col, &v) in prow.iter().enumerate() {
+                view_proj[col][row] = v;
+            }
+        }
 
         *slot = CascadeData {
-            view_proj: mat4_to_cols_array(view_proj),
+            view_proj,
             split_far: split_i,
             texel_size,
             _pad: [0.0; 2],
@@ -462,29 +507,6 @@ fn sphere_radius(corners: &[Vec3; 8], center: Vec3) -> f32 {
         max_sq = max_sq.max(d.length_squared());
     }
     max_sq.sqrt()
-}
-
-/// Prepends a LIGHT-VIEW-space translation to a light-view affine: `result = T(offset) ·
-/// light_view`, so applying `result` to a world point first maps it into light-view space,
-/// then shifts it by `offset` (the texel-snap delta). The linear part is unchanged; only
-/// the translation gains `offset` (the offset is already expressed in light-view axes).
-#[inline]
-fn prepend_light_view_translation(mut light_view: Affine3A, offset: Vec3) -> Affine3A {
-    light_view.translation = light_view.translation + offset;
-    light_view
-}
-
-/// Decomposes a column-major [`Mat4`] into the `[[f32; 4]; 4]` column array
-/// [`CascadeData::view_proj`] stores (column `j` is `m.cols[j]`).
-#[inline]
-fn mat4_to_cols_array(m: Mat4) -> [[f32; 4]; 4] {
-    let col = |v: Vec4| [v.x, v.y, v.z, v.w];
-    [
-        col(m.cols[0]),
-        col(m.cols[1]),
-        col(m.cols[2]),
-        col(m.cols[3]),
-    ]
 }
 
 // ---- the cold StrategyPolicy system (mirrors resolve_ssao_policy) ---------------------
@@ -762,5 +784,102 @@ mod tests {
         let view = perspective_view(Vec3::new(0.0, 2.0, 0.0), 0.0, 0.0);
         let resolved = resolve_csm(&cfg, &view, [0.0, -1.0, 0.0]);
         assert_eq!(resolved.active_count, MAX_CASCADES as u32);
+    }
+
+    // ---- convention pins (the shader contract — doc step 6) ---------------------------
+
+    /// Applies a cascade's COLUMN-MAJOR `view_proj` to a world point (`w = 1`), returning
+    /// the raw clip lanes: `clip[row] = Σ_col m[col][row] · p[col]`.
+    fn clip(m: &[[f32; 4]; 4], p: Vec3) -> [f32; 4] {
+        let ph = [p.x, p.y, p.z, 1.0];
+        let mut out = [0.0f32; 4];
+        for (row, o) in out.iter_mut().enumerate() {
+            *o = (0..4).map(|col| m[col][row] * ph[col]).sum();
+        }
+        out
+    }
+
+    /// The light basis of the PROVEN on-screen convention, re-derived independently
+    /// (the windowed harness's `csm_light_basis` formula) — the oracle the convention
+    /// pins compare the fit's axes against.
+    fn light_basis(sun: Vec3) -> (Vec3, Vec3) {
+        let fwd = sun * -1.0;
+        let up_hint = if sun.dot(Vec3::new(0.0, 1.0, 0.0)).abs() > 0.99 {
+            Vec3::new(0.0, 0.0, 1.0)
+        } else {
+            Vec3::new(0.0, 1.0, 0.0)
+        };
+        let right = up_hint.cross(fwd).normalize();
+        let up = fwd.cross(right);
+        (right, up)
+    }
+
+    #[test]
+    fn matrix_convention_is_the_proven_on_screen_one() {
+        // The shader-contract axes of the cascade matrix, pinned against the convention
+        // the committed depth-VS + resolve SPIR-V were validated with pixel-by-pixel in
+        // the windowed harness: depth GROWS away from the sun into the scene, `clip.y`
+        // carries the framebuffer Y-flip, `clip.x` follows the light's right axis, and
+        // the fitted slice lands inside the clip box. A matrix assembly that is merely
+        // SELF-consistent between the depth pass and the resolve can still flip these
+        // axes and break every shadow lookup (the R4 room regression: lit floors,
+        // self-shadowed casters, no cast shadows) — these pins fail on that assembly.
+        let cfg = enabled_cfg();
+        for &(eye, yaw, pitch, sun_dir) in &[
+            (Vec3::new(0.0, 1.7, 6.0), 0.0_f32, 0.0_f32, [-0.45_f32, 0.82, 0.36]),
+            (Vec3::new(5.0, 3.0, -2.0), 0.7, -0.2, [0.3, 0.9, 0.2]),
+            (Vec3::new(-3.0, 8.0, 4.0), -1.2, 0.3, [0.1, 0.7, -0.6]),
+        ] {
+            let view = perspective_view(eye, yaw, pitch);
+            let resolved = resolve_csm(&cfg, &view, sun_dir);
+            let sun = Vec3::new(sun_dir[0], sun_dir[1], sun_dir[2]).normalize();
+            let (light_right, light_up) = light_basis(sun);
+
+            // A world point inside cascade 0's fitted slice: the camera-ray midpoint of
+            // the [near, split_0] view-z range.
+            let fwd_cam = view.cam_forward.xyz();
+            let mid = eye + fwd_cam * ((view.near + resolved.cascades[0].split_far) * 0.5);
+            let m = &resolved.cascades[0].view_proj;
+
+            let c0 = clip(m, mid);
+            assert!(
+                (c0[3] - 1.0).abs() < 1.0e-5,
+                "orthographic clip.w must be 1 (got {})",
+                c0[3]
+            );
+            assert!(
+                c0[0].abs() <= 1.0 && c0[1].abs() <= 1.0 && (0.0..=1.0).contains(&c0[2]),
+                "the slice midpoint must land inside the clip box (clip {c0:?})"
+            );
+
+            // Depth axis: moving TOWARD the sun lowers depth (depth grows away from the
+            // sun into the scene) — inverted on the broken assembly.
+            let toward_sun = clip(m, mid + sun * 1.0);
+            assert!(
+                toward_sun[2] < c0[2],
+                "depth must DECREASE toward the sun ({} !< {})",
+                toward_sun[2],
+                c0[2]
+            );
+
+            // Y-flip: moving along the light's UP axis lowers clip.y (the engine's
+            // framebuffer convention) — absent on the broken assembly.
+            let up_moved = clip(m, mid + light_up * 0.5);
+            assert!(
+                up_moved[1] < c0[1],
+                "clip.y must carry the framebuffer Y-flip ({} !< {})",
+                up_moved[1],
+                c0[1]
+            );
+
+            // X axis: moving along the light's RIGHT axis raises clip.x.
+            let right_moved = clip(m, mid + light_right * 0.5);
+            assert!(
+                right_moved[0] > c0[0],
+                "clip.x must follow the light right axis ({} !> {})",
+                right_moved[0],
+                c0[0]
+            );
+        }
     }
 }
