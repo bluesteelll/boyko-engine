@@ -170,9 +170,18 @@ fn loom_m1_fork_join_no_lost_wakeup() {
 // =========================================================================
 
 /// Transcription of `worker.rs::unpark_one_idle`'s claim core (the only part
-/// that is `&ThreadPool`-bound and thus not loom-buildable). Line-for-line: same
-/// lowest-bit pick, same `compare_exchange_weak(AcqRel, Acquire)`. Returns the
+/// that is `&ThreadPool`-bound and thus not loom-buildable). Same
+/// `compare_exchange_weak(AcqRel, Acquire)` single-bit claim; returns the
 /// claimed worker id (the bit it cleared), or `None` if no bit was set.
+///
+/// FIX-3 divergence note: production `unpark_one_idle` now rotates the search
+/// START offset (a `Relaxed` `wake_rotor`) to remove the lowest-bit wake bias,
+/// but still claims exactly ONE set bit per successful CAS with identical
+/// orderings. The property M2/M2b verify — mutual exclusion of the claim + no
+/// lost wakeup under Race C — is independent of *which* set bit is picked, so
+/// this model fixes `start == 0` (the lowest-bit special case) as a faithful
+/// representative; the rotor only reshuffles the target across calls and
+/// carries no data, so it cannot introduce a synchronization edge to model.
 fn claim_one_idle(idle: &AtomicU64) -> Option<u32> {
     loop {
         let mask = idle.load(Ordering::Acquire);

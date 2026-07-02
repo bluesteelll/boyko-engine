@@ -6,6 +6,7 @@
 //! against Race C (plan §13.4.1) — we keep it explicit in the code with a
 //! comment, never collapse it into the pre-park branch.
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use crossbeam_deque::{Steal, Worker};
@@ -117,18 +118,43 @@ pub(crate) fn worker_main(inner: Arc<PoolInner>, worker_id: u32, deque: Worker<T
     }
 }
 
-/// Run a task body, catching any panic. The panic-catch here is a
-/// last-resort safety net for tasks spawned via `ThreadPool::spawn`
-/// (fire-and-forget); scope-spawned tasks have their own `catch_unwind`
-/// inside the body wrapper so that the payload reaches `Scope::Drop`.
+/// Run a task body with a process-abort guard for the fire-and-forget path.
+///
+/// Two distinct panic disciplines meet here:
+///
+/// - **Scope-spawned tasks** already wrap their body in `catch_unwind` inside
+///   [`Scope::spawn`](crate::Scope::spawn), storing the payload for
+///   `Scope::Drop` to re-raise on the joining thread. Such a body cannot
+///   unwind past its own wrapper, so the `catch_unwind` below never observes
+///   its panic and their propagation semantics are unchanged.
+/// - **Fire-and-forget tasks** (`ThreadPool::spawn`) have no joiner to receive
+///   a payload. A raw unwind here would tear down `worker_main`, permanently
+///   shrinking the pool to `n-1` threads for the rest of the process lifetime
+///   — a silent, unrecoverable degradation. We instead adopt rayon's `spawn`
+///   policy explicitly: catch the unwind and abort the process. The catch
+///   frame costs nothing on the hot path beyond a landing pad; the abort path
+///   is `#[cold]`.
 #[inline]
 fn run_task(t: TaskHandle) {
-    // Note: catch_unwind here would swallow scope-spawn panics that are
-    // already wrapped. Scope spawn bodies handle their own catch; for
-    // fire-and-forget ThreadPool::spawn, a panicking task currently
-    // unwinds the worker thread (aborting the process). Wave 7 may
-    // refine this, but it matches rayon's `spawn` semantic today.
-    t.run();
+    if catch_unwind(AssertUnwindSafe(|| t.run())).is_err() {
+        abort_on_task_panic();
+    }
+}
+
+/// Abort the process after a fire-and-forget task panicked. Kept `#[cold]` and
+/// out-of-line so the `run_task` landing pad stays small (I-cache). Matches
+/// rayon's documented `spawn` behaviour: an unhandled task panic aborts.
+#[cold]
+#[inline(never)]
+fn abort_on_task_panic() -> ! {
+    // The payload has already been printed by the default panic hook (which
+    // runs at the unwind's origin, before it reaches this catch). This line
+    // records the abort decision so the cause is unambiguous in logs.
+    eprintln!(
+        "boyko_threadpool: a fire-and-forget task (ThreadPool::spawn) panicked; \
+         aborting the process (no joiner can receive the payload)"
+    );
+    std::process::abort();
 }
 
 /// Poll all four sources once. Used by the backoff/park loop.
@@ -242,31 +268,46 @@ pub(crate) fn unmark_idle(idle: &AtomicU64, worker_id: u32) {
 
 /// Wake one parked worker, if any. Returns `true` on success.
 ///
-/// Algorithm (plan §4.3):
+/// Algorithm (plan §4.3, with the FIX-3 rotation):
 /// 1. Acquire-load the idle bitset.
 /// 2. If empty, no worker is parked → return false.
-/// 3. Pick the lowest set bit (`mask & mask.wrapping_neg()`).
+/// 3. Pick ONE set bit, starting the search from a rotating offset
+///    (`wake_rotor`) so that successive wakes do not always target the
+///    lowest-id parked worker (that systematic bias starves high-id workers
+///    and was the fairness enabler behind the cross-pool misrouting hazard).
 /// 4. CAS-clear that bit (AcqRel on success). On contention, restart.
 /// 5. `unpark` the corresponding worker.
 ///
-/// The CAS spin is bounded by the number of bits set; contention is rare
-/// (the bit count equals the parked worker count, and at most one wake-up
-/// per push is required).
+/// The claim is still a single-bit CAS: exactly one worker is claimed per
+/// successful call (the property the loom M2/M2b models verify over their
+/// transcribed copy — rotation changes *which* set bit, never that precisely
+/// one is claimed). The CAS spin is bounded by the number of bits set;
+/// contention is rare (the bit count equals the parked worker count, and at
+/// most one wake-up per push is required).
 pub(crate) fn unpark_one_idle(inner: &PoolInner) -> bool {
+    // Relaxed: the rotor only spreads the wake target; no data is published
+    // through it, so its inter-thread order is immaterial (correctness rests
+    // entirely on the idle-bitset CAS below).
+    let start = (inner.wake_rotor.fetch_add(1, Ordering::Relaxed) % 64) as u32;
     loop {
         let mask = inner.idle.load(Ordering::Acquire);
         if mask == 0 {
             return false;
         }
-        let bit = mask & mask.wrapping_neg();
+        // Pick the lowest set bit at or above `start`, wrapping around. This
+        // is a rotate-right by `start` (bringing bit `start` to position 0),
+        // lowest-bit pick, then rotate the index back.
+        let rotated = mask.rotate_right(start);
+        let low = rotated & rotated.wrapping_neg();
+        let id = ((low.trailing_zeros() + start) % 64) as u64;
+        let bit = 1u64 << id;
         let new = mask & !bit;
         match inner
             .idle
             .compare_exchange_weak(mask, new, Ordering::AcqRel, Ordering::Acquire)
         {
             Ok(_) => {
-                let id = bit.trailing_zeros() as usize;
-                inner.workers[id].thread.unpark();
+                inner.workers[id as usize].thread.unpark();
                 return true;
             }
             Err(_) => continue,
@@ -275,11 +316,25 @@ pub(crate) fn unpark_one_idle(inner: &PoolInner) -> bool {
 }
 
 /// Push a task into the pool, targeting the calling thread's local
-/// injector when on a worker (cache locality) and the global injector
-/// otherwise. Wakes one idle worker.
+/// injector when it belongs to *this* pool (cache locality) and the global
+/// injector otherwise. Wakes one idle worker.
+///
+/// The local-injector fast path is gated on pool identity, not on the bare
+/// TLS worker id: `injector_local[wid]` is polled only by *this* pool's
+/// worker `wid` (siblings reach it via the local-injector steal in stage 1.5,
+/// but only within the same pool). A worker of pool A (id `wid`) that pushes
+/// into pool B must NOT land the task in pool B's `injector_local[wid]` — that
+/// slot's owner in pool B may be parked while `unpark_one_idle` wakes the
+/// lowest idle bit, so the cross-pool task could sit undrained indefinitely.
+/// We compare the TLS active-pool pointer against the target `inner` by
+/// pointer equality; on any mismatch (cross-pool spawn, or an unattached
+/// thread) we route to the global injector, which every worker polls.
 pub(crate) fn push_task(inner: &PoolInner, task: TaskHandle) {
     let wid = tls::current_worker_id();
-    if (wid as usize) < inner.injector_local.len() {
+    // Same-pool fast path: the calling thread is a worker whose active pool is
+    // exactly `inner`. Pointer equality is branch-cheap and the common case.
+    let same_pool = std::ptr::eq(tls::active_pool_ptr(), inner);
+    if same_pool && (wid as usize) < inner.injector_local.len() {
         inner.injector_local[wid as usize].push(task);
     } else {
         inner.injector_global.push(task);

@@ -131,6 +131,13 @@ pub struct PoolInner {
     /// park. Lock-free via `fetch_or` / `fetch_and` / `compare_exchange`.
     pub(crate) idle: CachePadded<AtomicU64>,
 
+    /// Rotating start offset for `unpark_one_idle`'s set-bit search. A plain
+    /// `Relaxed` counter (order does not matter — it only spreads which parked
+    /// worker is woken across successive wakes) that removes the systematic
+    /// lowest-bit wake bias. `CachePadded` so the wake-path RMW does not
+    /// false-share with the `idle` bitset it sits beside.
+    pub(crate) wake_rotor: CachePadded<AtomicU64>,
+
     /// Counter of active install/scope frames. Used by `Drop` to assert
     /// no scope outlives the pool (drop while `> 0` is a contract bug).
     pub(crate) active_scopes: CachePadded<AtomicUsize>,
@@ -632,6 +639,7 @@ impl ThreadPoolBuilder {
             stealers,
             workers,
             idle: CachePadded::new(AtomicU64::new(0)),
+            wake_rotor: CachePadded::new(AtomicU64::new(0)),
             active_scopes: CachePadded::new(AtomicUsize::new(0)),
             shutdown: CachePadded::new(AtomicBool::new(false)),
             worker_count: worker_count as u32,
