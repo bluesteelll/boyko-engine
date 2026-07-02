@@ -57,6 +57,10 @@ pub enum VulkanError {
     /// A declared-but-unimplemented RHI seam was invoked on this backend (plan
     /// D7). The `&'static str` names the method.
     Unsupported(&'static str),
+    /// A second [`VulkanContext::boot_singleton`](crate::device::VulkanContext::boot_singleton)
+    /// was attempted while a live singleton exists — one device per process is
+    /// the singleton contract (host plan D2 / review P0).
+    SingletonAlreadyBooted,
     /// An agnostic [`RhiError`] carried verbatim (plan C3 / SEAM-4). Lets the
     /// `RhiError` → `VulkanError` → `RhiError` round-trip preserve the exact
     /// category instead of fabricating a `Vk(...)` for it. Constructed only by the
@@ -158,6 +162,9 @@ impl From<VulkanError> for RhiError {
                 RhiError::OutOfMemory
             }
             VulkanError::Unsupported(method) => RhiError::Unsupported(method),
+            VulkanError::SingletonAlreadyBooted => {
+                RhiError::BackendError("vulkan device singleton already booted")
+            }
             // Plan C3: project a verbatim-carried agnostic error back losslessly.
             VulkanError::Rhi(rhi) => rhi,
         }
@@ -174,6 +181,9 @@ impl core::fmt::Display for VulkanError {
             VulkanError::NoSuitableMemoryType => f.write_str("no suitable memory type"),
             VulkanError::SubAllocExhausted => f.write_str("sub-allocator exhausted"),
             VulkanError::Unsupported(method) => write!(f, "unsupported RHI operation: {method}"),
+            VulkanError::SingletonAlreadyBooted => {
+                f.write_str("vulkan device singleton already booted")
+            }
             VulkanError::Rhi(e) => write!(f, "{e}"),
         }
     }

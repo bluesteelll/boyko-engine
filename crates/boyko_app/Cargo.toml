@@ -1,0 +1,28 @@
+[package]
+name = "boyko-app"
+version = "0.1.0"
+edition = "2024"
+description = "The host layer: OS loop + device singleton boot + the windowed runner + plugin composition (EnginePlugins) — host plan D1/R2."
+
+# Layering (host plan D1, the amended boyko_render invariant): boyko_render
+# (the data bridge) and boyko_app (the host) are the only two crates that name
+# both the graphics RHI and the ECS core; boyko_app must not define per-entity
+# GPU data paths — those belong in boyko_render. boyko_render answers "WHAT to
+# upload" (ECS-reading, token-typed upload fns); boyko_app answers "WHEN"
+# (sequencing, token minting, window/swapchain lifetime).
+[lib]
+name = "boyko_app"
+
+[dependencies]
+boyko-ecs = { path = "../boyko_ecs" }
+boyko-scene = { path = "../boyko_scene" }
+boyko-render = { path = "../boyko_render" }
+boyko_rhi = { path = "../boyko_rhi" }
+boyko_rhi_vulkan = { path = "../boyko_rhi_vulkan" }
+boyko-input = { path = "../boyko_input" }
+boyko-math = { path = "../boyko_math" }
+
+[dev-dependencies]
+# The `#[derive(Resource)]` used by the windowed smoke test's frame-budget
+# resource (boyko-macros is a pure proc-macro crate — no workspace dep).
+boyko-macros = { path = "../boyko_macros" }

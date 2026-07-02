@@ -96,19 +96,74 @@ pub struct ResolvedColumn {
     pub device_cap: u32,
 }
 
+/// The device handle behind [`RhiContext`] — owned or shared (host plan R2,
+/// critic delta A2).
+///
+/// - [`Owned`](DeviceHandle::Owned): today's semantics, verbatim — the context
+///   owns the [`VulkanContext`] and its drop (after `destroy_all` in
+///   [`RhiContext`]'s `Drop`) destroys the device / instance / loader.
+/// - [`Shared`](DeviceHandle::Shared): the process-singleton mode — the context
+///   borrows the `&'static` handle pinned by
+///   [`VulkanContext::boot_singleton`]; dropping the variant drops only the
+///   reference, NEVER the device (the host ends the device's lifecycle via
+///   `VulkanContext::destroy_singleton`).
+///
+/// The discriminant is touched only on setup/teardown paths ([`RhiContext::new`]
+/// / [`RhiContext::from_shared`] / `Drop`); frame paths go through the borrowed
+/// `&VulkanContext` that [`get`](DeviceHandle::get) returns, so the split costs
+/// the hot path nothing.
+// The size skew (`VulkanContext` ~1 KB vs a `&'static`) is irrelevant here:
+// exactly ONE `RhiContext` exists per world (a singleton NonSend resource,
+// never an array element), and boxing `Owned` would both deviate from the
+// pinned "owned mode keeps today's semantics verbatim" contract (critic delta
+// A2) and add a pointer chase to every owned-mode device access.
+#[allow(clippy::large_enum_variant)]
+enum DeviceHandle {
+    /// The context owns the device; dropping it destroys the device.
+    Owned(VulkanContext),
+    /// The context shares the pinned process-singleton device; dropping it
+    /// drops only the reference.
+    Shared(&'static VulkanContext),
+}
+
+impl DeviceHandle {
+    /// Borrows the device regardless of mode — one predictable match on the
+    /// discriminant, used by setup/teardown paths; hot paths already hold the
+    /// resulting `&VulkanContext`.
+    #[inline]
+    fn get(&self) -> &VulkanContext {
+        match self {
+            DeviceHandle::Owned(ctx) => ctx,
+            DeviceHandle::Shared(ctx) => ctx,
+        }
+    }
+}
+
 /// The concrete `!Send` RHI handle the dispatcher reaches (MF-5).
 ///
-/// Owns the [`VulkanContext`] (device + the validation messenger) and the
-/// [`GpuColumnManager`]. `impl `[`NonSendResource`]: the orphan rule REQUIRES this
-/// impl to live in `boyko_render` (neither trait nor [`VulkanContext`] is local to
-/// the other crate). For Wave B it just exists and owns the manager; Wave C's
-/// `GpuSystem` projects it off the world on the dispatcher to record + submit.
+/// Holds the [`VulkanContext`] (device + the validation messenger) — owned or
+/// shared, see below — and the [`GpuColumnManager`]. `impl `[`NonSendResource`]:
+/// the orphan rule REQUIRES this impl to live in `boyko_render` (neither trait
+/// nor [`VulkanContext`] is local to the other crate). For Wave B it just exists
+/// and owns the manager; Wave C's `GpuSystem` projects it off the world on the
+/// dispatcher to record + submit.
 ///
-/// `!Send + !Sync` by [`VulkanContext`]'s own raw-pointer fields — the RHI is
-/// touched only on the owning (dispatcher) thread (§5.3).
+/// # Device-ownership modes (host plan R2)
+///
+/// - **Owned** ([`new`](Self::new)): the pre-R2 semantics, byte-for-byte —
+///   `Drop` runs `destroy_all` (columns + UI resources), then the owned
+///   [`VulkanContext`] field drops, destroying the device / instance / loader.
+/// - **Shared** ([`from_shared`](Self::from_shared)): the world-resident side of
+///   the leaked `&'static` device singleton — `Drop` runs `destroy_all` but
+///   NEVER touches the device lifecycle; the host ends it with
+///   [`VulkanContext::destroy_singleton`] after evicting this resource.
+///
+/// `!Send + !Sync` in both modes by [`VulkanContext`]'s own raw-pointer fields —
+/// the RHI is touched only on the owning (dispatcher) thread (§5.3).
 pub struct RhiContext {
-    /// The Vulkan device + queue origin + validation messenger.
-    context: VulkanContext,
+    /// The Vulkan device + queue origin + validation messenger (owned or
+    /// shared — see the type-level mode split).
+    context: DeviceHandle,
     /// The device-column manager (registry + meta + staging).
     manager: GpuColumnManager,
     /// The owned UI render capability (GUI P5a Decision 8): the UI pipeline +
@@ -120,20 +175,37 @@ pub struct RhiContext {
 }
 
 impl RhiContext {
-    /// Wraps a booted [`VulkanContext`] + a fresh [`GpuColumnManager`].
+    /// Wraps a booted [`VulkanContext`] + a fresh [`GpuColumnManager`] in OWNED
+    /// mode: teardown semantics are byte-for-byte the pre-R2 ones — `Drop` runs
+    /// `destroy_all`, then the owned context drops (destroying the device).
     #[inline]
     pub fn new(context: VulkanContext) -> Self {
         Self {
-            context,
+            context: DeviceHandle::Owned(context),
             manager: GpuColumnManager::new(),
             ui: None,
         }
     }
 
-    /// Borrows the owned [`VulkanContext`] (the RHI device origin).
+    /// Wraps the pinned process-singleton device + a fresh [`GpuColumnManager`]
+    /// in SHARED mode (host plan R2): `Drop` runs `destroy_all` (frees every
+    /// column / UI resource) but NEVER touches the device lifecycle — the host
+    /// runner ends it with [`VulkanContext::destroy_singleton`] AFTER evicting
+    /// this resource from the world.
+    #[inline]
+    pub fn from_shared(ctx: &'static VulkanContext) -> Self {
+        Self {
+            context: DeviceHandle::Shared(ctx),
+            manager: GpuColumnManager::new(),
+            ui: None,
+        }
+    }
+
+    /// Borrows the [`VulkanContext`] (the RHI device origin), whichever mode
+    /// holds it.
     #[inline]
     pub fn context(&self) -> &VulkanContext {
-        &self.context
+        self.context.get()
     }
 
     /// Borrows the device-column manager.
@@ -153,13 +225,13 @@ impl RhiContext {
     /// the setup/grow/upload paths need.
     #[inline]
     pub fn split_mut(&mut self) -> (&VulkanContext, &mut GpuColumnManager) {
-        (&self.context, &mut self.manager)
+        (self.context.get(), &mut self.manager)
     }
 
     /// SETUP-only: builds a compute pipeline from `spirv` (registered in the owned
     /// manager's registry) and returns its handle (Wave C).
     ///
-    /// Convenience over `self.manager.create_compute_pipeline(&self.context, …)`:
+    /// Convenience over `self.manager.create_compute_pipeline(self.context.get(), …)`:
     /// the `GpuSystem` setup path holds the projected `&mut RhiContext` and creates
     /// its `gpu_integrate` pipeline once through this.
     ///
@@ -170,7 +242,7 @@ impl RhiContext {
         &mut self,
         spirv: &[u32],
     ) -> Result<ComputePipelineHandle, GpuColumnError> {
-        self.manager.create_compute_pipeline(&self.context, spirv)
+        self.manager.create_compute_pipeline(self.context.get(), spirv)
     }
 
     /// SETUP-only (GUI P5a Rung 3, Decision 8): builds the owned UI render
@@ -205,7 +277,7 @@ impl RhiContext {
         // Idempotent re-setup: drop the prior capability (its own `destroy` drains
         // the device + frees every resource) before building anew.
         if let Some(old) = self.ui.take() {
-            old.destroy(&self.context);
+            old.destroy(self.context.get());
         }
         let (device, _manager) = self.split_mut();
         let resources = UiRenderResources::create(
@@ -256,7 +328,7 @@ impl RhiContext {
         // `split_mut`, which the manager paths use).
         let Self { context, ui, .. } = self;
         let ui = ui.as_mut().ok_or(GpuColumnError::StagingNotMapped)?;
-        ui.upload(context, packed, instance_count, frame_index)?;
+        ui.upload(context.get(), packed, instance_count, frame_index)?;
         Ok(UiFramePlan {
             instance_count,
             ortho,
@@ -332,7 +404,7 @@ impl RhiContext {
         barriers: &[PlannedBarrier],
     ) -> Result<bool, GpuColumnError> {
         self.manager
-            .dispatch_compute(&self.context, pipeline, archetype, component, barriers)
+            .dispatch_compute(self.context.get(), pipeline, archetype, component, barriers)
     }
 
     /// TEST-ONLY (Phase 5 Wave E `sync_validation` oracle): records two
@@ -352,7 +424,7 @@ impl RhiContext {
         barrier_between: bool,
     ) -> Result<bool, GpuColumnError> {
         self.manager.dispatch_compute_twice_one_submit(
-            &self.context,
+            self.context.get(),
             pipeline,
             archetype,
             component,
@@ -391,9 +463,9 @@ impl RhiContext {
         // a second `destroy_all`/`Drop` finds `None` and does nothing. Its `destroy`
         // drains the device + frees every UI resource before `self.context` drops.
         if let Some(ui) = self.ui.take() {
-            ui.destroy(&self.context);
+            ui.destroy(self.context.get());
         }
-        self.manager.destroy_all(&self.context);
+        self.manager.destroy_all(self.context.get());
     }
 }
 
@@ -411,19 +483,30 @@ impl Drop for RhiContext {
     /// `manager.destroy_all` are idempotent, so a prior explicit `destroy_all()`
     /// call does not double-free (GUI P5a Decision 8: the UI rings/pipeline are
     /// owned OUTSIDE the manager, so without this they would leak past Drop).
+    ///
+    /// Mode split (host plan R2): after this body runs, the
+    /// [`DeviceHandle::Owned`] field drop destroys the device / instance /
+    /// loader — byte-for-byte the pre-R2 semantics — while the
+    /// [`DeviceHandle::Shared`] field drop releases only the `&'static`
+    /// reference and NEVER touches the device lifecycle (the host ends it with
+    /// [`VulkanContext::destroy_singleton`]).
     fn drop(&mut self) {
         if let Some(ui) = self.ui.take() {
-            ui.destroy(&self.context);
+            ui.destroy(self.context.get());
         }
-        self.manager.destroy_all(&self.context);
+        self.manager.destroy_all(self.context.get());
     }
 }
 
-// SAFETY (no `unsafe`): `RhiContext` is `!Send + !Sync` automatically — its
-// `VulkanContext` field holds raw `*const DeviceFns` pointers (so it is neither
-// `Send` nor `Sync`), and that property propagates to `RhiContext`. The
-// `NonSendResource` contract is exactly "only ever touched on the owning thread",
-// which the `!Send` bound enforces structurally. No `unsafe impl` is added.
+// SAFETY (no `unsafe`): `RhiContext` is `!Send + !Sync` automatically in BOTH
+// device-ownership modes — `VulkanContext` holds raw `*const DeviceFns` pointers
+// (so it is neither `Send` nor `Sync`), the `DeviceHandle::Owned` variant embeds
+// it by value, and the `DeviceHandle::Shared` variant holds a
+// `&'static VulkanContext` (`&T` is `Send`/`Sync` only if `T: Sync`, which
+// `VulkanContext` is not) — so the property propagates to `RhiContext` either
+// way. The `NonSendResource` contract is exactly "only ever touched on the
+// owning thread", which the `!Send` bound enforces structurally. No
+// `unsafe impl` is added.
 impl NonSendResource for RhiContext {}
 
 /// Owns every device-resident column behind the [`boyko_rhi`] registry (D1).

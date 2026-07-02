@@ -63,12 +63,21 @@ impl VulkanContext {
     /// Ends the singleton's lifecycle: destroys the device, the instance, the
     /// debug messenger, and frees the loader (the normal `Drop` path).
     ///
+    /// PARAMLESS by soundness necessity (review P0): the owning raw pointer is
+    /// retained in a private `AtomicPtr` static at boot (the `&'static` handed out
+    /// is derived FROM it, staying below it in the borrow stack — `Box::leak`'s
+    /// `&mut` downgraded to `&` loses the ownership tag, so reconstructing the Box
+    /// from a shared ref is SB/TB UB; and a reference parameter is PROTECTED for
+    /// the call, making in-call deallocation UB regardless of pointer used). The
+    /// `swap(null)` doubles as the exactly-once tripwire (second destroy panics;
+    /// second boot errors).
+    ///
     /// # Safety
-    /// `ctx` was returned by `boot_singleton`; called exactly once; the device is
-    /// idle; NO other `&'static VulkanContext` reference exists anywhere any more
-    /// (host structs dropped, World GPU residents evicted) — the `'static` is a
-    /// documented fiction this call ends.
-    pub unsafe fn destroy_singleton(ctx: &'static VulkanContext);
+    /// A `boot_singleton` succeeded; the device is idle; NO `&'static
+    /// VulkanContext` reference exists anywhere any more (host structs dropped,
+    /// World GPU residents evicted) — the `'static` is a documented fiction this
+    /// call ends.
+    pub unsafe fn destroy_singleton();
 }
 ```
 
@@ -99,7 +108,7 @@ impl VulkanContext {
      does not touch the device)
    - take MeshRegistry and call its unsafe destroy(ctx) under the step-1 idle
    - remove GpuDevice (no dangling &'static may remain in a live structure)
-4. unsafe { VulkanContext::destroy_singleton(ctx) } — LAST statement of the runner
+4. unsafe { VulkanContext::destroy_singleton() } — LAST statement of the runner
 ```
 
 Post-run App state is pinned: the World is no longer GPU-capable; a `debug_assert!`
@@ -276,7 +285,7 @@ pub unsafe fn present_sampled(&mut self, token: FrameWriteToken, ...) -> ...;
 // boyko_rhi_vulkan (R2) — the device-singleton lifecycle, first-class
 impl VulkanContext {
     pub fn boot_singleton(config: InstanceConfig) -> Result<&'static VulkanContext, VulkanError>;
-    pub unsafe fn destroy_singleton(ctx: &'static VulkanContext); // SAFETY contract in D2
+    pub unsafe fn destroy_singleton(); // paramless by soundness necessity; contract in D2
 }
 
 // boyko_app

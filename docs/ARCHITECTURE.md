@@ -141,10 +141,12 @@ boyko_physics    ──→ boyko_ecs, boyko_macros, boyko_utils, boyko_threadpoo
 
 ### Render / UI / shaders
 
-`boyko_render` is the single bridge crate allowed to name BOTH the ECS surface
-and the RHI surface; `boyko_rhi` itself does NOT depend on `boyko_ecs` (so no
-cycle). `boyko_ui` produces render-agnostic glyph-quad / instance descriptors and
-takes **no** render dependency.
+`boyko_render` (the data bridge) and `boyko_app` (the host) are the only two
+crates that name both the graphics RHI and the ECS core; `boyko_app` must not
+define per-entity GPU data paths — those belong in `boyko_render`. `boyko_rhi`
+itself does NOT depend on `boyko_ecs` (so no cycle). `boyko_ui` produces
+render-agnostic glyph-quad / instance descriptors and takes **no** render
+dependency.
 
 ```
 boyko_rhi         ──→ boyko_utils                          (FFI-free trait surface)

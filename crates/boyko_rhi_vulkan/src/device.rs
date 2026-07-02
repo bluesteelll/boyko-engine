@@ -28,6 +28,7 @@ use core::cell::{OnceCell, RefCell};
 use core::ffi::{CStr, c_char, c_void};
 use core::mem;
 use core::ptr;
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::debug::{self, DebugMessengerState};
 use crate::ffi::*;
@@ -393,6 +394,17 @@ pub struct VulkanContext {
     device_block: OnceCell<RefCell<DeviceLocalBlock>>,
 }
 
+/// The retained OWNING pointer behind [`VulkanContext::boot_singleton`] /
+/// [`VulkanContext::destroy_singleton`] (host plan D2, review-P0 soundness
+/// shape): the `&'static` `boot_singleton` hands out is DERIVED from this
+/// pointer, and `destroy_singleton` reclaims the allocation through it — never
+/// through a shared reference (a shared reference carries no ownership-capable
+/// tag, so `Box::from_raw` from one is Stacked/Tree-Borrows UB). Null ⇔ no live
+/// singleton; the CAS/swap pair doubles as the second-boot error and the
+/// exactly-once destroy tripwire. Private by design: the lifecycle pair is the
+/// only code that may touch it.
+static SINGLETON: AtomicPtr<VulkanContext> = AtomicPtr::new(ptr::null_mut());
+
 impl VulkanContext {
     /// Boots a headless Vulkan context, picking a discrete GPU if available.
     ///
@@ -486,6 +498,129 @@ impl VulkanContext {
                 Err(e)
             }
         }
+    }
+
+    /// Boots the device and pins it as the process singleton: the returned
+    /// `&'static` is the ONE device handle every layer (host, World resources)
+    /// shares. Immutable after boot — no `&mut VulkanContext` ever exists
+    /// again, so every holder sees one frozen, shared handle. Ended EXACTLY
+    /// ONCE by [`destroy_singleton`](Self::destroy_singleton); the `'static`
+    /// lifetime is a documented fiction that call ends (host plan D2).
+    ///
+    /// The OWNING raw pointer is retained in the private [`SINGLETON`] static
+    /// (review-P0 soundness shape): the `&'static` handed out is derived FROM
+    /// that pointer, so the later reclamation goes through the retained,
+    /// ownership-capable raw pointer — never through a shared reference. The
+    /// mechanics live HERE, next to the type they manage — the host
+    /// (`boyko_app`) only calls this pair.
+    ///
+    /// # Errors
+    ///
+    /// - [`VulkanError::Boot`](crate::error::VulkanError::Boot) on any loader /
+    ///   driver / GPU absence (never panics), so a GPU-less machine can skip
+    ///   gracefully;
+    /// - [`VulkanError::SingletonAlreadyBooted`](crate::error::VulkanError::SingletonAlreadyBooted)
+    ///   if a live singleton already exists — a second boot is a contract
+    ///   violation (the fast path rejects it before creating a second device;
+    ///   the CAS-race path destroys the just-booted second device before
+    ///   returning).
+    pub fn boot_singleton(
+        config: InstanceConfig,
+    ) -> Result<&'static VulkanContext, crate::error::VulkanError> {
+        // Advisory fast-fail so a contract-violating second boot does not
+        // create (and immediately destroy) a whole second device. The
+        // compare_exchange below remains the authority.
+        // Acquire: matches the Release success ordering of the CAS below.
+        if !SINGLETON.load(Ordering::Acquire).is_null() {
+            return Err(crate::error::VulkanError::SingletonAlreadyBooted);
+        }
+
+        let ctx = Self::boot(config)?;
+        let raw = Box::into_raw(Box::new(ctx));
+
+        // Publish the owning pointer. Release on success: whoever observes
+        // `raw` (the advisory load above, `destroy_singleton`'s swap) also
+        // observes the fully-initialized `VulkanContext` behind it. Acquire on
+        // failure: observe the racing publisher's state coherently.
+        if SINGLETON
+            .compare_exchange(ptr::null_mut(), raw, Ordering::Release, Ordering::Acquire)
+            .is_err()
+        {
+            // Another boot published between the advisory load and the CAS —
+            // this boot lost.
+            // SAFETY: `raw` came from `Box::into_raw` just above, was NEVER
+            // published (the CAS failed) and no reference was ever derived
+            // from it — reconstructing and dropping the box is the unique
+            // owner reclaiming its own fresh allocation; the second device is
+            // fully torn down by the normal `Drop`.
+            drop(unsafe { Box::from_raw(raw) });
+            return Err(crate::error::VulkanError::SingletonAlreadyBooted);
+        }
+
+        // SAFETY: `raw` came from `Box::into_raw` (non-null, aligned, valid
+        // for reads) and its allocation stays live until `destroy_singleton`
+        // reclaims it through the SAME retained pointer in `SINGLETON` — the
+        // shared reference minted here is derived FROM the owning pointer and
+        // stays below it in the borrow stack, so the eventual `Box::from_raw`
+        // does not go through this reference. The referent is write-never
+        // after boot (no `&mut` ever exists again), so shared reads are sound
+        // for as long as the caller upholds `destroy_singleton`'s contract.
+        Ok(unsafe { &*raw })
+    }
+
+    /// Ends the singleton's lifecycle: destroys the device, the instance, the
+    /// debug messenger, and frees the loader (the normal [`Drop`] path), then
+    /// releases the pinned allocation.
+    ///
+    /// PARAMLESS by soundness necessity (review P0): the owning raw pointer is
+    /// retained in the private [`SINGLETON`] static at boot. A `&'static`
+    /// downgraded from `Box::leak`'s `&'static mut` loses the
+    /// ownership-capable tag, so reconstructing a `Box` from a shared
+    /// reference is Stacked/Tree-Borrows UB — and a reference-typed parameter
+    /// is PROTECTED for the call duration, making deallocation of its referent
+    /// inside the call UB regardless of which pointer performs it. Taking no
+    /// parameter and deallocating through the retained raw pointer avoids
+    /// both.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no live singleton exists (`boot_singleton` never succeeded,
+    /// or `destroy_singleton` already ran) — the exactly-once tripwire fires
+    /// on the null-swap BEFORE any memory is touched.
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees that:
+    /// - a [`boot_singleton`](Self::boot_singleton) succeeded and its
+    ///   singleton is still live (the tripwire panics otherwise, before
+    ///   touching memory — but exactly-once remains the caller's contract);
+    /// - the device is idle (no submitted GPU work still references it);
+    /// - NO `&'static VulkanContext` reference obtained from `boot_singleton`
+    ///   EXISTS anywhere any more (host structs dropped, World GPU residents
+    ///   evicted, no copy stashed in any live structure) — reference validity,
+    ///   not merely "no deref": the `'static` is a documented fiction this
+    ///   call ends, and any surviving reference would dangle.
+    pub unsafe fn destroy_singleton() {
+        // AcqRel: the Acquire half matches the Release success ordering of the
+        // CAS in `boot_singleton` (this thread observes the fully-initialized
+        // context before dropping it); the Release half orders the
+        // null-publish after this thread's prior device use.
+        let raw = SINGLETON.swap(ptr::null_mut(), Ordering::AcqRel);
+        if raw.is_null() {
+            panic!(
+                "invariant: destroy_singleton with no live device singleton \
+                 (boot_singleton never succeeded, or destroy_singleton ran twice)"
+            );
+        }
+        // SAFETY: `raw` is the exact pointer `boot_singleton`'s `Box::into_raw`
+        // stashed in `SINGLETON` (correct provenance + layout for
+        // `Box::from_raw`); the swap-to-null above guarantees no other call
+        // can observe or reclaim it again (exactly once); and per this fn's
+        // contract no `&'static VulkanContext` derived from it survives — so
+        // re-owning the box and dropping it (the normal `VulkanContext::Drop`
+        // teardown: device → messenger → instance → loader) cannot double-free
+        // or invalidate a live borrow.
+        drop(unsafe { Box::from_raw(raw) });
     }
 
     /// Continues the boot once the instance exists. On error it returns the
@@ -2149,16 +2284,125 @@ fn create_device(
 
 #[cfg(test)]
 mod tests {
-    use super::{InstanceConfig, validation_requested};
+    use std::sync::Mutex;
+
+    use super::{InstanceConfig, VulkanContext, validation_requested};
+    use crate::error::VulkanError;
+
+    /// Serializes the two tests that interact through PROCESS-GLOBAL state:
+    /// `validation_requested_env_gate` mutates `BOYKO_DISABLE_VALIDATION` via
+    /// `std::env::set_var` (unsound if any other thread reads the environment
+    /// concurrently), and `boot_singleton_destroy_singleton_round_trip` boots a
+    /// real device — whose dynamic-loader open may `getenv` on POSIX (Linux is
+    /// a target). Both tests hold this lock for their whole body, so the env
+    /// mutation can never interleave with a boot. Poison-tolerant so one
+    /// panicking test does not cascade-fail the other.
+    static ENV_AND_BOOT_LOCK: Mutex<()> = Mutex::new(());
+
+    /// R2 device-singleton lifecycle round trip + the exactly-once tripwires
+    /// (review P0/P1-1): `boot_singleton` pins the ONE `&'static` device
+    /// handle; a SECOND boot while it is live returns `SingletonAlreadyBooted`
+    /// (the advisory fast path — no second device is ever created, so nothing
+    /// leaks); `destroy_singleton` ends the lifecycle (the normal `Drop`
+    /// teardown of device / instance / loader); a SECOND destroy panics on the
+    /// null-swap tripwire BEFORE touching any memory (safe to catch). Skips
+    /// gracefully when no loader / GPU is present, mirroring the integration
+    /// tests' `boot_or_skip` convention.
+    ///
+    /// Headless, validation OFF by EXPLICIT config: `enable_validation: false`
+    /// makes `validation_requested`'s `&&` SHORT-CIRCUIT skip the
+    /// `BOYKO_DISABLE_VALIDATION` read entirely — the env var is never read
+    /// when the flag is false — so the effective flag is `false` regardless of
+    /// the environment and no validation message can be recorded by
+    /// construction. `ENV_AND_BOOT_LOCK` additionally serializes this test
+    /// against the sibling env-mutating test (the dynamic-loader open inside
+    /// `boot` may still `getenv` on POSIX).
+    #[test]
+    fn boot_singleton_destroy_singleton_round_trip() {
+        let _guard = ENV_AND_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let config = InstanceConfig {
+            enable_validation: false,
+            ..InstanceConfig::default()
+        };
+
+        // Scope the `&'static` binding so it is out of scope BEFORE
+        // `destroy_singleton` runs — the destroy contract is that no reference
+        // obtained from `boot_singleton` exists any more.
+        {
+            let ctx = match VulkanContext::boot_singleton(config) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!(
+                        "SKIP boot_singleton_destroy_singleton_round_trip: Vulkan unavailable ({e:?})"
+                    );
+                    return;
+                }
+            };
+
+            // Trivial use of the pinned handle: a booted context always has a
+            // device name and passed the G-buffer storage-format boot fail-fast.
+            assert!(
+                !ctx.device_name().is_empty(),
+                "a booted singleton reports its physical-device name"
+            );
+            assert!(
+                ctx.device_caps().gbuffer_storage_format_ok,
+                "the boot fail-fast guarantees G-buffer storage-format support"
+            );
+
+            // A second boot while the singleton is live is a contract
+            // violation: the advisory fast path rejects it WITHOUT booting a
+            // second device (so nothing leaks in this test).
+            assert!(
+                matches!(
+                    VulkanContext::boot_singleton(config),
+                    Err(VulkanError::SingletonAlreadyBooted)
+                ),
+                "a second boot_singleton while live must return SingletonAlreadyBooted"
+            );
+        }
+
+        // SAFETY: the `boot_singleton` above succeeded and its singleton is
+        // still live; the device is idle (no GPU work was ever submitted); and
+        // no `&'static VulkanContext` reference exists any more — the only one
+        // this test created went out of scope with the block above.
+        unsafe { VulkanContext::destroy_singleton() };
+
+        // The exactly-once tripwire: a second destroy must panic on the
+        // null-swap BEFORE touching any memory, so catching the unwind is safe
+        // (no partial teardown state exists on that path). The default panic
+        // hook is silenced around the call so the EXPECTED panic does not spam
+        // the test log.
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let second = std::panic::catch_unwind(|| {
+            // SAFETY: intentionally violates the exactly-once contract to
+            // assert the tripwire: the singleton is null, so the swap observes
+            // null and panics before `Box::from_raw` — no memory is touched on
+            // this path.
+            unsafe { VulkanContext::destroy_singleton() };
+        });
+        std::panic::set_hook(prev_hook);
+        assert!(
+            second.is_err(),
+            "a second destroy_singleton must panic on the null-swap tripwire"
+        );
+    }
 
     /// `BOYKO_DISABLE_VALIDATION` forces the effective flag to `false` regardless of
     /// `config.enable_validation`; with the var unset the helper mirrors the config
     /// (the default path is byte-identical to plain `config.enable_validation`).
     ///
     /// Mutates a process-global env var, so the three cases run in ONE test (no
-    /// cross-test interleave) and the prior value is saved + restored.
+    /// cross-test interleave), the prior value is saved + restored, and the
+    /// whole body holds `ENV_AND_BOOT_LOCK` — the singleton boot test may read
+    /// the environment inside the dynamic-loader open, and `set_var` must
+    /// never interleave with that.
     #[test]
     fn validation_requested_env_gate() {
+        let _guard = ENV_AND_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         const KEY: &str = "BOYKO_DISABLE_VALIDATION";
         let saved = std::env::var_os(KEY);
 
@@ -2172,8 +2416,11 @@ mod tests {
         };
 
         // Env UNSET: helper mirrors the config (default-path invariant).
-        // SAFETY: single-threaded test scope; no other thread reads the env
-        // concurrently. The original value is restored at the end of the test.
+        // SAFETY: `ENV_AND_BOOT_LOCK` (held for this whole test) serializes
+        // every env mutation here against the only other env reader in this
+        // binary — the singleton boot test, whose loader open may `getenv` —
+        // so no thread reads the environment concurrently. The original value
+        // is restored at the end of the test.
         unsafe { std::env::remove_var(KEY) };
         assert!(validation_requested(&on), "env unset + config true => requested");
         assert!(
@@ -2182,7 +2429,7 @@ mod tests {
         );
 
         // Env SET: forces `false` even when the config requests validation.
-        // SAFETY: as above — single-threaded test scope.
+        // SAFETY: as above — serialized by `ENV_AND_BOOT_LOCK`.
         unsafe { std::env::set_var(KEY, "1") };
         assert!(
             !validation_requested(&on),
@@ -2194,7 +2441,7 @@ mod tests {
         );
 
         // Restore the prior process env so sibling tests are unaffected.
-        // SAFETY: as above — single-threaded test scope.
+        // SAFETY: as above — serialized by `ENV_AND_BOOT_LOCK`.
         match saved {
             Some(v) => unsafe { std::env::set_var(KEY, v) },
             None => unsafe { std::env::remove_var(KEY) },
