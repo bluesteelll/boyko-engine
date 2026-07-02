@@ -125,6 +125,19 @@ pub struct ParticleColorGraph {
     seen_scratch: Vec<u64>,
 }
 
+/// DEBUG snapshot of a [`ParticleColorGraph`] CSR's `(len, capacity)` shape,
+/// captured before and after a `pool.scope` dispatch to assert the CSR is not
+/// resized/realloc'd while workers hold raw pointers into it (audit F5). Compiled
+/// only under `cfg(debug_assertions)`.
+#[cfg(debug_assertions)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+struct CsrShape {
+    start_len: usize,
+    start_cap: usize,
+    items_len: usize,
+    items_cap: usize,
+}
+
 impl ParticleColorGraph {
     /// Reserves the coloring buffers for up to `n` particles and `m` constraints (no
     /// later realloc in steady state).
@@ -156,6 +169,30 @@ impl ParticleColorGraph {
     #[inline]
     pub fn color_span(&self, c: usize) -> u32 {
         self.color_start[c + 1] - self.color_start[c]
+    }
+
+    /// DEBUG snapshot of the CSR's shape (audit F5): the `(len, capacity)` of the
+    /// two arrays workers read through raw pointers during a `pool.scope` dispatch
+    /// (`color_start` for the color offsets, `color_items` for the constraint
+    /// indices). Captured before the scope and re-captured after; equality across
+    /// the dispatch window pins the "built-then-frozen-before-dispatch" invariant
+    /// the raw-pointer worker access depends on — a resize mid-dispatch would
+    /// realloc a buffer a worker still holds a `*const` into (use-after-free /
+    /// torn read). `capacity` matters because a reserve-only realloc (no length
+    /// change) also moves the base.
+    ///
+    /// `cfg(debug_assertions)` only — a pure invariant probe, never compiled into
+    /// release (the borrow checker already forbids `&mut self` here; this is
+    /// defense-in-depth documenting the frozen contract).
+    #[cfg(debug_assertions)]
+    #[inline]
+    fn csr_shape(&self) -> CsrShape {
+        CsrShape {
+            start_len: self.color_start.len(),
+            start_cap: self.color_start.capacity(),
+            items_len: self.color_items.len(),
+            items_cap: self.color_items.capacity(),
+        }
     }
 
     /// Colors a 2-arity constraint set (distance edges or self-collision pairs):
@@ -980,6 +1017,17 @@ fn dispatch_color<F>(
             color_items: graph.color_items.as_ptr(),
         };
 
+        // F5 invariant pin: the CSR (`color_start` + `color_items`) is BUILT by the
+        // colorer and FROZEN before this dispatch — workers read `color_items`
+        // through `ptrs.color_items` (a `*const u32` captured above) and the color's
+        // `[lo, hi)` bounds through `color_start`, so a mid-dispatch resize/realloc
+        // of either would dangle those raw reads. `graph: &ParticleColorGraph` is a
+        // shared borrow held across the whole scope, so the compiler already forbids
+        // the mutation; this snapshot re-checks the CSR `(len, capacity)` shape after
+        // the join as defense-in-depth documenting the frozen contract.
+        #[cfg(debug_assertions)]
+        let csr_before = graph.csr_shape();
+
         pool.scope(|scope| {
             let mut chunk_lo = lo;
             while chunk_lo < hi {
@@ -1034,6 +1082,19 @@ fn dispatch_color<F>(
                 chunk_lo = chunk_hi;
             }
         });
+
+        // F5 invariant pin (post-join): `pool.scope`'s Drop has joined every
+        // worker, so no `ptrs.color_items` raw read is live past here. Assert the
+        // CSR shape is byte-for-byte what it was before dispatch — a mismatch would
+        // mean the built-then-frozen invariant was violated (the CSR was resized /
+        // realloc'd under the workers), which the serial↔colored bit-equality also
+        // silently relies on.
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            graph.csr_shape(),
+            csr_before,
+            "F5: dense colored CSR must stay frozen across the pool.scope dispatch window"
+        );
     });
 
     if dispatched.is_none() {
