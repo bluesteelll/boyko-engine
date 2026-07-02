@@ -111,9 +111,12 @@ pub enum CapturedMsg {
 ///
 /// Drop-oldest (mirroring `boyko_input::RawInputQueue`'s policy): on a slow
 /// frame the newest input — the player's latest intent — survives; the oldest
-/// stale events are evicted. The ring is drained fully by
-/// [`Window::drain_input`] each frame, so overflow only occurs within a single
-/// frame's burst. `head`/`tail` use a power-of-two mask for a branchless wrap.
+/// stale events are evicted. Consecutive raw-mouse deltas are COALESCED at push
+/// (they are additive and the only high-rate source — 1–8 kHz mice, plus the
+/// backlog flush on the first pump after a slow boot), so in practice the ring
+/// holds human-rate events and overflow is load-shedding for pathological
+/// bursts, never a fault. The ring is drained fully by [`Window::drain_input`]
+/// each frame. `head`/`tail` use a power-of-two mask for a branchless wrap.
 #[cfg(windows)]
 struct InputRing {
     buf: Box<[CapturedMsg]>,
@@ -152,9 +155,29 @@ impl InputRing {
         self.buf.len() - 1
     }
 
-    /// Pushes one captured message, evicting the oldest if the ring is full.
+    /// Pushes one captured message, coalescing consecutive raw-mouse deltas and
+    /// evicting the oldest entry if the ring is genuinely full.
+    ///
+    /// Relative mouse deltas are additive, and every consumer sums them per
+    /// frame (`PhysicalInput::mouse_delta` accumulates across the drain), so
+    /// merging a `RawMouse` into a `RawMouse` NEWEST entry is
+    /// semantics-preserving. Only CONSECUTIVE mouse events merge — a key event
+    /// between two deltas splits the run — so ordering relative to key events
+    /// is preserved exactly.
     fn push(&mut self, ev: CapturedMsg) {
         let mask = self.mask();
+        if let CapturedMsg::RawMouse { dx, dy } = ev
+            && self.len > 0
+        {
+            let newest = self.tail.wrapping_sub(1) & mask;
+            if let CapturedMsg::RawMouse { dx: ndx, dy: ndy } = &mut self.buf[newest] {
+                // Saturating: an unbounded backlog (hours of motion before the
+                // first pump) must clamp, not wrap.
+                *ndx = ndx.saturating_add(dx);
+                *ndy = ndy.saturating_add(dy);
+                return;
+            }
+        }
         if self.len == self.buf.len() {
             // Full: drop the oldest by advancing head before overwriting at tail.
             self.head = (self.head + 1) & mask;
@@ -444,8 +467,11 @@ impl Window {
     /// stays free of any `boyko_input` dependency.
     ///
     /// Returns the number of drop-oldest evictions the ring suffered since the
-    /// last drain (0 in the common case; a non-zero value means the burst
-    /// exceeded `INPUT_RING_CAP` within one frame).
+    /// last drain — diagnostic only. Eviction is the ring's load-shedding
+    /// CONTRACT (the newest input survives; raw-mouse coalescing bounds the one
+    /// high-rate source), never a fault: a burst of `> INPUT_RING_CAP` distinct
+    /// non-mouse events within one frame sheds the stalest ones and the frame
+    /// goes on.
     pub fn drain_input(&mut self, mut sink: impl FnMut(CapturedMsg)) -> usize {
         // SAFETY: `self.input_ring` is the box installed in `open` and not yet
         // freed (only `Drop` frees it). `&mut self` guarantees no other reference
@@ -458,10 +484,6 @@ impl Window {
             sink(ev);
         }
         ring.dropped = 0;
-        debug_assert!(
-            dropped == 0,
-            "Window input ring overflow — raise INPUT_RING_CAP"
-        );
         dropped
     }
 }
@@ -654,5 +676,76 @@ impl Window {
     /// Always fails on non-Windows: windowing is Windows-first (D8).
     pub fn open(_title: &str, _width: u32, _height: u32) -> Result<Self, WindowError> {
         Err(WindowError::UnsupportedPlatform)
+    }
+}
+
+#[cfg(all(test, windows))]
+mod input_ring_tests {
+    use super::{CapturedMsg, InputRing};
+
+    /// A distinguishable non-mouse event (the exact msg values are irrelevant to
+    /// the ring; it stores `CapturedMsg` opaquely).
+    fn key(n: usize) -> CapturedMsg {
+        CapturedMsg::Raw { msg: 0x100, wparam: n, lparam: 0 }
+    }
+
+    fn drain(ring: &mut InputRing) -> Vec<CapturedMsg> {
+        let mut out = Vec::new();
+        while let Some(ev) = ring.pop() {
+            out.push(ev);
+        }
+        out
+    }
+
+    #[test]
+    fn consecutive_raw_mouse_coalesces_into_one_entry() {
+        let mut ring = InputRing::with_capacity(8);
+        for _ in 0..10_000 {
+            ring.push(CapturedMsg::RawMouse { dx: 1, dy: -2 });
+        }
+        assert_eq!(ring.len, 1, "a mouse-only burst occupies exactly one slot");
+        assert_eq!(ring.dropped, 0, "coalescing means no eviction");
+        let out = drain(&mut ring);
+        assert_eq!(out, vec![CapturedMsg::RawMouse { dx: 10_000, dy: -20_000 }]);
+    }
+
+    #[test]
+    fn key_event_splits_mouse_runs_preserving_order() {
+        let mut ring = InputRing::with_capacity(8);
+        ring.push(CapturedMsg::RawMouse { dx: 1, dy: 0 });
+        ring.push(CapturedMsg::RawMouse { dx: 2, dy: 0 });
+        ring.push(key(1));
+        ring.push(CapturedMsg::RawMouse { dx: 4, dy: 0 });
+        ring.push(CapturedMsg::RawMouse { dx: 8, dy: 0 });
+        let out = drain(&mut ring);
+        assert_eq!(
+            out,
+            vec![
+                CapturedMsg::RawMouse { dx: 3, dy: 0 },
+                key(1),
+                CapturedMsg::RawMouse { dx: 12, dy: 0 },
+            ],
+            "runs merge; the key event splits them and keeps its position"
+        );
+    }
+
+    #[test]
+    fn overflow_drops_oldest_and_counts() {
+        let mut ring = InputRing::with_capacity(4);
+        for n in 0..6 {
+            ring.push(key(n));
+        }
+        assert_eq!(ring.dropped, 2, "two evictions past the 4-slot capacity");
+        let out = drain(&mut ring);
+        assert_eq!(out, vec![key(2), key(3), key(4), key(5)], "newest survive");
+    }
+
+    #[test]
+    fn coalesced_deltas_saturate_instead_of_wrapping() {
+        let mut ring = InputRing::with_capacity(4);
+        ring.push(CapturedMsg::RawMouse { dx: i32::MAX, dy: i32::MIN });
+        ring.push(CapturedMsg::RawMouse { dx: i32::MAX, dy: i32::MIN });
+        let out = drain(&mut ring);
+        assert_eq!(out, vec![CapturedMsg::RawMouse { dx: i32::MAX, dy: i32::MIN }]);
     }
 }
