@@ -12,10 +12,8 @@
 //! This file boots NO Vulkan context — it is a pure host-math regression the developer
 //! runs as part of the non-GPU gate (the GPU golden runs separately on the 3060).
 
-use boyko_rhi_vulkan::compute::{
-    golden_deferred_resolve, golden_deferred_resolve_table, GoldenLight, GoldenLightHeader,
-    GoldenMaterial, MarcherAttributes, PBR_SKY_DIFFUSE,
-};
+use boyko_rhi_vulkan::compute::{PBR_SKY_DIFFUSE};
+use boyko_rhi_vulkan::goldens::{golden_deferred_resolve, golden_deferred_resolve_table, GoldenLight, GoldenLightHeader, GoldenMaterial, MarcherAttributes};
 
 /// The ray origin passed on the L0a-only path: point/spot lights are absent, so the
 /// table oracle never reconstructs `P` from `ro` — any value is fine.

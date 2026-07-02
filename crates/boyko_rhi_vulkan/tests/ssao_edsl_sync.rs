@@ -309,7 +309,7 @@ fn ssao_horizon_step_host_matches_edsl_eval() {
             // body spells `SSAO_RADIUS`/`SSAO_EPS` (the module consts == the Medium row). Feed the
             // host the Medium params (`SsaoParams::default()`) so both read the SAME radius/eps and
             // the bit-equality holds (Medium == today's shipped consts == the eDSL Eval scalars).
-            let host = boyko_rhi_vulkan::compute::ssao_horizon_step(
+            let host = boyko_rhi_vulkan::goldens::ssao_horizon_step(
                 hc_seed,
                 *p,
                 *pp,

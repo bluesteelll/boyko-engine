@@ -41,10 +41,8 @@ use boyko_rhi::{
     RhiQueue, ShaderStage,
 };
 
-use boyko_rhi_vulkan::compute::{
-    EDITLIST_BUFFER_WORDS, LOCAL_SIZE_X, PIXEL_BASE_WORDS, SDF_IMG_H, SDF_IMG_W, SdfEdit,
-    editlist_pixel_hits, encode_edit_list, golden_editlist_pixel, sdf_editlist_spirv, sdf_op,
-};
+use boyko_rhi_vulkan::compute::{EDITLIST_BUFFER_WORDS, LOCAL_SIZE_X, PIXEL_BASE_WORDS, SDF_IMG_H, SDF_IMG_W, SdfEdit, editlist_pixel_hits, encode_edit_list, sdf_editlist_spirv, sdf_op};
+use boyko_rhi_vulkan::goldens::{golden_editlist_pixel};
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 
 /// Total pixel count (the push constant; the shader bounds `idx < count`).

@@ -51,34 +51,37 @@ use boyko_rhi_vulkan::compute::{
     SDF_CAMERA_Z, SDF_IMG_H,
     SDF_IMG_W, SDF_TRACE_T_MAX, SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, TILE_FLAG_EMPTY,
     TILE_SIZE, TileBound, EDITLIST_BUFFER_WORDS, editlist_pixel_hits, encode_edit_list,
-    golden_composite_pixel_culled, golden_composite_pixel_ex,
-    golden_composite_pixel_ex_omega_lit, golden_tile_bound,
-    golden_deferred_resolve, golden_deferred_resolve_table, golden_marcher_attributes,
-    // P6 R1 multi-light SDF shadows: the `shadow_mode == 1` host oracle + the per-pixel
-    // dominant-N caster cap (mirrors the shader's `MAX_SDF_SHADOW_CASTERS_PER_PIXEL`).
-    golden_deferred_resolve_table_shadowed, MAX_SDF_SHADOW_CASTERS_PER_PIXEL,
-    // Render P7 SSAO: the SSAO compute SPIR-V + the host two-stage oracle (Stage-1 G-buffer map +
-    // Stage-2 gather) + the SSAO-aware resolve mirrors (`min(class_ao, ssao)` combine).
-    golden_gbuffer, golden_ssao_attributes, golden_ssao_blur,
-    golden_deferred_resolve_table_shadowed_ssao,
+    // P6 R1 multi-light SDF shadows: the per-pixel dominant-N caster cap (mirrors the
+    // shader's `MAX_SDF_SHADOW_CASTERS_PER_PIXEL`).
+    MAX_SDF_SHADOW_CASTERS_PER_PIXEL,
     // Render P7-Q2: the quality-VARIANT SSAO `.spv` selector + the host preset table.
     sdf_ssao_spirv_variant, SSAO_PARAMS,
     SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM, SSAO_QUALITY_HIGH,
-    GoldenLight, GoldenLightHeader, GoldenMaterial, GOLDEN_LIGHT_HEADER_BASE_WORDS,
+    GOLDEN_LIGHT_HEADER_BASE_WORDS,
     composite_pixel_ray, deferred_pbr_spirv, mesh_depth_for_z,
     pack_rgba, pixel_world_xy,
     sdf_gbuffer_composite_spirv, sdf_op, sdf_tile_cull_spirv, tile_grid_extent,
-    cluster_cull_spirv, golden_cluster_cull, golden_cluster_index,
-    golden_deferred_resolve_clustered, ClusterCullPush, GoldenClusterConfig,
+    cluster_cull_spirv, ClusterCullPush,
     CLUSTER_CULL_PUSH_BYTES,
     // M2 brick-atlas trilinear+cubic SURFACE path: the widened b5 camera UBO (128 B with the
-    // M2GridParams tail @80), the host golden mirror, the M2 grid params block, and the exact-CSG
-    // crease epsilon. The atlas image/sampler themselves come from `BrickAtlas` (below).
+    // M2GridParams tail @80), the M2 grid params block, and the exact-CSG crease epsilon. The
+    // atlas image/sampler themselves come from `BrickAtlas` (below).
     B5_CAMERA_UBO_BYTES, M2GridParams, M2_CREASE_EPS, M2_GRID_PARAMS_OFFSET,
-    golden_composite_pixel_brick_m2,
-    // M4 clip-map LOD (Slice C): the further-widened b5 camera UBO (224 B with the N-level M4GridParams
-    // array tail @80), the per-level params block + the N-level golden mirror.
-    B5_CAMERA_UBO_BYTES_M4, M4GridParams, golden_composite_pixel_brick_m4,
+    // M4 clip-map LOD (Slice C): the further-widened b5 camera UBO (224 B with the N-level
+    // M4GridParams array tail @80) + the per-level params block.
+    B5_CAMERA_UBO_BYTES_M4, M4GridParams,
+};
+// The CPU golden-reference oracles (audit W3/R-2 split): marcher / lighting / SSAO /
+// cluster-cull host mirrors the GPU readback is diffed against. Behind the `goldens`
+// cargo feature (on for the test crates via the self dev-dependency).
+use boyko_rhi_vulkan::goldens::{
+    GoldenClusterConfig, GoldenLight, GoldenLightHeader, GoldenMaterial, MarcherAttributes,
+    golden_cluster_cull, golden_cluster_index, golden_composite_pixel_brick_m2,
+    golden_composite_pixel_brick_m4, golden_composite_pixel_culled, golden_composite_pixel_ex,
+    golden_composite_pixel_ex_omega_lit, golden_deferred_resolve, golden_deferred_resolve_clustered,
+    golden_deferred_resolve_table, golden_deferred_resolve_table_shadowed,
+    golden_deferred_resolve_table_shadowed_ssao, golden_gbuffer, golden_marcher_attributes,
+    golden_ssao_attributes, golden_ssao_blur, golden_tile_bound,
 };
 use boyko_rhi_vulkan::brick_atlas::{BrickAtlas, BrickClipmap};
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
@@ -7059,7 +7062,7 @@ fn ssao_host_gbuffer(
     edits: &[SdfEdit],
     flags: u32,
     light_dir: [f32; 3],
-) -> Vec<boyko_rhi_vulkan::compute::MarcherAttributes> {
+) -> Vec<MarcherAttributes> {
     let materials = host_material_table();
     golden_gbuffer(
         edits,
@@ -7509,7 +7512,7 @@ fn mesh_ssao_occluder() -> Vec<SdfEdit> {
 /// classifier the unlock-2 gate uses to separate mesh pixels from SDF-lit ones: `view_t` equals
 /// `t_mesh` to within an epsilon (an SDF hit stores `view_t = t_sdf < t_mesh`). `t_mesh` is the
 /// constant `depth_to_t(mesh_depth_for_z(MESH_Z))` the raster producer + the host oracle share.
-fn host_mesh_owned(gbuf: &[boyko_rhi_vulkan::compute::MarcherAttributes], px: u32, py: u32) -> bool {
+fn host_mesh_owned(gbuf: &[MarcherAttributes], px: u32, py: u32) -> bool {
     let idx = (py * SDF_IMG_W + px) as usize;
     let a = gbuf[idx];
     if a.mask != 1 {

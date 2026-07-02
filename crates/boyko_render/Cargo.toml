@@ -59,6 +59,12 @@ bytemuck.workspace = true
 # for "expose a test-only API to my own integration tests without shipping it by
 # default"; it introduces no production dependency.
 boyko-render = { path = ".", features = ["test-readback"] }
+# Turns the `goldens` feature of the Vulkan backend ON for THIS crate's test
+# targets only (dev-dep feature unification): the integration tests diff GPU
+# readbacks against `boyko_rhi_vulkan::goldens::*` CPU oracles (audit W3/R-2
+# split them out of `compute`). The production dependency above stays
+# feature-less, so a shipped build carries no host-mirror code.
+boyko_rhi_vulkan = { path = "../boyko_rhi_vulkan", features = ["goldens"] }
 # std-lib S6 cross-crate INTEGRATION gate ONLY: the `DynamicBody`-falls +
 # `Gpu3dInstance`-packs test names `boyko_physics` (DynamicBody / RigidBody / the
 # fixed-step pipeline) alongside this crate's `Gpu3dInstance` / `sync_gpu_3d_instances`.

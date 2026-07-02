@@ -9,7 +9,7 @@
 //! reproduces the rung-8/9 packed-buffer golden — the marcher color is written to a
 //! **storage image** instead of the packed word in the buffer's pixel region; depth
 //! still comes from the packed buffer / no mesh — within `+/-2/255` per channel vs
-//! [`golden_editlist_pixel`](boyko_rhi_vulkan::compute::golden_editlist_pixel). This
+//! [`golden_editlist_pixel`](boyko_rhi_vulkan::goldens::golden_editlist_pixel). This
 //! exercises the new RHI seam end to end:
 //!
 //! * [`RhiDevice::create_bind_group_layout`] with a **heterogeneous** entry slice
@@ -52,11 +52,8 @@ use boyko_rhi::{
     ImageBarrierDesc, ImageLayout, ImageSubresourceRange, ImageUsage, MemoryLocation,
     RhiCommandEncoder, RhiDevice, RhiQueue, ShaderStage, TextureDesc, TextureDimension,
 };
-use boyko_rhi_vulkan::compute::{
-    EDITLIST_BUFFER_WORDS, LOCAL_SIZE_X, SDF_IMG_H, SDF_IMG_W, SdfEdit, editlist_pixel_hits,
-    encode_edit_list, golden_editlist_pixel, sdf_editlist_spirv, sdf_editlist_storage_image_spirv,
-    sdf_op,
-};
+use boyko_rhi_vulkan::compute::{EDITLIST_BUFFER_WORDS, LOCAL_SIZE_X, SDF_IMG_H, SDF_IMG_W, SdfEdit, editlist_pixel_hits, encode_edit_list, sdf_editlist_spirv, sdf_editlist_storage_image_spirv, sdf_op};
+use boyko_rhi_vulkan::goldens::{golden_editlist_pixel};
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 
 /// Per-channel tolerance on the packed-RGBA bytes (identical to rung 8/9).

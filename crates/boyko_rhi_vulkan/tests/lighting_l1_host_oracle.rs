@@ -15,12 +15,8 @@
 //! This file boots NO Vulkan context — it is the non-GPU gate the developer runs (the GPU
 //! golden runs separately on the 3060).
 
-use boyko_rhi_vulkan::compute::{
-    composite_pixel_ray, golden_cluster_cull, golden_cluster_index, golden_cluster_xy_tile,
-    golden_cluster_z_slice, golden_deferred_resolve_clustered, golden_deferred_resolve_table,
-    CompositeCamera, GoldenClusterConfig, GoldenLight, GoldenLightHeader, GoldenMaterial,
-    MarcherAttributes, SDF_IMG_H, SDF_IMG_W,
-};
+use boyko_rhi_vulkan::compute::{composite_pixel_ray, CompositeCamera, SDF_IMG_H, SDF_IMG_W};
+use boyko_rhi_vulkan::goldens::{golden_cluster_cull, golden_cluster_index, golden_cluster_xy_tile, golden_cluster_z_slice, golden_deferred_resolve_clustered, golden_deferred_resolve_table, GoldenClusterConfig, GoldenLight, GoldenLightHeader, GoldenMaterial, MarcherAttributes};
 
 /// The ortho ray-gen the resolve uses: `ro=(0,0,2)`, `rd=(0,0,-1)`, so `view_z == view_t`
 /// and `P = ro + rd * view_t = (u*HE, v*HE, 2 - view_t)`.

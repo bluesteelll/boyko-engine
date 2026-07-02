@@ -58,13 +58,8 @@ use boyko_rhi::{
     RenderingAttachment, RenderingDesc, RhiCommandEncoder, RhiDevice, RhiQueue, ShaderStage, StoreOp,
     TextureDesc, TextureDimension, VertexAttribute, VertexBufferLayout, VertexFormat, Viewport,
 };
-use boyko_rhi_vulkan::compute::{
-    COMPOSITE_BUFFER_WORDS, COMPOSITE_DEPTH_BASE_WORDS, COMPOSITE_PIXEL_BASE_WORDS,
-    COMPOSITE_PUSH_CONSTANT_BYTES, CompositePushConstants, LOCAL_SIZE_X, MESH_COLOR,
-    MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_IMG_H, SDF_IMG_W, SDF_TRACE_T_MAX, SDF_VIEW_HALF_EXTENT,
-    SdfEdit, editlist_pixel_hits, encode_edit_list, golden_composite_pixel, mesh_depth_for_z,
-    pixel_world_xy, sdf_depth_composite_spirv, sdf_op,
-};
+use boyko_rhi_vulkan::compute::{COMPOSITE_BUFFER_WORDS, COMPOSITE_DEPTH_BASE_WORDS, COMPOSITE_PIXEL_BASE_WORDS, COMPOSITE_PUSH_CONSTANT_BYTES, CompositePushConstants, LOCAL_SIZE_X, MESH_COLOR, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_IMG_H, SDF_IMG_W, SDF_TRACE_T_MAX, SDF_VIEW_HALF_EXTENT, SdfEdit, editlist_pixel_hits, encode_edit_list, mesh_depth_for_z, pixel_world_xy, sdf_depth_composite_spirv, sdf_op};
+use boyko_rhi_vulkan::goldens::{golden_composite_pixel};
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 
 /// Total pixel count (the compute push constant; the shader bounds `idx < count`).

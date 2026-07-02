@@ -36,9 +36,12 @@ use boyko_rhi::{
 };
 use boyko_rhi_vulkan::compute::{
     COMPOSITE_DEPTH_BASE_WORDS, COMPOSITE_PUSH_CONSTANT_BYTES, CAM_MODE_PERSPECTIVE, CompositeCamera,
-    CompositePushConstants, LOCAL_SIZE_X, MESH_DEPTH_CLEAR, SdfEdit, golden_composite_pixel_ex,
+    CompositePushConstants, LOCAL_SIZE_X, MESH_DEPTH_CLEAR, SdfEdit,
     sdf_depth_composite_spirv, sdf_op,
 };
+// The CPU golden oracle (audit W3/R-2 split out of `compute`): behind the `goldens`
+// cargo feature, ON for this crate's test targets via the dev-dependency below.
+use boyko_rhi_vulkan::goldens::golden_composite_pixel_ex;
 use boyko_rhi_vulkan::device::VulkanContext;
 
 use boyko_render::composite_perspective_from_view;

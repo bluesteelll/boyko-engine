@@ -85,6 +85,13 @@ pub mod abi_guard;
 pub mod brick_atlas;
 pub mod compute;
 pub mod debug;
+/// CPU golden-reference oracles (host mirrors of the shader math). Compiled only
+/// for the crate's own `#[cfg(test)]` builds and for callers that enable the
+/// `goldens` cargo feature — `tests/*.rs` (via the self dev-dependency) and any
+/// downstream crate that diffs GPU output against them. Absent from a shipped
+/// build (feature off), so the production backend does not carry the host mirrors.
+#[cfg(any(test, feature = "goldens"))]
+pub mod goldens;
 pub mod device;
 pub mod error;
 pub mod ffi;

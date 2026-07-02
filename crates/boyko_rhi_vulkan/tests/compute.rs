@@ -44,9 +44,8 @@ use boyko_rhi::{
 };
 use boyko_rhi::enums::BarrierStage;
 
-use boyko_rhi_vulkan::compute::{
-    LOCAL_SIZE_X, golden_chained, golden_write_pattern, transform_add_spirv, write_pattern_spirv,
-};
+use boyko_rhi_vulkan::compute::{LOCAL_SIZE_X, transform_add_spirv, write_pattern_spirv};
+use boyko_rhi_vulkan::goldens::{golden_chained, golden_write_pattern};
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 
 /// Element count for both tests. Deliberately NOT a multiple of 64 so the

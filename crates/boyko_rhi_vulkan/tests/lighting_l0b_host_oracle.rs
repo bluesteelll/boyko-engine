@@ -14,11 +14,8 @@
 
 use core::f32::consts::PI;
 
-use boyko_rhi_vulkan::compute::{
-    depth_to_t, golden_deferred_resolve_table, golden_marcher_attributes, sdf_op, CompositeCamera,
-    GoldenLight, GoldenLightHeader, GoldenMaterial, MarcherAttributes, SdfEdit, LIGHTING_FLAG_AO,
-    LIGHTING_FLAG_SHADOWS, MESH_DEPTH_CLEAR, PBR_SKY_DIFFUSE, SDF_IMG_H, SDF_IMG_W,
-};
+use boyko_rhi_vulkan::compute::{depth_to_t, sdf_op, CompositeCamera, SdfEdit, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, MESH_DEPTH_CLEAR, PBR_SKY_DIFFUSE, SDF_IMG_H, SDF_IMG_W};
+use boyko_rhi_vulkan::goldens::{golden_deferred_resolve_table, golden_marcher_attributes, GoldenLight, GoldenLightHeader, GoldenMaterial, MarcherAttributes};
 
 /// The ray origin/dir used to reconstruct `P = ro + rd * view_t` in the L0b path. `rd` is
 /// unit (the shared ray-gen contract), so `view_t` is the true world distance.

@@ -48,11 +48,8 @@ use boyko_rhi::{
     BufferDesc, BufferUsage, ComputePipelineDesc, MemoryLocation, RhiCommandEncoder, RhiDevice,
     RhiQueue, ShaderStage,
 };
-use boyko_rhi_vulkan::compute::{
-    CAM_MODE_PERSPECTIVE, COMPOSITE_DEPTH_BASE_WORDS, COMPOSITE_PUSH_CONSTANT_BYTES,
-    CompositeCamera, CompositePushConstants, LOCAL_SIZE_X, MESH_DEPTH_CLEAR, SdfEdit,
-    golden_composite_pixel_ex, sdf_depth_composite_spirv, sdf_op,
-};
+use boyko_rhi_vulkan::compute::{CAM_MODE_PERSPECTIVE, COMPOSITE_DEPTH_BASE_WORDS, COMPOSITE_PUSH_CONSTANT_BYTES, CompositeCamera, CompositePushConstants, LOCAL_SIZE_X, MESH_DEPTH_CLEAR, SdfEdit, sdf_depth_composite_spirv, sdf_op};
+use boyko_rhi_vulkan::goldens::{golden_composite_pixel_ex};
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 
 /// Per-channel tolerance on the packed-RGBA bytes (the rung-8..11 ±2/255 contract):

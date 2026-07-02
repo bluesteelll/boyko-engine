@@ -10,6 +10,18 @@ description = "Raw hand-FFI Vulkan backend for boyko-engine (Slice 0 foundation:
 # `// SAFETY:` ABI comments + `cfg(windows)`). `boyko_rhi` is the in-house,
 # FFI-free RHI trait surface this backend implements (Phase 1, compute path) —
 # it adds no third-party dependency.
+[features]
+# The CPU golden-reference oracles (`crate::goldens`) — host mirrors of the
+# marcher / lighting / SSAO / cluster-cull shader math. Audit W3/R-2: split out of
+# `compute.rs` and gated OFF by default so a production/default build ships ZERO
+# host-mirror code (they exist only to diff GPU output in tests). The crate's OWN
+# integration tests still reach them: the self-referential dev-dependency below
+# (`boyko_rhi_vulkan` with `features = ["goldens"]`) turns the feature ON whenever
+# the test targets compile, because the integration tests are separate crates
+# where the lib's `cfg(test)` guard is NOT active.
+default = []
+goldens = []
+
 [dependencies]
 boyko_rhi = { path = "../boyko_rhi" }
 # The analytic SDF field math + std430 data model (the W4 leaf-cut). A `no_std`,
@@ -57,3 +69,9 @@ boyko_shaderdsl = { path = "../boyko_shaderdsl", features = ["emit"] }
 # `translate_win32_raw_mouse` edge maps them into `RawInputEvent`s a `PhysicalInput`
 # snapshot folds for WASD + mouse-look. DEV-only — the shipped backend never links it.
 boyko-input = { path = "../boyko_input" }
+# Self-referential dev-dependency that turns the `goldens` feature ON whenever the
+# test targets compile. The integration tests in `tests/*.rs` are SEPARATE crates,
+# so the lib's `cfg(test)` guard on `pub mod goldens` is NOT active for them; this
+# line makes `boyko_rhi_vulkan::goldens::*` available to every integration test
+# (and only there) without shipping the host mirrors in a default/production build.
+boyko_rhi_vulkan = { path = ".", features = ["goldens"] }

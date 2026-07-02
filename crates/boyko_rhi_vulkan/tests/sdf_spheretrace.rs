@@ -45,9 +45,8 @@ use boyko_rhi::{
     RhiQueue, ShaderStage,
 };
 
-use boyko_rhi_vulkan::compute::{
-    LOCAL_SIZE_X, SDF_IMG_H, SDF_IMG_W, golden_sdf_pixel, sdf_pixel_hits, sdf_spheretrace_spirv,
-};
+use boyko_rhi_vulkan::compute::{LOCAL_SIZE_X, SDF_IMG_H, SDF_IMG_W, sdf_pixel_hits, sdf_spheretrace_spirv};
+use boyko_rhi_vulkan::goldens::{golden_sdf_pixel};
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 
 /// Total pixel count (the storage buffer holds one packed-RGBA `u32` per pixel).
