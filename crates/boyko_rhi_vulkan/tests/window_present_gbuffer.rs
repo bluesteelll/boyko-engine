@@ -5514,6 +5514,288 @@ fn run_interactive_viewer<'ctx>(
     }
 }
 
+// === Shadow-motion A/B diagnostic (`BOYKO_SHADOW_AB=1`) =========================================
+//
+// Deterministically separates the two candidate causes of "shadows render slightly differently
+// while the camera is in motion" (the owner-reported viewer artifact):
+//
+//   1. CROSS-FRAME CONTAMINATION — a single-buffered GPU resource read by frame N while frame
+//      N+1 overwrites it (a WAR race): a pose reached IN MOTION then renders differently from
+//      the SAME pose reached statically (the sibling in-flight frame's writes tear the reads).
+//   2. PURE RESAMPLING SCINTILLATION — every frame is a pure function of the camera pose, and
+//      the perceived "dancing" is hard shadow-map / marcher edges requantizing under sub-pixel
+//      camera motion: the motion-arrival capture is then BYTE-IDENTICAL to the static one, and
+//      the micro-yaw pair quantifies how many pixels flip per milliradian of rotation.
+//
+// Protocol (every capture lands at the SAME pose P — bitwise-identical floats — so any byte
+// difference between captures is motion HISTORY, never pose):
+//   A  : 8 static warm frames at P, capture                      (static reference)
+//   A2 : capture at P again                                      (repeatability control)
+//   B  : 24 frames of ±0.35 rad yaw oscillation, capture at P    (rotation arrival)
+//   C  : 24 frames of ±0.8 unit x-strafe oscillation, capture    (translation arrival)
+//   D  : 8 static warm frames at P + 3 mrad yaw, capture         (static micro-rotation pair)
+// Verdicts print as `[shadow-ab]` lines; BMPs + ×8-amplified diff maps land in `D:\tmp\`.
+
+/// One camera pose the A/B script drives the viewer camera through.
+#[derive(Clone, Copy)]
+struct AbPose {
+    eye: [f32; 3],
+    yaw: f32,
+    pitch: f32,
+}
+
+/// Writes one camera pose exactly the way `run_interactive_viewer` does per frame: the 80-byte
+/// b5 camera block into THIS frame's ring slot + `scene.mvp` (byte 84 = the instanced arm).
+fn ab_set_pose(ctx: &VulkanContext, renderer: &Renderer<'_>, scene: &mut GBufferScene<'_>, p: AbPose) {
+    let world_up = [0.0_f32, 1.0, 0.0];
+    let (sy, cy) = p.yaw.sin_cos();
+    let (sp, cp) = p.pitch.sin_cos();
+    let forward = vnorm_or_zero([sy * cp, sp, -cy * cp]);
+    let right = vnorm_or_zero(vcross(forward, world_up));
+    let up = vcross(right, forward);
+    let cam = CompositePushConstants::perspective(
+        p.eye, forward, right, up, ROOM_CAM_FOV_Y, COMPOSITE_W, COMPOSITE_H,
+    );
+    let mut mvp = perspective_mvp_bytes(
+        p.eye, forward, right, up, ROOM_CAM_FOV_Y, COMPOSITE_W as f32 / COMPOSITE_H as f32,
+    );
+    mvp[84] = 1;
+    scene.mvp = mvp;
+    let s = renderer.frame_index();
+    if let Some(mapped) = RhiDevice::buffer_mapped_ptr(ctx, &scene.camera_ring[s]) {
+        let bytes = cam.as_bytes();
+        // SAFETY: identical contract to `run_interactive_viewer`'s per-frame camera write — ring
+        // slot `s` is per-frame-private (the sibling in-flight frame binds + reads `s ^ 1`), the
+        // mapped range is host-coherent and ≥ 80 B, and the 80-byte block is written at offset 0.
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+        }
+    }
+}
+
+/// Presents ONE frame at the already-written pose (optionally requesting the swapchain→staging
+/// readback). `false` = window closed / swapchain recreated / device error — a recreate
+/// invalidates byte-comparison, so the caller aborts the whole A/B run with a SKIP note.
+#[allow(clippy::too_many_arguments)]
+fn ab_present_one<'ctx>(
+    ctx: &VulkanContext,
+    surface: &Surface<'_>,
+    swapchain: &mut Swapchain<'ctx>,
+    renderer: &mut Renderer<'ctx>,
+    window: &mut Window,
+    scene: &GBufferScene<'_>,
+    frame: &mut GBufferFrame,
+    readback: Option<&BoundBuffer>,
+) -> bool {
+    let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
+    let clear = [0.02_f32, 0.02, 0.03, 1.0];
+    if !window.pump_events() {
+        return false;
+    }
+    window.refresh_size();
+    // SAFETY: identical contract to the interactive-viewer present — one shared device, every
+    // scene resource live, the composite extent covered by the dispatch + the camera UBO count.
+    let r = unsafe {
+        renderer.render_gbuffer_frame(
+            ctx,
+            surface,
+            swapchain,
+            scene,
+            frame,
+            window.width(),
+            window.height(),
+            clear,
+            present_extent,
+            readback,
+        )
+    };
+    matches!(r, Ok(true))
+}
+
+/// Renders the readback frame at pose `p`, drains 3 more frames at the SAME pose (the
+/// FRAMES_IN_FLIGHT==2 fence discipline of every windowed dump), then copies the staging bytes
+/// out as normalized RGBA. `None` = the run is void (window closed / swapchain recreated).
+#[allow(clippy::too_many_arguments)]
+fn ab_capture<'ctx>(
+    ctx: &VulkanContext,
+    surface: &Surface<'_>,
+    swapchain: &mut Swapchain<'ctx>,
+    renderer: &mut Renderer<'ctx>,
+    window: &mut Window,
+    scene: &mut GBufferScene<'_>,
+    frame: &mut GBufferFrame,
+    staging: &BoundBuffer,
+    is_bgra: bool,
+    p: AbPose,
+) -> Option<(Vec<u8>, u32, u32)> {
+    ab_set_pose(ctx, renderer, scene, p);
+    if !ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, Some(staging)) {
+        return None;
+    }
+    let extent = swapchain.extent();
+    for _ in 0..3 {
+        ab_set_pose(ctx, renderer, scene, p);
+        if !ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, None) {
+            return None;
+        }
+    }
+    let (w, h) = (extent.width, extent.height);
+    let byte_count = (w * h * 4) as usize;
+    let ptr = RhiDevice::buffer_mapped_ptr(ctx, staging)
+        .expect("host-visible readback staging buffer is mapped");
+    let mut raw = vec![0u8; byte_count];
+    // SAFETY: `ptr` maps ≥ `byte_count` host-coherent staging bytes; the readback frame's slot
+    // fence was re-waited by the 3 drain frames (3 > FRAMES_IN_FLIGHT == 2), so the copy
+    // completed before this read; `raw` is a fresh, non-overlapping allocation.
+    unsafe { core::ptr::copy_nonoverlapping(ptr.as_ptr(), raw.as_mut_ptr(), byte_count) };
+    Some((readback_to_rgba(&raw, w, h, is_bgra), w, h))
+}
+
+/// Counts differing pixels (any RGB channel) + the max channel delta between two RGBA captures.
+fn ab_compare(label: &str, a: &[u8], b: &[u8]) -> (usize, u32) {
+    let mut n_diff = 0usize;
+    let mut max_d = 0u32;
+    for (pa, pb) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+        let d = pa
+            .iter()
+            .zip(pb)
+            .take(3)
+            .map(|(x, y)| (i32::from(*x) - i32::from(*y)).unsigned_abs())
+            .max()
+            .unwrap_or(0);
+        if d > 0 {
+            n_diff += 1;
+            if d > max_d {
+                max_d = d;
+            }
+        }
+    }
+    println!("[shadow-ab] {label}: {n_diff} differing px, max channel delta {max_d}");
+    (n_diff, max_d)
+}
+
+/// A ×8-amplified per-channel |a−b| RGBA diff map (alpha forced opaque) for visual inspection.
+fn ab_diff_map(a: &[u8], b: &[u8]) -> Vec<u8> {
+    let mut out = vec![0u8; a.len()];
+    for ((pa, pb), po) in a.chunks_exact(4).zip(b.chunks_exact(4)).zip(out.chunks_exact_mut(4)) {
+        for c in 0..3 {
+            let d = (i32::from(pa[c]) - i32::from(pb[c])).unsigned_abs() * 8;
+            po[c] = d.min(255) as u8;
+        }
+        po[3] = 0xFF;
+    }
+    out
+}
+
+/// The scripted-camera A/B loop (`BOYKO_SHADOW_AB=1` swaps this in for the interactive loop; the
+/// heavy `run_showcase_dump` setup + teardown are shared verbatim). See the block comment above.
+#[allow(clippy::too_many_arguments)]
+fn run_shadow_motion_ab<'ctx>(
+    ctx: &VulkanContext,
+    surface: &Surface<'_>,
+    swapchain: &mut Swapchain<'ctx>,
+    renderer: &mut Renderer<'ctx>,
+    window: &mut Window,
+    scene: &mut GBufferScene<'_>,
+    frame: &mut GBufferFrame,
+    staging: &BoundBuffer,
+    is_bgra: bool,
+) {
+    // Pose P — the viewer spawn pose. All five captures land bitwise-exactly here (or at the
+    // micro-yaw variant), so capture differences can only come from the frames BEFORE them.
+    let pose_p = AbPose { eye: ROOM_CAM_EYE, yaw: 0.0, pitch: VIEWER_INITIAL_PITCH };
+
+    // Runs `n` scripted frames, pose per frame from `f(i)`. `false` = abort (window/swapchain).
+    macro_rules! sweep {
+        ($n:expr, $f:expr) => {{
+            let mut ok = true;
+            for i in 0..$n {
+                let p: AbPose = $f(i);
+                ab_set_pose(ctx, renderer, scene, p);
+                if !ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, None) {
+                    ok = false;
+                    break;
+                }
+            }
+            ok
+        }};
+    }
+    macro_rules! capture_or_skip {
+        ($p:expr, $label:expr) => {
+            match ab_capture(ctx, surface, swapchain, renderer, window, scene, frame, staging, is_bgra, $p) {
+                Some(c) => c,
+                None => {
+                    eprintln!("SKIP shadow-ab: window closed / swapchain recreated during {}", $label);
+                    return;
+                }
+            }
+        };
+    }
+
+    // A + A2: static reference + repeatability control.
+    if !sweep!(8, |_i| pose_p) {
+        eprintln!("SKIP shadow-ab: window closed during warm-up");
+        return;
+    }
+    let (a, w, h) = capture_or_skip!(pose_p, "capture A");
+    let (a2, ..) = capture_or_skip!(pose_p, "capture A2");
+
+    // B: rotation arrival — 24 frames of fast yaw oscillation (~±20°, sign flips), then P.
+    if !sweep!(24, |i: u32| AbPose { yaw: 0.35 * (0.8 * i as f32).sin(), ..pose_p }) {
+        eprintln!("SKIP shadow-ab: window closed during the yaw sweep");
+        return;
+    }
+    let (b, ..) = capture_or_skip!(pose_p, "capture B");
+
+    // C: translation arrival — 24 frames of fast x-strafe oscillation (±0.8 units), then P.
+    if !sweep!(24, |i: u32| AbPose {
+        eye: vadd(pose_p.eye, [0.8 * (0.8 * i as f32).sin(), 0.0, 0.0]),
+        ..pose_p
+    }) {
+        eprintln!("SKIP shadow-ab: window closed during the strafe sweep");
+        return;
+    }
+    let (c, ..) = capture_or_skip!(pose_p, "capture C");
+
+    // D: STATIC micro-rotation pair — 3 mrad of yaw (≈0.17°, ~1–2 px of screen shift at this
+    // FOV), statically warmed like A. A-vs-D quantifies edge requantization per milliradian.
+    let pose_d = AbPose { yaw: 0.003, ..pose_p };
+    if !sweep!(8, |_i| pose_d) {
+        eprintln!("SKIP shadow-ab: window closed during the micro-yaw warm-up");
+        return;
+    }
+    let (d, ..) = capture_or_skip!(pose_d, "capture D");
+
+    // Verdicts.
+    let (rep, _) = ab_compare("A vs A2 (static repeatability)", &a, &a2);
+    let (rot, rot_max) = ab_compare("A vs B  (rotation arrival)", &a, &b);
+    let (mov, mov_max) = ab_compare("A vs C  (translation arrival)", &a, &c);
+    let (micro_n, micro_max) = ab_compare("A vs D  (static 3 mrad yaw pair)", &a, &d);
+    let contaminated = rot > 0 || mov > 0;
+    println!(
+        "[shadow-ab] VERDICT: repeatability {}; motion contamination {} (rot {rot} px max {rot_max}, \
+         move {mov} px max {mov_max}); micro-yaw requantization {micro_n} px (max {micro_max})",
+        if rep == 0 { "OK" } else { "FAIL — nondeterministic even static!" },
+        if contaminated { "PRESENT — a cross-frame race is alive" } else { "NONE — the frame is a pure function of pose" },
+    );
+
+    // Artifacts for visual inspection (the diff maps are ×8-amplified).
+    let dump = |name: &str, rgba: &[u8]| {
+        let path = format!(r"D:\tmp\shadow_ab_{name}.bmp");
+        match write_bmp(&path, rgba, w, h) {
+            Ok(()) => println!("[shadow-ab] wrote {path}"),
+            Err(e) => eprintln!("[shadow-ab] failed to write {path}: {e:?}"),
+        }
+    };
+    dump("a_static", &a);
+    dump("b_rot_arrival", &b);
+    dump("c_move_arrival", &c);
+    dump("d_micro_yaw", &d);
+    dump("diff_a_vs_b_x8", &ab_diff_map(&a, &b));
+    dump("diff_a_vs_c_x8", &ab_diff_map(&a, &c));
+    dump("diff_a_vs_d_x8", &ab_diff_map(&a, &d));
+}
+
 /// **The INTERACTIVE engine viewer.** Opens a window and lets the owner FLY around the live
 /// HYBRID SDF+mesh room (the [`grand_showcase_config`] scene, CSM off + light markers added) with
 /// mouse-look + WASD + Space/Ctrl(Q/E) vertical fly, ESC to exit — inspecting objects, lighting,
@@ -5526,6 +5808,26 @@ fn run_interactive_viewer<'ctx>(
 fn engine_interactive_viewer() {
     run_showcase_dump(
         "boyko_engine interactive viewer",
+        GRAND_SHOWCASE_BMP,
+        viewer_config(),
+        true,
+    );
+}
+
+/// **Shadow-motion A/B diagnostic.** Runs the EXACT interactive-viewer scene/path with a
+/// scripted camera instead of live input: captures pose P reached statically vs reached in
+/// motion (yaw / strafe oscillation) and byte-compares — separating a cross-frame WAR race
+/// (motion arrival ≠ static) from pure pose-resampling scintillation (byte-identical arrivals;
+/// the static 3 mrad micro-yaw pair then quantifies edge requantization). Prints `[shadow-ab]`
+/// verdict lines and dumps BMPs + ×8 diff maps to `D:\tmp\shadow_ab_*.bmp`.
+#[test]
+#[ignore = "needs a real RTX windowed device; scripted shadow-motion A/B capture protocol"]
+fn shadow_motion_ab_dump() {
+    // SAFETY: set before any other thread reads the environment (the test body is the process's
+    // first activity under `--test-threads=1`, the only supported way to run windowed dumps).
+    unsafe { std::env::set_var("BOYKO_SHADOW_AB", "1") };
+    run_showcase_dump(
+        "boyko_engine shadow motion A/B",
         GRAND_SHOWCASE_BMP,
         viewer_config(),
         true,
@@ -7037,15 +7339,33 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
     // window in a loop, then falls through to the SAME teardown below. `present_extent`/`staging`
     // are created right after this block, so the interactive loop builds its own present extent.
     if interactive {
-        run_interactive_viewer(
-            &ctx,
-            &surface,
-            &mut swapchain,
-            &mut renderer,
-            &mut window,
-            &mut scene,
-            &mut frame,
-        );
+        // Shadow-motion A/B diagnostic: `BOYKO_SHADOW_AB=1` swaps the input-driven loop for the
+        // scripted-camera capture protocol (static-arrival vs motion-arrival byte comparison at
+        // one pose — see `run_shadow_motion_ab`). The heavy setup above + teardown below are
+        // shared verbatim, so the A/B frames exercise the EXACT production viewer path.
+        if std::env::var_os("BOYKO_SHADOW_AB").is_some() {
+            run_shadow_motion_ab(
+                &ctx,
+                &surface,
+                &mut swapchain,
+                &mut renderer,
+                &mut window,
+                &mut scene,
+                &mut frame,
+                &staging,
+                is_bgra,
+            );
+        } else {
+            run_interactive_viewer(
+                &ctx,
+                &surface,
+                &mut swapchain,
+                &mut renderer,
+                &mut window,
+                &mut scene,
+                &mut frame,
+            );
+        }
         // Skip the dump path entirely; fall through to teardown. `scene` borrows `mesh_draws` + the
         // instanced GPU buffers; its last use is the `run_interactive_viewer` call above, so NLL ends
         // those borrows here and the teardown is free to move/destroy them. (`GBufferScene` is not
