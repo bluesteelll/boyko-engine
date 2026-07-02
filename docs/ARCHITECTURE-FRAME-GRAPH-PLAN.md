@@ -1,6 +1,6 @@
 # Industrial Frame System — Render Dependency Graph + Sim/Render Interpolation (PLAN)
 
-> **STATUS: ✅ PILLAR A COMPLETE (1a–1f), committed + pushed (`bae13a0`, origin/ecs), 2026-07-02.**
+> **STATUS: ✅ PILLAR A COMPLETE (1a–1f, `bae13a0`) + ✅ PILLAR B COMPLETE (B1 `5063ffb` dense GpuTransform3D pair + pack/gather; B2 `7b57bd3` eDSL TRS slerp/lerp + interp_instances shader with the prev==curr bitwise keystone; B3 `641bab4` interp pre-pass in the framegraph + FIF-ringed pair/draw SSBOs + real-dt viewer fixed loop + bouncing-box GPU keystone), 2026-07-02.** Remaining tracks: Phase 2 (transient aliasing), Phase 3 (async compute); TAA (docs/TAA-PLAN.md, converged, awaiting owner VALUES).
 > Architect→critic loop converged (2026-06-28); owner greenlit + visually confirmed; the framegraph
 > now unconditionally drives every barrier in `record_gbuffer` — verified BYTE-IDENTICAL to the retired
 > hand path across all 20 windowed GPU dump configs (SHA256). Deviations from the literal 1f: the
