@@ -42,6 +42,12 @@ use crate::ecs::core::time::{FixedTime, Time, fixed_advance};
 /// Boxed because each startup system is a distinct monomorphized closure type.
 type StartupSystem = Box<dyn FnOnce(&mut EcsMaster)>;
 
+/// A type-erased run-loop owner, installed via [`App::set_runner`] and
+/// `take()`n by [`App::run`] (host plan D6 / rung R1 — the Bevy `RunnerFn`
+/// precedent adapted to `&mut App`, no App extraction). One setup-stage box,
+/// called once; never on the frame path.
+type RunnerFn = Box<dyn FnOnce(&mut App) -> AppExit>;
+
 /// The closed set of top-level schedules an [`App`] drives (Phase 20 plan D5).
 ///
 /// Matched ONLY inside config-time routing methods (`add_systems_in`,
@@ -104,7 +110,8 @@ pub enum EventUpdatePolicy {
 /// `Send + Sync` since Phase 9 (the old wording here was stale; Phase 21 audit) —
 /// but because of the type-erased one-shot closures the `App` stages:
 /// `StartupSystem` (`Box<dyn FnOnce(&mut EcsMaster)>` without `+ Send`) and
-/// the schedules' `StateEntry::insert` closures of the same shape. Pinned at
+/// the schedules' `StateEntry::insert` closures of the same shape (the R1
+/// [`RunnerFn`] box is another). Pinned at
 /// compile time by `assert_not_impl_any!(App: Send, Sync)` in
 /// `tests/multi_world.rs`. Practically: an `App` is built and run on a single
 /// dispatcher thread and never crosses a thread boundary; the only other
@@ -162,6 +169,13 @@ pub struct App {
     /// `finish`. Cold, setup-only.
     startup: Vec<StartupSystem>,
 
+    /// The installed run-loop owner (host plan D6 / rung R1): `Some` after
+    /// [`set_runner`](App::set_runner), `take()`n by [`run`](App::run) BEFORE
+    /// it calls `finish()` — when installed, the runner owns the app
+    /// lifecycle (its own `finish()` call, `AppExit` policy, and teardown).
+    /// Cold, setup-only — the one `dyn` dispatch in the host design.
+    runner: Option<RunnerFn>,
+
     /// Duplicate-plugin detection (cold, setup-only). Linear `TypeId` scan; the
     /// plugin count is small (dozens at most) so a `Vec` beats a `HashSet`
     /// here and avoids the allocation.
@@ -208,6 +222,7 @@ impl App {
             fixed_steps_since_swap: 0,
             last_instant: None,
             startup: Vec::new(),
+            runner: None,
             plugin_type_ids: Vec::new(),
             pool,
             finished: false,
@@ -497,6 +512,26 @@ impl App {
         self
     }
 
+    /// Installs a run-loop owner: [`run`](App::run) hands control to `runner`
+    /// as its FIRST action — BEFORE [`finish`](App::finish) — and returns the
+    /// runner's [`AppExit`] verbatim (host plan D6 / rung R1; the Bevy
+    /// `RunnerFn` precedent adapted to `&mut App`, no App extraction).
+    ///
+    /// When installed, the runner OWNS the app lifecycle: it is responsible
+    /// for calling `app.finish()` itself (typically after inserting its
+    /// platform resources, so the startup one-shots see them), for its own
+    /// `AppExit` policy (e.g. a windowed host's insert-if-absent vs the
+    /// headless path's unconditional insert), and for its own teardown before
+    /// returning.
+    ///
+    /// One setup-stage box, called once. Installing a second runner REPLACES
+    /// the first. Unlike the config methods, `set_runner` is NOT subject to
+    /// the post-`finish` panic guard (`boyko-B1802`) — it may be called any
+    /// time before [`run`](App::run).
+    pub fn set_runner(&mut self, runner: Box<dyn FnOnce(&mut App) -> AppExit>) {
+        self.runner = Some(runner);
+    }
+
     // ── Plugins ──────────────────────────────────────────────────────────────
 
     /// Adds a single plugin: detects duplicates, then calls
@@ -729,8 +764,21 @@ impl App {
         }
     }
 
-    /// Finishes once, then loops self-clocked frames until a system sets
-    /// `AppExit(true)`.
+    /// Hands control to the installed runner, or (headless default) finishes
+    /// once and loops self-clocked frames until a system sets `AppExit(true)`.
+    /// Returns the exit value in both modes.
+    ///
+    /// # Runner dispatch (host plan D6 / rung R1)
+    ///
+    /// If a runner was installed via [`set_runner`](App::set_runner), `run()`
+    /// hands it control as its FIRST action and returns its [`AppExit`]
+    /// verbatim: in runner mode `run()` calls NEITHER `finish()` nor inserts
+    /// `AppExit` — the runner owns both (see the `set_runner` contract). The
+    /// runner is `take()`n out of the `App`, so a hypothetical second `run()`
+    /// call falls through to the headless path below — a documented edge, not
+    /// a guarded one.
+    ///
+    /// # Headless path (no runner) — pre-R1 behavior, unchanged
     ///
     /// Inserts an `AppExit(false)` resource before the loop so the per-frame
     /// read never panics on a missing resource. A system requests exit via
@@ -739,8 +787,12 @@ impl App {
     /// observed at the end of the same frame). Note: this resets `AppExit` to
     /// `false` at the start of `run`, so a pre-loop exit request (e.g. set by
     /// a startup system) is cleared and at least one frame always executes —
-    /// request exit from a frame system.
-    pub fn run(&mut self) {
+    /// request exit from a frame system. The loop exits only on a `true`
+    /// flag, so this path always returns `AppExit(true)`.
+    pub fn run(&mut self) -> AppExit {
+        if let Some(runner) = self.runner.take() {
+            return runner(self);
+        }
         self.finish();
         // Ensure the exit flag is present so the per-frame read below cannot
         // panic on an absent resource.
@@ -751,6 +803,7 @@ impl App {
                 break;
             }
         }
+        AppExit(true)
     }
 
     /// Phase 20 ★C1/D8 — the cold all-schedule check-ticks pass: the
@@ -883,6 +936,115 @@ mod tests {
         let mut app = serial_app();
         app.finish();
         app.set_event_update_policy(EventUpdatePolicy::EveryFrame);
+    }
+
+    // ── R1 — set_runner + the run() dispatch contract (host plan D6) ─────────
+
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use crate::ecs::core::system::params::ResMut;
+
+    /// The installed runner receives control from `run()` and its `AppExit`
+    /// propagates verbatim; the captured marker proves the body executed.
+    #[test]
+    fn runner_receives_control_and_return_propagates() {
+        let ran = Rc::new(Cell::new(false));
+        let marker = Rc::clone(&ran);
+
+        let mut app = serial_app();
+        app.set_runner(Box::new(move |_app| {
+            marker.set(true);
+            AppExit(true)
+        }));
+
+        let exit = app.run();
+        assert!(ran.get(), "run() must invoke the installed runner body");
+        assert!(exit.0, "run() must return the runner's AppExit verbatim");
+    }
+
+    /// `run()` hands control to the runner BEFORE `finish()`: the startup
+    /// one-shot has NOT been drained when the runner starts (so a runner can
+    /// insert its platform resources first), and the runner's own `finish()`
+    /// call is what drains it.
+    #[test]
+    fn runner_mode_does_not_prefinish() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let started = Arc::new(AtomicBool::new(false));
+        let s = Arc::clone(&started);
+
+        let mut app = serial_app();
+        app.add_startup_system(move || {
+            s.store(true, Ordering::Relaxed);
+        });
+        let probe = Arc::clone(&started);
+        app.set_runner(Box::new(move |app| {
+            assert!(
+                !app.is_finished(),
+                "run() must NOT call finish() before handing control to the runner"
+            );
+            assert!(
+                !probe.load(Ordering::Relaxed),
+                "the startup one-shot must not run before the runner's finish()"
+            );
+            app.finish();
+            assert!(
+                probe.load(Ordering::Relaxed),
+                "the runner's own finish() call must drain the startup queue"
+            );
+            AppExit(true)
+        }));
+        assert!(app.run().0, "the runner's exit value propagates");
+    }
+
+    /// Headless default unchanged: with NO runner installed, `run()` finishes,
+    /// inserts `AppExit(false)`, and loops until a frame system requests exit
+    /// — returning the observed flag, which on this path is always
+    /// `AppExit(true)` (R1 signature). Frame-count termination stays covered
+    /// by `tests/app_plugin.rs::run_exits_on_appexit`.
+    #[test]
+    fn headless_default_unchanged() {
+        let mut app = serial_app();
+        // In-crate, `.0` would hit ResMut's own `pub(crate)` field — deref
+        // explicitly to reach the AppExit flag (external code says `exit.0`).
+        app.add_systems(|mut exit: ResMut<AppExit>| {
+            (*exit).0 = true;
+        });
+        let exit = app.run();
+        assert!(exit.0, "the headless path returns AppExit(true) after the loop exits");
+    }
+
+    /// The runner is `take()`n by `run()`: a second `run()` falls through to
+    /// the legacy headless path (terminating via the AppExit system) instead
+    /// of invoking the runner again — the call counter must not bump twice.
+    #[test]
+    fn runner_take_semantics() {
+        let calls = Rc::new(Cell::new(0u32));
+        let counter = Rc::clone(&calls);
+
+        let mut app = serial_app();
+        // Registered during config so the SECOND run() — the legacy path,
+        // which is the one that calls finish() — can terminate its loop.
+        // In-crate, `.0` would hit ResMut's own `pub(crate)` field — deref
+        // explicitly to reach the AppExit flag (external code says `exit.0`).
+        app.add_systems(|mut exit: ResMut<AppExit>| {
+            (*exit).0 = true;
+        });
+        app.set_runner(Box::new(move |_app| {
+            counter.set(counter.get() + 1);
+            AppExit(true)
+        }));
+
+        assert!(app.run().0, "first run(): the runner's exit value propagates");
+        assert_eq!(calls.get(), 1, "the runner ran exactly once");
+
+        assert!(
+            app.run().0,
+            "second run(): falls through to the legacy headless path and terminates"
+        );
+        assert_eq!(calls.get(), 1, "the take()n runner must NOT be invoked again");
     }
 
     // ── ★C1 — the margin-aware clamp pass strictly preempts the schedules'

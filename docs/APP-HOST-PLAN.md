@@ -49,10 +49,31 @@ speculative for one backend — the runner is the containment seam for a future 
 ### D2 — Device ownership: leaked `&'static VulkanContext` singleton + explicit world eviction
 
 `VulkanContext` is already morally a handle (it holds `*const DeviceFns` into stable
-storage). The runner makes that official:
+storage). The singleton lifecycle is a **first-class API of `boyko_rhi_vulkan`** —
+designed once, next to the type it manages, with its SAFETY contract at home in the
+RHI crate; `boyko_app` only calls it (no `Box::from_raw` improvisation in the host):
 
-1. Boot: `let ctx: &'static VulkanContext = Box::leak(Box::new(VulkanContext::boot(..)))`
-   — one intentional setup-stage leak per process, lifecycle ended explicitly (below).
+```rust
+impl VulkanContext {
+    /// Boots the device and pins it as the process singleton: the returned
+    /// `&'static` is the ONE device handle every layer (host, World resources)
+    /// shares. Immutable after boot. Ended EXACTLY ONCE by `destroy_singleton`.
+    pub fn boot_singleton(config: InstanceConfig) -> Result<&'static VulkanContext, VulkanError>;
+
+    /// Ends the singleton's lifecycle: destroys the device, the instance, the
+    /// debug messenger, and frees the loader (the normal `Drop` path).
+    ///
+    /// # Safety
+    /// `ctx` was returned by `boot_singleton`; called exactly once; the device is
+    /// idle; NO other `&'static VulkanContext` reference exists anywhere any more
+    /// (host structs dropped, World GPU residents evicted) — the `'static` is a
+    /// documented fiction this call ends.
+    pub unsafe fn destroy_singleton(ctx: &'static VulkanContext);
+}
+```
+
+1. Boot: `let ctx = VulkanContext::boot_singleton(config)?` — one intentional
+   setup-stage pin per process, lifecycle ended explicitly (below).
 2. Host side: `Surface<'static>` / `Swapchain<'static>` / `Renderer<'static>` — the
    existing `<'ctx>` signatures instantiated at `'static`. No self-referential struct.
 3. World side: `RhiContext::from_shared(ctx: &'static VulkanContext)`. `RhiContext`
@@ -78,7 +99,7 @@ storage). The runner makes that official:
      does not touch the device)
    - take MeshRegistry and call its unsafe destroy(ctx) under the step-1 idle
    - remove GpuDevice (no dangling &'static may remain in a live structure)
-4. unsafe { VulkanContext::destroy(ctx as *const _) } — LAST statement of the runner
+4. unsafe { VulkanContext::destroy_singleton(ctx) } — LAST statement of the runner
 ```
 
 Post-run App state is pinned: the World is no longer GPU-capable; a `debug_assert!`
@@ -251,6 +272,12 @@ impl EntityCommands { pub fn teleport_to(self, t: Transform) -> Self; }
 pub fn wait_frame_in_flight(&self) -> Result<FrameWriteToken, SwapchainError>;
 pub unsafe fn render_gbuffer_frame(&mut self, token: FrameWriteToken, ...) -> ...;
 pub unsafe fn present_sampled(&mut self, token: FrameWriteToken, ...) -> ...;
+
+// boyko_rhi_vulkan (R2) — the device-singleton lifecycle, first-class
+impl VulkanContext {
+    pub fn boot_singleton(config: InstanceConfig) -> Result<&'static VulkanContext, VulkanError>;
+    pub unsafe fn destroy_singleton(ctx: &'static VulkanContext); // SAFETY contract in D2
+}
 
 // boyko_app
 pub struct EnginePlugins { .. }   // ::window(title, w, h).present_mode(..)

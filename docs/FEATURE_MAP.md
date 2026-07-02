@@ -159,7 +159,8 @@ at the crate root: `boyko_ecs::{App, Plugin, Plugins, AppExit}`.
 | Add systems (ordered) | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_systems_cfg(\|b: &mut ScheduleBuilder\| …)` (162) — full Phase-15/16/17 chaining |
 | Add a system (unordered) | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_systems(system)` (180) |
 | Add a one-shot startup system | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_startup_system(system)` (199) — runs once before the loop |
-| Run the loop | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `run()` (until `AppExit(true)`), `run_n(frames)`, `update()` (self-clocked via `Instant`) |
+| Run the loop | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `run() -> AppExit` (dispatches to an installed runner first, else loops until `AppExit(true)`), `run_n(frames)`, `update()` (self-clocked via `Instant`) |
+| Hand the loop to a host (windowed runner) | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `set_runner(Box<dyn FnOnce(&mut App) -> AppExit>)` — `run()` hands control to it BEFORE `finish()`; the runner owns `finish()`, the `AppExit` policy, and teardown (APP-HOST-PLAN rung R1) |
 | Run one frame with an external clock | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `update_with_delta(raw)` — the Phase-20 frame driver (① Time → ② check-ticks → ③ event swap → ④ fixed loop → ⑤ Main); `run_n_with_delta(frames, delta)` — the deterministic loop for tests/benches |
 | Fixed-timestep systems | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_systems_in(CoreSchedule::Fixed, system)` / `add_systems_cfg_in` / `init_state_in` / `insert_state_in` — closed `CoreSchedule { Main, Fixed }` set (Phase 20 D5); fixed systems read `Res<FixedTime>` |
 | Configure the fixed timestep | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `set_fixed_timestep(Duration)` / `set_fixed_hz(f64)` — default exactly 64 Hz; config phase only |
@@ -173,8 +174,9 @@ at the crate root: `boyko_ecs::{App, Plugin, Plugins, AppExit}`.
 
 `App` is `!Send + !Sync` (single-threaded-owned). Multi-schedule landed in
 Phase 20 as the CLOSED `CoreSchedule` set — a user-mintable label map remains
-deliberately rejected (D5; no `HashMap` on the frame path). Still DEFERRED:
-SubApps, `PluginGroup`/`DefaultPlugins`, `set_runner`,
+deliberately rejected (D5; no `HashMap` on the frame path). `set_runner`
+landed as [APP-HOST-PLAN](APP-HOST-PLAN.md) rung R1 (see the table above).
+Still DEFERRED: SubApps, `PluginGroup`/`DefaultPlugins`,
 `App::with_world` (Phase 20.1) — see [PHASE-18-RESULTS.md](archive/PHASE-18-RESULTS.md)
 + [PHASE-20-RESULTS.md](archive/PHASE-20-RESULTS.md).
 
