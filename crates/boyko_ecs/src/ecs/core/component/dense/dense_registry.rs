@@ -36,11 +36,13 @@ const DENSE_STORE_RESERVE_ROWS: usize = 1024;
 ///
 /// # Why not `SparseMap<DenseStore>`
 ///
-/// `SparseMap<U>` requires `U: Clone` (its `swap_remove` value semantics); a
-/// `DenseStore` owns a `ComponentPool` (a raw VM reservation) and is correctly
-/// `!Clone`. So `slots` is a directly-indexed `Box<[Option<DenseStore>]>` of
-/// `MAX_COMPONENTS` cells — O(1) `ComponentId`-keyed lookup, `None` until the id
-/// is first touched.
+/// A `DenseStore` owns a `ComponentPool` (a raw VM reservation) and is correctly
+/// `!Clone`; the id space is small and dense (`≤ MAX_COMPONENTS`). So `slots` is a
+/// directly-indexed `Box<[Option<DenseStore>]>` of `MAX_COMPONENTS` cells — a
+/// branchless O(1) `ComponentId`-keyed lookup with no sparse indirection, `None`
+/// until the id is first touched. (`SparseMap` would add a redundant
+/// sparse→dense hop and reordering `swap_remove` semantics this registry never
+/// needs.)
 ///
 /// # 0%-gate (lazy `slots`)
 ///

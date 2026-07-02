@@ -263,6 +263,23 @@ pub(crate) struct ExecutorScratch {
     ///
     /// **Dispatcher-owned**.
     pub(crate) set_cond_result: FixedBitSet,
+
+    /// Reusable scratch for the dispatcher-only systems accepted in a dispatch
+    /// round. `try_dispatch_ready` `mem::take`s it, fills it, drains it, and
+    /// restores the (now-empty) buffer to reuse the heap allocation next round —
+    /// eliminating the per-round `Vec::new()` that was the executor's only
+    /// hot-path allocation. Capacity ≤ `system_count`.
+    ///
+    /// **Dispatcher-owned**.
+    pub(crate) exclusive_to_run: Vec<SystemIndex>,
+
+    /// Reusable scratch for the concurrent systems spawned in a dispatch round.
+    /// Same `mem::take`/refill/restore lifecycle as `exclusive_to_run`; the
+    /// spawn loop consumes it by value and the drained buffer is restored for
+    /// the next round. Capacity ≤ `system_count`.
+    ///
+    /// **Dispatcher-owned**.
+    pub(crate) to_spawn: Vec<SystemIndex>,
 }
 
 // SAFETY (Phase 9.3c): `ExecutorScratch` lost its auto-derived `Send`/`Sync`
@@ -325,6 +342,11 @@ impl ExecutorScratch {
         let set_cond_evaluated = FixedBitSet::with_capacity(set_condition_count);
         let set_cond_result = FixedBitSet::with_capacity(set_condition_count);
 
+        // Preallocate the per-round dispatch buffers once. Both are bounded by
+        // the system count and reused (cleared, never reallocated) every round.
+        let exclusive_to_run = Vec::with_capacity(system_count);
+        let to_spawn = Vec::with_capacity(system_count);
+
         Self {
             running,
             completed,
@@ -335,6 +357,8 @@ impl ExecutorScratch {
             cond_evaluated,
             set_cond_evaluated,
             set_cond_result,
+            exclusive_to_run,
+            to_spawn,
         }
     }
 

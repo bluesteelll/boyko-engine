@@ -1407,6 +1407,10 @@ unsafe impl<C: Component> QueryFilter for Changed<C> {
         archetype: *const Archetype,
         meta: &'_ SystemMeta,
     ) {
+        // SAFETY (QF3, Round 2 W7 — mirrors `Added<C>::set_table_readonly`):
+        //   `archetype` is a live `*const Archetype` for `'w` (this `unsafe fn`'s
+        //   caller contract); the shared reborrow is scoped to this block, and
+        //   `meta` is read-only INPUT with ticks `Copy`-extracted into the Fetch.
         let archetype_ref: &Archetype = unsafe { &*archetype };
         if const { C::STORAGE_IS_DENSE } {
             // Dense `Changed<C>`: cache `entity_ids`; `filter_fetch` reads the

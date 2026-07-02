@@ -13,13 +13,13 @@ pub struct SparseMap<U> {
     indices: Vec<usize>,
 }
 
-impl<U: Clone> Default for SparseMap<U> {
+impl<U> Default for SparseMap<U> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<U: Clone> SparseMap<U> {
+impl<U> SparseMap<U> {
     /// Creates a new empty SparseMap
     #[inline]
     pub fn new() -> Self {
@@ -66,49 +66,39 @@ impl<U: Clone> SparseMap<U> {
         }
     }
 
-    /// Removes an element by index and returns its value
-    /// Uses swap_remove for O(1) removal time
+    /// Removes an element by index and returns its value.
+    /// O(1): moves the removed value out and swaps the last dense element into
+    /// its slot (no clone), mirroring [`Vec::swap_remove`].
     #[inline]
     pub fn swap_remove(&mut self, index: usize) -> Option<U> {
         if index >= self.sparse.len() {
             return None;
         }
 
-        let dense_idx_opt = self.sparse[index].take();
+        let dense_idx = self.sparse[index].take()?;
 
-        if let Some(dense_idx) = dense_idx_opt {
-            // Fast removal by swapping with the last element
-            let last_idx = self.dense.len() - 1;
+        // Move the removed value out; `Vec::swap_remove` fills the hole with the
+        // last element (a move, not a clone) and keeps `dense`/`indices` in lockstep.
+        // Its return value is the REMOVED element (discarded for `indices` — the
+        // removed external index was already cleared from `sparse` above).
+        let value = self.dense.swap_remove(dense_idx);
+        self.indices.swap_remove(dense_idx);
 
-            let value = if dense_idx == last_idx {
-                // Last element, simply remove without swapping
-                let value = self.dense.pop().unwrap();
-                self.indices.pop();
-                value
-            } else {
-                // Get the value being removed
-                let value = self.dense[dense_idx].clone();
-
-                // Get the last element and its index
-                let last_element = self.dense.pop().unwrap();
-                let moved_entity_index = self.indices.pop().unwrap();
-
-                // Put the last element in place of the removed element
-                self.dense[dense_idx] = last_element;
-                self.indices[dense_idx] = moved_entity_index;
-
-                // Update the sparse map for the moved entity (the one that was previously last)
-                if moved_entity_index < self.sparse.len() {
-                    self.sparse[moved_entity_index] = Some(dense_idx);
-                }
-
-                value
-            };
-
-            Some(value)
-        } else {
-            None
+        // If an element was relocated into the freed slot (i.e. the removed one
+        // was not the last), its external index now sits at `indices[dense_idx]`;
+        // repoint its sparse entry at the new dense position. When the removed
+        // element WAS the last, `swap_remove` merely popped it and
+        // `dense_idx == self.dense.len()`, so no fix-up is needed.
+        if dense_idx < self.dense.len() {
+            let moved_entity_index = self.indices[dense_idx];
+            debug_assert!(
+                moved_entity_index < self.sparse.len(),
+                "invariant: a live dense element's external index is always within sparse",
+            );
+            self.sparse[moved_entity_index] = Some(dense_idx);
         }
+
+        Some(value)
     }
     /// Checks if an element exists at the specified index
     #[inline]
@@ -220,7 +210,7 @@ impl<U: Clone> SparseMap<U> {
     }
 }
 
-impl<U: Clone> Index<usize> for SparseMap<U> {
+impl<U> Index<usize> for SparseMap<U> {
     type Output = U;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -228,7 +218,7 @@ impl<U: Clone> Index<usize> for SparseMap<U> {
     }
 }
 
-impl<U: Clone> IndexMut<usize> for SparseMap<U> {
+impl<U> IndexMut<usize> for SparseMap<U> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         self.get_mut(index).expect("Index not found in SparseMap")
     }
@@ -279,5 +269,84 @@ mod tests {
 
         assert_eq!(map.iter_dense().count(), map.active_indices().len());
         assert_eq!(map.iter_dense().count(), map.len());
+    }
+
+    #[test]
+    fn t_swap_remove_last_element() {
+        let mut map: SparseMap<&str> = SparseMap::new();
+        map.insert(10, "a");
+        map.insert(20, "b");
+        map.insert(30, "c");
+
+        // 30 was inserted last, so it is the last dense element.
+        assert_eq!(map.swap_remove(30), Some("c"));
+        assert!(!map.contains(30));
+        assert_eq!(map.get(10), Some(&"a"));
+        assert_eq!(map.get(20), Some(&"b"));
+        assert_eq!(map.len(), 2);
+        assert!(map.validate());
+    }
+
+    #[test]
+    fn t_swap_remove_middle_relocates_swapped_element() {
+        let mut map: SparseMap<&str> = SparseMap::new();
+        map.insert(10, "a"); // dense 0
+        map.insert(20, "b"); // dense 1
+        map.insert(30, "c"); // dense 2 (last)
+
+        // Removing the middle external index must swap the last element ("c" at 30)
+        // into the freed dense slot and keep it reachable at its new dense index.
+        assert_eq!(map.swap_remove(20), Some("b"));
+        assert!(!map.contains(20));
+        assert_eq!(map.get(30), Some(&"c")); // relocated, still reachable
+        assert_eq!(map.get(10), Some(&"a"));
+        assert_eq!(map.len(), 2);
+        assert!(map.validate());
+    }
+
+    #[test]
+    fn t_swap_remove_then_reinsert() {
+        let mut map: SparseMap<u32> = SparseMap::new();
+        map.insert(1, 100);
+        map.insert(2, 200);
+        map.insert(3, 300);
+
+        assert_eq!(map.swap_remove(2), Some(200));
+        assert!(!map.contains(2));
+
+        // Reinserting a previously-removed index takes a fresh dense slot.
+        assert_eq!(map.insert(2, 222), None);
+        assert_eq!(map.get(2), Some(&222));
+        assert_eq!(map.get(1), Some(&100));
+        assert_eq!(map.get(3), Some(&300));
+        assert_eq!(map.len(), 3);
+        assert!(map.validate());
+    }
+
+    #[test]
+    fn t_swap_remove_absent_index_returns_none() {
+        let mut map: SparseMap<u32> = SparseMap::new();
+        map.insert(5, 55);
+
+        assert_eq!(map.swap_remove(999), None); // beyond sparse len
+        assert_eq!(map.swap_remove(0), None); // in range but unoccupied
+        assert_eq!(map.len(), 1);
+        assert!(map.validate());
+    }
+
+    #[test]
+    fn t_swap_remove_does_not_require_clone() {
+        // A non-Clone value type must compile and round-trip through swap_remove,
+        // proving the removed `U: Clone` bound was gratuitous.
+        struct NoClone(u32);
+
+        let mut map: SparseMap<NoClone> = SparseMap::new();
+        map.insert(0, NoClone(1));
+        map.insert(1, NoClone(2));
+
+        let removed = map.swap_remove(0).expect("index 0 was inserted");
+        assert_eq!(removed.0, 1);
+        assert_eq!(map.get(1).map(|v| v.0), Some(2));
+        assert!(map.validate());
     }
 }

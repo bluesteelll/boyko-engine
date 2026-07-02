@@ -34,6 +34,7 @@
 //!
 //! [`ScheduleBuilder::build`]: super::schedule_builder::ScheduleBuilder::build
 
+use std::mem;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 #[cfg(not(miri))]
@@ -954,17 +955,22 @@ impl Schedule {
     ) -> usize {
         let n = self.systems.len();
 
-        // Cheap scratch — bounded by the number of systems (≤ 1024).
-        // The scratch is a stack-local Vec because we cannot easily reuse
-        // the `executor_scratch.ready_scratch` bitset and at the same time
-        // iterate it while mutating `self.executor_scratch.running` below.
+        // Reusable per-round scratch (preallocated once in `ExecutorScratch::new`,
+        // capacity ≤ system_count). `mem::take` lends the buffers out so the loop
+        // can fill them while still borrowing `self.executor_scratch.running`
+        // (split borrow); each is restored (drained, allocation intact) before
+        // every return. This replaces the previous two `Vec::new()` per dispatch
+        // round — the executor's only hot-path allocation.
         //
         // Two buckets so dispatcher-only systems can short-circuit when the
         // LIVE running set is non-empty (FIX-3 — the snapshot would be stale by
-        // the time a later index is examined). Allocation cost is dominated by
-        // the dispatch path itself (~120 ns/spawn per plan §10.5); negligible.
-        let mut exclusive_to_run: Vec<SystemIndex> = Vec::new();
-        let mut to_spawn: Vec<SystemIndex> = Vec::new();
+        // the time a later index is examined).
+        let mut exclusive_to_run = mem::take(&mut self.executor_scratch.exclusive_to_run);
+        let mut to_spawn = mem::take(&mut self.executor_scratch.to_spawn);
+        debug_assert!(
+            exclusive_to_run.is_empty() && to_spawn.is_empty(),
+            "dispatch scratch must be drained and restored by the previous round",
+        );
 
         for i in 0..n {
             if self.executor_scratch.completed.contains(i) {
@@ -1148,8 +1154,16 @@ impl Schedule {
         // because the `break` above abandoned the scan, but the explicit
         // early return makes intent clearer.)
         if !exclusive_to_run.is_empty() {
+            // Restore both scratch buffers (drained, allocation reused) before
+            // returning so the next round `mem::take`s them empty.
+            exclusive_to_run.clear();
+            self.executor_scratch.exclusive_to_run = exclusive_to_run;
+            self.executor_scratch.to_spawn = to_spawn;
             return dispatched;
         }
+        // Past this point `exclusive_to_run` is empty; restore it now so the
+        // remaining exits only need to hand `to_spawn` back.
+        self.executor_scratch.exclusive_to_run = exclusive_to_run;
 
         // === Concurrent path (Step 12). ===
         //
@@ -1164,6 +1178,7 @@ impl Schedule {
         //     closures end before that borrow ends (`Scope::Drop` blocks until
         //     all spawns complete).
         if to_spawn.is_empty() {
+            self.executor_scratch.to_spawn = to_spawn;
             return dispatched;
         }
 
@@ -1202,7 +1217,9 @@ impl Schedule {
         // allocation), captured by value into each spawn below.
         let systems_ptr: *mut SystemBox = self.systems.as_mut_ptr();
 
-        for idx in to_spawn {
+        // Drain (not consume-by-value) so the buffer's heap allocation survives
+        // to be restored below for reuse next round.
+        for idx in to_spawn.drain(..) {
             let ptrs = SpawnPointers {
                 systems: systems_ptr,
                 completion,
@@ -1275,6 +1292,9 @@ impl Schedule {
 
             dispatched += 1;
         }
+
+        // `to_spawn` was drained above; restore the empty buffer for reuse.
+        self.executor_scratch.to_spawn = to_spawn;
 
         dispatched
     }

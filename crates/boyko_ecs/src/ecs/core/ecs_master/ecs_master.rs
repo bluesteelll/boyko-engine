@@ -3426,6 +3426,12 @@ impl EcsMaster {
             // Re-derive the next hop through a fresh read-only view (no `&` spans
             // the next fire). The view is minted and dropped within this block.
             let next = {
+                // SAFETY (`DeferredEcsMaster::from_world` contract): `&mut *self`
+                //   is the live, exclusively-held world; no `world`-derived
+                //   `&mut Archetype`/`&mut ComponentPool` is live at this mint
+                //   point (the fires above dropped theirs); and we are inside the
+                //   single-threaded apply window. The view is read-only and dies
+                //   at the end of this block before the next fire reborrows.
                 let view = unsafe { DeferredEcsMaster::from_world(NonNull::from(&mut *self)) };
                 E::Traversal::next(&view, current)
             };
