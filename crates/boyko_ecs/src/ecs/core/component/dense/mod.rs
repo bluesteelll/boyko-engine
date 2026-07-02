@@ -16,6 +16,7 @@
 
 pub mod dense_registry;
 pub mod dense_store;
+pub(crate) mod entity_slot_map;
 pub(crate) mod live_bitmap;
 pub mod views;
 

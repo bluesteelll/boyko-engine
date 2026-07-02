@@ -26,6 +26,8 @@ use crate::ecs::core::component::enable::enable_store::EnableStore;
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::core::iters::MAX_ARCHETYPES;
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, InlandArchetypeId};
+use crate::ecs::constants::POOL_MAX_ROWS;
+use crate::ecs::memory::vm_column::VmColumn;
 
 /// Number of `u64` words backing the occupancy bitset (`MAX_ARCHETYPES / 64`).
 const SLAB_WORDS: usize = MAX_ARCHETYPES / 64;
@@ -498,7 +500,13 @@ impl ArchetypeBundle {
             // in the `register_component_inplace` loop below (Wave 2).
             addr_of_mut!((*slot_ptr).flags).write(ArchetypeFlags::empty());
             addr_of_mut!((*slot_ptr).component_ids).write(component_ids.to_vec());
-            addr_of_mut!((*slot_ptr).entity_ids).write(Vec::new());
+            // F1: the entity-id column is now a `VmColumn` (address-stable, on
+            // one VM reservation) sized to the `u32` `unit_index` ceiling — the
+            // in-place slab path must construct it here (U13) or the slot is
+            // partially uninit. Construction reserves address space only (lazy —
+            // no commit until the first push).
+            addr_of_mut!((*slot_ptr).entity_ids)
+                .write(VmColumn::new("Archetype.entity_ids", POOL_MAX_ROWS));
         }
 
         // All fields are now initialised; promote the raw pointer to a

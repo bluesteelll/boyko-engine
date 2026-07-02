@@ -14,13 +14,13 @@
 
 use std::cell::UnsafeCell;
 
-use boyko_utils::sparse_map::sparse_map::SparseMap;
-
 use crate::ecs::core::change_detection::Tick;
 use crate::ecs::core::iters::archetype_bit_set::ArchetypeBitSet;
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId, EntityId};
 use crate::ecs::memory::component_pool::ComponentPool;
+use crate::ecs::memory::vm_column::VmColumn;
 
+use super::entity_slot_map::EntitySlotMap;
 use super::live_bitmap::LiveBitmap;
 use super::views::{DenseBuildView, DenseSolveView};
 
@@ -32,6 +32,17 @@ use super::views::{DenseBuildView, DenseSolveView};
 /// recognise a freed slot even before consulting `live`, and serves as the
 /// serde/debug "this slot is dead" sentinel (Dense plan, Data structures).
 pub(crate) const TOMBSTONE: EntityId = EntityId(usize::MAX);
+
+/// Initial capacity floor for the store's bookkeeping `Vec`s (`s2e` / `free` /
+/// `live` / `e2s`) — audit F4.
+///
+/// The column reserves a large (`pool_reserve_rows`-class) virtual-address span
+/// so `insert` never hits a hard ceiling, but that reserve is address space only
+/// (lazy commit). The bookkeeping arrays are real heap, so they must NOT mirror
+/// the column reserve: they start here and grow amortized (geometric doubling)
+/// with the store's actual live-row count. `min(reserve_rows, FLOOR)` keeps a
+/// deliberately tiny test store (e.g. `reserve_rows == 8`) from over-allocating.
+const DENSE_BOOKKEEPING_FLOOR_ROWS: usize = 1024;
 
 /// Global dense column for one component type + its `EntityId`-keyed bookkeeping.
 ///
@@ -46,19 +57,47 @@ pub(crate) const TOMBSTONE: EntityId = EntityId(usize::MAX);
 /// slots. Tombstoned slots stay within `[0, count)` but are dead.
 ///
 /// `s2e` / `free` / `e2s` / `live` are the dense storage's own bookkeeping —
-/// the legitimate `std::Vec` exception the Dense plan grants this module.
+/// the legitimate `std::Vec` exception the Dense plan grants this module. Their
+/// growth is LAZY (audit F4): the column is reserved at a `pool_reserve_rows`-
+/// class ceiling (VA is free — commit stays lazy), but the bookkeeping `Vec`s
+/// start at a small floor and grow amortized with actual use, so a large reserve
+/// never eagerly commits hundreds of MB of heap.
 pub struct DenseStore {
     /// The one contiguous data column (Dense plan: `ComponentPool::new(id,
     /// reserve_rows)` directly — no arena, no synthetic id). Address-stable:
     /// `grow_rows` commits pages in place, the base never moves.
     column: ComponentPool,
 
-    /// `EntityId -> slot`. The membership oracle (`contains` / `slot_of`).
-    e2s: SparseMap<u32>,
+    /// `EntityId -> slot`. The membership oracle (`contains` / `slot_of`), a
+    /// flat `Vec<u32>` with a `u32::MAX` absence sentinel (audit F2): 4 B per
+    /// addressable id and ONE dependent load per per-row probe (no sparse→dense
+    /// hop). Grows amortized to the max entity id touched.
+    e2s: EntitySlotMap,
 
     /// `slot -> EntityId` (deterministic order + serde key). `TOMBSTONE` marks
     /// a freed slot. Indexed by slot; grows alongside `column.count()`.
-    s2e: Vec<EntityId>,
+    ///
+    /// Address-stable and growable on ONE `VmReservation` (audit F3) — replaces
+    /// the former realloc-able `Vec<EntityId>` whose raw `as_ptr()` the hot
+    /// `DenseQueryIter` caches per pass (`s2e()`). On a `VmColumn` that base is
+    /// write-once, so the cached pointer can never be invalidated by a mid-pass
+    /// regrowth. Reserved to the store's `reserve_rows` (address space only —
+    /// commit stays lazy at the frontier, so this does NOT reintroduce the F4
+    /// eager-heap cost the other bookkeeping arrays avoid).
+    ///
+    /// SEPARATE reservation, not tick-style co-location inside the column's
+    /// pool reservation: the pool's `[pad | data | added | changed]` byte
+    /// layout (`pool_byte_layout`) is a shared, stagger-sensitive contract
+    /// sized at construction for EVERY pool — grafting an id sub-region onto it
+    /// would couple `s2e` growth to `grow_rows`' commit math for table pools
+    /// that have no `s2e` at all, while a second reservation costs only VA
+    /// (which is free) and leaves the shared layout untouched.
+    ///
+    /// Auto-trait note: `VmColumn` is `!Send`/`!Sync`, which flips `DenseStore`
+    /// too — absorbed by the `EcsMaster` blanket `unsafe impl Send/Sync`; the
+    /// cross-thread argument lives on that impl (SEND1, `ecs_master.rs`, the
+    /// F3 bullet).
+    s2e: VmColumn<EntityId>,
 
     /// Per-slot liveness (Dense plan W3). The O(1) oracle, the iteration skip,
     /// and the read-only source of `DenseSolveView::row_ptr`'s debug_assert.
@@ -76,8 +115,9 @@ pub struct DenseStore {
     ///
     /// CONSERVATIVE: a bit is SET on insert and never cleared on a single
     /// `remove` (an archetype may still host other dense members, and tracking
-    /// per-archetype live counts would cost a SparseMap per store). D3's per-row
-    /// membership filter (`e2s.contains(entity)`) is the exact oracle; this set
+    /// per-archetype live counts would cost a per-archetype counter map per
+    /// store). D3's per-row membership filter (`e2s.contains(entity)`) is the
+    /// exact oracle; this set
     /// only over-approximates the candidate archetypes (false positives are
     /// filtered per-row, never false negatives).
     arch_presence: ArchetypeBitSet,
@@ -88,20 +128,35 @@ pub struct DenseStore {
 
 impl DenseStore {
     /// Creates an empty store for `component_id`, backing the data column with
-    /// `ComponentPool::new(component_id, reserve_rows)` directly and sizing the
-    /// `live` / `s2e` / `free` bookkeeping for `reserve_rows`.
+    /// `ComponentPool::new(component_id, reserve_rows)` directly.
+    ///
+    /// `reserve_rows` sizes only the COLUMN's virtual-address reservation (VA is
+    /// free — commit stays lazy, so a large `reserve_rows` costs no resident
+    /// bytes). The `live` / `s2e` / `free` / `e2s` bookkeeping `Vec`s start at a
+    /// small [`DENSE_BOOKKEEPING_FLOOR_ROWS`] floor and grow amortized with
+    /// actual use (audit F4): at a 2^24-row column reserve, eagerly sizing them
+    /// to `reserve_rows` would commit hundreds of MB of heap for a store that may
+    /// hold a handful of entities. `e2s` is entity-id-indexed, so it grows to the
+    /// max live id, not the column reserve.
     ///
     /// The component must already be registered in the `ComponentRegistry`
     /// (the `ComponentPool::new` contract); the layout's `drop_fn` is honored
     /// on `remove` / `compact` / store drop, so a `DenseStore` is correct for
     /// any dense component, not only POD.
     pub fn new(component_id: ComponentId, reserve_rows: usize) -> Self {
+        // Bookkeeping starts at a small floor and grows amortized — it must not
+        // eagerly track the (now large) column VA reserve (audit F4).
+        let bookkeeping_floor = reserve_rows.min(DENSE_BOOKKEEPING_FLOOR_ROWS);
         Self {
             column: ComponentPool::new(component_id.get(), reserve_rows),
-            e2s: SparseMap::with_capacity(reserve_rows),
-            s2e: Vec::with_capacity(reserve_rows),
-            live: LiveBitmap::with_capacity(reserve_rows),
-            free: Vec::with_capacity(reserve_rows),
+            e2s: EntitySlotMap::with_capacity(bookkeeping_floor),
+            // F3: `s2e` on a `VmColumn` sized to the column ceiling. Unlike the
+            // heap bookkeeping arrays, its reserve is address space only (lazy
+            // commit at the frontier), so it does not need the F4 floor — it
+            // costs no resident bytes until rows are actually pushed.
+            s2e: VmColumn::new("DenseStore.s2e", reserve_rows),
+            live: LiveBitmap::with_capacity(bookkeeping_floor),
+            free: Vec::with_capacity(bookkeeping_floor),
             arch_presence: ArchetypeBitSet::new(),
             id: component_id,
         }
@@ -124,7 +179,10 @@ impl DenseStore {
     /// * `value_bytes.len() != column stride` — debug-asserted in the column.
     /// * the entity is already present — debug-asserted (a re-insert without an
     ///   intervening `remove` is a caller bug).
-    /// * the column's reserve ceiling is exhausted on a fresh-slot append.
+    /// * the column's reserve ceiling is exhausted on a fresh-slot append —
+    ///   `pool_reserve_rows(stride)` rows of one dense type (audit F4), a
+    ///   practically-unreachable ceiling (`POOL_MAX_ROWS` = 2^24 on the syscall
+    ///   arms), retained as a past-reserve guard.
     pub fn insert(&mut self, entity: EntityId, value_bytes: &[u8], current_tick: Tick) -> u32 {
         debug_assert!(
             !self.e2s.contains(entity.get()),
@@ -144,7 +202,7 @@ impl DenseStore {
                 // gives the column exclusive access; `value_bytes` is a valid,
                 // stride-sized representation per the caller contract.
                 unsafe { self.column.write_at(slot as usize, value_bytes) };
-                self.s2e[slot as usize] = entity;
+                self.s2e.set(slot as usize, entity);
                 slot
             }
             None => {
@@ -153,8 +211,11 @@ impl DenseStore {
                 let slot = self
                     .column
                     .add(value_bytes)
-                    .expect("invariant: DenseStore column reserve ceiling exhausted")
-                    as u32;
+                    .expect(
+                        "invariant: DenseStore column reserve ceiling exhausted \
+                         (pool_reserve_rows(stride) rows of a single dense type — \
+                         raise POOL_MAX_ROWS if a real workload legitimately reaches it)",
+                    ) as u32;
                 debug_assert_eq!(
                     slot as usize,
                     self.s2e.len(),
@@ -205,7 +266,7 @@ impl DenseStore {
         value_bytes: &[u8],
         current_tick: Tick,
     ) -> bool {
-        if let Some(slot) = self.e2s.get(entity.get()).copied() {
+        if let Some(slot) = self.e2s.slot_of(entity.get()) {
             // Present: drop the old value, overwrite in place at the SAME slot
             // (no free-list churn — the live slot never moves, C3 determinism).
             // SAFETY: `slot < column.count()` (`e2s` only maps to appended slots
@@ -236,7 +297,7 @@ impl DenseStore {
     /// contract; swap-remove would reorder slots and break physics
     /// bit-determinism), pushes it onto the free list, and clears its liveness.
     pub fn remove(&mut self, entity: EntityId) -> bool {
-        let Some(slot) = self.e2s.get(entity.get()).copied() else {
+        let Some(slot) = self.e2s.slot_of(entity.get()) else {
             return false;
         };
 
@@ -250,9 +311,9 @@ impl DenseStore {
         unsafe { self.column.drop_at(slot as usize) };
 
         self.live.clear(slot as usize);
-        self.s2e[slot as usize] = TOMBSTONE;
+        self.s2e.set(slot as usize, TOMBSTONE);
         self.free.push(slot);
-        self.e2s.swap_remove(entity.get());
+        self.e2s.remove(entity.get());
 
         debug_assert!(
             !self.live.test(slot as usize),
@@ -264,7 +325,7 @@ impl DenseStore {
     /// Returns the slot `entity` occupies, or `None` if it is not present.
     #[inline]
     pub fn slot_of(&self, entity: EntityId) -> Option<u32> {
-        self.e2s.get(entity.get()).copied()
+        self.e2s.slot_of(entity.get())
     }
 
     /// Returns `true` iff `entity` is present in this store.
@@ -324,7 +385,7 @@ impl DenseStore {
     /// `live` skip.
     #[inline]
     pub fn s2e(&self) -> &[EntityId] {
-        &self.s2e
+        self.s2e.as_slice()
     }
 
     /// The component stride (bytes per slot) — the public save-side accessor
@@ -383,7 +444,13 @@ impl DenseStore {
         let len = self.column.count();
         for slot in 0..len {
             if self.live.test(slot) {
-                f(slot as u32, self.s2e[slot]);
+                // A live slot is always `< column.count() == s2e.len()` by the
+                // store invariant (s2e grows in lockstep with the column).
+                let entity = self
+                    .s2e
+                    .get(slot)
+                    .expect("invariant: live slot < s2e.len()");
+                f(slot as u32, entity);
             }
         }
     }
@@ -438,8 +505,10 @@ impl DenseStore {
                     self.column.move_ticks(read, write);
                 }
             }
-            // The entity at the moved slot now lives at `write`.
-            self.s2e[write] = self.s2e[read];
+            // The entity at the moved slot now lives at `write` (`write <= read
+            // < len == s2e.len()`, so both indices are in-bounds).
+            let moved = self.s2e.get(read).expect("invariant: read < s2e.len()");
+            self.s2e.set(write, moved);
             write += 1;
         }
 
@@ -453,11 +522,14 @@ impl DenseStore {
         }
         self.s2e.truncate(write);
 
-        // Rebuild the membership structures from the canonical order.
+        // Rebuild the membership structures from the canonical order. Iterate by
+        // index (not `as_slice().iter()`) so the `self.s2e.get` read borrow does
+        // not overlap the disjoint `self.live` / `self.e2s` mutations.
         self.free.clear();
         self.live.clear_all();
         self.e2s.clear();
-        for (slot, &entity) in self.s2e.iter().enumerate() {
+        for slot in 0..self.s2e.len() {
+            let entity = self.s2e.get(slot).expect("invariant: slot < s2e.len()");
             debug_assert_ne!(
                 entity, TOMBSTONE,
                 "DenseStore::compact: a canonical slot must not be a tombstone"
@@ -569,10 +641,10 @@ impl DenseStore {
     #[allow(dead_code)]
     fn debug_check_slot(&self, slot: u32) -> bool {
         let s = slot as usize;
-        let entity = self.s2e[s];
+        let entity = self.s2e.get(s).expect("invariant: slot < s2e.len()");
         self.live.test(s)
             && entity != TOMBSTONE
-            && self.e2s.get(entity.get()).copied() == Some(slot)
+            && self.e2s.slot_of(entity.get()) == Some(slot)
     }
 
     /// Full-structure invariant verifier (debug / property-test oracle):
@@ -601,7 +673,9 @@ impl DenseStore {
         for slot in 0..len {
             let live = self.live.test(slot);
             let in_free = free.contains(&(slot as u32));
-            let is_tomb = self.s2e[slot] == TOMBSTONE;
+            // `slot < len == column.count() == s2e.len()`, so `get` is in-bounds.
+            let entity_at_slot = self.s2e.get(slot).expect("invariant: slot < s2e.len()");
+            let is_tomb = entity_at_slot == TOMBSTONE;
 
             // !live ⟺ s ∈ free ⟺ s2e[s] == TOMBSTONE
             if live == in_free {
@@ -612,9 +686,9 @@ impl DenseStore {
             }
 
             if live {
-                let entity = self.s2e[slot];
+                let entity = entity_at_slot;
                 // e2s[s2e[slot]] == slot
-                if self.e2s.get(entity.get()).copied() != Some(slot as u32) {
+                if self.e2s.slot_of(entity.get()) != Some(slot as u32) {
                     return false;
                 }
             }

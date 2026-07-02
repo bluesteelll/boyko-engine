@@ -4637,6 +4637,21 @@ impl Default for EcsMaster {
 //     `&mut EcsMaster` never aliases any worker-held `UnsafeEcsCell` read; the
 //     `ConflictGraph` (SCH3) prevents intra-frame aliasing between concurrently
 //     running systems.
+//   - F3 (kernel-memory audit): `dense_registry` owns `DenseStore`s whose
+//     `s2e` field is a `VmColumn<EntityId>` — `!Send`/`!Sync` by auto-trait
+//     (the `NonNull` base + `VmReservation` inside), absorbed by THIS blanket
+//     impl, so the argument is carried here. The invariants mirror SEND10 on
+//     `Archetype.entity_ids`: the column's `base` is write-once (set in the
+//     `&mut`-only cold `grow_to`, stable thereafter), every mutation runs
+//     under `&mut DenseStore` reached only through the dispatcher-serialized
+//     structural paths (insert/remove routing, `DenseBuildView` — itself
+//     deliberately `!Send`), and concurrent worker reads (`s2e()` slice / the
+//     `DenseQueryIter` cached base pointer) touch only committed
+//     plain-old-data memory below `len` with no interior mutability, gated by
+//     the same SCH3/SCH7 discipline the former `Vec<EntityId>` relied on.
+//     (`DenseSolveView` carries its OWN `unsafe impl Send/Sync` in
+//     `dense/views.rs`; it caches raw pointers and is unaffected by the
+//     auto-trait flip.)
 //   - Direct (non-scheduler) `&mut EcsMaster` callers (`EcsMaster::create_entity`,
 //     `EcsMaster::insert_resource`, etc.) inherit the borrow-checker
 //     enforcement; no scheduler invariant applies because no worker is in

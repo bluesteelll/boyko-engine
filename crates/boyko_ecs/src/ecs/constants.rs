@@ -43,6 +43,19 @@ pub const SIMD_BUFFER_ALIGN: usize = 32;
 /// `PROT_NONE` tail) ⇒ ≤ 18,000 at 3000 pools vs the Linux default
 /// `vm.max_map_count` of 65,530 (3.6× headroom) — the one OS limit a
 /// pathological embedder could approach.
+///
+/// Kernel-memory audit F1/F3/F4 amendment: each archetype additionally owns
+/// one `VmColumn<EntityId>` (`entity_ids`, F1) reserved at
+/// `POOL_MAX_ROWS × 8 B` = **128 MiB of VA** (lazy — nothing materializes
+/// until the first push), and each `DenseStore` one `s2e` column (F3) at
+/// `reserve_rows × 8 B` (≤ 128 MiB at the ceiling). At 1000 archetypes that
+/// is +125 GiB VA — noise against the 3.4 TiB pool budget — plus ≤ 2
+/// VMAs/VADs per MATERIALIZED column (committed prefix + `PROT_NONE` tail)
+/// ⇒ +2,000, still ≥ 3× headroom under `vm.max_map_count`. Resident floor:
+/// one `POOL_MIN_SLAB` (64 KiB) commit per NON-EMPTY column — empty
+/// archetypes/stores commit nothing. The dense bookkeeping arrays stay small
+/// heap `Vec`s (F4: floor + amortized growth), so none of this eagerly
+/// commits resident memory on the syscall arms.
 #[cfg(all(not(miri), any(windows, unix), target_pointer_width = "64"))]
 pub const POOL_TARGET_DATA_BYTES: usize = 1024 * 1024 * 1024;
 /// Fallback-arm target (Miri / wasm32 / 32-bit / exotic): 4 MiB. The

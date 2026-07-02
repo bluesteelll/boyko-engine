@@ -689,13 +689,14 @@ where
             .fill_ticks_batch(start_row, n, current_tick);
 
         // ── Step 7: archetype-level bookkeeping ────────────────────────
-        // `Range<usize>::map(EntityId)` is `TrustedLen + ExactSizeIterator`,
-        // so `Vec::extend` fast-paths it to a single `reserve` + bulk
-        // `ptr::copy_nonoverlapping`. `EntityId` is `#[repr(transparent)]`
-        // over `usize`, so the map closure compiles down to a no-op.
+        // `Range<usize>::map(EntityId)` is `ExactSizeIterator`, so
+        // `VmColumn::extend_exact` sizes ONE frontier commit for the whole
+        // batch then streams the ids into address-stable slots (F1: no
+        // realloc-memcpy spike). `EntityId` is `#[repr(transparent)]` over
+        // `usize`, so the map closure compiles down to a no-op.
         archetype
             .entity_ids
-            .extend((start_id..start_id + n).map(EntityId));
+            .extend_exact((start_id..start_id + n).map(EntityId));
         archetype.current_index = start_row + n;
 
         // ── Step 8: bulk-register entities ────────────────────────────

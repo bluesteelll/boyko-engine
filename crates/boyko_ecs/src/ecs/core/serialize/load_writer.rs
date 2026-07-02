@@ -554,7 +554,7 @@ pub fn load_archetype(
         let archetype: &mut Archetype = &mut *archetype_ptr;
         archetype
             .entity_ids
-            .extend((start_id..start_id + n).map(EntityId));
+            .extend_exact((start_id..start_id + n).map(EntityId));
         archetype.current_index = start_row + n;
     }
 

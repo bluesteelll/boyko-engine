@@ -11,6 +11,8 @@ use crate::ecs::core::component::component_registry::{
 use crate::ecs::core::component::enable::enable_store::{EnableColumn, EnableStore};
 use crate::ecs::core::component::hooks::archetype_flags::ArchetypeFlags;
 use crate::ecs::error::{EcsError, EcsResult};
+use crate::ecs::constants::POOL_MAX_ROWS;
+use crate::ecs::memory::vm_column::VmColumn;
 
 /// `MAX_COMPONENTS` as a `ComponentId` newtype for comparison against newtype-guarded IDs.
 const MAX_COMPONENTS_ID: ComponentId = ComponentId(MAX_COMPONENTS);
@@ -192,11 +194,27 @@ pub struct Archetype {
     ///
     /// `pub(crate)` for in-place slab construction (Phase 7 U13).
     pub(crate) component_ids: Vec<ComponentId>,
-    /// Vector of entity IDs, indexed by unit_index.
-    /// Allows O(1) access to entity ID by unit index.
+    /// Entity-id column, indexed by `unit_index`. Address-stable and growable
+    /// on ONE `VmReservation` (kernel-memory audit F1) — replaces the former
+    /// `Vec<EntityId>`, the last per-row hot column on a realloc-able `Vec`.
+    ///
+    /// The query fetch caches this column's `as_ptr()` at the archetype
+    /// boundary and reads `*base.add(row)` per row (`entity_ids_slice`); on a
+    /// `VmColumn` the base is write-once, so that cached pointer can never be
+    /// invalidated by a mid-pass regrowth (the batch-spawn realloc-memcpy spike
+    /// class Phase X.G deleted for `entities_inland`).
+    ///
+    /// Archetype-level (NOT pool-level): it exists for a ZST archetype with
+    /// zero component pools too — it tracks entity membership, not component
+    /// data. Sized to `POOL_MAX_ROWS`, the `u32` `unit_index` row ceiling that
+    /// bounds EVERY archetype (address space only until the first push).
+    /// Fallback-arm caveat (Miri / wasm32): the fallback `VmReservation` is an
+    /// eager `alloc_zeroed`, so the first push allocates the whole reserve at
+    /// once — `POOL_MAX_ROWS` (262,144 on that arm) × 8 B = 2 MiB of zeroed
+    /// heap per NON-EMPTY archetype (empty archetypes still pay nothing).
     ///
     /// `pub(crate)` for in-place slab construction (Phase 7 U13).
-    pub(crate) entity_ids: Vec<EntityId>,
+    pub(crate) entity_ids: VmColumn<EntityId>,
 }
 
 // Phase 7 U5 / D4: the inline column table MUST be at offset 0 so the fast
@@ -225,12 +243,25 @@ const _: () = assert!(std::mem::offset_of!(Archetype, columns) == 0);
 // columns in `SmallList4`, so the struct grows +64 B → 8640 B measured. This is
 // metadata only; the hot read path is unchanged.
 //
-// The struct embeds `Vec`s and `usize` fields, so the 8640 B figure encodes
-// the 64-bit ABI; gated to 64-bit (the engine's supported platform) — see
-// CLAUDE.md target platform. `offset_of(columns) == 0` above is
-// width-independent (first `#[repr(C)]` field) and stays unconditional.
+// Kernel-memory audit F1 replaces `entity_ids: Vec<EntityId>` (24 B) with
+// `entity_ids: VmColumn<EntityId>` at offset 8608 (measured). On the syscall
+// arms `VmColumn` is 72 B (`base`/`len`/`committed_elems`/`reserve_elems`/
+// `reserve_request` = 5×8 + `Option<VmReservation>` = 16 + `label:
+// &'static str` = 16); on the Miri/wasm/exotic FALLBACK arm `VmReservation`
+// carries an extra `layout: Layout` field (+16 B, mirroring `vm.rs`'s own cfg
+// split) ⇒ `VmColumn` = 88 B. BOTH arms round to the same 8704 B under the
+// align-32 tail the `ComponentMask` inside `signature` imposes
+// (8608 + 72 = 8680 → 8704 with 24 B tail pad; 8608 + 88 = 8696 → 8704 with
+// 8 B tail pad), so one unconditional pin covers them. `columns` stays at
+// offset 0 (asserted above) so the Phase 7 single-load hot read path is
+// undisturbed.
+//
+// The struct embeds `Vec`s and `usize` fields, so the figure encodes the
+// 64-bit ABI; gated to 64-bit (the engine's supported platform) — see CLAUDE.md
+// target platform. `offset_of(columns) == 0` above is width-independent (first
+// `#[repr(C)]` field) and stays unconditional.
 #[cfg(target_pointer_width = "64")]
-const _: () = assert!(std::mem::size_of::<Archetype>() == 8640);
+const _: () = assert!(std::mem::size_of::<Archetype>() == 8704);
 
 impl Archetype {
     /// Creates a new archetype with the given ID.
@@ -251,7 +282,7 @@ impl Archetype {
             // table at `create_by_ids` / `register_component_inplace`.
             flags: ArchetypeFlags::empty(),
             component_ids: Vec::new(),
-            entity_ids: Vec::new(),
+            entity_ids: VmColumn::new("Archetype.entity_ids", POOL_MAX_ROWS),
         }
     }
 
@@ -313,7 +344,7 @@ impl Archetype {
             // the component pools are registered (Wave 2 wires `HOOKS`).
             flags: ArchetypeFlags::empty(),
             component_ids: component_ids.to_vec(),
-            entity_ids: Vec::new(),
+            entity_ids: VmColumn::new("Archetype.entity_ids", POOL_MAX_ROWS),
         };
 
         // Create component pools for each component ID. Each successful
@@ -983,7 +1014,10 @@ impl Archetype {
         // If removing the last entity, just pop it.
         if removed_unit_index == last_unit_index {
             if self.component_pools.pop_entity() {
-                self.entity_ids.pop();
+                // `removed == last == current_index - 1 == entity_ids.len() - 1`
+                // (archetype invariant), so this is the degenerate last-index
+                // swap_remove == a pop; the value is discarded.
+                self.entity_ids.swap_remove(last_unit_index.0);
                 self.current_index -= 1;
                 // O1-r7 Last/pop: clear the popped row's bit in every enable
                 // column (`removed == last` ⇒ a single `clear(last)`).
@@ -1001,14 +1035,17 @@ impl Archetype {
         }
 
         // Get the entity ID that will be swapped.
-        let swapped_entity_id = self.entity_ids[last_unit_index.0];
+        let swapped_entity_id = self
+            .entity_ids
+            .get(last_unit_index.0)
+            .expect("invariant: last_unit_index < entity_ids.len() (archetype non-empty)");
 
         // Swap_remove in component pools.
         if self.component_pools.swap_remove_unit(removed_unit_index.0).is_err() {
             return RemoveOutcome::PoolFailure;
         }
 
-        // Swap_remove the entity ID as well.
+        // Swap_remove the entity ID as well (moves `last` into `removed`).
         self.entity_ids.swap_remove(removed_unit_index.0);
         self.current_index -= 1;
 
@@ -1070,7 +1107,8 @@ impl Archetype {
         if removed_unit_index == last_unit_index {
             // Pop trailing slot in every pool. W-N2: no drop.
             self.component_pools.pop_entity_no_drop();
-            self.entity_ids.pop();
+            // Degenerate last-index swap_remove == a pop (value discarded).
+            self.entity_ids.swap_remove(last_unit_index.0);
             self.current_index -= 1;
             // O1-r7 Last/pop: clear the popped row's bit (`removed == last`).
             if !self.enable_store.is_empty() {
@@ -1082,7 +1120,10 @@ impl Archetype {
             }
             return RemoveOutcome::Last;
         }
-        let moved_entity = self.entity_ids[last_unit_index.0];
+        let moved_entity = self
+            .entity_ids
+            .get(last_unit_index.0)
+            .expect("invariant: last_unit_index < entity_ids.len() (archetype non-empty)");
         // SAFETY: `removed_unit_index < last_unit_index < current_index`
         //   so the index is in-bounds for every pool (each pool's
         //   `count()` equals `current_index` by archetype invariant).
@@ -1402,19 +1443,21 @@ impl Archetype {
         }
 
         // Q-022 fix: keep entity_ids length in sync with current_index, otherwise
-        // get_entity_id_at returns stale entries after pop.
-        self.entity_ids.pop();
+        // get_entity_id_at returns stale entries after pop. `current_index > 0`
+        // (asserted above) ⇒ the column is non-empty, so the degenerate
+        // last-index swap_remove is a pop (value discarded).
+        self.entity_ids.swap_remove(self.current_index - 1);
 
         // Decrement entity counter
         self.current_index -= 1;
 
         true
     }
-    
+
     /// Gets the entity ID at a specific unit index
     #[inline]
     pub fn get_entity_id_at(&self, unit_index: InlandPoolId) -> Option<EntityId> {
-        self.entity_ids.get(unit_index.0).copied()
+        self.entity_ids.get(unit_index.0)
     }
 
     /// The archetype's entity-id column as a contiguous slice, in row order.
@@ -1425,7 +1468,7 @@ impl Archetype {
     /// saved little-endian `u64[]` table.
     #[inline]
     pub fn entity_ids_slice(&self) -> &[EntityId] {
-        &self.entity_ids
+        self.entity_ids.as_slice()
     }
 }
 
@@ -1459,7 +1502,7 @@ pub(crate) fn residency_conflict_panic(component_ids: &[ComponentId]) -> ! {
     );
 }
 
-// SAFETY (SEND10 — Phase 9 §2.4, §9.1):
+// SAFETY (SEND10 — Phase 9 §2.4, §9.1; F1 amendment):
 //
 // `Archetype` becomes `Send + Sync` under the Phase 9 contract:
 //
@@ -1468,8 +1511,22 @@ pub(crate) fn residency_conflict_panic(component_ids: &[ComponentId]) -> ! {
 //   - The inline `columns: [Column; MAX_COMPONENTS]` table is read-only from
 //     workers; updates happen during dispatcher-only `refresh_column` /
 //     `add_pool` flows.
-//   - All `Vec`s (`component_ids`, `entity_ids`) mutate only on `&mut self`
-//     paths reached from the apply window.
+//   - The `component_ids` Vec mutates only on `&mut self` paths reached from
+//     the apply window.
+//   - F1: `entity_ids` is a `VmColumn<EntityId>` — `!Send`/`!Sync` by
+//     auto-trait (the `NonNull` base + `VmReservation`), silently absorbed by
+//     THIS blanket impl, so the argument is carried here explicitly. The
+//     invariants: (a) the column's `base` is WRITE-ONCE — set inside the
+//     `&mut self`-only cold `grow_to` at lazy materialization and never
+//     reassigned, so a pointer a worker derived from `entity_ids_slice()`
+//     stays valid for the pass; (b) every mutation (`push` / `swap_remove` /
+//     `extend_exact`) requires `&mut Archetype`, reached ONLY from the
+//     dispatcher's apply window (SCH7) — exactly the discipline the former
+//     `Vec<EntityId>` relied on; (c) concurrent worker `&self` reads
+//     (`entity_ids_slice`, `get_entity_id_at`) touch only committed
+//     plain-old-data memory below `len` with no interior mutability, and the
+//     ConflictGraph (SCH3) forbids a structural writer to run concurrently
+//     with those readers.
 unsafe impl Send for Archetype {}
 unsafe impl Sync for Archetype {}
 
@@ -2075,14 +2132,21 @@ mod tests {
         assert!(!col.test(row2.0));
     }
 
-    /// The `Archetype` size pin holds after the `enable_store` field addition.
+    /// The `Archetype` size pin holds after the F1 `entity_ids: VmColumn`
+    /// migration. The syscall and Miri/fallback arms coincide at 8704 B — the
+    /// fallback `VmColumn` is 16 B larger (the fallback `VmReservation`'s
+    /// `layout: Layout` field) but both round to the same align-32 tail (see
+    /// the const-assert tripwire's comment for the arithmetic).
     #[test]
     #[cfg(target_pointer_width = "64")]
     fn archetype_size_pin_holds() {
         assert_eq!(
             std::mem::size_of::<Archetype>(),
-            8640,
-            "Archetype size pin must match the const-assert tripwire"
+            8704,
+            "Archetype size pin must match the const-assert tripwire \
+             (offset_of(entity_ids) = {}, size_of(VmColumn<EntityId>) = {})",
+            std::mem::offset_of!(Archetype, entity_ids),
+            std::mem::size_of::<VmColumn<EntityId>>()
         );
         assert_eq!(std::mem::offset_of!(Archetype, columns), 0, "columns must stay at offset 0");
     }

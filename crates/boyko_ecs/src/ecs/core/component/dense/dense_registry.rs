@@ -17,20 +17,40 @@
 //! # 0%-gate
 //!
 //! A world that defines no dense component never creates a store: `dense_ids` is
-//! empty, the lazy `SparseMap` holds nothing, and every despawn-path iteration
-//! over `dense_ids` runs zero turns. Construction is alloc-free until the first
-//! dense insert.
+//! empty, the lazy `slots` array is never materialised, and every despawn-path
+//! iteration over `dense_ids` runs zero turns. Construction is alloc-free until
+//! the first dense insert.
 
+use crate::ecs::constants::pool_reserve_rows;
 use crate::ecs::core::component::component_registry::{self, MAX_COMPONENTS};
 use crate::ecs::identifiers::primitives::ComponentId;
 
 use super::dense_store::DenseStore;
 
-/// Default per-store reserve-row hint handed to [`DenseStore::new`] on lazy
-/// creation. The backing `ComponentPool` reserves (does not commit) this many
-/// rows of virtual address space; growth commits pages in place, so an
-/// under-estimate only costs a later one-syscall slab commit, never a move.
-const DENSE_STORE_RESERVE_ROWS: usize = 1024;
+/// Per-store reserve-row ceiling handed to [`DenseStore::new`] on lazy creation,
+/// derived from the component's byte stride (audit F4).
+///
+/// Dense is the designated "one contiguous buffer for ALL instances" storage, so
+/// its column must not carry a small hard ceiling: [`DenseStore::insert`] PANICS
+/// once the reserve is exhausted on a fresh-slot append, and the previous flat
+/// `1024` was an under-reserve for a store meant to hold every instance of a
+/// type. The backing `ComponentPool` only RESERVES (does not commit) this many
+/// rows of virtual address space — VA is free and commit stays lazy, so a large
+/// reserve costs no resident bytes until rows are actually written; growth
+/// commits pages in place (address-stable), never moving the base.
+///
+/// [`pool_reserve_rows`] is the same byte-targeted, row-clamped formula the
+/// table pools use (`clamp(POOL_TARGET_DATA_BYTES / stride, POOL_MIN_ROWS,
+/// POOL_MAX_ROWS)`), so a dense column reserves the identical row ceiling a table
+/// column of the same stride would. A stride of `None` (component not yet
+/// registered — unreachable on the `store_mut` path, which the
+/// `ComponentPool::new` contract requires be registered) falls back to a
+/// stride-0 (`POOL_MAX_ROWS`) reserve.
+#[inline]
+fn dense_store_reserve_rows(component_id: ComponentId) -> usize {
+    let stride = component_registry::get_component_size(component_id.0).unwrap_or(0);
+    pool_reserve_rows(stride)
+}
 
 /// Per-world owner of the dense storage subsystem (Dense plan D2).
 ///
@@ -102,7 +122,7 @@ impl DenseRegistry {
         let slots = self.slots.get_or_insert_with(Self::alloc_slots);
         if slots[component_id.0].is_none() {
             slots[component_id.0] =
-                Some(DenseStore::new(component_id, DENSE_STORE_RESERVE_ROWS));
+                Some(DenseStore::new(component_id, dense_store_reserve_rows(component_id)));
             self.dense_ids.push(component_id);
         }
         slots[component_id.0]
