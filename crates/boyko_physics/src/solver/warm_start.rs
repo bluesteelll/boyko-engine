@@ -184,6 +184,13 @@ fn next_pow2(n: usize) -> usize {
     }
 }
 
+/// The Fibonacci-hash right-shift for a table of `len` slots (`len` a power of two):
+/// `64 - log2(len)`, so the multiplicative hash keeps the top `log2(len)` bits.
+#[inline]
+fn shift_for(len: usize) -> u32 {
+    64 - len.trailing_zeros()
+}
+
 /// A flat open-addressed warm-start impulse table, rebuilt fresh each frame
 /// (P2 W3 — C3).
 ///
@@ -200,6 +207,9 @@ pub struct WarmStartTable {
     slots: Vec<WarmEntry>,
     /// `slots.len() - 1` — the power-of-two index mask for the probe.
     mask: usize,
+    /// `64 - log2(len)` — the Fibonacci-hash right-shift, cached alongside `mask` so
+    /// the per-probe [`home`](Self::home) avoids recomputing `trailing_zeros`.
+    shift: u32,
 }
 
 impl WarmStartTable {
@@ -210,6 +220,7 @@ impl WarmStartTable {
         Self {
             slots: vec![WarmEntry::empty(); len],
             mask: len - 1,
+            shift: shift_for(len),
         }
     }
 
@@ -229,6 +240,7 @@ impl WarmStartTable {
             self.slots.resize(len, WarmEntry::empty());
         }
         self.mask = self.slots.len() - 1;
+        self.shift = shift_for(self.slots.len());
         // Zero every live slot (the whole buffer, including any slack past `len`
         // — `mask` covers the full current length).
         for slot in &mut self.slots {
@@ -246,9 +258,9 @@ impl WarmStartTable {
     #[inline]
     fn home(&self, key: u64) -> usize {
         // High-bits multiplicative hash: the product's top `log2(len)` bits are
-        // the well-mixed slot index. `shift = 64 - log2(len)`.
-        let bits = (self.mask + 1).trailing_zeros();
-        let h = key.wrapping_mul(GOLDEN_64) >> (64 - bits);
+        // the well-mixed slot index. `shift = 64 - log2(len)`, cached alongside
+        // `mask` so no per-probe `trailing_zeros` is needed.
+        let h = key.wrapping_mul(GOLDEN_64) >> self.shift;
         (h as usize) & self.mask
     }
 

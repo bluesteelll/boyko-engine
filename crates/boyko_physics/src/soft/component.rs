@@ -27,6 +27,12 @@ pub enum SoftBodyError {
     IndexOutOfRange,
     /// A position component or a supplied rest length is `NaN` / `±Inf`.
     NonFinite,
+    /// A compliance value is negative. XPBD compliance α (inverse stiffness) must be
+    /// `>= 0`: a negative α makes the constraint denominator `wsum + α/dt²` cross
+    /// zero, driving the Lagrange step (hence the corrected position) to `±Inf` /
+    /// `NaN` in release — silently voiding the serial/colored bit-equality keystone.
+    /// Rejected at construction so the solve never divides through a poisoned denom.
+    NegativeCompliance,
     /// A slice length disagrees with another it must match (e.g. `inv_masses.len()
     /// != positions.len()`, or `compliance_per_edge.len() != edges.len()`).
     LengthMismatch,
@@ -190,8 +196,10 @@ impl SoftBody {
     /// - [`SoftBodyError::TooManyParticles`] if `positions.len() > u32::MAX`.
     /// - [`SoftBodyError::LengthMismatch`] if `inv_masses.len() != positions.len()`,
     ///   or `rest` is `Some` with `rest.len() != edges.len()`.
-    /// - [`SoftBodyError::NonFinite`] if any position component, inverse mass, or
-    ///   supplied rest length is not finite, or `radius < 0` / non-finite.
+    /// - [`SoftBodyError::NonFinite`] if any position component, inverse mass,
+    ///   supplied rest length, or `compliance` is not finite, or `radius < 0` /
+    ///   non-finite.
+    /// - [`SoftBodyError::NegativeCompliance`] if `compliance < 0`.
     /// - [`SoftBodyError::IndexOutOfRange`] if an edge endpoint is `>=
     ///   positions.len()`.
     /// - [`SoftBodyError::SelfEdge`] if an edge has `a == b`.
@@ -224,7 +232,8 @@ impl SoftBody {
     /// # Errors
     ///
     /// As [`from_mesh`](Self::from_mesh), plus [`SoftBodyError::LengthMismatch`] if
-    /// `compliance_per_edge.len() != edges.len()`.
+    /// `compliance_per_edge.len() != edges.len()`. A non-finite entry yields
+    /// [`SoftBodyError::NonFinite`], a negative one [`SoftBodyError::NegativeCompliance`].
     pub fn from_mesh_per_edge(
         positions: &[[f32; 3]],
         inv_masses: &[f32],
@@ -266,6 +275,8 @@ impl SoftBody {
     /// - [`SoftBodyError::IndexOutOfRange`] if a tet vertex is `>= positions.len()`.
     /// - [`SoftBodyError::NonFinite`] if `tet_compliance` or a supplied `rest_vol`
     ///   is not finite.
+    /// - [`SoftBodyError::NegativeCompliance`] if `edge_compliance < 0` or
+    ///   `tet_compliance < 0`.
     /// - [`SoftBodyError::DegenerateTet`] if a tet's four vertices are not distinct,
     ///   or are coplanar at rest (`|V0| < DENOM_EPS` — no usable gradient).
     #[allow(clippy::too_many_arguments)]
@@ -282,6 +293,12 @@ impl SoftBody {
     ) -> Result<Self, SoftBodyError> {
         if !tet_compliance.is_finite() {
             return Err(SoftBodyError::NonFinite);
+        }
+        // A negative tet compliance poisons the volume-constraint denominator the
+        // same way a negative edge compliance does (see `NegativeCompliance`); reject
+        // it up front so the volume solve never divides through a poisoned denom.
+        if tet_compliance < 0.0 {
+            return Err(SoftBodyError::NegativeCompliance);
         }
         if let Some(rv) = rest_vol
             && rv.len() != tets.len()
@@ -446,6 +463,30 @@ impl SoftBody {
             && r.iter().any(|v| !v.is_finite())
         {
             return Err(SoftBodyError::NonFinite);
+        }
+
+        // Validate edge compliance (finiteness AND non-negativity). A non-finite or
+        // negative α poisons the constraint denominator on the hot path (see
+        // `NegativeCompliance`), so it is rejected here in the shared funnel — the
+        // solver never re-checks. `Uniform` broadcasts one α; `PerEdge` is a slice
+        // whose length the caller already matched to `edges`.
+        match &compliance {
+            Compliance::Uniform(alpha) => {
+                if !alpha.is_finite() {
+                    return Err(SoftBodyError::NonFinite);
+                }
+                if *alpha < 0.0 {
+                    return Err(SoftBodyError::NegativeCompliance);
+                }
+            }
+            Compliance::PerEdge(slice) => {
+                if slice.iter().any(|a| !a.is_finite()) {
+                    return Err(SoftBodyError::NonFinite);
+                }
+                if slice.iter().any(|a| *a < 0.0) {
+                    return Err(SoftBodyError::NegativeCompliance);
+                }
+            }
         }
 
         // All checks passed — build the SoA columns sized exactly once.

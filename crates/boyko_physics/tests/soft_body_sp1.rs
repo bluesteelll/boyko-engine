@@ -647,6 +647,55 @@ fn self_edge_rejected() {
 }
 
 #[test]
+fn negative_compliance_rejected() {
+    // A negative XPBD compliance α drives the constraint denominator `wsum + α/dt²`
+    // through zero, producing ±Inf/NaN positions in release and silently voiding the
+    // serial/colored bit-equality keystone. Both constructors must reject it up
+    // front (NegativeCompliance), distinctly from the NonFinite / LengthMismatch
+    // cases.
+    let positions = vec![[0.0_f32, 0.0, 0.0], [1.0, 0.0, 0.0]];
+    let inv_masses = vec![1.0_f32, 1.0];
+    let edges = vec![(0u32, 1u32)];
+
+    // Broadcast (Uniform) compliance path.
+    let err =
+        SoftBody::from_mesh(&positions, &inv_masses, &edges, None, -1.0e-4, 0.1).unwrap_err();
+    assert_eq!(
+        err,
+        SoftBodyError::NegativeCompliance,
+        "a negative broadcast compliance must be NegativeCompliance"
+    );
+
+    // Per-edge (slice) compliance path: one negative entry is enough.
+    let per_edge = [-0.5_f32];
+    let err2 =
+        SoftBody::from_mesh_per_edge(&positions, &inv_masses, &edges, None, &per_edge, 0.1)
+            .unwrap_err();
+    assert_eq!(
+        err2,
+        SoftBodyError::NegativeCompliance,
+        "a negative per-edge compliance must be NegativeCompliance"
+    );
+
+    // A non-finite compliance is still NonFinite (finiteness is checked first).
+    let per_edge_nan = [f32::NAN];
+    let err3 =
+        SoftBody::from_mesh_per_edge(&positions, &inv_masses, &edges, None, &per_edge_nan, 0.1)
+            .unwrap_err();
+    assert_eq!(
+        err3,
+        SoftBodyError::NonFinite,
+        "a non-finite compliance must be NonFinite, not NegativeCompliance"
+    );
+
+    // Zero compliance (perfectly stiff) is valid and must construct.
+    assert!(
+        SoftBody::from_mesh(&positions, &inv_masses, &edges, None, 0.0, 0.1).is_ok(),
+        "zero compliance (perfectly stiff) must be accepted"
+    );
+}
+
+#[test]
 fn compliance_broadcast_vs_per_edge() {
     // The scalar broadcast (`from_mesh` with one compliance) must fill c_compliance
     // identically to an explicit per-edge slice of that same value.

@@ -1075,6 +1075,64 @@ fn tet_degenerate_rejected() {
 }
 
 #[test]
+fn tet_negative_compliance_rejected() {
+    // A negative tet compliance poisons the volume-constraint denominator (±Inf/NaN
+    // in release), so the tet constructor must reject it at construction
+    // (NegativeCompliance) — distinctly from the edge-compliance and NonFinite cases.
+    let positions = vec![
+        [0.0_f32, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0], // a well-formed (non-degenerate) unit tet
+    ];
+    let inv_masses = vec![1.0_f32; 4];
+    let edges: Vec<(u32, u32)> = vec![(0, 1)];
+    let tets = vec![(0u32, 1, 2, 3)];
+
+    // Negative TET compliance.
+    let err = SoftBody::from_tet_mesh(
+        &positions, &inv_masses, &edges, &tets, None, None, 0.0, -1.0e-4, 0.1,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err,
+        boyko_physics::soft::SoftBodyError::NegativeCompliance,
+        "a negative tet compliance must be NegativeCompliance"
+    );
+
+    // Negative EDGE compliance on the tet constructor's shared build funnel.
+    let err2 = SoftBody::from_tet_mesh(
+        &positions, &inv_masses, &edges, &tets, None, None, -1.0e-4, 0.0, 0.1,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err2,
+        boyko_physics::soft::SoftBodyError::NegativeCompliance,
+        "a negative edge compliance on the tet path must be NegativeCompliance"
+    );
+
+    // A non-finite tet compliance stays NonFinite (finiteness is checked first).
+    let err3 = SoftBody::from_tet_mesh(
+        &positions, &inv_masses, &edges, &tets, None, None, 0.0, f32::NAN, 0.1,
+    )
+    .unwrap_err();
+    assert_eq!(
+        err3,
+        boyko_physics::soft::SoftBodyError::NonFinite,
+        "a non-finite tet compliance must be NonFinite, not NegativeCompliance"
+    );
+
+    // Zero compliance on both channels (perfectly stiff) is valid.
+    assert!(
+        SoftBody::from_tet_mesh(
+            &positions, &inv_masses, &edges, &tets, None, None, 0.0, 0.0, 0.1,
+        )
+        .is_ok(),
+        "zero tet + edge compliance must be accepted"
+    );
+}
+
+#[test]
 fn volume_projection_inflates_compressed_tet() {
     // A single tet COMPRESSED below its rest volume must be INFLATED back toward V0
     // by the volume sweep (a Miri-tractable witness of project_volume's sign + push).
