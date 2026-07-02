@@ -1,0 +1,1502 @@
+//! `Renderer::record_gbuffer`: the on-screen 3-pass G-buffer body
+//! (raster → depth-sample → march/SSAO → deferred resolve → present-blit) behind
+//! [`Renderer::render_gbuffer_frame`], with every derived barrier driven through the
+//! [`GbufferBarrierSink`](super::super::graph_bridge::GbufferBarrierSink).
+
+use core::ptr;
+
+use crate::compute::{
+    CoarseMode, DEFAULT_MARCHER_OMEGA, FineMarcherPush, LOCAL_SIZE_X, tile_grid_extent,
+};
+use crate::ffi::*;
+use crate::memory::BoundBuffer;
+use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS};
+
+use super::super::frame_driver::Renderer;
+use super::super::scene_types::{
+    CLUSTER_CULL_PUSH_BYTES, GBUFFER_MARCHER_PUSH_BYTES, GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
+    GBufferScene, LIGHT_CULL_LOCAL_SIZE_X,
+};
+use super::super::targets::GBufferTargets;
+use super::super::{COLOR_SUBRESOURCE_RANGE, SwapchainError};
+
+impl Renderer<'_> {
+    /// Records the Render-P1c on-screen 3-pass G-buffer frame into `cmd`. The barrier
+    /// sequence (one hand-FFI barrier per transition — correct-but-unbatched; P3a
+    /// batches later):
+    ///
+    /// 0. throwaway raster color `UNDEFINED → COLOR_ATTACHMENT_OPTIMAL` (the raster
+    ///    pipeline declares one color format, so the prepass binds a format-compatible
+    ///    throwaway color attachment whose result is discarded — only the depth matters)
+    /// 1. depth `UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL` (TOP_OF_PIPE → (EARLY|LATE)_FRAGMENT_TESTS)
+    /// 2. **(pass A)** `vkCmdBeginRendering` (throwaway color CLEAR/STORE + depth CLEAR
+    ///    to the far plane / STORE), draw the mesh quad — the depth prepass (the
+    ///    swapchain image becomes a color attachment only at pass C)
+    /// 3. depth `DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL` (DEPTH aspect,
+    ///    (EARLY|LATE)_FRAGMENT_TESTS → COMPUTE_SHADER) — the single dual-use depth
+    ///    barrier (REPLACES the packed path's depth copy + its two transfer barriers)
+    /// 4. the 3 G-buffer images `UNDEFINED → GENERAL` (TOP_OF_PIPE → COMPUTE_SHADER)
+    /// 5. **(P0 coarse cull, OPTIONAL — only when `scene.coarse` is `Some`)** bind the
+    ///    coarse-cull pipeline + the vocabulary set, dispatch one group per `LOCAL_SIZE_X`
+    ///    tiles (each invocation writes a `TileBound` into binding 6), then a COMPUTE→COMPUTE
+    ///    buffer barrier on `tiles_buffer` (SHADER_WRITE → SHADER_READ); the marcher then runs
+    ///    with `coarse_enabled == scene.coarse_mode` (`1` = full / `2` = empty-skip-only). When
+    ///    `scene.coarse` is `None` this step records NOTHING (`coarse_enabled == 0`).
+    /// 6. **(pass B)** bind the marcher + the vocabulary set, dispatch (the marcher
+    ///    SAMPLES the depth image, STORES the final composite into ALBEDO)
+    /// 7. ALBEDO `GENERAL → SHADER_READ_ONLY_OPTIMAL` (COMPUTE_SHADER → FRAGMENT_SHADER)
+    /// 8. swapchain `UNDEFINED → COLOR_ATTACHMENT_OPTIMAL` (TOP_OF_PIPE → COLOR_ATTACHMENT_OUTPUT)
+    /// 9. **(pass C)** `vkCmdBeginRendering` (swapchain color CLEAR), fullscreen-sample
+    ///    the ALBEDO 1:1 in the top-left, end
+    /// 10. swapchain `COLOR_ATTACHMENT_OPTIMAL → PRESENT_SRC_KHR` (steady) or
+    ///     `→ TRANSFER_SRC`, copy-to-buffer, `→ PRESENT` (the readback path)
+    ///
+    /// NO `copy_image_to_buffer(depth)` (step 3 replaces it) and NO
+    /// `vkUpdateDescriptorSets` (both sets were written once at `sync_gbuffer`).
+    ///
+    /// Extents: passes A (prepass raster/depth) and B (the marcher dispatch → composite)
+    /// run at `present_extent` (the composite size the G-buffer/depth images, the dispatch
+    /// grid, and the camera UBO `count` were all sized to in `sync_gbuffer`). `extent` is
+    /// the swapchain extent and governs ONLY pass C's clear render-area (step 8) and the
+    /// readback region (step 9); the present-blit viewport is `min(extent, present_extent)`
+    /// at the origin for the exact 1:1 top-left composite present.
+    ///
+    /// # Safety
+    ///
+    /// `cmd` must be recordable (waited free); `image`/`view` must belong to the
+    /// swapchain image presented this frame; `scene`'s pipelines / buffers / samplers
+    /// are live on this device; `targets` was synced to `present_extent` (the composite
+    /// size — its descriptor sets bind `scene`'s SSBO/UBO + its own images, and its
+    /// G-buffer/depth images are allocated at `present_extent`); `scene.dispatch_group_count_x`
+    /// (and `scene.camera_uniform`'s `count`) cover `present_extent`'s pixel count.
+    /// `extent` is the swapchain extent and governs ONLY pass C's clear render-area and the
+    /// readback region; a `Some(readback)` buffer is host-visible and ≥ the swapchain
+    /// image's (`extent`-sized) byte size.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) unsafe fn record_gbuffer(
+        &self,
+        cmd: VkCommandBuffer,
+        image: VkImage,
+        view: VkImageView,
+        extent: VkExtent2D,
+        present_extent: VkExtent2D,
+        clear: [f32; 4],
+        scene: &GBufferScene<'_>,
+        targets: &GBufferTargets,
+        readback: Option<&BoundBuffer>,
+    ) -> Result<(), SwapchainError> {
+        let begin = VkCommandBufferBeginInfo {
+            s_type: VkStructureType::CommandBufferBeginInfo,
+            p_next: ptr::null(),
+            flags: VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            p_inheritance_info: ptr::null(),
+        };
+        // SAFETY: `cmd` is recordable per this fn's contract; `begin` is a
+        // fully-initialized one-time-submit begin-info.
+        let raw = unsafe { (self.fns.begin_command_buffer)(cmd, &begin) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(SwapchainError::VkError("vkBeginCommandBuffer", result));
+        }
+
+        // The lock-free cross-frame ring index: this present's slot. EVERY G-buffer render-
+        // target IMAGE is RINGED to `FRAMES_IN_FLIGHT` copies, so this frame writes (and the
+        // matching `*_set[fi]` descriptor binds) `<image>[fi]` while a sibling in-flight frame
+        // reads its OWN slot — the cross-frame Write-After-Read fix. The per-slot `in_flight`
+        // fence (waited at the top of `render_gbuffer_frame`) already freed this slot's previous
+        // images, so no new wait is introduced. Index every image barrier / attachment by `[fi]`.
+        let fi = self.frame_index;
+
+        // === Pass A (Render P5-r0): rasterize the mesh quad as a 3-MRT G-buffer PRODUCER
+        // (albedo@0, normal@1, material@2) + the D32 depth. The marcher's attribute
+        // encoding is the contract; pass A writes mesh fragments in it (mask=1) so the
+        // deferred resolve lights mesh pixels first-class and the r1 ownership gate yields
+        // to them. gViewT is UNTOUCHED by r0 (still wholly marcher-produced). ===
+
+        // (0)+(1) Barrier-in: the 3 RGBA8 G-buffer images UNDEFINED → COLOR_ATTACHMENT_OPTIMAL,
+        // then the depth image UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL.
+        // `src=0`/`TOP_OF_PIPE` is the superset-correct FIRST transition for a freshly
+        // re-`UNDEFINED`'d image (no prior content to make available).
+        // Step 1a (sync1 array-batching): the 3 color barriers share one global
+        // TOP_OF_PIPE→COLOR_ATTACHMENT_OUTPUT scope over independent (non-aliasing) images,
+        // so ONE array-form `vkCmdPipelineBarrier` is byte-identical GPU semantics to the
+        // former three `count=1` calls — same masks/layouts/subresource, fewer API calls.
+        //
+        // These two batched barriers are DRIVEN by `frame_graph`'s "raster" pass — the
+        // graph derives the color + depth transitions, and `GbufferBarrierSink` records
+        // them into the two `vkCmdPipelineBarrier` calls. The per-frame plan is set by
+        // `declare_gbuffer_graph` just before this record; every barrier site below
+        // fetches it the same way.
+        // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+        // barriers for the "raster" pass into `cmd` against the live G-buffer targets.
+        let plan = self
+            .gbuffer_pass_plan
+            .as_ref()
+            .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
+        self.record_graph_pass(plan.raster, cmd, targets, scene, fi);
+
+        // (2) Dynamic rendering at the marcher's extent: 3 MRT color attachments
+        // (albedo@0, normal@1, material@2; CLEAR/STORE) + the depth attachment (CLEAR to
+        // the far plane / STORE). The render area is the marcher's extent so the
+        // rasterized fragments cover exactly the dispatched pixels; the swapchain may be
+        // WSI-clamped wider (the present-blit handles that).
+        //
+        // Render P5-r0 / Decision r0-2: each color clear IS the marcher's mask=0 neutral
+        // G-buffer, so a pixel with NO mesh fragment holds the cleared neutral, which the
+        // marcher (owning that pixel) overwrites anyway — making the no-mesh 0%-gate
+        // trivial AND a depth-failed/missed mesh fragment fall back to a valid mask=0
+        // neutral. The clears pass through the SAME float→UNORM8 `round(c*255)` quantizer
+        // the marcher store uses; 0.05/0.10/0.5/1.0/0.0 are all exact, so the cleared
+        // neutral is bit-identical to a marcher-written neutral.
+        //   albedo  clear = (BACKGROUND.rgb, 1.0)  — the marcher's background base.
+        //   normal  clear = (0.5, 0.5, 0.0, 0.0)   — neutral oct + id=0.
+        //   material clear = (1.0, 1.0, 0.0, 1.0)  — shadow=1, ao=1, mask=0, 1.
+        // These MUST equal the marcher's background-arm constants (sdf_gbuffer_composite.hlsl:
+        // BACKGROUND = (0.05, 0.05, 0.1); the Site-A/B mask=0 neutrals).
+        let albedo_attachment = VkRenderingAttachmentInfo {
+            s_type: VkStructureType::RenderingAttachmentInfo,
+            p_next: ptr::null(),
+            image_view: targets.albedo[fi].view,
+            image_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            resolve_mode: 0,
+            resolve_image_view: VkImageView::NULL,
+            resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+            store_op: VK_ATTACHMENT_STORE_OP_STORE,
+            clear_value: VkClearValue {
+                color: VkClearColorValue {
+                    float32: [0.05, 0.05, 0.1, 1.0],
+                },
+            },
+        };
+        let normal_attachment = VkRenderingAttachmentInfo {
+            s_type: VkStructureType::RenderingAttachmentInfo,
+            p_next: ptr::null(),
+            image_view: targets.normal[fi].view,
+            image_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            resolve_mode: 0,
+            resolve_image_view: VkImageView::NULL,
+            resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+            store_op: VK_ATTACHMENT_STORE_OP_STORE,
+            clear_value: VkClearValue {
+                color: VkClearColorValue {
+                    float32: [0.5, 0.5, 0.0, 0.0],
+                },
+            },
+        };
+        let material_attachment = VkRenderingAttachmentInfo {
+            s_type: VkStructureType::RenderingAttachmentInfo,
+            p_next: ptr::null(),
+            image_view: targets.material[fi].view,
+            image_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            resolve_mode: 0,
+            resolve_image_view: VkImageView::NULL,
+            resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+            store_op: VK_ATTACHMENT_STORE_OP_STORE,
+            clear_value: VkClearValue {
+                color: VkClearColorValue {
+                    float32: [1.0, 1.0, 0.0, 1.0],
+                },
+            },
+        };
+        let raster_color_attachments =
+            [albedo_attachment, normal_attachment, material_attachment];
+        let depth_attachment = VkRenderingAttachmentInfo {
+            s_type: VkStructureType::RenderingAttachmentInfo,
+            p_next: ptr::null(),
+            image_view: targets.depth[fi].view,
+            image_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            resolve_mode: 0,
+            resolve_image_view: VkImageView::NULL,
+            resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+            store_op: VK_ATTACHMENT_STORE_OP_STORE,
+            clear_value: VkClearValue {
+                depth_stencil: VkClearDepthStencilValue {
+                    depth: 1.0,
+                    stencil: 0,
+                },
+            },
+        };
+        let raster_area = VkRect2D {
+            offset: VkOffset2D { x: 0, y: 0 },
+            extent: present_extent,
+        };
+        let raster_rendering = VkRenderingInfo {
+            s_type: VkStructureType::RenderingInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            render_area: raster_area,
+            layer_count: 1,
+            view_mask: 0,
+            color_attachment_count: raster_color_attachments.len() as u32,
+            p_color_attachments: raster_color_attachments.as_ptr(),
+            p_depth_attachment: (&depth_attachment as *const VkRenderingAttachmentInfo).cast(),
+            p_stencil_attachment: ptr::null(),
+        };
+        let raster_viewport = VkViewport {
+            x: 0.0,
+            y: 0.0,
+            width: present_extent.width as f32,
+            height: present_extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        let vertex_offset: VkDeviceSize = 0;
+        // SAFETY: recording is open; `raster_rendering` is fully initialized — its 3 color
+        // attachments name the live albedo/normal/material views (now
+        // COLOR_ATTACHMENT_OPTIMAL) and its depth attachment the live depth view (now
+        // DEPTH_ATTACHMENT_OPTIMAL); `raster_color_attachments` outlives the bracketed
+        // calls; dynamic rendering is enabled on this device. The raster pipeline (declaring
+        // 3 matching color formats + 3 blend states, P5-r0) + its VERTEX push range + the
+        // vertex buffer all belong to this device (caller contract) and the pipeline's
+        // declared color/depth formats equal the bound attachments'. The 88-byte push is
+        // `GBUFFER_PUSH_BYTES` at offset 0 into the VERTEX range (M1: its trailing
+        // `use_model_matrix` selects the VS arm — `0` legacy / `1` instanced). A VALID set 0
+        // is bound before the draw to satisfy the VS's static `instances` reference:
+        // `scene.instance_bind_group` (the shared N-instance SSBO — the 1-element identity
+        // dummy on the legacy empty-slice arm, the gather-filled ring on the M3 instanced
+        // arm), bound ONCE for both arms. `vertex_offset`/`raster_viewport`/`raster_area`
+        // locals outlive the bracketed calls. On the legacy arm `draw(vertex_count, 1, 0, 0)`
+        // reads the merged vertex buffer; on the M3 arm the batch loop re-pushes each batch's
+        // `base_instance` (4 bytes at offset 80, in-range of the declared 88-byte VERTEX push)
+        // then `draw_indexed(index_count, instance_count, 0, 0, 0)` reads that batch's bound
+        // vertex + index buffers (created on this device, carrying VERTEX/INDEX usage;
+        // `index_type` a valid `VkIndexType`). Begin/End bracket pass A exactly.
+        unsafe {
+            (self.fns.cmd_begin_rendering)(cmd, &raster_rendering);
+            (self.fns.cmd_bind_pipeline)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                scene.raster_pipeline.pipeline,
+            );
+            // M3: the instanced batch loop binds the SHARED N-instance model SSBO ONCE
+            // (set 0); the legacy (empty-slice) arm binds the 1-element identity dummy
+            // (bound-but-unread). Both bind a VALID set 0 so the VS's static `instances`
+            // reference is satisfied. The shared SSBO is `scene.instance_bind_group` for
+            // both arms (M3 repurposed it as the gather-filled N-instance ring on the
+            // instanced path); every batch indexes it by `base_instance + SV_InstanceID`.
+            (self.fns.cmd_bind_descriptor_sets)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                scene.raster_pipeline.layout,
+                0,
+                1,
+                &scene.instance_bind_group.descriptor_set,
+                0,
+                ptr::null(),
+            );
+            (self.fns.cmd_push_constants)(
+                cmd,
+                scene.raster_pipeline.layout,
+                VK_SHADER_STAGE_VERTEX_BIT,
+                0,
+                scene.mvp.len() as u32,
+                scene.mvp.as_ptr().cast(),
+            );
+            (self.fns.cmd_set_viewport)(cmd, 0, 1, &raster_viewport);
+            (self.fns.cmd_set_scissor)(cmd, 0, 1, &raster_area);
+            if scene.mesh_draw.is_empty() {
+                // LEGACY arm: byte-identical to the pre-M2 stream — a non-indexed,
+                // single-instance draw over the scene's merged vertex buffer. The shared
+                // set 0 + the `use_model_matrix == 0` push (caller contract) make the bound
+                // SSBO bound-but-unread.
+                (self.fns.cmd_bind_vertex_buffers)(
+                    cmd,
+                    0,
+                    1,
+                    &scene.vertex_buffer.buffer,
+                    &vertex_offset,
+                );
+                (self.fns.cmd_draw)(cmd, scene.vertex_count, 1, 0, 0);
+            } else {
+                // M3 INSTANCED batch loop: one indexed draw per registered mesh. `scene.
+                // mvp`'s `use_model_matrix == 1` (caller contract) selects the VS arm that
+                // reads `instances[base_instance + SV_InstanceID]`. Each batch overwrites
+                // the push's `base_instance` word (offset 80, 4 bytes) with its bucket
+                // offset — NONZERO for every mesh after the first (the C1 proof) — then
+                // binds its own vertex+index buffers (with its O3 index width) and draws
+                // its instance bucket.
+                for batch in scene.mesh_draw {
+                    let base = batch.base_instance;
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        scene.raster_pipeline.layout,
+                        VK_SHADER_STAGE_VERTEX_BIT,
+                        GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
+                        4,
+                        (&base as *const u32).cast(),
+                    );
+                    (self.fns.cmd_bind_vertex_buffers)(
+                        cmd,
+                        0,
+                        1,
+                        &batch.vertex_buffer.buffer,
+                        &vertex_offset,
+                    );
+                    (self.fns.cmd_bind_index_buffer)(
+                        cmd,
+                        batch.index_buffer.buffer,
+                        0,
+                        batch.index_type,
+                    );
+                    (self.fns.cmd_draw_indexed)(
+                        cmd,
+                        batch.index_count,
+                        batch.instance_count,
+                        0,
+                        0,
+                        0,
+                    );
+                }
+            }
+            (self.fns.cmd_end_rendering)(cmd);
+        }
+
+        // The marcher's INPUT barriers — depth→sampled, color→general, lit/viewt/ssao
+        // first-touch — are DRIVEN by the graph's "marcher" pass, but that `record_pass`
+        // is emitted just BEFORE the marcher DISPATCH (site 5), NOT here. This is
+        // REQUIRED for the coarse-ON case: the graph derives the `tiles` cull→marcher
+        // barrier at the marcher (the reader), so it must fire AFTER the coarse dispatch
+        // WRITES tiles — recording the marcher pass here (before the coarse dispatch)
+        // would order a not-yet-issued write. So this site records NOTHING; the graph
+        // re-orders lit/ssao's first-touch to their true first-use (resolve / ssao) — a
+        // sound superset the equivalence tests lock in.
+
+        // === Lighting L0-r0: ASYNC light-table re-upload (C3), recorded only on a dirty
+        // frame, BEFORE the marcher/resolve reads. A staging→device `cmd_copy_buffer` +
+        // a TRANSFER_WRITE→SHADER_READ buffer barrier (TRANSFER→COMPUTE_SHADER) into the
+        // SAME `cmd` — fence-free, no readback (mirroring the store-to-load image barrier
+        // below). An idle (non-dirty) frame records NOTHING — byte-identical command
+        // stream to before (the rung L0-r0 0%-gate). The collection system wrote the new
+        // table into `light_staging`'s mapped bytes and set `light_dirty`. ===
+        if scene.light_dirty && scene.light_upload_bytes > 0 {
+            let region = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: scene.light_upload_bytes,
+            };
+            // SAFETY: recording is open; the copy names the live host-coherent staging +
+            // device-local table buffers; the copy region spans `[0, light_upload_bytes)`
+            // ≤ both buffer sizes (caller contract — the table is sized for MAX_LIGHTS).
+            // The COPY is GPU work (not a barrier), so it runs unconditionally — only the
+            // following buffer barrier is graph-driven. `&region` outlives the call.
+            unsafe {
+                (self.fns.cmd_copy_buffer)(
+                    cmd,
+                    scene.light_staging.buffer,
+                    scene.light_table.buffer,
+                    1,
+                    &region,
+                );
+            }
+            // The TRANSFER_WRITE→SHADER_READ barrier is DRIVEN by the graph's
+            // "light_upload" pass (this branch runs iff `light_dirty &&
+            // light_upload_bytes > 0`, the same gate that declared the pass). The graph
+            // barrier spans the WHOLE buffer (a sound superset of the `[0,
+            // light_upload_bytes)` range).
+            // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+            // TRANSFER→COMPUTE_SHADER buffer barrier for the "light_upload" pass, ordering
+            // the copy's write before the marcher/resolve reads on the GPU timeline.
+            let plan = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
+            let light_upload = plan
+                .light_upload
+                .expect("invariant: light_dirty ⇒ light_upload pass declared");
+            self.record_graph_pass(light_upload, cmd, targets, scene, fi);
+        }
+
+        // === Render P0: the P4b COARSE-CULL pass (Decision: mirror the offscreen
+        // `run_gbuffer_hybrid_ex` coarse dispatch + the `cluster_cull` optional-compute
+        // recorder shape). Recorded ONLY when the scene wires the coarse pipeline; otherwise
+        // skipped entirely — NO dispatch, NO barrier — so the command stream is byte-identical
+        // to the pre-P0 windowed path (the 0%-gate). The coarse pass binds the SAME vocabulary
+        // set (the cull shader declares only a subset — valid), SAMPLES the depth (already
+        // SHADER_READ from barrier 3, which it shares with the marcher), and WRITES one
+        // `TileBound` per 8×8 tile into vocab binding 6. The fine marcher then READS those
+        // bounds (gated by `coarse_enabled == 1` in its push) to skip empty / cone-rejected
+        // tiles — the SAME pixels, fewer marches. A COMPUTE→COMPUTE buffer barrier on
+        // `tiles_buffer` orders the cull WRITE before the marcher READ. ===
+        let coarse_enabled = scene.coarse.is_some();
+        if let Some(coarse_pipeline) = scene.coarse {
+            // The 1D coarse dispatch element count = the full tile grid at the COMPOSITE
+            // extent (the marcher dispatches + the camera UBO `count` are sized to it). One
+            // group per `LOCAL_SIZE_X` tiles, mirroring the offscreen `coarse_group_count_x`.
+            let (tw, th) = tile_grid_extent(present_extent.width, present_extent.height);
+            let coarse_groups = (tw * th).div_ceil(LOCAL_SIZE_X);
+            // The coarse pass's INPUT barrier (depth→sampled — the coarse pass is the
+            // graph's FIRST COMPUTE depth reader, so it owns the
+            // DEPTH_ATTACHMENT_OPTIMAL→SHADER_READ_ONLY transition) is DRIVEN by the
+            // graph's "coarse" pass, recorded HERE, immediately before the coarse dispatch
+            // that samples depth. The `tiles` cull→marcher barrier is derived at the
+            // marcher (the reader), so it is emitted later by `record_pass(marcher)`
+            // (after this dispatch writes tiles) — NOT here.
+            // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+            // depth→sampled barrier for the "coarse" pass into `cmd`.
+            let coarse = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .coarse
+                .expect("invariant: scene.coarse.is_some() ⇒ coarse pass declared");
+            self.record_graph_pass(coarse, cmd, targets, scene, fi);
+            // SAFETY: recording is open; the coarse pipeline + its layout (declaring
+            // `vocab_layout` at set 0 + the shared COMPUTE push range) are live on this device
+            // (caller contract); the vocabulary set binds the SSBO/UBO + the now-transitioned
+            // depth (SHADER_READ) + a valid Tiles SSBO @6 (the cull's write target) + the valid
+            // brick descriptors @9..=14; the cull shader uses only a subset of those bindings
+            // (valid); `coarse_groups` covers the full tile grid at the 64-wide group;
+            // `&...vocab_set.descriptor_set` is a single-element local alive for the call
+            // (first_set 0, count 1, zero dynamic offsets). The cull declares no push it reads,
+            // but the layout's push range matches the marcher's, so no constant is pushed here.
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    coarse_pipeline.pipeline,
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    coarse_pipeline.layout,
+                    0,
+                    1,
+                    &targets.vocab_set[self.frame_index].descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_dispatch)(cmd, coarse_groups, 1, 1);
+            }
+
+            // The coarse pass's `TileBound` WRITES (binding 6, COMPUTE/SHADER_WRITE) are
+            // ordered before the fine marcher's READS (COMPUTE/SHADER_READ) by the graph:
+            // it derives this COMPUTE→COMPUTE `tiles_buffer` barrier at the marcher (the
+            // `tiles` reader), so `record_pass(marcher)` emits it just before the marcher
+            // dispatch (still after this coarse dispatch's write) — NOT here.
+        }
+
+        // === Pass B: the marcher SAMPLES the depth image, STORES the G-buffer. ===
+        // (5) Bind the marcher + the vocabulary set (written ONCE at sync_gbuffer; NO
+        // per-frame update) against the marcher's OWN dedicated layout, push the 32-byte
+        // P4b/B1 constants, dispatch.
+        //
+        // The marcher's 32-byte compute push range is `FineMarcherPush`
+        // `{ coarse_enabled: u32 @0, omega: f32 @4, lighting_flags: u32 @8, light_dir: float3 @16 }`.
+        // Render P0: `coarse_enabled` is a 3-value `CoarseMode` — `0` on the OFF path (no coarse
+        // dispatch, the tile read is gated off), else `scene.coarse_mode`: `1` (full = EMPTY-skip +
+        // `near_t` seed) or `2` (empty-skip-only = EMPTY-skip, NO seed → lit-transparent, no rim).
+        // When the cull pass above ran the marcher reads the per-tile bounds it wrote into binding 6
+        // (skipping empty tiles). Either way the marcher DECLARES binding 6, so the (valid) Tiles descriptor
+        // is always bound in the vocabulary set. `omega` carries the B1 over-relaxation
+        // factor (`DEFAULT_MARCHER_OMEGA`, the provably hole-free speedup). Render A1/A2:
+        // the on-screen demo turns lighting ON (A1 soft shadows + A2 AO) with the default
+        // directional light.
+        // SDF brick-cache activation (campaign M1/M2/M4): the empty-skip + trilinear/cubic surface
+        // cache + clip-map LOD gates live ENTIRELY in this per-frame push (the bound descriptors at
+        // 9..=14 are static), so `scene.brick` selects ON/OFF at runtime with no re-record — the
+        // owner's A/B toggle.
+        //
+        // - `None` (the default / OFF path): `brick_enabled == 0` / `brick_trilinear == 0` /
+        //   `brick_levels == 1` — the marcher's `select_level` loops once over level 0 and never reads
+        //   the brick grids/atlas, byte-identical to the pre-brick M2 marcher. `with_brick_levels(1)`
+        //   is REQUIRED (the recompiled shader treats `brick_levels == 0` as no-level).
+        // - `Some(a)` (the ON path): `with_brick(a.grid_origin, a.grid_dims, a.brick_world)` stamps the
+        //   level-0 empty-skip grid uniforms (the `lvl == 0` arm indexes binding 9 with them),
+        //   `with_brick_trilinear(true)` turns on the surface-brick cubic, and `with_brick_levels(a.levels)`
+        //   loops the clip-map ladder. The caller MUST have bound the real BrickClipmap per-level
+        //   resources at 9..=14 + written its `M4GridParams` tail into the b5 UBO. This mirrors the
+        //   offscreen RTX-verified `run_gbuffer_hybrid_m4` push exactly.
+        // Render P0: the marcher's coarse-cull mode. OFF (no `coarse` pipeline ⇒ no dispatch) forces
+        // `CoarseMode::Off` so the push byte is 0 and the marcher never reads the (un-dispatched)
+        // tile bounds — byte-identical to the pre-P0 stream. ON uses `scene.coarse_mode`: `Full`
+        // keeps the historical EMPTY-skip + `near_t` seed (the offscreen goldens' mode);
+        // `EmptySkipOnly` is the LIT-TRANSPARENT on-screen cull (EMPTY-skip only, no seed → no
+        // grazing-silhouette AO/shadow rim).
+        let coarse_mode = if coarse_enabled { scene.coarse_mode } else { CoarseMode::Off };
+        let base = FineMarcherPush::new_mode(
+            coarse_mode,
+            DEFAULT_MARCHER_OMEGA,
+            scene.lighting_flags,
+            // The marcher marches the A1 soft shadow toward the SCENE's primary directional `L`
+            // (NOT a hardcoded head-on `[0,0,1]`), so an angled sun casts a real shadow that the
+            // resolve's primary directional then consumes via `gMaterial.r`. See `light_dir`.
+            scene.light_dir,
+        );
+        let marcher_push = match scene.brick {
+            Some(a) => base
+                .with_brick(a.grid_origin, a.grid_dims, a.brick_world)
+                .with_brick_trilinear(true)
+                .with_brick_levels(a.levels),
+            None => base.with_brick_levels(1),
+        }
+        // MDF Stage-2c: arm the mesh-distance-field SHADOW path. `false` (the default for every
+        // non-MDF scene) leaves the push byte-identical — the mesh-SDF texture @binding 15 is
+        // bound-but-unread, the shadow march stays the frozen analytic `sdf_soft_shadow` (the
+        // 0%-gate keeping the 41 hybrid goldens byte-exact). `true` marches `sdf_soft_shadow_mesh`.
+        .with_mesh_sdf(scene.mesh_sdf_enabled);
+        // SAFETY: recording is open; the marcher pipeline + its layout (declaring
+        // `vocab_layout` at set 0 AND the 80-byte COMPUTE push range) are live on this
+        // device (caller contract); the vocabulary set binds the SSBO/UBO + the
+        // now-transitioned depth (SHADER_READ) + G-buffer (GENERAL) images + a valid
+        // Tiles SSBO @6 + valid brick descriptors @9..=14 (whether the brick gates are ON
+        // or OFF, those descriptors are always bound — caller contract); `dispatch_group_count_x`
+        // covers `present_extent`'s pixel count (the G-buffer images + dispatch grid + camera UBO
+        // `count` are all sized to `present_extent`, the composite — NOT the swapchain `extent`;
+        // caller contract); `&...descriptor_set` is a single-element local alive for the call
+        // (first_set 0, count 1, zero dynamic offsets); `marcher_push.as_bytes()` is
+        // `GBUFFER_MARCHER_PUSH_BYTES` (80) bytes at offset 0, exactly the declared 80-byte range,
+        // and the backing `marcher_push` local outlives the call.
+        let marcher_push_bytes = marcher_push.as_bytes();
+        // The marcher's INPUT barriers are DRIVEN by the graph's "marcher" pass, recorded
+        // HERE, immediately before the marcher dispatch (the collapse of the former hand
+        // depth→sampled / color→general / lit·viewt·ssao first-touch sites). It emits
+        // color→general + viewt first-touch UNDEFINED→GENERAL and, on the coarse-ON path,
+        // the `tiles` cull→marcher COMPUTE→COMPUTE barrier (correctly AFTER the coarse
+        // dispatch wrote tiles). depth→sampled is free here (the coarse pass — or,
+        // coarse-OFF, this pass would own it: the graph derives it wherever depth is first
+        // COMPUTE-read).
+        // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+        // input barriers for the "marcher" pass into `cmd` against the live G-buffer targets.
+        let marcher = self
+            .gbuffer_pass_plan
+            .as_ref()
+            .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+            .marcher;
+        self.record_graph_pass(marcher, cmd, targets, scene, fi);
+        unsafe {
+            (self.fns.cmd_bind_pipeline)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                scene.marcher.pipeline,
+            );
+            (self.fns.cmd_bind_descriptor_sets)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                scene.marcher.layout,
+                0,
+                1,
+                &targets.vocab_set[self.frame_index].descriptor_set,
+                0,
+                ptr::null(),
+            );
+            (self.fns.cmd_push_constants)(
+                cmd,
+                scene.marcher.layout,
+                VK_SHADER_STAGE_COMPUTE_BIT,
+                0,
+                GBUFFER_MARCHER_PUSH_BYTES,
+                marcher_push_bytes.as_ptr().cast(),
+            );
+            (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+        }
+
+        // (5a) PBR MVP-2: make the marcher's gAlbedo + gNormal + gMaterial STORES available
+        // + visible to the resolve's LOADS. A real memory+execution dependency
+        // (SHADER_WRITE→SHADER_READ, COMPUTE→COMPUTE), GENERAL→GENERAL (no layout change).
+        // gNormal is now READ by the resolve (oct-normal decode + 16-bit material id), so it
+        // joins gAlbedo + gMaterial in the barrier (MVP-1 omitted it — gNormal was unread).
+        // Lighting L0b: the gViewT lane is marcher-STORED + resolve-READ, so it joins too.
+        // Step 1a (sync1 array-batching): the 4 store-to-load barriers share one global
+        // COMPUTE_SHADER→COMPUTE_SHADER scope over independent images → ONE array-form call,
+        // byte-identical GPU semantics to the former four `count=1` calls.
+        // The graph derives each attribute's store→load at its FIRST reader —
+        // normal/material/viewt at `record_pass(ssao)` (before the SSAO dispatch) when
+        // SSAO is on, and albedo (+ any not read by SSAO) at `record_pass(resolve)`
+        // (before the resolve dispatch). So the former single hand batch is split across
+        // those two pass records; nothing is recorded here.
+
+        // === Render P7: the SSAO compute pass. Recorded ONLY when the scene wires the SSAO
+        // activation (`scene.ssao.is_some()`); otherwise skipped entirely — NO bind, NO dispatch,
+        // NO barrier — so the command stream is byte-identical to the pre-P7 windowed path (the
+        // 0%-gate; the `ssao` image is always allocated + transitioned by C1's batch regardless of
+        // this branch). The SSAO pass gathers a horizon-based AO factor from the G-buffer (gNormal/
+        // gMaterial/gViewT, READ) and STORES it into the `ssao` lane the resolve combines under
+        // `ssao_mode != 0`. Its inputs are already SHADER_READ-visible: the marcher→resolve
+        // store-to-load barrier above (5a) covers gNormal/gMaterial/gViewT (the SSAO reads the same
+        // three the resolve reads), so NO new input barrier is needed. After the dispatch, a NEW
+        // COMPUTE→COMPUTE / SHADER_WRITE→SHADER_READ / GENERAL→GENERAL barrier on `ssao` orders the
+        // SSAO store before the resolve's `gSsao.Load` (the cull→resolve barrier shape, on the
+        // `ssao` image). The SSAO pass reads its camera from the UBO bound at the SSAO set's binding
+        // 4, so it pushes NO constant (unlike the marcher). ===
+        if let Some(activation) = &scene.ssao {
+            // The lock-free per-frame ring: bind this present's slot (`frame_index`).
+            let ssao_set = &targets
+                .ssao_set
+                .as_ref()
+                .expect("invariant: scene.ssao is Some ⇒ GBufferTargets::create wrote ssao_set")
+                [self.frame_index];
+            // The SSAO pass's INPUT barriers are DRIVEN by the graph's "ssao" pass,
+            // recorded HERE, before the SSAO dispatch: the normal/material/viewt marcher
+            // store→load (SSAO is their FIRST reader) + the `ssao` first-touch
+            // UNDEFINED→GENERAL (the SSAO write). The `ssao` store→load
+            // (SSAO-write→resolve-read) is derived at the resolve (the reader), so it is
+            // emitted later by `record_pass(resolve)` — NOT here.
+            // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+            // input barriers for the "ssao" pass into `cmd`.
+            let ssao_pass = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .ssao
+                .expect("invariant: scene.ssao.is_some() ⇒ ssao pass declared");
+            self.record_graph_pass(ssao_pass, cmd, targets, scene, fi);
+            // SAFETY: recording is open; the SSAO pipeline + its layout (declaring the SSAO set
+            // layout at set 0 + the shared 80-byte COMPUTE push range) are live on this device
+            // (caller contract); `ssao_set` binds the now-stored (SHADER_READ-visible, GENERAL)
+            // gNormal/gMaterial/gViewT + the `ssao` out (GENERAL) images + the scene's camera UBO;
+            // `dispatch_group_count_x` covers `present_extent`'s pixel count (the same grid the
+            // marcher/resolve dispatch); `&ssao_set.descriptor_set` is a single-element local alive
+            // for the call (first_set 0, count 1, zero dynamic offsets). The SSAO shader reads its
+            // camera from the UBO @4, so no push constant is recorded.
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    activation.pipeline.pipeline,
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    activation.pipeline.layout,
+                    0,
+                    1,
+                    &ssao_set.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+            }
+
+            // The SSAO pass's `ssao` WRITES (COMPUTE/SHADER_WRITE) are ordered before the
+            // resolve's `gSsao.Load` READS (COMPUTE/SHADER_READ) by the graph: it derives
+            // this COMPUTE→COMPUTE, GENERAL→GENERAL image barrier on `ssao` at the resolve
+            // (the `ssao` reader), so `record_pass(resolve)` emits it before the resolve
+            // dispatch (still after this SSAO dispatch's write) — NOT here.
+        }
+
+        // === Lighting L1: the clustered froxel light-cull pass (Decision 6). Recorded ONLY
+        // when the scene wires the cull pipeline + cull set; otherwise skipped entirely (the
+        // resolve's `clusters_enabled` header gate then loops the flat table — the L1 OFF /
+        // 0%-gate, byte-identical command stream). The cull reads the camera UBO + light table
+        // (the L0-r0 copy above already ordered the table for COMPUTE reads) and writes the
+        // ClusterGrid + LightIndexList; the resolve reads them, so a COMPUTE→COMPUTE buffer
+        // barrier orders the cull WRITE before the resolve READ. The cull does NOT depend on
+        // gViewT (it is geometric), so it can run after the marcher without further sync. ===
+        // `_grid` / `_index` are matched only to GATE this L1 block on the cluster
+        // buffers being wired; the graph's `light_cull` / `resolve` passes read them via
+        // `scene`, so the bindings themselves are unused here.
+        if let (Some(cull_pipeline), Some(cull_set), Some(_grid), Some(_index), Some(alloc)) = (
+            scene.cluster_cull,
+            // The lock-free per-frame ring: bind this present's slot (`frame_index`).
+            targets.cull_set.as_ref().map(|s| &s[self.frame_index]),
+            scene.cluster_grid,
+            scene.light_index,
+            scene.light_index_alloc,
+        ) {
+            // (L1-0) Reset the global slice-allocation counter to 0 (a transfer fill), then
+            // order the fill before the cull's atomic reads/writes (TRANSFER→COMPUTE).
+            // SAFETY: recording is open; `alloc` is a live device-local STORAGE buffer (≥ 4 B,
+            // the single u32 counter); `cmd_fill_buffer` zero-fills it (Vulkan 1.0 core). The
+            // FILL is GPU work (not a barrier), so it runs unconditionally — only the
+            // following barrier is graph-driven when the flag is ON.
+            unsafe {
+                (self.fns.cmd_fill_buffer)(cmd, alloc.buffer, 0, VK_WHOLE_SIZE, 0);
+            }
+            // The alloc TRANSFER→COMPUTE(RW) barrier (+ the light-table TRANSFER→COMPUTE
+            // flush, if `light_upload` left one pending — the cull is the first COMPUTE
+            // reader of the table) is DRIVEN by the graph's "light_cull" pass, recorded
+            // HERE, before the cull dispatch. The cull's grid/index writes are ordered to
+            // the resolve by `record_pass(resolve)` (the reader) — NOT here.
+            // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+            // TRANSFER→COMPUTE barrier for the "light_cull" pass into `cmd`, ordering the
+            // fill's TRANSFER write before the cull's COMPUTE atomics on the GPU timeline.
+            let light_cull = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .light_cull
+                .expect("invariant: cull wired ⇒ light_cull pass declared");
+            self.record_graph_pass(light_cull, cmd, targets, scene, fi);
+
+            // (L1-1) Bind the cull pipeline + the cull set (written ONCE at sync_gbuffer),
+            // push the 16-byte ClusterCullPush, dispatch over CLUSTER_COUNT froxels.
+            let cull_groups = scene.cluster_count.div_ceil(LIGHT_CULL_LOCAL_SIZE_X);
+            // SAFETY: recording is open; the cull pipeline + its layout (declaring `cull_layout`
+            // at set 0 + the 16-byte COMPUTE push range) are live on this device (caller
+            // contract); the cull set binds the camera UBO + light table + the cluster buffers;
+            // `cull_groups` covers `cluster_count` froxels at the 64-wide group; the push bytes
+            // are exactly `CLUSTER_CULL_PUSH_BYTES` (16) at offset 0; `&cull_set.descriptor_set`
+            // is a single-element local alive for the call (first_set 0, count 1).
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    cull_pipeline.pipeline,
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    cull_pipeline.layout,
+                    0,
+                    1,
+                    &cull_set.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    cull_pipeline.layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    CLUSTER_CULL_PUSH_BYTES,
+                    scene.cluster_cull_push.as_ptr().cast(),
+                );
+                (self.fns.cmd_dispatch)(cmd, cull_groups, 1, 1);
+            }
+
+            // (L1-2) The cull's ClusterGrid + LightIndexList writes are made available +
+            // visible to the resolve's reads by the graph: it derives these
+            // COMPUTE→COMPUTE, SHADER_WRITE→SHADER_READ buffer barriers at the resolve
+            // (the grid/index reader), so `record_pass(resolve)` emits them before the
+            // resolve dispatch (still after this cull dispatch's writes) — NOT here.
+        }
+
+        // === CSM Increment 1b (Rung A): the cascade DEPTH pass (W5 — a NEW recorder bracket,
+        // NOT record_gbuffer's main raster). Recorded ONLY when the scene wires the depth
+        // activation (`scene.csm.is_some()`); otherwise skipped entirely — NO barrier, NO
+        // rendering — so the command stream is byte-identical to the pre-CSM path (the 0%-gate;
+        // the cascade map/sampler/UBO are bound-but-unread). Renders the SAME caster batches
+        // (`scene.mesh_draw` + `scene.instance_bind_group`) from the SUN's POV into cascade
+        // layer 0, so the resolve can `min`-combine the exact hard shadow. RUN BEFORE the
+        // resolve dispatch (5b) so the cascade depth is SHADER_READ-visible to the resolve. ===
+        if let Some(csm) = &scene.csm {
+            let cascade = scene.csm_cascade_texture;
+            // CSM Increment 3 (Rung B): the number of cascade LAYERS to render — clamped to the
+            // backend cap so an out-of-range `active_count` cannot drive `layer_render_view` /
+            // the barrier range past the array bounds. `1` reproduces the Rung-A single-cascade path.
+            let active = (csm.active_count as usize).clamp(1, MAX_CASCADES) as u32;
+            // (CSM-0) Barrier-in: the cascade image UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL (the
+            // depth-write access, DEPTH aspect) over ALL `[0..active)` layers. Each is re-
+            // `UNDEFINED`'d (the prior frame's content is discarded before this frame's depth pass).
+            // The graph derives the layered subresource range internally; the former hand
+            // barriers spanned `[0..active)` explicitly (the Rung-A `DEPTH_SUBRESOURCE_RANGE`
+            // covers only layer 0).
+            // The graph's "csm" pass (declaring the cascade layered DEPTH_WRITE over
+            // `depth_layers(active)`) DRIVES this barrier-in, recorded HERE, before the
+            // cascade depth loop. Its barrier-OUT (→SHADER_READ_ONLY) is derived at the
+            // resolve (the cascade reader), so `record_pass(resolve)` emits it — NOT here.
+            // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+            // UNDEFINED→DEPTH barrier-in for the "csm" pass into `cmd`.
+            let csm_pass = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .csm
+                .expect("invariant: scene.csm.is_some() ⇒ csm pass declared");
+            self.record_graph_pass(csm_pass, cmd, targets, scene, fi);
+
+            // (CSM-1) Depth-only dynamic rendering, LOOPED over the `[0..active)` cascades (Rung B).
+            // The render area / viewport / scissor are cascade-INDEPENDENT (the square shadow-map
+            // resolution — NOT the swapchain/composite extent), so they are built ONCE; only the
+            // per-layer render view + the pushed `view_proj` change per cascade. NO color attachment
+            // (`color_attachment_count == 0`), one depth attachment (CLEAR to far / STORE).
+            let cascade_extent = VkExtent2D {
+                width: csm.shadow_dim,
+                height: csm.shadow_dim,
+            };
+            let csm_area = VkRect2D {
+                offset: VkOffset2D { x: 0, y: 0 },
+                extent: cascade_extent,
+            };
+            let csm_viewport = VkViewport {
+                x: 0.0,
+                y: 0.0,
+                width: cascade_extent.width as f32,
+                height: cascade_extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            };
+            let mut csm_push = csm.push;
+            // BUILD-ONCE-CONSUME-N-VIEWS: the SAME caster batches + instance SSBO are rendered into
+            // each cascade layer; only cascade `c`'s `view_proj` differs. Loop the active cascades.
+            for c in 0..active {
+                // Stamp cascade `c`'s COLUMN-MAJOR `view_proj` (64 B) into the push's leading
+                // matrix bytes (the O1 single-matrix pin — byte-equal to the resolve UBO's
+                // `gCascades[c].view_proj`). The trailing words (`use_model_matrix @84`) are
+                // unchanged from the template; `base_instance @80` is re-pushed per batch below.
+                csm_push[0..64].copy_from_slice(&csm.cascade_view_proj[c as usize]);
+                let csm_depth_attachment = VkRenderingAttachmentInfo {
+                    s_type: VkStructureType::RenderingAttachmentInfo,
+                    p_next: ptr::null(),
+                    image_view: cascade.layer_render_view(c),
+                    image_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                    resolve_mode: 0,
+                    resolve_image_view: VkImageView::NULL,
+                    resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                    load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+                    store_op: VK_ATTACHMENT_STORE_OP_STORE,
+                    clear_value: VkClearValue {
+                        depth_stencil: VkClearDepthStencilValue {
+                            depth: 1.0,
+                            stencil: 0,
+                        },
+                    },
+                };
+                let csm_rendering = VkRenderingInfo {
+                    s_type: VkStructureType::RenderingInfo,
+                    p_next: ptr::null(),
+                    flags: 0,
+                    render_area: csm_area,
+                    layer_count: 1,
+                    view_mask: 0,
+                    color_attachment_count: 0,
+                    p_color_attachments: ptr::null(),
+                    p_depth_attachment: (&csm_depth_attachment as *const VkRenderingAttachmentInfo)
+                        .cast(),
+                    p_stencil_attachment: ptr::null(),
+                };
+                // SAFETY: recording is open; `csm_rendering` is fully initialized — its depth
+                // attachment names the live cascade layer-`c` render view (now
+                // DEPTH_ATTACHMENT_OPTIMAL; `c < active <= MAX_CASCADES` so `layer_render_view(c)`
+                // is in bounds), NO color attachment (depth-only); the depth-only pipeline
+                // (declaring an EMPTY `color_formats` + `depth_format = D32Sfloat` + `cull_mode:
+                // Front` + a depth bias + the set-0 instance layout) belongs to this device (caller
+                // contract). The SAME instance SSBO (`scene.instance_bind_group`) the main pass
+                // binds is bound at set 0 to satisfy the depth VS's static `instances` reference;
+                // the 88-byte push carries cascade `c`'s `view_proj` (`@0`) + `use_model_matrix ==
+                // 1` (`@84`), and per caster batch the recorder re-pushes its `base_instance` (4
+                // bytes @80, in-range of the 88-byte VERTEX push) then `draw_indexed` reads that
+                // batch's bound vertex+index buffers (created on this device with VERTEX/INDEX
+                // usage). The locals outlive the bracketed calls. Begin/End bracket each cascade.
+                unsafe {
+                    (self.fns.cmd_begin_rendering)(cmd, &csm_rendering);
+                    (self.fns.cmd_bind_pipeline)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        csm.pipeline.pipeline,
+                    );
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        csm.pipeline.layout,
+                        0,
+                        1,
+                        &scene.instance_bind_group.descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        csm.pipeline.layout,
+                        VK_SHADER_STAGE_VERTEX_BIT,
+                        0,
+                        csm_push.len() as u32,
+                        csm_push.as_ptr().cast(),
+                    );
+                    (self.fns.cmd_set_viewport)(cmd, 0, 1, &csm_viewport);
+                    (self.fns.cmd_set_scissor)(cmd, 0, 1, &csm_area);
+                    // The caster batches: the instanced mesh draws the main pass rasterizes,
+                    // FILTERED to `casts_shadow` (the `With<ShadowCaster>` subset). A RECEIVER-only
+                    // mesh (room floor/wall) is skipped so it does not stamp itself into the cascade
+                    // and cast a spurious shadow over the scene. An EMPTY list (or all-receivers)
+                    // records the depth scope with no draw (a cleared cascade — every receiver fully
+                    // lit, the `min` a no-op).
+                    for batch in scene.mesh_draw {
+                        if !batch.casts_shadow {
+                            continue;
+                        }
+                        let base = batch.base_instance;
+                        csm_push[GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize
+                            ..GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4]
+                            .copy_from_slice(&base.to_le_bytes());
+                        (self.fns.cmd_push_constants)(
+                            cmd,
+                            csm.pipeline.layout,
+                            VK_SHADER_STAGE_VERTEX_BIT,
+                            GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
+                            4,
+                            (&base as *const u32).cast(),
+                        );
+                        (self.fns.cmd_bind_vertex_buffers)(
+                            cmd,
+                            0,
+                            1,
+                            &batch.vertex_buffer.buffer,
+                            &vertex_offset,
+                        );
+                        (self.fns.cmd_bind_index_buffer)(
+                            cmd,
+                            batch.index_buffer.buffer,
+                            0,
+                            batch.index_type,
+                        );
+                        (self.fns.cmd_draw_indexed)(
+                            cmd,
+                            batch.index_count,
+                            batch.instance_count,
+                            0,
+                            0,
+                            0,
+                        );
+                    }
+                    (self.fns.cmd_end_rendering)(cmd);
+                }
+            }
+
+            // (CSM-2) The dual-use depth barrier: DEPTH_ATTACHMENT_OPTIMAL →
+            // SHADER_READ_ONLY_OPTIMAL (reusing the marcher's depth-barrier shape) over ALL
+            // `[0..active)` cascade layers in ONE barrier. Depth WRITES happen at
+            // LATE_FRAGMENT_TESTS; the resolve PCF-SAMPLES at COMPUTE_SHADER. This barrier (DEPTH
+            // aspect, the full-array range) makes every rendered cascade's depth available +
+            // visible to the resolve's `SampleCmpLevelZero(float3(uv, c))` and transitions the
+            // layout for sampling.
+            // The graph derives this →SHADER_READ_ONLY barrier-out at the resolve (the
+            // cascade reader), so `record_pass(resolve)` emits it before the resolve
+            // dispatch (still after this cascade depth loop) — NOT here.
+        }
+
+        // === Shadow Phase 5 Inc-1-GPU: the sparse SPOT atlas DEPTH pass (a NEW recorder bracket,
+        // a CLONE of the CSM depth pass above). Recorded ONLY when the scene wires the activation
+        // (`scene.atlas_punctual.is_some()`); otherwise skipped entirely — NO barrier, NO rendering
+        // — so the command stream is byte-identical to the pre-Inc-1 path (the 0%-gate; the atlas
+        // map/sampler/UBO are bound-but-unread). Renders the SAME caster batches (`scene.mesh_draw` +
+        // `scene.instance_bind_group`) from each SPOT's POV into atlas layer `s`, so the resolve can
+        // multiply the exact hard shadow into that spot's contribution. RUN BEFORE the resolve
+        // dispatch (5b) so the atlas depth is SHADER_READ-visible to the resolve. ===
+        if let Some(atlas_act) = &scene.atlas_punctual {
+            let atlas = scene.shadow_atlas_texture;
+            // The number of atlas LAYERS to render — clamped to the backend cap so an out-of-range
+            // `active_layers` cannot drive `layer_render_view` / the barrier range past the array
+            // bounds. `1` reproduces the single-spot path.
+            let active = (atlas_act.active_layers as usize).clamp(1, MAX_TEXTURE_LAYERS) as u32;
+            // Barrier-in: the atlas image UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL (depth-write access,
+            // DEPTH aspect) over ALL `[0..active)` layers. Each is re-`UNDEFINED`'d (the prior frame's
+            // content is discarded before this frame's depth pass). The graph derives the
+            // layered subresource range internally.
+            // The graph's "atlas_depth" pass (declaring the atlas layered DEPTH_WRITE over
+            // `depth_layers(active)`) DRIVES this barrier-in, recorded HERE, before the
+            // atlas depth loop. Its barrier-OUT (→SHADER_READ_ONLY) is derived at the
+            // resolve (the atlas reader) — NOT here.
+            // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+            // UNDEFINED→DEPTH barrier-in for the "atlas_depth" pass into `cmd`.
+            let atlas_pass = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .atlas
+                .expect("invariant: scene.atlas_punctual.is_some() ⇒ atlas pass declared");
+            self.record_graph_pass(atlas_pass, cmd, targets, scene, fi);
+
+            // Depth-only dynamic rendering, LOOPED over the `[0..active)` atlas slots. The render
+            // area / viewport / scissor are slot-INDEPENDENT (the square shadow-map resolution), so
+            // they are built ONCE; only the per-slot render view + the pushed `view_proj` change.
+            let atlas_extent = VkExtent2D {
+                width: atlas_act.shadow_dim,
+                height: atlas_act.shadow_dim,
+            };
+            let atlas_area = VkRect2D {
+                offset: VkOffset2D { x: 0, y: 0 },
+                extent: atlas_extent,
+            };
+            let atlas_viewport = VkViewport {
+                x: 0.0,
+                y: 0.0,
+                width: atlas_extent.width as f32,
+                height: atlas_extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            };
+            let mut atlas_push = atlas_act.push;
+            // BUILD-ONCE-CONSUME-N-VIEWS: the SAME caster batches + instance SSBO are rendered into
+            // each atlas layer; only slot `s`'s `view_proj` (+ the POINT `cam_eye` lane) differs. The
+            // active layers are GROUPED by type in the activation (spot-faces then point-faces, or
+            // vice versa), so binding the per-slot pipeline only when it CHANGES costs at most TWO
+            // pipeline binds. `bound_point` tracks which pipeline is currently bound (`None` = none
+            // yet).
+            let mut bound_point: Option<bool> = None;
+            for s in 0..active {
+                // Shadow Phase 5 Inc-2: select this layer's pipeline by its TYPE. A SPOT face uses
+                // the `csm_depth` NDC-z pipeline; a POINT cube face uses the `punctual_depth`
+                // linear-distance pipeline (a depth-WRITE FS). Both share the SAME pipeline LAYOUT
+                // (the set-0 instance SSBO + the 88-byte push), so the descriptor set + push stamps
+                // are identical; only the bound pipeline object differs.
+                let is_point = atlas_act.face_is_point[s as usize];
+                let face_pipeline = if is_point {
+                    atlas_act.point_pipeline
+                } else {
+                    atlas_act.pipeline
+                };
+                // Stamp slot `s`'s COLUMN-MAJOR `view_proj` (64 B) into the push's leading matrix
+                // bytes (byte-equal to the resolve UBO's `gFaces[s].view_proj`). The trailing words
+                // are unchanged; `base_instance @80` is re-pushed per batch below.
+                atlas_push[0..64].copy_from_slice(&atlas_act.face_view_proj[s as usize]);
+                // Shadow Phase 5 Inc-2: for a POINT face, stamp the `cam_eye@64` lane (16 B) =
+                // `light_pos.xyz` + `inv_range` so the FS computes `length(world - light_pos) *
+                // inv_range`. For a SPOT face this lane is unused (the empty NDC-z FS), so it is left
+                // as the template default.
+                if is_point {
+                    atlas_push[64..80].copy_from_slice(&atlas_act.face_light[s as usize]);
+                }
+                let atlas_depth_attachment = VkRenderingAttachmentInfo {
+                    s_type: VkStructureType::RenderingAttachmentInfo,
+                    p_next: ptr::null(),
+                    image_view: atlas.layer_render_view(s),
+                    image_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                    resolve_mode: 0,
+                    resolve_image_view: VkImageView::NULL,
+                    resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                    load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+                    store_op: VK_ATTACHMENT_STORE_OP_STORE,
+                    clear_value: VkClearValue {
+                        depth_stencil: VkClearDepthStencilValue {
+                            depth: 1.0,
+                            stencil: 0,
+                        },
+                    },
+                };
+                let atlas_rendering = VkRenderingInfo {
+                    s_type: VkStructureType::RenderingInfo,
+                    p_next: ptr::null(),
+                    flags: 0,
+                    render_area: atlas_area,
+                    layer_count: 1,
+                    view_mask: 0,
+                    color_attachment_count: 0,
+                    p_color_attachments: ptr::null(),
+                    p_depth_attachment: (&atlas_depth_attachment as *const VkRenderingAttachmentInfo)
+                        .cast(),
+                    p_stencil_attachment: ptr::null(),
+                };
+                // SAFETY: recording is open; `atlas_rendering` is fully initialized — its depth
+                // attachment names the live atlas layer-`s` render view (now DEPTH_ATTACHMENT_OPTIMAL;
+                // `s < active <= MAX_TEXTURE_LAYERS` so `layer_render_view(s)` is in bounds), NO color
+                // attachment (depth-only); the selected depth-only pipeline (the SPOT `csm_depth` or
+                // the POINT `punctual_depth` pipeline — both EMPTY `color_formats` + `depth_format =
+                // D32Sfloat` + `cull_mode: Front` + the set-0 instance layout) belongs to this device
+                // (caller contract) and shares the SAME pipeline layout. The SAME instance SSBO
+                // (`scene.instance_bind_group`) the main pass binds is bound at set 0 to satisfy the
+                // depth VS's static `instances` reference; the 88-byte push carries slot `s`'s
+                // `view_proj` (`@0`) + (POINT only) the `cam_eye@64` `light_pos`/`inv_range` lane +
+                // `use_model_matrix == 1` (`@84`), pushed for `VERTEX | FRAGMENT` (the POINT FS reads
+                // `cam_eye`; the layout declares that range), and per caster batch the recorder
+                // re-pushes its `base_instance` (4 bytes @80, in-range of the 88-byte push) then
+                // `draw_indexed` reads that batch's bound vertex+index buffers (created on this device
+                // with VERTEX/INDEX usage). The pipeline + descriptor set are (re)bound only when the
+                // face TYPE changes (the layers are grouped), so at most two binds occur; the push is
+                // re-stamped every slot (the per-slot `view_proj` differs). The locals outlive the
+                // bracketed calls. Begin/End bracket each slot.
+                unsafe {
+                    (self.fns.cmd_begin_rendering)(cmd, &atlas_rendering);
+                    if bound_point != Some(is_point) {
+                        (self.fns.cmd_bind_pipeline)(
+                            cmd,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            face_pipeline.pipeline,
+                        );
+                        (self.fns.cmd_bind_descriptor_sets)(
+                            cmd,
+                            VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            face_pipeline.layout,
+                            0,
+                            1,
+                            &scene.instance_bind_group.descriptor_set,
+                            0,
+                            ptr::null(),
+                        );
+                        bound_point = Some(is_point);
+                    }
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        face_pipeline.layout,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                        0,
+                        atlas_push.len() as u32,
+                        atlas_push.as_ptr().cast(),
+                    );
+                    (self.fns.cmd_set_viewport)(cmd, 0, 1, &atlas_viewport);
+                    (self.fns.cmd_set_scissor)(cmd, 0, 1, &atlas_area);
+                    // The caster batches: the instanced mesh draws the main pass rasterizes,
+                    // FILTERED to `casts_shadow` (the `With<ShadowCaster>` subset). A RECEIVER-only
+                    // mesh (room floor/wall) is skipped so it does not stamp itself into this slot and
+                    // cast a spurious omni/cone shadow. An EMPTY list (or all-receivers) records the
+                    // depth scope with no draw (a cleared slot — every receiver in that cone fully lit).
+                    for batch in scene.mesh_draw {
+                        if !batch.casts_shadow {
+                            continue;
+                        }
+                        let base = batch.base_instance;
+                        atlas_push[GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize
+                            ..GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4]
+                            .copy_from_slice(&base.to_le_bytes());
+                        // The `base_instance` lane (@80) is read only by the VS, so a VERTEX-stage
+                        // push is sufficient (a subset of the layout's `VERTEX | FRAGMENT` range).
+                        // Both pipelines share the SAME layout, so `face_pipeline.layout` is correct
+                        // for either face type.
+                        (self.fns.cmd_push_constants)(
+                            cmd,
+                            face_pipeline.layout,
+                            VK_SHADER_STAGE_VERTEX_BIT,
+                            GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
+                            4,
+                            (&base as *const u32).cast(),
+                        );
+                        (self.fns.cmd_bind_vertex_buffers)(
+                            cmd,
+                            0,
+                            1,
+                            &batch.vertex_buffer.buffer,
+                            &vertex_offset,
+                        );
+                        (self.fns.cmd_bind_index_buffer)(
+                            cmd,
+                            batch.index_buffer.buffer,
+                            0,
+                            batch.index_type,
+                        );
+                        (self.fns.cmd_draw_indexed)(
+                            cmd,
+                            batch.index_count,
+                            batch.instance_count,
+                            0,
+                            0,
+                            0,
+                        );
+                    }
+                    (self.fns.cmd_end_rendering)(cmd);
+                }
+            }
+
+            // The graph derives the dual-use depth barrier-out
+            // (DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL over ALL `[0..active)`
+            // atlas layers) at the resolve (the atlas reader), so `record_pass(resolve)`
+            // emits it before the resolve dispatch (still after this atlas depth loop) —
+            // NOT here.
+        }
+
+        // The RESOLVE's INPUT barriers — the albedo store→load, the ssao store→load, the
+        // L1 grid/index cull→resolve, the layered cascade/atlas →sampled, and the lit
+        // first-touch UNDEFINED→GENERAL — are all DRIVEN by the graph's "resolve" pass,
+        // recorded HERE, immediately before the resolve dispatch. The graph derives each
+        // at its true first-use (the resolve is the first reader of albedo / ssao / grid /
+        // index / cascade / atlas, and the writer of lit), so this single `record_pass`
+        // emits the barriers those producers deferred to their consumers.
+        // SAFETY: recording is open; `record_graph_pass` records the graph's derived input
+        // barriers for the "resolve" pass into `cmd` against the live G-buffer targets.
+        let resolve = self
+            .gbuffer_pass_plan
+            .as_ref()
+            .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+            .resolve;
+        self.record_graph_pass(resolve, cmd, targets, scene, fi);
+
+        // (5b) Deferred RESOLVE pass: bind the resolve pipeline + the resolve set (gAlbedo
+        // @0, gMaterial @1, lit @2 — all STORAGE in GENERAL), dispatch at the SAME grid the
+        // marcher used (1:1 the marched pixels). It composites `lit = mask ? base*vis : base`.
+        // SAFETY: recording is open; the resolve pipeline + its layout (declaring
+        // `resolve_layout` at set 0) are live on this device (caller contract); the resolve
+        // set binds the now-stored (GENERAL) albedo/material + the lit (GENERAL) images;
+        // `dispatch_group_count_x` covers `present_extent`'s pixel count (the same grid the
+        // marcher dispatched); `&...descriptor_set` is a single-element local alive for the
+        // call (first_set 0, count 1, zero dynamic offsets). The resolve pushes NO constants.
+        unsafe {
+            (self.fns.cmd_bind_pipeline)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                scene.resolve_pipeline.pipeline,
+            );
+            (self.fns.cmd_bind_descriptor_sets)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                scene.resolve_pipeline.layout,
+                0,
+                1,
+                &targets.resolve_set[self.frame_index].descriptor_set,
+                0,
+                ptr::null(),
+            );
+            (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+        }
+
+        // (5c) LIT: GENERAL → SHADER_READ_ONLY_OPTIMAL for the present-blit sample. The
+        // present now samples LIT (the resolve's output), NOT albedo (the deletion target
+        // of the old step-6 albedo→SHADER_READ_ONLY barrier — albedo stays GENERAL,
+        // consumed only by the resolve as a STORAGE-in-GENERAL load).
+        // The graph's "present_sample" pass (declaring `lit`
+        // FRAGMENT/SHADER_READ/SHADER_READ_ONLY) DRIVES this transition. The SWAPCHAIN WSI
+        // barriers below (sites 7/9) stay HAND-recorded — the acquired presentable image
+        // is not a graph resource here.
+        // SAFETY: recording is open; `record_graph_pass` records the graph's derived
+        // GENERAL→SHADER_READ_ONLY barrier for the "present_sample" pass into `cmd`,
+        // making the resolve's lit store available + visible to the present-blit's sample.
+        let present_sample = self
+            .gbuffer_pass_plan
+            .as_ref()
+            .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+            .present_sample;
+        self.record_graph_pass(present_sample, cmd, targets, scene, fi);
+
+        // === Pass C: present-blit the LIT image (the resolve's output) into the swapchain. ===
+
+        // (7) Barrier (swapchain color): UNDEFINED → COLOR_ATTACHMENT_OPTIMAL.
+        let to_color = VkImageMemoryBarrier {
+            s_type: VkStructureType::ImageMemoryBarrier,
+            p_next: ptr::null(),
+            src_access_mask: 0,
+            dst_access_mask: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            new_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+            image,
+            subresource_range: COLOR_SUBRESOURCE_RANGE,
+        };
+        // SAFETY: recording is open; one image barrier on the live swapchain `image`;
+        // TOP_OF_PIPE→COLOR_ATTACHMENT_OUTPUT with UNDEFINED→COLOR is the
+        // superset-correct acquire→render transition; `&to_color` outlives the call.
+        unsafe {
+            (self.fns.cmd_pipeline_barrier)(
+                cmd,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                0,
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                1,
+                (&to_color as *const VkImageMemoryBarrier).cast(),
+            );
+        }
+
+        // (8) Dynamic rendering: the swapchain image (CLEAR/STORE), no depth. The
+        // present pipeline's declared color format equals the swapchain format (W2-b).
+        let color_attachment = VkRenderingAttachmentInfo {
+            s_type: VkStructureType::RenderingAttachmentInfo,
+            p_next: ptr::null(),
+            image_view: view,
+            image_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            resolve_mode: 0,
+            resolve_image_view: VkImageView::NULL,
+            resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+            store_op: VK_ATTACHMENT_STORE_OP_STORE,
+            clear_value: VkClearValue {
+                color: VkClearColorValue { float32: clear },
+            },
+        };
+        let present_rendering = VkRenderingInfo {
+            s_type: VkStructureType::RenderingInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            render_area: VkRect2D {
+                offset: VkOffset2D { x: 0, y: 0 },
+                extent,
+            },
+            layer_count: 1,
+            view_mask: 0,
+            color_attachment_count: 1,
+            p_color_attachments: &color_attachment,
+            p_depth_attachment: ptr::null(),
+            p_stencil_attachment: ptr::null(),
+        };
+        // Present the composite at its NATIVE size in the swapchain image's TOP-LEFT,
+        // NOT stretched to the (possibly WSI-clamped wider) swapchain extent. The
+        // viewport/scissor are clamped to `min(swapchain_extent, present_extent)` at
+        // origin: the fullscreen triangle writes exactly the composite's pixels 1:1, and
+        // a wider swapchain image's remainder keeps the clear color. A 1:1 top-left
+        // mapping makes a per-texel golden exact regardless of any WSI clamp.
+        let blit_extent = VkExtent2D {
+            width: extent.width.min(present_extent.width),
+            height: extent.height.min(present_extent.height),
+        };
+        let blit_viewport = VkViewport {
+            x: 0.0,
+            y: 0.0,
+            width: blit_extent.width as f32,
+            height: blit_extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        let blit_scissor = VkRect2D {
+            offset: VkOffset2D { x: 0, y: 0 },
+            extent: blit_extent,
+        };
+        // SAFETY: recording is open; `present_rendering` is fully initialized — its color
+        // attachment names the live swapchain `view` (now COLOR_ATTACHMENT_OPTIMAL);
+        // dynamic rendering is enabled. The present pipeline + its bind-group layout
+        // belong to this device (caller contract) and its declared color format equals
+        // the swapchain's (W2-b). The present set @fi binds `lit[fi]` (now
+        // SHADER_READ_ONLY_OPTIMAL — the SAME slot the resolve just wrote) + sampler at set 0;
+        // `blit_viewport`/`blit_scissor` outlive the bracketed calls; `draw(3, 1, 0, 0)`
+        // is the `SV_VertexID` fullscreen triangle (no vertex buffer). Begin/End bracket
+        // pass C exactly.
+        unsafe {
+            (self.fns.cmd_begin_rendering)(cmd, &present_rendering);
+            (self.fns.cmd_bind_pipeline)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                scene.present_pipeline.pipeline,
+            );
+            (self.fns.cmd_bind_descriptor_sets)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                scene.present_pipeline.layout,
+                0,
+                1,
+                &targets.present_set[fi].descriptor_set,
+                0,
+                ptr::null(),
+            );
+            (self.fns.cmd_set_viewport)(cmd, 0, 1, &blit_viewport);
+            (self.fns.cmd_set_scissor)(cmd, 0, 1, &blit_scissor);
+            (self.fns.cmd_draw)(cmd, 3, 1, 0, 0);
+            (self.fns.cmd_end_rendering)(cmd);
+        }
+
+        // (9) The post-draw swapchain transition: steady → PRESENT, or the readback
+        // path → TRANSFER_SRC, copy-to-buffer, → PRESENT (identical to
+        // `record_present_sampled`'s branch — the swapchain still presents after the
+        // copy).
+        match readback {
+            None => {
+                let to_present = VkImageMemoryBarrier {
+                    s_type: VkStructureType::ImageMemoryBarrier,
+                    p_next: ptr::null(),
+                    src_access_mask: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    dst_access_mask: 0,
+                    old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    new_layout: VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    image,
+                    subresource_range: COLOR_SUBRESOURCE_RANGE,
+                };
+                // SAFETY: recording is open; COLOR_ATTACHMENT_OUTPUT→BOTTOM_OF_PIPE with
+                // COLOR→PRESENT makes the blit's writes visible to the present engine;
+                // `&to_present` outlives the call.
+                unsafe {
+                    (self.fns.cmd_pipeline_barrier)(
+                        cmd,
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        0,
+                        0,
+                        ptr::null(),
+                        0,
+                        ptr::null(),
+                        1,
+                        (&to_present as *const VkImageMemoryBarrier).cast(),
+                    );
+                }
+            }
+            Some(staging) => {
+                let to_transfer = VkImageMemoryBarrier {
+                    s_type: VkStructureType::ImageMemoryBarrier,
+                    p_next: ptr::null(),
+                    src_access_mask: VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    dst_access_mask: VK_ACCESS_TRANSFER_READ_BIT,
+                    old_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    new_layout: VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    image,
+                    subresource_range: COLOR_SUBRESOURCE_RANGE,
+                };
+                // SAFETY: recording is open; COLOR_ATTACHMENT_OUTPUT→TRANSFER with
+                // COLOR→TRANSFER_SRC makes the blit's writes available to the copy;
+                // `&to_transfer` outlives the call.
+                unsafe {
+                    (self.fns.cmd_pipeline_barrier)(
+                        cmd,
+                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        0,
+                        0,
+                        ptr::null(),
+                        0,
+                        ptr::null(),
+                        1,
+                        (&to_transfer as *const VkImageMemoryBarrier).cast(),
+                    );
+                }
+
+                let region = VkBufferImageCopy {
+                    buffer_offset: 0,
+                    buffer_row_length: 0,
+                    buffer_image_height: 0,
+                    image_subresource: VkImageSubresourceLayers {
+                        aspect_mask: VK_IMAGE_ASPECT_COLOR_BIT,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    image_offset: VkOffset3D { x: 0, y: 0, z: 0 },
+                    image_extent: VkExtent3D {
+                        width: extent.width,
+                        height: extent.height,
+                        depth: 1,
+                    },
+                };
+                // SAFETY: recording is open; the swapchain image is TRANSFER_SRC_OPTIMAL
+                // per the barrier above; one full-image tightly-packed color region
+                // copies into the live host-visible `staging.buffer` (≥ the image's byte
+                // size per this fn's contract); `&region` outlives the call. This copies
+                // the SWAPCHAIN image (the on-screen golden) — NOT the depth (the depth
+                // copy is the deletion target this path proves absent).
+                unsafe {
+                    (self.fns.cmd_copy_image_to_buffer)(
+                        cmd,
+                        image,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        staging.buffer,
+                        1,
+                        &region,
+                    );
+                }
+
+                let to_present = VkImageMemoryBarrier {
+                    s_type: VkStructureType::ImageMemoryBarrier,
+                    p_next: ptr::null(),
+                    src_access_mask: VK_ACCESS_TRANSFER_READ_BIT,
+                    dst_access_mask: 0,
+                    old_layout: VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    new_layout: VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                    src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                    image,
+                    subresource_range: COLOR_SUBRESOURCE_RANGE,
+                };
+                // SAFETY: recording is open; TRANSFER→BOTTOM_OF_PIPE with
+                // TRANSFER_SRC→PRESENT releases the image to the present engine after the
+                // readback copy; `&to_present` outlives the call.
+                unsafe {
+                    (self.fns.cmd_pipeline_barrier)(
+                        cmd,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        0,
+                        0,
+                        ptr::null(),
+                        0,
+                        ptr::null(),
+                        1,
+                        (&to_present as *const VkImageMemoryBarrier).cast(),
+                    );
+                }
+            }
+        }
+
+        // SAFETY: recording is open; ending it matches the `begin` above.
+        let raw = unsafe { (self.fns.end_command_buffer)(cmd) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(SwapchainError::VkError("vkEndCommandBuffer", result));
+        }
+        Ok(())
+    }
+
+}

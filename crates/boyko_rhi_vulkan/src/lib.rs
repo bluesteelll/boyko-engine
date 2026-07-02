@@ -98,6 +98,7 @@ pub mod ffi;
 pub mod framegraph;
 pub mod memory;
 pub mod mesh_sdf_texture;
+pub mod present;
 pub mod rhi_impl;
 pub mod suballocator;
 pub mod swapchain;
