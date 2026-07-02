@@ -2230,6 +2230,8 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
             gx > 0 && gy > 0 && gz > 0,
             "invariant: dispatch group counts must be non-zero"
         );
+        // SAFETY: `self.fns` points into the owning context's boxed `DeviceFns` — a stable
+        // heap address that outlives this encoder (context teardown order); deref is valid.
         let fns = unsafe { &*self.fns };
         // The packed-buffer path binds its STORAGE_BUFFER via `bind_storage_buffer`
         // (so `bound_buffer != NULL`) before every dispatch — for it the recorded
@@ -2543,6 +2545,8 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
         // stencil (null). Dynamic rendering is enabled on the device (`dynamicRendering`
         // feature, Correction #1). All locals outlive the call. `self.fns` points into
         // the context's boxed fn-table (alive per the type contract).
+        // SAFETY: `self.fns` points into the owning context's boxed `DeviceFns` — a stable
+        // heap address that outlives this encoder (context teardown order); deref is valid.
         let fns = unsafe { &*self.fns };
         unsafe { (fns.cmd_begin_rendering)(self.command_buffer, &rendering) };
     }
@@ -2585,6 +2589,8 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
         // `first_set = 0`, `descriptor_set_count = 1` matches it; zero dynamic offsets
         // (null valid for count 0). `self.fns` points into the context's boxed
         // fn-table (alive per the type contract).
+        // SAFETY: `self.fns` points into the owning context's boxed `DeviceFns` — a stable
+        // heap address that outlives this encoder (context teardown order); deref is valid.
         let fns = unsafe { &*self.fns };
         unsafe {
             (fns.cmd_bind_descriptor_sets)(
@@ -2616,6 +2622,8 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
         // encoder's fixed STORAGE_BUFFER set (`bind_storage_buffer`/`dispatch`), so the
         // packed-buffer offscreen path is unaffected. `self.fns` points into the
         // context's boxed fn-table (alive per the type contract).
+        // SAFETY: `self.fns` points into the owning context's boxed `DeviceFns` — a stable
+        // heap address that outlives this encoder (context teardown order); deref is valid.
         let fns = unsafe { &*self.fns };
         unsafe {
             (fns.cmd_bind_descriptor_sets)(
@@ -2731,6 +2739,8 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
         // sibling, whose FIXED 4-byte/COMPUTE layout makes a static assert trivial).
         // `bytes.as_ptr()` points to `bytes.len()` bytes alive for the call; `self.fns`
         // points into the context's boxed fn-table (alive per the type contract).
+        // SAFETY: `self.fns` points into the owning context's boxed `DeviceFns` — a stable
+        // heap address that outlives this encoder (context teardown order); deref is valid.
         let fns = unsafe { &*self.fns };
         unsafe {
             (fns.cmd_push_constants)(

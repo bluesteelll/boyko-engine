@@ -150,6 +150,19 @@ pub fn write_light_table(
 ///
 /// Caller guarantees `dst` is sized for the worst case (`Default` does this). The
 /// iterators are walked exactly once each, in the table-order above.
+///
+/// # Overflow clamp (release-safe)
+///
+/// The table is hard-capped at [`MAX_LIGHTS`] rows: `dst`'s body region holds exactly
+/// `MAX_LIGHTS` `GpuLight` slots. A live count above the cap is clamped here in ALL build
+/// profiles — a saturating gate (`written == MAX_LIGHTS`) is checked once before each
+/// write, so both the write AND the count stop at the cap. This is the sole bounds
+/// enforcement for the `write_pod` `copy_nonoverlapping` (whose own check is a
+/// `debug_assert` that compiles out in release), so it must NOT be a debug-only guard.
+/// The gate adds one predictable compare per light (never taken until the cap); the
+/// dropped-lights branch is `#[cold]`. The returned length therefore never exceeds
+/// `LIGHT_HEADER_BYTES + MAX_LIGHTS * GPU_LIGHT_BYTES`, and the header counts sum to at
+/// most `MAX_LIGHTS`.
 pub fn fold_light_table<'a>(
     dst: &mut [u8],
     directionals: impl Iterator<Item = &'a DirectionalLight>,
@@ -160,27 +173,46 @@ pub fn fold_light_table<'a>(
 ) -> usize {
     // The body starts after the header region; walk the iterators in table order,
     // converting + writing each light in place and counting the two header blocks.
+    // `written` is the running total across all four kinds — the single quantity the
+    // saturating cap gates on, so no write can spill past the `MAX_LIGHTS`-slot body.
     let mut off = LIGHT_HEADER_BYTES;
+    let mut written: u32 = 0;
     let mut l0a_count: u32 = 0;
     for d in directionals {
+        if written == MAX_LIGHTS {
+            return finish_folded_overflow(dst, l0a_count, 0, off, cfg);
+        }
         write_pod(dst, off, &GpuLight::from_directional(d));
         off += GPU_LIGHT_BYTES;
+        written += 1;
         l0a_count += 1;
     }
     for s in skies {
+        if written == MAX_LIGHTS {
+            return finish_folded_overflow(dst, l0a_count, 0, off, cfg);
+        }
         write_pod(dst, off, &GpuLight::from_sky(s));
         off += GPU_LIGHT_BYTES;
+        written += 1;
         l0a_count += 1;
     }
     let mut point_spot_count: u32 = 0;
     for p in points {
+        if written == MAX_LIGHTS {
+            return finish_folded_overflow(dst, l0a_count, point_spot_count, off, cfg);
+        }
         write_pod(dst, off, &GpuLight::from_point(p));
         off += GPU_LIGHT_BYTES;
+        written += 1;
         point_spot_count += 1;
     }
     for s in spots {
+        if written == MAX_LIGHTS {
+            return finish_folded_overflow(dst, l0a_count, point_spot_count, off, cfg);
+        }
         write_pod(dst, off, &GpuLight::from_spot(s));
         off += GPU_LIGHT_BYTES;
+        written += 1;
         point_spot_count += 1;
     }
     debug_assert!(
@@ -188,11 +220,53 @@ pub fn fold_light_table<'a>(
         "invariant: live light count must not exceed MAX_LIGHTS"
     );
 
-    // Backfill the header now that the counts are known. The header region [0..HEADER)
-    // is disjoint from the body, so this is byte-identical to writing it up front.
+    finish_folded(dst, l0a_count, point_spot_count, off, cfg)
+}
+
+/// Backfills the light-table header once the two block counts are known and returns the
+/// valid byte length. Split out of [`fold_light_table`] so the cap-reached early exit
+/// (which stops writing rows mid-iteration) closes the table identically to the full walk:
+/// the header region `[0..LIGHT_HEADER_BYTES)` is disjoint from the body, so writing it
+/// last is byte-identical to writing it up front.
+#[inline]
+fn finish_folded(
+    dst: &mut [u8],
+    l0a_count: u32,
+    point_spot_count: u32,
+    off: usize,
+    cfg: &LightingConfig,
+) -> usize {
     let header = LightHeaderGpu::new(l0a_count, point_spot_count, cfg);
     write_pod(dst, 0, &header);
     off
+}
+
+/// The cap-reached table close: logs the overflow once (rate-limited to the first
+/// offender), then backfills the header for the `MAX_LIGHTS` rows already written.
+///
+/// Marked `#[cold]` + `#[inline(never)]` so the drop path stays entirely off the hot fold's
+/// straight-line code; only the single `written == MAX_LIGHTS` compare per light remains on
+/// the hot path.
+#[cold]
+#[inline(never)]
+fn finish_folded_overflow(
+    dst: &mut [u8],
+    l0a_count: u32,
+    point_spot_count: u32,
+    off: usize,
+    cfg: &LightingConfig,
+) -> usize {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    // Relaxed: this is a best-effort one-shot log guard, not a synchronization edge — a
+    // rare double-log under a race is harmless and no data is published through this flag.
+    if !LOGGED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "boyko_render: light table overflow — more than MAX_LIGHTS ({MAX_LIGHTS}) \
+             enabled lights; extras are dropped from the GPU table"
+        );
+    }
+    finish_folded(dst, l0a_count, point_spot_count, off, cfg)
 }
 
 /// Copies a `#[repr(C)]` POD's bytes into `dst` at `off`. The POD types are
@@ -203,10 +277,14 @@ fn write_pod<T: Copy>(dst: &mut [u8], off: usize, value: &T) {
     let size = core::mem::size_of::<T>();
     debug_assert!(off + size <= dst.len(), "invariant: POD write stays within the scratch");
     // SAFETY: `value` is a `Copy` POD of `size` bytes; `src` reads exactly those bytes.
-    // The `debug_assert` above (and the `Default` worst-case sizing) guarantee
-    // `dst[off..off+size]` is in bounds; the two regions never overlap (distinct
-    // allocations). No `T` invariants are violated by reading its raw bytes (it is a
-    // plain-data std430 element).
+    // `dst[off..off+size]` is in bounds in ALL build profiles: `dst` is sized to
+    // `LIGHT_HEADER_BYTES + MAX_LIGHTS * GPU_LIGHT_BYTES` (`LightTableStaging::default`),
+    // the header write is at `off == 0`, and every body write is gated by the release-safe
+    // `written == MAX_LIGHTS` cap in `fold_light_table` — so `off` never exceeds
+    // `LIGHT_HEADER_BYTES + (MAX_LIGHTS - 1) * GPU_LIGHT_BYTES` for a `GpuLight` write. The
+    // `debug_assert` above is a redundant witness of that gate, not the enforcement. The two
+    // regions never overlap (distinct allocations). No `T` invariants are violated by
+    // reading its raw bytes (it is a plain-data std430 element).
     unsafe {
         let src = (value as *const T).cast::<u8>();
         core::ptr::copy_nonoverlapping(src, dst.as_mut_ptr().add(off), size);
@@ -666,5 +744,75 @@ mod tests {
         assert!(s.pending_upload().is_none());
         let h = read_header(s.bytes());
         assert_eq!(h.light_count(), 0);
+    }
+
+    /// The worst-case scratch capacity `Default` allocates: header + `MAX_LIGHTS` slots.
+    const WORST_CASE_CAP: usize = LIGHT_HEADER_BYTES + (MAX_LIGHTS as usize) * GPU_LIGHT_BYTES;
+
+    #[test]
+    fn overflow_of_a_single_kind_clamps_to_max_lights_without_writing_past_scratch() {
+        // `MAX_LIGHTS + 1` enabled point lights folded into the exact `Default`-sized
+        // scratch: the +1 light must be dropped, and no byte may be written past the cap.
+        let over = (MAX_LIGHTS as usize) + 1;
+        let pts: Vec<PointLight> =
+            (0..over).map(|_| PointLight::new([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 50.0, 5.0)).collect();
+
+        // Guard bytes past the worst case would catch a spill; sizing `dst` to the exact
+        // worst case means any write past it is an OOB the test allocator/Miri would flag.
+        let mut scratch = vec![0u8; WORST_CASE_CAP];
+        let used = fold_light_table(
+            &mut scratch,
+            [].iter(),
+            [].iter(),
+            pts.iter(),
+            [].iter(),
+            &LightingConfig::default(),
+        );
+
+        // The returned length is exactly the full table (header + MAX_LIGHTS rows) — never
+        // more — so the recorder never copies past the SSBO mirror.
+        assert_eq!(used, WORST_CASE_CAP);
+        let h = read_header(&scratch);
+        assert_eq!(h.light_count(), MAX_LIGHTS);
+        assert_eq!(h.l0a_count(), 0);
+        assert_eq!(h.point_spot_count(), MAX_LIGHTS);
+    }
+
+    #[test]
+    fn overflow_across_kinds_gates_on_the_running_total_not_per_kind() {
+        // The cap gates on the running total across all four kinds: MAX_LIGHTS directionals
+        // fill the table, then a sky, points, and spots must ALL be dropped — proving the
+        // gate is a single cross-kind counter, not a per-loop reset.
+        let dirs: Vec<DirectionalLight> = (0..MAX_LIGHTS)
+            .map(|_| DirectionalLight::new([0.0, 0.0, 1.0], [1.0, 1.0, 1.0], 1.0))
+            .collect();
+        let skies = [SkyLight::new([0.1, 0.1, 0.12], [0.1, 0.1, 0.12])];
+        let pts = [PointLight::new([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 50.0, 5.0)];
+        let spots = [SpotLight::new(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            50.0,
+            5.0,
+            20.0,
+            30.0,
+        )];
+
+        let mut scratch = vec![0u8; WORST_CASE_CAP];
+        let used = fold_light_table(
+            &mut scratch,
+            dirs.iter(),
+            skies.iter(),
+            pts.iter(),
+            spots.iter(),
+            &LightingConfig::default(),
+        );
+
+        assert_eq!(used, WORST_CASE_CAP);
+        let h = read_header(&scratch);
+        assert_eq!(h.light_count(), MAX_LIGHTS);
+        // All MAX_LIGHTS rows are directionals; the sky/point/spot beyond the cap are gone.
+        assert_eq!(h.l0a_count(), MAX_LIGHTS);
+        assert_eq!(h.point_spot_count(), 0);
     }
 }
