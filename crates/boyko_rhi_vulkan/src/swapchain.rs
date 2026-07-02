@@ -2630,7 +2630,7 @@ impl<'ctx> Renderer<'ctx> {
     /// Zero heap allocation (the arenas keep capacity across `reset`); the per-frame
     /// `compile` walks a ~11-pass line (cheap).
     fn declare_gbuffer_graph(&mut self, scene: &GBufferScene<'_>) {
-        use crate::framegraph::SubRange;
+        use crate::framegraph::{ResSync, SubRange};
 
         // The (EARLY|LATE)_FRAGMENT_TESTS stage pair the depth-write barriers use.
         const FRAG: u32 =
@@ -2641,7 +2641,14 @@ impl<'ctx> Renderer<'ctx> {
         let g = &mut self.frame_graph;
         g.reset();
 
-        // --- Images (FIXED ResId order: albedo=0..atlas=8). ---
+        // --- Images (FIXED ResId order: albedo=0..atlas=8). The G-buffer attributes +
+        // depth + lit + ssao are RINGED per frame-in-flight (`ring[fi]`), so each slot's
+        // reuse is already fence-ordered two frames back — they start `undefined()`.
+        // The CSM cascade + shadow atlas are SINGLE instances shared by BOTH in-flight
+        // frames: their depth passes re-render them every armed frame, so the re-render
+        // must ORDER after the sibling frame's still-pipelined resolve reads — the
+        // cross-frame seed supplies that WAR src (audit B-003; the world-fixed viewer
+        // masked it because identical content made the torn read benign).
         let albedo = g.add_image("albedo");
         let normal = g.add_image("normal");
         let material = g.add_image("material");
@@ -2649,14 +2656,40 @@ impl<'ctx> Renderer<'ctx> {
         let viewt = g.add_image("viewt");
         let lit = g.add_image("lit");
         let ssao = g.add_image("ssao");
-        let cascade = g.add_image("cascade");
-        let atlas = g.add_image("atlas");
-        // --- Buffers (ResId 9..13). ---
-        let light_table = g.add_buffer("light_table");
-        let tiles = g.add_buffer("tiles");
-        let grid = g.add_buffer("grid");
-        let index = g.add_buffer("index");
-        let alloc = g.add_buffer("alloc");
+        let cascade = g.add_image_seeded(
+            "cascade",
+            ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+        );
+        let atlas = g.add_image_seeded(
+            "atlas",
+            ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+        );
+        // --- Buffers (ResId 9..13) — ALL single instances shared by both in-flight
+        // frames (audit B-002). light_table/tiles/grid/index end their frame consumed
+        // by a COMPUTE read (resolve / marcher), so a dirty-frame re-write must order
+        // after those sibling reads (WAR seed). `alloc` ends its frame on the cull's
+        // atomic WRITES with no draining read, so its per-frame TRANSFER reset needs
+        // the full memory dependency (writer seed).
+        let light_table = g.add_buffer_seeded(
+            "light_table",
+            ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+        );
+        let tiles = g.add_buffer_seeded(
+            "tiles",
+            ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+        );
+        let grid = g.add_buffer_seeded(
+            "grid",
+            ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+        );
+        let index = g.add_buffer_seeded(
+            "index",
+            ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+        );
+        let alloc = g.add_buffer_seeded(
+            "alloc",
+            ResSync::seeded_writer(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT),
+        );
 
         // Pass `raster` (sites 0/1): the 3-MRT G-buffer + depth.
         let raster = g.add_pass("raster");

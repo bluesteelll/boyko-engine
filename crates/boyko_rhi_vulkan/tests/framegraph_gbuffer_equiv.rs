@@ -19,7 +19,7 @@ use boyko_rhi_vulkan::ffi::{
     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
     VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
 };
-use boyko_rhi_vulkan::framegraph::{BufBarrier, FrameGraph, ImgBarrier, ResId, SubRange};
+use boyko_rhi_vulkan::framegraph::{BufBarrier, FrameGraph, ImgBarrier, ResId, ResSync, SubRange};
 
 /// Cascade / atlas layer counts, pinned to the scene's clamped `csm.active_count`
 /// and atlas `active_layers` (record_gbuffer clamps `[1, MAX_CASCADES]` /
@@ -57,7 +57,9 @@ struct Frame {
 fn build_maximal_frame() -> Frame {
     let mut g = FrameGraph::with_capacity(16, 16, 64);
 
-    // Images.
+    // Images. MIRRORS `declare_gbuffer_graph`: ringed resources start undefined;
+    // the SINGLE-INSTANCE cascade/atlas are seeded with the sibling in-flight
+    // frame's end-of-frame consumer scopes (the cross-frame WAR fix, B-002/B-003).
     let albedo = g.add_image("albedo");
     let normal = g.add_image("normal");
     let material = g.add_image("material");
@@ -65,18 +67,43 @@ fn build_maximal_frame() -> Frame {
     let viewt = g.add_image("viewt");
     let lit = g.add_image("lit");
     let ssao = g.add_image("ssao");
-    let cascade = g.add_image("cascade");
-    let atlas = g.add_image("atlas");
+    let cascade = g.add_image_seeded(
+        "cascade",
+        ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+    );
+    let atlas = g.add_image_seeded(
+        "atlas",
+        ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+    );
     // The WSI swapchain image (acquired UNDEFINED, presented PRESENT_SRC_KHR) — a
     // first-class graph resource, so the acquire→render→present transition is
-    // owned + verified like any other (C2).
+    // owned + verified like any other (C2). Per-image acquire/present semaphores
+    // handle its cross-frame ordering — NOT seeded.
     let swapchain = g.add_image("swapchain");
-    // Buffers.
-    let light_table = g.add_buffer("light_table");
-    let tiles = g.add_buffer("tiles");
-    let grid = g.add_buffer("grid");
-    let index = g.add_buffer("index");
-    let alloc = g.add_buffer("alloc");
+    // Buffers — all single instances shared by both in-flight frames (seeded,
+    // mirroring `declare_gbuffer_graph`): light_table/tiles/grid/index end their
+    // frame consumed by a COMPUTE read; `alloc` ends on the cull's undrained
+    // atomic writes (writer seed → full memory dependency for the next reset).
+    let light_table = g.add_buffer_seeded(
+        "light_table",
+        ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+    );
+    let tiles = g.add_buffer_seeded(
+        "tiles",
+        ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+    );
+    let grid = g.add_buffer_seeded(
+        "grid",
+        ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+    );
+    let index = g.add_buffer_seeded(
+        "index",
+        ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+    );
+    let alloc = g.add_buffer_seeded(
+        "alloc",
+        ResSync::seeded_writer(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT),
+    );
 
     // Pass A — raster the 3-MRT G-buffer + depth (record_gbuffer barriers 0/1).
     g.add_pass("raster");
@@ -282,10 +309,14 @@ fn graph_covers_every_gbuffer_producer_consumer_hazard() {
         "lit→present-blit fragment-sample missing"
     );
 
-    // --- CSM cascade layered: UNDEFINED→DEPTH (4 layers), DEPTH→SHADER_READ_ONLY (4 layers) ---
+    // --- CSM cascade layered: UNDEFINED→DEPTH (4 layers), DEPTH→SHADER_READ_ONLY (4 layers).
+    // The depth-in src is COMPUTE (not TOP_OF_PIPE): the cascade is a SINGLE image shared by
+    // both in-flight frames, so its re-render must order after the SIBLING frame's resolve
+    // reads — the cross-frame WAR seed supplies that src (B-003). Layout still UNDEFINED
+    // (content discarded); only the ordering strengthened. ---
     assert!(
-        has_img(img, f.cascade, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, FRAG, 0, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, SubRange::depth_layers(CASCADE_LAYERS)),
-        "cascade layered depth-in missing"
+        has_img(img, f.cascade, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, FRAG, 0, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, SubRange::depth_layers(CASCADE_LAYERS)),
+        "cascade layered depth-in missing (must carry the cross-frame WAR src = COMPUTE)"
     );
     assert!(
         has_img(img, f.cascade, FRAG, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, SubRange::depth_layers(CASCADE_LAYERS)),
@@ -314,6 +345,23 @@ fn graph_covers_every_gbuffer_producer_consumer_hazard() {
         has_buf(buf, f.index, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT),
         "index cull→resolve missing"
     );
+
+    // --- The CROSS-FRAME seeds (B-002): each single-instance buffer's FIRST write must
+    // order after the sibling in-flight frame's end-of-frame accesses. WAR seeds emit an
+    // execution-only src (src_access 0, src_stage = the sibling readers); the alloc WRITER
+    // seed emits the full memory dependency (its sibling write is undrained). ---
+    assert!(
+        has_buf(buf, f.light_table, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_ACCESS_TRANSFER_WRITE_BIT),
+        "light_table cross-frame WAR (sibling resolve reads → this upload) missing"
+    );
+    assert!(
+        has_buf(buf, f.tiles, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, VK_ACCESS_SHADER_WRITE_BIT),
+        "tiles cross-frame WAR (sibling marcher reads → this cull write) missing"
+    );
+    assert!(
+        has_buf(buf, f.alloc, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT),
+        "alloc cross-frame WAW (sibling cull atomics → this reset) missing"
+    );
 }
 
 #[test]
@@ -323,19 +371,26 @@ fn graph_matches_hand_path_barrier_count_exactly() {
     let buf = f.g.buf_barriers().len();
 
     // Derived by ENUMERATING every `cmd_pipeline_barrier`-emitted image/buffer
-    // barrier in `record_gbuffer` for the maximal-live permutation (readback=None):
+    // barrier in `record_gbuffer` (pre-1f) for the maximal-live permutation:
     //   IMAGE (23): color-in ×3, depth-in ×1, depth→sampled ×1, color→general ×3,
     //     lit/viewt/ssao→general ×3, store→load ×4, ssao store→load ×1,
     //     csm-in ×1, csm→sampled ×1, atlas-in ×1, atlas→sampled ×1, lit→sampled ×1,
     //     swapchain acquire→color ×1, swapchain color→present ×1.
-    //   BUFFER (5): light-upload ×1, coarse-tiles ×1, alloc-reset ×1, cull→resolve ×2.
-    // The graph derives EXACTLY these (equality, not `≤` — the hand path is already
-    // barrier-minimal; the graph's win is auto-derivation + correctness + the
-    // history-rotation/aliasing it enables, NOT fewer barriers).
+    //   BUFFER: the hand path emitted 5 (light-upload ×1, coarse-tiles ×1,
+    //     alloc-reset ×1, cull→resolve ×2) and LACKED the cross-frame ordering on
+    //     the single-instance buffers — the audited B-002 WAR race. The seeded
+    //     graph adds exactly the 5 missing first-write barriers (light_table /
+    //     tiles / grid / index WAR + alloc WAW), a deliberate sound SUPERSET:
+    //     5 hand + 5 cross-frame = 10.
+    // Image count is unchanged by the seeds (the cascade/atlas first-touch
+    // barriers already existed; only their src stage strengthened TOP→COMPUTE).
     const HAND_IMAGE_BARRIERS: usize = 23;
-    const HAND_BUFFER_BARRIERS: usize = 5;
+    const BUFFER_BARRIERS_WITH_CROSS_FRAME: usize = 10;
     assert_eq!(img, HAND_IMAGE_BARRIERS, "image barrier count diverged from the hand path");
-    assert_eq!(buf, HAND_BUFFER_BARRIERS, "buffer barrier count diverged from the hand path");
+    assert_eq!(
+        buf, BUFFER_BARRIERS_WITH_CROSS_FRAME,
+        "buffer barrier count diverged (5 hand-parity + 5 cross-frame seeds)"
+    );
 }
 
 /// Counts the sync1 `vkCmdPipelineBarrier` array-CALLS the graph's record step
@@ -355,25 +410,23 @@ impl boyko_rhi_vulkan::framegraph::BarrierSink for CountSink {
 }
 
 /// C6 (honest count quantification): the graph's record step groups each pass's
-/// derived barriers by (src,dst) stage pair into batched array calls. Measure the
-/// resulting call count — it must not exceed the hand path's post-1a array-call
-/// count. The honest result is PARITY (18 == 18): the graph fuses some batches the
-/// hand path splits (cascade+atlas→sampled; light_table+alloc) and splits some the
-/// hand path fuses (lit/viewt/ssao→general placed at each true first-use), netting
-/// zero. The graph's win is auto-derivation + correctness + enabling history-
-/// rotation/aliasing — NOT fewer calls than hand-tuned sync1 batching.
+/// derived barriers by (src,dst) stage pair into batched array calls. The hand
+/// path emitted 18 array calls; against those 18 the graph is call-for-call
+/// PARITY (it fuses some batches the hand path split and splits some it fused,
+/// netting zero). The cross-frame seeds (B-002) then add exactly FOUR calls the
+/// hand path never recorded — the fixed race: the light_upload WAR (+1), the
+/// coarse tiles WAR (+1), the cull grid+index WAR group (+1), and the alloc WAW
+/// (+1) — 18 + 4 = 22, each one a real missing ordering, not grouping loss.
 #[test]
-fn record_step_call_count_is_parity_with_hand_path() {
+fn record_step_call_count_is_pinned() {
     let f = build_maximal_frame();
     let mut sink = CountSink::default();
     f.g.record_all(&mut sink);
     let total = sink.img_calls + sink.buf_calls;
-    // The post-1a hand path emits 18 array-form `vkCmdPipelineBarrier` calls for
-    // this maximal-live permutation (see graph_matches_hand_path_barrier_count).
-    const HAND_ARRAY_CALLS: usize = 18;
+    const HAND_ARRAY_CALLS_PLUS_CROSS_FRAME: usize = 18 + 4;
     assert_eq!(
-        total, HAND_ARRAY_CALLS,
-        "graph record call count diverged from the hand path's array-call count"
+        total, HAND_ARRAY_CALLS_PLUS_CROSS_FRAME,
+        "graph record call count diverged (18 hand-parity + 4 cross-frame WAR/WAW groups)"
     );
 }
 

@@ -9,6 +9,19 @@
 > started): Pillar B (interpolation), Phase 2 (transient aliasing), Phase 3 (async compute).
 >
 > ## BUILD LOG
+> - **Post-1f: CROSS-FRAME SEED STATE (audit B-002/B-003, 2026-07-02).** The per-frame
+>   `ResSync::undefined()` reset left NON-RINGED resources (light_table/tiles/cluster
+>   grid+index+alloc SSBOs; CSM cascade + shadow-atlas depth images) with first-touch writes whose
+>   src was `TOP_OF_PIPE`/0 — no ordering against the SIBLING in-flight frame's still-pipelined
+>   reads (a cross-frame WAR/WAW race; benign in the world-fixed viewer only because identical
+>   content makes a torn read invisible). Fix: `ResSync::seeded_readers/seeded_writer` +
+>   `FrameGraph::add_image_seeded/add_buffer_seeded` — the declare site seeds each single-instance
+>   resource's start state with the sibling frame's end-of-frame scopes, and the untouched state
+>   machine derives the missing WAR (execution-only src) / WAW (full memory dependency, the alloc
+>   counter) barriers. Result: image barriers unchanged in count (cascade/atlas src strengthened
+>   TOP→COMPUTE), +5 buffer barriers / +4 array calls vs the hand path — each a real ordering the
+>   hand path LACKED. Equiv tests updated to pin 23 img + 10 buf + 22 calls (5/4 justified line by
+>   line); `record.rs` grouping got a release-safe chunked bound (audit B-010).
 > - **Step 1a — DONE (impl + static-verified; visual-OK gate still owner's).** Array-batched the 5
 >   `count=1` barrier LOOPS in `swapchain::record_gbuffer` into sync1 array-form `vkCmdPipelineBarrier`
 >   (15 barrier calls → 5). Byte-identical GPU semantics by construction (N consecutive same-stage

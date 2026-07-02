@@ -130,6 +130,43 @@ impl ResSync {
             visible_stages: 0,
         }
     }
+
+    /// Cross-frame seed for a NON-RINGED resource whose SIBLING in-flight frame
+    /// ends with READS at `(stages, access)` (light table / tiles / cluster
+    /// grid+index / CSM cascade / shadow atlas — each ends its frame consumed by
+    /// the resolve or marcher). This frame's first WRITE then derives a WAR
+    /// execution dependency (`src = stages`, no availability — the src is a read)
+    /// ordering it after those still-pipelined reads; a first READ at a covered
+    /// stage+access stays FREE (already visible), exactly as it is within a
+    /// frame. Layout stays UNDEFINED — content is re-rendered, only ordering
+    /// matters (audit B-002/B-003).
+    #[inline]
+    pub const fn seeded_readers(stages: u32, access: u32) -> Self {
+        Self {
+            layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            flush_access: 0,
+            flush_stages: 0,
+            visible_access: access,
+            visible_stages: stages,
+        }
+    }
+
+    /// Cross-frame seed for a NON-RINGED resource whose SIBLING frame ends with
+    /// an UNDRAINED WRITE at `(stages, access)` — no same-frame read follows to
+    /// flush it (the cluster `alloc` counter: the cull atomics are its last
+    /// touch). This frame's first access then derives a full memory dependency
+    /// (`src = stages/access`) — the WAW/RAW ordering + availability the sibling
+    /// write needs. `access` must be a WRITE bit.
+    #[inline]
+    pub const fn seeded_writer(stages: u32, access: u32) -> Self {
+        Self {
+            layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            flush_access: access,
+            flush_stages: stages,
+            visible_access: 0,
+            visible_stages: 0,
+        }
+    }
 }
 
 /// The two halves of a required barrier + its layout transition, returned by

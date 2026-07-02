@@ -47,6 +47,15 @@ pub struct FrameGraph {
     // --- resource arena (SoA) ---
     res_is_image: Vec<bool>,
     res_name: Vec<&'static str>,
+    /// The per-resource sync state `compile` STARTS from. `ResSync::undefined()`
+    /// for ringed/transient resources (prior content discarded, the per-slot fence
+    /// already orders slot reuse). For a NON-RINGED resource shared by both
+    /// in-flight frames (light table, CSM cascade, shadow atlas) the declare site
+    /// seeds `visible_stages/visible_access` with the resource's steady-state
+    /// consumer scopes, so this frame's FIRST write derives a WAR execution
+    /// dependency on the SIBLING frame's still-pipelined reads instead of a
+    /// no-op `TOP_OF_PIPE` src — the cross-frame torn-read fix (audit B-002/B-003).
+    res_seed: Vec<ResSync>,
 
     // --- pass arena (SoA) ---
     pass_name: Vec<&'static str>,
@@ -78,6 +87,7 @@ impl FrameGraph {
         Self {
             res_is_image: Vec::with_capacity(max_res),
             res_name: Vec::with_capacity(max_res),
+            res_seed: Vec::with_capacity(max_res),
             pass_name: Vec::with_capacity(max_pass),
             pass_access_begin: Vec::with_capacity(max_pass),
             pass_access_count: Vec::with_capacity(max_pass),
@@ -98,6 +108,7 @@ impl FrameGraph {
     pub fn reset(&mut self) {
         self.res_is_image.clear();
         self.res_name.clear();
+        self.res_seed.clear();
         self.pass_name.clear();
         self.pass_access_begin.clear();
         self.pass_access_count.clear();
@@ -115,26 +126,45 @@ impl FrameGraph {
     /// Declare a transient/history IMAGE resource (layout starts UNDEFINED).
     #[inline]
     pub fn add_image(&mut self, name: &'static str) -> ResId {
-        debug_assert!(
-            self.res_is_image.len() < u16::MAX as usize,
-            "framegraph resource count exceeds u16 index space"
-        );
-        let id = ResId(self.res_is_image.len() as u16);
-        self.res_is_image.push(true);
-        self.res_name.push(name);
-        id
+        self.push_res(true, name, ResSync::undefined())
     }
 
     /// Declare a BUFFER resource (no layout; ordering is flush/visibility only).
     #[inline]
     pub fn add_buffer(&mut self, name: &'static str) -> ResId {
+        self.push_res(false, name, ResSync::undefined())
+    }
+
+    /// Declare a NON-RINGED IMAGE shared by both in-flight frames (CSM cascade,
+    /// shadow atlas), seeding its start-of-frame sync state with the sibling
+    /// frame's end-of-frame scopes (see [`ResSync::seeded_readers`] /
+    /// [`ResSync::seeded_writer`]). The first write this frame then orders after
+    /// the sibling's still-pipelined accesses instead of the hazard-free
+    /// `TOP_OF_PIPE` a fresh `undefined()` state yields (audit B-002/B-003).
+    #[inline]
+    pub fn add_image_seeded(&mut self, name: &'static str, seed: ResSync) -> ResId {
+        self.push_res(true, name, seed)
+    }
+
+    /// Declare a NON-RINGED BUFFER shared by both in-flight frames (light table,
+    /// tiles, cluster grid/index/alloc): same cross-frame seeding as
+    /// [`add_image_seeded`](FrameGraph::add_image_seeded) (buffers have no
+    /// layout; the seed only strengthens the first access's src scope).
+    #[inline]
+    pub fn add_buffer_seeded(&mut self, name: &'static str, seed: ResSync) -> ResId {
+        self.push_res(false, name, seed)
+    }
+
+    #[inline]
+    fn push_res(&mut self, is_image: bool, name: &'static str, seed: ResSync) -> ResId {
         debug_assert!(
             self.res_is_image.len() < u16::MAX as usize,
             "framegraph resource count exceeds u16 index space"
         );
         let id = ResId(self.res_is_image.len() as u16);
-        self.res_is_image.push(false);
+        self.res_is_image.push(is_image);
         self.res_name.push(name);
+        self.res_seed.push(seed);
         id
     }
 
@@ -209,11 +239,13 @@ impl FrameGraph {
         self.buf_barriers.clear();
         self.pass_barriers.clear();
 
-        // Fresh per-resource state: every transient/history resource starts
-        // UNDEFINED (re-`UNDEFINED`'d each frame — prior content discarded).
+        // Per-resource start state: ringed/transient resources start UNDEFINED
+        // (re-`UNDEFINED`'d each frame — prior content discarded); NON-RINGED
+        // shared resources start from their declared cross-frame seed (visible
+        // consumer scopes), so their first write orders after the sibling
+        // in-flight frame's reads (see `add_image_seeded`).
         self.state.clear();
-        self.state
-            .resize(self.res_is_image.len(), ResSync::undefined());
+        self.state.extend_from_slice(&self.res_seed);
 
         for p in 0..self.pass_name.len() {
             let img_begin = self.img_barriers.len() as u32;

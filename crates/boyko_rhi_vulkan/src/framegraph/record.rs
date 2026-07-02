@@ -17,9 +17,14 @@ use super::graph::FrameGraph;
 use super::ids::PassId;
 use super::sync::{BufBarrier, ImgBarrier};
 
-/// The maximum image (or buffer) barriers a single pass boundary can carry. The
-/// densest real boundary (the marcher's input transitions) has 5; 16 is generous
-/// headroom keeping the record grouping alloc-free on the stack.
+/// The stack-scratch CHUNK size of the record grouping. The densest real pass
+/// boundary (the marcher's input transitions) has 5 barriers; 16 is generous
+/// headroom keeping the grouping alloc-free. NOT a hard cap: a pass exceeding it
+/// is processed in chunks of 16 (each grouped independently — sound: the same
+/// barriers are recorded, at worst one extra `vkCmdPipelineBarrier` per stage
+/// pair spanning a chunk boundary). The `debug_assert` still flags the headroom
+/// breach so the constant gets raised deliberately (audit B-010: the guard must
+/// not be debug-only — `declare_gbuffer_graph` grows two files away).
 pub const MAX_PASS_BARRIERS: usize = 16;
 
 /// A backend sink that RECORDS one batched sync1 `vkCmdPipelineBarrier` per call.
@@ -62,9 +67,17 @@ impl FrameGraph {
 fn emit_img_groups<S: BarrierSink>(bs: &[ImgBarrier], sink: &mut S) {
     debug_assert!(
         bs.len() <= MAX_PASS_BARRIERS,
-        "pass image barriers ({}) exceed MAX_PASS_BARRIERS",
+        "pass image barriers ({}) exceed MAX_PASS_BARRIERS — raise the constant",
         bs.len()
     );
+    // Release-safe bound (B-010): chunk an oversized pass instead of indexing the
+    // stack arrays out of range (the debug_assert above is compiled out).
+    if bs.len() > MAX_PASS_BARRIERS {
+        for chunk in bs.chunks(MAX_PASS_BARRIERS) {
+            emit_img_groups(chunk, sink);
+        }
+        return;
+    }
     let mut done = [false; MAX_PASS_BARRIERS];
     let mut i = 0;
     while i < bs.len() {
@@ -92,9 +105,17 @@ fn emit_img_groups<S: BarrierSink>(bs: &[ImgBarrier], sink: &mut S) {
 fn emit_buf_groups<S: BarrierSink>(bs: &[BufBarrier], sink: &mut S) {
     debug_assert!(
         bs.len() <= MAX_PASS_BARRIERS,
-        "pass buffer barriers ({}) exceed MAX_PASS_BARRIERS",
+        "pass buffer barriers ({}) exceed MAX_PASS_BARRIERS — raise the constant",
         bs.len()
     );
+    // Release-safe bound (B-010): chunk an oversized pass instead of indexing the
+    // stack arrays out of range (the debug_assert above is compiled out).
+    if bs.len() > MAX_PASS_BARRIERS {
+        for chunk in bs.chunks(MAX_PASS_BARRIERS) {
+            emit_buf_groups(chunk, sink);
+        }
+        return;
+    }
     let mut done = [false; MAX_PASS_BARRIERS];
     let mut i = 0;
     while i < bs.len() {
