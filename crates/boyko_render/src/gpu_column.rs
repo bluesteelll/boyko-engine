@@ -229,8 +229,11 @@ impl RhiContext {
     /// the no-bytemuck POD view. `ortho` is the pixel→NDC transform for the swapchain
     /// extent the UI pass renders into. `token` is the per-slot write proof
     /// (`Renderer::wait_frame_in_flight`, or [`FrameWriteToken::forge_unfenced`] at
-    /// setup time): the memcpy targets `token.slot()` and cannot be issued for a slot
-    /// whose in-flight fence was not waited. The returned plan borrows NO RHI handle,
+    /// setup time), BORROWED (R0b): this is a mid-frame write, so the caller keeps
+    /// the token and later feeds it BY VALUE to the frame-ending submit
+    /// (`Renderer::present_sampled`). The memcpy targets `token.slot()` and cannot
+    /// be issued for a slot whose in-flight fence was not waited. The returned plan
+    /// borrows NO RHI handle,
     /// so it is sound to stash across the dispatcher token drop; the swapchain
     /// recorder re-resolves the pipeline + bind-group by `frame_index` via
     /// [`ui_handles`](Self::ui_handles) (MF-7).
@@ -242,7 +245,7 @@ impl RhiContext {
         &mut self,
         instances: &[UiInstance],
         ortho: UiOrtho,
-        token: FrameWriteToken,
+        token: &FrameWriteToken,
     ) -> Result<UiFramePlan, GpuColumnError> {
         let frame_index = token.slot();
         let instance_count = instances.len() as u32;

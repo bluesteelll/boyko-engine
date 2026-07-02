@@ -58,6 +58,11 @@ windows-sys = { workspace = true, features = [
 # not the host test harness). proptest pulls only host-side, graphics-free crates.
 [dev-dependencies]
 proptest = "1"
+# Test-only. Drives the R0b `FrameWriteToken` compile-fail acceptance cases
+# (`tests/compile_fail_frame_write_token/`) — the affine-move / no-Clone /
+# private-field guarantees are proven by FAILURE to compile, exactly the
+# `boyko_ecs` `compile_fail_dispatcher_token` mechanism. Host-side only.
+trybuild = "1"
 # Test-only. The in-house shader eDSL, with the std `emit` codegen backend ON, so
 # the `sdf_field_edsl_sync` guard can regenerate the HLSL field bodies and assert
 # the committed `shaders/sdf_field.hlsli` still matches them (no by-hand drift).

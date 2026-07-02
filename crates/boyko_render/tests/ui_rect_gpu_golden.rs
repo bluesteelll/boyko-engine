@@ -154,7 +154,7 @@ fn render_ui_golden(rhi: &mut RhiContext) -> Vec<u8> {
     // submitted against them, so slot 0 is free to host-write unfenced.
     let token = unsafe { boyko_rhi_vulkan::swapchain::FrameWriteToken::forge_unfenced(0) };
     let plan = rhi
-        .ui_upload(&instances, ortho, token)
+        .ui_upload(&instances, ortho, &token)
         .expect("ui_upload (memcpy into the current-FIF ring + POD UiFramePlan)");
     assert_eq!(plan.instance_count, 2, "two instances uploaded");
     assert_eq!(plan.frame_index, 0, "the plan carries the slot index");

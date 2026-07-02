@@ -551,7 +551,7 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
         // GPU work references either FIF ring slot.
         let token = unsafe { FrameWriteToken::forge_unfenced(fif) };
         let plan = rhi
-            .ui_upload(&instances, ortho, token)
+            .ui_upload(&instances, ortho, &token)
             .expect("ui_upload into the FIF ring slot");
         assert_eq!(plan.instance_count, instances.len() as u32, "all instances uploaded");
         assert_eq!(plan.frame_index, fif, "the plan carries the FIF slot index");
@@ -594,13 +594,15 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
         let cur = swapchain.extent();
         let extent_stable = cur.width == live.width && cur.height == live.height;
 
-        // The host contract: pick the FIF slot, FENCE it (the ring was last read two
-        // presents back), then re-resolve the UI handles by frame_index (MF-7) into the
-        // concrete UiPass for THAT slot's pre-uploaded plan.
-        let fif = renderer.frame_index();
-        renderer
+        // The host contract: FENCE the current FIF slot (the ring was last read two
+        // presents back) — the minted token carries the slot index — then re-resolve
+        // the UI handles by frame_index (MF-7) into the concrete UiPass for THAT
+        // slot's pre-uploaded plan. The token is consumed by `present_sampled` below
+        // (R0b: the by-value consume ends this frame's host-write window).
+        let token = renderer
             .wait_frame_in_flight()
             .expect("wait the current FIF slot's in-flight fence");
+        let fif = token.slot();
         let pass = rhi.ui_pass(&plans[fif]).expect("ui_pass after ui_setup");
 
         let want_readback = i == 3 && !readback_done && extent_stable;
@@ -613,6 +615,7 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
         // buffer is host-visible and >= one swapchain image.
         let presented = unsafe {
             renderer.present_sampled(
+                token,
                 &surface,
                 &mut swapchain,
                 &composite,

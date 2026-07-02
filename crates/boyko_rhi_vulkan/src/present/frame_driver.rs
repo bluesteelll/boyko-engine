@@ -263,7 +263,10 @@ impl<'ctx> Renderer<'ctx> {
     /// Returns the [`FrameWriteToken`] write proof for the fenced slot — the
     /// required key for every per-slot host-write API (`RhiContext::ui_upload`,
     /// the interp pair ring): the write cannot be issued without the fence proof
-    /// and cannot target a different slot than the one fenced.
+    /// and cannot target a different slot than the one fenced. The token is
+    /// affine: mid-frame writers borrow it, and the frame-ending submit
+    /// ([`render_gbuffer_frame`](Self::render_gbuffer_frame) /
+    /// [`present_sampled`](Self::present_sampled)) consumes it by value.
     ///
     /// # Errors
     /// [`SwapchainError::VkError`] if `vkWaitForFences` fails.
@@ -622,6 +625,12 @@ impl<'ctx> Renderer<'ctx> {
     /// supplied host-visible staging buffer (the rung-11 golden path, proving the
     /// hybrid composite reached the swapchain image); the steady path passes `None`.
     ///
+    /// `token` is this frame's [`FrameWriteToken`] (minted by
+    /// [`wait_frame_in_flight`](Self::wait_frame_in_flight)), consumed BY VALUE:
+    /// the submit ends the frame's host-write window, so the affine consume makes
+    /// a per-slot host write after this call a compile error (R0b). The token must
+    /// belong to the slot being submitted (`token.slot() == frame_index`).
+    ///
     /// # Safety
     ///
     /// Every resource borrowed by `composite` (texture / sampler / bind group /
@@ -636,6 +645,7 @@ impl<'ctx> Renderer<'ctx> {
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn present_sampled(
         &mut self,
+        token: FrameWriteToken,
         surface: &Surface<'_>,
         swapchain: &mut Swapchain<'ctx>,
         composite: &SampledComposite<'_>,
@@ -645,6 +655,13 @@ impl<'ctx> Renderer<'ctx> {
         readback: Option<&BoundBuffer>,
         ui: Option<&UiPass<'_>>,
     ) -> Result<bool, SwapchainError> {
+        debug_assert_eq!(
+            token.slot(),
+            self.frame_index,
+            "invariant: the frame-write token must belong to the slot being submitted"
+        );
+        // The by-value consume ends this frame's host-write window (R0b).
+        let _ = token;
         // Thin adapter over the shared [`drive_frame`](Self::drive_frame) skeleton: no
         // pre-record sync (the composite texture was uploaded once by the caller before
         // the present loop and is never written again — no extent-dependent target to
@@ -709,6 +726,12 @@ impl<'ctx> Renderer<'ctx> {
     /// dispatched at (the clamped swapchain extent the caller sized `frame`'s targets
     /// + `scene.camera_uniform` + `scene.dispatch_group_count_x` to).
     ///
+    /// `token` is this frame's [`FrameWriteToken`] (minted by
+    /// [`wait_frame_in_flight`](Self::wait_frame_in_flight)), consumed BY VALUE:
+    /// the submit ends the frame's host-write window, so the affine consume makes
+    /// a per-slot host write after this call a compile error (R0b). The token must
+    /// belong to the slot being submitted (`token.slot() == frame_index`).
+    ///
     /// # Safety
     ///
     /// Every `scene` resource was created on the same device as this renderer and
@@ -723,6 +746,7 @@ impl<'ctx> Renderer<'ctx> {
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn render_gbuffer_frame(
         &mut self,
+        token: FrameWriteToken,
         ctx: &VulkanContext,
         surface: &Surface<'_>,
         swapchain: &mut Swapchain<'ctx>,
@@ -734,6 +758,13 @@ impl<'ctx> Renderer<'ctx> {
         present_extent: VkExtent2D,
         readback: Option<&BoundBuffer>,
     ) -> Result<bool, SwapchainError> {
+        debug_assert_eq!(
+            token.slot(),
+            self.frame_index,
+            "invariant: the frame-write token must belong to the slot being submitted"
+        );
+        // The by-value consume ends this frame's host-write window (R0b).
+        let _ = token;
         // Thin adapter over the shared [`drive_frame`](Self::drive_frame) skeleton, with
         // `frame` (the G-buffer targets) threaded as the payload: pre-record syncs the
         // targets, the record body re-declares the whole-frame graph then records the
@@ -836,14 +867,17 @@ impl<'ctx> Renderer<'ctx> {
 /// Per-slot host-write APIs (the UI instance ring, the interp pair ring, the
 /// camera UBO ring) take this token INSTEAD of a raw slot index — the
 /// `DispatcherToken` pattern: the write cannot be issued without the fence
-/// proof, and it cannot target a different slot than the one fenced. Zero
-/// runtime cost (a `Copy` of one `usize` the caller already had); the fence
-/// discipline becomes unforgeable instead of a documented convention. A write
-/// placed before the fence wait does not race the SIBLING in-flight frame (it
-/// binds slot `s ^ 1`) but the slot's PREVIOUS OCCUPANT (frame N−2 under
-/// `FRAMES_IN_FLIGHT == 2`) — the motion-only whole-face shadow flip the
-/// `shadow_lag_dump` diagnostic pins.
-#[derive(Clone, Copy, Debug)]
+/// proof, and it cannot target a different slot than the one fenced. The token
+/// is AFFINE (`!Clone`, `!Copy`, R0b): mid-frame per-slot writers borrow it
+/// (`&FrameWriteToken`), and the frame-ending submit APIs
+/// ([`Renderer::render_gbuffer_frame`] / [`Renderer::present_sampled`]) consume
+/// it BY VALUE — so a per-slot host write after the submit, or a token retained
+/// across frames, is a compile error, not a documented convention. Zero runtime
+/// cost (one `usize` moved instead of copied). A write placed before the fence
+/// wait does not race the SIBLING in-flight frame (it binds slot `s ^ 1`) but
+/// the slot's PREVIOUS OCCUPANT (frame N−2 under `FRAMES_IN_FLIGHT == 2`) — the
+/// motion-only whole-face shadow flip the `shadow_lag_dump` diagnostic pins.
+#[derive(Debug)]
 pub struct FrameWriteToken {
     slot: usize,
 }
@@ -851,7 +885,7 @@ pub struct FrameWriteToken {
 impl FrameWriteToken {
     /// The fenced frame slot — the ONLY ring slot the holder may host-write.
     #[inline]
-    pub fn slot(self) -> usize {
+    pub fn slot(&self) -> usize {
         self.slot
     }
 

@@ -25,10 +25,12 @@
 //!
 //! The shipped end-to-end ON-SCREEN path is the render host calling
 //! [`host_upload_frame`](UiUploadSystem::host_upload_frame) (read the swapchain slot →
-//! fence it → [`pack_sort_upload`](UiUploadSystem::pack_sort_upload)), then
-//! [`RhiContext::ui_pass`](crate::RhiContext::ui_pass) on the returned plan, then
+//! fence it → [`pack_sort_upload`](UiUploadSystem::pack_sort_upload)), which returns
+//! the plan AND the minted [`FrameWriteToken`]; then
+//! [`RhiContext::ui_pass`](crate::RhiContext::ui_pass) on the plan, then
 //! [`Renderer::present_sampled`](boyko_rhi_vulkan::swapchain::Renderer::present_sampled)
-//! with `Some(&pass)` — the `record_present_sampled` UI sub-pass records the one draw.
+//! with the token (consumed BY VALUE — R0b) and `Some(&pass)` — the
+//! `record_present_sampled` UI sub-pass records the one draw.
 //!
 //! The host-drivable
 //! [`host_upload_frame_from_world`](UiUploadSystem::host_upload_frame_from_world)
@@ -123,8 +125,10 @@ impl UiUploadSystem {
 
     /// The world-AGNOSTIC pack → stable z-sort → upload core (A1 steps 2-6). Drives
     /// the whole per-frame UI build given the visible nodes (in any order), the reused
-    /// `scratch`, the `ortho` for the swapchain extent, the [`FrameWriteToken`] write
-    /// proof for the target slot, and the `&mut RhiContext` that owns the rings.
+    /// `scratch`, the `ortho` for the swapchain extent, a BORROW of the
+    /// [`FrameWriteToken`] write proof for the target slot (R0b: the upload is a
+    /// mid-frame write — the caller keeps the token for the frame-ending
+    /// `present_sampled` consume), and the `&mut RhiContext` that owns the rings.
     ///
     /// - **pack**: `scratch.pack.clear()` + `extend` one [`UiInstance`] per node
     ///   (preallocated; never `Vec::new`), folding `scale_factor` + premultiply +
@@ -152,7 +156,7 @@ impl UiUploadSystem {
         scratch: &mut UiRenderScratch,
         gather: &mut Vec<UiInstance>,
         ortho: UiOrtho,
-        token: FrameWriteToken,
+        token: &FrameWriteToken,
         ctx: &mut RhiContext,
     ) -> Result<UiFramePlan, GpuColumnError> {
         // (2) pack — clear + extend into the preallocated scratch, never Vec::new.
@@ -188,10 +192,13 @@ impl UiUploadSystem {
     ///
     /// The host then calls [`RhiContext::ui_pass`](crate::RhiContext::ui_pass) on the
     /// returned plan to build the concrete
-    /// [`UiPass`](boyko_rhi_vulkan::swapchain::UiPass) and passes it to
-    /// `present_sampled(..., Some(&pass))`. Because the plan is POD (borrows no RHI
-    /// handle) the host may hold it across the pass build; the pass re-resolves the
-    /// pipeline + bind-group by `plan.frame_index` (MF-7).
+    /// [`UiPass`](boyko_rhi_vulkan::swapchain::UiPass) and passes it — together with
+    /// the returned [`FrameWriteToken`], BY VALUE — to
+    /// `present_sampled(token, ..., Some(&pass))`: the frame-ending submit consumes
+    /// the token (R0b), so the write discipline does not fork between the G-buffer
+    /// and UI-composite paths. Because the plan is POD (borrows no RHI handle) the
+    /// host may hold it across the pass build; the pass re-resolves the pipeline +
+    /// bind-group by `plan.frame_index` (MF-7).
     ///
     /// `ortho` MUST be [`UiOrtho::for_extent`](crate::UiOrtho::for_extent) of the
     /// swapchain extent this frame presents into (Decision 9). `gather` is the reused
@@ -208,14 +215,17 @@ impl UiUploadSystem {
         ortho: UiOrtho,
         renderer: &Renderer<'_>,
         ctx: &mut RhiContext,
-    ) -> Result<UiFramePlan, GpuColumnError> {
+    ) -> Result<(UiFramePlan, FrameWriteToken), GpuColumnError> {
         // (1) Fence the slot BEFORE the memcpy — the GPU finished reading this ring
         // slot two presents back; uploading before its in-flight fence signals would
         // race the GPU's read. The returned token is the write proof the upload
         // requires (and the only source of the slot index).
         let token = renderer.wait_frame_in_flight()?;
-        // (2) pack → sort → upload into the now-free slot.
-        self.pack_sort_upload(nodes, scratch, gather, ortho, token, ctx)
+        // (2) pack → sort → upload into the now-free slot (a mid-frame BORROW of the
+        // token); the token itself is returned for the frame-ending
+        // `present_sampled` consume.
+        let plan = self.pack_sort_upload(nodes, scratch, gather, ortho, &token, ctx)?;
+        Ok((plan, token))
     }
 
     /// Host-drivable per-frame upload that gathers the visible UI nodes from the
@@ -234,6 +244,10 @@ impl UiUploadSystem {
     /// resource), so this is a host driver, not the in-schedule site — see the
     /// module docs' world-access seam.
     ///
+    /// Like [`host_upload_frame`](Self::host_upload_frame), returns the minted
+    /// [`FrameWriteToken`] alongside the plan — the host passes it BY VALUE to the
+    /// frame-ending `present_sampled` consume (R0b).
+    ///
     /// # Errors
     /// [`GpuColumnError::Swapchain`] on the fence wait, or any
     /// [`pack_sort_upload`](Self::pack_sort_upload) upload error.
@@ -248,7 +262,7 @@ impl UiUploadSystem {
         ortho: UiOrtho,
         renderer: &Renderer<'_>,
         ctx: &mut RhiContext,
-    ) -> Result<UiFramePlan, GpuColumnError>
+    ) -> Result<(UiFramePlan, FrameWriteToken), GpuColumnError>
     where
         F: FnOnce(WorldView<'_>, &mut Vec<UiNode>),
     {

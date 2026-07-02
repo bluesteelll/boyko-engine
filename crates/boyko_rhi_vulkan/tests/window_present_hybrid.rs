@@ -950,6 +950,9 @@ fn windowed_hybrid_composite_present_is_validation_clean_and_renders_composite()
         let want_readback = i == 2 && !readback_done && extent_stable;
         let rb = if want_readback { Some(&staging) } else { None };
 
+        let token = renderer
+            .wait_frame_in_flight()
+            .expect("invariant: the frame slot fence wait precedes the submit");
         // SAFETY: `surface`/`swapchain` are live and created on the same device as
         // `renderer`; every `composite` resource is live on this device, the texture
         // was uploaded once and is resident in SHADER_READ_ONLY_OPTIMAL (the present
@@ -958,6 +961,7 @@ fn windowed_hybrid_composite_present_is_validation_clean_and_renders_composite()
         // one swapchain image) bytes.
         let presented = unsafe {
             renderer.present_sampled(
+                token,
                 &surface,
                 &mut swapchain,
                 &composite,

@@ -1,0 +1,5 @@
+error[E0451]: field `slot` of struct `FrameWriteToken` is private
+  --> tests/compile_fail_frame_write_token/token_literal_construction_rejected.rs:10:23
+   |
+10 |     FrameWriteToken { slot: 0 }
+   |                       ^^^^ private field

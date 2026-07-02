@@ -1087,9 +1087,10 @@ impl InterpGpu {
 
     /// Writes the `count` pairs into this frame slot's pair SSBO (host-coherent). Called each
     /// frame the pose changed (a substep ran or the count changed); the alpha slides every
-    /// frame via the push constant regardless. `token` is the per-slot write proof — the
-    /// memcpy targets `token.slot()` and cannot precede that slot's fence wait.
-    fn write_pairs(&self, device: &VulkanContext, token: FrameWriteToken, pairs: &[InterpPair]) {
+    /// frame via the push constant regardless. `token` is the per-slot write proof, BORROWED
+    /// (R0b: a mid-frame write — the caller keeps the token for the frame-ending submit) —
+    /// the memcpy targets `token.slot()` and cannot precede that slot's fence wait.
+    fn write_pairs(&self, device: &VulkanContext, token: &FrameWriteToken, pairs: &[InterpPair]) {
         let fi = token.slot();
         debug_assert_eq!(pairs.len(), self.count as usize, "pair count must equal the built count");
         let mapped = RhiDevice::buffer_mapped_ptr(device, &self.pairs[fi])
@@ -2333,13 +2334,16 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         let clear = [0.0_f32, 0.0, 0.0, 1.0];
 
         // The readback frame (requests the swapchain→staging copy).
+        let token = renderer
+            .wait_frame_in_flight()
+            .expect("invariant: the frame slot fence wait precedes the submit");
         // SAFETY: identical contract to the interactive loop's `render_gbuffer_frame` below —
         // `ctx`/`surface`/`swapchain`/`renderer` share one device; every `scene` resource is live;
         // `present_extent` + `scene.dispatch_group_count_x` + the camera UBO `count` cover the
         // composite extent; `staging` is host-visible and ≥ one swapchain image in bytes.
         let presented = unsafe {
             renderer.render_gbuffer_frame(
-                &ctx, &surface, &mut swapchain, &scene, &mut frame,
+                token, &ctx, &surface, &mut swapchain, &scene, &mut frame,
                 window.width(), window.height(), clear, present_extent, Some(&staging),
             )
         }
@@ -2356,10 +2360,13 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
                 break;
             }
             window.refresh_size();
+            let token = renderer
+                .wait_frame_in_flight()
+                .expect("invariant: the frame slot fence wait precedes the submit");
             // SAFETY: same contract; no readback requested on the drain frames.
             let _ = unsafe {
                 renderer.render_gbuffer_frame(
-                    &ctx, &surface, &mut swapchain, &scene, &mut frame,
+                    token, &ctx, &surface, &mut swapchain, &scene, &mut frame,
                     window.width(), window.height(), clear, present_extent, None,
                 )
             }
@@ -2460,6 +2467,9 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
             scene.brick = None;
         }
 
+        let token = renderer
+            .wait_frame_in_flight()
+            .expect("invariant: the frame slot fence wait precedes the submit");
         // SAFETY: `ctx`/`surface`/`swapchain` are live + created on the same device as
         // `renderer`; every `scene` resource is live on this device; `edit_list` /
         // `camera_uniform` were host-seeded once + are never written again (the marcher
@@ -2469,6 +2479,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         // (>= one swapchain image) bytes.
         let presented = unsafe {
             renderer.render_gbuffer_frame(
+                token,
                 &ctx,
                 &surface,
                 &mut swapchain,
@@ -3213,12 +3224,15 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         scene.coarse = if cull_on { Some(coarse_pipeline_ref) } else { None };
         let clear = [0.0_f32, 0.0, 0.0, 1.0];
 
+        let token = renderer
+            .wait_frame_in_flight()
+            .expect("invariant: the frame slot fence wait precedes the submit");
         // SAFETY: `ctx`/`surface`/`swapchain`/`renderer` share one device; every `scene` resource
         // is live; `present_extent` + `scene.dispatch_group_count_x` + the camera UBO `count` cover
         // the composite extent; `staging` is host-visible and ≥ one swapchain image in bytes.
         let presented = unsafe {
             renderer.render_gbuffer_frame(
-                &ctx, &surface, &mut swapchain, &scene, &mut frame,
+                token, &ctx, &surface, &mut swapchain, &scene, &mut frame,
                 window.width(), window.height(), clear, present_extent, Some(&staging),
             )
         }
@@ -3234,10 +3248,13 @@ fn p0_windowed_coarse_cull_matches_uncull() {
                 break;
             }
             window.refresh_size();
+            let token = renderer
+                .wait_frame_in_flight()
+                .expect("invariant: the frame slot fence wait precedes the submit");
             // SAFETY: same contract; no readback requested on the drain frames.
             let _ = unsafe {
                 renderer.render_gbuffer_frame(
-                    &ctx, &surface, &mut swapchain, &scene, &mut frame,
+                    token, &ctx, &surface, &mut swapchain, &scene, &mut frame,
                     window.width(), window.height(), clear, present_extent, None,
                 )
             }
@@ -5664,7 +5681,7 @@ fn run_interactive_viewer<'ctx, 's>(
             // SAFETY: setup-time seeding — the pair rings were created this call and the
             // present loop has not started, so no submitted GPU work references slot `fi`.
             let token = unsafe { FrameWriteToken::forge_unfenced(fi) };
-            interp.write_pairs(ctx, token, &pairs);
+            interp.write_pairs(ctx, &token, &pairs);
         }
     }
     // Per-slot "snapshot outdated" flags for the D5 substep-gated upload (see the loop body).
@@ -5791,15 +5808,14 @@ fn run_interactive_viewer<'ctx, 's>(
         // — both were seeded from one fit at setup).
 
         // The per-frame RING slot: the slot the UPCOMING present binds + reads. The renderer
-        // advances `frame_index` at the END of `render_gbuffer_frame` (post-present), so the value
-        // read HERE is exactly the `self.frame_index` the recorder will bind this frame. The
-        // sibling in-flight frame binds + reads `ring[s ^ 1]` — but slot `s` itself was last used
-        // by frame N−2, whose late passes (deferred lighting) may STILL be reading `ring[s]` on
-        // the GPU: `drive_frame` waits this slot's fence only INSIDE the render call, AFTER the
-        // writes below. Wait it HERE instead (the in-call wait becomes a no-op), or a moving
-        // camera makes the in-flight frame's lighting read a camera 2 frames NEWER than its
+        // advances `frame_index` at the END of `render_gbuffer_frame` (post-present), so the slot
+        // the minted token carries is exactly the `self.frame_index` the recorder will bind this
+        // frame. The sibling in-flight frame binds + reads `ring[s ^ 1]` — but slot `s` itself was
+        // last used by frame N−2, whose late passes (deferred lighting) may STILL be reading
+        // `ring[s]` on the GPU: `drive_frame` waits this slot's fence only INSIDE the render call,
+        // AFTER the writes below. Wait it HERE instead (the in-call wait becomes a no-op), or a
+        // moving camera makes the in-flight frame's lighting read a camera 2 frames NEWER than its
         // G-buffer raster — the motion-only whole-face shadow flip the shadow-lag diagnostic pins.
-        let s = renderer.frame_index();
         let token = match renderer.wait_frame_in_flight() {
             Ok(t) => t,
             Err(_) => {
@@ -5807,6 +5823,7 @@ fn run_interactive_viewer<'ctx, 's>(
                 break;
             }
         };
+        let s = token.slot();
 
         // Pillar B B3: the inline fixed-timestep loop for the bouncing box (interp ON). Accumulate
         // the real frame delta (clamped to MAX_ACCUM — the engine's 250 ms spiral clamp), expend
@@ -5849,7 +5866,7 @@ fn run_interactive_viewer<'ctx, 's>(
                 pair_dirty = [true; FRAMES_IN_FLIGHT];
             }
             if pair_dirty[s] {
-                interp.write_pairs(ctx, token, &pairs);
+                interp.write_pairs(ctx, &token, &pairs);
                 pair_dirty[s] = false;
             }
             // Bind THIS frame slot's draw SSBO as the raster/shadow VS instance source, and arm the
@@ -5871,13 +5888,15 @@ fn run_interactive_viewer<'ctx, 's>(
                 core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
             }
         }
-        // Present one frame. `Ok(false)` = the swapchain went OUT_OF_DATE and was recreated inside
+        // Present one frame, consuming the frame-write token (the host-write window for slot `s`
+        // ends HERE — R0b). `Ok(false)` = the swapchain went OUT_OF_DATE and was recreated inside
         // the call — skip this frame and try again next loop. `Err` = a fatal device error: stop.
         // SAFETY: `ctx`/`surface`/`swapchain`/`renderer` share one device; every `scene` resource is
         // live (owned by the caller); `present_extent` + `scene.dispatch_group_count_x` + the camera
         // UBO `count` all cover the composite extent; no readback requested (we present to the window).
         let r = unsafe {
             renderer.render_gbuffer_frame(
+                token,
                 ctx,
                 surface,
                 swapchain,
@@ -5933,7 +5952,16 @@ struct AbPose {
 
 /// Writes one camera pose exactly the way `run_interactive_viewer` does per frame: the 80-byte
 /// b5 camera block into THIS frame's ring slot + `scene.mvp` (byte 84 = the instanced arm).
-fn ab_set_pose(ctx: &VulkanContext, renderer: &Renderer<'_>, scene: &mut GBufferScene<'_>, p: AbPose) {
+///
+/// Returns the minted [`FrameWriteToken`] — the ONE token per presented frame (R0b): the caller
+/// threads it (borrowed for any further mid-frame per-slot write) into `ab_present_one`, whose
+/// `render_gbuffer_frame` consumes it by value.
+fn ab_set_pose(
+    ctx: &VulkanContext,
+    renderer: &Renderer<'_>,
+    scene: &mut GBufferScene<'_>,
+    p: AbPose,
+) -> FrameWriteToken {
     let world_up = [0.0_f32, 1.0, 0.0];
     let (sy, cy) = p.yaw.sin_cos();
     let (sp, cp) = p.pitch.sin_cos();
@@ -5948,10 +5976,10 @@ fn ab_set_pose(ctx: &VulkanContext, renderer: &Renderer<'_>, scene: &mut GBuffer
     );
     mvp[84] = 1;
     scene.mvp = mvp;
-    let s = renderer
+    let token = renderer
         .wait_frame_in_flight()
-        .expect("invariant: slot fence wait precedes the per-slot camera write")
-        .slot();
+        .expect("invariant: slot fence wait precedes the per-slot camera write");
+    let s = token.slot();
     if let Some(mapped) = RhiDevice::buffer_mapped_ptr(ctx, &scene.camera_ring[s]) {
         let bytes = cam.as_bytes();
         // SAFETY: identical contract to `run_interactive_viewer`'s per-frame camera write — the
@@ -5962,11 +5990,14 @@ fn ab_set_pose(ctx: &VulkanContext, renderer: &Renderer<'_>, scene: &mut GBuffer
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
         }
     }
+    token
 }
 
 /// Presents ONE frame at the already-written pose (optionally requesting the swapchain→staging
-/// readback). `false` = window closed / swapchain recreated / device error — a recreate
-/// invalidates byte-comparison, so the caller aborts the whole A/B run with a SKIP note.
+/// readback), consuming `token` — the frame-write proof `ab_set_pose` minted for this frame
+/// (R0b: the by-value consume ends the slot's host-write window). `false` = window closed /
+/// swapchain recreated / device error — a recreate invalidates byte-comparison, so the caller
+/// aborts the whole A/B run with a SKIP note.
 #[allow(clippy::too_many_arguments)]
 fn ab_present_one<'ctx>(
     ctx: &VulkanContext,
@@ -5976,6 +6007,7 @@ fn ab_present_one<'ctx>(
     window: &mut Window,
     scene: &GBufferScene<'_>,
     frame: &mut GBufferFrame,
+    token: FrameWriteToken,
     readback: Option<&BoundBuffer>,
 ) -> bool {
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -5988,6 +6020,7 @@ fn ab_present_one<'ctx>(
     // scene resource live, the composite extent covered by the dispatch + the camera UBO count.
     let r = unsafe {
         renderer.render_gbuffer_frame(
+            token,
             ctx,
             surface,
             swapchain,
@@ -6019,14 +6052,15 @@ fn ab_capture<'ctx>(
     is_bgra: bool,
     p: AbPose,
 ) -> Option<(Vec<u8>, u32, u32)> {
-    ab_set_pose(ctx, renderer, scene, p);
-    if !ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, Some(staging)) {
+    let token = ab_set_pose(ctx, renderer, scene, p);
+    if !ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, token, Some(staging))
+    {
         return None;
     }
     let extent = swapchain.extent();
     for _ in 0..3 {
-        ab_set_pose(ctx, renderer, scene, p);
-        if !ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, None) {
+        let token = ab_set_pose(ctx, renderer, scene, p);
+        if !ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, token, None) {
             return None;
         }
     }
@@ -6140,8 +6174,10 @@ fn run_shadow_dolly<'ctx>(
             let pose = AbPose { eye, yaw: f[0].atan2(-f[2]), pitch: f[1].asin() };
 
             for _ in 0..2 {
-                ab_set_pose(ctx, renderer, scene, pose);
-                if !ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, None) {
+                let token = ab_set_pose(ctx, renderer, scene, pose);
+                if !ab_present_one(
+                    ctx, surface, swapchain, renderer, window, scene, frame, token, None,
+                ) {
                     eprintln!("SKIP shadow-dolly: window closed / swapchain recreated");
                     return;
                 }
@@ -6193,8 +6229,10 @@ fn run_shadow_dolly<'ctx>(
             let f = vscale(to, 1.0 / len);
             let pose = AbPose { eye, yaw: f[0].atan2(-f[2]), pitch: f[1].asin() };
             for _ in 0..2 {
-                ab_set_pose(ctx, renderer, scene, pose);
-                if !ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, None) {
+                let token = ab_set_pose(ctx, renderer, scene, pose);
+                if !ab_present_one(
+                    ctx, surface, swapchain, renderer, window, scene, frame, token, None,
+                ) {
                     return;
                 }
             }
@@ -6259,8 +6297,10 @@ fn run_shadow_lag<'ctx>(
         // Settle the pipeline at the leg start so a sampled frame can differ from its settled
         // twin only through the in-motion history of the frames right before it.
         for _ in 0..3 {
-            ab_set_pose(ctx, renderer, scene, pose_at(0));
-            if !ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, None) {
+            let token = ab_set_pose(ctx, renderer, scene, pose_at(0));
+            if !ab_present_one(
+                ctx, surface, swapchain, renderer, window, scene, frame, token, None,
+            ) {
                 eprintln!("SKIP shadow-lag: window closed / swapchain recreated");
                 return;
             }
@@ -6271,19 +6311,19 @@ fn run_shadow_lag<'ctx>(
         let mut captures: Vec<(usize, Vec<u8>, u32, u32)> = Vec::with_capacity(samples.len());
         let mut k = 0usize;
         while k <= STEPS {
-            ab_set_pose(ctx, renderer, scene, pose_at(k));
+            let token = ab_set_pose(ctx, renderer, scene, pose_at(k));
             let sampled = samples.contains(&k);
             let rb = if sampled { Some(staging) } else { None };
-            if !ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, rb) {
+            if !ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, token, rb) {
                 eprintln!("SKIP shadow-lag: window closed / swapchain recreated");
                 return;
             }
             if sampled {
                 let extent = swapchain.extent();
                 for d in 1..=3usize {
-                    ab_set_pose(ctx, renderer, scene, pose_at((k + d).min(STEPS)));
+                    let token = ab_set_pose(ctx, renderer, scene, pose_at((k + d).min(STEPS)));
                     if !ab_present_one(
-                        ctx, surface, swapchain, renderer, window, scene, frame, None,
+                        ctx, surface, swapchain, renderer, window, scene, frame, token, None,
                     ) {
                         eprintln!("SKIP shadow-lag: window closed / swapchain recreated");
                         return;
@@ -6310,8 +6350,10 @@ fn run_shadow_lag<'ctx>(
         for (ks, motion_rgba, w, h) in &captures {
             let pose = pose_at(*ks);
             for _ in 0..2 {
-                ab_set_pose(ctx, renderer, scene, pose);
-                if !ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, None) {
+                let token = ab_set_pose(ctx, renderer, scene, pose);
+                if !ab_present_one(
+                    ctx, surface, swapchain, renderer, window, scene, frame, token, None,
+                ) {
                     eprintln!("SKIP shadow-lag: window closed / swapchain recreated");
                     return;
                 }
@@ -6371,8 +6413,10 @@ fn run_shadow_motion_ab<'ctx>(
             let mut ok = true;
             for i in 0..$n {
                 let p: AbPose = $f(i);
-                ab_set_pose(ctx, renderer, scene, p);
-                if !ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, None) {
+                let token = ab_set_pose(ctx, renderer, scene, p);
+                if !ab_present_one(
+                    ctx, surface, swapchain, renderer, window, scene, frame, token, None,
+                ) {
                     ok = false;
                     break;
                 }
@@ -6504,17 +6548,18 @@ fn run_interp_smoke<'ctx, 's>(
     // one frame (optionally with readback). A macro (not a closure) so it drives the outer `scene`
     // directly — assigning `scene.instance_bind_group = &interp.draw_bg[fi]` needs the `interp`
     // borrow to share the scene's `'s` lifetime, which a closure cannot express.
+    //
+    // ONE token per presented frame (R0b): `ab_set_pose` mints it (camera-write order vs the pair
+    // write does not matter — both precede recording), the pair write borrows it, and
+    // `ab_present_one`'s `render_gbuffer_frame` consumes it by value.
     macro_rules! present_interp {
         ($alpha:expr, $readback:expr) => {{
-            let token = renderer
-                .wait_frame_in_flight()
-                .expect("invariant: slot fence wait precedes the per-slot pair write");
+            let token = ab_set_pose(ctx, renderer, scene, pose);
             let fi = token.slot();
-            interp.write_pairs(ctx, token, &moved);
+            interp.write_pairs(ctx, &token, &moved);
             scene.instance_bind_group = &interp.draw_bg[fi];
             scene.interp = Some(interp.activation(fi, $alpha));
-            ab_set_pose(ctx, renderer, scene, pose);
-            ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, $readback)
+            ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, token, $readback)
         }};
     }
     // Captures one readback frame at `alpha`: 1 readback + 3 drain presents (the FRAMES_IN_FLIGHT==2
@@ -8356,13 +8401,16 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
         if live.width != alloc_extent.width || live.height != alloc_extent.height {
             eprintln!("NOTE engine_showcase_512: extent changed before the dump frame — skipping");
         } else {
+            let token = renderer
+                .wait_frame_in_flight()
+                .expect("invariant: the frame slot fence wait precedes the submit");
             // SAFETY: `ctx`/`surface`/`swapchain`/`renderer` share one device; every `scene`
             // resource is live; `present_extent` + `scene.dispatch_group_count_x` + the camera UBO
             // `count` cover the composite extent; `staging` is host-visible and ≥ one swapchain
             // image in bytes.
             let presented = unsafe {
                 renderer.render_gbuffer_frame(
-                    &ctx, &surface, &mut swapchain, &scene, &mut frame,
+                    token, &ctx, &surface, &mut swapchain, &scene, &mut frame,
                     window.width(), window.height(), clear, present_extent, Some(&staging),
                 )
             }
@@ -8377,10 +8425,13 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
                         break;
                     }
                     window.refresh_size();
+                    let token = renderer
+                        .wait_frame_in_flight()
+                        .expect("invariant: the frame slot fence wait precedes the submit");
                     // SAFETY: same contract; no readback requested on the drain frames.
                     let _ = unsafe {
                         renderer.render_gbuffer_frame(
-                            &ctx, &surface, &mut swapchain, &scene, &mut frame,
+                            token, &ctx, &surface, &mut swapchain, &scene, &mut frame,
                             window.width(), window.height(), clear, present_extent, None,
                         )
                     }
