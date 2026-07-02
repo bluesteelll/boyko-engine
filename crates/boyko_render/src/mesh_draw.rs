@@ -131,16 +131,21 @@ impl MeshRenderScratch {
     /// The TESTABLE gather core (Decision 7): count → prefix-sum → scatter, into the
     /// reused scratch. `mesh_count` is the registry's mesh count (sizes the per-mesh
     /// lanes, O2); `meta` resolves a mesh id to its `(index_count, index_type)` for the
-    /// emitted batch; `for_each_input` is a RE-ITERATION closure the gather invokes
-    /// TWICE (once to count, once to scatter) — each invocation walks the same
-    /// `(mesh_id, &InstanceModelCol)` source via the supplied `&mut FnMut`.
+    /// emitted batch; `iter_input` is an ITERATOR FACTORY the gather invokes TWICE (once
+    /// to count, once to scatter) — each call returns a FRESH iterator over the same
+    /// `(mesh_id, &InstanceModelCol)` source.
     ///
-    /// A re-iteration closure (not a `Clone` iterator) is the idiomatic two-pass form
-    /// when the source is an ECS [`Query`] (whose iterator is NOT `Clone`): the system
-    /// wrapper [`gather_mesh_draws`] passes `|emit| q.iter().for_each(|(h, c)|
-    /// emit(h.0, c))`; the unit test passes a closure over a `&[(u32,
-    /// &InstanceModelCol)]`. Keeping the inputs behind a closure (not building an ECS
-    /// world or touching a GPU) makes the bucketing unit-testable in isolation.
+    /// The factory (`Fn() -> I`, not a re-iteration `&mut dyn FnMut` callback) keeps both
+    /// passes FULLY MONOMORPHIC — zero virtual dispatch on the per-instance hot path
+    /// (P-002/P4). An ECS [`Query`] iterator is not `Clone`, but it does not need to be:
+    /// `Query::iter` borrows `&self`, so the factory simply re-runs `q.iter()` per pass,
+    /// yielding a brand-new iterator each time (the system wrapper [`gather_mesh_draws`]
+    /// passes `|| q.iter().map(|(h, c)| (h.0, c))`; a unit test passes `||
+    /// slice.iter().copied()`). The two iterators observe the SAME rows (the gather is
+    /// over row VALUES — mesh id + affine — not row order), so a stable two-pass walk
+    /// yields contiguous, correctly-offset buckets. Keeping the inputs behind the factory
+    /// (not building an ECS world or touching a GPU) makes the bucketing unit-testable in
+    /// isolation.
     ///
     /// After the call: `batches` holds one [`DrawBatch`] per non-empty mesh in mesh-id
     /// order with the correct prefix-sum `base_instance`s, and `ring` holds each mesh's
@@ -148,22 +153,23 @@ impl MeshRenderScratch {
     ///
     /// `debug_assert!`s catch an out-of-range `mesh_id` (a gather over a handle the
     /// registry never minted — a bundle/asset-binding bug).
-    pub fn gather_into<M, F>(&mut self, mesh_count: usize, mut meta: M, mut for_each_input: F)
+    pub fn gather_into<'a, M, F, I>(&mut self, mesh_count: usize, mut meta: M, iter_input: F)
     where
         M: FnMut(u32) -> (u32, IndexType),
-        F: FnMut(&mut dyn FnMut(u32, &InstanceModelCol)),
+        F: Fn() -> I,
+        I: Iterator<Item = (u32, &'a InstanceModelCol)>,
     {
         // --- Pass 1: count per mesh (touches only the small MeshHandle key). ---
         fit_len(&mut self.counts, mesh_count, 0);
         {
             let counts = &mut self.counts;
-            for_each_input(&mut |mesh_id, _col| {
+            for (mesh_id, _col) in iter_input() {
                 debug_assert!(
                     (mesh_id as usize) < mesh_count,
                     "invariant: a gathered mesh_id is in range of the registry"
                 );
                 counts[mesh_id as usize] += 1;
-            });
+            }
         }
 
         // --- Prefix-sum: offsets[m] = Σ counts[0..m] = mesh m's base_instance. Emit a
@@ -196,12 +202,12 @@ impl MeshRenderScratch {
             let offsets = &self.offsets;
             let cursors = &mut self.cursors;
             let ring = &mut self.ring;
-            for_each_input(&mut |mesh_id, col| {
+            for (mesh_id, col) in iter_input() {
                 let m = mesh_id as usize;
                 let slot = offsets[m] + cursors[m];
                 cursors[m] += 1;
                 ring[slot as usize] = *col;
-            });
+            }
         }
         debug_assert_eq!(
             self.ring.len(),
@@ -231,9 +237,11 @@ impl MeshRenderScratch {
 /// # Two passes over the query
 ///
 /// The Decision-7 count + scatter each iterate the query once. The query is
-/// re-iterable (`Query::iter` borrows `&self`-style state), so the two passes read the
-/// SAME rows; the gather is over the row VALUES (mesh id + affine), not the row order,
-/// so a stable two-pass walk yields contiguous, correctly-offset buckets.
+/// re-iterable (`Query::iter` borrows `&self`-style state), so the gather passes an
+/// iterator FACTORY (`|| q.iter().map(..)`) that is re-run per pass — both passes read
+/// the SAME rows, fully monomorphically (no per-instance virtual dispatch). The gather is
+/// over the row VALUES (mesh id + affine), not the row order, so a stable two-pass walk
+/// yields contiguous, correctly-offset buckets.
 #[allow(clippy::needless_pass_by_value)]
 pub fn gather_mesh_draws(
     q: Query<(&MeshHandle, &InstanceModelCol), Enabled<RenderEnabled>>,
@@ -247,11 +255,7 @@ pub fn gather_mesh_draws(
             let m = registry.get(MeshHandle(mesh_id));
             (m.index_count, m.index_type)
         },
-        |emit| {
-            for (h, col) in q.iter() {
-                emit(h.0, col);
-            }
-        },
+        || q.iter().map(|(h, col)| (h.0, col)),
     );
 }
 
@@ -304,11 +308,7 @@ mod tests {
             vec![(0, &a0), (1, &b0), (0, &a1), (1, &b1), (0, &a2)];
 
         let mut scratch = MeshRenderScratch::default();
-        scratch.gather_into(mesh_count, meta, |emit| {
-            for &(id, col) in &inputs {
-                emit(id, col);
-            }
-        });
+        scratch.gather_into(mesh_count, meta, || inputs.iter().copied());
 
         // One batch per distinct mesh (Principle 1: one draw per mesh).
         assert_eq!(scratch.batch_count(), 2, "two distinct meshes => two batches");
@@ -360,11 +360,7 @@ mod tests {
     fn bucketing_empty_yields_no_batches() {
         let mut scratch = MeshRenderScratch::default();
         let inputs: Vec<(u32, &InstanceModelCol)> = Vec::new();
-        scratch.gather_into(3, meta, |emit| {
-            for &(id, col) in &inputs {
-                emit(id, col);
-            }
-        });
+        scratch.gather_into(3, meta, || inputs.iter().copied());
         assert_eq!(scratch.batch_count(), 0);
         assert_eq!(scratch.instance_count(), 0);
     }
@@ -380,11 +376,7 @@ mod tests {
         let inputs: Vec<(u32, &InstanceModelCol)> = vec![(0, &a0), (2, &c0), (0, &a1)];
 
         let mut scratch = MeshRenderScratch::default();
-        scratch.gather_into(3, meta, |emit| {
-            for &(id, col) in &inputs {
-                emit(id, col);
-            }
-        });
+        scratch.gather_into(3, meta, || inputs.iter().copied());
 
         assert_eq!(scratch.batch_count(), 2, "mesh 1 is empty => only 2 batches");
         assert_eq!(scratch.batches[0].mesh_id, 0);
@@ -408,22 +400,14 @@ mod tests {
         let big: Vec<InstanceModelCol> = (0..5).map(|i| affine(i % 2, i)).collect();
         let big_inputs: Vec<(u32, &InstanceModelCol)> =
             big.iter().enumerate().map(|(i, c)| ((i as u32) % 2, c)).collect();
-        scratch.gather_into(2, meta, |emit| {
-            for &(id, col) in &big_inputs {
-                emit(id, col);
-            }
-        });
+        scratch.gather_into(2, meta, || big_inputs.iter().copied());
         assert_eq!(scratch.instance_count(), 5);
         let ring_cap_after_big = scratch.ring.capacity();
 
         // Frame 2: 1 instance of mesh 0.
         let small = affine(0, 0);
         let small_inputs: Vec<(u32, &InstanceModelCol)> = vec![(0, &small)];
-        scratch.gather_into(2, meta, |emit| {
-            for &(id, col) in &small_inputs {
-                emit(id, col);
-            }
-        });
+        scratch.gather_into(2, meta, || small_inputs.iter().copied());
         assert_eq!(scratch.batch_count(), 1);
         assert_eq!(scratch.instance_count(), 1);
         // The capacity did not shrink — the smaller frame reused the big frame's ring.

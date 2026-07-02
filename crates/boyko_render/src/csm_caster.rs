@@ -172,11 +172,7 @@ pub fn gather_shadow_casters(
             let m = registry.get(MeshHandle(mesh_id));
             (m.index_count, m.index_type)
         },
-        |emit| {
-            for (h, col) in q.iter() {
-                emit(h.0, col);
-            }
-        },
+        || q.iter().map(|(h, col)| (h.0, col)),
     );
 }
 
@@ -222,10 +218,8 @@ mod tests {
     /// Runs the SAME `gather_into` core the system runs, fed ONLY the rows whose
     /// `is_caster` is set — the CPU mirror of `Query<.., With<ShadowCaster>>`.
     fn gather_casters(scratch: &mut CsmCasterScratch, mesh_count: usize, rows: &[Row]) {
-        scratch.0.gather_into(mesh_count, meta, |emit| {
-            for r in rows.iter().filter(|r| r.is_caster) {
-                emit(r.mesh_id, &r.col);
-            }
+        scratch.0.gather_into(mesh_count, meta, || {
+            rows.iter().filter(|r| r.is_caster).map(|r| (r.mesh_id, &r.col))
         });
     }
 
@@ -334,11 +328,7 @@ mod tests {
 
         // The same inputs through the foundation's gather_into directly (no filter).
         let mut main = MeshRenderScratch::default();
-        main.gather_into(2, meta, |emit| {
-            for r in &rows {
-                emit(r.mesh_id, &r.col);
-            }
-        });
+        main.gather_into(2, meta, || rows.iter().map(|r| (r.mesh_id, &r.col)));
 
         assert_eq!(casters.batch_count(), main.batch_count());
         assert_eq!(casters.batches(), main.batches.as_slice());
