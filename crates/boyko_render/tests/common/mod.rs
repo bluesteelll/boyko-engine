@@ -41,7 +41,20 @@ pub fn boot_or_skip(test: &str) -> Option<VulkanContext> {
 }
 
 /// Asserts the validation messenger recorded ZERO messages — the Wave-B oracle.
+///
+/// Under the box-level `BOYKO_DISABLE_VALIDATION` escape hatch (the validation
+/// layer is crash-prone on some machines) the context boots WITHOUT the layer, so
+/// there is no messenger and no oracle to consult — the check degrades to a noted
+/// no-op (mirroring the no-device SKIP convention) instead of failing the suite.
 pub fn assert_validation_clean(ctx: &VulkanContext) {
+    if !ctx.validation_enabled() {
+        assert!(
+            std::env::var_os("BOYKO_DISABLE_VALIDATION").is_some(),
+            "validation must be active when enable_validation is set and the escape hatch is absent"
+        );
+        eprintln!("NOTE: validation disabled (BOYKO_DISABLE_VALIDATION) - messenger oracle skipped");
+        return;
+    }
     let state = ctx
         .debug_state()
         .expect("validation enabled => a debug-messenger state is present");

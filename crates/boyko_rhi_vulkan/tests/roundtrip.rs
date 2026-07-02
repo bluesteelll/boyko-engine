@@ -321,10 +321,17 @@ fn validation_layer_clean_on_device_ops() {
         }
     };
     println!("Vulkan device (validation on): {}", ctx.device_name());
-    assert!(
-        ctx.validation_enabled(),
-        "validation must be active when InstanceConfig::enable_validation is set"
-    );
+    if !ctx.validation_enabled() {
+        // The box-level BOYKO_DISABLE_VALIDATION escape hatch overrides
+        // InstanceConfig::enable_validation by design — SKIP the validation oracle
+        // (mirrors the no-device SKIP convention) instead of failing the suite.
+        assert!(
+            std::env::var_os("BOYKO_DISABLE_VALIDATION").is_some(),
+            "validation must be active when enable_validation is set and the escape hatch is absent"
+        );
+        eprintln!("SKIP: validation disabled (BOYKO_DISABLE_VALIDATION)");
+        return;
+    }
 
     let device: &VulkanContext = &ctx;
     let buffer = device

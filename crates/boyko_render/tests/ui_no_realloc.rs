@@ -27,6 +27,12 @@ static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 static REALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 static ARMED: AtomicBool = AtomicBool::new(false);
 
+/// Serializes the three tests: the counters + ARMED flag are PROCESS-GLOBAL while
+/// libtest runs the tests on parallel threads — a sibling test's setup allocations
+/// landing inside another test's armed window is a counter race (a real flake seen
+/// under full-workspace machine load). Each test holds this for its whole body.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // SAFETY: every method forwards verbatim to the system allocator (same ptr/layout
 // contract); the only added work is two relaxed atomic increments when ARMED, which
 // does not affect allocation correctness.
@@ -86,6 +92,7 @@ fn build_frame(scratch: &mut UiRenderScratch, gather: &mut Vec<UiInstance>, n: u
 /// warmed, `clear()` + `extend` reuse the storage and the capacities are byte-stable.
 #[test]
 fn ui_render_scratch_does_not_realloc_in_steady_state() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     const N: usize = 4096;
     let mut scratch = UiRenderScratch::default();
     let mut gather: Vec<UiInstance> = Vec::new();
@@ -131,6 +138,7 @@ fn ui_render_scratch_does_not_realloc_in_steady_state() {
 /// is in place and allocation-free at any N, so this frame is fully allocation-free.
 #[test]
 fn ui_render_scratch_steady_state_smaller_n_reuses_capacity() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     const WARM_N: usize = 2048;
     const STEADY_N: usize = 16;
     let mut scratch = UiRenderScratch::default();
@@ -173,6 +181,7 @@ fn ui_render_scratch_steady_state_smaller_n_reuses_capacity() {
 /// corrected contract (`allocs == 0` across many large-N frames).
 #[test]
 fn ui_render_scratch_sort_is_alloc_free_per_frame_at_large_n() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     const N: usize = 4096;
     let mut scratch = UiRenderScratch::default();
     let mut gather: Vec<UiInstance> = Vec::new();

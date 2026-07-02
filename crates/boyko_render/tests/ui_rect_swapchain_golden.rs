@@ -306,7 +306,17 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
         }
     };
     println!("Vulkan device (windowed, validation on): {}", ctx.device_name());
-    assert!(ctx.validation_enabled(), "validation must be active");
+    if !ctx.validation_enabled() {
+        // The box-level BOYKO_DISABLE_VALIDATION escape hatch (the validation layer is
+        // crash-prone on some machines) removes the layer this gate exists to exercise -
+        // SKIP, mirroring the no-device SKIP convention, instead of failing the suite.
+        assert!(
+            std::env::var_os("BOYKO_DISABLE_VALIDATION").is_some(),
+            "validation must be active when enable_validation is set and the escape hatch is absent"
+        );
+        eprintln!("SKIP: validation disabled (BOYKO_DISABLE_VALIDATION)");
+        return;
+    }
 
     // The UI capability OWNS the `VulkanContext`; the windowed `Surface`/`Swapchain`/
     // `Renderer` borrow the SAME device via `rhi.context()`. Because the windowed

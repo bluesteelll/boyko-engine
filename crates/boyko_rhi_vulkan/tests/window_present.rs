@@ -43,10 +43,17 @@ fn windowed_clear_present_is_validation_clean() {
         }
     };
     println!("Vulkan device (windowed, validation on): {}", ctx.device_name());
-    assert!(
-        ctx.validation_enabled(),
-        "validation must be active when InstanceConfig::enable_validation is set"
-    );
+    if !ctx.validation_enabled() {
+        // The box-level BOYKO_DISABLE_VALIDATION escape hatch overrides
+        // InstanceConfig::enable_validation by design — SKIP the validation oracle
+        // (mirrors the no-device SKIP convention) instead of failing the suite.
+        assert!(
+            std::env::var_os("BOYKO_DISABLE_VALIDATION").is_some(),
+            "validation must be active when enable_validation is set and the escape hatch is absent"
+        );
+        eprintln!("SKIP: validation disabled (BOYKO_DISABLE_VALIDATION)");
+        return;
+    }
 
     // SAFETY: `window` outlives the surface (dropped after it below); its
     // HWND/HINSTANCE are live for the surface's lifetime.

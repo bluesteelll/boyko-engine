@@ -277,7 +277,17 @@ fn sdf_editlist_crater_csg() {
         return;
     };
     println!("Vulkan device (validation on): {}", ctx.device_name());
-    assert!(ctx.validation_enabled(), "validation must be active");
+    if !ctx.validation_enabled() {
+        // The box-level BOYKO_DISABLE_VALIDATION escape hatch (the validation layer is
+        // crash-prone on some machines) removes the layer this gate exists to exercise -
+        // SKIP, mirroring the no-device SKIP convention, instead of failing the suite.
+        assert!(
+            std::env::var_os("BOYKO_DISABLE_VALIDATION").is_some(),
+            "validation must be active when enable_validation is set and the escape hatch is absent"
+        );
+        eprintln!("SKIP: validation disabled (BOYKO_DISABLE_VALIDATION)");
+        return;
+    }
 
     let base = base_only();
     let csg = crater();
@@ -386,7 +396,17 @@ fn box_csg_golden() {
         return;
     };
     println!("Vulkan device (validation on): {}", ctx.device_name());
-    assert!(ctx.validation_enabled(), "validation must be active");
+    if !ctx.validation_enabled() {
+        // The box-level BOYKO_DISABLE_VALIDATION escape hatch (the validation layer is
+        // crash-prone on some machines) removes the layer this gate exists to exercise -
+        // SKIP, mirroring the no-device SKIP convention, instead of failing the suite.
+        assert!(
+            std::env::var_os("BOYKO_DISABLE_VALIDATION").is_some(),
+            "validation must be active when enable_validation is set and the escape hatch is absent"
+        );
+        eprintln!("SKIP: validation disabled (BOYKO_DISABLE_VALIDATION)");
+        return;
+    }
 
     let box_scene = box_at_origin();
     let sphere_scene = inscribed_sphere();
@@ -455,7 +475,17 @@ fn smooth_union_golden() {
         return;
     };
     println!("Vulkan device (validation on): {}", ctx.device_name());
-    assert!(ctx.validation_enabled(), "validation must be active");
+    if !ctx.validation_enabled() {
+        // The box-level BOYKO_DISABLE_VALIDATION escape hatch (the validation layer is
+        // crash-prone on some machines) removes the layer this gate exists to exercise -
+        // SKIP, mirroring the no-device SKIP convention, instead of failing the suite.
+        assert!(
+            std::env::var_os("BOYKO_DISABLE_VALIDATION").is_some(),
+            "validation must be active when enable_validation is set and the escape hatch is absent"
+        );
+        eprintln!("SKIP: validation disabled (BOYKO_DISABLE_VALIDATION)");
+        return;
+    }
 
     let smooth = smooth_pair();
     let hard = hard_pair();
