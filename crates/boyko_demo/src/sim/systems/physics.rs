@@ -123,6 +123,16 @@ pub fn integrate_balls(
 /// change happens between snapshot and write-back, so row `i` is the same ball in
 /// both passes.
 ///
+/// **Row-order coupling invariant.** The snapshot pass here and the write-back in
+/// [`apply_ball_motion`] MUST use a component-*identical* query shape. Archetype
+/// iteration order is per-matched-archetype, so a query matching a different set of
+/// components can match a different set of archetypes (or the same ones in a
+/// different order) and row `i` would then be a *different* ball across the two
+/// passes — a silent misattribution (ball A gets ball B's solved state), not an
+/// OOB. Both queries fetch `(&Position, &Velocity, &Radius) With<BallTag>`; keep
+/// them in lockstep. `apply_ball_motion` fetches `&Radius` purely to preserve this
+/// shape (it does not read it).
+///
 /// `grid` is mutated through `&mut self` method calls (`set_cell_size`,
 /// `rebuild_with`); `snapshot` through a `&mut *` reborrow.
 #[allow(clippy::needless_pass_by_value)]
@@ -287,6 +297,15 @@ pub fn wall_bounce(mut snapshot: ResMut<BallSnapshot>, params: Res<PhysicsParams
 ///
 /// Re-walks the ball rows in the same order [`build_ball_grid`] snapshotted them
 /// (no structural change happened in between, so row `i` is the same ball).
+///
+/// **Row-order coupling invariant.** This query MUST be component-*identical* to
+/// [`build_ball_grid`]'s snapshot query, hence the `&Radius` fetch here even though
+/// this pass never reads the radius. A mismatched shape can match a different set
+/// of archetypes (or the same ones in a different order), which would silently
+/// misattribute row `i` to a different ball between the two passes — the `row >=
+/// snap.pos.len()` guard below catches only OOB, never misattribution. Do not drop
+/// `&Radius` "because it is unused": that would break the coupling.
+///
 /// Position is a plain `&mut Position` (nothing filters on it). **Velocity is a
 /// [`Mut<Velocity>`] change-tracking guard, deref-written only for rows the
 /// solver flagged touched** — `Mut::deref_mut` bumps the row's `changed` tick, so
@@ -304,11 +323,14 @@ pub fn wall_bounce(mut snapshot: ResMut<BallSnapshot>, params: Res<PhysicsParams
 /// a `&*` reborrow — the same false-positive as the `ResMut` systems above.
 #[allow(clippy::needless_pass_by_value)]
 pub fn apply_ball_motion(
-    mut query: Query<(&mut Position, Mut<Velocity>), With<BallTag>>,
+    // `&Radius` is fetched but never read: it keeps this query component-identical
+    // to `build_ball_grid`'s snapshot query, preserving the row-order coupling
+    // (see the doc comment above). Underscore-bound to mark it deliberately unused.
+    mut query: Query<(&mut Position, Mut<Velocity>, &Radius), With<BallTag>>,
     snapshot: Res<BallSnapshot>,
 ) {
     let snap = &*snapshot;
-    for (row, (pos, mut vel)) in query.iter_mut().enumerate() {
+    for (row, (pos, mut vel, _radius)) in query.iter_mut().enumerate() {
         // Defensive: the row count must match the snapshot; if a structural
         // change ever desynchronized them, stop rather than index out of bounds.
         if row >= snap.pos.len() {

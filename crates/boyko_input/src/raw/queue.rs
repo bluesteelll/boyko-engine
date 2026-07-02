@@ -80,10 +80,13 @@ impl RawInputQueue {
             self.tail = (self.tail + 1) & self.mask;
             self.len -= 1;
             self.dropped += 1;
-            debug_assert!(
-                self.dropped == 0,
-                "RawInputQueue overflow — raise RAW_QUEUE_CAP"
-            );
+            // In dev, an overflow is a sizing bug: panic on the *first* dropped
+            // event so it surfaces immediately. In release the branch above has
+            // already evicted the oldest event and bumped `dropped`, so we simply
+            // count and continue (drop-oldest). `false` (not `self.dropped == 0`)
+            // makes the intent explicit — this is an unconditional dev panic, not a
+            // condition that could ever hold after the increment.
+            debug_assert!(false, "RawInputQueue overflow — raise RAW_QUEUE_CAP");
         }
         let head = (self.tail + self.len) & self.mask;
         // `head <= mask < cap == buf.len()`, so the indexed write is in bounds;

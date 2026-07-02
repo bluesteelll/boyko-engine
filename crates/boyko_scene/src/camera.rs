@@ -60,7 +60,12 @@ pub struct Viewport {
 /// A camera component: an entity carrying a [`Camera`] (+ a [`Projection`] and a
 /// [`GlobalTransform`]) is a view into the scene.
 ///
-/// `#[repr(C)]` POD. Selection among multiple cameras is **explicit** (no
+/// `#[repr(C)]` fixes the declaration order of the fields, but this type is **not
+/// byte-blittable POD**: the `viewport: Option<Viewport>` field carries a
+/// `repr(Rust)` enum discriminant whose layout is unspecified, so the struct is
+/// not safe to memcpy to the GPU or reinterpret via `bytemuck`. `#[repr(C)]` here
+/// only pins the field order for the CPU-side component column, not a wire layout.
+/// Selection among multiple cameras is **explicit** (no
 /// implicit "first wins"): an [`ActiveCamera`] override takes precedence; absent
 /// an override, the highest-[`order`](Self::order) camera with
 /// [`is_active`](Self::is_active) set is chosen (see [`resolve_active_camera`]).

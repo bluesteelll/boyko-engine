@@ -362,10 +362,17 @@ impl DemoApp {
         let capacity_bytes = MAX_INSTANCES * stride;
 
         let mut byte_offset: u64 = 0;
+        // Overflow semantics: **truncate-in-order**. Once a chunk would overrun the
+        // instance buffer we latch `full` and skip every *subsequent* chunk too —
+        // not just the offending one. A bare per-chunk `return` (= `continue`)
+        // would skip the over-capacity chunk but let a later, smaller chunk still
+        // fit and write at its `byte_offset`, drawing an order-scrambled subset of
+        // the instances. Latching keeps the drawn set a contiguous in-order prefix.
+        let mut full = false;
         self.world
             .query::<&GpuInstance, ()>()
             .for_each_chunk(|chunk: &[GpuInstance]| {
-                if chunk.is_empty() {
+                if full || chunk.is_empty() {
                     return;
                 }
                 let bytes: &[u8] = bytemuck::cast_slice(chunk);
@@ -376,6 +383,7 @@ impl DemoApp {
                 // from a GPU buffer overrun if the entity count ever exceeds the
                 // cap (the paint callback clamps the draw count to match).
                 if byte_offset + len > capacity_bytes {
+                    full = true;
                     return;
                 }
                 queue.write_buffer(buffer, byte_offset, bytes);
