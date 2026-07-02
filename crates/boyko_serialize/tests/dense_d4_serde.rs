@@ -14,9 +14,11 @@
 //!   only the LIVE members (the compacted snapshot), so the reload has exactly the
 //!   live set.
 //!
-//! The dense component is a POD (`SerPod`/blit) type — the physics-body case. A
-//! non-POD dense type's value-encode is a documented v1.1 follow-up (the loader
-//! skips a ViaFn dense block), so this suite covers the shipped POB path.
+//! The primary dense component is a POD (`SerPod`/blit) type — the physics-body
+//! case. An OWNING dense type (a `Vec` field → `SerializeViaFn`) is DECODED
+//! per-member on load (the v1.1 dense ViaFn path, B9): this suite covers BOTH the
+//! POB blit path and the ViaFn decode path (values + memberships round-trip, and a
+//! mixed POB + ViaFn dense save reloads every store).
 
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
@@ -47,10 +49,10 @@ struct Key {
 }
 
 /// An OWNING dense component: `Clone` but NOT `Copy` (a `Vec` field), so it
-/// classifies `Serializability::SerializeViaFn` — the v1.1 path the loader cannot
-/// yet decode. v1 SKIPS it on load and records the skip in
-/// `LoadReport::dense_stores_skipped`. Exists to exercise the W1 observable-skip
-/// counter; the POD `SBody` above covers the shipped POB dense path.
+/// classifies `Serializability::SerializeViaFn`. Every field is `Wire` (`u32` +
+/// `Vec<u8>`), so the derive auto-installs a `deserialize_fn` and the loader DECODES
+/// it per-member (the v1.1 dense ViaFn path, B9) — its `tag` + `payload` round-trip
+/// through a save→load. The POD `SBody` above covers the POB blit path.
 #[derive(Component, Clone, PartialEq, Debug)]
 #[component(storage = "dense")]
 struct OwningBody {
@@ -268,9 +270,8 @@ fn dense_save_load_resave_is_byte_stable() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// W1: an OWNING (SerializeViaFn) dense block is an OBSERVABLE skip on load —
-// it bumps LoadReport::dense_stores_skipped / dense_members_skipped instead of
-// silently dropping the membership.
+// B9: an OWNING (SerializeViaFn) dense block is DECODED per-member on load — its
+// values + memberships survive a save→load round-trip (not skipped).
 // ════════════════════════════════════════════════════════════════════════════
 
 /// Single owning-dense-component spawn bundle.
@@ -279,36 +280,120 @@ struct OwningOnly {
     body: OwningBody,
 }
 
+/// Collects `(tag, payload)` for every live `OwningBody`, sorted for an
+/// order-stable compare (loaded entity ids are fresh, so equality is by value).
+fn owning_pairs(world: &mut EcsMaster) -> Vec<(u32, Vec<u8>)> {
+    let mut v: Vec<(u32, Vec<u8>)> = world
+        .query::<&OwningBody, ()>()
+        .iter()
+        .map(|b| (b.tag, b.payload.clone()))
+        .collect();
+    v.sort_unstable();
+    v
+}
+
+/// (a) An owning dense component with a ViaFn type survives save→load: its values
+/// (tag + variable-length `Vec` payload) and the live member count are equal across
+/// the round-trip. This is the headline B9 regression — a ViaFn dense store used to
+/// be SKIPPED on load (silent data loss); it is now decoded per-member.
 #[test]
-fn owning_dense_block_is_observable_skip_on_load() {
+fn owning_dense_block_decodes_on_load() {
     let mut src = EcsMaster::new();
     src.run_system(|mut cmds: Commands| {
         for i in 0..3u32 {
             cmds.spawn(OwningOnly {
-                body: OwningBody { tag: i, payload: vec![i as u8; (i + 1) as usize] },
+                // Distinct, variable-length payloads so a byte-move / decode bug
+                // (wrong stride, torn cursor) shows up as a value mismatch.
+                body: OwningBody { tag: 700 + i, payload: vec![i as u8; (i + 1) as usize] },
             });
         }
     });
 
-    // The owning dense store carries 3 live members in the source.
-    let live = src.query::<&OwningBody, ()>().iter().count();
-    assert_eq!(live, 3, "3 owning-dense members in the source");
+    let want = owning_pairs(&mut src);
+    assert_eq!(want.len(), 3, "3 owning-dense members in the source");
 
     let bytes = save(&src);
 
-    // Register the owning component in the destination so the loader resolves it as
-    // a still-dense, owning (SerializeViaFn) type — the W1 skip path.
     let mut dst = EcsMaster::new();
     let _ = OwningBody::component_id();
     let report = load_world(&mut dst, &bytes, LoadEntityPolicy::Remap).expect("load");
 
-    // W1: the owning dense block is SKIPPED (v1 has no decode path) but OBSERVABLY —
-    // the counters record it instead of a silent data loss.
-    assert_eq!(report.dense_stores_skipped, 1, "the owning dense store is counted skipped");
-    assert_eq!(report.dense_members_skipped, 3, "all 3 skipped owning members are counted");
-    // It is NOT a loaded dense store (no POB blit happened).
-    assert_eq!(report.dense_stores_loaded, 0, "no owning dense store is loaded in v1");
-    assert_eq!(report.dense_members_loaded, 0);
-    // The owning entities still materialized (they stay valid without the dense value).
-    assert_eq!(report.entities_loaded, 3, "the owning entities still load");
+    // B9: the owning dense block is DECODED (not skipped) — one store, all members.
+    assert_eq!(report.dense_stores_loaded, 1, "the owning dense store is decoded + loaded");
+    assert_eq!(report.dense_members_loaded, 3, "all 3 owning dense members are decoded");
+    assert_eq!(report.dense_stores_skipped, 0, "no owning dense store is skipped now");
+    assert_eq!(report.dense_members_skipped, 0);
+    assert_eq!(report.entities_loaded, 3, "the owning entities materialize");
+
+    // Values + row count survive the round-trip bit-identically.
+    let got = owning_pairs(&mut dst);
+    assert_eq!(got, want, "every (tag, payload) must round-trip through the ViaFn dense decode");
+}
+
+/// (b) Mixed POB + ViaFn dense stores in ONE save: a `SBody` (POB/blit) dense store
+/// and an `OwningBody` (ViaFn/decode) dense store both restore fully — the loader
+/// blits one and decodes the other in the same dense region.
+#[test]
+fn mixed_pob_and_viafn_dense_stores_roundtrip() {
+    let mut src = EcsMaster::new();
+    // POB dense members (with a table Key so they can be matched back).
+    src.run_system(|mut cmds: Commands| {
+        for i in 0..4u64 {
+            cmds.spawn(KeyBody {
+                key: Key { k: 5000 + i },
+                body: body(i as f32 + 3.0),
+            });
+        }
+    });
+    // ViaFn dense members (a disjoint entity set).
+    src.run_system(|mut cmds: Commands| {
+        for i in 0..3u32 {
+            cmds.spawn(OwningOnly {
+                body: OwningBody { tag: 900 + i, payload: vec![0xA0 | i as u8; (i + 2) as usize] },
+            });
+        }
+    });
+
+    let want_pob = key_body_pairs(&mut src);
+    let want_owning = owning_pairs(&mut src);
+    assert_eq!(want_pob.len(), 4);
+    assert_eq!(want_owning.len(), 3);
+
+    let bytes = save(&src);
+
+    let mut dst = EcsMaster::new();
+    let _ = OwningBody::component_id();
+    let report = load_world(&mut dst, &bytes, LoadEntityPolicy::Remap).expect("load");
+
+    // BOTH dense stores load: 2 stores, 4 + 3 = 7 members, nothing skipped.
+    assert_eq!(report.dense_stores_loaded, 2, "both the POB and ViaFn dense stores load");
+    assert_eq!(report.dense_members_loaded, 7, "4 POB + 3 ViaFn dense members restored");
+    assert_eq!(report.dense_stores_skipped, 0);
+    assert_eq!(report.dense_members_skipped, 0);
+
+    assert_eq!(key_body_pairs(&mut dst), want_pob, "POB dense values round-trip");
+    assert_eq!(owning_pairs(&mut dst), want_owning, "ViaFn dense values round-trip");
+}
+
+/// (c) An owning dense round-trip reaches a byte-stable fixed point (save→load→
+/// re-save is byte-identical) — the ViaFn decode reconstructs the exact compacted
+/// snapshot the saver re-emits, so the wire bytes are deterministic across a reload.
+#[test]
+fn owning_dense_save_load_resave_is_byte_stable() {
+    let mut src = EcsMaster::new();
+    src.run_system(|mut cmds: Commands| {
+        for i in 0..4u32 {
+            cmds.spawn(OwningOnly {
+                body: OwningBody { tag: 42 + i, payload: vec![i as u8; (i + 1) as usize] },
+            });
+        }
+    });
+
+    let bytes1 = save(&src);
+    let mut dst = EcsMaster::new();
+    let _ = OwningBody::component_id();
+    load_world(&mut dst, &bytes1, LoadEntityPolicy::Remap).expect("load");
+    let bytes2 = save(&dst);
+
+    assert_eq!(bytes1, bytes2, "owning dense round-trip must reach a byte-stable fixed point");
 }

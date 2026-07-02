@@ -13,6 +13,14 @@
 //! the parallel change-detection suite). It is a SMALL fixture (4 dense members)
 //! so Miri's interpreter stays fast.
 //!
+//! B9 adds a second target: the OWNING (`SerializeViaFn`) dense DECODE path
+//! (`load_dense_store_via_fn`) — the per-member `deserialize_fn` writes into a raw
+//! `alloc`'d scratch buffer, the reconstructed value is BYTE-MOVED into the dense
+//! store, and the scratch is freed AS RAW BYTES (never dropped). Miri-TB checks the
+//! scratch provenance, the decode-into-uninit write, the byte-move, and — the
+//! decisive check — that the `Vec` heap the owning value carries is neither leaked
+//! nor double-freed across the move.
+//!
 //! Run (Tree Borrows, the project oracle; `-Zmiri-ignore-leaks` for the documented
 //! Commands-apply RawVec leak, `-Zmiri-disable-isolation` so the in-memory buffer
 //! path is unaffected by the isolated-clock):
@@ -53,6 +61,23 @@ struct Key {
 struct KeyBody {
     key: Key,
     body: SBody,
+}
+
+/// An OWNING dense component (a `Vec` heap field → `SerializeViaFn`): the B9 Miri
+/// target. Its `deserialize_fn` reconstructs the `Vec` on load, and the loader
+/// byte-moves the value into the dense store — Miri-TB checks the heap is neither
+/// leaked nor double-freed across that move.
+#[derive(Component, Clone, PartialEq, Debug)]
+#[component(storage = "dense")]
+struct OwningBody {
+    tag: u32,
+    payload: Vec<u8>,
+}
+
+/// Single owning-dense-component spawn bundle.
+#[derive(Bundle)]
+struct OwningOnly {
+    body: OwningBody,
 }
 
 #[inline]
@@ -127,4 +152,55 @@ fn miri_dense_serde_roundtrip_restores_values_and_memberships_no_ub() {
         got, want,
         "every (Key, SBody) pair must round-trip bit-identically through the unsafe load path"
     );
+}
+
+/// B9 Miri target: the OWNING (`SerializeViaFn`) dense DECODE path. Saves a world
+/// with owning dense members → loads into a fresh world → asserts the `Vec` payloads
+/// round-trip. The load-bearing unsafe under test is `load_dense_store_via_fn`: a raw
+/// scratch `alloc`, the per-member `deserialize_fn` decode-into-uninit, the byte-move
+/// into the dense store, and the raw-bytes `dealloc` (never a drop). Miri-TB proves
+/// the moved-out `Vec` heap is freed exactly once (by the store's `Drop` when `dst`
+/// drops), never double-freed (a scratch drop would) nor leaked (a missing dealloc).
+#[test]
+fn miri_owning_dense_serde_roundtrip_no_ub() {
+    let mut src = EcsMaster::new();
+    src.run_system(|mut cmds: Commands| {
+        for i in 0..4u32 {
+            cmds.spawn(OwningOnly {
+                // Variable-length payloads so the byte-move copies a distinct heap
+                // pointer per member (a wrong-stride move would corrupt provenance).
+                body: OwningBody { tag: 300 + i, payload: vec![i as u8; (i + 1) as usize] },
+            });
+        }
+    });
+
+    let mut want: Vec<(u32, Vec<u8>)> = src
+        .query::<&OwningBody, ()>()
+        .iter()
+        .map(|b| (b.tag, b.payload.clone()))
+        .collect();
+    want.sort_unstable();
+    assert_eq!(want.len(), 4, "4 owning dense members in the source");
+
+    let mut bytes = Vec::new();
+    save_world(&src, &SaveOptions::default(), &mut bytes).expect("save");
+
+    let mut dst = EcsMaster::new();
+    let report = load_world(&mut dst, &bytes, LoadEntityPolicy::Remap).expect("load");
+
+    assert_eq!(report.dense_stores_loaded, 1, "the owning dense store is decoded + loaded");
+    assert_eq!(report.dense_members_loaded, 4, "all 4 owning dense members decoded");
+    assert_eq!(report.dense_stores_skipped, 0, "no owning dense store is skipped");
+
+    let mut got: Vec<(u32, Vec<u8>)> = dst
+        .query::<&OwningBody, ()>()
+        .iter()
+        .map(|b| (b.tag, b.payload.clone()))
+        .collect();
+    got.sort_unstable();
+    assert_eq!(
+        got, want,
+        "every (tag, Vec payload) must round-trip through the unsafe ViaFn dense decode"
+    );
+    // `dst` drops here — Miri-TB checks each decoded `Vec` heap is freed exactly once.
 }

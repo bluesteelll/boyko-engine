@@ -53,8 +53,8 @@ use std::path::Path;
 use boyko_ecs::ecs::core::component::component_registry::{self, Serializability, StorageKind};
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::serialize::{
-    LoadColumn, LoadEntityMap, load_archetype, load_dense_store, remap_loaded_entities,
-    required_ctor_in_set,
+    LoadColumn, LoadEntityMap, load_archetype, load_dense_store, load_dense_store_via_fn,
+    remap_loaded_entities, required_ctor_in_set,
 };
 use boyko_ecs::ecs::identifiers::primitives::{ComponentId, EntityId};
 
@@ -110,20 +110,26 @@ pub struct LoadReport {
     /// Dense plan D4 — total dense memberships restored across all dense stores
     /// (the sum of each restored store's member count).
     pub dense_members_loaded: u64,
-    /// Dense plan D4 (v1.1 follow-up) — dense `DenseStoreBlock`s whose resolved
-    /// type is owning ([`SerializeViaFn`](Serializability::SerializeViaFn)) or
-    /// [`Ignore`](Serializability::Ignore): v1 cannot reconstruct an owning dense
-    /// value (no per-member decode path yet), so the block is SKIPPED. The on-disk
-    /// bytes are preserved by the saver (a ViaFn dense block round-trips its
-    /// per-member encoded data + `s2e` table — see `save.rs`), so v1.1 will decode
-    /// them; until then this counter (+ a debug-only warning) makes the skip
-    /// OBSERVABLE rather than silent data loss. Mirrors `types_skipped` /
-    /// `types_bitset_skipped` on the table side.
+    /// Dense plan D4 — dense `DenseStoreBlock`s that carried memberships but no
+    /// decodable data and were SKIPPED (their memberships dropped). Two cases reach
+    /// here, both genuinely undecodable (NOT a data-loss regression):
+    ///
+    /// * an [`Ignore`](Serializability::Ignore) dense type — not serializable by
+    ///   contract (the saver records memberships only);
+    /// * a [`SerializeViaFn`](Serializability::SerializeViaFn) dense type with NO
+    ///   installed `deserialize_fn` (the S1 memberships-only boundary — the saver
+    ///   emitted a zero-length data run).
+    ///
+    /// An OWNING (`SerializeViaFn`) dense block WITH a decoder is now DECODED (the
+    /// v1.1 per-member ViaFn dense path — counted in [`Self::dense_stores_loaded`] /
+    /// [`Self::dense_members_loaded`]), not skipped. This counter (+ a debug-only
+    /// warning) makes a genuine skip OBSERVABLE rather than silent data loss.
+    /// Mirrors `types_skipped` / `types_bitset_skipped` on the table side.
     pub dense_stores_skipped: u32,
-    /// Dense plan D4 (v1.1 follow-up) — total dense memberships dropped by the
-    /// owning/ignore dense skips counted in [`Self::dense_stores_skipped`] (the sum
-    /// of each skipped block's `member_count`). The owning entities stay valid
-    /// without their dense membership/value; this records how many were dropped.
+    /// Dense plan D4 — total dense memberships dropped by the undecodable dense
+    /// skips counted in [`Self::dense_stores_skipped`] (the sum of each skipped
+    /// block's `member_count`). The owning entities stay valid without their dense
+    /// membership/value; this records how many were dropped.
     pub dense_members_skipped: u64,
 }
 
@@ -562,11 +568,15 @@ fn load_one_archetype(
 /// [`load_dense_store`] writer (which remaps each saved owning id and rebuilds the
 /// store). A block whose type is absent / no longer dense is a clean skip, and a
 /// fingerprint-or-version mismatch on a POB blit is a hard error, matching the table
-/// column policy. An OWNING (`SerializeViaFn`) or `Ignore` dense block is an
-/// OBSERVABLE skip — its bytes are preserved on disk for a future v1.1 decode and
-/// the skip is recorded in [`LoadReport::dense_stores_skipped`] /
-/// [`LoadReport::dense_members_skipped`] (plus a debug-only warning), NOT silently
-/// dropped. Runs zero turns for a `dense_store_count == 0` file (the 0%-gate).
+/// column policy. An OWNING (`SerializeViaFn`) dense block WITH an installed decoder
+/// is DECODED per-member (the v1.1 dense ViaFn path — one cursor over the whole
+/// variable-length run, mirroring the table `Decode` column), counted in
+/// [`LoadReport::dense_stores_loaded`] / [`LoadReport::dense_members_loaded`]. A
+/// `SerializeViaFn` block with NO decoder (the S1 memberships-only boundary) or an
+/// `Ignore` block carries no decodable data and stays an OBSERVABLE skip, recorded
+/// in [`LoadReport::dense_stores_skipped`] / [`LoadReport::dense_members_skipped`]
+/// (plus a debug-only warning), NOT silently dropped. Runs zero turns for a
+/// `dense_store_count == 0` file (the 0%-gate).
 fn load_dense_region(
     world: &mut EcsMaster,
     bytes: &[u8],
@@ -644,17 +654,42 @@ fn load_dense_region(
                 report.dense_stores_loaded += 1;
                 report.dense_members_loaded += loaded as u64;
             }
-            Serializability::SerializeViaFn | Serializability::Ignore => {
-                // v1 saves dense components as POB (the physics-body case). A ViaFn
-                // dense decode path is a documented v1.1 follow-up; an `Ignore` dense
-                // block carries memberships but no decodable data. v1 SKIPS the block
-                // (the owning entity stays valid without the dense membership) rather
-                // than reconstruct from undecodable bytes — but the skip is OBSERVABLE:
-                // the saver round-trips the per-member encoded bytes + `s2e` table on
-                // disk (save.rs ViaFn dense path), so the data is forward-decodable in
-                // v1.1; until then the counters below (+ a debug-only warning) make the
-                // skip visible instead of a silent data loss. Mirrors the table-side
-                // `types_skipped` / `types_bitset_skipped` counters.
+            Serializability::SerializeViaFn => {
+                // v1.1 OWNING dense decode: the saver ran `serialize_fn` per live
+                // member into ONE shared cursor (save.rs ViaFn dense path), so the
+                // block's `data` is a VARIABLE-LENGTH concatenated run — its length is
+                // `data_byte_len` (NOT `member_count * stride`; each element is
+                // self-describing). The writer reads `member_count` elements from one
+                // cursor over the whole run, mirroring the table `Decode` column. A
+                // ViaFn dense column with NO installed decoder (the S1 boundary — the
+                // saver emitted a zero-length data run, memberships only) cannot be
+                // reconstructed: skip it OBSERVABLY, exactly as before.
+                let Some(deserialize_fn) = component_registry::get_serialize_info(cid.0)
+                    .and_then(|info| info.deserialize_fn)
+                else {
+                    // No decoder installed — the S1 memberships-only boundary. Skip
+                    // observably (the owning entity stays valid without the value).
+                    report.dense_stores_skipped += 1;
+                    report.dense_members_skipped += member_count as u64;
+                    warn_dense_viafn_skipped(rt.stable_name, member_count);
+                    continue;
+                };
+                // The encoded run occupies exactly `data_byte_len` bytes at
+                // `data_off` (variable-length; validated in-bounds by `slice_at`).
+                let member_data =
+                    slice_at(bytes, data_off, data_byte_len, "dense store ViaFn data")?;
+                let loaded =
+                    load_dense_store_via_fn(world, cid, deserialize_fn, member_data, &saved_s2e, map)?;
+                report.dense_stores_loaded += 1;
+                report.dense_members_loaded += loaded as u64;
+            }
+            Serializability::Ignore => {
+                // An `Ignore` dense block carries memberships but no decodable data
+                // (its contract — not serializable). It stays an OBSERVABLE skip: the
+                // owning entity stays valid without the dense membership, and the
+                // counters (+ a debug-only warning) make the drop visible instead of a
+                // silent data loss. Mirrors the table-side `types_skipped` /
+                // `types_bitset_skipped` counters.
                 report.dense_stores_skipped += 1;
                 report.dense_members_skipped += member_count as u64;
                 warn_dense_viafn_skipped(rt.stable_name, member_count);
@@ -665,20 +700,21 @@ fn load_dense_region(
     Ok(())
 }
 
-/// Debug-only tripwire for an OWNING/`Ignore` dense block that v1 cannot decode
-/// (W1): names the component + dropped member count so a ViaFn dense store does not
-/// vanish without a trace during development. No-op in release (the `LoadReport`
-/// counters carry the signal there); no log-crate dependency — a bare `eprintln!`,
-/// matching the project's existing diagnostic pattern (`boyko_rhi`).
+/// Debug-only tripwire for a genuinely-undecodable dense block (an `Ignore` type,
+/// or a `SerializeViaFn` type with no installed `deserialize_fn`): names the
+/// component + dropped member count so a dense store's memberships do not vanish
+/// without a trace during development. No-op in release (the `LoadReport` counters
+/// carry the signal there); no log-crate dependency — a bare `eprintln!`, matching
+/// the project's existing diagnostic pattern (`boyko_rhi`). An OWNING dense block
+/// WITH a decoder is decoded, not warned about.
 #[cfg(debug_assertions)]
 #[cold]
 #[inline(never)]
 fn warn_dense_viafn_skipped(name: &str, member_count: usize) {
     eprintln!(
-        "boyko_serialize: dense store for component `{name}` is owning \
-         (SerializeViaFn/Ignore) — v1 cannot decode it; skipped {member_count} \
-         member(s) (bytes preserved on disk for v1.1, recorded in \
-         LoadReport::dense_stores_skipped)"
+        "boyko_serialize: dense store for component `{name}` carries no decodable \
+         data (Ignore, or SerializeViaFn with no installed deserialize_fn); skipped \
+         {member_count} member(s) (recorded in LoadReport::dense_stores_skipped)"
     );
 }
 

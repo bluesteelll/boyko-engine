@@ -121,6 +121,27 @@ struct Inventory {
     flags: Vec<u8>,
 }
 
+/// Owning DENSE component (a `Vec` heap field → `SerializeViaFn`, `storage =
+/// "dense"`). REQUIRED (B9) so the fuzz corpus carries a dense ViaFn
+/// `DenseStoreBlock`: the generic byte-mutation classes then stomp the dense
+/// region's headers / `s2e` table / variable-length data run, exercising
+/// `load_dense_store_via_fn`'s untrusted-bytes discipline (a malformed run must
+/// surface as a `LoadError::Decode`, never UB / panic / abort — the C3 obligation
+/// on the new decode path).
+#[derive(Component, Clone, PartialEq, Debug)]
+#[component(storage = "dense")]
+struct DenseOwning {
+    tag: u32,
+    blob: Vec<u8>,
+}
+
+/// Single dense-owning spawn bundle (a bare dense component does not auto-impl
+/// `Bundle`).
+#[derive(boyko_macros::Bundle)]
+struct DenseOwningOnly {
+    body: DenseOwning,
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // splitmix64 PRNG — constant-seeded, reproducible (no Date/rand/Math.random)
 // ════════════════════════════════════════════════════════════════════════════
@@ -198,6 +219,7 @@ fn register_components() {
     let _ = Heavy::component_id();
     let _ = ZstTag::component_id();
     let _ = Inventory::component_id();
+    let _ = DenseOwning::component_id();
 }
 
 /// Builds the multi-archetype corpus world: mixed-width POB + a ZST tag + an OWNING
@@ -282,6 +304,24 @@ fn build_world(rows: usize, present: &[bool; 3]) -> EcsMaster {
             .expect("spawn owning + pob");
         }
     }
+
+    // A dense ViaFn store (B9): a few owning dense members so the corpus carries a
+    // `DenseStoreBlock` classified `SerializeViaFn` (a variable-length encoded run +
+    // `s2e` table). Spawned via `Commands` — the dense-routing spawn path (a bare
+    // dense component is signature-excluded, so `create_entity`/`spawn_one` cannot
+    // place it into the dense store). Kept small (dense-count scales with `rows`) so
+    // the fuzz + Miri passes stay fast.
+    let drows = rows.clamp(1, 3);
+    w.run_system(move |mut cmds: boyko_ecs::ecs::core::system::Commands| {
+        for i in 0..drows as u32 {
+            cmds.spawn(DenseOwningOnly {
+                body: DenseOwning {
+                    tag: 0xD0_0000 + i,
+                    blob: vec![(i & 0xFF) as u8; (i as usize % 3) + 1],
+                },
+            });
+        }
+    });
 
     w
 }
