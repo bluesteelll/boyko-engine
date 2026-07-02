@@ -25,11 +25,11 @@
 use core::marker::PhantomData;
 
 use boyko_ecs::ecs::core::resources::resource::Resource;
+use boyko_ecs::ecs::core::resources::resource_id_for;
 use boyko_ecs::ecs::identifiers::primitives::ResourceId;
 use boyko_utils::bit_mask::bit_set_256::BitSet256;
 
 use crate::action::actionlike::{ActionKind, Actionlike};
-use crate::action::resource_id::id_for;
 use crate::constants::MAX_ACTIONS;
 
 /// The processed state of every action, queried by gameplay systems.
@@ -431,11 +431,13 @@ impl<A: Actionlike> Default for ActionState<A> {
 
 // NOT `#[derive(Resource)]`: the derive caches the id in a `static` inside the
 // generic `resource_id()` body, which collapses every `A` onto one id
-// (rust#22991). Mint through the `TypeId`-keyed registry instead (plan §7.1, C1).
+// (rust#22991). Mint through the shared kernel `TypeId`-keyed registry
+// `boyko_ecs::…::resource_type_registry` (published for reuse — the same map
+// `State<S>` uses).
 impl<A: Actionlike> Resource for ActionState<A> {
     #[inline]
     fn resource_id() -> ResourceId {
-        id_for::<Self>()
+        resource_id_for::<Self>()
     }
 }
 

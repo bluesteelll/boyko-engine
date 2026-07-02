@@ -17,6 +17,12 @@ pub(crate) mod nonsend_resource_registry;
 pub mod nonsend_resources;
 pub mod resource;
 pub(crate) mod resource_registry;
+// First-class kernel registry that interns a `TypeId → ResourceId` mapping for
+// generic resource types (`State<S>` / `NextState<S>` / `StateTransitionRecord<S>`
+// and `boyko_input`'s `ActionState<A>` / `InputMap<A>`), where the per-impl
+// `static SLOT` idiom is unsound (rust#22991). Publishing it replaces the
+// duplicate registry `boyko_input` previously hand-rolled (Principle 0).
+pub mod resource_type_registry;
 // Module name mirrors the public `Resources` slab type; the parent module
 // `resources` is the subsystem namespace.
 #[allow(clippy::module_inception)]
@@ -35,3 +41,9 @@ pub use resources::Resources;
 // entry point. Q6 RESOLUTION: keeps the registry module gated while still
 // allowing external derive expansion.
 pub use resource_registry::register_new;
+
+// `resource_id_for` is the first-class kernel entry point for interning a
+// generic resource type's `ResourceId`. `State<S>` and `boyko_input`'s
+// `ActionState<A>` / `InputMap<A>` reach it through this re-export. See
+// `resource_type_registry` for the rust#22991 rationale.
+pub use resource_type_registry::resource_id_for;

@@ -1,5 +1,20 @@
-//! Process-global `ResourceId` minting for the generic state resources
-//! `State<S>` / `NextState<S>` / `StateTransitionRecord<S>` (Phase 17 D3).
+//! First-class kernel registry that interns a `TypeId → ResourceId` mapping for
+//! **generic** resource types whose `resource_id()` body is itself generic.
+//!
+//! # Who uses this
+//!
+//! Any resource whose `Resource::resource_id()` is implemented on a *generic*
+//! type reaches its stable [`ResourceId`] through [`resource_id_for`]:
+//!
+//! * `State<S>` / `NextState<S>` / `StateTransitionRecord<S>` — the Phase 17
+//!   state resources (`crate::ecs::core::state`).
+//! * `ActionState<A>` / `InputMap<A>` — the `boyko_input` action resources.
+//!
+//! Non-generic resources keep using `#[derive(Resource)]`, which caches the id
+//! in a per-type `static OnceLock<ResourceId>` inside a *monomorphic* body —
+//! that is sound because the body is one-per-concrete-type. This registry is the
+//! canonical replacement for the derive **only on the generic path**, where that
+//! `static` idiom is unsound (see below).
 //!
 //! # Why a `TypeId → ResourceId` HashMap instead of a per-impl `static SLOT`
 //!
@@ -12,23 +27,24 @@
 //! a `static` declared in a generic function is NOT monomorphised — every
 //! instantiation shares one static. Consequence for `State<S>`: every distinct
 //! `S` would collapse to the SAME `ResourceId`, so `State<AppState>` and
-//! `State<MenuState>` would silently alias one resource slot.
+//! `State<MenuState>` would silently alias one resource slot — reinterpreting
+//! the bytes of the wrong type (UB / heap corruption). The same trap collapses
+//! `ActionState<GameplayAction>` and `ActionState<MenuAction>`.
 //!
 //! This is exactly the trap the query-type registry
 //! (`crate::ecs::core::iters::query::query_type_registry`) already solved for
 //! `(D, F)` pairs. We reuse that proven pattern verbatim: a process-global
 //! `OnceLock<Mutex<HashMap<TypeId, ResourceId>>>` keyed by
-//! `TypeId::of::<T>()`, where `T` is the concrete generic resource
-//! (`State<S>` / `NextState<S>` / `StateTransitionRecord<S>`).
+//! `TypeId::of::<T>()`, where `T` is the concrete generic resource.
 //!
 //! # Cost
 //!
-//! Paid at most once per `T` per process, on the cold registration path
-//! (a `Mutex::lock` + `HashMap` probe + a single `resource_registry::register_new`
-//! mint). Never on the steady-state hot path: `Res<State<S>>::get_param`
-//! caches the resolved `ResourceId` in `ResState<State<S>>` at `init_state`,
-//! so every per-frame `in_state` read goes through the cached id with zero
-//! map traffic.
+//! Paid at most once per concrete `T` per process, on the cold registration
+//! path (a `Mutex::lock` + `HashMap` probe + a single
+//! [`resource_registry::register_new`] mint). Never on the steady-state hot
+//! path: `Res<T>::get_param` caches the resolved `ResourceId` in `ResState<T>`
+//! at init, so every per-frame read goes through the cached id with zero map
+//! traffic.
 
 use std::any::TypeId;
 use std::collections::HashMap;
@@ -39,15 +55,15 @@ use crate::ecs::core::resources::resource_registry;
 use crate::ecs::identifiers::primitives::ResourceId;
 
 /// Process-global registry mapping `TypeId::of::<T>()` to the `ResourceId`
-/// minted for the generic state resource `T`.
+/// minted for the generic resource `T`.
 ///
 /// Replaces the per-impl `static SLOT` pattern, which collapses across
 /// monomorphisations inside a generic `resource_id()` body (see the module
 /// doc-comment for the rust#22991 / rfcs#2130 rationale).
 static REGISTRY: OnceLock<Mutex<HashMap<TypeId, ResourceId>>> = OnceLock::new();
 
-/// Returns the process-global [`ResourceId`] for the generic state resource
-/// `T`, minting it on first call.
+/// Returns the process-global [`ResourceId`] for the generic resource `T`,
+/// minting it on first call.
 ///
 /// The get-or-mint is atomic under the registry `Mutex`: the map is probed,
 /// a fresh id minted via [`resource_registry::register_new`] **only if
@@ -59,16 +75,21 @@ static REGISTRY: OnceLock<Mutex<HashMap<TypeId, ResourceId>>> = OnceLock::new();
 /// the global `NEXT_RESOURCE_ID` counter and stores `ResourceInfo::new_static`
 /// — so there is no recursion through this function.
 ///
+/// All generic resources (state `State<S>` / `NextState<S>` /
+/// `StateTransitionRecord<S>`, input `ActionState<A>` / `InputMap<A>`) share
+/// this one map, so their ids come from a single `TypeId`-keyed space over the
+/// global resource-id counter — distinct `TypeId`s always mint distinct ids.
+///
 /// # Panics
 ///
 /// Propagates [`resource_registry::register_new`]'s panics (resource-slab
-/// exhaustion at `RESOURCE_SLOT_COUNT`, or a Component/Resource clash). Panics
-/// if the registry `Mutex` is poisoned by a previous panicking caller.
-pub(crate) fn resource_id_for<T: Resource>() -> ResourceId {
+/// exhaustion at `RESOURCE_SLOT_COUNT`, or a Component/Resource clash for `T`).
+/// Panics if the registry `Mutex` is poisoned by a previous panicking caller.
+pub fn resource_id_for<T: Resource>() -> ResourceId {
     let registry = REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
     let mut map = registry
         .lock()
-        .expect("invariant: state resource registry mutex poisoned");
+        .expect("invariant: resource type registry mutex poisoned");
     let key = TypeId::of::<T>();
     if let Some(&id) = map.get(&key) {
         return id;
@@ -76,18 +97,18 @@ pub(crate) fn resource_id_for<T: Resource>() -> ResourceId {
     // `register_new` mints from `NEXT_RESOURCE_ID` and stores
     // `ResourceInfo::new_static::<T>()`; it does not call `T::resource_id()`,
     // so this is not re-entrant.
-    let id = ResourceId(resource_registry::register_new::<T>());
+    let id = ResourceId::new(resource_registry::register_new::<T>());
     map.insert(key, id);
     id
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::ecs::core::resources::resource::Resource;
     use crate::ecs::core::state::next_state::NextState;
     use crate::ecs::core::state::state::State;
     use crate::ecs::core::state::states::States;
     use crate::ecs::core::state::transition_record::StateTransitionRecord;
-    use crate::ecs::core::resources::resource::Resource;
 
     // Two DISTINCT state types. The whole point of the rust#22991 guard is that
     // a generic-body `static` would collapse `State<A>` and `State<B>` onto one
@@ -115,7 +136,7 @@ mod tests {
     /// body would NOT be monomorphised — every instantiation would share one
     /// static, collapsing `State<StateA>` and `State<StateB>` onto the SAME id
     /// (silent aliasing of two resource slots). The `TypeId`-keyed registry
-    /// (D3) prevents that. This test FAILS if the collapsing static is ever
+    /// prevents that. This test FAILS if the collapsing static is ever
     /// reintroduced.
     ///
     /// It asserts three independence axes:

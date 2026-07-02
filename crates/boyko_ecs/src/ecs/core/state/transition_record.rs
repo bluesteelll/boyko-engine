@@ -3,9 +3,9 @@
 
 use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
 use crate::ecs::core::resources::resource::Resource;
+use crate::ecs::core::resources::resource_type_registry::resource_id_for;
 use crate::ecs::core::state::next_state::NextState;
 use crate::ecs::core::state::state::State;
-use crate::ecs::core::state::state_resource_registry::resource_id_for;
 use crate::ecs::core::state::states::States;
 use crate::ecs::identifiers::primitives::ResourceId;
 

@@ -3,7 +3,7 @@
 use std::ops::Deref;
 
 use crate::ecs::core::resources::resource::Resource;
-use crate::ecs::core::state::state_resource_registry::resource_id_for;
+use crate::ecs::core::resources::resource_type_registry::resource_id_for;
 use crate::ecs::core::state::states::States;
 use crate::ecs::identifiers::primitives::ResourceId;
 
@@ -44,7 +44,7 @@ impl<S: States> Resource for State<S> {
     // The `ResourceId` is minted through the `TypeId`-keyed process-global
     // registry, NOT a `static ID: OnceLock<_>` in this generic body: such a
     // static collapses across monomorphisations (rust#22991), aliasing every
-    // `State<S>` onto one slot. See `state_resource_registry`.
+    // `State<S>` onto one slot. See `resources::resource_type_registry`.
     #[inline]
     fn resource_id() -> ResourceId {
         resource_id_for::<State<S>>()

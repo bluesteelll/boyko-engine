@@ -2,10 +2,13 @@
 //! action state, and the per-frame aggregation.
 //!
 //! # I4 (this round)
-//! `resource_id` mints a distinct `ResourceId` per concrete `A` for the generic
-//! `ActionState<A>` / `InputMap<A>` resources (plan §7.1, C1); the `Resource`
-//! impls live next to each type; the `update_action_state` ingest system and the
-//! frame-stable fixed snapshot (plan §7.3) land in `process` / `state`.
+//! The generic `ActionState<A>` / `InputMap<A>` resources mint a distinct
+//! `ResourceId` per concrete `A` through the shared kernel registry
+//! `boyko_ecs::ecs::core::resources::resource_id_for` (plan §7.1, C1) — the same
+//! `TypeId`-keyed map `State<S>` uses, published for cross-crate reuse so no
+//! duplicate registry lives here (Principle 0). The `Resource` impls live next
+//! to each type; the `update_action_state` ingest system and the frame-stable
+//! fixed snapshot (plan §7.3) land in `process` / `state`.
 //!
 //! # I5 (this round)
 //! `rebind` adds the [`RebindSession`](rebind::RebindSession) state machine
@@ -21,7 +24,6 @@ pub mod map;
 pub mod names;
 pub mod process;
 pub mod rebind;
-pub mod resource_id;
 pub mod state;
 
 pub(crate) mod clash;

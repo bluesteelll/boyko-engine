@@ -1,7 +1,7 @@
 //! The [`NextState<S>`] resource — a queued state-transition request (Phase 17 D2).
 
 use crate::ecs::core::resources::resource::Resource;
-use crate::ecs::core::state::state_resource_registry::resource_id_for;
+use crate::ecs::core::resources::resource_type_registry::resource_id_for;
 use crate::ecs::core::state::states::States;
 use crate::ecs::identifiers::primitives::ResourceId;
 

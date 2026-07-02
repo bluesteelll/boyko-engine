@@ -55,7 +55,8 @@ enum CameraAction {
 
 /// A plain `#[derive(Resource)]` type — its monomorphic `resource_id()` body
 /// mints from the SAME global resource-id counter (`register_new`) the generic
-/// `id_for` uses. Gate 1 asserts the generic mint never collides with it.
+/// `resource_id_for` kernel registry uses. Gate 1 asserts the generic mint
+/// never collides with it.
 struct PlainResource {
     _v: u32,
 }
