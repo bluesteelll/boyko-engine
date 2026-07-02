@@ -449,7 +449,13 @@ float csm_sample_cascade(uint c, float3 P, float3 n, float nol) {
     float3 ndc = clip.xyz / clip.w;
     float2 uv;
     uv.x = ndc.x * 0.5 + 0.5;
-    uv.y = 1.0 - (ndc.y * 0.5 + 0.5);      // Vulkan framebuffer Y-flip (matches project_to_screen)
+    // NO second Y-flip: the cascade depth pass renders into a POSITIVE-height viewport (it does NOT
+    // use a negative-height Vulkan flip), so the hardware stores the occluder at fy=(ndc.y*0.5+0.5)*DIM
+    // — and `csm_cascade_view_proj` ALREADY negates light-up once (its `-inv_h*up` clip row). A second
+    // `1.0 - (...)` here would Y-flip the READ vs the WRITE, mirroring every shadow across the cascade's
+    // light-up=0 line (invisible only when the caster sits on that line — the camera-fit fixed point;
+    // a world-fixed off-axis caster shows the full mirror). Match the write convention exactly.
+    uv.y = ndc.y * 0.5 + 0.5;
     // Outside this cascade's footprint there is no shadow data for it — treat as lit (the SELECT
     // already picked the tightest in-range cascade; a footprint miss here means fully lit). `ref`
     // is the receiver's light-space NDC depth (Vulkan [0,1] depth range).
@@ -546,7 +552,10 @@ float spot_atlas_visibility(uint s, float3 P, float3 n, float nol) {
     float3 ndc = clip.xyz / clip.w;
     float2 uv;
     uv.x = ndc.x * 0.5 + 0.5;
-    uv.y = 1.0 - (ndc.y * 0.5 + 0.5);      // Vulkan framebuffer Y-flip (matches csm_sample_cascade)
+    uv.y = ndc.y * 0.5 + 0.5;              // NO 2nd Y-flip (same as csm_sample_cascade): the spot matrix
+                                           // already Y-flips once (-f*up) into a positive-height viewport;
+                                           // a 1.0-(...) double-flips = latent mirror (masked when the
+                                           // caster sits on the cone axis — the fixed point).
     // Outside this spot's cone footprint there is no shadow data — treat as lit (the cone falloff
     // already drove the contribution to 0 at the edge). `ref` is the receiver's light-space NDC
     // depth (Vulkan [0,1] depth range).
@@ -618,7 +627,12 @@ float punctual_atlas_visibility(uint base, float3 P, float3 n, float nol) {
     float inv_ma = (ma > 1e-8) ? (1.0 / ma) : 0.0;
     float2 uv;
     uv.x = uvc.x * inv_ma * 0.5 + 0.5;
-    uv.y = 1.0 - (uvc.y * inv_ma * 0.5 + 0.5);
+    // NO second Y-flip (the CSM mirror, applied to the point cube). uvc.y is ALREADY -(up.dir) — the
+    // face matrix's own `-f*up` Y-flip — and the atlas depth pass writes into a POSITIVE-height
+    // viewport (no negative-height Vulkan flip), so the stored texel is at ndc.y*0.5+0.5. A `1.0 - (...)`
+    // here would Y-mirror every point shadow about uv.y=0.5 (invisible only for a caster on the face's
+    // central axis — the fixed point; an off-axis box/slab shows the full mirror). Net Y inversions = 1.
+    uv.y = uvc.y * inv_ma * 0.5 + 0.5;
     // The receiver's own normalized radial distance — the SAME expression the depth FS stored, so
     // the LessOrEqual compare is apples-to-apples. Saturated to the [0,1] depth range.
     float ref = saturate(length(dir) * inv_range);
@@ -1070,7 +1084,14 @@ void main(uint3 tid : SV_DispatchThreadID) {
             // common short/cheap nearby case) so the shadow ray stops AT the light (an
             // occluder past the light cannot shadow). Gated by the per-light flag + the
             // dominant-N cap + the NoL > 0 skip (a back-faced light marches nothing).
-            float vis = shadow;
+            // Render Shadow fix: a punctual light's visibility must be its OWN shadow, never the
+            // directional's `shadow` (gMaterial.r = the marcher's analytic SUN shadow). When the
+            // punctual atlas is armed (`punctual_shadow_mode != OFF`) start FULLY LIT and let
+            // `punctual_shadow` (the cube/spot map, multiplied in at the accumulate below) be the
+            // only occlusion — otherwise the sun's analytic shadow zeroes the point on exactly the
+            // hemisphere it should light (the SDF spheres "behind the light" went dark). OFF scenes
+            // keep `vis = shadow` byte-for-byte (the 0%-gate; the host oracle uses `shadow` too).
+            float vis = (punctual_shadow_mode != PUNCTUAL_SHADOW_MODE_OFF) ? 1.0 : shadow;
             if (multi_light && light_casts_sdf_shadow(L)
                 && marched < MAX_SDF_SHADOW_CASTERS_PER_PIXEL
                 && NoL > SHADOW_NDOTL_EPS) {

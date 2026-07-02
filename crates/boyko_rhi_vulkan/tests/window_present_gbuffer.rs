@@ -95,10 +95,9 @@ use boyko_rhi_vulkan::ffi::{
     VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VkExtent2D,
 };
 use boyko_rhi_vulkan::swapchain::{
-    BrickActivation, CsmDepthActivation, GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES,
-    GBUFFER_PUSH_BYTES, GBufferFrame, GBufferMeshDraw, GBufferScene, PunctualDepthActivation,
-    Renderer, SsaoActivation,
-    Surface, Swapchain,
+    BrickActivation, CsmDepthActivation, FRAMES_IN_FLIGHT, GBUFFER_IDENTITY_INSTANCE,
+    GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferFrame, GBufferMeshDraw, GBufferScene,
+    PunctualDepthActivation, Renderer, SsaoActivation, Surface, Swapchain,
 };
 use boyko_rhi_vulkan::window::{CapturedMsg, Window};
 
@@ -285,7 +284,11 @@ const SPOT_SHADOW_NORMAL_BIAS: f32 = 0.02;
 struct CsmSceneResources {
     cascade: VulkanTexture,
     sampler: VulkanSampler,
-    ubo: BoundBuffer,
+    // The cascade UBO RING (one host-coherent slot per in-flight frame): the resolve binds
+    // `ubo[frame_index]` @13 and the viewer writes that SAME slot per frame (a per-frame CSM
+    // re-fit), so the sibling in-flight frame reads a DIFFERENT slot — the lock-free
+    // write-after-read fix. A STATIC scene seeds every slot identically (byte-identical output).
+    ubo: [BoundBuffer; FRAMES_IN_FLIGHT],
     depth_pipeline: VulkanGraphicsPipeline,
     depth_vs: boyko_rhi_vulkan::rhi_impl::VulkanShaderModule,
     depth_fs: boyko_rhi_vulkan::rhi_impl::VulkanShaderModule,
@@ -338,15 +341,20 @@ impl CsmSceneResources {
             },
         )
         .expect("CSM PCF comparison sampler");
-        let ubo = RhiDevice::create_buffer(
-            device,
-            &BufferDesc {
-                size: CSM_UBO_BYTES,
-                usage: BufferUsage::UNIFORM,
-                location: MemoryLocation::HostVisibleCoherent,
-            },
-        )
-        .expect("CSM cascade UBO (ResolvedCsm mirror)");
+        // The cascade UBO RING (one host-coherent slot per in-flight frame): the lock-free
+        // per-frame re-fit binds `ubo[frame_index]` and writes that SAME slot, so the sibling
+        // in-flight frame reads a DIFFERENT slot (no write-after-read overlap).
+        let ubo: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            RhiDevice::create_buffer(
+                device,
+                &BufferDesc {
+                    size: CSM_UBO_BYTES,
+                    usage: BufferUsage::UNIFORM,
+                    location: MemoryLocation::HostVisibleCoherent,
+                },
+            )
+            .expect("CSM cascade UBO (ResolvedCsm mirror)")
+        });
         let depth_vs = RhiDevice::create_shader_module(device, csm_depth_vs_spirv())
             .expect("CSM depth VS module");
         let depth_fs = RhiDevice::create_shader_module(device, csm_depth_fs_spirv())
@@ -509,7 +517,11 @@ impl CsmSceneResources {
     /// trailing `[active_count..4)` cascade slots stay zero (bound-but-unread; the resolve SELECT
     /// loops only `[0..active_count)`). The per-cascade `view_proj` bytes are the SAME ones the
     /// depth pass stamps (the O1 single-matrix pin).
-    fn upload(&self, device: &VulkanContext, fit: &CsmDemoFit) {
+    ///
+    /// `slot` selects the RING slot to write (the in-flight frame index): the viewer writes the
+    /// slot the upcoming present binds + reads, so the sibling in-flight frame reads a DIFFERENT
+    /// slot (the lock-free write-after-read fix). A static scene seeds every slot identically.
+    fn upload(&self, device: &VulkanContext, fit: &CsmDemoFit, slot: usize) {
         let mut bytes = [0u8; CSM_UBO_BYTES as usize];
         for (c, cascade) in fit.cascades.iter().enumerate().take(fit.active_count as usize) {
             let base = c * 80; // CascadeData stride
@@ -523,13 +535,21 @@ impl CsmSceneResources {
         // After the 4 × 80-byte CascadeData array (320 B): active_count @320, csm_mode_word @324.
         bytes[320..324].copy_from_slice(&fit.active_count.to_le_bytes());
         bytes[324..328].copy_from_slice(&1u32.to_le_bytes());
-        let dst = RhiDevice::buffer_mapped_ptr(device, &self.ubo).expect("CSM UBO mapped");
-        // SAFETY: `dst` points to `CSM_UBO_BYTES` mapped host-coherent bytes (the UBO was created
-        // at exactly that size); `bytes` is a distinct stack array of the same length;
-        // host-coherent => the write is visible before the next submit reads the UBO.
+        let dst = RhiDevice::buffer_mapped_ptr(device, &self.ubo[slot]).expect("CSM UBO mapped");
+        // SAFETY: `dst` points to `CSM_UBO_BYTES` mapped host-coherent bytes (the slot's UBO was
+        // created at exactly that size); `bytes` is a distinct stack array of the same length;
+        // host-coherent => the write is visible before the next submit reads the UBO. `slot` is a
+        // valid ring index (`< FRAMES_IN_FLIGHT`), and that slot is per-frame-private — the sibling
+        // in-flight frame binds + reads a DIFFERENT slot, so this write is race-free (no fence wait).
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.as_ptr(), CSM_UBO_BYTES as usize);
         }
+    }
+
+    /// The cascade UBO ring (one slot per in-flight frame) for the [`GBufferScene::csm_cascade_ring`]
+    /// field. The resolve binds slot `frame_index` @13; the viewer writes that same slot per frame.
+    fn csm_ring(&self) -> &[BoundBuffer; FRAMES_IN_FLIGHT] {
+        &self.ubo
     }
 
     /// Tears the resources down (reverse creation order).
@@ -549,7 +569,9 @@ impl CsmSceneResources {
             RhiDevice::destroy_graphics_pipeline(device, self.depth_pipeline);
             RhiDevice::destroy_shader_module(device, self.depth_fs);
             RhiDevice::destroy_shader_module(device, self.depth_vs);
-            RhiDevice::destroy_buffer(device, self.ubo);
+            for slot in self.ubo {
+                RhiDevice::destroy_buffer(device, slot);
+            }
             RhiDevice::destroy_sampler(device, self.sampler);
             RhiDevice::destroy_texture(device, self.cascade);
         }
@@ -1515,20 +1537,24 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
     // `M2_GRID_PARAMS_OFFSET` (80). The widened marcher cbuffer declares 224 B. The tail holds the
     // ACTIVATED clip-map's baked per-level params (`clipmap.params()`); the brick-ON 'B' toggle reads
     // them across all 3 levels, the OFF path (`brick_levels = 1`) reads only level 0.
-    let camera_uniform = RhiDevice::create_buffer(
-        device,
-        &BufferDesc {
-            size: B5_CAMERA_UBO_BYTES_M4 as u64,
-            usage: BufferUsage::UNIFORM,
-            location: MemoryLocation::HostVisibleCoherent,
-        },
-    )
-    .expect("camera uniform buffer");
+    // The camera/extent UBO RING (binding 5): one host-coherent slot per in-flight frame. Every
+    // slot is seeded IDENTICALLY here and never rewritten in this offscreen path, so the output
+    // stays byte-identical to the pre-ring single-buffer version; the ring only matters for the
+    // interactive viewer (which writes `camera_ring[frame_index]` per frame, the lock-free fix).
+    let camera_ring: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+        RhiDevice::create_buffer(
+            device,
+            &BufferDesc {
+                size: B5_CAMERA_UBO_BYTES_M4 as u64,
+                usage: BufferUsage::UNIFORM,
+                location: MemoryLocation::HostVisibleCoherent,
+            },
+        )
+        .expect("camera uniform buffer")
+    });
     {
         let pc = CompositePushConstants::ortho(COMPOSITE_W, COMPOSITE_H);
         assert_eq!(pc.count, PIXELS);
-        let mapped = RhiDevice::buffer_mapped_ptr(device, &camera_uniform)
-            .expect("host-visible uniform buffer is mapped");
         let bytes = pc.as_bytes();
         debug_assert_eq!(bytes.len(), M2_GRID_PARAMS_OFFSET, "camera block must be 80 B (offset of the M4 tail)");
         // The M4 array tail at offset 80: the clip-map's baked per-level snapped origins (the values
@@ -1539,17 +1565,22 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         let m4 = *clipmap.params();
         let m4_bytes = m4.as_ubo_bytes();
         debug_assert_eq!(M2_GRID_PARAMS_OFFSET + m4_bytes.len(), B5_CAMERA_UBO_BYTES_M4);
-        // SAFETY: `mapped` points to `B5_CAMERA_UBO_BYTES_M4` (224) mapped host-coherent bytes; the
-        // 80-byte camera block is written at offset 0 and the (224-80)-byte M4 tail at offset 80 —
-        // together exactly 224 in-bounds bytes, disjoint. No GPU work is in flight yet (the present
-        // loop follows), so the writes are unsynchronized-safe.
-        unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
-            core::ptr::copy_nonoverlapping(
-                m4_bytes.as_ptr(),
-                mapped.as_ptr().add(M2_GRID_PARAMS_OFFSET),
-                m4_bytes.len(),
-            );
+        for slot in &camera_ring {
+            let mapped = RhiDevice::buffer_mapped_ptr(device, slot)
+                .expect("host-visible uniform buffer is mapped");
+            // SAFETY: `mapped` points to `B5_CAMERA_UBO_BYTES_M4` (224) mapped host-coherent bytes; the
+            // 80-byte camera block is written at offset 0 and the (224-80)-byte M4 tail at offset 80 —
+            // together exactly 224 in-bounds bytes, disjoint. No GPU work is in flight yet (the present
+            // loop follows), so the writes are unsynchronized-safe. Every ring slot is seeded with the
+            // SAME bytes (byte-identical to the pre-ring single buffer).
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+                core::ptr::copy_nonoverlapping(
+                    m4_bytes.as_ptr(),
+                    mapped.as_ptr().add(M2_GRID_PARAMS_OFFSET),
+                    m4_bytes.len(),
+                );
+            }
         }
     }
 
@@ -1914,7 +1945,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         marcher: &marcher,
         vocab_layout: &vocab_layout,
         edit_list: &edit_list,
-        camera_uniform: &camera_uniform,
+        camera_ring: &camera_ring,
         tiles_buffer: &tiles_buffer,
         // Brick bindings 9..=14: the ACTIVATED clip-map's REAL per-level resources. Level 0's grid +
         // atlas at @9/@10, level 1 at @11/@12, level 2 at @13/@14 — the genuine 3-level cache (NOT the
@@ -1990,7 +2021,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         // sample never runs and the trio is bound-but-unread (the 0%-gate — byte-identical pixels).
         csm_cascade_texture: &csm.cascade,
         csm_compare_sampler: &csm.sampler,
-        csm_cascade_ubo: &csm.ubo,
+        csm_cascade_ring: csm.csm_ring(),
         csm: None,
         // Shadow Phase 5 Inc-1-GPU: the atlas trio bound at resolve @14/@15 (ALWAYS), the punctual
         // depth pass OFF (`atlas_punctual: None`). On this golden present `punctual_shadow_mode == 0`,
@@ -2312,7 +2343,9 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         RhiDevice::destroy_buffer(device, light_staging);
         RhiDevice::destroy_buffer(device, light_table);
         RhiDevice::destroy_buffer(device, material_table);
-        RhiDevice::destroy_buffer(device, camera_uniform);
+        for slot in camera_ring {
+            RhiDevice::destroy_buffer(device, slot);
+        }
         RhiDevice::destroy_buffer(device, edit_list);
     }
     drop(swapchain);
@@ -2454,27 +2487,35 @@ fn p0_windowed_coarse_cull_matches_uncull() {
     // --- The camera/extent UBO (binding 5), host-seeded ONCE at the COMPOSITE ORTHO extent. The
     // M4 tail is zero here (brick is held OFF on both readback frames, so the marcher never reads
     // the per-level params; binding 9..=14 still need VALID descriptors below). ---
-    let camera_uniform = RhiDevice::create_buffer(
-        device,
-        &BufferDesc {
-            size: B5_CAMERA_UBO_BYTES_M4 as u64,
-            usage: BufferUsage::UNIFORM,
-            location: MemoryLocation::HostVisibleCoherent,
-        },
-    )
-    .expect("camera uniform buffer");
+    // The camera/extent UBO RING (binding 5): one host-coherent slot per in-flight frame, every
+    // slot seeded IDENTICALLY + never rewritten on these two readback frames (byte-identical to the
+    // pre-ring single buffer); the ring only matters for the interactive viewer's per-frame writes.
+    let camera_ring: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+        RhiDevice::create_buffer(
+            device,
+            &BufferDesc {
+                size: B5_CAMERA_UBO_BYTES_M4 as u64,
+                usage: BufferUsage::UNIFORM,
+                location: MemoryLocation::HostVisibleCoherent,
+            },
+        )
+        .expect("camera uniform buffer")
+    });
     {
         let pc = CompositePushConstants::ortho(COMPOSITE_W, COMPOSITE_H);
         assert_eq!(pc.count, PIXELS);
-        let mapped = RhiDevice::buffer_mapped_ptr(device, &camera_uniform)
-            .expect("host-visible uniform buffer is mapped");
         let bytes = pc.as_bytes();
         debug_assert_eq!(bytes.len(), M2_GRID_PARAMS_OFFSET, "camera block must be 80 B");
-        // SAFETY: `mapped` points to `B5_CAMERA_UBO_BYTES_M4` (224) mapped host-coherent bytes; the
-        // 80-byte camera block is written at offset 0 (the M4 tail stays zero — brick is OFF). No
-        // GPU work is in flight yet, so the host write is unsynchronized-safe.
-        unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+        for slot in &camera_ring {
+            let mapped = RhiDevice::buffer_mapped_ptr(device, slot)
+                .expect("host-visible uniform buffer is mapped");
+            // SAFETY: `mapped` points to `B5_CAMERA_UBO_BYTES_M4` (224) mapped host-coherent bytes; the
+            // 80-byte camera block is written at offset 0 (the M4 tail stays zero — brick is OFF). No
+            // GPU work is in flight yet, so the host write is unsynchronized-safe. Every ring slot is
+            // seeded with the SAME bytes (byte-identical to the pre-ring single buffer).
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+            }
         }
     }
 
@@ -2812,7 +2853,7 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         marcher: &marcher,
         vocab_layout: &vocab_layout,
         edit_list: &edit_list,
-        camera_uniform: &camera_uniform,
+        camera_ring: &camera_ring,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),
@@ -2876,7 +2917,7 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         // pass OFF (`csm: None`) — bound-but-unread on this cull-comparison present (the 0%-gate).
         csm_cascade_texture: &csm.cascade,
         csm_compare_sampler: &csm.sampler,
-        csm_cascade_ubo: &csm.ubo,
+        csm_cascade_ring: csm.csm_ring(),
         csm: None,
         // Shadow Phase 5 Inc-1-GPU: the atlas trio bound at resolve @14/@15 (ALWAYS), the punctual
         // depth pass OFF (`atlas_punctual: None`). On this golden present `punctual_shadow_mode == 0`,
@@ -3061,7 +3102,9 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         RhiDevice::destroy_buffer(device, light_staging);
         RhiDevice::destroy_buffer(device, light_table);
         RhiDevice::destroy_buffer(device, material_table);
-        RhiDevice::destroy_buffer(device, camera_uniform);
+        for slot in camera_ring {
+            RhiDevice::destroy_buffer(device, slot);
+        }
         RhiDevice::destroy_buffer(device, edit_list);
     }
     drop(swapchain);
@@ -4166,19 +4209,14 @@ fn spot_host_project(view_proj: &[f32; 16], p: [f32; 3], n: [f32; 3]) -> (f32, f
     (uv_x, uv_y, ndc[2], in_bounds)
 }
 
-/// CSM Increment 3 (Rung B): builds ONE cascade's COLUMN-MAJOR world→light-clip `view_proj`
-/// (`ortho · light_view`) for the sun `sun_dir` (direction TO the light) looking at `center`, with
-/// an orthographic half-extent `half` and light-space z-range `[z_near, z_far]` (Vulkan `[0,1]`
-/// depth). The light eye is pulled back along `sun_dir` by `z_far*0.5`. Generalizes the Rung-A fit
-/// (which fixed `half`/`z` to demo constants) so each cascade can size its own footprint. Returns
-/// the 16 column-major floats (the byte layout the depth VS push `@0` + the resolve cbuffer expect).
-fn csm_cascade_view_proj(
-    sun_dir: [f32; 3],
-    center: [f32; 3],
-    half: f32,
-    z_near: f32,
-    z_far: f32,
-) -> [f32; 16] {
+/// CSM shimmer fix: the orthonormal LIGHT basis `(right, up, fwd = -sun)` for a sun `sun_dir`
+/// (direction TO the light) — computed EXACTLY as [`csm_cascade_view_proj`] derives it, so the
+/// per-cascade texel SNAP can project the cascade center onto the SAME right/up axes the matrix
+/// is built from (snapping on any other basis would not land the origin on a shadow-map texel).
+///
+/// `sun = norm(sun_dir)`; `fwd = -sun`; `up_hint = [0,1,0]` unless `fwd` is nearly collinear with it
+/// (then `[0,0,1]` — the W5 alt-up guard); `right = norm(cross(up_hint, fwd))`; `up = cross(fwd, right)`.
+fn csm_light_basis(sun_dir: [f32; 3]) -> ([f32; 3], [f32; 3], [f32; 3]) {
     let norm = |v: [f32; 3]| {
         let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
         [v[0] / l, v[1] / l, v[2] / l]
@@ -4193,18 +4231,7 @@ fn csm_cascade_view_proj(
     let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 
     let sun = norm(sun_dir);
-    // The light looks back along -sun (from the sun toward the scene). Eye pulled back along sun.
-    let pullback = z_far * 0.5;
-    let eye = [
-        center[0] + sun[0] * pullback,
-        center[1] + sun[1] * pullback,
-        center[2] + sun[2] * pullback,
-    ];
-    let fwd = norm([
-        center[0] - eye[0],
-        center[1] - eye[1],
-        center[2] - eye[2],
-    ]); // = -sun
+    let fwd = [-sun[0], -sun[1], -sun[2]]; // = -sun (the light looks back toward the scene)
     // Right/up via a world-up hint (swap when nearly collinear — the W5 alt-up guard).
     let up_hint = if dot(fwd, [0.0, 1.0, 0.0]).abs() > 0.99 {
         [0.0, 0.0, 1.0]
@@ -4213,6 +4240,35 @@ fn csm_cascade_view_proj(
     };
     let right = norm(cross(up_hint, fwd));
     let up = cross(fwd, right);
+    (right, up, fwd)
+}
+
+/// CSM Increment 3 (Rung B): builds ONE cascade's COLUMN-MAJOR world→light-clip `view_proj`
+/// (`ortho · light_view`) for the sun `sun_dir` (direction TO the light) looking at `center`, with
+/// an orthographic half-extent `half` and light-space z-range `[z_near, z_far]` (Vulkan `[0,1]`
+/// depth). The light eye is pulled back along `sun_dir` by `z_far*0.5`. Generalizes the Rung-A fit
+/// (which fixed `half`/`z` to demo constants) so each cascade can size its own footprint. Returns
+/// the 16 column-major floats (the byte layout the depth VS push `@0` + the resolve cbuffer expect).
+fn csm_cascade_view_proj(
+    sun_dir: [f32; 3],
+    center: [f32; 3],
+    half: f32,
+    z_near: f32,
+    z_far: f32,
+) -> [f32; 16] {
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+
+    // The light basis (right, up, fwd = -sun) — the SAME derivation the texel snap uses, so the
+    // snap projects `center` onto EXACTLY the axes this matrix is built from.
+    let (right, up, fwd) = csm_light_basis(sun_dir);
+    let sun = [-fwd[0], -fwd[1], -fwd[2]]; // norm(sun_dir)
+    // The light looks back along -sun (from the sun toward the scene). Eye pulled back along sun.
+    let pullback = z_far * 0.5;
+    let eye = [
+        center[0] + sun[0] * pullback,
+        center[1] + sun[1] * pullback,
+        center[2] + sun[2] * pullback,
+    ];
     // light_view rows = basis; translation = -dot(basis, eye). z_light = forward·(P-eye) (POSITIVE
     // into the scene), matching `perspective_mvp_bytes`'s view convention.
     let tx = -dot(right, eye);
@@ -4333,6 +4389,24 @@ fn csm_demo_cascades(
         let diameter = (2.0 * radius).max(1.0);
         let half = diameter * 0.5;
         let texel_size = diameter / CSM_SHADOW_DIM as f32;
+        // TEXEL SNAP (shadow-shimmer fix): snap the cascade center onto the shadow-map texel grid in
+        // the LIGHT plane. The bounding-sphere RADIUS is rotation-invariant (a sphere), so under
+        // camera motion `texel_size` is constant frame-to-frame and ONLY `center` translates; quantizing
+        // its light-plane (right/up) coordinates to whole texels keeps each shadow texel mapping to the
+        // same world footprint between frames, killing the edge-crawl an unsnapped per-frame re-fit causes.
+        let (right, up, _fwd) = csm_light_basis(sun_dir);
+        let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let cx = dot(right, center);
+        let cy = dot(up, center);
+        let cxs = (cx / texel_size).floor() * texel_size;
+        let cys = (cy / texel_size).floor() * texel_size;
+        let dx = cxs - cx;
+        let dy = cys - cy;
+        let center = [
+            center[0] + right[0] * dx + up[0] * dy,
+            center[1] + right[1] * dx + up[1] * dy,
+            center[2] + right[2] * dx + up[2] * dy,
+        ];
         // The light z-range spans the sphere plus the pullback margin (the eye is pulled back
         // `z_far*0.5`); a generous far keeps the caster inside the ortho box.
         let z_far = diameter * 2.0;
@@ -5177,18 +5251,63 @@ fn showcase_material_table() -> [u32; 36] {
 }
 
 /// The interactive viewer scene: the [`grand_showcase_config`] room with the directional CSM turned
-/// OFF (camera-INDEPENDENT so flying around stays correct — the CSM cascade fit follows the camera
-/// frustum and would shadow-shift as the eye moves) and bright SDF light MARKERS added so the owner
-/// sees where each light sits. The point cube shadow ([`point_cube_fit`]) is camera-independent and
-/// stays on.
+/// ON and RE-FIT PER FRAME to the live camera (with a texel snap) — camera-correct AND shimmer-free —
+/// plus bright SDF light MARKERS so the owner sees where each light sits. The point cube shadow
+/// ([`point_cube_fit`]) is camera-independent and stays on.
+/// The interactive viewer's WORLD-FIXED directional sun-shadow cascade: ONE cascade whose ortho
+/// footprint covers the raster casters (the two boxes) + their sun-shadow landing zone on the floor,
+/// computed ONCE — camera-INDEPENDENT.
+///
+/// A sun shadow is glued to the world; it must NOT move as the camera flies. Re-fitting the cascade
+/// to the camera frustum each frame (the `csm_demo_cascades` PSSM path the showcase dump uses) makes
+/// the hard shadow SWIM across the scene for a free-fly camera — even with a per-texel snap the
+/// footprint rides the eye. For a BOUNDED scene (this room) a single fixed map covering the casters
+/// is the correct, stable choice: the shadow stays put in the world, the camera flies freely around
+/// it, and any mesh in `mesh_draw` casts a real geometric shadow. `split_far` is huge so every
+/// visible pixel SELECTs this one cascade (the resolve's `view_z < split_far` test).
+fn viewer_csm_fit() -> CsmDemoFit {
+    // A FIXED sphere enclosing the two boxes (box [1.6,0.46,-1.2] + slab [2.0,0.95,-2.6]) AND the
+    // short sun-shadow they cast on the floor (the sun is high — elevation ~55deg — so the shadows
+    // are compact). 2048 texels over a ~9-unit diameter ≈ 0.0044 u/texel: a 0.9-unit box spans ~200
+    // texels, sharp enough.
+    // Cover the WHOLE room, not just the casters: a tight box-centered fit left the footprint edge
+    // cutting across the far/left walls (the slab silhouette projected onto a wall that is not the
+    // true receiver = a hard "weird shadow" band). The room AABB is x∈[-4.5,4.5], y∈[0,5.2],
+    // z∈[-5,5]; its bounding sphere is center [0,2.6,0], radius ~7.21, so radius 8 encloses it with
+    // margin. 2048 texels over a 16-unit diameter ≈ 0.0078 u/texel (~115 texels across a 0.9u box —
+    // still a sharp hard shadow), and every receiver in view is inside the footprint (no edge band).
+    const VIEWER_CSM_CENTER: [f32; 3] = [0.0, 2.6, 0.0];
+    const VIEWER_CSM_RADIUS: f32 = 8.0;
+    let half = VIEWER_CSM_RADIUS;
+    // Light-space z far: `csm_cascade_view_proj` pulls the light eye back by `z_far*0.5`, so `half*4`
+    // puts the casters (within `half` of the center) safely inside `[near, z_far]`.
+    let view_proj =
+        csm_cascade_view_proj(SHOWCASE_SUN_DIR, VIEWER_CSM_CENTER, half, CSM_DEMO_NEAR, half * 4.0);
+    let texel_size = (2.0 * half) / CSM_SHADOW_DIM as f32;
+    // Emit THREE IDENTICAL room-covering cascades (NOT one). The resolve's view-z SELECT runs on the
+    // LIVE camera; a SINGLE cascade is fragile — if the SELECT ever walks past it (e.g. a header-vs-
+    // UBO `active_count` mismatch), it lands on a zeroed cascade whose `split_far == 0` makes
+    // `step(0, view_z) == 1` for every positive view_z, samples a ZERO matrix, and returns "lit" =
+    // NO shadow. Three identical valid cascades + ascending `split_far` keep the SELECT on a covering
+    // cascade from ANY camera distance (room view-z stays < the last split), on the proven
+    // `active_count == 3` depth+resolve path. All three are the SAME world-fixed fit, so whichever is
+    // picked (and the cross-fade between them) gives the identical, stable shadow.
+    let mut cascades = [CsmDemoCascade { view_proj, split_far: 0.0, texel_size }; CSM_MAX_CASCADES];
+    cascades[0].split_far = 6.0;
+    cascades[1].split_far = 14.0;
+    cascades[2].split_far = 100.0;
+    CsmDemoFit { cascades, active_count: 3 }
+}
+
 fn viewer_config() -> ShowcaseConfig {
     let mut cfg = grand_showcase_config();
 
-    // Camera-independence: drop the directional CSM (its PSSM cascades are fit to the live camera
-    // frustum, so the directional hard shadow would slide as the eye flies — wrong for free-look).
-    // The marcher's ANALYTIC SDF soft shadow toward the sun (driven by `light_dir`, NOT the CSM) is
-    // camera-independent and STAYS, so the SDF spheres still cast a correct shadow from any angle.
-    cfg.csm = None;
+    // CSM is ON with a WORLD-FIXED directional cascade: a sun shadow is glued to the world, so it
+    // must NOT move as the camera flies. Grand's seed re-fits the cascades to the camera frustum (it
+    // swims for a free-fly camera even with a texel snap); override it with the fixed room fit
+    // ([`viewer_csm_fit`]). It still arms the depth pass + activation and is seeded into every UBO
+    // ring slot once at build — `run_interactive_viewer` never re-fits it, so the shadow stays put.
+    cfg.csm = Some(viewer_csm_fit());
 
     // LIGHT MARKERS (bright SDF spheres so each light's position reads from every side). Appended to
     // the marched edit list ≤ MAX_SDF_EDITS (grand starts at 2 SDF edits; +2 markers = 4 total).
@@ -5220,8 +5339,11 @@ fn viewer_config() -> ShowcaseConfig {
 /// and presents one frame. Runs until the window closes (`WM_QUIT`) or `Escape` is pressed.
 ///
 /// All heavy resources are owned by the caller ([`run_showcase_dump`]); this borrows them. The
-/// camera UBO is written through `scene.camera_uniform` (the host-coherent mapped buffer the scene
-/// already binds), so the write lands in the SAME memory the marcher samples.
+/// camera UBO is written through a per-frame RING (`scene.camera_ring`): each frame writes the slot
+/// the upcoming present binds + reads ([`Renderer::frame_index`]), so the sibling in-flight frame
+/// reads a DIFFERENT slot — the lock-free write-after-read fix (no fence stall). The directional CSM
+/// is WORLD-FIXED ([`viewer_csm_fit`], seeded once at build), so the sun-shadow stays glued to the
+/// world as the camera flies (a per-frame camera-fit cascade swims for a free-fly camera).
 #[allow(clippy::too_many_arguments)]
 fn run_interactive_viewer<'ctx>(
     ctx: &VulkanContext,
@@ -5241,10 +5363,24 @@ fn run_interactive_viewer<'ctx>(
     let mut yaw: f32 = 0.0;
     let mut pitch: f32 = VIEWER_INITIAL_PITCH;
 
+    // RDG Steps 1c–1e visual gate: press `G` to TOGGLE the framegraph-driven barrier path
+    // (default OFF = the hand-authored barriers; ON = the auto-derived graph drives every
+    // barrier). Flip it live while flying — the frame must render IDENTICALLY in both modes
+    // (the graph is sound-superset: same dependencies, same pixels). Watch the console for any
+    // Vulkan validation-layer errors when ON. Edge-detected so a held key toggles once.
+    let mut use_framegraph = false;
+    let mut prev_g = false;
+
     let mut queue = RawInputQueue::with_capacity(1024);
     let mut physical = PhysicalInput::new();
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
     let clear = [0.02_f32, 0.02, 0.03, 1.0];
+
+    eprintln!(
+        "[viewer] WASD+Space/Ctrl fly, mouse look, Esc quit.  \
+         G = toggle RDG framegraph barriers (currently OFF = hand path). \
+         Flip G while flying: the image must look IDENTICAL, console must stay validation-clean."
+    );
 
     // `pump_events` returns false on WM_QUIT (the window closed) — exit then.
     while window.pump_events() {
@@ -5285,6 +5421,19 @@ fn run_interactive_viewer<'ctx>(
         if pressed(KeyCode::Escape) {
             break;
         }
+
+        // Edge-detected `G` toggle: flip the framegraph-driven barrier path live so the owner
+        // can A/B the graph-ON vs hand-OFF frame for pixel identity + validation cleanliness.
+        let g_now = pressed(KeyCode::KeyG);
+        if g_now && !prev_g {
+            use_framegraph = !use_framegraph;
+            renderer.set_use_framegraph(use_framegraph);
+            eprintln!(
+                "[framegraph] use_framegraph = {use_framegraph}  ({})",
+                if use_framegraph { "GRAPH drives barriers" } else { "HAND path" }
+            );
+        }
+        prev_g = g_now;
 
         // WASD planar move + Space/Ctrl vertical fly (Q/E also lower/raise as a fallback).
         let mut mv = [0.0_f32; 3];
@@ -5335,20 +5484,31 @@ fn run_interactive_viewer<'ctx>(
         mvp[84] = 1;
         scene.mvp = mvp;
 
-        // Upload the 80-byte camera block to the SAME host-coherent buffer the scene binds at b5.
-        if let Some(mapped) = RhiDevice::buffer_mapped_ptr(ctx, scene.camera_uniform) {
+        // The directional CSM is WORLD-FIXED (seeded ONCE at build from `viewer_csm_fit` via
+        // `cfg.csm` → every UBO ring slot + the depth-pass activation): a sun shadow must NOT move as
+        // the camera flies, so there is NOTHING to update here per frame. The depth push and the
+        // resolve UBO carry the SAME fixed `view_proj` (the O1 single-matrix pin holds by construction
+        // — both were seeded from one fit at setup).
+
+        // The lock-free per-frame RING slot: the slot the UPCOMING present binds + reads. The
+        // renderer advances `frame_index` at the END of `render_gbuffer_frame` (post-present), so the
+        // value read HERE is exactly the `self.frame_index` the recorder will bind this frame. The
+        // sibling in-flight frame binds + reads `ring[s ^ 1]`, so these writes are race-free with NO
+        // fence wait. (The accessor lives on `Renderer`, not `Swapchain` — same round-robin counter.)
+        let s = renderer.frame_index();
+
+        // Upload the 80-byte camera block to THIS frame's camera-ring slot (the b5 UBO @5).
+        if let Some(mapped) = RhiDevice::buffer_mapped_ptr(ctx, &scene.camera_ring[s]) {
             let bytes = cam.as_bytes();
-            // SAFETY: `mapped` points to the camera UBO's host-coherent mapped range (≥ 224 B); the
+            // SAFETY: `mapped` points to ring slot `s`'s host-coherent mapped range (≥ 224 B); the
             // 80-byte camera block is written at offset 0 (the M4 tail stays as seeded — brick OFF).
-            // The previous frame's GPU read completed before this write: `render_gbuffer_frame` waits
-            // this slot's in-flight fence at its start, but to be strict the write precedes the
-            // submit below within one serial loop iteration, and the buffer is per-`run_showcase_dump`
-            // (no other writer). `bytes.len()` (80) ≤ the mapped size.
+            // Slot `s` is per-frame-PRIVATE: the sibling in-flight frame binds + reads slot `s ^ 1`,
+            // so this write overlaps no GPU read — race-free + lock-free (no fence wait). `bytes.len()`
+            // (80) ≤ the mapped size.
             unsafe {
                 core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
             }
         }
-
         // Present one frame. `Ok(false)` = the swapchain went OUT_OF_DATE and was recreated inside
         // the call — skip this frame and try again next loop. `Err` = a fatal device error: stop.
         // SAFETY: `ctx`/`surface`/`swapchain`/`renderer` share one device; every `scene` resource is
@@ -6175,43 +6335,53 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
     } else {
         B5_CAMERA_UBO_BYTES_M4
     };
-    let camera_uniform = RhiDevice::create_buffer(
-        device,
-        &BufferDesc {
-            size: ubo_bytes as u64,
-            usage: BufferUsage::UNIFORM,
-            location: MemoryLocation::HostVisibleCoherent,
-        },
-    )
-    .expect("camera uniform buffer");
+    // The camera/extent UBO RING (binding 5): one host-coherent slot per in-flight frame. Every
+    // slot is seeded IDENTICALLY here. For the one-shot readback dump no slot is rewritten (so the
+    // output is byte-identical to the pre-ring single buffer); for the interactive viewer the loop
+    // writes `camera_ring[frame_index]` per frame — the lock-free write-after-read fix.
+    let camera_ring: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+        RhiDevice::create_buffer(
+            device,
+            &BufferDesc {
+                size: ubo_bytes as u64,
+                usage: BufferUsage::UNIFORM,
+                location: MemoryLocation::HostVisibleCoherent,
+            },
+        )
+        .expect("camera uniform buffer")
+    });
     {
         let pc = &cfg.camera;
         assert_eq!(pc.count, PIXELS);
-        let mapped = RhiDevice::buffer_mapped_ptr(device, &camera_uniform)
-            .expect("host-visible uniform buffer is mapped");
         let bytes = pc.as_bytes();
         debug_assert_eq!(bytes.len(), M2_GRID_PARAMS_OFFSET, "camera block must be 80 B");
-        // SAFETY: `mapped` points to `ubo_bytes` (224 or 256) mapped host-coherent bytes; the
-        // 80-byte camera block is written at offset 0 (the M4 tail stays zero — brick OFF). No GPU
-        // work is in flight yet, so the host write is unsynchronized-safe.
-        unsafe {
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
-        }
-        // MDF Stage-2c: write the `MeshSdfParams` grid transform at offset 224 so the marcher's
-        // `mesh_sdf_sample` maps a world point into the texture's UVW + decodes to a world distance.
-        if let Some(tex) = mesh_sdf_texture.as_ref() {
-            let params = MeshSdfParams::from_field(tex.field());
-            let pbytes = params.as_bytes();
-            debug_assert_eq!(MESH_SDF_PARAMS_OFFSET + pbytes.len(), ubo_bytes);
-            // SAFETY: the buffer is `ubo_bytes` (256) here; the 32-byte block is written at
-            // `MESH_SDF_PARAMS_OFFSET` (224), entirely within the mapped range; unique host writer
-            // before any GPU work.
+        let mesh_sdf_params = mesh_sdf_texture
+            .as_ref()
+            .map(|tex| MeshSdfParams::from_field(tex.field()));
+        for slot in &camera_ring {
+            let mapped = RhiDevice::buffer_mapped_ptr(device, slot)
+                .expect("host-visible uniform buffer is mapped");
+            // SAFETY: `mapped` points to `ubo_bytes` (224 or 256) mapped host-coherent bytes; the
+            // 80-byte camera block is written at offset 0. No GPU work is in flight yet, so the host
+            // write is unsynchronized-safe. Every ring slot is seeded with the SAME bytes.
             unsafe {
-                core::ptr::copy_nonoverlapping(
-                    pbytes.as_ptr(),
-                    mapped.as_ptr().add(MESH_SDF_PARAMS_OFFSET),
-                    pbytes.len(),
-                );
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+            }
+            // MDF Stage-2c: write the `MeshSdfParams` grid transform at offset 224 so the marcher's
+            // `mesh_sdf_sample` maps a world point into the texture's UVW + decodes to a world distance.
+            if let Some(params) = mesh_sdf_params.as_ref() {
+                let pbytes = params.as_bytes();
+                debug_assert_eq!(MESH_SDF_PARAMS_OFFSET + pbytes.len(), ubo_bytes);
+                // SAFETY: the buffer is `ubo_bytes` (256) here; the 32-byte block is written at
+                // `MESH_SDF_PARAMS_OFFSET` (224), entirely within the mapped range; unique host writer
+                // before any GPU work. Every ring slot receives the SAME tail bytes.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        pbytes.as_ptr(),
+                        mapped.as_ptr().add(MESH_SDF_PARAMS_OFFSET),
+                        pbytes.len(),
+                    );
+                }
             }
         }
     }
@@ -6674,7 +6844,11 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
     // push @0) + the active count. The push TEMPLATE carries `use_model_matrix == 1` (@84); its
     // leading 64 bytes are overwritten per cascade so they are left zero here.
     let csm_activation = cfg.csm.map(|fit| {
-        csm.upload(device, &fit);
+        // Seed EVERY ring slot identically (the static dump path never rewrites; the viewer
+        // overwrites `csm.ubo[frame_index]` per frame with a re-fit — the lock-free fix).
+        for s in 0..FRAMES_IN_FLIGHT {
+            csm.upload(device, &fit, s);
+        }
         let mut cascade_view_proj = [[0u8; 64]; CSM_MAX_CASCADES];
         for (dst, src) in cascade_view_proj
             .iter_mut()
@@ -6763,7 +6937,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
         marcher: &marcher,
         vocab_layout: &vocab_layout,
         edit_list: &edit_list,
-        camera_uniform: &camera_uniform,
+        camera_ring: &camera_ring,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),
@@ -6835,7 +7009,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
         // and the resolve `min`-combines the exact hard shadow onto the floor. OFF ⇒ bound-but-unread.
         csm_cascade_texture: &csm.cascade,
         csm_compare_sampler: &csm.sampler,
-        csm_cascade_ubo: &csm.ubo,
+        csm_cascade_ring: csm.csm_ring(),
         csm: csm_activation.map(|(push, cascade_view_proj, active_count)| CsmDepthActivation {
             pipeline: &csm.depth_pipeline,
             push,
@@ -6940,7 +7114,9 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
             RhiDevice::destroy_buffer(device, light_staging);
             RhiDevice::destroy_buffer(device, light_table);
             RhiDevice::destroy_buffer(device, material_table);
-            RhiDevice::destroy_buffer(device, camera_uniform);
+            for slot in camera_ring {
+                RhiDevice::destroy_buffer(device, slot);
+            }
             RhiDevice::destroy_buffer(device, edit_list);
         }
         drop(swapchain);
@@ -7103,7 +7279,9 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
         RhiDevice::destroy_buffer(device, light_staging);
         RhiDevice::destroy_buffer(device, light_table);
         RhiDevice::destroy_buffer(device, material_table);
-        RhiDevice::destroy_buffer(device, camera_uniform);
+        for slot in camera_ring {
+            RhiDevice::destroy_buffer(device, slot);
+        }
         RhiDevice::destroy_buffer(device, edit_list);
     }
     drop(swapchain);

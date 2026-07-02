@@ -88,6 +88,7 @@ pub mod debug;
 pub mod device;
 pub mod error;
 pub mod ffi;
+pub mod framegraph;
 pub mod memory;
 pub mod mesh_sdf_texture;
 pub mod rhi_impl;

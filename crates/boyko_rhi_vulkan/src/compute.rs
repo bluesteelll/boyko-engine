@@ -284,7 +284,7 @@ static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<155124> = SpirvBlob(*include_bytes!(
 /// → 48472 bytes. Shadow Phase 5 Inc-2 (POINT cube): a POINT light with a real slot BASE instead
 /// reads `punctual_atlas_visibility(base, P, n)` (major-axis cube face-select + LINEAR-distance
 /// compare over the six contiguous layers `base..base+6`); 48472 → 50976 bytes.
-static DEFERRED_PBR_SPV: SpirvBlob<51360> = SpirvBlob(*include_bytes!(concat!(
+static DEFERRED_PBR_SPV: SpirvBlob<51384> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/deferred_pbr.comp.spv"
 )));
