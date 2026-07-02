@@ -1097,7 +1097,9 @@ impl InterpGpu {
         }
         // SAFETY: `mapped` points to `count * 96` mapped host-coherent bytes (the buffer this
         // slot was sized to); `bytes` is exactly that length and copied in full, in-bounds.
-        // The per-slot fence (waited before this frame binds slot `fi`) freed the prior use.
+        // CALLER CONTRACT: slot `fi`'s in-flight fence was waited THIS frame before the call
+        // (`Renderer::wait_frame_in_flight`) — or no submission references the slot yet (the
+        // pre-loop seeding) — so the slot's previous occupant no longer reads the buffer.
         unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len()) };
     }
 
@@ -5569,6 +5571,17 @@ fn viewer_config() -> ShowcaseConfig {
         boyko_sdf_math::MAX_SDF_EDITS
     );
 
+    // Shadow-dolly diagnostic override (`BOYKO_DOLLY_CASCADES=1`): force a SINGLE active
+    // cascade so the dolly run can A/B "3 identical cascades + view-z SELECT" against
+    // "no SELECT at all" — if a camera-distance shadow flip vanishes here, the cascade
+    // LAYERS (or the select) differ in practice despite the identical world-fixed fit.
+    if std::env::var_os("BOYKO_DOLLY_CASCADES").is_some_and(|v| v == "1") {
+        if let Some(fit) = cfg.csm.as_mut() {
+            fit.active_count = 1;
+            fit.cascades[0].split_far = 100.0; // one cascade covers every room view-z
+        }
+    }
+
     cfg
 }
 
@@ -5614,6 +5627,8 @@ fn run_interactive_viewer<'ctx, 's>(
     let mut eye = ROOM_CAM_EYE;
     let mut yaw: f32 = 0.0;
     let mut pitch: f32 = VIEWER_INITIAL_PITCH;
+    // Edge-trigger latch for the `P` pose probe (shadow-flip triage).
+    let mut p_latch = false;
 
     let mut queue = RawInputQueue::with_capacity(1024);
     let mut physical = PhysicalInput::new();
@@ -5646,6 +5661,9 @@ fn run_interactive_viewer<'ctx, 's>(
             interp.write_pairs(ctx, fi, &pairs);
         }
     }
+    // Per-slot "snapshot outdated" flags for the D5 substep-gated upload (see the loop body).
+    // Both slots were just seeded from the same pairs, so both start clean.
+    let mut pair_dirty = [false; FRAMES_IN_FLIGHT];
 
     eprintln!(
         "[viewer] WASD+Space/Ctrl fly, mouse look, Esc quit.{}",
@@ -5694,6 +5712,19 @@ fn run_interactive_viewer<'ctx, 's>(
         };
         if pressed(KeyCode::Escape) {
             break;
+        }
+        // Pose probe (shadow-flip triage): `P` prints the exact camera pose so the owner can
+        // report the lit-face and shadowed-face positions as reproducible coordinates. Edge-
+        // triggered on the level bitset via a latch so holding P prints once.
+        {
+            let p_now = pressed(KeyCode::KeyP);
+            if p_now && !p_latch {
+                eprintln!(
+                    "[pose] eye=[{:.3}, {:.3}, {:.3}] yaw={:.4} pitch={:.4}",
+                    eye[0], eye[1], eye[2], yaw, pitch
+                );
+            }
+            p_latch = p_now;
         }
 
         // WASD planar move + Space/Ctrl vertical fly (Q/E also lower/raise as a fallback).
@@ -5753,12 +5784,20 @@ fn run_interactive_viewer<'ctx, 's>(
         // resolve UBO carry the SAME fixed `view_proj` (the O1 single-matrix pin holds by construction
         // — both were seeded from one fit at setup).
 
-        // The lock-free per-frame RING slot: the slot the UPCOMING present binds + reads. The
-        // renderer advances `frame_index` at the END of `render_gbuffer_frame` (post-present), so the
-        // value read HERE is exactly the `self.frame_index` the recorder will bind this frame. The
-        // sibling in-flight frame binds + reads `ring[s ^ 1]`, so these writes are race-free with NO
-        // fence wait. (The accessor lives on `Renderer`, not `Swapchain` — same round-robin counter.)
+        // The per-frame RING slot: the slot the UPCOMING present binds + reads. The renderer
+        // advances `frame_index` at the END of `render_gbuffer_frame` (post-present), so the value
+        // read HERE is exactly the `self.frame_index` the recorder will bind this frame. The
+        // sibling in-flight frame binds + reads `ring[s ^ 1]` — but slot `s` itself was last used
+        // by frame N−2, whose late passes (deferred lighting) may STILL be reading `ring[s]` on
+        // the GPU: `drive_frame` waits this slot's fence only INSIDE the render call, AFTER the
+        // writes below. Wait it HERE instead (the in-call wait becomes a no-op), or a moving
+        // camera makes the in-flight frame's lighting read a camera 2 frames NEWER than its
+        // G-buffer raster — the motion-only whole-face shadow flip the shadow-lag diagnostic pins.
         let s = renderer.frame_index();
+        if renderer.wait_frame_in_flight().is_err() {
+            eprintln!("interactive viewer: slot fence wait failed, exiting");
+            break;
+        }
 
         // Pillar B B3: the inline fixed-timestep loop for the bouncing box (interp ON). Accumulate
         // the real frame delta (clamped to MAX_ACCUM — the engine's 250 ms spiral clamp), expend
@@ -5790,11 +5829,19 @@ fn run_interactive_viewer<'ctx, 's>(
                 }
             }
             let alpha = if FIXED_DT > 0.0 { (accum / FIXED_DT).clamp(0.0, 1.0) } else { 0.0 };
-            // Re-upload the pairs when a substep changed the pose (D5 substep-gated discipline); the
-            // alpha slides every frame via the push constant regardless. On the FIRST frame (no
-            // substep yet) still write so the fresh slot holds valid pairs.
+            // Re-upload when THIS SLOT's snapshot is outdated (the D5 substep-gated discipline,
+            // kept PER-SLOT): a substep outdates BOTH ring slots, but only the bound slot gets
+            // written that frame — the sibling must catch up on ITS next frame EVEN IF no new
+            // substep ran then, else any frame rate above the 64 Hz substep rate renders every
+            // no-substep frame from a one-substep-stale pair (a visible backward hitch of the
+            // box — the "not smooth" bounce). The alpha still slides every frame via the push
+            // constant regardless.
             if stepped {
+                pair_dirty = [true; FRAMES_IN_FLIGHT];
+            }
+            if pair_dirty[s] {
                 interp.write_pairs(ctx, s, &pairs);
+                pair_dirty[s] = false;
             }
             // Bind THIS frame slot's draw SSBO as the raster/shadow VS instance source, and arm the
             // interp pass with this frame's overstep alpha. The interp compute writes `draw[s]` (which
@@ -5893,10 +5940,14 @@ fn ab_set_pose(ctx: &VulkanContext, renderer: &Renderer<'_>, scene: &mut GBuffer
     mvp[84] = 1;
     scene.mvp = mvp;
     let s = renderer.frame_index();
+    renderer
+        .wait_frame_in_flight()
+        .expect("invariant: slot fence wait precedes the per-slot camera write");
     if let Some(mapped) = RhiDevice::buffer_mapped_ptr(ctx, &scene.camera_ring[s]) {
         let bytes = cam.as_bytes();
-        // SAFETY: identical contract to `run_interactive_viewer`'s per-frame camera write — ring
-        // slot `s` is per-frame-private (the sibling in-flight frame binds + reads `s ^ 1`), the
+        // SAFETY: identical contract to `run_interactive_viewer`'s per-frame camera write — the
+        // slot fence wait above guarantees slot `s`'s previous occupant (frame N−2) finished all
+        // GPU reads of `camera_ring[s]` (the sibling in-flight frame binds + reads `s ^ 1`), the
         // mapped range is host-coherent and ≥ 80 B, and the 80-byte block is written at offset 0.
         unsafe {
             core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
@@ -6016,6 +6067,275 @@ fn ab_diff_map(a: &[u8], b: &[u8]) -> Vec<u8> {
         po[3] = 0xFF;
     }
     out
+}
+
+/// === Shadow-dolly diagnostic (`BOYKO_SHADOW_DOLLY=1`) ===========================================
+///
+/// Reproduces the owner's report: "standing in front of the column its front face is LIT; as I
+/// WALK TOWARD it a shadow APPEARS on the face." A whole-face shadow flip driven by camera
+/// DISTANCE is not edge scintillation — it is a camera-dependent shadow TERM. The prime suspect
+/// is the CSM view-z cascade SELECT (splits at 6.0 / 14.0 in the viewer fit): if the depth
+/// layers differ in practice, walking across a split boundary flips the sampled layer.
+///
+/// Protocol: dolly the camera straight toward the slab's front face from 8.0 to 1.2 units,
+/// capturing each pose; sample the CENTER pixel (always on the face — the camera looks straight
+/// at it); print `distance | view_z | CPU-selected cascade | center RGB` and flag the largest
+/// step-to-step luminance jump. Run once normally and once with `BOYKO_DOLLY_CASCADES=1`
+/// (active_count forced to 1): if the flip vanishes in the second run, the cascade select /
+/// layer contents are the bug.
+#[allow(clippy::too_many_arguments)]
+fn run_shadow_dolly<'ctx>(
+    ctx: &VulkanContext,
+    surface: &Surface<'_>,
+    swapchain: &mut Swapchain<'ctx>,
+    renderer: &mut Renderer<'ctx>,
+    window: &mut Window,
+    scene: &mut GBufferScene<'_>,
+    frame: &mut GBufferFrame,
+    staging: &BoundBuffer,
+    is_bgra: bool,
+) {
+    // The slab (the owner's "column"): instance_affine(-0.3, 1.0, [2.0, 0.95, -2.6]), half-extents
+    // (0.30, 0.95, 0.40). The camera orbits its center at eye height and dollies in per bearing —
+    // the two single-bearing dollies (straight-on + spawn path) showed NO flip, so this SWEEPS
+    // 8 azimuths x distances hunting the owner's dark-face state programmatically. The look-at
+    // targets the column center so the center pixel is always on whichever face fronts the camera.
+    let target = [2.0_f32, 1.0, -2.6];
+
+    let one_cascade = std::env::var_os("BOYKO_DOLLY_CASCADES").is_some_and(|v| v == "1");
+    println!(
+        "[shadow-dolly] bearing sweep: {} (viewer fit splits 6.0 / 14.0 / 100.0)",
+        if one_cascade { "SINGLE cascade (active_count=1, split 100)" } else { "3 cascades" }
+    );
+
+    // 8 azimuths x 8 distances. Rows print as a compact luminance matrix; any cell whose
+    // luminance deviates > 40 from its bearing's row median is flagged (the dark-face hunt).
+    let bearings = 8u32;
+    let dists = [7.0_f32, 5.5, 4.5, 3.5, 2.8, 2.2, 1.7, 1.3];
+    let mut flagged: Vec<(f32, f32, f32)> = Vec::new(); // (azimuth_deg, dist, lum)
+
+    for b in 0..bearings {
+        let az = (b as f32) * core::f32::consts::TAU / (bearings as f32);
+        let mut row: Vec<f32> = Vec::with_capacity(dists.len());
+        let mut cells = String::new();
+        for &d in &dists {
+            let eye = [
+                target[0] + az.sin() * d,
+                1.55, // eye height ~ the viewer spawn height, constant across the sweep
+                target[2] + az.cos() * d,
+            ];
+            // General look-at (FPS basis: forward = [sin(yaw)cos(p), sin(p), -cos(yaw)cos(p)]).
+            let to = vsub(target, eye);
+            let len = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
+            let f = vscale(to, 1.0 / len);
+            let pose = AbPose { eye, yaw: f[0].atan2(-f[2]), pitch: f[1].asin() };
+
+            for _ in 0..2 {
+                ab_set_pose(ctx, renderer, scene, pose);
+                if !ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, None) {
+                    eprintln!("SKIP shadow-dolly: window closed / swapchain recreated");
+                    return;
+                }
+            }
+            let Some((rgba, w, h)) = ab_capture(
+                ctx, surface, swapchain, renderer, window, scene, frame, staging, is_bgra, pose,
+            ) else {
+                eprintln!("SKIP shadow-dolly: capture failed");
+                return;
+            };
+            let ci = (((h / 2) * w + (w / 2)) * 4) as usize;
+            let lum = 0.2126 * rgba[ci] as f32
+                + 0.7152 * rgba[ci + 1] as f32
+                + 0.0722 * rgba[ci + 2] as f32;
+            row.push(lum);
+            cells.push_str(&format!(" {lum:5.0}"));
+        }
+        // Median-deviation flagging within the bearing row.
+        let mut sorted = row.clone();
+        sorted.sort_by(|a, b2| a.partial_cmp(b2).expect("finite luminance"));
+        let median = sorted[sorted.len() / 2];
+        for (i, &l) in row.iter().enumerate() {
+            if (l - median).abs() > 40.0 {
+                flagged.push(((az.to_degrees()), dists[i], l));
+            }
+        }
+        println!("[shadow-dolly] az {:5.0}° |{}", az.to_degrees(), cells);
+    }
+    println!("[shadow-dolly] dists    |  7.0   5.5   4.5   3.5   2.8   2.2   1.7   1.3");
+    if flagged.is_empty() {
+        println!("[shadow-dolly] NO dark-face flips found across the sweep (median-dev > 40).");
+    } else {
+        for (az, d, l) in &flagged {
+            println!("[shadow-dolly] FLIP CANDIDATE: az {az:.0}° dist {d:.1} lum {l:.0}");
+        }
+    }
+
+    // Dump full frames around the FIRST flip candidate (the flagged distance ± its sweep
+    // neighbors) for visual term identification: which shadow/light term flips.
+    if let Some(&(az_deg, d_mid, _)) = flagged.first() {
+        let az = az_deg.to_radians();
+        let mid_idx = dists.iter().position(|&x| (x - d_mid).abs() < 1e-3).unwrap_or(3);
+        let lo = if mid_idx > 0 { dists[mid_idx - 1] } else { d_mid + 1.0 };
+        let hi = if mid_idx + 1 < dists.len() { dists[mid_idx + 1] } else { d_mid - 0.5 };
+        for (tag, d) in [("before", lo), ("flip", d_mid), ("after", hi)] {
+            let eye = [target[0] + az.sin() * d, 1.55, target[2] + az.cos() * d];
+            let to = vsub(target, eye);
+            let len = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt();
+            let f = vscale(to, 1.0 / len);
+            let pose = AbPose { eye, yaw: f[0].atan2(-f[2]), pitch: f[1].asin() };
+            for _ in 0..2 {
+                ab_set_pose(ctx, renderer, scene, pose);
+                if !ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, None) {
+                    return;
+                }
+            }
+            if let Some((rgba, w, h)) = ab_capture(
+                ctx, surface, swapchain, renderer, window, scene, frame, staging, is_bgra, pose,
+            ) {
+                let path = format!(r"D:\tmp\shadow_dolly_{tag}_d{d:.1}.bmp");
+                match write_bmp(&path, &rgba, w, h) {
+                    Ok(()) => println!("[shadow-dolly] wrote {path}"),
+                    Err(e) => eprintln!("[shadow-dolly] write failed {path}: {e:?}"),
+                }
+            }
+        }
+    }
+}
+
+/// === Shadow-lag diagnostic (`BOYKO_SHADOW_LAG=1`) ===============================================
+///
+/// The owner's decisive observation: the column-face shadow flip happens ONLY while the camera is
+/// IN MOTION and converges as soon as it stops. Every prior capture protocol (A/B, dolly)
+/// presented warm-up / drain frames at a FROZEN pose before reading back — which lets any
+/// one-frame-stale camera input (or an in-flight mapped-UBO overwrite race) converge before the
+/// comparison, masking exactly this bug class. This protocol removes the mask: walk the owner's
+/// exact P-key-probed segment with the pose advancing EVERY frame, request the readback mid-walk,
+/// and keep the pose ADVANCING through the fence-drain frames (the drains never alter the sampled
+/// frame's bytes — its swapchain→staging copy is recorded inside the sampled frame itself); then
+/// byte-compare each in-motion capture against a settled capture at the identical pose. Nonzero
+/// diff convicts a camera-lag-class defect (stale ring slot / write race / intra-frame camera
+/// inconsistency); all-zero pushes the hunt into viewer-loop-only per-frame writes instead.
+#[allow(clippy::too_many_arguments)]
+fn run_shadow_lag<'ctx>(
+    ctx: &VulkanContext,
+    surface: &Surface<'_>,
+    swapchain: &mut Swapchain<'ctx>,
+    renderer: &mut Renderer<'ctx>,
+    window: &mut Window,
+    scene: &mut GBufferScene<'_>,
+    frame: &mut GBufferFrame,
+    staging: &BoundBuffer,
+    is_bgra: bool,
+) {
+    // Owner-reported repro segment (P-key pose probe): front face LIT here → shadow appears while
+    // walking to there, aim fixed the whole way.
+    let a = [0.762_f32, 1.953, 1.456];
+    let b = [1.040_f32, 1.835, 0.583];
+    let (yaw, pitch) = (0.3080_f32, -0.1285);
+    const STEPS: usize = 60; // ~0.92 units over 60 frames ≈ the owner's walk speed at 60 fps
+
+    for (leg, from, to) in [("fwd", a, b), ("rev", b, a)] {
+        let pose_at = |k: usize| {
+            let t = k as f32 / STEPS as f32;
+            AbPose {
+                eye: [
+                    from[0] + (to[0] - from[0]) * t,
+                    from[1] + (to[1] - from[1]) * t,
+                    from[2] + (to[2] - from[2]) * t,
+                ],
+                yaw,
+                pitch,
+            }
+        };
+        // Settle the pipeline at the leg start so a sampled frame can differ from its settled
+        // twin only through the in-motion history of the frames right before it.
+        for _ in 0..3 {
+            ab_set_pose(ctx, renderer, scene, pose_at(0));
+            if !ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, None) {
+                eprintln!("SKIP shadow-lag: window closed / swapchain recreated");
+                return;
+            }
+        }
+
+        // One continuous walk with mid-walk samples.
+        let samples = [15usize, 30, 45];
+        let mut captures: Vec<(usize, Vec<u8>, u32, u32)> = Vec::with_capacity(samples.len());
+        let mut k = 0usize;
+        while k <= STEPS {
+            ab_set_pose(ctx, renderer, scene, pose_at(k));
+            let sampled = samples.contains(&k);
+            let rb = if sampled { Some(staging) } else { None };
+            if !ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, rb) {
+                eprintln!("SKIP shadow-lag: window closed / swapchain recreated");
+                return;
+            }
+            if sampled {
+                let extent = swapchain.extent();
+                for d in 1..=3usize {
+                    ab_set_pose(ctx, renderer, scene, pose_at((k + d).min(STEPS)));
+                    if !ab_present_one(
+                        ctx, surface, swapchain, renderer, window, scene, frame, None,
+                    ) {
+                        eprintln!("SKIP shadow-lag: window closed / swapchain recreated");
+                        return;
+                    }
+                }
+                let (w, h) = (extent.width, extent.height);
+                let byte_count = (w * h * 4) as usize;
+                let ptr = RhiDevice::buffer_mapped_ptr(ctx, staging)
+                    .expect("host-visible readback staging buffer is mapped");
+                let mut raw = vec![0u8; byte_count];
+                // SAFETY: same fence discipline as `ab_capture` — the 3 drain presents re-waited
+                // the sampled frame's slot fence (3 > FRAMES_IN_FLIGHT == 2), so its swapchain→
+                // staging copy completed; `raw` is a fresh, non-overlapping allocation.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(ptr.as_ptr(), raw.as_mut_ptr(), byte_count)
+                };
+                captures.push((k, readback_to_rgba(&raw, w, h, is_bgra), w, h));
+                k += 3; // the drains already advanced the walk
+            }
+            k += 1;
+        }
+
+        // Settled twins at the identical poses + verdicts.
+        for (ks, motion_rgba, w, h) in &captures {
+            let pose = pose_at(*ks);
+            for _ in 0..2 {
+                ab_set_pose(ctx, renderer, scene, pose);
+                if !ab_present_one(ctx, surface, swapchain, renderer, window, scene, frame, None) {
+                    eprintln!("SKIP shadow-lag: window closed / swapchain recreated");
+                    return;
+                }
+            }
+            let Some((static_rgba, _, _)) = ab_capture(
+                ctx, surface, swapchain, renderer, window, scene, frame, staging, is_bgra, pose,
+            ) else {
+                eprintln!("SKIP shadow-lag: static capture failed");
+                return;
+            };
+            let (n_diff, max_d) = ab_compare(
+                &format!("{leg} k={ks} motion vs settled"),
+                motion_rgba,
+                &static_rgba,
+            );
+            if n_diff > 0 {
+                let base = format!(r"D:\tmp\shadow_lag_{leg}_k{ks}");
+                let _ = write_bmp(&format!("{base}_motion.bmp"), motion_rgba, *w, *h);
+                let _ = write_bmp(&format!("{base}_static.bmp"), &static_rgba, *w, *h);
+                let _ = write_bmp(
+                    &format!("{base}_diff.bmp"),
+                    &ab_diff_map(motion_rgba, &static_rgba),
+                    *w,
+                    *h,
+                );
+                println!("[shadow-lag] wrote {base}_{{motion,static,diff}}.bmp (max delta {max_d})");
+            }
+        }
+    }
+    println!(
+        "[shadow-lag] verdict key: nonzero diffs = camera-lag-class defect (stale slot / write \
+         race / intra-frame inconsistency); all-zero = the lag lives in viewer-loop-only writes."
+    );
 }
 
 /// The scripted-camera A/B loop (`BOYKO_SHADOW_AB=1` swaps this in for the interactive loop; the
@@ -6178,6 +6498,9 @@ fn run_interp_smoke<'ctx, 's>(
     macro_rules! present_interp {
         ($alpha:expr, $readback:expr) => {{
             let fi = renderer.frame_index();
+            renderer
+                .wait_frame_in_flight()
+                .expect("invariant: slot fence wait precedes the per-slot pair write");
             interp.write_pairs(ctx, fi, &moved);
             scene.instance_bind_group = &interp.draw_bg[fi];
             scene.interp = Some(interp.activation(fi, $alpha));
@@ -6296,6 +6619,48 @@ fn shadow_motion_ab_dump() {
     unsafe { std::env::set_var("BOYKO_SHADOW_AB", "1") };
     run_showcase_dump(
         "boyko_engine shadow motion A/B",
+        GRAND_SHOWCASE_BMP,
+        viewer_config(),
+        true,
+    );
+}
+
+/// **Shadow-dolly diagnostic.** Reproduces the owner's "a shadow APPEARS on the column's front
+/// face as I walk toward it" report deterministically: dollies the camera straight toward the
+/// slab's front face (8.0 → 1.2 units, crossing the viewer fit's 6.0 view-z split), tables the
+/// center-pixel shadow state vs the CPU-mirrored cascade SELECT, then repeats with the fit
+/// forced to a SINGLE cascade. A luminance flip at the split boundary that vanishes in the
+/// single-cascade run convicts the cascade select / layer contents.
+#[test]
+#[ignore = "needs a real RTX windowed device; scripted camera-dolly shadow diagnostic"]
+fn shadow_dolly_dump() {
+    // SAFETY: set before any other thread reads the environment (the test body is the process's
+    // first activity under `--test-threads=1`, the only supported way to run windowed dumps).
+    unsafe {
+        std::env::set_var("BOYKO_SHADOW_DOLLY", "1");
+        std::env::remove_var("BOYKO_DOLLY_CASCADES");
+    }
+    run_showcase_dump("boyko_engine shadow dolly (3 cascades)", GRAND_SHOWCASE_BMP, viewer_config(), true);
+
+    // SAFETY: same single-threaded windowed-test contract as above.
+    unsafe { std::env::set_var("BOYKO_DOLLY_CASCADES", "1") };
+    run_showcase_dump("boyko_engine shadow dolly (1 cascade)", GRAND_SHOWCASE_BMP, viewer_config(), true);
+}
+
+/// **Shadow-lag diagnostic.** The owner pinned the flip to MOTION: the column-face shadow appears
+/// only while the camera moves and settles back once it stops. Walks his exact P-key-probed
+/// segment with the pose advancing every frame, captures mid-walk WITHOUT freezing the pose
+/// during the fence drains, and byte-compares each in-motion frame against a settled frame at the
+/// identical pose. Nonzero diff = camera-lag-class defect (stale ring slot / mapped-write race /
+/// intra-frame camera inconsistency); all-zero = the lag lives in viewer-loop-only writes.
+#[test]
+#[ignore = "needs a real RTX windowed device; in-motion vs settled same-pose byte comparison"]
+fn shadow_lag_dump() {
+    // SAFETY: set before any other thread reads the environment (the test body is the process's
+    // first activity under `--test-threads=1`, the only supported way to run windowed dumps).
+    unsafe { std::env::set_var("BOYKO_SHADOW_LAG", "1") };
+    run_showcase_dump(
+        "boyko_engine shadow lag (motion vs settled)",
         GRAND_SHOWCASE_BMP,
         viewer_config(),
         true,
@@ -7839,7 +8204,36 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
         // scripted-camera capture protocol (static-arrival vs motion-arrival byte comparison at
         // one pose — see `run_shadow_motion_ab`). The heavy setup above + teardown below are
         // shared verbatim, so the A/B frames exercise the EXACT production viewer path.
-        if std::env::var_os("BOYKO_SHADOW_AB").is_some() {
+        if std::env::var_os("BOYKO_SHADOW_LAG").is_some() {
+            // Shadow-lag diagnostic: in-motion capture vs settled capture at the identical pose
+            // along the owner's exact reported walk (see `run_shadow_lag`).
+            run_shadow_lag(
+                &ctx,
+                &surface,
+                &mut swapchain,
+                &mut renderer,
+                &mut window,
+                &mut scene,
+                &mut frame,
+                &staging,
+                is_bgra,
+            );
+        } else if std::env::var_os("BOYKO_SHADOW_DOLLY").is_some() {
+            // Shadow-dolly diagnostic: walk the camera toward the slab's front face and table
+            // the center-pixel shadow state vs view_z / the CSM cascade select (the owner's
+            // "a shadow appears on the face as I approach" report). See `run_shadow_dolly`.
+            run_shadow_dolly(
+                &ctx,
+                &surface,
+                &mut swapchain,
+                &mut renderer,
+                &mut window,
+                &mut scene,
+                &mut frame,
+                &staging,
+                is_bgra,
+            );
+        } else if std::env::var_os("BOYKO_SHADOW_AB").is_some() {
             run_shadow_motion_ab(
                 &ctx,
                 &surface,

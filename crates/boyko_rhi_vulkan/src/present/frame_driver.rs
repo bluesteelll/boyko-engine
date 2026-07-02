@@ -240,6 +240,19 @@ impl<'ctx> Renderer<'ctx> {
     /// host upload before that fence signals is a write-after-read race on a
     /// persistently-mapped, host-coherent buffer the GPU may still be reading.
     ///
+    /// The G-buffer viewer's per-frame rings carry the SAME hazard (the camera UBO
+    /// ring, the interp pair SSBO ring): the write does not race the SIBLING
+    /// in-flight frame (it binds slot `s ^ 1`) but the slot's PREVIOUS OCCUPANT
+    /// (frame N−2), whose late passes (marcher / deferred resolve) read the slot's
+    /// buffer at GPU-execution time. With a static camera the overwrite is
+    /// bitwise-identical and invisible; the moment the camera moves, the in-flight
+    /// frame's lighting reconstructs world positions with a camera up to 2 frames
+    /// NEWER than the one its G-buffer was rasterized with — a whole-face
+    /// light/shadow flip that exists ONLY in motion (the `shadow_lag_dump`
+    /// diagnostic's exact signature: ~200k differing px before this wait, 0 after).
+    /// Every per-frame write into slot-indexed mapped memory must be preceded by
+    /// this wait.
+    ///
     /// The host therefore calls this IMMEDIATELY BEFORE `RhiContext::ui_upload` for the
     /// SAME `frame_index`, so the prior GPU read of that ring slot is complete before
     /// the memcpy. The fence is left SIGNALLED (not reset) — `present_sampled` resets
