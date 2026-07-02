@@ -335,6 +335,18 @@ impl DenseStore {
         self.column.component_layout().size()
     }
 
+    /// The registered component's `Layout` (size + align) — the load-side ViaFn
+    /// decode accessor (Dense plan D4 serialization v1.1). The dense ViaFn loader
+    /// (`load_dense_store_via_fn`) allocates one scratch buffer of this exact
+    /// layout, decodes each member into it via the per-element `deserialize_fn`,
+    /// then byte-moves the reconstructed value into a fresh slot via
+    /// [`Self::insert`]. `align` (not just `size`) is needed so the scratch buffer
+    /// satisfies the `DeserializeFn` contract (`dst` aligned to `align_of::<C>()`).
+    #[inline]
+    pub(crate) fn component_layout(&self) -> std::alloc::Layout {
+        self.column.component_layout()
+    }
+
     /// Read-only byte view of LIVE slot `slot` (Dense plan D4 serialization —
     /// the save-side per-member gather). Returns `&self`-borrowed `stride_bytes`
     /// bytes; the caller blits them into the file's dense column region.

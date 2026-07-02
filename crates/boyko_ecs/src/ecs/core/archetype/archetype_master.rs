@@ -10,7 +10,6 @@ use crate::ecs::core::component::observers::{
     ObserverFn, ObserverId, ObserverKind, ObserverRegistry,
 };
 use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
-use crate::ecs::core::iters::legacy_query::Query as LegacyQuery;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -343,14 +342,6 @@ impl ArchetypeMaster {
         out: &mut Vec<ArchetypeId>,
     ) {
         self.registry.find_archetypes_with_components_into(component_ids, out);
-    }
-
-    /// Finds all archetypes containing all components in the specified mask.
-    ///
-    /// Thin wrapper around `find_matching_archetypes_into` for backward compatibility.
-    #[inline]
-    pub fn find_matching_archetypes(&self, mask: &ComponentMask) -> Vec<ArchetypeId> {
-        self.registry.find_matching_archetypes(mask)
     }
 
     /// Writes archetypes matching `mask` into `out`.
@@ -819,50 +810,7 @@ impl ArchetypeMaster {
     pub fn archetype_registry_mut(&mut self) -> &mut ArchetypeRegistry {
         &mut self.registry
     }
-    
-    /// Creates a new query for archetypes containing all specified component IDs
-    pub fn query_with_components<'a>(&'a self, component_ids: &[ComponentId]) -> LegacyQuery<'a> {
-        LegacyQuery::with_component_ids(self, component_ids)
-    }
 
-    /// Creates a new query for archetypes matching the component mask
-    pub fn query_with_mask<'a>(&'a self, mask: &ComponentMask) -> LegacyQuery<'a> {
-        LegacyQuery::with_mask(self, mask)
-    }
-
-    /// Creates a new query for archetypes exactly matching the component mask
-    pub fn query_with_exact_mask<'a>(&'a self, mask: &ComponentMask) -> LegacyQuery<'a> {
-        LegacyQuery::with_exact_mask(self, mask)
-    }
-
-    /// Creates a type-safe query for archetypes containing the specified components
-    /// Example: master.query::<(Position, Velocity)>()
-    pub fn query<'a, T: crate::ecs::core::iters::component_set::ComponentSet>(&'a self) -> LegacyQuery<'a> {
-        LegacyQuery::with::<T>(self)
-    }
-
-    /// Creates a query with complex filtering criteria
-    /// - include_mask: Components that must be present (AND)
-    /// - exclude_mask: Components that must not be present (NOT)
-    /// - optional_mask: Components that are optional (at least one must be present)
-    pub fn query_with_filters<'a>(
-        &'a self,
-        include_mask: &ComponentMask,
-        exclude_mask: &ComponentMask,
-        optional_mask: &ComponentMask
-    ) -> LegacyQuery<'a> {
-        LegacyQuery::with_filters(self, include_mask, exclude_mask, optional_mask)
-    }
-
-    /// Creates a type-safe query with complex filtering
-    pub fn query_with_type_filters<'a, Inc: crate::ecs::core::iters::component_set::ComponentSet,
-                                     Exc: crate::ecs::core::iters::component_set::ComponentSet,
-                                     Opt: crate::ecs::core::iters::component_set::ComponentSet>(
-        &'a self
-    ) -> LegacyQuery<'a> {
-        LegacyQuery::with_type_filters::<Inc, Exc, Opt>(self)
-    }
-    
     /// Returns an iterator over all archetypes
     pub fn iter_archetypes(&self) -> impl Iterator<Item = &Archetype> {
         self.archetypes.iter()

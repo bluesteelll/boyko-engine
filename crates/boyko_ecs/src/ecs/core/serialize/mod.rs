@@ -22,7 +22,8 @@ pub mod load_writer;
 pub mod wire;
 
 pub use load_writer::{
-    LoadColumn, LoadWriteError, load_archetype, load_dense_store, remap_loaded_entities,
+    LoadColumn, LoadWriteError, load_archetype, load_dense_store, load_dense_store_via_fn,
+    remap_loaded_entities,
 };
 pub use wire::{Wire, WireRefTuple, WireTuple};
 

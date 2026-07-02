@@ -11,10 +11,11 @@ use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 
 /// Persistent archetype-match cache for hot-path query iteration.
 ///
-/// Unlike `LegacyQuery<'a>` (which rebuilds its archetype list on every construction),
-/// `QueryState` is long-lived and caches the result across frames. On the warm
-/// path — when no new archetypes have been created — `iter()` costs one pointer
-/// load + comparison. The delta update path classifies only newly minted archetypes.
+/// `QueryState` is long-lived and caches the matched-archetype list across
+/// frames. On the warm path — when no new archetypes have been created —
+/// `iter()` costs one pointer load + comparison. The delta update path
+/// classifies only newly minted archetypes. It is the shared, term-agnostic
+/// cache behind the typed `Query<D, F>` DSL (`iters::query`).
 ///
 /// # Layout rationale
 /// `#[repr(C, align(64))]` places the hot fields (`generation`, `matched_ids`)
@@ -34,7 +35,7 @@ use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
 ///   by the stale dedup bitset and silently absent from query results.
 /// - Only `archetype_generation` mismatched → delta-add path: skip already-seen
 ///   ids via the bitset, classify only the new ids. Preserves the warm-path
-///   ~21x speedup over rebuilding `LegacyQuery` from scratch.
+///   speedup of the cached matched-list over a full re-scan.
 ///
 /// A `QueryState` is therefore safe to keep alive across `clear()` and
 /// `remove_archetype()` calls — no manual `reset()` is required for
@@ -84,7 +85,7 @@ impl QueryState {
     /// query would silently match nothing — a footgun caught here, at build, not
     /// in the hot loop. Only `include` is checked (`exclude` / `optional` are
     /// harmless — they never produce a device read). The check is the single
-    /// funnel for every typed / legacy query construction. 0%-gate: a CPU-only
+    /// funnel for every typed query construction. 0%-gate: a CPU-only
     /// world leaves `GPU_COMPONENT_SET` all-zero, so the intersect is `0` and the
     /// branch predicts not-taken; the collection loop is untouched.
     ///
@@ -143,9 +144,9 @@ impl QueryState {
     /// Cold path (new archetypes exist): `update_archetypes` classifies the delta.
     ///
     /// # Phase 22 D4 — pre-terms
-    /// Iterates the raw matched list **term-agnostically**; reserved for the
-    /// legacy surface, benches, and cache maintenance. Dynamic-tag terms are
-    /// applied by the typed drivers only (the D4 funnel).
+    /// Iterates the raw matched list **term-agnostically**; reserved for
+    /// benches, tests, and cache maintenance. Dynamic-tag terms are applied by
+    /// the typed drivers only (the D4 funnel).
     ///
     /// # `clear()` / `remove_archetype()` interaction
     /// Safe across both. The structural_generation mismatch detected here
@@ -192,8 +193,8 @@ impl QueryState {
     ///    unchanged): delta-add. IDs already recorded in `matched_archetypes`
     ///    are skipped in O(1); only truly new IDs are tested against the
     ///    filter. This is the original warm-ish path that preserves the
-    ///    "create many, read many" benchmark profile (~21x speedup over
-    ///    rebuilding `LegacyQuery` from scratch).
+    ///    "create many, read many" benchmark profile (the cached matched-list
+    ///    avoids a full re-scan on each read).
     pub fn update_archetypes(&mut self, master: &ArchetypeMaster) {
         let current_gen = master.archetype_generation();
         let current_struct = master.structural_generation();
@@ -369,6 +370,12 @@ impl QueryState {
 
     /// Returns the number of matched archetypes — **pre-terms** (Phase 22
     /// D4): dynamic-tag terms are per-view and not visible at this layer.
+    ///
+    /// `#[allow(dead_code)]`: after the legacy `Query<'a>` retirement (audit
+    /// W5) the only remaining consumer is this module's own test suite. The
+    /// term-agnostic count is kept on the crate surface as the natural pair to
+    /// `matched_ids_pre_terms` / `is_empty_pre_terms`.
+    #[allow(dead_code)]
     #[inline]
     pub(crate) fn len_pre_terms(&self) -> usize {
         self.matched_ids.len()
@@ -376,6 +383,10 @@ impl QueryState {
 
     /// Returns true if no archetypes are matched — **pre-terms** (Phase 22
     /// D4): dynamic-tag terms are per-view and not visible at this layer.
+    ///
+    /// `#[allow(dead_code)]`: see `len_pre_terms` — test-only consumer after
+    /// the legacy query retirement.
+    #[allow(dead_code)]
     #[inline]
     pub(crate) fn is_empty_pre_terms(&self) -> bool {
         self.matched_ids.is_empty()
@@ -412,7 +423,7 @@ impl QueryState {
 
     /// Iterates the cached matched IDs without re-checking the generation —
     /// **pre-terms** (Phase 22 D4): term-agnostic raw-cache walk, reserved
-    /// for the legacy surface and cache maintenance.
+    /// for benches, tests, and cache maintenance.
     ///
     /// Requires that `update_archetypes` has already been called and
     /// `self.generation == master.archetype_generation()`.
@@ -439,21 +450,6 @@ impl QueryState {
             self.matched_archetypes.insert(id.0);
             self.matched_ids.push(id);
         }
-    }
-
-    /// Marks this state as synced with `master`'s current generation pair.
-    ///
-    /// Call once after manually pre-populating the cache via `push_matched`
-    /// (e.g., in `LegacyQuery::from_archetypes` or `LegacyQuery::with_exact_mask`) to
-    /// prevent a redundant `update_archetypes` sweep on the next `iter()`.
-    ///
-    /// Stamps BOTH `generation` and `structural_generation` — otherwise the
-    /// first `iter()` would observe a structural mismatch and rebuild,
-    /// silently discarding the just-pushed cache contents.
-    #[inline]
-    pub(crate) fn mark_synced(&mut self, master: &ArchetypeMaster) {
-        self.generation = master.archetype_generation();
-        self.structural_generation = master.structural_generation();
     }
 
     // --- Phase 8b Step 5 helpers ---
@@ -719,7 +715,7 @@ mod tests {
         assert_eq!(
             state.len_pre_terms(),
             3,
-            "filter must match same 3 archetypes as LegacyQuery::test_complex_filtering"
+            "filter must match the 3 archetypes with Pos, without Damage, with Vel or Health"
         );
         for arch in state.iter_pre_terms(&master) {
             assert!(arch.has_component_id(Pos::component_id()), "must have Pos");

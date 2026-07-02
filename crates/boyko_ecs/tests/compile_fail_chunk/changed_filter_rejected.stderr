@@ -16,7 +16,7 @@ error[E0277]: `Changed<U>` cannot be used as a filter in `Query::for_each_chunk`
              (F0, F1, F2, F3, F4, F5, F6)
              (F0, F1, F2, F3, F4, F5, F6, F7)
            and $N others
-note: required by a bound in `boyko_ecs::prelude::Query::<'w, 's, D, F>::for_each_chunk`
+note: required by a bound in `Query::<'w, 's, D, F>::for_each_chunk`
   --> src/ecs/core/iters/query/query.rs
    |
    |     pub fn for_each_chunk<Func>(&mut self, f: Func)

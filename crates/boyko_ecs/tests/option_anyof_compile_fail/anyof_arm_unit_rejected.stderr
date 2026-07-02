@@ -19,17 +19,17 @@ help: the following other types implement trait `AnyOfArm`
    | unsafe impl<T: Component> AnyOfArm for Mut<'_, T> {}
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Mut<'_, T>`
    = note: required for `AnyOf<((), &A)>` to implement `QueryData`
-note: required by a bound in `boyko_ecs::prelude::Query`
+note: required by a bound in `Query`
   --> src/ecs/core/iters/query/query.rs
    |
    | pub struct Query<'w, 's, D: QueryData, F: QueryFilter = ()> {
    |                             ^^^^^^^^^ required by this bound in `Query`
 
-error[E0599]: the method `iter` exists for struct `boyko_ecs::prelude::Query<'_, '_, AnyOf<((), &A)>>`, but its trait bounds were not satisfied
+error[E0599]: the method `iter` exists for struct `Query<'_, '_, AnyOf<((), &A)>>`, but its trait bounds were not satisfied
   --> tests/option_anyof_compile_fail/anyof_arm_unit_rejected.rs:22:16
    |
 22 |     for _ in q.iter() {}
-   |                ^^^^ method cannot be called on `boyko_ecs::prelude::Query<'_, '_, AnyOf<((), &A)>>` due to unsatisfied trait bounds
+   |                ^^^^ method cannot be called on `Query<'_, '_, AnyOf<((), &A)>>` due to unsatisfied trait bounds
    |
   ::: src/ecs/core/iters/query/data.rs
    |

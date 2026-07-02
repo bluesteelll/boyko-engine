@@ -1,8 +1,9 @@
 //! Phase 8b typed `Query<D, F>` DSL.
 //!
-//! Replaces the legacy `iters::LegacyQuery` for system-level use; the legacy
-//! path remains available for backward compatibility (see
-//! [`crate::ecs::core::iters::legacy_query`]).
+//! The single query stack for system-level use. The shared, term-agnostic
+//! archetype-match cache lives in [`crate::ecs::core::iters::query_state`]
+//! ([`QueryState`](crate::ecs::core::iters::query_state::QueryState)); this
+//! module builds the typed data/filter drivers on top of it.
 //!
 //! # Submodules
 //!

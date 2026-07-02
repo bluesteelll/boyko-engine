@@ -116,16 +116,6 @@ impl ArchetypeRegistry {
         true
     }
     
-    /// Finds archetypes containing all components in the query mask.
-    ///
-    /// Thin wrapper around `find_matching_archetypes_into` for backward compatibility.
-    #[inline]
-    pub fn find_matching_archetypes(&self, mask: &ComponentMask) -> Vec<ArchetypeId> {
-        let mut out = Vec::new();
-        self.find_matching_archetypes_into(mask, &mut out);
-        out
-    }
-
     /// Writes matching archetype IDs into `out`.
     ///
     /// # API contract
@@ -585,26 +575,30 @@ mod tests {
         registry.register_archetype(ArchetypeId(4), create_mask(&[2, 3, 7]));
         registry.register_archetype(ArchetypeId(5), create_mask(&[5, 6, 7]));
 
+        // `find_matching_archetypes_into` clears `out` at entry, so the buffer
+        // is reused across calls (zero-alloc steady state).
+        let mut results: Vec<ArchetypeId> = Vec::new();
+
         // Find archetypes with component 1
-        let results = registry.find_matching_archetypes(&create_mask(&[1]));
+        registry.find_matching_archetypes_into(&create_mask(&[1]), &mut results);
         assert_eq!(results.len(), 3);
         assert!(results.contains(&ArchetypeId(1)));
         assert!(results.contains(&ArchetypeId(2)));
         assert!(results.contains(&ArchetypeId(3)));
 
         // Find archetypes with components 1 and 3
-        let results = registry.find_matching_archetypes(&create_mask(&[1, 3]));
+        registry.find_matching_archetypes_into(&create_mask(&[1, 3]), &mut results);
         assert_eq!(results.len(), 2);
         assert!(results.contains(&ArchetypeId(1)));
         assert!(results.contains(&ArchetypeId(3)));
 
         // Find archetypes with components 5 and 7
-        let results = registry.find_matching_archetypes(&create_mask(&[5, 7]));
+        registry.find_matching_archetypes_into(&create_mask(&[5, 7]), &mut results);
         assert_eq!(results.len(), 1);
         assert!(results.contains(&ArchetypeId(5)));
 
         // No match
-        let results = registry.find_matching_archetypes(&create_mask(&[8, 9]));
+        registry.find_matching_archetypes_into(&create_mask(&[8, 9]), &mut results);
         assert_eq!(results.len(), 0);
     }
 
@@ -855,8 +849,9 @@ mod tests {
         assert!(registry.unregister_archetype(ArchetypeId(20)));
         assert_eq!(registry.len(), 2);
 
-        // Both A and C must still be findable via find_matching_archetypes
-        let results = registry.find_matching_archetypes(&create_mask(&[1, 2]));
+        // Both A and C must still be findable via find_matching_archetypes_into
+        let mut results: Vec<ArchetypeId> = Vec::new();
+        registry.find_matching_archetypes_into(&create_mask(&[1, 2]), &mut results);
         assert_eq!(results.len(), 2);
         assert!(results.contains(&ArchetypeId(10)));
         assert!(results.contains(&ArchetypeId(30)));

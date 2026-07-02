@@ -1147,8 +1147,8 @@ impl EcsMaster {
     /// rewinds without writing). `a` retains its full identity and runs its
     /// destructor at function-exit scope as usual — no leak, no double-free.
     ///
-    /// Mirrors `LegacyQuery::iter_one` (Phase 2d) on the spawn side: bounded 1-arity
-    /// API today, generic tuple version is Phase 2e-extension.
+    /// Bounded 1-arity typed spawn helper; a generic tuple version is a
+    /// Phase 2e-extension.
     pub fn spawn_one<A: crate::ecs::core::component::component::Component>(
         &mut self,
         archetype_id: ArchetypeId,
@@ -1174,7 +1174,7 @@ impl EcsMaster {
 
     /// Type-safe two-component spawn — see `spawn_one` for rationale.
     ///
-    /// Mirrors `LegacyQuery::iter_two` (Phase 2d) on the spawn side. Bounded 2-arity.
+    /// Bounded 2-arity typed spawn helper.
     ///
     /// # Drop discipline
     ///

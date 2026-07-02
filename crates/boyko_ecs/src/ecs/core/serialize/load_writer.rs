@@ -719,6 +719,160 @@ pub fn load_dense_store(
     Ok(member_count)
 }
 
+/// Dense plan D4 (v1.1) — loads ONE OWNING (`SerializeViaFn`) dense store's
+/// compacted snapshot into the world, decoding each member with its per-element
+/// `deserialize_fn`.
+///
+/// The dense analogue of the table [`LoadColumn::Decode`] path: where
+/// [`load_dense_store`] blits a POB member's `stride` bytes in place, an OWNING
+/// dense member (a `Vec`/`String`/bit-restricted/entity-bearing dense component)
+/// carries a VARIABLE-LENGTH encoded run on disk (the saver ran `serialize_fn` per
+/// member into one shared cursor — `save.rs` dense ViaFn path), so `data`'s total
+/// length is NOT `member_count * stride`. This driver reads `member_count` elements
+/// sequentially from ONE [`LoadCursor`] over the whole `data` run (each element's
+/// length is self-describing — length-prefixed heap fields + fixed leaf widths),
+/// reconstructing each value into a reused scratch buffer, then BYTE-MOVING it into
+/// a fresh [`DenseStore`] slot via [`DenseStore::insert`].
+///
+/// Saved owning ids are remapped through `map` exactly like [`load_dense_store`].
+///
+/// # Scratch-buffer byte-move (no double-drop)
+///
+/// `DenseStore::insert` COPIES the passed `&[u8]` into the slot (a bitwise move of
+/// the reconstructed value). So each member is decoded into a heap scratch buffer of
+/// the component's exact [`Layout`](std::alloc::Layout) (size + align — the
+/// `DeserializeFn` contract requires `dst` aligned to `align_of::<C>()`), the
+/// `stride` scratch bytes are handed to `insert` (which moves them into the store),
+/// and the scratch allocation is then FREED AS RAW BYTES — never dropped: on the
+/// `Ok` path the value's ownership already moved into the store (dropping the
+/// scratch would double-free its heap fields), and on the `Err` path the scratch is
+/// left uninitialized (dropping it would be UB). One scratch buffer is allocated
+/// once and reused across all members; it is freed exactly once at the end (or on
+/// the error return) regardless of outcome.
+///
+/// # Fresh-world-load invariant / Errors / Panics
+///
+/// Identical to [`load_dense_store`]: MUST target a freshly-created world (the
+/// target store is `debug_assert!`-empty); [`DecodeError::UnmappedEntity`] on a
+/// saved id absent from `map`; a malformed/short encoded run surfaces as the
+/// [`DecodeError`] its `deserialize_fn` returns (never UB). On any error the
+/// members inserted so far stay in the store, but `load_world` propagates the error
+/// and the caller discards the partially-loaded world — matching the POB dense path.
+/// COLD — reached only from `boyko_serialize::load_world`.
+pub fn load_dense_store_via_fn(
+    world: &mut EcsMaster,
+    component_id: ComponentId,
+    deserialize_fn: DeserializeFn,
+    member_data: &[u8],
+    saved_s2e: &[u64],
+    map: &LoadEntityMap,
+) -> Result<usize, DecodeError> {
+    let member_count = saved_s2e.len();
+    if member_count == 0 {
+        return Ok(0);
+    }
+    let current_tick = world.current_tick();
+
+    // Resolve every (fresh entity, its archetype) FIRST — `entity_archetype_id`
+    // borrows `&world`, which cannot coexist with the `&mut DenseStore` borrow
+    // below (identical to `load_dense_store`). An unmapped saved id is a loud
+    // `DecodeError` before any value is decoded or inserted (C4).
+    let mut resolved: Vec<(Entity, Option<ArchetypeId>)> = Vec::with_capacity(member_count);
+    for &saved_id in saved_s2e {
+        let fresh = map
+            .get(saved_id as usize)
+            .ok_or(DecodeError::UnmappedEntity)?;
+        let arch = world.entity_archetype_id(fresh);
+        resolved.push((fresh, arch));
+    }
+
+    let store = world.dense_registry_mut().store_mut(component_id);
+    // FRESH-WORLD-LOAD invariant — see `load_dense_store`.
+    debug_assert!(
+        store.is_empty(),
+        "load_dense_store_via_fn: target dense store for {component_id:?} is not empty \
+         (fresh-world-load contract violated — merge load is unsupported)"
+    );
+
+    let layout = store.component_layout();
+    let stride = layout.size();
+
+    // One reused scratch buffer of the component's exact layout. A ZST dense
+    // component (`stride == 0`, e.g. a bit-restricted marker) needs no allocation:
+    // `deserialize_fn` writes nothing to `dst` and `insert` copies zero bytes, so a
+    // dangling-but-aligned pointer is a valid `dst` for a zero-sized `C`.
+    let scratch: *mut u8 = if stride == 0 {
+        // A non-null, well-aligned dangling pointer for the ZST case (the layout's
+        // align is a valid dangling address for a zero-sized value).
+        layout.align() as *mut u8
+    } else {
+        // SAFETY: `layout` has non-zero size (checked) and a valid power-of-two
+        //   align (from a registered component). `alloc` returns either a block
+        //   valid for `layout` or null (handled below).
+        unsafe { std::alloc::alloc(layout) }
+    };
+    if scratch.is_null() {
+        // Allocation failure: mirror `std`'s convention (a raw-alloc null is an OOM
+        // abort site), but stay total on the load path — surface a decode error
+        // rather than deref a null. No value was decoded, so nothing to drop.
+        return Err(DecodeError::UnexpectedEof);
+    }
+
+    let mut cursor = LoadCursor::new(member_data);
+    let mut inserted = 0usize;
+    for &(fresh, arch) in &resolved {
+        // SAFETY (registry `DeserializeFn` contract):
+        //   * `scratch` points at writable, uninitialized space of `stride ==
+        //     size_of::<C>()` bytes aligned to `align_of::<C>()` (the `layout`
+        //     alloc, or the aligned dangling ptr for a ZST).
+        //   * On `Ok` the scratch holds an initialized `C` written exactly once; on
+        //     `Err` it is left uninitialized and we free it as RAW bytes (below)
+        //     without dropping — no UB.
+        //   * No `&mut DenseStore` is live across this call (only `store` is
+        //     borrowed, and `deserialize_fn` touches only `scratch` + `cursor`).
+        let decoded = unsafe { deserialize_fn(&mut cursor, scratch) };
+        if let Err(e) = decoded {
+            // The scratch is uninitialized (the failed decode left it untouched).
+            // Free it as raw bytes — never drop (the value was never constructed).
+            // SAFETY: `scratch` came from `alloc(layout)` with the SAME `layout`
+            //   (only reached for `stride != 0`; a ZST decode cannot fail on `dst`).
+            if stride != 0 {
+                unsafe { std::alloc::dealloc(scratch, layout) };
+            }
+            return Err(e);
+        }
+
+        // BYTE-MOVE the reconstructed value into a fresh slot. `insert`
+        // `copy_nonoverlapping`s exactly `stride` bytes, moving ownership of the
+        // value (and any heap it owns) into the store; the scratch bytes are now a
+        // stale bitwise copy that MUST NOT be dropped.
+        // SAFETY: `scratch` holds an initialized, `stride`-sized `C` (the `Ok`
+        //   above); the slice borrows the live scratch for the `insert` call only.
+        let value_bytes = unsafe { std::slice::from_raw_parts(scratch, stride) };
+        store.insert(fresh.id(), value_bytes, current_tick);
+        if let Some(arch) = arch {
+            store.mark_arch_present(arch);
+        }
+        inserted += 1;
+    }
+
+    // Free the scratch allocation ONCE, as raw bytes — every decoded value was moved
+    // into the store, so no drop runs here (a drop would double-free the moved-out
+    // heap fields).
+    // SAFETY: `scratch` came from `alloc(layout)` with the SAME `layout`; the last
+    //   value it held was byte-moved into the store, so freeing the raw block frees
+    //   no live value. Skipped for a ZST (no allocation was made).
+    if stride != 0 {
+        unsafe { std::alloc::dealloc(scratch, layout) };
+    }
+
+    debug_assert_eq!(
+        inserted, member_count,
+        "load_dense_store_via_fn: inserted count must equal member_count"
+    );
+    Ok(member_count)
+}
+
 /// S2.5 — the entity-remap pass (plan §3.11 step 5 + §5 C4). Runs AFTER every
 /// archetype has loaded (a separate whole-world pass): rewrites every saved
 /// `Entity` reference inside a remappable component to its freshly-allocated
