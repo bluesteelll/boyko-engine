@@ -387,6 +387,43 @@ static PUNCTUAL_DEPTH_FS_SPV: SpirvBlob<1084> = SpirvBlob(*include_bytes!(concat
     "/shaders/punctual_depth.fs.spv"
 )));
 
+/// The committed mesh-MRT G-buffer PRODUCER vertex SPIR-V (`shaders/gbuffer_mrt.vs.hlsl`).
+/// Vertex layout: position (loc 0, offset 0) + world normal (loc 2, offset 12) + color
+/// (loc 1, offset 24), a 40-byte stride. Reads the set-0 `InstanceModelCol` SSBO + the
+/// 88-byte `{ view_proj; cam_eye; base_instance; use_model_matrix }` VERTEX push
+/// ([`GBUFFER_PUSH_BYTES`](crate::swapchain::GBUFFER_PUSH_BYTES)); `use_model_matrix == 0`
+/// is the legacy merged-draw arm, `== 1` the instanced arm. Exported for the host layer
+/// (host plan R3): the SAME blob the `window_present_gbuffer` harness embeds.
+static GBUFFER_MRT_VS_SPV: SpirvBlob<4480> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/gbuffer_mrt.vs.spv"
+)));
+
+/// The committed mesh-MRT G-buffer PRODUCER fragment SPIR-V (`shaders/gbuffer_mrt.fs.hlsl`):
+/// writes albedo/normal/material as 3 MRT in the marcher's exact encoding (mask=1) + the
+/// marcher-aligned `SV_Depth` (euclidean under perspective, axial under ortho). Paired with
+/// [`gbuffer_mrt_vs_spirv`].
+static GBUFFER_MRT_FS_SPV: SpirvBlob<2252> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/gbuffer_mrt.fs.spv"
+)));
+
+/// The committed fullscreen-sample vertex SPIR-V (`shaders/fullscreen_sample.vs.hlsl`): a
+/// fullscreen triangle generating positions + UVs from `SV_VertexID` (no vertex buffer).
+/// The present-blit pass's VS.
+static FULLSCREEN_SAMPLE_VS_SPV: SpirvBlob<744> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/fullscreen_sample.vs.spv"
+)));
+
+/// The committed fullscreen-sample fragment SPIR-V (`shaders/fullscreen_sample.fs.hlsl`):
+/// samples the bound `Texture2D` + `SamplerState` at the interpolated UV and outputs it.
+/// The present-blit pass's FS; paired with [`fullscreen_sample_vs_spirv`].
+static FULLSCREEN_SAMPLE_FS_SPV: SpirvBlob<764> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/fullscreen_sample.fs.spv"
+)));
+
 /// Pillar B increment B2: the per-instance TRS interpolation compute PRE-PASS
 /// (`interp_instances.comp`). One invocation per instance reads a 96-byte `TransformPair`
 /// (prev + current substep TRS) at binding 0, interpolates at the frame-wide `alpha`, and
@@ -617,6 +654,47 @@ pub fn punctual_depth_vs_spirv() -> &'static [u32] {
 #[inline]
 pub fn punctual_depth_fs_spirv() -> &'static [u32] {
     PUNCTUAL_DEPTH_FS_SPV.as_words()
+}
+
+/// The committed mesh-MRT G-buffer PRODUCER vertex SPIR-V as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// Bound into the 3-MRT gbuffer raster pipeline (paired with [`gbuffer_mrt_fs_spirv`]):
+/// 3 × `R8G8B8A8_UNORM` color formats + `D32Sfloat` depth, the 40-byte vertex layout
+/// (position@0 / normal@12 / color@24), the set-0 instance-SSBO layout, and the 88-byte
+/// VERTEX push range. Exported for the host layer (host plan R3).
+#[inline]
+pub fn gbuffer_mrt_vs_spirv() -> &'static [u32] {
+    GBUFFER_MRT_VS_SPV.as_words()
+}
+
+/// The committed mesh-MRT G-buffer PRODUCER fragment SPIR-V as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// Paired with [`gbuffer_mrt_vs_spirv`] in the gbuffer raster pipeline.
+#[inline]
+pub fn gbuffer_mrt_fs_spirv() -> &'static [u32] {
+    GBUFFER_MRT_FS_SPV.as_words()
+}
+
+/// The committed fullscreen-sample (present-blit) vertex SPIR-V as a `u32` word stream,
+/// ready for [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// Bound into the present-blit pipeline (paired with [`fullscreen_sample_fs_spirv`]): no
+/// vertex buffer, no depth, one COMBINED_IMAGE_SAMPLER set-0 layout, `color_formats[0]` ==
+/// the swapchain format (W2-b). Exported for the host layer (host plan R3).
+#[inline]
+pub fn fullscreen_sample_vs_spirv() -> &'static [u32] {
+    FULLSCREEN_SAMPLE_VS_SPV.as_words()
+}
+
+/// The committed fullscreen-sample (present-blit) fragment SPIR-V as a `u32` word stream,
+/// ready for [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// Paired with [`fullscreen_sample_vs_spirv`] in the present-blit pipeline.
+#[inline]
+pub fn fullscreen_sample_fs_spirv() -> &'static [u32] {
+    FULLSCREEN_SAMPLE_FS_SPV.as_words()
 }
 
 /// The committed Render P7 SSAO (HBAO-lite) SPIR-V as a `u32` word stream, ready for

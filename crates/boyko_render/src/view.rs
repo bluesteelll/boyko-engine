@@ -48,6 +48,7 @@
 //! above, not a drop-in replacement.
 
 use boyko_rhi_vulkan::compute::{CAM_MODE_ORTHO, CompositePushConstants};
+use boyko_rhi_vulkan::swapchain::GBUFFER_PUSH_BYTES;
 use boyko_scene::ViewUniform;
 
 use boyko_math::Mat4;
@@ -104,6 +105,112 @@ pub fn composite_from_view(view: &ViewUniform, w: u32, h: u32) -> CompositePushC
     } else {
         composite_perspective_from_view(view, w, h)
     }
+}
+
+/// Builds the 88-byte gbuffer-raster VERTEX push (`{ float4x4 view_proj; float4
+/// cam_eye; uint base_instance; uint use_model_matrix }` —
+/// [`GBUFFER_PUSH_BYTES`]) from a resolved PERSPECTIVE [`ViewUniform`], for the
+/// host's [`GBufferScene::mvp`](boyko_rhi_vulkan::swapchain::GBufferScene) (host
+/// plan R3).
+///
+/// # Marcher-aligned by construction (NOT `view_proj_columns`)
+///
+/// The raster mesh and the SDF marcher must agree in screen x/y — the deferred
+/// resolve reconstructs each pixel's world position from the camera basis +
+/// `gViewT`, so a raster projection with a different convention detaches
+/// lighting/shadows from the geometry. This bridge therefore reproduces the
+/// GPU-verified construction of the `window_present_gbuffer` viewer's
+/// `perspective_mvp_bytes` (its convention notes hold verbatim), fed from the
+/// SAME [`ViewUniform`] lanes [`composite_perspective_from_view`] feeds the
+/// marcher's b5 camera:
+///
+/// * clip.x = `x_cam / (aspect · tan)`, clip.y = `−y_cam / tan` (the y-flip
+///   matching the marcher's `ndc_y = -(...)` ray-gen);
+/// * clip.z = clip.w = `forward · (P − eye)` (positive in front — the exact
+///   clip-z is irrelevant: the gbuffer FS overwrites depth with the
+///   marcher-aligned euclidean `length(cam_eye − P) / T_MAX`);
+/// * bytes 64..80 = `cam_eye` (`xyz` = eye, `w` = 1.0 — perspective mode);
+/// * bytes 80..88 = `{ base_instance = 0; use_model_matrix }` — the recorder
+///   overwrites `base_instance` per batch; `instanced` selects the VS arm
+///   (`true` REQUIRED when `GBufferScene::mesh_draw` is non-empty).
+///
+/// # Aspect is DERIVED FROM THE EXTENT — NOT `ViewUniform::aspect`
+///
+/// `width`/`height` are the COMPOSITE extent — the SAME `(w, h)` the caller
+/// gives [`composite_from_view`] for the marcher's b5 camera (whose
+/// `CompositePushConstants::perspective` also computes `aspect = w / h`). Both
+/// pushes therefore derive the aspect from one extent BY CONSTRUCTION; the
+/// user-authored `Projection` aspect (`view.aspect`) is deliberately NOT
+/// consulted — if the OS adjusts the boot client size, an authored aspect
+/// would silently diverge from the marcher's, misaligning the raster geometry
+/// against the resolve's camera-ray world reconstruction (the static form of
+/// the motion-shadow class; the `camera_ray` extent-derived-aspect precedent).
+///
+/// PERSPECTIVE-only: an orthographic view (`fov_y == 0`) is debug-asserted out
+/// — the ortho raster path is tied to the frozen SDF fixture constants and is
+/// not a host bridge (v1 scope).
+#[rustfmt::skip]
+pub fn gbuffer_push_from_view(
+    view: &ViewUniform,
+    width: u32,
+    height: u32,
+    instanced: bool,
+) -> [u8; GBUFFER_PUSH_BYTES] {
+    debug_assert!(
+        view.fov_y > 0.0,
+        "invariant: the gbuffer raster push bridge is PERSPECTIVE-only (fov_y > 0)"
+    );
+    debug_assert!(
+        width > 0 && height > 0,
+        "invariant: the composite extent is non-zero"
+    );
+    let eye = [view.camera_pos.x, view.camera_pos.y, view.camera_pos.z];
+    let forward = [view.cam_forward.x, view.cam_forward.y, view.cam_forward.z];
+    let right = [view.cam_right.x, view.cam_right.y, view.cam_right.z];
+    let up = [view.cam_up.x, view.cam_up.y, view.cam_up.z];
+    let tan = (view.fov_y * 0.5).tan();
+    // Extent-derived, matching `CompositePushConstants::perspective` exactly
+    // (see the doc section above) — NOT `view.aspect`.
+    let aspect = (width as f32) / (height as f32);
+
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let tx = -dot(right, eye);
+    let ty = -dot(up, eye);
+    let tz = dot(forward, eye); // in-front view depth: z_cam = forward·P − tz
+
+    // proj·view, ROW-MAJOR math rows; uploaded column-major (the verified
+    // transpose). `forward` points INTO the scene (the marcher's ray direction),
+    // so the clip.z/w row is `+forward` (see the viewer's sign-bug note).
+    let sx = 1.0 / (aspect * tan);
+    let sy = -1.0 / tan;
+    let (rx, ry, rz) = (right[0], right[1], right[2]);
+    let (ux, uy, uz) = (up[0], up[1], up[2]);
+    let (fx, fy, fz) = (forward[0], forward[1], forward[2]);
+    let pv: [[f32; 4]; 4] = [
+        [sx * rx, sx * ry, sx * rz, sx * tx], // clip.x
+        [sy * ux, sy * uy, sy * uz, sy * ty], // clip.y (marcher y-flip)
+        [fx,      fy,      fz,      -tz],     // clip.z = forward·(P − eye)
+        [fx,      fy,      fz,      -tz],     // clip.w (perspective divide)
+    ];
+
+    let mut out = [0u8; GBUFFER_PUSH_BYTES];
+    for col in 0..4 {
+        for row in 0..4 {
+            let b = pv[row][col].to_le_bytes();
+            out[(col * 4 + row) * 4..(col * 4 + row) * 4 + 4].copy_from_slice(&b);
+        }
+    }
+    // cam_eye push lane (bytes 64..80): xyz = eye, w = 1.0 (perspective mode).
+    let cam_eye = [eye[0], eye[1], eye[2], 1.0_f32];
+    for (i, f) in cam_eye.iter().enumerate() {
+        out[64 + i * 4..64 + i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+    }
+    // Trailing selectors: base_instance (@80) stays 0 (the recorder overwrites it
+    // per batch); use_model_matrix (@84) selects the instanced VS arm.
+    if instanced {
+        out[84..88].copy_from_slice(&1u32.to_le_bytes());
+    }
+    out
 }
 
 /// Re-views a column-major [`Mat4`] as the demo `CameraUniform.view_proj` layout

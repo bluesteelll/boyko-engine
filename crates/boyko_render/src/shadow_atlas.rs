@@ -250,6 +250,13 @@ const _: () = assert!(core::mem::offset_of!(ResolvedShadowAtlas, faces) == 0);
 const _: () = assert!(core::mem::offset_of!(ResolvedShadowAtlas, active_layers) == 1280);
 const _: () = assert!(core::mem::offset_of!(ResolvedShadowAtlas, mode_word) == 1284);
 
+/// The byte size of the host-coherent shadow-atlas UBO —
+/// `size_of::<ResolvedShadowAtlas>()` (1296 B: `[FaceTransform; M_SLOTS]` +
+/// `active_layers` + `mode_word` + pad). The resolve binds a UBO of exactly this
+/// shape at binding 15; hosts size their atlas UBO from THIS constant (single
+/// source — no hand-copied `1296`).
+pub const RESOLVED_SHADOW_ATLAS_BYTES: usize = size_of::<ResolvedShadowAtlas>();
+
 impl ResolvedShadowAtlas {
     /// The disabled selection — all-zero faces, `active_layers == 0`, `mode_word == 0`. The
     /// resolve of a disabled [`ShadowConfig`] and the value [`ResolvedShadowAtlas::default`]

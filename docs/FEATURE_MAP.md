@@ -21,7 +21,7 @@ piece of functionality lives, start here, then go to
 > record is its `docs/PHASE-*-RESULTS.md`. Line numbers below are verified
 > against the current source; if one drifts, the file path is still correct.
 
-> **Crate layout (18 members).** *Kernel:* `boyko_ecs` (core) · `boyko_macros`
+> **Crate layout (19 members).** *Kernel:* `boyko_ecs` (core) · `boyko_macros`
 > (derives) · `boyko_utils` (collections) · `boyko_threadpool` (Chase-Lev
 > work-stealing pool, on crossbeam-deque primitives). *Std-lib / sim:*
 > `boyko_math` (SIMD POD math) · `boyko_scene` (Transform / Camera) ·
@@ -30,11 +30,13 @@ piece of functionality lives, start here, then go to
 > save/load). *Render / UI / shaders:* `boyko_rhi` (RHI trait surface) ·
 > `boyko_rhi_vulkan` (raw-FFI Vulkan backend + framegraph) · `boyko_render`
 > (GPU-resident columns, lighting, SDF) · `boyko_shaderdsl` (Rust shader eDSL) ·
-> `boyko_fontbake` (MTSDF atlas baker) · `boyko_ui` (ECS-native UI). *Apps /
-> bench:* `boyko_demo` (wgpu+egui sandbox, dogfoods the public API) ·
-> `bench_bevy_vs_boyko` (comparison benches). This file catalogs the ECS kernel
-> in depth; the std-lib and render/UI subsystems are indexed below and detailed
-> per-crate in [SYSTEMS.md](SYSTEMS.md).
+> `boyko_fontbake` (MTSDF atlas baker) · `boyko_ui` (ECS-native UI). *Host /
+> apps / bench:* `boyko_app` (windowed host: `EnginePlugins`, device-singleton
+> boot, the token-fenced G-buffer runner — host plan R2/R3) · `boyko_demo`
+> (wgpu+egui sandbox, dogfoods the public API) · `bench_bevy_vs_boyko`
+> (comparison benches). This file catalogs the ECS kernel in depth; the std-lib
+> and render/UI subsystems are indexed below and detailed per-crate in
+> [SYSTEMS.md](SYSTEMS.md).
 
 ---
 
@@ -96,6 +98,10 @@ piece of functionality lives, start here, then go to
 | ECS-native UI (widgets = entities; layout systems; MSDF text) | `boyko_ui` — [layout.rs](../crates/boyko_ui/src/layout.rs) · [components.rs](../crates/boyko_ui/src/components.rs) · [text/](../crates/boyko_ui/src/text/) · [widgets.rs](../crates/boyko_ui/src/widgets.rs) · [interaction/](../crates/boyko_ui/src/interaction/) |
 | World-space / diegetic 3D HUD (cursor-ray pick, depth-occlude) | `boyko_ui` — [world/](../crates/boyko_ui/src/world/) |
 | Data-bind UI to ECS state / hot-reload `.ui` markup | `boyko_ui` — [binding/](../crates/boyko_ui/src/binding/) · [reload/](../crates/boyko_ui/src/reload/) · [text/](../crates/boyko_ui/src/text/) (`.ui` format) |
+| Open a window + run the frame loop (device boot, runner, teardown) | `boyko_app` — [plugins.rs](../crates/boyko_app/src/plugins.rs) (`EnginePlugins`) · [runner.rs](../crates/boyko_app/src/runner.rs) · [host.rs](../crates/boyko_app/src/host.rs) · [device.rs](../crates/boyko_app/src/device.rs) (`GpuDevice`) |
+| Windowed G-buffer scene host (static bundles, token-fenced uploads) | `boyko_app` — [gpu_scene.rs](../crates/boyko_app/src/gpu_scene.rs) + `boyko_render` — [upload.rs](../crates/boyko_render/src/upload.rs) · [view.rs](../crates/boyko_render/src/view.rs) (`gbuffer_push_from_view`) |
+| Spawn a drawable mesh from ECS (bundle + primitives + example) | `boyko_render` — [bundles.rs](../crates/boyko_render/src/bundles.rs) (`MeshBundle`) · [mesh_registry.rs](../crates/boyko_render/src/mesh_registry.rs) (`cube`/`plane`) + `boyko_app` — [examples/room.rs](../crates/boyko_app/examples/room.rs) |
+| Order Fixed gameplay vs engine snapshots (host plan D4 seam) | `boyko_scene` — [sets.rs](../crates/boyko_scene/src/sets.rs) (`FixedSet`) — wired by `EnginePlugins` |
 
 ---
 

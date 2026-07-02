@@ -46,6 +46,7 @@ pub mod identity;
 pub mod plugin;
 pub mod propagation;
 pub mod render_caps;
+pub mod sets;
 pub mod transform;
 pub mod visibility_sync;
 
@@ -59,6 +60,7 @@ pub use identity::{Name, NameId, intern, resolve};
 pub use plugin::TransformPlugin;
 pub use propagation::{TransformPropagationScratch, compute_global_transform, propagate_transforms};
 pub use render_caps::{MaterialHandle, MeshHandle, RenderEnabled, Visibility};
+pub use sets::FixedSet;
 pub use transform::{GlobalTransform, Transform};
 pub use visibility_sync::visibility_sync;
 
@@ -79,6 +81,7 @@ pub mod prelude {
     pub use crate::plugin::TransformPlugin;
     pub use crate::propagation::{compute_global_transform, propagate_transforms};
     pub use crate::render_caps::{MaterialHandle, MeshHandle, RenderEnabled, Visibility};
+    pub use crate::sets::FixedSet;
     pub use crate::transform::{GlobalTransform, Transform};
     pub use crate::visibility_sync::visibility_sync;
 }

@@ -1,15 +1,54 @@
-//! [`EnginePlugins`] — the host composition plugin (host plan D1/D6, R2
-//! subset): installs the windowed clear-color runner.
+//! [`EnginePlugins`] — the host composition plugin (host plan D1/D6, R3).
+//!
+//! Composes the engine's windowed frame stack: the scene plugins (transform
+//! propagation + camera resolution + visibility bridge via `CameraPlugin`,
+//! the S4 3D pack via `Render3dPlugin`), the R3 mesh-draw pack + gather, the
+//! D4 `FixedSet` ordering seam, and the windowed G-buffer runner.
 
+use boyko_ecs::ecs::core::app::CoreSchedule;
 use boyko_ecs::{App, Plugin};
+use boyko_render::instance_model::sync_instance_model_cols;
+use boyko_render::{MeshRenderScratch, Render3dPlugin, gather_mesh_draws};
+use boyko_scene::{CameraPlugin, FixedSet};
 
 use crate::runner::{self, WindowDesc};
 
-/// The engine host plugin: opens a window and installs the windowed runner
-/// (device-singleton boot, frame loop, D2 teardown) via `App::set_runner`.
+/// The engine host plugin: composes the scene/render frame systems, wires the
+/// D4 `FixedSet` ordering seam, opens a window, and installs the windowed
+/// G-buffer runner (device-singleton boot, token-fenced uploads, the
+/// production `render_gbuffer_frame`, D2 teardown) via `App::set_runner`.
 ///
-/// R2 keeps the surface minimal — title + client size; `present_mode` and the
-/// rest of the windowing knobs arrive with later rungs.
+/// # Composition (add-order discipline)
+///
+/// `EnginePlugins` adds [`CameraPlugin`] (which owns `propagate_transforms` +
+/// `resolve_active_camera` + `visibility_sync` with their ordering edges) and
+/// [`Render3dPlugin`], then registers the R3 mesh path —
+/// `sync_instance_model_cols` → `gather_mesh_draws` (edge-ordered) — AFTER
+/// them. The propagation → pack edge cannot be expressed explicitly
+/// (`propagate_transforms`'s `SystemKey` is only obtainable inside
+/// `CameraPlugin`'s own builder closure), so it is pinned by the documented
+/// cross-crate ADD-ORDER contract — and unlike the `Changed`-gated systems
+/// that contract usually covers, `sync_instance_model_cols` is UNCONDITIONAL:
+/// a wrong order would be a PERMANENT one-frame pose lag, not a
+/// self-correcting stagger. The add-order here IS the pin; do not reorder.
+/// Do NOT also add `CameraPlugin` / `TransformPlugin` / `Render3dPlugin`
+/// yourself — a duplicate plugin panics.
+///
+/// # The D4 seam
+///
+/// Wires `FixedSet::Snapshot.after(FixedSet::Gameplay)` in
+/// `CoreSchedule::Fixed`: put Fixed gameplay `.in_set(FixedSet::Gameplay)`;
+/// engine snapshot systems (the R5 `pack_gpu_transforms`) join
+/// `FixedSet::Snapshot`.
+///
+/// # Windowed host v1 = PERSPECTIVE cameras only
+///
+/// The host's camera/raster pushes are the perspective marcher convention. An
+/// Orthographic active camera carries the `fov_y == 0` sentinel
+/// ([`Projection::fov_y`](boyko_scene::Projection::fov_y)) and DEGRADES to a
+/// background-only frame (the marcher takes its frozen ORTHO fixture path and
+/// the raster push is zeroed — nothing draws, nothing panics). The sentinel
+/// is kept deliberately; an ortho windowed path is a later rung.
 ///
 /// ```no_run
 /// use boyko_app::prelude::*;
@@ -29,6 +68,16 @@ pub struct EnginePlugins {
 
 impl EnginePlugins {
     /// A windowed host with the given caption and requested client size.
+    ///
+    /// The composite (render) extent is fixed at boot from the ACTUAL client
+    /// size the window comes up at (plan D7); a later window resize recreates
+    /// the swapchain only and the present blit clamps. BOTH per-frame camera
+    /// pushes (the marcher's b5 block and the raster `view_proj`) derive their
+    /// aspect from that boot-fixed composite extent — the authored
+    /// `Projection` aspect is NOT consulted by the windowed host's pushes (it
+    /// still shapes `ViewUniform::view_proj` for non-host consumers), so the
+    /// two can never diverge even when the OS adjusts the client size.
+    /// Dynamic aspect/extent tracking is v2.
     #[inline]
     pub fn window(title: &'static str, width: u32, height: u32) -> Self {
         Self {
@@ -40,10 +89,37 @@ impl EnginePlugins {
 }
 
 impl Plugin for EnginePlugins {
-    /// Installs the windowed runner. `App::run` hands it control BEFORE
-    /// `finish()`; the runner owns the app lifecycle from there (its own
-    /// `finish()` call, `AppExit` policy, and teardown — see `runner.rs`).
+    /// Composes the frame systems + the D4 seam, then installs the windowed
+    /// runner. `App::run` hands the runner control BEFORE `finish()`; the
+    /// runner owns the app lifecycle from there (its own `finish()` call,
+    /// `AppExit` policy, and teardown — see `runner.rs`).
     fn build(&self, app: &mut App) {
+        // Scene stack: propagation + camera resolve + visibility bridge
+        // (CameraPlugin SUPERSEDES TransformPlugin — adding both would
+        // double-register propagation), then the S4 3D instance pack.
+        app.add_plugin(CameraPlugin);
+        app.add_plugin(Render3dPlugin);
+
+        // The R3 mesh path: pack GlobalTransform → InstanceModelCol, then
+        // bucket the visible instances into the reused MeshRenderScratch the
+        // runner uploads from. The pack → gather edge is explicit; the
+        // propagation → pack edge is the ADD-ORDER pin above (the pack is
+        // UNCONDITIONAL, so a wrong order would be a permanent one-frame pose
+        // lag — see the type-level Composition doc).
+        app.insert_resource(MeshRenderScratch::default());
+        app.add_systems_cfg(|b| {
+            let pack = b.add_system(sync_instance_model_cols).key();
+            b.add_system(gather_mesh_draws).after(pack);
+        });
+
+        // The D4 ordering seam: engine Fixed snapshots run AFTER user Fixed
+        // gameplay, pinned BY NAME (no topological accident). The sets are
+        // wired even while memberless (pack_gpu_transforms joins in R5) so
+        // user gameplay can join FixedSet::Gameplay from day one.
+        app.add_systems_cfg_in(CoreSchedule::Fixed, |b| {
+            b.configure_set(FixedSet::Snapshot).after(FixedSet::Gameplay);
+        });
+
         let desc = WindowDesc {
             title: self.title,
             width: self.width,
@@ -52,5 +128,9 @@ impl Plugin for EnginePlugins {
         app.set_runner(Box::new(move |app: &mut App| {
             runner::run_windowed(app, desc)
         }));
+    }
+
+    fn name(&self) -> &'static str {
+        "boyko_app::EnginePlugins"
     }
 }

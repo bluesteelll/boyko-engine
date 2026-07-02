@@ -93,8 +93,12 @@ impl VulkanContext {
    never the device. The discriminant is touched only at setup/teardown — zero hot-path
    cost.
 4. Startup device access: the runner inserts `GpuDevice(&'static VulkanContext)`
-   (NonSend) **before** `finish()`; `MeshRegistry::register_mesh` gains a thin
-   `&GpuDevice` overload.
+   (NonSend) **before** `finish()`. *(R3 amendment: the originally-planned
+   `MeshRegistry::register_mesh` `&GpuDevice` overload is impossible by layering —
+   `GpuDevice` is a `boyko_app` type and `boyko_render` cannot depend up. Shipped
+   resolution: `MeshRegistry` keeps its `&VulkanContext` signatures and startup code
+   passes `GpuDevice::get() -> &VulkanContext` at the call site, e.g.
+   `meshes.cube(dev.get(), 1.0)`.)*
 
 **Teardown (critic delta A1 — the runner cannot drop the App it borrows):** the runner
 **evicts** every device-referencing world resident explicitly, then destroys the device:
@@ -347,8 +351,10 @@ before `run_interactive_viewer` is deleted.
   clear-color runner (via existing `render_frame`), full teardown incl. world eviction
   + `VulkanContext::destroy`; layering amendment; `examples/clear.rs`.
 - **R3** — camera + mesh: `FixedSet` in `boyko_scene`; boot-fixed composite policy +
-  `WindowInfo`; `MeshRegistry` `&GpuDevice` overload; unconditional pair upload;
-  zero-alloc counting-allocator test; structural-change-on-0-substep-frame test;
+  `WindowInfo`; startup mesh registration via `GpuDevice::get() -> &VulkanContext` at
+  the call site *(amended from the layering-impossible "`MeshRegistry` `&GpuDevice`
+  overload" — see D2 item 4)*; unconditional pair upload; zero-alloc
+  counting-allocator test; structural-change-on-0-substep-frame test;
   `examples/room.rs`.
 - **R4** — lights/shadows/SSAO composition; `LightTableGeneration` per-slot gen compare;
   world-fixed CSM resources.

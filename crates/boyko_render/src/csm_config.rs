@@ -210,6 +210,12 @@ pub struct ResolvedCsm {
 // Layout pin: 80 × 4 + 4 + 4 + 8 = 320 + 16 = 336 B.
 const _: () = assert!(size_of::<ResolvedCsm>() == 336);
 
+/// The byte size of the host-coherent CSM cascade UBO — `size_of::<ResolvedCsm>()`
+/// (336 B: `[CascadeData; 4]` + `active_count` + `csm_mode_word` + pad). The resolve
+/// binds a UBO of exactly this shape at binding 13; hosts size their cascade-UBO
+/// ring slots from THIS constant (single source — no hand-copied `336`).
+pub const RESOLVED_CSM_BYTES: usize = size_of::<ResolvedCsm>();
+
 impl ResolvedCsm {
     /// The disabled selection — all-zero cascades, `active_count == 0`, `csm_mode_word ==
     /// 0`. The resolve of a disabled [`CsmConfig`] and the value [`ResolvedCsm::default`]

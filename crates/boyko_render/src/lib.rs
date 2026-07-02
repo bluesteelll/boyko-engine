@@ -128,12 +128,16 @@ pub mod shadow_plugin;
 pub mod ssao_config;
 pub mod ssao_plugin;
 pub mod ui;
+/// Token-typed per-slot ring uploads (host plan R3): the fence-proved camera +
+/// instance-model memcpys the windowed host runs each frame.
+pub mod upload;
 pub mod view;
 
 pub use barrier::{PlannedBarrier, lower_barriers};
-pub use bundles::{DirectionalLightObject, PointLightObject, SpotLightObject};
+pub use bundles::{DirectionalLightObject, MeshBundle, PointLightObject, SpotLightObject};
 pub use csm_config::{
-    CascadeData, CsmConfig, MAX_CASCADES, ResolvedCsm, resolve_csm, resolve_csm_cascades,
+    CascadeData, CsmConfig, MAX_CASCADES, RESOLVED_CSM_BYTES, ResolvedCsm, resolve_csm,
+    resolve_csm_cascades,
 };
 pub use csm_caster::{CsmCasterScratch, gather_shadow_casters};
 pub use csm_marker::ShadowCaster;
@@ -173,17 +177,18 @@ pub use mesh_registry::{
 };
 pub use shadow_atlas::{
     ATLAS_SLOT_MASK, ATLAS_SLOT_SHIFT, CASTS_SHADOW_BIT, FaceTransform, M_SLOTS, POINT_FACE_COUNT,
-    PointShadowInput, ResolvedShadowAtlas, SHADOW_DIM, SLOT_NONE, ShadowConfig, SpotShadowInput,
-    light_atlas_slot, pack_atlas_slot, resolve_shadow_atlas, resolve_shadow_atlas_inputs,
-    resolve_shadow_atlas_spots, spot_priority,
+    PointShadowInput, RESOLVED_SHADOW_ATLAS_BYTES, ResolvedShadowAtlas, SHADOW_DIM, SLOT_NONE,
+    ShadowConfig, SpotShadowInput, light_atlas_slot, pack_atlas_slot, resolve_shadow_atlas,
+    resolve_shadow_atlas_inputs, resolve_shadow_atlas_spots, spot_priority,
 };
 pub use shadow_marker::CastsPunctualShadow;
 pub use shadow_plugin::ShadowAtlasPlugin;
 pub use ssao_config::{ResolvedSsao, SsaoConfig, SsaoQuality, resolve_ssao, resolve_ssao_policy};
 pub use ssao_plugin::SsaoPlugin;
+pub use upload::{upload_camera_ring, upload_instance_models};
 pub use view::{
     composite_from_view, composite_perspective_from_view, demo_view_proj_from_view,
-    view_proj_columns,
+    gbuffer_push_from_view, view_proj_columns,
 };
 pub use ui::{
     pack_ui_instance, premultiply_rgba8, record_ui_rects, ui_rect_fs_spirv, ui_rect_vs_spirv,

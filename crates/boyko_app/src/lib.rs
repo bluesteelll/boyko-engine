@@ -33,11 +33,15 @@
 
 mod device;
 #[cfg(windows)]
+mod gpu_scene;
+#[cfg(windows)]
 mod host;
 mod runner;
+mod window_info;
 
 pub mod plugins;
 pub mod prelude;
 
 pub use device::GpuDevice;
 pub use plugins::EnginePlugins;
+pub use window_info::WindowInfo;

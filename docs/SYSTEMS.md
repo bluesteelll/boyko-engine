@@ -17,15 +17,17 @@ for cross-crate architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 > Line numbers are verified against current source; treat the file path as the
 > stable anchor if a line drifts.
 
-> **Crates (18 members).** *Kernel:* `boyko_ecs` (core) · `boyko_macros`
+> **Crates (19 members).** *Kernel:* `boyko_ecs` (core) · `boyko_macros`
 > (proc-macros) · `boyko_utils` (collections) · `boyko_threadpool` (Chase-Lev
 > work-stealing pool over crossbeam-deque). *Std-lib / sim:* `boyko_math` ·
 > `boyko_scene` · `boyko_sdf_math` · `boyko_physics` · `boyko_input` ·
 > `boyko_serialize`. *Render / UI / shaders:* `boyko_rhi` · `boyko_rhi_vulkan` ·
-> `boyko_render` · `boyko_shaderdsl` · `boyko_fontbake` · `boyko_ui`. *Apps /
-> bench:* `boyko_demo` (wgpu+egui sandbox) · `bench_bevy_vs_boyko`. Sections
-> 1–21 catalog the ECS kernel; sections 22–33 catalog the std-lib and
-> render/UI crates.
+> `boyko_render` · `boyko_shaderdsl` · `boyko_fontbake` · `boyko_ui`. *Host /
+> apps / bench:* `boyko_app` (the windowed host — `EnginePlugins`, the
+> device-singleton boot, the token-fenced G-buffer runner + `GpuSceneBundles`;
+> host plan R2/R3, [APP-HOST-PLAN.md](APP-HOST-PLAN.md)) · `boyko_demo`
+> (wgpu+egui sandbox) · `bench_bevy_vs_boyko`. Sections 1–21 catalog the ECS
+> kernel; sections 22–33 catalog the std-lib and render/UI crates.
 
 ---
 

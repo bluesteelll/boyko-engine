@@ -233,6 +233,78 @@ impl MeshRegistry {
         handle
     }
 
+    /// Registers an axis-aligned CUBE of edge length `size`, centered at the
+    /// model-space origin, with per-face outward normals (24 unique vertices,
+    /// 36 indices — `Uint16` by O3) and a neutral light-gray base color. The
+    /// canonical primitive for a first scene (host plan R3); place it with the
+    /// entity's `Transform`.
+    ///
+    /// # Panics
+    /// Same contract as [`register_mesh`](Self::register_mesh): a buffer create
+    /// / map failure at asset-registration time is a setup failure.
+    pub fn cube(&mut self, ctx: &VulkanContext, size: f32) -> MeshHandle {
+        const COLOR: [f32; 4] = [0.82, 0.82, 0.82, 1.0];
+        let h = size * 0.5;
+        // Six faces × four corners; each face carries its own outward normal so
+        // the G-buffer normal lane is face-correct (no vertex-normal averaging).
+        // Faces: +X, -X, +Y, -Y, +Z, -Z. Corner order is consistent per face so
+        // one index pattern (two triangles per quad) covers all six.
+        let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
+            ([1.0, 0.0, 0.0], [[h, -h, -h], [h, h, -h], [h, h, h], [h, -h, h]]),
+            ([-1.0, 0.0, 0.0], [[-h, -h, h], [-h, h, h], [-h, h, -h], [-h, -h, -h]]),
+            ([0.0, 1.0, 0.0], [[-h, h, -h], [-h, h, h], [h, h, h], [h, h, -h]]),
+            ([0.0, -1.0, 0.0], [[-h, -h, h], [-h, -h, -h], [h, -h, -h], [h, -h, h]]),
+            ([0.0, 0.0, 1.0], [[-h, -h, h], [h, -h, h], [h, h, h], [-h, h, h]]),
+            ([0.0, 0.0, -1.0], [[h, -h, -h], [-h, -h, -h], [-h, h, -h], [h, h, -h]]),
+        ];
+        let mut vertices = [Vertex {
+            position: [0.0; 3],
+            normal: [0.0; 3],
+            color: COLOR,
+        }; 24];
+        let mut indices = [0u32; 36];
+        for (f, (normal, corners)) in faces.iter().enumerate() {
+            for (c, corner) in corners.iter().enumerate() {
+                vertices[f * 4 + c] = Vertex {
+                    position: *corner,
+                    normal: *normal,
+                    color: COLOR,
+                };
+            }
+            let base = (f * 4) as u32;
+            indices[f * 6..f * 6 + 6].copy_from_slice(&[
+                base,
+                base + 1,
+                base + 2,
+                base,
+                base + 2,
+                base + 3,
+            ]);
+        }
+        self.register_mesh(ctx, &vertices, &indices)
+    }
+
+    /// Registers a flat XZ-plane quad of side length `size`, centered at the
+    /// model-space origin at `y == 0`, normal `+Y` (4 vertices, 6 indices —
+    /// `Uint16` by O3), with a neutral mid-gray base color — the canonical
+    /// floor/receiver primitive (host plan R3).
+    ///
+    /// # Panics
+    /// Same contract as [`register_mesh`](Self::register_mesh).
+    pub fn plane(&mut self, ctx: &VulkanContext, size: f32) -> MeshHandle {
+        const COLOR: [f32; 4] = [0.62, 0.62, 0.62, 1.0];
+        const NORMAL: [f32; 3] = [0.0, 1.0, 0.0];
+        let h = size * 0.5;
+        let vertices = [
+            Vertex { position: [-h, 0.0, -h], normal: NORMAL, color: COLOR },
+            Vertex { position: [-h, 0.0, h], normal: NORMAL, color: COLOR },
+            Vertex { position: [h, 0.0, h], normal: NORMAL, color: COLOR },
+            Vertex { position: [h, 0.0, -h], normal: NORMAL, color: COLOR },
+        ];
+        let indices = [0u32, 1, 2, 0, 2, 3];
+        self.register_mesh(ctx, &vertices, &indices)
+    }
+
     /// Resolves a [`MeshHandle`] to its GPU asset.
     ///
     /// # Panics

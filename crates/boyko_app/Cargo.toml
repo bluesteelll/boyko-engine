@@ -21,8 +21,11 @@ boyko_rhi = { path = "../boyko_rhi" }
 boyko_rhi_vulkan = { path = "../boyko_rhi_vulkan" }
 boyko-input = { path = "../boyko_input" }
 boyko-math = { path = "../boyko_math" }
+# R3: the empty-field brick placeholder bake (`SdfEditField`) the scene boot
+# mirrors from the showcase, + the derives (`Resource` for `WindowInfo`).
+boyko_sdf_math = { path = "../boyko_sdf_math" }
+boyko-macros = { path = "../boyko_macros" }
 
 [dev-dependencies]
-# The `#[derive(Resource)]` used by the windowed smoke test's frame-budget
-# resource (boyko-macros is a pure proc-macro crate — no workspace dep).
-boyko-macros = { path = "../boyko_macros" }
+# The zero-alloc gate reads the uploaded instance bytes back via `bytes_of`.
+bytemuck.workspace = true
