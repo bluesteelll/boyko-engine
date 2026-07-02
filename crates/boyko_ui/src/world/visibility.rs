@@ -19,10 +19,13 @@
 //! the project system, deferred-or-direct toggle). The layout pass skips a root
 //! with EITHER bit set, so the two never race a shared bit.
 
+use std::mem;
+
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_macros::Resource;
 
 use crate::world::components::{HoveredWorldEntity, UiWorldAnchor, UiWorldHidden, WorldTarget};
+use crate::world::pick::UiWorldScratch;
 use boyko_ecs::ecs::core::component::component::Component;
 
 /// Private tracked previous-hover state — the Changed-gate for
@@ -67,7 +70,7 @@ impl Default for UiWorldHoverState {
 /// `None` hides every `EntityAnchor` root (nothing hovered). The match is
 /// O(world-anchor roots) — tens, not entities — and only on a hover CHANGE.
 //
-// `clippy::needless_pass_by_ref_mut`: `resource` / `query_entities` /
+// `clippy::needless_pass_by_ref_mut`: `resource` / `query_entities_buf` /
 // `get_component` / `enable` / `disable` reach through `&mut self` engine
 // methods clippy cannot see through. Mirrors `ui_layout_apply`.
 #[allow(clippy::needless_pass_by_ref_mut)]
@@ -82,11 +85,13 @@ pub fn ui_world_visibility_system(world: &mut EcsMaster) {
 
     let hovered = current.0;
 
-    // Enumerate the world-anchor roots and toggle their hide bit. `query_entities`
-    // allocates; this is the rare hover-CHANGE path (O(tens) roots), off any
-    // per-entity hot loop.
-    let roots = world.query_entities(&[UiWorldAnchor::component_id()]);
-    for root in roots {
+    // Move the retained root/arch buffers out (the `mem::take` borrow protocol) and
+    // refill the root list via the allocation-free `query_entities_buf`. This is the
+    // rare hover-CHANGE path (O(tens) roots), off any per-entity hot loop, so a
+    // still-hover frame short-circuits above and never touches these buffers.
+    let mut scratch = mem::take(world.resource_mut::<UiWorldScratch>());
+    world.query_entities_buf(&[UiWorldAnchor::component_id()], &mut scratch.roots, &mut scratch.arch_ids);
+    for &root in scratch.roots.iter() {
         let Some(anchor) = world.get_component::<UiWorldAnchor>(root).copied() else {
             continue;
         };
@@ -101,6 +106,8 @@ pub fn ui_world_visibility_system(world: &mut EcsMaster) {
             world.enable::<UiWorldHidden>(root); // hide the rest
         }
     }
+    // Put the retained buffers back with their (grown) capacity intact.
+    *world.resource_mut::<UiWorldScratch>() = scratch;
 
     let st = world.resource_mut::<UiWorldHoverState>();
     st.prev = current;

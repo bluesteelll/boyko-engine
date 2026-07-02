@@ -53,7 +53,7 @@ use boyko_ui::resources::{LayoutScratch, UiSafeArea, UiViewport};
 use boyko_ui::units::Unit;
 use boyko_ui::world::{
     HoveredWorldEntity, UiWorldAnchor, UiWorldCulled, UiWorldHidden, UiWorldHoverState,
-    UiWorldProjection, WorldScaleMode, WorldTarget, project_world_to_screen,
+    UiWorldProjection, UiWorldScratch, WorldScaleMode, WorldTarget, project_world_to_screen,
     ui_world_project_system, ui_world_visibility_system,
 };
 
@@ -603,6 +603,7 @@ impl ProjOnce {
             scale_factor: 1.0,
             generation: 0,
         });
+        world.insert_resource(UiWorldScratch::default());
         Self { world }
     }
 
@@ -678,6 +679,7 @@ impl SchedHarness {
         world.insert_resource(UiViewport { width: VP_W, height: VP_H, scale_factor: 1.0, generation: 0 });
         world.insert_resource(UiSafeArea::default());
         world.insert_resource(LayoutScratch::with_seeds());
+        world.insert_resource(UiWorldScratch::default());
         world.insert_resource(boyko_scene::TransformPropagationScratch::default());
 
         let mut builder = ScheduleBuilder::new(pool);
@@ -777,6 +779,7 @@ impl VisHarness {
         let mut world = EcsMaster::new();
         world.insert_resource(HoveredWorldEntity::default());
         world.insert_resource(UiWorldHoverState::default());
+        world.insert_resource(UiWorldScratch::default());
         Self { world }
     }
 

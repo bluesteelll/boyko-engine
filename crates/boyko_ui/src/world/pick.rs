@@ -21,14 +21,19 @@
 //! strand a root permanently occluded).
 //!
 //! Principle 0: the pick bound is a first-class ECS component ([`UiPickable`]) on
-//! the engine's own storage; the only per-frame allocation is the `query_entities`
-//! Vec + a transient bound-snapshot Vec (the same tradeoff the sibling project /
-//! visibility systems make), NOT a parallel persistent data store.
+//! the engine's own storage; the per-frame root/pickable/bound buffers live in the
+//! retained [`UiWorldScratch`] resource (cleared-then-refilled, so the steady state
+//! allocates nothing — the sibling `UiInteractionScratch` / `UiBarScratch`
+//! discipline), NOT a parallel persistent data store.
+
+use std::mem;
 
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::entity::entity::Entity;
+use boyko_ecs::ecs::identifiers::primitives::ArchetypeId;
 use boyko_input::PhysicalInput;
+use boyko_macros::Resource;
 use boyko_math::{Ray, Vec3, ray_aabb, ray_sphere};
 use boyko_scene::camera::{ViewUniform, camera_ray};
 use boyko_scene::transform::GlobalTransform;
@@ -80,6 +85,39 @@ enum WorldShape {
     Sphere(f32),
     /// A world-half-extents axis-aligned box.
     Aabb(Vec3),
+}
+
+/// Reused per-frame scratch for the world-UI systems (a `Resource` — engine
+/// storage, allocated once, capacity retained). Frame-transient: every buffer is
+/// `clear()`-then-refilled so the steady-state path allocates nothing (Principle
+/// 1/5, the `UiInteractionScratch` / `UiBarScratch` discipline).
+///
+/// Shared by [`ui_world_pick_system`] (all four buffers), the project system, and
+/// the visibility system (both reuse only `roots` + `arch_ids`). `Default` is
+/// fully EMPTY so it is a valid `mem::take` target: each exclusive body moves the
+/// buffers onto its stack for the world-mutating loop, then moves them back with
+/// capacity retained (the `&mut world` calls in the loop cannot coexist with a held
+/// resource borrow — the same borrow protocol `ui_bar_apply` uses).
+///
+/// Principle 0: these are transient per-frame query/snapshot buffers, NOT a
+/// parallel persistent per-entity store — every durable datum stays a component on
+/// the engine's own storage.
+#[derive(Resource, Default)]
+pub struct UiWorldScratch {
+    /// Retained `UiWorldAnchor` root-query buffer (the roots project / pick /
+    /// visibility all iterate). Refilled via `query_entities_buf`. `pub(crate)` so
+    /// the sibling `project` / `visibility` modules reuse the same buffer.
+    pub(crate) roots: Vec<Entity>,
+    /// Retained `UiPickable` entity-query buffer for [`collect_bounds`]. Refilled
+    /// via `query_entities_buf`. Only the pick system uses it.
+    pickables: Vec<Entity>,
+    /// Retained world-space [`PickBound`] snapshot (one per pickable), built ONCE
+    /// per pick frame and ray-tested by both the pick and occlusion passes. Only
+    /// the pick system uses it.
+    bounds: Vec<PickBound>,
+    /// Retained archetype-id scratch backing every `query_entities_buf` call above
+    /// (alloc-free archetype walk). `pub(crate)` so the sibling modules reuse it.
+    pub(crate) arch_ids: Vec<ArchetypeId>,
 }
 
 /// The conservative uniform scale `s = max(‖col_0‖, ‖col_1‖, ‖col_2‖)` of the
@@ -184,7 +222,7 @@ fn set_hovered_if_changed(world: &mut EcsMaster, value: Option<Entity>) {
 /// `.after(propagate_transforms)` (fresh `GlobalTransform`),
 /// `.before(ui_world_visibility_system)` (it consumes `HoveredWorldEntity`).
 //
-// `clippy::needless_pass_by_ref_mut`: `query_entities` / `get_component` /
+// `clippy::needless_pass_by_ref_mut`: `query_entities_buf` / `get_component` /
 // `resource` / `resource_mut` / `enable` / `disable` are `&mut self` engine
 // methods clippy cannot see through. Mirrors `ui_world_project_system` /
 // `ui_focus_system`.
@@ -196,13 +234,18 @@ pub fn ui_world_pick_system(world: &mut EcsMaster) {
     let viewport = *world.resource::<UiViewport>();
     let physical = world.resource::<PhysicalInput>().clone();
 
+    // Move the retained buffers out so the per-entity `&mut world` calls do not
+    // conflict with a held resource borrow (the `mem::take` borrow protocol).
+    let mut scratch = mem::take(world.resource_mut::<UiWorldScratch>());
+
     let cursor_active = physical.cursor_inside && physical.window_focused;
 
     if !cursor_active {
         // Cursor gone: clear the hover AND re-derive every root's occlusion bit to
         // "not occluded" (C2 — a bit set on a prior active frame must not survive).
         set_hovered_if_changed(world, None);
-        clear_all_occlusion(world);
+        clear_all_occlusion(world, &mut scratch.roots, &mut scratch.arch_ids);
+        *world.resource_mut::<UiWorldScratch>() = scratch;
         return;
     }
 
@@ -220,21 +263,23 @@ pub fn ui_world_pick_system(world: &mut EcsMaster) {
 
     let ray = camera_ray(&view, cursor[0], cursor[1], viewport.width, viewport.height);
 
-    // Snapshot every pickable's WORLD bound ONCE (the single transform-math site,
-    // reused by the pick selection AND every occlusion ray — avoids re-querying /
-    // re-transforming per root). A per-frame Vec, the same tradeoff the project /
-    // visibility systems make (world UI is sparse, O(tens) pickables) — NOT a
+    // Snapshot every pickable's WORLD bound ONCE into the retained `bounds` buffer
+    // (the single transform-math site, reused by the pick selection AND every
+    // occlusion ray — avoids re-querying / re-transforming per root). Cleared then
+    // refilled, capacity retained (world UI is sparse, O(tens) pickables) — NOT a
     // persistent parallel store (Principle 0).
-    let bounds = collect_bounds(world);
+    collect_bounds(world, &mut scratch.pickables, &mut scratch.bounds, &mut scratch.arch_ids);
 
     // ── PICK: nearest positive-t hit over all bounds (no self-exclusion) ────────
-    let hovered = nearest_hit(ray, &bounds, None).map(|(_, e)| e);
+    let hovered = nearest_hit(ray, &scratch.bounds, None).map(|(_, e)| e);
     set_hovered_if_changed(world, hovered);
 
     // ── OCCLUSION: re-derive EVERY root's bit unconditionally (C2) ──────────────
+    // Refill the retained `roots` buffer (same query the project / visibility
+    // systems drive); iterate by reference so `bounds` stays borrowable alongside.
     let eye = view.camera_pos.xyz();
-    let roots = world.query_entities(&[UiWorldAnchor::component_id()]);
-    for root in roots {
+    world.query_entities_buf(&[UiWorldAnchor::component_id()], &mut scratch.roots, &mut scratch.arch_ids);
+    for &root in scratch.roots.iter() {
         let Some(anchor) = world.get_component::<UiWorldAnchor>(root).copied() else {
             continue;
         };
@@ -276,7 +321,7 @@ pub fn ui_world_pick_system(world: &mut EcsMaster) {
         // The eye→anchor ray. A zero `dist_anchor` (anchor AT the eye) makes the
         // dir degenerate → `ray_*` return None via the W2 guard → not occluded.
         let occ_ray = Ray::new(eye, to_anchor.normalize());
-        let occluded = match nearest_hit(occ_ray, &bounds, self_target) {
+        let occluded = match nearest_hit(occ_ray, &scratch.bounds, self_target) {
             Some((t, _)) => t < dist_anchor * (1.0 - REL_BIAS),
             None => false,
         };
@@ -287,17 +332,27 @@ pub fn ui_world_pick_system(world: &mut EcsMaster) {
             world.disable::<UiWorldOccluded>(root);
         }
     }
+
+    // Put the retained buffers back with their (grown) capacity intact.
+    *world.resource_mut::<UiWorldScratch>() = scratch;
 }
 
 /// Snapshots every [`UiPickable`] + `GlobalTransform` entity into a world-space
-/// [`PickBound`] (the single transform-math site). A `UiPickable` without a
-/// `GlobalTransform`, or one whose layers do not intersect [`PICK_LAYER_MASK`], is
-/// skipped (the former is a setup error → `debug_assert!`).
+/// [`PickBound`] (the single transform-math site), reusing the retained `pickables`
+/// / `bounds` / `arch_ids` scratch (no fresh `Vec`). `bounds` is cleared then
+/// refilled; a `UiPickable` without a `GlobalTransform`, or one whose layers do not
+/// intersect [`PICK_LAYER_MASK`], is skipped (the former is a setup error →
+/// `debug_assert!`).
 #[allow(clippy::needless_pass_by_ref_mut)] // get_component is &mut-opaque to clippy
-fn collect_bounds(world: &mut EcsMaster) -> Vec<PickBound> {
-    let entities = world.query_entities(&[UiPickable::component_id()]);
-    let mut bounds = Vec::with_capacity(entities.len());
-    for e in entities {
+fn collect_bounds(
+    world: &mut EcsMaster,
+    pickables: &mut Vec<Entity>,
+    bounds: &mut Vec<PickBound>,
+    arch_ids: &mut Vec<ArchetypeId>,
+) {
+    world.query_entities_buf(&[UiPickable::component_id()], pickables, arch_ids);
+    bounds.clear();
+    for &e in pickables.iter() {
         let Some(pk) = world.get_component::<UiPickable>(e).copied() else {
             continue;
         };
@@ -326,17 +381,17 @@ fn collect_bounds(world: &mut EcsMaster) -> Vec<PickBound> {
             shape,
         });
     }
-    bounds
 }
 
 /// Disables (clears) the [`UiWorldOccluded`] bit on EVERY [`UiWorldAnchor`] root —
 /// the cursor-inactive path's C2 guarantee (no bit set on a prior active frame can
 /// survive the cursor leaving the window). O(R) ≈ tens roots; `disable` writes
-/// nothing when the bit is already clear, so the inactive path stays cheap.
+/// nothing when the bit is already clear, so the inactive path stays cheap. Reuses
+/// the retained `roots` / `arch_ids` scratch (no fresh `Vec`).
 #[allow(clippy::needless_pass_by_ref_mut)] // enable/disable are &mut-opaque to clippy
-fn clear_all_occlusion(world: &mut EcsMaster) {
-    let roots = world.query_entities(&[UiWorldAnchor::component_id()]);
-    for root in roots {
+fn clear_all_occlusion(world: &mut EcsMaster, roots: &mut Vec<Entity>, arch_ids: &mut Vec<ArchetypeId>) {
+    world.query_entities_buf(&[UiWorldAnchor::component_id()], roots, arch_ids);
+    for &root in roots.iter() {
         world.disable::<UiWorldOccluded>(root);
     }
 }

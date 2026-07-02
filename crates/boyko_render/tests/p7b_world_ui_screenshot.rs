@@ -114,7 +114,7 @@ use boyko_ui::text::{emit_glyphs, FontId, FontTable, GlyphInstance, TextAlign, U
 use boyko_ui::world::components::{UiPickShape, UiPickable, UiWorldOccluded};
 use boyko_ui::world::{
     HoveredWorldEntity, UiWorldAnchor, UiWorldCulled, UiWorldHidden, UiWorldHoverState,
-    UiWorldProjection, WorldTarget, ui_world_pick_system, ui_world_project_system,
+    UiWorldProjection, UiWorldScratch, WorldTarget, ui_world_pick_system, ui_world_project_system,
     ui_world_visibility_system,
 };
 
@@ -502,6 +502,7 @@ fn build_p7b_world() -> P7bWorld {
     world.insert_resource(physical);
     world.insert_resource(HoveredWorldEntity::default());
     world.insert_resource(UiWorldHoverState::default());
+    world.insert_resource(UiWorldScratch::default());
     // `propagate_transforms` needs its scratch resource seeded.
     world.insert_resource(boyko_scene::TransformPropagationScratch::default());
 

@@ -46,7 +46,7 @@ use boyko_ui::units::Unit;
 use boyko_ui::world::components::{UiPickShape, UiPickable, UiWorldOccluded};
 use boyko_ui::world::{
     HoveredWorldEntity, UiWorldAnchor, UiWorldHidden, UiWorldHoverState, UiWorldProjection,
-    WorldScaleMode, WorldTarget, ui_world_pick_system, ui_world_project_system,
+    UiWorldScratch, WorldScaleMode, WorldTarget, ui_world_pick_system, ui_world_project_system,
     ui_world_visibility_system,
 };
 
@@ -109,6 +109,7 @@ impl PickHarness {
         world.insert_resource(physical);
         world.insert_resource(HoveredWorldEntity::default());
         world.insert_resource(UiWorldHoverState::default());
+        world.insert_resource(UiWorldScratch::default());
         Self { world }
     }
 
@@ -285,6 +286,7 @@ fn gate_pick_resolves_to_anchor_root() {
     world.insert_resource(physical);
     world.insert_resource(HoveredWorldEntity::default());
     world.insert_resource(UiWorldHoverState::default());
+    world.insert_resource(UiWorldScratch::default());
 
     // S: a pickable scene entity dead-ahead on the cursor ray.
     let s_pos = Vec3::new(0.0, 0.0, -5.0);
@@ -539,6 +541,7 @@ fn gate_depth_field_populated_in_unit_range() {
     let mut world = EcsMaster::new();
     world.insert_resource(origin_view());
     world.insert_resource(UiViewport { width: VP_W, height: VP_H, scale_factor: 1.0, generation: 0 });
+    world.insert_resource(UiWorldScratch::default());
 
     let root = spawn_anchor_root(&mut world, UiWorldAnchor { target: WorldTarget::WorldPos([0.0, 0.0, -10.0]), ..Default::default() });
     world.run_system(ui_world_project_system);
@@ -646,6 +649,7 @@ impl LayoutHarness {
         world.insert_resource(physical);
         world.insert_resource(HoveredWorldEntity::default());
         world.insert_resource(UiWorldHoverState::default());
+        world.insert_resource(UiWorldScratch::default());
         world.insert_resource(UiSafeArea::default());
         world.insert_resource(LayoutScratch::with_seeds());
 

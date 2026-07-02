@@ -106,7 +106,7 @@ pub mod prelude {
     pub use crate::world::{
         project_world_to_screen, ui_world_project_system, ui_world_visibility_system,
         HoveredWorldEntity, ProjectedPoint, UiWorldAnchor, UiWorldCulled, UiWorldHidden,
-        UiWorldProjection, WorldScaleMode, WorldTarget,
+        UiWorldProjection, UiWorldScratch, WorldScaleMode, WorldTarget,
     };
 
     pub use boyko_macros::{ui, Bindable};

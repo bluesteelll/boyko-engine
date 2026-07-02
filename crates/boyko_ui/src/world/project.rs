@@ -19,6 +19,8 @@
 //! screen_y = (1.0 - (ndc.y * 0.5 + 0.5)) * vp_h
 //! ```
 
+use std::mem;
+
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::entity::entity::Entity;
@@ -31,6 +33,7 @@ use crate::resources::UiViewport;
 use crate::world::components::{
     UiWorldAnchor, UiWorldCulled, UiWorldProjection, WorldScaleMode, WorldTarget,
 };
+use crate::world::pick::UiWorldScratch;
 
 /// The off-screen cull margin (NDC units): an anchor whose POINT is within this
 /// margin past an edge still projects (so a partly-off-screen label survives a
@@ -197,7 +200,7 @@ pub(crate) fn resolve_anchor_point(
 /// An EXCLUSIVE system (`&mut EcsMaster`): the engine's `Query` has no
 /// entity-yielding `QueryData`, so the cull-tag flip — which needs the ROOT
 /// `Entity` — cannot ride a normal query (the same constraint the layout pass
-/// documents). It enumerates the world-anchor roots via `query_entities`, reads
+/// documents). It enumerates the world-anchor roots via `query_entities_buf`, reads
 /// each anchor + the shared [`ViewUniform`] / [`UiViewport`], projects, then
 /// writes [`UiWorldProjection`] set-if-changed and toggles [`UiWorldCulled`]
 /// directly (O(1)).
@@ -217,13 +220,14 @@ pub(crate) fn resolve_anchor_point(
 ///
 /// # 0%-overhead
 ///
-/// With no `UiWorldAnchor` in the world, `query_entities` yields an empty set and
+/// With no `UiWorldAnchor` in the world, the root query yields an empty set and
 /// the system does no projection / no write. A still anchor + still camera
 /// re-projects to a bit-identical [`UiWorldProjection`], so `set_if_neq`
 /// suppresses the write and `Changed<UiWorldProjection>` stays clear (no
-/// relayout).
+/// relayout). The root list rides the retained [`UiWorldScratch`] buffers, so a
+/// steady frame allocates nothing.
 //
-// `clippy::needless_pass_by_ref_mut`: `query_entities` / `get_component` /
+// `clippy::needless_pass_by_ref_mut`: `query_entities_buf` / `get_component` /
 // `get_component_mut` / `enable` / `disable` are reached through `&mut self`
 // engine methods clippy cannot see through. Mirrors `ui_layout_apply` /
 // `ui_dispatch_system`.
@@ -254,13 +258,14 @@ pub fn ui_world_project_system(world: &mut EcsMaster) {
         viewport.width / viewport.height,
     );
 
-    // Enumerate the world-anchor roots. `query_entities` allocates a fresh Vec;
-    // world roots are O(tens), so this is off any per-entity hot path (the same
-    // tradeoff `refresh_roots` makes). A future phase can cache this behind a
-    // retained scratch if anchor churn warrants it.
-    let roots = world.query_entities(&[UiWorldAnchor::component_id()]);
+    // Move the retained root/arch buffers out so the per-root `&mut world` calls do
+    // not conflict with a held resource borrow (the `mem::take` borrow protocol),
+    // then refill the root list via the allocation-free `query_entities_buf`. World
+    // roots are O(tens), off any per-entity hot path.
+    let mut scratch = mem::take(world.resource_mut::<UiWorldScratch>());
+    world.query_entities_buf(&[UiWorldAnchor::component_id()], &mut scratch.roots, &mut scratch.arch_ids);
 
-    for root in roots {
+    for &root in scratch.roots.iter() {
         let Some(anchor) = world.get_component::<UiWorldAnchor>(root).copied() else {
             continue;
         };
@@ -325,6 +330,9 @@ pub fn ui_world_project_system(world: &mut EcsMaster) {
             world.enable::<UiWorldCulled>(root);
         }
     }
+
+    // Put the retained buffers back with their (grown) capacity intact.
+    *world.resource_mut::<UiWorldScratch>() = scratch;
 }
 
 /// Marks `root`'s projection invisible + culled (a dangling `EntityAnchor`). The

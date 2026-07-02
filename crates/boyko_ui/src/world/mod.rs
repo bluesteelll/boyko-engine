@@ -51,6 +51,6 @@ pub use components::{
     HoveredWorldEntity, UiPickShape, UiPickable, UiWorldAnchor, UiWorldCulled, UiWorldHidden,
     UiWorldOccluded, UiWorldProjection, WorldScaleMode, WorldTarget,
 };
-pub use pick::ui_world_pick_system;
+pub use pick::{ui_world_pick_system, UiWorldScratch};
 pub use project::{project_world_to_screen, ui_world_project_system, ProjectedPoint};
 pub use visibility::{ui_world_visibility_system, UiWorldHoverState};
