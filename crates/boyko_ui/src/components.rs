@@ -292,6 +292,11 @@ impl UiName {
     /// on the string literal, so the runtime path only `debug_assert!`s it (the
     /// P3 text path is the other caller and is responsible for its own bound
     /// check before calling). `const` so the `ui!` literal path is const-foldable.
+    ///
+    /// If an over-length name reaches this path in release (the `debug_assert!`
+    /// is gone), the copy is truncated at the last UTF-8 char boundary at or
+    /// before `CAP` — never at a partial multi-byte char — so `as_str` stays
+    /// sound.
     pub const fn new(s: &str) -> Self {
         debug_assert!(s.len() <= Self::CAP, "invariant: ui name exceeds CAP");
         let src = s.as_bytes();
@@ -299,7 +304,18 @@ impl UiName {
         // `const fn` cannot use `copy_from_slice`/iterators with `?`; a manual
         // index loop is the const-compatible byte copy. `n` is clamped to CAP so
         // an over-length name (which the macro already rejects) cannot overrun.
-        let n = if src.len() < Self::CAP { src.len() } else { Self::CAP };
+        let mut n = if src.len() < Self::CAP { src.len() } else { Self::CAP };
+        // If the clamp cut inside a multi-byte UTF-8 char (only possible when we
+        // truncated, i.e. `n < src.len()`), back `n` off to the preceding char
+        // boundary: continuation bytes match `(b & 0xC0) == 0x80`, so we drop the
+        // trailing partial sequence entirely. Without this a straddling char would
+        // leave an invalid-UTF-8 prefix that `as_str`'s `from_utf8_unchecked` reads
+        // as UB. `n < src.len()` guards `src[n]` in bounds; `n > 0` guards the
+        // decrement. A single boundary is at most 3 continuation bytes back (UTF-8
+        // scalar ≤ 4 bytes), so this loop cannot underflow a valid CAP-sized cut.
+        while n < src.len() && n > 0 && (src[n] & 0xC0) == 0x80 {
+            n -= 1;
+        }
         let mut i = 0;
         while i < n {
             bytes[i] = src[i];
@@ -312,10 +328,11 @@ impl UiName {
     #[inline]
     pub fn as_str(&self) -> &str {
         debug_assert!(self.len as usize <= Self::CAP, "invariant: UiName len exceeds CAP");
-        // SAFETY: `new` only ever writes valid UTF-8 bytes copied verbatim from a
-        // `&str` into `bytes[..len]`, and `len <= CAP` (debug-asserted above and
-        // clamped in `new`). The slice `bytes[..len]` is therefore the exact
-        // valid-UTF-8 prefix that was stored, so `from_utf8_unchecked` is sound.
+        // SAFETY: `new` copies bytes verbatim from a `&str` (already valid UTF-8) into
+        // `bytes[..len]`, and when it truncates it backs `len` off to a UTF-8 char
+        // boundary (never leaving a partial multi-byte sequence). So `bytes[..len]` is
+        // always a valid-UTF-8 prefix of the source, and `len <= CAP` (debug-asserted
+        // above and clamped in `new`). `from_utf8_unchecked` is therefore sound.
         unsafe { core::str::from_utf8_unchecked(&self.bytes[..self.len as usize]) }
     }
 

@@ -41,19 +41,12 @@ pub const MAX_POINTERS: usize = 1;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PointerSlot {
     /// The `(origin, resolved_action_index)` stamped at press time; fired at
-    /// release-inside-same-node after re-validation. `None` when no press is in
-    /// flight (Decision 2).
+    /// release when the release lands over the SAME origin entity. `None` when
+    /// no press is in flight (Decision 2).
     pub pending_click: Option<(Entity, u16)>,
-    /// The press-origin generation snapshot (kept for parity with the entity's
-    /// generation; the release-time re-validation uses `get_component_raw`).
-    pub press_gen: u32,
     /// Set at release-inside-same-node; consumed by `ui_dispatch_system` for
     /// exactly one frame (Decision 2).
     pub click_fired: Option<(Entity, u16)>,
-    /// A node pressed AND released in the same frame is reset to `None` NEXT
-    /// frame so a one-frame click is observable by dispatch this frame (focus
-    /// step 5).
-    pub reset_next_frame: Option<Entity>,
 }
 
 /// Single-pointer-aware pointer interaction resource (Decision 11). Fixed POD
@@ -464,7 +457,10 @@ fn write_relative_cursor(world: &mut EcsMaster, entity: Entity, rel: RelativeCur
     }
 }
 
-/// Stamp-at-press / release-up click resolution + same-frame defer (Decision 2).
+/// Stamp-at-press / release-up click resolution (Decision 2). A press stamps
+/// `(origin, action)` into `pending_click`; a release over the SAME origin fires
+/// `click_fired` (a one-frame output cleared at the next call), so a same-frame
+/// press+release is observed exactly once with no deferral bookkeeping.
 fn resolve_pointer(
     world: &mut EcsMaster,
     hovered: Option<Entity>,
@@ -475,30 +471,23 @@ fn resolve_pointer(
     let state = world.resource_mut::<UiPointerState>();
     let slot = &mut state.slots[0];
 
-    // Clear last frame's transient outputs.
+    // Clear last frame's transient output.
     slot.click_fired = None;
-    if let Some(deferred) = slot.reset_next_frame.take() {
-        // Reset a one-frame click node to None next frame (deferred). The
-        // Interaction column was set this frame to be observable; reset it now.
-        // (The actual write happens via the unconditional pass next frame; here
-        // we just clear the deferral marker — the pass already wrote None when
-        // the cursor moved off, and a still-hovered one-frame click stays
-        // Hovered, which is correct.)
-        let _ = deferred;
-    }
 
     // Stamp at press: read the origin's OnClick.0 now (Decision 2). We must do
     // this without holding the `state` borrow.
     if clicked && let Some(origin) = hovered {
         let action = read_on_click(world, origin);
-        let origin_gen = origin.generation();
         let state = world.resource_mut::<UiPointerState>();
         let slot = &mut state.slots[0];
         slot.pending_click = Some((origin, action));
-        slot.press_gen = origin_gen;
     }
 
-    // Release: fire iff release is over the SAME origin (Decision 2).
+    // Release: fire iff release lands over the SAME origin entity (Decision 2).
+    // The `hovered == Some(origin)` compare is generation-safe on its own —
+    // `Entity` equality includes the generation and `hovered` is resolved from
+    // live entities this frame, so a recycled slot can never masquerade as the
+    // pressed origin. No separate re-validation is needed.
     if released {
         let state = world.resource_mut::<UiPointerState>();
         let slot = &mut state.slots[0];
@@ -510,17 +499,11 @@ fn resolve_pointer(
         }
     }
 
-    // Same-frame press+release over the same node: the release branch above has
-    // already stamped `click_fired = Some((origin, action))` from the still-live
-    // `pending_click` set by the press branch this same frame. We must NOT re-read
-    // `pending_click` here — the release branch consumed it (set it to None), and
-    // re-reading would clobber the valid action with NO_ACTION. We only queue the
-    // reset deferral so dispatch observes the click exactly this frame.
-    if clicked && released && hovered.is_some() {
-        let state = world.resource_mut::<UiPointerState>();
-        let slot = &mut state.slots[0];
-        slot.reset_next_frame = hovered;
-    }
+    // Same-frame press+release over the same node needs no extra work: the press
+    // branch stamped `pending_click` and the release branch above already fired
+    // `click_fired` from it this same frame. `click_fired` is a one-frame output
+    // (cleared at the top of the next call), so dispatch observes the click
+    // exactly this frame with no deferral bookkeeping.
 }
 
 /// Reads `entity`'s `OnClick.0` action index, or [`NO_ACTION`] if absent.
@@ -641,7 +624,6 @@ fn blur_reset(
     for slot in &mut state.slots {
         slot.pending_click = None;
         slot.click_fired = None;
-        slot.reset_next_frame = None;
     }
     state.pending_submit = None;
 

@@ -31,6 +31,7 @@
 //! equals the shaped run, and an `Auto` leaf node hugs the measured `ContentSize`
 //! through the layout's leaf intrinsic-size fallback.
 
+use boyko_ecs::ecs::core::iters::query::data::Mut;
 use boyko_ecs::ecs::core::iters::query::filter::{Changed, Or};
 use boyko_ecs::ecs::core::iters::query::query::Query;
 use boyko_ecs::ecs::core::system::Res;
@@ -56,7 +57,7 @@ use super::shape::shape_into;
 #[allow(clippy::type_complexity)]
 pub fn ui_text_measure_system(
     mut nodes: Query<
-        (&UiText, &UiTextBuffer, &ComputedRect, &mut ContentSize),
+        (&UiText, &UiTextBuffer, &ComputedRect, Mut<ContentSize>),
         Or<(Changed<UiTextBuffer>, Changed<UiText>)>,
     >,
     fonts: Res<FontTable>,
@@ -65,13 +66,20 @@ pub fn ui_text_measure_system(
     if fonts.is_empty() {
         return;
     }
-    for (text, buffer, rect, content_size) in nodes.iter_mut() {
+    for (text, buffer, rect, mut content_size) in nodes.iter_mut() {
         let measured = measure_one(text, buffer.as_str(), rect, &fonts);
-        // Set-if-changed: a re-measure that produced the same size bumps no tick, so a
-        // value-bound label whose text is unchanged stays quiet for the relayout gate.
+        // Set-if-changed via the `Mut` guard: a same-value re-measure takes the else
+        // branch and never touches `deref_mut`, so no `Changed<ContentSize>` tick is
+        // bumped (a value-bound label whose text is unchanged stays quiet for the
+        // relayout gate). An `&mut ContentSize` query item would NOT bump the tick even
+        // when the value changes — only a `Mut<T>` deref does — so `ui_layout_discovery`'s
+        // `Changed<ContentSize>` relayout trigger would never fire and the Auto-sized node
+        // would re-measure invisibly. The epsilon gate (not `set_if_neq`, which needs
+        // `PartialEq` and would be an exact-bit compare) matches the f32 fields.
         if (content_size.width - measured.width).abs() > f32::EPSILON
             || (content_size.height - measured.height).abs() > f32::EPSILON
         {
+            // First `deref_mut` here bumps the changed tick (the relayout trigger).
             content_size.width = measured.width;
             content_size.height = measured.height;
         }
