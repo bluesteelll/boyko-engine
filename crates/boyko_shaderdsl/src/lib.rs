@@ -61,6 +61,12 @@ pub mod surface;
 #[cfg(feature = "emit")]
 pub mod emit;
 
+// Pillar B increment B2 — the TRS interpolation math. Codegen-only (it needs std trig
+// for its Eval oracle and records into the `Emit` HLSL recorder), so it is gated behind
+// `emit` exactly like the recorder itself: a physics `no_std` build never links it.
+#[cfg(feature = "emit")]
+pub mod interp;
+
 pub use brick::{
     BRICK_OUTSIDE_GRID, brick_cell_class_body, cubic_eval, decode_snorm8, jcgt_cubic_coeffs,
     snorm_normalize, snorm_scale,
@@ -86,6 +92,8 @@ pub use remarch::{
     EPS as B1_REMARCH_EPS, MAX_IT as B1_REMARCH_MAX_IT, T_MAX as B1_REMARCH_T_MAX,
     b1_exhaustion_remarch_body,
 };
+#[cfg(feature = "emit")]
+pub use interp::{InterpBackend, SLERP_DOT_THRESHOLD, slerp_quat, transform_pair_interp_body};
 pub use scalar::FieldScalar;
 pub use shadow::{
     FIELD_LIPSCHITZ_L, MAX_IT, SHADOW_HIT_EPS, SHADOW_K, SHADOW_MINT, SHADOW_MINT_STEP, T_MAX,

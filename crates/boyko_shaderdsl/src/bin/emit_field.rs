@@ -300,4 +300,14 @@ fn main() {
     // (8-space indent).
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_ssao());
+    // Pillar B increment B2 — the per-instance TRS interpolation + 3×4 model-affine
+    // compose leaf (`interp_trs`), a WHOLE struct-returning function generated from
+    // `boyko_shaderdsl::interp::transform_pair_interp_body` over the `Emit` backend (the
+    // straight-line `InterpBackend` axis — arithmetic/select/comparison + `sin`/`cos`/
+    // `acos`; no control flow). Spliced between the `// === GENERATED interp_trs
+    // BEGIN/END ===` sentinels in `interp_instances.comp.hlsl`. The `f32` Eval
+    // instantiation is the CPU oracle (its composed rows byte-match
+    // `boyko_render::InstanceModelCol::from_global` for the interpolated TRS).
+    println!();
+    print!("{}", boyko_shaderdsl::emit::emit_hlsl_transform_interp());
 }

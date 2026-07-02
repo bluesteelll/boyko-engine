@@ -113,6 +113,17 @@ enum Node {
     Abs(u32),
     /// `sqrt(a)`.
     Sqrt(u32),
+    /// `sin(a)` — the HLSL `sin` intrinsic (the B2 interp slerp weights). Recorded ONLY
+    /// by [`InterpBackend`](crate::interp::InterpBackend) (`interp_trs`); the SDF field
+    /// op-set is transcendental-free, so no field/marcher body records it.
+    Sin(u32),
+    /// `cos(a)` — the HLSL `cos` intrinsic (carried for the B2 interp facet; the slerp
+    /// body itself uses `sin`/`acos`, but the backend op-set exposes `cos` for
+    /// completeness of the transcendental facet).
+    Cos(u32),
+    /// `acos(a)` — the HLSL `acos` intrinsic (the B2 interp slerp angle `theta =
+    /// acos(dot)`). Recorded ONLY by [`InterpBackend`](crate::interp::InterpBackend).
+    Acos(u32),
     /// `cond ? t : e` — the HLSL ternary (the frozen `(k > 0.0) ? _ : _`). The arms are
     /// spelled UN-wrapped (the brick-exit progress clamp). Recorded by
     /// [`FieldScalar::select`].
@@ -144,6 +155,12 @@ enum Node {
     /// `<=`), printed inline like [`Node::Gt`]. The B1 exhaustion re-march's mesh guard
     /// `t >= t_mesh`.
     Ge(u32, u32),
+    /// `a == b` — a FLOAT equality Mask node (`OpFOrdEqual`), printed inline like
+    /// [`Node::Gt`]. The B2 interp exact-at-`prev==curr` keystone's per-component test
+    /// (folded by `&&` and consumed by `select`). Recorded ONLY by
+    /// [`InterpBackend`](crate::interp::InterpBackend); the SDF field op-set has no float
+    /// `==` (its only equality is the integer [`Node::IntEq`]).
+    FEq(u32, u32),
     /// `vec[iv]` — a dynamic index of a `float3` PARAMETER (`rd[a]`, `p[a]`,
     /// `cell_min[a]`) by the unroll induction variable. `(vec_id, iv_id)`: `vec_id`
     /// indexes [`Names::vec_in`] (the vector-parameter name table), `iv_id` references
@@ -934,6 +951,83 @@ impl FieldScalar for Emit {
     }
 }
 
+// ---- The B2 interp backend: `impl InterpBackend for Emit` ---------------------
+//
+// The TRS-interpolation body ([`crate::interp::transform_pair_interp_body`]) records
+// into the SAME arena / `Node` IR the field bodies use — the recorder is NOT forked.
+// Only the three transcendental nodes (`Sin`/`Cos`/`Acos`) and the float `==`
+// (`FEq`) are new; everything else reuses the existing arithmetic/select/comparison
+// nodes.
+
+impl crate::interp::InterpBackend for Emit {
+    type Mask = EmitMask;
+
+    #[inline]
+    fn lit(x: f32) -> Self {
+        Emit(push(Node::Lit(x)))
+    }
+    #[inline]
+    fn add(self, rhs: Self) -> Self {
+        Emit(push(Node::Add(self.0, rhs.0)))
+    }
+    #[inline]
+    fn sub(self, rhs: Self) -> Self {
+        Emit(push(Node::Sub(self.0, rhs.0)))
+    }
+    #[inline]
+    fn mul(self, rhs: Self) -> Self {
+        Emit(push(Node::Mul(self.0, rhs.0)))
+    }
+    #[inline]
+    fn div(self, rhs: Self) -> Self {
+        Emit(push(Node::Div(self.0, rhs.0)))
+    }
+    #[inline]
+    fn neg(self) -> Self {
+        Emit(push(Node::Neg(self.0)))
+    }
+    #[inline]
+    fn abs(self) -> Self {
+        Emit(push(Node::Abs(self.0)))
+    }
+    #[inline]
+    fn sqrt(self) -> Self {
+        Emit(push(Node::Sqrt(self.0)))
+    }
+    #[inline]
+    fn sin(self) -> Self {
+        Emit(push(Node::Sin(self.0)))
+    }
+    #[inline]
+    fn cos(self) -> Self {
+        Emit(push(Node::Cos(self.0)))
+    }
+    #[inline]
+    fn acos(self) -> Self {
+        Emit(push(Node::Acos(self.0)))
+    }
+    #[inline]
+    fn select(cond: EmitMask, t: Self, e: Self) -> Self {
+        Emit(push(Node::Select(cond.0, t.0, e.0)))
+    }
+    #[inline]
+    fn lt(self, rhs: Self) -> EmitMask {
+        EmitMask(push(Node::Lt(self.0, rhs.0)))
+    }
+    #[inline]
+    fn gt(self, rhs: Self) -> EmitMask {
+        EmitMask(push(Node::Gt(self.0, rhs.0)))
+    }
+    #[inline]
+    fn and(a: EmitMask, b: EmitMask) -> EmitMask {
+        EmitMask(push(Node::And2(a.0, b.0)))
+    }
+    #[inline]
+    fn eq(self, rhs: Self) -> EmitMask {
+        EmitMask(push(Node::FEq(self.0, rhs.0)))
+    }
+}
+
 // ---- The HLSL printer ---------------------------------------------------------
 
 /// The float-input names for the FIELD leaves (`smin`/`smax`/`combine`), in
@@ -1100,6 +1194,7 @@ fn is_inline_leaf(node: Node) -> bool {
             | Node::Lt(_, _)
             | Node::Le(_, _)
             | Node::Ge(_, _)
+            | Node::FEq(_, _)
             | Node::IntEq(_, _)
             | Node::UintInput(_)
             | Node::UintLit(_)
@@ -1233,6 +1328,9 @@ fn operand_str(
         Node::Lt(a, b) => format!("{} < {}", opl(a), opl(b)),
         Node::Le(a, b) => format!("{} <= {}", opl(a), opl(b)),
         Node::Ge(a, b) => format!("{} >= {}", opl(a), opl(b)),
+        // The B2 interp exact-at-equal keystone's float `==` (`OpFOrdEqual`) — a Mask
+        // spelled inline inside the `&&` fold, like the other comparison masks.
+        Node::FEq(a, b) => format!("{} == {}", opl(a), opl(b)),
         // `vec[iv]` — the vector parameter's name (`rd`/`p`/`cell_min`) indexed by the
         // iv node's own spelling (`a`). Both inline, so `p[a]` spells inline at each use.
         Node::VecIndex(vec_id, iv_id) => format!("{}[{}]", names.vec_in[vec_id as usize], opl(iv_id)),
@@ -1451,6 +1549,7 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
         | Node::Lt(_, _)
         | Node::Le(_, _)
         | Node::Ge(_, _)
+        | Node::FEq(_, _)
         | Node::IntEq(_, _)
         | Node::UintInput(_)
         | Node::UintLit(_)
@@ -1516,6 +1615,18 @@ fn define_str(arena: &[Node], names: Names, temps: &[Option<String>], id: u32) -
         Node::Sqrt(a) => {
             chk(a, EmitTy::Float);
             format!("sqrt({})", op(a))
+        }
+        Node::Sin(a) => {
+            chk(a, EmitTy::Float);
+            format!("sin({})", op(a))
+        }
+        Node::Cos(a) => {
+            chk(a, EmitTy::Float);
+            format!("cos({})", op(a))
+        }
+        Node::Acos(a) => {
+            chk(a, EmitTy::Float);
+            format!("acos({})", op(a))
         }
         Node::Select(_c, t, e) => {
             // The `_c` condition is a Mask leaf (a `Gt`/`IntEq`/`Le` node), not a float
@@ -1972,6 +2083,124 @@ fn trace_named_vec4<F: FnOnce(&[Emit], &[Emit]) -> [Emit; 4]>(
         let a = a.borrow();
         emit_body_vec4(&a, names, roots)
     })
+}
+
+/// Like [`emit_body`], but the TWELVE `roots` (the 3×4 ROW-MAJOR model affine) are
+/// spelled as three `InterpModel` struct-field assignments returning the struct — the
+/// B2 `interp_trs` output. The shared temp-emission walk ([`emit_temps`]) computes the
+/// slerp / compose subtrees ONCE; each root operand inlines its already-emitted `tN`
+/// temp into the `float4(...)` row constructor.
+fn emit_body_rows12(arena: &[Node], names: Names, roots: [u32; 12]) -> String {
+    let (mut out, temps) = emit_temps(arena, names);
+    let r = |id: u32| operand_str(arena, names, &temps, id, OperandPos::Root);
+    out.push_str("    InterpModel m;\n");
+    out.push_str(&format!(
+        "    m.row0 = float4({}, {}, {}, {});\n",
+        r(roots[0]),
+        r(roots[1]),
+        r(roots[2]),
+        r(roots[3])
+    ));
+    out.push_str(&format!(
+        "    m.row1 = float4({}, {}, {}, {});\n",
+        r(roots[4]),
+        r(roots[5]),
+        r(roots[6]),
+        r(roots[7])
+    ));
+    out.push_str(&format!(
+        "    m.row2 = float4({}, {}, {}, {});\n",
+        r(roots[8]),
+        r(roots[9]),
+        r(roots[10]),
+        r(roots[11])
+    ));
+    out.push_str("    return m;\n");
+    out
+}
+
+/// The 20 `float`-input names for `interp_trs`, in the seed order the interp body reads
+/// them: `prev` TRS (pos.xyz, rot.xyzw, scale.xyz) then `curr` TRS, spelled as the HLSL
+/// struct-member accessors of the `TransformPair` parameter so the generated body
+/// references `pair.prev.pos.x` etc. directly. `alpha` is seeded last (index 20).
+const INTERP_INPUT_NAMES: &[&str] = &[
+    "pair.prev.pos.x",
+    "pair.prev.pos.y",
+    "pair.prev.pos.z",
+    "pair.prev.rot.x",
+    "pair.prev.rot.y",
+    "pair.prev.rot.z",
+    "pair.prev.rot.w",
+    "pair.prev.scale.x",
+    "pair.prev.scale.y",
+    "pair.prev.scale.z",
+    "pair.curr.pos.x",
+    "pair.curr.pos.y",
+    "pair.curr.pos.z",
+    "pair.curr.rot.x",
+    "pair.curr.rot.y",
+    "pair.curr.rot.z",
+    "pair.curr.rot.w",
+    "pair.curr.scale.x",
+    "pair.curr.scale.y",
+    "pair.curr.scale.z",
+    "alpha",
+];
+
+/// Generates the HLSL `interp_trs` body — the per-instance TRS interpolation + 3×4
+/// model-affine compose (Pillar B increment B2) — by tracing the generic
+/// [`crate::interp::transform_pair_interp_body`] over the [`Emit`] backend, and returns
+/// the FULL `InterpModel interp_trs(TransformPair pair, float alpha) { ... }` function.
+///
+/// A struct-returning function (not `out` params) because a NEW shader can define the
+/// cleanest shape: the caller writes the returned `InterpModel` (three `float4` rows)
+/// straight into the `RWStructuredBuffer<InstanceModelCol>` record. The generated body
+/// is spliced between the `// === GENERATED interp_trs BEGIN/END ===` sentinels in
+/// `crates/boyko_rhi_vulkan/shaders/interp_instances.comp.hlsl`; the
+/// `interp_edsl_sync` test pins the committed shader to this output AND re-DXCs the
+/// whole file to the committed `.spv`.
+///
+/// The `f32` Eval instantiation of the SAME body is the CPU oracle whose composed rows
+/// byte-match `boyko_render::InstanceModelCol::from_global` for the interpolated TRS
+/// (proven by the `boyko_shaderdsl` eval-mirror tests).
+pub fn emit_hlsl_transform_interp() -> String {
+    use crate::interp;
+
+    let names = Names {
+        float_in: INTERP_INPUT_NAMES,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: NO_VEC_INPUTS,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: NO_NAMED_LITS,
+        vars: NO_VARS,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+    ARENA.with(|a| a.borrow_mut().clear());
+    let ins: Vec<Emit> = (0..INTERP_INPUT_NAMES.len())
+        .map(|i| Emit::input(i as u32))
+        .collect();
+    let rows = interp::transform_pair_interp_body::<Emit>(
+        [ins[0], ins[1], ins[2]],
+        [ins[3], ins[4], ins[5], ins[6]],
+        [ins[7], ins[8], ins[9]],
+        [ins[10], ins[11], ins[12]],
+        [ins[13], ins[14], ins[15], ins[16]],
+        [ins[17], ins[18], ins[19]],
+        ins[20],
+    );
+    let roots: [u32; 12] = core::array::from_fn(|i| rows[i].0);
+    let body = ARENA.with(|a| {
+        let a = a.borrow();
+        emit_body_rows12(&a, names, roots)
+    });
+    format!("InterpModel interp_trs(TransformPair pair, float alpha) {{\n{body}}}\n")
 }
 
 /// Generates the HLSL bodies of the frozen field functions (`smin`/`smax`/`combine`)
