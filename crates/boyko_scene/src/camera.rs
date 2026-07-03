@@ -33,8 +33,11 @@ use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::iters::query::data::Mut;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
+use boyko_ecs::ecs::core::time::Time;
 use boyko_macros::{Component, Resource};
 
+use boyko_input::raw::keycode::KeyCode;
+use boyko_input::raw::queue::PhysicalInput;
 use boyko_math::{Affine3A, Mat3, Mat4, Quat, Ray, Vec3, Vec4};
 
 use crate::transform::{GlobalTransform, Transform};
@@ -676,5 +679,320 @@ pub fn orbit_camera_system(mut rigs: Query<(&OrbitCamera, Mut<Transform>)>) {
             rotation: Quat::from_mat3(world.matrix3),
             scale: Vec3::ONE,
         };
+    }
+}
+
+/// A first-person FLY camera controller (host plan R6): the camera entity's pose
+/// is driven each frame from the [`PhysicalInput`] snapshot by
+/// [`fly_camera_system`] — mouse-look accumulates `yaw` / `pitch`, and WASD +
+/// vertical keys translate the eye along the derived orthonormal basis.
+///
+/// Unlike [`OrbitCamera`] (pure rig state the caller advances), `FlyCamera` OWNS
+/// its own drive: `fly_camera_system` reads the engine's per-frame input snapshot
+/// plus [`Time`] and both mutates the accumulators AND writes the entity's
+/// [`Transform`]. The interactive quit binding and the OS→ECS input bridge live
+/// in the host (`boyko_app::FlyCameraPlugin`); this component + system are the
+/// windowing-independent core, testable headless over a synthetic snapshot.
+///
+/// # Parity (the `run_interactive_viewer` fly math)
+///
+/// The defaults + the basis formula reproduce the reference interactive viewer
+/// (`boyko_rhi_vulkan`'s `run_interactive_viewer`): sensitivity `0.0035`,
+/// pitch-clamp `±1.5533`, move speed `3.5 u/s`, and `forward(yaw=0, pitch=0) ==
+/// [0, 0, -1]` (the `-Z` look).
+///
+/// `#[repr(C)]` POD (16 B, natural `f32` alignment), `Copy`. All four fields are
+/// read/written together once per frame — no hot/cold split.
+///
+/// # Required components
+///
+/// `#[require(Transform, GlobalTransform)]` auto-inserts the pose columns
+/// `fly_camera_system` writes and
+/// [`propagate_transforms`](crate::propagation::propagate_transforms) needs, so
+/// inserting a `FlyCamera` alone is well-formed. A camera is normally spawned via
+/// [`FlyCameraBundle`](crate::bundles::FlyCameraBundle) with the explicit
+/// `Camera + Projection + FlyCamera + Transform + GlobalTransform` list.
+#[repr(C)]
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+#[require(Transform, GlobalTransform)]
+pub struct FlyCamera {
+    /// Azimuth, radians. `yaw == 0` looks down `-Z`; `+yaw` sweeps the look
+    /// toward `+X`. Accumulated from the summed mouse-X delta each frame.
+    pub yaw: f32,
+    /// Elevation, radians. `pitch == 0` is level; `+pitch` looks up. CLAMPED to
+    /// `±`[`PITCH_LIMIT`](Self::PITCH_LIMIT) each frame so the look direction is
+    /// never collinear with world-up (which would collapse the right axis).
+    pub pitch: f32,
+    /// Planar/vertical move speed in world units per second.
+    pub speed: f32,
+    /// Mouse-look sensitivity (radians per raw mouse-delta unit).
+    pub sensitivity: f32,
+}
+
+// Layout pin (house style — cf. `OrbitCamera`, `Transform`). 4 × 4 = 16 B. A
+// change here is a deliberate decision, not an accident.
+const _: () = assert!(size_of::<FlyCamera>() == 16);
+
+impl FlyCamera {
+    /// The pitch clamp bound (radians), matching the reference viewer's
+    /// `VIEWER_PITCH_LIMIT`. Keeps the look direction strictly off the `±π/2`
+    /// poles where the right axis (`forward × up`) would collapse.
+    pub const PITCH_LIMIT: f32 = 1.5533;
+
+    /// Default mouse-look sensitivity (radians per raw mouse-delta unit),
+    /// matching the reference viewer's `VIEWER_LOOK_SENS`.
+    pub const DEFAULT_SENSITIVITY: f32 = 0.0035;
+
+    /// Default move speed (world units per second), matching the reference
+    /// viewer's `VIEWER_MOVE_SPEED`.
+    pub const DEFAULT_SPEED: f32 = 3.5;
+
+    /// Constructs a fly camera with the given initial `yaw` / `pitch` (radians)
+    /// and the default [`DEFAULT_SPEED`](Self::DEFAULT_SPEED) /
+    /// [`DEFAULT_SENSITIVITY`](Self::DEFAULT_SENSITIVITY).
+    #[inline]
+    pub const fn new(yaw: f32, pitch: f32) -> Self {
+        Self {
+            yaw,
+            pitch,
+            speed: Self::DEFAULT_SPEED,
+            sensitivity: Self::DEFAULT_SENSITIVITY,
+        }
+    }
+}
+
+impl Default for FlyCamera {
+    /// The reference viewer's start orientation: `yaw == 0` (looking down `-Z`)
+    /// and `pitch == -0.3805` (`VIEWER_INITIAL_PITCH` — a slight downward tilt),
+    /// with the default speed + sensitivity.
+    #[inline]
+    fn default() -> Self {
+        Self::new(0.0, -0.3805)
+    }
+}
+
+/// Drives every [`FlyCamera`] entity's [`Transform`] from the per-frame
+/// [`PhysicalInput`] snapshot + the virtual [`Time`] delta (host plan R6).
+///
+/// Per fly camera (typically one):
+///
+/// 1. `dt = time.delta_secs()` — the VIRTUAL delta (clamped / pausable / scaled;
+///    ZERO while paused). It tracks the raw delta at normal FPS, so movement is
+///    parity-faithful, but a hitch or a pause cannot fling the camera.
+/// 2. Accumulate look: `yaw += mouse_delta.x · sensitivity`,
+///    `pitch -= mouse_delta.y · sensitivity`, then clamp `pitch` to
+///    `±`[`PITCH_LIMIT`](FlyCamera::PITCH_LIMIT). The accumulators are written
+///    back to the component.
+/// 3. Build the orthonormal basis: `forward = norm([sy·cp, sp, -cy·cp])`,
+///    `right = norm(forward × up)`, `up = right × forward` (world up `+Y`), so
+///    `forward(0, 0) == [0, 0, -1]`.
+/// 4. Sum the movement axes from the LEVEL key bitset (`keys_pressed`):
+///    `W/S → ±forward`, `D/A → ±right`, `Space/E → +up`, `ControlLeft/Q → -up`;
+///    `eye = translation + norm_or_zero(move) · (speed · dt)`.
+/// 5. Write the pose through [`Mut<Transform>`](boyko_ecs::ecs::core::iters::query::data::Mut):
+///    `rotation = Quat::from_mat3(from_columns(right, up, -forward))` (the
+///    camera-world column convention `ViewUniform::from_camera` reads),
+///    `translation = eye`.
+///
+/// # Change detection (the load-bearing pin)
+///
+/// The pose is written through the change-tracking `Mut<Transform>` guard, NOT a
+/// bare `&mut Transform`. In THIS engine a `&mut T` query term does NOT stamp the
+/// row's `changed_tick` (`NEEDS_CHANGE_DETECTION = false`); only the `Mut<T>`
+/// guard's `DerefMut` does. `propagate_transforms` dirty-gates on
+/// `Transform.changed_tick`, so writing through the guard recomposes the camera's
+/// `GlobalTransform` the SAME frame (no one-frame view lag — cf. BUG-S35-1).
+///
+/// # Schedule order
+///
+/// Joins `CameraSet::Control` (via `boyko_app::FlyCameraPlugin`), which
+/// [`CameraPlugin`](crate::camera_plugin::CameraPlugin) orders
+/// `.before(CameraSet::Resolve)` — the propagation + resolve pair — so the
+/// same-frame view reflects this write.
+//
+// `clippy::needless_pass_by_value`: `Res` / `Query` are by-value `SystemParam`s
+// reborrowed internally — the same false-positive the orbit / resolve systems
+// carry.
+#[allow(clippy::needless_pass_by_value)]
+pub fn fly_camera_system(
+    time: Res<Time>,
+    input: Res<PhysicalInput>,
+    mut cams: Query<(&mut FlyCamera, Mut<Transform>)>,
+) {
+    let dt = time.delta_secs();
+    for (fly, mut transform) in cams.iter_mut() {
+        // Write through Mut<Transform> (stamps changed_tick — the pin). The
+        // per-entity math is the pure `fly_step` (alloc-free, unit-tested).
+        *transform = fly_step(fly, transform.translation, &input, dt);
+    }
+}
+
+/// The pure per-entity fly step (steps 2–5): mutate the [`FlyCamera`]
+/// accumulators from the input snapshot and return the new [`Transform`] for the
+/// camera whose current eye is `translation`.
+///
+/// Extracted from [`fly_camera_system`] so it is alloc-free-testable over
+/// borrowed state without the scheduler's per-run scaffolding (the `ingest_body`
+/// pattern from `boyko_input`'s zero-alloc gate). Pure + branch-only: no heap.
+#[inline]
+pub(crate) fn fly_step(
+    fly: &mut FlyCamera,
+    translation: Vec3,
+    input: &PhysicalInput,
+    dt: f32,
+) -> Transform {
+    const WORLD_UP: Vec3 = Vec3::new(0.0, 1.0, 0.0);
+
+    debug_assert!(
+        fly.sensitivity >= 0.0 && fly.speed >= 0.0,
+        "invariant: FlyCamera speed/sensitivity must be non-negative"
+    );
+
+    // 2) Accumulate mouse-look; clamp pitch off the poles. `mouse_delta` is
+    //    f64 (raw relative motion); cast to f32 for the basis math.
+    fly.yaw += input.mouse_delta[0] as f32 * fly.sensitivity;
+    fly.pitch -= input.mouse_delta[1] as f32 * fly.sensitivity;
+    fly.pitch = fly
+        .pitch
+        .clamp(-FlyCamera::PITCH_LIMIT, FlyCamera::PITCH_LIMIT);
+    debug_assert!(
+        fly.pitch.abs() <= FlyCamera::PITCH_LIMIT,
+        "invariant: FlyCamera pitch stays within the clamp"
+    );
+
+    // 3) FPS basis: forward at (yaw=0, pitch=0) is [0, 0, -1].
+    let (sy, cy) = fly.yaw.sin_cos();
+    let (sp, cp) = fly.pitch.sin_cos();
+    let forward = Vec3::new(sy * cp, sp, -cy * cp).normalize();
+    let right = forward.cross(WORLD_UP).normalize();
+    let up = right.cross(forward);
+
+    // 4) Sum the pressed movement axes over the LEVEL key bitset.
+    let held = |code: KeyCode| {
+        code.dense_index()
+            .is_some_and(|i| input.keys_pressed.get(i))
+    };
+    let mut mv = Vec3::ZERO;
+    if held(KeyCode::KeyW) {
+        mv = mv + forward;
+    }
+    if held(KeyCode::KeyS) {
+        mv = mv - forward;
+    }
+    if held(KeyCode::KeyD) {
+        mv = mv + right;
+    }
+    if held(KeyCode::KeyA) {
+        mv = mv - right;
+    }
+    if held(KeyCode::Space) || held(KeyCode::KeyE) {
+        mv = mv + WORLD_UP;
+    }
+    if held(KeyCode::ControlLeft) || held(KeyCode::KeyQ) {
+        mv = mv - WORLD_UP;
+    }
+    debug_assert!(mv.is_finite(), "invariant: FlyCamera move vector is finite");
+
+    // Diagonal-normalized planar speed (no diagonal boost); a zero vector stays
+    // put. Virtual dt so a hitch/pause does not overshoot.
+    let step = mv.normalize() * (fly.speed * dt);
+    let eye = translation + step;
+
+    // 5) The camera-world basis is column-major: local +X = right, +Y = up,
+    //    +Z = back = -forward (the `look_at_rh` / `from_camera` convention).
+    //    `Vec3` has no `Neg`, so back is `forward * -1.0`.
+    let basis = Mat3::from_columns(right, up, forward * -1.0);
+    Transform {
+        translation: eye,
+        rotation: Quat::from_mat3(basis),
+        scale: Vec3::ONE,
+    }
+}
+
+#[cfg(test)]
+mod fly_tests {
+    //! Alloc-free gate for the pure fly step (host plan R6, Test 6 — fly half).
+    //! Co-located so it can reach the `pub(crate)` `fly_step` without a scheduler.
+    //!
+    //! Counting is THREAD-LOCAL (not a global flag): the process-global allocator
+    //! sees allocations from every parallel test thread, so a global flag would
+    //! fold sibling threads' allocations into this measurement (a flaky
+    //! over-count). A thread-local flag counts only the measuring thread.
+
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    use super::*;
+
+    thread_local! {
+        static COUNTING: Cell<bool> = const { Cell::new(false) };
+        static ACQUISITIONS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    struct CountingAlloc;
+
+    #[inline]
+    fn note_alloc() {
+        let _ = COUNTING.try_with(|c| {
+            if c.get() {
+                let _ = ACQUISITIONS.try_with(|a| a.set(a.get() + 1));
+            }
+        });
+    }
+
+    // SAFETY: pure delegation to `System` with a thread-local counter side-effect;
+    // the layout/pointer contracts are forwarded unchanged.
+    unsafe impl GlobalAlloc for CountingAlloc {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            note_alloc();
+            // SAFETY: forwarded verbatim to the system allocator.
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            note_alloc();
+            // SAFETY: forwarded verbatim to the system allocator.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            note_alloc();
+            // SAFETY: forwarded verbatim to the system allocator.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: forwarded verbatim to the system allocator.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOC: CountingAlloc = CountingAlloc;
+
+    /// The pure fly step allocates ZERO heap — it is stack POD + branch-only.
+    #[test]
+    fn fly_step_is_alloc_free() {
+        let mut input = PhysicalInput::new();
+        input.keys_pressed.set(KeyCode::KeyW.dense_index().unwrap());
+        input.keys_pressed.set(KeyCode::KeyD.dense_index().unwrap());
+        input.mouse_delta = [12.0, -7.0];
+        let mut fly = FlyCamera::new(0.2, 0.1);
+        let mut pos = Vec3::new(0.0, 1.0, 5.0);
+
+        // Warm (keeps parity with the `ingest_body` gate shape).
+        for _ in 0..4 {
+            let t = fly_step(&mut fly, pos, &input, 0.016);
+            pos = t.translation;
+        }
+
+        ACQUISITIONS.with(|a| a.set(0));
+        COUNTING.with(|c| c.set(true));
+        let t = fly_step(&mut fly, pos, &input, 0.016);
+        COUNTING.with(|c| c.set(false));
+        core::hint::black_box(t);
+
+        assert_eq!(
+            ACQUISITIONS.with(|a| a.get()),
+            0,
+            "fly_step must not allocate"
+        );
     }
 }

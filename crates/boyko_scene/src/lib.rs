@@ -50,17 +50,17 @@ pub mod sets;
 pub mod transform;
 pub mod visibility_sync;
 
-pub use bundles::{CameraRig, SpatialBundle, StaticProp};
+pub use bundles::{CameraRig, FlyCameraBundle, SpatialBundle, StaticProp};
 pub use camera::{
-    ActiveCamera, Camera, OrbitCamera, Projection, ViewUniform, Viewport, orbit_camera_system,
-    resolve_active_camera,
+    ActiveCamera, Camera, FlyCamera, OrbitCamera, Projection, ViewUniform, Viewport,
+    fly_camera_system, orbit_camera_system, resolve_active_camera,
 };
 pub use camera_plugin::CameraPlugin;
 pub use identity::{Name, NameId, intern, resolve};
 pub use plugin::TransformPlugin;
 pub use propagation::{TransformPropagationScratch, compute_global_transform, propagate_transforms};
 pub use render_caps::{MaterialHandle, MeshHandle, RenderEnabled, Visibility};
-pub use sets::FixedSet;
+pub use sets::{CameraSet, FixedSet};
 pub use transform::{GlobalTransform, Transform};
 pub use visibility_sync::visibility_sync;
 
@@ -71,17 +71,17 @@ pub use visibility_sync::visibility_sync;
 /// re-exported (same boundary as `boyko_ecs::prelude`); import them from
 /// `boyko_macros` directly.
 pub mod prelude {
-    pub use crate::bundles::{CameraRig, SpatialBundle, StaticProp};
+    pub use crate::bundles::{CameraRig, FlyCameraBundle, SpatialBundle, StaticProp};
     pub use crate::camera::{
-        ActiveCamera, Camera, OrbitCamera, Projection, ViewUniform, Viewport, orbit_camera_system,
-        resolve_active_camera,
+        ActiveCamera, Camera, FlyCamera, OrbitCamera, Projection, ViewUniform, Viewport,
+        fly_camera_system, orbit_camera_system, resolve_active_camera,
     };
     pub use crate::camera_plugin::CameraPlugin;
     pub use crate::identity::{Name, NameId, intern, resolve};
     pub use crate::plugin::TransformPlugin;
     pub use crate::propagation::{compute_global_transform, propagate_transforms};
     pub use crate::render_caps::{MaterialHandle, MeshHandle, RenderEnabled, Visibility};
-    pub use crate::sets::FixedSet;
+    pub use crate::sets::{CameraSet, FixedSet};
     pub use crate::transform::{GlobalTransform, Transform};
     pub use crate::visibility_sync::visibility_sync;
 }

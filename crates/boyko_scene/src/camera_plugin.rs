@@ -5,6 +5,7 @@ use boyko_ecs::ecs::core::app::{App, Plugin};
 
 use crate::camera::{ActiveCamera, ViewUniform, resolve_active_camera};
 use crate::propagation::{ensure_detach_observer, propagate_transforms};
+use crate::sets::CameraSet;
 use crate::visibility_sync::visibility_sync;
 
 /// Registers [`resolve_active_camera`](crate::camera::resolve_active_camera) into
@@ -54,9 +55,21 @@ impl Plugin for CameraPlugin {
         // run BEFORE the render pack — that cross-crate edge is contract-documented;
         // see `crate::visibility_sync::visibility_sync`). All keys are captured in
         // this single closure.
+        //
+        // R6 camera seam: `propagate_transforms` + `resolve_active_camera` join
+        // `CameraSet::Resolve`, and `Control.before(Resolve)` pins any camera
+        // CONTROLLER (`fly_camera_system`, wired by a DIFFERENT plugin) to run
+        // BEFORE this pair — a set-to-set edge, so it holds regardless of plugin
+        // add-order (the `SystemKey`s of a cross-plugin controller are not
+        // co-visible here). `configure_set(Control)` also INTERNS the `Control`
+        // set so the edge resolves even if the controller plugin is added after
+        // this one.
         app.add_systems_cfg(|b| {
-            let propagate = b.add_system(propagate_transforms).key();
-            b.add_system(resolve_active_camera).after(propagate);
+            b.configure_set(CameraSet::Control).before(CameraSet::Resolve);
+            let propagate = b.add_system(propagate_transforms).in_set(CameraSet::Resolve).key();
+            b.add_system(resolve_active_camera)
+                .after(propagate)
+                .in_set(CameraSet::Resolve);
             b.add_system(visibility_sync).after(propagate);
         });
     }

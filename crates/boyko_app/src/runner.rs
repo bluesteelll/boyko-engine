@@ -15,8 +15,15 @@ use boyko_ecs::ecs::core::time::FixedTime;
 #[cfg(windows)]
 use std::time::Instant;
 
+// The OS→ECS input bridge helper (host plan R6) is source-agnostic (pure
+// translation + `push_raw`, no FFI, no GPU) so it is defined un-gated and unit-
+// testable on every host. `CapturedMsg` (the renderer's drained-message enum)
+// and the `boyko_input` translate fns both compile cross-platform.
+use boyko_input::{RawInputQueue, translate_win32, translate_win32_raw_mouse};
+use boyko_rhi_vulkan::window::CapturedMsg;
+
 #[cfg(windows)]
-use boyko_input::{ButtonState, KeyCode, RawInputEvent, translate_win32};
+use boyko_input::{ButtonState, KeyCode, RawInputEvent};
 #[cfg(windows)]
 use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
 #[cfg(windows)]
@@ -31,8 +38,6 @@ use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::ffi::VkExtent2D;
 #[cfg(windows)]
 use boyko_rhi_vulkan::swapchain::{GBUFFER_PUSH_BYTES, GBufferMeshDraw};
-#[cfg(windows)]
-use boyko_rhi_vulkan::window::CapturedMsg;
 #[cfg(windows)]
 use boyko_scene::render_caps::MeshHandle;
 #[cfg(windows)]
@@ -189,12 +194,40 @@ pub(crate) fn run_windowed(_app: &mut App, _desc: WindowDesc) -> AppExit {
     AppExit(true)
 }
 
-/// The per-frame loop (host plan D6 / the runner-frame table, R3 + R4):
+/// The OS→ECS input bridge (host plan R6, Decision 1): translate one drained
+/// [`CapturedMsg`] and push the resulting [`RawInputEvent`] into the World's
+/// [`RawInputQueue`].
 ///
-/// 1. pump the OS queue + drain input (Escape only until R6);
+/// A [`CapturedMsg::Raw`] triple is mapped by `translate_win32` (an unmapped
+/// message yields `None` and is dropped); a [`CapturedMsg::RawMouse`] delta by
+/// `translate_win32_raw_mouse`. The runner does NOT `begin_frame` / drain /
+/// `apply` here — those stay in `update_action_state` (on `Main`), which folds
+/// this queue into the frame's [`PhysicalInput`](boyko_input::PhysicalInput)
+/// snapshot. Pure (no FFI, no GPU), so it is unit-testable on every host.
+#[inline]
+fn ingest_captured(queue: &mut RawInputQueue, captured: CapturedMsg) {
+    match captured {
+        CapturedMsg::Raw { msg, wparam, lparam } => {
+            if let Some(ev) = translate_win32(msg, wparam, lparam) {
+                queue.push_raw(ev);
+            }
+        }
+        CapturedMsg::RawMouse { dx, dy } => {
+            queue.push_raw(translate_win32_raw_mouse(dx, dy));
+        }
+    }
+}
+
+/// The per-frame loop (host plan D6 / the runner-frame table, R3 + R4 + R6):
+///
+/// 1. pump the OS queue + drain input: WITH an `InputPlugin` (a World
+///    [`RawInputQueue`]) each drained message is bridged into the queue (R6,
+///    Decision 1) for `update_action_state` to fold; WITHOUT one, a lightweight
+///    inline Escape scan sets `AppExit` (the `room.rs` / `clear.rs` fallback);
 /// 2. `update_with_delta` — Time → events → Fixed×N → Main (propagation,
-///    camera resolve, `sync_instance_model_cols`, `gather_mesh_draws`,
-///    `gather_shadow_casters`, light reconcile + collect, the CSM fit);
+///    camera resolve, `fly_camera_system`, `sync_instance_model_cols`,
+///    `gather_mesh_draws`, `gather_shadow_casters`, light reconcile + collect,
+///    the CSM fit);
 /// 3. `AppExit` check;
 /// 4. `token = wait_frame_in_flight()` — the pacing point + the fence proof;
 /// 5. token-typed uploads into slot `token.slot()`: the b5 camera block + the
@@ -229,22 +262,37 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             return;
         }
 
-        // Drain the captured input. R3 still discards everything except the
-        // Escape key-down exit; the InputPlugin ingest arrives in R6.
-        let mut escape = false;
-        host.window.drain_input(|captured| {
-            if let CapturedMsg::Raw { msg, wparam, lparam } = captured
-                && let Some(RawInputEvent::Key {
-                    code: KeyCode::Escape,
-                    state: ButtonState::Pressed,
-                    ..
-                }) = translate_win32(msg, wparam, lparam)
-            {
-                escape = true;
+        // Step 1: drain the captured OS input (host plan R6, Decision 1). WITH an
+        // `InputPlugin` (a World `RawInputQueue`), bridge every drained message
+        // into the queue — `update_action_state` on `Main` folds it into this
+        // frame's `PhysicalInput` snapshot, and the ECS-native `quit_on_action`
+        // (in `FlyCameraPlugin`) sets `AppExit` on `FlyAction::Quit`; the runner
+        // stays input-agnostic (its step-3 `AppExit` check handles it). WITHOUT a
+        // queue (an input-free scene: `room.rs` / `clear.rs`), keep a lightweight
+        // inline Escape scan → return. The two paths are non-redundant: the ECS
+        // path when input is present, the inline scan only when it is absent.
+        if app.world().contains_resource::<RawInputQueue>() {
+            let queue = app.world_mut().resource_mut::<RawInputQueue>();
+            // Reborrow `queue` per call: the `FnMut` closure runs once per drained
+            // message, so it cannot move the `&mut` out.
+            host.window
+                .drain_input(|captured| ingest_captured(&mut *queue, captured));
+        } else {
+            let mut escape = false;
+            host.window.drain_input(|captured| {
+                if let CapturedMsg::Raw { msg, wparam, lparam } = captured
+                    && let Some(RawInputEvent::Key {
+                        code: KeyCode::Escape,
+                        state: ButtonState::Pressed,
+                        ..
+                    }) = translate_win32(msg, wparam, lparam)
+                {
+                    escape = true;
+                }
+            });
+            if escape {
+                return;
             }
-        });
-        if escape {
-            return;
         }
 
         // 2. The ECS frame with the real wall delta (Time clamps/scales it).
@@ -685,4 +733,153 @@ fn teardown(app: &mut App, host: WindowHost, ctx: &VulkanContext) {
 
     // Step 4 (`destroy_singleton`) is the CALLER's — see the fn contract: it
     // must run AFTER this fn returns, once `ctx`'s protector is gone.
+}
+
+#[cfg(test)]
+mod tests {
+    //! R6 runner-bridge unit tests (host plan R6, Decision 1 / Test 5 + Test 6).
+    //!
+    //! The OS→ECS bridge helper `ingest_captured` is pure (translate +
+    //! `push_raw`), so it is exercised here over SYNTHETIC `CapturedMsg`s — no
+    //! window, no device — asserting the drained messages land in the queue via
+    //! `translate_win32*`, and that a warm ingest allocates nothing.
+
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    use boyko_input::win32::{WM_KEYDOWN, WM_KEYUP};
+    use boyko_input::{ButtonState, KeyCode, RawInputEvent};
+
+    use super::*;
+
+    /// Builds a `WM_KEY*` `lParam`: OEM scancode in bits 16..=23 (mirrors the
+    /// `boyko_input` I6 translate gate's own helper).
+    fn key_lparam(scancode: u8) -> isize {
+        (scancode as isize) << 16
+    }
+
+    /// Escape's OEM scancode (`0x01`) and W's (`0x11`) — from the canonical table.
+    const SC_ESCAPE: u8 = 0x01;
+    const SC_W: u8 = 0x11;
+
+    /// Test 5: a `Raw` KeyDown, a `Raw` KeyUp, and a `RawMouse` delta all land in
+    /// the queue via `translate_win32` / `translate_win32_raw_mouse`, in order.
+    #[test]
+    fn ingest_captured_bridges_raw_and_raw_mouse() {
+        let mut queue = RawInputQueue::with_capacity(16);
+        queue.begin_frame();
+
+        ingest_captured(&mut queue, CapturedMsg::Raw { msg: WM_KEYDOWN, wparam: 0, lparam: key_lparam(SC_W) });
+        ingest_captured(&mut queue, CapturedMsg::RawMouse { dx: 7, dy: -3 });
+        ingest_captured(&mut queue, CapturedMsg::Raw { msg: WM_KEYUP, wparam: 0, lparam: key_lparam(SC_ESCAPE) });
+
+        assert_eq!(queue.len(), 3, "three translated events landed in FIFO order");
+        assert_eq!(
+            queue.pop(),
+            Some(RawInputEvent::Key { code: KeyCode::KeyW, state: ButtonState::Pressed, repeat: false }),
+            "first: W key-down"
+        );
+        assert_eq!(
+            queue.pop(),
+            Some(RawInputEvent::MouseMotion { dx: 7.0, dy: -3.0 }),
+            "second: the raw-mouse delta (i32 → f64)"
+        );
+        assert_eq!(
+            queue.pop(),
+            Some(RawInputEvent::Key { code: KeyCode::Escape, state: ButtonState::Released, repeat: false }),
+            "third: Escape key-up"
+        );
+    }
+
+    /// An unmapped `Raw` message translates to `None` and is silently dropped (no
+    /// push, no panic).
+    #[test]
+    fn ingest_captured_drops_unmapped_messages() {
+        let mut queue = RawInputQueue::with_capacity(16);
+        // `WM_NULL` (0x0000) is not a mapped input message.
+        ingest_captured(&mut queue, CapturedMsg::Raw { msg: 0x0000, wparam: 0, lparam: 0 });
+        assert_eq!(queue.len(), 0, "an unmapped message pushes nothing");
+    }
+
+    // --- Test 6 (bridge half): a warm ingest allocates nothing. ---
+    //
+    // The counting allocator is process-global, but the tests in this binary run
+    // in PARALLEL threads — a global counting flag would fold sibling threads'
+    // allocations into this test's window (a flaky over-count). Counting is
+    // therefore THREAD-LOCAL: only the measuring thread's allocations count, so
+    // the assertion is robust to concurrent siblings without `--test-threads=1`.
+
+    thread_local! {
+        static COUNTING: Cell<bool> = const { Cell::new(false) };
+        static ACQUISITIONS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    struct CountingAlloc;
+
+    #[inline]
+    fn note_alloc() {
+        // `try_with`: during thread teardown the TLS may be gone — then skip
+        // (we are never measuring at that point).
+        let _ = COUNTING.try_with(|c| {
+            if c.get() {
+                let _ = ACQUISITIONS.try_with(|a| a.set(a.get() + 1));
+            }
+        });
+    }
+
+    // SAFETY: pure delegation to `System` with a thread-local counter side-effect;
+    // the layout/pointer contracts are forwarded unchanged.
+    unsafe impl GlobalAlloc for CountingAlloc {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            note_alloc();
+            // SAFETY: forwarded verbatim to the system allocator.
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            note_alloc();
+            // SAFETY: forwarded verbatim to the system allocator.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            note_alloc();
+            // SAFETY: forwarded verbatim to the system allocator.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: forwarded verbatim to the system allocator.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOC: CountingAlloc = CountingAlloc;
+
+    /// A warm bridge (queue preallocated) ingesting a mixed key + mouse batch
+    /// allocates ZERO heap (`push_raw` writes the existing ring; the pure
+    /// translate is stack POD).
+    #[test]
+    fn ingest_captured_is_alloc_free_when_warm() {
+        let mut queue = RawInputQueue::with_capacity(64);
+        // Warm the queue outside the counting window.
+        for _ in 0..8 {
+            queue.begin_frame();
+            ingest_captured(&mut queue, CapturedMsg::RawMouse { dx: 1, dy: 1 });
+            while queue.pop().is_some() {}
+        }
+
+        ACQUISITIONS.with(|a| a.set(0));
+        COUNTING.with(|c| c.set(true));
+        queue.begin_frame();
+        ingest_captured(&mut queue, CapturedMsg::Raw { msg: WM_KEYDOWN, wparam: 0, lparam: key_lparam(SC_W) });
+        ingest_captured(&mut queue, CapturedMsg::RawMouse { dx: 4, dy: -2 });
+        ingest_captured(&mut queue, CapturedMsg::Raw { msg: WM_KEYUP, wparam: 0, lparam: key_lparam(SC_W) });
+        while queue.pop().is_some() {}
+        COUNTING.with(|c| c.set(false));
+
+        assert_eq!(
+            ACQUISITIONS.with(|a| a.get()),
+            0,
+            "a warm ingest+drain must not allocate"
+        );
+    }
 }

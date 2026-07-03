@@ -27,7 +27,7 @@
 
 use boyko_macros::Bundle;
 
-use crate::camera::{Camera, Projection};
+use crate::camera::{Camera, FlyCamera, Projection};
 use crate::render_caps::{MaterialHandle, MeshHandle, Visibility};
 use crate::transform::{GlobalTransform, Transform};
 
@@ -81,4 +81,31 @@ pub struct CameraRig {
     pub camera: Camera,
     /// The projection (perspective or orthographic) — no `Default`, fill it.
     pub projection: Projection,
+}
+
+/// An interactive FLY camera rig: a placed, world-tracked camera with a
+/// projection and a [`FlyCamera`] controller (arity 5).
+///
+/// The R6 interactive counterpart of [`CameraRig`]:
+/// [`fly_camera_system`](crate::camera::fly_camera_system) drives the
+/// `transform` from the per-frame input snapshot. Wire the controller +
+/// the OS→ECS input bridge with `boyko_app::FlyCameraPlugin`.
+///
+/// [`Camera`] has a `Default`, but [`Projection`] does NOT — construct the
+/// `projection` field explicitly. Seed the initial view by setting the
+/// `fly` field's `yaw` / `pitch` and the `transform`'s `translation` (the eye);
+/// `fly_camera_system` overwrites the `rotation` from `yaw` / `pitch` on the
+/// first frame.
+#[derive(Bundle)]
+pub struct FlyCameraBundle {
+    /// Local pose (designer-facing); the `translation` is the initial eye.
+    pub transform: Transform,
+    /// Cached world pose, filled by `propagate_transforms`.
+    pub global: GlobalTransform,
+    /// The view component (order / active / viewport).
+    pub camera: Camera,
+    /// The projection (perspective or orthographic) — no `Default`, fill it.
+    pub projection: Projection,
+    /// The fly controller (yaw / pitch accumulators + speed / sensitivity).
+    pub fly: FlyCamera,
 }

@@ -32,6 +32,7 @@
 //! evicted.
 
 mod device;
+mod fly;
 #[cfg(windows)]
 mod gpu_scene;
 #[cfg(windows)]
@@ -49,5 +50,6 @@ pub mod plugins;
 pub mod prelude;
 
 pub use device::GpuDevice;
+pub use fly::{FlyAction, FlyCameraPlugin, fly_default_map};
 pub use plugins::EnginePlugins;
 pub use window_info::{HostFrameStats, WindowInfo};

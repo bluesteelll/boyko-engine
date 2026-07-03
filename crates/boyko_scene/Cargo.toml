@@ -27,6 +27,12 @@ boyko-ecs = { path = "../boyko_ecs" }
 boyko-math = { path = "../boyko_math" }
 boyko-macros = { path = "../boyko_macros" }
 boyko-utils = { path = "../boyko_utils" }
+#   * `boyko-input` — the source-agnostic action layer (host plan R6). The
+#                     interactive `fly_camera_system` reads the per-frame
+#                     `PhysicalInput` snapshot (level key bitset + summed
+#                     mouse delta) directly. `boyko_input` is a LEAF — it does
+#                     NOT depend on `boyko_scene` — so this edge is acyclic.
+boyko-input = { path = "../boyko_input" }
 
 [dev-dependencies]
 # Test-only: the S2 propagation gates drive `propagate_transforms` through a

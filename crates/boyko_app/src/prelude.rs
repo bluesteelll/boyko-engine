@@ -32,12 +32,20 @@ pub use boyko_render::{
 // snap tag in one deferred command).
 pub use boyko_render::{GpuTransform3D, SnapInterpolation, TeleportCommandsExt};
 
-// Spatial + camera components and the D4 Fixed ordering seam.
+// Spatial + camera components and the D4 Fixed ordering seam. The R6
+// interactive-camera surface: the `FlyCamera` controller component, its
+// `FlyCameraBundle` spawn preset, and the `CameraSet` ordering seam.
 pub use boyko_scene::{
-    Camera, CameraRig, FixedSet, GlobalTransform, MaterialHandle, MeshHandle, Projection,
-    Transform, Visibility,
+    Camera, CameraRig, CameraSet, FixedSet, FlyCamera, FlyCameraBundle, GlobalTransform,
+    MaterialHandle, MeshHandle, Projection, Transform, Visibility,
 };
 
+// The R6 interactive-input surface: the fly-camera host plugin (input ingest +
+// controller + ECS-native quit), its action enum, and the `KeyCode` vocabulary
+// for authoring bindings / reading the input snapshot.
+pub use boyko_input::KeyCode;
+
 pub use crate::device::GpuDevice;
+pub use crate::fly::{FlyAction, FlyCameraPlugin};
 pub use crate::plugins::EnginePlugins;
 pub use crate::window_info::{HostFrameStats, WindowInfo};
