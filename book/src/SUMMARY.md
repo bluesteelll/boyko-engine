@@ -41,6 +41,7 @@
 # Application
 
 - [App & Plugins](app/plugins.md)
+- [Windowed Host (`boyko_app`)](app/windowed-host.md)
 - [Time & Fixed Timestep](app/time.md)
 - [Input](app/input.md)
 - [Multiple Worlds](app/multi-world.md)
