@@ -176,7 +176,7 @@ struct LightHeader {
 
 // One decoded light-table element.
 struct LightElem {
-    float3 dir;       // direction TO the light (directional/spot)
+    float3 dir;       // world light axis (DIRECTIONAL: to-light, dot(n,dir); SPOT: SHINE axis, dot(-l,dir)) | unused (POINT)
     uint   kind;      // LIGHT_KIND_*
     float3 pos;       // world pos (point/spot) | ground color (sky)
     float  range;     // cull radius (point/spot)

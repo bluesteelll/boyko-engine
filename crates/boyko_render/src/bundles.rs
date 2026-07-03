@@ -104,5 +104,8 @@ pub struct SpotLightObject {
     /// Cached world pose, filled by `propagate_transforms`.
     pub global: GlobalTransform,
     /// The spot light (position / axis / color / power / range / cone) — no `Default`.
+    /// NOTE: `light.direction` is a seed; with a `GlobalTransform` present,
+    /// `light_reconcile` overwrites it with the pose's world `-Z`. Aim the spot via
+    /// `transform` (`look_at`), not `light.direction`.
     pub light: SpotLight,
 }

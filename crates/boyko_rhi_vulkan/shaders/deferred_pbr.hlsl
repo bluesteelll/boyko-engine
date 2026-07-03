@@ -1107,7 +1107,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 // (i.e. light->surface = -l) and the spot axis, smoothstepped between the
                 // outer and inner cone cosines, squared for a soft edge.
                 float2 cones = unpack_cones(L.cone_pack); // (cos_inner, cos_outer)
-                float3 spot_dir = safe_normalize(L.dir);  // world spot axis (to-light dir)
+                float3 spot_dir = safe_normalize(L.dir);  // world spot SHINE axis (cosA = dot(-l, axis))
                 float cosA = dot(-l, spot_dir);
                 float denom = max(cones.x - cones.y, 1e-4);
                 float tt = saturate((cosA - cones.y) / denom);

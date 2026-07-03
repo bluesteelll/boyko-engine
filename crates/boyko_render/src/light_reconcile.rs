@@ -25,9 +25,17 @@
 //! # Axis / sign convention
 //!
 //! The local forward axis is `-Z` (the engine convention). The stored
-//! `direction` is "direction TO the light" — byte-compatible with the untouched
-//! `from_directional` / `from_spot` bake, which simply re-normalizes and stores
-//! `direction`. So:
+//! `direction` is the transform's world forward, `matrix3 · (0, 0, -1)`; its
+//! MEANING is per-light-type, because the resolve consumes each kind
+//! differently:
+//!
+//! - a `DirectionalLight` consumes it as the direction TO the light
+//!   (`NoL = dot(n, dir)`), so aim the transform's `-Z` toward the light;
+//! - a `SpotLight` consumes it as the SHINE axis, the way the cone points
+//!   (`dot(-l, dir)`), so aim the transform's `-Z` along the beam.
+//!
+//! It is byte-compatible with the untouched `from_directional` / `from_spot`
+//! bake, which simply re-normalizes and stores `direction`. So:
 //!
 //! ```text
 //! direction = normalize(GlobalTransform.matrix3 · (0, 0, -1))
@@ -42,12 +50,16 @@ use boyko_scene::GlobalTransform;
 
 use crate::light::{DirectionalLight, PointLight, SpotLight};
 
-/// The light's local forward axis (`-Z`, the engine convention). The world
-/// "direction TO the light" is `matrix3 · LOCAL_FORWARD`, normalized.
+/// The light's local forward axis (`-Z`, the engine convention). The stored
+/// light `direction` is `matrix3 · LOCAL_FORWARD`, normalized — the transform's
+/// world `-Z` (a directional's to-light dir; a spot's shine axis — see the
+/// module docs).
 const LOCAL_FORWARD: Vec3 = Vec3::new(0.0, 0.0, -1.0);
 
-/// Derives the world "direction TO the light" from a `GlobalTransform`:
-/// `normalize(matrix3 · (0, 0, -1))`.
+/// Derives the light's world `direction` from a `GlobalTransform`:
+/// `normalize(matrix3 · (0, 0, -1))` — the transform's world `-Z`. This is the
+/// to-light direction for a `DirectionalLight` and the shine axis for a
+/// `SpotLight` (the resolve consumes each per its kind; see the module docs).
 ///
 /// Uses `Affine3A::transform_vector` (= `matrix3.mul_vec`, the row-major op) so
 /// the result matches the math the `from_directional` / `from_spot` bake re-runs.

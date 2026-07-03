@@ -447,10 +447,10 @@ pub fn light_atlas_slot(kind_word: u32) -> u32 {
 // ---- the resolve decision (pure — the unit-testable slot assignment + fit) -------------
 
 /// A spot's world inputs for the fit: the cone apex (world position), the cone axis (the
-/// world "direction the light shines along" — `-direction`, since `SpotLight::direction` is
-/// "direction TO the light"), the outer cone half-angle (radians), the range, and the priority
-/// proxy. Decoupled from `SpotLight` / `GlobalTransform` so the pure core is testable with
-/// plain data.
+/// world direction the light shines along — `SpotLight::direction` UN-negated, since
+/// `light_reconcile` writes it as the transform's world `-Z` = the shine axis), the outer
+/// cone half-angle (radians), the range, and the priority proxy. Decoupled from `SpotLight` /
+/// `GlobalTransform` so the pure core is testable with plain data.
 #[derive(Clone, Copy, Debug)]
 pub struct SpotShadowInput {
     /// Cone apex — the world position of the spot (the perspective eye).
@@ -1613,7 +1613,7 @@ mod tests {
         let gt = GlobalTransform(Affine3A::look_at_rh(pos, target, up));
 
         // `SpotLight::direction` = the world `-Z` of the pose, normalized — this MIRRORS
-        // `light_reconcile.rs:57-64` (`to_light_dir` = normalize(matrix3 · (0,0,-1))), the value
+        // `light_reconcile::to_light_dir` (= normalize(matrix3 · (0,0,-1))), the value
         // the reconcile system writes before this resolve runs. Deriving it here (rather than
         // hand-picking `target - pos`) is what makes the test exercise the real reconcile math.
         let dir = gt.affine().transform_vector(Vec3::new(0.0, 0.0, -1.0)).normalize();

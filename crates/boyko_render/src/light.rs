@@ -82,8 +82,9 @@ pub const fn cluster_index(x: u32, y: u32, z: u32) -> u32 {
 /// Three 16-byte `vec4` lanes (the shader's `GpuLight`), a tagged union over the three
 /// light kinds (branchless `kind` dispatch in the resolve):
 ///
-/// - `dir_kind` (off 0): `xyz` = world direction TO the light (DIRECTIONAL/SPOT) |
-///   unused (POINT); `w` = bit-cast `u32` kind tag ([`LIGHT_KIND_DIRECTIONAL`] etc.).
+/// - `dir_kind` (off 0): `xyz` = the light's world axis (DIRECTIONAL: the direction
+///   TO the light, `dot(n, dir)`; SPOT: the SHINE axis, `dot(-l, dir)`) | unused
+///   (POINT); `w` = bit-cast `u32` kind tag ([`LIGHT_KIND_DIRECTIONAL`] etc.).
 /// - `pos_range` (off 16): `xyz` = world position (POINT/SPOT) | unused (DIRECTIONAL);
 ///   `w` = cull-sphere radius (POINT/SPOT) | `+inf` (DIRECTIONAL).
 /// - `color_cone` (off 32): `rgb` = LINEAR color × baked intensity (directional =
@@ -94,7 +95,7 @@ pub const fn cluster_index(x: u32, y: u32, z: u32) -> u32 {
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GpuLight {
-    /// `xyz` = direction TO the light (DIRECTIONAL/SPOT), `w` = bit-cast kind tag.
+    /// `xyz` = light world axis (DIRECTIONAL: to-light; SPOT: shine axis), `w` = bit-cast kind tag.
     pub dir_kind: [f32; 4],
     /// `xyz` = world position (POINT/SPOT), `w` = cull radius (`+inf` directional).
     pub pos_range: [f32; 4],
@@ -305,7 +306,10 @@ pub struct PointLight {
 pub struct SpotLight {
     /// World position.
     pub position: [f32; 3],
-    /// World spot axis (normalized host-side in the constructor).
+    /// World spot axis — the SHINE direction the cone points along (NOT "to-light";
+    /// the resolve consumes it as `dot(-l, dir)`). Normalized host-side. When a
+    /// `GlobalTransform` is present, `light_reconcile` overwrites this with the
+    /// transform's world `-Z`, so aim the spot via the pose (`look_at`), not this field.
     pub direction: [f32; 3],
     /// LINEAR `rgb` color.
     pub color: [f32; 3],
@@ -596,8 +600,10 @@ pub const SPOT_COS_OUTER_MAX: f32 = 0.9999;
 
 impl SpotLight {
     /// Builds a spot light. Clamps `cos(outer) ≤ `[`SPOT_COS_OUTER_MAX`] (Decision 2) so
-    /// the baked `I = Φ/(2π(1−cos(outer)))` stays bounded. `direction` (the spot axis) is
-    /// normalized here; `color` is LINEAR; `power` is `Φ` (lumens).
+    /// the baked `I = Φ/(2π(1−cos(outer)))` stays bounded. `direction` (the SHINE axis) is
+    /// normalized here; `color` is LINEAR; `power` is `Φ` (lumens). NOTE: `direction` is a
+    /// SEED — when the entity has a `GlobalTransform`, `light_reconcile` overwrites it with
+    /// the transform's world `-Z`, so aim the spot via the pose (`look_at`), not this arg.
     #[inline]
     pub fn new(
         position: [f32; 3],
@@ -724,7 +730,7 @@ impl GpuLight {
     /// Folds a [`SpotLight`] into a [`GpuLight`], baking `I = Φ / (2π(1 − cos(outer)))`
     /// (Decision 2, the reflector model) into `color_cone.rgb` and packing the cone
     /// cosines (`cos_inner`, `cos_outer`) into `color_cone.w`. `dir_kind.xyz` carries the
-    /// spot axis. The L0b resolve consumes all three lanes.
+    /// spot SHINE axis (un-negated). The L0b resolve consumes all three lanes.
     #[inline]
     pub fn from_spot(l: &SpotLight) -> Self {
         let cos_inner = l.inner_deg.to_radians().cos();
