@@ -5426,19 +5426,13 @@ fn engine_grand_showcase_512_screenshot_dump() {
     );
 }
 
-// === INTERACTIVE VIEWER — fly around the SDF+mesh scene (replaces the screenshot ping-pong). ===
+// === Shared fly-camera basis (VIEWER_INITIAL_PITCH + vadd/vscale/vcross/vnorm) used by the scripted shadow-diagnostic harnesses. The interactive viewer moved to boyko_app examples/showcase.rs (a fly-able host mixed scene). ===
 
 /// The interactive fly-camera's initial pitch (radians). At `yaw == 0` the FPS basis maps
 /// `forward == [sin(yaw)·cos(pitch), sin(pitch), -cos(yaw)·cos(pitch)]`, so this pitch reproduces
 /// [`ROOM_CAM_FORWARD`] (`[0, -0.371, -0.928]`) — the same down-into-the-room framing the static
 /// showcase uses, so the viewer opens on the familiar shot before the owner flies off it.
 const VIEWER_INITIAL_PITCH: f32 = -0.3805;
-/// The fly-camera move speed (world units / second) and mouse-look sensitivity (radians / raw count).
-const VIEWER_MOVE_SPEED: f32 = 3.5;
-const VIEWER_LOOK_SENS: f32 = 0.0035;
-/// The pitch clamp (radians) — just shy of ±π/2 so the FPS basis never degenerates (looking
-/// straight up/down makes `cross(forward, world_up)` undefined).
-const VIEWER_PITCH_LIMIT: f32 = 1.5533;
 
 #[inline]
 fn vadd(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -5568,7 +5562,7 @@ fn viewer_config() -> ShowcaseConfig {
     // must NOT move as the camera flies. Grand's seed re-fits the cascades to the camera frustum (it
     // swims for a free-fly camera even with a texel snap); override it with the fixed room fit
     // ([`viewer_csm_fit`]). It still arms the depth pass + activation and is seeded into every UBO
-    // ring slot once at build — `run_interactive_viewer` never re-fits it, so the shadow stays put.
+    // ring slot once at build — the fly harnesses never re-fit it, so the shadow stays put.
     cfg.csm = Some(viewer_csm_fit());
 
     // LIGHT MARKERS (bright SDF spheres so each light's position reads from every side). Appended to
@@ -5604,320 +5598,6 @@ fn viewer_config() -> ShowcaseConfig {
     cfg
 }
 
-/// The interactive fly-camera loop (the heart of `engine_interactive_viewer`).
-///
-/// Drains the window's captured raw input each frame into a [`PhysicalInput`] snapshot, integrates
-/// a free-look FPS camera (mouse-look + WASD + Space/Ctrl vertical fly), rebuilds the b5 camera UBO
-/// (the 80-byte [`CompositePushConstants`] block at offset 0) + `scene.mvp` from the live camera,
-/// and presents one frame. Runs until the window closes (`WM_QUIT`) or `Escape` is pressed.
-///
-/// All heavy resources are owned by the caller ([`run_showcase_dump`]); this borrows them. The
-/// camera UBO is written through a per-frame RING (`scene.camera_ring`): each frame writes the slot
-/// the upcoming present binds + reads ([`Renderer::frame_index`]), so the sibling in-flight frame
-/// reads a DIFFERENT slot — the lock-free write-after-read fix (no fence stall). The directional CSM
-/// is WORLD-FIXED ([`viewer_csm_fit`], seeded once at build), so the sun-shadow stays glued to the
-/// world as the camera flies (a per-frame camera-fit cascade swims for a free-fly camera).
-/// `interp_gpu` (Pillar B B3) turns the interpolation pre-pass ON: the loop runs a REAL-dt fixed
-/// accumulator (mirroring the engine's `Time::advance_with` + `fixed_advance`, reproduced inline
-/// since `boyko_rhi_vulkan` cannot depend on `boyko_ecs`/`boyko_physics`), stepping a simple
-/// gravity-driven bouncing box (instance 0) at a fixed 64 Hz substep, and feeds the fixed-loop
-/// overstep fraction as the interp `alpha` — so the box renders SMOOTHLY between substeps. `base_pairs`
-/// is the room's decomposed still-pose pair list (index 0 = the bouncing box). `None` interp keeps
-/// the legacy hand-affine draw (no interpolation).
-#[allow(clippy::too_many_arguments)]
-fn run_interactive_viewer<'ctx, 's>(
-    ctx: &VulkanContext,
-    surface: &Surface<'_>,
-    swapchain: &mut Swapchain<'ctx>,
-    renderer: &mut Renderer<'ctx>,
-    window: &mut Window,
-    scene: &mut GBufferScene<'s>,
-    frame: &mut GBufferFrame,
-    interp_gpu: Option<&'s InterpGpu>,
-    base_pairs: &[InterpPair],
-) {
-    use std::time::Instant;
-
-    use boyko_input::{
-        translate_win32, translate_win32_raw_mouse, KeyCode, PhysicalInput, RawInputQueue,
-    };
-
-    let world_up = [0.0_f32, 1.0, 0.0];
-    let mut eye = ROOM_CAM_EYE;
-    let mut yaw: f32 = 0.0;
-    let mut pitch: f32 = VIEWER_INITIAL_PITCH;
-    // Edge-trigger latch for the `P` pose probe (shadow-flip triage).
-    let mut p_latch = false;
-
-    let mut queue = RawInputQueue::with_capacity(1024);
-    let mut physical = PhysicalInput::new();
-    let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
-    let clear = [0.02_f32, 0.02, 0.03, 1.0];
-
-    // Pillar B B3 fixed-loop state (inline — no boyko_ecs dep). The bouncing box (instance 0) uses a
-    // fixed 64 Hz substep + a real-dt accumulator clamped to 250 ms (the engine's `Time::advance_with`
-    // spiral clamp, reproduced here so a hitch cannot spiral). Each substep integrates gravity + a
-    // floor bounce and shuffles the interp pair (`prev = old curr`, `curr = new pose`); the alpha is
-    // `overstep / dt` (the overstep fraction). The box is instance 0 of the room's pair list; the base
-    // pair holds its rest pose (its X/Z + orientation stay put, only Y bobs). A still room instance
-    // keeps `prev == curr` (the B2 keystone renders it bitwise-stable, so the room does not shimmer).
-    const FIXED_DT: f32 = 1.0 / 64.0;
-    const MAX_ACCUM: f32 = 0.25; // the 250 ms spiral clamp (Time::advance_with).
-    let mut pairs: Vec<InterpPair> = base_pairs.to_vec();
-    let box_base_y = pairs.first().map_or(0.0, |p| p.curr[1]);
-    let mut box_y = box_base_y + 3.0; // drop the box from 3 units up.
-    let mut box_vy = 0.0_f32;
-    let mut accum = 0.0_f32;
-    let mut last = Instant::now();
-    // Seed instance 0's pair at the initial dropped height (prev == curr so frame 0 is a no-op
-    // interpolation) and prime BOTH FIF pair slots so a fresh slot never reads uninitialized bytes.
-    if let Some(p0) = pairs.first_mut() {
-        p0.prev[1] = box_y;
-        p0.curr[1] = box_y;
-    }
-    if let Some(interp) = interp_gpu {
-        for fi in 0..FRAMES_IN_FLIGHT {
-            // SAFETY: setup-time seeding — the pair rings were created this call and the
-            // present loop has not started, so no submitted GPU work references slot `fi`.
-            let token = unsafe { FrameWriteToken::forge_unfenced(fi) };
-            interp.write_pairs(ctx, &token, &pairs);
-        }
-    }
-    // Per-slot "snapshot outdated" flags for the D5 substep-gated upload (see the loop body).
-    // Both slots were just seeded from the same pairs, so both start clean.
-    let mut pair_dirty = [false; FRAMES_IN_FLIGHT];
-
-    eprintln!(
-        "[viewer] WASD+Space/Ctrl fly, mouse look, Esc quit.{}",
-        if interp_gpu.is_some() { " (interp ON: a bouncing box)" } else { "" }
-    );
-
-    // `pump_events` returns false on WM_QUIT (the window closed) — exit then.
-    while window.pump_events() {
-        // Real frame delta (clamped by the accumulator below), the interp `alpha` source.
-        let now = Instant::now();
-        let frame_dt = (now - last).as_secs_f32();
-        last = now;
-        physical.begin_frame();
-        queue.begin_frame();
-        // Drain this frame's captured Win32 messages, mapping each at the edge into a RawInputEvent.
-        window.drain_input(|m| match m {
-            CapturedMsg::Raw { msg, wparam, lparam } => {
-                if let Some(ev) = translate_win32(msg, wparam, lparam) {
-                    queue.push_raw(ev);
-                }
-            }
-            CapturedMsg::RawMouse { dx, dy } => {
-                queue.push_raw(translate_win32_raw_mouse(dx, dy));
-            }
-        });
-        while let Some(ev) = queue.pop() {
-            physical.apply(&ev);
-        }
-
-        // Mouse-look (raw relative delta; `mouse_delta` is f64, cast to f32 for the basis math).
-        yaw += physical.mouse_delta[0] as f32 * VIEWER_LOOK_SENS;
-        pitch -= physical.mouse_delta[1] as f32 * VIEWER_LOOK_SENS;
-        pitch = pitch.clamp(-VIEWER_PITCH_LIMIT, VIEWER_PITCH_LIMIT);
-
-        // FPS basis: forward at (yaw=0, pitch=0) is [0, 0, -1] (matches ROOM_CAM_FORWARD's -Z look).
-        let (sy, cy) = yaw.sin_cos();
-        let (sp, cp) = pitch.sin_cos();
-        let forward = vnorm_or_zero([sy * cp, sp, -cy * cp]);
-        let right = vnorm_or_zero(vcross(forward, world_up));
-        let up = vcross(right, forward);
-
-        // A `pressed(KeyCode)` helper over the snapshot's level bitset (dense-index addressed).
-        let pressed = |code: KeyCode| {
-            code.dense_index()
-                .is_some_and(|i| physical.keys_pressed.get(i))
-        };
-        if pressed(KeyCode::Escape) {
-            break;
-        }
-        // Pose probe (shadow-flip triage): `P` prints the exact camera pose so the owner can
-        // report the lit-face and shadowed-face positions as reproducible coordinates. Edge-
-        // triggered on the level bitset via a latch so holding P prints once.
-        {
-            let p_now = pressed(KeyCode::KeyP);
-            if p_now && !p_latch {
-                eprintln!(
-                    "[pose] eye=[{:.3}, {:.3}, {:.3}] yaw={:.4} pitch={:.4}",
-                    eye[0], eye[1], eye[2], yaw, pitch
-                );
-            }
-            p_latch = p_now;
-        }
-
-        // WASD planar move + Space/Ctrl vertical fly (Q/E also lower/raise as a fallback).
-        let mut mv = [0.0_f32; 3];
-        if pressed(KeyCode::KeyW) {
-            mv = vadd(mv, forward);
-        }
-        if pressed(KeyCode::KeyS) {
-            mv = vsub(mv, forward);
-        }
-        if pressed(KeyCode::KeyD) {
-            mv = vadd(mv, right);
-        }
-        if pressed(KeyCode::KeyA) {
-            mv = vsub(mv, right);
-        }
-        if pressed(KeyCode::Space) {
-            mv = vadd(mv, world_up);
-        }
-        if pressed(KeyCode::ControlLeft) || pressed(KeyCode::KeyQ) {
-            mv = vsub(mv, world_up);
-        }
-        if pressed(KeyCode::KeyE) {
-            mv = vadd(mv, world_up);
-        }
-        // Camera movement uses the REAL frame delta (Pillar B, plan item 4 — replacing the former
-        // fixed 1/60 s VIEWER_DT): a fast machine flies proportionally, a slow one does not overshoot.
-        eye = vadd(eye, vscale(vnorm_or_zero(mv), VIEWER_MOVE_SPEED * frame_dt));
-
-        // Rebuild the camera: the b5 UBO 80-byte block (the marcher's ray-gen) + `scene.mvp` (the
-        // raster mesh's perspective MVP). Both must agree in screen x/y (the hybrid alignment), so
-        // both come from the SAME live eye/basis/fov/aspect.
-        let cam = CompositePushConstants::perspective(
-            eye,
-            forward,
-            right,
-            up,
-            ROOM_CAM_FOV_Y,
-            COMPOSITE_W,
-            COMPOSITE_H,
-        );
-        let mut mvp = perspective_mvp_bytes(
-            eye,
-            forward,
-            right,
-            up,
-            ROOM_CAM_FOV_Y,
-            COMPOSITE_W as f32 / COMPOSITE_H as f32,
-        );
-        // The instanced-arm selector (byte 84 = use_model_matrix == 1) the grand room mesh needs.
-        mvp[84] = 1;
-        scene.mvp = mvp;
-
-        // The directional CSM is WORLD-FIXED (seeded ONCE at build from `viewer_csm_fit` via
-        // `cfg.csm` → every UBO ring slot + the depth-pass activation): a sun shadow must NOT move as
-        // the camera flies, so there is NOTHING to update here per frame. The depth push and the
-        // resolve UBO carry the SAME fixed `view_proj` (the O1 single-matrix pin holds by construction
-        // — both were seeded from one fit at setup).
-
-        // The per-frame RING slot: the slot the UPCOMING present binds + reads. The renderer
-        // advances `frame_index` at the END of `render_gbuffer_frame` (post-present), so the slot
-        // the minted token carries is exactly the `self.frame_index` the recorder will bind this
-        // frame. The sibling in-flight frame binds + reads `ring[s ^ 1]` — but slot `s` itself was
-        // last used by frame N−2, whose late passes (deferred lighting) may STILL be reading
-        // `ring[s]` on the GPU: `drive_frame` waits this slot's fence only INSIDE the render call,
-        // AFTER the writes below. Wait it HERE instead (the in-call wait becomes a no-op), or a
-        // moving camera makes the in-flight frame's lighting read a camera 2 frames NEWER than its
-        // G-buffer raster — the motion-only whole-face shadow flip the shadow-lag diagnostic pins.
-        let token = match renderer.wait_frame_in_flight() {
-            Ok(t) => t,
-            Err(_) => {
-                eprintln!("interactive viewer: slot fence wait failed, exiting");
-                break;
-            }
-        };
-        let s = token.slot();
-
-        // Pillar B B3: the inline fixed-timestep loop for the bouncing box (interp ON). Accumulate
-        // the real frame delta (clamped to MAX_ACCUM — the engine's 250 ms spiral clamp), expend
-        // whole FIXED_DT substeps, integrating the box's gravity + floor bounce and shuffling its
-        // interp pair per substep (`prev = old curr`, `curr = new pose` — the D3 single-site
-        // discipline). The leftover `accum / FIXED_DT` is the overstep fraction fed as `alpha`, so the
-        // box renders SMOOTHLY between substeps. A frame with no substep still slides `alpha`.
-        if let Some(interp) = interp_gpu {
-            accum = (accum + frame_dt).min(MAX_ACCUM);
-            let mut stepped = false;
-            while accum >= FIXED_DT {
-                accum -= FIXED_DT;
-                stepped = true;
-                // Semi-implicit Euler under gravity with a floor bounce at the box's rest height.
-                box_vy -= 9.8 * FIXED_DT;
-                box_y += box_vy * FIXED_DT;
-                if box_y < box_base_y {
-                    box_y = box_base_y;
-                    box_vy = -box_vy * 0.72; // 0.72 restitution (a lively but decaying bounce).
-                    if box_vy < 1.5 {
-                        box_vy = 6.5; // re-launch so the demo keeps bouncing indefinitely.
-                    }
-                }
-                // D3 shuffle on instance 0's pair: prev = old curr, curr = the new Y pose (X/Z + the
-                // decomposed orientation/scale stay put — only the height bobs).
-                if let Some(p0) = pairs.first_mut() {
-                    p0.prev = p0.curr;
-                    p0.curr[1] = box_y;
-                }
-            }
-            let alpha = if FIXED_DT > 0.0 { (accum / FIXED_DT).clamp(0.0, 1.0) } else { 0.0 };
-            // Re-upload when THIS SLOT's snapshot is outdated (the D5 substep-gated discipline,
-            // kept PER-SLOT): a substep outdates BOTH ring slots, but only the bound slot gets
-            // written that frame — the sibling must catch up on ITS next frame EVEN IF no new
-            // substep ran then, else any frame rate above the 64 Hz substep rate renders every
-            // no-substep frame from a one-substep-stale pair (a visible backward hitch of the
-            // box — the "not smooth" bounce). The alpha still slides every frame via the push
-            // constant regardless.
-            if stepped {
-                pair_dirty = [true; FRAMES_IN_FLIGHT];
-            }
-            if pair_dirty[s] {
-                interp.write_pairs(ctx, &token, &pairs);
-                pair_dirty[s] = false;
-            }
-            // Bind THIS frame slot's draw SSBO as the raster/shadow VS instance source, and arm the
-            // interp pass with this frame's overstep alpha. The interp compute writes `draw[s]` (which
-            // this bind group reads), and the framegraph orders the COMPUTE→VERTEX barrier.
-            scene.instance_bind_group = &interp.draw_bg[s];
-            scene.interp = Some(interp.activation(s, alpha));
-        }
-
-        // Upload the 80-byte camera block to THIS frame's camera-ring slot (the b5 UBO @5).
-        if let Some(mapped) = RhiDevice::buffer_mapped_ptr(ctx, &scene.camera_ring[s]) {
-            let bytes = cam.as_bytes();
-            // SAFETY: `mapped` points to ring slot `s`'s host-coherent mapped range (≥ 224 B); the
-            // 80-byte camera block is written at offset 0 (the M4 tail stays as seeded — brick OFF).
-            // Slot `s` is per-frame-PRIVATE: the sibling in-flight frame binds + reads slot `s ^ 1`,
-            // so this write overlaps no GPU read — race-free + lock-free (no fence wait). `bytes.len()`
-            // (80) ≤ the mapped size.
-            unsafe {
-                core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
-            }
-        }
-        // Present one frame, consuming the frame-write token (the host-write window for slot `s`
-        // ends HERE — R0b). `Ok(false)` = the swapchain went OUT_OF_DATE and was recreated inside
-        // the call — skip this frame and try again next loop. `Err` = a fatal device error: stop.
-        // SAFETY: `ctx`/`surface`/`swapchain`/`renderer` share one device; every `scene` resource is
-        // live (owned by the caller); `present_extent` + `scene.dispatch_group_count_x` + the camera
-        // UBO `count` all cover the composite extent; no readback requested (we present to the window).
-        let r = unsafe {
-            renderer.render_gbuffer_frame(
-                token,
-                ctx,
-                surface,
-                swapchain,
-                scene,
-                frame,
-                window.width(),
-                window.height(),
-                clear,
-                present_extent,
-                None,
-            )
-        };
-        match r {
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("interactive viewer: render error, exiting ({e:?})");
-                break;
-            }
-        }
-        window.refresh_size();
-    }
-}
 
 // === Shadow-motion A/B diagnostic (`BOYKO_SHADOW_AB=1`) =========================================
 //
@@ -5949,7 +5629,7 @@ struct AbPose {
     pitch: f32,
 }
 
-/// Writes one camera pose exactly the way `run_interactive_viewer` does per frame: the 80-byte
+/// Writes one camera pose exactly the way a live per-frame fly loop does: the 80-byte
 /// b5 camera block into THIS frame's ring slot + `scene.mvp` (byte 84 = the instanced arm).
 ///
 /// Returns the minted [`FrameWriteToken`] — the ONE token per presented frame (R0b): the caller
@@ -5981,7 +5661,7 @@ fn ab_set_pose(
     let s = token.slot();
     if let Some(mapped) = RhiDevice::buffer_mapped_ptr(ctx, &scene.camera_ring[s]) {
         let bytes = cam.as_bytes();
-        // SAFETY: identical contract to `run_interactive_viewer`'s per-frame camera write — the
+        // SAFETY: identical contract to a live per-frame camera write — the
         // slot fence wait above guarantees slot `s`'s previous occupant (frame N−2) finished all
         // GPU reads of `camera_ring[s]` (the sibling in-flight frame binds + reads `s ^ 1`), the
         // mapped range is host-coherent and ≥ 80 B, and the 80-byte block is written at offset 0.
@@ -6513,7 +6193,7 @@ fn run_shadow_motion_ab<'ctx>(
 ///      interp pass IS driving the draw — and dumps both + an ×8 diff map for the owner.
 ///
 /// The alpha is scripted (not `overstep_fraction()`) so the proof is deterministic; the production
-/// wiring feeds the real overstep in `run_interactive_viewer`. Runs on the SAME production path
+/// wiring feeds the real overstep in a live fly loop. Runs on the SAME production path
 /// (`render_gbuffer_frame` + the framegraph COMPUTE→VERTEX barrier), so a green run validates the
 /// whole B3 GPU chain. The interp draw SSBO the compute writes IS the SSBO the raster VS reads
 /// (`scene.instance_bind_group = interp.draw_bg[fi]` each frame).
@@ -6640,23 +6320,6 @@ fn run_interp_smoke<'ctx, 's>(
     );
 }
 
-/// **The INTERACTIVE engine viewer.** Opens a window and lets the owner FLY around the live
-/// HYBRID SDF+mesh room (the [`grand_showcase_config`] scene, CSM off + light markers added) with
-/// mouse-look + WASD + Space/Ctrl(Q/E) vertical fly, ESC to exit — inspecting objects, lighting,
-/// and the SDF light markers from every side. Replaces the offscreen-screenshot ping-pong.
-///
-/// `#[ignore]`: opens a BLOCKING window and needs a real RTX windowed device. Run with
-/// `BOYKO_DISABLE_VALIDATION=1`; the orchestrator launches it on the GPU.
-#[test]
-#[ignore = "interactive: opens a window; fly with WASD + mouse-look, ESC to exit"]
-fn engine_interactive_viewer() {
-    run_showcase_dump(
-        "boyko_engine interactive viewer",
-        GRAND_SHOWCASE_BMP,
-        viewer_config(),
-        true,
-    );
-}
 
 /// **Shadow-motion A/B diagnostic.** Runs the EXACT interactive-viewer scene/path with a
 /// scripted camera instead of live input: captures pose P reached statically vs reached in
@@ -8162,7 +7825,7 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
     let alloc_extent = swapchain.extent();
     let mut frame = GBufferFrame::new();
 
-    // INTERACTIVE BRANCH (engine_interactive_viewer): instead of the one-shot readback dump, fly
+    // INTERACTIVE BRANCH (scripted shadow / interp diagnostics): instead of the one-shot readback dump,
     // around the live scene with WASD + mouse-look. The heavy setup above is SHARED verbatim; this
     // branch only rebuilds the camera (the b5 UBO @0 + `scene.mvp`) per frame and presents to the
     // window in a loop, then falls through to the SAME teardown below. `present_extent`/`staging`
@@ -8250,21 +7913,9 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
                 ctx, surface, &mut swapchain, &mut renderer, window, &mut scene, &mut frame,
                 &staging, is_bgra, interp, &base_pairs,
             );
-        } else {
-            run_interactive_viewer(
-                ctx,
-                surface,
-                &mut swapchain,
-                &mut renderer,
-                window,
-                &mut scene,
-                &mut frame,
-                interp_gpu.as_ref(),
-                &base_pairs,
-            );
         }
         // Skip the dump path entirely; fall through to teardown. `scene` borrows `mesh_draws` + the
-        // instanced GPU buffers; its last use is the `run_interactive_viewer` call above, so NLL ends
+        // instanced GPU buffers; its last use is the interactive-diagnostic harness call above (or none), so NLL ends
         // those borrows here and the teardown is free to move/destroy them. (`GBufferScene` is not
         // `Drop`, so an explicit `drop(scene)` would only flag clippy's `drop_non_drop`.)
         drop(renderer);
