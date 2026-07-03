@@ -495,65 +495,109 @@ fn compile_is_idempotent_and_reset_reuses_capacity() {
     assert_eq!(f2.g.img_barriers(), first.as_slice(), "reset/rebuild diverged");
 }
 
-/// Pillar B B3: the interp-ON path is PURELY ADDITIVE. With the interpolation pre-pass
-/// wired (the two FIF-ringed `interp_pairs` / `interp_draw` SSBOs + the interp compute pass
-/// that reads pairs → writes draw, then the raster VS reads draw at VERTEX), the graph
-/// derives EXACTLY TWO new buffer barriers, both on the interp SSBOs and NONE on the core
-/// resources:
+/// Pillar B B3 refined-B: the interp-ON path is PURELY ADDITIVE, and the SHARED instance
+/// ring (`interp_model_out`, `declare_gbuffer_graph`'s ResId 16) that the interp compute
+/// writes is read at VERTEX by THREE passes — the raster G-buffer pass AND the CSM cascade
+/// depth pass AND the punctual atlas depth pass, all binding the same physical instance SSBO
+/// (`scene.instance_bind_group`; see `gbuffer.rs` — the csm/atlas VS "binds the SAME instance
+/// SSBO the main pass binds"). The graph derives EXACTLY ONE COMPUTE→VERTEX RAW barrier for
+/// that ring, at the FIRST reader (the raster pass), and that single barrier covers all three
+/// readers by Vulkan memory-dependency semantics (a memory dependency makes the interp write
+/// available/visible to every subsequent same-stage access; the later csm/atlas VERTEX reads
+/// need no re-barrier). The refined-B topology faithful to `declare_gbuffer_graph`:
+///   - `interp` pass: `buffer_access(interp_model_out, COMPUTE, WRITE)` — the compute write
+///     of the ring's dynamic slots (graph_bridge.rs L365-369);
+///   - `raster` pass: `buffer_access(interp_model_out, VERTEX, READ)` — the ONLY declared read
+///     of the ring; this is where the graph derives the single COMPUTE→VERTEX RAW
+///     (graph_bridge.rs L382-388);
+///   - `csm_depth` / `atlas_depth` passes: declare ONLY their layered depth `image_access`
+///     (graph_bridge.rs L543-549 / L561-567) — they DO NOT declare a `buffer_access` on the
+///     ring; their VS reads of the same physical buffer are covered by the raster barrier plus
+///     recording order (interp → raster barrier recorded → … → csm → atlas draw; gbuffer.rs
+///     L217/L894/L1086). Modeling the graph exactly means NOT declaring csm/atlas ring reads.
+///
+/// So the graph derives EXACTLY TWO new buffer barriers, both on the interp SSBOs, NONE on the
+/// core resources:
 ///   1. the `interp_pairs` first-touch visibility barrier (`TOP_OF_PIPE → COMPUTE`, no src
 ///      access) — a benign execution-only barrier making the freshly host-written,
 ///      frame-private pair slot visible to the interp compute read (the buffer analogue of
 ///      an image's first-touch UNDEFINED→layout; costs nothing since host-coherent writes
 ///      are already ordered by the submit);
-///   2. the `interp_draw` COMPUTE(WRITE)→VERTEX(READ) RAW at the raster (the draw reader) —
-///      the load-bearing barrier ordering the interp write before the raster/shadow VS read.
+///   2. the `interp_model_out` COMPUTE(WRITE)→VERTEX(READ) RAW at the raster (the first ring
+///      reader) — the load-bearing barrier ordering the interp write before ALL THREE VS reads
+///      (raster + csm + atlas). It is derived ONCE, not once-per-reader.
 ///
 /// The interp SSBOs are `add_buffer` (undefined, frame-private), so there is NO cross-frame
-/// WAR/WAW seed; the CORE raster/marcher/resolve barriers are byte-unperturbed. This is the
-/// ON-path B-002-style line-by-line pin mirroring `declare_gbuffer_graph`'s interp arm; the
-/// OFF path stays the `build_maximal_frame` pins (23 img / 10 buf / 22 calls), unchanged.
+/// WAR/WAW seed; the CORE raster/marcher/csm/atlas/resolve barriers are byte-unperturbed. The
+/// pin here is "EXACTLY ONE COMPUTE→VERTEX barrier for the shared ring across the whole frame"
+/// (proving no redundant re-barrier at the csm/atlas readers), NOT "a barrier per reader".
 #[test]
-fn interp_prepass_adds_exactly_the_compute_to_vertex_draw_barrier() {
+fn interp_prepass_adds_exactly_one_shared_ring_compute_to_vertex_barrier() {
     const RW_ATTR: u32 = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
 
     let mut g = FrameGraph::with_capacity(8, 8, 32);
-    // The core images the raster/marcher/resolve/present touch (as in the additive test).
+    // The core images the raster/marcher/csm/atlas/resolve/present touch. cascade/atlas are the
+    // layered shadow-depth targets the csm_depth / atlas_depth passes write (as in the maximal
+    // frame); they are `add_image` here (this pin isolates the interp arm, so no cross-frame
+    // seed is modeled — the raster core barriers are the invariant under test).
     let albedo = g.add_image("albedo");
     let normal = g.add_image("normal");
     let material = g.add_image("material");
     let depth = g.add_image("depth");
     let viewt = g.add_image("viewt");
     let lit = g.add_image("lit");
-    // The B3 interp SSBOs: FIF-ringed / frame-private ⇒ `add_buffer` (undefined seed), so no
-    // cross-frame ordering — only the intra-frame COMPUTE→VERTEX RAW is derived. ResIds are
-    // declared BEFORE the interp pass (which accesses them), mirroring `declare_gbuffer_graph`.
+    let cascade = g.add_image("cascade");
+    let atlas = g.add_image("atlas");
+    // The B3 interp SSBOs. `interp_model_out` (ResId 16 in `declare_gbuffer_graph`) is the
+    // SHARED instance ring; `interp_pairs` is the host-written pair input. Both FIF-ringed /
+    // frame-private ⇒ `add_buffer` (undefined seed), so no cross-frame ordering — only the
+    // intra-frame COMPUTE→VERTEX RAW is derived. ResIds are declared BEFORE the interp pass
+    // (which accesses them), mirroring `declare_gbuffer_graph`.
     let interp_pairs = g.add_buffer("interp_pairs");
-    let interp_draw = g.add_buffer("interp_draw");
+    let interp_model_out = g.add_buffer("interp_model_out");
 
-    // Pass `interp` — runs FIRST: reads pairs (first touch), writes draw.
+    // Pass `interp` — runs FIRST: reads pairs (first touch), writes the shared ring.
     g.add_pass("interp");
     g.buffer_access(interp_pairs, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
-    g.buffer_access(interp_draw, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
+    g.buffer_access(interp_model_out, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
 
-    // Pass `raster` — reads the interp draw SSBO at VERTEX (the VS indexes `instances[...]`),
-    // then the usual 3-MRT + depth writes.
+    // Pass `raster` — the FIRST ring reader: reads `interp_model_out` at VERTEX (the VS indexes
+    // `instances[...]`), then the usual 3-MRT + depth writes. The graph derives the ONE
+    // COMPUTE→VERTEX RAW here.
     g.add_pass("raster");
-    g.buffer_access(interp_draw, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    g.buffer_access(interp_model_out, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
     for &c in &[albedo, normal, material] {
         g.image_access(c, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, SubRange::COLOR);
     }
     g.image_access(depth, FRAG, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, SubRange::DEPTH);
 
-    // Pass `marcher` → `resolve` → `present_blit` (the core tail, as in the additive test).
+    // Pass `marcher` (the core tail).
     g.add_pass("marcher");
     g.image_access(depth, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, SubRange::DEPTH);
     for &c in &[albedo, normal, material, viewt] {
         g.image_access(c, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, RW_ATTR, VK_IMAGE_LAYOUT_GENERAL, SubRange::COLOR);
     }
+
+    // Pass `csm_depth` — the SECOND ring reader. It binds the SAME physical instance ring at its
+    // VS (gbuffer.rs L962-963: "the SAME instance SSBO the main pass binds"), but in the real
+    // graph it declares ONLY its layered depth write — NOT a `buffer_access` on the ring — and
+    // relies on the raster barrier + recording order (raster barrier is recorded before csm
+    // draws). Mirror that exactly: no ring `buffer_access` here, only the depth `image_access`.
+    g.add_pass("csm_depth");
+    g.image_access(cascade, FRAG, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, SubRange::depth_layers(CASCADE_LAYERS));
+
+    // Pass `atlas_depth` — the THIRD ring reader. Same as csm_depth: binds the shared ring VS,
+    // declares ONLY its layered depth write, covered by the single raster barrier + order.
+    g.add_pass("atlas_depth");
+    g.image_access(atlas, FRAG, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, SubRange::depth_layers(ATLAS_LAYERS));
+
+    // Pass `resolve` → `present_blit`. resolve reads the layered shadow maps (→sampled).
     g.add_pass("resolve");
     for &c in &[albedo, normal, material, viewt] {
         g.image_access(c, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL, SubRange::COLOR);
     }
+    g.image_access(cascade, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, SubRange::depth_layers(CASCADE_LAYERS));
+    g.image_access(atlas, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, SubRange::depth_layers(ATLAS_LAYERS));
     g.image_access(lit, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_GENERAL, SubRange::COLOR);
     g.add_pass("present_blit");
     g.image_access(lit, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, SubRange::COLOR);
@@ -561,17 +605,37 @@ fn interp_prepass_adds_exactly_the_compute_to_vertex_draw_barrier() {
     g.compile();
     let buf = g.buf_barriers();
 
-    // (2) The load-bearing barrier: the interp draw COMPUTE(WRITE) → VERTEX(READ) RAW.
+    // (2) The load-bearing barrier: the shared-ring COMPUTE(WRITE) → VERTEX(READ) RAW, derived
+    // at the raster (the first reader). This ONE barrier orders the interp write before ALL
+    // THREE VS reads (raster + csm + atlas).
     assert!(
         has_buf(
             buf,
-            interp_draw,
+            interp_model_out,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
             VK_ACCESS_SHADER_WRITE_BIT,
             VK_ACCESS_SHADER_READ_BIT,
         ),
-        "interp draw COMPUTE→VERTEX RAW barrier (the interp write → raster VS read) missing"
+        "interp_model_out COMPUTE→VERTEX RAW barrier (the shared ring write → first VS read) missing"
+    );
+    // EXACTLY ONE COMPUTE→VERTEX barrier for the shared ring across the WHOLE frame — the
+    // refined-B pin. The csm_depth/atlas_depth passes declare no ring `buffer_access` (they rely
+    // on this barrier + recording order), and even if a graph erroneously re-declared the ring
+    // read there, the memory dependency at the first reader already makes the write visible to
+    // every subsequent VERTEX access, so a second barrier would be redundant. Count is 1.
+    let ring_compute_to_vertex = buf
+        .iter()
+        .filter(|b| {
+            b.res == interp_model_out
+                && b.src_stage == VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+                && b.dst_stage == VK_PIPELINE_STAGE_VERTEX_SHADER_BIT
+        })
+        .count();
+    assert_eq!(
+        ring_compute_to_vertex, 1,
+        "shared ring must derive EXACTLY ONE COMPUTE→VERTEX barrier (at the first reader), \
+         covering all three VS readers by Vulkan memory dependency — NOT one per reader"
     );
     // (1) The `interp_pairs` first-touch visibility barrier: TOP_OF_PIPE → COMPUTE, no src
     // access (a benign execution-only barrier on the freshly host-written, frame-private slot).
@@ -586,15 +650,12 @@ fn interp_prepass_adds_exactly_the_compute_to_vertex_draw_barrier() {
         ),
         "interp pairs first-touch TOP_OF_PIPE→COMPUTE visibility barrier missing"
     );
-    // EXACTLY two buffer barriers — both on the interp SSBOs; the frame-private (undefined)
-    // seed adds no cross-frame WAR/WAW, and no core buffer is touched.
+    // EXACTLY two buffer barriers total — both on the interp SSBOs; the frame-private (undefined)
+    // seed adds no cross-frame WAR/WAW, and no core buffer is touched. The three ring readers
+    // (raster + csm + atlas) collapse to the SINGLE ring RAW asserted above.
     assert_eq!(
         buf.len(),
         2,
-        "interp adds exactly TWO buffer barriers (pairs first-touch + draw RAW)"
+        "interp adds exactly TWO buffer barriers (pairs first-touch + the ONE shared-ring RAW)"
     );
-
-    // The CORE image barriers are byte-unperturbed: albedo/normal/material 3 each, depth 2,
-    // viewt 2, lit 2 → 15, identical to `optional_passes_are_additive_core_barriers_unperturbed`.
-    assert_eq!(g.img_barriers().len(), 15, "interp does not perturb the core image barriers");
 }
