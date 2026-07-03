@@ -698,6 +698,19 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
             }
         }
         let mut data_fetch = <D as QueryData>::init_fetch(&state.data_state);
+        // Dense plan D3: a dense `D` needs its global `DenseStore` pointer
+        // resolved before `fetch` (the iter cursors do this in `QueryIter::new`;
+        // a POINT LOOKUP must too, else the dense `fetch` dereferences a NULL
+        // `fetch.dense`). 0%-gate: `HAS_DENSE` folds `false` for a table `D`, so
+        // the common point-lookup stays byte-identical.
+        if const { <D as QueryData>::HAS_DENSE } {
+            // SAFETY (D3): `self.world` is the read-only mint scoped to the view
+            //   lifetime (the SAME cell the iter path passes to `resolve_dense`);
+            //   the resolved store pointer is address-stable for that lifetime.
+            unsafe {
+                <D as QueryData>::resolve_dense(&mut data_fetch, &state.data_state, self.world);
+            }
+        }
         // SAFETY (QD3, QD4): read-only mint via the raw pointer; the
         //   archetype was matched by `D::matches_component_set` (post-filter
         //   guarantee), so every cached column is non-null. `row` is the
@@ -710,7 +723,21 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
                 SystemMeta::dummy(),
             );
         }
-        // SAFETY (QD2, QD3): set_table_readonly cached the column pointers;
+        // Dense membership (D3): the matched-archetype bitset is a CONSERVATIVE
+        // over-approximation (seeded from `arch_presence`), and a dense component
+        // is NOT in the archetype signature — so `entity` may sit in a matched
+        // archetype WITHOUT being a live member of the dense store. `dense_row_passes`
+        // checks `slot_of`, so a non-member returns `None` here rather than tripping
+        // the `slot_of().expect()` inside the dense `fetch`. 0%-gate for a table `D`.
+        if const { <D as QueryData>::HAS_DENSE } {
+            // SAFETY (D3): `resolve_dense` + `set_table_readonly` above populated
+            //   `fetch.dense` / `fetch.entity_ids`; `row < entity_count`.
+            if !unsafe { <D as QueryData>::dense_row_passes(&data_fetch, row) } {
+                return None;
+            }
+        }
+        // SAFETY (QD2, QD3): `set_table_readonly` cached the column pointers (table
+        //   `D`); `resolve_dense` + the membership check guard the dense `D`;
         //   `row < entity_count` per the fast store invariant.
         Some(unsafe { <D as QueryData>::fetch(&data_fetch, row) })
     }
@@ -793,6 +820,18 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
             }
         }
         let mut data_fetch = <D as QueryData>::init_fetch(&state.data_state);
+        // Dense plan D3: resolve the dense store pointer before `fetch` — the
+        // point-lookup twin of `QueryIterMut::new` (else the dense `fetch`
+        // dereferences a NULL `fetch.dense`). 0%-gate for a table `D`.
+        if const { <D as QueryData>::HAS_DENSE } {
+            // SAFETY (D3): `self.world` is the write-capable cell scoped to the
+            //   view lifetime; `resolve_dense` reads the store pointer SHARED
+            //   (address-stable for that lifetime) — the same cell the iter path
+            //   passes.
+            unsafe {
+                <D as QueryData>::resolve_dense(&mut data_fetch, &state.data_state, self.world);
+            }
+        }
         // SAFETY (QD3, QD4): write-capable mint; archetype matched.
         unsafe {
             <D as QueryData>::set_table_mut(
@@ -802,7 +841,18 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
                 SystemMeta::dummy(),
             );
         }
-        // SAFETY (QD2, QD3): set_table_mut cached the column pointers;
+        // Dense membership (D3): return `None` for an entity that sits in a matched
+        // (arch_presence-seeded) archetype but is NOT a live dense-store member, so
+        // the dense `fetch`'s `slot_of().expect()` never fires. 0%-gate for a table `D`.
+        if const { <D as QueryData>::HAS_DENSE } {
+            // SAFETY (D3): `resolve_dense` + `set_table_mut` above populated
+            //   `fetch.dense` / `fetch.entity_ids`; `row < entity_count`.
+            if !unsafe { <D as QueryData>::dense_row_passes(&data_fetch, row) } {
+                return None;
+            }
+        }
+        // SAFETY (QD2, QD3): `set_table_mut` cached the column pointers (table `D`);
+        //   `resolve_dense` + the membership check guard the dense `D`;
         //   `row` in range per fast store invariant.
         Some(unsafe { <D as QueryData>::fetch(&data_fetch, row) })
     }

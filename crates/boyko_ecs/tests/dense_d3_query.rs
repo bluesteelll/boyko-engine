@@ -15,10 +15,12 @@
 //! (`Query` SystemParam) surfaces.
 
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
+use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::system::Commands;
 use boyko_ecs::ecs::core::iters::query::data::AnyOf;
 use boyko_ecs::ecs::core::iters::query::filter::{With, Without};
 use boyko_macros::{Bundle, Component};
+use std::sync::{Arc, Mutex};
 
 /// 16-byte POD dense "body" payload.
 #[derive(Component, Clone, Copy, PartialEq, Debug)]
@@ -371,5 +373,86 @@ fn anyof_dense_arm_none_for_absent_member() {
             (501.0, None),
         ],
         "AnyOf<(&Body,)> arm must be Some for members and None for absent members"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Point lookups: `QueryView::get` / `get_mut` on a DENSE `D`.
+//
+// Pre-fix these NULL-dereferenced: `get`/`get_mut` never called `resolve_dense`,
+// so the dense `fetch` read a NULL `fetch.dense`. The fix resolves the store
+// pointer AND checks `dense_row_passes` membership — the matched-archetype bitset
+// is a conservative `arch_presence` over-approximation, and a dense component is
+// OFF the archetype signature, so an entity can sit in a matched archetype
+// without being a live store member (which would trip the fetch `slot_of().expect()`).
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Spawns a `(Transform, Body)` via `Commands::spawn` and returns its `Entity`
+/// (the deferred spawn reserves the id eagerly, so `.id()` is valid immediately).
+fn spawn_transform_body(ecs: &mut EcsMaster, x: f32) -> Entity {
+    let sink: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
+    let probe = Arc::clone(&sink);
+    ecs.run_system(move |mut cmds: Commands| {
+        let e = cmds
+            .spawn(TransformBody { t: Transform { px: x, py: -x }, b: body(x) })
+            .id();
+        *probe.lock().expect("probe lock") = Some(e);
+    });
+    sink.lock().expect("sink lock").take().expect("spawned entity")
+}
+
+/// Spawns a `Transform`-ONLY entity (no `Body`): the SAME `{Transform}` archetype
+/// as `spawn_transform_body` (a dense `Body` is off the archetype signature), so it
+/// is a NON-MEMBER sitting in a matched (`arch_presence`-seeded) archetype.
+fn spawn_transform_only(ecs: &mut EcsMaster, px: f32) -> Entity {
+    let sink: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
+    let probe = Arc::clone(&sink);
+    ecs.run_system(move |mut cmds: Commands| {
+        let e = cmds.spawn(TransformOnly { t: Transform { px, py: -px } }).id();
+        *probe.lock().expect("probe lock") = Some(e);
+    });
+    sink.lock().expect("sink lock").take().expect("spawned entity")
+}
+
+#[test]
+fn dense_get_returns_the_live_member() {
+    // The direct null-deref regression witness: `get` on a dense member now
+    // resolves the store and returns the value (pre-fix: read of a NULL fetch.dense).
+    let mut ecs = EcsMaster::new();
+    let e = spawn_transform_body(&mut ecs, 42.0);
+    let got = ecs.query::<&Body, ()>().get(e).copied();
+    assert_eq!(got, Some(body(42.0)), "get on a dense member yields its value");
+}
+
+#[test]
+fn dense_get_mut_mutation_persists() {
+    let mut ecs = EcsMaster::new();
+    let e = spawn_transform_body(&mut ecs, 10.0);
+    {
+        let mut view = ecs.query::<&mut Body, ()>();
+        let b = view.get_mut(e).expect("live dense member");
+        b.x = 99.0;
+    }
+    let got = ecs.query::<&Body, ()>().get(e).map(|b| b.x);
+    assert_eq!(got, Some(99.0), "get_mut write-through to the dense column persists");
+}
+
+#[test]
+fn dense_get_non_member_in_matched_archetype_is_none_not_panic() {
+    // The membership-guard witness: a Transform-only entity shares the {Transform}
+    // archetype with a real Body member (dense Body is off-signature), so Body's
+    // `arch_presence` bitset MATCHES its archetype — the guard, not the bitset, must
+    // reject it. Pre-guard this reached the dense fetch's `slot_of().expect()` panic.
+    let mut ecs = EcsMaster::new();
+    let _member = spawn_transform_body(&mut ecs, 1.0);
+    let non_member = spawn_transform_only(&mut ecs, 2.0);
+    assert!(
+        ecs.query::<&Body, ()>().get(non_member).is_none(),
+        "a non-member in a matched (arch_presence) archetype must be None, not a panic"
+    );
+    let mut view = ecs.query::<&mut Body, ()>();
+    assert!(
+        view.get_mut(non_member).is_none(),
+        "get_mut mirrors get for a non-member"
     );
 }

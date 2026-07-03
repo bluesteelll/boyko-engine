@@ -188,14 +188,13 @@ fn miri_dense_enabled_iter_mut_write_through_lands() {
 // (d) iter / iter_mut over enabled vs disabled dense entities: the per-row bit
 //     test + dense fetch on the point-comparable set.
 //
-// NOTE (reviewer P2-a): this case does NOT exercise `get` / `get_mut`. Those
-// currently null-deref on a dense `D` (a PRE-EXISTING bug unrelated to the
-// dense-enable feature: `get`/`get_mut` never call `resolve_dense`, so
-// `fetch.dense` stays null — see the follow-up tracked as "QueryView::get/get_mut
-// null-deref on dense components"). Miri coverage of the `get`/`get_mut` unsafe
-// surface is DEFERRED until that fix lands; this case instead witnesses that the
-// `iter` set (which the enabled `get` MUST agree with) is exactly the enabled
-// row, under Tree-Borrows.
+// NOTE: this case exercises `iter` / `iter_mut`, not `get` / `get_mut`. The
+// dense `get`/`get_mut` null-deref (the pre-existing bug this case originally
+// worked around) is now FIXED — `get`/`get_mut` resolve the dense store and
+// check `dense_row_passes` membership — and its Miri Tree-Borrows coverage
+// lives in `dense_d3_query`'s `dense_get_*` tests. This case stays on the
+// `iter` surface (the enabled `get` MUST agree with the `iter` set, witnessed
+// under Tree-Borrows here).
 // ════════════════════════════════════════════════════════════════════════════
 
 #[test]
