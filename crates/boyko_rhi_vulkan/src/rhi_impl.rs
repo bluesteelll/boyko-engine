@@ -72,9 +72,11 @@ const MAX_VERTEX_ATTRIBUTES: usize = 8;
 /// on a SINGLE resolve set with headroom, then raised to 16 for the SDF clip-map
 /// (M4) per-level bindings (`N = brick::BRICK_LEVELS` levels × 2 resources on top of
 /// the 0..=8 gbuffer bindings = 15 — see the agnostic
-/// `boyko_rhi::MAX_BIND_GROUP_BINDINGS` docstring). A `debug_assert!` traps an
-/// over-count at `create_bind_group_layout`/`create_bind_group`.
-const MAX_BIND_GROUP_BINDINGS: usize = 16;
+/// `boyko_rhi::MAX_BIND_GROUP_BINDINGS` docstring). SDFDDGI I(-1) raised it 16 → 19 to
+/// reserve room for the 3 DDGI resolve bindings landed in rung I0 (this rung adds
+/// none). A `debug_assert!` traps an over-count at
+/// `create_bind_group_layout`/`create_bind_group`.
+const MAX_BIND_GROUP_BINDINGS: usize = 19;
 
 // The bind-group create path keeps its own copy of the cap so a future divergence
 // from the agnostic `boyko_rhi::MAX_BIND_GROUP_BINDINGS` (the desc-side cap) breaks

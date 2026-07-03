@@ -1921,6 +1921,9 @@ fn pick_physical_device(
     let props = query_device_properties(fns, chosen);
     let name = device_name_from_props(&props);
 
+    // SDFDDGI I0 adds the device-limit validation against the actual declared per-type
+    // DDGI descriptor counts (not the aggregate cap), as a soft RhiError.
+
     let mut mem_props: VkPhysicalDeviceMemoryProperties = unsafe { mem::zeroed() };
     // SAFETY: `chosen` is a valid physical device enumerated above; `&mut
     // mem_props` is a valid out-pointer for the `#[repr(C)]`

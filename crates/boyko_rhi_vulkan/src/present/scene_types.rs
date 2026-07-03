@@ -656,14 +656,15 @@ pub struct GBufferScene<'a> {
     /// The M4 marcher SPIR-V STATICALLY references all four inside the runtime level branch-ladder
     /// (DXC keeps them past the `brick_levels` gate), so the layout + set must bind VALID descriptors
     /// even on the OFF/N=1 path (`brick_levels == 1` takes only the lvl==0 arm → bound-but-unread).
-    /// 6 brick bindings total (9..=14) under the 16-binding cap (`MAX_BIND_GROUP_BINDINGS`).
+    /// 6 brick bindings total (9..=14), within the descriptor cap (`MAX_BIND_GROUP_BINDINGS`).
     ///
     /// The caller MUST likewise declare binding 15 = `DescriptorKind::CombinedImageSampler` (MDF
     /// Stage-2c): the recompiled marcher SPIR-V STATICALLY references the dense mesh-SDF
     /// `Texture3D MeshSdf : register(t15)` + `SamplerState MeshSdfSampler : register(s15)` inside the
     /// runtime-gated `mesh_sdf_enabled` branch, so the layout + set must bind a VALID combined
     /// image+sampler there even when the MDF path is gated OFF (`mesh_sdf_enabled == false` →
-    /// bound-but-unread). Binding 15 is the 16th / LAST slot under the 16-binding cap.
+    /// bound-but-unread). Binding 15 is the last slot this vocab layout declares (within
+    /// the descriptor cap `MAX_BIND_GROUP_BINDINGS`).
     pub vocab_layout: &'a VulkanBindGroupLayout,
     /// The edit-list StorageBuffer (binding 0), host-seeded ONCE before the loop.
     pub edit_list: &'a BoundBuffer,

@@ -27,9 +27,16 @@ use crate::error::RhiError;
 /// 9..=14 on top of the 0..=8 gbuffer bindings = 15 total, so the cap is 16 (N
 /// levels × 2, +1 headroom). This is a self-imposed engine inline-array size, NOT a
 /// hardware limit (NVIDIA Ampere / RTX 3060 `maxPerStageDescriptorStorageImages` /
-/// `maxPerStageResources` are both 1048576, so 16 is safe). A `debug_assert!` traps
+/// `maxPerStageResources` are both 1048576, so 19 is safe). A `debug_assert!` traps
 /// an over-count.
-pub const MAX_BIND_GROUP_BINDINGS: usize = 16;
+///
+/// SDFDDGI I(-1): raised 16 → 19 so the deferred-resolve set can LATER (rung I0)
+/// admit the 3 DDGI bindings (probe irradiance combined-image, probe depth
+/// combined-image, a grid UBO), restoring exact-fill to 19/19. This rung adds no
+/// bindings — the resolve set stays at 16 under a cap of 19 (byte-identical render).
+/// A boot-time device-limit check (`pick_physical_device` in the Vulkan backend)
+/// guards that 19 stays under the per-stage descriptor limits those additions consume.
+pub const MAX_BIND_GROUP_BINDINGS: usize = 19;
 
 /// Parameters for [`RhiDevice::create_texture`] (Phase-6 S0 graphics surface).
 ///

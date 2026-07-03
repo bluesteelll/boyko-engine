@@ -592,8 +592,8 @@ impl GBufferTargets {
                 // references `gShadowAtlas`/`ShadowAtlas`), so the layout MUST declare them and a valid
                 // descriptor MUST be present even on the OFF path; the resolve PCF-samples ONLY under
                 // `punctual_shadow_mode != 0` (0 every pre-Inc-1 scene), so the bound-but-unread atlas
-                // map/sampler/UBO are never sampled (the 0%-gate). These are the 15th + 16th entries —
-                // the resolve set now hits 16/16, the descriptor cap (`MAX_BIND_GROUP_BINDINGS`).
+                // map/sampler/UBO are never sampled (the 0%-gate). These are the 15th + 16th entries
+                // (indices 14, 15); the set sits at 16 under the cap (`MAX_BIND_GROUP_BINDINGS`).
                 BindGroupEntry::CombinedImage {
                     texture: scene.shadow_atlas_texture,
                     sampler: scene.shadow_atlas_sampler,
@@ -602,15 +602,20 @@ impl GBufferTargets {
                     buffer: scene.shadow_atlas_ubo,
                 },
             ];
-            // The resolve set now declares 16 bindings (0..=15) — EXACTLY the 16-binding cap
-            // (`MAX_BIND_GROUP_BINDINGS`), 0 free. CSM Rung A added the combined cascade map+sampler
-            // @12 + the cascade UBO @13; Shadow Inc-1-GPU adds the combined atlas map+sampler @14 +
-            // the atlas UBO @15 (both via the combined-image collapse — the in-house RHI has no
-            // SAMPLER-only `BindGroupEntry`). Assert the EXACT cap hit (16/16): a future binding has
-            // no room without raising the cap.
+            // The resolve set declares 16 bindings (0..=15). CSM Rung A added the combined cascade
+            // map+sampler @12 + the cascade UBO @13; Shadow Inc-1-GPU adds the combined atlas
+            // map+sampler @14 + the atlas UBO @15 (both via the combined-image collapse — the
+            // in-house RHI has no SAMPLER-only `BindGroupEntry`).
+            //
+            // TODO(SDFDDGI I0): the 3 DDGI resolve bindings restore exact-fill to 19/19; until then
+            // the set is <= cap. SDFDDGI I(-1) raised `MAX_BIND_GROUP_BINDINGS` 16 → 19 without
+            // adding bindings here, so the set now sits at 16 under a cap of 19. The guard stays a
+            // hard upper bound (an over-count of the inline-array capacity is still a bug); it is
+            // relaxed from `== cap` to `<= cap` only because the exact-fill invariant is deferred to
+            // rung I0.
             debug_assert!(
-                entries.len() == MAX_BIND_GROUP_BINDINGS,
-                "invariant: the resolve set must fill EXACTLY the 16-binding descriptor cap (16/16)"
+                entries.len() <= MAX_BIND_GROUP_BINDINGS,
+                "invariant: the resolve set must not exceed the {MAX_BIND_GROUP_BINDINGS}-binding descriptor cap"
             );
             let desc = BindGroupDesc::<Vulkan> {
                 layout: scene.resolve_layout,
