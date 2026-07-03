@@ -1366,6 +1366,16 @@ impl GpuSceneBundles {
         &self.csm.ubo[slot]
     }
 
+    /// The marcher's binding-0 edit-list SSBO — the write target of the runner's
+    /// ONE-SHOT boot-static `boyko_render::upload_sdf_edit_list` (host plan R7).
+    /// Unlike the cascade UBO this is a SINGLE shared buffer, not a per-slot ring:
+    /// in v1 the edit list is boot-static (written once, before the first marcher
+    /// dispatch reads it), so no in-flight race exists (see `upload_sdf_edit_list`).
+    #[inline]
+    pub(crate) fn edit_list(&self) -> &BoundBuffer {
+        &self.edit_list
+    }
+
     /// Tears every bundle down in reverse dependency order — the showcase
     /// teardown list, minus the resources R3 does not create (staging, SSAO
     /// pipeline, per-mesh instanced buffers).

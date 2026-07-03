@@ -112,6 +112,12 @@ pub mod mesh_draw;
 /// [`MeshGpu`] / [`Vertex`], the GPU vertex+index buffers a `MeshHandle` indexes.
 pub mod mesh_registry;
 pub mod render3d_plugin;
+/// Host plan R7 — the SDF instance path: the per-entity
+/// [`SdfPrimitive`](sdf_edit::SdfPrimitive) component (an `SdfEdit` carrier), the reused
+/// [`SdfEditStaging`](sdf_edit::SdfEditStaging) gather scratch, the one-shot startup
+/// [`collect_sdf_edits`](sdf_edit::collect_sdf_edits) gather, and the
+/// [`SdfPlugin`](sdf_edit::SdfPlugin) that composes them.
+pub mod sdf_edit;
 /// Shadow Inc-1 — the sparse spot/point shadow-atlas slot-assignment policy
 /// ([`ShadowConfig`](shadow_atlas::ShadowConfig) +
 /// [`ResolvedShadowAtlas`](shadow_atlas::ResolvedShadowAtlas) Resources + the pure
@@ -188,6 +194,10 @@ pub use shadow_atlas::{
     ShadowConfig, SpotShadowInput, light_atlas_slot, pack_atlas_slot, resolve_shadow_atlas,
     resolve_shadow_atlas_inputs, resolve_shadow_atlas_spots, spot_priority,
 };
+pub use sdf_edit::{
+    MAX_SDF_EDITS, SdfEdit, SdfEditStaging, SdfPlugin, SdfPrimitive, collect_sdf_edits, sdf_kind,
+    sdf_op,
+};
 pub use shadow_marker::CastsPunctualShadow;
 pub use shadow_plugin::ShadowAtlasPlugin;
 pub use snap_interpolation::{SnapInterpolation, TeleportCommandsExt, snap_apply};
@@ -195,7 +205,7 @@ pub use ssao_config::{ResolvedSsao, SsaoConfig, SsaoQuality, resolve_ssao, resol
 pub use ssao_plugin::SsaoPlugin;
 pub use upload::{
     upload_camera_ring, upload_csm_ring, upload_instance_models, upload_light_table,
-    upload_pair_out_slot, upload_pair_ring,
+    upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
 };
 pub use view::{
     composite_from_view, composite_perspective_from_view, demo_view_proj_from_view,

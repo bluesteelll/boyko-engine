@@ -32,6 +32,12 @@ boyko-macros = { path = "../boyko_macros" }
 boyko_rhi = { path = "../boyko_rhi" }
 boyko_rhi_vulkan = { path = "../boyko_rhi_vulkan" }
 boyko-utils = { path = "../boyko_utils" }
+# R7 SDF instance path: the `SdfEdit` std430 element + the `sdf_op` / `sdf_kind`
+# discriminants + `MAX_SDF_EDITS` for the `SdfPrimitive` component and the
+# `SdfEditStaging` gather scratch. `boyko_sdf_math` is a TRUE LEAF (depends on
+# nothing in the workspace except the `boyko_shaderdsl` field leaf), so this edge
+# is acyclic — boyko_render already sits above it in the graph.
+boyko_sdf_math = { path = "../boyko_sdf_math" }
 # S3: the renderer consumes the engine-derived `ViewUniform` (boyko_scene) and
 # its column-major `Mat4` (boyko_math) as the SINGLE view source — replacing the
 # prior hardcoded per-backend view. boyko_render is the only crate that may name

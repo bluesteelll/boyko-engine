@@ -28,9 +28,10 @@ use boyko_input::{ButtonState, KeyCode, RawInputEvent};
 use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
 #[cfg(windows)]
 use boyko_render::{
-    CsmCasterScratch, MeshRegistry, MeshRenderScratch, ResolvedCsm, RhiContext,
-    gbuffer_push_from_view, upload_camera_ring, upload_csm_ring, upload_instance_models,
-    upload_light_table, upload_pair_out_slot, upload_pair_ring,
+    CsmCasterScratch, MeshRegistry, MeshRenderScratch, ResolvedCsm, RhiContext, SdfEditStaging,
+    collect_sdf_edits, gbuffer_push_from_view, upload_camera_ring, upload_csm_ring,
+    upload_instance_models, upload_light_table, upload_pair_out_slot, upload_pair_ring,
+    upload_sdf_edit_list,
 };
 #[cfg(windows)]
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
@@ -140,6 +141,18 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     }
 
     app.finish();
+
+    // The R7 SDF edit-list gather — run ONCE here, explicitly (host plan R7, the P0
+    // order fix). `collect_sdf_edits` MUST observe every `SdfPrimitive` the user spawns,
+    // including those from systems registered via `add_startup_system` AFTER
+    // `add_plugins(EnginePlugins)`. Startup systems drain in PUSH order inside `finish()`
+    // above, so a plugin-registered startup gather would race (run BEFORE) the user's
+    // later `setup` and see zero primitives. Running it HERE — after `finish()` drained
+    // ALL startup systems (World fully populated: every spawn applied, the GPU residents
+    // inserted before finish) and before the frame loop — makes the gather order-proof
+    // and single-site. It sets `SdfEditStaging::dirty` deterministically; the frame
+    // loop's first-frame `is_dirty()` block then performs the one-shot upload unchanged.
+    app.world_mut().run_system(collect_sdf_edits);
 
     // A startup-requested exit is honored (plan D6): skip the loop, tear down.
     // BOTH frame-loop exits (normal Escape/close/AppExit AND a terminal render
@@ -323,6 +336,37 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             }
         };
         let s = token.slot();
+
+        // 5-pre. The R7 SDF edit list — the ONE-SHOT boot-static write (host plan R7).
+        // The explicit post-`finish()` `collect_sdf_edits` (run in `run_windowed` above,
+        // after ALL startup spawns drained) gathered every `SdfPrimitive` into
+        // `SdfEditStaging` and set `dirty` iff any SDF primitive was spawned. On the FIRST
+        // frame, encode + write the marcher's binding-0 edit-list SSBO ONCE (before the
+        // first `render_gbuffer_frame` below — same frame, uploads precede render), then
+        // `mark_uploaded()` so `is_dirty()` stays false: the frame loop touches the SDF
+        // path never again (0 per-frame cost, v1 boot-static).
+        //
+        // Deliberate deviation (v1): the design's post-boot-spawn debug_assert is replaced
+        // by this `is_dirty()` one-shot gate. A re-query to catch a post-boot spawn would
+        // perturb change-detection ticks (running a system stamps ticks), and v1 scope is
+        // boot-static — so a post-boot `SdfPrimitive` spawn is silently ignored (the scope
+        // line; the dynamic per-frame edit path is a deferred campaign).
+        {
+            let staging = app.world_mut().resource_mut::<SdfEditStaging>();
+            if staging.is_dirty() {
+                // SAFETY: `host.gpu.edit_list()` is a live host-visible buffer minted by
+                // `GpuSceneBundles::boot` (`RhiDevice::create_buffer`, HostVisibleCoherent
+                // — its `mapped`/`size` are the RHI's own) and destroyed only in teardown
+                // after the loop. This is the ONE-SHOT boot-static write, run under the
+                // fenced token BEFORE the first marcher dispatch reads the buffer, so no
+                // in-flight GPU read of a non-empty edit list is racing it (the SSBO was
+                // boot-seeded EMPTY; nothing else rewrites this single shared buffer).
+                unsafe {
+                    upload_sdf_edit_list(&token, host.gpu.edit_list(), staging.edits());
+                }
+                staging.mark_uploaded();
+            }
+        }
 
         // 5–7. Uploads + stack scene assembly + render. The draw list reuses
         // the host's parked allocation (0 alloc/frame after warmup); its

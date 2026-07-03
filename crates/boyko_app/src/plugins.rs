@@ -11,8 +11,8 @@ use boyko_render::instance_model::sync_instance_model_cols;
 use boyko_render::light_system::LightTableStaging;
 use boyko_render::{
     CsmCasterScratch, CsmPlugin, LightingConfig, LightingPlugin, MeshRenderScratch,
-    Render3dPlugin, add_gpu_transform_pack, gather_mesh_draws, gather_shadow_casters, snap_apply,
-    sync_csm_light_gate,
+    Render3dPlugin, SdfPlugin, add_gpu_transform_pack, gather_mesh_draws, gather_shadow_casters,
+    snap_apply, sync_csm_light_gate,
 };
 use boyko_scene::{CameraPlugin, FixedSet};
 
@@ -145,6 +145,15 @@ impl Plugin for EnginePlugins {
         app.insert_resource(LightingConfig::default());
         app.add_plugin(LightingPlugin);
         app.add_plugin(CsmPlugin);
+
+        // The R7 SDF instance path (composed by DEFAULT): inserts the
+        // `SdfEditStaging` gather scratch and registers the one-shot startup
+        // `collect_sdf_edits` gather. An entity carrying `SdfPrimitive` is direct-
+        // marched into the shared G-buffer; a scene with NO `SdfPrimitive` gathers
+        // zero edits, so the marcher's edit list stays the empty boot seed (the
+        // 0%-gate — byte-identical to pre-R7). The runner performs the one-shot
+        // boot-static edit-list upload on the first frame under the write token.
+        app.add_plugin(SdfPlugin);
 
         // The R3 mesh path: pack GlobalTransform → InstanceModelCol, then
         // bucket the visible instances into the reused MeshRenderScratch the

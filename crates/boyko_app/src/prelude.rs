@@ -32,6 +32,12 @@ pub use boyko_render::{
 // snap tag in one deferred command).
 pub use boyko_render::{GpuTransform3D, SnapInterpolation, TeleportCommandsExt};
 
+// The SDF instance surface (host plan R7): the per-entity [`SdfPrimitive`] component
+// (an `SdfEdit` carrier — its PRESENCE direct-marches the primitive into the shared
+// G-buffer), the [`SdfEdit`] std430 element + its `sphere`/`box_shape`/`capsule`
+// constructors, and the [`sdf_op`] / [`sdf_kind`] discriminants for authoring edits.
+pub use boyko_render::{SdfEdit, SdfPrimitive, sdf_kind, sdf_op};
+
 // Spatial + camera components and the D4 Fixed ordering seam. The R6
 // interactive-camera surface: the `FlyCamera` controller component, its
 // `FlyCameraBundle` spawn preset, and the `CameraSet` ordering seam.

@@ -20,10 +20,13 @@
 //! `# Safety` contract, discharged trivially by the intended callers (slots
 //! minted by `RhiDevice::create_buffer` and owned by the host's scene bundles).
 
-use boyko_rhi_vulkan::compute::{B5_CAMERA_UBO_BYTES_M4, M2_GRID_PARAMS_OFFSET};
+use boyko_rhi_vulkan::compute::{
+    B5_CAMERA_UBO_BYTES_M4, EDITLIST_BUFFER_WORDS, M2_GRID_PARAMS_OFFSET, encode_edit_list,
+};
 use boyko_rhi_vulkan::memory::BoundBuffer;
 use boyko_rhi_vulkan::swapchain::FrameWriteToken;
 use boyko_scene::ViewUniform;
+use boyko_sdf_math::SdfEdit;
 
 use crate::csm_config::{RESOLVED_CSM_BYTES, ResolvedCsm};
 use crate::gpu_transform3d::GPU_TRANSFORM3D_BYTES;
@@ -456,4 +459,69 @@ pub unsafe fn upload_csm_ring(
             RESOLVED_CSM_BYTES,
         );
     }
+}
+
+/// Encodes `edits` into the marcher's binding-0 edit-list SSBO (`slot`) — the R7 SDF
+/// instance path's ONE-SHOT boot-static write (host plan R7). Word 0 becomes
+/// `edit_count`, then the packed edit array (see
+/// [`encode_edit_list`](boyko_rhi_vulkan::compute::encode_edit_list)); the pixel region
+/// past the array is left as the boot seed wrote it (the shader owns those words).
+///
+/// # Why NOT a per-slot ring (unlike the sibling uploads)
+///
+/// The edit list is a SINGLE shared `BoundBuffer`, not a `FRAMES_IN_FLIGHT` ring. In v1
+/// it is boot-static: the edits are known once (the startup gather), and this write runs
+/// exactly once on the first frame BEFORE the first marcher dispatch reads the buffer —
+/// so it races nothing (there is no previous occupant, no sibling in-flight read of a
+/// non-empty list). The borrowed [`FrameWriteToken`] is still required as the mint proof
+/// that we are on the fenced, dispatcher-solo write path; a dynamic per-frame edit path
+/// (ring + generation gate) is a deferred campaign.
+///
+/// # Panics
+///
+/// Panics if the encoded word count exceeds `slot.size` (in words): writing past the
+/// mapped range would corrupt neighbouring sub-allocations (UB), so the guard is a hard
+/// assert in every build. `edits.len()` must be `<= MAX_SDF_EDITS`
+/// (debug-asserted inside `encode_edit_list` — exceeding the fixed cap is a caller bug;
+/// the gather already clamps).
+///
+/// # Safety
+///
+/// * `slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at
+///   least `slot.size` valid, persistently-mapped bytes. A hand-built `BoundBuffer` with
+///   a dangling / undersized `mapped` violates this.
+/// * `slot` is written on the fenced, dispatcher-solo path proved by the borrowed
+///   `token`, BEFORE the first marcher dispatch reads it. In v1 this is the single
+///   boot-static write, so no in-flight GPU read of a non-empty edit list can be racing
+///   it (the boot seed the marcher last read is the empty list, and no sibling frame
+///   rewrites this shared buffer).
+pub unsafe fn upload_sdf_edit_list(token: &FrameWriteToken, slot: &BoundBuffer, edits: &[SdfEdit]) {
+    // The borrow IS the fence/dispatcher-solo proof (mint-gated) — see `upload_camera_ring`.
+    let _ = token;
+
+    // Hard bound BEFORE the write: the encoder touches the header + the full edit array
+    // (up to `EDITLIST_BUFFER_WORDS` words); an undersized slot would make that write
+    // out-of-bounds. One compare on the single boot-static write.
+    assert!(
+        slot.size as usize >= EDITLIST_BUFFER_WORDS * 4,
+        "edit-list SSBO too small: {} bytes < the {}-byte packed edit-list buffer",
+        slot.size,
+        EDITLIST_BUFFER_WORDS * 4
+    );
+
+    let mapped = slot
+        .mapped
+        .expect("invariant: the edit-list SSBO is host-visible mapped");
+    // SAFETY: per this fn's contract `mapped` targets >= `slot.size` valid mapped
+    // host-coherent bytes, and `slot.size >= EDITLIST_BUFFER_WORDS * 4` is hard-asserted
+    // above, so a `[u32; EDITLIST_BUFFER_WORDS]` view of the mapping is in-bounds and
+    // 4-byte aligned (the RHI allocates SSBOs at >= 16-byte alignment). The mapping is a
+    // distinct sub-allocation, borrowed exclusively for this single write (no other
+    // `&mut` alias exists — the boot-static write is the only writer). `encode_edit_list`
+    // writes only initialized `u32` words.
+    let buf = unsafe {
+        core::slice::from_raw_parts_mut(mapped.as_ptr().cast::<u32>(), EDITLIST_BUFFER_WORDS)
+    };
+    encode_edit_list(buf, edits);
 }
