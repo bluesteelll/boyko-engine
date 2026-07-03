@@ -674,6 +674,10 @@ float punctual_atlas_visibility(uint base, float3 P, float3 n, float nol) {
     // (`spot_demo_view_proj` basis: right = norm(cross(up_hint, fwd)), up = cross(fwd, right), up_hint
     // = +Y except +Z for a ±Y axis). The depth pass projects `ndc.x = right.d / fwd.d`,
     // `ndc.y = -(up.d) / fwd.d`, so `uvc / ma` reproduces NDC EXACTLY (`fwd.d == ma` on each face).
+    // NOTE: this hand-coded reconstruction DROPS the perspective `f = cot(FOV/2)` factor, valid ONLY
+    // because cube faces are 90° (`f == 1`). The Rust bake pins that with a compile-time assert on
+    // `POINT_FACE_FOV_Y == π/2` (shadow_atlas.rs); if that FOV ever changes, sample the uploaded
+    // per-face `view_proj` here (like the spot path) instead of this table.
     uint face;
     float ma;
     float2 uvc;

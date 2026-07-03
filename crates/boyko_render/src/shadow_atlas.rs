@@ -115,6 +115,21 @@ const MIN_POINT_FAR: f32 = MIN_SPOT_FAR;
 /// the full sphere of directions around the light (the standard cube-map fit).
 const POINT_FACE_FOV_Y: f32 = core::f32::consts::FRAC_PI_2;
 
+// The resolve's point-cube shadow UV reconstruction (`punctual_atlas_visibility` in
+// `deferred_pbr.hlsl`) is a deliberate 90°-face SPECIALIZATION: it DROPS the perspective
+// `f = cot(FOV/2)` factor (which equals 1 ONLY at a 90° face) and rebuilds each face's UV
+// by hand from the major axis, instead of sampling the uploaded per-face `view_proj` the
+// way the arbitrary-FOV spot path does. That is correct BECAUSE cube faces are square 90°
+// frusta — cheaper (no per-pixel mat-vec) and exact. Pin the precondition: if this FOV ever
+// leaves 90°, `f != 1` and the hand-coded resolve silently drifts, so break the build rather
+// than ship a mis-projected point shadow. (Bit-compare, not `==`, to sidestep
+// `clippy::float_cmp`; the value is defined as `FRAC_PI_2`, so only a deliberate edit fails it.)
+const _: () = assert!(
+    POINT_FACE_FOV_Y.to_bits() == core::f32::consts::FRAC_PI_2.to_bits(),
+    "punctual_atlas_visibility (deferred_pbr.hlsl) assumes 90° cube faces (f = 1); \
+     update the resolve's hand-coded UV reconstruction if POINT_FACE_FOV_Y changes",
+);
+
 // A point's slot base `b` is packed into the 5-bit atlas-slot field, so the maximum base (the
 // last layer a point can start at, `M_SLOTS - POINT_FACE_COUNT`) MUST fit in `[0, ATLAS_SLOT_MASK)`
 // and stay distinct from `SLOT_NONE`. `16 - 6 == 10 < 31` — proven at compile time.
