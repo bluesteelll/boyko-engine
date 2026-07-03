@@ -76,7 +76,7 @@ use boyko_rhi_vulkan::rhi_impl::{
 };
 use boyko_rhi_vulkan::texture::{MAX_TEXTURE_LAYERS, VulkanTexture};
 use boyko_rhi_vulkan::ffi::{
-    VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VkExtent2D,
+    VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VkExtent2D,
 };
 use boyko_rhi_vulkan::swapchain::{
     BrickActivation, CsmDepthActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
@@ -1589,33 +1589,51 @@ const BRICK_ON_BMP: &str = r"C:\Users\flint\AppData\Local\Temp\brick_on.bmp";
 /// The fixed dump path for the brick-OFF (analytic marcher) frame.
 const BRICK_OFF_BMP: &str = r"C:\Users\flint\AppData\Local\Temp\brick_off.bmp";
 
-#[test]
-fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite() {
-    // Open the window first — the surface borrows its HWND/HINSTANCE and must be
-    // destroyed before it.
-    let mut window = match Window::open("boyko_rhi_vulkan gbuffer window", WIDTH, HEIGHT) {
+/// One booted windowed-present context, handed to a [`with_windowed_present`] body.
+/// `window`/`ctx`/`surface` are BORROWED from `with_windowed_present`'s own stack frame
+/// (which outlives the `body(..)` call and drops them in reverse-decl order — surface →
+/// ctx → window — at its frame end, matching the former inline teardown tail). `swapchain`
+/// and `renderer` are MOVED INTO the body so their `drop(..)` stays a real drop at its
+/// original point: `renderer`'s `Drop` (`device_wait_idle`) fires before the body's
+/// resource-destroy block, exactly as in the former inline code.
+struct BootPresent<'a, 'ctx> {
+    window: &'a mut Window,
+    ctx: &'ctx VulkanContext,
+    surface: &'a Surface<'ctx>,
+    swapchain: Swapchain<'ctx>,
+    renderer: Renderer<'ctx>,
+    is_bgra: bool,
+    swap_color_format: Format,
+}
+
+/// Boot the shared windowed-present topology (window + context + surface + swapchain +
+/// renderer + swapchain-format detection) and run `body` against it. Any boot/format
+/// failure prints a `SKIP {label}: …` line and returns WITHOUT calling `body` — the
+/// pre-existing graceful-skip contract for a machine with no windowed device.
+///
+/// This is the single source of the prologue formerly inlined into every windowed golden
+/// entry point. It is a strict superset of those prologues: the device-name / swapchain
+/// diagnostics and the `image_count() >= 1` assert are stdout/soundness only and never
+/// influence a rendered byte, so every caller's golden output is unchanged.
+fn with_windowed_present(title: &str, label: &str, body: impl FnOnce(BootPresent<'_, '_>)) {
+    let mut window = match Window::open(title, WIDTH, HEIGHT) {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("SKIP windowed_gbuffer_present: cannot open a window ({e:?})");
+            eprintln!("SKIP {label}: cannot open a window ({e:?})");
             return;
         }
     };
-
-    let ctx = match VulkanContext::boot(InstanceConfig {
-        enable_validation: true,
-        windowed: true,
-    }) {
+    let ctx = match VulkanContext::boot(InstanceConfig { enable_validation: true, windowed: true }) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("SKIP windowed_gbuffer_present: windowed Vulkan unavailable ({e:?})");
+            eprintln!("SKIP {label}: windowed Vulkan unavailable ({e:?})");
             return;
         }
     };
-    println!("Vulkan device (windowed, validation on): {}", ctx.device_name());
-    // Validation is the soundness oracle, NOT a render-output dependency: a context
-    // booted with `BOYKO_DISABLE_VALIDATION` (the layer DLL crashes the MinGW
-    // process on this box) still drives the pixel gate. The `state.total() == 0`
-    // oracle below self-gates on `validation_enabled()`.
+    println!("Vulkan device (windowed): {}", ctx.device_name());
+    // Validation is the soundness oracle, NOT a render-output dependency: a context booted
+    // with `BOYKO_DISABLE_VALIDATION` (the layer DLL crashes the MinGW process on this box)
+    // still drives the pixel gate.
     if !ctx.validation_enabled() {
         eprintln!("NOTE: validation disabled (BOYKO_DISABLE_VALIDATION) — pixel gate still runs");
     }
@@ -1625,20 +1643,20 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         "a booted context must support STORAGE_IMAGE on the G-buffer format"
     );
 
-    // SAFETY: `window` outlives the surface (dropped after it below); its
-    // HWND/HINSTANCE are live for the surface's lifetime.
+    // SAFETY: `window` outlives the surface — both live on this stack frame and the surface is
+    // dropped when this function returns, before `window`; its HWND/HINSTANCE stay live for the
+    // surface's whole lifetime.
     let surface = match unsafe { Surface::new(&ctx, window.hinstance(), window.hwnd()) } {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("SKIP windowed_gbuffer_present: surface creation failed ({e:?})");
+            eprintln!("SKIP {label}: surface creation failed ({e:?})");
             return;
         }
     };
-
-    let mut swapchain = match Swapchain::new(&ctx, &surface, window.width(), window.height()) {
+    let swapchain = match Swapchain::new(&ctx, &surface, window.width(), window.height()) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("SKIP windowed_gbuffer_present: swapchain creation failed ({e:?})");
+            eprintln!("SKIP {label}: swapchain creation failed ({e:?})");
             return;
         }
     };
@@ -1651,44 +1669,58 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         swapchain.format()
     );
 
-    // The composite present-blits 1:1 in the swapchain image's TOP-LEFT COMPOSITE_W×COMPOSITE_H
-    // sub-rect. A WSI clamp WIDER is fine (the rest stays clear); SMALLER in either dimension
-    // clips the composite → a graceful SKIP (the rung-11 handling).
     if swapchain.extent().width < COMPOSITE_W || swapchain.extent().height < COMPOSITE_H {
         eprintln!(
-            "SKIP windowed_gbuffer_present: swapchain extent {}x{} is smaller than the {}x{} \
-             composite, so the top-left 1:1 sub-rect does not fit",
+            "SKIP {label}: swapchain extent {}x{} is smaller than the {COMPOSITE_W}x{COMPOSITE_H} composite",
             swapchain.extent().width,
             swapchain.extent().height,
-            COMPOSITE_W,
-            COMPOSITE_H
         );
         return;
     }
 
     let Some(is_bgra) = swapchain_readback_is_bgra(swapchain.format()) else {
-        eprintln!(
-            "SKIP windowed_gbuffer_present: swapchain format {} (e.g. {VK_FORMAT_B8G8R8A8_SRGB} SRGB) \
-             has no host-decodable UNORM byte order",
-            swapchain.format()
-        );
+        eprintln!("SKIP {label}: swapchain format has no host-decodable UNORM byte order");
         return;
     };
-
-    // The present-blit pipeline declares the swapchain's color format (W2-b).
     let Some(swap_color_format) = (match swapchain.format() {
         f if f == VK_FORMAT_B8G8R8A8_UNORM => Some(Format::B8G8R8A8Unorm),
         f if f == VK_FORMAT_R8G8B8A8_UNORM => Some(Format::R8G8B8A8Unorm),
         _ => None,
     }) else {
-        eprintln!("SKIP windowed_gbuffer_present: swapchain format has no basic-slice Format variant");
+        eprintln!("SKIP {label}: swapchain format has no basic-slice Format variant");
         return;
     };
 
-    let mut renderer =
+    let renderer =
         Renderer::new(&ctx, &surface, &swapchain).expect("renderer (command pool + sync) creation");
 
-    let device: &VulkanContext = &ctx;
+    body(BootPresent {
+        window: &mut window,
+        ctx: &ctx,
+        surface: &surface,
+        swapchain,
+        renderer,
+        is_bgra,
+        swap_color_format,
+    });
+    // window, ctx, surface remain owned here and drop at this function's frame end in
+    // reverse-decl order (surface → ctx → window), matching the former inline teardown tail.
+}
+
+#[test]
+fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite() {
+    with_windowed_present(
+        "boyko_rhi_vulkan gbuffer window",
+        "windowed_gbuffer_present",
+        body_windowed_gbuffer_composite,
+    );
+}
+
+fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
+    let BootPresent { window, ctx, surface, mut swapchain, mut renderer, is_bgra, swap_color_format } =
+        bp;
+
+    let device: &VulkanContext = ctx;
     let sdf = sphere_scene();
 
     // --- Pick the three discriminator texels host-side, BEFORE any GPU run. ---
@@ -1773,7 +1805,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
     // the first present. The scene is static (the orbit moves only the camera, which is NOT in the
     // field), so no per-frame rebake is needed — a one-time startup bake suffices (an edit loop would
     // call `rebake_dirty_all` on the authority's `gen` change; there is none here).
-    let clipmap = BrickClipmap::create(&ctx, &field, [0.0, 0.0, 0.0])
+    let clipmap = BrickClipmap::create(ctx, &field, [0.0, 0.0, 0.0])
         .expect("M4 brick clip-map (windowed activation) — create + bake every level + upload");
 
     // Level 0's empty-skip grid geometry (the marcher's `lvl == 0` arm indexes binding 9 with it).
@@ -2377,7 +2409,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         // composite extent; `staging` is host-visible and ≥ one swapchain image in bytes.
         let presented = unsafe {
             renderer.render_gbuffer_frame(
-                token, &ctx, &surface, &mut swapchain, &scene, &mut frame,
+                token, ctx, surface, &mut swapchain, &scene, &mut frame,
                 window.width(), window.height(), clear, present_extent, Some(&staging),
             )
         }
@@ -2400,7 +2432,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
             // SAFETY: same contract; no readback requested on the drain frames.
             let _ = unsafe {
                 renderer.render_gbuffer_frame(
-                    token, &ctx, &surface, &mut swapchain, &scene, &mut frame,
+                    token, ctx, surface, &mut swapchain, &scene, &mut frame,
                     window.width(), window.height(), clear, present_extent, None,
                 )
             }
@@ -2514,8 +2546,8 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         let presented = unsafe {
             renderer.render_gbuffer_frame(
                 token,
-                &ctx,
-                &surface,
+                ctx,
+                surface,
                 &mut swapchain,
                 &scene,
                 &mut frame,
@@ -2609,10 +2641,10 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
     // submission references these resources; `ctx` is still alive; each is destroyed
     // exactly once, in reverse dependency order.
     unsafe {
-        frame.destroy(&ctx);
+        frame.destroy(ctx);
         RhiDevice::destroy_buffer(device, staging);
         // CSM Increment 1b: the cascade trio + depth pipeline.
-        csm.destroy(&ctx);
+        csm.destroy(ctx);
         RhiDevice::destroy_graphics_pipeline(device, present_pipeline);
         RhiDevice::destroy_bind_group_layout(device, present_layout);
         RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
@@ -2631,7 +2663,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         // The brick clip-map (every level's atlas image + sampler + pointer-grid SSBO). The renderer
         // was dropped above (waits idle), so no submission still samples it; `ctx` is alive; the
         // by-value `destroy` moves each level's resources out once.
-        clipmap.destroy(&ctx);
+        clipmap.destroy(ctx);
         RhiDevice::destroy_buffer(device, light_staging);
         RhiDevice::destroy_buffer(device, light_table);
         RhiDevice::destroy_buffer(device, material_table);
@@ -2641,9 +2673,7 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
         RhiDevice::destroy_buffer(device, edit_list);
     }
     drop(swapchain);
-    drop(surface);
-    drop(ctx);
-    drop(window);
+    // surface / ctx / window are owned by `with_windowed_present` and dropped in-order at its frame end.
 }
 
 /// **Render P0 GPU gate — the windowed EMPTY-SKIP-ONLY coarse cull is LIT-TRANSPARENT.**
@@ -2681,81 +2711,18 @@ fn windowed_gbuffer_composite_present_is_validation_clean_and_renders_composite(
 #[test]
 #[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU"]
 fn p0_windowed_coarse_cull_matches_uncull() {
-    let mut window = match Window::open("boyko_rhi_vulkan P0 coarse-cull window", WIDTH, HEIGHT) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("SKIP p0_windowed_coarse_cull: cannot open a window ({e:?})");
-            return;
-        }
-    };
-
-    let ctx = match VulkanContext::boot(InstanceConfig {
-        enable_validation: true,
-        windowed: true,
-    }) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("SKIP p0_windowed_coarse_cull: windowed Vulkan unavailable ({e:?})");
-            return;
-        }
-    };
-    // Validation is the soundness oracle, NOT a render-output dependency: a context
-    // booted with `BOYKO_DISABLE_VALIDATION` (the layer DLL crashes the MinGW
-    // process on this box) still drives the pixel gate. The `state.total() == 0`
-    // oracle below self-gates on `validation_enabled()`.
-    if !ctx.validation_enabled() {
-        eprintln!("NOTE: validation disabled (BOYKO_DISABLE_VALIDATION) — pixel gate still runs");
-    }
-    let caps = ctx.device_caps();
-    assert!(
-        caps.gbuffer_storage_format_ok,
-        "a booted context must support STORAGE_IMAGE on the G-buffer format"
+    with_windowed_present(
+        "boyko_rhi_vulkan P0 coarse-cull window",
+        "p0_windowed_coarse_cull",
+        body_p0_coarse_cull,
     );
+}
 
-    // SAFETY: `window` outlives the surface (dropped after it below); its HWND/HINSTANCE are live
-    // for the surface's lifetime.
-    let surface = match unsafe { Surface::new(&ctx, window.hinstance(), window.hwnd()) } {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("SKIP p0_windowed_coarse_cull: surface creation failed ({e:?})");
-            return;
-        }
-    };
-    let mut swapchain = match Swapchain::new(&ctx, &surface, window.width(), window.height()) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("SKIP p0_windowed_coarse_cull: swapchain creation failed ({e:?})");
-            return;
-        }
-    };
+fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
+    let BootPresent { window, ctx, surface, mut swapchain, mut renderer, is_bgra, swap_color_format } =
+        bp;
 
-    if swapchain.extent().width < COMPOSITE_W || swapchain.extent().height < COMPOSITE_H {
-        eprintln!(
-            "SKIP p0_windowed_coarse_cull: swapchain extent {}x{} is smaller than the {}x{} composite",
-            swapchain.extent().width,
-            swapchain.extent().height,
-            COMPOSITE_W,
-            COMPOSITE_H
-        );
-        return;
-    }
-
-    let Some(is_bgra) = swapchain_readback_is_bgra(swapchain.format()) else {
-        eprintln!("SKIP p0_windowed_coarse_cull: swapchain format has no host-decodable UNORM byte order");
-        return;
-    };
-    let Some(swap_color_format) = (match swapchain.format() {
-        f if f == VK_FORMAT_B8G8R8A8_UNORM => Some(Format::B8G8R8A8Unorm),
-        f if f == VK_FORMAT_R8G8B8A8_UNORM => Some(Format::R8G8B8A8Unorm),
-        _ => None,
-    }) else {
-        eprintln!("SKIP p0_windowed_coarse_cull: swapchain format has no basic-slice Format variant");
-        return;
-    };
-
-    let mut renderer =
-        Renderer::new(&ctx, &surface, &swapchain).expect("renderer (command pool + sync) creation");
-    let device: &VulkanContext = &ctx;
+    let device: &VulkanContext = ctx;
     let sdf = sphere_scene();
 
     // --- The edit-list SSBO (binding 0), host-seeded ONCE. ---
@@ -2853,7 +2820,7 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         f.bump_gen();
         f
     };
-    let clipmap = BrickClipmap::create(&ctx, &field, [0.0, 0.0, 0.0])
+    let clipmap = BrickClipmap::create(ctx, &field, [0.0, 0.0, 0.0])
         .expect("brick clip-map (P0 cull scene) — create + bake + upload");
 
     // --- The Lighting-L0 light table SSBO (resolve binding 6) + its staging source. ---
@@ -3266,7 +3233,7 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         // the composite extent; `staging` is host-visible and ≥ one swapchain image in bytes.
         let presented = unsafe {
             renderer.render_gbuffer_frame(
-                token, &ctx, &surface, &mut swapchain, &scene, &mut frame,
+                token, ctx, surface, &mut swapchain, &scene, &mut frame,
                 window.width(), window.height(), clear, present_extent, Some(&staging),
             )
         }
@@ -3288,7 +3255,7 @@ fn p0_windowed_coarse_cull_matches_uncull() {
             // SAFETY: same contract; no readback requested on the drain frames.
             let _ = unsafe {
                 renderer.render_gbuffer_frame(
-                    token, &ctx, &surface, &mut swapchain, &scene, &mut frame,
+                    token, ctx, surface, &mut swapchain, &scene, &mut frame,
                     window.width(), window.height(), clear, present_extent, None,
                 )
             }
@@ -3378,10 +3345,10 @@ fn p0_windowed_coarse_cull_matches_uncull() {
     // references these resources; `ctx` is still alive; each is destroyed exactly once, in reverse
     // dependency order.
     unsafe {
-        frame.destroy(&ctx);
+        frame.destroy(ctx);
         RhiDevice::destroy_buffer(device, staging);
         // CSM Increment 1b: the cascade trio + depth pipeline.
-        csm.destroy(&ctx);
+        csm.destroy(ctx);
         RhiDevice::destroy_graphics_pipeline(device, present_pipeline);
         RhiDevice::destroy_bind_group_layout(device, present_layout);
         RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
@@ -3398,7 +3365,7 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         RhiDevice::destroy_sampler(device, depth_sampler);
         RhiDevice::destroy_buffer(device, vertex_buffer);
         RhiDevice::destroy_buffer(device, tiles_buffer);
-        clipmap.destroy(&ctx);
+        clipmap.destroy(ctx);
         RhiDevice::destroy_buffer(device, light_staging);
         RhiDevice::destroy_buffer(device, light_table);
         RhiDevice::destroy_buffer(device, material_table);
@@ -3408,9 +3375,7 @@ fn p0_windowed_coarse_cull_matches_uncull() {
         RhiDevice::destroy_buffer(device, edit_list);
     }
     drop(swapchain);
-    drop(surface);
-    drop(ctx);
-    drop(window);
+    // surface / ctx / window are owned by `with_windowed_present` and dropped in-order at its frame end.
 }
 
 // ============================================================================
@@ -7414,77 +7379,16 @@ fn engine_mdf_shadow_512_screenshot_dump() {
 /// supplies the variable scene (SDF edits, camera, light table, raster mesh + MVP). SSAO is ON (the
 /// `cfg` builder arms `ssao_mode == 1`; `scene.ssao = Some(..)` records the pass that writes it).
 fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, interactive: bool) {
-    let mut window = match Window::open(window_title, WIDTH, HEIGHT) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("SKIP engine_showcase_512: cannot open a window ({e:?})");
-            return;
-        }
-    };
+    with_windowed_present(window_title, "engine_showcase_512", |bp| {
+        run_showcase_body(bp, bmp_path, cfg, interactive)
+    });
+}
 
-    let ctx = match VulkanContext::boot(InstanceConfig {
-        enable_validation: true,
-        windowed: true,
-    }) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("SKIP engine_showcase_512: windowed Vulkan unavailable ({e:?})");
-            return;
-        }
-    };
-    if !ctx.validation_enabled() {
-        eprintln!("NOTE: validation disabled (BOYKO_DISABLE_VALIDATION) — showcase dump still runs");
-    }
-    let caps = ctx.device_caps();
-    assert!(
-        caps.gbuffer_storage_format_ok,
-        "a booted context must support STORAGE_IMAGE on the G-buffer format"
-    );
+fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfig, interactive: bool) {
+    let BootPresent { window, ctx, surface, mut swapchain, mut renderer, is_bgra, swap_color_format } =
+        bp;
 
-    // SAFETY: `window` outlives the surface (dropped after it below); its HWND/HINSTANCE are
-    // live for the surface's lifetime.
-    let surface = match unsafe { Surface::new(&ctx, window.hinstance(), window.hwnd()) } {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("SKIP engine_showcase_512: surface creation failed ({e:?})");
-            return;
-        }
-    };
-    let mut swapchain = match Swapchain::new(&ctx, &surface, window.width(), window.height()) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("SKIP engine_showcase_512: swapchain creation failed ({e:?})");
-            return;
-        }
-    };
-
-    if swapchain.extent().width < COMPOSITE_W || swapchain.extent().height < COMPOSITE_H {
-        eprintln!(
-            "SKIP engine_showcase_512: swapchain extent {}x{} is smaller than the {}x{} composite",
-            swapchain.extent().width,
-            swapchain.extent().height,
-            COMPOSITE_W,
-            COMPOSITE_H
-        );
-        return;
-    }
-
-    let Some(is_bgra) = swapchain_readback_is_bgra(swapchain.format()) else {
-        eprintln!("SKIP engine_showcase_512: swapchain format has no host-decodable UNORM byte order");
-        return;
-    };
-    let Some(swap_color_format) = (match swapchain.format() {
-        f if f == VK_FORMAT_B8G8R8A8_UNORM => Some(Format::B8G8R8A8Unorm),
-        f if f == VK_FORMAT_R8G8B8A8_UNORM => Some(Format::R8G8B8A8Unorm),
-        _ => None,
-    }) else {
-        eprintln!("SKIP engine_showcase_512: swapchain format has no basic-slice Format variant");
-        return;
-    };
-
-    let mut renderer =
-        Renderer::new(&ctx, &surface, &swapchain).expect("renderer (command pool + sync) creation");
-    let device: &VulkanContext = &ctx;
+    let device: &VulkanContext = ctx;
     let sdf = &cfg.sdf;
     // M2: the instanced draw's instance count (captured before `cfg.vertices` is moved below).
     // `0` when there is no instanced mesh (the legacy path leaves `scene.mesh_draw == None`).
@@ -7522,7 +7426,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
         // A voxel fine enough that the P2 lower-bound budget holds (`for_mesh` asserts it). The
         // demo torus tube radius (~0.18) is well-resolved at this scale.
         let field = MeshSdfField::for_mesh(&mesh, 0.04);
-        MeshSdfTexture::create(&ctx, &mesh, &field).expect("MDF mesh-SDF texture create + upload")
+        MeshSdfTexture::create(ctx, &mesh, &field).expect("MDF mesh-SDF texture create + upload")
     });
     let mesh_sdf_enabled = mesh_sdf_texture.is_some();
 
@@ -7629,7 +7533,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
         f.bump_gen();
         f
     };
-    let clipmap = BrickClipmap::create(&ctx, &field, [0.0, 0.0, 0.0])
+    let clipmap = BrickClipmap::create(ctx, &field, [0.0, 0.0, 0.0])
         .expect("brick clip-map (showcase scene) — create + bake + upload");
 
     // --- The Lighting light table SSBO (resolve binding 6): the SHOWCASE multi-light shadow
@@ -8296,11 +8200,11 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
             // Shadow-lag diagnostic: in-motion capture vs settled capture at the identical pose
             // along the owner's exact reported walk (see `run_shadow_lag`).
             run_shadow_lag(
-                &ctx,
-                &surface,
+                ctx,
+                surface,
                 &mut swapchain,
                 &mut renderer,
-                &mut window,
+                window,
                 &mut scene,
                 &mut frame,
                 &staging,
@@ -8311,11 +8215,11 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
             // the center-pixel shadow state vs view_z / the CSM cascade select (the owner's
             // "a shadow appears on the face as I approach" report). See `run_shadow_dolly`.
             run_shadow_dolly(
-                &ctx,
-                &surface,
+                ctx,
+                surface,
                 &mut swapchain,
                 &mut renderer,
-                &mut window,
+                window,
                 &mut scene,
                 &mut frame,
                 &staging,
@@ -8323,11 +8227,11 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
             );
         } else if std::env::var_os("BOYKO_SHADOW_AB").is_some() {
             run_shadow_motion_ab(
-                &ctx,
-                &surface,
+                ctx,
+                surface,
                 &mut swapchain,
                 &mut renderer,
-                &mut window,
+                window,
                 &mut scene,
                 &mut frame,
                 &staging,
@@ -8343,16 +8247,16 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
                 .as_ref()
                 .expect("BOYKO_INTERP_SMOKE needs an instanced scene (the viewer_config supplies one)");
             run_interp_smoke(
-                &ctx, &surface, &mut swapchain, &mut renderer, &mut window, &mut scene, &mut frame,
+                ctx, surface, &mut swapchain, &mut renderer, window, &mut scene, &mut frame,
                 &staging, is_bgra, interp, &base_pairs,
             );
         } else {
             run_interactive_viewer(
-                &ctx,
-                &surface,
+                ctx,
+                surface,
                 &mut swapchain,
                 &mut renderer,
-                &mut window,
+                window,
                 &mut scene,
                 &mut frame,
                 interp_gpu.as_ref(),
@@ -8371,10 +8275,10 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
             // Pillar B B3: tear down the interp pipeline + FIF-ringed pair/draw SSBOs + bind groups
             // FIRST (they reference no other resource here; the renderer drop above idled the device).
             if let Some(interp) = interp_gpu {
-                interp.destroy(&ctx);
+                interp.destroy(ctx);
             }
-            frame.destroy(&ctx);
-            csm.destroy(&ctx);
+            frame.destroy(ctx);
+            csm.destroy(ctx);
             RhiDevice::destroy_graphics_pipeline(device, present_pipeline);
             RhiDevice::destroy_bind_group_layout(device, present_layout);
             RhiDevice::destroy_compute_pipeline(device, ssao_pipeline);
@@ -8401,9 +8305,9 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
             RhiDevice::destroy_buffer(device, vertex_buffer);
             RhiDevice::destroy_buffer(device, tiles_buffer);
             if let Some(t) = mesh_sdf_texture {
-                t.destroy(&ctx);
+                t.destroy(ctx);
             }
-            clipmap.destroy(&ctx);
+            clipmap.destroy(ctx);
             RhiDevice::destroy_buffer(device, light_staging);
             RhiDevice::destroy_buffer(device, light_table);
             RhiDevice::destroy_buffer(device, material_table);
@@ -8413,9 +8317,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
             RhiDevice::destroy_buffer(device, edit_list);
         }
         drop(swapchain);
-        drop(surface);
-        drop(ctx);
-        drop(window);
+        // surface / ctx / window are owned by `with_windowed_present` and dropped in-order at its frame end.
         return;
     }
 
@@ -8444,7 +8346,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
             // image in bytes.
             let presented = unsafe {
                 renderer.render_gbuffer_frame(
-                    token, &ctx, &surface, &mut swapchain, &scene, &mut frame,
+                    token, ctx, surface, &mut swapchain, &scene, &mut frame,
                     window.width(), window.height(), clear, present_extent, Some(&staging),
                 )
             }
@@ -8465,7 +8367,7 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
                     // SAFETY: same contract; no readback requested on the drain frames.
                     let _ = unsafe {
                         renderer.render_gbuffer_frame(
-                            token, &ctx, &surface, &mut swapchain, &scene, &mut frame,
+                            token, ctx, surface, &mut swapchain, &scene, &mut frame,
                             window.width(), window.height(), clear, present_extent, None,
                         )
                     }
@@ -8535,10 +8437,10 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
     // references these resources; `ctx` is still alive; each is destroyed exactly once, in reverse
     // dependency order.
     unsafe {
-        frame.destroy(&ctx);
+        frame.destroy(ctx);
         RhiDevice::destroy_buffer(device, staging);
         // CSM Increment 1b: the cascade trio + depth pipeline.
-        csm.destroy(&ctx);
+        csm.destroy(ctx);
         RhiDevice::destroy_graphics_pipeline(device, present_pipeline);
         RhiDevice::destroy_bind_group_layout(device, present_layout);
         RhiDevice::destroy_compute_pipeline(device, ssao_pipeline);
@@ -8572,9 +8474,9 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
         // MDF Stage-2c: destroy the mesh-SDF texture (if the showcase created one). The device is
         // idle (the renderer's Drop waited), so no submission still samples it.
         if let Some(t) = mesh_sdf_texture {
-            t.destroy(&ctx);
+            t.destroy(ctx);
         }
-        clipmap.destroy(&ctx);
+        clipmap.destroy(ctx);
         RhiDevice::destroy_buffer(device, light_staging);
         RhiDevice::destroy_buffer(device, light_table);
         RhiDevice::destroy_buffer(device, material_table);
@@ -8584,7 +8486,5 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
         RhiDevice::destroy_buffer(device, edit_list);
     }
     drop(swapchain);
-    drop(surface);
-    drop(ctx);
-    drop(window);
+    // surface / ctx / window are owned by `with_windowed_present` and dropped in-order at its frame end.
 }
