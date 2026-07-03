@@ -1,0 +1,19 @@
+error[E0080]: evaluation panicked: dense_iter cannot honor an enable term — use iter_mut()
+  --> tests/enable_filter_compile_fail/dense_iter_mut_enable_rejected.rs:35:15
+   |
+35 | const _: () = assert_dense_iter_no_enable::<&mut Dense, Enabled<Tag>>();
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `assert_dense_iter_no_enable::<&mut Dense, Enabled<Tag>>`
+  --> $RUST/core/src/panic.rs
+   |
+   |           $crate::panicking::panic_fmt($crate::const_format_args!($($t)+));
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the failure occurred here
+   |
+  ::: src/ecs/core/iters/query/query.rs
+   |
+   | /     assert!(
+   | |         !F::CONTAINS_ENABLE_TERM,
+   | |         "dense_iter cannot honor an enable term — use iter_mut()"
+   | |     );
+   | |_____- in this macro invocation

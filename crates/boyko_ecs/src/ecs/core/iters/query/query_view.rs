@@ -469,6 +469,11 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         D: DenseQueryData + ReadOnlyQueryData,
     {
         const { assert!(D::HAS_DENSE, "QueryView::dense_iter requires a dense `D` (storage = \"dense\")") };
+        // Dense-enable plan D0 — reject an enable-bearing `F` (the dense fast path
+        // is archetype-agnostic and cannot honor a per-row enable term). Use
+        // `iter()` for `QueryView<&Dense, Enabled<Tag>>`. See
+        // [`assert_dense_iter_no_enable`](super::query::assert_dense_iter_no_enable).
+        const { super::query::assert_dense_iter_no_enable::<D, F>() };
         let store = self.resolve_dense_store();
         // SAFETY (D3): `store` is NULL or the live `DenseStore` for `D`'s
         //   component, valid for `'w`; read-only cursor ⇒ the `&self` borrow
@@ -484,6 +489,10 @@ impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
         D: DenseQueryData,
     {
         const { assert!(D::HAS_DENSE, "QueryView::dense_iter_mut requires a dense `D` (storage = \"dense\")") };
+        // Dense-enable plan D0 — reject an enable-bearing `F` (the `&mut` leak the
+        // fix closes). Use `iter_mut()` for `QueryView<&mut Dense, Enabled<Tag>>`.
+        // See [`assert_dense_iter_no_enable`](super::query::assert_dense_iter_no_enable).
+        const { super::query::assert_dense_iter_no_enable::<D, F>() };
         let store = self.resolve_dense_store();
         // SAFETY (D3): `store` is NULL or the live `DenseStore` for `D`'s
         //   component; the `&mut self` borrow gates cursor uniqueness; distinct

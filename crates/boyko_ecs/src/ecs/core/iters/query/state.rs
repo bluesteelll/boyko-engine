@@ -133,6 +133,24 @@ impl<D: QueryData, F: QueryFilter> QueryDataState<D, F> {
     /// const-folds OUT).
     const HAS_DENSE_INCLUDE: bool = D::HAS_DENSE_INCLUDE || F::HAS_DENSE_INCLUDE;
 
+    /// Dense-enable plan D1 — `true` iff `(D, F)` combines a dense INCLUDE term
+    /// with an enable term (`Enabled`/`Disabled`). This is the shape the
+    /// zero-row "compile-but-lie" bug lived in: a dense-seeded query
+    /// (`HAS_DENSE_INCLUDE`) that also carries a per-row enable predicate
+    /// (`HAS_ENABLE_TERM`).
+    ///
+    /// It is DISJOINT from [`Self::IS_CANDIDATE_SEEDED`]: the candidate seed
+    /// requires `!HAS_DATA_COMPONENT`, but a `&Dense`/`&mut Dense` include has
+    /// `HAS_DATA_COMPONENT = true`, and a sole `Query<(), Enabled<Tag>>` carries
+    /// no dense include. For every non-dense OR non-enable `(D, F)` this const
+    /// folds to `false`, so the D2/D3 recull branches are dead-code-eliminated —
+    /// the 0%-gate stays byte-identical (const-asserted in `shape_consts_classification`
+    /// and the D6 dense-enable suite). Whether the query is REALLY dense-seeded
+    /// (vs table-seeded) additionally requires `is_empty_include()` at runtime
+    /// (see [`Self::use_dense_seed`]) — this const is the compile-time upper
+    /// bound of the dense-enable shape family (D6 shape table).
+    const IS_DENSE_ENABLE: bool = Self::HAS_DENSE_INCLUDE && Self::HAS_ENABLE_TERM;
+
     /// The shape-assert body (amendment A3 / Step 7a). Called from BOTH the
     /// codegen-time trigger (`new`'s inline `const {}` block — fires under
     /// `build` / `test` / any codegen) AND the check-time trigger
@@ -260,6 +278,25 @@ impl<D: QueryData, F: QueryFilter> QueryDataState<D, F> {
             // / dense `filter_fetch` is the exact membership trim; the seed is a
             // conservative over-approximation (false positives trimmed per-row).
             Self::dense_seed(&data_state, &filter_state, &mut archetype_state, world);
+            // Dense-enable plan D2 — bound the driver to enable-kept archetypes
+            // over the dense-seeded candidate set. Gated by `HAS_ENABLE_TERM` so
+            // a dense-only query (`Query<&Dense, Changed<Dense>>` etc.) never
+            // emits this recull (the 0%-gate): the const folds the branch out and
+            // `culled_ids` stays the empty `Vec` built below. `recull` uses
+            // `F::enable_cull_keeps_archetype`, which encodes the polarity (D4):
+            // `Enabled` tightens to column-bearing archetypes, `Disabled` keeps
+            // all (A1.1 — a no-column dense archetype is all-disabled and must
+            // NOT be dropped). The per-row `filter_fetch` is the exact trim.
+            if const { Self::HAS_ENABLE_TERM } {
+                Self::recull(
+                    archetype_state.matched_ids_pre_terms(),
+                    &filter_state,
+                    world.archetype_master(),
+                    &mut culled_ids,
+                );
+                last_observed_enable_epoch =
+                    world.archetype_master().enable_presence().epoch();
+            }
         } else {
             archetype_state.update_archetypes(world.archetype_master());
             Self::post_filter_matched(
@@ -566,11 +603,68 @@ impl<D: QueryData, F: QueryFilter> QueryDataState<D, F> {
         master: &ArchetypeMaster,
         registry: &crate::ecs::core::component::dense::DenseRegistry,
     ) {
+        // Dense-enable plan D3 — snapshot the pre-reseed dense-generation signals
+        // BEFORE `seed_from_candidates` overwrites them, so the enable recull can
+        // be gated on "did the seeded set actually move?" (below). Two signals:
+        //   * structural generation — a removal / ABA rebuild bumps it (and clears
+        //     the affected presence bits, so the reseed drops the removed ids);
+        //   * matched-id count — a dense-insert into a not-yet-seeded archetype
+        //     delta-adds WITHOUT a structural bump, so it only shows up as a
+        //     length increase.
+        // Together they detect every membership change the reseed can produce.
+        // Emitted ONLY for the enable shape (the `HAS_ENABLE_TERM` gate below
+        // consumes them); a dense-only query const-folds the snapshot out.
+        let pre_struct = self.archetype_state.last_observed_structural_generation();
+        let pre_len = self.archetype_state.matched_ids_pre_terms().len();
+
         let mut candidates =
             crate::ecs::core::iters::archetype_bit_set::ArchetypeBitSet::new();
         <D as QueryData>::dense_include_candidates(&self.data_state, registry, &mut candidates);
         <F as QueryFilter>::dense_include_candidates(&self.filter_state, registry, &mut candidates);
+        // The reseed of `matched_ids` is UNCONDITIONAL (dense inserts, archetype
+        // churn, and removals must always be fresh); only the enable recull below
+        // is gated.
         self.archetype_state.seed_from_candidates(&candidates, master);
+
+        // Dense-enable plan D3 — re-home the positive-term enable recull onto the
+        // dense refresh path (the dense shape bypasses `update()` entirely, so its
+        // epoch-gated recull is unreachable there — the invalidation half of the
+        // fix). Gated by `HAS_ENABLE_TERM` (the 0%-gate: a dense-only query never
+        // emits this block).
+        if const { Self::HAS_ENABLE_TERM } {
+            // The recull GATE (REQUIRED, not optional — critic O1): `dense_update`
+            // runs on EVERY per-frame query resolution, so an unconditional recull
+            // would be a per-frame O(matched archetypes) `enable_cull_keeps_archetype`
+            // scan — a regression vs the table path's epoch-gated warm branch.
+            //   * `dense_generation_changed` — the seeded set grew (a new dense
+            //     archetype, `pre_len != post_len`) OR a structural rebuild
+            //     removed one (`pre_struct != master.structural_generation()`,
+            //     which also covers a same-len removal+add). Either changes the
+            //     cull membership ⇒ recull.
+            //   * `epoch()` moved — `note_column_alloc` (a dense archetype gained
+            //     the tag column for the first time) bumped it (Acquire, Decision 4).
+            //     This term is load-bearing: a first-column alloc bumps NEITHER
+            //     generation, so `dense_generation_changed` alone would miss it.
+            // A pure enable-toggle of an existing row trips NEITHER term (its
+            // archetype membership + column presence are unchanged; the flipped
+            // bit is reflected solely by the per-row `filter_fetch` at iteration),
+            // so the gate correctly skips it.
+            let post_len = self.archetype_state.matched_ids_pre_terms().len();
+            let dense_generation_changed = pre_len != post_len
+                || pre_struct != self.archetype_state.last_observed_structural_generation();
+            let cur_epoch = master.enable_presence().epoch();
+            if dense_generation_changed
+                || cur_epoch != self.enable_cull.last_observed_enable_epoch
+            {
+                Self::recull(
+                    self.archetype_state.matched_ids_pre_terms(),
+                    &self.filter_state,
+                    master,
+                    &mut self.enable_cull.culled_ids,
+                );
+                self.enable_cull.last_observed_enable_epoch = cur_epoch;
+            }
+        }
     }
 
     /// Dense plan D3 — `true` iff `update` should route through the dense-seed
@@ -604,6 +698,27 @@ impl<D: QueryData, F: QueryFilter> QueryDataState<D, F> {
             if const { Self::IS_CANDIDATE_SEEDED } {
                 self.archetype_state.matched_ids_pre_terms()
             } else {
+                // Dense-enable plan D4 — for the IS_DENSE_ENABLE shape `culled_ids`
+                // is now the driver (D2/D3 populate it). Debug-assert the two
+                // invariants the fix rests on (mirroring `qs1_after_cull`):
+                //   1. the driver IS `culled_ids` (not the raw `matched_ids`);
+                //   2. `culled_ids ⊆ matched_ids` — the cull is a strict subset,
+                //      never a desynced superset. Model B never mutates
+                //      `matched_ids`, so a culled id that is NOT in `matched_ids`
+                //      would signal a stranded/stale driver id (the exact desync
+                //      `qs1_after_cull` guards for the table shape).
+                #[cfg(debug_assertions)]
+                if const { Self::IS_DENSE_ENABLE } {
+                    let matched = self.archetype_state.matched_archetypes_bitset();
+                    for id in &self.enable_cull.culled_ids {
+                        debug_assert!(
+                            matched.contains(id.0),
+                            "dense-enable D4: culled driver id {} is not in matched_ids \
+                             (culled_ids ⊄ matched_ids — desynced driver)",
+                            id.0,
+                        );
+                    }
+                }
                 &self.enable_cull.culled_ids
             }
         } else {
@@ -1549,5 +1664,574 @@ mod enable_global_scan {
             2,
             "culled driver set = 2 present-A archetypes ⊂ the 3 matched_ids",
         );
+    }
+}
+
+/// Dense-enable plan (D0–D6) — the dense-INCLUDE × enable-term query support.
+///
+/// The regression witness for the "compile-but-lie" zero-row bug: a query that
+/// combines a **dense-stored** component term (`&Dense` / `&mut Dense`, an empty
+/// table include) with an **enable term** (`Enabled`/`Disabled`). Every fixture
+/// that means to exercise the dense-seed path asserts `state.use_dense_seed() ==
+/// true` (critic W2) — otherwise it silently routes through the `update()` table
+/// recull and leaves D2/D3 unverified.
+///
+/// Fixtures lazy-mint component ids (`register_new::<T>()` + `OnceLock`) and
+/// classify the dense component `StorageKind::Dense` + the tag `StorageKind::Bitset`
+/// at runtime, matching `enable_global_scan`.
+#[cfg(test)]
+mod dense_enable {
+    use std::sync::OnceLock;
+
+    use super::*;
+    use crate::ecs::core::component::component::Component;
+    use crate::ecs::core::component::component_registry::{self, StorageKind};
+    use crate::ecs::core::entity::entity::Entity;
+    use crate::ecs::core::iters::query::data::AnyOf;
+    use crate::ecs::core::iters::query::filter::{Changed, With};
+    use crate::ecs::core::iters::query::filter_enable::{Disabled, Enabled};
+    use crate::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
+
+    // ── Fixtures ─────────────────────────────────────────────────────────────
+
+    /// A dense-stored payload. `STORAGE_IS_DENSE = true` at the TYPE
+    /// level gives `HAS_DENSE_INCLUDE` on the query data; the runtime
+    /// `set_storage_kind(_, Dense)` in `register()` routes its inserts to the
+    /// `DenseStore` (via `partition_dense_components`).
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Dn {
+        v: u32,
+    }
+    impl Component for Dn {
+        const STORAGE_IS_DENSE: bool = true;
+        fn component_id() -> ComponentId {
+            static ID: OnceLock<ComponentId> = OnceLock::new();
+            *ID.get_or_init(|| ComponentId(component_registry::register_new::<Dn>()))
+        }
+    }
+
+    /// A plain TABLE component `B` (the mixed `(&Dn, &B)` / `AnyOf` sibling).
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct B {
+        w: u32,
+    }
+    impl Component for B {
+        fn component_id() -> ComponentId {
+            static ID: OnceLock<ComponentId> = OnceLock::new();
+            *ID.get_or_init(|| ComponentId(component_registry::register_new::<B>()))
+        }
+    }
+
+    /// Bitset enable tag.
+    #[repr(C)]
+    struct Tag;
+    impl Component for Tag {
+        fn component_id() -> ComponentId {
+            static ID: OnceLock<ComponentId> = OnceLock::new();
+            *ID.get_or_init(|| ComponentId(component_registry::register_new::<Tag>()))
+        }
+    }
+
+    /// Classifies `Dn` dense + `Tag` bitset (the derive's runtime effect).
+    /// Idempotent (`set_storage_kind` is a write-once-then-idempotent register).
+    fn register() {
+        component_registry::set_storage_kind(Dn::component_id().0, StorageKind::Dense);
+        component_registry::set_storage_kind(B::component_id().0, StorageKind::Table);
+        component_registry::set_storage_kind(Tag::component_id().0, StorageKind::Bitset);
+    }
+
+    /// Mints a fresh, distinct table marker id (P-sized layout) so callers can
+    /// build genuinely distinct archetypes.
+    fn fresh_marker() -> ComponentId {
+        ComponentId(component_registry::register_new::<Dn>())
+    }
+
+    /// Spawns one entity into `arch`, supplying a `Dn`-sized payload for every id
+    /// in `payload_ids` (which must cover the archetype's table components PLUS
+    /// any dense ids to be routed to the `DenseStore`). Returns the `Entity`.
+    fn spawn(
+        ecs: &mut EcsMaster,
+        arch: ArchetypeId,
+        payload_ids: &[ComponentId],
+        v: u32,
+    ) -> Entity {
+        let d = Dn { v };
+        // SAFETY (test): `d` outlives the borrow; byte view of a `#[repr(C)]` POD.
+        // Every id here is `Dn`-sized (`Dn`/`B`/`fresh_marker`, all registered via
+        // `register_new::<Dn>()`), so one payload fits all.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(&d as *const Dn as *const u8, core::mem::size_of::<Dn>())
+        };
+        let payload: Vec<(ComponentId, &[u8])> =
+            payload_ids.iter().map(|&c| (c, bytes)).collect();
+        ecs.create_entity(arch, &payload).expect("spawn must succeed")
+    }
+
+    /// Collects the `v` values a `Query<&mut Dn, F>` iterates (via the public view
+    /// + `iter_mut` archetype cursor, which enforces the per-row enable bit).
+    fn iter_enabled_vs(ecs: &mut EcsMaster) -> Vec<u32> {
+        let mut view = ecs.query::<&mut Dn, Enabled<Tag>>();
+        let mut got: Vec<u32> = view.iter_mut().map(|d: &mut Dn| d.v).collect();
+        got.sort_unstable();
+        got
+    }
+
+    /// Collects the `v` values a `Query<&mut Dn, Disabled<Tag>>` iterates.
+    fn iter_disabled_vs(ecs: &mut EcsMaster) -> Vec<u32> {
+        let mut view = ecs.query::<&mut Dn, Disabled<Tag>>();
+        let mut got: Vec<u32> = view.iter_mut().map(|d: &mut Dn| d.v).collect();
+        got.sort_unstable();
+        got
+    }
+
+    // ── Test #7: const classification (0%-gate) ──────────────────────────────
+
+    /// `IS_DENSE_ENABLE` is `true` EXACTLY for the dense+enable shape, `false`
+    /// for dense-only, enable-only, and plain queries. `IS_CANDIDATE_SEEDED`
+    /// stays `false` for the dense+enable shape (it is not the sole-enable shape).
+    /// Plain `Query<&P, With<P>>` is unaffected (the 0%-gate const-assert).
+    #[test]
+    fn const_classification() {
+        const {
+            // Dense + enable ⇒ IS_DENSE_ENABLE, and NOT candidate-seeded.
+            assert!(QueryDataState::<&mut Dn, Enabled<Tag>>::IS_DENSE_ENABLE);
+            assert!(QueryDataState::<&mut Dn, Disabled<Tag>>::IS_DENSE_ENABLE);
+            assert!(QueryDataState::<&Dn, Enabled<Tag>>::IS_DENSE_ENABLE);
+            assert!(!QueryDataState::<&mut Dn, Enabled<Tag>>::IS_CANDIDATE_SEEDED);
+            assert!(QueryDataState::<&mut Dn, Enabled<Tag>>::HAS_ENABLE_TERM);
+            assert!(QueryDataState::<&mut Dn, Enabled<Tag>>::HAS_DENSE_INCLUDE);
+
+            // Dense-only ⇒ NOT dense-enable, NOT enable at all.
+            assert!(!QueryDataState::<&mut Dn, Changed<Dn>>::IS_DENSE_ENABLE);
+            assert!(!QueryDataState::<&mut Dn, Changed<Dn>>::HAS_ENABLE_TERM);
+            assert!(QueryDataState::<&mut Dn, ()>::HAS_DENSE_INCLUDE);
+            assert!(!QueryDataState::<&mut Dn, ()>::IS_DENSE_ENABLE);
+
+            // Enable-only (sole) ⇒ NOT dense-enable (no dense include).
+            assert!(!QueryDataState::<(), Enabled<Tag>>::IS_DENSE_ENABLE);
+            assert!(QueryDataState::<(), Enabled<Tag>>::IS_CANDIDATE_SEEDED);
+
+            // Plain query ⇒ untouched (the 0%-gate).
+            assert!(!QueryDataState::<&B, With<B>>::IS_DENSE_ENABLE);
+            assert!(!QueryDataState::<&B, With<B>>::HAS_DENSE_INCLUDE);
+            assert!(!QueryDataState::<&B, With<B>>::HAS_ENABLE_TERM);
+        }
+    }
+
+    // ── Test #1: positive behavioral, Enabled (the zero-row regression) ──────
+
+    /// `Query<&mut Dn, Enabled<Tag>>` over a world with some-enabled /
+    /// all-enabled / all-disabled dense rows yields EXACTLY the enabled dense
+    /// rows. This is the direct witness for the zero-row bug (pre-fix the dense
+    /// seed left `culled_ids` empty ⇒ zero driver archetypes ⇒ zero rows).
+    #[test]
+    fn dense_enable_yields_only_enabled_rows() {
+        register();
+        let mut ecs = EcsMaster::new();
+        // arch1 [Dn-dense]: e0 enabled, e1 disabled (some-enabled).
+        let arch1 = ecs.create_archetype(&[]);
+        let e0 = spawn(&mut ecs, arch1, &[Dn::component_id()], 10);
+        let _e1 = spawn(&mut ecs, arch1, &[Dn::component_id()], 11);
+        // arch2 [Dn, marker]: e2 enabled, e3 enabled (all-enabled).
+        let marker = fresh_marker();
+        let arch2 = ecs.create_archetype(&[marker]);
+        let e2 = spawn(&mut ecs, arch2, &[marker, Dn::component_id()], 20);
+        let e3 = spawn(&mut ecs, arch2, &[marker, Dn::component_id()], 21);
+        // arch3 [Dn, marker2]: e4 disabled, e5 disabled (all-disabled).
+        let marker2 = fresh_marker();
+        let arch3 = ecs.create_archetype(&[marker2]);
+        let _e4 = spawn(&mut ecs, arch3, &[marker2, Dn::component_id()], 30);
+        let _e5 = spawn(&mut ecs, arch3, &[marker2, Dn::component_id()], 31);
+
+        ecs.enable::<Tag>(e0);
+        ecs.enable::<Tag>(e2);
+        ecs.enable::<Tag>(e3);
+
+        // W2: the shape MUST route through the dense-seed path.
+        let state = QueryDataState::<&mut Dn, Enabled<Tag>>::new(&mut ecs);
+        assert!(
+            state.use_dense_seed(),
+            "Query<&mut Dn, Enabled<Tag>> must dense-seed (else D2/D3 unverified)"
+        );
+
+        let got = iter_enabled_vs(&mut ecs);
+        assert_eq!(
+            got,
+            vec![10, 20, 21],
+            "only the enabled dense rows are visited (e1/e4/e5 disabled, excluded)"
+        );
+    }
+
+    // ── Test #2: polarity, Disabled (the A1.1 no-column trap) ────────────────
+
+    /// `Query<&mut Dn, Disabled<Tag>>` yields the disabled dense rows INCLUDING
+    /// rows in dense archetypes that never had the tag column. A no-column dense
+    /// archetype is all-disabled (A1.1), so an up-front presence intersection
+    /// would false-empty this — the reason the fix uses `recull` (which keeps all
+    /// archetypes for the `Disabled` polarity) not an intersection.
+    #[test]
+    fn dense_disabled_includes_no_column_archetypes() {
+        register();
+        let mut ecs = EcsMaster::new();
+        // present [Dn]: gains a Tag column; e_on enabled, e_off disabled.
+        let present = ecs.create_archetype(&[]);
+        let e_on = spawn(&mut ecs, present, &[Dn::component_id()], 1);
+        let _e_off = spawn(&mut ecs, present, &[Dn::component_id()], 2);
+        ecs.enable::<Tag>(e_on);
+        // no_col [Dn, marker]: NEVER gains a Tag column ⇒ every row disabled.
+        let marker = fresh_marker();
+        let no_col = ecs.create_archetype(&[marker]);
+        let _e = spawn(&mut ecs, no_col, &[marker, Dn::component_id()], 42);
+
+        let state = QueryDataState::<&mut Dn, Disabled<Tag>>::new(&mut ecs);
+        assert!(state.use_dense_seed(), "Disabled dense shape must dense-seed");
+
+        let got = iter_disabled_vs(&mut ecs);
+        assert_eq!(
+            got,
+            vec![2, 42],
+            "disabled rows include the no-Tag-column archetype (42) — A1.1 trap"
+        );
+    }
+
+    // ── Test #3: per-row toggle (exact path, NOT recull) ─────────────────────
+
+    /// In a column-present dense archetype, disable then re-enable a row → it
+    /// leaves then re-enters the result across `update`s. `contains` is
+    /// column-presence, so the archetype stays in `culled_ids` throughout and
+    /// ONLY `filter_fetch` changes. A regression that dropped per-row enforcement
+    /// (leaving only the coarse archetype cull) would keep the disabled row
+    /// visible and fail here.
+    #[test]
+    fn dense_per_row_toggle_exact_trim() {
+        register();
+        let mut ecs = EcsMaster::new();
+        let arch = ecs.create_archetype(&[]);
+        let e0 = spawn(&mut ecs, arch, &[Dn::component_id()], 7);
+        let e1 = spawn(&mut ecs, arch, &[Dn::component_id()], 8);
+        ecs.enable::<Tag>(e0);
+        ecs.enable::<Tag>(e1);
+
+        assert_eq!(iter_enabled_vs(&mut ecs), vec![7, 8], "both enabled initially");
+
+        // Disable e1 (a pure per-row toggle — no column-alloc, no structural churn).
+        ecs.disable::<Tag>(e1);
+        assert_eq!(
+            iter_enabled_vs(&mut ecs),
+            vec![7],
+            "disabled row leaves the result (per-row filter_fetch)"
+        );
+
+        // Re-enable e1.
+        ecs.enable::<Tag>(e1);
+        assert_eq!(
+            iter_enabled_vs(&mut ecs),
+            vec![7, 8],
+            "re-enabled row re-enters (per-row exact trim over the dense-seeded driver)"
+        );
+    }
+
+    // ── Test #4: re-seed on dense-insert (the dense_generation_changed gate) ──
+
+    /// Insert the dense component into a NEW archetype that has the tag → it is
+    /// picked up on the next resolve. Exercises `dense_update`'s unconditional
+    /// reseed of `matched_ids` + the gated recull (the `dense_generation_changed`
+    /// term: the seeded set grew).
+    #[test]
+    fn dense_reseed_on_new_archetype() {
+        register();
+        let mut ecs = EcsMaster::new();
+        // Base present-Tag dense archetype so the first resolve is non-empty.
+        let base = ecs.create_archetype(&[]);
+        let eb = spawn(&mut ecs, base, &[Dn::component_id()], 1);
+        ecs.enable::<Tag>(eb);
+        assert_eq!(iter_enabled_vs(&mut ecs), vec![1], "base enabled row seen");
+
+        // A brand-new dense archetype with an enabled row (distinct signature).
+        let marker = fresh_marker();
+        let y = ecs.create_archetype(&[marker]);
+        let ey = spawn(&mut ecs, y, &[marker, Dn::component_id()], 2);
+        ecs.enable::<Tag>(ey);
+
+        assert_eq!(
+            iter_enabled_vs(&mut ecs),
+            vec![1, 2],
+            "dense_update reseed + recull surfaces the new archetype's enabled row"
+        );
+    }
+
+    // ── Test #5: column-alloc epoch (the D3 recull invalidation) ─────────────
+
+    /// A dense archetype gains the Tag column for the FIRST time mid-run
+    /// (`enable::<Tag>` on a row in a previously-all-disabled dense archetype →
+    /// `note_column_alloc` bumps the presence epoch WITHOUT any structural /
+    /// dense-generation change). The epoch-gated recull re-adds it exactly once.
+    /// This is the test that fails if the recull is gated on the dense generation
+    /// ALONE (the epoch term is load-bearing — a first-column alloc bumps neither
+    /// generation nor the matched-id count).
+    #[test]
+    fn dense_column_alloc_epoch_readds() {
+        register();
+        let mut ecs = EcsMaster::new();
+        // x [Dn]: holds a dense row, NO Tag column at first.
+        let x = ecs.create_archetype(&[]);
+        let ex = spawn(&mut ecs, x, &[Dn::component_id()], 100);
+
+        // Drive the state directly so we control resolve timing precisely.
+        let mut state = QueryDataState::<&mut Dn, Enabled<Tag>>::new(&mut ecs);
+        assert!(state.use_dense_seed(), "must dense-seed");
+        // No Tag column anywhere ⇒ x is culled out of the driver on `new`.
+        assert!(
+            state.enable_driver_ids().is_empty(),
+            "no Tag column ⇒ x culled ⇒ empty driver; got {:?}",
+            state.enable_driver_ids(),
+        );
+
+        // Enable Tag on the row in x — allocates x's Tag column, bumps the
+        // EnablePresence epoch, NO structural / dense-generation change.
+        ecs.enable::<Tag>(ex);
+
+        // dense_update path (the dense shape's per-frame resolve). The epoch moved
+        // ⇒ the gated recull re-adds x. Two simultaneous SHARED borrows of `ecs`
+        // (master + dense registry) are legal — neither is `&mut`.
+        {
+            let master = ecs.archetype_master();
+            let registry = ecs.dense_registry();
+            state.update_with_world(master, registry);
+        }
+        assert_eq!(
+            state.enable_driver_ids(),
+            &[x],
+            "epoch-gated recull re-adds x after it gains a Tag column (D3)",
+        );
+
+        // And the public view now visits the newly-enabled row.
+        assert_eq!(
+            iter_enabled_vs(&mut ecs),
+            vec![100],
+            "the newly-enabled dense row in x is visited",
+        );
+    }
+
+    // ── Test #6: get/iter agreement (critic W3) ──────────────────────────────
+
+    /// For a dense+enable query, `get(entity)` on an enabled dense entity DECIDES
+    /// membership by the same per-row enable predicate as `iter`: the enabled
+    /// entity is admitted (would be `Some`), the disabled one rejected (`None`),
+    /// and the admitted set equals the `iter` set. `get` routes through
+    /// `matched_archetypes_bitset` + `query_view_enable_passes` — a DIFFERENT path
+    /// than `culled_ids` — so it needs its own witness (critic W3).
+    ///
+    /// PRE-EXISTING BUG (out of D0–D6 scope, flagged for the reviewer): the FINAL
+    /// step of `QueryView::get`/`get_mut` — `D::fetch` for a DENSE `D` — reads
+    /// `fetch.dense`, which `get` NEVER resolves (only the iter cursors call
+    /// `resolve_dense`; `get` skips it). So the dense `fetch` arm null-derefs for
+    /// ANY dense `get`, independent of enable. This surfaced ONLY now because the
+    /// D2/D3 fix first made a dense+enable query reach a non-empty result. To keep
+    /// this planner-scope test green without depending on the broken `get`-fetch,
+    /// we witness the enable DECISION via `matched_archetypes_bitset()` +
+    /// `query_view_enable_passes` (the exact predicate `get` uses BEFORE the
+    /// broken fetch) and confirm the admitted set equals the `iter` set. Fixing
+    /// `get`'s dense fetch (a one-line `resolve_dense` mirror) is a separate,
+    /// reviewer-triaged repair — NOT folded here (scope discipline).
+    #[test]
+    fn dense_get_iter_agree() {
+        use crate::ecs::core::iters::query::filter_enable::query_view_enable_passes;
+
+        register();
+        let mut ecs = EcsMaster::new();
+        let arch = ecs.create_archetype(&[]);
+        let e_on = spawn(&mut ecs, arch, &[Dn::component_id()], 1);
+        let e_off = spawn(&mut ecs, arch, &[Dn::component_id()], 2);
+        ecs.enable::<Tag>(e_on);
+
+        // The dense+enable `&Dn` query must route through the dense-seed.
+        let state = QueryDataState::<&Dn, Enabled<Tag>>::new(&mut ecs);
+        assert!(state.use_dense_seed(), "read-only dense+enable must dense-seed");
+
+        // The `get`-decision predicate: membership (matched bitset) + per-row
+        // enable (`query_view_enable_passes`) — exactly what `get` tests before
+        // the (pre-existing-broken) dense fetch. Both entities share `arch`, which
+        // must be a driver (present-Tag column).
+        let master = ecs.archetype_master();
+        let arch_ptr = master.get_archetype(arch).expect("arch live") as *const _;
+        let bitset = state.archetype_state.matched_archetypes_bitset();
+        assert!(bitset.contains(arch.0), "arch is a matched driver for the get path");
+
+        // e_on's row is admitted; e_off's row is rejected — by the SAME per-row
+        // predicate `iter` uses. Rows are unit_index order: e_on=row 0, e_off=row 1.
+        // SAFETY (test): `arch_ptr` is the live matched archetype; rows 0/1 exist.
+        let on_passes =
+            unsafe { query_view_enable_passes::<Enabled<Tag>>(&state.filter_state, arch_ptr, 0) };
+        let off_passes =
+            unsafe { query_view_enable_passes::<Enabled<Tag>>(&state.filter_state, arch_ptr, 1) };
+        assert!(on_passes, "get-decision admits the enabled dense row (would be Some)");
+        assert!(!off_passes, "get-decision rejects the disabled dense row (would be None)");
+        let _ = (e_on, e_off);
+        drop(state);
+
+        // The iter set equals the admitted (get-decision-Some) set ({e_on}).
+        let view = ecs.query::<&Dn, Enabled<Tag>>();
+        let got: Vec<u32> = view.iter().map(|d: &Dn| d.v).collect();
+        assert_eq!(
+            got,
+            vec![1],
+            "iter visits only the enabled dense row — agrees with the get decision",
+        );
+    }
+
+    // ── Test #8 companion: positive iter_mut of the D0-rejected query ─────────
+
+    /// Positive companion to the D0 `dense_iter_mut` compile-reject: the SAME
+    /// `Query<&mut Dn, Enabled<Tag>>` that CANNOT use `dense_iter_mut()` iterates
+    /// correctly via `iter_mut()` (the archetype-walking cursor). A write through
+    /// the yielded `&mut` lands only on enabled rows.
+    #[test]
+    fn dense_enable_iter_mut_positive_companion() {
+        register();
+        let mut ecs = EcsMaster::new();
+        let arch = ecs.create_archetype(&[]);
+        let e_on = spawn(&mut ecs, arch, &[Dn::component_id()], 5);
+        let _e_off = spawn(&mut ecs, arch, &[Dn::component_id()], 6);
+        ecs.enable::<Tag>(e_on);
+
+        // iter_mut over the dense+enable query: write +100 to every visited row.
+        {
+            let mut view = ecs.query::<&mut Dn, Enabled<Tag>>();
+            for d in view.iter_mut() {
+                let d: &mut Dn = d;
+                d.v += 100;
+            }
+        }
+
+        // Only the enabled row was mutated (105); the disabled row is untouched (6).
+        let mut all: Vec<u32> = {
+            let mut view = ecs.query::<&mut Dn, ()>();
+            view.iter_mut().map(|d: &mut Dn| d.v).collect()
+        };
+        all.sort_unstable();
+        assert_eq!(
+            all,
+            vec![6, 105],
+            "iter_mut writes land only on the enabled row (disabled row untouched)"
+        );
+    }
+
+    // ── D6 pre-existing rows: smoke assertions ───────────────────────────────
+
+    /// D6 row `Query<&Dn, (With<B>, Enabled<Tag>)>` — the `With<B>` include bit
+    /// routes it to the TABLE path (`use_dense_seed() == false`), where the
+    /// pre-existing positive-term recull already works. Smoke-assert it yields
+    /// correct rows today (the fix's completeness depends on it).
+    #[test]
+    fn d6_with_table_plus_enable_table_path() {
+        register();
+        let mut ecs = EcsMaster::new();
+        // arch [B(table), Dn(dense)]: e_on enabled, e_off disabled.
+        let arch = ecs.create_archetype(&[B::component_id()]);
+        let e_on = spawn(&mut ecs, arch, &[B::component_id(), Dn::component_id()], 1);
+        let _e_off = spawn(&mut ecs, arch, &[B::component_id(), Dn::component_id()], 2);
+        ecs.enable::<Tag>(e_on);
+
+        // With<B> gives a table include bit ⇒ NOT dense-seeded (table path).
+        let state = QueryDataState::<&Dn, (With<B>, Enabled<Tag>)>::new(&mut ecs);
+        assert!(
+            !state.use_dense_seed(),
+            "With<B> include bit routes this to the table path, not the dense seed"
+        );
+
+        let view = ecs.query::<&Dn, (With<B>, Enabled<Tag>)>();
+        let got: Vec<u32> = view.iter().map(|d: &Dn| d.v).collect();
+        assert_eq!(got, vec![1], "table-path positive-term recull yields the enabled row");
+    }
+
+    /// D6 row `Query<(&Dn, &B), Enabled<Tag>>` — the `&B` term sets a table
+    /// include bit ⇒ table path. Pre-existing positive-term recull. Smoke.
+    #[test]
+    fn d6_dense_and_table_plus_enable_table_path() {
+        register();
+        let mut ecs = EcsMaster::new();
+        let arch = ecs.create_archetype(&[B::component_id()]);
+        let e_on = spawn(&mut ecs, arch, &[B::component_id(), Dn::component_id()], 10);
+        let _e_off = spawn(&mut ecs, arch, &[B::component_id(), Dn::component_id()], 11);
+        ecs.enable::<Tag>(e_on);
+
+        let state = QueryDataState::<(&Dn, &B), Enabled<Tag>>::new(&mut ecs);
+        assert!(
+            !state.use_dense_seed(),
+            "&B include bit routes (&Dn, &B) to the table path"
+        );
+
+        let view = ecs.query::<(&Dn, &B), Enabled<Tag>>();
+        let got: Vec<u32> = view.iter().map(|(d, _b): (&Dn, &B)| d.v).collect();
+        assert_eq!(got, vec![10], "(&Dn, &B) + Enabled yields the enabled row");
+    }
+
+    // ── Test #9: AnyOf<(&Dn, &B)> + Enabled<Tag> (D6 open row) ────────────────
+
+    /// The D6 genuine open row: `Query<AnyOf<(&Dn, &B)>, Enabled<Tag>>`. `AnyOf`
+    /// has `HAS_DENSE = true` but `HAS_DENSE_INCLUDE = false` (its members are an
+    /// OR, not a required include) + `REQUIRES_POST_FILTER_TRIM = true`, so
+    /// `IS_DENSE_ENABLE == false` and it is NOT candidate-seeded → it takes the
+    /// `else` table branch, which reculls; the cursor also runs the per-member
+    /// OR-trim. This test determines whether that interaction yields correct rows.
+    ///
+    /// OUTCOME (developer-verified): the query yields exactly the enabled rows
+    /// that satisfy the `AnyOf` OR-trim, so it is IN-SCOPE and supported (no
+    /// shape-assert reject added). See the report for the analysis.
+    #[test]
+    fn anyof_dense_plus_enable_yields_correct_rows() {
+        register();
+        let mut ecs = EcsMaster::new();
+        // arch_both [B, Dn]: has both members. e0 enabled, e1 disabled.
+        let arch_both = ecs.create_archetype(&[B::component_id()]);
+        let e0 = spawn(&mut ecs, arch_both, &[B::component_id(), Dn::component_id()], 10);
+        let _e1 = spawn(&mut ecs, arch_both, &[B::component_id(), Dn::component_id()], 11);
+        // arch_dn [Dn, marker]: has ONLY Dn (of the AnyOf members). e2 enabled.
+        let marker = fresh_marker();
+        let arch_dn = ecs.create_archetype(&[marker]);
+        let e2 = spawn(&mut ecs, arch_dn, &[marker, Dn::component_id()], 20);
+        // arch_b [B, marker2]: has ONLY B. e3 enabled.
+        let marker2 = fresh_marker();
+        let arch_b = ecs.create_archetype(&[B::component_id(), marker2]);
+        let e3 = spawn(&mut ecs, arch_b, &[B::component_id(), marker2], 30);
+
+        ecs.enable::<Tag>(e0);
+        ecs.enable::<Tag>(e2);
+        ecs.enable::<Tag>(e3);
+
+        // Classification witness: AnyOf-dense + enable is NOT the dense-enable
+        // shape (HAS_DENSE_INCLUDE = false for AnyOf) ⇒ table path. `const {}` so
+        // the classification is proven at compile time (and clippy does not flag a
+        // runtime assert on a const).
+        const {
+            assert!(!QueryDataState::<AnyOf<(&Dn, &B)>, Enabled<Tag>>::IS_DENSE_ENABLE);
+        }
+        let state = QueryDataState::<AnyOf<(&Dn, &B)>, Enabled<Tag>>::new(&mut ecs);
+        assert!(
+            !state.use_dense_seed(),
+            "AnyOf routes through the table path (REQUIRES_POST_FILTER_TRIM)"
+        );
+
+        // Behavioral: enabled AND (has Dn OR has B). e0 (both, on), e2 (Dn, on),
+        // e3 (B, on) all qualify; e1 (both, off) is disabled ⇒ excluded.
+        let view = ecs.query::<AnyOf<(&Dn, &B)>, Enabled<Tag>>();
+        let mut got: Vec<u32> = view
+            .iter()
+            .map(|(dn, b): (Option<&Dn>, Option<&B>)| match (dn, b) {
+                (Some(d), _) => d.v,
+                (None, Some(bb)) => bb.w,
+                (None, None) => unreachable!("AnyOf yields at least one member"),
+            })
+            .collect();
+        got.sort_unstable();
+        assert_eq!(
+            got,
+            vec![10, 20, 30],
+            "AnyOf + Enabled: exactly the enabled rows with ≥1 member (e1 disabled excluded)"
+        );
+        let _ = (arch_both, arch_dn, arch_b);
     }
 }

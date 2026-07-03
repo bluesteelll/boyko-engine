@@ -46,6 +46,31 @@
 //!   rejected (no `ComponentPool`, so field data has nowhere to live; Step 10 (3)).
 //! * `storage_bitset_not_a_bundle_rejected.rs` — a derived bitset tag is NOT a
 //!   `Bundle` (single-component `Bundle` emission suppressed; D6 / Step 10 (2c)).
+//! * `dense_iter_mut_enable_rejected.rs` (`&mut Dense` + `Enabled`),
+//!   `dense_iter_enable_rejected.rs` (`&Dense` + `Enabled`, the read-only twin),
+//!   `query_dense_iter_mut_enable_rejected.rs` (`&mut Dense` + `Disabled`, the
+//!   polarity twin — the `query_` filename prefix is historical; it is NOT a
+//!   `Query`-vs-`QueryView` distinction, it is the `Disabled` polarity case) —
+//!   Dense-enable plan D0: the archetype-agnostic dense fast path
+//!   (`dense_iter` / `dense_iter_mut` on `Query` and `QueryView`) cannot honor a
+//!   per-row enable term. All four methods gate on the shared
+//!   `Query::assert_dense_iter_no_enable::<D, F>()` shape assert; these cases fire
+//!   it in a `const ITEM` (the check-time trigger, since a `compile_fail`-only
+//!   suite runs `cargo check` — the in-body `const {}` at each method top is the
+//!   codegen-time trigger for real callers).
+//!
+//!   COVERAGE CAVEAT (reviewer P2-b): because a `compile_fail` suite only
+//!   `cargo check`s, these three cases invoke the shared helper DIRECTLY in a
+//!   `const ITEM` — they pin that the *helper* rejects an enable-bearing `F`, NOT
+//!   that each of the four `dense_iter*` method bodies actually CALLS the helper.
+//!   The real per-method-site `const {}` firing is a codegen-time guard, witnessed
+//!   indirectly by the positive companion (the SAME query iterating via
+//!   `iter_mut()`), the headless
+//!   `state.rs::dense_enable::dense_enable_iter_mut_positive_companion`, plus the
+//!   green `cargo check` proving the in-body `const {}` compiles for the
+//!   non-enable case. A future edit deleting a `const {}` from one method body
+//!   would not be caught here — the codegen guard is the load-bearing reject; this
+//!   suite documents the intent.
 
 #[cfg(not(miri))]
 #[test]

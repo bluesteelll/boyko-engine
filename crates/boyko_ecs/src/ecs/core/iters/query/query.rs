@@ -93,6 +93,32 @@ pub struct Query<'w, 's, D: QueryData, F: QueryFilter = ()> {
     _marker: PhantomData<fn() -> (D, F)>,
 }
 
+/// Dense-enable plan D0 — the `dense_iter*` enable-reject shape assert, factored
+/// out so it fires under BOTH triggers (the "const must be in a forcing context"
+/// lesson, verified against this toolchain):
+/// * the inline `const { assert_dense_iter_no_enable::<D, F>() }` at the top of
+///   each `dense_iter` / `dense_iter_mut` (on `Query` and `QueryView`) — evaluated
+///   at CODEGEN (build / test), the real runtime protection;
+/// * a `pub const fn` referenced from a `const ITEM` in the trybuild
+///   `compile_fail` suite — eagerly const-evaluated under a metadata-only
+///   `cargo check` (the mode trybuild runs when a suite has no `.pass()` case).
+///
+/// The dense fast path strides the archetype-agnostic `DenseStore` column
+/// directly (no per-slot `(archetype, row)` context) and therefore cannot honor a
+/// per-row enable term keyed by `(archetype, row)`. Callers who want
+/// `Query<&mut Dense, Enabled<Tag>>` iteration use `iter_mut()` — the
+/// archetype-walking cursor whose per-row `filter_fetch` enforces the bit.
+///
+/// REVIEWER NOTE: this rejects an ENABLE-bearing `F` only; whether the dense fast
+/// path also silently skips a `Changed`/`Added` per-row filter is a pre-existing,
+/// separate question — intentionally NOT widened here.
+pub const fn assert_dense_iter_no_enable<D: DenseQueryData, F: QueryFilter>() {
+    assert!(
+        !F::CONTAINS_ENABLE_TERM,
+        "dense_iter cannot honor an enable term — use iter_mut()"
+    );
+}
+
 impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
     /// Adds a dynamic-tag presence term (Phase 22 D4): only archetypes
     /// carrying `tag` participate in every driver of this query view
@@ -406,6 +432,12 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         D: DenseQueryData + ReadOnlyQueryData,
     {
         const { assert!(D::HAS_DENSE, "Query::dense_iter requires a dense `D` (storage = \"dense\")") };
+        // Dense-enable plan D0 — reject an enable-bearing `F` at monomorphization
+        // (the dense fast path is archetype-agnostic and cannot honor a per-row
+        // enable term). Mirrors `par_iter`'s dense const-reject and
+        // `for_each_chunk`'s `ArchetypalQueryFilter` reject. Use `iter()` for
+        // `Query<&Dense, Enabled<Tag>>`. See `assert_dense_iter_no_enable`.
+        const { assert_dense_iter_no_enable::<D, F>() };
         let store = self.resolve_dense_store();
         // SAFETY (D3): `store` is NULL or the live `DenseStore` for `D`'s
         //   component, valid for the world borrow; read-only cursor ⇒ no
@@ -426,6 +458,11 @@ impl<'w, 's, D: QueryData, F: QueryFilter> Query<'w, 's, D, F> {
         D: DenseQueryData,
     {
         const { assert!(D::HAS_DENSE, "Query::dense_iter_mut requires a dense `D` (storage = \"dense\")") };
+        // Dense-enable plan D0 — reject an enable-bearing `F` (the `&mut` leak the
+        // fix closes: today this would write EVERY live slot, disabled rows
+        // included). Use `iter_mut()` — its per-row `filter_fetch` enforces the
+        // enable bit. See `assert_dense_iter_no_enable`.
+        const { assert_dense_iter_no_enable::<D, F>() };
         let store = self.resolve_dense_store();
         // SAFETY (D3): `store` is NULL or the live `DenseStore` for `D`'s
         //   component; the `&mut self` borrow gates cursor uniqueness, so no
