@@ -361,9 +361,16 @@ pub enum ClusterSelectMode {
 /// The bit position of the resolve's `csm_mode` gate inside light-header word 7
 /// (`sky_diffuse.w`, never read by the L0a sky ambient). Mirrors the shader's
 /// `load_csm_mode` (`light_table.hlsli`: `(LightBuf[7] >> 2) & 1`); bits 0/1/3 of the
-/// same word carry `shadow_mode` / `contact_shadow_mode` / `punctual_shadow_mode`,
-/// which have no production ECS writer yet (they stay 0).
+/// same word carry `shadow_mode` / `contact_shadow_mode` / `punctual_shadow_mode`.
 pub const CSM_MODE_BIT: u32 = 2;
+
+/// The bit position of the resolve's `punctual_mode` gate inside light-header word 7
+/// (`sky_diffuse.w`) — bit 3, immediately above [`CSM_MODE_BIT`] (bit 2). Mirrors the
+/// shader's punctual gate (`light_table.hlsli`: `(LightBuf[7] >> 3) & 1`, the "BIT-3
+/// INDEPENDENCE PIN"), which selects the spot/point atlas sample vs the analytic
+/// fallback INDEPENDENTLY of the CSM bit. Its single production writer is
+/// [`sync_punctual_light_gate`](crate::shadow_atlas::sync_punctual_light_gate).
+pub const PUNCTUAL_MODE_BIT: u32 = 3;
 
 /// The global lighting config (Decision 3) — a `World`-singleton resource. `exposure`
 /// defaults to identity (`1.0`) and `sky_*` default to the resolve's old `SKY_*`
@@ -403,6 +410,21 @@ pub struct LightingConfig {
     /// layout-soundness note. Set this manually only in hosts that hold the same two
     /// guarantees (the showcase harness discipline).
     pub csm_shadows: bool,
+    /// The resolve's punctual (spot/point atlas) sample gate — packed into light-header
+    /// word 7 bit [`PUNCTUAL_MODE_BIT`] by [`shadow_gate_word`](Self::shadow_gate_word).
+    /// DEFAULT `false` (word 7 bit 3 stays 0 — the byte-identical 0%-gate, INDEPENDENT of
+    /// `csm_shadows`).
+    ///
+    /// # Single-writer / lock-step contract (host punctual rung)
+    ///
+    /// Like `csm_shadows`, this is DERIVED state: its single production writer is
+    /// [`sync_punctual_light_gate`](crate::shadow_atlas::sync_punctual_light_gate), which
+    /// keeps the header gate in lock-step with the depth-pass activation predicate ("a
+    /// fitted atlas AND live casters exist") to within 1–2 frames. Layout soundness under
+    /// that lag rests on the SAME two host guarantees the CSM path documents (boot-transition
+    /// the atlas array to `SHADER_READ_ONLY_OPTIMAL` once + upload the CURRENT
+    /// `ResolvedShadowAtlas` UBO every frame), not on this system's timing.
+    pub punctual_shadows: bool,
 }
 
 impl Default for LightingConfig {
@@ -416,17 +438,20 @@ impl Default for LightingConfig {
             clusters_enabled: false,
             cluster_select: ClusterSelectMode::Manual,
             csm_shadows: false,
+            punctual_shadows: false,
         }
     }
 }
 
 impl LightingConfig {
-    /// Packs the header's word-7 shadow-gate bits from this config. Only the CSM bit
-    /// has a production writer today; a default config returns 0 (word 7 == 0.0 — the
-    /// 0%-gate anchor every pre-R4 golden pins).
+    /// Packs the header's word-7 shadow-gate bits from this config: the CSM bit
+    /// ([`CSM_MODE_BIT`]) and the punctual bit ([`PUNCTUAL_MODE_BIT`]), each independent.
+    /// A default config returns 0 (word 7 == 0.0 — the 0%-gate anchor every pre-R4/pre-punctual
+    /// golden pins).
     #[inline]
     pub const fn shadow_gate_word(&self) -> u32 {
-        (self.csm_shadows as u32) << CSM_MODE_BIT
+        ((self.csm_shadows as u32) << CSM_MODE_BIT)
+            | ((self.punctual_shadows as u32) << PUNCTUAL_MODE_BIT)
     }
 }
 
@@ -829,6 +854,15 @@ impl LightHeaderGpu {
         (self.sky_diffuse[3].to_bits() >> CSM_MODE_BIT) & 1 != 0
     }
 
+    /// Whether the resolve's punctual (spot/point atlas) sample gate is armed (word 7 bit
+    /// [`PUNCTUAL_MODE_BIT`], bit-cast back from `sky_diffuse.w`) — the host mirror of the
+    /// shader's punctual gate. Independent of [`csm_mode`](Self::csm_mode) (the BIT-3
+    /// INDEPENDENCE PIN).
+    #[inline]
+    pub fn punctual_mode(&self) -> bool {
+        (self.sky_diffuse[3].to_bits() >> PUNCTUAL_MODE_BIT) & 1 != 0
+    }
+
     /// Whether the L1 cluster path is enabled (`cluster_params.w` bit-cast `!= 0`). `false`
     /// ⇒ the resolve loops the flat table (the L1 0%-gate == L0b).
     #[inline]
@@ -895,6 +929,32 @@ mod tests {
         assert!(!cfg.clusters_enabled);
         // P1: the policy substrate defaults to Manual so the gate stays owner-controlled.
         assert_eq!(cfg.cluster_select, ClusterSelectMode::Manual);
+        // The punctual gate defaults OFF (the byte-identical 0%-gate).
+        assert!(!cfg.punctual_shadows);
+    }
+
+    #[test]
+    fn shadow_gate_word_bits_are_independent() {
+        // A default config packs a zero gate word (word-7 == 0 — the 0%-gate anchor).
+        assert_eq!(LightingConfig::default().shadow_gate_word(), 0);
+
+        // The CSM bit alone (bit 2).
+        let csm = LightingConfig { csm_shadows: true, ..LightingConfig::default() };
+        assert_eq!(csm.shadow_gate_word(), 1 << CSM_MODE_BIT);
+        assert_eq!(csm.shadow_gate_word() & (1 << PUNCTUAL_MODE_BIT), 0, "csm must not touch bit 3");
+
+        // The punctual bit alone (bit 3), INDEPENDENT of the CSM bit.
+        let punc = LightingConfig { punctual_shadows: true, ..LightingConfig::default() };
+        assert_eq!(punc.shadow_gate_word(), 1 << PUNCTUAL_MODE_BIT);
+        assert_eq!(punc.shadow_gate_word() & (1 << CSM_MODE_BIT), 0, "punctual must not touch bit 2");
+
+        // Both set — the two independent bits OR together.
+        let both = LightingConfig {
+            csm_shadows: true,
+            punctual_shadows: true,
+            ..LightingConfig::default()
+        };
+        assert_eq!(both.shadow_gate_word(), (1 << CSM_MODE_BIT) | (1 << PUNCTUAL_MODE_BIT));
     }
 
     #[test]

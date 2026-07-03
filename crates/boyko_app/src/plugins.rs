@@ -11,8 +11,8 @@ use boyko_render::instance_model::sync_instance_model_cols;
 use boyko_render::light_system::LightTableStaging;
 use boyko_render::{
     CsmCasterScratch, CsmPlugin, LightingConfig, LightingPlugin, MeshRenderScratch,
-    Render3dPlugin, SdfPlugin, add_gpu_transform_pack, gather_mesh_draws, gather_shadow_casters,
-    snap_apply, sync_csm_light_gate,
+    Render3dPlugin, SdfPlugin, ShadowAtlasPlugin, add_gpu_transform_pack, gather_mesh_draws,
+    gather_shadow_casters, snap_apply, sync_csm_light_gate, sync_punctual_light_gate,
 };
 use boyko_scene::{CameraPlugin, FixedSet};
 
@@ -145,6 +145,16 @@ impl Plugin for EnginePlugins {
         app.insert_resource(LightingConfig::default());
         app.add_plugin(LightingPlugin);
         app.add_plugin(CsmPlugin);
+        // ShadowAtlasPlugin (the punctual host rung) — the spot/point analogue of CsmPlugin:
+        // it seeds the owner-set `ShadowConfig` (default DISABLED — the 0%-gate; overwrite it
+        // AFTER `add_plugins` to enable punctual shadows) + the derived `ResolvedShadowAtlas`,
+        // and registers the cold `resolve_shadow_atlas` fit. Added HERE (after Csm, alongside
+        // Camera/Lighting) so add-order places `resolve_shadow_atlas` before the host-closure
+        // `sync_punctual_light_gate` reads its `mode_word` — the SAME cross-plugin add-order
+        // discipline CsmPlugin documents (a `.after(resolve_shadow_atlas)` edge is not
+        // expressible across plugins; a loose one-frame stagger off cold owner state is
+        // self-correcting, and the default DISABLED config gates the whole path off).
+        app.add_plugin(ShadowAtlasPlugin);
 
         // The R7 SDF instance path (composed by DEFAULT): inserts the
         // `SdfEditStaging` gather scratch and registers the one-shot startup
@@ -182,6 +192,13 @@ impl Plugin for EnginePlugins {
             let pack = b.add_system(sync_instance_model_cols).key();
             let casters = b.add_system(gather_shadow_casters).after(pack).key();
             b.add_system(sync_csm_light_gate).after(casters);
+            // The punctual header-gate ⇄ depth-pass lock-step (mirrors the csm sync): after the
+            // SAME caster gather so the gate's caster predicate is THIS frame's. It reads
+            // `ResolvedShadowAtlas.mode_word` (written by `resolve_shadow_atlas` in
+            // ShadowAtlasPlugin, ordered earlier by add-order) — the resolve→sync edge follows the
+            // same cross-plugin add-order discipline as csm (self-correcting under a one-frame lag,
+            // gated off by the default DISABLED ShadowConfig).
+            b.add_system(sync_punctual_light_gate).after(casters);
             // The unified gather runs after BOTH the affine pack and the snap
             // collapse (snap-before-gather is load-bearing — the gather reads the
             // collapsed pair).

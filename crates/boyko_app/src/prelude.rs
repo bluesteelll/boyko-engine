@@ -16,12 +16,15 @@ pub use boyko_math::{Affine3A, Quat, Vec3};
 // The mesh spawn surface: the drawable bundle + the registry it indexes.
 pub use boyko_render::{MeshBundle, MeshRegistry};
 
-// The lighting spawn surface (host plan R4): the light components + their
-// placed-object bundles, the structural CSM caster capability, and the
-// owner-set CSM config knob.
+// The lighting spawn surface (host plan R4 + the punctual rung): the light
+// components + their placed-object bundles, the structural CSM caster capability
+// ([`ShadowCaster`]), the structural punctual map-owner capability
+// ([`CastsPunctualShadow`] — a spot/point light carrying it casts an exact atlas
+// shadow), and the owner-set CSM ([`CsmConfig`]) + punctual ([`ShadowConfig`])
+// config knobs (both default DISABLED — the 0%-gate).
 pub use boyko_render::{
-    CsmConfig, DirectionalLight, DirectionalLightObject, PointLight, PointLightObject,
-    ShadowCaster, SkyLight, SpotLight, SpotLightObject,
+    CastsPunctualShadow, CsmConfig, DirectionalLight, DirectionalLightObject, PointLight,
+    PointLightObject, ShadowCaster, ShadowConfig, SkyLight, SpotLight, SpotLightObject,
 };
 
 // The interpolation surface (host plan R5): the per-entity [`GpuTransform3D`] pair

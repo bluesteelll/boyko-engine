@@ -28,10 +28,10 @@ use boyko_input::{ButtonState, KeyCode, RawInputEvent};
 use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
 #[cfg(windows)]
 use boyko_render::{
-    CsmCasterScratch, MeshRegistry, MeshRenderScratch, ResolvedCsm, RhiContext, SdfEditStaging,
-    collect_sdf_edits, gbuffer_push_from_view, upload_camera_ring, upload_csm_ring,
-    upload_instance_models, upload_light_table, upload_pair_out_slot, upload_pair_ring,
-    upload_sdf_edit_list,
+    CsmCasterScratch, MeshRegistry, MeshRenderScratch, ResolvedCsm, ResolvedShadowAtlas, RhiContext,
+    SdfEditStaging, collect_sdf_edits, gbuffer_push_from_view, upload_atlas_ring, upload_camera_ring,
+    upload_csm_ring, upload_instance_models, upload_light_table, upload_pair_out_slot,
+    upload_pair_ring, upload_sdf_edit_list,
 };
 #[cfg(windows)]
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
@@ -376,6 +376,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // exactly once inside the block (definite-initialization, no dead seed).
         let mut frame_light_uploaded = false;
         let frame_csm_armed;
+        // The punctual-armed probe (the punctual host rung): assigned exactly once inside the
+        // block (definite-initialization, no dead seed), mirroring `frame_csm_armed`.
+        let frame_punctual_armed;
         // The interp-armed probe (host plan R5): set when this frame's pair gather
         // produced instances (the pair ring was uploaded + `scene.interp` armed).
         let frame_interp_armed;
@@ -472,6 +475,19 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 upload_csm_ring(&token, host.gpu.csm_ubo_slot(s), resolved_csm);
             }
 
+            // 5d'. The punctual shadow-atlas UBO into slot `s` — UNCONDITIONAL
+            //      every frame (1296 B; the fit is camera-dependent — the
+            //      `spot_priority` top-K shifts with the camera — so a boot-seed
+            //      would go stale, see `upload_atlas_ring`'s rationale). A DISABLED
+            //      selection uploads as all-zero, the bound-but-unread OFF state.
+            let resolved_atlas = world.resource::<ResolvedShadowAtlas>();
+            // SAFETY: the atlas UBO ring slot — same provenance contract as the
+            // cascade slot above (boot-minted at RESOLVED_SHADOW_ATLAS_BYTES, live
+            // until teardown, the fenced slot `s == token.slot()`).
+            unsafe {
+                upload_atlas_ring(&token, host.gpu.atlas_ubo_slot(s), resolved_atlas);
+            }
+
             // 6a. DrawBatch → GBufferMeshDraw: resolve each batch's mesh to its
             //     registry GPU buffers (the showcase's ~8070 conversion, driven
             //     by the ECS gather instead of a test-built list). R4:
@@ -528,6 +544,19 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 );
             }
 
+            // 6a''. The punctual (spot/point) depth-pass arming predicate: a fitted
+            //       atlas (`ResolvedShadowAtlas.mode_word == 1` — ShadowConfig
+            //       enabled AND at least one `CastsPunctualShadow` light got a slot)
+            //       AND live caster batches. The casters are the SAME
+            //       `CsmCasterScratch` the cascade arm reads — a `ShadowCaster` mesh
+            //       casts into BOTH the cascade array and the punctual atlas, so one
+            //       gather feeds both gates. This is the SAME predicate
+            //       `sync_punctual_light_gate` drives the light-header punctual bit
+            //       with, so the resolve samples the atlas only on frame streams where
+            //       this depth pass transitioned the atlas texture.
+            let punctual_armed = resolved_atlas.mode_word == 1 && casters.batch_count() > 0;
+            frame_punctual_armed = punctual_armed;
+
             // 6b. The raster push from the SAME resolved view the camera upload
             //     used (the marcher/raster screen alignment is by construction);
             //     `use_model_matrix == 1` iff the instanced batch list draws.
@@ -565,6 +594,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 &draws,
                 light_upload,
                 csm_armed.then_some(resolved_csm),
+                punctual_armed.then_some(resolved_atlas),
                 interp_count,
                 overstep,
             );
@@ -640,6 +670,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             stats.frames += 1;
             stats.light_uploads += u64::from(frame_light_uploaded);
             stats.csm_armed_frames += u64::from(frame_csm_armed);
+            stats.punctual_armed_frames += u64::from(frame_punctual_armed);
             stats.interp_armed_frames += u64::from(frame_interp_armed);
         }
     }
@@ -669,6 +700,28 @@ fn dump_diagnostics(app: &App) {
         eprintln!(
             "boyko_app: dump cascade[{c}] split_far={:.3} texel={:.4} col3=[{:.3}, {:.3}, {:.3}, {:.3}]",
             data.split_far, data.texel_size, m[3][0], m[3][1], m[3][2], m[3][3]
+        );
+    }
+
+    // The punctual shadow-atlas selection consumed on the captured frame stream (mirrors the
+    // cascade dump): the mode word, active layer count, the per-slot spot/point tag, and each
+    // active face's `light_pos`/`inv_range` (POINT lanes; benign for SPOT).
+    let atlas = world.resource::<ResolvedShadowAtlas>();
+    eprintln!(
+        "boyko_app: dump atlas mode={} active_layers={} face_point_mask={:#06x}",
+        atlas.mode_word, atlas.active_layers, atlas.face_point_mask
+    );
+    for (s, face) in atlas
+        .faces
+        .iter()
+        .enumerate()
+        .take(atlas.active_layers as usize)
+    {
+        let is_point = (atlas.face_point_mask >> s) & 1 != 0;
+        let kind = if is_point { "point" } else { "spot " };
+        eprintln!(
+            "boyko_app: dump atlas[{s}] kind={kind} light_pos=[{:.2}, {:.2}, {:.2}] inv_range={:.4}",
+            face.light_pos[0], face.light_pos[1], face.light_pos[2], face.inv_range
         );
     }
 
@@ -702,8 +755,12 @@ fn dump_diagnostics(app: &App) {
 
     let stats = world.resource::<HostFrameStats>();
     eprintln!(
-        "boyko_app: dump stats frames={} light_uploads={} csm_armed={} interp_armed={}",
-        stats.frames, stats.light_uploads, stats.csm_armed_frames, stats.interp_armed_frames
+        "boyko_app: dump stats frames={} light_uploads={} csm_armed={} punctual_armed={} interp_armed={}",
+        stats.frames,
+        stats.light_uploads,
+        stats.csm_armed_frames,
+        stats.punctual_armed_frames,
+        stats.interp_armed_frames
     );
 }
 

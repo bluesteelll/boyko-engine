@@ -43,6 +43,12 @@ pub struct HostFrameStats {
     /// Frames on which the cascade depth pass was armed
     /// (`GBufferScene::csm == Some` — a fitted sun AND live caster batches).
     pub csm_armed_frames: u64,
+    /// Frames on which the punctual (spot/point) depth pass was armed
+    /// (`GBufferScene::atlas_punctual == Some` — a fitted shadow atlas
+    /// (`ResolvedShadowAtlas::mode_word == 1`, at least one `CastsPunctualShadow`
+    /// light slotted) AND live caster batches). Zero on a scene with no
+    /// `CastsPunctualShadow` light (punctual OFF — byte-identical to the pre-rung path).
+    pub punctual_armed_frames: u64,
     /// Frames on which the interpolation pre-pass was armed (host plan R5): the
     /// pair gather produced instances (`MeshRenderScratch::pair_ring` non-empty),
     /// so the runner uploaded the pair ring, armed `GBufferScene::interp`, and the

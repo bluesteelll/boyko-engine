@@ -32,6 +32,7 @@ use crate::light::{
     DirectionalLight, GpuLight, LightEnabled, LightHeaderGpu, LightTableDirty, LightingConfig,
     MAX_LIGHTS, PointLight, SkyLight, SpotLight,
 };
+use crate::shadow_atlas::{PunctualSlotAssignment, SLOT_NONE, pack_atlas_slot};
 
 /// The byte size of the light SSBO's leading header region (`LightHeaderGpu`, 64 B).
 pub const LIGHT_HEADER_BYTES: usize = core::mem::size_of::<LightHeaderGpu>();
@@ -185,6 +186,42 @@ pub fn fold_light_table<'a>(
     spots: impl Iterator<Item = &'a SpotLight>,
     cfg: &LightingConfig,
 ) -> usize {
+    // The un-slotted path: no punctual light carries an atlas base, so every point/spot row keeps
+    // the raw kind word `from_point` / `from_spot` produce (`SLOT_NONE` base ⇒ no pack). Byte-
+    // identical to the pre-Inc-1-GPU fold — the slice unit tests + `write_light_table` are pinned
+    // on this signature.
+    fold_light_table_slotted(
+        dst,
+        directionals,
+        skies,
+        points.map(|p| (SLOT_NONE, p)),
+        spots.map(|s| (SLOT_NONE, s)),
+        cfg,
+    )
+}
+
+/// The slot-aware fold — the Inc-1-GPU light-table assembly. Identical to [`fold_light_table`]
+/// except each point/spot row is tagged with its RESOLVED atlas base (`base`): a real base
+/// (`base != SLOT_NONE`) is packed into that light's kind word via [`pack_atlas_slot`] so the
+/// shader's `light_atlas_slot(L.kind)` decodes the light's OWN cube/perspective base; a `SLOT_NONE`
+/// base leaves the kind word UNTOUCHED (byte-identical to the un-slotted path — the analytic
+/// fallback), which is why a non-`CastsPunctualShadow` light and a slot-loser produce the SAME
+/// bytes as before the wiring.
+///
+/// The per-light base comes from the entity-keyed [`PunctualSlotAssignment`] handoff the
+/// [`resolve_shadow_atlas`](crate::shadow_atlas::resolve_shadow_atlas) publishes; the caller
+/// ([`collect_lights`]) resolves it per row via `PunctualSlotAssignment::base_for` before the fold.
+///
+/// Caller guarantees `dst` is sized for the worst case (`Default` does this). The iterators are
+/// walked exactly once each, in table order (directionals → sky → point → spot).
+pub fn fold_light_table_slotted<'a>(
+    dst: &mut [u8],
+    directionals: impl Iterator<Item = &'a DirectionalLight>,
+    skies: impl Iterator<Item = &'a SkyLight>,
+    points: impl Iterator<Item = (u32, &'a PointLight)>,
+    spots: impl Iterator<Item = (u32, &'a SpotLight)>,
+    cfg: &LightingConfig,
+) -> usize {
     // The body starts after the header region; walk the iterators in table order,
     // converting + writing each light in place and counting the two header blocks.
     // `written` is the running total across all four kinds — the single quantity the
@@ -211,20 +248,20 @@ pub fn fold_light_table<'a>(
         l0a_count += 1;
     }
     let mut point_spot_count: u32 = 0;
-    for p in points {
+    for (base, p) in points {
         if written == MAX_LIGHTS {
             return finish_folded_overflow(dst, l0a_count, point_spot_count, off, cfg);
         }
-        write_pod(dst, off, &GpuLight::from_point(p));
+        write_pod(dst, off, &slot_pack(GpuLight::from_point(p), base));
         off += GPU_LIGHT_BYTES;
         written += 1;
         point_spot_count += 1;
     }
-    for s in spots {
+    for (base, s) in spots {
         if written == MAX_LIGHTS {
             return finish_folded_overflow(dst, l0a_count, point_spot_count, off, cfg);
         }
-        write_pod(dst, off, &GpuLight::from_spot(s));
+        write_pod(dst, off, &slot_pack(GpuLight::from_spot(s), base));
         off += GPU_LIGHT_BYTES;
         written += 1;
         point_spot_count += 1;
@@ -235,6 +272,19 @@ pub fn fold_light_table<'a>(
     );
 
     finish_folded(dst, l0a_count, point_spot_count, off, cfg)
+}
+
+/// Packs a resolved atlas `base` into a punctual [`GpuLight`]'s kind word, but ONLY when `base` is
+/// a real layer — a `SLOT_NONE` base returns the light UNCHANGED (byte-identical to the un-slotted
+/// fold). Guarding the `SLOT_NONE` case is what preserves the 0%-gate byte-identity:
+/// `pack_atlas_slot(kind, SLOT_NONE)` would WRITE the `0x1F` slot field (functionally the analytic
+/// fallback, but a different `dir_kind.w`), so the un-slotted rows must skip the pack entirely.
+#[inline]
+fn slot_pack(mut light: GpuLight, base: u32) -> GpuLight {
+    if base != SLOT_NONE {
+        light.dir_kind[3] = f32::from_bits(pack_atlas_slot(light.dir_kind[3].to_bits(), base));
+    }
+    light
 }
 
 /// Backfills the light-table header once the two block counts are known and returns the
@@ -322,15 +372,22 @@ fn write_pod<T: Copy>(dst: &mut [u8], off: usize, value: &T) {
 // (changed + full, four kinds) + the config + the staging are necessarily separate.
 #[allow(clippy::needless_pass_by_value, clippy::too_many_arguments, clippy::type_complexity)]
 pub fn collect_lights(
-    changed_dir: Query<&DirectionalLight, Changed<DirectionalLight>>,
-    changed_sky: Query<&SkyLight, Changed<SkyLight>>,
-    changed_point: Query<&PointLight, Changed<PointLight>>,
-    changed_spot: Query<&SpotLight, Changed<SpotLight>>,
+    // The four `Changed`-filtered rebuild-gate probes, grouped into ONE nested-tuple
+    // `SystemParam` slot so the system stays within the 12-param arity limit (the entity-keyed
+    // `PunctualSlotAssignment` read added a 13th param). A tuple is itself a `SystemParam`, so this
+    // is a pure regrouping — the per-query access + `Changed` semantics are unchanged.
+    changed: (
+        Query<&DirectionalLight, Changed<DirectionalLight>>,
+        Query<&SkyLight, Changed<SkyLight>>,
+        Query<&PointLight, Changed<PointLight>>,
+        Query<&SpotLight, Changed<SpotLight>>,
+    ),
     all_directionals: Query<(&DirectionalLight, IsEnabled<LightEnabled>)>,
     all_skies: Query<(&SkyLight, IsEnabled<LightEnabled>)>,
     all_points: Query<(&PointLight, IsEnabled<LightEnabled>)>,
     all_spots: Query<(&SpotLight, IsEnabled<LightEnabled>)>,
     cfg: Res<LightingConfig>,
+    assignment: Res<PunctualSlotAssignment>,
     mut staging: ResMut<LightTableStaging>,
     mut dirty: ResMut<LightTableDirty>,
     mut generation: ResMut<LightTableGeneration>,
@@ -343,6 +400,7 @@ pub fn collect_lights(
     // the on_remove hook registered first in LightingPlugin::build — so this gate evicts
     // them next frame. The dirty bit is consumed unconditionally after every rebuild (no
     // early-return in between).
+    let (changed_dir, changed_sky, changed_point, changed_spot) = &changed;
     let changed = changed_dir.iter().next().is_some()
         || changed_sky.iter().next().is_some()
         || changed_point.iter().next().is_some()
@@ -357,15 +415,26 @@ pub fn collect_lights(
     // worst-case-sized `scratch` is the SOLE sink, no per-frame `Vec` (Principle 1/5).
     // The per-row `IsEnabled<LightEnabled>` bit is `filter_map`'d so a disabled light is
     // dropped BEFORE the fold sees it — the header counts (incremented per write inside
-    // `fold_light_table`) stay correct, and the `impl Iterator<Item = &T>` signature is
-    // byte-identical (`write_light_table` + its slice unit tests are untouched).
+    // `fold_light_table_slotted`) stay correct.
+    //
+    // Point + spot rows are iterated WITH their `EntityId` (`iter_entities`) so each is tagged
+    // with its resolved atlas base from the entity-keyed `PunctualSlotAssignment` the shadow
+    // resolve published. `base_for` returns `SLOT_NONE` for a light that won no slot (or when the
+    // resolve is disabled — the empty handoff), so `fold_light_table_slotted` leaves that row's
+    // kind word UNTOUCHED (byte-identical to the pre-wiring path); a real base is packed via
+    // `pack_atlas_slot` so the shader decodes the light's OWN cube/perspective base.
+    let assign = &*assignment;
     let staging = &mut *staging;
-    let used = fold_light_table(
+    let used = fold_light_table_slotted(
         &mut staging.scratch,
         all_directionals.iter().filter_map(|(l, en)| en.then_some(l)),
         all_skies.iter().filter_map(|(l, en)| en.then_some(l)),
-        all_points.iter().filter_map(|(l, en)| en.then_some(l)),
-        all_spots.iter().filter_map(|(l, en)| en.then_some(l)),
+        all_points
+            .iter_entities()
+            .filter_map(|(id, (l, en))| en.then_some((assign.base_for(id), l))),
+        all_spots
+            .iter_entities()
+            .filter_map(|(id, (l, en))| en.then_some((assign.base_for(id), l))),
         &cfg,
     );
     staging.used_bytes = used;
@@ -833,5 +902,161 @@ mod tests {
         // All MAX_LIGHTS rows are directionals; the sky/point/spot beyond the cap are gone.
         assert_eq!(h.l0a_count(), MAX_LIGHTS);
         assert_eq!(h.point_spot_count(), 0);
+    }
+
+    // ---- Inc-1-GPU slot-pack wiring (the punctual-shadow regression) ------------------
+
+    use crate::shadow_atlas::light_atlas_slot;
+
+    /// Reads back a table row's kind word (`dir_kind.w`, bit-cast `u32`) at `elem`.
+    fn row_kind_word(bytes: &[u8], elem: usize) -> u32 {
+        // Each row is `GPU_LIGHT_WORDS` (12) words; `dir_kind.w` is word 3 of the row. The body
+        // starts at `LIGHT_HEADER_WORDS`.
+        let word = LIGHT_HEADER_WORDS + elem * (GPU_LIGHT_BYTES / 4) + 3;
+        let off = word * 4;
+        u32::from_ne_bytes(bytes[off..off + 4].try_into().unwrap())
+    }
+
+    /// Mirrors `resolve_shadow_atlas`'s assignment-publish loop: builds the entity-keyed handoff
+    /// from the per-source resolved slots. `SLOT_NONE` slots (losers) are NOT recorded — their
+    /// absence makes `base_for` return `SLOT_NONE`.
+    fn assignment_from(spots: &[(EntityId, u32)], points: &[(EntityId, u32)]) -> PunctualSlotAssignment {
+        let mut a = PunctualSlotAssignment::EMPTY;
+        for &(id, slot) in spots.iter().chain(points.iter()) {
+            if slot != SLOT_NONE {
+                a = a.with_winner(id, slot);
+            }
+        }
+        a
+    }
+
+    /// The masked bug: a 2-source scene (one SPOT + one POINT) where the POINT does NOT get base
+    /// 0 (the spot wins base 0, the point lands at base 1). The fold must decode EACH light's kind
+    /// word to its REAL base — before the fix, every punctual light decoded to base 0, so the point
+    /// sampled the spot's map.
+    #[test]
+    fn slotted_fold_packs_each_light_its_own_resolved_base() {
+        let spot_ent = EntityId(10);
+        let point_ent = EntityId(20);
+        // The resolve assigned: spot → layer 0, point → cube base 1 (a point costs 6 layers, so
+        // base 1 covers layers 1..7; here we assert the packed base index, not the layer count).
+        let assign = assignment_from(&[(spot_ent, 0)], &[(point_ent, 1)]);
+
+        let pt = PointLight::new([0.0, 1.0, 0.0], [1.0, 1.0, 1.0], 300.0, 9.0);
+        let sp = SpotLight::new([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 1.0], 200.0, 8.0, 20.0, 30.0);
+
+        let mut scratch = vec![0u8; LIGHT_HEADER_BYTES + 4 * GPU_LIGHT_BYTES];
+        let used = fold_light_table_slotted(
+            &mut scratch,
+            [].iter(),
+            [].iter(),
+            core::iter::once((assign.base_for(point_ent), &pt)),
+            core::iter::once((assign.base_for(spot_ent), &sp)),
+            &LightingConfig::default(),
+        );
+        assert_eq!(used, LIGHT_HEADER_BYTES + 2 * GPU_LIGHT_BYTES);
+
+        // Table order is point (elem 0) then spot (elem 1).
+        let point_kind = row_kind_word(&scratch, 0);
+        let spot_kind = row_kind_word(&scratch, 1);
+
+        // The POINT decodes to its OWN base 1 (NOT 0 — the bug) and carries the casts bit.
+        assert_eq!(light_atlas_slot(point_kind), 1, "point must decode to its resolved base 1");
+        assert_ne!(point_kind & crate::shadow_atlas::CASTS_SHADOW_BIT, 0, "point casts bit set");
+        // The kind tag survives the pack.
+        assert_eq!(point_kind & 0xFFFF, crate::light::LIGHT_KIND_POINT);
+
+        // The SPOT decodes to its own base 0 and carries the casts bit.
+        assert_eq!(light_atlas_slot(spot_kind), 0, "spot must decode to its resolved base 0");
+        assert_ne!(spot_kind & crate::shadow_atlas::CASTS_SHADOW_BIT, 0, "spot casts bit set");
+        assert_eq!(spot_kind & 0xFFFF, crate::light::LIGHT_KIND_SPOT);
+    }
+
+    /// A `CastsPunctualShadow` light that won NO slot (over budget) must pack `SLOT_NONE` — the
+    /// analytic fallback — never a stale base 0. Modelled as an entity absent from the assignment
+    /// (`base_for` returns `SLOT_NONE`), which the fold leaves UNPACKED.
+    #[test]
+    fn slotted_fold_loser_packs_slot_none_not_zero() {
+        let winner = EntityId(1);
+        let loser = EntityId(2);
+        let assign = assignment_from(&[(winner, 0)], &[]); // only `winner` got a slot
+
+        let sp_win = SpotLight::new([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 1.0], 200.0, 8.0, 20.0, 30.0);
+        let sp_lose = SpotLight::new([5.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 1.0], 200.0, 8.0, 20.0, 30.0);
+
+        let mut scratch = vec![0u8; LIGHT_HEADER_BYTES + 4 * GPU_LIGHT_BYTES];
+        fold_light_table_slotted(
+            &mut scratch,
+            [].iter(),
+            [].iter(),
+            core::iter::empty(),
+            [(assign.base_for(winner), &sp_win), (assign.base_for(loser), &sp_lose)].into_iter(),
+            &LightingConfig::default(),
+        );
+
+        let win_kind = row_kind_word(&scratch, 0);
+        let lose_kind = row_kind_word(&scratch, 1);
+        assert_eq!(light_atlas_slot(win_kind), 0, "winner decodes to base 0");
+        assert_ne!(win_kind & crate::shadow_atlas::CASTS_SHADOW_BIT, 0, "winner casts bit set");
+        // The loser is left UNPACKED (a `base_for` of `SLOT_NONE` skips the pack), so its kind word
+        // is byte-identical to the raw kind: slot field 0 AND casts bit CLEAR — the shader takes the
+        // analytic fallback off the CLEAR casts bit (never a stale slot-0 SAMPLE, the masked bug).
+        assert_eq!(lose_kind & crate::shadow_atlas::CASTS_SHADOW_BIT, 0, "loser casts bit clear");
+        assert_eq!(lose_kind, crate::light::LIGHT_KIND_SPOT, "loser kind word untouched (raw)");
+    }
+
+    /// The 0%-gate: a point light with NO atlas base (the empty assignment — no
+    /// `CastsPunctualShadow`, or the shadow resolve disabled) folds to a kind word BYTE-IDENTICAL
+    /// to the pre-wiring path (`fold_light_table`), no slot bits set.
+    #[test]
+    fn slotted_fold_no_assignment_is_byte_identical_to_unslotted() {
+        let pt = PointLight::new([0.0, 1.0, 0.0], [1.0, 1.0, 1.0], 300.0, 9.0);
+        let sp = SpotLight::new([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 1.0], 200.0, 8.0, 20.0, 30.0);
+        let cfg = LightingConfig::default();
+
+        // The un-slotted reference table.
+        let mut reference = vec![0u8; LIGHT_HEADER_BYTES + 4 * GPU_LIGHT_BYTES];
+        let r_used =
+            fold_light_table(&mut reference, [].iter(), [].iter(), [pt].iter(), [sp].iter(), &cfg);
+
+        // The slotted table with the EMPTY assignment (`base_for` == SLOT_NONE for both).
+        let empty = PunctualSlotAssignment::EMPTY;
+        let mut slotted = vec![0u8; LIGHT_HEADER_BYTES + 4 * GPU_LIGHT_BYTES];
+        let s_used = fold_light_table_slotted(
+            &mut slotted,
+            [].iter(),
+            [].iter(),
+            core::iter::once((empty.base_for(EntityId(0)), &pt)),
+            core::iter::once((empty.base_for(EntityId(0)), &sp)),
+            &cfg,
+        );
+
+        assert_eq!(r_used, s_used);
+        assert_eq!(reference, slotted, "empty-assignment slotted fold is byte-identical");
+    }
+
+    /// The host `pack_atlas_slot(kind, base)` must produce the SAME `dir_kind.w` the golden's
+    /// `with_atlas_slot(base)` encodes (they share the identical shift/mask/casts-bit encoding).
+    /// Reproduces the golden's `with_atlas_slot` arithmetic locally and asserts byte-equality for a
+    /// few bases + kinds.
+    #[test]
+    fn pack_atlas_slot_matches_golden_with_atlas_slot_encoding() {
+        // The golden's `with_atlas_slot(slot)` on a `dir_kind[3]` bit-pattern `kind` (goldens.rs):
+        // clear the slot field + casts bit, write the masked slot, set casts iff slot != NONE.
+        fn golden_with_atlas_slot(kind: u32, slot: u32) -> u32 {
+            use crate::shadow_atlas::{ATLAS_SLOT_MASK, ATLAS_SLOT_SHIFT, CASTS_SHADOW_BIT, SLOT_NONE};
+            let base = kind & !(ATLAS_SLOT_MASK << ATLAS_SLOT_SHIFT) & !CASTS_SHADOW_BIT;
+            let with_slot = base | ((slot & ATLAS_SLOT_MASK) << ATLAS_SLOT_SHIFT);
+            if slot == SLOT_NONE { with_slot } else { with_slot | CASTS_SHADOW_BIT }
+        }
+        for &kind in &[crate::light::LIGHT_KIND_POINT, crate::light::LIGHT_KIND_SPOT] {
+            for base in [0u32, 1, 6, 10, SLOT_NONE] {
+                assert_eq!(
+                    pack_atlas_slot(kind, base),
+                    golden_with_atlas_slot(kind, base),
+                    "pack_atlas_slot must match golden with_atlas_slot for kind={kind}, base={base}"
+                );
+            }
+        }
     }
 }

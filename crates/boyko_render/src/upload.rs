@@ -29,6 +29,7 @@ use boyko_scene::ViewUniform;
 use boyko_sdf_math::SdfEdit;
 
 use crate::csm_config::{RESOLVED_CSM_BYTES, ResolvedCsm};
+use crate::shadow_atlas::{RESOLVED_SHADOW_ATLAS_BYTES, ResolvedShadowAtlas};
 use crate::gpu_transform3d::GPU_TRANSFORM3D_BYTES;
 use crate::mesh_draw::MeshRenderScratch;
 use crate::view::composite_from_view;
@@ -457,6 +458,69 @@ pub unsafe fn upload_csm_ring(
             (resolved as *const ResolvedCsm).cast::<u8>(),
             mapped.as_ptr(),
             RESOLVED_CSM_BYTES,
+        );
+    }
+}
+
+/// Copies the fitted [`ResolvedShadowAtlas`] (the punctual spot/point atlas selection,
+/// byte-identical to the resolve's binding-15 UBO shape, see [`RESOLVED_SHADOW_ATLAS_BYTES`])
+/// into ONE atlas-UBO ring slot — the per-frame punctual upload of the production G-buffer path
+/// (the punctual host rung, mirroring [`upload_csm_ring`]).
+///
+/// Uploaded UNCONDITIONALLY every frame, exactly like [`upload_csm_ring`]: `resolve_shadow_atlas`
+/// re-fits from the LIVE camera each frame (the `spot_priority` = range²/dist² proxy is
+/// camera-dependent), so a boot-seed would go stale the moment the camera moves, and a change gate
+/// would cost a 1296-byte compare + host tracking state to save a ~1296-byte memcpy. A DISABLED
+/// selection uploads as all-zero (`mode_word == 0`) — consistent with the bound-but-unread OFF
+/// path.
+///
+/// # Panics
+///
+/// Panics if `ring_slot.size` is smaller than [`RESOLVED_SHADOW_ATLAS_BYTES`]: the memcpy would be
+/// out-of-bounds (UB), so the guard is a hard assert in every build.
+///
+/// # Safety
+///
+/// * `ring_slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at least
+///   `ring_slot.size` valid, persistently-mapped bytes.
+/// * `ring_slot` is the FENCED slot's buffer — `atlas_ubo[token.slot()]` (the same token/slot
+///   contract as [`upload_csm_ring`]): the resolve of the slot's previous occupant retired behind
+///   the waited fence, and the sibling in-flight frame binds the OTHER ring slot.
+pub unsafe fn upload_atlas_ring(
+    token: &FrameWriteToken,
+    ring_slot: &BoundBuffer,
+    resolved: &ResolvedShadowAtlas,
+) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    // Hard bound BEFORE the memcpy (review P1 discipline): an undersized slot would make the
+    // 1296-byte write out-of-bounds. One compare per frame.
+    assert!(
+        ring_slot.size as usize >= RESOLVED_SHADOW_ATLAS_BYTES,
+        "shadow-atlas UBO slot too small: {} bytes < the {}-byte ResolvedShadowAtlas mirror",
+        ring_slot.size,
+        RESOLVED_SHADOW_ATLAS_BYTES
+    );
+
+    let mapped = ring_slot
+        .mapped
+        .expect("invariant: the shadow-atlas UBO slot is host-visible mapped");
+    // SAFETY: `resolved` is a live `#[repr(C)]` POD of exactly `RESOLVED_SHADOW_ATLAS_BYTES`
+    // (const-asserted at its definition) with no padding holes (every trailing word — including
+    // the host-only `face_point_mask` and the final `_pad` — is an explicit field), so reading
+    // its raw bytes is defined. `mapped` targets >= `ring_slot.size >= RESOLVED_SHADOW_ATLAS_BYTES`
+    // valid mapped host-coherent bytes (hard-asserted above) — the write is in-bounds. The
+    // borrowed `FrameWriteToken` + the slot-identity contract prove this slot's in-flight fence
+    // was waited THIS frame (the previous occupant's resolve finished its UBO reads; the sibling
+    // frame binds the other slot) — race-free, lock-free. The two regions are distinct allocations
+    // (no overlap).
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            (resolved as *const ResolvedShadowAtlas).cast::<u8>(),
+            mapped.as_ptr(),
+            RESOLVED_SHADOW_ATLAS_BYTES,
         );
     }
 }

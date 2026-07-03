@@ -42,7 +42,7 @@ use boyko_rhi_vulkan::rhi_impl::{
 };
 use boyko_rhi_vulkan::swapchain::{
     CsmDepthActivation, FRAMES_IN_FLIGHT, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES,
-    GBufferMeshDraw, GBufferScene, InterpActivation,
+    GBufferMeshDraw, GBufferScene, InterpActivation, PunctualDepthActivation,
 };
 use boyko_rhi_vulkan::texture::VulkanTexture;
 use boyko_sdf_math::SdfEdit;
@@ -50,7 +50,8 @@ use boyko_sdf_math::SdfEdit;
 use boyko_render::{
     GPU_LIGHT_BYTES, GPU_LIGHT_WORDS, GPU_TRANSFORM3D_BYTES, GpuLight, LIGHT_HEADER_BASE_WORDS,
     LIGHT_HEADER_BYTES, LightHeaderGpu, LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialGpu,
-    RESOLVED_CSM_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, ResolvedCsm, SHADOW_DIM, Vertex,
+    RESOLVED_CSM_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, ResolvedCsm, ResolvedShadowAtlas, SHADOW_DIM,
+    Vertex,
 };
 
 /// The boot instance budget: the per-slot instance-model SSBO holds this many
@@ -200,7 +201,12 @@ struct CsmResources {
     depth_fs: VulkanShaderModule,
     atlas: VulkanTexture,
     atlas_sampler: VulkanSampler,
-    atlas_ubo: BoundBuffer,
+    /// The shadow-atlas UBO RING (one host-coherent slot per in-flight frame), zero-seeded —
+    /// bound-but-unread while the punctual depth pass is OFF. RINGED (was a single buffer): the
+    /// atlas fit is CAMERA-DEPENDENT (`spot_priority` = range²/dist²), re-uploaded through the
+    /// fenced write token every frame, so it needs a per-in-flight-frame slot exactly like the
+    /// CSM cascade UBO.
+    atlas_ubo: [BoundBuffer; FRAMES_IN_FLIGHT],
     point_depth_pipeline: VulkanGraphicsPipeline,
     point_depth_vs: VulkanShaderModule,
     point_depth_fs: VulkanShaderModule,
@@ -310,21 +316,22 @@ impl CsmResources {
             },
         )
         .expect("invariant: shadow-atlas PCF comparison sampler create");
-        let atlas_ubo = RhiDevice::create_buffer(
-            device,
-            &BufferDesc {
-                size: SPOT_ATLAS_UBO_BYTES,
-                usage: BufferUsage::UNIFORM,
-                location: MemoryLocation::HostVisibleCoherent,
-            },
-        )
-        .expect("invariant: shadow-atlas UBO create");
-        {
+        let atlas_ubo: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            let b = RhiDevice::create_buffer(
+                device,
+                &BufferDesc {
+                    size: SPOT_ATLAS_UBO_BYTES,
+                    usage: BufferUsage::UNIFORM,
+                    location: MemoryLocation::HostVisibleCoherent,
+                },
+            )
+            .expect("invariant: shadow-atlas UBO create");
             // Zero seed: mode_word == 0 (bound-but-unread on the OFF path).
-            let mapped = RhiDevice::buffer_mapped_ptr(device, &atlas_ubo)
+            let mapped = RhiDevice::buffer_mapped_ptr(device, &b)
                 .expect("invariant: host-visible atlas UBO is mapped");
             zero_fill(mapped, SPOT_ATLAS_UBO_BYTES as usize);
-        }
+            b
+        });
 
         let point_depth_vs = RhiDevice::create_shader_module(device, punctual_depth_vs_spirv())
             .expect("invariant: punctual point depth VS module create");
@@ -443,7 +450,9 @@ impl CsmResources {
             RhiDevice::destroy_graphics_pipeline(device, self.point_depth_pipeline);
             RhiDevice::destroy_shader_module(device, self.point_depth_fs);
             RhiDevice::destroy_shader_module(device, self.point_depth_vs);
-            RhiDevice::destroy_buffer(device, self.atlas_ubo);
+            for slot in self.atlas_ubo {
+                RhiDevice::destroy_buffer(device, slot);
+            }
             RhiDevice::destroy_sampler(device, self.atlas_sampler);
             RhiDevice::destroy_texture(device, self.atlas);
             RhiDevice::destroy_graphics_pipeline(device, self.depth_pipeline);
@@ -1217,6 +1226,7 @@ impl GpuSceneBundles {
         mesh_draw: &'a [GBufferMeshDraw<'a>],
         light_upload: Option<u64>,
         csm: Option<&ResolvedCsm>,
+        atlas: Option<&ResolvedShadowAtlas>,
         interp_count: u32,
         overstep: f32,
     ) -> GBufferScene<'a> {
@@ -1327,8 +1337,69 @@ impl GpuSceneBundles {
             }),
             shadow_atlas_texture: &self.csm.atlas,
             shadow_atlas_sampler: &self.csm.atlas_sampler,
-            shadow_atlas_ubo: &self.csm.atlas_ubo,
-            atlas_punctual: None,
+            // The FENCED slot's atlas-UBO ring buffer — the resolve binds the SAME slot the runner
+            // memcpys `ResolvedShadowAtlas` into via `upload_atlas_ring` (binding 15). The sibling
+            // in-flight frame binds the OTHER slot (the lock-free WAR discipline the ring exists for).
+            shadow_atlas_ubo: &self.csm.atlas_ubo[slot],
+            // The punctual (spot/point) depth-pass activation (the punctual host rung): built from
+            // the SAME ResolvedShadowAtlas the runner memcpys into this slot's atlas UBO (the O1
+            // single-matrix pin — LE float bytes == the in-memory f32s the UBO copy carries on
+            // x86_64). `face_is_point[s]` is fed DIRECTLY from `r.face_point_mask` (the resolve's
+            // single source of truth — W4), NOT re-derived from `inv_range` or contiguity.
+            atlas_punctual: atlas.map(|r| {
+                debug_assert!(
+                    r.mode_word == 1 && r.active_layers > 0,
+                    "invariant: the punctual arming predicate passes a fitted selection"
+                );
+                // Cross-crate const pins: the host atlas texture + UBO were created at these
+                // dimensions/slot budget, which MUST equal the render crate's fit shape.
+                debug_assert_eq!(
+                    SPOT_SHADOW_DIM, SHADOW_DIM,
+                    "invariant: host atlas dim == boyko_render::SHADOW_DIM"
+                );
+                debug_assert_eq!(
+                    SPOT_ATLAS_SLOTS as usize, M_SLOTS,
+                    "invariant: host atlas slots == boyko_render::M_SLOTS"
+                );
+                let count = (r.active_layers as usize).min(r.faces.len());
+                let mut face_view_proj = [[0u8; 64]; M_SLOTS];
+                let mut face_is_point = [false; M_SLOTS];
+                let mut face_light = [[0u8; 16]; M_SLOTS];
+                for s in 0..count {
+                    let face = &r.faces[s];
+                    // COLUMN-MAJOR LE bytes (the O1 single-matrix pin — the depth VS + resolve read
+                    // the SAME per-slot matrix; on x86_64 these bytes == the f32s the UBO copy holds).
+                    for (col, column) in face.view_proj.iter().enumerate() {
+                        for (row, f) in column.iter().enumerate() {
+                            let at = col * 16 + row * 4;
+                            face_view_proj[s][at..at + 4].copy_from_slice(&f.to_le_bytes());
+                        }
+                    }
+                    // W4 single source of truth: bit `s` of `face_point_mask` ⇒ a POINT cube face.
+                    face_is_point[s] = (r.face_point_mask >> s) & 1 != 0;
+                    // The POINT-face `cam_eye@64` push lane: `light_pos.xyz` (12 B) + `inv_range` (4 B).
+                    // Unused (but harmless) for SPOT faces.
+                    face_light[s][0..4].copy_from_slice(&face.light_pos[0].to_le_bytes());
+                    face_light[s][4..8].copy_from_slice(&face.light_pos[1].to_le_bytes());
+                    face_light[s][8..12].copy_from_slice(&face.light_pos[2].to_le_bytes());
+                    face_light[s][12..16].copy_from_slice(&face.inv_range.to_le_bytes());
+                }
+                // The 88-byte depth-pass push TEMPLATE: `use_model_matrix == 1` (@84). The recorder
+                // overwrites `view_proj` (@0..64) per slot, `cam_eye` (@64..80) per POINT slot, and
+                // `base_instance` (@80) per caster batch.
+                let mut push = [0u8; GBUFFER_PUSH_BYTES];
+                push[84..88].copy_from_slice(&1u32.to_le_bytes());
+                PunctualDepthActivation {
+                    pipeline: &self.csm.depth_pipeline,
+                    point_pipeline: &self.csm.point_depth_pipeline,
+                    push,
+                    face_view_proj,
+                    face_is_point,
+                    face_light,
+                    active_layers: count as u32,
+                    shadow_dim: SPOT_SHADOW_DIM,
+                }
+            }),
             // The B3 interp activation (host plan R5, refined-B): Some(_) on a frame
             // the gather produced DYNAMIC instances. Its model_out target is the SHARED
             // instance ring the raster VS reads (instance_bind_group ==
@@ -1364,6 +1435,15 @@ impl GpuSceneBundles {
     #[inline]
     pub(crate) fn csm_ubo_slot(&self, slot: usize) -> &BoundBuffer {
         &self.csm.ubo[slot]
+    }
+
+    /// The FENCED slot's shadow-atlas-UBO ring buffer — the write target of the runner's
+    /// per-frame [`upload_atlas_ring`](boyko_render::upload_atlas_ring) (the resolve binds the
+    /// same slot at binding 15, so the sibling in-flight frame reads the OTHER slot — the
+    /// lock-free write-after-read discipline the ring exists for).
+    #[inline]
+    pub(crate) fn atlas_ubo_slot(&self, slot: usize) -> &BoundBuffer {
+        &self.csm.atlas_ubo[slot]
     }
 
     /// The marcher's binding-0 edit-list SSBO — the write target of the runner's

@@ -9,6 +9,7 @@ use crate::light::{DirectionalLight, LightTableDirty, PointLight, SkyLight, Spot
 use crate::light_policy::{LightStats, select_lighting_cull};
 use crate::light_reconcile::light_reconcile;
 use crate::light_system::{LightTableGeneration, collect_lights, evict_light, light_seed_state};
+use crate::shadow_atlas::{PunctualResolveSet, PunctualSlotAssignment};
 
 /// Registers [`light_reconcile`](crate::light_reconcile::light_reconcile) BEFORE
 /// [`collect_lights`](crate::light_system::collect_lights), plus the
@@ -75,6 +76,14 @@ impl Plugin for LightingPlugin {
         // every actual rewrite; ringed hosts gate their per-slot staging writes on it.
         app.insert_resource(LightTableGeneration(0));
 
+        // The entity-keyed punctual atlas-base handoff (Inc-1-GPU): its READER is
+        // `collect_lights` (owned here), so this plugin guarantees the resource exists even in a
+        // lighting-only world (LE gate tests, no `ShadowAtlasPlugin`). Default EMPTY — the 0%-gate,
+        // so `collect_lights` reads `SLOT_NONE` for every light and packs NOTHING until the shadow
+        // resolve (in `ShadowAtlasPlugin`) publishes winners. The single WRITER is
+        // `resolve_shadow_atlas`.
+        app.insert_resource(PunctualSlotAssignment::default());
+
         // P1: the cold cost-model carrier for the lighting StrategyPolicy. Default starts
         // the band OFF (matching `LightingConfig::clusters_enabled`'s `false` default), so
         // a default-Manual world is byte-identical to pre-P1. `select_lighting_cull` is its
@@ -91,7 +100,14 @@ impl Plugin for LightingPlugin {
         // `select_lighting_cull` (P1) also runs `.before(collect)` so this frame's banded
         // cluster decision feeds the header fold (no one-frame staleness).
         app.add_systems_cfg(|b| {
-            let collect = b.add_system(collect_lights).key();
+            // `collect_lights` runs `.after_set(PunctualResolveSet)` — the by-name cross-plugin
+            // edge that guarantees the punctual shadow resolve (in `ShadowAtlasPlugin`) has
+            // published `PunctualSlotAssignment` BEFORE this fold reads it to pack each light's
+            // atlas base. Set-to-set ordering is add-order-independent (holds even though
+            // `ShadowAtlasPlugin` is added after this plugin) and cross-schedule-safe (both land in
+            // `CoreSchedule::Main`), so the assignment is never one frame stale — correct on a
+            // moving camera, where the priority ranking can reorder which light wins base 0.
+            let collect = b.add_system(collect_lights).after_set(PunctualResolveSet).key();
             b.add_system(light_reconcile).before(collect);
             b.add_system(select_lighting_cull).before(collect);
             let mut seed_state = light_seed_state();

@@ -175,13 +175,14 @@ pub use light::{
     DirectionalLight, GPU_LIGHT_WORDS, GpuLight, INDEX_LIST_CAP, LIGHT_HEADER_BASE_WORDS,
     LIGHT_HEADER_WORDS, LIGHT_KIND_DIRECTIONAL, LIGHT_KIND_POINT, LIGHT_KIND_SKY, LIGHT_KIND_SPOT,
     LightEnabled, LightHeaderGpu, LightTableDirty, LightingConfig, MAX_LIGHTS,
-    MAX_LIGHTS_PER_CLUSTER, PointLight, SPOT_COS_OUTER_MAX, SkyLight, SpotLight, cluster_index,
+    MAX_LIGHTS_PER_CLUSTER, PUNCTUAL_MODE_BIT, PointLight, SPOT_COS_OUTER_MAX, SkyLight, SpotLight,
+    cluster_index,
 };
 pub use light_policy::{CLUSTER_HI, CLUSTER_LO, LightStats, select_lighting_cull};
 pub use light_system::{
     GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightSeedState, LightTableGeneration,
     LightTableStaging, SetLightEnabledById, collect_lights, evict_light, fold_light_table,
-    light_seed_state, set_light_enabled_now, write_light_table,
+    fold_light_table_slotted, light_seed_state, set_light_enabled_now, write_light_table,
 };
 pub use gbuffer_depth::{GBUFFER_T_MAX, assert_gbuffer_marcher_t_max_agree};
 pub use material::{MATERIAL_GPU_WORDS, MaterialGpu, MaterialId};
@@ -190,9 +191,10 @@ pub use mesh_registry::{
 };
 pub use shadow_atlas::{
     ATLAS_SLOT_MASK, ATLAS_SLOT_SHIFT, CASTS_SHADOW_BIT, FaceTransform, M_SLOTS, POINT_FACE_COUNT,
-    PointShadowInput, RESOLVED_SHADOW_ATLAS_BYTES, ResolvedShadowAtlas, SHADOW_DIM, SLOT_NONE,
-    ShadowConfig, SpotShadowInput, light_atlas_slot, pack_atlas_slot, resolve_shadow_atlas,
-    resolve_shadow_atlas_inputs, resolve_shadow_atlas_spots, spot_priority,
+    PointShadowInput, PunctualResolveSet, PunctualSlotAssignment, RESOLVED_SHADOW_ATLAS_BYTES,
+    ResolvedShadowAtlas, SHADOW_DIM, SLOT_NONE, ShadowConfig, SpotShadowInput, light_atlas_slot,
+    pack_atlas_slot, resolve_shadow_atlas, resolve_shadow_atlas_inputs, resolve_shadow_atlas_spots,
+    spot_priority, sync_punctual_light_gate,
 };
 pub use sdf_edit::{
     MAX_SDF_EDITS, SdfEdit, SdfEditStaging, SdfPlugin, SdfPrimitive, collect_sdf_edits, sdf_kind,
@@ -204,8 +206,8 @@ pub use snap_interpolation::{SnapInterpolation, TeleportCommandsExt, snap_apply}
 pub use ssao_config::{ResolvedSsao, SsaoConfig, SsaoQuality, resolve_ssao, resolve_ssao_policy};
 pub use ssao_plugin::SsaoPlugin;
 pub use upload::{
-    upload_camera_ring, upload_csm_ring, upload_instance_models, upload_light_table,
-    upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
+    upload_atlas_ring, upload_camera_ring, upload_csm_ring, upload_instance_models,
+    upload_light_table, upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
 };
 pub use view::{
     composite_from_view, composite_perspective_from_view, demo_view_proj_from_view,

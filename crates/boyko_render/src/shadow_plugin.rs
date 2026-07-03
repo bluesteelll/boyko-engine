@@ -5,7 +5,9 @@
 
 use boyko_ecs::ecs::core::app::{App, Plugin};
 
-use crate::shadow_atlas::{ResolvedShadowAtlas, ShadowConfig, resolve_shadow_atlas};
+use crate::shadow_atlas::{
+    PunctualResolveSet, ResolvedShadowAtlas, ShadowConfig, resolve_shadow_atlas,
+};
 
 /// Registers the sparse-shadow config substrate: inserts [`ShadowConfig`] (default DISABLED —
 /// `enabled == false`, the 0%-gate) and its derived [`ResolvedShadowAtlas`] companion, and
@@ -57,9 +59,19 @@ impl Plugin for ShadowAtlasPlugin {
         // even before the first policy run.
         app.insert_resource(ShadowConfig::default());
         app.insert_resource(ResolvedShadowAtlas::default());
+        // NOTE: the `PunctualSlotAssignment` resolve → light-table handoff resource is inserted by
+        // `LightingPlugin` (the plugin that owns its READER, `collect_lights`), NOT here — so a
+        // lighting-only world (LE gate tests) has the empty handoff even without this plugin. This
+        // plugin's `resolve_shadow_atlas` is only its WRITER.
 
+        // `resolve_shadow_atlas` joins `PunctualResolveSet` — the by-name ordering seam that pins
+        // it BEFORE the light-table fold (`collect_lights` runs `.after_set(PunctualResolveSet)` in
+        // `LightingPlugin`). Set-to-set ordering is add-order-independent and cross-schedule-safe
+        // (both systems land in `CoreSchedule::Main`), so the resolve → publish → collect chain
+        // completes within ONE frame — correct even on a moving camera, where the priority ranking
+        // (`range²/dist²`) can reorder which light wins base 0 (the R6 `CameraSet` precedent).
         app.add_systems_cfg(|b| {
-            b.add_system(resolve_shadow_atlas);
+            b.add_system(resolve_shadow_atlas).in_set(PunctualResolveSet);
         });
     }
 

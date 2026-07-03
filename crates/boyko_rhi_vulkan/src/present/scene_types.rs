@@ -1005,11 +1005,15 @@ pub struct GBufferScene<'a> {
     /// [`Self::atlas_punctual`] is `Some`) renders into `layer_render_view(s)` per spot slot, the
     /// resolve PCF-samples through the array sample view bundled with [`Self::shadow_atlas_sampler`].
     ///
-    /// INTENTIONALLY NOT RINGED (a single instance, unlike the G-buffer render targets): the
-    /// shadow atlas is WORLD-FIXED — rendered every frame from CONSTANT per-slot face matrices over
-    /// the STATIC caster batch, so its content is byte-identical each frame and a cross-frame read
-    /// of it is benign (no Write-After-Read jitter). It would only need ringing if a future scene
-    /// made its content camera-dependent.
+    /// The DEPTH TEXTURE itself is a single instance (not ring-swapped): the punctual depth pass
+    /// re-renders every ACTIVE layer this frame and then barriers the WHOLE `M_SLOTS` array to
+    /// `SHADER_READ_ONLY_OPTIMAL` before the resolve sample (see [`Self::atlas_punctual`]), so the
+    /// resolve only ever reads layers written this frame. NOTE: the atlas CONTENT is NOT
+    /// byte-identical across frames — the host fit (`resolve_shadow_atlas`) is CAMERA-DEPENDENT (the
+    /// `spot_priority` = range²/dist² top-K selection shifts which lights get slots as the camera
+    /// moves), so the per-slot `view_proj` matrices and slot assignment change frame to frame. The
+    /// UBO carrying that fit ([`Self::shadow_atlas_ubo`]) IS host-ringed for exactly this reason;
+    /// the depth image needs no ring because the whole-array barrier closes the cross-frame read.
     pub shadow_atlas_texture: &'a VulkanTexture,
     /// Shadow Phase 5 Inc-1-GPU: the PCF COMPARISON sampler (`compareEnable = VK_TRUE`,
     /// `LessOrEqual`), BUNDLED with [`Self::shadow_atlas_texture`] as the resolve's binding-14
