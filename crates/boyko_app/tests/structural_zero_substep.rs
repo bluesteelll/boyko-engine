@@ -23,7 +23,7 @@ use boyko_ecs::prelude::*;
 use boyko_macros::Resource;
 use boyko_render::instance_model::InstanceModelCol;
 use boyko_render::mesh_draw::MeshRenderScratch;
-use boyko_render::{MeshBundle, upload_instance_models};
+use boyko_render::{GpuTransform3D, MeshBundle, upload_instance_models};
 use boyko_rhi::enums::IndexType;
 use boyko_rhi_vulkan::ffi::VkBuffer;
 use boyko_rhi_vulkan::memory::BoundBuffer;
@@ -41,17 +41,22 @@ fn count_substep(mut s: ResMut<Substeps>) {
     s.0 += 1;
 }
 
-/// The headless twin of `gather_mesh_draws`: the SAME query shape + the same
-/// count→prefix-sum→scatter core, with a fixed meta table (no GPU registry).
+/// The headless twin of `gather_mesh_draws`: the SAME unified query shape
+/// (`Option<&GpuTransform3D>` keys static vs interpolated) + the same
+/// count→prefix-sum→scatter core, with a fixed meta table (no GPU registry). The
+/// test spawns only static meshes, so every row takes the `None` branch.
 #[allow(clippy::needless_pass_by_value)]
 fn gather_headless(
-    q: Query<(&MeshHandle, &InstanceModelCol), Enabled<RenderEnabled>>,
+    q: Query<
+        (&MeshHandle, &InstanceModelCol, Option<&GpuTransform3D>),
+        Enabled<RenderEnabled>,
+    >,
     mut scratch: ResMut<MeshRenderScratch>,
 ) {
-    scratch.gather_into(
+    scratch.gather_mixed_into(
         1,
         |_mesh| (36u32, IndexType::Uint16),
-        || q.iter().map(|(h, col)| (h.0, col)),
+        || q.iter().map(|(h, col, pair)| (h.0, col, pair)),
     );
 }
 

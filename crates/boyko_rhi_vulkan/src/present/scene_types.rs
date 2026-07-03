@@ -527,18 +527,21 @@ pub struct SsaoActivation<'a> {
 /// `None` (the default for every dump/offscreen scene) keeps the command stream
 /// BYTE-IDENTICAL to the pre-B3 path — NO interp dispatch, NO interp barrier is recorded,
 /// and the raster/shadow VS read whatever `instance_bind_group` the caller supplies (the
-/// legacy hand-affine SSBO). `Some(_)` records the interp dispatch BEFORE the raster pass,
-/// writing this frame's interpolated model columns into the draw SSBO the raster + shadow
-/// vertex shaders read; the graph derives the COMPUTE→VERTEX RAW barrier.
+/// static instance ring). `Some(_)` records the interp dispatch BEFORE the raster pass,
+/// interpolating each dynamic body's model column into the SHARED instance ring the raster +
+/// shadow vertex shaders read; the graph derives the COMPUTE→VERTEX RAW barrier.
 ///
-/// # The draw-SSBO ring contract (the caller's responsibility)
+/// # The shared-ring contract (refined-B — the caller's responsibility)
 ///
-/// When interp is ON the caller MUST make [`GBufferScene::instance_bind_group`] the CURRENT
-/// frame slot's DRAW-SSBO bind group — the SAME buffer this pass's [`Self::interp_set`]
-/// writes at binding 1 — so the raster + CSM + atlas vertex shaders read the freshly
-/// interpolated columns. Both the pair SSBO (this frame's host-written pairs) and the draw
-/// SSBO are FIF-ringed (frame-private, like the G-buffer ring), so no cross-frame barrier is
-/// needed beyond the intra-frame COMPUTE→VERTEX dependency the graph derives.
+/// Refined-B unifies the output: there is NO private draw SSBO. The host CPU-scatters the
+/// STATIC rows into the instance ring, this pass's [`Self::model_out_buffer`] (bound at
+/// [`Self::interp_set`] @2) is that SAME ring, and the compute overwrites ONLY the DYNAMIC
+/// slots (via [`Self::out_slot_buffer`], the shader's `OutSlot` lane). So the caller keeps
+/// [`GBufferScene::instance_bind_group`] pointed at the ring's bind group UNCHANGED whether
+/// interp is ON or OFF — no bind swap. The pair, out-slot, and shared-ring slots are all
+/// FIF-ringed (frame-private), so no cross-frame barrier is needed beyond the intra-frame
+/// COMPUTE→VERTEX dependency the graph derives on the shared ring. The static slots are never
+/// in `OutSlot`, so the compute never touches them (single-writer-per-slot).
 #[derive(Clone, Copy)]
 pub struct InterpActivation<'a> {
     /// The B2 interp compute pipeline (`interp_instances.comp` /
@@ -548,25 +551,32 @@ pub struct InterpActivation<'a> {
     /// recorder binds it + dispatches `ceil(count / LOCAL_SIZE_X)` groups BEFORE the raster pass.
     pub pipeline: &'a ComputePipeline,
     /// The CURRENT frame slot's interp bind group { `StructuredBuffer<TransformPair>` @0 (the
-    /// host-written pair SSBO, read), `RWStructuredBuffer<InterpModel>` @1 (the draw SSBO,
-    /// written) }. A ring the caller rebuilds/selects per frame (the pair slot the host just
-    /// wrote + the draw slot the raster VS will read — both `frame_index()`).
+    /// host-written pair SSBO, read), `StructuredBuffer<uint>` @1 (the host-written out-slot
+    /// SSBO, read), `RWStructuredBuffer<InterpModel>` @2 (the SHARED instance ring, written) }.
+    /// A ring the caller rebuilds/selects per frame (all three `frame_index()`).
     pub interp_set: &'a VulkanBindGroup,
     /// The CURRENT frame slot's PAIR SSBO physical buffer (bound at [`Self::interp_set`] @0).
     /// The framegraph resolves the interp pass's declared pair read to this handle; that read
     /// is a first touch on a frame-private slot, so no barrier is derived (the handle is
     /// declared for completeness). Same `frame_index()` slot the host wrote this frame.
     pub pair_buffer: &'a BoundBuffer,
-    /// The CURRENT frame slot's DRAW SSBO physical buffer (bound at [`Self::interp_set`] @1 for
-    /// the compute WRITE, and at [`GBufferScene::instance_bind_group`] @0 for the raster/shadow
-    /// VS READ). The framegraph resolves the COMPUTE→VERTEX RAW barrier on the draw SSBO to
-    /// this handle — the barrier the raster pass emits so the VS reads the freshly interpolated
-    /// columns. Same `frame_index()` slot as [`Self::interp_set`]'s @1 target.
-    pub draw_buffer: &'a BoundBuffer,
-    /// The number of interpolated instances this frame — the compute dispatch element count
-    /// (`ceil(count / LOCAL_SIZE_X)` groups) AND the push's `count` bounds guard. `0` records
-    /// NO dispatch (an empty frame skips the pass entirely, byte-identical to interp OFF for
-    /// that frame).
+    /// The CURRENT frame slot's OUT-SLOT SSBO physical buffer (bound at [`Self::interp_set`] @1,
+    /// the shader's `OutSlot` lane). `out_slot[d]` is dynamic instance `d`'s offset into the
+    /// shared model-out ring. Same first-touch handling as the pair buffer (no barrier).
+    pub out_slot_buffer: &'a BoundBuffer,
+    /// The CURRENT frame slot's SHARED instance-ring physical buffer (refined-B): bound at
+    /// [`Self::interp_set`] @2 for the compute WRITE (the dynamic slots), and at
+    /// [`GBufferScene::instance_bind_group`] @0 for the raster/shadow VS READ — the SAME
+    /// buffer. The host CPU-scatters the STATIC rows into it before this pass; the compute
+    /// overwrites ONLY the dynamic slots. The framegraph resolves the COMPUTE→VERTEX RAW
+    /// barrier on this ring to this handle — the barrier the raster pass emits so the VS reads
+    /// the freshly interpolated columns beside the static ones. Same `frame_index()` slot as
+    /// [`Self::interp_set`]'s @2 target.
+    pub model_out_buffer: &'a BoundBuffer,
+    /// The number of DYNAMIC (interpolated) instances this frame — the compute dispatch element
+    /// count (`ceil(count / LOCAL_SIZE_X)` groups) AND the push's `count` bounds guard. `0`
+    /// records NO dispatch (a pure-static frame skips the pass entirely, byte-identical to
+    /// interp OFF for that frame).
     pub instance_count: u32,
     /// This frame's fixed-timestep overstep fraction (`FixedTime::overstep_fraction()`, in
     /// `[0, 1)`) — pushed as the interp `alpha`. Updates EVERY frame (a per-frame push, no

@@ -43,4 +43,10 @@ pub struct HostFrameStats {
     /// Frames on which the cascade depth pass was armed
     /// (`GBufferScene::csm == Some` — a fitted sun AND live caster batches).
     pub csm_armed_frames: u64,
+    /// Frames on which the interpolation pre-pass was armed (host plan R5): the
+    /// pair gather produced instances (`MeshRenderScratch::pair_ring` non-empty),
+    /// so the runner uploaded the pair ring, armed `GBufferScene::interp`, and the
+    /// raster VS read the interpolated draw SSBO. Zero on a scene with no
+    /// `GpuTransform3D` body (interp OFF — byte-identical to pre-R5).
+    pub interp_armed_frames: u64,
 }

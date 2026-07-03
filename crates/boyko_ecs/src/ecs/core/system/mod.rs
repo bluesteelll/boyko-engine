@@ -29,9 +29,9 @@ pub use gpu_intent::{GpuAccess, GpuAccessIntent, GpuStage, GpuTouch, MAX_GPU_TOU
 pub use function_system::{FunctionSystem, SystemParamFunction};
 pub use into_system::{ExclusiveSystemMarker, IntoSystem, IsFunctionSystem};
 pub use params::{
-    Commands, EventIter, EventReader, EventReaderState, EventWriter, EventWriterState, Local,
-    MAX_SYSTEM_PARAM_ARITY, NonSendRes, NonSendResMut, NonSendResMutState, NonSendResState, Res,
-    ResMut, ResMutState, ResState,
+    Commands, EntityCommands, EventIter, EventReader, EventReaderState, EventWriter,
+    EventWriterState, Local, MAX_SYSTEM_PARAM_ARITY, NonSendRes, NonSendResMut, NonSendResMutState,
+    NonSendResState, Res, ResMut, ResMutState, ResState,
 };
 pub use system::System;
 pub use system_meta::SystemMeta;

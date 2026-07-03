@@ -10,11 +10,12 @@
 //! structural difference: a `With<ShadowCaster>` term on the filter, so a non-caster
 //! row never enters a cascade bucket.
 //!
-//! # Reuse, not duplication (REUSE `gather_into`)
+//! # Reuse, not duplication (REUSE `gather_mixed_into`)
 //!
 //! The count → prefix-sum → scatter core is NOT re-implemented here — it is
-//! [`MeshRenderScratch::gather_into`](crate::mesh_draw::MeshRenderScratch::gather_into)
-//! called VERBATIM, with the `With<ShadowCaster>`-filtered query passed as the
+//! [`MeshRenderScratch::gather_mixed_into`](crate::mesh_draw::MeshRenderScratch::gather_mixed_into)
+//! called VERBATIM (all rows take the `None` pair branch — casters are static), with
+//! the `With<ShadowCaster>`-filtered query passed as the
 //! re-iteration closure. [`CsmCasterScratch`] is a newtype over
 //! [`MeshRenderScratch`](crate::mesh_draw::MeshRenderScratch) so the caster batches +
 //! ring live in a SEPARATE [`Resource`] from the main gather's (they must not collide:
@@ -73,7 +74,7 @@ use crate::mesh_registry::MeshRegistry;
 /// batches.
 ///
 /// A newtype over [`MeshRenderScratch`](crate::mesh_draw::MeshRenderScratch): it REUSES
-/// the foundation's `gather_into` core, its per-mesh lanes + instance ring, and its
+/// the foundation's `gather_mixed_into` core, its per-mesh lanes + instance ring, and its
 /// cleared-not-reallocated grow-POW2 discipline (Principle 5) VERBATIM — only the
 /// resource IDENTITY differs (the ECS keys a `Resource` by type, so the wrapper gives
 /// the caster gather its own slot). The gather is filtered on
@@ -134,7 +135,7 @@ impl CsmCasterScratch {
 /// # Reuse of the foundation core
 ///
 /// The count → prefix-sum → scatter is
-/// [`MeshRenderScratch::gather_into`](crate::mesh_draw::MeshRenderScratch::gather_into)
+/// [`MeshRenderScratch::gather_mixed_into`](crate::mesh_draw::MeshRenderScratch::gather_mixed_into)
 /// called verbatim: the `With<ShadowCaster>`-filtered `q.iter()` is the re-iteration
 /// closure, the [`MeshRegistry`] supplies the mesh count (sizes the lanes, O2) + each
 /// batch's `(index_count, index_type)`. One `vkCmdDrawIndexed` per caster mesh
@@ -168,13 +169,17 @@ pub fn gather_shadow_casters(
     mut scratch: ResMut<CsmCasterScratch>,
 ) {
     let mesh_count = registry.len();
-    scratch.0.gather_into(
+    // The caster gather is ALL-STATIC (the CSM depth pass reads the caster affines from
+    // this scratch's `batches`, never an interpolated ring), so every row takes the
+    // `None` pair branch of the unified gather — `pair_ring` / `pair_out_slot` stay empty
+    // and inert on the caster scratch. Reuses the one gather core (refined-B).
+    scratch.0.gather_mixed_into(
         mesh_count,
         |mesh_id| {
             let m = registry.get(MeshHandle(mesh_id));
             (m.index_count, m.index_type)
         },
-        || q.iter().map(|(h, col)| (h.0, col)),
+        || q.iter().map(|(h, col)| (h.0, col, None)),
     );
 }
 
@@ -283,11 +288,12 @@ mod tests {
         is_caster: bool,
     }
 
-    /// Runs the SAME `gather_into` core the system runs, fed ONLY the rows whose
-    /// `is_caster` is set — the CPU mirror of `Query<.., With<ShadowCaster>>`.
+    /// Runs the SAME unified gather core the system runs, fed ONLY the rows whose
+    /// `is_caster` is set — the CPU mirror of `Query<.., With<ShadowCaster>>`. All-static
+    /// (casters have no interpolation pair), so every row takes the `None` branch.
     fn gather_casters(scratch: &mut CsmCasterScratch, mesh_count: usize, rows: &[Row]) {
-        scratch.0.gather_into(mesh_count, meta, || {
-            rows.iter().filter(|r| r.is_caster).map(|r| (r.mesh_id, &r.col))
+        scratch.0.gather_mixed_into(mesh_count, meta, || {
+            rows.iter().filter(|r| r.is_caster).map(|r| (r.mesh_id, &r.col, None))
         });
     }
 
@@ -379,7 +385,7 @@ mod tests {
 
     /// Every entity is a caster — the caster gather degenerates to the SAME result the
     /// main `gather_mesh_draws` would produce (the `With<ShadowCaster>` term is a no-op
-    /// when all rows carry the marker), proving the reuse of `gather_into` is faithful.
+    /// when all rows carry the marker), proving the reuse of `gather_mixed_into` is faithful.
     #[test]
     fn all_casters_matches_unfiltered_gather() {
         let a0 = affine(0, 0);
@@ -394,9 +400,9 @@ mod tests {
         let mut casters = CsmCasterScratch::default();
         gather_casters(&mut casters, 2, &rows);
 
-        // The same inputs through the foundation's gather_into directly (no filter).
+        // The same inputs through the foundation's unified gather directly (no filter).
         let mut main = MeshRenderScratch::default();
-        main.gather_into(2, meta, || rows.iter().map(|r| (r.mesh_id, &r.col)));
+        main.gather_mixed_into(2, meta, || rows.iter().map(|r| (r.mesh_id, &r.col, None)));
 
         assert_eq!(casters.batch_count(), main.batch_count());
         assert_eq!(casters.batches(), main.batches.as_slice());

@@ -26,6 +26,7 @@ use boyko_rhi_vulkan::swapchain::FrameWriteToken;
 use boyko_scene::ViewUniform;
 
 use crate::csm_config::{RESOLVED_CSM_BYTES, ResolvedCsm};
+use crate::gpu_transform3d::GPU_TRANSFORM3D_BYTES;
 use crate::mesh_draw::MeshRenderScratch;
 use crate::view::composite_from_view;
 
@@ -110,9 +111,15 @@ pub unsafe fn upload_camera_ring(
 }
 
 /// Uploads the gathered 48-byte [`InstanceModelCol`](crate::InstanceModelCol)
-/// instance ring — the interp-OFF instance path (host plan R3) — into ONE
-/// instance-SSBO ring slot: ONE contiguous `bytemuck` memcpy, zero staging,
-/// zero allocation (plan P2-1).
+/// UNIFIED instance ring (host plan R3/R5, refined-B) into ONE instance-SSBO ring
+/// slot: ONE contiguous `bytemuck` memcpy, zero staging, zero allocation (plan P2-1).
+///
+/// The ring holds EVERY drawable (static + interpolated). Static rows carry their real
+/// affines; interpolated rows carry placeholder bytes that the interp compute
+/// overwrites on-GPU (via the out-slot lane) BEFORE the raster VS reads — the
+/// data-race note: the CPU writes the whole ring on the FENCED slot, the compute
+/// touches only the dynamic slots, and the static slots are never in `OutSlot` (so
+/// never GPU-touched), single-writer-per-slot.
 ///
 /// UNCONDITIONAL every frame (plan D5): correct by construction beats
 /// probability-correct — no dirty gating, no fingerprints. An empty gather
@@ -169,6 +176,149 @@ pub unsafe fn upload_instance_models(
     // finished its GPU reads; the sibling frame binds the other slot) —
     // race-free, lock-free. `bytes` is the scratch's own heap buffer, a
     // distinct non-overlapping region.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+    }
+}
+
+/// Uploads the gathered 96-byte [`GpuTransform3D`](crate::GpuTransform3D)
+/// interpolation-PAIR ring — the interp-ON pair path (host plan R5) — into ONE
+/// pair-SSBO ring slot: ONE contiguous `bytemuck` memcpy, zero staging, zero
+/// allocation. The B2 interp compute pre-pass reads this slot as its
+/// `TransformPair` input; its per-instance model output lands in the draw SSBO the
+/// raster VS reads.
+///
+/// UNCONDITIONAL every frame (plan D5): correct by construction beats
+/// probability-correct — no dirty gating, no fingerprints (the fingerprint gate was
+/// KILLED; a stride-64 hash collision class made it silently wrong under id-recycled
+/// respawn). An empty gather (`scratch.pair_ring` empty — a frame that took the
+/// affine gather, or a scene with no interpolated body) writes nothing; the interp
+/// activation's `instance_count == 0` then records no dispatch (byte-identical to
+/// interp OFF).
+///
+/// # Panics
+///
+/// Panics if the gathered pair ring exceeds the slot's capacity: writing past the
+/// mapped range would corrupt neighbouring sub-allocations (UB), so the guard is a
+/// hard assert in every build. The boot capacity is the host's documented initial
+/// instance budget; growth is a host (R7) concern.
+///
+/// # Safety
+///
+/// * `slot_buffer` is a LIVE host-visible buffer minted by
+///   `RhiDevice::create_buffer` (`HostVisibleCoherent`) and not yet destroyed:
+///   its `mapped` pointer targets at least `slot_buffer.size` valid,
+///   persistently-mapped bytes. A hand-built `BoundBuffer` with a dangling /
+///   undersized `mapped` violates this.
+/// * `slot_buffer` is the FENCED slot's buffer — `interp.pairs[token.slot()]`
+///   (the same token/slot contract as [`upload_camera_ring`]): the token proves
+///   that slot's in-flight fence was waited THIS frame, so the slot's previous
+///   occupant finished every COMPUTE read of this pair SSBO and the sibling
+///   in-flight frame binds the OTHER slot. Passing a different slot's buffer
+///   re-opens the `80bf033` write-after-read race.
+pub unsafe fn upload_pair_ring(
+    token: &FrameWriteToken,
+    slot_buffer: &BoundBuffer,
+    scratch: &MeshRenderScratch,
+) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    if scratch.pair_ring.is_empty() {
+        return;
+    }
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.pair_ring.as_slice());
+    assert!(
+        bytes.len() as u64 <= slot_buffer.size,
+        "pair ring overflow: {} gathered pairs ({} bytes) exceed the {}-pair \
+         ({}-byte) slot (grow the boot instance capacity; dynamic growth is host \
+         plan R7)",
+        scratch.pair_ring.len(),
+        bytes.len(),
+        slot_buffer.size / GPU_TRANSFORM3D_BYTES as u64,
+        slot_buffer.size
+    );
+
+    let mapped = slot_buffer
+        .mapped
+        .expect("invariant: the pair ring slot is host-visible mapped");
+    // SAFETY: per this fn's contract `mapped` targets >= `slot_buffer.size` valid
+    // mapped host-coherent bytes, and `bytes.len() <= slot_buffer.size` is
+    // hard-asserted above — the write is in-bounds. The borrowed `FrameWriteToken`
+    // + the slot-identity contract prove this slot's in-flight fence was waited
+    // THIS frame (the slot's previous occupant finished its COMPUTE reads of the
+    // pair SSBO; the sibling frame binds the other slot) — race-free, lock-free.
+    // `bytes` is the scratch's own heap buffer, a distinct non-overlapping region.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+    }
+}
+
+/// Uploads the gathered per-dynamic-instance OUT-SLOT lane
+/// ([`pair_out_slot`](crate::MeshRenderScratch::pair_out_slot) — one `u32` per
+/// interpolated instance) into ONE out-slot-SSBO ring slot — the interp-ON path
+/// (host plan R5, refined-B): ONE contiguous `bytemuck` memcpy, zero staging, zero
+/// allocation. The B2 interp compute pre-pass reads this slot as its `OutSlot`
+/// binding — `out_slot[d]` is dynamic instance `d`'s offset into the SHARED instance
+/// ring the compute scatters its interpolated model column into.
+///
+/// UNCONDITIONAL every frame (plan D5), paired with [`upload_pair_ring`]: the two
+/// lanes are parallel (`pair_out_slot.len() == pair_ring.len()` — the dynamic count),
+/// so they upload together. An empty gather (`pair_out_slot` empty — a pure-static
+/// scene or no interpolated body) writes nothing; `dynamic_count() == 0` then records
+/// no dispatch (byte-identical to interp OFF).
+///
+/// # Panics
+///
+/// Panics if the gathered out-slot lane exceeds the slot's capacity: writing past the
+/// mapped range would corrupt neighbouring sub-allocations (UB), so the guard is a
+/// hard assert in every build.
+///
+/// # Safety
+///
+/// * `slot_buffer` is a LIVE host-visible buffer minted by
+///   `RhiDevice::create_buffer` (`HostVisibleCoherent`) and not yet destroyed: its
+///   `mapped` pointer targets at least `slot_buffer.size` valid, persistently-mapped
+///   bytes. A hand-built `BoundBuffer` with a dangling / undersized `mapped` violates
+///   this.
+/// * `slot_buffer` is the FENCED slot's buffer — `interp.out_slot[token.slot()]` (the
+///   same token/slot contract as [`upload_camera_ring`]): the token proves that slot's
+///   in-flight fence was waited THIS frame, so the slot's previous occupant finished
+///   every COMPUTE read of this out-slot SSBO and the sibling in-flight frame binds the
+///   OTHER slot. Passing a different slot's buffer re-opens the `80bf033` race.
+pub unsafe fn upload_pair_out_slot(
+    token: &FrameWriteToken,
+    slot_buffer: &BoundBuffer,
+    scratch: &MeshRenderScratch,
+) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    if scratch.pair_out_slot.is_empty() {
+        return;
+    }
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.pair_out_slot.as_slice());
+    assert!(
+        bytes.len() as u64 <= slot_buffer.size,
+        "out-slot ring overflow: {} gathered out-slots ({} bytes) exceed the {}-slot \
+         ({}-byte) buffer (grow the boot instance capacity; dynamic growth is host \
+         plan R7)",
+        scratch.pair_out_slot.len(),
+        bytes.len(),
+        slot_buffer.size / 4,
+        slot_buffer.size
+    );
+
+    let mapped = slot_buffer
+        .mapped
+        .expect("invariant: the out-slot ring slot is host-visible mapped");
+    // SAFETY: per this fn's contract `mapped` targets >= `slot_buffer.size` valid
+    // mapped host-coherent bytes, and `bytes.len() <= slot_buffer.size` is
+    // hard-asserted above — the write is in-bounds. The borrowed `FrameWriteToken`
+    // + the slot-identity contract prove this slot's in-flight fence was waited THIS
+    // frame (the slot's previous occupant finished its COMPUTE reads of the out-slot
+    // SSBO; the sibling frame binds the other slot) — race-free, lock-free. `bytes`
+    // is the scratch's own heap buffer, a distinct non-overlapping region.
     unsafe {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
     }

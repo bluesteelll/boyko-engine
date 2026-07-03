@@ -1002,9 +1002,16 @@ struct InterpGpu {
     layout: VulkanBindGroupLayout,
     /// FIF ring of pair SSBOs (host-written, COMPUTE-read); capacity = `count` × 96 B.
     pairs: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// FIF ring of out-slot SSBOs (host-written, COMPUTE-read); capacity = `count` × 4 B.
+    /// This harness is ALL-interpolated (no static rows), so the out-slot lane is the
+    /// IDENTITY `[0, 1, .., count-1]` — each dynamic instance writes its own ring index.
+    out_slot: [BoundBuffer; FRAMES_IN_FLIGHT],
     /// FIF ring of draw SSBOs (COMPUTE-written, VERTEX-read); capacity = `count` × 48 B.
+    /// Refined-B: this IS the shared model-out ring the raster VS reads (the harness has
+    /// no separate static rows to CPU-scatter).
     draw: [BoundBuffer; FRAMES_IN_FLIGHT],
-    /// FIF ring of interp bind groups { pairs[fi] @0, draw[fi] @1 } on [`Self::layout`].
+    /// FIF ring of interp bind groups { pairs[fi] @0, out_slot[fi] @1, draw[fi] @2 } on
+    /// [`Self::layout`] — the model_out target is the SAME `draw` ring the raster VS reads.
     interp_bg: [VulkanBindGroup; FRAMES_IN_FLIGHT],
     /// FIF ring of draw-read bind groups { draw[fi] @0 } on the gbuffer set-0 instance
     /// layout — the SAME shape the raster VS reads as `instances[...]`.
@@ -1029,6 +1036,7 @@ impl InterpGpu {
                 entries: &[
                     BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
                     BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
                 ],
             },
         )
@@ -1045,6 +1053,7 @@ impl InterpGpu {
         .expect("B3 interp compute pipeline");
 
         let pair_bytes = count as u64 * 96;
+        let out_slot_bytes = count as u64 * 4;
         let draw_bytes = count as u64 * GBUFFER_INSTANCE_MODEL_BYTES as u64;
         let make_buf = |size: u64, what: &str| {
             RhiDevice::create_buffer(
@@ -1059,6 +1068,25 @@ impl InterpGpu {
             core::array::from_fn(|_| make_buf(pair_bytes, "pairs"));
         let draw: [BoundBuffer; FRAMES_IN_FLIGHT] =
             core::array::from_fn(|_| make_buf(draw_bytes, "draw"));
+        // The out-slot lane is the IDENTITY (all-interpolated harness): out_slot[i] = i, so
+        // each thread writes its own ring index. Seed it once (it never changes).
+        let out_slot: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            let b = make_buf(out_slot_bytes, "out_slot");
+            let mapped = RhiDevice::buffer_mapped_ptr(device, &b)
+                .expect("host-visible interp out-slot SSBO is mapped");
+            let identity: Vec<u32> = (0..count).collect();
+            // SAFETY: `mapped` targets `count * 4` mapped host-coherent bytes; `identity` is
+            // exactly `count` u32s, copied in full, in-bounds. Seeded at setup — no submission
+            // references this slot yet.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    identity.as_ptr().cast::<u8>(),
+                    mapped.as_ptr(),
+                    out_slot_bytes as usize,
+                );
+            }
+            b
+        });
         let interp_bg: [VulkanBindGroup; FRAMES_IN_FLIGHT] = core::array::from_fn(|fi| {
             RhiDevice::create_bind_group(
                 device,
@@ -1066,6 +1094,7 @@ impl InterpGpu {
                     layout: &layout,
                     entries: &[
                         BindGroupEntry::StorageBuffer { buffer: &pairs[fi] },
+                        BindGroupEntry::StorageBuffer { buffer: &out_slot[fi] },
                         BindGroupEntry::StorageBuffer { buffer: &draw[fi] },
                     ],
                 },
@@ -1082,7 +1111,7 @@ impl InterpGpu {
             )
             .expect("B3 interp draw-read bind group")
         });
-        Self { pipeline, layout, pairs, draw, interp_bg, draw_bg, count }
+        Self { pipeline, layout, pairs, out_slot, draw, interp_bg, draw_bg, count }
     }
 
     /// Writes the `count` pairs into this frame slot's pair SSBO (host-coherent). Called each
@@ -1107,14 +1136,16 @@ impl InterpGpu {
         unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len()) };
     }
 
-    /// The [`InterpActivation`] for this frame slot: the interp set (pairs@0 + draw@1 for slot
-    /// `fi`) + the instance count + this frame's overstep `alpha`.
+    /// The [`InterpActivation`] for this frame slot: the interp set (pairs@0 + out_slot@1 +
+    /// model_out@2 for slot `fi`) + the instance count + this frame's overstep `alpha`. The
+    /// model_out target is the `draw` ring (which the raster VS also reads — refined-B).
     fn activation(&self, fi: usize, alpha: f32) -> InterpActivation<'_> {
         InterpActivation {
             pipeline: &self.pipeline,
             interp_set: &self.interp_bg[fi],
             pair_buffer: &self.pairs[fi],
-            draw_buffer: &self.draw[fi],
+            out_slot_buffer: &self.out_slot[fi],
+            model_out_buffer: &self.draw[fi],
             instance_count: self.count,
             alpha,
         }
@@ -1137,6 +1168,9 @@ impl InterpGpu {
                 RhiDevice::destroy_bind_group(device, bg);
             }
             for b in self.draw {
+                RhiDevice::destroy_buffer(device, b);
+            }
+            for b in self.out_slot {
                 RhiDevice::destroy_buffer(device, b);
             }
             for b in self.pairs {

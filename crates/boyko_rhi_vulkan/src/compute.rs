@@ -425,12 +425,12 @@ static FULLSCREEN_SAMPLE_FS_SPV: SpirvBlob<764> = SpirvBlob(*include_bytes!(conc
 )));
 
 /// Pillar B increment B2: the per-instance TRS interpolation compute PRE-PASS
-/// (`interp_instances.comp`). One invocation per instance reads a 96-byte `TransformPair`
-/// (prev + current substep TRS) at binding 0, interpolates at the frame-wide `alpha`, and
-/// writes the 48-byte `InstanceModelCol`-shaped model row at binding 1. The size pins the
-/// committed `.spv`; the `interp_edsl_sync` test proves the byte stream is the
-/// single-sourced eDSL emit.
-static INTERP_INSTANCES_SPV: SpirvBlob<6320> = SpirvBlob(*include_bytes!(concat!(
+/// (`interp_instances.comp`, refined-B). One invocation per DYNAMIC instance reads a
+/// 96-byte `TransformPair` at binding 0 + its output slot at binding 1, interpolates at the
+/// frame-wide `alpha`, and scatters the 48-byte `InstanceModelCol`-shaped model row into the
+/// SHARED instance ring at binding 2 (`ModelOut[OutSlot[i]]`). The size pins the committed
+/// `.spv`; the `interp_edsl_sync` test proves the byte stream is the single-sourced eDSL emit.
+static INTERP_INSTANCES_SPV: SpirvBlob<6584> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/interp_instances.comp.spv"
 )));
@@ -752,13 +752,15 @@ fn ssao_variant_out_of_range(q: usize) -> ! {
 /// stream, ready for
 /// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
 ///
-/// One invocation per instance; bound to a dedicated 2-binding set { `StructuredBuffer`
-/// `TransformPair` @0 (read), `RWStructuredBuffer` `InstanceModelCol` @1 (write) } + an
-/// 8-byte COMPUTE push ([`INTERP_INSTANCES_PUSH_BYTES`] — `{ uint count; float alpha }`).
-/// The B3 interp pre-pass dispatches `ceil(count / LOCAL_SIZE_X)` groups, refreshing every
-/// instance's interpolated model column from its prev/curr pair before the raster + shadow
-/// vertex shaders read it. The interpolation math body is single-sourced from
-/// `boyko_shaderdsl` (the `interp_edsl_sync` byte-identity gate).
+/// One invocation per DYNAMIC instance (refined-B); bound to a dedicated 3-binding set
+/// { `StructuredBuffer<TransformPair>` @0 (read), `StructuredBuffer<uint>` OutSlot @1
+/// (read), `RWStructuredBuffer<InstanceModelCol>` model-out ring @2 (write) } + an 8-byte
+/// COMPUTE push ([`INTERP_INSTANCES_PUSH_BYTES`] — `{ uint count; float alpha }`). The B3
+/// interp pre-pass dispatches `ceil(count / LOCAL_SIZE_X)` groups, scattering each
+/// interpolated model column into the SHARED instance ring at `OutSlot[i]` — beside the
+/// host-scattered static rows — before the raster + shadow vertex shaders read it. The
+/// interpolation math body is single-sourced from `boyko_shaderdsl` (the `interp_edsl_sync`
+/// byte-identity gate).
 #[inline]
 pub fn interp_instances_spirv() -> &'static [u32] {
     INTERP_INSTANCES_SPV.as_words()

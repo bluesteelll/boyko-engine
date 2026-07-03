@@ -11,7 +11,8 @@ use boyko_render::instance_model::sync_instance_model_cols;
 use boyko_render::light_system::LightTableStaging;
 use boyko_render::{
     CsmCasterScratch, CsmPlugin, LightingConfig, LightingPlugin, MeshRenderScratch,
-    Render3dPlugin, gather_mesh_draws, gather_shadow_casters, sync_csm_light_gate,
+    Render3dPlugin, add_gpu_transform_pack, gather_mesh_draws, gather_shadow_casters, snap_apply,
+    sync_csm_light_gate,
 };
 use boyko_scene::{CameraPlugin, FixedSet};
 
@@ -50,12 +51,16 @@ use crate::runner::{self, WindowDesc};
 /// through the D5 generation protocol and arms the cascade depth pass when a
 /// fitted sun and live casters exist.
 ///
-/// # The D4 seam
+/// # The D4 seam + interpolation (host plan R5)
 ///
-/// Wires `FixedSet::Snapshot.after(FixedSet::Gameplay)` in
-/// `CoreSchedule::Fixed`: put Fixed gameplay `.in_set(FixedSet::Gameplay)`;
-/// engine snapshot systems (the R5 `pack_gpu_transforms`) join
-/// `FixedSet::Snapshot`.
+/// Wires `FixedSet::Snapshot.after(FixedSet::Gameplay)` in `CoreSchedule::Fixed`
+/// and joins `pack_gpu_transforms` to `FixedSet::Snapshot` — put Fixed gameplay
+/// `.in_set(FixedSet::Gameplay)` and the per-substep prev/curr shuffle observes
+/// the substep's FINAL pose (no one-substep lag). The Main-schedule
+/// `snap_apply` → `gather_mesh_draws` unified path feeds the runner's interp
+/// pre-pass; a body opts into interpolation by carrying `GpuTransform3D`, and
+/// teleports it with [`teleport_to`](boyko_render::TeleportCommandsExt::teleport_to)
+/// (which snaps `prev = curr` for one frame — no streak).
 ///
 /// # Windowed host v1 = PERSPECTIVE cameras only
 ///
@@ -153,21 +158,41 @@ impl Plugin for EnginePlugins {
         // production gather) runs after the pack, and `sync_csm_light_gate`
         // (the header-gate ⇄ depth-pass lock-step) after the caster gather, so
         // the gate's caster predicate is THIS frame's.
+        // R5 adds the INTERPOLATION Main system `snap_apply` (the zero-streak
+        // collapse for teleported bodies) in the SAME closure. Refined-B unifies
+        // the two former gathers into ONE `gather_mesh_draws` over ALL drawables
+        // (static + interpolated), so `snap_apply` must run BEFORE it: the collapsed
+        // `curr == prev` a teleport lands is what the unified gather reads into the
+        // pair lanes THIS frame. The single gather runs `.after(pack)` (the affine
+        // pack — add-order cross-schedule note above) AND `.after(snap)`; it emits
+        // ONE batch list + ONE ring, recording each interpolated row's pair +
+        // out-slot, so the runner arms interp only when `dynamic_count() > 0`.
         app.insert_resource(MeshRenderScratch::default());
         app.insert_resource(CsmCasterScratch::default());
         app.add_systems_cfg(|b| {
             let pack = b.add_system(sync_instance_model_cols).key();
-            b.add_system(gather_mesh_draws).after(pack);
             let casters = b.add_system(gather_shadow_casters).after(pack).key();
             b.add_system(sync_csm_light_gate).after(casters);
+            // The unified gather runs after BOTH the affine pack and the snap
+            // collapse (snap-before-gather is load-bearing — the gather reads the
+            // collapsed pair).
+            let snap = b.add_system(snap_apply).key();
+            b.add_system(gather_mesh_draws).after(pack).after(snap);
         });
 
         // The D4 ordering seam: engine Fixed snapshots run AFTER user Fixed
-        // gameplay, pinned BY NAME (no topological accident). The sets are
-        // wired even while memberless (pack_gpu_transforms joins in R5) so
-        // user gameplay can join FixedSet::Gameplay from day one.
+        // gameplay, pinned BY NAME (no topological accident). R5 makes the seam
+        // REAL — `pack_gpu_transforms` joins `FixedSet::Snapshot` (retiring the
+        // memberless-set W1501 warning): its `.in_set(Snapshot)` membership +
+        // the `configure_set(Snapshot).after(Gameplay)` edge pin it AFTER every
+        // user Fixed gameplay system (which joins `FixedSet::Gameplay`), so the
+        // prev/curr shuffle observes the substep's FINAL pose (no one-substep
+        // lag). The engine composes no physics here, so there is no
+        // `sync_body_to_transform` key to name — the set-level edge is the whole
+        // ordering contract for the windowed host.
         app.add_systems_cfg_in(CoreSchedule::Fixed, |b| {
             b.configure_set(FixedSet::Snapshot).after(FixedSet::Gameplay);
+            add_gpu_transform_pack(b).in_set(FixedSet::Snapshot);
         });
 
         let desc = WindowDesc {

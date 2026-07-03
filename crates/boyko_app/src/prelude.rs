@@ -24,6 +24,14 @@ pub use boyko_render::{
     ShadowCaster, SkyLight, SpotLight, SpotLightObject,
 };
 
+// The interpolation surface (host plan R5): the per-entity [`GpuTransform3D`] pair
+// (its PRESENCE opts a body into interpolation — the pack shuffles prev/curr, the
+// runner lerps at the frame overstep), the [`SnapInterpolation`] marker tag
+// (present ⇒ snap `prev = curr` for one frame), and the
+// [`TeleportCommandsExt::teleport_to`] command sugar (write `Transform` + attach the
+// snap tag in one deferred command).
+pub use boyko_render::{GpuTransform3D, SnapInterpolation, TeleportCommandsExt};
+
 // Spatial + camera components and the D4 Fixed ordering seam.
 pub use boyko_scene::{
     Camera, CameraRig, FixedSet, GlobalTransform, MaterialHandle, MeshHandle, Projection,

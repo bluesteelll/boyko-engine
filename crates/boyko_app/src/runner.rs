@@ -10,6 +10,9 @@
 use boyko_ecs::{App, AppExit};
 
 #[cfg(windows)]
+use boyko_ecs::ecs::core::time::FixedTime;
+
+#[cfg(windows)]
 use std::time::Instant;
 
 #[cfg(windows)]
@@ -20,7 +23,7 @@ use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
 use boyko_render::{
     CsmCasterScratch, MeshRegistry, MeshRenderScratch, ResolvedCsm, RhiContext,
     gbuffer_push_from_view, upload_camera_ring, upload_csm_ring, upload_instance_models,
-    upload_light_table,
+    upload_light_table, upload_pair_out_slot, upload_pair_ring,
 };
 #[cfg(windows)]
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
@@ -195,9 +198,10 @@ pub(crate) fn run_windowed(_app: &mut App, _desc: WindowDesc) -> AppExit {
 /// 3. `AppExit` check;
 /// 4. `token = wait_frame_in_flight()` — the pacing point + the fence proof;
 /// 5. token-typed uploads into slot `token.slot()`: the b5 camera block + the
-///    instance-model ring (UNCONDITIONAL, plan D5) + the CSM cascade UBO
-///    (unconditional 336 B) + the light staging iff
-///    `light_uploaded_gen[s] != LightTableGeneration` (the D5 gate);
+///    instance-model ring (UNCONDITIONAL, plan D5) + the interpolation-pair ring
+///    (UNCONDITIONAL, plan D5/R5) + the CSM cascade UBO (unconditional 336 B) +
+///    the light staging iff `light_uploaded_gen[s] != LightTableGeneration`
+///    (the D5 gate);
 /// 6. assemble `GBufferScene` on the stack (draw list from the gather output,
 ///    `casts_shadow` from the caster gather, `csm` armed on "fitted sun AND
 ///    live casters" — the `sync_csm_light_gate` predicate);
@@ -280,6 +284,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // exactly once inside the block (definite-initialization, no dead seed).
         let mut frame_light_uploaded = false;
         let frame_csm_armed;
+        // The interp-armed probe (host plan R5): set when this frame's pair gather
+        // produced instances (the pair ring was uploaded + `scene.interp` armed).
+        let frame_interp_armed;
         // The dump's readback request (cold; `None` without the env knob). The
         // returned borrow holds `dump` until the render call consumes it.
         let readback = match dump.as_mut() {
@@ -311,6 +318,26 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // fenced slot `s == token.slot()`).
             unsafe {
                 upload_instance_models(&token, &host.gpu.instance_rings[s], scratch);
+            }
+
+            // 5b'. The gathered interpolation PAIR ring + OUT-SLOT lane into slot
+            //      `s` (refined-B) — UNCONDITIONAL every frame (plan D5; the
+            //      fingerprint gate was KILLED). Both are empty on a pure-static
+            //      scene (no interpolated body): then `interp_count == 0` arms no
+            //      interp pass (byte-identical to interp OFF). The DYNAMIC count is
+            //      this frame's dispatch bound + the scene arming key; the interp
+            //      compute reads the pair @0 + out-slot @1 and scatters into the
+            //      SHARED instance ring @2 (uploaded whole in 5b above).
+            let interp_count = scratch.dynamic_count() as u32;
+            frame_interp_armed = interp_count > 0;
+            // SAFETY: `host.gpu.interp_pair_slot(s)` / `interp_out_slot_slot(s)` —
+            // same provenance contract as the instance slot above (boot-minted at
+            // INSTANCE_CAPACITY, live until teardown, the fenced slot
+            // `s == token.slot()`); the interp compute reads the same slots @0/@1,
+            // the sibling frame binds the other slot.
+            unsafe {
+                upload_pair_ring(&token, host.gpu.interp_pair_slot(s), scratch);
+                upload_pair_out_slot(&token, host.gpu.interp_out_slot_slot(s), scratch);
             }
 
             // 5c. The light staging into slot `s` — GEN-GATED (plan D5, R4):
@@ -433,7 +460,22 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 }
                 zeroed
             };
-            let scene = host.gpu.scene(mvp, s, &draws, light_upload, csm_armed.then_some(resolved_csm));
+            // The lerp alpha (host plan R5): `overstep_fraction()` in [0, 1),
+            // sampled in Main AFTER the fixed loop settled (a mid-catch-up read
+            // could see overstep >= timestep; the value saturates at
+            // 1.0.next_down()). Refreshed EVERY frame via the 8-byte interp push
+            // even when the pairs are not re-uploaded. `FixedTime` is inserted at
+            // `finish()` (insert-if-absent), so it is always present in the loop.
+            let overstep = world.resource::<FixedTime>().overstep_fraction();
+            let scene = host.gpu.scene(
+                mvp,
+                s,
+                &draws,
+                light_upload,
+                csm_armed.then_some(resolved_csm),
+                interp_count,
+                overstep,
+            );
 
             // 7. Render + present, consuming the token (the host-write window
             //    for slot `s` ends here — R0b).
@@ -506,6 +548,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             stats.frames += 1;
             stats.light_uploads += u64::from(frame_light_uploaded);
             stats.csm_armed_frames += u64::from(frame_csm_armed);
+            stats.interp_armed_frames += u64::from(frame_interp_armed);
         }
     }
 }
@@ -567,8 +610,8 @@ fn dump_diagnostics(app: &App) {
 
     let stats = world.resource::<HostFrameStats>();
     eprintln!(
-        "boyko_app: dump stats frames={} light_uploads={} csm_armed={}",
-        stats.frames, stats.light_uploads, stats.csm_armed_frames
+        "boyko_app: dump stats frames={} light_uploads={} csm_armed={} interp_armed={}",
+        stats.frames, stats.light_uploads, stats.csm_armed_frames, stats.interp_armed_frames
     );
 }
 

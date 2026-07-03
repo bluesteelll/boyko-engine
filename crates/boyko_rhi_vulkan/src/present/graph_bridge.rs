@@ -80,12 +80,14 @@ pub(crate) struct GbufferBarrierSink<'a> {
     /// barrier naming that ResId, so its slot may hold [`VkImage::NULL`] harmlessly.
     pub(crate) images: [VkImage; FRAMEGRAPH_IMAGE_COUNT],
     /// The physical buffers resolved by `res.index() - FRAMEGRAPH_IMAGE_COUNT` —
-    /// `[light_table, tiles, grid, index, alloc, interp_pairs, interp_draw]`. The last two
-    /// (Pillar B B3) are the CURRENT frame slot's FIF-ringed interpolation SSBOs, declared +
-    /// bound ONLY when `scene.interp.is_some()`; on the OFF path they are never named by a
-    /// derived barrier, so their [`VkBuffer::NULL`] slots are inert (same NULL-when-ungated
-    /// rule as [`Self::images`]).
-    pub(crate) buffers: [VkBuffer; 7],
+    /// `[light_table, tiles, grid, index, alloc, interp_pairs, interp_out_slot,
+    /// interp_model_out]`. The last three (Pillar B B3, refined-B) are the CURRENT frame
+    /// slot's FIF-ringed interpolation SSBOs — the host-written pair + out-slot inputs and
+    /// the SHARED instance ring the compute writes / the raster VS reads — declared + bound
+    /// ONLY when `scene.interp.is_some()`; on the OFF path they are never named by a derived
+    /// barrier, so their [`VkBuffer::NULL`] slots are inert (same NULL-when-ungated rule as
+    /// [`Self::images`]).
+    pub(crate) buffers: [VkBuffer; 8],
 }
 
 impl crate::framegraph::BarrierSink for GbufferBarrierSink<'_> {
@@ -321,26 +323,34 @@ impl Renderer<'_> {
             "alloc",
             ResSync::seeded_writer(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT),
         );
-        // --- Pillar B B3 interp SSBOs (ResIds 14/15) — declared ONLY when the interp pass is
-        // wired, so the OFF path's ResId + barrier counts are byte-unchanged (the equiv pins).
-        // Both are FIF-RINGED (frame-private, like the G-buffer ring): the host writes this
-        // frame's slot of `interp_pairs`, the interp compute writes this frame's slot of
-        // `interp_draw`, and the raster/shadow VS read the SAME `interp_draw` slot — a sibling
-        // in-flight frame touches a DIFFERENT slot. So they start `undefined()` (plain
-        // `add_buffer`, NOT seeded): no cross-frame WAR/WAW hazard, only the intra-frame
-        // COMPUTE→VERTEX RAW the graph derives at the raster (the draw reader).
-        let (interp_pairs, interp_draw) = if scene.interp.is_some() {
-            (Some(g.add_buffer("interp_pairs")), Some(g.add_buffer("interp_draw")))
+        // --- Pillar B B3 interp SSBOs (ResIds 14/15/16, refined-B) — declared ONLY when the
+        // interp pass is wired, so the OFF path's ResId + barrier counts are byte-unchanged (the
+        // equiv pins). All three are FIF-RINGED (frame-private, like the G-buffer ring): the host
+        // writes this frame's slot of `interp_pairs` + `interp_out_slot`, the interp compute
+        // writes the DYNAMIC slots of the SHARED `interp_model_out` (the instance ring), and the
+        // raster/shadow VS read the SAME `interp_model_out` slot — a sibling in-flight frame
+        // touches a DIFFERENT slot. So they start `undefined()` (plain `add_buffer`, NOT seeded):
+        // no cross-frame WAR/WAW hazard, only the intra-frame COMPUTE→VERTEX RAW the graph derives
+        // at the raster (the model_out reader).
+        let (interp_pairs, interp_out_slot, interp_model_out) = if scene.interp.is_some() {
+            (
+                Some(g.add_buffer("interp_pairs")),
+                Some(g.add_buffer("interp_out_slot")),
+                Some(g.add_buffer("interp_model_out")),
+            )
         } else {
-            (None, None)
+            (None, None, None)
         };
 
-        // Pass `interp` (Pillar B B3) — gated `scene.interp.is_some()`. Runs FIRST (before
-        // raster): reads the pair SSBO (COMPUTE/SHADER_READ — first touch, no barrier needed on
-        // a fresh frame-private slot) + writes the draw SSBO (COMPUTE/SHADER_WRITE). The
-        // COMPUTE→VERTEX barrier ordering this write before the raster VS read is derived at the
-        // raster pass (the draw reader), NOT here.
-        let interp = if let (Some(pairs), Some(draw)) = (interp_pairs, interp_draw) {
+        // Pass `interp` (Pillar B B3, refined-B) — gated `scene.interp.is_some()`. Runs FIRST
+        // (before raster): reads the pair + out-slot SSBOs (COMPUTE/SHADER_READ — first touch, no
+        // barrier needed on fresh frame-private slots) + writes the SHARED model-out ring
+        // (COMPUTE/SHADER_WRITE — the dynamic slots). The COMPUTE→VERTEX barrier ordering this
+        // write before the raster VS read is derived at the raster pass (the model_out reader),
+        // NOT here.
+        let interp = if let (Some(pairs), Some(out_slot), Some(model_out)) =
+            (interp_pairs, interp_out_slot, interp_model_out)
+        {
             let p = g.add_pass("interp");
             g.buffer_access(
                 pairs,
@@ -348,7 +358,12 @@ impl Renderer<'_> {
                 VK_ACCESS_SHADER_READ_BIT,
             );
             g.buffer_access(
-                draw,
+                out_slot,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+            );
+            g.buffer_access(
+                model_out,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 VK_ACCESS_SHADER_WRITE_BIT,
             );
@@ -359,14 +374,14 @@ impl Renderer<'_> {
 
         // Pass `raster` (sites 0/1): the 3-MRT G-buffer + depth.
         let raster = g.add_pass("raster");
-        // Pillar B B3: when the interp pass ran, the raster VS READS the draw SSBO it wrote —
-        // the graph derives the COMPUTE(WRITE)→VERTEX(READ) RAW barrier here (the reader). The
-        // draw SSBO is consumed at the VERTEX stage (the raster + shadow VS index
-        // `instances[...]`), so declare a VERTEX_SHADER/SHADER_READ access. Declared ONLY when
-        // the interp pass exists, so the OFF path derives nothing.
-        if let Some(draw) = interp_draw {
+        // Pillar B B3 (refined-B): when the interp pass ran, the raster VS READS the SHARED
+        // model-out ring the compute wrote — the graph derives the COMPUTE(WRITE)→VERTEX(READ)
+        // RAW barrier here (the reader). The ring is consumed at the VERTEX stage (the raster +
+        // shadow VS index `instances[...]`), so declare a VERTEX_SHADER/SHADER_READ access.
+        // Declared ONLY when the interp pass exists, so the OFF path derives nothing.
+        if let Some(model_out) = interp_model_out {
             g.buffer_access(
-                draw,
+                model_out,
                 VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
                 VK_ACCESS_SHADER_READ_BIT,
             );
@@ -707,12 +722,14 @@ impl Renderer<'_> {
                 scene.cluster_grid.map_or(VkBuffer::NULL, |b| b.buffer),
                 scene.light_index.map_or(VkBuffer::NULL, |b| b.buffer),
                 scene.light_index_alloc.map_or(VkBuffer::NULL, |b| b.buffer),
-                // Pillar B B3 (ResIds 14/15): the CURRENT frame slot's FIF-ringed interp SSBOs,
-                // NULL on the interp-OFF path (never named by a derived barrier there). On the
-                // ON path the ONLY derived barrier is the COMPUTE→VERTEX RAW on `interp_draw`
-                // at the raster pass; `interp_pairs` is declared but never barriered.
+                // Pillar B B3 (ResIds 14/15/16, refined-B): the CURRENT frame slot's FIF-ringed
+                // interp SSBOs, NULL on the interp-OFF path (never named by a derived barrier
+                // there). On the ON path the ONLY derived barrier is the COMPUTE→VERTEX RAW on
+                // `interp_model_out` (the shared instance ring) at the raster pass; `interp_pairs`
+                // and `interp_out_slot` are declared but never barriered (first-touch reads).
                 scene.interp.map_or(VkBuffer::NULL, |a| a.pair_buffer.buffer),
-                scene.interp.map_or(VkBuffer::NULL, |a| a.draw_buffer.buffer),
+                scene.interp.map_or(VkBuffer::NULL, |a| a.out_slot_buffer.buffer),
+                scene.interp.map_or(VkBuffer::NULL, |a| a.model_out_buffer.buffer),
             ],
         };
         self.frame_graph.record_pass(pass, &mut sink);

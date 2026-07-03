@@ -66,7 +66,7 @@ pub mod csm_config;
 /// ([`CsmCasterScratch`](csm_caster::CsmCasterScratch) reused resource +
 /// [`gather_shadow_casters`](csm_caster::gather_shadow_casters), the
 /// `With<ShadowCaster>`-filtered count→prefix-sum→scatter that produces the cascade
-/// depth-pass caster batches, reusing the M3 `gather_into` core).
+/// depth-pass caster batches, reusing the M3 `gather_mixed_into` core).
 pub mod csm_caster;
 /// CSM Inc-1a — the structural [`ShadowCaster`](csm_marker::ShadowCaster) capability
 /// marker (CSM-casting vs SDF/MDF-occlusion are mutually exclusive by presence).
@@ -125,6 +125,12 @@ pub mod shadow_marker;
 /// Shadow Inc-1 — the [`ShadowAtlasPlugin`](shadow_plugin::ShadowAtlasPlugin) that seeds the
 /// config substrate and schedules the cold slot-assignment policy.
 pub mod shadow_plugin;
+/// Host plan D4 (R5) — the interpolation SNAP / teleport seam: the
+/// [`SnapInterpolation`](snap_interpolation::SnapInterpolation) `EnableTag`, the
+/// Main-schedule [`snap_apply`](snap_interpolation::snap_apply) zero-streak system,
+/// and the [`TeleportCommandsExt`](snap_interpolation::TeleportCommandsExt) command
+/// sugar.
+pub mod snap_interpolation;
 pub mod ssao_config;
 pub mod ssao_plugin;
 pub mod ui;
@@ -151,7 +157,7 @@ pub use gpu_transform3d::{
 };
 pub use gpu_transform_pack::{add_gpu_transform_pack, pack_gpu_transforms};
 pub use instance_model::{INSTANCE_MODEL_COL_BYTES, InstanceModelCol, sync_instance_model_cols};
-pub use mesh_draw::{DrawBatch, MeshRenderScratch, gather_mesh_draw_pairs, gather_mesh_draws};
+pub use mesh_draw::{DrawBatch, MeshRenderScratch, gather_mesh_draws};
 pub use light_plugin::LightingPlugin;
 pub use light_reconcile::light_reconcile;
 pub use render3d_plugin::Render3dPlugin;
@@ -184,10 +190,12 @@ pub use shadow_atlas::{
 };
 pub use shadow_marker::CastsPunctualShadow;
 pub use shadow_plugin::ShadowAtlasPlugin;
+pub use snap_interpolation::{SnapInterpolation, TeleportCommandsExt, snap_apply};
 pub use ssao_config::{ResolvedSsao, SsaoConfig, SsaoQuality, resolve_ssao, resolve_ssao_policy};
 pub use ssao_plugin::SsaoPlugin;
 pub use upload::{
     upload_camera_ring, upload_csm_ring, upload_instance_models, upload_light_table,
+    upload_pair_out_slot, upload_pair_ring,
 };
 pub use view::{
     composite_from_view, composite_perspective_from_view, demo_view_proj_from_view,

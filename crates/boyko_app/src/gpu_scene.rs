@@ -28,11 +28,11 @@ use boyko_rhi::{
 use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
 use boyko_rhi_vulkan::compute::{
     B5_CAMERA_UBO_BYTES_M4, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, EDITLIST_BUFFER_WORDS,
-    LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, LOCAL_SIZE_X, TILE_BOUND_BYTES, csm_depth_fs_spirv,
-    csm_depth_vs_spirv, deferred_pbr_spirv, encode_edit_list, fullscreen_sample_fs_spirv,
-    fullscreen_sample_vs_spirv, gbuffer_mrt_fs_spirv, gbuffer_mrt_vs_spirv,
-    punctual_depth_fs_spirv, punctual_depth_vs_spirv, sdf_gbuffer_composite_spirv,
-    tile_grid_extent,
+    INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, LOCAL_SIZE_X,
+    TILE_BOUND_BYTES, csm_depth_fs_spirv, csm_depth_vs_spirv, deferred_pbr_spirv, encode_edit_list,
+    fullscreen_sample_fs_spirv, fullscreen_sample_vs_spirv, gbuffer_mrt_fs_spirv,
+    gbuffer_mrt_vs_spirv, interp_instances_spirv, punctual_depth_fs_spirv, punctual_depth_vs_spirv,
+    sdf_gbuffer_composite_spirv, tile_grid_extent,
 };
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::memory::BoundBuffer;
@@ -42,15 +42,15 @@ use boyko_rhi_vulkan::rhi_impl::{
 };
 use boyko_rhi_vulkan::swapchain::{
     CsmDepthActivation, FRAMES_IN_FLIGHT, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES,
-    GBufferMeshDraw, GBufferScene,
+    GBufferMeshDraw, GBufferScene, InterpActivation,
 };
 use boyko_rhi_vulkan::texture::VulkanTexture;
 use boyko_sdf_math::SdfEdit;
 
 use boyko_render::{
-    GPU_LIGHT_BYTES, GPU_LIGHT_WORDS, GpuLight, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_BYTES,
-    LightHeaderGpu, LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialGpu, RESOLVED_CSM_BYTES,
-    RESOLVED_SHADOW_ATLAS_BYTES, ResolvedCsm, SHADOW_DIM, Vertex,
+    GPU_LIGHT_BYTES, GPU_LIGHT_WORDS, GPU_TRANSFORM3D_BYTES, GpuLight, LIGHT_HEADER_BASE_WORDS,
+    LIGHT_HEADER_BYTES, LightHeaderGpu, LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialGpu,
+    RESOLVED_CSM_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, ResolvedCsm, SHADOW_DIM, Vertex,
 };
 
 /// The boot instance budget: the per-slot instance-model SSBO holds this many
@@ -458,6 +458,204 @@ impl CsmResources {
     }
 }
 
+/// The productionized B3 interpolation pre-pass GPU resources (host plan D7/R5,
+/// refined-B): the interp compute pipeline + its 3-binding set layout, and the
+/// `FRAMES_IN_FLIGHT`-ringed pair / out-slot SSBOs (frame-private, like the G-buffer
+/// ring). The COMPUTE output target is the SHARED instance ring (`instance_rings`),
+/// NOT a private draw ring — refined-B retires the private draw/draw_bg rings so
+/// static and interpolated instances share ONE draw-ordered buffer.
+///
+/// The host writes this frame's `pairs[fi]` + `out_slot[fi]` (from the World's
+/// `MeshRenderScratch` `pair_ring` / `pair_out_slot` lanes — the source of truth
+/// stays in the World, Principle 0: the host only memcpys them) and CPU-scatters the
+/// static rows into `instance_rings[fi]`; the interp compute reads `pairs[fi]` +
+/// `out_slot[fi]` and OVERWRITES ONLY the dynamic slots of `instance_rings[fi]`; the
+/// raster / CSM / atlas VS read that SAME shared ring via
+/// `GBufferScene::instance_bind_group` = `instance_bind_groups[fi]` (unchanged — the
+/// recorder binds one instance set, raster+CSM+atlas 3-pass reuse). Owned by
+/// [`GpuSceneBundles`], created at boot, destroyed in the explicit reverse-order
+/// teardown.
+///
+/// # Sizing
+///
+/// Both the pair ring and the out-slot ring are sized to [`INSTANCE_CAPACITY`] (the
+/// same budget as the affine instance ring), so any per-frame gather up to the budget
+/// fits. The PER-FRAME dynamic count (which may be `< INSTANCE_CAPACITY`) is the
+/// activation's `instance_count` — the dispatch bound and the shader's loop guard;
+/// the built `capacity` only bounds the SSBOs.
+struct InterpGpuProd {
+    /// The B2 interp compute pipeline (`interp_instances.comp`).
+    pipeline: ComputePipeline,
+    /// The 3-binding interp set layout { pairs @0 (read), out_slot @1 (read),
+    /// model_out @2 (write) }, all COMPUTE.
+    layout: VulkanBindGroupLayout,
+    /// FIF ring of pair SSBOs (host-written, COMPUTE-read); [`INSTANCE_CAPACITY`] × 96 B.
+    pairs: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// FIF ring of out-slot SSBOs (host-written, COMPUTE-read); [`INSTANCE_CAPACITY`] × 4 B.
+    /// `out_slot[fi][d]` is dynamic instance `d`'s offset into the shared instance ring
+    /// (the gather's `pair_out_slot` lane — the shader's `OutSlot` binding).
+    out_slot: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// FIF ring of interp bind groups { pairs[fi] @0, out_slot[fi] @1,
+    /// instance_rings[fi] @2 } on [`Self::layout`] — the model_out target is the SHARED
+    /// instance ring, so the compute writes what the raster VS reads (no private ring).
+    interp_bg: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// The built SSBO capacity in instances ([`INSTANCE_CAPACITY`]) — the SSBO bound,
+    /// NOT the per-frame dispatch count (that arrives via the activation).
+    capacity: u32,
+}
+
+impl InterpGpuProd {
+    /// Builds the interp pipeline + the FIF-ringed pair/out-slot SSBOs + their bind
+    /// groups (whose model_out target is the SHARED `instance_rings`) sized to
+    /// `capacity` instances. `instance_rings` is the gbuffer set-0 instance ring the
+    /// raster VS reads — the compute writes it directly (refined-B). `capacity` must
+    /// be ≥ 1.
+    ///
+    /// # Panics
+    /// Panics (`expect("invariant: ...")`) on any RHI create failure — a setup-stage
+    /// device failure by design (the `GpuSceneBundles::boot` contract).
+    fn create(
+        device: &VulkanContext,
+        instance_rings: &[BoundBuffer; FRAMES_IN_FLIGHT],
+        capacity: u32,
+    ) -> Self {
+        debug_assert!(capacity >= 1, "invariant: the interp pass needs at least one instance slot");
+        let cs = RhiDevice::create_shader_module(device, interp_instances_spirv())
+            .expect("invariant: B3 interp compute shader module create");
+        let layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: B3 interp bind-group layout create");
+        let pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &cs,
+                entry: c"main",
+                push_constant_bytes: INTERP_INSTANCES_PUSH_BYTES,
+                bind_group_layout: Some(&layout),
+            },
+        )
+        .expect("invariant: B3 interp compute pipeline create");
+
+        let pair_bytes = capacity as u64 * GPU_TRANSFORM3D_BYTES as u64;
+        // The out-slot lane is one u32 per dynamic instance (the shader's `OutSlot`).
+        let out_slot_bytes = capacity as u64 * 4;
+        let make_buf = |size: u64, what: &str| {
+            let b = RhiDevice::create_buffer(
+                device,
+                &BufferDesc { size, usage: BufferUsage::STORAGE, location: MemoryLocation::HostVisibleCoherent },
+            )
+            .unwrap_or_else(|e| panic!("invariant: B3 interp {what} SSBO create: {e:?}"));
+            // Zero-seed: a fresh sub-allocation carries prior bytes, and a first
+            // frame binds the ring before its first host write.
+            let mapped = RhiDevice::buffer_mapped_ptr(device, &b)
+                .unwrap_or_else(|| panic!("invariant: host-visible B3 interp {what} SSBO is mapped"));
+            zero_fill(mapped, size as usize);
+            b
+        };
+        // Each ring slot is a distinct frame-private SSBO (host-coherent so the pair /
+        // out-slot writes need no explicit flush).
+        let pairs: [BoundBuffer; FRAMES_IN_FLIGHT] =
+            core::array::from_fn(|_| make_buf(pair_bytes, "pairs"));
+        let out_slot: [BoundBuffer; FRAMES_IN_FLIGHT] =
+            core::array::from_fn(|_| make_buf(out_slot_bytes, "out_slot"));
+        // interp_bg binds { pairs[fi] @0, out_slot[fi] @1, instance_rings[fi] @2 } —
+        // the model_out target is the SHARED instance ring (refined-B): the compute
+        // writes the dynamic slots the raster VS then reads, on the SAME buffer.
+        let interp_bg: [VulkanBindGroup; FRAMES_IN_FLIGHT] = core::array::from_fn(|fi| {
+            RhiDevice::create_bind_group(
+                device,
+                &BindGroupDesc {
+                    layout: &layout,
+                    entries: &[
+                        BindGroupEntry::StorageBuffer { buffer: &pairs[fi] },
+                        BindGroupEntry::StorageBuffer { buffer: &out_slot[fi] },
+                        BindGroupEntry::StorageBuffer { buffer: &instance_rings[fi] },
+                    ],
+                },
+            )
+            .expect("invariant: B3 interp bind group create")
+        });
+
+        // The shader module is consumed by pipeline creation; destroy it now
+        // (the ComputePipeline owns the compiled state — mirrors the boot's
+        // post-create module teardown).
+        // SAFETY: `cs` was created on `device` above and is no longer needed once
+        // the pipeline exists; it is destroyed exactly once; no GPU work has been
+        // submitted yet (boot stage).
+        unsafe {
+            RhiDevice::destroy_shader_module(device, cs);
+        }
+
+        Self { pipeline, layout, pairs, out_slot, interp_bg, capacity }
+    }
+
+    /// The [`InterpActivation`] for this frame slot `fi` and this frame's overstep
+    /// `alpha`: the interp set (pairs@0 read + out_slot@1 read + model_out@2 write for
+    /// slot `fi`), the pair / out-slot / model-out slot buffers, the per-frame dynamic
+    /// `instance_count`, and `alpha`. `model_out_buffer` is the SHARED instance ring
+    /// slot (`instance_rings[fi]`), which the caller ALSO binds as
+    /// `GBufferScene::instance_bind_group` for the raster read — the ring contract.
+    ///
+    /// `instance_count` is THIS frame's gathered DYNAMIC count (the dispatch bound +
+    /// the push count) — the caller passes the gather's `dynamic_count()`, which the
+    /// pair-ring upload already hard-asserts fits `capacity`.
+    #[inline]
+    fn activation<'a>(
+        &'a self,
+        fi: usize,
+        model_out: &'a BoundBuffer,
+        instance_count: u32,
+        alpha: f32,
+    ) -> InterpActivation<'a> {
+        debug_assert!(
+            instance_count <= self.capacity,
+            "invariant: the per-frame interp instance count fits the built SSBO capacity"
+        );
+        InterpActivation {
+            pipeline: &self.pipeline,
+            interp_set: &self.interp_bg[fi],
+            pair_buffer: &self.pairs[fi],
+            out_slot_buffer: &self.out_slot[fi],
+            model_out_buffer: model_out,
+            instance_count,
+            alpha,
+        }
+    }
+
+    /// Tears every owned resource down in reverse dependency order (interp_bg →
+    /// out_slot → pairs → pipeline → layout). The SHARED instance rings are owned by
+    /// `GpuSceneBundles`, not this struct, so they are NOT destroyed here.
+    ///
+    /// # Safety
+    /// The device is idle (the caller's renderer drop waited) so no submission
+    /// references these; each is destroyed exactly once (by-value `self`); `device`
+    /// is the live context they were created on.
+    unsafe fn destroy(self, device: &VulkanContext) {
+        // SAFETY: per the contract the device is idle + live; reverse creation order.
+        unsafe {
+            for bg in self.interp_bg {
+                RhiDevice::destroy_bind_group(device, bg);
+            }
+            for b in self.out_slot {
+                RhiDevice::destroy_buffer(device, b);
+            }
+            for b in self.pairs {
+                RhiDevice::destroy_buffer(device, b);
+            }
+            RhiDevice::destroy_compute_pipeline(device, self.pipeline);
+            RhiDevice::destroy_bind_group_layout(device, self.layout);
+        }
+    }
+}
+
 /// The static-resource half of the windowed G-buffer scene (host plan R3):
 /// every pipeline / layout / sampler / seeded buffer `render_gbuffer_frame`
 /// needs beyond the swapchain + the extent-dependent `GBufferFrame` targets.
@@ -475,6 +673,14 @@ pub(crate) struct GpuSceneBundles {
     /// `token.slot()` every frame (plan D5 — unconditional).
     pub(crate) instance_rings: [BoundBuffer; FRAMES_IN_FLIGHT],
     instance_bind_groups: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// The B3 interpolation pre-pass resources (host plan R5, refined-B): the
+    /// FIF-ringed pair / out-slot SSBOs + bind groups + the interp compute pipeline.
+    /// The runner writes this frame's pairs into `interp.pairs[slot]` + out-slots into
+    /// `interp.out_slot[slot]`, CPU-scatters the static rows into
+    /// `instance_rings[slot]`, and arms `scene.interp` — whose model_out target is that
+    /// SAME `instance_rings[slot]` (the compute overwrites the dynamic slots). The
+    /// raster `instance_bind_group` stays `instance_bind_groups[slot]` (no bind swap).
+    interp: InterpGpuProd,
     /// The DEGENERATE legacy vertex buffer (6 identical vertices ⇒ zero-area ⇒
     /// no fragments): pass A's legacy draw target on empty-gather frames —
     /// mirrors the showcase's `showcase_quad_vertices` discipline.
@@ -928,6 +1134,14 @@ impl GpuSceneBundles {
         // valid descriptors); both depth passes stay OFF in R3.
         let csm = CsmResources::create(device, &instance_layout);
 
+        // ── The B3 interpolation pre-pass (host plan R5, refined-B): the pair /
+        // out-slot SSBO rings + bind groups + compute pipeline, sized to the same
+        // INSTANCE_CAPACITY as the affine instance ring. Its model_out target is the
+        // SHARED `instance_rings` (the compute writes the dynamic slots the raster VS
+        // reads), so an armed interp frame keeps `scene.instance_bind_group` at
+        // `instance_bind_groups[slot]` — no bind swap.
+        let interp = InterpGpuProd::create(device, &instance_rings, INSTANCE_CAPACITY as u32);
+
         let dispatch_group_count_x = (cw * ch).div_ceil(LOCAL_SIZE_X);
 
         Self {
@@ -935,6 +1149,7 @@ impl GpuSceneBundles {
             instance_layout,
             instance_rings,
             instance_bind_groups,
+            interp,
             vertex_buffer,
             marcher,
             vocab_layout,
@@ -975,6 +1190,26 @@ impl GpuSceneBundles {
     /// The depth-pass push matrices built here are byte-images of the SAME
     /// `resolved.cascades[c].view_proj` floats `upload_csm_ring` memcpys into
     /// the slot's cascade UBO — one fit, two byte-identical consumers.
+    ///
+    /// # Interpolation arming (host plan R5)
+    ///
+    /// `interp_count` is THIS frame's gathered interpolation-pair count
+    /// (`MeshRenderScratch::pair_ring.len()`) and `overstep` is
+    /// `FixedTime::overstep_fraction()` (the lerp `alpha`, refreshed EVERY frame via
+    /// the 8-byte push even when the pairs are not re-uploaded). When
+    /// `interp_count > 0` the interp pass is armed: the raster VS still binds the
+    /// SAME shared instance ring (`instance_bind_groups[slot]` — NO bind swap under
+    /// refined-B), the interp compute overwrites that ring's dynamic slots in place
+    /// before the raster pass, and `scene.interp` carries the activation. When
+    /// `interp_count == 0` the path is byte-identical to pre-R5 (the same shared
+    /// instance bind group, `interp: None`) — the recorder records no interp dispatch
+    /// and no COMPUTE→VERTEX barrier.
+    // The per-frame scene assembler: each argument is a distinct per-frame INPUT the
+    // stack-built `GBufferScene` (a ~50-field POD borrow bundle) needs — the push,
+    // the fenced slot, the draw list, and the four independent arming inputs (light,
+    // csm, interp count, overstep). Grouping them into a struct would only relocate
+    // the same fields behind an extra indirection with no other caller to share it.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn scene<'a>(
         &'a self,
         mvp: [u8; GBUFFER_PUSH_BYTES],
@@ -982,17 +1217,32 @@ impl GpuSceneBundles {
         mesh_draw: &'a [GBufferMeshDraw<'a>],
         light_upload: Option<u64>,
         csm: Option<&ResolvedCsm>,
+        interp_count: u32,
+        overstep: f32,
     ) -> GBufferScene<'a> {
         debug_assert!(
             light_upload.unwrap_or(0) <= LIGHT_TABLE_CAPACITY,
             "invariant: the staged light table fits the device table capacity"
         );
+        // Interp arming (refined-B): the raster VS ALWAYS reads the shared instance
+        // ring (`instance_bind_groups[slot]`) — no bind swap. When the gather produced
+        // DYNAMIC instances, the interp compute overwrites that ring's dynamic slots
+        // in place (its model_out target IS `instance_rings[slot]`) before the raster
+        // pass; a COMPUTE→VERTEX barrier on that shared ring is derived by the graph.
+        // `interp_count` is the DYNAMIC count (`dynamic_count()`); `0` records no
+        // dispatch (byte-identical to the pre-R5 path).
+        let interp_armed = interp_count > 0;
+        let instance_bind_group = &self.instance_bind_groups[slot];
+        let interp = interp_armed.then(|| {
+            self.interp
+                .activation(slot, &self.instance_rings[slot], interp_count, overstep)
+        });
         GBufferScene {
             raster_pipeline: &self.raster_pipeline,
             vertex_buffer: &self.vertex_buffer,
             vertex_count: 6,
             mvp,
-            instance_bind_group: &self.instance_bind_groups[slot],
+            instance_bind_group,
             marcher: &self.marcher,
             vocab_layout: &self.vocab_layout,
             edit_list: &self.edit_list,
@@ -1079,8 +1329,32 @@ impl GpuSceneBundles {
             shadow_atlas_sampler: &self.csm.atlas_sampler,
             shadow_atlas_ubo: &self.csm.atlas_ubo,
             atlas_punctual: None,
-            interp: None,
+            // The B3 interp activation (host plan R5, refined-B): Some(_) on a frame
+            // the gather produced DYNAMIC instances. Its model_out target is the SHARED
+            // instance ring the raster VS reads (instance_bind_group ==
+            // instance_bind_groups[slot], unchanged) — the compute overwrites the
+            // dynamic slots in place before the raster pass.
+            interp,
         }
+    }
+
+    /// The FENCED slot's interpolation-pair SSBO — the write target of the runner's
+    /// per-frame [`upload_pair_ring`](boyko_render::upload_pair_ring) (the interp
+    /// compute reads the same slot at binding 0). The sibling in-flight frame binds
+    /// the OTHER slot — the lock-free write-after-read discipline the ring exists for.
+    #[inline]
+    pub(crate) fn interp_pair_slot(&self, slot: usize) -> &BoundBuffer {
+        &self.interp.pairs[slot]
+    }
+
+    /// The FENCED slot's interpolation OUT-SLOT SSBO (refined-B) — the write target of
+    /// the runner's per-frame [`upload_pair_out_slot`](boyko_render::upload_pair_out_slot)
+    /// (the interp compute reads the same slot at binding 1 as its `OutSlot` lane). The
+    /// sibling in-flight frame binds the OTHER slot — the same lock-free discipline as
+    /// the pair slot.
+    #[inline]
+    pub(crate) fn interp_out_slot_slot(&self, slot: usize) -> &BoundBuffer {
+        &self.interp.out_slot[slot]
     }
 
     /// The FENCED slot's cascade-UBO ring buffer — the write target of the
@@ -1114,6 +1388,11 @@ impl GpuSceneBundles {
             RhiDevice::destroy_compute_pipeline(ctx, self.marcher);
             RhiDevice::destroy_bind_group_layout(ctx, self.vocab_layout);
             RhiDevice::destroy_graphics_pipeline(ctx, self.raster_pipeline);
+            // The B3 interp cluster (host plan R5, refined-B): its `interp_bg` binds
+            // the SHARED `instance_rings` (the model-out target) plus the pair +
+            // out-slot rings; it is torn down here (before the shared instance
+            // bind groups/rings below), reverse creation order internally.
+            self.interp.destroy(ctx);
             for bg in self.instance_bind_groups {
                 RhiDevice::destroy_bind_group(ctx, bg);
             }

@@ -166,15 +166,16 @@ impl Renderer<'_> {
             push[0..4].copy_from_slice(&interp.instance_count.to_le_bytes());
             push[4..8].copy_from_slice(&interp.alpha.to_le_bytes());
             // SAFETY: recording is open; the interp pipeline + its layout (declaring the
-            // 2-binding interp set at set 0 + the 8-byte COMPUTE push range) are live on this
+            // 3-binding interp set at set 0 + the 8-byte COMPUTE push range) are live on this
             // device (caller contract); `interp.interp_set` binds this frame slot's pair SSBO
-            // @0 (the host-written prev/curr pairs) + the draw SSBO @1 (the compute write
-            // target, the SAME buffer the raster VS reads); `groups` covers `instance_count`
-            // at the 64-wide group; `&interp.interp_set.descriptor_set` is a single-element
-            // local alive for the call (first_set 0, count 1, zero dynamic offsets); the push
-            // is exactly `INTERP_INSTANCES_PUSH_BYTES` (8) at offset 0 and `push` outlives
-            // the call. The interp pass reads a frame-private pair slot (a first touch — the
-            // graph derives NO input barrier), so no barrier is recorded before this dispatch.
+            // @0 (the host-written prev/curr pairs) + the out-slot SSBO @1 (the host-written
+            // ring offsets) + the SHARED model-out ring @2 (the compute write target, the SAME
+            // buffer the raster VS reads); `groups` covers the dynamic `instance_count` at the
+            // 64-wide group; `&interp.interp_set.descriptor_set` is a single-element local alive
+            // for the call (first_set 0, count 1, zero dynamic offsets); the push is exactly
+            // `INTERP_INSTANCES_PUSH_BYTES` (8) at offset 0 and `push` outlives the call. The
+            // interp pass reads frame-private pair + out-slot slots (first touches — the graph
+            // derives NO input barrier), so no barrier is recorded before this dispatch.
             unsafe {
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
@@ -201,16 +202,18 @@ impl Renderer<'_> {
                 );
                 (self.fns.cmd_dispatch)(cmd, groups, 1, 1);
             }
-            // The interp pass's draw-SSBO WRITES (COMPUTE/SHADER_WRITE) are ordered before
-            // the raster VS's READS (VERTEX/SHADER_READ) by the graph: it derives the
-            // COMPUTE→VERTEX RAW `interp_draw` barrier at the raster pass (the draw reader),
-            // so `record_graph_pass(plan.raster)` below emits it BEFORE the raster begins —
-            // still AFTER this dispatch's write. NOT recorded here.
+            // The interp pass's model-out WRITES (COMPUTE/SHADER_WRITE, the dynamic slots of
+            // the SHARED instance ring) are ordered before the raster VS's READS
+            // (VERTEX/SHADER_READ) by the graph: it derives the COMPUTE→VERTEX RAW
+            // `interp_model_out` barrier at the raster pass (the model_out reader), so
+            // `record_graph_pass(plan.raster)` below emits it BEFORE the raster begins — still
+            // AFTER this dispatch's write. NOT recorded here.
         }
 
         // SAFETY: recording is open; `record_graph_pass` records the graph's derived
         // barriers for the "raster" pass into `cmd` against the live G-buffer targets. When the
-        // interp pass ran, this also emits the COMPUTE→VERTEX RAW barrier on the interp draw SSBO.
+        // interp pass ran, this also emits the COMPUTE→VERTEX RAW barrier on the SHARED interp
+        // model-out ring (the instance ring the raster VS reads).
         self.record_graph_pass(plan.raster, cmd, targets, scene, fi);
 
         // (2) Dynamic rendering at the marcher's extent: 3 MRT color attachments
