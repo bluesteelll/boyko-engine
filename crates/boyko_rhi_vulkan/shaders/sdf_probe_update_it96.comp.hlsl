@@ -3,8 +3,9 @@
 // Sphere-traces the CSG edit-list from each ACTIVE probe over a Fibonacci ray set, shades each
 // hit (direct light + `sdf_soft_shadow_ranged` visibility), and blends the results into the
 // probe's octahedral irradiance tile (+ two-moment depth tile). Subset-limited by round-robin
-// from frame one (plan §4). INTERNAL checkpoint (strobes without hysteresis). All work stays
-// behind the GI-OFF 0%-gate: the pass is recorded ONLY when `ResolvedDdgi::enabled()`.
+// from frame one (plan §4). SDFDDGI I4: temporal hysteresis (an EMA-blend against the persistent
+// atlas) + a per-frame smoothly-advancing ray rotation converge the field over frames (no more
+// strobe). All work stays behind the GI-OFF 0%-gate: recorded ONLY when `ResolvedDdgi::enabled()`.
 //
 // # Single-source (eDSL — `boyko_shaderdsl`)
 //
@@ -84,7 +85,7 @@ static const float SHADOW_NORMAL_BIAS = 0.02;
 // inverse spacing).
 cbuffer DdgiUpdate : register(b6) {
     float4 origin;             // xyz = grid world origin, w = probe spacing
-    uint4  grid_dims;          // xyz = grid dims (probes per axis), w = free
+    uint4  grid_dims;          // xyz = grid dims (probes per axis), w = asfloat(hysteresis alpha)
     uint   frame_index;        // host-frame-derived (the round-robin phase)
     uint   subset_n;           // round-robin divisor N (divides DDGI_PROBE_COUNT)
     uint   rays_per_probe;     // Fibonacci ray count (== RayTable length)
@@ -113,6 +114,27 @@ static const float DDGI_MIN_SUM_WEIGHT   = 1.0e-6; // the resolve-side cosine-su
 static const uint DDGI_CLASS_ACTIVE    = 1u;      // bit0: probe not inside geometry
 static const uint DDGI_CLASS_CONVERGED = 2u;      // bit1: first successful tile write done
 static const float GI_INSIDE_EPS       = 0.0;     // `field_distance(probe) < eps` ⇒ inside ⇒ inactive
+
+// --- SDFDDGI I4 temporal-accumulation + quality tuning (update-side; the RESOLVE is untouched) ---
+// Per-frame ray rotation (smoothly-advancing, deterministic — see `rotate_ray`). A SMALL per-frame
+// orientation delta keeps the alpha-hysteresis EMA stable while the set sweeps the sphere over
+// frames (a per-frame RANDOM reorientation would inject variance a 0.9x filter cannot settle —
+// RTXGI tolerates random only via an adaptive-hysteresis relief we do not have).
+static const float GI_ROT_SPIN    = 0.2393; // primary spin per frame (rad), constant angular vel
+static const float GI_ROT_PRECESS = 0.0409; // slow axis precession per frame (rad), incommensurate
+static const float GI_ROT_TILT    = 0.9553; // precession cone half-angle (~54.7 deg, even coverage)
+// Firefly clamp on ONE ray's shaded radiance (anti a lone bright hit freezing into the EMA for
+// ~1/(1-alpha) frames). Generous — a sunlit Lambert surface is O(1), so 16 never clips real signal.
+static const float DDGI_MAX_RADIANCE = 16.0;
+// Depth two-moment distance clamp (x spacing): a sky-miss ray writes GI_T_MAX (10); left raw it
+// blows up E[d^2] -> a huge Chebyshev variance -> light leak. 1.5*spacing (the RTXGI rule) keeps the
+// moments inside the resolve's probe-neighbourhood query range.
+static const float GI_DEPTH_CLAMP_SCALE = 1.5;
+// A single constant standing in for the diffuse bounce reflectance the update shade omits (the
+// update set binds NO material table, so `shade_hit` returns the hit's incident light, not
+// rho/pi * E). 1.0 = the I3 behaviour (white bounce, no per-hit albedo tint — colored bleeding is a
+// follow-up needing the material table in the update set); tuned from the owner-eval picture.
+static const float GI_BOUNCE_SCALE = 1.0;
 
 // The groupshared cooperative ray cache (plan §2.4): one thread-block per active probe; the 64
 // threads cooperatively march the rays into LDS, sync, then cooperatively gather the texels.
@@ -241,7 +263,30 @@ float3 shade_hit(float3 hit_pos, float3 n) {
         // Diffuse only: `e.color` already carries `color × illuminance` (no double-count).
         lit += e.color * (NoL * vis);
     }
-    return lit;
+    // SDFDDGI I4: the single-constant bounce-reflectance stand-in (GI_BOUNCE_SCALE; 1.0 = white
+    // bounce — the update set binds no material table, so no per-hit albedo tint yet).
+    return lit * GI_BOUNCE_SCALE;
+}
+
+// SDFDDGI I4 — the per-frame ray-set rotation. A smoothly-advancing DETERMINISTIC rotation (NOT a
+// per-frame random reorientation): a primary spin at constant angular velocity about an axis that
+// slowly precesses on a cone, the two rates incommensurate. Successive frames' 64-ray sets stay
+// nearly aligned (small delta -> the hysteresis EMA settles) yet fill each other's angular gaps and
+// sweep the sphere over frames. Transcendentals are fine here — this is the UPDATE pass, not the
+// bit-exact RESOLVE. `frame` is the raw monotonic frame index (never the subset phase).
+float3 rotate_ray(float3 v, uint frame) {
+    float f = (float)frame;
+    float spin = f * GI_ROT_SPIN;
+    float prec = f * GI_ROT_PRECESS;
+    // The precessing unit axis: a cone about +Y at half-angle GI_ROT_TILT.
+    float3 axis = float3(sin(GI_ROT_TILT) * cos(prec), cos(GI_ROT_TILT), sin(GI_ROT_TILT) * sin(prec));
+    // Rotate v by the unit quaternion (axis*sin(spin/2), cos(spin/2)):
+    //   v' = v + 2 s (q x v) + 2 q x (q x v),  q = axis*sin(h), s = cos(h), h = spin/2.
+    float h = 0.5 * spin;
+    float s = cos(h);
+    float3 q = axis * sin(h);
+    float3 t = 2.0 * cross(q, v);
+    return v + s * t + cross(q, t);
 }
 
 [numthreads(64, 1, 1)]
@@ -256,6 +301,19 @@ void main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
     float3 pw = probe_world_pos(c);
     uint R = min(rays_per_probe, GI_MAX_RAYS);
 
+    // SDFDDGI I4: the temporal-blend state, read ONCE before any tile write. `blend_a` is the
+    // hysteresis alpha (from grid_dims.w) ONLY when this probe was ACTIVE *and* CONVERGED last frame,
+    // else 0 (a fresh write). The reset key is `ACTIVE & CONVERGED`, NOT `CONVERGED` alone: a probe
+    // that was buried last frame keeps its CONVERGED bit but its atlas tile is stale (geometry moved
+    // through it), and the resolve gates on the depth-mean sentinel — NOT this bit — so a stale tile
+    // would leak (the re-activation ghost). Keying the reset on ACTIVE&CONVERGED forces a fresh write
+    // on re-activation. Every texel thread reads the PRE-frame class (the CONVERGED bit is re-stamped
+    // only at the end by lid.x==0).
+    uint cls = Classification[probe_index];
+    bool was_ac = (cls & (DDGI_CLASS_ACTIVE | DDGI_CLASS_CONVERGED))
+                  == (DDGI_CLASS_ACTIVE | DDGI_CLASS_CONVERGED);
+    float blend_a = was_ac ? asfloat(grid_dims.w) : 0.0;
+
     // Classification bit0 (active): re-evaluated each scheduled frame (geometry is dynamic).
     // `inside = field_distance(probe) < GI_INSIDE_EPS` ⇒ the probe is buried ⇒ skip it.
     bool inside = field_distance(pw) < GI_INSIDE_EPS;
@@ -263,14 +321,17 @@ void main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
         if (lid.x == 0u) {
             // Clear the active bit (keep the converged bit) so the resolve treats a
             // newly-buried probe as inactive.
-            Classification[probe_index] = Classification[probe_index] & DDGI_CLASS_CONVERGED;
+            Classification[probe_index] = cls & DDGI_CLASS_CONVERGED;
         }
         return;
     }
 
     // (1) Cooperatively march the rays into groupshared (thread i marches rays i, i+64, ...).
     for (uint r = lid.x; r < R; r += 64u) {
-        float3 rd = normalize(RayTable[r].xyz);
+        // SDFDDGI I4: rotate the boot-static Fibonacci direction by this frame's smooth rotation so
+        // the hysteresis EMA integrates a fuller sphere over frames. The ROTATED `rd` is what gets
+        // cached in `gs_dir[r]`, so the octahedral blend weights against the same direction marched.
+        float3 rd = rotate_ray(normalize(RayTable[r].xyz), frame_index);
         float hit_t;
         bool hit = probe_march(pw, rd, hit_t);
         // Shade the hit; a sky miss contributes zero radiance + GI_T_MAX depth.
@@ -280,9 +341,11 @@ void main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
             // The TRUE SDF field normal at the hit (`sdf_normal` from `sdf_field.hlsli` — the SAME
             // eDSL-generated central-difference gradient the resolve uses, pinned by
             // `sdf_field_edsl_sync`; NOT the coarse `-rd`, P1-2). Its ~6 field taps/hit are a
-            // real part of the `ddgi_probe_update_cost` bench (cost-honesty).
+            // real part of the `ddgi_probe_gi_cost` bench (cost-honesty).
             float3 n = sdf_normal(hit_pos);
             L = shade_hit(hit_pos, n);
+            // SDFDDGI I4 firefly clamp: a lone bright hit would otherwise freeze into the EMA.
+            L = min(L, float3(DDGI_MAX_RADIANCE, DDGI_MAX_RADIANCE, DDGI_MAX_RADIANCE));
         } else {
             hit_t = GI_T_MAX;
         }
@@ -317,7 +380,12 @@ void main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
         float3 irr = float3(sum_r, sum_g, sum_b) / max(sum_w, DDGI_MIN_SUM_WEIGHT);
         // Write the valid interior texel (offset past the 1-texel border).
         uint3 dst = uint3(irr_org.y + DDGI_TILE_BORDER + tx, irr_org.z + DDGI_TILE_BORDER + ty, irr_org.x);
-        gIrrOut[dst] = float4(irr, 1.0);
+        // SDFDDGI I4 hysteresis: EMA-blend the fresh irradiance against the persistent atlas texel
+        // (a read-modify-write of the UAV — this dispatch has not yet written `dst`, so the read is
+        // last frame's value; each interior texel is owned by exactly one thread, no aliasing).
+        // `blend_a == 0` on the first-converged / re-activated write ⇒ a fresh (un-blended) write.
+        float3 prev_irr = gIrrOut[dst].rgb;
+        gIrrOut[dst] = float4(lerp(irr, prev_irr, blend_a), 1.0);
     }
 
     // (3) Cooperatively gather the depth texels (14x14 valid) — the two-moment tile.
@@ -331,7 +399,10 @@ void main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
         float dmean = 0.0, dmean2 = 0.0, dw = 0.0;
         for (uint r = 0u; r < R; ++r) {
             float3 rayDir = gs_dir[r];
-            float t = gs_t[r];
+            // SDFDDGI I4: clamp the hit distance to 1.5*spacing before the two-moment accumulate —
+            // a sky-miss ray writes GI_T_MAX, which left raw blows up E[d^2] -> a huge Chebyshev
+            // variance -> light leak. The clamp keeps the moments in the resolve's probe-query range.
+            float t = min(gs_t[r], origin.w * GI_DEPTH_CLAMP_SCALE);
             // === GENERATED probe_depth_blend BEGIN ===
             float w = max(texelDir.x * rayDir.x + texelDir.y * rayDir.y + texelDir.z * rayDir.z, 0.0);
             float wt = w * t;
@@ -343,7 +414,10 @@ void main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
         float inv = 1.0 / max(dw, DDGI_MIN_SUM_WEIGHT);
         float2 moments = float2(dmean * inv, dmean2 * inv);
         uint3 dst = uint3(depth_org.y + DDGI_TILE_BORDER + tx, depth_org.z + DDGI_TILE_BORDER + ty, depth_org.x);
-        gDepthOut[dst] = moments;
+        // SDFDDGI I4 hysteresis: EMA-blend the two moments (a linear EMA of E[d] and E[d^2] converges
+        // to the true moments, so the Chebyshev variance E[d^2]-E[d]^2 self-heals). Same `blend_a`.
+        float2 prev_m = gDepthOut[dst];
+        gDepthOut[dst] = lerp(moments, prev_m, blend_a);
     }
 
     // (4) One thread stamps the converged-once bit (+ keeps active set): the tile is written.

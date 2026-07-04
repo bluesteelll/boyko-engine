@@ -68,6 +68,15 @@ pub const DEFAULT_SUBSET_N: u32 = 2;
 /// sweeps `rays_per_probe ∈ {16, 32, 64, 128}`, all `<= 128`.
 pub const GI_MAX_RAYS: u32 = 128;
 
+/// The default temporal-hysteresis blend factor `α` (SDFDDGI I4) — the fraction of the PREVIOUS
+/// atlas value kept per update: the shader writes `lerp(fresh, prev, α)`. `0.95` gives an effective
+/// window of `1/(1-α) ≈ 20` frames — stable for *dynamic* runtime GI once the smoothly-advancing
+/// per-frame ray rotation feeds it decorrelated samples (a per-frame random rotation would need a
+/// LOWER α; ours is smooth, so `0.95` is safe). A one-shot static capture wants a LOWER α (≈0.9)
+/// so it converges in fewer frames. Rides the update UBO's `grid_dims.w` lane as a bit-cast `f32`;
+/// clamped to `[0, 1)` where packed (a `1.0` would freeze the field, never integrating new light).
+pub const DEFAULT_HYSTERESIS: f32 = 0.95;
+
 // ---- DdgiUpdateUbo (the b6 cbuffer byte-mirror) --------------------------------------
 
 /// The SDFDDGI I2 probe-update parameter UBO — a `#[repr(C)]` byte-mirror of the committed
@@ -86,9 +95,12 @@ pub struct DdgiUpdateUbo {
     /// `origin.w` = the probe spacing (world units between adjacent probes). The shader's
     /// `probe_world_pos` = `origin.xyz + float3(coord) * origin.w`.
     pub origin: [f32; 4],
-    /// `grid_dims.xyz` = the probes per axis as bit-cast `u32` (`.w` free/zero) — packed
-    /// like [`ResolvedDdgi`](crate::ddgi_config::ResolvedDdgi)'s dims lanes. The shader reads
-    /// `grid_dims.x/.y/.z` as `uint` (its `probe_coord` decomposition divisors).
+    /// `grid_dims.xyz` = the probes per axis as bit-cast `u32` — packed like
+    /// [`ResolvedDdgi`](crate::ddgi_config::ResolvedDdgi)'s dims lanes. The shader reads
+    /// `grid_dims.x/.y/.z` as `uint` (its `probe_coord` decomposition divisors). **`.w` carries the
+    /// temporal-hysteresis `α` as a bit-cast `f32`** (SDFDDGI I4 — the shader reads
+    /// `asfloat(grid_dims.w)`), NOT a free/pad lane: this transports `α` without disturbing the
+    /// pinned 48-byte layout. A reader wiring dims must NOT treat `.w` as a dimension.
     pub grid_dims: [u32; 4],
     /// The host-frame-derived round-robin phase (`frame_index % subset_n` selects the subset).
     /// I2 ships identity ray-rotation, so this only phases the subset (the quaternion rotate is
@@ -166,6 +178,11 @@ pub struct DdgiUpdateConfig {
     /// [`GI_MAX_IT_VARIANTS`](boyko_rhi_vulkan::compute::GI_MAX_IT_VARIANTS). Selects the
     /// pre-compiled `sdf_probe_update_it*.comp.spv` pipeline (measured==shipped, plan §5).
     pub gi_max_it: u32,
+    /// The temporal-hysteresis blend factor `α` (SDFDDGI I4) — the fraction of the previous atlas
+    /// value the update KEEPS each frame (`lerp(fresh, prev, α)`). Rides the UBO `grid_dims.w` lane
+    /// as a bit-cast `f32`; clamped to `[0, 1)` in [`pack_ddgi_update_ubo`] (a `1.0` never
+    /// integrates new light). Default [`DEFAULT_HYSTERESIS`].
+    pub hysteresis: f32,
 }
 
 impl Default for DdgiUpdateConfig {
@@ -175,6 +192,7 @@ impl Default for DdgiUpdateConfig {
             rays_per_probe: DEFAULT_RAYS_PER_PROBE,
             subset_n: DEFAULT_SUBSET_N,
             gi_max_it: boyko_rhi_vulkan::compute::GI_MAX_IT_DEFAULT,
+            hysteresis: DEFAULT_HYSTERESIS,
         }
     }
 }
@@ -329,11 +347,15 @@ pub fn pack_ddgi_update_ubo(
     // (the resolve's degenerate) → spacing 0 (a benign collapse; the pass never runs disabled).
     let inv_spacing = resolved.inv_spacing_dims[0];
     let spacing = if inv_spacing > 0.0 { 1.0 / inv_spacing } else { 0.0 };
+    // `grid_dims.w` (SDFDDGI I4) carries the temporal-hysteresis `α` as a bit-cast `f32`. Clamp to
+    // `[0, 1)`: a NaN/inf would reach the shader `lerp`, and `1.0` would freeze the field (never
+    // integrating new light). `0.999` is the practical ceiling.
+    let hysteresis = cfg.hysteresis.clamp(0.0, 0.999);
     let dims = [
         resolved.inv_spacing_dims[1].to_bits(),
         resolved.inv_spacing_dims[2].to_bits(),
         resolved.inv_spacing_dims[3].to_bits(),
-        0,
+        hysteresis.to_bits(),
     ];
     let rays = cfg.rays_per_probe.clamp(1, GI_MAX_RAYS);
     let subset_n = cfg.subset_n.max(1);
@@ -403,11 +425,30 @@ mod tests {
         let ubo = pack_ddgi_update_ubo(&resolved, &update, 3, 5);
         // Spacing round-trips from the resolve's inv_spacing.
         assert!((ubo.origin[3] - cfg.spacing).abs() < 1e-5);
-        // Dims match the config (bit-cast lanes).
-        assert_eq!(ubo.grid_dims, [cfg.dims[0], cfg.dims[1], cfg.dims[2], 0]);
+        // Dims match the config (bit-cast lanes) in xyz; .w carries the hysteresis alpha.
+        assert_eq!(
+            [ubo.grid_dims[0], ubo.grid_dims[1], ubo.grid_dims[2]],
+            [cfg.dims[0], cfg.dims[1], cfg.dims[2]]
+        );
+        assert_eq!(ubo.grid_dims[3], update.hysteresis.clamp(0.0, 0.999).to_bits());
         assert_eq!(ubo.frame_index, 3);
         assert_eq!(ubo.light_count, 5);
         assert_eq!(ubo.rays_per_probe, update.rays_per_probe);
         assert_eq!(ubo.subset_n, update.subset_n);
+    }
+
+    #[test]
+    fn packed_ubo_clamps_hysteresis_into_the_w_lane() {
+        let cfg = DdgiConfig { ddgi_indirect: true, ..DdgiConfig::default() };
+        let resolved = crate::ddgi_config::resolve_ddgi(&cfg);
+        // An out-of-range alpha (>= 1.0 would freeze the field / a NaN would poison the lerp) is
+        // clamped to 0.999 before it reaches `grid_dims.w`.
+        let update = DdgiUpdateConfig { hysteresis: 1.5, ..DdgiUpdateConfig::default() };
+        let ubo = pack_ddgi_update_ubo(&resolved, &update, 0, 1);
+        assert_eq!(f32::from_bits(ubo.grid_dims[3]), 0.999);
+        // The in-range default round-trips exactly.
+        let ok = DdgiUpdateConfig { hysteresis: 0.9, ..DdgiUpdateConfig::default() };
+        let ubo_ok = pack_ddgi_update_ubo(&resolved, &ok, 0, 1);
+        assert_eq!(f32::from_bits(ubo_ok.grid_dims[3]), 0.9);
     }
 }

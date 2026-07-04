@@ -69,7 +69,10 @@ use boyko_rhi_vulkan::goldens::{GoldenLight, GoldenLightHeader, golden_composite
 use boyko_rhi_vulkan::mesh_sdf_texture::MeshSdfTexture;
 use boyko_sdf_math::mesh_sdf::{BakeMesh, MeshSdfField};
 use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
-use boyko_rhi_vulkan::ddgi::DdgiAtlas;
+use boyko_rhi_vulkan::compute::{GI_MAX_IT_DEFAULT, sdf_probe_update_spirv};
+use boyko_rhi_vulkan::ddgi::{
+    DDGI_GRID_DIM_X, DDGI_GRID_DIM_Y, DDGI_GRID_DIM_Z, DDGI_PROBE_COUNT, DdgiAtlas,
+};
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::memory::BoundBuffer;
 use boyko_rhi_vulkan::rhi_impl::{
@@ -80,7 +83,7 @@ use boyko_rhi_vulkan::ffi::{
     VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM, VkExtent2D,
 };
 use boyko_rhi_vulkan::swapchain::{
-    BrickActivation, CsmDepthActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
+    BrickActivation, CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
     GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferFrame,
     GBufferMeshDraw, GBufferScene, InterpActivation, PunctualDepthActivation, Renderer,
     SsaoActivation, Surface, Swapchain,
@@ -260,6 +263,10 @@ const SPOT_ATLAS_UBO_BYTES: u64 = 1296;
 /// `inv_spacing`/dims + `ddgi_mode_word` + pad). Zero-seeded, bound-but-unread at resolve binding 18
 /// while the GI gate is OFF (the default on every golden present).
 const DDGI_UBO_BYTES: u64 = 48;
+/// SDFDDGI I4 — the probe-update Fibonacci ray count for the GI-ON showcase (`run_showcase_body_ddgi`):
+/// the ray table length + the b6 UBO's `rays_per_probe`. 64 rays/probe (≤ the shader's `GI_MAX_RAYS`)
+/// — the owner-locked derived-ray budget the I4 update pass converges under 3 ms at full grid.
+const DDGI_UPDATE_RAYS: usize = 64;
 /// Shadow Phase 5 Inc-1-GPU: the host-side spot normal-bias FACTOR — MUST equal the resolve shader's
 /// `SPOT_SHADOW_NORMAL_BIAS` (`deferred_pbr.hlsl`) so the host spot matrix golden reprojects EXACTLY
 /// as the resolve does.
@@ -5520,6 +5527,30 @@ fn engine_grand_showcase_512_screenshot_dump() {
     );
 }
 
+/// The GRAND flagship showcase screenshot with SDFDDGI **GI ON** — the FIRST render (rung I4) that
+/// arms the live probe-update pass AND the resolve's GI-injection gate. The warm sun drives the
+/// probe update, whose converged indirect irradiance the resolve injects onto the two SDF spheres
+/// (the only `is_sdf_lit` geometry in [`grand_showcase_config`]). Dumps to [`GRAND_SHOWCASE_DDGI_BMP`]
+/// for the owner's RTX visual sign-off. See [`run_showcase_body_ddgi`] for the deltas from the
+/// GI-OFF golden body.
+const GRAND_SHOWCASE_DDGI_BMP: &str = r"D:\tmp\engine_grand_showcase_ddgi.bmp";
+
+/// **The GRAND flagship showcase — SDFDDGI I4, dynamic diffuse GI ON.** Renders the same
+/// maximum-capability room as [`engine_grand_showcase_512_screenshot_dump`], but arms the live
+/// DDGI probe-update pass + the resolve's word-7 bit-4 GI-injection gate and converges the probe
+/// atlas over [`run_showcase_body_ddgi`]'s ramp before the readback frame, so the two SDF spheres
+/// pick up the sun-driven indirect bounce. Dumps a TRUE 512×512 BMP to [`GRAND_SHOWCASE_DDGI_BMP`].
+///
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
+/// orchestrator runs it on the GPU to dump the screenshot.
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the DDGI GI-ON showcase screenshot"]
+fn engine_grand_showcase_512_ddgi_screenshot_dump() {
+    with_windowed_present("boyko_engine grand showcase DDGI 512", "engine_showcase_512", |bp| {
+        run_showcase_body_ddgi(bp, GRAND_SHOWCASE_DDGI_BMP, grand_showcase_config(), false)
+    });
+}
+
 // === Shared fly-camera basis (VIEWER_INITIAL_PITCH + vadd/vscale/vcross/vnorm) used by the scripted shadow-diagnostic harnesses. The interactive viewer moved to boyko_app examples/showcase.rs (a fly-able host mixed scene). ===
 
 /// The interactive fly-camera's initial pitch (radians). At `yaw == 0` the FPS basis maps
@@ -7139,6 +7170,977 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
     with_windowed_present(window_title, "engine_showcase_512", |bp| {
         run_showcase_body(bp, bmp_path, cfg, interactive)
     });
+}
+
+/// SDFDDGI I4 — the GI-ON variant of [`run_showcase_body`]. It shares the whole GI-OFF golden setup
+/// VERBATIM (so the byte-identical golden body is untouched) and layers on the deltas that light up
+/// dynamic diffuse GI: the light-header word-7 bit-4 injection gate ([`GoldenLightHeader::with_ddgi_mode`]),
+/// a snugly-fit probe grid reseeded into BOTH the resolve grid UBO (`csm.ddgi_ubo`) and a dedicated
+/// update UBO, the live probe-update compute pass ([`DdgiUpdateActivation`], its ray table + params
+/// UBO + pipeline + layout), and a [`DDGI_CONVERGE_FRAMES`]-frame convergence loop (rewriting
+/// `frame_index` each frame for the I4 ray rotation) before the single readback frame. Only ever
+/// called with `interactive == false` (the readback dump path); the interactive viewer branch is
+/// intentionally absent.
+///
+/// The resolve injects GI ONLY on `is_sdf_lit` pixels — in [`grand_showcase_config`] that is the two
+/// SDF spheres — so the converged sun-driven indirect bounce reads there and nowhere else (the mesh
+/// walls/floor/boxes are `mask == 0`). The update shader shades DIRECTIONAL lights only, so the warm
+/// sun is the GI driver.
+fn run_showcase_body_ddgi(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfig, interactive: bool) {
+    let BootPresent { window, ctx, surface, mut swapchain, mut renderer, is_bgra, swap_color_format } =
+        bp;
+    debug_assert!(!interactive, "invariant: run_showcase_body_ddgi is a readback-only dump path");
+
+    let device: &VulkanContext = ctx;
+    let sdf = &cfg.sdf;
+
+    // SDFDDGI I4 grid fit — snugly encloses the grand_showcase room (X∈[-4.5,4.5], Y∈[0,5.2],
+    // Z∈[-5,3.5]) and both SDF spheres. 16×8×16 probes, uniform spacing 0.7 → AABB X∈[-5.25,5.25],
+    // Y∈[0.2,5.1], Z∈[-6,4.5].
+    const DDGI_ORIGIN: [f32; 3] = [-5.25, 0.20, -6.00];
+    const DDGI_SPACING: f32 = 0.70;
+    // dims are boyko_rhi_vulkan::ddgi::{DDGI_GRID_DIM_X/Y/Z} = [16,8,16].
+    const DDGI_HYSTERESIS: f32 = 0.9; // static-capture α (lower than the 0.95 runtime default → converges faster).
+    const DDGI_CONVERGE_FRAMES: u32 = 160; // 0.9^160 ≈ 1e-7; ramps from the boot-zero atlas.
+    // The update UBO's `light_count` — captured before `cfg`'s fields are consumed below (the moves
+    // of `cfg.vertices`/`cfg.mvp` and the borrows of `cfg.light_elems` would otherwise clash with a
+    // late read at the update-UBO seed site).
+    let ddgi_light_count = cfg.light_elems.len() as u32;
+
+    // --- The edit-list SSBO (binding 0), host-seeded ONCE. The resolve binds the SAME buffer
+    // at binding 10 for the per-caster shadow march. ---
+    let edit_list = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: (EDITLIST_BUFFER_WORDS as u64) * 4,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("edit-list storage buffer");
+    {
+        let mut header = vec![0u32; EDITLIST_BUFFER_WORDS];
+        encode_edit_list(&mut header, sdf);
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &edit_list)
+            .expect("host-visible edit-list buffer is mapped");
+        write_words(mapped, &header);
+    }
+
+    let mesh_sdf_texture: Option<MeshSdfTexture> = cfg.mesh_sdf.as_ref().map(|(pos, idx)| {
+        let mesh = BakeMesh::new(pos, idx);
+        let field = MeshSdfField::for_mesh(&mesh, 0.04);
+        MeshSdfTexture::create(ctx, &mesh, &field).expect("MDF mesh-SDF texture create + upload")
+    });
+    let mesh_sdf_enabled = mesh_sdf_texture.is_some();
+
+    let ubo_bytes = if mesh_sdf_enabled {
+        B5_CAMERA_UBO_BYTES_MESH_SDF
+    } else {
+        B5_CAMERA_UBO_BYTES_M4
+    };
+    let camera_ring: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+        RhiDevice::create_buffer(
+            device,
+            &BufferDesc {
+                size: ubo_bytes as u64,
+                usage: BufferUsage::UNIFORM,
+                location: MemoryLocation::HostVisibleCoherent,
+            },
+        )
+        .expect("camera uniform buffer")
+    });
+    {
+        let pc = &cfg.camera;
+        assert_eq!(pc.count, PIXELS);
+        let bytes = pc.as_bytes();
+        debug_assert_eq!(bytes.len(), M2_GRID_PARAMS_OFFSET, "camera block must be 80 B");
+        let mesh_sdf_params = mesh_sdf_texture
+            .as_ref()
+            .map(|tex| MeshSdfParams::from_field(tex.field()));
+        for slot in &camera_ring {
+            let mapped = RhiDevice::buffer_mapped_ptr(device, slot)
+                .expect("host-visible uniform buffer is mapped");
+            // SAFETY: `mapped` points to `ubo_bytes` (224 or 256) mapped host-coherent bytes; the
+            // 80-byte camera block is written at offset 0. No GPU work is in flight yet, so the host
+            // write is unsynchronized-safe. Every ring slot is seeded with the SAME bytes.
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+            }
+            if let Some(params) = mesh_sdf_params.as_ref() {
+                let pbytes = params.as_bytes();
+                debug_assert_eq!(MESH_SDF_PARAMS_OFFSET + pbytes.len(), ubo_bytes);
+                // SAFETY: the buffer is `ubo_bytes` (256) here; the 32-byte block is written at
+                // `MESH_SDF_PARAMS_OFFSET` (224), entirely within the mapped range; unique host writer
+                // before any GPU work. Every ring slot receives the SAME tail bytes.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        pbytes.as_ptr(),
+                        mapped.as_ptr().add(MESH_SDF_PARAMS_OFFSET),
+                        pbytes.len(),
+                    );
+                }
+            }
+        }
+    }
+
+    let (tw, th) = tile_grid_extent(COMPOSITE_W, COMPOSITE_H);
+    let tiles_buffer = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: (tw as u64) * (th as u64) * (TILE_BOUND_BYTES as u64),
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("P4b coarse-cull tile-bound storage buffer (vocab binding 6)");
+
+    let mat_table = showcase_material_table();
+    let material_table = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: (mat_table.len() as u64) * 4,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("PBR material table storage buffer");
+    {
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &material_table)
+            .expect("host-visible material table is mapped");
+        write_words(mapped, &mat_table);
+    }
+
+    let field = {
+        use boyko_sdf_math::SdfEditField;
+        let mut f = SdfEditField::new();
+        for e in sdf {
+            assert!(f.push(*e), "showcase scene must fit MAX_SDF_EDITS");
+        }
+        f.bump_gen();
+        f
+    };
+    let clipmap = BrickClipmap::create(ctx, &field, [0.0, 0.0, 0.0])
+        .expect("brick clip-map (showcase scene) — create + bake + upload");
+
+    // --- The light table SSBO. SDFDDGI I4: `.with_ddgi_mode(true)` sets the resolve's GI-injection
+    // gate (header word-7 bit 4), the ONLY header change vs the GI-OFF golden. ---
+    let light_header = cfg
+        .light_header
+        .with_csm_mode(cfg.csm.is_some())
+        .with_punctual_shadow_mode(cfg.spot_atlas.is_some())
+        .with_ddgi_mode(true);
+    let light_elems = &cfg.light_elems;
+    let light_words = pack_showcase_light_table(&light_header, light_elems);
+    let light_table_bytes = (light_words.len() as u64) * 4;
+    let light_table = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: light_table_bytes,
+            usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("showcase light table storage buffer");
+    {
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &light_table)
+            .expect("host-visible light table is mapped");
+        write_words(mapped, &light_words);
+    }
+    let light_staging = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: light_table_bytes,
+            usage: BufferUsage::TRANSFER_SRC,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("showcase light table staging buffer");
+    {
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &light_staging)
+            .expect("host-visible light staging is mapped");
+        write_words(mapped, &light_words);
+    }
+
+    // --- The mesh's vertex buffer (the showcase floor / hybrid-room geometry). ---
+    let vertices = cfg.vertices;
+    let vertex_bytes = core::mem::size_of_val(vertices.as_slice()) as u64;
+    let vertex_buffer = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: vertex_bytes,
+            usage: BufferUsage::VERTEX,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("host-visible vertex buffer");
+    {
+        let vb_ptr = RhiDevice::buffer_mapped_ptr(device, &vertex_buffer)
+            .expect("host-visible vertex buffer is mapped");
+        // SAFETY: `vb_ptr` points to `vertex_bytes` mapped host-coherent bytes; `vertices`'s heap
+        // buffer is a distinct `vertex_bytes`-byte region (`vertex_bytes == len * stride`); the
+        // write completes before any submit.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                vertices.as_ptr().cast::<u8>(),
+                vb_ptr.as_ptr(),
+                vertex_bytes as usize,
+            );
+        }
+    }
+
+    let depth_sampler = RhiDevice::create_sampler(device, &SamplerDesc::default())
+        .expect("depth sampler (ignored by .Load)");
+    let present_sampler = RhiDevice::create_sampler(
+        device,
+        &SamplerDesc {
+            mag_filter: Filter::Nearest,
+            min_filter: Filter::Nearest,
+            address_mode: AddressMode::ClampToEdge,
+            mip: MipMode::None,
+            compare: None,
+        },
+    )
+    .expect("present nearest/clamp sampler");
+
+    // --- The mesh-MRT G-buffer producer graphics pipeline (Render P5-r0). ---
+    let vs = RhiDevice::create_shader_module(device, MRT_VS_SPV.as_words())
+        .expect("mesh-MRT vertex shader module");
+    let fs = RhiDevice::create_shader_module(device, MRT_FS_SPV.as_words())
+        .expect("mesh-MRT fragment shader module");
+    let attributes = [
+        VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
+        VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
+        VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
+    ];
+    let (instance_layout, instance_buffer, instance_bind_group) = create_identity_instance(device);
+
+    let instanced_gpu: Option<InstancedGpu> = cfg.instanced.as_ref().map(|inst| {
+        let mut ring: Vec<[f32; 12]> = Vec::new();
+        let mut batches: Vec<InstancedGpuBatch> = Vec::with_capacity(inst.meshes.len());
+        for (batch_idx, entry) in inst.meshes.iter().enumerate() {
+            let base_instance = ring.len() as u32;
+            ring.extend_from_slice(&entry.affines);
+
+            let vbytes = core::mem::size_of_val(entry.vertices.as_slice()) as u64;
+            let mvb = RhiDevice::create_buffer(
+                device,
+                &BufferDesc {
+                    size: vbytes,
+                    usage: BufferUsage::VERTEX,
+                    location: MemoryLocation::HostVisibleCoherent,
+                },
+            )
+            .expect("M3 instanced mesh vertex buffer");
+            {
+                let p = RhiDevice::buffer_mapped_ptr(device, &mvb)
+                    .expect("host-visible instanced vertex buffer is mapped");
+                // SAFETY: `p` points to `vbytes` mapped host-coherent bytes; `entry.vertices` is
+                // a distinct `vbytes`-byte slice; the copy completes before any submit.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        entry.vertices.as_ptr().cast::<u8>(),
+                        p.as_ptr(),
+                        vbytes as usize,
+                    );
+                }
+            }
+            let index_type = if entry.vertices.len() <= u16::MAX as usize + 1 {
+                IndexType::Uint16
+            } else {
+                IndexType::Uint32
+            };
+            let idx_bytes: Vec<u8> = match index_type {
+                IndexType::Uint16 => entry
+                    .indices
+                    .iter()
+                    .flat_map(|&i| (i as u16).to_le_bytes())
+                    .collect(),
+                IndexType::Uint32 => entry.indices.iter().flat_map(|&i| i.to_le_bytes()).collect(),
+            };
+            let mib = RhiDevice::create_buffer(
+                device,
+                &BufferDesc {
+                    size: idx_bytes.len() as u64,
+                    usage: BufferUsage::INDEX,
+                    location: MemoryLocation::HostVisibleCoherent,
+                },
+            )
+            .expect("M3 instanced mesh index buffer");
+            {
+                let p = RhiDevice::buffer_mapped_ptr(device, &mib)
+                    .expect("host-visible instanced index buffer is mapped");
+                // SAFETY: `p` points to `idx_bytes.len()` mapped host-coherent bytes; `idx_bytes`
+                // is a distinct equally-sized alloc; the copy completes before any submit.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(idx_bytes.as_ptr(), p.as_ptr(), idx_bytes.len());
+                }
+            }
+            batches.push(InstancedGpuBatch {
+                vertex_buffer: mvb,
+                index_buffer: mib,
+                index_count: entry.indices.len() as u32,
+                index_type: index_type.as_i32(),
+                base_instance,
+                instance_count: entry.affines.len() as u32,
+                casts_shadow: !inst.non_casters.contains(&batch_idx),
+            });
+        }
+        let (ssbo, bg) = create_instance_buffer(device, &instance_layout, &ring);
+        InstancedGpu { batches, instance_ssbo: ssbo, instance_bind_group: bg }
+    });
+
+    let raster_pipeline = RhiDevice::create_graphics_pipeline(
+        device,
+        &GraphicsPipelineDesc {
+            vertex_module: &vs,
+            vertex_entry: c"main",
+            fragment_module: &fs,
+            fragment_entry: c"main",
+            color_formats: &[RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT],
+            depth_format: Some(Format::D32Sfloat),
+            topology: PrimitiveTopology::TriangleList,
+            vertex_layout: Some(VertexBufferLayout {
+                stride: VERTEX_STRIDE,
+                attributes: &attributes,
+            }),
+            push_constant_bytes: MVP_BYTES,
+            bind_group_layout: Some(&instance_layout),
+            blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
+        },
+    )
+    .expect("mesh-MRT graphics pipeline");
+
+    // --- The P1b marcher: the vocabulary layout + the marcher pipeline. ---
+    let cs = RhiDevice::create_shader_module(device, sdf_gbuffer_composite_spirv())
+        .expect("P1b G-buffer marcher compute shader module");
+    let vocab_entries = [
+        BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::SampledImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 15, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+    ];
+    let vocab_layout = RhiDevice::create_bind_group_layout(
+        device,
+        &BindGroupLayoutDesc { entries: &vocab_entries },
+    )
+    .expect("P1b vocabulary bind-group layout");
+    let marcher = RhiDevice::create_compute_pipeline(
+        device,
+        &ComputePipelineDesc {
+            module: &cs,
+            entry: c"main",
+            push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: Some(&vocab_layout),
+        },
+    )
+    .expect("P1b G-buffer marcher compute pipeline");
+
+    // --- The deferred RESOLVE pipeline (binds the light table @6 + the SDF edit-list @10). ---
+    let resolve_cs = RhiDevice::create_shader_module(device, deferred_pbr_spirv())
+        .expect("deferred resolve compute shader module");
+    let resolve_entries = [
+        BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 15, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 16, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 17, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 18, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+    ];
+    let resolve_layout = RhiDevice::create_bind_group_layout(
+        device,
+        &BindGroupLayoutDesc { entries: &resolve_entries },
+    )
+    .expect("deferred resolve bind-group layout");
+    let resolve_pipeline = RhiDevice::create_compute_pipeline(
+        device,
+        &ComputePipelineDesc {
+            module: &resolve_cs,
+            entry: c"main",
+            push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: Some(&resolve_layout),
+        },
+    )
+    .expect("deferred resolve compute pipeline");
+
+    // --- The present-blit pipeline. ---
+    let present_layout = RhiDevice::create_bind_group_layout(
+        device,
+        &BindGroupLayoutDesc {
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                count: 1,
+                kind: DescriptorKind::CombinedImageSampler,
+                stage: ShaderStage::FRAGMENT,
+            }],
+        },
+    )
+    .expect("present-blit bind-group layout");
+    let sample_vs = RhiDevice::create_shader_module(device, SAMPLE_VS_SPV.as_words())
+        .expect("fullscreen vertex shader module");
+    let sample_fs = RhiDevice::create_shader_module(device, SAMPLE_FS_SPV.as_words())
+        .expect("fullscreen fragment shader module");
+    let present_pipeline = RhiDevice::create_graphics_pipeline(
+        device,
+        &GraphicsPipelineDesc {
+            vertex_module: &sample_vs,
+            vertex_entry: c"main",
+            fragment_module: &sample_fs,
+            fragment_entry: c"main",
+            color_formats: &[swap_color_format],
+            depth_format: None,
+            topology: PrimitiveTopology::TriangleList,
+            vertex_layout: None,
+            push_constant_bytes: 0,
+            bind_group_layout: Some(&present_layout),
+            blend: None,
+            cull_mode: CullMode::None,
+            depth_bias: None,
+        },
+    )
+    .expect("present-blit fullscreen-sample pipeline");
+
+    // --- Render P7: the SSAO compute pass. ---
+    let ssao_variant = cfg.ssao_quality.unwrap_or(SSAO_QUALITY_MEDIUM);
+    let ssao_cs = RhiDevice::create_shader_module(device, sdf_ssao_spirv_variant(ssao_variant))
+        .expect("Render P7 SSAO compute shader module");
+    let ssao_entries = [
+        BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+    ];
+    let ssao_layout = RhiDevice::create_bind_group_layout(
+        device,
+        &BindGroupLayoutDesc { entries: &ssao_entries },
+    )
+    .expect("Render P7 SSAO bind-group layout");
+    let ssao_pipeline = RhiDevice::create_compute_pipeline(
+        device,
+        &ComputePipelineDesc {
+            module: &ssao_cs,
+            entry: c"main",
+            push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+            bind_group_layout: Some(&ssao_layout),
+        },
+    )
+    .expect("Render P7 SSAO compute pipeline");
+
+    // The shader modules are consumed by pipeline creation; destroy them now.
+    // SAFETY: every module was created on `ctx` above + is no longer needed once its pipeline
+    // is created; each is destroyed exactly once.
+    unsafe {
+        RhiDevice::destroy_shader_module(device, sample_fs);
+        RhiDevice::destroy_shader_module(device, sample_vs);
+        RhiDevice::destroy_shader_module(device, ssao_cs);
+        RhiDevice::destroy_shader_module(device, resolve_cs);
+        RhiDevice::destroy_shader_module(device, cs);
+        RhiDevice::destroy_shader_module(device, fs);
+        RhiDevice::destroy_shader_module(device, vs);
+    }
+
+    // CSM Increment 1b (Rung A): the cascade trio + depth-only pipeline.
+    let csm = CsmSceneResources::create(device, &instance_layout);
+
+    // SDFDDGI I4: reseed the resolve grid UBO (`csm.ddgi_ubo`, resolve binding 18) — boot-created
+    // ZERO — with the fitted grid geometry (the `ResolvedDdgi` 48-byte layout: `origin` vec4,
+    // `inv_spacing`+dims vec4, `ddgi_mode_word`, pad). The redundant `ddgi_mode_word` mirror is set
+    // too, though the resolve gates GI on the LightBuf word-7 bit-4 flag, not on this word.
+    {
+        let inv_spacing = 1.0_f32 / DDGI_SPACING;
+        let grid_words: [u32; 12] = [
+            DDGI_ORIGIN[0].to_bits(),
+            DDGI_ORIGIN[1].to_bits(),
+            DDGI_ORIGIN[2].to_bits(),
+            0, // origin.w pad
+            inv_spacing.to_bits(),
+            DDGI_GRID_DIM_X,
+            DDGI_GRID_DIM_Y,
+            DDGI_GRID_DIM_Z,
+            1, // ddgi_mode_word (redundant mirror)
+            0,
+            0,
+            0, // pad
+        ];
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &csm.ddgi_ubo)
+            .expect("host-visible DDGI grid UBO is mapped");
+        write_words(mapped, &grid_words);
+    }
+
+    // SDFDDGI I4: the dedicated probe-update resources (the arm test's template) — a boot-static
+    // Fibonacci ray table, the b6 params UBO, the 7-binding update layout, the update module +
+    // pipeline. The renderer writes the update bind group itself (`ddgi_update = Some(..)` on the
+    // scene); the atlas / classification / light table already exist (reused).
+    let ddgi_ray_table = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: (DDGI_UPDATE_RAYS * 16) as u64,
+            usage: BufferUsage::STORAGE,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("SDFDDGI update ray table");
+    {
+        let golden = core::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
+        let mut words = vec![0u32; DDGI_UPDATE_RAYS * 4];
+        for i in 0..DDGI_UPDATE_RAYS {
+            let z = 1.0 - 2.0 * (i as f32 + 0.5) / DDGI_UPDATE_RAYS as f32;
+            let r = (1.0 - z * z).max(0.0).sqrt();
+            let phi = i as f32 * golden;
+            for (k, c) in [r * phi.cos(), r * phi.sin(), z, 0.0].into_iter().enumerate() {
+                words[i * 4 + k] = c.to_bits();
+            }
+        }
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &ddgi_ray_table)
+            .expect("host-visible DDGI ray table is mapped");
+        write_words(mapped, &words);
+    }
+
+    let ddgi_update_ubo = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: DDGI_UBO_BYTES,
+            usage: BufferUsage::UNIFORM,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("SDFDDGI update params UBO");
+    {
+        // The b6 `DdgiUpdateUbo` layout: `float4 origin` (xyz = grid origin, w = SPACING — the b6
+        // convention carries spacing, NOT inv_spacing), `uint4 grid_dims` (xyz = raw dims, w =
+        // `asfloat(hysteresis α)`), then `frame_index / subset_n / rays_per_probe / light_count`.
+        let mut w = [0u32; (DDGI_UBO_BYTES / 4) as usize];
+        w[0] = DDGI_ORIGIN[0].to_bits();
+        w[1] = DDGI_ORIGIN[1].to_bits();
+        w[2] = DDGI_ORIGIN[2].to_bits();
+        w[3] = DDGI_SPACING.to_bits();
+        w[4] = DDGI_GRID_DIM_X;
+        w[5] = DDGI_GRID_DIM_Y;
+        w[6] = DDGI_GRID_DIM_Z;
+        w[7] = DDGI_HYSTERESIS.to_bits(); // grid_dims.w = asfloat(α) — the I4 update shader reads it.
+        w[8] = 0; // frame_index — rewritten each converge frame.
+        w[9] = 1; // subset_n = 1 (every probe every frame).
+        w[10] = DDGI_UPDATE_RAYS as u32; // rays_per_probe (== ray-table length; ≤ GI_MAX_RAYS).
+        w[11] = ddgi_light_count; // light_count.
+        let mapped = RhiDevice::buffer_mapped_ptr(device, &ddgi_update_ubo)
+            .expect("host-visible DDGI update UBO is mapped");
+        write_words(mapped, &w);
+    }
+
+    let ddgi_update_layout = RhiDevice::create_bind_group_layout(
+        device,
+        &BindGroupLayoutDesc {
+            entries: &[
+                BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+            ],
+        },
+    )
+    .expect("SDFDDGI update bind-group layout");
+    let ddgi_update_module = RhiDevice::create_shader_module(device, sdf_probe_update_spirv(GI_MAX_IT_DEFAULT))
+        .expect("SDFDDGI probe-update shader module");
+    let ddgi_update_pipeline = RhiDevice::create_compute_pipeline(
+        device,
+        &ComputePipelineDesc {
+            module: &ddgi_update_module,
+            entry: c"main",
+            // The update shader reads NO push constant (params ride the b6 UBO), but the RHI mandates
+            // a non-empty shared range — 4 bytes, never 0.
+            push_constant_bytes: 4,
+            bind_group_layout: Some(&ddgi_update_layout),
+        },
+    )
+    .expect("SDFDDGI probe-update compute pipeline");
+
+    let csm_activation = cfg.csm.map(|fit| {
+        for s in 0..FRAMES_IN_FLIGHT {
+            csm.upload(device, &fit, s);
+        }
+        let mut cascade_view_proj = [[0u8; 64]; CSM_MAX_CASCADES];
+        for (dst, src) in cascade_view_proj
+            .iter_mut()
+            .zip(fit.cascades.iter())
+            .take(fit.active_count as usize)
+        {
+            for (i, f) in src.view_proj.iter().enumerate() {
+                dst[i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+            }
+        }
+        let mut push = [0u8; GBUFFER_PUSH_BYTES];
+        push[84..88].copy_from_slice(&1u32.to_le_bytes());
+        (push, cascade_view_proj, fit.active_count)
+    });
+
+    let spot_activation = cfg.spot_atlas.map(|fit| {
+        csm.upload_atlas(device, &fit);
+        let mut face_view_proj = [[0u8; 64]; MAX_TEXTURE_LAYERS];
+        let mut face_is_point = [false; MAX_TEXTURE_LAYERS];
+        let mut face_light = [[0u8; 16]; MAX_TEXTURE_LAYERS];
+        for (slot, src) in fit.faces.iter().enumerate().take(fit.active_layers as usize) {
+            for (i, f) in src.view_proj.iter().enumerate() {
+                face_view_proj[slot][i * 4..i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+            }
+            face_is_point[slot] = src.is_point;
+            face_light[slot][0..4].copy_from_slice(&src.light_pos[0].to_le_bytes());
+            face_light[slot][4..8].copy_from_slice(&src.light_pos[1].to_le_bytes());
+            face_light[slot][8..12].copy_from_slice(&src.light_pos[2].to_le_bytes());
+            face_light[slot][12..16].copy_from_slice(&src.inv_range.to_le_bytes());
+        }
+        let mut push = [0u8; GBUFFER_PUSH_BYTES];
+        push[84..88].copy_from_slice(&1u32.to_le_bytes());
+        (push, face_view_proj, face_is_point, face_light, fit.active_layers)
+    });
+
+    let mesh_draws: Vec<GBufferMeshDraw> = instanced_gpu
+        .as_ref()
+        .map(|g| {
+            g.batches
+                .iter()
+                .map(|b| GBufferMeshDraw {
+                    vertex_buffer: &b.vertex_buffer,
+                    index_buffer: &b.index_buffer,
+                    index_count: b.index_count,
+                    index_type: b.index_type,
+                    base_instance: b.base_instance,
+                    instance_count: b.instance_count,
+                    casts_shadow: b.casts_shadow,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mvp = cfg.mvp;
+    let scene = GBufferScene {
+        raster_pipeline: &raster_pipeline,
+        vertex_buffer: &vertex_buffer,
+        vertex_count: vertices.len() as u32,
+        mvp,
+        instance_bind_group: instanced_gpu
+            .as_ref()
+            .map_or(&instance_bind_group, |g| &g.instance_bind_group),
+        marcher: &marcher,
+        vocab_layout: &vocab_layout,
+        edit_list: &edit_list,
+        camera_ring: &camera_ring,
+        tiles_buffer: &tiles_buffer,
+        pointer_grid: clipmap.grid_buffer(0),
+        atlas: clipmap.atlas(0).texture(),
+        atlas_sampler: clipmap.sampler(0),
+        level_grids: [clipmap.grid_buffer(1), clipmap.grid_buffer(2)],
+        level_atlases: [clipmap.atlas(1).texture(), clipmap.atlas(2).texture()],
+        level_atlas_samplers: [clipmap.sampler(1), clipmap.sampler(2)],
+        mesh_sdf: mesh_sdf_texture
+            .as_ref()
+            .map_or_else(|| clipmap.atlas(0).texture(), |t| t.texture()),
+        mesh_sdf_sampler: mesh_sdf_texture
+            .as_ref()
+            .map_or_else(|| clipmap.sampler(0), |t| t.sampler()),
+        mesh_sdf_enabled,
+        depth_sampler: &depth_sampler,
+        material_table: &material_table,
+        light_table: &light_table,
+        light_staging: &light_staging,
+        light_upload_bytes: light_table_bytes,
+        light_dirty: false,
+        cluster_cull: None,
+        cull_layout: None,
+        cluster_grid: None,
+        light_index: None,
+        light_index_alloc: None,
+        cluster_cull_push: [0u8; 16],
+        cluster_count: 0,
+        resolve_pipeline: &resolve_pipeline,
+        resolve_layout: &resolve_layout,
+        present_pipeline: &present_pipeline,
+        present_layout: &present_layout,
+        present_sampler: &present_sampler,
+        dispatch_group_count_x: group_count_x(),
+        brick: None,
+        coarse: None,
+        coarse_mode: CoarseMode::EmptySkipOnly,
+        lighting_flags: LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
+        light_dir: marcher_light_dir(&cfg.light_elems),
+        ssao: cfg
+            .ssao_quality
+            .map(|_| SsaoActivation { pipeline: &ssao_pipeline, layout: &ssao_layout }),
+        mesh_draw: &mesh_draws,
+        csm_cascade_texture: &csm.cascade,
+        csm_compare_sampler: &csm.sampler,
+        csm_cascade_ring: csm.csm_ring(),
+        csm: csm_activation.map(|(push, cascade_view_proj, active_count)| CsmDepthActivation {
+            pipeline: &csm.depth_pipeline,
+            push,
+            cascade_view_proj,
+            active_count,
+            shadow_dim: CSM_SHADOW_DIM,
+        }),
+        shadow_atlas_texture: &csm.atlas,
+        shadow_atlas_sampler: &csm.atlas_sampler,
+        shadow_atlas_ubo: &csm.atlas_ubo,
+        // SDFDDGI I4: the resolve grid UBO now carries the fitted grid geometry (reseeded above); the
+        // irradiance/depth atlases + samplers are the REAL probe atlas (unchanged from the golden).
+        ddgi_irr_texture: csm.ddgi_atlas.irradiance(),
+        ddgi_irr_sampler: csm.ddgi_atlas.sampler(),
+        ddgi_depth_texture: csm.ddgi_atlas.depth(),
+        ddgi_depth_sampler: csm.ddgi_atlas.sampler(),
+        ddgi_grid_ubo: &csm.ddgi_ubo,
+        // SDFDDGI I4: the probe-update pass is ARMED. The RDG derives the SRO→GENERAL update barriers
+        // from `Some(..)`, records the update dispatch AFTER the marcher + L0 light-table copy and
+        // BEFORE the resolve, and writes the 7-binding update set itself. The ray table + params UBO
+        // are the dedicated buffers created above; the classification buffer is the atlas's own.
+        ddgi_update: Some(DdgiUpdateActivation {
+            pipeline: &ddgi_update_pipeline,
+            layout: &ddgi_update_layout,
+            dispatch_group_count_x: DDGI_PROBE_COUNT, // subset_n = 1 → one block per probe.
+        }),
+        ddgi_classification: csm.ddgi_atlas.classification(),
+        ddgi_ray_table: &ddgi_ray_table,
+        ddgi_update_ubo: &ddgi_update_ubo,
+        atlas_punctual: spot_activation.map(
+            |(push, face_view_proj, face_is_point, face_light, active_layers)| {
+                PunctualDepthActivation {
+                    pipeline: &csm.depth_pipeline,
+                    point_pipeline: &csm.point_depth_pipeline,
+                    push,
+                    face_view_proj,
+                    face_is_point,
+                    face_light,
+                    active_layers,
+                    shadow_dim: SPOT_SHADOW_DIM,
+                }
+            },
+        ),
+        interp: None,
+    };
+
+    let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
+    let staging_size = (swapchain.extent().width * swapchain.extent().height * 4) as u64;
+    let staging = RhiDevice::create_buffer(
+        device,
+        &BufferDesc {
+            size: staging_size,
+            usage: BufferUsage::TRANSFER_DST,
+            location: MemoryLocation::HostVisibleCoherent,
+        },
+    )
+    .expect("host-visible readback staging buffer");
+    let alloc_extent = swapchain.extent();
+    let mut frame = GBufferFrame::new();
+
+    // SDFDDGI I4 convergence: present `DDGI_CONVERGE_FRAMES` frames so the hysteresis-blended probe
+    // atlas ramps from the boot-zero state to a converged indirect field before the readback. Each
+    // frame rewrites `frame_index` (update UBO word 8, byte offset 32) so the I4 ray rotation
+    // decorrelates the per-frame ray set; only the FINAL frame requests the staging readback.
+    const DRAIN_FRAMES: u32 = 3;
+    let clear = [0.04_f32, 0.05, 0.07, 1.0];
+
+    let ddgi_ubo_ptr = RhiDevice::buffer_mapped_ptr(device, &ddgi_update_ubo)
+        .expect("host-visible DDGI update UBO is mapped");
+
+    let mut dumped: Option<(Vec<u8>, u32, u32)> = None;
+    let mut converge_ok = true;
+    for f in 0..DDGI_CONVERGE_FRAMES {
+        if !window.pump_events() {
+            eprintln!("NOTE engine_showcase_512: window closed during DDGI convergence — skipping");
+            converge_ok = false;
+            break;
+        }
+        window.refresh_size();
+        let live = swapchain.extent();
+        if live.width != alloc_extent.width || live.height != alloc_extent.height {
+            eprintln!("NOTE engine_showcase_512: extent changed during DDGI convergence — skipping");
+            converge_ok = false;
+            break;
+        }
+        // SAFETY: `ddgi_update_ubo` is `DDGI_UBO_BYTES` (48) host-coherent mapped bytes; offset 32 is
+        // the `frame_index` u32 (`DdgiUpdateUbo` layout, word 8). The prior frame's slot fence was
+        // re-waited by `wait_frame_in_flight` below before this frame's submit, so no in-flight GPU
+        // read of this UBO overlaps the write. The write precedes the submit that consumes it.
+        unsafe {
+            ddgi_ubo_ptr.as_ptr().add(32).cast::<u32>().write_unaligned(f);
+        }
+        let is_last = f == DDGI_CONVERGE_FRAMES - 1;
+        let token = renderer
+            .wait_frame_in_flight()
+            .expect("invariant: the frame slot fence wait precedes the submit");
+        // SAFETY: `ctx`/`surface`/`swapchain`/`renderer` share one device; every `scene` resource is
+        // live; `present_extent` + `scene.dispatch_group_count_x` + the camera UBO `count` cover the
+        // composite extent; `staging` is host-visible and ≥ one swapchain image in bytes. The staging
+        // readback is requested ONLY on the final converge frame.
+        let staging_arg = if is_last { Some(&staging) } else { None };
+        let presented = unsafe {
+            renderer.render_gbuffer_frame(
+                token, ctx, surface, &mut swapchain, &scene, &mut frame,
+                window.width(), window.height(), clear, present_extent, staging_arg,
+            )
+        }
+        .unwrap_or_else(|e| panic!("showcase DDGI converge frame failed: {e:?}"));
+        if !presented {
+            eprintln!("NOTE engine_showcase_512: swapchain recreated during DDGI convergence — skipping");
+            converge_ok = false;
+            break;
+        }
+    }
+
+    if converge_ok {
+        let extent = swapchain.extent();
+        for _ in 0..DRAIN_FRAMES {
+            if !window.pump_events() {
+                break;
+            }
+            window.refresh_size();
+            let token = renderer
+                .wait_frame_in_flight()
+                .expect("invariant: the frame slot fence wait precedes the submit");
+            // SAFETY: same contract; no readback requested on the drain frames.
+            let _ = unsafe {
+                renderer.render_gbuffer_frame(
+                    token, ctx, surface, &mut swapchain, &scene, &mut frame,
+                    window.width(), window.height(), clear, present_extent, None,
+                )
+            }
+            .unwrap_or_else(|e| panic!("showcase DDGI drain frame failed: {e:?}"));
+        }
+
+        let w = extent.width;
+        let h = extent.height;
+        let byte_count = (w * h * 4) as usize;
+        let dst_ptr = RhiDevice::buffer_mapped_ptr(device, &staging)
+            .expect("host-visible staging buffer is mapped");
+        let mut raw = vec![0u8; byte_count];
+        // SAFETY: `dst_ptr` points to `staging_size` (≥ `byte_count`) mapped host-coherent bytes; the
+        // final converge frame's copy completed before this read (its slot fence was re-waited by the
+        // drain frames); `raw` is a distinct, non-overlapping alloc.
+        unsafe { core::ptr::copy_nonoverlapping(dst_ptr.as_ptr(), raw.as_mut_ptr(), byte_count) };
+        dumped = Some((readback_to_rgba(&raw, w, h, is_bgra), w, h));
+    }
+
+    if ctx.validation_enabled() {
+        let state = ctx
+            .debug_state()
+            .expect("validation enabled => a debug-messenger state is present");
+        assert_eq!(
+            state.total(),
+            0,
+            "validation layer reported {} message(s) during the DDGI showcase present — \
+             see the [vk-validation] log",
+            state.total()
+        );
+    }
+
+    match dumped {
+        Some((rgba, w, h)) => {
+            assert_eq!(
+                (w, h),
+                (COMPOSITE_W, COMPOSITE_H),
+                "the readback must be the native {COMPOSITE_W}x{COMPOSITE_H} composite (no upscale)"
+            );
+            write_bmp(bmp_path, &rgba, w, h)
+                .unwrap_or_else(|e| panic!("failed to write {bmp_path}: {e:?}"));
+            let bytes = std::fs::read(bmp_path)
+                .unwrap_or_else(|e| panic!("failed to re-read {bmp_path} for header verification: {e:?}"));
+            let (bw, bh) = read_bmp_dimensions(&bytes)
+                .expect("the dumped showcase must be a valid BM 54-byte-header BMP");
+            assert_eq!(
+                (bw, bh),
+                (COMPOSITE_W as i32, COMPOSITE_H as i32),
+                "the dumped BMP header must report {COMPOSITE_W}x{COMPOSITE_H} native dimensions"
+            );
+            println!("engine DDGI showcase dump -> {bmp_path} ({bw}x{bh} native, GI-ON indirect on the SDF spheres)");
+        }
+        None => {
+            eprintln!(
+                "NOTE engine_showcase_512: no DDGI readback frame presented (swapchain kept recreating); \
+                 no BMP written"
+            );
+        }
+    }
+
+    drop(renderer);
+    // SAFETY: the renderer was dropped above (its `Drop` waits the device idle), so no submission
+    // references these resources; `ctx` is still alive; each is destroyed exactly once, in reverse
+    // dependency order. The SDFDDGI I4 update resources are torn down FIRST (they reference nothing
+    // else here; the device is idle).
+    unsafe {
+        RhiDevice::destroy_compute_pipeline(device, ddgi_update_pipeline);
+        RhiDevice::destroy_shader_module(device, ddgi_update_module);
+        RhiDevice::destroy_bind_group_layout(device, ddgi_update_layout);
+        RhiDevice::destroy_buffer(device, ddgi_update_ubo);
+        RhiDevice::destroy_buffer(device, ddgi_ray_table);
+        frame.destroy(ctx);
+        RhiDevice::destroy_buffer(device, staging);
+        csm.destroy(ctx);
+        RhiDevice::destroy_graphics_pipeline(device, present_pipeline);
+        RhiDevice::destroy_bind_group_layout(device, present_layout);
+        RhiDevice::destroy_compute_pipeline(device, ssao_pipeline);
+        RhiDevice::destroy_bind_group_layout(device, ssao_layout);
+        RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
+        RhiDevice::destroy_bind_group_layout(device, resolve_layout);
+        RhiDevice::destroy_compute_pipeline(device, marcher);
+        RhiDevice::destroy_bind_group_layout(device, vocab_layout);
+        RhiDevice::destroy_graphics_pipeline(device, raster_pipeline);
+        drop(mesh_draws);
+        if let Some(g) = instanced_gpu {
+            RhiDevice::destroy_bind_group(device, g.instance_bind_group);
+            RhiDevice::destroy_buffer(device, g.instance_ssbo);
+            for b in g.batches {
+                RhiDevice::destroy_buffer(device, b.index_buffer);
+                RhiDevice::destroy_buffer(device, b.vertex_buffer);
+            }
+        }
+        RhiDevice::destroy_bind_group(device, instance_bind_group);
+        RhiDevice::destroy_buffer(device, instance_buffer);
+        RhiDevice::destroy_bind_group_layout(device, instance_layout);
+        RhiDevice::destroy_sampler(device, present_sampler);
+        RhiDevice::destroy_sampler(device, depth_sampler);
+        RhiDevice::destroy_buffer(device, vertex_buffer);
+        RhiDevice::destroy_buffer(device, tiles_buffer);
+        if let Some(t) = mesh_sdf_texture {
+            t.destroy(ctx);
+        }
+        clipmap.destroy(ctx);
+        RhiDevice::destroy_buffer(device, light_staging);
+        RhiDevice::destroy_buffer(device, light_table);
+        RhiDevice::destroy_buffer(device, material_table);
+        for slot in camera_ring {
+            RhiDevice::destroy_buffer(device, slot);
+        }
+        RhiDevice::destroy_buffer(device, edit_list);
+    }
+    drop(swapchain);
+    // surface / ctx / window are owned by `with_windowed_present` and dropped in-order at its frame end.
 }
 
 fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfig, interactive: bool) {

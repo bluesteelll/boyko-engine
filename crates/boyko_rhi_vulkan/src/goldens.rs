@@ -1614,6 +1614,37 @@ impl GoldenLightHeader {
         (self.sky_diffuse[3].to_bits() >> 3) & 1
     }
 
+    /// Sets the SDFDDGI I4 `ddgi_mode` — dynamic diffuse GI injection — packed into BIT 4 of header
+    /// WORD 7 (`sky_diffuse.w`), the SAME word [`with_shadow_mode`](Self::with_shadow_mode) packs
+    /// `shadow_mode` (BIT 0), [`with_contact_shadow_mode`](Self::with_contact_shadow_mode) packs
+    /// `contact_shadow_mode` (BIT 1), [`with_csm_mode`](Self::with_csm_mode) packs `csm_mode` (BIT 2),
+    /// and [`with_punctual_shadow_mode`](Self::with_punctual_shadow_mode) packs `punctual_shadow_mode`
+    /// (BIT 3) into. `on` ORs/clears ONLY bit 4, preserving bits 0..3, so the five flags are
+    /// independent and order-agnostic. `false` leaves word 7 byte-identical on a fresh header (BIT 4
+    /// already 0 — the 0%-gate: every pre-DDGI scene reads `ddgi_mode == 0`, so the resolve's GI-
+    /// injection block never runs and the bound-but-unread probe atlas/samplers/grid UBO are never
+    /// sampled). This is the resolve's GI-injection GATE — the grid UBO's redundant `ddgi_mode_word`
+    /// mirror is NOT what the resolve tests. Read GPU-side by `light_table.hlsli::load_ddgi_mode`
+    /// (`(word7 >> 4) & 1`).
+    #[inline]
+    pub fn with_ddgi_mode(mut self, on: bool) -> Self {
+        let mut word7 = self.sky_diffuse[3].to_bits();
+        if on {
+            word7 |= 1 << 4;
+        } else {
+            word7 &= !(1 << 4);
+        }
+        self.sky_diffuse[3] = f32::from_bits(word7);
+        self
+    }
+
+    /// The SDFDDGI I4 `ddgi_mode` (header word 7 BIT 4, bit-cast back from `sky_diffuse.w`). 0 on
+    /// every pre-DDGI scene (the 0%-gate); 1 when dynamic diffuse GI injection is armed.
+    #[inline]
+    pub fn ddgi_mode(&self) -> u32 {
+        (self.sky_diffuse[3].to_bits() >> 4) & 1
+    }
+
     /// Sets the Render P7 `ssao_mode` (header WORD 11 = `sky_spec.w`, read RAW by the
     /// resolve's `load_ssao_mode` — stored BIT-CAST, NOT as a float value, EXACTLY as
     /// [`with_shadow_mode`](Self::with_shadow_mode) does for word 7). `0` = SSAO OFF (the

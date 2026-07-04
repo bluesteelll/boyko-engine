@@ -377,25 +377,25 @@ static SDF_SSAO_HIGH_SPV: SpirvBlob<90160> = SpirvBlob(*include_bytes!(concat!(
 // the right blob.
 
 /// `GI_MAX_IT == 32` — `sdf_probe_update_it32.comp.spv`.
-static SDF_PROBE_UPDATE_IT32_SPV: SpirvBlob<44720> = SpirvBlob(*include_bytes!(concat!(
+static SDF_PROBE_UPDATE_IT32_SPV: SpirvBlob<45740> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_probe_update_it32.comp.spv"
 )));
 
 /// `GI_MAX_IT == 64` — `sdf_probe_update_it64.comp.spv` (the shipped default per plan §6).
-static SDF_PROBE_UPDATE_IT64_SPV: SpirvBlob<44704> = SpirvBlob(*include_bytes!(concat!(
+static SDF_PROBE_UPDATE_IT64_SPV: SpirvBlob<45724> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_probe_update_it64.comp.spv"
 )));
 
 /// `GI_MAX_IT == 96` — `sdf_probe_update_it96.comp.spv`.
-static SDF_PROBE_UPDATE_IT96_SPV: SpirvBlob<44720> = SpirvBlob(*include_bytes!(concat!(
+static SDF_PROBE_UPDATE_IT96_SPV: SpirvBlob<45740> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_probe_update_it96.comp.spv"
 )));
 
 /// `GI_MAX_IT == 128` — `sdf_probe_update_it128.comp.spv`.
-static SDF_PROBE_UPDATE_IT128_SPV: SpirvBlob<44704> = SpirvBlob(*include_bytes!(concat!(
+static SDF_PROBE_UPDATE_IT128_SPV: SpirvBlob<45724> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/sdf_probe_update_it128.comp.spv"
 )));
