@@ -26,6 +26,21 @@
 //! no fixed `MAX_MESHES` ceiling), and the ring grows POW2 keyed off the live
 //! instance count. The scratch is a reused [`Resource`], NOT an ad-hoc `Vec` (the
 //! [`UiRenderScratch`](crate::ui::UiRenderScratch) precedent, Principle 5).
+//!
+//! # The per-instance mesh-id lane (M3 → HW-RT, TLAS-readiness)
+//!
+//! Alongside the affine [`ring`](MeshRenderScratch::ring) the gather scatters a
+//! PARALLEL [`mesh_ids`](MeshRenderScratch::mesh_ids) lane: `mesh_ids[i]` is ring
+//! instance `i`'s `MeshHandle.0` — which is also its BLAS index (the mesh BLAS is
+//! keyed by the same `MeshRegistry` handle). This makes the instance ring DIRECTLY
+//! consumable by a future TLAS builder — instance `i` maps to (`ring[i]` = its 3×4
+//! world affine, `mesh_ids[i]` = its BLAS) in O(1), with no need to reconstruct the
+//! mapping by range-searching the per-mesh [`batches`](MeshRenderScratch::batches).
+//! The lane is valid for DYNAMIC rows too (interpolation rewrites the affine on-GPU,
+//! never the mesh identity). It is a host-side `Vec<u32>` the acceleration-structure
+//! builder reads; the RASTER draw does NOT read it (it reads mesh identity from each
+//! batch's contiguous `base_instance` range), so the lane costs the raster path
+//! nothing but one scatter store per instance.
 
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
@@ -99,6 +114,14 @@ pub struct MeshRenderScratch {
     /// frame the compute overwrites only the dynamic slots before the raster VS reads.
     /// `ring.len()` == the TOTAL drawable count. `clear()` + scatter, capacity persists.
     pub ring: Vec<InstanceModelCol>,
+    /// The parallel per-instance MESH-ID (BLAS-index) lane (M3 → HW-RT): `mesh_ids[i]`
+    /// is [`ring`](Self::ring) instance `i`'s `MeshHandle.0`, scattered in lock-step with
+    /// `ring` (`mesh_ids.len() == ring.len()`, every slot written exactly once). Makes the
+    /// instance ring directly TLAS-consumable — instance `i` → (`ring[i]` affine,
+    /// `mesh_ids[i]` BLAS) — without range-searching [`batches`](Self::batches). Valid for
+    /// dynamic rows (mesh identity is interpolation-invariant). Host-side only (the
+    /// AS builder reads it; the raster draw does not). `clear()` + scatter, capacity persists.
+    pub mesh_ids: Vec<u32>,
     /// The contiguous interpolation-PAIR ring (Pillar B B1) — the 96-byte
     /// [`GpuTransform3D`] of EVERY DYNAMIC (interpolated) instance, in gather order.
     /// `pair_ring.len()` == the dynamic instance count (NOT the total — static rows
@@ -213,13 +236,18 @@ impl MeshRenderScratch {
         // only the small `mesh_id` key (the record tuple is never read on pass 1).
         let total = self.bucket_lanes_mixed(mesh_count, meta, &iter_input);
 
-        // The three output lanes are temporarily taken so the scatter closure can borrow
+        // The output lanes are temporarily taken so the scatter closure can borrow
         // `&self.offsets` / `&mut self.cursors` disjointly from them.
         let mut ring = std::mem::take(&mut self.ring);
+        let mut mesh_ids = std::mem::take(&mut self.mesh_ids);
         let mut pair_ring = std::mem::take(&mut self.pair_ring);
         let mut pair_out_slot = std::mem::take(&mut self.pair_out_slot);
         ring.clear();
         ring.resize(total as usize, InstanceModelCol::zeroed());
+        // The per-instance mesh-id lane is scattered in lock-step with `ring` (every slot
+        // written once, so the `0` fill is fully overwritten).
+        mesh_ids.clear();
+        mesh_ids.resize(total as usize, 0);
         // The pair lanes are re-filled by `push` (their length is the dynamic count,
         // not `total`); `clear()` keeps the reserved capacity (Principle 5).
         pair_ring.clear();
@@ -236,6 +264,10 @@ impl MeshRenderScratch {
                 // way the CPU writes the whole ring (the data-race note: static slots are
                 // never in `pair_out_slot`, so never GPU-touched — no conflict).
                 ring[slot as usize] = *col;
+                // The BLAS-id lane: the mesh identity is the same whether the row is static
+                // or interpolated (interpolation touches only the affine), so it is written
+                // unconditionally for every slot (M3 → HW-RT TLAS-readiness).
+                mesh_ids[slot as usize] = mesh_id;
                 if let Some(pair) = maybe_pair {
                     pair_ring.push(*pair);
                     pair_out_slot.push(slot);
@@ -248,6 +280,11 @@ impl MeshRenderScratch {
             "invariant: the unified ring holds exactly Σ instance_count instances"
         );
         debug_assert_eq!(
+            mesh_ids.len(),
+            ring.len(),
+            "invariant: the per-instance mesh-id lane is parallel to the ring (one id per instance)"
+        );
+        debug_assert_eq!(
             pair_ring.len(),
             pair_out_slot.len(),
             "invariant: the pair ring and its out-slot lane are parallel (one entry per dynamic row)"
@@ -257,6 +294,7 @@ impl MeshRenderScratch {
             "invariant: every dynamic out-slot indexes the unified ring in range"
         );
         self.ring = ring;
+        self.mesh_ids = mesh_ids;
         self.pair_ring = pair_ring;
         self.pair_out_slot = pair_out_slot;
     }
@@ -694,5 +732,74 @@ mod tests {
             scratch.pair_ring.capacity() >= pair_cap,
             "the pair ring retains its reserved capacity across a static frame"
         );
+    }
+
+    /// M3 → HW-RT: the per-instance mesh-id (BLAS-id) lane is parallel to the ring and
+    /// agrees with the per-mesh batches — every ring slot in a batch's `base_instance`
+    /// range carries that batch's `mesh_id`. Crucially the lane is keyed off the input
+    /// MESH KEY, not the ring affine: a DYNAMIC row's ring affine is a placeholder (the
+    /// interp compute overwrites it on-GPU), yet its mesh-id entry is still correct — so a
+    /// TLAS builder reading (`ring[i]`, `mesh_ids[i]`) maps every instance, static or
+    /// interpolated, to the right BLAS.
+    #[test]
+    fn mesh_id_lane_is_parallel_to_ring_and_matches_batches() {
+        let mesh_count = 2;
+        let a00 = affine(0, 0);
+        let a01 = affine(0, 1);
+        let a10 = affine(1, 0);
+        // The DYNAMIC row's ring affine is a deliberately WRONG-encoded placeholder
+        // (translation encodes mesh 9), proving the mesh-id lane is set from the mesh KEY,
+        // never re-derived from the placeholder affine.
+        let ph = affine(9, 9);
+        let p = pair(1, 0);
+        let inputs = [
+            (0u32, &a00, None),
+            (1u32, &a10, None),
+            (0u32, &a01, None),
+            (1u32, &ph, Some(&p)),
+        ];
+
+        let mut scratch = MeshRenderScratch::default();
+        scratch.gather_mixed_into(mesh_count, meta, || inputs.iter().copied());
+
+        // The lane is parallel to the ring (one id per instance).
+        assert_eq!(scratch.mesh_ids.len(), scratch.ring.len());
+        assert_eq!(scratch.mesh_ids.len(), 4);
+
+        // Every slot in each batch's range carries that batch's mesh_id.
+        for b in &scratch.batches {
+            let start = b.base_instance as usize;
+            let end = start + b.instance_count as usize;
+            for slot in start..end {
+                assert_eq!(
+                    scratch.mesh_ids[slot], b.mesh_id,
+                    "ring slot {slot} must carry its batch's mesh_id {}",
+                    b.mesh_id
+                );
+            }
+        }
+        // Concretely: mesh 0 fills [0,2), mesh 1 fills [2,4).
+        assert_eq!(scratch.mesh_ids, vec![0, 0, 1, 1]);
+
+        // The DYNAMIC row: its ring affine is the WRONG-encoded placeholder (x == 9), but
+        // its mesh-id entry is the correct BLAS id (1). The interp out-slot points at that
+        // same slot, and the lane there reads 1.
+        let dyn_slot = scratch.pair_out_slot[0] as usize;
+        assert_eq!(scratch.mesh_ids[dyn_slot], 1, "the dynamic row maps to BLAS 1");
+        assert_eq!(
+            scratch.ring[dyn_slot].rows[0][3], 9.0,
+            "the dynamic row's ring affine is the placeholder (proves the lane is key-derived)"
+        );
+
+        // For STATIC rows the ring affine's encoded mesh id agrees with the lane.
+        for (slot, &mid) in scratch.mesh_ids.iter().enumerate() {
+            if slot == dyn_slot {
+                continue;
+            }
+            assert_eq!(
+                scratch.ring[slot].rows[0][3] as u32, mid,
+                "a static row's affine-encoded mesh id matches the lane"
+            );
+        }
     }
 }

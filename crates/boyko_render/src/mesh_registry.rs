@@ -14,9 +14,16 @@
 //! `MeshRegistry` is `!Send` (it owns RHI buffers, which are device-bound and
 //! single-thread-touch), so it is registered as a
 //! [`NonSendResource`](boyko_ecs::ecs::core::resources::resource::NonSendResource)
-//! alongside [`RhiContext`](crate::RhiContext). M2 builds the registry directly in the
-//! test harness and drives ONE registered mesh through the instanced gbuffer arm; the
-//! ECS gather that fills it from spawned `MeshHandle` components is M3.
+//! alongside [`RhiContext`](crate::RhiContext). The registry is the immutable, SHARED
+//! ASSET table: it is populated once at setup via [`register_mesh`](Self::register_mesh) /
+//! [`cube`](Self::cube) / [`plane`](Self::plane) — assets are shared across entities, NOT
+//! auto-created per spawned handle (that would re-upload geometry per instance). The M3
+//! ECS gather that reads spawned `(MeshHandle, InstanceModelCol)` entities and buckets
+//! them into per-mesh draw batches + the shared instance ring is
+//! [`gather_mesh_draws`](crate::mesh_draw::gather_mesh_draws) (`crate::mesh_draw`, SHIPPED);
+//! it resolves each bucket's `mesh_id` to THIS table for the draw. The gather also emits a
+//! parallel per-instance mesh-id lane so the instance ring is directly TLAS-consumable
+//! (mesh foundation M3 → HW-RT).
 //!
 //! # The vertex contract
 //!
