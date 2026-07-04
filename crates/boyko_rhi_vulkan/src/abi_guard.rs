@@ -16,7 +16,7 @@
 use boyko_rhi::enums::{
     AddressMode, BarrierAccess, BarrierStage, BlendFactor, BlendOp, BufferUsage, CompareOp,
     CullMode, DescriptorKind, Filter, Format, ImageAspect, ImageLayout, ImageUsage, IndexType,
-    LoadOp, PrimitiveTopology, ShaderStage, StoreOp, TextureDimension, VertexFormat,
+    LoadOp, PrimitiveTopology, ShaderStage, StoreOp, TextureDimension, TimestampStage, VertexFormat,
 };
 
 use crate::ffi::{
@@ -156,6 +156,16 @@ const _: () = assert!(
 const _: () = assert!(
     BarrierAccess::COLOR_ATTACHMENT_WRITE.bits() == VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
     "BarrierAccess::COLOR_ATTACHMENT_WRITE must equal VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT"
+);
+
+// --- TimestampStage `as_i32()` (identity-cast in `write_timestamp`, HW-RT rung R0). ---
+const _: () = assert!(
+    TimestampStage::TopOfPipe.as_i32() == VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT as i32,
+    "TimestampStage::TopOfPipe must equal VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT"
+);
+const _: () = assert!(
+    TimestampStage::BottomOfPipe.as_i32() == VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT as i32,
+    "TimestampStage::BottomOfPipe must equal VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT"
 );
 
 // --- ImageUsage (identity-cast in `create_texture`). ---

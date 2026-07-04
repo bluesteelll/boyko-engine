@@ -797,3 +797,33 @@ impl BitOr for ImageAspect {
         ImageAspect(self.0 | rhs.0)
     }
 }
+
+/// The pipeline stage a [`crate::encoder::RhiCommandEncoder::write_timestamp`]
+/// captures (HW-RT rung R0: the profiler-standard TOP/BOTTOM bracket).
+///
+/// A SINGLE `VkPipelineStageFlagBits` (NOT the [`BarrierStage`] bitmask): a
+/// `vkCmdWriteTimestamp` takes one pipeline-stage bit naming the moment the query
+/// is written. `#[repr(i32)]` with discriminants equal to the matching
+/// `VK_PIPELINE_STAGE_*` bit values, so the Vulkan backend lowers it with a trivial
+/// `as VkFlags` cast (asserted backend-side). A bracket opens at [`Self::TopOfPipe`]
+/// (front of the passed pass) and closes at [`Self::BottomOfPipe`] (its retirement);
+/// intermediate stages are meaningless for the pass-wall-clock measurement.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TimestampStage {
+    /// `VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT` — the front of the pipeline (the bracket
+    /// open, capturing the moment work enters the pass).
+    TopOfPipe = 0x0000_0001,
+    /// `VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT` — the back of the pipeline (the bracket
+    /// close, capturing the moment the pass retires).
+    BottomOfPipe = 0x0000_2000,
+}
+
+impl TimestampStage {
+    /// The raw `i32` discriminant — equal to the matching `VK_PIPELINE_STAGE_*` bit
+    /// (a `VkFlags`/`u32` value that fits an `i32` for these two low bits).
+    #[inline]
+    pub const fn as_i32(self) -> i32 {
+        self as i32
+    }
+}

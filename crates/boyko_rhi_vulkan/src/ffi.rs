@@ -377,6 +377,10 @@ non_dispatchable_handle!(
     VkFence
 );
 non_dispatchable_handle!(
+    /// `VkQueryPool` — a pool of GPU queries (HW-RT rung R0: TIMESTAMP queries).
+    VkQueryPool
+);
+non_dispatchable_handle!(
     /// `VkDebugUtilsMessengerEXT` — the validation-message callback registration.
     VkDebugUtilsMessengerEXT
 );
@@ -511,6 +515,9 @@ pub enum VkStructureType {
     SubmitInfo = 4,
     MemoryAllocateInfo = 5,
     FenceCreateInfo = 8,
+    /// `VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO` (HW-RT rung R0: the timestamp
+    /// query-pool create). Verified against vulkan_core.h: value 11.
+    QueryPoolCreateInfo = 11,
     BufferCreateInfo = 12,
     BufferMemoryBarrier = 44,
     ShaderModuleCreateInfo = 16,
@@ -739,6 +746,19 @@ pub const VK_QUEUE_FAMILY_IGNORED: u32 = u32::MAX;
 
 /// Timeout sentinel for `vkWaitForFences` (wait indefinitely).
 pub const VK_TIMEOUT_INFINITE: u64 = u64::MAX;
+
+// --- HW-RT rung R0 — GPU timestamp-query constants. ---
+
+/// `VkQueryType::VK_QUERY_TYPE_TIMESTAMP` — a query that captures the GPU's
+/// monotonic timestamp counter at a pipeline stage.
+pub const VK_QUERY_TYPE_TIMESTAMP: i32 = 2;
+
+/// `VkQueryResultFlagBits::VK_QUERY_RESULT_64_BIT` — read each result as a 64-bit
+/// value (mandatory for timestamps: a 32-bit ~1 ns counter overflows in ~0.43 s).
+pub const VK_QUERY_RESULT_64_BIT: VkFlags = 0x0000_0001;
+/// `VkQueryResultFlagBits::VK_QUERY_RESULT_WAIT_BIT` — block until the results are
+/// available before writing them (paired with the caller's `wait_fence`).
+pub const VK_QUERY_RESULT_WAIT_BIT: VkFlags = 0x0000_0002;
 
 // --- Slice-1 instance / device extension names. ---
 
@@ -1124,6 +1144,20 @@ pub const LIMITS_OFF_MAX_PER_STAGE_STORAGE_IMAGES: usize = 84;
 // The read offsets must lie inside the blob (the last field read is a `u32` at 84 → 84..88 <= 504).
 const _: () = assert!(LIMITS_OFF_MAX_PER_STAGE_STORAGE_IMAGES + 4 <= 504);
 
+/// Offset of `timestampPeriod` (`float`) within `VkPhysicalDeviceLimits` (HW-RT rung
+/// R0). Re-derived from the in-repo anchor `maxPerStageDescriptorStorageImages == 84`
+/// by walking the spec-fixed field order forward: the trailing block runs `…,
+/// maxSampleMaskWords (u32)`, `timestampComputeAndGraphics (VkBool32) @420`,
+/// `timestampPeriod (float) @424` — the last two 4-byte scalars before the
+/// sample-count-flags / image-limit tail. A runtime plausibility guard (a period
+/// outside `(0, 1000)` ns/tick ⇒ treat as unusable) degrades a WRONG offset to a
+/// graceful skip, never to fake timings — so a byte-offset drift can never produce a
+/// bogus measurement.
+pub const LIMITS_OFF_TIMESTAMP_PERIOD: usize = 424;
+
+// The `f32` read at 424 must lie inside the blob (424..428 <= 504).
+const _: () = assert!(LIMITS_OFF_TIMESTAMP_PERIOD + 4 <= 504);
+
 impl VkPhysicalDeviceLimitsBlob {
     /// Reads the `u32` field at `offset` bytes into the opaque limits blob. The
     /// `LIMITS_OFF_*` constants above name the documented spec offsets; a bad offset is a
@@ -1138,6 +1172,23 @@ impl VkPhysicalDeviceLimitsBlob {
         // driver writes native-endian, and this target is little-endian x86_64.
         let bytes: [u8; 4] = unsafe { *(self.0.as_ptr().add(offset) as *const [u8; 4]) };
         u32::from_ne_bytes(bytes)
+    }
+
+    /// Reads the `f32` field at `offset` bytes into the opaque limits blob (HW-RT rung
+    /// R0: `timestampPeriod` at [`LIMITS_OFF_TIMESTAMP_PERIOD`]). The companion of
+    /// [`Self::read_u32`]; a bad offset is a programming error, guarded here with a
+    /// `debug_assert` (the read stays in-bounds because `LIMITS_OFF_TIMESTAMP_PERIOD`
+    /// const-asserts `offset + 4 <= 504`).
+    #[inline]
+    pub fn read_f32(&self, offset: usize) -> f32 {
+        debug_assert!(offset + 4 <= self.0.len(), "invariant: limits field read within the blob");
+        // SAFETY: `offset + 4 <= 504` (the caller's `LIMITS_OFF_*` const-asserts + the
+        // debug-assert), so the 4-byte read is in-bounds of the blob. The bytes were
+        // written by the driver through the `vkGetPhysicalDeviceProperties` out-pointer (a
+        // valid `float` at the spec-fixed offset). The driver writes native-endian, and
+        // this target is little-endian x86_64.
+        let bytes: [u8; 4] = unsafe { *(self.0.as_ptr().add(offset) as *const [u8; 4]) };
+        f32::from_ne_bytes(bytes)
     }
 }
 
@@ -1849,6 +1900,26 @@ pub struct VkFenceCreateInfo {
     pub p_next: *const c_void,
     pub flags: VkFlags,
 }
+
+/// `VkQueryPoolCreateInfo` — the HW-RT rung R0 TIMESTAMP query-pool create struct.
+/// `query_type` is a `VkQueryType` (`i32`; set to [`VK_QUERY_TYPE_TIMESTAMP`]);
+/// `pipeline_statistics` is `0` for a TIMESTAMP pool.
+#[repr(C)]
+pub struct VkQueryPoolCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub flags: VkFlags,
+    /// `VkQueryType` (`i32`).
+    pub query_type: i32,
+    pub query_count: u32,
+    /// `VkQueryPipelineStatisticFlags` — `0` for a TIMESTAMP pool.
+    pub pipeline_statistics: VkFlags,
+}
+// ABI pin (belt-and-suspenders, matching the crate's other Vk-struct guards): on the x86_64 ABI
+// `s_type`@0(4) + pad(4) + `p_next`@8(8) + `flags`@16(4) + `query_type`@20(4) + `query_count`@24(4)
+// + `pipeline_statistics`@28(4) = 32 B, align 8. A field-type slip would change this and fail here.
+const _: () = assert!(size_of::<VkQueryPoolCreateInfo>() == 32);
+const _: () = assert!(align_of::<VkQueryPoolCreateInfo>() == 8);
 
 /// `VkSubmitInfo`.
 #[repr(C)]
@@ -3025,6 +3096,53 @@ pub type PfnVkResetFences = unsafe extern "system" fn(
     device: VkDevice,
     fence_count: u32,
     p_fences: *const VkFence,
+) -> i32;
+
+// --- HW-RT rung R0 — GPU timestamp-query PFNs (Vulkan 1.0 core, always present). ---
+
+/// `PFN_vkCreateQueryPool`.
+pub type PfnVkCreateQueryPool = unsafe extern "system" fn(
+    device: VkDevice,
+    p_create_info: *const VkQueryPoolCreateInfo,
+    p_allocator: *const c_void,
+    p_query_pool: *mut VkQueryPool,
+) -> i32;
+
+/// `PFN_vkDestroyQueryPool`.
+pub type PfnVkDestroyQueryPool = unsafe extern "system" fn(
+    device: VkDevice,
+    query_pool: VkQueryPool,
+    p_allocator: *const c_void,
+);
+
+/// `PFN_vkCmdResetQueryPool`.
+pub type PfnVkCmdResetQueryPool = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    query_pool: VkQueryPool,
+    first_query: u32,
+    query_count: u32,
+);
+
+/// `PFN_vkCmdWriteTimestamp` — `pipeline_stage` is a single `VkPipelineStageFlagBits`
+/// (`VkFlags`) naming the stage at which the timestamp is written.
+pub type PfnVkCmdWriteTimestamp = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    pipeline_stage: VkFlags,
+    query_pool: VkQueryPool,
+    query: u32,
+);
+
+/// `PFN_vkGetQueryPoolResults` — `stride`/`data_size` are `VkDeviceSize` (`u64`);
+/// `flags` is a `VkQueryResultFlags` (`VkFlags`).
+pub type PfnVkGetQueryPoolResults = unsafe extern "system" fn(
+    device: VkDevice,
+    query_pool: VkQueryPool,
+    first_query: u32,
+    query_count: u32,
+    data_size: usize,
+    p_data: *mut c_void,
+    stride: VkDeviceSize,
+    flags: VkFlags,
 ) -> i32;
 
 /// `PFN_vkCmdBeginRendering` (Vulkan 1.3 core dynamic rendering).

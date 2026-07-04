@@ -460,6 +460,7 @@ mod tests {
         type ShaderModule = u32;
         type ComputePipeline = u32;
         type Fence = u32;
+        type QueryPool = u32;
         type Surface = ();
         type Swapchain = ();
         type Semaphore = ();

@@ -25,6 +25,22 @@ pub struct BufferDesc {
     pub location: MemoryLocation,
 }
 
+/// Parameters for [`crate::device::RhiDevice::create_query_pool`] (HW-RT rung R0).
+///
+/// `#[repr(C)]` POD (a single `u32` count) so the field layout is stable for a
+/// backend to read — it maps onto a `VkQueryPoolCreateInfo` with `queryType =
+/// TIMESTAMP`, `queryCount = count`, `pipelineStatistics = 0`. A TIMESTAMP query pool
+/// is UNDEFINED at creation; the caller MUST reset every query
+/// ([`crate::encoder::RhiCommandEncoder::reset_query_pool`]) before its first
+/// [`crate::encoder::RhiCommandEncoder::write_timestamp`].
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryPoolDesc {
+    /// The number of timestamp queries the pool holds. The bracket collector sizes it
+    /// to `2 * PASS_COUNT` (a begin/end pair per timed pass).
+    pub count: u32,
+}
+
 /// One buffer-to-buffer copy region for
 /// [`crate::encoder::RhiCommandEncoder::copy_buffer`].
 ///

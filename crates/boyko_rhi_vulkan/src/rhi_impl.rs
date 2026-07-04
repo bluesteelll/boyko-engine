@@ -41,8 +41,8 @@ use boyko_rhi::{
     BarrierDesc, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BufferBarrier, BufferCopy,
     BufferDesc, BufferImageCopy, ComputePipelineDesc, DescriptorKind, GraphicsPipelineDesc,
     ImageBarrierDesc, ImageLayout, ImageSubresourceRange, IndexType, MemoryLocation, MipMode,
-    RenderArea, RenderingDesc, RhiApi, RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc,
-    ShaderStage, TextureDesc, Viewport,
+    QueryPoolDesc, RenderArea, RenderingDesc, RhiApi, RhiCommandEncoder, RhiDevice, RhiQueue,
+    SamplerDesc, ShaderStage, TextureDesc, TimestampStage, Viewport,
 };
 
 use crate::compute::ComputeError;
@@ -235,6 +235,7 @@ impl RhiApi for Vulkan {
     type ShaderModule = VulkanShaderModule;
     type ComputePipeline = ComputePipeline;
     type Fence = VulkanFence;
+    type QueryPool = VulkanQueryPool;
 
     // ===== DEFERRED SEAM — bound to the cheapest placeholder this phase. =====
     // The concrete on-screen `Surface`/`Swapchain`/`Renderer` are lifetime-bound
@@ -532,6 +533,23 @@ pub struct VulkanBindGroup {
 pub struct VulkanFence {
     /// The `VkFence` handle; destroyed by `destroy_fence`.
     pub(crate) fence: VkFence,
+}
+
+/// An owned GPU timestamp-query pool ([`RhiApi::QueryPool`], HW-RT rung R0).
+///
+/// # Safety
+///
+/// The originating [`VulkanContext`] MUST still be alive when this pool is read from
+/// or destroyed: each goes through the context's device fn-table. Its queries are
+/// UNDEFINED until reset ([`RhiCommandEncoder::reset_query_pool`]) each frame before
+/// the first [`RhiCommandEncoder::write_timestamp`]. No compile-time `'ctx` tie this
+/// phase (plan F1; the fence precedent).
+pub struct VulkanQueryPool {
+    /// The `VkQueryPool` handle; destroyed by `destroy_query_pool`.
+    pub(crate) pool: VkQueryPool,
+    /// The number of queries the pool holds (`2 * PASS_COUNT` for the bracket
+    /// collector); used to `debug_assert` a read stays in bounds.
+    pub(crate) count: u32,
 }
 
 /// A thin submission-queue wrapper ([`RhiQueue`], plan O1/Q2).
@@ -1884,6 +1902,102 @@ impl RhiDevice<Vulkan> for VulkanContext {
         Ok(())
     }
 
+    fn create_query_pool(&self, desc: &QueryPoolDesc) -> Result<VulkanQueryPool, VulkanError> {
+        debug_assert!(desc.count > 0, "invariant: a query pool needs >= 1 query");
+        let create_info = VkQueryPoolCreateInfo {
+            s_type: VkStructureType::QueryPoolCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            query_type: VK_QUERY_TYPE_TIMESTAMP,
+            query_count: desc.count,
+            // A TIMESTAMP pool sets no pipeline-statistics flags.
+            pipeline_statistics: 0,
+        };
+        let mut pool = VkQueryPool::NULL;
+        // SAFETY: `device` is live; `create_info` is fully initialized (a TIMESTAMP pool of
+        // `count` queries); `&mut pool` is a valid out-pointer; NULL allocator. The queries
+        // are UNDEFINED at creation — the caller resets them before the first write.
+        let raw = unsafe {
+            (self.device_fns().create_query_pool)(self.device(), &create_info, ptr::null(), &mut pool)
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkCreateQueryPool", result));
+        }
+        Ok(VulkanQueryPool { pool, count: desc.count })
+    }
+
+    unsafe fn destroy_query_pool(&self, pool: VulkanQueryPool) {
+        // SAFETY: `pool.pool` was created on this device, no submission writing/reading it is
+        // pending (caller contract), and the by-value move destroys it exactly once.
+        unsafe { (self.device_fns().destroy_query_pool)(self.device(), pool.pool, ptr::null()) };
+    }
+
+    fn read_query_pool_ns(
+        &self,
+        pool: &VulkanQueryPool,
+        pair_count: u32,
+        scratch: &mut [u64],
+        out_ns: &mut [f64],
+    ) -> Result<(), VulkanError> {
+        let query_count = pair_count * 2;
+        debug_assert!(
+            query_count <= pool.count,
+            "invariant: 2 * pair_count must fit the pool's query count"
+        );
+        debug_assert!(
+            scratch.len() >= query_count as usize,
+            "invariant: scratch must hold 2 * pair_count raw timestamps"
+        );
+        debug_assert!(
+            out_ns.len() >= pair_count as usize,
+            "invariant: out_ns must hold pair_count ns values"
+        );
+
+        // SAFETY: `device` is live; `pool.pool` is a live TIMESTAMP pool whose `[0..query_count)`
+        // queries were reset + written this frame (caller contract, after `wait_fence`);
+        // `scratch.as_mut_ptr()` names `query_count` `u64` slots (asserted above) — `data_size`
+        // is exactly that many bytes and `stride` is 8 (one `u64` per query). `64_BIT | WAIT_BIT`
+        // reads each result as a 64-bit value, blocking until it is available. NULL is not passed.
+        let raw = unsafe {
+            (self.device_fns().get_query_pool_results)(
+                self.device(),
+                pool.pool,
+                0,
+                query_count,
+                (query_count as usize) * 8,
+                scratch.as_mut_ptr().cast::<c_void>(),
+                8,
+                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT,
+            )
+        };
+        let result = VkResult::from_raw(raw);
+        // `WAIT_BIT` makes the call return ONLY once every requested query is available, so the sole
+        // success code here is `VK_SUCCESS`; the positive non-error `VK_NOT_READY`/`VK_INCOMPLETE`
+        // (which `is_success()` would also accept, meaning an unwritten/partial query) cannot occur.
+        // Callers MUST read only WRITTEN (begin,end) pairs — an unwritten query would block this call
+        // forever and never reach here (the timing harnesses enforce this: the isolated smoke reads 1
+        // pair; the combined harness asserts all four passes active). So `is_success()` here is
+        // unambiguously a fully-available result.
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkGetQueryPoolResults", result));
+        }
+
+        // Mask each raw timestamp to the queue family's valid bits BEFORE subtracting (high
+        // bits above the valid width are hardware garbage), then × `timestampPeriod`. The
+        // `wrapping_sub` + post-subtraction mask handles a counter wrap across the pair.
+        let caps = self.device_caps();
+        let mask = caps.timestamp_mask();
+        let period = caps.timestamp_period as f64;
+        for i in 0..pair_count as usize {
+            let begin = scratch[2 * i] & mask;
+            let end = scratch[2 * i + 1] & mask;
+            let ticks = end.wrapping_sub(begin) & mask;
+            out_ns[i] = ticks as f64 * period;
+        }
+        Ok(())
+    }
+
     fn create_command_encoder(&self) -> Result<VulkanCommandEncoder, VulkanError> {
         let layouts = self.compute_layouts()?;
         // SAFETY: the device is live; `layouts` are this device's shared compute
@@ -2283,6 +2397,35 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
         // (the fixed set just bound above for the packed path, or the vocabulary set
         // bound earlier via `bind_descriptor_set_compute`) cover the dispatch.
         unsafe { (fns.cmd_dispatch)(self.command_buffer, gx, gy, gz) };
+    }
+
+    fn reset_query_pool(&mut self, pool: &VulkanQueryPool, first: u32, count: u32) {
+        debug_assert!(
+            first + count <= pool.count,
+            "invariant: reset range must fit the pool's query count"
+        );
+        // SAFETY: `self.fns` points into the owning context's boxed `DeviceFns` — a stable
+        // heap address that outlives this encoder (context teardown order); deref is valid.
+        let fns = unsafe { &*self.fns };
+        // SAFETY: recording is open; `pool.pool` is a live TIMESTAMP pool; `[first..first+count)`
+        // is in bounds (asserted above). MUST be recorded OUTSIDE any render / dynamic-rendering
+        // scope (caller contract — the collector resets at the compute-only frame top).
+        unsafe { (fns.cmd_reset_query_pool)(self.command_buffer, pool.pool, first, count) };
+    }
+
+    fn write_timestamp(&mut self, pool: &VulkanQueryPool, stage: TimestampStage, index: u32) {
+        debug_assert!(index < pool.count, "invariant: timestamp index must be in the pool");
+        // Map the agnostic stage to a `VkPipelineStageFlagBits` via an identity cast — the
+        // `TimestampStage` discriminants equal the `VK_PIPELINE_STAGE_*` bit values (asserted
+        // in `abi_guard.rs`).
+        let vk_stage: VkFlags = stage.as_i32() as VkFlags;
+        // SAFETY: `self.fns` points into the owning context's boxed `DeviceFns` (alive per the
+        // type contract); deref is valid.
+        let fns = unsafe { &*self.fns };
+        // SAFETY: recording is open; `pool.pool` is a live TIMESTAMP pool; `index < pool.count`
+        // (asserted above) and was reset this frame via `reset_query_pool` (caller contract);
+        // `vk_stage` is a single valid pipeline-stage bit (TOP/BOTTOM).
+        unsafe { (fns.cmd_write_timestamp)(self.command_buffer, vk_stage, pool.pool, index) };
     }
 
     fn pipeline_barrier(&mut self, barrier: &BarrierDesc<Vulkan>) {

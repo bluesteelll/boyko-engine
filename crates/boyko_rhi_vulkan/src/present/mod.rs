@@ -37,6 +37,7 @@ use crate::ffi::{
 };
 
 mod frame_driver;
+pub mod gpu_timing;
 mod graph_bridge;
 mod passes;
 mod scene_types;
@@ -45,6 +46,7 @@ mod swapchain;
 mod targets;
 
 pub use frame_driver::{FrameWriteToken, Renderer};
+pub use gpu_timing::{PASS_COUNT, TimedPass, TimestampCollector};
 pub use scene_types::{
     BrickActivation, CsmDepthActivation, DdgiUpdateActivation, GBUFFER_IDENTITY_INSTANCE,
     GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene,

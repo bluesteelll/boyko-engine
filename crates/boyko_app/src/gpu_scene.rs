@@ -1660,6 +1660,10 @@ impl GpuSceneBundles {
             // instance_bind_groups[slot], unchanged) — the compute overwrites the
             // dynamic slots in place before the raster pass.
             interp,
+            // HW-RT rung R0: GPU timestamp instrumentation OFF on every host frame (byte-
+            // identical command stream — the offline `software_ray_baseline_cost` harness is
+            // the only `Some` caller).
+            gpu_timing: None,
         }
     }
 

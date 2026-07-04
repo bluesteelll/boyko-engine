@@ -202,6 +202,18 @@ pub struct DeviceCaps {
     /// EITHER degrades DDGI gracefully (RECORDED, not a boot fail-fast — see
     /// [`ddgi_irr_storage_ok`](Self::ddgi_irr_storage_ok)).
     pub ddgi_depth_storage_ok: bool,
+    /// HW-RT rung R0: `VkPhysicalDeviceLimits::timestampPeriod` — nanoseconds per GPU
+    /// timestamp tick (multiply a masked tick delta by this to get ns). RECORDED (not a
+    /// boot fail-fast): a `<= 0` or `> 1000` value (an implausible period, or a wrong-offset
+    /// read) makes [`Self::timestamps_usable`] `false`, degrading the GPU-timing harness to a
+    /// graceful skip.
+    pub timestamp_period: f32,
+    /// HW-RT rung R0: the chosen graphics+compute queue family's
+    /// `timestampValidBits` — the number of MEANINGFUL low bits in a raw timestamp
+    /// (bits above this width are hardware garbage and MUST be masked off before
+    /// subtracting). `0` means the family does not support timestamps → the harness
+    /// skips (see [`Self::timestamps_usable`]).
+    pub timestamp_valid_bits: u32,
 }
 
 impl DeviceCaps {
@@ -229,6 +241,30 @@ impl DeviceCaps {
     #[inline]
     pub const fn ddgi_storage_ok(&self) -> bool {
         self.ddgi_irr_storage_ok && self.ddgi_depth_storage_ok
+    }
+
+    /// HW-RT rung R0: whether GPU timestamp measurement is USABLE on this device — the
+    /// queue family reports at least one valid timestamp bit AND the period is a plausible
+    /// ns/tick (`0 < period < 1000`). The plausibility bound also degrades a WRONG
+    /// [`crate::ffi::LIMITS_OFF_TIMESTAMP_PERIOD`] offset to a graceful skip (never a fake
+    /// timing). The GPU-timing harness prints a skip line + returns when this is `false`; it
+    /// NEVER panics.
+    #[inline]
+    pub const fn timestamps_usable(&self) -> bool {
+        self.timestamp_valid_bits > 0 && self.timestamp_period > 0.0 && self.timestamp_period < 1000.0
+    }
+
+    /// HW-RT rung R0: the low-bit mask for a raw timestamp (`(1 << valid_bits) - 1`),
+    /// guarding the `1u64 << 64` shift UB — a `valid_bits >= 64` family (all bits valid)
+    /// yields `u64::MAX`. AND both bracket endpoints with this BEFORE subtracting; high bits
+    /// above the valid width are hardware garbage.
+    #[inline]
+    pub const fn timestamp_mask(&self) -> u64 {
+        if self.timestamp_valid_bits >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << self.timestamp_valid_bits) - 1
+        }
     }
 }
 
@@ -335,6 +371,12 @@ pub struct DeviceFns {
     pub wait_for_fences: PfnVkWaitForFences,
     pub queue_submit: PfnVkQueueSubmit,
     pub device_wait_idle: PfnVkDeviceWaitIdle,
+    // --- HW-RT rung R0 GPU timestamp-query commands (Vulkan 1.0 core, always present). ---
+    pub create_query_pool: PfnVkCreateQueryPool,
+    pub destroy_query_pool: PfnVkDestroyQueryPool,
+    pub cmd_reset_query_pool: PfnVkCmdResetQueryPool,
+    pub cmd_write_timestamp: PfnVkCmdWriteTimestamp,
+    pub get_query_pool_results: PfnVkGetQueryPoolResults,
     // --- Slice-1 core (Vulkan 1.0 / 1.3) commands, always loaded. ---
     pub reset_fences: PfnVkResetFences,
     pub create_image_view: PfnVkCreateImageView,
@@ -731,18 +773,27 @@ impl VulkanContext {
                 Err(e) => fail!(e),
             };
 
-        // --- 5. Find a graphics+compute queue family. ---
-        let queue_family_index = match find_queue_family(&instance_fns, physical_device) {
-            Ok(q) => q,
-            Err(e) => fail!(e),
-        };
+        // --- 5. Find a graphics+compute queue family (+ its timestampValidBits, R0). ---
+        let (queue_family_index, timestamp_valid_bits) =
+            match find_queue_family(&instance_fns, physical_device) {
+                Ok(q) => q,
+                Err(e) => fail!(e),
+            };
 
         // --- 5b. Query the minimal device caps ONCE (Render P1b), alongside the
         // `dynamicRendering` fail-fast in `create_device`. `bindless_capable` is
         // recorded only; `gbuffer_storage_format_ok` is fail-fast here so a context
         // that exists always has it (a marcher storage-image store can never fault on
         // an unsupported format). Core-guaranteed on the RTX 3060.
-        let device_caps = query_device_caps(&instance_fns, physical_device);
+        let mut device_caps = query_device_caps(&instance_fns, physical_device);
+        // HW-RT rung R0: populate the two timestamp caps `query_device_caps` left at
+        // placeholder zeros — the `timestampPeriod` from the physical-device limits blob +
+        // the CHOSEN family's `timestampValidBits` (from `find_queue_family`). RECORDED (not
+        // a fail-fast): `timestamps_usable()` degrades an unusable/implausible device to a
+        // graceful skip in the GPU-timing harness.
+        let device_props = query_device_properties(&instance_fns, physical_device);
+        device_caps.timestamp_period = device_props.limits.read_f32(LIMITS_OFF_TIMESTAMP_PERIOD);
+        device_caps.timestamp_valid_bits = timestamp_valid_bits;
         if !device_caps.gbuffer_storage_format_ok {
             fail!(BootError::GbufferStorageFormatUnsupported);
         }
@@ -1499,6 +1550,12 @@ fn load_device_fns(
             wait_for_fences: load_device_command(gdpa, device, c"vkWaitForFences")?,
             queue_submit: load_device_command(gdpa, device, c"vkQueueSubmit")?,
             device_wait_idle: load_device_command(gdpa, device, c"vkDeviceWaitIdle")?,
+            // --- HW-RT rung R0 GPU timestamp-query commands (Vulkan 1.0 core ⇒ `?` safe). ---
+            create_query_pool: load_device_command(gdpa, device, c"vkCreateQueryPool")?,
+            destroy_query_pool: load_device_command(gdpa, device, c"vkDestroyQueryPool")?,
+            cmd_reset_query_pool: load_device_command(gdpa, device, c"vkCmdResetQueryPool")?,
+            cmd_write_timestamp: load_device_command(gdpa, device, c"vkCmdWriteTimestamp")?,
+            get_query_pool_results: load_device_command(gdpa, device, c"vkGetQueryPoolResults")?,
             // --- Slice-1 core (Vulkan 1.0 / 1.3) commands. ---
             reset_fences: load_device_command(gdpa, device, c"vkResetFences")?,
             create_image_view: load_device_command(gdpa, device, c"vkCreateImageView")?,
@@ -2098,8 +2155,13 @@ fn device_name_from_props(props: &VkPhysicalDeviceProperties) -> String {
     String::from_utf8_lossy(&bytes[..nul]).into_owned()
 }
 
-/// Finds a queue family that supports both graphics and compute.
-fn find_queue_family(fns: &InstanceFns, device: VkPhysicalDevice) -> Result<u32, BootError> {
+/// Finds a queue family that supports both graphics and compute, returning its index
+/// and its `timestampValidBits` (HW-RT rung R0: the number of meaningful low bits in a
+/// raw timestamp written on that family's queue — `0` means no timestamp support).
+fn find_queue_family(
+    fns: &InstanceFns,
+    device: VkPhysicalDevice,
+) -> Result<(u32, u32), BootError> {
     let mut count: u32 = 0;
     // SAFETY: count-query call with a null array; `&mut count` valid.
     unsafe { (fns.get_physical_device_queue_family_properties)(device, &mut count, ptr::null_mut()) };
@@ -2131,7 +2193,9 @@ fn find_queue_family(fns: &InstanceFns, device: VkPhysicalDevice) -> Result<u32,
     let required = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT;
     for (idx, fam) in families.iter().take(count as usize).enumerate() {
         if fam.queue_count > 0 && (fam.queue_flags & required) == required {
-            return Ok(idx as u32);
+            // Return the CHOSEN family's `timestampValidBits` (HW-RT rung R0): the mask
+            // width for timestamps written on this family's queue. Previously discarded.
+            return Ok((idx as u32, fam.timestamp_valid_bits));
         }
     }
     Err(BootError::NoSuitableQueueFamily)
@@ -2395,6 +2459,11 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         atlas_linear_filter_ok,
         ddgi_irr_storage_ok,
         ddgi_depth_storage_ok,
+        // HW-RT rung R0: placeholders — the boot site overwrites these from the physical-
+        // device limits (`timestampPeriod`) + the chosen queue family (`timestampValidBits`),
+        // the two inputs `query_device_caps` does not itself read.
+        timestamp_period: 0.0,
+        timestamp_valid_bits: 0,
     }
 }
 

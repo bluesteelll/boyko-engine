@@ -9,7 +9,7 @@ use crate::api::RhiApi;
 use crate::descriptor::{
     BarrierDesc, BufferCopy, BufferImageCopy, ImageBarrierDesc, RenderArea, RenderingDesc, Viewport,
 };
-use crate::enums::{ImageLayout, IndexType, ShaderStage};
+use crate::enums::{ImageLayout, IndexType, ShaderStage, TimestampStage};
 use crate::error::RhiError;
 
 /// Records commands into a one-time-submit command buffer.
@@ -352,5 +352,39 @@ pub trait RhiCommandEncoder<A: RhiApi> {
     #[inline(never)]
     fn dispatch_indirect(&mut self, _buffer: &A::Buffer, _offset: u64) {
         // Phase-6+ seam: no foundation code calls this.
+    }
+
+    // ===== GPU TIMESTAMP-QUERY SEAM (HW-RT rung R0; default bodies keep Mock + ABI) =====
+
+    /// Records a reset of `count` queries starting at `first` in `pool`
+    /// (`vkCmdResetQueryPool`, HW-RT rung R0). A TIMESTAMP query is UNDEFINED at pool
+    /// creation and stays undefined until reset, so this MUST run before the frame's first
+    /// [`Self::write_timestamp`] targeting those queries — and MUST be recorded **OUTSIDE**
+    /// any render / dynamic-rendering scope (`VUID-vkCmdResetQueryPool-renderpass`); a
+    /// compute-only prologue is trivially legal.
+    ///
+    /// The default body is a no-op marked `#[cold] #[inline(never)]` so a backend without a
+    /// query path (the Mock) leaves it a no-op and the trait ABI is unaffected; the Vulkan
+    /// backend overrides it (mirroring [`Self::image_barrier`]).
+    #[cold]
+    #[inline(never)]
+    fn reset_query_pool(&mut self, _pool: &A::QueryPool, _first: u32, _count: u32) {
+        // HW-RT R0 default seam: a backend without a query path leaves this a no-op; the
+        // Vulkan backend overrides it.
+    }
+
+    /// Records a timestamp write into query `index` of `pool` at pipeline stage `stage`
+    /// (`vkCmdWriteTimestamp`, HW-RT rung R0). `index` MUST have been reset this frame via
+    /// [`Self::reset_query_pool`]. The profiler-standard bracket writes
+    /// [`TimestampStage::TopOfPipe`] at a pass's open and [`TimestampStage::BottomOfPipe`]
+    /// at its close.
+    ///
+    /// The default body is a no-op marked `#[cold] #[inline(never)]`; the Vulkan backend
+    /// overrides it.
+    #[cold]
+    #[inline(never)]
+    fn write_timestamp(&mut self, _pool: &A::QueryPool, _stage: TimestampStage, _index: u32) {
+        // HW-RT R0 default seam: a backend without a query path leaves this a no-op; the
+        // Vulkan backend overrides it.
     }
 }

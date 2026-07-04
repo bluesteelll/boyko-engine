@@ -8,7 +8,7 @@
 //! stable across phases.
 
 use crate::api::RhiApi;
-use crate::descriptor::{BufferDesc, ComputePipelineDesc, GraphicsPipelineDesc};
+use crate::descriptor::{BufferDesc, ComputePipelineDesc, GraphicsPipelineDesc, QueryPoolDesc};
 use crate::enums::{
     AddressMode, CompareOp, DescriptorKind, Filter, Format, ImageUsage, ShaderStage,
     TextureDimension,
@@ -538,5 +538,67 @@ pub trait RhiDevice<A: RhiApi> {
     #[inline(never)]
     fn unmap_buffer(&self, _buffer: &A::Buffer) -> Result<(), Self::Error> {
         Err(RhiError::unsupported("unmap_buffer").into())
+    }
+
+    // ===== GPU TIMESTAMP-QUERY SEAM (HW-RT rung R0; default bodies keep Mock + ABI) =====
+
+    /// Creates a GPU timestamp-query pool per `desc` (HW-RT rung R0). Mirrors
+    /// [`Self::create_fence`]: an owned resource torn down by [`Self::destroy_query_pool`].
+    ///
+    /// A TIMESTAMP query pool is **UNDEFINED at creation** — the caller MUST reset every
+    /// query ([`crate::encoder::RhiCommandEncoder::reset_query_pool`]) before its first
+    /// [`crate::encoder::RhiCommandEncoder::write_timestamp`], or the read is undefined
+    /// (not stale).
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; a backend
+    /// with a query path (Vulkan) overrides it. Keeps the trait ABI stable for a backend
+    /// (e.g. the Mock) without one.
+    #[cold]
+    #[inline(never)]
+    fn create_query_pool(&self, _desc: &QueryPoolDesc) -> Result<A::QueryPool, Self::Error> {
+        Err(RhiError::unsupported("create_query_pool").into())
+    }
+
+    /// Destroys `pool`, consuming it (HW-RT rung R0). Mirrors [`Self::destroy_fence`].
+    ///
+    /// The default body drops the value (a no-op for a backend whose `QueryPool` is
+    /// zero-sized, e.g. the Mock); the Vulkan backend overrides it to destroy the
+    /// `VkQueryPool`. Keeps the trait ABI stable.
+    ///
+    /// # Safety
+    /// The GPU must no longer be using `pool` (no submission writing/reading it is pending —
+    /// fence-waited or `wait_idle`'d), and it is destroyed exactly once (the by-value move
+    /// enforces the latter).
+    #[cold]
+    #[inline(never)]
+    unsafe fn destroy_query_pool(&self, pool: A::QueryPool) {
+        // Default seam: drop the value. A zero-sized `QueryPool` (Mock) drops to a no-op;
+        // the Vulkan backend with a `VkQueryPool` overrides this.
+        drop(pool);
+    }
+
+    /// Host-waits + reads `2 * pair_count` raw timestamps from `pool`, masks each to the
+    /// device's `timestampValidBits`, and returns the nanoseconds of each consecutive
+    /// `(begin, end)` pair in `out_ns` (HW-RT rung R0): `out_ns[i]` = ns between query
+    /// `2*i` (begin) and `2*i + 1` (end), computed as
+    /// `((t_end & mask).wrapping_sub(t_begin & mask) & mask) as f64 * timestamp_period`.
+    ///
+    /// Uses `VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT` (64-bit is mandatory — a
+    /// 32-bit ~1 ns counter overflows in ~0.43 s; `WAIT_BIT` blocks until the results are
+    /// available, after the caller's `wait_fence`). `scratch` is the caller-owned raw-u64
+    /// staging (length `>= 2 * pair_count`); `out_ns` receives `pair_count` values.
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; the Vulkan
+    /// backend overrides it (`vkGetQueryPoolResults`).
+    #[cold]
+    #[inline(never)]
+    fn read_query_pool_ns(
+        &self,
+        _pool: &A::QueryPool,
+        _pair_count: u32,
+        _scratch: &mut [u64],
+        _out_ns: &mut [f64],
+    ) -> Result<(), Self::Error> {
+        Err(RhiError::unsupported("read_query_pool_ns").into())
     }
 }

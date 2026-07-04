@@ -15,6 +15,7 @@ use crate::rhi_impl::{
 };
 use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS, VulkanTexture};
 
+use super::gpu_timing::TimestampCollector;
 use super::{FRAMES_IN_FLIGHT, SwapchainError};
 
 // Doc-link scope: types referenced only from doc-comments in this module (the render
@@ -1150,6 +1151,17 @@ pub struct GBufferScene<'a> {
     /// slot's draw-SSBO bind group the activation's set writes at binding 1 (see
     /// [`InterpActivation`]).
     pub interp: Option<InterpActivation<'a>>,
+    /// HW-RT rung R0: the optional GPU timestamp bracket collector. `None` on EVERY
+    /// golden/host frame (the DEFAULT — the capability-as-presence discipline) ⇒ the recorder
+    /// emits ZERO reset/write commands, so the recorded command stream is BYTE-IDENTICAL to
+    /// the pre-R0 path (proven by the framegraph byte-identity golden + the grand_showcase
+    /// pixel dump, both run with `None`). `Some(tc)` (the offline `software_ray_baseline_cost`
+    /// harness) brackets the four software-ray passes (DDGI update, deferred resolve, CSM
+    /// cascade depth, punctual atlas depth) so the harness reports per-pass GPU wall-clock.
+    /// The `is_some()` branch is COLD + perfectly predicted; a runtime `Option`, NOT a cargo
+    /// feature (a feature would risk the timed build diverging from the shipped pipeline the
+    /// calibration must measure).
+    pub gpu_timing: Option<&'a TimestampCollector>,
 }
 
 /// CSM Increment 1b (Rung A): the cascade DEPTH-PASS activation threaded into

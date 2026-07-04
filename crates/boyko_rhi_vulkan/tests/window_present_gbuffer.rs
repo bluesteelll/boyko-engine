@@ -61,8 +61,8 @@ use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc,
     BufferUsage, CompareOp, ComputePipelineDesc, DepthBias, Format, CullMode, GraphicsPipelineDesc,
     ImageUsage, MemoryLocation, MipMode,
-    PrimitiveTopology, RhiDevice, SamplerDesc, ShaderStage, TextureDesc, TextureDimension,
-    VertexAttribute, VertexBufferLayout, VertexFormat,
+    PrimitiveTopology, QueryPoolDesc, RhiDevice, SamplerDesc, ShaderStage, TextureDesc,
+    TextureDimension, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use boyko_rhi_vulkan::compute::{B5_CAMERA_UBO_BYTES_M4, B5_CAMERA_UBO_BYTES_MESH_SDF, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, CompositePushConstants, csm_depth_fs_spirv, csm_depth_vs_spirv, punctual_depth_fs_spirv, punctual_depth_vs_spirv, EDITLIST_BUFFER_WORDS, GOLDEN_LIGHT_HEADER_BASE_WORDS, GOLDEN_LIGHT_KIND_DIRECTIONAL, GOLDEN_LIGHT_KIND_POINT, GOLDEN_LIGHT_KIND_SPOT, INTERP_INSTANCES_PUSH_BYTES, interp_instances_spirv, LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET, MESH_SDF_PARAMS_OFFSET, MeshSdfParams, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_TRACE_T_MAX, SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, CompositeCamera, encode_edit_list, deferred_pbr_spirv, composite_pixel_ray, DEFAULT_MARCHER_OMEGA, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, DEFAULT_LIGHT_DIR, mesh_depth_for_z, sdf_gbuffer_composite_spirv, sdf_op, sdf_ssao_spirv_variant, sdf_tile_cull_spirv, tile_grid_extent, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM, SSAO_QUALITY_HIGH};
 use boyko_rhi_vulkan::goldens::{GoldenLight, GoldenLightHeader, golden_composite_pixel_ex, golden_deferred_resolve, golden_marcher_attributes, GoldenMaterial};
@@ -76,7 +76,8 @@ use boyko_rhi_vulkan::ddgi::{
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::memory::BoundBuffer;
 use boyko_rhi_vulkan::rhi_impl::{
-    ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline, VulkanSampler,
+    ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline,
+    VulkanQueryPool, VulkanSampler,
 };
 use boyko_rhi_vulkan::texture::{MAX_TEXTURE_LAYERS, VulkanTexture};
 use boyko_rhi_vulkan::ffi::{
@@ -85,8 +86,8 @@ use boyko_rhi_vulkan::ffi::{
 use boyko_rhi_vulkan::swapchain::{
     BrickActivation, CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
     GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferFrame,
-    GBufferMeshDraw, GBufferScene, InterpActivation, PunctualDepthActivation, Renderer,
-    SsaoActivation, Surface, Swapchain,
+    GBufferMeshDraw, GBufferScene, InterpActivation, PASS_COUNT, PunctualDepthActivation, Renderer,
+    SsaoActivation, Surface, Swapchain, TimestampCollector,
 };
 use boyko_rhi_vulkan::window::{CapturedMsg, Window};
 
@@ -2418,6 +2419,8 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // Pillar B B3: the interpolation pre-pass is OFF for every dump/offscreen golden — the
         // raster VS reads the hand-affine SSBO directly (byte-identical command stream + pixels).
         interp: None,
+        // HW-RT rung R0: GPU timing OFF (byte-identical command stream).
+        gpu_timing: None,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -3289,6 +3292,8 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         atlas_punctual: None,
         // Pillar B B3: the interpolation pre-pass is OFF for every dump/offscreen golden.
         interp: None,
+        // HW-RT rung R0: GPU timing OFF (byte-identical command stream).
+        gpu_timing: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -5547,7 +5552,8 @@ const GRAND_SHOWCASE_DDGI_BMP: &str = r"D:\tmp\engine_grand_showcase_ddgi.bmp";
 #[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the DDGI GI-ON showcase screenshot"]
 fn engine_grand_showcase_512_ddgi_screenshot_dump() {
     with_windowed_present("boyko_engine grand showcase DDGI 512", "engine_showcase_512", |bp| {
-        run_showcase_body_ddgi(bp, GRAND_SHOWCASE_DDGI_BMP, grand_showcase_config(), false)
+        // `gpu_timing = None`: ZERO extra commands, byte-identical to the pre-R0 golden.
+        run_showcase_body_ddgi(bp, GRAND_SHOWCASE_DDGI_BMP, grand_showcase_config(), false, None)
     });
 }
 
@@ -7186,7 +7192,13 @@ fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, in
 /// SDF spheres — so the converged sun-driven indirect bounce reads there and nowhere else (the mesh
 /// walls/floor/boxes are `mask == 0`). The update shader shades DIRECTIONAL lights only, so the warm
 /// sun is the GI driver.
-fn run_showcase_body_ddgi(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfig, interactive: bool) {
+fn run_showcase_body_ddgi(
+    bp: BootPresent<'_, '_>,
+    bmp_path: &str,
+    cfg: ShowcaseConfig,
+    interactive: bool,
+    gpu_timing: Option<&TimestampCollector>,
+) {
     let BootPresent { window, ctx, surface, mut swapchain, mut renderer, is_bgra, swap_color_format } =
         bp;
     debug_assert!(!interactive, "invariant: run_showcase_body_ddgi is a readback-only dump path");
@@ -7943,6 +7955,12 @@ fn run_showcase_body_ddgi(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: Showcase
             },
         ),
         interp: None,
+        // HW-RT rung R0: the caller's GPU timestamp collector. `None` for the byte-identical
+        // BMP dump (`engine_grand_showcase_512_ddgi_screenshot_dump`) — ZERO extra commands, so
+        // the golden stays byte-identical. `Some(&collector)` for the
+        // `engine_grand_showcase_512_gpu_pass_cost` timing test, which brackets the four
+        // software-ray passes on this real combined frame.
+        gpu_timing,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -7968,6 +7986,30 @@ fn run_showcase_body_ddgi(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: Showcase
 
     let ddgi_ubo_ptr = RhiDevice::buffer_mapped_ptr(device, &ddgi_update_ubo)
         .expect("host-visible DDGI update UBO is mapped");
+
+    // HW-RT rung R0: the GPU-pass-cost TIMING path. When a collector is threaded in, the
+    // recorder brackets the four software-ray passes on every frame (`scene.gpu_timing` is
+    // `Some`). Run `>= 200` measured frames, reading each frame's pool AFTER a `wait_idle` (the
+    // simplest offline discipline — the recorded slot is `renderer.frame_index()` captured
+    // BEFORE the submit that then rotates it), accumulate a `[f64; PASS_COUNT]` sample per
+    // frame, discard the first 20, and report median + p95 + stddev (ns) per pass + ns/ray.
+    // This whole block is skipped on the `None` (BMP dump) path — byte-identical golden.
+    if let Some(collector) = gpu_timing {
+        run_gpu_pass_cost_timing(
+            window,
+            ctx,
+            surface,
+            &mut swapchain,
+            &mut renderer,
+            &scene,
+            &mut frame,
+            &clear,
+            present_extent,
+            alloc_extent,
+            ddgi_ubo_ptr,
+            collector,
+        );
+    } else {
 
     let mut dumped: Option<(Vec<u8>, u32, u32)> = None;
     let mut converge_ok = true;
@@ -8088,6 +8130,8 @@ fn run_showcase_body_ddgi(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: Showcase
         }
     }
 
+    } // end of the `None`-gpu_timing (BMP dump) path.
+
     drop(renderer);
     // SAFETY: the renderer was dropped above (its `Drop` waits the device idle), so no submission
     // references these resources; `ctx` is still alive; each is destroyed exactly once, in reverse
@@ -8141,6 +8185,269 @@ fn run_showcase_body_ddgi(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: Showcase
     }
     drop(swapchain);
     // surface / ctx / window are owned by `with_windowed_present` and dropped in-order at its frame end.
+}
+
+// === HW-RT rung R0 — the GPU-pass-cost timing loop + its `#[ignore]` entry point. ===
+
+/// The reported per-pass GPU timing summary (all in nanoseconds, GPU wall-clock).
+#[derive(Clone, Copy, Debug, Default)]
+struct GpuPassSummary {
+    median_ns: f64,
+    p95_ns: f64,
+    stddev_ns: f64,
+}
+
+/// Summarizes a slice of ns samples to a `GpuPassSummary` (median + p95 + stddev). Sorts a copy
+/// for the percentiles; `samples` must be non-empty.
+fn summarize_gpu_pass(samples_ns: &[f64]) -> GpuPassSummary {
+    let mut s = samples_ns.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = s.len();
+    let median_ns = s[n / 2];
+    let p95_idx = ((n as f64) * 0.95).ceil() as usize;
+    let p95_ns = s[p95_idx.min(n - 1)];
+    let mean = s.iter().sum::<f64>() / n as f64;
+    let var = s.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n as f64;
+    GpuPassSummary { median_ns, p95_ns, stddev_ns: var.sqrt() }
+}
+
+/// The number of measured frames the GPU-pass-cost timing loop presents (`>= 200`, plan Part C).
+const GPU_PASS_COST_FRAMES: u32 = 220;
+/// The warm-up frames discarded from the front (shader compile + GPU clock ramp + atlas ramp).
+const GPU_PASS_COST_WARMUP: usize = 20;
+
+/// Drives the GPU-pass-cost timing loop (HW-RT rung R0): presents `GPU_PASS_COST_FRAMES` real
+/// combined frames with `scene.gpu_timing == Some(collector)` (so the recorder resets the pool
+/// at the frame top + brackets the four software-ray passes), reads each frame's pool AFTER a
+/// `wait_idle` for `PASS_COUNT` pairs, accumulates a `[f64; PASS_COUNT]` sample per frame,
+/// discards the first `GPU_PASS_COST_WARMUP`, and prints the plan §C.3 table (median / p95 /
+/// stddev per pass + ns/ray attribution).
+///
+/// `fi` (the pool slot the recorder used) is `renderer.frame_index()` captured BEFORE the
+/// submit — `drive_frame` rotates `frame_index` at its END, so the pre-submit index IS the slot
+/// `record_gbuffer`'s internal `let fi = self.frame_index` wrote. A `wait_idle` after each frame
+/// (the simplest offline discipline) guarantees that slot's pool is readable before the next
+/// frame reuses it.
+#[allow(clippy::too_many_arguments)]
+fn run_gpu_pass_cost_timing<'ctx>(
+    window: &mut Window,
+    ctx: &'ctx VulkanContext,
+    surface: &Surface<'ctx>,
+    swapchain: &mut Swapchain<'ctx>,
+    renderer: &mut Renderer<'ctx>,
+    scene: &GBufferScene<'_>,
+    frame: &mut GBufferFrame,
+    clear: &[f32; 4],
+    present_extent: VkExtent2D,
+    alloc_extent: VkExtent2D,
+    ddgi_ubo_ptr: NonNull<u8>,
+    collector: &TimestampCollector,
+) {
+    let device: &VulkanContext = ctx;
+    // W1 precondition: the `read_query_pool_ns` below reads ALL `PASS_COUNT` (begin,end) pairs with
+    // `VK_QUERY_RESULT_WAIT_BIT`, so EVERY bracketed pass must be recorded (its two queries written)
+    // each frame — an unwritten query never becomes available and would HANG the read forever. The
+    // grand_showcase GI-ON scene activates all four passes (DDGI update + the always-on deferred
+    // resolve + CSM cascade depth + punctual atlas depth); assert it so a future scene config that
+    // drops a pass fails LOUDLY here instead of deadlocking on the GPU.
+    assert!(
+        scene.ddgi_update.is_some() && scene.csm.is_some() && scene.atlas_punctual.is_some(),
+        "gpu_pass_cost timing requires the DDGI-update + CSM + punctual passes all ACTIVE (else the \
+         WAIT_BIT timestamp readback hangs on an unwritten query)"
+    );
+    // One `[f64; PASS_COUNT]` sample per measured frame.
+    let mut samples: Vec<[f64; PASS_COUNT as usize]> = Vec::with_capacity(GPU_PASS_COST_FRAMES as usize);
+    let mut scratch = [0u64; (2 * PASS_COUNT) as usize];
+    let mut out_ns = [0.0f64; PASS_COUNT as usize];
+
+    for f in 0..GPU_PASS_COST_FRAMES {
+        if !window.pump_events() {
+            eprintln!("NOTE gpu_pass_cost: window closed during timing — reporting partial samples");
+            break;
+        }
+        window.refresh_size();
+        let live = swapchain.extent();
+        if live.width != alloc_extent.width || live.height != alloc_extent.height {
+            eprintln!("NOTE gpu_pass_cost: extent changed during timing — reporting partial samples");
+            break;
+        }
+        // Rotate the I4 ray set per frame (as the dump path does) so the DDGI-update cost reflects
+        // the shipped per-frame ray rotation, not a degenerate fixed ray set.
+        // SAFETY: `ddgi_update_ubo` is `DDGI_UBO_BYTES` (48) host-coherent mapped bytes; offset 32
+        // is the `frame_index` u32 (`DdgiUpdateUbo` word 8). The prior frame's slot fence was
+        // re-waited by `wait_frame_in_flight` below (and a `wait_idle` runs each iteration), so no
+        // in-flight GPU read of this UBO overlaps the write. The write precedes the consuming submit.
+        unsafe {
+            ddgi_ubo_ptr.as_ptr().add(32).cast::<u32>().write_unaligned(f);
+        }
+
+        // The pool slot the recorder will write is the CURRENT frame_index (captured BEFORE the
+        // submit that rotates it inside `drive_frame`).
+        let fi = renderer.frame_index();
+        let token = renderer
+            .wait_frame_in_flight()
+            .expect("invariant: the frame slot fence wait precedes the submit");
+        // SAFETY: `ctx`/`surface`/`swapchain`/`renderer` share one device; every `scene` resource
+        // is live; `present_extent` + `scene.dispatch_group_count_x` + the camera UBO `count` cover
+        // the composite extent; NO readback buffer (the timing path reads timestamps, not pixels).
+        let presented = unsafe {
+            renderer.render_gbuffer_frame(
+                token, ctx, surface, swapchain, scene, frame,
+                window.width(), window.height(), *clear, present_extent, None,
+            )
+        }
+        .unwrap_or_else(|e| panic!("gpu_pass_cost frame failed: {e:?}"));
+        if !presented {
+            eprintln!("NOTE gpu_pass_cost: swapchain recreated during timing — reporting partial samples");
+            break;
+        }
+
+        // Offline discipline: wait the device idle so the just-submitted frame's timestamp writes
+        // are complete + readable before we read (and before the slot is reused two frames on).
+        device.wait_idle().expect("wait_idle");
+        // Read the four (begin,end) pairs of THIS frame's pool (`fi`), masked + period-scaled to ns.
+        device
+            .read_query_pool_ns(collector.pool(fi), PASS_COUNT, &mut scratch, &mut out_ns)
+            .expect("read_query_pool_ns");
+        samples.push(out_ns);
+    }
+
+    if ctx.validation_enabled() {
+        let state = ctx
+            .debug_state()
+            .expect("validation enabled => a debug-messenger state is present");
+        assert_eq!(
+            state.total(),
+            0,
+            "validation layer reported {} message(s) during the GPU-pass-cost timing — see the [vk-validation] log",
+            state.total()
+        );
+    }
+
+    if samples.len() <= GPU_PASS_COST_WARMUP {
+        eprintln!(
+            "NOTE gpu_pass_cost: only {} frame(s) measured (<= {GPU_PASS_COST_WARMUP} warm-up) — no stats reported",
+            samples.len()
+        );
+        return;
+    }
+    let kept = &samples[GPU_PASS_COST_WARMUP..];
+
+    // Per-pass columns for the summary.
+    let pass_names = ["DdgiUpdate", "DeferredResolve", "CsmDepth", "PunctualDepth"];
+    let mut per_pass: [Vec<f64>; PASS_COUNT as usize] =
+        core::array::from_fn(|_| Vec::with_capacity(kept.len()));
+    for sample in kept {
+        for (p, &ns) in sample.iter().enumerate() {
+            per_pass[p].push(ns);
+        }
+    }
+    let summaries: Vec<GpuPassSummary> = per_pass.iter().map(|c| summarize_gpu_pass(c)).collect();
+
+    // ns/ray attribution (plan Part C):
+    //  - DdgiUpdate  = DDGI_PROBE_COUNT * DDGI_UPDATE_RAYS rays.
+    //  - DeferredResolve = shaded-pixel count (ns/px; the SDF soft-shadow march is INCLUSIVE).
+    //  - CsmDepth / PunctualDepth = n/a (no clean ray count — depth-only passes).
+    const DDGI_UPDATE_RAYS: u32 = 64; // the showcase's I4 ray count (subset_n = 1 → one block/probe).
+    let ddgi_rays = (DDGI_PROBE_COUNT * DDGI_UPDATE_RAYS) as f64;
+    // The resolve dispatches one thread per composite pixel (the marcher's 1:1 grid).
+    let shaded_px = (COMPOSITE_W * COMPOSITE_H) as f64;
+
+    println!(
+        "engine_grand_showcase_512_gpu_pass_cost on: {} (kept {}/{} frames, GI ON — all four software-ray passes)",
+        ctx.device_name(),
+        kept.len(),
+        samples.len()
+    );
+    println!(
+        "  DDGI update rays = {DDGI_PROBE_COUNT} probes * {DDGI_UPDATE_RAYS} rays = {} rays; resolve shaded px = {}x{} = {}",
+        ddgi_rays as u64, COMPOSITE_W, COMPOSITE_H, shaded_px as u64
+    );
+    println!(
+        "  {:<16} {:>14} {:>14} {:>14} {:>16}",
+        "pass", "median_ns", "p95_ns", "stddev_ns", "per-ray/px"
+    );
+    for (p, name) in pass_names.iter().enumerate() {
+        let s = summaries[p];
+        let attribution = match p {
+            0 => format!("{:.3} ns/ray", s.median_ns / ddgi_rays),
+            1 => format!("{:.3} ns/px*", s.median_ns / shaded_px),
+            _ => "n/a".to_string(),
+        };
+        println!(
+            "  {:<16} {:>14.1} {:>14.1} {:>14.1} {:>16}",
+            name, s.median_ns, s.p95_ns, s.stddev_ns, attribution
+        );
+    }
+    println!(
+        "  * DeferredResolve ns/px is the WHOLE resolve dispatch, INCLUDING the inline SDF soft-shadow \
+         march (R0 brackets passes, not shader sections)."
+    );
+    println!(
+        "  NOTE: TOP/BOTTOM brackets each pass's wall-clock (inclusive of pipeline overlap), not \
+         isolated kernel time; the median/p95 are over {} kept frames.",
+        kept.len()
+    );
+}
+
+/// HW-RT rung R0 — the four-pass GPU-pass-cost timing test on the REAL combined showcase frame
+/// (`#[ignore]`, plan `docs/RENDER-R0-INSTRUMENT-PLAN.md` Part C).
+///
+/// Reuses `run_showcase_body_ddgi`'s GI-ON scene setup VERBATIM (so all four software-ray passes
+/// run: DDGI probe-update, deferred resolve incl. the inline SDF shadow march, CSM cascade depth,
+/// punctual atlas depth), threading a [`TimestampCollector`] so the recorder brackets each pass.
+/// Graceful-skip when the device cannot be timed (`!timestamps_usable()`). Reports per-pass
+/// GPU wall-clock (median / p95 / stddev, ns) + ns/ray attribution.
+///
+/// Named `..._gpu_pass_cost` (NOT `..._time_setup`): "cost"/"pass"/"baseline" are safe substrings;
+/// "time"/"update"/"setup"/"install"/"patch" trigger Windows os-error-740 (UAC) on the box.
+///
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1` +
+/// `--nocapture --test-threads=1` (the orchestrator runs it on the GPU).
+#[test]
+#[ignore = "GPU-timestamp pass-cost measurement; needs a real RTX windowed device (--nocapture --test-threads=1); the orchestrator runs it"]
+fn engine_grand_showcase_512_gpu_pass_cost() {
+    with_windowed_present("boyko_engine grand showcase GPU pass cost 512", "engine_showcase_512", |bp| {
+        // Graceful-skip BEFORE any resource setup: a device with no valid timestamp bits or an
+        // implausible period cannot be measured — print a skip line + return (no panic).
+        let caps = bp.ctx.device_caps();
+        if !caps.timestamps_usable() {
+            println!(
+                "SKIP engine_grand_showcase_512_gpu_pass_cost: GPU timestamps unusable \
+                 (valid_bits={}, period={} ns/tick)",
+                caps.timestamp_valid_bits, caps.timestamp_period
+            );
+            return;
+        }
+        println!(
+            "engine_grand_showcase_512_gpu_pass_cost: timestamps OK (valid_bits={}, period={} ns/tick, mask=0x{:x})",
+            caps.timestamp_valid_bits, caps.timestamp_period, caps.timestamp_mask()
+        );
+
+        // Create the R0 collector: one `2 * PASS_COUNT`-query TIMESTAMP pool per in-flight frame.
+        let device: &VulkanContext = bp.ctx;
+        let pools: [VulkanQueryPool; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            RhiDevice::create_query_pool(device, &QueryPoolDesc { count: 2 * PASS_COUNT })
+                .expect("timestamp query pool")
+        });
+        let collector = TimestampCollector::new(pools);
+
+        // Drive the GI-ON showcase with the collector — `run_showcase_body_ddgi` sets
+        // `scene.gpu_timing = Some(&collector)` and takes its timing branch (>= 200 frames,
+        // per-pass readback, stats print), leaving the BMP-dump path byte-identical when `None`.
+        // Its shared teardown waits the device idle before it returns, so the pools are safe to
+        // destroy below.
+        run_showcase_body_ddgi(bp, GRAND_SHOWCASE_DDGI_BMP, grand_showcase_config(), false, Some(&collector));
+
+        // SAFETY: `run_showcase_body_ddgi` dropped its `Renderer` (its `Drop` waits the device
+        // idle) before returning, so no submission references the pools; each pool was created on
+        // `device` and is destroyed exactly once (the by-value move out of the collector).
+        unsafe {
+            for pool in collector.into_pools() {
+                RhiDevice::destroy_query_pool(device, pool);
+            }
+        }
+    });
 }
 
 fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfig, interactive: bool) {
@@ -8933,6 +9240,8 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         // identical command stream). The INTERACTIVE branch below rebuilds `scene.interp =
         // Some(..)` per frame with the current-slot draw-SSBO set + this frame's overstep alpha.
         interp: None,
+        // HW-RT rung R0: GPU timing OFF (the golden/interactive showcase; byte-identical).
+        gpu_timing: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };

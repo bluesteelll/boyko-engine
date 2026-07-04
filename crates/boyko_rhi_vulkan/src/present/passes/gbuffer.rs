@@ -14,6 +14,7 @@ use crate::memory::BoundBuffer;
 use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS};
 
 use super::super::frame_driver::Renderer;
+use super::super::gpu_timing::TimedPass;
 use super::super::scene_types::{
     CLUSTER_CULL_PUSH_BYTES, GBUFFER_MARCHER_PUSH_BYTES, GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
     GBufferScene, LIGHT_CULL_LOCAL_SIZE_X,
@@ -107,6 +108,18 @@ impl Renderer<'_> {
         // fence (waited at the top of `render_gbuffer_frame`) already freed this slot's previous
         // images, so no new wait is introduced. Index every image barrier / attachment by `[fi]`.
         let fi = self.frame_index;
+
+        // HW-RT rung R0: reset ALL `2 * PASS_COUNT` timestamp queries at the frame top —
+        // OUTSIDE any render / dynamic-rendering scope (recording is open but no
+        // `begin_rendering` has run yet), before the frame's first `write_timestamp`. GATED
+        // on `scene.gpu_timing`: `None` (every golden/host frame) records NOTHING, so the
+        // command stream is byte-identical. A TIMESTAMP query is undefined until reset.
+        if let Some(tc) = scene.gpu_timing {
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the reset is
+            // recorded before any `begin_rendering` (outside a render pass, per
+            // `VUID-vkCmdResetQueryPool-renderpass`); `fi` is this present's in-flight slot.
+            unsafe { tc.reset_frame(self.fns, cmd, fi) };
+        }
 
         // === Pass A (Render P5-r0): rasterize the mesh quad as a 3-MRT G-buffer PRODUCER
         // (albedo@0, normal@1, material@2) + the D32 depth. The marcher's attribute
@@ -804,6 +817,13 @@ impl Renderer<'_> {
                 .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
                 .ddgi_update
                 .expect("invariant: scene.ddgi_update.is_some() ⇒ ddgi_update pass declared");
+            // HW-RT rung R0: open the DdgiUpdate bracket BEFORE the pass's input barriers +
+            // dispatch. GATED — `None` records nothing (byte-identical).
+            if let Some(tc) = scene.gpu_timing {
+                // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+                // reset at the frame top; `fi` is this present's in-flight slot.
+                unsafe { tc.write_begin(self.fns, cmd, fi, TimedPass::DdgiUpdate) };
+            }
             self.record_graph_pass(ddgi_update_pass, cmd, targets, scene, fi);
             // SAFETY: recording is open; the update pipeline + its layout (declaring the 7-binding
             // update set layout at set 0, NO push range) are live on this device (caller contract);
@@ -831,6 +851,11 @@ impl Renderer<'_> {
                     ptr::null(),
                 );
                 (self.fns.cmd_dispatch)(cmd, activation.dispatch_group_count_x, 1, 1);
+            }
+            // HW-RT rung R0: close the DdgiUpdate bracket AFTER the dispatch. GATED.
+            if let Some(tc) = scene.gpu_timing {
+                // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
+                unsafe { tc.write_end(self.fns, cmd, fi, TimedPass::DdgiUpdate) };
             }
 
             // The update pass's atlas WRITES (COMPUTE/SHADER_WRITE, GENERAL) are ordered before the
@@ -961,6 +986,16 @@ impl Renderer<'_> {
                 .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
                 .csm
                 .expect("invariant: scene.csm.is_some() ⇒ csm pass declared");
+            // HW-RT rung R0: open the CsmDepth bracket BEFORE the pass's barrier-in +
+            // cascade depth loop (the reset MUST have run before `begin_rendering`, so the
+            // begin write is still legal here — it is outside the per-cascade rendering scope,
+            // which opens below inside the loop). GATED — `None` records nothing.
+            if let Some(tc) = scene.gpu_timing {
+                // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+                // reset at the frame top; this write is outside any `begin_rendering` scope; `fi`
+                // is this present's in-flight slot.
+                unsafe { tc.write_begin(self.fns, cmd, fi, TimedPass::CsmDepth) };
+            }
             self.record_graph_pass(csm_pass, cmd, targets, scene, fi);
 
             // (CSM-1) Depth-only dynamic rendering, LOOPED over the `[0..active)` cascades (Rung B).
@@ -1110,6 +1145,13 @@ impl Renderer<'_> {
                     (self.fns.cmd_end_rendering)(cmd);
                 }
             }
+            // HW-RT rung R0: close the CsmDepth bracket AFTER the cascade depth loop (all
+            // `end_rendering`s recorded — this write is outside any rendering scope). GATED.
+            if let Some(tc) = scene.gpu_timing {
+                // SAFETY: recording is open; the pool was reset this frame; the per-cascade
+                // rendering scopes are all closed; `fi` is this slot.
+                unsafe { tc.write_end(self.fns, cmd, fi, TimedPass::CsmDepth) };
+            }
 
             // (CSM-2) The dual-use depth barrier: DEPTH_ATTACHMENT_OPTIMAL →
             // SHADER_READ_ONLY_OPTIMAL (reusing the marcher's depth-barrier shape) over ALL
@@ -1153,6 +1195,15 @@ impl Renderer<'_> {
                 .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
                 .atlas
                 .expect("invariant: scene.atlas_punctual.is_some() ⇒ atlas pass declared");
+            // HW-RT rung R0: open the PunctualDepth bracket BEFORE the pass's barrier-in +
+            // atlas depth loop (outside the per-slot rendering scope, which opens below inside
+            // the loop). GATED — `None` records nothing.
+            if let Some(tc) = scene.gpu_timing {
+                // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+                // reset at the frame top; this write is outside any `begin_rendering` scope; `fi`
+                // is this present's in-flight slot.
+                unsafe { tc.write_begin(self.fns, cmd, fi, TimedPass::PunctualDepth) };
+            }
             self.record_graph_pass(atlas_pass, cmd, targets, scene, fi);
 
             // Depth-only dynamic rendering, LOOPED over the `[0..active)` atlas slots. The render
@@ -1333,6 +1384,13 @@ impl Renderer<'_> {
                     (self.fns.cmd_end_rendering)(cmd);
                 }
             }
+            // HW-RT rung R0: close the PunctualDepth bracket AFTER the atlas depth loop (all
+            // `end_rendering`s recorded — outside any rendering scope). GATED.
+            if let Some(tc) = scene.gpu_timing {
+                // SAFETY: recording is open; the pool was reset this frame; the per-slot
+                // rendering scopes are all closed; `fi` is this slot.
+                unsafe { tc.write_end(self.fns, cmd, fi, TimedPass::PunctualDepth) };
+            }
 
             // The graph derives the dual-use depth barrier-out
             // (DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL over ALL `[0..active)`
@@ -1355,6 +1413,16 @@ impl Renderer<'_> {
             .as_ref()
             .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
             .resolve;
+        // HW-RT rung R0: open the DeferredResolve bracket BEFORE the resolve's input barriers
+        // + dispatch. This spans the WHOLE resolve dispatch, INCLUDING the inline SDF
+        // soft-shadow march (R0 brackets passes, not shader sections). GATED — `None` records
+        // nothing.
+        if let Some(tc) = scene.gpu_timing {
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+            // reset at the frame top; this write is outside any rendering scope (the resolve is a
+            // compute dispatch); `fi` is this present's in-flight slot.
+            unsafe { tc.write_begin(self.fns, cmd, fi, TimedPass::DeferredResolve) };
+        }
         self.record_graph_pass(resolve, cmd, targets, scene, fi);
 
         // (5b) Deferred RESOLVE pass: bind the resolve pipeline + the resolve set (gAlbedo
@@ -1383,6 +1451,12 @@ impl Renderer<'_> {
                 ptr::null(),
             );
             (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+        }
+        // HW-RT rung R0: close the DeferredResolve bracket AFTER the resolve dispatch. GATED.
+        if let Some(tc) = scene.gpu_timing {
+            // SAFETY: recording is open; the pool was reset this frame; the resolve dispatch is
+            // recorded; `fi` is this slot.
+            unsafe { tc.write_end(self.fns, cmd, fi, TimedPass::DeferredResolve) };
         }
 
         // (5c) LIT: GENERAL → SHADER_READ_ONLY_OPTIMAL for the present-blit sample. The

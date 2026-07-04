@@ -42,6 +42,9 @@ pub trait RhiApi: Sized + 'static {
     type ComputePipeline;
     /// An owned fence for CPU↔GPU submission synchronization.
     type Fence;
+    /// An owned GPU timestamp-query pool (HW-RT rung R0: the per-pass GPU
+    /// wall-clock bracket resource — Vulkan backend: `VulkanQueryPool`).
+    type QueryPool;
 
     // ===== DEFERRED SEAM — plain unbounded associated types =====
     // Declared now (cheap; avoids a later ABA/ABI break) but with no operational

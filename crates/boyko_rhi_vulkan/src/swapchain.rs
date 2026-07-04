@@ -8,7 +8,7 @@
 pub use crate::present::{
     BrickActivation, CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
     GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferFrame,
-    GBufferMeshDraw, GBufferScene, GBufferTargets, InterpActivation, PunctualDepthActivation,
-    Renderer, SCENE_MVP_BYTES, SampledComposite, Scene, SsaoActivation, Surface, Swapchain,
-    SwapchainError, UiPass,
+    GBufferMeshDraw, GBufferScene, GBufferTargets, InterpActivation, PASS_COUNT,
+    PunctualDepthActivation, Renderer, SCENE_MVP_BYTES, SampledComposite, Scene, SsaoActivation,
+    Surface, Swapchain, SwapchainError, TimedPass, TimestampCollector, UiPass,
 };
