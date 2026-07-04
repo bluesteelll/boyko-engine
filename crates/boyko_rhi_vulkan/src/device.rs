@@ -101,6 +101,25 @@ pub enum BootError {
     /// [`Self::GbufferStorageFormatUnsupported`] so the SSAO image can never fault on an
     /// unsupported format.
     SsaoStorageFormatUnsupported,
+    /// SDFDDGI I0: the chosen GPU's per-stage descriptor limits cannot satisfy the deferred
+    /// resolve set's ACTUAL declared per-type descriptor counts (the resolve set grew to 19
+    /// bindings with the 3 DDGI bindings + the CSM/atlas ones). A device below the real need is
+    /// EXTERNAL INPUT (not an engine invariant), so it is surfaced as a `BootError` through the
+    /// device-selection path (`pick_physical_device` → `VulkanContext::boot`) — NOT a release
+    /// `assert!`. It projects to `RhiError::BackendError("vulkan boot failed")` in
+    /// `From<VulkanError> for RhiError` (the same agnostic category as the format-unsupported device
+    /// rejections). Carries `(kind, need, limit)`: the descriptor kind that overflowed (a
+    /// `&'static str` name), the resolve set's need, and the device's `maxPerStageDescriptor*` cap
+    /// for that kind. The I(-1) deferral (validate the ACTUAL per-type counts, not the aggregate cap
+    /// vs a per-type limit) is closed here.
+    ResolveDescriptorLimitExceeded {
+        /// The overflowing descriptor kind's `maxPerStageDescriptor*` field name.
+        kind: &'static str,
+        /// The resolve set's declared need for that kind.
+        need: u32,
+        /// The device's per-stage limit for that kind.
+        limit: u32,
+    },
 }
 
 /// Bootstrap options for the instance.
@@ -1921,8 +1940,12 @@ fn pick_physical_device(
     let props = query_device_properties(fns, chosen);
     let name = device_name_from_props(&props);
 
-    // SDFDDGI I0 adds the device-limit validation against the actual declared per-type
-    // DDGI descriptor counts (not the aggregate cap), as a soft RhiError.
+    // SDFDDGI I0: validate the deferred resolve set's ACTUAL declared per-type descriptor counts
+    // against the chosen device's `maxPerStageDescriptor*` limits (the I(-1) deferral — done
+    // CORRECTLY per-type, NOT the aggregate-cap-vs-per-type-limit bug). A device below the real need
+    // is external input, so a violation returns a `BootError` (mapped to `RhiError::BackendError` in
+    // `From<VulkanError> for RhiError`) through this device-selection path — NOT a release `assert!`.
+    check_resolve_descriptor_limits(&props.limits)?;
 
     let mut mem_props: VkPhysicalDeviceMemoryProperties = unsafe { mem::zeroed() };
     // SAFETY: `chosen` is a valid physical device enumerated above; `&mut
@@ -1932,6 +1955,89 @@ fn pick_physical_device(
     unsafe { (fns.get_physical_device_memory_properties)(chosen, &mut mem_props) };
 
     Ok((chosen, name, mem_props))
+}
+
+// ── SDFDDGI I0: the deferred resolve set's ACTUAL per-type descriptor need. ──
+//
+// The exact per-kind counts the resolve bind-group layout declares (19 bindings total — see
+// `boyko_app::gpu_scene`'s `resolve_entries` / `present::targets`'s resolve set), one row per kind,
+// stated once:
+//   CombinedImageSampler: @12, @14, @16, @17          → 4
+//   StorageImage:         @0, @1, @2, @3, @7, @11      → 6
+//   StorageBuffer:        @4, @6, @8, @9, @10          → 5
+//   UniformBuffer:        @5, @13, @15, @18            → 4
+// Sum = 4 + 6 + 5 + 4 = 19. (@10 is the SDF edit-list StorageBuffer, not a combined image; the four
+// combined-image-samplers are the CSM @12, punctual atlas @14, and the two DDGI atlases @16/@17.)
+/// The resolve set's per-stage COMBINED_IMAGE_SAMPLER need (@12 CSM, @14 atlas, @16/@17 DDGI).
+const RESOLVE_NEED_COMBINED_IMAGE_SAMPLERS: u32 = 4;
+/// The resolve set's per-stage STORAGE_IMAGE need (@0/@1/@2/@3 gbuffer + @7 gViewT + @11 gSsao).
+const RESOLVE_NEED_STORAGE_IMAGES: u32 = 6;
+/// The resolve set's per-stage STORAGE_BUFFER need (@4 material, @6 light, @8/@9 cluster, @10 edits).
+const RESOLVE_NEED_STORAGE_BUFFERS: u32 = 5;
+/// The resolve set's per-stage UNIFORM_BUFFER need (@5 camera, @13 CSM, @15 atlas, @18 DDGI).
+const RESOLVE_NEED_UNIFORM_BUFFERS: u32 = 4;
+
+/// Validates the deferred resolve set's per-type descriptor need against the device's per-stage
+/// `maxPerStageDescriptor*` limits (SDFDDGI I0 — the I(-1) deferral, done per-type not per-aggregate).
+///
+/// Each combined-image-sampler consumes BOTH a `maxPerStageDescriptorSamplers` slot AND a
+/// `maxPerStageDescriptorSampledImages` slot (Vulkan §Limits), so the resolve's combined-image count
+/// is checked against BOTH. The storage-image / storage-buffer / uniform-buffer needs are checked
+/// against their dedicated limits. This is the CORRECT per-type validation — NOT the aggregate cap
+/// (19) vs a single per-type limit (the I(-1) bug this closes).
+///
+/// # Spec-minimum vs the targeted device class (NOT "all needs ≤ 16 / spec-min-safe")
+///
+/// The gate is against the ACTUAL per-type device limit, so it is correct regardless of the Vulkan
+/// guaranteed minimums. Note two needs EXCEED the Vulkan §Limits guaranteed minimum of 4:
+/// STORAGE_IMAGE = 6 and STORAGE_BUFFER = 5. So a hypothetical device that advertises only the
+/// spec minimum is INTENTIONALLY rejected here (correctly — the resolve genuinely needs 6/5). The
+/// targeted class — desktop GPUs, 2080Ti and up (every NV / AMD / Intel desktop driver) — clears
+/// these by orders of magnitude, so the rejection can only fire on a device far below the engine's
+/// baseline. This is NOT a regression this rung introduced: the storage-image(6) / storage-buffer(5)
+/// counts are PRE-EXISTING; SDFDDGI added only the 2 combined-image-samplers @16/@17 + the 1 uniform
+/// buffer @18 (combined-image 2→4, uniform 3→4 — both still well under any real limit).
+///
+/// A device below any per-type need returns [`BootError::ResolveDescriptorLimitExceeded`] — external
+/// input, so a boot error through the device-selection path, not an invariant `assert!`.
+fn check_resolve_descriptor_limits(
+    limits: &VkPhysicalDeviceLimitsBlob,
+) -> Result<(), BootError> {
+    // (need, device-limit, field-name) — the per-type checks. A combined-image-sampler counts
+    // against BOTH the sampler and the sampled-image limit, so it appears in two rows.
+    let checks: [(u32, u32, &'static str); 5] = [
+        (
+            RESOLVE_NEED_COMBINED_IMAGE_SAMPLERS,
+            limits.read_u32(LIMITS_OFF_MAX_PER_STAGE_SAMPLERS),
+            "maxPerStageDescriptorSamplers",
+        ),
+        (
+            RESOLVE_NEED_COMBINED_IMAGE_SAMPLERS,
+            limits.read_u32(LIMITS_OFF_MAX_PER_STAGE_SAMPLED_IMAGES),
+            "maxPerStageDescriptorSampledImages",
+        ),
+        (
+            RESOLVE_NEED_STORAGE_IMAGES,
+            limits.read_u32(LIMITS_OFF_MAX_PER_STAGE_STORAGE_IMAGES),
+            "maxPerStageDescriptorStorageImages",
+        ),
+        (
+            RESOLVE_NEED_STORAGE_BUFFERS,
+            limits.read_u32(LIMITS_OFF_MAX_PER_STAGE_STORAGE_BUFFERS),
+            "maxPerStageDescriptorStorageBuffers",
+        ),
+        (
+            RESOLVE_NEED_UNIFORM_BUFFERS,
+            limits.read_u32(LIMITS_OFF_MAX_PER_STAGE_UNIFORM_BUFFERS),
+            "maxPerStageDescriptorUniformBuffers",
+        ),
+    ];
+    for (need, limit, kind) in checks {
+        if need > limit {
+            return Err(BootError::ResolveDescriptorLimitExceeded { kind, need, limit });
+        }
+    }
+    Ok(())
 }
 
 /// Queries `VkPhysicalDeviceProperties` for one device.
@@ -2449,5 +2555,80 @@ mod tests {
             Some(v) => unsafe { std::env::set_var(KEY, v) },
             None => unsafe { std::env::remove_var(KEY) },
         }
+    }
+
+    // ── SDFDDGI I0: the resolve-descriptor per-type limit check (locks the fragile byte offsets). ──
+
+    use super::{
+        BootError, RESOLVE_NEED_COMBINED_IMAGE_SAMPLERS, RESOLVE_NEED_STORAGE_BUFFERS,
+        RESOLVE_NEED_STORAGE_IMAGES, RESOLVE_NEED_UNIFORM_BUFFERS, check_resolve_descriptor_limits,
+    };
+    use crate::ffi::{
+        LIMITS_OFF_MAX_PER_STAGE_SAMPLED_IMAGES, LIMITS_OFF_MAX_PER_STAGE_SAMPLERS,
+        LIMITS_OFF_MAX_PER_STAGE_STORAGE_BUFFERS, LIMITS_OFF_MAX_PER_STAGE_STORAGE_IMAGES,
+        LIMITS_OFF_MAX_PER_STAGE_UNIFORM_BUFFERS, VkPhysicalDeviceLimitsBlob,
+    };
+
+    /// Fabricates a `VkPhysicalDeviceLimitsBlob` with the five `maxPerStageDescriptor*` fields the
+    /// resolve check reads written at their documented offsets (68/72/76/80/84). Every other byte
+    /// stays zero — the check never reads them. This is a HAND-BUILT blob (no driver call), so the
+    /// test locks the byte offsets against a silent drift (the I(-1)-class fragility) without a GPU.
+    fn limits_blob(
+        samplers: u32,
+        uniform_buffers: u32,
+        storage_buffers: u32,
+        sampled_images: u32,
+        storage_images: u32,
+    ) -> VkPhysicalDeviceLimitsBlob {
+        let mut bytes = [0u8; 504];
+        let put = |b: &mut [u8; 504], off: usize, v: u32| {
+            b[off..off + 4].copy_from_slice(&v.to_ne_bytes());
+        };
+        put(&mut bytes, LIMITS_OFF_MAX_PER_STAGE_SAMPLERS, samplers);
+        put(&mut bytes, LIMITS_OFF_MAX_PER_STAGE_UNIFORM_BUFFERS, uniform_buffers);
+        put(&mut bytes, LIMITS_OFF_MAX_PER_STAGE_STORAGE_BUFFERS, storage_buffers);
+        put(&mut bytes, LIMITS_OFF_MAX_PER_STAGE_SAMPLED_IMAGES, sampled_images);
+        put(&mut bytes, LIMITS_OFF_MAX_PER_STAGE_STORAGE_IMAGES, storage_images);
+        VkPhysicalDeviceLimitsBlob(bytes)
+    }
+
+    #[test]
+    fn resolve_descriptor_check_rejects_below_need_and_accepts_generous() {
+        // (a) A device whose `maxPerStageDescriptorStorageBuffers` is BELOW the resolve need
+        // (4 < RESOLVE_NEED_STORAGE_BUFFERS == 5) is rejected, carrying the exact (kind, need, limit).
+        // Every OTHER limit is generous, so the storage-buffer row is the one that fires.
+        let starved = limits_blob(
+            1_000_000, // samplers
+            1_000_000, // uniform buffers
+            4,         // storage buffers — BELOW the need of 5
+            1_000_000, // sampled images
+            1_000_000, // storage images
+        );
+        match check_resolve_descriptor_limits(&starved) {
+            Err(BootError::ResolveDescriptorLimitExceeded { kind, need, limit }) => {
+                assert_eq!(kind, "maxPerStageDescriptorStorageBuffers");
+                assert_eq!(need, RESOLVE_NEED_STORAGE_BUFFERS);
+                assert_eq!(need, 5);
+                assert_eq!(limit, 4);
+            }
+            other => panic!("expected ResolveDescriptorLimitExceeded, got {other:?}"),
+        }
+
+        // (b) A device with every per-type limit set generously satisfies all five per-type needs.
+        let generous = limits_blob(1_000_000, 1_000_000, 1_000_000, 1_000_000, 1_000_000);
+        assert!(check_resolve_descriptor_limits(&generous).is_ok());
+
+        // Sanity: the needs the check enforces are the pinned per-type counts (19 total).
+        assert_eq!(RESOLVE_NEED_COMBINED_IMAGE_SAMPLERS, 4);
+        assert_eq!(RESOLVE_NEED_STORAGE_IMAGES, 6);
+        assert_eq!(RESOLVE_NEED_STORAGE_BUFFERS, 5);
+        assert_eq!(RESOLVE_NEED_UNIFORM_BUFFERS, 4);
+        assert_eq!(
+            RESOLVE_NEED_COMBINED_IMAGE_SAMPLERS
+                + RESOLVE_NEED_STORAGE_IMAGES
+                + RESOLVE_NEED_STORAGE_BUFFERS
+                + RESOLVE_NEED_UNIFORM_BUFFERS,
+            19
+        );
     }
 }

@@ -125,6 +125,23 @@ uint load_punctual_shadow_mode(StructuredBuffer<uint> LightBuf) {
     return (LightBuf[7] >> 3) & 1u;
 }
 
+// === SDFDDGI I0 — the resolve `ddgi_mode` (SDF diffuse GI), packed in word 7 BIT 4 ============
+//
+// The DDGI probe-irradiance injection is gated by BIT 4 of the SAME header word 7 that carries
+// `shadow_mode` (BIT 0), `contact_shadow_mode` (BIT 1), `csm_mode` (BIT 2), and
+// `punctual_shadow_mode` (BIT 3). BIT-4 INDEPENDENCE: the mask `>> 4 & 1` reads ONLY bit 4, so a
+// scene setting bits 0..3 never perturbs `ddgi_mode`, and vice-versa. On every pre-SDFDDGI scene
+// word 7's bit 4 is 0 → `ddgi_mode == OFF` → the resolve's GI injection block (a structural `if`)
+// never runs → the bound-but-unread DDGI irradiance/depth/UBO bindings (16/17/18) are never sampled
+// → byte-identical to today (the 0%-gate). Host writer:
+// `boyko_render::ddgi_config::sync_ddgi_light_gate` (via `LightingConfig::shadow_gate_word`).
+static const uint DDGI_MODE_OFF = 0u;
+static const uint DDGI_MODE_ON  = 1u;
+
+uint load_ddgi_mode(StructuredBuffer<uint> LightBuf) {
+    return (LightBuf[7] >> 4) & 1u;
+}
+
 // === Shadow Phase 5 Inc-1-GPU — the per-light atlas-slot field, packed in the kind word ========
 //
 // A shadowed punctual light's atlas LAYER index lives in bits `17..22` (5 bits) of its kind word

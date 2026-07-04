@@ -1028,6 +1028,35 @@ pub struct GBufferScene<'a> {
     /// `gFaces[slot].view_proj`, so the host writes it once into this UBO and the recorder reads it
     /// back for the depth-pass push.
     pub shadow_atlas_ubo: &'a BoundBuffer,
+    /// SDFDDGI I0: the DDGI probe-IRRADIANCE atlas texture (a bound-but-unread `Texture2DArray`
+    /// dummy this rung — a real R11G11B10F octahedral atlas at I1). ALWAYS supplied so the resolve
+    /// set can bind binding 16 — the resolve `.spv` statically references `gDdgiIrr`, so the
+    /// descriptor MUST be valid even on the OFF path (the `SampleLevel` runs only under the
+    /// `ddgi_mode != 0` gate, OFF by default → bound-but-unread, the `gCsm`/`gShadowAtlas`
+    /// precedent). Reuse an existing bound-but-unread array texture (e.g. the cascade map) for the
+    /// I0 dummy — the descriptor TYPE (`COMBINED_IMAGE_SAMPLER`) is all Vulkan validates, not the
+    /// shader's element type. BUNDLED with [`Self::ddgi_irr_sampler`] as the combined image+sampler.
+    pub ddgi_irr_texture: &'a VulkanTexture,
+    /// SDFDDGI I0: the LINEAR sampler BUNDLED with [`Self::ddgi_irr_texture`] as the resolve's
+    /// binding-16 combined image+sampler (the `gDdgiIrr`(t16)+`gDdgiIrrSamp`(s16) DXC collapse).
+    /// ALWAYS supplied (bound-but-unread on the OFF path); reuse any existing linear sampler.
+    pub ddgi_irr_sampler: &'a VulkanSampler,
+    /// SDFDDGI I0: the DDGI probe DEPTH-MOMENT atlas texture (a bound-but-unread `Texture2DArray`
+    /// dummy this rung — a real RG16F two-moment atlas at I1). ALWAYS supplied so the resolve set can
+    /// bind binding 17 — the resolve `.spv` statically references `gDdgiDepth` (bound-but-unread on
+    /// the OFF path, same contract as [`Self::ddgi_irr_texture`]). BUNDLED with
+    /// [`Self::ddgi_depth_sampler`]. Reuse an existing bound-but-unread array texture for the dummy.
+    pub ddgi_depth_texture: &'a VulkanTexture,
+    /// SDFDDGI I0: the LINEAR sampler BUNDLED with [`Self::ddgi_depth_texture`] as the resolve's
+    /// binding-17 combined image+sampler. ALWAYS supplied (bound-but-unread on the OFF path).
+    pub ddgi_depth_sampler: &'a VulkanSampler,
+    /// SDFDDGI I0: the DDGI grid UBO (host-coherent), a
+    /// [`RESOLVED_DDGI_BYTES`](boyko_render's `RESOLVED_DDGI_BYTES`, 48 B) byte-mirror of
+    /// `boyko_render::ResolvedDdgi` (`origin` + `inv_spacing`/dims + `ddgi_mode_word` + pad). ALWAYS
+    /// supplied — a ZEROED UBO on the OFF path (bound-but-unread; `ddgi_mode_word == 0`). The grid is
+    /// WORLD-FIXED (Decision D1), so this is a SINGLE buffer, NOT a per-FIF ring (unlike the
+    /// camera-dependent CSM/atlas UBOs). Bound at resolve binding 18. UNREAD at I0.
+    pub ddgi_grid_ubo: &'a BoundBuffer,
     /// Shadow Phase 5 Inc-1-GPU: the sparse spot/point DEPTH-PASS activation. `None` = the OFF path
     /// (the default, byte-identical command stream): NO depth pass is recorded, the resolve's
     /// `punctual_shadow_mode` header gate is 0, and the always-bound atlas map/sampler/UBO are

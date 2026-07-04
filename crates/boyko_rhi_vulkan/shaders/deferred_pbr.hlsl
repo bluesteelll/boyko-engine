@@ -237,6 +237,45 @@ cbuffer ShadowAtlas : register(b15) {
     uint2 _gAtlasPad;  // pad to the 1296-byte ResolvedShadowAtlas stride
 };
 
+// === SDFDDGI I0 — the DDGI probe-irradiance + depth atlases + grid UBO (bindings 16/17/18) ======
+//
+// The octahedral probe grid (Hu et al. 2021 / RTXGI DDGI) whose irradiance the resolve samples into
+// the `ambient` accumulator. Declared NOW (I0 — the gated skeleton) but READ by NOTHING: the GI
+// injection block below is EMPTY at I0 (I3 wires the trilinear probe sample). All three are
+// BOUND-BUT-UNREAD on the OFF path (`load_ddgi_mode(LightBuf) == 0`, every pre-SDFDDGI scene) — the
+// resolve `.spv` STATICALLY declares them so the layout MUST bind valid descriptors, but no
+// `.Sample` executes, so the lit PIXELS are byte-identical to today (the `gCsm`/`gShadowAtlas`
+// bound-but-unread precedent, the 0%-gate). The 3 extra bindings sit at 16/17/18 under the raised
+// cap (`MAX_BIND_GROUP_BINDINGS == 19`) → the resolve set is exactly 19/19.
+//
+// binding 16 (t16 + s16): the probe IRRADIANCE atlas (R11G11B10F, no-gamma — Decision D6)
+// Texture2DArray BUNDLED with its LINEAR sampler as ONE `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER`
+// (the `gCsm`(t12+s12) / `gShadowAtlas`(t14+s14) combined-image-collapse precedent — DXC shares the
+// register NUMBER). `gDdgiIrr` is `Texture2DArray<float4>` (octahedral irradiance tiles per plane);
+// I0 binds a bound-but-unread dummy array.
+Texture2DArray<float4> gDdgiIrr : register(t16);
+SamplerState gDdgiIrrSamp : register(s16);
+
+// binding 17 (t17 + s17): the probe DEPTH-MOMENT atlas (RG16F: mean + mean²) Texture2DArray BUNDLED
+// with its LINEAR sampler as ONE combined descriptor (same collapse). `gDdgiDepth` is
+// `Texture2DArray<float2>` (the two-moment Chebyshev leak-suppression tiles); I0 binds a
+// bound-but-unread dummy array.
+Texture2DArray<float2> gDdgiDepth : register(t17);
+SamplerState gDdgiDepthSamp : register(s17);
+
+// binding 18 (b18): the DDGI grid UBO — byte-mirrors `boyko_render::ResolvedDdgi` (48 B): the grid
+// `origin` (vec4) + `inv_spacing` and the three `u32` dims (packed in one vec4) + `ddgi_mode_word` +
+// pad. The host uploads `ResolvedDdgi` verbatim; the grid is WORLD-FIXED (Decision D1), so this UBO
+// needs NO per-FIF ring. `gDdgiMode` mirrors `ddgi_mode_word` (a redundant copy of the header bit);
+// the resolve gates on the HEADER's `load_ddgi_mode` (the single source of truth), NOT this field.
+// UNREAD at I0 (the injection block is empty).
+cbuffer ResolvedDdgi : register(b18) {
+    float4 gDdgiOrigin;     // grid origin (probe (0,0,0) min world corner); .w padding
+    float4 gDdgiInvSpacDims;// .x = inv_spacing; .yzw = bit-cast u32 dims (x, y, z)
+    uint   gDdgiMode;       // mirrors ResolvedDdgi.ddgi_mode_word (the resolve gates on the header bit)
+    uint3  _gDdgiPad;       // pad to the 48-byte ResolvedDdgi stride
+};
+
 // Shadow Phase 5 Inc-1-GPU normal-offset bias FACTOR — the spot receiver lookup is pushed off the
 // surface by `n * SPOT_SHADOW_NORMAL_BIAS` so a grazing receiver does not self-shadow (acne). A
 // world-space constant (the spot map has no per-cascade `texel_size`); owner-retunable. Mirrors the
@@ -930,6 +969,12 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // bound-but-unread atlas map/sampler/UBO are never sampled → byte-identical to today, the
         // 0%-gate). Read ONCE here, consumed at the per-spot `vis` site in the point/spot loop below.
         uint punctual_shadow_mode = load_punctual_shadow_mode(LightBuf);
+        // SDFDDGI I0: the DDGI (SDF diffuse GI) gate (header word 7 bit 4; OFF on every pre-SDFDDGI
+        // scene → the probe-irradiance injection block never runs → the bound-but-unread DDGI
+        // irradiance/depth/UBO bindings (16/17/18) are never sampled → byte-identical to today, the
+        // 0%-gate). Read ONCE here, consumed at the GATED (empty at I0) injection site after the L0a
+        // ambient accumulation below.
+        uint ddgi_mode = load_ddgi_mode(LightBuf);
         float view_t = gViewT.Load(coord);
         float3 P = ro + rd * view_t;
         uint marched = 0u;
@@ -1042,6 +1087,32 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 ambient += (spec_ambient + diff_ambient) * ao_final;
             }
             // Point/spot (kinds 1/2) are the L0b block — not in the L0a front block.
+        }
+
+        // SDFDDGI I0 — the GATED probe-irradiance injection (the I0 skeleton). `ambient` is now
+        // fully accumulated by the L0a hemisphere/sky term above; I3 replaces the body below with the
+        // real trilinear probe-irradiance sample (`ambient += diffuse_color * probe_irradiance(P, n)
+        // * ao_final` inside the world-fixed grid AABB, else the existing sky-ambient fallback).
+        //
+        // 0%-GATE + KEEP-ALIVE (the CSM/punctual/SSAO precedent): the 3 DDGI bindings (16/17/18) are
+        // referenced ONLY inside this `if (ddgi_mode != 0u)` structural gate. On the OFF path
+        // (`ddgi_mode == 0`, the DEFAULT — every pre-SDFDDGI scene) the block NEVER runs, so the
+        // bindings are bound-but-UNREAD and the lit pixels are byte-identical to today. But the sample
+        // is REAL code reachable at runtime, so DXC keeps the descriptor references (a truly empty
+        // block would be dead-stripped and break the "the .spv statically references the binding"
+        // layout contract). At I0 the ON body is a placeholder that adds a PROVABLE ZERO to `ambient`:
+        // it samples all 3 bindings and multiplies by `float(gDdgiMode - 1u)` == 0 (the UBO's
+        // `ddgi_mode_word` is 1 whenever the header gate is 1, so the factor is a RUNTIME zero DXC
+        // cannot fold away). So even a (non-default) armed gate leaves `ambient` unchanged at I0 —
+        // only I3 gives the sample real weight.
+        if (ddgi_mode != 0u) {
+            float3 irr = gDdgiIrr.SampleLevel(gDdgiIrrSamp, float3(0.5, 0.5, 0.0), 0.0).rgb;
+            float2 mom = gDdgiDepth.SampleLevel(gDdgiDepthSamp, float3(0.5, 0.5, 0.0), 0.0).rg;
+            // Runtime-zero weight (see the block comment): 1 - gDdgiMode == 0 when armed, and it also
+            // references the b18 UBO so the cbuffer descriptor stays live. I3 replaces this with the
+            // real trilinear probe weight; the sample coords/tile become the octahedral lookup.
+            float w = (1.0 - float(gDdgiMode)) * (irr.r + mom.x) * gDdgiInvSpacDims.x;
+            ambient += float3(w, w, w);
         }
 
         // L0b: loop the point/spot block `[l0a_count .. light_count)`. The surface world

@@ -74,6 +74,18 @@ pub mod csm_marker;
 /// CSM Inc-1a — the [`CsmPlugin`](csm_plugin::CsmPlugin) that seeds the config
 /// substrate and schedules the cold cascade-fit policy.
 pub mod csm_plugin;
+/// SDFDDGI I0 — the DDGI irradiance-probe-grid ECS policy
+/// ([`DdgiConfig`](ddgi_config::DdgiConfig) +
+/// [`ResolvedDdgi`](ddgi_config::ResolvedDdgi) Resources + the pure
+/// [`resolve_ddgi`](ddgi_config::resolve_ddgi) fit + the cold
+/// [`resolve_ddgi_grid`](ddgi_config::resolve_ddgi_grid) policy +
+/// [`sync_ddgi_light_gate`](ddgi_config::sync_ddgi_light_gate), the sole writer of the
+/// LightBuf word-7 bit-4 GI gate).
+pub mod ddgi_config;
+/// SDFDDGI I0 — the [`DdgiPlugin`](ddgi_plugin::DdgiPlugin) that seeds the config
+/// substrate and schedules the cold grid-resolve policy under
+/// [`DdgiResolveSet`](ddgi_config::DdgiResolveSet).
+pub mod ddgi_plugin;
 pub mod error;
 /// The gbuffer ⇄ marcher linear-depth contract (mesh foundation M2): the host
 /// [`GBUFFER_T_MAX`](gbuffer_depth::GBUFFER_T_MAX) mirror + the C2 drift guard
@@ -155,6 +167,11 @@ pub use csm_config::{
 pub use csm_caster::{CsmCasterScratch, gather_shadow_casters, sync_csm_light_gate};
 pub use csm_marker::ShadowCaster;
 pub use csm_plugin::CsmPlugin;
+pub use ddgi_config::{
+    DdgiConfig, DdgiResolveSet, RESOLVED_DDGI_BYTES, ResolvedDdgi, resolve_ddgi, resolve_ddgi_grid,
+    sync_ddgi_light_gate,
+};
+pub use ddgi_plugin::DdgiPlugin;
 pub use error::GpuColumnError;
 pub use gpu3d_instance::{GPU3D_INSTANCE_SIZE, Gpu3dInstance};
 pub use gpu3d_system::sync_gpu_3d_instances;
@@ -172,7 +189,8 @@ pub use gpu_system::{GpuSystem, gpu_integrate_spirv};
 pub use light::{
     CLUSTER_COUNT, CLUSTER_DIM_X, CLUSTER_DIM_Y, CLUSTER_DIM_Z, CLUSTER_FAR_DEFAULT,
     CLUSTER_NEAR_DEFAULT, CSM_MODE_BIT, ClusterCell, ClusterConfig, ClusterSelectMode,
-    DirectionalLight, GPU_LIGHT_WORDS, GpuLight, INDEX_LIST_CAP, LIGHT_HEADER_BASE_WORDS,
+    DDGI_MODE_BIT, DirectionalLight, GPU_LIGHT_WORDS, GpuLight, INDEX_LIST_CAP,
+    LIGHT_HEADER_BASE_WORDS,
     LIGHT_HEADER_WORDS, LIGHT_KIND_DIRECTIONAL, LIGHT_KIND_POINT, LIGHT_KIND_SKY, LIGHT_KIND_SPOT,
     LightEnabled, LightHeaderGpu, LightTableDirty, LightingConfig, MAX_LIGHTS,
     MAX_LIGHTS_PER_CLUSTER, PUNCTUAL_MODE_BIT, PointLight, SPOT_COS_OUTER_MAX, SkyLight, SpotLight,

@@ -1090,6 +1090,45 @@ pub struct VkQueueFamilyProperties {
 #[repr(C, align(8))]
 pub struct VkPhysicalDeviceLimitsBlob(pub [u8; 504]);
 
+// Documented byte offsets of the `maxPerStageDescriptor*` fields inside `VkPhysicalDeviceLimits`
+// (the SDFDDGI I0 device-limit check reads them out of the opaque blob — the FFI does not expose the
+// struct typed). The `VkPhysicalDeviceLimits` field order is spec-fixed: the leading `u32`s run
+// `maxImageDimension1D/2D/3D/Cube`, `maxImageArrayLayers`, `maxTexelBufferElements`,
+// `maxUniformBufferRange`, `maxStorageBufferRange`, `maxPushConstantsSize`,
+// `maxMemoryAllocationCount`, `maxSamplerAllocationCount` (11 × 4 = 44 B), then 4 B pad to the
+// 8-aligned `VkDeviceSize bufferImageGranularity` @48 + `sparseAddressSpaceSize` @56, then
+// `maxBoundDescriptorSets` @64, and the six per-stage descriptor caps @68..92 in the order below.
+/// Offset of `maxPerStageDescriptorSamplers` (`u32`) within `VkPhysicalDeviceLimits`.
+pub const LIMITS_OFF_MAX_PER_STAGE_SAMPLERS: usize = 68;
+/// Offset of `maxPerStageDescriptorUniformBuffers` (`u32`).
+pub const LIMITS_OFF_MAX_PER_STAGE_UNIFORM_BUFFERS: usize = 72;
+/// Offset of `maxPerStageDescriptorStorageBuffers` (`u32`).
+pub const LIMITS_OFF_MAX_PER_STAGE_STORAGE_BUFFERS: usize = 76;
+/// Offset of `maxPerStageDescriptorSampledImages` (`u32`).
+pub const LIMITS_OFF_MAX_PER_STAGE_SAMPLED_IMAGES: usize = 80;
+/// Offset of `maxPerStageDescriptorStorageImages` (`u32`).
+pub const LIMITS_OFF_MAX_PER_STAGE_STORAGE_IMAGES: usize = 84;
+
+// The read offsets must lie inside the blob (the last field read is a `u32` at 84 → 84..88 <= 504).
+const _: () = assert!(LIMITS_OFF_MAX_PER_STAGE_STORAGE_IMAGES + 4 <= 504);
+
+impl VkPhysicalDeviceLimitsBlob {
+    /// Reads the `u32` field at `offset` bytes into the opaque limits blob. The
+    /// `LIMITS_OFF_*` constants above name the documented spec offsets; a bad offset is a
+    /// programming error, guarded here with a `debug_assert` (the read stays in-bounds
+    /// because every `LIMITS_OFF_*` const-asserts `offset + 4 <= 504`).
+    #[inline]
+    pub fn read_u32(&self, offset: usize) -> u32 {
+        debug_assert!(offset + 4 <= self.0.len(), "invariant: limits field read within the blob");
+        // SAFETY: `offset + 4 <= 504` (the `LIMITS_OFF_*` const-asserts + the debug-assert), so the
+        // 4-byte read is in-bounds of the blob. The bytes were written by the driver through the
+        // `vkGetPhysicalDeviceProperties` out-pointer (a valid `u32` at the spec-fixed offset). The
+        // driver writes native-endian, and this target is little-endian x86_64.
+        let bytes: [u8; 4] = unsafe { *(self.0.as_ptr().add(offset) as *const [u8; 4]) };
+        u32::from_ne_bytes(bytes)
+    }
+}
+
 /// `VkPhysicalDeviceProperties` — declared up to and including `deviceName`
 /// (the only fields Slice 0 reads). `limits`/`sparseProperties` are reserved as
 /// opaque, ABI-exact footprints (`VkPhysicalDeviceLimitsBlob` carries the

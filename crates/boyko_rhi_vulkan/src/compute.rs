@@ -280,8 +280,12 @@ static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<155124> = SpirvBlob(*include_bytes!(
 /// reads `punctual_atlas_visibility(base, P, n)` (major-axis cube face-select + LINEAR-distance
 /// compare over the six contiguous layers `base..base+6`); 48472 → 50976 bytes. Shadow
 /// anti-scintillation: the CSM/atlas tail compares widened to the 13-tap tent-disc PCF
-/// (`csm_pcf_disc`/`atlas_pcf_disc`, ConstOffset taps); 50976 → 57928 bytes.
-static DEFERRED_PBR_SPV: SpirvBlob<57928> = SpirvBlob(*include_bytes!(concat!(
+/// (`csm_pcf_disc`/`atlas_pcf_disc`, ConstOffset taps); 50976 → 57928 bytes. SDFDDGI I0: the 3
+/// bound-but-unread DDGI resolve bindings (16/17/18 — `gDdgiIrr`/`gDdgiDepth` combined images + the
+/// `ResolvedDdgi` UBO) + the gated (runtime-zero at I0) probe-irradiance injection; 57928 → 59160
+/// bytes. (The GI gate is header word-7 bit 4, OFF by default → the injection never runs → the
+/// rendered pixels are byte-identical; only the .spv byte-length grows with the new decls.)
+static DEFERRED_PBR_SPV: SpirvBlob<59160> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/deferred_pbr.comp.spv"
 )));

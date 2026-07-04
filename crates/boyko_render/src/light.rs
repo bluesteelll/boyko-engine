@@ -376,6 +376,16 @@ pub const CSM_MODE_BIT: u32 = 2;
 /// [`sync_punctual_light_gate`](crate::shadow_atlas::sync_punctual_light_gate).
 pub const PUNCTUAL_MODE_BIT: u32 = 3;
 
+/// The bit position of the resolve's DDGI (SDF diffuse GI) gate inside light-header word 7
+/// (`sky_diffuse.w`) — bit 4, immediately above [`PUNCTUAL_MODE_BIT`] (bit 3). Bits 2/3
+/// are the CSM / punctual gates; bit 4 is free. Mirrors the shader's DDGI gate
+/// (`light_table.hlsli`: `(LightBuf[7] >> 4) & 1`), which arms the gated probe-irradiance
+/// injection in the resolve INDEPENDENTLY of the CSM / punctual bits. Its single
+/// production writer is
+/// [`sync_ddgi_light_gate`](crate::ddgi_config::sync_ddgi_light_gate). DEFAULT `false` on
+/// every pre-SDFDDGI scene ⇒ word 7 bit 4 stays 0, the byte-identical 0%-gate.
+pub const DDGI_MODE_BIT: u32 = 4;
+
 /// The global lighting config (Decision 3) — a `World`-singleton resource. `exposure`
 /// defaults to identity (`1.0`) and `sky_*` default to the resolve's old `SKY_*`
 /// constants, so a world that never inserts a non-default config reproduces today's
@@ -429,6 +439,20 @@ pub struct LightingConfig {
     /// the atlas array to `SHADER_READ_ONLY_OPTIMAL` once + upload the CURRENT
     /// `ResolvedShadowAtlas` UBO every frame), not on this system's timing.
     pub punctual_shadows: bool,
+    /// The resolve's DDGI (SDF diffuse GI) sample gate — packed into light-header word 7
+    /// bit [`DDGI_MODE_BIT`] by [`shadow_gate_word`](Self::shadow_gate_word). DEFAULT
+    /// `false` (word 7 bit 4 stays 0 — the byte-identical 0%-gate, INDEPENDENT of
+    /// `csm_shadows` / `punctual_shadows`).
+    ///
+    /// # Single-writer / lock-step contract (SDFDDGI)
+    ///
+    /// Like the shadow gates, this is DERIVED state: its single production writer is
+    /// [`sync_ddgi_light_gate`](crate::ddgi_config::sync_ddgi_light_gate), which keeps the
+    /// header gate in lock-step with the structural GI predicate
+    /// [`DdgiConfig::enabled`](crate::ddgi_config::DdgiConfig::enabled). At SDFDDGI I0 the
+    /// gated resolve block is EMPTY (no probe sample yet), so even an armed gate leaves the
+    /// pixels byte-identical; later rungs (I3) wire the probe-irradiance injection.
+    pub ddgi_indirect: bool,
 }
 
 impl Default for LightingConfig {
@@ -443,19 +467,21 @@ impl Default for LightingConfig {
             cluster_select: ClusterSelectMode::Manual,
             csm_shadows: false,
             punctual_shadows: false,
+            ddgi_indirect: false,
         }
     }
 }
 
 impl LightingConfig {
-    /// Packs the header's word-7 shadow-gate bits from this config: the CSM bit
-    /// ([`CSM_MODE_BIT`]) and the punctual bit ([`PUNCTUAL_MODE_BIT`]), each independent.
-    /// A default config returns 0 (word 7 == 0.0 — the 0%-gate anchor every pre-R4/pre-punctual
-    /// golden pins).
+    /// Packs the header's word-7 shadow/GI-gate bits from this config: the CSM bit
+    /// ([`CSM_MODE_BIT`]), the punctual bit ([`PUNCTUAL_MODE_BIT`]), and the DDGI bit
+    /// ([`DDGI_MODE_BIT`]), each independent. A default config returns 0 (word 7 == 0.0 —
+    /// the 0%-gate anchor every pre-R4/pre-punctual/pre-SDFDDGI golden pins).
     #[inline]
     pub const fn shadow_gate_word(&self) -> u32 {
         ((self.csm_shadows as u32) << CSM_MODE_BIT)
             | ((self.punctual_shadows as u32) << PUNCTUAL_MODE_BIT)
+            | ((self.ddgi_indirect as u32) << DDGI_MODE_BIT)
     }
 }
 
@@ -869,6 +895,15 @@ impl LightHeaderGpu {
         (self.sky_diffuse[3].to_bits() >> PUNCTUAL_MODE_BIT) & 1 != 0
     }
 
+    /// Whether the resolve's DDGI (SDF diffuse GI) sample gate is armed (word 7 bit
+    /// [`DDGI_MODE_BIT`], bit-cast back from `sky_diffuse.w`) — the host mirror of the
+    /// shader's DDGI gate. Independent of [`csm_mode`](Self::csm_mode) /
+    /// [`punctual_mode`](Self::punctual_mode) (bit 4).
+    #[inline]
+    pub fn ddgi_mode(&self) -> bool {
+        (self.sky_diffuse[3].to_bits() >> DDGI_MODE_BIT) & 1 != 0
+    }
+
     /// Whether the L1 cluster path is enabled (`cluster_params.w` bit-cast `!= 0`). `false`
     /// ⇒ the resolve loops the flat table (the L1 0%-gate == L0b).
     #[inline]
@@ -937,6 +972,10 @@ mod tests {
         assert_eq!(cfg.cluster_select, ClusterSelectMode::Manual);
         // The punctual gate defaults OFF (the byte-identical 0%-gate).
         assert!(!cfg.punctual_shadows);
+        // The DDGI gate defaults OFF (the byte-identical 0%-gate).
+        assert!(!cfg.ddgi_indirect);
+        // Word 7 is exactly 0 for a default config (the 0%-gate anchor).
+        assert_eq!(cfg.shadow_gate_word(), 0);
     }
 
     #[test]
@@ -954,13 +993,26 @@ mod tests {
         assert_eq!(punc.shadow_gate_word(), 1 << PUNCTUAL_MODE_BIT);
         assert_eq!(punc.shadow_gate_word() & (1 << CSM_MODE_BIT), 0, "punctual must not touch bit 2");
 
-        // Both set — the two independent bits OR together.
+        // The DDGI bit alone (bit 4), INDEPENDENT of the CSM / punctual bits.
+        let ddgi = LightingConfig { ddgi_indirect: true, ..LightingConfig::default() };
+        assert_eq!(ddgi.shadow_gate_word(), 1 << DDGI_MODE_BIT);
+        assert_eq!(
+            ddgi.shadow_gate_word() & ((1 << CSM_MODE_BIT) | (1 << PUNCTUAL_MODE_BIT)),
+            0,
+            "ddgi must not touch bit 2 or 3"
+        );
+
+        // All three set — the independent bits OR together.
         let both = LightingConfig {
             csm_shadows: true,
             punctual_shadows: true,
+            ddgi_indirect: true,
             ..LightingConfig::default()
         };
-        assert_eq!(both.shadow_gate_word(), (1 << CSM_MODE_BIT) | (1 << PUNCTUAL_MODE_BIT));
+        assert_eq!(
+            both.shadow_gate_word(),
+            (1 << CSM_MODE_BIT) | (1 << PUNCTUAL_MODE_BIT) | (1 << DDGI_MODE_BIT)
+        );
     }
 
     #[test]

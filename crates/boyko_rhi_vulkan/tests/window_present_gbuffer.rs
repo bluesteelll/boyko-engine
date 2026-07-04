@@ -255,6 +255,10 @@ const SPOT_ATLAS_SLOTS: u32 = 16;
 /// (1296 B: `[FaceTransform; M_SLOTS]` + `active_layers` + `mode_word` + pad). The resolve reads
 /// `gFaces[slot].view_proj` from it; the depth pass pushes the SAME matrix.
 const SPOT_ATLAS_UBO_BYTES: u64 = 1296;
+/// SDFDDGI I0: the byte size of the host DDGI grid UBO — a `ResolvedDdgi` mirror (48 B: `origin` +
+/// `inv_spacing`/dims + `ddgi_mode_word` + pad). Zero-seeded, bound-but-unread at resolve binding 18
+/// while the GI gate is OFF (the default on every golden present).
+const DDGI_UBO_BYTES: u64 = 48;
 /// Shadow Phase 5 Inc-1-GPU: the host-side spot normal-bias FACTOR — MUST equal the resolve shader's
 /// `SPOT_SHADOW_NORMAL_BIAS` (`deferred_pbr.hlsl`) so the host spot matrix golden reprojects EXACTLY
 /// as the resolve does.
@@ -286,6 +290,12 @@ struct CsmSceneResources {
     atlas: VulkanTexture,
     atlas_sampler: VulkanSampler,
     atlas_ubo: BoundBuffer,
+    // SDFDDGI I0: the DDGI grid UBO (single buffer — the grid is world-fixed, no per-FIF ring),
+    // zero-seeded ⇒ `ddgi_mode_word == 0`, bound-but-unread at resolve binding 18 while the GI gate
+    // is OFF (the default on every golden present). The I0 probe-irradiance / depth image dummies
+    // REUSE the cascade texture + sampler (bound-but-unread array descriptors), so only this UBO is a
+    // dedicated new resource.
+    ddgi_ubo: BoundBuffer,
     // Shadow Phase 5 Inc-2 (POINT cube): the POINT depth-WRITE pipeline (`punctual_depth.vs/fs` —
     // the FS writes the linear radial distance `SV_Depth`) + its two shader modules. A SEPARATE
     // pipeline from `depth_pipeline` (the SPOT NDC-z path); the punctual depth pass binds it for
@@ -411,6 +421,17 @@ impl CsmSceneResources {
             },
         )
         .expect("shadow-atlas UBO (ResolvedShadowAtlas mirror)");
+        // SDFDDGI I0: the DDGI grid UBO — a SINGLE zero-seeded buffer (the grid is world-fixed, no
+        // ring), bound-but-unread at resolve binding 18 (GI gate OFF on every golden present).
+        let ddgi_ubo = RhiDevice::create_buffer(
+            device,
+            &BufferDesc {
+                size: DDGI_UBO_BYTES,
+                usage: BufferUsage::UNIFORM,
+                location: MemoryLocation::HostVisibleCoherent,
+            },
+        )
+        .expect("SDFDDGI grid UBO (ResolvedDdgi mirror)");
         // Shadow Phase 5 Inc-2 (POINT cube): the POINT depth-WRITE pipeline (`punctual_depth.vs/fs`).
         // Same EMPTY color_formats / D32 depth / FRONT cull / depth-bias / set-0 instance layout /
         // 88-byte push as the SPOT pipeline; the ONLY difference is the shader pair — the POINT FS
@@ -454,6 +475,7 @@ impl CsmSceneResources {
             atlas,
             atlas_sampler,
             atlas_ubo,
+            ddgi_ubo,
             point_depth_pipeline,
             point_depth_vs,
             point_depth_fs,
@@ -548,6 +570,8 @@ impl CsmSceneResources {
             RhiDevice::destroy_graphics_pipeline(device, self.point_depth_pipeline);
             RhiDevice::destroy_shader_module(device, self.point_depth_fs);
             RhiDevice::destroy_shader_module(device, self.point_depth_vs);
+            // SDFDDGI I0: the single DDGI grid UBO (reverse creation order — created after atlas_ubo).
+            RhiDevice::destroy_buffer(device, self.ddgi_ubo);
             RhiDevice::destroy_buffer(device, self.atlas_ubo);
             RhiDevice::destroy_sampler(device, self.atlas_sampler);
             RhiDevice::destroy_texture(device, self.atlas);
@@ -2171,6 +2195,12 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // `punctual_shadow_mode == 0` on the golden presents → bound-but-unread (the 0%-gate).
         BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 15, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        // SDFDDGI I0: the DDGI probe-irradiance combined image @16 + depth combined image @17 + the
+        // `ResolvedDdgi` grid UBO @18 (bound-but-unread; the recompiled resolve STATICALLY references
+        // `gDdgiIrr`/`gDdgiDepth`/`ResolvedDdgi`, so the layout MUST declare them). Exact-fill 19/19.
+        BindGroupLayoutEntry { binding: 16, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 17, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 18, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -2341,6 +2371,28 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         shadow_atlas_texture: &csm.atlas,
         shadow_atlas_sampler: &csm.atlas_sampler,
         shadow_atlas_ubo: &csm.atlas_ubo,
+        // SDFDDGI I0: the 3 bound-but-unread DDGI resolve bindings (@16/@17/@18). The GI gate is OFF
+        // on every golden present (LightBuf word-7 bit 4 == 0), so the resolve's probe sample never
+        // runs and these are bound-but-unread (the 0%-gate — byte-identical pixels). The
+        // irradiance/depth image dummies REUSE the cascade texture + sampler (a valid bound-but-unread
+        // `Texture2DArray` descriptor); the grid UBO is the dedicated zeroed `ddgi_ubo`.
+        // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM cascade Texture2DArray (format mismatch
+        // inert off-gate). Sever this coupling when the real DDGI atlas is allocated at I1.
+        ddgi_irr_texture: &csm.cascade,
+        // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM COMPARISON sampler (compareEnable=VK_TRUE).
+        // A non-Dref SampleLevel with a comparison sampler is a Vulkan VUID violation — INERT now
+        // (the sample is in the dead `if (ddgi_mode != 0u)` branch), but swap to a dedicated LINEAR
+        // sampler when the real R11G11B10F/RG16F atlas lands at I1.
+        ddgi_irr_sampler: &csm.sampler,
+        // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM cascade Texture2DArray (format mismatch
+        // inert off-gate). Sever this coupling when the real DDGI atlas is allocated at I1.
+        ddgi_depth_texture: &csm.cascade,
+        // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM COMPARISON sampler (compareEnable=VK_TRUE).
+        // A non-Dref SampleLevel with a comparison sampler is a Vulkan VUID violation — INERT now
+        // (the sample is in the dead `if (ddgi_mode != 0u)` branch), but swap to a dedicated LINEAR
+        // sampler when the real R11G11B10F/RG16F atlas lands at I1.
+        ddgi_depth_sampler: &csm.sampler,
+        ddgi_grid_ubo: &csm.ddgi_ubo,
         atlas_punctual: None,
         // Pillar B B3: the interpolation pre-pass is OFF for every dump/offscreen golden — the
         // raster VS reads the hand-affine SSBO directly (byte-identical command stream + pixels).
@@ -3029,6 +3081,12 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // `punctual_shadow_mode == 0` on the golden presents → bound-but-unread (the 0%-gate).
         BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 15, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        // SDFDDGI I0: the DDGI probe-irradiance combined image @16 + depth combined image @17 + the
+        // `ResolvedDdgi` grid UBO @18 (bound-but-unread; the recompiled resolve STATICALLY references
+        // `gDdgiIrr`/`gDdgiDepth`/`ResolvedDdgi`, so the layout MUST declare them). Exact-fill 19/19.
+        BindGroupLayoutEntry { binding: 16, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 17, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 18, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -3185,6 +3243,28 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         shadow_atlas_texture: &csm.atlas,
         shadow_atlas_sampler: &csm.atlas_sampler,
         shadow_atlas_ubo: &csm.atlas_ubo,
+        // SDFDDGI I0: the 3 bound-but-unread DDGI resolve bindings (@16/@17/@18). The GI gate is OFF
+        // on every golden present (LightBuf word-7 bit 4 == 0), so the resolve's probe sample never
+        // runs and these are bound-but-unread (the 0%-gate — byte-identical pixels). The
+        // irradiance/depth image dummies REUSE the cascade texture + sampler (a valid bound-but-unread
+        // `Texture2DArray` descriptor); the grid UBO is the dedicated zeroed `ddgi_ubo`.
+        // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM cascade Texture2DArray (format mismatch
+        // inert off-gate). Sever this coupling when the real DDGI atlas is allocated at I1.
+        ddgi_irr_texture: &csm.cascade,
+        // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM COMPARISON sampler (compareEnable=VK_TRUE).
+        // A non-Dref SampleLevel with a comparison sampler is a Vulkan VUID violation — INERT now
+        // (the sample is in the dead `if (ddgi_mode != 0u)` branch), but swap to a dedicated LINEAR
+        // sampler when the real R11G11B10F/RG16F atlas lands at I1.
+        ddgi_irr_sampler: &csm.sampler,
+        // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM cascade Texture2DArray (format mismatch
+        // inert off-gate). Sever this coupling when the real DDGI atlas is allocated at I1.
+        ddgi_depth_texture: &csm.cascade,
+        // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM COMPARISON sampler (compareEnable=VK_TRUE).
+        // A non-Dref SampleLevel with a comparison sampler is a Vulkan VUID violation — INERT now
+        // (the sample is in the dead `if (ddgi_mode != 0u)` branch), but swap to a dedicated LINEAR
+        // sampler when the real R11G11B10F/RG16F atlas lands at I1.
+        ddgi_depth_sampler: &csm.sampler,
+        ddgi_grid_ubo: &csm.ddgi_ubo,
         atlas_punctual: None,
         // Pillar B B3: the interpolation pre-pass is OFF for every dump/offscreen golden.
         interp: None,
@@ -7496,6 +7576,12 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         // `punctual_shadow_mode == 0` on the golden presents → bound-but-unread (the 0%-gate).
         BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 15, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        // SDFDDGI I0: the DDGI probe-irradiance combined image @16 + depth combined image @17 + the
+        // `ResolvedDdgi` grid UBO @18 (bound-but-unread; the recompiled resolve STATICALLY references
+        // `gDdgiIrr`/`gDdgiDepth`/`ResolvedDdgi`, so the layout MUST declare them). Exact-fill 19/19.
+        BindGroupLayoutEntry { binding: 16, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 17, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 18, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -7791,6 +7877,28 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         shadow_atlas_texture: &csm.atlas,
         shadow_atlas_sampler: &csm.atlas_sampler,
         shadow_atlas_ubo: &csm.atlas_ubo,
+        // SDFDDGI I0: the 3 bound-but-unread DDGI resolve bindings (@16/@17/@18). The GI gate is OFF
+        // on every golden present (LightBuf word-7 bit 4 == 0), so the resolve's probe sample never
+        // runs and these are bound-but-unread (the 0%-gate — byte-identical pixels). The
+        // irradiance/depth image dummies REUSE the cascade texture + sampler (a valid bound-but-unread
+        // `Texture2DArray` descriptor); the grid UBO is the dedicated zeroed `ddgi_ubo`.
+        // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM cascade Texture2DArray (format mismatch
+        // inert off-gate). Sever this coupling when the real DDGI atlas is allocated at I1.
+        ddgi_irr_texture: &csm.cascade,
+        // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM COMPARISON sampler (compareEnable=VK_TRUE).
+        // A non-Dref SampleLevel with a comparison sampler is a Vulkan VUID violation — INERT now
+        // (the sample is in the dead `if (ddgi_mode != 0u)` branch), but swap to a dedicated LINEAR
+        // sampler when the real R11G11B10F/RG16F atlas lands at I1.
+        ddgi_irr_sampler: &csm.sampler,
+        // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM cascade Texture2DArray (format mismatch
+        // inert off-gate). Sever this coupling when the real DDGI atlas is allocated at I1.
+        ddgi_depth_texture: &csm.cascade,
+        // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM COMPARISON sampler (compareEnable=VK_TRUE).
+        // A non-Dref SampleLevel with a comparison sampler is a Vulkan VUID violation — INERT now
+        // (the sample is in the dead `if (ddgi_mode != 0u)` branch), but swap to a dedicated LINEAR
+        // sampler when the real R11G11B10F/RG16F atlas lands at I1.
+        ddgi_depth_sampler: &csm.sampler,
+        ddgi_grid_ubo: &csm.ddgi_ubo,
         atlas_punctual: spot_activation.map(
             |(push, face_view_proj, face_is_point, face_light, active_layers)| {
                 PunctualDepthActivation {

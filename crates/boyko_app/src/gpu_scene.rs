@@ -50,8 +50,8 @@ use boyko_sdf_math::SdfEdit;
 use boyko_render::{
     GPU_LIGHT_BYTES, GPU_LIGHT_WORDS, GPU_TRANSFORM3D_BYTES, GpuLight, LIGHT_HEADER_BASE_WORDS,
     LIGHT_HEADER_BYTES, LightHeaderGpu, LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialGpu,
-    RESOLVED_CSM_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, ResolvedCsm, ResolvedShadowAtlas, SHADOW_DIM,
-    Vertex,
+    RESOLVED_CSM_BYTES, RESOLVED_DDGI_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, ResolvedCsm,
+    ResolvedShadowAtlas, SHADOW_DIM, Vertex,
 };
 
 /// The boot instance budget: the per-slot instance-model SSBO holds this many
@@ -102,6 +102,10 @@ const SPOT_ATLAS_SLOTS: u32 = M_SLOTS as u32;
 /// Byte size of the host atlas UBO — `size_of::<ResolvedShadowAtlas>()` via
 /// [`RESOLVED_SHADOW_ATLAS_BYTES`] (the resolve's binding-15 shape).
 const SPOT_ATLAS_UBO_BYTES: u64 = RESOLVED_SHADOW_ATLAS_BYTES as u64;
+/// Byte size of the SDFDDGI grid UBO — `size_of::<ResolvedDdgi>()` via
+/// [`RESOLVED_DDGI_BYTES`] (48 B, the resolve's binding-18 shape). A SINGLE buffer (the grid is
+/// world-fixed — Decision D1), NOT a per-FIF ring. Zero-seeded (bound-but-unread on the OFF path).
+const DDGI_UBO_BYTES: u64 = RESOLVED_DDGI_BYTES as u64;
 
 /// Copies a `u32` word stream into a mapped host-coherent buffer.
 ///
@@ -207,6 +211,11 @@ struct CsmResources {
     /// fenced write token every frame, so it needs a per-in-flight-frame slot exactly like the
     /// CSM cascade UBO.
     atlas_ubo: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// SDFDDGI I0: the DDGI grid UBO (single buffer — the grid is world-fixed, so no per-FIF ring),
+    /// zero-seeded ⇒ `ddgi_mode_word == 0`, bound-but-unread at resolve binding 18 while the GI gate
+    /// is OFF (the default). The I0 probe-irradiance / depth atlas dummies REUSE the cascade texture
+    /// + sampler (bound-but-unread array descriptors), so only this UBO is a dedicated new resource.
+    ddgi_ubo: BoundBuffer,
     point_depth_pipeline: VulkanGraphicsPipeline,
     point_depth_vs: VulkanShaderModule,
     point_depth_fs: VulkanShaderModule,
@@ -333,6 +342,25 @@ impl CsmResources {
             b
         });
 
+        // SDFDDGI I0: the DDGI grid UBO — a SINGLE host-coherent buffer (the grid is world-fixed,
+        // Decision D1, so no per-FIF ring). Zero-seeded ⇒ `ddgi_mode_word == 0`, bound-but-unread at
+        // resolve binding 18 while the GI gate is OFF (the default 0%-gate).
+        let ddgi_ubo = {
+            let b = RhiDevice::create_buffer(
+                device,
+                &BufferDesc {
+                    size: DDGI_UBO_BYTES,
+                    usage: BufferUsage::UNIFORM,
+                    location: MemoryLocation::HostVisibleCoherent,
+                },
+            )
+            .expect("invariant: SDFDDGI grid UBO create");
+            let mapped = RhiDevice::buffer_mapped_ptr(device, &b)
+                .expect("invariant: host-visible DDGI grid UBO is mapped");
+            zero_fill(mapped, DDGI_UBO_BYTES as usize);
+            b
+        };
+
         let point_depth_vs = RhiDevice::create_shader_module(device, punctual_depth_vs_spirv())
             .expect("invariant: punctual point depth VS module create");
         let point_depth_fs = RhiDevice::create_shader_module(device, punctual_depth_fs_spirv())
@@ -383,6 +411,7 @@ impl CsmResources {
             atlas,
             atlas_sampler,
             atlas_ubo,
+            ddgi_ubo,
             point_depth_pipeline,
             point_depth_vs,
             point_depth_fs,
@@ -450,6 +479,8 @@ impl CsmResources {
             RhiDevice::destroy_graphics_pipeline(device, self.point_depth_pipeline);
             RhiDevice::destroy_shader_module(device, self.point_depth_fs);
             RhiDevice::destroy_shader_module(device, self.point_depth_vs);
+            // SDFDDGI I0: the single DDGI grid UBO (reverse creation order — created after atlas_ubo).
+            RhiDevice::destroy_buffer(device, self.ddgi_ubo);
             for slot in self.atlas_ubo {
                 RhiDevice::destroy_buffer(device, slot);
             }
@@ -1070,6 +1101,12 @@ impl GpuSceneBundles {
             BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
             BindGroupLayoutEntry { binding: 14, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
             BindGroupLayoutEntry { binding: 15, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+            // SDFDDGI I0: the DDGI probe-irradiance combined image @16 + depth combined image @17 +
+            // the `ResolvedDdgi` grid UBO @18 (bound-but-unread; the resolve `.spv` statically
+            // references all three). The set is now EXACT-FILL at 19/19 (== MAX_BIND_GROUP_BINDINGS).
+            BindGroupLayoutEntry { binding: 16, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+            BindGroupLayoutEntry { binding: 17, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+            BindGroupLayoutEntry { binding: 18, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
         ];
         let resolve_layout = RhiDevice::create_bind_group_layout(
             device,
@@ -1341,6 +1378,30 @@ impl GpuSceneBundles {
             // memcpys `ResolvedShadowAtlas` into via `upload_atlas_ring` (binding 15). The sibling
             // in-flight frame binds the OTHER slot (the lock-free WAR discipline the ring exists for).
             shadow_atlas_ubo: &self.csm.atlas_ubo[slot],
+            // SDFDDGI I0: the 3 bound-but-unread DDGI resolve bindings (@16/@17/@18). The GI gate is
+            // OFF by default (`DdgiConfig::ddgi_indirect == false` → LightBuf word-7 bit 4 == 0), so
+            // the resolve's probe-irradiance sample never runs and these are bound-but-unread (the
+            // 0%-gate — byte-identical pixels). The irradiance/depth image dummies REUSE the cascade
+            // texture + its comparison sampler (a valid bound-but-unread `Texture2DArray` descriptor —
+            // Vulkan validates only the descriptor TYPE, not the shader element type); the grid UBO is
+            // the dedicated zeroed `ddgi_ubo` (single buffer — the grid is world-fixed, no ring).
+            // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM cascade Texture2DArray (format mismatch
+            // inert off-gate). Sever this coupling when the real DDGI atlas is allocated at I1.
+            ddgi_irr_texture: &self.csm.cascade,
+            // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM COMPARISON sampler (compareEnable=VK_TRUE).
+            // A non-Dref SampleLevel with a comparison sampler is a Vulkan VUID violation — INERT now
+            // (the sample is in the dead `if (ddgi_mode != 0u)` branch), but swap to a dedicated
+            // LINEAR sampler when the real R11G11B10F/RG16F atlas lands at I1.
+            ddgi_irr_sampler: &self.csm.sampler,
+            // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM cascade Texture2DArray (format mismatch
+            // inert off-gate). Sever this coupling when the real DDGI atlas is allocated at I1.
+            ddgi_depth_texture: &self.csm.cascade,
+            // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM COMPARISON sampler (compareEnable=VK_TRUE).
+            // A non-Dref SampleLevel with a comparison sampler is a Vulkan VUID violation — INERT now
+            // (the sample is in the dead `if (ddgi_mode != 0u)` branch), but swap to a dedicated
+            // LINEAR sampler when the real R11G11B10F/RG16F atlas lands at I1.
+            ddgi_depth_sampler: &self.csm.sampler,
+            ddgi_grid_ubo: &self.csm.ddgi_ubo,
             // The punctual (spot/point) depth-pass activation (the punctual host rung): built from
             // the SAME ResolvedShadowAtlas the runner memcpys into this slot's atlas UBO (the O1
             // single-matrix pin — LE float bytes == the in-memory f32s the UBO copy carries on

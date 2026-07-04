@@ -148,7 +148,11 @@ impl From<VulkanError> for RhiError {
                 | BootError::GbufferStorageFormatUnsupported
                 | BootError::ViewtStorageFormatUnsupported
                 | BootError::GbufferColorAttachmentFormatUnsupported
-                | BootError::SsaoStorageFormatUnsupported => {
+                | BootError::SsaoStorageFormatUnsupported
+                // SDFDDGI I0: a device whose per-stage descriptor limits cannot satisfy the resolve
+                // set's actual per-type need — external input, projected as a generic backend boot
+                // failure (the same category as the format-unsupported device rejections above).
+                | BootError::ResolveDescriptorLimitExceeded { .. } => {
                     RhiError::BackendError("vulkan boot failed")
                 }
                 BootError::VkError(_cmd, result) => match result {

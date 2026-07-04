@@ -98,7 +98,11 @@ pub struct GBufferTargets {
     /// term `gSsao` STORAGE image @11). When L1 is off the scene's `cluster_grid`/`light_index`
     /// are `None`, so @8/@9 bind the light table as a harmless valid placeholder (the resolve's
     /// `clusters_enabled` header gate never reads them on the OFF path). `gSsao` @11 is always
-    /// bound; the resolve reads it only under `ssao_mode != 0` (0 every pre-P7 scene). NO
+    /// bound; the resolve reads it only under `ssao_mode != 0` (0 every pre-P7 scene). @12/@13 =
+    /// the CSM cascade combined-image + UBO; @14/@15 = the punctual shadow-atlas combined-image +
+    /// UBO; @16/@17/@18 = the SDFDDGI probe irradiance + depth combined images + the `ResolvedDdgi`
+    /// grid UBO (all bound-but-unread when their header gate is 0). The set is EXACT-FILL at
+    /// `MAX_BIND_GROUP_BINDINGS` (19). NO
     /// per-frame update.
     ///
     /// A RING (one per in-flight frame): slot `i` binds `scene.camera_ring[i]` @5 +
@@ -601,21 +605,44 @@ impl GBufferTargets {
                 BindGroupEntry::UniformBuffer {
                     buffer: scene.shadow_atlas_ubo,
                 },
+                // SDFDDGI I0: the DDGI probe-IRRADIANCE atlas + its LINEAR sampler as ONE combined
+                // descriptor @16 (DXC collapsed `gDdgiIrr`(t16)+`gDdgiIrrSamp`(s16) — the `gCsm`
+                // precedent); the probe DEPTH-MOMENT atlas + sampler @17; the `ResolvedDdgi` grid UBO
+                // @18. ALL THREE ALWAYS bound (the resolve `.spv` statically references
+                // `gDdgiIrr`/`gDdgiDepth`/`ResolvedDdgi`), so the layout MUST declare them and a valid
+                // descriptor MUST be present even on the OFF path; the resolve samples them ONLY under
+                // `ddgi_mode != 0` (header word-7 bit 4; 0 every pre-SDFDDGI scene → OFF by default),
+                // so the bound-but-unread DDGI atlases/UBO are never sampled (the 0%-gate). The I0
+                // dummies reuse existing bound-but-unread array textures + a zeroed grid UBO. These
+                // are the 17th/18th/19th entries (indices 16, 17, 18); the set now sits at EXACTLY 19
+                // under the cap (`MAX_BIND_GROUP_BINDINGS == 19`).
+                BindGroupEntry::CombinedImage {
+                    texture: scene.ddgi_irr_texture,
+                    sampler: scene.ddgi_irr_sampler,
+                },
+                BindGroupEntry::CombinedImage {
+                    texture: scene.ddgi_depth_texture,
+                    sampler: scene.ddgi_depth_sampler,
+                },
+                BindGroupEntry::UniformBuffer {
+                    buffer: scene.ddgi_grid_ubo,
+                },
             ];
-            // The resolve set declares 16 bindings (0..=15). CSM Rung A added the combined cascade
+            // The resolve set declares 19 bindings (0..=18). CSM Rung A added the combined cascade
             // map+sampler @12 + the cascade UBO @13; Shadow Inc-1-GPU adds the combined atlas
-            // map+sampler @14 + the atlas UBO @15 (both via the combined-image collapse — the
-            // in-house RHI has no SAMPLER-only `BindGroupEntry`).
+            // map+sampler @14 + the atlas UBO @15; SDFDDGI I0 adds the combined DDGI irradiance @16 +
+            // depth @17 + the grid UBO @18 (the combined images via the collapse — the in-house RHI
+            // has no SAMPLER-only `BindGroupEntry`).
             //
-            // TODO(SDFDDGI I0): the 3 DDGI resolve bindings restore exact-fill to 19/19; until then
-            // the set is <= cap. SDFDDGI I(-1) raised `MAX_BIND_GROUP_BINDINGS` 16 → 19 without
-            // adding bindings here, so the set now sits at 16 under a cap of 19. The guard stays a
-            // hard upper bound (an over-count of the inline-array capacity is still a bug); it is
-            // relaxed from `== cap` to `<= cap` only because the exact-fill invariant is deferred to
-            // rung I0.
-            debug_assert!(
-                entries.len() <= MAX_BIND_GROUP_BINDINGS,
-                "invariant: the resolve set must not exceed the {MAX_BIND_GROUP_BINDINGS}-binding descriptor cap"
+            // SDFDDGI I0 restores EXACT-FILL: the resolve set declares exactly
+            // `MAX_BIND_GROUP_BINDINGS` (== 19) bindings, so the guard is back to `== cap` (I(-1)
+            // temporarily relaxed it to `<= cap` while the 3 DDGI bindings were pending). An
+            // over-count is a bug (past the inline-array capacity); an under-count now means a missing
+            // binding this rung was meant to add — both are caught.
+            debug_assert_eq!(
+                entries.len(),
+                MAX_BIND_GROUP_BINDINGS,
+                "invariant: the resolve set must declare EXACTLY the {MAX_BIND_GROUP_BINDINGS}-binding descriptor cap (exact-fill)"
             );
             let desc = BindGroupDesc::<Vulkan> {
                 layout: scene.resolve_layout,
