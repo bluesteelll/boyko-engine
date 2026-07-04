@@ -346,6 +346,40 @@ static SDF_SSAO_HIGH_SPV: SpirvBlob<90160> = SpirvBlob(*include_bytes!(concat!(
     "/shaders/sdf_ssao_high.comp.spv"
 )));
 
+// The committed SDFDDGI I2 probe-update SPIR-V — one PRE-COMPILED `.spv` per `GI_MAX_IT` sweep
+// value {32, 64, 96, 128} (the same variant mechanism as SSAO: a `GI_MAX_IT` header symbol
+// re-DXC'd per value so measured==shipped, plan §1.2/§5). All four share the IDENTICAL update
+// bind-group interface (set 0: t0 Buf, u1 gIrrOut, u2 gDepthOut, u3 Classification, t4 RayTable,
+// t5 LightBuf, b6 DdgiUpdate), so ONE bind-group layout drives any of them; only the baked
+// `GI_MAX_IT` `[loop]` trip count differs. Each `.spv` is a distinct size, so each is its own
+// `SpirvBlob<N>` `static` with its own const-asserted `include_bytes!` length — a drifted variant
+// fails the length at compile time. `sdf_probe_update_spirv(gi_max_it)` matches the sweep value to
+// the right blob.
+
+/// `GI_MAX_IT == 32` — `sdf_probe_update_it32.comp.spv`.
+static SDF_PROBE_UPDATE_IT32_SPV: SpirvBlob<44720> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/sdf_probe_update_it32.comp.spv"
+)));
+
+/// `GI_MAX_IT == 64` — `sdf_probe_update_it64.comp.spv` (the shipped default per plan §6).
+static SDF_PROBE_UPDATE_IT64_SPV: SpirvBlob<44704> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/sdf_probe_update_it64.comp.spv"
+)));
+
+/// `GI_MAX_IT == 96` — `sdf_probe_update_it96.comp.spv`.
+static SDF_PROBE_UPDATE_IT96_SPV: SpirvBlob<44720> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/sdf_probe_update_it96.comp.spv"
+)));
+
+/// `GI_MAX_IT == 128` — `sdf_probe_update_it128.comp.spv`.
+static SDF_PROBE_UPDATE_IT128_SPV: SpirvBlob<44704> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/sdf_probe_update_it128.comp.spv"
+)));
+
 /// The committed CSM Increment-1b Rung-A cascade DEPTH-PASS vertex SPIR-V
 /// (`shaders/csm_depth.vs.hlsl`). A GRAPHICS (`vs_6_0`) stage — the FIRST non-compute blob
 /// hosted here, so the resolve/depth-pass shaders live behind ONE `compute::*_spirv()`
@@ -751,6 +785,53 @@ fn ssao_variant_out_of_range(q: usize) -> ! {
          SSAO_QUALITY_LOW/MEDIUM/HIGH = 0..{SSAO_QUALITY_COUNT})"
     )
 }
+
+/// The committed SDFDDGI I2 probe-update SPIR-V for the `gi_max_it` sweep value (one of
+/// [`GI_MAX_IT_VARIANTS`] = {32, 64, 96, 128}), as a `u32` word stream ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// All four variants share the SAME dedicated update bind-group interface (set 0: t0 `Buf`, u1
+/// `gIrrOut`, u2 `gDepthOut`, u3 `Classification`, t4 `RayTable`, t5 `LightBuf`, b6 `DdgiUpdate`), so
+/// ONE bind-group layout drives any of them; only the BAKED `GI_MAX_IT` header const (the sphere-
+/// trace `[loop]` trip count) differs. The host selects a variant by binding its pipeline (the SSAO
+/// Mechanism-C precedent — ZERO per-thread runtime cost, the loop stays fully bounded). The bench
+/// (`tests/ddgi_probe_gi_cost.rs`) sweeps this knob to derive the shipped `GI_MAX_IT` under the cost
+/// ceiling (plan §5); the shipped default is [`GI_MAX_IT_DEFAULT`] (64).
+///
+/// # Panics
+///
+/// Panics (debug + release) if `gi_max_it` is not one of [`GI_MAX_IT_VARIANTS`]; a caller passing an
+/// unbuilt variant is a bug.
+#[inline]
+pub fn sdf_probe_update_spirv(gi_max_it: u32) -> &'static [u32] {
+    match gi_max_it {
+        32 => SDF_PROBE_UPDATE_IT32_SPV.as_words(),
+        64 => SDF_PROBE_UPDATE_IT64_SPV.as_words(),
+        96 => SDF_PROBE_UPDATE_IT96_SPV.as_words(),
+        128 => SDF_PROBE_UPDATE_IT128_SPV.as_words(),
+        _ => probe_update_variant_out_of_range(gi_max_it),
+    }
+}
+
+/// The cold out-of-range arm of [`sdf_probe_update_spirv`] (a `gi_max_it` with no committed variant
+/// is a caller bug). Split out + `#[cold]` so the selector's hot path stays a compact jump table.
+#[cold]
+#[inline(never)]
+fn probe_update_variant_out_of_range(gi_max_it: u32) -> ! {
+    panic!(
+        "invariant: DDGI probe-update GI_MAX_IT {gi_max_it} has no committed variant \
+         (must be one of GI_MAX_IT_VARIANTS = {GI_MAX_IT_VARIANTS:?})"
+    )
+}
+
+/// The committed `GI_MAX_IT` probe-update variants (the sphere-trace `[loop]` trip counts that
+/// [`sdf_probe_update_spirv`] can select — the bench's `GI_MAX_IT` sweep axis, plan §5).
+pub const GI_MAX_IT_VARIANTS: [u32; 4] = [32, 64, 96, 128];
+
+/// The shipped-default `GI_MAX_IT` probe-update variant (plan §6 placeholder — 64; the orchestrator
+/// finalizes it from the `ddgi_probe_gi_cost` bench). The activation-populate system loads this
+/// variant's pipeline unless the config overrides it.
+pub const GI_MAX_IT_DEFAULT: u32 = 64;
 
 /// The committed Pillar-B B2 per-instance TRS interpolation SPIR-V as a `u32` word
 /// stream, ready for

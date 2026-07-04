@@ -73,6 +73,22 @@ impl SubRange {
             layer_count: layers,
         }
     }
+
+    /// A whole-array COLOR range over `[0, layers)` — the SDFDDGI I2 probe-update pass's
+    /// storage WRITE covers ALL `DDGI_ATLAS_LAYERS` array layers of each atlas (the boot
+    /// SHADER_READ_ONLY_OPTIMAL → GENERAL transition + the update→resolve barrier must span
+    /// every layer, since the resolve samples the whole array). The COLOR analogue of
+    /// [`depth_layers`](Self::depth_layers).
+    #[inline]
+    pub const fn color_layers(layers: u32) -> Self {
+        Self {
+            aspect: VK_IMAGE_ASPECT_COLOR_BIT,
+            base_mip: 0,
+            mip_count: 1,
+            base_layer: 0,
+            layer_count: layers,
+        }
+    }
 }
 
 /// A derived image-memory barrier (Vk-valued, resource-logical). Lowered to a
@@ -144,6 +160,32 @@ impl ResSync {
     pub const fn seeded_readers(stages: u32, access: u32) -> Self {
         Self {
             layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            flush_access: 0,
+            flush_stages: 0,
+            visible_access: access,
+            visible_stages: stages,
+        }
+    }
+
+    /// Cross-frame seed for a NON-RINGED, CONTENT-PERSISTENT image whose start-of-frame
+    /// layout is a REAL layout (NOT re-rendered from scratch), and whose sibling in-flight
+    /// frame ends with READS at `(stages, access)`. Unlike [`seeded_readers`](Self::seeded_readers)
+    /// — which leaves the layout UNDEFINED because its resource is re-rendered every frame
+    /// (content-discard legal) — this seeds the ACTUAL `layout` so the first write's derived
+    /// transition is `layout → GENERAL`, PRESERVING the existing contents (Vulkan discards on a
+    /// `UNDEFINED` oldLayout, which would wipe a persistent accumulator).
+    ///
+    /// The SDFDDGI I2 probe atlases use this: they are boot-initialized to
+    /// `SHADER_READ_ONLY_OPTIMAL` and are PERSISTENT accumulators (Decision D2 — the round-robin
+    /// update writes only 1/N tiles per frame; the other (N-1)/N MUST survive), so the first
+    /// storage write each frame needs a content-preserving `SHADER_READ_ONLY_OPTIMAL → GENERAL`
+    /// transition, not a discarding `UNDEFINED → GENERAL` (plan §2.5/§7). The reader-visibility
+    /// half still orders this frame's write after the sibling's still-pipelined resolve reads
+    /// (the WAR seed).
+    #[inline]
+    pub const fn seeded_readers_at_layout(layout: i32, stages: u32, access: u32) -> Self {
+        Self {
+            layout,
             flush_access: 0,
             flush_stages: 0,
             visible_access: access,

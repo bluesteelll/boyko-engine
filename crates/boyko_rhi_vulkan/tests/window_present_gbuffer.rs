@@ -2397,6 +2397,16 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         ddgi_depth_texture: csm.ddgi_atlas.depth(),
         ddgi_depth_sampler: csm.ddgi_atlas.sampler(),
         ddgi_grid_ubo: &csm.ddgi_ubo,
+        // SDFDDGI I2: the probe-update pass is OFF in these harness scenes (the GI-OFF 0%-gate).
+        // `ddgi_update = None` ⇒ no update RDG pass / dispatch / barrier is recorded. The
+        // classification / ray-table / update-UBO handles are supplied so the RDG sink can resolve
+        // them (unread while the pass is off); the ray-table + update-UBO reuse the bound-but-unread
+        // `ddgi_ubo` as a placeholder buffer (never read on the OFF path — this harness does not arm
+        // the update pass; a bench/host that arms it supplies real dedicated buffers).
+        ddgi_update: None,
+        ddgi_classification: csm.ddgi_atlas.classification(),
+        ddgi_ray_table: &csm.ddgi_ubo,
+        ddgi_update_ubo: &csm.ddgi_ubo,
         atlas_punctual: None,
         // Pillar B B3: the interpolation pre-pass is OFF for every dump/offscreen golden — the
         // raster VS reads the hand-affine SSBO directly (byte-identical command stream + pixels).
@@ -3259,6 +3269,16 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         ddgi_depth_texture: csm.ddgi_atlas.depth(),
         ddgi_depth_sampler: csm.ddgi_atlas.sampler(),
         ddgi_grid_ubo: &csm.ddgi_ubo,
+        // SDFDDGI I2: the probe-update pass is OFF in these harness scenes (the GI-OFF 0%-gate).
+        // `ddgi_update = None` ⇒ no update RDG pass / dispatch / barrier is recorded. The
+        // classification / ray-table / update-UBO handles are supplied so the RDG sink can resolve
+        // them (unread while the pass is off); the ray-table + update-UBO reuse the bound-but-unread
+        // `ddgi_ubo` as a placeholder buffer (never read on the OFF path — this harness does not arm
+        // the update pass; a bench/host that arms it supplies real dedicated buffers).
+        ddgi_update: None,
+        ddgi_classification: csm.ddgi_atlas.classification(),
+        ddgi_ray_table: &csm.ddgi_ubo,
+        ddgi_update_ubo: &csm.ddgi_ubo,
         atlas_punctual: None,
         // Pillar B B3: the interpolation pre-pass is OFF for every dump/offscreen golden.
         interp: None,
@@ -7883,6 +7903,16 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         ddgi_depth_texture: csm.ddgi_atlas.depth(),
         ddgi_depth_sampler: csm.ddgi_atlas.sampler(),
         ddgi_grid_ubo: &csm.ddgi_ubo,
+        // SDFDDGI I2: the probe-update pass is OFF in these harness scenes (the GI-OFF 0%-gate).
+        // `ddgi_update = None` ⇒ no update RDG pass / dispatch / barrier is recorded. The
+        // classification / ray-table / update-UBO handles are supplied so the RDG sink can resolve
+        // them (unread while the pass is off); the ray-table + update-UBO reuse the bound-but-unread
+        // `ddgi_ubo` as a placeholder buffer (never read on the OFF path — this harness does not arm
+        // the update pass; a bench/host that arms it supplies real dedicated buffers).
+        ddgi_update: None,
+        ddgi_classification: csm.ddgi_atlas.classification(),
+        ddgi_ray_table: &csm.ddgi_ubo,
+        ddgi_update_ubo: &csm.ddgi_ubo,
         atlas_punctual: spot_activation.map(
             |(push, face_view_proj, face_is_point, face_light, active_layers)| {
                 PunctualDepthActivation {

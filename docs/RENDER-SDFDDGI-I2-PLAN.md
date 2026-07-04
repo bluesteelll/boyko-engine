@@ -311,7 +311,9 @@ bytes, cleared to 0 = unconverged/inactive-until-proven).
 **Measurement method (P0-1 fix): CPU wall-clock around a fenced, dispatch-ONLY, swapchain-absent
 isolated submit.** No timestamp-query RHI subsystem exists (grep-confirmed zero
 `QueryPool`/`vkCmdWriteTimestamp`), so building one is out of scope this rung. Instead a new
-`#[ignore]` measurement test `crates/boyko_rhi_vulkan/tests/ddgi_probe_update_cost.rs` (run
+`#[ignore]` measurement test `crates/boyko_rhi_vulkan/tests/ddgi_probe_gi_cost.rs` (named
+`ddgi_probe_gi_cost`, NOT `ddgi_probe_update_cost` — a test/exe name containing "update" trips
+Windows installer-detection UAC elevation, os error 740, on this box) (run
 `--test-threads=1`, `BOYKO_DISABLE_VALIDATION=1`):
 1. Boot a device (offscreen, no swapchain acquire/present); allocate atlas + classification(u32) + ray table + the grand_showcase edit-list SSBO (the real CSG fold cost).
 2. Create the update pipeline (the `GI_MAX_IT` variant under test).

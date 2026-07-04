@@ -772,6 +772,76 @@ impl Renderer<'_> {
             // dispatch (still after this SSAO dispatch's write) — NOT here.
         }
 
+        // === SDFDDGI I2: the probe-update compute pass. Recorded ONLY when the scene wires the
+        // update activation (`scene.ddgi_update.is_some()`) — i.e. only when `ResolvedDdgi::enabled()`
+        // (the same predicate driving the LightBuf GI gate + the resolve read). Otherwise skipped
+        // entirely — NO RDG pass, NO bind, NO dispatch, NO barrier — so the command stream is
+        // byte-identical to the pre-I2 windowed path (the GI-OFF 0%-gate; the atlas + ray-table + UBO
+        // are allocated regardless, staying in boot SHADER_READ_ONLY_OPTIMAL, unread). Placed AFTER
+        // the marcher (edit-list SSBO warm) + AFTER the L0 light-table copy (`LightBuf`
+        // COMPUTE-read-visible), BEFORE the resolve. The pass sphere-traces the CSG edit-list from
+        // each active probe over the Fibonacci ray set + blends into the atlas storage images. Its
+        // input barriers (light_table/ray-table/classification reads + the boot
+        // SHADER_READ_ONLY_OPTIMAL → GENERAL atlas transition) are DERIVED by the graph's "ddgi_update"
+        // pass recorded HERE; the update-write → resolve-read atlas barrier is DERIVED at the resolve
+        // (the atlas reader) — NEITHER is hand-written (a hand `cmd_pipeline_barrier` would
+        // double-transition against the RDG's derived barriers, a validation error). ===
+        if let Some(activation) = &scene.ddgi_update {
+            // The SINGLE (non-ringed) update bind group written once at sync_gbuffer — every input
+            // is non-ringed per plan §2.2 (the update pass binds neither the ringed camera UBO nor
+            // any ringed input), so one bind group captures no stale slot.
+            let ddgi_update_set = targets
+                .ddgi_update_set
+                .as_ref()
+                .expect("invariant: scene.ddgi_update is Some ⇒ GBufferTargets wrote ddgi_update_set");
+            // SAFETY: recording is open; `record_graph_pass` records the graph's derived input
+            // barriers for the "ddgi_update" pass into `cmd` (the light_table/ray-table reads, the
+            // classification RW, and the two atlas storage images' boot SHADER_READ_ONLY_OPTIMAL →
+            // GENERAL transition — all before the dispatch below).
+            let ddgi_update_pass = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .ddgi_update
+                .expect("invariant: scene.ddgi_update.is_some() ⇒ ddgi_update pass declared");
+            self.record_graph_pass(ddgi_update_pass, cmd, targets, scene, fi);
+            // SAFETY: recording is open; the update pipeline + its layout (declaring the 7-binding
+            // update set layout at set 0, NO push range) are live on this device (caller contract);
+            // `ddgi_update_set` binds the edit-list SSBO @0 + the two atlas storage images @1/@2
+            // (now GENERAL) + the classification @3 + the ray table @4 + the light table @5 + the
+            // update UBO @6; `dispatch_group_count_x` = `DDGI_PROBE_COUNT / subset_n` blocks (one
+            // `[numthreads(64,1,1)]` block per active probe in this frame's round-robin subset).
+            // The shader reads all params from the b6 UBO, so no push constant is recorded.
+            // `&ddgi_update_set.descriptor_set` is a single-element local alive for the call
+            // (first_set 0, count 1, zero dynamic offsets).
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    activation.pipeline.pipeline,
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    activation.pipeline.layout,
+                    0,
+                    1,
+                    &ddgi_update_set.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_dispatch)(cmd, activation.dispatch_group_count_x, 1, 1);
+            }
+
+            // The update pass's atlas WRITES (COMPUTE/SHADER_WRITE, GENERAL) are ordered before the
+            // resolve's atlas READS (COMPUTE/SHADER_READ) by the graph: it derives the
+            // COMPUTE→COMPUTE, GENERAL→SHADER_READ_ONLY_OPTIMAL image barriers on `ddgi_irr`/
+            // `ddgi_depth` at the resolve (the atlas reader — the resolve SAMPLES them through a
+            // combined-image-sampler, so it reads at SHADER_READ_ONLY_OPTIMAL, ending the frame at
+            // that layout = the cross-frame seed), so `record_pass(resolve)` emits them before the
+            // resolve dispatch (still after this update dispatch's writes) — NOT here.
+        }
+
         // === Lighting L1: the clustered froxel light-cull pass (Decision 6). Recorded ONLY
         // when the scene wires the cull pipeline + cull set; otherwise skipped entirely (the
         // resolve's `clusters_enabled` header gate then loops the flat table — the L1 OFF /

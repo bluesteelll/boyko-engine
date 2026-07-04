@@ -126,6 +126,19 @@ pub struct GBufferTargets {
     /// A RING when `Some` (one per in-flight frame): slot `i` binds `scene.camera_ring[i]` @4 — the
     /// lock-free per-frame ring fix. The recorder selects `ssao_set[self.frame_index]`.
     pub(crate) ssao_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// SDFDDGI I2: the probe-update descriptor set, written ONCE against
+    /// [`DdgiUpdateActivation::layout`](crate::present::scene_types::DdgiUpdateActivation::layout)
+    /// (7 bindings: `Buf` @0 R, `gIrrOut` @1 W, `gDepthOut` @2 W storage images, `Classification` @3
+    /// RW, `RayTable` @4 R, `LightBuf` @5 R, `DdgiUpdate` UBO @6) — `None` when the update pass is off
+    /// ([`GBufferScene::ddgi_update`](crate::present::scene_types::GBufferScene::ddgi_update) is
+    /// `None`). The recorder then skips the update pass entirely (the GI-OFF 0%-gate, byte-identical
+    /// command stream). NO per-frame update.
+    ///
+    /// SINGLE (NOT a `[FRAMES_IN_FLIGHT]` ring): every input is non-ringed per plan §2.2 (the update
+    /// pass binds neither the ringed camera UBO nor any ringed input — the atlas/classification/
+    /// ray-table/UBO/edit-list/light-table are all single device-only instances), so one bind group
+    /// captures no stale slot.
+    pub(crate) ddgi_update_set: Option<VulkanBindGroup>,
     /// The present-blit descriptor set RING (one per in-flight frame), each written ONCE
     /// against [`GBufferScene::present_layout`] (one COMBINED_IMAGE_SAMPLER pointing at
     /// `lit[i]` + the scene's present sampler). NO per-frame update. RINGED so slot `i`'s
@@ -814,6 +827,67 @@ impl GBufferTargets {
             None => None,
         };
 
+        // SDFDDGI I2: the SINGLE (non-ringed) probe-update set, written ONCE here when the update
+        // pass is wired (`Buf` @0 R, `gIrrOut` @1 W, `gDepthOut` @2 W storage images, `Classification`
+        // @3 RW, `RayTable` @4 R, `LightBuf` @5 R, `DdgiUpdate` UBO @6) — matching
+        // `sdf_probe_update.comp`'s set 0. `None` when the scene does not supply the update activation
+        // (the default GI-OFF path); the recorder then skips the update pass entirely (the 0%-gate,
+        // byte-identical command stream). NOT ringed — every input is a single device-only instance
+        // (plan §2.2 ring audit): the two atlas storage images are the SAME textures the resolve set
+        // samples (the update WRITES them, the resolve READS them, ordered by the RDG-derived
+        // update→resolve barrier). On a failure, the prior vocab/resolve/(optional cull/ssao) rings +
+        // the eight image rings MUST be destroyed (the ssao teardown chain shape).
+        let ddgi_update_set: Option<VulkanBindGroup> = match scene.ddgi_update {
+            Some(activation) => {
+                let entries = [
+                    BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
+                    BindGroupEntry::StorageImage { texture: scene.ddgi_irr_texture },
+                    BindGroupEntry::StorageImage { texture: scene.ddgi_depth_texture },
+                    BindGroupEntry::StorageBuffer { buffer: scene.ddgi_classification },
+                    BindGroupEntry::StorageBuffer { buffer: scene.ddgi_ray_table },
+                    BindGroupEntry::StorageBuffer { buffer: scene.light_table },
+                    BindGroupEntry::UniformBuffer { buffer: scene.ddgi_update_ubo },
+                ];
+                let desc = BindGroupDesc::<Vulkan> { layout: activation.layout, entries: &entries };
+                match RhiDevice::create_bind_group(ctx, &desc) {
+                    Ok(g) => Some(g),
+                    Err(e) => {
+                        // SAFETY: the vocab & resolve rings + the (optional) cull & ssao rings + the
+                        // eight image rings were created on `ctx`; referenced by no submission; each
+                        // destroyed exactly once (sets → images via `destroy_ring`). The cull & ssao
+                        // rings are `Option`-guarded (present only when L1 / SSAO wired).
+                        unsafe {
+                            if let Some(ss) = ssao_set {
+                                for g in ss {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
+                            }
+                            if let Some(cs) = cull_set {
+                                for g in cs {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
+                            }
+                            for g in resolve_set {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                            for g in vocab_set {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        destroy_ring(ssao);
+                        destroy_ring(viewt);
+                        destroy_ring(lit);
+                        destroy_ring(material);
+                        destroy_ring(normal);
+                        destroy_ring(albedo);
+                        destroy_ring(depth);
+                        return Err(SwapchainError::DepthImage(e));
+                    }
+                }
+            }
+            None => None,
+        };
+
         // The present-blit set RING, written ONCE here: slot `i` is one COMBINED_IMAGE_SAMPLER
         // pointing at `lit[i]` (the resolve's output for that slot) + the scene's present
         // sampler. RINGED so the present samples the SAME slot the resolve wrote this frame (the
@@ -845,6 +919,11 @@ impl GBufferTargets {
                             if let Some(g) = s.take() {
                                 RhiDevice::destroy_bind_group(ctx, g);
                             }
+                        }
+                        // SDFDDGI I2: the single (non-ringed) update set, `Option`-guarded (present
+                        // only when the update pass is wired).
+                        if let Some(du) = ddgi_update_set {
+                            RhiDevice::destroy_bind_group(ctx, du);
                         }
                         if let Some(ss) = ssao_set {
                             for g in ss {
@@ -889,6 +968,7 @@ impl GBufferTargets {
             resolve_set,
             cull_set,
             ssao_set,
+            ddgi_update_set,
             present_set,
             extent,
         })
@@ -955,12 +1035,18 @@ impl GBufferTargets {
         // SAFETY: per the contract `ctx` is live and nothing references these
         // resources; each was created on `ctx` and is destroyed exactly once, in
         // reverse acquisition order (sets → images). The vocab, resolve & present RINGS
-        // each have `FRAMES_IN_FLIGHT` slots; the cull & SSAO RINGS are `Option`-guarded
-        // (present only when L1 / SSAO were wired); the eight render-target image RINGS
-        // each have `FRAMES_IN_FLIGHT` slots — every slot of every ring is drained.
+        // each have `FRAMES_IN_FLIGHT` slots; the cull & SSAO RINGS + the single DDGI
+        // update set are `Option`-guarded (present only when L1 / SSAO / the DDGI update
+        // pass were wired); the eight render-target image RINGS each have
+        // `FRAMES_IN_FLIGHT` slots — every slot of every ring (and the single set) is drained.
         unsafe {
             for g in self.present_set {
                 RhiDevice::destroy_bind_group(ctx, g);
+            }
+            // SDFDDGI I2: the single (non-ringed) update set, `Option`-guarded (present only when
+            // the update pass was wired).
+            if let Some(du) = self.ddgi_update_set {
+                RhiDevice::destroy_bind_group(ctx, du);
             }
             if let Some(ss) = self.ssao_set {
                 for g in ss {

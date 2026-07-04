@@ -5,7 +5,8 @@
 
 use boyko_ecs::ecs::core::app::{App, Plugin};
 
-use crate::ddgi_config::{DdgiConfig, DdgiResolveSet, ResolvedDdgi, resolve_ddgi_grid};
+use crate::ddgi_config::{DdgiConfig, DdgiResolveSet, ResolvedDdgi};
+use crate::ddgi_update::{DdgiCaps, DdgiUpdateConfig, resolve_ddgi_grid_gated};
 
 /// Registers the DDGI config substrate: inserts [`DdgiConfig`] (default DISABLED —
 /// `ddgi_indirect == false`, the 0%-gate) and its derived [`ResolvedDdgi`] companion, and
@@ -44,18 +45,25 @@ pub struct DdgiPlugin;
 impl Plugin for DdgiPlugin {
     fn build(&self, app: &mut App) {
         // The owner-set cold config (default DISABLED — the 0%-gate) + its derived carrier.
-        // `resolve_ddgi_grid` is the single writer of `ResolvedDdgi`; the default
+        // `resolve_ddgi_grid_gated` is the single writer of `ResolvedDdgi`; the default
         // `ResolvedDdgi` already reads the disabled selection, so the world is correct even
         // before the first policy run.
         app.insert_resource(DdgiConfig::default());
         app.insert_resource(ResolvedDdgi::default());
+        // SDFDDGI I2: the owner-set update knobs (rays/subset/GI_MAX_IT — plan §6 placeholders,
+        // bench-finalized) + the device-storage degrade gate (default `storage_ok = true`; the
+        // HOST overrides it at device boot with the real `DeviceCaps::ddgi_storage_ok()` query,
+        // plan §3). A device lacking B10G11R11/RG16F storage then clamps the resolve to DISABLED.
+        app.insert_resource(DdgiUpdateConfig::default());
+        app.insert_resource(DdgiCaps::default());
 
-        // `resolve_ddgi_grid` joins `DdgiResolveSet` — the by-name ordering seam a consumer
+        // `resolve_ddgi_grid_gated` joins `DdgiResolveSet` — the by-name ordering seam a consumer
         // pins BEFORE (via `.after_set(DdgiResolveSet)`). Set-to-set ordering is
         // add-order-independent; the grid is camera-independent so there is no camera/light
-        // edge to express (see the doc above).
+        // edge to express (see the doc above). It folds the `DdgiCaps` degrade gate into the
+        // resolve (SDFDDGI I2 / plan §3), superseding the ungated `resolve_ddgi_grid`.
         app.add_systems_cfg(|b| {
-            b.add_system(resolve_ddgi_grid).in_set(DdgiResolveSet);
+            b.add_system(resolve_ddgi_grid_gated).in_set(DdgiResolveSet);
         });
     }
 

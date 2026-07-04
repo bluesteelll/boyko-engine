@@ -519,6 +519,53 @@ pub struct SsaoActivation<'a> {
     pub layout: &'a VulkanBindGroupLayout,
 }
 
+/// The SDFDDGI I2 probe-update compute pass activation: the update pipeline + its DEDICATED
+/// 7-binding bind-group LAYOUT, threaded into [`GBufferScene::ddgi_update`] as `Some` to turn the
+/// probe-update pass ON. Mirrors [`SsaoActivation`]'s borrow-bundle shape.
+///
+/// `None` on [`GBufferScene::ddgi_update`] is the OFF path (the DEFAULT — the GI-OFF 0%-gate): the
+/// recorder records NOTHING new (no update descriptor-set write in [`GBufferTargets::create`], no
+/// RDG pass / dispatch / barrier in [`crate::present::passes::gbuffer`]), so the command stream is
+/// BYTE-IDENTICAL to the pre-I2 path (the grand_showcase golden). The atlas + ray-table + UBO are
+/// allocated regardless (like the SSAO image), but stay in boot `SHADER_READ_ONLY_OPTIMAL`, unread.
+/// `Some(_)` is populated ONLY when `ResolvedDdgi::enabled()` — the SAME predicate driving the
+/// LightBuf word-7 GI gate, so the update dispatch and the resolve read never disagree.
+///
+/// # Borrow bundle
+///
+/// The caller OWNS the update pipeline + layout (in `boyko_render`'s `DdgiUpdateResources`) and
+/// tears them down; the `'a` lifetime ties this activation to those borrows for the frame call.
+/// [`GBufferTargets`] writes a SINGLE 7-binding `ddgi_update_set` against [`Self::layout`] ONCE per
+/// extent (NOT `[FRAMES_IN_FLIGHT]` — every input is non-ringed per plan §2.2/§7: the update pass
+/// binds neither the ringed camera UBO nor any ringed input). The dispatch is sized to the current
+/// round-robin subset: `groups_x = DDGI_PROBE_COUNT / subset_n` blocks (one block per active probe).
+///
+/// `#[derive(Clone, Copy)]` — a pair of borrows plus the dispatch group count, flipped between
+/// frames with no re-record.
+#[derive(Clone, Copy)]
+pub struct DdgiUpdateActivation<'a> {
+    /// The I2 probe-update compute pipeline (`sdf_probe_update_it*.comp` /
+    /// [`crate::compute::sdf_probe_update_spirv`]): its layout declares [`Self::layout`] at `set 0`.
+    /// The shader reads NO push constant (every param rides the b6 `DdgiUpdate` UBO, like SSAO's
+    /// camera UBO), but the arming site MUST still create the pipeline with `push_constant_bytes: 4`
+    /// (the standard shared compute push range this RHI mandates — a `0`/empty range is rejected;
+    /// Vulkan allows a declared-but-unread range). The recorder pushes nothing. It binds the pipeline
+    /// + the single bind group + dispatches [`Self::dispatch_group_count_x`] blocks AFTER the marcher
+    /// + the L0 light-table copy, BEFORE the resolve.
+    pub pipeline: &'a ComputePipeline,
+    /// The DEDICATED 7-binding update bind-group LAYOUT { `Buf` STORAGE @0 (R), `gIrrOut` STORAGE
+    /// image @1 (W), `gDepthOut` STORAGE image @2 (W), `Classification` STORAGE @3 (RW), `RayTable`
+    /// STORAGE @4 (R), `LightBuf` STORAGE @5 (R), `DdgiUpdate` UNIFORM @6 } — matching
+    /// `sdf_probe_update.comp`'s set 0. The renderer writes a single `ddgi_update_set` against it
+    /// once per extent (the caller-owned bind group in `DdgiUpdateResources` may also be reused).
+    pub layout: &'a VulkanBindGroupLayout,
+    /// The number of thread-BLOCKS to dispatch (`groups_x`) — one `[numthreads(64,1,1)]` block per
+    /// ACTIVE probe in this frame's round-robin subset, i.e. `DDGI_PROBE_COUNT / subset_n` (exact
+    /// division; `subset_n` divides `DDGI_PROBE_COUNT = 2048`). The shader maps block `b` → probe
+    /// `b * subset_n + (frame_index % subset_n)`. `cmd_dispatch(dispatch_group_count_x, 1, 1)`.
+    pub dispatch_group_count_x: u32,
+}
+
 /// Pillar B increment B3: the per-instance TRS interpolation compute PRE-PASS activation
 /// threaded into [`GBufferScene::interp`] to turn the interp pass ON. Mirrors
 /// [`SsaoActivation`]'s borrow-bundle shape: a per-frame `Copy` bundle the caller rebuilds
@@ -1057,6 +1104,28 @@ pub struct GBufferScene<'a> {
     /// WORLD-FIXED (Decision D1), so this is a SINGLE buffer, NOT a per-FIF ring (unlike the
     /// camera-dependent CSM/atlas UBOs). Bound at resolve binding 18. UNREAD at I0.
     pub ddgi_grid_ubo: &'a BoundBuffer,
+    /// SDFDDGI I2: the probe-update compute pass activation. `None` = the OFF path (the DEFAULT —
+    /// the GI-OFF 0%-gate): NO update RDG pass / set-write / dispatch / barrier is recorded, so the
+    /// command stream is BYTE-IDENTICAL to the pre-I2 path (the grand_showcase golden). `Some(_)` is
+    /// populated by `boyko_render`'s activation-populate system ONLY when `ResolvedDdgi::enabled()`:
+    /// [`GBufferTargets`] writes the single 7-binding `ddgi_update_set`, and AFTER the marcher + the
+    /// L0 light-table copy, BEFORE the resolve, the recorder records the `ddgi_update` RDG pass +
+    /// binds + dispatches. The update→resolve atlas barrier is DERIVED BY THE RDG at the resolve.
+    pub ddgi_update: Option<DdgiUpdateActivation<'a>>,
+    /// SDFDDGI I2: the per-probe CLASSIFICATION storage buffer (1 u32/probe — `DdgiAtlas::
+    /// classification()`), bound at the update set @3 (RW) and named as an RDG READ resource so the
+    /// derived barrier chain covers it. ALWAYS supplied (bound only when the update set is written,
+    /// i.e. `ddgi_update.is_some()`). Its handle rides the scene so the sink can resolve it.
+    pub ddgi_classification: &'a BoundBuffer,
+    /// SDFDDGI I2: the boot-static Fibonacci RAY-TABLE storage buffer (`rays_per_probe` `float4`s —
+    /// `DdgiUpdateResources`), bound at the update set @4 (R). ALWAYS supplied; used only on the
+    /// update ON path. Boot-uploaded ONCE (identity ray-rotation at I2), so it is non-ringed.
+    pub ddgi_ray_table: &'a BoundBuffer,
+    /// SDFDDGI I2: the update-pass parameter UBO (`DdgiUpdateUbo` — `DdgiUpdateResources`), bound at
+    /// the update set @6. Host-written when the activation is populated (grid origin/spacing/dims +
+    /// subset + ray/light counts). ALWAYS supplied; read only on the update ON path. Non-ringed (I2
+    /// ships identity ray-rotation → the UBO is effectively static, plan §2.3/§7).
+    pub ddgi_update_ubo: &'a BoundBuffer,
     /// Shadow Phase 5 Inc-1-GPU: the sparse spot/point DEPTH-PASS activation. `None` = the OFF path
     /// (the default, byte-identical command stream): NO depth pass is recorded, the resolve's
     /// `punctual_shadow_mode` header gate is 0, and the always-bound atlas map/sampler/UBO are

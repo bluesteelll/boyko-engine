@@ -28,10 +28,10 @@ use boyko_input::{ButtonState, KeyCode, RawInputEvent};
 use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
 #[cfg(windows)]
 use boyko_render::{
-    CsmCasterScratch, MeshRegistry, MeshRenderScratch, ResolvedCsm, ResolvedShadowAtlas, RhiContext,
-    SdfEditStaging, collect_sdf_edits, gbuffer_push_from_view, upload_atlas_ring, upload_camera_ring,
-    upload_csm_ring, upload_instance_models, upload_light_table, upload_pair_out_slot,
-    upload_pair_ring, upload_sdf_edit_list,
+    CsmCasterScratch, DdgiCaps, MeshRegistry, MeshRenderScratch, ResolvedCsm, ResolvedShadowAtlas,
+    RhiContext, SdfEditStaging, collect_sdf_edits, gbuffer_push_from_view, upload_atlas_ring,
+    upload_camera_ring, upload_csm_ring, upload_instance_models, upload_light_table,
+    upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
 };
 #[cfg(windows)]
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
@@ -133,6 +133,18 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // The R4 host probe (WindowInfo-adjacent, same post-present publish step):
     // lets headless smokes assert the light-upload gating + CSM arming decisions.
     app.world_mut().insert_resource(HostFrameStats::default());
+
+    // ── SDFDDGI I2 (plan §3): OVERRIDE the `DdgiPlugin`'s default `DdgiCaps`
+    // (storage_ok = true) with the REAL device query now that the device is
+    // booted. `resolve_ddgi_grid_gated` reads this to CLAMP the DDGI resolve to
+    // DISABLED when the device lacks B10G11R11/RG16F STORAGE — degrading (not
+    // fail-fasting) a GI-enabled config on an unsupported device, so the future
+    // armed pass never binds a non-storage atlas as a storage image
+    // (validation error / device loss). The same `ctx` whose
+    // `DdgiAtlas::create` already read these caps to drop the STORAGE bit is
+    // reachable here; `insert_resource` REPLACES the plugin's default.
+    app.world_mut()
+        .insert_resource(DdgiCaps::new(ctx.device_caps().ddgi_storage_ok()));
 
     // ── Windowed `AppExit` semantics: insert-IF-ABSENT (plan D6; the legacy
     // headless path keeps its unconditional insert).

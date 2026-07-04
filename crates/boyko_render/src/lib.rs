@@ -86,6 +86,14 @@ pub mod ddgi_config;
 /// substrate and schedules the cold grid-resolve policy under
 /// [`DdgiResolveSet`](ddgi_config::DdgiResolveSet).
 pub mod ddgi_plugin;
+/// SDFDDGI I2 — the probe-update host data + policy: the b6
+/// [`DdgiUpdateUbo`](ddgi_update::DdgiUpdateUbo) byte-mirror, the owner-set
+/// [`DdgiUpdateConfig`](ddgi_update::DdgiUpdateConfig) knobs, the device-storage degrade gate
+/// [`DdgiCaps`](ddgi_update::DdgiCaps) + [`resolve_ddgi_grid_gated`](ddgi_update::resolve_ddgi_grid_gated),
+/// the boot [`fill_fibonacci_ray_table`](ddgi_update::fill_fibonacci_ray_table) precompute, and
+/// the per-frame [`pack_ddgi_update_ubo`](ddgi_update::pack_ddgi_update_ubo) /
+/// [`ddgi_update_dispatch_groups`](ddgi_update::ddgi_update_dispatch_groups) helpers.
+pub mod ddgi_update;
 pub mod error;
 /// The gbuffer ⇄ marcher linear-depth contract (mesh foundation M2): the host
 /// [`GBUFFER_T_MAX`](gbuffer_depth::GBUFFER_T_MAX) mirror + the C2 drift guard
@@ -172,6 +180,12 @@ pub use ddgi_config::{
     sync_ddgi_light_gate,
 };
 pub use ddgi_plugin::DdgiPlugin;
+pub use ddgi_update::{
+    DDGI_DEFAULT_DIMS, DDGI_UPDATE_UBO_BYTES, DEFAULT_RAYS_PER_PROBE, DEFAULT_SUBSET_N, DdgiCaps,
+    DdgiUpdateConfig, DdgiUpdateUbo, GI_MAX_RAYS, ddgi_update_dispatch_groups,
+    fill_fibonacci_ray_table, pack_ddgi_update_ubo, resolve_ddgi_grid_clamped,
+    resolve_ddgi_grid_gated,
+};
 pub use error::GpuColumnError;
 pub use gpu3d_instance::{GPU3D_INSTANCE_SIZE, Gpu3dInstance};
 pub use gpu3d_system::sync_gpu_3d_instances;

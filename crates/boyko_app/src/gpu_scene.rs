@@ -49,10 +49,11 @@ use boyko_rhi_vulkan::texture::VulkanTexture;
 use boyko_sdf_math::SdfEdit;
 
 use boyko_render::{
-    GPU_LIGHT_BYTES, GPU_LIGHT_WORDS, GPU_TRANSFORM3D_BYTES, GpuLight, LIGHT_HEADER_BASE_WORDS,
-    LIGHT_HEADER_BYTES, LightHeaderGpu, LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialGpu,
-    RESOLVED_CSM_BYTES, RESOLVED_DDGI_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, ResolvedCsm,
-    ResolvedShadowAtlas, SHADOW_DIM, Vertex,
+    DDGI_UPDATE_UBO_BYTES, DdgiUpdateUbo, GI_MAX_RAYS, GPU_LIGHT_BYTES, GPU_LIGHT_WORDS,
+    GPU_TRANSFORM3D_BYTES, GpuLight, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_BYTES, LightHeaderGpu,
+    LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialGpu, RESOLVED_CSM_BYTES, RESOLVED_DDGI_BYTES,
+    RESOLVED_SHADOW_ATLAS_BYTES, ResolvedCsm, ResolvedShadowAtlas, SHADOW_DIM, Vertex,
+    fill_fibonacci_ray_table,
 };
 
 /// The boot instance budget: the per-slot instance-model SSBO holds this many
@@ -107,6 +108,13 @@ const SPOT_ATLAS_UBO_BYTES: u64 = RESOLVED_SHADOW_ATLAS_BYTES as u64;
 /// [`RESOLVED_DDGI_BYTES`] (48 B, the resolve's binding-18 shape). A SINGLE buffer (the grid is
 /// world-fixed — Decision D1), NOT a per-FIF ring. Zero-seeded (bound-but-unread on the OFF path).
 const DDGI_UBO_BYTES: u64 = RESOLVED_DDGI_BYTES as u64;
+/// Byte size of the SDFDDGI I2 probe-update UBO — `size_of::<DdgiUpdateUbo>()` via
+/// [`DDGI_UPDATE_UBO_BYTES`] (48 B, the update set's b6 shape). A SINGLE buffer (identity
+/// ray-rotation at I2 → static UBO, no per-FIF ring). Zero-seeded (bound-but-unread on the OFF path).
+const DDGI_UPDATE_UBO_SIZE: u64 = DDGI_UPDATE_UBO_BYTES as u64;
+/// Byte size of the SDFDDGI I2 Fibonacci ray-table STORAGE buffer — `GI_MAX_RAYS` `float4`s (16 B
+/// each). Boot-filled ONCE with the spherical-Fibonacci directions; non-ringed (static, world-fixed).
+const DDGI_RAY_TABLE_BYTES: u64 = (GI_MAX_RAYS as u64) * 16;
 
 /// Copies a `u32` word stream into a mapped host-coherent buffer.
 ///
@@ -224,6 +232,17 @@ struct CsmResources {
     /// structural gate (`deferred_pbr.hlsl`), so on the OFF path they never run at all (not merely
     /// ×0), and the swap is byte-identical.
     ddgi_atlas: DdgiAtlas,
+    /// SDFDDGI I2: the boot-static Fibonacci RAY-TABLE storage buffer (`GI_MAX_RAYS` `float4`s),
+    /// boot-filled ONCE with the spherical-Fibonacci directions (identity ray-rotation at I2). A
+    /// single host-coherent STORAGE buffer (RHI-owned device buffer — Principle 0, not a host
+    /// `Vec`); non-ringed (the table is static, world-fixed grid). Bound at the update set @4 (R);
+    /// bound-but-UNREAD while the GI update pass is OFF (the default 0%-gate — `ddgi_update == None`).
+    ddgi_ray_table: BoundBuffer,
+    /// SDFDDGI I2: the probe-update parameter UBO (`DdgiUpdateUbo`, 48 B — the b6 cbuffer mirror),
+    /// zero-seeded. A single host-coherent buffer (I2 ships identity ray-rotation → the UBO is
+    /// effectively static, so no per-FIF ring). Bound at the update set @6; bound-but-UNREAD while
+    /// the GI update pass is OFF (the default 0%-gate).
+    ddgi_update_ubo: BoundBuffer,
     point_depth_pipeline: VulkanGraphicsPipeline,
     point_depth_vs: VulkanShaderModule,
     point_depth_fs: VulkanShaderModule,
@@ -375,6 +394,56 @@ impl CsmResources {
         let ddgi_atlas =
             DdgiAtlas::create(device).expect("invariant: SDFDDGI probe atlas create (setup stage)");
 
+        // SDFDDGI I2: the boot-static Fibonacci RAY-TABLE storage buffer — a single host-coherent
+        // STORAGE buffer boot-filled ONCE with `GI_MAX_RAYS` spherical-Fibonacci directions (identity
+        // ray-rotation at I2). Bound at the update set @4; bound-but-unread while the GI update pass is
+        // OFF (the default 0%-gate — `ddgi_update == None`). Principle 0: an RHI-owned device buffer,
+        // not a host `Vec`.
+        let ddgi_ray_table = {
+            let b = RhiDevice::create_buffer(
+                device,
+                &BufferDesc {
+                    size: DDGI_RAY_TABLE_BYTES,
+                    usage: BufferUsage::STORAGE,
+                    location: MemoryLocation::HostVisibleCoherent,
+                },
+            )
+            .expect("invariant: SDFDDGI ray-table create");
+            let mapped = RhiDevice::buffer_mapped_ptr(device, &b)
+                .expect("invariant: host-visible DDGI ray table is mapped");
+            // Fill the mapped bytes with the unit spherical-Fibonacci directions (the CPU precompute
+            // writes directly into the mapped slice — no host scratch `Vec`).
+            // SAFETY: `mapped` points at `DDGI_RAY_TABLE_BYTES` host-coherent bytes (= `GI_MAX_RAYS`
+            // `[f32; 4]`s); the slice covers exactly that region and every `[f32; 4]` is a POD, so the
+            // reinterpret + write only touches owned, correctly-sized memory.
+            let rays: &mut [[f32; 4]] = unsafe {
+                core::slice::from_raw_parts_mut(mapped.as_ptr().cast::<[f32; 4]>(), GI_MAX_RAYS as usize)
+            };
+            fill_fibonacci_ray_table(rays);
+            b
+        };
+
+        // SDFDDGI I2: the probe-update parameter UBO — a single host-coherent buffer (identity
+        // ray-rotation → static UBO, no per-FIF ring). Zero-seeded ⇒ bound-but-unread on the OFF path.
+        let ddgi_update_ubo = {
+            let b = RhiDevice::create_buffer(
+                device,
+                &BufferDesc {
+                    size: DDGI_UPDATE_UBO_SIZE,
+                    usage: BufferUsage::UNIFORM,
+                    location: MemoryLocation::HostVisibleCoherent,
+                },
+            )
+            .expect("invariant: SDFDDGI update UBO create");
+            let mapped = RhiDevice::buffer_mapped_ptr(device, &b)
+                .expect("invariant: host-visible DDGI update UBO is mapped");
+            // Zero-seed = `DdgiUpdateUbo::ZERO` (bound-but-unread while the update pass is OFF).
+            zero_fill(mapped, DDGI_UPDATE_UBO_SIZE as usize);
+            // Pin the mirror shape against the host buffer size (a drift is a bug).
+            debug_assert_eq!(DDGI_UPDATE_UBO_SIZE as usize, size_of::<DdgiUpdateUbo>());
+            b
+        };
+
         let point_depth_vs = RhiDevice::create_shader_module(device, punctual_depth_vs_spirv())
             .expect("invariant: punctual point depth VS module create");
         let point_depth_fs = RhiDevice::create_shader_module(device, punctual_depth_fs_spirv())
@@ -427,6 +496,8 @@ impl CsmResources {
             atlas_ubo,
             ddgi_ubo,
             ddgi_atlas,
+            ddgi_ray_table,
+            ddgi_update_ubo,
             point_depth_pipeline,
             point_depth_vs,
             point_depth_fs,
@@ -494,6 +565,10 @@ impl CsmResources {
             RhiDevice::destroy_graphics_pipeline(device, self.point_depth_pipeline);
             RhiDevice::destroy_shader_module(device, self.point_depth_fs);
             RhiDevice::destroy_shader_module(device, self.point_depth_vs);
+            // SDFDDGI I2: the probe-update UBO + Fibonacci ray-table (reverse creation order —
+            // created after ddgi_atlas).
+            RhiDevice::destroy_buffer(device, self.ddgi_update_ubo);
+            RhiDevice::destroy_buffer(device, self.ddgi_ray_table);
             // SDFDDGI I1: the probe atlas + classification buffer + LINEAR sampler (reverse creation
             // order — created after ddgi_ubo). `DdgiAtlas::destroy` is `unsafe` on the same device-idle
             // contract this block already upholds (the caller drained the device).
@@ -1411,6 +1486,17 @@ impl GpuSceneBundles {
             ddgi_depth_texture: self.csm.ddgi_atlas.depth(),
             ddgi_depth_sampler: self.csm.ddgi_atlas.sampler(),
             ddgi_grid_ubo: &self.csm.ddgi_ubo,
+            // SDFDDGI I2: the probe-update pass stays OFF on the host path (the GI-OFF 0%-gate —
+            // `DdgiConfig::ddgi_indirect == false`): `ddgi_update = None`, so NO update RDG pass /
+            // set-write / dispatch / barrier is recorded and the command stream is byte-identical to
+            // the pre-I2 golden. The classification / ray-table / update-UBO handles are ALWAYS
+            // supplied (allocated regardless, like the atlas) so the RDG sink can resolve them — but
+            // they are unread while the pass is off. Arming the pass (populating `ddgi_update`) is the
+            // bench-derived follow-up the orchestrator wires after `ddgi_probe_gi_cost`.
+            ddgi_update: None,
+            ddgi_classification: self.csm.ddgi_atlas.classification(),
+            ddgi_ray_table: &self.csm.ddgi_ray_table,
+            ddgi_update_ubo: &self.csm.ddgi_update_ubo,
             // The punctual (spot/point) depth-pass activation (the punctual host rung): built from
             // the SAME ResolvedShadowAtlas the runner memcpys into this slot's atlas UBO (the O1
             // single-matrix pin — LE float bytes == the in-memory f32s the UBO copy carries on

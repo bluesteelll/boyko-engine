@@ -496,22 +496,25 @@ fn compile_is_idempotent_and_reset_reuses_capacity() {
 }
 
 /// Pillar B B3 refined-B: the interp-ON path is PURELY ADDITIVE, and the SHARED instance
-/// ring (`interp_model_out`, `declare_gbuffer_graph`'s ResId 16) that the interp compute
-/// writes is read at VERTEX by THREE passes — the raster G-buffer pass AND the CSM cascade
-/// depth pass AND the punctual atlas depth pass, all binding the same physical instance SSBO
-/// (`scene.instance_bind_group`; see `gbuffer.rs` — the csm/atlas VS "binds the SAME instance
-/// SSBO the main pass binds"). The graph derives EXACTLY ONE COMPUTE→VERTEX RAW barrier for
-/// that ring, at the FIRST reader (the raster pass), and that single barrier covers all three
-/// readers by Vulkan memory-dependency semantics (a memory dependency makes the interp write
-/// available/visible to every subsequent same-stage access; the later csm/atlas VERTEX reads
-/// need no re-barrier). The refined-B topology faithful to `declare_gbuffer_graph`:
+/// ring (`interp_model_out`, `declare_gbuffer_graph`'s ResId 20 after the SDFDDGI I2 buffer
+/// reshuffle — DDGI classification/ray-table took ResIds 16/17, so the interp trio shifted to
+/// 18/19/20) that the interp compute writes is read at VERTEX by THREE passes — the raster
+/// G-buffer pass AND the CSM cascade depth pass AND the punctual atlas depth pass, all binding
+/// the same physical instance SSBO (`scene.instance_bind_group`; see `gbuffer.rs` — the
+/// csm/atlas VS "binds the SAME instance SSBO the main pass binds"). The graph derives EXACTLY
+/// ONE COMPUTE→VERTEX RAW barrier for that ring, at the FIRST reader (the raster pass), and that
+/// single barrier covers all three readers by Vulkan memory-dependency semantics (a memory
+/// dependency makes the interp write available/visible to every subsequent same-stage access;
+/// the later csm/atlas VERTEX reads need no re-barrier). The refined-B topology faithful to
+/// `declare_gbuffer_graph`:
 ///   - `interp` pass: `buffer_access(interp_model_out, COMPUTE, WRITE)` — the compute write
-///     of the ring's dynamic slots (graph_bridge.rs L365-369);
+///     of the ring's dynamic slots (the `add_pass("interp")` block in graph_bridge.rs);
 ///   - `raster` pass: `buffer_access(interp_model_out, VERTEX, READ)` — the ONLY declared read
-///     of the ring; this is where the graph derives the single COMPUTE→VERTEX RAW
-///     (graph_bridge.rs L382-388);
+///     of the ring; this is where the graph derives the single COMPUTE→VERTEX RAW (the
+///     interp-gated `buffer_access` in the `raster` pass block in graph_bridge.rs);
 ///   - `csm_depth` / `atlas_depth` passes: declare ONLY their layered depth `image_access`
-///     (graph_bridge.rs L543-549 / L561-567) — they DO NOT declare a `buffer_access` on the
+///     (the `add_pass("csm_depth")` / `add_pass("atlas_depth")` blocks in graph_bridge.rs) —
+///     they DO NOT declare a `buffer_access` on the
 ///     ring; their VS reads of the same physical buffer are covered by the raster barrier plus
 ///     recording order (interp → raster barrier recorded → … → csm → atlas draw; gbuffer.rs
 ///     L217/L894/L1086). Modeling the graph exactly means NOT declaring csm/atlas ring reads.
@@ -548,11 +551,14 @@ fn interp_prepass_adds_exactly_one_shared_ring_compute_to_vertex_barrier() {
     let lit = g.add_image("lit");
     let cascade = g.add_image("cascade");
     let atlas = g.add_image("atlas");
-    // The B3 interp SSBOs. `interp_model_out` (ResId 16 in `declare_gbuffer_graph`) is the
-    // SHARED instance ring; `interp_pairs` is the host-written pair input. Both FIF-ringed /
-    // frame-private ⇒ `add_buffer` (undefined seed), so no cross-frame ordering — only the
-    // intra-frame COMPUTE→VERTEX RAW is derived. ResIds are declared BEFORE the interp pass
-    // (which accesses them), mirroring `declare_gbuffer_graph`.
+    // The B3 interp SSBOs. `interp_model_out` (ResId 20 in `declare_gbuffer_graph` after the
+    // SDFDDGI I2 buffer reshuffle — DDGI classification/ray-table occupy 16/17, so the interp
+    // trio is 18/19/20) is the SHARED instance ring; `interp_pairs` is the host-written pair
+    // input. Both FIF-ringed / frame-private ⇒ `add_buffer` (undefined seed), so no cross-frame
+    // ordering — only the intra-frame COMPUTE→VERTEX RAW is derived. ResIds are declared BEFORE
+    // the interp pass (which accesses them), mirroring `declare_gbuffer_graph`. This test builds
+    // its OWN local frame (not `declare_gbuffer_graph`), so the absolute ResId numbering does not
+    // affect it — the note keeps the cross-reference accurate.
     let interp_pairs = g.add_buffer("interp_pairs");
     let interp_model_out = g.add_buffer("interp_model_out");
 
