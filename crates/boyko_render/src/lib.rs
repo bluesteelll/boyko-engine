@@ -131,6 +131,21 @@ pub mod mesh_draw;
 /// The renderer-owned mesh asset table (mesh foundation M2): [`MeshRegistry`] /
 /// [`MeshGpu`] / [`Vertex`], the GPU vertex+index buffers a `MeshHandle` indexes.
 pub mod mesh_registry;
+/// HW-RT rung R1 — the dormant unified ray / acceleration-structure backend seam:
+/// the [`RayBackendConfig`](ray_backend::RayBackendConfig) derived carrier +
+/// [`RayCaps`](ray_backend::RayCaps) device-tier input Resources, the pure
+/// [`resolve_ray_backend`](ray_backend::resolve_ray_backend) fit + the cold
+/// [`resolve_ray_backend_system`](ray_backend::resolve_ray_backend_system) writer,
+/// the [`RayBackend`](ray_backend::RayBackend) / [`RayWorkload`](ray_backend::RayWorkload)
+/// / [`RayGeom`](ray_backend::RayGeom) vocab, and the
+/// [`RayResolveSet`](ray_backend::RayResolveSet) / [`AsBuildSet`](ray_backend::AsBuildSet)
+/// ordering seams. Resolves all-software for every device tier in R1 (dormant — no
+/// rendered-pixel change).
+pub mod ray_backend;
+/// HW-RT rung R1 — the [`RayPlugin`](ray_plugin::RayPlugin) that seeds the dormant
+/// ray-backend substrate and schedules the cold resolve under
+/// [`RayResolveSet`](ray_backend::RayResolveSet).
+pub mod ray_plugin;
 pub mod render3d_plugin;
 /// Host plan R7 — the SDF instance path: the per-entity
 /// [`SdfPrimitive`](sdf_edit::SdfPrimitive) component (an `SdfEdit` carrier), the reused
@@ -180,6 +195,15 @@ pub use ddgi_config::{
     sync_ddgi_light_gate,
 };
 pub use ddgi_plugin::DdgiPlugin;
+pub use ray_backend::{
+    AsBuildSet, RAY_BACKEND_CONFIG_BYTES, RayBackend, RayBackendConfig, RayCaps, RayGeom,
+    RayResolveSet, RayWorkload, resolve_ray_backend, resolve_ray_backend_system,
+};
+pub use ray_plugin::RayPlugin;
+// HW-RT rung R1: re-export `RtTier` (defined in `boyko_rhi_vulkan::device`) since the
+// crate surfaces the ray-caps tier (`RayCaps`) — a consumer that fills `RayCaps` from a
+// device query gets the tier type from here.
+pub use boyko_rhi_vulkan::device::RtTier;
 pub use ddgi_update::{
     DDGI_DEFAULT_DIMS, DDGI_UPDATE_UBO_BYTES, DEFAULT_RAYS_PER_PROBE, DEFAULT_SUBSET_N, DdgiCaps,
     DdgiUpdateConfig, DdgiUpdateUbo, GI_MAX_RAYS, ddgi_update_dispatch_groups,

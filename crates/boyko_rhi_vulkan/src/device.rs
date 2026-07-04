@@ -148,6 +148,32 @@ pub struct InstanceConfig {
     pub windowed: bool,
 }
 
+/// HW-RT rung R1: the ray-tracing capability TIER a device resolves to — the
+/// dormant seam a later rung's backend routing gates on.
+///
+/// Derived from [`DeviceCaps`] via [`DeviceCaps::rt_tier`], NOT stored: the tier
+/// is a pure function of the recorded RT feature bits. In R1 those bits are
+/// hard-wired `false` (no `VK_KHR_ray_query`/`acceleration_structure` extension
+/// is requested), so `rt_tier()` returns [`RtTier::Absent`] for EVERY device —
+/// the dormancy anchor. R2a (`feature=hwrt`) enables the real presence+enable
+/// query and the `Weak`/`Strong` arms come alive.
+///
+/// `#[repr(u8)]` for a compact, stable discriminant a later config table may
+/// index by. Ordered by capability (`Absent < Weak < Strong`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum RtTier {
+    /// No usable hardware ray tracing (`ray_query == false`). Every device in R1
+    /// — the software-only path is the only honest selection.
+    Absent = 0,
+    /// Hardware ray query WITHOUT shader-execution-reorder (`ray_query == true`,
+    /// `ray_reorder == false`). Reserved for R2a; unreachable in R1.
+    Weak = 1,
+    /// Hardware ray query WITH shader-execution-reorder (`ray_query == true`,
+    /// `ray_reorder == true`). Reserved for R2a; unreachable in R1.
+    Strong = 2,
+}
+
 /// Minimal physical-device capabilities queried ONCE at device-create (Render P1b),
 /// alongside the `dynamicRendering` fail-fast.
 ///
@@ -214,6 +240,34 @@ pub struct DeviceCaps {
     /// subtracting). `0` means the family does not support timestamps → the harness
     /// skips (see [`Self::timestamps_usable`]).
     pub timestamp_valid_bits: u32,
+    /// HW-RT rung R1: whether hardware ray query is ENABLED on this device (the
+    /// `VK_KHR_ray_query` extension requested + its feature turned on). The
+    /// field's contract is "ENABLED", not "present": R1 requests NO RT extension
+    /// and adds nothing to `VkDeviceCreateInfo`, so the only honest value is
+    /// `false` (a presence-query reporting `true` while disabled would let a
+    /// consumer arm a null trace path — UB). HARD-WIRED `false` in R1 (the
+    /// dormancy anchor); R2a (`feature=hwrt`) runs the real presence+enable query.
+    /// [`Self::rt_tier`] gates on this, so `rt_tier() == Absent` for every device.
+    pub ray_query: bool,
+    /// HW-RT rung R1: whether hardware shader-execution-reorder is ENABLED
+    /// (`VK_NV_ray_tracing_invocation_reorder` or equivalent). HARD-WIRED `false`
+    /// in R1; distinguishes [`RtTier::Weak`] from [`RtTier::Strong`] once
+    /// [`Self::ray_query`] is `true` (R2a). Unread in R1 (`ray_query == false`
+    /// short-circuits `rt_tier()` to `Absent` first).
+    pub ray_reorder: bool,
+    /// HW-RT rung R1: `VkPhysicalDeviceProperties::vendorID` — the PCI vendor ID
+    /// (real value, populated at the boot site; the R3 per-GPU calibration-cache
+    /// key). RECORDED ONLY: nothing branches on it in R1 (`rt_tier()` gates on
+    /// [`Self::ray_query`], which is `false`), so a real ID arms nothing.
+    pub vendor_id: u32,
+    /// HW-RT rung R1: `VkPhysicalDeviceProperties::deviceID` — the PCI device ID
+    /// (real value; part of the R3 calibration-cache key). RECORDED ONLY (see
+    /// [`Self::vendor_id`]).
+    pub device_id: u32,
+    /// HW-RT rung R1: `VkPhysicalDeviceProperties::driverVersion` — the
+    /// vendor-encoded driver version (real value; part of the R3
+    /// calibration-cache key). RECORDED ONLY (see [`Self::vendor_id`]).
+    pub driver_version: u32,
 }
 
 impl DeviceCaps {
@@ -264,6 +318,27 @@ impl DeviceCaps {
             u64::MAX
         } else {
             (1u64 << self.timestamp_valid_bits) - 1
+        }
+    }
+
+    /// HW-RT rung R1: the ray-tracing [`RtTier`] this device resolves to — the
+    /// dormant seam the later backend routing gates on. Pure function of the
+    /// recorded RT feature bits: no hardware ray query ⇒ [`RtTier::Absent`]; ray
+    /// query without reorder ⇒ [`RtTier::Weak`]; ray query with reorder ⇒
+    /// [`RtTier::Strong`].
+    ///
+    /// In R1 [`Self::ray_query`] is hard-wired `false` (no RT extension is
+    /// requested), so this returns [`RtTier::Absent`] for EVERY device — the
+    /// dormancy anchor the byte-identity proof rests on. R2a's real
+    /// presence+enable query brings the `Weak`/`Strong` arms alive.
+    #[inline]
+    pub const fn rt_tier(&self) -> RtTier {
+        if !self.ray_query {
+            RtTier::Absent
+        } else if self.ray_reorder {
+            RtTier::Strong
+        } else {
+            RtTier::Weak
         }
     }
 }
@@ -794,6 +869,15 @@ impl VulkanContext {
         let device_props = query_device_properties(&instance_fns, physical_device);
         device_caps.timestamp_period = device_props.limits.read_f32(LIMITS_OFF_TIMESTAMP_PERIOD);
         device_caps.timestamp_valid_bits = timestamp_valid_bits;
+        // HW-RT rung R1: copy the real GPU identity from the physical-device properties
+        // (`vendor_id`/`device_id`/`driver_version` are typed `u32` at the TOP of
+        // `VkPhysicalDeviceProperties`, NOT in the opaque limits blob — plain field copies,
+        // no offset math). RECORDED ONLY (the R3 calibration-cache key); `ray_query`/
+        // `ray_reorder` stay `false` (no RT extension requested), so `rt_tier() == Absent`
+        // for every device and nothing branches on these IDs in R1.
+        device_caps.vendor_id = device_props.vendor_id;
+        device_caps.device_id = device_props.device_id;
+        device_caps.driver_version = device_props.driver_version;
         if !device_caps.gbuffer_storage_format_ok {
             fail!(BootError::GbufferStorageFormatUnsupported);
         }
@@ -2464,6 +2548,16 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         // the two inputs `query_device_caps` does not itself read.
         timestamp_period: 0.0,
         timestamp_valid_bits: 0,
+        // HW-RT rung R1: `ray_query`/`ray_reorder` stay `false` — R1 requests NO RT
+        // extension, so there is nothing to enable (the dormancy anchor; `rt_tier()`
+        // then returns `Absent` for every device). The `vendor_id`/`device_id`/
+        // `driver_version` are placeholder zeros the boot site overwrites with the real
+        // `VkPhysicalDeviceProperties` values (`query_device_caps` reads no properties blob).
+        ray_query: false,
+        ray_reorder: false,
+        vendor_id: 0,
+        device_id: 0,
+        driver_version: 0,
     }
 }
 
@@ -2784,5 +2878,44 @@ mod tests {
                 + RESOLVE_NEED_UNIFORM_BUFFERS,
             19
         );
+    }
+
+    // ── HW-RT rung R1: the RtTier truth table (plan §8). ──
+
+    use super::{DeviceCaps, RtTier};
+
+    /// Builds a [`DeviceCaps`] varying ONLY the two RT feature bits — every other
+    /// field is a benign placeholder the tier decision never reads. Not a driver
+    /// query: this locks the pure `rt_tier()` truth table without a GPU.
+    fn rt_caps(ray_query: bool, ray_reorder: bool) -> DeviceCaps {
+        DeviceCaps {
+            bindless_capable: false,
+            gbuffer_storage_format_ok: true,
+            viewt_storage_format_ok: true,
+            gbuffer_color_attachment_format_ok: true,
+            r8_unorm_storage_ok: true,
+            atlas_linear_filter_ok: true,
+            ddgi_irr_storage_ok: true,
+            ddgi_depth_storage_ok: true,
+            timestamp_period: 1.0,
+            timestamp_valid_bits: 64,
+            ray_query,
+            ray_reorder,
+            vendor_id: 0,
+            device_id: 0,
+            driver_version: 0,
+        }
+    }
+
+    #[test]
+    fn rt_tier_truth_table() {
+        // `ray_query == false` ⇒ Absent regardless of `ray_reorder` (the dormancy
+        // anchor — the only reachable state in R1).
+        assert_eq!(rt_caps(false, false).rt_tier(), RtTier::Absent);
+        assert_eq!(rt_caps(false, true).rt_tier(), RtTier::Absent);
+        // `ray_query == true` splits on reorder: without ⇒ Weak, with ⇒ Strong
+        // (the R2a arms, unreachable in R1 but pinned here).
+        assert_eq!(rt_caps(true, false).rt_tier(), RtTier::Weak);
+        assert_eq!(rt_caps(true, true).rt_tier(), RtTier::Strong);
     }
 }

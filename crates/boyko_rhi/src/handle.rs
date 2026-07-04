@@ -469,6 +469,7 @@ mod tests {
         type GraphicsPipeline = ();
         type BindGroup = ();
         type BindGroupLayout = ();
+        type AccelerationStructure = ();
     }
 
     impl RhiDevice<MockApi> for MockDevice {

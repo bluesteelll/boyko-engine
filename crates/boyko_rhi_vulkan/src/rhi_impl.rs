@@ -257,6 +257,10 @@ impl RhiApi for Vulkan {
     type GraphicsPipeline = VulkanGraphicsPipeline;
     type BindGroup = VulkanBindGroup;
     type BindGroupLayout = VulkanBindGroupLayout;
+    // HW-RT rung R1: the cheapest placeholder — no `VkAccelerationStructureKHR`
+    // FFI, no verbs, no RT extension. R2a rebinds this to the concrete
+    // `BoundAccelStruct` once `create_acceleration_structure` / build land.
+    type AccelerationStructure = ();
 }
 
 /// The fixed Slice-0 compute layouts shared by every compute pipeline + command

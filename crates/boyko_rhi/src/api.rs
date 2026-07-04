@@ -67,4 +67,12 @@ pub trait RhiApi: Sized + 'static {
     type BindGroup;
     /// A descriptor-set layout. Seam: Phase 6+.
     type BindGroupLayout;
+    /// A ray-tracing acceleration structure (BLAS/TLAS). Seam: HW-RT rung R2a.
+    ///
+    /// Declared now (HW-RT rung R1) as a BARE unbounded associated type — no
+    /// operational-trait bound, no backend verbs, no FFI — so the R2a create /
+    /// build / refit verbs (and the `BoundAccelStruct` binding) land without an
+    /// [`RhiApi`] ABI break, exactly how `Surface`/`Swapchain`/`Texture` were
+    /// declared phases before their verbs. In R1 both backends bind it to `()`.
+    type AccelerationStructure;
 }

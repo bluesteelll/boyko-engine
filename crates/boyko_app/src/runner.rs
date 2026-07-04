@@ -28,10 +28,10 @@ use boyko_input::{ButtonState, KeyCode, RawInputEvent};
 use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
 #[cfg(windows)]
 use boyko_render::{
-    CsmCasterScratch, DdgiCaps, MeshRegistry, MeshRenderScratch, ResolvedCsm, ResolvedShadowAtlas,
-    RhiContext, SdfEditStaging, collect_sdf_edits, gbuffer_push_from_view, upload_atlas_ring,
-    upload_camera_ring, upload_csm_ring, upload_instance_models, upload_light_table,
-    upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
+    CsmCasterScratch, DdgiCaps, MeshRegistry, MeshRenderScratch, RayCaps, ResolvedCsm,
+    ResolvedShadowAtlas, RhiContext, SdfEditStaging, collect_sdf_edits, gbuffer_push_from_view,
+    upload_atlas_ring, upload_camera_ring, upload_csm_ring, upload_instance_models,
+    upload_light_table, upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
 };
 #[cfg(windows)]
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
@@ -145,6 +145,17 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // reachable here; `insert_resource` REPLACES the plugin's default.
     app.world_mut()
         .insert_resource(DdgiCaps::new(ctx.device_caps().ddgi_storage_ok()));
+
+    // HW-RT rung R1 (plan §3/§9): OVERRIDE the `RayPlugin`'s default `RayCaps`
+    // (tier = `Absent`) with the REAL device tier now that the device is booted.
+    // `resolve_ray_backend_system` reads this to select the ray backend per
+    // workload. In R1 `DeviceCaps::ray_query` is hard-wired `false` (no RT
+    // extension requested), so `rt_tier()` returns `Absent` on every device and
+    // the resolve stays all-software — this fill is the tested seam R2a inherits
+    // (the tier goes live once the real presence+enable query lands), NOT a
+    // behavior change. `insert_resource` REPLACES the plugin's default.
+    app.world_mut()
+        .insert_resource(RayCaps::new(ctx.device_caps().rt_tier()));
 
     // ── Windowed `AppExit` semantics: insert-IF-ABSENT (plan D6; the legacy
     // headless path keeps its unconditional insert).

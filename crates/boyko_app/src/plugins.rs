@@ -11,8 +11,9 @@ use boyko_render::instance_model::sync_instance_model_cols;
 use boyko_render::light_system::LightTableStaging;
 use boyko_render::{
     CsmCasterScratch, CsmPlugin, LightingConfig, LightingPlugin, MeshRenderScratch,
-    Render3dPlugin, SdfPlugin, ShadowAtlasPlugin, add_gpu_transform_pack, gather_mesh_draws,
-    gather_shadow_casters, snap_apply, sync_csm_light_gate, sync_punctual_light_gate,
+    RayPlugin, Render3dPlugin, SdfPlugin, ShadowAtlasPlugin, add_gpu_transform_pack,
+    gather_mesh_draws, gather_shadow_casters, snap_apply, sync_csm_light_gate,
+    sync_punctual_light_gate,
 };
 use boyko_scene::{CameraPlugin, FixedSet};
 
@@ -155,6 +156,17 @@ impl Plugin for EnginePlugins {
         // expressible across plugins; a loose one-frame stagger off cold owner state is
         // self-correcting, and the default DISABLED config gates the whole path off).
         app.add_plugin(ShadowAtlasPlugin);
+
+        // HW-RT rung R1 — the dormant unified ray / acceleration-structure seam.
+        // RayPlugin seeds the derived `RayBackendConfig` carrier (default DISABLED —
+        // every cell Software) + its `RayCaps` device-tier input (default `Absent`)
+        // and schedules the cold `resolve_ray_backend_system` under `RayResolveSet`.
+        // Dormant: the resolve is all-software for every tier, no pass reads the
+        // config, and `RayResolveSet` has no command-recording consumer, so the
+        // command stream is byte-identical. The runner OVERRIDES `RayCaps` at device
+        // boot with the real `DeviceCaps::rt_tier()` query (still `Absent` in R1), at
+        // the same site it fills `DdgiCaps`.
+        app.add_plugin(RayPlugin);
 
         // The R7 SDF instance path (composed by DEFAULT): inserts the
         // `SdfEditStaging` gather scratch and registers the one-shot startup
