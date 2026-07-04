@@ -41,6 +41,16 @@ impl BufferUsage {
     /// non-indexed, so this is defined for the `bind_index_buffer` verb but unused).
     pub const INDEX: BufferUsage = BufferUsage(0x0000_0040);
 
+    /// `VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT` (HW-RT rung R2a-2): the buffer can
+    /// return a device address (every AS-input / scratch / AS-backing buffer needs it).
+    pub const SHADER_DEVICE_ADDRESS: BufferUsage = BufferUsage(0x0002_0000);
+    /// `VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR` (HW-RT rung R2a-2): the
+    /// backing buffer an acceleration structure lives in.
+    pub const ACCEL_STRUCTURE_STORAGE: BufferUsage = BufferUsage(0x0010_0000);
+    /// `VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR` (HW-RT R2a-2):
+    /// vertex / index / instance buffers read by an AS build.
+    pub const ACCEL_BUILD_INPUT: BufferUsage = BufferUsage(0x0008_0000);
+
     /// The empty set (no usage bits).
     pub const NONE: BufferUsage = BufferUsage(0);
 

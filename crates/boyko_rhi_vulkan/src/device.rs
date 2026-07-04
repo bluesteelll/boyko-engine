@@ -1063,6 +1063,36 @@ impl VulkanContext {
         self.accel_fns.as_ref()
     }
 
+    /// Whether the shared blocks must carry `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT` (HW-RT
+    /// R2a-2): true only under `hwrt` AND when the device enabled ray query. Always false
+    /// otherwise (byte-identical — the alloc flag / `p_next` chain is never added).
+    #[inline]
+    pub(crate) fn rt_buffer_device_address(&self) -> bool {
+        #[cfg(feature = "hwrt")]
+        {
+            self.device_caps().ray_query
+        }
+        #[cfg(not(feature = "hwrt"))]
+        {
+            false
+        }
+    }
+
+    /// Whether hardware ray query is enabled on this device (HW-RT R2a-2). Exposed for the
+    /// render layer's gated mesh buffer-usage bits (`SHADER_DEVICE_ADDRESS | ACCEL_BUILD_INPUT`
+    /// on a mesh that will be a BLAS build input). Always false without `hwrt` (byte-identical).
+    #[inline]
+    pub fn ray_query_enabled(&self) -> bool {
+        #[cfg(feature = "hwrt")]
+        {
+            self.device_caps().ray_query
+        }
+        #[cfg(not(feature = "hwrt"))]
+        {
+            false
+        }
+    }
+
     /// The cached physical-device memory properties.
     #[inline]
     pub fn memory_properties(&self) -> &VkPhysicalDeviceMemoryProperties {
@@ -1155,6 +1185,7 @@ impl VulkanContext {
             self.device_fns(),
             self.memory_properties(),
             SHARED_HOST_BLOCK_CAPACITY,
+            self.rt_buffer_device_address(),
         )?;
         // Race-free: `&self` is single-threaded; the cell is empty here.
         let _ = self.host_block.set(RefCell::new(block));
@@ -1186,6 +1217,7 @@ impl VulkanContext {
             self.device_fns(),
             self.memory_properties(),
             SHARED_DEVICE_BLOCK_CAPACITY,
+            self.rt_buffer_device_address(),
         )?;
         // Race-free: `&self` is single-threaded; the cell is empty here.
         let _ = self.device_block.set(RefCell::new(block));

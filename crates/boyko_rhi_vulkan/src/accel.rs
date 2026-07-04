@@ -91,7 +91,16 @@ impl AccelFns {
                     device,
                     c"vkGetAccelerationStructureDeviceAddressKHR",
                 )?,
-                get_buffer_device_address: load_one(gdpa, device, c"vkGetBufferDeviceAddressKHR")?,
+                // `bufferDeviceAddress` is enabled as the CORE Vulkan 1.2 feature (NOT the
+                // `VK_KHR_buffer_device_address` extension), so the device exposes the CORE
+                // `vkGetBufferDeviceAddress`; the `KHR`-suffixed alias is present ONLY when
+                // that extension string is enabled (which we never enable — the core feature
+                // bit suffices). Resolve the core name first, falling back to the `KHR` alias
+                // for a driver that somehow exposes only the latter. (A hardware bug this
+                // catches: on the RTX 3060 the `KHR` alias returns null → the whole table
+                // failed to load → `ray_query` never latched, silently disabling HW-RT.)
+                get_buffer_device_address: load_one(gdpa, device, c"vkGetBufferDeviceAddress")
+                    .or_else(|| load_one(gdpa, device, c"vkGetBufferDeviceAddressKHR"))?,
             })
         }
     }

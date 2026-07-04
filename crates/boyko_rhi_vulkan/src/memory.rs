@@ -95,11 +95,19 @@ impl HostVisibleBlock {
     /// `fns` is captured as a raw `*const DeviceFns`; the caller must guarantee it
     /// targets a stable address (the context's boxed fn-table) that outlives the
     /// returned block (plan A1).
+    ///
+    /// `device_address` (HW-RT rung R2a-2): when `true` the allocation is flagged
+    /// [`VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`] (a [`VkMemoryAllocateFlagsInfo`] chained
+    /// into `p_next`) so buffers sub-allocated from it can return a device address — the
+    /// precondition for an acceleration-structure build input / scratch / backing buffer.
+    /// The caller passes `true` ONLY under `hwrt` on a ray-query device; `false` keeps the
+    /// allocation byte-identical to the pre-R2a path (`p_next` stays null).
     pub fn new(
         device: VkDevice,
         fns: &DeviceFns,
         mem_props: &VkPhysicalDeviceMemoryProperties,
         capacity: u64,
+        device_address: bool,
     ) -> Result<Self, MemoryError> {
         debug_assert!(capacity > 0, "block capacity must be non-zero");
 
@@ -111,9 +119,37 @@ impl HostVisibleBlock {
         let memory_type_index = select_memory_type(mem_props, required, u32::MAX)
             .ok_or(MemoryError::NoSuitableMemoryType)?;
 
+        // HW-RT rung R2a-2: the DEVICE_ADDRESS alloc-flag chain, declared BEFORE
+        // `alloc_info` so it outlives the `vkAllocateMemory` call `alloc_info.p_next`
+        // points at. `p_next` is null (byte-identical) unless `device_address`.
+        #[cfg(feature = "hwrt")]
+        let flags_info = crate::ffi::VkMemoryAllocateFlagsInfo {
+            s_type: crate::ffi::ST_MEMORY_ALLOCATE_FLAGS_INFO,
+            p_next: ptr::null(),
+            flags: if device_address {
+                crate::ffi::VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT
+            } else {
+                0
+            },
+            device_mask: 0,
+        };
+        #[cfg(feature = "hwrt")]
+        let p_next: *const c_void = if device_address {
+            (&flags_info as *const crate::ffi::VkMemoryAllocateFlagsInfo).cast()
+        } else {
+            ptr::null()
+        };
+        #[cfg(not(feature = "hwrt"))]
+        let p_next: *const c_void = {
+            // Without `hwrt` the flag struct does not exist; the param is always `false`
+            // (device.rs `rt_buffer_device_address`), so `p_next` stays null — byte-identical.
+            debug_assert!(!device_address, "device_address requires the hwrt feature");
+            ptr::null()
+        };
+
         let alloc_info = VkMemoryAllocateInfo {
             s_type: VkStructureType::MemoryAllocateInfo,
-            p_next: ptr::null(),
+            p_next,
             allocation_size: capacity,
             memory_type_index,
         };
@@ -337,11 +373,17 @@ impl DeviceLocalBlock {
     /// `fns` is captured as a raw `*const DeviceFns`; the caller must guarantee it
     /// targets a stable address (the context's boxed fn-table) that outlives the
     /// returned block (plan A1).
+    ///
+    /// `device_address` (HW-RT rung R2a-2): identical contract to
+    /// [`HostVisibleBlock::new`] — `true` flags the allocation
+    /// [`VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`] (only under `hwrt` on a ray-query device);
+    /// `false` keeps `p_next` null (byte-identical).
     pub fn new(
         device: VkDevice,
         fns: &DeviceFns,
         mem_props: &VkPhysicalDeviceMemoryProperties,
         capacity: u64,
+        device_address: bool,
     ) -> Result<Self, MemoryError> {
         debug_assert!(capacity > 0, "block capacity must be non-zero");
 
@@ -353,9 +395,34 @@ impl DeviceLocalBlock {
             select_memory_type(mem_props, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, u32::MAX)
                 .ok_or(MemoryError::NoSuitableMemoryType)?;
 
+        // HW-RT rung R2a-2: the DEVICE_ADDRESS alloc-flag chain (see `HostVisibleBlock::new`
+        // for the invariant) — declared BEFORE `alloc_info` so it outlives the alloc call.
+        #[cfg(feature = "hwrt")]
+        let flags_info = crate::ffi::VkMemoryAllocateFlagsInfo {
+            s_type: crate::ffi::ST_MEMORY_ALLOCATE_FLAGS_INFO,
+            p_next: ptr::null(),
+            flags: if device_address {
+                crate::ffi::VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT
+            } else {
+                0
+            },
+            device_mask: 0,
+        };
+        #[cfg(feature = "hwrt")]
+        let p_next: *const c_void = if device_address {
+            (&flags_info as *const crate::ffi::VkMemoryAllocateFlagsInfo).cast()
+        } else {
+            ptr::null()
+        };
+        #[cfg(not(feature = "hwrt"))]
+        let p_next: *const c_void = {
+            debug_assert!(!device_address, "device_address requires the hwrt feature");
+            ptr::null()
+        };
+
         let alloc_info = VkMemoryAllocateInfo {
             s_type: VkStructureType::MemoryAllocateInfo,
-            p_next: ptr::null(),
+            p_next,
             allocation_size: capacity,
             memory_type_index,
         };

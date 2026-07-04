@@ -71,6 +71,7 @@
 //!     ctx.device_fns(),
 //!     ctx.memory_properties(),
 //!     16 * 1024 * 1024,
+//!     false, // device_address (HW-RT R2a-2): no VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT
 //! )
 //! .expect("alloc");
 //! let bound = block
@@ -90,6 +91,11 @@ pub mod accel;
 /// typedefs). Gated `hwrt` — absent from the default/golden build (byte-identical).
 #[cfg(feature = "hwrt")]
 pub mod accel_ffi;
+/// HW-RT rung R2a-2: the buffer-based BLAS/TLAS build orchestration (`build_blas` /
+/// `build_tlas` — backing/scratch lifecycle + record/submit/fence). Gated `hwrt` — absent
+/// from the default/golden build (byte-identical).
+#[cfg(feature = "hwrt")]
+pub mod accel_build;
 pub mod brick_atlas;
 pub mod compute;
 pub mod ddgi;

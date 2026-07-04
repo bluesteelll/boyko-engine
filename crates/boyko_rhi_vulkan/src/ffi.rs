@@ -801,6 +801,15 @@ pub const VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR: VkFlags = 0x00
 pub const VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR: VkFlags =
     0x0008_0000;
 
+/// `VkMemoryAllocateFlagBits::VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT` (HW-RT rung R2a-2) — set
+/// in a [`VkMemoryAllocateFlagsInfo`] chained into `VkMemoryAllocateInfo.p_next` so the
+/// allocation's buffers can return a device address (the `SHADER_DEVICE_ADDRESS` buffer-usage
+/// bit alone is NOT enough; the backing MEMORY must carry this allocation flag too, or the
+/// address is garbage — the research-confirmed triple-gate). Consumed by the shared blocks
+/// when ray query is enabled.
+#[cfg(feature = "hwrt")]
+pub const VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT: VkFlags = 0x0000_0002;
+
 /// `VkPipelineStageFlagBits2`-independent 32-bit
 /// `VkPipelineStageFlagBits::VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR` — the
 /// stage an AS build runs at (the source stage of the build→read barrier).
@@ -1313,6 +1322,49 @@ pub struct VkMemoryAllocateInfo {
     pub p_next: *const c_void,
     pub allocation_size: VkDeviceSize,
     pub memory_type_index: u32,
+}
+
+/// `VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO` (HW-RT rung R2a-2) — Vulkan 1.1 core. The
+/// `sType` heading a [`VkMemoryAllocateFlagsInfo`] chained into `VkMemoryAllocateInfo.p_next`.
+///
+/// Typed as a plain `i32` (the same discipline `accel_ffi.rs` uses for the RT `ST_*` values)
+/// rather than a [`VkStructureType`] variant, so the ungated `VkStructureType` enum stays
+/// textually pre-R2a for byte-identity. Value verified against vulkan_core.h.
+#[cfg(feature = "hwrt")]
+pub const ST_MEMORY_ALLOCATE_FLAGS_INFO: i32 = 1_000_060_000;
+
+// R2a-1 lesson: raw-FFI RT sType/flag VALUES matter (abi_guard only pins layout). The two
+// magic numbers below were verified against vulkan_core.h at authoring (see the const docs);
+// these asserts are the REGRESSION LOCK — they trip if a later edit changes the `const` without
+// updating the pinned literal (they do not, by themselves, prove the original value correct).
+#[cfg(feature = "hwrt")]
+const _: () = assert!(
+    ST_MEMORY_ALLOCATE_FLAGS_INFO == 1_000_060_000,
+    "ST_MEMORY_ALLOCATE_FLAGS_INFO must equal VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO"
+);
+#[cfg(feature = "hwrt")]
+const _: () = assert!(
+    VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT == 0x0000_0002,
+    "VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT must equal 0x2"
+);
+
+/// `VkMemoryAllocateFlagsInfo` (HW-RT rung R2a-2) — chained into `VkMemoryAllocateInfo.p_next`
+/// with [`VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`] so buffers bound into the allocation can
+/// return a device address (`vkGetBufferDeviceAddress`).
+///
+/// `#[repr(C)]` matching the C ABI: `sType`\@0 (4 B) + 4 B pad + `pNext`\@8 + `flags`\@16 +
+/// `deviceMask`\@20, size 24, align 8 (the offsets pinned in `abi_guard.rs`).
+#[cfg(feature = "hwrt")]
+#[repr(C)]
+pub struct VkMemoryAllocateFlagsInfo {
+    /// `VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO`.
+    pub s_type: i32,
+    /// The next struct in the chain (null — this is the tail).
+    pub p_next: *const c_void,
+    /// `VkMemoryAllocateFlags` (`VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`).
+    pub flags: VkFlags,
+    /// The device mask (`0` for a single-device group).
+    pub device_mask: u32,
 }
 
 /// `VkBufferCreateInfo`.

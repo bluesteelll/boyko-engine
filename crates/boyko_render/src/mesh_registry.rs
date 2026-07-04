@@ -163,12 +163,35 @@ impl MeshRegistry {
             IndexType::Uint32
         };
 
+        // HW-RT rung R2a-2: on an RT device the mesh is a BLAS build input, so its vertex +
+        // index buffers must carry `ACCEL_BUILD_INPUT | SHADER_DEVICE_ADDRESS` (the shared
+        // host block carries `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT` — device.rs
+        // `rt_buffer_device_address` — so the device-address usage is valid). hwrt-off OR a
+        // non-RT GPU ⇒ `as_bits` is `NONE`, so the usage is unchanged (byte-identical to the
+        // pre-R2a mesh buffers).
+        let as_bits = {
+            #[cfg(feature = "hwrt")]
+            {
+                if ctx.ray_query_enabled() {
+                    BufferUsage::ACCEL_BUILD_INPUT | BufferUsage::SHADER_DEVICE_ADDRESS
+                } else {
+                    BufferUsage::NONE
+                }
+            }
+            #[cfg(not(feature = "hwrt"))]
+            {
+                BufferUsage::NONE
+            }
+        };
+        let vertex_usage = BufferUsage::VERTEX | as_bits;
+        let index_usage = BufferUsage::INDEX | as_bits;
+
         // --- Vertex buffer: copy the model-space vertices in once. ---
         let vertex_bytes = core::mem::size_of_val(vertices) as u64;
         let vertex_buffer = ctx
             .create_buffer(&BufferDesc {
                 size: vertex_bytes,
-                usage: BufferUsage::VERTEX,
+                usage: vertex_usage,
                 location: MemoryLocation::HostVisibleCoherent,
             })
             .expect("invariant: mesh vertex buffer create");
@@ -211,7 +234,7 @@ impl MeshRegistry {
         let index_buffer = ctx
             .create_buffer(&BufferDesc {
                 size: index_bytes.len() as u64,
-                usage: BufferUsage::INDEX,
+                usage: index_usage,
                 location: MemoryLocation::HostVisibleCoherent,
             })
             .expect("invariant: mesh index buffer create");

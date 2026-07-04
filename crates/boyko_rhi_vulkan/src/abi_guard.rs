@@ -86,6 +86,27 @@ const _: () = assert!(
     "BufferUsage::INDEX must equal VK_BUFFER_USAGE_INDEX_BUFFER_BIT"
 );
 
+// ===== HW-RT rung R2a-2 — AS buffer-usage bits (identity-cast in `create_buffer`;
+// gated `hwrt` because they reference the hwrt-only VK usage consts). =====
+#[cfg(feature = "hwrt")]
+const _: () = assert!(
+    boyko_rhi::BufferUsage::SHADER_DEVICE_ADDRESS.bits()
+        == crate::ffi::VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+    "BufferUsage::SHADER_DEVICE_ADDRESS must equal VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT"
+);
+#[cfg(feature = "hwrt")]
+const _: () = assert!(
+    boyko_rhi::BufferUsage::ACCEL_STRUCTURE_STORAGE.bits()
+        == crate::ffi::VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR,
+    "BufferUsage::ACCEL_STRUCTURE_STORAGE must equal VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR"
+);
+#[cfg(feature = "hwrt")]
+const _: () = assert!(
+    boyko_rhi::BufferUsage::ACCEL_BUILD_INPUT.bits()
+        == crate::ffi::VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+    "BufferUsage::ACCEL_BUILD_INPUT must equal VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR"
+);
+
 // ===== ShaderStage (identity-cast in `push_constants`). =====
 const _: () = assert!(
     ShaderStage::VERTEX.bits() == VK_SHADER_STAGE_VERTEX_BIT,
@@ -682,4 +703,14 @@ mod hwrt_accel {
     // BufferDeviceAddressInfo: sType(4)+pad(4)+pNext(8)+buffer(8) = 24.
     const _: () = assert!(size_of::<VkBufferDeviceAddressInfo>() == 24);
     const _: () = assert!(align_of::<VkBufferDeviceAddressInfo>() == 8);
+
+    // --- R2a-2: the DEVICE_ADDRESS alloc-flag chain struct (a driver reads it through the
+    //     `VkMemoryAllocateInfo.p_next` chain during `vkAllocateMemory`). sType(4)+pad(4)+
+    //     pNext(8)+flags(4)+deviceMask(4) = 24, align 8; flags@16, deviceMask@20. ---
+    use crate::ffi::VkMemoryAllocateFlagsInfo;
+    const _: () = assert!(size_of::<VkMemoryAllocateFlagsInfo>() == 24);
+    const _: () = assert!(align_of::<VkMemoryAllocateFlagsInfo>() == 8);
+    const _: () = assert!(offset_of!(VkMemoryAllocateFlagsInfo, p_next) == 8);
+    const _: () = assert!(offset_of!(VkMemoryAllocateFlagsInfo, flags) == 16);
+    const _: () = assert!(offset_of!(VkMemoryAllocateFlagsInfo, device_mask) == 20);
 }
