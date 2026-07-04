@@ -17,7 +17,7 @@ transpose, no repack. This match is the whole reason M3's mesh-id lane makes the
 | Sub-rung | Delivers | Gate | Pixel change |
 |---|---|---|---|
 | **R2a-1** | `feature=hwrt` + RT extension enable + presence → real `DeviceCaps.ray_query`; raw-FFI AS surface (`accel_ffi.rs` structs/PFNs + abi_guard); AS verbs on RhiDevice/RhiCommandEncoder (`#[cold]` erroring defaults, Mock-safe); `BoundAccelStruct` | compile ±hwrt green; abi_guard passes; hwrt-OFF ⇒ device-create bytes UNCHANGED; `ray_query==false` when ext absent | NONE (byte-identical) |
-| **R2a-2** | BLAS build from `MeshRegistry` (per-mesh triangle BLAS) + scratch lifecycle + gated mesh buffer-usage bits; a BLAS/TLAS **GPU smoke** (build+destroy a trivial TLAS, assert `device_address!=0`, no device-lost) | smoke passes on RTX 3060; blas/tlas build_ms bracketed (R0 timestamps); non-hwrt byte-identical | NONE (AS built, never traced) |
+| **R2a-2** ✅ SHIPPED @e2ba0df | BLAS build (per-mesh triangle BLAS) + scratch lifecycle + gated mesh buffer-usage bits; a BLAS/TLAS **GPU smoke** (build+destroy a trivial TLAS, assert `device_address!=0`, no device-lost) | smoke PASSES on RTX 3060 (BLAS×2+TLAS distinct+non-zero addrs, scratch_align=128); non-hwrt byte-identical `58f6c6c3`; clippy-D±hwrt green | NONE (AS built, never traced) |
 | **R2a-3** | per-frame TLAS **RDG pass** under `AsBuildSet`; instance buffer fed from M3 `ring`+`mesh_ids`; the `ACCELERATION_STRUCTURE_WRITE→READ` host barrier; resolve `.after_set(AsBuildSet)` (still samples shadow-maps) | TLAS rebuilt per-frame from live M3; frame clean; `tlas_refit_ms` acceptable; resolve `.spv` untouched ⇒ byte-identical | NONE (TLAS live, not read) |
 | **R2a-4** | the `rayQuery` shadow variant (`deferred_pbr_hwrt.comp.spv`, `#if HWRT` one-body, +TLAS binding 19); variant+layout selected ONLY when hwrt+`ray_query`+`table[Shadow][Mesh]==HardwareTri`; the resolve routes its mesh-shadow term to the TLAS trace | **OWNER-EVAL** (RT mesh shadows vs shadow-map, RTX 3060); degrade paths byte-identical | YES (owner-eval) |
 
@@ -102,6 +102,17 @@ subagents can't run fresh GPU exes (os-740) → the smoke + owner-eval run throu
 **Gate cadence:** each sub-rung — `cargo check --all-targets` ±hwrt + `clippy -D warnings` (touch first) + the
 grand_showcase golden `58f6c6c3` (R2a-1..3 byte-identical) → R2a-4 owner-eval. Windowed dumps `--test-threads=1`,
 `BOYKO_DISABLE_VALIDATION=1`.
+
+## R2a-2 live-run lesson (the smoke's payoff — an R2a-1 bug HW-only could surface)
+`AccelFns::load` resolved `vkGetBufferDeviceAddress**KHR**` → **NULL on the RTX 3060**: we enable the
+CORE Vulkan 1.2 `bufferDeviceAddress` FEATURE, not the `VK_KHR_buffer_device_address` EXTENSION, so
+the `*KHR`-suffixed command alias is never exported (only the extension exports it) — the whole AS
+command table failed to load, `DeviceCaps.ray_query` never latched, and HW-RT was silently disabled
+(the smoke SKIPped as "non-RT GPU" on an RT GPU). **FIX**: resolve the CORE `vkGetBufferDeviceAddress`
+first, `*KHR` as fallback. **GENERAL RULE for the rest of the track**: a feature promoted to core and
+enabled via the core bit exports the CORE command name — resolve that, not the `*KHR` alias. This is
+a THIRD silent class (after wrong sType values, wrong enum values): wrong *command name* — and it is
+invisible to `cargo check` AND to the no-validation box; the live GPU smoke is the only oracle.
 
 ## Research-confirmed constants (2 RT researcher passes, cross-validated vs Khronos + nvpro/Vulkan-Samples)
 - **Enablement chain:** enable the 3 NON-core extension STRINGS `VK_KHR_ray_query` + `VK_KHR_acceleration_structure`
