@@ -542,3 +542,144 @@ const _: () = assert!(
     CullMode::Back.as_u32() == VK_CULL_MODE_BACK_BIT,
     "CullMode::Back must equal VK_CULL_MODE_BACK_BIT"
 );
+
+// ===========================================================================
+// HW-RT rung R2a-1 — acceleration-structure FFI ABI contracts (gated `hwrt`).
+//
+// Every `accel_ffi` struct a driver reads (build-info / geometry / create-info) or
+// WRITES (the size + property structs) MUST match the C ABI or the driver reads/writes
+// out of bounds. These `size_of` / `align_of` / `offset_of!` asserts pin each; the
+// ABI-CRITICAL one is `VkAccelerationStructureInstanceKHR` (a driver reads a `[Self]`
+// array during the TLAS build) — 64 B, align 8, offsets 0/48/52/56 — plus the 48-B
+// row-major bridge (`transform: [[f32;4];3]`) that lets `InstanceModelCol.rows` memcpy in
+// at R2a-3. The whole block is `#[cfg(feature="hwrt")]` so a default build asserts nothing.
+// ===========================================================================
+#[cfg(feature = "hwrt")]
+mod hwrt_accel {
+    use core::mem::{align_of, offset_of, size_of};
+
+    use crate::accel_ffi::{
+        VkAccelerationStructureBuildGeometryInfoKHR, VkAccelerationStructureBuildRangeInfoKHR,
+        VkAccelerationStructureBuildSizesInfoKHR, VkAccelerationStructureCreateInfoKHR,
+        VkAccelerationStructureDeviceAddressInfoKHR, VkAccelerationStructureGeometryDataKHR,
+        VkAccelerationStructureGeometryInstancesDataKHR, VkAccelerationStructureGeometryKHR,
+        VkAccelerationStructureGeometryTrianglesDataKHR, VkAccelerationStructureInstanceKHR,
+        VkAccelerationStructureKHR, VkBufferDeviceAddressInfo,
+        VkPhysicalDeviceAccelerationStructureFeaturesKHR,
+        VkPhysicalDeviceAccelerationStructurePropertiesKHR,
+        VkPhysicalDeviceBufferDeviceAddressFeatures, VkPhysicalDeviceRayQueryFeaturesKHR,
+    };
+
+    // --- The ABI-CRITICAL instance struct: 64 B, align 8, offsets 0/48/52/56. ---
+    const _: () = assert!(
+        size_of::<VkAccelerationStructureInstanceKHR>() == 64,
+        "VkAccelerationStructureInstanceKHR must be 64 bytes (the spec-fixed TLAS instance stride)"
+    );
+    const _: () = assert!(
+        align_of::<VkAccelerationStructureInstanceKHR>() == 8,
+        "VkAccelerationStructureInstanceKHR must be 8-byte aligned"
+    );
+    const _: () = assert!(
+        offset_of!(VkAccelerationStructureInstanceKHR, transform) == 0,
+        "transform must be at offset 0 (a driver reads the 3x4 affine there)"
+    );
+    const _: () = assert!(
+        offset_of!(VkAccelerationStructureInstanceKHR, instance_custom_index_and_mask) == 48,
+        "customIndex|mask word must be at offset 48 (immediately after the 48-B transform)"
+    );
+    const _: () = assert!(
+        offset_of!(VkAccelerationStructureInstanceKHR, instance_sbt_offset_and_flags) == 52,
+        "sbtOffset|flags word must be at offset 52"
+    );
+    const _: () = assert!(
+        offset_of!(VkAccelerationStructureInstanceKHR, acceleration_structure_reference) == 56,
+        "accelerationStructureReference (BLAS device address) must be at offset 56"
+    );
+
+    // --- The 48-B row-major bridge: the `transform` field IS `[[f32;4];3]` (48 B), so a
+    //     `boyko_render::InstanceModelCol.rows` (also `[[f32;4];3]`, 48 B row-major) memcpy
+    //     into it at R2a-3 is a direct 48-byte copy with NO transpose. `boyko_rhi_vulkan`
+    //     cannot name `InstanceModelCol` (that would be an upward dependency cycle); the
+    //     equal-size contract is pinned HERE on the layout type + re-pinned on the render
+    //     side (`INSTANCE_MODEL_COL_BYTES == 48`). ---
+    const _: () = assert!(
+        size_of::<[[f32; 4]; 3]>() == 48,
+        "the 3x4 row-major affine bridge (InstanceModelCol.rows <-> InstanceKHR.transform) must be 48 bytes"
+    );
+    const _: () = assert!(
+        size_of::<[[f32; 4]; 3]>() == size_of::<[f32; 12]>(),
+        "the transform is 12 contiguous f32 with no padding"
+    );
+
+    // --- The handle is a 64-bit non-dispatchable token. ---
+    const _: () = assert!(size_of::<VkAccelerationStructureKHR>() == 8);
+    const _: () = assert!(align_of::<VkAccelerationStructureKHR>() == 8);
+
+    // --- Feature / property query structs (driver-written through the p_next chain). ---
+    // `VkPhysicalDeviceBufferDeviceAddressFeatures`: sType(4)+pad(4)+pNext(8)+3 VkBool32(12)
+    // → 28, rounded up to align 8 = 32.
+    const _: () = assert!(size_of::<VkPhysicalDeviceBufferDeviceAddressFeatures>() == 32);
+    const _: () = assert!(align_of::<VkPhysicalDeviceBufferDeviceAddressFeatures>() == 8);
+    // `VkPhysicalDeviceAccelerationStructureFeaturesKHR`: head(16)+5 VkBool32(20) → 36 → 40.
+    const _: () = assert!(size_of::<VkPhysicalDeviceAccelerationStructureFeaturesKHR>() == 40);
+    const _: () = assert!(align_of::<VkPhysicalDeviceAccelerationStructureFeaturesKHR>() == 8);
+    // `VkPhysicalDeviceRayQueryFeaturesKHR`: head(16)+1 VkBool32(4) → 20 → 24.
+    const _: () = assert!(size_of::<VkPhysicalDeviceRayQueryFeaturesKHR>() == 24);
+    const _: () = assert!(align_of::<VkPhysicalDeviceRayQueryFeaturesKHR>() == 8);
+    // `VkPhysicalDeviceAccelerationStructurePropertiesKHR`: head(16)+3 u64(24)+4 u32(16)+
+    // scratch-align u32(4) = 60 → padded to 64 (align 8). The scratch-align field the caps
+    // query reads sits at offset 56 (16 head + 24 + 16 = 56).
+    const _: () = assert!(size_of::<VkPhysicalDeviceAccelerationStructurePropertiesKHR>() == 64);
+    const _: () = assert!(align_of::<VkPhysicalDeviceAccelerationStructurePropertiesKHR>() == 8);
+    const _: () = assert!(
+        offset_of!(
+            VkPhysicalDeviceAccelerationStructurePropertiesKHR,
+            min_acceleration_structure_scratch_offset_alignment
+        ) == 56
+    );
+
+    // --- Geometry / build / create / size / address structs. ---
+    // TrianglesData: sType(4)+pad(4)+pNext(8)+format(4)+pad(4)+vertexData(8)+stride(8)+
+    // maxVertex(4)+indexType(4)+indexData(8)+transformData(8) = 64.
+    const _: () = assert!(size_of::<VkAccelerationStructureGeometryTrianglesDataKHR>() == 64);
+    const _: () = assert!(align_of::<VkAccelerationStructureGeometryTrianglesDataKHR>() == 8);
+    // InstancesData: sType(4)+pad(4)+pNext(8)+arrayOfPointers(4)+pad(4)+data(8) = 32.
+    const _: () = assert!(size_of::<VkAccelerationStructureGeometryInstancesDataKHR>() == 32);
+    const _: () = assert!(align_of::<VkAccelerationStructureGeometryInstancesDataKHR>() == 8);
+    // The union is as large as its largest arm (the 64-B triangles struct), align 8.
+    const _: () = assert!(size_of::<VkAccelerationStructureGeometryDataKHR>() == 64);
+    const _: () = assert!(align_of::<VkAccelerationStructureGeometryDataKHR>() == 8);
+    // GeometryKHR: sType(4)+pad(4)+pNext(8)+geometryType(4)+pad(4)+geometry(64)+flags(4)+
+    // pad(4) = 96; the union `geometry` starts at offset 24.
+    const _: () = assert!(size_of::<VkAccelerationStructureGeometryKHR>() == 96);
+    const _: () = assert!(align_of::<VkAccelerationStructureGeometryKHR>() == 8);
+    const _: () = assert!(offset_of!(VkAccelerationStructureGeometryKHR, geometry) == 24);
+    // BuildGeometryInfo: sType(4)+pad(4)+pNext(8)+type(4)+flags(4)+mode(4)+pad(4)+src(8)+
+    // dst(8)+geomCount(4)+pad(4)+pGeom(8)+ppGeom(8)+scratch(8) = 80; scratch at offset 72.
+    const _: () = assert!(size_of::<VkAccelerationStructureBuildGeometryInfoKHR>() == 80);
+    const _: () = assert!(align_of::<VkAccelerationStructureBuildGeometryInfoKHR>() == 8);
+    const _: () =
+        assert!(offset_of!(VkAccelerationStructureBuildGeometryInfoKHR, scratch_data) == 72);
+    // BuildRangeInfo: four u32 = 16, align 4 (a driver reads an array of these).
+    const _: () = assert!(size_of::<VkAccelerationStructureBuildRangeInfoKHR>() == 16);
+    const _: () = assert!(align_of::<VkAccelerationStructureBuildRangeInfoKHR>() == 4);
+    // BuildSizesInfo (driver-WRITTEN): sType(4)+pad(4)+pNext(8)+3 VkDeviceSize(24) = 40.
+    const _: () = assert!(size_of::<VkAccelerationStructureBuildSizesInfoKHR>() == 40);
+    const _: () = assert!(align_of::<VkAccelerationStructureBuildSizesInfoKHR>() == 8);
+    const _: () = assert!(
+        offset_of!(
+            VkAccelerationStructureBuildSizesInfoKHR,
+            acceleration_structure_size
+        ) == 16
+    );
+    // CreateInfo: sType(4)+pad(4)+pNext(8)+createFlags(4)+pad(4)+buffer(8)+offset(8)+size(8)+
+    // type(4)+pad(4)+deviceAddress(8) = 64.
+    const _: () = assert!(size_of::<VkAccelerationStructureCreateInfoKHR>() == 64);
+    const _: () = assert!(align_of::<VkAccelerationStructureCreateInfoKHR>() == 8);
+    // DeviceAddressInfo: sType(4)+pad(4)+pNext(8)+accelStruct(8) = 24.
+    const _: () = assert!(size_of::<VkAccelerationStructureDeviceAddressInfoKHR>() == 24);
+    const _: () = assert!(align_of::<VkAccelerationStructureDeviceAddressInfoKHR>() == 8);
+    // BufferDeviceAddressInfo: sType(4)+pad(4)+pNext(8)+buffer(8) = 24.
+    const _: () = assert!(size_of::<VkBufferDeviceAddressInfo>() == 24);
+    const _: () = assert!(align_of::<VkBufferDeviceAddressInfo>() == 8);
+}

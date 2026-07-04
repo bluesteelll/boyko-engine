@@ -769,6 +769,51 @@ pub const VK_KHR_WIN32_SURFACE_EXTENSION_NAME: &core::ffi::CStr = c"VK_KHR_win32
 /// `VK_KHR_swapchain` device-extension name.
 pub const VK_KHR_SWAPCHAIN_EXTENSION_NAME: &core::ffi::CStr = c"VK_KHR_swapchain";
 
+// --- HW-RT rung R2a-1 — ray-query device-extension names + AS buffer-usage /
+//     build-barrier constants (gated `hwrt`: absent from the default/golden build). ---
+
+/// `VK_KHR_acceleration_structure` device-extension name (HW-RT rung R2a-1).
+#[cfg(feature = "hwrt")]
+pub const VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME: &core::ffi::CStr =
+    c"VK_KHR_acceleration_structure";
+/// `VK_KHR_ray_query` device-extension name (inline `rayQuery`; NO ray-tracing-pipeline).
+#[cfg(feature = "hwrt")]
+pub const VK_KHR_RAY_QUERY_EXTENSION_NAME: &core::ffi::CStr = c"VK_KHR_ray_query";
+/// `VK_KHR_deferred_host_operations` device-extension name — a DECLARED dependency of
+/// `VK_KHR_acceleration_structure` (must be enabled even though a GPU-build path never
+/// calls its API; omitting it fails device create).
+#[cfg(feature = "hwrt")]
+pub const VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME: &core::ffi::CStr =
+    c"VK_KHR_deferred_host_operations";
+
+/// `VkBufferUsageFlagBits::VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT` — the buffer can
+/// return a device address via `vkGetBufferDeviceAddress` (required for every AS-input /
+/// scratch / AS-backing buffer). Consumed at R2a-2.
+#[cfg(feature = "hwrt")]
+pub const VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT: VkFlags = 0x0002_0000;
+/// `VkBufferUsageFlagBits::VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR` — the
+/// backing buffer an acceleration structure lives in.
+#[cfg(feature = "hwrt")]
+pub const VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR: VkFlags = 0x0010_0000;
+/// `VkBufferUsageFlagBits::VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR`
+/// — vertex / index / instance buffers read by an AS build.
+#[cfg(feature = "hwrt")]
+pub const VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR: VkFlags =
+    0x0008_0000;
+
+/// `VkPipelineStageFlagBits2`-independent 32-bit
+/// `VkPipelineStageFlagBits::VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR` — the
+/// stage an AS build runs at (the source stage of the build→read barrier).
+#[cfg(feature = "hwrt")]
+pub const VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR: VkFlags = 0x0200_0000;
+/// `VkAccessFlagBits::VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR` — a build's write.
+#[cfg(feature = "hwrt")]
+pub const VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR: VkFlags = 0x0040_0000;
+/// `VkAccessFlagBits::VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR` — a trace's read (the
+/// `rayQuery` resolve at R2a-4; the destination access of the build→read barrier).
+#[cfg(feature = "hwrt")]
+pub const VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR: VkFlags = 0x0020_0000;
+
 // --- Slice-1 format / color-space / present-mode / image enums. ---
 
 /// `VkFormat::VK_FORMAT_B8G8R8A8_UNORM` — a universally-supported swapchain format.

@@ -82,6 +82,14 @@
 //! ```
 
 pub mod abi_guard;
+/// HW-RT rung R2a-1: the `BoundAccelStruct` + the Vulkan acceleration-structure verb
+/// impls. Gated `hwrt` — absent from the default/golden build (byte-identical).
+#[cfg(feature = "hwrt")]
+pub mod accel;
+/// HW-RT rung R2a-1: the raw-FFI acceleration-structure Vulkan surface (structs / PFN
+/// typedefs). Gated `hwrt` — absent from the default/golden build (byte-identical).
+#[cfg(feature = "hwrt")]
+pub mod accel_ffi;
 pub mod brick_atlas;
 pub mod compute;
 pub mod ddgi;

@@ -25,6 +25,10 @@ name = "boyko_render"
 # guard is NOT active.
 default = []
 test-readback = []
+# HW-RT rung R2a-1: forwards to `boyko_rhi_vulkan/hwrt` so a render build can opt
+# into the hardware ray-tracing FFI surface. OFF by default → the shipped/golden
+# render path is byte-identical to R1 (the RT FFI compiles to nothing downstream).
+hwrt = ["boyko_rhi_vulkan/hwrt"]
 
 [dependencies]
 boyko-ecs = { path = "../boyko_ecs" }

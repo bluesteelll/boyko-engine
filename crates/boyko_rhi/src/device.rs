@@ -8,7 +8,10 @@
 //! stable across phases.
 
 use crate::api::RhiApi;
-use crate::descriptor::{BufferDesc, ComputePipelineDesc, GraphicsPipelineDesc, QueryPoolDesc};
+use crate::descriptor::{
+    AsBuildSizes, AsGeometryDesc, AsKind, BufferDesc, ComputePipelineDesc, GraphicsPipelineDesc,
+    QueryPoolDesc,
+};
 use crate::enums::{
     AddressMode, CompareOp, DescriptorKind, Filter, Format, ImageUsage, ShaderStage,
     TextureDimension,
@@ -600,5 +603,101 @@ pub trait RhiDevice<A: RhiApi> {
         _out_ns: &mut [f64],
     ) -> Result<(), Self::Error> {
         Err(RhiError::unsupported("read_query_pool_ns").into())
+    }
+
+    // ===== HW-RT ACCELERATION-STRUCTURE SEAM (rung R2a-1; default bodies keep Mock + ABI) =====
+    // The verbs are declared UNGATED so the trait surface is stable across phases
+    // (mirroring the timestamp seam + the `Texture`/`Surface` seams). Every default
+    // body is `#[cold] #[inline(never)]` and errors `Unsupported` (or drops, for the
+    // destroy verb): the Mock inherits the default, and the Vulkan backend overrides
+    // them ONLY under `feature="hwrt"`. With `hwrt` OFF the Vulkan `AccelerationStructure`
+    // stays `()` and inherits these defaults, so no RT FFI is ever reached — byte-identical.
+
+    /// Queries the scratch + result sizes for one acceleration-structure build
+    /// (`vkGetAccelerationStructureBuildSizesKHR`, HW-RT rung R2a-1) — a host-side
+    /// size query issuing NO GPU work. `kind` selects BLAS/TLAS; `geometry` supplies
+    /// the primitive count (and, for a BLAS, vertex stride / max-vertex). The caller
+    /// sizes the AS-backing buffer to [`AsBuildSizes::as_size`] and the scratch buffer
+    /// to [`AsBuildSizes::build_scratch`] (aligned to
+    /// [`crate::device::RhiDevice`]'s backend `as_scratch_align`).
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; the
+    /// Vulkan backend overrides it under `feature="hwrt"`.
+    #[cold]
+    #[inline(never)]
+    fn get_acceleration_structure_build_sizes(
+        &self,
+        _kind: AsKind,
+        _geometry: &AsGeometryDesc,
+    ) -> Result<AsBuildSizes, Self::Error> {
+        Err(RhiError::unsupported("get_acceleration_structure_build_sizes").into())
+    }
+
+    /// Creates an acceleration structure of `size` bytes over the caller-owned AS-backing
+    /// `buffer` (`vkCreateAccelerationStructureKHR`, HW-RT rung R2a-1). `buffer` must have
+    /// usage `ACCELERATION_STRUCTURE_STORAGE_KHR | SHADER_DEVICE_ADDRESS` and outlive the AS;
+    /// `size` comes from [`AsBuildSizes::as_size`]. Returns the owned
+    /// [`crate::api::RhiApi::AccelerationStructure`], torn down by
+    /// [`Self::destroy_acceleration_structure`].
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; the
+    /// Vulkan backend overrides it under `feature="hwrt"`.
+    #[cold]
+    #[inline(never)]
+    fn create_acceleration_structure(
+        &self,
+        _kind: AsKind,
+        _buffer: &A::Buffer,
+        _size: u64,
+    ) -> Result<A::AccelerationStructure, Self::Error> {
+        Err(RhiError::unsupported("create_acceleration_structure").into())
+    }
+
+    /// Returns the device address of a built acceleration structure
+    /// (`vkGetAccelerationStructureDeviceAddressKHR`, HW-RT rung R2a-1) — the value a
+    /// TLAS instance's `accelerationStructureReference` (or a `rayQuery` binding) needs.
+    /// A non-zero address is required; a zero return signals a mis-flagged buffer (missing
+    /// `SHADER_DEVICE_ADDRESS` / the memory alloc flag) and the caller must fail fast.
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; the
+    /// Vulkan backend overrides it under `feature="hwrt"`.
+    #[cold]
+    #[inline(never)]
+    fn get_acceleration_structure_device_address(
+        &self,
+        _accel: &A::AccelerationStructure,
+    ) -> Result<u64, Self::Error> {
+        Err(RhiError::unsupported("get_acceleration_structure_device_address").into())
+    }
+
+    /// Returns the device address of a buffer (`vkGetBufferDeviceAddressKHR`, HW-RT rung
+    /// R2a-1) — used to feed vertex/index/instance/scratch addresses into an AS build.
+    /// The buffer MUST have been created with `SHADER_DEVICE_ADDRESS` usage AND backed by
+    /// memory allocated with the device-address flag, else the address is garbage.
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; the
+    /// Vulkan backend overrides it under `feature="hwrt"`.
+    #[cold]
+    #[inline(never)]
+    fn get_buffer_device_address(&self, _buffer: &A::Buffer) -> Result<u64, Self::Error> {
+        Err(RhiError::unsupported("get_buffer_device_address").into())
+    }
+
+    /// Destroys an acceleration structure, consuming it
+    /// (`vkDestroyAccelerationStructureKHR`, HW-RT rung R2a-1). Mirrors
+    /// [`Self::destroy_query_pool`]: the default body drops the value (a no-op for a
+    /// backend whose `AccelerationStructure` is zero-sized, e.g. the Mock); the Vulkan
+    /// backend overrides it under `feature="hwrt"` to destroy the `VkAccelerationStructureKHR`.
+    ///
+    /// # Safety
+    /// The GPU must no longer be using `accel` (no submission building/tracing it is
+    /// pending — fence-waited or `wait_idle`'d), and it is destroyed exactly once (the
+    /// by-value move enforces the latter). Its backing buffer must outlive this call.
+    #[cold]
+    #[inline(never)]
+    unsafe fn destroy_acceleration_structure(&self, accel: A::AccelerationStructure) {
+        // Default seam: drop the value. A zero-sized `AccelerationStructure` (Mock) drops
+        // to a no-op; the Vulkan backend with a `VkAccelerationStructureKHR` overrides this.
+        drop(accel);
     }
 }

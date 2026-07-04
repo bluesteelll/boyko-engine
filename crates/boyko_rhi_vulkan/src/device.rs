@@ -268,6 +268,13 @@ pub struct DeviceCaps {
     /// vendor-encoded driver version (real value; part of the R3
     /// calibration-cache key). RECORDED ONLY (see [`Self::vendor_id`]).
     pub driver_version: u32,
+    /// HW-RT rung R2a-1: `VkPhysicalDeviceAccelerationStructurePropertiesKHR
+    /// ::minAccelerationStructureScratchOffsetAlignment` — the byte alignment a build's
+    /// scratch device address MUST satisfy (=128 on Ampere/RTX 3060). `0` when ray query is
+    /// off (`hwrt` compiled out, OR the device lacks the RT extensions): the AS build path
+    /// (R2a-2) is then never reached. RECORDED; consumed by the scratch-buffer suballocator
+    /// at R2a-2 — do NOT trust the buffer memreq alignment for scratch.
+    pub as_scratch_align: u64,
 }
 
 impl DeviceCaps {
@@ -556,6 +563,13 @@ pub struct VulkanContext {
     /// use. Never mapped (plan D3/MF-8). Caches the same plan-A1 `*const DeviceFns`
     /// and is torn down in `Drop` BEFORE `vkDestroyDevice` + the boxed fn-table.
     device_block: OnceCell<RefCell<DeviceLocalBlock>>,
+    /// HW-RT rung R2a-1: the resolved `VK_KHR_acceleration_structure` command table,
+    /// `Some` ONLY when the RT extensions were enabled at device create (mirroring
+    /// `DeviceFns::swapchain: Option<SwapchainDeviceFns>`). `None` when the device lacks
+    /// ray query — the AS verbs then return `Unsupported`. Gated `hwrt`: the field itself
+    /// is absent from a default build, so `VulkanContext`'s layout is textually R1 there.
+    #[cfg(feature = "hwrt")]
+    accel_fns: Option<crate::accel::AccelFns>,
 }
 
 /// The retained OWNING pointer behind [`VulkanContext::boot_singleton`] /
@@ -901,12 +915,24 @@ impl VulkanContext {
             fail!(BootError::SsaoStorageFormatUnsupported);
         }
 
+        // HW-RT rung R2a-1: query ray-query support ONCE (presence + feature + props) BEFORE
+        // device create — its result drives BOTH the RT-extension enable in `create_device`
+        // AND the `accel_fns` load + caps below (a single query, no double-enumeration). On a
+        // non-hwrt build the flag is the hard `false` `RT_ENABLE_DEFAULT` (dormancy anchor).
+        #[cfg(feature = "hwrt")]
+        let rt_caps = supports_ray_query(&instance_fns, gipa, instance, physical_device);
+        #[cfg(feature = "hwrt")]
+        let enable_ray_query = rt_caps.ray_query;
+        #[cfg(not(feature = "hwrt"))]
+        let enable_ray_query = RT_ENABLE_DEFAULT;
+
         // --- 6. Create the logical device + retrieve the queue. ---
         let device = match create_device(
             &instance_fns,
             physical_device,
             queue_family_index,
             config.windowed,
+            enable_ray_query,
         ) {
             Ok(d) => d,
             Err(e) => fail!(e),
@@ -933,6 +959,31 @@ impl VulkanContext {
         // a valid out-pointer for one `VkQueue`.
         unsafe { (device_fns.get_device_queue)(device, queue_family_index, 0, &mut queue) };
 
+        // HW-RT rung R2a-1: when `feature="hwrt"` AND the device advertised + enabled ray
+        // query, resolve the AS command table + populate the RT caps (`ray_query`,
+        // `as_scratch_align`). `create_device` only appends the 3 RT extensions when the
+        // same `supports_ray_query` presence+feature query returned true, so the table
+        // resolves; a non-RT (or `hwrt`-off) device keeps `accel_fns = None` and the R1
+        // caps (`ray_query == false`, `as_scratch_align == 0`).
+        #[cfg(feature = "hwrt")]
+        let accel_fns: Option<crate::accel::AccelFns> = {
+            if rt_caps.ray_query {
+                // SAFETY: `get_device_proc_addr` is the live device's proc-addr fn; the RT
+                // extensions were enabled in `create_device` (same `rt_caps` query), so the
+                // commands resolve.
+                let fns = unsafe {
+                    crate::accel::AccelFns::load(instance_fns.get_device_proc_addr, device)
+                };
+                if fns.is_some() {
+                    device_caps.ray_query = true;
+                    device_caps.as_scratch_align = rt_caps.scratch_align;
+                }
+                fns
+            } else {
+                None
+            }
+        };
+
         Ok(Self {
             module,
             instance,
@@ -953,6 +1004,8 @@ impl VulkanContext {
             compute_layouts: OnceCell::new(),
             host_block: OnceCell::new(),
             device_block: OnceCell::new(),
+            #[cfg(feature = "hwrt")]
+            accel_fns,
         })
     }
 
@@ -999,6 +1052,15 @@ impl VulkanContext {
     #[inline]
     pub fn device_fns(&self) -> &DeviceFns {
         &self.device_fns
+    }
+
+    /// HW-RT rung R2a-1: the resolved acceleration-structure command table, or `None` when
+    /// ray query is not enabled on this device (the AS verbs return `Unsupported`). Gated
+    /// `hwrt` — absent from a default build.
+    #[cfg(feature = "hwrt")]
+    #[inline]
+    pub fn accel_fns_opt(&self) -> Option<&crate::accel::AccelFns> {
+        self.accel_fns.as_ref()
     }
 
     /// The cached physical-device memory properties.
@@ -2333,6 +2395,187 @@ fn supports_dynamic_rendering(fns: &InstanceFns, physical_device: VkPhysicalDevi
     features13.dynamic_rendering == VK_TRUE
 }
 
+/// HW-RT rung R2a-1: the ray-query capability + scratch alignment of a device.
+#[cfg(feature = "hwrt")]
+pub(crate) struct RtCaps {
+    /// Whether the 3 RT extensions are present AND `accelerationStructure` + `rayQuery` +
+    /// `bufferDeviceAddress` are all advertised (the enable precondition).
+    pub ray_query: bool,
+    /// `minAccelerationStructureScratchOffsetAlignment` (=128 on Ampere); `0` when absent.
+    pub scratch_align: u64,
+}
+
+/// HW-RT rung R2a-1: whether hardware ray query is available on `physical_device` — the 3
+/// non-core extension strings (`VK_KHR_acceleration_structure` + `VK_KHR_ray_query` +
+/// `VK_KHR_deferred_host_operations`) all present AND the feature bools
+/// (`accelerationStructure` / `rayQuery` / `bufferDeviceAddress`) all advertised via a
+/// `vkGetPhysicalDeviceFeatures2` p_next chain (mirroring [`supports_dynamic_rendering`]).
+/// Also reads `minAccelerationStructureScratchOffsetAlignment` from a
+/// `vkGetPhysicalDeviceProperties2` chain. Absent ⇒ `ray_query == false` (NEVER a boot
+/// fail: a non-RT GPU boots on the software path). Gated `hwrt`.
+#[cfg(feature = "hwrt")]
+fn supports_ray_query(
+    fns: &InstanceFns,
+    gipa: PfnVkGetInstanceProcAddr,
+    instance: VkInstance,
+    physical_device: VkPhysicalDevice,
+) -> RtCaps {
+    use crate::accel_ffi::{
+        PfnVkEnumerateDeviceExtensionProperties, PfnVkGetPhysicalDeviceProperties2,
+        ST_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+        ST_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR,
+        ST_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES, ST_PHYSICAL_DEVICE_FEATURES_2,
+        ST_PHYSICAL_DEVICE_PROPERTIES_2, ST_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+        VkPhysicalDeviceAccelerationStructureFeaturesKHR,
+        VkPhysicalDeviceAccelerationStructurePropertiesKHR,
+        VkPhysicalDeviceBufferDeviceAddressFeatures, VkPhysicalDeviceProperties2,
+        VkPhysicalDeviceRayQueryFeaturesKHR,
+    };
+
+    let absent = RtCaps { ray_query: false, scratch_align: 0 };
+
+    // Resolve the two instance-scope queries this path needs (the standing `InstanceFns`
+    // table does not carry them). `vkGetPhysicalDeviceProperties2` is Vulkan 1.1 core;
+    // `vkEnumerateDeviceExtensionProperties` is 1.0 core — both always resolvable.
+    // SAFETY: `gipa` is the live instance's `vkGetInstanceProcAddr`; the two names are core
+    // commands that always resolve; each is reinterpreted as its PFN typedef (ABI-matched).
+    let (enum_ext, get_props2): (
+        PfnVkEnumerateDeviceExtensionProperties,
+        PfnVkGetPhysicalDeviceProperties2,
+    ) = unsafe {
+        let e = (gipa)(instance, c"vkEnumerateDeviceExtensionProperties".as_ptr());
+        let p = (gipa)(instance, c"vkGetPhysicalDeviceProperties2".as_ptr());
+        match (e, p) {
+            (Some(e), Some(p)) => (
+                mem::transmute::<PfnVkVoidFunction, PfnVkEnumerateDeviceExtensionProperties>(
+                    Some(e),
+                ),
+                mem::transmute::<PfnVkVoidFunction, PfnVkGetPhysicalDeviceProperties2>(Some(p)),
+            ),
+            _ => return absent,
+        }
+    };
+
+    // 1. All 3 non-core RT extension strings present?
+    let have_exts = [
+        VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+        VK_KHR_RAY_QUERY_EXTENSION_NAME,
+        VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+    ]
+    .iter()
+    .all(|want| is_device_extension_present(enum_ext, physical_device, want));
+    if !have_exts {
+        return absent;
+    }
+
+    // 2. Feature chain: bufferDeviceAddress → accelerationStructure → rayQuery.
+    let mut ray_query_feat = VkPhysicalDeviceRayQueryFeaturesKHR {
+        s_type: ST_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+        p_next: ptr::null_mut(),
+        ray_query: VK_FALSE,
+    };
+    let mut accel_feat = VkPhysicalDeviceAccelerationStructureFeaturesKHR {
+        s_type: ST_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+        p_next: (&mut ray_query_feat as *mut VkPhysicalDeviceRayQueryFeaturesKHR).cast(),
+        acceleration_structure: VK_FALSE,
+        acceleration_structure_capture_replay: VK_FALSE,
+        acceleration_structure_indirect_build: VK_FALSE,
+        acceleration_structure_host_commands: VK_FALSE,
+        descriptor_binding_acceleration_structure_update_after_bind: VK_FALSE,
+    };
+    let mut bda_feat = VkPhysicalDeviceBufferDeviceAddressFeatures {
+        s_type: ST_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
+        p_next: (&mut accel_feat as *mut VkPhysicalDeviceAccelerationStructureFeaturesKHR).cast(),
+        buffer_device_address: VK_FALSE,
+        buffer_device_address_capture_replay: VK_FALSE,
+        buffer_device_address_multi_device: VK_FALSE,
+    };
+    let mut features2 = VkPhysicalDeviceFeatures2 {
+        s_type: VkStructureType::PhysicalDeviceFeatures2,
+        p_next: (&mut bda_feat as *mut VkPhysicalDeviceBufferDeviceAddressFeatures).cast(),
+        features: [VK_FALSE; 55],
+    };
+    debug_assert_eq!(features2.s_type as i32, ST_PHYSICAL_DEVICE_FEATURES_2);
+    // SAFETY: `physical_device` is valid; `features2` is fully initialized and its `p_next`
+    // chains the three live RT feature locals (all outlive the call); the driver writes each
+    // advertised bool through the chain.
+    unsafe { (fns.get_physical_device_features2)(physical_device, &mut features2) };
+    let features_ok = bda_feat.buffer_device_address == VK_TRUE
+        && accel_feat.acceleration_structure == VK_TRUE
+        && ray_query_feat.ray_query == VK_TRUE;
+    if !features_ok {
+        return absent;
+    }
+
+    // 3. Read the scratch-offset alignment from the AS properties chain.
+    let mut as_props = VkPhysicalDeviceAccelerationStructurePropertiesKHR {
+        s_type: ST_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR,
+        p_next: ptr::null_mut(),
+        max_geometry_count: 0,
+        max_instance_count: 0,
+        max_primitive_count: 0,
+        max_per_stage_descriptor_acceleration_structures: 0,
+        max_per_stage_descriptor_update_after_bind_acceleration_structures: 0,
+        max_descriptor_set_acceleration_structures: 0,
+        max_descriptor_set_update_after_bind_acceleration_structures: 0,
+        min_acceleration_structure_scratch_offset_alignment: 0,
+    };
+    let mut props2 = VkPhysicalDeviceProperties2 {
+        s_type: ST_PHYSICAL_DEVICE_PROPERTIES_2,
+        _pad: 0,
+        p_next: (&mut as_props as *mut VkPhysicalDeviceAccelerationStructurePropertiesKHR).cast(),
+        properties: unsafe { mem::zeroed() },
+    };
+    // SAFETY: `physical_device` is valid; `props2` is fully initialized (the opaque
+    // `properties` block is zeroed and driver-overwritten) and its `p_next` chains the live
+    // `as_props` local (outlives the call); the driver writes the AS properties through it.
+    unsafe { (get_props2)(physical_device, &mut props2) };
+
+    RtCaps {
+        ray_query: true,
+        scratch_align: as_props.min_acceleration_structure_scratch_offset_alignment as u64,
+    }
+}
+
+/// HW-RT rung R2a-1: whether the named DEVICE extension is advertised (queried via
+/// `vkEnumerateDeviceExtensionProperties` with a null layer). Alloc-light: a count query
+/// then a fill. Gated `hwrt`.
+#[cfg(feature = "hwrt")]
+fn is_device_extension_present(
+    enum_ext: crate::accel_ffi::PfnVkEnumerateDeviceExtensionProperties,
+    physical_device: VkPhysicalDevice,
+    want: &CStr,
+) -> bool {
+    let mut count: u32 = 0;
+    // SAFETY: null `p_layer_name` queries the device's own extensions; the count query
+    // passes a null array; `&mut count` is a valid out-pointer.
+    let raw = unsafe {
+        (enum_ext)(physical_device, ptr::null(), &mut count, ptr::null_mut())
+    };
+    let result = VkResult::from_raw(raw);
+    if (!result.is_success() && result != VkResult::INCOMPLETE) || count == 0 {
+        return false;
+    }
+    let mut exts = vec![
+        VkExtensionProperties {
+            extension_name: [0; 256],
+            spec_version: 0,
+        };
+        count as usize
+    ];
+    // SAFETY: `exts` has exactly `count` slots; the array pointer is valid for `count`
+    // writes of the driver-written `#[repr(C)]` `VkExtensionProperties`.
+    let raw = unsafe {
+        (enum_ext)(physical_device, ptr::null(), &mut count, exts.as_mut_ptr())
+    };
+    let result = VkResult::from_raw(raw);
+    if !result.is_success() && result != VkResult::INCOMPLETE {
+        return false;
+    }
+    exts.truncate(count as usize);
+    exts.iter().any(|e| cstr_array_eq(&e.extension_name, want))
+}
+
 /// Queries the minimal Render P1b [`DeviceCaps`]: whether the GPU advertises the
 /// bindless prerequisite (Vulkan 1.2 `descriptorIndexing` + `runtimeDescriptorArray`,
 /// chained into `vkGetPhysicalDeviceFeatures2`), whether `R8G8B8A8_UNORM` supports
@@ -2558,6 +2801,10 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         vendor_id: 0,
         device_id: 0,
         driver_version: 0,
+        // HW-RT rung R2a-1: `0` = no scratch-align requirement (ray query off). Under
+        // `feature="hwrt"` the boot site overwrites this from the AS-properties query when
+        // the RT extensions were enabled; otherwise it stays `0` (the R1 value).
+        as_scratch_align: 0,
     }
 }
 
@@ -2574,7 +2821,14 @@ fn create_device(
     physical_device: VkPhysicalDevice,
     queue_family_index: u32,
     windowed: bool,
+    // HW-RT rung R2a-1: when `true` (only ever set under `feature="hwrt"` after
+    // `supports_ray_query` returned true), the 3 RT extension strings are appended + the RT
+    // feature structs are chained into `p_next`. HARD `false` on every non-hwrt build (the
+    // caller passes `RT_ENABLE_DEFAULT`), so the RT arm below is dead + gated → the
+    // device-create bytes are the R1 extension array + `p_next = &features13`.
+    enable_ray_query: bool,
 ) -> Result<VkDevice, BootError> {
+    let _ = enable_ray_query; // read only on the hwrt arm below (silences the OFF build).
     // Correction #2 (OQ-6): fail fast with a CLEAR error if the GPU does not
     // support dynamic rendering, rather than letting `vkCreateDevice` fail opaquely
     // (or, worse, succeed and fault at `cmd_begin_rendering`).
@@ -2599,15 +2853,76 @@ fn create_device(
     // paths. The feature struct lives on this stack frame and is only read during
     // the call; all feature bools except `dynamic_rendering` are zero. The
     // `VK_KHR_swapchain` extension stays windowed-only.
-    let swapchain_ext: [*const c_char; 1] = [VK_KHR_SWAPCHAIN_EXTENSION_NAME.as_ptr()];
     let mut features13 = zeroed_features13();
     features13.dynamic_rendering = VK_TRUE;
-    let p_next: *const c_void = (&features13 as *const VkPhysicalDeviceVulkan13Features).cast();
-    let (ext_count, pp_exts): (u32, *const *const c_char) = if windowed {
-        (1, swapchain_ext.as_ptr())
-    } else {
-        (0, ptr::null())
-    };
+
+    // The extension name pointers this device enables. The base set is the windowed-only
+    // `VK_KHR_swapchain`; the hwrt arm appends the 3 RT strings when `enable_ray_query`.
+    // A fixed-capacity stack array (no heap) sized to the maximum (1 swapchain + 3 RT).
+    let mut ext_ptrs: [*const c_char; 4] = [ptr::null(); 4];
+    let mut ext_count: usize = 0;
+    if windowed {
+        ext_ptrs[ext_count] = VK_KHR_SWAPCHAIN_EXTENSION_NAME.as_ptr();
+        ext_count += 1;
+    }
+
+    // The p_next chain head is the always-present `dynamicRendering` feature struct. On the
+    // hwrt arm the RT feature structs are prepended so the chain becomes
+    // rayQuery → accelerationStructure → bufferDeviceAddress → features13. `mut` is used only
+    // by that gated arm; on a default build the head is never reassigned (byte-identical R1).
+    #[cfg_attr(not(feature = "hwrt"), allow(unused_mut))]
+    let mut p_next: *const c_void =
+        (&features13 as *const VkPhysicalDeviceVulkan13Features).cast();
+
+    // HW-RT rung R2a-1: enable the 3 RT extensions + chain the RT feature structs. Only ever
+    // reached when `enable_ray_query` (⇒ `feature="hwrt"` AND `supports_ray_query`). The
+    // feature locals live on this frame + are read only during the call.
+    #[cfg(feature = "hwrt")]
+    let (_rt_ray_query, _rt_accel, _rt_bda);
+    #[cfg(feature = "hwrt")]
+    if enable_ray_query {
+        use crate::accel_ffi::{
+            ST_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+            ST_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
+            ST_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+            VkPhysicalDeviceAccelerationStructureFeaturesKHR,
+            VkPhysicalDeviceBufferDeviceAddressFeatures, VkPhysicalDeviceRayQueryFeaturesKHR,
+        };
+        ext_ptrs[ext_count] = VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME.as_ptr();
+        ext_count += 1;
+        ext_ptrs[ext_count] = VK_KHR_RAY_QUERY_EXTENSION_NAME.as_ptr();
+        ext_count += 1;
+        ext_ptrs[ext_count] = VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME.as_ptr();
+        ext_count += 1;
+        // Build the chain rayQuery → accel → bda → features13 (each ENABLE bit TRUE). The
+        // feature-struct `p_next` fields are `*mut c_void`; the chain tail is `features13`
+        // (input-only during `vkCreateDevice`, never written through the chain), so the
+        // `*const → *mut` cast of the head is sound.
+        _rt_ray_query = VkPhysicalDeviceRayQueryFeaturesKHR {
+            s_type: ST_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+            p_next: p_next as *mut c_void,
+            ray_query: VK_TRUE,
+        };
+        _rt_accel = VkPhysicalDeviceAccelerationStructureFeaturesKHR {
+            s_type: ST_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+            p_next: (&_rt_ray_query as *const VkPhysicalDeviceRayQueryFeaturesKHR)
+                .cast::<c_void>() as *mut c_void,
+            acceleration_structure: VK_TRUE,
+            acceleration_structure_capture_replay: VK_FALSE,
+            acceleration_structure_indirect_build: VK_FALSE,
+            acceleration_structure_host_commands: VK_FALSE,
+            descriptor_binding_acceleration_structure_update_after_bind: VK_FALSE,
+        };
+        _rt_bda = VkPhysicalDeviceBufferDeviceAddressFeatures {
+            s_type: ST_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
+            p_next: (&_rt_accel as *const VkPhysicalDeviceAccelerationStructureFeaturesKHR)
+                .cast::<c_void>() as *mut c_void,
+            buffer_device_address: VK_TRUE,
+            buffer_device_address_capture_replay: VK_FALSE,
+            buffer_device_address_multi_device: VK_FALSE,
+        };
+        p_next = (&_rt_bda as *const VkPhysicalDeviceBufferDeviceAddressFeatures).cast();
+    }
 
     let create_info = VkDeviceCreateInfo {
         s_type: VkStructureType::DeviceCreateInfo,
@@ -2617,19 +2932,24 @@ fn create_device(
         p_queue_create_infos: &queue_info,
         enabled_layer_count: 0,
         pp_enabled_layer_names: ptr::null(),
-        enabled_extension_count: ext_count,
-        pp_enabled_extension_names: pp_exts,
+        enabled_extension_count: ext_count as u32,
+        pp_enabled_extension_names: if ext_count == 0 {
+            ptr::null()
+        } else {
+            ext_ptrs.as_ptr()
+        },
         p_enabled_features: ptr::null(),
     };
 
     let mut device = VkDevice::NULL;
     // SAFETY: `physical_device` is valid; `create_info` is a fully-initialized
     // `#[repr(C)]` struct whose `p_queue_create_infos`/`p_queue_priorities`
-    // pointers (`&queue_info`, `&priority`), the always-present `p_next`
-    // `dynamicRendering` feature chain (`&features13`), and the windowed-only
-    // extension array (`swapchain_ext`) all outlive the call (locals of this
-    // frame); `&mut device` is a valid out-pointer; NULL allocator picks the
-    // default. The feature is verified supported above (Correction #2).
+    // pointers (`&queue_info`, `&priority`), the `p_next` feature chain (`&features13`,
+    // plus the RT feature structs on the hwrt arm — all frame locals that outlive the
+    // call), and the extension-name array (`ext_ptrs`) all outlive the call; `&mut device`
+    // is a valid out-pointer; NULL allocator picks the default. The dynamic-rendering
+    // feature is verified supported above (Correction #2); the RT extensions are appended
+    // only when `supports_ray_query` returned true (caller).
     let raw =
         unsafe { (fns.create_device)(physical_device, &create_info, ptr::null(), &mut device) };
     let result = VkResult::from_raw(raw);
@@ -2638,6 +2958,11 @@ fn create_device(
     }
     Ok(device)
 }
+
+/// The `enable_ray_query` argument to [`create_device`] on a non-hwrt build (always `false`
+/// — no RT extension is ever requested; the dormancy anchor).
+#[cfg(not(feature = "hwrt"))]
+const RT_ENABLE_DEFAULT: bool = false;
 
 #[cfg(test)]
 mod tests {
@@ -2904,6 +3229,7 @@ mod tests {
             vendor_id: 0,
             device_id: 0,
             driver_version: 0,
+            as_scratch_align: 0,
         }
     }
 

@@ -41,6 +41,87 @@ pub struct QueryPoolDesc {
     pub count: u32,
 }
 
+// ===========================================================================
+// HW-RT rung R2a-1 — acceleration-structure POD descriptors.
+//
+// Agnostic carriers (plan D5 seam discipline: NO `Vk*` leak into `boyko_rhi`).
+// Device/scratch addresses are plain `u64` device addresses (the backend obtains
+// them via `get_buffer_device_address` / `get_acceleration_structure_device_address`).
+// R2a-1 defines the vocabulary; R2a-2 (BLAS build) + R2a-3 (per-frame TLAS) consume
+// it. Nothing here references a backend type, so the whole block is UNGATED — it
+// carries no FFI and compiles in every build (byte-identical: no consumer calls the
+// AS verbs when `hwrt` is OFF, they are `#[cold]` erroring defaults).
+// ===========================================================================
+
+/// Which acceleration-structure level an [`AsBuildEntry`] targets (HW-RT rung R2a-1):
+/// a bottom-level (per-mesh triangle geometry) or a top-level (an instance array over
+/// BLASes). Maps to `VkAccelerationStructureTypeKHR` backend-side.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsKind {
+    /// A bottom-level acceleration structure (triangle geometry).
+    /// `VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR`.
+    Blas = 0,
+    /// A top-level acceleration structure (an instance array). `VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR`.
+    Tlas = 1,
+}
+
+/// One triangle-geometry (or instance-array) input to a BLAS/TLAS build
+/// (HW-RT rung R2a-1). A `#[repr(C)]` POD carrier of the *device addresses* + counts
+/// the backend needs to fill a `VkAccelerationStructureGeometryKHR` — no backend
+/// handle, no `Vk*` type. For a TLAS this describes the instance array
+/// (`vertex_data` = the `VkAccelerationStructureInstanceKHR[]` device address,
+/// `primitive_count` = the instance count); the triangle fields are unread there.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AsGeometryDesc {
+    /// Device address of the vertex buffer (BLAS) or the instance array (TLAS).
+    pub vertex_data: u64,
+    /// Device address of the index buffer (BLAS only; `0` for a TLAS).
+    pub index_data: u64,
+    /// Byte stride between consecutive vertices (BLAS only).
+    pub vertex_stride: u64,
+    /// The highest vertex index referenced (`vertexCount - 1`, BLAS only).
+    pub max_vertex: u32,
+    /// The number of primitives: triangles (`indexCount / 3`, BLAS) or instances (TLAS).
+    pub primitive_count: u32,
+}
+
+/// The build-scratch + result sizes a `vkGetAccelerationStructureBuildSizesKHR`
+/// query returns for one build (HW-RT rung R2a-1). A `#[repr(C)]` POD echo of
+/// `VkAccelerationStructureBuildSizesInfoKHR` in agnostic bytes: the caller sizes
+/// the AS-backing buffer to `as_size` and the scratch buffer to `build_scratch`
+/// (aligned to `DeviceCaps::as_scratch_align`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AsBuildSizes {
+    /// Bytes the acceleration-structure backing buffer must hold.
+    pub as_size: u64,
+    /// Bytes the scratch buffer must hold for a fresh build.
+    pub build_scratch: u64,
+    /// Bytes the scratch buffer must hold for an in-place update (refit; `0` when
+    /// the build was not created with `ALLOW_UPDATE`). R2a rebuilds every frame, so
+    /// this is recorded but unused until R6.
+    pub update_scratch: u64,
+}
+
+/// One acceleration-structure build entry recorded by
+/// [`crate::encoder::RhiCommandEncoder::cmd_build_acceleration_structures`]
+/// (HW-RT rung R2a-1). A `#[repr(C)]` POD carrier: the target level, its geometry,
+/// the destination AS device address, and the scratch device address — everything
+/// the backend needs to fill a `VkAccelerationStructureBuildGeometryInfoKHR` +
+/// `VkAccelerationStructureBuildRangeInfoKHR` without a backend handle in the struct.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AsBuildEntry {
+    /// Whether this builds a BLAS or a TLAS.
+    pub kind: AsKind,
+    /// The geometry (BLAS triangles) or instance array (TLAS) to build from.
+    pub geometry: AsGeometryDesc,
+    /// Device address of the scratch buffer (aligned to `DeviceCaps::as_scratch_align`).
+    pub scratch_address: u64,
+}
+
 /// One buffer-to-buffer copy region for
 /// [`crate::encoder::RhiCommandEncoder::copy_buffer`].
 ///

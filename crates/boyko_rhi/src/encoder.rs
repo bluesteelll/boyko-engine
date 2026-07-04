@@ -7,7 +7,8 @@
 
 use crate::api::RhiApi;
 use crate::descriptor::{
-    BarrierDesc, BufferCopy, BufferImageCopy, ImageBarrierDesc, RenderArea, RenderingDesc, Viewport,
+    AsBuildEntry, BarrierDesc, BufferCopy, BufferImageCopy, ImageBarrierDesc, RenderArea,
+    RenderingDesc, Viewport,
 };
 use crate::enums::{ImageLayout, IndexType, ShaderStage, TimestampStage};
 use crate::error::RhiError;
@@ -386,5 +387,48 @@ pub trait RhiCommandEncoder<A: RhiApi> {
     fn write_timestamp(&mut self, _pool: &A::QueryPool, _stage: TimestampStage, _index: u32) {
         // HW-RT R0 default seam: a backend without a query path leaves this a no-op; the
         // Vulkan backend overrides it.
+    }
+
+    // ===== HW-RT ACCELERATION-STRUCTURE SEAM (rung R2a-1; default bodies keep Mock + ABI) =====
+    // Declared UNGATED so the trait ABI is stable across phases (mirroring the timestamp
+    // seam). Default bodies are no-ops marked `#[cold] #[inline(never)]`; the Vulkan
+    // backend overrides them ONLY under `feature="hwrt"`. With `hwrt` OFF no consumer
+    // records these (the resolve stays software), so they never execute — byte-identical.
+
+    /// Records `entries.len()` acceleration-structure builds into the command buffer
+    /// (`vkCmdBuildAccelerationStructuresKHR`, HW-RT rung R2a-1). Each [`AsBuildEntry`]
+    /// pairs a target level + geometry (device addresses) + a scratch device address; the
+    /// backend fills the `VkAccelerationStructureBuildGeometryInfoKHR` +
+    /// `BuildRangeInfoKHR` per entry, writing the built structure at the entry's
+    /// destination AS. `dest_addresses[i]` is the device address of the AS that entry `i`
+    /// builds into (parallel to `entries`); the caller pre-creates each AS via
+    /// [`crate::device::RhiDevice::create_acceleration_structure`].
+    ///
+    /// The default body is a no-op marked `#[cold] #[inline(never)]`; the Vulkan backend
+    /// overrides it under `feature="hwrt"`.
+    #[cold]
+    #[inline(never)]
+    fn cmd_build_acceleration_structures(
+        &mut self,
+        _entries: &[AsBuildEntry],
+        _dest: &[&A::AccelerationStructure],
+    ) {
+        // HW-RT R2a-1 default seam: a backend without an AS path leaves this a no-op; the
+        // Vulkan backend overrides it under `feature="hwrt"`.
+    }
+
+    /// Records the `ACCELERATION_STRUCTURE_BUILD → *` execution/memory barrier
+    /// (`vkCmdPipelineBarrier` with
+    /// `ACCELERATION_STRUCTURE_WRITE_BIT_KHR → ACCELERATION_STRUCTURE_READ_BIT_KHR`,
+    /// HW-RT rung R2a-1). Ordered after a build so a subsequent read (the `rayQuery`
+    /// resolve at R2a-4, or a dependent build) observes the finished structure.
+    ///
+    /// The default body is a no-op marked `#[cold] #[inline(never)]`; the Vulkan backend
+    /// overrides it under `feature="hwrt"`.
+    #[cold]
+    #[inline(never)]
+    fn cmd_acceleration_structure_barrier(&mut self) {
+        // HW-RT R2a-1 default seam: a backend without an AS path leaves this a no-op; the
+        // Vulkan backend overrides it under `feature="hwrt"`.
     }
 }

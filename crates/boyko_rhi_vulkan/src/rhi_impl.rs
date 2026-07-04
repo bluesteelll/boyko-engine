@@ -258,9 +258,13 @@ impl RhiApi for Vulkan {
     type BindGroup = VulkanBindGroup;
     type BindGroupLayout = VulkanBindGroupLayout;
     // HW-RT rung R1: the cheapest placeholder — no `VkAccelerationStructureKHR`
-    // FFI, no verbs, no RT extension. R2a rebinds this to the concrete
-    // `BoundAccelStruct` once `create_acceleration_structure` / build land.
+    // FFI, no verbs, no RT extension. R2a-1 rebinds this to the concrete
+    // `BoundAccelStruct` under `feature="hwrt"`; a default build keeps `()` (byte-identical,
+    // and the AS verbs stay the RhiDevice/RhiCommandEncoder `#[cold]` erroring defaults).
+    #[cfg(not(feature = "hwrt"))]
     type AccelerationStructure = ();
+    #[cfg(feature = "hwrt")]
+    type AccelerationStructure = crate::accel::BoundAccelStruct;
 }
 
 /// The fixed Slice-0 compute layouts shared by every compute pipeline + command
@@ -618,6 +622,12 @@ pub struct VulkanCommandEncoder {
     /// The descriptor-set index the next `dispatch` binds at (set by
     /// `bind_storage_buffer`; the Slice-0 contract is set 0).
     bound_set_index: u32,
+    /// HW-RT rung R2a-1: a raw pointer into the owning context's `AccelFns` (the AS command
+    /// table), or `null` when ray query is off. Set by `create_command_encoder` under `hwrt`
+    /// (mirroring the `*const DeviceFns` discipline — the context outlives the encoder). Gated
+    /// `hwrt`: absent from a default build (the encoder layout is textually R1 there).
+    #[cfg(feature = "hwrt")]
+    accel_fns: *const crate::accel::AccelFns,
 }
 
 // SAFETY: the encoder is a single-thread-only resource (plan §5.3): it is NOT
@@ -2002,12 +2012,55 @@ impl RhiDevice<Vulkan> for VulkanContext {
         Ok(())
     }
 
+    // ===== HW-RT ACCELERATION-STRUCTURE VERBS (rung R2a-1; `feature="hwrt"` overrides) =====
+    // Each delegates to a `crate::accel` inherent helper (the real `vkGet*`/`vkCreate*` FFI).
+    // Present ONLY under `hwrt`; a default build inherits the `#[cold]` erroring defaults.
+
+    #[cfg(feature = "hwrt")]
+    fn get_acceleration_structure_build_sizes(
+        &self,
+        kind: boyko_rhi::AsKind,
+        geometry: &boyko_rhi::AsGeometryDesc,
+    ) -> Result<boyko_rhi::AsBuildSizes, VulkanError> {
+        self.build_sizes(kind, geometry)
+    }
+
+    #[cfg(feature = "hwrt")]
+    fn create_acceleration_structure(
+        &self,
+        kind: boyko_rhi::AsKind,
+        buffer: &BoundBuffer,
+        size: u64,
+    ) -> Result<crate::accel::BoundAccelStruct, VulkanError> {
+        self.create_accel(kind, buffer.buffer, size)
+    }
+
+    #[cfg(feature = "hwrt")]
+    fn get_acceleration_structure_device_address(
+        &self,
+        accel: &crate::accel::BoundAccelStruct,
+    ) -> Result<u64, VulkanError> {
+        self.accel_device_address(accel)
+    }
+
+    #[cfg(feature = "hwrt")]
+    fn get_buffer_device_address(&self, buffer: &BoundBuffer) -> Result<u64, VulkanError> {
+        self.buffer_device_address(buffer.buffer)
+    }
+
+    #[cfg(feature = "hwrt")]
+    unsafe fn destroy_acceleration_structure(&self, accel: crate::accel::BoundAccelStruct) {
+        // SAFETY: the RhiDevice contract — the GPU is no longer using `accel` (caller
+        // fence-waited/`wait_idle`'d) and it is destroyed once (by-value move).
+        unsafe { self.destroy_accel(accel) };
+    }
+
     fn create_command_encoder(&self) -> Result<VulkanCommandEncoder, VulkanError> {
         let layouts = self.compute_layouts()?;
         // SAFETY: the device is live; `layouts` are this device's shared compute
         // layouts; the encoder takes a raw pointer to this context's `DeviceFns`
         // (which outlives any encoder built from `&self`).
-        unsafe {
+        let enc = unsafe {
             VulkanCommandEncoder::new(
                 self.device(),
                 self.device_fns() as *const DeviceFns,
@@ -2015,7 +2068,19 @@ impl RhiDevice<Vulkan> for VulkanContext {
                 layouts.set_layout,
                 layouts.pipeline_layout,
             )
-        }
+        };
+        // HW-RT rung R2a-1: wire the AS command table (a raw pointer into this context, which
+        // outlives the encoder) so `cmd_build_acceleration_structures` can reach the FFI; null
+        // when ray query is off. No-op on a non-hwrt build.
+        #[cfg(feature = "hwrt")]
+        let enc = enc.map(|mut e| {
+            let p = self
+                .accel_fns_opt()
+                .map_or(ptr::null(), |f| f as *const crate::accel::AccelFns);
+            e.set_accel_fns(p);
+            e
+        });
+        enc
     }
 
     unsafe fn destroy_command_encoder(&self, enc: VulkanCommandEncoder) {
@@ -2199,7 +2264,20 @@ impl VulkanCommandEncoder {
             pipeline_layout,
             bound_buffer: VkBuffer::NULL,
             bound_set_index: 0,
+            // HW-RT rung R2a-1: null until `create_command_encoder` wires the context's
+            // `AccelFns` under `hwrt` (a non-RT device leaves it null → the AS verbs no-op).
+            #[cfg(feature = "hwrt")]
+            accel_fns: ptr::null(),
         })
+    }
+
+    /// HW-RT rung R2a-1: wires the owning context's `AccelFns` (the AS command table) into
+    /// the encoder so its `cmd_build_acceleration_structures` can reach the `vkCmd*` FFI. A
+    /// raw pointer into the context (which outlives the encoder, §5.3); `null` when ray query
+    /// is off. Gated `hwrt`.
+    #[cfg(feature = "hwrt")]
+    pub(crate) fn set_accel_fns(&mut self, accel: *const crate::accel::AccelFns) {
+        self.accel_fns = accel;
     }
 
     /// Tears down the encoder's command pool + descriptor pool in reverse creation
@@ -2430,6 +2508,45 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
         // (asserted above) and was reset this frame via `reset_query_pool` (caller contract);
         // `vk_stage` is a single valid pipeline-stage bit (TOP/BOTTOM).
         unsafe { (fns.cmd_write_timestamp)(self.command_buffer, vk_stage, pool.pool, index) };
+    }
+
+    // ===== HW-RT ACCELERATION-STRUCTURE ENCODER VERBS (rung R2a-1; `hwrt` overrides) =====
+
+    #[cfg(feature = "hwrt")]
+    fn cmd_build_acceleration_structures(
+        &mut self,
+        entries: &[boyko_rhi::AsBuildEntry],
+        dest: &[&crate::accel::BoundAccelStruct],
+    ) {
+        if self.accel_fns.is_null() || entries.is_empty() {
+            // Ray query off (null table) or nothing to build → no-op (R2a-1 records nothing).
+            return;
+        }
+        // SAFETY: `self.accel_fns` is a live pointer into the owning context's `AccelFns` (set
+        // by `create_command_encoder`, non-null checked above; the context outlives the
+        // encoder, §5.3); recording is open. `crate::accel::cmd_build_acceleration_structures`
+        // upholds the per-build FFI invariants (documented at its definition): every device
+        // address in `entries` + each `dest[i].handle` is a live, correctly-flagged resource
+        // the caller pre-created, and `entries.len() == dest.len()`.
+        let fns = unsafe { &*self.accel_fns };
+        // SAFETY: as above — the command buffer is recording, `fns` is the live AS table.
+        unsafe {
+            crate::accel::cmd_build_acceleration_structures(
+                fns,
+                self.command_buffer,
+                entries,
+                dest,
+            );
+        }
+    }
+
+    #[cfg(feature = "hwrt")]
+    fn cmd_acceleration_structure_barrier(&mut self) {
+        // SAFETY: `self.fns` borrows the live device fn-table (context outlives the encoder);
+        // recording is open. The helper records one AS write→read global memory barrier.
+        let fns = unsafe { &*self.fns };
+        // SAFETY: as above — the command buffer is recording, `fns` is the live device table.
+        unsafe { crate::accel::cmd_acceleration_structure_barrier(fns, self.command_buffer) };
     }
 
     fn pipeline_barrier(&mut self, barrier: &BarrierDesc<Vulkan>) {

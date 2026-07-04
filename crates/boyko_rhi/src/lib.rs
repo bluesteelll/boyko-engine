@@ -41,10 +41,10 @@ pub mod queue;
 
 pub use api::RhiApi;
 pub use descriptor::{
-    BarrierDesc, BufferBarrier, BufferCopy, BufferDesc, BufferImageCopy, ComputePipelineDesc,
-    DepthAttachment, DepthBias, GraphicsPipelineDesc, ImageBarrierDesc, ImageSubresourceRange,
-    QueryPoolDesc, RenderArea, RenderingAttachment, RenderingDesc, VertexAttribute,
-    VertexBufferLayout, Viewport,
+    AsBuildEntry, AsBuildSizes, AsGeometryDesc, AsKind, BarrierDesc, BufferBarrier, BufferCopy,
+    BufferDesc, BufferImageCopy, ComputePipelineDesc, DepthAttachment, DepthBias,
+    GraphicsPipelineDesc, ImageBarrierDesc, ImageSubresourceRange, QueryPoolDesc, RenderArea,
+    RenderingAttachment, RenderingDesc, VertexAttribute, VertexBufferLayout, Viewport,
 };
 pub use device::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,

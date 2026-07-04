@@ -21,6 +21,15 @@ description = "Raw hand-FFI Vulkan backend for boyko-engine (Slice 0 foundation:
 # where the lib's `cfg(test)` guard is NOT active.
 default = []
 goldens = []
+# HW-RT rung R2a-1: the hardware ray-tracing FFI surface (the RT extension enable,
+# the raw-FFI acceleration-structure structs/PFNs in `accel_ffi.rs`, the
+# `BoundAccelStruct` + the Vulkan AS verb overrides in `accel.rs`, and the real
+# `supports_ray_query` device-caps query). OFF by default so the shipped/golden
+# build is TEXTUALLY the pre-R2a (R1) code: every RT item is `#[cfg(feature="hwrt")]`
+# so it compiles to nothing, `create_device` emits the R1 extension array + p_next
+# chain verbatim, and `DeviceCaps.ray_query` stays literally `false`. Builds NO
+# acceleration structure and traces nothing (that is R2a-2..4).
+hwrt = []
 
 [dependencies]
 boyko_rhi = { path = "../boyko_rhi" }
