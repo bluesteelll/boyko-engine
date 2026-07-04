@@ -26,6 +26,7 @@ use boyko_rhi::{
     VertexBufferLayout, VertexFormat,
 };
 use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
+use boyko_rhi_vulkan::ddgi::DdgiAtlas;
 use boyko_rhi_vulkan::compute::{
     B5_CAMERA_UBO_BYTES_M4, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, EDITLIST_BUFFER_WORDS,
     INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, LOCAL_SIZE_X,
@@ -213,9 +214,16 @@ struct CsmResources {
     atlas_ubo: [BoundBuffer; FRAMES_IN_FLIGHT],
     /// SDFDDGI I0: the DDGI grid UBO (single buffer — the grid is world-fixed, so no per-FIF ring),
     /// zero-seeded ⇒ `ddgi_mode_word == 0`, bound-but-unread at resolve binding 18 while the GI gate
-    /// is OFF (the default). The I0 probe-irradiance / depth atlas dummies REUSE the cascade texture
-    /// + sampler (bound-but-unread array descriptors), so only this UBO is a dedicated new resource.
+    /// is OFF (the default).
     ddgi_ubo: BoundBuffer,
+    /// SDFDDGI I1: the REAL probe atlas — irradiance (`B10G11R11_UFLOAT`) + depth (`R16G16_SFLOAT`)
+    /// `Texture2DArray`s + the per-probe classification buffer + a dedicated LINEAR sampler,
+    /// boot-cleared + boot-transitioned to `SHADER_READ_ONLY_OPTIMAL`. Bound at resolve @16/@17
+    /// (severing the I0a CSM-cascade/comparison-sampler dummy). Bound-but-UNREAD while the GI gate
+    /// is OFF (the default) — the resolve's `SampleLevel`s live INSIDE the `if (ddgi_mode != 0u)`
+    /// structural gate (`deferred_pbr.hlsl`), so on the OFF path they never run at all (not merely
+    /// ×0), and the swap is byte-identical.
+    ddgi_atlas: DdgiAtlas,
     point_depth_pipeline: VulkanGraphicsPipeline,
     point_depth_vs: VulkanShaderModule,
     point_depth_fs: VulkanShaderModule,
@@ -361,6 +369,12 @@ impl CsmResources {
             b
         };
 
+        // SDFDDGI I1: the REAL probe atlas + classification buffer + LINEAR sampler. Created here,
+        // boot-cleared + boot-transitioned to SHADER_READ_ONLY_OPTIMAL inside `DdgiAtlas::create`.
+        // Bound at resolve @16/@17 (replacing the I0a dummy) — bound-but-unread while GI is OFF.
+        let ddgi_atlas =
+            DdgiAtlas::create(device).expect("invariant: SDFDDGI probe atlas create (setup stage)");
+
         let point_depth_vs = RhiDevice::create_shader_module(device, punctual_depth_vs_spirv())
             .expect("invariant: punctual point depth VS module create");
         let point_depth_fs = RhiDevice::create_shader_module(device, punctual_depth_fs_spirv())
@@ -412,6 +426,7 @@ impl CsmResources {
             atlas_sampler,
             atlas_ubo,
             ddgi_ubo,
+            ddgi_atlas,
             point_depth_pipeline,
             point_depth_vs,
             point_depth_fs,
@@ -479,6 +494,10 @@ impl CsmResources {
             RhiDevice::destroy_graphics_pipeline(device, self.point_depth_pipeline);
             RhiDevice::destroy_shader_module(device, self.point_depth_fs);
             RhiDevice::destroy_shader_module(device, self.point_depth_vs);
+            // SDFDDGI I1: the probe atlas + classification buffer + LINEAR sampler (reverse creation
+            // order — created after ddgi_ubo). `DdgiAtlas::destroy` is `unsafe` on the same device-idle
+            // contract this block already upholds (the caller drained the device).
+            self.ddgi_atlas.destroy(device);
             // SDFDDGI I0: the single DDGI grid UBO (reverse creation order — created after atlas_ubo).
             RhiDevice::destroy_buffer(device, self.ddgi_ubo);
             for slot in self.atlas_ubo {
@@ -1378,29 +1397,19 @@ impl GpuSceneBundles {
             // memcpys `ResolvedShadowAtlas` into via `upload_atlas_ring` (binding 15). The sibling
             // in-flight frame binds the OTHER slot (the lock-free WAR discipline the ring exists for).
             shadow_atlas_ubo: &self.csm.atlas_ubo[slot],
-            // SDFDDGI I0: the 3 bound-but-unread DDGI resolve bindings (@16/@17/@18). The GI gate is
-            // OFF by default (`DdgiConfig::ddgi_indirect == false` → LightBuf word-7 bit 4 == 0), so
-            // the resolve's probe-irradiance sample never runs and these are bound-but-unread (the
-            // 0%-gate — byte-identical pixels). The irradiance/depth image dummies REUSE the cascade
-            // texture + its comparison sampler (a valid bound-but-unread `Texture2DArray` descriptor —
-            // Vulkan validates only the descriptor TYPE, not the shader element type); the grid UBO is
-            // the dedicated zeroed `ddgi_ubo` (single buffer — the grid is world-fixed, no ring).
-            // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM cascade Texture2DArray (format mismatch
-            // inert off-gate). Sever this coupling when the real DDGI atlas is allocated at I1.
-            ddgi_irr_texture: &self.csm.cascade,
-            // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM COMPARISON sampler (compareEnable=VK_TRUE).
-            // A non-Dref SampleLevel with a comparison sampler is a Vulkan VUID violation — INERT now
-            // (the sample is in the dead `if (ddgi_mode != 0u)` branch), but swap to a dedicated
-            // LINEAR sampler when the real R11G11B10F/RG16F atlas lands at I1.
-            ddgi_irr_sampler: &self.csm.sampler,
-            // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM cascade Texture2DArray (format mismatch
-            // inert off-gate). Sever this coupling when the real DDGI atlas is allocated at I1.
-            ddgi_depth_texture: &self.csm.cascade,
-            // FIXME(SDFDDGI I1): DDGI dummy reuses the CSM COMPARISON sampler (compareEnable=VK_TRUE).
-            // A non-Dref SampleLevel with a comparison sampler is a Vulkan VUID violation — INERT now
-            // (the sample is in the dead `if (ddgi_mode != 0u)` branch), but swap to a dedicated
-            // LINEAR sampler when the real R11G11B10F/RG16F atlas lands at I1.
-            ddgi_depth_sampler: &self.csm.sampler,
+            // SDFDDGI I1: the 3 DDGI resolve bindings (@16/@17/@18) now bind the REAL probe atlas.
+            // The GI gate is OFF by default (`DdgiConfig::ddgi_indirect == false` → LightBuf word-7
+            // bit 4 == 0), so the resolve's probe-irradiance sample never runs and all three are
+            // bound-but-unread (the 0%-gate — byte-identical pixels). I1 severs the I0a dummy: the
+            // irradiance/depth atlases are the dedicated `B10G11R11_UFLOAT`/`R16G16_SFLOAT`
+            // `Texture2DArray`s, each sampled with a dedicated LINEAR (non-comparison) sampler —
+            // closing the VUID trap (a non-Dref SampleLevel with the old CSM COMPARISON sampler was
+            // UB). The grid UBO is the dedicated zeroed `ddgi_ubo` (single buffer — world-fixed grid,
+            // no ring).
+            ddgi_irr_texture: self.csm.ddgi_atlas.irradiance(),
+            ddgi_irr_sampler: self.csm.ddgi_atlas.sampler(),
+            ddgi_depth_texture: self.csm.ddgi_atlas.depth(),
+            ddgi_depth_sampler: self.csm.ddgi_atlas.sampler(),
             ddgi_grid_ubo: &self.csm.ddgi_ubo,
             // The punctual (spot/point) depth-pass activation (the punctual host rung): built from
             // the SAME ResolvedShadowAtlas the runner memcpys into this slot's atlas UBO (the O1

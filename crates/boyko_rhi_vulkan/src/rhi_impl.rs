@@ -40,8 +40,9 @@ use core::ptr::{self, NonNull};
 use boyko_rhi::{
     BarrierDesc, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BufferBarrier, BufferCopy,
     BufferDesc, BufferImageCopy, ComputePipelineDesc, DescriptorKind, GraphicsPipelineDesc,
-    ImageBarrierDesc, ImageLayout, IndexType, MemoryLocation, MipMode, RenderArea, RenderingDesc,
-    RhiApi, RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc, ShaderStage, TextureDesc, Viewport,
+    ImageBarrierDesc, ImageLayout, ImageSubresourceRange, IndexType, MemoryLocation, MipMode,
+    RenderArea, RenderingDesc, RhiApi, RhiCommandEncoder, RhiDevice, RhiQueue, SamplerDesc,
+    ShaderStage, TextureDesc, Viewport,
 };
 
 use crate::compute::ComputeError;
@@ -2956,6 +2957,60 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
 }
 
 impl VulkanCommandEncoder {
+    /// Records a `vkCmdClearColorImage` over `range` of `texture` (which the caller MUST
+    /// have transitioned to `layout`, one of `GENERAL`/`TRANSFER_DST_OPTIMAL`), clearing
+    /// every covered texel to `color` (SDFDDGI I1 boot-clear of the probe atlases). A
+    /// crate-internal helper (not on the public `RhiCommandEncoder` trait) reaching the
+    /// encoder's private `command_buffer`/`fns` the same way [`Self::image_barrier`] does.
+    pub(crate) fn clear_color_image(
+        &mut self,
+        texture: &VulkanTexture,
+        layout: ImageLayout,
+        color: [f32; 4],
+        range: ImageSubresourceRange,
+    ) {
+        let clear = VkClearColorValue { float32: color };
+        let vk_range = VkImageSubresourceRange {
+            aspect_mask: range.aspect.bits(),
+            base_mip_level: range.base_mip_level,
+            level_count: range.level_count,
+            base_array_layer: range.base_array_layer,
+            layer_count: range.layer_count,
+        };
+        // SAFETY: recording is open; `texture.image` is a live COLOR image the caller has
+        // transitioned to `layout` (TRANSFER_DST_OPTIMAL per its clear boot path);
+        // `&clear` + `&vk_range` are fully-initialized locals alive for the call, and
+        // `vk_range` names an in-bounds subresource (the caller passes the image's own
+        // `0..layer_count`). `self.fns` points into the context's boxed fn-table (alive
+        // per the type contract).
+        let fns = unsafe { &*self.fns };
+        unsafe {
+            (fns.cmd_clear_color_image)(
+                self.command_buffer,
+                texture.image,
+                layout.as_i32(),
+                &clear,
+                1,
+                &vk_range,
+            );
+        }
+    }
+
+    /// Records a `vkCmdFillBuffer` filling all `size` bytes of `buffer` from offset 0 with
+    /// the 4-byte `pattern` (SDFDDGI I1 boot-clear of the per-probe classification buffer
+    /// to 0 = unconverged). A crate-internal helper reaching the encoder's private
+    /// `command_buffer`/`fns` directly, mirroring the gbuffer cull's `cmd_fill_buffer` reset.
+    pub(crate) fn fill_buffer(&mut self, buffer: &BoundBuffer, pattern: u32) {
+        // SAFETY: recording is open; `buffer.buffer` is a live buffer carrying TRANSFER_DST
+        // usage (the classification buffer is created with it); `buffer.size` is its exact
+        // byte size (a multiple of 4 — a `u8`-per-probe count rounded to a `u32` word).
+        // `self.fns` points into the context's boxed fn-table (alive per the type contract).
+        let fns = unsafe { &*self.fns };
+        unsafe {
+            (fns.cmd_fill_buffer)(self.command_buffer, buffer.buffer, 0, buffer.size, pattern);
+        }
+    }
+
     /// The cold multi-buffer-barrier fallback for [`RhiCommandEncoder::pipeline_barrier`]
     /// (plan D1): builds a heap `Vec<VkBufferMemoryBarrier>` and records the
     /// barrier. The headless compute path never reaches this (it supplies 0 or 1

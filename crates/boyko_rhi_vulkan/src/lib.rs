@@ -84,6 +84,7 @@
 pub mod abi_guard;
 pub mod brick_atlas;
 pub mod compute;
+pub mod ddgi;
 pub mod debug;
 /// CPU golden-reference oracles (host mirrors of the shader math). Compiled only
 /// for the crate's own `#[cfg(test)]` builds and for callers that enable the

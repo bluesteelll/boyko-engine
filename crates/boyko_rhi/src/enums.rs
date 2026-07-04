@@ -258,6 +258,28 @@ pub enum Format {
     R8Unorm = 9,
     /// `VK_FORMAT_R16_SFLOAT` — a compact single-channel float (deferred SDF use).
     R16Sfloat = 76,
+    /// `VK_FORMAT_R16G16_SFLOAT` — two 16-bit half floats (SDFDDGI I1: the probe
+    /// DEPTH/visibility atlas storing the two Chebyshev moments `E[d]`/`E[d²]` in the
+    /// `.r`/`.g` lanes — the RG16F two-moment depth tile, Decision D2).
+    ///
+    /// The value is the canonical `VkFormat` enumerant `VK_FORMAT_R16G16_SFLOAT == 83`
+    /// (the 16-bit-per-component SFLOAT block: R16=76, R16G16=83). VERIFIED against the
+    /// Vulkan spec enumerant, NOT a copied guess (the M2 UNORM-vs-SNORM lesson: a wrong
+    /// format const is a silent dead-branch bug — the image + view would be created at
+    /// the wrong layout and the sampler decode would be degenerate).
+    R16G16Sfloat = 83,
+    /// `VK_FORMAT_B10G11R11_UFLOAT_PACK32` — the packed R11G11B10 unsigned-float HDR
+    /// format (SDFDDGI I1: the probe IRRADIANCE atlas, Decision D6 — stored WITHOUT the
+    /// gamma encode so the resolve path is bit-exact). Despite the "R11G11B10F" shorthand
+    /// the ONLY Vulkan format for it packs the components as B10-G11-R11 into one `u32`
+    /// (`.r` = low 11 bits, `.g` = next 11, `.b` = high 10); the sampler returns them in
+    /// RGB order, so the shader still reads `.rgb` as red/green/blue.
+    ///
+    /// The value is the canonical `VkFormat` enumerant
+    /// `VK_FORMAT_B10G11R11_UFLOAT_PACK32 == 122` (the packed-32 specials block). VERIFIED
+    /// against the Vulkan spec enumerant (the M2 lesson: validate the ACTUAL const — there
+    /// is NO `VK_FORMAT_R11G11B10_*`, only this B10G11R11 packing).
+    B10G11R11UfloatPack32 = 122,
     /// `VK_FORMAT_R32_SFLOAT` — a single 32-bit float (Lighting L0b: the `gViewT`
     /// G-buffer lane storing the marcher's surface ray parameter `t` for world-position
     /// reconstruction in the deferred resolve).

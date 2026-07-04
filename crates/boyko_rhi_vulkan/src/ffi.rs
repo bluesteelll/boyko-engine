@@ -779,6 +779,12 @@ pub const VK_FORMAT_R8_UNORM: i32 = 9;
 /// half-float carries the narrow-band distance with NO quantization, so the `EPSILON_Q`
 /// store bias is harmless there).
 pub const VK_FORMAT_R16_SFLOAT: i32 = 76;
+/// `VkFormat::VK_FORMAT_R16G16_SFLOAT` — two 16-bit (half) floats (SDFDDGI I1: the probe
+/// DEPTH/visibility atlas's two Chebyshev moments `E[d]`/`E[d²]`). The value is 83 (the
+/// 16-bit-per-component SFLOAT block: R16=76, R16G16=83) — the M2 lesson: the const is
+/// pinned to the ACTUAL enumerant, cross-checked against `Format::R16G16Sfloat` in
+/// `abi_guard`.
+pub const VK_FORMAT_R16G16_SFLOAT: i32 = 83;
 /// `VkFormat::VK_FORMAT_R32_SFLOAT` — a single 32-bit float (Lighting L0b: the
 /// `gViewT` G-buffer storage-image lane carrying the marcher's surface ray param `t`).
 pub const VK_FORMAT_R32_SFLOAT: i32 = 100;
@@ -788,6 +794,12 @@ pub const VK_FORMAT_R32G32B32_SFLOAT: i32 = 106;
 /// `VkFormat::VK_FORMAT_R32G32B32A32_SFLOAT` — four 32-bit floats (a vec4 vertex
 /// color, Phase-6 S0 rung 3).
 pub const VK_FORMAT_R32G32B32A32_SFLOAT: i32 = 109;
+/// `VkFormat::VK_FORMAT_B10G11R11_UFLOAT_PACK32` — the packed R11G11B10 unsigned-float HDR
+/// format (SDFDDGI I1: the probe IRRADIANCE atlas, Decision D6 — `R11G11B10F`-no-gamma). The
+/// value is 122 (the packed-32 specials block); there is NO `VK_FORMAT_R11G11B10_*` — this
+/// B10G11R11 packing is the only Vulkan format for it (the M2 lesson: validate the ACTUAL
+/// enumerant, cross-checked against `Format::B10G11R11UfloatPack32` in `abi_guard`).
+pub const VK_FORMAT_B10G11R11_UFLOAT_PACK32: i32 = 122;
 /// `VkFormat::VK_FORMAT_D32_SFLOAT` — a 32-bit float depth attachment (Phase-6 S0
 /// rung 4). Spec-mandated as a depth attachment on every conformant device.
 pub const VK_FORMAT_D32_SFLOAT: i32 = 126;
@@ -2843,6 +2855,20 @@ pub type PfnVkCmdFillBuffer = unsafe extern "system" fn(
     dst_offset: VkDeviceSize,
     size: VkDeviceSize,
     data: u32,
+);
+
+/// `PFN_vkCmdClearColorImage` — clears the given subresource ranges of `image` (which must
+/// be in `image_layout`, one of `GENERAL`/`TRANSFER_DST_OPTIMAL`) to `p_color` (Vulkan 1.0
+/// core, always present). SDFDDGI I1 uses it to boot-clear the probe IRRADIANCE
+/// (`B10G11R11_UFLOAT`) + DEPTH (`R16G16_SFLOAT`) atlases to defined values before the first
+/// resolve can sample them (the uninitialized-read hazard fix).
+pub type PfnVkCmdClearColorImage = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    image: VkImage,
+    image_layout: i32,
+    p_color: *const VkClearColorValue,
+    range_count: u32,
+    p_ranges: *const VkImageSubresourceRange,
 );
 
 /// `PFN_vkCreateFence`.
