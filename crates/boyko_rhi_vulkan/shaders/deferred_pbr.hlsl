@@ -299,6 +299,11 @@ static const float CSM_OVERLAP_PROPORTION = 0.2;
 // `sdf_soft_shadow_ranged` march. Included AFTER `Buf` (the include contract). A strict
 // field-CONSUMER; the field math + `sdf_field.hlsli` stay BYTE-FROZEN.
 #include "sdf_field.hlsli"
+// SDFDDGI I3: the shared DDGI resolve sample (`ddgi_probe_sample`) — ONE source of truth with the
+// `ddgi_probe_gi_resolve` GPU golden, the op-for-op HLSL mirror of `goldens::probe_sample`.
+// Included AFTER the gDdgiIrr/gDdgiDepth/ResolvedDdgi binding decls above (the tap helpers read
+// them). GI-OFF (`ddgi_mode == 0`) never calls into it — the 0%-gate holds.
+#include "ddgi_resolve.hlsli"
 
 // P6 R1 shadow-march tuning — MIRRORS the marcher's frozen A1 consts (`sdf_gbuffer_
 // composite.hlsl:407-437`) byte-for-byte (the same owner defaults; `GRAD_H` +
@@ -1089,30 +1094,35 @@ void main(uint3 tid : SV_DispatchThreadID) {
             // Point/spot (kinds 1/2) are the L0b block — not in the L0a front block.
         }
 
-        // SDFDDGI I0 — the GATED probe-irradiance injection (the I0 skeleton). `ambient` is now
-        // fully accumulated by the L0a hemisphere/sky term above; I3 replaces the body below with the
-        // real trilinear probe-irradiance sample (`ambient += diffuse_color * probe_irradiance(P, n)
-        // * ao_final` inside the world-fixed grid AABB, else the existing sky-ambient fallback).
+        // SDFDDGI I3 — the GATED probe-irradiance injection (GI first becomes VISIBLE here). The
+        // real trilinear + wrap + Chebyshev probe sample (`ddgi_resolve.hlsli::ddgi_probe_sample`,
+        // the op-for-op mirror of `goldens::probe_sample`), ADDED to the `ambient` accumulator so
+        // the indirect diffuse rides on top of the L0a hemisphere/sky term.
         //
-        // 0%-GATE + KEEP-ALIVE (the CSM/punctual/SSAO precedent): the 3 DDGI bindings (16/17/18) are
-        // referenced ONLY inside this `if (ddgi_mode != 0u)` structural gate. On the OFF path
-        // (`ddgi_mode == 0`, the DEFAULT — every pre-SDFDDGI scene) the block NEVER runs, so the
-        // bindings are bound-but-UNREAD and the lit pixels are byte-identical to today. But the sample
-        // is REAL code reachable at runtime, so DXC keeps the descriptor references (a truly empty
-        // block would be dead-stripped and break the "the .spv statically references the binding"
-        // layout contract). At I0 the ON body is a placeholder that adds a PROVABLE ZERO to `ambient`:
-        // it samples all 3 bindings and multiplies by `float(gDdgiMode - 1u)` == 0 (the UBO's
-        // `ddgi_mode_word` is 1 whenever the header gate is 1, so the factor is a RUNTIME zero DXC
-        // cannot fold away). So even a (non-default) armed gate leaves `ambient` unchanged at I0 —
-        // only I3 gives the sample real weight.
+        // 0%-GATE (the CSM/punctual/SSAO precedent): the 3 DDGI bindings (16/17/18) are read ONLY
+        // inside this `if (ddgi_mode != 0u)` structural gate. On the OFF path (`ddgi_mode == 0`, the
+        // DEFAULT — every pre-SDFDDGI scene) the block NEVER runs, so the bindings stay bound-but-
+        // UNREAD and the lit pixels are byte-identical to today. The block is REAL code reachable at
+        // runtime, so DXC keeps the descriptor references (the "the .spv statically references the
+        // binding" layout contract).
+        //
+        // Grid params from the b18 UBO: origin.xyz, inv_spacing (gDdgiInvSpacDims.x), and the three
+        // u32 dims bit-cast into gDdgiInvSpacDims.yzw. The sky-ambient FALLBACK (receiver outside the
+        // grid AABB / all corners unconverged) is ZERO: GI here is an ADDITIVE indirect term, so no
+        // coverage adds no extra indirect (the L0a hemisphere/sky ambient already supplies the base).
+        // The indirect diffuse is `diffuse_color * gi * ao_final` (the same diffuse-color × AO shaping
+        // the L0a diffuse ambient uses), so metals (diffuse_color == 0) receive no GI diffuse.
         if (ddgi_mode != 0u) {
-            float3 irr = gDdgiIrr.SampleLevel(gDdgiIrrSamp, float3(0.5, 0.5, 0.0), 0.0).rgb;
-            float2 mom = gDdgiDepth.SampleLevel(gDdgiDepthSamp, float3(0.5, 0.5, 0.0), 0.0).rg;
-            // Runtime-zero weight (see the block comment): 1 - gDdgiMode == 0 when armed, and it also
-            // references the b18 UBO so the cbuffer descriptor stays live. I3 replaces this with the
-            // real trilinear probe weight; the sample coords/tile become the octahedral lookup.
-            float w = (1.0 - float(gDdgiMode)) * (irr.r + mom.x) * gDdgiInvSpacDims.x;
-            ambient += float3(w, w, w);
+            uint3 ddgi_dims = uint3(asuint(gDdgiInvSpacDims.y),
+                                    asuint(gDdgiInvSpacDims.z),
+                                    asuint(gDdgiInvSpacDims.w));
+            float3 gi = ddgi_probe_sample(
+                P, n,
+                gDdgiOrigin.xyz, gDdgiInvSpacDims.x, ddgi_dims,
+                float3(0.0, 0.0, 0.0),               // additive fallback: no coverage -> no extra indirect
+                gDdgiIrr, gDdgiIrrSamp,
+                gDdgiDepth, gDdgiDepthSamp);
+            ambient += diffuse_color * gi * ao_final;
         }
 
         // L0b: loop the point/spot block `[l0a_count .. light_count)`. The surface world

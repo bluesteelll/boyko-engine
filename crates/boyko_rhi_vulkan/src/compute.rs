@@ -284,10 +284,30 @@ static SDF_GBUFFER_COMPOSITE_SPV: SpirvBlob<155124> = SpirvBlob(*include_bytes!(
 /// bound-but-unread DDGI resolve bindings (16/17/18 — `gDdgiIrr`/`gDdgiDepth` combined images + the
 /// `ResolvedDdgi` UBO) + the gated (runtime-zero at I0) probe-irradiance injection; 57928 → 59160
 /// bytes. (The GI gate is header word-7 bit 4, OFF by default → the injection never runs → the
-/// rendered pixels are byte-identical; only the .spv byte-length grows with the new decls.)
-static DEFERRED_PBR_SPV: SpirvBlob<59160> = SpirvBlob(*include_bytes!(concat!(
+/// rendered pixels are byte-identical; only the .spv byte-length grows with the new decls.) SDFDDGI
+/// I3: the gated probe-irradiance injection becomes the REAL trilinear + wrap + Chebyshev sample
+/// (`ddgi_resolve.hlsli::ddgi_probe_sample`, the op-for-op `goldens::probe_sample` mirror); 59160 →
+/// 65456 bytes (the `precise` pin on the blend accumulators forbids DXC from fusing the
+/// accumulation MACs into single-rounding FMAs, matching the Rust host oracle's non-fused adds; a
+/// residual ≤2-ULP B10G11R11 texture-sampler difference — far below the format's 11-bit storage
+/// precision — is absorbed by the `ddgi_probe_gi_resolve` golden's tight ULP tolerance. NB: pinning
+/// MORE sites `precise` was reverted — it perturbed DXC's global optimization enough to drift the
+/// GI-OFF PBR path off the golden). GI still OFF by default → the injection never runs →
+/// byte-identical pixels (the 0%-gate); only `ddgi_indirect=true` samples.
+static DEFERRED_PBR_SPV: SpirvBlob<65456> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/deferred_pbr.comp.spv"
+)));
+
+/// The SDFDDGI I3 DDGI resolve-sample GPU-GOLDEN SPIR-V (`shaders/ddgi_probe_gi_resolve.comp.hlsl`).
+/// A standalone compute harness that runs the SAME `ddgi_probe_sample` the deferred resolve runs
+/// (both `#include "ddgi_resolve.hlsli"`) over host-supplied receiver samples and STOREs the
+/// resolved irradiance, so the `ddgi_probe_gi_resolve` test can diff GPU-vs-`goldens::probe_sample`
+/// to bits. Its own pipeline layout (b0 grid UBO — its pad `.x` carries the sample count, t1/s1 irr,
+/// t2/s2 depth, t3 recv-pos, t4 recv-nrm, u5 out) — NOT the resolve set, no push constant.
+static DDGI_PROBE_GI_RESOLVE_SPV: SpirvBlob<9212> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/ddgi_probe_gi_resolve.comp.spv"
 )));
 
 /// The committed Lighting-L1 clustered froxel light-cull SPIR-V (`shaders/cluster_cull.hlsl`).
@@ -610,6 +630,19 @@ pub fn sdf_gbuffer_composite_spirv() -> &'static [u32] {
 #[inline]
 pub fn deferred_pbr_spirv() -> &'static [u32] {
     DEFERRED_PBR_SPV.as_words()
+}
+
+/// The SDFDDGI I3 DDGI resolve-sample GPU-GOLDEN SPIR-V as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// Runs the SAME `ddgi_probe_sample` (`shaders/ddgi_resolve.hlsli`) the deferred resolve runs, over
+/// a host-supplied receiver buffer, and STOREs the resolved indirect irradiance — the GPU half of
+/// the `probe_sample_gpu_eq_cpu_to_bits` contract (diff to `crate::goldens::probe_sample` to bits).
+/// Bound to its OWN layout { b0 grid UBO (pad `.x` = sample count), t1/s1 irr atlas, t2/s2 depth
+/// atlas, t3 recv-pos SSBO, t4 recv-nrm SSBO, u5 out SSBO } — no push constant.
+#[inline]
+pub fn ddgi_probe_gi_resolve_spirv() -> &'static [u32] {
+    DDGI_PROBE_GI_RESOLVE_SPV.as_words()
 }
 
 /// The committed Lighting-L1 clustered froxel light-cull SPIR-V as a `u32` word stream,
