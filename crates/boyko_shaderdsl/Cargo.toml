@@ -33,3 +33,13 @@ required-features = ["emit"]
 name = "emit_ssao_variants"
 path = "src/bin/emit_ssao_variants.rs"
 required-features = ["emit"]
+
+# The SDFDDGI I2 probe-update-pass shader emitter (writes `sdf_probe_update_it{N}.comp.hlsl`).
+# Named `emit_probe_gi` (NOT `_update`): Windows installer-detection forces UAC elevation on any
+# exe whose name contains "update"/"setup"/"install"/"patch" (os error 740 when the test harness
+# launches it non-elevated), so the executable-producing bin/test names drop that token — the
+# emitted shader DATA files keep `probe_update` (never executed → never flagged).
+[[bin]]
+name = "emit_probe_gi"
+path = "src/bin/emit_probe_gi.rs"
+required-features = ["emit"]

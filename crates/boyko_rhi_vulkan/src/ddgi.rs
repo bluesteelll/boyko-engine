@@ -7,8 +7,9 @@
 //! 1. the **irradiance** atlas — a `B10G11R11_UFLOAT` (`R11G11B10F`-no-gamma, Decision D6)
 //!    `Texture2DArray` of octahedral probe tiles;
 //! 2. the **depth/visibility** atlas — an `R16G16_SFLOAT` (`RG16F` two-moment) `Texture2DArray`;
-//! 3. the **classification** buffer — 1 byte/probe (bit0 = active, bit1 = converged-once), a
-//!    GPU storage buffer, the resolve/feedback's "unconverged ⇒ sky-ambient" gate.
+//! 3. the **classification** buffer — 1 u32/probe (bit0 = active, bit1 = converged-once), a
+//!    GPU storage buffer, the resolve/feedback's "unconverged ⇒ sky-ambient" gate. One full
+//!    word per probe (SDFDDGI I2) so the update pass's parallel per-probe stores are race-free.
 //!
 //! Plus one dedicated LINEAR (non-comparison) sampler shared by both atlases. This CLOSES the
 //! I0a VUID trap: I0a bound the CSM COMPARISON sampler (`compareEnable == VK_TRUE`) as the
@@ -53,8 +54,11 @@
 //! Mirrors the `gCsm`/`gShadowAtlas` one-shot boot-transition lifecycle (the host
 //! `CsmResources::seed_boot_layouts`): the atlases end in `SHADER_READ_ONLY_OPTIMAL` (the
 //! resolve read layout), fence-waited, before the first frame. The clear runs while the image
-//! is in `TRANSFER_DST_OPTIMAL`, then one barrier moves it to `SHADER_READ_ONLY_OPTIMAL`. (At
-//! I2 the update pass moves them to `GENERAL` for the compute store — not now.)
+//! is in `TRANSFER_DST_OPTIMAL`, then one barrier moves it to `SHADER_READ_ONLY_OPTIMAL`. At
+//! I2 the update pass moves them to `GENERAL` for the compute store — but that transition is
+//! DERIVED BY THE RDG (from an `add_image_seeded(SHADER_READ_ONLY_OPTIMAL)` seed), not
+//! hand-written here; this boot path is unchanged (the STORAGE usage bit does not perturb the
+//! `TRANSFER_DST` clear, preserving the byte-identical 0%-gate golden).
 //!
 //! # Lifetime
 //!
@@ -162,11 +166,11 @@ pub struct DdgiAtlas {
     /// `DDGI_DEPTH_ATLAS_WIDTH × DDGI_DEPTH_ATLAS_HEIGHT × DDGI_ATLAS_LAYERS`. Sampled at resolve
     /// binding 17 via [`Self::sampler`].
     depth: VulkanTexture,
-    /// The per-probe CLASSIFICATION buffer — 1 byte/probe (`DDGI_PROBE_COUNT` bytes, rounded up
-    /// to a `u32` multiple for `vkCmdFillBuffer`), a device-local STORAGE buffer. bit0 = active,
-    /// bit1 = converged-once. Boot-cleared to 0 (all unconverged). NOT bound at resolve I1 (the
-    /// resolve does not yet read it — I3 gates on the converged bit); owned here for I2's compute
-    /// write.
+    /// The per-probe CLASSIFICATION buffer — 1 u32/probe (`DDGI_PROBE_COUNT * 4` bytes = 8 KB),
+    /// a device-local STORAGE buffer. bit0 = active, bit1 = converged-once. One full u32 per probe
+    /// (NOT the I1 byte-packed layout) so I2's parallel per-probe stores are race-free without
+    /// atomics (single-writer-per-word-per-frame). Boot-cleared to 0 (all unconverged). NOT bound
+    /// at resolve I1 (I3 gates on the converged bit); owned here for I2's compute read/write.
     classification: BoundBuffer,
     /// The dedicated LINEAR, non-comparison (`compareEnable == VK_FALSE`), clamp-to-edge sampler
     /// bundled with BOTH atlases as their combined image+sampler (bindings 16/17). NOT the CSM
@@ -181,6 +185,20 @@ impl DdgiAtlas {
     /// `SHADER_READ_ONLY_OPTIMAL` (fence-waited, before the first frame). On any partial failure
     /// every object created so far is torn down before the error returns.
     pub fn create(ctx: &VulkanContext) -> Result<Self, VulkanError> {
+        // SDFDDGI I2 — the STORAGE re-add + its GRACEFUL-DEGRADATION gate (plan §3). The probe-
+        // update pass writes both atlases via storage images, but B10G11R11 storage is a device-
+        // OPTIONAL format feature. DDGI is OPT-IN (unlike the always-used `gViewT`), so a device
+        // lacking it MUST NOT boot-fail: read the two device caps, add STORAGE only when BOTH are
+        // supported, else fall back to the I1 `SAMPLED | TRANSFER_DST` usage so `vkCreateImage`
+        // cannot panic. `resolve_ddgi_grid` clamps DDGI permanently disabled on the same
+        // predicate (`ddgi_storage_ok`), so an atlas-without-storage is never dispatched into.
+        let storage_ok = ctx.device_caps().ddgi_storage_ok();
+        let atlas_usage = if storage_ok {
+            ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST | ImageUsage::STORAGE
+        } else {
+            ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST
+        };
+
         let irradiance = RhiDevice::create_texture(
             ctx,
             &TextureDesc {
@@ -191,14 +209,13 @@ impl DdgiAtlas {
                 // format packs the components as B10-G11-R11; the sampler returns RGB order.
                 format: Format::B10G11R11UfloatPack32,
                 dimension: TextureDimension::D2,
-                // SAMPLED for the resolve read; TRANSFER_DST for the boot-clear. NO STORAGE at I1:
-                // the rung only SAMPLES (bound-but-unread) + CLEARS, and STORAGE on B10G11R11 is a
-                // device-OPTIONAL format feature (needs `shaderStorageImageExtendedFormats`), so
-                // requesting it here would panic `vkCreateImage` at boot on a device lacking it.
-                // STORAGE + the boot VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT support gate (mirroring
-                // viewt_storage_format_ok) arrive together at I2, where the update pass writes the
-                // atlas via a storage image.
-                usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
+                // I2: SAMPLED (resolve read) + TRANSFER_DST (boot-clear) + STORAGE (the update
+                // pass's compute write) — the STORAGE bit is present ONLY when
+                // `ddgi_storage_ok` (else the I1 usage, so an unsupported device still boots; the
+                // resolve clamp makes disabled DDGI cost nothing). The TRANSFER_DST boot-clear /
+                // transition path below is UNCHANGED by adding STORAGE (the clear is not perturbed
+                // — it preserves the byte-identical 0%-gate golden).
+                usage: atlas_usage,
                 array_layers: DDGI_ATLAS_LAYERS,
             },
         )?;
@@ -212,9 +229,10 @@ impl DdgiAtlas {
                 // RG16F two-moment depth (Decision D2): `.r = E[d]`, `.g = E[d²]`.
                 format: Format::R16G16Sfloat,
                 dimension: TextureDimension::D2,
-                // SAMPLED + TRANSFER_DST only (see the irradiance atlas note): NO STORAGE at I1 —
-                // the update pass's storage write + its format-support gate land at I2.
-                usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
+                // I2: SAMPLED + TRANSFER_DST + STORAGE (the update pass's compute write), STORAGE
+                // present only when `ddgi_storage_ok` (see the irradiance atlas note). The
+                // boot-clear/transition path is UNCHANGED.
+                usage: atlas_usage,
                 array_layers: DDGI_ATLAS_LAYERS,
             },
         ) {
@@ -227,9 +245,13 @@ impl DdgiAtlas {
             }
         };
 
-        // The classification buffer: 1 byte/probe, rounded UP to a u32 multiple so the
-        // `vkCmdFillBuffer` boot-clear (4-byte granularity) covers the whole buffer.
-        let class_bytes = (DDGI_PROBE_COUNT as u64).div_ceil(4) * 4;
+        // The classification buffer: 1 u32/probe (SDFDDGI I2 / P1-2). At I1 it was 1 byte/probe
+        // rounded to a u32 multiple, so 4 probes shared a u32 word — under I2's PARALLEL per-probe
+        // byte-stores that word-shares a race (a non-atomic byte store read-modify-writes the
+        // whole word, clobbering the neighbours). One u32/probe (`DDGI_PROBE_COUNT * 4` = 8 KB,
+        // trivial) makes each probe own a full word → single-writer-per-element-per-frame is
+        // race-free with plain stores, no atomics. bit0 = active, bit1 = converged-once.
+        let class_bytes = (DDGI_PROBE_COUNT as u64) * 4;
         let classification = match RhiDevice::create_buffer(
             ctx,
             &BufferDesc {
@@ -378,8 +400,9 @@ impl DdgiAtlas {
                 full_range,
             );
 
-            // Clear the classification buffer to 0 (every probe unconverged — the resolve/feedback
-            // sky-ambient fallback anchor). `fill_buffer` covers the whole (u32-rounded) buffer.
+            // Clear the classification buffer to 0 (every probe unconverged/inactive-until-proven
+            // — the resolve/feedback sky-ambient fallback anchor). `fill_buffer` covers the whole
+            // `DDGI_PROBE_COUNT * 4`-byte (1 u32/probe) buffer.
             encoder.fill_buffer(&self.classification, 0);
 
             // Both atlases: TRANSFER_DST_OPTIMAL → SHADER_READ_ONLY_OPTIMAL (the resolve read

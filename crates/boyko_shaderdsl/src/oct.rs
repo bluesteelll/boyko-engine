@@ -47,6 +47,23 @@ use crate::scalar::FieldScalar;
 /// literal `0.0` (`sdf_gbuffer_composite.hlsl:510`).
 const HEMISPHERE_PIVOT: f32 = 0.0;
 
+// ---- oct_decode: the DDGI-tile octahedral DECODE (the inverse of oct_encode) ------------------
+
+/// The `[0,1] -> [-1,1]` unfold scale — `e * 2.0 - 1.0`. Mirrors the GPU `oct_decode`'s literal
+/// `2.0` (`deferred_pbr.hlsl:398`). The exact inverse of [`REMAP_SCALE`]/[`REMAP_BIAS`].
+const UNFOLD_SCALE: f32 = 2.0;
+
+/// The `[0,1] -> [-1,1]` unfold bias — `... - 1.0`. Mirrors the GPU `oct_decode`'s literal `1.0`.
+const UNFOLD_BIAS: f32 = 1.0;
+
+/// The `nz = 1.0 - abs(nx) - abs(ny)` reconstruction constant. Mirrors the GPU `oct_decode`'s
+/// literal `1.0` (`deferred_pbr.hlsl:399`).
+const RECONSTRUCT_ONE: f32 = 1.0;
+
+/// The lower-hemisphere sign-fold comparand — `nx >= 0.0` chooses `-t`/`+t`. Mirrors the GPU
+/// `oct_decode`'s literal `0.0` (`deferred_pbr.hlsl:401-402`).
+const FOLD_SIGN_PIVOT: f32 = 0.0;
+
 /// The sign-ternary comparand — `e.x >= 0.0` chooses `+1`/`-1`. Mirrors the GPU's literal `0.0`
 /// (`sdf_gbuffer_composite.hlsl:511`).
 const SIGN_PIVOT: f32 = 0.0;
@@ -127,4 +144,67 @@ pub fn oct_encode_body<C: Cf>(n_param: C::Vec3f, ret_out: &C::RetCellV2) -> Flow
             C::Scalar::lit(REMAP_BIAS),
         ),
     )
+}
+
+/// Octahedral-DECODES a `[0,1]^2` tile UV pair `(ex, ey)` into the PRE-NORMALIZE direction
+/// lanes `[nx, ny, nz]` — the mathematical inverse of [`oct_encode_body`]. Authored ONCE over
+/// the control-flow axis `C`, host-mirrorable (its `<EvalCf>` instantiation, after `normalize`,
+/// equals the [`oct_encode_body`] round-trip and the I0b host mirror `goldens::oct_decode`).
+///
+/// I2 is the FIRST rung to commit a DDGI-tile `oct_decode` (the SDFDDGI plan §1.4 P0-2 fix).
+/// This body single-sources it: the I2 update pass weights cached rays against each texel's
+/// decoded direction (`texelDir = oct_decode(texelUV)`), and I3's resolve MUST decode against
+/// this EXACT eDSL-emitted body. The three lanes are returned PRE-`normalize` (the emitter
+/// [`crate::emit::emit_hlsl_oct_decode`] wraps the tail `return normalize(float3(nx, ny, nz));`
+/// textually — the `sdf_normal` normalize-as-text precedent, since there is no `Vec3Normalize`
+/// emit node, so no frozen `.spv` can fork).
+///
+/// # The I2 → I3 decode contract (load-bearing)
+///
+/// The tile-UV↔texel REMAP and probe-spacing reconstruction that I3 owns MUST live in the
+/// texel→UV chain OUTSIDE this decode, never inside it — else I2's per-texel WRITE iteration
+/// and I3's per-sample READ desync (the silent point-cube-drift class). This body takes an
+/// ALREADY-remapped `[0,1]^2` tile-UV pair and inverts ONLY the octahedral fold; the host
+/// mirror `goldens::oct_decode` has the identical boundary (it too takes `e` = a `[0,1]^2`
+/// pair). The `oct_decode_edsl_matches_host` sync test pins the two equal.
+///
+/// The committed math (matching `deferred_pbr.hlsl:397-404` / `goldens::oct_decode`):
+/// ```text
+/// e  = e * 2.0 - 1.0;                              // [0,1] -> [-1,1]
+/// n  = float3(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+/// t  = saturate(-n.z);                             // = clamp(-nz, 0, 1)
+/// n.x += n.x >= 0.0 ? -t : t;
+/// n.y += n.y >= 0.0 ? -t : t;
+/// return normalize(n);
+/// ```
+#[inline]
+pub fn oct_decode_body<C: Cf>(ex: C::Scalar, ey: C::Scalar) -> [C::Scalar; 3] {
+    // e = e * 2.0 - 1.0;  — the [0,1] -> [-1,1] unfold (materialized as `ex`/`ey` temps so the
+    // reconstruct + fold read the SAME unfolded value, not a recomputed `ex*2-1`).
+    let unfold_scale = C::Scalar::lit(UNFOLD_SCALE);
+    let unfold_bias = C::Scalar::lit(UNFOLD_BIAS);
+    let ex = C::temp_float("ex", ex.mul(unfold_scale).sub(unfold_bias));
+    let ey = C::temp_float("ey", ey.mul(unfold_scale).sub(unfold_bias));
+
+    // float3 n = float3(ex, ey, 1.0 - abs(ex) - abs(ey));  — carried as the three lanes
+    // `nx`/`ny`/`nz` (the fold reassigns `nx`/`ny`; `nz` is read once for `t`).
+    let nx0 = ex;
+    let ny0 = ey;
+    let nz = C::temp_float(
+        "nz",
+        C::Scalar::lit(RECONSTRUCT_ONE).sub(ex.abs()).sub(ey.abs()),
+    );
+
+    // float t = saturate(-nz);  — the lower-hemisphere fold amount (clamp of the negated z).
+    let t = C::temp_float("t", nz.neg().clamp01());
+
+    // n.x += n.x >= 0.0 ? -t : t;  — the sign-mirroring fold (a bare sign-ternary, the
+    // `oct_encode` `select_bare` shape). Spelled as `nx = nx + (nx >= 0 ? -t : t)`.
+    let pivot = C::Scalar::lit(FOLD_SIGN_PIVOT);
+    let nx = C::temp_float("nx", nx0.add(C::select_bare(nx0.ge(pivot), t.neg(), t)));
+    // n.y += n.y >= 0.0 ? -t : t;
+    let ny = C::temp_float("ny", ny0.add(C::select_bare(ny0.ge(pivot), t.neg(), t)));
+
+    // return normalize(float3(nx, ny, nz));  — the emitter wraps the `normalize(...)` textually.
+    [nx, ny, nz]
 }

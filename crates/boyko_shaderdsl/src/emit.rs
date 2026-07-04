@@ -5443,6 +5443,354 @@ pub fn emit_hlsl_oct_encode() -> String {
     })
 }
 
+/// Generates the HLSL SDFDDGI I2 `probe_march` LOOP+TAIL SPAN — the stripped fixed-budget GI-ray
+/// sphere-trace (`float t = GI_MINT; [loop] { d = field_distance(ro + rd * t); if (d < GI_HIT_EPS)
+/// { t_out = t; return true; } t = t + max(d, GI_MINT_STEP); if (t > GI_T_MAX) break; } t_out = t;
+/// return false;`) — by tracing the generic [`crate::probe_march::probe_march_body`] over the
+/// `EmitCf` backend, and returns ONLY the span (NOT a wrapped function).
+///
+/// Framing (b): a SPAN spliced between the `// === GENERATED probe_march BEGIN/END ===` sentinels
+/// INSIDE the `sdf_probe_update.comp.hlsl` per-ray glue. `ro`/`rd` are the `float3` ray origin +
+/// direction the hand-written glue computes; `t_out` is the `out float` hit distance and the bool
+/// return is the occluder-hit flag (the `m2_surface_hit` `(hit, t)` deposit shape). The named
+/// tuning consts spell SYMBOLICALLY (`GI_MINT`/`GI_HIT_EPS`/`GI_MINT_STEP`/`GI_T_MAX`); `GI_MAX_IT`
+/// is the `[loop]` bound symbol re-DXC'd per sweep value {32,64,96,128}. The span prints at DEPTH 2
+/// (8-space indent — the committed site nests `main`→the per-ray `for`→this body).
+pub fn emit_hlsl_probe_march() -> String {
+    use crate::probe_march;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    // Seed the function body block (the bottom of the STMTS stack).
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the span's inputs:
+    //   ro    → Vec3Param(0) (vec_in[0] = "ro") — the probe world position (ray origin)
+    //   rd    → Vec3Param(1) (vec_in[1] = "rd") — the Fibonacci ray direction
+    //   hit_t → OutFloatParam(0) (out_in[0] = "hit_t") — the `out float` marched hit distance
+    let ro = Emit(push(Node::Vec3Param(0)));
+    let rd = Emit(push(Node::Vec3Param(1)));
+    let t_out = OutFloatParam(0);
+    let ret_out = RetCellB;
+
+    // The field-distance seam: on Emit it records a `field_distance(ro + rd * t)` call node.
+    probe_march::probe_march_body::<EmitCf, _>(
+        ro,
+        rd,
+        |q| EmitCf::call1("field_distance", q),
+        &t_out,
+        &ret_out,
+    );
+
+    // Pop the function body block and print it.
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let float_in: [&str; 0] = [];
+    let vec_in = ["ro", "rd"];
+    let out_in = ["hit_t"];
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
+    let call_in = CALLS.with(|c| c.borrow().clone());
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: &vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: &out_in,
+        named_lit: &named_lit,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: &call_in,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        // DEPTH 2 (8-space indent): the committed site nests `main`→the per-ray `for`→this body.
+        print_block(&body_block, &arena, names, 2, &mut span);
+        span
+    })
+}
+
+/// Generates the HLSL SDFDDGI I2 `probe_blend` SPAN — ONE ray's cosine-weighted irradiance
+/// accumulate into a probe oct texel (`float w = max(0.0, dot(texelDir, rayDir)); sum_rgb += L * w;
+/// sum_w += w;`) — by tracing the generic [`crate::probe_blend::probe_blend_body`] over the
+/// `EmitCf` backend, and returns ONLY the span.
+///
+/// Framing (b): a SPAN spliced between the `// === GENERATED probe_blend BEGIN/END ===` sentinels
+/// INSIDE the per-texel gather loop of `sdf_probe_update.comp.hlsl`. `texelDir`/`rayDir` are the
+/// `float3` texel + ray directions the hand-written glue supplies; `l_r`/`l_g`/`l_b` the ray's
+/// radiance lanes; `sum_r`/`sum_g`/`sum_b`/`sum_w` the running accumulator locals the hand-written
+/// per-texel preamble declared (`float3 sum_rgb`/`float sum_w`) — seeded here as SUPPRESSED-DECL
+/// `float` params (bound by name, no recorded decl) so the span writes `sum_r = ...;` etc. with no
+/// redecl. ZERO new eDSL leaves: `dot` is inline component reads + mul/add (the SSAO discipline).
+/// The span prints at DEPTH 3 (12-space indent — `main`→the per-texel `for`→the per-ray `for`→this).
+#[allow(clippy::too_many_lines)]
+pub fn emit_hlsl_probe_blend() -> String {
+    use crate::probe_blend;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the span's inputs. `texelDir`/`rayDir` are `float3` params; `l_r`/`l_g`/`l_b` are
+    // scalar `float` inputs; the four accumulators are SUPPRESSED-DECL `float` params (the SSAO
+    // `hc` shape — bound by name, no decl) so the span records bare `sum_r = ...;` assigns.
+    let texel_dir = Emit(push(Node::Vec3Param(0)));
+    let ray_dir = Emit(push(Node::Vec3Param(1)));
+    let l_r = Emit::input(0);
+    let l_g = Emit::input(1);
+    let l_b = Emit::input(2);
+    let sum_r = EmitCf::decl_param("sum_r", Emit::lit(0.0));
+    let sum_g = EmitCf::decl_param("sum_g", Emit::lit(0.0));
+    let sum_b = EmitCf::decl_param("sum_b", Emit::lit(0.0));
+    let sum_w = EmitCf::decl_param("sum_w", Emit::lit(0.0));
+
+    let (nr, ng, nb, nw) = probe_blend::probe_blend_body::<EmitCf>(
+        texel_dir,
+        ray_dir,
+        l_r,
+        l_g,
+        l_b,
+        EmitCf::get_var(&sum_r),
+        EmitCf::get_var(&sum_g),
+        EmitCf::get_var(&sum_b),
+        EmitCf::get_var(&sum_w),
+    );
+    // Record the four accumulator assigns (`sum_r = ...;` etc.), the span's tail.
+    EmitCf::set_var(&sum_r, nr);
+    EmitCf::set_var(&sum_g, ng);
+    EmitCf::set_var(&sum_b, nb);
+    EmitCf::set_var(&sum_w, nw);
+
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let float_in = ["l_r", "l_g", "l_b"];
+    let vec_in = ["texelDir", "rayDir"];
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: &vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: &named_lit,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        // DEPTH 3 (12-space indent): `main`→the per-texel `for`→the per-ray `for`→this body.
+        print_block(&body_block, &arena, names, 3, &mut span);
+        span
+    })
+}
+
+/// Generates the HLSL SDFDDGI I2 `probe_depth_blend` SPAN — ONE ray's cosine-weighted two-moment
+/// depth accumulate (`float w = max(0.0, dot(texelDir, rayDir)); float wt = w * t; dmean += w * t;
+/// dmean2 += w * t * t; dw += w;`) — by tracing the generic
+/// [`crate::probe_blend::probe_depth_blend_body`] over the `EmitCf` backend, and returns ONLY the
+/// span. NO `pow` this rung (the depth-sharpen `pow` is an I4 Chebyshev knob).
+///
+/// Framing (b): spliced between the `// === GENERATED probe_depth_blend BEGIN/END ===` sentinels
+/// INSIDE the per-depth-texel gather loop. `texelDir`/`rayDir` the directions; `t` the ray's
+/// marched hit distance; `dmean`/`dmean2`/`dw` the SUPPRESSED-DECL accumulator params. The span
+/// prints at DEPTH 3 (12-space indent).
+pub fn emit_hlsl_probe_depth_blend() -> String {
+    use crate::probe_blend;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // texelDir/rayDir are `float3` params; `t` a scalar `float` input; the three moments are
+    // SUPPRESSED-DECL `float` params (bound by name).
+    let texel_dir = Emit(push(Node::Vec3Param(0)));
+    let ray_dir = Emit(push(Node::Vec3Param(1)));
+    let t = Emit::input(0);
+    let dmean = EmitCf::decl_param("dmean", Emit::lit(0.0));
+    let dmean2 = EmitCf::decl_param("dmean2", Emit::lit(0.0));
+    let dw = EmitCf::decl_param("dw", Emit::lit(0.0));
+
+    let (nmean, nmean2, ndw) = probe_blend::probe_depth_blend_body::<EmitCf>(
+        texel_dir,
+        ray_dir,
+        t,
+        EmitCf::get_var(&dmean),
+        EmitCf::get_var(&dmean2),
+        EmitCf::get_var(&dw),
+    );
+    EmitCf::set_var(&dmean, nmean);
+    EmitCf::set_var(&dmean2, nmean2);
+    EmitCf::set_var(&dw, ndw);
+
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    let float_in = ["t"];
+    let vec_in = ["texelDir", "rayDir"];
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: &vec_in,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: &named_lit,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut span = String::new();
+        print_block(&body_block, &arena, names, 3, &mut span);
+        span
+    })
+}
+
+/// Generates the WHOLE HLSL `float3 oct_decode(float2 e)` function — the DDGI-tile octahedral
+/// DECODE (the inverse of `oct_encode`) — by tracing the generic [`crate::oct::oct_decode_body`]
+/// over the `EmitCf` backend, and — like [`emit_hlsl_sdf_soft_shadow_ranged`] — returns a COMPLETE
+/// function (the update shader calls `oct_decode(texelUV)` per texel).
+///
+/// The body records the `ex`/`ey` unfold temps, the `nz` reconstruct temp, the `t` saturate temp,
+/// and the `nx`/`ny` sign-fold temps (the recorded statements), then the emitter appends the
+/// literal tail `return normalize(float3(nx, ny, nz));` — the `emit_normal_body` normalize-as-text
+/// precedent (there is no `Vec3Normalize` emit node, so no frozen `.spv` forks). Spelled between the
+/// `// === GENERATED oct_decode BEGIN/END ===` sentinels in `sdf_probe_update.comp.hlsl` and pinned
+/// equal to the I0b host mirror `goldens::oct_decode` by the `oct_decode_edsl_matches_host` sync
+/// test. The I2→I3 decode contract (the tile-UV↔texel remap lives OUTSIDE this decode) is stated in
+/// the [`crate::oct::oct_decode_body`] doc + the shader header.
+pub fn emit_hlsl_oct_decode() -> String {
+    use crate::oct;
+
+    // Fresh recorder state.
+    ARENA.with(|a| a.borrow_mut().clear());
+    STMTS.with(|s| s.borrow_mut().clear());
+    VARS.with(|v| v.borrow_mut().clear());
+    VAR_TYPES.with(|t| t.borrow_mut().clear());
+    NAMED_LITS.with(|n| n.borrow_mut().clear());
+    CALLS.with(|c| c.borrow_mut().clear());
+    TEMP_SEQ.with(|c| *c.borrow_mut() = 0);
+    TEMP_TYPES.with(|t| t.borrow_mut().clear());
+    TEMP_NAMES.with(|t| t.borrow_mut().clear());
+
+    STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
+
+    // Seed the two `float` component inputs `e.x` / `e.y` (the `float2 e` parameter's lanes; the
+    // body indexes them separately, so they seed as two scalar inputs spelling `e.x`/`e.y`).
+    let ex = Emit::input(0);
+    let ey = Emit::input(1);
+
+    let lanes = oct::oct_decode_body::<EmitCf>(ex, ey);
+    // The three PRE-normalize lanes are the return operand; the tail is printed textually below.
+    let (nx, ny, nz) = (lanes[0], lanes[1], lanes[2]);
+
+    let body_block = STMTS.with(|s| {
+        s.borrow_mut()
+            .pop()
+            .expect("invariant: the function body block was pushed above")
+    });
+
+    // The two inputs spell `e.x` / `e.y` (the `float2 e` parameter's lanes).
+    let float_in = ["e.x", "e.y"];
+    let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
+    let vars = VARS.with(|v| v.borrow().clone());
+    let names = Names {
+        float_in: &float_in,
+        uint_in: NO_UINT_INPUTS,
+        vec_in: NO_VEC_INPUTS,
+        uint3_in: NO_UINT3_INPUTS,
+        buf_in: NO_BUF_INPUTS,
+        out_in: NO_OUT_INPUTS,
+        named_lit: &named_lit,
+        vars: &vars,
+        vec4_in: NO_VEC4_INPUTS,
+        call_in: NO_CALL_INPUTS,
+        pc_in: NO_PC_INPUTS,
+        level_field: NO_LEVEL_FIELDS,
+        array: NO_ARRAY,
+        res_in: NO_RES_INPUTS,
+    };
+
+    // The three PRE-normalize lanes are the NAMED temps `nx`/`ny`/`nz` (via `temp_float` in
+    // `oct_decode_body`), so the tail references them by NAME (the `emit_normal_body`
+    // `normalize(n)` precedent). The handles are consumed only to force their materialization
+    // ORDER (the recorded `Stmt::DeclTemp`s); the return spelling is textual.
+    let _ = (nx, ny, nz);
+
+    ARENA.with(|a| {
+        let arena = a.borrow();
+        let mut body = String::new();
+        print_block(&body_block, &arena, names, 1, &mut body);
+        // The `normalize(float3(nx, ny, nz))` tail is printed textually (the `emit_normal_body`
+        // precedent — there is no `Vec3Normalize` emit node, so no frozen `.spv` can fork).
+        format!(
+            "float3 oct_decode(float2 e) {{\n{body}    return normalize(float3(nx, ny, nz));\n}}\n"
+        )
+    })
+}
+
 /// Generates the HLSL `m2_brick_span` body — the brick-AABB ray-span clip (the standard slab
 /// method) with the `[unroll]` axis loop, the parallel-slab early `return false`, the near/far
 /// swap, and the COMPUTED-bool tail `return tmax > tmin;` — by tracing the generic

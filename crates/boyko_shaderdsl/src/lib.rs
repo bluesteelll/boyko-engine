@@ -50,6 +50,8 @@ pub mod marcher;
 pub mod normal;
 pub mod oct;
 pub mod pack;
+pub mod probe_blend;
+pub mod probe_march;
 pub mod refine;
 pub mod remarch;
 pub mod scalar;
@@ -83,7 +85,12 @@ pub use field::{
 pub use levels::{BRICK_LEVELS, select_level_body};
 pub use marcher::{b1_marcher_fold_d_body, b1_marcher_mesh_p_body};
 pub use normal::sdf_normal_body;
+pub use oct::{oct_decode_body, oct_encode_body};
 pub use pack::pack_material_id_ba_body;
+pub use probe_blend::{probe_blend_body, probe_depth_blend_body};
+pub use probe_march::{
+    GI_HIT_EPS, GI_MAX_IT, GI_MINT, GI_MINT_STEP, GI_T_MAX, probe_march_body,
+};
 pub use refine::{
     EPS as B1_REFINE_EPS, M2_REFINE_ITERS as B1_REFINE_ITERS, M2_REFINE_RELAX as B1_REFINE_RELAX,
     b1_accept_refine_body,

@@ -188,6 +188,20 @@ pub struct DeviceCaps {
     /// supports linear filtering on every conformant GPU), so the engine boots on either
     /// path. Read via [`DeviceCaps::atlas_format`] to pick the brick-atlas image format.
     pub atlas_linear_filter_ok: bool,
+    /// Whether `B10G11R11_UFLOAT_PACK32` supports `STORAGE_IMAGE` under OPTIMAL tiling
+    /// (SDFDDGI I2: the probe-update pass writes the irradiance atlas via a storage image).
+    /// B10G11R11 storage is a device-OPTIONAL format feature (`shaderStorageImageExtendedFormats`),
+    /// so unlike [`viewt_storage_format_ok`](Self::viewt_storage_format_ok) this is RECORDED,
+    /// NOT a boot fail-fast: DDGI is opt-in, so when `false` the atlas is created WITHOUT storage
+    /// and `resolve_ddgi_grid` clamps DDGI permanently disabled — a GI-OFF (or unsupported)
+    /// device boots normally (plan §3). Read via [`DeviceCaps::ddgi_storage_ok`].
+    pub ddgi_irr_storage_ok: bool,
+    /// Whether `R16G16_SFLOAT` supports `STORAGE_IMAGE` under OPTIMAL tiling (SDFDDGI I2: the
+    /// probe-update pass writes the two-moment depth atlas via a storage image). RG16F storage
+    /// is broadly available, but gated together with the irradiance atlas so a device missing
+    /// EITHER degrades DDGI gracefully (RECORDED, not a boot fail-fast — see
+    /// [`ddgi_irr_storage_ok`](Self::ddgi_irr_storage_ok)).
+    pub ddgi_depth_storage_ok: bool,
 }
 
 impl DeviceCaps {
@@ -204,6 +218,17 @@ impl DeviceCaps {
         } else {
             boyko_rhi::Format::R16Sfloat
         }
+    }
+
+    /// Whether BOTH SDFDDGI atlas storage formats (`B10G11R11_UFLOAT` irradiance +
+    /// `R16G16_SFLOAT` depth) support `STORAGE_IMAGE` under OPTIMAL tiling — the precondition
+    /// for the I2 probe-update compute WRITE. When `false`, the atlas is created without storage
+    /// and DDGI is clamped permanently disabled (graceful degradation — DDGI is opt-in, plan
+    /// §3): both `DdgiAtlas::create` (usage selection) and `resolve_ddgi_grid` (the disabled
+    /// clamp) read this single predicate so they cannot disagree.
+    #[inline]
+    pub const fn ddgi_storage_ok(&self) -> bool {
+        self.ddgi_irr_storage_ok && self.ddgi_depth_storage_ok
     }
 }
 
@@ -2307,6 +2332,60 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)
         != 0;
 
+    // --- ddgi_irr_storage_ok (SDFDDGI I2): STORAGE_IMAGE on B10G11R11_UFLOAT_PACK32, OPTIMAL
+    // tiling. The probe-update pass writes the irradiance atlas via a storage image. Mirror the
+    // `viewt_storage_format_ok` QUERY shape, but the caller does NOT fail-fast on `false`: DDGI
+    // is opt-in, so an unsupported device degrades DDGI to permanently-disabled (plan §3), never
+    // a boot failure. B10G11R11 storage is device-OPTIONAL (`shaderStorageImageExtendedFormats`).
+    let mut ddgi_irr_props = VkFormatProperties {
+        linear_tiling_features: 0,
+        optimal_tiling_features: 0,
+        buffer_features: 0,
+    };
+    // SAFETY: `physical_device` is valid; `B10G11R11_UFLOAT_PACK32` is a valid `VkFormat`;
+    // `&mut ddgi_irr_props` is a valid out-pointer for the `#[repr(C)]` `VkFormatProperties`
+    // the driver fully overwrites.
+    unsafe {
+        (fns.get_physical_device_format_properties)(
+            physical_device,
+            VK_FORMAT_B10G11R11_UFLOAT_PACK32,
+            &mut ddgi_irr_props,
+        )
+    };
+    let ddgi_irr_storage_ok =
+        (ddgi_irr_props.optimal_tiling_features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+
+    // --- ddgi_depth_storage_ok (SDFDDGI I2): STORAGE_IMAGE on R16G16_SFLOAT, OPTIMAL tiling.
+    // The probe-update pass writes the two-moment depth atlas via a storage image. Same
+    // degrade-not-crash policy as `ddgi_irr_storage_ok` (gated together via `ddgi_storage_ok`).
+    let mut ddgi_depth_props = VkFormatProperties {
+        linear_tiling_features: 0,
+        optimal_tiling_features: 0,
+        buffer_features: 0,
+    };
+    // SAFETY: `physical_device` is valid; `R16G16_SFLOAT` is a valid `VkFormat`;
+    // `&mut ddgi_depth_props` is a valid out-pointer for the `#[repr(C)]` `VkFormatProperties`
+    // the driver fully overwrites.
+    unsafe {
+        (fns.get_physical_device_format_properties)(
+            physical_device,
+            VK_FORMAT_R16G16_SFLOAT,
+            &mut ddgi_depth_props,
+        )
+    };
+    let ddgi_depth_storage_ok =
+        (ddgi_depth_props.optimal_tiling_features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+
+    // A debug-log line only when a supported feature is missing (NO boot fail-fast — DDGI is
+    // opt-in; the resolve clamp + the no-storage atlas fallback handle it, plan §3).
+    #[cfg(debug_assertions)]
+    if !(ddgi_irr_storage_ok && ddgi_depth_storage_ok) {
+        eprintln!(
+            "DDGI disabled: B10G11R11/RG16F storage unsupported (irr_ok={ddgi_irr_storage_ok}, \
+             depth_ok={ddgi_depth_storage_ok})"
+        );
+    }
+
     DeviceCaps {
         bindless_capable,
         gbuffer_storage_format_ok,
@@ -2314,6 +2393,8 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         gbuffer_color_attachment_format_ok,
         r8_unorm_storage_ok,
         atlas_linear_filter_ok,
+        ddgi_irr_storage_ok,
+        ddgi_depth_storage_ok,
     }
 }
 

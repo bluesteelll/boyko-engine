@@ -1679,8 +1679,10 @@ pub(crate) fn oct_encode(n: [f32; 3]) -> [f32; 2] {
     [ex * 0.5 + 0.5, ey * 0.5 + 0.5]
 }
 
-/// Octahedral-decode (mirrors the resolve's `oct_decode`).
-pub(crate) fn oct_decode(e: [f32; 2]) -> [f32; 3] {
+/// Octahedral-decode (mirrors the resolve's `oct_decode`). `pub` (behind the `goldens` feature)
+/// so the SDFDDGI I2 `oct_decode_edsl_matches_host` sync test can pin the new eDSL
+/// `boyko_shaderdsl::oct::oct_decode_body::<EvalCf>` equal to this host mirror (plan §6 gate 4).
+pub fn oct_decode(e: [f32; 2]) -> [f32; 3] {
     let ex = e[0] * 2.0 - 1.0;
     let ey = e[1] * 2.0 - 1.0;
     let mut n = [ex, ey, 1.0 - ex.abs() - ey.abs()];
