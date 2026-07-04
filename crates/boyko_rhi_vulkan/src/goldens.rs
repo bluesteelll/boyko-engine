@@ -19,7 +19,7 @@ use boyko_sdf_math::brick::{
 };
 use boyko_sdf_math::{
     MAX_SDF_EDITS, SDF_GRAD_H, SDF_IMG_H, SDF_IMG_W, SdfEdit, SdfEditField, edit_distance,
-    sdf_edit_list, sdf_edit_list_normal, v_dot, v_normalize,
+    sdf_edit_list, sdf_edit_list_normal, v_dot, v_len, v_normalize, v_sub,
 };
 
 use crate::compute::{
@@ -3907,4 +3907,290 @@ pub fn golden_composite_pixel_culled_omega_lit(
         SDF_BACKGROUND
     };
     pack_rgba(color)
+}
+
+// ======================================================================
+// SDFDDGI I0b — the `probe_sample` resolve-side irradiance-lookup HOST ORACLE.
+//
+// This is the CPU reference for the SDFDDGI per-pixel resolve GI sample (Decision D6:
+// R11G11B10F-no-gamma → the resolve path is bit-exact against the GPU). It renders
+// NOTHING and is NOT wired into any resolve (that is I3); it is the de-risk proof that
+// the whole world→probe→trilinear→octahedral-direction→weight→accumulate chain is
+// TRANSCENDENTAL-FREE (dot/max/sqrt/div/lerp/select only) BEFORE the shader is authored.
+// I3 will add `probe_sample_gpu_eq_cpu_to_bits` (dispatch the I3 HLSL `probe_sample`,
+// read the atlas back, and diff to THIS reference to bits — the same GPU-vs-CPU gate the
+// SSAO / marcher mirrors carry). See `docs/RENDER-SDFDDGI-PLAN.md`
+// ("Host-oracle bit-exactness", Decisions D2 / D6).
+//
+// # Transcendental-freedom (the load-bearing property — proven op-by-op)
+//
+// Every arithmetic op in the chain is in the ACCEPTED host-oracle set
+// `{+ - * / abs min max clamp/saturate floor sqrt/normalize select/ternary}`:
+//   * world→probe fractional index — `-` (P-origin), `*` (inv_spacing), `clamp`;
+//   * base cell + trilinear frac — `floor` (the `floor` intrinsic — deterministic and NOT a
+//     transcendental; GPU/CPU agree bit-for-bit here ONLY because the input is `clamp`ed to
+//     `[0, dims-1] ≥ 0` on the line above, where `floor == trunc` and HLSL `floor` matches;
+//     do NOT move `floor` before the clamp), `-` (frac = f - floor), `select` (corner pick);
+//   * texel→tile-UV→direction — `+ 0.5`, `/ VALID_EXTENT`, `* 2 - 1`, then `oct_decode`
+//     which is `abs / clamp / select / +/-/* ` ending in `v_normalize` (= `sqrt` + `/`);
+//   * wrap/backface weight — `v_dot`, `+ 1`, `* 0.5`, `* self` (the square), `+ bias`,
+//     `max(_, 0)`;
+//   * Chebyshev — `-`, `* self`, `max(0, _)`, `+`, `/` (`var / (var + d²)`);
+//   * accumulate / normalize — `+`, `*`, `/ (sum weight)` guarded by `max(_, eps)`,
+//     `select` (sky fallback).
+// NO `atan2`/`asin`/`acos`/`sin`/`cos`/`pow`/`exp`/`log` appears anywhere. VERDICT:
+// transcendental-free — the resolve golden's op set STAYS host-oracle bit-exact-CAPABLE (no
+// re-classify to GPU-only+tolerance is forced by a transcendental).
+//
+// # Host-vs-HLSL bit-parity is DEFERRED to the I3 GPU golden (NOT proven here)
+//
+// I0b proves transcendental-freedom + HOST math correctness. It does NOT prove the host
+// `oct_decode` bit-matches the future I3 hand-written HLSL decode: there is NO `oct_decode`
+// eDSL body (only an ENCODE body exists), so the decode has no eDSL reference to lock
+// against — the HLSL decode is hand-authored like the marcher/SSAO oracles and is verified
+// at I3 by `probe_sample_gpu_eq_cpu_to_bits` (dispatch the HLSL `probe_sample`, read the
+// atlas back, diff to THIS host reference to bits). The host `oct_encode` reused for the
+// round-trip parity check ALSO differs from the eDSL encode body by ≤2 ULP (`x*(1/s)` vs
+// `x/s`; see `oct_encode_matches_edsl_within_2_ulp` in the I0b test). So "bit-exact" is the
+// TARGET the I3 GPU golden certifies, not a property I0b asserts by itself.
+
+/// The DDGI octahedral IRRADIANCE tile edge in texels (Decision D2: 8×8 tile). The tile
+/// is `6×6` VALID interior texels ([`DDGI_IRR_VALID_EXTENT`]) plus a 1-texel border on
+/// every side (the standard DDGI/RTXGI octahedral layout: `6 + 2 = 8`).
+pub const DDGI_IRR_TILE_EDGE: u32 = 8;
+
+/// The VALID interior edge of the irradiance tile in texels (Decision D2: `6×6` valid).
+/// The octahedral map is parameterized across exactly these interior texels; the 1-texel
+/// border is a wrap-copy for clamp-free bilinear addressing (the border WRAP-COPY / sampler
+/// addressing is pinned at I7 — this I0b reference resolves the interior direction chain).
+pub const DDGI_IRR_VALID_EXTENT: u32 = 6;
+
+/// The 1-texel border width on each side of an octahedral tile (`(8 - 6) / 2 == 1`).
+pub const DDGI_TILE_BORDER: u32 = 1;
+
+/// The plan's per-probe wrap/backface weight small-bias `+0.2` — keeps a grazing-but-valid
+/// probe (`dot(dirToProbe, n) ≈ -1`) from being fully zero-weighted, avoiding a hard cut
+/// (`docs/RENDER-SDFDDGI-PLAN.md`, "Host-oracle bit-exactness": `((dot+1)*0.5)²+0.2`).
+pub const DDGI_WRAP_WEIGHT_BIAS: f32 = 0.2;
+
+/// The minimum summed weight before the normalize divides — guards the all-corner-zero /
+/// fully-unconverged case against a `0/0` NaN (a `max(sum, eps)` select, accepted). Below
+/// this the sample is treated as no coverage ⇒ the sky-ambient fallback.
+pub const DDGI_MIN_SUM_WEIGHT: f32 = 1.0e-6;
+
+/// Maps an octahedral IRRADIANCE-tile interior texel `(tx, ty)` (each in
+/// `0..DDGI_IRR_VALID_EXTENT`) to the world-space DIRECTION its texel CENTER encodes — the
+/// texel→tile-UV→`[-1,1]²`→`oct_decode` chain the I3 shader will author for probe-tile
+/// construction and readback. The UV is the texel CENTER `(t + 0.5) / VALID_EXTENT` over the
+/// `6×6` interior (border-exclusive; the border is the I7 wrap-copy of these interior texels).
+///
+/// The chain is transcendental-free: `+0.5`, `/VALID_EXTENT`, `*2-1` (the `[0,1]→[-1,1]`
+/// remap `oct_decode` inverts), then [`oct_decode`] (`abs`/`clamp`/`select`/±/`*` +
+/// `v_normalize`). Reuses the SAME [`oct_decode`] the G-buffer resolve uses — no re-derived
+/// octahedral math.
+///
+/// # Host-vs-HLSL bit-parity is DEFERRED (not proven here)
+///
+/// There is no `oct_decode` eDSL body to lock this decode against; its bit-parity with the
+/// I3 hand-written HLSL decode is certified at I3 by `probe_sample_gpu_eq_cpu_to_bits` (the
+/// standard host-oracle discipline — the marcher/SSAO decode oracles work the same way).
+/// I0b proves the HOST chain is transcendental-free + math-correct, nothing about the GPU
+/// yet.
+///
+/// # Panics (debug)
+///
+/// Debug-asserts `tx < DDGI_IRR_VALID_EXTENT && ty < DDGI_IRR_VALID_EXTENT` — an
+/// out-of-interior texel is a caller bug (the border texels are wrap-copies, never
+/// parameterized directly).
+pub fn ddgi_texel_direction(tx: u32, ty: u32) -> [f32; 3] {
+    debug_assert!(
+        tx < DDGI_IRR_VALID_EXTENT && ty < DDGI_IRR_VALID_EXTENT,
+        "invariant: DDGI interior texel ({tx},{ty}) must be < DDGI_IRR_VALID_EXTENT {DDGI_IRR_VALID_EXTENT}"
+    );
+    let extent = DDGI_IRR_VALID_EXTENT as f32;
+    // Texel CENTER → [0,1] tile UV → the [0,1]² pair oct_decode remaps to [-1,1]², decoded
+    // to a unit direction.
+    let u = (tx as f32 + 0.5) / extent;
+    let v = (ty as f32 + 0.5) / extent;
+    oct_decode([u, v])
+}
+
+/// Octahedral-ENCODES a unit direction into the `[0,1]²` tile UV — the inverse of
+/// [`ddgi_texel_direction`]'s decode, the direction→texel mapping the I3 atlas WRITE + the
+/// resolve READ use to address a probe tile. A thin `pub` seam over the crate-private
+/// `oct_encode` (the SAME encode the G-buffer marcher writes, which backs the existing
+/// `golden_marcher_attributes` normal goldens), so the I0b round-trip sanity test can reach
+/// it without widening `oct_encode`.
+///
+/// # NOT bit-identical to the eDSL encode body (≤2 ULP)
+///
+/// `oct_encode` L1-normalizes by MULTIPLY-BY-RECIPROCAL (`inv = 1/s; n*inv`); the eDSL
+/// `oct_encode_body::<EvalCf>` — and the committed HLSL `float3 / float` it is spliced from —
+/// DIVIDE (`n / s`). `x*(1/s)` ≠ `x/s` in IEEE; the gap is ≤2 ULP over the DDGI texel sweep
+/// (pinned by `oct_encode_matches_edsl_within_2_ulp` in the I0b test). `oct_encode`'s op
+/// sequence is NOT changed here — altering it would break the byte-identity of the G-buffer
+/// normal goldens that already depend on it. The encode is used only for the round-trip
+/// SANITY check (tolerance, not bits); the real GPU parity is the I3 golden's job.
+///
+/// Transcendental-free: `abs`/`select`/±/`*`/`/` (`oct_encode`'s L1-normalize + fold) — no
+/// transcendental in the direction→UV chain either.
+#[inline]
+pub fn ddgi_oct_encode(dir: [f32; 3]) -> [f32; 2] {
+    oct_encode(dir)
+}
+
+/// A single probe's contribution to a [`probe_sample`] receiver — the RG16F depth moments
+/// and the (already atlas-fetched) octahedral irradiance in the receiver-normal direction.
+/// Modelled as an explicit struct so [`probe_sample`] takes the atlas read as an injected
+/// dependency (no atlas is allocated until I1): the resolve fetches `irradiance` from the
+/// irradiance atlas via `oct_encode(dir)` and `depth_mean`/`depth_mean2` from the depth
+/// atlas at the same probe, exactly the two texture reads I3 will author.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DdgiProbeTap {
+    /// The probe's octahedral irradiance in the receiver's chosen direction (the atlas
+    /// texel `oct_encode(dir)` decodes to) — linear R11G11B10F, no gamma (Decision D6:
+    /// the pow encode is DROPPED so this is a plain stored value).
+    pub irradiance: [f32; 3],
+    /// The depth tile's first moment `E[dist]` (mean distance to geometry along the probe's
+    /// octahedral direction) — the RG16F `.r` lane.
+    pub depth_mean: f32,
+    /// The depth tile's second moment `E[dist²]` — the RG16F `.g` lane. `var = mean2 -
+    /// mean²` feeds the Chebyshev visibility (two-moment leak suppression).
+    pub depth_mean2: f32,
+    /// Whether this probe has been written at least once (the converged-once bit, Decision
+    /// D2 / storage-class 3). An unconverged probe contributes ZERO weight so the receiver
+    /// falls back to sky-ambient until first coverage.
+    pub converged: bool,
+}
+
+/// The DDGI resolve-side irradiance lookup HOST ORACLE (SDFDDGI I0b) — the bit-exact CPU
+/// reference the I3 shader's `probe_sample` will be diffed against (`docs/RENDER-SDFDDGI-PLAN.md`,
+/// Decision D6). Given a receiver world position `p` + normal `n`, the world-fixed grid
+/// (`origin` / `inv_spacing` / `dims`, mirroring the `ResolvedDdgi` carrier that
+/// `boyko_render::ddgi_config` derives — `inv_spacing_dims` there), and a per-probe tap
+/// provider, returns the trilinearly-blended, wrap- + Chebyshev-weighted indirect
+/// irradiance, or `sky_ambient` when no surrounding probe has coverage.
+///
+/// # The chain (all transcendental-free — see the module header proof)
+///
+/// 1. `world → probe`: `f = (p - origin) * inv_spacing`, clamped to `[0, dims-1]` so the base
+///    cell + its `+1` neighbour stay in-bounds; `base = floor(f)`, `frac = f - base`.
+/// 2. The 8 surrounding probes (`base + {0,1}³`) with TRILINEAR corner weights
+///    (`lerp` factors `frac` / `1-frac` per axis, multiplied).
+/// 3. Per probe: skip if `!converged` (contributes zero); else weight =
+///    `trilinear · wrap · chebyshev`:
+///    - wrap/backface `w = ((dot(dirToProbe, n) + 1) · 0.5)² + 0.2` (clamped `≥ 0`),
+///    - Chebyshev `cheb = var / (var + max(0, dist - mean)²)` with `var = mean2 - mean²`
+///      (`≥ 0`), `dist = |p - probe_pos|`; if `dist ≤ mean` the probe is unshadowed ⇒
+///      `cheb = 1`.
+/// 4. Accumulate `weight · irradiance`; normalize by `max(sum_weight, eps)`. If
+///    `sum_weight < eps` (all corners out-of-bounds or unconverged) ⇒ `sky_ambient`.
+///
+/// `probe_pos(i)` returns probe `i`'s world position (`origin + i · spacing`) — the caller's
+/// closure OWNS the `spacing` reconstruction, so `probe_sample` itself needs only
+/// `inv_spacing` (`== 1/spacing`, mirroring `ResolvedDdgi::inv_spacing_dims[0]`) for the
+/// world→probe fractional index. `tap(i, dir)` returns probe `i`'s [`DdgiProbeTap`] for the
+/// octahedral `dir` (the atlas read, injected because the atlas is not allocated until I1).
+///
+/// # Determinism / stable accumulation order
+///
+/// The corner iteration order is fixed (`z` outer, `y`, `x` inner — the `i = ((z·dy)+y)·dx +
+/// x` grid index order), so the floating-point accumulation order is stable and matches the
+/// order the I3 GPU shader will unroll. No op leaves the accepted set. (Actual host-vs-GPU
+/// bit-parity is certified by the I3 `probe_sample_gpu_eq_cpu_to_bits` golden, not here.)
+#[allow(clippy::too_many_arguments)]
+pub fn probe_sample(
+    p: [f32; 3],
+    n: [f32; 3],
+    origin: [f32; 3],
+    inv_spacing: f32,
+    dims: [u32; 3],
+    sky_ambient: [f32; 3],
+    probe_pos: impl Fn([u32; 3]) -> [f32; 3],
+    tap: impl Fn([u32; 3], [f32; 3]) -> DdgiProbeTap,
+) -> [f32; 3] {
+    // world → fractional probe coords, clamped so base and base+1 both stay in [0, dims-1].
+    // A receiver outside the AABB clamps onto the boundary cell (a benign edge extrapolation);
+    // fully-outside coverage still resolves to sky via the summed-weight guard when the
+    // clamped corners are unconverged.
+    let frac_coord = |axis: usize| -> f32 {
+        let f = (p[axis] - origin[axis]) * inv_spacing;
+        // Upper bound is dims-1 so the +1 neighbour is the last valid index; guard dims==0.
+        let hi = (dims[axis].max(1) - 1) as f32;
+        f.clamp(0.0, hi)
+    };
+    let fx = frac_coord(0);
+    let fy = frac_coord(1);
+    let fz = frac_coord(2);
+
+    // Base cell + trilinear fractions. `floor` is the `floor` intrinsic — deterministic and
+    // NOT a transcendental; it is GPU/CPU-agreement-safe here ONLY because `frac_coord`
+    // clamped the input to `[0, dims-1] ≥ 0`, where `floor == trunc` and HLSL `floor` matches
+    // bit-for-bit (do NOT move `floor` before that clamp).
+    let bx = fx.floor();
+    let by = fy.floor();
+    let bz = fz.floor();
+    let tx = fx - bx;
+    let ty = fy - by;
+    let tz = fz - bz;
+    let (bx, by, bz) = (bx as u32, by as u32, bz as u32);
+
+    let mut sum_irr = [0.0_f32; 3];
+    let mut sum_w = 0.0_f32;
+
+    // The 8 surrounding probes: z outer, y, x inner (the grid index order — a stable
+    // accumulation order matching the shader's unroll).
+    for cz in 0..2u32 {
+        let wz = if cz == 0 { 1.0 - tz } else { tz };
+        let pz = (bz + cz).min(dims[2].max(1) - 1);
+        for cy in 0..2u32 {
+            let wy = if cy == 0 { 1.0 - ty } else { ty };
+            let py = (by + cy).min(dims[1].max(1) - 1);
+            for cx in 0..2u32 {
+                let wx = if cx == 0 { 1.0 - tx } else { tx };
+                let px = (bx + cx).min(dims[0].max(1) - 1);
+                let idx = [px, py, pz];
+
+                let ppos = probe_pos(idx);
+                // Direction receiver → probe (the wrap-weight axis). `to_probe` degenerate
+                // (receiver AT the probe) → v_normalize returns ZERO ⇒ dot 0 ⇒ neutral
+                // wrap weight, never a NaN.
+                let to_probe = v_normalize(v_sub(ppos, p));
+
+                let probe = tap(idx, n);
+                if !probe.converged {
+                    continue; // unconverged probe: zero weight (sky fallback until first write)
+                }
+
+                // Wrap / backface weight: ((dot + 1) * 0.5)² + bias, floored at 0.
+                let facing = (v_dot(to_probe, n) + 1.0) * 0.5;
+                let wrap = (facing * facing + DDGI_WRAP_WEIGHT_BIAS).max(0.0);
+
+                // Chebyshev two-moment visibility: var = E[d²] - E[d]²; if the receiver is
+                // nearer than the mean it is unshadowed (cheb = 1), else var / (var + Δ²).
+                let mean = probe.depth_mean;
+                let var = (probe.depth_mean2 - mean * mean).max(0.0);
+                let dist = v_len(v_sub(p, ppos));
+                let delta = (dist - mean).max(0.0);
+                let cheb = if dist <= mean {
+                    1.0
+                } else {
+                    var / (var + delta * delta).max(DDGI_MIN_SUM_WEIGHT)
+                };
+
+                let w = wx * wy * wz * wrap * cheb;
+                sum_irr[0] += w * probe.irradiance[0];
+                sum_irr[1] += w * probe.irradiance[1];
+                sum_irr[2] += w * probe.irradiance[2];
+                sum_w += w;
+            }
+        }
+    }
+
+    // Normalize by the summed weight; below the epsilon there was no coverage ⇒ sky fallback.
+    if sum_w < DDGI_MIN_SUM_WEIGHT {
+        return sky_ambient;
+    }
+    let inv = 1.0 / sum_w;
+    [sum_irr[0] * inv, sum_irr[1] * inv, sum_irr[2] * inv]
 }

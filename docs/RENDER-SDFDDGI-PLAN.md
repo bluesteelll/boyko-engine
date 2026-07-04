@@ -99,13 +99,24 @@ the rendered IMAGE, not UBO bytes, so unread words/bindings are image-invisible.
 ## Host-oracle bit-exactness
 
 Accepted primitive set (mirrored in `goldens.rs`): `{+ - * / abs min max clamp/saturate
-sqrt/normalize select}`. **Resolve path (per-pixel) MUST be bit-exact** — world→probe index,
-trilinear, wrap/backface weight `((dot+1)*0.5)²+0.2`, Chebyshev `var/(var+max(0,d-μ)²)`,
-octahedral decode (`oct.rs` reuse) are all in the set. **I0 deliverable:** a host-Rust
-`probe_sample` reference (goldens.rs mirror) + `probe_sample_gpu_eq_cpu_to_bits`, proving the
-texel-index→UV→direction→weight chain is transcendental-free BEFORE any GI logic ships. If any
-transcendental surfaces, re-classify the resolve golden to GPU-only+tolerance NOW. **Update
-pass** (marches) is GPU-only-golden + tolerance regardless.
+floor sqrt/normalize select}`. (`floor` is a deterministic non-transcendental intrinsic;
+GPU/CPU agree bit-for-bit ONLY when its input is `clamp`ed to `≥ 0` first — where
+`floor == trunc` and HLSL `floor` matches — so the world→probe base-cell `floor` MUST stay
+after the `[0, dims-1]` clamp.) **Resolve path (per-pixel) op set MUST stay bit-exact-capable**
+— world→probe index, trilinear, wrap/backface weight `((dot+1)*0.5)²+0.2`, Chebyshev
+`var/(var+max(0,d-μ)²)` are all in the set, and octahedral decode ends in `normalize` (`sqrt`,
+in the set). The host `oct_decode` is a HAND-WRITTEN mirror (there is NO `oct_decode` eDSL
+body — `oct.rs` authors only ENCODE); its bit-parity with the I3 HLSL decode is NOT yet
+proven — it is certified at I3 by the GPU golden, exactly like the marcher/SSAO decode
+oracles. **I0b deliverable (SHIPPED):** a host-Rust `probe_sample` reference (goldens.rs
+mirror) proving the texel-index→UV→direction→weight chain is transcendental-free +
+math-correct on the host BEFORE any GI logic ships (the encode reuse diverges from the eDSL
+body by ≤2 ULP — `x*(1/s)` vs `x/s` — documented, not bit-asserted). **I3 will add**
+`probe_sample_gpu_eq_cpu_to_bits` (dispatch the HLSL `probe_sample`, read the atlas back, diff
+to the host reference to bits) — that GPU golden is where host↔GPU bit-exactness is actually
+certified. If any transcendental had surfaced, the resolve golden would re-classify to
+GPU-only+tolerance NOW; none did. **Update pass** (marches) is GPU-only-golden + tolerance
+regardless.
 
 ## Increment ladder
 
