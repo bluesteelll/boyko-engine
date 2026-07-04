@@ -18,7 +18,7 @@ transpose, no repack. This match is the whole reason M3's mesh-id lane makes the
 |---|---|---|---|
 | **R2a-1** | `feature=hwrt` + RT extension enable + presence → real `DeviceCaps.ray_query`; raw-FFI AS surface (`accel_ffi.rs` structs/PFNs + abi_guard); AS verbs on RhiDevice/RhiCommandEncoder (`#[cold]` erroring defaults, Mock-safe); `BoundAccelStruct` | compile ±hwrt green; abi_guard passes; hwrt-OFF ⇒ device-create bytes UNCHANGED; `ray_query==false` when ext absent | NONE (byte-identical) |
 | **R2a-2** ✅ SHIPPED @e2ba0df | BLAS build (per-mesh triangle BLAS) + scratch lifecycle + gated mesh buffer-usage bits; a BLAS/TLAS **GPU smoke** (build+destroy a trivial TLAS, assert `device_address!=0`, no device-lost) | smoke PASSES on RTX 3060 (BLAS×2+TLAS distinct+non-zero addrs, scratch_align=128); non-hwrt byte-identical `58f6c6c3`; clippy-D±hwrt green | NONE (AS built, never traced) |
-| **R2a-3** | per-frame TLAS **RDG pass** under `AsBuildSet`; instance buffer fed from M3 `ring`+`mesh_ids`; the `ACCELERATION_STRUCTURE_WRITE→READ` host barrier; resolve `.after_set(AsBuildSet)` (still samples shadow-maps) | TLAS rebuilt per-frame from live M3; frame clean; `tlas_refit_ms` acceptable; resolve `.spv` untouched ⇒ byte-identical | NONE (TLAS live, not read) |
+| **R2a-3** ✅ SHIPPED @e919670 | GPU-resident per-frame TLAS build (detail → [RENDER-R2A3-TLAS-PLAN.md](RENDER-R2A3-TLAS-PLAN.md)): the `VkAccelerationStructureInstanceKHR[]` array is **written by a compute shader** `build_tlas_instances.comp` (zero CPU-pack) from the M3 `InstanceModelCol` ring + a `mesh_id` device buffer + a `blas_addr` table; pack + build are **first-class framegraph passes** (interp→pack COMPUTE→COMPUTE + pack→build SHADER_WRITE→AS_BUILD/SHADER_READ barriers graph-DERIVED, no raw barrier, `WRITE_ACCESS_MASK` untouched). BLAS on `MeshGpu` (Principle 0); `TlasResources` per-FIF named owner (instance-array/scratch/backing device-local). `AsBuildSet` stays a dormant anchor — the RDG has no ECS-scheduled encoder, so the GPU order is the graph barrier, not an ECS set edge | byte-identical `58f6c6c3` hwrt-OFF **and** hwrt-ON; framegraph barrier-derivation + hwrt sink-slot mapping pinned by CPU tests; **GPU smoke on RTX 3060 proves the pack shader writes byte-correct 64-B records** + the TLAS builds from the GPU-packed array; clippy-D±hwrt green | NONE (TLAS live, not read) |
 | **R2a-4** | the `rayQuery` shadow variant (`deferred_pbr_hwrt.comp.spv`, `#if HWRT` one-body, +TLAS binding 19); variant+layout selected ONLY when hwrt+`ray_query`+`table[Shadow][Mesh]==HardwareTri`; the resolve routes its mesh-shadow term to the TLAS trace | **OWNER-EVAL** (RT mesh shadows vs shadow-map, RTX 3060); degrade paths byte-identical | YES (owner-eval) |
 
 Why 4 not 2: separating the static BLAS build (R2a-2, proves the FFI *sequence* on HW) from the
@@ -129,11 +129,11 @@ invisible to `cargo check` AND to the no-validation box; the live GPU smoke is t
   ROW-MAJOR, translation in column 3 = `m[r][3]`); word0@48 = `customIndex:24`(LSB) | `mask:8`(MSB); word1@52 =
   `sbtOffset:24`(LSB) | `flags:8`(MSB); `accelerationStructureReference:u64`@56 = the BLAS **device address** (NOT the
   handle). Pack the bitfields as raw u32 (Rust has no C bitfields): `word0 = (custom & 0xFFFFFF) | (mask<<24)`.
-- **⚠️ ROW-MAJOR VERIFY (the #1 raw-FFI RT bug — resolve at R2a-3):** the architect read `InstanceModelCol.rows` as
-  3×4 ROW-major (→ direct 48-B memcpy). One researcher warns `boyko_math` is typically COLUMN-major (→ transpose the
-  upper 3×4 before the instance write). **The developer MUST confirm `InstanceModelCol`'s actual row/column convention
-  from `instance_model.rs` + the instanced-VS usage before the R2a-3 TLAS fill** — a wrong convention yields shadows
-  detached from geometry (caught by the R2a-2 smoke + R2a-4 owner-eval, but verify upfront). abi_guard the 48-B bridge.
+- **✅ ROW-MAJOR RESOLVED @R2a-3 (was the #1 raw-FFI RT risk):** `InstanceModelCol.rows` IS 3×4 ROW-major with the
+  translation in column 3 — `from_global` writes `rows[i] = [matrix3.rows[i].{x,y,z}, translation.i]` and the gbuffer VS
+  reads it row-major (`m3 = float3x3(r0.xyz,r1.xyz,r2.xyz); world = mul(m3,p)+t`). Byte-identical to `VkTransformMatrixKHR`
+  → **direct 48-B memcpy in the pack compute shader, NO transpose** (the architect's reading; the researcher's
+  column-major warning is refuted). The R2a-3 GPU smoke's byte-readback oracle confirmed the packed transform bytes on HW.
 - **Scratch:** `scratchData.deviceAddress` MUST be aligned to `minAccelerationStructureScratchOffsetAlignment` (=128 on
   Ampere/RTX 3060; query from `VkPhysicalDeviceAccelerationStructurePropertiesKHR` — do NOT trust buffer memreq alignment).
   Buffer triple-gate: `bufferDeviceAddress` feature + `SHADER_DEVICE_ADDRESS_BIT` usage + `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`
