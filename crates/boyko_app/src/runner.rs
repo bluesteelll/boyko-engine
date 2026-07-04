@@ -281,6 +281,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // owner-eval channel, see `host_dump`). `None` on the steady path.
     let mut dump = crate::host_dump::HostDump::from_env(host.swapchain.format());
     let mut last = Instant::now();
+    // SDFDDGI I2 (arm): a monotonically-incrementing frame index feeding the probe-update UBO's
+    // round-robin `frame_index` (which subset updates this frame). Wraps at u32::MAX (benign — the
+    // subset phase is `frame_index % subset_n`).
+    let mut frame_index: u32 = 0;
     loop {
         // 1. Pump the OS queue; `false` = WM_QUIT (the window closed).
         if !host.window.pump_events() {
@@ -600,6 +604,17 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // even when the pairs are not re-uploaded. `FixedTime` is inserted at
             // `finish()` (insert-if-absent), so it is always present in the loop.
             let overstep = world.resource::<FixedTime>().overstep_fraction();
+            // SDFDDGI I2 (arm): GI is ON when the world carries an ENABLED `DdgiConfig` (the host's
+            // config path — the owner/test inserts `DdgiConfig { ddgi_indirect: true, .. }`) AND the
+            // device supports B10G11R11/RG16F STORAGE (plan §3 degrade — the atlas was created WITHOUT
+            // the STORAGE bit on an unsupported device, so binding it as a storage image would fault;
+            // clamp to OFF). Absent (the default host that never composes `DdgiPlugin`), GI is OFF →
+            // `ddgi_update = None`, the byte-identical 0%-gate. Even when ON the render stays
+            // byte-identical this rung (I3 wires the resolve sample; the atlas is written-but-unread).
+            let ddgi_enabled = ctx.device_caps().ddgi_storage_ok()
+                && world
+                    .try_resource::<boyko_render::DdgiConfig>()
+                    .is_some_and(|cfg| cfg.enabled());
             let scene = host.gpu.scene(
                 mvp,
                 s,
@@ -609,6 +624,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 punctual_armed.then_some(resolved_atlas),
                 interp_count,
                 overstep,
+                ddgi_enabled,
+                frame_index,
+                ctx,
             );
 
             // 7. Render + present, consuming the token (the host-write window
@@ -685,6 +703,8 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             stats.punctual_armed_frames += u64::from(frame_punctual_armed);
             stats.interp_armed_frames += u64::from(frame_interp_armed);
         }
+        // SDFDDGI I2 (arm): advance the round-robin frame index (wraps benignly at u32::MAX).
+        frame_index = frame_index.wrapping_add(1);
     }
 }
 

@@ -1065,9 +1065,23 @@ impl RhiDevice<Vulkan> for VulkanContext {
             let mut p_buffer_info: *const VkDescriptorBufferInfo = ptr::null();
             match *entry {
                 BindGroupEntry::StorageImage { texture } => {
+                    // SDFDDGI I2: a MULTI-LAYER texture (array_view != NULL) binds its
+                    // `VK_IMAGE_VIEW_TYPE_2D_ARRAY` view so a shader `RWTexture2DArray` write
+                    // reaches EVERY layer (the DDGI probe atlas is an 8-layer `Texture2DArray`
+                    // whose update pass writes `gIrrOut[uint3(x, y, layer)]` across all layers;
+                    // `.view` is only layer 0's single-layer 2D render view — binding it would
+                    // clamp the storage write to layer 0 / mismatch the descriptor's array type).
+                    // A single-layer image has `array_view == NULL` → falls back to the
+                    // full-subresource `.view`, BYTE-IDENTICAL to every existing StorageImage caller
+                    // (all bind single-layer G-buffer images: gNormal/gMaterial/gViewT/ssao).
+                    let image_view = if texture.array_view != VkImageView::NULL {
+                        texture.array_view
+                    } else {
+                        texture.view
+                    };
                     image_infos[i] = VkDescriptorImageInfo {
                         sampler: VkSampler::NULL,
-                        image_view: texture.view,
+                        image_view,
                         image_layout: VK_IMAGE_LAYOUT_GENERAL,
                     };
                     p_image_info = (&image_infos[i] as *const VkDescriptorImageInfo).cast();

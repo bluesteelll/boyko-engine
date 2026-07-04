@@ -29,11 +29,11 @@ use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
 use boyko_rhi_vulkan::ddgi::DdgiAtlas;
 use boyko_rhi_vulkan::compute::{
     B5_CAMERA_UBO_BYTES_M4, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, EDITLIST_BUFFER_WORDS,
-    INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, LOCAL_SIZE_X,
-    TILE_BOUND_BYTES, csm_depth_fs_spirv, csm_depth_vs_spirv, deferred_pbr_spirv, encode_edit_list,
-    fullscreen_sample_fs_spirv, fullscreen_sample_vs_spirv, gbuffer_mrt_fs_spirv,
+    GI_MAX_IT_DEFAULT, INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS,
+    LOCAL_SIZE_X, TILE_BOUND_BYTES, csm_depth_fs_spirv, csm_depth_vs_spirv, deferred_pbr_spirv,
+    encode_edit_list, fullscreen_sample_fs_spirv, fullscreen_sample_vs_spirv, gbuffer_mrt_fs_spirv,
     gbuffer_mrt_vs_spirv, interp_instances_spirv, punctual_depth_fs_spirv, punctual_depth_vs_spirv,
-    sdf_gbuffer_composite_spirv, tile_grid_extent,
+    sdf_gbuffer_composite_spirv, sdf_probe_update_spirv, tile_grid_extent,
 };
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::memory::BoundBuffer;
@@ -42,18 +42,19 @@ use boyko_rhi_vulkan::rhi_impl::{
     VulkanSampler, VulkanShaderModule,
 };
 use boyko_rhi_vulkan::swapchain::{
-    CsmDepthActivation, FRAMES_IN_FLIGHT, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES,
-    GBufferMeshDraw, GBufferScene, InterpActivation, PunctualDepthActivation,
+    CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, GBUFFER_INSTANCE_MODEL_BYTES,
+    GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene, InterpActivation, PunctualDepthActivation,
 };
 use boyko_rhi_vulkan::texture::VulkanTexture;
 use boyko_sdf_math::SdfEdit;
 
 use boyko_render::{
-    DDGI_UPDATE_UBO_BYTES, DdgiUpdateUbo, GI_MAX_RAYS, GPU_LIGHT_BYTES, GPU_LIGHT_WORDS,
-    GPU_TRANSFORM3D_BYTES, GpuLight, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_BYTES, LightHeaderGpu,
-    LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialGpu, RESOLVED_CSM_BYTES, RESOLVED_DDGI_BYTES,
-    RESOLVED_SHADOW_ATLAS_BYTES, ResolvedCsm, ResolvedShadowAtlas, SHADOW_DIM, Vertex,
-    fill_fibonacci_ray_table,
+    DDGI_UPDATE_UBO_BYTES, DdgiConfig, DdgiUpdateConfig, DdgiUpdateUbo, GI_MAX_RAYS, GPU_LIGHT_BYTES,
+    GPU_LIGHT_WORDS, GPU_TRANSFORM3D_BYTES, GpuLight, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_BYTES,
+    LightHeaderGpu, LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialGpu, RESOLVED_CSM_BYTES,
+    RESOLVED_DDGI_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, ResolvedCsm, ResolvedShadowAtlas, SHADOW_DIM,
+    Vertex, ddgi_update_dispatch_groups, fill_fibonacci_ray_table, pack_ddgi_update_ubo,
+    resolve_ddgi,
 };
 
 /// The boot instance budget: the per-slot instance-model SSBO holds this many
@@ -243,6 +244,14 @@ struct CsmResources {
     /// effectively static, so no per-FIF ring). Bound at the update set @6; bound-but-UNREAD while
     /// the GI update pass is OFF (the default 0%-gate).
     ddgi_update_ubo: BoundBuffer,
+    /// SDFDDGI I2 (the ARM rung): the probe-update `DdgiUpdateResources` — the compute pipeline for
+    /// the `GI_MAX_IT_DEFAULT` variant (`sdf_probe_update_spirv`) + its dedicated 7-binding
+    /// bind-group layout. Co-located with the atlas/ray-table/UBO it drives (an RHI-owned carrier —
+    /// Principle 0). The activation-populate in `Self::scene` borrows these into
+    /// `scene.ddgi_update = Some(...)` when GI is enabled; torn down with the atlas. The bind group
+    /// itself is written ONCE (non-ringed) by `GBufferTargets` against this layout.
+    ddgi_update_pipeline: ComputePipeline,
+    ddgi_update_layout: VulkanBindGroupLayout,
     point_depth_pipeline: VulkanGraphicsPipeline,
     point_depth_vs: VulkanShaderModule,
     point_depth_fs: VulkanShaderModule,
@@ -444,6 +453,50 @@ impl CsmResources {
             b
         };
 
+        // SDFDDGI I2 (the ARM rung): the probe-update `DdgiUpdateResources` — the compute pipeline
+        // for the shipped `GI_MAX_IT_DEFAULT` variant + its dedicated 7-binding layout (set 0):
+        // t0 `Buf` StorageBuffer (R), u1 `gIrrOut` StorageImage (W), u2 `gDepthOut` StorageImage (W),
+        // u3 `Classification` StorageBuffer (RW), t4 `RayTable` StorageBuffer (R), t5 `LightBuf`
+        // StorageBuffer (R), b6 `DdgiUpdate` UniformBuffer. The pipeline declares `push_constant_bytes
+        // = 4` (the shared compute push range this RHI mandates — a 0-byte range is rejected; the
+        // shader reads no push). The shader module is a boot transient dropped after the pipeline
+        // captures the compiled state.
+        let (ddgi_update_pipeline, ddgi_update_layout) = {
+            let module = RhiDevice::create_shader_module(device, sdf_probe_update_spirv(GI_MAX_IT_DEFAULT))
+                .expect("invariant: SDFDDGI probe-update compute shader module create");
+            let layout = RhiDevice::create_bind_group_layout(
+                device,
+                &BindGroupLayoutDesc {
+                    entries: &[
+                        BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                        BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                        BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                        BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                        BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                        BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                        BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                    ],
+                },
+            )
+            .expect("invariant: SDFDDGI probe-update bind-group layout create");
+            let pipeline = RhiDevice::create_compute_pipeline(
+                device,
+                &ComputePipelineDesc {
+                    module: &module,
+                    entry: c"main",
+                    // The shared 4-byte compute push range (a 0-byte range is rejected); the update
+                    // shader reads no push constant — every param rides the b6 UBO.
+                    push_constant_bytes: 4,
+                    bind_group_layout: Some(&layout),
+                },
+            )
+            .expect("invariant: SDFDDGI probe-update compute pipeline create");
+            // SAFETY: `module` was just created on `device`, never submitted; the pipeline captured
+            // the compiled state, so the module is a boot transient destroyed once here.
+            unsafe { RhiDevice::destroy_shader_module(device, module) };
+            (pipeline, layout)
+        };
+
         let point_depth_vs = RhiDevice::create_shader_module(device, punctual_depth_vs_spirv())
             .expect("invariant: punctual point depth VS module create");
         let point_depth_fs = RhiDevice::create_shader_module(device, punctual_depth_fs_spirv())
@@ -498,6 +551,8 @@ impl CsmResources {
             ddgi_atlas,
             ddgi_ray_table,
             ddgi_update_ubo,
+            ddgi_update_pipeline,
+            ddgi_update_layout,
             point_depth_pipeline,
             point_depth_vs,
             point_depth_fs,
@@ -565,6 +620,10 @@ impl CsmResources {
             RhiDevice::destroy_graphics_pipeline(device, self.point_depth_pipeline);
             RhiDevice::destroy_shader_module(device, self.point_depth_fs);
             RhiDevice::destroy_shader_module(device, self.point_depth_vs);
+            // SDFDDGI I2 (arm): the probe-update pipeline + its bind-group layout (reverse creation
+            // order — created after ddgi_update_ubo, before the point-depth pipeline).
+            RhiDevice::destroy_compute_pipeline(device, self.ddgi_update_pipeline);
+            RhiDevice::destroy_bind_group_layout(device, self.ddgi_update_layout);
             // SDFDDGI I2: the probe-update UBO + Fibonacci ray-table (reverse creation order —
             // created after ddgi_atlas).
             RhiDevice::destroy_buffer(device, self.ddgi_update_ubo);
@@ -1360,6 +1419,9 @@ impl GpuSceneBundles {
         atlas: Option<&ResolvedShadowAtlas>,
         interp_count: u32,
         overstep: f32,
+        ddgi_enabled: bool,
+        frame_index: u32,
+        device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
             light_upload.unwrap_or(0) <= LIGHT_TABLE_CAPACITY,
@@ -1377,6 +1439,43 @@ impl GpuSceneBundles {
         let interp = interp_armed.then(|| {
             self.interp
                 .activation(slot, &self.instance_rings[slot], interp_count, overstep)
+        });
+
+        // SDFDDGI I2 (the ARM rung): when GI is enabled, pack the b6 update UBO for THIS frame and
+        // arm the probe-update pass. The render stays BYTE-IDENTICAL — I3 has not wired the resolve
+        // sample yet, so the atlas is written-but-unread; this rung validates the LIVE RDG-integrated
+        // dispatch (`record_graph_pass` path). When disabled → `None` (the GI-OFF 0%-gate, default).
+        //
+        // The grid is world-fixed (Decision D1) → a single enabled `ResolvedDdgi` from the
+        // owner-locked default `DdgiConfig` (the host does not run the `DdgiPlugin` resolve, so it
+        // builds the carrier inline). The UBO write is host-coherent into the SINGLE (non-ringed)
+        // `ddgi_update_ubo` before the dispatch reads it (identity ray-rotation → static UBO).
+        // `light_count` drives the shader's per-ray shade loop; the host light table is bound at t5.
+        let ddgi_update = ddgi_enabled.then(|| {
+            let config = DdgiUpdateConfig::default();
+            let resolved = resolve_ddgi(&DdgiConfig { ddgi_indirect: true, ..DdgiConfig::default() });
+            // The shade loop iterates `light_count` lights from the bound light table. The host's
+            // fold caps at `MAX_LIGHTS`; a conservative full-table count keeps the dispatch
+            // representative (the resolve does not sample the atlas this rung, so the exact count
+            // does not perturb byte-identity — only the write cost).
+            let light_count = MAX_LIGHTS;
+            let ubo = pack_ddgi_update_ubo(&resolved, &config, frame_index, light_count);
+            let bytes = ubo.as_bytes();
+            let mapped = RhiDevice::buffer_mapped_ptr(device, &self.csm.ddgi_update_ubo)
+                .expect("invariant: host-visible DDGI update UBO is mapped");
+            // SAFETY: `mapped` points at `DDGI_UPDATE_UBO_SIZE` (48) host-coherent bytes; `bytes` is
+            // exactly that length and copied in full, in-bounds. The UBO is non-ringed and written
+            // here before this frame's update dispatch reads it (the update pass is recorded after
+            // the scene is assembled); no in-flight submission references it concurrently (the caller
+            // fence-waited this frame's slot before assembling the scene).
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+            }
+            DdgiUpdateActivation {
+                pipeline: &self.csm.ddgi_update_pipeline,
+                layout: &self.csm.ddgi_update_layout,
+                dispatch_group_count_x: ddgi_update_dispatch_groups(config.subset_n),
+            }
         });
         GBufferScene {
             raster_pipeline: &self.raster_pipeline,
@@ -1486,14 +1585,13 @@ impl GpuSceneBundles {
             ddgi_depth_texture: self.csm.ddgi_atlas.depth(),
             ddgi_depth_sampler: self.csm.ddgi_atlas.sampler(),
             ddgi_grid_ubo: &self.csm.ddgi_ubo,
-            // SDFDDGI I2: the probe-update pass stays OFF on the host path (the GI-OFF 0%-gate —
-            // `DdgiConfig::ddgi_indirect == false`): `ddgi_update = None`, so NO update RDG pass /
-            // set-write / dispatch / barrier is recorded and the command stream is byte-identical to
-            // the pre-I2 golden. The classification / ray-table / update-UBO handles are ALWAYS
-            // supplied (allocated regardless, like the atlas) so the RDG sink can resolve them — but
-            // they are unread while the pass is off. Arming the pass (populating `ddgi_update`) is the
-            // bench-derived follow-up the orchestrator wires after `ddgi_probe_gi_cost`.
-            ddgi_update: None,
+            // SDFDDGI I2 (the ARM rung): `ddgi_update` is `Some(...)` when GI is enabled (the packed
+            // activation computed above) → the update RDG pass is recorded + dispatched in the LIVE
+            // frame; `None` on the default GI-OFF path (byte-identical 0%-gate — no pass recorded).
+            // Even when armed the render stays byte-identical this rung: I3 has not wired the resolve
+            // sample, so the atlas is written-but-unread. The classification / ray-table / update-UBO
+            // handles are ALWAYS supplied so the RDG sink can resolve them.
+            ddgi_update,
             ddgi_classification: self.csm.ddgi_atlas.classification(),
             ddgi_ray_table: &self.csm.ddgi_ray_table,
             ddgi_update_ubo: &self.csm.ddgi_update_ubo,
