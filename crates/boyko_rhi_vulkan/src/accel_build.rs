@@ -19,8 +19,8 @@
 //! inside the build once the fence signals the build finished reading it.
 
 use boyko_rhi::{
-    AsBuildEntry, AsGeometryDesc, AsKind, BufferDesc, BufferUsage, MemoryLocation, RhiCommandEncoder,
-    RhiDevice, RhiQueue,
+    AsBuildEntry, AsGeometryDesc, AsIndexType, AsKind, BufferDesc, BufferUsage, MemoryLocation,
+    RhiCommandEncoder, RhiDevice, RhiQueue,
 };
 
 use crate::accel::{BoundAccelStruct, pack_instance};
@@ -47,7 +47,7 @@ fn round_up(x: u64, align: u64) -> u64 {
 pub struct BlasBuildInput<'a> {
     /// The model-space vertex buffer (position at byte offset 0, `R32G32B32_SFLOAT`).
     pub vertex_buffer: &'a BoundBuffer,
-    /// The `u32` index buffer (`index_count` indices, three per triangle).
+    /// The index buffer (`index_count` indices, three per triangle), read at [`Self::index_type`].
     pub index_buffer: &'a BoundBuffer,
     /// The number of vertices (`max_vertex = vertex_count - 1`).
     pub vertex_count: u32,
@@ -56,6 +56,10 @@ pub struct BlasBuildInput<'a> {
     /// The byte stride between consecutive vertices (`40` for `MeshRegistry::Vertex`; any
     /// stride is valid as long as the position sits at offset 0).
     pub vertex_stride: u64,
+    /// The index width the BLAS reads `index_buffer` at (R2a-3): `Uint16` or `Uint32`, chosen
+    /// by the mesh's O3 crossover. The BLAS reads the mesh's EXISTING index buffer at its real
+    /// width — NO duplicate `u32` buffer (Principle 0, less VRAM).
+    pub index_type: AsIndexType,
 }
 
 /// A built bottom-level acceleration structure + its owned backing buffer + cached device
@@ -92,18 +96,132 @@ pub struct BuiltTlas {
 const IDENTITY_3X4: [[f32; 4]; 3] =
     [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]];
 
-/// Allocates a device-addressable buffer of `size` bytes with `usage` from the shared
-/// host-visible block, failing fast if `size == 0`.
+/// A PERSISTENT top-level acceleration structure sized ONCE for a MAX instance capacity, built
+/// into every frame from a caller-supplied instance array (HW-RT rung R2a-3). Unlike
+/// [`BuiltTlas`] (which owns its own instance buffer and is built once), this is the durable
+/// per-FIF-slot TLAS the host's [`TlasResources`](../../boyko_app/gpu_scene/index.html) rebuilds
+/// each frame: the backing is sized for `capacity` instances (`build_sizes` with the MAX), the
+/// scratch holds a build's scratch + alignment slack, and the per-frame build supplies the actual
+/// (`<= capacity`) instance array address + count. The instance array is NOT owned here (it is
+/// the compute-written array in `TlasResources`); the backing + scratch ARE owned.
+///
+/// # Lifetime contract
+/// The backing MUST outlive `accel`; both (+ scratch) are freed by [`destroy_persistent_tlas`]
+/// with the device idle (caller contract), the AS FIRST.
+pub struct PersistentTlas {
+    /// The top-level acceleration structure (built into every frame; sized for `capacity`).
+    pub accel: BoundAccelStruct,
+    /// The AS backing buffer (MUST outlive `accel`; freed in [`destroy_persistent_tlas`]).
+    pub backing: BoundBuffer,
+    /// The build scratch buffer (over-allocated by `as_scratch_align` for the aligned address).
+    pub scratch: BoundBuffer,
+    /// The aligned scratch device address (`round_up(base, as_scratch_align)`), cached once —
+    /// the per-frame build's `AsBuildEntry::scratch_address`.
+    pub scratch_addr: u64,
+}
+
+/// Creates a [`PersistentTlas`] sized for `capacity` instances (HW-RT rung R2a-3): a single
+/// `build_sizes(Tlas, primitive_count = capacity)` query, then the AS backing + AS + an
+/// over-allocated (alignment-slack) scratch buffer. NO build is recorded here — the caller
+/// records a build into [`PersistentTlas::accel`] each frame with the actual (`<= capacity`)
+/// instance array + count.
+///
+/// # Errors
+/// A [`VulkanError`] if ray query is off, a buffer/AS create fails, or the scratch buffer's
+/// device address comes back `0` (a mis-flagged buffer — fail fast).
+pub fn create_persistent_tlas(
+    ctx: &VulkanContext,
+    capacity: u32,
+) -> Result<PersistentTlas, VulkanError> {
+    debug_assert!(capacity >= 1, "invariant: a persistent TLAS needs at least one instance slot");
+    // Size with the MAX (capacity): the per-frame build's `primitiveCount` must be <= the count
+    // used for sizing (VUID). The instance-array address is left 0 for the size query (the size
+    // depends only on `primitive_count`, not on the array contents).
+    let geom = AsGeometryDesc {
+        vertex_data: 0,
+        index_data: 0,
+        vertex_stride: 0,
+        max_vertex: 0,
+        primitive_count: capacity,
+        index_type: AsIndexType::Uint32,
+    };
+    let sizes = ctx.build_sizes(AsKind::Tlas, &geom)?;
+
+    // The TLAS backing + scratch are GPU-ONLY (the build writes/reads them, never the CPU) →
+    // DEVICE-LOCAL VRAM. The device-local block carries the DEVICE_ADDRESS alloc flag under hwrt,
+    // so the scratch device address still resolves.
+    let backing = create_addr_buffer(
+        ctx,
+        sizes.as_size,
+        BufferUsage::ACCEL_STRUCTURE_STORAGE | BufferUsage::SHADER_DEVICE_ADDRESS,
+        MemoryLocation::DeviceLocal,
+    )?;
+    let accel = ctx.create_accel(AsKind::Tlas, backing.buffer, sizes.as_size)?;
+
+    let align = ctx.as_scratch_align().max(1);
+    let scratch = create_addr_buffer(
+        ctx,
+        sizes.build_scratch + align,
+        BufferUsage::STORAGE | BufferUsage::SHADER_DEVICE_ADDRESS,
+        MemoryLocation::DeviceLocal,
+    )?;
+    let scratch_base = ctx.buffer_device_address(scratch.buffer)?;
+    if scratch_base == 0 {
+        return Err(VulkanError::Unsupported("persistent TLAS scratch buffer has a zero device address"));
+    }
+    let scratch_addr = round_up(scratch_base, align);
+
+    Ok(PersistentTlas { accel, backing, scratch, scratch_addr })
+}
+
+/// Destroys a [`PersistentTlas`]: the AS FIRST, then its backing + scratch buffers (HW-RT rung
+/// R2a-3).
+///
+/// # Safety
+/// The device is idle / the caller fence-waited every submission that built or traced this
+/// TLAS (`ctx.wait_idle()`), and it is destroyed exactly once (by-value move). Both buffers are
+/// still live at this call (the AS references its backing until destroyed).
+pub unsafe fn destroy_persistent_tlas(ctx: &VulkanContext, tlas: PersistentTlas) {
+    // SAFETY: caller contract — the GPU no longer uses `tlas.accel`; the AS is destroyed before
+    // its backing (its memory lives in `backing`), and the scratch is freed last.
+    unsafe {
+        ctx.destroy_accel(tlas.accel);
+        ctx.destroy_buffer(tlas.backing);
+        ctx.destroy_buffer(tlas.scratch);
+    }
+}
+
+/// The device address of `buffer` (HW-RT rung R2a-3): a public wrapper over the R2a-1 verb, so
+/// the host's [`TlasResources`](../../boyko_app/gpu_scene/index.html) can cache the compute-written
+/// instance array's device address once at create (the per-frame build's instance-array address).
+/// The buffer MUST carry `SHADER_DEVICE_ADDRESS` usage over device-address-flagged memory.
+///
+/// # Errors
+/// A [`VulkanError`] if ray query is off; the returned address is `0` for a mis-flagged buffer
+/// (the caller must fail fast on `0`).
+pub fn buffer_device_address(
+    ctx: &VulkanContext,
+    buffer: &BoundBuffer,
+) -> Result<u64, VulkanError> {
+    ctx.buffer_device_address(buffer.buffer)
+}
+
+/// Allocates a device-addressable buffer of `size` bytes with `usage` from `location`,
+/// failing fast if `size == 0`.
+///
+/// GPU-ONLY AS buffers (BLAS/TLAS backing, build scratch) pass
+/// [`MemoryLocation::DeviceLocal`] — they are never CPU-read, so VRAM residency avoids
+/// streaming them over BAR/PCIe; the device-local block carries
+/// `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT` under `hwrt` on a ray-query device, so the
+/// device address the build needs still resolves. Only the ONE CPU-touched AS buffer —
+/// `build_tlas`'s host-packed instance array — stays [`MemoryLocation::HostVisibleCoherent`].
 fn create_addr_buffer(
     ctx: &VulkanContext,
     size: u64,
     usage: BufferUsage,
+    location: MemoryLocation,
 ) -> Result<BoundBuffer, VulkanError> {
-    ctx.create_buffer(&BufferDesc {
-        size,
-        usage,
-        location: MemoryLocation::HostVisibleCoherent,
-    })
+    ctx.create_buffer(&BufferDesc { size, usage, location })
 }
 
 /// Records + submits + fence-waits a single AS build (`entries[0]` into `dest[0]`), then
@@ -168,14 +286,18 @@ pub fn build_blas(
         vertex_stride: input.vertex_stride,
         max_vertex: input.vertex_count - 1,
         primitive_count: input.index_count / 3,
+        index_type: input.index_type,
     };
     let sizes = ctx.build_sizes(AsKind::Blas, &geom)?;
 
-    // The AS backing buffer + the AS created over it.
+    // The AS backing buffer + the AS created over it. Both backing + scratch are GPU-ONLY
+    // (written/read by the build, never CPU-touched) → DEVICE-LOCAL VRAM; the device-local block
+    // carries the DEVICE_ADDRESS alloc flag under hwrt, so the scratch device address resolves.
     let backing = create_addr_buffer(
         ctx,
         sizes.as_size,
         BufferUsage::ACCEL_STRUCTURE_STORAGE | BufferUsage::SHADER_DEVICE_ADDRESS,
+        MemoryLocation::DeviceLocal,
     )?;
     let accel = ctx.create_accel(AsKind::Blas, backing.buffer, sizes.as_size)?;
 
@@ -187,6 +309,7 @@ pub fn build_blas(
         ctx,
         sizes.build_scratch + align,
         BufferUsage::STORAGE | BufferUsage::SHADER_DEVICE_ADDRESS,
+        MemoryLocation::DeviceLocal,
     )?;
     let scratch_base = ctx.buffer_device_address(scratch.buffer)?;
     if scratch_base == 0 {
@@ -198,7 +321,7 @@ pub fn build_blas(
     record_build(ctx, queue, &entry, &accel)?;
 
     // The scratch is done (the build fence signaled); free it.
-    // SAFETY: `scratch` was created by `create_addr_buffer` on `ctx`'s shared host block and
+    // SAFETY: `scratch` was created by `create_addr_buffer` on `ctx`'s device-local block and
     // is destroyed exactly once here; the build fence completed, so the GPU no longer reads it.
     unsafe { ctx.destroy_buffer(scratch) };
 
@@ -237,12 +360,15 @@ pub fn build_tlas(
         .map(|(i, &blas_addr)| pack_instance(IDENTITY_3X4, i as u32, 0xFF, 0, 0, blas_addr))
         .collect();
 
-    // The instance array buffer (`64 B` per instance) — an AS build input.
+    // The instance array buffer (`64 B` per instance) — an AS build input. This is the ONE
+    // CPU-touched AS buffer (the host memcpys the `pack_instance` output into it below), so it
+    // MUST stay HOST-VISIBLE COHERENT (device-local memory is not mappable).
     let instance_bytes = core::mem::size_of_val(instances.as_slice()) as u64;
     let instance_buffer = create_addr_buffer(
         ctx,
         instance_bytes,
         BufferUsage::ACCEL_BUILD_INPUT | BufferUsage::SHADER_DEVICE_ADDRESS,
+        MemoryLocation::HostVisibleCoherent,
     )?;
     let dst = instance_buffer
         .mapped
@@ -275,13 +401,19 @@ pub fn build_tlas(
         vertex_stride: 0,
         max_vertex: 0,
         primitive_count: blas_addresses.len() as u32,
+        // A TLAS geometry ignores the index type (instance array, not triangles); any value.
+        index_type: AsIndexType::Uint32,
     };
     let sizes = ctx.build_sizes(AsKind::Tlas, &geom)?;
 
+    // The TLAS backing + scratch are GPU-ONLY → DEVICE-LOCAL VRAM (the CPU-packed instance array
+    // above is the only host-visible AS buffer). The device-local block carries the DEVICE_ADDRESS
+    // alloc flag under hwrt, so the scratch device address resolves.
     let backing = create_addr_buffer(
         ctx,
         sizes.as_size,
         BufferUsage::ACCEL_STRUCTURE_STORAGE | BufferUsage::SHADER_DEVICE_ADDRESS,
+        MemoryLocation::DeviceLocal,
     )?;
     let accel = ctx.create_accel(AsKind::Tlas, backing.buffer, sizes.as_size)?;
 
@@ -290,6 +422,7 @@ pub fn build_tlas(
         ctx,
         sizes.build_scratch + align,
         BufferUsage::STORAGE | BufferUsage::SHADER_DEVICE_ADDRESS,
+        MemoryLocation::DeviceLocal,
     )?;
     let scratch_base = ctx.buffer_device_address(scratch.buffer)?;
     if scratch_base == 0 {

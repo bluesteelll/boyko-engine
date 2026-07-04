@@ -53,6 +53,18 @@ pub(crate) struct GbufferPassPlan {
     pub(crate) csm: Option<crate::framegraph::PassId>,
     /// The sparse spot/point atlas depth pass (`scene.atlas_punctual.is_some()`).
     pub(crate) atlas: Option<crate::framegraph::PassId>,
+    /// HW-RT rung R2a-3: the TLAS-instance PACK compute pre-pass (`scene.tlas.is_some()`). Runs
+    /// after interp, before the raster `begin_rendering`; writes the `tlas_instances` array
+    /// (COMPUTE/SHADER_WRITE) and, when interp ran, reads the shared ring (COMPUTE/SHADER_READ).
+    /// `Some` iff `scene.tlas.is_some()` (the "member is Some iff its body is recorded" invariant).
+    #[cfg(feature = "hwrt")]
+    pub(crate) tlas_pack: Option<crate::framegraph::PassId>,
+    /// HW-RT rung R2a-3: the per-frame TLAS BUILD pass (`scene.tlas.is_some()`), right after
+    /// `tlas_pack`. Reads the `tlas_instances` array at the AS-build stage
+    /// (AS_BUILD/SHADER_READ), deriving the pack-write → build-read barrier; the AS write into
+    /// the UNTRACKED backing/scratch is invisible to the graph.
+    #[cfg(feature = "hwrt")]
+    pub(crate) tlas_build: Option<crate::framegraph::PassId>,
     /// The always-present deferred resolve pass.
     pub(crate) resolve: crate::framegraph::PassId,
     /// The always-present present-sample pass: only the `lit` GENERAL→SHADER_READ_ONLY
@@ -89,16 +101,27 @@ pub(crate) struct GbufferBarrierSink<'a> {
     /// atlases when the update pass is off) never routes a barrier naming that ResId, so its
     /// slot may hold [`VkImage::NULL`] harmlessly.
     pub(crate) images: [VkImage; FRAMEGRAPH_IMAGE_COUNT],
-    /// The physical buffers resolved by `res.index() - FRAMEGRAPH_IMAGE_COUNT` —
-    /// `[light_table, tiles, grid, index, alloc, interp_pairs, interp_out_slot,
-    /// interp_model_out, ddgi_classification, ddgi_ray_table]`. The interp trio (Pillar B
-    /// B3, refined-B) is the CURRENT frame slot's FIF-ringed interpolation SSBOs, bound ONLY
-    /// when `scene.interp.is_some()`. The last two (SDFDDGI I2) are the single-instance
-    /// classification + Fibonacci ray-table buffers, named by the `ddgi_update` pass ONLY when
-    /// `scene.ddgi_update.is_some()`. On any OFF path the ungated slots are never named by a
-    /// derived barrier, so their [`VkBuffer::NULL`] slots are inert (same NULL-when-ungated
-    /// rule as [`Self::images`]).
+    /// The physical buffers resolved by `res.index() - FRAMEGRAPH_IMAGE_COUNT` (the graph's
+    /// FIXED buffer declaration order): `[light_table, tiles, grid, index, alloc,
+    /// ddgi_classification, ddgi_ray_table, interp_pairs, interp_out_slot, interp_model_out]`.
+    /// The two SDFDDGI I2 buffers (classification + Fibonacci ray-table) are single-instance,
+    /// named by the `ddgi_update` pass ONLY when `scene.ddgi_update.is_some()`. The interp trio
+    /// (Pillar B B3, refined-B) is the CURRENT frame slot's FIF-ringed interpolation SSBOs,
+    /// bound ONLY when `scene.interp.is_some()`.
+    ///
+    /// Under `hwrt` the array grows by ONE: `tlas_instances` (HW-RT rung R2a-3) is declared
+    /// UNCONDITIONALLY right AFTER the DDGI buffers (so its ResId is FIXED regardless of the
+    /// conditional interp trio, which then shifts one slot later), landing at index 7 — the
+    /// order becomes `[.., ddgi_ray_table, tlas_instances, interp_pairs, interp_out_slot,
+    /// interp_model_out]`. On a `not(hwrt)` build the array is exactly `[VkBuffer; 10]` with
+    /// unchanged indices (RISK-2: cfg-gated ⇒ no OFF-path ResId shift). On any OFF path an
+    /// ungated slot is never named by a derived barrier, so its [`VkBuffer::NULL`] is inert
+    /// (same NULL-when-ungated rule as [`Self::images`]).
+    #[cfg(not(feature = "hwrt"))]
     pub(crate) buffers: [VkBuffer; 10],
+    /// See the `not(hwrt)` variant's doc: `hwrt` grows this by one (`tlas_instances` at index 7).
+    #[cfg(feature = "hwrt")]
+    pub(crate) buffers: [VkBuffer; 11],
 }
 
 impl crate::framegraph::BarrierSink for GbufferBarrierSink<'_> {
@@ -234,8 +257,9 @@ impl crate::framegraph::BarrierSink for GbufferBarrierSink<'_> {
         // `record_gbuffer` recording). Every `arr[i].buffer` was resolved from the
         // `buffers[res.index() - FRAMEGRAPH_IMAGE_COUNT]` slot (a live scene buffer for
         // this frame); a buffer barrier's `res.index()` is always `>= FRAMEGRAPH_IMAGE_COUNT`
-        // (buffers are declared after the 11 images) and `< FRAMEGRAPH_IMAGE_COUNT + 10`
-        // (the 5 core + 2 DDGI + 3 interp buffer ResIds).
+        // (buffers are declared after the 11 images) and `< FRAMEGRAPH_IMAGE_COUNT +
+        // buffers.len()` (the 5 core + 2 DDGI + 3 interp buffer ResIds, plus the 1 R2a-3
+        // `tlas_instances` ResId under `hwrt`).
         // The masks are the graph-derived Vk values that reproduce the hand path's
         // TRANSFER→COMPUTE / COMPUTE→COMPUTE flush/visibility hazards; the whole-buffer
         // range matches every hand buffer barrier. `arr[..n]` (a stack array) outlives
@@ -382,7 +406,19 @@ impl Renderer<'_> {
             "ddgi_ray_table",
             ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
         );
-        // --- Pillar B B3 interp SSBOs (ResIds 18/19/20, refined-B) — declared ONLY when the
+        // --- HW-RT rung R2a-3 `tlas_instances` (ResId 18 under `hwrt`; RISK-2) — the compute-
+        // written `VkAccelerationStructureInstanceKHR[]` array, the ONLY new framegraph-tracked
+        // resource. Declared UNCONDITIONALLY (so its ResId is FIXED regardless of the conditional
+        // interp trio, which then shifts to 19/20/21 → sink slots 8/9/10). Per-FIF frame-private
+        // (`add_buffer`, undefined seed — the pack fully overwrites `[0..count)` each frame, and
+        // the sibling in-flight frame touches the OTHER slot; no cross-frame WAR/WAW hazard).
+        // Because the whole declaration is `#[cfg(feature = "hwrt")]`-gated, a `not(hwrt)` build
+        // leaves every existing ResId unchanged. On a tlas-off frame no pass declares a
+        // `buffer_access` on it, so the graph routes zero barriers naming it (byte-identical OFF).
+        #[cfg(feature = "hwrt")]
+        let tlas_instances = g.add_buffer("tlas_instances");
+        // --- Pillar B B3 interp SSBOs (ResIds 18/19/20; 19/20/21 under `hwrt`, refined-B) —
+        // declared ONLY when the
         // interp pass is wired, so the OFF path's ResId + barrier counts are byte-unchanged (the
         // equiv pins). All three are FIF-RINGED (frame-private, like the G-buffer ring): the host
         // writes this frame's slot of `interp_pairs` + `interp_out_slot`, the interp compute
@@ -429,6 +465,48 @@ impl Renderer<'_> {
             Some(p)
         } else {
             None
+        };
+
+        // HW-RT rung R2a-3: the TLAS pack + build passes — declared ONLY when `scene.tlas.is_some()`
+        // (armed under hwrt + ray_query + count > 0), so the OFF path's ResId + barrier counts are
+        // byte-unchanged. Run after interp, BEFORE the raster `begin_rendering` (the pack reads the
+        // shared instance ring; the build reads the pack output).
+        #[cfg(feature = "hwrt")]
+        let (tlas_pack, tlas_build) = if scene.tlas.is_some() {
+            // Pass `tlas_pack`: writes the `tlas_instances` array (COMPUTE/SHADER_WRITE); when the
+            // interp pass ran it ALSO reads the shared `interp_model_out` ring the interp compute
+            // wrote (COMPUTE/SHADER_READ — deriving the interp-WRITE → pack-READ RAW on the ring),
+            // mirroring the raster pass's conditional ring read. When interp is OFF the ring is
+            // host-CPU-scattered into host-coherent memory and the submit's host-write → device
+            // domain dependency orders it (exactly as the raster VS reads the host-scattered ring),
+            // so the pack declares ONLY its `tlas_instances` write.
+            let pack = g.add_pass("tlas_pack");
+            if let Some(model_out) = interp_model_out {
+                g.buffer_access(
+                    model_out,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                );
+            }
+            g.buffer_access(
+                tlas_instances,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+            );
+            // Pass `tlas_build`: reads the `tlas_instances` array at the AS-build stage — the graph
+            // derives the pack(COMPUTE/SHADER_WRITE) → build(AS_BUILD/SHADER_READ) barrier. The build
+            // writes the AS into the UNTRACKED backing/scratch (invisible to the graph), so ONLY this
+            // instance-array read is declared. `VK_ACCESS_SHADER_READ_BIT & WRITE_ACCESS_MASK == 0`,
+            // so `sync.rs` classifies it a READ with no `WRITE_ACCESS_MASK`/sync-engine change.
+            let build = g.add_pass("tlas_build");
+            g.buffer_access(
+                tlas_instances,
+                VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                VK_ACCESS_SHADER_READ_BIT,
+            );
+            (Some(pack), Some(build))
+        } else {
+            (None, None)
         };
 
         // Pass `raster` (sites 0/1): the 3-MRT G-buffer + depth.
@@ -798,6 +876,10 @@ impl Renderer<'_> {
             light_cull,
             csm,
             atlas: atlas_pass,
+            #[cfg(feature = "hwrt")]
+            tlas_pack,
+            #[cfg(feature = "hwrt")]
+            tlas_build,
             resolve,
             present_sample,
         });
@@ -842,6 +924,7 @@ impl Renderer<'_> {
                 scene.ddgi_irr_texture.image,
                 scene.ddgi_depth_texture.image,
             ],
+            #[cfg(not(feature = "hwrt"))]
             buffers: [
                 scene.light_table.buffer,
                 scene.tiles_buffer.buffer,
@@ -862,8 +945,26 @@ impl Renderer<'_> {
                 scene.interp.map_or(VkBuffer::NULL, |a| a.out_slot_buffer.buffer),
                 scene.interp.map_or(VkBuffer::NULL, |a| a.model_out_buffer.buffer),
             ],
+            // HW-RT rung R2a-3 (RISK-2): `tlas_instances` is declared UNCONDITIONALLY right after
+            // the DDGI buffers (ResId 18 → slot 7), so its slot is FIXED regardless of the
+            // conditional interp trio (which shifts to ResIds 19/20/21 → slots 8/9/10). NULL on the
+            // tlas-OFF path (never named by a derived barrier there); on the ON path the pack write
+            // → build read barrier is derived on this slot.
+            #[cfg(feature = "hwrt")]
+            buffers: [
+                scene.light_table.buffer,
+                scene.tiles_buffer.buffer,
+                scene.cluster_grid.map_or(VkBuffer::NULL, |b| b.buffer),
+                scene.light_index.map_or(VkBuffer::NULL, |b| b.buffer),
+                scene.light_index_alloc.map_or(VkBuffer::NULL, |b| b.buffer),
+                scene.ddgi_classification.buffer,
+                scene.ddgi_ray_table.buffer,
+                scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer),
+                scene.interp.map_or(VkBuffer::NULL, |a| a.pair_buffer.buffer),
+                scene.interp.map_or(VkBuffer::NULL, |a| a.out_slot_buffer.buffer),
+                scene.interp.map_or(VkBuffer::NULL, |a| a.model_out_buffer.buffer),
+            ],
         };
         self.frame_graph.record_pass(pass, &mut sink);
     }
-
 }

@@ -815,6 +815,12 @@ impl<'ctx> Renderer<'ctx> {
                         scene,
                         targets,
                         readback,
+                        // HW-RT rung R2a-3: the AS command table (for the per-frame TLAS build),
+                        // resolved from `ctx` — `None` on a non-RT device (the recorder then skips
+                        // the tlas block even if `scene.tlas` were somehow `Some`). Gated so the
+                        // `not(hwrt)` signature is unchanged.
+                        #[cfg(feature = "hwrt")]
+                        ctx.accel_fns_opt(),
                     )
                 },
             )

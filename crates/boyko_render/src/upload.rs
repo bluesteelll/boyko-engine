@@ -328,6 +328,71 @@ pub unsafe fn upload_pair_out_slot(
     }
 }
 
+/// HW-RT rung R2a-3: uploads the gathered per-instance MESH-ID (BLAS-index) lane
+/// ([`mesh_ids`](crate::MeshRenderScratch::mesh_ids) — one `u32` per drawable, parallel to the
+/// instance ring) into ONE mesh-id-SSBO ring slot: ONE contiguous `bytemuck` memcpy, zero
+/// staging, zero allocation. The TLAS-instance packer compute pre-pass reads this slot at
+/// binding 1 (`MeshIds[i]`) to resolve instance `i`'s BLAS device address from the per-mesh
+/// address table.
+///
+/// UNCONDITIONAL on an RT device every frame (the pack path mirror of
+/// [`upload_instance_models`]): the mesh-id lane is scattered in lock-step with the ring
+/// (`mesh_ids.len() == ring.len()`). An empty gather (`scratch.mesh_ids` empty ⇒ no drawable ⇒
+/// the pack records no dispatch) writes nothing.
+///
+/// # Panics
+///
+/// Panics if the gathered lane exceeds the slot's capacity: writing past the mapped range
+/// would corrupt neighbouring sub-allocations (UB), so the guard is a hard assert in every
+/// build. The boot capacity is the host's documented instance budget; growth is a host concern.
+///
+/// # Safety
+///
+/// * `slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at least
+///   `slot.size` valid, persistently-mapped bytes. A hand-built [`BoundBuffer`] with a dangling
+///   / undersized `mapped` violates this.
+/// * `slot` is the FENCED slot's buffer — `mesh_id_rings[token.slot()]` (the same token/slot
+///   contract as [`upload_instance_models`]): the token proves that slot's in-flight fence was
+///   waited THIS frame, so the slot's previous occupant finished every COMPUTE read of this
+///   mesh-id SSBO and the sibling in-flight frame binds the OTHER slot — race-free, lock-free.
+#[cfg(feature = "hwrt")]
+pub unsafe fn upload_mesh_ids(
+    token: &FrameWriteToken,
+    slot: &BoundBuffer,
+    scratch: &MeshRenderScratch,
+) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    if scratch.mesh_ids.is_empty() {
+        return;
+    }
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.mesh_ids.as_slice());
+    assert!(
+        bytes.len() as u64 <= slot.size,
+        "mesh-id ring overflow: {} gathered mesh-ids ({} bytes) exceed the {}-slot \
+         ({}-byte) buffer (grow the boot instance capacity; dynamic growth is host plan R7)",
+        scratch.mesh_ids.len(),
+        bytes.len(),
+        slot.size / 4,
+        slot.size
+    );
+
+    let mapped = slot
+        .mapped
+        .expect("invariant: the mesh-id ring slot is host-visible mapped");
+    // SAFETY: per this fn's contract `mapped` targets >= `slot.size` valid mapped host-coherent
+    // bytes, and `bytes.len() <= slot.size` is hard-asserted above — the write is in-bounds. The
+    // borrowed `FrameWriteToken` + the slot-identity contract prove this slot's in-flight fence
+    // was waited THIS frame (the slot's previous occupant finished its COMPUTE reads of the
+    // mesh-id SSBO; the sibling frame binds the other slot) — race-free, lock-free. `bytes` is
+    // the scratch's own heap buffer, a distinct non-overlapping region.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+    }
+}
+
 /// Writes the staged light-table bytes (`[LightHeaderGpu || GpuLight[]]`, e.g.
 /// [`LightTableStaging::bytes`](crate::light_system::LightTableStaging::bytes)) into
 /// ONE light-STAGING ring slot — the host half of the rung L0-r0 on-change upload

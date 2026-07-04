@@ -53,6 +53,8 @@ pub use scene_types::{
     InterpActivation, PunctualDepthActivation, SCENE_MVP_BYTES, SampledComposite, Scene,
     SsaoActivation, UiPass,
 };
+#[cfg(feature = "hwrt")]
+pub use scene_types::TlasBuildActivation;
 pub use surface::Surface;
 pub use swapchain::Swapchain;
 pub use targets::{GBufferFrame, GBufferTargets};

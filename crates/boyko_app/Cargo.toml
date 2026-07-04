@@ -26,6 +26,12 @@ boyko-math = { path = "../boyko_math" }
 boyko_sdf_math = { path = "../boyko_sdf_math" }
 boyko-macros = { path = "../boyko_macros" }
 
+[features]
+# HW-RT rung R2a-3: forwards to `boyko-render/hwrt` (→ `boyko_rhi_vulkan/hwrt`) so the host
+# can opt into the GPU-resident per-frame TLAS build. Default OFF: a `not(hwrt)` host build is
+# TEXTUALLY the pre-R2a-3 code (every RT item is `#[cfg(feature = "hwrt")]`-gated).
+hwrt = ["boyko-render/hwrt"]
+
 [dev-dependencies]
 # The zero-alloc gate reads the uploaded instance bytes back via `bytes_of`.
 bytemuck.workspace = true

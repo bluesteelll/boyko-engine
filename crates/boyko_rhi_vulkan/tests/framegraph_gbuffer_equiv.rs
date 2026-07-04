@@ -665,3 +665,179 @@ fn interp_prepass_adds_exactly_one_shared_ring_compute_to_vertex_barrier() {
         "interp adds exactly TWO buffer barriers (pairs first-touch + the ONE shared-ring RAW)"
     );
 }
+
+/// HW-RT rung R2a-3: the TLAS pack + build passes (with interp on) derive EXACTLY the two
+/// declared barriers on the ring and the instance array — (1) interp(COMPUTE-WRITE) →
+/// pack(COMPUTE-READ) RAW on the shared instance ring at the pack (the first COMPUTE reader), and
+/// (2) pack(COMPUTE-WRITE) → build(AS_BUILD-READ) RAW on `tlas_instances` at the build — and no
+/// core-resource barrier perturbation. This builds its OWN local frame (not
+/// `declare_gbuffer_graph`), so the absolute ResId numbering is irrelevant; it isolates the
+/// pack/build barrier derivation.
+#[cfg(feature = "hwrt")]
+#[test]
+fn tlas_pack_build_derives_two_buffer_barriers() {
+    use boyko_rhi_vulkan::ffi::VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+
+    let mut g = FrameGraph::with_capacity(8, 8, 32);
+    let albedo = g.add_image("albedo");
+    let normal = g.add_image("normal");
+    let material = g.add_image("material");
+    let depth = g.add_image("depth");
+    // The shared instance ring + the R2a-3 instance array. Both FIF-ringed / frame-private ⇒
+    // `add_buffer` (undefined seed), so no cross-frame ordering — only the intra-frame RAWs.
+    let interp_model_out = g.add_buffer("interp_model_out");
+    let tlas_instances = g.add_buffer("tlas_instances");
+
+    // Pass `interp` — writes the shared ring.
+    g.add_pass("interp");
+    g.buffer_access(interp_model_out, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
+
+    // Pass `tlas_pack` — reads the ring (COMPUTE, the interp→pack RAW's first reader) + writes
+    // the instance array (COMPUTE).
+    g.add_pass("tlas_pack");
+    g.buffer_access(interp_model_out, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+    g.buffer_access(tlas_instances, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT);
+
+    // Pass `tlas_build` — reads the instance array at the AS-build stage (the pack→build RAW).
+    g.add_pass("tlas_build");
+    g.buffer_access(tlas_instances, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, VK_ACCESS_SHADER_READ_BIT);
+
+    // Pass `raster` — the core tail (no ring read here; this pin isolates the pack/build arms).
+    g.add_pass("raster");
+    for &c in &[albedo, normal, material] {
+        g.image_access(c, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, SubRange::COLOR);
+    }
+    g.image_access(depth, FRAG, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, SubRange::DEPTH);
+
+    g.compile();
+    let buf = g.buf_barriers();
+
+    // (1) interp(COMPUTE-WRITE) → pack(COMPUTE-READ) RAW on the shared ring, at the pack.
+    assert!(
+        has_buf(
+            buf,
+            interp_model_out,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        ),
+        "interp_model_out COMPUTE(WRITE)→COMPUTE(READ) RAW at the pack missing"
+    );
+    // (2) pack(COMPUTE-WRITE) → build(AS_BUILD-READ) RAW on the instance array, at the build.
+    assert!(
+        has_buf(
+            buf,
+            tlas_instances,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+        ),
+        "tlas_instances COMPUTE(WRITE)→AS_BUILD(READ) RAW at the build missing"
+    );
+    // EXACTLY two buffer barriers total — the ring RAW at the pack + the instance-array RAW at
+    // the build; the frame-private (undefined) seeds add no cross-frame hazard, no core buffer is
+    // touched.
+    assert_eq!(
+        buf.len(),
+        2,
+        "tlas pack+build derive exactly TWO buffer barriers (ring RAW at pack + array RAW at build)"
+    );
+}
+
+/// HW-RT rung R2a-3: the tlas-OFF path adds ZERO new barriers — no pass declares a
+/// `buffer_access` on `tlas_instances`, so the graph routes zero barriers naming it (the
+/// `optional_passes_are_additive` invariant for the R2a-3 resource).
+#[cfg(feature = "hwrt")]
+#[test]
+fn tlas_off_path_zero_new_barriers() {
+    let mut g = FrameGraph::with_capacity(8, 8, 32);
+    let albedo = g.add_image("albedo");
+    let normal = g.add_image("normal");
+    let material = g.add_image("material");
+    let depth = g.add_image("depth");
+    // `tlas_instances` declared (fixed ResId, as in `declare_gbuffer_graph`) but NEVER accessed
+    // (tlas off ⇒ no pack/build pass).
+    let _tlas_instances = g.add_buffer("tlas_instances");
+
+    g.add_pass("raster");
+    for &c in &[albedo, normal, material] {
+        g.image_access(c, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, SubRange::COLOR);
+    }
+    g.image_access(depth, FRAG, VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, SubRange::DEPTH);
+
+    g.compile();
+    assert_eq!(
+        g.buf_barriers().len(),
+        0,
+        "tlas-OFF path (no pack/build access on tlas_instances) emits zero buffer barriers"
+    );
+}
+
+/// HW-RT rung R2a-3 (RISK-2 regression pin): a FAITHFUL MIRROR of `declare_gbuffer_graph`'s
+/// buffer declaration order under `hwrt` + interp ON + tlas ON, asserting the exact ResId → sink
+/// slot mapping the [`GbufferBarrierSink`](graph_bridge) resolves by (`sink_slot = ResId - 11`,
+/// the FRAMEGRAPH_IMAGE_COUNT offset). This pins `tlas_instances` to ResId 18 → slot 7 and the
+/// SHIFTED interp trio to 19/20/21 → slots 8/9/10, so a future ResId insertion cannot silently
+/// route a barrier to the wrong physical buffer (we have no validation layer on this box).
+///
+/// The mirror declares 11 placeholder IMAGES first (the ResId 0..10 the real graph consumes, so
+/// the buffers start at ResId 11), then the buffers in `declare_gbuffer_graph`'s EXACT order:
+/// light_table..alloc (11..15), ddgi_classification/ray_table (16/17), tlas_instances (18,
+/// unconditional under hwrt), then the interp trio (19/20/21). The sink `buffers` array positions
+/// (graph_bridge.rs `record_graph_pass`) MUST match this: slot 5=ddgi_class, 6=ddgi_ray,
+/// 7=tlas_instances, 8=interp_pairs, 9=interp_out_slot, 10=interp_model_out.
+#[cfg(feature = "hwrt")]
+#[test]
+fn hwrt_resid_18_sink_slot_mapping_pinned() {
+    // The sink's fixed image count (graph_bridge.rs `FRAMEGRAPH_IMAGE_COUNT`, `pub(crate)` — mirror
+    // its value here; if it changes the real sink offset changes too and this pin must be revisited).
+    const IMAGE_COUNT: usize = 11;
+    let sink_slot = |r: ResId| r.index() - IMAGE_COUNT;
+
+    let mut g = FrameGraph::with_capacity(16, 8, 32);
+    // 11 placeholder images (ResIds 0..=10), matching the real graph's image span so the buffers
+    // begin at ResId 11 exactly as in `declare_gbuffer_graph`.
+    for name in [
+        "albedo", "normal", "material", "depth", "viewt", "lit", "ssao", "cascade", "atlas",
+        "ddgi_irr", "ddgi_depth",
+    ] {
+        g.add_image(name);
+    }
+    // Buffers in `declare_gbuffer_graph`'s EXACT order.
+    let light_table = g.add_buffer("light_table");
+    let _tiles = g.add_buffer("tiles");
+    let _grid = g.add_buffer("grid");
+    let _index = g.add_buffer("index");
+    let alloc = g.add_buffer("alloc");
+    let ddgi_classification = g.add_buffer("ddgi_classification");
+    let ddgi_ray_table = g.add_buffer("ddgi_ray_table");
+    // R2a-3: tlas_instances declared UNCONDITIONALLY under hwrt, BEFORE the conditional interp trio.
+    let tlas_instances = g.add_buffer("tlas_instances");
+    // Interp trio (interp ON), shifted by the tlas_instances insertion.
+    let interp_pairs = g.add_buffer("interp_pairs");
+    let interp_out_slot = g.add_buffer("interp_out_slot");
+    let interp_model_out = g.add_buffer("interp_model_out");
+
+    // The absolute ResIds the real graph assigns under hwrt+interp+tlas.
+    assert_eq!(light_table.index(), 11, "light_table ResId");
+    assert_eq!(alloc.index(), 15, "alloc ResId");
+    assert_eq!(ddgi_classification.index(), 16, "ddgi_classification ResId");
+    assert_eq!(ddgi_ray_table.index(), 17, "ddgi_ray_table ResId");
+    assert_eq!(tlas_instances.index(), 18, "tlas_instances must be ResId 18 (fixed, unconditional)");
+    assert_eq!(interp_pairs.index(), 19, "interp trio shifts to 19 under hwrt");
+    assert_eq!(interp_out_slot.index(), 20, "interp_out_slot ResId under hwrt");
+    assert_eq!(interp_model_out.index(), 21, "interp_model_out ResId under hwrt");
+
+    // The sink slot each ResId resolves to (`sink.buffers[ResId - 11]` in `record_graph_pass`).
+    assert_eq!(sink_slot(ddgi_classification), 5, "ddgi_classification → sink slot 5");
+    assert_eq!(sink_slot(ddgi_ray_table), 6, "ddgi_ray_table → sink slot 6");
+    assert_eq!(sink_slot(tlas_instances), 7, "tlas_instances → sink slot 7 (the R2a-3 pin)");
+    assert_eq!(sink_slot(interp_pairs), 8, "interp_pairs → sink slot 8 (shifted)");
+    assert_eq!(sink_slot(interp_out_slot), 9, "interp_out_slot → sink slot 9 (shifted)");
+    assert_eq!(sink_slot(interp_model_out), 10, "interp_model_out → sink slot 10 (shifted)");
+    // The hwrt sink `buffers` array is [VkBuffer; 11] (slots 0..=10) — the tlas_instances slot 7
+    // is inside it, and the shifted interp trio (8/9/10) are the last three slots.
+    assert_eq!(sink_slot(interp_model_out), 10, "the hwrt sink array's last slot index is 10");
+}

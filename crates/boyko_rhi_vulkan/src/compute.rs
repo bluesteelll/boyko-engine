@@ -493,6 +493,17 @@ static INTERP_INSTANCES_SPV: SpirvBlob<6584> = SpirvBlob(*include_bytes!(concat!
     "/shaders/interp_instances.comp.spv"
 )));
 
+/// HW-RT rung R2a-3: the per-frame TLAS-instance PACKER compute pre-pass
+/// (`build_tlas_instances.comp`). One invocation per drawable instance reads the shared M3
+/// instance ring (t0) + the mesh-id lane (t1) + the per-mesh BLAS-address table (t2), and
+/// stream-writes the 64-byte `VkAccelerationStructureInstanceKHR` record into the device-local
+/// output array (u3) the per-frame TLAS build reads. The size pins the committed `.spv`.
+#[cfg(feature = "hwrt")]
+static BUILD_TLAS_INSTANCES_SPV: SpirvBlob<3572> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/build_tlas_instances.comp.spv"
+)));
+
 /// A 4-byte-aligned wrapper around a committed SPIR-V byte blob so its address is
 /// a valid `*const u32` and it can be re-viewed as a `&[u32]` word stream.
 #[repr(C, align(4))]
@@ -888,6 +899,28 @@ pub fn interp_instances_spirv() -> &'static [u32] {
 /// (`{ uint count; float alpha }` — the instance-count bounds guard + the frame-wide
 /// fixed-timestep overstep fraction). Mirrors the shader's `InterpInstancesPush`.
 pub const INTERP_INSTANCES_PUSH_BYTES: u32 = 8;
+
+/// The committed HW-RT rung R2a-3 TLAS-instance packer SPIR-V (`build_tlas_instances.comp`)
+/// as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// One invocation per drawable instance; bound to a dedicated 4-binding set
+/// { `StructuredBuffer<InstanceModelCol>` @0 (the shared M3 ring, read),
+/// `StructuredBuffer<uint>` mesh-ids @1 (read), `StructuredBuffer<uint2>` BLAS-address table
+/// @2 (read), `RWByteAddressBuffer` output @3 (the 64-byte instance records, write) } + a
+/// 4-byte COMPUTE push ([`BUILD_TLAS_INSTANCES_PUSH_BYTES`] — `{ uint count }`). The pack
+/// pre-pass dispatches `ceil(count / LOCAL_SIZE_X)` groups, writing one
+/// `VkAccelerationStructureInstanceKHR` per instance for the per-frame TLAS build.
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn build_tlas_instances_spirv() -> &'static [u32] {
+    BUILD_TLAS_INSTANCES_SPV.as_words()
+}
+
+/// The byte size of the HW-RT rung R2a-3 TLAS-instance packer COMPUTE push constant
+/// (`{ uint count }` — the drawable-instance bounds guard). Mirrors the shader's `Push`.
+#[cfg(feature = "hwrt")]
+pub const BUILD_TLAS_INSTANCES_PUSH_BYTES: u32 = 4;
 
 /// The number of pre-compiled SSAO quality variants (the valid `SSAO_QUALITY_*` / [`SSAO_PARAMS`]
 /// index range, `0..SSAO_QUALITY_COUNT`).

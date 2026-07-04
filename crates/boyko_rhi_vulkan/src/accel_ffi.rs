@@ -142,6 +142,11 @@ pub const VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR: VkFlags = 0
 /// — a device (GPU) build/size-query, not a host build.
 pub const VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR: i32 = 1;
 
+/// `VkIndexType::VK_INDEX_TYPE_UINT16` (BLAS triangle index type for a `Uint16` mesh, R2a-3;
+/// value matches `crate::ffi::VK_INDEX_TYPE_UINT16`). The BLAS reads the mesh's real-width
+/// index buffer, so a `Uint16` mesh needs no duplicate `u32` buffer.
+pub const VK_INDEX_TYPE_UINT16: i32 = 0;
+
 /// `VkIndexType::VK_INDEX_TYPE_UINT32` (BLAS triangle index type; re-declared here for the
 /// gated module's self-containment — value matches `crate::ffi::VK_INDEX_TYPE_UINT32`).
 pub const VK_INDEX_TYPE_UINT32: i32 = 1;

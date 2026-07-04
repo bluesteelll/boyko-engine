@@ -36,6 +36,8 @@
 use boyko_ecs::ecs::core::resources::resource::NonSendResource;
 use boyko_rhi::enums::IndexType;
 use boyko_rhi::{BufferDesc, BufferUsage, MemoryLocation, RhiDevice};
+#[cfg(feature = "hwrt")]
+use boyko_rhi::AsIndexType;
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::memory::BoundBuffer;
 use boyko_scene::render_caps::MeshHandle;
@@ -85,6 +87,15 @@ pub struct MeshGpu {
     pub index_type: IndexType,
     /// The number of vertices in `vertex_buffer` (the unique-vertex count).
     pub vertex_count: u32,
+    /// HW-RT rung R2a-3: this mesh's per-mesh BLAS — durable per-mesh data ON the record
+    /// (Principle 0: NOT a parallel `Vec<BuiltBlas>`). Built EAGERLY in
+    /// [`register_mesh`](MeshRegistry::register_mesh) under
+    /// [`ray_query_enabled`](boyko_rhi_vulkan::device::VulkanContext::ray_query_enabled)
+    /// (`None` on a non-RT device or hwrt OFF), read at its real index width from the mesh's
+    /// existing index buffer (no duplicate `u32` buffer). Freed FIRST in
+    /// [`destroy`](MeshRegistry::destroy) (AS before its backing, device-idle contract).
+    #[cfg(feature = "hwrt")]
+    pub blas: Option<boyko_rhi_vulkan::accel_build::BuiltBlas>,
 }
 
 /// A DENSE, renderer-owned table of [`MeshGpu`] assets keyed by `MeshHandle.0`.
@@ -96,6 +107,12 @@ pub struct MeshRegistry {
     /// The dense asset column, `meshes[MeshHandle.0]`. Address stability is NOT required
     /// (handles are integer indices, never pointers), so a plain `Vec` is correct here.
     meshes: Vec<MeshGpu>,
+    /// HW-RT rung R2a-3: bumped once per [`register_mesh`](Self::register_mesh) that built a
+    /// BLAS. The host's per-frame TLAS-instance packer reads a per-mesh BLAS-address table;
+    /// this generation lets it rewrite that (frame-invariant) table ONLY when a new mesh
+    /// registered, not every frame (BLASes never move — spec).
+    #[cfg(feature = "hwrt")]
+    blas_generation: u64,
 }
 
 impl NonSendResource for MeshRegistry {}
@@ -106,7 +123,11 @@ impl MeshRegistry {
     /// realloc).
     #[inline]
     pub fn new() -> Self {
-        Self { meshes: Vec::new() }
+        Self {
+            meshes: Vec::new(),
+            #[cfg(feature = "hwrt")]
+            blas_generation: 0,
+        }
     }
 
     /// An empty registry preallocated for `capacity` meshes (Principle 5: the setup path
@@ -115,6 +136,8 @@ impl MeshRegistry {
     pub fn with_reserved(capacity: usize) -> Self {
         Self {
             meshes: Vec::with_capacity(capacity),
+            #[cfg(feature = "hwrt")]
+            blas_generation: 0,
         }
     }
 
@@ -252,6 +275,39 @@ impl MeshRegistry {
             );
         }
 
+        // HW-RT rung R2a-3: build this mesh's per-mesh BLAS EAGERLY on an RT device (Principle 0
+        // — durable per-mesh data ON the record). The BLAS reads the vertex + index buffers just
+        // created (at the mesh's REAL index width — no duplicate `u32` buffer), so it must build
+        // BEFORE they move into `MeshGpu`; `build_blas` submits + fence-waits synchronously and
+        // caches only the device addresses (it keeps no reference to these buffers). hwrt-off OR a
+        // non-RT GPU ⇒ no BLAS, no generation bump (byte-identical to the pre-R2a registry).
+        #[cfg(feature = "hwrt")]
+        let blas = {
+            if ctx.ray_query_enabled() {
+                let as_index_type = match index_type {
+                    IndexType::Uint16 => AsIndexType::Uint16,
+                    IndexType::Uint32 => AsIndexType::Uint32,
+                };
+                let built = boyko_rhi_vulkan::accel_build::build_blas(
+                    ctx,
+                    &ctx.rhi_queue(),
+                    &boyko_rhi_vulkan::accel_build::BlasBuildInput {
+                        vertex_buffer: &vertex_buffer,
+                        index_buffer: &index_buffer,
+                        vertex_count: vertex_count as u32,
+                        index_count: indices.len() as u32,
+                        vertex_stride: VERTEX_STRIDE as u64,
+                        index_type: as_index_type,
+                    },
+                )
+                .expect("invariant: mesh BLAS build on an RT device");
+                self.blas_generation += 1;
+                Some(built)
+            } else {
+                None
+            }
+        };
+
         let handle = MeshHandle(self.meshes.len() as u32);
         self.meshes.push(MeshGpu {
             vertex_buffer,
@@ -259,6 +315,8 @@ impl MeshRegistry {
             index_count: indices.len() as u32,
             index_type,
             vertex_count: vertex_count as u32,
+            #[cfg(feature = "hwrt")]
+            blas,
         });
         handle
     }
@@ -361,15 +419,47 @@ impl MeshRegistry {
     /// `wait_idle`) so no in-flight submit still references any mesh buffer; each buffer
     /// is destroyed exactly once. Mirrors the test harness's explicit buffer teardown.
     pub unsafe fn destroy(&mut self, ctx: &VulkanContext) {
+        #[cfg(feature = "hwrt")]
+        for mesh in self.meshes.iter_mut() {
+            // R2a-3 (P0-3): free the AS FIRST — the AS's memory lives in its backing buffer,
+            // which MUST outlive it. `destroy_blas` frees the AS then its backing.
+            // SAFETY: the device is idle (caller contract), so no submit builds/traces this
+            // BLAS; `take` ensures it is destroyed exactly once (subsequent iterations see `None`).
+            if let Some(b) = mesh.blas.take() {
+                unsafe { boyko_rhi_vulkan::accel_build::destroy_blas(ctx, b) };
+            }
+        }
         for mesh in self.meshes.drain(..) {
             // SAFETY: each buffer was created by `register_mesh` on `ctx`; the device is
             // idle (caller contract), so no submit references it; the by-value move
-            // destroys it exactly once.
+            // destroys it exactly once. Any per-mesh BLAS was already freed above (R2a-3).
             unsafe {
                 ctx.destroy_buffer(mesh.vertex_buffer);
                 ctx.destroy_buffer(mesh.index_buffer);
             }
         }
+    }
+
+    /// HW-RT rung R2a-3: the current BLAS-address generation — bumped once per
+    /// [`register_mesh`](Self::register_mesh) that built a BLAS. The host's per-frame
+    /// TLAS-instance packer rewrites its (frame-invariant) per-mesh BLAS-address table ONLY when
+    /// this advances (BLASes never move — spec), never per frame.
+    #[cfg(feature = "hwrt")]
+    #[inline]
+    pub fn blas_generation(&self) -> u64 {
+        self.blas_generation
+    }
+
+    /// HW-RT rung R2a-3: mesh `h`'s BLAS device address (a TLAS instance's
+    /// `accelerationStructureReference`), or `0` if the handle has no BLAS (a non-RT device, or a
+    /// handle the registry never minted). Non-zero for every mesh registered on an RT device.
+    #[cfg(feature = "hwrt")]
+    #[inline]
+    pub fn blas_address(&self, h: MeshHandle) -> u64 {
+        self.meshes
+            .get(h.0 as usize)
+            .and_then(|m| m.blas.as_ref())
+            .map_or(0, |b| b.device_address)
     }
 }
 

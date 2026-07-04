@@ -12,3 +12,5 @@ pub use crate::present::{
     PunctualDepthActivation, Renderer, SCENE_MVP_BYTES, SampledComposite, Scene, SsaoActivation,
     Surface, Swapchain, SwapchainError, TimedPass, TimestampCollector, UiPass,
 };
+#[cfg(feature = "hwrt")]
+pub use crate::present::TlasBuildActivation;

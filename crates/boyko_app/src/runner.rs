@@ -33,6 +33,8 @@ use boyko_render::{
     upload_atlas_ring, upload_camera_ring, upload_csm_ring, upload_instance_models,
     upload_light_table, upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
 };
+#[cfg(all(windows, feature = "hwrt"))]
+use boyko_render::upload_mesh_ids;
 #[cfg(windows)]
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 #[cfg(windows)]
@@ -462,6 +464,24 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 upload_pair_out_slot(&token, host.gpu.interp_out_slot_slot(s), scratch);
             }
 
+            // 5b''. HW-RT rung R2a-3: the gathered per-instance MESH-ID (BLAS-index) lane
+            //       into slot `s` — UNCONDITIONAL on an RT device (the pack path mirror of
+            //       5b). The TLAS packer reads it at binding 1 (`MeshIds[i]`) to resolve each
+            //       instance's BLAS address; an empty gather writes nothing (then no TLAS this
+            //       frame). Skipped entirely on a non-RT device (`mesh_id_slot` is `None`).
+            #[cfg(feature = "hwrt")]
+            if ctx.ray_query_enabled()
+                && let Some(mesh_id_slot) = host.gpu.mesh_id_slot(s)
+            {
+                // SAFETY: `mesh_id_slot` — same provenance contract as the instance slot above
+                // (boot-minted at INSTANCE_CAPACITY on the RT device, live until teardown, the
+                // fenced slot `s == token.slot()`); the packer reads the same slot at binding 1,
+                // the sibling frame binds the other slot.
+                unsafe {
+                    upload_mesh_ids(&token, mesh_id_slot, scratch);
+                }
+            }
+
             // 5c. The light staging into slot `s` — GEN-GATED (plan D5, R4):
             //     rewritten only when this slot's uploaded generation lags the
             //     writer-side `LightTableGeneration` (`collect_lights` bumps it
@@ -626,6 +646,19 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 && world
                     .try_resource::<boyko_render::DdgiConfig>()
                     .is_some_and(|cfg| cfg.enabled());
+            // HW-RT rung R2a-3: TLAS arming — hwrt + an RT device + a non-empty gather. On an RT
+            // device, first sync the frame-invariant BLAS-address table (a no-op unless the mesh
+            // registry's `blas_generation` advanced — a BLAS never moves), then arm the per-frame
+            // pack + build. On a non-RT device (or hwrt OFF) `tlas_enabled` is `false` → the
+            // byte-identical OFF path (no pack, no build, no barrier).
+            #[cfg(feature = "hwrt")]
+            let tlas_enabled = {
+                let on = ctx.ray_query_enabled() && scratch.instance_count() > 0;
+                if ctx.ray_query_enabled() {
+                    host.gpu.sync_tlas_blas_addr(ctx, registry);
+                }
+                on
+            };
             let scene = host.gpu.scene(
                 mvp,
                 s,
@@ -637,6 +670,8 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 overstep,
                 ddgi_enabled,
                 frame_index,
+                #[cfg(feature = "hwrt")]
+                tlas_enabled,
                 ctx,
             );
 

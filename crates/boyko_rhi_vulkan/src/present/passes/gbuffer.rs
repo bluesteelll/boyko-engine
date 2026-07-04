@@ -75,6 +75,7 @@ impl Renderer<'_> {
     /// readback region; a `Some(readback)` buffer is host-visible and ≥ the swapchain
     /// image's (`extent`-sized) byte size.
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(feature = "hwrt", allow(clippy::too_many_arguments))]
     pub(crate) unsafe fn record_gbuffer(
         &self,
         cmd: VkCommandBuffer,
@@ -86,6 +87,10 @@ impl Renderer<'_> {
         scene: &GBufferScene<'_>,
         targets: &GBufferTargets,
         readback: Option<&BoundBuffer>,
+        // HW-RT rung R2a-3: the resolved AS command table for the per-frame TLAS build; `None`
+        // on a non-RT device. The whole parameter is `hwrt`-gated, so the `not(hwrt)` signature
+        // is unchanged (byte-identity).
+        #[cfg(feature = "hwrt")] accel_fns: Option<&crate::accel::AccelFns>,
     ) -> Result<(), SwapchainError> {
         let begin = VkCommandBufferBeginInfo {
             s_type: VkStructureType::CommandBufferBeginInfo,
@@ -221,6 +226,95 @@ impl Renderer<'_> {
             // `interp_model_out` barrier at the raster pass (the model_out reader), so
             // `record_graph_pass(plan.raster)` below emits it BEFORE the raster begins — still
             // AFTER this dispatch's write. NOT recorded here.
+        }
+
+        // === HW-RT rung R2a-3: the GPU-resident per-frame TLAS PACK + BUILD. Recorded ONLY when
+        // the scene wires the activation (`scene.tlas.is_some()` — armed under hwrt + ray_query +
+        // count > 0) AND the AS command table resolved (`accel_fns.is_some()`); otherwise skipped
+        // entirely — NO bind, NO dispatch, NO build, NO barrier — so the command stream is
+        // BYTE-IDENTICAL to the tlas-OFF path. Runs after interp, BEFORE the raster pass. The
+        // pack pre-pass writes one 64-byte `VkAccelerationStructureInstanceKHR` per instance into
+        // the device-local array (reading the shared M3 ring + the mesh-id lane + the BLAS-address
+        // table); the graph derives the pack-WRITE → build-READ barrier; the build then builds the
+        // TLAS into the UNTRACKED backing/scratch. Nothing traces the TLAS yet (R2a-4), so the
+        // render stays byte-identical even when armed. ===
+        #[cfg(feature = "hwrt")]
+        if let (Some(t), Some(fns)) = (scene.tlas.as_ref(), accel_fns) {
+            let pack_pass = plan
+                .tlas_pack
+                .expect("invariant: scene.tlas.is_some() ⇒ tlas_pack declared");
+            let build_pass = plan
+                .tlas_build
+                .expect("invariant: scene.tlas.is_some() ⇒ tlas_build declared");
+            // Pack: emit the graph's derived input barriers (interp→pack on the shared ring when
+            // interp ran; else none), then bind the packer + dispatch `ceil(count / LOCAL_SIZE_X)`.
+            // SAFETY: recording is open; `record_graph_pass` records the "tlas_pack" pass's derived
+            // barriers into `cmd` against the live scene buffers.
+            self.record_graph_pass(pack_pass, cmd, targets, scene, fi);
+            let groups = t.count.div_ceil(LOCAL_SIZE_X);
+            let push = t.count.to_le_bytes();
+            // SAFETY: recording is open; the packer pipeline + its layout (declaring the 4-binding
+            // pack set at set 0 + the 4-byte COMPUTE push range) are live on this device (caller
+            // contract); `t.bind_group` binds this frame slot's { M3 ring @0, mesh-ids @1,
+            // blas-addr @2, instance-array @3 }; `groups` covers `t.count` at the 64-wide group;
+            // `&t.bind_group.descriptor_set` is a single-element local alive for the call
+            // (first_set 0, count 1, zero dynamic offsets); the push is exactly
+            // `BUILD_TLAS_INSTANCES_PUSH_BYTES` (4) at offset 0 and `push` outlives the call.
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, t.pipeline.pipeline);
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    t.pipeline.layout,
+                    0,
+                    1,
+                    &t.bind_group.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    t.pipeline.layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    crate::compute::BUILD_TLAS_INSTANCES_PUSH_BYTES,
+                    push.as_ptr().cast(),
+                );
+                (self.fns.cmd_dispatch)(cmd, groups, 1, 1);
+            }
+            // Build: emit the graph's derived pack-WRITE → build-READ barrier on the instance
+            // array, then record the TLAS build into the UNTRACKED backing/scratch (the DDGI-update
+            // discipline — the BARRIER is graph-emitted, only the GPU work is raw).
+            // SAFETY: recording is open; `record_graph_pass` records the "tlas_build" pass's derived
+            // barrier (pack COMPUTE/SHADER_WRITE → build AS_BUILD/SHADER_READ on `tlas_instances`).
+            self.record_graph_pass(build_pass, cmd, targets, scene, fi);
+            let entry = boyko_rhi::AsBuildEntry {
+                kind: boyko_rhi::AsKind::Tlas,
+                geometry: boyko_rhi::AsGeometryDesc {
+                    vertex_data: t.instance_array_addr,
+                    index_data: 0,
+                    vertex_stride: 0,
+                    max_vertex: 0,
+                    primitive_count: t.count,
+                    // A TLAS geometry ignores the index type (instance array, not triangles).
+                    index_type: boyko_rhi::AsIndexType::Uint32,
+                },
+                scratch_address: t.scratch_addr,
+            };
+            // SAFETY: recording is open; `fns` is the live device's AS table (resolved from the RT
+            // `ctx`); `entry`'s `vertex_data` (the pack-written instance array) + `scratch_address`
+            // (aligned to `as_scratch_align` at create) + `t.dest.handle` (this slot's persistent
+            // TLAS, its backing sized for `capacity >= count` at create) are live, correctly-flagged
+            // resources; the pack→build barrier just recorded orders the instance-array write before
+            // this build's read; `entry`/`dest` are 1-element slices that outlive the call.
+            unsafe {
+                crate::accel::cmd_build_acceleration_structures(
+                    fns,
+                    cmd,
+                    core::slice::from_ref(&entry),
+                    &[t.dest],
+                );
+            }
         }
 
         // SAFETY: recording is open; `record_graph_pass` records the graph's derived

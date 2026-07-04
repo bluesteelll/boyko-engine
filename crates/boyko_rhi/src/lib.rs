@@ -41,7 +41,8 @@ pub mod queue;
 
 pub use api::RhiApi;
 pub use descriptor::{
-    AsBuildEntry, AsBuildSizes, AsGeometryDesc, AsKind, BarrierDesc, BufferBarrier, BufferCopy,
+    AsBuildEntry, AsBuildSizes, AsGeometryDesc, AsIndexType, AsKind, BarrierDesc, BufferBarrier,
+    BufferCopy,
     BufferDesc, BufferImageCopy, ComputePipelineDesc, DepthAttachment, DepthBias,
     GraphicsPipelineDesc, ImageBarrierDesc, ImageSubresourceRange, QueryPoolDesc, RenderArea,
     RenderingAttachment, RenderingDesc, VertexAttribute, VertexBufferLayout, Viewport,

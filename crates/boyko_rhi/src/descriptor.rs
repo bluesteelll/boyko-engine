@@ -66,6 +66,20 @@ pub enum AsKind {
     Tlas = 1,
 }
 
+/// The index width a BLAS triangle geometry reads its index buffer at (HW-RT rung R2a-3):
+/// `Uint16` or `Uint32`. The BLAS reads the mesh's EXISTING index buffer at its real width
+/// (chosen by the O3 crossover in [`MeshRegistry`](../../boyko_render/mesh_registry/index.html)),
+/// so a `Uint16` mesh needs NO duplicate `u32` buffer (Principle 0, less VRAM). Maps to
+/// `VkIndexType` backend-side (`VK_INDEX_TYPE_UINT16 = 0`, `VK_INDEX_TYPE_UINT32 = 1`).
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsIndexType {
+    /// 16-bit indices (`VK_INDEX_TYPE_UINT16`).
+    Uint16 = 0,
+    /// 32-bit indices (`VK_INDEX_TYPE_UINT32`).
+    Uint32 = 1,
+}
+
 /// One triangle-geometry (or instance-array) input to a BLAS/TLAS build
 /// (HW-RT rung R2a-1). A `#[repr(C)]` POD carrier of the *device addresses* + counts
 /// the backend needs to fill a `VkAccelerationStructureGeometryKHR` — no backend
@@ -85,6 +99,9 @@ pub struct AsGeometryDesc {
     pub max_vertex: u32,
     /// The number of primitives: triangles (`indexCount / 3`, BLAS) or instances (TLAS).
     pub primitive_count: u32,
+    /// The index width the BLAS reads `index_data` at (BLAS only; ignored for a TLAS).
+    /// R2a-3: the BLAS reads the mesh's real-width index buffer — no duplicate `u32` buffer.
+    pub index_type: AsIndexType,
 }
 
 /// The build-scratch + result sizes a `vkGetAccelerationStructureBuildSizesKHR`

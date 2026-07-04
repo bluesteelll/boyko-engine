@@ -265,6 +265,8 @@ pub use upload::{
     upload_atlas_ring, upload_camera_ring, upload_csm_ring, upload_instance_models,
     upload_light_table, upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
 };
+#[cfg(feature = "hwrt")]
+pub use upload::upload_mesh_ids;
 pub use view::{
     composite_from_view, composite_perspective_from_view, demo_view_proj_from_view,
     gbuffer_push_from_view, view_proj_columns,

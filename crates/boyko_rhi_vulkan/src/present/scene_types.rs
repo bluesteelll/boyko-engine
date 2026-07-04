@@ -6,6 +6,8 @@
 
 use boyko_rhi::{Format, ImageUsage, RhiDevice, TextureDesc, TextureDimension};
 
+#[cfg(feature = "hwrt")]
+use crate::accel::BoundAccelStruct;
 use crate::compute::CoarseMode;
 use crate::device::VulkanContext;
 use crate::ffi::*;
@@ -633,6 +635,53 @@ pub struct InterpActivation<'a> {
     pub alpha: f32,
 }
 
+/// HW-RT rung R2a-3: the per-frame TLAS-build activation threaded into
+/// [`GBufferScene::tlas`] to turn the GPU-resident TLAS pack + build ON. `None` = the OFF path
+/// (the default for every golden/host frame — byte-identical command stream): NO pack dispatch,
+/// NO TLAS build, NO barrier is recorded, and the `tlas_instances` framegraph resource routes
+/// zero barriers. `Some(_)` = the ON path (armed only under hwrt + ray_query + `count > 0`):
+/// BEFORE the raster pass the recorder runs the pack pre-pass (the compute writes one 64-byte
+/// `VkAccelerationStructureInstanceKHR` per instance into [`Self::instance_array`], reading the
+/// shared M3 ring), the graph derives the pack-write → build-read barrier, then the recorder
+/// records the per-frame TLAS build into [`Self::dest`] (the UNTRACKED backing/scratch). Nothing
+/// traces the TLAS yet (R2a-4), so the render stays byte-identical.
+///
+/// A per-frame `Copy` borrow-bundle (mirrors [`InterpActivation`] / [`SsaoActivation`]): the
+/// caller flips it between frames with no re-record.
+#[cfg(feature = "hwrt")]
+#[derive(Clone, Copy)]
+pub struct TlasBuildActivation<'a> {
+    /// The R2a-3 TLAS-instance packer compute pipeline (`build_tlas_instances.comp` /
+    /// [`crate::compute::build_tlas_instances_spirv`]): its layout declares [`Self::bind_group`]'s
+    /// 4-binding set at `set 0` + the 4-byte COMPUTE push range
+    /// ([`crate::compute::BUILD_TLAS_INSTANCES_PUSH_BYTES`] — `{ uint count }`). The recorder binds
+    /// it + dispatches `ceil(count / LOCAL_SIZE_X)` groups BEFORE the raster pass.
+    pub pipeline: &'a ComputePipeline,
+    /// The CURRENT frame slot's pack bind group { `StructuredBuffer<InstanceModelCol>` @0 (the
+    /// shared M3 ring, read), `StructuredBuffer<uint>` @1 (the host-written mesh-id lane, read),
+    /// `StructuredBuffer<uint2>` @2 (the per-mesh BLAS-address table, read),
+    /// `RWByteAddressBuffer` @3 ([`Self::instance_array`], the 64-byte record output, write) }.
+    pub bind_group: &'a VulkanBindGroup,
+    /// This slot's persistent TLAS (the per-frame build target). Its backing + scratch are
+    /// UNTRACKED by the framegraph (the build's AS write is invisible to the graph), so the
+    /// build is a raw `crate::accel::cmd_build_acceleration_structures` call.
+    pub dest: &'a BoundAccelStruct,
+    /// The compute-written `VkAccelerationStructureInstanceKHR[]` array (the sink's `tlas_instances`
+    /// slot): the pack writes it (COMPUTE/SHADER_WRITE), the build reads it (AS_BUILD/SHADER_READ).
+    /// The graph derives that single barrier; this is the ONLY framegraph-tracked TLAS resource.
+    pub instance_array: &'a BoundBuffer,
+    /// The device address of [`Self::instance_array`] (cached once at create) — the build's
+    /// `AsGeometryDesc::vertex_data` (the instance-array address).
+    pub instance_array_addr: u64,
+    /// The device address of this slot's scratch buffer (aligned to `as_scratch_align`, cached
+    /// once at create) — the build's `AsBuildEntry::scratch_address`.
+    pub scratch_addr: u64,
+    /// The host-known drawable instance count this frame (`<= capacity`) — the pack dispatch
+    /// element count (`ceil(count / LOCAL_SIZE_X)` groups) + the push's `count` bounds guard +
+    /// the build's `primitive_count`. `0` never reaches here (the activation is `None` then).
+    pub count: u32,
+}
+
 pub struct GBufferScene<'a> {
     /// The mesh-raster graphics pipeline (pass A). Render P5-r0: a 3-MRT G-buffer
     /// PRODUCER — the fronto-parallel quad is drawn into the D32 depth image AND the three
@@ -1162,6 +1211,16 @@ pub struct GBufferScene<'a> {
     /// feature (a feature would risk the timed build diverging from the shipped pipeline the
     /// calibration must measure).
     pub gpu_timing: Option<&'a TimestampCollector>,
+    /// HW-RT rung R2a-3: the optional GPU-resident per-frame TLAS pack + build activation. `None`
+    /// on EVERY golden/host frame (the DEFAULT — capability-as-presence) ⇒ NO pack dispatch, NO
+    /// build, NO barrier, so the recorded command stream is BYTE-IDENTICAL to the pre-R2a-3 path
+    /// (and the `tlas_instances` framegraph resource routes zero barriers). `Some(_)` (armed under
+    /// hwrt + ray_query + a non-empty gather) runs the pack pre-pass + the TLAS build BEFORE the
+    /// raster pass; nothing traces the TLAS yet (R2a-4), so the render stays byte-identical even
+    /// when armed. The whole field is `#[cfg(feature = "hwrt")]`-gated, so a `not(hwrt)` build has
+    /// this field absent entirely (no ResId shift, no OFF-path change).
+    #[cfg(feature = "hwrt")]
+    pub tlas: Option<TlasBuildActivation<'a>>,
 }
 
 /// CSM Increment 1b (Rung A): the cascade DEPTH-PASS activation threaded into

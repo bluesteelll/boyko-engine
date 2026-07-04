@@ -13,9 +13,10 @@
 //! R2a-1 builds NO acceleration structure and traces nothing; these verbs are the FFI
 //! surface later rungs (R2a-2 BLAS build, R2a-3 TLAS) call.
 
+use core::mem::MaybeUninit;
 use core::ptr;
 
-use boyko_rhi::{AsBuildEntry, AsBuildSizes, AsGeometryDesc, AsKind};
+use boyko_rhi::{AsBuildEntry, AsBuildSizes, AsGeometryDesc, AsIndexType, AsKind};
 
 use crate::accel_ffi::{
     PfnVkCmdBuildAccelerationStructuresKHR, PfnVkCreateAccelerationStructureKHR,
@@ -36,7 +37,7 @@ use crate::accel_ffi::{
     VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR,
     VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR, VK_FORMAT_R32G32B32_SFLOAT,
     VK_GEOMETRY_OPAQUE_BIT_KHR, VK_GEOMETRY_TYPE_INSTANCES_KHR, VK_GEOMETRY_TYPE_TRIANGLES_KHR,
-    VK_INDEX_TYPE_UINT32,
+    VK_INDEX_TYPE_UINT16, VK_INDEX_TYPE_UINT32,
 };
 use crate::device::{DeviceFns, VulkanContext};
 use crate::error::VulkanError;
@@ -200,7 +201,12 @@ fn fill_geometry(kind: AsKind, g: &AsGeometryDesc) -> VkAccelerationStructureGeo
                 vertex_data: g.vertex_data,
                 vertex_stride: g.vertex_stride,
                 max_vertex: g.max_vertex,
-                index_type: VK_INDEX_TYPE_UINT32,
+                // R2a-3: the BLAS reads the mesh's EXISTING index buffer at its real width
+                // (chosen by the O3 crossover), so a `Uint16` mesh needs no duplicate u32 buffer.
+                index_type: match g.index_type {
+                    AsIndexType::Uint16 => VK_INDEX_TYPE_UINT16,
+                    AsIndexType::Uint32 => VK_INDEX_TYPE_UINT32,
+                },
                 index_data: g.index_data,
                 transform_data: 0,
             };
@@ -332,13 +338,19 @@ impl VulkanContext {
         if !result.is_success() {
             return Err(VulkanError::Vk("vkCreateAccelerationStructureKHR", result));
         }
-        Ok(BoundAccelStruct {
+        let mut bound = BoundAccelStruct {
             handle,
             buffer,
             device_address: 0,
             kind,
             _not_send: core::marker::PhantomData,
-        })
+        };
+        // The AS device address is valid right after `vkCreateAccelerationStructureKHR`
+        // (independent of the build), so populate it here — every `BoundAccelStruct` carries its
+        // real address (the R2a-3 `PersistentTlas` + R2a-4 tracing read it via `device_address()`;
+        // R2a-2's `build_blas`/`build_tlas` re-query it into their own wrapper field, harmlessly).
+        bound.device_address = self.accel_device_address(&bound)?;
+        Ok(bound)
     }
 
     /// HW-RT rung R2a-1: `vkGetAccelerationStructureDeviceAddressKHR` — the AS device
@@ -414,26 +426,86 @@ pub(crate) unsafe fn cmd_build_acceleration_structures(
         dest.len(),
         "invariant: one destination AS per build entry"
     );
-    // Build the per-entry geometry + build-info + range-info arrays, then the pointer array of
-    // range-infos vkCmdBuild wants (`const VkAccelerationStructureBuildRangeInfoKHR* const*`).
-    // Bounded stack-free: R2a builds a handful of structures, so a heap Vec is acceptable here
-    // (this is a per-build setup, not a hot per-instance loop). Fixed at R2a-2 to a scratch pool.
-    let mut geoms: Vec<VkAccelerationStructureGeometryKHR> = Vec::with_capacity(entries.len());
-    let mut ranges: Vec<VkAccelerationStructureBuildRangeInfoKHR> =
-        Vec::with_capacity(entries.len());
-    for e in entries {
-        geoms.push(fill_geometry(e.kind, &e.geometry));
-        ranges.push(VkAccelerationStructureBuildRangeInfoKHR {
+    let n = entries.len();
+    // The per-frame R2a-3 TLAS build (and every R2a-2 caller) records EXACTLY ONE entry, so the
+    // common path builds the per-entry structures into FIXED STACK arrays — ZERO heap allocation
+    // on the hot per-frame path. A larger batch (never on the per-frame path) falls back to a heap
+    // `Vec` via the `#[cold]` slow path.
+    if n <= AS_BUILD_INLINE_CAP {
+        // An array of `MaybeUninit` needs NO initialization (each element is trivially valid
+        // uninitialized memory), so `[const { MaybeUninit::uninit() }; N]` is safe to construct.
+        let mut geoms: [MaybeUninit<VkAccelerationStructureGeometryKHR>; AS_BUILD_INLINE_CAP] =
+            [const { MaybeUninit::uninit() }; AS_BUILD_INLINE_CAP];
+        let mut ranges: [MaybeUninit<VkAccelerationStructureBuildRangeInfoKHR>; AS_BUILD_INLINE_CAP] =
+            [const { MaybeUninit::uninit() }; AS_BUILD_INLINE_CAP];
+        let mut build_infos: [MaybeUninit<VkAccelerationStructureBuildGeometryInfoKHR>;
+            AS_BUILD_INLINE_CAP] = [const { MaybeUninit::uninit() }; AS_BUILD_INLINE_CAP];
+        let mut range_ptrs: [MaybeUninit<*const VkAccelerationStructureBuildRangeInfoKHR>;
+            AS_BUILD_INLINE_CAP] = [const { MaybeUninit::uninit() }; AS_BUILD_INLINE_CAP];
+        // SAFETY: `n <= AS_BUILD_INLINE_CAP`, so the fixed stack arrays hold every entry;
+        // `record_build_arrays` populates `[0..n)` before use and only reads `[0..n)`, upholding
+        // the `p_geometries` stability + FFI invariants (its own SAFETY). Caller contract: every
+        // device address + `dest[i].handle` is a live, correctly-flagged resource.
+        unsafe {
+            record_build_arrays(
+                fns,
+                command_buffer,
+                entries,
+                dest,
+                &mut geoms,
+                &mut ranges,
+                &mut build_infos,
+                &mut range_ptrs,
+            );
+        }
+    } else {
+        // SAFETY: same contract as the inline path — the `#[cold]` fallback allocates heap arrays
+        // sized to `n` and records the identical build.
+        unsafe { cmd_build_acceleration_structures_heap(fns, command_buffer, entries, dest) };
+    }
+}
+
+/// The inline fast-path capacity of [`cmd_build_acceleration_structures`]: builds up to this many
+/// AS entries into fixed STACK arrays (zero heap alloc). Every current caller records ONE entry;
+/// the small margin keeps a modest batch alloc-free too.
+const AS_BUILD_INLINE_CAP: usize = 4;
+
+/// Populates the caller-supplied per-entry arrays (`[0..entries.len())`) and records the build.
+/// Factored out so the inline (stack) and `#[cold]` heap paths share the FFI call — the arrays'
+/// storage differs, the record is identical.
+///
+/// # Safety
+/// The four arrays have length `>= entries.len()`; `command_buffer` is recording; `fns` is the
+/// live AS table; `entries.len() == dest.len()`; every device address in `entries` + each
+/// `dest[i].handle` is a live, correctly-flagged resource (caller contract).
+#[allow(clippy::too_many_arguments)]
+unsafe fn record_build_arrays(
+    fns: &AccelFns,
+    command_buffer: VkCommandBuffer,
+    entries: &[AsBuildEntry],
+    dest: &[&BoundAccelStruct],
+    geoms: &mut [MaybeUninit<VkAccelerationStructureGeometryKHR>],
+    ranges: &mut [MaybeUninit<VkAccelerationStructureBuildRangeInfoKHR>],
+    build_infos: &mut [MaybeUninit<VkAccelerationStructureBuildGeometryInfoKHR>],
+    range_ptrs: &mut [MaybeUninit<*const VkAccelerationStructureBuildRangeInfoKHR>],
+) {
+    let n = entries.len();
+    // Fill geometry + range first — `geoms[i]` must be initialized before a build-info takes
+    // `&geoms[i]`, and both must outlive the `cmd_build` call below (they do — same stack frame).
+    for (i, e) in entries.iter().enumerate() {
+        geoms[i].write(fill_geometry(e.kind, &e.geometry));
+        ranges[i].write(VkAccelerationStructureBuildRangeInfoKHR {
             primitive_count: e.geometry.primitive_count,
             primitive_offset: 0,
             first_vertex: 0,
             transform_offset: 0,
         });
     }
-    let mut build_infos: Vec<VkAccelerationStructureBuildGeometryInfoKHR> =
-        Vec::with_capacity(entries.len());
     for (i, e) in entries.iter().enumerate() {
-        build_infos.push(VkAccelerationStructureBuildGeometryInfoKHR {
+        // SAFETY: `geoms[i]`/`ranges[i]` were written above (`i < n`), so `.assume_init_ref()` /
+        // taking `&` of the initialized value is sound; the pointer stays valid for the whole call.
+        let geom_ptr = unsafe { geoms[i].assume_init_ref() } as *const _;
+        build_infos[i].write(VkAccelerationStructureBuildGeometryInfoKHR {
             s_type: ST_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR,
             p_next: ptr::null(),
             ty: vk_as_type(e.kind),
@@ -442,25 +514,66 @@ pub(crate) unsafe fn cmd_build_acceleration_structures(
             src_acceleration_structure: VkAccelerationStructureKHR::NULL,
             dst_acceleration_structure: dest[i].handle,
             geometry_count: 1,
-            p_geometries: &geoms[i],
+            p_geometries: geom_ptr,
             pp_geometries: ptr::null(),
             scratch_data: e.scratch_address,
         });
+        // SAFETY: `ranges[i]` initialized above; the range pointer stays valid for the call.
+        range_ptrs[i].write(unsafe { ranges[i].assume_init_ref() } as *const _);
     }
-    let range_ptrs: Vec<*const VkAccelerationStructureBuildRangeInfoKHR> =
-        (0..entries.len()).map(|i| &ranges[i] as *const _).collect();
 
-    // SAFETY: recording is open; `build_infos`/`geoms`/`ranges`/`range_ptrs` are live locals
-    // (outlive the call); each build-info's `dst_acceleration_structure` is a live AS
-    // (`dest[i]`), its `p_geometries` points at the live `geoms[i]`, and `scratch_data` +
-    // every geometry device address are correctly-flagged live resources (caller contract).
-    // `info_count == build_infos.len() == range_ptrs.len()`.
+    // SAFETY: recording is open; `build_infos[0..n]`/`geoms[0..n]`/`ranges[0..n]`/`range_ptrs[0..n]`
+    // are initialized live storage (outlive the call); each build-info's `dst_acceleration_structure`
+    // is a live AS (`dest[i]`), its `p_geometries` points at the live `geoms[i]`, and `scratch_data`
+    // + every geometry device address are correctly-flagged live resources (caller contract).
+    // `info_count == n`; the two pointer arrays are read as `[0..n)`.
     unsafe {
         (fns.cmd_build)(
             command_buffer,
-            build_infos.len() as u32,
-            build_infos.as_ptr(),
-            range_ptrs.as_ptr(),
+            n as u32,
+            build_infos.as_ptr().cast::<VkAccelerationStructureBuildGeometryInfoKHR>(),
+            range_ptrs.as_ptr().cast::<*const VkAccelerationStructureBuildRangeInfoKHR>(),
+        );
+    }
+}
+
+/// The `#[cold]` heap fallback of [`cmd_build_acceleration_structures`] for a batch larger than
+/// [`AS_BUILD_INLINE_CAP`] (never the per-frame path). Allocates `Vec`-backed arrays, then shares
+/// the record via [`record_build_arrays`].
+///
+/// # Safety
+/// Identical contract to [`cmd_build_acceleration_structures`].
+#[cold]
+#[inline(never)]
+unsafe fn cmd_build_acceleration_structures_heap(
+    fns: &AccelFns,
+    command_buffer: VkCommandBuffer,
+    entries: &[AsBuildEntry],
+    dest: &[&BoundAccelStruct],
+) {
+    let n = entries.len();
+    let mut geoms: Vec<MaybeUninit<VkAccelerationStructureGeometryKHR>> = Vec::with_capacity(n);
+    let mut ranges: Vec<MaybeUninit<VkAccelerationStructureBuildRangeInfoKHR>> =
+        Vec::with_capacity(n);
+    let mut build_infos: Vec<MaybeUninit<VkAccelerationStructureBuildGeometryInfoKHR>> =
+        Vec::with_capacity(n);
+    let mut range_ptrs: Vec<MaybeUninit<*const VkAccelerationStructureBuildRangeInfoKHR>> =
+        Vec::with_capacity(n);
+    geoms.resize_with(n, MaybeUninit::uninit);
+    ranges.resize_with(n, MaybeUninit::uninit);
+    build_infos.resize_with(n, MaybeUninit::uninit);
+    range_ptrs.resize_with(n, MaybeUninit::uninit);
+    // SAFETY: the four Vecs are length `n == entries.len()`; the caller contract holds.
+    unsafe {
+        record_build_arrays(
+            fns,
+            command_buffer,
+            entries,
+            dest,
+            &mut geoms,
+            &mut ranges,
+            &mut build_infos,
+            &mut range_ptrs,
         );
     }
 }

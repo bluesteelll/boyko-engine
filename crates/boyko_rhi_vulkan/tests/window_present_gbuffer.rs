@@ -2421,6 +2421,9 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         interp: None,
         // HW-RT rung R0: GPU timing OFF (byte-identical command stream).
         gpu_timing: None,
+        // HW-RT rung R2a-3: the per-frame TLAS pack + build OFF (byte-identical command stream).
+        #[cfg(feature = "hwrt")]
+        tlas: None,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -3294,6 +3297,9 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         interp: None,
         // HW-RT rung R0: GPU timing OFF (byte-identical command stream).
         gpu_timing: None,
+        // HW-RT rung R2a-3: the per-frame TLAS pack + build OFF (byte-identical command stream).
+        #[cfg(feature = "hwrt")]
+        tlas: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -7961,6 +7967,9 @@ fn run_showcase_body_ddgi(
         // `engine_grand_showcase_512_gpu_pass_cost` timing test, which brackets the four
         // software-ray passes on this real combined frame.
         gpu_timing,
+        // HW-RT rung R2a-3: the per-frame TLAS pack + build OFF (byte-identical command stream).
+        #[cfg(feature = "hwrt")]
+        tlas: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -9242,6 +9251,9 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         interp: None,
         // HW-RT rung R0: GPU timing OFF (the golden/interactive showcase; byte-identical).
         gpu_timing: None,
+        // HW-RT rung R2a-3: the per-frame TLAS pack + build OFF (byte-identical command stream).
+        #[cfg(feature = "hwrt")]
+        tlas: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
