@@ -35,9 +35,10 @@ use crate::ffi::{
     VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_FILTER_LINEAR,
     VK_FILTER_NEAREST, VK_FORMAT_B10G11R11_UFLOAT_PACK32, VK_FORMAT_B8G8R8A8_SRGB,
-    VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_D32_SFLOAT, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R16_SFLOAT,
-    VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT, VK_FORMAT_R32_SFLOAT,
-    VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8_SNORM, VK_FORMAT_R8_UNORM,
+    VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_D32_SFLOAT, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R16G16_UNORM,
+    VK_FORMAT_R16_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
+    VK_FORMAT_R32_SFLOAT, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8_UNORM,
+    VK_FORMAT_R8_SNORM, VK_FORMAT_R8_UNORM,
     VK_FORMAT_UNDEFINED,
     VK_IMAGE_ASPECT_COLOR_BIT,
     VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -266,6 +267,18 @@ const _: () = assert!(
 const _: () = assert!(
     Format::R16G16Sfloat.as_i32() == VK_FORMAT_R16G16_SFLOAT,
     "Format::R16G16Sfloat must equal VK_FORMAT_R16G16_SFLOAT"
+);
+// Rung 3a: the RT soft-shadow VISIBILITY target `shadow_vis` format (`as_i32()` mapped in
+// `create_texture`). The M2 lesson net: pin against the canonical enumerant, not a copy.
+const _: () = assert!(
+    Format::R8G8Unorm.as_i32() == VK_FORMAT_R8G8_UNORM,
+    "Format::R8G8Unorm must equal VK_FORMAT_R8G8_UNORM"
+);
+// Rung 3a: the à-trous ping-pong target `shadow_vis2` format (`as_i32()` mapped in
+// `create_texture`). Pinned to the canonical enumerant (`VK_FORMAT_R16G16_UNORM == 77`).
+const _: () = assert!(
+    Format::R16G16Unorm.as_i32() == VK_FORMAT_R16G16_UNORM,
+    "Format::R16G16Unorm must equal VK_FORMAT_R16G16_UNORM"
 );
 // SDFDDGI I1: the probe IRRADIANCE atlas format (`R11G11B10F`-no-gamma, Decision D6;
 // `as_i32()` mapped in `create_texture`).

@@ -79,6 +79,20 @@ pub(crate) struct GbufferPassPlan {
 /// declared UNCONDITIONALLY (seeded with the boot `SHADER_READ_ONLY_OPTIMAL` layout) but only
 /// ACCESSED on the `ddgi_update`/`resolve` passes that name them, so the OFF-path barrier set
 /// (which never routes a barrier at ResId 9/10) is byte-unchanged.
+///
+/// Rung 3a (`feature = "hwrt"`): the count is cfg-selected `11 → 13`. The two RT
+/// soft-shadow-visibility targets `shadow_vis` (ResId 11) + `shadow_vis2` (ResId 12) are
+/// declared LAST in the image block (AFTER `ddgi_depth`, BEFORE the first `add_buffer`), so
+/// EVERY existing image ResId 0..10 is byte-unchanged and the buffers still begin at ResId
+/// `FRAMEGRAPH_IMAGE_COUNT` on BOTH builds by construction (their numeric ResIds shift +2 on
+/// hwrt, absorbed by this const — the three `- FRAMEGRAPH_IMAGE_COUNT` buffer re-base sites
+/// re-base by the SAME const, so a buffer's LOGICAL sink slot is unchanged). In this step NO
+/// pass accesses ResId 11/12, so the derived barrier set is unchanged (byte-identical render).
+#[cfg(feature = "hwrt")]
+pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 13;
+/// See the `hwrt` variant: a `not(hwrt)` build keeps the count at 11 (no shadow-vis targets,
+/// byte-unchanged).
+#[cfg(not(feature = "hwrt"))]
 pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 11;
 
 /// The REAL [`BarrierSink`](crate::framegraph::BarrierSink) for the whole G-buffer
@@ -100,6 +114,14 @@ pub(crate) struct GbufferBarrierSink<'a> {
     /// that does NOT declare an optional image (e.g. cascade when CSM is off, or the DDGI
     /// atlases when the update pass is off) never routes a barrier naming that ResId, so its
     /// slot may hold [`VkImage::NULL`] harmlessly.
+    ///
+    /// Rung 3a (`hwrt`): the array grows by TWO — `shadow_vis` (ResId 11) + `shadow_vis2`
+    /// (ResId 12), the ringed RT soft-shadow-visibility targets — declared LAST in the image
+    /// block. Each slot carries the current frame slot's handle when the targets are allocated, or
+    /// [`VkImage::NULL`] when the device lacks `RG8`/`RG16` UNORM storage (the DDGI-degrade mirror —
+    /// the targets are `Option`-guarded on the boot probe). In THIS step no pass names ResId 11/12,
+    /// so their slots are never handed to the driver either way; steps 4-6 add the passes that read
+    /// them (gated on the same `shadow_denoise_storage_ok()` predicate).
     pub(crate) images: [VkImage; FRAMEGRAPH_IMAGE_COUNT],
     /// The physical buffers resolved by `res.index() - FRAMEGRAPH_IMAGE_COUNT` (the graph's
     /// FIXED buffer declaration order): `[light_table, tiles, grid, index, alloc,
@@ -123,6 +145,19 @@ pub(crate) struct GbufferBarrierSink<'a> {
     #[cfg(feature = "hwrt")]
     pub(crate) buffers: [VkBuffer; 11],
 }
+
+/// Compile-time guard that [`GbufferBarrierSink::images`] is exactly [`FRAMEGRAPH_IMAGE_COUNT`]
+/// long on BOTH builds (`13` under `hwrt`, `11` otherwise). The field's `[VkImage;
+/// FRAMEGRAPH_IMAGE_COUNT]` type already ties the two; this pins the concrete count so an
+/// accidental const edit (e.g. adding a third shadow target without growing the const) trips
+/// here, and the `record_graph_pass` array literal — whose element count the compiler checks
+/// against this same field type — cannot silently drift.
+const _: () = {
+    #[cfg(feature = "hwrt")]
+    assert!(FRAMEGRAPH_IMAGE_COUNT == 13, "hwrt: 11 base images + shadow_vis + shadow_vis2");
+    #[cfg(not(feature = "hwrt"))]
+    assert!(FRAMEGRAPH_IMAGE_COUNT == 11, "not(hwrt): the 11 base images, no shadow-vis targets");
+};
 
 impl crate::framegraph::BarrierSink for GbufferBarrierSink<'_> {
     fn image_barriers(
@@ -183,7 +218,8 @@ impl crate::framegraph::BarrierSink for GbufferBarrierSink<'_> {
         // `record_gbuffer` recording). Every `arr[i].image` was resolved from the
         // `images[res.index()]` slot (a live G-buffer image for the current frame);
         // `res.index()` is in `0..FRAMEGRAPH_IMAGE_COUNT` for every image barrier the
-        // whole-frame graph derives (images are ResId `0..11`). The masks/layouts/
+        // whole-frame graph derives (images are ResId `0..FRAMEGRAPH_IMAGE_COUNT` — `0..11`,
+        // or `0..13` under `hwrt` with the two Rung 3a shadow-vis targets). The masks/layouts/
         // subresource are the graph-derived Vk values that reproduce the hand path's
         // transitions. `arr[..n]` (a stack array) outlives the call; the count == `n`.
         // No memory or buffer barriers (`0, ptr::null(), 0, ptr::null()`), matching the
@@ -257,7 +293,7 @@ impl crate::framegraph::BarrierSink for GbufferBarrierSink<'_> {
         // `record_gbuffer` recording). Every `arr[i].buffer` was resolved from the
         // `buffers[res.index() - FRAMEGRAPH_IMAGE_COUNT]` slot (a live scene buffer for
         // this frame); a buffer barrier's `res.index()` is always `>= FRAMEGRAPH_IMAGE_COUNT`
-        // (buffers are declared after the 11 images) and `< FRAMEGRAPH_IMAGE_COUNT +
+        // (buffers are declared after the images — 11, or 13 under `hwrt`) and `< FRAMEGRAPH_IMAGE_COUNT +
         // buffers.len()` (the 5 core + 2 DDGI + 3 interp buffer ResIds, plus the 1 R2a-3
         // `tlas_instances` ResId under `hwrt`).
         // The masks are the graph-derived Vk values that reproduce the hand path's
@@ -294,9 +330,12 @@ impl Renderer<'_> {
     /// `tests/framegraph_gbuffer_equiv.rs::build_maximal_frame` (minus the swapchain
     /// image, whose WSI barriers stay hand-recorded). Resources are declared in a FIXED
     /// order that pins the ResIds the [`GbufferBarrierSink`] resolves by: images
-    /// albedo=0..atlas=8, then SDFDDGI I2 ddgi_irr=9/ddgi_depth=10, then buffers
-    /// light_table=11..alloc=15, ddgi_classification=16/ddgi_ray_table=17, then the
-    /// (conditional) interp trio=18/19/20.
+    /// albedo=0..atlas=8, then SDFDDGI I2 ddgi_irr=9/ddgi_depth=10 (then, under `hwrt`, the two
+    /// Rung 3a shadow-vis targets shadow_vis=11/shadow_vis2=12), then buffers
+    /// light_table..alloc, ddgi_classification/ddgi_ray_table, then the (conditional) interp trio —
+    /// each buffer at `FRAMEGRAPH_IMAGE_COUNT + slot`, so a buffer's LOGICAL sink slot
+    /// (`ResId - FRAMEGRAPH_IMAGE_COUNT`) is cfg-invariant even though its numeric ResId shifts +2
+    /// under `hwrt` (absorbed by the const).
     ///
     /// Zero heap allocation (the arenas keep capacity across `reset`); the per-frame
     /// `compile` walks a ~11-pass line (cheap).
@@ -365,7 +404,23 @@ impl Renderer<'_> {
                 VK_ACCESS_SHADER_READ_BIT,
             ),
         );
-        // --- Buffers (ResId 11..15) — ALL single instances shared by both in-flight
+        // Rung 3a (`hwrt`, ResIds 11/12): the two RT soft-shadow-visibility targets, declared LAST
+        // in the image block — AFTER `ddgi_depth`, BEFORE the first `add_buffer` (light_table).
+        // This keeps ResId 0..10 byte-unchanged AND makes `light_table` land at ResId
+        // `FRAMEGRAPH_IMAGE_COUNT` on BOTH builds by construction (13 under hwrt, 11 otherwise), so
+        // the three `- FRAMEGRAPH_IMAGE_COUNT` buffer re-base sites keep every buffer's LOGICAL sink
+        // slot fixed. `shadow_vis` (RG8, R=mesh_vis/G=validity) + `shadow_vis2` (RG16, the à-trous
+        // ping-pong) are ringed per-FIF STORAGE targets. Plain `add_image` (undefined first-touch,
+        // like the ringed G-buffer images). In THIS step (targets + decls + sink ONLY) NO pass names
+        // them via `image_access`, so the graph routes ZERO barriers at ResId 11/12 → the derived
+        // barrier set is unchanged → byte-identical render. Steps 4-6 add the VIS / à-trous /
+        // RESOLVE_DENOISED passes that access them. The `_`-prefix marks them declared-but-not-yet-
+        // accessed (the `add_image` side effect — consuming the ResId — is the point, not the id).
+        #[cfg(feature = "hwrt")]
+        let _shadow_vis = g.add_image("shadow_vis"); // ResId 11
+        #[cfg(feature = "hwrt")]
+        let _shadow_vis2 = g.add_image("shadow_vis2"); // ResId 12
+        // --- Buffers (ResId FRAMEGRAPH_IMAGE_COUNT..+4) — ALL single instances shared by both in-flight
         // frames (audit B-002). light_table/tiles/grid/index end their frame consumed
         // by a COMPUTE read (resolve / marcher), so a dirty-frame re-write must order
         // after those sibling reads (WAR seed). `alloc` ends its frame on the cull's
@@ -923,6 +978,24 @@ impl Renderer<'_> {
                 // unreferenced (their slots inert, like cascade/atlas when those maps are off).
                 scene.ddgi_irr_texture.image,
                 scene.ddgi_depth_texture.image,
+                // Rung 3a (`hwrt`, ResIds 11/12): the two RT soft-shadow-visibility targets — ringed
+                // per-FIF STORAGE images, so bind the CURRENT frame slot's handle (like the G-buffer
+                // ring slots above). `Option`-guarded (the DDGI-degrade mirror): `None` — resolving to
+                // [`VkImage::NULL`] — when the device lacks `RG8`/`RG16` UNORM storage
+                // (`shadow_denoise_storage_ok() == false`), the target is not allocated and the
+                // denoise stays disabled. In THIS step no pass names ResId 11/12, so these slots are
+                // never handed to the driver either way (a NULL there is inert, like cascade/atlas
+                // when those maps are off); steps 4-6 add the passes, gated on the same predicate.
+                #[cfg(feature = "hwrt")]
+                targets
+                    .shadow_vis
+                    .as_ref()
+                    .map_or(VkImage::NULL, |r| r[fi].image),
+                #[cfg(feature = "hwrt")]
+                targets
+                    .shadow_vis2
+                    .as_ref()
+                    .map_or(VkImage::NULL, |r| r[fi].image),
             ],
             #[cfg(not(feature = "hwrt"))]
             buffers: [

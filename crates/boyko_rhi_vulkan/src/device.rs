@@ -228,6 +228,23 @@ pub struct DeviceCaps {
     /// EITHER degrades DDGI gracefully (RECORDED, not a boot fail-fast — see
     /// [`ddgi_irr_storage_ok`](Self::ddgi_irr_storage_ok)).
     pub ddgi_depth_storage_ok: bool,
+    /// Rung 3a: whether `R8G8_UNORM` supports `STORAGE_IMAGE` under OPTIMAL tiling (the RT
+    /// soft-shadow VISIBILITY target `shadow_vis` — R = mesh visibility, G = validity — a
+    /// full-res STORAGE image the VIS/à-trous passes write). RECORDED ONLY (NO boot fail-fast):
+    /// the shadow denoise is opt-in (`feature = "hwrt"` + config `Spatial`, default `None`),
+    /// so a device missing this format degrades the denoise to disabled rather than failing
+    /// boot — the SAME degrade-not-crash policy as [`ddgi_irr_storage_ok`](Self::ddgi_irr_storage_ok).
+    /// `#[cfg(feature = "hwrt")]`, so a `not(hwrt)` build has neither the field nor the probe.
+    #[cfg(feature = "hwrt")]
+    pub rg8_unorm_storage_ok: bool,
+    /// Rung 3a: whether `R16G16_UNORM` supports `STORAGE_IMAGE` under OPTIMAL tiling (the
+    /// à-trous ping-pong target `shadow_vis2`; 16-bit avoids the cumulative 8-bit rounding of a
+    /// multi-level filter). RECORDED ONLY (NO boot fail-fast): gated together with
+    /// [`rg8_unorm_storage_ok`](Self::rg8_unorm_storage_ok) via
+    /// [`shadow_denoise_storage_ok`](Self::shadow_denoise_storage_ok) so a device missing EITHER
+    /// degrades the shadow denoise gracefully (mirrors the DDGI pair). `#[cfg(feature = "hwrt")]`.
+    #[cfg(feature = "hwrt")]
+    pub rg16_unorm_storage_ok: bool,
     /// HW-RT rung R0: `VkPhysicalDeviceLimits::timestampPeriod` — nanoseconds per GPU
     /// timestamp tick (multiply a masked tick delta by this to get ns). RECORDED (not a
     /// boot fail-fast): a `<= 0` or `> 1000` value (an implausible period, or a wrong-offset
@@ -302,6 +319,19 @@ impl DeviceCaps {
     #[inline]
     pub const fn ddgi_storage_ok(&self) -> bool {
         self.ddgi_irr_storage_ok && self.ddgi_depth_storage_ok
+    }
+
+    /// Rung 3a: whether BOTH RT soft-shadow denoise storage formats (`R8G8_UNORM` visibility +
+    /// `R16G16_UNORM` à-trous ping-pong) support `STORAGE_IMAGE` under OPTIMAL tiling — the
+    /// precondition for the VIS/à-trous compute WRITEs. When `false`, the denoise targets are not
+    /// used and the spatial denoise stays disabled (graceful degradation — the denoise is opt-in,
+    /// `feature = "hwrt"` + config `Spatial`), mirroring [`Self::ddgi_storage_ok`]. Both probes are
+    /// read through this single predicate so the target-allocation and the (steps 4-7) activation
+    /// gate cannot disagree.
+    #[cfg(feature = "hwrt")]
+    #[inline]
+    pub const fn shadow_denoise_storage_ok(&self) -> bool {
+        self.rg8_unorm_storage_ok && self.rg16_unorm_storage_ok
     }
 
     /// HW-RT rung R0: whether GPU timestamp measurement is USABLE on this device — the
@@ -2809,6 +2839,63 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         );
     }
 
+    // --- rg8_unorm_storage_ok / rg16_unorm_storage_ok (Rung 3a): STORAGE_IMAGE on R8G8_UNORM
+    // (the `shadow_vis` visibility target) + R16G16_UNORM (the `shadow_vis2` à-trous ping-pong),
+    // OPTIMAL tiling. Mirror the `ddgi_*_storage_ok` QUERY shape, and — like the DDGI pair — the
+    // caller does NOT fail-fast on `false`: the RT soft-shadow denoise is opt-in (`feature =
+    // "hwrt"` + config `Spatial`), so an unsupported device degrades the denoise to disabled,
+    // never a boot failure. `#[cfg(feature = "hwrt")]`-gated, so a `not(hwrt)` build runs neither
+    // probe nor records the fields.
+    #[cfg(feature = "hwrt")]
+    let (rg8_unorm_storage_ok, rg16_unorm_storage_ok) = {
+        let mut rg8_props = VkFormatProperties {
+            linear_tiling_features: 0,
+            optimal_tiling_features: 0,
+            buffer_features: 0,
+        };
+        // SAFETY: `physical_device` is valid; `R8G8_UNORM` is a valid `VkFormat`;
+        // `&mut rg8_props` is a valid out-pointer for the `#[repr(C)]` `VkFormatProperties`
+        // the driver fully overwrites.
+        unsafe {
+            (fns.get_physical_device_format_properties)(
+                physical_device,
+                crate::ffi::VK_FORMAT_R8G8_UNORM,
+                &mut rg8_props,
+            )
+        };
+        let rg8_ok =
+            (rg8_props.optimal_tiling_features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+
+        let mut rg16_props = VkFormatProperties {
+            linear_tiling_features: 0,
+            optimal_tiling_features: 0,
+            buffer_features: 0,
+        };
+        // SAFETY: `physical_device` is valid; `R16G16_UNORM` is a valid `VkFormat`;
+        // `&mut rg16_props` is a valid out-pointer for the `#[repr(C)]` `VkFormatProperties`
+        // the driver fully overwrites.
+        unsafe {
+            (fns.get_physical_device_format_properties)(
+                physical_device,
+                crate::ffi::VK_FORMAT_R16G16_UNORM,
+                &mut rg16_props,
+            )
+        };
+        let rg16_ok =
+            (rg16_props.optimal_tiling_features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+
+        // A debug-log line only when a supported format is missing (NO boot fail-fast — the
+        // denoise is opt-in; the target-allocation + activation gate handle it).
+        #[cfg(debug_assertions)]
+        if !(rg8_ok && rg16_ok) {
+            eprintln!(
+                "shadow denoise disabled: RG8/RG16 UNORM storage unsupported \
+                 (rg8_ok={rg8_ok}, rg16_ok={rg16_ok})"
+            );
+        }
+        (rg8_ok, rg16_ok)
+    };
+
     DeviceCaps {
         bindless_capable,
         gbuffer_storage_format_ok,
@@ -2818,6 +2905,11 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         atlas_linear_filter_ok,
         ddgi_irr_storage_ok,
         ddgi_depth_storage_ok,
+        // Rung 3a: the RT soft-shadow denoise storage-format probes (recorded, not fail-fast).
+        #[cfg(feature = "hwrt")]
+        rg8_unorm_storage_ok,
+        #[cfg(feature = "hwrt")]
+        rg16_unorm_storage_ok,
         // HW-RT rung R0: placeholders — the boot site overwrites these from the physical-
         // device limits (`timestampPeriod`) + the chosen queue family (`timestampValidBits`),
         // the two inputs `query_device_caps` does not itself read.
@@ -3254,6 +3346,10 @@ mod tests {
             atlas_linear_filter_ok: true,
             ddgi_irr_storage_ok: true,
             ddgi_depth_storage_ok: true,
+            #[cfg(feature = "hwrt")]
+            rg8_unorm_storage_ok: true,
+            #[cfg(feature = "hwrt")]
+            rg16_unorm_storage_ok: true,
             timestamp_period: 1.0,
             timestamp_valid_bits: 64,
             ray_query,

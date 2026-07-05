@@ -84,6 +84,24 @@ pub struct GBufferTargets {
     /// reads it, so its undefined contents are irrelevant (the 0%-gate is the byte-identical
     /// PIXELS + command stream, which the always-allocate preserves). RINGED (see [`Self::depth`]).
     pub(crate) ssao: [VulkanTexture; FRAMES_IN_FLIGHT],
+    /// Rung 3a: the RT soft-shadow VISIBILITY target `shadow_vis` RING (`R8G8_UNORM` STORAGE,
+    /// full-res): `R` = the per-pixel mesh visibility the VIS pass writes, `G` = the validity mask.
+    /// RINGED per-FIF (the cross-frame WAR fix, like [`Self::ssao`]) so the à-trous denoise reads/
+    /// writes the slot the VIS pass just wrote. `Option`-guarded: `Some` when the device advertises
+    /// `RG8`/`RG16` UNORM storage ([`crate::device::DeviceCaps::shadow_denoise_storage_ok`]), `None`
+    /// otherwise — the DDGI-degrade discipline (the denoise is opt-in, `feature = "hwrt"` + config
+    /// `Spatial`; a device missing the format degrades it to disabled, never a boot fault). No pass
+    /// reads it yet (steps 4-6 add the VIS / à-trous passes) — allocated-but-unused this step, so
+    /// the render is byte-identical. `#[cfg(feature = "hwrt")]`, so a `not(hwrt)` build lacks it.
+    #[cfg(feature = "hwrt")]
+    pub(crate) shadow_vis: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
+    /// Rung 3a: the à-trous ping-pong target `shadow_vis2` RING (`R16G16_UNORM` STORAGE, full-res) —
+    /// 16-bit precision avoids the cumulative 8-bit rounding of a multi-level filter. RINGED +
+    /// `Option`-guarded exactly like [`Self::shadow_vis`] (allocated together on the same
+    /// `shadow_denoise_storage_ok()` predicate; both `None` on an unsupported device). No pass reads
+    /// it yet (steps 4-6 add the à-trous ping-pong). `#[cfg(feature = "hwrt")]`.
+    #[cfg(feature = "hwrt")]
+    pub(crate) shadow_vis2: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
     /// The marcher vocabulary descriptor set RING (one per in-flight frame), each written
     /// ONCE against [`GBufferScene::vocab_layout`] (pointing at `depth`/`albedo`/`normal`/
     /// `material` + the scene's SSBO/UBO/sampler + the M1 `pointer_grid` SSBO @9). Slot `i`
@@ -184,6 +202,24 @@ const GVIEWT_FORMAT: Format = Format::R32Sfloat;
 /// ([`crate::device::DeviceCaps::r8_unorm_storage_ok`]), so the SSAO image create can never
 /// fault on an unsupported format.
 const SSAO_FORMAT: Format = Format::R8Unorm;
+
+/// Rung 3a: the RT soft-shadow VISIBILITY target `shadow_vis` format: `R8G8_UNORM`, a full-res
+/// STORAGE image the VIS pass writes (`R` = per-pixel mesh visibility, `G` = validity mask) and
+/// the à-trous denoise reads/writes. 8-bit-per-channel is the engine shadow tolerance (matches the
+/// inline Vogel `mesh_vis`); `R8G8_UNORM`/`STORAGE_IMAGE` support is device-probed at boot
+/// ([`crate::device::DeviceCaps::rg8_unorm_storage_ok`]) — RECORDED-not-fail-fast, so on a device
+/// that lacks it the target is not allocated and the denoise stays disabled (steps 4-7 read the
+/// [`shadow_denoise_storage_ok`](crate::device::DeviceCaps::shadow_denoise_storage_ok) predicate).
+#[cfg(feature = "hwrt")]
+const SHADOW_VIS_FORMAT: Format = Format::R8G8Unorm;
+
+/// Rung 3a: the à-trous ping-pong target `shadow_vis2` format: `R16G16_UNORM`, a full-res STORAGE
+/// image the multi-level denoise writes/reads. 16-bit avoids the 3× cumulative 8-bit rounding a
+/// multi-iteration filter would accrue. `R16G16_UNORM`/`STORAGE_IMAGE` support is device-probed at
+/// boot ([`crate::device::DeviceCaps::rg16_unorm_storage_ok`]) — RECORDED-not-fail-fast, same
+/// degrade policy as [`SHADOW_VIS_FORMAT`].
+#[cfg(feature = "hwrt")]
+const SHADOW_VIS2_FORMAT: Format = Format::R16G16Unorm;
 
 /// The binding count of the SOFTWARE deferred-resolve set (indices 0..=18). The HWRT variant is
 /// this plus one (binding 19 = the TLAS). Kept as ONE source so the exact-fill guards + both set
@@ -340,6 +376,50 @@ impl GBufferTargets {
         RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
     }
 
+    /// Rung 3a: creates one slot of the RT soft-shadow VISIBILITY target `shadow_vis`: a 2D
+    /// `R8G8_UNORM` STORAGE image at `extent` (`R` = mesh visibility, `G` = validity). A separate
+    /// helper from [`Self::create_ssao_image`] because the lane is `R8G8_UNORM`. The caller only
+    /// invokes this after `shadow_denoise_storage_ok()` is `true` (the boot probe), so the create
+    /// cannot fault on an unsupported storage format (the SSAO-helper discipline, but probe-gated
+    /// rather than boot-fail-fast — the denoise is opt-in).
+    #[cfg(feature = "hwrt")]
+    fn create_shadow_vis_image(
+        ctx: &VulkanContext,
+        extent: VkExtent2D,
+    ) -> Result<VulkanTexture, SwapchainError> {
+        let desc = TextureDesc {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+            format: SHADOW_VIS_FORMAT,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE,
+            array_layers: 1,
+        };
+        RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
+    }
+
+    /// Rung 3a: creates one slot of the à-trous ping-pong target `shadow_vis2`: a 2D
+    /// `R16G16_UNORM` STORAGE image at `extent`. A separate helper from
+    /// [`Self::create_shadow_vis_image`] because the lane is `R16G16_UNORM` (16-bit ping-pong).
+    /// Probe-gated exactly like [`Self::create_shadow_vis_image`].
+    #[cfg(feature = "hwrt")]
+    fn create_shadow_vis2_image(
+        ctx: &VulkanContext,
+        extent: VkExtent2D,
+    ) -> Result<VulkanTexture, SwapchainError> {
+        let desc = TextureDesc {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+            format: SHADOW_VIS2_FORMAT,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE,
+            array_layers: 1,
+        };
+        RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
+    }
+
     /// Allocates the depth + MRT G-buffer images at `extent` and writes the marcher
     /// vocabulary set + the present-sample set against them (ONCE). The caller
     /// ([`GBufferTargets::sync_gbuffer`]) destroys any prior targets + waits idle
@@ -377,6 +457,20 @@ impl GBufferTargets {
         let drain_partial = |ring: &mut [Option<VulkanTexture>; FRAMES_IN_FLIGHT]| unsafe {
             for slot in ring.iter_mut() {
                 if let Some(t) = slot.take() {
+                    RhiDevice::destroy_texture(ctx, t);
+                }
+            }
+        };
+        // Rung 3a: tears down a COMPLETED `Option`-guarded ring (the two shadow-vis targets, which
+        // are `None` on a device lacking RG8/RG16 storage) IN PLACE via `take()`, so it can be
+        // called from inside the descriptor-set error loops below without moving the outer `let`
+        // (a move-in-loop the borrow checker rejects). The `None` case (and a second call after a
+        // take) is a no-op. Same SAFETY as `destroy_ring` (`ctx` live, no submission references it,
+        // each slot destroyed once — the `take` guarantees at-most-once).
+        #[cfg(feature = "hwrt")]
+        let destroy_vis_opt = |ring: &mut Option<[VulkanTexture; FRAMES_IN_FLIGHT]>| unsafe {
+            if let Some(r) = ring.take() {
+                for t in r {
                     RhiDevice::destroy_texture(ctx, t);
                 }
             }
@@ -541,6 +635,65 @@ impl GBufferTargets {
         let ssao: [VulkanTexture; FRAMES_IN_FLIGHT] =
             ssao_slots.map(|s| s.expect("invariant: every ssao ring slot built before here"));
 
+        // Rung 3a: the two RT soft-shadow-visibility target RINGS (`shadow_vis` RG8 + `shadow_vis2`
+        // RG16), allocated together ONLY when the device advertises both storage formats
+        // (`shadow_denoise_storage_ok()` — the DDGI-degrade discipline; on an unsupported device
+        // BOTH stay `None` and the denoise is disabled, never a boot fault). Ringed per-FIF like the
+        // ssao ring, built with the same `[Option<_>; N]` drain-on-error ladder. No pass reads them
+        // this step (steps 4-6 add the VIS / à-trous passes) — allocated-but-unused, byte-identical.
+        // On a mid-ring failure, drain the partial ring + every prior image ring (ssao..depth).
+        #[cfg(feature = "hwrt")]
+        let (mut shadow_vis, mut shadow_vis2): (
+            Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
+            Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        ) = if ctx.device_caps().shadow_denoise_storage_ok() {
+            let mut vis_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
+                [const { None }; FRAMES_IN_FLIGHT];
+            for slot in vis_slots.iter_mut() {
+                match Self::create_shadow_vis_image(ctx, extent) {
+                    Ok(t) => *slot = Some(t),
+                    Err(e) => {
+                        drain_partial(&mut vis_slots);
+                        destroy_ring(ssao);
+                        destroy_ring(viewt);
+                        destroy_ring(lit);
+                        destroy_ring(material);
+                        destroy_ring(normal);
+                        destroy_ring(albedo);
+                        destroy_ring(depth);
+                        return Err(e);
+                    }
+                }
+            }
+            let vis: [VulkanTexture; FRAMES_IN_FLIGHT] = vis_slots
+                .map(|s| s.expect("invariant: every shadow_vis ring slot built before here"));
+
+            let mut vis2_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
+                [const { None }; FRAMES_IN_FLIGHT];
+            for slot in vis2_slots.iter_mut() {
+                match Self::create_shadow_vis2_image(ctx, extent) {
+                    Ok(t) => *slot = Some(t),
+                    Err(e) => {
+                        drain_partial(&mut vis2_slots);
+                        destroy_ring(vis);
+                        destroy_ring(ssao);
+                        destroy_ring(viewt);
+                        destroy_ring(lit);
+                        destroy_ring(material);
+                        destroy_ring(normal);
+                        destroy_ring(albedo);
+                        destroy_ring(depth);
+                        return Err(e);
+                    }
+                }
+            }
+            let vis2: [VulkanTexture; FRAMES_IN_FLIGHT] = vis2_slots
+                .map(|s| s.expect("invariant: every shadow_vis2 ring slot built before here"));
+            (Some(vis), Some(vis2))
+        } else {
+            (None, None)
+        };
+
         // The marcher vocabulary set, written ONCE here (NO per-frame update). The
         // entry order matches the layout: SSBO @0, sampled depth @1, storage albedo @2,
         // storage normal @3, storage material @4, UNIFORM camera @5, STORAGE tiles @6,
@@ -632,6 +785,12 @@ impl GBufferTargets {
                             }
                         }
                     }
+                    // Rung 3a: the two shadow-vis rings (last-built images), `Option`-drained first
+                    // (reverse acquisition: vis2 before vis before ssao). No-op when unallocated.
+                    #[cfg(feature = "hwrt")]
+                    destroy_vis_opt(&mut shadow_vis2);
+                    #[cfg(feature = "hwrt")]
+                    destroy_vis_opt(&mut shadow_vis);
                     destroy_ring(ssao);
                     destroy_ring(viewt);
                     destroy_ring(lit);
@@ -707,6 +866,12 @@ impl GBufferTargets {
                             RhiDevice::destroy_bind_group(ctx, g);
                         }
                     }
+                    // Rung 3a: the two shadow-vis rings (last-built images), `Option`-drained first
+                    // (reverse acquisition: vis2 before vis before ssao). No-op when unallocated.
+                    #[cfg(feature = "hwrt")]
+                    destroy_vis_opt(&mut shadow_vis2);
+                    #[cfg(feature = "hwrt")]
+                    destroy_vis_opt(&mut shadow_vis);
                     destroy_ring(ssao);
                     destroy_ring(viewt);
                     destroy_ring(lit);
@@ -768,6 +933,12 @@ impl GBufferTargets {
                             RhiDevice::destroy_bind_group(ctx, g);
                         }
                     }
+                    // Rung 3a: the two shadow-vis rings (last-built images), `Option`-drained first
+                    // (reverse acquisition: vis2 before vis before ssao). No-op when unallocated.
+                    #[cfg(feature = "hwrt")]
+                    destroy_vis_opt(&mut shadow_vis2);
+                    #[cfg(feature = "hwrt")]
+                    destroy_vis_opt(&mut shadow_vis);
                     destroy_ring(ssao);
                     destroy_ring(viewt);
                     destroy_ring(lit);
@@ -840,6 +1011,12 @@ impl GBufferTargets {
                             RhiDevice::destroy_bind_group(ctx, g);
                         }
                     }
+                    // Rung 3a: the two shadow-vis rings (last-built images), `Option`-drained first
+                    // (reverse acquisition: vis2 before vis before ssao). No-op when unallocated.
+                    #[cfg(feature = "hwrt")]
+                    destroy_vis_opt(&mut shadow_vis2);
+                    #[cfg(feature = "hwrt")]
+                    destroy_vis_opt(&mut shadow_vis);
                     destroy_ring(ssao);
                     destroy_ring(viewt);
                     destroy_ring(lit);
@@ -903,6 +1080,13 @@ impl GBufferTargets {
                                 RhiDevice::destroy_bind_group(ctx, g);
                             }
                         }
+                        // Rung 3a: the two shadow-vis rings (last-built images), `Option`-drained
+                        // first (reverse acquisition: vis2 before vis before ssao). No-op when
+                        // unallocated.
+                        #[cfg(feature = "hwrt")]
+                        destroy_vis_opt(&mut shadow_vis2);
+                        #[cfg(feature = "hwrt")]
+                        destroy_vis_opt(&mut shadow_vis);
                         destroy_ring(ssao);
                         destroy_ring(viewt);
                         destroy_ring(lit);
@@ -971,6 +1155,12 @@ impl GBufferTargets {
                             RhiDevice::destroy_bind_group(ctx, g);
                         }
                     }
+                    // Rung 3a: the two shadow-vis rings (last-built images), `Option`-drained first
+                    // (reverse acquisition: vis2 before vis before ssao). No-op when unallocated.
+                    #[cfg(feature = "hwrt")]
+                    destroy_vis_opt(&mut shadow_vis2);
+                    #[cfg(feature = "hwrt")]
+                    destroy_vis_opt(&mut shadow_vis);
                     destroy_ring(ssao);
                     destroy_ring(viewt);
                     destroy_ring(lit);
@@ -1091,6 +1281,13 @@ impl GBufferTargets {
                                 RhiDevice::destroy_bind_group(ctx, g);
                             }
                         }
+                        // Rung 3a: the two shadow-vis rings (last-built images), `Option`-drained
+                        // first (reverse acquisition: vis2 before vis before ssao). No-op when
+                        // unallocated.
+                        #[cfg(feature = "hwrt")]
+                        destroy_vis_opt(&mut shadow_vis2);
+                        #[cfg(feature = "hwrt")]
+                        destroy_vis_opt(&mut shadow_vis);
                         destroy_ring(ssao);
                         destroy_ring(viewt);
                         destroy_ring(lit);
@@ -1115,6 +1312,10 @@ impl GBufferTargets {
             lit,
             viewt,
             ssao,
+            #[cfg(feature = "hwrt")]
+            shadow_vis,
+            #[cfg(feature = "hwrt")]
+            shadow_vis2,
             vocab_set,
             resolve_set,
             #[cfg(feature = "hwrt")]
@@ -1190,8 +1391,9 @@ impl GBufferTargets {
         // reverse acquisition order (sets → images). The vocab, resolve & present RINGS
         // each have `FRAMES_IN_FLIGHT` slots; the cull & SSAO RINGS + the single DDGI
         // update set are `Option`-guarded (present only when L1 / SSAO / the DDGI update
-        // pass were wired); the eight render-target image RINGS each have
-        // `FRAMES_IN_FLIGHT` slots — every slot of every ring (and the single set) is drained.
+        // pass were wired); the seven render-target image RINGS each have `FRAMES_IN_FLIGHT`
+        // slots — every slot of every ring (and the single set) is drained. Rung 3a (`hwrt`) adds
+        // the two `Option`-guarded shadow-vis image RINGS, drained before ssao (reverse acquisition).
         unsafe {
             // R2a-4b: the HWRT resolve set RING (last-acquired), `Option`-guarded (present only on
             // an RT device under `feature = "hwrt"` + config HardwareTri).
@@ -1224,6 +1426,21 @@ impl GBufferTargets {
             }
             for g in self.vocab_set {
                 RhiDevice::destroy_bind_group(ctx, g);
+            }
+            // Rung 3a: the two shadow-vis image RINGS (built AFTER ssao, so destroyed BEFORE it in
+            // reverse-acquisition order). `Option`-guarded (`None` on a device lacking RG8/RG16
+            // storage), each a `[VulkanTexture; FRAMES_IN_FLIGHT]` ring.
+            #[cfg(feature = "hwrt")]
+            if let Some(r) = self.shadow_vis2 {
+                for t in r {
+                    RhiDevice::destroy_texture(ctx, t);
+                }
+            }
+            #[cfg(feature = "hwrt")]
+            if let Some(r) = self.shadow_vis {
+                for t in r {
+                    RhiDevice::destroy_texture(ctx, t);
+                }
             }
             for t in self.ssao {
                 RhiDevice::destroy_texture(ctx, t);

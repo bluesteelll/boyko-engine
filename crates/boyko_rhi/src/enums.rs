@@ -266,8 +266,28 @@ pub enum Format {
     /// image the deferred resolve loads under the `ssao_mode != 0` gate; OFF every pre-P7
     /// scene, so the image is allocated-but-unread). `VK_FORMAT_R8_UNORM` is 9.
     R8Unorm = 9,
+    /// `VK_FORMAT_R8G8_UNORM` — two unsigned-normalized 8-bit channels mapping each byte
+    /// onto `[0, 1]` (Rung 3a: the RT soft-shadow VISIBILITY target `shadow_vis` — R = the
+    /// per-pixel mesh visibility the VIS pass writes, G = the validity mask; a full-res
+    /// `R8G8_UNORM` STORAGE image the à-trous denoise reads/writes).
+    ///
+    /// The value is the canonical `VkFormat` enumerant `VK_FORMAT_R8G8_UNORM == 16` (the
+    /// 8-bit two-component UNORM block). VERIFIED against the Vulkan spec enumerant, NOT a
+    /// copied guess (the M2 UNORM-vs-SNORM lesson: a wrong format const is a silent
+    /// dead-branch bug); cross-checked against `VK_FORMAT_R8G8_UNORM` in `abi_guard`.
+    R8G8Unorm = 16,
     /// `VK_FORMAT_R16_SFLOAT` — a compact single-channel float (deferred SDF use).
     R16Sfloat = 76,
+    /// `VK_FORMAT_R16G16_UNORM` — two unsigned-normalized 16-bit channels mapping each
+    /// 16-bit word onto `[0, 1]` (Rung 3a: the à-trous ping-pong target `shadow_vis2` —
+    /// 16-bit precision avoids the 3× cumulative 8-bit rounding a multi-level filter would
+    /// accrue; a full-res STORAGE image the denoise writes/reads).
+    ///
+    /// The value is the canonical `VkFormat` enumerant `VK_FORMAT_R16G16_UNORM == 77` (the
+    /// 16-bit two-component UNORM block: R16_UNORM=70, R16G16_UNORM=77). VERIFIED against the
+    /// Vulkan spec enumerant, NOT a copied guess; cross-checked against `VK_FORMAT_R16G16_UNORM`
+    /// in `abi_guard`.
+    R16G16Unorm = 77,
     /// `VK_FORMAT_R16G16_SFLOAT` — two 16-bit half floats (SDFDDGI I1: the probe
     /// DEPTH/visibility atlas storing the two Chebyshev moments `E[d]`/`E[d²]` in the
     /// `.r`/`.g` lanes — the RG16F two-moment depth tile, Decision D2).
