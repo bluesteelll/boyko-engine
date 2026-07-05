@@ -317,6 +317,17 @@ cbuffer RayShadowUbo : register(b20) {
 [[vk::constant_id(0)]] const uint SHADOW_RAY_COUNT = 16; // rays per pixel (spec-const; default 16)
 #endif
 
+// SHADOW_STAGE selects how the HWRT mesh-shadow term is produced (Rung 3a spatial denoise):
+//   RESOLVE_INLINE  (default) - trace inline + light, exactly as before (byte-identical).
+//   VIS             - trace, write raw visibility to gShadowVis, return before lighting.
+//   RESOLVE_DENOISED- read the a-trous-filtered visibility instead of tracing.
+#define SHADOW_STAGE_RESOLVE_INLINE   0
+#define SHADOW_STAGE_VIS              1
+#define SHADOW_STAGE_RESOLVE_DENOISED 2
+#ifndef SHADOW_STAGE
+#define SHADOW_STAGE SHADOW_STAGE_RESOLVE_INLINE
+#endif
+
 // Shadow Phase 5 Inc-1-GPU normal-offset bias FACTOR — the spot receiver lookup is pushed off the
 // surface by `n * SPOT_SHADOW_NORMAL_BIAS` so a grazing receiver does not self-shadow (acne). A
 // world-space constant (the spot map has no per-cascade `texel_size`); owner-retunable. Mirrors the
@@ -1098,6 +1109,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
                                          ? (dot(rd, cam_forward.xyz) * view_t)
                                          : view_t;
 #if HWRT
+    #if SHADOW_STAGE == SHADOW_STAGE_RESOLVE_INLINE
                         // R2a-4b (owner-eval, soft): the mesh-shadow term routes to a SOFT `rayQuery`
                         // TLAS trace (replacing the CSM shadow-map sample for mesh geometry). The
                         // directional light is at infinity, so the shadow rays cast toward `l` (the
@@ -1138,6 +1150,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
                         }
                         float mesh_vis = 1.0 - occ / SHADOW_RAY_COUNT;
                         vis = min(vis, mesh_vis);
+    #elif SHADOW_STAGE == SHADOW_STAGE_VIS
+        // Rung 3a step 4: trace + write gShadowVis + early-return. Empty stub for now.
+    #else // SHADOW_STAGE_RESOLVE_DENOISED
+        // Rung 3a step 6: read the filtered visibility. Empty stub for now.
+    #endif
 #else
                         vis = min(vis, csm_visibility(P, n, csm_view_z, NoL));
 #endif
