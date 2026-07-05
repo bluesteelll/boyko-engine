@@ -20,8 +20,8 @@ lives in `present/passes/gbuffer.rs` (`hwrt_triple`).
 |---|------|--------|
 | 1a | Spec-constant support in the RHI (first-class primitive) | **SHIPPED** `c22bac5` |
 | 1b | RayShadowConfig + tunable shadow params (count=spec-const, cone/tmax/tmin/bias=UBO) | **SHIPPED** `31fd66a` |
-| 2 | Runtime backend toggle (consumer reads resolved cell + force_software) | next |
-| 3a | Spatial bilateral shadow denoise (opt-in) | pending |
+| 2 | Runtime backend toggle (consumer reads resolved cell + force_software) | **SHIPPED** `8d6bcc5` |
+| 3a | Spatial bilateral shadow denoise (opt-in) | next |
 | 3b | TAA subsystem (opt-in) | pending |
 | 4a | Unified mesh+SDF TLAS (procedural AABB → HardwareMixed) | pending |
 | 4b–d | HW-RT workloads: AO → Reflection → GiProbe (SDFDDGI→HW-RT) | pending |
