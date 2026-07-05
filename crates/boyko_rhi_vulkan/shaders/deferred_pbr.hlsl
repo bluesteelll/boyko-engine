@@ -328,6 +328,23 @@ cbuffer RayShadowUbo : register(b20) {
 #define SHADOW_STAGE SHADOW_STAGE_RESOLVE_INLINE
 #endif
 
+#if SHADOW_STAGE != SHADOW_STAGE_RESOLVE_INLINE
+// binding 21 (u21): the shadow-visibility image (Rung 3a spatial denoise). RG: R = raw mesh_vis,
+// G = validity (1 = a real mesh-shadow sample was written; 0 = the neutral fill on a pixel that
+// never reached the mesh arm). Declared ENTIRELY under `SHADOW_STAGE != RESOLVE_INLINE` so the
+// RESOLVE_INLINE `.spv` (the byte-identity gate) never references it — 21 is the next free HWRT
+// binding after the TLAS @19 + RayShadowUbo @20. ONE binding serves BOTH stages: the VIS stage
+// UAV-WRITES `float2(mesh_vis, 1.0)` here, and the RESOLVE_DENOISED stage `.Load`s the à-trous-
+// FILTERED value the host binds into this same slot (the host swaps the descriptor between stages).
+// `[[vk::image_format("rg16")]]` pins the `OpTypeImage` to `Rg16` (`shaderStorageImageWriteWithout-
+// Format` is OFF). BOTH ping-pong rings (`shadow_vis` + `shadow_vis2`) AND this binding are the
+// SAME format, R16G16_UNORM (uniform-RG16 design): the VIS stage writes `shadow_vis[fi]` (RG16) and
+// the RESOLVE_DENOISED stage reads the FINAL à-trous output (also RG16, either ring by parity), so
+// the single "rg16" pin matches the bound view on EVERY level and every `levels` value — no
+// format-class mismatch on the odd-parity or DENOISED bind (the former RG8-vs-RG16 divergence).
+[[vk::image_format("rg16")]] RWTexture2D<float2> gShadowVis : register(u21);
+#endif
+
 // Shadow Phase 5 Inc-1-GPU normal-offset bias FACTOR — the spot receiver lookup is pushed off the
 // surface by `n * SPOT_SHADOW_NORMAL_BIAS` so a grazing receiver does not self-shadow (acne). A
 // world-space constant (the spot map has no per-cascade `texel_size`); owner-retunable. Mirrors the
@@ -955,6 +972,14 @@ void main(uint3 tid : SV_DispatchThreadID) {
     uint px = idx % w;
     uint py = idx / w;
 
+#if SHADOW_STAGE == SHADOW_STAGE_VIS
+    // Rung 3a VIS: seed the NEUTRAL visibility (full vis, validity 0) for EVERY in-bounds pixel.
+    // A pixel that never reaches the mesh-shadow arm (background, `NoL <= 0`, `csm_mode == OFF`,
+    // or a non-directional/`mask == 0` pixel) keeps this — validity 0 tells the à-trous filter the
+    // texel carries no real sample. The mesh arm OVERWRITES this with `float2(mesh_vis, 1.0)`.
+    gShadowVis[uint2(px, py)] = float2(1.0, 0.0);
+#endif
+
     int2 coord = int2((int)px, (int)py);
     float4 albedo_texel   = gAlbedo.Load(coord);
     float4 normal_texel   = gNormal.Load(coord);
@@ -1151,9 +1176,49 @@ void main(uint3 tid : SV_DispatchThreadID) {
                         float mesh_vis = 1.0 - occ / SHADOW_RAY_COUNT;
                         vis = min(vis, mesh_vis);
     #elif SHADOW_STAGE == SHADOW_STAGE_VIS
-        // Rung 3a step 4: trace + write gShadowVis + early-return. Empty stub for now.
+                        // Rung 3a VIS: the IDENTICAL Vogel-disk trace as RESOLVE_INLINE (same
+                        // SHADOW_RAY_COUNT spec-const, cone/tmax/tmin/bias UBO, IGN rotation,
+                        // golden angle, ray flags) — copied VERBATIM so `mesh_vis` is bit-identical
+                        // to the inline path (the C3 algebraic anchor). The ONLY divergence vs
+                        // RESOLVE_INLINE is the SINK: instead of `vis = min(vis, mesh_vis)`, write
+                        // the raw visibility (+ validity 1) to `gShadowVis` and RETURN before any
+                        // lighting — the VIS stage produces NO lit output (the à-trous filter + the
+                        // RESOLVE_DENOISED stage consume `gShadowVis`).
+                        float3 sh_up = abs(l.y) < 0.99 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+                        float3 sh_tx = normalize(cross(sh_up, l));
+                        float3 sh_ty = cross(l, sh_tx);
+                        float  sh_rot = ign(px, py) * 6.2831853; // IGN → [0, 2π) spiral rotation
+                        float  occ = 0.0;
+                        [loop] for (uint si = 0u; si < SHADOW_RAY_COUNT; ++si) {
+                            float sh_r = sqrt((si + 0.5) / SHADOW_RAY_COUNT);        // Vogel disk radius
+                            float sh_t = si * 2.399963229728653 + sh_rot;            // golden angle + IGN
+                            float2 sh_d = float2(cos(sh_t), sin(sh_t)) * (sh_r * SHADOW_CONE_RADIUS);
+                            float3 sh_dir = normalize(l + sh_tx * sh_d.x + sh_ty * sh_d.y);
+                            RayDesc shadow_ray;
+                            shadow_ray.Origin = P + n * SHADOW_RAY_BIAS;
+                            shadow_ray.Direction = sh_dir;
+                            shadow_ray.TMin = SHADOW_RAY_TMIN;
+                            shadow_ray.TMax = SHADOW_RAY_TMAX;
+                            RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH
+                                   | RAY_FLAG_FORCE_OPAQUE
+                                   | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+                            q.TraceRayInline(tlas, 0, 0xFF, shadow_ray);
+                            q.Proceed();
+                            occ += (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? 1.0 : 0.0;
+                        }
+                        float mesh_vis = 1.0 - occ / SHADOW_RAY_COUNT;
+                        // Overwrite the neutral seed: R = the raw mesh visibility, G = 1 (a real
+                        // mesh-shadow sample). Exactly ONE gShadowVis texel per pixel is written.
+                        gShadowVis[uint2(px, py)] = float2(mesh_vis, 1.0);
     #else // SHADOW_STAGE_RESOLVE_DENOISED
-        // Rung 3a step 6: read the filtered visibility. Empty stub for now.
+                        // Rung 3a DENOISED: replace the inline trace with a single point-read of the
+                        // à-trous-FILTERED visibility (the host binds gShadowVis to the final à-trous
+                        // level here), then the IDENTICAL min-combine at the IDENTICAL predicate as
+                        // RESOLVE_INLINE. With a pass-through filter (levels == 0) `mesh_vis` equals
+                        // the VIS write, which equals the inline `mesh_vis`, so the DENOISED render is
+                        // bit-identical to RESOLVE_INLINE (the C3 algebraic anchor: `af934c50`).
+                        float mesh_vis = gShadowVis.Load(int2(px, py)).r;
+                        vis = min(vis, mesh_vis);
     #endif
 #else
                         vis = min(vis, csm_visibility(P, n, csm_view_z, NoL));
@@ -1377,6 +1442,17 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // (the 0%-gate). No PBR, no material fetch, no normal/id decode.
         lit = base;
     }
+
+#if SHADOW_STAGE == SHADOW_STAGE_VIS
+    // Rung 3a VIS: the VIS stage produces NO lit output. By this convergent point EVERY pixel has
+    // settled EXACTLY ONE gShadowVis texel — the mesh arm wrote `float2(mesh_vis, 1.0)` for a
+    // primary-directional shadow-receiving pixel, and the top-of-main neutral seed
+    // (`float2(1.0, 0.0)`) covers every other pixel (background, `NoL <= 0`, `csm_mode == OFF`,
+    // non-directional, or `mask == 0`). RETURN before the sole `gLit` store so VIS never writes the
+    // lit target. (`lit` above is computed but discarded — the dead lighting work does not affect
+    // the VIS output; the à-trous pass + the RESOLVE_DENOISED stage consume `gShadowVis` alone.)
+    return;
+#endif
 
     gLit[uint2(px, py)] = float4(clamp(lit, 0.0, 1.0), 1.0);
 }

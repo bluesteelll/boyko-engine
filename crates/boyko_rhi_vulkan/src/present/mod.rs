@@ -54,7 +54,7 @@ pub use scene_types::{
     SsaoActivation, UiPass,
 };
 #[cfg(feature = "hwrt")]
-pub use scene_types::TlasBuildActivation;
+pub use scene_types::{ShadowVisActivation, TlasBuildActivation};
 pub use surface::Surface;
 pub use swapchain::Swapchain;
 pub use targets::{GBufferFrame, GBufferTargets};
@@ -69,6 +69,25 @@ pub use targets::{GBufferFrame, GBufferTargets};
 /// write-after-read fix: each frame writes `ring[frame_index]` and the GPU binds that
 /// same slot, so the sibling in-flight frame reads a DIFFERENT slot (no overlap).
 pub const FRAMES_IN_FLIGHT: usize = 2;
+
+/// HW-RT rung 3a: the max à-trous spatial-denoise iterations the recorder can dispatch (the
+/// ping-pong / pass-array bound). This is the RHI-layer MIRROR of `boyko_render`'s authoritative
+/// `MAX_ATROUS_LEVELS` — the RHI cannot depend on `boyko_render` (the render crate sits ABOVE it),
+/// so the value is duplicated here and the host (which links both) is the single point that keeps
+/// them in lock-step: `boyko_render::ShadowDenoiseConfig::clamped_levels` clamps to
+/// `boyko_render::MAX_ATROUS_LEVELS`, and a `ShadowVisActivation.levels` beyond THIS const would
+/// index past the per-level `GbufferPassPlan.shadow_atrous` / `atrous_set` arrays (a debug-asserted
+/// invariant at the record site). Kept equal to `boyko_render::MAX_ATROUS_LEVELS` (5).
+#[cfg(feature = "hwrt")]
+pub const MAX_ATROUS_LEVELS: u32 = 5;
+
+/// HW-RT rung 3a: the byte size of the à-trous edge-stop UBO — the RHI-layer MIRROR of
+/// `boyko_render::RESOLVED_SHADOW_DENOISE_BYTES` (`size_of::<ResolvedShadowDenoise>()`, one std140
+/// vec4 = 16 B). The RHI mints the per-FIF `shadow_denoise_ubo` ring at this size (`sigma_z` @0,
+/// `sigma_n` @4, pad @8/@12); the host writes `ResolvedShadowDenoise`'s 16 bytes into the fenced
+/// slot. Kept equal to `boyko_render::RESOLVED_SHADOW_DENOISE_BYTES` (16).
+#[cfg(feature = "hwrt")]
+pub const SHADOW_DENOISE_UBO_BYTES: u64 = 16;
 
 /// Errors from surface / swapchain / present operations.
 #[derive(Debug)]

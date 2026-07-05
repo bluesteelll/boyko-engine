@@ -2439,6 +2439,9 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // HW-RT rung R2a-3: the per-frame TLAS pack + build OFF (byte-identical command stream).
         #[cfg(feature = "hwrt")]
         tlas: None,
+        // HW-RT rung 3a: the spatial (à-trous) RT soft-shadow denoise OFF (byte-identical).
+        #[cfg(feature = "hwrt")]
+        shadow: None,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -3330,6 +3333,9 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // HW-RT rung R2a-3: the per-frame TLAS pack + build OFF (byte-identical command stream).
         #[cfg(feature = "hwrt")]
         tlas: None,
+        // HW-RT rung 3a: the spatial (à-trous) RT soft-shadow denoise OFF (byte-identical).
+        #[cfg(feature = "hwrt")]
+        shadow: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -8016,6 +8022,9 @@ fn run_showcase_body_ddgi(
         // HW-RT rung R2a-3: the per-frame TLAS pack + build OFF (byte-identical command stream).
         #[cfg(feature = "hwrt")]
         tlas: None,
+        // HW-RT rung 3a: the spatial (à-trous) RT soft-shadow denoise OFF (byte-identical).
+        #[cfg(feature = "hwrt")]
+        shadow: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -9315,6 +9324,9 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         // HW-RT rung R2a-3: the per-frame TLAS pack + build OFF (byte-identical command stream).
         #[cfg(feature = "hwrt")]
         tlas: None,
+        // HW-RT rung 3a: the spatial (à-trous) RT soft-shadow denoise OFF (byte-identical).
+        #[cfg(feature = "hwrt")]
+        shadow: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };

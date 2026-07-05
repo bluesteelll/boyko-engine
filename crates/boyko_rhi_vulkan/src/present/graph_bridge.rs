@@ -65,6 +65,19 @@ pub(crate) struct GbufferPassPlan {
     /// the UNTRACKED backing/scratch is invisible to the graph.
     #[cfg(feature = "hwrt")]
     pub(crate) tlas_build: Option<crate::framegraph::PassId>,
+    /// HW-RT rung 3a: the VIS pre-pass (`scene.shadow.is_some()`) — the resolve front-matter re-run
+    /// that traces the TLAS + WRITES `shadow_vis`. Reads gNormal/gViewT + the tlas buffer at COMPUTE;
+    /// `Some` iff `scene.shadow.is_some()` (the "member is Some iff its body is recorded" invariant).
+    /// Recorded BEFORE the à-trous passes + the resolve.
+    #[cfg(feature = "hwrt")]
+    pub(crate) shadow_vis: Option<crate::framegraph::PassId>,
+    /// HW-RT rung 3a: the per-level à-trous denoise passes (`scene.shadow.is_some()`), ping-ponging
+    /// `shadow_vis` / `shadow_vis2`. Exactly `levels` (`1..=MAX_ATROUS_LEVELS`) are populated; the
+    /// unused tail slots stay `None`. Each reads the in-ResId + gNormal/gViewT, writes the out-ResId.
+    /// The last one's write → resolve-read barrier is derived at the resolve.
+    #[cfg(feature = "hwrt")]
+    pub(crate) shadow_atrous:
+        [Option<crate::framegraph::PassId>; crate::present::MAX_ATROUS_LEVELS as usize],
     /// The always-present deferred resolve pass.
     pub(crate) resolve: crate::framegraph::PassId,
     /// The always-present present-sample pass: only the `lit` GENERAL→SHADER_READ_ONLY
@@ -413,13 +426,14 @@ impl Renderer<'_> {
         // ping-pong) are ringed per-FIF STORAGE targets. Plain `add_image` (undefined first-touch,
         // like the ringed G-buffer images). In THIS step (targets + decls + sink ONLY) NO pass names
         // them via `image_access`, so the graph routes ZERO barriers at ResId 11/12 → the derived
-        // barrier set is unchanged → byte-identical render. Steps 4-6 add the VIS / à-trous /
-        // RESOLVE_DENOISED passes that access them. The `_`-prefix marks them declared-but-not-yet-
-        // accessed (the `add_image` side effect — consuming the ResId — is the point, not the id).
+        // barrier set is unchanged → byte-identical render. The VIS / à-trous / RESOLVE_DENOISED
+        // passes below access them, but ONLY when `scene.shadow.is_some()` — the host keeps that
+        // gate a literal `None` (rung-3a step 7 flips it), so on EVERY current frame NO pass names
+        // ResId 11/12 → byte-identical.
         #[cfg(feature = "hwrt")]
-        let _shadow_vis = g.add_image("shadow_vis"); // ResId 11
+        let shadow_vis = g.add_image("shadow_vis"); // ResId 11
         #[cfg(feature = "hwrt")]
-        let _shadow_vis2 = g.add_image("shadow_vis2"); // ResId 12
+        let shadow_vis2 = g.add_image("shadow_vis2"); // ResId 12
         // --- Buffers (ResId FRAMEGRAPH_IMAGE_COUNT..+4) — ALL single instances shared by both in-flight
         // frames (audit B-002). light_table/tiles/grid/index end their frame consumed
         // by a COMPUTE read (resolve / marcher), so a dirty-frame re-write must order
@@ -690,6 +704,99 @@ impl Renderer<'_> {
             None
         };
 
+        // HW-RT rung 3a: the RT soft-shadow VIS pre-pass + the `levels` à-trous passes — declared
+        // ONLY when `scene.shadow.is_some()` (the step-7 gate; the host keeps it a literal `None`
+        // this rung, so these are dead on EVERY current frame → the OFF path's ResId + barrier
+        // counts are byte-unchanged). The VIS pass RE-RUNS the resolve front-matter + traces the
+        // TLAS, so it reads gNormal/gViewT (GENERAL, already SHADER_READ-visible from the marcher
+        // store→load) + the `tlas_instances` array (COMPUTE/SHADER_READ — the graph derives the
+        // build→VIS AS-visibility barrier), and WRITES `shadow_vis` (COMPUTE/SHADER_WRITE, first
+        // touch UNDEFINED→GENERAL). Each à-trous level then reads the in-ResId + gNormal/gViewT
+        // and writes the out-ResId (ping-pong `shadow_vis` ⇄ `shadow_vis2`), the graph deriving
+        // each level's RAW on the ping-pong pair.
+        #[cfg(feature = "hwrt")]
+        let (shadow_vis_pass, shadow_atrous_passes, final_vis_res) = if let Some(sh) =
+            scene.shadow.as_ref()
+        {
+            // Pass `shadow_vis`: reads gNormal/gViewT (GENERAL) + the tlas buffer (COMPUTE read),
+            // writes `shadow_vis` (GENERAL). NOTE: the `tlas_instances` buffer_access derives the
+            // build(AS_BUILD/SHADER_WRITE) → VIS(COMPUTE/SHADER_READ) barrier only when the tlas
+            // pass ran (`scene.tlas.is_some()`); the step-7 gate implies both, so declare it.
+            let vis = g.add_pass("shadow_vis");
+            for &c in &[normal, viewt] {
+                g.image_access(
+                    c,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    SubRange::COLOR,
+                );
+            }
+            g.buffer_access(
+                tlas_instances,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+            );
+            g.image_access(
+                shadow_vis,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                SubRange::COLOR,
+            );
+
+            // The `levels` à-trous passes (ping-pong). Level `i` reads `i`-even ? `shadow_vis` :
+            // `shadow_vis2` and writes the other; the FINAL write lands in `shadow_vis2` for odd
+            // `levels`, `shadow_vis` for even (== the input of level `levels`). Clamped to the
+            // per-level array bound so an over-count author config can never index past it.
+            let levels = (sh.levels as usize).clamp(1, crate::present::MAX_ATROUS_LEVELS as usize);
+            let mut atrous: [Option<crate::framegraph::PassId>;
+                crate::present::MAX_ATROUS_LEVELS as usize] =
+                [None; crate::present::MAX_ATROUS_LEVELS as usize];
+            for (i, slot) in atrous.iter_mut().enumerate().take(levels) {
+                let (in_res, out_res) = if i % 2 == 0 {
+                    (shadow_vis, shadow_vis2)
+                } else {
+                    (shadow_vis2, shadow_vis)
+                };
+                let p = g.add_pass("shadow_atrous");
+                for &c in &[normal, viewt] {
+                    g.image_access(
+                        c,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        SubRange::COLOR,
+                    );
+                }
+                g.image_access(
+                    in_res,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    SubRange::COLOR,
+                );
+                g.image_access(
+                    out_res,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    SubRange::COLOR,
+                );
+                *slot = Some(p);
+            }
+            // The final filtered-vis target the resolve reads: `shadow_vis2` for odd `levels`
+            // (last write landed there), `shadow_vis` for even.
+            let final_res = if levels % 2 == 1 { shadow_vis2 } else { shadow_vis };
+            (Some(vis), atrous, final_res)
+        } else {
+            (
+                None,
+                [None; crate::present::MAX_ATROUS_LEVELS as usize],
+                shadow_vis,
+            )
+        };
+
         // Pass `ddgi_update` (SDFDDGI I2 probe update) — gated `scene.ddgi_update.is_some()`, i.e.
         // ONLY when `ResolvedDdgi::enabled()`. Recorded AFTER the marcher (edit-list warm) + AFTER
         // the L0 light-table copy (`LightBuf` COMPUTE-read-visible), BEFORE the resolve. Reads the
@@ -898,6 +1005,35 @@ impl Renderer<'_> {
                 );
             }
         }
+        // HW-RT rung 3a: when the denoise stack ran (`scene.shadow.is_some()`), the DENOISED resolve
+        // READS the FINAL à-trous output (`final_vis_res`) — declaring the read here (the vis READER)
+        // is what makes the RDG DERIVE the last-atrous-write → resolve-read barrier. Declared ONLY on
+        // the ON path (the host keeps `scene.shadow == None` this rung), so the OFF path derives
+        // nothing (byte-identical). `debug_assert` that the resolve reads exactly the ResId the last
+        // à-trous pass wrote (the ping-pong parity invariant): `final_vis_res == shadow_vis2` iff
+        // `levels` is odd (see the pass loop above).
+        #[cfg(feature = "hwrt")]
+        if shadow_vis_pass.is_some() {
+            debug_assert!(
+                {
+                    let levels = scene
+                        .shadow
+                        .as_ref()
+                        .map(|s| (s.levels as usize).clamp(1, crate::present::MAX_ATROUS_LEVELS as usize))
+                        .unwrap_or(1);
+                    let last_write = if levels % 2 == 1 { shadow_vis2 } else { shadow_vis };
+                    final_vis_res.index() == last_write.index()
+                },
+                "invariant: the resolve reads the ResId the last à-trous pass wrote (ping-pong parity)"
+            );
+            g.image_access(
+                final_vis_res,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                SubRange::COLOR,
+            );
+        }
         g.image_access(
             lit,
             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -935,6 +1071,10 @@ impl Renderer<'_> {
             tlas_pack,
             #[cfg(feature = "hwrt")]
             tlas_build,
+            #[cfg(feature = "hwrt")]
+            shadow_vis: shadow_vis_pass,
+            #[cfg(feature = "hwrt")]
+            shadow_atrous: shadow_atrous_passes,
             resolve,
             present_sample,
         });
@@ -979,9 +1119,10 @@ impl Renderer<'_> {
                 scene.ddgi_irr_texture.image,
                 scene.ddgi_depth_texture.image,
                 // Rung 3a (`hwrt`, ResIds 11/12): the two RT soft-shadow-visibility targets — ringed
-                // per-FIF STORAGE images, so bind the CURRENT frame slot's handle (like the G-buffer
-                // ring slots above). `Option`-guarded (the DDGI-degrade mirror): `None` — resolving to
-                // [`VkImage::NULL`] — when the device lacks `RG8`/`RG16` UNORM storage
+                // per-FIF STORAGE images (BOTH R16G16_UNORM — the uniform-RG16 ping-pong), so bind
+                // the CURRENT frame slot's handle (like the G-buffer ring slots above). `Option`-
+                // guarded (the DDGI-degrade mirror): `None` — resolving to [`VkImage::NULL`] — when
+                // the device lacks `RG16` UNORM storage
                 // (`shadow_denoise_storage_ok() == false`), the target is not allocated and the
                 // denoise stays disabled. In THIS step no pass names ResId 11/12, so these slots are
                 // never handed to the driver either way (a NULL there is inert, like cascade/atlas

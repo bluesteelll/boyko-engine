@@ -55,7 +55,8 @@ use boyko_rhi_vulkan::accel_build::{
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::compute::{
-    BUILD_TLAS_INSTANCES_PUSH_BYTES, build_tlas_instances_spirv, deferred_pbr_hwrt_spirv,
+    BUILD_TLAS_INSTANCES_PUSH_BYTES, build_tlas_instances_spirv, deferred_pbr_denoised_spirv,
+    deferred_pbr_hwrt_spirv, deferred_pbr_vis_spirv, shadow_atrous_spirv,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::swapchain::TlasBuildActivation;
@@ -143,6 +144,10 @@ const CSM_UBO_BYTES: u64 = RESOLVED_CSM_BYTES as u64;
 /// binding-20 shape, 16 B).
 #[cfg(feature = "hwrt")]
 const RAY_SHADOW_UBO_BYTES: u64 = RESOLVED_RAY_SHADOW_BYTES as u64;
+/// HW-RT rung 3a: the à-trous filter's push-constant size — a single `{ uint step }` (4 B). The
+/// recorder pushes `step = 1 << level` per dispatch.
+#[cfg(feature = "hwrt")]
+const SHADOW_ATROUS_PUSH_BYTES: u32 = 4;
 /// Sparse spot/point shadow-atlas resolution — `boyko_render`'s [`SHADOW_DIM`].
 const SPOT_SHADOW_DIM: u32 = SHADOW_DIM;
 /// Atlas layer budget — `boyko_render`'s [`M_SLOTS`] (the atlas texture's
@@ -1256,6 +1261,22 @@ pub(crate) struct GpuSceneBundles {
     /// instead of sampling the CSM map.
     #[cfg(feature = "hwrt")]
     resolve_pipeline_hwrt: Option<(ComputePipeline, VulkanBindGroupLayout)>,
+    /// HW-RT rung 3a: the spatial-denoise VIS + DENOISED resolve pipelines + their SHARED 22-binding
+    /// layout (the 21-binding RESOLVE_INLINE-hwrt layout + `gShadowVis` STORAGE image @21). `.0` =
+    /// the VIS pipeline (`deferred_pbr_hwrt_vis.comp`, writes `gShadowVis`), `.1` = the DENOISED
+    /// pipeline (`deferred_pbr_hwrt_denoised.comp`, reads it), `.2` = the shared layout. Built at boot
+    /// ONLY on an RT device (`ray_query_enabled`) under `feature = "hwrt"`, the same gate as
+    /// [`Self::resolve_pipeline_hwrt`]; `None` otherwise. Bound only when a frame wires
+    /// `scene.shadow = Some(..)` (the step-7 gate; kept `None` this rung, so unbound ⇒ byte-identical).
+    #[cfg(feature = "hwrt")]
+    shadow_denoise_pipelines:
+        Option<(ComputePipeline, ComputePipeline, VulkanBindGroupLayout)>,
+    /// HW-RT rung 3a: the à-trous spatial-denoise filter pipeline (`shadow_atrous.comp`) + its
+    /// DEDICATED 6-binding layout { `gVisIn` @0, `gVisOut` @1, `gNormal` @2, `gViewT` @3, the
+    /// `ResolvedShadowDenoise` UBO @4, the camera UBO @5 } + a 4-byte `{ uint step; }` push. Built at
+    /// boot under the SAME gate as [`Self::shadow_denoise_pipelines`]; `None` otherwise.
+    #[cfg(feature = "hwrt")]
+    shadow_atrous_pipeline: Option<(ComputePipeline, VulkanBindGroupLayout)>,
     /// HW-RT rung 1b: the HWRT soft-shadow-params UBO RING (one host-coherent slot per in-flight
     /// frame, [`RAY_SHADOW_UBO_BYTES`] each, zero-seeded). Slot `i` is bound into slot `i`'s HWRT
     /// resolve set at binding 20 (the tunable cone/tmax/tmin/bias) — each in-flight frame reads its
@@ -1705,6 +1726,126 @@ impl GpuSceneBundles {
             (hwrt_pipeline, hwrt_layout)
         });
 
+        // ── HW-RT rung 3a: the spatial-denoise VIS + DENOISED resolve pipelines (their SHARED
+        // 22-binding layout = the RESOLVE_INLINE-hwrt 21 bindings + `gShadowVis` STORAGE image @21) +
+        // the à-trous filter pipeline (its own 6-binding layout + a 4-byte `{ uint step }` push).
+        // Built under the SAME `ray_query_enabled` gate as `resolve_pipeline_hwrt` (the à-trous stack
+        // lives on exactly this RT tier). `None` on the software path ⇒ the scene never wires
+        // `scene.shadow` ⇒ the resolve stays RESOLVE_INLINE-hwrt ⇒ byte-identical.
+        #[cfg(feature = "hwrt")]
+        let shadow_denoise_pipelines: Option<(
+            ComputePipeline,
+            ComputePipeline,
+            VulkanBindGroupLayout,
+        )> = ctx.ray_query_enabled().then(|| {
+            // The 22-binding VIS/DENOISED layout: the 19 software resolve bindings (0..=18),
+            // binding 19 (`AccelerationStructure` — the VIS trace target), binding 20 (the rung-1b
+            // soft-shadow-params UBO), binding 21 (`gShadowVis` STORAGE image). Rebuilt here (the
+            // `hwrt_entries` above lives inside its own closure).
+            let mut denoise_entries = resolve_entries.to_vec();
+            denoise_entries.push(BindGroupLayoutEntry {
+                binding: 19,
+                count: 1,
+                kind: DescriptorKind::AccelerationStructure,
+                stage: ShaderStage::COMPUTE,
+            });
+            denoise_entries.push(BindGroupLayoutEntry {
+                binding: 20,
+                count: 1,
+                kind: DescriptorKind::UniformBuffer,
+                stage: ShaderStage::COMPUTE,
+            });
+            denoise_entries.push(BindGroupLayoutEntry {
+                binding: 21,
+                count: 1,
+                kind: DescriptorKind::StorageImage,
+                stage: ShaderStage::COMPUTE,
+            });
+            let denoise_layout = RhiDevice::create_bind_group_layout(
+                device,
+                &BindGroupLayoutDesc { entries: &denoise_entries },
+            )
+            .expect("invariant: rung-3a VIS/DENOISED resolve bind-group layout create");
+
+            // The VIS variant traces — bake the SAME `SHADOW_RAY_COUNT` spec-const (id 0) as the
+            // RESOLVE_INLINE resolve so `mesh_vis` is bit-identical. The DENOISED variant does NOT
+            // trace (it reads `gShadowVis`), so it declares no spec-const (`spec_constants: &[]`).
+            let ray_count = RayShadowConfig::default().ray_count.max(1);
+            let vis_cs = RhiDevice::create_shader_module(device, deferred_pbr_vis_spirv())
+                .expect("invariant: rung-3a VIS resolve compute shader module create");
+            let vis_pipeline = RhiDevice::create_compute_pipeline(
+                device,
+                &ComputePipelineDesc {
+                    module: &vis_cs,
+                    entry: c"main",
+                    push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+                    bind_group_layout: Some(&denoise_layout),
+                    spec_constants: &[SpecConstant { id: 0, value: ray_count }],
+                },
+            )
+            .expect("invariant: rung-3a VIS resolve compute pipeline create");
+            let denoised_cs =
+                RhiDevice::create_shader_module(device, deferred_pbr_denoised_spirv())
+                    .expect("invariant: rung-3a DENOISED resolve compute shader module create");
+            let denoised_pipeline = RhiDevice::create_compute_pipeline(
+                device,
+                &ComputePipelineDesc {
+                    module: &denoised_cs,
+                    entry: c"main",
+                    push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+                    bind_group_layout: Some(&denoise_layout),
+                    spec_constants: &[],
+                },
+            )
+            .expect("invariant: rung-3a DENOISED resolve compute pipeline create");
+            // SAFETY: both modules were created on `device` and are consumed by their pipeline
+            // create; destroy each once; no GPU work is in flight yet.
+            unsafe {
+                RhiDevice::destroy_shader_module(device, denoised_cs);
+                RhiDevice::destroy_shader_module(device, vis_cs);
+            }
+            (vis_pipeline, denoised_pipeline, denoise_layout)
+        });
+
+        // ── HW-RT rung 3a: the à-trous filter pipeline + its 6-binding layout { `gVisIn` @0,
+        // `gVisOut` @1, `gNormal` @2, `gViewT` @3, the `ResolvedShadowDenoise` UBO @4, the camera
+        // UBO @5 } + a 4-byte `{ uint step }` COMPUTE push. Same `ray_query_enabled` gate.
+        #[cfg(feature = "hwrt")]
+        let shadow_atrous_pipeline: Option<(ComputePipeline, VulkanBindGroupLayout)> =
+            ctx.ray_query_enabled().then(|| {
+                let atrous_layout = RhiDevice::create_bind_group_layout(
+                    device,
+                    &BindGroupLayoutDesc {
+                        entries: &[
+                            BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                        ],
+                    },
+                )
+                .expect("invariant: rung-3a à-trous bind-group layout create");
+                let atrous_cs = RhiDevice::create_shader_module(device, shadow_atrous_spirv())
+                    .expect("invariant: rung-3a à-trous compute shader module create");
+                let atrous_pipeline = RhiDevice::create_compute_pipeline(
+                    device,
+                    &ComputePipelineDesc {
+                        module: &atrous_cs,
+                        entry: c"main",
+                        push_constant_bytes: SHADOW_ATROUS_PUSH_BYTES,
+                        bind_group_layout: Some(&atrous_layout),
+                        spec_constants: &[],
+                    },
+                )
+                .expect("invariant: rung-3a à-trous compute pipeline create");
+                // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+                // destroy it once; no GPU work is in flight yet.
+                unsafe { RhiDevice::destroy_shader_module(device, atrous_cs) };
+                (atrous_pipeline, atrous_layout)
+            });
+
         // Rung 1b: the HWRT soft-shadow-params UBO ring — minted ONLY on an RT device
         // (`ray_query_enabled`), the SAME gate that builds `resolve_pipeline_hwrt`. `None` on the
         // software path (the resolve set has no binding 20 there). Zero-seeded (the runner memcpys
@@ -1823,6 +1964,10 @@ impl GpuSceneBundles {
             resolve_layout,
             #[cfg(feature = "hwrt")]
             resolve_pipeline_hwrt,
+            #[cfg(feature = "hwrt")]
+            shadow_denoise_pipelines,
+            #[cfg(feature = "hwrt")]
+            shadow_atrous_pipeline,
             #[cfg(feature = "hwrt")]
             ray_shadow_ubo,
             material_table,
@@ -2171,6 +2316,17 @@ impl GpuSceneBundles {
             // byte-identical path — the TLAS is built + barriered but never traced this rung).
             #[cfg(feature = "hwrt")]
             tlas,
+            // HW-RT rung 3a: the spatial (à-trous) RT soft-shadow denoise activation. A LITERAL
+            // `None` this rung (steps 4-6 build all the denoise pipelines/passes/sets but keep them
+            // DORMANT) ⇒ NO VIS / à-trous passes recorded + the resolve stays RESOLVE_INLINE-hwrt ⇒
+            // the render is BYTE-IDENTICAL. Rung 3a step 7 computes the per-frame gate here:
+            //   gate = mode == Spatial && backend == HardwareTri && has_primary_directional
+            //          && tlas_nonempty
+            // → `Some(ShadowVisActivation { vis_pipeline, denoised_pipeline, resolve_layout,
+            //   atrous_pipeline, atrous_layout, levels, final_is_vis2 })` borrowing
+            // `self.shadow_denoise_pipelines` + `self.shadow_atrous_pipeline`.
+            #[cfg(feature = "hwrt")]
+            shadow: None,
         }
     }
 
@@ -2283,6 +2439,20 @@ impl GpuSceneBundles {
             // (present only on an RT device under `feature = "hwrt"`). Pipeline before layout.
             #[cfg(feature = "hwrt")]
             if let Some((pipeline, layout)) = self.resolve_pipeline_hwrt {
+                RhiDevice::destroy_compute_pipeline(ctx, pipeline);
+                RhiDevice::destroy_bind_group_layout(ctx, layout);
+            }
+            // HW-RT rung 3a: the VIS + DENOISED resolve pipelines + their shared 22-binding layout,
+            // and the à-trous filter pipeline + its 6-binding layout. `Option`-guarded (present only
+            // on an RT device). Pipelines before their layout.
+            #[cfg(feature = "hwrt")]
+            if let Some((vis, denoised, layout)) = self.shadow_denoise_pipelines {
+                RhiDevice::destroy_compute_pipeline(ctx, vis);
+                RhiDevice::destroy_compute_pipeline(ctx, denoised);
+                RhiDevice::destroy_bind_group_layout(ctx, layout);
+            }
+            #[cfg(feature = "hwrt")]
+            if let Some((pipeline, layout)) = self.shadow_atrous_pipeline {
                 RhiDevice::destroy_compute_pipeline(ctx, pipeline);
                 RhiDevice::destroy_bind_group_layout(ctx, layout);
             }

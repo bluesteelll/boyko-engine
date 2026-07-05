@@ -81,9 +81,12 @@ const MAX_VERTEX_ATTRIBUTES: usize = 8;
 /// grows. HW-RT rung 1b raised it 20 → 21 to reserve binding 20 for the HWRT resolve's
 /// tunable soft-shadow params UBO (`boyko_render::ResolvedRayShadow`) — BYTE-NEUTRAL by
 /// the same argument: only the HWRT set fills the new tail slot, the software resolve
-/// still fills 19. A `debug_assert!` traps an over-count at
-/// `create_bind_group_layout`/`create_bind_group`.
-const MAX_BIND_GROUP_BINDINGS: usize = 21;
+/// still fills 19. HW-RT rung 3a raised it 21 → 22 to reserve binding 21 for the VIS/DENOISED
+/// resolve variants' `gShadowVis` UAV (`RWTexture2D<float2>`) — BYTE-NEUTRAL by the same
+/// argument: only the 22-binding VIS/DENOISED layout fills the new tail slot, the software
+/// resolve still fills 19 and the RESOLVE_INLINE-hwrt resolve still fills 21. A `debug_assert!`
+/// traps an over-count at `create_bind_group_layout`/`create_bind_group`.
+const MAX_BIND_GROUP_BINDINGS: usize = 22;
 
 // The bind-group create path keeps its own copy of the cap so a future divergence
 // from the agnostic `boyko_rhi::MAX_BIND_GROUP_BINDINGS` (the desc-side cap) breaks

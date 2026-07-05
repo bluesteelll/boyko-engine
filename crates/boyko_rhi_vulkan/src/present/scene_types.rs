@@ -522,6 +522,70 @@ pub struct SsaoActivation<'a> {
     pub layout: &'a VulkanBindGroupLayout,
 }
 
+/// HW-RT rung 3a: the spatial (à-trous) RT soft-shadow DENOISE pass activation threaded into
+/// [`GBufferScene::shadow`] to turn the denoise pipeline ON. Mirrors [`SsaoActivation`]'s
+/// borrow-bundle shape: a `Copy` bundle of caller-owned pipeline/layout borrows plus the
+/// per-frame filter parameters.
+///
+/// `None` on [`GBufferScene::shadow`] is the OFF path (the DEFAULT — the 0%-gate): the recorder
+/// records NOTHING new (no VIS/à-trous descriptor-set write in [`GBufferTargets::create`], no VIS
+/// / à-trous RDG pass / dispatch / barrier in [`crate::present::passes::gbuffer`]), and the resolve
+/// binds the RESOLVE_INLINE-hwrt pipeline (`resolve_pipeline_hwrt`) — so the command stream is
+/// BYTE-IDENTICAL to the pre-rung-3a path (the golden). `Some(_)` (populated ONLY when
+/// `ShadowDenoiseConfig::enabled()` + a primary directional + a non-empty TLAS all hold — the
+/// rung-3a step-7 gate) records the VIS pre-pass + the `levels` à-trous passes, and the resolve
+/// binds the DENOISED pipeline reading the filtered visibility.
+///
+/// # Borrow bundle
+///
+/// The caller OWNS the VIS / DENOISED resolve pipelines, the à-trous pipeline + its layout (in the
+/// host's boot bundle) and tears them down; the `'a` lifetime ties this activation to those borrows
+/// for the frame call. The VIS/DENOISED resolve descriptor sets + the per-level à-trous sets are
+/// written by [`GBufferTargets`] ONCE per extent (the SSAO `ssao_set` precedent); the recorder
+/// selects them by [`Self::final_is_vis2`] / the frame slot at record time.
+///
+/// `#[derive(Clone, Copy)]` — a bundle of borrows plus the `levels` / `final_is_vis2` scalars,
+/// flipped between frames with no re-record.
+#[cfg(feature = "hwrt")]
+#[derive(Clone, Copy)]
+pub struct ShadowVisActivation<'a> {
+    /// The VIS-variant resolve pipeline (`deferred_pbr_hwrt_vis.comp` /
+    /// [`crate::compute::deferred_pbr_vis_spirv`]) — runs the inline Vogel `rayQuery` trace and
+    /// WRITES `gShadowVis` (the 22-binding VIS/DENOISED layout's binding 21) instead of lighting.
+    /// Dispatched as the à-trous pre-pass at the resolve's 1D group count BEFORE the à-trous
+    /// passes. Its layout is [`Self::resolve_layout`].
+    pub vis_pipeline: &'a ComputePipeline,
+    /// The DENOISED-variant resolve pipeline (`deferred_pbr_hwrt_denoised.comp` /
+    /// [`crate::compute::deferred_pbr_denoised_spirv`]) — reads the FILTERED `gShadowVis` (@21) and
+    /// runs the full lighting. Bound as the resolve pipeline (in place of the RESOLVE_INLINE-hwrt
+    /// pipeline) when this activation is `Some`. Its layout is [`Self::resolve_layout`].
+    pub denoised_pipeline: &'a ComputePipeline,
+    /// The 22-binding VIS/DENOISED resolve bind-group LAYOUT (the 21-binding RESOLVE_INLINE-hwrt
+    /// layout + `gShadowVis` STORAGE image @21). BOTH [`Self::vis_pipeline`] +
+    /// [`Self::denoised_pipeline`] declare it at set 0. The renderer writes the per-FIF VIS +
+    /// DENOISED resolve sets against it once per extent.
+    pub resolve_layout: &'a VulkanBindGroupLayout,
+    /// The à-trous filter pipeline (`shadow_atrous.comp` / [`crate::compute::shadow_atrous_spirv`]),
+    /// its layout declares [`Self::atrous_layout`] at set 0 + the 4-byte `{ uint step; }` COMPUTE
+    /// push. Dispatched once per level (ping-pong between `shadow_vis` / `shadow_vis2`).
+    pub atrous_pipeline: &'a ComputePipeline,
+    /// The DEDICATED 6-binding à-trous bind-group LAYOUT { `gVisIn` STORAGE image @0 (R), `gVisOut`
+    /// STORAGE image @1 (W), `gNormal` STORAGE image @2, `gViewT` STORAGE image @3, the
+    /// `ResolvedShadowDenoise` UNIFORM buffer @4, the camera UNIFORM buffer @5 } — matching
+    /// `shadow_atrous.comp`'s set 0. The renderer writes one `atrous_set` per level against it once
+    /// per extent (level `i` reads `i`-even ? `shadow_vis` : `shadow_vis2`, writes the other).
+    pub atrous_layout: &'a VulkanBindGroupLayout,
+    /// The number of à-trous iterations to dispatch this frame (`1..=MAX_ATROUS_LEVELS`, the
+    /// host-clamped [`ShadowDenoiseConfig::clamped_levels`](boyko_render's
+    /// `ShadowDenoiseConfig::clamped_levels`)). Each pushes `step = 1 << level`; the recorder
+    /// dispatches this many à-trous passes after the VIS pre-pass.
+    pub levels: u32,
+    /// `levels % 2 == 1` — whether the FINAL à-trous output landed in `shadow_vis2` (odd levels) vs
+    /// `shadow_vis` (even levels). Threaded so the DENOISED resolve set binds `gShadowVis` @21 to the
+    /// correct final target and the last-atrous-write → resolve-read barrier names the right ResId.
+    pub final_is_vis2: bool,
+}
+
 /// The SDFDDGI I2 probe-update compute pass activation: the update pipeline + its DEDICATED
 /// 7-binding bind-group LAYOUT, threaded into [`GBufferScene::ddgi_update`] as `Some` to turn the
 /// probe-update pass ON. Mirrors [`SsaoActivation`]'s borrow-bundle shape.
@@ -1263,6 +1327,20 @@ pub struct GBufferScene<'a> {
     /// this field absent entirely (no ResId shift, no OFF-path change).
     #[cfg(feature = "hwrt")]
     pub tlas: Option<TlasBuildActivation<'a>>,
+    /// HW-RT rung 3a: the spatial (à-trous) RT soft-shadow DENOISE activation. `None` on EVERY
+    /// golden/host frame (the DEFAULT — rung-3a steps 4-6 keep the host gate a literal `None`; step
+    /// 7 flips it to `Some` under `mode == Spatial && backend == HardwareTri && has_primary_directional
+    /// && tlas_nonempty`) ⇒ NO VIS pre-pass, NO à-trous passes, and the resolve binds the
+    /// RESOLVE_INLINE-hwrt pipeline (`resolve_pipeline_hwrt`) ⇒ the command stream is BYTE-IDENTICAL
+    /// to the pre-rung-3a path. `Some(_)` records the VIS pre-pass (writing `gShadowVis`) + the
+    /// `levels` à-trous passes (ping-ponging `shadow_vis`/`shadow_vis2`), and the resolve binds the
+    /// DENOISED pipeline reading the filtered visibility. `Some` REQUIRES the scene to also wire
+    /// [`Self::resolve_pipeline_hwrt`] (the à-trous stack sits under the same hwrt+RT capability
+    /// gate) and the targets to carry the `shadow_vis`/`shadow_vis2` rings (device
+    /// `shadow_denoise_storage_ok()`). The whole field is `#[cfg(feature = "hwrt")]`, so a
+    /// `not(hwrt)` build has it absent entirely.
+    #[cfg(feature = "hwrt")]
+    pub shadow: Option<ShadowVisActivation<'a>>,
 }
 
 /// CSM Increment 1b (Rung A): the cascade DEPTH-PASS activation threaded into

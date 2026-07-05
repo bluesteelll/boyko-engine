@@ -1505,6 +1505,139 @@ impl Renderer<'_> {
             // NOT here.
         }
 
+        // === HW-RT rung 3a: the spatial RT soft-shadow DENOISE stack — the VIS pre-pass + the
+        // `levels` à-trous filter passes. Recorded ONLY when the scene wires `scene.shadow` (the
+        // step-7 gate; the host keeps it a LITERAL `None` this rung, so this whole block is skipped
+        // on EVERY current frame — NO bind, NO dispatch, NO barrier — and the resolve stays
+        // RESOLVE_INLINE-hwrt ⇒ BYTE-IDENTICAL). When `Some`:
+        //   (a) the VIS pass re-runs the resolve front-matter + traces the TLAS, WRITING
+        //       `gShadowVis` (@21 of its 22-binding set = `shadow_vis[fi]`); dispatched at the
+        //       resolve's 1D group count.
+        //   (b) `levels` à-trous passes ping-pong `shadow_vis` ⇄ `shadow_vis2`, each pushing
+        //       `step = 1 << level` (a 4-byte `{ uint step }`); dispatched at the SAME grid.
+        // The resolve then binds the DENOISED pipeline (selected in the `(pipeline, layout, set)`
+        // triple below), reading the FILTERED `gShadowVis`. All input/RAW barriers are graph-derived
+        // (the "shadow_vis" + "shadow_atrous" passes recorded here). ===
+        #[cfg(feature = "hwrt")]
+        if let Some(sh) = scene.shadow.as_ref() {
+            let plan = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
+            let vis_set = &targets
+                .shadow_vis_resolve_set
+                .as_ref()
+                .expect("invariant: scene.shadow.is_some() ⇒ GBufferTargets wrote the VIS resolve set")
+                [self.frame_index];
+            let atrous_sets = targets
+                .shadow_atrous_sets
+                .as_ref()
+                .expect("invariant: scene.shadow.is_some() ⇒ GBufferTargets wrote the à-trous sets");
+            // (a) The VIS pre-pass. Its input barriers (gNormal/gViewT store→load already visible,
+            // the build→VIS AS barrier, the `shadow_vis` first-touch UNDEFINED→GENERAL) are DRIVEN
+            // by the graph's "shadow_vis" pass, recorded here.
+            let vis_pass = plan
+                .shadow_vis
+                .expect("invariant: scene.shadow.is_some() ⇒ shadow_vis pass declared");
+            // SAFETY: recording is open; `record_graph_pass` records the graph's derived input
+            // barriers for the "shadow_vis" pass into `cmd`.
+            self.record_graph_pass(vis_pass, cmd, targets, scene, fi);
+            // SAFETY: recording is open; the VIS pipeline + its 22-binding layout are live on this
+            // device (caller contract); `vis_set` binds the resolve inputs + `gShadowVis` @21 =
+            // `shadow_vis[fi]` (the write target); `dispatch_group_count_x` covers the pixel count
+            // (the resolve grid); `&vis_set.descriptor_set` is a single-element local alive for the
+            // call. The VIS shader reads its camera/params from the bound UBOs; the resolve's
+            // 80-byte push range is declared-but-unread here (no push recorded).
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    sh.vis_pipeline.pipeline,
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    sh.vis_pipeline.layout,
+                    0,
+                    1,
+                    &vis_set.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+            }
+            // (b) The `levels` à-trous passes. Each pushes `step = 1 << level`, binds the level's
+            // per-FIF set (ping-ponging `shadow_vis`/`shadow_vis2`), and dispatches at the resolve
+            // grid. The per-level RAW barriers on the ping-pong pair are graph-derived (the
+            // "shadow_atrous" passes recorded here).
+            //
+            // W1: the SAME `.clamp(1, MAX_ATROUS_LEVELS)` the graph-declare site
+            // (`declare_gbuffer_graph`) and the host `clamped_levels()` use — all three agree by
+            // construction (floor at 1 so it can never be an empty ping-pong, ceiling at the
+            // per-level array bound). A prior `.min(atrous_sets.len())` here dropped the floor, so a
+            // `levels == 0` author config would have recorded ZERO à-trous passes while the graph
+            // declared / the DENOISED bind expected the floored count — a divergence.
+            let levels = (sh.levels as usize).clamp(1, crate::present::MAX_ATROUS_LEVELS as usize);
+            // The per-level set array is sized `MAX_ATROUS_LEVELS`, so the clamp ceiling already
+            // guarantees `levels <= atrous_sets.len()`; assert it so an array-size change can never
+            // silently let the `take(levels)` index past the built sets.
+            debug_assert!(
+                atrous_sets.len() >= levels,
+                "invariant: the à-trous set array must hold at least `levels` levels"
+            );
+            // The DENOISED resolve set binds `gShadowVis` @21 to the FINAL à-trous ring, chosen by
+            // `final_is_vis2` (odd levels ⇒ `shadow_vis2`, even ⇒ `shadow_vis`). Assert the record
+            // parity matches so the denoised bind target can never diverge from the à-trous chain's
+            // last write (a divergence would read the wrong ring — a stale/uninitialized shadow).
+            debug_assert_eq!(
+                sh.final_is_vis2,
+                levels % 2 == 1,
+                "denoised bind ring must match the last à-trous parity"
+            );
+            for (level, level_ring) in atrous_sets.iter().enumerate().take(levels) {
+                let atrous_pass = plan
+                    .shadow_atrous[level]
+                    .expect("invariant: level < scene.shadow.levels ⇒ shadow_atrous[level] declared");
+                let step: u32 = 1u32 << level;
+                // SAFETY: recording is open; `record_graph_pass` records the "shadow_atrous" pass's
+                // derived RAW barriers on the ping-pong pair into `cmd`.
+                self.record_graph_pass(atrous_pass, cmd, targets, scene, fi);
+                let atrous_set = &level_ring[self.frame_index];
+                // SAFETY: recording is open; the à-trous pipeline + its 6-binding layout are live on
+                // this device (caller contract); `atrous_set` binds `gVisIn`/`gVisOut` (the
+                // ping-pong pair) + gNormal/gViewT + the ResolvedShadowDenoise UBO + the camera UBO;
+                // the 4-byte `{ uint step }` push covers the pipeline's declared COMPUTE range;
+                // `dispatch_group_count_x` covers the pixel count; `&atrous_set.descriptor_set` is a
+                // single-element local alive for the call.
+                unsafe {
+                    (self.fns.cmd_bind_pipeline)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        sh.atrous_pipeline.pipeline,
+                    );
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        sh.atrous_pipeline.layout,
+                        0,
+                        1,
+                        &atrous_set.descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        sh.atrous_pipeline.layout,
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0,
+                        4,
+                        (&step as *const u32).cast(),
+                    );
+                    (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+                }
+            }
+        }
+
         // The RESOLVE's INPUT barriers — the albedo store→load, the ssao store→load, the
         // L1 grid/index cull→resolve, the layered cascade/atlas →sampled, and the lit
         // first-touch UNDEFINED→GENERAL — are all DRIVEN by the graph's "resolve" pass,
@@ -1577,10 +1710,32 @@ impl Renderer<'_> {
             hwrt_triple.is_none() || scene.tlas.is_some(),
             "invariant: the HW shadow resolve is armed ⟺ scene.tlas.is_some() (the sole predicate)"
         );
+        // HW-RT rung 3a: the DENOISED resolve triple (the à-trous ON path). When the scene wires
+        // `scene.shadow` (the step-7 gate; kept `None` this rung), the resolve binds the DENOISED
+        // pipeline (`deferred_pbr_hwrt_denoised.comp`, reading the FILTERED `gShadowVis` @21) + its
+        // 22-binding layout + the DENOISED resolve set — REPLACING the RESOLVE_INLINE-hwrt triple. It
+        // takes priority over `hwrt_triple` (both need `scene.tlas`, but `scene.shadow.is_some()`
+        // implies the à-trous stack ran this frame). `None` ⇒ fall through to `hwrt_triple`
+        // (RESOLVE_INLINE) or the software triple ⇒ byte-identical.
+        #[cfg(feature = "hwrt")]
+        let denoised_triple = scene.shadow.as_ref().and_then(|sh| {
+            targets
+                .shadow_denoised_resolve_set
+                .as_ref()
+                .map(|sets| {
+                    (
+                        sh.denoised_pipeline.pipeline,
+                        sh.denoised_pipeline.layout,
+                        &sets[self.frame_index],
+                    )
+                })
+        });
         // The software triple (the default / byte-identical path).
         let (resolve_pipeline_h, resolve_layout_h, resolve_set_h) = {
             #[cfg(feature = "hwrt")]
-            if let Some((p, l, s, _layout)) = hwrt_triple {
+            if let Some((p, l, s)) = denoised_triple {
+                (p, l, s)
+            } else if let Some((p, l, s, _layout)) = hwrt_triple {
                 (p, l, s)
             } else {
                 (

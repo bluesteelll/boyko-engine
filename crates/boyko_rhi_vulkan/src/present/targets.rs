@@ -6,6 +6,8 @@ use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, Format, ImageUsage, RhiDevice,
     TextureDesc, TextureDimension,
 };
+#[cfg(feature = "hwrt")]
+use boyko_rhi::{BufferDesc, BufferUsage, MemoryLocation};
 
 use crate::device::VulkanContext;
 use crate::ffi::*;
@@ -84,11 +86,13 @@ pub struct GBufferTargets {
     /// reads it, so its undefined contents are irrelevant (the 0%-gate is the byte-identical
     /// PIXELS + command stream, which the always-allocate preserves). RINGED (see [`Self::depth`]).
     pub(crate) ssao: [VulkanTexture; FRAMES_IN_FLIGHT],
-    /// Rung 3a: the RT soft-shadow VISIBILITY target `shadow_vis` RING (`R8G8_UNORM` STORAGE,
+    /// Rung 3a: the RT soft-shadow VISIBILITY target `shadow_vis` RING (`R16G16_UNORM` STORAGE,
     /// full-res): `R` = the per-pixel mesh visibility the VIS pass writes, `G` = the validity mask.
-    /// RINGED per-FIF (the cross-frame WAR fix, like [`Self::ssao`]) so the à-trous denoise reads/
-    /// writes the slot the VIS pass just wrote. `Option`-guarded: `Some` when the device advertises
-    /// `RG8`/`RG16` UNORM storage ([`crate::device::DeviceCaps::shadow_denoise_storage_ok`]), `None`
+    /// SAME format as [`Self::shadow_vis2`] (the uniform-RG16 ping-pong — one `"rg16"` shader pin
+    /// fits every binding on every parity). RINGED per-FIF (the cross-frame WAR fix, like
+    /// [`Self::ssao`]) so the à-trous denoise reads/writes the slot the VIS pass just wrote.
+    /// `Option`-guarded: `Some` when the device advertises `RG16` UNORM storage
+    /// ([`crate::device::DeviceCaps::shadow_denoise_storage_ok`]), `None`
     /// otherwise — the DDGI-degrade discipline (the denoise is opt-in, `feature = "hwrt"` + config
     /// `Spatial`; a device missing the format degrades it to disabled, never a boot fault). No pass
     /// reads it yet (steps 4-6 add the VIS / à-trous passes) — allocated-but-unused this step, so
@@ -157,6 +161,39 @@ pub struct GBufferTargets {
     /// A RING when `Some` (one per in-flight frame): slot `i` binds `scene.camera_ring[i]` @4 — the
     /// lock-free per-frame ring fix. The recorder selects `ssao_set[self.frame_index]`.
     pub(crate) ssao_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// HW-RT rung 3a: the VIS-variant resolve descriptor set RING (one per in-flight frame), written
+    /// ONCE against [`ShadowVisActivation::resolve_layout`](crate::present::scene_types::ShadowVisActivation::resolve_layout)
+    /// — the 21 RESOLVE_INLINE-hwrt bindings PLUS `gShadowVis` STORAGE image @21 fed slot `i`'s
+    /// `shadow_vis[i]` (the VIS pass WRITES it). `None` unless BOTH the scene wires the denoise
+    /// activation (`scene.shadow.is_some()`) AND the HWRT resolve resources exist. RINGED like
+    /// [`Self::resolve_set_hwrt`]; the recorder selects `shadow_vis_resolve_set[self.frame_index]`.
+    /// The whole field is `#[cfg(feature = "hwrt")]`.
+    #[cfg(feature = "hwrt")]
+    pub(crate) shadow_vis_resolve_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// HW-RT rung 3a: the DENOISED-variant resolve descriptor set RING (one per in-flight frame),
+    /// written ONCE against the SAME 22-binding VIS/DENOISED layout — identical to
+    /// [`Self::shadow_vis_resolve_set`] except `gShadowVis` @21 is fed the FINAL à-trous output
+    /// (`shadow_vis[i]` when `final_is_vis2 == false`, `shadow_vis2[i]` when `true`), which the
+    /// DENOISED resolve READS. `None` on the OFF path; the recorder selects
+    /// `shadow_denoised_resolve_set[self.frame_index]` when routing is denoised.
+    #[cfg(feature = "hwrt")]
+    pub(crate) shadow_denoised_resolve_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// HW-RT rung 3a: the à-trous denoise descriptor sets — one per level (`0..MAX_ATROUS_LEVELS`),
+    /// each RINGED per in-flight frame — `sets[level][fi]`. Level `i` binds `gVisIn` @0 =
+    /// `i`-even ? `shadow_vis[fi]` : `shadow_vis2[fi]`, `gVisOut` @1 = the OTHER, `gNormal` @2 /
+    /// `gViewT` @3 (slot `fi`), the `ResolvedShadowDenoise` UBO @4 (`shadow_denoise_ubo[fi]`), the
+    /// camera UBO @5 (`scene.camera_ring[fi]`). `None` on the OFF path. Only `levels` inner rings
+    /// are consumed at record time; the unused tail entries are still built (fixed per-extent cost).
+    #[cfg(feature = "hwrt")]
+    pub(crate) shadow_atrous_sets:
+        Option<[[VulkanBindGroup; FRAMES_IN_FLIGHT]; crate::present::MAX_ATROUS_LEVELS as usize]>,
+    /// HW-RT rung 3a: the à-trous edge-stop UBO RING (one 16-byte `HostVisibleCoherent` slot per
+    /// in-flight frame), carrying `ResolvedShadowDenoise` (`sigma_z`/`sigma_n`, live-tunable). A
+    /// RING (mirrors the rung-1b `ray_shadow_ubo` ring): each FIF frame's à-trous sets bind their
+    /// own slot @4, the host writes that slot before the present, so the sibling in-flight frame
+    /// reads a DIFFERENT slot (lock-free write-after-read). `None` on the OFF path.
+    #[cfg(feature = "hwrt")]
+    pub(crate) shadow_denoise_ubo: Option<[BoundBuffer; FRAMES_IN_FLIGHT]>,
     /// SDFDDGI I2: the probe-update descriptor set, written ONCE against
     /// [`DdgiUpdateActivation::layout`](crate::present::scene_types::DdgiUpdateActivation::layout)
     /// (7 bindings: `Buf` @0 R, `gIrrOut` @1 W, `gDepthOut` @2 W storage images, `Classification` @3
@@ -203,15 +240,19 @@ const GVIEWT_FORMAT: Format = Format::R32Sfloat;
 /// fault on an unsupported format.
 const SSAO_FORMAT: Format = Format::R8Unorm;
 
-/// Rung 3a: the RT soft-shadow VISIBILITY target `shadow_vis` format: `R8G8_UNORM`, a full-res
+/// Rung 3a: the RT soft-shadow VISIBILITY target `shadow_vis` format: `R16G16_UNORM`, a full-res
 /// STORAGE image the VIS pass writes (`R` = per-pixel mesh visibility, `G` = validity mask) and
-/// the à-trous denoise reads/writes. 8-bit-per-channel is the engine shadow tolerance (matches the
-/// inline Vogel `mesh_vis`); `R8G8_UNORM`/`STORAGE_IMAGE` support is device-probed at boot
-/// ([`crate::device::DeviceCaps::rg8_unorm_storage_ok`]) — RECORDED-not-fail-fast, so on a device
-/// that lacks it the target is not allocated and the denoise stays disabled (steps 4-7 read the
-/// [`shadow_denoise_storage_ok`](crate::device::DeviceCaps::shadow_denoise_storage_ok) predicate).
+/// the à-trous denoise reads/writes. UNIFIED with [`SHADOW_VIS2_FORMAT`] to R16G16_UNORM (was RG8):
+/// both ping-pong rings share ONE format so the single `[[vk::image_format("rg16")]]` shader pin on
+/// `gShadowVis`/`gVisIn`/`gVisOut` matches the bound view on EVERY à-trous parity and every `levels`
+/// value — a mixed RG8/RG16 pair silently bound the RG16 ring into an rg8-pinned UAV on odd levels
+/// (a format-class mismatch = UB, no validation layer here). `R16G16_UNORM`/`STORAGE_IMAGE` support
+/// is device-probed at boot ([`crate::device::DeviceCaps::rg16_unorm_storage_ok`]) — RECORDED-not-
+/// fail-fast, so on a device that lacks it the target is not allocated and the denoise stays disabled
+/// (steps 4-7 read the [`shadow_denoise_storage_ok`](crate::device::DeviceCaps::shadow_denoise_storage_ok)
+/// predicate, which is now rg16-only).
 #[cfg(feature = "hwrt")]
-const SHADOW_VIS_FORMAT: Format = Format::R8G8Unorm;
+const SHADOW_VIS_FORMAT: Format = Format::R16G16Unorm;
 
 /// Rung 3a: the à-trous ping-pong target `shadow_vis2` format: `R16G16_UNORM`, a full-res STORAGE
 /// image the multi-level denoise writes/reads. 16-bit avoids the 3× cumulative 8-bit rounding a
@@ -226,6 +267,15 @@ const SHADOW_VIS2_FORMAT: Format = Format::R16G16Unorm;
 /// builders agree. HW-RT rung R2a-4a raised [`MAX_BIND_GROUP_BINDINGS`](boyko_rhi::MAX_BIND_GROUP_BINDINGS)
 /// 19 → 20; the software set stays EXACT at 19 (the under-fill tripwire).
 const RESOLVE_SOFTWARE_BINDINGS: usize = 19;
+
+/// HW-RT rung 3a: the binding count of the VIS/DENOISED deferred-resolve set (indices 0..=21) — the
+/// 21 RESOLVE_INLINE-hwrt bindings (`RESOLVE_SOFTWARE_BINDINGS + 2` = the 19 shared + TLAS @19 +
+/// soft-shadow UBO @20) PLUS `gShadowVis` STORAGE image @21. The EXACT-fill tripwire for both the
+/// VIS and DENOISED sets — under the rung-3a cap of [`MAX_BIND_GROUP_BINDINGS`](boyko_rhi::MAX_BIND_GROUP_BINDINGS)
+/// (22). The software resolve stays EXACT at 19, the RESOLVE_INLINE-hwrt resolve EXACT at 21; only
+/// this layout fills 22.
+#[cfg(feature = "hwrt")]
+const RESOLVE_HWRT_DENOISE_BINDINGS: usize = RESOLVE_SOFTWARE_BINDINGS + 3;
 
 /// The six per-in-flight-slot G-buffer image RINGS' slot views the resolve set binds — bundled so
 /// [`resolve_software_entries`] takes ONE argument for them instead of six (clippy
@@ -312,7 +362,281 @@ fn resolve_software_entries<'a>(
     ]
 }
 
+/// HW-RT rung 3a: the bundle [`GBufferTargets::build_shadow_denoise_sets`] returns — the VIS +
+/// DENOISED resolve set rings, the per-level à-trous set rings, and the à-trous edge-stop UBO ring.
+/// Moved field-by-field into the [`GBufferTargets`] `Option`s at `create` time.
+#[cfg(feature = "hwrt")]
+struct ShadowDenoiseSets {
+    /// The VIS resolve set RING (`gShadowVis` @21 = `shadow_vis[i]`, the VIS pass WRITES it).
+    vis_resolve: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// The DENOISED resolve set RING (`gShadowVis` @21 = the FINAL à-trous output, READ).
+    denoised_resolve: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// The per-level à-trous set rings (`sets[level][fi]`).
+    atrous: [[VulkanBindGroup; FRAMES_IN_FLIGHT]; crate::present::MAX_ATROUS_LEVELS as usize],
+    /// The à-trous edge-stop UBO ring (16 B `HostVisibleCoherent` per FIF slot, zero-seeded).
+    ubo: [BoundBuffer; FRAMES_IN_FLIGHT],
+}
+
 impl GBufferTargets {
+    /// HW-RT rung 3a: builds the spatial-denoise descriptor sets + the à-trous edge-stop UBO ring.
+    ///
+    /// Returns `Ok(None)` when the scene does NOT wire the denoise activation
+    /// (`scene.shadow.is_none()`, the DEFAULT this rung) OR the `shadow_vis`/`shadow_vis2` target
+    /// rings are absent (a device lacking `shadow_denoise_storage_ok()`) — the byte-identical OFF
+    /// path. `Ok(Some(_))` on the ON path (all present). On ANY internal `create_*` failure the
+    /// helper drains ITS OWN partial allocations (the reverse-acquisition order below) and returns the
+    /// `VulkanError`, leaving nothing leaked for the caller to reason about beyond the rings/sets it
+    /// built before calling this.
+    ///
+    /// The VIS + DENOISED resolve sets fill EXACTLY [`RESOLVE_HWRT_DENOISE_BINDINGS`] (22): the shared
+    /// 19 (via [`resolve_software_entries`]) + TLAS @19 + soft-shadow UBO @20 + `gShadowVis` @21. The
+    /// VIS set binds `gShadowVis` to `shadow_vis[i]` (write target); the DENOISED set binds it to the
+    /// FINAL à-trous output (`shadow_vis[i]` for even `levels`, `shadow_vis2[i]` for odd). Each à-trous
+    /// level `i` binds `gVisIn`/`gVisOut` = (`i`-even ? `shadow_vis` : `shadow_vis2`) / the OTHER.
+    ///
+    /// `#[allow(clippy::too_many_arguments)]`: the six image rings + the L1 placeholder buffers are
+    /// all distinct borrows the sets bind (the same list [`resolve_software_entries`] consumes);
+    /// grouping them into a struct would only move the argument list.
+    #[cfg(feature = "hwrt")]
+    #[allow(clippy::too_many_arguments)]
+    fn build_shadow_denoise_sets(
+        ctx: &VulkanContext,
+        scene: &GBufferScene<'_>,
+        albedo: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        normal: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        material: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        lit: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        viewt: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        ssao: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        shadow_vis: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        shadow_vis2: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        cluster_grid_buf: &BoundBuffer,
+        light_index_buf: &BoundBuffer,
+    ) -> Result<Option<ShadowDenoiseSets>, crate::error::VulkanError> {
+        // All preconditions must hold — else the byte-identical OFF path (the host keeps
+        // `scene.shadow == None` this rung, so this is the `None` no-op on EVERY current frame). The
+        // resolve sets bind against the activation's OWN 22-binding VIS/DENOISED layout
+        // (`activation.resolve_layout`), NOT the 21-binding `scene.resolve_layout_hwrt`; the TLAS @19
+        // handles come from `scene.resolve_tlas_hwrt`.
+        let (activation, vis_ring, vis2_ring, denoise_layout, tlas) = match (
+            scene.shadow.as_ref(),
+            shadow_vis,
+            shadow_vis2,
+            scene.resolve_tlas_hwrt,
+        ) {
+            (Some(a), Some(v), Some(v2), Some(t)) => (a, v, v2, a.resolve_layout, t),
+            _ => return Ok(None),
+        };
+        // The final à-trous output the DENOISED resolve reads at `gShadowVis` @21 (ping-pong parity).
+        let final_ring = if activation.final_is_vis2 { vis2_ring } else { vis_ring };
+
+        // (1) The à-trous edge-stop UBO ring — one 16-byte host-coherent slot per FIF, zero-seeded
+        // (the host memcpys `ResolvedShadowDenoise` in each frame). On a slot's failure, drain [0..i).
+        let mut ubo_slots: [Option<BoundBuffer>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for (i, dst) in ubo_slots.iter_mut().enumerate() {
+            let b = match RhiDevice::create_buffer(
+                ctx,
+                &BufferDesc {
+                    size: crate::present::SHADOW_DENOISE_UBO_BYTES,
+                    usage: BufferUsage::UNIFORM,
+                    location: MemoryLocation::HostVisibleCoherent,
+                },
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    // SAFETY: slots [0..i) were created on `ctx`, never submitted; destroy each once.
+                    unsafe {
+                        for s in ubo_slots.iter_mut().take(i) {
+                            if let Some(b) = s.take() {
+                                RhiDevice::destroy_buffer(ctx, b);
+                            }
+                        }
+                    }
+                    return Err(e);
+                }
+            };
+            if let Some(p) = RhiDevice::buffer_mapped_ptr(ctx, &b) {
+                // SAFETY: `p` is the host-coherent mapping of a freshly-created >= 16-byte UNIFORM
+                // buffer; writing `SHADOW_DENOISE_UBO_BYTES` zeroes stays in-bounds; byte `0` is a
+                // valid init for the `f32` sigma lanes (host-overwritten before first read).
+                unsafe {
+                    core::ptr::write_bytes(
+                        p.as_ptr(),
+                        0,
+                        crate::present::SHADOW_DENOISE_UBO_BYTES as usize,
+                    );
+                }
+            }
+            *dst = Some(b);
+        }
+        let ubo: [BoundBuffer; FRAMES_IN_FLIGHT] =
+            ubo_slots.map(|s| s.expect("invariant: every à-trous UBO ring slot built"));
+
+        // Builds ONE 22-binding VIS/DENOISED resolve set for `slot`, binding `gShadowVis` @21 to
+        // `vis_target[slot]`. Shared by the VIS (write target = `shadow_vis`) + DENOISED
+        // (read target = `final_ring`) rings — the first 21 bindings are IDENTICAL to the
+        // RESOLVE_INLINE-hwrt set (via `resolve_software_entries` + TLAS @19 + soft-shadow UBO @20),
+        // so they cannot drift. Exact-fill at `RESOLVE_HWRT_DENOISE_BINDINGS` (22).
+        let build_resolve_set = |slot: usize,
+                                 vis_target: &[VulkanTexture; FRAMES_IN_FLIGHT]|
+         -> Result<VulkanBindGroup, crate::error::VulkanError> {
+            let imgs = ResolveSlotImages {
+                albedo: &albedo[slot],
+                normal: &normal[slot],
+                material: &material[slot],
+                lit: &lit[slot],
+                viewt: &viewt[slot],
+                ssao: &ssao[slot],
+            };
+            let shared =
+                resolve_software_entries(scene, &imgs, slot, cluster_grid_buf, light_index_buf);
+            let mut chained = shared
+                .into_iter()
+                .chain(core::iter::once(BindGroupEntry::AccelerationStructure {
+                    accel: tlas[slot],
+                }))
+                .chain(core::iter::once(BindGroupEntry::UniformBuffer {
+                    buffer: &scene.ray_shadow_ubo[slot],
+                }))
+                .chain(core::iter::once(BindGroupEntry::StorageImage {
+                    texture: &vis_target[slot],
+                }));
+            let entries: [BindGroupEntry<'_, Vulkan>; RESOLVE_HWRT_DENOISE_BINDINGS] =
+                core::array::from_fn(|_| {
+                    chained.next().expect(
+                        "invariant: the chained iterator yields exactly RESOLVE_HWRT_DENOISE_BINDINGS entries",
+                    )
+                });
+            debug_assert_eq!(
+                entries.len(),
+                RESOLVE_HWRT_DENOISE_BINDINGS,
+                "invariant: the VIS/DENOISED resolve set must declare EXACTLY {RESOLVE_HWRT_DENOISE_BINDINGS} bindings (exact-fill)"
+            );
+            let desc = BindGroupDesc::<Vulkan> { layout: denoise_layout, entries: &entries };
+            RhiDevice::create_bind_group(ctx, &desc)
+        };
+
+        // (2) The VIS resolve set ring (`gShadowVis` @21 = `shadow_vis[i]`, the WRITE target).
+        let mut vis_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for (slot, dst) in vis_slots.iter_mut().enumerate() {
+            match build_resolve_set(slot, vis_ring) {
+                Ok(g) => *dst = Some(g),
+                Err(e) => {
+                    // SAFETY: the [0..slot) vis slots + the UBO ring were created on `ctx`, never
+                    // submitted; destroy each once (reverse acquisition: sets → UBO).
+                    unsafe {
+                        for s in vis_slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for b in ubo {
+                            RhiDevice::destroy_buffer(ctx, b);
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let vis_resolve: [VulkanBindGroup; FRAMES_IN_FLIGHT] =
+            vis_slots.map(|s| s.expect("invariant: every VIS resolve ring slot built"));
+
+        // (3) The DENOISED resolve set ring (`gShadowVis` @21 = the FINAL à-trous output, the READ
+        // target). On failure, drain the VIS ring + the UBO ring too.
+        let mut den_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for (slot, dst) in den_slots.iter_mut().enumerate() {
+            match build_resolve_set(slot, final_ring) {
+                Ok(g) => *dst = Some(g),
+                Err(e) => {
+                    // SAFETY: the [0..slot) den slots + the whole VIS ring + the UBO ring were
+                    // created on `ctx`, never submitted; destroy each once.
+                    unsafe {
+                        for s in den_slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in vis_resolve {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        for b in ubo {
+                            RhiDevice::destroy_buffer(ctx, b);
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let denoised_resolve: [VulkanBindGroup; FRAMES_IN_FLIGHT] =
+            den_slots.map(|s| s.expect("invariant: every DENOISED resolve ring slot built"));
+
+        // (4) The per-level à-trous set rings (`sets[level][fi]`). Level `i` binds `gVisIn` @0 =
+        // (`i`-even ? `shadow_vis` : `shadow_vis2`), `gVisOut` @1 = the OTHER, `gNormal` @2 /
+        // `gViewT` @3 (slot `fi`), the `ResolvedShadowDenoise` UBO @4 (`ubo[fi]`), the camera UBO @5
+        // (`scene.camera_ring[fi]`). ALL `MAX_ATROUS_LEVELS` × `FRAMES_IN_FLIGHT` are built (fixed
+        // per-extent cost); the recorder consumes only the first `levels`. On any slot's failure,
+        // drain the à-trous sets built so far + the DENOISED + VIS rings + the UBO ring.
+        let mut atrous_opt: [[Option<VulkanBindGroup>; FRAMES_IN_FLIGHT];
+            crate::present::MAX_ATROUS_LEVELS as usize] =
+            core::array::from_fn(|_| [const { None }; FRAMES_IN_FLIGHT]);
+        for level in 0..crate::present::MAX_ATROUS_LEVELS as usize {
+            // Even levels: read `shadow_vis`, write `shadow_vis2`. Odd: the reverse.
+            let (in_ring, out_ring) = if level % 2 == 0 {
+                (vis_ring, vis2_ring)
+            } else {
+                (vis2_ring, vis_ring)
+            };
+            for slot in 0..FRAMES_IN_FLIGHT {
+                let entries = [
+                    BindGroupEntry::StorageImage { texture: &in_ring[slot] },
+                    BindGroupEntry::StorageImage { texture: &out_ring[slot] },
+                    BindGroupEntry::StorageImage { texture: &normal[slot] },
+                    BindGroupEntry::StorageImage { texture: &viewt[slot] },
+                    BindGroupEntry::UniformBuffer { buffer: &ubo[slot] },
+                    BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
+                ];
+                let desc = BindGroupDesc::<Vulkan> {
+                    layout: activation.atrous_layout,
+                    entries: &entries,
+                };
+                match RhiDevice::create_bind_group(ctx, &desc) {
+                    Ok(g) => atrous_opt[level][slot] = Some(g),
+                    Err(e) => {
+                        // SAFETY: every à-trous set built so far (all prior levels + this level's
+                        // [0..slot)) + the DENOISED + VIS resolve rings + the UBO ring were created
+                        // on `ctx`, never submitted; destroy each once (reverse acquisition).
+                        unsafe {
+                            for lvl in atrous_opt.iter_mut() {
+                                for s in lvl.iter_mut() {
+                                    if let Some(g) = s.take() {
+                                        RhiDevice::destroy_bind_group(ctx, g);
+                                    }
+                                }
+                            }
+                            for g in denoised_resolve {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                            for g in vis_resolve {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                            for b in ubo {
+                                RhiDevice::destroy_buffer(ctx, b);
+                            }
+                        }
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        let atrous: [[VulkanBindGroup; FRAMES_IN_FLIGHT]; crate::present::MAX_ATROUS_LEVELS as usize] =
+            atrous_opt.map(|lvl| lvl.map(|s| s.expect("invariant: every à-trous set slot built")));
+
+        Ok(Some(ShadowDenoiseSets { vis_resolve, denoised_resolve, atrous, ubo }))
+    }
+
     /// Creates a 2D `R8G8B8A8_UNORM` storage image at `extent` with `usage`. A small
     /// helper shared by the albedo/normal/material allocations in [`Self::create`].
     fn create_gbuffer_image(
@@ -377,11 +701,12 @@ impl GBufferTargets {
     }
 
     /// Rung 3a: creates one slot of the RT soft-shadow VISIBILITY target `shadow_vis`: a 2D
-    /// `R8G8_UNORM` STORAGE image at `extent` (`R` = mesh visibility, `G` = validity). A separate
-    /// helper from [`Self::create_ssao_image`] because the lane is `R8G8_UNORM`. The caller only
-    /// invokes this after `shadow_denoise_storage_ok()` is `true` (the boot probe), so the create
-    /// cannot fault on an unsupported storage format (the SSAO-helper discipline, but probe-gated
-    /// rather than boot-fail-fast — the denoise is opt-in).
+    /// `R16G16_UNORM` STORAGE image at `extent` (`R` = mesh visibility, `G` = validity). Shares the
+    /// format with [`Self::create_shadow_vis2_image`] (the uniform-RG16 design, so one `"rg16"`
+    /// shader pin fits both ping-pong rings). The caller only invokes this after
+    /// `shadow_denoise_storage_ok()` is `true` (the boot probe), so the create cannot fault on an
+    /// unsupported storage format (the SSAO-helper discipline, but probe-gated rather than
+    /// boot-fail-fast — the denoise is opt-in).
     #[cfg(feature = "hwrt")]
     fn create_shadow_vis_image(
         ctx: &VulkanContext,
@@ -400,9 +725,10 @@ impl GBufferTargets {
     }
 
     /// Rung 3a: creates one slot of the à-trous ping-pong target `shadow_vis2`: a 2D
-    /// `R16G16_UNORM` STORAGE image at `extent`. A separate helper from
-    /// [`Self::create_shadow_vis_image`] because the lane is `R16G16_UNORM` (16-bit ping-pong).
-    /// Probe-gated exactly like [`Self::create_shadow_vis_image`].
+    /// `R16G16_UNORM` STORAGE image at `extent` — the SAME [`SHADOW_VIS2_FORMAT`] ==
+    /// [`SHADOW_VIS_FORMAT`] as [`Self::create_shadow_vis_image`] (the uniform-RG16 ping-pong, so one
+    /// `"rg16"` shader pin fits both rings). Kept a separate named helper for call-site clarity (the
+    /// second ping-pong ring). Probe-gated exactly like [`Self::create_shadow_vis_image`].
     #[cfg(feature = "hwrt")]
     fn create_shadow_vis2_image(
         ctx: &VulkanContext,
@@ -635,9 +961,10 @@ impl GBufferTargets {
         let ssao: [VulkanTexture; FRAMES_IN_FLIGHT] =
             ssao_slots.map(|s| s.expect("invariant: every ssao ring slot built before here"));
 
-        // Rung 3a: the two RT soft-shadow-visibility target RINGS (`shadow_vis` RG8 + `shadow_vis2`
-        // RG16), allocated together ONLY when the device advertises both storage formats
-        // (`shadow_denoise_storage_ok()` — the DDGI-degrade discipline; on an unsupported device
+        // Rung 3a: the two RT soft-shadow-visibility target RINGS (`shadow_vis` + `shadow_vis2`,
+        // BOTH R16G16_UNORM — the uniform-RG16 ping-pong), allocated together ONLY when the device
+        // advertises RG16 storage (`shadow_denoise_storage_ok()` — the DDGI-degrade discipline; on
+        // an unsupported device
         // BOTH stay `None` and the denoise is disabled, never a boot fault). Ringed per-FIF like the
         // ssao ring, built with the same `[Option<_>; N]` drain-on-error ladder. No pass reads them
         // this step (steps 4-6 add the VIS / à-trous passes) — allocated-but-unused, byte-identical.
@@ -1304,6 +1631,87 @@ impl GBufferTargets {
                 _ => None,
             };
 
+        // HW-RT rung 3a: the spatial-denoise descriptor sets + the à-trous edge-stop UBO ring.
+        // Built ONLY when the scene wires `scene.shadow` (the step-7 gate; the host keeps it `None`
+        // this rung, so this is a `None` no-op on EVERY current frame → byte-identical). Requires the
+        // `shadow_vis`/`shadow_vis2` rings (device `shadow_denoise_storage_ok()`). The builder cleans
+        // up its OWN partial allocations on internal failure and returns the `VulkanError`; the outer
+        // `?`-arm then drains every ring/set already built above (reverse acquisition) before
+        // returning. `None` when the activation / targets are absent.
+        #[cfg(feature = "hwrt")]
+        let (
+            shadow_vis_resolve_set,
+            shadow_denoised_resolve_set,
+            shadow_atrous_sets,
+            shadow_denoise_ubo,
+        ) = match Self::build_shadow_denoise_sets(
+            ctx,
+            scene,
+            &albedo,
+            &normal,
+            &material,
+            &lit,
+            &viewt,
+            &ssao,
+            shadow_vis.as_ref(),
+            shadow_vis2.as_ref(),
+            cluster_grid_buf,
+            light_index_buf,
+        ) {
+            Ok(Some(sets)) => (
+                Some(sets.vis_resolve),
+                Some(sets.denoised_resolve),
+                Some(sets.atrous),
+                Some(sets.ubo),
+            ),
+            Ok(None) => (None, None, None, None),
+            Err(e) => {
+                // SAFETY: every ring/set built above (vocab/resolve/present + the optional
+                // cull/ssao/ddgi-update/resolve-hwrt) was created on `ctx`, referenced by no
+                // submission, and is destroyed exactly once here (the denoise builder already drained
+                // its own partial allocations before returning). Reverse acquisition: sets → images.
+                unsafe {
+                    if let Some(hs) = resolve_set_hwrt {
+                        for g in hs {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    for g in present_set {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                    if let Some(du) = ddgi_update_set {
+                        RhiDevice::destroy_bind_group(ctx, du);
+                    }
+                    if let Some(ss) = ssao_set {
+                        for g in ss {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    if let Some(cs) = cull_set {
+                        for g in cs {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    for g in resolve_set {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                    for g in vocab_set {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                }
+                destroy_vis_opt(&mut shadow_vis2);
+                destroy_vis_opt(&mut shadow_vis);
+                destroy_ring(ssao);
+                destroy_ring(viewt);
+                destroy_ring(lit);
+                destroy_ring(material);
+                destroy_ring(normal);
+                destroy_ring(albedo);
+                destroy_ring(depth);
+                return Err(SwapchainError::DepthImage(e));
+            }
+        };
+
         Ok(Self {
             depth,
             albedo,
@@ -1322,6 +1730,14 @@ impl GBufferTargets {
             resolve_set_hwrt,
             cull_set,
             ssao_set,
+            #[cfg(feature = "hwrt")]
+            shadow_vis_resolve_set,
+            #[cfg(feature = "hwrt")]
+            shadow_denoised_resolve_set,
+            #[cfg(feature = "hwrt")]
+            shadow_atrous_sets,
+            #[cfg(feature = "hwrt")]
+            shadow_denoise_ubo,
             ddgi_update_set,
             present_set,
             extent,
@@ -1395,6 +1811,36 @@ impl GBufferTargets {
         // slots — every slot of every ring (and the single set) is drained. Rung 3a (`hwrt`) adds
         // the two `Option`-guarded shadow-vis image RINGS, drained before ssao (reverse acquisition).
         unsafe {
+            // Rung 3a: the spatial-denoise sets + UBO ring (LAST-acquired, so destroyed FIRST in
+            // reverse acquisition). Each `Option`-guarded (present only on the denoise ON path — the
+            // host keeps `scene.shadow == None` this rung, so these are `None` on every current
+            // frame). Order within: à-trous sets → DENOISED resolve → VIS resolve → UBO ring.
+            #[cfg(feature = "hwrt")]
+            if let Some(sets) = self.shadow_atrous_sets {
+                for lvl in sets {
+                    for g in lvl {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                }
+            }
+            #[cfg(feature = "hwrt")]
+            if let Some(dr) = self.shadow_denoised_resolve_set {
+                for g in dr {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            #[cfg(feature = "hwrt")]
+            if let Some(vr) = self.shadow_vis_resolve_set {
+                for g in vr {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            #[cfg(feature = "hwrt")]
+            if let Some(ubo) = self.shadow_denoise_ubo {
+                for b in ubo {
+                    RhiDevice::destroy_buffer(ctx, b);
+                }
+            }
             // R2a-4b: the HWRT resolve set RING (last-acquired), `Option`-guarded (present only on
             // an RT device under `feature = "hwrt"` + config HardwareTri).
             #[cfg(feature = "hwrt")]

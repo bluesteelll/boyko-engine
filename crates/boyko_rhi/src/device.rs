@@ -53,7 +53,14 @@ use crate::error::RhiError;
 /// argument as R2a-4a's 19 → 20: the software resolve still declares exactly 19 bindings
 /// (0..=18) with identical content, and even the HWRT set only grew from 20 to 21 — the
 /// grown tail slot (20) is written solely on the HWRT resolve layout.
-pub const MAX_BIND_GROUP_BINDINGS: usize = 21;
+///
+/// HW-RT rung 3a (spatial shadow denoise): raised 21 → 22 to reserve binding 21 for the
+/// VIS/DENOISED resolve variants' `gShadowVis` UAV (`RWTexture2D<float2>` — R=mesh_vis,
+/// G=validity). BYTE-NEUTRAL by the same argument: the software resolve still fills 19 and the
+/// RESOLVE_INLINE-hwrt resolve still fills 21 (0..=20); only the VIS/DENOISED layout fills 22
+/// (0..=21), and that layout is bound solely when `scene.shadow.is_some()` — dormant until
+/// rung-3a step 7 flips the per-frame gate, so the grown tail slot (21) stays unwritten.
+pub const MAX_BIND_GROUP_BINDINGS: usize = 22;
 
 /// Parameters for [`RhiDevice::create_texture`] (Phase-6 S0 graphics surface).
 ///

@@ -314,6 +314,49 @@ static DEFERRED_PBR_HWRT_SPV: SpirvBlob<59424> = SpirvBlob(*include_bytes!(conca
     "/shaders/deferred_pbr_hwrt.comp.spv"
 )));
 
+/// The Rung-3a VIS-variant deferred-resolve SPIR-V (`shaders/deferred_pbr_hwrt_vis.comp.spv`,
+/// compiled from `deferred_pbr.hlsl` with `SHADOW_STAGE=1`). Runs the SAME primary-directional
+/// inline `rayQuery` Vogel-disk cone trace as [`DEFERRED_PBR_HWRT_SPV`] (RESOLVE_INLINE) — same
+/// `SHADOW_RAY_COUNT` spec-const, same live inputs, so `mesh_vis` is bit-identical — but instead of
+/// combining it into the lighting it **writes** `gShadowVis[px,py] = RG(mesh_vis, validity)` to the
+/// 22nd descriptor (`RWTexture2D<float2>` @21) and RETURNS (lighting stripped). Non-mesh-arm pixels
+/// write `RG(1.0, 0.0)`. This is the à-trous pre-pass. Bound to the 22-binding VIS/DENOISED layout
+/// (the 21-binding RESOLVE_INLINE-hwrt layout + `gShadowVis` @21); gated behind `feature = "hwrt"` +
+/// `ctx.ray_query_enabled()` and only ever dispatched when `scene.shadow.is_some()`.
+#[cfg(feature = "hwrt")]
+static DEFERRED_PBR_VIS_SPV: SpirvBlob<8032> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/deferred_pbr_hwrt_vis.comp.spv"
+)));
+
+/// The Rung-3a DENOISED-variant deferred-resolve SPIR-V
+/// (`shaders/deferred_pbr_hwrt_denoised.comp.spv`, compiled from `deferred_pbr.hlsl` with
+/// `SHADOW_STAGE=2`). Identical to [`DEFERRED_PBR_HWRT_SPV`] (RESOLVE_INLINE) except the inline
+/// Vogel trace is replaced by a single `mesh_vis = gShadowVis.Load(px,py).r` (reading the FINAL
+/// à-trous output at descriptor @21), then the identical `vis = min(vis, mesh_vis)` combine and
+/// full lighting. It does NOT trace, so it references no acceleration structure and declares no
+/// `SHADOW_RAY_COUNT` spec-const. Bound to the SAME 22-binding VIS/DENOISED layout; selected as the
+/// resolve pipeline only when `scene.shadow.is_some()`.
+#[cfg(feature = "hwrt")]
+static DEFERRED_PBR_DENOISED_SPV: SpirvBlob<57576> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/deferred_pbr_hwrt_denoised.comp.spv"
+)));
+
+/// The Rung-3a à-trous spatial shadow-denoise filter SPIR-V (`shaders/shadow_atrous.comp.spv`,
+/// Dammertz 2010). A 2D 25-tap/level (5×5 B3-spline) edge-stopping wavelet: `levels` iterations,
+/// `step = 1 << level` (a 4-byte `{ uint step; }` push-const), edge-stop weight
+/// `w = h · pow(max(0,dot(n_t,n_c)),σ_n) · exp(-|z_t-z_c| / (σ_z·|o·step|+eps)) · valid_t`,
+/// normalized `Σ(w·vis)/Σw`. Bound to its OWN 6-binding layout { @0 `gVisIn` (RG read), @1
+/// `gVisOut` (RG write), @2 `gNormal`, @3 `gViewT`, @4 `ResolvedShadowDenoise` UBO (16 B,
+/// σ_z/σ_n), @5 the shared 80-byte Camera UBO }. Ping-ponged between the `shadow_vis` /
+/// `shadow_vis2` targets, one dispatch per level.
+#[cfg(feature = "hwrt")]
+static SHADOW_ATROUS_SPV: SpirvBlob<59700> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/shadow_atrous.comp.spv"
+)));
+
 /// The SDFDDGI I3 DDGI resolve-sample GPU-GOLDEN SPIR-V (`shaders/ddgi_probe_gi_resolve.comp.hlsl`).
 /// A standalone compute harness that runs the SAME `ddgi_probe_sample` the deferred resolve runs
 /// (both `#include "ddgi_resolve.hlsli"`) over host-supplied receiver samples and STOREs the
@@ -709,6 +752,47 @@ pub fn deferred_pbr_spirv() -> &'static [u32] {
 #[inline]
 pub fn deferred_pbr_hwrt_spirv() -> &'static [u32] {
     DEFERRED_PBR_HWRT_SPV.as_words()
+}
+
+/// The Rung-3a VIS-variant deferred-resolve SPIR-V (`SHADOW_STAGE=1`) as a `u32` word stream, ready
+/// for [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// The à-trous pre-pass: runs the inline Vogel `rayQuery` trace exactly as the RESOLVE_INLINE-hwrt
+/// resolve does (bit-identical `mesh_vis`, same `SHADOW_RAY_COUNT` spec-const) but writes
+/// `gShadowVis[px,py] = RG(mesh_vis, validity)` to descriptor @21 and returns. Bound to the
+/// 22-binding VIS/DENOISED layout; dispatched only when `scene.shadow.is_some()`. See
+/// [`DEFERRED_PBR_VIS_SPV`]; the const-asserted length is the anti-drift guard.
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn deferred_pbr_vis_spirv() -> &'static [u32] {
+    DEFERRED_PBR_VIS_SPV.as_words()
+}
+
+/// The Rung-3a DENOISED-variant deferred-resolve SPIR-V (`SHADOW_STAGE=2`) as a `u32` word stream,
+/// ready for [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// Identical to the RESOLVE_INLINE-hwrt resolve except the inline trace is replaced by one
+/// `gShadowVis.Load(px,py).r` read of the FILTERED vis at descriptor @21, then the identical
+/// `min`-combine + full lighting. Declares no `SHADOW_RAY_COUNT` spec-const (it never traces).
+/// Bound to the SAME 22-binding VIS/DENOISED layout; selected as the resolve pipeline only when
+/// `scene.shadow.is_some()`. See [`DEFERRED_PBR_DENOISED_SPV`].
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn deferred_pbr_denoised_spirv() -> &'static [u32] {
+    DEFERRED_PBR_DENOISED_SPV.as_words()
+}
+
+/// The Rung-3a à-trous spatial shadow-denoise filter SPIR-V as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// A 25-tap/level edge-stopping wavelet (Dammertz 2010) ping-ponged over `shadow_vis`/`shadow_vis2`,
+/// one dispatch per level with `step = 1 << level` pushed as a 4-byte `{ uint step; }` push-const.
+/// Bound to its own 6-binding layout (see [`SHADOW_ATROUS_SPV`]). The const-asserted length is the
+/// anti-drift guard.
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn shadow_atrous_spirv() -> &'static [u32] {
+    SHADOW_ATROUS_SPV.as_words()
 }
 
 /// The SDFDDGI I3 DDGI resolve-sample GPU-GOLDEN SPIR-V as a `u32` word stream, ready for
