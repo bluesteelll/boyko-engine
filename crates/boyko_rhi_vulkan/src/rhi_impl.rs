@@ -78,9 +78,12 @@ const MAX_VERTEX_ATTRIBUTES: usize = 8;
 /// raised it 19 → 20 to reserve binding 19 for the resolve's
 /// `RaytracingAccelerationStructure` (the TLAS the rayQuery mesh-shadow trace reads) —
 /// BYTE-NEUTRAL: the software resolve still fills 19, only the inline-array capacity
-/// grows. A `debug_assert!` traps an over-count at
+/// grows. HW-RT rung 1b raised it 20 → 21 to reserve binding 20 for the HWRT resolve's
+/// tunable soft-shadow params UBO (`boyko_render::ResolvedRayShadow`) — BYTE-NEUTRAL by
+/// the same argument: only the HWRT set fills the new tail slot, the software resolve
+/// still fills 19. A `debug_assert!` traps an over-count at
 /// `create_bind_group_layout`/`create_bind_group`.
-const MAX_BIND_GROUP_BINDINGS: usize = 20;
+const MAX_BIND_GROUP_BINDINGS: usize = 21;
 
 // The bind-group create path keeps its own copy of the cap so a future divergence
 // from the agnostic `boyko_rhi::MAX_BIND_GROUP_BINDINGS` (the desc-side cap) breaks

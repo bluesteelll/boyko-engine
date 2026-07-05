@@ -146,6 +146,14 @@ pub mod ray_backend;
 /// ray-backend substrate and schedules the cold resolve under
 /// [`RayResolveSet`](ray_backend::RayResolveSet).
 pub mod ray_plugin;
+/// HW-RT rung 1b — the tunable soft-shadow ECS policy
+/// ([`RayShadowConfig`](ray_shadow_config::RayShadowConfig) +
+/// [`ResolvedRayShadow`](ray_shadow_config::ResolvedRayShadow) Resources + the pure
+/// [`resolve_ray_shadow`](ray_shadow_config::resolve_ray_shadow) fit + the cold
+/// [`resolve_ray_shadow_system`](ray_shadow_config::resolve_ray_shadow_system) writer).
+/// The ray COUNT bakes into a spec-constant at pipeline build; cone/tmax/tmin/bias flow
+/// through the HWRT resolve's binding-20 UBO. Defaults byte-identical to the R2a-4b consts.
+pub mod ray_shadow_config;
 pub mod render3d_plugin;
 /// Host plan R7 — the SDF instance path: the per-entity
 /// [`SdfPrimitive`](sdf_edit::SdfPrimitive) component (an `SdfEdit` carrier), the reused
@@ -200,6 +208,10 @@ pub use ray_backend::{
     RayResolveSet, RayWorkload, resolve_ray_backend, resolve_ray_backend_system,
 };
 pub use ray_plugin::RayPlugin;
+pub use ray_shadow_config::{
+    RESOLVED_RAY_SHADOW_BYTES, RayShadowConfig, ResolvedRayShadow, resolve_ray_shadow,
+    resolve_ray_shadow_system,
+};
 // HW-RT rung R1: re-export `RtTier` (defined in `boyko_rhi_vulkan::device`) since the
 // crate surfaces the ray-caps tier (`RayCaps`) — a consumer that fills `RayCaps` from a
 // device query gets the tier type from here.
@@ -263,7 +275,8 @@ pub use ssao_config::{ResolvedSsao, SsaoConfig, SsaoQuality, resolve_ssao, resol
 pub use ssao_plugin::SsaoPlugin;
 pub use upload::{
     upload_atlas_ring, upload_camera_ring, upload_csm_ring, upload_instance_models,
-    upload_light_table, upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
+    upload_light_table, upload_pair_out_slot, upload_pair_ring, upload_ray_shadow_ring,
+    upload_sdf_edit_list,
 };
 #[cfg(feature = "hwrt")]
 pub use upload::upload_mesh_ids;

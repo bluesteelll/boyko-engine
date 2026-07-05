@@ -8,6 +8,7 @@ use boyko_ecs::ecs::core::app::{App, Plugin};
 use crate::ray_backend::{
     RayBackendConfig, RayCaps, RayResolveSet, resolve_ray_backend_system,
 };
+use crate::ray_shadow_config::{RayShadowConfig, ResolvedRayShadow, resolve_ray_shadow_system};
 
 /// Registers the dormant ray-backend seam (HW-RT rung R1): inserts the derived
 /// [`RayBackendConfig`] carrier (default DISABLED — every cell
@@ -54,12 +55,21 @@ impl Plugin for RayPlugin {
         app.insert_resource(RayBackendConfig::default());
         app.insert_resource(RayCaps::default());
 
-        // `resolve_ray_backend_system` joins `RayResolveSet` — the by-name ordering
-        // seam a R2a consumer pins BEFORE (via `.after_set(RayResolveSet)`).
-        // Set-to-set ordering is add-order-independent; the tier is device-fixed so
-        // there is no camera/light edge to express.
+        // HW-RT rung 1b: the author-set soft-shadow tuning + its derived UBO carrier.
+        // `resolve_ray_shadow_system` is the single writer of `ResolvedRayShadow`; the
+        // default carrier is INSERTED as the resolved default (`ResolvedRayShadow::default`
+        // == `resolve_ray_shadow(&RayShadowConfig::default())`) so frame 0 — before the
+        // policy first runs — already carries the byte-identical R2a-4b UBO scalars.
+        app.insert_resource(RayShadowConfig::default());
+        app.insert_resource(ResolvedRayShadow::default());
+
+        // `resolve_ray_backend_system` + `resolve_ray_shadow_system` join `RayResolveSet` —
+        // the by-name ordering seam a consumer pins BEFORE (via `.after_set(RayResolveSet)`).
+        // Set-to-set ordering is add-order-independent; the tier is device-fixed so there is
+        // no camera/light edge to express.
         app.add_systems_cfg(|b| {
             b.add_system(resolve_ray_backend_system).in_set(RayResolveSet);
+            b.add_system(resolve_ray_shadow_system).in_set(RayResolveSet);
         });
     }
 

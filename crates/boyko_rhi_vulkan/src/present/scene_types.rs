@@ -978,6 +978,20 @@ pub struct GBufferScene<'a> {
     /// (no AS descriptor is written).
     #[cfg(feature = "hwrt")]
     pub resolve_tlas_hwrt: Option<[&'a BoundAccelStruct; FRAMES_IN_FLIGHT]>,
+    /// HW-RT rung 1b: the HWRT soft-shadow-params UBO ring
+    /// (`boyko_render::ResolvedRayShadow`, 16 B — cone/tmax/tmin/bias) the HWRT resolve set
+    /// binds at binding 20. Written ONLY into the HWRT resolve set (the software resolve set
+    /// stays EXACT at 19 bindings). The whole field is `#[cfg(hwrt)]`, so a `not(hwrt)` build
+    /// has it absent entirely; the host supplies it only on an RT device
+    /// (`ray_query_enabled()`), the same gate as the TLAS handles above.
+    ///
+    /// A RING (one slot per in-flight frame, like [`Self::csm_cascade_ring`]): each FIF frame
+    /// binds its own slot `ray_shadow_ubo[self.frame_index]` @20, the host writes that SAME slot
+    /// via `upload_ray_shadow_ring` before the present (a per-frame cone/tmax/tmin/bias retune),
+    /// so the sibling in-flight frame reads a DIFFERENT slot — the lock-free write-after-read
+    /// fix. A STATIC config seeds every slot identically (byte-identical).
+    #[cfg(feature = "hwrt")]
+    pub ray_shadow_ubo: &'a [BoundBuffer; FRAMES_IN_FLIGHT],
     /// The marcher's 1D dispatch group count (`ceil(pixels / LOCAL_SIZE_X)` at the
     /// WSI-clamped extent the recorder dispatches). The deferred resolve dispatches at the
     /// SAME grid (1:1 the marched pixels).

@@ -29,6 +29,7 @@ use boyko_scene::ViewUniform;
 use boyko_sdf_math::SdfEdit;
 
 use crate::csm_config::{RESOLVED_CSM_BYTES, ResolvedCsm};
+use crate::ray_shadow_config::{RESOLVED_RAY_SHADOW_BYTES, ResolvedRayShadow};
 use crate::shadow_atlas::{RESOLVED_SHADOW_ATLAS_BYTES, ResolvedShadowAtlas};
 use crate::gpu_transform3d::GPU_TRANSFORM3D_BYTES;
 use crate::mesh_draw::MeshRenderScratch;
@@ -523,6 +524,68 @@ pub unsafe fn upload_csm_ring(
             (resolved as *const ResolvedCsm).cast::<u8>(),
             mapped.as_ptr(),
             RESOLVED_CSM_BYTES,
+        );
+    }
+}
+
+/// Copies the resolved [`ResolvedRayShadow`] (the HWRT `rayQuery` mesh-shadow tuning —
+/// cone/tmax/tmin/bias, byte-identical to the HWRT resolve's binding-20 UBO shape, see
+/// [`RESOLVED_RAY_SHADOW_BYTES`]) into ONE HWRT shadow-params-UBO ring slot — the per-frame
+/// upload of the HWRT resolve path (mirroring [`upload_csm_ring`]).
+///
+/// Uploaded every HWRT frame (the runner gates the CALL on `feature = "hwrt"` +
+/// `ray_query_enabled()`, the SAME gate that mints the ring), exactly like
+/// [`upload_csm_ring`]: `resolve_ray_shadow_system` re-derives the 16-byte UBO from the cold
+/// [`RayShadowConfig`](crate::ray_shadow_config::RayShadowConfig) each frame, so a boot-seed
+/// would go stale the moment the author retunes, and the 16-byte memcpy is cheaper than a
+/// change gate. A default config uploads the byte-identical R2a-4b consts.
+///
+/// # Panics
+///
+/// Panics if `ring_slot.size` is smaller than [`RESOLVED_RAY_SHADOW_BYTES`]: the memcpy would
+/// be out-of-bounds (UB), so the guard is a hard assert in every build.
+///
+/// # Safety
+///
+/// * `ring_slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at least
+///   `ring_slot.size` valid, persistently-mapped bytes.
+/// * `ring_slot` is the FENCED slot's buffer — `ray_shadow_ubo[token.slot()]` (the same
+///   token/slot contract as [`upload_csm_ring`]): the resolve of the slot's previous occupant
+///   retired behind the waited fence, and the sibling in-flight frame binds the OTHER ring slot.
+pub unsafe fn upload_ray_shadow_ring(
+    token: &FrameWriteToken,
+    ring_slot: &BoundBuffer,
+    resolved: &ResolvedRayShadow,
+) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    // Hard bound BEFORE the memcpy (review P1 discipline): an undersized slot would make the
+    // 16-byte write out-of-bounds. One compare per frame.
+    assert!(
+        ring_slot.size as usize >= RESOLVED_RAY_SHADOW_BYTES,
+        "HWRT shadow-params UBO slot too small: {} bytes < the {}-byte ResolvedRayShadow mirror",
+        ring_slot.size,
+        RESOLVED_RAY_SHADOW_BYTES
+    );
+
+    let mapped = ring_slot
+        .mapped
+        .expect("invariant: the HWRT shadow-params UBO slot is host-visible mapped");
+    // SAFETY: `resolved` is a live `#[repr(C)]` POD of exactly `RESOLVED_RAY_SHADOW_BYTES`
+    // (const-asserted at its definition) with no padding holes (4 packed `f32`s), so reading its
+    // raw bytes is defined. `mapped` targets >= `ring_slot.size >= RESOLVED_RAY_SHADOW_BYTES`
+    // valid mapped host-coherent bytes (hard-asserted above) — the write is in-bounds. The
+    // borrowed `FrameWriteToken` + the slot-identity contract prove this slot's in-flight fence
+    // was waited THIS frame (the previous occupant's resolve finished its UBO reads; the sibling
+    // frame binds the other slot) — race-free, lock-free. The two regions are distinct
+    // allocations (no overlap).
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            (resolved as *const ResolvedRayShadow).cast::<u8>(),
+            mapped.as_ptr(),
+            RESOLVED_RAY_SHADOW_BYTES,
         );
     }
 }

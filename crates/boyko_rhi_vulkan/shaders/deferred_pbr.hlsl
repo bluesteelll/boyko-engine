@@ -245,8 +245,9 @@ cbuffer ShadowAtlas : register(b15) {
 // BOUND-BUT-UNREAD on the OFF path (`load_ddgi_mode(LightBuf) == 0`, every pre-SDFDDGI scene) — the
 // resolve `.spv` STATICALLY declares them so the layout MUST bind valid descriptors, but no
 // `.Sample` executes, so the lit PIXELS are byte-identical to today (the `gCsm`/`gShadowAtlas`
-// bound-but-unread precedent, the 0%-gate). The 3 extra bindings sit at 16/17/18 under the raised
-// cap (`MAX_BIND_GROUP_BINDINGS == 19`) → the resolve set is exactly 19/19.
+// bound-but-unread precedent, the 0%-gate). The 3 extra bindings sit at 16/17/18 → the SOFTWARE
+// resolve set is exactly 19/19 (the HWRT variant adds TLAS @19 + the shadow-params UBO @20 under the
+// rung-1b `MAX_BIND_GROUP_BINDINGS == 21` cap; the software fill is unchanged).
 //
 // binding 16 (t16 + s16): the probe IRRADIANCE atlas (R11G11B10F, no-gamma — Decision D6)
 // Texture2DArray BUNDLED with its LINEAR sampler as ONE `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER`
@@ -289,17 +290,31 @@ cbuffer ResolvedDdgi : register(b18) {
 // origin is lifted off the surface by `n * SHADOW_RAY_BIAS` and the trace runs [`SHADOW_RAY_TMIN`,
 // `SHADOW_RAY_TMAX`]. `TMAX = 1e4` covers the bounded scene; the MAGNITUDE (bias / TMin) is tuned at
 // owner-eval, the DIMENSION is fixed world-space.
-static const float SHADOW_RAY_BIAS = 1e-3;
-static const float SHADOW_RAY_TMIN = 1e-3;
-static const float SHADOW_RAY_TMAX = 1e4;
+//
+// Rung 1b — tunable soft-shadow params:
+//   * SHADOW_RAY_COUNT is spec-const id 0 (baked at pipeline build; the Vogel loop below UNROLLS
+//     against the baked count, so a runtime change is a relaunch — Decision 5). The `16` here is the
+//     default when unspecialized (byte-identical to the R2a-4b hardcoded const).
+//   * cone/tmax/tmin/bias come from RayShadowUbo @ binding 20 — a per-FIF UBO byte-mirroring
+//     `boyko_render::ResolvedRayShadow` (4×f32: cone_radius, tmax, tmin, bias). Runtime-tunable,
+//     defaults byte-identical to the old consts.
+// binding 20 (b20): the tunable soft-shadow params UBO. Field ORDER + TYPES exactly match
+// `boyko_render::ResolvedRayShadow` (cone_radius @0, tmax @4, tmin @8, bias @12 — 16 B, one vec4
+// slot, no trailing pad). Declared ENTIRELY under `#if HWRT` — the software `.spv` never references
+// it (the byte-identity gate).
+cbuffer RayShadowUbo : register(b20) {
+    float SHADOW_CONE_RADIUS; // was 0.035 (tan(half-angle) of the sun disk, ~2°)
+    float SHADOW_RAY_TMAX;    // was 1e4
+    float SHADOW_RAY_TMIN;    // was 1e-3
+    float SHADOW_RAY_BIAS;    // was 1e-3
+};
 
 // R2a-4b soft-shadow (owner-eval): the hard single-ray trace read TOO SHARP, so the mesh-shadow
 // term cone-samples N rays jittered within the sun's angular disk around `l` and averages the miss
 // fraction — a single-frame soft penumbra (no TAA on this engine, so the per-ray count carries the
-// smoothness). `SHADOW_CONE_RADIUS` is `tan(half-angle)` of the sun disk (~2°); both are
-// owner-retunable at eval.
-static const uint  SHADOW_RAY_COUNT   = 16;    // rays per pixel (single-frame smoothness)
-static const float SHADOW_CONE_RADIUS = 0.035; // tan(half-angle) of the sun disk (~2°)
+// smoothness). `SHADOW_CONE_RADIUS` is `tan(half-angle)` of the sun disk (~2°); rung 1b moved it +
+// tmax/tmin/bias into the RayShadowUbo above and SHADOW_RAY_COUNT to spec-const id 0.
+[[vk::constant_id(0)]] const uint SHADOW_RAY_COUNT = 16; // rays per pixel (spec-const; default 16)
 #endif
 
 // Shadow Phase 5 Inc-1-GPU normal-offset bias FACTOR — the spot receiver lookup is pushed off the

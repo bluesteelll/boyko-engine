@@ -25,6 +25,8 @@ use boyko_rhi::{
     RhiQueue, SamplerDesc, ShaderStage, TextureDesc, TextureDimension, VertexAttribute,
     VertexBufferLayout, VertexFormat,
 };
+#[cfg(feature = "hwrt")]
+use boyko_rhi::SpecConstant;
 use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
 use boyko_rhi_vulkan::ddgi::DdgiAtlas;
 use boyko_rhi_vulkan::compute::{
@@ -70,6 +72,8 @@ use boyko_render::{
 };
 #[cfg(feature = "hwrt")]
 use boyko_render::MeshRegistry;
+#[cfg(feature = "hwrt")]
+use boyko_render::{RESOLVED_RAY_SHADOW_BYTES, RayShadowConfig};
 #[cfg(feature = "hwrt")]
 use boyko_scene::render_caps::MeshHandle;
 
@@ -134,6 +138,11 @@ pub(crate) const CSM_SHADOW_DIM: u32 = 2048;
 /// Byte size of one host cascade-UBO ring slot — `size_of::<ResolvedCsm>()`
 /// via [`RESOLVED_CSM_BYTES`] (the resolve's binding-13 shape).
 const CSM_UBO_BYTES: u64 = RESOLVED_CSM_BYTES as u64;
+/// HW-RT rung 1b: byte size of one HWRT shadow-params-UBO ring slot —
+/// `size_of::<ResolvedRayShadow>()` via [`RESOLVED_RAY_SHADOW_BYTES`] (the HWRT resolve's
+/// binding-20 shape, 16 B).
+#[cfg(feature = "hwrt")]
+const RAY_SHADOW_UBO_BYTES: u64 = RESOLVED_RAY_SHADOW_BYTES as u64;
 /// Sparse spot/point shadow-atlas resolution — `boyko_render`'s [`SHADOW_DIM`].
 const SPOT_SHADOW_DIM: u32 = SHADOW_DIM;
 /// Atlas layer budget — `boyko_render`'s [`M_SLOTS`] (the atlas texture's
@@ -1247,6 +1256,17 @@ pub(crate) struct GpuSceneBundles {
     /// instead of sampling the CSM map.
     #[cfg(feature = "hwrt")]
     resolve_pipeline_hwrt: Option<(ComputePipeline, VulkanBindGroupLayout)>,
+    /// HW-RT rung 1b: the HWRT soft-shadow-params UBO RING (one host-coherent slot per in-flight
+    /// frame, [`RAY_SHADOW_UBO_BYTES`] each, zero-seeded). Slot `i` is bound into slot `i`'s HWRT
+    /// resolve set at binding 20 (the tunable cone/tmax/tmin/bias) — each in-flight frame reads its
+    /// OWN slot; the runner memcpys `ResolvedRayShadow` into the fenced slot every HWRT frame via
+    /// [`upload_ray_shadow_ring`](boyko_render::upload_ray_shadow_ring). RINGED like the CSM cascade
+    /// UBO (the fit is author-config-dependent — a retune must reach the resolve without a WAR
+    /// hazard). `Some` only on an RT device (`ray_query_enabled`) under `feature = "hwrt"`, the same
+    /// gate as [`Self::resolve_pipeline_hwrt`]; `None` otherwise (never bound — the software resolve
+    /// set has no binding 20).
+    #[cfg(feature = "hwrt")]
+    ray_shadow_ubo: Option<[BoundBuffer; FRAMES_IN_FLIGHT]>,
     material_table: BoundBuffer,
     /// The device light table (resolve binding 6), [`LIGHT_TABLE_CAPACITY`] bytes.
     /// The recorder copies `light_upload_bytes` from the fenced slot's staging into
@@ -1650,11 +1670,27 @@ impl GpuSceneBundles {
                 kind: DescriptorKind::AccelerationStructure,
                 stage: ShaderStage::COMPUTE,
             });
+            // Rung 1b: binding 20 = the tunable soft-shadow-params UBO (`ResolvedRayShadow`,
+            // cone/tmax/tmin/bias). Declared ONLY on the HWRT layout (the software resolve
+            // layout still fills exactly 19 bindings — byte-neutral).
+            hwrt_entries.push(BindGroupLayoutEntry {
+                binding: 20,
+                count: 1,
+                kind: DescriptorKind::UniformBuffer,
+                stage: ShaderStage::COMPUTE,
+            });
             let hwrt_layout = RhiDevice::create_bind_group_layout(
                 device,
                 &BindGroupLayoutDesc { entries: &hwrt_entries },
             )
             .expect("invariant: HWRT deferred resolve bind-group layout create");
+            // Rung 1b: bake the ray COUNT into spec-const id 0 (the Vogel-disk loop unrolls
+            // against it — a retune is a relaunch, Decision 5). `RayShadowConfig` is NOT
+            // reachable at this boot site (`boot` takes no `World`), so the count bakes the
+            // DEFAULT (16 — the R2a-4b const); a later rung threads the world config here to
+            // bake an author retune at boot. `.max(1)` guards the `occ/0` NaN-visibility a `0`
+            // count would bake (the `resolve_ray_shadow` debug-assert's build-side counterpart).
+            let ray_count = RayShadowConfig::default().ray_count.max(1);
             let hwrt_pipeline = RhiDevice::create_compute_pipeline(
                 device,
                 &ComputePipelineDesc {
@@ -1662,12 +1698,36 @@ impl GpuSceneBundles {
                     entry: c"main",
                     push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
                     bind_group_layout: Some(&hwrt_layout),
-                    spec_constants: &[],
+                    spec_constants: &[SpecConstant { id: 0, value: ray_count }],
                 },
             )
             .expect("invariant: HWRT deferred resolve compute pipeline create");
             (hwrt_pipeline, hwrt_layout)
         });
+
+        // Rung 1b: the HWRT soft-shadow-params UBO ring — minted ONLY on an RT device
+        // (`ray_query_enabled`), the SAME gate that builds `resolve_pipeline_hwrt`. `None` on the
+        // software path (the resolve set has no binding 20 there). Zero-seeded (the runner memcpys
+        // `ResolvedRayShadow` into the fenced slot every HWRT frame).
+        #[cfg(feature = "hwrt")]
+        let ray_shadow_ubo: Option<[BoundBuffer; FRAMES_IN_FLIGHT]> =
+            ctx.ray_query_enabled().then(|| {
+                core::array::from_fn(|_| {
+                    let b = RhiDevice::create_buffer(
+                        device,
+                        &BufferDesc {
+                            size: RAY_SHADOW_UBO_BYTES,
+                            usage: BufferUsage::UNIFORM,
+                            location: MemoryLocation::HostVisibleCoherent,
+                        },
+                    )
+                    .expect("invariant: HWRT shadow-params UBO create");
+                    let mapped = RhiDevice::buffer_mapped_ptr(device, &b)
+                        .expect("invariant: host-visible HWRT shadow-params UBO is mapped");
+                    zero_fill(mapped, RAY_SHADOW_UBO_BYTES as usize);
+                    b
+                })
+            });
 
         // ── The present-blit pipeline (`color_formats[0]` == the swapchain
         // format — W2-b).
@@ -1763,6 +1823,8 @@ impl GpuSceneBundles {
             resolve_layout,
             #[cfg(feature = "hwrt")]
             resolve_pipeline_hwrt,
+            #[cfg(feature = "hwrt")]
+            ray_shadow_ubo,
             material_table,
             light_table,
             light_staging,
@@ -1950,6 +2012,16 @@ impl GpuSceneBundles {
             resolve_layout_hwrt: self.resolve_pipeline_hwrt.as_ref().map(|(_, l)| l),
             #[cfg(feature = "hwrt")]
             resolve_tlas_hwrt: self.tlas.as_ref().map(|t| t.resolve_accels()),
+            // Rung 1b: the HWRT shadow-params UBO ring. `Some` on an RT device (the ring is minted
+            // under the same `ray_query_enabled` gate as the HWRT resolve set that binds
+            // `ray_shadow_ubo[frame_index]` @20 per FIF slot); on the software path the HWRT resolve
+            // set is never built, so this is bound by NO set — a benign valid placeholder (the
+            // whole CSM cascade UBO ring, always minted + host-coherent + >= 16 B, same
+            // `[BoundBuffer; FRAMES_IN_FLIGHT]` shape) satisfies the field type without ever being
+            // read. Pass the WHOLE ring (like `csm_cascade_ring`): the resolve-set builder writes
+            // each slot into its own HWRT set, so each in-flight frame reads its own slot.
+            #[cfg(feature = "hwrt")]
+            ray_shadow_ubo: self.ray_shadow_ubo.as_ref().unwrap_or(&self.csm.ubo),
             dispatch_group_count_x: self.dispatch_group_count_x,
             brick: None,
             coarse: None,
@@ -2161,6 +2233,23 @@ impl GpuSceneBundles {
         &self.csm.atlas_ubo[slot]
     }
 
+    /// HW-RT rung 1b: the FENCED slot's HWRT shadow-params-UBO ring buffer — the write target of
+    /// the runner's per-frame [`upload_ray_shadow_ring`](boyko_render::upload_ray_shadow_ring)
+    /// (the HWRT resolve binds the same slot at binding 20, so the sibling in-flight frame reads
+    /// the OTHER slot — the lock-free write-after-read discipline the ring exists for). Callable
+    /// ONLY on an RT device (the ring is `Some` under `ray_query_enabled`); the runner gates the
+    /// call on the SAME `feature = "hwrt"` + `ray_query_enabled()` condition, so the `expect`
+    /// never fires (an unminted-ring call would be a runner bug).
+    #[cfg(feature = "hwrt")]
+    #[inline]
+    pub(crate) fn ray_shadow_ubo_slot(&self, slot: usize) -> &BoundBuffer {
+        &self
+            .ray_shadow_ubo
+            .as_ref()
+            .expect("invariant: ray_shadow_ubo ring is minted on an RT device (ray_query_enabled)")
+            [slot]
+    }
+
     /// The marcher's binding-0 edit-list SSBO — the write target of the runner's
     /// ONE-SHOT boot-static `boyko_render::upload_sdf_edit_list` (host plan R7).
     /// Unlike the cascade UBO this is a SINGLE shared buffer, not a per-slot ring:
@@ -2190,12 +2279,20 @@ impl GpuSceneBundles {
             RhiDevice::destroy_bind_group_layout(ctx, self.present_layout);
             RhiDevice::destroy_compute_pipeline(ctx, self.resolve_pipeline);
             RhiDevice::destroy_bind_group_layout(ctx, self.resolve_layout);
-            // HW-RT rung R2a-4b: the HWRT resolve pipeline + its 20-binding layout, `Option`-guarded
+            // HW-RT rung R2a-4b: the HWRT resolve pipeline + its 21-binding layout, `Option`-guarded
             // (present only on an RT device under `feature = "hwrt"`). Pipeline before layout.
             #[cfg(feature = "hwrt")]
             if let Some((pipeline, layout)) = self.resolve_pipeline_hwrt {
                 RhiDevice::destroy_compute_pipeline(ctx, pipeline);
                 RhiDevice::destroy_bind_group_layout(ctx, layout);
+            }
+            // HW-RT rung 1b: the HWRT soft-shadow-params UBO ring, `Option`-guarded (minted only on
+            // an RT device). Each slot is a plain host-coherent buffer (no dependents).
+            #[cfg(feature = "hwrt")]
+            if let Some(ring) = self.ray_shadow_ubo {
+                for b in ring {
+                    RhiDevice::destroy_buffer(ctx, b);
+                }
             }
             RhiDevice::destroy_compute_pipeline(ctx, self.marcher);
             RhiDevice::destroy_bind_group_layout(ctx, self.vocab_layout);

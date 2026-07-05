@@ -46,7 +46,14 @@ use crate::error::RhiError;
 /// exactly 19 bindings (0..=18) with identical content — only the inline-array capacity
 /// each backend allocates grows 19 → 20, with the 20th slot unused until an AS is bound.
 /// A `[DescriptorKind::AccelerationStructure]` binding at index 19 is what fills it.
-pub const MAX_BIND_GROUP_BINDINGS: usize = 20;
+///
+/// HW-RT rung 1b: raised 20 → 21 to reserve binding 20 for the HWRT resolve's
+/// tunable soft-shadow params UBO (`boyko_render::ResolvedRayShadow` — the cone/tmax/
+/// tmin/bias the rayQuery mesh-shadow trace reads at runtime). BYTE-NEUTRAL by the same
+/// argument as R2a-4a's 19 → 20: the software resolve still declares exactly 19 bindings
+/// (0..=18) with identical content, and even the HWRT set only grew from 20 to 21 — the
+/// grown tail slot (20) is written solely on the HWRT resolve layout.
+pub const MAX_BIND_GROUP_BINDINGS: usize = 21;
 
 /// Parameters for [`RhiDevice::create_texture`] (Phase-6 S0 graphics surface).
 ///

@@ -2359,6 +2359,12 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         resolve_layout_hwrt: None,
         #[cfg(feature = "hwrt")]
         resolve_tlas_hwrt: None,
+        // Rung 1b: the HWRT resolve is OFF in this harness (`resolve_tlas_hwrt: None`), so the
+        // shadow-params UBO ring is bound by NO set — a benign valid placeholder (the whole cascade
+        // UBO ring, a per-FIF `[BoundBuffer; FRAMES_IN_FLIGHT]`, host-coherent + >= 16 B/slot)
+        // satisfies the field type without ever being read.
+        #[cfg(feature = "hwrt")]
+        ray_shadow_ubo: csm.csm_ring(),
         present_pipeline: &present_pipeline,
         present_layout: &present_layout,
         present_sampler: &present_sampler,
@@ -3244,6 +3250,12 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         resolve_layout_hwrt: None,
         #[cfg(feature = "hwrt")]
         resolve_tlas_hwrt: None,
+        // Rung 1b: the HWRT resolve is OFF in this harness (`resolve_tlas_hwrt: None`), so the
+        // shadow-params UBO ring is bound by NO set — a benign valid placeholder (the whole cascade
+        // UBO ring, a per-FIF `[BoundBuffer; FRAMES_IN_FLIGHT]`, host-coherent + >= 16 B/slot)
+        // satisfies the field type without ever being read.
+        #[cfg(feature = "hwrt")]
+        ray_shadow_ubo: csm.csm_ring(),
         present_pipeline: &present_pipeline,
         present_layout: &present_layout,
         present_sampler: &present_sampler,
@@ -7929,6 +7941,12 @@ fn run_showcase_body_ddgi(
         resolve_layout_hwrt: None,
         #[cfg(feature = "hwrt")]
         resolve_tlas_hwrt: None,
+        // Rung 1b: the HWRT resolve is OFF in this harness (`resolve_tlas_hwrt: None`), so the
+        // shadow-params UBO ring is bound by NO set — a benign valid placeholder (the whole cascade
+        // UBO ring, a per-FIF `[BoundBuffer; FRAMES_IN_FLIGHT]`, host-coherent + >= 16 B/slot)
+        // satisfies the field type without ever being read.
+        #[cfg(feature = "hwrt")]
+        ray_shadow_ubo: csm.csm_ring(),
         present_pipeline: &present_pipeline,
         present_layout: &present_layout,
         present_sampler: &present_sampler,
@@ -9193,6 +9211,12 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         resolve_layout_hwrt: None,
         #[cfg(feature = "hwrt")]
         resolve_tlas_hwrt: None,
+        // Rung 1b: the HWRT resolve is OFF in this harness (`resolve_tlas_hwrt: None`), so the
+        // shadow-params UBO ring is bound by NO set — a benign valid placeholder (the whole cascade
+        // UBO ring, a per-FIF `[BoundBuffer; FRAMES_IN_FLIGHT]`, host-coherent + >= 16 B/slot)
+        // satisfies the field type without ever being read.
+        #[cfg(feature = "hwrt")]
+        ray_shadow_ubo: csm.csm_ring(),
         present_pipeline: &present_pipeline,
         present_layout: &present_layout,
         present_sampler: &present_sampler,

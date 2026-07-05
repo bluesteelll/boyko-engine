@@ -677,9 +677,10 @@ impl GBufferTargets {
             let entries =
                 resolve_software_entries(scene, &imgs, slot, cluster_grid_buf, light_index_buf);
             // The software resolve set is EXACT-FILL at `RESOLVE_SOFTWARE_BINDINGS` (19), under the
-            // R2a-4a cap of `MAX_BIND_GROUP_BINDINGS` (20). Keeping it EXACT (not `<= cap`) preserves
-            // the UNDER-FILL tripwire (a missing binding) AND the over-fill tripwire. R2a-4b adds the
-            // 20-binding HWRT variant as a SEPARATE set, guarded against `RESOLVE_SOFTWARE_BINDINGS + 1`.
+            // rung-1b cap of `MAX_BIND_GROUP_BINDINGS` (21). Keeping it EXACT (not `<= cap`) preserves
+            // the UNDER-FILL tripwire (a missing binding) AND the over-fill tripwire. The HWRT variant
+            // is a SEPARATE 21-binding set (TLAS @19 + shadow-params UBO @20), guarded against
+            // `RESOLVE_HWRT_BINDINGS` — the software fill is untouched.
             debug_assert_eq!(
                 entries.len(),
                 RESOLVE_SOFTWARE_BINDINGS,
@@ -985,12 +986,13 @@ impl GBufferTargets {
             .map(|s| s.expect("invariant: every present ring slot built before reaching here"));
 
         // R2a-4b: the HWRT-variant resolve set RING — built ONLY when the scene wires BOTH the
-        // 20-binding HWRT resolve layout AND the per-FIF TLAS handles (i.e. under `feature = "hwrt"`
+        // 21-binding HWRT resolve layout AND the per-FIF TLAS handles (i.e. under `feature = "hwrt"`
         // + `ctx.ray_query_enabled()` + config HardwareTri). `None` on every software path ⇒ the
         // recorder binds the 19-binding `resolve_set` against the software pipeline ⇒ byte-identical
         // to the golden. Built LAST (after every other fallible set) so its own error path tears
         // down everything prior; no upstream path knows about it. Slot `i`'s set is the 19 software
-        // entries PLUS binding 19 = slot `i`'s persistent TLAS.
+        // entries PLUS binding 19 = slot `i`'s persistent TLAS PLUS rung-1b binding 20 = the HWRT
+        // soft-shadow-params UBO.
         #[cfg(feature = "hwrt")]
         let resolve_set_hwrt: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> =
             match (scene.resolve_layout_hwrt, scene.resolve_tlas_hwrt) {
@@ -1001,7 +1003,8 @@ impl GBufferTargets {
                     for (slot, dst) in hwrt_slots.iter_mut().enumerate() {
                         // The HWRT resolve set = the SAME 19 shared bindings the software set uses
                         // (via `resolve_software_entries`, so they cannot drift) + the 20th
-                        // `AccelerationStructure` at binding 19 (slot `slot`'s frame-stable TLAS).
+                        // `AccelerationStructure` at binding 19 (slot `slot`'s frame-stable TLAS) +
+                        // the rung-1b 21st `UniformBuffer` at binding 20 (the soft-shadow-params UBO).
                         let imgs = ResolveSlotImages {
                             albedo: &albedo[slot],
                             normal: &normal[slot],
@@ -1017,16 +1020,21 @@ impl GBufferTargets {
                             cluster_grid_buf,
                             light_index_buf,
                         );
-                        // Append binding 19 (the `rayQuery` trace target) to the shared 19 →
-                        // `RESOLVE_SOFTWARE_BINDINGS + 1` (20) EXACT-fill. `BindGroupEntry` is not
-                        // `Copy` (it holds a `&A::AccelerationStructure`), so MOVE the shared entries
-                        // into 0..=18 via a by-value iterator chained with the TLAS entry — each
-                        // element is placed exactly once.
-                        const RESOLVE_HWRT_BINDINGS: usize = RESOLVE_SOFTWARE_BINDINGS + 1;
+                        // Append binding 19 (the `rayQuery` trace target) + rung-1b binding 20 (the
+                        // HWRT soft-shadow-params UBO) to the shared 19 → `RESOLVE_SOFTWARE_BINDINGS
+                        // + 2` (21) EXACT-fill. `BindGroupEntry` is not `Copy` (it holds a
+                        // `&A::AccelerationStructure`), so MOVE the shared entries into 0..=18 via a
+                        // by-value iterator chained with the TLAS + UBO entries — each element is
+                        // placed exactly once. The UBO entry mirrors the csm/atlas
+                        // `BindGroupEntry::UniformBuffer` shape.
+                        const RESOLVE_HWRT_BINDINGS: usize = RESOLVE_SOFTWARE_BINDINGS + 2;
                         let mut chained = shared
                             .into_iter()
                             .chain(core::iter::once(BindGroupEntry::AccelerationStructure {
                                 accel: tlas[slot],
+                            }))
+                            .chain(core::iter::once(BindGroupEntry::UniformBuffer {
+                                buffer: &scene.ray_shadow_ubo[slot],
                             }));
                         let entries: [BindGroupEntry<'_, Vulkan>; RESOLVE_HWRT_BINDINGS] =
                             core::array::from_fn(|_| {

@@ -309,7 +309,7 @@ static DEFERRED_PBR_SPV: SpirvBlob<65456> = SpirvBlob(*include_bytes!(concat!(
 /// `RayBackendConfig.table[Shadow][Mesh] == HardwareTri`; the software `.spv` above stays the frozen
 /// 65456-byte golden artifact (the `#else` is byte-verbatim, verified by a recompile temp-diff).
 #[cfg(feature = "hwrt")]
-static DEFERRED_PBR_HWRT_SPV: SpirvBlob<58884> = SpirvBlob(*include_bytes!(concat!(
+static DEFERRED_PBR_HWRT_SPV: SpirvBlob<59424> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/deferred_pbr_hwrt.comp.spv"
 )));

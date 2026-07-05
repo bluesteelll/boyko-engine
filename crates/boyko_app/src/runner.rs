@@ -34,7 +34,7 @@ use boyko_render::{
     upload_light_table, upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
 };
 #[cfg(all(windows, feature = "hwrt"))]
-use boyko_render::upload_mesh_ids;
+use boyko_render::{ResolvedRayShadow, upload_mesh_ids, upload_ray_shadow_ring};
 #[cfg(windows)]
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 #[cfg(windows)]
@@ -533,6 +533,30 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // until teardown, the fenced slot `s == token.slot()`).
             unsafe {
                 upload_atlas_ring(&token, host.gpu.atlas_ubo_slot(s), resolved_atlas);
+            }
+
+            // 5d''. HW-RT rung 1b: the HWRT soft-shadow-params UBO into slot `s` —
+            //       UNCONDITIONAL every HWRT frame (16 B; `resolve_ray_shadow_system`
+            //       re-derives it from the author `RayShadowConfig`, so a boot-seed
+            //       would go stale on a retune, see `upload_ray_shadow_ring`). GATED on
+            //       an RT device (`ray_query_enabled`) — the SAME gate that mints the
+            //       ring in `GpuSceneBundles::boot`, so an unminted slot is never
+            //       uploaded; a software-only build pays zero (the whole block is
+            //       `#[cfg(feature = "hwrt")]`).
+            #[cfg(feature = "hwrt")]
+            if ctx.ray_query_enabled() {
+                let resolved_ray_shadow = world.resource::<ResolvedRayShadow>();
+                // SAFETY: the HWRT shadow-params UBO ring slot — same provenance
+                // contract as the cascade slot above (boot-minted at
+                // RESOLVED_RAY_SHADOW_BYTES on the RT device under this same gate, live
+                // until teardown, the fenced slot `s == token.slot()`).
+                unsafe {
+                    upload_ray_shadow_ring(
+                        &token,
+                        host.gpu.ray_shadow_ubo_slot(s),
+                        resolved_ray_shadow,
+                    );
+                }
             }
 
             // 6a. DrawBatch → GBufferMeshDraw: resolve each batch's mesh to its
