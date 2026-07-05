@@ -155,6 +155,18 @@ pub mod ray_plugin;
 /// through the HWRT resolve's binding-20 UBO. Defaults byte-identical to the R2a-4b consts.
 pub mod ray_shadow_config;
 pub mod render3d_plugin;
+/// HW-RT Rung 3a Step 1 — the ECS-native shadow-denoise config
+/// ([`ShadowDenoiseConfig`](shadow_denoise_config::ShadowDenoiseConfig) +
+/// [`ResolvedShadowDenoise`](shadow_denoise_config::ResolvedShadowDenoise) Resources + the pure
+/// [`resolve_shadow_denoise`](shadow_denoise_config::resolve_shadow_denoise) pack + the cold
+/// [`resolve_shadow_denoise_policy`](shadow_denoise_config::resolve_shadow_denoise_policy) writer).
+/// The a-trous loop-bound `levels` drives the host dispatch count; the edge-stop scalars flow
+/// through a 16-byte std140 UBO. Default [`None`](shadow_denoise_config::ShadowDenoiseMode::None)
+/// is the 0%-gate — byte-identical to today (no denoise pass).
+pub mod shadow_denoise_config;
+/// HW-RT Rung 3a Step 1 — the [`ShadowDenoisePlugin`](shadow_denoise_plugin::ShadowDenoisePlugin)
+/// that seeds the config substrate and schedules the cold resolve single-writer.
+pub mod shadow_denoise_plugin;
 /// Host plan R7 — the SDF instance path: the per-entity
 /// [`SdfPrimitive`](sdf_edit::SdfPrimitive) component (an `SdfEdit` carrier), the reused
 /// [`SdfEditStaging`](sdf_edit::SdfEditStaging) gather scratch, the one-shot startup
@@ -212,6 +224,11 @@ pub use ray_shadow_config::{
     RESOLVED_RAY_SHADOW_BYTES, RayShadowConfig, ResolvedRayShadow, resolve_ray_shadow,
     resolve_ray_shadow_system,
 };
+pub use shadow_denoise_config::{
+    MAX_ATROUS_LEVELS, RESOLVED_SHADOW_DENOISE_BYTES, ResolvedShadowDenoise, ShadowDenoiseConfig,
+    ShadowDenoiseMode, resolve_shadow_denoise, resolve_shadow_denoise_policy,
+};
+pub use shadow_denoise_plugin::ShadowDenoisePlugin;
 // HW-RT rung R1: re-export `RtTier` (defined in `boyko_rhi_vulkan::device`) since the
 // crate surfaces the ray-caps tier (`RayCaps`) — a consumer that fills `RayCaps` from a
 // device query gets the tier type from here.
