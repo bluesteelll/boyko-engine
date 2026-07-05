@@ -39,7 +39,14 @@ use crate::error::RhiError;
 /// bindings — the resolve set stays at 16 under a cap of 19 (byte-identical render).
 /// A boot-time device-limit check (`pick_physical_device` in the Vulkan backend)
 /// guards that 19 stays under the per-stage descriptor limits those additions consume.
-pub const MAX_BIND_GROUP_BINDINGS: usize = 19;
+///
+/// HW-RT rung R2a-4a: raised 19 → 20 to reserve binding 19 for the deferred resolve's
+/// `RaytracingAccelerationStructure` (the TLAS the R2a-4b rayQuery mesh-shadow trace
+/// reads). BYTE-NEUTRAL to every existing path: the software resolve still declares
+/// exactly 19 bindings (0..=18) with identical content — only the inline-array capacity
+/// each backend allocates grows 19 → 20, with the 20th slot unused until an AS is bound.
+/// A `[DescriptorKind::AccelerationStructure]` binding at index 19 is what fills it.
+pub const MAX_BIND_GROUP_BINDINGS: usize = 20;
 
 /// Parameters for [`RhiDevice::create_texture`] (Phase-6 S0 graphics surface).
 ///
@@ -198,8 +205,9 @@ pub struct BindGroupLayoutDesc<'a> {
 }
 
 /// One resource written into a [`BindGroupDesc`]'s descriptor set at the matching
-/// layout entry's binding (Render P1a) — a tagged union over the five
-/// [`DescriptorKind`]s.
+/// layout entry's binding (Render P1a) — a tagged union over the
+/// [`DescriptorKind`]s (five resource kinds since P1a, plus an acceleration structure
+/// since HW-RT rung R2a-4a).
 ///
 /// Each variant borrows the backend resource(s) for the `create_bind_group` call
 /// only — but the resulting bind group retains them BY RAW HANDLE in its descriptor
@@ -237,6 +245,20 @@ pub enum BindGroupEntry<'a, A: RhiApi> {
     UniformBuffer {
         /// The buffer bound at this binding (its full range).
         buffer: &'a A::Buffer,
+    },
+    /// A `VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR` — a ray-tracing acceleration
+    /// structure (a TLAS a `rayQuery` shader traces against; HW-RT rung R2a-4a).
+    ///
+    /// Written via the extension-specific `p_next` chain (a
+    /// `VkWriteDescriptorSetAccelerationStructureKHR` carrying the AS handle), NOT the
+    /// image/buffer-info arms; the backend handles that. The borrowed AS's handle must
+    /// stay live for the whole `create_bind_group` call (the descriptor write copies the
+    /// handle into the set). On a backend that binds `A::AccelerationStructure = ()`
+    /// (the non-`hwrt` default) the variant is still constructible (`accel: &()`) but
+    /// nonsensical — the backend defensively panics on it rather than silently no-op'ing.
+    AccelerationStructure {
+        /// The acceleration structure (a TLAS) bound at this binding.
+        accel: &'a A::AccelerationStructure,
     },
 }
 

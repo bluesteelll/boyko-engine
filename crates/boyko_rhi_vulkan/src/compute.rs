@@ -504,6 +504,19 @@ static BUILD_TLAS_INSTANCES_SPV: SpirvBlob<3572> = SpirvBlob(*include_bytes!(con
     "/shaders/build_tlas_instances.comp.spv"
 )));
 
+/// HW-RT rung R2a-4a: the AS-descriptor GPU-smoke shader (`hwrt_as_descriptor_smoke.comp`). A
+/// minimal `rayQuery` compute that binds a TLAS at t0 (the new
+/// `VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR` descriptor), traces one inline ray against it,
+/// and writes the hit flag to a single-`uint` output (u1). It exists ONLY as the oracle for the
+/// AS-descriptor `p_next` write — the smoke passes iff the dispatch is device-lost-free with clean
+/// validation. Compiled `dxc -T cs_6_5 -fspv-target-env=vulkan1.3` (emits `OpCapability
+/// RayQueryKHR`). The size pins the committed `.spv`.
+#[cfg(feature = "hwrt")]
+static HWRT_AS_DESCRIPTOR_SMOKE_SPV: SpirvBlob<1412> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/hwrt_as_descriptor_smoke.comp.spv"
+)));
+
 /// A 4-byte-aligned wrapper around a committed SPIR-V byte blob so its address is
 /// a valid `*const u32` and it can be re-viewed as a `&[u32]` word stream.
 #[repr(C, align(4))]
@@ -921,6 +934,20 @@ pub fn build_tlas_instances_spirv() -> &'static [u32] {
 /// (`{ uint count }` — the drawable-instance bounds guard). Mirrors the shader's `Push`.
 #[cfg(feature = "hwrt")]
 pub const BUILD_TLAS_INSTANCES_PUSH_BYTES: u32 = 4;
+
+/// The committed HW-RT rung R2a-4a AS-descriptor GPU-smoke SPIR-V
+/// (`hwrt_as_descriptor_smoke.comp`) as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// A minimal `rayQuery` compute bound to a 2-binding set { `RaytracingAccelerationStructure` @0
+/// (a `DescriptorKind::AccelerationStructure` — the R2a-4a descriptor under test),
+/// `RWStructuredBuffer<uint>` @1 (the hit-flag output) }, dispatched `1×1×1` by the R2a-4a GPU
+/// smoke to exercise the AS-descriptor `p_next` write on real hardware. No push constants.
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn hwrt_as_descriptor_smoke_spirv() -> &'static [u32] {
+    HWRT_AS_DESCRIPTOR_SMOKE_SPV.as_words()
+}
 
 /// The number of pre-compiled SSAO quality variants (the valid `SSAO_QUALITY_*` / [`SSAO_PARAMS`]
 /// index range, `0..SSAO_QUALITY_COUNT`).

@@ -391,6 +391,60 @@ pub const ST_MEMORY_BARRIER: i32 = 46;
 const _: () = assert!(size_of::<VkMemoryBarrier>() == 24);
 const _: () = assert!(align_of::<VkMemoryBarrier>() == 8);
 
+/// `VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR` (vulkan_core.h; value
+/// `1_000_150_007`). Chained into a `VkWriteDescriptorSet`'s `p_next` to bind a TLAS to an
+/// `ACCELERATION_STRUCTURE_KHR` descriptor (HW-RT rung R2a-4a).
+///
+/// NOTE: `1_000_150_007` was the pre-fix (wrong) value of
+/// [`ST_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR`] — the R2a-1 review found that
+/// collision and moved the build-info sType to its correct `1_000_150_000`. So this constant
+/// is now the ONLY user of `1_000_150_007`, its true owner.
+pub const ST_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR: i32 = 1_000_150_007;
+
+/// `VkWriteDescriptorSetAccelerationStructureKHR` — the extension `p_next` struct that carries
+/// the acceleration-structure handle(s) a `VkWriteDescriptorSet` of type
+/// `VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR` binds (HW-RT rung R2a-4a).
+///
+/// The owning `VkWriteDescriptorSet.p_next` points at ONE of these; its
+/// `p_acceleration_structures` names an array of `acceleration_structure_count`
+/// `VkAccelerationStructureKHR` handles (one per array element of the descriptor —
+/// `descriptor_count` on the write must equal `acceleration_structure_count`). R2a-4a binds a
+/// single TLAS, so both are `1`. `#[repr(C)]` pins the exact C layout (`s_type`@0 + `_pad`@4 +
+/// `p_next`@8 + `count`@16 + `_pad2`@20 + `p_acceleration_structures`@24 = 32 B, align 8); the
+/// explicit `_pad`/`_pad2` make the natural 8-byte alignment of the two pointers visible for a
+/// `#[repr(C)]` reader.
+#[repr(C)]
+pub struct VkWriteDescriptorSetAccelerationStructureKHR {
+    pub s_type: i32,
+    pub _pad: i32,
+    pub p_next: *const c_void,
+    /// The number of acceleration structures in `p_acceleration_structures` (== the owning
+    /// write's `descriptor_count`).
+    pub acceleration_structure_count: u32,
+    pub _pad2: u32,
+    /// `const VkAccelerationStructureKHR*` — the AS handle array the descriptor binds.
+    pub p_acceleration_structures: *const VkAccelerationStructureKHR,
+}
+
+// abi_guard: pin the exact C size/align/offsets — a driver reads this struct through the
+// `p_next` chain of a batched `vkUpdateDescriptorSets`, so a layout slip is a silent
+// mis-parse (device-lost) invisible on a no-validation box.
+const _: () = assert!(size_of::<VkWriteDescriptorSetAccelerationStructureKHR>() == 32);
+const _: () = assert!(align_of::<VkWriteDescriptorSetAccelerationStructureKHR>() == 8);
+const _: () = assert!(offset_of!(VkWriteDescriptorSetAccelerationStructureKHR, s_type) == 0);
+const _: () = assert!(offset_of!(VkWriteDescriptorSetAccelerationStructureKHR, p_next) == 8);
+const _: () = assert!(
+    offset_of!(VkWriteDescriptorSetAccelerationStructureKHR, acceleration_structure_count) == 16
+);
+const _: () = assert!(
+    offset_of!(VkWriteDescriptorSetAccelerationStructureKHR, p_acceleration_structures) == 24
+);
+
+// Value-guard: the sType must equal `VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR`
+// (`1_000_150_007`). A wrong sType VALUE silently device-losts on a no-validation box (the R2a-1
+// lesson — 4 wrong sTypes, one a live collision), so a transcription slip fails THIS build.
+const _: () = assert!(ST_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR == 1_000_150_007);
+
 /// The ABI-critical **`VkAccelerationStructureInstanceKHR`** — one TLAS instance
 /// (64 B packed, align 8).
 ///

@@ -74,10 +74,13 @@ const MAX_VERTEX_ATTRIBUTES: usize = 8;
 /// (M4) per-level bindings (`N = brick::BRICK_LEVELS` levels × 2 resources on top of
 /// the 0..=8 gbuffer bindings = 15 — see the agnostic
 /// `boyko_rhi::MAX_BIND_GROUP_BINDINGS` docstring). SDFDDGI I(-1) raised it 16 → 19 to
-/// reserve room for the 3 DDGI resolve bindings landed in rung I0 (this rung adds
-/// none). A `debug_assert!` traps an over-count at
+/// reserve room for the 3 DDGI resolve bindings landed in rung I0. HW-RT rung R2a-4a
+/// raised it 19 → 20 to reserve binding 19 for the resolve's
+/// `RaytracingAccelerationStructure` (the TLAS the rayQuery mesh-shadow trace reads) —
+/// BYTE-NEUTRAL: the software resolve still fills 19, only the inline-array capacity
+/// grows. A `debug_assert!` traps an over-count at
 /// `create_bind_group_layout`/`create_bind_group`.
-const MAX_BIND_GROUP_BINDINGS: usize = 19;
+const MAX_BIND_GROUP_BINDINGS: usize = 20;
 
 // The bind-group create path keeps its own copy of the cap so a future divergence
 // from the agnostic `boyko_rhi::MAX_BIND_GROUP_BINDINGS` (the desc-side cap) breaks
@@ -87,19 +90,44 @@ const _: () = assert!(
     "backend bind-group cap must match the agnostic boyko_rhi::MAX_BIND_GROUP_BINDINGS"
 );
 
-/// The five [`DescriptorKind`] slots, in a fixed order, used to bucket a bind
-/// group's descriptors into a per-kind histogram for exact pool sizing (Render P1a).
-/// [`DESCRIPTOR_KIND_VK`] maps each slot to its `VkDescriptorType`; the two arrays
-/// share the slot order.
-const DESCRIPTOR_KIND_VK: [i32; 5] = [
+/// `VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR` (value `1_000_150_000`) — the
+/// `VkDescriptorType` a TLAS binding declares (HW-RT rung R2a-4a). Sourced from the agnostic
+/// [`DescriptorKind::AccelerationStructure`] discriminant (its own value-guard pins the value),
+/// so the histogram + the write's `descriptor_type` share one source of truth.
+const VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR: i32 =
+    DescriptorKind::AccelerationStructure.as_i32();
+
+/// The [`DescriptorKind`] slots, in a fixed order, used to bucket a bind group's descriptors
+/// into a per-kind histogram for exact pool sizing (Render P1a; the AS slot 5 added at HW-RT
+/// rung R2a-4a). [`DESCRIPTOR_KIND_VK`] maps each slot to its `VkDescriptorType`; the two
+/// arrays share the slot order. The array length MUST equal [`KIND_COUNT`] — the const-guard
+/// below pins it (a slot-count divergence would over/under-run the `create_bind_group`
+/// histogram).
+const DESCRIPTOR_KIND_VK: [i32; 6] = [
     VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
     VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
     VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
 ];
 
-/// Maps a [`DescriptorKind`] to its histogram slot in [`DESCRIPTOR_KIND_VK`].
+// The histogram's slot count (see `create_bind_group`'s `KIND_COUNT`) MUST equal the
+// per-slot `VkDescriptorType` table length — otherwise `descriptor_kind_slot` could return a
+// slot the `hist`/`DESCRIPTOR_KIND_VK` arrays cannot index (a release OOB). Pin it here.
+const _: () = assert!(DESCRIPTOR_KIND_VK.len() == KIND_COUNT);
+
+// Value-guard: slot 5 is the AS descriptor type (`1_000_150_000`). A wrong value silently
+// device-losts (the R2a-1 RT-value lesson — `abi_guard` pins layout, not values).
+const _: () = assert!(DESCRIPTOR_KIND_VK[5] == 1_000_150_000);
+
+/// The number of [`DescriptorKind`] histogram slots (== [`DESCRIPTOR_KIND_VK`] length).
+/// `create_bind_group` sizes its per-kind `hist`/`pool_sizes` inline arrays to this. Raised
+/// 5 → 6 at HW-RT rung R2a-4a for the acceleration-structure slot.
+const KIND_COUNT: usize = 6;
+
+/// Maps a [`DescriptorKind`] to its histogram slot in [`DESCRIPTOR_KIND_VK`] (an exhaustive
+/// match with NO wildcard, so a new kind fails to compile until it is slotted here).
 #[inline]
 fn descriptor_kind_slot(kind: DescriptorKind) -> usize {
     match kind {
@@ -108,6 +136,7 @@ fn descriptor_kind_slot(kind: DescriptorKind) -> usize {
         DescriptorKind::StorageImage => 2,
         DescriptorKind::UniformBuffer => 3,
         DescriptorKind::StorageBuffer => 4,
+        DescriptorKind::AccelerationStructure => 5,
     }
 }
 
@@ -122,6 +151,11 @@ fn bind_group_entry_kind(entry: &BindGroupEntry<Vulkan>) -> DescriptorKind {
         BindGroupEntry::CombinedImage { .. } => DescriptorKind::CombinedImageSampler,
         BindGroupEntry::StorageBuffer { .. } => DescriptorKind::StorageBuffer,
         BindGroupEntry::UniformBuffer { .. } => DescriptorKind::UniformBuffer,
+        // HW-RT rung R2a-4a: a TLAS binding. The variant is ungated in `boyko_rhi` (its
+        // `A::AccelerationStructure` is `()` without `hwrt`), so this arm compiles in both
+        // builds; only the `create_bind_group` WRITE branch (which names AS FFI types) is
+        // `#[cfg(feature = "hwrt")]`.
+        BindGroupEntry::AccelerationStructure { .. } => DescriptorKind::AccelerationStructure,
     }
 }
 
@@ -970,9 +1004,9 @@ impl RhiDevice<Vulkan> for VulkanContext {
         let count = count.clamp(1, MAX_BIND_GROUP_BINDINGS);
 
         // --- Per-kind descriptor histogram → pool sizes (one entry per kind that
-        //     actually appears, so the pool is sized exactly). The five kinds map onto
-        //     fixed histogram slots; `pool_sizes` is a fixed inline array (zero heap). ---
-        const KIND_COUNT: usize = 5;
+        //     actually appears, so the pool is sized exactly). The kinds map onto fixed
+        //     histogram slots ([`KIND_COUNT`] of them); `pool_sizes` is a fixed inline
+        //     array (zero heap). ---
         let mut hist = [0u32; KIND_COUNT];
         for entry in desc.entries.iter().take(count) {
             hist[descriptor_kind_slot(bind_group_entry_kind(entry))] += 1;
@@ -1059,6 +1093,26 @@ impl RhiDevice<Vulkan> for VulkanContext {
             offset: 0,
             range: 0,
         }; MAX_BIND_GROUP_BINDINGS];
+        // HW-RT rung R2a-4a: the per-entry acceleration-structure `p_next` scratch, PARALLEL to
+        // `image_infos`/`buffer_infos`. An AS binding's `VkWriteDescriptorSet.p_next` points at
+        // this array's slot `i` (NOT a closure-local, which would DANGLE past the `from_fn`
+        // closure — the batched `vkUpdateDescriptorSets` below reads every `p_next` at once). It
+        // is address-stable to that update because it is declared here, out of the closure. The
+        // array itself is only READ by the driver for the AS-kind slots; the buffer/image slots
+        // leave their scratch entry untouched (a harmless zeroed default). Gated `hwrt` because it
+        // names the RT FFI type; a non-`hwrt` build binds no AS, so it needs no scratch.
+        #[cfg(feature = "hwrt")]
+        let mut as_writes: [crate::accel_ffi::VkWriteDescriptorSetAccelerationStructureKHR;
+            MAX_BIND_GROUP_BINDINGS] = core::array::from_fn(|_| {
+            crate::accel_ffi::VkWriteDescriptorSetAccelerationStructureKHR {
+                s_type: crate::accel_ffi::ST_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+                _pad: 0,
+                p_next: ptr::null(),
+                acceleration_structure_count: 0,
+                _pad2: 0,
+                p_acceleration_structures: ptr::null(),
+            }
+        });
         let writes: [VkWriteDescriptorSet; MAX_BIND_GROUP_BINDINGS] = core::array::from_fn(|i| {
             if i >= count {
                 // Unused tail slot — never read (`descriptor_count: 0`, and the update
@@ -1095,6 +1149,11 @@ impl RhiDevice<Vulkan> for VulkanContext {
             let dst_binding = desc.layout.entries[i].binding;
             let mut p_image_info: *const c_void = ptr::null();
             let mut p_buffer_info: *const VkDescriptorBufferInfo = ptr::null();
+            // HW-RT rung R2a-4a: the write's `p_next`. Null for every P1a resource kind (the
+            // driver reads none); an AS binding points it at the `as_writes[i]` scratch below.
+            // Only the `hwrt` AS arm reassigns it, so a non-`hwrt` build never mutates it.
+            #[cfg_attr(not(feature = "hwrt"), allow(unused_mut))]
+            let mut p_next: *const c_void = ptr::null();
             match *entry {
                 BindGroupEntry::StorageImage { texture } => {
                     // SDFDDGI I2: a MULTI-LAYER texture (array_view != NULL) binds its
@@ -1154,10 +1213,47 @@ impl RhiDevice<Vulkan> for VulkanContext {
                     };
                     p_buffer_info = &buffer_infos[i];
                 }
+                // HW-RT rung R2a-4a: bind a TLAS. The AS handle rides the extension `p_next`
+                // chain (NOT `p_image_info`/`p_buffer_info`, which stay null). TWO pointer
+                // lifetimes are pinned to survive the SINGLE batched `vkUpdateDescriptorSets`
+                // below (the `from_fn` closure returns, so any closure-local would DANGLE):
+                //   (i)  `p_next` → `&as_writes[i]`, the out-of-closure per-entry scratch;
+                //   (ii) `p_acceleration_structures` → `&accel.handle`, read DIRECTLY from the
+                //        borrowed `&'a BoundAccelStruct` (`desc.entries[i]` holds the `&'a`, so
+                //        `accel.handle`'s address is stable for the whole `create_bind_group`
+                //        call — never a copied local).
+                #[cfg(feature = "hwrt")]
+                BindGroupEntry::AccelerationStructure { accel } => {
+                    as_writes[i] = crate::accel_ffi::VkWriteDescriptorSetAccelerationStructureKHR {
+                        s_type: crate::accel_ffi::ST_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+                        _pad: 0,
+                        p_next: ptr::null(),
+                        acceleration_structure_count: 1,
+                        _pad2: 0,
+                        // `accel.handle` lives in the borrowed `&'a BoundAccelStruct` (address
+                        // stable for the call); taking its address does not copy the handle into
+                        // a local. The pointer is read by the driver during the update below.
+                        p_acceleration_structures: &accel.handle,
+                    };
+                    p_next = (&as_writes[i]
+                        as *const crate::accel_ffi::VkWriteDescriptorSetAccelerationStructureKHR)
+                        .cast();
+                }
+                // A non-`hwrt` build binds `A::AccelerationStructure = ()`, so this variant IS
+                // constructible (`accel: &()`) but is nonsensical — there is no RT device to bind
+                // against. Defensive loud panic (not a compiler-dead arm): a caller who binds an AS
+                // without `hwrt` gets a clean abort, not a silently no-op'd descriptor. Keeps the
+                // match exhaustive without naming the AS FFI in a non-`hwrt` build.
+                #[cfg(not(feature = "hwrt"))]
+                BindGroupEntry::AccelerationStructure { .. } => {
+                    unreachable!(
+                        "invariant: BindGroupEntry::AccelerationStructure requires feature=\"hwrt\""
+                    )
+                }
             }
             VkWriteDescriptorSet {
                 s_type: VkStructureType::WriteDescriptorSet,
-                p_next: ptr::null(),
+                p_next,
                 dst_set: descriptor_set,
                 dst_binding,
                 dst_array_element: 0,
@@ -1174,12 +1270,16 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // `p_image_info` points at the matching `image_infos[i]` local (which names the
         // caller's live image view + optional sampler); for a buffer kind
         // `p_buffer_info` points at `buffer_infos[i]` (which names the caller's live
-        // buffer with its full range). The non-relevant pointer stays null, which the
-        // driver ignores for that descriptor type. Both inline info arrays + the
-        // `writes` array outlive the call; only the first `count` writes are passed
-        // (the count bounds the driver's read). The set is not bound to any pending
-        // command buffer (it was just allocated), so writing it is sound — and it is
-        // written exactly ONCE here, never per-frame.
+        // buffer with its full range). For an AS kind (HW-RT R2a-4a) `p_next` points at
+        // `as_writes[i]`, whose `p_acceleration_structures` points at `accel.handle` inside the
+        // caller's borrowed `&'a BoundAccelStruct` — BOTH lifetimes outlive this single batched
+        // call: `as_writes` is declared out of the `from_fn` closure (address-stable), and the
+        // `&'a` AS borrow is live for the whole `create_bind_group`. The non-relevant pointers
+        // stay null, which the driver ignores for that descriptor type. All inline info arrays,
+        // the AS scratch, and the `writes` array outlive the call; only the first `count` writes
+        // are passed (the count bounds the driver's read). The set is not bound to any pending
+        // command buffer (it was just allocated), so writing it is sound — and it is written
+        // exactly ONCE here, never per-frame.
         unsafe {
             (fns.update_descriptor_sets)(device, count as u32, writes.as_ptr(), 0, ptr::null())
         };

@@ -577,11 +577,12 @@ impl AddressMode {
 /// `#[repr(i32)]` with discriminants equal to the matching `VkDescriptorType`
 /// constants (asserted backend-side in `abi_guard.rs`), so the backend maps a
 /// [`crate::device::BindGroupLayoutEntry::kind`] to a `VkDescriptorType` with a
-/// trivial `as i32` cast — no per-kind translation table. Only the five kinds the
-/// G-buffer foundation needs are defined (a combined image+sampler, a separate
-/// sampled image, a storage image, a uniform buffer, a storage buffer); the family
-/// grows per phase. This generalizes the prior COMBINED_IMAGE_SAMPLER-only
-/// bind-group surface into the multi-resource descriptor vocabulary.
+/// trivial `as i32` cast — no per-kind translation table. The G-buffer foundation
+/// defined five kinds (a combined image+sampler, a separate sampled image, a storage
+/// image, a uniform buffer, a storage buffer); HW-RT rung R2a-4a added a sixth (an
+/// acceleration structure). The family grows per phase. This generalizes the prior
+/// COMBINED_IMAGE_SAMPLER-only bind-group surface into the multi-resource descriptor
+/// vocabulary.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DescriptorKind {
@@ -600,7 +601,25 @@ pub enum DescriptorKind {
     /// `VK_DESCRIPTOR_TYPE_STORAGE_BUFFER` — a read/write buffer a shader accesses
     /// (the P1a marcher's edit-list input).
     StorageBuffer = 7,
+    /// `VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR` — a ray-tracing acceleration
+    /// structure (a TLAS a `rayQuery`/`traceRay` shader traces against; HW-RT rung
+    /// R2a-4a). The discriminant `1_000_150_000` is `VkDescriptorType`'s extension
+    /// value.
+    ///
+    /// NOTE: `1_000_150_000` numerically COINCIDES with
+    /// `VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR`
+    /// (`accel_ffi.rs`'s `ST_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR`), but the
+    /// two live in DIFFERENT Vulkan enum namespaces (`VkDescriptorType` here vs
+    /// `VkStructureType` there) — the coincidence is not a bug and neither value may be
+    /// "deduped" into the other.
+    AccelerationStructure = 1_000_150_000,
 }
+
+/// Value-guard: `AccelerationStructure` must equal `VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR`
+/// (`1_000_150_000`). A wrong `VkDescriptorType` VALUE is a SILENT device-lost on a
+/// no-validation box (the R2a-1 sType-collision lesson: `abi_guard` pins layout, not values),
+/// so a transcription slip on the discriminant above fails THIS build, not the GPU.
+const _: () = assert!(DescriptorKind::AccelerationStructure as i32 == 1_000_150_000);
 
 impl DescriptorKind {
     /// The raw `i32` discriminant — equal to the matching `VkDescriptorType`.

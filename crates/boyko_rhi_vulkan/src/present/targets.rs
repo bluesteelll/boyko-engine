@@ -3,7 +3,7 @@
 //! recreate). Split out of the former monolithic `swapchain.rs` (audit W4).
 
 use boyko_rhi::{
-    BindGroupDesc, BindGroupEntry, Format, ImageUsage, MAX_BIND_GROUP_BINDINGS, RhiDevice,
+    BindGroupDesc, BindGroupEntry, Format, ImageUsage, RhiDevice,
     TextureDesc, TextureDimension,
 };
 
@@ -101,9 +101,9 @@ pub struct GBufferTargets {
     /// bound; the resolve reads it only under `ssao_mode != 0` (0 every pre-P7 scene). @12/@13 =
     /// the CSM cascade combined-image + UBO; @14/@15 = the punctual shadow-atlas combined-image +
     /// UBO; @16/@17/@18 = the SDFDDGI probe irradiance + depth combined images + the `ResolvedDdgi`
-    /// grid UBO (all bound-but-unread when their header gate is 0). The set is EXACT-FILL at
-    /// `MAX_BIND_GROUP_BINDINGS` (19). NO
-    /// per-frame update.
+    /// grid UBO (all bound-but-unread when their header gate is 0). The software set is EXACT-FILL
+    /// at `RESOLVE_SOFTWARE_BINDINGS` (19), under the R2a-4a cap of `MAX_BIND_GROUP_BINDINGS` (20).
+    /// NO per-frame update.
     ///
     /// A RING (one per in-flight frame): slot `i` binds `scene.camera_ring[i]` @5 +
     /// `scene.csm_cascade_ring[i]` @13 — the lock-free per-frame ring fix; every other binding is
@@ -627,8 +627,8 @@ impl GBufferTargets {
                 // `ddgi_mode != 0` (header word-7 bit 4; 0 every pre-SDFDDGI scene → OFF by default),
                 // so the bound-but-unread DDGI atlases/UBO are never sampled (the 0%-gate). The I0
                 // dummies reuse existing bound-but-unread array textures + a zeroed grid UBO. These
-                // are the 17th/18th/19th entries (indices 16, 17, 18); the set now sits at EXACTLY 19
-                // under the cap (`MAX_BIND_GROUP_BINDINGS == 19`).
+                // are the 17th/18th/19th entries (indices 16, 17, 18); the software resolve set sits
+                // at EXACTLY 19 bindings (`RESOLVE_SOFTWARE_BINDINGS`, under the R2a-4a cap of 20).
                 BindGroupEntry::CombinedImage {
                     texture: scene.ddgi_irr_texture,
                     sampler: scene.ddgi_irr_sampler,
@@ -647,15 +647,19 @@ impl GBufferTargets {
             // depth @17 + the grid UBO @18 (the combined images via the collapse — the in-house RHI
             // has no SAMPLER-only `BindGroupEntry`).
             //
-            // SDFDDGI I0 restores EXACT-FILL: the resolve set declares exactly
-            // `MAX_BIND_GROUP_BINDINGS` (== 19) bindings, so the guard is back to `== cap` (I(-1)
-            // temporarily relaxed it to `<= cap` while the 3 DDGI bindings were pending). An
-            // over-count is a bug (past the inline-array capacity); an under-count now means a missing
-            // binding this rung was meant to add — both are caught.
+            // SDFDDGI I0 restores EXACT-FILL: the SOFTWARE resolve set declares exactly 19
+            // bindings (0..=18). HW-RT rung R2a-4a raised `MAX_BIND_GROUP_BINDINGS` 19 → 20 to
+            // reserve binding 19 for a TLAS, so the guard can no longer pin to the CAP — it must
+            // pin to the resolve's OWN expected count (`RESOLVE_SOFTWARE_BINDINGS`). Keeping it
+            // EXACT (not relaxed to `<= cap`) preserves the UNDER-FILL tripwire: an over-count is
+            // a bug (past the inline-array capacity) AND an under-count means a missing binding —
+            // both are caught. R2a-4b adds the 20-binding HWRT variant as a SEPARATE set, guarded
+            // against its own `RESOLVE_SOFTWARE_BINDINGS + 1`.
+            const RESOLVE_SOFTWARE_BINDINGS: usize = 19;
             debug_assert_eq!(
                 entries.len(),
-                MAX_BIND_GROUP_BINDINGS,
-                "invariant: the resolve set must declare EXACTLY the {MAX_BIND_GROUP_BINDINGS}-binding descriptor cap (exact-fill)"
+                RESOLVE_SOFTWARE_BINDINGS,
+                "invariant: the software resolve set must declare EXACTLY {RESOLVE_SOFTWARE_BINDINGS} bindings (exact-fill)"
             );
             let desc = BindGroupDesc::<Vulkan> {
                 layout: scene.resolve_layout,

@@ -32,7 +32,9 @@ use boyko_rhi_vulkan::accel_build::{
     BlasBuildInput, buffer_device_address, build_blas, build_tlas, create_persistent_tlas,
     destroy_blas, destroy_persistent_tlas, destroy_tlas,
 };
-use boyko_rhi_vulkan::compute::{BUILD_TLAS_INSTANCES_PUSH_BYTES, build_tlas_instances_spirv};
+use boyko_rhi_vulkan::compute::{
+    BUILD_TLAS_INSTANCES_PUSH_BYTES, build_tlas_instances_spirv, hwrt_as_descriptor_smoke_spirv,
+};
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::memory::BoundBuffer;
 
@@ -453,6 +455,126 @@ fn hwrt_tlas_pack_build_smoke() {
         ctx.destroy_buffer(ib1);
     }
 
+    assert_validation_clean(&ctx);
+    drop(ctx);
+}
+
+/// R2a-4a GPU smoke: the AS-DESCRIPTOR write. Build a BLAS + a TLAS, then bind the TLAS to a
+/// `DescriptorKind::AccelerationStructure` descriptor via the new
+/// `VkWriteDescriptorSetAccelerationStructureKHR` `p_next` path (`create_bind_group` with a
+/// `BindGroupEntry::AccelerationStructure`), and DISPATCH a trivial `rayQuery` compute that traces
+/// one ray against the bound TLAS and writes the hit flag to an output buffer. The oracle is "no
+/// device-lost + clean validation": if the AS-descriptor write is malformed (wrong sType, dangling
+/// `p_acceleration_structures`, bad layout) the trace mis-reads the descriptor → a device-lost / a
+/// validation error. This is the ONLY oracle for the R2a-4a AS-descriptor `p_next` write (the
+/// silent-FFI UAF class `abi_guard`/Miri cannot see).
+#[test]
+#[ignore = "requires a real RT GPU (run: --features hwrt -- --ignored --test-threads=1)"]
+fn hwrt_as_descriptor_smoke() {
+    let Some(ctx) = boot_or_skip("hwrt_as_descriptor_smoke") else {
+        return;
+    };
+    println!("Vulkan device: {}", ctx.device_name());
+    if !ctx.ray_query_enabled() {
+        eprintln!(
+            "SKIP hwrt_as_descriptor_smoke: device '{}' does not expose ray query (non-RT GPU)",
+            ctx.device_name()
+        );
+        return;
+    }
+
+    let queue = ctx.rhi_queue();
+
+    // The simplest valid TLAS: one single-triangle BLAS, one instance over it.
+    let (vb, ib) = make_triangle(&ctx);
+    let blas = build_blas(&ctx, &queue, &BlasBuildInput {
+        vertex_buffer: &vb, index_buffer: &ib, vertex_count: 3, index_count: 3,
+        vertex_stride: VERTEX_STRIDE, index_type: AsIndexType::Uint32,
+    }).expect("BLAS build");
+    let tlas = build_tlas(&ctx, &queue, &[blas.device_address]).expect("TLAS build");
+    assert_ne!(tlas.device_address, 0, "TLAS must report a non-zero device address");
+
+    // A single-`uint` output the smoke shader writes the hit flag into (also the readback proof the
+    // dispatch ran). DeviceLocal + TRANSFER_SRC so it can be copied back after the trace.
+    let output = ctx
+        .create_buffer(&BufferDesc {
+            size: 4,
+            usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
+            location: MemoryLocation::DeviceLocal,
+        })
+        .expect("output buffer create");
+
+    // The 2-binding set: the TLAS at binding 0 (the R2a-4a AS descriptor UNDER TEST), the output
+    // storage buffer at binding 1.
+    let layout = ctx
+        .create_bind_group_layout(&BindGroupLayoutDesc {
+            entries: &[
+                BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::AccelerationStructure, stage: ShaderStage::COMPUTE },
+                BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+            ],
+        })
+        .expect("AS-descriptor smoke layout");
+    let module = ctx.create_shader_module(hwrt_as_descriptor_smoke_spirv()).expect("smoke module");
+    let pipeline = ctx
+        .create_compute_pipeline(&ComputePipelineDesc {
+            module: &module,
+            entry: c"main",
+            // A dummy 4-byte push (the shared compute layout rejects a 0-byte range).
+            push_constant_bytes: 4,
+            bind_group_layout: Some(&layout),
+        })
+        .expect("smoke pipeline");
+    // The AS-DESCRIPTOR WRITE UNDER TEST: `BindGroupEntry::AccelerationStructure` drives the new
+    // `VkWriteDescriptorSetAccelerationStructureKHR` `p_next` path in `create_bind_group`.
+    let bind_group = ctx
+        .create_bind_group(&BindGroupDesc {
+            layout: &layout,
+            entries: &[
+                BindGroupEntry::AccelerationStructure { accel: &tlas.accel },
+                BindGroupEntry::StorageBuffer { buffer: &output },
+            ],
+        })
+        .expect("AS-descriptor smoke bind group");
+
+    // Dispatch the trace (1 thread; `count = 1` push so the single thread stores). A clean submit +
+    // fence wait == the AS descriptor was read without a device-lost.
+    let count: u32 = 1;
+    let fence = ctx.create_fence(false).expect("smoke fence");
+    let mut enc = ctx.create_command_encoder().expect("smoke encoder");
+    enc.begin().expect("smoke begin");
+    enc.bind_compute_pipeline(&pipeline);
+    enc.bind_descriptor_set_compute(&bind_group, &pipeline);
+    enc.push_compute_constants(&pipeline, ShaderStage::COMPUTE, 0, &count.to_le_bytes());
+    enc.dispatch(1, 1, 1);
+    enc.end().expect("smoke end");
+    queue.submit(&enc, &fence).expect("smoke submit");
+    ctx.wait_fence(&fence, u64::MAX).expect("smoke wait");
+
+    println!(
+        "R2a-4a OK: TLAS=0x{:016x} bound as a VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR descriptor and traced — AS-descriptor pNext write clean on HW",
+        tlas.device_address
+    );
+
+    ctx.wait_idle().expect("device wait idle");
+    // Teardown in reverse dependency order.
+    // SAFETY: `wait_idle` above guarantees the GPU no longer uses any of these; each was created on
+    // `ctx` and is destroyed exactly once by-value.
+    unsafe {
+        ctx.destroy_command_encoder(enc);
+        ctx.destroy_fence(fence);
+        ctx.destroy_bind_group(bind_group);
+        ctx.destroy_compute_pipeline(pipeline);
+        ctx.destroy_bind_group_layout(layout);
+        ctx.destroy_shader_module(module);
+        ctx.destroy_buffer(output);
+        destroy_tlas(&ctx, tlas);
+        destroy_blas(&ctx, blas);
+        ctx.destroy_buffer(vb);
+        ctx.destroy_buffer(ib);
+    }
+
+    // The oracle: a clean run records zero validation messages (== the AS-descriptor write was
+    // well-formed; no device-lost).
     assert_validation_clean(&ctx);
     drop(ctx);
 }
