@@ -950,6 +950,34 @@ pub struct GBufferScene<'a> {
     /// L0a) replaces the compiled-in `LIGHT_DIR`/`SKY_*` constants with the header+table
     /// read; binding 7 (Lighting L0b) is the `gViewT` lane the resolve reconstructs `P` from.
     pub resolve_layout: &'a VulkanBindGroupLayout,
+    /// R2a-4b: the HWRT-variant deferred RESOLVE pipeline (`deferred_pbr_hwrt.comp` /
+    /// [`crate::compute::deferred_pbr_hwrt_spirv`]) — the mesh-shadow term routes to an inline
+    /// `rayQuery` TLAS trace (binding 19) instead of the CSM shadow-map sample. `None` on EVERY
+    /// non-hwrt / non-RT / config-Software path ⇒ the recorder binds the software
+    /// [`Self::resolve_pipeline`] ⇒ byte-identical to the golden. `Some(_)` (built only under
+    /// `feature = "hwrt"` + `ctx.ray_query_enabled()`) carries its OWN 20-binding layout
+    /// ([`Self::resolve_layout_hwrt`]) — the record-site selects the `(pipeline, layout, set)`
+    /// TRIPLE together (a layout mismatch is a device-lost). The whole field is `#[cfg(hwrt)]`, so
+    /// a `not(hwrt)` build has it absent entirely.
+    #[cfg(feature = "hwrt")]
+    pub resolve_pipeline_hwrt: Option<&'a ComputePipeline>,
+    /// R2a-4b: the 20-binding bind-group LAYOUT [`Self::resolve_pipeline_hwrt`] declares at set 0
+    /// (the 19 software bindings + binding 19 `AccelerationStructure`). `Some` iff
+    /// [`Self::resolve_pipeline_hwrt`] is `Some` (they are built + selected in lock-step); the
+    /// record-site binds [`GBufferTargets::resolve_set_hwrt`] against THIS layout when routing is
+    /// Hardware, never the software [`Self::resolve_layout`].
+    #[cfg(feature = "hwrt")]
+    pub resolve_layout_hwrt: Option<&'a VulkanBindGroupLayout>,
+    /// R2a-4b: the per-FIF persistent TLAS handles (the host's `PersistentTlas.accel`) the HWRT
+    /// resolve set binds at binding 19 — the stable, built-into (not recreated) acceleration
+    /// structures the `rayQuery` trace reads. An array of per-slot borrows (the host's per-FIF
+    /// TLASes are not contiguous, so this is `[&BoundAccelStruct; N]`, not `&[_; N]`). `Some` iff
+    /// [`Self::resolve_pipeline_hwrt`] is `Some`. The resolve-set builder
+    /// ([`GBufferTargets::create`]) writes slot `i`'s TLAS into slot `i`'s HWRT set (the
+    /// once-per-FIF write model holds — the handle is frame-stable). `None` on the software path
+    /// (no AS descriptor is written).
+    #[cfg(feature = "hwrt")]
+    pub resolve_tlas_hwrt: Option<[&'a BoundAccelStruct; FRAMES_IN_FLIGHT]>,
     /// The marcher's 1D dispatch group count (`ceil(pixels / LOCAL_SIZE_X)` at the
     /// WSI-clamped extent the recorder dispatches). The deferred resolve dispatches at the
     /// SAME grid (1:1 the marched pixels).

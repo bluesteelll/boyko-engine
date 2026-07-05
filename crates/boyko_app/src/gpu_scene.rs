@@ -46,11 +46,15 @@ use boyko_rhi_vulkan::swapchain::{
     GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene, InterpActivation, PunctualDepthActivation,
 };
 #[cfg(feature = "hwrt")]
+use boyko_rhi_vulkan::accel::BoundAccelStruct;
+#[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::accel_build::{
     PersistentTlas, buffer_device_address, create_persistent_tlas, destroy_persistent_tlas,
 };
 #[cfg(feature = "hwrt")]
-use boyko_rhi_vulkan::compute::{BUILD_TLAS_INSTANCES_PUSH_BYTES, build_tlas_instances_spirv};
+use boyko_rhi_vulkan::compute::{
+    BUILD_TLAS_INSTANCES_PUSH_BYTES, build_tlas_instances_spirv, deferred_pbr_hwrt_spirv,
+};
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::swapchain::TlasBuildActivation;
 use boyko_rhi_vulkan::texture::VulkanTexture;
@@ -1142,6 +1146,14 @@ impl TlasResources {
         }
     }
 
+    /// R2a-4b: the per-FIF persistent TLAS handles — the frame-stable `rayQuery` trace targets the
+    /// HWRT resolve set binds at binding 19. Slot `i` is `tlas[i].accel` (built into every frame,
+    /// never recreated), so the once-per-FIF resolve-set write holds.
+    #[inline]
+    fn resolve_accels(&self) -> [&BoundAccelStruct; FRAMES_IN_FLIGHT] {
+        core::array::from_fn(|i| &self.tlas[i].accel)
+    }
+
     /// Tears every owned resource down in reverse dependency order (bind_groups → TLASes
     /// (AS before backing, P0-3) → instance arrays → mesh-id rings → blas_addr → pipeline →
     /// layout). The SHARED instance rings are owned by `GpuSceneBundles`, not this struct.
@@ -1224,6 +1236,14 @@ pub(crate) struct GpuSceneBundles {
     // ── Resolve (pass C) ─────────────────────────────────────────────────────
     resolve_pipeline: ComputePipeline,
     resolve_layout: VulkanBindGroupLayout,
+    /// HW-RT rung R2a-4b: the HWRT-variant deferred resolve pipeline (`deferred_pbr_hwrt.comp`)
+    /// paired with its 20-binding layout (the 19 software bindings plus binding 19
+    /// `AccelerationStructure`). Built at boot ONLY on an RT device (`ray_query_enabled`) under
+    /// `feature = "hwrt"`, the same capability gate as [`Self::tlas`]; `None` otherwise (the
+    /// byte-identical software path). Its mesh-shadow term traces the per-FIF TLAS with `rayQuery`
+    /// instead of sampling the CSM map.
+    #[cfg(feature = "hwrt")]
+    resolve_pipeline_hwrt: Option<(ComputePipeline, VulkanBindGroupLayout)>,
     material_table: BoundBuffer,
     /// The device light table (resolve binding 6), [`LIGHT_TABLE_CAPACITY`] bytes.
     /// The recorder copies `light_upload_bytes` from the fenced slot's staging into
@@ -1607,6 +1627,42 @@ impl GpuSceneBundles {
         )
         .expect("invariant: deferred resolve compute pipeline create");
 
+        // ── HW-RT rung R2a-4b: the HWRT-variant resolve pipeline + its 20-binding layout.
+        // Built ONLY on an RT device (`ray_query_enabled`) under `feature = "hwrt"` — the SAME
+        // capability gate the TLAS resources use (`RayBackendConfig` resolves the mesh-shadow cell
+        // to `HardwareTri` on exactly this device tier, so presence == the routing decision).
+        // `None` on the software path ⇒ the render binds the software pipeline ⇒ byte-identical. The
+        // layout is the 19 software bindings + binding 19 (`AccelerationStructure`) the
+        // `deferred_pbr_hwrt.comp` `rayQuery` mesh-shadow trace reads.
+        #[cfg(feature = "hwrt")]
+        let resolve_pipeline_hwrt = ctx.ray_query_enabled().then(|| {
+            let hwrt_cs = RhiDevice::create_shader_module(device, deferred_pbr_hwrt_spirv())
+                .expect("invariant: HWRT deferred resolve compute shader module create");
+            let mut hwrt_entries = resolve_entries.to_vec();
+            hwrt_entries.push(BindGroupLayoutEntry {
+                binding: 19,
+                count: 1,
+                kind: DescriptorKind::AccelerationStructure,
+                stage: ShaderStage::COMPUTE,
+            });
+            let hwrt_layout = RhiDevice::create_bind_group_layout(
+                device,
+                &BindGroupLayoutDesc { entries: &hwrt_entries },
+            )
+            .expect("invariant: HWRT deferred resolve bind-group layout create");
+            let hwrt_pipeline = RhiDevice::create_compute_pipeline(
+                device,
+                &ComputePipelineDesc {
+                    module: &hwrt_cs,
+                    entry: c"main",
+                    push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+                    bind_group_layout: Some(&hwrt_layout),
+                },
+            )
+            .expect("invariant: HWRT deferred resolve compute pipeline create");
+            (hwrt_pipeline, hwrt_layout)
+        });
+
         // ── The present-blit pipeline (`color_formats[0]` == the swapchain
         // format — W2-b).
         let present_layout = RhiDevice::create_bind_group_layout(
@@ -1699,6 +1755,8 @@ impl GpuSceneBundles {
             clipmap,
             resolve_pipeline,
             resolve_layout,
+            #[cfg(feature = "hwrt")]
+            resolve_pipeline_hwrt,
             material_table,
             light_table,
             light_staging,
@@ -1876,6 +1934,16 @@ impl GpuSceneBundles {
             cluster_count: 0,
             resolve_pipeline: &self.resolve_pipeline,
             resolve_layout: &self.resolve_layout,
+            // R2a-4b: the HWRT resolve pipeline+layout+per-FIF TLAS triple — `Some` only when the
+            // boot built the HWRT resources (RT device + hwrt) AND the TLAS ring exists. All three
+            // are `Some`/`None` in lock-step, so the record-site picks a consistent triple. `None`
+            // ⇒ the software resolve ⇒ byte-identical.
+            #[cfg(feature = "hwrt")]
+            resolve_pipeline_hwrt: self.resolve_pipeline_hwrt.as_ref().map(|(p, _)| p),
+            #[cfg(feature = "hwrt")]
+            resolve_layout_hwrt: self.resolve_pipeline_hwrt.as_ref().map(|(_, l)| l),
+            #[cfg(feature = "hwrt")]
+            resolve_tlas_hwrt: self.tlas.as_ref().map(|t| t.resolve_accels()),
             dispatch_group_count_x: self.dispatch_group_count_x,
             brick: None,
             coarse: None,
@@ -2116,6 +2184,13 @@ impl GpuSceneBundles {
             RhiDevice::destroy_bind_group_layout(ctx, self.present_layout);
             RhiDevice::destroy_compute_pipeline(ctx, self.resolve_pipeline);
             RhiDevice::destroy_bind_group_layout(ctx, self.resolve_layout);
+            // HW-RT rung R2a-4b: the HWRT resolve pipeline + its 20-binding layout, `Option`-guarded
+            // (present only on an RT device under `feature = "hwrt"`). Pipeline before layout.
+            #[cfg(feature = "hwrt")]
+            if let Some((pipeline, layout)) = self.resolve_pipeline_hwrt {
+                RhiDevice::destroy_compute_pipeline(ctx, pipeline);
+                RhiDevice::destroy_bind_group_layout(ctx, layout);
+            }
             RhiDevice::destroy_compute_pipeline(ctx, self.marcher);
             RhiDevice::destroy_bind_group_layout(ctx, self.vocab_layout);
             RhiDevice::destroy_graphics_pipeline(ctx, self.raster_pipeline);

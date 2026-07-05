@@ -14,14 +14,16 @@
 //! cold single-writer) + [`DdgiResolveSet`](crate::ddgi_config::DdgiResolveSet)
 //! (the by-name ordering seam).
 //!
-//! # The dormancy anchor (plan D1/D3)
+//! # The dormancy anchor (plan D1/D3) + the R2a-4b routing
 //!
 //! [`resolve_ray_backend`] returns [`RayBackendConfig::DISABLED`] (every cell
-//! [`RayBackend::Software`]) for EVERY [`RtTier`] in R1 — the `Weak`/`Strong`
-//! arms are written now so R2a fills them without reshaping the function. No
-//! render pass reads [`RayBackendConfig`] in R1, and the sets carry no
-//! command-recording members, so nothing arms a trace path. The byte-identity
-//! proof (plan §4) rests on DISABLED == [`Default`] == every cell `Software`.
+//! [`RayBackend::Software`]) for [`RtTier::Absent`] — the byte-identity majority
+//! and every non-RT device. R2a-4b brought the `Weak`/`Strong` arms alive: they
+//! route the mesh-shadow cell to [`RayBackend::HardwareTri`] (the deferred
+//! resolve's `rayQuery` TLAS trace, the FIRST consumer) and keep every other cell
+//! software. The `HardwareTri` cell is honored only when the resolve is built under
+//! `feature = "hwrt"` + `ctx.ray_query_enabled()`; on a non-hwrt build no consumer
+//! reads it, so the config is inert and the render stays byte-identical.
 
 use boyko_macros::{Resource, SystemSet};
 
@@ -212,13 +214,22 @@ impl RayCaps {
 #[inline]
 pub fn resolve_ray_backend(tier: RtTier) -> RayBackendConfig {
     match tier {
-        // No hardware ray query — the only reachable arm in R1.
+        // No hardware ray query — the software path (byte-identity majority + every
+        // non-RT device). Every cell stays [`RayBackend::Software`].
         RtTier::Absent => RayBackendConfig::DISABLED,
-        // Reserved for R2a: hardware ray query without / with reorder. Both return
-        // DISABLED in R1 (defence-in-depth — even if `ray_query` were spuriously
-        // `true`, the resolve still selects all-software, so no trace path arms).
-        RtTier::Weak => RayBackendConfig::DISABLED,
-        RtTier::Strong => RayBackendConfig::DISABLED,
+        // R2a-4b: hardware ray query present (without / with reorder). Route the
+        // mesh-shadow workload to the hardware triangle backend — the deferred
+        // resolve's `rayQuery` TLAS trace (the FIRST consumer). Every OTHER cell
+        // stays software (SDF shadows, AO, GI probes, reflections keep their
+        // software paths). `HardwareTri` is honored only when the resolve is built
+        // under `feature = "hwrt"` + `ctx.ray_query_enabled()`; on a non-hwrt build
+        // the cell is inert (no consumer reads it).
+        RtTier::Weak | RtTier::Strong => {
+            let mut cfg = RayBackendConfig::DISABLED;
+            cfg.table[RayWorkload::Shadow as usize][RayGeom::Mesh as usize] =
+                RayBackend::HardwareTri;
+            cfg
+        }
     }
 }
 
@@ -258,10 +269,13 @@ pub struct AsBuildSet;
 /// recomputes the selection from the boot tier each frame (a dormant `Absent` tier
 /// resolves the all-software carrier).
 ///
-/// The `debug_assert!` is the R1 tripwire (plan §8): every resolved cell MUST be
-/// [`RayBackend::Software`] in R1 — a hardware cell would mean the dormancy anchor
-/// broke (e.g. `ray_query` spuriously `true`). R2a removes it once the hardware
-/// arms come alive.
+/// The `debug_assert!` is the dormancy tripwire, made TIER-CONDITIONAL in R2a-4b
+/// (critic P1-4): when the device has NO hardware ray query ([`RtTier::Absent`] —
+/// the byte-identity majority / every non-RT device) every resolved cell MUST STILL
+/// be [`RayBackend::Software`] — a hardware cell on an `Absent` device would mean the
+/// software-path invariant broke (e.g. `ray_query` spuriously `true`). On a `Weak` /
+/// `Strong` device the mesh-shadow cell is legitimately [`RayBackend::HardwareTri`],
+/// so the assert is skipped for those tiers.
 //
 // `clippy::needless_pass_by_value`: `Res`/`ResMut` are by-value `SystemParam`s
 // read/written through reborrows — the same false-positive `resolve_ddgi_grid_gated`
@@ -270,11 +284,13 @@ pub struct AsBuildSet;
 pub fn resolve_ray_backend_system(caps: Res<RayCaps>, mut out: ResMut<RayBackendConfig>) {
     let resolved = resolve_ray_backend(caps.tier);
     debug_assert!(
-        resolved
-            .table
-            .iter()
-            .all(|row| row.iter().all(|&b| b == RayBackend::Software)),
-        "invariant: R1 must resolve every ray-backend cell to Software (the dormancy anchor)"
+        caps.tier != RtTier::Absent
+            || resolved
+                .table
+                .iter()
+                .all(|row| row.iter().all(|&b| b == RayBackend::Software)),
+        "invariant: an Absent-tier device must resolve every ray-backend cell to Software \
+         (the software-path anchor)"
     );
     *out = resolved;
 }
@@ -297,16 +313,28 @@ mod tests {
         assert_eq!(cfg._pad, [0; 8]);
     }
 
-    /// The R1 all-software invariant (RISK-2 lock, plan §8): every tier resolves
-    /// to DISABLED.
+    /// The R2a-4b routing contract: an `Absent`-tier device resolves all-software
+    /// (the byte-identity anchor); a `Weak` / `Strong` device routes ONLY the
+    /// mesh-shadow cell to [`RayBackend::HardwareTri`] and keeps every other cell
+    /// software.
     #[test]
-    fn resolve_is_disabled_for_every_tier() {
-        for tier in [RtTier::Absent, RtTier::Weak, RtTier::Strong] {
+    fn resolve_routes_mesh_shadow_on_rt_tiers() {
+        // Absent: unchanged all-software dormancy anchor.
+        assert_eq!(resolve_ray_backend(RtTier::Absent), RayBackendConfig::DISABLED);
+
+        // Weak / Strong: the mesh-shadow cell is HardwareTri; every OTHER cell is Software.
+        for tier in [RtTier::Weak, RtTier::Strong] {
             let cfg = resolve_ray_backend(tier);
-            assert_eq!(cfg, RayBackendConfig::DISABLED, "tier {tier:?} must resolve DISABLED");
-            for row in &cfg.table {
-                for &cell in row {
-                    assert_eq!(cell, RayBackend::Software, "tier {tier:?} must be all-software");
+            for (w, row) in cfg.table.iter().enumerate() {
+                for (g, &cell) in row.iter().enumerate() {
+                    let expected = if w == RayWorkload::Shadow as usize
+                        && g == RayGeom::Mesh as usize
+                    {
+                        RayBackend::HardwareTri
+                    } else {
+                        RayBackend::Software
+                    };
+                    assert_eq!(cell, expected, "tier {tier:?} cell [{w}][{g}]");
                 }
             }
         }

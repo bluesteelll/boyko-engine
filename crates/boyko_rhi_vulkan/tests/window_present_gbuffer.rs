@@ -2350,6 +2350,12 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         cluster_count: 0,
         resolve_pipeline: &resolve_pipeline,
         resolve_layout: &resolve_layout,
+        #[cfg(feature = "hwrt")]
+        resolve_pipeline_hwrt: None,
+        #[cfg(feature = "hwrt")]
+        resolve_layout_hwrt: None,
+        #[cfg(feature = "hwrt")]
+        resolve_tlas_hwrt: None,
         present_pipeline: &present_pipeline,
         present_layout: &present_layout,
         present_sampler: &present_sampler,
@@ -3226,6 +3232,12 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         cluster_count: 0,
         resolve_pipeline: &resolve_pipeline,
         resolve_layout: &resolve_layout,
+        #[cfg(feature = "hwrt")]
+        resolve_pipeline_hwrt: None,
+        #[cfg(feature = "hwrt")]
+        resolve_layout_hwrt: None,
+        #[cfg(feature = "hwrt")]
+        resolve_tlas_hwrt: None,
         present_pipeline: &present_pipeline,
         present_layout: &present_layout,
         present_sampler: &present_sampler,
@@ -7901,6 +7913,12 @@ fn run_showcase_body_ddgi(
         cluster_count: 0,
         resolve_pipeline: &resolve_pipeline,
         resolve_layout: &resolve_layout,
+        #[cfg(feature = "hwrt")]
+        resolve_pipeline_hwrt: None,
+        #[cfg(feature = "hwrt")]
+        resolve_layout_hwrt: None,
+        #[cfg(feature = "hwrt")]
+        resolve_tlas_hwrt: None,
         present_pipeline: &present_pipeline,
         present_layout: &present_layout,
         present_sampler: &present_sampler,
@@ -9156,6 +9174,12 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         cluster_count: 0,
         resolve_pipeline: &resolve_pipeline,
         resolve_layout: &resolve_layout,
+        #[cfg(feature = "hwrt")]
+        resolve_pipeline_hwrt: None,
+        #[cfg(feature = "hwrt")]
+        resolve_layout_hwrt: None,
+        #[cfg(feature = "hwrt")]
+        resolve_tlas_hwrt: None,
         present_pipeline: &present_pipeline,
         present_layout: &present_layout,
         present_sampler: &present_sampler,

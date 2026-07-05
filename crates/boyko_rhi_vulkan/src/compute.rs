@@ -299,6 +299,21 @@ static DEFERRED_PBR_SPV: SpirvBlob<65456> = SpirvBlob(*include_bytes!(concat!(
     "/shaders/deferred_pbr.comp.spv"
 )));
 
+/// The R2a-4b HWRT-variant deferred-resolve SPIR-V (`shaders/deferred_pbr_hwrt.comp.spv`, compiled
+/// `-T cs_6_5 -D HWRT=1`). Compiled from the SAME `deferred_pbr.hlsl` with the `#if HWRT` mesh-shadow
+/// arm active: the primary directional's mesh-shadow term routes to a SOFT inline `rayQuery` cone
+/// trace (`SHADOW_RAY_COUNT` Vogel-disk rays within the sun's angular cone against the binding-19
+/// `RaytracingAccelerationStructure`, averaged) instead of the CSM shadow-map sample, so the module
+/// carries `OpCapability RayQueryKHR` + `SPV_KHR_ray_query` + the 20th descriptor. Gated behind
+/// `feature = "hwrt"` + a runtime `ctx.ray_query_enabled()` +
+/// `RayBackendConfig.table[Shadow][Mesh] == HardwareTri`; the software `.spv` above stays the frozen
+/// 65456-byte golden artifact (the `#else` is byte-verbatim, verified by a recompile temp-diff).
+#[cfg(feature = "hwrt")]
+static DEFERRED_PBR_HWRT_SPV: SpirvBlob<58884> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/deferred_pbr_hwrt.comp.spv"
+)));
+
 /// The SDFDDGI I3 DDGI resolve-sample GPU-GOLDEN SPIR-V (`shaders/ddgi_probe_gi_resolve.comp.hlsl`).
 /// A standalone compute harness that runs the SAME `ddgi_probe_sample` the deferred resolve runs
 /// (both `#include "ddgi_resolve.hlsli"`) over host-supplied receiver samples and STOREs the
@@ -654,6 +669,22 @@ pub fn sdf_gbuffer_composite_spirv() -> &'static [u32] {
 #[inline]
 pub fn deferred_pbr_spirv() -> &'static [u32] {
     DEFERRED_PBR_SPV.as_words()
+}
+
+/// The R2a-4b HWRT-variant deferred-resolve SPIR-V (`shaders/deferred_pbr_hwrt.comp.spv`) as a `u32`
+/// word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// This module's mesh-shadow term traces the binding-19 TLAS with an inline `rayQuery` (the `#if
+/// HWRT` arm of `deferred_pbr.hlsl`) instead of sampling the CSM shadow map, so its resolve pipeline
+/// layout carries a 20th [`DescriptorKind::AccelerationStructure`](boyko_rhi::DescriptorKind) binding.
+/// It is bound ONLY when `feature = "hwrt"` + `ctx.ray_query_enabled()` +
+/// `RayBackendConfig.table[Shadow][Mesh] == HardwareTri` all hold; every other path keeps the
+/// software [`deferred_pbr_spirv`] and its 19-binding layout, byte-identical to the golden.
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn deferred_pbr_hwrt_spirv() -> &'static [u32] {
+    DEFERRED_PBR_HWRT_SPV.as_words()
 }
 
 /// The SDFDDGI I3 DDGI resolve-sample GPU-GOLDEN SPIR-V as a `u32` word stream, ready for

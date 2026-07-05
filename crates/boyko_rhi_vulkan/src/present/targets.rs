@@ -9,6 +9,7 @@ use boyko_rhi::{
 
 use crate::device::VulkanContext;
 use crate::ffi::*;
+use crate::memory::BoundBuffer;
 use crate::rhi_impl::{Vulkan, VulkanBindGroup};
 use crate::texture::VulkanTexture;
 
@@ -109,6 +110,18 @@ pub struct GBufferTargets {
     /// `scene.csm_cascade_ring[i]` @13 — the lock-free per-frame ring fix; every other binding is
     /// identical across slots. The recorder selects `resolve_set[self.frame_index]`.
     pub(crate) resolve_set: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// R2a-4b: the HWRT-variant RESOLVE descriptor set RING (one per in-flight frame), written
+    /// ONCE against [`GBufferScene::resolve_layout_hwrt`] — the 19 software bindings PLUS binding
+    /// 19 (`AccelerationStructure`) fed slot `i`'s persistent TLAS
+    /// ([`GBufferScene::resolve_tlas_hwrt`]`[i].accel`). `None` on EVERY software path (non-hwrt /
+    /// non-RT / config-Software) ⇒ the recorder binds the 19-binding [`Self::resolve_set`] against
+    /// the software pipeline ⇒ byte-identical to the golden. `Some(_)` (built iff the scene wires
+    /// [`GBufferScene::resolve_pipeline_hwrt`]) is selected as part of the `(pipeline, layout, set)`
+    /// TRIPLE at the record-site when routing is Hardware. RINGED like [`Self::resolve_set`]; the
+    /// per-FIF TLAS handle is frame-stable, so the once-per-FIF write model holds. NO per-frame
+    /// update. The whole field is `#[cfg(feature = "hwrt")]`, so a `not(hwrt)` build has it absent.
+    #[cfg(feature = "hwrt")]
+    pub(crate) resolve_set_hwrt: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// The Lighting-L1 CULL descriptor set, written ONCE against
     /// [`GBufferScene::cull_layout`] (camera UBO @0, light table SSBO @1, `ClusterGrid` SSBO
     /// @2, `LightIndexList` SSBO @3, `LightIndexAlloc` SSBO @4) — `None` when L1 is off
@@ -171,6 +184,97 @@ const GVIEWT_FORMAT: Format = Format::R32Sfloat;
 /// ([`crate::device::DeviceCaps::r8_unorm_storage_ok`]), so the SSAO image create can never
 /// fault on an unsupported format.
 const SSAO_FORMAT: Format = Format::R8Unorm;
+
+/// The binding count of the SOFTWARE deferred-resolve set (indices 0..=18). The HWRT variant is
+/// this plus one (binding 19 = the TLAS). Kept as ONE source so the exact-fill guards + both set
+/// builders agree. HW-RT rung R2a-4a raised [`MAX_BIND_GROUP_BINDINGS`](boyko_rhi::MAX_BIND_GROUP_BINDINGS)
+/// 19 → 20; the software set stays EXACT at 19 (the under-fill tripwire).
+const RESOLVE_SOFTWARE_BINDINGS: usize = 19;
+
+/// The six per-in-flight-slot G-buffer image RINGS' slot views the resolve set binds — bundled so
+/// [`resolve_software_entries`] takes ONE argument for them instead of six (clippy
+/// `too_many_arguments`). Each is the `[slot]` view of the corresponding target ring
+/// ([`GBufferTargets::albedo`] etc.).
+struct ResolveSlotImages<'a> {
+    albedo: &'a VulkanTexture,
+    normal: &'a VulkanTexture,
+    material: &'a VulkanTexture,
+    lit: &'a VulkanTexture,
+    viewt: &'a VulkanTexture,
+    ssao: &'a VulkanTexture,
+}
+
+/// Builds the 19 SHARED deferred-resolve [`BindGroupEntry`]s (indices 0..=18) for slot `slot` —
+/// the SINGLE source both the software resolve set ([`GBufferTargets::create`]) and the R2a-4b HWRT
+/// resolve set consume, so their first 19 bindings CANNOT drift (a drift would be an invisible
+/// set↔shader-layout mismatch → device-lost, which the golden never arms HWRT to catch). The HWRT
+/// builder appends binding 19 (the TLAS) to this array; the software builder uses it verbatim.
+///
+/// `imgs` are slot `slot`'s six G-buffer image views; `cluster_grid_buf` / `light_index_buf` are the
+/// L1 buffers (or the light-table placeholder when L1 is off). Every entry borrows from `scene` /
+/// `imgs` for the caller's `create_bind_group` call.
+fn resolve_software_entries<'a>(
+    scene: &'a GBufferScene<'a>,
+    imgs: &ResolveSlotImages<'a>,
+    slot: usize,
+    cluster_grid_buf: &'a BoundBuffer,
+    light_index_buf: &'a BoundBuffer,
+) -> [BindGroupEntry<'a, Vulkan>; RESOLVE_SOFTWARE_BINDINGS] {
+    [
+        BindGroupEntry::StorageImage { texture: imgs.albedo },
+        BindGroupEntry::StorageImage { texture: imgs.normal },
+        BindGroupEntry::StorageImage { texture: imgs.material },
+        BindGroupEntry::StorageImage { texture: imgs.lit },
+        BindGroupEntry::StorageBuffer { buffer: scene.material_table },
+        BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
+        BindGroupEntry::StorageBuffer { buffer: scene.light_table },
+        // Lighting L0b: the gViewT lane @7 (the resolve READS it under `mask == 1`).
+        BindGroupEntry::StorageImage { texture: imgs.viewt },
+        // Lighting L1: the ClusterGrid @8 + LightIndexList @9 (resolve READS the pixel's froxel
+        // slice when `clusters_enabled`); the light-table placeholder when L1 is off.
+        BindGroupEntry::StorageBuffer { buffer: cluster_grid_buf },
+        BindGroupEntry::StorageBuffer { buffer: light_index_buf },
+        // P6 R1: the SDF edit-list `Buf` @10 (a read-only field CONSUMER; the marcher already
+        // uploaded + barriered it, and a `shadow_mode==0` scene never marches — 0%-gate).
+        BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
+        // Render P7: the SSAO term `gSsao` @11 — ALWAYS bound (the resolve interface is stable
+        // regardless of `ssao_mode`); read only under `ssao_mode != 0` (the 0%-gate).
+        BindGroupEntry::StorageImage { texture: imgs.ssao },
+        // CSM Increment 1b: the cascade shadow-map ARRAY + PCF sampler as ONE combined descriptor
+        // @12 + the cascade UBO @13. BOTH always bound (the `.spv` statically references them);
+        // PCF-sampled only under `csm_mode != 0` (the 0%-gate).
+        BindGroupEntry::CombinedImage {
+            texture: scene.csm_cascade_texture,
+            sampler: scene.csm_compare_sampler,
+        },
+        BindGroupEntry::UniformBuffer {
+            buffer: &scene.csm_cascade_ring[slot],
+        },
+        // Shadow Phase 5 Inc-1-GPU: the sparse spot/point shadow-ATLAS array + PCF sampler @14 + the
+        // atlas UBO @15. BOTH always bound; PCF-sampled only under `punctual_shadow_mode != 0`.
+        BindGroupEntry::CombinedImage {
+            texture: scene.shadow_atlas_texture,
+            sampler: scene.shadow_atlas_sampler,
+        },
+        BindGroupEntry::UniformBuffer {
+            buffer: scene.shadow_atlas_ubo,
+        },
+        // SDFDDGI I0: the probe-IRRADIANCE combined image @16 + the DEPTH-MOMENT combined image @17
+        // + the `ResolvedDdgi` grid UBO @18. ALL THREE always bound; sampled only under
+        // `ddgi_mode != 0` (the 0%-gate). Indices 16/17/18 close the software set at EXACTLY 19.
+        BindGroupEntry::CombinedImage {
+            texture: scene.ddgi_irr_texture,
+            sampler: scene.ddgi_irr_sampler,
+        },
+        BindGroupEntry::CombinedImage {
+            texture: scene.ddgi_depth_texture,
+            sampler: scene.ddgi_depth_sampler,
+        },
+        BindGroupEntry::UniformBuffer {
+            buffer: scene.ddgi_grid_ubo,
+        },
+    ]
+}
 
 impl GBufferTargets {
     /// Creates a 2D `R8G8B8A8_UNORM` storage image at `extent` with `usage`. A small
@@ -559,103 +663,23 @@ impl GBufferTargets {
         let mut resolve_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
         for slot in 0..FRAMES_IN_FLIGHT {
-            let entries = [
-                BindGroupEntry::StorageImage { texture: &albedo[slot] },
-                BindGroupEntry::StorageImage { texture: &normal[slot] },
-                BindGroupEntry::StorageImage { texture: &material[slot] },
-                BindGroupEntry::StorageImage { texture: &lit[slot] },
-                BindGroupEntry::StorageBuffer { buffer: scene.material_table },
-                BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
-                BindGroupEntry::StorageBuffer { buffer: scene.light_table },
-                // Lighting L0b: the gViewT lane @7 (the resolve READS it under `mask == 1`).
-                BindGroupEntry::StorageImage { texture: &viewt[slot] },
-                // Lighting L1: the ClusterGrid @8 + LightIndexList @9 (resolve READS the
-                // pixel's froxel slice when `clusters_enabled`).
-                BindGroupEntry::StorageBuffer { buffer: cluster_grid_buf },
-                BindGroupEntry::StorageBuffer { buffer: light_index_buf },
-                // P6 R1: the SDF edit-list `Buf` @10 — the SAME buffer the marcher binds +
-                // uploads + barriers. The resolve dispatch is ordered after the marcher in the
-                // same submit, so the prior upload+barrier covers this second COMPUTE read (no
-                // new barrier). The resolve's `sdf_soft_shadow_ranged` march reads it read-only
-                // (a strict field-CONSUMER); on a `shadow_mode==0` scene the march is never
-                // executed, so the binding is a harmless valid descriptor (the 0%-gate).
-                BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
-                // Render P7: the SSAO term `gSsao` @11 — ALWAYS bound (the resolve descriptor
-                // interface is stable regardless of `ssao_mode`). The resolve reads it only under
-                // `ssao_mode != 0` (0 every pre-P7 scene), so the binding is a harmless valid
-                // descriptor (the 0%-gate); no SSAO pass writes it yet (C2 adds that).
-                BindGroupEntry::StorageImage { texture: &ssao[slot] },
-                // CSM Increment 1b (Rung A): the cascade shadow-map ARRAY + its PCF comparison
-                // sampler as ONE combined descriptor @12 (DXC collapsed `gCsm`(t12)+`gCsmCmp`(s12)
-                // — the BrickAtlas precedent). The cascade UBO @13 (mirrors `ResolvedCsm`). BOTH
-                // ALWAYS bound (the resolve `.spv` statically references `gCsm`/`CsmCascades`), so
-                // the layout MUST declare them and a valid descriptor MUST be present even on the
-                // OFF path; the resolve PCF-samples ONLY under `csm_mode != 0` (0 every pre-CSM
-                // scene), so the bound-but-unread cascade map/sampler/UBO are never sampled (the
-                // 0%-gate). The combined-image entry needs the cascade ARRAY SAMPLE view + the
-                // comparison sampler; both come from the scene's always-supplied resources (a real
-                // cascade map when CSM is on, a 1×1×1 D32 array dummy + a zeroed UBO when off).
-                BindGroupEntry::CombinedImage {
-                    texture: scene.csm_cascade_texture,
-                    sampler: scene.csm_compare_sampler,
-                },
-                BindGroupEntry::UniformBuffer {
-                    buffer: &scene.csm_cascade_ring[slot],
-                },
-                // Shadow Phase 5 Inc-1-GPU: the sparse spot/point shadow-ATLAS array + its PCF
-                // comparison sampler as ONE combined descriptor @14 (DXC collapsed `gShadowAtlas`(t14)
-                // + `gShadowAtlasCmp`(s14) — the `gCsm` precedent). The atlas UBO @15 (mirrors
-                // `ResolvedShadowAtlas`, 1296 B). BOTH ALWAYS bound (the resolve `.spv` statically
-                // references `gShadowAtlas`/`ShadowAtlas`), so the layout MUST declare them and a valid
-                // descriptor MUST be present even on the OFF path; the resolve PCF-samples ONLY under
-                // `punctual_shadow_mode != 0` (0 every pre-Inc-1 scene), so the bound-but-unread atlas
-                // map/sampler/UBO are never sampled (the 0%-gate). These are the 15th + 16th entries
-                // (indices 14, 15); the set sits at 16 under the cap (`MAX_BIND_GROUP_BINDINGS`).
-                BindGroupEntry::CombinedImage {
-                    texture: scene.shadow_atlas_texture,
-                    sampler: scene.shadow_atlas_sampler,
-                },
-                BindGroupEntry::UniformBuffer {
-                    buffer: scene.shadow_atlas_ubo,
-                },
-                // SDFDDGI I0: the DDGI probe-IRRADIANCE atlas + its LINEAR sampler as ONE combined
-                // descriptor @16 (DXC collapsed `gDdgiIrr`(t16)+`gDdgiIrrSamp`(s16) — the `gCsm`
-                // precedent); the probe DEPTH-MOMENT atlas + sampler @17; the `ResolvedDdgi` grid UBO
-                // @18. ALL THREE ALWAYS bound (the resolve `.spv` statically references
-                // `gDdgiIrr`/`gDdgiDepth`/`ResolvedDdgi`), so the layout MUST declare them and a valid
-                // descriptor MUST be present even on the OFF path; the resolve samples them ONLY under
-                // `ddgi_mode != 0` (header word-7 bit 4; 0 every pre-SDFDDGI scene → OFF by default),
-                // so the bound-but-unread DDGI atlases/UBO are never sampled (the 0%-gate). The I0
-                // dummies reuse existing bound-but-unread array textures + a zeroed grid UBO. These
-                // are the 17th/18th/19th entries (indices 16, 17, 18); the software resolve set sits
-                // at EXACTLY 19 bindings (`RESOLVE_SOFTWARE_BINDINGS`, under the R2a-4a cap of 20).
-                BindGroupEntry::CombinedImage {
-                    texture: scene.ddgi_irr_texture,
-                    sampler: scene.ddgi_irr_sampler,
-                },
-                BindGroupEntry::CombinedImage {
-                    texture: scene.ddgi_depth_texture,
-                    sampler: scene.ddgi_depth_sampler,
-                },
-                BindGroupEntry::UniformBuffer {
-                    buffer: scene.ddgi_grid_ubo,
-                },
-            ];
-            // The resolve set declares 19 bindings (0..=18). CSM Rung A added the combined cascade
-            // map+sampler @12 + the cascade UBO @13; Shadow Inc-1-GPU adds the combined atlas
-            // map+sampler @14 + the atlas UBO @15; SDFDDGI I0 adds the combined DDGI irradiance @16 +
-            // depth @17 + the grid UBO @18 (the combined images via the collapse — the in-house RHI
-            // has no SAMPLER-only `BindGroupEntry`).
-            //
-            // SDFDDGI I0 restores EXACT-FILL: the SOFTWARE resolve set declares exactly 19
-            // bindings (0..=18). HW-RT rung R2a-4a raised `MAX_BIND_GROUP_BINDINGS` 19 → 20 to
-            // reserve binding 19 for a TLAS, so the guard can no longer pin to the CAP — it must
-            // pin to the resolve's OWN expected count (`RESOLVE_SOFTWARE_BINDINGS`). Keeping it
-            // EXACT (not relaxed to `<= cap`) preserves the UNDER-FILL tripwire: an over-count is
-            // a bug (past the inline-array capacity) AND an under-count means a missing binding —
-            // both are caught. R2a-4b adds the 20-binding HWRT variant as a SEPARATE set, guarded
-            // against its own `RESOLVE_SOFTWARE_BINDINGS + 1`.
-            const RESOLVE_SOFTWARE_BINDINGS: usize = 19;
+            // The 19 SHARED resolve bindings (0..=18) — built by the ONE helper the HWRT set also
+            // consumes, so the two sets' first 19 bindings cannot drift (a drift = an invisible
+            // set↔shader-layout mismatch → device-lost). The software set uses them verbatim.
+            let imgs = ResolveSlotImages {
+                albedo: &albedo[slot],
+                normal: &normal[slot],
+                material: &material[slot],
+                lit: &lit[slot],
+                viewt: &viewt[slot],
+                ssao: &ssao[slot],
+            };
+            let entries =
+                resolve_software_entries(scene, &imgs, slot, cluster_grid_buf, light_index_buf);
+            // The software resolve set is EXACT-FILL at `RESOLVE_SOFTWARE_BINDINGS` (19), under the
+            // R2a-4a cap of `MAX_BIND_GROUP_BINDINGS` (20). Keeping it EXACT (not `<= cap`) preserves
+            // the UNDER-FILL tripwire (a missing binding) AND the over-fill tripwire. R2a-4b adds the
+            // 20-binding HWRT variant as a SEPARATE set, guarded against `RESOLVE_SOFTWARE_BINDINGS + 1`.
             debug_assert_eq!(
                 entries.len(),
                 RESOLVE_SOFTWARE_BINDINGS,
@@ -960,6 +984,121 @@ impl GBufferTargets {
         let present_set: [VulkanBindGroup; FRAMES_IN_FLIGHT] = present_slots
             .map(|s| s.expect("invariant: every present ring slot built before reaching here"));
 
+        // R2a-4b: the HWRT-variant resolve set RING — built ONLY when the scene wires BOTH the
+        // 20-binding HWRT resolve layout AND the per-FIF TLAS handles (i.e. under `feature = "hwrt"`
+        // + `ctx.ray_query_enabled()` + config HardwareTri). `None` on every software path ⇒ the
+        // recorder binds the 19-binding `resolve_set` against the software pipeline ⇒ byte-identical
+        // to the golden. Built LAST (after every other fallible set) so its own error path tears
+        // down everything prior; no upstream path knows about it. Slot `i`'s set is the 19 software
+        // entries PLUS binding 19 = slot `i`'s persistent TLAS.
+        #[cfg(feature = "hwrt")]
+        let resolve_set_hwrt: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> =
+            match (scene.resolve_layout_hwrt, scene.resolve_tlas_hwrt) {
+                (Some(hwrt_layout), Some(tlas)) => {
+                    let mut hwrt_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+                        [const { None }; FRAMES_IN_FLIGHT];
+                    let mut failure: Option<crate::error::VulkanError> = None;
+                    for (slot, dst) in hwrt_slots.iter_mut().enumerate() {
+                        // The HWRT resolve set = the SAME 19 shared bindings the software set uses
+                        // (via `resolve_software_entries`, so they cannot drift) + the 20th
+                        // `AccelerationStructure` at binding 19 (slot `slot`'s frame-stable TLAS).
+                        let imgs = ResolveSlotImages {
+                            albedo: &albedo[slot],
+                            normal: &normal[slot],
+                            material: &material[slot],
+                            lit: &lit[slot],
+                            viewt: &viewt[slot],
+                            ssao: &ssao[slot],
+                        };
+                        let shared = resolve_software_entries(
+                            scene,
+                            &imgs,
+                            slot,
+                            cluster_grid_buf,
+                            light_index_buf,
+                        );
+                        // Append binding 19 (the `rayQuery` trace target) to the shared 19 →
+                        // `RESOLVE_SOFTWARE_BINDINGS + 1` (20) EXACT-fill. `BindGroupEntry` is not
+                        // `Copy` (it holds a `&A::AccelerationStructure`), so MOVE the shared entries
+                        // into 0..=18 via a by-value iterator chained with the TLAS entry — each
+                        // element is placed exactly once.
+                        const RESOLVE_HWRT_BINDINGS: usize = RESOLVE_SOFTWARE_BINDINGS + 1;
+                        let mut chained = shared
+                            .into_iter()
+                            .chain(core::iter::once(BindGroupEntry::AccelerationStructure {
+                                accel: tlas[slot],
+                            }));
+                        let entries: [BindGroupEntry<'_, Vulkan>; RESOLVE_HWRT_BINDINGS] =
+                            core::array::from_fn(|_| {
+                                chained.next().expect(
+                                    "invariant: the chained iterator yields exactly RESOLVE_HWRT_BINDINGS entries",
+                                )
+                            });
+                        debug_assert_eq!(
+                            entries.len(),
+                            RESOLVE_HWRT_BINDINGS,
+                            "invariant: the HWRT resolve set must declare EXACTLY {RESOLVE_HWRT_BINDINGS} bindings (exact-fill)"
+                        );
+                        let desc = BindGroupDesc::<Vulkan> { layout: hwrt_layout, entries: &entries };
+                        match RhiDevice::create_bind_group(ctx, &desc) {
+                            Ok(g) => *dst = Some(g),
+                            Err(e) => {
+                                failure = Some(e);
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(e) = failure {
+                        // SAFETY: every prior set RING (vocab/resolve/present + the optional
+                        // cull/ssao/ddgi-update) + the eight image RINGS + the HWRT slots already
+                        // built [0..slot) were created on `ctx`; referenced by no submission; each
+                        // destroyed exactly once on this error path. The optional sets are
+                        // `Option`-guarded; every ring slot is drained.
+                        unsafe {
+                            for s in hwrt_slots.iter_mut() {
+                                if let Some(g) = s.take() {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
+                            }
+                            for g in present_set {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                            if let Some(du) = ddgi_update_set {
+                                RhiDevice::destroy_bind_group(ctx, du);
+                            }
+                            if let Some(ss) = ssao_set {
+                                for g in ss {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
+                            }
+                            if let Some(cs) = cull_set {
+                                for g in cs {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
+                            }
+                            for g in resolve_set {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                            for g in vocab_set {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        destroy_ring(ssao);
+                        destroy_ring(viewt);
+                        destroy_ring(lit);
+                        destroy_ring(material);
+                        destroy_ring(normal);
+                        destroy_ring(albedo);
+                        destroy_ring(depth);
+                        return Err(SwapchainError::DepthImage(e));
+                    }
+                    Some(hwrt_slots.map(|s| {
+                        s.expect("invariant: every HWRT resolve ring slot built before reaching here")
+                    }))
+                }
+                _ => None,
+            };
+
         Ok(Self {
             depth,
             albedo,
@@ -970,6 +1109,8 @@ impl GBufferTargets {
             ssao,
             vocab_set,
             resolve_set,
+            #[cfg(feature = "hwrt")]
+            resolve_set_hwrt,
             cull_set,
             ssao_set,
             ddgi_update_set,
@@ -1044,6 +1185,14 @@ impl GBufferTargets {
         // pass were wired); the eight render-target image RINGS each have
         // `FRAMES_IN_FLIGHT` slots — every slot of every ring (and the single set) is drained.
         unsafe {
+            // R2a-4b: the HWRT resolve set RING (last-acquired), `Option`-guarded (present only on
+            // an RT device under `feature = "hwrt"` + config HardwareTri).
+            #[cfg(feature = "hwrt")]
+            if let Some(hs) = self.resolve_set_hwrt {
+                for g in hs {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
             for g in self.present_set {
                 RhiDevice::destroy_bind_group(ctx, g);
             }

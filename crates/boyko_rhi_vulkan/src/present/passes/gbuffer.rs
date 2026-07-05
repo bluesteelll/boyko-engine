@@ -315,6 +315,18 @@ impl Renderer<'_> {
                     &[t.dest],
                 );
             }
+            // R2a-4b: order this TLAS build's AS write against the deferred resolve's `rayQuery`
+            // read (the shadow trace at gbuffer.rs's resolve dispatch). The TLAS backing/scratch is
+            // UNTRACKED by the framegraph (the build's AS write is invisible to the graph), so this
+            // is a raw AS-write → AS-read global barrier — NOT a double-transition of any tracked
+            // resource. Inside the same `if let (Some(t), Some(fns))` gate ⇒ the tlas-OFF path emits
+            // NOTHING (byte-identical).
+            // SAFETY: recording is open; `self.fns` is the live device's core command table (the
+            // same table the pack bind/dispatch above used). The barrier touches no resource beyond
+            // the execution/memory dependency (AS_BUILD stage → COMPUTE_SHADER stage).
+            unsafe {
+                crate::accel::cmd_acceleration_structure_barrier(self.fns, cmd);
+            }
         }
 
         // SAFETY: recording is open; `record_graph_pass` records the graph's derived
@@ -1522,25 +1534,72 @@ impl Renderer<'_> {
         // (5b) Deferred RESOLVE pass: bind the resolve pipeline + the resolve set (gAlbedo
         // @0, gMaterial @1, lit @2 — all STORAGE in GENERAL), dispatch at the SAME grid the
         // marcher used (1:1 the marched pixels). It composites `lit = mask ? base*vis : base`.
-        // SAFETY: recording is open; the resolve pipeline + its layout (declaring
-        // `resolve_layout` at set 0) are live on this device (caller contract); the resolve
-        // set binds the now-stored (GENERAL) albedo/material + the lit (GENERAL) images;
-        // `dispatch_group_count_x` covers `present_extent`'s pixel count (the same grid the
-        // marcher dispatched); `&...descriptor_set` is a single-element local alive for the
-        // call (first_set 0, count 1, zero dynamic offsets). The resolve pushes NO constants.
+        //
+        // R2a-4b: select the `(pipeline, layout, set)` TRIPLE together. Route to the HWRT `rayQuery`
+        // variant (its mesh-shadow term traces the TLAS at binding 19) ONLY when BOTH hold:
+        //   (1) the scene wires the HWRT resolve pipeline+layout AND the targets carry the 20-binding
+        //       HWRT resolve set (i.e. `feature = "hwrt"` + `ctx.ray_query_enabled()` + config
+        //       HardwareTri — all boot-gated, present on EVERY RT+hwrt frame); AND
+        //   (2) a TLAS was (re)built + build→trace-barriered THIS frame — i.e. `scene.tlas.is_some()`
+        //       (the per-frame `TlasBuildActivation`, `None` when the drawable count is 0).
+        // Condition (2) is the P0 correctness gate: the TLAS build + the AS-write→read barrier
+        // (gbuffer.rs:311-326) run ONLY under `scene.tlas.is_some()`, so on a zero-mesh-instance frame
+        // (warm-up / gather-lag / all-SDF / count-drops-to-0) NO build + NO barrier ran — tracing
+        // `tlas[fi].accel` there would read an UNBUILT (device-lost UB) or stale, un-barriered AS.
+        // When (2) is false we fall back to the SOFTWARE triple (which needs no TLAS — a zero-mesh
+        // frame casts no mesh shadows anyway), so the HWRT resolve is selected ⟺ a TLAS was built +
+        // barriered this frame. The showcase (count > 0 every frame) is behaviorally unchanged.
+        // The layout, pipeline, and set MUST swap in LOCK-STEP — the HWRT layout has 20 bindings vs
+        // the software 19; a mismatch is a device-lost.
+        #[cfg(feature = "hwrt")]
+        let hwrt_triple = scene
+            .tlas
+            .as_ref()
+            .and(scene.resolve_pipeline_hwrt.zip(scene.resolve_layout_hwrt))
+            .and_then(|(pipe, layout)| {
+                targets
+                    .resolve_set_hwrt
+                    .as_ref()
+                    .map(|sets| (pipe.pipeline, pipe.layout, &sets[self.frame_index], layout))
+            });
+        // The software triple (the default / byte-identical path).
+        let (resolve_pipeline_h, resolve_layout_h, resolve_set_h) = {
+            #[cfg(feature = "hwrt")]
+            if let Some((p, l, s, _layout)) = hwrt_triple {
+                (p, l, s)
+            } else {
+                (
+                    scene.resolve_pipeline.pipeline,
+                    scene.resolve_pipeline.layout,
+                    &targets.resolve_set[self.frame_index],
+                )
+            }
+            #[cfg(not(feature = "hwrt"))]
+            {
+                (
+                    scene.resolve_pipeline.pipeline,
+                    scene.resolve_pipeline.layout,
+                    &targets.resolve_set[self.frame_index],
+                )
+            }
+        };
+        // SAFETY: recording is open; the selected resolve pipeline + its layout (the software
+        // `resolve_layout` at set 0, or the HWRT 20-binding layout when routing is Hardware — chosen
+        // as one triple so the pipeline/layout/set never mismatch) are live on this device (caller
+        // contract); the selected set binds the now-stored (GENERAL) albedo/material + the lit
+        // (GENERAL) images (+ the binding-19 TLAS on the HWRT set); `dispatch_group_count_x` covers
+        // `present_extent`'s pixel count (the same grid the marcher dispatched); `&...descriptor_set`
+        // is a single-element local alive for the call (first_set 0, count 1, zero dynamic offsets).
+        // The resolve pushes NO constants.
         unsafe {
-            (self.fns.cmd_bind_pipeline)(
-                cmd,
-                VK_PIPELINE_BIND_POINT_COMPUTE,
-                scene.resolve_pipeline.pipeline,
-            );
+            (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, resolve_pipeline_h);
             (self.fns.cmd_bind_descriptor_sets)(
                 cmd,
                 VK_PIPELINE_BIND_POINT_COMPUTE,
-                scene.resolve_pipeline.layout,
+                resolve_layout_h,
                 0,
                 1,
-                &targets.resolve_set[self.frame_index].descriptor_set,
+                &resolve_set_h.descriptor_set,
                 0,
                 ptr::null(),
             );

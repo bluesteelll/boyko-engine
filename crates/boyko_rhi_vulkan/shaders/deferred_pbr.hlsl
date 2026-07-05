@@ -276,6 +276,32 @@ cbuffer ResolvedDdgi : register(b18) {
     uint3  _gDdgiPad;       // pad to the 48-byte ResolvedDdgi stride
 };
 
+#if HWRT
+// binding 19 (t19): the per-frame TLAS (R2a-3 `PersistentTlas.accel`) the HWRT mesh-shadow variant
+// traces with `rayQuery` (R2a-4b). Declared ENTIRELY under `#if HWRT` so the software `.spv` never
+// references an acceleration structure (the byte-identity gate). `RaytracingAccelerationStructure`
+// binds as `VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR` at set 0 binding 19 — the 20th resolve
+// descriptor the HWRT layout adds atop the 19 the software resolve uses.
+[[vk::binding(19)]] RaytracingAccelerationStructure tlas;
+
+// R2a-4b HWRT mesh-shadow ray tuning (world space — the directional light is at infinity, so the ray
+// is a world-space cast; a VIEW-space `split_far` is dimensionally wrong here, critic P0-2). The
+// origin is lifted off the surface by `n * SHADOW_RAY_BIAS` and the trace runs [`SHADOW_RAY_TMIN`,
+// `SHADOW_RAY_TMAX`]. `TMAX = 1e4` covers the bounded scene; the MAGNITUDE (bias / TMin) is tuned at
+// owner-eval, the DIMENSION is fixed world-space.
+static const float SHADOW_RAY_BIAS = 1e-3;
+static const float SHADOW_RAY_TMIN = 1e-3;
+static const float SHADOW_RAY_TMAX = 1e4;
+
+// R2a-4b soft-shadow (owner-eval): the hard single-ray trace read TOO SHARP, so the mesh-shadow
+// term cone-samples N rays jittered within the sun's angular disk around `l` and averages the miss
+// fraction — a single-frame soft penumbra (no TAA on this engine, so the per-ray count carries the
+// smoothness). `SHADOW_CONE_RADIUS` is `tan(half-angle)` of the sun disk (~2°); both are
+// owner-retunable at eval.
+static const uint  SHADOW_RAY_COUNT   = 16;    // rays per pixel (single-frame smoothness)
+static const float SHADOW_CONE_RADIUS = 0.035; // tan(half-angle) of the sun disk (~2°)
+#endif
+
 // Shadow Phase 5 Inc-1-GPU normal-offset bias FACTOR — the spot receiver lookup is pushed off the
 // surface by `n * SPOT_SHADOW_NORMAL_BIAS` so a grazing receiver does not self-shadow (acne). A
 // world-space constant (the spot map has no per-cascade `texel_size`); owner-retunable. Mirrors the
@@ -1056,7 +1082,50 @@ void main(uint3 tid : SV_DispatchThreadID) {
                         float csm_view_z = (camera_mode == RAYGEN_CAM_PERSPECTIVE)
                                          ? (dot(rd, cam_forward.xyz) * view_t)
                                          : view_t;
+#if HWRT
+                        // R2a-4b (owner-eval, soft): the mesh-shadow term routes to a SOFT `rayQuery`
+                        // TLAS trace (replacing the CSM shadow-map sample for mesh geometry). The
+                        // directional light is at infinity, so the shadow rays cast toward `l` (the
+                        // world dir TO the light) from `P + n * bias`. Instead of ONE ray (too sharp),
+                        // `SHADOW_RAY_COUNT` rays are jittered on a Vogel disk within the sun's angular
+                        // cone (`SHADOW_CONE_RADIUS` = tan(half-angle)) around `l`; the AVERAGE miss
+                        // fraction is the soft penumbra. The SDF analytic term (already in `vis`) stays
+                        // min-combined. Flags per ray: ACCEPT_FIRST_HIT_AND_END_SEARCH (occlusion query
+                        // — first hit suffices), FORCE_OPAQUE (no any-hit) + SKIP_PROCEDURAL_PRIMITIVES
+                        // (the BLAS is triangles-only; skip any AABB geometry).
+                        //
+                        // Orthonormal basis around `l` (guard the near-parallel `up` case); the
+                        // per-pixel golden-angle spiral is rotated by the shader's own IGN hash (the
+                        // SAME `ign(px, py)` the SSCS dither uses) so neighbouring pixels sample
+                        // decorrelated cone directions — the penumbra reads as noise, not banding (no
+                        // TAA on this engine, so `SHADOW_RAY_COUNT` carries the single-frame smoothness).
+                        float3 sh_up = abs(l.y) < 0.99 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
+                        float3 sh_tx = normalize(cross(sh_up, l));
+                        float3 sh_ty = cross(l, sh_tx);
+                        float  sh_rot = ign(px, py) * 6.2831853; // IGN → [0, 2π) spiral rotation
+                        float  occ = 0.0;
+                        [loop] for (uint si = 0u; si < SHADOW_RAY_COUNT; ++si) {
+                            float sh_r = sqrt((si + 0.5) / SHADOW_RAY_COUNT);        // Vogel disk radius
+                            float sh_t = si * 2.399963229728653 + sh_rot;            // golden angle + IGN
+                            float2 sh_d = float2(cos(sh_t), sin(sh_t)) * (sh_r * SHADOW_CONE_RADIUS);
+                            float3 sh_dir = normalize(l + sh_tx * sh_d.x + sh_ty * sh_d.y);
+                            RayDesc shadow_ray;
+                            shadow_ray.Origin = P + n * SHADOW_RAY_BIAS;
+                            shadow_ray.Direction = sh_dir;
+                            shadow_ray.TMin = SHADOW_RAY_TMIN;
+                            shadow_ray.TMax = SHADOW_RAY_TMAX;
+                            RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH
+                                   | RAY_FLAG_FORCE_OPAQUE
+                                   | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+                            q.TraceRayInline(tlas, 0, 0xFF, shadow_ray);
+                            q.Proceed();
+                            occ += (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? 1.0 : 0.0;
+                        }
+                        float mesh_vis = 1.0 - occ / SHADOW_RAY_COUNT;
+                        vis = min(vis, mesh_vis);
+#else
                         vis = min(vis, csm_visibility(P, n, csm_view_z, NoL));
+#endif
                     }
                 } else if (multi_light && light_casts_sdf_shadow(L)
                            && marched < MAX_SDF_SHADOW_CASTERS_PER_PIXEL
