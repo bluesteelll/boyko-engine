@@ -1,8 +1,20 @@
 # R2a-4 — rayQuery `#if HWRT` mesh shadow (HW-RT, first VISIBLE rung → owner-eval)
 
-Status: **DESIGNED** (3 parallel investigations, orchestrator-consolidated), coding-ready. Feature `hwrt`
-(default OFF). Rung of `docs/RENDER-R2A-HWRT-SHADOWS-PLAN.md`; builds on R2a-3 (@e919670, per-frame
-GPU-resident TLAS — `docs/RENDER-R2A3-TLAS-PLAN.md`).
+Status: **✅ SHIPPED** — R2a-4a (AS-descriptor RHI) @29c2fe7, R2a-4b (rayQuery variant + routing + soft
+cone-sampled shadows) @8eb770f. **OWNER-APPROVED** on the RTX 3060. Feature `hwrt` (default OFF). Rung of
+`docs/RENDER-R2A-HWRT-SHADOWS-PLAN.md`; builds on R2a-3 (@e919670, per-frame GPU-resident TLAS —
+`docs/RENDER-R2A3-TLAS-PLAN.md`).
+
+**As-built notes (vs the design below):** (1) `TMax` = a WORLD-space constant `SHADOW_RAY_TMAX=1e4` (the
+critic P0-2 fix — `split_far` is view-space, dimensionally wrong). (2) The HWRT resolve triple is gated on
+`scene.tlas.is_some()` (a TLAS built + barriered this frame) — a zero-mesh frame falls back to the software
+triple, so no unbuilt/stale TLAS is ever traced (the code-review P0). (3) The routing gate at the boot layer
+is `ctx.ray_query_enabled()` (capability-presence, matching the R2a-3 tlas gate) — `RayBackendConfig`
+resolves `HardwareTri` on an RT tier and agrees by construction; a runtime config toggle (Software fallback
+on RT hardware) is a follow-up. (4) **Soft shadows:** the single-ray hard version was owner-rejected ("too
+sharp"); shipped = 16 Vogel-disk rays in the sun's ~2° cone (`SHADOW_CONE_RADIUS=0.035`) + per-pixel IGN
+rotation → soft penumbra + contact-hardening. Owner accepted the single-frame sampling noise as
+parameter-tunable; **follow-up = TAA / higher ray count to denoise it.**
 
 ## Goal
 
