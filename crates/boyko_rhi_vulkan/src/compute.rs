@@ -532,6 +532,22 @@ static HWRT_AS_DESCRIPTOR_SMOKE_SPV: SpirvBlob<1412> = SpirvBlob(*include_bytes!
     "/shaders/hwrt_as_descriptor_smoke.comp.spv"
 )));
 
+/// The committed SPIR-V for the Rung 1a specialization-constant GPU smoke
+/// (`shaders/spec_constant_smoke.comp.hlsl`): a single-thread compute that writes
+/// its `[[vk::constant_id(0)]]` value into `buffer[0]`. Gated behind
+/// `spec_constant_smoke` (OFF by default) so the shipped/golden build never
+/// references the orchestrator-compiled smoke `.spv`.
+///
+/// NOTE: `N = 908` is the compiled `spec_constant_smoke.comp.spv`'s exact byte
+/// count (a multiple of 4, so `as_words`' const-assert holds); the `include_bytes!`
+/// + `const`-asserted length is the anti-drift guard — recompiling the shader to a
+/// different size fails the build until `N` is updated to match.
+#[cfg(feature = "spec_constant_smoke")]
+static SPEC_CONSTANT_SMOKE_SPV: SpirvBlob<908> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/spec_constant_smoke.comp.spv"
+)));
+
 /// A 4-byte-aligned wrapper around a committed SPIR-V byte blob so its address is
 /// a valid `*const u32` and it can be re-viewed as a `&[u32]` word stream.
 #[repr(C, align(4))]
@@ -570,6 +586,14 @@ pub fn write_pattern_spirv() -> &'static [u32] {
 #[inline]
 pub fn transform_add_spirv() -> &'static [u32] {
     TRANSFORM_ADD_SPV.as_words()
+}
+
+/// The committed Rung 1a spec-constant smoke SPIR-V as a `u32` word stream (writes
+/// its `constant_id(0)` value into `buffer[0]`). Gated behind `spec_constant_smoke`.
+#[cfg(feature = "spec_constant_smoke")]
+#[inline]
+pub fn spec_constant_smoke_spirv() -> &'static [u32] {
+    SPEC_CONSTANT_SMOKE_SPV.as_words()
 }
 
 /// The committed Phase-6 rung-8 SDF sphere-trace SPIR-V as a `u32` word stream,

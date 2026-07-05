@@ -400,6 +400,7 @@ fn run_sweep(ctx: &VulkanContext) {
                 // shader never reads; the recorder pushes nothing.
                 push_constant_bytes: 4,
                 bind_group_layout: Some(&layout),
+                spec_constants: &[],
             })
             .expect("probe-update compute pipeline");
 

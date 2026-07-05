@@ -158,13 +158,34 @@ pub struct BufferCopy {
     pub size: u64,
 }
 
+/// One specialization constant: a 4-byte scalar keyed by its SPIR-V constant_id
+/// (Rung 1a). RHI-neutral — no backend/`Vk*` type leaks here.
+///
+/// `value` holds the raw 4 bytes. For a `uint`/`int` spec-const pass the integer
+/// directly; for a `float` spec-const pass `x.to_bits()` (a bit-reinterpret, NOT a
+/// truncating `as u32` cast):
+///
+/// ```ignore
+/// SpecConstant { id: 0, value: 16 };                  // HLSL: [[vk::constant_id(0)]] uint
+/// SpecConstant { id: 1, value: 0.035_f32.to_bits() }; // HLSL: [[vk::constant_id(1)]] float
+/// ```
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpecConstant {
+    /// Matches the shader's `[[vk::constant_id(id)]]`.
+    pub id: u32,
+    /// 4 raw bytes; interpreted by the shader's declared scalar type.
+    pub value: u32,
+}
+const _: () = assert!(core::mem::size_of::<SpecConstant>() == 8);
+
 /// Parameters for [`crate::device::RhiDevice::create_compute_pipeline`].
 ///
 /// Generic over the backend `A` because it borrows that backend's owned shader
 /// module by reference. The `'a` lifetime ties the descriptor to the borrowed
-/// module + entry name (+ the optional bind-group layout) for the duration of the
-/// create call (the backend copies what it needs; nothing is retained past the
-/// call).
+/// module + entry name (+ the optional bind-group layout + the spec-constant
+/// slice) for the duration of the create call (the backend copies what it needs;
+/// nothing is retained past the call).
 pub struct ComputePipelineDesc<'a, A: RhiApi> {
     /// The compiled shader module the pipeline's compute stage is built from.
     pub module: &'a A::ShaderModule,
@@ -191,6 +212,12 @@ pub struct ComputePipelineDesc<'a, A: RhiApi> {
     /// pipeline must push against its own layout (P1b adds a pipeline-scoped
     /// `push_constants` variant for the marcher's camera block).
     pub bind_group_layout: Option<&'a A::BindGroupLayout>,
+    /// Specialization constants baked at pipeline-create (Rung 1a). EMPTY ⇒ the
+    /// backend passes a LITERAL `ptr::null()` for `p_specialization_info` ⇒ the
+    /// create-info is byte-identical to the pre-spec-const path. Non-empty ⇒ the
+    /// backend assembles a `VkSpecializationInfo` on its create-call stack frame
+    /// (the data blob outlives the synchronous create call).
+    pub spec_constants: &'a [SpecConstant],
 }
 
 /// One vertex attribute within a [`VertexBufferLayout`] (Phase-6 S0 rung 3).

@@ -175,6 +175,7 @@ fn p1a_vocabulary_set_creates_clean_host() {
             entry: c"main",
             push_constant_bytes: 4,
             bind_group_layout: Some(&layout),
+            spec_constants: &[],
         })
         .expect("P1a vocabulary compute pipeline (set 0 = vocabulary set)");
 
@@ -368,6 +369,7 @@ fn p1a_vocabulary_storage_image_matches_golden() {
             // "non-empty multiple of 4" contract.
             push_constant_bytes: 4,
             bind_group_layout: Some(&layout),
+            spec_constants: &[],
         })
         .expect("P1a vocabulary compute pipeline");
     // The bind group: StorageBuffer + StorageImage, written ONCE at create.

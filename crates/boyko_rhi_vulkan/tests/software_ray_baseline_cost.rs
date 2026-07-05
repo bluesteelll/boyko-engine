@@ -352,6 +352,7 @@ fn run(ctx: &VulkanContext) {
             // mandates a non-empty multiple-of-4 shared push range; declare the standard 4 bytes.
             push_constant_bytes: 4,
             bind_group_layout: Some(&layout),
+            spec_constants: &[],
         })
         .expect("probe-update compute pipeline");
 

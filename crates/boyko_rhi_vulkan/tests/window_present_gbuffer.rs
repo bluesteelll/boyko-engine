@@ -1094,6 +1094,7 @@ impl InterpGpu {
                 entry: c"main",
                 push_constant_bytes: INTERP_INSTANCES_PUSH_BYTES,
                 bind_group_layout: Some(&layout),
+                spec_constants: &[],
             },
         )
         .expect("B3 interp compute pipeline");
@@ -2170,6 +2171,7 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
             entry: c"main",
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&vocab_layout),
+            spec_constants: &[],
         },
     )
     .expect("P1b G-buffer marcher compute pipeline");
@@ -2238,6 +2240,7 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
             // a non-empty (multiple-of-4) push range; declare the shared range (unused).
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&resolve_layout),
+            spec_constants: &[],
         },
     )
     .expect("deferred resolve compute pipeline");
@@ -3058,6 +3061,7 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
             entry: c"main",
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&vocab_layout),
+            spec_constants: &[],
         },
     )
     .expect("P1b G-buffer marcher compute pipeline");
@@ -3074,6 +3078,7 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
             entry: c"main",
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&vocab_layout),
+            spec_constants: &[],
         },
     )
     .expect("P4b coarse-cull compute pipeline (shared vocab layout)");
@@ -3133,6 +3138,7 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
             entry: c"main",
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&resolve_layout),
+            spec_constants: &[],
         },
     )
     .expect("deferred resolve compute pipeline");
@@ -7575,6 +7581,7 @@ fn run_showcase_body_ddgi(
             entry: c"main",
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&vocab_layout),
+            spec_constants: &[],
         },
     )
     .expect("P1b G-buffer marcher compute pipeline");
@@ -7615,6 +7622,7 @@ fn run_showcase_body_ddgi(
             entry: c"main",
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&resolve_layout),
+            spec_constants: &[],
         },
     )
     .expect("deferred resolve compute pipeline");
@@ -7679,6 +7687,7 @@ fn run_showcase_body_ddgi(
             entry: c"main",
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&ssao_layout),
+            spec_constants: &[],
         },
     )
     .expect("Render P7 SSAO compute pipeline");
@@ -7810,6 +7819,7 @@ fn run_showcase_body_ddgi(
             // a non-empty shared range — 4 bytes, never 0.
             push_constant_bytes: 4,
             bind_group_layout: Some(&ddgi_update_layout),
+            spec_constants: &[],
         },
     )
     .expect("SDFDDGI probe-update compute pipeline");
@@ -8887,6 +8897,7 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
             entry: c"main",
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&vocab_layout),
+            spec_constants: &[],
         },
     )
     .expect("P1b G-buffer marcher compute pipeline");
@@ -8945,6 +8956,7 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
             entry: c"main",
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&resolve_layout),
+            spec_constants: &[],
         },
     )
     .expect("deferred resolve compute pipeline");
@@ -9018,6 +9030,7 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
             // requires a non-empty (multiple-of-4) range; declare the shared range (unused).
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&ssao_layout),
+            spec_constants: &[],
         },
     )
     .expect("Render P7 SSAO compute pipeline");

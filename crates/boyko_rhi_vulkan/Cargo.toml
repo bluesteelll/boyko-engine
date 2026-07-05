@@ -30,6 +30,14 @@ goldens = []
 # chain verbatim, and `DeviceCaps.ray_query` stays literally `false`. Builds NO
 # acceleration structure and traces nothing (that is R2a-2..4).
 hwrt = []
+# Rung 1a: the specialization-constant GPU smoke. Gates the `spec_constant_smoke`
+# integration test + its committed `.spv` getter in `compute.rs`. OFF by default so
+# the shipped/golden build never references the (orchestrator-compiled) smoke `.spv`
+# — a spec-const smoke needs only a plain device + one compute dispatch (no `hwrt`).
+# Enable it AFTER compiling `shaders/spec_constant_smoke.comp.spv` (see the dxc line
+# in the shader header):
+#   cargo test -p boyko_rhi_vulkan --features spec_constant_smoke --test spec_constant_smoke
+spec_constant_smoke = []
 
 [dependencies]
 boyko_rhi = { path = "../boyko_rhi" }

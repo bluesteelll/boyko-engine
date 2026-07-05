@@ -1224,6 +1224,7 @@ fn run_gbuffer_hybrid_m4(
             // contract (the 4-byte push fits inside the declared 80-byte range).
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&bind_layout),
+            spec_constants: &[],
         })
         .expect("P1b G-buffer marcher compute pipeline");
     // Render P4b: the coarse-cull pipeline, against the SAME vocabulary layout.
@@ -1233,6 +1234,7 @@ fn run_gbuffer_hybrid_m4(
             entry: c"main",
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&bind_layout),
+            spec_constants: &[],
         })
         .expect("P4b coarse-cull compute pipeline");
     // M4 clip-map LOD (Slice C): resolve the per-level brick resources. With a `clipmap` (the N-level
@@ -1355,6 +1357,7 @@ fn run_gbuffer_hybrid_m4(
             // non-empty (multiple-of-4) push range; declare the shared range (unused).
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&resolve_layout),
+            spec_constants: &[],
         })
         .expect("deferred resolve compute pipeline");
     let resolve_bind_group = device
@@ -2095,6 +2098,7 @@ fn run_gbuffer_hybrid_ssao(
             entry: c"main",
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&bind_layout),
+            spec_constants: &[],
         })
         .expect("G-buffer marcher compute pipeline");
 
@@ -2153,6 +2157,7 @@ fn run_gbuffer_hybrid_ssao(
             entry: c"main",
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&resolve_layout),
+            spec_constants: &[],
         })
         .expect("deferred resolve compute pipeline");
     let resolve_bind_group = device
@@ -2210,6 +2215,7 @@ fn run_gbuffer_hybrid_ssao(
             entry: c"main",
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&ssao_layout),
+            spec_constants: &[],
         })
         .expect("SSAO compute pipeline");
     let ssao_bind_group = device
@@ -5217,6 +5223,7 @@ fn run_gbuffer_hybrid_lit_clustered(
             entry: c"main",
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&bind_layout),
+            spec_constants: &[],
         })
         .expect("P1b G-buffer marcher compute pipeline");
     let bind_group = device
@@ -5284,6 +5291,7 @@ fn run_gbuffer_hybrid_lit_clustered(
             entry: c"main",
             push_constant_bytes: CLUSTER_CULL_PUSH_BYTES,
             bind_group_layout: Some(&cull_layout),
+            spec_constants: &[],
         })
         .expect("L1 cluster-cull compute pipeline");
     let cull_bind_group = device
@@ -5342,6 +5350,7 @@ fn run_gbuffer_hybrid_lit_clustered(
             entry: c"main",
             push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
             bind_group_layout: Some(&resolve_layout),
+            spec_constants: &[],
         })
         .expect("deferred resolve compute pipeline");
     let resolve_bind_group = device

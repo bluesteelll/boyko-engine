@@ -521,6 +521,7 @@ mod gpu {
                 entry: c"main",
                 push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
                 bind_group_layout: None,
+                spec_constants: &[],
             })
             .expect("composite compute pipeline");
 

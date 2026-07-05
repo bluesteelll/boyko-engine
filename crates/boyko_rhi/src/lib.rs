@@ -45,7 +45,8 @@ pub use descriptor::{
     BufferCopy,
     BufferDesc, BufferImageCopy, ComputePipelineDesc, DepthAttachment, DepthBias,
     GraphicsPipelineDesc, ImageBarrierDesc, ImageSubresourceRange, QueryPoolDesc, RenderArea,
-    RenderingAttachment, RenderingDesc, VertexAttribute, VertexBufferLayout, Viewport,
+    RenderingAttachment, RenderingDesc, SpecConstant, VertexAttribute, VertexBufferLayout,
+    Viewport,
 };
 pub use device::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,

@@ -525,6 +525,7 @@ impl CsmResources {
                     // shader reads no push constant — every param rides the b6 UBO.
                     push_constant_bytes: 4,
                     bind_group_layout: Some(&layout),
+                    spec_constants: &[],
                 },
             )
             .expect("invariant: SDFDDGI probe-update compute pipeline create");
@@ -770,6 +771,7 @@ impl InterpGpuProd {
                 entry: c"main",
                 push_constant_bytes: INTERP_INSTANCES_PUSH_BYTES,
                 bind_group_layout: Some(&layout),
+                spec_constants: &[],
             },
         )
         .expect("invariant: B3 interp compute pipeline create");
@@ -971,6 +973,7 @@ impl TlasResources {
                 entry: c"main",
                 push_constant_bytes: BUILD_TLAS_INSTANCES_PUSH_BYTES,
                 bind_group_layout: Some(&layout),
+                spec_constants: &[],
             },
         )
         .expect("invariant: R2a-3 pack compute pipeline create");
@@ -1579,6 +1582,7 @@ impl GpuSceneBundles {
                 entry: c"main",
                 push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
                 bind_group_layout: Some(&vocab_layout),
+                spec_constants: &[],
             },
         )
         .expect("invariant: G-buffer marcher compute pipeline create");
@@ -1623,6 +1627,7 @@ impl GpuSceneBundles {
                 entry: c"main",
                 push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
                 bind_group_layout: Some(&resolve_layout),
+                spec_constants: &[],
             },
         )
         .expect("invariant: deferred resolve compute pipeline create");
@@ -1657,6 +1662,7 @@ impl GpuSceneBundles {
                     entry: c"main",
                     push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
                     bind_group_layout: Some(&hwrt_layout),
+                    spec_constants: &[],
                 },
             )
             .expect("invariant: HWRT deferred resolve compute pipeline create");

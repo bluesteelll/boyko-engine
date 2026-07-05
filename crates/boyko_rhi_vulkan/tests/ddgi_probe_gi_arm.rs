@@ -265,6 +265,7 @@ fn probe_update_dispatch_writes_nonzero_irradiance() {
             entry: c"main",
             push_constant_bytes: 4,
             bind_group_layout: Some(&layout),
+            spec_constants: &[],
         })
         .expect("probe-update pipeline");
 

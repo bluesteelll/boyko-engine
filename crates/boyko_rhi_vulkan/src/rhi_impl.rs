@@ -1412,6 +1412,53 @@ impl RhiDevice<Vulkan> for VulkanContext {
             }
         };
 
+        // Rung 1a: assemble the specialization blob as SAME-SCOPE stack locals so
+        // the pointers stay valid through the `vkCreateComputePipelines` call below.
+        // This MUST stay inline in `create_compute_pipeline` — extracting it into a
+        // helper that returns `p_spec` would dangle the locals on return.
+        const MAX_SPEC: usize = 8;
+        let spec_n = desc.spec_constants.len().min(MAX_SPEC); // release-safe clamp
+        debug_assert!(
+            desc.spec_constants.len() <= MAX_SPEC,
+            "spec-const count exceeds MAX_SPEC"
+        );
+        let mut spec_data: [u32; MAX_SPEC] = [0; MAX_SPEC];
+        let mut spec_map: [VkSpecializationMapEntry; MAX_SPEC] =
+            core::array::from_fn(|_| VkSpecializationMapEntry {
+                constant_id: 0,
+                offset: 0,
+                size: 0,
+            });
+        for i in 0..spec_n {
+            let sc = desc.spec_constants[i];
+            spec_data[i] = sc.value;
+            let offset = (i * 4) as u32;
+            spec_map[i] = VkSpecializationMapEntry {
+                constant_id: sc.id,
+                offset,
+                size: 4usize,
+            };
+            debug_assert!((offset as usize) + 4 <= spec_n * 4, "spec map entry past blob");
+        }
+        let spec_info = VkSpecializationInfo {
+            map_entry_count: spec_n as u32,
+            p_map_entries: spec_map.as_ptr(),
+            data_size: spec_n * 4,
+            p_data: spec_data.as_ptr() as *const c_void,
+        };
+        // Linchpin: empty ⇒ LITERAL null, never a zero-count struct pointer.
+        let p_spec: *const VkSpecializationInfo = if spec_n == 0 {
+            ptr::null()
+        } else {
+            &spec_info as *const VkSpecializationInfo
+        };
+
+        // SAFETY: spec_data, spec_map, and spec_info are stack locals of this function, in the
+        // same lexical scope as the vkCreateComputePipelines call below; the driver reads and
+        // COPIES specialization data synchronously during that call and retains nothing past it,
+        // so the pointers stay valid for the whole call. spec_n == 0 ⇒ p_spec is a literal null ⇒
+        // the create-info is byte-identical to the pre-spec-const path. Each map entry's
+        // offset+size (= i*4 + 4) is <= data_size (= spec_n*4), so blob reads are in-bounds.
         let stage = VkPipelineShaderStageCreateInfo {
             s_type: VkStructureType::PipelineShaderStageCreateInfo,
             p_next: ptr::null(),
@@ -1419,7 +1466,7 @@ impl RhiDevice<Vulkan> for VulkanContext {
             stage: VK_SHADER_STAGE_COMPUTE_BIT,
             module: desc.module.module,
             p_name: desc.entry.as_ptr(),
-            p_specialization_info: ptr::null(),
+            p_specialization_info: p_spec.cast(),
         };
         let cp_info = VkComputePipelineCreateInfo {
             s_type: VkStructureType::ComputePipelineCreateInfo,

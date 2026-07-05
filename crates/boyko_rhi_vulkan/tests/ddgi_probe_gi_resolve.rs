@@ -432,6 +432,7 @@ fn probe_sample_gpu_eq_cpu_to_bits() {
             // rejected as `Unsupported` before the dispatch ever runs.
             push_constant_bytes: 4,
             bind_group_layout: Some(&layout),
+            spec_constants: &[],
         })
         .expect("golden pipeline");
 

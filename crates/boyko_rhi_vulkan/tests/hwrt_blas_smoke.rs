@@ -298,6 +298,7 @@ fn hwrt_tlas_pack_build_smoke() {
             entry: c"main",
             push_constant_bytes: BUILD_TLAS_INSTANCES_PUSH_BYTES,
             bind_group_layout: Some(&layout),
+            spec_constants: &[],
         })
         .expect("packer pipeline");
     let bind_group = ctx
@@ -522,6 +523,7 @@ fn hwrt_as_descriptor_smoke() {
             // A dummy 4-byte push (the shared compute layout rejects a 0-byte range).
             push_constant_bytes: 4,
             bind_group_layout: Some(&layout),
+            spec_constants: &[],
         })
         .expect("smoke pipeline");
     // The AS-DESCRIPTOR WRITE UNDER TEST: `BindGroupEntry::AccelerationStructure` drives the new

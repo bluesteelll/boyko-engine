@@ -1544,9 +1544,30 @@ pub struct VkPipelineShaderStageCreateInfo {
     pub stage: VkFlags,
     pub module: VkShaderModule,
     pub p_name: *const c_char,
-    /// `const VkSpecializationInfo*` — null (no specialization constants).
+    /// `const VkSpecializationInfo*` — null (no specialization constants), or a
+    /// pointer to a [`VkSpecializationInfo`] the driver reads and COPIES during the
+    /// create call (Rung 1a).
     pub p_specialization_info: *const c_void,
 }
+
+/// `VkSpecializationMapEntry` — maps one constant_id to a byte range in the data blob.
+#[repr(C)]
+pub struct VkSpecializationMapEntry {
+    pub constant_id: u32,
+    pub offset: u32,
+    pub size: usize, // C size_t
+}
+const _: () = assert!(core::mem::size_of::<VkSpecializationMapEntry>() == 16); // 4+4+8 (x86_64)
+
+/// `VkSpecializationInfo` — the specialization blob handed to a shader stage.
+#[repr(C)]
+pub struct VkSpecializationInfo {
+    pub map_entry_count: u32,
+    pub p_map_entries: *const VkSpecializationMapEntry,
+    pub data_size: usize, // C size_t
+    pub p_data: *const c_void,
+}
+const _: () = assert!(core::mem::size_of::<VkSpecializationInfo>() == 32); // 4 + pad4 + 8 + 8 + 8
 
 /// `VkComputePipelineCreateInfo`.
 #[repr(C)]
