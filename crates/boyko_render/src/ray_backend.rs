@@ -199,6 +199,34 @@ impl RayCaps {
     }
 }
 
+// ---- RayBackendPolicy (the owner's runtime backend-override input) --------------------
+
+/// The owner's runtime backend-override input — read by [`resolve_ray_backend_system`]
+/// ALONGSIDE [`RayCaps`] and applied AFTER the tier resolve, so it survives the per-frame
+/// overwrite (an INPUT, not a second writer of [`RayBackendConfig`]). `Copy` POD; [`Default`]
+/// is the zero-override (today's behavior on every tier).
+///
+/// The owner flips this at runtime via `world.resource_mut::<RayBackendPolicy>()` (the
+/// scheduler serializes it against the single writer); the host boot may also seed it from
+/// the `BOYKO_FORCE_SOFTWARE` env knob for the byte-identity gate + a flight-check.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct RayBackendPolicy {
+    /// When `true`, every workload cell the tier resolved to a hardware backend is
+    /// DOWNGRADED to [`RayBackend::Software`] (the forced-software runtime knob). `false`
+    /// ([`Default`]) keeps the tier's selection — today's behavior.
+    pub force_software: bool,
+}
+
+impl Default for RayBackendPolicy {
+    /// The zero-override — `force_software = false`, i.e. the tier's own selection stands
+    /// (today's behavior on every tier).
+    #[inline]
+    fn default() -> Self {
+        Self { force_software: false }
+    }
+}
+
 // ---- the resolve decision (pure — the unit-testable fit) ------------------------------
 
 /// Derives the [`RayBackendConfig`] carrier from the device [`RtTier`] — the PURE,
@@ -260,6 +288,22 @@ pub struct RayResolveSet;
 #[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct AsBuildSet;
 
+// ---- the force-software sweep (pure — the unit-testable downgrade) --------------------
+
+/// Downgrade every [`RayBackend::HardwareTri`] / [`RayBackend::HardwareMixed`] cell to
+/// [`RayBackend::Software`] (the force-software sweep). Idempotent; only ever downgrades
+/// (never upgrades), so the `Absent`-tier all-software invariant is preserved — an
+/// already-all-software config passes through unchanged.
+fn apply_force_software(cfg: &mut RayBackendConfig) {
+    for row in cfg.table.iter_mut() {
+        for cell in row.iter_mut() {
+            if *cell != RayBackend::Software {
+                *cell = RayBackend::Software;
+            }
+        }
+    }
+}
+
 // ---- the cold single-writer system ----------------------------------------------------
 
 /// Writes [`RayBackendConfig`] from the device [`RayCaps`] tier — the SINGLE
@@ -276,13 +320,28 @@ pub struct AsBuildSet;
 /// software-path invariant broke (e.g. `ray_query` spuriously `true`). On a `Weak` /
 /// `Strong` device the mesh-shadow cell is legitimately [`RayBackend::HardwareTri`],
 /// so the assert is skipped for those tiers.
+///
+/// After the tier fit, the owner's [`RayBackendPolicy`] is applied: when
+/// `force_software` is set, every hardware cell is DOWNGRADED to [`RayBackend::Software`]
+/// (the runtime force-software knob). The policy is an INPUT, not a second writer of
+/// [`RayBackendConfig`] — it composes into the resolved table BEFORE the store, so this
+/// system stays the SINGLE writer. The `debug_assert!` still holds: it fires only on a
+/// spurious hardware cell for an `Absent` tier, and `force_software` only DOWNGRADES
+/// hardware→software (never upgrades), so it can never introduce such a cell.
 //
 // `clippy::needless_pass_by_value`: `Res`/`ResMut` are by-value `SystemParam`s
 // read/written through reborrows — the same false-positive `resolve_ddgi_grid_gated`
 // carries.
 #[allow(clippy::needless_pass_by_value)]
-pub fn resolve_ray_backend_system(caps: Res<RayCaps>, mut out: ResMut<RayBackendConfig>) {
-    let resolved = resolve_ray_backend(caps.tier);
+pub fn resolve_ray_backend_system(
+    caps: Res<RayCaps>,
+    policy: Res<RayBackendPolicy>,
+    mut out: ResMut<RayBackendConfig>,
+) {
+    let mut resolved = resolve_ray_backend(caps.tier);
+    if policy.force_software {
+        apply_force_software(&mut resolved);
+    }
     debug_assert!(
         caps.tier != RtTier::Absent
             || resolved
@@ -290,7 +349,7 @@ pub fn resolve_ray_backend_system(caps: Res<RayCaps>, mut out: ResMut<RayBackend
                 .iter()
                 .all(|row| row.iter().all(|&b| b == RayBackend::Software)),
         "invariant: an Absent-tier device must resolve every ray-backend cell to Software \
-         (the software-path anchor)"
+         (the software-path anchor; force_software only ever downgrades hardware→software)"
     );
     *out = resolved;
 }
@@ -364,5 +423,64 @@ mod tests {
     fn ray_caps_default_is_absent() {
         assert_eq!(RayCaps::default().tier, RtTier::Absent);
         assert_eq!(RayCaps::new(RtTier::Strong).tier, RtTier::Strong);
+    }
+
+    /// (a) `force_software = false` (the default policy) leaves the tier's selection
+    /// untouched — a `Weak` / `Strong` device still carries the `HardwareTri` mesh-shadow
+    /// cell (today's behavior byte-for-byte).
+    #[test]
+    fn force_software_false_keeps_tier_selection() {
+        assert!(!RayBackendPolicy::default().force_software);
+        for tier in [RtTier::Weak, RtTier::Strong] {
+            let mut cfg = resolve_ray_backend(tier);
+            let expected = cfg;
+            let policy = RayBackendPolicy::default();
+            if policy.force_software {
+                apply_force_software(&mut cfg);
+            }
+            assert_eq!(cfg, expected, "tier {tier:?}: default policy must not mutate");
+            assert_eq!(
+                cfg.table[RayWorkload::Shadow as usize][RayGeom::Mesh as usize],
+                RayBackend::HardwareTri,
+                "tier {tier:?}: mesh-shadow cell stays HardwareTri"
+            );
+        }
+    }
+
+    /// (b) `force_software = true` on a `Strong` device downgrades every cell to
+    /// `Software` — the resolved carrier equals [`RayBackendConfig::DISABLED`].
+    #[test]
+    fn force_software_true_downgrades_strong_to_disabled() {
+        let mut cfg = resolve_ray_backend(RtTier::Strong);
+        apply_force_software(&mut cfg);
+        assert_eq!(cfg, RayBackendConfig::DISABLED);
+        for row in &cfg.table {
+            for &cell in row {
+                assert_eq!(cell, RayBackend::Software);
+            }
+        }
+    }
+
+    /// (c) `force_software = true` on an `Absent` device stays `DISABLED` — the sweep
+    /// only downgrades, so the already-all-software config is preserved.
+    #[test]
+    fn force_software_true_on_absent_stays_disabled() {
+        let mut cfg = resolve_ray_backend(RtTier::Absent);
+        assert_eq!(cfg, RayBackendConfig::DISABLED);
+        apply_force_software(&mut cfg);
+        assert_eq!(cfg, RayBackendConfig::DISABLED);
+    }
+
+    /// (d) `apply_force_software` is idempotent — applying it twice equals applying it
+    /// once (it only downgrades, never upgrades).
+    #[test]
+    fn force_software_is_idempotent() {
+        for tier in [RtTier::Absent, RtTier::Weak, RtTier::Strong] {
+            let mut once = resolve_ray_backend(tier);
+            apply_force_software(&mut once);
+            let mut twice = once;
+            apply_force_software(&mut twice);
+            assert_eq!(once, twice, "tier {tier:?}: apply twice == apply once");
+        }
     }
 }

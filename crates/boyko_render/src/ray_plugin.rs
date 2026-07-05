@@ -6,7 +6,7 @@
 use boyko_ecs::ecs::core::app::{App, Plugin};
 
 use crate::ray_backend::{
-    RayBackendConfig, RayCaps, RayResolveSet, resolve_ray_backend_system,
+    RayBackendConfig, RayBackendPolicy, RayCaps, RayResolveSet, resolve_ray_backend_system,
 };
 use crate::ray_shadow_config::{RayShadowConfig, ResolvedRayShadow, resolve_ray_shadow_system};
 
@@ -14,9 +14,19 @@ use crate::ray_shadow_config::{RayShadowConfig, ResolvedRayShadow, resolve_ray_s
 /// [`RayBackendConfig`] carrier (default DISABLED — every cell
 /// [`RayBackend::Software`](crate::ray_backend::RayBackend::Software)) + its
 /// [`RayCaps`] device-tier input (default [`RtTier::Absent`](boyko_rhi_vulkan's
-/// `RtTier`) — dormant until the host fills it), and schedules the cold
+/// `RtTier`) — dormant until the host fills it) + the owner's
+/// [`RayBackendPolicy`] override input (default zero-override —
+/// `force_software = false`, today's behavior), and schedules the cold
 /// [`resolve_ray_backend_system`] (the SINGLE writer of `RayBackendConfig`) under
 /// [`RayResolveSet`].
+///
+/// # The runtime backend-override input (rung 2)
+///
+/// [`RayBackendPolicy`] is a read-only INPUT to `resolve_ray_backend_system` (read
+/// ALONGSIDE `RayCaps`, applied AFTER the tier fit). The owner flips it at runtime
+/// (`world.resource_mut::<RayBackendPolicy>()`) to force every hardware cell back to
+/// software without a pipeline rebuild; the single-writer discipline is intact
+/// (`resolve_ray_backend_system` stays the sole writer of `RayBackendConfig`).
 ///
 /// # Mirror of [`DdgiPlugin`](crate::ddgi_plugin::DdgiPlugin)
 ///
@@ -54,6 +64,12 @@ impl Plugin for RayPlugin {
         // run. The host overrides `RayCaps` at device boot (still `Absent` in R1).
         app.insert_resource(RayBackendConfig::default());
         app.insert_resource(RayCaps::default());
+        // The owner's runtime backend-override input (rung 2): default zero-override
+        // (`force_software = false`, today's behavior). `resolve_ray_backend_system` reads
+        // it ALONGSIDE `RayCaps` and applies it AFTER the tier fit — an INPUT, not a second
+        // writer of `RayBackendConfig`. The owner flips it via `resource_mut` at runtime;
+        // the host boot may seed it from `BOYKO_FORCE_SOFTWARE`.
+        app.insert_resource(RayBackendPolicy::default());
 
         // HW-RT rung 1b: the author-set soft-shadow tuning + its derived UBO carrier.
         // `resolve_ray_shadow_system` is the single writer of `ResolvedRayShadow`; the

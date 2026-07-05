@@ -204,8 +204,8 @@ pub use ddgi_config::{
 };
 pub use ddgi_plugin::DdgiPlugin;
 pub use ray_backend::{
-    AsBuildSet, RAY_BACKEND_CONFIG_BYTES, RayBackend, RayBackendConfig, RayCaps, RayGeom,
-    RayResolveSet, RayWorkload, resolve_ray_backend, resolve_ray_backend_system,
+    AsBuildSet, RAY_BACKEND_CONFIG_BYTES, RayBackend, RayBackendConfig, RayBackendPolicy, RayCaps,
+    RayGeom, RayResolveSet, RayWorkload, resolve_ray_backend, resolve_ray_backend_system,
 };
 pub use ray_plugin::RayPlugin;
 pub use ray_shadow_config::{

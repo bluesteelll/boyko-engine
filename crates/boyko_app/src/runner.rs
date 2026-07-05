@@ -28,13 +28,17 @@ use boyko_input::{ButtonState, KeyCode, RawInputEvent};
 use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
 #[cfg(windows)]
 use boyko_render::{
-    CsmCasterScratch, DdgiCaps, MeshRegistry, MeshRenderScratch, RayCaps, ResolvedCsm,
-    ResolvedShadowAtlas, RhiContext, SdfEditStaging, collect_sdf_edits, gbuffer_push_from_view,
-    upload_atlas_ring, upload_camera_ring, upload_csm_ring, upload_instance_models,
-    upload_light_table, upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
+    CsmCasterScratch, DdgiCaps, MeshRegistry, MeshRenderScratch, RayBackendPolicy, RayCaps,
+    ResolvedCsm, ResolvedShadowAtlas, RhiContext, SdfEditStaging, collect_sdf_edits,
+    gbuffer_push_from_view, upload_atlas_ring, upload_camera_ring, upload_csm_ring,
+    upload_instance_models, upload_light_table, upload_pair_out_slot, upload_pair_ring,
+    upload_sdf_edit_list,
 };
 #[cfg(all(windows, feature = "hwrt"))]
-use boyko_render::{ResolvedRayShadow, upload_mesh_ids, upload_ray_shadow_ring};
+use boyko_render::{
+    RayBackend, RayBackendConfig, RayGeom, RayWorkload, ResolvedRayShadow, upload_mesh_ids,
+    upload_ray_shadow_ring,
+};
 #[cfg(windows)]
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 #[cfg(windows)]
@@ -158,6 +162,27 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // behavior change. `insert_resource` REPLACES the plugin's default.
     app.world_mut()
         .insert_resource(RayCaps::new(ctx.device_caps().rt_tier()));
+
+    // HW-RT rung 2 (runtime backend toggle): seed the owner's `RayBackendPolicy`
+    // force-software knob from `BOYKO_FORCE_SOFTWARE`. A non-empty truthy value
+    // ("1"/"true", case-insensitive) DOWNGRADES every hardware cell to Software at
+    // the resolve — the host-layer boot knob that (a) makes the forced-software path
+    // headlessly runnable for the byte-identity gate and (b) gives the owner a real
+    // runtime toggle to flight-check on RT hardware. Unset (the default) keeps the
+    // tier's own selection — today's behavior. This is inert on a non-hwrt / non-RT
+    // build (no hardware cell to downgrade), but reading/writing the resource is
+    // harmless, so it stays un-gated to match the surrounding `RayCaps` override.
+    if let Ok(v) = std::env::var("BOYKO_FORCE_SOFTWARE") {
+        let force = matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true");
+        if force {
+            app.world_mut()
+                .resource_mut::<RayBackendPolicy>()
+                .force_software = true;
+            eprintln!(
+                "boyko_app: BOYKO_FORCE_SOFTWARE={v} - forcing the SOFTWARE ray-shadow backend"
+            );
+        }
+    }
 
     // ── Windowed `AppExit` semantics: insert-IF-ABSENT (plan D6; the legacy
     // headless path keeps its unconditional insert).
@@ -677,11 +702,32 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // byte-identical OFF path (no pack, no build, no barrier).
             #[cfg(feature = "hwrt")]
             let tlas_enabled = {
-                let on = ctx.ray_query_enabled() && scratch.instance_count() > 0;
+                // Rung 2: fold the config-arbiter read into the TLAS gate. The
+                // owner's runtime force-software knob (`RayBackendPolicy`) flows
+                // through `resolve_ray_backend_system` into the mesh-shadow cell;
+                // when it resolves to `Software` the TLAS is DISARMED here, so the
+                // deferred resolve's `scene.tlas.is_some()`-gated `hwrt_triple` falls
+                // back to the pure-software shadow path (no pack, no build, no
+                // barrier) — a runtime backend flip with zero pipeline rebuild.
+                let backend_hw = world
+                    .resource::<RayBackendConfig>()
+                    .table[RayWorkload::Shadow as usize][RayGeom::Mesh as usize]
+                    == RayBackend::HardwareTri;
+                // A `HardwareTri` cell can only survive the resolve on an RT device
+                // (the `Weak`/`Strong` tier fit routes it, `Absent` stays software),
+                // so a hardware cell implies `ray_query_enabled()`.
+                debug_assert!(
+                    !backend_hw || ctx.ray_query_enabled(),
+                    "invariant: a HardwareTri mesh-shadow cell implies an RT device (ray_query_enabled)"
+                );
+                // The frame-invariant BLAS-address sync runs under `ray_query_enabled()`
+                // REGARDLESS of `backend_hw` (boot-time setup — a BLAS never moves; a
+                // no-op unless `blas_generation` advanced). Only the per-frame TLAS
+                // BUILD is gated by `tlas_enabled`.
                 if ctx.ray_query_enabled() {
                     host.gpu.sync_tlas_blas_addr(ctx, registry);
                 }
-                on
+                ctx.ray_query_enabled() && backend_hw && scratch.instance_count() > 0
             };
             let scene = host.gpu.scene(
                 mvp,

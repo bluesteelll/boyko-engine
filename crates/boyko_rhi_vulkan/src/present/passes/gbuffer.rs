@@ -1562,6 +1562,21 @@ impl Renderer<'_> {
                     .as_ref()
                     .map(|sets| (pipe.pipeline, pipe.layout, &sets[self.frame_index], layout))
             });
+        // FORWARD-SEAM INVARIANT (hardening; NO functional change): `scene.tlas.is_some()`
+        // is the SOLE predicate that arms the HW shadow resolve — the host folds the
+        // shadow-backend decision (`RayBackendConfig`'s HardwareTri mesh-shadow cell + the
+        // owner's force-software knob) INTO `tlas_enabled`, so a disarmed TLAS ⇒ the
+        // software resolve here. Selecting `hwrt_triple` therefore implies `scene.tlas`.
+        // RISK: a FUTURE workload that consumes the TLAS for something OTHER than mesh
+        // shadows (AO / GI / reflections on hardware) must SPLIT the TLAS-arm predicate
+        // from the shadow-backend decision — the TLAS may then be armed while the shadow
+        // cell is software (or vice versa), and folding both into one `tlas_enabled` bit
+        // would mis-route this selection. This is the riskiest forward seam.
+        #[cfg(feature = "hwrt")]
+        debug_assert!(
+            hwrt_triple.is_none() || scene.tlas.is_some(),
+            "invariant: the HW shadow resolve is armed ⟺ scene.tlas.is_some() (the sole predicate)"
+        );
         // The software triple (the default / byte-identical path).
         let (resolve_pipeline_h, resolve_layout_h, resolve_set_h) = {
             #[cfg(feature = "hwrt")]
