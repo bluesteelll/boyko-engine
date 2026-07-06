@@ -114,3 +114,75 @@ pub fn sync_instance_model_cols(
         *col = InstanceModelCol::from_global(g);
     }
 }
+
+/// The per-entity PREVIOUS-frame model affine — a byte-identical dense sibling of
+/// [`InstanceModelCol`], carrying the transform the entity had LAST frame.
+///
+/// # Why it exists (HW-RT Rung 3b — temporal shadow-vis motion vectors)
+///
+/// The temporal shadow-vis denoiser reprojects each pixel's shadow term from where its
+/// surface *was* last frame. For a moving mesh box the correct per-object motion vector
+/// needs the box's PREVIOUS model transform in the raster VS
+/// (`prev_world = prev_m3·position_local + prev_t`), computed alongside the current
+/// `cur_world` — the deferred domain has neither `SV_InstanceID` nor `position_local`, so
+/// mesh motion vectors MUST be generated in the raster pass, and that pass reads this
+/// prev-transform column. This sibling is the ECS-native carry of that prev-transform.
+///
+/// # Principle 0
+///
+/// The prev-transform is durable per-entity data, so it lives in a dense `ComponentPool`
+/// column — NOT a side `std::Vec<PrevModel>` (the SP4-race lesson: a parallel data system
+/// glued on the side is the anti-pattern this engine forbids). It is the exact 48-byte
+/// layout of [`InstanceModelCol`]: the gbuffer VS reads it as the same
+/// `StructuredBuffer<InstanceModelCol>` stride, just from the prev-instance ring instead of
+/// the current one.
+///
+/// # HW-RT-walled
+///
+/// `#[cfg(feature = "hwrt")]`: a `not(hwrt)` build never compiles this column, so its
+/// instancing path is TEXTUALLY the pre-Rung-3b code (the same discipline the RT track
+/// keeps end-to-end).
+#[cfg(feature = "hwrt")]
+#[repr(C)]
+#[derive(Component, Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct PrevInstanceModelCol {
+    /// The three interleaved `[linear_row.xyz | translation_component]` quads — the SAME
+    /// 3×4 row-major affine layout as [`InstanceModelCol`], holding LAST frame's transform.
+    pub rows: [[f32; 4]; 3],
+}
+
+// The prev-instance ring stride MUST equal the current instance ring stride (48 B): the
+// gbuffer VS indexes both by `base_instance + SV_InstanceID`, so a layout divergence would
+// desynchronise the two rings and reproject to a wrong surface point.
+#[cfg(feature = "hwrt")]
+const _: () = assert!(size_of::<PrevInstanceModelCol>() == INSTANCE_MODEL_COL_BYTES);
+#[cfg(feature = "hwrt")]
+const _: () = assert!(align_of::<PrevInstanceModelCol>() == 4);
+
+/// Copies each visible entity's CURRENT [`InstanceModelCol`] into its
+/// [`PrevInstanceModelCol`] — one sequential 48-byte column-to-column copy per row,
+/// alloc-free, branch-free (the `Enabled<RenderEnabled>` filter is a structural skip).
+///
+/// # Ordering — MUST run `.before(sync_instance_model_cols)`
+///
+/// This captures `prev := curr` BEFORE [`sync_instance_model_cols`] refreshes `curr` from
+/// this frame's moving [`GlobalTransform`]. The plugin pins the `.before` edge. With it, at
+/// frame N: `prev` holds frame N−1's transform (the value `curr` still carries at frame
+/// start) and `curr` is then overwritten with frame N's — so the motion vector `cur − prev`
+/// is exactly this frame's per-object displacement. Reordering it AFTER the refresh would
+/// make `prev == curr` (zero motion, every box ghosts under its own motion — the exact
+/// class the denoiser must fix).
+///
+/// # 0%-gate
+///
+/// A world with no [`PrevInstanceModelCol`] column yields zero matching archetypes ⇒ zero
+/// work: a scene that never opts into temporal motion vectors pays nothing.
+#[cfg(feature = "hwrt")]
+#[allow(clippy::needless_pass_by_value)]
+pub fn sync_prev_instance_model_cols(
+    mut q: Query<(&InstanceModelCol, &mut PrevInstanceModelCol), Enabled<RenderEnabled>>,
+) {
+    for (cur, prev) in q.iter_mut() {
+        prev.rows = cur.rows;
+    }
+}

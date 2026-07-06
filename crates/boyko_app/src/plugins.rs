@@ -8,6 +8,10 @@
 use boyko_ecs::ecs::core::app::CoreSchedule;
 use boyko_ecs::{App, Plugin};
 use boyko_render::instance_model::sync_instance_model_cols;
+// HW-RT rung 3b: the prev-frame model-affine copy system (temporal motion vectors), ordered
+// `.before` the affine pack below. `not(hwrt)` never compiles it.
+#[cfg(feature = "hwrt")]
+use boyko_render::instance_model::sync_prev_instance_model_cols;
 use boyko_render::light_system::LightTableStaging;
 use boyko_render::{
     CsmCasterScratch, CsmPlugin, LightingConfig, LightingPlugin, MeshRenderScratch,
@@ -214,6 +218,13 @@ impl Plugin for EnginePlugins {
         app.insert_resource(CsmCasterScratch::default());
         app.add_systems_cfg(|b| {
             let pack = b.add_system(sync_instance_model_cols).key();
+            // HW-RT rung 3b: `prev := curr` MUST run BEFORE the affine pack refreshes `curr`
+            // from this frame's moving `GlobalTransform`, so a mesh's motion vector is this
+            // frame's true per-object displacement (else `prev == curr`, zero motion, every
+            // box ghosts under its own motion). Dormant until a scene carries the
+            // `PrevInstanceModelCol` column (0%-gate).
+            #[cfg(feature = "hwrt")]
+            b.add_system(sync_prev_instance_model_cols).before(pack);
             let casters = b.add_system(gather_shadow_casters).after(pack).key();
             b.add_system(sync_csm_light_gate).after(casters);
             // The punctual header-gate ⇄ depth-pass lock-step (mirrors the csm sync): after the

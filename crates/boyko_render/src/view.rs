@@ -107,6 +107,69 @@ pub fn composite_from_view(view: &ViewUniform, w: u32, h: u32) -> CompositePushC
     }
 }
 
+/// The marcher-aligned proj·view matrix (ROW-MAJOR math rows) from a resolved
+/// PERSPECTIVE [`ViewUniform`] and a `w × h` extent — the SINGLE construction of
+/// the raster projection convention.
+///
+/// Both the raster gbuffer push ([`gbuffer_push_from_view`], which uploads it
+/// column-major at bytes 0..64) and the HW-RT Rung-3b `MotionCam` UBO
+/// (`boyko_render::motion_cam`) build their view-proj from THIS function, so the
+/// motion vector's `cur`/`prev` endpoints are placed with EXACTLY the projection
+/// the rasterizer/marcher used — the static-camera convergence anchor (motion
+/// vector ≡ 0 when nothing moves) holds by construction, with no risk of a
+/// second, drifting projection.
+///
+/// # Convention (verified against the `window_present_gbuffer` viewer)
+///
+/// * clip.x = `x_cam / (aspect · tan)`, clip.y = `−y_cam / tan` (the y-flip
+///   matching the marcher's `ndc_y = -(...)` ray-gen);
+/// * clip.z = clip.w = `forward · (P − eye)` (positive in front — the exact clip-z
+///   is irrelevant: the gbuffer FS overwrites depth with the marcher-aligned
+///   euclidean `length(cam_eye − P) / T_MAX`);
+/// * `aspect` is DERIVED FROM THE EXTENT (`w / h`), NOT `ViewUniform::aspect` —
+///   the SAME extent [`composite_from_view`] gives the marcher's b5 camera, so
+///   both derive one aspect by construction (an authored aspect would silently
+///   misalign the raster geometry against the resolve's camera-ray world
+///   reconstruction — the static form of the motion-shadow class).
+///
+/// PERSPECTIVE-only: an orthographic view (`fov_y == 0`) is debug-asserted out.
+#[rustfmt::skip]
+#[inline]
+pub fn marcher_view_proj_rows(view: &ViewUniform, width: u32, height: u32) -> [[f32; 4]; 4] {
+    debug_assert!(
+        view.fov_y > 0.0,
+        "invariant: the marcher-aligned view-proj bridge is PERSPECTIVE-only (fov_y > 0)"
+    );
+    debug_assert!(
+        width > 0 && height > 0,
+        "invariant: the composite extent is non-zero"
+    );
+    let eye = [view.camera_pos.x, view.camera_pos.y, view.camera_pos.z];
+    let forward = [view.cam_forward.x, view.cam_forward.y, view.cam_forward.z];
+    let right = [view.cam_right.x, view.cam_right.y, view.cam_right.z];
+    let up = [view.cam_up.x, view.cam_up.y, view.cam_up.z];
+    let tan = (view.fov_y * 0.5).tan();
+    // Extent-derived, matching `CompositePushConstants::perspective` exactly — NOT `view.aspect`.
+    let aspect = (width as f32) / (height as f32);
+
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let tx = -dot(right, eye);
+    let ty = -dot(up, eye);
+    let tz = dot(forward, eye); // in-front view depth: z_cam = forward·P − tz
+
+    let sx = 1.0 / (aspect * tan);
+    let sy = -1.0 / tan;
+    let (rx, ry, rz) = (right[0], right[1], right[2]);
+    let (ux, uy, uz) = (up[0], up[1], up[2]);
+    let (fx, fy, fz) = (forward[0], forward[1], forward[2]);
+    [
+        [sx * rx, sx * ry, sx * rz, sx * tx], // clip.x
+        [sy * ux, sy * uy, sy * uz, sy * ty], // clip.y (marcher y-flip)
+        [fx,      fy,      fz,      -tz],     // clip.z = forward·(P − eye)
+        [fx,      fy,      fz,      -tz],     // clip.w (perspective divide)
+    ]
+}
+
 /// Builds the 88-byte gbuffer-raster VERTEX push (`{ float4x4 view_proj; float4
 /// cam_eye; uint base_instance; uint use_model_matrix }` —
 /// [`GBUFFER_PUSH_BYTES`]) from a resolved PERSPECTIVE [`ViewUniform`], for the
@@ -156,42 +219,11 @@ pub fn gbuffer_push_from_view(
     height: u32,
     instanced: bool,
 ) -> [u8; GBUFFER_PUSH_BYTES] {
-    debug_assert!(
-        view.fov_y > 0.0,
-        "invariant: the gbuffer raster push bridge is PERSPECTIVE-only (fov_y > 0)"
-    );
-    debug_assert!(
-        width > 0 && height > 0,
-        "invariant: the composite extent is non-zero"
-    );
     let eye = [view.camera_pos.x, view.camera_pos.y, view.camera_pos.z];
-    let forward = [view.cam_forward.x, view.cam_forward.y, view.cam_forward.z];
-    let right = [view.cam_right.x, view.cam_right.y, view.cam_right.z];
-    let up = [view.cam_up.x, view.cam_up.y, view.cam_up.z];
-    let tan = (view.fov_y * 0.5).tan();
-    // Extent-derived, matching `CompositePushConstants::perspective` exactly
-    // (see the doc section above) — NOT `view.aspect`.
-    let aspect = (width as f32) / (height as f32);
-
-    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-    let tx = -dot(right, eye);
-    let ty = -dot(up, eye);
-    let tz = dot(forward, eye); // in-front view depth: z_cam = forward·P − tz
-
-    // proj·view, ROW-MAJOR math rows; uploaded column-major (the verified
-    // transpose). `forward` points INTO the scene (the marcher's ray direction),
-    // so the clip.z/w row is `+forward` (see the viewer's sign-bug note).
-    let sx = 1.0 / (aspect * tan);
-    let sy = -1.0 / tan;
-    let (rx, ry, rz) = (right[0], right[1], right[2]);
-    let (ux, uy, uz) = (up[0], up[1], up[2]);
-    let (fx, fy, fz) = (forward[0], forward[1], forward[2]);
-    let pv: [[f32; 4]; 4] = [
-        [sx * rx, sx * ry, sx * rz, sx * tx], // clip.x
-        [sy * ux, sy * uy, sy * uz, sy * ty], // clip.y (marcher y-flip)
-        [fx,      fy,      fz,      -tz],     // clip.z = forward·(P − eye)
-        [fx,      fy,      fz,      -tz],     // clip.w (perspective divide)
-    ];
+    // The marcher-aligned proj·view (ROW-MAJOR math rows) — the SINGLE source of
+    // the raster projection convention, shared with the Rung-3b `MotionCam`
+    // (see `marcher_view_proj_rows`).
+    let pv = marcher_view_proj_rows(view, width, height);
 
     let mut out = [0u8; GBUFFER_PUSH_BYTES];
     for col in 0..4 {

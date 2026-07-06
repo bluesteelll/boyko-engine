@@ -282,6 +282,17 @@ pub struct GBufferTargets { /* … */
 6. **`shadow_temporal.comp.hlsl` + pass + accumulate**: reproject + variance-clamp + velocity-k + prev-depth disocclusion reset (W2); wire seeded barriers; DENOISED gShadowVis←temporal-out rebind. Host gate `scene.shadow_temporal = Some(..)` iff `temporal_enabled() ∧ backend==HardwareTri ∧ has_primary_directional ∧ tlas_nonempty`. GATE: `None`/`Spatial` ⇒ both goldens; `Temporal`/`Both` ⇒ owner-eval.
 7. **Host wiring + boot env + flip**: `BOYKO_SHADOW_DENOISE=temporal|both`; the algebraic + convergence anchors. GATE: full verification suite.
 
+## As-built — step 1 (`44a4645`) + step 2 (this commit)
+
+- **Step 1 (`44a4645`):** the 4-mode selector + separate 16 B `ResolvedTemporalShadow` UBO, `ResolvedShadowDenoise` unchanged (Decision 1 / W1). `Spatial` upload byte-stream provably untouched.
+- **Step 2 (this commit) — commit-boundary refinement (orchestrator's implementation fork):** step 2 was tightened to a **pure `boyko_render` data-layer commit** with ZERO host/GPU surface, so byte-identity holds *by construction* and is fully unit-tested:
+  - `PrevInstanceModelCol` (48 B `hwrt`-gated dense sibling) + `sync_prev_instance_model_cols`, registered `.before(sync_instance_model_cols)` in `EnginePlugins` — dormant (0%-gate: no scene carries the column yet).
+  - `MotionCam` (128 B UBO) + `MotionCamState` (`Resource`, prev-`view_proj` persist) in a new `hwrt`-gated `motion_cam.rs`, unit-tested (column-major transpose; first-frame `prev==cur` ⇒ MV≡0; second-frame `prev`= last `cur`; static-camera stays zero-motion).
+  - **`marcher_view_proj_rows` factored out of `gbuffer_push_from_view`** (view.rs) — the SINGLE marcher-aligned proj·view construction, shared by the raster push (runner.rs:724) and `MotionCam.cur`. Byte-identity of the push proven by the existing `perspective_bridge_reproduces_legacy_push_constants` unit test.
+  - **Decision 2b refinement:** `MotionCam.cur/prev` are built from `marcher_view_proj_rows` (the marcher-aligned `pv`, clip.z=clip.w=forward·(P−eye), extent-derived aspect), **NOT** `ViewUniform::view_proj` — the MV endpoints must be placed with EXACTLY the projection the rasterizer/marcher used, or the static convergence anchor (MV≡0) breaks. The `prev` matrix is persisted via `MotionCamState::advance` (ECS-native, Principle 0), first frame `prev==cur`.
+  - **Deferred to step 5** (folded with the consumers to avoid dead-code on unbound buffers): the `gpu_scene` `prev_instance_rings` + `motioncam_ring` `[BoundBuffer; FIF]` rings, the per-frame host `MotionCam` build/persist/upload, and the gather-into-prev-ring. The plan's step-2 "prev-instance ring + MotionCam UBO host plumbing (unbound)" moves there.
+  - **Gate:** all 4 feature variants (`boyko-render`/`boyko-app` × `hwrt`/non-`hwrt`) `check` + `clippy -D warnings` green; `boyko-render` lib 125 tests + 4 new `motion_cam` tests pass; the push byte-identity unit test green. `boyko_rhi_vulkan` `grand_showcase` golden is unaffected by construction (it sits below `boyko_render` in the dep graph and does not use the bridge).
+
 ## Metrics and validation
 
 - **Byte-identity:** `None`/`Spatial` reproduce `58f6c6c3` (±hwrt) + `af934c50`. Framegraph equiv ResId pins (16 imgs hwrt) + the **I3 pin** (no `UNDEFINED` old-layout on `shadow_temporal_hist` after init — reusing the DDGI-seed test shape, C3).

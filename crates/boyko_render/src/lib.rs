@@ -131,6 +131,11 @@ pub mod mesh_draw;
 /// The renderer-owned mesh asset table (mesh foundation M2): [`MeshRegistry`] /
 /// [`MeshGpu`] / [`Vertex`], the GPU vertex+index buffers a `MeshHandle` indexes.
 pub mod mesh_registry;
+/// HW-RT rung 3b — the camera view-proj carry for temporal shadow-vis motion vectors
+/// ([`MotionCam`](motion_cam::MotionCam) UBO + [`MotionCamState`](motion_cam::MotionCamState)
+/// persist Resource). `not(hwrt)` builds carry none of it.
+#[cfg(feature = "hwrt")]
+pub mod motion_cam;
 /// HW-RT rung R1 — the dormant unified ray / acceleration-structure backend seam:
 /// the [`RayBackendConfig`](ray_backend::RayBackendConfig) derived carrier +
 /// [`RayCaps`](ray_backend::RayCaps) device-tier input Resources, the pure
@@ -249,6 +254,14 @@ pub use gpu_transform3d::{
 };
 pub use gpu_transform_pack::{add_gpu_transform_pack, pack_gpu_transforms};
 pub use instance_model::{INSTANCE_MODEL_COL_BYTES, InstanceModelCol, sync_instance_model_cols};
+// HW-RT rung 3b: the previous-frame model-affine sibling + its copy system (temporal motion
+// vectors). `not(hwrt)` builds never compile the column, so its instancing path is textually
+// the pre-Rung-3b code.
+#[cfg(feature = "hwrt")]
+pub use instance_model::{PrevInstanceModelCol, sync_prev_instance_model_cols};
+// HW-RT rung 3b: the camera view-proj carry for motion-vector reprojection.
+#[cfg(feature = "hwrt")]
+pub use motion_cam::{MOTION_CAM_UBO_BYTES, MotionCam, MotionCamState};
 pub use mesh_draw::{DrawBatch, MeshRenderScratch, gather_mesh_draws};
 pub use light_plugin::LightingPlugin;
 pub use light_reconcile::light_reconcile;
@@ -301,7 +314,7 @@ pub use upload::{
 pub use upload::upload_mesh_ids;
 pub use view::{
     composite_from_view, composite_perspective_from_view, demo_view_proj_from_view,
-    gbuffer_push_from_view, view_proj_columns,
+    gbuffer_push_from_view, marcher_view_proj_rows, view_proj_columns,
 };
 pub use ui::{
     pack_ui_instance, premultiply_rgba8, record_ui_rects, ui_rect_fs_spirv, ui_rect_vs_spirv,
