@@ -380,10 +380,15 @@ struct ShadowDenoiseSets {
 impl GBufferTargets {
     /// HW-RT rung 3a: builds the spatial-denoise descriptor sets + the à-trous edge-stop UBO ring.
     ///
-    /// Returns `Ok(None)` when the scene does NOT wire the denoise activation
-    /// (`scene.shadow.is_none()`, the DEFAULT this rung) OR the `shadow_vis`/`shadow_vis2` target
-    /// rings are absent (a device lacking `shadow_denoise_storage_ok()`) — the byte-identical OFF
-    /// path. `Ok(Some(_))` on the ON path (all present). On ANY internal `create_*` failure the
+    /// The build is DECOUPLED from the per-frame `scene.shadow` activation (which is `None` on the
+    /// create frame — the TLAS/CSM are not yet armed): it gates on the STABLE boot signals so the
+    /// sets exist before a later render frame flips the activation on. Returns `Ok(None)` when the
+    /// denoise is OFF (`!scene.shadow_denoise_enabled` — mode `None`, the DEFAULT), the boot denoise
+    /// LAYOUTS are absent (`scene.resolve_layout_denoise_hwrt` / `atrous_layout_denoise_hwrt` `None`
+    /// on a non-RT / non-hwrt device), the `shadow_vis`/`shadow_vis2` target rings are absent (a
+    /// device lacking `shadow_denoise_storage_ok()`), or the persistent TLAS ring is absent — the
+    /// byte-identical OFF path. `Ok(Some(_))` on the ON path (all present). On ANY internal `create_*`
+    /// failure the
     /// helper drains ITS OWN partial allocations (the reverse-acquisition order below) and returns the
     /// `VulkanError`, leaving nothing leaked for the caller to reason about beyond the rings/sets it
     /// built before calling this.
@@ -413,22 +418,37 @@ impl GBufferTargets {
         cluster_grid_buf: &BoundBuffer,
         light_index_buf: &BoundBuffer,
     ) -> Result<Option<ShadowDenoiseSets>, crate::error::VulkanError> {
-        // All preconditions must hold — else the byte-identical OFF path (the host keeps
-        // `scene.shadow == None` this rung, so this is the `None` no-op on EVERY current frame). The
-        // resolve sets bind against the activation's OWN 22-binding VIS/DENOISED layout
-        // (`activation.resolve_layout`), NOT the 21-binding `scene.resolve_layout_hwrt`; the TLAS @19
-        // handles come from `scene.resolve_tlas_hwrt`.
-        let (activation, vis_ring, vis2_ring, denoise_layout, tlas) = match (
-            scene.shadow.as_ref(),
+        // The denoise SETS are decoupled from the per-frame `scene.shadow` activation (which is
+        // `None` on THIS create frame — the TLAS/CSM are not yet armed): they build on the STABLE
+        // boot signals so the render frame, once it flips `scene.shadow = Some`, finds the sets
+        // already written. All preconditions must hold — else the byte-identical OFF path:
+        //   * `scene.shadow_denoise_enabled` — the boot `ShadowDenoiseConfig::enabled()` (mode ==
+        //     Spatial). `false` on the default (mode `None`) world ⇒ NO sets built (byte-identical).
+        //   * `scene.resolve_layout_denoise_hwrt` / `scene.atrous_layout_denoise_hwrt` — the STABLE
+        //     22-binding VIS/DENOISED + 6-binding à-trous LAYOUTS from the boot pipelines (`Some`
+        //     on an RT + hwrt device REGARDLESS of the per-frame gate). These replace the former
+        //     `scene.shadow.as_ref().resolve_layout` — the bug's linchpin.
+        //   * `shadow_vis` / `shadow_vis2` — the RG16 ping-pong target rings (device
+        //     `shadow_denoise_storage_ok()`); `scene.resolve_tlas_hwrt` — the persistent TLAS ring
+        //     (@19). The soft-shadow UBO @20 comes from `scene.ray_shadow_ubo`.
+        let (denoise_layout, atrous_layout, vis_ring, vis2_ring, tlas) = match (
+            scene.shadow_denoise_enabled,
+            scene.resolve_layout_denoise_hwrt,
+            scene.atrous_layout_denoise_hwrt,
             shadow_vis,
             shadow_vis2,
             scene.resolve_tlas_hwrt,
         ) {
-            (Some(a), Some(v), Some(v2), Some(t)) => (a, v, v2, a.resolve_layout, t),
+            (true, Some(rl), Some(al), Some(v), Some(v2), Some(t)) => (rl, al, v, v2, t),
             _ => return Ok(None),
         };
-        // The final à-trous output the DENOISED resolve reads at `gShadowVis` @21 (ping-pong parity).
-        let final_ring = if activation.final_is_vis2 { vis2_ring } else { vis_ring };
+        // The final à-trous output the DENOISED resolve reads at `gShadowVis` @21 (ping-pong
+        // parity). W1: the SAME `clamped_levels() % 2 == 1` the record + graph + the per-frame
+        // `ShadowVisActivation::final_is_vis2` use — threaded stably so the DENOISED set binds the
+        // correct ring at create. When the per-frame activation later opens, the record site
+        // asserts `scene.shadow.final_is_vis2 == scene.shadow_denoise_final_is_vis2`.
+        let final_is_vis2 = scene.shadow_denoise_final_is_vis2;
+        let final_ring = if final_is_vis2 { vis2_ring } else { vis_ring };
 
         // (1) The à-trous edge-stop UBO ring — one 16-byte host-coherent slot per FIF, zero-seeded
         // (the host memcpys `ResolvedShadowDenoise` in each frame). On a slot's failure, drain [0..i).
@@ -599,7 +619,7 @@ impl GBufferTargets {
                     BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
                 ];
                 let desc = BindGroupDesc::<Vulkan> {
-                    layout: activation.atrous_layout,
+                    layout: atrous_layout,
                     entries: &entries,
                 };
                 match RhiDevice::create_bind_group(ctx, &desc) {
@@ -1940,6 +1960,25 @@ impl GBufferFrame {
     #[inline]
     pub fn new() -> Self {
         Self { targets: None }
+    }
+
+    /// HW-RT rung 3a: the fenced à-trous edge-stop UBO ring slot the host memcpys
+    /// [`ResolvedShadowDenoise`](boyko_render's `ResolvedShadowDenoise`) into each frame
+    /// (the per-level à-trous sets bind `shadow_denoise_ubo[fi]` @4). Returns `None` when
+    /// the targets are not yet synced (frame 0, before the first
+    /// [`Renderer::render_gbuffer_frame`]) OR the device lacks
+    /// [`shadow_denoise_storage_ok`](crate::device::DeviceCaps::shadow_denoise_storage_ok)
+    /// (the `shadow_denoise_ubo` ring was never minted) — in both cases the denoise pass is
+    /// not recorded, so the (absent) slot is never read. The slot is per-FIF ringed, so the
+    /// caller writes the FENCED slot (`token.slot()`) under the same WAR discipline as the
+    /// other host-written rings.
+    #[cfg(feature = "hwrt")]
+    #[inline]
+    pub fn shadow_denoise_ubo_slot(&self, slot: usize) -> Option<&BoundBuffer> {
+        self.targets
+            .as_ref()
+            .and_then(|t| t.shadow_denoise_ubo.as_ref())
+            .map(|ring| &ring[slot])
     }
 
     /// Tears down the per-extent G-buffer targets through `ctx`, consuming `self`. The

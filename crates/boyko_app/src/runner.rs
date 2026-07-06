@@ -29,15 +29,15 @@ use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
 #[cfg(windows)]
 use boyko_render::{
     CsmCasterScratch, DdgiCaps, MeshRegistry, MeshRenderScratch, RayBackendPolicy, RayCaps,
-    ResolvedCsm, ResolvedShadowAtlas, RhiContext, SdfEditStaging, collect_sdf_edits,
-    gbuffer_push_from_view, upload_atlas_ring, upload_camera_ring, upload_csm_ring,
-    upload_instance_models, upload_light_table, upload_pair_out_slot, upload_pair_ring,
-    upload_sdf_edit_list,
+    ResolvedCsm, ResolvedShadowAtlas, RhiContext, SdfEditStaging, ShadowDenoiseConfig,
+    ShadowDenoiseMode, collect_sdf_edits, gbuffer_push_from_view, upload_atlas_ring,
+    upload_camera_ring, upload_csm_ring, upload_instance_models, upload_light_table,
+    upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
 };
 #[cfg(all(windows, feature = "hwrt"))]
 use boyko_render::{
-    RayBackend, RayBackendConfig, RayGeom, RayWorkload, ResolvedRayShadow, upload_mesh_ids,
-    upload_ray_shadow_ring,
+    RayBackend, RayBackendConfig, RayGeom, RayWorkload, ResolvedRayShadow, ResolvedShadowDenoise,
+    upload_mesh_ids, upload_ray_shadow_ring, upload_shadow_denoise_ring,
 };
 #[cfg(windows)]
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
@@ -180,6 +180,36 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
                 .force_software = true;
             eprintln!(
                 "boyko_app: BOYKO_FORCE_SOFTWARE={v} - forcing the SOFTWARE ray-shadow backend"
+            );
+        }
+    }
+
+    // HW-RT rung 3a step 7 (spatial-denoise flight-check knob): seed the author's
+    // `ShadowDenoiseConfig` from `BOYKO_SHADOW_DENOISE`. A truthy value ("spatial"/"1"/"true",
+    // case-insensitive, trimmed) flips `mode` to `Spatial` — the host-layer boot knob that (a)
+    // makes the spatial-denoise path headlessly renderable for the orchestrator's structure /
+    // grain gate and (b) gives the owner a real toggle to flight-check on RT hardware. An
+    // optional `BOYKO_SHADOW_DENOISE_LEVELS` (a `u32`) A/B-tunes the à-trous level count
+    // (clamped `1..=MAX_ATROUS_LEVELS` by `clamped_levels()` at the read site). Unset (the
+    // default `mode == None`) keeps every host world byte-identical (the `scene.shadow` gate
+    // stays closed). `insert_resource` in `ShadowDenoisePlugin` seeded the config, so this
+    // overwrites its fields. Un-gated to match the surrounding `RayCaps`/`BOYKO_FORCE_SOFTWARE`
+    // overrides (the resource always exists; on a non-RT device the gate's `tlas_enabled` half
+    // keeps the pass off regardless).
+    if let Ok(v) = std::env::var("BOYKO_SHADOW_DENOISE") {
+        let spatial = matches!(v.trim().to_ascii_lowercase().as_str(), "spatial" | "1" | "true");
+        if spatial {
+            let levels = std::env::var("BOYKO_SHADOW_DENOISE_LEVELS")
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok());
+            let cfg = app.world_mut().resource_mut::<ShadowDenoiseConfig>();
+            cfg.mode = ShadowDenoiseMode::Spatial;
+            if let Some(levels) = levels {
+                cfg.levels = levels;
+            }
+            let clamped = cfg.clamped_levels();
+            eprintln!(
+                "boyko_app: BOYKO_SHADOW_DENOISE={v} - enabling the SPATIAL (a-trous) shadow denoise (levels={clamped})"
             );
         }
     }
@@ -582,6 +612,30 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                         resolved_ray_shadow,
                     );
                 }
+
+                // 5d'''. HW-RT rung 3a step 7: the à-trous edge-stop UBO (`sigma_z`/`sigma_n`)
+                //        into the renderer's `shadow_denoise_ubo[s]` — the per-level à-trous sets
+                //        bind slot `s` @4. `resolve_shadow_denoise_policy` re-derives it from the
+                //        author `ShadowDenoiseConfig` each frame (a boot-seed would go stale on a
+                //        retune, mirroring `upload_ray_shadow_ring`). `shadow_denoise_ubo_slot`
+                //        is `None` until the first frame syncs the targets (frame 0) OR on a
+                //        device lacking RG16 storage (`shadow_denoise_storage_ok()`) — in both the
+                //        denoise pass is not recorded, so the (absent) slot is never read. GATED on
+                //        `ray_query_enabled()` — the SAME gate that mints the ring in
+                //        `GBufferTargets::build_shadow_denoise_sets`.
+                if let Some(denoise_slot) = host.frame.shadow_denoise_ubo_slot(s) {
+                    let resolved_denoise = world.resource::<ResolvedShadowDenoise>();
+                    // SAFETY: `denoise_slot` is the renderer's `shadow_denoise_ubo[s]` — a live
+                    // host-coherent >= RESOLVED_SHADOW_DENOISE_BYTES UNIFORM buffer minted under
+                    // this same `ray_query_enabled()` gate, live until the targets are torn down
+                    // (device-idle). The FENCED slot `s == token.slot()`: the borrowed
+                    // `FrameWriteToken` proves this slot's in-flight fence was waited THIS frame
+                    // (the previous occupant's à-trous reads retired; the sibling frame binds the
+                    // other slot) — the same borrow-is-fence-proof shape as `upload_ray_shadow_ring`.
+                    unsafe {
+                        upload_shadow_denoise_ring(&token, denoise_slot, resolved_denoise);
+                    }
+                }
             }
 
             // 6a. DrawBatch → GBufferMeshDraw: resolve each batch's mesh to its
@@ -729,6 +783,17 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 }
                 ctx.ray_query_enabled() && backend_hw && scratch.instance_count() > 0
             };
+            // HW-RT rung 3a step 7: read the author's spatial-denoise gate + clamped level
+            // count from the world (`ShadowDenoisePlugin` inserts both). `enabled()` is the
+            // structural `mode == Spatial` predicate; the OTHER three `scene.shadow` gate
+            // conditions (`backend == HardwareTri`, `tlas_nonempty`, `has_primary_directional`)
+            // are threaded via `tlas_enabled` + the `csm_armed` arg inside `scene()`. Default
+            // `mode == None` ⇒ `false` ⇒ `scene.shadow == None` ⇒ byte-identical.
+            #[cfg(feature = "hwrt")]
+            let (shadow_denoise_enabled, shadow_denoise_levels) = {
+                let cfg = world.resource::<boyko_render::ShadowDenoiseConfig>();
+                (cfg.enabled(), cfg.clamped_levels())
+            };
             let scene = host.gpu.scene(
                 mvp,
                 s,
@@ -742,6 +807,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 frame_index,
                 #[cfg(feature = "hwrt")]
                 tlas_enabled,
+                #[cfg(feature = "hwrt")]
+                shadow_denoise_enabled,
+                #[cfg(feature = "hwrt")]
+                shadow_denoise_levels,
                 ctx,
             );
 

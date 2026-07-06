@@ -2442,6 +2442,16 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // HW-RT rung 3a: the spatial (à-trous) RT soft-shadow denoise OFF (byte-identical).
         #[cfg(feature = "hwrt")]
         shadow: None,
+        // HW-RT rung 3a: the STABLE denoise-set-build signals — all OFF in this harness (no denoise
+        // sets built; byte-identical).
+        #[cfg(feature = "hwrt")]
+        resolve_layout_denoise_hwrt: None,
+        #[cfg(feature = "hwrt")]
+        atrous_layout_denoise_hwrt: None,
+        #[cfg(feature = "hwrt")]
+        shadow_denoise_enabled: false,
+        #[cfg(feature = "hwrt")]
+        shadow_denoise_final_is_vis2: false,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -3336,6 +3346,16 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // HW-RT rung 3a: the spatial (à-trous) RT soft-shadow denoise OFF (byte-identical).
         #[cfg(feature = "hwrt")]
         shadow: None,
+        // HW-RT rung 3a: the STABLE denoise-set-build signals — all OFF in this harness (no denoise
+        // sets built; byte-identical).
+        #[cfg(feature = "hwrt")]
+        resolve_layout_denoise_hwrt: None,
+        #[cfg(feature = "hwrt")]
+        atrous_layout_denoise_hwrt: None,
+        #[cfg(feature = "hwrt")]
+        shadow_denoise_enabled: false,
+        #[cfg(feature = "hwrt")]
+        shadow_denoise_final_is_vis2: false,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -8025,6 +8045,16 @@ fn run_showcase_body_ddgi(
         // HW-RT rung 3a: the spatial (à-trous) RT soft-shadow denoise OFF (byte-identical).
         #[cfg(feature = "hwrt")]
         shadow: None,
+        // HW-RT rung 3a: the STABLE denoise-set-build signals — all OFF in this harness (no denoise
+        // sets built; byte-identical).
+        #[cfg(feature = "hwrt")]
+        resolve_layout_denoise_hwrt: None,
+        #[cfg(feature = "hwrt")]
+        atrous_layout_denoise_hwrt: None,
+        #[cfg(feature = "hwrt")]
+        shadow_denoise_enabled: false,
+        #[cfg(feature = "hwrt")]
+        shadow_denoise_final_is_vis2: false,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -9327,6 +9357,16 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         // HW-RT rung 3a: the spatial (à-trous) RT soft-shadow denoise OFF (byte-identical).
         #[cfg(feature = "hwrt")]
         shadow: None,
+        // HW-RT rung 3a: the STABLE denoise-set-build signals — all OFF in this harness (no denoise
+        // sets built; byte-identical).
+        #[cfg(feature = "hwrt")]
+        resolve_layout_denoise_hwrt: None,
+        #[cfg(feature = "hwrt")]
+        atrous_layout_denoise_hwrt: None,
+        #[cfg(feature = "hwrt")]
+        shadow_denoise_enabled: false,
+        #[cfg(feature = "hwrt")]
+        shadow_denoise_final_is_vis2: false,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };

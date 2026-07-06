@@ -11,9 +11,9 @@ use boyko_render::instance_model::sync_instance_model_cols;
 use boyko_render::light_system::LightTableStaging;
 use boyko_render::{
     CsmCasterScratch, CsmPlugin, LightingConfig, LightingPlugin, MeshRenderScratch,
-    RayPlugin, Render3dPlugin, SdfPlugin, ShadowAtlasPlugin, add_gpu_transform_pack,
-    gather_mesh_draws, gather_shadow_casters, snap_apply, sync_csm_light_gate,
-    sync_punctual_light_gate,
+    RayPlugin, Render3dPlugin, SdfPlugin, ShadowAtlasPlugin, ShadowDenoisePlugin,
+    add_gpu_transform_pack, gather_mesh_draws, gather_shadow_casters, snap_apply,
+    sync_csm_light_gate, sync_punctual_light_gate,
 };
 use boyko_scene::{CameraPlugin, FixedSet};
 
@@ -167,6 +167,18 @@ impl Plugin for EnginePlugins {
         // boot with the real `DeviceCaps::rt_tier()` query (still `Absent` in R1), at
         // the same site it fills `DdgiCaps`.
         app.add_plugin(RayPlugin);
+
+        // HW-RT rung 3a — the spatial (à-trous) RT soft-shadow DENOISE config substrate.
+        // `ShadowDenoisePlugin` inserts the author-set `ShadowDenoiseConfig` (default
+        // `mode == None` — the 0%-gate) + its derived `ResolvedShadowDenoise` companion and
+        // schedules the cold `resolve_shadow_denoise_policy` single-writer. Unlike step 1 (no
+        // live pass) the host now has the denoise pass wired, so composing it here makes the
+        // knob LIVE: the per-frame `scene.shadow` gate (gpu_scene::scene) reads
+        // `ShadowDenoiseConfig::enabled()`; the à-trous UBO upload reads `ResolvedShadowDenoise`.
+        // The default `None` keeps every host world byte-identical (the gate stays closed) — safe
+        // to compose unconditionally, and the `BOYKO_SHADOW_DENOISE` boot knob flips it to
+        // `Spatial` for a headless flight-check.
+        app.add_plugin(ShadowDenoisePlugin);
 
         // The R7 SDF instance path (composed by DEFAULT): inserts the
         // `SdfEditStaging` gather scratch and registers the one-shot startup

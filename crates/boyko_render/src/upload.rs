@@ -31,6 +31,7 @@ use boyko_sdf_math::SdfEdit;
 use crate::csm_config::{RESOLVED_CSM_BYTES, ResolvedCsm};
 use crate::ray_shadow_config::{RESOLVED_RAY_SHADOW_BYTES, ResolvedRayShadow};
 use crate::shadow_atlas::{RESOLVED_SHADOW_ATLAS_BYTES, ResolvedShadowAtlas};
+use crate::shadow_denoise_config::{RESOLVED_SHADOW_DENOISE_BYTES, ResolvedShadowDenoise};
 use crate::gpu_transform3d::GPU_TRANSFORM3D_BYTES;
 use crate::mesh_draw::MeshRenderScratch;
 use crate::view::composite_from_view;
@@ -586,6 +587,69 @@ pub unsafe fn upload_ray_shadow_ring(
             (resolved as *const ResolvedRayShadow).cast::<u8>(),
             mapped.as_ptr(),
             RESOLVED_RAY_SHADOW_BYTES,
+        );
+    }
+}
+
+/// Copies the resolved [`ResolvedShadowDenoise`] (the HW-RT rung 3a à-trous edge-stop scalars —
+/// `sigma_z`/`sigma_n`, byte-identical to the à-trous set's binding-4 UBO shape, see
+/// [`RESOLVED_SHADOW_DENOISE_BYTES`]) into ONE à-trous edge-stop-UBO ring slot — the per-frame
+/// upload of the spatial-denoise path (mirroring [`upload_ray_shadow_ring`]).
+///
+/// Uploaded every denoise-armed HW-RT frame (the runner gates the CALL on `feature = "hwrt"` +
+/// `ray_query_enabled()`, the SAME gate that mints the ring), exactly like
+/// [`upload_ray_shadow_ring`]: `resolve_shadow_denoise_policy` re-derives the 16-byte UBO from the
+/// cold [`ShadowDenoiseConfig`](crate::shadow_denoise_config::ShadowDenoiseConfig) each frame, so a
+/// boot-seed would go stale the moment the author retunes `sigma_z`/`sigma_n`, and the 16-byte
+/// memcpy is cheaper than a change gate. A default config uploads the ON-default edge-stop scalars.
+///
+/// # Panics
+///
+/// Panics if `ring_slot.size` is smaller than [`RESOLVED_SHADOW_DENOISE_BYTES`]: the memcpy would
+/// be out-of-bounds (UB), so the guard is a hard assert in every build.
+///
+/// # Safety
+///
+/// * `ring_slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at least
+///   `ring_slot.size` valid, persistently-mapped bytes.
+/// * `ring_slot` is the FENCED slot's buffer — the renderer's `shadow_denoise_ubo[token.slot()]`
+///   (the same token/slot contract as [`upload_ray_shadow_ring`]): the resolve of the slot's
+///   previous occupant retired behind the waited fence, and the sibling in-flight frame binds the
+///   OTHER ring slot.
+pub unsafe fn upload_shadow_denoise_ring(
+    token: &FrameWriteToken,
+    ring_slot: &BoundBuffer,
+    resolved: &ResolvedShadowDenoise,
+) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    // Hard bound BEFORE the memcpy (review P1 discipline): an undersized slot would make the
+    // 16-byte write out-of-bounds. One compare per frame.
+    assert!(
+        ring_slot.size as usize >= RESOLVED_SHADOW_DENOISE_BYTES,
+        "à-trous edge-stop UBO slot too small: {} bytes < the {}-byte ResolvedShadowDenoise mirror",
+        ring_slot.size,
+        RESOLVED_SHADOW_DENOISE_BYTES
+    );
+
+    let mapped = ring_slot
+        .mapped
+        .expect("invariant: the à-trous edge-stop UBO slot is host-visible mapped");
+    // SAFETY: `resolved` is a live `#[repr(C)]` POD of exactly `RESOLVED_SHADOW_DENOISE_BYTES`
+    // (const-asserted at its definition) with no padding holes (4 packed `f32`s — two scalars + two
+    // zeroed std140 pad lanes), so reading its raw bytes is defined. `mapped` targets
+    // >= `ring_slot.size >= RESOLVED_SHADOW_DENOISE_BYTES` valid mapped host-coherent bytes
+    // (hard-asserted above) — the write is in-bounds. The borrowed `FrameWriteToken` + the
+    // slot-identity contract prove this slot's in-flight fence was waited THIS frame (the previous
+    // occupant's à-trous reads finished; the sibling frame binds the other slot) — race-free,
+    // lock-free. The two regions are distinct allocations (no overlap).
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            (resolved as *const ResolvedShadowDenoise).cast::<u8>(),
+            mapped.as_ptr(),
+            RESOLVED_SHADOW_DENOISE_BYTES,
         );
     }
 }

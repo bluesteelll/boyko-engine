@@ -59,7 +59,7 @@ use boyko_rhi_vulkan::compute::{
     deferred_pbr_hwrt_spirv, deferred_pbr_vis_spirv, shadow_atrous_spirv,
 };
 #[cfg(feature = "hwrt")]
-use boyko_rhi_vulkan::swapchain::TlasBuildActivation;
+use boyko_rhi_vulkan::swapchain::{ShadowVisActivation, TlasBuildActivation};
 use boyko_rhi_vulkan::texture::VulkanTexture;
 use boyko_sdf_math::SdfEdit;
 
@@ -2034,6 +2034,17 @@ impl GpuSceneBundles {
         ddgi_enabled: bool,
         frame_index: u32,
         #[cfg(feature = "hwrt")] tlas_enabled: bool,
+        // HW-RT rung 3a step 7: `ShadowDenoiseConfig.mode == Spatial` (the author gate — the
+        // runner reads `ShadowDenoiseConfig::enabled()` from the world). One of the four
+        // `scene.shadow` gate conditions; the other three (`backend == HardwareTri`,
+        // `tlas_nonempty`) are folded into `tlas_enabled`, and (`has_primary_directional`)
+        // into `csm.is_some()`.
+        #[cfg(feature = "hwrt")] shadow_denoise_enabled: bool,
+        // HW-RT rung 3a step 7: the host-clamped à-trous iteration count
+        // (`ShadowDenoiseConfig::clamped_levels()`). Threaded so `activation.levels` +
+        // `final_is_vis2 = levels % 2 == 1` use the SAME clamp/parity the record + graph
+        // sites assume (W1 consistency). Only read when the gate opens.
+        #[cfg(feature = "hwrt")] shadow_denoise_levels: u32,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -2104,6 +2115,41 @@ impl GpuSceneBundles {
                 dispatch_group_count_x: ddgi_update_dispatch_groups(config.subset_n),
             }
         });
+
+        // HW-RT rung 3a step 7: the per-frame spatial-denoise gate. `scene.shadow = Some(..)`
+        // IFF ALL FOUR hold:
+        //   (1) `ShadowDenoiseConfig.mode == Spatial`  → `shadow_denoise_enabled` (the world read).
+        //   (2) the mesh-shadow backend is `HardwareTri` → folded into `tlas_enabled`.
+        //   (3) a primary directional light exists     → `csm.is_some()` (the CSM arm is the
+        //       primary-directional signal: `csm_armed = csm_mode_word == 1 && caster_count > 0`,
+        //       and the VIS trace only writes for that light).
+        //   (4) the TLAS is non-empty this frame       → folded into `tlas_enabled`
+        //       (`ray_query_enabled() && backend_hw && instance_count() > 0`).
+        // When ANY condition is false ⇒ `None` ⇒ RESOLVE_INLINE-hwrt ⇒ byte-identical. The boot
+        // built `shadow_denoise_pipelines` + `shadow_atrous_pipeline` only on an RT device, so
+        // conditions (2)/(4) via `tlas_enabled` already imply both are `Some` — the `.zip` below
+        // is defensive (never `None` under the gate) but keeps the activation total. `levels` +
+        // `final_is_vis2` use the caller's `clamped_levels()` (W1: the SAME clamp/parity the
+        // record + graph sites assume).
+        #[cfg(feature = "hwrt")]
+        let shadow = (shadow_denoise_enabled && tlas_enabled && csm.is_some())
+            .then(|| {
+                self.shadow_denoise_pipelines.as_ref().zip(self.shadow_atrous_pipeline.as_ref())
+            })
+            .flatten()
+            .map(|((vis_pipeline, denoised_pipeline, resolve_layout), (atrous_pipeline, atrous_layout))| {
+                let levels = shadow_denoise_levels;
+                ShadowVisActivation {
+                    vis_pipeline,
+                    denoised_pipeline,
+                    resolve_layout,
+                    atrous_pipeline,
+                    atrous_layout,
+                    levels,
+                    final_is_vis2: levels % 2 == 1,
+                }
+            });
+
         GBufferScene {
             raster_pipeline: &self.raster_pipeline,
             vertex_buffer: &self.vertex_buffer,
@@ -2316,17 +2362,36 @@ impl GpuSceneBundles {
             // byte-identical path — the TLAS is built + barriered but never traced this rung).
             #[cfg(feature = "hwrt")]
             tlas,
-            // HW-RT rung 3a: the spatial (à-trous) RT soft-shadow denoise activation. A LITERAL
-            // `None` this rung (steps 4-6 build all the denoise pipelines/passes/sets but keep them
-            // DORMANT) ⇒ NO VIS / à-trous passes recorded + the resolve stays RESOLVE_INLINE-hwrt ⇒
-            // the render is BYTE-IDENTICAL. Rung 3a step 7 computes the per-frame gate here:
-            //   gate = mode == Spatial && backend == HardwareTri && has_primary_directional
-            //          && tlas_nonempty
-            // → `Some(ShadowVisActivation { vis_pipeline, denoised_pipeline, resolve_layout,
-            //   atrous_pipeline, atrous_layout, levels, final_is_vis2 })` borrowing
-            // `self.shadow_denoise_pipelines` + `self.shadow_atrous_pipeline`.
+            // HW-RT rung 3a step 7: the spatial (à-trous) RT soft-shadow denoise activation,
+            // computed above from the per-frame gate `mode == Spatial && backend == HardwareTri
+            // && has_primary_directional && tlas_nonempty`. `None` (the DEFAULT — any gate
+            // condition false) ⇒ NO VIS / à-trous passes recorded + the resolve stays
+            // RESOLVE_INLINE-hwrt ⇒ the render is BYTE-IDENTICAL. `Some(_)` records the VIS
+            // pre-pass + the `levels` à-trous passes and binds the DENOISED resolve.
             #[cfg(feature = "hwrt")]
-            shadow: None,
+            shadow,
+            // HW-RT rung 3a: the STABLE denoise-set-build signals. Populated from the boot
+            // resources REGARDLESS of the per-frame `shadow` gate above, so the resolve/à-trous
+            // sets are written ONCE per extent at `create` (where `shadow` is still `None`) — the
+            // decoupling that removes the record-time `None`-set panic. `resolve_layout_denoise_hwrt`
+            // / `atrous_layout_denoise_hwrt` are `Some` iff the boot pipelines exist (an RT + hwrt
+            // device); `shadow_denoise_enabled` gates the actual build (so a mode-`None` world still
+            // builds NO sets → byte-identical); `shadow_denoise_final_is_vis2` uses the SAME
+            // `clamped_levels() % 2 == 1` parity the record + graph + activation use (W1).
+            #[cfg(feature = "hwrt")]
+            resolve_layout_denoise_hwrt: self
+                .shadow_denoise_pipelines
+                .as_ref()
+                .map(|(_, _, layout)| layout),
+            #[cfg(feature = "hwrt")]
+            atrous_layout_denoise_hwrt: self
+                .shadow_atrous_pipeline
+                .as_ref()
+                .map(|(_, layout)| layout),
+            #[cfg(feature = "hwrt")]
+            shadow_denoise_enabled,
+            #[cfg(feature = "hwrt")]
+            shadow_denoise_final_is_vis2: shadow_denoise_levels % 2 == 1,
         }
     }
 

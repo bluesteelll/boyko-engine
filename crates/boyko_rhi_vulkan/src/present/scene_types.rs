@@ -1341,6 +1341,44 @@ pub struct GBufferScene<'a> {
     /// `not(hwrt)` build has it absent entirely.
     #[cfg(feature = "hwrt")]
     pub shadow: Option<ShadowVisActivation<'a>>,
+    /// HW-RT rung 3a: the STABLE 22-binding VIS/DENOISED resolve bind-group LAYOUT (the same layout
+    /// [`ShadowVisActivation::resolve_layout`] carries when the per-frame gate opens). Populated from
+    /// the boot VIS/DENOISED pipelines REGARDLESS of the per-frame [`Self::shadow`] activation —
+    /// `Some` on EVERY frame the boot denoise pipelines exist (an RT + `hwrt` device), including the
+    /// create frame where [`Self::shadow`] is still `None`. Threaded so
+    /// [`GBufferTargets::build_shadow_denoise_sets`](crate::present::targets) can write the resolve
+    /// sets ONCE per extent decoupled from the per-frame activation (the create frame's `shadow ==
+    /// None` no longer starves the set build → no record-time `None`-set panic). `None` on the
+    /// software / non-RT path (no denoise sets built). Mirrors [`Self::resolve_layout_hwrt`]'s
+    /// stable-populate shape.
+    #[cfg(feature = "hwrt")]
+    pub resolve_layout_denoise_hwrt: Option<&'a VulkanBindGroupLayout>,
+    /// HW-RT rung 3a: the STABLE 6-binding à-trous bind-group LAYOUT (the same layout
+    /// [`ShadowVisActivation::atrous_layout`] carries when the per-frame gate opens). Populated from
+    /// the boot à-trous pipeline REGARDLESS of the per-frame [`Self::shadow`] activation — `Some`
+    /// whenever [`Self::resolve_layout_denoise_hwrt`] is `Some` (they are built in lock-step at
+    /// boot). Threaded so [`GBufferTargets::build_shadow_denoise_sets`](crate::present::targets) can
+    /// write the per-level à-trous sets at create without the per-frame activation. `None` on the
+    /// software / non-RT path.
+    #[cfg(feature = "hwrt")]
+    pub atrous_layout_denoise_hwrt: Option<&'a VulkanBindGroupLayout>,
+    /// HW-RT rung 3a: `true` iff the author's `ShadowDenoiseConfig.mode == Spatial` (the boot
+    /// `ShadowDenoiseConfig::enabled()` read). The STABLE "denoise is on" signal used at CREATE time
+    /// to gate the resolve/à-trous SET build — it does NOT depend on the per-frame [`Self::shadow`]
+    /// activation (which is still `None` on the create frame), so the sets get built before the
+    /// render frame flips the activation on. Kept in sync across frames (a live config read). `false`
+    /// on the default (mode `None`) path ⇒ NO sets built ⇒ byte-identical.
+    #[cfg(feature = "hwrt")]
+    pub shadow_denoise_enabled: bool,
+    /// HW-RT rung 3a: the STABLE `clamped_levels() % 2 == 1` parity — whether the FINAL à-trous
+    /// output lands in `shadow_vis2` (odd levels) vs `shadow_vis` (even). Derived from the boot
+    /// `ShadowDenoiseConfig::clamped_levels()` (the SAME clamp/parity the record + graph +
+    /// [`ShadowVisActivation::final_is_vis2`] use — W1 consistency), threaded stably so the DENOISED
+    /// resolve set binds `gShadowVis` @21 to the correct final ring at CREATE time, independent of
+    /// the per-frame [`Self::shadow`] activation. When the activation IS present, it MUST equal
+    /// [`ShadowVisActivation::final_is_vis2`] (asserted at the set-build site).
+    #[cfg(feature = "hwrt")]
+    pub shadow_denoise_final_is_vis2: bool,
 }
 
 /// CSM Increment 1b (Rung A): the cascade DEPTH-PASS activation threaded into

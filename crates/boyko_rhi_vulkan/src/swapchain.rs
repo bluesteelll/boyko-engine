@@ -13,4 +13,4 @@ pub use crate::present::{
     Surface, Swapchain, SwapchainError, TimedPass, TimestampCollector, UiPass,
 };
 #[cfg(feature = "hwrt")]
-pub use crate::present::TlasBuildActivation;
+pub use crate::present::{ShadowVisActivation, TlasBuildActivation};

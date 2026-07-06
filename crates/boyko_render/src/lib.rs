@@ -293,7 +293,7 @@ pub use ssao_plugin::SsaoPlugin;
 pub use upload::{
     upload_atlas_ring, upload_camera_ring, upload_csm_ring, upload_instance_models,
     upload_light_table, upload_pair_out_slot, upload_pair_ring, upload_ray_shadow_ring,
-    upload_sdf_edit_list,
+    upload_sdf_edit_list, upload_shadow_denoise_ring,
 };
 #[cfg(feature = "hwrt")]
 pub use upload::upload_mesh_ids;

@@ -1518,21 +1518,28 @@ impl Renderer<'_> {
         // The resolve then binds the DENOISED pipeline (selected in the `(pipeline, layout, set)`
         // triple below), reading the FILTERED `gShadowVis`. All input/RAW barriers are graph-derived
         // (the "shadow_vis" + "shadow_atrous" passes recorded here). ===
+        //
+        // Belt-and-suspenders: the record REQUIRES the pre-built VIS + à-trous sets
+        // ([`GBufferTargets::build_shadow_denoise_sets`]). They are built decoupled from this
+        // per-frame gate (on the STABLE boot signals), so `scene.shadow.is_some()` normally implies
+        // both are `Some`. If a future gate mismatch ever leaves them `None` while `scene.shadow` is
+        // `Some`, we DEGRADE GRACEFULLY — skip the whole VIS/à-trous stack (no bind, no dispatch, no
+        // barrier) exactly as if `scene.shadow` were `None`. The `denoised_triple` selection below is
+        // ALSO `None`-set-guarded (it `.map`s over `shadow_denoised_resolve_set`), so the resolve
+        // falls back to the RESOLVE_INLINE-hwrt triple — never a DENOISED bind with no `gShadowVis`
+        // data. This removes the `None`-set panic as a failure mode; the primary fix is that the sets
+        // ARE built at create.
         #[cfg(feature = "hwrt")]
-        if let Some(sh) = scene.shadow.as_ref() {
+        if let (Some(sh), Some(vis_ring), Some(atrous_sets)) = (
+            scene.shadow.as_ref(),
+            targets.shadow_vis_resolve_set.as_ref(),
+            targets.shadow_atrous_sets.as_ref(),
+        ) {
             let plan = self
                 .gbuffer_pass_plan
                 .as_ref()
                 .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
-            let vis_set = &targets
-                .shadow_vis_resolve_set
-                .as_ref()
-                .expect("invariant: scene.shadow.is_some() ⇒ GBufferTargets wrote the VIS resolve set")
-                [self.frame_index];
-            let atrous_sets = targets
-                .shadow_atrous_sets
-                .as_ref()
-                .expect("invariant: scene.shadow.is_some() ⇒ GBufferTargets wrote the à-trous sets");
+            let vis_set = &vis_ring[self.frame_index];
             // (a) The VIS pre-pass. Its input barriers (gNormal/gViewT store→load already visible,
             // the build→VIS AS barrier, the `shadow_vis` first-touch UNDEFINED→GENERAL) are DRIVEN
             // by the graph's "shadow_vis" pass, recorded here.
