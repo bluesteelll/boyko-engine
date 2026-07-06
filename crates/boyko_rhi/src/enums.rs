@@ -298,6 +298,18 @@ pub enum Format {
     /// format const is a silent dead-branch bug — the image + view would be created at
     /// the wrong layout and the sampler decode would be degenerate).
     R16G16Sfloat = 83,
+    /// `VK_FORMAT_R16G16B16A16_UNORM` — four unsigned-normalized 16-bit channels (HW-RT Rung 3b:
+    /// the temporal shadow-vis HISTORY ring — `.r` = accumulated visibility, `.g` = confidence /
+    /// frame-count, `.b` = the previous frame's `view_t`/depth (the W2 disocclusion backstop that
+    /// makes a same-pixel surface swap under motion detectable — the moving-box case), `.a` =
+    /// reserved). UNORM (not SFLOAT) because every carried lane is a normalized `[0,1]` quantity —
+    /// uniform precision, no exponent waste.
+    ///
+    /// The value is the canonical `VkFormat` enumerant `VK_FORMAT_R16G16B16A16_UNORM == 91` (the
+    /// 16-bit four-component UNORM block: R16=70, R16G16=77, R16G16B16A16=91). VERIFIED against the
+    /// Vulkan spec enumerant, cross-checked against `Format::R16G16B16A16Unorm` in `abi_guard` (the
+    /// M2 lesson: a wrong format const is a silent dead-branch bug).
+    R16G16B16A16Unorm = 91,
     /// `VK_FORMAT_B10G11R11_UFLOAT_PACK32` — the packed R11G11B10 unsigned-float HDR
     /// format (SDFDDGI I1: the probe IRRADIANCE atlas, Decision D6 — stored WITHOUT the
     /// gamma encode so the resolve path is bit-exact). Despite the "R11G11B10F" shorthand

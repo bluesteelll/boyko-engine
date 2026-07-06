@@ -777,17 +777,18 @@ fn tlas_off_path_zero_new_barriers() {
 
 /// HW-RT rung R2a-3 (RISK-2 regression pin): a FAITHFUL MIRROR of `declare_gbuffer_graph`'s
 /// buffer declaration order under `hwrt` + interp ON + tlas ON, asserting the exact ResId → sink
-/// slot mapping the [`GbufferBarrierSink`](graph_bridge) resolves by (`sink_slot = ResId - 13`,
-/// the FRAMEGRAPH_IMAGE_COUNT offset under hwrt after Rung 3a's two shadow-vis images). This pins
-/// `tlas_instances` to ResId 20 → slot 7 and the SHIFTED interp trio to 21/22/23 → slots 8/9/10,
-/// so a future ResId insertion cannot silently route a barrier to the wrong physical buffer (we
-/// have no validation layer on this box). The +2 absolute-ResId shift is the intended consequence
-/// of the shadow-vis images; the SINK SLOTS stay put because the offset re-bases by the same const.
+/// slot mapping the [`GbufferBarrierSink`](graph_bridge) resolves by (`sink_slot = ResId - 16`,
+/// the FRAMEGRAPH_IMAGE_COUNT offset under hwrt after Rung 3a's two shadow-vis + Rung 3b's three
+/// temporal images). This pins `tlas_instances` to ResId 23 → slot 7 and the SHIFTED interp trio to
+/// 24/25/26 → slots 8/9/10, so a future ResId insertion cannot silently route a barrier to the wrong
+/// physical buffer (we have no validation layer on this box). The +5 absolute-ResId shift is the
+/// intended consequence of the denoise images; the SINK SLOTS stay put because the offset re-bases
+/// by the same const.
 ///
-/// The mirror declares 13 placeholder IMAGES first (the ResId 0..12 the real graph consumes under
-/// hwrt, so the buffers start at ResId 13), then the buffers in `declare_gbuffer_graph`'s EXACT
-/// order: light_table..alloc (13..17), ddgi_classification/ray_table (18/19), tlas_instances (20,
-/// unconditional under hwrt), then the interp trio (21/22/23). The sink `buffers` array positions
+/// The mirror declares 16 placeholder IMAGES first (the ResId 0..15 the real graph consumes under
+/// hwrt, so the buffers start at ResId 16), then the buffers in `declare_gbuffer_graph`'s EXACT
+/// order: light_table..alloc (16..20), ddgi_classification/ray_table (21/22), tlas_instances (23,
+/// unconditional under hwrt), then the interp trio (24/25/26). The sink `buffers` array positions
 /// (graph_bridge.rs `record_graph_pass`) MUST match this: slot 5=ddgi_class, 6=ddgi_ray,
 /// 7=tlas_instances, 8=interp_pairs, 9=interp_out_slot, 10=interp_model_out.
 #[cfg(feature = "hwrt")]
@@ -795,17 +796,20 @@ fn tlas_off_path_zero_new_barriers() {
 fn hwrt_resid_18_sink_slot_mapping_pinned() {
     // The sink's fixed image count (graph_bridge.rs `FRAMEGRAPH_IMAGE_COUNT`, `pub(crate)` — mirror
     // its value here; if it changes the real sink offset changes too and this pin must be revisited).
-    // Rung 3a step 3 bumped it to 13 under hwrt (the two shadow-vis denoise images at ResId 11/12).
-    const IMAGE_COUNT: usize = 13;
+    // Rung 3a bumped it to 13 (shadow_vis/shadow_vis2 at ResId 11/12); Rung 3b to 16 (motion_vec /
+    // shadow_temporal_hist / temporal_out at ResId 13/14/15).
+    const IMAGE_COUNT: usize = 16;
     let sink_slot = |r: ResId| r.index() - IMAGE_COUNT;
 
-    let mut g = FrameGraph::with_capacity(16, 8, 32);
-    // 13 placeholder images (ResIds 0..=12) under hwrt, matching the real graph's image span so the
-    // buffers begin at ResId 13 exactly as in `declare_gbuffer_graph` (Rung 3a added shadow_vis /
-    // shadow_vis2 LAST in the image block, before the first add_buffer).
+    let mut g = FrameGraph::with_capacity(20, 8, 32);
+    // 16 placeholder images (ResIds 0..=15) under hwrt, matching the real graph's image span so the
+    // buffers begin at ResId 16 exactly as in `declare_gbuffer_graph` (Rung 3a added shadow_vis /
+    // shadow_vis2, Rung 3b added motion_vec / shadow_temporal_hist / temporal_out — all LAST in the
+    // image block, before the first add_buffer).
     for name in [
         "albedo", "normal", "material", "depth", "viewt", "lit", "ssao", "cascade", "atlas",
-        "ddgi_irr", "ddgi_depth", "shadow_vis", "shadow_vis2",
+        "ddgi_irr", "ddgi_depth", "shadow_vis", "shadow_vis2", "motion_vec", "shadow_temporal_hist",
+        "temporal_out",
     ] {
         g.add_image(name);
     }
@@ -824,19 +828,20 @@ fn hwrt_resid_18_sink_slot_mapping_pinned() {
     let interp_out_slot = g.add_buffer("interp_out_slot");
     let interp_model_out = g.add_buffer("interp_model_out");
 
-    // The absolute ResIds the real graph assigns under hwrt+interp+tlas — all shifted +2 by the
-    // Rung 3a shadow-vis images (ResId 11/12), while the SINK SLOTS below stay put (the point).
-    assert_eq!(light_table.index(), 13, "light_table ResId");
-    assert_eq!(alloc.index(), 17, "alloc ResId");
-    assert_eq!(ddgi_classification.index(), 18, "ddgi_classification ResId");
-    assert_eq!(ddgi_ray_table.index(), 19, "ddgi_ray_table ResId");
-    assert_eq!(tlas_instances.index(), 20, "tlas_instances ResId 20 (fixed under hwrt after shadow-vis)");
-    assert_eq!(interp_pairs.index(), 21, "interp trio shifts to 21 under hwrt+shadow-vis");
-    assert_eq!(interp_out_slot.index(), 22, "interp_out_slot ResId under hwrt+shadow-vis");
-    assert_eq!(interp_model_out.index(), 23, "interp_model_out ResId under hwrt+shadow-vis");
+    // The absolute ResIds the real graph assigns under hwrt+interp+tlas — all shifted +5 by the
+    // Rung 3a shadow-vis (11/12) + Rung 3b temporal (13/14/15) images, while the SINK SLOTS below
+    // stay put (the point).
+    assert_eq!(light_table.index(), 16, "light_table ResId");
+    assert_eq!(alloc.index(), 20, "alloc ResId");
+    assert_eq!(ddgi_classification.index(), 21, "ddgi_classification ResId");
+    assert_eq!(ddgi_ray_table.index(), 22, "ddgi_ray_table ResId");
+    assert_eq!(tlas_instances.index(), 23, "tlas_instances ResId 23 (fixed under hwrt after 5 denoise images)");
+    assert_eq!(interp_pairs.index(), 24, "interp trio shifts to 24 under hwrt+denoise images");
+    assert_eq!(interp_out_slot.index(), 25, "interp_out_slot ResId under hwrt+denoise images");
+    assert_eq!(interp_model_out.index(), 26, "interp_model_out ResId under hwrt+denoise images");
 
-    // The sink slot each ResId resolves to (`sink.buffers[ResId - 13]` in `record_graph_pass`) —
-    // UNCHANGED by the +2 image shift because the offset re-bases by the same FRAMEGRAPH_IMAGE_COUNT.
+    // The sink slot each ResId resolves to (`sink.buffers[ResId - 16]` in `record_graph_pass`) —
+    // UNCHANGED by the +5 image shift because the offset re-bases by the same FRAMEGRAPH_IMAGE_COUNT.
     assert_eq!(sink_slot(ddgi_classification), 5, "ddgi_classification → sink slot 5");
     assert_eq!(sink_slot(ddgi_ray_table), 6, "ddgi_ray_table → sink slot 6");
     assert_eq!(sink_slot(tlas_instances), 7, "tlas_instances → sink slot 7 (the R2a-3 pin)");

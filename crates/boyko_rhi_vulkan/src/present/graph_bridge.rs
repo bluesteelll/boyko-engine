@@ -93,16 +93,21 @@ pub(crate) struct GbufferPassPlan {
 /// ACCESSED on the `ddgi_update`/`resolve` passes that name them, so the OFF-path barrier set
 /// (which never routes a barrier at ResId 9/10) is byte-unchanged.
 ///
-/// Rung 3a (`feature = "hwrt"`): the count is cfg-selected `11 → 13`. The two RT
-/// soft-shadow-visibility targets `shadow_vis` (ResId 11) + `shadow_vis2` (ResId 12) are
-/// declared LAST in the image block (AFTER `ddgi_depth`, BEFORE the first `add_buffer`), so
-/// EVERY existing image ResId 0..10 is byte-unchanged and the buffers still begin at ResId
-/// `FRAMEGRAPH_IMAGE_COUNT` on BOTH builds by construction (their numeric ResIds shift +2 on
-/// hwrt, absorbed by this const — the three `- FRAMEGRAPH_IMAGE_COUNT` buffer re-base sites
-/// re-base by the SAME const, so a buffer's LOGICAL sink slot is unchanged). In this step NO
-/// pass accesses ResId 11/12, so the derived barrier set is unchanged (byte-identical render).
+/// `feature = "hwrt"`: the count is cfg-selected `11 → 16`. Declared LAST in the image block
+/// (AFTER `ddgi_depth`, BEFORE the first `add_buffer`), so EVERY existing image ResId 0..10 is
+/// byte-unchanged and the buffers still begin at ResId `FRAMEGRAPH_IMAGE_COUNT` on BOTH builds by
+/// construction (their numeric ResIds shift +5 on hwrt, absorbed by this const — the three
+/// `- FRAMEGRAPH_IMAGE_COUNT` buffer re-base sites re-base by the SAME const, so a buffer's LOGICAL
+/// sink slot is unchanged):
+/// - Rung 3a: `shadow_vis` (ResId 11) + `shadow_vis2` (ResId 12) — the à-trous ping-pong.
+/// - Rung 3b: `motion_vec` (ResId 13, RG16F) + `shadow_temporal_hist` (ResId 14, RGBA16, seeded
+///   GENERAL cross-frame) + `temporal_out` (ResId 15, RG16) — the temporal reproject targets.
+///
+/// In the current step NO pass accesses ResId 11..15, so the derived barrier set is unchanged
+/// (byte-identical render); the VIS/à-trous passes (gated on `scene.shadow`) and the temporal pass
+/// (steps 5-6) add the accesses later.
 #[cfg(feature = "hwrt")]
-pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 13;
+pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 16;
 /// See the `hwrt` variant: a `not(hwrt)` build keeps the count at 11 (no shadow-vis targets,
 /// byte-unchanged).
 #[cfg(not(feature = "hwrt"))]
@@ -167,7 +172,10 @@ pub(crate) struct GbufferBarrierSink<'a> {
 /// against this same field type — cannot silently drift.
 const _: () = {
     #[cfg(feature = "hwrt")]
-    assert!(FRAMEGRAPH_IMAGE_COUNT == 13, "hwrt: 11 base images + shadow_vis + shadow_vis2");
+    assert!(
+        FRAMEGRAPH_IMAGE_COUNT == 16,
+        "hwrt: 11 base + shadow_vis + shadow_vis2 + motion_vec + shadow_temporal_hist + temporal_out"
+    );
     #[cfg(not(feature = "hwrt"))]
     assert!(FRAMEGRAPH_IMAGE_COUNT == 11, "not(hwrt): the 11 base images, no shadow-vis targets");
 };
@@ -434,6 +442,35 @@ impl Renderer<'_> {
         let shadow_vis = g.add_image("shadow_vis"); // ResId 11
         #[cfg(feature = "hwrt")]
         let shadow_vis2 = g.add_image("shadow_vis2"); // ResId 12
+        // Rung 3b (`hwrt`, ResIds 13/14/15): the temporal reproject targets, declared LAST in the
+        // image block (AFTER `shadow_vis2`, BEFORE the first `add_buffer`), so ResId 0..12 stay
+        // byte-unchanged and the buffers still begin at `FRAMEGRAPH_IMAGE_COUNT` (16 under hwrt).
+        // `motion_vec` (RG16F Δuv) + `temporal_out` (RG16 accumulated vis) are FRAME-PRIVATE (ringed,
+        // written+read within one frame in steps 5-6) ⇒ plain `add_image` (undefined first-touch,
+        // like the G-buffer ring images). `shadow_temporal_hist` (RGBA16) is CROSS-FRAME (frame `fi`
+        // reads `[1-fi]`, writes `[fi]`) ⇒ `add_image_seeded` at GENERAL — the DDGI-precedent
+        // content-preserving seed (I3), so the first temporal frame's read of the sibling slot orders
+        // after a real GENERAL layout, never a discard. In THIS step NO pass names ResId 13/14/15
+        // (`image_access`), so the graph routes ZERO barriers on them ⇒ the seed is inert and the
+        // render is byte-identical; steps 5-6 add the producers + the temporal pass.
+        #[cfg(feature = "hwrt")]
+        let motion_vec = g.add_image("motion_vec"); // ResId 13
+        #[cfg(feature = "hwrt")]
+        let shadow_temporal_hist = g.add_image_seeded(
+            "shadow_temporal_hist",
+            ResSync::seeded_readers_at_layout(
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+            ),
+        ); // ResId 14
+        #[cfg(feature = "hwrt")]
+        let temporal_out = g.add_image("temporal_out"); // ResId 15
+        // No pass names ResId 13/14/15 this step — bind the reserved handles to `_` so the slots are
+        // reserved (the `add_image`/`add_image_seeded` side effect) without an unused-binding warning.
+        // Steps 5-6 replace this with the real `image_access` wiring.
+        #[cfg(feature = "hwrt")]
+        let _ = (motion_vec, shadow_temporal_hist, temporal_out);
         // --- Buffers (ResId FRAMEGRAPH_IMAGE_COUNT..+4) — ALL single instances shared by both in-flight
         // frames (audit B-002). light_table/tiles/grid/index end their frame consumed
         // by a COMPUTE read (resolve / marcher), so a dirty-frame re-write must order
@@ -1135,6 +1172,26 @@ impl Renderer<'_> {
                 #[cfg(feature = "hwrt")]
                 targets
                     .shadow_vis2
+                    .as_ref()
+                    .map_or(VkImage::NULL, |r| r[fi].image),
+                // Rung 3b (`hwrt`, ResIds 13/14/15): the temporal reproject target rings — bind the
+                // CURRENT frame slot's handle (like the G-buffer / shadow-vis ring slots above).
+                // `Option`-guarded (degrade-to-`NULL` when the device lacks the storage format). NO
+                // pass names ResId 13/14/15 this step, so these slots are never handed to the driver
+                // (a NULL there is inert, like the shadow-vis slots when the denoise is off).
+                #[cfg(feature = "hwrt")]
+                targets
+                    .motion_vec
+                    .as_ref()
+                    .map_or(VkImage::NULL, |r| r[fi].image),
+                #[cfg(feature = "hwrt")]
+                targets
+                    .shadow_temporal_hist
+                    .as_ref()
+                    .map_or(VkImage::NULL, |r| r[fi].image),
+                #[cfg(feature = "hwrt")]
+                targets
+                    .temporal_out
                     .as_ref()
                     .map_or(VkImage::NULL, |r| r[fi].image),
             ],

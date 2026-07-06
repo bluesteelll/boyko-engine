@@ -870,6 +870,11 @@ pub const VK_FORMAT_R16G16_UNORM: i32 = 77;
 /// pinned to the ACTUAL enumerant, cross-checked against `Format::R16G16Sfloat` in
 /// `abi_guard`.
 pub const VK_FORMAT_R16G16_SFLOAT: i32 = 83;
+/// `VkFormat::VK_FORMAT_R16G16B16A16_UNORM` — four 16-bit UNORM channels (HW-RT Rung 3b: the
+/// temporal shadow-vis history ring — vis / confidence / prev-depth / reserved). The value is 91
+/// (the 16-bit four-component UNORM block: R16=70, R16G16=77, R16G16B16A16=91) — pinned to the
+/// ACTUAL enumerant, cross-checked against `Format::R16G16B16A16Unorm` in `abi_guard`.
+pub const VK_FORMAT_R16G16B16A16_UNORM: i32 = 91;
 /// `VkFormat::VK_FORMAT_R32_SFLOAT` — a single 32-bit float (Lighting L0b: the
 /// `gViewT` G-buffer storage-image lane carrying the marcher's surface ray param `t`).
 pub const VK_FORMAT_R32_SFLOAT: i32 = 100;

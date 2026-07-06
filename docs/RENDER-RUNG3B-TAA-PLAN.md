@@ -293,6 +293,37 @@ pub struct GBufferTargets { /* … */
   - **Deferred to step 5** (folded with the consumers to avoid dead-code on unbound buffers): the `gpu_scene` `prev_instance_rings` + `motioncam_ring` `[BoundBuffer; FIF]` rings, the per-frame host `MotionCam` build/persist/upload, and the gather-into-prev-ring. The plan's step-2 "prev-instance ring + MotionCam UBO host plumbing (unbound)" moves there.
   - **Gate:** all 4 feature variants (`boyko-render`/`boyko-app` × `hwrt`/non-`hwrt`) `check` + `clippy -D warnings` green; `boyko-render` lib 125 tests + 4 new `motion_cam` tests pass; the push byte-identity unit test green. `boyko_rhi_vulkan` `grand_showcase` golden is unaffected by construction (it sits below `boyko_render` in the dep graph and does not use the bridge).
 
+## As-built — steps 3+4 (this commit): framegraph temporal targets + ResId re-base (dormant)
+
+Plan steps 3 and 4 **merged** into one dormant commit (one `13→16` ResId re-base beats two
+successive COUNT bumps + equiv re-pins). All `#[cfg(feature="hwrt")]`, byte-identical (both goldens
+`58f6c6c3` ±hwrt, verified).
+
+- **RHI foundation (surfaced at impl start — plan open-Q5):** the plan's `R16G16B16A16_UNORM`
+  history format was NOT in `boyko_rhi`'s `Format` enum. Added `R16G16B16A16Unorm = 91`
+  (`VK_FORMAT_R16G16B16A16_UNORM`) + the `ffi` const + the `abi_guard` const-assert (the enumerant
+  cross-check the other formats carry). Foundation-before-API.
+- **Three hwrt framegraph images** appended LAST in the image block (ResId 0..12 byte-unchanged;
+  buffers still begin at `FRAMEGRAPH_IMAGE_COUNT`): `motion_vec` (ResId 13, RG16F, frame-private) +
+  `shadow_temporal_hist` (ResId 14, RGBA16, **`add_image_seeded` at GENERAL** — the I3/DDGI
+  cross-frame content-preserving seed) + `temporal_out` (ResId 15, RG16, frame-private). `temporal_out`
+  is a DEDICATED target (not an in-place à-trous write-back) so the reproject's 3×3 neighborhood read
+  cannot race the accumulate write. `FRAMEGRAPH_IMAGE_COUNT` hwrt `13→16`; the `- FRAMEGRAPH_IMAGE_COUNT`
+  buffer re-base keeps every buffer's LOGICAL sink slot invariant (absolute buffer ResIds +3).
+- **targets.rs (orchestrator fork):** the three ring fields + create fns; built via a leak-safe
+  `build_denoise_ring` helper **at the END of `create`** (after every fallible descriptor set) that
+  **degrades to `None`** on any create failure — so they need ZERO teardown weaving into the ~8-site
+  error ladder above (the "recorded-not-fail-fast" opt-in policy). Gated on the SAME
+  `shadow_denoise_storage_ok()` probe as the vis rings; destroyed FIRST (reverse-acquisition) in
+  `destroy`.
+- **No pass names ResId 13/14/15 this step** (`let _ =` reserves the graph handles) ⇒ zero barriers
+  ⇒ byte-identical. The MV producers (step 5) + temporal pass (step 6) add the accesses.
+- **Gate:** `boyko_rhi` enum tests + `boyko_rhi_vulkan` compile ±hwrt + `clippy -D warnings` ±hwrt
+  green; `framegraph_gbuffer_equiv` 10 (hwrt) / 7 (non-hwrt) pass — incl. the updated
+  `hwrt_resid_18_sink_slot_mapping_pinned` (IMAGE_COUNT 16, buffer ResIds +3, sink slots unchanged);
+  `grand_showcase` golden `58f6c6c3` byte-identical BOTH hwrt-ON and hwrt-OFF; `boyko-app` hwrt
+  compiles.
+
 ## Metrics and validation
 
 - **Byte-identity:** `None`/`Spatial` reproduce `58f6c6c3` (±hwrt) + `af934c50`. Framegraph equiv ResId pins (16 imgs hwrt) + the **I3 pin** (no `UNDEFINED` old-layout on `shadow_temporal_hist` after init — reusing the DDGI-seed test shape, C3).

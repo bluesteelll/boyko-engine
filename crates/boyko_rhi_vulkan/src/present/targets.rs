@@ -106,6 +106,27 @@ pub struct GBufferTargets {
     /// it yet (steps 4-6 add the à-trous ping-pong). `#[cfg(feature = "hwrt")]`.
     #[cfg(feature = "hwrt")]
     pub(crate) shadow_vis2: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
+    /// HW-RT Rung 3b: the temporal motion-vector target `motion_vec` RING (`R16G16_SFLOAT`, full-
+    /// res): screen-space Δuv (prev − cur), written by the raster gbuffer MV MRT (mesh) + the
+    /// marcher (SDF) in step 5, read by the temporal reproject pass in step 6. RINGED per-FIF +
+    /// `Option`-guarded exactly like [`Self::shadow_vis`] (built together on the same
+    /// `shadow_denoise_storage_ok()` probe, degrade-to-`None` on any create failure). No pass reads
+    /// it yet — allocated-but-unused this step, byte-identical. `#[cfg(feature = "hwrt")]`.
+    #[cfg(feature = "hwrt")]
+    pub(crate) motion_vec: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
+    /// HW-RT Rung 3b: the temporal shadow-vis HISTORY ring `shadow_temporal_hist`
+    /// (`R16G16B16A16_UNORM`, full-res): frame `fi` writes `[fi]` (vis, conf, prev-depth, _) and
+    /// reads `[1-fi]` — the cross-frame accumulate, seeded GENERAL in the graph (the DDGI
+    /// precedent). RINGED + `Option`-guarded like [`Self::motion_vec`]. No pass reads it yet (step 6
+    /// adds the temporal pass). `#[cfg(feature = "hwrt")]`.
+    #[cfg(feature = "hwrt")]
+    pub(crate) shadow_temporal_hist: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
+    /// HW-RT Rung 3b: the temporal-accumulate OUTPUT `temporal_out` RING (`R16G16_UNORM`, full-res)
+    /// — the accumulated visibility the DENOISED resolve reads at `gShadowVis` @21 when temporal is
+    /// on. A DEDICATED target (avoids the in-place neighborhood-read race). RINGED + `Option`-
+    /// guarded like [`Self::motion_vec`]. No pass reads it yet (step 6). `#[cfg(feature = "hwrt")]`.
+    #[cfg(feature = "hwrt")]
+    pub(crate) temporal_out: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
     /// The marcher vocabulary descriptor set RING (one per in-flight frame), each written
     /// ONCE against [`GBufferScene::vocab_layout`] (pointing at `depth`/`albedo`/`normal`/
     /// `material` + the scene's SSBO/UBO/sampler + the M1 `pointer_grid` SSBO @9). Slot `i`
@@ -261,6 +282,26 @@ const SHADOW_VIS_FORMAT: Format = Format::R16G16Unorm;
 /// degrade policy as [`SHADOW_VIS_FORMAT`].
 #[cfg(feature = "hwrt")]
 const SHADOW_VIS2_FORMAT: Format = Format::R16G16Unorm;
+
+/// HW-RT Rung 3b: the temporal motion-vector target `motion_vec` format: `R16G16_SFLOAT` (screen-
+/// space Δuv, `R`=Δu/`G`=Δv). fp16 ULP at 64 px ≈ 0.03 px — sufficient for reprojection.
+/// Storage support is gated by the SAME `shadow_denoise_storage_ok()` probe as the vis rings.
+#[cfg(feature = "hwrt")]
+const MOTION_VEC_FORMAT: Format = Format::R16G16Sfloat;
+
+/// HW-RT Rung 3b: the temporal shadow-vis HISTORY ring `shadow_temporal_hist` format:
+/// `R16G16B16A16_UNORM` (`R`=accumulated vis, `G`=confidence/frame-count, `B`=prev `view_t`/depth —
+/// the W2 disocclusion backstop for the moving-box case — `A`=reserved). UNORM: every lane is a
+/// normalized `[0,1]` quantity.
+#[cfg(feature = "hwrt")]
+const SHADOW_TEMPORAL_HIST_FORMAT: Format = Format::R16G16B16A16Unorm;
+
+/// HW-RT Rung 3b: the temporal-accumulate OUTPUT `temporal_out` format: `R16G16_UNORM` — the SAME
+/// format as [`SHADOW_VIS_FORMAT`] (the DENOISED resolve reads it at `gShadowVis` @21). A DEDICATED
+/// target (not an in-place write into the à-trous ping-pong) so the reproject's 3×3 neighborhood
+/// read cannot race the accumulate write.
+#[cfg(feature = "hwrt")]
+const TEMPORAL_OUT_FORMAT: Format = Format::R16G16Unorm;
 
 /// The binding count of the SOFTWARE deferred-resolve set (indices 0..=18). The HWRT variant is
 /// this plus one (binding 19 = the TLAS). Kept as ONE source so the exact-fill guards + both set
@@ -764,6 +805,100 @@ impl GBufferTargets {
             array_layers: 1,
         };
         RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
+    }
+
+    /// HW-RT Rung 3b: creates one slot of the motion-vector target `motion_vec` — a 2D
+    /// [`MOTION_VEC_FORMAT`] (`R16G16_SFLOAT`) image at `extent`. `STORAGE` (the temporal reproject
+    /// reads it) | `SAMPLED` (bilinear reproject) | `COLOR_ATTACHMENT` (the raster gbuffer MV MRT
+    /// writes it in step 5). Probe-gated like [`Self::create_shadow_vis_image`].
+    #[cfg(feature = "hwrt")]
+    fn create_motion_vec_image(
+        ctx: &VulkanContext,
+        extent: VkExtent2D,
+    ) -> Result<VulkanTexture, SwapchainError> {
+        let desc = TextureDesc {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+            format: MOTION_VEC_FORMAT,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT,
+            array_layers: 1,
+        };
+        RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
+    }
+
+    /// HW-RT Rung 3b: creates one slot of the temporal shadow-vis HISTORY ring
+    /// `shadow_temporal_hist` — a 2D [`SHADOW_TEMPORAL_HIST_FORMAT`] (`R16G16B16A16_UNORM`) image at
+    /// `extent`. `STORAGE` (the temporal pass reads/writes) | `SAMPLED` (the bilinear reproject of
+    /// the previous slot). Probe-gated like [`Self::create_shadow_vis_image`].
+    #[cfg(feature = "hwrt")]
+    fn create_shadow_temporal_hist_image(
+        ctx: &VulkanContext,
+        extent: VkExtent2D,
+    ) -> Result<VulkanTexture, SwapchainError> {
+        let desc = TextureDesc {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+            format: SHADOW_TEMPORAL_HIST_FORMAT,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE | ImageUsage::SAMPLED,
+            array_layers: 1,
+        };
+        RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
+    }
+
+    /// HW-RT Rung 3b: creates one slot of the temporal-accumulate OUTPUT `temporal_out` — a 2D
+    /// [`TEMPORAL_OUT_FORMAT`] (`R16G16_UNORM`, same as `shadow_vis`) image at `extent`. `STORAGE`
+    /// (the temporal pass writes) | `SAMPLED` (the DENOISED resolve reads it as `gShadowVis`).
+    /// Probe-gated like [`Self::create_shadow_vis_image`].
+    #[cfg(feature = "hwrt")]
+    fn create_temporal_out_image(
+        ctx: &VulkanContext,
+        extent: VkExtent2D,
+    ) -> Result<VulkanTexture, SwapchainError> {
+        let desc = TextureDesc {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+            format: TEMPORAL_OUT_FORMAT,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE | ImageUsage::SAMPLED,
+            array_layers: 1,
+        };
+        RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
+    }
+
+    /// HW-RT Rung 3b: builds one FIF-ringed temporal denoise target, DEGRADING to `None` (leak-
+    /// safe) on any per-slot create failure — the opt-in "recorded-not-fail-fast" policy: a device
+    /// that faults on the RG16F/RGBA16 storage format disables temporal denoise rather than failing
+    /// the whole swapchain. Because these rings are built LAST (after every fallible descriptor set)
+    /// and never propagate `Err`, they need NO teardown weaving into the earlier error ladder.
+    #[cfg(feature = "hwrt")]
+    fn build_denoise_ring(
+        ctx: &VulkanContext,
+        extent: VkExtent2D,
+        create: impl Fn(&VulkanContext, VkExtent2D) -> Result<VulkanTexture, SwapchainError>,
+    ) -> Option<[VulkanTexture; FRAMES_IN_FLIGHT]> {
+        let mut slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for slot in slots.iter_mut() {
+            match create(ctx, extent) {
+                Ok(t) => *slot = Some(t),
+                Err(_) => {
+                    // SAFETY: each `Some` slot was created on `ctx` just above, is referenced by no
+                    // submission (build phase), and is destroyed exactly once (the `take`).
+                    for s in slots.iter_mut() {
+                        if let Some(t) = s.take() {
+                            unsafe { RhiDevice::destroy_texture(ctx, t) };
+                        }
+                    }
+                    return None;
+                }
+            }
+        }
+        Some(slots.map(|s| s.expect("invariant: every denoise ring slot built above")))
     }
 
     /// Allocates the depth + MRT G-buffer images at `extent` and writes the marcher
@@ -1732,6 +1867,25 @@ impl GBufferTargets {
             }
         };
 
+        // HW-RT Rung 3b: the three temporal denoise target rings (motion_vec RG16F,
+        // shadow_temporal_hist RGBA16, temporal_out RG16), built LAST — after every fallible
+        // descriptor set — and DEGRADE-TO-NONE on any create failure (leak-safe, opt-in). Because
+        // nothing fallible follows, they need NO teardown weaving into the ladder above. Gated on
+        // the SAME `shadow_denoise_storage_ok()` probe as `shadow_vis`/`shadow_vis2`. No pass names
+        // them this step (steps 5-6 add the MV producers + the temporal pass) — allocated-but-
+        // unused, byte-identical render.
+        #[cfg(feature = "hwrt")]
+        let (motion_vec, shadow_temporal_hist, temporal_out) =
+            if ctx.device_caps().shadow_denoise_storage_ok() {
+                (
+                    Self::build_denoise_ring(ctx, extent, Self::create_motion_vec_image),
+                    Self::build_denoise_ring(ctx, extent, Self::create_shadow_temporal_hist_image),
+                    Self::build_denoise_ring(ctx, extent, Self::create_temporal_out_image),
+                )
+            } else {
+                (None, None, None)
+            };
+
         Ok(Self {
             depth,
             albedo,
@@ -1744,6 +1898,12 @@ impl GBufferTargets {
             shadow_vis,
             #[cfg(feature = "hwrt")]
             shadow_vis2,
+            #[cfg(feature = "hwrt")]
+            motion_vec,
+            #[cfg(feature = "hwrt")]
+            shadow_temporal_hist,
+            #[cfg(feature = "hwrt")]
+            temporal_out,
             vocab_set,
             resolve_set,
             #[cfg(feature = "hwrt")]
@@ -1892,6 +2052,28 @@ impl GBufferTargets {
             }
             for g in self.vocab_set {
                 RhiDevice::destroy_bind_group(ctx, g);
+            }
+            // HW-RT Rung 3b: the three temporal denoise target RINGS (motion_vec / hist /
+            // temporal_out), built LAST so destroyed FIRST in reverse-acquisition order. `Option`-
+            // guarded (degrade-to-None on an unsupported device), each a
+            // `[VulkanTexture; FRAMES_IN_FLIGHT]` ring.
+            #[cfg(feature = "hwrt")]
+            if let Some(r) = self.temporal_out {
+                for t in r {
+                    RhiDevice::destroy_texture(ctx, t);
+                }
+            }
+            #[cfg(feature = "hwrt")]
+            if let Some(r) = self.shadow_temporal_hist {
+                for t in r {
+                    RhiDevice::destroy_texture(ctx, t);
+                }
+            }
+            #[cfg(feature = "hwrt")]
+            if let Some(r) = self.motion_vec {
+                for t in r {
+                    RhiDevice::destroy_texture(ctx, t);
+                }
             }
             // Rung 3a: the two shadow-vis image RINGS (built AFTER ssao, so destroyed BEFORE it in
             // reverse-acquisition order). `Option`-guarded (`None` on a device lacking RG8/RG16
