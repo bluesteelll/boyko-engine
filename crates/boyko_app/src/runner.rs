@@ -784,15 +784,17 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 ctx.ray_query_enabled() && backend_hw && scratch.instance_count() > 0
             };
             // HW-RT rung 3a step 7: read the author's spatial-denoise gate + clamped level
-            // count from the world (`ShadowDenoisePlugin` inserts both). `enabled()` is the
-            // structural `mode == Spatial` predicate; the OTHER three `scene.shadow` gate
-            // conditions (`backend == HardwareTri`, `tlas_nonempty`, `has_primary_directional`)
-            // are threaded via `tlas_enabled` + the `csm_armed` arg inside `scene()`. Default
-            // `mode == None` ⇒ `false` ⇒ `scene.shadow == None` ⇒ byte-identical.
+            // count from the world (`ShadowDenoisePlugin` inserts both). `spatial_enabled()` is
+            // the structural `mode ∈ {Spatial, Both}` predicate (Rung 3b grew the enum; this
+            // gate stays the SPATIAL path only — `None`/`Temporal` ⇒ `false`, unchanged from 3a
+            // for `None`/`Spatial`); the OTHER three `scene.shadow` gate conditions
+            // (`backend == HardwareTri`, `tlas_nonempty`, `has_primary_directional`) are threaded
+            // via `tlas_enabled` + the `csm_armed` arg inside `scene()`. Default `mode == None`
+            // ⇒ `false` ⇒ `scene.shadow == None` ⇒ byte-identical.
             #[cfg(feature = "hwrt")]
             let (shadow_denoise_enabled, shadow_denoise_levels) = {
                 let cfg = world.resource::<boyko_render::ShadowDenoiseConfig>();
-                (cfg.enabled(), cfg.clamped_levels())
+                (cfg.spatial_enabled(), cfg.clamped_levels())
             };
             let scene = host.gpu.scene(
                 mvp,

@@ -1,5 +1,5 @@
-//! HW-RT Rung 3a Step 1 — the ECS-native shadow-denoise config the author sets, plus the
-//! cold resolve policy that packs its live-tunable edge-stop scalars into a std140 UBO.
+//! HW-RT Rung 3a/3b — the ECS-native shadow-denoise config the author sets, plus the cold
+//! resolve policies that pack its live-tunable scalars into std140 UBOs.
 //!
 //! Principle 0: ECS-native — [`ShadowDenoiseConfig`] is the author-set `#[derive(Resource)]`
 //! singleton (the cold config, NOT a side `std::Vec`/`HashMap`) and [`ResolvedShadowDenoise`]
@@ -14,19 +14,30 @@
 //!
 //! # Capability is structural (no redundant `enabled: bool`)
 //!
-//! Whether the denoise pass runs is keyed off the [`ShadowDenoiseMode`] enum, NOT a separate
-//! flag — [`ShadowDenoiseMode::None`] IS "disabled". This is the capability-is-structural
+//! Whether each denoise path runs is keyed off the [`ShadowDenoiseMode`] enum, NOT separate
+//! flags — [`ShadowDenoiseMode::None`] IS "disabled". This is the capability-is-structural
 //! principle and mirrors how [`SsaoConfig`](crate::ssao_config::SsaoConfig) keys off
-//! [`SsaoQuality`](crate::ssao_config::SsaoQuality) rather than a `bool`.
-//! [`ShadowDenoiseConfig::enabled`] is a derived predicate (`mode == Spatial`), not stored
-//! state.
+//! [`SsaoQuality`](crate::ssao_config::SsaoQuality) rather than a `bool`. The two derived
+//! predicates ([`ShadowDenoiseConfig::spatial_enabled`], [`ShadowDenoiseConfig::temporal_enabled`])
+//! are computed from `mode`, not stored state.
+//!
+//! # Rung 3b: the temporal mode selector (this step — pure config, byte-identical)
+//!
+//! [`ShadowDenoiseMode`] grows to a 4-state lattice
+//! (`None`/`Spatial`/`Temporal`/`Both`): `Both` = à-trous THEN temporal (SVGF ordering — the
+//! spatial pre-blur lowers the variance the temporal clamp must tolerate). The temporal
+//! params live in a SEPARATE 16 B [`ResolvedTemporalShadow`] UBO — the à-trous
+//! [`ResolvedShadowDenoise`] stays byte-unchanged, so the shipped `Spatial` upload byte-stream
+//! is provably untouched (Rung 3b plan, Decision 1 / W1). No pass reads
+//! [`ResolvedTemporalShadow`] this step; the temporal reproject pass that consumes it lands in
+//! the later Rung 3b steps.
 //!
 //! # The 0%-gate (byte-identical default)
 //!
 //! [`ShadowDenoiseConfig::default`] is [`ShadowDenoiseMode::None`] — the resolve traces the
-//! Vogel cone inline (byte-identical to today, no a-trous pass). This is Step 1 of the Rung
-//! 3a track: a PURE config module + plugin, no render/shader/framegraph change. The a-trous
-//! filter that READS [`ResolvedShadowDenoise`] lands in the later steps.
+//! Vogel cone inline (byte-identical to today, no a-trous pass, no temporal pass). The a-trous
+//! filter that READS [`ResolvedShadowDenoise`] and the temporal pass that READS
+//! [`ResolvedTemporalShadow`] land in the later steps.
 
 use boyko_macros::Resource;
 
@@ -34,13 +45,14 @@ use boyko_ecs::ecs::core::system::{Res, ResMut};
 
 // ---- ShadowDenoiseMode (the author-set knob; capability is structural) ----------------
 
-/// Spatial denoise mode for the RT soft mesh-shadow visibility. Capability-is-structural:
+/// Denoise mode for the RT soft mesh-shadow visibility. Capability-is-structural:
 /// `None` (default) = no denoise pass, the resolve traces inline (byte-identical to today).
 ///
-/// `None` is the structural "disabled" state (the capability-is-structural principle): the
-/// resolve gates the whole denoise pass on `mode != None`, so there is NO redundant
-/// `enabled: bool` — exactly as [`SsaoQuality`](crate::ssao_config::SsaoQuality) keys the
-/// SSAO pass off `Off` rather than a flag.
+/// The 4-state lattice keys BOTH denoise paths off one enum (no redundant `enabled: bool`) —
+/// exactly as [`SsaoQuality`](crate::ssao_config::SsaoQuality) keys the SSAO pass off `Off`
+/// rather than a flag. The two paths are read via
+/// [`spatial_enabled`](ShadowDenoiseConfig::spatial_enabled) /
+/// [`temporal_enabled`](ShadowDenoiseConfig::temporal_enabled).
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ShadowDenoiseMode {
@@ -51,6 +63,12 @@ pub enum ShadowDenoiseMode {
     None,
     /// Single-frame edge-avoiding a-trous spatial filter over the traced visibility.
     Spatial,
+    /// Cross-frame temporal reproject + variance-clamp accumulate over the traced visibility
+    /// (Rung 3b). No spatial pre-filter.
+    Temporal,
+    /// Both paths: à-trous THEN temporal (SVGF ordering — the spatial pre-blur lowers the
+    /// variance the temporal clamp must tolerate).
+    Both,
 }
 
 // ---- constants ------------------------------------------------------------------------
@@ -65,10 +83,11 @@ pub const MAX_ATROUS_LEVELS: u32 = 5;
 ///
 /// `#[derive(Resource)]` via [`boyko_macros::Resource`] (the same derive path
 /// [`RayShadowConfig`](crate::ray_shadow_config::RayShadowConfig) uses). Enablement is
-/// structural (`mode != None`), so there is no separate flag.
+/// structural (keyed off [`mode`](ShadowDenoiseConfig::mode)), so there is no separate flag.
 #[derive(Resource, Clone, Copy, Debug)]
 pub struct ShadowDenoiseConfig {
     /// `None` (default) => inline trace, byte-identical. `Spatial` => a-trous filter path.
+    /// `Temporal` => cross-frame reproject accumulate. `Both` => à-trous then temporal.
     pub mode: ShadowDenoiseMode,
     /// A-trous dispatch count (spatial reach ~ 2^levels). ON-default 3; clamped
     /// `1..=MAX_ATROUS_LEVELS` by [`clamped_levels`](ShadowDenoiseConfig::clamped_levels).
@@ -77,26 +96,57 @@ pub struct ShadowDenoiseConfig {
     pub sigma_z: f32,
     /// Normal edge-stop exponent. ON-default 128.0.
     pub sigma_n: f32,
+    /// Temporal (3b) — max history feedback for a static camera (the accumulation ceiling).
+    /// ON-default 0.95.
+    pub feedback_max: f32,
+    /// Temporal (3b) — min history feedback under fast motion (the velocity-k floor).
+    /// ON-default 0.85.
+    pub feedback_min: f32,
+    /// Temporal (3b) — neighborhood AABB variance-clamp width (the ghosting ceiling).
+    /// ON-default 1.0.
+    pub variance_gamma: f32,
+    /// Temporal (3b) — disocclusion depth tolerance `tau`:
+    /// `|reproj_depth - hist_depth| > tol * depth` resets the history (single-frame fallback).
+    /// ON-default 0.02.
+    pub disocclusion_depth_tol: f32,
 }
 
 impl Default for ShadowDenoiseConfig {
-    /// `None` (the 0%-gate anchor): a default world runs no denoise pass and is
-    /// byte-identical to today. The ON-defaults (`levels 3`, `sigma_z 1.0`, `sigma_n 128.0`)
-    /// are carried so a bare `mode` flip to `Spatial` is a sensible starting tune.
+    /// `None` (the 0%-gate anchor): a default world runs no denoise pass and is byte-identical
+    /// to today. The ON-defaults (spatial `levels 3`/`sigma_z 1.0`/`sigma_n 128.0`; temporal
+    /// `feedback_max 0.95`/`feedback_min 0.85`/`variance_gamma 1.0`/`disocclusion_depth_tol 0.02`)
+    /// are carried so a bare `mode` flip is a sensible starting tune.
     #[inline]
     fn default() -> Self {
-        Self { mode: ShadowDenoiseMode::None, levels: 3, sigma_z: 1.0, sigma_n: 128.0 }
+        Self {
+            mode: ShadowDenoiseMode::None,
+            levels: 3,
+            sigma_z: 1.0,
+            sigma_n: 128.0,
+            feedback_max: 0.95,
+            feedback_min: 0.85,
+            variance_gamma: 1.0,
+            disocclusion_depth_tol: 0.02,
+        }
     }
 }
 
 impl ShadowDenoiseConfig {
-    /// `true` iff the spatial denoise path is active (whole-pass capability gate) — the
-    /// structural predicate `mode == Spatial` (NOT stored state). Mirrors reading the mode
-    /// in [`SsaoConfig::enabled`](crate::ssao_config::SsaoConfig::enabled) rather than a
-    /// redundant `bool`.
+    /// `true` iff the SPATIAL (a-trous) denoise path is active — the structural predicate
+    /// `mode ∈ {Spatial, Both}` (NOT stored state). This is the whole-pass capability gate the
+    /// host uses to choose the à-trous filter path over the inline resolve; it preserves the
+    /// Rung-3a gate exactly (`None` ⇒ `false` ⇒ inline resolve, byte-identical).
     #[inline]
-    pub const fn enabled(&self) -> bool {
-        matches!(self.mode, ShadowDenoiseMode::Spatial)
+    pub const fn spatial_enabled(&self) -> bool {
+        matches!(self.mode, ShadowDenoiseMode::Spatial | ShadowDenoiseMode::Both)
+    }
+
+    /// `true` iff the TEMPORAL (cross-frame reproject) denoise path is active — the structural
+    /// predicate `mode ∈ {Temporal, Both}` (NOT stored state). Not yet consumed by any pass
+    /// this step; the later Rung 3b steps gate the temporal reproject on it.
+    #[inline]
+    pub const fn temporal_enabled(&self) -> bool {
+        matches!(self.mode, ShadowDenoiseMode::Temporal | ShadowDenoiseMode::Both)
     }
 
     /// The a-trous level count clamped to the valid range (never 0, never > MAX). Bounds the
@@ -177,6 +227,74 @@ pub fn resolve_shadow_denoise_policy(
     *out = resolve_shadow_denoise(&cfg);
 }
 
+// ---- ResolvedTemporalShadow (the SEPARATE temporal UBO — Rung 3b, Decision 1) -----------
+
+/// The packed UBO the temporal reproject pass reads: std140 vec4, 16 B — a SEPARATE carrier
+/// from [`ResolvedShadowDenoise`] so the shipped à-trous UBO byte-stream stays untouched
+/// (Rung 3b plan, Decision 1 / W1). Live-tunable temporal scalars (no loop-bound impact ⇒
+/// UBO), bound ONLY when [`temporal_enabled`](ShadowDenoiseConfig::temporal_enabled).
+///
+/// `#[repr(C)]` for a stable GPU-ready layout — the field ORDER + TYPES byte-mirror the
+/// temporal cbuffer (feedback_max @0, feedback_min @4, variance_gamma @8, depth_tol @12).
+/// `#[derive(Resource)]` (the same derive path [`ResolvedShadowDenoise`] uses) so the plugin
+/// inserts it as a `World` singleton and the cold policy writes it via `ResMut`.
+#[repr(C)]
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct ResolvedTemporalShadow {
+    /// Max history feedback (static camera — the accumulation ceiling). Offset 0.
+    pub feedback_max: f32,
+    /// Min history feedback (fast motion — the velocity-k floor). Offset 4.
+    pub feedback_min: f32,
+    /// Neighborhood AABB variance-clamp width. Offset 8.
+    pub variance_gamma: f32,
+    /// Disocclusion depth tolerance `tau`. Offset 12.
+    pub depth_tol: f32,
+}
+
+// Layout pin: 4 × 4 = 16 B = one std140 vec4 slot. A change is a deliberate decision (the
+// temporal filter's cbuffer reads this stride).
+const _: () = assert!(core::mem::size_of::<ResolvedTemporalShadow>() == 16);
+
+/// The byte size of the host-coherent temporal UBO — `size_of::<ResolvedTemporalShadow>()`
+/// (16 B). Hosts size their UBO slots from THIS constant (single source — no hand-copied `16`).
+/// Mirrors [`RESOLVED_SHADOW_DENOISE_BYTES`].
+pub const RESOLVED_TEMPORAL_SHADOW_BYTES: usize = core::mem::size_of::<ResolvedTemporalShadow>();
+
+impl Default for ResolvedTemporalShadow {
+    /// The resolve of the default [`ShadowDenoiseConfig`] — so a never-run policy (frame 0)
+    /// already carries the correct temporal scalars.
+    #[inline]
+    fn default() -> Self {
+        resolve_temporal_shadow(&ShadowDenoiseConfig::default())
+    }
+}
+
+/// Pure cold policy: config -> the packed temporal UBO. The PURE, unit-testable resolve
+/// (the temporal analogue of [`resolve_shadow_denoise`]). No allocation, no `World` access.
+#[inline]
+pub fn resolve_temporal_shadow(cfg: &ShadowDenoiseConfig) -> ResolvedTemporalShadow {
+    ResolvedTemporalShadow {
+        feedback_max: cfg.feedback_max,
+        feedback_min: cfg.feedback_min,
+        variance_gamma: cfg.variance_gamma,
+        depth_tol: cfg.disocclusion_depth_tol,
+    }
+}
+
+/// Single writer of [`ResolvedTemporalShadow`] (cold, once/frame), mirrors
+/// [`resolve_shadow_denoise_policy`]. Reads the author [`ShadowDenoiseConfig`] and writes the
+/// derived temporal UBO carrier (the one-producer-per-field write discipline).
+//
+// `clippy::needless_pass_by_value`: `Res`/`ResMut` are by-value `SystemParam`s read/written
+// through reborrows — the same false-positive `resolve_shadow_denoise_policy` carries.
+#[allow(clippy::needless_pass_by_value)]
+pub fn resolve_temporal_shadow_policy(
+    cfg: Res<ShadowDenoiseConfig>,
+    mut out: ResMut<ResolvedTemporalShadow>,
+) {
+    *out = resolve_temporal_shadow(&cfg);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,7 +307,18 @@ mod tests {
         assert_eq!(cfg.levels, 3);
         assert_eq!(cfg.sigma_z, 1.0);
         assert_eq!(cfg.sigma_n, 128.0);
-        assert!(!cfg.enabled(), "the default config is the 0%-gate (no denoise pass)");
+        assert_eq!(cfg.feedback_max, 0.95);
+        assert_eq!(cfg.feedback_min, 0.85);
+        assert_eq!(cfg.variance_gamma, 1.0);
+        assert_eq!(cfg.disocclusion_depth_tol, 0.02);
+        assert!(
+            !cfg.spatial_enabled(),
+            "the default config is the 0%-gate (no spatial denoise pass)"
+        );
+        assert!(
+            !cfg.temporal_enabled(),
+            "the default config is the 0%-gate (no temporal denoise pass)"
+        );
     }
 
     /// `ShadowDenoiseMode::default()` is `None` (the structural disabled state).
@@ -226,10 +355,60 @@ mod tests {
         assert_eq!(clamped(3), 3, "an in-range level passes through");
     }
 
-    /// `enabled` is the structural predicate `mode == Spatial`.
+    /// The two derived predicates key off `mode` across all 4 states: `None` ⇒ neither;
+    /// `Spatial` ⇒ spatial only; `Temporal` ⇒ temporal only; `Both` ⇒ both.
     #[test]
-    fn enabled_is_structural_mode_spatial() {
-        assert!(ShadowDenoiseConfig { mode: ShadowDenoiseMode::Spatial, ..Default::default() }.enabled());
-        assert!(!ShadowDenoiseConfig { mode: ShadowDenoiseMode::None, ..Default::default() }.enabled());
+    fn enabled_predicates_are_structural_over_the_four_modes() {
+        let cfg = |mode| ShadowDenoiseConfig { mode, ..Default::default() };
+
+        let none = cfg(ShadowDenoiseMode::None);
+        assert!(!none.spatial_enabled());
+        assert!(!none.temporal_enabled());
+
+        let spatial = cfg(ShadowDenoiseMode::Spatial);
+        assert!(spatial.spatial_enabled(), "Spatial ⇒ spatial path on");
+        assert!(!spatial.temporal_enabled(), "Spatial ⇒ temporal path off");
+
+        let temporal = cfg(ShadowDenoiseMode::Temporal);
+        assert!(!temporal.spatial_enabled(), "Temporal ⇒ spatial path off");
+        assert!(temporal.temporal_enabled(), "Temporal ⇒ temporal path on");
+
+        let both = cfg(ShadowDenoiseMode::Both);
+        assert!(both.spatial_enabled(), "Both ⇒ spatial path on");
+        assert!(both.temporal_enabled(), "Both ⇒ temporal path on");
+    }
+
+    /// The temporal UBO layout pin (16 B — one std140 vec4 slot), separate from the à-trous UBO.
+    #[test]
+    fn resolved_temporal_shadow_is_16_bytes() {
+        assert_eq!(core::mem::size_of::<ResolvedTemporalShadow>(), 16);
+        assert_eq!(RESOLVED_TEMPORAL_SHADOW_BYTES, 16);
+    }
+
+    /// The temporal resolve maps the 4 temporal config fields into the packed UBO, and the
+    /// `Default` impl equals the resolve of the default config (the frame-0 seed).
+    #[test]
+    fn resolve_temporal_maps_the_four_fields() {
+        let cfg = ShadowDenoiseConfig {
+            feedback_max: 0.9,
+            feedback_min: 0.7,
+            variance_gamma: 1.5,
+            disocclusion_depth_tol: 0.05,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_temporal_shadow(&cfg),
+            ResolvedTemporalShadow {
+                feedback_max: 0.9,
+                feedback_min: 0.7,
+                variance_gamma: 1.5,
+                depth_tol: 0.05,
+            }
+        );
+        assert_eq!(
+            resolve_temporal_shadow(&ShadowDenoiseConfig::default()),
+            ResolvedTemporalShadow::default(),
+            "the Default impl equals the resolve of the default config"
+        );
     }
 }

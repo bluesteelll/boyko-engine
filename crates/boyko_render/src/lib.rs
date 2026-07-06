@@ -225,8 +225,10 @@ pub use ray_shadow_config::{
     resolve_ray_shadow_system,
 };
 pub use shadow_denoise_config::{
-    MAX_ATROUS_LEVELS, RESOLVED_SHADOW_DENOISE_BYTES, ResolvedShadowDenoise, ShadowDenoiseConfig,
-    ShadowDenoiseMode, resolve_shadow_denoise, resolve_shadow_denoise_policy,
+    MAX_ATROUS_LEVELS, RESOLVED_SHADOW_DENOISE_BYTES, RESOLVED_TEMPORAL_SHADOW_BYTES,
+    ResolvedShadowDenoise, ResolvedTemporalShadow, ShadowDenoiseConfig, ShadowDenoiseMode,
+    resolve_shadow_denoise, resolve_shadow_denoise_policy, resolve_temporal_shadow,
+    resolve_temporal_shadow_policy,
 };
 pub use shadow_denoise_plugin::ShadowDenoisePlugin;
 // HW-RT rung R1: re-export `RtTier` (defined in `boyko_rhi_vulkan::device`) since the

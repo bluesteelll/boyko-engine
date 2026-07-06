@@ -7,7 +7,8 @@
 use boyko_ecs::ecs::core::app::{App, Plugin};
 
 use crate::shadow_denoise_config::{
-    ResolvedShadowDenoise, ShadowDenoiseConfig, resolve_shadow_denoise_policy,
+    ResolvedShadowDenoise, ResolvedTemporalShadow, ShadowDenoiseConfig,
+    resolve_shadow_denoise_policy, resolve_temporal_shadow_policy,
 };
 
 /// Registers the shadow-denoise config substrate: inserts [`ShadowDenoiseConfig`] (default
@@ -39,15 +40,20 @@ pub struct ShadowDenoisePlugin;
 
 impl Plugin for ShadowDenoisePlugin {
     fn build(&self, app: &mut App) {
-        // The author-set cold config (default None — the 0%-gate) + its derived carrier.
-        // `resolve_shadow_denoise_policy` is the single writer of `ResolvedShadowDenoise`
-        // (the one-producer write discipline). The default `ResolvedShadowDenoise` already
-        // carries the edge-stop scalars, so the world is correct even before the first run.
+        // The author-set cold config (default None — the 0%-gate) + its two derived carriers.
+        // `resolve_shadow_denoise_policy` / `resolve_temporal_shadow_policy` are the single
+        // writers of `ResolvedShadowDenoise` / `ResolvedTemporalShadow` (the one-producer write
+        // discipline). Both defaults already carry the resolved scalars, so the world is correct
+        // even before the first run. The temporal carrier (Rung 3b, Decision 1) is inserted +
+        // resolved here but read by no pass this step — the temporal reproject pass consumes it
+        // in the later Rung 3b steps.
         app.insert_resource(ShadowDenoiseConfig::default());
         app.insert_resource(ResolvedShadowDenoise::default());
+        app.insert_resource(ResolvedTemporalShadow::default());
 
         app.add_systems_cfg(|b| {
             b.add_system(resolve_shadow_denoise_policy);
+            b.add_system(resolve_temporal_shadow_policy);
         });
     }
 
