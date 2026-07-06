@@ -466,11 +466,12 @@ impl Renderer<'_> {
         ); // ResId 14
         #[cfg(feature = "hwrt")]
         let temporal_out = g.add_image("temporal_out"); // ResId 15
-        // No pass names ResId 13/14/15 this step — bind the reserved handles to `_` so the slots are
-        // reserved (the `add_image`/`add_image_seeded` side effect) without an unused-binding warning.
-        // Steps 5-6 replace this with the real `image_access` wiring.
+        // Step 5a wires `motion_vec` (the raster's temporal-gated 4th-MRT write below). ResId 14/15
+        // (`shadow_temporal_hist`/`temporal_out`) are still unnamed this step — bind them to `_` so
+        // the slots stay reserved (the `add_image`/`add_image_seeded` side effect) without an
+        // unused-binding warning. Step 6 adds the temporal pass that names them.
         #[cfg(feature = "hwrt")]
-        let _ = (motion_vec, shadow_temporal_hist, temporal_out);
+        let _ = (shadow_temporal_hist, temporal_out);
         // --- Buffers (ResId FRAMEGRAPH_IMAGE_COUNT..+4) — ALL single instances shared by both in-flight
         // frames (audit B-002). light_table/tiles/grid/index end their frame consumed
         // by a COMPUTE read (resolve / marcher), so a dirty-frame re-write must order
@@ -632,6 +633,24 @@ impl Renderer<'_> {
         for &c in &[albedo, normal, material] {
             g.image_access(
                 c,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                SubRange::COLOR,
+            );
+        }
+        // HW-RT Rung 3b step 5a: when the mesh-MV path is active, the raster pass ALSO writes the
+        // `motion_vec` 4th MRT (the mesh Δuv). Declare its COLOR_ATTACHMENT_WRITE so the graph
+        // transitions it UNDEFINED → COLOR_ATTACHMENT_OPTIMAL (first-touch, like the other ring
+        // color targets) and orders the later temporal-pass read after it. The gate is
+        // `mesh_mv_active()` — the SAME predicate the recorder binds the MV pipeline under (NOT
+        // `temporal_enabled` alone), so the graph never declares a write the recorder won't emit
+        // (W1: gate-divergence on a storage-ok-but-no-ray-query device). OFF (default / non-hwrt)
+        // ⇒ no access ⇒ the graph routes ZERO barriers on `motion_vec` ⇒ byte-identical.
+        #[cfg(feature = "hwrt")]
+        if scene.mesh_mv_active() {
+            g.image_access(
+                motion_vec,
                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,

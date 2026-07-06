@@ -524,6 +524,33 @@ static GBUFFER_MRT_FS_SPV: SpirvBlob<2252> = SpirvBlob(*include_bytes!(concat!(
     "/shaders/gbuffer_mrt.fs.spv"
 )));
 
+/// The Rung-3b MOTION_VECTORS-variant mesh-MRT G-buffer PRODUCER vertex SPIR-V
+/// (`shaders/gbuffer_mrt_mv.vs.spv`, compiled from `gbuffer_mrt.vs.hlsl` with
+/// `-D MOTION_VECTORS=1`). Identical to [`GBUFFER_MRT_VS_SPV`] except it additionally reads a
+/// second per-instance model ring `prev_instances` (set-0 binding 1, LAST frame's transforms)
+/// and a `MotionCam` UBO (set-0 binding 2, cur+prev marcher-aligned view-proj), and forwards
+/// the current + previous CLIP positions to the fragment. Bound into the 4-attachment MV
+/// raster pipeline (3× `R8G8B8A8_UNORM` + `motion_vec` `R16G16_SFLOAT`) with the 3-binding
+/// instance-MV layout; selected only when the shadow denoiser's temporal mode is active. The
+/// base [`GBUFFER_MRT_VS_SPV`] stays the byte-frozen 3-MRT golden (the step-5 gate).
+#[cfg(feature = "hwrt")]
+static GBUFFER_MRT_MV_VS_SPV: SpirvBlob<5780> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/gbuffer_mrt_mv.vs.spv"
+)));
+
+/// The Rung-3b MOTION_VECTORS-variant mesh-MRT G-buffer PRODUCER fragment SPIR-V
+/// (`shaders/gbuffer_mrt_mv.fs.spv`, compiled from `gbuffer_mrt.fs.hlsl` with
+/// `-D MOTION_VECTORS=1`). Writes the SAME 3 attribute MRTs + `SV_Depth` as
+/// [`GBUFFER_MRT_FS_SPV`], plus a 4th MRT `SV_Target3 motion_vec` = `clip_to_uv(prev_clip) -
+/// clip_to_uv(cur_clip)` (a static pixel writes exactly `(0,0)`). Paired with
+/// [`gbuffer_mrt_mv_vs_spirv`]; the base [`GBUFFER_MRT_FS_SPV`] stays the byte-frozen golden.
+#[cfg(feature = "hwrt")]
+static GBUFFER_MRT_MV_FS_SPV: SpirvBlob<2732> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/gbuffer_mrt_mv.fs.spv"
+)));
+
 /// The committed fullscreen-sample vertex SPIR-V (`shaders/fullscreen_sample.vs.hlsl`): a
 /// fullscreen triangle generating positions + UVs from `SV_VertexID` (no vertex buffer).
 /// The present-blit pass's VS.
@@ -909,6 +936,25 @@ pub fn gbuffer_mrt_vs_spirv() -> &'static [u32] {
 #[inline]
 pub fn gbuffer_mrt_fs_spirv() -> &'static [u32] {
     GBUFFER_MRT_FS_SPV.as_words()
+}
+
+/// The Rung-3b MOTION_VECTORS-variant mesh-MRT gbuffer VERTEX SPIR-V as a `u32` word stream.
+/// Bound into the 4-attachment MV raster pipeline (3× `R8G8B8A8_UNORM` + `motion_vec`
+/// `R16G16_SFLOAT`, `D32Sfloat` depth) with the 3-binding instance-MV set (instances @0,
+/// prev_instances @1, `MotionCam` UBO @2) + the 88-byte VERTEX push. Paired with
+/// [`gbuffer_mrt_mv_fs_spirv`]; selected only when the temporal shadow denoiser is active.
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn gbuffer_mrt_mv_vs_spirv() -> &'static [u32] {
+    GBUFFER_MRT_MV_VS_SPV.as_words()
+}
+
+/// The Rung-3b MOTION_VECTORS-variant mesh-MRT gbuffer FRAGMENT SPIR-V as a `u32` word stream.
+/// Paired with [`gbuffer_mrt_mv_vs_spirv`]; writes the 4th MRT `motion_vec` (`Δuv`).
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn gbuffer_mrt_mv_fs_spirv() -> &'static [u32] {
+    GBUFFER_MRT_MV_FS_SPV.as_words()
 }
 
 /// The committed fullscreen-sample (present-blit) vertex SPIR-V as a `u32` word stream,

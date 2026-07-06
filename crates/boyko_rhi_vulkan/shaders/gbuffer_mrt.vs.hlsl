@@ -49,9 +49,20 @@
 // singular transform cannot poison the normal MRT with NaN/Inf. The LEGACY arm
 // (`use_model_matrix == 0`) is UNCHANGED (the bit-identity gate).
 //
+// Rung-3b MOTION_VECTORS variant (opt-in, compiled with `-D MOTION_VECTORS=1`): adds a
+// per-object + camera motion vector as the fragment's 4th MRT. This VS additionally reads
+// (a) a SECOND per-instance model ring `prev_instances` (binding 1, byte-identical 48 B
+// layout to `instances`) holding LAST frame's transforms, and (b) a `MotionCam` UBO
+// (binding 2) carrying the current + previous marcher-aligned view-proj. It forwards the
+// current and previous CLIP positions (`cur_clip`/`prev_clip`) to the fragment, which
+// divides both and writes `Δuv`. EVERYTHING new is gated under `#ifdef MOTION_VECTORS`, so
+// the base (no-define) compile is byte-frozen — the `gbuffer_mrt.vs.spv` golden is
+// untouched (the Rung-3b step-5 byte-identity gate).
+//
 // Compiled offline (hermetic build — no SDK at `cargo build` time) with:
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T vs_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 gbuffer_mrt.vs.hlsl -Fo gbuffer_mrt.vs.spv
+//   (MOTION_VECTORS variant: add `-D MOTION_VECTORS=1 -Fo gbuffer_mrt_mv.vs.spv`)
 
 struct PushConstants {
     float4x4 view_proj;        // perspective (or ortho) proj*view, column-major (was `mvp`)
@@ -73,6 +84,23 @@ struct InstanceModelCol {
 };
 [[vk::binding(0, 0)]] StructuredBuffer<InstanceModelCol> instances;
 
+#ifdef MOTION_VECTORS
+// Rung-3b motion-vector inputs (opt-in). `prev_instances` is the LAST-frame per-instance
+// model ring (byte-identical 48 B layout to `instances`, uploaded via the FIF-parallel
+// prev-instance ring); the instanced arm reads slot `base_instance + SV_InstanceID` to
+// reconstruct the object's PREVIOUS world position. `MotionCam` carries the current and
+// previous marcher-aligned view-proj (column-major, the SAME convention `pc.view_proj`
+// uses — `mc_cur_view_proj` is bit-equal to `pc.view_proj` by construction, but sourcing
+// both clip positions from ONE UBO keeps a static object's `cur_clip == prev_clip` exact,
+// so `Δuv == 0` for a still scene). Declared ENTIRELY under `#ifdef MOTION_VECTORS`, so the
+// base variant never references bindings 1/2 — its layout stays the single-SSBO gate.
+[[vk::binding(1, 0)]] StructuredBuffer<InstanceModelCol> prev_instances;
+[[vk::binding(2, 0)]] cbuffer MotionCam {
+    float4x4 mc_cur_view_proj;   // current marcher-aligned proj*view (== pc.view_proj)
+    float4x4 mc_prev_view_proj;  // last frame's marcher-aligned proj*view
+};
+#endif
+
 // Field DECLARATION order fixes the SPIR-V vertex-input locations DXC auto-assigns
 // (this codebase uses no explicit `[[vk::location]]`): position -> 0, color -> 1,
 // normal -> 2. The vertex BUFFER offsets are independent of this order and are bound by
@@ -89,6 +117,13 @@ struct VsOut {
     float3 normal   : NORMAL;       // per-vertex world normal, passed through to the fragment
     float3 eye_rel  : WORLDDIST;    // cam_eye.xyz - world position (perspective-correct interp)
     float  cam_mode : CAMMODE;      // 0 = ortho (use SV_Position.z), 1 = perspective (use eye_rel)
+#ifdef MOTION_VECTORS
+    // Marcher-aligned clip positions (NOT SV_Position — passed as perspective-correct
+    // varyings so the fragment divides BOTH through the identical interpolation path;
+    // a static object then has `cur_clip == prev_clip` per pixel ⇒ Δuv == 0 exactly).
+    float4 cur_clip  : CURCLIP;     // mc_cur_view_proj  * cur_world
+    float4 prev_clip : PREVCLIP;    // mc_prev_view_proj * prev_world
+#endif
 };
 
 // The degeneracy threshold for the instanced normal matrix. Below this |det| the 3x3 inverse
@@ -144,6 +179,14 @@ VsOut main(VsIn input, uint instance_id : SV_InstanceID) {
         // cam_eye is constant across the primitive, so the default perspective-correct interp
         // of (cam_eye - worldpos) yields the true per-pixel (cam_eye - P) in the fragment.
         output.eye_rel = pc.cam_eye.xyz - input.position;
+#ifdef MOTION_VECTORS
+        // The merged-draw arm has no per-instance model, so this geometry is static in world
+        // space (`input.position` IS the world position — `mul(view_proj, p)` above). Motion
+        // is camera-only: prev_world == cur_world, so `Δuv` comes purely from the view-proj
+        // delta. A still camera ⇒ mc_prev == mc_cur ⇒ cur_clip == prev_clip ⇒ Δuv == 0.
+        output.cur_clip  = mul(mc_cur_view_proj,  float4(input.position, 1.0));
+        output.prev_clip = mul(mc_prev_view_proj, float4(input.position, 1.0));
+#endif
     } else {
         // INSTANCED arm — read the per-instance 3x4 row-major affine and place the vertex in
         // world space. `m3` is the 3x3 rotation/scale; `t` the translation.
@@ -171,6 +214,19 @@ VsOut main(VsIn input, uint instance_id : SV_InstanceID) {
             float3x3 nm = transpose(inverse3x3(m3));
             output.normal = mul(nm, input.normal);
         }
+#ifdef MOTION_VECTORS
+        // Per-object motion: read the SAME instance slot from the PREVIOUS-frame model ring
+        // and place `input.position` in last frame's world space. `world` (above) is this
+        // frame's world position. This is what recovers the moving box's TRUE motion vector
+        // — its shadow-vis history is then sampled from where the box WAS (the owner's #1
+        // in-motion sensitivity). A box at rest has prev model == cur model ⇒ Δuv == 0.
+        InstanceModelCol pmodel = prev_instances[pc.base_instance + instance_id];
+        float3x3 pm3 = float3x3(pmodel.r0.xyz, pmodel.r1.xyz, pmodel.r2.xyz);
+        float3 pt = float3(pmodel.r0.w, pmodel.r1.w, pmodel.r2.w);
+        float3 prev_world = mul(pm3, input.position) + pt;
+        output.cur_clip  = mul(mc_cur_view_proj,  float4(world, 1.0));
+        output.prev_clip = mul(mc_prev_view_proj, float4(prev_world, 1.0));
+#endif
     }
     return output;
 }

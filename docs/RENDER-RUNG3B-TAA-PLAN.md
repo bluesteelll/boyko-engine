@@ -324,6 +324,82 @@ successive COUNT bumps + equiv re-pins). All `#[cfg(feature="hwrt")]`, byte-iden
   `grand_showcase` golden `58f6c6c3` byte-identical BOTH hwrt-ON and hwrt-OFF; `boyko-app` hwrt
   compiles.
 
+## As-built — step 5a (mesh motion vectors) — SHIPPED (this commit)
+
+Step 5 split into **5a (mesh MV, raster) + 5b (SDF MV, VIS)** — the mesh path is the owner's #1
+in-motion sensitivity (moving boxes) and is self-contained (raster only, no resolve-set changes);
+5b touches the resolve descriptor set (new bindings + a MAX_BIND_GROUP_BINDINGS bump) and lands
+separately.
+
+**Shaders DONE + byte-identity proven** (`gbuffer_mrt.{vs,fs}.hlsl`, `-D MOTION_VECTORS=1`):
+- VS: under `#ifdef MOTION_VECTORS` adds binding 1 `prev_instances` SSBO + binding 2 `MotionCam`
+  UBO (128 B, cur+prev marcher-aligned view-proj); the legacy arm emits camera-only clip (world =
+  `input.position`, prev==cur world), the instanced arm reads `prev_instances[base+id]` for TRUE
+  per-object motion; forwards `cur_clip`/`prev_clip` as varyings.
+- FS: adds 4th MRT `SV_Target3 motion_vec` (R16G16_SFLOAT) = `clip_to_uv(prev_clip) −
+  clip_to_uv(cur_clip)`. `clip_to_uv(c) = c.xy/c.w*0.5+0.5` — NO extra y-negation (the projection
+  `marcher_view_proj_rows` already bakes `sy=-1/tan`). **Both clip positions are VS varyings divided
+  through the identical `clip_to_uv`**, so a static pixel yields exactly `(0,0)` (mixing SV_Position
+  for cur with an interpolated prev would break that; that is why the plan passes both).
+- **GATE PASSED:** base recompile (no define) is BYTE-IDENTICAL to the frozen `gbuffer_mrt.vs.spv`
+  (4480 B) + `gbuffer_mrt.fs.spv` (2252 B). MV variant compiles clean (`gbuffer_mrt_mv.vs.spv` 5780 B,
+  `gbuffer_mrt_mv.fs.spv` 2732 B). `compute.rs`: `GBUFFER_MRT_MV_{VS,FS}_SPV<5780/2732>` +
+  `gbuffer_mrt_mv_{vs,fs}_spirv()` accessors (hwrt-gated). dxc command confirmed by reproducing the
+  frozen VIS `.spv` (`7b704fcb…`, 8032 B) byte-for-byte.
+
+**Binding contract (host must match):** set 0 → binding 0 `instances` SSBO, binding 1 `prev_instances`
+SSBO, binding 2 `MotionCam` UBO (128 B), ALL `ShaderStage::VERTEX`. MV pipeline = 4 color formats
+`[R8G8B8A8Unorm×3, R16G16Sfloat]`, `D32Sfloat` depth, 88 B vertex push (unchanged), 40 B vertex layout.
+
+**Host design decisions (orchestrator forks):**
+- **MV resources** bundled into `#[cfg(feature="hwrt")] mv: Option<MotionVecResources>` on
+  `GpuSceneBundles` — boot-built under `ctx.ray_query_enabled() && ctx.device_caps().
+  shadow_denoise_storage_ok()` (matches the `motion_vec` target gate + the hwrt stack; the 3a
+  "decouple set-build from the per-frame activation gate" lesson). Holds: the MV pipeline + 3-binding
+  layout, `prev_instance_rings: [BoundBuffer; FIF]` (byte-parallel to `instance_rings`),
+  `motion_cam_ubo: [BoundBuffer; FIF]` (128 B UNIFORM), `bind_groups: [VulkanBindGroup; FIF]`
+  (instances@0, prev_instances@1, motion_cam@2).
+- **Prev-gather PAIRED in ONE query** (`Option<&PrevInstanceModelCol>` added to the `gather_mesh_draws`
+  query, hwrt-gated) filling a hwrt-gated `prev_ring` lane of `MeshRenderScratch` in the SAME
+  mesh-bucketed order ⇒ index-aligned with `ring` by construction; a row missing the prev column
+  falls back to its current `InstanceModelCol` (⇒ camera-only MV for that entity, safe). NOT a second
+  independent gather (set-mismatch risk).
+- **Scene threading:** add `#[cfg(feature="hwrt")] temporal_enabled: bool` (+ the MV pipeline/bind-group
+  refs) to `GBufferScene`; `runner` reads `ShadowDenoiseConfig::temporal_enabled()`; `scene()` threads
+  it. `MotionCamState` (Resource) persists prev-view-proj; runner builds `MotionCam` via
+  `marcher_view_proj_rows(&view, cw, ch)` + `.advance()`, uploads the UBO + prev-ring.
+- **Recording (record_gbuffer):** when `scene.temporal_enabled` (and `mv` present) bind the MV pipeline
+  + MV bind group + a 4-attachment color array (append the `motion_vec` view). Pipeline color-attach
+  count is fixed at create ⇒ the 4-format pipeline MUST pair with a 4-attachment `begin_rendering`
+  (select both together). Push constants (88 B) unchanged.
+- **Framegraph:** raster pass adds `g.image_access(motion_vec, COLOR_ATTACHMENT_OUTPUT, WRITE,
+  COLOR_ATTACHMENT_OPTIMAL, COLOR)` ONLY when temporal ⇒ OFF path names no new ResId ⇒ byte-identical.
+- **GATE (testable now):** mode∈{None,Spatial} + non-hwrt ⇒ both goldens `58f6c6c3` ±hwrt +
+  eDSL-sync test green. Temporal-ON writes `motion_vec` but has NO consumer until step 6 (a harmless
+  framegraph dangling write); MV VALUES validated by owner-eval at step 6/7 (in-motion).
+
+**Code review (all 7 priority points CLEAN — binding contract, attachment lifetime, index-alignment,
+O2 fence parity, MotionCam extent/view, soundness) + 4 findings fixed:**
+- **W1 (gate divergence, would have bitten step 6):** the framegraph declared the `motion_vec` write
+  barrier on `temporal_enabled` alone, but the recorder writes on `temporal_enabled && mv pipeline +
+  bind group exist` — diverges on a `storage_ok && !ray_query` device (e.g. `BOYKO_FORCE_SOFTWARE=1`),
+  which would have made step 6 read an uninitialized `motion_vec`. FIX: a single-source
+  `GBufferScene::mesh_mv_active()` used by BOTH the graph declaration and the recorder.
+- **W2 (OFF-path waste, Principle 1):** the hwrt gather ran the full O(N) prev-scatter every frame even
+  temporal-OFF. FIX: gated `gather_prev_ring_into` on `ShadowDenoiseConfig::temporal_enabled()`
+  (`Res`, always present via `EnginePlugins`+`ShadowDenoisePlugin`) — OFF hwrt frames now pay zero.
+- **O1:** the 4th-attachment view is now `expect`-ed (not `unwrap_or(NULL)`) so a future MV-gate
+  loosening trips loudly instead of binding a NULL color attachment.
+- **O2:** de-magic'd the `/48` in the prev-ring overflow diagnostic (`size_of::<InstanceModelCol>()`).
+- **False-green caught:** the hwrt golden first "passed" against a STALE `.bmp` — the hwrt test binary
+  failed to compile (`GBufferScene` gained 3 fields the 4 in-test literals didn't set; `cargo check`
+  skips test targets). FIX: set the fields in all 4 harness literals; re-ran with a delete-then-run
+  so the hash reflects a real render. Lesson reinforced: golden verification MUST delete the artifact
+  first + build `--all-targets`.
+- **Final gate (this commit):** golden `58f6c6c3` byte-identical BOTH ±hwrt (real, delete-then-run);
+  `check`/`clippy -D warnings` ±hwrt `--all-targets` green; `boyko-render` 125 lib tests + framegraph
+  -equiv 10 (hwrt)/7 (non-hwrt) + eDSL-sync 2 pass.
+
 ## Metrics and validation
 
 - **Byte-identity:** `None`/`Spatial` reproduce `58f6c6c3` (±hwrt) + `af934c50`. Framegraph equiv ResId pins (16 imgs hwrt) + the **I3 pin** (no `UNDEFINED` old-layout on `shadow_temporal_hist` after init — reusing the DDGI-seed test shape, C3).

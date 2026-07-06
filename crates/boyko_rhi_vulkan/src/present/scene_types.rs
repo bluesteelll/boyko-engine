@@ -1379,6 +1379,44 @@ pub struct GBufferScene<'a> {
     /// [`ShadowVisActivation::final_is_vis2`] (asserted at the set-build site).
     #[cfg(feature = "hwrt")]
     pub shadow_denoise_final_is_vis2: bool,
+    /// HW-RT Rung 3b step 5a: `true` iff the author's `ShadowDenoiseConfig.mode ∈ {Temporal, Both}`
+    /// (the runner's `ShadowDenoiseConfig::temporal_enabled()` read) — the per-frame gate that
+    /// swaps the raster pass to the MESH motion-vector pipeline (a 4th MRT writing Δuv). `false` on
+    /// the default (`None`/`Spatial`) path ⇒ the base 3-MRT raster draws ⇒ byte-identical. Combined
+    /// with [`Self::raster_pipeline_mv`]/[`Self::mv_bind_group`] being `Some` (an RT + storage
+    /// device); when any is absent the recorder takes the base path. `#[cfg(feature = "hwrt")]`.
+    #[cfg(feature = "hwrt")]
+    pub temporal_enabled: bool,
+    /// HW-RT Rung 3b step 5a: the MESH motion-vector raster pipeline (`gbuffer_mrt_mv.{vs,fs}`) —
+    /// carries its own `.pipeline` + `.layout` (the 3-binding set-0 layout: current @0 / prev @1 /
+    /// motion-cam @2). `Some` on an RT + storage device; `None` otherwise (the recorder takes the
+    /// base [`Self::raster_pipeline`]). Bound instead of the base ONLY when [`Self::temporal_enabled`]
+    /// AND this is `Some` AND [`Self::mv_bind_group`] is `Some`. `#[cfg(feature = "hwrt")]`.
+    #[cfg(feature = "hwrt")]
+    pub raster_pipeline_mv: Option<&'a VulkanGraphicsPipeline>,
+    /// HW-RT Rung 3b step 5a: this frame's motion-vector set-0 bind group (slot `frame_index` of the
+    /// MV resources' per-FIF bind groups: `{ instances[i], prev_instances[i], motion_cam[i] }`).
+    /// Bound at set 0 when the MV pipeline is selected. `Some` iff [`Self::raster_pipeline_mv`] is
+    /// `Some`. `#[cfg(feature = "hwrt")]`.
+    #[cfg(feature = "hwrt")]
+    pub mv_bind_group: Option<&'a VulkanBindGroup>,
+}
+
+impl GBufferScene<'_> {
+    /// HW-RT Rung 3b step 5a — the SINGLE source of the "the raster pass writes the mesh
+    /// motion-vector 4th MRT this frame" decision, so the framegraph barrier declaration
+    /// (`declare_gbuffer_graph`) and the draw recording (`record_gbuffer`) can never diverge.
+    ///
+    /// True iff temporal is on AND the MV pipeline + this frame's MV bind group both exist (an
+    /// RT + RG16-storage device built them at boot). The pipeline/bind-group presence is NOT
+    /// implied by `temporal_enabled` alone: a device with RG16 storage but no ray-query (e.g.
+    /// `BOYKO_FORCE_SOFTWARE=1`) allocates the `motion_vec` target yet builds no MV pipeline, so
+    /// gating the barrier on `temporal_enabled` alone would declare a write the recorder never
+    /// emits. Both call sites MUST use this method.
+    #[cfg(feature = "hwrt")]
+    pub(crate) fn mesh_mv_active(&self) -> bool {
+        self.temporal_enabled && self.raster_pipeline_mv.is_some() && self.mv_bind_group.is_some()
+    }
 }
 
 /// CSM Increment 1b (Rung A): the cascade DEPTH-PASS activation threaded into

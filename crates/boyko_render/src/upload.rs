@@ -34,6 +34,8 @@ use crate::shadow_atlas::{RESOLVED_SHADOW_ATLAS_BYTES, ResolvedShadowAtlas};
 use crate::shadow_denoise_config::{RESOLVED_SHADOW_DENOISE_BYTES, ResolvedShadowDenoise};
 use crate::gpu_transform3d::GPU_TRANSFORM3D_BYTES;
 use crate::mesh_draw::MeshRenderScratch;
+#[cfg(feature = "hwrt")]
+use crate::motion_cam::{MOTION_CAM_UBO_BYTES, MotionCam};
 use crate::view::composite_from_view;
 
 /// Writes the 80-byte b5 camera block (the marcher / resolve / SSAO
@@ -390,6 +392,136 @@ pub unsafe fn upload_mesh_ids(
     // was waited THIS frame (the slot's previous occupant finished its COMPUTE reads of the
     // mesh-id SSBO; the sibling frame binds the other slot) — race-free, lock-free. `bytes` is
     // the scratch's own heap buffer, a distinct non-overlapping region.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+    }
+}
+
+/// HW-RT Rung 3b: uploads the gathered 48-byte
+/// [`PrevInstanceModelCol`](crate::PrevInstanceModelCol)-derived PREVIOUS-frame instance ring
+/// ([`prev_ring`](crate::MeshRenderScratch::prev_ring)) into ONE prev-instance-SSBO ring slot —
+/// the mesh-motion-vector mirror of [`upload_instance_models`]: ONE contiguous `bytemuck` memcpy,
+/// zero staging, zero allocation. The gbuffer MV vertex shader reads this slot at binding 1
+/// (`prev_instances[base_instance + SV_InstanceID]`) to compute each mesh pixel's per-object
+/// `prev_world`, so its motion vector is `cur_world − prev_world`.
+///
+/// Uploaded ONLY when the temporal denoiser is on (the runner gates the CALL on `feature = "hwrt"`
+/// plus `temporal_enabled` plus the `mv` ring's presence — the SAME gate that binds the MV
+/// pipeline). The lane is scattered INDEX-ALIGNED with `scratch.ring` (`prev_ring.len() ==
+/// ring.len()`), so a prev row lands in the SAME slot the current row did. An empty gather
+/// (`prev_ring` empty ⇒ no drawable ⇒ the recorder takes the legacy draw) writes nothing.
+///
+/// # Panics
+///
+/// Panics if the gathered prev ring exceeds the slot's capacity: writing past the mapped range
+/// would corrupt neighbouring sub-allocations (UB), so the guard is a hard assert in every build.
+/// The boot capacity is the host's documented instance budget (the prev ring is sized identically
+/// to the current instance ring); growth is a host concern.
+///
+/// # Safety
+///
+/// * `ring_slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at least
+///   `ring_slot.size` valid, persistently-mapped bytes. A hand-built [`BoundBuffer`] with a
+///   dangling / undersized `mapped` violates this.
+/// * `ring_slot` is the FENCED slot's buffer — `prev_instance_rings[token.slot()]` (the same
+///   token/slot contract as [`upload_instance_models`]): the token proves that slot's in-flight
+///   fence was waited THIS frame, so the slot's previous occupant finished every VERTEX read of
+///   this prev-instance SSBO and the sibling in-flight frame binds the OTHER slot — race-free,
+///   lock-free.
+#[cfg(feature = "hwrt")]
+pub unsafe fn upload_prev_instance_models(
+    token: &FrameWriteToken,
+    ring_slot: &BoundBuffer,
+    scratch: &MeshRenderScratch,
+) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    if scratch.prev_ring.is_empty() {
+        return;
+    }
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.prev_ring.as_slice());
+    assert!(
+        bytes.len() as u64 <= ring_slot.size,
+        "prev-instance ring overflow: {} gathered instances ({} bytes) exceed the \
+         {}-instance ({}-byte) slot (grow the boot instance capacity; dynamic growth is host \
+         plan R7)",
+        scratch.prev_ring.len(),
+        bytes.len(),
+        ring_slot.size / core::mem::size_of::<crate::InstanceModelCol>() as u64,
+        ring_slot.size
+    );
+
+    let mapped = ring_slot
+        .mapped
+        .expect("invariant: the prev-instance ring slot is host-visible mapped");
+    // SAFETY: per this fn's contract `mapped` targets >= `ring_slot.size` valid mapped host-coherent
+    // bytes, and `bytes.len() <= ring_slot.size` is hard-asserted above — the write is in-bounds.
+    // The borrowed `FrameWriteToken` + the slot-identity contract prove this slot's in-flight fence
+    // was waited THIS frame (the slot's previous occupant finished its VERTEX reads of the
+    // prev-instance SSBO; the sibling frame binds the other slot) — race-free, lock-free. `bytes` is
+    // the scratch's own heap buffer, a distinct non-overlapping region.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+    }
+}
+
+/// HW-RT Rung 3b: copies the frame's [`MotionCam`] (the 128-byte camera view-proj pair — this
+/// frame's `cur` + last frame's `prev`, column-major, see [`MOTION_CAM_UBO_BYTES`]) into ONE
+/// motion-cam-UBO ring slot — the mesh-motion-vector camera upload (mirroring [`upload_csm_ring`]).
+/// The gbuffer MV vertex shader reads it at binding 2 as `{ float4x4 cur_view_proj; float4x4
+/// prev_view_proj; }` to project `cur_world` / `prev_world` into the two clip spaces whose Δuv is
+/// the screen-space motion vector.
+///
+/// Uploaded ONLY when the temporal denoiser is on (the runner gates the CALL on `feature = "hwrt"`
+/// plus `temporal_enabled` plus the `mv` ring's presence — the SAME gate that binds the MV
+/// pipeline). [`MotionCamState::advance`](crate::MotionCamState::advance) re-derives the pair from
+/// the LIVE camera each frame (a boot-seed would go stale the moment the camera moves), and the
+/// 128-byte memcpy is cheaper than a change gate.
+///
+/// # Panics
+///
+/// Panics if `ring_slot.size` is smaller than [`MOTION_CAM_UBO_BYTES`]: the memcpy would be
+/// out-of-bounds (UB), so the guard is a hard assert in every build.
+///
+/// # Safety
+///
+/// * `ring_slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at least
+///   `ring_slot.size` valid, persistently-mapped bytes.
+/// * `ring_slot` is the FENCED slot's buffer — `motion_cam_ubo[token.slot()]` (the same token/slot
+///   contract as [`upload_csm_ring`]): the token proves that slot's in-flight fence was waited THIS
+///   frame, so the slot's previous occupant finished every VERTEX read of this UBO and the sibling
+///   in-flight frame binds the OTHER ring slot — race-free, lock-free.
+#[cfg(feature = "hwrt")]
+pub unsafe fn upload_motion_cam_ring(
+    token: &FrameWriteToken,
+    ring_slot: &BoundBuffer,
+    cam: &MotionCam,
+) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    // Hard bound BEFORE the memcpy (review P1 discipline): an undersized slot would make the
+    // 128-byte write out-of-bounds. One compare per frame.
+    assert!(
+        ring_slot.size as usize >= MOTION_CAM_UBO_BYTES,
+        "motion-cam UBO slot too small: {} bytes < the {}-byte MotionCam pair",
+        ring_slot.size,
+        MOTION_CAM_UBO_BYTES
+    );
+
+    let bytes = cam.to_bytes();
+    let mapped = ring_slot
+        .mapped
+        .expect("invariant: the motion-cam UBO slot is host-visible mapped");
+    // SAFETY: `bytes` is a distinct 128-byte stack array (`MotionCam::to_bytes`). `mapped` targets
+    // >= `ring_slot.size >= MOTION_CAM_UBO_BYTES` valid mapped host-coherent bytes (hard-asserted
+    // above) — the write is in-bounds. The borrowed `FrameWriteToken` + the slot-identity contract
+    // prove this slot's in-flight fence was waited THIS frame (the previous occupant's MV VS reads
+    // finished; the sibling frame binds the other slot) — race-free, lock-free. The two regions are
+    // distinct allocations (no overlap).
     unsafe {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
     }

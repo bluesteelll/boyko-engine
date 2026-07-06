@@ -472,6 +472,30 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             Some(d) => d.request(ctx, host.swapchain.extent()),
             None => None,
         };
+        // HW-RT Rung 3b step 5a: advance the MESH motion-vector camera pair BEFORE the render
+        // block (the `advance` needs `&mut World` to persist this frame's `cur` as next frame's
+        // `prev`; the render block borrows `&World`). Computed ONLY when temporal is on AND the
+        // MV ring exists (an RT + storage device) — else `None`, and the runner uploads nothing +
+        // the recorder takes the base 3-MRT raster (byte-identical). `marcher_view_proj_rows` is
+        // the marcher-aligned proj·view the shaders reproject against (I-O1 majorness pin).
+        #[cfg(feature = "hwrt")]
+        let mv_cam = {
+            let temporal_on = app
+                .world()
+                .resource::<boyko_render::ShadowDenoiseConfig>()
+                .temporal_enabled();
+            if temporal_on && host.gpu.motion_vec_slots(0).is_some() {
+                let view = *app.world().resource::<ViewUniform>();
+                let cur = boyko_render::marcher_view_proj_rows(&view, cw, ch);
+                Some(
+                    app.world_mut()
+                        .resource_mut::<boyko_render::MotionCamState>()
+                        .advance(cur),
+                )
+            } else {
+                None
+            }
+        };
         let mut draws = host.draw_scratch.take();
         let presented = {
             let world = app.world();
@@ -534,6 +558,28 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // the sibling frame binds the other slot.
                 unsafe {
                     upload_mesh_ids(&token, mesh_id_slot, scratch);
+                }
+            }
+
+            // 5b'''. HW-RT Rung 3b step 5a: the MESH motion-vector uploads into slot `s` — the
+            //        gathered PREV-instance ring (index-aligned with the current ring) + the
+            //        MotionCam view-proj pair. GATED on `mv_cam` being `Some` (temporal-on AND the
+            //        MV ring exists — the SAME gate the recorder binds the MV pipeline under), so a
+            //        temporal-OFF frame (or a non-RT / non-storage device) writes NOTHING and the
+            //        base 3-MRT raster draws (byte-identical). `motion_vec_slots(s)` returns the
+            //        FENCED slot's prev-instance ring + motion-cam UBO; the MV bind group binds the
+            //        SAME slots @1/@2.
+            #[cfg(feature = "hwrt")]
+            if let Some(cam) = mv_cam.as_ref()
+                && let Some((prev_slot, cam_slot)) = host.gpu.motion_vec_slots(s)
+            {
+                // SAFETY: `prev_slot` / `cam_slot` — same provenance contract as the instance slot
+                // above (boot-minted at INSTANCE_CAPACITY / MOTION_CAM_UBO_BYTES on the RT+storage
+                // device under the MV gate, live until teardown, the fenced slot `s == token.slot()`);
+                // the MV VS reads the same slots @1/@2, the sibling frame binds the other slot.
+                unsafe {
+                    boyko_render::upload_prev_instance_models(&token, prev_slot, scratch);
+                    boyko_render::upload_motion_cam_ring(&token, cam_slot, cam);
                 }
             }
 
@@ -792,9 +838,13 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // via `tlas_enabled` + the `csm_armed` arg inside `scene()`. Default `mode == None`
             // ⇒ `false` ⇒ `scene.shadow == None` ⇒ byte-identical.
             #[cfg(feature = "hwrt")]
-            let (shadow_denoise_enabled, shadow_denoise_levels) = {
+            let (shadow_denoise_enabled, shadow_denoise_levels, temporal_enabled) = {
                 let cfg = world.resource::<boyko_render::ShadowDenoiseConfig>();
-                (cfg.spatial_enabled(), cfg.clamped_levels())
+                // Rung 3b step 5a: `temporal_enabled()` is the structural `mode ∈ {Temporal, Both}`
+                // predicate — the per-frame gate that swaps the raster pass to the MESH
+                // motion-vector pipeline. Default `mode == None` ⇒ `false` ⇒ base 3-MRT raster ⇒
+                // byte-identical.
+                (cfg.spatial_enabled(), cfg.clamped_levels(), cfg.temporal_enabled())
             };
             let scene = host.gpu.scene(
                 mvp,
@@ -813,6 +863,8 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 shadow_denoise_enabled,
                 #[cfg(feature = "hwrt")]
                 shadow_denoise_levels,
+                #[cfg(feature = "hwrt")]
+                temporal_enabled,
                 ctx,
             );
 

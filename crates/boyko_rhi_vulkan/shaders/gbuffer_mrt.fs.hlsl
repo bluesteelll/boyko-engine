@@ -33,9 +33,18 @@
 // generated bodies; re-run `cargo run -p boyko_shaderdsl --features emit --bin
 // emit_field` and re-splice. The signatures + framing + raster I/O are hand-written.
 //
+// Rung-3b MOTION_VECTORS variant (opt-in, compiled with `-D MOTION_VECTORS=1`): adds a 4th
+// MRT `SV_Target3 motion_vec` (R16G16_SFLOAT) carrying `Δuv = clip_to_uv(prev_clip) -
+// clip_to_uv(cur_clip)` — the per-object + camera motion vector the temporal shadow-vis
+// reprojection samples the history with. Both clip positions arrive as VS varyings and are
+// divided here through the IDENTICAL `clip_to_uv`, so a static pixel writes exactly `(0,0)`.
+// All new I/O is gated under `#ifdef MOTION_VECTORS`, so the base compile is byte-frozen
+// (the `gbuffer_mrt.fs.spv` golden is untouched — the Rung-3b step-5 byte-identity gate).
+//
 // Compiled offline (hermetic build — no SDK at `cargo build` time) with:
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T ps_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 gbuffer_mrt.fs.hlsl -Fo gbuffer_mrt.fs.spv
+//   (MOTION_VECTORS variant: add `-D MOTION_VECTORS=1 -Fo gbuffer_mrt_mv.fs.spv`)
 
 // OQ-r0-B: the mesh's 16-bit material id. The default material (id 0); see the DEVIATION
 // note in the header for why this is a constant, not a fragment push, in r0.
@@ -63,14 +72,33 @@ struct PsIn {
     float3 normal   : NORMAL;
     float3 eye_rel  : WORLDDIST;   // cam_eye.xyz - world position (perspective-correct)
     float  cam_mode : CAMMODE;     // 0 = ortho, 1 = perspective
+#ifdef MOTION_VECTORS
+    float4 cur_clip  : CURCLIP;    // mc_cur_view_proj  * cur_world  (marcher-aligned clip)
+    float4 prev_clip : PREVCLIP;   // mc_prev_view_proj * prev_world (marcher-aligned clip)
+#endif
 };
 
 struct PsOut {
     float4 albedo   : SV_Target0;  // -> gAlbedo
     float4 normal   : SV_Target1;  // -> gNormal
     float4 material : SV_Target2;  // -> gMaterial
+#ifdef MOTION_VECTORS
+    float2 motion_vec : SV_Target3; // -> motion_vec (R16G16_SFLOAT) Δuv, prev - cur
+#endif
     float  depth    : SV_Depth;    // -> the shared D32 depth the marcher samples as `md`
 };
+
+#ifdef MOTION_VECTORS
+// Marcher-aligned clip -> [0,1]^2 screen UV. The projection (`marcher_view_proj_rows`)
+// already bakes the y-flip into clip.y (sy = -1/tan), so this is the plain NDC remap with
+// NO extra negation: uv = (clip.xy / clip.w) * 0.5 + 0.5. Applied identically to cur_clip
+// and prev_clip, so the constant 0.5 offset + scale cancel in the Δuv difference and a
+// static pixel yields (0,0). The UV origin is top-left (Vulkan framebuffer convention), so
+// the temporal reprojection samples the history at `pixel_uv + Δuv` directly.
+float2 clip_to_uv(float4 clip) {
+    return (clip.xy / clip.w) * 0.5 + 0.5;
+}
+#endif
 
 // Octahedral-encode a unit normal `n` into [0,1]^2, the marcher/resolve's exact fold.
 // The BODY is eDSL-single-sourced (boyko_shaderdsl::oct::oct_encode_body); the resolve
@@ -120,5 +148,10 @@ PsOut main(PsIn input) {
     //     back unchanged is byte-identical to NOT writing SV_Depth — the 41 ortho goldens
     //     are preserved (the composite decodes the ortho arm with the marcher `T_MAX`).
     output.depth = (input.cam_mode > 0.5) ? (length(input.eye_rel) / MESH_DEPTH_T_MAX) : input.position.z;
+#ifdef MOTION_VECTORS
+    // 4th MRT: Δuv = where-this-surface-was minus where-it-is, in [0,1] screen UV. The
+    // temporal reprojection reads `hist` at `pixel_uv + motion_vec`. Static ⇒ (0,0).
+    output.motion_vec = clip_to_uv(input.prev_clip) - clip_to_uv(input.cur_clip);
+#endif
     return output;
 }

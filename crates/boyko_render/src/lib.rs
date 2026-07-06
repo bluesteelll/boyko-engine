@@ -311,7 +311,7 @@ pub use upload::{
     upload_sdf_edit_list, upload_shadow_denoise_ring,
 };
 #[cfg(feature = "hwrt")]
-pub use upload::upload_mesh_ids;
+pub use upload::{upload_mesh_ids, upload_motion_cam_ring, upload_prev_instance_models};
 pub use view::{
     composite_from_view, composite_perspective_from_view, demo_view_proj_from_view,
     gbuffer_push_from_view, marcher_view_proj_rows, view_proj_columns,

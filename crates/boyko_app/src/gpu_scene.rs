@@ -56,7 +56,8 @@ use boyko_rhi_vulkan::accel_build::{
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::compute::{
     BUILD_TLAS_INSTANCES_PUSH_BYTES, build_tlas_instances_spirv, deferred_pbr_denoised_spirv,
-    deferred_pbr_hwrt_spirv, deferred_pbr_vis_spirv, shadow_atrous_spirv,
+    deferred_pbr_hwrt_spirv, deferred_pbr_vis_spirv, gbuffer_mrt_mv_fs_spirv,
+    gbuffer_mrt_mv_vs_spirv, shadow_atrous_spirv,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::swapchain::{ShadowVisActivation, TlasBuildActivation};
@@ -73,6 +74,8 @@ use boyko_render::{
 };
 #[cfg(feature = "hwrt")]
 use boyko_render::MeshRegistry;
+#[cfg(feature = "hwrt")]
+use boyko_render::MOTION_CAM_UBO_BYTES;
 #[cfg(feature = "hwrt")]
 use boyko_render::{RESOLVED_RAY_SHADOW_BYTES, RayShadowConfig};
 #[cfg(feature = "hwrt")]
@@ -1202,6 +1205,41 @@ impl TlasResources {
     }
 }
 
+/// HW-RT Rung 3b step 5a: the MESH motion-vector raster resources — the `gbuffer_mrt_mv`
+/// pipeline variant (a 4th MRT writing screen-space Δuv) plus the per-FIF prev-instance ring +
+/// motion-cam UBO ring the MV vertex shader reads at set 0.
+///
+/// Built at boot ONLY on an RT device (`ray_query_enabled` + `shadow_denoise_storage_ok`), the
+/// SAME capability gate the à-trous / temporal denoise stack lives on; `None` otherwise. Bound by
+/// the recorder ONLY when the per-frame temporal gate opens (`temporal_enabled`); on every other
+/// frame — and in a non-hwrt build (the whole struct is `#[cfg(feature = "hwrt")]`) — the base
+/// 3-MRT raster pipeline draws and these resources are unbound (byte-identical OFF path).
+#[cfg(feature = "hwrt")]
+pub(crate) struct MotionVecResources {
+    /// The `gbuffer_mrt_mv.{vs,fs}` graphics pipeline: identical to the base raster pipeline
+    /// (40-byte vertex layout, D32 depth, 88-byte VERTEX push, `CullMode::None`, no blend/bias)
+    /// EXCEPT for a 4th color format `R16G16Sfloat` (the `motion_vec` Δuv attachment) and its set-0
+    /// layout ([`Self::layout`]).
+    pipeline: VulkanGraphicsPipeline,
+    /// The 3-binding set-0 layout the MV pipeline declares: binding 0 = the current instance SSBO
+    /// (VERTEX), binding 1 = the prev-instance SSBO (VERTEX), binding 2 = the motion-cam UBO
+    /// (VERTEX). A SEPARATE layout from the base raster's single-binding instance layout.
+    layout: VulkanBindGroupLayout,
+    /// The per-slot PREVIOUS-frame instance-model SSBO ring ([`INSTANCE_CAPACITY`] × 48 B,
+    /// zero-seeded) — identical in shape to `instance_rings`. The runner uploads the gathered
+    /// `prev_ring` into slot `token.slot()` when temporal is on (via
+    /// [`upload_prev_instance_models`](boyko_render::upload_prev_instance_models)).
+    pub(crate) prev_instance_rings: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// The per-slot motion-cam UBO ring ([`MOTION_CAM_UBO_BYTES`] each, zero-seeded): the runner
+    /// memcpys `MotionCam` (cur + prev view-proj) into slot `token.slot()` when temporal is on
+    /// (via [`upload_motion_cam_ring`](boyko_render::upload_motion_cam_ring)).
+    pub(crate) motion_cam_ubo: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// Per-FIF bind groups against [`Self::layout`]: slot `i` binds `{ instance_rings[i],
+    /// prev_instance_rings[i], motion_cam_ubo[i] }`. The recorder binds slot `s` at set 0 when the
+    /// temporal gate opens.
+    bind_groups: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+}
+
 /// The static-resource half of the windowed G-buffer scene (host plan R3):
 /// every pipeline / layout / sampler / seeded buffer `render_gbuffer_frame`
 /// needs beyond the swapchain + the extent-dependent `GBufferFrame` targets.
@@ -1233,6 +1271,13 @@ pub(crate) struct GpuSceneBundles {
     /// `None` on a non-RT device (the byte-identical OFF path — `scene.tlas` stays `None`).
     #[cfg(feature = "hwrt")]
     tlas: Option<TlasResources>,
+    /// HW-RT Rung 3b step 5a: the MESH motion-vector raster resources (the `gbuffer_mrt_mv`
+    /// pipeline variant + the prev-instance ring + motion-cam UBO ring + per-FIF bind groups).
+    /// Built at boot ONLY on an RT device (`ray_query_enabled && shadow_denoise_storage_ok`);
+    /// `None` otherwise. Bound by the recorder ONLY when the per-frame temporal gate opens — on
+    /// every other frame the base 3-MRT raster pipeline draws (byte-identical OFF path).
+    #[cfg(feature = "hwrt")]
+    mv: Option<MotionVecResources>,
     /// The DEGENERATE legacy vertex buffer (6 identical vertices ⇒ zero-area ⇒
     /// no fragments): pass A's legacy draw target on empty-gather frames —
     /// mirrors the showcase's `showcase_quad_vertices` discipline.
@@ -1943,6 +1988,153 @@ impl GpuSceneBundles {
             .ray_query_enabled()
             .then(|| TlasResources::create(device, &instance_rings, INSTANCE_CAPACITY as u32));
 
+        // ── HW-RT Rung 3b step 5a: the MESH motion-vector raster resources — built ONLY on an RT
+        // device that also supports the denoise storage targets (`ray_query_enabled` +
+        // `shadow_denoise_storage_ok`), the SAME capability gate the à-trous / temporal stack lives
+        // on. `None` otherwise → the recorder never binds the MV pipeline (the base 3-MRT raster
+        // draws) → byte-identical. Bound at record time ONLY when the per-frame temporal gate opens.
+        #[cfg(feature = "hwrt")]
+        let mv = (ctx.ray_query_enabled() && ctx.device_caps().shadow_denoise_storage_ok()).then(
+            || {
+                // The 3-binding set-0 layout: current instances @0 (VERTEX), prev instances @1
+                // (VERTEX), motion-cam UBO @2 (VERTEX) — the exact binding order the
+                // `gbuffer_mrt_mv` VS declares.
+                let mv_layout = RhiDevice::create_bind_group_layout(
+                    device,
+                    &BindGroupLayoutDesc {
+                        entries: &[
+                            BindGroupLayoutEntry {
+                                binding: 0,
+                                count: 1,
+                                kind: DescriptorKind::StorageBuffer,
+                                stage: ShaderStage::VERTEX,
+                            },
+                            BindGroupLayoutEntry {
+                                binding: 1,
+                                count: 1,
+                                kind: DescriptorKind::StorageBuffer,
+                                stage: ShaderStage::VERTEX,
+                            },
+                            BindGroupLayoutEntry {
+                                binding: 2,
+                                count: 1,
+                                kind: DescriptorKind::UniformBuffer,
+                                stage: ShaderStage::VERTEX,
+                            },
+                        ],
+                    },
+                )
+                .expect("invariant: motion-vector bind-group layout create");
+
+                // The MV pipeline: identical to `raster_pipeline` (same 40-byte vertex layout, D32
+                // depth, 88-byte VERTEX push, CullMode::None, no blend/bias) EXCEPT a 4th color
+                // format `R16G16Sfloat` (the motion_vec Δuv attachment) + the 3-binding MV layout.
+                let mv_vs = RhiDevice::create_shader_module(device, gbuffer_mrt_mv_vs_spirv())
+                    .expect("invariant: motion-vector vertex shader module create");
+                let mv_fs = RhiDevice::create_shader_module(device, gbuffer_mrt_mv_fs_spirv())
+                    .expect("invariant: motion-vector fragment shader module create");
+                let mv_attributes = [
+                    VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
+                    VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
+                    VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
+                ];
+                let mv_pipeline = RhiDevice::create_graphics_pipeline(
+                    device,
+                    &GraphicsPipelineDesc {
+                        vertex_module: &mv_vs,
+                        vertex_entry: c"main",
+                        fragment_module: &mv_fs,
+                        fragment_entry: c"main",
+                        color_formats: &[
+                            RASTER_COLOR_FORMAT,
+                            RASTER_COLOR_FORMAT,
+                            RASTER_COLOR_FORMAT,
+                            Format::R16G16Sfloat,
+                        ],
+                        depth_format: Some(Format::D32Sfloat),
+                        topology: PrimitiveTopology::TriangleList,
+                        vertex_layout: Some(VertexBufferLayout {
+                            stride: 40,
+                            attributes: &mv_attributes,
+                        }),
+                        push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
+                        bind_group_layout: Some(&mv_layout),
+                        blend: None,
+                        cull_mode: CullMode::None,
+                        depth_bias: None,
+                    },
+                )
+                .expect("invariant: motion-vector graphics pipeline create");
+                // SAFETY: both modules were created on `device` and are consumed by the pipeline
+                // create; each is destroyed once; no GPU work is in flight yet.
+                unsafe {
+                    RhiDevice::destroy_shader_module(device, mv_fs);
+                    RhiDevice::destroy_shader_module(device, mv_vs);
+                }
+
+                // The prev-instance ring: identical shape to `instance_rings` (same
+                // `instance_ring_bytes`, STORAGE, HostVisibleCoherent, zero-seeded).
+                let prev_instance_rings: [BoundBuffer; FRAMES_IN_FLIGHT] =
+                    core::array::from_fn(|_| {
+                        let b = RhiDevice::create_buffer(
+                            device,
+                            &BufferDesc {
+                                size: instance_ring_bytes,
+                                usage: BufferUsage::STORAGE,
+                                location: MemoryLocation::HostVisibleCoherent,
+                            },
+                        )
+                        .expect("invariant: prev-instance-model SSBO ring slot create");
+                        let mapped = RhiDevice::buffer_mapped_ptr(device, &b)
+                            .expect("invariant: host-visible prev-instance SSBO is mapped");
+                        zero_fill(mapped, instance_ring_bytes as usize);
+                        b
+                    });
+
+                // The motion-cam UBO ring: one 128-byte slot per in-flight frame, zero-seeded
+                // (mirrors the CSM cascade UBO ring).
+                let motion_cam_ubo: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+                    let b = RhiDevice::create_buffer(
+                        device,
+                        &BufferDesc {
+                            size: MOTION_CAM_UBO_BYTES as u64,
+                            usage: BufferUsage::UNIFORM,
+                            location: MemoryLocation::HostVisibleCoherent,
+                        },
+                    )
+                    .expect("invariant: motion-cam UBO ring slot create");
+                    let mapped = RhiDevice::buffer_mapped_ptr(device, &b)
+                        .expect("invariant: host-visible motion-cam UBO is mapped");
+                    zero_fill(mapped, MOTION_CAM_UBO_BYTES);
+                    b
+                });
+
+                // Per-FIF bind groups: slot `i` binds { instances[i], prev[i], motion_cam[i] }.
+                let bind_groups: [VulkanBindGroup; FRAMES_IN_FLIGHT] = core::array::from_fn(|i| {
+                    RhiDevice::create_bind_group(
+                        device,
+                        &BindGroupDesc {
+                            layout: &mv_layout,
+                            entries: &[
+                                BindGroupEntry::StorageBuffer { buffer: &instance_rings[i] },
+                                BindGroupEntry::StorageBuffer { buffer: &prev_instance_rings[i] },
+                                BindGroupEntry::UniformBuffer { buffer: &motion_cam_ubo[i] },
+                            ],
+                        },
+                    )
+                    .expect("invariant: motion-vector bind group create")
+                });
+
+                MotionVecResources {
+                    pipeline: mv_pipeline,
+                    layout: mv_layout,
+                    prev_instance_rings,
+                    motion_cam_ubo,
+                    bind_groups,
+                }
+            },
+        );
+
         let dispatch_group_count_x = (cw * ch).div_ceil(LOCAL_SIZE_X);
 
         Self {
@@ -1953,6 +2145,8 @@ impl GpuSceneBundles {
             interp,
             #[cfg(feature = "hwrt")]
             tlas,
+            #[cfg(feature = "hwrt")]
+            mv,
             vertex_buffer,
             marcher,
             vocab_layout,
@@ -2045,6 +2239,11 @@ impl GpuSceneBundles {
         // `final_is_vis2 = levels % 2 == 1` use the SAME clamp/parity the record + graph
         // sites assume (W1 consistency). Only read when the gate opens.
         #[cfg(feature = "hwrt")] shadow_denoise_levels: u32,
+        // HW-RT Rung 3b step 5a: `ShadowDenoiseConfig.mode ∈ {Temporal, Both}` (the runner reads
+        // `ShadowDenoiseConfig::temporal_enabled()`). When `true` AND the MV resources exist, the
+        // raster pass swaps to the MESH motion-vector pipeline (a 4th MRT writing Δuv). `false` (the
+        // default) ⇒ the base 3-MRT raster ⇒ byte-identical.
+        #[cfg(feature = "hwrt")] temporal_enabled: bool,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -2392,6 +2591,22 @@ impl GpuSceneBundles {
             shadow_denoise_enabled,
             #[cfg(feature = "hwrt")]
             shadow_denoise_final_is_vis2: shadow_denoise_levels % 2 == 1,
+            // HW-RT Rung 3b step 5a: the MESH motion-vector gate + refs. `temporal_enabled` is the
+            // author's `mode ∈ {Temporal, Both}`; the pipeline/bind-group refs are `Some` only when
+            // `self.mv` exists (an RT + storage device) AND temporal is on — so a temporal-OFF frame
+            // (or a device without the MV resources) passes `None` and the recorder takes the base
+            // 3-MRT raster pipeline (byte-identical). This frame's bind group is `bind_groups[slot]`
+            // (the FENCED slot — its instance/prev/motion-cam rings the runner just wrote).
+            #[cfg(feature = "hwrt")]
+            temporal_enabled,
+            #[cfg(feature = "hwrt")]
+            raster_pipeline_mv: (temporal_enabled)
+                .then(|| self.mv.as_ref().map(|m| &m.pipeline))
+                .flatten(),
+            #[cfg(feature = "hwrt")]
+            mv_bind_group: (temporal_enabled)
+                .then(|| self.mv.as_ref().map(|m| &m.bind_groups[slot]))
+                .flatten(),
         }
     }
 
@@ -2471,6 +2686,21 @@ impl GpuSceneBundles {
             [slot]
     }
 
+    /// HW-RT Rung 3b step 5a: the FENCED slot's PREV-instance ring + motion-cam UBO — the write
+    /// targets of the runner's per-frame
+    /// [`upload_prev_instance_models`](boyko_render::upload_prev_instance_models) +
+    /// [`upload_motion_cam_ring`](boyko_render::upload_motion_cam_ring) when temporal is on. Returns
+    /// `None` on a device without the MV resources (`self.mv` absent — non-RT / non-storage), so the
+    /// runner skips the writes. The MV bind group binds these SAME slots @1/@2; the sibling in-flight
+    /// frame binds the OTHER slot — the same lock-free discipline as the instance ring.
+    #[cfg(feature = "hwrt")]
+    #[inline]
+    pub(crate) fn motion_vec_slots(&self, slot: usize) -> Option<(&BoundBuffer, &BoundBuffer)> {
+        self.mv
+            .as_ref()
+            .map(|m| (&m.prev_instance_rings[slot], &m.motion_cam_ubo[slot]))
+    }
+
     /// The marcher's binding-0 edit-list SSBO — the write target of the runner's
     /// ONE-SHOT boot-static `boyko_render::upload_sdf_edit_list` (host plan R7).
     /// Unlike the cascade UBO this is a SINGLE shared buffer, not a per-slot ring:
@@ -2532,6 +2762,25 @@ impl GpuSceneBundles {
             RhiDevice::destroy_compute_pipeline(ctx, self.marcher);
             RhiDevice::destroy_bind_group_layout(ctx, self.vocab_layout);
             RhiDevice::destroy_graphics_pipeline(ctx, self.raster_pipeline);
+            // HW-RT Rung 3b step 5a: the MESH motion-vector resources bind the SHARED
+            // `instance_rings` (@0) plus their own prev-instance + motion-cam UBO rings; torn down
+            // BEFORE the shared instance bind groups/rings below (bind groups first, then the
+            // pipeline/layout, then the owned buffers). `None` on a non-RT / non-storage device
+            // (no-op).
+            #[cfg(feature = "hwrt")]
+            if let Some(mv) = self.mv {
+                for bg in mv.bind_groups {
+                    RhiDevice::destroy_bind_group(ctx, bg);
+                }
+                RhiDevice::destroy_graphics_pipeline(ctx, mv.pipeline);
+                RhiDevice::destroy_bind_group_layout(ctx, mv.layout);
+                for b in mv.motion_cam_ubo {
+                    RhiDevice::destroy_buffer(ctx, b);
+                }
+                for b in mv.prev_instance_rings {
+                    RhiDevice::destroy_buffer(ctx, b);
+                }
+            }
             // HW-RT rung R2a-3: the TLAS cluster binds the SHARED `instance_rings` at @0 (plus
             // its own mesh-id / instance-array / blas-addr buffers + the persistent per-slot
             // TLASes); torn down FIRST (before the interp cluster + the shared rings below), the

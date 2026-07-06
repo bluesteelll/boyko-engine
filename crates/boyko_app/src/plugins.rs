@@ -12,6 +12,11 @@ use boyko_render::instance_model::sync_instance_model_cols;
 // `.before` the affine pack below. `not(hwrt)` never compiles it.
 #[cfg(feature = "hwrt")]
 use boyko_render::instance_model::sync_prev_instance_model_cols;
+// HW-RT rung 3b step 5a: the persisted previous-frame camera view-proj (the motion-vector camera
+// carry) — a `Resource` singleton the runner `advance`s each temporal frame. `not(hwrt)` never
+// compiles it.
+#[cfg(feature = "hwrt")]
+use boyko_render::MotionCamState;
 use boyko_render::light_system::LightTableStaging;
 use boyko_render::{
     CsmCasterScratch, CsmPlugin, LightingConfig, LightingPlugin, MeshRenderScratch,
@@ -216,6 +221,12 @@ impl Plugin for EnginePlugins {
         // out-slot, so the runner arms interp only when `dynamic_count() > 0`.
         app.insert_resource(MeshRenderScratch::default());
         app.insert_resource(CsmCasterScratch::default());
+        // HW-RT rung 3b step 5a: the persisted prev-frame camera view-proj (the motion-vector
+        // camera carry). Inserted so the runner's `advance` (temporal frames only) finds it; a
+        // `None` seed yields `prev == cur` on the first temporal frame (zero motion). Dormant until
+        // the temporal denoiser is on (0%-gate). `not(hwrt)` never inserts it.
+        #[cfg(feature = "hwrt")]
+        app.insert_resource(MotionCamState::default());
         app.add_systems_cfg(|b| {
             let pack = b.add_system(sync_instance_model_cols).key();
             // HW-RT rung 3b: `prev := curr` MUST run BEFORE the affine pack refreshes `curr`

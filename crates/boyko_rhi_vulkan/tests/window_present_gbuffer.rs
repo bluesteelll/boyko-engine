@@ -2452,6 +2452,13 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         shadow_denoise_enabled: false,
         #[cfg(feature = "hwrt")]
         shadow_denoise_final_is_vis2: false,
+        // Rung-3b step 5a: the temporal-MV mesh path — OFF in this harness (byte-identical).
+        #[cfg(feature = "hwrt")]
+        temporal_enabled: false,
+        #[cfg(feature = "hwrt")]
+        raster_pipeline_mv: None,
+        #[cfg(feature = "hwrt")]
+        mv_bind_group: None,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -3356,6 +3363,13 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         shadow_denoise_enabled: false,
         #[cfg(feature = "hwrt")]
         shadow_denoise_final_is_vis2: false,
+        // Rung-3b step 5a: the temporal-MV mesh path — OFF in this harness (byte-identical).
+        #[cfg(feature = "hwrt")]
+        temporal_enabled: false,
+        #[cfg(feature = "hwrt")]
+        raster_pipeline_mv: None,
+        #[cfg(feature = "hwrt")]
+        mv_bind_group: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -8055,6 +8069,13 @@ fn run_showcase_body_ddgi(
         shadow_denoise_enabled: false,
         #[cfg(feature = "hwrt")]
         shadow_denoise_final_is_vis2: false,
+        // Rung-3b step 5a: the temporal-MV mesh path — OFF in this harness (byte-identical).
+        #[cfg(feature = "hwrt")]
+        temporal_enabled: false,
+        #[cfg(feature = "hwrt")]
+        raster_pipeline_mv: None,
+        #[cfg(feature = "hwrt")]
+        mv_bind_group: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -9367,6 +9388,13 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         shadow_denoise_enabled: false,
         #[cfg(feature = "hwrt")]
         shadow_denoise_final_is_vis2: false,
+        // Rung-3b step 5a: the temporal-MV mesh path — OFF in this harness (byte-identical).
+        #[cfg(feature = "hwrt")]
+        temporal_enabled: false,
+        #[cfg(feature = "hwrt")]
+        raster_pipeline_mv: None,
+        #[cfg(feature = "hwrt")]
+        mv_bind_group: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };

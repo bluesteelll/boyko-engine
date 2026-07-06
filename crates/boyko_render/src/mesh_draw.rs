@@ -45,6 +45,8 @@
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
 use boyko_ecs::ecs::core::system::{NonSendRes, ResMut};
+#[cfg(feature = "hwrt")]
+use boyko_ecs::ecs::core::system::Res;
 use boyko_macros::Resource;
 use boyko_rhi::enums::IndexType;
 use boyko_scene::render_caps::{MeshHandle, RenderEnabled};
@@ -138,6 +140,26 @@ pub struct MeshRenderScratch {
     /// (Principle 0). `pair_out_slot.len()` == `pair_ring.len()` == the dynamic count.
     /// `clear()` + scatter, capacity persists.
     pub pair_out_slot: Vec<u32>,
+    /// HW-RT Rung 3b: the PREVIOUS-frame instance ring — the 48-byte
+    /// [`InstanceModelCol`] each drawable had LAST frame, scattered INDEX-ALIGNED with
+    /// [`ring`](Self::ring) (`prev_ring[i]` is `ring[i]`'s prev-frame model). Filled from
+    /// the entity's [`PrevInstanceModelCol`](crate::instance_model::PrevInstanceModelCol)
+    /// dense column in the SAME mesh-bucketed scatter as `ring`; a drawable with NO
+    /// prev column (`None`) falls back to its CURRENT row (camera-only motion, safe).
+    /// The gbuffer MV VS reads it as `StructuredBuffer<InstanceModelCol> prev_instances`
+    /// (binding 1) so a moving mesh's per-object motion vector is `cur_world −
+    /// prev_world`. Written ONLY when the temporal denoiser is on (the raster MV variant);
+    /// on every other frame it is filled but the prev-instance ring is bound by no set.
+    /// `clear()` + scatter, capacity persists (like `ring`). Host-side only.
+    #[cfg(feature = "hwrt")]
+    pub prev_ring: Vec<InstanceModelCol>,
+    /// HW-RT Rung 3b: the prev-ring scatter's write-head lane — a private clone of
+    /// `cursors` reset to 0 so [`gather_prev_ring_into`](Self::gather_prev_ring_into) can
+    /// re-derive each drawable's ring slot (`offsets[m] + prev_cursors[m]++`) IDENTICALLY
+    /// to the `ring` scatter, without disturbing `cursors`. Reused across frames
+    /// (`fit_len` re-zeros it), never `Vec::new` on the hot path.
+    #[cfg(feature = "hwrt")]
+    prev_cursors: Vec<u32>,
 }
 
 /// Grows `v` to at least `min_len` using POW2 capacity steps (O2 — no fixed ceiling),
@@ -356,6 +378,76 @@ impl MeshRenderScratch {
         }
         running
     }
+
+    /// HW-RT Rung 3b: scatters the PREVIOUS-frame instance ring INDEX-ALIGNED with
+    /// [`ring`](Self::ring), re-using the offsets [`gather_mixed_into`](Self::gather_mixed_into)
+    /// just computed. Call IMMEDIATELY after `gather_mixed_into` on the SAME frame, with a
+    /// factory (`Fn() -> J`) that yields the SAME `(mesh_id, ...)` rows in the SAME order as
+    /// the affine gather's factory (the system passes `q.iter()` over the identical query),
+    /// each carrying `Option<&PrevInstanceModelCol>` — `Some(prev)` for a row with a prev
+    /// column, `None` for a row without one.
+    ///
+    /// # Index-alignment guarantee
+    ///
+    /// The slot arithmetic is `offsets[m] + prev_cursors[m]++` — the SAME `offsets` (this
+    /// frame's prefix-sum) and the SAME per-mesh cursor advance the `ring` scatter used,
+    /// over the SAME query iteration order. So `prev_ring[slot]` lands in the SAME slot
+    /// `ring[slot]` did for that drawable — guaranteed by construction, not by luck. A
+    /// `prev_cursors` lane (reset to 0 here) keeps `cursors` untouched.
+    ///
+    /// # Fallback (camera-only motion)
+    ///
+    /// A row with NO prev column (`None`) writes its CURRENT model (from `curr`) into
+    /// `prev_ring[slot]`, so `prev_world == cur_world` for that pixel — the motion vector
+    /// carries only the CAMERA's inter-frame delta (safe: no per-object ghost, the
+    /// disocclusion-clean seed). `prev_ring.len() == ring.len()`, every slot written once.
+    ///
+    /// `curr` and `prev` are read as raw `[[f32; 4]; 3]` rows: the caller supplies the
+    /// current [`InstanceModelCol`] (for the fallback) and the optional prev column's rows
+    /// (both are the same 48-byte layout).
+    #[cfg(feature = "hwrt")]
+    pub fn gather_prev_ring_into<'a, F, J>(&mut self, iter_input: F)
+    where
+        F: Fn() -> J,
+        J: Iterator<
+            Item = (
+                u32,
+                &'a InstanceModelCol,
+                Option<&'a crate::instance_model::PrevInstanceModelCol>,
+            ),
+        >,
+    {
+        let total = self.ring.len();
+        // A fresh cursor lane sized to the current mesh-lane length, reset to 0 (reuses the
+        // reserved capacity — no per-frame alloc). `offsets.len()` is the mesh count the
+        // affine gather just fitted.
+        fit_len(&mut self.prev_cursors, self.offsets.len(), 0);
+
+        let mut prev_ring = std::mem::take(&mut self.prev_ring);
+        prev_ring.clear();
+        prev_ring.resize(total, InstanceModelCol::zeroed());
+        {
+            let offsets = &self.offsets;
+            let cursors = &mut self.prev_cursors;
+            for (mesh_id, curr, maybe_prev) in iter_input() {
+                let m = mesh_id as usize;
+                let slot = (offsets[m] + cursors[m]) as usize;
+                cursors[m] += 1;
+                // A row with a prev column carries LAST frame's affine; a row without one
+                // falls back to its CURRENT affine (camera-only motion — no per-object ghost).
+                prev_ring[slot] = match maybe_prev {
+                    Some(prev) => InstanceModelCol { rows: prev.rows },
+                    None => *curr,
+                };
+            }
+        }
+        debug_assert_eq!(
+            prev_ring.len(),
+            self.ring.len(),
+            "invariant: the prev-instance ring is index-aligned with the current ring"
+        );
+        self.prev_ring = prev_ring;
+    }
 }
 
 /// The ECS-native M3 gather SYSTEM: buckets every visible
@@ -400,6 +492,20 @@ impl MeshRenderScratch {
 /// iterator FACTORY (`|| q.iter().map(..)`) that is re-run per pass — both passes read
 /// the SAME rows in the SAME order, fully monomorphically (no per-instance virtual
 /// dispatch), so the second pass assigns each row the SAME slot the count reserved.
+///
+/// # HW-RT Rung 3b — the prev-instance ring (temporal motion vectors)
+///
+/// Under `feature = "hwrt"` the query gains an `Option<&PrevInstanceModelCol>` term (an
+/// `Option`, so it never restricts archetype matching — a scene without the column yields
+/// `None` for every row). Immediately after the unified gather the system re-scatters that
+/// prev column INDEX-ALIGNED with the ring via
+/// [`gather_prev_ring_into`](MeshRenderScratch::gather_prev_ring_into) (reusing the SAME
+/// offsets over the SAME query order — alignment guaranteed by construction). A row without
+/// a prev column falls back to its current affine (camera-only motion). The prev ring is
+/// bound by the gbuffer MV pipeline only when the temporal denoiser is on; otherwise it is
+/// filled but read by no set (the byte-identical OFF path). A `not(hwrt)` build compiles the
+/// pre-Rung-3b system verbatim.
+#[cfg(not(feature = "hwrt"))]
 #[allow(clippy::needless_pass_by_value)]
 pub fn gather_mesh_draws(
     q: Query<
@@ -418,6 +524,53 @@ pub fn gather_mesh_draws(
         },
         || q.iter().map(|(h, col, pair)| (h.0, col, pair)),
     );
+}
+
+/// The HW-RT Rung 3b variant of [`gather_mesh_draws`] (see that fn's docs): identical
+/// bucketed gather PLUS the prev-instance ring scatter. The affine gather reads only
+/// `(MeshHandle, InstanceModelCol, GpuTransform3D)` — the prev term is read solely by the
+/// second, index-aligned scatter, so the ring / mesh-id / pair lanes are byte-identical to
+/// the non-hwrt gather (the OFF path never diverges).
+#[cfg(feature = "hwrt")]
+#[allow(clippy::needless_pass_by_value)]
+// `clippy::type_complexity`: this IS the ECS query contract — the 4-term tuple + the
+// `Enabled<RenderEnabled>` filter is the system's `SystemParam` signature, which the scheduler
+// reads to derive access. Factoring it into a `type` alias would only hide the access set from a
+// reader (and the alias could not carry the elided lifetime cleanly). The 3-term non-hwrt variant
+// stays under the threshold; the 4th (`Option<&PrevInstanceModelCol>`) tips it only under hwrt.
+#[allow(clippy::type_complexity)]
+pub fn gather_mesh_draws(
+    q: Query<
+        (
+            &MeshHandle,
+            &InstanceModelCol,
+            Option<&GpuTransform3D>,
+            Option<&crate::instance_model::PrevInstanceModelCol>,
+        ),
+        Enabled<RenderEnabled>,
+    >,
+    registry: NonSendRes<MeshRegistry>,
+    mut scratch: ResMut<MeshRenderScratch>,
+    denoise: Res<crate::ShadowDenoiseConfig>,
+) {
+    let mesh_count = registry.len();
+    scratch.gather_mixed_into(
+        mesh_count,
+        |mesh_id| {
+            let m = registry.get(MeshHandle(mesh_id));
+            (m.index_count, m.index_type)
+        },
+        || q.iter().map(|(h, col, pair, _prev)| (h.0, col, pair)),
+    );
+    // The prev-instance ring is bound ONLY by the temporal-MV raster pipeline, so the O(N)
+    // prev-scatter is pure waste on a temporal-OFF frame (the default `mode ∈ {None, Spatial}`).
+    // Gate it on the temporal predicate so an OFF hwrt frame pays ZERO — Principle 1 (no OFF-path
+    // overhead), the owner's static-where-dynamic-costs directive. The config is always present
+    // here (`EnginePlugins` adds `ShadowDenoisePlugin` alongside this system). When ON, the
+    // re-scatter reuses the SAME offsets over the SAME query order ⇒ index-aligned with `ring`.
+    if denoise.temporal_enabled() {
+        scratch.gather_prev_ring_into(|| q.iter().map(|(h, col, _pair, prev)| (h.0, col, prev)));
+    }
 }
 
 #[cfg(test)]

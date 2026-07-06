@@ -401,8 +401,63 @@ impl Renderer<'_> {
                 },
             },
         };
-        let raster_color_attachments =
-            [albedo_attachment, normal_attachment, material_attachment];
+        // HW-RT Rung 3b step 5a: decide whether this frame uses the MESH motion-vector pipeline (a
+        // 4th MRT writing Δuv). ON iff temporal is enabled AND the MV pipeline + bind group exist
+        // (an RT + storage device). OFF (the default / non-hwrt build) ⇒ the base 3-MRT raster ⇒
+        // byte-identical. Evaluated ONCE; drives the attachment count, the color-array ptr, the
+        // pipeline/layout, and the set-0 bind below.
+        // `mesh_mv_active()` is the SINGLE source shared with `declare_gbuffer_graph` (W1: the
+        // barrier declaration and this write must never disagree).
+        #[cfg(feature = "hwrt")]
+        let mv_active = scene.mesh_mv_active();
+        #[cfg(not(feature = "hwrt"))]
+        let mv_active = false;
+        // The 4th MRT: the motion_vec Δuv target (R16G16Sfloat), CLEAR to (0,0) / STORE — a pixel
+        // with no mesh fragment holds zero motion (the marcher overwrites SDF pixels in step 5b).
+        // Built unconditionally so it outlives `cmd_begin_rendering`; the driver reads it ONLY when
+        // `color_attachment_count == 4` (the `mv_active` branch). On the OFF path its `image_view`
+        // is NULL and it is never read (count stays 3), so no motion_vec target need exist.
+        // `mv_active` (⇒ `raster_pipeline_mv.is_some()`) implies the MV boot gate held
+        // (`ray_query_enabled() && shadow_denoise_storage_ok()`), a strict superset of the
+        // `motion_vec` target gate (`shadow_denoise_storage_ok()`), so the target MUST exist here.
+        // `expect` (not `unwrap_or(NULL)`) so a future loosening of the MV gate trips loudly rather
+        // than binding a NULL 4th color attachment (O1).
+        #[cfg(feature = "hwrt")]
+        let motion_vec_view = if mv_active {
+            targets
+                .motion_vec
+                .as_ref()
+                .map(|r| r[fi].view)
+                .expect("invariant: mesh_mv_active implies the motion_vec target was allocated")
+        } else {
+            VkImageView::NULL
+        };
+        #[cfg(not(feature = "hwrt"))]
+        let motion_vec_view = VkImageView::NULL;
+        let motion_vec_attachment = VkRenderingAttachmentInfo {
+            s_type: VkStructureType::RenderingAttachmentInfo,
+            p_next: ptr::null(),
+            image_view: motion_vec_view,
+            image_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            resolve_mode: 0,
+            resolve_image_view: VkImageView::NULL,
+            resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+            store_op: VK_ATTACHMENT_STORE_OP_STORE,
+            clear_value: VkClearValue {
+                color: VkClearColorValue { float32: [0.0, 0.0, 0.0, 0.0] },
+            },
+        };
+        // The color-attachment array is ALWAYS 4 elements (so the ptr is valid for both counts and
+        // the array outlives the bracketed calls — the lifetime caution). `color_attachment_count`
+        // selects 3 (base) vs 4 (MV); on the base path the 4th element is present-but-unread.
+        let raster_color_attachments = [
+            albedo_attachment,
+            normal_attachment,
+            material_attachment,
+            motion_vec_attachment,
+        ];
+        let color_attachment_count: u32 = if mv_active { 4 } else { 3 };
         let depth_attachment = VkRenderingAttachmentInfo {
             s_type: VkStructureType::RenderingAttachmentInfo,
             p_next: ptr::null(),
@@ -431,7 +486,7 @@ impl Renderer<'_> {
             render_area: raster_area,
             layer_count: 1,
             view_mask: 0,
-            color_attachment_count: raster_color_attachments.len() as u32,
+            color_attachment_count,
             p_color_attachments: raster_color_attachments.as_ptr(),
             p_depth_attachment: (&depth_attachment as *const VkRenderingAttachmentInfo).cast(),
             p_stencil_attachment: ptr::null(),
@@ -445,6 +500,39 @@ impl Renderer<'_> {
             max_depth: 1.0,
         };
         let vertex_offset: VkDeviceSize = 0;
+        // HW-RT Rung 3b step 5a: select the pipeline + its set-0 bind group. When `mv_active`, bind
+        // the MESH motion-vector pipeline (its own 3-binding set-0 layout: current @0 / prev @1 /
+        // motion-cam @2) + this frame's MV bind group; else the base raster pipeline + the shared
+        // instance bind group (byte-identical). Both pipelines carry `.pipeline` + `.layout`; the
+        // push (88 B) + the per-batch `base_instance` re-push are UNCHANGED across both.
+        let raster_pipeline = if mv_active {
+            #[cfg(feature = "hwrt")]
+            {
+                scene
+                    .raster_pipeline_mv
+                    .expect("invariant: mv_active implies raster_pipeline_mv is Some")
+            }
+            #[cfg(not(feature = "hwrt"))]
+            {
+                scene.raster_pipeline
+            }
+        } else {
+            scene.raster_pipeline
+        };
+        let raster_set = if mv_active {
+            #[cfg(feature = "hwrt")]
+            {
+                scene
+                    .mv_bind_group
+                    .expect("invariant: mv_active implies mv_bind_group is Some")
+            }
+            #[cfg(not(feature = "hwrt"))]
+            {
+                scene.instance_bind_group
+            }
+        } else {
+            scene.instance_bind_group
+        };
         // SAFETY: recording is open; `raster_rendering` is fully initialized — its 3 color
         // attachments name the live albedo/normal/material views (now
         // COLOR_ATTACHMENT_OPTIMAL) and its depth attachment the live depth view (now
@@ -470,7 +558,7 @@ impl Renderer<'_> {
             (self.fns.cmd_bind_pipeline)(
                 cmd,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
-                scene.raster_pipeline.pipeline,
+                raster_pipeline.pipeline,
             );
             // M3: the instanced batch loop binds the SHARED N-instance model SSBO ONCE
             // (set 0); the legacy (empty-slice) arm binds the 1-element identity dummy
@@ -481,16 +569,16 @@ impl Renderer<'_> {
             (self.fns.cmd_bind_descriptor_sets)(
                 cmd,
                 VK_PIPELINE_BIND_POINT_GRAPHICS,
-                scene.raster_pipeline.layout,
+                raster_pipeline.layout,
                 0,
                 1,
-                &scene.instance_bind_group.descriptor_set,
+                &raster_set.descriptor_set,
                 0,
                 ptr::null(),
             );
             (self.fns.cmd_push_constants)(
                 cmd,
-                scene.raster_pipeline.layout,
+                raster_pipeline.layout,
                 VK_SHADER_STAGE_VERTEX_BIT,
                 0,
                 scene.mvp.len() as u32,
@@ -523,7 +611,7 @@ impl Renderer<'_> {
                     let base = batch.base_instance;
                     (self.fns.cmd_push_constants)(
                         cmd,
-                        scene.raster_pipeline.layout,
+                        raster_pipeline.layout,
                         VK_SHADER_STAGE_VERTEX_BIT,
                         GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
                         4,
