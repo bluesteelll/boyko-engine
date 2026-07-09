@@ -53,8 +53,10 @@
 
 #![cfg(windows)]
 
+mod common;
+use common::*;
+
 use core::ptr::NonNull;
-use core::slice;
 
 use boyko_rhi::enums::{AddressMode, DescriptorKind, Filter, IndexType};
 use boyko_rhi::{
@@ -122,17 +124,6 @@ const PIXELS: u32 = COMPOSITE_W * COMPOSITE_H;
 /// match brittle; `+/-2/255` still proves the lit SDF / flat mesh / background apart.
 const CHANNEL_TOL: i32 = 2;
 
-/// The mesh quad's constant world Z (strictly between the sphere surface and the camera,
-/// so the mesh occludes the SDF where they overlap). Mirrors the packed/P1b `MESH_Z`.
-const MESH_Z: f32 = 1.0;
-
-/// The mesh quad's world-XY footprint (the left part of the view in x, full y), so the
-/// sphere straddles the quad edge. Mirrors the packed/P1b footprint.
-const QUAD_X_MIN: f32 = -1.0;
-const QUAD_X_MAX: f32 = 0.2;
-const QUAD_Y_MIN: f32 = -1.0;
-const QUAD_Y_MAX: f32 = 1.0;
-
 /// The depth attachment's CLEAR value (the far plane). Must equal [`MESH_DEPTH_CLEAR`].
 const DEPTH_CLEAR: f32 = MESH_DEPTH_CLEAR;
 
@@ -157,18 +148,6 @@ const VK_B: usize = 0x42;
 /// color formats match the bound albedo/normal/material attachments.
 const RASTER_COLOR_FORMAT: Format = Format::R8G8B8A8Unorm;
 
-/// One vertex: a `Float32x3` position (offset 0), a `Float32x3` world normal (offset 12),
-/// and a `Float32x4` color (offset 24). `#[repr(C)]` for the exact 40-byte stride. The
-/// per-vertex normal feeds the mesh-MRT producer's G-buffer normal target (multi-object
-/// meshes carry real face normals — the +Z constant the VS used to bake is gone).
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Vertex {
-    position: [f32; 3],
-    normal: [f32; 3],
-    color: [f32; 4],
-}
-
 const VERTEX_STRIDE: u32 = core::mem::size_of::<Vertex>() as u32;
 const _: () = assert!(VERTEX_STRIDE == 40, "Vertex must be tightly packed at 40 bytes");
 
@@ -178,22 +157,6 @@ const _: () = assert!(VERTEX_STRIDE == 40, "Vertex must be tightly packed at 40 
 /// 80 bytes exactly as before and append two zero `u32`s — `use_model_matrix == 0` selects
 /// the VS's legacy arm (byte-identical pixels).
 const MVP_BYTES: u32 = GBUFFER_PUSH_BYTES as u32;
-
-/// A 4-byte-aligned wrapper around a committed SPIR-V byte blob so its address is a
-/// valid `*const u32` and it can be re-viewed as a `&[u32]` word stream.
-#[repr(C, align(4))]
-struct SpirvBlob<const N: usize>([u8; N]);
-
-impl<const N: usize> SpirvBlob<N> {
-    /// Re-views the blob as its SPIR-V `u32` word stream.
-    fn as_words(&self) -> &[u32] {
-        const { assert!(N.is_multiple_of(4), "SPIR-V byte length must be a multiple of 4") };
-        // SAFETY: the `align(4)` wrapper makes `self.0`'s address a valid `*const u32`;
-        // `N` is a 4-byte multiple (const-asserted); the `&self` borrow keeps the
-        // `'static` blob alive for the slice's lifetime; any bit pattern is a valid `u32`.
-        unsafe { slice::from_raw_parts(self.0.as_ptr().cast::<u32>(), N / 4) }
-    }
-}
 
 /// Render P5-r0: the mesh-MRT G-buffer PRODUCER vertex SPIR-V (`gbuffer_mrt.vs.spv`).
 /// Vertex layout: position (loc 0, offset 0) + color (loc 1, offset 24) + per-vertex world
@@ -1244,19 +1207,6 @@ fn instance_affine_nonuniform(yaw: f32, s: [f32; 3], t: [f32; 3]) -> [f32; 12] {
     ]
 }
 
-/// The mesh quad as two triangles spanning the world-XY footprint at world Z [`MESH_Z`].
-/// The quad faces the camera (`+Z`), so every vertex carries the outward normal `[0, 0, 1]`.
-fn quad_vertices() -> [Vertex; 6] {
-    let z = MESH_Z;
-    let c = [1.0_f32, 1.0, 1.0, 1.0];
-    let n = [0.0_f32, 0.0, 1.0];
-    let bl = Vertex { position: [QUAD_X_MIN, QUAD_Y_MIN, z], normal: n, color: c };
-    let br = Vertex { position: [QUAD_X_MAX, QUAD_Y_MIN, z], normal: n, color: c };
-    let tr = Vertex { position: [QUAD_X_MAX, QUAD_Y_MAX, z], normal: n, color: c };
-    let tl = Vertex { position: [QUAD_X_MIN, QUAD_Y_MAX, z], normal: n, color: c };
-    [bl, br, tr, bl, tr, tl]
-}
-
 /// Emits one mesh quad face as two CCW triangles `(a, b, c)` + `(a, c, d)`, every vertex
 /// carrying the supplied outward world `normal` `n` and `color`. `corners` are the four
 /// quad corners in CCW order as seen from the `+n` side (matching [`quad_vertices`]'s
@@ -1456,19 +1406,6 @@ fn expected_mesh_depth(px: u32, py: u32) -> f32 {
 /// body the mesh occludes (the packed/P1b `sphere_scene`).
 fn sphere_scene() -> Vec<SdfEdit> {
     vec![SdfEdit::sphere([0.0, 0.0, 0.0], 0.5, sdf_op::UNION, 0.0)]
-}
-
-/// Writes `words` `u32`s into a buffer's persistent host-coherent mapping (the CPU seeds
-/// the edit-list header before submit).
-fn write_words(base: NonNull<u8>, words: &[u32]) {
-    let dst = base.as_ptr().cast::<u32>();
-    for (i, &w) in words.iter().enumerate() {
-        // SAFETY: the buffer is at least `words.len() * 4` bytes inside the persistent
-        // host-coherent mapping; `dst + i` for `i < words.len()` is in-bounds. No GPU
-        // work is in flight yet (the present loop follows), so the host write is
-        // unsynchronized-safe. `write_unaligned` tolerates the sub-allocated offset.
-        unsafe { dst.add(i).write_unaligned(w) };
-    }
 }
 
 /// PBR MVP-2: the std430 word-packing of a ONE-element material table holding the engine

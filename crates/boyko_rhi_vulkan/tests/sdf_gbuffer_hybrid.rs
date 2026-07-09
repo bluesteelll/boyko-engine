@@ -30,8 +30,8 @@
 //! sampled image) and the color SINK (a storage image) change. The float-to-UNORM store
 //! vs the host `pack_rgba` rounding is absorbed by the `+/-2/255` tolerance.
 
-use core::ptr::NonNull;
-use core::slice;
+mod common;
+use common::*;
 
 use boyko_rhi::descriptor::{BarrierDesc, BufferBarrier};
 use boyko_rhi::enums::{BarrierAccess, BarrierStage};
@@ -224,18 +224,6 @@ const READBACK_BYTES: u64 = (PIXELS as u64) * 4;
 /// apart (they differ by 100+).
 const CHANNEL_TOL: i32 = 2;
 
-/// The mesh quad's constant world Z (chosen strictly between the sphere surface and the
-/// camera so the mesh occludes the SDF over the sphere). Mirrors `run_hybrid`'s `MESH_Z`.
-const MESH_Z: f32 = 1.0;
-
-/// The mesh quad's world-XY footprint (the left part of the view in x, full y), so the
-/// sphere straddles the quad edge — yielding texels over BOTH / sphere-only / quad-only
-/// / neither. Mirrors `run_hybrid`'s footprint.
-const QUAD_X_MIN: f32 = -1.0;
-const QUAD_X_MAX: f32 = 0.2;
-const QUAD_Y_MIN: f32 = -1.0;
-const QUAD_Y_MAX: f32 = 1.0;
-
 /// The depth attachment's CLEAR value (the far plane; an uncovered pixel keeps it,
 /// decoded as "no mesh"). Must equal [`MESH_DEPTH_CLEAR`].
 const DEPTH_CLEAR: f32 = MESH_DEPTH_CLEAR;
@@ -243,18 +231,6 @@ const DEPTH_CLEAR: f32 = MESH_DEPTH_CLEAR;
 /// The G-buffer color format (albedo / normal / material): `R8G8B8A8_UNORM`, the
 /// STORAGE-image store target whose support the [`DeviceCaps`] boot fail-fast asserts.
 const GBUFFER_FORMAT: Format = Format::R8G8B8A8Unorm;
-
-/// One vertex: a `Float32x3` position (offset 0), a `Float32x3` world normal (offset 12),
-/// and a `Float32x4` color (offset 24). `#[repr(C)]` for the exact 40-byte stride. The
-/// per-vertex normal feeds the mesh-MRT producer's G-buffer normal target (the shared
-/// `gbuffer_mrt.vs` consumes location 2 now — the +Z constant it used to bake is gone).
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Vertex {
-    position: [f32; 3],
-    normal: [f32; 3],
-    color: [f32; 4],
-}
 
 const VERTEX_STRIDE: u32 = core::mem::size_of::<Vertex>() as u32;
 const _: () = assert!(VERTEX_STRIDE == 40, "Vertex must be tightly packed at 40 bytes");
@@ -309,20 +285,6 @@ const DEGENERATE_LIGHT_TABLE: [u32; 40] = [
 /// single default material at id 0).
 fn host_material_table() -> [GoldenMaterial; 1] {
     [GoldenMaterial::default()]
-}
-
-/// A 4-byte-aligned wrapper around a committed SPIR-V byte blob.
-#[repr(C, align(4))]
-struct SpirvBlob<const N: usize>([u8; N]);
-
-impl<const N: usize> SpirvBlob<N> {
-    fn as_words(&self) -> &[u32] {
-        const { assert!(N.is_multiple_of(4), "SPIR-V byte length must be a multiple of 4") };
-        // SAFETY: the `align(4)` wrapper makes `self.0`'s address a valid `*const u32`;
-        // `N` is a 4-byte multiple (const-asserted); the `&self` borrow keeps the
-        // `'static` blob alive for the slice's lifetime; any bit pattern is a valid `u32`.
-        unsafe { slice::from_raw_parts(self.0.as_ptr().cast::<u32>(), N / 4) }
-    }
 }
 
 /// Render P5-r0: the mesh-MRT G-buffer PRODUCER vertex SPIR-V (`gbuffer_mrt.vs.spv`):
@@ -497,18 +459,6 @@ fn create_identity_instance(
     (layout, buffer, bind_group)
 }
 
-/// The mesh quad as two triangles spanning the world-XY footprint at world Z [`MESH_Z`].
-fn quad_vertices() -> [Vertex; 6] {
-    let z = MESH_Z;
-    let c = [1.0_f32, 1.0, 1.0, 1.0];
-    let n = [0.0_f32, 0.0, 1.0]; // the fronto-parallel quad faces +Z
-    let bl = Vertex { position: [QUAD_X_MIN, QUAD_Y_MIN, z], normal: n, color: c };
-    let br = Vertex { position: [QUAD_X_MAX, QUAD_Y_MIN, z], normal: n, color: c };
-    let tr = Vertex { position: [QUAD_X_MAX, QUAD_Y_MAX, z], normal: n, color: c };
-    let tl = Vertex { position: [QUAD_X_MIN, QUAD_Y_MAX, z], normal: n, color: c };
-    [bl, br, tr, bl, tr, tl]
-}
-
 /// Whether pixel `(px, py)`'s orthographic ray passes through the mesh quad footprint
 /// (the rasterizer's covered-pixel set, host-computable from the SAME camera mapping).
 fn mesh_covers_pixel(px: u32, py: u32) -> bool {
@@ -523,19 +473,6 @@ fn expected_mesh_depth(px: u32, py: u32) -> f32 {
         mesh_depth_for_z(MESH_Z)
     } else {
         DEPTH_CLEAR
-    }
-}
-
-/// Writes `words` `u32`s into a buffer's persistent host-coherent mapping (valid before
-/// the submit — the CPU seeds the edit-list header / the UBO here).
-fn write_words(base: NonNull<u8>, words: &[u32]) {
-    let dst = base.as_ptr().cast::<u32>();
-    for (i, &w) in words.iter().enumerate() {
-        // SAFETY: the buffer is at least `words.len() * 4` bytes inside the persistent
-        // host-coherent mapping; `dst + i` for `i < words.len()` is in-bounds. No GPU
-        // work is in flight yet (the submit follows), so the host write is
-        // unsynchronized-safe. `write_unaligned` tolerates the sub-allocated offset.
-        unsafe { dst.add(i).write_unaligned(w) };
     }
 }
 
