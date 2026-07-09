@@ -1,5 +1,6 @@
 pub mod app;
 pub mod archetype;
+pub mod asset;
 pub mod bundle;
 pub mod change_detection;
 pub mod clone;
