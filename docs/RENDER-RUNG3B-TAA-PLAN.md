@@ -497,6 +497,68 @@ producers only ran in `Both`); the DENOISED `gShadowVis` ← `temporal_out` rebi
 in-motion owner-eval** (moving camera + moving boxes, multiple `k`, before/after — ghosting is
 invisible in a settled capture).
 
+## step 6b — C1 CROSS-FRAME HISTORY RACE + fix (architect design → critic-APPROVED → IMPLEMENTED)
+
+**Critic verdict:** APPROVED the crux (a single-queue pipeline barrier's src scope DOES reach prior
+submissions on that queue — Vulkan §7.2 submission order; corroborated by the 5 shipped `seeded_*`
+cross-frame seeds that already rely on it). 3 refinements, ALL implemented: **H1** — `images[16]` binds
+the SIBLING slot `hist[fi^1]` (the read image), NOT `r[fi]` (else the RAW lands on the write image = a
+false-green; + a `debug_assert hist[fi]!=hist[fi^1]`). **H2** — boot-clear lives INSIDE `create()`
+(resize rebuilds via it) with the final `TRANSFER_DST→GENERAL` carrying `COMPUTE_SHADER/SHADER_READ`
+dst scope (a fence wait ≠ shader visibility; also closes the latent frame-1 UNDEFINED-layout bug on
+ResId 14 = code-review H1). **M1/M2/L1** — arming is boot-static (`BOYKO_SHADOW_DENOISE`) ⇒ monotonic;
+the single-queue coupling + async-compute caveat documented at the FIF const-assert; `fi^1` not
+`(frame_index-1)&1`. **Implemented + OFF-path verified:** golden `58f6c6c3` byte-identical ±hwrt +
+framegraph-equiv 10/7 + `check`/`clippy` ±hwrt green. ON-path (the race fix under motion) validated by
+the in-motion self-eval (owner delegated the visual-oracle role to me).
+
+## step 6b — C1 CROSS-FRAME HISTORY RACE + fix design (as-designed)
+
+**The bug (code-review C1, Critical):** `shadow_temporal_hist` was a per-FIF `[_; FRAMES_IN_FLIGHT]`
+ring; the temporal pass binds `@3 gHistIn = hist[1-fi]` (READ, **direct-bound — NOT a framegraph
+ResId**) + `@4 gHistOut = hist[fi]` (WRITE = ResId 14). With 2 frames in flight, frame N reads
+`hist[1-fi]` which the sibling frame N-1 concurrently WRITES → an unsynchronized cross-submission
+**RAW**. The per-slot fence (`wait_frame_in_flight` waits the t-2 occupant) does NOT cover the t-1
+sibling. The WAR on `hist[fi]` is incidentally covered by ResId-14's seed; the uncovered gap is the
+read-side RAW. The engine's THIRD "wrong only in motion" cross-frame race ([[reference-crossframe-target-race]]).
+
+**The fix (architect, cross-validated researcher+analyst+source):**
+- **`shadow_temporal_hist` is a cross-frame PERSISTENT 2-image ping-pong POOL indexed by frame PARITY
+  (`frame_index & 1`)**, NOT a frame-private FIF ring. At FIF==2, parity == slot, so the physical
+  binding (gHistIn=hist[1-fi], gHistOut=hist[fi]) is ALREADY the parity ping-pong ⇒ NO shader / MV /
+  descriptor change. Frame N reads `pool[(N-1)&1]` (frame N-1's write = **1-frame-old** history) +
+  writes `pool[N&1]`. This is the Bevy/Unity/UE standard + the DDGI persistent-seed discipline
+  generalized to the 2-image ping-pong the reproject (read `prev_uv` ≠ write texel) requires.
+- **Fix mechanism:** promote the READ image to a NEW **ResId 16** (`shadow_temporal_hist_read`) with a
+  NEW `ResSync::seeded_writer_at_layout(GENERAL, COMPUTE, SHADER_WRITE)` — the content-PRESERVING RAW
+  analogue of `seeded_readers_at_layout` (WAR). `transition()` then emits `src=(COMPUTE,SHADER_WRITE)
+  → dst=(COMPUTE,SHADER_READ)` before frame N's read, ordering it after frame N-1's write via
+  **single-queue submission order** (one `vkQueueSubmit`/frame; the framegraph is rebuilt per frame,
+  cross-frame reach is ONLY submission order binding the seed barrier to a physical image). ResId 14
+  keeps `seeded_readers_at_layout` (the WAR). **CRUX under critic review:** does a barrier's src scope
+  in frame N's cmdbuf reach frame N-1's PRIOR submission on one queue with no semaphore?
+- **MV stays 1-FRAME (Decision 3, unchanged)** — reading `pool[(N-1)&1]` (1 frame old) matches the
+  1-frame MotionCam/PrevInstanceModelCol. NO change to 5a/5b/motion_cam/instance_model/runner.
+- **`motion_vec`(13) + `temporal_out`(15) stay FIF-ringed** (frame-private, fence-covered) — unchanged.
+- **Boot-clear both pool images UNDEFINED→GENERAL + (vis=1, conf=0)** at build (mirror DDGI's
+  `clear_color_image`) — satisfies both seeds' GENERAL assumption + gives conf==0 first read. **This
+  ALSO closes code-review H1** (the seeded-GENERAL-but-never-transitioned latent frame-1 bug + the
+  shader's false "zeroed ⇒ conf==0" claim).
+- **FIF guard:** `const _: () = assert!(FRAMES_IN_FLIGHT == 2)` at the pool site (parity==slot only at
+  FIF=2; FIF≥3 needs parity-selected hist descriptors). Async-compute forward risk (Pillar 3): moving
+  the temporal pass off the graphics queue makes the seed insufficient → a timeline semaphore becomes
+  mandatory (doc invariant).
+- **Diff surface (barrier-only):** `sync.rs` (+`seeded_writer_at_layout`), `graph_bridge.rs` (ResId
+  16 + seed + read access + `images[16]=hist[(frame_index-1)&1]` + COUNT hwrt 16→17 + buffer rebase),
+  `targets.rs` (`[_;2]` pool + boot clear + FIF guard), `framegraph_gbuffer_equiv.rs` (re-pin).
+  UNTOUCHED: the shader + `.spv`, the descriptor layout, the MV producers, non-hwrt paths.
+- **Rejected:** (A) per-FIF-independent (2-frame MV + half-rate + inter-slot flicker = a NEW
+  motion artifact); (C) FIF+1 ring (the FIF-sized fence ring never covers the t-1 sibling → collapses
+  to B + a wasted image); a raw semaphore (unnecessary on one queue; the seed IS the primitive).
+- **Verification adds:** GPU sync-validation layer (zero hazards, temporal ON — directly catches the
+  RAW), an in-motion byte-diff vs a `device_wait_idle`-serialized reference (racy=nonzero, fixed=0),
+  the static-camera k=0.95 convergence anchor.
+
 ## Metrics and validation
 
 - **Byte-identity:** `None`/`Spatial` reproduce `58f6c6c3` (±hwrt) + `af934c50`. Framegraph equiv ResId pins (16 imgs hwrt) + the **I3 pin** (no `UNDEFINED` old-layout on `shadow_temporal_hist` after init — reusing the DDGI-seed test shape, C3).

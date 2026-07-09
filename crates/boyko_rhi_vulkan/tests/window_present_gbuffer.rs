@@ -2466,6 +2466,9 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         vis_mv_layout: None,
         #[cfg(feature = "hwrt")]
         motion_cam_ubo_ring: None,
+        // Rung-3b step 6: the temporal reproject layout — OFF in this harness (byte-identical).
+        #[cfg(feature = "hwrt")]
+        temporal_layout: None,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -3384,6 +3387,9 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         vis_mv_layout: None,
         #[cfg(feature = "hwrt")]
         motion_cam_ubo_ring: None,
+        // Rung-3b step 6: the temporal reproject layout — OFF in this harness (byte-identical).
+        #[cfg(feature = "hwrt")]
+        temporal_layout: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -8097,6 +8103,9 @@ fn run_showcase_body_ddgi(
         vis_mv_layout: None,
         #[cfg(feature = "hwrt")]
         motion_cam_ubo_ring: None,
+        // Rung-3b step 6: the temporal reproject layout — OFF in this harness (byte-identical).
+        #[cfg(feature = "hwrt")]
+        temporal_layout: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -9423,6 +9432,9 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         vis_mv_layout: None,
         #[cfg(feature = "hwrt")]
         motion_cam_ubo_ring: None,
+        // Rung-3b step 6: the temporal reproject layout — OFF in this harness (byte-identical).
+        #[cfg(feature = "hwrt")]
+        temporal_layout: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };

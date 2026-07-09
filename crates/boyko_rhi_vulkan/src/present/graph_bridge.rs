@@ -78,6 +78,15 @@ pub(crate) struct GbufferPassPlan {
     #[cfg(feature = "hwrt")]
     pub(crate) shadow_atrous:
         [Option<crate::framegraph::PassId>; crate::present::MAX_ATROUS_LEVELS as usize],
+    /// HW-RT Rung 3b step 6: the temporal reproject+accumulate pass (`scene.temporal_active()`).
+    /// Recorded AFTER the à-trous chain, BEFORE the resolve; reads the à-trous FINAL output
+    /// (`final_vis_res`) + `motion_vec` + `viewt`, writes `shadow_temporal_hist[fi]` + `temporal_out`.
+    /// The cross-frame `shadow_temporal_hist[1-fi]` READ is bound DIRECTLY in the set (seeded GENERAL,
+    /// not framegraph-tracked). `Some` iff `scene.temporal_active()` (the "member is Some iff its body
+    /// is recorded" invariant). The write → resolve-read barrier on `temporal_out` is derived at the
+    /// resolve.
+    #[cfg(feature = "hwrt")]
+    pub(crate) shadow_temporal: Option<crate::framegraph::PassId>,
     /// The always-present deferred resolve pass.
     pub(crate) resolve: crate::framegraph::PassId,
     /// The always-present present-sample pass: only the `lit` GENERAL→SHADER_READ_ONLY
@@ -107,7 +116,7 @@ pub(crate) struct GbufferPassPlan {
 /// (byte-identical render); the VIS/à-trous passes (gated on `scene.shadow`) and the temporal pass
 /// (steps 5-6) add the accesses later.
 #[cfg(feature = "hwrt")]
-pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 16;
+pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 17;
 /// See the `hwrt` variant: a `not(hwrt)` build keeps the count at 11 (no shadow-vis targets,
 /// byte-unchanged).
 #[cfg(not(feature = "hwrt"))]
@@ -173,8 +182,8 @@ pub(crate) struct GbufferBarrierSink<'a> {
 const _: () = {
     #[cfg(feature = "hwrt")]
     assert!(
-        FRAMEGRAPH_IMAGE_COUNT == 16,
-        "hwrt: 11 base + shadow_vis + shadow_vis2 + motion_vec + shadow_temporal_hist + temporal_out"
+        FRAMEGRAPH_IMAGE_COUNT == 17,
+        "hwrt: 11 base + shadow_vis + shadow_vis2 + motion_vec + shadow_temporal_hist + temporal_out + shadow_temporal_hist_read"
     );
     #[cfg(not(feature = "hwrt"))]
     assert!(FRAMEGRAPH_IMAGE_COUNT == 11, "not(hwrt): the 11 base images, no shadow-vis targets");
@@ -466,12 +475,29 @@ impl Renderer<'_> {
         ); // ResId 14
         #[cfg(feature = "hwrt")]
         let temporal_out = g.add_image("temporal_out"); // ResId 15
-        // Step 5a wires `motion_vec` (the raster's temporal-gated 4th-MRT write below). ResId 14/15
-        // (`shadow_temporal_hist`/`temporal_out`) are still unnamed this step — bind them to `_` so
-        // the slots stay reserved (the `add_image`/`add_image_seeded` side effect) without an
-        // unused-binding warning. Step 6 adds the temporal pass that names them.
+        // Rung 3b step 6b (C1 cross-frame RACE fix): `shadow_temporal_hist` is a CROSS-FRAME
+        // PERSISTENT parity ping-pong POOL (frame `fi` WRITES `pool[fi]`, READS `pool[fi^1]` = the
+        // sibling in-flight frame's write). BOTH physical images the temporal pass touches must be
+        // framegraph-tracked so the graph derives their cross-frame barriers (single-queue submission
+        // order reaches the sibling's prior submit — the shipped `seeded_*` cross-frame precedent):
+        //   * ResId 14 `shadow_temporal_hist` = the `[fi]` WRITE — `seeded_readers_at_layout` (WAR:
+        //     order frame N's write after the sibling's still-pipelined read of the same image).
+        //   * ResId 16 `shadow_temporal_hist_read` = the `[fi^1]` READ — `seeded_writer_at_layout`
+        //     (content-preserving RAW: `transition()` emits `COMPUTE/SHADER_WRITE → COMPUTE/SHADER_
+        //     READ` before frame N's read, ordering it after — and making visible — the sibling
+        //     frame N-1's write of that same physical image). WITHOUT this the read was direct-bound
+        //     and UNSYNCHRONIZED against the sibling's write — the C1 "wrong only in motion" race.
+        // The sink binds ResId 16 to the SIBLING slot `hist[fi^1]` (the ONE non-`[fi]` sink entry).
+        // On a non-temporal frame no pass names ResId 14/15/16 ⇒ zero derived barriers ⇒ byte-identical.
         #[cfg(feature = "hwrt")]
-        let _ = (shadow_temporal_hist, temporal_out);
+        let shadow_temporal_hist_read = g.add_image_seeded(
+            "shadow_temporal_hist_read",
+            ResSync::seeded_writer_at_layout(
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+            ),
+        ); // ResId 16
         // --- Buffers (ResId FRAMEGRAPH_IMAGE_COUNT..+4) — ALL single instances shared by both in-flight
         // frames (audit B-002). light_table/tiles/grid/index end their frame consumed
         // by a COMPUTE read (resolve / marcher), so a dirty-frame re-write must order
@@ -771,8 +797,8 @@ impl Renderer<'_> {
         // and writes the out-ResId (ping-pong `shadow_vis` ⇄ `shadow_vis2`), the graph deriving
         // each level's RAW on the ping-pong pair.
         #[cfg(feature = "hwrt")]
-        let (shadow_vis_pass, shadow_atrous_passes, final_vis_res) = if let Some(sh) =
-            scene.shadow.as_ref()
+        let (shadow_vis_pass, shadow_atrous_passes, final_vis_res, shadow_temporal_pass) =
+            if let Some(sh) = scene.shadow.as_ref()
         {
             // Pass `shadow_vis`: reads gNormal/gViewT (GENERAL) + the tlas buffer (COMPUTE read),
             // writes `shadow_vis` (GENERAL). NOTE: the `tlas_instances` buffer_access derives the
@@ -820,15 +846,18 @@ impl Renderer<'_> {
                 );
             }
 
-            // The `levels` à-trous passes (ping-pong). Level `i` reads `i`-even ? `shadow_vis` :
+            // The `atrous_levels` à-trous passes (ping-pong). Level `i` reads `i`-even ? `shadow_vis` :
             // `shadow_vis2` and writes the other; the FINAL write lands in `shadow_vis2` for odd
-            // `levels`, `shadow_vis` for even (== the input of level `levels`). Clamped to the
-            // per-level array bound so an over-count author config can never index past it.
-            let levels = (sh.levels as usize).clamp(1, crate::present::MAX_ATROUS_LEVELS as usize);
+            // `atrous_levels`, `shadow_vis` for even (== the input of the last level). Rung 3b allows
+            // `0` (Temporal-only mode: the raw VIS feeds the temporal pass ⇒ NO à-trous pass, so
+            // `final_res == shadow_vis` = the raw VIS). Only the CEILING is clamped (the per-level
+            // array bound) — the floor stays 0 (`.min`, not `.clamp(1, ..)`).
+            let atrous_levels =
+                (sh.atrous_levels as usize).min(crate::present::MAX_ATROUS_LEVELS as usize);
             let mut atrous: [Option<crate::framegraph::PassId>;
                 crate::present::MAX_ATROUS_LEVELS as usize] =
                 [None; crate::present::MAX_ATROUS_LEVELS as usize];
-            for (i, slot) in atrous.iter_mut().enumerate().take(levels) {
+            for (i, slot) in atrous.iter_mut().enumerate().take(atrous_levels) {
                 let (in_res, out_res) = if i % 2 == 0 {
                     (shadow_vis, shadow_vis2)
                 } else {
@@ -860,15 +889,52 @@ impl Renderer<'_> {
                 );
                 *slot = Some(p);
             }
-            // The final filtered-vis target the resolve reads: `shadow_vis2` for odd `levels`
-            // (last write landed there), `shadow_vis` for even.
-            let final_res = if levels % 2 == 1 { shadow_vis2 } else { shadow_vis };
-            (Some(vis), atrous, final_res)
+            // The final filtered-vis target: `shadow_vis2` for odd `atrous_levels` (last write landed
+            // there), `shadow_vis` for even (incl. `0` ⇒ the raw VIS). Consumed by the temporal pass's
+            // `gVisIn` (below) and/or the resolve read.
+            let final_res = if atrous_levels % 2 == 1 { shadow_vis2 } else { shadow_vis };
+            // HW-RT Rung 3b step 6: the temporal reproject+accumulate pass, declared AFTER the à-trous
+            // chain when the author's mode is temporal (`sh.temporal`). Reads `final_res` (the à-trous
+            // FINAL / the raw VIS), `motion_vec` (ResId 13), and `viewt` — all COMPUTE/SHADER_READ at
+            // GENERAL. Writes `shadow_temporal_hist` (ResId 14, the `[fi]` slot) + `temporal_out`
+            // (ResId 15) — COMPUTE/SHADER_WRITE at GENERAL. The cross-frame `shadow_temporal_hist[fi^1]`
+            // READ is declared as ResId 16 `shadow_temporal_hist_read` (C1 fix): its `seeded_writer_at_
+            // layout` seed makes `transition()` emit the RAW ordering frame N's read after — and visible
+            // to — the sibling frame N-1's write of that same physical image (was direct-bound +
+            // unsynchronized = the race). The write → resolve-read barrier on `temporal_out` is derived
+            // at the resolve (the reader). OFF (non-temporal) ⇒ `None` ⇒ zero derived barriers on
+            // ResId 14/15/16 ⇒ byte-identical.
+            let temporal = if sh.temporal {
+                let p = g.add_pass("shadow_temporal");
+                for &c in &[final_res, motion_vec, viewt, shadow_temporal_hist_read] {
+                    g.image_access(
+                        c,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        SubRange::COLOR,
+                    );
+                }
+                for &w in &[shadow_temporal_hist, temporal_out] {
+                    g.image_access(
+                        w,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        SubRange::COLOR,
+                    );
+                }
+                Some(p)
+            } else {
+                None
+            };
+            (Some(vis), atrous, final_res, temporal)
         } else {
             (
                 None,
                 [None; crate::present::MAX_ATROUS_LEVELS as usize],
                 shadow_vis,
+                None,
             )
         };
 
@@ -1080,29 +1146,32 @@ impl Renderer<'_> {
                 );
             }
         }
-        // HW-RT rung 3a: when the denoise stack ran (`scene.shadow.is_some()`), the DENOISED resolve
-        // READS the FINAL à-trous output (`final_vis_res`) — declaring the read here (the vis READER)
-        // is what makes the RDG DERIVE the last-atrous-write → resolve-read barrier. Declared ONLY on
-        // the ON path (the host keeps `scene.shadow == None` this rung), so the OFF path derives
-        // nothing (byte-identical). `debug_assert` that the resolve reads exactly the ResId the last
-        // à-trous pass wrote (the ping-pong parity invariant): `final_vis_res == shadow_vis2` iff
-        // `levels` is odd (see the pass loop above).
+        // HW-RT rung 3a/3b: when the denoise stack ran (`scene.shadow.is_some()`), the DENOISED
+        // resolve READS the filtered visibility — declaring the read here (the vis READER) is what
+        // makes the RDG DERIVE the last-write → resolve-read barrier. Rung 3b: on a TEMPORAL frame the
+        // resolve reads `temporal_out` (ResId 15, the temporal-accumulate OUTPUT), deriving the
+        // temporal-write → resolve-read barrier; otherwise it reads the à-trous FINAL `final_vis_res`
+        // (the Rung-3a path, byte-identical). Declared ONLY on the ON path, so the OFF path derives
+        // nothing (byte-identical). `debug_assert` the à-trous parity (the ping-pong invariant) on the
+        // non-temporal path: `final_vis_res == shadow_vis2` iff `atrous_levels` is odd.
         #[cfg(feature = "hwrt")]
         if shadow_vis_pass.is_some() {
+            let temporal = scene.temporal_active();
             debug_assert!(
-                {
-                    let levels = scene
+                temporal || {
+                    let atrous_levels = scene
                         .shadow
                         .as_ref()
-                        .map(|s| (s.levels as usize).clamp(1, crate::present::MAX_ATROUS_LEVELS as usize))
-                        .unwrap_or(1);
-                    let last_write = if levels % 2 == 1 { shadow_vis2 } else { shadow_vis };
+                        .map(|s| (s.atrous_levels as usize).min(crate::present::MAX_ATROUS_LEVELS as usize))
+                        .unwrap_or(0);
+                    let last_write = if atrous_levels % 2 == 1 { shadow_vis2 } else { shadow_vis };
                     final_vis_res.index() == last_write.index()
                 },
                 "invariant: the resolve reads the ResId the last à-trous pass wrote (ping-pong parity)"
             );
+            let vis_read = if temporal { temporal_out } else { final_vis_res };
             g.image_access(
-                final_vis_res,
+                vis_read,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 VK_ACCESS_SHADER_READ_BIT,
                 VK_IMAGE_LAYOUT_GENERAL,
@@ -1150,6 +1219,8 @@ impl Renderer<'_> {
             shadow_vis: shadow_vis_pass,
             #[cfg(feature = "hwrt")]
             shadow_atrous: shadow_atrous_passes,
+            #[cfg(feature = "hwrt")]
+            shadow_temporal: shadow_temporal_pass,
             resolve,
             present_sample,
         });
@@ -1173,6 +1244,20 @@ impl Renderer<'_> {
         scene: &GBufferScene<'_>,
         fi: usize,
     ) {
+        // C1 guard (the critic's H1): ResId 16 (the temporal history READ) MUST bind the SIBLING
+        // parity slot `hist[fi^1]`, distinct from ResId 14 (the WRITE, `hist[fi]`) — else the
+        // cross-frame RAW barrier lands on the wrong image (a false-green: passes static, shimmers
+        // only in motion). The pool is 2 distinct textures, so the parity slots always differ when
+        // present; a future edit that collapses them (or copies the uniform `r[fi]` pattern here)
+        // trips this in debug.
+        #[cfg(feature = "hwrt")]
+        debug_assert!(
+            targets
+                .shadow_temporal_hist
+                .as_ref()
+                .is_none_or(|r| r[fi].image != r[fi ^ 1].image),
+            "invariant: the temporal history pool's [fi] write slot and [fi^1] read slot must be distinct images"
+        );
         let mut sink = GbufferBarrierSink {
             fns: self.fns,
             cmd,
@@ -1232,6 +1317,18 @@ impl Renderer<'_> {
                     .temporal_out
                     .as_ref()
                     .map_or(VkImage::NULL, |r| r[fi].image),
+                // C1 fix — ResId 16 `shadow_temporal_hist_read`: the CROSS-FRAME READ image = the
+                // SIBLING parity slot `hist[fi ^ 1]` (the image frame N-1 wrote). THIS IS THE ONE SINK
+                // ENTRY THAT IS NOT `r[fi]`. Binding `r[fi]` here (the natural copy-paste mistake)
+                // would land ResId 16's RAW barrier on the WRITE image, NOT the read image — the
+                // barrier count would look right and a static scene would pass, but the cross-frame
+                // read would stay unsynchronized and shimmer in motion (the exact false-green that
+                // shipped twice). The temporal set @3 (`gHistIn`) binds this SAME sibling slot.
+                #[cfg(feature = "hwrt")]
+                targets
+                    .shadow_temporal_hist
+                    .as_ref()
+                    .map_or(VkImage::NULL, |r| r[fi ^ 1].image),
             ],
             #[cfg(not(feature = "hwrt"))]
             buffers: [

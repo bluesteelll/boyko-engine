@@ -31,7 +31,10 @@ use boyko_sdf_math::SdfEdit;
 use crate::csm_config::{RESOLVED_CSM_BYTES, ResolvedCsm};
 use crate::ray_shadow_config::{RESOLVED_RAY_SHADOW_BYTES, ResolvedRayShadow};
 use crate::shadow_atlas::{RESOLVED_SHADOW_ATLAS_BYTES, ResolvedShadowAtlas};
-use crate::shadow_denoise_config::{RESOLVED_SHADOW_DENOISE_BYTES, ResolvedShadowDenoise};
+use crate::shadow_denoise_config::{
+    RESOLVED_SHADOW_DENOISE_BYTES, RESOLVED_TEMPORAL_SHADOW_BYTES, ResolvedShadowDenoise,
+    ResolvedTemporalShadow,
+};
 use crate::gpu_transform3d::GPU_TRANSFORM3D_BYTES;
 use crate::mesh_draw::MeshRenderScratch;
 #[cfg(feature = "hwrt")]
@@ -782,6 +785,70 @@ pub unsafe fn upload_shadow_denoise_ring(
             (resolved as *const ResolvedShadowDenoise).cast::<u8>(),
             mapped.as_ptr(),
             RESOLVED_SHADOW_DENOISE_BYTES,
+        );
+    }
+}
+
+/// Copies the resolved [`ResolvedTemporalShadow`] (the HW-RT Rung 3b temporal reproject scalars —
+/// `feedback_max`/`feedback_min`/`variance_gamma`/`depth_tol`, byte-identical to the temporal
+/// pass's binding-6 UBO shape, see [`RESOLVED_TEMPORAL_SHADOW_BYTES`]) into ONE temporal-UBO ring
+/// slot — the per-frame upload of the temporal-denoise path (a SEPARATE carrier from the à-trous
+/// [`upload_shadow_denoise_ring`], so the shipped Spatial upload byte-stream is untouched).
+///
+/// Uploaded every temporal-armed HW-RT frame (the runner gates the CALL on `feature = "hwrt"` + the
+/// temporal-UBO ring existing, the SAME gate that mints it), exactly like
+/// [`upload_shadow_denoise_ring`]: `resolve_temporal_shadow_policy` re-derives the 16-byte UBO from
+/// the cold [`ShadowDenoiseConfig`](crate::shadow_denoise_config::ShadowDenoiseConfig) each frame, so
+/// a boot-seed would go stale the moment the author retunes the temporal scalars, and the 16-byte
+/// memcpy is cheaper than a change gate. A default config uploads the ON-default temporal scalars.
+///
+/// # Panics
+///
+/// Panics if `ring_slot.size` is smaller than [`RESOLVED_TEMPORAL_SHADOW_BYTES`]: the memcpy would
+/// be out-of-bounds (UB), so the guard is a hard assert in every build.
+///
+/// # Safety
+///
+/// * `ring_slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at least
+///   `ring_slot.size` valid, persistently-mapped bytes.
+/// * `ring_slot` is the FENCED slot's buffer — the renderer's `temporal_shadow_ubo[token.slot()]`
+///   (the same token/slot contract as [`upload_shadow_denoise_ring`]): the temporal pass of the
+///   slot's previous occupant retired behind the waited fence, and the sibling in-flight frame binds
+///   the OTHER ring slot.
+pub unsafe fn upload_temporal_shadow_ring(
+    token: &FrameWriteToken,
+    ring_slot: &BoundBuffer,
+    resolved: &ResolvedTemporalShadow,
+) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    // Hard bound BEFORE the memcpy (review P1 discipline): an undersized slot would make the
+    // 16-byte write out-of-bounds. One compare per frame.
+    assert!(
+        ring_slot.size as usize >= RESOLVED_TEMPORAL_SHADOW_BYTES,
+        "temporal shadow UBO slot too small: {} bytes < the {}-byte ResolvedTemporalShadow mirror",
+        ring_slot.size,
+        RESOLVED_TEMPORAL_SHADOW_BYTES
+    );
+
+    let mapped = ring_slot
+        .mapped
+        .expect("invariant: the temporal shadow UBO slot is host-visible mapped");
+    // SAFETY: `resolved` is a live `#[repr(C)]` POD of exactly `RESOLVED_TEMPORAL_SHADOW_BYTES`
+    // (const-asserted at its definition) with no padding holes (4 packed `f32`s), so reading its raw
+    // bytes is defined. `mapped` targets >= `ring_slot.size >= RESOLVED_TEMPORAL_SHADOW_BYTES` valid
+    // mapped host-coherent bytes (hard-asserted above) — the write is in-bounds. The borrowed
+    // `FrameWriteToken` + the slot-identity contract prove this slot's in-flight fence was waited
+    // THIS frame (the previous occupant's temporal reproject finished its UBO reads; the sibling
+    // frame binds the other slot) — race-free, lock-free. The two regions are distinct allocations
+    // (no overlap).
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            (resolved as *const ResolvedTemporalShadow).cast::<u8>(),
+            mapped.as_ptr(),
+            RESOLVED_TEMPORAL_SHADOW_BYTES,
         );
     }
 }

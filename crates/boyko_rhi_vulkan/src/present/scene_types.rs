@@ -575,15 +575,30 @@ pub struct ShadowVisActivation<'a> {
     /// `shadow_atrous.comp`'s set 0. The renderer writes one `atrous_set` per level against it once
     /// per extent (level `i` reads `i`-even ? `shadow_vis` : `shadow_vis2`, writes the other).
     pub atrous_layout: &'a VulkanBindGroupLayout,
-    /// The number of à-trous iterations to dispatch this frame (`1..=MAX_ATROUS_LEVELS`, the
-    /// host-clamped [`ShadowDenoiseConfig::clamped_levels`](boyko_render's
-    /// `ShadowDenoiseConfig::clamped_levels`)). Each pushes `step = 1 << level`; the recorder
-    /// dispatches this many à-trous passes after the VIS pre-pass.
-    pub levels: u32,
-    /// `levels % 2 == 1` — whether the FINAL à-trous output landed in `shadow_vis2` (odd levels) vs
-    /// `shadow_vis` (even levels). Threaded so the DENOISED resolve set binds `gShadowVis` @21 to the
-    /// correct final target and the last-atrous-write → resolve-read barrier names the right ResId.
+    /// HW-RT Rung 3b: the number of à-trous iterations to dispatch this frame — `0..=MAX_ATROUS_LEVELS`.
+    /// `spatial ? clamped_levels() (>=1) : 0` (the runner threads `0` for the Temporal-only mode, so
+    /// the VIS pass feeds the temporal reproject its RAW output — `final_vis_res == shadow_vis`). Each
+    /// pushes `step = 1 << level`; the recorder dispatches this many à-trous passes after the VIS
+    /// pre-pass (0 ⇒ none). (Rung 3a called this `levels` and floored it at 1.)
+    pub atrous_levels: u32,
+    /// `atrous_levels % 2 == 1` — whether the FINAL à-trous output landed in `shadow_vis2` (odd count)
+    /// vs `shadow_vis` (even count, incl. `0` ⇒ `shadow_vis` = the raw VIS). Threaded so the DENOISED
+    /// resolve set + the temporal pass's `gVisIn` bind the correct final target and the
+    /// last-write → read barrier names the right ResId.
     pub final_is_vis2: bool,
+    /// HW-RT Rung 3b step 6: `true` iff the author's mode ∈ {`Temporal`, `Both`} (the runner's
+    /// `ShadowDenoiseConfig::temporal_enabled()` read). When `true`, the recorder runs the temporal
+    /// reproject+accumulate pass AFTER the à-trous chain (reading the final à-trous output / the raw
+    /// VIS when `atrous_levels == 0`) and the resolve reads `temporal_out` instead of the à-trous
+    /// output. `false` ⇒ the Rung-3a Spatial path (byte-identical): no temporal pass, the resolve
+    /// reads the à-trous output.
+    pub temporal: bool,
+    /// HW-RT Rung 3b step 6: the temporal reproject compute pipeline (`shadow_temporal.comp` /
+    /// [`crate::compute::shadow_temporal_spirv`]) — bound by the recorder when [`Self::temporal`] AND
+    /// the temporal descriptor sets exist. `Some` iff the boot temporal pipeline was built (an RT
+    /// device); `None` on a device without it (the recorder then degrades — no temporal dispatch).
+    /// Its 8-binding layout is threaded stably as [`GBufferScene::temporal_layout`] for the set build.
+    pub temporal_pipeline: Option<&'a ComputePipeline>,
 }
 
 /// The SDFDDGI I2 probe-update compute pass activation: the update pipeline + its DEDICATED
@@ -1362,21 +1377,25 @@ pub struct GBufferScene<'a> {
     /// software / non-RT path.
     #[cfg(feature = "hwrt")]
     pub atrous_layout_denoise_hwrt: Option<&'a VulkanBindGroupLayout>,
-    /// HW-RT rung 3a: `true` iff the author's `ShadowDenoiseConfig.mode == Spatial` (the boot
-    /// `ShadowDenoiseConfig::enabled()` read). The STABLE "denoise is on" signal used at CREATE time
-    /// to gate the resolve/à-trous SET build — it does NOT depend on the per-frame [`Self::shadow`]
-    /// activation (which is still `None` on the create frame), so the sets get built before the
-    /// render frame flips the activation on. Kept in sync across frames (a live config read). `false`
-    /// on the default (mode `None`) path ⇒ NO sets built ⇒ byte-identical.
+    /// HW-RT rung 3a/3b: `true` iff the denoise is ARMED — `spatial_enabled() || temporal_enabled()`
+    /// (the runner's `denoise_armed`). Rung 3a used the spatial-only predicate; Rung 3b widened it so
+    /// the Temporal-only mode (spatial off, temporal on) still builds the VIS set + the temporal sets.
+    /// The STABLE "denoise is on" signal used at CREATE time to gate the resolve/à-trous/temporal SET
+    /// build — it does NOT depend on the per-frame [`Self::shadow`] activation (which is still `None`
+    /// on the create frame), so the sets get built before the render frame flips the activation on.
+    /// Kept in sync across frames (a live config read). `false` on the default (mode `None`) path ⇒ NO
+    /// sets built ⇒ byte-identical. For Spatial the value is unchanged from 3a (`true`).
     #[cfg(feature = "hwrt")]
     pub shadow_denoise_enabled: bool,
-    /// HW-RT rung 3a: the STABLE `clamped_levels() % 2 == 1` parity — whether the FINAL à-trous
-    /// output lands in `shadow_vis2` (odd levels) vs `shadow_vis` (even). Derived from the boot
-    /// `ShadowDenoiseConfig::clamped_levels()` (the SAME clamp/parity the record + graph +
+    /// HW-RT rung 3a/3b: the STABLE `atrous_levels % 2 == 1` parity — whether the FINAL à-trous
+    /// output lands in `shadow_vis2` (odd count) vs `shadow_vis` (even count, incl. Temporal-only's
+    /// `atrous_levels == 0` ⇒ `shadow_vis` = the raw VIS). Derived from the runner's `atrous_levels`
+    /// (`spatial ? clamped_levels() : 0` — the SAME parity the record + graph +
     /// [`ShadowVisActivation::final_is_vis2`] use — W1 consistency), threaded stably so the DENOISED
-    /// resolve set binds `gShadowVis` @21 to the correct final ring at CREATE time, independent of
-    /// the per-frame [`Self::shadow`] activation. When the activation IS present, it MUST equal
-    /// [`ShadowVisActivation::final_is_vis2`] (asserted at the set-build site).
+    /// resolve set binds `gShadowVis` @21 + the temporal set binds `gVisIn` @0 to the correct final
+    /// ring at CREATE time, independent of the per-frame [`Self::shadow`] activation. When the
+    /// activation IS present, it MUST equal [`ShadowVisActivation::final_is_vis2`] (asserted at the
+    /// set-build site).
     #[cfg(feature = "hwrt")]
     pub shadow_denoise_final_is_vis2: bool,
     /// HW-RT Rung 3b step 5a: `true` iff the author's `ShadowDenoiseConfig.mode ∈ {Temporal, Both}`
@@ -1425,6 +1444,16 @@ pub struct GBufferScene<'a> {
     /// "hwrt")]`.
     #[cfg(feature = "hwrt")]
     pub motion_cam_ubo_ring: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// HW-RT Rung 3b step 6: the STABLE 8-binding temporal reproject bind-group LAYOUT (the layout
+    /// [`ShadowVisActivation::temporal_pipeline`] declares: `gVisIn` @0 / `gMotionVec` @1 / `gViewT`
+    /// @2 / `gHistIn` @3 / `gHistOut` @4 / `gTemporalOut` @5 STORAGE images + the `ResolvedTemporalShadow`
+    /// UBO @6 + the camera UBO @7). Populated from the boot temporal pipeline REGARDLESS of the
+    /// per-frame temporal gate (mirrors [`Self::resolve_layout_denoise_hwrt`]), so
+    /// [`GBufferTargets::build_shadow_temporal_sets`](crate::present::targets) can write the per-FIF
+    /// temporal set ONCE per extent decoupled from the activation. `None` on a non-RT / non-hwrt
+    /// device. `#[cfg(feature = "hwrt")]`.
+    #[cfg(feature = "hwrt")]
+    pub temporal_layout: Option<&'a VulkanBindGroupLayout>,
 }
 
 impl GBufferScene<'_> {
@@ -1465,6 +1494,21 @@ impl GBufferScene<'_> {
             && self.vis_mv_pipeline.is_some()
             && self.vis_mv_layout.is_some()
             && self.motion_cam_ubo_ring.is_some()
+    }
+
+    /// HW-RT Rung 3b step 6 — the SINGLE source of the "the temporal reproject+accumulate pass runs
+    /// this frame" decision, so the framegraph declaration (`declare_gbuffer_graph`: the temporal
+    /// pass + the resolve's `temporal_out`-vs-à-trous read) and the recording (`record_gbuffer`: the
+    /// temporal dispatch + the DENOISED resolve set selection) can never diverge (the W1 lesson,
+    /// mirroring [`Self::mesh_mv_active`] / [`Self::sdf_mv_active`]).
+    ///
+    /// True iff the spatial/temporal denoise arm opened this frame (`self.shadow.is_some()`, so the
+    /// VIS pass produced the input) AND the author's mode is temporal (`ShadowVisActivation::temporal`).
+    /// The physical temporal sets/pipeline presence is a STRICT SUPERSET the recorder additionally
+    /// checks (degrade-graceful), exactly as the à-trous recorder re-checks its pre-built sets.
+    #[cfg(feature = "hwrt")]
+    pub(crate) fn temporal_active(&self) -> bool {
+        self.shadow.as_ref().is_some_and(|sh| sh.temporal)
     }
 }
 

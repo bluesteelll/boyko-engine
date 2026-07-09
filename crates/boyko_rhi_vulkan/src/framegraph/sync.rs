@@ -209,6 +209,31 @@ impl ResSync {
             visible_stages: 0,
         }
     }
+
+    /// Cross-frame seed for a NON-RINGED, CONTENT-PERSISTENT image whose start-of-frame layout is a
+    /// REAL layout (NOT re-rendered) and whose SIBLING in-flight frame ends with an UNDRAINED WRITE
+    /// at `(stages, access)`. This frame's first access then derives a full memory dependency
+    /// (`src = stages/access`) — the RAW/WAW ordering + availability the sibling write needs —
+    /// WITHOUT discarding content (unlike [`seeded_writer`](Self::seeded_writer), whose UNDEFINED
+    /// layout would wipe a persistent accumulator). `access` must be a WRITE bit.
+    ///
+    /// This is the content-preserving RAW analogue of [`seeded_readers_at_layout`](Self::seeded_readers_at_layout)
+    /// (which is the content-preserving WAR seed). The Rung-3b temporal shadow-vis history uses it on
+    /// the READ image of its cross-frame ping-pong: the sibling frame WROTE that physical image, and
+    /// this frame's FIRST access is a READ, so a genuine `SHADER_WRITE → SHADER_READ` availability +
+    /// visibility barrier is required (the reader WAR seed would leave the read FREE/already-visible,
+    /// which is exactly the race). The `layout` is preserved (GENERAL for life). Ordering reaches the
+    /// sibling's still-pipelined write via single-queue submission order.
+    #[inline]
+    pub const fn seeded_writer_at_layout(layout: i32, stages: u32, access: u32) -> Self {
+        Self {
+            layout,
+            flush_access: access,
+            flush_stages: stages,
+            visible_access: 0,
+            visible_stages: 0,
+        }
+    }
 }
 
 /// The two halves of a required barrier + its layout transition, returned by

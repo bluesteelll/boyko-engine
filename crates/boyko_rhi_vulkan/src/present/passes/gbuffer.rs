@@ -1694,27 +1694,33 @@ impl Renderer<'_> {
             // per-level array bound). A prior `.min(atrous_sets.len())` here dropped the floor, so a
             // `levels == 0` author config would have recorded ZERO à-trous passes while the graph
             // declared / the DENOISED bind expected the floored count — a divergence.
-            let levels = (sh.levels as usize).clamp(1, crate::present::MAX_ATROUS_LEVELS as usize);
-            // The per-level set array is sized `MAX_ATROUS_LEVELS`, so the clamp ceiling already
-            // guarantees `levels <= atrous_sets.len()`; assert it so an array-size change can never
-            // silently let the `take(levels)` index past the built sets.
+            // Rung 3b: `atrous_levels` may be `0` (Temporal-only mode) ⇒ NO à-trous pass, the raw VIS
+            // feeds the temporal reproject. Only the CEILING is clamped (`.min`, not `.clamp(1, ..)`) —
+            // the same floor-0/ceiling-MAX the graph-declare site uses (W1). The graph declared exactly
+            // this many à-trous passes.
+            let atrous_levels =
+                (sh.atrous_levels as usize).min(crate::present::MAX_ATROUS_LEVELS as usize);
+            // The per-level set array is sized `MAX_ATROUS_LEVELS`, so the ceiling already guarantees
+            // `atrous_levels <= atrous_sets.len()`; assert it so an array-size change can never
+            // silently let the `take(atrous_levels)` index past the built sets.
             debug_assert!(
-                atrous_sets.len() >= levels,
-                "invariant: the à-trous set array must hold at least `levels` levels"
+                atrous_sets.len() >= atrous_levels,
+                "invariant: the à-trous set array must hold at least `atrous_levels` levels"
             );
-            // The DENOISED resolve set binds `gShadowVis` @21 to the FINAL à-trous ring, chosen by
-            // `final_is_vis2` (odd levels ⇒ `shadow_vis2`, even ⇒ `shadow_vis`). Assert the record
-            // parity matches so the denoised bind target can never diverge from the à-trous chain's
-            // last write (a divergence would read the wrong ring — a stale/uninitialized shadow).
+            // The DENOISED resolve set binds `gShadowVis` @21 to the FINAL à-trous ring (or, on the
+            // temporal path, `gVisIn` @0 of the temporal set), chosen by `final_is_vis2` (odd count ⇒
+            // `shadow_vis2`, even/`0` ⇒ `shadow_vis` = the raw VIS). Assert the record parity matches so
+            // the bind target can never diverge from the à-trous chain's last write (a divergence would
+            // read the wrong ring — a stale/uninitialized shadow).
             debug_assert_eq!(
                 sh.final_is_vis2,
-                levels % 2 == 1,
-                "denoised bind ring must match the last à-trous parity"
+                atrous_levels % 2 == 1,
+                "denoised/temporal bind ring must match the last à-trous parity"
             );
-            for (level, level_ring) in atrous_sets.iter().enumerate().take(levels) {
+            for (level, level_ring) in atrous_sets.iter().enumerate().take(atrous_levels) {
                 let atrous_pass = plan
                     .shadow_atrous[level]
-                    .expect("invariant: level < scene.shadow.levels ⇒ shadow_atrous[level] declared");
+                    .expect("invariant: level < scene.shadow.atrous_levels ⇒ shadow_atrous[level] declared");
                 let step: u32 = 1u32 << level;
                 // SAFETY: recording is open; `record_graph_pass` records the "shadow_atrous" pass's
                 // derived RAW barriers on the ping-pong pair into `cmd`.
@@ -1752,6 +1758,67 @@ impl Renderer<'_> {
                     );
                     (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
                 }
+            }
+        }
+
+        // === HW-RT Rung 3b step 6: the TEMPORAL reproject+accumulate pass. ===
+        // Runs AFTER the à-trous chain, BEFORE the resolve, when the author's mode is temporal
+        // (`scene.temporal_active()`) AND the pre-built temporal sets exist. Belt-and-suspenders (the
+        // à-trous precedent): the temporal sets are built decoupled on the STABLE boot signals, so
+        // `temporal_active()` normally implies them; a future gate mismatch DEGRADES GRACEFULLY — no
+        // temporal dispatch, and the `denoised_triple` below falls back to the à-trous DENOISED set
+        // (never a temporal-DENOISED bind reading an unwritten `temporal_out`). The pass reads the
+        // à-trous FINAL output (or the raw VIS when `atrous_levels == 0`) via `gVisIn`, `motion_vec`,
+        // `viewt`, and the cross-frame history `[1-fi]` (all bound in the set — the `[1-fi]` read is
+        // NOT framegraph-tracked, covered by the ResId-14 GENERAL seed), and writes the history `[fi]`
+        // + `temporal_out`. Its input/RAW barriers are graph-derived (the "shadow_temporal" pass).
+        #[cfg(feature = "hwrt")]
+        if scene.temporal_active()
+            && let Some(temporal_sets) = targets.shadow_temporal_set.as_ref()
+        {
+            let sh = scene
+                .shadow
+                .as_ref()
+                .expect("invariant: temporal_active() implies scene.shadow.is_some()");
+            let temporal_pipeline = sh.temporal_pipeline.expect(
+                "invariant: temporal_active() + the temporal set built implies the temporal pipeline",
+            );
+            let plan = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
+            let temporal_pass = plan
+                .shadow_temporal
+                .expect("invariant: scene.temporal_active() ⇒ shadow_temporal pass declared");
+            // SAFETY: recording is open; `record_graph_pass` records the "shadow_temporal" pass's
+            // derived input/RAW barriers (final-vis/motion_vec/viewt → read, hist[fi]/temporal_out
+            // first-touch/RAW) into `cmd`.
+            self.record_graph_pass(temporal_pass, cmd, targets, scene, fi);
+            let temporal_set = &temporal_sets[self.frame_index];
+            // SAFETY: recording is open; the temporal pipeline + its 8-binding layout are live on this
+            // device (caller contract); `temporal_set` binds gVisIn/gMotionVec/gViewT/gHistIn/gHistOut/
+            // gTemporalOut + the ResolvedTemporalShadow UBO + the camera UBO for `frame_index`;
+            // `dispatch_group_count_x` covers the pixel count (`numthreads(64,1,1)`, the resolve grid);
+            // `&temporal_set.descriptor_set` is a single-element local alive for the call. The temporal
+            // shader reads NO push (its params ride the b6 UBO); the pipeline's declared 4-byte COMPUTE
+            // range is bound-but-unread (no push recorded).
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    temporal_pipeline.pipeline,
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    temporal_pipeline.layout,
+                    0,
+                    1,
+                    &temporal_set.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
             }
         }
 
@@ -1836,16 +1903,26 @@ impl Renderer<'_> {
         // (RESOLVE_INLINE) or the software triple ⇒ byte-identical.
         #[cfg(feature = "hwrt")]
         let denoised_triple = scene.shadow.as_ref().and_then(|sh| {
-            targets
-                .shadow_denoised_resolve_set
-                .as_ref()
-                .map(|sets| {
-                    (
-                        sh.denoised_pipeline.pipeline,
-                        sh.denoised_pipeline.layout,
-                        &sets[self.frame_index],
-                    )
-                })
+            // Rung 3b step 6 (S1): on a TEMPORAL frame the DENOISED resolve reads `temporal_out` via the
+            // sibling `shadow_temporal_denoised_resolve_set` (@21 = `temporal_out[fi]`); otherwise it
+            // reads the à-trous FINAL ring via `shadow_denoised_resolve_set` (the Rung-3a path,
+            // byte-identical). `temporal_active()` is the SINGLE source shared with the graph's temporal
+            // read + the temporal dispatch above (W1). If the selected set is absent (a gate mismatch),
+            // the `.map` yields `None` ⇒ `denoised_triple` falls through to the RESOLVE_INLINE
+            // `hwrt_triple` — matching the temporal-dispatch degrade above (never a temporal-DENOISED
+            // bind reading an unwritten `temporal_out`).
+            let sets = if scene.temporal_active() {
+                targets.shadow_temporal_denoised_resolve_set.as_ref()
+            } else {
+                targets.shadow_denoised_resolve_set.as_ref()
+            };
+            sets.map(|sets| {
+                (
+                    sh.denoised_pipeline.pipeline,
+                    sh.denoised_pipeline.layout,
+                    &sets[self.frame_index],
+                )
+            })
         });
         // The software triple (the default / byte-identical path).
         let (resolve_pipeline_h, resolve_layout_h, resolve_set_h) = {

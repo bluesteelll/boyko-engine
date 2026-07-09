@@ -37,7 +37,8 @@ use boyko_render::{
 #[cfg(all(windows, feature = "hwrt"))]
 use boyko_render::{
     RayBackend, RayBackendConfig, RayGeom, RayWorkload, ResolvedRayShadow, ResolvedShadowDenoise,
-    upload_mesh_ids, upload_ray_shadow_ring, upload_shadow_denoise_ring,
+    ResolvedTemporalShadow, upload_mesh_ids, upload_ray_shadow_ring, upload_shadow_denoise_ring,
+    upload_temporal_shadow_ring,
 };
 #[cfg(windows)]
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
@@ -197,19 +198,27 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // overrides (the resource always exists; on a non-RT device the gate's `tlas_enabled` half
     // keeps the pass off regardless).
     if let Ok(v) = std::env::var("BOYKO_SHADOW_DENOISE") {
-        let spatial = matches!(v.trim().to_ascii_lowercase().as_str(), "spatial" | "1" | "true");
-        if spatial {
+        // Rung 3b step 7: the 4-state selector. `spatial`/`1`/`true` keep the Rung-3a SPATIAL (à-trous)
+        // path; `temporal` selects the cross-frame reproject (0 à-trous); `both` runs à-trous THEN
+        // temporal. Any other value leaves the default `None` (byte-identical).
+        let mode = match v.trim().to_ascii_lowercase().as_str() {
+            "spatial" | "1" | "true" => Some(ShadowDenoiseMode::Spatial),
+            "temporal" => Some(ShadowDenoiseMode::Temporal),
+            "both" => Some(ShadowDenoiseMode::Both),
+            _ => None,
+        };
+        if let Some(mode) = mode {
             let levels = std::env::var("BOYKO_SHADOW_DENOISE_LEVELS")
                 .ok()
                 .and_then(|s| s.trim().parse::<u32>().ok());
             let cfg = app.world_mut().resource_mut::<ShadowDenoiseConfig>();
-            cfg.mode = ShadowDenoiseMode::Spatial;
+            cfg.mode = mode;
             if let Some(levels) = levels {
                 cfg.levels = levels;
             }
             let clamped = cfg.clamped_levels();
             eprintln!(
-                "boyko_app: BOYKO_SHADOW_DENOISE={v} - enabling the SPATIAL (a-trous) shadow denoise (levels={clamped})"
+                "boyko_app: BOYKO_SHADOW_DENOISE={v} - enabling the {mode:?} shadow denoise (à-trous levels={clamped})"
             );
         }
     }
@@ -682,6 +691,29 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                         upload_shadow_denoise_ring(&token, denoise_slot, resolved_denoise);
                     }
                 }
+
+                // 5d''''. HW-RT Rung 3b step 6: the temporal reproject scalars
+                //         (`feedback_max`/`feedback_min`/`variance_gamma`/`depth_tol`) into the
+                //         renderer's `temporal_shadow_ubo[s]` — the temporal set binds slot `s` @6.
+                //         `resolve_temporal_shadow_policy` re-derives it from the author
+                //         `ShadowDenoiseConfig` each frame (a boot-seed would go stale on a retune,
+                //         mirroring the à-trous upload above). `temporal_shadow_ubo_slot` is `None`
+                //         until the targets sync (frame 0) OR when the temporal denoise is not armed
+                //         (the ring was never minted) — in both the temporal pass is not recorded, so
+                //         the (absent) slot is never read.
+                if let Some(temporal_slot) = host.frame.temporal_shadow_ubo_slot(s) {
+                    let resolved_temporal = world.resource::<ResolvedTemporalShadow>();
+                    // SAFETY: `temporal_slot` is the renderer's `temporal_shadow_ubo[s]` — a live
+                    // host-coherent >= RESOLVED_TEMPORAL_SHADOW_BYTES UNIFORM buffer minted under this
+                    // same `ray_query_enabled()` gate (in `build_shadow_temporal_sets`), live until the
+                    // targets are torn down (device-idle). The FENCED slot `s == token.slot()`: the
+                    // borrowed `FrameWriteToken` proves this slot's in-flight fence was waited THIS
+                    // frame (the previous occupant's temporal reproject retired; the sibling frame binds
+                    // the other slot) — the same borrow-is-fence-proof shape as `upload_shadow_denoise_ring`.
+                    unsafe {
+                        upload_temporal_shadow_ring(&token, temporal_slot, resolved_temporal);
+                    }
+                }
             }
 
             // 6a. DrawBatch → GBufferMeshDraw: resolve each batch's mesh to its
@@ -829,22 +861,22 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 }
                 ctx.ray_query_enabled() && backend_hw && scratch.instance_count() > 0
             };
-            // HW-RT rung 3a step 7: read the author's spatial-denoise gate + clamped level
-            // count from the world (`ShadowDenoisePlugin` inserts both). `spatial_enabled()` is
-            // the structural `mode ∈ {Spatial, Both}` predicate (Rung 3b grew the enum; this
-            // gate stays the SPATIAL path only — `None`/`Temporal` ⇒ `false`, unchanged from 3a
-            // for `None`/`Spatial`); the OTHER three `scene.shadow` gate conditions
-            // (`backend == HardwareTri`, `tlas_nonempty`, `has_primary_directional`) are threaded
-            // via `tlas_enabled` + the `csm_armed` arg inside `scene()`. Default `mode == None`
-            // ⇒ `false` ⇒ `scene.shadow == None` ⇒ byte-identical.
+            // HW-RT rung 3a/3b step 7: read the author's denoise mode from the world
+            // (`ShadowDenoisePlugin` inserts the config). `denoise_armed = spatial || temporal` is the
+            // widened arm gate (Rung 3b: Temporal-only still arms the VIS pass + the temporal sets);
+            // `atrous_levels = spatial ? clamped_levels() (>=1) : 0` (Temporal-only runs 0 à-trous, so
+            // the raw VIS feeds the temporal reproject); `temporal_enabled` is the structural
+            // `mode ∈ {Temporal, Both}` predicate (the MESH-MV raster + the temporal pass gate). The
+            // OTHER three `scene.shadow` gate conditions (`backend == HardwareTri`, `tlas_nonempty`,
+            // `has_primary_directional`) are threaded via `tlas_enabled` + `csm_armed` inside `scene()`.
+            // Default `mode == None` ⇒ `denoise_armed == false` ⇒ `scene.shadow == None` ⇒ byte-identical.
             #[cfg(feature = "hwrt")]
-            let (shadow_denoise_enabled, shadow_denoise_levels, temporal_enabled) = {
+            let (denoise_armed, atrous_levels, temporal_enabled) = {
                 let cfg = world.resource::<boyko_render::ShadowDenoiseConfig>();
-                // Rung 3b step 5a: `temporal_enabled()` is the structural `mode ∈ {Temporal, Both}`
-                // predicate — the per-frame gate that swaps the raster pass to the MESH
-                // motion-vector pipeline. Default `mode == None` ⇒ `false` ⇒ base 3-MRT raster ⇒
-                // byte-identical.
-                (cfg.spatial_enabled(), cfg.clamped_levels(), cfg.temporal_enabled())
+                let spatial = cfg.spatial_enabled();
+                let temporal = cfg.temporal_enabled();
+                let atrous_levels = if spatial { cfg.clamped_levels() } else { 0 };
+                (spatial || temporal, atrous_levels, temporal)
             };
             let scene = host.gpu.scene(
                 mvp,
@@ -860,9 +892,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 #[cfg(feature = "hwrt")]
                 tlas_enabled,
                 #[cfg(feature = "hwrt")]
-                shadow_denoise_enabled,
+                denoise_armed,
                 #[cfg(feature = "hwrt")]
-                shadow_denoise_levels,
+                atrous_levels,
                 #[cfg(feature = "hwrt")]
                 temporal_enabled,
                 ctx,

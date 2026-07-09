@@ -8,6 +8,12 @@ use boyko_rhi::{
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi::{BufferDesc, BufferUsage, MemoryLocation};
+#[cfg(feature = "hwrt")]
+use boyko_rhi::{
+    ImageAspect, ImageBarrierDesc, ImageLayout, ImageSubresourceRange, RhiCommandEncoder, RhiQueue,
+};
+#[cfg(feature = "hwrt")]
+use boyko_rhi::enums::{BarrierAccess, BarrierStage};
 
 use crate::device::VulkanContext;
 use crate::ffi::*;
@@ -227,6 +233,34 @@ pub struct GBufferTargets {
     /// The whole field is `#[cfg(feature = "hwrt")]`.
     #[cfg(feature = "hwrt")]
     pub(crate) shadow_vis_mv_resolve_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// HW-RT Rung 3b step 6: the temporal reproject UBO RING (one 16-byte `HostVisibleCoherent` slot
+    /// per in-flight frame), carrying `ResolvedTemporalShadow`
+    /// (`feedback_max`/`feedback_min`/`variance_gamma`/`depth_tol`, live-tunable). A SEPARATE ring
+    /// from [`Self::shadow_denoise_ubo`] (the à-trous edge-stop UBO) — the temporal set binds its own
+    /// slot @6, the host writes that slot before the present (lock-free WAR). `None` unless the
+    /// temporal denoise is armed AND its rings exist. `#[cfg(feature = "hwrt")]`.
+    #[cfg(feature = "hwrt")]
+    pub(crate) temporal_shadow_ubo: Option<[BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// HW-RT Rung 3b step 6: the temporal reproject descriptor set RING (one 8-binding set per
+    /// in-flight frame), written ONCE per extent against the boot temporal layout
+    /// ([`GBufferScene::temporal_layout`]). Slot `fi` binds `gVisIn` @0 = the à-trous FINAL ring
+    /// (`shadow_vis` when `atrous_levels == 0`, else the parity ring), `gMotionVec` @1 =
+    /// `motion_vec[fi]`, `gViewT` @2 = `viewt[fi]`, `gHistIn` @3 = `shadow_temporal_hist[1-fi]`,
+    /// `gHistOut` @4 = `shadow_temporal_hist[fi]`, `gTemporalOut` @5 = `temporal_out[fi]`, the
+    /// `ResolvedTemporalShadow` UBO @6 = `temporal_shadow_ubo[fi]`, the camera UBO @7 =
+    /// `scene.camera_ring[fi]`. `None` unless the temporal denoise is armed + its rings exist. The
+    /// recorder selects `shadow_temporal_set[self.frame_index]`. `#[cfg(feature = "hwrt")]`.
+    #[cfg(feature = "hwrt")]
+    pub(crate) shadow_temporal_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// HW-RT Rung 3b step 6: the DENOISED resolve set RING for the TEMPORAL path — a sibling of
+    /// [`Self::shadow_denoised_resolve_set`] identical except `gShadowVis` @21 is fed
+    /// `temporal_out[i]` (the temporal-accumulate OUTPUT) instead of the à-trous FINAL ring, which the
+    /// DENOISED resolve READS when temporal is active. `None` on the OFF path; the recorder selects
+    /// `shadow_temporal_denoised_resolve_set[self.frame_index]` when
+    /// [`GBufferScene::temporal_active`](crate::present::scene_types::GBufferScene::temporal_active).
+    /// `#[cfg(feature = "hwrt")]`.
+    #[cfg(feature = "hwrt")]
+    pub(crate) shadow_temporal_denoised_resolve_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// SDFDDGI I2: the probe-update descriptor set, written ONCE against
     /// [`DdgiUpdateActivation::layout`](crate::present::scene_types::DdgiUpdateActivation::layout)
     /// (7 bindings: `Buf` @0 R, `gIrrOut` @1 W, `gDepthOut` @2 W storage images, `Classification` @3
@@ -307,6 +341,20 @@ const MOTION_VEC_FORMAT: Format = Format::R16G16Sfloat;
 /// normalized `[0,1]` quantity.
 #[cfg(feature = "hwrt")]
 const SHADOW_TEMPORAL_HIST_FORMAT: Format = Format::R16G16B16A16Unorm;
+
+// HW-RT Rung 3b C1/H2 invariant: `shadow_temporal_hist` is a PARITY-indexed cross-frame ping-pong
+// POOL (frame `fi` writes `pool[fi]`, reads `pool[fi^1]`). The parity index collapses onto the
+// physical `[VulkanTexture; FRAMES_IN_FLIGHT]` ring ONLY at FIF == 2 (parity == slot). The
+// cross-frame ordering ALSO rests on single-queue submission order (one `vkQueueSubmit` per frame
+// reaches the sibling's prior submit); moving the temporal pass to an async-compute queue would
+// require a timeline semaphore, not this ring (critic M2). Arming is boot-static via
+// `BOYKO_SHADOW_DENOISE`, so the pool config never changes after boot (critic M1 moot).
+#[cfg(feature = "hwrt")]
+const _: () = assert!(
+    FRAMES_IN_FLIGHT == 2,
+    "the temporal history is a PARITY-indexed cross-frame ping-pong pool; FIF>=3 needs the hist \
+     read/write descriptors + the sink ResId-16 bind selected by PARITY, not the FIF slot"
+);
 
 /// HW-RT Rung 3b: the temporal-accumulate OUTPUT `temporal_out` format: `R16G16_UNORM` — the SAME
 /// format as [`SHADOW_VIS_FORMAT`] (the DENOISED resolve reads it at `gShadowVis` @21). A DEDICATED
@@ -435,6 +483,20 @@ struct ShadowDenoiseSets {
     atrous: [[VulkanBindGroup; FRAMES_IN_FLIGHT]; crate::present::MAX_ATROUS_LEVELS as usize],
     /// The à-trous edge-stop UBO ring (16 B `HostVisibleCoherent` per FIF slot, zero-seeded).
     ubo: [BoundBuffer; FRAMES_IN_FLIGHT],
+}
+
+/// HW-RT Rung 3b step 6: the bundle [`GBufferTargets::build_shadow_temporal_sets`] returns — the
+/// temporal reproject UBO ring, the 8-binding temporal reproject set ring, and the DENOISED-temporal
+/// resolve set ring. Moved field-by-field into the [`GBufferTargets`] `Option`s at `create` time.
+#[cfg(feature = "hwrt")]
+struct ShadowTemporalSets {
+    /// The temporal reproject UBO ring (16 B `HostVisibleCoherent` per FIF slot, zero-seeded).
+    ubo: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// The 8-binding temporal reproject set ring (`gVisIn`/motion/viewt/hist-in/hist-out/temporal-out
+    /// + the temporal UBO + the camera UBO).
+    temporal: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// The DENOISED-temporal resolve set ring (`gShadowVis` @21 = `temporal_out[i]`, the READ).
+    denoised: [VulkanBindGroup; FRAMES_IN_FLIGHT],
 }
 
 impl GBufferTargets {
@@ -846,6 +908,220 @@ impl GBufferTargets {
         Some(slots.map(|s| s.expect("invariant: every VIS-MV resolve ring slot built")))
     }
 
+    /// HW-RT Rung 3b step 6: builds the temporal-denoise descriptor sets — the temporal reproject UBO
+    /// ring, the 8-binding temporal reproject set, and the sibling DENOISED-temporal resolve set (which
+    /// binds `gShadowVis` @21 to `temporal_out` instead of the à-trous ring).
+    ///
+    /// DECOUPLED from the per-frame temporal activation (the same lesson as
+    /// [`Self::build_shadow_vis_mv_resolve_set`]): it gates on the STABLE signals so the sets already
+    /// exist before a render frame flips [`GBufferScene::temporal_active`] on. Returns `None` (the
+    /// byte-identical OFF path) unless ALL hold: the denoise is armed (`scene.shadow_denoise_enabled`)
+    /// AND temporal (`scene.temporal_enabled`) AND the temporal layout + the VIS/DENOISED layout + the
+    /// `shadow_vis`/`shadow_vis2`/`motion_vec`/`shadow_temporal_hist`/`temporal_out` rings + the
+    /// persistent TLAS ring all exist (an RT + storage device). Built LAST in `create` (after every
+    /// fallible set + the temporal target rings) and DEGRADES-TO-`None` on any `create_*` failure
+    /// (draining its own partials) — nothing depends on it, so no teardown weaves into the ladder.
+    ///
+    /// `#[allow(clippy::too_many_arguments)]`: the image rings + the two L1 placeholder buffers are the
+    /// exact borrows the sets bind (the same list [`resolve_software_entries`] consumes); grouping them
+    /// would only move the argument list.
+    #[cfg(feature = "hwrt")]
+    #[allow(clippy::too_many_arguments)]
+    fn build_shadow_temporal_sets(
+        ctx: &VulkanContext,
+        scene: &GBufferScene<'_>,
+        albedo: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        normal: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        material: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        lit: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        viewt: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        ssao: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        shadow_vis: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        shadow_vis2: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        motion_vec: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        shadow_temporal_hist: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        temporal_out: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        cluster_grid_buf: &BoundBuffer,
+        light_index_buf: &BoundBuffer,
+    ) -> Option<ShadowTemporalSets> {
+        // The STABLE-signal gate (see the doc): the denoise is armed + temporal AND every input the
+        // temporal set + the denoised-temporal set bind is present. DECOUPLED from
+        // `scene.temporal_active()` (the per-frame activation) — building on the STABLE signals so the
+        // sets already exist before a frame flips it on (the "build denoise sets on stable boot
+        // config, not the per-frame gate, else set=None panic when the gate opens late" lesson). Any
+        // absent ⇒ the byte-identical OFF path.
+        let (temporal_layout, denoise_layout, vis_ring, vis2_ring, mvec, hist, tout, tlas) = match (
+            scene.shadow_denoise_enabled && scene.temporal_enabled,
+            scene.temporal_layout,
+            scene.resolve_layout_denoise_hwrt,
+            shadow_vis,
+            shadow_vis2,
+            motion_vec,
+            shadow_temporal_hist,
+            temporal_out,
+            scene.resolve_tlas_hwrt,
+        ) {
+            (true, Some(tl), Some(dl), Some(v), Some(v2), Some(mv), Some(h), Some(to), Some(t)) => {
+                (tl, dl, v, v2, mv, h, to, t)
+            }
+            _ => return None,
+        };
+        // The à-trous FINAL ring feeds `gVisIn` @0 (the temporal input): `shadow_vis2` for odd
+        // `atrous_levels`, `shadow_vis` for even (incl. Temporal-only's `0` ⇒ the raw VIS). The SAME
+        // parity the DENOISED resolve set + the record + graph use (W1).
+        let final_ring = if scene.shadow_denoise_final_is_vis2 { vis2_ring } else { vis_ring };
+
+        // (1) The temporal reproject UBO ring — one 16-byte host-coherent slot per FIF, zero-seeded
+        // (the host memcpys `ResolvedTemporalShadow` each frame). On a slot's failure, drain [0..i).
+        let mut ubo_slots: [Option<BoundBuffer>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for (i, dst) in ubo_slots.iter_mut().enumerate() {
+            let b = match RhiDevice::create_buffer(
+                ctx,
+                &BufferDesc {
+                    size: crate::present::TEMPORAL_SHADOW_UBO_BYTES,
+                    usage: BufferUsage::UNIFORM,
+                    location: MemoryLocation::HostVisibleCoherent,
+                },
+            ) {
+                Ok(b) => b,
+                Err(_) => {
+                    // Degrade to None (opt-in, no dependents): drain the [0..i) UBO slots.
+                    // SAFETY: each was created on `ctx`, never submitted; destroy each once.
+                    unsafe {
+                        for s in ubo_slots.iter_mut().take(i) {
+                            if let Some(b) = s.take() {
+                                RhiDevice::destroy_buffer(ctx, b);
+                            }
+                        }
+                    }
+                    return None;
+                }
+            };
+            if let Some(p) = RhiDevice::buffer_mapped_ptr(ctx, &b) {
+                // SAFETY: `p` is the host-coherent mapping of a freshly-created >= 16-byte UNIFORM
+                // buffer; writing `TEMPORAL_SHADOW_UBO_BYTES` zeroes stays in-bounds; byte `0` is a
+                // valid init for the `f32` temporal lanes (host-overwritten before first read).
+                unsafe {
+                    core::ptr::write_bytes(
+                        p.as_ptr(),
+                        0,
+                        crate::present::TEMPORAL_SHADOW_UBO_BYTES as usize,
+                    );
+                }
+            }
+            *dst = Some(b);
+        }
+        let ubo: [BoundBuffer; FRAMES_IN_FLIGHT] =
+            ubo_slots.map(|s| s.expect("invariant: every temporal UBO ring slot built"));
+
+        // (2) The 8-binding temporal reproject set ring. Slot `fi` binds `gVisIn` @0 = `final_ring[fi]`,
+        // `gMotionVec` @1 = `motion_vec[fi]`, `gViewT` @2 = `viewt[fi]`, `gHistIn` @3 =
+        // `shadow_temporal_hist[1-fi]` (the cross-frame READ — bound DIRECTLY, not framegraph-tracked),
+        // `gHistOut` @4 = `shadow_temporal_hist[fi]` (the WRITE), `gTemporalOut` @5 = `temporal_out[fi]`,
+        // the `ResolvedTemporalShadow` UBO @6 = `ubo[fi]`, the camera UBO @7 = `scene.camera_ring[fi]`.
+        // On a slot's failure, drain the [0..slot) temporal sets + the UBO ring.
+        let mut temporal_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for (slot, dst) in temporal_slots.iter_mut().enumerate() {
+            let prev = FRAMES_IN_FLIGHT - 1 - slot;
+            let entries = [
+                BindGroupEntry::StorageImage { texture: &final_ring[slot] },
+                BindGroupEntry::StorageImage { texture: &mvec[slot] },
+                BindGroupEntry::StorageImage { texture: &viewt[slot] },
+                BindGroupEntry::StorageImage { texture: &hist[prev] },
+                BindGroupEntry::StorageImage { texture: &hist[slot] },
+                BindGroupEntry::StorageImage { texture: &tout[slot] },
+                BindGroupEntry::UniformBuffer { buffer: &ubo[slot] },
+                BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
+            ];
+            let desc = BindGroupDesc::<Vulkan> { layout: temporal_layout, entries: &entries };
+            match RhiDevice::create_bind_group(ctx, &desc) {
+                Ok(g) => *dst = Some(g),
+                Err(_) => {
+                    // SAFETY: the [0..slot) temporal sets + the whole UBO ring were created on `ctx`,
+                    // never submitted; destroy each once (reverse acquisition: sets → UBO).
+                    unsafe {
+                        for s in temporal_slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for b in ubo {
+                            RhiDevice::destroy_buffer(ctx, b);
+                        }
+                    }
+                    return None;
+                }
+            }
+        }
+        let temporal: [VulkanBindGroup; FRAMES_IN_FLIGHT] =
+            temporal_slots.map(|s| s.expect("invariant: every temporal reproject set slot built"));
+
+        // (3) The DENOISED-temporal resolve set ring — the SAME 22 VIS/DENOISED entries as the base
+        // DENOISED set (the 19 shared via `resolve_software_entries` + TLAS @19 + soft-shadow UBO @20)
+        // EXCEPT `gShadowVis` @21 = `temporal_out[slot]` (the DENOISED resolve READS the accumulated
+        // visibility). Exact-fill at `RESOLVE_HWRT_DENOISE_BINDINGS` (22). On a slot's failure, drain
+        // the [0..slot) denoised-temporal sets + the whole temporal set ring + the UBO ring.
+        let mut den_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for (slot, dst) in den_slots.iter_mut().enumerate() {
+            let imgs = ResolveSlotImages {
+                albedo: &albedo[slot],
+                normal: &normal[slot],
+                material: &material[slot],
+                lit: &lit[slot],
+                viewt: &viewt[slot],
+                ssao: &ssao[slot],
+            };
+            let shared =
+                resolve_software_entries(scene, &imgs, slot, cluster_grid_buf, light_index_buf);
+            let mut chained = shared
+                .into_iter()
+                .chain(core::iter::once(BindGroupEntry::AccelerationStructure {
+                    accel: tlas[slot],
+                }))
+                .chain(core::iter::once(BindGroupEntry::UniformBuffer {
+                    buffer: &scene.ray_shadow_ubo[slot],
+                }))
+                .chain(core::iter::once(BindGroupEntry::StorageImage {
+                    texture: &tout[slot],
+                }));
+            let entries: [BindGroupEntry<'_, Vulkan>; RESOLVE_HWRT_DENOISE_BINDINGS] =
+                core::array::from_fn(|_| {
+                    chained.next().expect(
+                        "invariant: the chained iterator yields exactly RESOLVE_HWRT_DENOISE_BINDINGS entries",
+                    )
+                });
+            let dsc = BindGroupDesc::<Vulkan> { layout: denoise_layout, entries: &entries };
+            match RhiDevice::create_bind_group(ctx, &dsc) {
+                Ok(g) => *dst = Some(g),
+                Err(_) => {
+                    // SAFETY: the [0..slot) denoised-temporal sets + the whole temporal set ring + the
+                    // UBO ring were created on `ctx`, never submitted; destroy each once.
+                    unsafe {
+                        for s in den_slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in temporal {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        for b in ubo {
+                            RhiDevice::destroy_buffer(ctx, b);
+                        }
+                    }
+                    return None;
+                }
+            }
+        }
+        let denoised: [VulkanBindGroup; FRAMES_IN_FLIGHT] =
+            den_slots.map(|s| s.expect("invariant: every DENOISED-temporal resolve set slot built"));
+
+        Some(ShadowTemporalSets { ubo, temporal, denoised })
+    }
+
     /// Creates a 2D `R8G8B8A8_UNORM` storage image at `extent` with `usage`. A small
     /// helper shared by the albedo/normal/material allocations in [`Self::create`].
     fn create_gbuffer_image(
@@ -1047,6 +1323,140 @@ impl GBufferTargets {
             }
         }
         Some(slots.map(|s| s.expect("invariant: every denoise ring slot built above")))
+    }
+
+    /// HW-RT Rung 3b C1/H2: builds the temporal shadow-vis HISTORY POOL ring AND boot-clears BOTH
+    /// physical slots before the first frame reads them. `shadow_temporal_hist` is a CROSS-FRAME
+    /// PERSISTENT parity ping-pong POOL; the framegraph seeds ResId 14/16 at `GENERAL`, which ASSUMES
+    /// the image already holds a real `GENERAL` layout — but a fresh image is `UNDEFINED`. This clears
+    /// each slot to `[1, 0, 0, 0]` (R = vis = 1, G = conf = 0 ⇒ the first temporal read sees
+    /// `conf == 0` = a disocclusion reset / the I5 single-frame fallback, never stale accumulation)
+    /// and transitions `UNDEFINED` → `GENERAL`, satisfying the seed's layout assumption AND making the
+    /// clear visible to the first `COMPUTE` read.
+    ///
+    /// # Placement (H2(a))
+    ///
+    /// Called from [`Self::create`] (the tuple build), NOT a boot-only one-shot: `sync_gbuffer`'s
+    /// resize path rebuilds targets through `create`, so a resize RE-clears the fresh pool.
+    ///
+    /// DEGRADES to `None` (leak-safe, temporal off ⇒ byte-identical) on any build / encoder / submit /
+    /// fence failure, like [`Self::build_denoise_ring`].
+    #[cfg(feature = "hwrt")]
+    fn build_and_clear_shadow_temporal_hist(
+        ctx: &VulkanContext,
+        extent: VkExtent2D,
+    ) -> Option<[VulkanTexture; FRAMES_IN_FLIGHT]> {
+        let pool = Self::build_denoise_ring(ctx, extent, Self::create_shadow_temporal_hist_image)?;
+
+        match Self::boot_clear_shadow_temporal_hist(ctx, &pool) {
+            Ok(()) => Some(pool),
+            Err(_) => {
+                // Degrade to None (opt-in, no dependents). The boot-clear submit (if it ran) faulted
+                // — drain the device so no in-flight clear still references the pool before destroy.
+                let _ = RhiDevice::wait_idle(ctx);
+                // SAFETY: each pool texture was created on `ctx` in `build_denoise_ring`; the device is
+                // drained above ⇒ no submission references them; each is moved by value out of `pool`
+                // ⇒ destroyed exactly once.
+                for t in pool {
+                    unsafe { RhiDevice::destroy_texture(ctx, t) };
+                }
+                None
+            }
+        }
+    }
+
+    /// Records + submits ONE encoder that boot-clears BOTH `pool` slots
+    /// (`UNDEFINED` → `TRANSFER_DST_OPTIMAL` → clear → `GENERAL`) and fence-waits it — mirrors the
+    /// `DdgiAtlas::boot_clear_and_transition` precedent (all barriers/clears for both slots in one
+    /// encoder + one submit + one fence). The encoder + fence are setup-class transients torn down
+    /// here on every path.
+    #[cfg(feature = "hwrt")]
+    fn boot_clear_shadow_temporal_hist(
+        ctx: &VulkanContext,
+        pool: &[VulkanTexture; FRAMES_IN_FLIGHT],
+    ) -> Result<(), SwapchainError> {
+        let mut encoder =
+            RhiDevice::create_command_encoder(ctx).map_err(SwapchainError::DepthImage)?;
+        let fence = match RhiDevice::create_fence(ctx, false) {
+            Ok(f) => f,
+            Err(e) => {
+                // SAFETY: `encoder` was just created on `ctx`, never submitted; destroy once.
+                unsafe { RhiDevice::destroy_command_encoder(ctx, encoder) };
+                return Err(SwapchainError::DepthImage(e));
+            }
+        };
+
+        // The full COLOR range of a 2D single-layer image (per `create_shadow_temporal_hist_image`).
+        let range = ImageSubresourceRange {
+            aspect: ImageAspect::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+
+        let record = (|| -> Result<(), SwapchainError> {
+            encoder.begin().map_err(SwapchainError::DepthImage)?;
+
+            // Both slots: UNDEFINED → TRANSFER_DST_OPTIMAL (a fresh image has no prior contents, so
+            // UNDEFINED discards — this is the clear destination).
+            for tex in pool {
+                encoder.image_barrier(&ImageBarrierDesc {
+                    texture: tex,
+                    src_stage: BarrierStage::TOP_OF_PIPE,
+                    dst_stage: BarrierStage::TRANSFER,
+                    src_access: BarrierAccess::NONE,
+                    dst_access: BarrierAccess::TRANSFER_WRITE,
+                    old_layout: ImageLayout::Undefined,
+                    new_layout: ImageLayout::TransferDstOptimal,
+                    range,
+                });
+            }
+
+            // Clear each slot to R = vis = 1, G = conf = 0, B = depth = 0, A = 0. G = conf = 0 makes
+            // the FIRST temporal read a `conf == 0` disocclusion reset (the I5 single-frame fallback).
+            for tex in pool {
+                encoder.clear_color_image(
+                    tex,
+                    ImageLayout::TransferDstOptimal,
+                    [1.0, 0.0, 0.0, 0.0],
+                    range,
+                );
+            }
+
+            // Both slots: TRANSFER_DST_OPTIMAL → GENERAL, made available to COMPUTE_SHADER/SHADER_READ.
+            // H2(b): the fence wait below signals the CPU only — the first temporal read must SEE the
+            // clear, so the make-available targets COMPUTE/SHADER_READ; the GENERAL layout also
+            // satisfies the ResId-14/16 framegraph seed's GENERAL-layout assumption.
+            for tex in pool {
+                encoder.image_barrier(&ImageBarrierDesc {
+                    texture: tex,
+                    src_stage: BarrierStage::TRANSFER,
+                    dst_stage: BarrierStage::COMPUTE_SHADER,
+                    src_access: BarrierAccess::TRANSFER_WRITE,
+                    dst_access: BarrierAccess::SHADER_READ,
+                    old_layout: ImageLayout::TransferDstOptimal,
+                    new_layout: ImageLayout::General,
+                    range,
+                });
+            }
+
+            encoder.end().map_err(SwapchainError::DepthImage)?;
+            let queue = ctx.rhi_queue();
+            queue.submit(&encoder, &fence).map_err(SwapchainError::DepthImage)?;
+            RhiDevice::wait_fence(ctx, &fence, u64::MAX).map_err(SwapchainError::DepthImage)?;
+            Ok(())
+        })();
+
+        // Tear down the setup-class transients. The submit (if it ran) is fence-waited on the Ok path.
+        // SAFETY: encoder/fence were created on `ctx`; the encoder's only submission (if any) is
+        // fence-waited above on the Ok path (or never submitted / faulted on an error path), and each
+        // is moved by value ⇒ destroyed exactly once.
+        unsafe {
+            RhiDevice::destroy_command_encoder(ctx, encoder);
+            RhiDevice::destroy_fence(ctx, fence);
+        }
+        record
     }
 
     /// Allocates the depth + MRT G-buffer images at `extent` and writes the marcher
@@ -2027,7 +2437,7 @@ impl GBufferTargets {
             if ctx.device_caps().shadow_denoise_storage_ok() {
                 (
                     Self::build_denoise_ring(ctx, extent, Self::create_motion_vec_image),
-                    Self::build_denoise_ring(ctx, extent, Self::create_shadow_temporal_hist_image),
+                    Self::build_and_clear_shadow_temporal_hist(ctx, extent),
                     Self::build_denoise_ring(ctx, extent, Self::create_temporal_out_image),
                 )
             } else {
@@ -2053,6 +2463,34 @@ impl GBufferTargets {
             cluster_grid_buf,
             light_index_buf,
         );
+
+        // HW-RT Rung 3b step 6: the temporal reproject UBO ring + the 8-binding temporal set + the
+        // DENOISED-temporal resolve set. Built LAST (after every fallible set + the temporal target
+        // rings it binds) and DEGRADE-TO-NONE (opt-in, no dependents) — like the VIS-MV set, it needs
+        // no teardown weaving. `None` on every OFF path (denoise off / temporal off / non-storage /
+        // non-RT device) ⇒ byte-identical.
+        #[cfg(feature = "hwrt")]
+        let (temporal_shadow_ubo, shadow_temporal_set, shadow_temporal_denoised_resolve_set) =
+            match Self::build_shadow_temporal_sets(
+                ctx,
+                scene,
+                &albedo,
+                &normal,
+                &material,
+                &lit,
+                &viewt,
+                &ssao,
+                shadow_vis.as_ref(),
+                shadow_vis2.as_ref(),
+                motion_vec.as_ref(),
+                shadow_temporal_hist.as_ref(),
+                temporal_out.as_ref(),
+                cluster_grid_buf,
+                light_index_buf,
+            ) {
+                Some(sets) => (Some(sets.ubo), Some(sets.temporal), Some(sets.denoised)),
+                None => (None, None, None),
+            };
 
         Ok(Self {
             depth,
@@ -2088,6 +2526,12 @@ impl GBufferTargets {
             shadow_denoise_ubo,
             #[cfg(feature = "hwrt")]
             shadow_vis_mv_resolve_set,
+            #[cfg(feature = "hwrt")]
+            temporal_shadow_ubo,
+            #[cfg(feature = "hwrt")]
+            shadow_temporal_set,
+            #[cfg(feature = "hwrt")]
+            shadow_temporal_denoised_resolve_set,
             ddgi_update_set,
             present_set,
             extent,
@@ -2165,6 +2609,28 @@ impl GBufferTargets {
             // reverse acquisition). Each `Option`-guarded (present only on the denoise ON path — the
             // host keeps `scene.shadow == None` this rung, so these are `None` on every current
             // frame). Order within: à-trous sets → DENOISED resolve → VIS resolve → UBO ring.
+            // HW-RT Rung 3b step 6: the temporal reproject sets + UBO ring — acquired LAST (after the
+            // temporal target rings), so destroyed FIRST here (before the textures they bind). Order
+            // within: DENOISED-temporal set → temporal set → UBO ring. `Option`-guarded (present only
+            // on the temporal path).
+            #[cfg(feature = "hwrt")]
+            if let Some(dr) = self.shadow_temporal_denoised_resolve_set {
+                for g in dr {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            #[cfg(feature = "hwrt")]
+            if let Some(ts) = self.shadow_temporal_set {
+                for g in ts {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            #[cfg(feature = "hwrt")]
+            if let Some(ubo) = self.temporal_shadow_ubo {
+                for b in ubo {
+                    RhiDevice::destroy_buffer(ctx, b);
+                }
+            }
             // HW-RT Rung 3b step 5b: the SDF motion-vector VIS resolve set RING — acquired LAST among
             // the denoise sets (after `motion_vec`), so destroyed FIRST here (before the textures it
             // references). `Option`-guarded (present only on the `mode == Both` temporal path).
@@ -2339,6 +2805,21 @@ impl GBufferFrame {
         self.targets
             .as_ref()
             .and_then(|t| t.shadow_denoise_ubo.as_ref())
+            .map(|ring| &ring[slot])
+    }
+
+    /// HW-RT Rung 3b step 6: the fenced temporal reproject UBO ring slot the host memcpys
+    /// [`ResolvedTemporalShadow`](boyko_render's `ResolvedTemporalShadow`) into each frame (the
+    /// temporal set binds `temporal_shadow_ubo[fi]` @6). Returns `None` when the targets are not yet
+    /// synced (frame 0) OR the temporal denoise is not armed (the `temporal_shadow_ubo` ring was never
+    /// minted) — in both cases the temporal pass is not recorded, so the (absent) slot is never read.
+    /// Per-FIF ringed under the same WAR discipline as [`Self::shadow_denoise_ubo_slot`].
+    #[cfg(feature = "hwrt")]
+    #[inline]
+    pub fn temporal_shadow_ubo_slot(&self, slot: usize) -> Option<&BoundBuffer> {
+        self.targets
+            .as_ref()
+            .and_then(|t| t.temporal_shadow_ubo.as_ref())
             .map(|ring| &ring[slot])
     }
 

@@ -89,6 +89,16 @@ pub const MAX_ATROUS_LEVELS: u32 = 5;
 #[cfg(feature = "hwrt")]
 pub const SHADOW_DENOISE_UBO_BYTES: u64 = 16;
 
+/// HW-RT Rung 3b: the byte size of the temporal reproject UBO — the RHI-layer MIRROR of
+/// `boyko_render::RESOLVED_TEMPORAL_SHADOW_BYTES` (`size_of::<ResolvedTemporalShadow>()`, one std140
+/// vec4 = 16 B). A SEPARATE carrier from `SHADOW_DENOISE_UBO_BYTES` so the shipped à-trous UBO byte
+/// stream stays untouched. The RHI mints the per-FIF `temporal_shadow_ubo` ring at this size
+/// (`feedback_max` @0, `feedback_min` @4, `variance_gamma` @8, `depth_tol` @12); the host writes
+/// `ResolvedTemporalShadow`'s 16 bytes into the fenced slot. Kept equal to
+/// `boyko_render::RESOLVED_TEMPORAL_SHADOW_BYTES` (16).
+#[cfg(feature = "hwrt")]
+pub const TEMPORAL_SHADOW_UBO_BYTES: u64 = 16;
+
 /// Errors from surface / swapchain / present operations.
 #[derive(Debug)]
 pub enum SwapchainError {

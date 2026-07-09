@@ -57,7 +57,7 @@ use boyko_rhi_vulkan::accel_build::{
 use boyko_rhi_vulkan::compute::{
     BUILD_TLAS_INSTANCES_PUSH_BYTES, build_tlas_instances_spirv, deferred_pbr_denoised_spirv,
     deferred_pbr_hwrt_spirv, deferred_pbr_vis_mv_spirv, deferred_pbr_vis_spirv,
-    gbuffer_mrt_mv_fs_spirv, gbuffer_mrt_mv_vs_spirv, shadow_atrous_spirv,
+    gbuffer_mrt_mv_fs_spirv, gbuffer_mrt_mv_vs_spirv, shadow_atrous_spirv, shadow_temporal_spirv,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::swapchain::{ShadowVisActivation, TlasBuildActivation};
@@ -1335,6 +1335,15 @@ pub(crate) struct GpuSceneBundles {
     /// boot under the SAME gate as [`Self::shadow_denoise_pipelines`]; `None` otherwise.
     #[cfg(feature = "hwrt")]
     shadow_atrous_pipeline: Option<(ComputePipeline, VulkanBindGroupLayout)>,
+    /// HW-RT Rung 3b step 6: the temporal reproject compute pipeline (`shadow_temporal.comp`) + its
+    /// DEDICATED 8-binding layout { `gVisIn` @0, `gMotionVec` @1, `gViewT` @2, `gHistIn` @3, `gHistOut`
+    /// @4, `gTemporalOut` @5 STORAGE images, the `ResolvedTemporalShadow` UBO @6, the camera UBO @7 } +
+    /// a 4-byte declared-but-unread COMPUTE push (the RHI rejects a 0-byte compute range; the shader
+    /// reads no push — the DDGI-update precedent). Built at boot under the SAME `ray_query_enabled`
+    /// gate as [`Self::shadow_atrous_pipeline`]; `None` otherwise. Bound only when a frame's mode is
+    /// temporal (kept `None`/`Spatial` ⇒ unbound ⇒ byte-identical).
+    #[cfg(feature = "hwrt")]
+    shadow_temporal_pipeline: Option<(ComputePipeline, VulkanBindGroupLayout)>,
     /// HW-RT rung 1b: the HWRT soft-shadow-params UBO RING (one host-coherent slot per in-flight
     /// frame, [`RAY_SHADOW_UBO_BYTES`] each, zero-seeded). Slot `i` is bound into slot `i`'s HWRT
     /// resolve set at binding 20 (the tunable cone/tmax/tmin/bias) — each in-flight frame reads its
@@ -1904,6 +1913,52 @@ impl GpuSceneBundles {
                 (atrous_pipeline, atrous_layout)
             });
 
+        // ── HW-RT Rung 3b step 6: the temporal reproject pipeline + its 8-binding layout { `gVisIn`
+        // @0, `gMotionVec` @1, `gViewT` @2, `gHistIn` @3, `gHistOut` @4, `gTemporalOut` @5 STORAGE
+        // images, the `ResolvedTemporalShadow` UBO @6, the camera UBO @7 }. The shader declares NO push
+        // constant, but the RHI's `create_compute_pipeline` REJECTS a 0-byte range — so create it with
+        // `push_constant_bytes: 4` (a declared-but-unread COMPUTE range; the DDGI-update precedent),
+        // matching the RHI's minimum. Same `ray_query_enabled` gate as `shadow_atrous_pipeline`.
+        #[cfg(feature = "hwrt")]
+        let shadow_temporal_pipeline: Option<(ComputePipeline, VulkanBindGroupLayout)> =
+            ctx.ray_query_enabled().then(|| {
+                let temporal_layout = RhiDevice::create_bind_group_layout(
+                    device,
+                    &BindGroupLayoutDesc {
+                        entries: &[
+                            BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                        ],
+                    },
+                )
+                .expect("invariant: rung-3b temporal reproject bind-group layout create");
+                let temporal_cs = RhiDevice::create_shader_module(device, shadow_temporal_spirv())
+                    .expect("invariant: rung-3b temporal reproject compute shader module create");
+                let temporal_pipeline = RhiDevice::create_compute_pipeline(
+                    device,
+                    &ComputePipelineDesc {
+                        module: &temporal_cs,
+                        entry: c"main",
+                        // The shader reads no push; the RHI rejects a 0-byte compute range, so declare
+                        // the minimum 4-byte range (bound-but-unread — the DDGI-update precedent).
+                        push_constant_bytes: 4,
+                        bind_group_layout: Some(&temporal_layout),
+                        spec_constants: &[],
+                    },
+                )
+                .expect("invariant: rung-3b temporal reproject compute pipeline create");
+                // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+                // destroy it once; no GPU work is in flight yet.
+                unsafe { RhiDevice::destroy_shader_module(device, temporal_cs) };
+                (temporal_pipeline, temporal_layout)
+            });
+
         // Rung 1b: the HWRT soft-shadow-params UBO ring — minted ONLY on an RT device
         // (`ray_query_enabled`), the SAME gate that builds `resolve_pipeline_hwrt`. `None` on the
         // software path (the resolve set has no binding 20 there). Zero-seeded (the runner memcpys
@@ -2242,6 +2297,8 @@ impl GpuSceneBundles {
             #[cfg(feature = "hwrt")]
             shadow_atrous_pipeline,
             #[cfg(feature = "hwrt")]
+            shadow_temporal_pipeline,
+            #[cfg(feature = "hwrt")]
             ray_shadow_ubo,
             material_table,
             light_table,
@@ -2307,21 +2364,22 @@ impl GpuSceneBundles {
         ddgi_enabled: bool,
         frame_index: u32,
         #[cfg(feature = "hwrt")] tlas_enabled: bool,
-        // HW-RT rung 3a step 7: `ShadowDenoiseConfig.mode == Spatial` (the author gate — the
-        // runner reads `ShadowDenoiseConfig::enabled()` from the world). One of the four
-        // `scene.shadow` gate conditions; the other three (`backend == HardwareTri`,
-        // `tlas_nonempty`) are folded into `tlas_enabled`, and (`has_primary_directional`)
-        // into `csm.is_some()`.
-        #[cfg(feature = "hwrt")] shadow_denoise_enabled: bool,
-        // HW-RT rung 3a step 7: the host-clamped à-trous iteration count
-        // (`ShadowDenoiseConfig::clamped_levels()`). Threaded so `activation.levels` +
-        // `final_is_vis2 = levels % 2 == 1` use the SAME clamp/parity the record + graph
-        // sites assume (W1 consistency). Only read when the gate opens.
-        #[cfg(feature = "hwrt")] shadow_denoise_levels: u32,
-        // HW-RT Rung 3b step 5a: `ShadowDenoiseConfig.mode ∈ {Temporal, Both}` (the runner reads
+        // HW-RT rung 3a/3b step 7: the DENOISE-ARMED gate — `spatial_enabled() || temporal_enabled()`
+        // (the runner's `denoise_armed`). Rung 3a used the spatial-only predicate; Rung 3b widened it
+        // so Temporal-only (spatial off, temporal on) still arms the VIS pass + the temporal sets. One
+        // of the `scene.shadow` gate conditions; the others (`backend == HardwareTri`, `tlas_nonempty`)
+        // are folded into `tlas_enabled`, and (`has_primary_directional`) into `csm.is_some()`.
+        #[cfg(feature = "hwrt")] denoise_armed: bool,
+        // HW-RT rung 3a/3b step 7: the à-trous iteration count — `spatial ? clamped_levels() (>=1) : 0`
+        // (the runner threads `0` for Temporal-only, so the VIS pass feeds the temporal reproject its
+        // RAW output). Threaded so `activation.atrous_levels` + `final_is_vis2 = atrous_levels % 2 == 1`
+        // use the SAME parity the record + graph sites assume (W1 consistency). Only read when armed.
+        #[cfg(feature = "hwrt")] atrous_levels: u32,
+        // HW-RT Rung 3b step 5a/6: `ShadowDenoiseConfig.mode ∈ {Temporal, Both}` (the runner reads
         // `ShadowDenoiseConfig::temporal_enabled()`). When `true` AND the MV resources exist, the
-        // raster pass swaps to the MESH motion-vector pipeline (a 4th MRT writing Δuv). `false` (the
-        // default) ⇒ the base 3-MRT raster ⇒ byte-identical.
+        // raster pass swaps to the MESH motion-vector pipeline (a 4th MRT writing Δuv) and the
+        // temporal reproject pass runs after the à-trous chain. `false` (the default) ⇒ the base 3-MRT
+        // raster + no temporal pass ⇒ byte-identical.
         #[cfg(feature = "hwrt")] temporal_enabled: bool,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
@@ -2394,37 +2452,38 @@ impl GpuSceneBundles {
             }
         });
 
-        // HW-RT rung 3a step 7: the per-frame spatial-denoise gate. `scene.shadow = Some(..)`
-        // IFF ALL FOUR hold:
-        //   (1) `ShadowDenoiseConfig.mode == Spatial`  → `shadow_denoise_enabled` (the world read).
+        // HW-RT rung 3a/3b step 7: the per-frame denoise gate. `scene.shadow = Some(..)` IFF ALL hold:
+        //   (1) the denoise is armed (`spatial || temporal`) → `denoise_armed` (the world read).
         //   (2) the mesh-shadow backend is `HardwareTri` → folded into `tlas_enabled`.
         //   (3) a primary directional light exists     → `csm.is_some()` (the CSM arm is the
         //       primary-directional signal: `csm_armed = csm_mode_word == 1 && caster_count > 0`,
         //       and the VIS trace only writes for that light).
         //   (4) the TLAS is non-empty this frame       → folded into `tlas_enabled`
         //       (`ray_query_enabled() && backend_hw && instance_count() > 0`).
-        // When ANY condition is false ⇒ `None` ⇒ RESOLVE_INLINE-hwrt ⇒ byte-identical. The boot
-        // built `shadow_denoise_pipelines` + `shadow_atrous_pipeline` only on an RT device, so
-        // conditions (2)/(4) via `tlas_enabled` already imply both are `Some` — the `.zip` below
-        // is defensive (never `None` under the gate) but keeps the activation total. `levels` +
-        // `final_is_vis2` use the caller's `clamped_levels()` (W1: the SAME clamp/parity the
-        // record + graph sites assume).
+        // When ANY condition is false ⇒ `None` ⇒ RESOLVE_INLINE-hwrt ⇒ byte-identical. The boot built
+        // `shadow_denoise_pipelines` + `shadow_atrous_pipeline` (+ `shadow_temporal_pipeline`) only on
+        // an RT device, so conditions (2)/(4) via `tlas_enabled` already imply all are `Some` — the
+        // `.zip` below is defensive but keeps the activation total. `atrous_levels`/`temporal`/
+        // `final_is_vis2 = atrous_levels % 2 == 1` are threaded from the runner (W1: the SAME parity
+        // the record + graph sites assume). `temporal_pipeline` is the SEPARATE Option (built on the
+        // SAME gate, so `Some` under the arm) the recorder binds for the temporal dispatch.
         #[cfg(feature = "hwrt")]
-        let shadow = (shadow_denoise_enabled && tlas_enabled && csm.is_some())
+        let shadow = (denoise_armed && tlas_enabled && csm.is_some())
             .then(|| {
                 self.shadow_denoise_pipelines.as_ref().zip(self.shadow_atrous_pipeline.as_ref())
             })
             .flatten()
             .map(|((vis_pipeline, denoised_pipeline, resolve_layout), (atrous_pipeline, atrous_layout))| {
-                let levels = shadow_denoise_levels;
                 ShadowVisActivation {
                     vis_pipeline,
                     denoised_pipeline,
                     resolve_layout,
                     atrous_pipeline,
                     atrous_layout,
-                    levels,
-                    final_is_vis2: levels % 2 == 1,
+                    atrous_levels,
+                    final_is_vis2: atrous_levels % 2 == 1,
+                    temporal: temporal_enabled,
+                    temporal_pipeline: self.shadow_temporal_pipeline.as_ref().map(|(p, _)| p),
                 }
             });
 
@@ -2667,9 +2726,9 @@ impl GpuSceneBundles {
                 .as_ref()
                 .map(|(_, layout)| layout),
             #[cfg(feature = "hwrt")]
-            shadow_denoise_enabled,
+            shadow_denoise_enabled: denoise_armed,
             #[cfg(feature = "hwrt")]
-            shadow_denoise_final_is_vis2: shadow_denoise_levels % 2 == 1,
+            shadow_denoise_final_is_vis2: atrous_levels % 2 == 1,
             // HW-RT Rung 3b step 5a: the MESH motion-vector gate + refs. `temporal_enabled` is the
             // author's `mode ∈ {Temporal, Both}`; the pipeline/bind-group refs are `Some` only when
             // `self.mv` exists (an RT + storage device) AND temporal is on — so a temporal-OFF frame
@@ -2702,6 +2761,12 @@ impl GpuSceneBundles {
             vis_mv_layout: self.mv.as_ref().map(|m| &m.vis_mv_layout),
             #[cfg(feature = "hwrt")]
             motion_cam_ubo_ring: self.mv.as_ref().map(|m| &m.motion_cam_ubo),
+            // HW-RT Rung 3b step 6: the STABLE 8-binding temporal reproject layout (from the boot
+            // temporal pipeline, REGARDLESS of the per-frame gate — mirrors `resolve_layout_denoise_hwrt`),
+            // threaded so `GBufferTargets::build_shadow_temporal_sets` writes the per-FIF temporal set
+            // once per extent. `None` on a non-RT device.
+            #[cfg(feature = "hwrt")]
+            temporal_layout: self.shadow_temporal_pipeline.as_ref().map(|(_, l)| l),
         }
     }
 
@@ -2843,6 +2908,13 @@ impl GpuSceneBundles {
             }
             #[cfg(feature = "hwrt")]
             if let Some((pipeline, layout)) = self.shadow_atrous_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, pipeline);
+                RhiDevice::destroy_bind_group_layout(ctx, layout);
+            }
+            // HW-RT Rung 3b step 6: the temporal reproject pipeline + its 8-binding layout,
+            // `Option`-guarded (present only on an RT device). Pipeline before layout.
+            #[cfg(feature = "hwrt")]
+            if let Some((pipeline, layout)) = self.shadow_temporal_pipeline {
                 RhiDevice::destroy_compute_pipeline(ctx, pipeline);
                 RhiDevice::destroy_bind_group_layout(ctx, layout);
             }
