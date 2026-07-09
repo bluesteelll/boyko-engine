@@ -478,21 +478,27 @@ where
 // plain Rust on BOTH backends (it needs no `Cf` induction variable: `SSAO_BLUR_R` is a
 // compile-time bound, and `Option` has no Emit representation).
 //
-// # Track 1 scope: host-only (no Emit instantiation yet)
+// # Track 2: the SPAN-only Emit splice (resolved fork: no new loop-emit Cf facet)
 //
-// This body is authored generic over `C: Cf` (like every other leaf here) so a LATER increment
-// can instantiate `EmitCf` to generate the HLSL (a `.hlsl`/`.spv` change is a SEPARATE,
-// byte-identity-gated rung). NOTE it is NOT a drop-in Emit splice: unlike [`ssao_slice_body`]
-// (whose loops ARE emitted, via `C::runtime_for`), the neighbourhood WALK here is plain Rust on
-// both backends, so a bare `EmitCf` walk would unroll 49 inline per-tap `continue`s with no
-// enclosing emitted loop (invalid HLSL) and would NOT reproduce `deferred_pbr.hlsl`'s ROLLED
-// `for (dy) for (dx)`. The Emit rung must therefore wrap the tap in `runtime_for` (or emit a
-// branchless per-tap accumulate); only the loop STRUCTURE needs that decision — the per-tap math
-// + fold are byte-faithful. Track 1 instantiates `<EvalCf>` ONLY: the
-// crate-external `ssao_blur_edsl_sync` test proves the Eval gather is bit-identical to
-// `golden_ssao_blur` (pinning `ao == 1.0` so the fold is a provable no-op — see that test's
-// doc — which isolates the gather; the `ao_class`/`min` fold is covered by this module's own
-// unit tests below, since `golden_ssao_blur` itself does not model that fold).
+// The committed blur loop (`for (int dy = -SSAO_BLUR_R; dy <= SSAO_BLUR_R; ++dy) { for (int dx =
+// ...) { ... } }`) is a SIGNED, symmetric-range, `<=`-terminated header — structurally
+// INCOMPATIBLE with every existing loop-emit facet (`Cf::unroll_for` / `Cf::runtime_for`, both
+// HARDCODED by their `Stmt::UnrollFor`/`Stmt::Loop` printers to `for (uint <iv> = 0u; <iv> <
+// <bound>; ++<iv>)`). Neither remapping to an unsigned 0-based counter (an extra per-iteration
+// cast/subtract the committed `.comp.spv` does not contain) nor a bare unrolled `EmitCf` walk (49
+// inline `continue`s with no enclosing loop — invalid HLSL) is byte-safe or valid. The resolved
+// fork (mirroring [`emit_hlsl_ssao`]'s established "Framing (b)"): generate ONLY the per-tap
+// gate+accumulate SPAN ([`ssao_blur_tap_body`]) and the tail-combine SPAN
+// ([`ssao_blur_combine_body`]), splicing BOTH inside the hand-written loop nest, which stays
+// UNTOUCHED (the loop headers, the bounds `continue`, and the `gViewT`/`gSsao` `Load` calls are
+// hand-written glue — the SAME seam discipline [`ssao_slice_body`]'s `tap` closure and
+// [`ssao_estimate_body`]'s forward-reconstruct already use). `ssao_blur_body` now COMPOSES
+// [`ssao_blur_tap_body`] (the loop-body tap) and [`ssao_blur_combine_body`] (the post-loop fold);
+// its signature and Eval behavior are UNCHANGED, so `ssao_blur_edsl_sync`'s existing host-mirror
+// tests stay valid. `<EmitCf>` is instantiated by [`crate::emit::emit_hlsl_ssao_blur_tap`] /
+// [`crate::emit::emit_hlsl_ssao_blur_combine`]; the crate-external `ssao_blur_edsl_sync` test
+// pins both generated spans to the committed `deferred_pbr.hlsl` splice (a `.contains` drift
+// gate, mirroring `ssao_horizon_step_matches_edsl_emit`).
 
 /// The resolve's SSAO depth-aware box-blur half-kernel radius (`SSAO_BLUR_R` in
 /// `deferred_pbr.hlsl`). `R == 3` is a 7x7 box. Equals `boyko_rhi_vulkan::compute::SSAO_BLUR_R`.
@@ -510,8 +516,12 @@ pub const SSAO_BLUR_DEPTH_TOL: f32 = 0.1;
 /// pixel, which has no field AO (`ao_class` then takes the pure SSAO average unconditionally).
 /// Equals `boyko_rhi_vulkan::compute::SSAO_VIEWT_BG`. Emit note: unlike `SSAO_BLUR_R` /
 /// `SSAO_BLUR_DEPTH_TOL` (both declared `static const` in `deferred_pbr.hlsl`), the shader spells
-/// this sentinel as the BARE literal `1.0e30` — there is no `SSAO_VIEWT_BG` symbol there — so a
-/// future `EmitCf` rung must emit the literal or first declare the const to stay byte-identical.
+/// this sentinel as the BARE literal `1.0e30` — there is no `SSAO_VIEWT_BG` symbol there.
+/// [`ssao_blur_combine_body`] therefore spells it via `C::Scalar::lit(SSAO_VIEWT_BG)`
+/// ([`FieldScalar::lit`], the VALUE), NOT `C::named_lit` (the SYMBOL) — `fmt_lit`'s
+/// scientific-notation branch renders `1.0e30` exactly, matching the committed literal; a
+/// `named_lit` would instead spell the undeclared identifier `SSAO_VIEWT_BG` (an HLSL compile
+/// error).
 pub const SSAO_VIEWT_BG: f32 = 1.0e30;
 
 /// Accumulates ONE blur neighbour tap into the running `(sum, cnt)` box-filter accumulators —
@@ -547,6 +557,54 @@ pub fn ssao_blur_tap_body<C: Cf>(
     Flow::Continue(())
 }
 
+/// Folds the accumulated box-filter `sum`/`cnt` into the resolve's final `ao_final` — the TAIL
+/// combine AFTER the `(2*SSAO_BLUR_R+1)^2` neighbourhood walk (`deferred_pbr.hlsl`'s
+/// `ssao_mode != SSAO_MODE_OFF` combine, the second half of the block [`ssao_blur_tap_body`]
+/// covers the first half of). Authored ONCE over `C`; `sum`/`cnt` are the walk's running
+/// accumulators (the SAME `C::Var`s [`ssao_blur_tap_body`] writes through — a suppressed-decl
+/// param on Emit, since `deferred_pbr.hlsl` declares `ssao_sum`/`ssao_cnt` in the hand-written
+/// preamble above the loop), `view_t` the CENTER pixel's `gViewT`, `ao` its own A2 march AO
+/// factor (`gMaterial.g`).
+///
+/// The plan's op order (`deferred_pbr.hlsl`, `ssao_mode != SSAO_MODE_OFF`):
+///   `ssao_blurred = ssao_sum / max(ssao_cnt, 1.0)`     (center always counts -> `cnt >= 1`)
+///   `ao_class     = (view_t >= SSAO_VIEWT_BG) ? 1.0 : ao`
+///   `ao_final     = min(ao_class, ssao_blurred)`
+///
+/// `SSAO_VIEWT_BG` is spelled via `C::Scalar::lit` (the VALUE — see the const's doc), NOT
+/// `C::named_lit` (the SYMBOL): `deferred_pbr.hlsl` never declares a `SSAO_VIEWT_BG` symbol, it
+/// spells the bare literal `1.0e30`. Similarly the `ao_class` select uses
+/// [`FieldScalar::select`] (`C::Scalar::select`, condition-wrapped with BARE arms —
+/// `(cond) ? t : e`), NOT [`Cf::select`] (`C::select`, which wraps BOTH arms — the
+/// `m2_regula_falsi` ternary shape): the committed `(view_t >= 1.0e30) ? 1.0 : ao` has bare arms.
+///
+/// Returns the `ao_final` value a caller assigns (the shader's `ao_final = min(...);` bare
+/// assignment — `ao_final` is declared earlier in the resolve, so this is NOT a `float ao_final =
+/// ...` redecl).
+#[inline]
+pub fn ssao_blur_combine_body<C: Cf>(
+    sum: &C::Var,
+    cnt: &C::Var,
+    view_t: C::Scalar,
+    ao: C::Scalar,
+) -> C::Scalar {
+    // float ssao_blurred = ssao_sum / max(ssao_cnt, 1.0);
+    let ssao_blurred = C::temp_float(
+        "ssao_blurred",
+        C::get_var(sum).div(C::get_var(cnt).max(C::Scalar::lit(1.0))),
+    );
+
+    // float ao_class = (view_t >= 1.0e30) ? 1.0 : ao;
+    let bg = C::Scalar::lit(SSAO_VIEWT_BG);
+    let ao_class = C::temp_float(
+        "ao_class",
+        C::Scalar::select(view_t.ge(bg), C::Scalar::lit(1.0), ao),
+    );
+
+    // ao_final = min(ao_class, ssao_blurred);
+    ao_class.min(ssao_blurred)
+}
+
 /// Folds the resolve's SSAO depth-aware box blur + the `ao_class`/`min` combine into the final
 /// `ao_final` — the top-level body the `deferred_pbr.hlsl` `ssao_mode != SSAO_MODE_OFF` combine
 /// spells inline. Authored ONCE over `C`; `view_t` is the CENTER pixel's `gViewT`, `ao` its own
@@ -554,16 +612,17 @@ pub fn ssao_blur_tap_body<C: Cf>(
 /// the module doc): `None` on an out-of-bounds neighbour (the shader's bounds `continue`),
 /// `Some((vt, s))` on an in-bounds one (its `gViewT`/`gSsao` taps).
 ///
-/// The plan's op order (`deferred_pbr.hlsl`, `ssao_mode != SSAO_MODE_OFF`):
-///   `ssao_blurred = ssao_sum / max(ssao_cnt, 1.0)`     (center always counts -> `cnt >= 1`)
-///   `ao_class     = (view_t >= SSAO_VIEWT_BG) ? 1.0 : ao`
-///   `ao_final     = min(ao_class, ssao_blurred)`
-///
 /// The `(2*SSAO_BLUR_R+1)^2` neighbourhood walk (`for dy in -R..=R { for dx in -R..=R { ... }
 /// }`) is a PLAIN Rust loop on both backends (it needs no `Cf::Iv`: the bound is a compile-time
 /// `i32` and `fetch`'s `Option` has no Emit shape); each accepted tap folds through
-/// [`ssao_blur_tap_body`], the ONLY per-tap math that is genuinely eDSL. Returns the `ao_final`
+/// [`ssao_blur_tap_body`], the ONLY per-tap math that is genuinely eDSL. The tail then folds
+/// through [`ssao_blur_combine_body`] (the `ao_class`/`min` combine). Returns the `ao_final`
 /// factor a caller stores (the shader writes it into the resolve's `ao_final` local).
+///
+/// This is the Eval/Track-1 HOST composition entry (`ssao_blur_edsl_sync` locks it bit-identical
+/// to `golden_ssao_blur`); the Emit/Track-2 HLSL splice traces [`ssao_blur_tap_body`] and
+/// [`ssao_blur_combine_body`] SEPARATELY as two spans (see the module doc) — this function itself
+/// is never traced whole (the loop nest it wraps has no Emit shape).
 #[inline]
 pub fn ssao_blur_body<C, F>(view_t: C::Scalar, ao: C::Scalar, fetch: &F) -> C::Scalar
 where
@@ -585,21 +644,7 @@ where
         }
     }
 
-    // float ssao_blurred = ssao_sum / max(ssao_cnt, 1.0);
-    let ssao_blurred = C::temp_float(
-        "ssao_blurred",
-        C::get_var(&sum).div(C::get_var(&cnt).max(C::Scalar::lit(1.0))),
-    );
-
-    // float ao_class = (view_t >= SSAO_VIEWT_BG) ? 1.0 : ao;
-    let bg = C::named_lit("SSAO_VIEWT_BG", SSAO_VIEWT_BG);
-    let ao_class = C::temp_float(
-        "ao_class",
-        C::select(view_t.ge(bg), C::Scalar::lit(1.0), ao),
-    );
-
-    // ao_final = min(ao_class, ssao_blurred);
-    ao_class.min(ssao_blurred)
+    ssao_blur_combine_body::<C>(&sum, &cnt, view_t, ao)
 }
 
 #[cfg(test)]
