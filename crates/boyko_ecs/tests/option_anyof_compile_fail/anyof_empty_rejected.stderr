@@ -26,7 +26,7 @@ error[E0599]: the method `iter` exists for struct `Query<'_, '_, AnyOf<()>>`, bu
 13 |     for _ in q.iter() {}
    |                ^^^^ method cannot be called on `Query<'_, '_, AnyOf<()>>` due to unsatisfied trait bounds
    |
-  ::: src/ecs/core/iters/query/data.rs
+  ::: src/ecs/core/iters/query/data/anyof.rs
    |
    | pub struct AnyOf<T>(PhantomData<fn() -> T>);
    | ------------------- doesn't satisfy `AnyOf<()>: QueryData`
