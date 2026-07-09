@@ -44,10 +44,6 @@ cargo +nightly miri test                           # UB detector (if nightly is 
 - SIMD: AVX2 baseline; AVX-512 optionally via `cfg(target_feature)`
 - Edition: Rust 2024
 
-## `master` vs `ecs` (history)
-
-`master` = memory subsystem only (generic `ComponentPool<T>`/`Chunk<T>`, two-level `UnitId` addressing). `ecs` (here) = the full architecture: type-erased `ComponentPool`/`Chunk` (Layout via `ComponentRegistry`), direct-pointer `Unit`, `usize` ids, `EntityMaster` recycling, global metadata registries, `EcsMaster` facade. Full detail → [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-
 ## Documentation — two layers
 
 - **Internal (for agents):** [docs/FEATURE_MAP.md](docs/FEATURE_MAP.md) (**first point of contact** — "where is X?"), [docs/SYSTEMS.md](docs/SYSTEMS.md) (subsystem catalog + file:line), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (layers/deps/data-flow). Consult before starting work.
