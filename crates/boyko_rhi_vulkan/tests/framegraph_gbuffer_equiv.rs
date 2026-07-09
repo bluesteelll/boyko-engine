@@ -853,3 +853,90 @@ fn hwrt_resid_18_sink_slot_mapping_pinned() {
     // is inside it, and the shifted interp trio (8/9/10) are the last three slots.
     assert_eq!(sink_slot(interp_model_out), 10, "the hwrt sink array's last slot index is 10");
 }
+
+// ===========================================================================
+// `compile()`'s DEBUG-ONLY unwritten-transient-image-read authoring guard.
+//
+// A mis-authored pass that READS a transient (non-seeded) image with no prior
+// producer/seed would otherwise silently derive a hazard-free `TOP_OF_PIPE`
+// barrier — a whole class of authoring regressions going uncaught. `compile`
+// tracks a per-resource written-or-seeded bit and `debug_assert!`s it holds
+// before a non-seeded transient IMAGE's first read.
+// ===========================================================================
+
+/// A pass reads a transient image that no prior pass wrote and that was never
+/// declared via `add_image_seeded` — the guard must fire.
+#[test]
+#[should_panic(expected = "reads transient image")]
+fn compile_panics_on_unwritten_transient_image_read() {
+    let mut g = FrameGraph::with_capacity(4, 4, 4);
+    let orphan = g.add_image("orphan");
+
+    g.add_pass("consumer_only");
+    g.image_access(
+        orphan,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        SubRange::COLOR,
+    );
+
+    g.compile();
+}
+
+/// A correctly-authored producer→consumer pair (a prior pass writes the image
+/// before any pass reads it) must NOT trip the guard.
+#[test]
+fn compile_does_not_panic_when_producer_writes_before_read() {
+    let mut g = FrameGraph::with_capacity(4, 4, 4);
+    let img = g.add_image("produced");
+
+    g.add_pass("producer");
+    g.image_access(
+        img,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        SubRange::COLOR,
+    );
+
+    g.add_pass("consumer");
+    g.image_access(
+        img,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        SubRange::COLOR,
+    );
+
+    g.compile();
+}
+
+/// A NON-RINGED, content-persistent seeded image (mirroring the shadow-temporal
+/// history pool / DDGI atlas: `add_image_seeded` + `seeded_writer_at_layout`,
+/// the sibling in-flight frame's undrained write) read FIRST, with no in-frame
+/// producer, must NOT trip the guard — cross-frame content is intentional for
+/// a seeded resource.
+#[test]
+fn compile_does_not_panic_on_seeded_resource_read_first() {
+    let mut g = FrameGraph::with_capacity(4, 4, 4);
+    let history = g.add_image_seeded(
+        "shadow_temporal_hist_read",
+        ResSync::seeded_writer_at_layout(
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+        ),
+    );
+
+    g.add_pass("reader_only");
+    g.image_access(
+        history,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT,
+        VK_IMAGE_LAYOUT_GENERAL,
+        SubRange::COLOR,
+    );
+
+    g.compile();
+}

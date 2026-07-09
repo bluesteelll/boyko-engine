@@ -25,7 +25,7 @@
 //! per-resource sync state machine — the actual industrial win — is fully here.
 
 use super::ids::{PassId, ResId};
-use super::sync::{transition, BufBarrier, ImgBarrier, ResSync, SubRange};
+use super::sync::{transition, BufBarrier, ImgBarrier, ResSync, SubRange, WRITE_ACCESS_MASK};
 use crate::ffi::VK_IMAGE_LAYOUT_UNDEFINED;
 
 /// The per-pass slice into the flat derived-barrier arenas: the image + buffer
@@ -56,6 +56,15 @@ pub struct FrameGraph {
     /// dependency on the SIBLING frame's still-pipelined reads instead of a
     /// no-op `TOP_OF_PIPE` src — the cross-frame torn-read fix (audit B-002/B-003).
     res_seed: Vec<ResSync>,
+    /// `true` iff the resource was declared via
+    /// [`add_image_seeded`](FrameGraph::add_image_seeded) /
+    /// [`add_buffer_seeded`](FrameGraph::add_buffer_seeded) — content is
+    /// intentionally cross-frame, so `compile`'s DEBUG-ONLY unwritten-transient-
+    /// read guard exempts it. Populated at declare time in every profile
+    /// (negligible once-per-resource-per-frame cost, matching `res_seed`/
+    /// `res_name`); only ever READ under `cfg(debug_assertions)`.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    res_seeded: Vec<bool>,
 
     // --- pass arena (SoA) ---
     pass_name: Vec<&'static str>,
@@ -71,6 +80,14 @@ pub struct FrameGraph {
 
     // --- compile scratch (reused; preallocated to res cap) ---
     state: Vec<ResSync>,
+    /// DEBUG-ONLY per-resource "written-or-seeded" bit for `compile`'s authoring
+    /// guard: a non-seeded transient IMAGE must be written by a prior pass before
+    /// its first read, or a mis-authored pass silently derives a hazard-free
+    /// `TOP_OF_PIPE` barrier instead of a caught bug (see `compile`). Cleared to
+    /// `res_seeded` every compile; entirely compiled out in release — `compile`
+    /// runs every frame, so the tracking must cost nothing there (Principle 1/7).
+    #[cfg(debug_assertions)]
+    res_written: Vec<bool>,
 
     // --- compile output ---
     img_barriers: Vec<ImgBarrier>,
@@ -88,6 +105,7 @@ impl FrameGraph {
             res_is_image: Vec::with_capacity(max_res),
             res_name: Vec::with_capacity(max_res),
             res_seed: Vec::with_capacity(max_res),
+            res_seeded: Vec::with_capacity(max_res),
             pass_name: Vec::with_capacity(max_pass),
             pass_access_begin: Vec::with_capacity(max_pass),
             pass_access_count: Vec::with_capacity(max_pass),
@@ -97,6 +115,8 @@ impl FrameGraph {
             acc_layout: Vec::with_capacity(max_acc),
             acc_sub: Vec::with_capacity(max_acc),
             state: Vec::with_capacity(max_res),
+            #[cfg(debug_assertions)]
+            res_written: Vec::with_capacity(max_res),
             img_barriers: Vec::with_capacity(max_acc),
             buf_barriers: Vec::with_capacity(max_acc),
             pass_barriers: Vec::with_capacity(max_pass),
@@ -109,6 +129,7 @@ impl FrameGraph {
         self.res_is_image.clear();
         self.res_name.clear();
         self.res_seed.clear();
+        self.res_seeded.clear();
         self.pass_name.clear();
         self.pass_access_begin.clear();
         self.pass_access_count.clear();
@@ -118,6 +139,8 @@ impl FrameGraph {
         self.acc_layout.clear();
         self.acc_sub.clear();
         self.state.clear();
+        #[cfg(debug_assertions)]
+        self.res_written.clear();
         self.img_barriers.clear();
         self.buf_barriers.clear();
         self.pass_barriers.clear();
@@ -126,13 +149,13 @@ impl FrameGraph {
     /// Declare a transient/history IMAGE resource (layout starts UNDEFINED).
     #[inline]
     pub fn add_image(&mut self, name: &'static str) -> ResId {
-        self.push_res(true, name, ResSync::undefined())
+        self.push_res(true, name, ResSync::undefined(), false)
     }
 
     /// Declare a BUFFER resource (no layout; ordering is flush/visibility only).
     #[inline]
     pub fn add_buffer(&mut self, name: &'static str) -> ResId {
-        self.push_res(false, name, ResSync::undefined())
+        self.push_res(false, name, ResSync::undefined(), false)
     }
 
     /// Declare a NON-RINGED IMAGE shared by both in-flight frames (CSM cascade,
@@ -143,7 +166,7 @@ impl FrameGraph {
     /// `TOP_OF_PIPE` a fresh `undefined()` state yields (audit B-002/B-003).
     #[inline]
     pub fn add_image_seeded(&mut self, name: &'static str, seed: ResSync) -> ResId {
-        self.push_res(true, name, seed)
+        self.push_res(true, name, seed, true)
     }
 
     /// Declare a NON-RINGED BUFFER shared by both in-flight frames (light table,
@@ -152,11 +175,11 @@ impl FrameGraph {
     /// layout; the seed only strengthens the first access's src scope).
     #[inline]
     pub fn add_buffer_seeded(&mut self, name: &'static str, seed: ResSync) -> ResId {
-        self.push_res(false, name, seed)
+        self.push_res(false, name, seed, true)
     }
 
     #[inline]
-    fn push_res(&mut self, is_image: bool, name: &'static str, seed: ResSync) -> ResId {
+    fn push_res(&mut self, is_image: bool, name: &'static str, seed: ResSync, seeded: bool) -> ResId {
         debug_assert!(
             self.res_is_image.len() < u16::MAX as usize,
             "framegraph resource count exceeds u16 index space"
@@ -165,6 +188,7 @@ impl FrameGraph {
         self.res_is_image.push(is_image);
         self.res_name.push(name);
         self.res_seed.push(seed);
+        self.res_seeded.push(seeded);
         id
     }
 
@@ -246,6 +270,14 @@ impl FrameGraph {
         // in-flight frame's reads (see `add_image_seeded`).
         self.state.clear();
         self.state.extend_from_slice(&self.res_seed);
+        // DEBUG-ONLY authoring-guard scratch: starts from the declare-time seeded
+        // bit (a seeded resource is exempt everywhere), then latches `true` at
+        // each write encountered below. Entirely compiled out in release.
+        #[cfg(debug_assertions)]
+        {
+            self.res_written.clear();
+            self.res_written.extend_from_slice(&self.res_seeded);
+        }
 
         for p in 0..self.pass_name.len() {
             let img_begin = self.img_barriers.len() as u32;
@@ -261,6 +293,29 @@ impl FrameGraph {
                 let sub = self.acc_sub[a];
                 let ri = res.index();
                 let is_image = self.res_is_image[ri];
+
+                // DEBUG-ONLY authoring guard (release-neutral): a non-seeded
+                // transient IMAGE must be written by a prior pass before its first
+                // read, or a mis-authored pass silently derives a hazard-free
+                // `TOP_OF_PIPE` barrier below instead of surfacing as a caught bug.
+                // Ringed/seeded resources (`res_seeded`) are exempt — cross-frame
+                // content is intentional for them (the shadow-temporal history pool,
+                // the DDGI atlas, CSM cascade / shadow atlas, the shared buffers).
+                #[cfg(debug_assertions)]
+                {
+                    let is_write = access & WRITE_ACCESS_MASK != 0;
+                    debug_assert!(
+                        !is_image || is_write || self.res_written[ri],
+                        "framegraph: pass '{}' reads transient image '{}' with no prior \
+                         producer or seed (add_image_seeded) — this would silently derive \
+                         a hazard-free TOP_OF_PIPE barrier",
+                        self.pass_name[p],
+                        self.res_name[ri],
+                    );
+                    if is_write {
+                        self.res_written[ri] = true;
+                    }
+                }
 
                 // Split-borrow: read the access scalars above, mutate state here,
                 // release the borrow before pushing into the barrier arenas.
