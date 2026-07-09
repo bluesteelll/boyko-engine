@@ -499,6 +499,933 @@ struct ShadowTemporalSets {
     denoised: [VulkanBindGroup; FRAMES_IN_FLIGHT],
 }
 
+/// The always-present G-buffer image RINGS (one texture per in-flight frame), built FIRST in
+/// [`GBufferTargets::create`] — the lock-free cross-frame Write-After-Read fix (frame N+1 writes
+/// slot `i`'s images while frame N reads slot `j`'s). Extracted into a bundle so `create` builds
+/// them in ONE call and its error ladder collapses: [`Self::build`] drains its OWN partial ring on
+/// failure, so the orchestrator only tears down the (fully-built) prior bundles. Flattened back into
+/// the [`GBufferTargets`] fields at `create` time, so `present/` readers keep the same `targets.<x>`
+/// paths.
+struct CoreImages {
+    depth: [VulkanTexture; FRAMES_IN_FLIGHT],
+    albedo: [VulkanTexture; FRAMES_IN_FLIGHT],
+    normal: [VulkanTexture; FRAMES_IN_FLIGHT],
+    material: [VulkanTexture; FRAMES_IN_FLIGHT],
+    lit: [VulkanTexture; FRAMES_IN_FLIGHT],
+    viewt: [VulkanTexture; FRAMES_IN_FLIGHT],
+    ssao: [VulkanTexture; FRAMES_IN_FLIGHT],
+}
+
+impl CoreImages {
+    /// Allocates the seven always-present G-buffer image rings at `extent` in acquisition order
+    /// (depth → albedo → normal → material → lit → viewt → ssao). On any ring's partial failure the
+    /// slots already built in THAT ring are drained AND every fully-built prior ring is destroyed
+    /// (reverse acquisition), so nothing leaks; the orchestrator has no partials to reason about
+    /// beyond the bundles it built before this call.
+    fn build(ctx: &VulkanContext, extent: VkExtent2D) -> Result<Self, SwapchainError> {
+        // SAFETY (shared by both closures): `ctx` is the live context each texture was created on;
+        // none is referenced by any submission (the build phase, before any record/submit); each ring
+        // slot is destroyed exactly once — a completed ring is consumed by value (`destroy_ring`), a
+        // partial ring is `take`-drained (`drain_partial`).
+        let destroy_ring = |ring: [VulkanTexture; FRAMES_IN_FLIGHT]| unsafe {
+            for t in ring {
+                RhiDevice::destroy_texture(ctx, t);
+            }
+        };
+        let drain_partial = |ring: &mut [Option<VulkanTexture>; FRAMES_IN_FLIGHT]| unsafe {
+            for slot in ring.iter_mut() {
+                if let Some(t) = slot.take() {
+                    RhiDevice::destroy_texture(ctx, t);
+                }
+            }
+        };
+
+        // Depth: DEPTH_STENCIL_ATTACHMENT (rasterize into) | SAMPLED (marcher .Load).
+        let depth_desc = TextureDesc {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+            format: Format::D32Sfloat,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
+            array_layers: 1,
+        };
+        let mut depth_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for slot in depth_slots.iter_mut() {
+            match RhiDevice::create_texture(ctx, &depth_desc).map_err(SwapchainError::DepthImage) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => {
+                    drain_partial(&mut depth_slots);
+                    return Err(e);
+                }
+            }
+        }
+        let depth: [VulkanTexture; FRAMES_IN_FLIGHT] =
+            depth_slots.map(|s| s.expect("invariant: every depth ring slot built before here"));
+
+        // ALBEDO: STORAGE (marcher store) | SAMPLED (the present-blit, pass C) |
+        // COLOR_ATTACHMENT (Render P5-r0: the mesh raster pass A writes it as MRT@0).
+        let mut albedo_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for slot in albedo_slots.iter_mut() {
+            match GBufferTargets::create_gbuffer_image(
+                ctx,
+                extent,
+                ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT,
+            ) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => {
+                    drain_partial(&mut albedo_slots);
+                    destroy_ring(depth);
+                    return Err(e);
+                }
+            }
+        }
+        let albedo: [VulkanTexture; FRAMES_IN_FLIGHT] =
+            albedo_slots.map(|s| s.expect("invariant: every albedo ring slot built before here"));
+
+        // NORMAL / MATERIAL: STORAGE (marcher store) | COLOR_ATTACHMENT (Render P5-r0: the
+        // mesh raster pass A writes them as MRT@1 / MRT@2). Read by the deferred resolve.
+        let mut normal_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for slot in normal_slots.iter_mut() {
+            match GBufferTargets::create_gbuffer_image(
+                ctx,
+                extent,
+                ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
+            ) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => {
+                    drain_partial(&mut normal_slots);
+                    destroy_ring(albedo);
+                    destroy_ring(depth);
+                    return Err(e);
+                }
+            }
+        }
+        let normal: [VulkanTexture; FRAMES_IN_FLIGHT] =
+            normal_slots.map(|s| s.expect("invariant: every normal ring slot built before here"));
+
+        let mut material_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for slot in material_slots.iter_mut() {
+            match GBufferTargets::create_gbuffer_image(
+                ctx,
+                extent,
+                ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
+            ) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => {
+                    drain_partial(&mut material_slots);
+                    destroy_ring(normal);
+                    destroy_ring(albedo);
+                    destroy_ring(depth);
+                    return Err(e);
+                }
+            }
+        }
+        let material: [VulkanTexture; FRAMES_IN_FLIGHT] = material_slots
+            .map(|s| s.expect("invariant: every material ring slot built before here"));
+
+        // LIT: the deferred resolve's STORAGE store output; also SAMPLED by the
+        // present-blit (pass C) and TRANSFER_SRC so an offscreen golden could read it back.
+        let mut lit_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for slot in lit_slots.iter_mut() {
+            match GBufferTargets::create_gbuffer_image(
+                ctx,
+                extent,
+                ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::TRANSFER_SRC,
+            ) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => {
+                    drain_partial(&mut lit_slots);
+                    destroy_ring(material);
+                    destroy_ring(normal);
+                    destroy_ring(albedo);
+                    destroy_ring(depth);
+                    return Err(e);
+                }
+            }
+        }
+        let lit: [VulkanTexture; FRAMES_IN_FLIGHT] =
+            lit_slots.map(|s| s.expect("invariant: every lit ring slot built before here"));
+
+        // Lighting L0b: the R32_SFLOAT `gViewT` lane (the marcher's surface `t`).
+        let mut viewt_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for slot in viewt_slots.iter_mut() {
+            match GBufferTargets::create_viewt_image(ctx, extent) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => {
+                    drain_partial(&mut viewt_slots);
+                    destroy_ring(lit);
+                    destroy_ring(material);
+                    destroy_ring(normal);
+                    destroy_ring(albedo);
+                    destroy_ring(depth);
+                    return Err(e);
+                }
+            }
+        }
+        let viewt: [VulkanTexture; FRAMES_IN_FLIGHT] =
+            viewt_slots.map(|s| s.expect("invariant: every viewt ring slot built before here"));
+
+        // Render P7: the R8_UNORM `gSsao` term (ALWAYS allocated — the resolve descriptor
+        // interface is stable regardless of `ssao_mode`; no SSAO pass writes it yet, C2 adds
+        // that). Read by the resolve only under `ssao_mode != 0` (0 every pre-P7 scene).
+        let mut ssao_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for slot in ssao_slots.iter_mut() {
+            match GBufferTargets::create_ssao_image(ctx, extent) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => {
+                    drain_partial(&mut ssao_slots);
+                    destroy_ring(viewt);
+                    destroy_ring(lit);
+                    destroy_ring(material);
+                    destroy_ring(normal);
+                    destroy_ring(albedo);
+                    destroy_ring(depth);
+                    return Err(e);
+                }
+            }
+        }
+        let ssao: [VulkanTexture; FRAMES_IN_FLIGHT] =
+            ssao_slots.map(|s| s.expect("invariant: every ssao ring slot built before here"));
+
+        Ok(Self { depth, albedo, normal, material, lit, viewt, ssao })
+    }
+
+    /// Tears down the seven image rings in reverse acquisition order (ssao → depth), consuming
+    /// `self`.
+    ///
+    /// # Safety
+    ///
+    /// `ctx` is the live context the textures were created on; no submission references them; each is
+    /// destroyed exactly once (the by-value `self`).
+    unsafe fn destroy(self, ctx: &VulkanContext) {
+        // SAFETY: per the contract `ctx` is live and nothing references these textures; each was
+        // created on `ctx` and is destroyed exactly once, in reverse acquisition order.
+        unsafe {
+            for t in self.ssao {
+                RhiDevice::destroy_texture(ctx, t);
+            }
+            for t in self.viewt {
+                RhiDevice::destroy_texture(ctx, t);
+            }
+            for t in self.lit {
+                RhiDevice::destroy_texture(ctx, t);
+            }
+            for t in self.material {
+                RhiDevice::destroy_texture(ctx, t);
+            }
+            for t in self.normal {
+                RhiDevice::destroy_texture(ctx, t);
+            }
+            for t in self.albedo {
+                RhiDevice::destroy_texture(ctx, t);
+            }
+            for t in self.depth {
+                RhiDevice::destroy_texture(ctx, t);
+            }
+        }
+    }
+}
+
+/// Rung 3a (`hwrt`): the two RG16 soft-shadow-visibility ping-pong image RINGS (`shadow_vis` +
+/// `shadow_vis2`), built together right after [`CoreImages`] iff the device advertises RG16 storage
+/// ([`crate::device::DeviceCaps::shadow_denoise_storage_ok`]). A bundle so [`GBufferTargets::create`]
+/// builds them in one call with a self-draining error path; flattened into the two `Option` fields at
+/// `create` time.
+#[cfg(feature = "hwrt")]
+struct ShadowVisImages {
+    shadow_vis: [VulkanTexture; FRAMES_IN_FLIGHT],
+    shadow_vis2: [VulkanTexture; FRAMES_IN_FLIGHT],
+}
+
+#[cfg(feature = "hwrt")]
+impl ShadowVisImages {
+    /// Allocates the two RG16 ping-pong rings at `extent`, or `Ok(None)` on a device lacking RG16
+    /// storage (the DDGI-degrade discipline: the denoise is opt-in, a missing format disables it,
+    /// never a boot fault). On a mid-ring failure the partial ring is drained + the (fully-built)
+    /// first ring destroyed (reverse acquisition); the orchestrator owns the prior [`CoreImages`],
+    /// which it tears down on this method's `Err`.
+    fn build(ctx: &VulkanContext, extent: VkExtent2D) -> Result<Option<Self>, SwapchainError> {
+        if !ctx.device_caps().shadow_denoise_storage_ok() {
+            return Ok(None);
+        }
+        // SAFETY (both closures): `ctx` is live; no submission references these textures (build
+        // phase); each ring slot is destroyed exactly once (a completed ring is consumed by value, a
+        // partial ring is `take`-drained).
+        let destroy_ring = |ring: [VulkanTexture; FRAMES_IN_FLIGHT]| unsafe {
+            for t in ring {
+                RhiDevice::destroy_texture(ctx, t);
+            }
+        };
+        let drain_partial = |ring: &mut [Option<VulkanTexture>; FRAMES_IN_FLIGHT]| unsafe {
+            for slot in ring.iter_mut() {
+                if let Some(t) = slot.take() {
+                    RhiDevice::destroy_texture(ctx, t);
+                }
+            }
+        };
+
+        let mut vis_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for slot in vis_slots.iter_mut() {
+            match GBufferTargets::create_shadow_vis_image(ctx, extent) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => {
+                    drain_partial(&mut vis_slots);
+                    return Err(e);
+                }
+            }
+        }
+        let shadow_vis: [VulkanTexture; FRAMES_IN_FLIGHT] =
+            vis_slots.map(|s| s.expect("invariant: every shadow_vis ring slot built before here"));
+
+        let mut vis2_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for slot in vis2_slots.iter_mut() {
+            match GBufferTargets::create_shadow_vis2_image(ctx, extent) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => {
+                    drain_partial(&mut vis2_slots);
+                    destroy_ring(shadow_vis);
+                    return Err(e);
+                }
+            }
+        }
+        let shadow_vis2: [VulkanTexture; FRAMES_IN_FLIGHT] =
+            vis2_slots.map(|s| s.expect("invariant: every shadow_vis2 ring slot built before here"));
+
+        Ok(Some(Self { shadow_vis, shadow_vis2 }))
+    }
+
+    /// Tears down the two ping-pong rings in reverse acquisition order (`shadow_vis2` → `shadow_vis`).
+    ///
+    /// # Safety
+    ///
+    /// `ctx` is live; no submission references these textures; each is destroyed exactly once.
+    unsafe fn destroy(self, ctx: &VulkanContext) {
+        // SAFETY: per the contract `ctx` is live and nothing references these textures; each was
+        // created on `ctx` and is destroyed exactly once, in reverse acquisition order.
+        unsafe {
+            for t in self.shadow_vis2 {
+                RhiDevice::destroy_texture(ctx, t);
+            }
+            for t in self.shadow_vis {
+                RhiDevice::destroy_texture(ctx, t);
+            }
+        }
+    }
+}
+
+/// The per-extent deferred descriptor SETS bound ONCE against the [`CoreImages`] rings + `scene` (NO
+/// per-frame update). Built as one bundle so [`GBufferTargets::create`]'s error ladder no longer
+/// re-lists the image teardown at every set (the cross-bundle O(n²) collapse): [`Self::build`] drains
+/// only the sets it built, and the orchestrator tears down the images. Acquisition order (matched by
+/// [`Self::destroy`] in reverse): vocab → resolve → cull → ssao → ddgi-update → present → resolve-hwrt.
+/// Flattened into the [`GBufferTargets`] set fields at `create` time, so `present/` readers keep the
+/// same `targets.<x>` paths.
+struct DeferredSets {
+    vocab_set: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    resolve_set: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    cull_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    ssao_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    ddgi_update_set: Option<VulkanBindGroup>,
+    present_set: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    #[cfg(feature = "hwrt")]
+    resolve_set_hwrt: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+}
+
+impl DeferredSets {
+    /// Writes the seven deferred descriptor sets ONCE against `core` + `scene`. `cluster_grid_buf` /
+    /// `light_index_buf` are the L1 buffers (or the light-table placeholder when L1 is off), computed
+    /// once by the caller and shared with the hwrt denoise/temporal set builders. On any set's partial
+    /// failure the slots already built in THAT set are drained + every fully-built prior set destroyed
+    /// (reverse acquisition); the orchestrator owns the image rings, which it tears down on this
+    /// method's `Err`.
+    fn build(
+        ctx: &VulkanContext,
+        scene: &GBufferScene<'_>,
+        core: &CoreImages,
+        cluster_grid_buf: &BoundBuffer,
+        light_index_buf: &BoundBuffer,
+    ) -> Result<DeferredSets, SwapchainError> {
+        // The marcher vocabulary set, written ONCE here (NO per-frame update). The
+        // entry order matches the layout: SSBO @0, sampled depth @1, storage albedo @2,
+        // storage normal @3, storage material @4, UNIFORM camera @5, STORAGE tiles @6,
+        // STORAGE material-table @7, STORAGE gViewT @8 (Lighting L0b), STORAGE PointerGrid @9
+        // (M1), COMBINED_IMAGE_SAMPLER BrickAtlas @10 (M2). Bindings 6/9/10 are the P4b coarse-cull
+        // tiles, the M1 empty-skip pointer grid, and the M2 brick atlas: the marcher shader DECLARES
+        // all three unconditionally (DXC keeps the @9/@10 references past the runtime
+        // `brick_enabled`/`brick_trilinear` gates), so VALID descriptors are bound here even though
+        // the windowed path gates ALL reads OFF (`coarse_enabled == 0` / `brick_enabled == 0` /
+        // `brick_trilinear == 0` — byte-identical output, bindings bound-but-unread).
+        // Build FRAMES_IN_FLIGHT identical copies of the vocab set, slot `i` binding
+        // `scene.camera_ring[i]` at the camera UBO @5 (the lock-free per-frame ring fix; every
+        // other binding is identical across slots). On a failure at slot `i`, the slots already
+        // built [0..i) MUST be destroyed (no descriptor leak); the caller owns the images.
+        let mut vocab_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for slot in 0..FRAMES_IN_FLIGHT {
+            let entries = [
+                BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
+                BindGroupEntry::SampledImage {
+                    texture: &core.depth[slot],
+                    sampler: scene.depth_sampler,
+                },
+                BindGroupEntry::StorageImage { texture: &core.albedo[slot] },
+                BindGroupEntry::StorageImage { texture: &core.normal[slot] },
+                BindGroupEntry::StorageImage { texture: &core.material[slot] },
+                BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
+                BindGroupEntry::StorageBuffer { buffer: scene.tiles_buffer },
+                // PBR MVP-2: the material table SSBO @7 (the marcher fetches `base_color`).
+                BindGroupEntry::StorageBuffer { buffer: scene.material_table },
+                // Lighting L0b: the gViewT lane @8 (the marcher STORES the surface `t`).
+                BindGroupEntry::StorageImage { texture: &core.viewt[slot] },
+                // M1: the empty-skip PointerGrid SSBO @9. Statically referenced by the marcher
+                // SPIR-V (`register(t9)`); the windowed path gates the read OFF
+                // (`brick_enabled == 0`), so it is bound-but-unread (byte-identical output).
+                BindGroupEntry::StorageBuffer { buffer: scene.pointer_grid },
+                // M2: the brick-atlas 3D image @10 as a COMBINED_IMAGE_SAMPLER (the marcher's
+                // hardware trilinear `.SampleLevel` needs the sampler). Statically referenced by the
+                // marcher SPIR-V (`register(t10)` + `register(s10)`, collapsed to one combined
+                // descriptor by DXC); the windowed path gates the read OFF (`brick_trilinear == 0`),
+                // so it is bound-but-unread (byte-identical output, the M2 R2 contract).
+                BindGroupEntry::CombinedImage {
+                    texture: scene.atlas,
+                    sampler: scene.atlas_sampler,
+                },
+                // M4 clip-map LOD: the LEVEL-1 + LEVEL-2 brick resources (bindings 11/12 + 13/14). The
+                // marcher SPIR-V statically references `PointerGrid1`@t11, `BrickAtlas1`@t12,
+                // `PointerGrid2`@t13, `BrickAtlas2`@t14 inside the runtime level branch-ladder (NOT
+                // dead-stripped past the gate), so VALID descriptors are bound here even on the OFF/N=1
+                // path (`brick_levels == 1` takes only the lvl==0 arm → bound-but-unread, byte-identical).
+                // Order matches the layout: PointerGrid1 @11, BrickAtlas1 @12, PointerGrid2 @13, BrickAtlas2 @14.
+                BindGroupEntry::StorageBuffer { buffer: scene.level_grids[0] },
+                BindGroupEntry::CombinedImage {
+                    texture: scene.level_atlases[0],
+                    sampler: scene.level_atlas_samplers[0],
+                },
+                BindGroupEntry::StorageBuffer { buffer: scene.level_grids[1] },
+                BindGroupEntry::CombinedImage {
+                    texture: scene.level_atlases[1],
+                    sampler: scene.level_atlas_samplers[1],
+                },
+                // MDF Stage-2c: the dedicated dense mesh-SDF shadow-caster image @15 as a
+                // COMBINED_IMAGE_SAMPLER (the marcher's trilinear `.SampleLevel` needs the sampler).
+                // Statically referenced by the recompiled marcher SPIR-V (`register(t15)` +
+                // `register(s15)`, collapsed to one combined descriptor by DXC) inside the
+                // runtime-gated `mesh_sdf_enabled` branch; a non-MDF scene gates the read OFF
+                // (`mesh_sdf_enabled == false`), so it is bound-but-unread (byte-identical output, the
+                // R2 contract). A non-MDF scene binds a benign placeholder (e.g. the brick atlas).
+                BindGroupEntry::CombinedImage {
+                    texture: scene.mesh_sdf,
+                    sampler: scene.mesh_sdf_sampler,
+                },
+            ];
+            let desc = BindGroupDesc::<Vulkan> {
+                layout: scene.vocab_layout,
+                entries: &entries,
+            };
+            match RhiDevice::create_bind_group(ctx, &desc) {
+                Ok(g) => vocab_slots[slot] = Some(g),
+                Err(e) => {
+                    // SAFETY: the vocab slots already built [0..slot) were created on `ctx`,
+                    // referenced by no submission; each destroyed exactly once (the partial ring is
+                    // drained). The image rings are owned by the caller (torn down on this `Err`).
+                    unsafe {
+                        for s in vocab_slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                    }
+                    return Err(SwapchainError::DepthImage(e));
+                }
+            }
+        }
+        // Every slot is now `Some` (the loop returned on any failure); collect the ring.
+        let vocab_set: [VulkanBindGroup; FRAMES_IN_FLIGHT] = vocab_slots
+            .map(|s| s.expect("invariant: every vocab ring slot built before reaching here"));
+
+        // The deferred RESOLVE set, written ONCE here (12 bindings, 0..=11): gAlbedo @0,
+        // gNormal @1, gMaterial @2, lit @3 (STORAGE images), material SSBO @4, camera UBO
+        // @5, light table SSBO @6 (Lighting L0a), gViewT @7 (Lighting L0b), ClusterGrid @8 +
+        // LightIndexList @9 (Lighting L1) — matching `deferred_pbr.comp`'s set 0. When L1 is
+        // off the scene's cluster buffers are `None`, so @8/@9 bind the light table as a
+        // harmless VALID placeholder (the resolve's `clusters_enabled` header gate never reads
+        // them on the OFF path — the layout requires a valid descriptor regardless).
+        //
+        // Build FRAMES_IN_FLIGHT identical copies of the resolve set, slot `i` binding
+        // `scene.camera_ring[i]` @5 + `scene.csm_cascade_ring[i]` @13 (the lock-free per-frame ring
+        // fix; every other binding is identical across slots). On a failure at slot `i`, the slots
+        // already built [0..i) plus the prior vocab ring MUST be destroyed (no leak).
+        let mut resolve_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for slot in 0..FRAMES_IN_FLIGHT {
+            // The 19 SHARED resolve bindings (0..=18) — built by the ONE helper the HWRT set also
+            // consumes, so the two sets' first 19 bindings cannot drift (a drift = an invisible
+            // set↔shader-layout mismatch → device-lost). The software set uses them verbatim.
+            let imgs = ResolveSlotImages {
+                albedo: &core.albedo[slot],
+                normal: &core.normal[slot],
+                material: &core.material[slot],
+                lit: &core.lit[slot],
+                viewt: &core.viewt[slot],
+                ssao: &core.ssao[slot],
+            };
+            let entries =
+                resolve_software_entries(scene, &imgs, slot, cluster_grid_buf, light_index_buf);
+            // The software resolve set is EXACT-FILL at `RESOLVE_SOFTWARE_BINDINGS` (19), under the
+            // rung-1b cap of `MAX_BIND_GROUP_BINDINGS` (21). Keeping it EXACT (not `<= cap`) preserves
+            // the UNDER-FILL tripwire (a missing binding) AND the over-fill tripwire. The HWRT variant
+            // is a SEPARATE 21-binding set (TLAS @19 + shadow-params UBO @20), guarded against
+            // `RESOLVE_HWRT_BINDINGS` — the software fill is untouched.
+            debug_assert_eq!(
+                entries.len(),
+                RESOLVE_SOFTWARE_BINDINGS,
+                "invariant: the software resolve set must declare EXACTLY {RESOLVE_SOFTWARE_BINDINGS} bindings (exact-fill)"
+            );
+            let desc = BindGroupDesc::<Vulkan> {
+                layout: scene.resolve_layout,
+                entries: &entries,
+            };
+            match RhiDevice::create_bind_group(ctx, &desc) {
+                Ok(g) => resolve_slots[slot] = Some(g),
+                Err(e) => {
+                    // SAFETY: the resolve slots already built [0..slot) + the whole vocab ring were
+                    // created on `ctx`; referenced by no submission; each destroyed exactly once
+                    // (reverse acquisition: resolve → vocab). The images are owned by the caller.
+                    unsafe {
+                        for s in resolve_slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in vocab_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    return Err(SwapchainError::DepthImage(e));
+                }
+            }
+        }
+        let resolve_set: [VulkanBindGroup; FRAMES_IN_FLIGHT] = resolve_slots
+            .map(|s| s.expect("invariant: every resolve ring slot built before reaching here"));
+
+        // The Lighting-L1 CULL set, written ONCE here when L1 is wired (camera UBO @0, light
+        // table SSBO @1, ClusterGrid @2, LightIndexList @3, LightIndexAlloc @4) — matching
+        // `cluster_cull.comp`'s set 0. `None` when the scene does not supply the cull layout
+        // (the L0b-only build); the recorder then skips the cull pass entirely.
+        let cull_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = match (scene.cull_layout, scene.cluster_grid, scene.light_index, scene.light_index_alloc) {
+            (Some(cull_layout), Some(grid), Some(index), Some(alloc)) => {
+                // Build FRAMES_IN_FLIGHT identical copies, slot `i` binding `scene.camera_ring[i]`
+                // @0 (the lock-free per-frame ring fix). On a failure at slot `i`, the slots already
+                // built [0..i) plus the prior resolve + vocab rings MUST be destroyed.
+                let mut cull_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+                    [const { None }; FRAMES_IN_FLIGHT];
+                let mut failure: Option<crate::error::VulkanError> = None;
+                for (slot, dst) in cull_slots.iter_mut().enumerate() {
+                    let entries = [
+                        BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
+                        BindGroupEntry::StorageBuffer { buffer: scene.light_table },
+                        BindGroupEntry::StorageBuffer { buffer: grid },
+                        BindGroupEntry::StorageBuffer { buffer: index },
+                        BindGroupEntry::StorageBuffer { buffer: alloc },
+                    ];
+                    let desc = BindGroupDesc::<Vulkan> { layout: cull_layout, entries: &entries };
+                    match RhiDevice::create_bind_group(ctx, &desc) {
+                        Ok(g) => *dst = Some(g),
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                    }
+                }
+                if let Some(e) = failure {
+                    // SAFETY: the cull slots already built [0..slot) + the resolve + vocab rings were
+                    // created on `ctx`; referenced by no submission; each destroyed exactly once
+                    // (reverse acquisition: cull → resolve → vocab). The images are owned by the caller.
+                    unsafe {
+                        for s in cull_slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in resolve_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        for g in vocab_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    return Err(SwapchainError::DepthImage(e));
+                }
+                Some(cull_slots.map(|s| {
+                    s.expect("invariant: every cull ring slot built before reaching here")
+                }))
+            }
+            _ => None,
+        };
+
+        // Render P7: the SSAO set, written ONCE here when the SSAO pass is wired (gNormal @0,
+        // gMaterial @1, gViewT @2 STORAGE images READ, the `ssao` out STORAGE image @3 WRITE, the
+        // camera UBO @4) — matching `sdf_ssao.comp`'s set 0. `None` when the scene does not supply
+        // the SSAO activation (the default OFF path); the recorder then skips the SSAO pass
+        // entirely (the 0%-gate, byte-identical command stream). The `ssao` image is the SAME one
+        // the resolve set binds at @11 — the SSAO pass WRITES it, the resolve READS it (ordered by
+        // the recorder's COMPUTE→COMPUTE barrier on the SSAO ON path).
+        let ssao_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = match scene.ssao {
+            Some(activation) => {
+                // Build FRAMES_IN_FLIGHT identical copies, slot `i` binding `scene.camera_ring[i]`
+                // @4 (the lock-free per-frame ring fix). On a failure at slot `i`, the slots already
+                // built [0..i) plus the prior cull/resolve/vocab rings MUST be destroyed.
+                let mut ssao_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+                    [const { None }; FRAMES_IN_FLIGHT];
+                let mut failure: Option<crate::error::VulkanError> = None;
+                for (slot, dst) in ssao_slots.iter_mut().enumerate() {
+                    let entries = [
+                        BindGroupEntry::StorageImage { texture: &core.normal[slot] },
+                        BindGroupEntry::StorageImage { texture: &core.material[slot] },
+                        BindGroupEntry::StorageImage { texture: &core.viewt[slot] },
+                        BindGroupEntry::StorageImage { texture: &core.ssao[slot] },
+                        BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
+                    ];
+                    let desc = BindGroupDesc::<Vulkan> { layout: activation.layout, entries: &entries };
+                    match RhiDevice::create_bind_group(ctx, &desc) {
+                        Ok(g) => *dst = Some(g),
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                    }
+                }
+                if let Some(e) = failure {
+                    // SAFETY: the ssao slots already built [0..slot) + the (optional) cull ring + the
+                    // resolve + vocab rings were created on `ctx`; referenced by no submission; each
+                    // destroyed exactly once (reverse acquisition: ssao → cull → resolve → vocab). The
+                    // cull ring is `Option`-guarded (only when L1 wired); the images are owned by the
+                    // caller.
+                    unsafe {
+                        for s in ssao_slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(cs) = cull_set {
+                            for g in cs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in resolve_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        for g in vocab_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    return Err(SwapchainError::DepthImage(e));
+                }
+                Some(ssao_slots.map(|s| {
+                    s.expect("invariant: every ssao ring slot built before reaching here")
+                }))
+            }
+            None => None,
+        };
+
+        // SDFDDGI I2: the SINGLE (non-ringed) probe-update set, written ONCE here when the update
+        // pass is wired (`Buf` @0 R, `gIrrOut` @1 W, `gDepthOut` @2 W storage images, `Classification`
+        // @3 RW, `RayTable` @4 R, `LightBuf` @5 R, `DdgiUpdate` UBO @6) — matching
+        // `sdf_probe_update.comp`'s set 0. `None` when the scene does not supply the update activation
+        // (the default GI-OFF path); the recorder then skips the update pass entirely (the 0%-gate,
+        // byte-identical command stream). NOT ringed — every input is a single device-only instance
+        // (plan §2.2 ring audit): the two atlas storage images are the SAME textures the resolve set
+        // samples (the update WRITES them, the resolve READS them, ordered by the RDG-derived
+        // update→resolve barrier). On a failure, the prior vocab/resolve/(optional cull/ssao) rings
+        // MUST be destroyed (the ssao teardown chain shape).
+        let ddgi_update_set: Option<VulkanBindGroup> = match scene.ddgi_update {
+            Some(activation) => {
+                let entries = [
+                    BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
+                    BindGroupEntry::StorageImage { texture: scene.ddgi_irr_texture },
+                    BindGroupEntry::StorageImage { texture: scene.ddgi_depth_texture },
+                    BindGroupEntry::StorageBuffer { buffer: scene.ddgi_classification },
+                    BindGroupEntry::StorageBuffer { buffer: scene.ddgi_ray_table },
+                    BindGroupEntry::StorageBuffer { buffer: scene.light_table },
+                    BindGroupEntry::UniformBuffer { buffer: scene.ddgi_update_ubo },
+                ];
+                let desc = BindGroupDesc::<Vulkan> { layout: activation.layout, entries: &entries };
+                match RhiDevice::create_bind_group(ctx, &desc) {
+                    Ok(g) => Some(g),
+                    Err(e) => {
+                        // SAFETY: the (optional) ssao & cull rings + the resolve & vocab rings were
+                        // created on `ctx`; referenced by no submission; each destroyed exactly once
+                        // (reverse acquisition: ssao → cull → resolve → vocab). The cull & ssao rings
+                        // are `Option`-guarded (present only when L1 / SSAO wired); the images are
+                        // owned by the caller.
+                        unsafe {
+                            if let Some(ss) = ssao_set {
+                                for g in ss {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
+                            }
+                            if let Some(cs) = cull_set {
+                                for g in cs {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
+                            }
+                            for g in resolve_set {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                            for g in vocab_set {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        return Err(SwapchainError::DepthImage(e));
+                    }
+                }
+            }
+            None => None,
+        };
+
+        // The present-blit set RING, written ONCE here: slot `i` is one COMBINED_IMAGE_SAMPLER
+        // pointing at `lit[i]` (the resolve's output for that slot) + the scene's present
+        // sampler. RINGED so the present samples the SAME slot the resolve wrote this frame (the
+        // `lit` ring made a single present set stale — it would sample a sibling slot's image).
+        // On a failure at slot `i`, the slots already built [0..i) plus every prior set ring
+        // (vocab/resolve/cull/ssao/ddgi) MUST be destroyed (no leak).
+        let mut present_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for (slot, dst) in present_slots.iter_mut().enumerate() {
+            let entries = [BindGroupEntry::CombinedImage {
+                texture: &core.lit[slot],
+                sampler: scene.present_sampler,
+            }];
+            let desc = BindGroupDesc::<Vulkan> {
+                layout: scene.present_layout,
+                entries: &entries,
+            };
+            match RhiDevice::create_bind_group(ctx, &desc) {
+                Ok(g) => *dst = Some(g),
+                Err(e) => {
+                    // SAFETY: the present slots already built [0..slot) + the (optional) ddgi-update
+                    // set + the (optional) ssao & cull rings + the resolve & vocab rings were created
+                    // on `ctx`; referenced by no submission; each destroyed exactly once (reverse
+                    // acquisition). The ddgi/cull/ssao are `Option`-guarded; the images are owned by
+                    // the caller.
+                    unsafe {
+                        for s in present_slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(du) = ddgi_update_set {
+                            RhiDevice::destroy_bind_group(ctx, du);
+                        }
+                        if let Some(ss) = ssao_set {
+                            for g in ss {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(cs) = cull_set {
+                            for g in cs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in resolve_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        for g in vocab_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    return Err(SwapchainError::DepthImage(e));
+                }
+            }
+        }
+        let present_set: [VulkanBindGroup; FRAMES_IN_FLIGHT] = present_slots
+            .map(|s| s.expect("invariant: every present ring slot built before reaching here"));
+
+        // R2a-4b: the HWRT-variant resolve set RING — built ONLY when the scene wires BOTH the
+        // 21-binding HWRT resolve layout AND the per-FIF TLAS handles (i.e. under `feature = "hwrt"`
+        // + `ctx.ray_query_enabled()` + config HardwareTri). `None` on every software path ⇒ the
+        // recorder binds the 19-binding `resolve_set` against the software pipeline ⇒ byte-identical
+        // to the golden. Built LAST (after every other fallible set) so its own error path tears
+        // down everything prior; no upstream path knows about it. Slot `i`'s set is the 19 software
+        // entries PLUS binding 19 = slot `i`'s persistent TLAS PLUS rung-1b binding 20 = the HWRT
+        // soft-shadow-params UBO.
+        #[cfg(feature = "hwrt")]
+        let resolve_set_hwrt: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> =
+            match (scene.resolve_layout_hwrt, scene.resolve_tlas_hwrt) {
+                (Some(hwrt_layout), Some(tlas)) => {
+                    let mut hwrt_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+                        [const { None }; FRAMES_IN_FLIGHT];
+                    let mut failure: Option<crate::error::VulkanError> = None;
+                    for (slot, dst) in hwrt_slots.iter_mut().enumerate() {
+                        // The HWRT resolve set = the SAME 19 shared bindings the software set uses
+                        // (via `resolve_software_entries`, so they cannot drift) + the 20th
+                        // `AccelerationStructure` at binding 19 (slot `slot`'s frame-stable TLAS) +
+                        // the rung-1b 21st `UniformBuffer` at binding 20 (the soft-shadow-params UBO).
+                        let imgs = ResolveSlotImages {
+                            albedo: &core.albedo[slot],
+                            normal: &core.normal[slot],
+                            material: &core.material[slot],
+                            lit: &core.lit[slot],
+                            viewt: &core.viewt[slot],
+                            ssao: &core.ssao[slot],
+                        };
+                        let shared = resolve_software_entries(
+                            scene,
+                            &imgs,
+                            slot,
+                            cluster_grid_buf,
+                            light_index_buf,
+                        );
+                        // Append binding 19 (the `rayQuery` trace target) + rung-1b binding 20 (the
+                        // HWRT soft-shadow-params UBO) to the shared 19 → `RESOLVE_SOFTWARE_BINDINGS
+                        // + 2` (21) EXACT-fill. `BindGroupEntry` is not `Copy` (it holds a
+                        // `&A::AccelerationStructure`), so MOVE the shared entries into 0..=18 via a
+                        // by-value iterator chained with the TLAS + UBO entries — each element is
+                        // placed exactly once. The UBO entry mirrors the csm/atlas
+                        // `BindGroupEntry::UniformBuffer` shape.
+                        const RESOLVE_HWRT_BINDINGS: usize = RESOLVE_SOFTWARE_BINDINGS + 2;
+                        let mut chained = shared
+                            .into_iter()
+                            .chain(core::iter::once(BindGroupEntry::AccelerationStructure {
+                                accel: tlas[slot],
+                            }))
+                            .chain(core::iter::once(BindGroupEntry::UniformBuffer {
+                                buffer: &scene.ray_shadow_ubo[slot],
+                            }));
+                        let entries: [BindGroupEntry<'_, Vulkan>; RESOLVE_HWRT_BINDINGS] =
+                            core::array::from_fn(|_| {
+                                chained.next().expect(
+                                    "invariant: the chained iterator yields exactly RESOLVE_HWRT_BINDINGS entries",
+                                )
+                            });
+                        debug_assert_eq!(
+                            entries.len(),
+                            RESOLVE_HWRT_BINDINGS,
+                            "invariant: the HWRT resolve set must declare EXACTLY {RESOLVE_HWRT_BINDINGS} bindings (exact-fill)"
+                        );
+                        let desc = BindGroupDesc::<Vulkan> { layout: hwrt_layout, entries: &entries };
+                        match RhiDevice::create_bind_group(ctx, &desc) {
+                            Ok(g) => *dst = Some(g),
+                            Err(e) => {
+                                failure = Some(e);
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(e) = failure {
+                        // SAFETY: the HWRT slots already built [0..slot) + the present ring + the
+                        // (optional) ddgi-update/ssao/cull + the resolve & vocab rings were created on
+                        // `ctx`; referenced by no submission; each destroyed exactly once (reverse
+                        // acquisition). The optional sets are `Option`-guarded; the images are owned by
+                        // the caller.
+                        unsafe {
+                            for s in hwrt_slots.iter_mut() {
+                                if let Some(g) = s.take() {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
+                            }
+                            for g in present_set {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                            if let Some(du) = ddgi_update_set {
+                                RhiDevice::destroy_bind_group(ctx, du);
+                            }
+                            if let Some(ss) = ssao_set {
+                                for g in ss {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
+                            }
+                            if let Some(cs) = cull_set {
+                                for g in cs {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
+                            }
+                            for g in resolve_set {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                            for g in vocab_set {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        return Err(SwapchainError::DepthImage(e));
+                    }
+                    Some(hwrt_slots.map(|s| {
+                        s.expect("invariant: every HWRT resolve ring slot built before reaching here")
+                    }))
+                }
+                _ => None,
+            };
+
+        Ok(DeferredSets {
+            vocab_set,
+            resolve_set,
+            cull_set,
+            ssao_set,
+            ddgi_update_set,
+            present_set,
+            #[cfg(feature = "hwrt")]
+            resolve_set_hwrt,
+        })
+    }
+
+    /// Tears down the deferred sets in reverse acquisition order (resolve-hwrt → present →
+    /// ddgi-update → ssao → cull → resolve → vocab), consuming `self`.
+    ///
+    /// # Safety
+    ///
+    /// `ctx` is live; no submission references these descriptor sets; each is destroyed exactly once
+    /// (the by-value `self`). The `cull`/`ssao`/`ddgi-update`/`resolve-hwrt` sets are `Option`-guarded
+    /// (present only when their feature was wired).
+    unsafe fn destroy(self, ctx: &VulkanContext) {
+        // SAFETY: per the contract `ctx` is live and nothing references these sets; each was created
+        // on `ctx` and is destroyed exactly once, in reverse acquisition order.
+        unsafe {
+            // R2a-4b: the HWRT resolve set RING (last-acquired), `Option`-guarded (present only on an
+            // RT device under `feature = "hwrt"` + config HardwareTri).
+            #[cfg(feature = "hwrt")]
+            if let Some(hs) = self.resolve_set_hwrt {
+                for g in hs {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            for g in self.present_set {
+                RhiDevice::destroy_bind_group(ctx, g);
+            }
+            // SDFDDGI I2: the single (non-ringed) update set, `Option`-guarded (present only when the
+            // update pass was wired).
+            if let Some(du) = self.ddgi_update_set {
+                RhiDevice::destroy_bind_group(ctx, du);
+            }
+            if let Some(ss) = self.ssao_set {
+                for g in ss {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            if let Some(cs) = self.cull_set {
+                for g in cs {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            for g in self.resolve_set {
+                RhiDevice::destroy_bind_group(ctx, g);
+            }
+            for g in self.vocab_set {
+                RhiDevice::destroy_bind_group(ctx, g);
+            }
+        }
+    }
+}
+
 impl GBufferTargets {
     /// HW-RT rung 3a: builds the spatial-denoise descriptor sets + the à-trous edge-stop UBO ring.
     ///
@@ -1472,876 +2399,45 @@ impl GBufferTargets {
         scene: &GBufferScene<'_>,
         extent: VkExtent2D,
     ) -> Result<Self, SwapchainError> {
-        // === The G-buffer render-target IMAGE RINGS (lock-free cross-frame WAR fix). ===
-        // Each render-target image is RINGED to `FRAMES_IN_FLIGHT` copies so frame N+1 writes
-        // slot `i`'s images while frame N still reads slot `j`'s. A `[Option<_>; N]` builder
-        // per ring lets every early-return error path drain the partial ring it failed in PLUS
-        // every fully-built prior ring (no VkImage/VkImageView leak) — the exhaustive ladder.
-        //
-        // `destroy_ring` tears down a COMPLETED ring (consumes the `[VulkanTexture; N]`);
-        // `drain_partial` tears down the slots already built in the FAILING ring (drains the
-        // `[Option<_>; N]` in place). Both are `unsafe` (they call `destroy_texture`): every
-        // texture was created on `ctx` just above, is referenced by no submission, and is
-        // destroyed exactly once on the single error path that runs.
-        //
-        // SAFETY (shared by every destroy below): `ctx` is the live context each texture was
-        // created on; none is referenced by any submission (this is the build phase, before
-        // any record/submit); each ring slot is destroyed exactly once (a completed ring is
-        // consumed by value, a partial ring is `take`-drained).
-        let destroy_ring = |ring: [VulkanTexture; FRAMES_IN_FLIGHT]| unsafe {
-            for t in ring {
-                RhiDevice::destroy_texture(ctx, t);
-            }
-        };
-        let drain_partial = |ring: &mut [Option<VulkanTexture>; FRAMES_IN_FLIGHT]| unsafe {
-            for slot in ring.iter_mut() {
-                if let Some(t) = slot.take() {
-                    RhiDevice::destroy_texture(ctx, t);
-                }
-            }
-        };
-        // Rung 3a: tears down a COMPLETED `Option`-guarded ring (the two shadow-vis targets, which
-        // are `None` on a device lacking RG8/RG16 storage) IN PLACE via `take()`, so it can be
-        // called from inside the descriptor-set error loops below without moving the outer `let`
-        // (a move-in-loop the borrow checker rejects). The `None` case (and a second call after a
-        // take) is a no-op. Same SAFETY as `destroy_ring` (`ctx` live, no submission references it,
-        // each slot destroyed once — the `take` guarantees at-most-once).
+        // === Sub-bundle builds (order-preserving — see the `CoreImages` / `DeferredSets` docs). ===
+        // Each `build` drains its OWN partials on failure; the orchestrator tears down the
+        // (fully-built) earlier bundles in reverse acquisition order — the cross-bundle O(n²)
+        // teardown-ladder collapse. The SUCCESSFUL create ORDER is preserved EXACTLY: core images →
+        // shadow-vis images → deferred sets → (hwrt) denoise sets → temporal images → mv set →
+        // temporal sets, so the render stays byte-identical.
+        let core = CoreImages::build(ctx, extent)?;
+
         #[cfg(feature = "hwrt")]
-        let destroy_vis_opt = |ring: &mut Option<[VulkanTexture; FRAMES_IN_FLIGHT]>| unsafe {
-            if let Some(r) = ring.take() {
-                for t in r {
-                    RhiDevice::destroy_texture(ctx, t);
-                }
+        let shadow_vis_imgs = match ShadowVisImages::build(ctx, extent) {
+            Ok(v) => v,
+            Err(e) => {
+                // SAFETY: `core` was built above on `ctx`, referenced by no submission; destroyed once.
+                unsafe { core.destroy(ctx) };
+                return Err(e);
             }
         };
 
-        // Depth: DEPTH_STENCIL_ATTACHMENT (rasterize into) | SAMPLED (marcher .Load).
-        let depth_desc = TextureDesc {
-            width: extent.width,
-            height: extent.height,
-            depth: 1,
-            format: Format::D32Sfloat,
-            dimension: TextureDimension::D2,
-            usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
-            array_layers: 1,
-        };
-        let mut depth_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
-            [const { None }; FRAMES_IN_FLIGHT];
-        for slot in depth_slots.iter_mut() {
-            match RhiDevice::create_texture(ctx, &depth_desc).map_err(SwapchainError::DepthImage) {
-                Ok(t) => *slot = Some(t),
-                Err(e) => {
-                    drain_partial(&mut depth_slots);
-                    return Err(e);
-                }
-            }
-        }
-        let depth: [VulkanTexture; FRAMES_IN_FLIGHT] =
-            depth_slots.map(|s| s.expect("invariant: every depth ring slot built before here"));
-
-        // Render P5-r0: the throwaway depth-prepass color attachment is DELETED — pass A
-        // now binds the three REAL G-buffer images (albedo/normal/material) as MRT color
-        // attachments, so a separate throwaway color image is obsolete.
-
-        // ALBEDO: STORAGE (marcher store) | SAMPLED (the present-blit, pass C) |
-        // COLOR_ATTACHMENT (Render P5-r0: the mesh raster pass A writes it as MRT@0).
-        let mut albedo_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
-            [const { None }; FRAMES_IN_FLIGHT];
-        for slot in albedo_slots.iter_mut() {
-            match Self::create_gbuffer_image(
-                ctx,
-                extent,
-                ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT,
-            ) {
-                Ok(t) => *slot = Some(t),
-                Err(e) => {
-                    drain_partial(&mut albedo_slots);
-                    destroy_ring(depth);
-                    return Err(e);
-                }
-            }
-        }
-        let albedo: [VulkanTexture; FRAMES_IN_FLIGHT] =
-            albedo_slots.map(|s| s.expect("invariant: every albedo ring slot built before here"));
-
-        // NORMAL / MATERIAL: STORAGE (marcher store) | COLOR_ATTACHMENT (Render P5-r0: the
-        // mesh raster pass A writes them as MRT@1 / MRT@2). Read by the deferred resolve.
-        let mut normal_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
-            [const { None }; FRAMES_IN_FLIGHT];
-        for slot in normal_slots.iter_mut() {
-            match Self::create_gbuffer_image(
-                ctx,
-                extent,
-                ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
-            ) {
-                Ok(t) => *slot = Some(t),
-                Err(e) => {
-                    drain_partial(&mut normal_slots);
-                    destroy_ring(albedo);
-                    destroy_ring(depth);
-                    return Err(e);
-                }
-            }
-        }
-        let normal: [VulkanTexture; FRAMES_IN_FLIGHT] =
-            normal_slots.map(|s| s.expect("invariant: every normal ring slot built before here"));
-
-        let mut material_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
-            [const { None }; FRAMES_IN_FLIGHT];
-        for slot in material_slots.iter_mut() {
-            match Self::create_gbuffer_image(
-                ctx,
-                extent,
-                ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
-            ) {
-                Ok(t) => *slot = Some(t),
-                Err(e) => {
-                    drain_partial(&mut material_slots);
-                    destroy_ring(normal);
-                    destroy_ring(albedo);
-                    destroy_ring(depth);
-                    return Err(e);
-                }
-            }
-        }
-        let material: [VulkanTexture; FRAMES_IN_FLIGHT] = material_slots
-            .map(|s| s.expect("invariant: every material ring slot built before here"));
-
-        // LIT: the deferred resolve's STORAGE store output; also SAMPLED by the
-        // present-blit (pass C) and TRANSFER_SRC so an offscreen golden could read it back.
-        let mut lit_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
-            [const { None }; FRAMES_IN_FLIGHT];
-        for slot in lit_slots.iter_mut() {
-            match Self::create_gbuffer_image(
-                ctx,
-                extent,
-                ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::TRANSFER_SRC,
-            ) {
-                Ok(t) => *slot = Some(t),
-                Err(e) => {
-                    drain_partial(&mut lit_slots);
-                    destroy_ring(material);
-                    destroy_ring(normal);
-                    destroy_ring(albedo);
-                    destroy_ring(depth);
-                    return Err(e);
-                }
-            }
-        }
-        let lit: [VulkanTexture; FRAMES_IN_FLIGHT] =
-            lit_slots.map(|s| s.expect("invariant: every lit ring slot built before here"));
-
-        // Lighting L0b: the R32_SFLOAT `gViewT` lane (the marcher's surface `t`).
-        let mut viewt_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
-            [const { None }; FRAMES_IN_FLIGHT];
-        for slot in viewt_slots.iter_mut() {
-            match Self::create_viewt_image(ctx, extent) {
-                Ok(t) => *slot = Some(t),
-                Err(e) => {
-                    drain_partial(&mut viewt_slots);
-                    destroy_ring(lit);
-                    destroy_ring(material);
-                    destroy_ring(normal);
-                    destroy_ring(albedo);
-                    destroy_ring(depth);
-                    return Err(e);
-                }
-            }
-        }
-        let viewt: [VulkanTexture; FRAMES_IN_FLIGHT] =
-            viewt_slots.map(|s| s.expect("invariant: every viewt ring slot built before here"));
-
-        // Render P7: the R8_UNORM `gSsao` term (ALWAYS allocated — the resolve descriptor
-        // interface is stable regardless of `ssao_mode`; no SSAO pass writes it yet, C2 adds
-        // that). Read by the resolve only under `ssao_mode != 0` (0 every pre-P7 scene).
-        let mut ssao_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
-            [const { None }; FRAMES_IN_FLIGHT];
-        for slot in ssao_slots.iter_mut() {
-            match Self::create_ssao_image(ctx, extent) {
-                Ok(t) => *slot = Some(t),
-                Err(e) => {
-                    drain_partial(&mut ssao_slots);
-                    destroy_ring(viewt);
-                    destroy_ring(lit);
-                    destroy_ring(material);
-                    destroy_ring(normal);
-                    destroy_ring(albedo);
-                    destroy_ring(depth);
-                    return Err(e);
-                }
-            }
-        }
-        let ssao: [VulkanTexture; FRAMES_IN_FLIGHT] =
-            ssao_slots.map(|s| s.expect("invariant: every ssao ring slot built before here"));
-
-        // Rung 3a: the two RT soft-shadow-visibility target RINGS (`shadow_vis` + `shadow_vis2`,
-        // BOTH R16G16_UNORM — the uniform-RG16 ping-pong), allocated together ONLY when the device
-        // advertises RG16 storage (`shadow_denoise_storage_ok()` — the DDGI-degrade discipline; on
-        // an unsupported device
-        // BOTH stay `None` and the denoise is disabled, never a boot fault). Ringed per-FIF like the
-        // ssao ring, built with the same `[Option<_>; N]` drain-on-error ladder. No pass reads them
-        // this step (steps 4-6 add the VIS / à-trous passes) — allocated-but-unused, byte-identical.
-        // On a mid-ring failure, drain the partial ring + every prior image ring (ssao..depth).
-        #[cfg(feature = "hwrt")]
-        let (mut shadow_vis, mut shadow_vis2): (
-            Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
-            Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
-        ) = if ctx.device_caps().shadow_denoise_storage_ok() {
-            let mut vis_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
-                [const { None }; FRAMES_IN_FLIGHT];
-            for slot in vis_slots.iter_mut() {
-                match Self::create_shadow_vis_image(ctx, extent) {
-                    Ok(t) => *slot = Some(t),
-                    Err(e) => {
-                        drain_partial(&mut vis_slots);
-                        destroy_ring(ssao);
-                        destroy_ring(viewt);
-                        destroy_ring(lit);
-                        destroy_ring(material);
-                        destroy_ring(normal);
-                        destroy_ring(albedo);
-                        destroy_ring(depth);
-                        return Err(e);
-                    }
-                }
-            }
-            let vis: [VulkanTexture; FRAMES_IN_FLIGHT] = vis_slots
-                .map(|s| s.expect("invariant: every shadow_vis ring slot built before here"));
-
-            let mut vis2_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
-                [const { None }; FRAMES_IN_FLIGHT];
-            for slot in vis2_slots.iter_mut() {
-                match Self::create_shadow_vis2_image(ctx, extent) {
-                    Ok(t) => *slot = Some(t),
-                    Err(e) => {
-                        drain_partial(&mut vis2_slots);
-                        destroy_ring(vis);
-                        destroy_ring(ssao);
-                        destroy_ring(viewt);
-                        destroy_ring(lit);
-                        destroy_ring(material);
-                        destroy_ring(normal);
-                        destroy_ring(albedo);
-                        destroy_ring(depth);
-                        return Err(e);
-                    }
-                }
-            }
-            let vis2: [VulkanTexture; FRAMES_IN_FLIGHT] = vis2_slots
-                .map(|s| s.expect("invariant: every shadow_vis2 ring slot built before here"));
-            (Some(vis), Some(vis2))
-        } else {
-            (None, None)
-        };
-
-        // The marcher vocabulary set, written ONCE here (NO per-frame update). The
-        // entry order matches the layout: SSBO @0, sampled depth @1, storage albedo @2,
-        // storage normal @3, storage material @4, UNIFORM camera @5, STORAGE tiles @6,
-        // STORAGE material-table @7, STORAGE gViewT @8 (Lighting L0b), STORAGE PointerGrid @9
-        // (M1), COMBINED_IMAGE_SAMPLER BrickAtlas @10 (M2). Bindings 6/9/10 are the P4b coarse-cull
-        // tiles, the M1 empty-skip pointer grid, and the M2 brick atlas: the marcher shader DECLARES
-        // all three unconditionally (DXC keeps the @9/@10 references past the runtime
-        // `brick_enabled`/`brick_trilinear` gates), so VALID descriptors are bound here even though
-        // the windowed path gates ALL reads OFF (`coarse_enabled == 0` / `brick_enabled == 0` /
-        // `brick_trilinear == 0` — byte-identical output, bindings bound-but-unread).
-        // Build FRAMES_IN_FLIGHT identical copies of the vocab set, slot `i` binding
-        // `scene.camera_ring[i]` at the camera UBO @5 (the lock-free per-frame ring fix; every
-        // other binding is identical across slots). On a failure at slot `i`, the slots already
-        // built [0..i) MUST be destroyed (no descriptor leak) along with the prior images.
-        let mut vocab_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
-            [const { None }; FRAMES_IN_FLIGHT];
-        for slot in 0..FRAMES_IN_FLIGHT {
-            let entries = [
-                BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
-                BindGroupEntry::SampledImage {
-                    texture: &depth[slot],
-                    sampler: scene.depth_sampler,
-                },
-                BindGroupEntry::StorageImage { texture: &albedo[slot] },
-                BindGroupEntry::StorageImage { texture: &normal[slot] },
-                BindGroupEntry::StorageImage { texture: &material[slot] },
-                BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
-                BindGroupEntry::StorageBuffer { buffer: scene.tiles_buffer },
-                // PBR MVP-2: the material table SSBO @7 (the marcher fetches `base_color`).
-                BindGroupEntry::StorageBuffer { buffer: scene.material_table },
-                // Lighting L0b: the gViewT lane @8 (the marcher STORES the surface `t`).
-                BindGroupEntry::StorageImage { texture: &viewt[slot] },
-                // M1: the empty-skip PointerGrid SSBO @9. Statically referenced by the marcher
-                // SPIR-V (`register(t9)`); the windowed path gates the read OFF
-                // (`brick_enabled == 0`), so it is bound-but-unread (byte-identical output).
-                BindGroupEntry::StorageBuffer { buffer: scene.pointer_grid },
-                // M2: the brick-atlas 3D image @10 as a COMBINED_IMAGE_SAMPLER (the marcher's
-                // hardware trilinear `.SampleLevel` needs the sampler). Statically referenced by the
-                // marcher SPIR-V (`register(t10)` + `register(s10)`, collapsed to one combined
-                // descriptor by DXC); the windowed path gates the read OFF (`brick_trilinear == 0`),
-                // so it is bound-but-unread (byte-identical output, the M2 R2 contract).
-                BindGroupEntry::CombinedImage {
-                    texture: scene.atlas,
-                    sampler: scene.atlas_sampler,
-                },
-                // M4 clip-map LOD: the LEVEL-1 + LEVEL-2 brick resources (bindings 11/12 + 13/14). The
-                // marcher SPIR-V statically references `PointerGrid1`@t11, `BrickAtlas1`@t12,
-                // `PointerGrid2`@t13, `BrickAtlas2`@t14 inside the runtime level branch-ladder (NOT
-                // dead-stripped past the gate), so VALID descriptors are bound here even on the OFF/N=1
-                // path (`brick_levels == 1` takes only the lvl==0 arm → bound-but-unread, byte-identical).
-                // Order matches the layout: PointerGrid1 @11, BrickAtlas1 @12, PointerGrid2 @13, BrickAtlas2 @14.
-                BindGroupEntry::StorageBuffer { buffer: scene.level_grids[0] },
-                BindGroupEntry::CombinedImage {
-                    texture: scene.level_atlases[0],
-                    sampler: scene.level_atlas_samplers[0],
-                },
-                BindGroupEntry::StorageBuffer { buffer: scene.level_grids[1] },
-                BindGroupEntry::CombinedImage {
-                    texture: scene.level_atlases[1],
-                    sampler: scene.level_atlas_samplers[1],
-                },
-                // MDF Stage-2c: the dedicated dense mesh-SDF shadow-caster image @15 as a
-                // COMBINED_IMAGE_SAMPLER (the marcher's trilinear `.SampleLevel` needs the sampler).
-                // Statically referenced by the recompiled marcher SPIR-V (`register(t15)` +
-                // `register(s15)`, collapsed to one combined descriptor by DXC) inside the
-                // runtime-gated `mesh_sdf_enabled` branch; a non-MDF scene gates the read OFF
-                // (`mesh_sdf_enabled == false`), so it is bound-but-unread (byte-identical output, the
-                // R2 contract). A non-MDF scene binds a benign placeholder (e.g. the brick atlas).
-                BindGroupEntry::CombinedImage {
-                    texture: scene.mesh_sdf,
-                    sampler: scene.mesh_sdf_sampler,
-                },
-            ];
-            let desc = BindGroupDesc::<Vulkan> {
-                layout: scene.vocab_layout,
-                entries: &entries,
-            };
-            match RhiDevice::create_bind_group(ctx, &desc) {
-                Ok(g) => vocab_slots[slot] = Some(g),
-                Err(e) => {
-                    // SAFETY: the eight image RINGS + the vocab slots already built [0..slot)
-                    // were created on `ctx`; referenced by no submission; each destroyed
-                    // exactly once on this error path (the partial vocab ring is drained
-                    // first, then every image ring via `destroy_ring`).
-                    unsafe {
-                        for s in vocab_slots.iter_mut() {
-                            if let Some(g) = s.take() {
-                                RhiDevice::destroy_bind_group(ctx, g);
-                            }
-                        }
-                    }
-                    // Rung 3a: the two shadow-vis rings (last-built images), `Option`-drained first
-                    // (reverse acquisition: vis2 before vis before ssao). No-op when unallocated.
-                    #[cfg(feature = "hwrt")]
-                    destroy_vis_opt(&mut shadow_vis2);
-                    #[cfg(feature = "hwrt")]
-                    destroy_vis_opt(&mut shadow_vis);
-                    destroy_ring(ssao);
-                    destroy_ring(viewt);
-                    destroy_ring(lit);
-                    destroy_ring(material);
-                    destroy_ring(normal);
-                    destroy_ring(albedo);
-                    destroy_ring(depth);
-                    return Err(SwapchainError::DepthImage(e));
-                }
-            }
-        }
-        // Every slot is now `Some` (the loop returned on any failure); collect the ring.
-        let vocab_set: [VulkanBindGroup; FRAMES_IN_FLIGHT] = vocab_slots
-            .map(|s| s.expect("invariant: every vocab ring slot built before reaching here"));
-
-        // The deferred RESOLVE set, written ONCE here (12 bindings, 0..=11): gAlbedo @0,
-        // gNormal @1, gMaterial @2, lit @3 (STORAGE images), material SSBO @4, camera UBO
-        // @5, light table SSBO @6 (Lighting L0a), gViewT @7 (Lighting L0b), ClusterGrid @8 +
-        // LightIndexList @9 (Lighting L1) — matching `deferred_pbr.comp`'s set 0. When L1 is
-        // off the scene's cluster buffers are `None`, so @8/@9 bind the light table as a
-        // harmless VALID placeholder (the resolve's `clusters_enabled` header gate never reads
-        // them on the OFF path — the layout requires a valid descriptor regardless).
+        // The L1 froxel buffers (or the light-table placeholder when L1 is off) — computed ONCE and
+        // shared with the deferred-set builder AND the hwrt denoise/temporal set builders below.
         let cluster_grid_buf = scene.cluster_grid.unwrap_or(scene.light_table);
         let light_index_buf = scene.light_index.unwrap_or(scene.light_table);
-        // Build FRAMES_IN_FLIGHT identical copies of the resolve set, slot `i` binding
-        // `scene.camera_ring[i]` @5 + `scene.csm_cascade_ring[i]` @13 (the lock-free per-frame ring
-        // fix; every other binding is identical across slots). On a failure at slot `i`, the slots
-        // already built [0..i) plus the prior vocab ring + images MUST be destroyed (no leak).
-        let mut resolve_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
-            [const { None }; FRAMES_IN_FLIGHT];
-        for slot in 0..FRAMES_IN_FLIGHT {
-            // The 19 SHARED resolve bindings (0..=18) — built by the ONE helper the HWRT set also
-            // consumes, so the two sets' first 19 bindings cannot drift (a drift = an invisible
-            // set↔shader-layout mismatch → device-lost). The software set uses them verbatim.
-            let imgs = ResolveSlotImages {
-                albedo: &albedo[slot],
-                normal: &normal[slot],
-                material: &material[slot],
-                lit: &lit[slot],
-                viewt: &viewt[slot],
-                ssao: &ssao[slot],
-            };
-            let entries =
-                resolve_software_entries(scene, &imgs, slot, cluster_grid_buf, light_index_buf);
-            // The software resolve set is EXACT-FILL at `RESOLVE_SOFTWARE_BINDINGS` (19), under the
-            // rung-1b cap of `MAX_BIND_GROUP_BINDINGS` (21). Keeping it EXACT (not `<= cap`) preserves
-            // the UNDER-FILL tripwire (a missing binding) AND the over-fill tripwire. The HWRT variant
-            // is a SEPARATE 21-binding set (TLAS @19 + shadow-params UBO @20), guarded against
-            // `RESOLVE_HWRT_BINDINGS` — the software fill is untouched.
-            debug_assert_eq!(
-                entries.len(),
-                RESOLVE_SOFTWARE_BINDINGS,
-                "invariant: the software resolve set must declare EXACTLY {RESOLVE_SOFTWARE_BINDINGS} bindings (exact-fill)"
-            );
-            let desc = BindGroupDesc::<Vulkan> {
-                layout: scene.resolve_layout,
-                entries: &entries,
-            };
-            match RhiDevice::create_bind_group(ctx, &desc) {
-                Ok(g) => resolve_slots[slot] = Some(g),
+
+        let deferred =
+            match DeferredSets::build(ctx, scene, &core, cluster_grid_buf, light_index_buf) {
+                Ok(s) => s,
                 Err(e) => {
-                    // SAFETY: the eight image RINGS + the whole vocab ring + the resolve slots
-                    // already built [0..slot) were created on `ctx`; referenced by no submission;
-                    // each destroyed exactly once on this error path (sets → images via
-                    // `destroy_ring`).
+                    // SAFETY: the shadow-vis images (hwrt) + `core` were built above on `ctx`,
+                    // referenced by no submission; each destroyed exactly once, reverse acquisition
+                    // (shadow-vis → core).
                     unsafe {
-                        for s in resolve_slots.iter_mut() {
-                            if let Some(g) = s.take() {
-                                RhiDevice::destroy_bind_group(ctx, g);
-                            }
-                        }
-                        for g in vocab_set {
-                            RhiDevice::destroy_bind_group(ctx, g);
-                        }
-                    }
-                    // Rung 3a: the two shadow-vis rings (last-built images), `Option`-drained first
-                    // (reverse acquisition: vis2 before vis before ssao). No-op when unallocated.
-                    #[cfg(feature = "hwrt")]
-                    destroy_vis_opt(&mut shadow_vis2);
-                    #[cfg(feature = "hwrt")]
-                    destroy_vis_opt(&mut shadow_vis);
-                    destroy_ring(ssao);
-                    destroy_ring(viewt);
-                    destroy_ring(lit);
-                    destroy_ring(material);
-                    destroy_ring(normal);
-                    destroy_ring(albedo);
-                    destroy_ring(depth);
-                    return Err(SwapchainError::DepthImage(e));
-                }
-            }
-        }
-        let resolve_set: [VulkanBindGroup; FRAMES_IN_FLIGHT] = resolve_slots
-            .map(|s| s.expect("invariant: every resolve ring slot built before reaching here"));
-
-        // The Lighting-L1 CULL set, written ONCE here when L1 is wired (camera UBO @0, light
-        // table SSBO @1, ClusterGrid @2, LightIndexList @3, LightIndexAlloc @4) — matching
-        // `cluster_cull.comp`'s set 0. `None` when the scene does not supply the cull layout
-        // (the L0b-only build); the recorder then skips the cull pass entirely.
-        let cull_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = match (scene.cull_layout, scene.cluster_grid, scene.light_index, scene.light_index_alloc) {
-            (Some(cull_layout), Some(grid), Some(index), Some(alloc)) => {
-                // Build FRAMES_IN_FLIGHT identical copies, slot `i` binding `scene.camera_ring[i]`
-                // @0 (the lock-free per-frame ring fix). On a failure at slot `i`, the slots already
-                // built [0..i) plus the prior resolve + vocab rings + images MUST be destroyed.
-                let mut cull_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
-                    [const { None }; FRAMES_IN_FLIGHT];
-                let mut failure: Option<crate::error::VulkanError> = None;
-                for (slot, dst) in cull_slots.iter_mut().enumerate() {
-                    let entries = [
-                        BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
-                        BindGroupEntry::StorageBuffer { buffer: scene.light_table },
-                        BindGroupEntry::StorageBuffer { buffer: grid },
-                        BindGroupEntry::StorageBuffer { buffer: index },
-                        BindGroupEntry::StorageBuffer { buffer: alloc },
-                    ];
-                    let desc = BindGroupDesc::<Vulkan> { layout: cull_layout, entries: &entries };
-                    match RhiDevice::create_bind_group(ctx, &desc) {
-                        Ok(g) => *dst = Some(g),
-                        Err(e) => {
-                            failure = Some(e);
-                            break;
-                        }
-                    }
-                }
-                if let Some(e) = failure {
-                    // SAFETY: the resolve + vocab rings + the eight image RINGS above + the cull
-                    // slots already built [0..slot) were created on `ctx`; referenced by no
-                    // submission; each destroyed exactly once on this error path (sets → images
-                    // via `destroy_ring`).
-                    unsafe {
-                        for s in cull_slots.iter_mut() {
-                            if let Some(g) = s.take() {
-                                RhiDevice::destroy_bind_group(ctx, g);
-                            }
-                        }
-                        for g in resolve_set {
-                            RhiDevice::destroy_bind_group(ctx, g);
-                        }
-                        for g in vocab_set {
-                            RhiDevice::destroy_bind_group(ctx, g);
-                        }
-                    }
-                    // Rung 3a: the two shadow-vis rings (last-built images), `Option`-drained first
-                    // (reverse acquisition: vis2 before vis before ssao). No-op when unallocated.
-                    #[cfg(feature = "hwrt")]
-                    destroy_vis_opt(&mut shadow_vis2);
-                    #[cfg(feature = "hwrt")]
-                    destroy_vis_opt(&mut shadow_vis);
-                    destroy_ring(ssao);
-                    destroy_ring(viewt);
-                    destroy_ring(lit);
-                    destroy_ring(material);
-                    destroy_ring(normal);
-                    destroy_ring(albedo);
-                    destroy_ring(depth);
-                    return Err(SwapchainError::DepthImage(e));
-                }
-                Some(cull_slots.map(|s| {
-                    s.expect("invariant: every cull ring slot built before reaching here")
-                }))
-            }
-            _ => None,
-        };
-
-        // Render P7: the SSAO set, written ONCE here when the SSAO pass is wired (gNormal @0,
-        // gMaterial @1, gViewT @2 STORAGE images READ, the `ssao` out STORAGE image @3 WRITE, the
-        // camera UBO @4) — matching `sdf_ssao.comp`'s set 0. `None` when the scene does not supply
-        // the SSAO activation (the default OFF path); the recorder then skips the SSAO pass
-        // entirely (the 0%-gate, byte-identical command stream). The `ssao` image is the SAME one
-        // the resolve set binds at @11 — the SSAO pass WRITES it, the resolve READS it (ordered by
-        // the recorder's COMPUTE→COMPUTE barrier on the SSAO ON path).
-        let ssao_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = match scene.ssao {
-            Some(activation) => {
-                // Build FRAMES_IN_FLIGHT identical copies, slot `i` binding `scene.camera_ring[i]`
-                // @4 (the lock-free per-frame ring fix). On a failure at slot `i`, the slots already
-                // built [0..i) plus the prior cull/resolve/vocab rings + images MUST be destroyed.
-                let mut ssao_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
-                    [const { None }; FRAMES_IN_FLIGHT];
-                let mut failure: Option<crate::error::VulkanError> = None;
-                for (slot, dst) in ssao_slots.iter_mut().enumerate() {
-                    let entries = [
-                        BindGroupEntry::StorageImage { texture: &normal[slot] },
-                        BindGroupEntry::StorageImage { texture: &material[slot] },
-                        BindGroupEntry::StorageImage { texture: &viewt[slot] },
-                        BindGroupEntry::StorageImage { texture: &ssao[slot] },
-                        BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
-                    ];
-                    let desc = BindGroupDesc::<Vulkan> { layout: activation.layout, entries: &entries };
-                    match RhiDevice::create_bind_group(ctx, &desc) {
-                        Ok(g) => *dst = Some(g),
-                        Err(e) => {
-                            failure = Some(e);
-                            break;
-                        }
-                    }
-                }
-                if let Some(e) = failure {
-                    // SAFETY: the resolve + vocab rings + the (optional) cull ring + the eight
-                    // image RINGS above + the ssao slots already built [0..slot) were created on
-                    // `ctx`; referenced by no submission; each destroyed exactly once (sets →
-                    // images via `destroy_ring`). The cull ring is `Option`-guarded (only when L1
-                    // wired).
-                    unsafe {
-                        for s in ssao_slots.iter_mut() {
-                            if let Some(g) = s.take() {
-                                RhiDevice::destroy_bind_group(ctx, g);
-                            }
-                        }
-                        if let Some(cs) = cull_set {
-                            for g in cs {
-                                RhiDevice::destroy_bind_group(ctx, g);
-                            }
-                        }
-                        for g in resolve_set {
-                            RhiDevice::destroy_bind_group(ctx, g);
-                        }
-                        for g in vocab_set {
-                            RhiDevice::destroy_bind_group(ctx, g);
-                        }
-                    }
-                    // Rung 3a: the two shadow-vis rings (last-built images), `Option`-drained first
-                    // (reverse acquisition: vis2 before vis before ssao). No-op when unallocated.
-                    #[cfg(feature = "hwrt")]
-                    destroy_vis_opt(&mut shadow_vis2);
-                    #[cfg(feature = "hwrt")]
-                    destroy_vis_opt(&mut shadow_vis);
-                    destroy_ring(ssao);
-                    destroy_ring(viewt);
-                    destroy_ring(lit);
-                    destroy_ring(material);
-                    destroy_ring(normal);
-                    destroy_ring(albedo);
-                    destroy_ring(depth);
-                    return Err(SwapchainError::DepthImage(e));
-                }
-                Some(ssao_slots.map(|s| {
-                    s.expect("invariant: every ssao ring slot built before reaching here")
-                }))
-            }
-            None => None,
-        };
-
-        // SDFDDGI I2: the SINGLE (non-ringed) probe-update set, written ONCE here when the update
-        // pass is wired (`Buf` @0 R, `gIrrOut` @1 W, `gDepthOut` @2 W storage images, `Classification`
-        // @3 RW, `RayTable` @4 R, `LightBuf` @5 R, `DdgiUpdate` UBO @6) — matching
-        // `sdf_probe_update.comp`'s set 0. `None` when the scene does not supply the update activation
-        // (the default GI-OFF path); the recorder then skips the update pass entirely (the 0%-gate,
-        // byte-identical command stream). NOT ringed — every input is a single device-only instance
-        // (plan §2.2 ring audit): the two atlas storage images are the SAME textures the resolve set
-        // samples (the update WRITES them, the resolve READS them, ordered by the RDG-derived
-        // update→resolve barrier). On a failure, the prior vocab/resolve/(optional cull/ssao) rings +
-        // the eight image rings MUST be destroyed (the ssao teardown chain shape).
-        let ddgi_update_set: Option<VulkanBindGroup> = match scene.ddgi_update {
-            Some(activation) => {
-                let entries = [
-                    BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
-                    BindGroupEntry::StorageImage { texture: scene.ddgi_irr_texture },
-                    BindGroupEntry::StorageImage { texture: scene.ddgi_depth_texture },
-                    BindGroupEntry::StorageBuffer { buffer: scene.ddgi_classification },
-                    BindGroupEntry::StorageBuffer { buffer: scene.ddgi_ray_table },
-                    BindGroupEntry::StorageBuffer { buffer: scene.light_table },
-                    BindGroupEntry::UniformBuffer { buffer: scene.ddgi_update_ubo },
-                ];
-                let desc = BindGroupDesc::<Vulkan> { layout: activation.layout, entries: &entries };
-                match RhiDevice::create_bind_group(ctx, &desc) {
-                    Ok(g) => Some(g),
-                    Err(e) => {
-                        // SAFETY: the vocab & resolve rings + the (optional) cull & ssao rings + the
-                        // eight image rings were created on `ctx`; referenced by no submission; each
-                        // destroyed exactly once (sets → images via `destroy_ring`). The cull & ssao
-                        // rings are `Option`-guarded (present only when L1 / SSAO wired).
-                        unsafe {
-                            if let Some(ss) = ssao_set {
-                                for g in ss {
-                                    RhiDevice::destroy_bind_group(ctx, g);
-                                }
-                            }
-                            if let Some(cs) = cull_set {
-                                for g in cs {
-                                    RhiDevice::destroy_bind_group(ctx, g);
-                                }
-                            }
-                            for g in resolve_set {
-                                RhiDevice::destroy_bind_group(ctx, g);
-                            }
-                            for g in vocab_set {
-                                RhiDevice::destroy_bind_group(ctx, g);
-                            }
-                        }
-                        // Rung 3a: the two shadow-vis rings (last-built images), `Option`-drained
-                        // first (reverse acquisition: vis2 before vis before ssao). No-op when
-                        // unallocated.
                         #[cfg(feature = "hwrt")]
-                        destroy_vis_opt(&mut shadow_vis2);
-                        #[cfg(feature = "hwrt")]
-                        destroy_vis_opt(&mut shadow_vis);
-                        destroy_ring(ssao);
-                        destroy_ring(viewt);
-                        destroy_ring(lit);
-                        destroy_ring(material);
-                        destroy_ring(normal);
-                        destroy_ring(albedo);
-                        destroy_ring(depth);
-                        return Err(SwapchainError::DepthImage(e));
+                        if let Some(v) = shadow_vis_imgs {
+                            v.destroy(ctx);
+                        }
+                        core.destroy(ctx);
                     }
+                    return Err(e);
                 }
-            }
-            None => None,
-        };
-
-        // The present-blit set RING, written ONCE here: slot `i` is one COMBINED_IMAGE_SAMPLER
-        // pointing at `lit[i]` (the resolve's output for that slot) + the scene's present
-        // sampler. RINGED so the present samples the SAME slot the resolve wrote this frame (the
-        // `lit` ring made a single present set stale — it would sample a sibling slot's image).
-        // On a failure at slot `i`, the slots already built [0..i) plus every prior ring
-        // (vocab/resolve/cull/ssao + the eight image rings) MUST be destroyed (no leak).
-        let mut present_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
-            [const { None }; FRAMES_IN_FLIGHT];
-        for (slot, dst) in present_slots.iter_mut().enumerate() {
-            let entries = [BindGroupEntry::CombinedImage {
-                texture: &lit[slot],
-                sampler: scene.present_sampler,
-            }];
-            let desc = BindGroupDesc::<Vulkan> {
-                layout: scene.present_layout,
-                entries: &entries,
-            };
-            match RhiDevice::create_bind_group(ctx, &desc) {
-                Ok(g) => *dst = Some(g),
-                Err(e) => {
-                    // SAFETY: the eight image RINGS + the vocab & resolve RINGS + the (optional)
-                    // cull & (optional) SSAO RINGS + the present slots already built [0..slot) above
-                    // were created on `ctx`; referenced by no submission; each destroyed exactly
-                    // once on this error path (sets → images via `destroy_ring`). The cull & SSAO
-                    // rings are `Option`-guarded (present only when L1 / SSAO wired); every ring
-                    // slot is drained.
-                    unsafe {
-                        for s in present_slots.iter_mut() {
-                            if let Some(g) = s.take() {
-                                RhiDevice::destroy_bind_group(ctx, g);
-                            }
-                        }
-                        // SDFDDGI I2: the single (non-ringed) update set, `Option`-guarded (present
-                        // only when the update pass is wired).
-                        if let Some(du) = ddgi_update_set {
-                            RhiDevice::destroy_bind_group(ctx, du);
-                        }
-                        if let Some(ss) = ssao_set {
-                            for g in ss {
-                                RhiDevice::destroy_bind_group(ctx, g);
-                            }
-                        }
-                        if let Some(cs) = cull_set {
-                            for g in cs {
-                                RhiDevice::destroy_bind_group(ctx, g);
-                            }
-                        }
-                        for g in resolve_set {
-                            RhiDevice::destroy_bind_group(ctx, g);
-                        }
-                        for g in vocab_set {
-                            RhiDevice::destroy_bind_group(ctx, g);
-                        }
-                    }
-                    // Rung 3a: the two shadow-vis rings (last-built images), `Option`-drained first
-                    // (reverse acquisition: vis2 before vis before ssao). No-op when unallocated.
-                    #[cfg(feature = "hwrt")]
-                    destroy_vis_opt(&mut shadow_vis2);
-                    #[cfg(feature = "hwrt")]
-                    destroy_vis_opt(&mut shadow_vis);
-                    destroy_ring(ssao);
-                    destroy_ring(viewt);
-                    destroy_ring(lit);
-                    destroy_ring(material);
-                    destroy_ring(normal);
-                    destroy_ring(albedo);
-                    destroy_ring(depth);
-                    return Err(SwapchainError::DepthImage(e));
-                }
-            }
-        }
-        let present_set: [VulkanBindGroup; FRAMES_IN_FLIGHT] = present_slots
-            .map(|s| s.expect("invariant: every present ring slot built before reaching here"));
-
-        // R2a-4b: the HWRT-variant resolve set RING — built ONLY when the scene wires BOTH the
-        // 21-binding HWRT resolve layout AND the per-FIF TLAS handles (i.e. under `feature = "hwrt"`
-        // + `ctx.ray_query_enabled()` + config HardwareTri). `None` on every software path ⇒ the
-        // recorder binds the 19-binding `resolve_set` against the software pipeline ⇒ byte-identical
-        // to the golden. Built LAST (after every other fallible set) so its own error path tears
-        // down everything prior; no upstream path knows about it. Slot `i`'s set is the 19 software
-        // entries PLUS binding 19 = slot `i`'s persistent TLAS PLUS rung-1b binding 20 = the HWRT
-        // soft-shadow-params UBO.
-        #[cfg(feature = "hwrt")]
-        let resolve_set_hwrt: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> =
-            match (scene.resolve_layout_hwrt, scene.resolve_tlas_hwrt) {
-                (Some(hwrt_layout), Some(tlas)) => {
-                    let mut hwrt_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
-                        [const { None }; FRAMES_IN_FLIGHT];
-                    let mut failure: Option<crate::error::VulkanError> = None;
-                    for (slot, dst) in hwrt_slots.iter_mut().enumerate() {
-                        // The HWRT resolve set = the SAME 19 shared bindings the software set uses
-                        // (via `resolve_software_entries`, so they cannot drift) + the 20th
-                        // `AccelerationStructure` at binding 19 (slot `slot`'s frame-stable TLAS) +
-                        // the rung-1b 21st `UniformBuffer` at binding 20 (the soft-shadow-params UBO).
-                        let imgs = ResolveSlotImages {
-                            albedo: &albedo[slot],
-                            normal: &normal[slot],
-                            material: &material[slot],
-                            lit: &lit[slot],
-                            viewt: &viewt[slot],
-                            ssao: &ssao[slot],
-                        };
-                        let shared = resolve_software_entries(
-                            scene,
-                            &imgs,
-                            slot,
-                            cluster_grid_buf,
-                            light_index_buf,
-                        );
-                        // Append binding 19 (the `rayQuery` trace target) + rung-1b binding 20 (the
-                        // HWRT soft-shadow-params UBO) to the shared 19 → `RESOLVE_SOFTWARE_BINDINGS
-                        // + 2` (21) EXACT-fill. `BindGroupEntry` is not `Copy` (it holds a
-                        // `&A::AccelerationStructure`), so MOVE the shared entries into 0..=18 via a
-                        // by-value iterator chained with the TLAS + UBO entries — each element is
-                        // placed exactly once. The UBO entry mirrors the csm/atlas
-                        // `BindGroupEntry::UniformBuffer` shape.
-                        const RESOLVE_HWRT_BINDINGS: usize = RESOLVE_SOFTWARE_BINDINGS + 2;
-                        let mut chained = shared
-                            .into_iter()
-                            .chain(core::iter::once(BindGroupEntry::AccelerationStructure {
-                                accel: tlas[slot],
-                            }))
-                            .chain(core::iter::once(BindGroupEntry::UniformBuffer {
-                                buffer: &scene.ray_shadow_ubo[slot],
-                            }));
-                        let entries: [BindGroupEntry<'_, Vulkan>; RESOLVE_HWRT_BINDINGS] =
-                            core::array::from_fn(|_| {
-                                chained.next().expect(
-                                    "invariant: the chained iterator yields exactly RESOLVE_HWRT_BINDINGS entries",
-                                )
-                            });
-                        debug_assert_eq!(
-                            entries.len(),
-                            RESOLVE_HWRT_BINDINGS,
-                            "invariant: the HWRT resolve set must declare EXACTLY {RESOLVE_HWRT_BINDINGS} bindings (exact-fill)"
-                        );
-                        let desc = BindGroupDesc::<Vulkan> { layout: hwrt_layout, entries: &entries };
-                        match RhiDevice::create_bind_group(ctx, &desc) {
-                            Ok(g) => *dst = Some(g),
-                            Err(e) => {
-                                failure = Some(e);
-                                break;
-                            }
-                        }
-                    }
-                    if let Some(e) = failure {
-                        // SAFETY: every prior set RING (vocab/resolve/present + the optional
-                        // cull/ssao/ddgi-update) + the eight image RINGS + the HWRT slots already
-                        // built [0..slot) were created on `ctx`; referenced by no submission; each
-                        // destroyed exactly once on this error path. The optional sets are
-                        // `Option`-guarded; every ring slot is drained.
-                        unsafe {
-                            for s in hwrt_slots.iter_mut() {
-                                if let Some(g) = s.take() {
-                                    RhiDevice::destroy_bind_group(ctx, g);
-                                }
-                            }
-                            for g in present_set {
-                                RhiDevice::destroy_bind_group(ctx, g);
-                            }
-                            if let Some(du) = ddgi_update_set {
-                                RhiDevice::destroy_bind_group(ctx, du);
-                            }
-                            if let Some(ss) = ssao_set {
-                                for g in ss {
-                                    RhiDevice::destroy_bind_group(ctx, g);
-                                }
-                            }
-                            if let Some(cs) = cull_set {
-                                for g in cs {
-                                    RhiDevice::destroy_bind_group(ctx, g);
-                                }
-                            }
-                            for g in resolve_set {
-                                RhiDevice::destroy_bind_group(ctx, g);
-                            }
-                            for g in vocab_set {
-                                RhiDevice::destroy_bind_group(ctx, g);
-                            }
-                        }
-                        // Rung 3a: the two shadow-vis rings (last-built images), `Option`-drained
-                        // first (reverse acquisition: vis2 before vis before ssao). No-op when
-                        // unallocated.
-                        #[cfg(feature = "hwrt")]
-                        destroy_vis_opt(&mut shadow_vis2);
-                        #[cfg(feature = "hwrt")]
-                        destroy_vis_opt(&mut shadow_vis);
-                        destroy_ring(ssao);
-                        destroy_ring(viewt);
-                        destroy_ring(lit);
-                        destroy_ring(material);
-                        destroy_ring(normal);
-                        destroy_ring(albedo);
-                        destroy_ring(depth);
-                        return Err(SwapchainError::DepthImage(e));
-                    }
-                    Some(hwrt_slots.map(|s| {
-                        s.expect("invariant: every HWRT resolve ring slot built before reaching here")
-                    }))
-                }
-                _ => None,
             };
 
         // HW-RT rung 3a: the spatial-denoise descriptor sets + the à-trous edge-stop UBO ring.
@@ -2360,14 +2456,14 @@ impl GBufferTargets {
         ) = match Self::build_shadow_denoise_sets(
             ctx,
             scene,
-            &albedo,
-            &normal,
-            &material,
-            &lit,
-            &viewt,
-            &ssao,
-            shadow_vis.as_ref(),
-            shadow_vis2.as_ref(),
+            &core.albedo,
+            &core.normal,
+            &core.material,
+            &core.lit,
+            &core.viewt,
+            &core.ssao,
+            shadow_vis_imgs.as_ref().map(|v| &v.shadow_vis),
+            shadow_vis_imgs.as_ref().map(|v| &v.shadow_vis2),
             cluster_grid_buf,
             light_index_buf,
         ) {
@@ -2379,51 +2475,41 @@ impl GBufferTargets {
             ),
             Ok(None) => (None, None, None, None),
             Err(e) => {
-                // SAFETY: every ring/set built above (vocab/resolve/present + the optional
-                // cull/ssao/ddgi-update/resolve-hwrt) was created on `ctx`, referenced by no
-                // submission, and is destroyed exactly once here (the denoise builder already drained
-                // its own partial allocations before returning). Reverse acquisition: sets → images.
+                // SAFETY: the deferred sets + the shadow-vis images + `core` were built above on
+                // `ctx`, referenced by no submission; each is destroyed exactly once, in reverse
+                // acquisition order (deferred sets → shadow-vis → core). `build_shadow_denoise_sets`
+                // already drained its OWN partial allocations before returning `Err`.
                 unsafe {
-                    if let Some(hs) = resolve_set_hwrt {
-                        for g in hs {
-                            RhiDevice::destroy_bind_group(ctx, g);
-                        }
+                    deferred.destroy(ctx);
+                    if let Some(v) = shadow_vis_imgs {
+                        v.destroy(ctx);
                     }
-                    for g in present_set {
-                        RhiDevice::destroy_bind_group(ctx, g);
-                    }
-                    if let Some(du) = ddgi_update_set {
-                        RhiDevice::destroy_bind_group(ctx, du);
-                    }
-                    if let Some(ss) = ssao_set {
-                        for g in ss {
-                            RhiDevice::destroy_bind_group(ctx, g);
-                        }
-                    }
-                    if let Some(cs) = cull_set {
-                        for g in cs {
-                            RhiDevice::destroy_bind_group(ctx, g);
-                        }
-                    }
-                    for g in resolve_set {
-                        RhiDevice::destroy_bind_group(ctx, g);
-                    }
-                    for g in vocab_set {
-                        RhiDevice::destroy_bind_group(ctx, g);
-                    }
+                    core.destroy(ctx);
                 }
-                destroy_vis_opt(&mut shadow_vis2);
-                destroy_vis_opt(&mut shadow_vis);
-                destroy_ring(ssao);
-                destroy_ring(viewt);
-                destroy_ring(lit);
-                destroy_ring(material);
-                destroy_ring(normal);
-                destroy_ring(albedo);
-                destroy_ring(depth);
                 return Err(SwapchainError::DepthImage(e));
             }
         };
+
+        // Flatten the image + set bundles into the original local names so the remaining (infallible)
+        // hwrt tail below + the `Self` construction stay byte-identical.
+        let CoreImages { depth, albedo, normal, material, lit, viewt, ssao } = core;
+        #[cfg(feature = "hwrt")]
+        let (shadow_vis, shadow_vis2) = match shadow_vis_imgs {
+            Some(ShadowVisImages { shadow_vis, shadow_vis2 }) => {
+                (Some(shadow_vis), Some(shadow_vis2))
+            }
+            None => (None, None),
+        };
+        let DeferredSets {
+            vocab_set,
+            resolve_set,
+            cull_set,
+            ssao_set,
+            ddgi_update_set,
+            present_set,
+            #[cfg(feature = "hwrt")]
+            resolve_set_hwrt,
+        } = deferred;
 
         // HW-RT Rung 3b: the three temporal denoise target rings (motion_vec RG16F,
         // shadow_temporal_hist RGBA16, temporal_out RG16), built LAST — after every fallible
@@ -2666,38 +2752,20 @@ impl GBufferTargets {
                     RhiDevice::destroy_buffer(ctx, b);
                 }
             }
-            // R2a-4b: the HWRT resolve set RING (last-acquired), `Option`-guarded (present only on
-            // an RT device under `feature = "hwrt"` + config HardwareTri).
-            #[cfg(feature = "hwrt")]
-            if let Some(hs) = self.resolve_set_hwrt {
-                for g in hs {
-                    RhiDevice::destroy_bind_group(ctx, g);
-                }
+            // The deferred descriptor SETS (resolve-hwrt → present → ddgi-update → ssao → cull →
+            // resolve → vocab), via the `DeferredSets` bundle's reverse-acquisition teardown — the
+            // SAME order + `Option`-guards the old flat teardown used.
+            DeferredSets {
+                vocab_set: self.vocab_set,
+                resolve_set: self.resolve_set,
+                cull_set: self.cull_set,
+                ssao_set: self.ssao_set,
+                ddgi_update_set: self.ddgi_update_set,
+                present_set: self.present_set,
+                #[cfg(feature = "hwrt")]
+                resolve_set_hwrt: self.resolve_set_hwrt,
             }
-            for g in self.present_set {
-                RhiDevice::destroy_bind_group(ctx, g);
-            }
-            // SDFDDGI I2: the single (non-ringed) update set, `Option`-guarded (present only when
-            // the update pass was wired).
-            if let Some(du) = self.ddgi_update_set {
-                RhiDevice::destroy_bind_group(ctx, du);
-            }
-            if let Some(ss) = self.ssao_set {
-                for g in ss {
-                    RhiDevice::destroy_bind_group(ctx, g);
-                }
-            }
-            if let Some(cs) = self.cull_set {
-                for g in cs {
-                    RhiDevice::destroy_bind_group(ctx, g);
-                }
-            }
-            for g in self.resolve_set {
-                RhiDevice::destroy_bind_group(ctx, g);
-            }
-            for g in self.vocab_set {
-                RhiDevice::destroy_bind_group(ctx, g);
-            }
+            .destroy(ctx);
             // HW-RT Rung 3b: the three temporal denoise target RINGS (motion_vec / hist /
             // temporal_out), built LAST so destroyed FIRST in reverse-acquisition order. `Option`-
             // guarded (degrade-to-None on an unsupported device), each a
@@ -2735,27 +2803,18 @@ impl GBufferTargets {
                     RhiDevice::destroy_texture(ctx, t);
                 }
             }
-            for t in self.ssao {
-                RhiDevice::destroy_texture(ctx, t);
+            // The seven always-present G-buffer image RINGS (ssao → depth), via the `CoreImages`
+            // bundle's reverse-acquisition teardown.
+            CoreImages {
+                depth: self.depth,
+                albedo: self.albedo,
+                normal: self.normal,
+                material: self.material,
+                lit: self.lit,
+                viewt: self.viewt,
+                ssao: self.ssao,
             }
-            for t in self.viewt {
-                RhiDevice::destroy_texture(ctx, t);
-            }
-            for t in self.lit {
-                RhiDevice::destroy_texture(ctx, t);
-            }
-            for t in self.material {
-                RhiDevice::destroy_texture(ctx, t);
-            }
-            for t in self.normal {
-                RhiDevice::destroy_texture(ctx, t);
-            }
-            for t in self.albedo {
-                RhiDevice::destroy_texture(ctx, t);
-            }
-            for t in self.depth {
-                RhiDevice::destroy_texture(ctx, t);
-            }
+            .destroy(ctx);
         }
     }
 }

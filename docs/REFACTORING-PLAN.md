@@ -35,7 +35,27 @@ That is **8 redundant source files + 8 `.spv` + 8 registry embeds** (~3 200 dupl
 
 **The rationale is sound but does NOT justify FILE duplication.** A **specialization constant** delivers the *identical* property — the trip count resolves at *pipeline-create*, so the driver still specializes/unrolls, from **one** `.hlsl`. The engine already proves this in the *same* deferred family: `SHADOW_RAY_COUNT` is a spec-const (`deferred_pbr.hlsl:317`, `[[vk::constant_id(0)]]`) whose Vogel loop unrolls. Rung-1a added `SpecConstant{id,value}` (`descriptor.rs:172`) + `ComputePipelineDesc.spec_constants` (`descriptor.rs:220`) **explicitly "to collapse SSAO/DDGI variant-explosion"** — the lever exists and is unused for these families.
 
-**Fix (A1):** collapse `GI_MAX_IT` (4→1) and SSAO quality (4→1) to one source each via spec-const; delete the dead `sdf_ssao.comp.hlsl`. **−8 `.hlsl`, −8 `.spv`, −~120 registry lines.** Caveat: confirm the target driver unrolls a spec-const-bounded loop (Rung-1a's stated intent); if not, the loop stays dynamically-bounded-but-correct — measure per [[feedback-hybrid-perf-decides]], don't assume.
+**Fix (A1):** collapse `GI_MAX_IT` (4→1) and SSAO quality (4→1) to one source each via spec-const; delete the dead `sdf_ssao.comp.hlsl`. **−8 `.hlsl`, −8 `.spv`, −~120 registry lines.**
+
+**VERIFIED (investigation 2026-07): NO perf risk — the "measure the unroll" caveat is MOOT for `GI_MAX_IT`.** The `probe_march` trip loop is already `[loop]` (`sdf_probe_update_it64.comp.hlsl:186` — an explicit DYNAMIC loop, driver forbidden to unroll), exactly like the shipped `SHADOW_RAY_COUNT` spec-const (`deferred_pbr.hlsl:1195` `[loop]`). A spec-const bound on a `[loop]` is structurally identical to a baked-const bound — same dynamic loop, same 64 iterations. **The compute.rs:429 "keeps every `[unroll]` fully unrolled at zero cost" rationale for the 4 files was FACTUALLY WRONG** (the loop is `[loop]`, never unrolled either way); the 4 files were pure waste. (SSAO: confirm its slice/step loops' attribute the same way — if `[unroll]`, a spec-const may not fold; if `[loop]`, same no-risk.)
+
+**Scope note:** the `probe_march` body is eDSL-generated (`boyko_shaderdsl::probe_march` + the `emit_probe_gi` bin) + spliced into all 4 files, guarded by `ddgi_probe_gi_sync`. So the collapse ALSO simplifies the eDSL (emit → ONE file) but touches: the emit bin (target 1 file), the sync test (1 file), the 4 `.hlsl` (rename it64→`sdf_probe_update.comp.hlsl`, delete 3), `compute.rs` (4 embeds+selector → 1 embed + `sdf_probe_update_spirv()` no-arg), `gpu_scene.rs:519` + the bench (create the pipeline with `spec_constants=[SpecConstant{id:0, value:gi_max_it}]`; `GI_MAX_IT` at `sdf_probe_update_it64.comp.hlsl:98` becomes `[[vk::constant_id(0)]] const uint GI_MAX_IT = 64;` — OUTSIDE the splice, so the eDSL body is untouched). Verify: golden `58f6c6c3` (GI-OFF, byte-identical) + the `ddgi_probe_gi_arm` #[ignore] smoke (GI-ON, atlas non-zero at default 64). A focused multi-file unit — best done with dedicated context.
+
+**TURNKEY (investigation 2026-07):** the pipeline infra is ALREADY wired — `gpu_scene.rs:536-547`
+creates the probe-update pipeline via `ComputePipelineDesc { …, spec_constants: &[] }`. And because
+the spec-const carries a **default of 64** (`[[vk::constant_id(0)]] const uint GI_MAX_IT = 64;`), a
+pipeline built with `spec_constants: &[]` resolves GI_MAX_IT to 64 — **byte-identical to the baked
+`static const 64u`**. So the DEFAULT callers just drop the arg (`sdf_probe_update_spirv(GI_MAX_IT_DEFAULT)`
+→ `sdf_probe_update_spirv()`, `spec_constants` stays `&[]`); ONLY the bench sweep needs the override.
+Exact edit set (5 callers): `gpu_scene.rs:519` (drop arg), `ddgi_probe_gi_arm.rs:260` (drop arg),
+`window_present_gbuffer.rs:7883` (drop arg), `software_ray_baseline_cost.rs:345` (drop arg), and
+`ddgi_probe_gi_cost.rs:387-390` — the ONLY spec-const site: `sdf_probe_update_spirv()` +
+`spec_constants: &[SpecConstant{id:0, value:gi_max_it}]` in its per-value pipeline build. Plus
+`emit_probe_gi.rs:51` (emit ONE `sdf_probe_update.comp.hlsl`, GI_MAX_IT as `constant_id(0)`),
+`ddgi_probe_gi_sync.rs:88` (read the 1 file), `compute.rs` (4 embeds+selector → 1
+`SDF_PROBE_UPDATE_SPV` + `sdf_probe_update_spirv()`), delete the 4 `it{N}` `.hlsl`+`.spv`. Same recipe
+for SSAO (`SpecConstant` id per slice/step). **Executes on a CLEAN tree after B1 (both touch the
+render golden — serialize for attribution).**
 
 ### A2. Root cause 2 — the hand-maintained embed REGISTRY (`compute.rs`)
 

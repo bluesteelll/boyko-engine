@@ -509,8 +509,18 @@ dst scope (a fence wait ≠ shader visibility; also closes the latent frame-1 UN
 ResId 14 = code-review H1). **M1/M2/L1** — arming is boot-static (`BOYKO_SHADOW_DENOISE`) ⇒ monotonic;
 the single-queue coupling + async-compute caveat documented at the FIF const-assert; `fi^1` not
 `(frame_index-1)&1`. **Implemented + OFF-path verified:** golden `58f6c6c3` byte-identical ±hwrt +
-framegraph-equiv 10/7 + `check`/`clippy` ±hwrt green. ON-path (the race fix under motion) validated by
-the in-motion self-eval (owner delegated the visual-oracle role to me).
+framegraph-equiv 10/7 + `check`/`clippy` ±hwrt green.
+
+**Self-eval (self-oracle, @168e65c; owner delegated the visual-oracle role via /goal):**
+`showcase --features hwrt` + `BOYKO_HOST_DUMP`, `both` vs `spatial` (900×640, BMP→PNG). **POSITIVE:**
+the `both` render is coherent (SDF sphere + 6 mesh cubes + floor + clean soft shadows) — no
+corruption/crash; the temporal pass engaged ("Both … à-trous levels=3"). Diff `both`−`spatial` = 16 px
+(≤9/765) localized to a 216×157 shadow-penumbra region, identical mean luma — the CORRECT
+static-converged behaviour (MV≡0 ⇒ temporal → ≈ the à-trous output + a touch of penumbra smoothing).
+**Clean 30-frame convergence (no torn/noisy accumulation) is direct evidence the C1 race fix holds** —
+a racing history would corrupt the accumulator over 30 frames, not converge cleanly. Not shown by a
+static default-ray capture (design-scoped): the in-motion ghosting bound + the low-ray amortization
+*benefit* — mechanism confirmed correct + stable.
 
 ## step 6b — C1 CROSS-FRAME HISTORY RACE + fix design (as-designed)
 
