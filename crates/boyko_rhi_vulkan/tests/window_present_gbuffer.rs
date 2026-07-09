@@ -1210,7 +1210,7 @@ fn instance_affine_nonuniform(yaw: f32, s: [f32; 3], t: [f32; 3]) -> [f32; 12] {
 /// Emits one mesh quad face as two CCW triangles `(a, b, c)` + `(a, c, d)`, every vertex
 /// carrying the supplied outward world `normal` `n` and `color`. `corners` are the four
 /// quad corners in CCW order as seen from the `+n` side (matching [`quad_vertices`]'s
-/// `bl, br, tr, tl` winding for the `+Z` face). Culling is OFF (`rhi_impl.rs`), so the
+/// `bl, br, tr, tl` winding for the `+Z` face). Culling is OFF (`rhi_impl/device.rs`), so the
 /// winding is cosmetic, but it is kept consistent for correctness.
 fn mesh_quad(corners: [[f32; 3]; 4], n: [f32; 3], color: [f32; 4]) -> [Vertex; 6] {
     let [a, b, c, d] = corners;

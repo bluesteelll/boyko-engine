@@ -50,7 +50,7 @@ use crate::gpu_column::RhiContext;
 /// The VERTEX-stage push-constant range the UI pipeline declares (one [`UiOrtho`],
 /// 16 B). The fragment shader reads only the SSBO + the per-atlas UBO, so the ortho
 /// is pushed VERTEX-only (matching the backend's VERTEX-only graphics push range —
-/// `rhi_impl.rs`). GUI P5b adds NO push bytes: the per-atlas pxRange/atlasSize ride
+/// `rhi_impl/device.rs`). GUI P5b adds NO push bytes: the per-atlas pxRange/atlasSize ride
 /// the binding-2 UBO (Decision T4-A), so this stays VERTEX-only and unchanged.
 const UI_PUSH_CONSTANT_BYTES: u32 = size_of::<UiOrtho>() as u32;
 

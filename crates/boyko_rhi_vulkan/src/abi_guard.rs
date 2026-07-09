@@ -10,7 +10,7 @@
 //! future drift between an agnostic bit and its `VK_*` constant breaks the build
 //! instead of silently corrupting a buffer-usage / stage / access mask.
 //!
-//! Every bit the backend identity-casts (`rhi_impl.rs::create_buffer`,
+//! Every bit the backend identity-casts (`rhi_impl/device.rs::create_buffer`,
 //! `push_constants`, `pipeline_barrier`) is covered.
 
 use boyko_rhi::enums::{
@@ -344,7 +344,7 @@ const _: () = assert!(
 // Phase-6 S0 rung-2 graphics-pipeline contracts. `PrimitiveTopology` `as_i32()` is
 // mapped in `create_graphics_pipeline` (the `VkPipelineInputAssemblyStateCreateInfo`
 // topology); the `Viewport`↔`VkViewport` byte-for-byte layout match (a direct slice
-// reinterpret in `set_viewport`) is asserted at the cast site in `rhi_impl.rs`.
+// reinterpret in `set_viewport`) is asserted at the cast site in `rhi_impl/encoder.rs`.
 // ===========================================================================
 
 // --- PrimitiveTopology `as_i32()` (mapped in `create_graphics_pipeline`). ---

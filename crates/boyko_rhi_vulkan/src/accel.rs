@@ -8,7 +8,7 @@
 //!   (`Option<AccelFns>` on the context, mirroring `swapchain: Option<SwapchainDeviceFns>`),
 //!   loaded ONLY when the 3 RT extensions were enabled at device create.
 //! - the inherent verb helpers the [`RhiDevice`]/[`RhiCommandEncoder`] overrides
-//!   (in `rhi_impl.rs`) delegate to — the real `vkCreate*` / `vkCmd*` / `vkGet*` FFI calls.
+//!   (in `rhi_impl/{device,encoder}.rs`) delegate to — the real `vkCreate*` / `vkCmd*` / `vkGet*` FFI calls.
 //!
 //! R2a-1 builds NO acceleration structure and traces nothing; these verbs are the FFI
 //! surface later rungs (R2a-2 BLAS build, R2a-3 TLAS) call.

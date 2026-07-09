@@ -397,8 +397,8 @@ fn run_sweep(ctx: &VulkanContext) {
                 module: &module,
                 entry: c"main",
                 // The update shader uses NO push constant (every param rides the b6 UBO), but this
-                // RHI mandates a NON-EMPTY multiple-of-4 shared compute push range (rhi_impl.rs
-                // 1208-1217 rejects 0), so declare the standard 4-byte range every other compute
+                // RHI mandates a NON-EMPTY multiple-of-4 shared compute push range
+                // (rhi_impl/device.rs::create_compute_pipeline rejects 0), so declare the standard 4-byte range every other compute
                 // pipeline in the tree carries. Vulkan allows a layout to declare a push range the
                 // shader never reads; the recorder pushes nothing.
                 push_constant_bytes: 4,

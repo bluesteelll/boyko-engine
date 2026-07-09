@@ -427,7 +427,7 @@ fn probe_sample_gpu_eq_cpu_to_bits() {
         .create_compute_pipeline(&ComputePipelineDesc {
             module: &module,
             entry: c"main",
-            // The RHI mandates a NON-empty multiple-of-4 shared compute push range (rhi_impl.rs);
+            // The RHI mandates a NON-empty multiple-of-4 shared compute push range (rhi_impl/device.rs);
             // the shader declares-but-never-reads it (every compute pipeline uses 4). `0` is
             // rejected as `Unsupported` before the dispatch ever runs.
             push_constant_bytes: 4,
