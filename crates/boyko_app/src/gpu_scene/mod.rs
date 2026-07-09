@@ -158,11 +158,13 @@ pub(crate) const CSM_SHADOW_DIM: u32 = 2048;
 /// Byte size of one host cascade-UBO ring slot — `size_of::<ResolvedCsm>()`
 /// via [`RESOLVED_CSM_BYTES`] (the resolve's binding-13 shape).
 const CSM_UBO_BYTES: u64 = RESOLVED_CSM_BYTES as u64;
-/// HW-RT rung 1b: byte size of one HWRT shadow-params-UBO ring slot —
-/// `size_of::<ResolvedRayShadow>()` via [`RESOLVED_RAY_SHADOW_BYTES`] (the HWRT resolve's
-/// binding-20 shape, 16 B).
+/// HW-RT rung 1b/3b: byte size of one HWRT shadow-params-UBO ring slot — the resolved
+/// [`RESOLVED_RAY_SHADOW_BYTES`] mirror (cone/tmax/tmin/bias, 16 B) PLUS the runner-injected
+/// rung-3b `SHADOW_FRAME_SEED` at offset 16 (4 B, see `upload_ray_shadow_ring`), rounded up to
+/// the HLSL `RayShadowUbo` cbuffer's 32-byte std140 block (two vec4 slots; the trailing 12 B is
+/// bound-but-unread pad). The +16 over the bare resolved size is negligible (×2 FIF ring).
 #[cfg(feature = "hwrt")]
-const RAY_SHADOW_UBO_BYTES: u64 = RESOLVED_RAY_SHADOW_BYTES as u64;
+const RAY_SHADOW_UBO_BYTES: u64 = RESOLVED_RAY_SHADOW_BYTES as u64 + 16;
 /// HW-RT rung 3a: the à-trous filter's push-constant size — a single `{ uint step }` (4 B). The
 /// recorder pushes `step = 1 << level` per dispatch.
 #[cfg(feature = "hwrt")]

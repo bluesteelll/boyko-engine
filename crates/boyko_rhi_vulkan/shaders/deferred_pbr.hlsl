@@ -298,15 +298,22 @@ cbuffer ResolvedDdgi : register(b18) {
 //   * cone/tmax/tmin/bias come from RayShadowUbo @ binding 20 — a per-FIF UBO byte-mirroring
 //     `boyko_render::ResolvedRayShadow` (4×f32: cone_radius, tmax, tmin, bias). Runtime-tunable,
 //     defaults byte-identical to the old consts.
+//   * SHADOW_FRAME_SEED (rung 3b temporal) is the runner's per-frame counter, packed straight
+//     into the UBO at `upload_ray_shadow_ring` (a HOT per-frame value, NOT routed through the
+//     cold `ResolvedRayShadow` resolve — see that struct's doc). It advances the Vogel-disk cone
+//     rotation below by the golden angle each frame, so the temporal shadow denoiser has
+//     something to average (a frame-invariant rotation is measured dead weight for it).
 // binding 20 (b20): the tunable soft-shadow params UBO. Field ORDER + TYPES exactly match
-// `boyko_render::ResolvedRayShadow` (cone_radius @0, tmax @4, tmin @8, bias @12 — 16 B, one vec4
-// slot, no trailing pad). Declared ENTIRELY under `#if HWRT` — the software `.spv` never references
-// it (the byte-identity gate).
+// `boyko_render::ResolvedRayShadow` (cone_radius @0, tmax @4, tmin @8, bias @12) PLUS the
+// runner-injected SHADOW_FRAME_SEED @16 — 20 B used of a 32 B std140 block (rounded to the next
+// vec4 boundary; the trailing 12 B is bound-but-unread pad). Declared ENTIRELY under `#if HWRT`
+// — the software `.spv` never references it (the byte-identity gate).
 cbuffer RayShadowUbo : register(b20) {
     float SHADOW_CONE_RADIUS; // was 0.035 (tan(half-angle) of the sun disk, ~2°)
     float SHADOW_RAY_TMAX;    // was 1e4
     float SHADOW_RAY_TMIN;    // was 1e-3
     float SHADOW_RAY_BIAS;    // was 1e-3
+    uint  SHADOW_FRAME_SEED;  // rung 3b: per-frame counter, offset 16 (see above)
 };
 
 // R2a-4b soft-shadow (owner-eval): the hard single-ray trace read TOO SHARP, so the mesh-shadow
@@ -1186,11 +1193,15 @@ void main(uint3 tid : SV_DispatchThreadID) {
                         // per-pixel golden-angle spiral is rotated by the shader's own IGN hash (the
                         // SAME `ign(px, py)` the SSCS dither uses) so neighbouring pixels sample
                         // decorrelated cone directions — the penumbra reads as noise, not banding (no
-                        // TAA on this engine, so `SHADOW_RAY_COUNT` carries the single-frame smoothness).
+                        // spatial TAA on this engine, so `SHADOW_RAY_COUNT` carries the single-frame
+                        // smoothness). Rung 3b adds a SECOND, per-frame rotation term keyed off
+                        // `SHADOW_FRAME_SEED`: the spiral also advances by the golden angle every
+                        // frame, so the same pixel samples a DIFFERENT cone subset frame-to-frame —
+                        // the temporal decorrelation the shadow temporal-reproject pass averages out.
                         float3 sh_up = abs(l.y) < 0.99 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
                         float3 sh_tx = normalize(cross(sh_up, l));
                         float3 sh_ty = cross(l, sh_tx);
-                        float  sh_rot = ign(px, py) * 6.2831853; // IGN → [0, 2π) spiral rotation
+                        float  sh_rot = ign(px, py) * 6.2831853 + float(SHADOW_FRAME_SEED & 0xFFu) * 2.399963229728653; // IGN spiral + rung-3b per-frame golden-angle step
                         float  occ = 0.0;
                         [loop] for (uint si = 0u; si < SHADOW_RAY_COUNT; ++si) {
                             float sh_r = sqrt((si + 0.5) / SHADOW_RAY_COUNT);        // Vogel disk radius
@@ -1214,8 +1225,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
     #elif SHADOW_STAGE == SHADOW_STAGE_VIS
                         // Rung 3a VIS: the IDENTICAL Vogel-disk trace as RESOLVE_INLINE (same
                         // SHADOW_RAY_COUNT spec-const, cone/tmax/tmin/bias UBO, IGN rotation,
-                        // golden angle, ray flags) — copied VERBATIM so `mesh_vis` is bit-identical
-                        // to the inline path (the C3 algebraic anchor). The ONLY divergence vs
+                        // golden angle, rung-3b SHADOW_FRAME_SEED per-frame rotation term, ray
+                        // flags) — copied VERBATIM so `mesh_vis` is bit-identical to the inline
+                        // path, INCLUDING across frames now that the rotation is frame-varying (the
+                        // C3 algebraic anchor). The ONLY divergence vs
                         // RESOLVE_INLINE is the SINK: instead of `vis = min(vis, mesh_vis)`, write
                         // the raw visibility (+ validity 1) to `gShadowVis` and RETURN before any
                         // lighting — the VIS stage produces NO lit output (the à-trous filter + the
@@ -1223,7 +1236,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
                         float3 sh_up = abs(l.y) < 0.99 ? float3(0.0, 1.0, 0.0) : float3(1.0, 0.0, 0.0);
                         float3 sh_tx = normalize(cross(sh_up, l));
                         float3 sh_ty = cross(l, sh_tx);
-                        float  sh_rot = ign(px, py) * 6.2831853; // IGN → [0, 2π) spiral rotation
+                        float  sh_rot = ign(px, py) * 6.2831853 + float(SHADOW_FRAME_SEED & 0xFFu) * 2.399963229728653; // IGN spiral + rung-3b per-frame golden-angle step
                         float  occ = 0.0;
                         [loop] for (uint si = 0u; si < SHADOW_RAY_COUNT; ++si) {
                             float sh_r = sqrt((si + 0.5) / SHADOW_RAY_COUNT);        // Vogel disk radius
