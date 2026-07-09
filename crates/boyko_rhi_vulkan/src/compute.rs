@@ -373,6 +373,24 @@ static SHADOW_ATROUS_SPV: SpirvBlob<59700> = SpirvBlob(*include_bytes!(concat!(
     "/shaders/shadow_atrous.comp.spv"
 )));
 
+/// The Rung-3b TEMPORAL shadow-vis reproject+accumulate SPIR-V (`shaders/shadow_temporal.comp.spv`,
+/// Option B). ONE dispatch AFTER the à-trous filter, BEFORE the RESOLVE_DENOISED resolve: reprojects
+/// the current shadow-vis (`gVisIn` — the à-trous output in `Both`, the raw VIS output in `Temporal`)
+/// through the per-pixel `motion_vec` into a per-FIF `R16G16B16A16_UNORM` history ring (R=vis,
+/// G=conf/CONF_MAX, B=depth/DEPTH_NORM, A=_), variance-clamps to the current 3×3 AABB (Salvi),
+/// velocity-adaptive `k = lerp(feedback_max, feedback_min, |Δuv|·extent/VELOCITY_REF)`, and hard-
+/// resets on disocclusion (off-screen / conf==0 / prev-vs-cur depth swap, W2). Writes the history
+/// `[fi]` + `gTemporalOut` (the DENOISED reads it at `gShadowVis` @21). Bound to its OWN 8-binding
+/// layout { @0 `gVisIn` RG read, @1 `gMotionVec` RG16F read, @2 `gViewT` r32f read, @3 `gHistIn`
+/// RGBA16 read (`hist[1-fi]`), @4 `gHistOut` RGBA16 write (`hist[fi]`), @5 `gTemporalOut` RG16 write,
+/// @6 `ResolvedTemporalShadow` UBO (16 B), @7 the shared 80-byte Camera UBO }. NEW `.spv` (no base
+/// variant to freeze); dispatched only when `mode ∈ {Temporal, Both}` ⇒ the golden path is untouched.
+#[cfg(feature = "hwrt")]
+static SHADOW_TEMPORAL_SPV: SpirvBlob<8496> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/shadow_temporal.comp.spv"
+)));
+
 /// The SDFDDGI I3 DDGI resolve-sample GPU-GOLDEN SPIR-V (`shaders/ddgi_probe_gi_resolve.comp.hlsl`).
 /// A standalone compute harness that runs the SAME `ddgi_probe_sample` the deferred resolve runs
 /// (both `#include "ddgi_resolve.hlsli"`) over host-supplied receiver samples and STOREs the
@@ -851,6 +869,17 @@ pub fn deferred_pbr_denoised_spirv() -> &'static [u32] {
 #[inline]
 pub fn shadow_atrous_spirv() -> &'static [u32] {
     SHADOW_ATROUS_SPV.as_words()
+}
+
+/// The Rung-3b TEMPORAL shadow-vis reproject+accumulate SPIR-V as a `u32` word stream. Bound to its
+/// own 8-binding layout (see [`SHADOW_TEMPORAL_SPV`]): one dispatch after the à-trous filter, before
+/// the RESOLVE_DENOISED resolve; reprojects `gVisIn` through `gMotionVec` into the RGBA16 history ring
+/// and writes `gTemporalOut` (the DENOISED reads it at @21). The const-asserted length is the
+/// anti-drift guard.
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn shadow_temporal_spirv() -> &'static [u32] {
+    SHADOW_TEMPORAL_SPV.as_words()
 }
 
 /// The SDFDDGI I3 DDGI resolve-sample GPU-GOLDEN SPIR-V as a `u32` word stream, ready for

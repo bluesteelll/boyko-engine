@@ -464,6 +464,39 @@ invariant, byte-identity, teardown) + 3 findings resolved:**
   `check`/`clippy -D warnings` ±hwrt `--all-targets`; framegraph-equiv 10 + eDSL-sync 2. All 4 base
   resolve `.spv` recompile byte-frozen (65456/59424/8032/57576).
 
+## As-built — step 6 (temporal reproject pass) — IN PROGRESS
+
+Split 6a (reproject shader, DORMANT) + 6b (host wiring → owner-eval), mirroring the campaign's
+dormant-increment style (steps 3-4). The shader is the intellectual core; the host pass wiring +
+the in-motion owner-eval land in 6b.
+
+**Step 6a — `shadow_temporal.comp.hlsl` DONE + committed dormant** (Decision 5, hand-authored like
+`shadow_atrous.comp.hlsl`):
+- `numthreads(64,1,1)`; 8-binding dedicated layout: @0 `gVisIn` (RG16 read = final_vis_res / raw VIS),
+  @1 `gMotionVec` (RG16F read), @2 `gViewT` (r32f read), @3 `gHistIn` (RGBA16 read = `hist[1-fi]`),
+  @4 `gHistOut` (RGBA16 write = `hist[fi]`), @5 `gTemporalOut` (RG16 write, DENOISED reads @21),
+  @6 `ResolvedTemporalShadow` UBO (16 B), @7 the shared 80 B Camera UBO.
+- Algorithm: neutral-passthrough for non-lit/background pixels (I5); 3×3 current-vis moments →
+  clamp AABB `[μ−γσ, μ+γσ]` (validity-gated); reproject `prev_uv = pixel_uv + Δuv`; bilinear-sample
+  history vis + NEAREST conf/depth (blending conf/depth across a boundary would corrupt disocclusion);
+  reset (→ current, conf=1) on off-screen | conf==0 | `|depth_hist − cur_depth| > τ·cur_depth`; else
+  `out = lerp(current, clamp(vis_hist, lo, hi), k)`, `k = lerp(feedback_max, feedback_min,
+  saturate(|Δuv|·extent / VELOCITY_REF))`, `conf = min(prev+1, CONF_MAX)`; store history
+  `(vis, conf/CONF_MAX, cur_depth/DEPTH_NORM, 0)` + temporal_out `(vis, 1)`.
+- Constants: `CONF_MAX=32`, `VELOCITY_REF=16 px`, `DEPTH_NORM=64` (static const — set UNORM
+  quantization, not live knobs); `feedback_max/min`, `variance_gamma`, `depth_tol` are the live UBO.
+- `compute.rs`: `SHADOW_TEMPORAL_SPV<8496>` + `shadow_temporal_spirv()` (hwrt-gated). DORMANT (no
+  pipeline references it yet) ⇒ golden `58f6c6c3` byte-identical ±hwrt.
+
+**Step 6b — host wiring (NEXT):** the temporal pipeline + 8-binding layout + per-FIF bind groups
+(gVisIn=final à-trous output/VIS, gHistIn=`hist[1-fi]`, gHistOut=`hist[fi]`, gTemporalOut, the
+`ResolvedTemporalShadow` UBO ring + upload); the `shadow_temporal` framegraph pass AFTER à-trous /
+BEFORE DENOISED with the cross-frame seeded-history barriers (`add_image_seeded` GENERAL, DDGI
+precedent); **make `scene.shadow` arm for pure `Temporal`** (today it only arms for spatial — so 6a's
+producers only ran in `Both`); the DENOISED `gShadowVis` ← `temporal_out` rebind. Then the **MANDATORY
+in-motion owner-eval** (moving camera + moving boxes, multiple `k`, before/after — ghosting is
+invisible in a settled capture).
+
 ## Metrics and validation
 
 - **Byte-identity:** `None`/`Spatial` reproduce `58f6c6c3` (±hwrt) + `af934c50`. Framegraph equiv ResId pins (16 imgs hwrt) + the **I3 pin** (no `UNDEFINED` old-layout on `shadow_temporal_hist` after init — reusing the DDGI-seed test shape, C3).
