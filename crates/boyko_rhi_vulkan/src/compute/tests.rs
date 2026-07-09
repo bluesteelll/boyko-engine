@@ -269,7 +269,7 @@ mod p4b_tests {
 
     use boyko_sdf_math::{sdf_edit_list, v_sub};
 
-    use super::super::{ALPHA_MARGIN, CompositeCamera, FIELD_LIPSCHITZ_L, MESH_DEPTH_CLEAR, SDF_CAM_Z, SDF_EPS, SDF_HALF_EXTENT, SDF_T_MAX, SdfEdit, TILE_FLAG_EMPTY, TILE_SIZE, sdf_op, tile_grid_extent};
+    use super::super::{ALPHA_MARGIN, CompositeCamera, FIELD_LIPSCHITZ_L, MESH_DEPTH_CLEAR, MESH_DEPTH_T_MAX, SDF_CAM_Z, SDF_EPS, SDF_HALF_EXTENT, SDF_T_MAX, SdfEdit, TILE_FLAG_EMPTY, TILE_SIZE, sdf_op, tile_grid_extent};
     use crate::goldens::{golden_composite_pixel_culled, golden_composite_pixel_ex, golden_tile_bound};
 
     // --- A tiny deterministic PRNG (splitmix64) so the randomized sweeps are
@@ -768,6 +768,75 @@ mod p4b_tests {
         // scene constants (a compile-time touch so a refactor that drops them is caught).
         let _ = (SDF_CAM_Z, SDF_T_MAX);
         println!("[e] cull-off bit-identity: {checked} pixels (ortho + perspective) all match golden_composite_pixel_ex");
+    }
+
+    /// (f) PERSPECTIVE far_t regression: the audit found the cull's covered-texel decode
+    /// used `md * T_MAX` (10) unconditionally, disagreeing with the fine marcher's
+    /// PERSPECTIVE decode `md * MESH_DEPTH_T_MAX` (64) — a ~6.4x under-decode that
+    /// truncates `far_t` short of real SDF surfaces, culling their tile (a HOLE).
+    ///
+    /// Setup: a single 8×8 tile (the whole image), a perspective camera looking exactly
+    /// down -Z (the tile-center ray is bit-exact `forward` at this extent), a narrow FOV
+    /// (small cone half-angle, so the conservative cone-entry tracks the literal surface
+    /// closely instead of firing early), a covering mesh depth `md = 0.2`, and a sphere
+    /// (r = 0.3) at the origin whose surface the eye-at-z=3 ray first hits at `t = 2.7`.
+    ///
+    ///   * correct decode: `far_t = min(0.2 * MESH_DEPTH_T_MAX, T_MAX) = min(12.8, 10) = 10`
+    ///     — the march reaches the sphere (conservatively enters around `t ≈ 2.45`,
+    ///     BEFORE the literal surface, `> 2.0`) ⇒ tile is NON-empty.
+    ///   * prior (buggy) decode: `far_t = 0.2 * T_MAX = 2.0` — the march never reaches the
+    ///     cone-entry (which needs `t > 2.0`) and breaks at `t >= far_t` ⇒ EMPTY (a hole).
+    ///
+    /// Asserts the corrected `far_t` value directly (the primary regression pin) AND that
+    /// the tile is NOT culled with `near_t` beyond the old (buggy) bound — proving the old
+    /// decode would have produced a hole here.
+    #[test]
+    fn perspective_far_t_uses_mesh_depth_t_max_not_t_max() {
+        let (w, h) = (TILE_SIZE, TILE_SIZE); // one 8x8 tile spans the whole image.
+        let camera = CompositeCamera::Perspective {
+            eye: [0.0, 0.0, 3.0],
+            forward: [0.0, 0.0, -1.0],
+            right: [1.0, 0.0, 0.0],
+            up: [0.0, 1.0, 0.0],
+            tan_half_fov: 0.05, // narrow FOV: a small cone half-angle over the whole tile.
+            aspect: 1.0,
+        };
+        let edits = vec![SdfEdit::sphere([0.0, 0.0, 0.0], 0.3, sdf_op::UNION, 0.0)];
+        let md = 0.2_f32;
+        let tile_depths = [md; 64];
+
+        let tb = golden_tile_bound(&edits, &tile_depths, 0, 0, w, h, camera);
+
+        let old_buggy_far_t = md * SDF_T_MAX; // the pre-fix decode (2.0).
+        let expected_far_t = (md * MESH_DEPTH_T_MAX).min(SDF_T_MAX); // the fix (10.0).
+        assert!(
+            (tb.far_t - expected_far_t).abs() < 1e-4,
+            "far_t {} must equal min(md * MESH_DEPTH_T_MAX, T_MAX) = {expected_far_t} \
+             (the prior `md * T_MAX` decode gave {old_buggy_far_t}, ~6.4x too shallow)",
+            tb.far_t
+        );
+        assert_eq!(
+            tb.flags & TILE_FLAG_EMPTY,
+            0,
+            "tile wrongly culled EMPTY: far_t {} must not truncate the march before the \
+             sphere's first hit at t ~= 2.7 (a HOLE)",
+            tb.far_t
+        );
+        assert!(
+            tb.near_t > old_buggy_far_t,
+            "near_t {} must exceed the OLD buggy far_t ({old_buggy_far_t}) — proving the \
+             old decode would have missed this surface entirely (EMPTY before entry)",
+            tb.near_t
+        );
+        assert!(
+            tb.near_t <= 2.7 + 1e-2,
+            "near_t {} must be <= the sphere's analytic first hit (~2.7, conservative)",
+            tb.near_t
+        );
+        println!(
+            "[f] perspective far_t regression: far_t={} near_t={} (old buggy far_t would've been {old_buggy_far_t})",
+            tb.far_t, tb.near_t
+        );
     }
 }
 

@@ -27,7 +27,7 @@ use crate::compute::{
     CompositeCamera, DEFAULT_LIGHT_DIR, EPS_COARSE, FIELD_LIPSCHITZ_L, GOLDEN_ATLAS_SLOT_MASK, GOLDEN_ATLAS_SLOT_SHIFT,
     GOLDEN_LIGHT_FLAG_CASTS_SHADOW, GOLDEN_LIGHT_KIND_DIRECTIONAL, GOLDEN_LIGHT_KIND_MASK, GOLDEN_LIGHT_KIND_POINT, GOLDEN_LIGHT_KIND_SKY, GOLDEN_LIGHT_KIND_SPOT,
     GOLDEN_SLOT_NONE, GOLDEN_SPOT_COS_OUTER_MAX, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, M2_GRID_DIM, M2_REFINE_ITERS, M2_REFINE_RELAX, M4GridParams, MAX_IT_COARSE, MAX_SDF_SHADOW_CASTERS_PER_PIXEL,
-    MESH_COLOR, MESH_DEPTH_CLEAR, MESH_RASTER_ALBEDO, PBR_FAR, PBR_LIGHT_COLOR, PBR_LIGHT_DIR,
+    MESH_COLOR, MESH_DEPTH_CLEAR, MESH_DEPTH_T_MAX, MESH_RASTER_ALBEDO, PBR_FAR, PBR_LIGHT_COLOR, PBR_LIGHT_DIR,
     PBR_SKY_DIFFUSE, PBR_SKY_SPEC, SDF_CAM_Z, SDF_EPS, SDF_HALF_EXTENT, SDF_MAX_IT,
     SDF_T_MAX, SHADOW_HIT_EPS, SHADOW_K, SHADOW_MINT, SHADOW_MINT_STEP, SHADOW_NDOTL_EPS,
     SHADOW_NORMAL_BIAS, SSAO_BLUR_DEPTH_TOL, SSAO_BLUR_R, SSAO_HILBERT_W, SSAO_R2_ALPHA1, SSAO_R2_ALPHA2, SSAO_RADIUS_PIX_MAX, SSAO_RADIUS_PIX_MIN,
@@ -3632,7 +3632,10 @@ pub(crate) fn perspective_alpha_tile(tx: u32, ty: u32, img_w: u32, img_h: u32, c
 ///   1. `coarse_ray` (D1) → the tile-center axis.
 ///   2. `far_t = min(max over the depths of depth→t, T_MAX)` (D5: a cleared /
 ///      out-of-range texel decodes to `T_MAX`, so a partial-edge tile bounds at
-///      `T_MAX`, not clamp-to-edge).
+///      `T_MAX`, not clamp-to-edge). The covered-texel decode is CAMERA-AWARE:
+///      PERSPECTIVE uses [`MESH_DEPTH_T_MAX`] (64, decoupled from `T_MAX` so far
+///      raster geometry doesn't saturate to no-mesh), ORTHO uses `T_MAX` (its MVP
+///      bakes it).
 ///   3. The cone-aware march (D4): at `t`, `d = field`, cone radius `r(t)` (ortho:
 ///      `r_const`; perspective: `t · tan(alpha_safe)`); budget `= d/L − r(t)`. When
 ///      the budget `<= EPS_COARSE` RECORD `near_t = t` and STOP (cone-entry). Else
@@ -3654,10 +3657,17 @@ pub fn golden_tile_bound(
     let (ro, rd) = coarse_ray(tx, ty, img_w, img_h, camera);
 
     // far_t = min(max over the 8×8 depth texels of depth→t, T_MAX). A cleared
-    // (>= MESH_DEPTH_CLEAR) texel decodes to T_MAX (conservative: no mesh bound).
+    // (>= MESH_DEPTH_CLEAR) texel decodes to T_MAX (conservative: no mesh bound). The
+    // covered-texel decode is CAMERA-AWARE (mirrors the shader's `mesh_norm` /
+    // `sdf_gbuffer_composite.hlsl`'s `mesh_norm`): PERSPECTIVE uses [`MESH_DEPTH_T_MAX`]
+    // (64), ORTHO uses [`depth_to_t`] (`d * SDF_T_MAX`, its MVP bakes `SDF_T_MAX`).
+    let mesh_norm = match camera {
+        CompositeCamera::Perspective { .. } => MESH_DEPTH_T_MAX,
+        CompositeCamera::Ortho => SDF_T_MAX,
+    };
     let mut max_t_mesh = 0.0_f32;
     for &md in tile_depths {
-        let t_mesh = if md < MESH_DEPTH_CLEAR { depth_to_t(md) } else { SDF_T_MAX };
+        let t_mesh = if md < MESH_DEPTH_CLEAR { md * mesh_norm } else { SDF_T_MAX };
         if t_mesh > max_t_mesh {
             max_t_mesh = t_mesh;
         }
