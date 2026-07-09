@@ -38,14 +38,20 @@ use boyko_ecs::ecs::identifiers::primitives::{ComponentId, EntityId};
 
 use crate::error::SaveError;
 use crate::format::{
-    ArchetypeBlock, COLUMN_REGION_ALIGN, ColumnRegion, DenseStoreBlock, SaveHeader, TypeTableEntry,
+    ArchetypeBlock, COLUMN_REGION_ALIGN, ColumnRegion, DenseStoreBlock, PERSIST_TICKS_FLAG,
+    SaveHeader, TypeTableEntry,
 };
 
 /// Options controlling a save (plan §3.10).
 #[derive(Default)]
 pub struct SaveOptions {
-    /// Persist per-row change-detection ticks. S1 always resets ticks on load, so
-    /// this is recorded for forward compatibility but not yet acted on.
+    /// Persist per-row change-detection ticks. Setting this ORs
+    /// [`PERSIST_TICKS_FLAG`] into the header's `flags` bit 0 (round-tripped — a
+    /// loader observes the save-time intent via `LoadReport::persist_ticks_flag`),
+    /// but S1 still always resets every row's ticks to the load-time `current_tick`:
+    /// per-row tick-VALUE persistence is deferred to a later rung (plan §6).
+    /// Setting this today changes only the recorded header bit, not the loaded tick
+    /// values.
     pub persist_ticks: bool,
     /// When `Some`, only components for which the predicate returns `true` are
     /// serialized; the rest are skipped. `None` serializes every non-`Ignore`
@@ -488,6 +494,9 @@ pub fn save_world(
     header.dense_table_off = dense_table_off as u64;
     header.dense_store_count =
         u32::try_from(dense_plans.len()).map_err(|_| SaveError::SizeOverflow)?;
+    if opts.persist_ticks {
+        header.flags |= PERSIST_TICKS_FLAG;
+    }
     out.extend_from_slice(header.as_bytes());
 
     // Type table (contiguous `TypeTableEntry[]`), then the name pool (the

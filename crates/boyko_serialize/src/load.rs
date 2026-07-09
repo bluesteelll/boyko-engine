@@ -61,7 +61,7 @@ use boyko_ecs::ecs::identifiers::primitives::{ComponentId, EntityId};
 use crate::error::LoadError;
 use crate::format::{
     ArchetypeBlock, ColumnRegion, DenseStoreBlock, ENDIAN_LITTLE, FORMAT_VERSION, MAGIC,
-    SaveHeader, TypeTableEntry, native_endianness,
+    PERSIST_TICKS_FLAG, SaveHeader, TypeTableEntry, native_endianness,
 };
 
 /// Which strategy the loader uses to place saved entities (plan §3.10). v1 ships
@@ -131,6 +131,15 @@ pub struct LoadReport {
     /// block's `member_count`). The owning entities stay valid without their dense
     /// membership/value; this records how many were dropped.
     pub dense_members_skipped: u64,
+    /// The file's [`PERSIST_TICKS_FLAG`] header bit, round-tripped from
+    /// `SaveOptions::persist_ticks` (a save/load residual fix). `true` when the file
+    /// was saved with that option set. Per-row tick VALUES are NOT restored by this
+    /// rung regardless of this flag — every row is stamped fresh at the load-time
+    /// `current_tick` (matching a plain load), same as before; this field exists so
+    /// the option's recorded intent is OBSERVABLE on load rather than a silent
+    /// header no-op, and so a future tick-value-persisting rung has the header bit
+    /// already reserved and wired end to end.
+    pub persist_ticks_flag: bool,
 }
 
 /// Resolution of one file-local type to the running build (built once per load).
@@ -215,7 +224,12 @@ pub fn load_world(
 
     // ── Pre-size + the saved→fresh map (populated per archetype below) ─────────
     let mut map = LoadEntityMap::new();
-    let mut report = LoadReport::default();
+    let mut report = LoadReport {
+        // Round-trips the save-time `SaveOptions::persist_ticks` intent (a
+        // save/load residual fix) — observable on the report, not a silent no-op.
+        persist_ticks_flag: header.flags & PERSIST_TICKS_FLAG != 0,
+        ..LoadReport::default()
+    };
 
     // ── Step 4: per archetype (always fresh — start_row == 0, W4) ──────────────
     let archetype_table_off = usize_off(header.archetype_table_off, "archetype_table_off")?;
@@ -577,6 +591,18 @@ fn load_one_archetype(
 /// in [`LoadReport::dense_stores_skipped`] / [`LoadReport::dense_members_skipped`]
 /// (plus a debug-only warning), NOT silently dropped. Runs zero turns for a
 /// `dense_store_count == 0` file (the 0%-gate).
+///
+/// # Duplicate `type_index` hardening
+///
+/// The saver emits AT MOST ONE block per live dense type, but a hostile/corrupt
+/// file can repeat a `type_index` across two blocks. `DenseStore::insert`'s
+/// target-is-empty precondition (the fresh-world-load contract enforced in
+/// `load_writer.rs`) is a `debug_assert!` only, so a release build would run a
+/// second insert pass into the SAME store with no defense — a stale slot from the
+/// first pass stays "live" while `e2s` is overwritten to the second pass's slot for
+/// any shared saved entity, an aliased/corrupted dense iteration, never a panic.
+/// This function rejects a repeated `type_index` itself, RELEASE-level, before
+/// [`load_dense_store`] / [`load_dense_store_via_fn`] is ever reached.
 fn load_dense_region(
     world: &mut EcsMaster,
     bytes: &[u8],
@@ -590,6 +616,11 @@ fn load_dense_region(
     }
     let table_off = usize_off(header.dense_table_off, "dense_table_off")?;
     let count = header.dense_store_count as usize;
+    // Tracks every `type_index` seen so far (one bool per file-local type). Sized by
+    // `resolved.len()`, itself capped by `resolve_type_table`'s own W2 guard against
+    // the real type-table bytes — NOT by this untrusted `dense_store_count` — so this
+    // allocation cannot be driven to an unbounded size by a hostile header.
+    let mut seen_type_index = vec![false; resolved.len()];
     for i in 0..count {
         let block_off = table_off
             .checked_add(i.checked_mul(DenseStoreBlock::SIZE).ok_or(OVF)?)
@@ -600,6 +631,11 @@ fn load_dense_region(
         if type_index >= resolved.len() {
             return Err(LoadError::Truncated("dense store type index out of range"));
         }
+        if seen_type_index[type_index] {
+            return Err(LoadError::Truncated("duplicate dense store type index"));
+        }
+        seen_type_index[type_index] = true;
+
         let rt = &resolved[type_index];
         let member_count = block.member_count as usize;
 

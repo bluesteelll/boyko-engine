@@ -17,6 +17,12 @@
 //!   column. The `ArchetypeLoadGuard` rollback must leave the destination world
 //!   consistent (no half-loaded archetype, `entity_count == 0`), drop every
 //!   successfully-decoded row exactly once, and never construct the failed row.
+//! * **Dense duplicate `type_index`** (a Fix S3 residual, audit B9 neighborhood) —
+//!   a corrupt/hostile file that repeats a `DenseStoreBlock`'s `type_index` across
+//!   two blocks. `DenseStore::insert`'s target-is-empty precondition is a
+//!   `debug_assert!` only, so nothing stops a release build from running a second
+//!   insert pass into the SAME store; the loader must reject the repeat as a
+//!   release-level `LoadError::Truncated`, never a silent double-insert.
 //!
 //! These exercise the load `unsafe` (the writer's reserved-uninit decode + the
 //! panic-path `Drop` rollback), so the suite is also run under Miri-TB.
@@ -30,7 +36,8 @@ use boyko_ecs::ecs::core::component::component_registry::{
 };
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::serialize::{DecodeError, LoadCursor, SaveCursor, Wire};
-use boyko_macros::Component;
+use boyko_ecs::ecs::core::system::Commands;
+use boyko_macros::{Bundle, Component};
 
 use boyko_serialize::{LoadEntityPolicy, LoadError, SaveOptions, load_world, save_world};
 
@@ -426,4 +433,125 @@ fn deserialize_panic_mid_column_rolls_back_cleanly() {
     // Dropping `src` now drops its 3 live payloads; keep it alive until here so the
     // `live_before` snapshot is meaningful.
     drop(src);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Dense duplicate type_index — a repeated DenseStoreBlock.type_index is a hard
+// Truncated rejection, never a silent double-insert (Fix S3 residual).
+// ════════════════════════════════════════════════════════════════════════════
+//
+// The saver emits at most one `DenseStoreBlock` per live dense component type, but
+// a corrupt/hostile file can repeat a `type_index` across two blocks.
+// `DenseStore::insert`'s target-is-empty precondition (the fresh-world-load
+// contract, `load_writer.rs`) is a `debug_assert!` only — a release build has
+// nothing else stopping a second insert pass into the SAME store, which would
+// silently alias/corrupt the dense bookkeeping (a stale slot stays "live" while
+// `e2s` is overwritten to the second pass's slot). `load_dense_region` must reject
+// the repeat itself, release-level, before either dense writer is ever called.
+//
+// NOTE on `load_world`'s Err-path contract: `load_world` is NOT transactional on
+// an `Err` return — Step 4 (the archetype loop, `load.rs:237`) already commits
+// entities into the destination world BEFORE Step 4b (`load_dense_region`, where
+// this guard lives, `load.rs:260`) runs. So a rejected load here still leaves the
+// archetype-loaded entities in `dst` — a pre-existing, broader gap in every `Err`
+// path (tracked separately; out of scope for this guard). What THIS guard actually
+// proves is narrower and still the whole point: the dense store itself is never
+// corrupted, because the repeat is rejected BEFORE the duplicated block's members
+// are ever read or inserted — no dense type ends up with a doubled/aliased slot.
+
+/// A POD dense component (distinct stable name/type from `DenseB`).
+#[derive(Component, Clone, Copy, PartialEq, Debug)]
+#[component(storage = "dense")]
+#[repr(C)]
+struct DenseA {
+    v: f32,
+}
+
+/// A second, distinct POD dense component — needed so a genuine save emits TWO
+/// `DenseStoreBlock`s (with two DIFFERENT `type_index`es) to corrupt.
+#[derive(Component, Clone, Copy, PartialEq, Debug)]
+#[component(storage = "dense")]
+#[repr(C)]
+struct DenseB {
+    v: f32,
+}
+
+/// Single-dense-component spawn bundles (a bare dense component does not
+/// auto-impl `Bundle`).
+#[derive(Bundle)]
+struct DenseAOnly {
+    a: DenseA,
+}
+
+#[derive(Bundle)]
+struct DenseBOnly {
+    b: DenseB,
+}
+
+#[test]
+fn duplicate_dense_store_type_index_is_truncated_not_corrupted() {
+    let mut src = EcsMaster::new();
+    src.run_system(|mut cmds: Commands| {
+        cmds.spawn(DenseAOnly { a: DenseA { v: 1.0 } });
+        cmds.spawn(DenseBOnly { b: DenseB { v: 2.0 } });
+    });
+    let bytes = save(&src);
+
+    // `dense_table_off` is header offset 64 (u64); `dense_store_count` is offset 72
+    // (u32) — see `SaveHeader`'s layout doc.
+    let dense_table_off = u64::from_le_bytes(bytes[64..72].try_into().unwrap()) as usize;
+    let dense_store_count = u32::from_le_bytes(bytes[72..76].try_into().unwrap()) as usize;
+    assert_eq!(
+        dense_store_count, 2,
+        "two distinct live dense component types must emit two DenseStoreBlocks"
+    );
+
+    // Control: the genuine two-distinct-type_index file must still load cleanly —
+    // proves the new duplicate guard does not false-positive on a legitimate
+    // multi-store file.
+    let mut dst_ok = EcsMaster::new();
+    let report = load_world(&mut dst_ok, &bytes, LoadEntityPolicy::Remap)
+        .expect("a genuine two-distinct-type_index dense file must still load");
+    assert_eq!(report.dense_stores_loaded, 2, "both distinct dense stores load");
+
+    // Corrupt: copy the FIRST block's `type_index` (offset 0 of its 40-byte
+    // `DenseStoreBlock` header — see `DenseStoreBlock::SIZE`) over the SECOND
+    // block's, so both blocks now name the same file-local type.
+    let block0_off = dense_table_off;
+    let block1_off = dense_table_off + 40; // DenseStoreBlock::SIZE
+    let mut corrupted = bytes.clone();
+    let type_index0 = corrupted[block0_off..block0_off + 4].to_vec();
+    corrupted[block1_off..block1_off + 4].copy_from_slice(&type_index0);
+
+    let mut dst = EcsMaster::new();
+    let err = load_world(&mut dst, &corrupted, LoadEntityPolicy::Remap).unwrap_err();
+    assert!(
+        matches!(err, LoadError::Truncated(_)),
+        "a duplicate dense store type_index must be a Truncated rejection, got {err:?}"
+    );
+
+    // `load_world` is not transactional on `Err`: Step 4 already committed both
+    // archetype entities before Step 4b's guard fired (see the note above) — this
+    // is the loader's existing, broader contract, not a property of this guard.
+    assert_eq!(
+        dst.entity_count(),
+        2,
+        "Step 4 (the archetype loop) already committed both entities before the \
+         dense-region guard rejects the stream"
+    );
+
+    // What the guard DOES prove: the dense store is never corrupted. The loop
+    // rejects the repeat on the SECOND block, before its members are ever read or
+    // inserted — so across BOTH dense types combined, exactly the first
+    // (non-duplicated) block's single member was ever inserted, never a doubled or
+    // aliased slot for either type.
+    let live_a = dst.query::<&DenseA, ()>().iter().count();
+    let live_b = dst.query::<&DenseB, ()>().iter().count();
+    assert_eq!(
+        live_a + live_b,
+        1,
+        "only the first block's member may be inserted before the guard rejects the \
+         duplicate; neither dense store may end up with a doubled/aliased member \
+         (got DenseA={live_a}, DenseB={live_b})"
+    );
 }
