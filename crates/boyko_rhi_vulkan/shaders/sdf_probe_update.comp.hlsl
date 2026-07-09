@@ -115,6 +115,12 @@ static const uint  DDGI_DEPTH_VALID_EXTENT = 14u; // the valid interior extent (
 static const uint  DDGI_TILE_BORDER      = 1u;    // the 1-texel border inset
 static const float DDGI_MIN_SUM_WEIGHT   = 1.0e-6; // the resolve-side cosine-sum divide guard
 
+// SDFDDGI I7: the octahedral tile border-RING texel counts (the 1-texel ring around the valid
+// interior — `tile_edge^2 - valid_extent^2 == 4*(tile_edge-1)`), the loop bound the border-copy
+// pass below iterates over. Symbolic, mirroring the valid-extent/tile-edge pair per atlas.
+static const uint  DDGI_IRR_BORDER_COUNT   = 4u * (DDGI_IRR_TILE_EDGE - 1u);   // 28
+static const uint  DDGI_DEPTH_BORDER_COUNT = 4u * (DDGI_DEPTH_TILE_EDGE - 1u); // 60
+
 // The classification bits (plan §4).
 static const uint DDGI_CLASS_ACTIVE    = 1u;      // bit0: probe not inside geometry
 static const uint DDGI_CLASS_CONVERGED = 2u;      // bit1: first successful tile write done
@@ -225,6 +231,52 @@ float3 probe_world_pos(uint3 c) {
 // tile_edge (mirrors `boyko_rhi_vulkan::ddgi::ddgi_probe_tile_origin`).
 uint3 tile_origin(uint3 c, uint tile_edge) {
     return uint3(c.y, c.x * tile_edge, c.z * tile_edge);
+}
+
+// SDFDDGI I7 — the octahedral tile BORDER-COPY index map. Maps a border-ring texel index `bt`
+// (in [0, 4*(tile_edge-1))) to its LOCAL destination texel `dst` (in the full [0,tile_edge)^2
+// tile) and its LOCAL source INTERIOR texel `src` (in [0,valid_extent)^2) to copy from. The
+// interior occupies local [DDGI_TILE_BORDER, DDGI_TILE_BORDER + valid_extent - 1]^2; the border
+// ring is the outermost 1-texel edge. Octahedral wrap-with-flip (the RTXGI/Majercik DDGI
+// convention): a top/bottom edge texel copies the OPPOSITE interior row, column REVERSED; a
+// left/right edge texel copies the OPPOSITE interior column, row REVERSED; the 4 corner texels
+// copy the DIAGONALLY-OPPOSITE interior corner. This makes a LINEAR SampleLevel tap straddling a
+// tile edge read the octahedrally-continuous neighbor instead of the boot-clear 0 (closing the
+// I3 resolve's seam-bleed / depth-leak at `ddgi_irr_uv`/`ddgi_depth_uv`'s oct-UV extremes).
+void border_copy_index(uint bt, uint tile_edge, uint valid_extent, out uint2 dst, out uint2 src) {
+    uint v = valid_extent;
+    if (bt < tile_edge) {
+        // Top row (local y = 0); bt is the local x (column).
+        uint bx = bt;
+        dst = uint2(bx, 0u);
+        if (bx == 0u) { src = uint2(v - 1u, v - 1u); return; }          // top-left <- bottom-right interior
+        if (bx == tile_edge - 1u) { src = uint2(0u, v - 1u); return; }  // top-right <- bottom-left interior
+        uint cx = bx - DDGI_TILE_BORDER;
+        src = uint2(v - 1u - cx, v - 1u);                                 // bottom interior row, column reversed
+        return;
+    }
+    bt -= tile_edge;
+    if (bt < tile_edge) {
+        // Bottom row (local y = tile_edge - 1); bt is the local x (column).
+        uint bx = bt;
+        dst = uint2(bx, tile_edge - 1u);
+        if (bx == 0u) { src = uint2(v - 1u, 0u); return; }              // bottom-left <- top-right interior
+        if (bx == tile_edge - 1u) { src = uint2(0u, 0u); return; }      // bottom-right <- top-left interior
+        uint cx = bx - DDGI_TILE_BORDER;
+        src = uint2(v - 1u - cx, 0u);                                    // top interior row, column reversed
+        return;
+    }
+    bt -= tile_edge;
+    if (bt < v) {
+        // Left col (local x = 0), corners excluded; bt is the local y offset within the interior span.
+        dst = uint2(0u, bt + DDGI_TILE_BORDER);
+        src = uint2(v - 1u, v - 1u - bt);                                // right interior col, row reversed
+        return;
+    }
+    bt -= v;
+    // Right col (local x = tile_edge - 1), corners excluded; bt is the local y offset.
+    dst = uint2(tile_edge - 1u, bt + DDGI_TILE_BORDER);
+    src = uint2(0u, v - 1u - bt);                                        // left interior col, row reversed
 }
 
 // The valid-interior texel (tx, ty) -> the [0,1]^2 tile UV oct_decode remaps to [-1,1]^2. The
@@ -393,6 +445,24 @@ void main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
         gIrrOut[dst] = float4(lerp(irr, prev_irr, blend_a), 1.0);
     }
 
+    // SDFDDGI I7: publish this dispatch's irradiance interior writes to the whole group before the
+    // border-copy reads them — a border-copy thread may read an interior texel a DIFFERENT thread
+    // just wrote in the loop above (a cross-thread UAV read-after-write within this threadgroup).
+    DeviceMemoryBarrierWithGroupSync();
+
+    // (2b) Cooperatively fill the irradiance tile's 1-texel border (SDFDDGI I7 — the octahedral
+    // wrap-with-flip copy, `border_copy_index`). Without this the border stays at the boot-clear 0,
+    // and the I3 resolve's LINEAR `SampleLevel` (`ddgi_irr_uv`) lands exactly on the border/interior
+    // boundary at the oct-UV extremes (e == 0 or e == 1), blending 50% with that 0 — a real
+    // darkened seam at every probe tile edge.
+    for (uint ib = lid.x; ib < DDGI_IRR_BORDER_COUNT; ib += 64u) {
+        uint2 dst2, src2;
+        border_copy_index(ib, DDGI_IRR_TILE_EDGE, DDGI_IRR_VALID_EXTENT, dst2, src2);
+        uint3 dst_texel = uint3(irr_org.y + dst2.x, irr_org.z + dst2.y, irr_org.x);
+        uint3 src_texel = uint3(irr_org.y + DDGI_TILE_BORDER + src2.x, irr_org.z + DDGI_TILE_BORDER + src2.y, irr_org.x);
+        gIrrOut[dst_texel] = gIrrOut[src_texel];
+    }
+
     // (3) Cooperatively gather the depth texels (14x14 valid) — the two-moment tile.
     uint3 depth_org = tile_origin(c, DDGI_DEPTH_TILE_EDGE);
     uint depth_valid = DDGI_DEPTH_VALID_EXTENT * DDGI_DEPTH_VALID_EXTENT;
@@ -423,6 +493,23 @@ void main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {
         // to the true moments, so the Chebyshev variance E[d^2]-E[d]^2 self-heals). Same `blend_a`.
         float2 prev_m = gDepthOut[dst];
         gDepthOut[dst] = lerp(moments, prev_m, blend_a);
+    }
+
+    // SDFDDGI I7: publish this dispatch's depth interior writes before the border-copy reads them
+    // (the same cross-thread UAV read-after-write hazard as the irradiance tile above).
+    DeviceMemoryBarrierWithGroupSync();
+
+    // (3b) Cooperatively fill the depth tile's 1-texel border (SDFDDGI I7 — the same octahedral
+    // wrap-with-flip copy, parameterized by the depth tile geometry). Closes the SAME seam-bleed
+    // hazard for the Chebyshev two-moment tap (`ddgi_depth_uv`) — an uncopied border would blend a
+    // valid moment with the boot-clear (0,0), skewing `var`/`mean` at tile edges (a depth-leak, not
+    // just a color darkening).
+    for (uint db = lid.x; db < DDGI_DEPTH_BORDER_COUNT; db += 64u) {
+        uint2 dst2, src2;
+        border_copy_index(db, DDGI_DEPTH_TILE_EDGE, DDGI_DEPTH_VALID_EXTENT, dst2, src2);
+        uint3 dst_texel = uint3(depth_org.y + dst2.x, depth_org.z + dst2.y, depth_org.x);
+        uint3 src_texel = uint3(depth_org.y + DDGI_TILE_BORDER + src2.x, depth_org.z + DDGI_TILE_BORDER + src2.y, depth_org.x);
+        gDepthOut[dst_texel] = gDepthOut[src_texel];
     }
 
     // (4) One thread stamps the converged-once bit (+ keeps active set): the tile is written.
