@@ -800,6 +800,25 @@ impl Renderer<'_> {
                 VK_IMAGE_LAYOUT_GENERAL,
                 SubRange::COLOR,
             );
+            // HW-RT Rung 3b step 5b: when the SDF-MV path is active, the VIS pass ALSO writes each
+            // SDF pixel's camera-only `Δuv` to `motion_vec` (STORAGE, GENERAL). Declaring this WRITE
+            // makes the graph order the raster pass's earlier COLOR_ATTACHMENT write of the MESH
+            // pixels (step 5a) BEFORE this STORAGE write — the required COLOR_ATTACHMENT_OPTIMAL →
+            // GENERAL transition + WAW barrier (the two passes cover DISJOINT pixels). The gate is
+            // `sdf_mv_active()` — the SAME predicate the recorder binds the VIS-MV pipeline under
+            // (W1: the barrier declaration and the write must never disagree). OFF (temporal off /
+            // non-storage / non-hwrt) ⇒ no access ⇒ the graph routes ZERO barriers on `motion_vec`
+            // for this pass ⇒ byte-identical. (`mode == Both` this rung — the VIS pass runs only when
+            // spatial is on; step 6 extends it to pure Temporal.)
+            if scene.sdf_mv_active() {
+                g.image_access(
+                    motion_vec,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    SubRange::COLOR,
+                );
+            }
 
             // The `levels` à-trous passes (ping-pong). Level `i` reads `i`-even ? `shadow_vis` :
             // `shadow_vis2` and writes the other; the FINAL write lands in `shadow_vis2` for odd

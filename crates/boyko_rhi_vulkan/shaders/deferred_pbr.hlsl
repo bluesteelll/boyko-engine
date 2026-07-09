@@ -345,6 +345,31 @@ cbuffer RayShadowUbo : register(b20) {
 [[vk::image_format("rg16")]] RWTexture2D<float2> gShadowVis : register(u21);
 #endif
 
+#ifdef MOTION_VECTORS
+// Rung 3b step 5b: the SDF-pixel motion-vector output + the camera pair. Declared ONLY under
+// MOTION_VECTORS (the `deferred_pbr_hwrt_vis_mv` variant — SHADOW_STAGE=VIS + MOTION_VECTORS), so
+// the base VIS / DENOISED / RESOLVE_INLINE `.spv` never reference bindings 22/23 and their layouts
+// stay the frozen byte-identity gate. binding 22: the `MotionCam` UBO (current + previous
+// marcher-aligned proj*view, column-major — the SAME 128 B camera pair the raster MV variant reads,
+// so the mesh and SDF motion vectors share ONE camera basis). binding 23 (u23): the `motion_vec`
+// image the raster wrote MESH pixels into; this stage adds the SDF pixels (camera-only). Pinned
+// **rg16f** (`R16G16_SFLOAT`, matching the image) — NOT `rg16`/UNORM: Δuv is SIGNED and can exceed
+// [0,1], so a UNORM pin would clamp negative/>1 motion and disagree with the raster's SFLOAT pixels.
+[[vk::binding(22)]] cbuffer MotionCamVis {
+    float4x4 mv_cur_view_proj;   // current marcher-aligned proj*view
+    float4x4 mv_prev_view_proj;  // last frame's marcher-aligned proj*view
+};
+[[vk::image_format("rg16f")]] RWTexture2D<float2> gMotionVec : register(u23);
+
+// Marcher-aligned clip -> [0,1]^2 screen UV. The projection (`marcher_view_proj_rows`) bakes the
+// y-flip into clip.y, so this is the plain NDC remap (NO extra negation) — IDENTICAL to the gbuffer
+// MV variant's `clip_to_uv`, so the mesh (raster) and SDF (here) motion vectors land in ONE
+// consistent UV space across the r1 ownership seam.
+float2 mv_clip_to_uv(float4 clip) {
+    return (clip.xy / clip.w) * 0.5 + 0.5;
+}
+#endif
+
 // Shadow Phase 5 Inc-1-GPU normal-offset bias FACTOR — the spot receiver lookup is pushed off the
 // surface by `n * SPOT_SHADOW_NORMAL_BIAS` so a grazing receiver does not self-shadow (acne). A
 // world-space constant (the spot map has no per-cascade `texel_size`); owner-retunable. Mirrors the
@@ -1059,6 +1084,17 @@ void main(uint3 tid : SV_DispatchThreadID) {
         uint ddgi_mode = load_ddgi_mode(LightBuf);
         float view_t = gViewT.Load(coord);
         float3 P = ro + rd * view_t;
+#ifdef MOTION_VECTORS
+        // Rung 3b step 5b: the SDF pixel's CAMERA-ONLY motion vector. Reproject the reconstructed
+        // world surface `P` through the previous + current view-proj (SDF-edit motion deferred).
+        // Written here — inside `is_sdf_lit`, right after `P` and BEFORE the light loop — so EVERY
+        // SDF pixel gets exactly one write. Mesh pixels are raster-owned (the gbuffer MV variant
+        // wrote them); the two producers cover DISJOINT pixels of one `motion_vec`. Static camera ⇒
+        // `mv_prev == mv_cur` ⇒ Δuv = 0.
+        gMotionVec[uint2(px, py)] =
+              mv_clip_to_uv(mul(mv_prev_view_proj, float4(P, 1.0)))
+            - mv_clip_to_uv(mul(mv_cur_view_proj, float4(P, 1.0)));
+#endif
         uint marched = 0u;
 
         // Render P7: the SSAO combine (a structural `if`, the 0%-gate). `ao` is the A2 SDF

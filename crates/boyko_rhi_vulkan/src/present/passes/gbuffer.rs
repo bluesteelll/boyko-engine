@@ -1627,32 +1627,54 @@ impl Renderer<'_> {
                 .gbuffer_pass_plan
                 .as_ref()
                 .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
-            let vis_set = &vis_ring[self.frame_index];
             // (a) The VIS pre-pass. Its input barriers (gNormal/gViewT store→load already visible,
             // the build→VIS AS barrier, the `shadow_vis` first-touch UNDEFINED→GENERAL) are DRIVEN
             // by the graph's "shadow_vis" pass, recorded here.
             let vis_pass = plan
                 .shadow_vis
                 .expect("invariant: scene.shadow.is_some() ⇒ shadow_vis pass declared");
+            // HW-RT Rung 3b step 5b: select the SDF motion-vector VIS-variant pipeline + its
+            // 24-binding set when temporal is active (`sdf_mv_active()`). That variant writes
+            // `gShadowVis` @21 (bit-identical to the base VIS) AND each SDF pixel's camera-only `Δuv`
+            // to `motion_vec` @23. `sdf_mv_active()` is the SINGLE source shared with
+            // `declare_gbuffer_graph` (the `motion_vec` STORAGE write is declared under the SAME
+            // predicate — W1: the barrier declaration and this write must never disagree). `Some`
+            // implies the boot MV pipeline exists (⇒ RT + storage), a strict superset of the VIS-MV
+            // set-build gate, so both `expect`s hold (they trip loudly on a future gate loosening,
+            // matching the step-5a `expect` discipline). When false ⇒ the base VIS pipeline + its
+            // 22-binding set (byte-identical).
+            let (vis_pipeline, vis_set) = if scene.sdf_mv_active() {
+                let p = scene
+                    .vis_mv_pipeline
+                    .expect("invariant: sdf_mv_active implies vis_mv_pipeline is Some");
+                let ring = targets.shadow_vis_mv_resolve_set.as_ref().expect(
+                    "invariant: sdf_mv_active + shadow.is_some implies the VIS-MV resolve set was built",
+                );
+                (p, &ring[self.frame_index])
+            } else {
+                (sh.vis_pipeline, &vis_ring[self.frame_index])
+            };
             // SAFETY: recording is open; `record_graph_pass` records the graph's derived input
             // barriers for the "shadow_vis" pass into `cmd`.
             self.record_graph_pass(vis_pass, cmd, targets, scene, fi);
-            // SAFETY: recording is open; the VIS pipeline + its 22-binding layout are live on this
-            // device (caller contract); `vis_set` binds the resolve inputs + `gShadowVis` @21 =
-            // `shadow_vis[fi]` (the write target); `dispatch_group_count_x` covers the pixel count
-            // (the resolve grid); `&vis_set.descriptor_set` is a single-element local alive for the
-            // call. The VIS shader reads its camera/params from the bound UBOs; the resolve's
-            // 80-byte push range is declared-but-unread here (no push recorded).
+            // SAFETY: recording is open; the selected VIS pipeline + its layout (22-binding base or
+            // 24-binding VIS-MV) are live on this device (caller contract); `vis_set` binds the
+            // resolve inputs + `gShadowVis` @21 = `shadow_vis[fi]` (the write target) [+ the
+            // `MotionCam` UBO @22 + `motion_vec[fi]` @23 on the VIS-MV path]; `dispatch_group_count_x`
+            // covers the pixel count (the resolve grid); `&vis_set.descriptor_set` is a
+            // single-element local alive for the call. The VIS shader reads its camera/params from
+            // the bound UBOs; the resolve's 80-byte push range is declared-but-unread here (no push
+            // recorded).
             unsafe {
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
-                    sh.vis_pipeline.pipeline,
+                    vis_pipeline.pipeline,
                 );
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_COMPUTE,
-                    sh.vis_pipeline.layout,
+                    vis_pipeline.layout,
                     0,
                     1,
                     &vis_set.descriptor_set,

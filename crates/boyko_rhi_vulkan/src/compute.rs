@@ -343,6 +343,22 @@ static DEFERRED_PBR_DENOISED_SPV: SpirvBlob<57576> = SpirvBlob(*include_bytes!(c
     "/shaders/deferred_pbr_hwrt_denoised.comp.spv"
 )));
 
+/// The Rung-3b step-5b MOTION_VECTORS VIS-variant deferred-resolve SPIR-V
+/// (`shaders/deferred_pbr_hwrt_vis_mv.comp.spv`, compiled from `deferred_pbr.hlsl` with
+/// `SHADOW_STAGE=1 + MOTION_VECTORS`). Identical to [`DEFERRED_PBR_VIS_SPV`] (writes `gShadowVis`
+/// @21) except it ALSO writes each SDF pixel's CAMERA-ONLY motion vector `Δuv` to a `motion_vec`
+/// STORAGE image @23 (rg16), reprojecting the reconstructed surface `P` through a `MotionCam` UBO
+/// @22 (cur+prev marcher-aligned view-proj — the SAME 128 B pair the raster MV variant reads). Mesh
+/// pixels are raster-owned (the gbuffer MV variant); the two producers write disjoint pixels of one
+/// `motion_vec`. Bound to a 24-binding VIS-MV layout (the 22 VIS bindings + `MotionCam` @22 +
+/// `motion_vec` @23); selected instead of [`DEFERRED_PBR_VIS_SPV`] only when the temporal denoiser
+/// is active. The base VIS `.spv` stays the byte-frozen 8032-byte golden.
+#[cfg(feature = "hwrt")]
+static DEFERRED_PBR_VIS_MV_SPV: SpirvBlob<9008> = SpirvBlob(*include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/shaders/deferred_pbr_hwrt_vis_mv.comp.spv"
+)));
+
 /// The Rung-3a à-trous spatial shadow-denoise filter SPIR-V (`shaders/shadow_atrous.comp.spv`,
 /// Dammertz 2010). A 2D 25-tap/level (5×5 B3-spline) edge-stopping wavelet: `levels` iterations,
 /// `step = 1 << level` (a 4-byte `{ uint step; }` push-const), edge-stop weight
@@ -793,6 +809,21 @@ pub fn deferred_pbr_hwrt_spirv() -> &'static [u32] {
 #[inline]
 pub fn deferred_pbr_vis_spirv() -> &'static [u32] {
     DEFERRED_PBR_VIS_SPV.as_words()
+}
+
+/// The Rung-3b step-5b MOTION_VECTORS VIS-variant deferred-resolve SPIR-V
+/// (`SHADOW_STAGE=1 + MOTION_VECTORS`) as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// Identical to [`deferred_pbr_vis_spirv`] (writes `gShadowVis` @21) plus a per-SDF-pixel
+/// camera-only motion vector `Δuv` written to a `motion_vec` STORAGE image @23, reprojecting the
+/// reconstructed surface `P` through a `MotionCam` UBO @22. Bound to the 24-binding VIS-MV layout;
+/// selected instead of [`deferred_pbr_vis_spirv`] only when the temporal shadow denoiser is active.
+/// See [`DEFERRED_PBR_VIS_MV_SPV`]; the const-asserted length is the anti-drift guard.
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn deferred_pbr_vis_mv_spirv() -> &'static [u32] {
+    DEFERRED_PBR_VIS_MV_SPV.as_words()
 }
 
 /// The Rung-3a DENOISED-variant deferred-resolve SPIR-V (`SHADOW_STAGE=2`) as a `u32` word stream,

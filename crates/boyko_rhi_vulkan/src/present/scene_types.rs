@@ -1400,6 +1400,31 @@ pub struct GBufferScene<'a> {
     /// `Some`. `#[cfg(feature = "hwrt")]`.
     #[cfg(feature = "hwrt")]
     pub mv_bind_group: Option<&'a VulkanBindGroup>,
+    /// HW-RT Rung 3b step 5b: the SDF motion-vector VIS-variant resolve pipeline
+    /// (`deferred_pbr_hwrt_vis_mv.comp`) — writes `gShadowVis` @21 (like the base VIS) AND each SDF
+    /// pixel's camera-only `Δuv` to `motion_vec` @23. Bound instead of
+    /// [`ShadowVisActivation::vis_pipeline`] in the VIS pass ONLY when [`Self::sdf_mv_active`] (and
+    /// the VIS pass runs, i.e. `Self::shadow.is_some()`). The recorder's ref — `Some` only on a
+    /// temporal frame with the MV resources (mirrors [`Self::raster_pipeline_mv`]).
+    /// `#[cfg(feature = "hwrt")]`.
+    #[cfg(feature = "hwrt")]
+    pub vis_mv_pipeline: Option<&'a ComputePipeline>,
+    /// HW-RT Rung 3b step 5b: the STABLE 24-binding VIS-MV resolve bind-group LAYOUT (the 22-binding
+    /// VIS/DENOISED layout + the `MotionCam` UBO @22 + the `motion_vec` STORAGE image @23). Populated
+    /// whenever the boot MV resources exist (an RT + storage device), REGARDLESS of the per-frame
+    /// temporal gate (mirrors [`Self::resolve_layout_denoise_hwrt`]) — so
+    /// [`GBufferTargets::build_shadow_vis_mv_resolve_set`](crate::present::targets) can write the
+    /// per-FIF VIS-MV set ONCE per extent decoupled from the activation. `None` on a non-storage /
+    /// non-hwrt device. `#[cfg(feature = "hwrt")]`.
+    #[cfg(feature = "hwrt")]
+    pub vis_mv_layout: Option<&'a VulkanBindGroupLayout>,
+    /// HW-RT Rung 3b step 5b: the STABLE `MotionCam` UBO ring the VIS-MV set binds @22 (the runner
+    /// uploads `MotionCam` into slot `frame_index` under the same temporal gate that feeds the mesh MV
+    /// pass). Populated whenever the boot MV resources exist, like [`Self::vis_mv_layout`]; the VIS-MV
+    /// set-build reads slot `fi`. `None` on a non-storage / non-hwrt device. `#[cfg(feature =
+    /// "hwrt")]`.
+    #[cfg(feature = "hwrt")]
+    pub motion_cam_ubo_ring: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
 }
 
 impl GBufferScene<'_> {
@@ -1416,6 +1441,30 @@ impl GBufferScene<'_> {
     #[cfg(feature = "hwrt")]
     pub(crate) fn mesh_mv_active(&self) -> bool {
         self.temporal_enabled && self.raster_pipeline_mv.is_some() && self.mv_bind_group.is_some()
+    }
+
+    /// HW-RT Rung 3b step 5b — the SINGLE source of the "the VIS pass ALSO writes the SDF pixels'
+    /// camera-only motion vector to `motion_vec` this frame" decision, so the framegraph barrier
+    /// declaration (`declare_gbuffer_graph`) and the VIS-pass recording (`record_gbuffer`) can never
+    /// diverge (the W1 lesson, mirroring [`Self::mesh_mv_active`]).
+    ///
+    /// True iff temporal is on AND the VIS-MV pipeline + its build-time inputs (the 24-binding
+    /// layout + the `MotionCam` UBO ring) all exist (an RT + RG16-storage device built them at boot).
+    /// The pipeline/layout/ring presence is NOT implied by `temporal_enabled` alone: a device with
+    /// RG16 storage but no ray-query (e.g. `BOYKO_FORCE_SOFTWARE=1`) allocates the `motion_vec`
+    /// target yet builds no VIS-MV pipeline, so gating on `temporal_enabled` alone would declare a
+    /// STORAGE write the recorder never emits.
+    ///
+    /// NOTE: the actual SDF-MV write only happens when the VIS pass runs (`self.shadow.is_some()`,
+    /// i.e. `mode == Both` this rung — spatial gates the VIS pass on). Both the graph declaration and
+    /// the recording sit INSIDE the `self.shadow.is_some()` branch and additionally gate on this
+    /// method, so the effective predicate is `self.shadow.is_some() && self.sdf_mv_active()`.
+    #[cfg(feature = "hwrt")]
+    pub(crate) fn sdf_mv_active(&self) -> bool {
+        self.temporal_enabled
+            && self.vis_mv_pipeline.is_some()
+            && self.vis_mv_layout.is_some()
+            && self.motion_cam_ubo_ring.is_some()
     }
 }
 

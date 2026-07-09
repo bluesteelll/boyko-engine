@@ -215,6 +215,18 @@ pub struct GBufferTargets {
     /// reads a DIFFERENT slot (lock-free write-after-read). `None` on the OFF path.
     #[cfg(feature = "hwrt")]
     pub(crate) shadow_denoise_ubo: Option<[BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// HW-RT Rung 3b step 5b: the SDF motion-vector VIS-variant resolve descriptor set RING (one per
+    /// in-flight frame), written ONCE per extent against the 24-binding VIS-MV layout
+    /// ([`GBufferScene::vis_mv_layout`](crate::present::scene_types::GBufferScene::vis_mv_layout)) —
+    /// the SAME 22 VIS bindings as [`Self::shadow_vis_resolve_set`] (incl. `gShadowVis` @21 =
+    /// `shadow_vis[i]`, the WRITE target) PLUS the `MotionCam` UBO @22 (`motion_cam_ubo[i]`) + the
+    /// `motion_vec` STORAGE image @23 (`motion_vec[i]`, the SDF-Δuv WRITE target). `None` unless
+    /// temporal is on AND the spatial denoise is on (so the base VIS set + `scene.shadow` exist too —
+    /// `mode == Both` this rung) AND the RT + storage MV resources exist. The recorder selects
+    /// `shadow_vis_mv_resolve_set[self.frame_index]` when [`GBufferScene::sdf_mv_active`](crate::present::scene_types::GBufferScene::sdf_mv_active).
+    /// The whole field is `#[cfg(feature = "hwrt")]`.
+    #[cfg(feature = "hwrt")]
+    pub(crate) shadow_vis_mv_resolve_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// SDFDDGI I2: the probe-update descriptor set, written ONCE against
     /// [`DdgiUpdateActivation::layout`](crate::present::scene_types::DdgiUpdateActivation::layout)
     /// (7 bindings: `Buf` @0 R, `gIrrOut` @1 W, `gDepthOut` @2 W storage images, `Classification` @3
@@ -317,6 +329,13 @@ const RESOLVE_SOFTWARE_BINDINGS: usize = 19;
 /// this layout fills 22.
 #[cfg(feature = "hwrt")]
 const RESOLVE_HWRT_DENOISE_BINDINGS: usize = RESOLVE_SOFTWARE_BINDINGS + 3;
+
+/// HW-RT Rung 3b step 5b: the binding count of the VIS-MV deferred-resolve set (indices 0..=23) —
+/// the 22 VIS/DENOISED bindings ([`RESOLVE_HWRT_DENOISE_BINDINGS`]) PLUS the `MotionCam` UNIFORM
+/// buffer @22 + the `motion_vec` STORAGE image @23. The EXACT-fill tripwire for the VIS-MV set,
+/// filling [`MAX_BIND_GROUP_BINDINGS`](boyko_rhi::MAX_BIND_GROUP_BINDINGS) (24) exactly.
+#[cfg(feature = "hwrt")]
+const RESOLVE_HWRT_VIS_MV_BINDINGS: usize = RESOLVE_HWRT_DENOISE_BINDINGS + 2;
 
 /// The six per-in-flight-slot G-buffer image RINGS' slot views the resolve set binds — bundled so
 /// [`resolve_software_entries`] takes ONE argument for them instead of six (clippy
@@ -696,6 +715,135 @@ impl GBufferTargets {
             atrous_opt.map(|lvl| lvl.map(|s| s.expect("invariant: every à-trous set slot built")));
 
         Ok(Some(ShadowDenoiseSets { vis_resolve, denoised_resolve, atrous, ubo }))
+    }
+
+    /// HW-RT Rung 3b step 5b: builds the SDF motion-vector VIS-variant resolve set RING (one 24-entry
+    /// set per in-flight frame) against the boot VIS-MV layout ([`GBufferScene::vis_mv_layout`]).
+    ///
+    /// The set = the SAME 22 VIS/DENOISED entries the base VIS set builds (the 19 shared via
+    /// [`resolve_software_entries`] + TLAS @19 + soft-shadow UBO @20 + `gShadowVis` @21 =
+    /// `shadow_vis[slot]`, the WRITE target) PLUS the `MotionCam` UBO @22 (`motion_cam[slot]`) + the
+    /// `motion_vec` STORAGE image @23 (`motion_vec[slot]`, the SDF-Δuv WRITE target). Exact-fill at
+    /// [`RESOLVE_HWRT_VIS_MV_BINDINGS`] (24).
+    ///
+    /// DECOUPLED from the per-frame activation (the same lesson as [`Self::build_shadow_denoise_sets`]):
+    /// it gates on the STABLE signals — NOT `scene.temporal_enabled` — so the set already exists
+    /// before a render frame flips [`GBufferScene::sdf_mv_active`] on (else a Spatial→Both mode change
+    /// with no resize would hit a `None` set: the "set=None panic when the gate opens late" trap).
+    /// Returns `None` (the byte-identical OFF path) unless ALL hold: the spatial denoise is armed
+    /// (`scene.shadow_denoise_enabled` — so the base VIS set + `scene.shadow` also exist) AND the
+    /// VIS-MV layout + the `MotionCam` ring + the `motion_vec` target + the `shadow_vis` ring + the
+    /// persistent TLAS ring are all present (an RT + storage device). In `mode == Spatial` (temporal
+    /// off) the set is BUILT-BUT-UNUSED — the recorder gates USE on `sdf_mv_active()`; a small
+    /// boot-time cost that makes the recorder's `expect` on this set panic-free. On ANY
+    /// `create_bind_group` failure it DEGRADES to `None` (draining its own partials) — it is called
+    /// LAST (after every fallible set + the `motion_vec` ring), so nothing depends on it and no
+    /// teardown weaves into the ladder.
+    ///
+    /// `#[allow(clippy::too_many_arguments)]`: the six G-buffer image rings + the two L1 placeholder
+    /// buffers are the exact borrows [`resolve_software_entries`] consumes — grouping them would only
+    /// move the argument list.
+    #[cfg(feature = "hwrt")]
+    #[allow(clippy::too_many_arguments)]
+    fn build_shadow_vis_mv_resolve_set(
+        ctx: &VulkanContext,
+        scene: &GBufferScene<'_>,
+        albedo: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        normal: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        material: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        lit: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        viewt: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        ssao: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        shadow_vis: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        motion_vec: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        cluster_grid_buf: &BoundBuffer,
+        light_index_buf: &BoundBuffer,
+    ) -> Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> {
+        // The STABLE-signal gate (see the doc): the spatial denoise is armed (so the base VIS set +
+        // `scene.shadow` also exist) AND every input the 24-entry set binds is present. NOTE: this is
+        // DECOUPLED from `scene.temporal_enabled` (the per-frame activation) exactly like
+        // `build_shadow_denoise_sets` — building on the STABLE signals so the set already exists
+        // before a frame flips `sdf_mv_active()` on (the "build denoise sets on stable boot config,
+        // not the per-frame gate, else set=None panic when the gate opens late" lesson). The
+        // `vis_mv_layout` / `motion_cam_ubo_ring` are `Some` whenever the boot MV resources exist
+        // (an RT + storage device), independent of the temporal mode. Any absent ⇒ the byte-identical
+        // OFF path. When temporal is OFF (`mode == Spatial`) the set is built-but-unused (the recorder
+        // gates USE on `sdf_mv_active()`); a small boot-time cost that removes the panic.
+        let (vis_mv_layout, motion_cam, vis_ring, mvec, tlas) = match (
+            scene.shadow_denoise_enabled,
+            scene.vis_mv_layout,
+            scene.motion_cam_ubo_ring,
+            shadow_vis,
+            motion_vec,
+            scene.resolve_tlas_hwrt,
+        ) {
+            (true, Some(l), Some(mc), Some(v), Some(mv), Some(t)) => (l, mc, v, mv, t),
+            _ => return None,
+        };
+
+        let mut slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for (slot, dst) in slots.iter_mut().enumerate() {
+            let imgs = ResolveSlotImages {
+                albedo: &albedo[slot],
+                normal: &normal[slot],
+                material: &material[slot],
+                lit: &lit[slot],
+                viewt: &viewt[slot],
+                ssao: &ssao[slot],
+            };
+            let shared =
+                resolve_software_entries(scene, &imgs, slot, cluster_grid_buf, light_index_buf);
+            // The 22 VIS bindings (identical to `build_resolve_set`'s VIS chain) + `MotionCam` @22 +
+            // `motion_vec` @23. `gShadowVis` @21 binds `shadow_vis[slot]` (the WRITE target, same as
+            // the base VIS set).
+            let mut chained = shared
+                .into_iter()
+                .chain(core::iter::once(BindGroupEntry::AccelerationStructure {
+                    accel: tlas[slot],
+                }))
+                .chain(core::iter::once(BindGroupEntry::UniformBuffer {
+                    buffer: &scene.ray_shadow_ubo[slot],
+                }))
+                .chain(core::iter::once(BindGroupEntry::StorageImage {
+                    texture: &vis_ring[slot],
+                }))
+                .chain(core::iter::once(BindGroupEntry::UniformBuffer {
+                    buffer: &motion_cam[slot],
+                }))
+                .chain(core::iter::once(BindGroupEntry::StorageImage {
+                    texture: &mvec[slot],
+                }));
+            let entries: [BindGroupEntry<'_, Vulkan>; RESOLVE_HWRT_VIS_MV_BINDINGS] =
+                core::array::from_fn(|_| {
+                    chained.next().expect(
+                        "invariant: the chained iterator yields exactly RESOLVE_HWRT_VIS_MV_BINDINGS entries",
+                    )
+                });
+            debug_assert_eq!(
+                entries.len(),
+                RESOLVE_HWRT_VIS_MV_BINDINGS,
+                "invariant: the VIS-MV resolve set must declare EXACTLY {RESOLVE_HWRT_VIS_MV_BINDINGS} bindings (exact-fill)"
+            );
+            let desc = BindGroupDesc::<Vulkan> { layout: vis_mv_layout, entries: &entries };
+            match RhiDevice::create_bind_group(ctx, &desc) {
+                Ok(g) => *dst = Some(g),
+                Err(_) => {
+                    // Degrade to None (opt-in path, no dependents): drain the [0..slot) sets built so
+                    // far. SAFETY: each was created on `ctx`, referenced by no submission; destroy
+                    // exactly once.
+                    unsafe {
+                        for s in slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                    }
+                    return None;
+                }
+            }
+        }
+        Some(slots.map(|s| s.expect("invariant: every VIS-MV resolve ring slot built")))
     }
 
     /// Creates a 2D `R8G8B8A8_UNORM` storage image at `extent` with `usage`. A small
@@ -1886,6 +2034,26 @@ impl GBufferTargets {
                 (None, None, None)
             };
 
+        // HW-RT Rung 3b step 5b: the SDF motion-vector VIS-variant resolve set ring. Built LAST
+        // (after `motion_vec`, which it binds @23) and DEGRADE-TO-NONE (opt-in, no dependents) —
+        // like the temporal target rings, it needs no teardown weaving. `None` on every OFF path
+        // (temporal off / spatial off / non-storage device) ⇒ byte-identical.
+        #[cfg(feature = "hwrt")]
+        let shadow_vis_mv_resolve_set = Self::build_shadow_vis_mv_resolve_set(
+            ctx,
+            scene,
+            &albedo,
+            &normal,
+            &material,
+            &lit,
+            &viewt,
+            &ssao,
+            shadow_vis.as_ref(),
+            motion_vec.as_ref(),
+            cluster_grid_buf,
+            light_index_buf,
+        );
+
         Ok(Self {
             depth,
             albedo,
@@ -1918,6 +2086,8 @@ impl GBufferTargets {
             shadow_atrous_sets,
             #[cfg(feature = "hwrt")]
             shadow_denoise_ubo,
+            #[cfg(feature = "hwrt")]
+            shadow_vis_mv_resolve_set,
             ddgi_update_set,
             present_set,
             extent,
@@ -1995,6 +2165,15 @@ impl GBufferTargets {
             // reverse acquisition). Each `Option`-guarded (present only on the denoise ON path — the
             // host keeps `scene.shadow == None` this rung, so these are `None` on every current
             // frame). Order within: à-trous sets → DENOISED resolve → VIS resolve → UBO ring.
+            // HW-RT Rung 3b step 5b: the SDF motion-vector VIS resolve set RING — acquired LAST among
+            // the denoise sets (after `motion_vec`), so destroyed FIRST here (before the textures it
+            // references). `Option`-guarded (present only on the `mode == Both` temporal path).
+            #[cfg(feature = "hwrt")]
+            if let Some(mvr) = self.shadow_vis_mv_resolve_set {
+                for g in mvr {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
             #[cfg(feature = "hwrt")]
             if let Some(sets) = self.shadow_atrous_sets {
                 for lvl in sets {

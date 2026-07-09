@@ -84,9 +84,13 @@ const MAX_VERTEX_ATTRIBUTES: usize = 8;
 /// still fills 19. HW-RT rung 3a raised it 21 → 22 to reserve binding 21 for the VIS/DENOISED
 /// resolve variants' `gShadowVis` UAV (`RWTexture2D<float2>`) — BYTE-NEUTRAL by the same
 /// argument: only the 22-binding VIS/DENOISED layout fills the new tail slot, the software
-/// resolve still fills 19 and the RESOLVE_INLINE-hwrt resolve still fills 21. A `debug_assert!`
-/// traps an over-count at `create_bind_group_layout`/`create_bind_group`.
-const MAX_BIND_GROUP_BINDINGS: usize = 22;
+/// resolve still fills 19 and the RESOLVE_INLINE-hwrt resolve still fills 21. HW-RT rung 3b step 5b
+/// raised it 22 → 24 to reserve bindings 22/23 for the VIS-MV variant's `MotionCam` UBO + `motion_vec`
+/// STORAGE image (the SDF camera-only motion vector) — BYTE-NEUTRAL by the same argument: only the
+/// 24-binding VIS-MV layout fills the two new tail slots; the software resolve still fills 19, the
+/// RESOLVE_INLINE-hwrt resolve still fills 21, and the base VIS/DENOISED set still fills 22. A
+/// `debug_assert!` traps an over-count at `create_bind_group_layout`/`create_bind_group`.
+const MAX_BIND_GROUP_BINDINGS: usize = 24;
 
 // The bind-group create path keeps its own copy of the cap so a future divergence
 // from the agnostic `boyko_rhi::MAX_BIND_GROUP_BINDINGS` (the desc-side cap) breaks

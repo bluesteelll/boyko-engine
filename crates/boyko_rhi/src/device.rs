@@ -60,7 +60,13 @@ use crate::error::RhiError;
 /// RESOLVE_INLINE-hwrt resolve still fills 21 (0..=20); only the VIS/DENOISED layout fills 22
 /// (0..=21), and that layout is bound solely when `scene.shadow.is_some()` — dormant until
 /// rung-3a step 7 flips the per-frame gate, so the grown tail slot (21) stays unwritten.
-pub const MAX_BIND_GROUP_BINDINGS: usize = 22;
+///
+/// HW-RT rung 3b step 5b (temporal SDF motion vectors): raised 22 → 24 to reserve bindings 22/23
+/// for the VIS-MV variant's `MotionCam` UBO + `motion_vec` STORAGE image. BYTE-NEUTRAL by the same
+/// argument: only the 24-binding VIS-MV layout fills the two new tail slots, and it is bound solely
+/// when the temporal denoiser is active; every other set (software 19, RESOLVE_INLINE-hwrt 21, base
+/// VIS/DENOISED 22) is untouched.
+pub const MAX_BIND_GROUP_BINDINGS: usize = 24;
 
 /// Parameters for [`RhiDevice::create_texture`] (Phase-6 S0 graphics surface).
 ///

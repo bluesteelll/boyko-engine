@@ -56,8 +56,8 @@ use boyko_rhi_vulkan::accel_build::{
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::compute::{
     BUILD_TLAS_INSTANCES_PUSH_BYTES, build_tlas_instances_spirv, deferred_pbr_denoised_spirv,
-    deferred_pbr_hwrt_spirv, deferred_pbr_vis_spirv, gbuffer_mrt_mv_fs_spirv,
-    gbuffer_mrt_mv_vs_spirv, shadow_atrous_spirv,
+    deferred_pbr_hwrt_spirv, deferred_pbr_vis_mv_spirv, deferred_pbr_vis_spirv,
+    gbuffer_mrt_mv_fs_spirv, gbuffer_mrt_mv_vs_spirv, shadow_atrous_spirv,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::swapchain::{ShadowVisActivation, TlasBuildActivation};
@@ -1225,6 +1225,19 @@ pub(crate) struct MotionVecResources {
     /// (VERTEX), binding 1 = the prev-instance SSBO (VERTEX), binding 2 = the motion-cam UBO
     /// (VERTEX). A SEPARATE layout from the base raster's single-binding instance layout.
     layout: VulkanBindGroupLayout,
+    /// HW-RT Rung 3b step 5b: the SDF motion-vector VIS-variant resolve pipeline
+    /// (`deferred_pbr_hwrt_vis_mv.comp` / [`deferred_pbr_vis_mv_spirv`]) — identical to the base VIS
+    /// resolve (`deferred_pbr_hwrt_vis.comp`, writes `gShadowVis` @21) EXCEPT it ALSO writes each SDF
+    /// pixel's camera-only motion vector `Δuv` to the `motion_vec` STORAGE image @23, reprojecting the
+    /// reconstructed surface `P` through the `MotionCam` UBO @22. Bound instead of the base VIS
+    /// pipeline (in the VIS pass) ONLY when the temporal denoiser is active (`sdf_mv_active()`).
+    vis_mv_pipeline: ComputePipeline,
+    /// HW-RT Rung 3b step 5b: the 24-binding VIS-MV resolve layout — the 22-binding VIS/DENOISED
+    /// layout (0..=21, incl. `gShadowVis` @21) PLUS the `MotionCam` UNIFORM buffer @22 + the
+    /// `motion_vec` STORAGE image @23 (both COMPUTE). Threaded (as `scene.vis_mv_layout`) into
+    /// [`GBufferTargets::build_shadow_vis_mv_resolve_set`] so the per-FIF VIS-MV set is written once
+    /// per extent, decoupled from the per-frame gate.
+    vis_mv_layout: VulkanBindGroupLayout,
     /// The per-slot PREVIOUS-frame instance-model SSBO ring ([`INSTANCE_CAPACITY`] × 48 B,
     /// zero-seeded) — identical in shape to `instance_rings`. The runner uploads the gathered
     /// `prev_ring` into slot `token.slot()` when temporal is on (via
@@ -2072,6 +2085,70 @@ impl GpuSceneBundles {
                     RhiDevice::destroy_shader_module(device, mv_vs);
                 }
 
+                // ── HW-RT Rung 3b step 5b: the SDF motion-vector VIS-variant resolve pipeline +
+                // its 24-binding layout. The layout = the 22-binding VIS/DENOISED entries (the 19
+                // software resolve bindings + TLAS @19 + soft-shadow UBO @20 + `gShadowVis` @21,
+                // rebuilt here from `resolve_entries`) PLUS the `MotionCam` UBO @22 + the
+                // `motion_vec` STORAGE image @23 (both COMPUTE). Built under the SAME `mv` gate
+                // (`ray_query_enabled && shadow_denoise_storage_ok`); bound only when temporal is on.
+                let mut vis_mv_entries = resolve_entries.to_vec();
+                vis_mv_entries.push(BindGroupLayoutEntry {
+                    binding: 19,
+                    count: 1,
+                    kind: DescriptorKind::AccelerationStructure,
+                    stage: ShaderStage::COMPUTE,
+                });
+                vis_mv_entries.push(BindGroupLayoutEntry {
+                    binding: 20,
+                    count: 1,
+                    kind: DescriptorKind::UniformBuffer,
+                    stage: ShaderStage::COMPUTE,
+                });
+                vis_mv_entries.push(BindGroupLayoutEntry {
+                    binding: 21,
+                    count: 1,
+                    kind: DescriptorKind::StorageImage,
+                    stage: ShaderStage::COMPUTE,
+                });
+                vis_mv_entries.push(BindGroupLayoutEntry {
+                    binding: 22,
+                    count: 1,
+                    kind: DescriptorKind::UniformBuffer,
+                    stage: ShaderStage::COMPUTE,
+                });
+                vis_mv_entries.push(BindGroupLayoutEntry {
+                    binding: 23,
+                    count: 1,
+                    kind: DescriptorKind::StorageImage,
+                    stage: ShaderStage::COMPUTE,
+                });
+                let vis_mv_layout = RhiDevice::create_bind_group_layout(
+                    device,
+                    &BindGroupLayoutDesc { entries: &vis_mv_entries },
+                )
+                .expect("invariant: rung-3b VIS-MV resolve bind-group layout create");
+                // The VIS-MV variant TRACES (it writes `gShadowVis` @21 like the base VIS), so bake
+                // the SAME `SHADOW_RAY_COUNT` spec-const (id 0) as the VIS / RESOLVE_INLINE resolve
+                // so `mesh_vis` stays bit-identical.
+                let vis_mv_ray_count = RayShadowConfig::default().ray_count.max(1);
+                let vis_mv_cs =
+                    RhiDevice::create_shader_module(device, deferred_pbr_vis_mv_spirv())
+                        .expect("invariant: rung-3b VIS-MV resolve compute shader module create");
+                let vis_mv_pipeline = RhiDevice::create_compute_pipeline(
+                    device,
+                    &ComputePipelineDesc {
+                        module: &vis_mv_cs,
+                        entry: c"main",
+                        push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+                        bind_group_layout: Some(&vis_mv_layout),
+                        spec_constants: &[SpecConstant { id: 0, value: vis_mv_ray_count }],
+                    },
+                )
+                .expect("invariant: rung-3b VIS-MV resolve compute pipeline create");
+                // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+                // destroy it once; no GPU work is in flight yet.
+                unsafe { RhiDevice::destroy_shader_module(device, vis_mv_cs) };
+
                 // The prev-instance ring: identical shape to `instance_rings` (same
                 // `instance_ring_bytes`, STORAGE, HostVisibleCoherent, zero-seeded).
                 let prev_instance_rings: [BoundBuffer; FRAMES_IN_FLIGHT] =
@@ -2128,6 +2205,8 @@ impl GpuSceneBundles {
                 MotionVecResources {
                     pipeline: mv_pipeline,
                     layout: mv_layout,
+                    vis_mv_pipeline,
+                    vis_mv_layout,
                     prev_instance_rings,
                     motion_cam_ubo,
                     bind_groups,
@@ -2607,6 +2686,22 @@ impl GpuSceneBundles {
             mv_bind_group: (temporal_enabled)
                 .then(|| self.mv.as_ref().map(|m| &m.bind_groups[slot]))
                 .flatten(),
+            // HW-RT Rung 3b step 5b: the SDF motion-vector VIS resolve refs. The pipeline is the
+            // recorder's ref — gated on `temporal_enabled` (mirrors `raster_pipeline_mv`) so it is
+            // `Some` only on a temporal frame with the MV resources. The layout + the motion-cam UBO
+            // ring are STABLE build-time refs (mirror `resolve_layout_denoise_hwrt`): populated
+            // whenever `self.mv` exists (an RT + storage device), REGARDLESS of the per-frame gate,
+            // so `GBufferTargets::build_shadow_vis_mv_resolve_set` can write the per-FIF VIS-MV set
+            // once per extent. `sdf_mv_active()` folds `temporal_enabled` back in. `None` (temporal
+            // off / non-storage device) ⇒ the recorder takes the base VIS path (byte-identical).
+            #[cfg(feature = "hwrt")]
+            vis_mv_pipeline: (temporal_enabled)
+                .then(|| self.mv.as_ref().map(|m| &m.vis_mv_pipeline))
+                .flatten(),
+            #[cfg(feature = "hwrt")]
+            vis_mv_layout: self.mv.as_ref().map(|m| &m.vis_mv_layout),
+            #[cfg(feature = "hwrt")]
+            motion_cam_ubo_ring: self.mv.as_ref().map(|m| &m.motion_cam_ubo),
         }
     }
 
@@ -2774,6 +2869,10 @@ impl GpuSceneBundles {
                 }
                 RhiDevice::destroy_graphics_pipeline(ctx, mv.pipeline);
                 RhiDevice::destroy_bind_group_layout(ctx, mv.layout);
+                // step 5b: the SDF motion-vector VIS resolve pipeline + its 24-binding layout
+                // (pipeline before layout; no bind groups — the VIS-MV set lives in `GBufferTargets`).
+                RhiDevice::destroy_compute_pipeline(ctx, mv.vis_mv_pipeline);
+                RhiDevice::destroy_bind_group_layout(ctx, mv.vis_mv_layout);
                 for b in mv.motion_cam_ubo {
                     RhiDevice::destroy_buffer(ctx, b);
                 }

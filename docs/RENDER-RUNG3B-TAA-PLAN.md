@@ -400,6 +400,70 @@ O2 fence parity, MotionCam extent/view, soundness) + 4 findings fixed:**
   `check`/`clippy -D warnings` ±hwrt `--all-targets` green; `boyko-render` 125 lib tests + framegraph
   -equiv 10 (hwrt)/7 (non-hwrt) + eDSL-sync 2 pass.
 
+## As-built — step 5b (SDF motion vectors, VIS pass) — SHIPPED (this commit)
+
+Completes the motion-vector producers: the VIS pass writes each SDF pixel's camera-only motion
+vector to the SAME `motion_vec` image the raster wrote mesh pixels into (disjoint pixels by the r1
+ownership gate). SDF-edit motion (the SDF surface itself moving) is deferred — camera-only.
+
+**Shader DONE + byte-identity proven** (`deferred_pbr.hlsl`, `-D HWRT=1 -D SHADOW_STAGE=1 -D
+MOTION_VECTORS=1`):
+- Under `#ifdef MOTION_VECTORS`: binding 22 `MotionCam` UBO (cur+prev marcher-aligned view-proj, the
+  SAME 128 B pair the raster MV reads) + binding 23 `gMotionVec` (rg16 STORAGE) + `mv_clip_to_uv`
+  (identical to the raster's `clip_to_uv`, so mesh + SDF MV share one UV space).
+- The write is injected right after `float3 P = ro + rd * view_t` (inside `if (is_sdf_lit)`, BEFORE
+  the light loop) — so EVERY SDF pixel writes `Δuv = mv_clip_to_uv(prev·P) − mv_clip_to_uv(cur·P)`
+  exactly once. Static camera ⇒ Δuv = 0.
+- **GATE PASSED:** ALL 4 base variants recompile BYTE-IDENTICAL (software 65456, hwrt 59424, VIS
+  8032, DENOISED 57576) — the `#ifdef MOTION_VECTORS` blocks don't perturb them. New VIS-MV variant
+  `deferred_pbr_hwrt_vis_mv.comp.spv` = 8932 B. `compute.rs`: `DEFERRED_PBR_VIS_MV_SPV<8932>` +
+  `deferred_pbr_vis_mv_spirv()` (hwrt-gated).
+- **`MAX_BIND_GROUP_BINDINGS` 22→24** (both `boyko_rhi/device.rs` + `boyko_rhi_vulkan/rhi_impl.rs`,
+  the const-assert links them) — reserves bindings 22/23; BYTE-NEUTRAL (only the 24-binding VIS-MV
+  set fills the two new tail slots; software 19 / RESOLVE_INLINE 21 / base VIS-DENOISED 22 untouched;
+  the exact-fill `debug_assert` pins to `RESOLVE_SOFTWARE_BINDINGS`=19, not the cap).
+
+**Host design (orchestrator forks):**
+- **Reuse, not recreate:** the VIS-MV set binds 5a's `MotionVecResources.motion_cam_ubo[fi]` @22
+  (runner already uploads it every temporal frame) + `targets.motion_vec[fi]` @23 (STORAGE view). NO
+  new ring, NO new upload, NO runner change.
+- VIS-MV pipeline + 24-binding layout boot-built under the SAME gate as `shadow_denoise_pipelines`
+  (ray_query) + `shadow_denoise_storage_ok` (the motion_vec target); stored in `MotionVecResources`.
+  The per-frame VIS-MV bind group = the 22 base VIS entries + the 2 new tail binds.
+- **Framegraph raster→VIS WAW on `motion_vec`:** 5a's raster writes it as COLOR_ATTACHMENT (mesh
+  pixels); 5b's VIS writes it as STORAGE/GENERAL (SDF pixels). The graph derives the ordering +
+  the COLOR_ATTACHMENT_OPTIMAL→GENERAL transition from the two `image_access` declarations.
+- **Single-source gate `sdf_mv_active()`** (the W1 lesson) — BOTH the framegraph VIS `image_access`
+  and the VIS pass recording gate on it, so the declared STORAGE write and the actual write can't
+  diverge.
+- **GATE (testable now):** None/Spatial + non-hwrt ⇒ base VIS variant (no motion_vec write) ⇒ both
+  goldens `58f6c6c3` ±hwrt + all base `.spv` byte-frozen. The VIS pass runs when spatial is armed, so
+  5b's SDF-MV is exercised in mode `Both` (spatial+temporal); step 6 extends the VIS pass to run for
+  pure `Temporal`. MV VALUES validated by owner-eval in-motion at step 6/7.
+
+**Code review (all priority points CLEAN — binding layout↔shader match, WAW barrier, disjoint-pixel
+invariant, byte-identity, teardown) + 3 findings resolved:**
+- **C1 (Critical, GENUINE BUG):** `gMotionVec` was pinned `rg16` (= `R16G16_UNORM` in this codebase,
+  the `gShadowVis` convention) on the `R16G16_SFLOAT` `motion_vec` image. Δuv is SIGNED and can exceed
+  [0,1] — a UNORM store clamps negative/>1 SDF motion and disagrees with the raster's SFLOAT mesh
+  pixels of the SAME image (a torn seam under motion the golden can't catch — OFF path). FIX: `rg16` →
+  `rg16f`, regenerated (`SpirvBlob` 8932→9008). The raster (5a) was already correct (SFLOAT color
+  attachment, no image_format pin).
+- **W1 (reachable panic on a Spatial→Both mode change):** `build_shadow_vis_mv_resolve_set` gated on
+  the PER-FRAME `scene.temporal_enabled`, so a mid-session toggle (set built when temporal off ⇒
+  `None`) would hit the recorder `expect`. FIX: decouple the build from `temporal_enabled` — gate on
+  the STABLE signals (like `build_shadow_denoise_sets`), so the set exists before `sdf_mv_active()`
+  flips on. The memory lesson ("build denoise sets on stable boot config, not the per-frame gate") 
+  applied. In `Spatial` the set is built-but-unused; the recorder gates USE on `sdf_mv_active()`.
+- **W2 (sign convention):** verified the 5a raster (`gbuffer_mrt.fs.hlsl:154`) and the 5b VIS both
+  emit `Δuv = uv_prev − uv_cur` — IDENTICAL order, so the mesh + SDF vectors agree across the seam.
+  (The reviewer flagged it unverifiable because it missed the in-tree 5a `.hlsl`; the orders match.)
+- **O1:** background/sky `motion_vec` = the raster attachment's `loadOp=CLEAR` (0,0) = no motion —
+  already correct from 5a.
+- **Final gate (this commit):** golden `58f6c6c3` byte-identical BOTH ±hwrt (real, delete-then-run);
+  `check`/`clippy -D warnings` ±hwrt `--all-targets`; framegraph-equiv 10 + eDSL-sync 2. All 4 base
+  resolve `.spv` recompile byte-frozen (65456/59424/8032/57576).
+
 ## Metrics and validation
 
 - **Byte-identity:** `None`/`Spatial` reproduce `58f6c6c3` (±hwrt) + `af934c50`. Framegraph equiv ResId pins (16 imgs hwrt) + the **I3 pin** (no `UNDEFINED` old-layout on `shadow_temporal_hist` after init — reusing the DDGI-seed test shape, C3).
