@@ -1,0 +1,5 @@
+error: SystemSet can only be derived for unit structs or fieldless enums
+  --> tests/system_set_compile_fail/union_rejected.rs:10:7
+   |
+10 | union U {
+   |       ^

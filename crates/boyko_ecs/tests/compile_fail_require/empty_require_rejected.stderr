@@ -1,0 +1,5 @@
+error: empty #[require(...)]: list at least one required component, e.g. #[require(Velocity, Mass = Mass(1.0))]
+  --> tests/compile_fail_require/empty_require_rejected.rs:10:1
+   |
+10 | #[require()]
+   | ^^^^^^^^^^^^

@@ -1,0 +1,23 @@
+[package]
+name = "boyko-serialize"
+version = "0.1.0"
+edition = "2024"
+
+# Phase S1 — custom binary save format + two-pass save. The crate-boundary
+# decision (SERIALIZATION-PLAN.md §3.2): depends on `boyko_ecs` + `std` ONLY,
+# never `boyko_reflect` (the codegen-not-reflection invariant) and no
+# third-party crate. The cursor / error / entity-map types it drives live in
+# `boyko_ecs::ecs::core::serialize` (the registry's fn-ptr aliases name them).
+[dependencies]
+boyko-ecs = { path = "../boyko_ecs" }
+
+[dev-dependencies]
+boyko-macros = { path = "../boyko_macros" }
+# Workspace-pinned criterion 0.5 (same major as every other crate's bench).
+criterion.workspace = true
+
+# POB save/load throughput (GB/s): proves the codegen-blit path is memcpy-bound
+# (whole-column `copy_nonoverlapping`, no per-field / reflection overhead).
+[[bench]]
+name = "pob_throughput"
+harness = false

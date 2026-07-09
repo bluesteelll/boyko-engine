@@ -38,6 +38,21 @@ cargo install mdbook-mermaid
 mdbook serve --open
 ```
 
+## Navigating the codebase
+
+The repository ships a **graphify** knowledge graph in `graphify-out/` — a semantic map of the codebase with cross-file relationships and per-subsystem anchors. Query it **before** browsing raw source; it returns a scoped subgraph that is usually far smaller than a wide grep:
+
+```powershell
+graphify query "where is the component pool grown"   # scoped subgraph for a question
+graphify explain "ComponentPool"                     # focused view of one concept
+graphify path "EcsMaster" "VmReservation"            # how two things relate
+
+# After you change code, keep the graph current (AST-only, no network call):
+graphify update .
+```
+
+The internal docs are the other half of orientation: `docs/FEATURE_MAP.md` (first point of contact — "where is X"), `docs/SYSTEMS.md` (subsystem catalog with `file:line`), and `docs/ARCHITECTURE.md` (layers, dependencies, data flow). These are kept in sync with the code and are the fastest way to find a subsystem.
+
 ## Coding standards
 
 ### Performance is a feature
@@ -45,7 +60,7 @@ mdbook serve --open
 This is not a typical Rust crate. The engine targets ultimate performance, so:
 
 - **No `dyn Trait`, `Box`, `Rc`, `Arc<Mutex<_>>`, `HashMap`, `Vec::new()` in hot paths.** If you need one of these, justify it in your PR description.
-- **`#[inline]` and `#[inline(always)]`** are used aggressively on accessors and trampoline functions.
+- **Inlining is measured, not aggressive** (see [Measured inlining](architecture/principles.md)). Use `#[inline]` on cross-crate and generic methods so their bodies stay visible to the optimizer. Reach for `#[inline(always)]` *only* when a profiler or assembly inspection shows the compiler isn't inlining and that it measurably matters — blind `#[inline(always)]` bloats the L1i cache and **lowers** performance. Use `#[cold]` / `#[inline(never)]` on error paths and rarely-taken branches to keep the hot path compact.
 - **Generics + monomorphization** over runtime polymorphism.
 
 ### Unsafe code
@@ -68,9 +83,9 @@ A PR with undocumented `unsafe` will not be merged.
 
 ### Documentation
 
-- Every public item needs a `///` doc comment.
-- Doc comments explain **what** the item is and **what guarantees** it provides — not how it's implemented.
-- Implementation details go in `//` comments inside the body, and only when "why" is non-obvious.
+- Every public item needs a `///` doc comment stating what it is and what guarantees it provides — this is the contract a user reads in the API reference, not a description of the implementation.
+- Inline `//` comments inside a body explain **why**, not **what**: `// increment counter` above `x += 1` is noise; a comment justifying a non-obvious decision is signal.
+- Use `expect("invariant: ...")` instead of `unwrap()` where a panic is by design, and `debug_assert!` for hot-path invariant checks (they vanish in release).
 
 ### Tests
 
@@ -88,14 +103,15 @@ A PR with undocumented `unsafe` will not be merged.
 ### Benchmarks
 
 - Use [criterion](https://github.com/bheisler/criterion.rs).
-- Benchmarks live in `crates/boyko_ecs/benches/`.
+- Benchmarks live in each crate's `benches/` directory — for example `crates/boyko_ecs/benches/` for the kernel, `crates/bench_bevy_vs_boyko/benches/` for cross-engine comparisons against Bevy, plus `boyko_physics`, `boyko_serialize`, `boyko_fontbake`, and `boyko_demo`.
+- `[profile.bench]` pins `codegen-units = 1` so two builds of the same source produce identical machine code — this hardens the "0%-regression / byte-identical asm" A/B methodology.
 - Don't add a benchmark just for the sake of it — measure something meaningful.
 
 ## Pull request workflow
 
 1. **Open an issue first** if your change is more than a trivial fix. Get alignment on the approach before writing code.
 2. **Write the architecture plan** for non-trivial features — describe what you'll build and why before the PR.
-3. **Branch from `master`**.
+3. **Branch from `ecs`** — the active development branch holding the full, green engine. Do **not** branch from `master`: it is a historical foundation that contains only the memory subsystem (see [Project structure](#project-structure)).
 4. **Keep commits focused** — one logical change per commit.
 5. **Update documentation** — both API doc comments and (if relevant) pages in `book/src/`.
 6. **Pass all checks**:
@@ -108,7 +124,7 @@ A PR with undocumented `unsafe` will not be merged.
 
 ## Review process
 
-PRs go through (at least) the following:
+Every non-trivial change passes through (at least) the following gates:
 
 - **Architecture review** — does the design fit the engine's principles?
 - **Code review** — does the implementation match the design? Are `unsafe` invariants sound? Are there hidden allocations?
@@ -116,22 +132,58 @@ PRs go through (at least) the following:
 
 Be prepared for multiple rounds of feedback. The standards are high because the project is performance-first.
 
+### Agent-driven workflow
+
+Much of the project is built through a structured pipeline of specialized agents defined in `.claude/agents/`, run by an orchestrator. The roster mirrors the review gates above:
+
+- **architect** designs a feature → **researcher** gathers practice from Bevy / flecs / EnTT / Unity DOTS → **architecture-critic** stress-tests the plan.
+- **developer** implements the plan (and does *not* run the tests) → **code-reviewer** finds issues (and does *not* fix code) → **tester** runs build, unit / integration / proptest / loom, and criterion.
+- **results-analyst** delivers the final verdict; **project-analyst** answers free-form questions without editing anything.
+- **doc-writer** is the *only* agent that edits `book/src/`. The public mdBook is written exclusively through it — internal `docs/` are maintained separately and are not part of the published site.
+
+Each duty is deliberately separated so that no single pass both proposes and rubber-stamps a change.
+
 ## Project structure
+
+The workspace is a single unified engine: every system (physics, render, input, lighting, UI) is a first-class part of `boyko_ecs` — components and systems on the ECS's own storage, never a subsystem glued on the side with its own data structures.
 
 ```
 boyko-engine/
-├── Cargo.toml              # workspace
-├── src/main.rs             # binary entry point
+├── Cargo.toml                   # workspace (18 members) + [profile.bench] + thin binary
+├── src/main.rs                  # entry point (library-shaped project)
 ├── crates/
-│   ├── boyko_ecs/          # ECS core
-│   ├── boyko_macros/       # proc-macros
-│   └── boyko_utils/        # bitsets (on `ecs` branch)
-├── book/                   # mdBook source
+│   ├── boyko_ecs/               # ECS kernel: memory, components, archetypes, queries,
+│   │                            #   events, scheduler, change-detection, hooks/observers,
+│   │                            #   commands, states, app/plugin, serialize seam
+│   ├── boyko_macros/            # #[derive(Component/Bundle/Resource/SystemSet)], #[event]
+│   ├── boyko_utils/             # BitSet / BitMask / SparseMap / Slot
+│   ├── boyko_threadpool/        # Chase-Lev work-stealing pool
+│   │
+│   ├── boyko_math/              # math primitives
+│   ├── boyko_scene/             # Transform / Camera
+│   ├── boyko_physics/           # in-house 3D TGS-Soft solver
+│   ├── boyko_sdf_math/          # SDF math
+│   ├── boyko_input/             # input
+│   ├── boyko_serialize/         # codegen serialization
+│   │
+│   ├── boyko_rhi/               # in-house render hardware interface
+│   ├── boyko_rhi_vulkan/        # raw-FFI Vulkan backend
+│   ├── boyko_render/            # GPU columns, lighting, SDF render
+│   ├── boyko_ui/                # ECS-native UI
+│   ├── boyko_fontbake/          # MSDF atlas baker
+│   ├── boyko_shaderdsl/         # shader eDSL (single-sourced host/GPU field code)
+│   │
+│   ├── boyko_demo/              # wgpu/egui sandbox that dogfoods the API
+│   └── bench_bevy_vs_boyko/     # cross-engine comparison benches
+├── book/                        # mdBook source (this site)
 │   └── src/
-└── docs/                   # internal documentation
+└── docs/                        # internal documentation (agent-facing)
 ```
 
-The `master` branch holds the stable foundation (currently the memory subsystem only). The `ecs` branch contains in-progress work on archetypes, queries, and events.
+### Branches: `ecs` vs `master`
+
+- **`ecs`** is the active development branch — the full engine, builds green. This is where all feature work goes. It carries the complete architecture: type-erased `ComponentPool` / archetypes, the typed `Query<D, F>` DSL, `Commands` / `EntityCommands`, events, resources, lifecycle hooks and observers, required components, entity cloning, generic relations (`ChildOf` / `Children`), states, schedule ordering and sets, run conditions, the `App` + `Plugin` facade, fixed timestep, multi-world, and dense (non-fragmenting) components — plus the in-house RHI + raw-FFI Vulkan render path, SDF (sphere-trace + brick atlas + shader eDSL), clustered lighting, the in-house physics solver, ECS-native UI, input, and codegen serialization.
+- **`master`** is a historical foundation containing the memory subsystem only (the generic `ComponentPool<T>` / `Chunk<T>` with two-level addressing). It is **not** where new work goes.
 
 ## Reporting issues
 

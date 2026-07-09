@@ -1,0 +1,5 @@
+error: expected `=`
+ --> tests/compile_fail_hooks/missing_value_rejected.rs:9:19
+  |
+9 | #[component(on_add)]
+  |                   ^

@@ -1,0 +1,5 @@
+error[E0599]: no method named `add_observer` found for struct `DeferredEcsMaster<'w>` in the current scope
+  --> tests/compile_fail_observers/view_no_add_observer.rs:12:7
+   |
+12 |     w.add_observer();
+   |       ^^^^^^^^^^^^ method not found in `DeferredEcsMaster<'_>`

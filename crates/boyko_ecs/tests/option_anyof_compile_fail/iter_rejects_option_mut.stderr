@@ -1,0 +1,47 @@
+error[E0277]: the trait bound `&mut T: ReadOnlyQueryData` is not satisfied
+  --> tests/option_anyof_compile_fail/iter_rejects_option_mut.rs:25:16
+   |
+25 |     for _ in q.iter() {}
+   |                ^^^^ the trait `ReadOnlyQueryData` is not implemented for `&mut T`
+   |
+   = help: the following other types implement trait `ReadOnlyQueryData`:
+             &T
+             ()
+             (D0, D1)
+             (D0, D1, D2)
+             (D0, D1, D2, D3)
+             (D0, D1, D2, D3, D4)
+             (D0, D1, D2, D3, D4, D5)
+             (D0, D1, D2, D3, D4, D5, D6)
+           and $N others
+   = note: `ReadOnlyQueryData` is implemented for `&T`, but not for `&mut T`
+   = note: required for `Option<&mut T>` to implement `ReadOnlyQueryData`
+note: required by a bound in `Query::<'w, 's, D, F>::iter`
+  --> src/ecs/core/iters/query/query.rs
+   |
+   |     pub fn iter(&self) -> QueryIter<'_, 's, D, F>
+   |            ---- required by a bound in this associated function
+   |     where
+   |         D: ReadOnlyQueryData,
+   |            ^^^^^^^^^^^^^^^^^ required by this bound in `Query::<'w, 's, D, F>::iter`
+
+error[E0277]: the trait bound `&mut T: ReadOnlyQueryData` is not satisfied
+  --> tests/option_anyof_compile_fail/iter_rejects_option_mut.rs:25:14
+   |
+25 |     for _ in q.iter() {}
+   |              ^^^^^^^^ the trait `ReadOnlyQueryData` is not implemented for `&mut T`
+   |
+   = help: the following other types implement trait `ReadOnlyQueryData`:
+             &T
+             ()
+             (D0, D1)
+             (D0, D1, D2)
+             (D0, D1, D2, D3)
+             (D0, D1, D2, D3, D4)
+             (D0, D1, D2, D3, D4, D5)
+             (D0, D1, D2, D3, D4, D5, D6)
+           and $N others
+   = note: `ReadOnlyQueryData` is implemented for `&T`, but not for `&mut T`
+   = note: required for `Option<&mut T>` to implement `ReadOnlyQueryData`
+   = note: required for `QueryIter<'_, '_, Option<&mut T>, ()>` to implement `Iterator`
+   = note: required for `QueryIter<'_, '_, Option<&mut T>, ()>` to implement `IntoIterator`

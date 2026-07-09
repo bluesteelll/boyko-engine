@@ -1,0 +1,32 @@
+error[E0277]: the trait bound `Foo: boyko_ecs::ecs::core::bundle::bundle::sealed::BundleSealed` is not satisfied
+  --> tests/bundle_compile_fail/manual_impl_blocked.rs:15:17
+   |
+15 | impl Bundle for Foo {
+   |                 ^^^ unsatisfied trait bound
+   |
+help: the trait `boyko_ecs::ecs::core::bundle::bundle::sealed::BundleSealed` is not implemented for `Foo`
+  --> tests/bundle_compile_fail/manual_impl_blocked.rs:13:1
+   |
+13 | struct Foo;
+   | ^^^^^^^^^^
+help: the following other types implement trait `boyko_ecs::ecs::core::bundle::bundle::sealed::BundleSealed`
+  --> src/ecs/core/bundle/self_bundle.rs
+   |
+   |         impl $crate::ecs::core::bundle::bundle::sealed::BundleSealed for $ty {}
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |         |
+   |         `ChildOf`
+   |         `Children`
+   |
+  ::: src/ecs/core/hierarchy/bundles.rs
+   |
+   | impl_self_bundle!(ChildOf);
+   | -------------------------- in this macro invocation
+   | impl_self_bundle!(Children);
+   | --------------------------- in this macro invocation
+note: required by a bound in `Bundle`
+  --> src/ecs/core/bundle/bundle.rs
+   |
+   | pub trait Bundle: sealed::BundleSealed + Send + Sync + Unpin + 'static {
+   |                   ^^^^^^^^^^^^^^^^^^^^ required by this bound in `Bundle`
+   = note: this error originates in the macro `impl_self_bundle` (in Nightly builds, run with -Z macro-backtrace for more info)

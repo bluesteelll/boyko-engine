@@ -1,0 +1,5 @@
+error: duplicate #[component(...)] key; each hook may be set at most once
+  --> tests/compile_fail_hooks/duplicate_key_rejected.rs:15:25
+   |
+15 | #[component(on_add = a, on_add = b)]
+   |                         ^^^^^^

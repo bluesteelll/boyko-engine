@@ -1,0 +1,26 @@
+error[E0080]: evaluation panicked: EcsMaster::query<D, F>() does not support change-detection filters (D or F has NEEDS_CHANGE_DETECTION = true, i.e. Ref/Mut/Added/Changed); use Query<D, F> as a SystemParam inside a system body via Schedule.
+  --> tests/query_change_detection_compile_fail/query_added_filter_rejected.rs:19:15
+   |
+19 | const _: () = assert_query_no_change_detection::<&P, Added<P>>();
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `assert_query_no_change_detection::<&P, Added<P>>`
+  --> src/ecs/core/ecs_master/ecs_master.rs
+   |
+   |     eval_query_no_change_detection::<D, F>();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: inside `boyko_ecs::ecs::core::ecs_master::ecs_master::eval_query_no_change_detection::<&P, Added<P>>`
+  --> $RUST/core/src/panic.rs
+   |
+   |           $crate::panicking::panic_fmt($crate::const_format_args!($($t)+));
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the failure occurred here
+   |
+  ::: src/ecs/core/ecs_master/ecs_master.rs
+   |
+   | /     assert!(
+   | |         !(D::NEEDS_CHANGE_DETECTION || F::NEEDS_CHANGE_DETECTION),
+   | |         "EcsMaster::query<D, F>() does not support change-detection filters \
+   | |          (D or F has NEEDS_CHANGE_DETECTION = true, i.e. Ref/Mut/Added/Changed); \
+   | |          use Query<D, F> as a SystemParam inside a system body via Schedule."
+   | |     );
+   | |_____- in this macro invocation

@@ -1,9 +1,5 @@
-
-pub mod arena;
-
 pub mod utils;
-mod free_mem_block;
-pub mod chunk;
 pub mod component_pool;
-pub mod component_index;
-
+pub mod device_column;
+pub(crate) mod vm;
+pub(crate) mod vm_column;

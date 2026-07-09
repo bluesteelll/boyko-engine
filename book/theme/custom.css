@@ -1,0 +1,10 @@
+/* Boyko Engine — book theme overrides.
+ *
+ * Referenced from book.toml (`output.html.additional-css`). Keep this file
+ * present even when empty: mdBook fails the build on a missing entry.
+ */
+
+/* Slightly tighten wide tables (cost-model pages use them heavily). */
+table {
+    font-size: 0.95em;
+}

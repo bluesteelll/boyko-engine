@@ -1,0 +1,5 @@
+error[E0308]: mismatched types
+  --> tests/ui_macro_compile_fail/bad_field_in_bundle_slot.rs:14:27
+   |
+14 |         UiLayout { width: "not a unit", ..UiLayout::default() },
+   |                           ^^^^^^^^^^^^ expected `Unit`, found `&str`

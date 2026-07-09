@@ -1,0 +1,5 @@
+error: on_despawn is not supported in this version (deferred to Phase 14b); valid keys: on_add, on_insert, on_replace, on_remove, no_bundle, no_clone, clone = <fn>, storage = "bitset", no_serialize, stable_name = "..", format_version = N
+  --> tests/compile_fail_hooks/on_despawn_rejected.rs:15:13
+   |
+15 | #[component(on_despawn = h)]
+   |             ^^^^^^^^^^

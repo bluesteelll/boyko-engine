@@ -1,0 +1,5 @@
+error: Bundle derive does not support generics (Phase 8.5 scope)
+  --> tests/bundle_compile_fail/generic_struct.rs:11:8
+   |
+11 | struct G<T> {
+   |        ^

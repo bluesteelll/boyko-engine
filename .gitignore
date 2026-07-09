@@ -2,3 +2,21 @@
 **/target/
 /.idea/
 *.lock
+
+# Temporary diagnostic outputs (generated during local builds / tests)
+/build-log.txt
+/test-output.txt
+/test-full-output.txt
+
+# Stray `rustc --out-dir .` artifacts (occur when a quick rustc invocation
+# runs in the workspace root instead of going through `cargo`).
+/rust_out.exe
+/rust_out.pdb
+
+# Agent worktree scratch (created by subagents with isolation: "worktree").
+/.claude/worktrees/
+# graphify knowledge-graph artifacts (rebuilt per-machine by the post-commit hook)
+graphify-out/
+
+# mdBook build output (the source is book/src/; CI rebuilds for GitHub Pages)
+/book/output/

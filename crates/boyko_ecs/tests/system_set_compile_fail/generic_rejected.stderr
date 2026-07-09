@@ -1,0 +1,5 @@
+error: SystemSet derive does not support generics (Phase 9 scope)
+  --> tests/system_set_compile_fail/generic_rejected.rs:11:8
+   |
+11 | struct G<T> {
+   |        ^

@@ -1,0 +1,46 @@
+error[E0277]: the trait bound `Option<&B>: AnyOfArm` is not satisfied
+  --> tests/option_anyof_compile_fail/anyof_arm_option_rejected.rs:33:24
+   |
+33 | fn must_not_compile(q: Query<AnyOf<(&A, Option<&B>)>>) {
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AnyOfArm` is not implemented for `Option<&B>`
+   |
+help: the following other types implement trait `AnyOfArm`
+  --> src/ecs/core/iters/query/data/anyof.rs
+   |
+   | unsafe impl<T: Component> AnyOfArm for &T {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&T`
+...
+   | unsafe impl<T: Component> AnyOfArm for &mut T {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&mut T`
+...
+   | unsafe impl<T: Component> AnyOfArm for Ref<'_, T> {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `boyko_ecs::prelude::Ref<'_, T>`
+...
+   | unsafe impl<T: Component> AnyOfArm for Mut<'_, T> {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Mut<'_, T>`
+   = note: required for `AnyOf<(&A, Option<&B>)>` to implement `QueryData`
+note: required by a bound in `Query`
+  --> src/ecs/core/iters/query/query.rs
+   |
+   | pub struct Query<'w, 's, D: QueryData, F: QueryFilter = ()> {
+   |                             ^^^^^^^^^ required by this bound in `Query`
+
+error[E0599]: the method `iter` exists for struct `Query<'_, '_, AnyOf<(&A, Option<&B>)>>`, but its trait bounds were not satisfied
+  --> tests/option_anyof_compile_fail/anyof_arm_option_rejected.rs:34:16
+   |
+34 |     for _ in q.iter() {}
+   |                ^^^^ method cannot be called on `Query<'_, '_, AnyOf<(&A, Option<&B>)>>` due to unsatisfied trait bounds
+   |
+  ::: src/ecs/core/iters/query/data/anyof.rs
+   |
+   | pub struct AnyOf<T>(PhantomData<fn() -> T>);
+   | ------------------- doesn't satisfy `AnyOf<(&A, Option<&B>)>: QueryData`
+   |
+  ::: $RUST/core/src/option.rs
+   |
+   | pub enum Option<T> {
+   | ------------------ doesn't satisfy `Option<&B>: AnyOfArm`
+   |
+   = note: the following trait bounds were not satisfied:
+           `Option<&B>: AnyOfArm`
+           which is required by `AnyOf<(&A, Option<&B>)>: QueryData`

@@ -1,0 +1,5 @@
+error: unknown component storage "typo"; the only supported values are "bitset" and "dense"
+ --> tests/enable_filter_compile_fail/storage_unknown_value_rejected.rs:9:23
+  |
+9 | #[component(storage = "typo")]
+  |                       ^^^^^^

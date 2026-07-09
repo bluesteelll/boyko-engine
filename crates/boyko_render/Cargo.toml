@@ -1,0 +1,100 @@
+[package]
+name = "boyko-render"
+version = "0.1.0"
+edition = "2024"
+description = "GPU-resident ECS columns: the boyko_render manager that mints device-local component pools behind the boyko_rhi registry and drives the boyko_ecs A2 device-mint seam (Phase 5)."
+
+# Dependency fan-out (no cycle): boyko_render depends DIRECTLY on boyko_ecs +
+# boyko_rhi + boyko_rhi_vulkan + boyko_utils. boyko_rhi itself depends only on
+# boyko_utils (NOT on boyko_ecs). Layering (host plan D1 amendment): boyko_render
+# (the data bridge) and boyko_app (the host) are the only two crates that name
+# both the graphics RHI and the ECS core; boyko_app must not define per-entity
+# GPU data paths — those belong in boyko_render, which is why the
+# `RhiContext: NonSendResource` orphan impl lives here (Phase 5 MF-5).
+[lib]
+name = "boyko_render"
+
+[features]
+# The TEST-ONLY device→host readback path (`GpuColumnManager::readback_for_test`).
+# W2: inverted OFF by default so a production/default build ships ZERO readback
+# code (steady state does ZERO readback — D2), instead of every default build
+# carrying the test-only round-trip. The crate's OWN integration tests still
+# reach it: the self-referential dev-dependency below (`boyko-render` with
+# `features = ["test-readback"]`) enables it whenever the test targets compile,
+# because the integration tests are separate crates where the lib's `cfg(test)`
+# guard is NOT active.
+default = []
+test-readback = []
+# HW-RT rung R2a-1: forwards to `boyko_rhi_vulkan/hwrt` so a render build can opt
+# into the hardware ray-tracing FFI surface. OFF by default → the shipped/golden
+# render path is byte-identical to R1 (the RT FFI compiles to nothing downstream).
+hwrt = ["boyko_rhi_vulkan/hwrt"]
+
+[dependencies]
+boyko-ecs = { path = "../boyko_ecs" }
+boyko-macros = { path = "../boyko_macros" }
+boyko_rhi = { path = "../boyko_rhi" }
+boyko_rhi_vulkan = { path = "../boyko_rhi_vulkan" }
+boyko-utils = { path = "../boyko_utils" }
+# R7 SDF instance path: the `SdfEdit` std430 element + the `sdf_op` / `sdf_kind`
+# discriminants + `MAX_SDF_EDITS` for the `SdfPrimitive` component and the
+# `SdfEditStaging` gather scratch. `boyko_sdf_math` is a TRUE LEAF (depends on
+# nothing in the workspace except the `boyko_shaderdsl` field leaf), so this edge
+# is acyclic — boyko_render already sits above it in the graph.
+boyko_sdf_math = { path = "../boyko_sdf_math" }
+# S3: the renderer consumes the engine-derived `ViewUniform` (boyko_scene) and
+# its column-major `Mat4` (boyko_math) as the SINGLE view source — replacing the
+# prior hardcoded per-backend view. boyko_render is the only crate that may name
+# both the scene vocabulary and the marcher push-constant struct, so the
+# `ViewUniform -> CompositePushConstants` bridge lives here (the low-level
+# `boyko_rhi_vulkan` backend must not depend upward on the scene crate).
+boyko-scene = { path = "../boyko_scene" }
+boyko-math = { path = "../boyko_math" }
+# GUI P5b: the MSDF font atlas is BAKED offline (boyko-fontbake, a load-time tool)
+# and shipped as a checked-in `.bfont`. boyko_render reads it with the thin POD
+# reader (`read_bfont`) at UI setup — no bake-time dependency at runtime; the reader
+# is the only surface used here (the generator/threadpool paths are not linked on the
+# render hot path). The metrics tables themselves become ECS-resident (boyko_ui).
+boyko-fontbake = { path = "../boyko_fontbake" }
+# S4: the 3D GPU instance (`Gpu3dInstance`) is a `bytemuck::Pod` component whose
+# column uploads zero-copy via `cast_slice` (same discipline as the demo's 2D
+# `GpuInstance`). The `derive` feature gives the `Pod` / `Zeroable` derives.
+bytemuck.workspace = true
+
+[dev-dependencies]
+# W2: self-referential dev-dependency that turns the `test-readback` feature ON
+# for THIS crate's integration tests (now that it is OFF by default). The
+# integration tests in `tests/*.rs` compile against `boyko_render` as an external
+# crate — the lib's `#[cfg(any(test, feature = "test-readback"))]` guard sees no
+# `cfg(test)` there, so the readback API (`readback_for_test`, `readback_count`,
+# …) is only reachable via the feature. This edge is the canonical Cargo pattern
+# for "expose a test-only API to my own integration tests without shipping it by
+# default"; it introduces no production dependency.
+boyko-render = { path = ".", features = ["test-readback"] }
+# Turns the `goldens` feature of the Vulkan backend ON for THIS crate's test
+# targets only (dev-dep feature unification): the integration tests diff GPU
+# readbacks against `boyko_rhi_vulkan::goldens::*` CPU oracles (audit W3/R-2
+# split them out of `compute`). The production dependency above stays
+# feature-less, so a shipped build carries no host-mirror code.
+boyko_rhi_vulkan = { path = "../boyko_rhi_vulkan", features = ["goldens"] }
+# std-lib S6 cross-crate INTEGRATION gate ONLY: the `DynamicBody`-falls +
+# `Gpu3dInstance`-packs test names `boyko_physics` (DynamicBody / RigidBody / the
+# fixed-step pipeline) alongside this crate's `Gpu3dInstance` / `sync_gpu_3d_instances`.
+# This edge is acyclic and TEST-ONLY: `boyko_render` (dev) -> `boyko_physics` ->
+# `boyko_scene`; `boyko_physics` never depends on `boyko_render`, so no production
+# cycle is introduced. `boyko_threadpool` supplies the `ScheduleBuilder` pool the
+# physics pipeline fans across.
+boyko-physics = { path = "../boyko_physics" }
+boyko-threadpool = { path = "../boyko_threadpool" }
+# GUI P6b screenshot test ONLY: the HUD test drives the SHIPPED data-binding chain
+# (`BindText` -> `UiTextBuffer` -> `emit_glyphs`) that lives in boyko-ui, then renders
+# the bound glyphs through this crate's reused `pack_ui_instance` / `record_ui_rects`
+# path. Acyclic + TEST-ONLY: `boyko_render` (dev) -> `boyko-ui`; `boyko-ui` names no
+# render crate (verified: its deps are ecs/macros/utils/input/fontbake/scene/math), so
+# no production cycle is introduced.
+boyko-ui = { path = "../boyko_ui" }
+# GUI P7b screenshot test ONLY: the world-UI proof drives the SHIPPED pick/project/
+# visibility systems (boyko-ui::world), whose pick reads `PhysicalInput` (boyko-input).
+# Acyclic + TEST-ONLY: `boyko_render` (dev) -> `boyko-input`; `boyko-input` names no
+# render crate (its deps are ecs/macros/utils/math), so no production cycle is introduced.
+boyko-input = { path = "../boyko_input" }

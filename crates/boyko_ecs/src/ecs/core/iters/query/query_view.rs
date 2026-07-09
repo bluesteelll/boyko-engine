@@ -1,0 +1,1106 @@
+//! `QueryView<'w, D, F>` — direct query API handle (Phase 12.5 Track B Wave D).
+//!
+//! Wave D Step 3 lands `QueryView` as the return type of the
+//! [`EcsMaster::query`](crate::ecs::core::ecs_master::ecs_master::EcsMaster::query)
+//! direct API. Bypasses the `FunctionSystem` wrapper / `FilteredAccessSet`
+//! overhead by relying on `&mut EcsMaster` to gate aliasing at the type
+//! level.
+//!
+//! See `docs/PHASE-12.5-QUERY-OPTIMIZATIONS-PLAN.md` §4.3 (data layout),
+//! §5 (API surface), §7.5 (Send/Sync proof), and §10.2 (memory layout).
+//!
+//! # Send/Sync (W1 / I-NEW-5 — single canonical assertion)
+//!
+//! `QueryView<'w, D, F>: Send + Sync` whenever `D::State: Send + Sync` and
+//! `F::State: Send + Sync` (the `QueryData::State` / `QueryFilter::State`
+//! trait bound at `data.rs:90`/`filter.rs:76` already requires both).
+//! Equivalent to the existing [`Query<'w, 's, D, F>`](super::query::Query)
+//! SystemParam's Send/Sync surface.
+//!
+//! The module-scope `assert_impl_all!` below fires on **every compile**
+//! (debug + release + test + doctest) — single canonical Send/Sync assertion
+//! per the W1 fold; no `cfg(test)`-gated alternative exists.
+
+use std::cell::UnsafeCell;
+use std::marker::PhantomData;
+use std::ptr::NonNull;
+
+use static_assertions::assert_impl_all;
+
+use crate::ecs::core::component::component_registry::{EnableTagId, TagId};
+use crate::ecs::core::entity::entity::Entity;
+use crate::ecs::core::iters::query::chunk_iter;
+use crate::ecs::core::iters::query::chunked_data::ChunkedQueryData;
+use crate::ecs::core::iters::query::data::{QueryData, ReadOnlyQueryData};
+use crate::ecs::core::iters::query::dense_iter::{
+    DenseQueryData, DenseQueryIter, DenseQueryIterMut,
+};
+use crate::ecs::core::iters::query::enable_terms::EnableTerms;
+use crate::ecs::core::iters::query::filter::{ArchetypalQueryFilter, QueryFilter};
+use crate::ecs::core::iters::query::filter_enable::query_view_enable_passes;
+use crate::ecs::core::iters::query::iter::{QueryIter, QueryIterMut};
+use crate::ecs::core::iters::query::par_chunk;
+use crate::ecs::core::iters::query::par_iter::{BatchingStrategy, ParQuery, ParQueryMut};
+use crate::ecs::core::iters::query::state::QueryDataState;
+use crate::ecs::core::iters::query::tag_terms::{
+    TagTerms, any_term_matched, archetype_passes_tag_terms, count_term_matched,
+};
+use crate::ecs::core::system::system_meta::SystemMeta;
+use crate::ecs::core::system::unsafe_ecs_cell::UnsafeEcsCell;
+use crate::ecs::identifiers::primitives::ArchetypeId;
+
+/// Direct query iteration handle returned by
+/// [`EcsMaster::query`](crate::ecs::core::ecs_master::ecs_master::EcsMaster::query).
+///
+/// Bypasses the `FunctionSystem` wrapper used by the in-system
+/// [`Query<'w, 's, D, F>`](super::query::Query) SystemParam — no
+/// `FilteredAccessSet` allocation, no per-call `QueryDataState::new` (the
+/// state is cached in the world's `query_state_cache`), and no apply pass.
+///
+/// # Lifetime
+///
+/// `'w` is the world-borrow lifetime (`&'w mut EcsMaster` upstream); the
+/// cached state pointer is valid for `'w` because the cache slot lives in
+/// the same `EcsMaster` whose `&mut` borrow produced this view (QV6).
+///
+/// # Restrictions (QV11 / I-NEW-4 / W4)
+///
+/// The direct API does **not** support change-detection filters. Any
+/// `EcsMaster::query<D, F>()` call with `D::NEEDS_CHANGE_DETECTION ||
+/// F::NEEDS_CHANGE_DETECTION == true` is a **compile error** (the call fails
+/// to compile via the W4 `const`-assert in `EcsMaster::query`). A `QueryView`
+/// carrying change-detection therefore cannot be constructed at all. Use
+/// `Query<D, F>` as a SystemParam inside a system body via `Schedule` for
+/// change-detection queries.
+///
+/// # Layout (§10.2, amended by Phase 22 D4)
+///
+/// `UnsafeEcsCell<'w>` (8 B) + `NonNull<UnsafeCell<...>>` (8 B) + inline
+/// `TagTerms` (stack-only, `MAX_DYN_TAG_TERMS` slots) + ZST `PhantomData`.
+/// Hot pointer fields plus an inline 72-B term block; no heap indirection.
+/// Field order is left to rustc (no `#[repr(C)]`); the no-terms fast path
+/// reads only the terms' `len == 0` byte once per archetype transition.
+pub struct QueryView<'w, D: QueryData, F: QueryFilter = ()> {
+    /// World-access cell. By-value copy — `UnsafeEcsCell` is `Copy + Send + Sync`
+    /// per SEND3 and never holds a `&` retag.
+    world: UnsafeEcsCell<'w>,
+
+    /// Type-erased pointer to the world-owned
+    /// `Box<UnsafeCell<QueryDataState<D, F>>>` minted by
+    /// `EcsMaster::query_cold_init` and stored in the cache slot.
+    ///
+    /// `UnsafeCell` wrapper exists for I1 (Tree Borrows hygiene) — the
+    /// cache permits both `&` and `&mut` reborrows of the inner state
+    /// across distinct `query` calls; `UnsafeCell::get` mints a `*mut`
+    /// without raising a SharedReadOnly retag.
+    state: NonNull<UnsafeCell<QueryDataState<D, F>>>,
+
+    /// Phase 22 D4: per-view dynamic-tag terms. Stack-only `Copy` payload —
+    /// EMPTY for every `EcsMaster::query`-minted view; populated by
+    /// [`Self::with_tag`] / [`Self::without_tag`]. NEVER written into the
+    /// world-owned cached `QueryDataState` (QS1 stays term-agnostic).
+    terms: TagTerms,
+
+    /// EnableTag Step 9: per-view dynamic **per-row** enable terms (the dynamic
+    /// twin of typed `Enabled<T>` / `Disabled<T>`). Stack-only `Copy` payload —
+    /// EMPTY for every `EcsMaster::query`-minted view; populated by
+    /// [`Self::with_enabled`] / [`Self::without_enabled`]. A no-enable-term view
+    /// takes the byte-identical cursor / point-lookup fast path (0%-gate).
+    enable_terms: EnableTerms,
+
+    /// Lifetime binding to `&'w mut EcsMaster` plus invariance over
+    /// `(D, F)`. Two separate marker fields keep the type signature
+    /// readable (clippy::type_complexity) — the lifetime carrier and the
+    /// `fn` invariance carrier each have a single responsibility.
+    _world_borrow: PhantomData<&'w mut ()>,
+    _data_filter_invariance: PhantomData<fn() -> (D, F)>,
+}
+
+// ── Send/Sync — W1 single canonical assertion ──────────────────────────────
+//
+// SAFETY (SEND10 / I-NEW-5):
+//   - `UnsafeEcsCell<'w>: Send + Sync` per `unsafe_ecs_cell.rs:341-342`.
+//   - `NonNull<UnsafeCell<QueryDataState<D, F>>>` carries no auto-Send/Sync.
+//     The hand-marked impls below mirror the bounds the existing
+//     `Query<'w, 's, D, F>` SystemParam carries (data.rs:90 — `D::State:
+//     Send + Sync, F::State: Send + Sync`).
+//   - `QueryDataState<D, F>` is `Send + Sync` whenever both inner states
+//     are; the `UnsafeCell` wrapper does NOT relax this requirement (auto
+//     `!Sync` only) — and the `Send` we need for cross-thread cache reads
+//     under the future `query_ref<&self>` API is preserved by the
+//     `Send + Sync` bound on `D::State`/`F::State`.
+
+// SAFETY (SEND10): `QueryView` holds an `UnsafeEcsCell` (Send + Sync per
+// SEND2) and a `NonNull<UnsafeCell<QueryDataState<D, F>>>` whose pointee is
+// owned by `EcsMaster` (Send + Sync per the const SEND1 gate at
+// `ecs_master.rs:1737-1746`). The trait bounds on `QueryData::State` /
+// `QueryFilter::State` (Send + Sync + 'static) guarantee `QueryDataState`
+// itself is Send. The `&'w mut EcsMaster` borrow upstream enforces that
+// the view is only handed across threads inside a scope where the world
+// is exclusively owned — equivalent to the existing `Query` SystemParam.
+unsafe impl<D: QueryData, F: QueryFilter> Send for QueryView<'_, D, F> {}
+// SAFETY: same composition as Send; `UnsafeEcsCell` is Sync, the NonNull is
+// an opaque address (not dereferenced from sibling threads), the pointee
+// inside the cache is read-only across `&self` views (cache mutation only
+// under `&mut EcsMaster`).
+unsafe impl<D: QueryData, F: QueryFilter> Sync for QueryView<'_, D, F> {}
+
+// I-NEW-5 / W1 — single canonical Send/Sync assertion at module scope,
+// outside `cfg(test)`. Fires on every compile (debug, release, doctest,
+// test). Uses unit `()` for both `D` and `F` because:
+//
+//   * `(): QueryData` and `(): QueryFilter` exist at `data.rs:1155` /
+//     `filter.rs:179` as the Phase 8b empty-tuple/empty-filter stubs.
+//   * Both `State` types are `()` (trivially `Send + Sync + 'static`).
+//   * The structural Send/Sync geometry is identical to any non-trivial
+//     `(D, F)` pair — the trait bounds on `D::State` / `F::State` are the
+//     universal ground truth (data.rs:90), and a regression on a
+//     non-trivial pair would still surface at the SystemParam construction
+//     site of `Query<'w, 's, D, F>`.
+assert_impl_all!(QueryView<'static, (), ()>: Send, Sync);
+
+impl<'w, D: QueryData, F: QueryFilter> QueryView<'w, D, F> {
+    /// **Internal constructor — called only from `EcsMaster::query`.**
+    ///
+    /// Bundles the world cell and the cache-slot pointer into the public
+    /// handle. The `&mut EcsMaster` upstream of this call gates aliasing
+    /// at the type level — the `world` cell carries write-capable
+    /// provenance and the `state` pointer is unique for the duration of
+    /// `'w`.
+    ///
+    /// # Safety
+    ///
+    /// * `world` MUST have been minted via
+    ///   [`UnsafeEcsCell::new_mutable`] from the same `&mut EcsMaster` that
+    ///   owns the `state` cache slot — i.e. both must descend from the
+    ///   same exclusive borrow.
+    /// * `state` MUST be a valid `NonNull<UnsafeCell<QueryDataState<D, F>>>`
+    ///   pointing into the world's `query_state_cache` slot for
+    ///   `<(D, F) as QueryTypeKey>::query_type_id()`.
+    /// * The state pointed to MUST already have been updated (via
+    ///   `QueryDataState::update`) against the world's archetype master
+    ///   for the current `'w` scope.
+    #[inline]
+    pub(crate) unsafe fn from_parts(
+        world: UnsafeEcsCell<'w>,
+        state: NonNull<UnsafeCell<QueryDataState<D, F>>>,
+    ) -> Self {
+        Self {
+            world,
+            state,
+            // Phase 22 D4: a freshly minted view carries no dynamic-tag
+            // terms; `with_tag` / `without_tag` populate them.
+            terms: TagTerms::EMPTY,
+            // EnableTag Step 9: no dynamic enable terms until `with_enabled` /
+            // `without_enabled` populate them.
+            enable_terms: EnableTerms::EMPTY,
+            _world_borrow: PhantomData,
+            _data_filter_invariance: PhantomData,
+        }
+    }
+
+    /// Relations W1 — seeds the cached `filter_state` from a runtime-valued
+    /// filter, the value-carrying twin of the type-keyed cache build.
+    ///
+    /// Called ONCE by
+    /// [`EcsMaster::query_filtered`](crate::ecs::core::ecs_master::ecs_master::EcsMaster::query_filtered)
+    /// on a freshly-minted view, BEFORE any driver (`iter`/`par_iter`/…) runs.
+    /// The `(D, F)` matched-archetype set is value-INDEPENDENT (it bounds to
+    /// `R`-hosting archetypes), so only the per-row `filter_fetch`'s runtime
+    /// `target` needs injecting — done here via [`QueryFilter::seed_state`]
+    /// (default no-op for value-less filters; the 0%-gate).
+    ///
+    /// # Soundness
+    ///
+    /// At call time no driver holds a borrow of the cached state, so the
+    /// one-shot `&mut` reborrow below is exclusive — the same provenance
+    /// contract `EcsMaster::query`'s post-mint `state.update(master)` relies on.
+    #[inline]
+    pub(crate) fn seed_filter(&mut self, filter: &F) {
+        // SAFETY (QV6 / I1):
+        //   - `self.state` is a valid `NonNull<UnsafeCell<...>>` per the
+        //     `from_parts` contract; it was minted from `Box::leak` and lives
+        //     for `'w`.
+        //   - This view was just constructed by `query_filtered` and no driver
+        //     has borrowed the state yet, so this `&mut` reborrow is exclusive
+        //     (no aliasing `&`/`&mut` to the cache slot is live). The `&mut`
+        //     is dropped before the function returns.
+        let state_mut: &mut QueryDataState<D, F> =
+            unsafe { &mut *(*self.state.as_ptr()).get() };
+        <F as QueryFilter>::seed_state(&mut state_mut.filter_state, filter);
+    }
+
+    /// Adds a dynamic-tag presence term (Phase 22 D4): only archetypes
+    /// carrying `tag` participate in every driver of this view
+    /// (`iter`/`iter_mut`, `par_iter`/`par_iter_mut`, `for_each_chunk`,
+    /// `par_for_each_chunk`, `get`/`get_mut`, `single`/`single_mut`,
+    /// `archetype_count`/`is_empty`).
+    ///
+    /// Archetype-level filtering only — zero per-row cost; the no-terms fast
+    /// path stays byte-identical (one predicted branch per archetype
+    /// transition).
+    ///
+    /// # Panics
+    /// Loud release panic past
+    /// [`MAX_DYN_TAG_TERMS`](crate::ecs::core::iters::query::MAX_DYN_TAG_TERMS)
+    /// combined `with_tag`/`without_tag` terms (setup-time, cold).
+    #[must_use]
+    #[inline]
+    pub fn with_tag(mut self, tag: TagId) -> Self {
+        self.terms.push_with(tag);
+        self
+    }
+
+    /// Adds a dynamic-tag absence term (Phase 22 D4): archetypes carrying
+    /// `tag` are excluded. Same cost model and panic contract as
+    /// [`Self::with_tag`].
+    #[must_use]
+    #[inline]
+    pub fn without_tag(mut self, tag: TagId) -> Self {
+        self.terms.push_without(tag);
+        self
+    }
+
+    /// Adds a dynamic **per-row** enable term (EnableTag Decision D2 / Step 9):
+    /// only rows whose `tag` enable bit is SET participate in every driver of
+    /// this view (`iter`/`iter_mut`, `par_iter`/`par_iter_mut`, `get`/`get_mut`,
+    /// `single`/`single_mut`). The dynamic twin of the typed
+    /// [`Enabled<T>`](super::filter_enable::Enabled).
+    ///
+    /// Per-row filtering: a `tag` with no allocated enable column in an
+    /// archetype reads as all-disabled, so no row in it survives a
+    /// `with_enabled` term — identical polarity to `Enabled<T>`. The
+    /// no-enable-term fast path stays byte-identical (one predicted `is_empty()`
+    /// branch — 0%-gate).
+    ///
+    /// # Panics
+    /// Loud release panic past
+    /// [`MAX_ENABLE_TERMS`](crate::ecs::constants::MAX_ENABLE_TERMS) combined
+    /// `with_enabled`/`without_enabled` terms (setup-time, cold — C2 dynamic
+    /// enforcement).
+    #[must_use]
+    #[inline]
+    pub fn with_enabled(mut self, tag: EnableTagId) -> Self {
+        self.enable_terms.push_with(tag);
+        self
+    }
+
+    /// Adds a dynamic **per-row** enable term (EnableTag Decision D2 / Step 9):
+    /// only rows whose `tag` enable bit is CLEAR participate. The dynamic twin
+    /// of the typed [`Disabled<T>`](super::filter_enable::Disabled). Same
+    /// per-row cost model and panic contract as [`Self::with_enabled`].
+    ///
+    /// A `tag` with no allocated enable column reads as all-disabled, so every
+    /// row survives a `without_enabled` term (clear bit ⇒ matches — identical
+    /// polarity to `Disabled<T>`).
+    #[must_use]
+    #[inline]
+    pub fn without_enabled(mut self, tag: EnableTagId) -> Self {
+        self.enable_terms.push_without(tag);
+        self
+    }
+
+    /// Shared reborrow of the cached state.
+    ///
+    /// Used by every `QueryView` method that consumes the state by
+    /// reference (`iter`, `single`, `get`, `par_iter`, etc.). Never
+    /// produces a `&mut` — that is reserved for `EcsMaster::query`'s
+    /// post-mint `state.update(master)` call.
+    #[inline]
+    fn state(&self) -> &QueryDataState<D, F> {
+        // SAFETY (QV6 / I1 / I-NEW-3):
+        //   - `self.state` is a valid `NonNull<UnsafeCell<...>>` per the
+        //     `from_parts` contract.
+        //   - `UnsafeCell::get` returns `*mut T`; we reborrow as `&T`
+        //     only. The `&mut` retag inside `EcsMaster::query`'s
+        //     `state.update(master)` is produced once per call via the
+        //     `&mut self` uniqueness gate and is dropped before
+        //     `from_parts` runs.
+        //   - The `&` reborrow lifetime is bound to `&self` (sub-lifetime
+        //     of `'w`); no aliasing `&mut` to the cache slot can exist
+        //     concurrently because `&mut EcsMaster` produced this view.
+        unsafe { &*(*self.state.as_ptr()).get() }
+    }
+
+    /// Resolves the id slice every iteration-style driver walks (Phase 22.1
+    /// Area A, D-C funnel — mirror of `Query::driver_ids`).
+    ///
+    /// No terms: returns the shared `matched_ids_pre_terms()` slice exactly
+    /// as pre-Phase-22 — one predicted branch, no master mint, the term
+    /// scratch is never loaded. Terms: routes to the cold
+    /// [`Self::driver_ids_term_slow`]. The returned slice borrows `&self`
+    /// (sub-lifetime of `'w`); `iter_mut` already reads the state through the
+    /// `&self`-scoped `state()` reborrow, so no conflict with its `&mut self`
+    /// uniqueness gate.
+    #[inline]
+    fn driver_ids(&self) -> &[ArchetypeId] {
+        if self.terms.is_empty() {
+            // EnableTag Decision 3: the no-terms fast path — `culled_ids` for a
+            // positive-term enable `F`, else const-folds to
+            // `matched_ids_pre_terms()` (the 0%-gate).
+            return self.state().enable_driver_ids();
+        }
+        self.driver_ids_term_slow()
+    }
+
+    /// Cold term-bearing arm of [`Self::driver_ids`] — mints the master and
+    /// resolves the memoised term-filtered slice (P1–P4).
+    #[cold]
+    #[inline(never)]
+    fn driver_ids_term_slow(&self) -> &[ArchetypeId] {
+        let state = self.state();
+        // SAFETY (U_C2): shared read mint — `world()` yields `&EcsMaster`
+        //   scoped to this statement; no `&mut` access occurs through it
+        //   (same pattern as `get`'s world reborrow). The borrow ends at the
+        //   `archetype_master()` deref; the resolved slice borrows the cached
+        //   state's term scratch, not the cell.
+        let master = unsafe { self.world.world().archetype_master() };
+        state.term_scratch.resolve_term_filtered(
+            &self.terms,
+            master,
+            &state.archetype_state,
+        )
+    }
+
+    /// Returns the number of currently-matched archetypes.
+    ///
+    /// No-terms path: O(1) — reads the length of the cached `matched_ids`
+    /// slice. With dynamic-tag terms: O(matched) signature-filtered walk
+    /// (archetype-level membership only — `entity_count` is never consulted,
+    /// matching the no-terms semantics; stale removed ids do not count on
+    /// the term path, since the term test needs the live signature).
+    #[inline]
+    pub fn archetype_count(&self) -> usize {
+        let state = self.state();
+        if self.terms.is_empty() {
+            // EnableTag Decision 6: route the no-terms arm through the cull set
+            // so count stays consistent with `iter` (const-folds to
+            // `matched_ids_pre_terms()` for non-enable `F`).
+            return state.enable_driver_ids().len();
+        }
+        let ids = state.archetype_state.matched_ids_pre_terms();
+        // SAFETY (U_C2): shared read mint — `world()` yields `&EcsMaster`
+        //   scoped to this statement; no `&mut` access occurs through it
+        //   (same pattern as `get`'s world reborrow).
+        let master = unsafe { self.world.world().archetype_master() };
+        count_term_matched(&self.terms, master, ids)
+    }
+
+    /// Returns `true` if no archetypes are currently matched.
+    ///
+    /// Same caveat as [`Query::is_empty`](super::query::Query::is_empty):
+    /// an archetype-count of zero does not imply a zero-row iteration.
+    ///
+    /// Term semantics mirror [`Self::archetype_count`].
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        let state = self.state();
+        if self.terms.is_empty() {
+            // EnableTag Decision 6: consistent with `iter` / `archetype_count`.
+            return state.enable_driver_ids().is_empty();
+        }
+        let ids = state.archetype_state.matched_ids_pre_terms();
+        // SAFETY (U_C2): shared read mint scoped to this statement — see
+        //   `archetype_count`.
+        let master = unsafe { self.world.world().archetype_master() };
+        !any_term_matched(&self.terms, master, ids)
+    }
+
+    /// Returns a read-only iterator over `D::Item<'_>` for every matched row.
+    ///
+    /// `D` must be [`ReadOnlyQueryData`]. For mutable iteration use
+    /// [`Self::iter_mut`].
+    ///
+    /// # Meta plumbing (NCD7)
+    ///
+    /// Passes `SystemMeta::dummy()` as the cursor's meta argument. For
+    /// `D::NEEDS_CHANGE_DETECTION == false` paths (the common `&T` /
+    /// tuple-of-`&T` case) the NCD6 const-fold in `QueryIter::next` elides
+    /// any `meta.last_run` / `meta.this_run` read; the dummy is touched
+    /// only as a register-resident `&'static SystemMeta` reference.
+    #[inline]
+    pub fn iter(&self) -> QueryIter<'_, '_, D, F>
+    where
+        D: ReadOnlyQueryData,
+    {
+        // SAFETY (Q1, QD4, U_C2): `D: ReadOnlyQueryData` ⇒ no `&mut T` in
+        //   `D`; `QueryIter::new` will call `cell.archetype_ptr(_)` and
+        //   `D::set_table_readonly` only. The `world` cell is `Copy`;
+        //   passing it by value preserves raw-pointer provenance.
+        //   `SystemMeta::dummy()` returns a stable `'static` reference
+        //   (NCD7); the NCD6 const-fold makes the dummy contents
+        //   unobservable on the !NCD path. Phase 22.1 Area A: the id slice is
+        //   resolved ONCE here (no terms → pre-terms slice; terms → memoised
+        //   filtered slice); the cursor walks it term-free.
+        let ids = self.driver_ids();
+        unsafe {
+            QueryIter::new(self.state(), ids, self.world, SystemMeta::dummy(), self.enable_terms)
+        }
+    }
+
+    /// Returns a mutable iterator over `D::Item<'_>` for every matched row.
+    ///
+    /// Accepts any `D: QueryData` (including `&mut T`). The `&mut self`
+    /// borrow gates cursor uniqueness; no two `iter_mut` cursors can be
+    /// live simultaneously.
+    #[inline]
+    pub fn iter_mut(&mut self) -> QueryIterMut<'_, '_, D, F> {
+        // SAFETY (Q1, Q3, QD4, U_C3): `&mut self` enforces cursor
+        //   uniqueness; the cell carries write-capable provenance from
+        //   the upstream `&mut EcsMaster` (QV1). See `iter` SAFETY for
+        //   meta plumbing rationale. Phase 22.1 Area A: the id slice is
+        //   resolved once here (term-free for the cursor); `iter_mut` reads
+        //   the state through the same `&self`-scoped `state()` reborrow as
+        //   `driver_ids`, so there is no conflict with the `&mut self` gate.
+        let ids = self.driver_ids();
+        unsafe {
+            QueryIterMut::new(self.state(), ids, self.world, SystemMeta::dummy(), self.enable_terms)
+        }
+    }
+
+    /// Returns a contiguous PURE-DENSE iterator over `(EntityId, &T)` for every
+    /// LIVE slot of the single dense column `D` strides (Dense plan D3, FORK 2).
+    ///
+    /// The opt-in fast path — strides ONE contiguous `DenseStore` column in
+    /// insertion order, skipping tombstones via the `live` oracle. See
+    /// [`Query::dense_iter`](super::query::Query::dense_iter) for the precondition.
+    pub fn dense_iter(&self) -> DenseQueryIter<'_, D>
+    where
+        D: DenseQueryData + ReadOnlyQueryData,
+    {
+        const { assert!(D::HAS_DENSE, "QueryView::dense_iter requires a dense `D` (storage = \"dense\")") };
+        // Dense-enable plan D0 — reject an enable-bearing `F` (the dense fast path
+        // is archetype-agnostic and cannot honor a per-row enable term). Use
+        // `iter()` for `QueryView<&Dense, Enabled<Tag>>`. See
+        // [`assert_dense_iter_no_enable`](super::query::assert_dense_iter_no_enable).
+        const { super::query::assert_dense_iter_no_enable::<D, F>() };
+        let store = self.resolve_dense_store();
+        // SAFETY (D3): `store` is NULL or the live `DenseStore` for `D`'s
+        //   component, valid for `'w`; read-only cursor ⇒ the `&self` borrow
+        //   forbids a concurrent mutable cursor on this view.
+        unsafe { DenseQueryIter::new(store) }
+    }
+
+    /// Returns a contiguous PURE-DENSE mutable iterator over
+    /// `(EntityId, &mut T)` for every LIVE slot (Dense plan D3, FORK 2). Writes
+    /// land in the column (round-trip). The `&mut self` borrow gates uniqueness.
+    pub fn dense_iter_mut(&mut self) -> DenseQueryIterMut<'_, D>
+    where
+        D: DenseQueryData,
+    {
+        const { assert!(D::HAS_DENSE, "QueryView::dense_iter_mut requires a dense `D` (storage = \"dense\")") };
+        // Dense-enable plan D0 — reject an enable-bearing `F` (the `&mut` leak the
+        // fix closes). Use `iter_mut()` for `QueryView<&mut Dense, Enabled<Tag>>`.
+        // See [`assert_dense_iter_no_enable`](super::query::assert_dense_iter_no_enable).
+        const { super::query::assert_dense_iter_no_enable::<D, F>() };
+        let store = self.resolve_dense_store();
+        // SAFETY (D3): `store` is NULL or the live `DenseStore` for `D`'s
+        //   component; the `&mut self` borrow gates cursor uniqueness; distinct
+        //   slots ⇒ no aliasing across yielded `&mut`.
+        unsafe { DenseQueryIterMut::new(store) }
+    }
+
+    /// Resolves the `DenseStore` pointer for `D`'s sole dense component from the
+    /// world cell (Dense plan D3 pure-dense path). NULL if absent.
+    #[inline]
+    fn resolve_dense_store(&self) -> *const crate::ecs::core::component::dense::DenseStore
+    where
+        D: DenseQueryData,
+    {
+        let id = D::dense_component_id(&self.state().data_state);
+        // SAFETY (U_C2): shared read mint scoped to this statement; the resolved
+        //   store pointer is address-stable for `'w`.
+        let registry = unsafe { self.world.world().dense_registry() };
+        match registry.store(id) {
+            Some(store) => store as *const _,
+            None => std::ptr::null(),
+        }
+    }
+
+    /// Returns a parallel read-only iteration handle.
+    ///
+    /// Same semantics as
+    /// [`Query::par_iter`](super::query::Query::par_iter) — fans the work
+    /// across the current `ThreadPool`'s workers via `pool.scope`; degrades
+    /// to a sequential walk on the calling thread if no pool is attached
+    /// (PAR7).
+    #[inline]
+    pub fn par_iter<'q>(&'q self) -> ParQuery<'q, 'q, D, F>
+    where
+        D: ReadOnlyQueryData,
+    {
+        // Phase 22.1 Area A: resolve once at handle mint; `for_each` forwards
+        // the slice to both the scoped loop and the PAR7 fallback.
+        let ids = self.driver_ids();
+        ParQuery {
+            state: self.state(),
+            ids,
+            world: self.world,
+            batching: BatchingStrategy::default(),
+            meta: SystemMeta::dummy(),
+            enable_terms: self.enable_terms,
+        }
+    }
+
+    /// Returns a parallel mutable iteration handle.
+    ///
+    /// Same semantics as
+    /// [`Query::par_iter_mut`](super::query::Query::par_iter_mut). The
+    /// `&mut self` borrow gates cursor uniqueness.
+    #[inline]
+    pub fn par_iter_mut<'q>(&'q mut self) -> ParQueryMut<'q, 'q, D, F> {
+        // Phase 22.1 Area A: resolve once before the mutable handle is handed
+        // out; `for_each` forwards the slice.
+        let ids = self.driver_ids();
+        ParQueryMut {
+            state: self.state(),
+            ids,
+            world: self.world,
+            batching: BatchingStrategy::default(),
+            meta: SystemMeta::dummy(),
+            enable_terms: self.enable_terms,
+            _mut_marker: PhantomData,
+        }
+    }
+
+    /// Returns the single matched row, panicking if the query yields
+    /// anything other than exactly one row.
+    ///
+    /// `D` must be [`ReadOnlyQueryData`]. For the mutable variant use
+    /// [`Self::single_mut`].
+    ///
+    /// # Panics
+    ///
+    /// Panics with a diagnostic message if the iterator yields zero rows
+    /// or more than one row. Cold path — no overhead on the success path
+    /// beyond the iteration itself.
+    #[inline]
+    pub fn single(&self) -> D::Item<'_>
+    where
+        D: ReadOnlyQueryData,
+    {
+        let mut iter = self.iter();
+        let first = iter
+            .next()
+            .unwrap_or_else(|| query_view_single_panic_empty::<D, F>());
+        if iter.next().is_some() {
+            query_view_single_panic_many::<D, F>();
+        }
+        first
+    }
+
+    /// Returns the single matched mutable row, panicking if the query
+    /// yields anything other than exactly one row.
+    ///
+    /// Accepts any `D: QueryData`.
+    ///
+    /// # Panics
+    ///
+    /// Same as [`Self::single`] — zero or many rows trip a cold panic.
+    #[inline]
+    pub fn single_mut(&mut self) -> D::Item<'_> {
+        let mut iter = self.iter_mut();
+        let first = iter
+            .next()
+            .unwrap_or_else(|| query_view_single_panic_empty::<D, F>());
+        if iter.next().is_some() {
+            query_view_single_panic_many::<D, F>();
+        }
+        first
+    }
+
+    /// Returns the row corresponding to `entity` if it is alive AND lives
+    /// in a matched archetype.
+    ///
+    /// `D` must be [`ReadOnlyQueryData`]. For the mutable variant use
+    /// [`Self::get_mut`].
+    ///
+    /// # Enable filters (EnableTag Step 9 — C3-r5)
+    ///
+    /// A typed [`Enabled<T>`](super::filter_enable::Enabled) /
+    /// [`Disabled<T>`](super::filter_enable::Disabled) in `F`, and any dynamic
+    /// [`with_enabled`](Self::with_enabled) / [`without_enabled`](Self::without_enabled)
+    /// term, IS applied per-row here: a disabled (resp. enabled) entity returns
+    /// `None`.
+    ///
+    /// # Note (C3-r7-c)
+    ///
+    /// Non-archetypal **change-detection** filters (`Changed<C>` / `Added<C>`)
+    /// can never reach a `QueryView`: `EcsMaster::query<D, F>()` rejects any
+    /// change-detection `D`/`F` at compile time (W4 `const`-assert). So `get`
+    /// only ever sees archetypal and enable terms — there is no silent-ignore
+    /// path. For per-row change detection, use `Query<D, F>` as a SystemParam
+    /// inside a system body via `Schedule`. (Independently, mixing an enable
+    /// term with `Changed`/`Added` in one query is also a compile error.)
+    ///
+    /// # Cost
+    ///
+    /// O(1) entity-master lookup + a single archetype dispatch. The
+    /// matched-set membership check is an `ArchetypeBitSet::contains`
+    /// (one load + bit test).
+    pub fn get(&self, entity: Entity) -> Option<D::Item<'_>>
+    where
+        D: ReadOnlyQueryData,
+    {
+        let state = self.state();
+        // SAFETY (U_C2): cell scoped to '_; `world()` returns a shared
+        //   reborrow of the EcsMaster.
+        let ecs = unsafe { self.world.world() };
+        let inland = ecs.entity_master.entities_inland.get(entity.id().0)?;
+        if inland.is_null() {
+            return None;
+        }
+        if inland.generation() != entity.generation() {
+            return None;
+        }
+        // SAFETY (U1, U2, U11, F1): archetype_ptr was minted via the bundle's
+        //   `UnsafeCell::raw_get` helper at register time; slab heap address is
+        //   stable for `'w`, and the pointer is interior-mutable
+        //   (`SharedReadWrite`, F4-rooted) so it survives sibling structural
+        //   writes under TB/SB (whole slab element is `UnsafeCell`-wrapped).
+        let arch_ptr: *const _ = inland.archetype_ptr();
+        let arch_ref = unsafe { &*arch_ptr };
+        // Membership check — the bitset is the dedup-mirror of matched_ids.
+        let bitset = state.archetype_state.matched_archetypes_bitset();
+        if !bitset.contains(arch_ref.id().0) {
+            return None;
+        }
+        // Phase 22 D4: per-entity term test on the in-hand archetype ref —
+        // ≤ 8 signature bit tests; `len == 0` is one predicted branch.
+        if !archetype_passes_tag_terms(&self.terms, arch_ref) {
+            return None;
+        }
+        let row = inland.unit_index() as usize;
+        // EnableTag Step 9 (C3-r5): point lookups must honor enable filters too,
+        // else a typed `Enabled<T>` would be silently ignored ("compile-but-lie").
+        // Typed term: gated behind `const { F::CONTAINS_ENABLE_TERM }`, so the
+        // call is emitted ONLY for enable-bearing filters — the no-enable get is
+        // byte-identical (0%-gate). C3-r7 forbids mixing with `Changed`/`Added`,
+        // so any such `F` is NCD = false and the meta-free route is correct.
+        if const { F::CONTAINS_ENABLE_TERM } {
+            // SAFETY (ENBL-PT): `arch_ptr` is the live, matched, slab-stable
+            //   archetype pointer; `row < entity_count` per the fast-store
+            //   invariant. The helper caches the enable column for this
+            //   archetype and tests the row bit (Enabled: set; Disabled: clear).
+            if !unsafe { query_view_enable_passes::<F>(&state.filter_state, arch_ptr, row) } {
+                return None;
+            }
+        }
+        // Dynamic per-row enable terms: gated behind one `is_empty()` branch so
+        // a no-dynamic-term get is unchanged.
+        if !self.enable_terms.is_empty() {
+            // SAFETY (ENBL-9): `arch_ref` is the live, matched archetype;
+            //   `row < entity_count`. `resolve` scans the archetype's
+            //   EnableStore (`&self`) and `passes` tests each term's bit.
+            let cols = self.enable_terms.resolve(arch_ref);
+            if !unsafe { cols.passes(row) } {
+                return None;
+            }
+        }
+        let mut data_fetch = <D as QueryData>::init_fetch(&state.data_state);
+        // Dense plan D3: a dense `D` needs its global `DenseStore` pointer
+        // resolved before `fetch` (the iter cursors do this in `QueryIter::new`;
+        // a POINT LOOKUP must too, else the dense `fetch` dereferences a NULL
+        // `fetch.dense`). 0%-gate: `HAS_DENSE` folds `false` for a table `D`, so
+        // the common point-lookup stays byte-identical.
+        if const { <D as QueryData>::HAS_DENSE } {
+            // SAFETY (D3): `self.world` is the read-only mint scoped to the view
+            //   lifetime (the SAME cell the iter path passes to `resolve_dense`);
+            //   the resolved store pointer is address-stable for that lifetime.
+            unsafe {
+                <D as QueryData>::resolve_dense(&mut data_fetch, &state.data_state, self.world);
+            }
+        }
+        // SAFETY (QD3, QD4): read-only mint via the raw pointer; the
+        //   archetype was matched by `D::matches_component_set` (post-filter
+        //   guarantee), so every cached column is non-null. `row` is the
+        //   live `unit_index` from the fast store — strictly < entity_count.
+        unsafe {
+            <D as QueryData>::set_table_readonly(
+                &mut data_fetch,
+                &state.data_state,
+                arch_ptr,
+                SystemMeta::dummy(),
+            );
+        }
+        // Dense membership (D3): the matched-archetype bitset is a CONSERVATIVE
+        // over-approximation (seeded from `arch_presence`), and a dense component
+        // is NOT in the archetype signature — so `entity` may sit in a matched
+        // archetype WITHOUT being a live member of the dense store. `dense_row_passes`
+        // checks `slot_of`, so a non-member returns `None` here rather than tripping
+        // the `slot_of().expect()` inside the dense `fetch`. 0%-gate for a table `D`.
+        if const { <D as QueryData>::HAS_DENSE } {
+            // SAFETY (D3): `resolve_dense` + `set_table_readonly` above populated
+            //   `fetch.dense` / `fetch.entity_ids`; `row < entity_count`.
+            if !unsafe { <D as QueryData>::dense_row_passes(&data_fetch, row) } {
+                return None;
+            }
+        }
+        // SAFETY (QD2, QD3): `set_table_readonly` cached the column pointers (table
+        //   `D`); `resolve_dense` + the membership check guard the dense `D`;
+        //   `row < entity_count` per the fast store invariant.
+        Some(unsafe { <D as QueryData>::fetch(&data_fetch, row) })
+    }
+
+    /// Returns the mutable row corresponding to `entity` if it is alive AND
+    /// lives in a matched archetype.
+    ///
+    /// Accepts any `D: QueryData`.
+    ///
+    /// # Enable filters (EnableTag Step 9 — C3-r5)
+    ///
+    /// Mirrors [`Self::get`]: typed [`Enabled<T>`](super::filter_enable::Enabled)
+    /// / [`Disabled<T>`](super::filter_enable::Disabled) and dynamic
+    /// [`with_enabled`](Self::with_enabled) / [`without_enabled`](Self::without_enabled)
+    /// terms ARE applied per-row (a filtered-out entity returns `None`).
+    ///
+    /// # Note (C3-r7-c)
+    ///
+    /// Non-archetypal **change-detection** filters (`Changed<C>` / `Added<C>`)
+    /// can never reach a `QueryView`: `EcsMaster::query<D, F>()` rejects any
+    /// change-detection `D`/`F` at compile time (W4 `const`-assert). So
+    /// `get_mut` only ever sees archetypal and enable terms — there is no
+    /// silent-ignore path. For per-row change detection, use `Query<D, F>` as a
+    /// SystemParam inside a system body via `Schedule`. (Independently, mixing
+    /// an enable term with `Changed`/`Added` in one query is also a compile
+    /// error.)
+    pub fn get_mut(&mut self, entity: Entity) -> Option<D::Item<'_>> {
+        let state = self.state();
+        // SAFETY (U_C2): cell scoped to '_; `world()` returns a shared
+        //   reborrow of the EcsMaster. The eventual `archetype_ptr_mut`
+        //   call below upgrades to a write-capable raw pointer via the
+        //   cell's own retag-free path (cell carries write-capable
+        //   provenance per QV1).
+        let ecs = unsafe { self.world.world() };
+        let inland_copy = *ecs.entity_master.entities_inland.get(entity.id().0)?;
+        if inland_copy.is_null() {
+            return None;
+        }
+        if inland_copy.generation() != entity.generation() {
+            return None;
+        }
+        // SAFETY (U1, U2, U11, U14, F1): the inland-cached `archetype_ptr` was
+        //   minted with write-capable, interior-mutable (`SharedReadWrite`,
+        //   F4-rooted) provenance via the bundle's `UnsafeCell::raw_get` helper
+        //   at register time (Phase 7 W7); slab heap address is stable for
+        //   `'w`; the pointer survives sibling structural writes under TB/SB
+        //   (whole slab element is `UnsafeCell`-wrapped); `&mut self` upstream
+        //   of this view forbids any aliasing `&` to the same archetype slot.
+        let arch_ptr: *mut _ = inland_copy.archetype_ptr();
+        let arch_ref = unsafe { &*arch_ptr };
+        let bitset = state.archetype_state.matched_archetypes_bitset();
+        if !bitset.contains(arch_ref.id().0) {
+            return None;
+        }
+        // Phase 22 D4: per-entity term test on the in-hand archetype ref —
+        // mirrors `get`.
+        if !archetype_passes_tag_terms(&self.terms, arch_ref) {
+            return None;
+        }
+        let row = inland_copy.unit_index() as usize;
+        // EnableTag Step 9 (C3-r5): per-row enable test — mirrors `get`. The
+        // enable bit is read shared regardless of the cursor's mutability, so a
+        // `*const` reborrow of `arch_ptr` is the correct read surface here.
+        if const { F::CONTAINS_ENABLE_TERM } {
+            // SAFETY (ENBL-PT): `arch_ptr` is the live, matched, slab-stable
+            //   archetype pointer; `row < entity_count`. The typed enable test
+            //   reads the bit shared; see `get` for the full rationale.
+            if !unsafe {
+                query_view_enable_passes::<F>(&state.filter_state, arch_ptr as *const _, row)
+            } {
+                return None;
+            }
+        }
+        if !self.enable_terms.is_empty() {
+            // SAFETY (ENBL-9): `arch_ref` is the live, matched archetype;
+            //   `row < entity_count`; the enable bit is read shared.
+            let cols = self.enable_terms.resolve(arch_ref);
+            if !unsafe { cols.passes(row) } {
+                return None;
+            }
+        }
+        let mut data_fetch = <D as QueryData>::init_fetch(&state.data_state);
+        // Dense plan D3: resolve the dense store pointer before `fetch` — the
+        // point-lookup twin of `QueryIterMut::new` (else the dense `fetch`
+        // dereferences a NULL `fetch.dense`). 0%-gate for a table `D`.
+        if const { <D as QueryData>::HAS_DENSE } {
+            // SAFETY (D3): `self.world` is the write-capable cell scoped to the
+            //   view lifetime; `resolve_dense` reads the store pointer SHARED
+            //   (address-stable for that lifetime) — the same cell the iter path
+            //   passes.
+            unsafe {
+                <D as QueryData>::resolve_dense(&mut data_fetch, &state.data_state, self.world);
+            }
+        }
+        // SAFETY (QD3, QD4): write-capable mint; archetype matched.
+        unsafe {
+            <D as QueryData>::set_table_mut(
+                &mut data_fetch,
+                &state.data_state,
+                arch_ptr,
+                SystemMeta::dummy(),
+            );
+        }
+        // Dense membership (D3): return `None` for an entity that sits in a matched
+        // (arch_presence-seeded) archetype but is NOT a live dense-store member, so
+        // the dense `fetch`'s `slot_of().expect()` never fires. 0%-gate for a table `D`.
+        if const { <D as QueryData>::HAS_DENSE } {
+            // SAFETY (D3): `resolve_dense` + `set_table_mut` above populated
+            //   `fetch.dense` / `fetch.entity_ids`; `row < entity_count`.
+            if !unsafe { <D as QueryData>::dense_row_passes(&data_fetch, row) } {
+                return None;
+            }
+        }
+        // SAFETY (QD2, QD3): `set_table_mut` cached the column pointers (table `D`);
+        //   `resolve_dense` + the membership check guard the dense `D`;
+        //   `row` in range per fast store invariant.
+        Some(unsafe { <D as QueryData>::fetch(&data_fetch, row) })
+    }
+
+    /// Direct-API mirror of
+    /// [`Query::for_each_chunk`](super::query::Query::for_each_chunk).
+    /// Invokes `f` once per matched archetype, passing a slice (or tuple of
+    /// slices) covering every row in that archetype.
+    ///
+    /// `D` must satisfy [`ChunkedQueryData`]; `F` must satisfy
+    /// [`ArchetypalQueryFilter`]. Both bounds are compile-time —
+    /// `QueryView<&T, Changed<U>>::for_each_chunk` is a type error. Use
+    /// [`Self::iter`] / [`Self::iter_mut`] for per-row change-detection
+    /// flows; the direct API explicitly rejects change-detection filters at
+    /// `EcsMaster::query` mint time anyway (QV11 / W4).
+    ///
+    /// # Performance
+    ///
+    /// Identical cost model to
+    /// [`Query::for_each_chunk`](super::query::Query::for_each_chunk) — see
+    /// plan §1.2. Empty matched archetypes are skipped at the
+    /// `entity_count == 0` guard; stale-id entries (Q5) are skipped
+    /// transparently via the driver's `archetype_ptr(_mut)` `None` arm.
+    ///
+    /// # See also
+    ///
+    /// * [`Query::for_each_chunk`](super::query::Query::for_each_chunk)
+    ///   — SystemParam mirror used inside system bodies.
+    /// * [`Self::par_for_each_chunk`] — parallel variant (Phase X.A Wave 6).
+    ///
+    /// [`ChunkedQueryData`]: super::chunked_data::ChunkedQueryData
+    /// [`ArchetypalQueryFilter`]: super::filter::ArchetypalQueryFilter
+    #[inline]
+    pub fn for_each_chunk<Func>(&mut self, f: Func)
+    where
+        D: ChunkedQueryData,
+        F: ArchetypalQueryFilter,
+        Func: for<'c> FnMut(D::ChunkItem<'c>),
+    {
+        // SAFETY (Q1, Q3, CD1-CD4): mirrors `Query::for_each_chunk`.
+        //   `&mut self` enforces cursor uniqueness on the view;
+        //   `D::IS_READ_ONLY` selects the readonly / mut chunk-dispatch
+        //   arm inside the driver. `QueryView` does not carry `meta` —
+        //   `NEEDS_CHANGE_DETECTION` const-folds to `false` at this
+        //   monomorphisation because `D: ChunkedQueryData` excludes
+        //   `Ref<T>` / `Mut<T>` and `F: ArchetypalQueryFilter` excludes
+        //   `Added<C>` / `Changed<C>`, so the meta-bearing branch from
+        //   `iter.rs` does not appear in this driver. The cell
+        //   `self.world` is `Copy`; passing by value preserves the
+        //   raw-pointer provenance through the call (Phase 8a C1 fix).
+        // Phase 22.1 Area A: resolve the id slice once before dispatch; the
+        // driver walks it term-free.
+        let ids = self.driver_ids();
+        let mutable = !D::IS_READ_ONLY;
+        unsafe {
+            chunk_iter::for_each_chunk_impl(
+                self.state(),
+                ids,
+                self.world,
+                mutable,
+                self.enable_terms,
+                f,
+            );
+        }
+    }
+
+    /// Direct-API mirror of
+    /// [`Query::par_for_each_chunk`](super::query::Query::par_for_each_chunk).
+    /// Splits each matched archetype's row range into sub-ranges per
+    /// [`BatchingStrategy`] and dispatches each sub-range to a
+    /// [`boyko_threadpool::ThreadPool`] worker via
+    /// [`boyko_threadpool::ThreadPool::scope`]. Archetypes with fewer than
+    /// [`MIN_ARCHETYPE_FOR_PARALLEL`][min] rows run inline on the calling
+    /// thread (PAR9). PAR7 fallback (no active pool → sequential walk)
+    /// preserved.
+    ///
+    /// # Closure invocation frequency
+    ///
+    /// Identical semantics to
+    /// [`Query::par_for_each_chunk`](super::query::Query::par_for_each_chunk):
+    /// the closure fires once per archetype sub-range, NOT once per archetype.
+    /// See the linked method for the per-regime worked examples and the
+    /// thread-safe-accumulator pattern for reductions.
+    ///
+    /// # Compile-time bounds
+    ///
+    /// `D` must satisfy [`ChunkedQueryData`]; `F` must satisfy
+    /// [`ArchetypalQueryFilter`]; `Func` must be `Fn + Send + Sync`. The
+    /// direct-API change-detection guard at `EcsMaster::query` mint time
+    /// (QV11 / W4) is subsumed by these bounds — `Ref<T>` / `Mut<T>` /
+    /// `Added<C>` / `Changed<C>` cannot reach this method.
+    ///
+    /// # See also
+    ///
+    /// * [`Query::par_for_each_chunk`](super::query::Query::par_for_each_chunk)
+    ///   — SystemParam mirror used inside system bodies.
+    /// * [`Self::for_each_chunk`] — sequential variant.
+    ///
+    /// [`ChunkedQueryData`]: super::chunked_data::ChunkedQueryData
+    /// [`ArchetypalQueryFilter`]: super::filter::ArchetypalQueryFilter
+    /// [`BatchingStrategy`]: super::par_iter::BatchingStrategy
+    /// [min]: super::par_iter::MIN_ARCHETYPE_FOR_PARALLEL
+    #[inline]
+    pub fn par_for_each_chunk<Func>(&mut self, f: Func, batching: BatchingStrategy)
+    where
+        D: ChunkedQueryData,
+        F: ArchetypalQueryFilter,
+        Func: for<'c> Fn(D::ChunkItem<'c>) + Send + Sync,
+    {
+        // SAFETY (Q1, Q3, CD1-CD4, §9): mirrors `Query::par_for_each_chunk`.
+        //   `&mut self` enforces cursor uniqueness on the view (QV1 plus the
+        //   `&mut EcsMaster` borrow that produced the cache slot upstream).
+        //   `D::IS_READ_ONLY` selects the readonly / mut chunk-dispatch arm.
+        //   `QueryView` carries no `meta` — the `ChunkedQueryData` /
+        //   `ArchetypalQueryFilter` gates force NCD const-fold to `false`,
+        //   so the meta-bearing branch is unreachable. The cell `self.world`
+        //   is `Copy`; passing by value preserves raw-pointer provenance.
+        // Phase 22.1 Area A: resolve the id slice once on the calling thread
+        // before `pool.scope`.
+        let ids = self.driver_ids();
+        let mutable = !D::IS_READ_ONLY;
+        unsafe {
+            par_chunk::par_for_each_chunk_impl(
+                self.state(),
+                ids,
+                self.world,
+                mutable,
+                self.enable_terms,
+                batching,
+                f,
+            );
+        }
+    }
+}
+
+/// Cold panic site for [`QueryView::single`] when the iterator yields zero
+/// rows. `#[cold] + #[inline(never)]` so it lives outside the hot path's
+/// instruction cache.
+#[cold]
+#[inline(never)]
+fn query_view_single_panic_empty<D: QueryData, F: QueryFilter>() -> ! {
+    panic!(
+        "QueryView::single<{}, {}>(): query yielded zero rows; \
+         expected exactly one",
+        std::any::type_name::<D>(),
+        std::any::type_name::<F>(),
+    );
+}
+
+/// Cold panic site for [`QueryView::single`] when the iterator yields more
+/// than one row.
+#[cold]
+#[inline(never)]
+fn query_view_single_panic_many<D: QueryData, F: QueryFilter>() -> ! {
+    panic!(
+        "QueryView::single<{}, {}>(): query yielded more than one row; \
+         expected exactly one",
+        std::any::type_name::<D>(),
+        std::any::type_name::<F>(),
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ecs::core::component::component::Component;
+    use crate::ecs::core::component::component_registry;
+    use crate::ecs::core::ecs_master::ecs_master::EcsMaster;
+    use crate::ecs::identifiers::primitives::ComponentId;
+
+    // Component id reserved for the Phase X.A Wave 5 QueryView chunk test.
+    // The free slot below was verified at write time against existing
+    // crate-wide allocations:
+    //   * 400-422 — archetype.rs / archetype_bundle.rs / component_pool_bundle.rs
+    //   * 450-456 — component_registry TEST_BASE+0..+6
+    //   * 457-461 — component_registry "reserved" + Phase X.A Wave 4 (460-461)
+    //   * 462    — component_registry collision_with_different_type test
+    //   * 465    — component_registry collision_with_same_type test
+    //   * 480-482 — archetype_bundle miri tests
+    //   * 483-485 — query/iter.rs
+    //   * 486-488 — query/query.rs
+    //   * 490-497 — query_state / component_set
+    //   * 503-504 — query/data.rs
+    //   * 506-510 — query/state.rs / resource_registry
+    // Slot 463 is free (between the collision-different and collision-same
+    // anchors at 462 / 465, both inside the component_registry 450-465 zone).
+    const COMP_A: ComponentId = ComponentId(463);
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CompA(u32);
+
+    impl Component for CompA {
+        fn component_id() -> ComponentId {
+            COMP_A
+        }
+    }
+
+    /// Idempotent registry priming.
+    fn register_test_components() {
+        component_registry::register_layout::<CompA>(COMP_A.0);
+    }
+
+    /// Mirror of `chunk_iter::tests::sequential_single_archetype_yields_full_slice`
+    /// but routed through `ecs.query::<&CompA>().for_each_chunk(...)`. Verifies
+    /// the direct-API entry point hits the same driver (exactly one closure
+    /// invocation; the slice covers every row).
+    #[test]
+    fn query_view_for_each_chunk_yields_full_slice() {
+        register_test_components();
+        let mut ecs = EcsMaster::new();
+        let arch = ecs.create_archetype(&[COMP_A]);
+
+        for i in 0..10u32 {
+            let comp = CompA(i + 500);
+            // SAFETY: `CompA` is `#[repr(C)]` POD; reading its bytes
+            //   produces a valid byte slice for the duration of this call.
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &comp as *const CompA as *const u8,
+                    std::mem::size_of::<CompA>(),
+                )
+            };
+            ecs.create_entity(arch, &[(COMP_A, bytes)])
+                .expect("query_view_for_each_chunk: create_entity must succeed");
+        }
+
+        let mut invocations = 0usize;
+        let mut collected: Vec<u32> = Vec::with_capacity(10);
+        {
+            let mut view = ecs.query::<&CompA, ()>();
+            view.for_each_chunk(|slice: &[CompA]| {
+                invocations += 1;
+                for c in slice {
+                    collected.push(c.0);
+                }
+            });
+        }
+
+        assert_eq!(
+            invocations, 1,
+            "single archetype ⇒ exactly one closure invocation",
+        );
+        assert_eq!(collected.len(), 10, "slice must cover every row");
+        for expected in 500..510u32 {
+            assert!(
+                collected.contains(&expected),
+                "row {expected} must appear in collected = {collected:?}",
+            );
+        }
+    }
+}

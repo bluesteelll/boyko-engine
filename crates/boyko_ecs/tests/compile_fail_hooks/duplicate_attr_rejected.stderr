@@ -1,0 +1,5 @@
+error: duplicate #[component(...)] attribute; combine all hooks into one
+  --> tests/compile_fail_hooks/duplicate_attr_rejected.rs:16:1
+   |
+16 | #[component(on_remove = b)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^

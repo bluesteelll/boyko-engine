@@ -3,7 +3,6 @@ title = "Boyko Engine"
 authors = ["Boyko Engine Contributors"]
 description = "A high-performance Rust ECS game engine focused on cache optimization (data and instruction) and lock-free parallelism"
 language = "en"
-multilingual = false
 src = "book/src"
 
 [build]

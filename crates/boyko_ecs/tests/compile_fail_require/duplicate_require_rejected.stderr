@@ -1,0 +1,5 @@
+error: duplicate #[require(...)] for the same component; each required component may be listed at most once
+  --> tests/compile_fail_require/duplicate_require_rejected.rs:15:16
+   |
+15 | #[require(Dep, Dep)]
+   |                ^^^

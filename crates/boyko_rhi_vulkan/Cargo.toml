@@ -1,0 +1,99 @@
+[package]
+name = "boyko_rhi_vulkan"
+version = "0.1.0"
+edition = "2024"
+description = "Raw hand-FFI Vulkan backend for boyko-engine (Slice 0 foundation: loader + device + VkDeviceMemory sub-allocator). std-only, no third-party crates."
+
+# INVIOLABLE: this crate depends on `std` ONLY for FFI. No ash / vulkano /
+# windows-sys / libc. The Vulkan surface is hand-declared raw FFI mirroring the
+# `boyko_ecs::ecs::memory::vm.rs` discipline (`unsafe extern "system"` blocks +
+# `// SAFETY:` ABI comments + `cfg(windows)`). `boyko_rhi` is the in-house,
+# FFI-free RHI trait surface this backend implements (Phase 1, compute path) —
+# it adds no third-party dependency.
+[features]
+# The CPU golden-reference oracles (`crate::goldens`) — host mirrors of the
+# marcher / lighting / SSAO / cluster-cull shader math. Audit W3/R-2: split out of
+# `compute.rs` and gated OFF by default so a production/default build ships ZERO
+# host-mirror code (they exist only to diff GPU output in tests). The crate's OWN
+# integration tests still reach them: the self-referential dev-dependency below
+# (`boyko_rhi_vulkan` with `features = ["goldens"]`) turns the feature ON whenever
+# the test targets compile, because the integration tests are separate crates
+# where the lib's `cfg(test)` guard is NOT active.
+default = []
+goldens = []
+# HW-RT rung R2a-1: the hardware ray-tracing FFI surface (the RT extension enable,
+# the raw-FFI acceleration-structure structs/PFNs in `accel_ffi.rs`, the
+# `BoundAccelStruct` + the Vulkan AS verb overrides in `accel.rs`, and the real
+# `supports_ray_query` device-caps query). OFF by default so the shipped/golden
+# build is TEXTUALLY the pre-R2a (R1) code: every RT item is `#[cfg(feature="hwrt")]`
+# so it compiles to nothing, `create_device` emits the R1 extension array + p_next
+# chain verbatim, and `DeviceCaps.ray_query` stays literally `false`. Builds NO
+# acceleration structure and traces nothing (that is R2a-2..4).
+hwrt = []
+# Rung 1a: the specialization-constant GPU smoke. Gates the `spec_constant_smoke`
+# integration test + its committed `.spv` getter in `compute.rs`. OFF by default so
+# the shipped/golden build never references the (orchestrator-compiled) smoke `.spv`
+# — a spec-const smoke needs only a plain device + one compute dispatch (no `hwrt`).
+# Enable it AFTER compiling `shaders/spec_constant_smoke.comp.spv` (see the dxc line
+# in the shader header):
+#   cargo test -p boyko_rhi_vulkan --features spec_constant_smoke --test spec_constant_smoke
+spec_constant_smoke = []
+
+[dependencies]
+boyko_rhi = { path = "../boyko_rhi" }
+# The analytic SDF field math + std430 data model (the W4 leaf-cut). A `no_std`,
+# graphics-free leaf with ZERO third-party deps — does not breach the "no
+# ash/vulkano/windows-sys/libc" constraint above. It is the SINGLE source of truth
+# the rung-8/9/10/11 golden mirror in `compute.rs` folds and that `boyko_physics`
+# (W5) reuses for CPU SDF-collision queries WITHOUT depending on this crate.
+boyko_sdf_math = { path = "../boyko_sdf_math" }
+
+# Win32 INPUT FFI (I6 / I6b) — the OFFICIAL Microsoft-maintained raw bindings,
+# explicitly approved for the OS layer. SCOPE: the windowing + Raw-Input FFI ONLY
+# (SetWindowLongPtrW / GetWindowLongPtrW / RegisterRawInputDevices /
+# GetRawInputData + the RAWINPUT* structs + the WM_* / GWLP_USERDATA / RID_* /
+# HID_* constants). `windows-sys` (NOT `windows`) is the raw, zero-overhead,
+# transitive-dep-free binding layer that matches this crate's hand-FFI idiom. The
+# Vulkan FFI stays 100% in-house (the INVIOLABLE no-ash/no-vulkano rule is
+# untouched: this dep covers OS windowing/input, never `vk*`). Target-gated to
+# `cfg(windows)` so non-Windows / wasm builds pull nothing.
+# The workspace `windows-sys` pin carries the base `Win32_UI_WindowsAndMessaging`
+# feature; this crate's windowing + Raw-Input FFI adds the Foundation / Raw-Input /
+# HID features on top locally (Cargo unions them with the workspace base).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_Input",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Devices_HumanInterfaceDevice",
+] }
+
+# Test-only. `proptest` drives the Render B1 over-relaxation soundness oracle
+# (the hit-set-superset no-hole property over randomized SDF scenes — the Candidate-C
+# correctness gate). It is a DEV-dependency only — the shipped backend stays third-party-free
+# for the Vulkan path (the "no ash/vulkano" constraint above governs the GPU FFI,
+# not the host test harness). proptest pulls only host-side, graphics-free crates.
+[dev-dependencies]
+proptest = "1"
+# Test-only. Drives the R0b `FrameWriteToken` compile-fail acceptance cases
+# (`tests/compile_fail_frame_write_token/`) — the affine-move / no-Clone /
+# private-field guarantees are proven by FAILURE to compile, exactly the
+# `boyko_ecs` `compile_fail_dispatcher_token` mechanism. Host-side only.
+trybuild = "1"
+# Test-only. The in-house shader eDSL, with the std `emit` codegen backend ON, so
+# the `sdf_field_edsl_sync` guard can regenerate the HLSL field bodies and assert
+# the committed `shaders/sdf_field.hlsli` still matches them (no by-hand drift).
+# Zero third-party deps; `emit` is dev-only so the shipped backend never links it.
+boyko_shaderdsl = { path = "../boyko_shaderdsl", features = ["emit"] }
+# Test-only. The source-agnostic input layer drives the INTERACTIVE viewer test
+# (`engine_interactive_viewer`): the window crate captures raw Win32 `(msg, wparam,
+# lparam)` triples + raw-mouse deltas, and this crate's `translate_win32` /
+# `translate_win32_raw_mouse` edge maps them into `RawInputEvent`s a `PhysicalInput`
+# snapshot folds for WASD + mouse-look. DEV-only — the shipped backend never links it.
+boyko-input = { path = "../boyko_input" }
+# Self-referential dev-dependency that turns the `goldens` feature ON whenever the
+# test targets compile. The integration tests in `tests/*.rs` are SEPARATE crates,
+# so the lib's `cfg(test)` guard on `pub mod goldens` is NOT active for them; this
+# line makes `boyko_rhi_vulkan::goldens::*` available to every integration test
+# (and only there) without shipping the host mirrors in a default/production build.
+boyko_rhi_vulkan = { path = ".", features = ["goldens"] }

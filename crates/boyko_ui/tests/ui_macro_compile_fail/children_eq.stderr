@@ -1,0 +1,13 @@
+error: expected `:` after `children`, found `=`
+ --> tests/ui_macro_compile_fail/children_eq.rs:9:9
+  |
+9 |         children = [ { UiLayout::default() } ]
+  |         ^^^^^^^^
+
+warning: unused import: `boyko_ui::components::UiLayout`
+ --> tests/ui_macro_compile_fail/children_eq.rs:3:5
+  |
+3 | use boyko_ui::components::UiLayout;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

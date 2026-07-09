@@ -1,0 +1,18 @@
+error[E0277]: `AnyOf<(&A, &B)>` does not implement `ChunkedQueryData` — cannot be used in `Query::for_each_chunk`
+  --> tests/option_anyof_compile_fail/for_each_chunk_rejects_anyof.rs:33:7
+   |
+33 |     q.for_each_chunk(|_slice| {});
+   |       ^^^^^^^^^^^^^^ not chunked-iterable
+   |
+   = help: the trait `ChunkedQueryData` is not implemented for `AnyOf<(&A, &B)>`
+   = note: members: `&T`, `&mut T`, `()`, tuples of those. `Ref<T>` / `Mut<T>` are NOT members; use `Query::iter()` instead for per-row tick state.
+   = help: the following other types implement trait `ChunkedQueryData`:
+             &T
+             &mut T
+             ()
+             (D0, D1)
+             (D0, D1, D2)
+             (D0, D1, D2, D3)
+             (D0, D1, D2, D3, D4)
+             (D0, D1, D2, D3, D4, D5)
+           and $N others

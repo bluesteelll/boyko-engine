@@ -1,0 +1,5 @@
+error: #[event] does not support generic structs (Q-001 scope)
+ --> tests/ui/event_attribute/generic_struct.rs:4:8
+  |
+4 | struct GenericEvent<T> {
+  |        ^^^^^^^^^^^^

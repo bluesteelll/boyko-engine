@@ -1,0 +1,13 @@
+error: field `confused` has both #[participant] and #[parameter] markers; use exactly one
+ --> tests/ui/event_attribute/conflicting_markers.rs:8:5
+  |
+8 |     confused: Entity,
+  |     ^^^^^^^^
+
+warning: unused import: `boyko_ecs::ecs::core::entity::entity::Entity`
+ --> tests/ui/event_attribute/conflicting_markers.rs:1:5
+  |
+1 | use boyko_ecs::ecs::core::entity::entity::Entity;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

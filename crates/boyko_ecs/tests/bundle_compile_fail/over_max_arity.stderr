@@ -1,0 +1,5 @@
+error: Bundle supports at most 16 components (MAX_BUNDLE_ARITY); split the bundle and insert the remainder with EntityCommands::insert
+  --> tests/bundle_compile_fail/over_max_arity.rs:12:8
+   |
+12 | struct SeventeenFields {
+   |        ^^^^^^^^^^^^^^^

@@ -1,0 +1,46 @@
+[package]
+name = "boyko-ui"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "boyko_ui"
+path = "src/lib.rs"
+
+[dependencies]
+boyko-ecs    = { path = "../boyko_ecs" }
+boyko-macros = { path = "../boyko_macros" }
+boyko-utils  = { path = "../boyko_utils" }
+# P4: UI is a symmetric ACTION SOURCE (`ActionState::ui_press`) — `ui_dispatch`
+# lowers an Interaction edge into an action. Acyclic: boyko-input does NOT depend
+# on boyko-ui. The OS focus/cursor-inside flags on `PhysicalInput` are also read
+# here for the blur/leave short-circuit (Decision 12).
+boyko-input  = { path = "../boyko_input" }
+# GUI P5b: the glyph metrics table + atlas metadata are ECS-resident (the FontTable
+# Resource) and loaded once from a checked-in `.bfont`. boyko-ui depends on the bake
+# crate ONLY for the POD metric/meta types + the thin `read_bfont` reader (load-time,
+# off every hot path) — NOT for the generator. Acyclic: boyko-fontbake depends on the
+# threadpool, never on boyko-ui or boyko-render. The render-side atlas upload lives in
+# boyko-render; the emitter here produces render-agnostic glyph-quad descriptors the
+# host folds into the P5a instance stream (so boyko-ui takes NO render dependency).
+boyko-fontbake = { path = "../boyko_fontbake" }
+# GUI P7a: world-space / diegetic UI. The world-anchor projection reads the S3
+# camera `ViewUniform` (`view_proj` + `camera_pos`) and entity `GlobalTransform`s
+# to place a UI subtree at a 3D world point. ACYCLIC: boyko-scene depends on
+# {boyko-ecs, boyko-math, boyko-macros, boyko-utils} and does NOT depend on
+# boyko-ui (nor does boyko-input, the other boyko-ui dep, reach boyko-scene). The
+# `world` module is the only place boyko-ui touches the scene crate.
+boyko-scene  = { path = "../boyko_scene" }
+boyko-math   = { path = "../boyko_math" }
+# NOTE: boyko-threadpool is NOT a dependency in P1 — the apply pass is exclusive;
+# the host already owns the pool to build the schedule.
+
+[dev-dependencies]
+# Integration tests build a hand-rolled Schedule (mirroring the demo's
+# schedule-build + run pattern), which requires an Arc<ThreadPool>. macros is
+# needed for #[derive(Component)] on test-local probe components.
+boyko-threadpool = { path = "../boyko_threadpool" }
+boyko-macros     = { path = "../boyko_macros" }
+# P2 `ui!` macro compile-fail acceptance tests (snapshot-based).
+trybuild         = "1"

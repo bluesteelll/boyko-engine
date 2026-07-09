@@ -1,0 +1,26 @@
+error[E0277]: the trait bound `NoDefault: Default` is not satisfied
+  --> tests/compile_fail_local/local_non_default_rejected.rs:18:44
+   |
+18 |     let _sys = IntoSystem::into_system(|_: Local<NoDefault>| {});
+   |                                            ^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `NoDefault`
+   |
+note: required by a bound in `Local`
+  --> src/ecs/core/system/params/local.rs
+   |
+   | pub struct Local<'s, T: Send + Sync + Default + 'static>(pub(crate) &'s mut T);
+   |                                       ^^^^^^^ required by this bound in `Local`
+help: consider annotating `NoDefault` with `#[derive(Default)]`
+   |
+12 + #[derive(Default)]
+13 | struct NoDefault;
+   |
+
+error[E0277]: the trait bound `{closure@$DIR/tests/compile_fail_local/local_non_default_rejected.rs:18:40: 18:61}: IntoSystem<_, _, _>` is not satisfied
+  --> tests/compile_fail_local/local_non_default_rejected.rs:18:40
+   |
+18 |     let _sys = IntoSystem::into_system(|_: Local<NoDefault>| {});
+   |                ----------------------- ^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |                |
+   |                required by a bound introduced by this call
+   |
+   = help: the trait `IntoSystem<_, _, _>` is not implemented for closure `{closure@$DIR/tests/compile_fail_local/local_non_default_rejected.rs:18:40: 18:61}`

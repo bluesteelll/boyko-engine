@@ -1,0 +1,27 @@
+error: #[relationship_target(...)] requires the `retain_empty` flag in v1 (RETAIN_EMPTY = true is mandatory; remove-on-empty is deferred to v1.1)
+  --> tests/compile_fail_relations/relationship_target_no_retain_empty.rs:18:8
+   |
+18 | struct LikedBy(Vec<Entity>);
+   |        ^^^^^^^
+
+error[E0277]: the trait bound `LikedBy: RelationshipTarget` is not satisfied
+  --> tests/compile_fail_relations/relationship_target_no_retain_empty.rs:12:25
+   |
+12 | #[relationship(target = LikedBy)]
+   |                         ^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `RelationshipTarget` is not implemented for `LikedBy`
+  --> tests/compile_fail_relations/relationship_target_no_retain_empty.rs:18:1
+   |
+18 | struct LikedBy(Vec<Entity>);
+   | ^^^^^^^^^^^^^^
+help: the trait `RelationshipTarget` is implemented for `Children`
+  --> src/ecs/core/hierarchy/mod.rs
+   |
+   | impl RelationshipTarget for Children {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `boyko_ecs::prelude::Relationship::Target`
+  --> src/ecs/core/relationship/mod.rs
+   |
+   |     type Target: RelationshipTarget<Source = Self>;
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Relationship::Target`

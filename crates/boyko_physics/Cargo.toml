@@ -1,0 +1,119 @@
+[package]
+name = "boyko-physics"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "boyko_physics"
+path = "src/lib.rs"
+
+[dependencies]
+# Physics builds ONLY on the public boyko_ecs API (Component / Resource / Bundle
+# derives, Query<D, F>, Res / ResMut / Mut, Schedule / ScheduleBuilder, EcsMaster,
+# FixedTime). `boyko_threadpool` supplies the work-stealing pool that
+# `Schedule::run` fans `par_iter_mut` across; `boyko_utils` supplies the
+# `BitSet256` chunk the touched-row mask is built from. `boyko_sdf_math` is the
+# graphics-free `no_std` leaf (W4-pt1) holding the analytic SDF edit-list field —
+# its CPU evaluator is the single source of truth the W5 SDF-collision narrowphase
+# shares with the GPU golden, with ZERO readback and (critically) NO Vulkan/graphics
+# dep pulled in (the whole point of the leaf extraction). NO other graphics deps.
+boyko-ecs = { path = "../boyko_ecs" }
+boyko-macros = { path = "../boyko_macros" }
+boyko-utils = { path = "../boyko_utils" }
+boyko-threadpool = { path = "../boyko_threadpool" }
+boyko_sdf_math = { path = "../boyko_sdf_math" }
+# S1: the shared SIMD-aligned POD math vocabulary. Vec3/Quat/Mat3 are lifted
+# VERBATIM from this crate's former `math.rs` into `boyko_math` (bit-identical,
+# exact sqrt, no FMA), and `boyko_physics::math` now re-exports them so the
+# public API and every `crate::math::{..}` call site stay UNCHANGED.
+boyko-math = { path = "../boyko_math" }
+# S5: the spatial vocabulary. The physics ⇄ Transform pose-sync systems
+# (`sync_transform_to_body` / `sync_body_to_transform`) read/write the engine's
+# canonical `Transform` component, so the world pose lives in ONE datum
+# (Principle 0 — no parallel pose store). The edge is acyclic: `boyko_scene`
+# depends only on `boyko_ecs` + `boyko_math` + `boyko_macros` + `boyko_utils` —
+# never on `boyko_physics` — so `boyko_physics -> boyko_scene` adds no cycle.
+boyko-scene = { path = "../boyko_scene" }
+
+[dev-dependencies]
+proptest.workspace = true
+# Workspace-pinned criterion 0.5 (same major as every other crate's bench).
+criterion.workspace = true
+
+[[bench]]
+# O2 A/B: the grid broadphase vs the shipped all-pairs loop at {100, 1k, 10k}
+# bodies — reports the measured crossover (the plan promises only "expect
+# O(100s)", not a number).
+name = "broadphase"
+harness = false
+
+[[bench]]
+# O1 A/B: scalar vs AVX2 in-solver `refresh_inertia` + integrate on a 10k-body
+# substep — reports the width-only speed-up (build the AVX2 arm with
+# RUSTFLAGS="-C target-feature=+avx2"). The SIMD path is bit-identical to scalar.
+name = "simd_o1"
+harness = false
+
+[[bench]]
+# O4: the pure `ConstraintGraph::build` partition (union-find islands + greedy
+# coloring) at 1k / 10k / 100k bodies with realistic contact density — reports the
+# (~linear) build cost. Anti-vacuity: every scene has > 0 manifolds + > 1 color.
+name = "constraint_graph"
+harness = false
+
+[[bench]]
+# O5 A/B: the colored color-order solve vs the reference manifold-order solve at
+# ~1k / 10k contacts on a warmed resting pile — confirms single-threaded colored
+# is roughly comparable (no pathological regression; the wins land in O6/O7).
+# Anti-vacuity: every scene has > 0 contacts + > 1 color.
+name = "colored_solve"
+harness = false
+
+[[bench]]
+# O6 Gate 10: PARALLEL colored-solve scaling on a 10k-body pyramid at {1,2,4,8}
+# workers vs the O5 single-threaded baseline (the >= 0.6x-linear-to-4-workers bar),
+# plus the threshold effect (small-color worlds pay no scope tax; large-color
+# worlds scale). Anti-vacuity: > 1 color + a color above MIN_PARALLEL_SLOTS_PER_COLOR.
+name = "parallel_solve"
+harness = false
+
+[[bench]]
+# O9 A/B: the box-vs-SDF narrowphase (`box_sdf_manifold`) scalar build vs the
+# `+avx2` batched-kernel build, at SDF edit counts {1,2,4,8,16}. Two BUILDS of the
+# same public entry (the kernel is cfg-gated, not runtime-switched); the
+# scalar->avx2 delta is the O9 speed-up. Build the AVX2 arm with
+# RUSTFLAGS="-C target-feature=+avx2".
+name = "sdf_narrowphase_o9"
+harness = false
+
+[[bench]]
+# O8 Gate 9: the SLEEPING headline win + worst-case overhead on a ~10k-contact
+# resting pile — (1) all-awake sleeping-OFF baseline, (2) mostly-settled sleeping-ON
+# (the slept steady state, must be <= ~5% of (1)), (3) fully-awake sleeping-ON (the
+# always-on bookkeeping overhead, must be a small over-(1) cost, no regression).
+name = "sleeping"
+harness = false
+
+[[bench]]
+# O11 SP1: the single-threaded XPBD soft-body step (`physics_soft_step`) over
+# {64, 512} particles — the SP4-parallel baseline. Reports per-step time +
+# throughput; not a pass/fail gate (SP1 is the correctness foundation).
+name = "soft_step"
+harness = false
+
+[[bench]]
+# O11 SP2 (observation): the volume-constraint step cost (a tet-meshed cube via
+# `physics_soft_step` — `project_volume` per substep) and the soft↔rigid coupled
+# step cost (`physics_soft_step_coupled` + the deepest-contact broadphase query +
+# `physics_soft_rigid_apply`). Reports per-step time; not a pass/fail gate.
+name = "soft_step_sp2"
+harness = false
+
+[[bench]]
+# O11 SP4 (observation, W2 A/B): SERIAL vs COLORED-PARALLEL soft step on a hanging
+# cloth at n ∈ {1k, 10k, 50k} — serial / colored-inline (no-pool, must ≈ serial) /
+# colored-{2,4,8}-worker (the wall-clock win at the larger sizes). Reports per-step
+# time; not a pass/fail gate.
+name = "soft_colored_sp4"
+harness = false

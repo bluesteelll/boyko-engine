@@ -1,0 +1,70 @@
+[package]
+name = "boyko_demo"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "boyko_demo"
+path = "src/main.rs"
+
+[dependencies]
+# ECS core (Wave 3, plan §2.2). The demo drives ONLY the public boyko_ecs API
+# (deep module paths — there is no prelude; see plan §9 G0). `boyko_macros`
+# supplies the `Component` / `Bundle` / `Resource` derives; `boyko_threadpool`
+# the native work-stealing pool that `Schedule::run` fans `par_iter_mut` across.
+boyko-ecs = { path = "../boyko_ecs" }
+boyko-macros = { path = "../boyko_macros" }
+boyko-threadpool = { path = "../boyko_threadpool" }
+
+# eframe brings egui + winit + wgpu integration in one versioned bundle. Reach
+# wgpu/egui THROUGH eframe re-exports (`eframe::egui`, `eframe::egui_wgpu`, and
+# `eframe::egui_wgpu::wgpu`) — do NOT add separate wgpu/egui deps. Version skew
+# across the egui/egui-wgpu/winit/wgpu quadruple is the #1 build failure
+# (plan §2.3, H1/H2). `default-features = false` drops the glow (GL) renderer;
+# keep `wgpu` + `default_fonts`.
+eframe = { version = "0.34", default-features = false, features = ["wgpu", "default_fonts"] }
+bytemuck.workspace = true
+log = "0.4"
+rand = "0.9"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+env_logger = "0.11"
+
+# Native-only test/bench tooling (Phase 20.1 W4). Target-gated so the wasm32
+# check graph never resolves them: criterion drives `benches/gpu_pack.rs` (the
+# G2 pack-cost gate), proptest the T7 prev-invariant property test.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
+
+# Phase 20.1 G2 — 16 B baseline vs 24 B interpolated pack mirror (★R1-4:
+# baseline measured FIRST; gate = 24 B <= 5 ns/row absolute if baseline <= 3,
+# else ratio <= 1.6x). See docs/PHASE-20.1-PLAN.md §Metrics.
+[[bench]]
+name = "gpu_pack"
+harness = false
+
+# Web (wasm32) target deps (Wave 7, plan §2.2 / §8.2). The demo runs the sim
+# SEQUENTIALLY on wasm — no `ThreadPool`, no OS threads (D10) — so nothing here
+# pulls a threading shim.
+#
+# * `wasm-bindgen` provides the `#[wasm_bindgen(start)]` entry + `JsCast` (the
+#   canvas downcast). `web-sys` is reached via `eframe::web_sys` (re-exported),
+#   so it is NOT re-declared.
+# * `wasm-bindgen-futures` drives the async `WebRunner::start` via `spawn_local`.
+#   eframe 0.34.3 re-exports `wasm_bindgen` + `web_sys` but NOT
+#   `wasm_bindgen_futures`, so it is declared here, pinned to eframe's `0.4`
+#   minor to keep a single version in the graph.
+# * `console_error_panic_hook` + `console_log` surface panics/logs in the
+#   browser devtools.
+# * `getrandom`'s `wasm_js` feature wires `rand`'s entropy to the Web Crypto API.
+#   getrandom 0.3 ALSO requires the `--cfg getrandom_backend="wasm_js"` rustflag
+#   (set in `.cargo/config.toml`) — the feature alone is insufficient (it emits a
+#   `compile_error!` otherwise). Without both, `rand` fails to build on wasm.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+console_log = "1"
+getrandom = { version = "0.3", features = ["wasm_js"] }

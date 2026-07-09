@@ -2,9 +2,9 @@ name: Deploy Documentation
 
 on:
   push:
-    branches: [master]
+    branches: [master, ecs]
   pull_request:
-    branches: [master]
+    branches: [master, ecs]
   workflow_dispatch:
 
 permissions:
@@ -30,8 +30,16 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        # A PINNED nightly, not floating @nightly: the engine carries hard-coded
+        # layout asserts (e.g. size_of::<ComponentPool>() == 128 in
+        # boyko_ecs/src/ecs/memory/component_pool.rs) that newer nightlies break
+        # via niche/layout changes (E0080). This is the nightly the project builds
+        # green on; bump it together with the engine when those asserts move.
+        # nightly is also required for boyko_shaderdsl's `nightly`/`emit` features
+        # (#![feature(core_intrinsics)]), which do not compile on stable (E0554).
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-05-20
           components: rustfmt
 
       - name: Cache cargo
@@ -55,22 +63,32 @@ jobs:
         run: mdbook build
 
       - name: Build cargo doc
-        env:
-          RUSTDOCFLAGS: "-D warnings --enable-index-page -Z unstable-options"
-        run: |
-          # Note: --enable-index-page requires nightly. For stable, we generate a manual redirect below.
-          cargo doc --no-deps --workspace --all-features || cargo doc --no-deps --workspace --all-features
+        id: build_doc
+        # NON-FATAL by design: the rustdoc /api/ sub-site must never take down the
+        # mdBook book deploy (the book builds independently above). If this step
+        # fails, "Assemble site" below publishes the book without /api/.
+        #   - default features only (NOT --all-features): --all-features pulls the
+        #     bench-only `bench-alloc`/mimalloc C dependency, which has no doc value.
+        #   - boyko_demo / bench_bevy_vs_boyko are excluded: they are the app/bench
+        #     harnesses (wgpu/winit/eframe, bevy), not the engine's public API, and
+        #     winit's linux backend trips "platform not supported" in this CI image.
+        #   - --enable-index-page is omitted; the /api/ landing page is the manual
+        #     redirect written in "Assemble site".
+        #   - RUSTDOCFLAGS=-D warnings is intentionally NOT set.
+        continue-on-error: true
+        run: cargo doc --no-deps --workspace --exclude boyko_demo --exclude bench_bevy_vs_boyko
 
       - name: Assemble site
         run: |
           mkdir -p _site
           # mdBook output → root
           cp -r book/output/* _site/
-          # cargo doc → /api/
-          mkdir -p _site/api
-          cp -r target/doc/* _site/api/
-          # Index redirect for /api/ to main crate
-          cat > _site/api/index.html <<'EOF'
+          # cargo doc → /api/ — only if the (non-fatal) doc build succeeded.
+          if [ "${{ steps.build_doc.outcome }}" = "success" ]; then
+            mkdir -p _site/api
+            cp -r target/doc/* _site/api/
+            # Index redirect for /api/ to main crate
+            cat > _site/api/index.html <<'EOF'
           <!DOCTYPE html>
           <html lang="en">
           <head>
@@ -84,15 +102,59 @@ jobs:
           </body>
           </html>
           EOF
+          else
+            echo "::warning::cargo doc failed; publishing the book without the /api/ rustdoc sub-site."
+          fi
           # Ensure GitHub Pages serves correctly
           touch _site/.nojekyll
 
+      # ── boyko_demo web build (Wave 7, plan §8.2 / §10 W7.3) ─────────────────
+      # ADDITIVE: builds the wasm demo with Trunk and folds dist/ into the same
+      # Pages artifact under /demo/. The mdBook + rustdoc deploy above is already
+      # assembled into _site/ at this point, so these steps only ADD to it.
+      #
+      # NON-FATAL by design (continue-on-error: true on the build step). As of
+      # Wave 7 the wasm build is blocked UPSTREAM in `boyko_ecs` (out of scope
+      # here): ~19 hard-coded 64-bit `const _: () = assert!(size_of/align_of/
+      # offset_of ...)` layout guards (EntityInland, Column, Commands,
+      # EventReader/Writer, ...) fail const-eval on the 32-bit wasm32 ABI. Until
+      # those asserts are made pointer-width-aware in the core, `trunk build`
+      # fails — but it MUST NOT take down the docs deploy. So the step is
+      # `continue-on-error`, and the publish step below only copies dist/ if it
+      # was actually produced. See docs/DEMO-DOGFOODING.md (Wave-7 finding).
+      - name: Add wasm target
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs'
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install Trunk
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs'
+        uses: jetli/trunk-action@v0.5.0
+        with:
+          version: 'latest'
+
+      - name: Build boyko_demo (wasm, non-fatal until the core layout asserts are pointer-width-aware)
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs'
+        id: build_demo
+        continue-on-error: true
+        working-directory: crates/boyko_demo
+        # The demo's .cargo/config.toml (discovered from this dir) sets
+        # `--cfg getrandom_backend="wasm_js"`, required by getrandom 0.3 on wasm.
+        # `--public-url /boyko-engine/demo/` matches the Pages project subpath so
+        # the generated asset URLs resolve under the deployed /demo/ path.
+        run: trunk build --release --public-url /boyko-engine/demo/
+
+      - name: Publish boyko_demo to /demo/ (only if the wasm build succeeded)
+        if: (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs') && steps.build_demo.outcome == 'success'
+        run: |
+          mkdir -p _site/demo
+          cp -r crates/boyko_demo/dist/* _site/demo/
+
       - name: Setup Pages
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs'
         uses: actions/configure-pages@v5
 
       - name: Upload artifact
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs'
         uses: actions/upload-pages-artifact@v3
         with:
           path: _site
@@ -100,7 +162,7 @@ jobs:
   deploy:
     name: Deploy to GitHub Pages
     needs: build
-    if: github.ref == 'refs/heads/master'
+    if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/ecs'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

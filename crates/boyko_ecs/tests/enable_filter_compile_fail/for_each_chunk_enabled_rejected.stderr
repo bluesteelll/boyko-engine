@@ -1,0 +1,26 @@
+error[E0277]: `Enabled<A>` cannot be used as a filter in `Query::for_each_chunk` — it is not archetype-level
+  --> tests/enable_filter_compile_fail/for_each_chunk_enabled_rejected.rs:21:10
+   |
+21 |         .for_each_chunk(|_slice: &[P]| {});
+   |          ^^^^^^^^^^^^^^ non-archetypal filter (likely `Added<T>` / `Changed<T>` / tuple containing one)
+   |
+   = help: the trait `ArchetypalQueryFilter` is not implemented for `Enabled<A>`
+   = note: the chunk API yields one slice per archetype with no per-row gate; use `Query::iter()` for per-row tick filtering
+   = help: the following other types implement trait `ArchetypalQueryFilter`:
+             ()
+             (F0, F1)
+             (F0, F1, F2)
+             (F0, F1, F2, F3)
+             (F0, F1, F2, F3, F4)
+             (F0, F1, F2, F3, F4, F5)
+             (F0, F1, F2, F3, F4, F5, F6)
+             (F0, F1, F2, F3, F4, F5, F6, F7)
+           and $N others
+note: required by a bound in `QueryView::<'w, D, F>::for_each_chunk`
+  --> src/ecs/core/iters/query/query_view.rs
+   |
+   |     pub fn for_each_chunk<Func>(&mut self, f: Func)
+   |            -------------- required by a bound in this associated function
+...
+   |         F: ArchetypalQueryFilter,
+   |            ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `QueryView::<'w, D, F>::for_each_chunk`

@@ -1,0 +1,13 @@
+error: a node reference must appear inside a component field; a bare `#name` is not a component
+ --> tests/ui_macro_compile_fail/bare_name_item.rs:9:9
+  |
+9 |         #title
+  |         ^
+
+warning: unused import: `boyko_ui::components::UiLayout`
+ --> tests/ui_macro_compile_fail/bare_name_item.rs:3:5
+  |
+3 | use boyko_ui::components::UiLayout;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

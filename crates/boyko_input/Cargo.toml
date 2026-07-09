@@ -1,0 +1,29 @@
+[package]
+name = "boyko-input"
+version = "0.1.0"
+edition = "2024"
+description = "Source-agnostic, rebindable action-mapping for boyko-engine. Turns raw keyboard/mouse events from any source into typed, rebindable ECS actions. NO windowing dependency on the engine path (winit/Win32/eframe live behind feature-gated edge adapters only)."
+
+# INVIOLABLE dependency boundary (INPUT-SYSTEM-PLAN §4): the action core depends
+# on `boyko_ecs` (Resource), `boyko_utils` (BitSet256), and `boyko_macros` (the
+# `#[derive(Actionlike)]`). It must NOT depend on `boyko_rhi_vulkan`, winit, or
+# eframe — keeping windowing out of core lets the ECS-facing action layer
+# compile on every target (incl. wasm) with one action map for every frontend.
+[dependencies]
+boyko-ecs = { path = "../boyko_ecs" }
+boyko-utils = { path = "../boyko_utils" }
+boyko-macros = { path = "../boyko_macros" }
+
+# Win32 message / bit constants for the pure `win32::translate` (I6 / I6b). The
+# OFFICIAL MS-maintained `windows-sys` bindings, explicitly approved for the OS
+# layer. These are pure `u32`/`u16`/`i32` constant VALUES (WM_*, XBUTTON1/2,
+# WHEEL_DELTA, KF_EXTENDED, KF_REPEAT) — `translate` makes NO FFI call, so this
+# dependency adds no linkage and no runtime cost; it only sources the documented
+# message-id / bit values from MS instead of hand-transcribing them. TARGET-GATED
+# to `cfg(windows)` so the INVIOLABLE leaf boundary holds: wasm / non-Windows
+# builds pull NOTHING and `win32.rs` itself is `#[cfg(windows)]`-only (see lib.rs).
+# The workspace `windows-sys` pin already carries `Win32_UI_WindowsAndMessaging`
+# (the only feature this crate's pure-constant `win32::translate` needs), so no
+# local `features` addition is required here.
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

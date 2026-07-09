@@ -1,0 +1,27 @@
+error: #[relationship_target]'s collection field must be PRIVATE (the reverse index must not be writable by user code); remove the `pub`
+  --> tests/compile_fail_relations/relationship_target_public_field.rs:18:8
+   |
+18 | struct LikedBy(pub Vec<Entity>);
+   |        ^^^^^^^
+
+error[E0277]: the trait bound `LikedBy: RelationshipTarget` is not satisfied
+  --> tests/compile_fail_relations/relationship_target_public_field.rs:12:25
+   |
+12 | #[relationship(target = LikedBy)]
+   |                         ^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `RelationshipTarget` is not implemented for `LikedBy`
+  --> tests/compile_fail_relations/relationship_target_public_field.rs:18:1
+   |
+18 | struct LikedBy(pub Vec<Entity>);
+   | ^^^^^^^^^^^^^^
+help: the trait `RelationshipTarget` is implemented for `Children`
+  --> src/ecs/core/hierarchy/mod.rs
+   |
+   | impl RelationshipTarget for Children {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `boyko_ecs::prelude::Relationship::Target`
+  --> src/ecs/core/relationship/mod.rs
+   |
+   |     type Target: RelationshipTarget<Source = Self>;
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Relationship::Target`

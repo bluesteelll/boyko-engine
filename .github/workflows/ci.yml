@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [master, ecs]
+  pull_request:
+    branches: [master, ecs]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: cargo check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets
+
+  test:
+    name: cargo test (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        profile: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test (${{ matrix.profile }})
+        run: |
+          if [ "${{ matrix.profile }}" = "release" ]; then
+            cargo test --all-targets --release
+          else
+            cargo test --all-targets
+          fi
+
+  clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy
+        # Phase 5a cleared boyko_utils (13 warnings); Phase 5d cleared boyko_ecs
+        # (~43 warnings). Workspace is now clean: no || true workaround needed.
+        run: cargo clippy --all-targets -- -D warnings
+
+  bench-compile:
+    name: cargo bench --no-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo bench --no-run
+
+  force-alloc-panic:
+    name: cargo test --release (force_alloc_panic)
+    runs-on: ubuntu-latest
+    env:
+      # Phase 9 Wave 7 Step 24 (Round 3 O-NEW-1): escalate ALLOC1 to a
+      # release-mode panic. Catches any regression that accidentally
+      # allocates from `Arena` inside a System body. See
+      # docs/PHASE-9-FORCE-ALLOC-PANIC.md.
+      RUSTFLAGS: "--cfg force_alloc_panic -D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all-targets --release
+
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+    # Phase 3a (Miri retag fix + EntityId leak guard) closed the pre-existing UB.
+    # continue-on-error removed: Miri is now a required gate.
+    # MIRIFLAGS=-Zmiri-tree-borrows is set in .cargo/config.toml (workspace-wide)
+    # because Tree Borrows (TB) correctly models *const Arena raw provenance with
+    # UnsafeCell interior mutation — Stacked Borrows (SB) falsely rejects it.
+    # Miri retag UB (Step 1) + EntityId leak (Step 4) jointly close Phase 3a.
+    # continue-on-error removed from .github/workflows/ci.yml as per Phase 3a plan.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo miri setup
+        run: cargo +nightly miri setup
+      - name: cargo miri test (event_attribute — known clean)
+        run: cargo +nightly miri test --package boyko-ecs --test event_attribute
+      - name: cargo miri test (drop_fn — known clean)
+        run: cargo +nightly miri test --package boyko-ecs --test drop_fn
+      - name: cargo miri test (full sweep)
+        run: cargo +nightly miri test --all-targets

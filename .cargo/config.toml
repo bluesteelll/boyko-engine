@@ -1,0 +1,15 @@
+# Miri: use Tree Borrows (TB) instead of the default Stacked Borrows (SB).
+#
+# TB is the successor borrow model and correctly handles `*const T` raw pointers
+# into allocations that contain `UnsafeCell` fields (e.g., `Arena::free_blocks`).
+# Under SB, any `&mut` reborrow through an `UnsafeCell` field invalidates all
+# `SharedReadOnly` tags derived from a `*const Arena` ancestor pointer — even
+# though the access is semantically valid (the UnsafeCell permits interior
+# mutability). TB models this correctly: a Frozen `*const` and an
+# `UnsafeCell`-guarded `&mut` coexist without conflict.
+#
+# This setting was introduced in Phase 3a (Miri retag fix) and is required for
+# Miri to accept the `*const Arena` raw provenance pattern used throughout the
+# ECS core (audit finding C-001 / Phase 3a).
+[env]
+MIRIFLAGS = "-Zmiri-tree-borrows"

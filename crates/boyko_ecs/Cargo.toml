@@ -4,4 +4,218 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+boyko-utils =  { path = "../boyko_utils" }
+boyko-threadpool = { path = "../boyko_threadpool" }
+fixedbitset = "0.5"
+crossbeam-queue = "0.3"
+crossbeam-utils = "0.8"
+# Phase 12.5 Opt-A2: SBO-SEND1 / SBO-UNPIN pin-down via compile-time
+# `assert_impl_all!` in `commands/spawn_batch_command.rs` and
+# `bundle/bundle_column_cache.rs`. Production build asserts (not
+# `#[cfg(test)]`) per I-N5.
+static_assertions = "1.1"
+
+# Phase X.E — optional bench-only global allocator, gated behind the
+# `bench-alloc` feature (OFF by default). Cargo forbids `optional = true` on
+# dev-dependencies, so the bench allocator lives here as a normal optional
+# dependency; because nothing enables `bench-alloc` by default, it is NEVER
+# compiled in the default build/test/bench graph. Enabled via
+# `cargo bench --features bench-alloc`. See docs/BENCHMARKING.md.
+mimalloc = { version = "0.1", optional = true }
+
+# Phase X.C/X.H — lazy-commit virtual-memory backing store. The Unix arm of
+# `VmReservation` (`memory/vm.rs`) calls `mmap` / `mprotect` / `munmap` via
+# `libc`. Already present in Cargo.lock at 0.2.x (transitively), so this
+# unifies with zero new compilation. Not pulled in on Windows/wasm32 (the
+# cfg-gated arms there use `VirtualAlloc` / the global allocator).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# Phase 22.1: loom is pulled in ONLY under `--cfg loom` (mirrors
+# boyko_threadpool's Phase-9.1 setup). `term_list.rs` aliases its atomics to
+# `loom::sync::atomic` under `cfg(loom)` so the loom harness drives the REAL
+# resolve/reclaim protocol; the normal build graph never lists loom.
+[target.'cfg(loom)'.dependencies]
+loom.workspace = true
+
+[features]
+default = []
+# Phase 12.5 Track B I5 — bumps `MAX_QUERY_TYPES` from 1024 to 4096 for
+# projects with an unusually high fan-out of `(D, F)` query shapes. Increases
+# the per-world `query_state_cache` footprint from ≤ 32 KB to ≤ 128 KB.
+big_query_table = []
+# Phase X.E — opt-in low-variance bench allocator. OFF by default so the normal
+# `cargo bench` keeps the production system heap (honest absolutes); enable via
+# `cargo bench --features bench-alloc` to swap in mimalloc for A/B signal
+# extraction. See docs/BENCHMARKING.md.
+bench-alloc = ["dep:mimalloc"]
+
+[dev-dependencies]
+boyko-macros = { path = "../boyko_macros" }
+trybuild = "1"
+criterion.workspace = true
+proptest.workspace = true
+# `rand` is used only by tests/benches (the single `src/` reference is inside a
+# `#[cfg(test)] mod tests` in `schedule/bitset_intersects.rs`), so it lives in
+# dev-dependencies. This keeps its `getrandom` dependency out of the normal
+# `wasm32-unknown-unknown` build (the web-demo target), where getrandom 0.3
+# otherwise requires an explicit backend flag.
 rand = "0.9.0"
+
+[[bench]]
+name = "component_id"
+harness = false
+
+[[bench]]
+name = "swap_remove"
+harness = false
+
+# Phase X.B — dense Vec<Unit>-elimination pool micro-benchmarks (add fill /
+# swap_remove / get_raw row_ptr recompute), isolated from EcsMaster setup noise.
+[[bench]]
+name = "component_pool_dense"
+harness = false
+
+[[bench]]
+name = "query_iter"
+harness = false
+
+# Phase X.C/X.J — cold-construction gate (EcsMaster::new <= 7.5 µs). Lived in
+# benches/arena_new.rs until Phase X.J retired the shared Arena (and the
+# arena-only groups with it).
+[[bench]]
+name = "ecs_master_new"
+harness = false
+
+[[bench]]
+name = "archetype"
+harness = false
+
+# Phase X.I — XI-B2 archetype-creation gate (create_by_ids <= 25 us; pools
+# are reserve-only post-X.I). See docs/PHASE-XI-PLAN.md §Metrics.
+[[bench]]
+name = "archetype_create"
+harness = false
+
+# Phase X.I — XI-B4 growth-event gate (one grow_rows commit step at
+# 64 KiB / 2 MiB / 64 MiB <= 10 / 10 / 50 us). Gate figures are the printed
+# `pool_grow_event[...]` lines. See docs/PHASE-XI-PLAN.md §Metrics.
+[[bench]]
+name = "pool_grow_event"
+harness = false
+
+# D6 micro-experiment — splits the g5 spawn_batch cold-world cost into the
+# `vm.commit` syscall vs demand-zero page faults (decides Decision 6
+# feasibility). See benches/d6_commit_vs_faults.rs.
+[[bench]]
+name = "d6_commit_vs_faults"
+harness = false
+
+[[bench]]
+name = "event_dispatch"
+harness = false
+
+[[bench]]
+name = "random_access"
+harness = false
+
+[[bench]]
+name = "system_param"
+harness = false
+
+[[bench]]
+name = "query_dsl"
+harness = false
+
+[[bench]]
+name = "phase8cd"
+harness = false
+
+[[bench]]
+name = "bundle_static_cache"
+harness = false
+
+[[bench]]
+name = "phase9_scheduler"
+harness = false
+
+[[bench]]
+name = "phase10_change_detection"
+harness = false
+
+[[bench]]
+name = "phase12_5_spawn_batch"
+harness = false
+
+[[bench]]
+name = "phase14a_hooks_gate"
+harness = false
+
+[[bench]]
+name = "phase17_states"
+harness = false
+
+[[bench]]
+name = "phase18_app"
+harness = false
+
+# Phase 22 — tag benches: tag-only / mixed-bundle spawn, has_tag, dynamic
+# attach/detach toggle (cold vs warm attribution split), 1-dynamic-term query
+# overhead on both drivers, ZST tick-only pool grow ladder. See
+# docs/PHASE-22-TAGS-PLAN.md §"New benches".
+[[bench]]
+name = "phase22_tags"
+harness = false
+
+# EnableTag (Wave 6) — enable-bit non-fragmenting tag benches: warm O(1) bit
+# toggle, Query<&P, Enabled<A>> iteration, spawn+enable vs plain spawn (no
+# archetype churn), and a >4096-row toggle forcing a 2nd EnablePage. See
+# benches/enable_tags.rs.
+[[bench]]
+name = "enable_tags"
+harness = false
+
+# Chunk-aware EnableTag filter (rev. 3) — the PERF gate: A/B of the scalar
+# per-row `with_enabled().iter()` path vs the run-aware
+# `with_enabled().for_each_chunk()` path across {99,50,1}% density, plus the
+# 0%-gate no-filter / absent-column references. See benches/enable_chunk_filter.rs.
+[[bench]]
+name = "enable_chunk_filter"
+harness = false
+
+# Task #5 — EnableTag positive-term archetype-cull DIAGNOSTIC (profile-first; the
+# cull is NOT implemented). Measures whether visiting no-column archetypes in a
+# `Query<&EtPos, Enabled<EtFlag>>` is measurable against same-binary scenarios
+# (A/B cull_full vs cull_equiv, R-sweep, M-sweep, all-have-column control). See
+# benches/cull_diagnostic.rs.
+[[bench]]
+name = "cull_diagnostic"
+harness = false
+
+# Phase 20 — App frame-driver overhead gates: P20-B1(b) empty-frame envelope
+# (empty_main <= 250 ns/frame) + P20-B2 substep overhead (fixed_loop_1_substep
+# minus bare_empty_schedule_run minus the (b) envelope <= 100 ns/substep).
+# See docs/PHASE-20-PLAN.md §Metrics.
+[[bench]]
+name = "app_overhead"
+harness = false
+
+# Feature 1 (required components) — the 0%-gate (sacred). Drives the
+# require-free spawn + insert/migration paths so the tester can run a
+# same-binary A/B (--save-baseline / --baseline) to confirm no regression on
+# the require-free path. See docs/REQUIRED-COMPONENTS-PLAN.md §"0%-gate".
+[[bench]]
+name = "gate_spawn_no_require"
+harness = false
+
+# Relations query DSL (H) — the `Related<ChildOf, &Pos>` join vs a manual
+# targets+get_component loop, plus the relation-seam 0%-gate (plain Query<&Pos>).
+[[bench]]
+name = "relation_join"
+harness = false
+
+[lints.rust]
+# Phase 9 Wave 7 Step 24: opt-in stronger ALLOC1 check via
+# `RUSTFLAGS="--cfg force_alloc_panic"`. See
+# docs/PHASE-9-FORCE-ALLOC-PANIC.md.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(force_alloc_panic)', 'cfg(loom)'] }

@@ -1,0 +1,45 @@
+[package]
+name = "boyko_shaderdsl"
+version = "0.1.0"
+edition = "2024"
+description = "In-house Rust shader eDSL: author the SDF field math ONCE, generic over a `FieldScalar` backend, instantiated as (a) a CPU f32 mirror byte-identical to `boyko_sdf_math::sdf_edit_list` and (b) an HLSL SSA emitter textually equivalent to the frozen `sdf_field.hlsli`. ZERO third-party deps (in-house). NO rust-gpu / naga / spirv-builder."
+
+# INVIOLABLE: in-house, ZERO third-party deps. The `Eval` path (`scalar.rs` f32
+# impl + `field.rs`) is `#![no_std]`-clean so it can be the physics leaf — physics
+# never links the emitter. The `emit` feature (OFF by default) gates the std-side
+# SSA recorder + the HLSL printer + the `emit_field` bin, so a physics build never
+# pulls `std`/codegen for the eDSL.
+[dependencies]
+
+[features]
+# The `Eval` (f32) path needs `sqrt`, the one op stable `core` lacks. Mirrors
+# `boyko_sdf_math`'s `nightly` feature: with `nightly` the crate is strictly
+# `#![no_std]` (using `core::intrinsics::sqrtf32`); the default build links `std`
+# SOLELY for `f32::sqrt`. Both lower to the same hardware `sqrtss`, so the f32 Eval
+# path is bit-identical in either mode (the GPU goldens are unaffected).
+nightly = []
+# Gates the std/codegen side: the `Emit` SSA backend, the HLSL printer, and the
+# `emit_field` bin. OFF by default → physics builds never link the emitter.
+emit = []
+
+default = []
+
+[[bin]]
+name = "emit_field"
+path = "src/bin/emit_field.rs"
+required-features = ["emit"]
+
+[[bin]]
+name = "emit_ssao_variants"
+path = "src/bin/emit_ssao_variants.rs"
+required-features = ["emit"]
+
+# The SDFDDGI I2 probe-update-pass shader emitter (writes ONE `sdf_probe_update.comp.hlsl`; A-1).
+# Named `emit_probe_gi` (NOT `_update`): Windows installer-detection forces UAC elevation on any
+# exe whose name contains "update"/"setup"/"install"/"patch" (os error 740 when the test harness
+# launches it non-elevated), so the executable-producing bin/test names drop that token — the
+# emitted shader DATA files keep `probe_update` (never executed → never flagged).
+[[bin]]
+name = "emit_probe_gi"
+path = "src/bin/emit_probe_gi.rs"
+required-features = ["emit"]

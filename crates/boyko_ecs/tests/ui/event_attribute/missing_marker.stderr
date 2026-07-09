@@ -1,0 +1,13 @@
+error: field `unmarked_field` has no #[participant] or #[parameter] marker; every field must have exactly one
+ --> tests/ui/event_attribute/missing_marker.rs:8:5
+  |
+8 |     unmarked_field: u32,
+  |     ^^^^^^^^^^^^^^
+
+warning: unused import: `boyko_ecs::ecs::core::entity::entity::Entity`
+ --> tests/ui/event_attribute/missing_marker.rs:1:5
+  |
+1 | use boyko_ecs::ecs::core::entity::entity::Entity;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

@@ -1,0 +1,5 @@
+error[E0599]: no method named `clone` found for struct `FrameWriteToken` in the current scope
+  --> tests/compile_fail_frame_write_token/token_clone_rejected.rs:12:22
+   |
+12 |     let copy = token.clone();
+   |                      ^^^^^ method not found in `FrameWriteToken`

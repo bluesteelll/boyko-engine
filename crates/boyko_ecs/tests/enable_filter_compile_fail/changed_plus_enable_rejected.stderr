@@ -1,0 +1,26 @@
+error[E0080]: evaluation panicked: an `Enabled<T>`/`Disabled<T>` term cannot be combined with `Added`/`Changed` in one query: point lookups apply the enable bit but not change-detection, which would silently mislead. Split into two queries.
+  --> tests/enable_filter_compile_fail/changed_plus_enable_rejected.rs:32:15
+   |
+32 | const _: () = QueryDataState::<&P, (Changed<P>, Enabled<A>)>::assert_query_shape();
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ evaluation of `_` failed inside this call
+   |
+note: inside `QueryDataState::<&P, (Changed<P>, Enabled<A>)>::assert_query_shape`
+  --> src/ecs/core/iters/query/state.rs
+   |
+   |         Self::eval_shape_asserts();
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: inside `QueryDataState::<&P, (Changed<P>, Enabled<A>)>::eval_shape_asserts`
+  --> $RUST/core/src/panic.rs
+   |
+   |           $crate::panicking::panic_fmt($crate::const_format_args!($($t)+));
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the failure occurred here
+   |
+  ::: src/ecs/core/iters/query/state.rs
+   |
+   | /         assert!(
+   | |             !(F::CONTAINS_ENABLE_TERM && F::CONTAINS_CHANGE_DETECTION),
+   | |             "an `Enabled<T>`/`Disabled<T>` term cannot be combined with `Added`/`Changed` \
+   | |              in one query: point lookups apply the enable bit but not change-detection, \
+   | |              which would silently mislead. Split into two queries."
+   | |         );
+   | |_________- in this macro invocation

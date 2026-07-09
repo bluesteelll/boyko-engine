@@ -1,0 +1,88 @@
+[package]
+name = "bench-bevy-vs-boyko"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+# W2 workspace hygiene: this crate is a 2-line doc-stub lib whose real payload is
+# its benches (dev targets). The bevy tree + the boyko path deps were NORMAL
+# dependencies, so every `cargo check/build --workspace` compiled the whole Bevy
+# dependency graph. Moving them to `[dev-dependencies]` keeps them out of the
+# non-bench build graph while the benches still see them.
+[dependencies]
+# Phase X.E — optional bench-only global allocator, gated behind the
+# `bench-alloc` feature (OFF by default). Cargo forbids `optional = true` on
+# dev-dependencies, so the bench allocator lives here as a normal optional
+# dependency; because nothing enables `bench-alloc` by default, it is NEVER
+# compiled in the default build/bench graph. Enabled via
+# `cargo bench --features bench-alloc`. See docs/BENCHMARKING.md.
+mimalloc = { version = "0.1", optional = true }
+
+[dev-dependencies]
+boyko-ecs = { path = "../boyko_ecs" }
+boyko-macros = { path = "../boyko_macros" }
+boyko-threadpool = { path = "../boyko_threadpool" }
+bevy_ecs = { version = "0.18.1", features = ["std", "multi_threaded"] }
+criterion.workspace = true
+
+[features]
+# Opt-in flag for benches that require nightly-only intrinsics (e.g.
+# `float_algebraic`). The default-toolchain `--all-targets` build leaves this
+# off so it never tries to compile `#![feature(...)]` code on stable.
+# Run the nightly benches via: `cargo +nightly bench --features nightly`.
+nightly = []
+# Phase X.E — opt-in low-variance bench allocator. OFF by default so the normal
+# `cargo bench` keeps the production system heap (honest absolutes); enable via
+# `cargo bench --features bench-alloc` to swap in mimalloc for A/B signal
+# extraction. See docs/BENCHMARKING.md.
+bench-alloc = ["dep:mimalloc"]
+
+[[bench]]
+name = "comparison"
+harness = false
+
+[[bench]]
+name = "comparison_v2"
+harness = false
+
+[[bench]]
+name = "profile_spawn"
+harness = false
+
+[[bench]]
+name = "profile_spawn_v2"
+harness = false
+
+[[bench]]
+name = "profile_query"
+harness = false
+
+[[bench]]
+name = "profile_spawn_single"
+harness = false
+
+# Phase X.F — g7/g7b growth-crossing gate (boyko slab commit vs Bevy table
+# doubling memcpy). Binding targets: total >= 1.5x faster, worst-event spike
+# <= 0.1x. See docs/PHASE-XF-PLAN.md §B5/B6 + R2 FINAL + R3-2.
+[[bench]]
+name = "growth_crossing"
+harness = false
+
+# Phase X.I — g8 growth-crossing into ONE archetype: 1 M entities, 15x past
+# the old 65,536-row pool ceiling (impossible pre-X.I). Binding targets
+# (XI-B6): total >= 1.5x faster than Bevy, worst-sub-batch spike <= 0.1x.
+# See docs/PHASE-XI-PLAN.md §Metrics.
+[[bench]]
+name = "growth_crossing_pool"
+harness = false
+
+[[bench]]
+name = "g6_for_each_chunk"
+harness = false
+# Uses `f32::algebraic_add` (`#![feature(float_algebraic)]`), so it only
+# compiles on nightly with the `nightly` feature enabled. Excluded from the
+# stable `--all-targets` build to keep `cargo clippy --workspace` green.
+required-features = ["nightly"]

@@ -1,0 +1,33 @@
+[package]
+name = "boyko-fontbake"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Load-time MTSDF font baker: in-house FontFace trait + ttf-parser outline/metrics adapter, in-house MSDF generation (edge-coloring, pseudo-distance, scanline sign-correction, error-correction), skyline atlas packing, and the .bfont binary format. Off the engine hot path."
+
+[lib]
+name = "boyko_fontbake"
+path = "src/lib.rs"
+
+[dependencies]
+# Math vocabulary (Vec2 etc.). Leaf, zero-dep, bit-deterministic.
+boyko-math = { path = "../boyko_math" }
+# Parallel per-texel MSDF generation (Principle: parallelize the bake).
+boyko-threadpool = { path = "../boyko_threadpool" }
+# Outline + metrics extraction ONLY, behind the in-house `FontFace` trait
+# (owner-approved, locked). ttf-parser is `#![forbid(unsafe_code)]`,
+# zero-dependency, zero-alloc, and handles glyf + CFF/CFF2. The engine code
+# depends on the `FontFace` TRAIT, never on this crate directly.
+ttf-parser = "0.21"
+
+[dev-dependencies]
+# Property-based tests for the MSDF/atlas math + serialization round-trip
+# (random inputs, invariant checks). Workspace-standard pin.
+proptest.workspace = true
+# Microbenchmarks for the load-time bake hot paths (per-glyph MSDF generation,
+# atlas packing, .bfont serialization). Off the engine runtime hot path.
+criterion.workspace = true
+
+[[bench]]
+name = "bake"
+harness = false

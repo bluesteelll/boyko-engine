@@ -1,0 +1,677 @@
+//! The `eframe::App` implementation: the single seam between the ECS sim and the
+//! wgpu renderer (plan §4 / D8 / D14).
+//!
+//! `DemoApp` owns the [`EcsMaster`] world, the native [`SimRunner`] (which bundles
+//! the thread pool, schedule, and fixed-timestep accumulator), and the GPU handles
+//! needed for the per-frame upload. Each frame `ui` runs the pipeline in order:
+//!
+//! 1. maps the egui pointer into world space and writes [`InputState`];
+//! 2. steps the simulation (`runner.step`) — the real multi-threaded schedule;
+//! 3. uploads the `GpuInstance` column zero-copy via `for_each_chunk` into the
+//!    shared instance buffer (plan D2/H4 — done here because the `'static` paint
+//!    callback cannot borrow the world);
+//! 4. registers the paint callback (which only draws `0..count`); and
+//! 5. draws the egui control/stats panel.
+
+use std::sync::Arc;
+// `std::time::Instant` panics on `wasm32-unknown-unknown` (no monotonic clock
+// without a JS shim), so the per-frame wall-clock timing is native-only; the
+// wasm path derives `frame_ms` from egui's `stable_dt` instead (see `ui`).
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+
+use eframe::CreationContext;
+use eframe::egui;
+use eframe::egui_wgpu::wgpu;
+use rand::Rng;
+
+use boyko_ecs::ecs::core::component::component::Component;
+use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
+use boyko_ecs::ecs::core::state::NextState;
+use boyko_ecs::ecs::core::time::FixedTime;
+use boyko_ecs::ecs::identifiers::primitives::{ArchetypeId, ComponentId};
+// The thread pool exists only on native (wasm runs the sim sequentially, D10).
+#[cfg(not(target_arch = "wasm32"))]
+use boyko_threadpool::{ThreadPool, ThreadPoolBuilder};
+
+use crate::render::camera::CameraUniform;
+use crate::render::instance::GpuInstance;
+use crate::render::{MAX_INSTANCES, RenderCallback, RenderResources, WORLD_HALF_EXTENT};
+use crate::sim::bundles::ParticleBundle;
+use crate::sim::components::{ParticleTag, Position, Velocity};
+use crate::sim::modes::Mode;
+use crate::sim::resources::{BoidParams, FrameStats, InputState, PhysicsParams, SimParams};
+use crate::sim::runner::SimRunner;
+use crate::ui;
+
+/// Entity capacity the world is sized for at startup. Sized to the particle
+/// population (the larger of the two modes — boids are fewer per plan §6.5), so
+/// the `on_enter(Particles)` spawn on frame 1 (plan §10 W5) and any later click
+/// bursts fit without a pool resize. The boid population is strictly smaller, so
+/// switching modes never exceeds this.
+const WORLD_ENTITY_CAPACITY: usize = crate::sim::modes::PARTICLE_COUNT;
+
+/// Speed range for particles spawned by a scene click, in world units per
+/// second. Wide so a click reads as an outward burst.
+const CLICK_BURST_SPEED: f32 = 90.0;
+
+/// Pre-resolved identifiers for the particle archetype, so a spawn (startup or a
+/// runtime click burst) skips the per-entity registry lookups.
+///
+/// `bundle_archetype_id_for` registers the archetype on first call; the
+/// `ComponentId`s are process-stable. Resolving them once and reusing the handle
+/// keeps the direct `create_entity` spawn path (C1 / plan §9 G5) allocation- and
+/// lookup-light in the click-spawn hot path.
+#[derive(Clone, Copy)]
+struct ParticleSpawner {
+    archetype: ArchetypeId,
+    pos_id: ComponentId,
+    vel_id: ComponentId,
+    gpu_id: ComponentId,
+    tag_id: ComponentId,
+}
+
+impl ParticleSpawner {
+    /// Resolves (and, for the archetype, registers on first call) every id the
+    /// particle spawn path needs.
+    fn resolve(world: &mut EcsMaster) -> Self {
+        Self {
+            archetype: world.bundle_archetype_id_for::<ParticleBundle>(),
+            pos_id: Position::component_id(),
+            vel_id: Velocity::component_id(),
+            gpu_id: GpuInstance::component_id(),
+            tag_id: ParticleTag::component_id(),
+        }
+    }
+
+    /// Spawns one particle with the given state via the direct `create_entity`
+    /// path. Returns whether the spawn succeeded; a `false` result means the
+    /// underlying pool is full (the world hit capacity).
+    fn spawn_one(&self, world: &mut EcsMaster, pos: Position, vel: Velocity) -> bool {
+        // Filled by `sync_gpu_instance` on the next step; a sane initial value
+        // avoids a one-frame flash of zeroed instances.
+        let gpu = GpuInstance::new([pos.x, pos.y], 0.6, [80, 160, 255, 255]);
+        world
+            .create_entity(
+                self.archetype,
+                &[
+                    (self.pos_id, bytemuck::bytes_of(&pos)),
+                    (self.vel_id, bytemuck::bytes_of(&vel)),
+                    (self.gpu_id, bytemuck::bytes_of(&gpu)),
+                    // ZST tag (Phase 22): the marker contributes no bytes.
+                    (self.tag_id, &[]),
+                ],
+            )
+            .is_ok()
+    }
+}
+
+/// The Phase-20.1 D5 upload gate: the instance column is re-uploaded only when
+/// this frame ran at least one substep (`steps > 0` — every in-schedule
+/// mutation: integration, mode transitions, spawns/despawns, tint) or the
+/// entity count changed out-of-substep (`entity_count != last_uploaded_count`
+/// — the click burst, which spawns directly BEFORE `runner.step`).
+///
+/// Skipping is correct because the GPU buffer still holds the last substep's
+/// exact `{prev_pos, pos}` pair; only the camera alpha (D7) changes between
+/// substeps — precisely the interpolation contract. `last_uploaded_count`
+/// starts at `u64::MAX` so the first frame always evaluates the upload.
+#[inline]
+fn upload_due(steps: u32, entity_count: u64, last_uploaded_count: u64) -> bool {
+    steps > 0 || entity_count != last_uploaded_count
+}
+
+/// Rolling upload-traffic probe for the panel (Phase 20.1 ★R1-3 / Q7 KEEP —
+/// the only witness of the D5 upload-event cut visible in the wasm deploy).
+///
+/// Accumulates upload events + bytes over a ~1 s window of display time (the
+/// same `stable_dt` deltas that drive the sim accumulator — wasm-safe, no
+/// `Instant`), then latches the rates. Plain `Copy` scalars; no allocation.
+#[derive(Clone, Copy, Debug, Default)]
+struct UploadProbe {
+    /// Display time accumulated into the current window, in seconds.
+    window_secs: f32,
+    /// Upload events recorded in the current window.
+    window_events: u32,
+    /// Bytes uploaded in the current window.
+    window_bytes: u64,
+    /// Latched rate: upload events per second over the last full window.
+    events_per_s: f32,
+    /// Latched rate: megabytes uploaded per second over the last full window.
+    mb_per_s: f32,
+}
+
+impl UploadProbe {
+    /// Length of the averaging window in seconds of display time.
+    const WINDOW_SECS: f32 = 1.0;
+
+    /// Records one frame: `dt` is the display delta; `uploaded_bytes` is
+    /// `Some(bytes)` if the upload fired this frame, `None` on a skipped
+    /// frame. Latches the per-second rates once the window fills.
+    fn frame(&mut self, dt: f32, uploaded_bytes: Option<u64>) {
+        self.window_secs += dt;
+        if let Some(bytes) = uploaded_bytes {
+            self.window_events += 1;
+            self.window_bytes += bytes;
+        }
+        if self.window_secs >= Self::WINDOW_SECS {
+            self.events_per_s = self.window_events as f32 / self.window_secs;
+            self.mb_per_s = (self.window_bytes as f32 / self.window_secs) / 1_000_000.0;
+            self.window_secs = 0.0;
+            self.window_events = 0;
+            self.window_bytes = 0;
+        }
+    }
+}
+
+/// The demo application state (plan §4).
+///
+/// Holds the ECS world and the native runner. GPU handles are limited to what
+/// the per-frame upload needs: the `queue` (a cheap refcounted handle) and the
+/// shared `instance_buffer`. The pipeline and bind groups live in egui's
+/// `callback_resources`, not here (plan D8).
+pub struct DemoApp {
+    /// The ECS world: entities, components, resources.
+    world: EcsMaster,
+    /// Fixed-timestep driver: a multi-threaded `Schedule` on native, a
+    /// sequential dispatcher on wasm (plan D10). Same API either way.
+    runner: SimRunner,
+    /// The work-stealing pool the schedule fans `par_iter` across. Held to keep
+    /// it alive for the schedule's lifetime and as the canonical owner. Native
+    /// only — wasm runs the sim sequentially with no pool (plan D10).
+    #[cfg(not(target_arch = "wasm32"))]
+    _pool: Arc<ThreadPool>,
+    /// wgpu queue for the per-frame instance upload. `wgpu::Queue` is `Clone`
+    /// (refcounted internally), so cloning it out of eframe's render state is
+    /// cheap and the clone shares the same underlying queue.
+    queue: wgpu::Queue,
+    /// Instance buffer shared with [`RenderResources`]; the upload target.
+    instance_buffer: Arc<wgpu::Buffer>,
+    /// Pre-resolved particle ids/archetype for runtime click-spawning.
+    spawner: ParticleSpawner,
+    /// Rolling frame/sim timing + entity-count history for the panel readouts and
+    /// FPS plot (plan §7 / §11.2). A fixed-size ring — no per-frame allocation.
+    stats: FrameStats,
+    /// Entity count at the last fired upload (Phase 20.1 D5 gate state).
+    /// `u64::MAX` at init so the first frame always evaluates the upload.
+    last_uploaded_count: u64,
+    /// Instance count from the last fired upload, reused as the draw count on
+    /// skipped frames (the GPU buffer still holds that population, D5).
+    cached_instance_count: u32,
+    /// Upload events/s + MB/s probe for the panel (Phase 20.1 ★R1-3).
+    upload_probe: UploadProbe,
+}
+
+impl DemoApp {
+    /// Builds the app: creates the wgpu render resources, the ECS world (with its
+    /// resources and the startup particle population), and the native runner.
+    ///
+    /// # Panics
+    /// Panics if `wgpu_render_state` is absent. eframe always provides it when
+    /// built with the `wgpu` feature (the only configuration this binary uses), so
+    /// its absence is an unrecoverable setup error rather than a runtime
+    /// condition.
+    pub fn new(cc: &CreationContext<'_>) -> Self {
+        let render_state = cc
+            .wgpu_render_state
+            .as_ref()
+            .expect("invariant: eframe is built with the wgpu backend");
+
+        let (resources, instance_buffer) =
+            RenderResources::new(&render_state.device, render_state.target_format);
+
+        // Store GPU pipeline/bind-group resources in egui's per-renderer type-map
+        // so the `'static` paint callback can reach them (plan D8).
+        render_state
+            .renderer
+            .write()
+            .callback_resources
+            .insert(resources);
+
+        // `wgpu::Queue` is refcounted internally and `Clone`; cloning eframe's
+        // queue is a cheap handle copy sharing the same underlying queue, which
+        // the app uses for the per-frame instance upload.
+        let queue = render_state.queue.clone();
+
+        // Build the world: resources first. Two archetypes now (particle +
+        // boid bundles); the entity capacity covers the larger (particle)
+        // population. The mode-tag archetypes are registered lazily on the first
+        // spawn-on-enter, so an archetype capacity of 2 is the steady state.
+        let mut world = EcsMaster::with_capacity(WORLD_ENTITY_CAPACITY, 2);
+        // Time/FixedTime (the Phase-20 engine clocks) are seeded by
+        // `SimRunner::new` alongside the other sim resources.
+        world.insert_resource(InputState::default());
+        world.insert_resource(SimParams::default());
+
+        // Resolve the particle spawn ids once (registers the archetype) for the
+        // runtime click-spawn path (C1 / plan §9 G5). The STARTUP population is
+        // NOT spawned here: the runner registers `Mode::Particles` as the initial
+        // state, so the synthesized initial transition (Phase 17 D7) fires
+        // `on_enter(Particles)` on the first `Schedule::run`, which spawns the
+        // startup cloud (plan §10 W5). Keeping the spawn in one place
+        // (`modes::spawn_particles`) means re-entering Particles after a switch
+        // repopulates it identically.
+        let spawner = ParticleSpawner::resolve(&mut world);
+
+        // Native: a real multi-threaded pool sized to the machine (plan D10).
+        // `SimRunner::new` registers the mode state + all gated systems and
+        // inserts the boid-pipeline resources. wasm cannot spawn the pool's OS
+        // threads (header-less Pages has no SharedArrayBuffer, D10), so the wasm
+        // runner takes no pool and dispatches sequentially — the one pool seam
+        // (plan §8.4). The mode-sim resources + `State<Mode>` are seeded by
+        // `SimRunner::new` on both targets.
+        #[cfg(not(target_arch = "wasm32"))]
+        let pool = ThreadPoolBuilder::new().build();
+        #[cfg(not(target_arch = "wasm32"))]
+        let runner = SimRunner::new(Arc::clone(&pool), &mut world);
+        #[cfg(target_arch = "wasm32")]
+        let runner = SimRunner::new(&mut world);
+
+        Self {
+            world,
+            runner,
+            // The pool is held only on native to keep it alive for the
+            // schedule's lifetime; the field does not exist on wasm.
+            #[cfg(not(target_arch = "wasm32"))]
+            _pool: pool,
+            queue,
+            instance_buffer,
+            spawner,
+            stats: FrameStats::default(),
+            // u64::MAX forces the D5 gate to fire on the first frame even if it
+            // expends zero substeps (Phase 20.1 §Soundness edge cases).
+            last_uploaded_count: u64::MAX,
+            cached_instance_count: 0,
+            upload_probe: UploadProbe::default(),
+        }
+    }
+
+    /// Maps the egui pointer into world space and writes [`InputState`] for the
+    /// upcoming sim step (plan §7).
+    ///
+    /// `rect` is the scene rect in logical points; `ppp` is points-per-pixel. The
+    /// well is suppressed when egui is using the pointer (e.g. over the panel) so
+    /// dragging a slider does not also fling particles.
+    ///
+    /// Returns the world position of a primary click made over the scene this
+    /// frame, if any (plan §7 click-to-spawn). It is `Some` only when the click
+    /// landed on the scene and egui did not want the pointer, so clicking a
+    /// widget never spawns.
+    fn update_input(
+        &mut self,
+        ctx: &egui::Context,
+        rect: egui::Rect,
+        ppp: f32,
+    ) -> Option<[f32; 2]> {
+        // egui 0.34 renamed the pointer-capture query to `egui_wants_pointer_input`
+        // (the bare `wants_pointer_input` is deprecated). It is `true` when egui is
+        // consuming the pointer (e.g. over a panel widget), which suppresses both
+        // the gravity well and click-to-spawn.
+        let wants_pointer = ctx.egui_wants_pointer_input();
+        let (pointer_pos, primary_held, primary_clicked) = ctx.input(|i| {
+            (
+                i.pointer.latest_pos(),
+                i.pointer.primary_down(),
+                i.pointer.primary_clicked(),
+            )
+        });
+
+        // The well engages only when the pointer is over the scene and egui is
+        // not consuming it (so dragging a slider does not also fling particles).
+        let over_scene = pointer_pos.is_some_and(|pos| !wants_pointer && rect.contains(pos));
+
+        let cursor_world = if over_scene {
+            // `over_scene` guarantees `Some`; the pointer is inside the rect.
+            let pos = pointer_pos.expect("invariant: over_scene implies a pointer position");
+            // Logical point within the rect -> physical pixels within the
+            // viewport, then invert the camera projection.
+            let px = (pos.x - rect.min.x) * ppp;
+            let py = (pos.y - rect.min.y) * ppp;
+            CameraUniform::screen_to_world(
+                px,
+                py,
+                rect.width() * ppp,
+                rect.height() * ppp,
+                WORLD_HALF_EXTENT,
+                WORLD_HALF_EXTENT,
+            )
+        } else {
+            None
+        };
+
+        let input = self.world.resource_mut::<InputState>();
+        input.cursor_world = cursor_world;
+        input.primary_down = over_scene && primary_held;
+
+        // A click that both started and ended over the scene spawns a burst
+        // there. `cursor_world` already encodes the over-scene gate.
+        if primary_clicked { cursor_world } else { None }
+    }
+
+    /// Uploads the live `GpuInstance` column into the instance buffer with no
+    /// intermediate AoS copy (the headline zero-copy path, plan D2/D5/H4) and
+    /// returns the total instance count drawn.
+    ///
+    /// `&GpuInstance` needs no change detection, so the direct `query()` API is
+    /// valid here (plan §9 G2). `for_each_chunk` yields one contiguous column
+    /// slice per archetype; each is `cast_slice`d straight into the GPU buffer.
+    fn upload_instances(&mut self) -> u32 {
+        let queue = &self.queue;
+        let buffer = &self.instance_buffer;
+        let stride = size_of::<GpuInstance>() as u64;
+        let capacity_bytes = MAX_INSTANCES * stride;
+
+        let mut byte_offset: u64 = 0;
+        // Overflow semantics: **truncate-in-order**. Once a chunk would overrun the
+        // instance buffer we latch `full` and skip every *subsequent* chunk too —
+        // not just the offending one. A bare per-chunk `return` (= `continue`)
+        // would skip the over-capacity chunk but let a later, smaller chunk still
+        // fit and write at its `byte_offset`, drawing an order-scrambled subset of
+        // the instances. Latching keeps the drawn set a contiguous in-order prefix.
+        let mut full = false;
+        self.world
+            .query::<&GpuInstance, ()>()
+            .for_each_chunk(|chunk: &[GpuInstance]| {
+                if full || chunk.is_empty() {
+                    return;
+                }
+                let bytes: &[u8] = bytemuck::cast_slice(chunk);
+                let len = bytes.len() as u64;
+                // The buffer is sized at MAX_INSTANCES; never write past it
+                // (plan §11.4 upload invariant). The runtime guard is strictly
+                // stronger than a `debug_assert!` — it protects release builds
+                // from a GPU buffer overrun if the entity count ever exceeds the
+                // cap (the paint callback clamps the draw count to match).
+                if byte_offset + len > capacity_bytes {
+                    full = true;
+                    return;
+                }
+                queue.write_buffer(buffer, byte_offset, bytes);
+                byte_offset += len;
+            });
+
+        (byte_offset / stride) as u32
+    }
+
+    /// Spawns a burst of particles at `world_pos`, clamped to remaining capacity
+    /// (plan §7 click-to-spawn / D6 / M5).
+    ///
+    /// The burst size is `min(spawn_burst, MAX_INSTANCES - current_count)` so it
+    /// can never exceed the instance buffer the renderer draws from. Each spawn
+    /// uses the direct `create_entity` path (C1); if the underlying pool reports
+    /// full mid-burst (`create_entity` errors), the loop stops early — the next
+    /// frame's panel then shows "at capacity". Particles fan out from the click
+    /// with small random velocities so the burst reads as an explosion.
+    fn spawn_click_burst(&mut self, world_pos: [f32; 2]) {
+        let burst = self.world.resource::<SimParams>().spawn_burst as u64;
+        let live = self.world.entity_count() as u64;
+        // Clamp against the instance-buffer cap (M5). `saturating_sub` yields 0
+        // once the world is at or above the cap, making the burst a no-op.
+        let room = MAX_INSTANCES.saturating_sub(live);
+        let to_spawn = burst.min(room);
+        if to_spawn == 0 {
+            return;
+        }
+
+        let [cx, cy] = world_pos;
+        let mut rng = rand::rng();
+        for _ in 0..to_spawn {
+            let vx = rng.random_range(-CLICK_BURST_SPEED..CLICK_BURST_SPEED);
+            let vy = rng.random_range(-CLICK_BURST_SPEED..CLICK_BURST_SPEED);
+            let pos = Position { x: cx, y: cy };
+            let vel = Velocity { x: vx, y: vy };
+            // Stop early if the pool fills mid-burst (capacity reached); the
+            // panel surfaces it next frame via `at_capacity`.
+            if !self.spawner.spawn_one(&mut self.world, pos, vel) {
+                break;
+            }
+        }
+    }
+
+    /// Whether the world has reached the instance cap, so click-to-spawn is a
+    /// no-op (drives the panel's "at capacity" note, plan D6/M5).
+    fn at_capacity(&self) -> bool {
+        self.world.entity_count() as u64 >= MAX_INSTANCES
+    }
+
+    /// The currently active simulation mode (read from `State<Mode>`).
+    fn current_mode(&self) -> Mode {
+        *self.world.state::<Mode>()
+    }
+}
+
+impl eframe::App for DemoApp {
+    // eframe 0.34 made `App::ui` the primary entry point. `ui` hands us the whole
+    // app area; side panels and windows go on top via `ui.ctx()`.
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Wall clock for the per-frame stats. `Instant` is the native shell's
+        // timer; `std::time::Instant` panics on `wasm32-unknown-unknown` (no
+        // monotonic clock), so on wasm the per-frame timing is derived from
+        // egui's `stable_dt` below instead (the FPS readout stays live; `sim_ms`
+        // is reported as 0 — a single-threaded diagnostic, not load-bearing).
+        #[cfg(not(target_arch = "wasm32"))]
+        let frame_start = Instant::now();
+
+        let ctx = ui.ctx().clone();
+
+        // Display delta drives the fixed-timestep accumulator (plan §6.7). egui's
+        // `stable_dt` is wasm-safe (no `std::time::Instant`) and smoothed against
+        // hitches.
+        let dt = ctx.input(|i| i.stable_dt).max(f32::EPSILON);
+
+        let rect = ui.available_rect_before_wrap();
+        let ppp = ctx.pixels_per_point();
+
+        // 1. Pointer -> InputState for this step; capture a scene click position.
+        let click_world = self.update_input(&ctx, rect, ppp);
+
+        // 2. Click-to-spawn a burst at the cursor before stepping, so the new
+        // particles integrate this frame (plan §7). Capacity-clamped (M5). Only
+        // in Particles mode — a click in Boids mode would inject particle-tagged
+        // entities into a boid world (mixing modes); the well still works in both.
+        if let Some(world_pos) = click_world
+            && self.current_mode() == Mode::Particles
+        {
+            self.spawn_click_burst(world_pos);
+        }
+
+        // 3. Advance the simulation (real multi-threaded schedule on native, the
+        // sequential runner on wasm; fixed dt), timing just the sim so the panel
+        // can show sim ms vs total frame ms (native only — see the clock note).
+        #[cfg(not(target_arch = "wasm32"))]
+        let sim_start = Instant::now();
+        // Bind the substep count (Phase 20.1 D5): it is one of the two inputs
+        // of the upload gate below.
+        let steps = self.runner.step(&mut self.world, dt);
+        #[cfg(not(target_arch = "wasm32"))]
+        let sim_ms = sim_start.elapsed().as_secs_f32() * 1000.0;
+        #[cfg(target_arch = "wasm32")]
+        let sim_ms = 0.0_f32;
+
+        // 4. Upload gate (Phase 20.1 D5): re-upload the GpuInstance column
+        // (zero-copy, plan D2/H4) only when a substep ran or the entity count
+        // changed out-of-substep (click burst). On a skipped frame the GPU
+        // buffer still holds the last substep's exact {prev, pos} pair — only
+        // the camera alpha changes — so we reuse the cached draw count and run
+        // NO column walk and NO write_buffer.
+        let entity_count = self.world.entity_count() as u64;
+        let uploaded_bytes = if upload_due(steps, entity_count, self.last_uploaded_count) {
+            let count = self.upload_instances();
+            self.last_uploaded_count = entity_count;
+            self.cached_instance_count = count;
+            Some(count as u64 * size_of::<GpuInstance>() as u64)
+        } else {
+            None
+        };
+        let instance_count = self.cached_instance_count;
+        self.upload_probe.frame(dt, uploaded_bytes);
+
+        // Interpolation alpha (Phase 20.1 D7): sampled strictly AFTER the fixed
+        // loop, so `overstep < timestep` holds and the value is pinned to
+        // [0, 1). While paused the overstep (and thus alpha) freezes mid-value
+        // — a static frame mid-lerp, no snap (D7).
+        let alpha = self.world.resource::<FixedTime>().overstep_fraction();
+
+        // 5. Register the paint callback for this rect. It is `'static`: it owns
+        // only the viewport size, the instance count, and the alpha — never a
+        // borrow of the world (D6 / D8 / plan H4).
+        let viewport_px = [rect.width() * ppp, rect.height() * ppp];
+        let callback = RenderCallback {
+            viewport_px,
+            instance_count,
+            alpha,
+        };
+        let paint_callback = eframe::egui_wgpu::Callback::new_paint_callback(rect, callback);
+        ui.painter().add(paint_callback);
+
+        // 6. Record this frame's stats into the fixed ring (no allocation), then
+        // draw the control panel. `frame_ms` uses the whole-`ui` span up to this
+        // point — the dominant cost (sim + upload + draw record); the remaining
+        // egui paint is negligible and not double-counted. On wasm there is no
+        // `Instant`, so `frame_ms` is taken from egui's smoothed `stable_dt`
+        // (the same value driving the sim accumulator) — close enough for the
+        // FPS readout/plot.
+        #[cfg(not(target_arch = "wasm32"))]
+        let frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
+        #[cfg(target_arch = "wasm32")]
+        let frame_ms = dt * 1000.0;
+        let entity_count = self.world.entity_count() as u32;
+        self.stats.push(frame_ms, sim_ms, entity_count);
+
+        let at_capacity = self.at_capacity();
+        let mode = self.current_mode();
+
+        // `SimParams`/`BoidParams` are small `Copy` PODs. The `EcsMaster` API
+        // hands out only one `&mut` resource at a time, so the panel cannot
+        // borrow both live; instead copy them out, let the panel mutate the
+        // copies + report a requested mode switch, then write the (possibly
+        // edited) copies back. The next `Schedule::run` picks them up — same
+        // zero-plumbing path as before, one frame's indirection through a stack
+        // copy (no allocation).
+        let mut sim_params = *self.world.resource::<SimParams>();
+        let mut boid_params = *self.world.resource::<BoidParams>();
+        let mut physics_params = *self.world.resource::<PhysicsParams>();
+        let panel = ui::panel::PanelState {
+            mode,
+            sim: &mut sim_params,
+            boids: &mut boid_params,
+            physics: &mut physics_params,
+            stats: &self.stats,
+            instances_drawn: instance_count,
+            at_capacity,
+            upload_events_per_s: self.upload_probe.events_per_s,
+            upload_mb_per_s: self.upload_probe.mb_per_s,
+        };
+        let requested_mode = ui::panel::draw(&ctx, panel);
+        *self.world.resource_mut::<SimParams>() = sim_params;
+        *self.world.resource_mut::<BoidParams>() = boid_params;
+        *self.world.resource_mut::<PhysicsParams>() = physics_params;
+
+        // A mode button writes `NextState<Mode>`; `Schedule::run` auto-applies
+        // the transition next step (plan G10 / D15). Only queue an ACTUAL change
+        // — requesting the current mode would be a no-op transition anyway, but
+        // skipping it keeps `NextState` clean.
+        if let Some(target) = requested_mode
+            && target != mode
+        {
+            self.world.resource_mut::<NextState<Mode>>().set(target);
+        }
+
+        // Keep animating so the sim runs every frame and the readouts stay live.
+        ctx.request_repaint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::upload_due;
+
+    /// The engine's fixed timestep in seconds (64 Hz) for the synthetic frame
+    /// sequences below.
+    const TIMESTEP: f64 = 1.0 / 64.0;
+
+    /// Drives a synthetic display-frame sequence through the same
+    /// accumulator arithmetic `fixed_advance` uses (acc += dt; expend whole
+    /// timesteps) and the D5 gate, returning `(fired, skipped)` counts.
+    ///
+    /// `counts` yields the entity count per frame (constant for the steady
+    /// state, stepped for the burst rows); `last` starts at `u64::MAX` like
+    /// `DemoApp::new`.
+    fn run_sequence(frame_dt: f64, frames: usize, counts: impl Fn(usize) -> u64) -> (u32, u32) {
+        let mut acc = 0.0_f64;
+        let mut last = u64::MAX;
+        let (mut fired, mut skipped) = (0_u32, 0_u32);
+        for i in 0..frames {
+            acc += frame_dt;
+            let mut steps = 0_u32;
+            while acc >= TIMESTEP {
+                acc -= TIMESTEP;
+                steps += 1;
+            }
+            let count = counts(i);
+            if upload_due(steps, count, last) {
+                fired += 1;
+                last = count;
+            } else {
+                skipped += 1;
+            }
+        }
+        (fired, skipped)
+    }
+
+    /// T5 (Phase 20.1): the gate truth table — substeps force an upload, a
+    /// count change forces an upload, and only (0 substeps, unchanged count)
+    /// skips.
+    #[test]
+    fn upload_due_truth_table() {
+        // (0 steps, count == last) -> skip.
+        assert!(!upload_due(0, 100, 100));
+        // (>= 1 step, any count) -> fire.
+        assert!(upload_due(1, 100, 100));
+        assert!(upload_due(3, 100, 100));
+        assert!(upload_due(1, 100, 50));
+        // (0 steps, count != last) -> fire (the click-burst path).
+        assert!(upload_due(0, 101, 100));
+        // First frame: last = u64::MAX always fires.
+        assert!(upload_due(0, 0, u64::MAX));
+    }
+
+    /// T5 / G1: synthetic 144 Hz display / 64 Hz sim sequence, 1000 frames,
+    /// constant entity count — the gate fires only on substep-bearing frames
+    /// (plus the forced first frame) and the skip rate is >= 55 %.
+    #[test]
+    fn gate_skip_rate_at_144_over_64() {
+        let (fired, skipped) = run_sequence(1.0 / 144.0, 1000, |_| 100_000);
+        assert_eq!(fired + skipped, 1000);
+        // 1000 * 64/144 = 444.4 substep-bearing frames + the forced first
+        // frame (0 substeps, last == u64::MAX) = 445 fires, 555 skips.
+        assert_eq!(fired, 445, "fires = substep-bearing frames + first frame");
+        let skip_rate = skipped as f64 / 1000.0;
+        assert!(
+            skip_rate >= 0.55,
+            "skip rate must be >= 55 % at 144/64 (got {skip_rate})"
+        );
+    }
+
+    /// T5: while paused (zero substeps every frame, stable count) the gate
+    /// never fires after the initial upload.
+    #[test]
+    fn gate_paused_never_fires() {
+        // Paused: fixed_advance expends nothing regardless of dt; model it as
+        // 0 accumulated time. Frame 1 fires (last == u64::MAX), the rest skip.
+        let (fired, skipped) = run_sequence(0.0, 500, |_| 4_000);
+        assert_eq!(fired, 1, "only the forced first frame fires while paused");
+        assert_eq!(skipped, 499);
+    }
+
+    /// T5: a click burst landing on a 0-substep frame fires the gate exactly
+    /// once — the next 0-substep frame (count now matching) skips again.
+    #[test]
+    fn gate_burst_on_zero_substep_frame_fires_once() {
+        // 0-substep frames throughout (paused-style); the count steps up once
+        // at frame 100 (the burst) and stays there.
+        let (fired, _) = run_sequence(0.0, 500, |i| if i < 100 { 1_000 } else { 3_000 });
+        // Frame 0 (u64::MAX) + frame 100 (burst) = 2 fires total.
+        assert_eq!(fired, 2, "the burst fires the gate exactly once");
+    }
+}

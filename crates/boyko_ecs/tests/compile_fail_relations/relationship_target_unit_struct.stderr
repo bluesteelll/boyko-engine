@@ -1,0 +1,27 @@
+error: #[relationship_target] requires exactly one collection field; a unit struct has none (e.g. `struct LikedBy(Vec<Entity>);`)
+  --> tests/compile_fail_relations/relationship_target_unit_struct.rs:19:8
+   |
+19 | struct LikedBy;
+   |        ^^^^^^^
+
+error[E0277]: the trait bound `LikedBy: RelationshipTarget` is not satisfied
+  --> tests/compile_fail_relations/relationship_target_unit_struct.rs:13:25
+   |
+13 | #[relationship(target = LikedBy)]
+   |                         ^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `RelationshipTarget` is not implemented for `LikedBy`
+  --> tests/compile_fail_relations/relationship_target_unit_struct.rs:19:1
+   |
+19 | struct LikedBy;
+   | ^^^^^^^^^^^^^^
+help: the trait `RelationshipTarget` is implemented for `Children`
+  --> src/ecs/core/hierarchy/mod.rs
+   |
+   | impl RelationshipTarget for Children {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `boyko_ecs::prelude::Relationship::Target`
+  --> src/ecs/core/relationship/mod.rs
+   |
+   |     type Target: RelationshipTarget<Source = Self>;
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Relationship::Target`
