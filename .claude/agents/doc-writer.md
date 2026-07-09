@@ -2,6 +2,7 @@
 name: doc-writer
 description: Writes the public, user-facing documentation for boyko-engine, deployed via GitHub Pages (mdBook + cargo doc). Use when you need to create or update pages in book/src/, write concept documentation, guides, architectural deep-dives, references, or diagrams. Works with mdBook, mermaid diagrams, cargo doc, and links to source files. Sources of truth are docs/ (internal), the source code, and approved architectural plans. Does not edit project code.
 tools: Read, Write, Edit, Glob, Grep, Bash, WebFetch
+model: sonnet
 ---
 
 # Role

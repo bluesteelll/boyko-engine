@@ -81,3 +81,74 @@ pub fn quad_vertices() -> [Vertex; 6] {
     let tl = Vertex { position: [QUAD_X_MIN, QUAD_Y_MAX, z], normal: n, color: c };
     [bl, br, tr, bl, tr, tl]
 }
+
+/// The result of comparing a rendered readback against a golden reference within a
+/// pixel-space bounding box.
+///
+/// Bbox-scoped on purpose: a small, localized effect (a denoise pass over a penumbra, a
+/// moved shadow edge) must never be averaged into invisibility across the full frame. A
+/// whole-image mean once hid a real 6847-px effect behind a 0.12 average and cost ~8 debug
+/// cycles chasing a phantom "no-op". Always report BOTH the whole-frame diff AND the
+/// in-bbox diff so an effect that lives in a rectangle cannot be masked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BboxDiff {
+    /// Largest single-channel absolute difference (`0..=255`) seen inside the bbox.
+    pub worst_delta: i32,
+    /// Count of texels with ANY RGB channel differing by more than the tolerance.
+    pub changed_texels: u32,
+    /// Total texels inspected inside the (image-clamped) bbox.
+    pub total_texels: u32,
+}
+
+/// Compares two tightly-packed RGBA byte buffers (`w x h`, 4 bytes/texel) inside the
+/// half-open pixel rect `(x0, y0, x1, y1)` = `[x0, x1) x [y0, y1)`, clamped to the image.
+/// Alpha is ignored (RGB only). Returns the worst per-channel delta and the number of
+/// texels exceeding `tol`.
+///
+/// Use alongside a whole-frame diff, never instead of one: the point is to surface a
+/// localized change that a frame-wide aggregate would flatten. The bbox is the effect's
+/// expected footprint (e.g. the penumbra region for a shadow-denoise change).
+pub fn diff_in_bbox(
+    golden: &[u8],
+    readback: &[u8],
+    w: u32,
+    h: u32,
+    rect: (u32, u32, u32, u32),
+    tol: i32,
+) -> BboxDiff {
+    debug_assert!(golden.len() >= (w * h * 4) as usize, "invariant: golden buffer is w*h*4 bytes");
+    debug_assert!(readback.len() >= (w * h * 4) as usize, "invariant: readback buffer is w*h*4 bytes");
+    let (x0, y0, x1, y1) = rect;
+    let x0 = x0.min(w);
+    let x1 = x1.min(w);
+    let y0 = y0.min(h);
+    let y1 = y1.min(h);
+
+    let mut worst = 0i32;
+    let mut changed = 0u32;
+    let mut total = 0u32;
+    let mut y = y0;
+    while y < y1 {
+        let mut x = x0;
+        while x < x1 {
+            let base = ((y * w + x) * 4) as usize;
+            let mut texel_changed = false;
+            for c in 0..3 {
+                let d = (golden[base + c] as i32 - readback[base + c] as i32).abs();
+                if d > worst {
+                    worst = d;
+                }
+                if d > tol {
+                    texel_changed = true;
+                }
+            }
+            if texel_changed {
+                changed += 1;
+            }
+            total += 1;
+            x += 1;
+        }
+        y += 1;
+    }
+    BboxDiff { worst_delta: worst, changed_texels: changed, total_texels: total }
+}

@@ -58,6 +58,7 @@ piece of functionality lives, start here, then go to
 | Data-less bounded global scan of (en/dis)abled entities | [EnableTag (enable-bit backend)](#enabletag-enable-bit-non-fragmenting-tag-backend) (candidate-seeded, D7) |
 | SIMD/batched columnar iteration | [for_each_chunk](#chunked--parallel-iteration) |
 | Run systems in parallel | [Schedule + scheduler](#schedule--parallel-scheduler) |
+| Verify / re-pin a golden render, or learn the byte-identity gate | [Golden byte-identity harness](#golden-byte-identity-harness-render-regression-gate) |
 | Order systems / group into sets | [Ordering & sets](#system-ordering--sets) |
 | Conditionally run systems | [Run conditions](#run-conditions-run_if) |
 | Application states / state machines | [States](#states) |
@@ -794,3 +795,20 @@ comparison in [crates/bench_bevy_vs_boyko/](../crates/bench_bevy_vs_boyko/).
 Methodology (deterministic `[profile.bench]` codegen + opt-in `bench-alloc`
 mimalloc + the median-of-N `bench.ps1`) is in
 [BENCHMARKING.md](BENCHMARKING.md) (Phase X.E).
+
+### Golden byte-identity harness (render regression gate)
+
+GPU render regressions are caught by a **byte-identity** gate: the whole scene is dumped
+to a `.bmp` and SHA-256'd, and any logical no-op (god-file split, `embed_spirv!`, a
+gated-OFF path) must keep that hash unchanged (the "Tier-0" gate). Where things live:
+
+| Piece | Location | What it is |
+|-------|----------|------------|
+| The gate command | [scripts/golden.ps1](../scripts/golden.ps1) | `-Check` / `-Bless` — force-compiles the test bin, DELETE-then-regen, asserts fresh mtime, hashes, compares against the pin. Encodes every anti-false-green lesson. |
+| The pins | [goldens/PINS.toml](../goldens/PINS.toml) | Single source of truth for the SHA-256 pin(s) + the feature/env each was blessed under. Replaces the hash formerly hand-copied across ~10 docs. Update ONLY via `golden.ps1 -Bless`. |
+| CPU host oracles | [crates/boyko_rhi_vulkan/src/goldens.rs](../crates/boyko_rhi_vulkan/src/goldens.rs) | ~4.2 kLOC of `golden_*`/`host_*` functions mirroring shader math bit-for-bit (gated by the `goldens` feature). Diffed against GPU readback within `CHANNEL_TOL` or bit-exact. Incrementally migrating to eDSL-derived references — see [GOLDEN-EDSL-MIGRATION-PLAN.md](GOLDEN-EDSL-MIGRATION-PLAN.md). |
+| Shared test helpers | [crates/boyko_rhi_vulkan/tests/common/mod.rs](../crates/boyko_rhi_vulkan/tests/common/mod.rs) | `Vertex`, `SpirvBlob`, `write_words`, and `diff_in_bbox` (bbox-scoped diff — use it alongside a whole-frame diff so a localized effect is never averaged into invisibility). |
+| The dump tests | `crates/boyko_rhi_vulkan/tests/window_present_gbuffer.rs`, `sdf_gbuffer_hybrid.rs` | `#[ignore]`d windowed presents (`--test-threads=1`, single RTX-3060). Run via `golden.ps1`. |
+
+**Usage:** `scripts\golden.ps1` (software leg) or `-Hwrt` (hwrt leg) to verify; `-Bless`
+after a visual owner sign-off to re-pin. Never run on CI (no GPU there — goldens skip).

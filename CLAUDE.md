@@ -71,6 +71,15 @@ In [.claude/agents/](.claude/agents/) the following are defined:
 
 The main Claude in the chat acts as the **orchestrator** — chooses the right agents for each task and runs the iteration loops.
 
+**Model routing** (set via each agent's `model:` frontmatter): deep-reasoning roles run on **Opus** (`architect`, `architecture-critic`, `code-reviewer`, `results-analyst`); mechanical / gathering roles run on **Sonnet** (`developer`, `tester`, `researcher`, `doc-writer`, `project-analyst`). Do not downgrade a Opus role (esp. `code-reviewer` — it is the last line against `unsafe`/atomics UB) without a measured before/after quality diff. The orchestrator itself stays on the session model.
+
+## Orchestration discipline
+
+- **Clarify before acting.** If a request is ambiguous, or you do not fully understand the intended scope/behavior, **ask** (`AskUserQuestion`) or **enter Plan Mode BEFORE any Write/Edit** — never guess. Only VALUES/SCOPE calls go to the owner; decide perf/architecture forks yourself, with numbers.
+- **Plan-Mode threshold.** Any change touching **≥3 files**, or that you cannot describe in one sentence, goes through Plan Mode (`ExitPlanMode` approval) before the first edit.
+- **Backstop hook.** A `UserPromptSubmit` hook ([.claude/hooks/clarify_gate.py](.claude/hooks/clarify_gate.py)) injects a reminder when a prompt is imperative but names no file/path/symbol. It reminds; it never blocks. Subagents cannot ask the user — a subagent that hits an ambiguity **stops and escalates to the orchestrator** (already encoded in `developer.md`).
+- **graphify-first, one retry.** The PreToolUse hooks ([graphify_read_gate.py](.claude/hooks/graphify_read_gate.py), [graphify_bash_gate.py](.claude/hooks/graphify_bash_gate.py)) nudge `graphify query/explain/path` before reading/grepping source. graphify is tuned to the ECS kernel; if it returns off-target or empty results, fall back to Grep/Read **once** — do not retry graphify.
+
 ## Communication
 
 - Chat messages between Claude and the user can be in Russian.

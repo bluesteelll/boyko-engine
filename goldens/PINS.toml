@@ -1,0 +1,37 @@
+# goldens/PINS.toml — SINGLE SOURCE OF TRUTH for golden byte-identity pins.
+#
+# Each pin records the SHA-256 of a dumped BMP plus the exact pipeline it was
+# blessed under. This file REPLACES the `58f6c6c3…` hash string that was formerly
+# hand-copied across ~10 docs/*.md (miss one file = a silent stale gate).
+#
+# DO NOT hand-edit the sha256_* values. Update them ONLY via:
+#     scripts\golden.ps1 -Pin <name> [-Hwrt] -Bless
+# and only AFTER a visual owner sign-off on the freshly-dumped BMP.
+#
+# Verify a pin (no write):  scripts\golden.ps1 -Pin <name> [-Hwrt] -Check
+#
+# Format is a flat, section-scoped TOML subset (see scripts\golden.ps1 :: Read-Pins).
+# `sha256_hwrt` may equal `sha256_software` (the HW-RT shadow path was made
+# byte-identical to software for this scene) or diverge — each leg is pinned on its
+# own -Bless run, so -Check reports reality regardless.
+
+[grand_showcase]
+# The whole-scene refactor gate: mesh + SDF + CSM + punctual + DDGI-off. Any logical
+# no-op (god-file split, embed_spirv!, gated-OFF path, host-Rust render diff) MUST keep
+# this byte-identical (Tier-0). Host-Rust diffs never pass through DXC FP-lowering, so
+# they are never eligible for any perceptual relaxation.
+crate           = "boyko_rhi_vulkan"
+test_binary     = "window_present_gbuffer"
+test_name       = "engine_grand_showcase_512_screenshot_dump"
+bmp             = "D:\\tmp\\engine_grand_showcase.bmp"
+width           = 512
+height          = 512
+sha256_software = "58f6c6c3d986f7a393ea53b01c5021e7360cf6f1b32bf9db05d4d8bb98999dd5"
+sha256_hwrt     = "58f6c6c3d986f7a393ea53b01c5021e7360cf6f1b32bf9db05d4d8bb98999dd5"
+
+# Env the pin was blessed under. golden.ps1 SETS these explicitly (never inherits) and
+# CLEARS BOYKO_FORCE_SOFTWARE, so a stray shell env cannot silently change the pipeline.
+[grand_showcase.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
