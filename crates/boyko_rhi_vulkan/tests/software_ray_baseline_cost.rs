@@ -342,7 +342,9 @@ fn run(ctx: &VulkanContext) {
         .expect("update bind group");
 
     let module = device
-        .create_shader_module(sdf_probe_update_spirv(GI_MAX_IT))
+        // A-1: `GI_MAX_IT` is now a spec-const (id 0, default 64); this baseline ships the default
+        // (`GI_MAX_IT == 64`), so `spec_constants: &[]` below resolves it byte-identically.
+        .create_shader_module(sdf_probe_update_spirv())
         .expect("probe-update shader module");
     let pipeline = device
         .create_compute_pipeline(&ComputePipelineDesc {

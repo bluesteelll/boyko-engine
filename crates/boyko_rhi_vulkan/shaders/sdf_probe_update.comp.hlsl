@@ -22,9 +22,9 @@
 // chain OUTSIDE `oct_decode` (in the hand-written `texel_dir_irr`/`texel_dir_depth` glue),
 // never inside `oct_decode` — else this pass's WRITE iteration and I3's READ desync.
 //
-// # Compiled offline (hermetic) with, per `GI_MAX_IT` variant:
+// # Compiled offline (hermetic) with (ONE file; GI_MAX_IT is spec-const id 0, default 64):
 //   dxc -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 \
-//       sdf_probe_update_it128.comp.hlsl -Fo sdf_probe_update_it128.comp.spv
+//       sdf_probe_update.comp.hlsl -Fo sdf_probe_update.comp.spv
 
 // --- Resources (dedicated update bind-group, set 0 — plan §2.2) ----------------------------
 //   t0 : StructuredBuffer<uint>   Buf            — the SDF edit-list (`sdf_field.hlsli` contract)
@@ -95,7 +95,12 @@ cbuffer DdgiUpdate : register(b6) {
 // --- The atlas geometry (mirror boyko_rhi_vulkan::ddgi; host-pinned) -----------------------
 // Y-plane-major: array layer = probe Y; within a layer, tile column = X, tile row = Z. The
 // irradiance tile is 8x8 (6x6 valid + 1-texel border); the depth tile 16x16 (14x14 + border).
-static const uint  GI_MAX_IT           = 128u; // the swept `[loop]` trip count (this variant)
+// GI_MAX_IT is a Vulkan SPECIALIZATION CONSTANT (id 0): the sphere-trace `[loop]` trip count,
+// resolved at pipeline-create. Its DEFAULT (64) makes a pipeline built with `spec_constants: &[]`
+// byte-identical to the former baked `static const 64u`; the bench overrides it per sweep value via
+// a `SpecConstant` (id 0). A spec-const on a `[loop]` bound is structurally identical to a baked
+// const (the loop is never unrolled either way) — same dynamic loop, ZERO per-thread cost.
+[[vk::constant_id(0)]] const uint GI_MAX_IT = 64;
 // The `probe_march` tuning (the generated span spells these SYMBOLICALLY — plan §1.2). The
 // SHADOW_MINT-class start bias, the occluder-hit epsilon, the min per-step advance, and the
 // escape bound. GRAD_H/EPS come from `sdf_field.hlsli` / the shadow tuning block above.

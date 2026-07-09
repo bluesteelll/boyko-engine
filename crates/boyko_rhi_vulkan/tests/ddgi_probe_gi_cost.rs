@@ -42,7 +42,7 @@ use std::time::Instant;
 use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc,
     BufferUsage, ComputePipelineDesc, DescriptorKind, MemoryLocation, RhiCommandEncoder, RhiDevice,
-    RhiQueue, ShaderStage,
+    RhiQueue, ShaderStage, SpecConstant,
 };
 
 use boyko_rhi_vulkan::compute::{
@@ -385,9 +385,12 @@ fn run_sweep(ctx: &VulkanContext) {
     );
 
     for &gi_max_it in &GI_MAX_IT_VARIANTS {
-        // Rebuild the pipeline for this GI_MAX_IT variant (measured==shipped).
+        // A-1: ONE committed `.spv` (`GI_MAX_IT` is spec-const id 0, default 64) — measured==shipped
+        // is preserved by overriding the spec-const per sweep value at pipeline-create, NOT by
+        // binding a distinct pre-compiled blob. The module is re-created each iteration (the
+        // specialization is captured by the PIPELINE, so a fresh module keeps the loop simple).
         let module = device
-            .create_shader_module(sdf_probe_update_spirv(gi_max_it))
+            .create_shader_module(sdf_probe_update_spirv())
             .expect("probe-update shader module");
         let pipeline = device
             .create_compute_pipeline(&ComputePipelineDesc {
@@ -400,7 +403,9 @@ fn run_sweep(ctx: &VulkanContext) {
                 // shader never reads; the recorder pushes nothing.
                 push_constant_bytes: 4,
                 bind_group_layout: Some(&layout),
-                spec_constants: &[],
+                // Override `GI_MAX_IT` (spec-const id 0) with this sweep value so the MEASURED
+                // pipeline runs the exact trip count under test (the old per-variant `.spv`).
+                spec_constants: &[SpecConstant { id: 0, value: gi_max_it }],
             })
             .expect("probe-update compute pipeline");
 

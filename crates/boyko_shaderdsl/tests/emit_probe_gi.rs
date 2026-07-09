@@ -3,12 +3,12 @@
 //!
 //! Two halves (plan §6 gate 3-4, §9):
 //!
-//! 1. **Emit drift gates** — assert each committed `sdf_probe_update_it<N>.comp.hlsl` variant
-//!    still `.contains` the EXACT eDSL-generated span (`oct_decode` / `probe_march` /
-//!    `probe_blend` / `probe_depth_blend`). A hand-edit of a spliced span fails here. The fix:
-//!    re-run `cargo run -p boyko_shaderdsl --features emit --bin emit_probe_gi` + re-DXC the
-//!    affected `.comp.spv`. The spans are variant-INDEPENDENT (they spell the tuning consts
-//!    symbolically), so the SAME text must appear in every `GI_MAX_IT` variant.
+//! 1. **Emit drift gates** — assert the committed `sdf_probe_update.comp.hlsl` still `.contains`
+//!    the EXACT eDSL-generated span (`oct_decode` / `probe_march` / `probe_blend` /
+//!    `probe_depth_blend`). A hand-edit of a spliced span fails here. The fix: re-run `cargo run -p
+//!    boyko_shaderdsl --features emit --bin emit_probe_gi` + re-DXC `sdf_probe_update.comp.spv`.
+//!    (A-1: `GI_MAX_IT` is a spec-const now, so ONE source carries every span — the former 4
+//!    baked-const variant files are gone.)
 //! 2. **CPU unit oracles** — `probe_march_body::<EvalCf>` hits a unit sphere / escapes to sky;
 //!    `probe_blend_body`/`probe_depth_blend_body` normalize correctly (all-equal rays → uniform;
 //!    a single ray → a cosine peak); `oct_decode_body::<EvalCf>` (after `normalize`) == the
@@ -204,9 +204,6 @@ fn oct_decode_is_the_inverse_of_oct_encode() {
 mod emit_drift {
     use std::path::PathBuf;
 
-    /// The four swept `GI_MAX_IT` variant file stems (the emitter writes one HLSL per value).
-    const VARIANTS: [u32; 4] = [32, 64, 96, 128];
-
     fn shaders_dir() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -214,22 +211,22 @@ mod emit_drift {
             .join("shaders")
     }
 
-    /// Asserts every committed variant `.hlsl` still contains the exact eDSL-generated `span`.
+    /// Asserts the committed `sdf_probe_update.comp.hlsl` still contains the exact eDSL-generated
+    /// `span`. (A-1: the former 4 `GI_MAX_IT` variant files collapsed to ONE — `GI_MAX_IT` is now a
+    /// spec-const, so a single source carries every eDSL span.)
     fn assert_span_in_all_variants(span: &str, which: &str) {
         let span = span.replace("\r\n", "\n");
-        for n in VARIANTS {
-            let path = shaders_dir().join(format!("sdf_probe_update_it{n}.comp.hlsl"));
-            let shader = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("invariant: {} must exist: {e}", path.display()))
-                .replace("\r\n", "\n");
-            assert!(
-                shader.contains(&span),
-                "sdf_probe_update_it{n} `{which}` span DRIFTED from boyko_shaderdsl::emit — the \
-                 committed span no longer matches the generator. Re-run `cargo run -p \
-                 boyko_shaderdsl --features emit --bin emit_probe_gi` + re-DXC the variant \
-                 `.comp.spv`.\n--- expected (eDSL-generated) ---\n{span}"
-            );
-        }
+        let path = shaders_dir().join("sdf_probe_update.comp.hlsl");
+        let shader = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("invariant: {} must exist: {e}", path.display()))
+            .replace("\r\n", "\n");
+        assert!(
+            shader.contains(&span),
+            "sdf_probe_update `{which}` span DRIFTED from boyko_shaderdsl::emit — the committed span \
+             no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl --features emit \
+             --bin emit_probe_gi` + re-DXC `sdf_probe_update.comp.spv`.\n--- expected \
+             (eDSL-generated) ---\n{span}"
+        );
     }
 
     #[test]

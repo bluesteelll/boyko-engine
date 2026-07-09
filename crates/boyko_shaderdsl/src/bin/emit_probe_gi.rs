@@ -1,6 +1,9 @@
 //! `emit_probe_gi` — generates the SDFDDGI I2 committed probe-update compute shader
-//! `sdf_probe_update.comp.hlsl` with one `GI_MAX_IT` variant per sweep value {32, 64, 96,
-//! 128} (the SSAO-variant mechanism → measured==shipped, plan §1.2 P1-2).
+//! `sdf_probe_update.comp.hlsl` as ONE file whose `GI_MAX_IT` sphere-trace trip count is a
+//! Vulkan SPECIALIZATION CONSTANT (id 0, default 64). The former 4 baked-const variant files
+//! (`sdf_probe_update_it{32,64,96,128}.comp.hlsl`) collapse to this single source — the bench
+//! sweep now overrides `GI_MAX_IT` per value via a `SpecConstant` at pipeline-create, so
+//! measured==shipped from ONE `.spv` (refactor A-1, plan Part A §A1).
 //!
 //! The shader single-sources its eDSL spans from `boyko_shaderdsl`: the GENERATED `oct_decode`
 //! function, the `probe_march` loop+tail span (inside the per-ray loop), and the `probe_blend`
@@ -15,21 +18,21 @@
 //!
 //! Run: `cargo run -p boyko_shaderdsl --features emit --bin emit_probe_gi`
 //!
-//! Then DXC each variant with the frozen recipe (the same one in every shader header):
+//! Then DXC the single file with the frozen recipe (in the shader header):
 //!   `dxc -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 \
-//!        sdf_probe_update_it<N>.comp.hlsl -Fo sdf_probe_update_it<N>.comp.spv`
+//!        sdf_probe_update.comp.hlsl -Fo sdf_probe_update.comp.spv`
 //! (cwd = the shaders dir, so the relative `#include "sdf_field.hlsli"` resolves). The
-//! `emit_probe_gi` drift/sync tests pin each committed variant `.spv` to a fresh re-DXC of
-//! the re-emitted variant `.hlsl`.
+//! `emit_probe_gi` drift/sync tests pin the committed `.spv` to a fresh re-DXC of the
+//! re-emitted `.hlsl`.
 
 use std::path::PathBuf;
 
 use boyko_shaderdsl::emit;
 
-/// The `GI_MAX_IT` sweep values (plan §5) — one PRE-COMPILED `.spv` variant per value so the
-/// bench MEASURES the shipped shader (the SSAO N-variant mechanism). All are `[loop]` trip
-/// counts baked as a `static const uint GI_MAX_IT`, so the eDSL-generated `probe_march` span
-/// (which spells `GI_MAX_IT` SYMBOLICALLY) is byte-identical across every variant.
+/// The `GI_MAX_IT` sweep values (plan §5) the bench overrides via a `SpecConstant` (id 0). The
+/// shader is emitted ONCE (the trip count is a spec-const, default 64), so these values no longer
+/// drive per-file emission — the bench binds them at pipeline-create to MEASURE each on the ONE
+/// shipped `.spv`. Kept to document the sweep the emitter's spec-const default (64) anchors.
 const GI_MAX_IT_VARIANTS: [u32; 4] = [32, 64, 96, 128];
 
 fn main() {
@@ -48,20 +51,21 @@ fn main() {
     let probe_blend = emit::emit_hlsl_probe_blend();
     let probe_depth_blend = emit::emit_hlsl_probe_depth_blend();
 
-    for gi_max_it in GI_MAX_IT_VARIANTS {
-        let shader = build_shader(gi_max_it, &oct_decode, &probe_march, &probe_blend, &probe_depth_blend);
-        let out = shaders.join(format!("sdf_probe_update_it{gi_max_it}.comp.hlsl"));
-        std::fs::write(&out, &shader)
-            .unwrap_or_else(|e| panic!("invariant: failed to write {} : {e}", out.display()));
-        println!("wrote {} ({} bytes)", out.display(), shader.len());
-    }
+    let shader = build_shader(&oct_decode, &probe_march, &probe_blend, &probe_depth_blend);
+    let out = shaders.join("sdf_probe_update.comp.hlsl");
+    std::fs::write(&out, &shader)
+        .unwrap_or_else(|e| panic!("invariant: failed to write {} : {e}", out.display()));
+    println!(
+        "wrote {} ({} bytes) — GI_MAX_IT is spec-const id 0 (default 64); bench sweeps {GI_MAX_IT_VARIANTS:?}",
+        out.display(),
+        shader.len()
+    );
 }
 
-/// Assembles ONE `GI_MAX_IT` variant of the committed `sdf_probe_update.comp.hlsl`. Only the
-/// `static const uint GI_MAX_IT` in the tuning header varies between variants; the eDSL spans +
-/// all hand-written glue are carried verbatim (the SSAO single-source discipline).
+/// Assembles the single committed `sdf_probe_update.comp.hlsl`. `GI_MAX_IT` is a Vulkan
+/// specialization constant (id 0, default 64) — resolved at pipeline-create, NOT baked — so ONE
+/// source serves every sweep value. The eDSL spans + all hand-written glue are carried verbatim.
 fn build_shader(
-    gi_max_it: u32,
     oct_decode: &str,
     probe_march: &str,
     probe_blend: &str,
@@ -92,9 +96,9 @@ fn build_shader(
 // chain OUTSIDE `oct_decode` (in the hand-written `texel_dir_irr`/`texel_dir_depth` glue),
 // never inside `oct_decode` — else this pass's WRITE iteration and I3's READ desync.
 //
-// # Compiled offline (hermetic) with, per `GI_MAX_IT` variant:
+// # Compiled offline (hermetic) with (ONE file; GI_MAX_IT is spec-const id 0, default 64):
 //   dxc -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 \
-//       sdf_probe_update_it{gi_max_it}.comp.hlsl -Fo sdf_probe_update_it{gi_max_it}.comp.spv
+//       sdf_probe_update.comp.hlsl -Fo sdf_probe_update.comp.spv
 
 // --- Resources (dedicated update bind-group, set 0 — plan §2.2) ----------------------------
 //   t0 : StructuredBuffer<uint>   Buf            — the SDF edit-list (`sdf_field.hlsli` contract)
@@ -165,7 +169,12 @@ cbuffer DdgiUpdate : register(b6) {{
 // --- The atlas geometry (mirror boyko_rhi_vulkan::ddgi; host-pinned) -----------------------
 // Y-plane-major: array layer = probe Y; within a layer, tile column = X, tile row = Z. The
 // irradiance tile is 8x8 (6x6 valid + 1-texel border); the depth tile 16x16 (14x14 + border).
-static const uint  GI_MAX_IT           = {gi_max_it}u; // the swept `[loop]` trip count (this variant)
+// GI_MAX_IT is a Vulkan SPECIALIZATION CONSTANT (id 0): the sphere-trace `[loop]` trip count,
+// resolved at pipeline-create. Its DEFAULT (64) makes a pipeline built with `spec_constants: &[]`
+// byte-identical to the former baked `static const 64u`; the bench overrides it per sweep value via
+// a `SpecConstant` (id 0). A spec-const on a `[loop]` bound is structurally identical to a baked
+// const (the loop is never unrolled either way) — same dynamic loop, ZERO per-thread cost.
+[[vk::constant_id(0)]] const uint GI_MAX_IT = 64;
 // The `probe_march` tuning (the generated span spells these SYMBOLICALLY — plan §1.2). The
 // SHADOW_MINT-class start bias, the occluder-hit epsilon, the min per-step advance, and the
 // escape bound. GRAD_H/EPS come from `sdf_field.hlsli` / the shadow tuning block above.
@@ -443,7 +452,6 @@ void main(uint3 gid : SV_GroupID, uint3 lid : SV_GroupThreadID) {{
     }}
 }}
 "#,
-        gi_max_it = gi_max_it,
         soft_shadow = SDF_SOFT_SHADOW_RANGED_COPY,
         oct_decode = oct_decode,
         probe_march = probe_march,

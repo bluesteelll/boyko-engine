@@ -69,7 +69,7 @@ use boyko_rhi_vulkan::goldens::{GoldenLight, GoldenLightHeader, golden_composite
 use boyko_rhi_vulkan::mesh_sdf_texture::MeshSdfTexture;
 use boyko_sdf_math::mesh_sdf::{BakeMesh, MeshSdfField};
 use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
-use boyko_rhi_vulkan::compute::{GI_MAX_IT_DEFAULT, sdf_probe_update_spirv};
+use boyko_rhi_vulkan::compute::sdf_probe_update_spirv;
 use boyko_rhi_vulkan::ddgi::{
     DDGI_GRID_DIM_X, DDGI_GRID_DIM_Y, DDGI_GRID_DIM_Z, DDGI_PROBE_COUNT, DdgiAtlas,
 };
@@ -7880,7 +7880,7 @@ fn run_showcase_body_ddgi(
         },
     )
     .expect("SDFDDGI update bind-group layout");
-    let ddgi_update_module = RhiDevice::create_shader_module(device, sdf_probe_update_spirv(GI_MAX_IT_DEFAULT))
+    let ddgi_update_module = RhiDevice::create_shader_module(device, sdf_probe_update_spirv())
         .expect("SDFDDGI probe-update shader module");
     let ddgi_update_pipeline = RhiDevice::create_compute_pipeline(
         device,

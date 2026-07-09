@@ -626,7 +626,7 @@ pub struct ShadowVisActivation<'a> {
 /// frames with no re-record.
 #[derive(Clone, Copy)]
 pub struct DdgiUpdateActivation<'a> {
-    /// The I2 probe-update compute pipeline (`sdf_probe_update_it*.comp` /
+    /// The I2 probe-update compute pipeline (`sdf_probe_update.comp` /
     /// [`crate::compute::sdf_probe_update_spirv`]): its layout declares [`Self::layout`] at `set 0`.
     /// The shader reads NO push constant (every param rides the b6 `DdgiUpdate` UBO, like SSAO's
     /// camera UBO), but the arming site MUST still create the pipeline with `push_constant_bytes: 4`

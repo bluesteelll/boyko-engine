@@ -33,8 +33,7 @@ use boyko_rhi::{
 use boyko_rhi::enums::{BarrierAccess, BarrierStage};
 
 use boyko_rhi_vulkan::compute::{
-    EDITLIST_BUFFER_WORDS, GI_MAX_IT_DEFAULT, encode_edit_list, sdf_op, sdf_probe_update_spirv,
-    SdfEdit,
+    EDITLIST_BUFFER_WORDS, encode_edit_list, sdf_op, sdf_probe_update_spirv, SdfEdit,
 };
 use boyko_rhi_vulkan::ddgi::{
     DDGI_ATLAS_LAYERS, DDGI_IRR_ATLAS_HEIGHT, DDGI_IRR_ATLAS_WIDTH, DDGI_PROBE_COUNT, DdgiAtlas,
@@ -257,7 +256,7 @@ fn probe_update_dispatch_writes_nonzero_irradiance() {
         .expect("update bind group");
 
     let module = device
-        .create_shader_module(sdf_probe_update_spirv(GI_MAX_IT_DEFAULT))
+        .create_shader_module(sdf_probe_update_spirv())
         .expect("probe-update module");
     let pipeline = device
         .create_compute_pipeline(&ComputePipelineDesc {

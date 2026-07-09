@@ -78,21 +78,20 @@ fn extract_soft_shadow_ranged(hlsl: &str, which: &str) -> String {
 
 #[test]
 fn sdf_soft_shadow_ranged_copy_matches_resolve() {
-    // The probe-update shader (any GI_MAX_IT variant — the copied function is variant-independent)
-    // COPIES `sdf_soft_shadow_ranged` from `deferred_pbr.hlsl`. Extract both function bodies and
-    // assert token-equality (indentation-normalized, see the extractor): a drift means the GI
-    // shadow march no longer matches the resolve's, the silent-fork the plan §1.1 copy discipline
-    // guards.
+    // The probe-update shader COPIES `sdf_soft_shadow_ranged` from `deferred_pbr.hlsl`. Extract both
+    // function bodies and assert token-equality (indentation-normalized, see the extractor): a drift
+    // means the GI shadow march no longer matches the resolve's, the silent-fork the plan §1.1 copy
+    // discipline guards. (A-1: ONE `sdf_probe_update.comp.hlsl`, `GI_MAX_IT` now a spec-const.)
     let resolve = std::fs::read_to_string(shaders_dir().join("deferred_pbr.hlsl"))
         .expect("invariant: shaders/deferred_pbr.hlsl must exist next to this crate");
-    let update = std::fs::read_to_string(shaders_dir().join("sdf_probe_update_it64.comp.hlsl"))
+    let update = std::fs::read_to_string(shaders_dir().join("sdf_probe_update.comp.hlsl"))
         .expect(
-            "invariant: shaders/sdf_probe_update_it64.comp.hlsl must exist (run `cargo run -p \
+            "invariant: shaders/sdf_probe_update.comp.hlsl must exist (run `cargo run -p \
              boyko_shaderdsl --features emit --bin emit_probe_gi`)",
         );
 
     let resolve_fn = extract_soft_shadow_ranged(&resolve, "deferred_pbr.hlsl");
-    let update_fn = extract_soft_shadow_ranged(&update, "sdf_probe_update_it64.comp.hlsl");
+    let update_fn = extract_soft_shadow_ranged(&update, "sdf_probe_update.comp.hlsl");
 
     assert_eq!(
         update_fn, resolve_fn,

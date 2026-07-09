@@ -31,7 +31,7 @@ use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
 use boyko_rhi_vulkan::ddgi::DdgiAtlas;
 use boyko_rhi_vulkan::compute::{
     B5_CAMERA_UBO_BYTES_M4, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, EDITLIST_BUFFER_WORDS,
-    GI_MAX_IT_DEFAULT, INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS,
+    INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS,
     LOCAL_SIZE_X, TILE_BOUND_BYTES, csm_depth_fs_spirv, csm_depth_vs_spirv, deferred_pbr_spirv,
     encode_edit_list, fullscreen_sample_fs_spirv, fullscreen_sample_vs_spirv, gbuffer_mrt_fs_spirv,
     gbuffer_mrt_vs_spirv, interp_instances_spirv, punctual_depth_fs_spirv, punctual_depth_vs_spirv,
@@ -516,7 +516,7 @@ impl CsmResources {
         // shader reads no push). The shader module is a boot transient dropped after the pipeline
         // captures the compiled state.
         let (ddgi_update_pipeline, ddgi_update_layout) = {
-            let module = RhiDevice::create_shader_module(device, sdf_probe_update_spirv(GI_MAX_IT_DEFAULT))
+            let module = RhiDevice::create_shader_module(device, sdf_probe_update_spirv())
                 .expect("invariant: SDFDDGI probe-update compute shader module create");
             let layout = RhiDevice::create_bind_group_layout(
                 device,

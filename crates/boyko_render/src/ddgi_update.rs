@@ -175,8 +175,9 @@ pub struct DdgiUpdateConfig {
     /// (guarded by a `debug_assert!` in [`ddgi_update_dispatch_groups`]).
     pub subset_n: u32,
     /// The shipped `GI_MAX_IT` sphere-trace trip count — one of
-    /// [`GI_MAX_IT_VARIANTS`](boyko_rhi_vulkan::compute::GI_MAX_IT_VARIANTS). Selects the
-    /// pre-compiled `sdf_probe_update_it*.comp.spv` pipeline (measured==shipped, plan §5).
+    /// [`GI_MAX_IT_VARIANTS`](boyko_rhi_vulkan::compute::GI_MAX_IT_VARIANTS). A-1: `GI_MAX_IT` is a
+    /// spec-const (id 0) on the ONE committed `sdf_probe_update.comp.spv`, so a non-default value is
+    /// bound at pipeline-create via `SpecConstant { id: 0, value }` (measured==shipped, plan §5).
     pub gi_max_it: u32,
     /// The temporal-hysteresis blend factor `α` (SDFDDGI I4) — the fraction of the previous atlas
     /// value the update KEEPS each frame (`lerp(fresh, prev, α)`). Rides the UBO `grid_dims.w` lane
