@@ -6,15 +6,20 @@
 
 pub use boyko_ecs::{App, AppExit};
 
+// The world-global asset kernel table: `Assets<MeshGpu>` is the mesh asset table's
+// storage type (a NonSend resource — see `boyko_render::MeshAssetsExt`).
+pub use boyko_ecs::ecs::core::asset::Assets;
 // System params a startup/scene system takes (`Commands` spawns; the NonSend
-// pair reaches the device + mesh registry).
+// pair reaches the device + mesh asset table).
 pub use boyko_ecs::ecs::core::system::{Commands, NonSendRes, NonSendResMut};
 
 // Math vocabulary for authoring transforms.
 pub use boyko_math::{Affine3A, Quat, Vec3};
 
-// The mesh spawn surface: the drawable bundle + the registry it indexes.
-pub use boyko_render::{MeshBundle, MeshRegistry};
+// The mesh spawn surface: the drawable bundle + the mesh asset record type + the
+// mint/resolve domain API (`register_mesh` / `cube` / `plane` / ...) attached via
+// extension trait to `Assets<MeshGpu>` (asset-system rung A2).
+pub use boyko_render::{MeshAssetsExt, MeshBundle, MeshGpu};
 
 // The lighting spawn surface (host plan R4 + the punctual rung): the light
 // components + their placed-object bundles, the structural CSM caster capability

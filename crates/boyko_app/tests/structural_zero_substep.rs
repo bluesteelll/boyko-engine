@@ -10,11 +10,11 @@
 //!
 //! # Scoping (documented)
 //!
-//! Headless: `MeshRegistry` needs a live device, so the gather runs through a
-//! test-local system over the SAME `(MeshHandle, InstanceModelCol)` +
-//! `Enabled<RenderEnabled>` query shape `gather_mesh_draws` uses, with a fixed
-//! meta table instead of the registry; the upload is the production
-//! `upload_instance_models` over a fake mapped slot.
+//! Headless: the mesh asset table (`Assets<MeshGpu>`) needs a live device, so the
+//! gather runs through a test-local system over the SAME `(MeshHandle,
+//! InstanceModelCol)` + `Enabled<RenderEnabled>` query shape `gather_mesh_draws`
+//! uses, with a fixed meta table instead of the asset table; the upload is the
+//! production `upload_instance_models` over a fake mapped slot.
 
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;

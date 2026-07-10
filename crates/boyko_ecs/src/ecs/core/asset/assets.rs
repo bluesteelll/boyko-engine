@@ -3,7 +3,7 @@
 use crate::ecs::core::asset::asset::{Asset, AssetLoadState};
 use crate::ecs::core::asset::handle::Handle;
 use crate::ecs::core::asset::slot::Slot;
-use crate::ecs::core::resources::resource::Resource;
+use crate::ecs::core::resources::resource::{NonSendResource, Resource};
 use crate::ecs::core::resources::resource_type_registry::resource_id_for;
 use crate::ecs::identifiers::primitives::ResourceId;
 
@@ -202,6 +202,29 @@ impl<T: Asset> Assets<T> {
         self.records.len()
     }
 
+    /// Resolves a dense row `index` DIRECTLY, bypassing the generation check —
+    /// the sanctioned way a render carrier that stores only a raw `u32` index
+    /// (no generation in hand, e.g. a GPU-mirror table or a bucketed gather
+    /// keyed by dense mesh id) resolves back to its record. Returns `None` if
+    /// `index` is out of range or the row is vacant.
+    ///
+    /// # Append-only caveat
+    ///
+    /// Sound ONLY under the append-only usage [`Handle`]'s own doc already
+    /// documents for a render-visible table: once the row at `index` is freed
+    /// and reused by [`add`](Self::add), this call cannot distinguish the old
+    /// occupant from the new one (no generation is consulted here) — the same
+    /// P1-3 caveat governs any render carrier that stores a bare index.
+    /// Callers that never [`remove`](Self::remove) a live render-referenced
+    /// handle (the only supported usage today) are safe.
+    #[inline]
+    pub fn get_by_index(&self, index: u32) -> Option<&T> {
+        match self.records.get(index as usize)? {
+            Slot::Occupied(value) => Some(value),
+            Slot::Vacant { .. } => None,
+        }
+    }
+
     /// Returns the [`AssetLoadState`] of the row `handle` addresses, or
     /// `None` if `handle` is out of range or stale.
     ///
@@ -266,6 +289,28 @@ impl<T: Asset + Send + Sync> Resource for Assets<T> {
         resource_id_for::<Assets<T>>()
     }
 }
+
+// Asset-system rung A2 (the "Resource residency" flavor — e.g. `Assets<MeshGpu>`,
+// whose records own device buffers): a `!Send` asset record (`T: !Send`) cannot
+// satisfy the `Resource` impl above (it requires `T: Send + Sync`), so its
+// `Assets<T>` table must be registered through the separate NonSend slab instead.
+//
+// `NonSendResource` carries no `Send`/`Sync` bound at all (`T: 'static` only,
+// already implied by `Asset: 'static + Sized`), so this impl is unconditional —
+// ANY `Assets<T>` may be registered as a NonSend resource, regardless of whether
+// `T` also happens to be `Send + Sync` (in which case it may ALSO be registered as
+// a plain `Resource`, at the caller's choice; the two slabs are independent, so
+// there is no ambiguity — a type satisfying both traits is not itself inserted
+// into both slabs unless a caller explicitly calls both `insert_resource` and
+// `insert_non_send_resource`).
+//
+// This impl must live HERE, not in a downstream crate: `Assets<T>` and
+// `NonSendResource` are both defined in this crate, so a downstream crate (e.g.
+// `boyko_render`, implementing this for `Assets<MeshGpu>`) would hit the orphan
+// rule (E0117) — neither `Assets` nor `NonSendResource` is local there, and
+// `Assets` is not a "fundamental" type (unlike `&`/`&mut`/`Box`), so nesting a
+// local `T` inside it does not satisfy coherence.
+impl<T: Asset> NonSendResource for Assets<T> {}
 
 #[cfg(test)]
 mod tests {
@@ -367,6 +412,32 @@ mod tests {
             visited,
             vec![(h0, 10), (h2, 30)],
             "iter() must skip the vacated row and preserve the rest in order"
+        );
+    }
+
+    /// `get_by_index` resolves a dense row bypassing generation, returns `None`
+    /// out of range, and correctly stops resolving a freed row while a still-live
+    /// higher index remains resolvable (plan A2 unit: the render-carrier indexed
+    /// accessor added for `MeshHandle`-shaped consumers).
+    #[test]
+    fn get_by_index_resolves_dense_row_bypassing_generation() {
+        let mut assets = Assets::<u64>::with_reserved(4);
+        let h0 = assets.add(10);
+        let h1 = assets.add(20);
+
+        assert_eq!(assets.get_by_index(h1.index()), Some(&20), "index 1 is the 2nd row");
+        assert_eq!(assets.get_by_index(5), None, "an out-of-range index must be None");
+
+        assets.remove(h0);
+        assert_eq!(
+            assets.get_by_index(h0.index()),
+            None,
+            "a freed row must resolve to None even though the index is in range"
+        );
+        assert_eq!(
+            assets.get_by_index(h1.index()),
+            Some(&20),
+            "a still-live higher index remains resolvable after a lower row is freed"
         );
     }
 

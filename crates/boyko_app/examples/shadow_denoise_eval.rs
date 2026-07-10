@@ -75,7 +75,7 @@ fn main() {
     app.run();
 }
 
-fn setup(mut commands: Commands, mut meshes: NonSendResMut<MeshRegistry>, dev: NonSendRes<GpuDevice>) {
+fn setup(mut commands: Commands, mut meshes: NonSendResMut<Assets<MeshGpu>>, dev: NonSendRes<GpuDevice>) {
     let cube = meshes.cube(dev.get(), 1.0);
 
     // The RECEIVER: a large flat SDF slab (40×40, top surface at y = 0). SDF,

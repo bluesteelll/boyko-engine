@@ -20,7 +20,7 @@
 //! `MaterialTable` is `!Send` (it owns RHI buffers, device-bound and
 //! single-thread-touch), so it is registered as a
 //! [`NonSendResource`](boyko_ecs::ecs::core::resources::resource::NonSendResource)
-//! alongside [`MeshRegistry`](crate::mesh_registry::MeshRegistry).
+//! alongside the mesh assets ([`MeshAssetsExt`](crate::mesh_assets::MeshAssetsExt)).
 //!
 //! # Boot-seed vs. steady-state refresh
 //!
@@ -126,7 +126,7 @@ impl MaterialTable {
     ///   default material before this call).
     /// - Panics (`expect`) on an RHI create/map failure — a device OOM at scene-boot
     ///   time is a setup failure, not a recoverable per-frame error (the
-    ///   [`MeshRegistry::register_mesh`](crate::mesh_registry::MeshRegistry::register_mesh)
+    ///   [`MeshAssetsExt::register_mesh`](crate::mesh_assets::MeshAssetsExt::register_mesh)
     ///   precedent).
     pub fn boot_seed(&mut self, assets: &Assets<MaterialGpu>, ctx: &VulkanContext) {
         debug_assert!(
@@ -272,7 +272,7 @@ impl MaterialTable {
     /// The caller MUST have made the device idle (e.g. via the renderer's `Drop` /
     /// `wait_idle`) so no in-flight submit still references the table or staging ring;
     /// each buffer is destroyed exactly once. Mirrors
-    /// [`MeshRegistry::destroy`](crate::mesh_registry::MeshRegistry::destroy).
+    /// [`MeshAssetsExt::destroy`](crate::mesh_assets::MeshAssetsExt::destroy).
     pub unsafe fn destroy(&mut self, ctx: &VulkanContext) {
         if let Some(table) = self.table.take() {
             // SAFETY: the device is idle (caller contract); `table` was created by

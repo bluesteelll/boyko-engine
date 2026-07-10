@@ -55,6 +55,7 @@
 //! `debug_assert!` that no gathered caster also carries that marker (and the query a
 //! `Without<SdfOccluder>` term to make the exclusion structural, not just asserted).
 
+use boyko_ecs::ecs::core::asset::Assets;
 use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
 use boyko_ecs::ecs::core::iters::query::{Query, With};
 use boyko_ecs::ecs::core::system::{NonSendRes, Res, ResMut};
@@ -65,8 +66,9 @@ use crate::csm_config::ResolvedCsm;
 use crate::csm_marker::ShadowCaster;
 use crate::instance_model::InstanceModelCol;
 use crate::light::{LightTableDirty, LightingConfig};
+use crate::mesh::MeshGpu;
+use crate::mesh_assets::MeshAssetsExt;
 use crate::mesh_draw::{DrawBatch, MeshRenderScratch};
-use crate::mesh_registry::MeshRegistry;
 
 /// The reused per-frame shadow-caster gather scratch (CSM Inc 2) — a SEPARATE
 /// [`Resource`] from the main [`MeshRenderScratch`](crate::mesh_draw::MeshRenderScratch)
@@ -137,9 +139,9 @@ impl CsmCasterScratch {
 /// The count → prefix-sum → scatter is
 /// [`MeshRenderScratch::gather_mixed_into`](crate::mesh_draw::MeshRenderScratch::gather_mixed_into)
 /// called verbatim: the `With<ShadowCaster>`-filtered `q.iter()` is the re-iteration
-/// closure, the [`MeshRegistry`] supplies the mesh count (sizes the lanes, O2) + each
-/// batch's `(index_count, index_type)`. One `vkCmdDrawIndexed` per caster mesh
-/// (Principle 1).
+/// closure, the world's `Assets<MeshGpu>` table supplies the mesh count (sizes the
+/// lanes, O2) + each batch's `(index_count, index_type)`. One `vkCmdDrawIndexed` per
+/// caster mesh (Principle 1).
 ///
 /// # 0%-gate
 ///
@@ -152,8 +154,9 @@ impl CsmCasterScratch {
 /// This system is NOT registered in [`CsmPlugin`](crate::csm_plugin::CsmPlugin) (nor any
 /// plugin), exactly as
 /// [`gather_mesh_draws`](crate::mesh_draw::gather_mesh_draws) is an unwired exported API:
-/// it requires the `MeshRegistry` `NonSend` resource + the `InstanceModelCol`/`MeshHandle`
-/// columns the inline CSM demos do not yet spawn, and its output must be co-registered
+/// it requires the world's `Assets<MeshGpu>` `NonSend` resource + the
+/// `InstanceModelCol`/`MeshHandle` columns the inline CSM demos do not yet spawn, and
+/// its output must be co-registered
 /// `.before` the depth-pass consumer at the OWNING app's call site (so the
 /// `.before(record_csm_depth)` edge is expressible there — the same add-order discipline
 /// `CsmPlugin` documents for the resolve/consumer ordering). The app registers it
@@ -165,10 +168,10 @@ impl CsmCasterScratch {
 #[allow(clippy::type_complexity, clippy::needless_pass_by_value)]
 pub fn gather_shadow_casters(
     q: Query<(&MeshHandle, &InstanceModelCol), (Enabled<RenderEnabled>, With<ShadowCaster>)>,
-    registry: NonSendRes<MeshRegistry>,
+    mesh_assets: NonSendRes<Assets<MeshGpu>>,
     mut scratch: ResMut<CsmCasterScratch>,
 ) {
-    let mesh_count = registry.len();
+    let mesh_count = mesh_assets.len();
     // The caster gather is ALL-STATIC (the CSM depth pass reads the caster affines from
     // this scratch's `batches`, never an interpolated ring), so every row takes the
     // `None` pair branch of the unified gather — `pair_ring` / `pair_out_slot` stay empty
@@ -176,7 +179,7 @@ pub fn gather_shadow_casters(
     scratch.0.gather_mixed_into(
         mesh_count,
         |mesh_id| {
-            let m = registry.get(MeshHandle(mesh_id));
+            let m = mesh_assets.mesh(MeshHandle(mesh_id));
             (m.index_count, m.index_type)
         },
         || q.iter().map(|(h, col)| (h.0, col, None)),

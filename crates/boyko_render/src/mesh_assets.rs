@@ -1,0 +1,438 @@
+//! [`MeshAssetsExt`] — the mesh-domain API over `Assets<MeshGpu>` (asset-system
+//! rung A2: the `MeshRegistry` fold).
+//!
+//! Rung A2 replaces the standalone `MeshRegistry` (mesh foundation M2) with the
+//! world-global [`Assets<MeshGpu>`](boyko_ecs::ecs::core::asset::Assets)
+//! `NonSendResource` — the SAME generic asset-kernel table
+//! [`Assets<MaterialGpu>`](crate::material::MaterialGpu) shares (rung A1), this
+//! time in its "Resource residency" flavor: EACH RECORD OWNS its own GPU
+//! buffers, so there is no separate GPU-mirror table like
+//! [`MaterialTable`](crate::material_table::MaterialTable) — a draw binds
+//! straight from the resolved record.
+//!
+//! `Assets<T>` is a bare generic kernel type in `boyko_ecs` (it cannot carry
+//! mesh-specific methods), so the mint/resolve/teardown domain API
+//! (`register_mesh`, `cube`, `plane`, `mesh`, `try_get`, `destroy`, plus the
+//! HW-RT `blas_address`/`blas_generation`) is attached via this extension
+//! trait, `impl`ed once for `Assets<MeshGpu>`. A consumer brings it into scope
+//! with `use boyko_render::MeshAssetsExt;` (or `boyko_app::prelude::*`) and
+//! calls the same method names `MeshRegistry` exposed, on an `Assets<MeshGpu>`
+//! receiver.
+//!
+//! # Why the panicking accessor is named `mesh`, not `get`
+//!
+//! `Assets<T>` already declares an INHERENT `get(&self, handle: Handle<T>) ->
+//! Option<&T>` (the generation-checked core accessor). Rust's method-call
+//! resolution always prefers an inherent method over a trait method of the
+//! SAME name — an extension-trait `get(&self, h: MeshHandle) -> &MeshGpu`
+//! would be permanently shadowed by that inherent method and never reachable
+//! via `assets.get(mesh_handle)` (it would resolve to the inherent `get`,
+//! then fail to type-check `MeshHandle` against `Handle<MeshGpu>`). The
+//! panicking single-mesh accessor is therefore named
+//! [`mesh`](MeshAssetsExt::mesh) instead — the one deliberate naming deviation
+//! from `MeshRegistry`'s original API; every other method name is unchanged.
+//!
+//! # `MeshHandle` stays a raw dense index (unchanged, the P1-3 caveat)
+//!
+//! [`MeshHandle`](boyko_scene::render_caps::MeshHandle) is NOT widened to carry
+//! an `Assets` [`Handle<MeshGpu>`](boyko_ecs::ecs::core::asset::Handle)'s
+//! generation — it stays the plain 4-byte `u32` row index it always was.
+//! [`register_mesh`](MeshAssetsExt::register_mesh) mints via
+//! [`Assets::add`](boyko_ecs::ecs::core::asset::Assets::add) and truncates the
+//! returned `Handle`'s index into a `MeshHandle` (mirrors
+//! [`MaterialId::from_handle`](crate::material::MaterialId::from_handle)'s
+//! carrier truncation); [`mesh`](MeshAssetsExt::mesh) /
+//! [`try_get`](MeshAssetsExt::try_get) resolve it back via
+//! [`Assets::get_by_index`](boyko_ecs::ecs::core::asset::Assets::get_by_index) —
+//! the generation-AGNOSTIC accessor added specifically for this render-carrier
+//! shape. Three per-frame consumers
+//! ([`gather_mesh_draws`](crate::mesh_draw::gather_mesh_draws),
+//! [`gather_shadow_casters`](crate::csm_caster::gather_shadow_casters), and the
+//! host's per-draw / TLAS BLAS-address resolution) fabricate a `MeshHandle`
+//! from a bare dense loop counter (never a stored generational `Handle`), so
+//! `get_by_index` is the only resolution mechanism that fits their call
+//! sites. Sound ONLY under the append-only invariant meshes hold at setup
+//! (documented on [`Handle`](boyko_ecs::ecs::core::asset::Handle)'s own doc,
+//! the same P1-3 caveat `MaterialId` carries) — no caller ever removes a live
+//! mesh handle.
+//!
+//! # BLAS generation, without a bespoke counter field
+//!
+//! The old `MeshRegistry::blas_generation` was a dedicated `u64` field bumped
+//! once per [`register_mesh`](MeshAssetsExt::register_mesh) call that built a
+//! BLAS. `Assets<T>` has no room for mesh-specific extra state, so
+//! [`blas_generation`](MeshAssetsExt::blas_generation) is derived instead from
+//! [`Assets::high_water`](boyko_ecs::ecs::core::asset::Assets::high_water) — the
+//! existing O(1) monotonic row-count high-water mark. This is
+//! BEHAVIOR-IDENTICAL, not merely "close enough":
+//! [`ray_query_enabled`](boyko_rhi_vulkan::device::VulkanContext::ray_query_enabled)
+//! is a FIXED per-process device capability (it never toggles mid-run), so on
+//! an RT device EVERY registration builds a BLAS (the two counters advance in
+//! lockstep, 1:1) and on a non-RT device the BLAS-sync call site is never
+//! reached at all (gated on `ray_query_enabled()` at the call site in
+//! `boyko_app::runner` / `gpu_scene::mod`) — so substituting `high_water()`
+//! changes nothing observable, at zero extra cost (an existing O(1) counter,
+//! not a new scan).
+
+use boyko_ecs::ecs::core::asset::assets::Assets;
+use boyko_ecs::ecs::core::asset::handle::Handle;
+#[cfg(feature = "hwrt")]
+use boyko_rhi::AsIndexType;
+use boyko_rhi::enums::IndexType;
+use boyko_rhi::{BufferDesc, BufferUsage, MemoryLocation, RhiDevice};
+use boyko_rhi_vulkan::device::VulkanContext;
+use boyko_scene::render_caps::MeshHandle;
+
+use crate::mesh::{MeshGpu, U16_INDEX_VERTEX_LIMIT, Vertex};
+#[cfg(feature = "hwrt")]
+use crate::mesh::VERTEX_STRIDE;
+
+/// The mesh-domain API over the world's [`Assets<MeshGpu>`] table (asset-system
+/// rung A2). See the module doc for the fold's shape, the `mesh`-vs-`get`
+/// naming note, the dense-index resolution, and the BLAS-generation
+/// derivation.
+pub trait MeshAssetsExt {
+    /// Uploads a model-space mesh (`vertices` + triangle `indices`) into a fresh GPU
+    /// asset and returns its [`MeshHandle`].
+    ///
+    /// The index width is chosen by O3: `Uint16` when the unique vertex count is at or
+    /// below [`U16_INDEX_VERTEX_LIMIT`], else `Uint32`. The `u32` `indices` are narrowed
+    /// to `u16` on the `Uint16` path; the caller's indices MUST be in `0..vertices.len()`
+    /// (a `debug_assert!` catches an out-of-range index, which would be a `u16`
+    /// truncation bug on the narrow path).
+    ///
+    /// Both buffers are `HostVisibleCoherent` and seeded once here, reusing the RHI's
+    /// `create_buffer` + `buffer_mapped_ptr` upload helpers — the SAME host-coherent
+    /// staging discipline the UI / vertex-buffer paths use; no hand-rolled Vulkan.
+    ///
+    /// # Panics
+    /// Panics (`expect`) if either buffer create or its host mapping fails — a device
+    /// out-of-memory at asset-registration time is a setup failure, not a recoverable
+    /// per-frame error.
+    fn register_mesh(
+        &mut self,
+        ctx: &VulkanContext,
+        vertices: &[Vertex],
+        indices: &[u32],
+    ) -> MeshHandle;
+
+    /// Registers an axis-aligned CUBE of edge length `size`, centered at the
+    /// model-space origin, with per-face outward normals (24 unique vertices,
+    /// 36 indices — `Uint16` by O3) and a neutral light-gray base color. The
+    /// canonical primitive for a first scene (host plan R3); place it with the
+    /// entity's `Transform`.
+    ///
+    /// # Panics
+    /// Same contract as [`register_mesh`](Self::register_mesh): a buffer create
+    /// / map failure at asset-registration time is a setup failure.
+    fn cube(&mut self, ctx: &VulkanContext, size: f32) -> MeshHandle;
+
+    /// Registers a flat XZ-plane quad of side length `size`, centered at the
+    /// model-space origin at `y == 0`, normal `+Y` (4 vertices, 6 indices —
+    /// `Uint16` by O3), with a neutral mid-gray base color — the canonical
+    /// floor/receiver primitive (host plan R3).
+    ///
+    /// # Panics
+    /// Same contract as [`register_mesh`](Self::register_mesh).
+    fn plane(&mut self, ctx: &VulkanContext, size: f32) -> MeshHandle;
+
+    /// Resolves a [`MeshHandle`] to its GPU asset.
+    ///
+    /// # Panics
+    /// Panics if `h` is out of range or was never registered — a handle no
+    /// live row resolves to is a caller/asset-binding bug, not a recoverable
+    /// error (the ECS gather only emits handles this table returned).
+    fn mesh(&self, h: MeshHandle) -> &MeshGpu;
+
+    /// Resolves a [`MeshHandle`] to its GPU asset, or `None` if the handle is
+    /// out of range or was never registered (the fallible counterpart of
+    /// [`mesh`](Self::mesh) for a gather that may hold a not-yet-registered
+    /// handle).
+    fn try_get(&self, h: MeshHandle) -> Option<&MeshGpu>;
+
+    /// Destroys every registered mesh's RHI buffers through `ctx` and empties
+    /// the table.
+    ///
+    /// # Safety
+    /// The caller MUST have made the device idle (e.g. via the renderer's `Drop` /
+    /// `wait_idle`) so no in-flight submit still references any mesh buffer; each buffer
+    /// is destroyed exactly once. Mirrors the test harness's explicit buffer teardown.
+    unsafe fn destroy(&mut self, ctx: &VulkanContext);
+
+    /// HW-RT rung R2a-3: the current BLAS-address generation. The host's per-frame
+    /// TLAS-instance packer rewrites its (frame-invariant) per-mesh BLAS-address table
+    /// ONLY when this advances (BLASes never move — spec), never every frame. See the
+    /// module doc's "BLAS generation, without a bespoke counter field" section.
+    #[cfg(feature = "hwrt")]
+    fn blas_generation(&self) -> u64;
+
+    /// HW-RT rung R2a-3: mesh `h`'s BLAS device address (a TLAS instance's
+    /// `accelerationStructureReference`), or `0` if the handle has no BLAS (a non-RT
+    /// device, or a handle the table never minted). Non-zero for every mesh registered
+    /// on an RT device.
+    #[cfg(feature = "hwrt")]
+    fn blas_address(&self, h: MeshHandle) -> u64;
+}
+
+impl MeshAssetsExt for Assets<MeshGpu> {
+    fn register_mesh(
+        &mut self,
+        ctx: &VulkanContext,
+        vertices: &[Vertex],
+        indices: &[u32],
+    ) -> MeshHandle {
+        debug_assert!(!vertices.is_empty(), "invariant: a mesh has at least one vertex");
+        debug_assert!(!indices.is_empty(), "invariant: an indexed mesh has at least one index");
+        let vertex_count = vertices.len();
+        let index_type = if vertex_count <= U16_INDEX_VERTEX_LIMIT {
+            IndexType::Uint16
+        } else {
+            IndexType::Uint32
+        };
+
+        // HW-RT rung R2a-2: on an RT device the mesh is a BLAS build input, so its vertex +
+        // index buffers must carry `ACCEL_BUILD_INPUT | SHADER_DEVICE_ADDRESS` (the shared
+        // host block carries `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT` — device.rs
+        // `rt_buffer_device_address` — so the device-address usage is valid). hwrt-off OR a
+        // non-RT GPU ⇒ `as_bits` is `NONE`, so the usage is unchanged (byte-identical to the
+        // pre-R2a mesh buffers).
+        let as_bits = {
+            #[cfg(feature = "hwrt")]
+            {
+                if ctx.ray_query_enabled() {
+                    BufferUsage::ACCEL_BUILD_INPUT | BufferUsage::SHADER_DEVICE_ADDRESS
+                } else {
+                    BufferUsage::NONE
+                }
+            }
+            #[cfg(not(feature = "hwrt"))]
+            {
+                BufferUsage::NONE
+            }
+        };
+        let vertex_usage = BufferUsage::VERTEX | as_bits;
+        let index_usage = BufferUsage::INDEX | as_bits;
+
+        // --- Vertex buffer: copy the model-space vertices in once. ---
+        let vertex_bytes = core::mem::size_of_val(vertices) as u64;
+        let vertex_buffer = ctx
+            .create_buffer(&BufferDesc {
+                size: vertex_bytes,
+                usage: vertex_usage,
+                location: MemoryLocation::HostVisibleCoherent,
+            })
+            .expect("invariant: mesh vertex buffer create");
+        let vb_ptr = ctx
+            .buffer_mapped_ptr(&vertex_buffer)
+            .expect("invariant: host-visible vertex buffer is mapped");
+        // SAFETY: `vb_ptr` points to `vertex_bytes` mapped host-coherent bytes; `vertices`
+        // is a distinct `vertex_bytes`-byte slice (`#[repr(C)]`, tightly packed); the two
+        // regions do not overlap (a fresh device allocation vs the caller's slice). The
+        // copy completes before any GPU submit references the buffer.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                vertices.as_ptr().cast::<u8>(),
+                vb_ptr.as_ptr(),
+                vertex_bytes as usize,
+            );
+        }
+
+        // --- Index buffer: width chosen above; the bytes are built host-side then copied. ---
+        let index_bytes: Vec<u8> = match index_type {
+            IndexType::Uint16 => {
+                let mut bytes = Vec::with_capacity(indices.len() * 2);
+                for &i in indices {
+                    debug_assert!(
+                        (i as usize) < vertex_count,
+                        "invariant: index in range for the u16 narrow path"
+                    );
+                    bytes.extend_from_slice(&(i as u16).to_le_bytes());
+                }
+                bytes
+            }
+            IndexType::Uint32 => {
+                let mut bytes = Vec::with_capacity(indices.len() * 4);
+                for &i in indices {
+                    bytes.extend_from_slice(&i.to_le_bytes());
+                }
+                bytes
+            }
+        };
+        let index_buffer = ctx
+            .create_buffer(&BufferDesc {
+                size: index_bytes.len() as u64,
+                usage: index_usage,
+                location: MemoryLocation::HostVisibleCoherent,
+            })
+            .expect("invariant: mesh index buffer create");
+        let ib_ptr = ctx
+            .buffer_mapped_ptr(&index_buffer)
+            .expect("invariant: host-visible index buffer is mapped");
+        // SAFETY: `ib_ptr` points to `index_bytes.len()` mapped host-coherent bytes;
+        // `index_bytes` is a distinct, equally-sized owned allocation (no overlap with the
+        // device buffer). The copy completes before any GPU submit references the buffer.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                index_bytes.as_ptr(),
+                ib_ptr.as_ptr(),
+                index_bytes.len(),
+            );
+        }
+
+        // HW-RT rung R2a-3: build this mesh's per-mesh BLAS EAGERLY on an RT device (Principle 0
+        // — durable per-mesh data ON the record). The BLAS reads the vertex + index buffers just
+        // created (at the mesh's REAL index width — no duplicate `u32` buffer), so it must build
+        // BEFORE they move into `MeshGpu`; `build_blas` submits + fence-waits synchronously and
+        // caches only the device addresses (it keeps no reference to these buffers). hwrt-off OR a
+        // non-RT GPU ⇒ no BLAS (byte-identical to the pre-R2a registry).
+        #[cfg(feature = "hwrt")]
+        let blas = {
+            if ctx.ray_query_enabled() {
+                let as_index_type = match index_type {
+                    IndexType::Uint16 => AsIndexType::Uint16,
+                    IndexType::Uint32 => AsIndexType::Uint32,
+                };
+                let built = boyko_rhi_vulkan::accel_build::build_blas(
+                    ctx,
+                    &ctx.rhi_queue(),
+                    &boyko_rhi_vulkan::accel_build::BlasBuildInput {
+                        vertex_buffer: &vertex_buffer,
+                        index_buffer: &index_buffer,
+                        vertex_count: vertex_count as u32,
+                        index_count: indices.len() as u32,
+                        vertex_stride: VERTEX_STRIDE as u64,
+                        index_type: as_index_type,
+                    },
+                )
+                .expect("invariant: mesh BLAS build on an RT device");
+                Some(built)
+            } else {
+                None
+            }
+        };
+
+        let handle = self.add(MeshGpu {
+            vertex_buffer,
+            index_buffer,
+            index_count: indices.len() as u32,
+            index_type,
+            vertex_count: vertex_count as u32,
+            #[cfg(feature = "hwrt")]
+            blas,
+        });
+        MeshHandle(handle.index())
+    }
+
+    fn cube(&mut self, ctx: &VulkanContext, size: f32) -> MeshHandle {
+        const COLOR: [f32; 4] = [0.82, 0.82, 0.82, 1.0];
+        let h = size * 0.5;
+        // Six faces × four corners; each face carries its own outward normal so
+        // the G-buffer normal lane is face-correct (no vertex-normal averaging).
+        // Faces: +X, -X, +Y, -Y, +Z, -Z. Corner order is consistent per face so
+        // one index pattern (two triangles per quad) covers all six.
+        let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
+            ([1.0, 0.0, 0.0], [[h, -h, -h], [h, h, -h], [h, h, h], [h, -h, h]]),
+            ([-1.0, 0.0, 0.0], [[-h, -h, h], [-h, h, h], [-h, h, -h], [-h, -h, -h]]),
+            ([0.0, 1.0, 0.0], [[-h, h, -h], [-h, h, h], [h, h, h], [h, h, -h]]),
+            ([0.0, -1.0, 0.0], [[-h, -h, h], [-h, -h, -h], [h, -h, -h], [h, -h, h]]),
+            ([0.0, 0.0, 1.0], [[-h, -h, h], [h, -h, h], [h, h, h], [-h, h, h]]),
+            ([0.0, 0.0, -1.0], [[h, -h, -h], [-h, -h, -h], [-h, h, -h], [h, h, -h]]),
+        ];
+        let mut vertices = [Vertex {
+            position: [0.0; 3],
+            normal: [0.0; 3],
+            color: COLOR,
+        }; 24];
+        let mut indices = [0u32; 36];
+        for (f, (normal, corners)) in faces.iter().enumerate() {
+            for (c, corner) in corners.iter().enumerate() {
+                vertices[f * 4 + c] = Vertex {
+                    position: *corner,
+                    normal: *normal,
+                    color: COLOR,
+                };
+            }
+            let base = (f * 4) as u32;
+            indices[f * 6..f * 6 + 6].copy_from_slice(&[
+                base,
+                base + 1,
+                base + 2,
+                base,
+                base + 2,
+                base + 3,
+            ]);
+        }
+        self.register_mesh(ctx, &vertices, &indices)
+    }
+
+    fn plane(&mut self, ctx: &VulkanContext, size: f32) -> MeshHandle {
+        const COLOR: [f32; 4] = [0.62, 0.62, 0.62, 1.0];
+        const NORMAL: [f32; 3] = [0.0, 1.0, 0.0];
+        let h = size * 0.5;
+        let vertices = [
+            Vertex { position: [-h, 0.0, -h], normal: NORMAL, color: COLOR },
+            Vertex { position: [-h, 0.0, h], normal: NORMAL, color: COLOR },
+            Vertex { position: [h, 0.0, h], normal: NORMAL, color: COLOR },
+            Vertex { position: [h, 0.0, -h], normal: NORMAL, color: COLOR },
+        ];
+        let indices = [0u32, 1, 2, 0, 2, 3];
+        self.register_mesh(ctx, &vertices, &indices)
+    }
+
+    #[inline]
+    fn mesh(&self, h: MeshHandle) -> &MeshGpu {
+        self.get_by_index(h.0)
+            .expect("invariant: MeshHandle resolves to a registered mesh")
+    }
+
+    #[inline]
+    fn try_get(&self, h: MeshHandle) -> Option<&MeshGpu> {
+        self.get_by_index(h.0)
+    }
+
+    unsafe fn destroy(&mut self, ctx: &VulkanContext) {
+        // `Assets<T>` exposes no owned/mutable whole-table iteration (only the
+        // borrowed `iter()` and the handle-keyed `remove()`), so every live handle is
+        // collected FIRST (a small, one-shot teardown allocation — never on the
+        // gameplay hot path, Principle 5's actual scope) and then removed by value,
+        // one mesh at a time.
+        let handles: Vec<Handle<MeshGpu>> = self.iter().map(|(h, _)| h).collect();
+        for h in handles {
+            #[cfg_attr(not(feature = "hwrt"), allow(unused_mut))]
+            let mut mesh = self
+                .remove(h)
+                .expect("invariant: a handle collected from iter() resolves via remove()");
+            // R2a-3 (P0-3): free the AS FIRST — the AS's memory lives in its backing buffer,
+            // which MUST outlive it. `destroy_blas` frees the AS then its backing.
+            #[cfg(feature = "hwrt")]
+            if let Some(b) = mesh.blas.take() {
+                // SAFETY: the device is idle (caller contract), so no submit builds/traces this
+                // BLAS; `take` ensures it is destroyed exactly once (a repeat `destroy` call sees
+                // `None`).
+                unsafe { boyko_rhi_vulkan::accel_build::destroy_blas(ctx, b) };
+            }
+            // SAFETY: `mesh.vertex_buffer` / `mesh.index_buffer` were created by
+            // `register_mesh` on this same `ctx`; the device is idle (caller contract), so
+            // no submit references them; the by-value move destroys each exactly once. Any
+            // per-mesh BLAS was already freed above (R2a-3).
+            unsafe {
+                ctx.destroy_buffer(mesh.vertex_buffer);
+                ctx.destroy_buffer(mesh.index_buffer);
+            }
+        }
+    }
+
+    #[cfg(feature = "hwrt")]
+    #[inline]
+    fn blas_generation(&self) -> u64 {
+        self.high_water() as u64
+    }
+
+    #[cfg(feature = "hwrt")]
+    #[inline]
+    fn blas_address(&self, h: MeshHandle) -> u64 {
+        self.get_by_index(h.0)
+            .and_then(|m| m.blas.as_ref())
+            .map_or(0, |b| b.device_address)
+    }
+}

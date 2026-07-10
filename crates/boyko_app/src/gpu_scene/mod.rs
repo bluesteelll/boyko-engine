@@ -73,7 +73,9 @@ use boyko_render::{
     resolve_ddgi,
 };
 #[cfg(feature = "hwrt")]
-use boyko_render::MeshRegistry;
+use boyko_ecs::ecs::core::asset::Assets;
+#[cfg(feature = "hwrt")]
+use boyko_render::{MeshAssetsExt, MeshGpu};
 #[cfg(feature = "hwrt")]
 use boyko_render::MOTION_CAM_UBO_BYTES;
 #[cfg(feature = "hwrt")]
@@ -107,7 +109,7 @@ pub(crate) const INSTANCE_CAPACITY: usize = 1024;
 /// host's TLAS packer can reference). The table is a tiny host-visible `u64` column indexed by
 /// `MeshHandle.0`; a registration beyond it is a hard `debug_assert` (consistent with
 /// [`INSTANCE_CAPACITY`]'s overflow discipline). Frame-invariant (BLASes never move), rewritten
-/// only when [`MeshRegistry::blas_generation`](boyko_render::MeshRegistry::blas_generation)
+/// only when [`MeshAssetsExt::blas_generation`](boyko_render::MeshAssetsExt::blas_generation)
 /// advances.
 #[cfg(feature = "hwrt")]
 pub(crate) const MESH_ADDR_CAP: usize = 256;
@@ -430,7 +432,7 @@ impl GpuSceneBundles {
     /// # Panics
     /// Panics (`expect("invariant: ...")`) on any RHI create failure — a device
     /// OOM at scene-boot time is a setup failure, not a recoverable per-frame
-    /// error (the `MeshRegistry::register_mesh` precedent). The window / WSI
+    /// error (the `MeshAssetsExt::register_mesh` precedent). The window / WSI
     /// links that can legitimately fail on end-user machines are handled by
     /// `WindowHost::boot`'s typed error BEFORE this runs.
     pub(crate) fn boot(ctx: &VulkanContext, composite: (u32, u32), swap_format: Format) -> Self {
@@ -1826,15 +1828,15 @@ impl GpuSceneBundles {
         self.tlas.as_ref().map(|t| t.mesh_id_slot(slot))
     }
 
-    /// HW-RT rung R2a-3: rewrites the frame-invariant BLAS-address table from `registry` IFF its
+    /// HW-RT rung R2a-3: rewrites the frame-invariant BLAS-address table from `mesh_assets` IFF its
     /// `blas_generation` advanced (a BLAS never moves — spec, so this is a no-op on the steady
     /// per-frame path). No-op on a non-RT device (`self.tlas` absent). Called by the runner before
     /// `scene()` on an RT device.
     #[cfg(feature = "hwrt")]
     #[inline]
-    pub(crate) fn sync_tlas_blas_addr(&self, device: &VulkanContext, registry: &MeshRegistry) {
+    pub(crate) fn sync_tlas_blas_addr(&self, device: &VulkanContext, mesh_assets: &Assets<MeshGpu>) {
         if let Some(t) = self.tlas.as_ref() {
-            t.sync_blas_addr(device, registry);
+            t.sync_blas_addr(device, mesh_assets);
         }
     }
 
@@ -2020,7 +2022,7 @@ impl GpuSceneBundles {
             RhiDevice::destroy_buffer(ctx, self.light_table);
             // Asset-system rung A1: the material table is now World-owned
             // (`MaterialTable`); `boyko_app::runner`'s teardown destroys it
-            // separately, AFTER this fn returns (mirrors `MeshRegistry`'s teardown
+            // separately, AFTER this fn returns (mirrors `Assets<MeshGpu>`'s teardown
             // slot) — destroying it here too would double-free.
             for slot in self.camera_ring {
                 RhiDevice::destroy_buffer(ctx, slot);

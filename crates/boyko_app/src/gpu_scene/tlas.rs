@@ -49,9 +49,9 @@ pub(super) struct TlasResources {
     /// The built SSBO capacity in instances ([`INSTANCE_CAPACITY`]) — the sizing MAX + the
     /// per-frame count's `debug_assert` bound.
     capacity: u32,
-    /// The last [`blas_generation`](boyko_render::MeshRegistry::blas_generation) the `blas_addr`
+    /// The last [`blas_generation`](boyko_render::MeshAssetsExt::blas_generation) the `blas_addr`
     /// table reflects (interior-mutable: the table sync runs through `&self`). Starts `u64::MAX`
-    /// so the first `sync_blas_addr` (registry generation 0..N) always rewrites.
+    /// so the first `sync_blas_addr` (generation 0..N) always rewrites.
     blas_addr_gen: core::cell::Cell<u64>,
 }
 
@@ -203,7 +203,7 @@ impl TlasResources {
         &self.mesh_id_rings[slot]
     }
 
-    /// Rewrites the frame-invariant `blas_addr` table from `registry` IFF its `blas_generation`
+    /// Rewrites the frame-invariant `blas_addr` table from `mesh_assets` IFF its `blas_generation`
     /// advanced since the last sync (a BLAS never moves — spec, so the table is stable across
     /// frames). A plain host-coherent memcpy of the per-mesh BLAS device addresses (RISK-3): no
     /// staging, no barrier — the submit's host-write → device domain dependency covers the packer's
@@ -211,12 +211,12 @@ impl TlasResources {
     ///
     /// Runs through `&self` (interior-mutable `blas_addr_gen`) so the host can call it right before
     /// `scene()` without a `&mut` borrow of the bundles.
-    pub(super) fn sync_blas_addr(&self, device: &VulkanContext, registry: &MeshRegistry) {
-        let generation = registry.blas_generation();
+    pub(super) fn sync_blas_addr(&self, device: &VulkanContext, mesh_assets: &Assets<MeshGpu>) {
+        let generation = mesh_assets.blas_generation();
         if self.blas_addr_gen.get() == generation {
             return;
         }
-        let mesh_count = registry.len();
+        let mesh_count = mesh_assets.len();
         // HARD assert (not `debug_assert`): a silent `.min()` clamp would leave the shader reading
         // `BlasAddr[mesh_id]` past the written region (garbage `accelerationStructureReference` →
         // bogus TLAS / device-lost) for a scene with > MESH_ADDR_CAP meshes. Fail fast in every
@@ -229,7 +229,7 @@ impl TlasResources {
         let mapped = RhiDevice::buffer_mapped_ptr(device, &self.blas_addr)
             .expect("invariant: host-visible BLAS-address table is mapped");
         for m in 0..mesh_count {
-            let addr = registry.blas_address(MeshHandle(m as u32));
+            let addr = mesh_assets.blas_address(MeshHandle(m as u32));
             // SAFETY: `mapped` targets `MESH_ADDR_CAP * 8` host-coherent bytes; `m < mesh_count <=
             // MESH_ADDR_CAP` (hard-asserted above), so the 8-byte write at `m * 8` is in-bounds.
             // `addr` is a plain `u64` (any bit pattern valid); the packer reads it as `uint2` (lo,

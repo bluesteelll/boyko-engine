@@ -44,7 +44,8 @@ pub struct MeshBundle {
     pub transform: Transform,
     /// Cached world pose, filled by `propagate_transforms`.
     pub global: GlobalTransform,
-    /// Mesh asset handle (an index into the [`MeshRegistry`](crate::MeshRegistry)).
+    /// Mesh asset handle (a dense index into the world's `Assets<MeshGpu>` table —
+    /// see [`MeshAssetsExt`](crate::MeshAssetsExt)).
     pub mesh: MeshHandle,
     /// Material asset handle (table slot; `0` = the engine default material).
     pub material: MaterialHandle,

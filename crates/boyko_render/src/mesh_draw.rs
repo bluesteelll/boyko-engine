@@ -32,7 +32,7 @@
 //! Alongside the affine [`ring`](MeshRenderScratch::ring) the gather scatters a
 //! PARALLEL [`mesh_ids`](MeshRenderScratch::mesh_ids) lane: `mesh_ids[i]` is ring
 //! instance `i`'s `MeshHandle.0` — which is also its BLAS index (the mesh BLAS is
-//! keyed by the same `MeshRegistry` handle). This makes the instance ring DIRECTLY
+//! keyed by the same `Assets<MeshGpu>` handle). This makes the instance ring DIRECTLY
 //! consumable by a future TLAS builder — instance `i` maps to (`ring[i]` = its 3×4
 //! world affine, `mesh_ids[i]` = its BLAS) in O(1), with no need to reconstruct the
 //! mapping by range-searching the per-mesh [`batches`](MeshRenderScratch::batches).
@@ -42,6 +42,7 @@
 //! batch's contiguous `base_instance` range), so the lane costs the raster path
 //! nothing but one scatter store per instance.
 
+use boyko_ecs::ecs::core::asset::Assets;
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
 use boyko_ecs::ecs::core::system::{NonSendRes, ResMut};
@@ -54,7 +55,8 @@ use bytemuck::Zeroable;
 
 use crate::gpu_transform3d::GpuTransform3D;
 use crate::instance_model::InstanceModelCol;
-use crate::mesh_registry::MeshRegistry;
+use crate::mesh::MeshGpu;
+use crate::mesh_assets::MeshAssetsExt;
 
 /// One per-mesh instanced draw (mesh foundation M3) — the consumer issues exactly ONE
 /// `vkCmdDrawIndexed(index_count, instance_count, 0, 0, base_instance)` per batch
@@ -68,10 +70,11 @@ use crate::mesh_registry::MeshRegistry;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DrawBatch {
     /// The mesh this batch draws (`MeshHandle.0`) — the consumer resolves it to GPU
-    /// buffers via the [`MeshRegistry`].
+    /// buffers via the world's `Assets<MeshGpu>` table
+    /// ([`MeshAssetsExt`](crate::mesh_assets::MeshAssetsExt)).
     pub mesh_id: u32,
     /// The mesh's index count (`vkCmdDrawIndexed`'s `index_count`), copied from the
-    /// registry at gather time so the recorder reads it without a second lookup.
+    /// asset table at gather time so the recorder reads it without a second lookup.
     pub index_count: u32,
     /// The mesh's bound index width (O3 mixed `Uint16`/`Uint32`), copied from the
     /// registry at gather time.
@@ -457,8 +460,8 @@ impl MeshRenderScratch {
 /// ad-hoc buffer).
 ///
 /// The query is filtered on `Enabled<RenderEnabled>` (the `Visibility::Hidden` gate),
-/// so a hidden row never enters a bucket. The [`MeshRegistry`] (a `NonSend` resource)
-/// supplies the mesh count (sizes the lanes, O2) + each batch's `(index_count,
+/// so a hidden row never enters a bucket. The world's [`Assets<MeshGpu>`] (a `NonSend`
+/// resource) supplies the mesh count (sizes the lanes, O2) + each batch's `(index_count,
 /// index_type)`.
 ///
 /// # Static + interpolated in ONE gather (refined-B — the R5 review P0 fix)
@@ -512,14 +515,14 @@ pub fn gather_mesh_draws(
         (&MeshHandle, &InstanceModelCol, Option<&GpuTransform3D>),
         Enabled<RenderEnabled>,
     >,
-    registry: NonSendRes<MeshRegistry>,
+    mesh_assets: NonSendRes<Assets<MeshGpu>>,
     mut scratch: ResMut<MeshRenderScratch>,
 ) {
-    let mesh_count = registry.len();
+    let mesh_count = mesh_assets.len();
     scratch.gather_mixed_into(
         mesh_count,
         |mesh_id| {
-            let m = registry.get(MeshHandle(mesh_id));
+            let m = mesh_assets.mesh(MeshHandle(mesh_id));
             (m.index_count, m.index_type)
         },
         || q.iter().map(|(h, col, pair)| (h.0, col, pair)),
@@ -549,15 +552,15 @@ pub fn gather_mesh_draws(
         ),
         Enabled<RenderEnabled>,
     >,
-    registry: NonSendRes<MeshRegistry>,
+    mesh_assets: NonSendRes<Assets<MeshGpu>>,
     mut scratch: ResMut<MeshRenderScratch>,
     denoise: Res<crate::ShadowDenoiseConfig>,
 ) {
-    let mesh_count = registry.len();
+    let mesh_count = mesh_assets.len();
     scratch.gather_mixed_into(
         mesh_count,
         |mesh_id| {
-            let m = registry.get(MeshHandle(mesh_id));
+            let m = mesh_assets.mesh(MeshHandle(mesh_id));
             (m.index_count, m.index_type)
         },
         || q.iter().map(|(h, col, pair, _prev)| (h.0, col, pair)),

@@ -53,7 +53,7 @@ fn exit_after_budget(mut budget: ResMut<FrameBudget>, mut exit: ResMut<AppExit>)
 
 /// The interpolated room: one cube carrying BOTH the mesh draw components AND the
 /// `GpuTransform3D` interpolation pair (the opt-in), a floor, a sun, a camera.
-fn setup(mut commands: Commands, mut meshes: NonSendResMut<MeshRegistry>, dev: NonSendRes<GpuDevice>) {
+fn setup(mut commands: Commands, mut meshes: NonSendResMut<Assets<MeshGpu>>, dev: NonSendRes<GpuDevice>) {
     let floor = meshes.plane(dev.get(), 12.0);
     let cube = meshes.cube(dev.get(), 1.0);
 
@@ -169,8 +169,8 @@ fn interp_smoke_pair_path_is_live_over_the_host() {
         "teardown must evict the shared-mode RhiContext"
     );
     assert!(
-        !app.world().contains_non_send_resource::<MeshRegistry>(),
-        "teardown must evict + destroy the MeshRegistry"
+        !app.world().contains_non_send_resource::<Assets<MeshGpu>>(),
+        "teardown must evict + destroy the mesh Assets<MeshGpu> table"
     );
     assert!(
         !app.world().contains_non_send_resource::<GpuDevice>(),

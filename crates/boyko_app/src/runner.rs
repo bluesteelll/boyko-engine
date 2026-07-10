@@ -30,7 +30,7 @@ use boyko_input::{ButtonState, KeyCode, RawInputEvent};
 use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
 #[cfg(windows)]
 use boyko_render::{
-    CsmCasterScratch, DdgiCaps, MaterialGpu, MaterialId, MaterialTable, MeshRegistry,
+    CsmCasterScratch, DdgiCaps, MaterialGpu, MaterialId, MaterialTable, MeshAssetsExt, MeshGpu,
     MeshRenderScratch, RayBackendPolicy, RayCaps, ResolvedCsm, ResolvedShadowAtlas, RhiContext,
     SdfEditStaging, ShadowDenoiseConfig, ShadowDenoiseMode, collect_sdf_edits,
     gbuffer_push_from_view, upload_atlas_ring, upload_camera_ring, upload_csm_ring,
@@ -137,14 +137,16 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
 
     // ── World residents BEFORE `finish()` so the startup one-shots drain WITH
     // the device present (plan D2 step 4 / D6). The GPU handles are NonSend:
-    // all GPU access stays runner-thread-only. `MeshRegistry` starts empty —
-    // user startup registers meshes through `GpuDevice`. `WindowInfo` seeds at
+    // all GPU access stays runner-thread-only. `Assets<MeshGpu>` starts empty —
+    // user startup registers meshes through `GpuDevice` (asset-system rung A2:
+    // the mesh records own their GPU buffers, so this table IS the GPU-resident
+    // mesh asset table, no separate mirror). `WindowInfo` seeds at
     // the boot client size (its one-frame-stale contract starts post-present).
     app.world_mut()
         .insert_non_send_resource(RhiContext::from_shared(ctx));
     app.world_mut().insert_non_send_resource(GpuDevice(ctx));
     app.world_mut()
-        .insert_non_send_resource(MeshRegistry::new());
+        .insert_non_send_resource(Assets::<MeshGpu>::default());
     // Asset-system rung A1: `Assets<MaterialGpu>` is the CPU authority (a Resource,
     // the same generic asset-kernel table every future asset type shares);
     // `MaterialTable` is its GPU mirror (NonSend — it owns RHI buffers once
@@ -323,7 +325,7 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // since); and NO `&'static VulkanContext` reference remains in any live
     // structure — `teardown` destroyed the whole host chain (renderer /
     // targets / bundles / swapchain / surface / window) and evicted every
-    // World GPU resident (`RhiContext`, `MeshRegistry`, `GpuDevice`), no
+    // World GPU resident (`RhiContext`, `Assets<MeshGpu>`, `GpuDevice`), no
     // protected `&ctx` parameter is in scope, and `ctx` is not used past this
     // statement — so the documented `'static` fiction ends with no surviving
     // reference.
@@ -335,7 +337,7 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     debug_assert!(
         !app.world().contains_non_send_resource::<RhiContext>()
             && !app.world().contains_non_send_resource::<GpuDevice>()
-            && !app.world().contains_non_send_resource::<MeshRegistry>()
+            && !app.world().contains_non_send_resource::<Assets<MeshGpu>>()
             && !app.world().contains_non_send_resource::<MaterialTable>(),
         "invariant: the post-run World is GPU-evicted (plan D2)"
     );
@@ -519,7 +521,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
 
         // 5–7. Uploads + stack scene assembly + render. The draw list reuses
         // the host's parked allocation (0 alloc/frame after warmup); its
-        // elements borrow the World's `MeshRegistry` buffers for this frame.
+        // elements borrow the World's `Assets<MeshGpu>` buffers for this frame.
         // The two flags feed the post-present `HostFrameStats` publish (step 8):
         // the light flag is set on the gated branch; the csm flag is assigned
         // exactly once inside the block (definite-initialization, no dead seed).
@@ -780,7 +782,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             }
 
             // 6a. DrawBatch → GBufferMeshDraw: resolve each batch's mesh to its
-            //     registry GPU buffers (the showcase's ~8070 conversion, driven
+            //     asset-table GPU buffers (the showcase's ~8070 conversion, driven
             //     by the ECS gather instead of a test-built list). R4:
             //     `casts_shadow` is driven by the PRODUCTION `ShadowCaster`
             //     gather — a mesh whose batch appears in `CsmCasterScratch`
@@ -791,7 +793,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             //     a mesh with ANY caster instance casts with ALL its visible
             //     instances (mixed caster/receiver instances of one mesh are
             //     not separable on this path — split the mesh id if needed).
-            let registry = world.non_send_resource::<MeshRegistry>();
+            let mesh_assets = world.non_send_resource::<Assets<MeshGpu>>();
             // Asset-system rung A1: the World-owned material GPU mirror, threaded into
             // `scene()` below so `GBufferScene.material_table` binds its device SSBO
             // instead of a boot-owned buffer.
@@ -805,7 +807,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 }
                 let casts_shadow =
                     ci < caster_batches.len() && caster_batches[ci].mesh_id == b.mesh_id;
-                let mesh = registry.get(MeshHandle(b.mesh_id));
+                let mesh = mesh_assets.mesh(MeshHandle(b.mesh_id));
                 draws.push(GBufferMeshDraw {
                     vertex_buffer: &mesh.vertex_buffer,
                     index_buffer: &mesh.index_buffer,
@@ -896,7 +898,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     .is_some_and(|cfg| cfg.enabled());
             // HW-RT rung R2a-3: TLAS arming — hwrt + an RT device + a non-empty gather. On an RT
             // device, first sync the frame-invariant BLAS-address table (a no-op unless the mesh
-            // registry's `blas_generation` advanced — a BLAS never moves), then arm the per-frame
+            // asset table's `blas_generation` advanced — a BLAS never moves), then arm the per-frame
             // pack + build. On a non-RT device (or hwrt OFF) `tlas_enabled` is `false` → the
             // byte-identical OFF path (no pack, no build, no barrier).
             #[cfg(feature = "hwrt")]
@@ -924,7 +926,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // no-op unless `blas_generation` advanced). Only the per-frame TLAS
                 // BUILD is gated by `tlas_enabled`.
                 if ctx.ray_query_enabled() {
-                    host.gpu.sync_tlas_blas_addr(ctx, registry);
+                    host.gpu.sync_tlas_blas_addr(ctx, mesh_assets);
                 }
                 ctx.ray_query_enabled() && backend_hw && scratch.instance_count() > 0
             };
@@ -972,7 +974,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             //    for slot `s` ends here — R0b).
             // SAFETY: `ctx`/`surface`/`swapchain`/`renderer` share the one
             // pinned device; every `scene` resource is live (owned by
-            // `host.gpu` / the World's `MeshRegistry` / `MaterialTable`, all
+            // `host.gpu` / the World's `Assets<MeshGpu>` / `MaterialTable`, all
             // outliving the call); `present_extent` == the composite extent the camera
             // push `count`, `dispatch_group_count_x`, and the G-buffer targets
             // are sized to (all boot-fixed, plan D7); a `Some(readback)` is
@@ -1188,16 +1190,16 @@ fn teardown(app: &mut App, host: WindowHost, ctx: &VulkanContext) {
     //     every column/UI resource; the registry teardown wait-idles the
     //     already-idle device — a benign no-op) and NEVER touches the device
     //     lifecycle;
-    //   - `MeshRegistry` / `MaterialTable`: their buffers are destroyed through
+    //   - `Assets<MeshGpu>` / `MaterialTable`: their buffers are destroyed through
     //     `ctx` under the step-1 idle (`unsafe destroy` — neither has `Drop` glue);
     //   - `GpuDevice`: the last world-resident `&'static` handle — no dangling
     //     `&'static` may remain in a live structure past this point.
     drop(app.world_mut().remove_non_send_resource::<RhiContext>());
-    if let Some(mut registry) = app.world_mut().remove_non_send_resource::<MeshRegistry>() {
+    if let Some(mut mesh_assets) = app.world_mut().remove_non_send_resource::<Assets<MeshGpu>>() {
         // SAFETY: the device is idle (step 1) so no in-flight submit references
         // any mesh buffer; `ctx` is the context they were created on; the
-        // registry is destroyed exactly once (just removed from the World).
-        unsafe { registry.destroy(ctx) };
+        // table is destroyed exactly once (just removed from the World).
+        unsafe { mesh_assets.destroy(ctx) };
     }
     // Asset-system rung A1: `MaterialTable`'s table + staging ring are destroyed the
     // SAME way, under the SAME step-1 idle contract. `Assets<MaterialGpu>` (the CPU

@@ -38,9 +38,9 @@ fn main() {
 
 /// Spawns the room + one SDF sphere: startup runs WITH the device present, so
 /// meshes register straight through the world-resident `GpuDevice` +
-/// `MeshRegistry`, and the `SdfPrimitive` lands in the World before the startup
+/// `Assets<MeshGpu>`, and the `SdfPrimitive` lands in the World before the startup
 /// `collect_sdf_edits` gather folds it (drained in `finish()`).
-fn setup(mut commands: Commands, mut meshes: NonSendResMut<MeshRegistry>, dev: NonSendRes<GpuDevice>) {
+fn setup(mut commands: Commands, mut meshes: NonSendResMut<Assets<MeshGpu>>, dev: NonSendRes<GpuDevice>) {
     let floor = meshes.plane(dev.get(), 12.0);
     let cube = meshes.cube(dev.get(), 1.0);
 

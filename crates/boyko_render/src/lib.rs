@@ -130,14 +130,21 @@ pub mod material;
 /// [`MaterialId`](material::MaterialId). Replaces the standalone mesh-materials rung
 /// M(-1) `MaterialRegistry`.
 pub mod material_table;
+/// The GPU-resident mesh asset record (mesh foundation M2, asset-system rung A2):
+/// [`MeshGpu`] / [`Vertex`], the GPU vertex+index buffers a `MeshHandle` indexes.
+pub mod mesh;
+/// Asset-system rung A2 — the mesh-domain API over `Assets<MeshGpu>`
+/// ([`MeshAssetsExt`](mesh_assets::MeshAssetsExt)): mint (`register_mesh` / `cube` /
+/// `plane`), resolve (`mesh` / `try_get`), and teardown (`destroy`), plus the HW-RT
+/// `blas_address` / `blas_generation`. Replaces the standalone mesh foundation M2
+/// `MeshRegistry` — the records OWN their GPU buffers, so `Assets<MeshGpu>` itself is
+/// the GPU-resident table (no separate mirror like [`MaterialTable`](material_table::MaterialTable)).
+pub mod mesh_assets;
 /// The ECS-native bucketed instance gather (mesh foundation M3): the
 /// [`MeshRenderScratch`](mesh_draw::MeshRenderScratch) reused resource, the
 /// per-mesh [`DrawBatch`](mesh_draw::DrawBatch), and the
 /// count→prefix-sum→scatter [`gather_mesh_draws`](mesh_draw::gather_mesh_draws) system.
 pub mod mesh_draw;
-/// The renderer-owned mesh asset table (mesh foundation M2): [`MeshRegistry`] /
-/// [`MeshGpu`] / [`Vertex`], the GPU vertex+index buffers a `MeshHandle` indexes.
-pub mod mesh_registry;
 /// HW-RT rung 3b — the camera view-proj carry for temporal shadow-vis motion vectors
 /// ([`MotionCam`](motion_cam::MotionCam) UBO + [`MotionCamState`](motion_cam::MotionCamState)
 /// persist Resource). `not(hwrt)` builds carry none of it.
@@ -294,9 +301,8 @@ pub use light_system::{
 pub use gbuffer_depth::{GBUFFER_T_MAX, assert_gbuffer_marcher_t_max_agree};
 pub use material::{MATERIAL_GPU_WORDS, Material, MaterialGpu, MaterialId};
 pub use material_table::MaterialTable;
-pub use mesh_registry::{
-    MeshGpu, MeshRegistry, U16_INDEX_VERTEX_LIMIT, VERTEX_STRIDE as MESH_VERTEX_STRIDE, Vertex,
-};
+pub use mesh::{MeshGpu, U16_INDEX_VERTEX_LIMIT, VERTEX_STRIDE as MESH_VERTEX_STRIDE, Vertex};
+pub use mesh_assets::MeshAssetsExt;
 pub use shadow_atlas::{
     ATLAS_SLOT_MASK, ATLAS_SLOT_SHIFT, CASTS_SHADOW_BIT, FaceTransform, M_SLOTS, POINT_FACE_COUNT,
     PointShadowInput, PunctualResolveSet, PunctualSlotAssignment, RESOLVED_SHADOW_ATLAS_BYTES,

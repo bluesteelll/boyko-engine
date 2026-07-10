@@ -58,8 +58,8 @@ const SUN_DIR: [f32; 3] = [-0.45, 0.82, 0.36];
 
 /// The room scene of `examples/room.rs` (R4 form: casters + sun + sky + point),
 /// spawned at startup (the device is present — the runner inserts `GpuDevice` +
-/// `MeshRegistry` before finish).
-fn setup(mut commands: Commands, mut meshes: NonSendResMut<MeshRegistry>, dev: NonSendRes<GpuDevice>) {
+/// `Assets<MeshGpu>` before finish).
+fn setup(mut commands: Commands, mut meshes: NonSendResMut<Assets<MeshGpu>>, dev: NonSendRes<GpuDevice>) {
     let floor = meshes.plane(dev.get(), 12.0);
     let cube = meshes.cube(dev.get(), 1.0);
     // Floor = receiver-only (no ShadowCaster); cubes = structural casters.
@@ -213,8 +213,8 @@ fn room_smoke_ten_frames_then_clean_teardown() {
         "teardown must evict the shared-mode RhiContext"
     );
     assert!(
-        !app.world().contains_non_send_resource::<MeshRegistry>(),
-        "teardown must evict + destroy the MeshRegistry"
+        !app.world().contains_non_send_resource::<Assets<MeshGpu>>(),
+        "teardown must evict + destroy the mesh Assets<MeshGpu> table"
     );
     assert!(
         !app.world().contains_non_send_resource::<GpuDevice>(),
