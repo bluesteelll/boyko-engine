@@ -15,10 +15,13 @@
 //! the flag via [`LightTableStaging::mark_uploaded`]. The FIRST seed uses the
 //! fence-waited `upload_initial`; only the on-change re-upload is async.
 
+use boyko_ecs::ecs::constants::pool_reserve_rows;
+use boyko_ecs::ecs::core::asset::register_asset_layout;
 use boyko_ecs::ecs::core::change_detection::Tick;
 use boyko_ecs::ecs::core::commands::Command;
 use boyko_ecs::ecs::core::component::hooks::HookContext;
 use boyko_ecs::ecs::core::component::hooks::deferred_master::DeferredEcsMaster;
+use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::iters::query::{Added, Changed, IsEnabled, Or, Query};
@@ -56,13 +59,21 @@ pub struct LightTableGeneration(pub u64);
 /// The reused light-table staging scratch + the on-change dirty flag (Principle 0).
 ///
 /// `scratch` holds the contiguous `[LightHeaderGpu || GpuLight[]]` bytes the GPU table
-/// mirrors; it is sized once to `LIGHT_HEADER_BYTES + MAX_LIGHTS * GPU_LIGHT_BYTES` and
-/// refilled in place — no per-frame allocation. `dirty` is set by [`collect_lights`] on
-/// a change and cleared by [`Self::mark_uploaded`] after the recorder copies the bytes.
+/// mirrors; it is a [`ScratchColumn<u8>`] (the same `ComponentPool`-backed, VM-native
+/// transient-scratch primitive [`MeshRenderScratch`](crate::mesh_draw::MeshRenderScratch)
+/// uses — Principle 0, not a `std::Vec` side store) fixed, once at construction, to exactly
+/// `LIGHT_HEADER_BYTES + MAX_LIGHTS * GPU_LIGHT_BYTES` LIVE elements — never cleared or
+/// resized afterward, because [`fold_light_table_slotted`] writes THROUGH the whole buffer
+/// at arbitrary offsets (`write_pod` at a running byte cursor), not via append-only `push`.
+/// Refilled IN PLACE on a change — no per-frame allocation. `dirty` is set by
+/// [`collect_lights`] on a change and cleared by [`Self::mark_uploaded`] after the recorder
+/// copies the bytes.
 #[derive(Resource)]
 pub struct LightTableStaging {
-    /// `[LightHeaderGpu || GpuLight[]]` host bytes; the GPU table is its mirror.
-    scratch: Vec<u8>,
+    /// `[LightHeaderGpu || GpuLight[]]` host bytes; the GPU table is its mirror. Always
+    /// exactly `LIGHT_HEADER_BYTES + MAX_LIGHTS * GPU_LIGHT_BYTES` live elements (see the
+    /// struct doc).
+    scratch: ScratchColumn<u8>,
     /// Valid byte length in `scratch` (`LIGHT_HEADER_BYTES + light_count * GPU_LIGHT_BYTES`).
     used_bytes: usize,
     /// Set on a changed frame; the recorder records the copy + barrier when set.
@@ -78,10 +89,29 @@ impl Default for LightTableStaging {
         // Preallocate the worst-case table once: header + MAX_LIGHTS elements. The
         // collection refills this in place (Principle 5 — no frame-path alloc).
         let cap = LIGHT_HEADER_BYTES + (MAX_LIGHTS as usize) * GPU_LIGHT_BYTES;
-        let mut scratch = vec![0u8; cap];
+        let byte_id = register_asset_layout::<u8>(None);
+        let mut scratch = ScratchColumn::new(byte_id, pool_reserve_rows(core::mem::size_of::<u8>()));
+        {
+            // Fill to the fixed worst-case capacity ONCE, at setup: `fold_light_table_slotted`
+            // writes through the WHOLE `cap`-sized buffer at arbitrary offsets (not via `push`),
+            // so the column must present `cap` live (zeroed) elements before any fold runs.
+            // Mirrors `fit_len` (mesh_draw.rs) — a push loop over the already-reserved
+            // `pool_reserve_rows`-class backing, never a realloc.
+            let mut view = scratch.build_view();
+            for _ in 0..cap {
+                view.push(0u8);
+            }
+        }
         // Seed with an empty default table (count 0, identity exposure) so a never-changed
         // world still has a valid header to seed the device buffer with.
-        let used = write_light_table(&mut scratch, &[], &[], &[], &[], &LightingConfig::default());
+        let used = write_light_table(
+            scratch.build_view().as_mut_slice(),
+            &[],
+            &[],
+            &[],
+            &[],
+            &LightingConfig::default(),
+        );
         Self { scratch, used_bytes: used, dirty: true, seeded: false }
     }
 }
@@ -90,7 +120,7 @@ impl LightTableStaging {
     /// The currently-valid table bytes (`[header || GpuLight[]]`).
     #[inline]
     pub fn bytes(&self) -> &[u8] {
-        &self.scratch[..self.used_bytes]
+        &self.scratch.as_read_slice()[..self.used_bytes]
     }
 
     /// The pending on-change upload bytes if a change is queued, else `None` (idle frame
@@ -425,8 +455,12 @@ pub fn collect_lights(
     // `pack_atlas_slot` so the shader decodes the light's OWN cube/perspective base.
     let assign = &*assignment;
     let staging = &mut *staging;
+    // Disjoint field-projection borrow (mesh_draw.rs precedent): `scratch_view` borrows only
+    // `staging.scratch`, so the plain `staging.used_bytes = used;` write below (a distinct
+    // field) needs no explicit drop.
+    let mut scratch_view = staging.scratch.build_view();
     let used = fold_light_table_slotted(
-        &mut staging.scratch,
+        scratch_view.as_mut_slice(),
         all_directionals.iter().filter_map(|(l, en)| en.then_some(l)),
         all_skies.iter().filter_map(|(l, en)| en.then_some(l)),
         all_points
@@ -480,8 +514,14 @@ pub struct LightSeedState<A, S, P, T, Aa, Sa, Pa, Ta> {
     all_point: Pa,
     all_spot: Ta,
     first_run: bool,
-    /// Reused id scratch — cleared and refilled each non-static pass (Principle 5).
-    ids: Vec<EntityId>,
+    /// Reused id scratch — cleared and refilled each non-static pass (Principle 5). A
+    /// [`ScratchColumn<EntityId>`] (Principle 0, not a `std::Vec` side store): unlike
+    /// [`MeshRenderScratch`](crate::mesh_draw::MeshRenderScratch)'s fields this state is
+    /// closure-captured cross-frame data, not an ECS `Resource` — but `ScratchColumn`
+    /// needs no `Resource`/`World` home to construct (it is a bare `ComponentPool`-backed
+    /// struct built from a registered [`ComponentId`](boyko_ecs::ecs::identifiers::primitives::ComponentId)),
+    /// so it drops in here identically.
+    ids: ScratchColumn<EntityId>,
 }
 
 /// Builds the cross-frame [`LightSeedState`] with its eight cached light-id systems.
@@ -533,7 +573,10 @@ pub fn light_seed_state() -> LightSeedState<
             q.iter_entities().map(|(id, _)| id).collect::<Vec<_>>()
         }),
         first_run: false,
-        ids: Vec::new(),
+        ids: ScratchColumn::new(
+            register_asset_layout::<EntityId>(None),
+            pool_reserve_rows(core::mem::size_of::<EntityId>()),
+        ),
     }
 }
 
@@ -554,10 +597,17 @@ where
     /// `initialize` is paid once. The world borrow is internal to each call and dropped
     /// before the caller `enable`s the bits.
     fn collect_all_light_ids(&mut self, world: &mut EcsMaster) {
-        self.ids.extend(world.run_cached_system(&mut self.all_dir));
-        self.ids.extend(world.run_cached_system(&mut self.all_sky));
-        self.ids.extend(world.run_cached_system(&mut self.all_point));
-        self.ids.extend(world.run_cached_system(&mut self.all_spot));
+        // Each cached system still returns an owned `Vec<EntityId>` (the `System::Out`
+        // contract, unchanged by this scratch conversion) — `extend_from_slice` appends its
+        // bytes into the reused `ids` column, then the temporary `Vec` drops as before.
+        let dir = world.run_cached_system(&mut self.all_dir);
+        self.ids.build_view().extend_from_slice(&dir);
+        let sky = world.run_cached_system(&mut self.all_sky);
+        self.ids.build_view().extend_from_slice(&sky);
+        let point = world.run_cached_system(&mut self.all_point);
+        self.ids.build_view().extend_from_slice(&point);
+        let spot = world.run_cached_system(&mut self.all_spot);
+        self.ids.build_view().extend_from_slice(&spot);
     }
 
     /// Collects the ids of every NEWLY-added light into `self.ids` (steady-state scan).
@@ -600,8 +650,12 @@ where
     /// Factored out so the four `Added` sub-systems share one stamp+run path; the
     /// per-pass window advance is what makes `Added` mean "since the previous seed pass"
     /// (see [`collect_added_light_ids`](Self::collect_added_light_ids)).
-    fn run_added<Sys>(sys: &mut Sys, world: &mut EcsMaster, this_run: Tick, out: &mut Vec<EntityId>)
-    where
+    fn run_added<Sys>(
+        sys: &mut Sys,
+        world: &mut EcsMaster,
+        this_run: Tick,
+        out: &mut ScratchColumn<EntityId>,
+    ) where
         Sys: System<Out = Vec<EntityId>>,
     {
         // `initialize` is idempotent (FS1); the first call seeds the window, after which
@@ -610,7 +664,8 @@ where
         sys.initialize(world);
         let prev_this_run = sys.meta().this_run();
         sys.set_change_ticks(prev_this_run, this_run);
-        out.extend(world.run_cached_system(sys));
+        let added = world.run_cached_system(sys);
+        out.build_view().extend_from_slice(&added);
     }
 
     /// Exclusive seed pass (`&mut EcsMaster`): enables the [`LightEnabled`] bit on lights
@@ -642,7 +697,7 @@ where
     pub fn seed(&mut self, world: &mut EcsMaster) {
         // Collect the ids first (the query view borrows the world), then enable (needs
         // `&mut`). `self.ids` is the reused scratch (cleared here, refilled below).
-        self.ids.clear();
+        self.ids.build_view().clear();
         if self.first_run {
             self.collect_added_light_ids(world);
         } else {
@@ -659,7 +714,7 @@ where
         // without aliasing. The buffer keeps its capacity for reuse — it is `clear()`ed at the
         // top of the NEXT pass (line above), not emptied here.
         for i in 0..self.ids.len() {
-            let id = self.ids[i];
+            let id = self.ids.as_read_slice()[i];
             // `get_entity` resolves the live `Entity` (with generation); a stale / dead id
             // is a `None` no-op. `enable` is the O(1) immediate `&mut self` bit flip.
             if let Some(entity) = world.get_entity(id) {
