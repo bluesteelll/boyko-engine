@@ -31,8 +31,8 @@ use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
 #[cfg(windows)]
 use boyko_render::{
     CsmCasterScratch, DdgiCaps, MaterialGpu, MaterialId, MaterialTable, MeshAssetsExt, MeshGpu,
-    MeshRenderScratch, ObjMeshLoader, RayBackendPolicy, RayCaps, ResolvedCsm, ResolvedShadowAtlas,
-    RhiContext, RonMaterialLoader, SdfEditStaging, ShadowDenoiseConfig, ShadowDenoiseMode,
+    MeshRenderScratch, RayBackendPolicy, RayCaps, ResolvedCsm, ResolvedShadowAtlas,
+    RhiContext, SdfEditStaging, ShadowDenoiseConfig, ShadowDenoiseMode,
     collect_sdf_edits, gbuffer_push_from_view, upload_atlas_ring, upload_camera_ring,
     upload_csm_ring, upload_instance_models, upload_light_table, upload_material_assets,
     upload_mesh_assets, upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
@@ -177,17 +177,16 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     app.world_mut()
         .insert_non_send_resource(MaterialTable::new());
 
-    // Asset-system rung A3b: the loader registry + the decode->upload staging
-    // queues. `AssetServer` was not wired into `boyko_app` before this rung — it
-    // is minted here with both concrete loaders registered
-    // (`ObjMeshLoader`/`RonMaterialLoader`). `AssetStaging<A>` is the NonSend
+    // Asset-system rung A3b: the decode->upload staging queues. `AssetServer`
+    // was not wired into `boyko_app` before this rung — it is minted here bare
+    // (asset-streaming plan F3: loader dispatch is a compile-time-static
+    // `HasLoaders` const-table on `MeshGpu`/`MaterialGpu` themselves, so there
+    // is no runtime registration step). `AssetStaging<A>` is the NonSend
     // handoff queue `AssetServer::load` pushes into and the boot-one-shot
     // `upload_material_assets`/`upload_mesh_assets` drain (run explicitly below,
     // after `finish()`). No scene calls `load` yet at this rung, so both queues
     // stay empty at boot — zero effect, the wiring is the deliverable.
-    let mut asset_server = AssetServer::new();
-    asset_server.register_loader::<ObjMeshLoader>();
-    asset_server.register_loader::<RonMaterialLoader>();
+    let asset_server = AssetServer::new();
     app.world_mut().insert_resource(asset_server);
     app.world_mut()
         .insert_non_send_resource(AssetStaging::<MaterialGpu>::default());

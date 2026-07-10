@@ -10,7 +10,9 @@
 //! reservation — exercised here end-to-end through the real `AssetServer`
 //! path (a missing file on disk), not just the unit-level `Assets` API.
 
-use boyko_ecs::ecs::core::asset::{Asset, AssetError, AssetLoadState, AssetLoader, AssetServer, AssetStaging, Assets};
+use boyko_ecs::ecs::core::asset::{
+    Asset, AssetError, AssetLoadState, AssetLoader, AssetServer, AssetStaging, Assets, HasLoaders, LoaderEntry,
+};
 
 /// A minimal `Asset`/`AssetLoader` pair whose `decode` parses the first byte
 /// of the payload as a tag — enough to prove decoded content survives the
@@ -54,6 +56,12 @@ impl AssetLoader for TagLoader {
     }
 }
 
+// Asset-streaming plan F3: `AssetServer::load` dispatches decode through a
+// compile-time-static `HasLoaders::LOADERS` table, not a runtime registry.
+impl HasLoaders for TagAsset {
+    const LOADERS: &'static [LoaderEntry<Self>] = &[LoaderEntry::of::<TagLoader>()];
+}
+
 /// Writes `bytes` to a fresh temp file with extension `.tag` and returns its
 /// path — test setup only, cleaned up by the caller.
 fn write_temp_tag_file(bytes: &[u8], unique: &str) -> std::path::PathBuf {
@@ -72,7 +80,6 @@ fn load_reserve_stage_fill_round_trips_the_decoded_value() {
     let path = write_temp_tag_file(&[0x11], "happy_path");
 
     let mut server = AssetServer::new();
-    server.register_loader::<TagLoader>();
     let mut assets = Assets::<TagAsset>::with_reserved(4);
     let mut staging = AssetStaging::<TagAsset>::default();
 
@@ -110,7 +117,6 @@ fn load_reserve_stage_fill_round_trips_the_decoded_value() {
 #[test]
 fn load_missing_file_yields_a_resolvable_failed_handle() {
     let mut server = AssetServer::new();
-    server.register_loader::<TagLoader>();
     let mut assets = Assets::<TagAsset>::with_reserved(4);
     let mut staging = AssetStaging::<TagAsset>::default();
 
@@ -130,7 +136,6 @@ fn load_missing_file_yields_a_resolvable_failed_handle() {
 #[test]
 fn removing_a_failed_load_recycles_its_row_for_a_later_successful_load() {
     let mut server = AssetServer::new();
-    server.register_loader::<TagLoader>();
     let mut assets = Assets::<TagAsset>::with_reserved(4);
     let mut staging = AssetStaging::<TagAsset>::default();
 
@@ -158,24 +163,21 @@ fn removing_a_failed_load_recycles_its_row_for_a_later_successful_load() {
     assert!(assets.get(failed).is_none(), "the OLD handle must stay rejected after its row is reused");
 }
 
-/// Two distinct asset types (each with its OWN extension/loader, per
-/// `AssetServer`'s per-extension registry — see the note below) load
-/// independently through the SAME `AssetServer` without cross-contaminating
-/// each other's `Assets<T>` table or intern cache, and repeated `load` calls
-/// for the same path dedupe to the same handle (plan §A0/§A3a: `load`
-/// dedupes a repeated path; distinct types do not alias).
+/// Two distinct asset types (each with its OWN `HasLoaders::LOADERS` table)
+/// load independently through the SAME `AssetServer` without
+/// cross-contaminating each other's `Assets<T>` table or intern cache, and
+/// repeated `load` calls for the same path dedupe to the same handle (plan
+/// §A0/§A3a/§F3: `load` dedupes a repeated path; distinct types do not alias).
 ///
-/// # Note — one extension names exactly one loader per `AssetServer`
+/// # Note — static per-type dispatch has no shared-extension hazard
 ///
-/// `register_loader`'s own doc states registering a second loader for an
-/// already-registered extension REPLACES the first (last-registered wins):
-/// the registry is keyed by extension alone, not `(extension, asset type)`.
-/// Consequently two asset types cannot both successfully decode the SAME
-/// extension through one `AssetServer` — whichever type's loader did not
-/// "win" the registration will encounter `decode_bytes`'s asset-type
-/// cross-check. This test therefore uses two distinct extensions (the only
-/// configuration under which two types load independently); see this
-/// suite's defect report for what happens on a shared-extension collision.
+/// Under the F3 `HasLoaders` const-table dispatch, each asset type carries
+/// its OWN `LOADERS` table (there is no process-wide extension→loader
+/// registry to collide over): two types COULD legitimately reuse the same
+/// extension string with no cross-contamination, since `decode_bytes::<A>`
+/// only ever scans `A::LOADERS`. This test still uses two distinct
+/// extensions (`.tag` / `.other`) — a realistic authoring choice for two
+/// distinct formats — not because a shared extension would be unsound.
 #[test]
 fn distinct_asset_types_load_independently_through_one_server() {
     struct OtherAsset;
@@ -191,14 +193,15 @@ fn distinct_asset_types_load_independently_through_one_server() {
             Ok(())
         }
     }
+    impl HasLoaders for OtherAsset {
+        const LOADERS: &'static [LoaderEntry<Self>] = &[LoaderEntry::of::<OtherLoader>()];
+    }
 
     let tag_path = write_temp_tag_file(&[0x99], "distinct_types_tag");
     let other_path = std::env::temp_dir().join("boyko_ecs_asset_pipeline_distinct_types.other");
     std::fs::write(&other_path, [0x00]).expect("test setup: write temp asset file");
 
     let mut server = AssetServer::new();
-    server.register_loader::<TagLoader>();
-    server.register_loader::<OtherLoader>();
 
     let mut tag_assets = Assets::<TagAsset>::with_reserved(4);
     let mut tag_staging = AssetStaging::<TagAsset>::default();

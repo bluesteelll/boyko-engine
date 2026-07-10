@@ -57,6 +57,6 @@ pub use assets::{Assets, RetireTicket};
 pub use backing::{AssetBacking, register_asset_layout};
 pub use error::AssetError;
 pub use handle::Handle;
-pub use loader::AssetLoader;
+pub use loader::{AssetLoader, HasLoaders, LoaderEntry};
 pub use server::AssetServer;
 pub use staging::{AssetStaging, Staged};

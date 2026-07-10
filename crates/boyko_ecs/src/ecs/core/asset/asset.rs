@@ -24,11 +24,13 @@ pub trait Asset: 'static + Sized {
     /// thread-safe) — decode is the only half of loading that ever
     /// parallelizes.
     ///
-    /// `+ 'static` (rung A3a): the loader registry type-erases a decoded
-    /// value as `Box<dyn Any + Send>` (a SAFE `TypeId`-checked downcast, no
-    /// hand-rolled unsafe thunk) — `Any` itself requires `'static`. Every
-    /// concrete `Cpu` today (`MaterialGpu`, `()`) already satisfies this
-    /// trivially (neither carries a borrowed lifetime).
+    /// `+ 'static`: `Cpu` is stored inside a queued
+    /// [`Staged<A>`](crate::ecs::core::asset::staging::Staged) entry on a
+    /// [`NonSendResource`](crate::ecs::core::resources::resource::NonSendResource)
+    /// (`AssetStaging<A>`), which — like every other `TypeId`-registered
+    /// resource in the kernel — requires its whole type graph to carry no
+    /// borrowed lifetime. Every concrete `Cpu` today (`MaterialGpu`,
+    /// `MeshData`, `()`) already satisfies this trivially.
     type Cpu: Send + 'static;
 }
 

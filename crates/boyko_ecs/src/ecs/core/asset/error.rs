@@ -22,17 +22,26 @@ pub enum AssetError {
     /// version, ...).
     Decode(String),
 
-    /// The path's extension does not match any registered
-    /// [`AssetLoader::EXTENSIONS`](crate::ecs::core::asset::loader::AssetLoader::EXTENSIONS).
+    /// The path's extension is not claimed by any entry in the requested
+    /// asset type's [`HasLoaders::LOADERS`](crate::ecs::core::asset::loader::HasLoaders::LOADERS)
+    /// table.
     UnsupportedExtension {
         /// The extension actually found on the path (lowercased, no dot).
         extension: String,
     },
 
-    /// The extension resolved to a loader registered for a DIFFERENT asset
-    /// type than the one requested — the loader-registry rung's runtime
-    /// erasure check (a downcast mismatch), e.g. `decode_bytes::<Material>`
-    /// called with an extension whose loader produces a `Mesh`.
+    /// Formerly: the extension resolved to a loader registered for a
+    /// DIFFERENT asset type than the one requested — the old runtime
+    /// registry's `Any::downcast` mismatch. Unconstructible since
+    /// asset-streaming plan F3 replaced the `Box<dyn Any>` registry with the
+    /// compile-time-static [`HasLoaders`](crate::ecs::core::asset::HasLoaders)
+    /// dispatch table (a type mismatch is now a compile error, not a runtime
+    /// one). Kept only to avoid churn on this `#[non_exhaustive]` enum.
+    #[deprecated(
+        note = "unconstructible since F3 static HasLoaders dispatch replaced the Box<dyn Any> \
+                registry; a loader/asset-type mismatch is now a compile error"
+    )]
+    #[doc(hidden)]
     LoaderTypeMismatch {
         /// The extension whose registered loader does not match the
         /// requested asset type.
@@ -49,6 +58,11 @@ pub enum AssetError {
 }
 
 impl std::fmt::Display for AssetError {
+    // Matching the deprecated `LoaderTypeMismatch` arm below is itself deprecated
+    // usage; this impl is the sole remaining reader (kept so the variant still
+    // formats sensibly if a caller somehow constructs one via `..`-update or a
+    // future non-deprecated re-add).
+    #[allow(deprecated)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AssetError::Io(reason) => write!(f, "asset io error: {reason}"),

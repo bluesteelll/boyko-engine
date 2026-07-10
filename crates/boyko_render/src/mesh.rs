@@ -54,11 +54,12 @@
 //! the instance SSBO carries; the table stores the model-space mesh once and every
 //! instance reuses it.
 
-use boyko_ecs::ecs::core::asset::{Asset, AssetBacking, register_asset_layout};
+use boyko_ecs::ecs::core::asset::{Asset, AssetBacking, HasLoaders, LoaderEntry, register_asset_layout};
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 use boyko_rhi::enums::IndexType;
 use boyko_rhi_vulkan::memory::BoundBuffer;
 
+use crate::loaders::ObjMeshLoader;
 use crate::mesh_data::MeshData;
 
 /// The `gbuffer_mrt.vs` vertex: a model-space position (offset 0), an outward world
@@ -164,6 +165,12 @@ impl AssetBacking for MeshGpu {
     fn register_layout() -> ComponentId {
         register_asset_layout::<MeshGpu>(Some(MeshGpu::drop_glue))
     }
+}
+
+impl HasLoaders for MeshGpu {
+    /// One entry: the in-house Wavefront `.obj` loader. Asset-streaming plan
+    /// F3 — a compile-time-static table, no runtime registration.
+    const LOADERS: &'static [LoaderEntry<Self>] = &[LoaderEntry::of::<ObjMeshLoader>()];
 }
 
 // `Assets<MeshGpu>` is `!Send` (each record owns RHI buffers, device-bound and

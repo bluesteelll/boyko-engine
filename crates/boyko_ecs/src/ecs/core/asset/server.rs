@@ -1,7 +1,9 @@
-//! [`AssetServer`] — the path→[`Handle`] intern + loader registry (rung A3a:
-//! reserve → decode → stage; the GPU-upload half of loading is rung A3b).
+//! [`AssetServer`] — the path→[`Handle`] intern (rung A3a: reserve → decode →
+//! stage; the GPU-upload half of loading is rung A3b). Loader dispatch itself
+//! is `HasLoaders::LOADERS`, a compile-time-static const table (asset-
+//! streaming plan F3) — not part of this server.
 
-use std::any::{Any, TypeId};
+use std::any::TypeId;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -11,49 +13,23 @@ use crate::ecs::core::asset::assets::Assets;
 use crate::ecs::core::asset::backing::AssetBacking;
 use crate::ecs::core::asset::error::AssetError;
 use crate::ecs::core::asset::handle::Handle;
-use crate::ecs::core::asset::loader::AssetLoader;
+use crate::ecs::core::asset::loader::HasLoaders;
 use crate::ecs::core::asset::staging::{AssetStaging, Staged};
 use crate::ecs::core::resources::register_new;
 use crate::ecs::core::resources::resource::Resource;
 use crate::ecs::identifiers::primitives::ResourceId;
 
-/// The type-erased decode entry point [`AssetServer`]'s loader registry
-/// stores per extension — a factored-out alias (clippy `type_complexity`),
-/// not a new abstraction. See [`decode_thunk`]'s doc for what it does and why
-/// it is safe.
-type DecodeFn = fn(&[u8]) -> Result<Box<dyn Any + Send>, AssetError>;
-
-/// Monomorphized per `L: AssetLoader` by [`AssetServer::register_loader`];
-/// boxes `L`'s decoded [`Asset::Cpu`] behind `dyn Any + Send` so a single
-/// non-generic [`DecodeFn`] pointer can dispatch to it, stored directly as
-/// the registry's `HashMap` value (no wrapper struct — there is no other
-/// per-loader state to carry: the ONE runtime type check the registry needs,
-/// "does this extension's loader produce the asset type the caller
-/// requested", is the `Any::downcast` in [`AssetServer::decode_bytes`]
-/// itself, not a separately-stored `TypeId`).
-///
-/// This is the ENTIRE type-erasure mechanism: safe because `Box::new` +
-/// unsizing to `Box<dyn Any + Send>` costs one allocation and involves no
-/// `unsafe` at all, and the box is later reopened by
-/// [`AssetServer::decode_bytes`] via std's own `TypeId`-checked
-/// `Any::downcast` — never a hand-rolled transmute thunk.
-fn decode_thunk<L: AssetLoader>(bytes: &[u8]) -> Result<Box<dyn Any + Send>, AssetError> {
-    Ok(Box::new(L::decode(bytes)?))
-}
-
-/// World-global path→[`Handle`] intern + extension→loader registry,
-/// registered as a [`Resource`].
+/// World-global path→[`Handle`] intern, registered as a [`Resource`].
 ///
 /// # Rung A3a scope — reserve, decode, stage; no GPU upload
 ///
 /// [`load`](Self::load) interns `(TypeId::of::<A>(), path)` and, the first
 /// time a path is requested for asset type `A`, reads the file, decodes it
-/// through the loader [`register_loader`](Self::register_loader) registered
-/// for its extension, [`reserve`](Assets::reserve)s a row in `assets`, and
-/// queues the decoded value on `staging`. GPU upload (turning the queued
-/// value into a resident asset and calling
-/// [`Assets::fill`](crate::ecs::core::asset::assets::Assets::fill)) is a
-/// separate, render-side pass — rung A3b.
+/// through the [`HasLoaders::LOADERS`] entry matching its extension,
+/// [`reserve`](Assets::reserve)s a row in `assets`, and queues the decoded
+/// value on `staging`. GPU upload (turning the queued value into a resident
+/// asset and calling [`Assets::fill`](crate::ecs::core::asset::assets::Assets::fill))
+/// is a separate, render-side pass — rung A3b.
 ///
 /// A read or decode failure does NOT panic and does NOT leave the row
 /// unminted: `load` still reserves a row (so the returned `Handle` is
@@ -64,68 +40,52 @@ fn decode_thunk<L: AssetLoader>(bytes: &[u8]) -> Result<Box<dyn Any + Send>, Ass
 ///
 /// # Cold path
 ///
-/// Both `interned` and `loaders` are `HashMap`s — acceptable ONLY because
-/// path interning and loader registration are setup-time operations (asset
-/// declarations / plugin registration), never touched on the per-frame hot
-/// path. Mirrors the identical cold-path `HashMap` exception
+/// `interned` is a `HashMap` — acceptable ONLY because path interning is a
+/// setup-time operation (asset declarations), never touched on the
+/// per-frame hot path. Mirrors the identical cold-path `HashMap` exception
 /// `resource_type_registry` documents for its `TypeId → ResourceId` map.
+/// Loader dispatch itself is no longer a runtime registry at all
+/// (asset-streaming plan F3): it is [`HasLoaders::LOADERS`], a compile-time
+/// `&'static` const table baked into the binary per asset type.
 #[derive(Default)]
 pub struct AssetServer {
     /// `(asset TypeId, path)` → the `(index, generation)` pair of the
     /// [`Handle`] minted for that pair. Cold path only — see the struct doc.
     interned: HashMap<(TypeId, String), (u32, u32)>,
-    /// Extension (lowercase, no leading dot) → its registered loader's
-    /// type-erased decode entry point. Cold path only — see the struct doc.
-    loaders: HashMap<String, DecodeFn>,
 }
 
 impl AssetServer {
-    /// Creates an empty server with no interned paths and no registered
-    /// loaders.
+    /// Creates an empty server with no interned paths.
     #[inline]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Registers `L` for every extension in [`AssetLoader::EXTENSIONS`],
-    /// routing that extension's future [`decode_bytes`](Self::decode_bytes) /
-    /// [`load`](Self::load) calls through `L::decode`.
-    ///
-    /// Registering a second loader for an already-registered extension
-    /// replaces the first (last-registered wins) — a setup-time convenience,
-    /// not a runtime hot path.
-    pub fn register_loader<L: AssetLoader>(&mut self) {
-        for &ext in L::EXTENSIONS {
-            self.loaders.insert(ext.to_owned(), decode_thunk::<L>);
-        }
-    }
-
-    /// Decodes `bytes` as asset type `A`, dispatching through the loader
-    /// registered for `ext` (lowercase, no leading dot).
+    /// Decodes `bytes` as asset type `A`, linearly scanning `A::LOADERS`
+    /// (asset-streaming plan F3) for the entry whose `extensions` contains
+    /// `ext` (lowercase, no leading dot) and calling its TYPED `decode`
+    /// directly — no erasure, no downcast.
     ///
     /// This is the fs-free, host-testable half of [`load`](Self::load)'s
-    /// pipeline: no path parsing, no disk read — just a registry lookup, the
-    /// loader's `decode`, and the safe erasure downcast.
+    /// pipeline: no path parsing, no disk read — just a linear scan over
+    /// `A::LOADERS` (a handful of entries per asset type) and the matched
+    /// entry's `decode`.
     ///
     /// # Errors
-    /// [`AssetError::UnsupportedExtension`] if no loader is registered for
-    /// `ext`. [`AssetError::Decode`] if the registered loader's `decode`
-    /// itself rejects `bytes`. [`AssetError::LoaderTypeMismatch`] if `ext`'s
-    /// registered loader produces a DIFFERENT asset type than `A` — a
-    /// RECOVERABLE, every-build error (two asset types' loaders can
-    /// legitimately share an extension by caller mistake), detected by the
-    /// `Any::downcast` below via its own `TypeId` comparison. There is
-    /// deliberately no separate `debug_assert_eq!` pre-check here: that would
-    /// turn this same, ordinary-API-misuse case into an unconditional debug
-    /// panic, masking the graceful `Err` path in every non-release build.
-    pub fn decode_bytes<A: Asset>(
+    /// [`AssetError::UnsupportedExtension`] if no entry in `A::LOADERS`
+    /// claims `ext`. [`AssetError::Decode`] if the matched entry's `decode`
+    /// itself rejects `bytes`.
+    #[inline]
+    pub fn decode_bytes<A: HasLoaders>(
         &self,
         ext: &str,
         bytes: &[u8],
     ) -> Result<<A as Asset>::Cpu, AssetError> {
-        let decode = self.loaders.get(ext).ok_or_else(|| unsupported_extension(ext))?;
-        let boxed = decode(bytes)?;
-        boxed.downcast::<A::Cpu>().map(|b| *b).map_err(|_| loader_type_mismatch(ext))
+        let entry = A::LOADERS
+            .iter()
+            .find(|entry| entry.extensions.contains(&ext))
+            .ok_or_else(|| unsupported_extension(ext))?;
+        (entry.decode)(bytes)
     }
 
     /// Interns `path` for asset type `A`, returning the SAME [`Handle<A>`]
@@ -136,8 +96,10 @@ impl AssetServer {
     /// rather than panicking).
     ///
     /// `A: AssetBacking` (asset-streaming plan F1): `assets: &mut Assets<A>`
-    /// requires it — `Assets<T>`'s own generic bound.
-    pub fn load<A: Asset + AssetBacking>(
+    /// requires it — `Assets<T>`'s own generic bound. `A: HasLoaders`
+    /// (asset-streaming plan F3): `load` dispatches decode through `A`'s own
+    /// static loader table.
+    pub fn load<A: HasLoaders + AssetBacking>(
         &mut self,
         path: &str,
         assets: &mut Assets<A>,
@@ -169,9 +131,9 @@ impl AssetServer {
 }
 
 /// Lowercases and strips the leading dot from `path`'s extension, or returns
-/// an empty string if `path` has none. An empty extension never matches a
-/// registered loader, so it resolves to `AssetError::UnsupportedExtension`
-/// the same way any other unregistered extension would.
+/// an empty string if `path` has none. An empty extension never matches an
+/// entry in `A::LOADERS`, so it resolves to `AssetError::UnsupportedExtension`
+/// the same way any other unclaimed extension would.
 #[inline]
 fn extension_of(path: &str) -> String {
     Path::new(path)
@@ -199,12 +161,6 @@ fn unsupported_extension(ext: &str) -> AssetError {
     AssetError::UnsupportedExtension { extension: ext.to_owned() }
 }
 
-#[cold]
-#[inline(never)]
-fn loader_type_mismatch(ext: &str) -> AssetError {
-    AssetError::LoaderTypeMismatch { extension: ext.to_owned() }
-}
-
 // Hand-implemented rather than `#[derive(Resource)]`: `boyko-macros` is a
 // dev-dependency of `boyko-ecs`, so its derives are unavailable in normal
 // builds. `AssetServer` is a concrete (non-generic) type, so — unlike
@@ -223,6 +179,7 @@ mod tests {
     use super::*;
     use crate::ecs::core::asset::asset::AssetLoadState;
     use crate::ecs::core::asset::assets::Assets;
+    use crate::ecs::core::asset::loader::{AssetLoader, LoaderEntry};
     use crate::ecs::core::asset::staging::AssetStaging;
 
     struct Dummy;
@@ -255,6 +212,16 @@ mod tests {
     // with no device teardown is the correct fit for every test type here.
     crate::impl_asset_pod_backing!(Dummy, Other, TestAsset);
 
+    // Asset-streaming plan F3: `AssetServer::load` requires `A: HasLoaders`.
+    // `Dummy`/`Other` never decode in these tests (only their I/O-failure /
+    // dedup paths run), so an empty table is enough for them to type-check.
+    impl HasLoaders for Dummy {
+        const LOADERS: &'static [LoaderEntry<Self>] = &[];
+    }
+    impl HasLoaders for Other {
+        const LOADERS: &'static [LoaderEntry<Self>] = &[];
+    }
+
     struct TestLoader;
     impl AssetLoader for TestLoader {
         type Out = TestAsset;
@@ -268,20 +235,25 @@ mod tests {
         }
     }
 
-    /// `decode_bytes::<A>` dispatches through the registered loader and
-    /// returns the decoded value (plan §A3a unit: decode_bytes happy path).
+    impl HasLoaders for TestAsset {
+        const LOADERS: &'static [LoaderEntry<Self>] = &[LoaderEntry::of::<TestLoader>()];
+    }
+
+    /// `decode_bytes::<A>` linearly scans `A::LOADERS` for the extension and
+    /// calls the matched entry's typed `decode` directly (plan §F3 unit:
+    /// decode_bytes happy path, static dispatch).
     #[test]
-    fn decode_bytes_dispatches_registered_loader() {
-        let mut server = AssetServer::new();
-        server.register_loader::<TestLoader>();
+    fn decode_bytes_dispatches_via_matching_extension() {
+        let server = AssetServer::new();
 
         let result = server.decode_bytes::<TestAsset>("test", &[0x42, 0xFF]);
 
         assert_eq!(result, Ok(TestCpu { tag: 0x42 }));
     }
 
-    /// An extension with no registered loader errors `UnsupportedExtension`
-    /// (plan §A3a unit: decode_bytes rejects an unregistered extension).
+    /// An extension no entry in `A::LOADERS` claims errors
+    /// `UnsupportedExtension` (plan §F3 unit: decode_bytes rejects an
+    /// unclaimed extension).
     #[test]
     fn decode_bytes_missing_extension_is_unsupported() {
         let server = AssetServer::new();
@@ -292,35 +264,15 @@ mod tests {
     }
 
     /// Malformed bytes (an empty payload, per `TestLoader::decode`) surface
-    /// the loader's own `Decode` error unchanged (plan §A3a unit:
+    /// the loader's own `Decode` error unchanged (plan §F3 unit:
     /// decode_bytes propagates a loader decode failure).
     #[test]
     fn decode_bytes_malformed_payload_is_decode_error() {
-        let mut server = AssetServer::new();
-        server.register_loader::<TestLoader>();
+        let server = AssetServer::new();
 
         let result = server.decode_bytes::<TestAsset>("test", &[]);
 
         assert!(matches!(result, Err(AssetError::Decode(_))), "empty payload must surface Decode, got {result:?}");
-    }
-
-    /// The W1 fix: an extension whose registered loader produces a
-    /// DIFFERENT asset type than requested must be reported as
-    /// `LoaderTypeMismatch`, NOT `UnsupportedExtension` (plan §A3a unit:
-    /// decode_bytes distinguishes a type mismatch from a missing loader).
-    #[test]
-    fn decode_bytes_type_mismatch_is_loader_type_mismatch() {
-        let mut server = AssetServer::new();
-        server.register_loader::<TestLoader>(); // registers "test" -> TestAsset
-
-        let result = server.decode_bytes::<Other>("test", &[1]);
-
-        assert_eq!(
-            result,
-            Err(AssetError::LoaderTypeMismatch { extension: "test".to_owned() }),
-            "a loader registered for TestAsset called as Other must report LoaderTypeMismatch, not \
-             UnsupportedExtension"
-        );
     }
 
     /// A read/decode failure still returns a resolvable `Handle` in the
@@ -346,7 +298,6 @@ mod tests {
     #[test]
     fn load_success_stages_entry_bound_to_reserved_handle() {
         let mut server = AssetServer::new();
-        server.register_loader::<TestLoader>();
         let mut assets = Assets::<TestAsset>::with_reserved(4);
         let mut staging = AssetStaging::<TestAsset>::default();
 

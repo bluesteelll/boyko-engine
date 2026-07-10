@@ -26,7 +26,9 @@
 //! seed/refresh the device SSBO — it holds no host authority of its own. This replaces
 //! the standalone mesh-materials rung M(-1) `MaterialRegistry`.
 
-use boyko_ecs::ecs::core::asset::{Asset, Handle};
+use boyko_ecs::ecs::core::asset::{Asset, Handle, HasLoaders, LoaderEntry};
+
+use crate::loaders::RonMaterialLoader;
 
 /// The GPU material-table element — a std430-compatible POD, uploaded once / on-change.
 ///
@@ -94,6 +96,12 @@ impl Asset for MaterialGpu {
 // no device handle) — the POD macro path (`NEEDS_TEARDOWN = false`, no
 // `drop_fn`) fits it exactly.
 boyko_ecs::impl_asset_pod_backing!(MaterialGpu);
+
+impl HasLoaders for MaterialGpu {
+    /// One entry: the in-house `.mat` text-format loader. Asset-streaming
+    /// plan F3 — a compile-time-static table, no runtime registration.
+    const LOADERS: &'static [LoaderEntry<Self>] = &[LoaderEntry::of::<RonMaterialLoader>()];
+}
 
 /// The asset-facing name for [`MaterialGpu`] — `Assets<Material>` mint call sites
 /// (`Assets::add`) read more naturally under this alias than the raw GPU-layout type
