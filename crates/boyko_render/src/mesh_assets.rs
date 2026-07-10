@@ -174,6 +174,163 @@ pub trait MeshAssetsExt {
     fn blas_address(&self, h: MeshHandle) -> u64;
 }
 
+/// The device work behind [`MeshAssetsExt::register_mesh`]: creates + fills the
+/// vertex/index RHI buffers (index width chosen by O3), and — on an RT device —
+/// builds the mesh's BLAS eagerly, returning the assembled [`MeshGpu`] (NOT yet
+/// inserted into any [`Assets<MeshGpu>`] table — the caller mints the row).
+///
+/// Factored out of `register_mesh` (asset-system rung A3b) so a loaded mesh's
+/// GPU-upload pass ([`GpuUpload`](crate::gpu_upload::GpuUpload) for [`MeshGpu`])
+/// can build a resident mesh from a decoded
+/// [`MeshData`](crate::mesh_data::MeshData) through the EXACT SAME device path a
+/// host-authored `register_mesh` call uses — a pure refactor of
+/// `register_mesh`'s prior inline body, byte-identical to the pre-A3b behavior.
+///
+/// # Panics
+/// Same contract as [`MeshAssetsExt::register_mesh`]: a buffer create / map
+/// failure at asset-registration time is a setup failure.
+pub fn build_mesh_gpu(ctx: &VulkanContext, vertices: &[Vertex], indices: &[u32]) -> MeshGpu {
+    debug_assert!(!vertices.is_empty(), "invariant: a mesh has at least one vertex");
+    debug_assert!(!indices.is_empty(), "invariant: an indexed mesh has at least one index");
+    let vertex_count = vertices.len();
+    let index_type = if vertex_count <= U16_INDEX_VERTEX_LIMIT {
+        IndexType::Uint16
+    } else {
+        IndexType::Uint32
+    };
+
+    // HW-RT rung R2a-2: on an RT device the mesh is a BLAS build input, so its vertex +
+    // index buffers must carry `ACCEL_BUILD_INPUT | SHADER_DEVICE_ADDRESS` (the shared
+    // host block carries `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT` — device.rs
+    // `rt_buffer_device_address` — so the device-address usage is valid). hwrt-off OR a
+    // non-RT GPU ⇒ `as_bits` is `NONE`, so the usage is unchanged (byte-identical to the
+    // pre-R2a mesh buffers).
+    let as_bits = {
+        #[cfg(feature = "hwrt")]
+        {
+            if ctx.ray_query_enabled() {
+                BufferUsage::ACCEL_BUILD_INPUT | BufferUsage::SHADER_DEVICE_ADDRESS
+            } else {
+                BufferUsage::NONE
+            }
+        }
+        #[cfg(not(feature = "hwrt"))]
+        {
+            BufferUsage::NONE
+        }
+    };
+    let vertex_usage = BufferUsage::VERTEX | as_bits;
+    let index_usage = BufferUsage::INDEX | as_bits;
+
+    // --- Vertex buffer: copy the model-space vertices in once. ---
+    let vertex_bytes = core::mem::size_of_val(vertices) as u64;
+    let vertex_buffer = ctx
+        .create_buffer(&BufferDesc {
+            size: vertex_bytes,
+            usage: vertex_usage,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("invariant: mesh vertex buffer create");
+    let vb_ptr = ctx
+        .buffer_mapped_ptr(&vertex_buffer)
+        .expect("invariant: host-visible vertex buffer is mapped");
+    // SAFETY: `vb_ptr` points to `vertex_bytes` mapped host-coherent bytes; `vertices`
+    // is a distinct `vertex_bytes`-byte slice (`#[repr(C)]`, tightly packed); the two
+    // regions do not overlap (a fresh device allocation vs the caller's slice). The
+    // copy completes before any GPU submit references the buffer.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            vertices.as_ptr().cast::<u8>(),
+            vb_ptr.as_ptr(),
+            vertex_bytes as usize,
+        );
+    }
+
+    // --- Index buffer: width chosen above; the bytes are built host-side then copied. ---
+    let index_bytes: Vec<u8> = match index_type {
+        IndexType::Uint16 => {
+            let mut bytes = Vec::with_capacity(indices.len() * 2);
+            for &i in indices {
+                debug_assert!(
+                    (i as usize) < vertex_count,
+                    "invariant: index in range for the u16 narrow path"
+                );
+                bytes.extend_from_slice(&(i as u16).to_le_bytes());
+            }
+            bytes
+        }
+        IndexType::Uint32 => {
+            let mut bytes = Vec::with_capacity(indices.len() * 4);
+            for &i in indices {
+                bytes.extend_from_slice(&i.to_le_bytes());
+            }
+            bytes
+        }
+    };
+    let index_buffer = ctx
+        .create_buffer(&BufferDesc {
+            size: index_bytes.len() as u64,
+            usage: index_usage,
+            location: MemoryLocation::HostVisibleCoherent,
+        })
+        .expect("invariant: mesh index buffer create");
+    let ib_ptr = ctx
+        .buffer_mapped_ptr(&index_buffer)
+        .expect("invariant: host-visible index buffer is mapped");
+    // SAFETY: `ib_ptr` points to `index_bytes.len()` mapped host-coherent bytes;
+    // `index_bytes` is a distinct, equally-sized owned allocation (no overlap with the
+    // device buffer). The copy completes before any GPU submit references the buffer.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            index_bytes.as_ptr(),
+            ib_ptr.as_ptr(),
+            index_bytes.len(),
+        );
+    }
+
+    // HW-RT rung R2a-3: build this mesh's per-mesh BLAS EAGERLY on an RT device (Principle 0
+    // — durable per-mesh data ON the record). The BLAS reads the vertex + index buffers just
+    // created (at the mesh's REAL index width — no duplicate `u32` buffer), so it must build
+    // BEFORE they move into `MeshGpu`; `build_blas` submits + fence-waits synchronously and
+    // caches only the device addresses (it keeps no reference to these buffers). hwrt-off OR a
+    // non-RT GPU ⇒ no BLAS (byte-identical to the pre-R2a registry).
+    #[cfg(feature = "hwrt")]
+    let blas = {
+        if ctx.ray_query_enabled() {
+            let as_index_type = match index_type {
+                IndexType::Uint16 => AsIndexType::Uint16,
+                IndexType::Uint32 => AsIndexType::Uint32,
+            };
+            let built = boyko_rhi_vulkan::accel_build::build_blas(
+                ctx,
+                &ctx.rhi_queue(),
+                &boyko_rhi_vulkan::accel_build::BlasBuildInput {
+                    vertex_buffer: &vertex_buffer,
+                    index_buffer: &index_buffer,
+                    vertex_count: vertex_count as u32,
+                    index_count: indices.len() as u32,
+                    vertex_stride: VERTEX_STRIDE as u64,
+                    index_type: as_index_type,
+                },
+            )
+            .expect("invariant: mesh BLAS build on an RT device");
+            Some(built)
+        } else {
+            None
+        }
+    };
+
+    MeshGpu {
+        vertex_buffer,
+        index_buffer,
+        index_count: indices.len() as u32,
+        index_type,
+        vertex_count: vertex_count as u32,
+        #[cfg(feature = "hwrt")]
+        blas,
+    }
+}
+
 impl MeshAssetsExt for Assets<MeshGpu> {
     fn register_mesh(
         &mut self,
@@ -181,146 +338,8 @@ impl MeshAssetsExt for Assets<MeshGpu> {
         vertices: &[Vertex],
         indices: &[u32],
     ) -> MeshHandle {
-        debug_assert!(!vertices.is_empty(), "invariant: a mesh has at least one vertex");
-        debug_assert!(!indices.is_empty(), "invariant: an indexed mesh has at least one index");
-        let vertex_count = vertices.len();
-        let index_type = if vertex_count <= U16_INDEX_VERTEX_LIMIT {
-            IndexType::Uint16
-        } else {
-            IndexType::Uint32
-        };
-
-        // HW-RT rung R2a-2: on an RT device the mesh is a BLAS build input, so its vertex +
-        // index buffers must carry `ACCEL_BUILD_INPUT | SHADER_DEVICE_ADDRESS` (the shared
-        // host block carries `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT` — device.rs
-        // `rt_buffer_device_address` — so the device-address usage is valid). hwrt-off OR a
-        // non-RT GPU ⇒ `as_bits` is `NONE`, so the usage is unchanged (byte-identical to the
-        // pre-R2a mesh buffers).
-        let as_bits = {
-            #[cfg(feature = "hwrt")]
-            {
-                if ctx.ray_query_enabled() {
-                    BufferUsage::ACCEL_BUILD_INPUT | BufferUsage::SHADER_DEVICE_ADDRESS
-                } else {
-                    BufferUsage::NONE
-                }
-            }
-            #[cfg(not(feature = "hwrt"))]
-            {
-                BufferUsage::NONE
-            }
-        };
-        let vertex_usage = BufferUsage::VERTEX | as_bits;
-        let index_usage = BufferUsage::INDEX | as_bits;
-
-        // --- Vertex buffer: copy the model-space vertices in once. ---
-        let vertex_bytes = core::mem::size_of_val(vertices) as u64;
-        let vertex_buffer = ctx
-            .create_buffer(&BufferDesc {
-                size: vertex_bytes,
-                usage: vertex_usage,
-                location: MemoryLocation::HostVisibleCoherent,
-            })
-            .expect("invariant: mesh vertex buffer create");
-        let vb_ptr = ctx
-            .buffer_mapped_ptr(&vertex_buffer)
-            .expect("invariant: host-visible vertex buffer is mapped");
-        // SAFETY: `vb_ptr` points to `vertex_bytes` mapped host-coherent bytes; `vertices`
-        // is a distinct `vertex_bytes`-byte slice (`#[repr(C)]`, tightly packed); the two
-        // regions do not overlap (a fresh device allocation vs the caller's slice). The
-        // copy completes before any GPU submit references the buffer.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                vertices.as_ptr().cast::<u8>(),
-                vb_ptr.as_ptr(),
-                vertex_bytes as usize,
-            );
-        }
-
-        // --- Index buffer: width chosen above; the bytes are built host-side then copied. ---
-        let index_bytes: Vec<u8> = match index_type {
-            IndexType::Uint16 => {
-                let mut bytes = Vec::with_capacity(indices.len() * 2);
-                for &i in indices {
-                    debug_assert!(
-                        (i as usize) < vertex_count,
-                        "invariant: index in range for the u16 narrow path"
-                    );
-                    bytes.extend_from_slice(&(i as u16).to_le_bytes());
-                }
-                bytes
-            }
-            IndexType::Uint32 => {
-                let mut bytes = Vec::with_capacity(indices.len() * 4);
-                for &i in indices {
-                    bytes.extend_from_slice(&i.to_le_bytes());
-                }
-                bytes
-            }
-        };
-        let index_buffer = ctx
-            .create_buffer(&BufferDesc {
-                size: index_bytes.len() as u64,
-                usage: index_usage,
-                location: MemoryLocation::HostVisibleCoherent,
-            })
-            .expect("invariant: mesh index buffer create");
-        let ib_ptr = ctx
-            .buffer_mapped_ptr(&index_buffer)
-            .expect("invariant: host-visible index buffer is mapped");
-        // SAFETY: `ib_ptr` points to `index_bytes.len()` mapped host-coherent bytes;
-        // `index_bytes` is a distinct, equally-sized owned allocation (no overlap with the
-        // device buffer). The copy completes before any GPU submit references the buffer.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                index_bytes.as_ptr(),
-                ib_ptr.as_ptr(),
-                index_bytes.len(),
-            );
-        }
-
-        // HW-RT rung R2a-3: build this mesh's per-mesh BLAS EAGERLY on an RT device (Principle 0
-        // — durable per-mesh data ON the record). The BLAS reads the vertex + index buffers just
-        // created (at the mesh's REAL index width — no duplicate `u32` buffer), so it must build
-        // BEFORE they move into `MeshGpu`; `build_blas` submits + fence-waits synchronously and
-        // caches only the device addresses (it keeps no reference to these buffers). hwrt-off OR a
-        // non-RT GPU ⇒ no BLAS (byte-identical to the pre-R2a registry).
-        #[cfg(feature = "hwrt")]
-        let blas = {
-            if ctx.ray_query_enabled() {
-                let as_index_type = match index_type {
-                    IndexType::Uint16 => AsIndexType::Uint16,
-                    IndexType::Uint32 => AsIndexType::Uint32,
-                };
-                let built = boyko_rhi_vulkan::accel_build::build_blas(
-                    ctx,
-                    &ctx.rhi_queue(),
-                    &boyko_rhi_vulkan::accel_build::BlasBuildInput {
-                        vertex_buffer: &vertex_buffer,
-                        index_buffer: &index_buffer,
-                        vertex_count: vertex_count as u32,
-                        index_count: indices.len() as u32,
-                        vertex_stride: VERTEX_STRIDE as u64,
-                        index_type: as_index_type,
-                    },
-                )
-                .expect("invariant: mesh BLAS build on an RT device");
-                Some(built)
-            } else {
-                None
-            }
-        };
-
-        let handle = self.add(MeshGpu {
-            vertex_buffer,
-            index_buffer,
-            index_count: indices.len() as u32,
-            index_type,
-            vertex_count: vertex_count as u32,
-            #[cfg(feature = "hwrt")]
-            blas,
-        });
-        MeshHandle(handle.index())
+        let mesh = build_mesh_gpu(ctx, vertices, indices);
+        MeshHandle(self.add(mesh).index())
     }
 
     fn cube(&mut self, ctx: &VulkanContext, size: f32) -> MeshHandle {

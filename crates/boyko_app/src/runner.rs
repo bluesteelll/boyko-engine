@@ -23,7 +23,7 @@ use boyko_input::{RawInputQueue, translate_win32, translate_win32_raw_mouse};
 use boyko_rhi_vulkan::window::CapturedMsg;
 
 #[cfg(windows)]
-use boyko_ecs::ecs::core::asset::Assets;
+use boyko_ecs::ecs::core::asset::{AssetServer, AssetStaging, Assets};
 #[cfg(windows)]
 use boyko_input::{ButtonState, KeyCode, RawInputEvent};
 #[cfg(windows)]
@@ -31,11 +31,11 @@ use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
 #[cfg(windows)]
 use boyko_render::{
     CsmCasterScratch, DdgiCaps, MaterialGpu, MaterialId, MaterialTable, MeshAssetsExt, MeshGpu,
-    MeshRenderScratch, RayBackendPolicy, RayCaps, ResolvedCsm, ResolvedShadowAtlas, RhiContext,
-    SdfEditStaging, ShadowDenoiseConfig, ShadowDenoiseMode, collect_sdf_edits,
-    gbuffer_push_from_view, upload_atlas_ring, upload_camera_ring, upload_csm_ring,
-    upload_instance_models, upload_light_table, upload_pair_out_slot, upload_pair_ring,
-    upload_sdf_edit_list,
+    MeshRenderScratch, ObjMeshLoader, RayBackendPolicy, RayCaps, ResolvedCsm, ResolvedShadowAtlas,
+    RhiContext, RonMaterialLoader, SdfEditStaging, ShadowDenoiseConfig, ShadowDenoiseMode,
+    collect_sdf_edits, gbuffer_push_from_view, upload_atlas_ring, upload_camera_ring,
+    upload_csm_ring, upload_instance_models, upload_light_table, upload_material_assets,
+    upload_mesh_assets, upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
 };
 #[cfg(all(windows, feature = "hwrt"))]
 use boyko_render::{
@@ -167,6 +167,24 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     app.world_mut().insert_resource(material_assets);
     app.world_mut()
         .insert_non_send_resource(MaterialTable::new());
+
+    // Asset-system rung A3b: the loader registry + the decode->upload staging
+    // queues. `AssetServer` was not wired into `boyko_app` before this rung — it
+    // is minted here with both concrete loaders registered
+    // (`ObjMeshLoader`/`RonMaterialLoader`). `AssetStaging<A>` is the NonSend
+    // handoff queue `AssetServer::load` pushes into and the boot-one-shot
+    // `upload_material_assets`/`upload_mesh_assets` drain (run explicitly below,
+    // after `finish()`). No scene calls `load` yet at this rung, so both queues
+    // stay empty at boot — zero effect, the wiring is the deliverable.
+    let mut asset_server = AssetServer::new();
+    asset_server.register_loader::<ObjMeshLoader>();
+    asset_server.register_loader::<RonMaterialLoader>();
+    app.world_mut().insert_resource(asset_server);
+    app.world_mut()
+        .insert_non_send_resource(AssetStaging::<MaterialGpu>::default());
+    app.world_mut()
+        .insert_non_send_resource(AssetStaging::<MeshGpu>::default());
+
     app.world_mut().insert_resource(WindowInfo {
         width: host.window.width(),
         height: host.window.height(),
@@ -276,6 +294,18 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // and single-site. It sets `SdfEditStaging::dirty` deterministically; the frame
     // loop's first-frame `is_dirty()` block then performs the one-shot upload unchanged.
     app.world_mut().run_system(collect_sdf_edits);
+
+    // Asset-system rung A3b: drain any decoded-but-not-yet-uploaded assets BEFORE
+    // `MaterialTable::boot_seed` below sizes/uploads the device SSBO from
+    // `Assets<MaterialGpu>` — a loaded material must be `fill`ed (and therefore
+    // counted in `high_water`) before that seed runs. Materials FIRST (the
+    // ordering `boot_seed` requires), then meshes (no ordering dependency on
+    // `boot_seed`, but run alongside as one boot-time asset-drain block). This is
+    // a BOOT ONE-SHOT, not a per-frame system (keeps the frame loop unchanged):
+    // at A3b no scene calls `AssetServer::load`, so both drains are empty and
+    // this costs nothing beyond the `staging.is_empty()` check (byte-identical).
+    app.world_mut().run_system(upload_material_assets);
+    app.world_mut().run_system(upload_mesh_assets);
 
     // Asset-system rung A1: boot-seed the material table — hard-size + upload the
     // device SSBO from whatever `finish()` drained into `Assets<MaterialGpu>` (every

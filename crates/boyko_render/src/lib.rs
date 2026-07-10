@@ -128,6 +128,13 @@ pub mod light_plugin;
 pub mod light_policy;
 pub mod light_reconcile;
 pub mod light_system;
+/// Asset-system rung A3b — concrete [`AssetLoader`](boyko_ecs::ecs::core::asset::AssetLoader)
+/// impls: [`ObjMeshLoader`](loaders::ObjMeshLoader) (Wavefront `.obj` →
+/// [`MeshData`](mesh_data::MeshData)) and
+/// [`RonMaterialLoader`](loaders::RonMaterialLoader) (a `.mat` text KV format
+/// → [`MaterialGpu`](material::MaterialGpu)). In-house, no `ron`/`serde`
+/// dependency.
+pub mod loaders;
 pub mod material;
 /// Asset-system rung A1 — the GPU-resident mirror of `Assets<MaterialGpu>`
 /// ([`MaterialTable`](material_table::MaterialTable)): a `MeshRegistry`-shaped device
@@ -145,7 +152,14 @@ pub mod mesh;
 /// `blas_address` / `blas_generation`. Replaces the standalone mesh foundation M2
 /// `MeshRegistry` — the records OWN their GPU buffers, so `Assets<MeshGpu>` itself is
 /// the GPU-resident table (no separate mirror like [`MaterialTable`](material_table::MaterialTable)).
+/// Rung A3b factors the device-upload half out as the free fn
+/// [`build_mesh_gpu`](mesh_assets::build_mesh_gpu), shared with
+/// [`GpuUpload`](gpu_upload::GpuUpload) for `MeshGpu`.
 pub mod mesh_assets;
+/// Asset-system rung A3b — [`MeshData`](mesh_data::MeshData): the `Send`-safe
+/// CPU intermediate [`ObjMeshLoader`](loaders::ObjMeshLoader) decodes into,
+/// now `MeshGpu`'s `Asset::Cpu` (replacing the pre-A3b `()` placeholder).
+pub mod mesh_data;
 /// The ECS-native bucketed instance gather (mesh foundation M3): the
 /// [`MeshRenderScratch`](mesh_draw::MeshRenderScratch) reused resource, the
 /// per-mesh [`DrawBatch`](mesh_draw::DrawBatch), and the
@@ -273,7 +287,7 @@ pub use gpu_transform3d::{
     GPU_TRANSFORM3D_BYTES, GpuTransform3D, TRS_PACKED_BYTES, TrsPacked,
 };
 pub use gpu_transform_pack::{add_gpu_transform_pack, pack_gpu_transforms};
-pub use gpu_upload::{GpuUpload, upload_assets};
+pub use gpu_upload::{GpuUpload, upload_assets, upload_material_assets, upload_mesh_assets};
 pub use instance_model::{INSTANCE_MODEL_COL_BYTES, InstanceModelCol, sync_instance_model_cols};
 // HW-RT rung 3b: the previous-frame model-affine sibling + its copy system (temporal motion
 // vectors). `not(hwrt)` builds never compile the column, so its instancing path is textually
@@ -306,10 +320,12 @@ pub use light_system::{
     fold_light_table_slotted, light_seed_state, set_light_enabled_now, write_light_table,
 };
 pub use gbuffer_depth::{GBUFFER_T_MAX, assert_gbuffer_marcher_t_max_agree};
+pub use loaders::{ObjMeshLoader, RonMaterialLoader};
 pub use material::{MATERIAL_GPU_WORDS, Material, MaterialGpu, MaterialId};
 pub use material_table::MaterialTable;
 pub use mesh::{MeshGpu, U16_INDEX_VERTEX_LIMIT, VERTEX_STRIDE as MESH_VERTEX_STRIDE, Vertex};
-pub use mesh_assets::MeshAssetsExt;
+pub use mesh_assets::{MeshAssetsExt, build_mesh_gpu};
+pub use mesh_data::MeshData;
 pub use shadow_atlas::{
     ATLAS_SLOT_MASK, ATLAS_SLOT_SHIFT, CASTS_SHADOW_BIT, FaceTransform, M_SLOTS, POINT_FACE_COUNT,
     PointShadowInput, PunctualResolveSet, PunctualSlotAssignment, RESOLVED_SHADOW_ATLAS_BYTES,

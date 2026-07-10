@@ -32,18 +32,19 @@
 //! via the [`MeshAssetsExt`](crate::mesh_assets::MeshAssetsExt) extension trait
 //! in [`mesh_assets`](crate::mesh_assets).
 //!
-//! # `Asset::Cpu` — a placeholder, not `MeshGpu` itself
+//! # `Asset::Cpu` — [`MeshData`], not `MeshGpu` itself
 //!
 //! Unlike `MaterialGpu` (`type Cpu = MaterialGpu`, since its GPU layout doubles
 //! as its own decoded form — it owns no device handle), [`MeshGpu`] owns
 //! non-`Send` RHI buffers and therefore CANNOT itself satisfy `Asset::Cpu: Send`.
-//! No mesh loader exists yet at this rung (`register_mesh` mints `MeshGpu`
-//! directly from host-provided vertex/index slices, never from raw file bytes),
-//! so `Cpu = ()` is the placeholder a future mesh loader replaces with a real
-//! `Send`-safe decoded intermediate (e.g. raw vertex/index bytes) — this mirrors
-//! `boyko_ecs`'s own `Assets` unit-test `Asset` impl, which documents the
-//! identical "never exercised without a loader, just needs to satisfy the bound"
-//! pattern.
+//! Asset-system rung A3b adds the first mesh loader
+//! ([`ObjMeshLoader`](crate::loaders::ObjMeshLoader)), so `Cpu = `[`MeshData`]
+//! (a plain, `Send`-safe `Vec<Vertex>` + `Vec<u32>` pair) replaces the pre-A3b
+//! `()` placeholder — `register_mesh` still mints `MeshGpu` directly from
+//! host-provided vertex/index slices for the host-authored primitives (`cube`,
+//! `plane`), sharing the same device-upload path
+//! ([`build_mesh_gpu`](crate::mesh_assets::build_mesh_gpu)) a decoded
+//! [`MeshData`] uses.
 //!
 //! # The vertex contract
 //!
@@ -56,6 +57,8 @@
 use boyko_ecs::ecs::core::asset::Asset;
 use boyko_rhi::enums::IndexType;
 use boyko_rhi_vulkan::memory::BoundBuffer;
+
+use crate::mesh_data::MeshData;
 
 /// The `gbuffer_mrt.vs` vertex: a model-space position (offset 0), an outward world
 /// normal (offset 12), and a linear RGBA color (offset 24). `#[repr(C)]` pins the exact
@@ -117,10 +120,11 @@ pub struct MeshGpu {
 }
 
 impl Asset for MeshGpu {
-    // See the module doc's "`Asset::Cpu` — a placeholder, not `MeshGpu` itself" section:
+    // See the module doc's "`Asset::Cpu` — `MeshData`, not `MeshGpu` itself" section:
     // `MeshGpu` owns non-`Send` RHI buffers, so it cannot satisfy `Asset::Cpu: Send`
-    // itself, and no mesh loader exists yet to decode into a real intermediate.
-    type Cpu = ();
+    // itself; `MeshData` is the `Send`-safe decoded intermediate `ObjMeshLoader`
+    // produces (asset-system rung A3b).
+    type Cpu = MeshData;
 }
 
 // `Assets<MeshGpu>` is `!Send` (each record owns RHI buffers, device-bound and
