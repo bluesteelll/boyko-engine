@@ -585,6 +585,35 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// Asset-streaming plan F8+ PER_INSTANCE_MATERIAL-variant mesh-MRT G-buffer PRODUCER
+    /// vertex SPIR-V (`shaders/gbuffer_mrt_pm.vs.spv`, compiled from `gbuffer_mrt.vs.hlsl`
+    /// with `-D PER_INSTANCE_MATERIAL=1`). Identical to [`GBUFFER_MRT_VS_SPV`] except it
+    /// additionally reads a per-instance material PAYLOAD SSBO (set-0 binding 1, VERTEX —
+    /// id + `base_color`) at the SAME `pc.base_instance + SV_InstanceID` index the
+    /// model-matrix arm already uses, and forwards both flat (`nointerpolation`) to the
+    /// fragment. Materials are device-agnostic (unlike `mv`, this is NOT
+    /// `#[cfg(feature = "hwrt")]`) — built at boot on every device and bound instead of the
+    /// base pipeline ONLY on a frame with a non-default material (and no temporal denoise —
+    /// MV takes priority, asset-streaming plan F8 §2.3). The base [`GBUFFER_MRT_VS_SPV`]
+    /// stays the byte-frozen 3-MRT golden (never recompiled by F8/F8+).
+    GBUFFER_MRT_PM_VS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/gbuffer_mrt_pm.vs.spv")
+}
+
+embed_spirv! {
+    /// Asset-streaming plan F8+ PER_INSTANCE_MATERIAL-variant mesh-MRT G-buffer PRODUCER
+    /// fragment SPIR-V (`shaders/gbuffer_mrt_pm.fs.spv`, compiled from `gbuffer_mrt.fs.hlsl`
+    /// with `-D PER_INSTANCE_MATERIAL=1`). Writes the SAME 3 attribute MRTs + `SV_Depth` as
+    /// [`GBUFFER_MRT_FS_SPV`], except `gNormal.BA` packs the REAL per-instance material id
+    /// (forwarded flat from the VS, unchanged from F8) AND `gAlbedo` sources the
+    /// per-instance material's `base_color` (owner: material-drives-albedo-too) instead of
+    /// the mesh vertex color. Paired with [`gbuffer_mrt_pm_vs_spirv`]; the base
+    /// [`GBUFFER_MRT_FS_SPV`] stays the byte-frozen golden (never recompiled by F8/F8+).
+    GBUFFER_MRT_PM_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/gbuffer_mrt_pm.fs.spv")
+}
+
+embed_spirv! {
     /// The committed fullscreen-sample vertex SPIR-V (`shaders/fullscreen_sample.vs.hlsl`): a
     /// fullscreen triangle generating positions + UVs from `SV_VertexID` (no vertex buffer).
     /// The present-blit pass's VS.
@@ -1014,6 +1043,24 @@ pub fn gbuffer_mrt_mv_vs_spirv() -> &'static [u32] {
 #[inline]
 pub fn gbuffer_mrt_mv_fs_spirv() -> &'static [u32] {
     GBUFFER_MRT_MV_FS_SPV.as_words()
+}
+
+/// Asset-streaming plan F8 PER_INSTANCE_MATERIAL-variant mesh-MRT gbuffer VERTEX SPIR-V as a
+/// `u32` word stream. Bound into the PM raster pipeline (the base 3-attachment layout) with the
+/// 2-binding instance-material set (instances @0, `instance_materials` @1) + the 88-byte VERTEX
+/// push. Paired with [`gbuffer_mrt_pm_fs_spirv`]; selected only on a frame with a non-default
+/// material. NOT `#[cfg(feature = "hwrt")]` — materials are device-agnostic.
+#[inline]
+pub fn gbuffer_mrt_pm_vs_spirv() -> &'static [u32] {
+    GBUFFER_MRT_PM_VS_SPV.as_words()
+}
+
+/// Asset-streaming plan F8 PER_INSTANCE_MATERIAL-variant mesh-MRT gbuffer FRAGMENT SPIR-V as a
+/// `u32` word stream. Paired with [`gbuffer_mrt_pm_vs_spirv`]; packs the real per-instance
+/// material id into `gNormal.BA`.
+#[inline]
+pub fn gbuffer_mrt_pm_fs_spirv() -> &'static [u32] {
+    GBUFFER_MRT_PM_FS_SPV.as_words()
 }
 
 /// The committed fullscreen-sample (present-blit) vertex SPIR-V as a `u32` word stream,

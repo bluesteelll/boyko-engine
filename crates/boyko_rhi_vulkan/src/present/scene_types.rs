@@ -1454,6 +1454,25 @@ pub struct GBufferScene<'a> {
     /// device. `#[cfg(feature = "hwrt")]`.
     #[cfg(feature = "hwrt")]
     pub temporal_layout: Option<&'a VulkanBindGroupLayout>,
+    /// Asset-streaming plan F8: `true` iff THIS frame's gather scattered any non-default
+    /// material id (`MeshRenderScratch::any_non_default_material`) — the per-frame
+    /// `PER_INSTANCE_MATERIAL` raster-pipeline selection gate. NOT `#[cfg(feature =
+    /// "hwrt")]` — materials are device-agnostic (the 2-material golden runs on the
+    /// software leg). `false` on every all-default scene (the goldens) ⇒ the recorder
+    /// binds the FROZEN base pipeline (byte-identity by construction).
+    pub pm_enabled: bool,
+    /// Asset-streaming plan F8: the PER_INSTANCE_MATERIAL gbuffer producer pipeline
+    /// (`gbuffer_mrt_pm.{vs,fs}`) — built UNCONDITIONALLY at boot (unlike `mv`, this is
+    /// not RT-specific). `Some` iff [`Self::pm_enabled`] (belt-and-suspenders); bound
+    /// instead of [`Self::raster_pipeline`] ONLY when [`Self::pm_enabled`] AND this is
+    /// `Some` AND [`Self::pm_bind_group`] is `Some`, AND no MV frame is active (MV takes
+    /// priority, F8 §2.3).
+    pub raster_pipeline_pm: Option<&'a VulkanGraphicsPipeline>,
+    /// Asset-streaming plan F8: this frame's PM set-0 bind group (slot `frame_index` of
+    /// the PM resources' per-FIF bind groups: `{ instance_rings[i] @0,
+    /// pm_instance_material_rings[i] @1 }`). Bound at set 0 when the PM pipeline is
+    /// selected. `Some` iff [`Self::pm_enabled`].
+    pub pm_bind_group: Option<&'a VulkanBindGroup>,
 }
 
 impl GBufferScene<'_> {
@@ -1470,6 +1489,15 @@ impl GBufferScene<'_> {
     #[cfg(feature = "hwrt")]
     pub(crate) fn mesh_mv_active(&self) -> bool {
         self.temporal_enabled && self.raster_pipeline_mv.is_some() && self.mv_bind_group.is_some()
+    }
+
+    /// Asset-streaming plan F8 — the SINGLE source of the "this frame draws with the
+    /// PER_INSTANCE_MATERIAL pipeline" decision. NOT `#[cfg(feature = "hwrt")]` — PM works
+    /// on the software leg (the 2-material golden). MV takes priority over PM at the
+    /// recorder's selection site (F8 §2.3): a temporal frame with the MV pipeline active
+    /// renders default materials (the tracked F8-mv follow-up), never a crash.
+    pub(crate) fn mesh_pm_active(&self) -> bool {
+        self.pm_enabled && self.raster_pipeline_pm.is_some() && self.pm_bind_group.is_some()
     }
 
     /// HW-RT Rung 3b step 5b — the SINGLE source of the "the VIS pass ALSO writes the SDF pixels'

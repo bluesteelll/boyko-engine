@@ -2406,6 +2406,11 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // Rung-3b step 6: the temporal reproject layout — OFF in this harness (byte-identical).
         #[cfg(feature = "hwrt")]
         temporal_layout: None,
+        // Asset-streaming plan F8: PER_INSTANCE_MATERIAL is OFF in this low-level RHI harness
+        // (no ECS gather / material store exists here) — byte-identical to the pre-F8 stream.
+        pm_enabled: false,
+        raster_pipeline_pm: None,
+        pm_bind_group: None,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -3327,6 +3332,11 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // Rung-3b step 6: the temporal reproject layout — OFF in this harness (byte-identical).
         #[cfg(feature = "hwrt")]
         temporal_layout: None,
+        // Asset-streaming plan F8: PER_INSTANCE_MATERIAL is OFF in this low-level RHI harness
+        // (no ECS gather / material store exists here) — byte-identical to the pre-F8 stream.
+        pm_enabled: false,
+        raster_pipeline_pm: None,
+        pm_bind_group: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -8043,6 +8053,11 @@ fn run_showcase_body_ddgi(
         // Rung-3b step 6: the temporal reproject layout — OFF in this harness (byte-identical).
         #[cfg(feature = "hwrt")]
         temporal_layout: None,
+        // Asset-streaming plan F8: PER_INSTANCE_MATERIAL is OFF in this low-level RHI harness
+        // (no ECS gather / material store exists here) — byte-identical to the pre-F8 stream.
+        pm_enabled: false,
+        raster_pipeline_pm: None,
+        pm_bind_group: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -9372,6 +9387,11 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         // Rung-3b step 6: the temporal reproject layout — OFF in this harness (byte-identical).
         #[cfg(feature = "hwrt")]
         temporal_layout: None,
+        // Asset-streaming plan F8: PER_INSTANCE_MATERIAL is OFF in this low-level RHI harness
+        // (no ECS gather / material store exists here) — byte-identical to the pre-F8 stream.
+        pm_enabled: false,
+        raster_pipeline_pm: None,
+        pm_bind_group: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };

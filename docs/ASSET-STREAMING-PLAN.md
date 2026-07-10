@@ -377,6 +377,35 @@ Ordering: F1 store under a green byte-identity gate → F2 lifecycle/refcount �
   regression BOTH legs; `asset_streaming_f7_grow_headless.rs` (material grow + multi-grow FIX-F + non-RT instance grow
   + rebind-under-FIF, Phase B runtime-gated to non-RT) BOTH legs; `f7_rt_cap` hwrt.
 
+**F8 as-built (SHIPPED — the LAST rung; closes the confirmed bug: the raster ignored per-instance material,
+`gbuffer_mrt.fs.hlsl` hardcoded material id 0 for every pixel):**
+- **Producer-only fix.** The deferred resolve already samples `Materials[mat_id]` (`deferred_pbr.hlsl:1035`); F8
+  wires the REAL per-instance id into `gNormal.BA`. A SEPARATE `#ifdef PER_INSTANCE_MATERIAL` gbuffer variant
+  (`gbuffer_mrt_pm.{vs,fs}.spv`, recompiled with `-D`; the committed BASE `.spv` is byte-frozen — the developer
+  `cmp`-verified a no-`-D` recompile against the committed blob = identical; the resolve `.spv` is untouched). A
+  per-frame `any_non_default_material` OR-reduce (fused into the scatter, RESET per gather) selects `mv > pm > base`
+  on BOTH cfg legs (the `pm` arm is NOT cfg-gated — else it would be dead on the software leg the golden runs on).
+- **Data path.** A `material_ids` `ScratchColumn` lane parallel to `ring`/`mesh_ids` (same `counts[m]==0` skip) →
+  the `pm_instance_material_rings` SSBO that JOINS the F7 instance family (non-RT lockstep grow, RT hard-cap). A HARD
+  CPU-side OOB clamp (`raw_material_id >= high_water() → 0`, targeting the live pinned slot 0) is the SOLE
+  material-safety; the visual `MaterialStale` substitution is DEFERRED to the async rung (task#13). `MaterialStale`
+  EnableTag / validate material arm are NOT wired.
+- **base_color→albedo extension (owner-requested).** The mesh albedo came from the VERTEX color (`deferred_pbr.hlsl:1020`
+  reads `base = gAlbedo`); only the SDF marcher read `base_color`. So a "red material" was metallic but not red. Fix:
+  the per-instance payload widened to `PerInstanceMaterial { base_color:[f32;4], id:u32, _pad }` (32 B, std430 stride
+  verified at the SPIR-V level: offsets 0/16, stride 32); the PM VS forwards a `nointerpolation mat_albedo` varying, the
+  PM FS writes it to `gAlbedo` under `#ifdef/#else` (the `#else` char-for-char the vertex-color line). Resolve + base
+  frozen → byte-identity by construction. Principle 1 (reviewer M1/M2): `id == 0` SHORT-CIRCUITS the store lookup (the
+  common/golden all-default path does ZERO per-instance material work), `default_base_color` = the ACTUAL slot-0
+  base_color read ONCE. Now the material drives BOTH albedo AND metallic/roughness for meshes.
+- **Deferred/tracked:** MaterialStale substitution → async prereq (task#13); the combined MV+PM variant → **F8-mv**
+  (task#12 — materials render default under temporal denoise, MV>PM, warn-once'd).
+- Gates GREEN: `58f6c6c3` BOTH legs (base `.spv` cmp-identical + full golden holds); a NEW `grand_showcase_2mat`
+  golden `ac09f138` (a 5-sphere material chart — default/red/green/gold-metal/blue-metal — oracle-blessed BOTH legs);
+  the F8 gather/OOB/two-pass CPU tests + `mesh_pm_active`; `grow_headless`/`rt_cap` extended material-bearing BOTH
+  legs; F6 churn BOTH legs; opus-reviewed TWICE (F8 core + the base_color extension, the latter verifying the
+  HLSL↔Rust layout against the disassembled SPIR-V). **→ asset-streaming plan COMPLETE (9/9 rungs).**
+
 ## Open questions (non-blocking)
 
 1. **ComponentId budget:** each asset type consumes one id from the 512 cap (MeshGpu, MaterialGpu, + POD

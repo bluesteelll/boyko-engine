@@ -22,7 +22,7 @@ use boyko_ecs::ecs::core::system::ResMut;
 use boyko_ecs::prelude::*;
 use boyko_macros::Resource;
 use boyko_render::instance_model::InstanceModelCol;
-use boyko_render::mesh_draw::MeshRenderScratch;
+use boyko_render::mesh_draw::{MeshRenderScratch, PerInstanceMaterial};
 use boyko_render::{GpuTransform3D, MeshBundle, upload_instance_models};
 use boyko_rhi::enums::IndexType;
 use boyko_rhi_vulkan::ffi::VkBuffer;
@@ -56,7 +56,7 @@ fn gather_headless(
     scratch.gather_mixed_into(
         1,
         |_mesh| Some((36u32, IndexType::Uint16)),
-        || q.iter().map(|(h, col, pair)| (h.0, col, pair)),
+        || q.iter().map(|(h, col, pair)| (h.0, col, pair, PerInstanceMaterial::default())),
     );
 }
 

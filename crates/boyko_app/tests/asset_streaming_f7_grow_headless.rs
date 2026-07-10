@@ -103,6 +103,23 @@
 //! certify the hwrt path survived the grow+repoint cycle with every resolve variant
 //! armed.
 //!
+//! # Asset-streaming plan F8 fold-in — the PER_INSTANCE_MATERIAL ring's own lockstep grow
+//!
+//! Phase B's batch (below) now carries a SHARED non-default material (previously every
+//! Phase-B drawable used the implicit default `MaterialHandle(0)`), so its
+//! `> INSTANCE_CAPACITY` spawn also exercises F8's `pm_instance_material_rings[s]` /
+//! `pm_bind_groups[s]` growth — `GpuSceneBundles`'s F8 fields are `pub(crate)`/private
+//! (same public-API-only constraint as `INSTANCE_CAPACITY` above), so this is, like Phase
+//! B's own instance-ring claim, an EXECUTION SMOKE: `upload_instance_materials` (`upload.rs`)
+//! hard-asserts `bytes.len() <= ring_slot.size` — if `pm_instance_material_rings[s]` had NOT
+//! grown in lockstep with `instance_rings[s]` (F8 §7b/i), this phased run would abort with
+//! that assert instead of reaching the final checks below. `FinalPmStats` (a plain `Send`
+//! snapshot, mirroring `FinalGrowStats`'s idiom) additionally cross-checks, via the PUBLIC
+//! `MeshRenderScratch` surface, that the material lane actually scaled past
+//! `INSTANCE_CAPACITY` and that the PM pipeline-selection flag stayed armed — so a silently
+//! SKIPPED material upload (e.g. a gating bug that never calls `upload_instance_materials`
+//! at all) would also be caught, not just a hard-cap overflow.
+//!
 //! # Running (the orchestrator, NOT a subagent)
 //!
 //! ```text
@@ -119,7 +136,7 @@
 use boyko_app::prelude::*;
 use boyko_ecs::prelude::*;
 use boyko_macros::Resource;
-use boyko_render::{MaterialGpu, MaterialTable, RayCaps, RetiredGpuBuffers, RtTier};
+use boyko_render::{MaterialGpu, MaterialTable, MeshRenderScratch, RayCaps, RetiredGpuBuffers, RtTier};
 #[cfg(feature = "hwrt")]
 use boyko_render::{ShadowDenoiseConfig, ShadowDenoiseMode};
 
@@ -246,6 +263,30 @@ fn snapshot_grow_stats(
     stats.captured = true;
 }
 
+/// Asset-streaming plan F8 fold-in — a DURING-run snapshot of the material-gather PM
+/// state, overwritten every frame (the LAST frame's values win) — mirrors
+/// `FinalGrowStats`'s snapshot idiom. Plain `Send`, so it SURVIVES the runner's shutdown
+/// (`MeshRenderScratch` itself is a plain `Send` resource the render plugin owns for the
+/// whole run — unlike `MaterialTable`/`RetiredGpuBuffers`, it is never force-destroyed at
+/// shutdown, so `app.world().resource::<MeshRenderScratch>()` would also work post-run;
+/// this snapshot exists so the LAST in-run frame's values are captured even if the runner
+/// clears/rebuilds render-only state during shutdown).
+#[derive(Resource, Default, Clone, Copy)]
+struct FinalPmStats {
+    any_non_default_material_last: bool,
+    /// The highest `MeshRenderScratch::material_ids` length observed across the whole
+    /// run. Phase B's >`INSTANCE_CAPACITY` batch is a ONE-SHOT spawn (nothing despawns
+    /// it), so later frames' length stays at the post-Phase-B total — sampling the MAX
+    /// is robust regardless of exactly which frame this system runs relative to the
+    /// gather within a frame.
+    max_material_ids_len: usize,
+}
+
+fn snapshot_pm_stats(scratch: Res<MeshRenderScratch>, mut stats: ResMut<FinalPmStats>) {
+    stats.any_non_default_material_last = scratch.any_non_default_material();
+    stats.max_material_ids_len = stats.max_material_ids_len.max(scratch.material_ids.len());
+}
+
 /// The phase driver: ONE system, gated on `FrameCounter`, that runs Phase A (steady
 /// material mint), then Phase B (one-shot instance-heavy spawn — SKIPPED on an RT
 /// device, see `instance_grow_out_of_scope`), then goes quiet for Phase D. See this
@@ -285,11 +326,27 @@ fn phase_driver(
         // device would abort THIS phased run before Phases A/D's assertions below
         // ever get checked.
         if !instance_grow_out_of_scope(&caps) {
+            // Asset-streaming plan F8 fold-in: every Phase-B drawable carries a SHARED
+            // non-default material (not just Phase A's fresh-material-per-drawable side
+            // effect — Phase A's own drawables already carry non-zero-indexed handles) —
+            // see this file's module doc for why this batch is ALSO the F8
+            // pm_instance_material_rings lockstep-growth execution smoke.
+            let pm_material = materials.add(MaterialGpu::new(
+                [0.9, 0.1, 0.1, 1.0],
+                1.0,
+                0.3,
+                0.5,
+                [0.0, 0.0, 0.0],
+                0,
+            ));
             for i in 0..PHASE_B_INSTANCE_DRAWABLES {
-                commands.spawn(MeshBundle::new(
-                    cube.get(),
-                    Transform::from_translation(Vec3::new((i % 64) as f32, (i / 64) as f32, 0.0)),
-                ));
+                commands.spawn(MeshBundle {
+                    material: MaterialHandle(pm_material.index() as u16),
+                    ..MeshBundle::new(
+                        cube.get(),
+                        Transform::from_translation(Vec3::new((i % 64) as f32, (i / 64) as f32, 0.0)),
+                    )
+                });
             }
             instance_grow_ran.0 = true;
         }
@@ -355,11 +412,13 @@ fn f7_grow_and_defer_old_phased_headless() {
     app.insert_resource(FrameBudget(BUDGET));
     app.insert_resource(FrameCounter::default());
     app.insert_resource(FinalGrowStats::default());
+    app.insert_resource(FinalPmStats::default());
     app.insert_resource(InstanceGrowRan::default());
     app.insert_resource(SharedCubeMesh::default());
     app.add_systems(exit_after_budget);
     app.add_systems(phase_driver);
     app.add_systems(snapshot_grow_stats);
+    app.add_systems(snapshot_pm_stats);
     app.add_startup_system(setup_minimal_scene);
     app.add_plugins(EnginePlugins::window("boyko_app F7 grow-and-defer-old headless", 320, 240));
     // C1 hwrt completeness fold-in (see module doc): arms EVERY Option-guarded HWRT
@@ -445,4 +504,31 @@ fn f7_grow_and_defer_old_phased_headless() {
          is in scope (non-RT device): instance_grow_ran={instance_grow_ran}, \
          device_is_rt={device_is_rt}"
     );
+
+    // Asset-streaming plan F8 fold-in: on a non-RT device, Phase B's shared non-default
+    // material must have kept the PM pipeline-selection flag armed AND the material lane
+    // must have scaled past INSTANCE_CAPACITY in lockstep with the instance ring — reaching
+    // this assertion at all (rather than a panic inside `upload_instance_materials`) already
+    // proves the lockstep grow held (see this file's module doc); these two checks
+    // additionally rule out a SILENTLY SKIPPED material upload (a gating bug that never
+    // calls `upload_instance_materials`, which would leave the flag/lane looking inert
+    // instead of aborting).
+    if !device_is_rt {
+        let pm_stats = *app.world().resource::<FinalPmStats>();
+        assert!(
+            pm_stats.any_non_default_material_last,
+            "F8: any_non_default_material() must still read true at the end of the run — \
+             Phase B's shared non-default material (plus Phase A's own \
+             fresh-material-per-drawable drawables, all still live) must keep the PM gate armed"
+        );
+        assert!(
+            pm_stats.max_material_ids_len >= PHASE_B_INSTANCE_DRAWABLES as usize,
+            "F8: MeshRenderScratch::material_ids must have scaled to at least the \
+             post-Phase-B drawable count (observed max {}, expected >= {}) — a material \
+             lane that failed to grow past INSTANCE_CAPACITY in lockstep with the instance \
+             ring would have aborted this run via upload_instance_materials's hard assert \
+             before ever reaching here",
+            pm_stats.max_material_ids_len, PHASE_B_INSTANCE_DRAWABLES
+        );
+    }
 }

@@ -314,7 +314,9 @@ pub use instance_model::{PrevInstanceModelCol, sync_prev_instance_model_cols};
 // HW-RT rung 3b: the camera view-proj carry for motion-vector reprojection.
 #[cfg(feature = "hwrt")]
 pub use motion_cam::{MOTION_CAM_UBO_BYTES, MotionCam, MotionCamState};
-pub use mesh_draw::{DrawBatch, MeshRenderScratch, gather_mesh_draws};
+pub use mesh_draw::{
+    DrawBatch, MeshRenderScratch, PER_INSTANCE_MATERIAL_BYTES, PerInstanceMaterial, gather_mesh_draws,
+};
 pub use light_plugin::LightingPlugin;
 pub use light_reconcile::light_reconcile;
 pub use render3d_plugin::Render3dPlugin;
@@ -360,9 +362,10 @@ pub use snap_interpolation::{SnapInterpolation, TeleportCommandsExt, snap_apply}
 pub use ssao_config::{ResolvedSsao, SsaoConfig, SsaoQuality, resolve_ssao, resolve_ssao_policy};
 pub use ssao_plugin::SsaoPlugin;
 pub use upload::{
-    upload_atlas_ring, upload_camera_ring, upload_csm_ring, upload_instance_models,
-    upload_light_table, upload_pair_out_slot, upload_pair_ring, upload_ray_shadow_ring,
-    upload_sdf_edit_list, upload_shadow_denoise_ring, upload_temporal_shadow_ring,
+    upload_atlas_ring, upload_camera_ring, upload_csm_ring, upload_instance_materials,
+    upload_instance_models, upload_light_table, upload_pair_out_slot, upload_pair_ring,
+    upload_ray_shadow_ring, upload_sdf_edit_list, upload_shadow_denoise_ring,
+    upload_temporal_shadow_ring,
 };
 #[cfg(feature = "hwrt")]
 pub use upload::{upload_mesh_ids, upload_motion_cam_ring, upload_prev_instance_models};

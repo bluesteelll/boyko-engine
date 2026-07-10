@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use boyko_math::{Affine3A, Mat3, Vec3};
 use boyko_render::gpu_transform3d::GpuTransform3D;
 use boyko_render::instance_model::InstanceModelCol;
-use boyko_render::mesh_draw::MeshRenderScratch;
+use boyko_render::mesh_draw::{MeshRenderScratch, PerInstanceMaterial};
 use boyko_render::{
     gbuffer_push_from_view, upload_camera_ring, upload_instance_models, upload_pair_out_slot,
     upload_pair_ring,
@@ -135,12 +135,12 @@ fn frame_helpers_allocate_zero_after_warmup() {
             GpuTransform3D::from_transform(&Transform::from_translation(Vec3::new(i as f32, 0.0, 0.0)))
         })
         .collect();
-    let inputs: Vec<(u32, &InstanceModelCol, Option<&GpuTransform3D>)> = records
+    let inputs: Vec<(u32, &InstanceModelCol, Option<&GpuTransform3D>, PerInstanceMaterial)> = records
         .iter()
         .enumerate()
         .map(|(i, r)| {
             let pair = if i % 4 == 0 { Some(&pairs[i]) } else { None };
-            ((i as u32) % 2, r, pair)
+            ((i as u32) % 2, r, pair, PerInstanceMaterial::default())
         })
         .collect();
     let meta = |_mesh: u32| Some((36u32, IndexType::Uint16));

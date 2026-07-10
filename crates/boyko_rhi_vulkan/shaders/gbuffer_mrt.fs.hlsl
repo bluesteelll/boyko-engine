@@ -41,10 +41,27 @@
 // All new I/O is gated under `#ifdef MOTION_VECTORS`, so the base compile is byte-frozen
 // (the `gbuffer_mrt.fs.spv` golden is untouched — the Rung-3b step-5 byte-identity gate).
 //
+// Asset-streaming plan F8 PER_INSTANCE_MATERIAL variant (opt-in, compiled with
+// `-D PER_INSTANCE_MATERIAL=1`): reads the flat per-instance `mat_id` varying the VS
+// forwards and packs IT (instead of the compile-time `DEFAULT_MESH_MATERIAL_ID`) into
+// `gNormal.BA`. The WHOLE `id_ba` statement is under `#ifdef/#else/#endif`, with the
+// `#else` arm CHARACTER-FOR-CHARACTER the base line, so the base (no-`-D`) compile
+// emits the identical token stream there — the `gbuffer_mrt.fs.spv` golden is untouched
+// (mirrors the MOTION_VECTORS discipline above; the two variants are mutually
+// exclusive — never compiled together this rung).
+//
+// F8+ (owner: material-drives-albedo-too): the SAME variant ALSO sources `gAlbedo`
+// from the flat per-instance `mat_albedo` varying (the material's LINEAR base_color)
+// instead of the interpolated vertex color, so a material genuinely controls what the
+// mesh looks like, not just its metallic/roughness (`mrr`). The WHOLE `albedo`
+// statement is under `#ifdef/#else/#endif` the same way, `#else` CHARACTER-FOR-
+// CHARACTER the pre-F8+ line — the base compile is untouched by construction.
+//
 // Compiled offline (hermetic build — no SDK at `cargo build` time) with:
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T ps_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 gbuffer_mrt.fs.hlsl -Fo gbuffer_mrt.fs.spv
 //   (MOTION_VECTORS variant: add `-D MOTION_VECTORS=1 -Fo gbuffer_mrt_mv.fs.spv`)
+//   (PER_INSTANCE_MATERIAL variant: add `-D PER_INSTANCE_MATERIAL=1 -Fo gbuffer_mrt_pm.fs.spv`)
 
 // OQ-r0-B: the mesh's 16-bit material id. The default material (id 0); see the DEVIATION
 // note in the header for why this is a constant, not a fragment push, in r0.
@@ -72,6 +89,10 @@ struct PsIn {
     float3 normal   : NORMAL;
     float3 eye_rel  : WORLDDIST;   // cam_eye.xyz - world position (perspective-correct)
     float  cam_mode : CAMMODE;     // 0 = ortho, 1 = perspective
+#ifdef PER_INSTANCE_MATERIAL
+    nointerpolation uint mat_id : MATID;
+    nointerpolation float3 mat_albedo : MATALBEDO;
+#endif
 #ifdef MOTION_VECTORS
     float4 cur_clip  : CURCLIP;    // mc_cur_view_proj  * cur_world  (marcher-aligned clip)
     float4 prev_clip : PREVCLIP;   // mc_prev_view_proj * prev_world (marcher-aligned clip)
@@ -129,11 +150,28 @@ float2 pack_material_id_ba(uint id) {
 PsOut main(PsIn input) {
     PsOut output;
     // gAlbedo: RAW LINEAR base color (saturated to the UNORM range), alpha 1.
+    // F8+ (owner: material-drives-albedo-too): the PER_INSTANCE_MATERIAL variant sources
+    // it from the per-instance material's `base_color` instead of the mesh vertex color,
+    // so a material genuinely controls what the mesh looks like (not just `mrr`). The
+    // `#else` arm is CHARACTER-FOR-CHARACTER the pre-F8+ line — the base (no-`-D`)
+    // compile is byte-frozen (the `gbuffer_mrt.fs.spv` golden is untouched).
+#ifdef PER_INSTANCE_MATERIAL
+    output.albedo = float4(saturate(input.mat_albedo), 1.0);
+#else
     output.albedo = float4(saturate(input.color.rgb), 1.0);
+#endif
     // gNormal: the octahedral world normal in RG + the packed 16-bit material id in BA.
     float3 n = normalize(input.normal);
     float2 oct = oct_encode(n);
+    // Asset-streaming plan F8: the PER_INSTANCE_MATERIAL variant packs the REAL
+    // per-instance id (already CPU OOB-clamped, F8 §4.2); the base compile keeps the
+    // compile-time default (the `#else` arm is CHARACTER-FOR-CHARACTER the pre-F8 line —
+    // the frozen-base guarantee by construction, F8 §3.2).
+#ifdef PER_INSTANCE_MATERIAL
+    float2 id_ba = pack_material_id_ba(input.mat_id);
+#else
     float2 id_ba = pack_material_id_ba(DEFAULT_MESH_MATERIAL_ID);
+#endif
     output.normal = float4(oct.x, oct.y, id_ba.x, id_ba.y);
     // gMaterial: shadow = 1, ao = 1, mask = 1 (SDF-lit -> Cook-Torrance in the resolve).
     // Analytic mesh shadow/AO via the SDF march is a charted follow-up, NOT P5.

@@ -1,7 +1,7 @@
-# goldens/PINS.toml — SINGLE SOURCE OF TRUTH for golden byte-identity pins.
+﻿# goldens/PINS.toml â€” SINGLE SOURCE OF TRUTH for golden byte-identity pins.
 #
 # Each pin records the SHA-256 of a dumped BMP plus the exact pipeline it was
-# blessed under. This file REPLACES the `58f6c6c3…` hash string that was formerly
+# blessed under. This file REPLACES the `58f6c6c3â€¦` hash string that was formerly
 # hand-copied across ~10 docs/*.md (miss one file = a silent stale gate).
 #
 # DO NOT hand-edit the sha256_* values. Update them ONLY via:
@@ -12,7 +12,7 @@
 #
 # Format is a flat, section-scoped TOML subset (see scripts\golden.ps1 :: Read-Pins).
 # `sha256_hwrt` may equal `sha256_software` (the HW-RT shadow path was made
-# byte-identical to software for this scene) or diverge — each leg is pinned on its
+# byte-identical to software for this scene) or diverge â€” each leg is pinned on its
 # own -Bless run, so -Check reports reality regardless.
 
 [grand_showcase]
@@ -34,4 +34,25 @@ sha256_hwrt     = "58f6c6c3d986f7a393ea53b01c5021e7360cf6f1b32bf9db05d4d8bb98999
 [grand_showcase.env]
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
+[grand_showcase_2mat]
+# Asset-streaming plan F8 â€” the FIRST scene exercising the PER_INSTANCE_MATERIAL raster
+# pipeline: five UV-spheres, one material each (default gray, red + green matte dielectrics, a
+# low-roughness gold metal, a blue metal); the material drives BOTH albedo (base_color) and
+# metallic/roughness. Blessed by the orchestrator (delegated visual oracle) after a sign-off on the
+# freshly-dumped BMP (two visibly distinct surfaces) â€” do NOT hand-edit the sha256_* values.
+crate           = "boyko-app"
+test_binary     = "grand_showcase_2mat"
+test_name       = "grand_showcase_2mat_screenshot_dump"
+bmp             = "D:\\tmp\\grand_showcase_2mat.bmp"
+width           = 512
+height          = 512
+sha256_software = "ac09f13801b79bc4314618ff5385b12739e515aaa735ddb0d838b306882b9e91"
+sha256_hwrt     = "ac09f13801b79bc4314618ff5385b12739e515aaa735ddb0d838b306882b9e91"
+
+[grand_showcase_2mat.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\grand_showcase_2mat.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"

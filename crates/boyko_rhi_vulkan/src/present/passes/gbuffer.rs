@@ -412,6 +412,12 @@ impl Renderer<'_> {
         let mv_active = scene.mesh_mv_active();
         #[cfg(not(feature = "hwrt"))]
         let mv_active = false;
+        // Asset-streaming plan F8: decide whether this frame uses the PER_INSTANCE_MATERIAL
+        // pipeline. Present on BOTH cfg legs (materials are device-agnostic, unlike `mv`) —
+        // `mesh_pm_active()` is the SINGLE source shared with the pipeline/set selection below.
+        // MV takes priority over PM (F8 §2.3): a temporal frame renders default materials
+        // (a graceful degradation, never a crash — the warn-once at `scene()` surfaces it).
+        let pm_active = scene.mesh_pm_active();
         // The 4th MRT: the motion_vec Δuv target (R16G16Sfloat), CLEAR to (0,0) / STORE — a pixel
         // with no mesh fragment holds zero motion (the marcher overwrites SDF pixels in step 5b).
         // Built unconditionally so it outlives `cmd_begin_rendering`; the driver reads it ONLY when
@@ -505,6 +511,9 @@ impl Renderer<'_> {
         // motion-cam @2) + this frame's MV bind group; else the base raster pipeline + the shared
         // instance bind group (byte-identical). Both pipelines carry `.pipeline` + `.layout`; the
         // push (88 B) + the per-batch `base_instance` re-push are UNCHANGED across both.
+        // Asset-streaming plan F8 §2.3: the `pm_active` arm is present on BOTH cfg legs
+        // (materials are device-agnostic); only the `mv_active` arm is cfg-gated. Priority
+        // mv > pm > base.
         let raster_pipeline = if mv_active {
             #[cfg(feature = "hwrt")]
             {
@@ -516,6 +525,10 @@ impl Renderer<'_> {
             {
                 scene.raster_pipeline
             }
+        } else if pm_active {
+            scene
+                .raster_pipeline_pm
+                .expect("invariant: pm_active implies raster_pipeline_pm is Some")
         } else {
             scene.raster_pipeline
         };
@@ -530,6 +543,10 @@ impl Renderer<'_> {
             {
                 scene.instance_bind_group
             }
+        } else if pm_active {
+            scene
+                .pm_bind_group
+                .expect("invariant: pm_active implies pm_bind_group is Some")
         } else {
             scene.instance_bind_group
         };
@@ -546,7 +563,13 @@ impl Renderer<'_> {
         // is bound before the draw to satisfy the VS's static `instances` reference:
         // `scene.instance_bind_group` (the shared N-instance SSBO — the 1-element identity
         // dummy on the legacy empty-slice arm, the gather-filled ring on the M3 instanced
-        // arm), bound ONCE for both arms. `vertex_offset`/`raster_viewport`/`raster_area`
+        // arm), bound ONCE for both arms. Asset-streaming plan F8: when `pm_active`, set 0
+        // instead binds the PM group's TWO bindings — `instances[s]` @0 (the SAME
+        // gather-filled model ring) + `instance_materials[s]` @1 (the gather-filled,
+        // OOB-clamped id ring); both buffers are live (boot-minted or F7/F8-grown) and, on
+        // any grow, `grow_instance_family_if_needed` rebound BOTH the PM set's @0 and @1
+        // against slot `s`'s fence-waited buffers (F8 §7i), so neither descriptor points at
+        // a freed buffer. `vertex_offset`/`raster_viewport`/`raster_area`
         // locals outlive the bracketed calls. On the legacy arm `draw(vertex_count, 1, 0, 0)`
         // reads the merged vertex buffer; on the M3 arm the batch loop re-pushes each batch's
         // `base_instance` (4 bytes at offset 80, in-range of the declared 88-byte VERTEX push)

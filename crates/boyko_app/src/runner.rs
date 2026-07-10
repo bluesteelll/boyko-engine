@@ -34,9 +34,9 @@ use boyko_render::{
     MeshRenderScratch, OrphanedMeshGpu, RayBackendPolicy, RayCaps, RenderEpoch, ResolvedCsm,
     ResolvedShadowAtlas, RetiredGpuBuffers, RhiContext, SdfEditStaging, ShadowDenoiseConfig,
     ShadowDenoiseMode, collect_sdf_edits, gbuffer_push_from_view, retire_deferred_frees,
-    upload_atlas_ring, upload_camera_ring, upload_csm_ring, upload_instance_models,
-    upload_light_table, upload_material_assets, upload_mesh_assets, upload_pair_out_slot,
-    upload_pair_ring, upload_sdf_edit_list,
+    upload_atlas_ring, upload_camera_ring, upload_csm_ring, upload_instance_materials,
+    upload_instance_models, upload_light_table, upload_material_assets, upload_mesh_assets,
+    upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
 };
 #[cfg(all(windows, feature = "hwrt"))]
 use boyko_render::{
@@ -754,6 +754,18 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 upload_instance_models(&token, &host.gpu.instance_rings[s], scratch);
             }
 
+            // 5b''. Asset-streaming plan F8: the gathered per-instance material-id lane —
+            //       gated on `any_non_default_material` (Principle 1: a default frame does
+            //       ZERO material-upload work).
+            if scratch.any_non_default_material() {
+                // SAFETY: `host.gpu.pm_instance_material_rings[s]` — same provenance
+                // contract as `instance_rings[s]` above (boot-minted or F8-grown in
+                // lockstep, live until teardown, the fenced slot `s == token.slot()`).
+                unsafe {
+                    upload_instance_materials(&token, &host.gpu.pm_instance_material_rings[s], scratch);
+                }
+            }
+
             // 5b'. The gathered interpolation PAIR ring + OUT-SLOT lane into slot
             //      `s` (refined-B) — UNCONDITIONAL every frame (plan D5; the
             //      fingerprint gate was KILLED). Both are empty on a pure-static
@@ -1141,6 +1153,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 #[cfg(feature = "hwrt")]
                 temporal_enabled,
                 material_table,
+                // Asset-streaming plan F8: the per-frame PER_INSTANCE_MATERIAL pipeline gate,
+                // read from the SAME `scratch` the instance-model upload above just read.
+                scratch.any_non_default_material(),
                 ctx,
             );
 

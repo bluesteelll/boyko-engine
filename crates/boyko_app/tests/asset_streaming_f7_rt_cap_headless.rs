@@ -4,6 +4,18 @@
 //! family on an RT device (E1 Option B; the TLAS packer's `instance_arrays`/backing/
 //! scratch are sized once for `INSTANCE_CAPACITY`, see design §3/§7.3).
 //!
+//! # Asset-streaming plan F8 fold-in
+//!
+//! `spawn_many` now gives every drawable a SHARED non-default material (previously the
+//! implicit default `MaterialHandle(0)`), so the over-capacity gather this test traps is
+//! material-bearing — `pm_instance_material_rings` shares the SAME `INSTANCE_CAPACITY`
+//! hard cap as `instance_rings` (F8 §1.2/§7b), so on an RT device the pre-existing
+//! `upload_instance_models` hard assert still fires FIRST (the runner calls it before
+//! `upload_instance_materials`, `runner.rs`), but this now also proves F8 did not
+//! introduce a bypass of the RT hard cap (e.g. a reordering that uploads materials
+//! before the model assert, which would have OOB-written the un-grown material ring
+//! instead of aborting cleanly).
+//!
 //! # Separate file (structural constraint)
 //!
 //! This scenario is EXPECTED TO PANIC — it cannot share an `App`/`#[test]` with
@@ -47,6 +59,7 @@
 use boyko_app::prelude::*;
 use boyko_ecs::prelude::*;
 use boyko_macros::Resource;
+use boyko_render::MaterialGpu;
 
 /// Frames left before the test requests exit. Mirrors
 /// `asset_streaming_f6_churn_headless.rs`'s / the sibling F7 file's budget idiom.
@@ -120,12 +133,19 @@ fn setup_minimal_scene(
     });
 }
 
-fn spawn_many(mut commands: Commands, cube: Res<SharedCubeMesh>) {
+fn spawn_many(mut commands: Commands, cube: Res<SharedCubeMesh>, mut materials: ResMut<Assets<MaterialGpu>>) {
+    // Asset-streaming plan F8 fold-in: a SHARED non-default material for every drawable —
+    // see this file's module doc for why the over-capacity gather this test traps must be
+    // material-bearing.
+    let pm_material = materials.add(MaterialGpu::new([0.9, 0.1, 0.1, 1.0], 1.0, 0.3, 0.5, [0.0, 0.0, 0.0], 0));
     for i in 0..DRAWABLES {
-        commands.spawn(MeshBundle::new(
-            cube.get(),
-            Transform::from_translation(Vec3::new((i % 64) as f32, (i / 64) as f32, 0.0)),
-        ));
+        commands.spawn(MeshBundle {
+            material: MaterialHandle(pm_material.index() as u16),
+            ..MeshBundle::new(
+                cube.get(),
+                Transform::from_translation(Vec3::new((i % 64) as f32, (i / 64) as f32, 0.0)),
+            )
+        });
     }
 }
 

@@ -34,8 +34,9 @@ use boyko_rhi_vulkan::compute::{
     INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS,
     LOCAL_SIZE_X, TILE_BOUND_BYTES, csm_depth_fs_spirv, csm_depth_vs_spirv, deferred_pbr_spirv,
     encode_edit_list, fullscreen_sample_fs_spirv, fullscreen_sample_vs_spirv, gbuffer_mrt_fs_spirv,
-    gbuffer_mrt_vs_spirv, interp_instances_spirv, punctual_depth_fs_spirv, punctual_depth_vs_spirv,
-    sdf_gbuffer_composite_spirv, sdf_probe_update_spirv, tile_grid_extent,
+    gbuffer_mrt_pm_fs_spirv, gbuffer_mrt_pm_vs_spirv, gbuffer_mrt_vs_spirv, interp_instances_spirv,
+    punctual_depth_fs_spirv, punctual_depth_vs_spirv, sdf_gbuffer_composite_spirv,
+    sdf_probe_update_spirv, tile_grid_extent,
 };
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::memory::BoundBuffer;
@@ -68,10 +69,10 @@ use boyko_sdf_math::SdfEdit;
 use boyko_render::{
     DDGI_UPDATE_UBO_BYTES, DdgiConfig, DdgiUpdateConfig, DdgiUpdateUbo, GI_MAX_RAYS, GPU_LIGHT_BYTES,
     GPU_LIGHT_WORDS, GPU_TRANSFORM3D_BYTES, GpuLight, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_BYTES,
-    LightHeaderGpu, LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialTable, RESOLVED_CSM_BYTES,
-    RESOLVED_DDGI_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, RETIRE_DELAY, ResolvedCsm, ResolvedShadowAtlas,
-    RetiredGpuBuffers, SHADOW_DIM, Vertex, ddgi_update_dispatch_groups, fill_fibonacci_ray_table,
-    pack_ddgi_update_ubo, resolve_ddgi,
+    LightHeaderGpu, LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialTable, PER_INSTANCE_MATERIAL_BYTES,
+    RESOLVED_CSM_BYTES, RESOLVED_DDGI_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, RETIRE_DELAY, ResolvedCsm,
+    ResolvedShadowAtlas, RetiredGpuBuffers, SHADOW_DIM, Vertex, ddgi_update_dispatch_groups,
+    fill_fibonacci_ray_table, pack_ddgi_update_ubo, resolve_ddgi,
 };
 #[cfg(feature = "hwrt")]
 use boyko_ecs::ecs::core::asset::Assets;
@@ -356,6 +357,36 @@ pub(crate) struct GpuSceneBundles {
     /// (`tlas`/`mv` both `Some`) this stays pinned at [`INSTANCE_CAPACITY`] forever — the W3
     /// runtime gate in [`Self::grow_instance_family_if_needed`] never grows it there.
     instance_capacity: [u32; FRAMES_IN_FLIGHT],
+    /// Asset-streaming plan F8: the PER_INSTANCE_MATERIAL gbuffer producer pipeline
+    /// (`gbuffer_mrt_pm.{vs,fs}` — the base pair recompiled with `-D
+    /// PER_INSTANCE_MATERIAL=1`). Built UNCONDITIONALLY at boot (materials are not
+    /// RT-specific — unlike `mv`, this is NOT `#[cfg(feature = "hwrt")]`). Bound instead
+    /// of `raster_pipeline` ONLY on a frame with `any_non_default_material` (and no MV —
+    /// MV takes priority, F8 §2.3). Its own 2-binding set-0 layout
+    /// ([`Self::pm_instance_material_layout`]): instances @0 (VERTEX) + instance_materials
+    /// @1 (VERTEX).
+    raster_pipeline_pm: VulkanGraphicsPipeline,
+    /// Asset-streaming plan F8: the 2-binding set-0 layout [`Self::raster_pipeline_pm`]
+    /// declares. A SEPARATE layout from [`Self::instance_layout`] (which is
+    /// single-binding). Both bindings VERTEX stage.
+    pm_instance_material_layout: VulkanBindGroupLayout,
+    /// Asset-streaming plan F8+ (owner: material-drives-albedo-too): the per-slot
+    /// instance-material SSBO ring ([`INSTANCE_CAPACITY`]
+    /// [`PerInstanceMaterial`](boyko_render::PerInstanceMaterial)s = 32 B each,
+    /// zero-seeded). The runner uploads `scratch.material_ids` into slot
+    /// `token.slot()` ONLY on an `any_non_default_material` frame (Principle 1 — no
+    /// OFF-path upload cost). Grows in
+    /// LOCKSTEP with [`Self::instance_rings`] via
+    /// [`Self::grow_instance_family_if_needed`] on the non-RT leg; HARD-CAPPED at
+    /// [`INSTANCE_CAPACITY`] on an RT device (the F7 W3 gate) — its index space is
+    /// IDENTICAL to `instance_rings`, so the two MUST share capacity at all times (a
+    /// divergent capacity would OOB the instant the instance ring grows).
+    pub(crate) pm_instance_material_rings: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// Asset-streaming plan F8: per-FIF bind groups against
+    /// [`Self::pm_instance_material_layout`]: slot `i` binds `{ instance_rings[i] @0,
+    /// pm_instance_material_rings[i] @1 }`. The recorder binds slot `s` at set 0 when the
+    /// PM pipeline is selected.
+    pm_bind_groups: [VulkanBindGroup; FRAMES_IN_FLIGHT],
     /// The DEGENERATE legacy vertex buffer (6 identical vertices ⇒ zero-area ⇒
     /// no fragments): pass A's legacy draw target on empty-gather frames —
     /// mirrors the showcase's `showcase_quad_vertices` discipline.
@@ -706,6 +737,90 @@ impl GpuSceneBundles {
             },
         )
         .expect("invariant: mesh-MRT graphics pipeline create");
+
+        // ── Asset-streaming plan F8: the PER_INSTANCE_MATERIAL gbuffer producer
+        // pipeline — built UNCONDITIONALLY (materials are device-agnostic, unlike
+        // `mv`). Its own 2-binding set-0 layout: instances @0 (VERTEX, the SAME shared
+        // `instance_rings`) + instance_materials @1 (VERTEX, its own per-slot ring).
+        let pm_instance_material_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::VERTEX,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::VERTEX,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: PM instance-material bind-group layout create");
+        let pm_vs = RhiDevice::create_shader_module(device, gbuffer_mrt_pm_vs_spirv())
+            .expect("invariant: PM mesh-MRT vertex shader module create");
+        let pm_fs = RhiDevice::create_shader_module(device, gbuffer_mrt_pm_fs_spirv())
+            .expect("invariant: PM mesh-MRT fragment shader module create");
+        let raster_pipeline_pm = RhiDevice::create_graphics_pipeline(
+            device,
+            &GraphicsPipelineDesc {
+                vertex_module: &pm_vs,
+                vertex_entry: c"main",
+                fragment_module: &pm_fs,
+                fragment_entry: c"main",
+                color_formats: &[RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT],
+                depth_format: Some(Format::D32Sfloat),
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: Some(VertexBufferLayout { stride: 40, attributes: &attributes }),
+                push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
+                bind_group_layout: Some(&pm_instance_material_layout),
+                blend: None,
+                cull_mode: CullMode::None,
+                depth_bias: None,
+            },
+        )
+        .expect("invariant: PM mesh-MRT graphics pipeline create");
+        // SAFETY: both modules were created on `device` and are consumed by the pipeline
+        // create; each is destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, pm_fs);
+            RhiDevice::destroy_shader_module(device, pm_vs);
+        }
+        let pm_material_ring_bytes = (INSTANCE_CAPACITY * PER_INSTANCE_MATERIAL_BYTES) as u64;
+        let pm_instance_material_rings: [BoundBuffer; FRAMES_IN_FLIGHT] =
+            core::array::from_fn(|_| {
+                let b = RhiDevice::create_buffer(
+                    device,
+                    &BufferDesc {
+                        size: pm_material_ring_bytes,
+                        usage: BufferUsage::STORAGE,
+                        location: MemoryLocation::HostVisibleCoherent,
+                    },
+                )
+                .expect("invariant: PM instance-material SSBO ring slot create");
+                let mapped = RhiDevice::buffer_mapped_ptr(device, &b)
+                    .expect("invariant: host-visible PM instance-material SSBO is mapped");
+                zero_fill(mapped, pm_material_ring_bytes as usize);
+                b
+            });
+        let pm_bind_groups: [VulkanBindGroup; FRAMES_IN_FLIGHT] = core::array::from_fn(|i| {
+            RhiDevice::create_bind_group(
+                device,
+                &BindGroupDesc {
+                    layout: &pm_instance_material_layout,
+                    entries: &[
+                        BindGroupEntry::StorageBuffer { buffer: &instance_rings[i] },
+                        BindGroupEntry::StorageBuffer { buffer: &pm_instance_material_rings[i] },
+                    ],
+                },
+            )
+            .expect("invariant: PM instance-material bind group create")
+        });
 
         // ── The marcher: the 16-entry vocabulary layout + the compute pipeline
         // (bindings 0..=15, mirroring the showcase's `vocab_entries`).
@@ -1333,6 +1448,10 @@ impl GpuSceneBundles {
             #[cfg(feature = "hwrt")]
             mv,
             instance_capacity: [INSTANCE_CAPACITY as u32; FRAMES_IN_FLIGHT],
+            raster_pipeline_pm,
+            pm_instance_material_layout,
+            pm_instance_material_rings,
+            pm_bind_groups,
             vertex_buffer,
             marcher,
             vocab_layout,
@@ -1469,6 +1588,38 @@ impl GpuSceneBundles {
             rebind_storage_buffer(ctx, &self.instance_bind_groups[s], 0, &self.instance_rings[s]);
         }
 
+        // Asset-streaming plan F8 §1.2/§7i: the PM instance-material ring shares the SAME
+        // index space as `instance_rings` (`instance_materials[i]` names the SAME instance
+        // `instances[i]` does), so it MUST grow in lockstep — a divergent capacity would
+        // OOB the instant the instance ring grows. Rebind BOTH of `pm_bind_groups[s]`'s
+        // bindings (0 = the just-grown `instance_rings[s]`, 1 = the just-grown material
+        // ring): forgetting either leaves the PM set pointing at a freed/undersized buffer.
+        let new_pm_bytes = new_cap as u64 * PER_INSTANCE_MATERIAL_BYTES as u64;
+        let new_pm_ring = RhiDevice::create_buffer(
+            ctx,
+            &BufferDesc {
+                size: new_pm_bytes,
+                usage: BufferUsage::STORAGE,
+                location: MemoryLocation::HostVisibleCoherent,
+            },
+        )
+        .expect("invariant: grown PM instance-material SSBO ring slot create");
+        let pm_mapped = RhiDevice::buffer_mapped_ptr(ctx, &new_pm_ring)
+            .expect("invariant: host-visible grown PM instance-material SSBO is mapped");
+        // No seed (see this fn's doc): the runner's `upload_instance_materials` (gated on
+        // `any_non_default_material`) rewrites the whole lane this frame.
+        zero_fill(pm_mapped, new_pm_bytes as usize);
+        let old_pm_ring = core::mem::replace(&mut self.pm_instance_material_rings[s], new_pm_ring);
+        retired.push(old_pm_ring, epoch + RETIRE_DELAY);
+        // SAFETY: slot `s == token.slot()`'s fence was waited this frame (this fn's caller
+        // contract above) — `pm_bind_groups[s]`'s set is non-pending, so rewriting BOTH its
+        // bindings in place is sound. Binding 0 repoints to the SAME grown `instance_rings[s]`
+        // rebound above; binding 1 to the just-grown material ring.
+        unsafe {
+            rebind_storage_buffer(ctx, &self.pm_bind_groups[s], 0, &self.instance_rings[s]);
+            rebind_storage_buffer(ctx, &self.pm_bind_groups[s], 1, &self.pm_instance_material_rings[s]);
+        }
+
         // SAFETY: same fence contract as above — `interp.grow_slot`'s own precondition
         // (slot `s`'s fence was waited this frame) — reallocates `pairs[s]`/`out_slot[s]`
         // in lockstep and repoints ALL THREE of `interp_bg[s]`'s bindings, including
@@ -1561,6 +1712,12 @@ impl GpuSceneBundles {
         // boot-owned 1-slot stub; only slot 0 is ever registered this rung, so the
         // bound bytes are byte-identical to that stub.
         material_table: &'a MaterialTable,
+        // Asset-streaming plan F8 §2.2: `true` iff THIS gather scattered any non-default
+        // material id (`MeshRenderScratch::any_non_default_material`, read by the runner
+        // AFTER the gather). Gates `raster_pipeline_pm`/`pm_bind_group` below — `false` on
+        // every all-default scene (the goldens), so the recorder binds the FROZEN base
+        // pipeline (byte-identity by construction, F8 §2.4).
+        any_non_default_material: bool,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -1666,6 +1823,29 @@ impl GpuSceneBundles {
                     temporal_pipeline: self.shadow_temporal_pipeline.as_ref().map(|(p, _)| p),
                 }
             });
+
+        // Asset-streaming plan F8 §2.2 (MV>PM priority, finding 4): MV takes priority over PM
+        // (§2.3 below) — a material-bearing scene under temporal denoise silently renders
+        // default materials (the MV pipeline hardcodes id 0). This is a VALID combination (just
+        // degraded, never a crash: the MV FS writes an in-bounds id 0), so a WARN-ONCE surfaces
+        // the degradation without breaking a legitimate scene with a hard assert. The combined
+        // MV+PM variant is the tracked F8-mv follow-up.
+        #[cfg(feature = "hwrt")]
+        {
+            static WARNED_MV_OVER_PM: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if any_non_default_material
+                && temporal_enabled
+                && self.mv.is_some()
+                && !WARNED_MV_OVER_PM.swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                eprintln!(
+                    "boyko_app: F8: a material-bearing scene under temporal denoise renders \
+                     default materials (the MV pipeline hardcodes material id 0); the combined \
+                     MV+PM variant is the tracked F8-mv follow-up"
+                );
+            }
+        }
 
         GBufferScene {
             raster_pipeline: &self.raster_pipeline,
@@ -1947,6 +2127,16 @@ impl GpuSceneBundles {
             // once per extent. `None` on a non-RT device.
             #[cfg(feature = "hwrt")]
             temporal_layout: self.shadow_temporal_pipeline.as_ref().map(|(_, l)| l),
+            // Asset-streaming plan F8: the PER_INSTANCE_MATERIAL gate + refs. `pm_enabled` is
+            // the per-frame `any_non_default_material` read; the pipeline/bind-group refs are
+            // `Some` iff `pm_enabled` (belt-and-suspenders — the PM pipeline/rings are ALWAYS
+            // built at boot, unlike `mv`). `false`/`None` on every all-default scene (the
+            // goldens) ⇒ the recorder binds the FROZEN base pipeline (byte-identity by
+            // construction, F8 §2.4). This frame's bind group is `pm_bind_groups[slot]` (the
+            // FENCED slot — its instance/material rings the runner just wrote/grew).
+            pm_enabled: any_non_default_material,
+            raster_pipeline_pm: any_non_default_material.then_some(&self.raster_pipeline_pm),
+            pm_bind_group: any_non_default_material.then(|| &self.pm_bind_groups[slot]),
         }
     }
 
@@ -2110,6 +2300,19 @@ impl GpuSceneBundles {
             RhiDevice::destroy_compute_pipeline(ctx, self.marcher);
             RhiDevice::destroy_bind_group_layout(ctx, self.vocab_layout);
             RhiDevice::destroy_graphics_pipeline(ctx, self.raster_pipeline);
+            // Asset-streaming plan F8: the PM resources bind the SHARED `instance_rings` (@0)
+            // plus their own instance-material ring (@1); torn down BEFORE the shared instance
+            // bind groups/rings below (bind groups first, then the pipeline/layout, then the
+            // owned buffers) — mirrors the MV teardown ordering. NOT `#[cfg(feature = "hwrt")]`
+            // (built unconditionally at boot).
+            for bg in self.pm_bind_groups {
+                RhiDevice::destroy_bind_group(ctx, bg);
+            }
+            RhiDevice::destroy_graphics_pipeline(ctx, self.raster_pipeline_pm);
+            RhiDevice::destroy_bind_group_layout(ctx, self.pm_instance_material_layout);
+            for b in self.pm_instance_material_rings {
+                RhiDevice::destroy_buffer(ctx, b);
+            }
             // HW-RT Rung 3b step 5a: the MESH motion-vector resources bind the SHARED
             // `instance_rings` (@0) plus their own prev-instance + motion-cam UBO rings; torn down
             // BEFORE the shared instance bind groups/rings below (bind groups first, then the

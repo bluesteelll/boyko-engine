@@ -36,7 +36,7 @@ use crate::shadow_denoise_config::{
     ResolvedTemporalShadow,
 };
 use crate::gpu_transform3d::GPU_TRANSFORM3D_BYTES;
-use crate::mesh_draw::MeshRenderScratch;
+use crate::mesh_draw::{MeshRenderScratch, PER_INSTANCE_MATERIAL_BYTES};
 #[cfg(feature = "hwrt")]
 use crate::motion_cam::{MOTION_CAM_UBO_BYTES, MotionCam};
 use crate::view::composite_from_view;
@@ -190,6 +190,72 @@ pub unsafe fn upload_instance_models(
     // finished its GPU reads; the sibling frame binds the other slot) —
     // race-free, lock-free. `bytes` is the scratch's own heap buffer, a
     // distinct non-overlapping region.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+    }
+}
+
+/// Asset-streaming plan F8+ (owner: material-drives-albedo-too): uploads the gathered
+/// per-instance [`MeshRenderScratch::material_ids`] lane (id + `base_color`, a
+/// [`PerInstanceMaterial`](crate::mesh_draw::PerInstanceMaterial) per instance) into ONE
+/// instance-material-SSBO ring slot — ONE contiguous `bytemuck` memcpy, zero staging,
+/// zero allocation (mirrors [`upload_instance_models`]'s discipline exactly).
+///
+/// Called ONLY on a frame with [`MeshRenderScratch::any_non_default_material`] (Principle 1 —
+/// a default frame does ZERO material-upload work); the caller (the runner) is responsible for
+/// that gate. The lane is index-aligned with the instance ring (`instance_materials[i]` names
+/// the SAME instance `instances[i]` does), so it shares the instance ring's growth/cap
+/// discipline (asset-streaming plan F8 §1.2): grown in lockstep by
+/// `GpuSceneBundles::grow_instance_family_if_needed` on the non-RT leg, hard-capped at
+/// `INSTANCE_CAPACITY` on an RT device (the F7 W3 gate).
+///
+/// # Panics
+///
+/// Panics if the gathered lane exceeds the slot's capacity — the SAME hard overflow discipline
+/// as [`upload_instance_models`] (the F7 C3 discipline: a live overflow on an RT device's hard
+/// cap must ABORT, never OOB-write).
+///
+/// # Safety
+///
+/// * `ring_slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at least
+///   `ring_slot.size` valid, persistently-mapped bytes.
+/// * `ring_slot` is the FENCED slot's buffer — `pm_instance_material_rings[token.slot()]` (the
+///   same token/slot contract as [`upload_instance_models`]).
+pub unsafe fn upload_instance_materials(
+    token: &FrameWriteToken,
+    ring_slot: &BoundBuffer,
+    scratch: &MeshRenderScratch,
+) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    if scratch.material_ids.is_empty() {
+        return;
+    }
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.material_ids.as_read_slice());
+    assert!(
+        bytes.len() as u64 <= ring_slot.size,
+        "instance-material ring overflow: {} gathered material payloads ({} bytes) exceed the \
+         {}-instance ({}-byte) slot (asset-streaming plan F7 W3: an RT device hard-caps the \
+         whole instance family at INSTANCE_CAPACITY — the material ring shares that cap; reduce \
+         the scene's simultaneous drawable count or raise the boot INSTANCE_CAPACITY)",
+        scratch.material_ids.len(),
+        bytes.len(),
+        ring_slot.size / PER_INSTANCE_MATERIAL_BYTES as u64,
+        ring_slot.size
+    );
+
+    let mapped = ring_slot
+        .mapped
+        .expect("invariant: the instance-material ring slot is host-visible mapped");
+    // SAFETY: per this fn's contract `mapped` targets >= `ring_slot.size` valid mapped
+    // host-coherent bytes, and `bytes.len() <= ring_slot.size` is hard-asserted above — the
+    // write is in-bounds. The borrowed `FrameWriteToken` + the slot-identity contract prove
+    // this slot's in-flight fence was waited THIS frame (the slot's previous occupant finished
+    // its VERTEX reads of the material SSBO; the sibling frame binds the other slot) —
+    // race-free, lock-free. `bytes` is the scratch's own heap buffer, a distinct
+    // non-overlapping region.
     unsafe {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
     }

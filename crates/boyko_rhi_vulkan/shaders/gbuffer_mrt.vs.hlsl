@@ -59,10 +59,23 @@
 // the base (no-define) compile is byte-frozen — the `gbuffer_mrt.vs.spv` golden is
 // untouched (the Rung-3b step-5 byte-identity gate).
 //
+// Asset-streaming plan F8 PER_INSTANCE_MATERIAL variant (opt-in, compiled with
+// `-D PER_INSTANCE_MATERIAL=1`): reads a per-instance material PAYLOAD SSBO (binding 1,
+// VERTEX) at the SAME `pc.base_instance + instance_id` index the model-matrix arm
+// already uses, and forwards it flat (`nointerpolation`) to the fragment: the id, which
+// packs into `gNormal.BA` instead of the compile-time default id (unchanged from F8),
+// and (F8+, owner: material-drives-albedo-too) the material's `base_color`, which the
+// PM fragment sources `gAlbedo` from instead of the mesh vertex color. EVERYTHING new
+// is gated under `#ifdef PER_INSTANCE_MATERIAL`, so the base (no-define) compile is
+// byte-frozen — the `gbuffer_mrt.vs.spv` golden is untouched (mirrors the
+// MOTION_VECTORS discipline above; the two variants are mutually exclusive — never
+// compiled together this rung).
+//
 // Compiled offline (hermetic build — no SDK at `cargo build` time) with:
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T vs_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 gbuffer_mrt.vs.hlsl -Fo gbuffer_mrt.vs.spv
 //   (MOTION_VECTORS variant: add `-D MOTION_VECTORS=1 -Fo gbuffer_mrt_mv.vs.spv`)
+//   (PER_INSTANCE_MATERIAL variant: add `-D PER_INSTANCE_MATERIAL=1 -Fo gbuffer_mrt_pm.vs.spv`)
 
 struct PushConstants {
     float4x4 view_proj;        // perspective (or ortho) proj*view, column-major (was `mvp`)
@@ -101,6 +114,29 @@ struct InstanceModelCol {
 };
 #endif
 
+#ifdef PER_INSTANCE_MATERIAL
+// Asset-streaming plan F8+ (owner: material-drives-albedo-too): the per-instance
+// material PAYLOAD — the FINAL, already CPU OOB-clamped material slot (F8 §4.2) PLUS
+// that slot's LINEAR `base_color` (the Rust host mirror is
+// `boyko_render::mesh_draw::PerInstanceMaterial`; a `float4` cannot straddle a
+// 16-byte boundary under HLSL structured-buffer packing, so `id` immediately
+// following `base_color` and `_pad` filling the rest of the second 16-byte lane
+// produces the SAME 32-byte element stride host- and device-side).
+struct PerInstanceMaterial {
+    float4 base_color;
+    uint   id;
+    uint3  _pad;
+};
+// Set 0, binding 1 (VERTEX). Indexed IDENTICALLY to `instances` @0 — the SAME
+// `pc.base_instance + SV_InstanceID` expression the model-matrix arm already uses
+// (M3-proven), so `instance_materials[i]` always names the SAME instance `instances[i]`
+// does. Declared ENTIRELY under this `#ifdef`, so the base variant never references
+// binding 1 — its layout stays the single-SSBO gate (mutually exclusive with
+// MOTION_VECTORS's OWN binding-1 use above; the two variants are never compiled
+// together this rung).
+[[vk::binding(1, 0)]] StructuredBuffer<PerInstanceMaterial> instance_materials;
+#endif
+
 // Field DECLARATION order fixes the SPIR-V vertex-input locations DXC auto-assigns
 // (this codebase uses no explicit `[[vk::location]]`): position -> 0, color -> 1,
 // normal -> 2. The vertex BUFFER offsets are independent of this order and are bound by
@@ -117,6 +153,14 @@ struct VsOut {
     float3 normal   : NORMAL;       // per-vertex world normal, passed through to the fragment
     float3 eye_rel  : WORLDDIST;    // cam_eye.xyz - world position (perspective-correct interp)
     float  cam_mode : CAMMODE;      // 0 = ortho (use SV_Position.z), 1 = perspective (use eye_rel)
+#ifdef PER_INSTANCE_MATERIAL
+    // flat (per-primitive constant) — never interpolated, so every pixel of a triangle
+    // reads the SAME instance's material id.
+    nointerpolation uint mat_id : MATID;
+    // F8+ (owner: material-drives-albedo-too): the SAME instance's LINEAR base_color,
+    // flat like `mat_id` — the PM fragment's `gAlbedo` source.
+    nointerpolation float3 mat_albedo : MATALBEDO;
+#endif
 #ifdef MOTION_VECTORS
     // Marcher-aligned clip positions (NOT SV_Position — passed as perspective-correct
     // varyings so the fragment divides BOTH through the identical interpolation path;
@@ -179,6 +223,13 @@ VsOut main(VsIn input, uint instance_id : SV_InstanceID) {
         // cam_eye is constant across the primitive, so the default perspective-correct interp
         // of (cam_eye - worldpos) yields the true per-pixel (cam_eye - P) in the fragment.
         output.eye_rel = pc.cam_eye.xyz - input.position;
+#ifdef PER_INSTANCE_MATERIAL
+        // The PM pipeline never binds an empty (legacy, merged-draw) mesh_draw list
+        // (F8 §7a) — this arm's id/albedo are defined-but-unread placeholders, kept
+        // only so `mat_id`/`mat_albedo` are initialized on every path.
+        output.mat_id = 0u;
+        output.mat_albedo = float3(0.0, 0.0, 0.0);
+#endif
 #ifdef MOTION_VECTORS
         // The merged-draw arm has no per-instance model, so this geometry is static in world
         // space (`input.position` IS the world position — `mul(view_proj, p)` above). Motion
@@ -214,6 +265,14 @@ VsOut main(VsIn input, uint instance_id : SV_InstanceID) {
             float3x3 nm = transpose(inverse3x3(m3));
             output.normal = mul(nm, input.normal);
         }
+#ifdef PER_INSTANCE_MATERIAL
+        // Indexed IDENTICALLY to `instances[pc.base_instance + instance_id]` above (the
+        // SAME expression, M3-proven) — so `mat_id`/`mat_albedo` always name the SAME
+        // instance the model matrix does (F8 §7e).
+        PerInstanceMaterial pm = instance_materials[pc.base_instance + instance_id];
+        output.mat_id = pm.id;
+        output.mat_albedo = pm.base_color.xyz;
+#endif
 #ifdef MOTION_VECTORS
         // Per-object motion: read the SAME instance slot from the PREVIOUS-frame model ring
         // and place `input.position` in last frame's world space. `world` (above) is this

@@ -68,7 +68,7 @@ use crate::instance_model::InstanceModelCol;
 use crate::light::{LightTableDirty, LightingConfig};
 use crate::mesh::MeshGpu;
 use crate::mesh_assets::MeshAssetsExt;
-use crate::mesh_draw::{DrawBatch, MeshRenderScratch};
+use crate::mesh_draw::{DrawBatch, MeshRenderScratch, PerInstanceMaterial};
 
 /// The reused per-frame shadow-caster gather scratch (CSM Inc 2) — a SEPARATE
 /// [`Resource`] from the main [`MeshRenderScratch`](crate::mesh_draw::MeshRenderScratch)
@@ -190,7 +190,10 @@ pub fn gather_shadow_casters(
             Some((m.index_count, m.index_type))
         },
         // slot resolved by index; staleness is caught by validate_asset_refs earlier this frame (apply→validate→gather)
-        || q.iter().map(|(h, col)| (h.0, col, None)),
+        // The caster gather has no material dimension (the CSM depth pass reads only
+        // `.batches`/`.ring`, never `.material_ids`) — a constant default payload feeds the
+        // shared gather core's material lane inertly (asset-streaming plan F8+).
+        || q.iter().map(|(h, col)| (h.0, col, None, PerInstanceMaterial::default())),
     );
 }
 
@@ -304,7 +307,9 @@ mod tests {
     /// (casters have no interpolation pair), so every row takes the `None` branch.
     fn gather_casters(scratch: &mut CsmCasterScratch, mesh_count: usize, rows: &[Row]) {
         scratch.0.gather_mixed_into(mesh_count, meta, || {
-            rows.iter().filter(|r| r.is_caster).map(|r| (r.mesh_id, &r.col, None))
+            rows.iter()
+                .filter(|r| r.is_caster)
+                .map(|r| (r.mesh_id, &r.col, None, PerInstanceMaterial::default()))
         });
     }
 
@@ -413,7 +418,9 @@ mod tests {
 
         // The same inputs through the foundation's unified gather directly (no filter).
         let mut main = MeshRenderScratch::default();
-        main.gather_mixed_into(2, meta, || rows.iter().map(|r| (r.mesh_id, &r.col, None)));
+        main.gather_mixed_into(2, meta, || {
+            rows.iter().map(|r| (r.mesh_id, &r.col, None, PerInstanceMaterial::default()))
+        });
 
         assert_eq!(casters.batch_count(), main.batch_count());
         assert_eq!(casters.batches(), main.batches.as_read_slice());
