@@ -41,3 +41,6 @@ boyko-input = { path = "../boyko_input" }
 # never touches the pool directly — it is reached only via the `App`/`Schedule`
 # API in the integration tests.
 boyko-threadpool = { path = "../boyko_threadpool" }
+# Property-based test framework (asset-streaming plan F6): the
+# `DeferredFree::drain_ready` fence-gate oracle in `asset_refs.rs`.
+proptest.workspace = true

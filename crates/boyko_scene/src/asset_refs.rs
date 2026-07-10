@@ -169,6 +169,31 @@ impl DeferredFree {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Moves every entry with `retire_frame <= epoch` out of the queue and
+    /// into `out` (cleared first), preserving enqueue (FIFO) order; entries
+    /// not yet fence-safe stay queued (asset-streaming plan F6: the
+    /// fence-gate). `out` is a caller-owned, host-parked scratch buffer
+    /// reused every frame — zero steady-state allocation on the churn-free
+    /// (golden) path, where this is called on an already-empty queue and
+    /// returns immediately.
+    pub fn drain_ready(&mut self, epoch: u64, out: &mut Vec<FreeEntry>) {
+        out.clear();
+        let mut i = 0;
+        while i < self.entries.len() {
+            if self.entries[i].retire_frame <= epoch {
+                out.push(self.entries[i]);
+                // `FreeEntry` is `Copy` and the queue is churn-small (bounded
+                // by refcount zero-crossings per fence window) — an
+                // order-preserving `remove` (not `swap_remove`) keeps `out`
+                // in FIFO order, which the mesh/material retire passes rely
+                // on for no particular reason today but is cheap to keep.
+                self.entries.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -202,5 +227,184 @@ mod tests {
         assert!(!free.is_empty());
         assert_eq!(free.entries().len(), 1);
         assert_eq!(free.entries()[0].slot, 3);
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // `DeferredFree::drain_ready` — the F6 fence-gate. A row stamped
+    // `retire_frame = N` must NEVER drain for any epoch `M < N`, MUST drain
+    // at `M == N` (the fence-gate proof's own boundary — `retire_deferred_frees`
+    // never calls this with `M < N` for a real row, but the horizon check
+    // itself must be `<=`, not `<`, or a real caller would wait one frame
+    // longer than the proof requires), and enqueue order (FIFO) is preserved
+    // in `out`.
+    // ════════════════════════════════════════════════════════════════════
+
+    fn entry(slot: u32, retire_frame: u64) -> FreeEntry {
+        FreeEntry { kind: AssetRefKind::Mesh, slot, retire_frame }
+    }
+
+    /// A row stamped `retire_frame = N` must NOT drain for any `epoch < N` —
+    /// the CPU-side half of the fence-gate proof (`retire_deferred_frees`'s
+    /// doc): draining early would free a resource a submit made before the
+    /// horizon could still reference.
+    #[test]
+    fn drain_ready_does_not_drain_an_entry_below_its_retire_frame() {
+        let mut free = DeferredFree::default();
+        free.push(entry(7, 10));
+        let mut out = Vec::new();
+
+        free.drain_ready(9, &mut out);
+
+        assert!(out.is_empty(), "epoch 9 < retire_frame 10 must not drain the entry");
+        assert_eq!(free.entries().len(), 1, "the entry must remain queued");
+        assert_eq!(free.entries()[0].slot, 7);
+    }
+
+    /// A row stamped `retire_frame = N` MUST drain the instant `epoch == N` —
+    /// the fence-gate's own boundary is inclusive (`<=`), not exclusive.
+    #[test]
+    fn drain_ready_drains_an_entry_exactly_at_its_retire_frame() {
+        let mut free = DeferredFree::default();
+        free.push(entry(7, 10));
+        let mut out = Vec::new();
+
+        free.drain_ready(10, &mut out);
+
+        assert_eq!(out.len(), 1, "epoch == retire_frame must drain the entry");
+        assert_eq!(out[0].slot, 7);
+        assert!(free.is_empty(), "a drained entry must leave the queue");
+    }
+
+    /// A row stamped `retire_frame = N` also drains for any `epoch > N` (a
+    /// missed/late drain call, e.g. a frame-index gap, must not strand it
+    /// forever — the horizon is a MINIMUM, not an exact match).
+    #[test]
+    fn drain_ready_drains_an_entry_past_its_retire_frame() {
+        let mut free = DeferredFree::default();
+        free.push(entry(7, 10));
+        let mut out = Vec::new();
+
+        free.drain_ready(999, &mut out);
+
+        assert_eq!(out.len(), 1, "epoch > retire_frame must still drain the entry");
+        assert!(free.is_empty());
+    }
+
+    /// Mixed horizons: only the ready entries drain, FIFO (enqueue) order is
+    /// preserved in `out`, and the not-yet-ready entries stay queued in their
+    /// original relative order — `retire_deferred_frees`'s single drain call
+    /// per frame must never reorder or skip a still-pending row.
+    #[test]
+    fn drain_ready_preserves_fifo_order_and_leaves_not_ready_entries_queued() {
+        let mut free = DeferredFree::default();
+        // Enqueue order: slot 1 (ready), slot 2 (not ready), slot 3 (ready),
+        // slot 4 (not ready), slot 5 (ready).
+        free.push(entry(1, 5));
+        free.push(entry(2, 20));
+        free.push(entry(3, 5));
+        free.push(entry(4, 100));
+        free.push(entry(5, 5));
+        let mut out = Vec::new();
+
+        free.drain_ready(5, &mut out);
+
+        assert_eq!(
+            out.iter().map(|e| e.slot).collect::<Vec<_>>(),
+            vec![1, 3, 5],
+            "drained entries must preserve FIFO (enqueue) order"
+        );
+        assert_eq!(
+            free.entries().iter().map(|e| e.slot).collect::<Vec<_>>(),
+            vec![2, 4],
+            "not-yet-ready entries must remain queued in their original relative order"
+        );
+    }
+
+    /// `out` is cleared BEFORE being populated — a caller-owned, host-parked
+    /// scratch buffer reused every frame must never leak a PRIOR frame's
+    /// drained entries into the current frame's result.
+    #[test]
+    fn drain_ready_clears_out_before_populating() {
+        let mut free = DeferredFree::default();
+        free.push(entry(9, 1));
+        let mut out = vec![entry(999, 0), entry(998, 0)];
+
+        free.drain_ready(1, &mut out);
+
+        assert_eq!(
+            out.iter().map(|e| e.slot).collect::<Vec<_>>(),
+            vec![9],
+            "out must hold ONLY this call's drained entries, not a prior frame's leftovers"
+        );
+    }
+
+    /// Edge case: draining an already-empty queue is a no-op that also
+    /// clears `out` — the O(1) golden-scene early-out path
+    /// `retire_deferred_frees` relies on (a scene that never lets an asset's
+    /// refcount reach zero never enqueues anything).
+    #[test]
+    fn drain_ready_on_an_empty_queue_clears_out_and_does_nothing() {
+        let mut free = DeferredFree::default();
+        let mut out = vec![entry(1, 0)];
+
+        free.drain_ready(1_000_000, &mut out);
+
+        assert!(out.is_empty(), "draining an empty queue must still clear a stale `out`");
+        assert!(free.is_empty());
+    }
+
+    /// proptest oracle: for ANY sequence of `(slot, retire_frame)` pushes and
+    /// ANY probe `epoch`, `drain_ready` must (1) drain exactly the entries
+    /// with `retire_frame <= epoch`, in their original enqueue order, and (2)
+    /// leave exactly the entries with `retire_frame > epoch` queued, also in
+    /// their original relative order. The fence-gate's core safety property —
+    /// no entry ever drains before its horizon — proven over a wide,
+    /// randomized span of horizons and epochs, not just the hand-picked cases
+    /// above.
+    mod drain_ready_proptest {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+            #[test]
+            fn drain_ready_matches_the_retire_frame_le_epoch_model(
+                retire_frames in proptest::collection::vec(0u64..50, 0..64),
+                epoch in 0u64..50,
+            ) {
+                let mut free = DeferredFree::default();
+                for (i, &rf) in retire_frames.iter().enumerate() {
+                    free.push(entry(i as u32, rf));
+                }
+
+                let expected_drained: Vec<u32> = retire_frames
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &rf)| rf <= epoch)
+                    .map(|(i, _)| i as u32)
+                    .collect();
+                let expected_remaining: Vec<u32> = retire_frames
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &rf)| rf > epoch)
+                    .map(|(i, _)| i as u32)
+                    .collect();
+
+                let mut out = Vec::new();
+                free.drain_ready(epoch, &mut out);
+
+                prop_assert_eq!(
+                    out.iter().map(|e| e.slot).collect::<Vec<_>>(),
+                    expected_drained,
+                    "drained slots must be exactly {{retire_frame <= epoch}}, in enqueue order"
+                );
+                prop_assert_eq!(
+                    free.entries().iter().map(|e| e.slot).collect::<Vec<_>>(),
+                    expected_remaining,
+                    "remaining slots must be exactly {{retire_frame > epoch}}, in enqueue order"
+                );
+            }
+        }
     }
 }

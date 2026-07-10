@@ -31,11 +31,12 @@ use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
 #[cfg(windows)]
 use boyko_render::{
     CsmCasterScratch, DdgiCaps, MaterialGpu, MaterialId, MaterialTable, MeshAssetsExt, MeshGpu,
-    MeshRenderScratch, RayBackendPolicy, RayCaps, ResolvedCsm, ResolvedShadowAtlas,
-    RhiContext, SdfEditStaging, ShadowDenoiseConfig, ShadowDenoiseMode,
-    collect_sdf_edits, gbuffer_push_from_view, upload_atlas_ring, upload_camera_ring,
-    upload_csm_ring, upload_instance_models, upload_light_table, upload_material_assets,
-    upload_mesh_assets, upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
+    MeshRenderScratch, OrphanedMeshGpu, RayBackendPolicy, RayCaps, RenderEpoch, ResolvedCsm,
+    ResolvedShadowAtlas, RhiContext, SdfEditStaging, ShadowDenoiseConfig, ShadowDenoiseMode,
+    collect_sdf_edits, gbuffer_push_from_view, retire_deferred_frees, upload_atlas_ring,
+    upload_camera_ring, upload_csm_ring, upload_instance_models, upload_light_table,
+    upload_material_assets, upload_mesh_assets, upload_pair_out_slot, upload_pair_ring,
+    upload_sdf_edit_list,
 };
 #[cfg(all(windows, feature = "hwrt"))]
 use boyko_render::{
@@ -147,6 +148,11 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     app.world_mut().insert_non_send_resource(GpuDevice(ctx));
     app.world_mut()
         .insert_non_send_resource(Assets::<MeshGpu>::default());
+    // Asset-streaming plan F6: the fill-reject orphan teardown queue (Decision 4).
+    // NonSend (a `MeshGpu` orphan owns `!Send` RHI buffers) — drained every frame
+    // by `retire_deferred_frees` alongside `DeferredFree`, and at shutdown below.
+    app.world_mut()
+        .insert_non_send_resource(OrphanedMeshGpu::default());
     // Asset-system rung A1: `Assets<MaterialGpu>` is the CPU authority (a Resource,
     // the same generic asset-kernel table every future asset type shares);
     // `MaterialTable` is its GPU mirror (NonSend — it owns RHI buffers once
@@ -509,6 +515,12 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         let now = Instant::now();
         let dt = now - last;
         last = now;
+        // Asset-streaming plan F6 Decision 1/2: publish the fence clock BEFORE the
+        // ECS frame runs, so `apply_refcount_deltas` (inside `update_with_delta`)
+        // stamps every newly-`Retiring` row's `retire_frame` from THIS frame's
+        // epoch — read before this frame's own submit, matching the fence-gate
+        // proof (`retire_deferred_frees`'s doc).
+        *app.world_mut().resource_mut::<RenderEpoch>() = RenderEpoch(host.renderer.submission_epoch());
         app.update_with_delta(dt);
 
         // 3. `AppExit` check — after the frame completes, before the present.
@@ -533,6 +545,19 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             }
         };
         let s = token.slot();
+
+        // 4.5. Asset-streaming plan F6 Decision 2: the fence-gated deferred-free
+        // drain — MUST run after `wait_frame_in_flight` above (the fence-gate
+        // proof's precondition) and before any per-frame mesh-handle resolve
+        // below (the mesh buffer-ptr resolve, the hwrt TLAS gather). Reads the
+        // SAME epoch just published above `app.update_with_delta` (no new GPU
+        // submit occurred between the two reads).
+        retire_deferred_frees(
+            app.world_mut(),
+            ctx,
+            host.renderer.submission_epoch(),
+            &mut host.retire_scratch,
+        );
 
         // 5-pre. The R7 SDF edit list — the ONE-SHOT boot-static write (host plan R7).
         // The explicit post-`finish()` `collect_sdf_edits` (run in `run_windowed` above,
@@ -847,13 +872,22 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             let casters = world.resource::<CsmCasterScratch>();
             let caster_batches = casters.batches();
             let mut ci = 0usize;
-            for b in &scratch.batches {
+            for b in scratch.batches.as_read_slice() {
                 while ci < caster_batches.len() && caster_batches[ci].mesh_id < b.mesh_id {
                     ci += 1;
                 }
                 let casts_shadow =
                     ci < caster_batches.len() && caster_batches[ci].mesh_id == b.mesh_id;
-                let mesh = mesh_assets.mesh(MeshHandle(b.mesh_id));
+                // INVARIANT (asset-streaming plan F6 FIX-2): this resolve must NEVER
+                // dereference a non-Loaded slot. `scratch.batches` was gathered earlier
+                // THIS frame's `app.update_with_delta`, but `retire_deferred_frees` (run
+                // just before this block, host plan step 4.5) may have since retired a
+                // mesh whose carrier `validate_asset_refs` (a best-effort net, not a hard
+                // guarantee) failed to disable in time — `try_get` + a graceful skip
+                // makes that safe by construction, independent of validation timing.
+                let Some(mesh) = mesh_assets.try_get(MeshHandle(b.mesh_id)) else {
+                    continue;
+                };
                 draws.push(GBufferMeshDraw {
                     vertex_buffer: &mesh.vertex_buffer,
                     index_buffer: &mesh.index_buffer,
@@ -944,9 +978,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     .is_some_and(|cfg| cfg.enabled());
             // HW-RT rung R2a-3: TLAS arming — hwrt + an RT device + a non-empty gather. On an RT
             // device, first sync the frame-invariant BLAS-address table (a no-op unless the mesh
-            // asset table's `blas_generation` advanced — a BLAS never moves), then arm the per-frame
-            // pack + build. On a non-RT device (or hwrt OFF) `tlas_enabled` is `false` → the
-            // byte-identical OFF path (no pack, no build, no barrier).
+            // asset table's `install_epoch` advanced — asset-streaming plan F6: gated on install,
+            // not row-count growth, so a fence-gated retire+reuse cannot leave a stale, freed BLAS
+            // address behind), then arm the per-frame pack + build. On a non-RT device (or hwrt OFF)
+            // `tlas_enabled` is `false` → the byte-identical OFF path (no pack, no build, no barrier).
             #[cfg(feature = "hwrt")]
             let tlas_enabled = {
                 // Rung 2: fold the config-arbiter read into the TLAS gate. The
@@ -968,9 +1003,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     "invariant: a HardwareTri mesh-shadow cell implies an RT device (ray_query_enabled)"
                 );
                 // The frame-invariant BLAS-address sync runs under `ray_query_enabled()`
-                // REGARDLESS of `backend_hw` (boot-time setup — a BLAS never moves; a
-                // no-op unless `blas_generation` advanced). Only the per-frame TLAS
-                // BUILD is gated by `tlas_enabled`.
+                // REGARDLESS of `backend_hw` (boot-time setup; a no-op unless the mesh
+                // table's `install_epoch` advanced — F6). Only the per-frame TLAS BUILD
+                // is gated by `tlas_enabled`.
                 if ctx.ray_query_enabled() {
                     host.gpu.sync_tlas_blas_addr(ctx, mesh_assets);
                 }
@@ -1211,6 +1246,7 @@ fn teardown(app: &mut App, host: WindowHost, ctx: &VulkanContext) {
         frame,
         gpu,
         draw_scratch: _,
+        retire_scratch: _,
         composite_extent: _,
         light_uploaded_gen: _,
         swapchain,
@@ -1241,6 +1277,17 @@ fn teardown(app: &mut App, host: WindowHost, ctx: &VulkanContext) {
     //   - `GpuDevice`: the last world-resident `&'static` handle — no dangling
     //     `&'static` may remain in a live structure past this point.
     drop(app.world_mut().remove_non_send_resource::<RhiContext>());
+    // Asset-streaming plan F6: force-drain every residual `DeferredFree` entry +
+    // `OrphanedMeshGpu` orphan BEFORE the whole-table teardown below. The device
+    // is idle (step 1), which trivially satisfies (and exceeds) the per-resource
+    // fence precondition every other F6 destroy relies on, so `epoch = u64::MAX`
+    // forces every entry past its `retire_frame` gate regardless of how recently
+    // it was enqueued. This is REQUIRED, not cosmetic: `Assets::iter` (which
+    // `MeshAssetsExt::destroy` below collects its handles from) skips a
+    // `Retiring` row (F2: it is occupied-but-unreusable, not `Loaded`), so an
+    // un-drained `Retiring` mesh's device buffers would otherwise leak at
+    // shutdown.
+    retire_deferred_frees(app.world_mut(), ctx, u64::MAX, &mut Vec::new());
     if let Some(mut mesh_assets) = app.world_mut().remove_non_send_resource::<Assets<MeshGpu>>() {
         // SAFETY: the device is idle (step 1) so no in-flight submit references
         // any mesh buffer; `ctx` is the context they were created on; the

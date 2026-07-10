@@ -164,7 +164,7 @@ pub unsafe fn upload_instance_models(
     if scratch.ring.is_empty() {
         return;
     }
-    let bytes: &[u8] = bytemuck::cast_slice(scratch.ring.as_slice());
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.ring.as_read_slice());
     assert!(
         bytes.len() as u64 <= ring_slot.size,
         "instance ring overflow: {} gathered instances ({} bytes) exceed the \
@@ -238,7 +238,7 @@ pub unsafe fn upload_pair_ring(
     if scratch.pair_ring.is_empty() {
         return;
     }
-    let bytes: &[u8] = bytemuck::cast_slice(scratch.pair_ring.as_slice());
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.pair_ring.as_read_slice());
     assert!(
         bytes.len() as u64 <= slot_buffer.size,
         "pair ring overflow: {} gathered pairs ({} bytes) exceed the {}-pair \
@@ -308,7 +308,7 @@ pub unsafe fn upload_pair_out_slot(
     if scratch.pair_out_slot.is_empty() {
         return;
     }
-    let bytes: &[u8] = bytemuck::cast_slice(scratch.pair_out_slot.as_slice());
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.pair_out_slot.as_read_slice());
     assert!(
         bytes.len() as u64 <= slot_buffer.size,
         "out-slot ring overflow: {} gathered out-slots ({} bytes) exceed the {}-slot \
@@ -375,7 +375,7 @@ pub unsafe fn upload_mesh_ids(
     if scratch.mesh_ids.is_empty() {
         return;
     }
-    let bytes: &[u8] = bytemuck::cast_slice(scratch.mesh_ids.as_slice());
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.mesh_ids.as_read_slice());
     assert!(
         bytes.len() as u64 <= slot.size,
         "mesh-id ring overflow: {} gathered mesh-ids ({} bytes) exceed the {}-slot \
@@ -444,7 +444,7 @@ pub unsafe fn upload_prev_instance_models(
     if scratch.prev_ring.is_empty() {
         return;
     }
-    let bytes: &[u8] = bytemuck::cast_slice(scratch.prev_ring.as_slice());
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.prev_ring.as_read_slice());
     assert!(
         bytes.len() as u64 <= ring_slot.size,
         "prev-instance ring overflow: {} gathered instances ({} bytes) exceed the \

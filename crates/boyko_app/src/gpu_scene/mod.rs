@@ -1829,9 +1829,10 @@ impl GpuSceneBundles {
     }
 
     /// HW-RT rung R2a-3: rewrites the frame-invariant BLAS-address table from `mesh_assets` IFF its
-    /// `blas_generation` advanced (a BLAS never moves — spec, so this is a no-op on the steady
-    /// per-frame path). No-op on a non-RT device (`self.tlas` absent). Called by the runner before
-    /// `scene()` on an RT device.
+    /// `install_epoch` advanced (asset-streaming plan F6 — a no-op on the steady, never-retiring
+    /// per-frame path; see [`TlasResources::sync_blas_addr`]'s doc for why row-count growth alone
+    /// cannot gate this). No-op on a non-RT device (`self.tlas` absent). Called by the runner
+    /// before `scene()` on an RT device.
     #[cfg(feature = "hwrt")]
     #[inline]
     pub(crate) fn sync_tlas_blas_addr(&self, device: &VulkanContext, mesh_assets: &Assets<MeshGpu>) {

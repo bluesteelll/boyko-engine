@@ -21,10 +21,15 @@
 //!    [`InstanceModelCol`] into `ring[offsets[m] + cursors[m]++]` — contiguous per
 //!    bucket, no overlap.
 //!
-//! Alloc-free after warmup: every `Vec` is `clear()`ed + re-filled (capacity
-//! persists); the per-mesh lanes grow POW2 keyed off the registry's mesh count (O2 —
-//! no fixed `MAX_MESHES` ceiling), and the ring grows POW2 keyed off the live
-//! instance count. The scratch is a reused [`Resource`], NOT an ad-hoc `Vec` (the
+//! Alloc-free after warmup: every lane is a
+//! [`ScratchColumn<T>`](boyko_ecs::ecs::core::component::scratch::ScratchColumn) — the
+//! same `ComponentPool`-backed, VM-native transient-scratch primitive the kernel's own
+//! solver scratch uses, NOT `std::Vec` (Principle 0) — `clear()`ed + re-filled every
+//! frame (the backing reservation persists). Each lane's ceiling is
+//! [`pool_reserve_rows`](boyko_ecs::ecs::constants::pool_reserve_rows) of its element
+//! size — the same VA-reservation-class (address-space-only, lazy-commit) ceiling every
+//! other kernel column uses, so there is no fixed `MAX_MESHES`/instance-count cap in
+//! practice. The scratch is a reused [`Resource`], NOT an ad-hoc buffer (the
 //! [`UiRenderScratch`](crate::ui::UiRenderScratch) precedent, Principle 5).
 //!
 //! # The per-instance mesh-id lane (M3 → HW-RT, TLAS-readiness)
@@ -37,12 +42,14 @@
 //! world affine, `mesh_ids[i]` = its BLAS) in O(1), with no need to reconstruct the
 //! mapping by range-searching the per-mesh [`batches`](MeshRenderScratch::batches).
 //! The lane is valid for DYNAMIC rows too (interpolation rewrites the affine on-GPU,
-//! never the mesh identity). It is a host-side `Vec<u32>` the acceleration-structure
+//! never the mesh identity). It is a host-side scratch column the acceleration-structure
 //! builder reads; the RASTER draw does NOT read it (it reads mesh identity from each
 //! batch's contiguous `base_instance` range), so the lane costs the raster path
 //! nothing but one scatter store per instance.
 
-use boyko_ecs::ecs::core::asset::Assets;
+use boyko_ecs::ecs::constants::pool_reserve_rows;
+use boyko_ecs::ecs::core::asset::{Assets, register_asset_layout};
+use boyko_ecs::ecs::core::component::scratch::ScratchColumn;
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
 use boyko_ecs::ecs::core::system::{NonSendRes, ResMut};
@@ -91,58 +98,66 @@ pub struct DrawBatch {
 /// The reused per-frame mesh-render scratch (Principle-0 storage — a [`Resource`],
 /// NOT a side store; the [`UiRenderScratch`](crate::ui::UiRenderScratch) precedent).
 ///
-/// Cleared-not-reallocated each frame (Principle 5): a steady-state frame only
-/// `clear()`s + re-fills + scatters in place, so there is ZERO steady-state
-/// allocation. The per-mesh lanes (`counts`/`offsets`/`cursors`) grow POW2 keyed off
-/// the registry's mesh count (O2 — no fixed `MAX_MESHES`); the instance `ring` grows
-/// POW2 keyed off the live instance count.
-#[derive(Resource, Default)]
+/// Every lane is a [`ScratchColumn<T>`] — the same `ComponentPool`-backed,
+/// address-stable, VM-native transient-scratch primitive the kernel's own solver
+/// scratch uses — NOT a `std::Vec` (Principle 0: durable/bulk per-frame data lives
+/// on the engine's own storage). Cleared-not-reallocated each frame (Principle 5):
+/// a steady-state frame only `clear()`s + re-fills + scatters in place through each
+/// lane's [`ScratchBuildView`](boyko_ecs::ecs::core::component::scratch::ScratchBuildView),
+/// so there is ZERO steady-state heap allocation. Each lane's reservation ceiling is
+/// [`pool_reserve_rows`] of its element size — the SAME VA-reservation-class ceiling
+/// (address space only, lazy-commit, effectively unbounded in practice) every other
+/// `ComponentPool`-backed kernel column uses, so this preserves the "no fixed
+/// `MAX_MESHES`/instance-count ceiling" property without a bespoke growth scheme.
+#[derive(Resource)]
 pub struct MeshRenderScratch {
     /// `counts[m]` — the number of visible instances of mesh `m` (pass 1). Length ==
-    /// the per-mesh-lane capacity (≥ mesh count); `clear()` + re-fill with zeros.
-    counts: Vec<u32>,
+    /// the per-mesh-lane length (≥ mesh count); `clear()` + re-fill with zeros.
+    counts: ScratchColumn<u32>,
     /// `offsets[m]` — mesh `m`'s `base_instance` (the prefix-sum of `counts`). Reused.
-    offsets: Vec<u32>,
+    offsets: ScratchColumn<u32>,
     /// `cursors[m]` — the scatter write-head within mesh `m`'s bucket (pass 2),
     /// `0..counts[m]`. A separate lane so `offsets` stays the immutable bucket base.
-    cursors: Vec<u32>,
+    cursors: ScratchColumn<u32>,
     /// The emitted [`DrawBatch`]es (one per non-empty mesh), in mesh-id order;
-    /// `clear()` + `extend`, never `Vec::new`.
-    pub batches: Vec<DrawBatch>,
+    /// `clear()` + sequential `push`, never a fresh allocation.
+    pub batches: ScratchColumn<DrawBatch>,
     /// The UNIFIED contiguous instance ring (refined-B) — EVERY visible instance's
     /// 48-byte [`InstanceModelCol`], STATIC and interpolated alike, in one
     /// draw-ordered buffer. Static rows are CPU-scattered here at gather time; dynamic
     /// (interpolated) rows' slots are left as-scattered on the CPU (stale bytes,
     /// overwritten on-GPU) and filled by the interp compute pre-pass via
-    /// [`pair_out_slot`](Self::pair_out_slot). The renderer uploads this whole slice
-    /// into ONE shared instance SSBO bound once for the whole batch list; on an interp
-    /// frame the compute overwrites only the dynamic slots before the raster VS reads.
-    /// `ring.len()` == the TOTAL drawable count. `clear()` + scatter, capacity persists.
-    pub ring: Vec<InstanceModelCol>,
+    /// [`pair_out_slot`](Self::pair_out_slot). The renderer uploads
+    /// [`as_read_slice()`](ScratchColumn::as_read_slice) into ONE shared instance SSBO
+    /// bound once for the whole batch list; on an interp frame the compute overwrites
+    /// only the dynamic slots before the raster VS reads. `ring.len()` == the TOTAL
+    /// drawable count. `clear()` + scatter, backing reservation persists.
+    pub ring: ScratchColumn<InstanceModelCol>,
     /// The parallel per-instance MESH-ID (BLAS-index) lane (M3 → HW-RT): `mesh_ids[i]`
     /// is [`ring`](Self::ring) instance `i`'s `MeshHandle.0`, scattered in lock-step with
     /// `ring` (`mesh_ids.len() == ring.len()`, every slot written exactly once). Makes the
     /// instance ring directly TLAS-consumable — instance `i` → (`ring[i]` affine,
     /// `mesh_ids[i]` BLAS) — without range-searching [`batches`](Self::batches). Valid for
     /// dynamic rows (mesh identity is interpolation-invariant). Host-side only (the
-    /// AS builder reads it; the raster draw does not). `clear()` + scatter, capacity persists.
-    pub mesh_ids: Vec<u32>,
+    /// AS builder reads it; the raster draw does not). `clear()` + scatter, backing
+    /// reservation persists.
+    pub mesh_ids: ScratchColumn<u32>,
     /// The contiguous interpolation-PAIR ring (Pillar B B1) — the 96-byte
     /// [`GpuTransform3D`] of EVERY DYNAMIC (interpolated) instance, in gather order.
     /// `pair_ring.len()` == the dynamic instance count (NOT the total — static rows
     /// contribute no pair). The B2 interpolation compute pre-pass reads this slice as
     /// its `TransformPair` input SSBO. Populated by
-    /// [`gather_mixed_into`](Self::gather_mixed_into); `clear()` + scatter, capacity
-    /// persists.
-    pub pair_ring: Vec<GpuTransform3D>,
+    /// [`gather_mixed_into`](Self::gather_mixed_into); `clear()` + scatter, backing
+    /// reservation persists.
+    pub pair_ring: ScratchColumn<GpuTransform3D>,
     /// The parallel SoA lane to [`pair_ring`](Self::pair_ring): `pair_out_slot[d]` is
     /// dynamic instance `d`'s gather-assigned offset into the unified
     /// [`ring`](Self::ring) — where the interp compute must scatter its interpolated
     /// model column (the shader's `OutSlot` binding). A SEPARATE lane, NOT a widened
     /// 96-byte pair record, keeping the pair ring's dense std430 layout intact
     /// (Principle 0). `pair_out_slot.len()` == `pair_ring.len()` == the dynamic count.
-    /// `clear()` + scatter, capacity persists.
-    pub pair_out_slot: Vec<u32>,
+    /// `clear()` + scatter, backing reservation persists.
+    pub pair_out_slot: ScratchColumn<u32>,
     /// HW-RT Rung 3b: the PREVIOUS-frame instance ring — the 48-byte
     /// [`InstanceModelCol`] each drawable had LAST frame, scattered INDEX-ALIGNED with
     /// [`ring`](Self::ring) (`prev_ring[i]` is `ring[i]`'s prev-frame model). Filled from
@@ -153,33 +168,70 @@ pub struct MeshRenderScratch {
     /// (binding 1) so a moving mesh's per-object motion vector is `cur_world −
     /// prev_world`. Written ONLY when the temporal denoiser is on (the raster MV variant);
     /// on every other frame it is filled but the prev-instance ring is bound by no set.
-    /// `clear()` + scatter, capacity persists (like `ring`). Host-side only.
+    /// `clear()` + scatter, backing reservation persists (like `ring`). Host-side only.
     #[cfg(feature = "hwrt")]
-    pub prev_ring: Vec<InstanceModelCol>,
-    /// HW-RT Rung 3b: the prev-ring scatter's write-head lane — a private clone of
+    pub prev_ring: ScratchColumn<InstanceModelCol>,
+    /// HW-RT Rung 3b: the prev-ring scatter's write-head lane — a private twin of
     /// `cursors` reset to 0 so [`gather_prev_ring_into`](Self::gather_prev_ring_into) can
     /// re-derive each drawable's ring slot (`offsets[m] + prev_cursors[m]++`) IDENTICALLY
     /// to the `ring` scatter, without disturbing `cursors`. Reused across frames
-    /// (`fit_len` re-zeros it), never `Vec::new` on the hot path.
+    /// (`fit_len` re-zeros it), never a fresh allocation on the hot path.
     #[cfg(feature = "hwrt")]
-    prev_cursors: Vec<u32>,
+    prev_cursors: ScratchColumn<u32>,
 }
 
-/// Grows `v` to at least `min_len` using POW2 capacity steps (O2 — no fixed ceiling),
-/// then sets its length to exactly `min_len` (the extra capacity stays reserved). The
-/// `[min_len .. ]` tail is left at `fill` after a grow; existing `[.. old_len]` is NOT
-/// reset here (the caller zeroes lanes explicitly where it matters). Alloc-free once
-/// the capacity covers `min_len`.
-#[inline]
-fn fit_len(v: &mut Vec<u32>, min_len: usize, fill: u32) {
-    if v.capacity() < min_len {
-        // POW2 reserve keyed off the requested length (O2): reserve up to the next
-        // power of two so repeated small growths amortize, never realloc per frame.
-        let target = min_len.next_power_of_two();
-        v.reserve(target - v.len());
+/// Constructs every lane fresh: registers ONE [`boyko_ecs`] `ComponentId` per
+/// DISTINCT element type (memoized process-wide by [`register_asset_layout`] — no
+/// `World`/registry handle needed here, mirroring the asset store's F1
+/// `AssetBacking::register_layout` convention) and sizes each lane's backing
+/// `ComponentPool` at [`pool_reserve_rows`] of its element size — the kernel's
+/// standard VA-reservation-class ceiling (address space only, lazy-commit), so
+/// `MeshRenderScratch::default()` stays a valid zero-argument constructor callable
+/// from `insert_resource(MeshRenderScratch::default())` / test setup exactly as
+/// before.
+impl Default for MeshRenderScratch {
+    fn default() -> Self {
+        let u32_id = register_asset_layout::<u32>(None);
+        let batch_id = register_asset_layout::<DrawBatch>(None);
+        let model_id = register_asset_layout::<InstanceModelCol>(None);
+        let pair_id = register_asset_layout::<GpuTransform3D>(None);
+
+        let u32_rows = pool_reserve_rows(std::mem::size_of::<u32>());
+        let batch_rows = pool_reserve_rows(std::mem::size_of::<DrawBatch>());
+        let model_rows = pool_reserve_rows(std::mem::size_of::<InstanceModelCol>());
+        let pair_rows = pool_reserve_rows(std::mem::size_of::<GpuTransform3D>());
+
+        Self {
+            counts: ScratchColumn::new(u32_id, u32_rows),
+            offsets: ScratchColumn::new(u32_id, u32_rows),
+            cursors: ScratchColumn::new(u32_id, u32_rows),
+            batches: ScratchColumn::new(batch_id, batch_rows),
+            ring: ScratchColumn::new(model_id, model_rows),
+            mesh_ids: ScratchColumn::new(u32_id, u32_rows),
+            pair_ring: ScratchColumn::new(pair_id, pair_rows),
+            pair_out_slot: ScratchColumn::new(u32_id, u32_rows),
+            #[cfg(feature = "hwrt")]
+            prev_ring: ScratchColumn::new(model_id, model_rows),
+            #[cfg(feature = "hwrt")]
+            prev_cursors: ScratchColumn::new(u32_id, u32_rows),
+        }
     }
-    v.clear();
-    v.resize(min_len, fill);
+}
+
+/// Grows `col` to exactly `min_len` live elements (a fresh `clear()` + fill-push):
+/// every slot in `[0, min_len)` holds `fill` until the caller's scatter overwrites
+/// it. Unlike the old `Vec`-backed POW2-reserve dance, there is no separate
+/// capacity-growth step to amortize — `col`'s backing `ComponentPool` already
+/// reserves a [`pool_reserve_rows`]-class VA ceiling at construction, so growing
+/// `len` within it is a cheap page-commit at worst (never a realloc/move; alloc-free
+/// once the working set's pages are resident from a prior frame).
+#[inline]
+fn fit_len(col: &mut ScratchColumn<u32>, min_len: usize, fill: u32) {
+    let mut view = col.build_view();
+    view.clear();
+    for _ in 0..min_len {
+        view.push(fill);
+    }
 }
 
 impl MeshRenderScratch {
@@ -221,8 +273,16 @@ impl MeshRenderScratch {
     /// another's batches.
     ///
     /// `mesh_count` is the registry's mesh count (sizes the per-mesh lanes, O2); `meta`
-    /// resolves a mesh id to its `(index_count, index_type)` for the emitted batch;
-    /// `iter_input` is an ITERATOR FACTORY the gather invokes TWICE (once to count, once
+    /// resolves a mesh id to its `(index_count, index_type)` for the emitted batch, or
+    /// `None` if the mesh no longer resolves (asset-streaming plan F6 FIX-2/FIX-C1: a
+    /// carrier whose mesh retired THIS frame, between `validate_asset_refs`'s
+    /// best-effort disable and this gather). A non-resolvable mesh's instances are
+    /// EXCLUDED from the ring/`mesh_ids`/prev-ring BY CONSTRUCTION (not merely
+    /// un-batched — `bucket_lanes_mixed` zeroes `counts[m]` for such a mesh, so the
+    /// scatter's `counts[m] == 0` skip covers it too): the hwrt TLAS packer
+    /// must never see a retired mesh's id in `mesh_ids`, so `count == ring.len()`
+    /// holds exactly, with no tail drop and no freed-BLAS read; `iter_input` is an
+    /// ITERATOR FACTORY the gather invokes TWICE (once to count, once
     /// to scatter) — each call returns a FRESH iterator over the same
     /// `(mesh_id, &InstanceModelCol, Option<&GpuTransform3D>)` source. The `Option` keys
     /// the row's kind: `None` ⇒ STATIC (the affine is real, CPU-scattered into `ring`),
@@ -241,11 +301,13 @@ impl MeshRenderScratch {
     /// row order), so the second pass's `offsets[m] + cursors[m]` assigns each row the
     /// SAME slot the count pass reserved for it.
     ///
-    /// After the call: `batches` holds one [`DrawBatch`] per non-empty mesh in mesh-id
-    /// order with the correct prefix-sum `base_instance`s; `ring` holds each mesh's
-    /// instances contiguously (`ring.len() == the total drawable count`, no overlap);
-    /// `pair_ring` / `pair_out_slot` hold the dynamic rows' pairs + ring slots
-    /// (`len() == the dynamic count`, in gather order).
+    /// After the call: `batches` holds one [`DrawBatch`] per non-empty, resolvable
+    /// mesh (mesh-id order, correct prefix-sum `base_instance`s); `ring` holds ONLY
+    /// resolvable meshes' instances, contiguously (`ring.len() == Σ instance_count`
+    /// over resolvable meshes — a non-resolvable mesh's instances are excluded
+    /// entirely, not merely un-batched, per FIX-C1 above); `pair_ring` /
+    /// `pair_out_slot` hold the dynamic rows' pairs + ring slots (`len() == the
+    /// dynamic count`, in gather order, non-resolvable rows excluded the same way).
     ///
     /// `debug_assert!`s catch an out-of-range `mesh_id` (a gather over a handle the
     /// registry never minted — a bundle/asset-binding bug) and pin the SoA-lane
@@ -253,7 +315,7 @@ impl MeshRenderScratch {
     /// range of the ring).
     pub fn gather_mixed_into<'a, M, F, I>(&mut self, mesh_count: usize, meta: M, iter_input: F)
     where
-        M: FnMut(u32) -> (u32, IndexType),
+        M: FnMut(u32) -> Option<(u32, IndexType)>,
         F: Fn() -> I,
         I: Iterator<Item = (u32, &'a InstanceModelCol, Option<&'a GpuTransform3D>)>,
     {
@@ -261,27 +323,62 @@ impl MeshRenderScratch {
         // only the small `mesh_id` key (the record tuple is never read on pass 1).
         let total = self.bucket_lanes_mixed(mesh_count, meta, &iter_input);
 
-        // The output lanes are temporarily taken so the scatter closure can borrow
-        // `&self.offsets` / `&mut self.cursors` disjointly from them.
-        let mut ring = std::mem::take(&mut self.ring);
-        let mut mesh_ids = std::mem::take(&mut self.mesh_ids);
-        let mut pair_ring = std::mem::take(&mut self.pair_ring);
-        let mut pair_out_slot = std::mem::take(&mut self.pair_out_slot);
-        ring.clear();
-        ring.resize(total as usize, InstanceModelCol::zeroed());
+        // Grow `ring`/`mesh_ids` to exactly `total` live elements: a clear + fill-push
+        // loop, byte-equivalent to the old `Vec::resize(total, fill)` — every slot in
+        // `[0, total)` is written here, then overwritten exactly once by the scatter
+        // below (no slot is ever READ between the two writes), so the fill value is
+        // never observed. `ScratchColumn` has no bulk "grow to N" op; a push-loop over
+        // its already-reserved (`pool_reserve_rows`-class) backing is the equivalent —
+        // never a realloc, at worst a page-commit already amortized from a prior frame.
+        {
+            let mut ring_view = self.ring.build_view();
+            ring_view.clear();
+            for _ in 0..total {
+                ring_view.push(InstanceModelCol::zeroed());
+            }
+        }
         // The per-instance mesh-id lane is scattered in lock-step with `ring` (every slot
         // written once, so the `0` fill is fully overwritten).
-        mesh_ids.clear();
-        mesh_ids.resize(total as usize, 0);
-        // The pair lanes are re-filled by `push` (their length is the dynamic count,
-        // not `total`); `clear()` keeps the reserved capacity (Principle 5).
-        pair_ring.clear();
-        pair_out_slot.clear();
         {
-            let offsets = &self.offsets;
-            let cursors = &mut self.cursors;
+            let mut mesh_ids_view = self.mesh_ids.build_view();
+            mesh_ids_view.clear();
+            for _ in 0..total {
+                mesh_ids_view.push(0u32);
+            }
+        }
+        // The pair lanes are re-filled by `push` (their length is the dynamic count,
+        // not `total`); `clear()` keeps the backing reservation (Principle 5).
+        self.pair_ring.build_view().clear();
+        self.pair_out_slot.build_view().clear();
+        {
+            // Disjoint field-projection borrows off `&mut self` / `&self` — each view
+            // borrows only its own field, so all seven coexist (the same discipline the
+            // prior `mem::take` dance achieved, without needing `ScratchColumn: Default`).
+            let mut ring_view = self.ring.build_view();
+            let ring = ring_view.as_mut_slice();
+            let mut mesh_ids_view = self.mesh_ids.build_view();
+            let mesh_ids = mesh_ids_view.as_mut_slice();
+            let mut pair_ring_view = self.pair_ring.build_view();
+            let mut pair_out_slot_view = self.pair_out_slot.build_view();
+            let offsets = self.offsets.as_read_slice();
+            let mut cursors_view = self.cursors.build_view();
+            let cursors = cursors_view.as_mut_slice();
+            let counts = self.counts.as_read_slice();
             for (mesh_id, col, maybe_pair) in iter_input() {
                 let m = mesh_id as usize;
+                // FIX-C1 (asset-streaming plan F6): a non-resolvable mesh's instances
+                // are EXCLUDED from the ring/`mesh_ids` here — not scattered into a
+                // reserved-but-unused slot. `bucket_lanes_mixed` already zeroed this
+                // mesh's count/offset span (`counts[m] == 0` iff the mesh had no
+                // instances OR its `meta` resolved to `None` this gather — the two
+                // are indistinguishable here, and don't need to be: both mean "skip"),
+                // so `total` (== `ring.len()`, sized above) already excludes them;
+                // this skip is what keeps a retired mesh's id out of `mesh_ids`
+                // entirely, so the hwrt TLAS packer (`BlasAddr[MeshIds[i]]`) never
+                // reads a freed BLAS device address.
+                if counts[m] == 0 {
+                    continue;
+                }
                 let slot = offsets[m] + cursors[m];
                 cursors[m] += 1;
                 // STATIC rows carry the real model column; DYNAMIC rows carry a
@@ -294,46 +391,57 @@ impl MeshRenderScratch {
                 // unconditionally for every slot (M3 → HW-RT TLAS-readiness).
                 mesh_ids[slot as usize] = mesh_id;
                 if let Some(pair) = maybe_pair {
-                    pair_ring.push(*pair);
-                    pair_out_slot.push(slot);
+                    pair_ring_view.push(*pair);
+                    pair_out_slot_view.push(slot);
                 }
             }
         }
         debug_assert_eq!(
-            ring.len(),
+            self.ring.len(),
             total as usize,
             "invariant: the unified ring holds exactly Σ instance_count instances"
         );
         debug_assert_eq!(
-            mesh_ids.len(),
-            ring.len(),
+            self.mesh_ids.len(),
+            self.ring.len(),
             "invariant: the per-instance mesh-id lane is parallel to the ring (one id per instance)"
         );
         debug_assert_eq!(
-            pair_ring.len(),
-            pair_out_slot.len(),
+            self.pair_ring.len(),
+            self.pair_out_slot.len(),
             "invariant: the pair ring and its out-slot lane are parallel (one entry per dynamic row)"
         );
         debug_assert!(
-            pair_out_slot.iter().all(|&s| (s as usize) < ring.len()),
+            self.pair_out_slot
+                .as_read_slice()
+                .iter()
+                .all(|&s| (s as usize) < self.ring.len()),
             "invariant: every dynamic out-slot indexes the unified ring in range"
         );
-        self.ring = ring;
-        self.mesh_ids = mesh_ids;
-        self.pair_ring = pair_ring;
-        self.pair_out_slot = pair_out_slot;
     }
 
-    /// The count → prefix-sum → batch-emit core of the unified gather (Decision 7).
+    /// The count → resolve → prefix-sum → batch-emit core of the unified gather
+    /// (Decision 7; asset-streaming plan F6 FIX-C1 adds the resolve step).
     ///
-    /// Fills `counts` (pass 1), `offsets` (each mesh's `base_instance`), zeroed
-    /// `cursors` (the scatter write-heads the caller advances), and `batches` (one
-    /// [`DrawBatch`] per non-empty mesh, mesh-id order). Returns `Σ instance_count` —
+    /// Fills `counts` (pass 1); then, per mesh (pass 2, AT MOST `mesh_count` calls
+    /// to `meta`, NEVER per-instance): resolves `meta(m)` for every mesh with a
+    /// non-zero count, and — on `None` — ZEROES `counts[m]` BEFORE the
+    /// prefix-sum runs, so a non-resolvable mesh contributes NOTHING to
+    /// `offsets`/`running` (its instances are excluded from the ring by
+    /// construction, not merely un-batched — see
+    /// [`gather_mixed_into`](Self::gather_mixed_into)'s scatter, which consults
+    /// `counts[m] == 0` per instance: the zeroing here IS the resolvability
+    /// signal, so no separate lane is needed). Fills `offsets` (each mesh's
+    /// `base_instance`), zeroed `cursors` (the scatter write-heads the caller
+    /// advances), and `batches` (one [`DrawBatch`] per resolvable non-empty mesh,
+    /// mesh-id order). Returns `Σ instance_count` over RESOLVABLE meshes only —
     /// the ring length the caller sizes its scatter to.
     ///
     /// `iter_input` is invoked ONCE here (the count pass); the caller invokes it a
     /// second time for the scatter. Only the small `mesh_id` key is touched — neither
-    /// the affine nor the `Option` pair is read on pass 1.
+    /// the affine nor the `Option` pair is read on pass 1. The resolve pass is
+    /// O(mesh_count), not O(instance_count) — `meta` is never called per-instance,
+    /// keeping the per-instance scatter a plain array index (`counts[m] == 0`).
     fn bucket_lanes_mixed<'a, M, F, I>(
         &mut self,
         mesh_count: usize,
@@ -341,14 +449,15 @@ impl MeshRenderScratch {
         iter_input: &F,
     ) -> u32
     where
-        M: FnMut(u32) -> (u32, IndexType),
+        M: FnMut(u32) -> Option<(u32, IndexType)>,
         F: Fn() -> I,
         I: Iterator<Item = (u32, &'a InstanceModelCol, Option<&'a GpuTransform3D>)>,
     {
         // --- Pass 1: count per mesh (touches only the small MeshHandle key). ---
         fit_len(&mut self.counts, mesh_count, 0);
         {
-            let counts = &mut self.counts;
+            let mut counts_view = self.counts.build_view();
+            let counts = counts_view.as_mut_slice();
             for (mesh_id, _col, _pair) in iter_input() {
                 debug_assert!(
                     (mesh_id as usize) < mesh_count,
@@ -358,18 +467,40 @@ impl MeshRenderScratch {
             }
         }
 
-        // --- Prefix-sum: offsets[m] = Σ counts[0..m] = mesh m's base_instance. Emit a
-        // DrawBatch per non-empty mesh (in mesh-id order). ---
+        // --- Resolve + prefix-sum: offsets[m] = Σ counts[0..m] = mesh m's
+        // base_instance (over RESOLVABLE meshes only). `meta` is called ONCE per
+        // non-empty mesh (never per-instance, asset-streaming plan F6 FIX-C1) —
+        // `None` zeroes `counts[m]` BEFORE it feeds `running`/`offsets`, so a
+        // non-resolvable mesh's instances are excluded from the ring by
+        // construction (the zeroed `counts[m]` IS the scatter's per-instance
+        // exclusion signal — `counts[m] == 0`, no separate lane needed). Emits a
+        // DrawBatch per resolvable non-empty mesh (in mesh-id order) — the SAME
+        // `meta` call drives both the batch emission and the exclusion, so there
+        // is exactly one skip mechanism.
         fit_len(&mut self.offsets, mesh_count, 0);
         fit_len(&mut self.cursors, mesh_count, 0);
-        self.batches.clear();
+        self.batches.build_view().clear();
         let mut running: u32 = 0;
+        // Disjoint field-projection borrows: `offsets`/`counts` (both `ScratchColumn<u32>`)
+        // and `batches` (`ScratchColumn<DrawBatch>`) are three DISTINCT fields of `self`, so
+        // their views coexist for the loop's duration exactly as the prior direct
+        // `self.offsets[m]` / `self.counts[m]` / `self.batches.push` field accesses did.
+        let mut offsets_view = self.offsets.build_view();
+        let offsets = offsets_view.as_mut_slice();
+        let mut counts_view = self.counts.build_view();
+        let counts = counts_view.as_mut_slice();
+        let mut batches_view = self.batches.build_view();
         for m in 0..mesh_count {
-            self.offsets[m] = running;
-            let c = self.counts[m];
-            if c != 0 {
-                let (index_count, index_type) = meta(m as u32);
-                self.batches.push(DrawBatch {
+            offsets[m] = running;
+            // A mesh with zero instances this frame needs no `meta` call — its
+            // resolvability is moot (nothing would be excluded either way).
+            let resolved = if counts[m] != 0 { meta(m as u32) } else { None };
+            if resolved.is_none() {
+                counts[m] = 0;
+            }
+            let c = counts[m];
+            if let Some((index_count, index_type)) = resolved {
+                batches_view.push(DrawBatch {
                     mesh_id: m as u32,
                     index_count,
                     index_type,
@@ -394,8 +525,10 @@ impl MeshRenderScratch {
     ///
     /// The slot arithmetic is `offsets[m] + prev_cursors[m]++` — the SAME `offsets` (this
     /// frame's prefix-sum) and the SAME per-mesh cursor advance the `ring` scatter used,
-    /// over the SAME query iteration order. So `prev_ring[slot]` lands in the SAME slot
-    /// `ring[slot]` did for that drawable — guaranteed by construction, not by luck. A
+    /// over the SAME query iteration order, INCLUDING the SAME `counts[m] == 0`
+    /// per-instance skip (asset-streaming plan F6 FIX-C1) — a row whose mesh `gather_mixed_into`
+    /// excluded from `ring` is excluded here too. So `prev_ring[slot]` lands in the SAME
+    /// slot `ring[slot]` did for that drawable — guaranteed by construction, not by luck. A
     /// `prev_cursors` lane (reset to 0 here) keeps `cursors` untouched.
     ///
     /// # Fallback (camera-only motion)
@@ -422,18 +555,37 @@ impl MeshRenderScratch {
     {
         let total = self.ring.len();
         // A fresh cursor lane sized to the current mesh-lane length, reset to 0 (reuses the
-        // reserved capacity — no per-frame alloc). `offsets.len()` is the mesh count the
+        // backing reservation — no per-frame alloc). `offsets.len()` is the mesh count the
         // affine gather just fitted.
         fit_len(&mut self.prev_cursors, self.offsets.len(), 0);
 
-        let mut prev_ring = std::mem::take(&mut self.prev_ring);
-        prev_ring.clear();
-        prev_ring.resize(total, InstanceModelCol::zeroed());
+        // Grow `prev_ring` to exactly `total` — same clear + fill-push equivalence as
+        // `gather_mixed_into`'s `ring` grow (every slot is written once here, then
+        // overwritten exactly once by the scatter below).
         {
-            let offsets = &self.offsets;
-            let cursors = &mut self.prev_cursors;
+            let mut prev_ring_view = self.prev_ring.build_view();
+            prev_ring_view.clear();
+            for _ in 0..total {
+                prev_ring_view.push(InstanceModelCol::zeroed());
+            }
+        }
+        {
+            let mut prev_ring_view = self.prev_ring.build_view();
+            let prev_ring = prev_ring_view.as_mut_slice();
+            let offsets = self.offsets.as_read_slice();
+            let mut cursors_view = self.prev_cursors.build_view();
+            let cursors = cursors_view.as_mut_slice();
+            let counts = self.counts.as_read_slice();
             for (mesh_id, curr, maybe_prev) in iter_input() {
                 let m = mesh_id as usize;
+                // FIX-C1 (asset-streaming plan F6): mirror `gather_mixed_into`'s skip
+                // EXACTLY — a non-resolvable mesh's instances never occupied a `ring`
+                // slot, so they must not occupy a `prev_ring` slot either. The
+                // index-alignment guarantee this fn depends on requires visiting the
+                // SAME rows, in the SAME order, with the SAME skip as the affine gather.
+                if counts[m] == 0 {
+                    continue;
+                }
                 let slot = (offsets[m] + cursors[m]) as usize;
                 cursors[m] += 1;
                 // A row with a prev column carries LAST frame's affine; a row without one
@@ -445,11 +597,10 @@ impl MeshRenderScratch {
             }
         }
         debug_assert_eq!(
-            prev_ring.len(),
+            self.prev_ring.len(),
             self.ring.len(),
             "invariant: the prev-instance ring is index-aligned with the current ring"
         );
-        self.prev_ring = prev_ring;
     }
 }
 
@@ -524,9 +675,14 @@ pub fn gather_mesh_draws(
     let mesh_count = mesh_assets.high_water();
     scratch.gather_mixed_into(
         mesh_count,
+        // INVARIANT (asset-streaming plan F6 FIX-2): never dereference a non-Loaded
+        // slot. `try_get` + `None` lets `gather_mixed_into` skip ONLY this bucket's
+        // batch (see its doc) — a graceful, construction-guaranteed skip that does
+        // not depend on `validate_asset_refs` (a best-effort net) having caught this
+        // mesh's retire in time.
         |mesh_id| {
-            let m = mesh_assets.mesh(MeshHandle(mesh_id));
-            (m.index_count, m.index_type)
+            let m = mesh_assets.try_get(MeshHandle(mesh_id))?;
+            Some((m.index_count, m.index_type))
         },
         // slot resolved by index; staleness is caught by validate_asset_refs earlier this frame (apply→validate→gather)
         || q.iter().map(|(h, col, pair)| (h.0, col, pair)),
@@ -565,9 +721,11 @@ pub fn gather_mesh_draws(
     let mesh_count = mesh_assets.high_water();
     scratch.gather_mixed_into(
         mesh_count,
+        // INVARIANT (asset-streaming plan F6 FIX-2): never dereference a non-Loaded
+        // slot — see the non-hwrt variant's comment above.
         |mesh_id| {
-            let m = mesh_assets.mesh(MeshHandle(mesh_id));
-            (m.index_count, m.index_type)
+            let m = mesh_assets.try_get(MeshHandle(mesh_id))?;
+            Some((m.index_count, m.index_type))
         },
         // slot resolved by index; staleness is caught by validate_asset_refs earlier this frame (apply→validate→gather)
         || q.iter().map(|(h, col, pair, _prev)| (h.0, col, pair)),
@@ -605,14 +763,16 @@ mod tests {
 
     /// A fake registry `meta`: every mesh `m` has `index_count = 6 * (m + 1)` and
     /// alternating index width (mesh 0 → Uint16, mesh 1 → Uint32, …) to exercise the
-    /// O3 mixed-width batch carry.
-    fn meta(mesh_id: u32) -> (u32, IndexType) {
+    /// O3 mixed-width batch carry. Always `Some` — these existing suites exercise the
+    /// "every mesh resolves" path; the F6 FIX-2 `None` (skipped-bucket) path is a
+    /// dedicated new suite (see the tester's list).
+    fn meta(mesh_id: u32) -> Option<(u32, IndexType)> {
         let width = if mesh_id.is_multiple_of(2) {
             IndexType::Uint16
         } else {
             IndexType::Uint32
         };
-        (6 * (mesh_id + 1), width)
+        Some((6 * (mesh_id + 1), width))
     }
 
     /// A distinct-per-instance interpolation pair so a misplaced scatter is
@@ -668,7 +828,7 @@ mod tests {
         assert_eq!(scratch.batch_count(), 2, "two distinct meshes => two batches");
 
         // Batch 0 = mesh A: base 0, 3 instances, Uint16 width, 6 indices.
-        let ba = scratch.batches[0];
+        let ba = scratch.batches.as_read_slice()[0];
         assert_eq!(ba.mesh_id, 0);
         assert_eq!(ba.base_instance, 0, "mesh A is the first bucket => base 0");
         assert_eq!(ba.instance_count, 3);
@@ -677,7 +837,7 @@ mod tests {
 
         // Batch 1 = mesh B: base == count(A) == 3 (NONZERO — the C1 proof), 2
         // instances, Uint32 width, 12 indices (O3 mixed width).
-        let bb = scratch.batches[1];
+        let bb = scratch.batches.as_read_slice()[1];
         assert_eq!(bb.mesh_id, 1);
         assert_eq!(bb.base_instance, 3, "mesh B's base == count(A) == 3 (NONZERO)");
         assert_eq!(bb.instance_count, 2);
@@ -685,7 +845,7 @@ mod tests {
         assert_eq!(bb.index_type, IndexType::Uint32);
 
         // Σ instance_count == total inputs.
-        let total: u32 = scratch.batches.iter().map(|b| b.instance_count).sum();
+        let total: u32 = scratch.batches.as_read_slice().iter().map(|b| b.instance_count).sum();
         assert_eq!(total, 5);
         assert_eq!(scratch.instance_count(), 5, "the ring holds every instance");
         // All-static ⇒ interp OFF (the pair lanes are empty ⇒ no dispatch).
@@ -698,14 +858,14 @@ mod tests {
         for ord in 0..3u32 {
             let slot = ba.base_instance + ord;
             assert_eq!(
-                scratch.ring[slot as usize], affine(0, ord),
+                scratch.ring.as_read_slice()[slot as usize], affine(0, ord),
                 "mesh A instance {ord} at ring slot {slot}"
             );
         }
         for ord in 0..2u32 {
             let slot = bb.base_instance + ord;
             assert_eq!(
-                scratch.ring[slot as usize], affine(1, ord),
+                scratch.ring.as_read_slice()[slot as usize], affine(1, ord),
                 "mesh B instance {ord} at ring slot {slot}"
             );
         }
@@ -737,14 +897,103 @@ mod tests {
         scratch.gather_mixed_into(3, meta, || inputs.iter().copied());
 
         assert_eq!(scratch.batch_count(), 2, "mesh 1 is empty => only 2 batches");
-        assert_eq!(scratch.batches[0].mesh_id, 0);
-        assert_eq!(scratch.batches[0].base_instance, 0);
-        assert_eq!(scratch.batches[0].instance_count, 2);
+        let batches = scratch.batches.as_read_slice();
+        assert_eq!(batches[0].mesh_id, 0);
+        assert_eq!(batches[0].base_instance, 0);
+        assert_eq!(batches[0].instance_count, 2);
         // Mesh 2's base == count(0) + count(1) == 2 + 0 == 2.
-        assert_eq!(scratch.batches[1].mesh_id, 2);
-        assert_eq!(scratch.batches[1].base_instance, 2);
-        assert_eq!(scratch.batches[1].instance_count, 1);
+        assert_eq!(batches[1].mesh_id, 2);
+        assert_eq!(batches[1].base_instance, 2);
+        assert_eq!(batches[1].instance_count, 1);
         assert_eq!(scratch.instance_count(), 3);
+    }
+
+    /// FIX-C1 regression guard (asset-streaming plan F6, hwrt GPU-UAF closure): a
+    /// `meta` closure returning `None` for a mesh with a NONZERO instance count in
+    /// the MIDDLE of the scene (a retired-slot hole — its carriers are still
+    /// gathered by the query this frame, between `validate_asset_refs`'s
+    /// best-effort disable and this gather) must EXCLUDE that mesh's instances
+    /// from the ring / `mesh_ids` ENTIRELY (not merely leave them un-batched —
+    /// `bucket_lanes_mixed` zeroes `counts[m]` for a non-resolvable mesh, and the
+    /// scatter's `counts[m] == 0` skip excludes it): the hwrt TLAS
+    /// packer reads `BlasAddr[MeshIds[i]]` for every `i` in the FULL ring, so a
+    /// retired mesh's id surviving in `mesh_ids` would read a freed BLAS device
+    /// address. Sibling of [`bucketing_skips_empty_mesh_in_the_middle`] above,
+    /// which only covers the `count == 0` skip (a DIFFERENT code path — that
+    /// test never reaches the `meta` call at all, since `bucket_lanes_mixed`'s
+    /// `self.counts[m] != 0` guard short-circuits first).
+    #[test]
+    fn none_mid_scene_meta_excludes_its_instances_from_the_ring() {
+        let mesh_count = 3;
+        // mesh 0: 2 instances, mesh 1 (the retired hole, NONZERO count): 3
+        // instances, mesh 2: 2 instances. Interleaved so the scatter order, not
+        // input order, drives the ring layout.
+        let a0 = affine(0, 0);
+        let a1 = affine(0, 1);
+        let b0 = affine(1, 0);
+        let b1 = affine(1, 1);
+        let b2 = affine(1, 2);
+        let c0 = affine(2, 0);
+        let c1 = affine(2, 1);
+        let inputs = [
+            stat(0, &a0),
+            stat(1, &b0),
+            stat(0, &a1),
+            stat(1, &b1),
+            stat(2, &c0),
+            stat(1, &b2),
+            stat(2, &c1),
+        ];
+
+        // FIX-C1 scenario: mesh 1's meta returns None (a retired-slot hole) —
+        // everything else (the query rows, the mesh_count) is unchanged.
+        let meta_hole = |mesh_id: u32| if mesh_id == 1 { None } else { meta(mesh_id) };
+        let mut holed = MeshRenderScratch::default();
+        holed.gather_mixed_into(mesh_count, meta_hole, || inputs.iter().copied());
+
+        assert_eq!(holed.batch_count(), 2, "mesh 1's None must skip its batch");
+        assert!(
+            holed.batches.as_read_slice().iter().all(|b| b.mesh_id != 1),
+            "no batch may reference the mesh whose meta returned None"
+        );
+
+        // THE KEY GATE (FIX-C1): the ring holds ONLY the surviving (resolvable)
+        // instances — count == ring.len() == Σ surviving, NOT the pre-hole total.
+        assert_eq!(
+            holed.instance_count(),
+            4,
+            "the retired mesh's 3 instances must be EXCLUDED, not merely un-batched: \
+             2 (mesh 0) + 2 (mesh 2) == 4, not 2 + 3 + 2 == 7"
+        );
+
+        // No retired mesh_id ever appears in the TLAS-consumable mesh-id lane —
+        // the exact hazard FIX-C1 closes (a stale id would let the hwrt packer
+        // read `BlasAddr[1]`, a freed BLAS device address).
+        assert!(
+            holed.mesh_ids.as_read_slice().iter().all(|&id| id != 1),
+            "the retired mesh's id must never appear in mesh_ids"
+        );
+
+        // The surviving batches are CONTIGUOUS (no gap where the excluded mesh's
+        // instances used to be) — mesh 2 starts exactly where mesh 0 ends.
+        let batches = holed.batches.as_read_slice();
+        let mesh0 = *batches.iter().find(|b| b.mesh_id == 0).expect("mesh0 batch present");
+        let mesh2 = *batches.iter().find(|b| b.mesh_id == 2).expect("mesh2 batch present");
+        assert_eq!(mesh0.base_instance, 0, "mesh 0's base_instance is unaffected (it precedes the hole)");
+        assert_eq!(mesh0.instance_count, 2);
+        assert_eq!(
+            mesh2.base_instance,
+            mesh0.base_instance + mesh0.instance_count,
+            "mesh 2's batch is CONTIGUOUS with mesh 0's — no gap for the excluded mesh"
+        );
+        assert_eq!(mesh2.instance_count, 2);
+
+        // The ring itself is exactly [a0, a1, c0, c1] — no reserved-but-empty slots.
+        let ring = holed.ring.as_read_slice();
+        assert_eq!(ring[0], a0);
+        assert_eq!(ring[1], a1);
+        assert_eq!(ring[2], c0);
+        assert_eq!(ring[3], c1);
     }
 
     /// Re-running the gather REUSES the scratch's capacity (Principle 5): after a
@@ -808,17 +1057,18 @@ mod tests {
         // TWO batches — the floor batch is NOT dropped by the cube's presence (the P0
         // regression dropped exactly this).
         assert_eq!(scratch.batch_count(), 2, "static + interp => two batches, none dropped");
-        let bf = scratch.batches[0];
-        let bc = scratch.batches[1];
+        let batches = scratch.batches.as_read_slice();
+        let bf = batches[0];
+        let bc = batches[1];
         assert_eq!((bf.mesh_id, bf.base_instance, bf.instance_count), (0, 0, 2), "floor batch");
         assert_eq!((bc.mesh_id, bc.base_instance, bc.instance_count), (1, 2, 1), "cube batch (NONZERO base)");
 
         // base_instance / instance_count cover the whole bound ring [0, 3) with no gap.
-        let total: u32 = scratch.batches.iter().map(|b| b.instance_count).sum();
+        let total: u32 = batches.iter().map(|b| b.instance_count).sum();
         assert_eq!(total, 3);
         assert_eq!(scratch.instance_count(), 3, "ring covers every drawable, no drop");
         let mut covered = [false; 3];
-        for b in &scratch.batches {
+        for b in batches {
             for s in b.base_instance..b.base_instance + b.instance_count {
                 assert!(!covered[s as usize], "no ring slot double-covered");
                 covered[s as usize] = true;
@@ -827,15 +1077,16 @@ mod tests {
         assert!(covered.iter().all(|&c| c), "the two batches cover [0, 3) contiguously");
 
         // The STATIC floor rows hold their real affines verbatim (not GPU-touched).
-        assert_eq!(scratch.ring[0], affine(0, 0), "floor slot 0 is the real affine");
-        assert_eq!(scratch.ring[1], affine(0, 1), "floor slot 1 is the real affine");
+        let ring = scratch.ring.as_read_slice();
+        assert_eq!(ring[0], affine(0, 0), "floor slot 0 is the real affine");
+        assert_eq!(ring[1], affine(0, 1), "floor slot 1 is the real affine");
 
         // The DYNAMIC cube: exactly one pair, its out-slot == the cube's ring slot (2),
         // and that slot is NOT a static slot (never CPU-authoritative).
         assert_eq!(scratch.dynamic_count(), 1, "exactly one interpolated instance");
-        assert_eq!(scratch.pair_ring[0], cube_pair, "the cube's pair was recorded");
+        assert_eq!(scratch.pair_ring.as_read_slice()[0], cube_pair, "the cube's pair was recorded");
         assert_eq!(
-            scratch.pair_out_slot[0], bc.base_instance,
+            scratch.pair_out_slot.as_read_slice()[0], bc.base_instance,
             "the cube's out-slot is its gather-assigned ring slot (2)"
         );
     }
@@ -863,7 +1114,7 @@ mod tests {
         assert_eq!(scratch.dynamic_count(), 3, "every row is interpolated");
         assert_eq!(scratch.pair_ring.len(), scratch.pair_out_slot.len());
         // Every out-slot is a distinct index in [0, 3).
-        let mut slots: Vec<u32> = scratch.pair_out_slot.clone();
+        let mut slots: Vec<u32> = scratch.pair_out_slot.as_read_slice().to_vec();
         slots.sort_unstable();
         assert_eq!(slots, vec![0, 1, 2], "the three out-slots partition the ring");
     }
@@ -931,37 +1182,39 @@ mod tests {
         assert_eq!(scratch.mesh_ids.len(), 4);
 
         // Every slot in each batch's range carries that batch's mesh_id.
-        for b in &scratch.batches {
+        let mesh_ids = scratch.mesh_ids.as_read_slice();
+        for b in scratch.batches.as_read_slice() {
             let start = b.base_instance as usize;
             let end = start + b.instance_count as usize;
-            for slot in start..end {
+            for (slot, &id) in mesh_ids.iter().enumerate().take(end).skip(start) {
                 assert_eq!(
-                    scratch.mesh_ids[slot], b.mesh_id,
+                    id, b.mesh_id,
                     "ring slot {slot} must carry its batch's mesh_id {}",
                     b.mesh_id
                 );
             }
         }
         // Concretely: mesh 0 fills [0,2), mesh 1 fills [2,4).
-        assert_eq!(scratch.mesh_ids, vec![0, 0, 1, 1]);
+        assert_eq!(mesh_ids, [0u32, 0, 1, 1]);
 
         // The DYNAMIC row: its ring affine is the WRONG-encoded placeholder (x == 9), but
         // its mesh-id entry is the correct BLAS id (1). The interp out-slot points at that
         // same slot, and the lane there reads 1.
-        let dyn_slot = scratch.pair_out_slot[0] as usize;
-        assert_eq!(scratch.mesh_ids[dyn_slot], 1, "the dynamic row maps to BLAS 1");
+        let dyn_slot = scratch.pair_out_slot.as_read_slice()[0] as usize;
+        assert_eq!(mesh_ids[dyn_slot], 1, "the dynamic row maps to BLAS 1");
+        let ring = scratch.ring.as_read_slice();
         assert_eq!(
-            scratch.ring[dyn_slot].rows[0][3], 9.0,
+            ring[dyn_slot].rows[0][3], 9.0,
             "the dynamic row's ring affine is the placeholder (proves the lane is key-derived)"
         );
 
         // For STATIC rows the ring affine's encoded mesh id agrees with the lane.
-        for (slot, &mid) in scratch.mesh_ids.iter().enumerate() {
+        for (slot, &mid) in mesh_ids.iter().enumerate() {
             if slot == dyn_slot {
                 continue;
             }
             assert_eq!(
-                scratch.ring[slot].rows[0][3] as u32, mid,
+                ring[slot].rows[0][3] as u32, mid,
                 "a static row's affine-encoded mesh id matches the lane"
             );
         }

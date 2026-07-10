@@ -128,8 +128,12 @@ pub(crate) const fn pool_align_up_granule(value: usize) -> usize {
 ///
 /// `reserve_rows(stride) = clamp(POOL_TARGET_DATA_BYTES / stride,
 /// POOL_MIN_ROWS, POOL_MAX_ROWS)`. Used by
-/// `ComponentPool::with_default_sizes` ONLY — the legacy explicit-ceiling
-/// constructor `ComponentPool::new` bypasses the clamp by design (★R1-9).
+/// `ComponentPool::with_default_sizes` (in-crate) and, cross-crate, by every
+/// `ScratchColumn<T>`-backed transient scratch (e.g.
+/// `boyko_render::mesh_draw::MeshRenderScratch`) that wants the SAME
+/// VA-reservation-class ceiling every other kernel column uses, instead of a
+/// bespoke fixed cap — the legacy explicit-ceiling constructor
+/// `ComponentPool::new` bypasses the clamp by design (★R1-9).
 ///
 /// Phase 22 D6 (ZST/tag pools): `stride == 0` routes straight to
 /// [`POOL_MAX_ROWS`] — row capacity is bounded by the tick sub-regions
@@ -139,7 +143,7 @@ pub(crate) const fn pool_align_up_granule(value: usize) -> usize {
 /// virtual address space per tag pool per hosting archetype** (2 MiB under
 /// the cfg-fallback `POOL_MAX_ROWS = 262_144`), with zero resident bytes
 /// until rows commit.
-pub(crate) const fn pool_reserve_rows(stride: usize) -> usize {
+pub const fn pool_reserve_rows(stride: usize) -> usize {
     if stride == 0 {
         return POOL_MAX_ROWS;
     }

@@ -143,7 +143,7 @@ fn frame_helpers_allocate_zero_after_warmup() {
             ((i as u32) % 2, r, pair)
         })
         .collect();
-    let meta = |_mesh: u32| (36u32, IndexType::Uint16);
+    let meta = |_mesh: u32| Some((36u32, IndexType::Uint16));
 
     // SAFETY: no GPU work exists in this process (no device was booted), so no
     // submitted work can reference the fake slots — the `forge_unfenced` setup
@@ -200,11 +200,11 @@ fn frame_helpers_allocate_zero_after_warmup() {
     // Sanity: the uploads actually wrote — the instance slot's leading bytes
     // equal the gathered ring's first record, and the out-slot slot's first
     // entry equals the first dynamic row's ring slot.
-    let expect: &[u8] = bytemuck::bytes_of(&scratch.ring[0]);
+    let expect: &[u8] = bytemuck::bytes_of(&scratch.ring.as_read_slice()[0]);
     assert_eq!(&inst_storage[..48], expect, "the instance memcpy landed");
     let first_out_slot = u32::from_le_bytes(out_slot_storage[..4].try_into().unwrap());
     assert_eq!(
-        first_out_slot, scratch.pair_out_slot[0],
+        first_out_slot, scratch.pair_out_slot.as_read_slice()[0],
         "the out-slot memcpy landed (first dynamic row's ring slot)"
     );
 }

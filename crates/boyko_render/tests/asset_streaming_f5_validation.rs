@@ -54,7 +54,7 @@ use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::system::Commands;
 
 use boyko_render::asset_refcount::{ValidateCursor, validate_asset_refs};
-use boyko_render::{MaterialGpu, MeshGpu, apply_refcount_deltas};
+use boyko_render::{MaterialGpu, MeshGpu, RenderEpoch, apply_refcount_deltas};
 use boyko_scene::{DeferredFree, MaterialHandle, MaterialRefGen, MeshHandle, MeshRefGen, RefcountDeltas, RenderEnabled};
 
 use boyko_rhi::enums::IndexType;
@@ -87,6 +87,9 @@ fn world_with(material_assets: Assets<MaterialGpu>, mesh_assets: Assets<MeshGpu>
     ecs.insert_resource(RefcountDeltas::default());
     ecs.insert_resource(DeferredFree::default());
     ecs.insert_resource(ValidateCursor::default());
+    // Asset-streaming plan F6: `apply_refcount_deltas` now reads `RenderEpoch` to
+    // stamp a real fence-gated `retire_frame` — mirrors `AssetRefcountPlugin::build`.
+    ecs.insert_resource(RenderEpoch::default());
     ecs.insert_resource(material_assets);
     ecs.insert_non_send_resource(mesh_assets);
     // Prime both ids (installs the on_insert/on_replace hooks) before any spawn —

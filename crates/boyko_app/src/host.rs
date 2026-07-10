@@ -17,6 +17,7 @@ use boyko_rhi_vulkan::swapchain::{
     FRAMES_IN_FLIGHT, GBufferFrame, Renderer, Surface, Swapchain, SwapchainError,
 };
 use boyko_rhi_vulkan::window::{Window, WindowError};
+use boyko_scene::FreeEntry;
 
 use crate::gpu_scene::{DrawListScratch, GpuSceneBundles};
 use crate::runner::WindowDesc;
@@ -88,6 +89,10 @@ pub(crate) struct WindowHost {
     pub(crate) gpu: GpuSceneBundles,
     /// The reusable per-frame draw-list allocation (0 alloc/frame after warmup).
     pub(crate) draw_scratch: DrawListScratch,
+    /// Asset-streaming plan F6: the host-parked scratch buffer
+    /// `retire_deferred_frees` drains ready [`FreeEntry`] rows into every frame —
+    /// reused across frames (capacity retained), zero steady-state allocation.
+    pub(crate) retire_scratch: Vec<FreeEntry>,
     /// The boot-fixed composite extent (plan D7): the G-buffer / marcher /
     /// camera-push extent, frozen at the boot client size. A window resize
     /// recreates the swapchain only; the present blit clamps to
@@ -175,6 +180,7 @@ impl WindowHost {
             frame: GBufferFrame::new(),
             gpu,
             draw_scratch: DrawListScratch::new(),
+            retire_scratch: Vec::new(),
             composite_extent,
             // u64::MAX ≠ any real generation ⇒ both slots upload the ECS light
             // table on their first frames (host plan D5/R4).

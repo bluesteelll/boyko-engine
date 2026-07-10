@@ -47,6 +47,13 @@ pub struct Renderer<'ctx> {
     pub(crate) render_finished: Vec<VkSemaphore>,
     /// The current frame-in-flight slot (round-robin).
     pub(crate) frame_index: usize,
+    /// Total committed submits (`vkQueueSubmit` calls that reached the ring
+    /// advance below) — the fence clock the asset-retire gate (F6) is keyed on.
+    /// Increments 1:1 with `frame_index` at the SAME site (below); unlike
+    /// `frame_index` it is NOT reset by [`recreate`](Self::recreate) (it stays
+    /// monotonic across swapchain rebuilds — `recreate`'s `device_wait_idle`
+    /// already backstops the fence horizon for any in-flight retire).
+    submission_epoch: u64,
     /// The in-house Render Dependency Graph. Re-declared PER FRAME over the WHOLE
     /// G-buffer frame in [`render_gbuffer_frame`](Self::render_gbuffer_frame) (a
     /// zero-alloc `reset`+re-declare+`compile`) and stored as the resulting
@@ -209,6 +216,7 @@ impl<'ctx> Renderer<'ctx> {
             frames,
             render_finished,
             frame_index: 0,
+            submission_epoch: 0,
             frame_graph,
             gbuffer_pass_plan: None,
         })
@@ -225,6 +233,19 @@ impl<'ctx> Renderer<'ctx> {
     #[inline]
     pub fn frame_index(&self) -> usize {
         self.frame_index
+    }
+
+    /// Total committed submits so far — the monotonic fence clock. Advances
+    /// exactly once per successful `vkQueueSubmit` (the same site that advances
+    /// [`frame_index`](Self::frame_index)), and only there: a pre-acquire
+    /// out-of-date recreate returns before either counter moves. Used by the
+    /// asset-retire gate: a resource enqueued at epoch `N` is safe to free once
+    /// the host has observed epoch `>= N + FRAMES_IN_FLIGHT` (its last possible
+    /// submit, `N`, is then guaranteed GPU-complete by the ring's own fence
+    /// discipline).
+    #[inline]
+    pub fn submission_epoch(&self) -> u64 {
+        self.submission_epoch
     }
 
     /// Blocks until the CURRENT [`frame_index`](Self::frame_index) slot's in-flight
@@ -458,6 +479,9 @@ impl<'ctx> Renderer<'ctx> {
         let present_result = VkResult::from_raw(raw);
 
         self.frame_index = (self.frame_index + 1) % FRAMES_IN_FLIGHT;
+        // Counts committed submits exactly (see `submission_epoch` doc); `u64`
+        // never wraps in practice (~585 years at 1000 submits/s).
+        self.submission_epoch = self.submission_epoch.wrapping_add(1);
 
         if present_result == VkResult::ERROR_OUT_OF_DATE_KHR
             || present_result == VkResult::SUBOPTIMAL_KHR

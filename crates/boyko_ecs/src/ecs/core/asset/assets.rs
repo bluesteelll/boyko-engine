@@ -188,6 +188,15 @@ pub struct RetireTicket {
 /// - [`refcount`](Self::refcount) / [`free_epoch`](Self::free_epoch) /
 ///   [`dirty`](Self::dirty) / [`pinned`](Self::pinned) — streaming lifetime
 ///   plumbing that lands inert in this rung (F2+ wires the readers).
+/// - [`install_epoch`](Self::install_epoch) — bumped by every [`Self::add`] /
+///   [`Self::fill`] call that writes a live `T` into a row, INCLUDING a
+///   free-list reuse, AND by every [`Self::retire`] (the terminal
+///   Retiring->Vacant transition) — asset-streaming plan F6: the signal a
+///   GPU-mirror table whose gate is keyed on row-count growth alone (e.g. the
+///   hwrt TLAS `blas_addr` table) needs to detect BOTH a reused slot's
+///   re-install AND a bare retire-to-Vacant, which neither
+///   [`high_water`](Self::high_water) nor [`dirty_gen`](Self::dirty_gen)
+///   captures.
 pub struct Assets<T: AssetBacking> {
     col: ComponentPool,
     slot_word: VmColumn<u32>,
@@ -199,6 +208,7 @@ pub struct Assets<T: AssetBacking> {
     live_count: usize,
     dirty_gen: u64,
     free_epoch: u64,
+    install_epoch: u64,
     // The deferred-free queue's routing key, copied into every `RetireTicket`
     // `dec_ref` returns (F2); F6 is the actual consumer of the routed value.
     id: AssetKind,
@@ -232,6 +242,7 @@ impl<T: AssetBacking> Assets<T> {
             live_count: 0,
             dirty_gen: 0,
             free_epoch: 0,
+            install_epoch: 0,
             id: AssetKind(component_id),
             _t: PhantomData,
         }
@@ -284,7 +295,11 @@ impl<T: AssetBacking> Assets<T> {
     }
 
     /// Inserts `value`, reusing a freed row (LIFO) if one exists, otherwise
-    /// appending a fresh row. Returns the [`Handle`] addressing it.
+    /// appending a fresh row. Returns the [`Handle`] addressing it. Bumps
+    /// [`Self::install_epoch`] on both paths — a GPU-mirror table gated on
+    /// row-count growth alone (e.g. the hwrt TLAS `blas_addr` table) cannot
+    /// otherwise detect the free-list-reuse path, since it leaves
+    /// [`high_water`](Self::high_water) unchanged.
     pub fn add(&mut self, value: T) -> Handle<T> {
         if let Some(reused) = self.free.pop() {
             let idx = reused as usize;
@@ -305,6 +320,7 @@ impl<T: AssetBacking> Assets<T> {
             self.refcount.set(idx, 0);
             self.live.set(idx);
             self.live_count += 1;
+            self.install_epoch = self.install_epoch.wrapping_add(1);
             return Handle::new(reused, generation);
         }
 
@@ -321,6 +337,7 @@ impl<T: AssetBacking> Assets<T> {
         self.slot_word.push(pack_slot_word(0, STATE_LOADED));
         self.refcount.push(0);
         self.live.set(idx);
+        self.install_epoch = self.install_epoch.wrapping_add(1);
         self.live_count += 1;
         Handle::new(idx as u32, 0)
     }
@@ -414,7 +431,8 @@ impl<T: AssetBacking> Assets<T> {
     }
 
     /// Fills a row previously minted by [`Self::reserve`], transitioning it
-    /// from `Loading`/`Failed` to [`Loaded`](AssetLoadState::Loaded).
+    /// from `Loading`/`Failed` to [`Loaded`](AssetLoadState::Loaded). Bumps
+    /// [`Self::install_epoch`] on success — same rationale as [`Self::add`].
     ///
     /// # Errors
     /// Returns `(`[`AssetError::StaleHandle`]`, value)` — WITH `value`
@@ -423,6 +441,15 @@ impl<T: AssetBacking> Assets<T> {
     /// resolve to a `Loading`/`Failed` row with a matching generation: an
     /// already-`Loaded` row (a double-fill), a `Vacant` row, an
     /// out-of-range index, or a stale generation are all rejected.
+    ///
+    /// # Routing obligation on `Err`
+    /// The store never took ownership of a rejected `value` — for a
+    /// device-owning `T` (e.g. `MeshGpu`, which has no `Drop`) the caller
+    /// MUST route it into that type's orphan teardown queue (asset-streaming
+    /// plan F6: `OrphanedMeshGpu`) rather than dropping it bare, or the
+    /// device buffers/BLAS it holds leak.
+    #[must_use = "a rejected value (e.g. MeshGpu) holds live device buffers with no Drop — \
+                  route the Err value into its orphan teardown queue (OrphanedMeshGpu) or it leaks"]
     pub fn fill(&mut self, handle: Handle<T>, value: T) -> Result<(), (AssetError, T)> {
         let Some(idx) = self.resolve_reserved(handle) else {
             return Err((AssetError::StaleHandle, value));
@@ -438,6 +465,7 @@ impl<T: AssetBacking> Assets<T> {
         self.live.set(idx);
         self.live_count += 1;
         self.dirty_gen += 1;
+        self.install_epoch = self.install_epoch.wrapping_add(1);
         Ok(())
     }
 
@@ -767,6 +795,20 @@ impl<T: AssetBacking> Assets<T> {
         self.free_epoch
     }
 
+    /// Monotonic counter bumped by every [`Self::add`] / [`Self::fill`] call
+    /// that writes a live `T` into a row, AND by every [`Self::retire`]
+    /// (asset-streaming plan F6). Unlike [`Self::high_water`], this ALSO
+    /// advances on a free-list-reuse install (which leaves `high_water`
+    /// unchanged) and on a bare retire-to-Vacant — the signal a GPU-mirror
+    /// table gated purely on row-count growth (e.g. the hwrt TLAS
+    /// `blas_addr` table) needs to detect a reused slot's new content, or a
+    /// retired slot's Vacant sentinel, and avoid reading a freed device
+    /// resource's stale address.
+    #[inline]
+    pub fn install_epoch(&self) -> u64 {
+        self.install_epoch
+    }
+
     /// Marks dense row `slot` NEVER-RETIRE (asset-streaming plan F2: pins
     /// slot 0, the default asset). [`Self::dec_ref`] reaching zero on a
     /// pinned row leaves it `Loaded` at refcount 0 instead of transitioning
@@ -921,6 +963,86 @@ impl<T: AssetBacking> Assets<T> {
         self.free_epoch = self.free_epoch.wrapping_add(1);
         self.dirty.set(idx);
         Some(RetireTicket { kind: self.id, slot })
+    }
+
+    /// Terminal free of a `Retiring` row — the deferred-retire path's other
+    /// half of [`Self::dec_ref`] ([`Self::remove`] deliberately no-ops on
+    /// `Retiring`, see its doc). Called ONLY by the fence-gated drain
+    /// (asset-streaming plan F6: `retire_deferred_frees`) once every GPU
+    /// submit that could reference this row's `T` is provably complete (see
+    /// the F6 design's fence-gate proof).
+    ///
+    /// Returns the value for a `Loaded`->`Retiring` row (held a live `T`,
+    /// `live` bit set), or `None` for a `Loading`/`Failed`->`Retiring` row
+    /// (a cancelled load — never held a `T`; the same `live`-gated
+    /// discriminator [`Self::get_by_index`] uses). Transitions the row to
+    /// `Vacant` (generation bumped so a stale `Handle` is rejected even after
+    /// reuse), clears the refcount, pushes the free-list, bumps
+    /// [`Self::free_epoch`], and marks the row [`Self::dirty`] — mirrors
+    /// [`Self::remove`]'s terminal-`Vacant` bookkeeping exactly.
+    ///
+    /// # Resurrection is impossible by construction (no refcount recheck)
+    /// [`Self::inc_ref`] refuses a `Retiring`/`Vacant` slot (F5 Decision 5),
+    /// so a row's refcount is provably still 0 at retire time; a `Retiring`
+    /// row is also never pushed onto [`Self::free`] until this call, so `add`
+    /// cannot reuse (and thus re-tenant) it first. `dec_ref` is idempotent on
+    /// `Retiring`, so exactly one [`RetireTicket`] is ever issued per row —
+    /// this runs exactly once per row.
+    ///
+    /// # Panics (debug only)
+    /// If `slot`'s packed state is not `Retiring` — a well-formed caller
+    /// (draining the deferred-free queue exactly once per enqueued
+    /// [`RetireTicket`]) never calls this on any other state. Also panics
+    /// (unconditionally, an invariant violation) if `slot >= high_water` —
+    /// same contract every other row accessor in this file states.
+    pub fn retire(&mut self, slot: u32) -> Option<T> {
+        let idx = slot as usize;
+        let word = self
+            .slot_word
+            .get(idx)
+            .expect("invariant: retire's slot must be < high_water (caller: deferred-free drain)");
+        let state = unpack_state(word);
+        debug_assert_eq!(
+            state, STATE_RETIRING,
+            "invariant: retire must target a Retiring row (slot {slot}) — dec_ref's idempotent \
+             guard issues exactly one RetireTicket per row"
+        );
+        let generation = unpack_generation(word);
+
+        let value = if self.live.test(idx) {
+            // Clear `live` BEFORE the move-out — mirrors `remove`'s
+            // exactly-once discipline: no later drop path (this store's
+            // terminal `Drop`) can re-touch a slot once its `live` bit is
+            // clear.
+            self.live.clear(idx);
+            self.live_count -= 1;
+            // SAFETY: `live.test(idx)` was true — a Loaded->Retiring row
+            // holds a valid `T` written by `push_value`/`write_value_at`
+            // (the same discriminator `get_by_index` uses). `live` was just
+            // cleared, so no other path reads or drops this slot again
+            // before it is rewritten. `take_at` moves the value out via
+            // `ptr::read` without running drop — the caller now owns it.
+            Some(unsafe { self.col.take_at::<T>(idx) })
+        } else {
+            // A Loading/Failed->Retiring row never held a real `T` (only
+            // inert scratch bytes) — nothing to move out.
+            None
+        };
+
+        self.slot_word.set(idx, pack_slot_word(generation.wrapping_add(1), STATE_VACANT));
+        self.refcount.set(idx, 0);
+        self.free.push(idx as u32);
+        self.free_epoch = self.free_epoch.wrapping_add(1);
+        // Bumped here too (not just on `add`/`fill`, FIX-C1): a GPU-mirror table
+        // gated on `install_epoch` (the hwrt TLAS `blas_addr` table) must also
+        // resync on a bare retire-to-Vacant transition — even with no reuse yet,
+        // this is what makes the NEXT `sync_blas_addr` overwrite the freed slot's
+        // stale device address with the `Vacant` sentinel (0), rather than
+        // leaving it stale until some future unrelated `add`/`fill` happens to
+        // bump the epoch.
+        self.install_epoch = self.install_epoch.wrapping_add(1);
+        self.dirty.set(idx);
+        value
     }
 }
 
@@ -2210,6 +2332,227 @@ mod tests {
             assets.state_of_index(slot),
             None,
             "a Retiring slot has no AssetLoadState mapping"
+        );
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // F6 store-level tests: `Assets::retire` — the terminal, fence-gated free
+    // of a `Retiring` row. Miri-TB: exactly-once move-out, no double-take on
+    // an already-`Vacant` slot, and a fresh generation on reuse.
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Miri-TB: `retire` moves a `Loaded`->`Retiring` row's value out via
+    /// `take_at` WITHOUT dropping it in place (mirrors
+    /// `take_at_and_terminal_drop_are_exactly_once`'s `RecordDrop` idiom
+    /// exactly — the `impl_asset_pod_backing!` macro fixes `NEEDS_TEARDOWN =
+    /// false` with no drop glue, which is unsound for a Drop-counting stand-in
+    /// whose value the store's OWN terminal `Drop` must also be able to drop
+    /// correctly if it were ever left un-retired). The returned value's Drop
+    /// runs EXACTLY ONCE when the caller drops it; the store's own terminal
+    /// `Drop` (at scope exit, over the now-`Vacant`/reused slot) must not
+    /// touch it again.
+    #[test]
+    fn retire_moves_the_value_out_exactly_once_on_a_loaded_then_retiring_slot() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+        struct RetireDrop;
+        impl Drop for RetireDrop {
+            fn drop(&mut self) {
+                DROP_COUNT.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        // SAFETY: caller (`ComponentPool::drop_at` / the terminal `Assets::drop`)
+        // guarantees `ptr` points at a valid, aligned, fully-initialized
+        // `RetireDrop`, exclusively owned and not accessed again after this call.
+        unsafe fn retire_drop_glue(ptr: *mut u8) {
+            unsafe { core::ptr::drop_in_place(ptr.cast::<RetireDrop>()) }
+        }
+
+        impl AssetBacking for RetireDrop {
+            const NEEDS_TEARDOWN: bool = true;
+            fn register_layout() -> ComponentId {
+                crate::ecs::core::asset::backing::register_asset_layout::<RetireDrop>(Some(
+                    retire_drop_glue,
+                ))
+            }
+        }
+
+        DROP_COUNT.store(0, Ordering::Relaxed);
+        {
+            let mut assets = Assets::<RetireDrop>::with_reserved(4);
+            let h = assets.add(RetireDrop);
+            let slot = h.index();
+            assert!(assets.inc_ref(slot), "inc_ref on a fresh Loaded row must succeed");
+            let ticket = assets.dec_ref(slot, GEN_UNSYNCED);
+            assert!(ticket.is_some(), "refcount 1->0 must retire the row (test precondition)");
+            assert_eq!(
+                DROP_COUNT.load(Ordering::Relaxed),
+                0,
+                "dec_ref's Retiring transition must not drop the value — it still holds it"
+            );
+
+            let taken = assets.retire(slot);
+            assert!(taken.is_some(), "retire on a Loaded->Retiring row must return the value");
+            assert_eq!(
+                DROP_COUNT.load(Ordering::Relaxed),
+                0,
+                "retire's take_at must move the value out WITHOUT dropping it in place"
+            );
+
+            drop(taken);
+            assert_eq!(
+                DROP_COUNT.load(Ordering::Relaxed),
+                1,
+                "dropping the returned owned value runs Drop exactly once"
+            );
+            // The slot is now Vacant; the store's terminal Drop below must not
+            // touch it again.
+        }
+        assert_eq!(
+            DROP_COUNT.load(Ordering::Relaxed),
+            1,
+            "the store's terminal Drop must not re-drop a slot `retire` already moved out"
+        );
+    }
+
+    /// Sibling of the above for a `Loading`/`Failed`->`Retiring` row (never
+    /// held a real value — only `reserve()`'s inert scratch bytes): `retire`
+    /// must return `None` and run Drop ZERO times.
+    #[test]
+    fn retire_on_a_loading_retiring_row_returns_none_and_drops_nothing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static DROP_COUNT_LOADING: AtomicUsize = AtomicUsize::new(0);
+
+        struct RetireDropLoading;
+        impl Drop for RetireDropLoading {
+            fn drop(&mut self) {
+                DROP_COUNT_LOADING.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        // SAFETY: same `DropFn` contract as `retire_drop_glue` above.
+        unsafe fn retire_drop_loading_glue(ptr: *mut u8) {
+            unsafe { core::ptr::drop_in_place(ptr.cast::<RetireDropLoading>()) }
+        }
+
+        impl AssetBacking for RetireDropLoading {
+            const NEEDS_TEARDOWN: bool = true;
+            fn register_layout() -> ComponentId {
+                crate::ecs::core::asset::backing::register_asset_layout::<RetireDropLoading>(Some(
+                    retire_drop_loading_glue,
+                ))
+            }
+        }
+
+        DROP_COUNT_LOADING.store(0, Ordering::Relaxed);
+        let mut assets = Assets::<RetireDropLoading>::with_reserved(4);
+        let h = assets.reserve(); // Loading, live=false — never held a real value.
+        let slot = h.index();
+        assert!(assets.inc_ref(slot), "inc_ref on a Loading row must succeed");
+        let ticket = assets.dec_ref(slot, GEN_UNSYNCED);
+        assert!(ticket.is_some(), "refcount 1->0 must retire the row (test precondition)");
+
+        let taken = assets.retire(slot);
+        assert!(
+            taken.is_none(),
+            "a Loading->Retiring row never held a real value — retire must return None"
+        );
+        assert_eq!(
+            DROP_COUNT_LOADING.load(Ordering::Relaxed),
+            0,
+            "no value ever existed at this slot — Drop must never run"
+        );
+    }
+
+    /// `retire` targets a `Retiring` row by construction (exactly one call per
+    /// `RetireTicket` — see its own doc's "Resurrection is impossible"
+    /// section). A SECOND `retire` call on the same slot (now `Vacant`) is a
+    /// caller-contract violation, NOT a silent no-op: the debug assertion
+    /// fires — deliberately harder-failing than a quiet `None`, so a
+    /// double-drain bug (which would otherwise double-push the free-list and
+    /// corrupt a later `add`'s slot assignment) is caught immediately rather
+    /// than corrupting state silently.
+    #[test]
+    #[should_panic(expected = "invariant: retire must target a Retiring row")]
+    fn retire_again_on_the_now_vacant_slot_panics_the_one_shot_contract() {
+        let mut assets = Assets::<u64>::with_reserved(4);
+        let h = assets.add(1);
+        let slot = h.index();
+        assert!(assets.inc_ref(slot), "inc_ref on a fresh Loaded row must succeed");
+        assert!(
+            assets.dec_ref(slot, GEN_UNSYNCED).is_some(),
+            "refcount 1->0 must retire the row (test precondition)"
+        );
+        let _ = assets.retire(slot);
+
+        // The slot is now Vacant — a second retire() must panic, not double-take.
+        let _ = assets.retire(slot);
+    }
+
+    /// A retired-and-reused slot gets a FRESH generation (retire bumps it
+    /// exactly once, mirroring `remove`'s terminal-`Vacant` bookkeeping): the
+    /// old `Handle` never resolves again, even after the slot is handed back
+    /// out by a later `add` (LIFO reuse).
+    #[test]
+    fn retire_then_add_reuses_the_slot_with_a_fresh_generation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static DROP_COUNT_REUSE: AtomicUsize = AtomicUsize::new(0);
+
+        struct RetireDropReuse;
+        impl Drop for RetireDropReuse {
+            fn drop(&mut self) {
+                DROP_COUNT_REUSE.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        // SAFETY: same `DropFn` contract as `retire_drop_glue` above.
+        unsafe fn retire_drop_reuse_glue(ptr: *mut u8) {
+            unsafe { core::ptr::drop_in_place(ptr.cast::<RetireDropReuse>()) }
+        }
+
+        impl AssetBacking for RetireDropReuse {
+            const NEEDS_TEARDOWN: bool = true;
+            fn register_layout() -> ComponentId {
+                crate::ecs::core::asset::backing::register_asset_layout::<RetireDropReuse>(Some(
+                    retire_drop_reuse_glue,
+                ))
+            }
+        }
+
+        DROP_COUNT_REUSE.store(0, Ordering::Relaxed);
+        let mut assets = Assets::<RetireDropReuse>::with_reserved(4);
+        let h = assets.add(RetireDropReuse);
+        let slot = h.index();
+        assert!(assets.inc_ref(slot), "inc_ref on a fresh Loaded row must succeed");
+        assert!(
+            assets.dec_ref(slot, GEN_UNSYNCED).is_some(),
+            "refcount 1->0 must retire the row (test precondition)"
+        );
+        let taken = assets.retire(slot);
+        drop(taken);
+        assert_eq!(DROP_COUNT_REUSE.load(Ordering::Relaxed), 1);
+
+        let reused = assets.add(RetireDropReuse);
+        assert_eq!(reused.index(), slot, "the freed slot must be reused (LIFO)");
+        assert_eq!(
+            reused.generation(),
+            h.generation() + 1,
+            "reuse must bump the generation by exactly one"
+        );
+
+        assert!(assets.contains(reused), "the reused handle must resolve");
+        assert!(
+            !assets.contains(h),
+            "the OLD (pre-retire) handle must never resolve again, even after reuse"
+        );
+        assert!(
+            assets.get(h).is_none(),
+            "the old handle's generation must not match the reused slot's new one"
         );
     }
 

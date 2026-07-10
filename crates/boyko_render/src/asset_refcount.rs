@@ -2,19 +2,24 @@
 //! [`RefcountDeltas`](boyko_scene::RefcountDeltas) (pushed by the
 //! `MeshHandle`/`MaterialHandle` carrier hooks in `boyko_scene::render_caps`)
 //! into the two GPU asset tables (asset-streaming plan F2 §1/§3, gen-checked
-//! as of F5), plus [`validate_asset_refs`] (F5's best-effort staleness net)
-//! and the [`AssetRefcountPlugin`] that wires the resources + both systems
-//! into the app schedule.
+//! as of F5), plus [`validate_asset_refs`] (F5's best-effort staleness net),
+//! [`retire_deferred_frees`] (F6's fence-gated device-free drain), and the
+//! [`AssetRefcountPlugin`] that wires the resources + both systems into the
+//! app schedule.
 
 use boyko_ecs::ecs::core::app::{App, Plugin};
 use boyko_ecs::ecs::core::asset::{AssetBacking, AssetLoadState, Assets, GEN_UNSYNCED};
 use boyko_ecs::ecs::core::commands::Command;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
+use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
-use boyko_ecs::ecs::core::system::{Commands, NonSendRes, NonSendResMut, ResMut};
+use boyko_ecs::ecs::core::system::{Commands, NonSendRes, NonSendResMut, Res, ResMut};
 use boyko_ecs::ecs::identifiers::primitives::EntityId;
 use boyko_macros::Resource;
+use boyko_rhi::RhiDevice;
+use boyko_rhi_vulkan::device::VulkanContext;
+use boyko_rhi_vulkan::swapchain::FRAMES_IN_FLIGHT;
 use boyko_scene::{
     AssetRefKind, DeferredFree, FreeEntry, MaterialRefGen, MeshHandle, MeshRefGen, RefcountDeltas,
     RenderEnabled,
@@ -22,16 +27,40 @@ use boyko_scene::{
 
 use crate::material::MaterialGpu;
 use crate::mesh::MeshGpu;
+use crate::mesh_assets::OrphanedMeshGpu;
+
+/// The fence-gated retire delay (asset-streaming plan F6 Decision 1): a row
+/// enqueued at submission-epoch `N` is safe to free once the host observes
+/// `epoch >= N + RETIRE_DELAY`. Pinned to
+/// [`FRAMES_IN_FLIGHT`](boyko_rhi_vulkan::swapchain::FRAMES_IN_FLIGHT) — the
+/// exact fence horizon `wait_frame_in_flight` guarantees (see
+/// [`retire_deferred_frees`]'s doc for the full proof). If the TLAS ever
+/// becomes persistent/compacted across frames, or an async-compute queue with
+/// an independent fence references BLAS/buffers, `RETIRE_DELAY` MUST grow
+/// beyond `FRAMES_IN_FLIGHT` to match the new horizon.
+pub const RETIRE_DELAY: u64 = FRAMES_IN_FLIGHT as u64;
+
+/// The host-published fence clock (asset-streaming plan F6 Decision 1):
+/// [`Renderer::submission_epoch`](boyko_rhi_vulkan::swapchain::Renderer::submission_epoch)
+/// mirrored into a world resource BEFORE `app.update_with_delta` each frame,
+/// so [`apply_refcount_deltas`] can stamp a real
+/// `retire_frame = epoch + `[`RETIRE_DELAY`] on every newly-`Retiring` row —
+/// counts committed GPU submits (the ring-advance site), NOT the runner's
+/// jitter `frame_index` (which can advance on a pre-acquire recreate-skip
+/// where nothing submitted, over-counting relative to true GPU progress).
+#[derive(Debug, Default, Clone, Copy, Resource)]
+pub struct RenderEpoch(pub u64);
 
 /// Drains [`RefcountDeltas`] and folds each delta into the matching
 /// `Assets<T>` table's refcount (asset-streaming plan F2 §1, gen-checked as of
 /// F5): `+1` calls [`Assets::inc_ref`] and (regardless of its result — see
 /// [`apply_one`]'s doc) re-syncs the carrier's `MeshRefGen`/`MaterialRefGen`
-/// lane via [`Commands`]; `-1` calls [`Assets::dec_ref`] with the delta's
-/// captured bind-generation. A `dec_ref` that returns a retire ticket is
-/// enqueued into [`DeferredFree`] with a placeholder `retire_frame = 0` (F6
-/// sets the real fence-gated value; F5 only enqueues — nothing drains this
-/// queue yet).
+/// lane via a deferred, generation-checked [`SyncRefGenCommand`] (churn-safe —
+/// see that command's doc for why a plain `Commands::entity(...).insert(...)`
+/// is unsound here); `-1` calls [`Assets::dec_ref`] with the delta's captured
+/// bind-generation. A `dec_ref` that returns a retire ticket is enqueued into
+/// [`DeferredFree`] with a placeholder `retire_frame = 0` (F6 sets the real
+/// fence-gated value; F5 only enqueues — nothing drains this queue yet).
 ///
 /// Any other `delta` magnitude is unreachable from the hook wiring (every
 /// pushed [`RefDelta`](boyko_scene::RefDelta) is `+1` or `-1`); a `debug_assert`
@@ -58,18 +87,26 @@ pub fn apply_refcount_deltas(
     mut free: ResMut<DeferredFree>,
     mut material_assets: ResMut<Assets<MaterialGpu>>,
     mut mesh_assets: NonSendResMut<Assets<MeshGpu>>,
+    epoch: Res<RenderEpoch>,
     mut cmd: Commands,
 ) {
     if deltas.is_empty() {
         return;
     }
+    let epoch = epoch.0;
     for delta in deltas.drain() {
         match delta.kind {
             AssetRefKind::Mesh => {
-                if let Some(g) =
-                    apply_one(&mut mesh_assets, &mut free, delta.kind, delta.slot, delta.gen_, delta.delta)
-                {
-                    cmd.entity(delta.entity).insert(MeshRefGen(g));
+                if let Some(g) = apply_one(
+                    &mut mesh_assets,
+                    &mut free,
+                    delta.kind,
+                    delta.slot,
+                    delta.gen_,
+                    delta.delta,
+                    epoch,
+                ) {
+                    cmd.add(SyncRefGenCommand { entity: delta.entity, kind: delta.kind, gen_: g });
                 }
             }
             AssetRefKind::Material => {
@@ -80,8 +117,9 @@ pub fn apply_refcount_deltas(
                     delta.slot,
                     delta.gen_,
                     delta.delta,
+                    epoch,
                 ) {
-                    cmd.entity(delta.entity).insert(MaterialRefGen(g));
+                    cmd.add(SyncRefGenCommand { entity: delta.entity, kind: delta.kind, gen_: g });
                 }
             }
         }
@@ -115,6 +153,15 @@ pub fn apply_refcount_deltas(
 /// boundary stays airtight (see `Assets::inc_ref`'s doc for the full
 /// argument). `try_generation` (not the panicking `generation`) guards the
 /// OOR case — a malformed carrier holding a never-minted index must not panic.
+///
+/// # `retire_frame` stamp (asset-streaming plan F6)
+///
+/// A `-1` delta that reaches a real zero-crossing enqueues a [`FreeEntry`]
+/// stamped `retire_frame = epoch + `[`RETIRE_DELAY`] — `epoch` is this
+/// frame's [`RenderEpoch`] (the submission-epoch observed BEFORE this frame's
+/// submit), so the row is fence-safe to free once the host later observes
+/// `epoch' >= epoch + RETIRE_DELAY` (see [`retire_deferred_frees`]'s doc for
+/// the full fence-gate proof).
 #[inline]
 fn apply_one<T: AssetBacking>(
     assets: &mut Assets<T>,
@@ -123,6 +170,7 @@ fn apply_one<T: AssetBacking>(
     slot: u32,
     gen_: u32,
     delta: i32,
+    epoch: u64,
 ) -> Option<u32> {
     match delta {
         1 => {
@@ -131,7 +179,7 @@ fn apply_one<T: AssetBacking>(
         }
         -1 => {
             if assets.dec_ref(slot, gen_).is_some() {
-                free.push(FreeEntry { kind, slot, retire_frame: 0 });
+                free.push(FreeEntry { kind, slot, retire_frame: epoch + RETIRE_DELAY });
             }
             None
         }
@@ -142,6 +190,71 @@ fn apply_one<T: AssetBacking>(
                  (a hook regression — every carrier hook pushes exactly +1 or -1)"
             );
             None
+        }
+    }
+}
+
+/// Deferred, generation-checked re-sync of a carrier's
+/// `MeshRefGen`/`MaterialRefGen` lane (asset-streaming plan F5; F6 churn-safety
+/// fix) — the stale-tolerant counterpart of a plain
+/// `Commands::entity(entity).insert(...)`.
+///
+/// # Why not a plain `Commands::entity(...).insert(...)`
+///
+/// `apply_refcount_deltas` enqueues this stamp for every `+1` delta —
+/// including one whose `entity` gets despawned, and its id RECYCLED with a
+/// bumped generation, before this system's own queued command reaches its
+/// apply turn: the concurrent dispatcher drains worker completions (and
+/// therefore calls each finished system's `apply`) in COMPLETION order, not
+/// as an atomic body-then-apply pair per system (`schedule.rs`'s dispatch
+/// loop applies one finished system's commands per drained completion,
+/// interleaved with every other finished system's), so an unrelated
+/// concurrently-scheduled despawn's apply can land strictly between this
+/// system's body finishing and this stamp's own apply. A plain
+/// `InsertCommand` hitting that window trips its general
+/// `debug_assert!(false, "stale entity ...")` (a correct guard against an
+/// actual hook-wiring bug elsewhere) even though a departed carrier here is a
+/// normal, expected outcome of churn — not a bug. This command performs the
+/// SAME generation check [`EcsMaster::get_component_mut`] already does
+/// internally (`inland.generation() == entity.generation()`, mirroring
+/// `InsertCommand::apply`'s own guard) and silently no-ops on a mismatch —
+/// no `debug_assert`, because a departed carrier IS the expected shape here.
+///
+/// # Byte-identity on a non-churning (golden) scene
+///
+/// Every `MeshHandle`/`MaterialHandle` carrier structurally `#[require]`s its
+/// `MeshRefGen`/`MaterialRefGen` sibling (see `render_caps.rs`'s "Generation
+/// lanes" doc), so a LIVE `entity` always already hosts the lane component —
+/// `get_component_mut` resolves it and this stamp writes the identical value
+/// (`MeshRefGen(gen_)` / `MaterialRefGen(gen_)`) the prior `InsertCommand`
+/// fast (replace-in-place) path would have written, with the same
+/// unconditional `changed_tick` bump (`Mut::deref_mut`, mirroring
+/// `ComponentPool::write_changed_tick`). Neither lane type has a registered
+/// `on_insert`/`on_replace` hook or observer (grep-confirmed against
+/// `render_caps.rs`), so skipping the structural-insert machinery loses no
+/// hook/observer fire on the live path.
+struct SyncRefGenCommand {
+    /// The (possibly stale-by-apply-time) carrier entity to re-stamp.
+    entity: Entity,
+    /// Which lane to write — routes to `MeshRefGen` or `MaterialRefGen`.
+    kind: AssetRefKind,
+    /// The generation value to stamp.
+    gen_: u32,
+}
+
+impl Command for SyncRefGenCommand {
+    fn apply(self, world: &mut EcsMaster) {
+        match self.kind {
+            AssetRefKind::Mesh => {
+                if let Some(mut lane) = world.get_component_mut::<MeshRefGen>(self.entity) {
+                    *lane = MeshRefGen(self.gen_);
+                }
+            }
+            AssetRefKind::Material => {
+                if let Some(mut lane) = world.get_component_mut::<MaterialRefGen>(self.entity) {
+                    *lane = MaterialRefGen(self.gen_);
+                }
+            }
         }
     }
 }
@@ -312,10 +425,15 @@ pub fn validate_asset_refs(
 }
 
 /// Wires the asset-streaming refcount pipeline into the app schedule
-/// (asset-streaming plan F2 §1/§3, F5's validation): inserts the queue
-/// resources ([`RefcountDeltas`], [`DeferredFree`], [`ValidateCursor`]) the
-/// carrier hooks and both systems share, and registers
-/// [`apply_refcount_deltas`] `.before(validate_asset_refs)`.
+/// (asset-streaming plan F2 §1/§3, F5's validation, F6's fence gate): inserts
+/// the queue resources ([`RefcountDeltas`], [`DeferredFree`],
+/// [`ValidateCursor`], [`RenderEpoch`]) the carrier hooks and both systems
+/// share, and registers [`apply_refcount_deltas`] `.before(validate_asset_refs)`.
+/// `RenderEpoch` starts at `0`, matching a fresh [`Renderer`](boyko_rhi_vulkan::swapchain::Renderer)'s
+/// `submission_epoch` before the first submit; the host overwrites it every
+/// frame BEFORE `app.update_with_delta` (`boyko_app::runner`'s boot-ordering
+/// contract), so this only matters for a `apply_refcount_deltas` run before
+/// the first host publish (none exists in-tree today).
 ///
 /// # The apply → validate edge is expressible; the validate → gather edge is NOT
 ///
@@ -350,6 +468,7 @@ impl Plugin for AssetRefcountPlugin {
         app.insert_resource(RefcountDeltas::default());
         app.insert_resource(DeferredFree::default());
         app.insert_resource(ValidateCursor::default());
+        app.insert_resource(RenderEpoch::default());
         app.add_systems_cfg(|b| {
             let apply = b.add_system(apply_refcount_deltas).key();
             b.add_system(validate_asset_refs).after(apply);
@@ -359,6 +478,125 @@ impl Plugin for AssetRefcountPlugin {
     fn name(&self) -> &'static str {
         "boyko_render::AssetRefcountPlugin"
     }
+}
+
+/// Fence-gated drain of [`DeferredFree`] + [`OrphanedMeshGpu`] at `epoch`
+/// (asset-streaming plan F6): actually retires every store slot whose
+/// `retire_frame <= epoch` (moving its value out via
+/// [`Assets::retire`](boyko_ecs::ecs::core::asset::Assets::retire)) and frees
+/// the device resources ([`MeshGpu`]'s vertex/index buffers, and its BLAS
+/// under `hwrt`) it held — then does the same for every fill-rejected orphan
+/// past its gate.
+///
+/// # Caller contract — MUST run after `wait_frame_in_flight` for THIS `epoch`
+///
+/// `epoch` MUST be
+/// [`Renderer::submission_epoch`](boyko_rhi_vulkan::swapchain::Renderer::submission_epoch)
+/// read AFTER this frame's
+/// [`wait_frame_in_flight`](boyko_rhi_vulkan::swapchain::Renderer::wait_frame_in_flight)
+/// call (`boyko_app::runner`, immediately after `let s = token.slot();`, BEFORE
+/// any per-frame upload/draw-assembly reads a mesh handle). The fence-gate
+/// proof:
+///
+/// Let a row `S` be enqueued (`RefDelta` -1 reaching zero) at submission-epoch
+/// `N` (stamped `retire_frame = N + `[`RETIRE_DELAY`]` by [`apply_one`]). This
+/// fn frees `S` at the first `epoch M` with `N + RETIRE_DELAY <= M`. The SAME
+/// frame `N` that enqueued `S` also ran `validate_asset_refs` (after `apply`,
+/// before any gather) — `dec_ref`'s `Retiring` transition already bumped
+/// `free_epoch`, so validation (same frame) or the entity's own despawn
+/// disables every carrier of `S` before frame `N`'s own gather/submit runs;
+/// `S`'s LAST possible GPU reference is therefore submit `<= N - 1 < N`, i.e.
+/// `<= M - RETIRE_DELAY` for any `M` this fn is called at. Since `RETIRE_DELAY
+/// == FRAMES_IN_FLIGHT` and `wait_frame_in_flight` at epoch `M` waits the ring
+/// slot last used by submit `M - FRAMES_IN_FLIGHT`'s fence, ALL submits up to
+/// and including `M - FRAMES_IN_FLIGHT` are GPU-complete once this fn runs —
+/// covering `S`'s last reference with a full frame of margin. Reused-slot
+/// resurrection cannot reopen this: [`Assets::inc_ref`] permanently refuses a
+/// `Retiring`/`Vacant` slot, and `dec_ref` is idempotent on `Retiring`, so
+/// `S`'s refcount is provably 0 and exactly one `FreeEntry`/orphan exists per
+/// value — `retire`/`OrphanedMeshGpu::drain_ready` free it exactly once.
+///
+/// `debug_assert_eq!(RETIRE_DELAY, FRAMES_IN_FLIGHT as u64)` below pins the
+/// invariant this proof depends on; if the TLAS ever becomes
+/// persistent/compacted (rather than rebuilt whole every frame) or an
+/// independent-fence async-compute queue references BLAS/buffers,
+/// `RETIRE_DELAY` must grow to match the new horizon — see [`RETIRE_DELAY`]'s
+/// doc.
+///
+/// # Golden byte-identity (O(1) early-out)
+///
+/// A scene that never lets any asset's refcount reach zero (the golden scene:
+/// every load is held for the run's duration) never enqueues a `FreeEntry` or
+/// an orphan — `free.is_empty() && orphans.is_empty()` short-circuits with
+/// two `bool` reads and zero world mutation, zero device calls. The rewrite
+/// below is idempotent in any case (same store state -> same device calls),
+/// so this never perturbs a rendered frame.
+///
+/// `scratch` is a host-owned, reusable buffer (parked across frames) — zero
+/// steady-state allocation.
+pub fn retire_deferred_frees(
+    world: &mut EcsMaster,
+    ctx: &VulkanContext,
+    epoch: u64,
+    scratch: &mut Vec<FreeEntry>,
+) {
+    debug_assert_eq!(
+        RETIRE_DELAY,
+        FRAMES_IN_FLIGHT as u64,
+        "invariant: RETIRE_DELAY must equal the ring's fence horizon (FRAMES_IN_FLIGHT) — \
+         see retire_deferred_frees' fence-gate proof"
+    );
+
+    let free_empty = world.resource::<DeferredFree>().is_empty();
+    let orphans_empty = world.non_send_resource::<OrphanedMeshGpu>().is_empty();
+    if free_empty && orphans_empty {
+        return;
+    }
+
+    world.resource_mut::<DeferredFree>().drain_ready(epoch, scratch);
+
+    if !scratch.is_empty() {
+        {
+            let mesh_assets = world.non_send_resource_mut::<Assets<MeshGpu>>();
+            for entry in scratch.iter().filter(|e| e.kind == AssetRefKind::Mesh) {
+                // INVARIANT: `retire` targets a Retiring row by construction — every
+                // entry here came from a `RetireTicket` `dec_ref` issued exactly once
+                // (F5 Decision 5: resurrection is impossible once Retiring), so no
+                // recheck is needed here (see `Assets::retire`'s own debug assert).
+                if let Some(mesh) = mesh_assets.retire(entry.slot) {
+                    // R2a-3 (P0-3): free the AS FIRST — its memory lives in its backing
+                    // buffer, which must outlive it (mirrors `MeshAssetsExt::destroy`).
+                    #[cfg(feature = "hwrt")]
+                    if let Some(b) = mesh.blas {
+                        // SAFETY: the fence for this `epoch` has been waited via
+                        // `wait_frame_in_flight` (the caller's contract above), so every
+                        // submit that could reference this mesh's BLAS is complete — the
+                        // per-resource form of the device-idle contract this fn's own
+                        // fence-gate proof establishes.
+                        unsafe { boyko_rhi_vulkan::accel_build::destroy_blas(ctx, b) };
+                    }
+                    // SAFETY: same fence-gate contract as the BLAS destroy above —
+                    // `epoch`'s fence was waited via `wait_frame_in_flight` before this
+                    // call, so no submit can still reference `mesh`'s buffers; `retire`
+                    // guarantees this value is moved out exactly once.
+                    unsafe {
+                        ctx.destroy_buffer(mesh.vertex_buffer);
+                        ctx.destroy_buffer(mesh.index_buffer);
+                    }
+                }
+            }
+        }
+        {
+            let material_assets = world.resource_mut::<Assets<MaterialGpu>>();
+            for entry in scratch.iter().filter(|e| e.kind == AssetRefKind::Material) {
+                // `MaterialGpu` is `NEEDS_TEARDOWN = false` (device-free POD) — no
+                // destroy call needed, only the store-slot retire.
+                let _ = material_assets.retire(entry.slot);
+            }
+        }
+    }
+
+    world.non_send_resource_mut::<OrphanedMeshGpu>().drain_ready(epoch, ctx);
 }
 
 #[cfg(test)]
@@ -382,19 +620,25 @@ mod tests {
         let handle = assets.add(MaterialGpu::default());
         let slot = handle.index();
         let mut free = DeferredFree::default();
+        const EPOCH: u64 = 10;
 
-        let _ = apply_one(&mut assets, &mut free, AssetRefKind::Material, slot, GEN_UNSYNCED, 1);
+        let _ = apply_one(&mut assets, &mut free, AssetRefKind::Material, slot, GEN_UNSYNCED, 1, EPOCH);
         assert!(free.is_empty(), "refcount 0->1 must not enqueue a retire");
 
-        let _ = apply_one(&mut assets, &mut free, AssetRefKind::Material, slot, GEN_UNSYNCED, 1);
+        let _ = apply_one(&mut assets, &mut free, AssetRefKind::Material, slot, GEN_UNSYNCED, 1, EPOCH);
         assert!(free.is_empty(), "refcount 1->2 must not enqueue a retire");
 
-        let _ = apply_one(&mut assets, &mut free, AssetRefKind::Material, slot, GEN_UNSYNCED, -1);
+        let _ = apply_one(&mut assets, &mut free, AssetRefKind::Material, slot, GEN_UNSYNCED, -1, EPOCH);
         assert!(free.is_empty(), "refcount 2->1 must not enqueue a retire");
 
-        let _ = apply_one(&mut assets, &mut free, AssetRefKind::Material, slot, GEN_UNSYNCED, -1);
+        let _ = apply_one(&mut assets, &mut free, AssetRefKind::Material, slot, GEN_UNSYNCED, -1, EPOCH);
         assert_eq!(free.entries().len(), 1, "refcount 1->0 must enqueue exactly one retire");
         assert_eq!(free.entries()[0].slot, slot);
+        assert_eq!(
+            free.entries()[0].retire_frame,
+            EPOCH + RETIRE_DELAY,
+            "the enqueued entry must stamp the real fence-gated retire_frame, not a placeholder"
+        );
     }
 
     /// `Assets::add` mints refcount 0 (see the sibling test's doc) — `inc_ref`
@@ -407,17 +651,211 @@ mod tests {
         let handle = assets.add(MaterialGpu::default());
         let slot = handle.index();
         let mut free = DeferredFree::default();
+        const EPOCH: u64 = 10;
 
-        let _ = apply_one(&mut assets, &mut free, AssetRefKind::Material, slot, GEN_UNSYNCED, 1);
+        let _ = apply_one(&mut assets, &mut free, AssetRefKind::Material, slot, GEN_UNSYNCED, 1, EPOCH);
 
-        let _ = apply_one(&mut assets, &mut free, AssetRefKind::Material, slot, GEN_UNSYNCED, -1);
+        let _ = apply_one(&mut assets, &mut free, AssetRefKind::Material, slot, GEN_UNSYNCED, -1, EPOCH);
         assert_eq!(free.entries().len(), 1, "the first zero-crossing decrement enqueues once");
 
-        let _ = apply_one(&mut assets, &mut free, AssetRefKind::Material, slot, GEN_UNSYNCED, -1);
+        let _ = apply_one(&mut assets, &mut free, AssetRefKind::Material, slot, GEN_UNSYNCED, -1, EPOCH);
         assert_eq!(
             free.entries().len(),
             1,
             "a second decrement on an already-Retiring slot must not enqueue again"
+        );
+    }
+
+    /// A tiny deterministic xorshift32 PRNG — reproducible churn without a new
+    /// `rand`/`proptest` dev-dependency (`boyko_render` has neither today).
+    struct Xorshift32(u32);
+    impl Xorshift32 {
+        fn next_u32(&mut self) -> u32 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            self.0 = x;
+            x
+        }
+    }
+
+    /// CPU churn stress (asset-streaming plan F6): a long-running simulated
+    /// spawn/despawn churn over `Assets<MaterialGpu>`, driving the EXACT same
+    /// `apply_one` (enqueue) -> `DeferredFree::drain_ready` (fence-gate) ->
+    /// `Assets::retire` (terminal free) pipeline
+    /// [`retire_deferred_frees`]'s material branch runs — MINUS the actual
+    /// device call (`MaterialGpu` is `NEEDS_TEARDOWN = false`; its branch in
+    /// `retire_deferred_frees` is ALREADY just `let _ = material_assets.retire(..)`
+    /// with no device touch, so this test exercises that branch's real logic
+    /// verbatim, not a stand-in). `retire_deferred_frees` itself cannot be
+    /// called from a unit test — it takes `&VulkanContext`, which has no
+    /// public/testable constructor outside a real device boot (see this
+    /// module's sibling suites, which likewise never call it directly); the
+    /// mesh side's BLAS-before-buffer destroy CALL ORDER therefore needs a
+    /// real device and is covered instead by the `#[ignore]`d windowed churn
+    /// test (`boyko_app`'s `asset_streaming_f6_churn_headless.rs`).
+    ///
+    /// Over many simulated epochs: some live slots are despawned (a `-1` that
+    /// reaches zero, enqueuing a `FreeEntry` stamped `epoch + RETIRE_DELAY`),
+    /// fresh slots are spawned (`add` + a `+1`), and every epoch drains
+    /// whatever is fence-ready. Asserts, across the WHOLE run:
+    /// - **No leak / no double-free**: every `add` ends up EITHER still alive
+    ///   (a live slot at the end) OR retired EXACTLY ONCE — never both, never
+    ///   neither (`create_count == destroy_count + assets.len()`).
+    /// - **No retire before its horizon**: every drained entry's
+    ///   `retire_frame <= `the epoch it drained at (the same property test
+    ///   (a) proves for `drain_ready` in isolation, re-checked here under
+    ///   sustained multi-slot churn rather than a hand-picked few entries).
+    /// - **Free-list reuse actually happens**: `high_water()` stays far below
+    ///   `create_count` (a broken reuse path would grow it 1:1 with every
+    ///   spawn).
+    #[test]
+    fn material_churn_over_many_epochs_never_leaks_or_double_frees_and_respects_the_horizon() {
+        use std::collections::HashSet;
+
+        const INITIAL_SLOTS: usize = 32;
+        const CHURN_EPOCHS: u64 = 400;
+        const DRAIN_TAIL_EPOCHS: u64 = 16; // >> RETIRE_DELAY — drains every straggler.
+        const MAX_CHURN_PER_EPOCH: usize = 3;
+
+        let mut assets = Assets::<MaterialGpu>::with_reserved(INITIAL_SLOTS);
+        let mut free = DeferredFree::default();
+        let mut scratch: Vec<FreeEntry> = Vec::new();
+        let mut rng = Xorshift32(0xC0FF_EE01);
+
+        let mut live_slots: Vec<u32> = Vec::new();
+        // Keyed by (slot, generation-at-retire), not bare slot — see the drain loops'
+        // comments for why bare-slot double-insert would be a false positive.
+        let mut destroyed: HashSet<(u32, u32)> = HashSet::new();
+        let mut create_count: u64 = 0;
+        let mut destroy_count: u64 = 0;
+
+        let spawn = |assets: &mut Assets<MaterialGpu>,
+                     free: &mut DeferredFree,
+                     epoch: u64,
+                     live_slots: &mut Vec<u32>,
+                     create_count: &mut u64| {
+            let handle = assets.add(MaterialGpu::default());
+            let slot = handle.index();
+            *create_count += 1;
+            // A `+1` delta's return is the lane-stamp generation (see `apply_one`'s
+            // doc), not an enqueue signal — a fresh 0->1 increment never enqueues a
+            // retire; `free` staying whatever it already was is the real assertion,
+            // implicitly proven by every `free.entries()` check elsewhere in this test.
+            let _ = apply_one(assets, free, AssetRefKind::Material, slot, GEN_UNSYNCED, 1, epoch);
+            live_slots.push(slot);
+        };
+
+        for epoch in 0..CHURN_EPOCHS {
+            // Despawn up to MAX_CHURN_PER_EPOCH live slots (a -1 that may or may not
+            // reach zero — every slot here has exactly one virtual owner, so it always
+            // reaches zero and enqueues).
+            let despawn_n = (rng.next_u32() as usize % (MAX_CHURN_PER_EPOCH + 1)).min(live_slots.len());
+            for _ in 0..despawn_n {
+                let pick = rng.next_u32() as usize % live_slots.len();
+                let slot = live_slots.swap_remove(pick);
+                let gen_ = assets.generation(slot);
+                let enqueued_before = free.entries().len();
+                // A `-1` delta's return is always `None` regardless of enqueue (see
+                // `apply_one`'s match arm) — the enqueue side-effect is only observable
+                // via `free.entries()`, checked below.
+                let _ =
+                    apply_one(&mut assets, &mut free, AssetRefKind::Material, slot, gen_, -1, epoch);
+                assert_eq!(
+                    free.entries().len(),
+                    enqueued_before + 1,
+                    "the sole owner's despawn must retire the slot (single-owner model)"
+                );
+            }
+
+            // Spawn up to MAX_CHURN_PER_EPOCH fresh slots.
+            let spawn_n = (rng.next_u32() as usize % (MAX_CHURN_PER_EPOCH + 1)) + 1;
+            for _ in 0..spawn_n {
+                spawn(&mut assets, &mut free, epoch, &mut live_slots, &mut create_count);
+            }
+
+            // Drain whatever is fence-ready THIS epoch and retire it — mirrors
+            // `retire_deferred_frees`'s material branch exactly (see this test's doc).
+            free.drain_ready(epoch, &mut scratch);
+            for entry in &scratch {
+                assert!(
+                    entry.retire_frame <= epoch,
+                    "drain_ready must never yield an entry before its own fence horizon"
+                );
+                // Keyed by (slot, generation-AT-retire-time), not bare slot: the same
+                // numeric slot legitimately gets retired MULTIPLE times over the run
+                // (LIFO reuse re-tenants it) — a real double-free is retiring the SAME
+                // tenancy (slot, generation) twice, not merely reusing an index.
+                let gen_before_retire = assets.generation(entry.slot);
+                assert!(
+                    destroyed.insert((entry.slot, gen_before_retire)),
+                    "slot {} generation {} must be retired at most once — a repeat means a \
+                     double-free of the SAME tenancy",
+                    entry.slot,
+                    gen_before_retire
+                );
+                let taken = assets.retire(entry.slot);
+                assert!(taken.is_some(), "a Loaded->Retiring MaterialGpu row always holds a value");
+                destroy_count += 1;
+            }
+        }
+
+        // Seed INITIAL_SLOTS extra rows too (via `add`, no owner) so the store starts
+        // from a nontrivial base, matching a real boot (slot 0 pinned defaults, etc.) —
+        // these are never churned, only counted, proving churn coexists with a stable
+        // baseline population without cross-contamination.
+        for _ in 0..INITIAL_SLOTS {
+            let h = assets.add(MaterialGpu::default());
+            create_count += 1;
+            live_slots.push(h.index());
+        }
+
+        // Tail: no more churn, just drain every straggler past its horizon.
+        for epoch in CHURN_EPOCHS..(CHURN_EPOCHS + DRAIN_TAIL_EPOCHS) {
+            free.drain_ready(epoch, &mut scratch);
+            for entry in &scratch {
+                let gen_before_retire = assets.generation(entry.slot);
+                assert!(
+                    destroyed.insert((entry.slot, gen_before_retire)),
+                    "slot {} generation {} must be retired at most once — a repeat means a \
+                     double-free of the SAME tenancy",
+                    entry.slot,
+                    gen_before_retire
+                );
+                let taken = assets.retire(entry.slot);
+                assert!(taken.is_some());
+                destroy_count += 1;
+            }
+        }
+
+        assert!(
+            free.is_empty(),
+            "every enqueued retire must have fully drained by the tail's end \
+             (DRAIN_TAIL_EPOCHS >> RETIRE_DELAY)"
+        );
+
+        // The conservation law: every `add` ends up EITHER still alive OR retired
+        // exactly once — never both, never neither.
+        assert_eq!(
+            create_count,
+            destroy_count + assets.len() as u64,
+            "no leak, no double-free: create_count must equal destroy_count + still-alive count"
+        );
+        assert_eq!(
+            assets.len(),
+            live_slots.len(),
+            "the store's live count must match the model's still-owned slot set"
+        );
+
+        // Free-list reuse actually happened: high_water stays far below the total
+        // number of `add` calls (a broken reuse path would grow it 1:1 with churn).
+        assert!(
+            (assets.high_water() as u64) < create_count,
+            "high_water ({}) must stay below create_count ({}) — free-list reuse must have \
+             recycled retired slots, not appended a fresh row for every spawn",
+            assets.high_water(),
+            create_count
         );
     }
 }

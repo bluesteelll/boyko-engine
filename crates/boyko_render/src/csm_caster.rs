@@ -104,7 +104,7 @@ impl CsmCasterScratch {
     /// `vkCmdDrawIndexed` per batch into each cascade.
     #[inline]
     pub fn batches(&self) -> &[DrawBatch] {
-        &self.0.batches
+        self.0.batches.as_read_slice()
     }
 
     /// The contiguous caster instance ring — every gathered caster's 48-byte
@@ -113,7 +113,7 @@ impl CsmCasterScratch {
     /// list; the depth VS indexes `ring[base_instance + SV_InstanceID]`.
     #[inline]
     pub fn ring(&self) -> &[InstanceModelCol] {
-        &self.0.ring
+        self.0.ring.as_read_slice()
     }
 }
 
@@ -181,9 +181,13 @@ pub fn gather_shadow_casters(
     // and inert on the caster scratch. Reuses the one gather core (refined-B).
     scratch.0.gather_mixed_into(
         mesh_count,
+        // INVARIANT (asset-streaming plan F6 FIX-2): never dereference a non-Loaded
+        // slot — see `mesh_draw::gather_mesh_draws`'s identical fix for the full
+        // rationale (a graceful skipped-batch, not a dependence on
+        // `validate_asset_refs` having caught this mesh's retire in time).
         |mesh_id| {
-            let m = mesh_assets.mesh(MeshHandle(mesh_id));
-            (m.index_count, m.index_type)
+            let m = mesh_assets.try_get(MeshHandle(mesh_id))?;
+            Some((m.index_count, m.index_type))
         },
         // slot resolved by index; staleness is caught by validate_asset_refs earlier this frame (apply→validate→gather)
         || q.iter().map(|(h, col)| (h.0, col, None)),
@@ -276,13 +280,13 @@ mod tests {
     /// A fake registry `meta`: mesh `m` has `index_count = 6 * (m + 1)` and alternating
     /// index width — identical to the `mesh_draw` scaffold so the caster gather is proven
     /// to carry the same O3 mixed-width batch fields.
-    fn meta(mesh_id: u32) -> (u32, IndexType) {
+    fn meta(mesh_id: u32) -> Option<(u32, IndexType)> {
         let width = if mesh_id.is_multiple_of(2) {
             IndexType::Uint16
         } else {
             IndexType::Uint32
         };
-        (6 * (mesh_id + 1), width)
+        Some((6 * (mesh_id + 1), width))
     }
 
     /// One `(mesh_id, &InstanceModelCol)` input plus its `is_caster` structural flag —
@@ -412,8 +416,8 @@ mod tests {
         main.gather_mixed_into(2, meta, || rows.iter().map(|r| (r.mesh_id, &r.col, None)));
 
         assert_eq!(casters.batch_count(), main.batch_count());
-        assert_eq!(casters.batches(), main.batches.as_slice());
-        assert_eq!(casters.ring(), main.ring.as_slice());
+        assert_eq!(casters.batches(), main.batches.as_read_slice());
+        assert_eq!(casters.ring(), main.ring.as_read_slice());
     }
 
     /// Re-running the caster gather REUSES the scratch's capacity (Principle 5): a large

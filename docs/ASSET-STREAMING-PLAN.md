@@ -290,6 +290,42 @@ Ordering: F1 store under a green byte-identity gate → F2 lifecycle/refcount �
   save in-tree; same-build round-trips serialize the lane). Also confirm the deserialize path does not fire the
   carrier hooks without the lane present (a `-1` with `GEN_UNSYNCED` against a never-incremented refcount).
 
+**F6 locked mechanism (architect→soundness-critic, design-locked):** full design = scratchpad `f6_design_full.md`.
+- **Clock = a dedicated `submission_epoch: u64`, NOT the runner's `frame_index`.** The jitter/SDFDDGI `frame_index`
+  (runner.rs:468) advances on pre-acquire recreate-SKIPS where NO submit happened → runs AHEAD of GPU submits →
+  gating on it UNDER-gates → UAF. The correct clock is a new `Renderer.submission_epoch` incremented at the ring
+  advance (frame_driver.rs:460, reached only on a committed `vkQueueSubmit`). Published into a `RenderEpoch(u64)`
+  resource; `apply_one` stamps `retire_frame = epoch + FRAMES_IN_FLIGHT` (replaces F2's placeholder 0);
+  `retire_deferred_frees` drains `retire_frame <= epoch`.
+- `retire_deferred_frees` is a HOST STEP at runner.rs:536 (right after `wait_frame_in_flight`), NOT a Main-schedule
+  system (the schedule runs before the fence wait). `Assets::retire(slot)` = a Retiring-gated sibling of `remove`
+  (take_at + gen-bump→Vacant + refcount 0 + free-list push + free_epoch++); device teardown BLAS-BEFORE-buffer.
+  Fill-reject orphans (rejected `MeshGpu` with live buffers) route through a `!Send OrphanedMeshGpu` queue on the
+  same fence gate (FreeEntry can't name MeshGpu). Resurrection needs NO retire-time recheck (F5 `inc_ref` refuses a
+  Retiring slot → refcount provably 0 at retire; slot off the free-list until retire → no ABA).
+- **BLOCKER FIX 1 (hwrt, critic):** the per-frame TLAS `blas_addr` table is refreshed only when
+  `blas_generation == high_water()` advances — but retire+REUSE does NOT change `col.count()` → `blas_addr[reused]`
+  keeps the FREED BLAS device address → GPU-UAF on the ray dispatch. FIX: write `blas_addr[slot]` at BLAS-INSTALL
+  time (add/fill/register_mesh), decoupled from the high_water gate, so a reused slot's address is refreshed on the
+  re-add. + an hwrt churn test asserting no stale device address survives a retire+reuse.
+- **BLOCKER FIX 2 (retire-before-resolve, critic):** retire at :536 frees a slot the same frame the buffer resolve
+  at runner.rs:856 (`mesh().expect()` → PANIC on Vacant) and the submit at :1030 (GPU-UAF under hwrt) run — and the
+  gather (:512, pre-retire) may still contain that slot if `validate` (best-effort: add-order edge + lane-less
+  carriers) didn't disable it. FIX: route the :856 resolve AND the TLAS-instance gather through `try_get`/`get_by_index`
+  and SKIP a slot that does not resolve to a live Loaded row (never `.expect()`) → any retired-slot-in-batch becomes a
+  graceful skip BY CONSTRUCTION, independent of validate. State the invariant "the resolve/TLAS gather never
+  dereferences a non-Loaded slot."
+- **MAJOR FIX (test gate, critic):** the CPU/mock tests (deterministic fence-order, Miri-TB exactly-once, CPU churn)
+  do NOT exercise the real fence-gated DEVICE free (goldens never retire). ADD a headless REAL-DEVICE churn
+  integration test (hwrt + non-hwrt) that drives the frame loop, spawns/despawns to force `retire_deferred_frees`
+  against live device resources with VALIDATION LAYERS ON (assert zero VUID/UAF), destroy_count == create_count,
+  free-list/live/high_water consistent. Run by the orchestrator (subagents can't run fresh GPU exes, os-740).
+- Moderates: DROP the `submission_epoch % FIF == frame_index` debug_assert (false after `recreate` resets
+  frame_index=0; recreate's `device_wait_idle` backstops the horizon) — keep only `RETIRE_DELAY == FIF` + monotonic.
+  RECONCILE the `destroy_blas`/`destroy_buffer` "device-idle" SAFETY docs with F6's weaker-but-sufficient per-resource
+  precondition ("the fence for `retire_frame` was waited → every submit referencing this resource is complete").
+  Mark `fill()`'s return `#[must_use]` + document the OrphanedMeshGpu routing obligation (leak guard).
+
 ## Test plan
 
 - **PORT VERBATIM:** `assets.rs` ~30 unit + 256-proptest (`Assets::<u64>` via `impl_asset_pod_backing!`).

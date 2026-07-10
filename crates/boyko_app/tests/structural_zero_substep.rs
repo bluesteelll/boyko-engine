@@ -55,7 +55,7 @@ fn gather_headless(
 ) {
     scratch.gather_mixed_into(
         1,
-        |_mesh| (36u32, IndexType::Uint16),
+        |_mesh| Some((36u32, IndexType::Uint16)),
         || q.iter().map(|(h, col, pair)| (h.0, col, pair)),
     );
 }
@@ -100,7 +100,7 @@ fn structural_spawn_on_zero_substep_frame_reaches_the_instance_ring() {
         0,
         "precondition: the first frame ran zero fixed substeps"
     );
-    let ring_before = app.world().resource::<MeshRenderScratch>().ring.clone();
+    let ring_before = app.world().resource::<MeshRenderScratch>().ring.as_read_slice().to_vec();
     assert_eq!(ring_before.len(), 1, "frame 1 gathered the first instance");
     // SAFETY: the fake slot's `mapped` points to the LIVE heap `storage` Vec of
     // exactly `size` bytes (outliving every upload), satisfying the memory
@@ -134,7 +134,8 @@ fn structural_spawn_on_zero_substep_frame_reaches_the_instance_ring() {
         "the gather output changed on the structural-change frame"
     );
     assert_ne!(
-        scratch.ring, ring_before,
+        scratch.ring.as_read_slice(),
+        ring_before.as_slice(),
         "the gathered ring differs from the pre-spawn frame"
     );
 
@@ -147,7 +148,7 @@ fn structural_spawn_on_zero_substep_frame_reaches_the_instance_ring() {
     // The upload happened: the slot's leading bytes are the NEW two records
     // (the second one did not exist before the spawn), proving a 0-substep
     // structural-change frame re-uploads — the P0-3 regression witness.
-    let expect: &[u8] = bytemuck::cast_slice(scratch.ring.as_slice());
+    let expect: &[u8] = bytemuck::cast_slice(scratch.ring.as_read_slice());
     assert_eq!(
         &storage[..expect.len()],
         expect,

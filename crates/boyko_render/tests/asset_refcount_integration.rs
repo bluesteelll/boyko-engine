@@ -39,7 +39,7 @@ use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::system::Commands;
 
-use boyko_render::{MaterialGpu, MeshGpu, apply_refcount_deltas};
+use boyko_render::{MaterialGpu, MeshGpu, RenderEpoch, apply_refcount_deltas};
 use boyko_scene::{DeferredFree, MaterialHandle, RefcountDeltas};
 
 /// Builds an `EcsMaster` with the F2 refcount pipeline's resources inserted
@@ -52,6 +52,9 @@ fn world_with(material_assets: Assets<MaterialGpu>) -> EcsMaster {
     let mut ecs = EcsMaster::new();
     ecs.insert_resource(RefcountDeltas::default());
     ecs.insert_resource(DeferredFree::default());
+    // Asset-streaming plan F6: `apply_refcount_deltas` now reads `RenderEpoch` to
+    // stamp a real fence-gated `retire_frame` — mirrors `AssetRefcountPlugin::build`.
+    ecs.insert_resource(RenderEpoch::default());
     ecs.insert_resource(material_assets);
     ecs.insert_non_send_resource(Assets::<MeshGpu>::default());
     // Prime the id (installs the on_insert/on_replace hooks) before any spawn —

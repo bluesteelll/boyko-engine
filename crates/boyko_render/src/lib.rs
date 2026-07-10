@@ -55,7 +55,10 @@
 /// ([`apply_refcount_deltas`](asset_refcount::apply_refcount_deltas)) that folds
 /// the `MeshHandle`/`MaterialHandle` carrier hooks' pushed deltas into the two
 /// GPU asset tables, plus the [`AssetRefcountPlugin`](asset_refcount::AssetRefcountPlugin)
-/// that wires it into the app schedule.
+/// that wires it into the app schedule. F6 adds the fence-gated device-free drain
+/// ([`retire_deferred_frees`](asset_refcount::retire_deferred_frees)), its
+/// [`RenderEpoch`](asset_refcount::RenderEpoch) clock resource, and
+/// [`RETIRE_DELAY`](asset_refcount::RETIRE_DELAY).
 pub mod asset_refcount;
 pub mod barrier;
 /// Light-object bundle presets ([`DirectionalLightObject`] / [`PointLightObject`]
@@ -246,7 +249,7 @@ pub mod ui;
 pub mod upload;
 pub mod view;
 
-pub use asset_refcount::{AssetRefcountPlugin, apply_refcount_deltas};
+pub use asset_refcount::{AssetRefcountPlugin, RETIRE_DELAY, RenderEpoch, apply_refcount_deltas, retire_deferred_frees};
 pub use barrier::{PlannedBarrier, lower_barriers};
 pub use bundles::{DirectionalLightObject, MeshBundle, PointLightObject, SpotLightObject};
 pub use csm_config::{
@@ -331,7 +334,7 @@ pub use loaders::{ObjMeshLoader, RonMaterialLoader};
 pub use material::{MATERIAL_GPU_WORDS, Material, MaterialGpu, MaterialId};
 pub use material_table::MaterialTable;
 pub use mesh::{MeshGpu, U16_INDEX_VERTEX_LIMIT, VERTEX_STRIDE as MESH_VERTEX_STRIDE, Vertex};
-pub use mesh_assets::{MeshAssetsExt, build_mesh_gpu};
+pub use mesh_assets::{MeshAssetsExt, OrphanedMeshGpu, build_mesh_gpu};
 pub use mesh_data::MeshData;
 pub use shadow_atlas::{
     ATLAS_SLOT_MASK, ATLAS_SLOT_SHIFT, CASTS_SHADOW_BIT, FaceTransform, M_SLOTS, POINT_FACE_COUNT,

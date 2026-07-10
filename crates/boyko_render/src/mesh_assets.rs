@@ -63,19 +63,23 @@
 //! BLAS. `Assets<T>` has no room for mesh-specific extra state, so
 //! [`blas_generation`](MeshAssetsExt::blas_generation) is derived instead from
 //! [`Assets::high_water`](boyko_ecs::ecs::core::asset::Assets::high_water) — the
-//! existing O(1) monotonic row-count high-water mark. This is
-//! BEHAVIOR-IDENTICAL, not merely "close enough":
-//! [`ray_query_enabled`](boyko_rhi_vulkan::device::VulkanContext::ray_query_enabled)
-//! is a FIXED per-process device capability (it never toggles mid-run), so on
-//! an RT device EVERY registration builds a BLAS (the two counters advance in
-//! lockstep, 1:1) and on a non-RT device the BLAS-sync call site is never
-//! reached at all (gated on `ray_query_enabled()` at the call site in
-//! `boyko_app::runner` / `gpu_scene::mod`) — so substituting `high_water()`
-//! changes nothing observable, at zero extra cost (an existing O(1) counter,
-//! not a new scan).
+//! existing O(1) monotonic row-count high-water mark. This stays a correct,
+//! useful metric for a scene that only ever GROWS (an RT device builds a BLAS
+//! on every registration — the two counters advance in lockstep, 1:1).
+//!
+//! It is, however, NOT the signal `TlasResources::sync_blas_addr`
+//! (`boyko_app::gpu_scene::tlas`) gates its `blas_addr` table refresh on
+//! (asset-streaming plan F6): a fence-gated retire-then-reuse installs a
+//! DIFFERENT mesh's BLAS at the SAME slot without advancing `high_water` (a
+//! free-list reuse overwrites a hole in place), which `blas_generation` alone
+//! cannot detect. `sync_blas_addr` instead gates on
+//! [`Assets::install_epoch`](boyko_ecs::ecs::core::asset::Assets::install_epoch),
+//! which advances on every `add`/`fill`, reuse included — see that fn's doc
+//! for the full argument.
 
 use boyko_ecs::ecs::core::asset::assets::Assets;
 use boyko_ecs::ecs::core::asset::handle::Handle;
+use boyko_ecs::ecs::core::resources::resource::NonSendResource;
 #[cfg(feature = "hwrt")]
 use boyko_rhi::AsIndexType;
 use boyko_rhi::enums::IndexType;
@@ -453,5 +457,81 @@ impl MeshAssetsExt for Assets<MeshGpu> {
         self.get_by_index(h.0)
             .and_then(|m| m.blas.as_ref())
             .map_or(0, |b| b.device_address)
+    }
+}
+
+/// Fill-reject `MeshGpu` values awaiting the fence-gated device-free pass
+/// (asset-streaming plan F6 Decision 4).
+///
+/// `Assets::fill`'s `Err((_, MeshGpu))` arm returns a value the store never
+/// took ownership of (a stale/double-fill target) — it still holds LIVE
+/// device buffers (and, under hwrt, a BLAS) with no `Drop` to free them.
+/// [`DeferredFree`](boyko_scene::DeferredFree) cannot carry it: a
+/// `FreeEntry` is a `slot: u32` into a store-owned row, and this value was
+/// never stored at all; `DeferredFree` itself is `Send + Sync` POD in
+/// `boyko_scene`, which cannot depend on the `!Send` `MeshGpu` (wrong crate
+/// direction) or hold a non-POD payload. This dedicated `!Send`
+/// `NonSendResource` is therefore the only correct home — a caller pushes
+/// the rejected value here with its own fence-gate stamp, and
+/// `retire_deferred_frees` (`boyko_render::asset_refcount`, F6) drains it on
+/// the same `epoch` gate as every store-owned retire.
+#[derive(Default)]
+pub struct OrphanedMeshGpu {
+    orphans: Vec<(MeshGpu, u64)>,
+}
+
+impl NonSendResource for OrphanedMeshGpu {}
+
+impl OrphanedMeshGpu {
+    /// Queues a fill-rejected `MeshGpu` value for teardown once every submit
+    /// that could reference it is fence-complete. `retire_frame` is the
+    /// caller-computed gate (`RenderEpoch` at reject time `+ RETIRE_DELAY`) —
+    /// strictly conservative here, since a value `fill` rejected was never
+    /// submitted at all (see the F6 design's proof C).
+    #[inline]
+    pub fn push(&mut self, mesh: MeshGpu, retire_frame: u64) {
+        self.orphans.push((mesh, retire_frame));
+    }
+
+    /// `true` if no orphan is awaiting teardown — the O(1) golden early-out
+    /// (no `fill` caller exists in-tree yet, so this is always `true` today).
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.orphans.is_empty()
+    }
+
+    /// Tears down (BLAS before its backing buffer, then the vertex/index
+    /// buffers — mirrors [`MeshAssetsExt::destroy`]'s ordering) every orphan
+    /// whose `retire_frame <= epoch`, retaining the rest in enqueue order.
+    /// Called ONLY by `retire_deferred_frees` (`boyko_render::asset_refcount`,
+    /// F6) AFTER `wait_frame_in_flight` for this `epoch` — the same
+    /// per-resource fence precondition every other F6 destroy call relies on.
+    pub fn drain_ready(&mut self, epoch: u64, ctx: &VulkanContext) {
+        let mut i = 0;
+        while i < self.orphans.len() {
+            if self.orphans[i].1 > epoch {
+                i += 1;
+                continue;
+            }
+            let (mesh, _) = self.orphans.remove(i);
+            // R2a-3 (P0-3): free the AS FIRST — its memory lives in its backing
+            // buffer, which must outlive it (mirrors `MeshAssetsExt::destroy`).
+            #[cfg(feature = "hwrt")]
+            if let Some(b) = mesh.blas {
+                // SAFETY: this value was NEVER submitted (the store rejected it
+                // before any draw could reference it — F6 design proof C), so
+                // no GPU work reads its AS/buffers; `remove` above guarantees
+                // it is destroyed exactly once.
+                unsafe { boyko_rhi_vulkan::accel_build::destroy_blas(ctx, b) };
+            }
+            // SAFETY: `mesh.vertex_buffer` / `mesh.index_buffer` were created
+            // by the failed upload attempt on this same `ctx`; the value was
+            // never submitted (see above), so no GPU work references them;
+            // the by-value move destroys each exactly once.
+            unsafe {
+                ctx.destroy_buffer(mesh.vertex_buffer);
+                ctx.destroy_buffer(mesh.index_buffer);
+            }
+        }
     }
 }
