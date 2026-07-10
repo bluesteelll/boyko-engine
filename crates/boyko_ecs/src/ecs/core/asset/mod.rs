@@ -56,7 +56,7 @@ pub mod server;
 pub mod staging;
 
 pub use asset::{Asset, AssetLoadState};
-pub use assets::{Assets, RetireTicket};
+pub use assets::{Assets, GEN_UNSYNCED, RetireTicket};
 pub use backing::{AssetBacking, register_asset_layout};
 pub use error::AssetError;
 pub use handle::Handle;

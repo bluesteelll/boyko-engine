@@ -35,18 +35,31 @@
 //! # Streaming fields — refcount wired at F2, the rest still inert
 //!
 //! [`inc_ref`](Assets::inc_ref) / [`dec_ref`](Assets::dec_ref) (asset-streaming
-//! plan F2) are the refcount lifetime driver: a carrier hook (`on_insert` /
-//! `on_replace` on a `boyko_scene` `MeshHandle` / `MaterialHandle`) pushes a
-//! delta, a `boyko_render` apply system folds it in, and
-//! [`dec_ref`](Assets::dec_ref) reaching zero on an unpinned row marks it
-//! `Retiring` (see [`STATE_RETIRING`]), bumps
+//! plan F2, gen-checked as of F5) are the refcount lifetime driver: a carrier
+//! hook (`on_insert` / `on_replace` on a `boyko_scene` `MeshHandle` /
+//! `MaterialHandle`) pushes a delta, a `boyko_render` apply system folds it
+//! in, and [`dec_ref`](Assets::dec_ref) reaching zero on an unpinned row marks
+//! it `Retiring` (see [`STATE_RETIRING`]), bumps
 //! [`free_epoch`](Assets::free_epoch), sets [`dirty`](Assets::dirty), and
 //! returns a [`RetireTicket`] the caller enqueues into the (still-undrained)
 //! deferred-free queue. [`pin`](Assets::pin) marks a row NEVER-RETIRE (slot 0,
-//! the default asset). The generation-checked validation (a `MeshRefGen`/
-//! `MaterialRefGen` lane pair, `validate_asset_refs`) and the actual
-//! fence-gated device teardown (`retire_deferred_frees`) are later rungs
-//! (F5/F6) — F2 only marks and enqueues.
+//! the default asset).
+//!
+//! # F5 — the generation gen-check closes the stale-decrement/reuse hole
+//!
+//! [`inc_ref`](Assets::inc_ref) now refuses (returns `false`, no mutation) a
+//! `Retiring`/`Vacant` target — the sole resurrection hazard (a carrier
+//! binding an already-`Retiring` slot); see its doc for the F5/F6 boundary
+//! this establishes. [`dec_ref`](Assets::dec_ref) now takes the carrier's
+//! bind-time `slot` generation and no-ops (no mutation, no `RetireTicket`) on
+//! a mismatch — a stale weak `Handle`/carrier decrementing a slot that was
+//! since retired-and-reused would otherwise corrupt the new tenant's
+//! refcount; [`GEN_UNSYNCED`] bypasses the check for the same-frame
+//! bound-but-not-yet-synced window. The generation-checked validation (a
+//! `MeshRefGen`/`MaterialRefGen` lane pair, `boyko_render`'s
+//! `validate_asset_refs`) is the best-effort net over these two durable
+//! guards; the actual fence-gated device teardown (`retire_deferred_frees`)
+//! is F6.
 //!
 //! Removal (see [`Assets::remove`]) stays FULLY SYNCHRONOUS (immediate
 //! `take_at` + move-out + generation bump + free-list push) — the
@@ -94,6 +107,16 @@ const STATE_FAILED: u32 = 3;
 /// resolve — see [`Assets::get_by_index`]'s doc for the `live`-gated
 /// discriminator between the two.
 const STATE_RETIRING: u32 = 4;
+
+/// Sentinel generation (asset-streaming plan F5): marks a `boyko_scene`
+/// `MeshRefGen`/`MaterialRefGen` lane as "bound this frame, not yet
+/// gen-stamped by `apply_refcount_deltas`", and is the value
+/// [`Assets::dec_ref`] treats as "skip the gen-check" (the
+/// bound-but-not-yet-synced window, where no reuse can have happened — reuse
+/// requires a prior-frame sync). Real generations are 29-bit
+/// (`< 2^29`, see [`pack_slot_word`]'s doc), so `u32::MAX` never collides
+/// with one.
+pub const GEN_UNSYNCED: u32 = u32::MAX;
 
 /// Packs `generation` (high 29 bits) and `state` (low 3 bits) into one `u32`.
 ///
@@ -665,13 +688,28 @@ impl<T: AssetBacking> Assets<T> {
         })
     }
 
-    /// The generation currently stamped on dense row `slot` (streaming
-    /// plumbing — F2's ref-gen validation reads this). Inert in F1.
+    /// The generation currently stamped on dense row `slot` — `boyko_render`'s
+    /// `apply_refcount_deltas` reads this on a `+1` delta to re-sync the
+    /// carrier's `MeshRefGen`/`MaterialRefGen` lane (asset-streaming plan F5).
+    ///
+    /// # Panics
+    /// If `slot >= `[`Self::high_water`] — every caller resolves `slot` from a
+    /// carrier that is (or just was) live, so this is an invariant violation,
+    /// not a user error.
     #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn generation(&self, slot: u32) -> u32 {
+    pub fn generation(&self, slot: u32) -> u32 {
         let word = self.slot_word.get(slot as usize).expect("invariant: slot < slot_word.len()");
         unpack_generation(word)
+    }
+
+    /// OOR-safe twin of [`Self::generation`] — `None` if `slot >=`
+    /// [`Self::high_water`] (asset-streaming plan F5: `validate_asset_refs`
+    /// probes a bare carrier-held `u32` index, which — unlike every other
+    /// caller of [`Self::generation`] — is not guaranteed in-range for a
+    /// malformed/stale carrier).
+    #[inline]
+    pub fn try_generation(&self, slot: u32) -> Option<u32> {
+        self.slot_word.get(slot as usize).map(unpack_generation)
     }
 
     /// The [`AssetLoadState`] currently stamped on dense row `slot`, bypassing
@@ -680,8 +718,10 @@ impl<T: AssetBacking> Assets<T> {
     ///
     /// # Panics (debug only)
     /// If `slot`'s packed state is `Vacant`/`Retiring` — neither has an
-    /// `AssetLoadState` mapping until F2 wires `Retiring`-aware validation;
-    /// callers today only ever reach a `Loading`/`Loaded`/`Failed` row.
+    /// `AssetLoadState` mapping. Cross-crate callers that cannot guarantee
+    /// `slot` resolves to a `Loading`/`Loaded`/`Failed` row (e.g. a malformed
+    /// carrier) MUST use [`Self::state_of_index`] instead, which has no such
+    /// precondition.
     #[inline]
     #[allow(dead_code)]
     pub(crate) fn state_of(&self, slot: u32) -> AssetLoadState {
@@ -693,11 +733,28 @@ impl<T: AssetBacking> Assets<T> {
             other => {
                 debug_assert!(
                     false,
-                    "state_of: slot {slot} is Vacant/Retiring (packed state {other}) — no \
-                     AssetLoadState mapping exists until F2 wires Retiring-aware validation"
+                    "state_of: slot {slot} is Vacant/Retiring (packed state {other}) — \
+                     no AssetLoadState mapping; cross-crate callers must use state_of_index"
                 );
                 AssetLoadState::Failed
             }
+        }
+    }
+
+    /// OOR/`Vacant`/`Retiring`-safe twin of [`Self::state_of`] (asset-streaming
+    /// plan F5): `None` for an out-of-range `slot`, a never-minted/freed
+    /// `Vacant` row, or a `Retiring` row (neither has an `AssetLoadState`
+    /// mapping); `Some` otherwise. The sanctioned cross-crate probe —
+    /// `validate_asset_refs` calls this on a bare carrier-held index that may
+    /// name any row state, including a malformed carrier's out-of-range one.
+    #[inline]
+    pub fn state_of_index(&self, slot: u32) -> Option<AssetLoadState> {
+        let word = self.slot_word.get(slot as usize)?;
+        match unpack_state(word) {
+            STATE_LOADING => Some(AssetLoadState::Loading),
+            STATE_LOADED => Some(AssetLoadState::Loaded),
+            STATE_FAILED => Some(AssetLoadState::Failed),
+            _ => None,
         }
     }
 
@@ -706,8 +763,7 @@ impl<T: AssetBacking> Assets<T> {
     /// [`Self::remove`] and, as of F2, by [`Self::dec_ref`] on a Retiring
     /// transition).
     #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn free_epoch(&self) -> u64 {
+    pub fn free_epoch(&self) -> u64 {
         self.free_epoch
     }
 
@@ -729,16 +785,37 @@ impl<T: AssetBacking> Assets<T> {
     /// [`Self::add`]/[`Self::reserve`] always mint a fresh row at refcount 0
     /// (an unattached load has no owner yet).
     ///
-    /// A no-op if `slot` is out of range: F2 carries no generation check on
-    /// the hook-pushed delta (F5 adds one), so a carrier value that never
-    /// resolved to a minted row must not panic.
+    /// Returns `true` iff the refcount was actually incremented.
+    ///
+    /// # State-guarded (F5 Decision 5) — refuses `Retiring`/`Vacant`
+    ///
+    /// A no-op (`false`, refcount untouched) if `slot` is out of range, or its
+    /// row is `Retiring`/`Vacant`. The `Retiring` refusal is the sole
+    /// resurrection-hazard guard: a carrier binding an ALREADY-`Retiring` slot
+    /// (refcount 0, already queued for a future fence-gated free) must not
+    /// resurrect it — this call no-ops (the real refcount never rises above
+    /// 0), the slot stays queued and always eventually dies, and
+    /// `validate_asset_refs` (F5) disables/substitutes the carrier once it
+    /// observes the non-`Loaded` state. This is the exact F5/F6 boundary: F5
+    /// guarantees a `Retiring` slot's refcount can never rise again, so a
+    /// future F6 `retire_deferred_frees` needs no retire-time refcount
+    /// recheck — it can free unconditionally.
     #[inline]
-    pub fn inc_ref(&mut self, slot: u32) {
+    pub fn inc_ref(&mut self, slot: u32) -> bool {
         let idx = slot as usize;
-        if let Some(count) = self.refcount.get(idx) {
-            debug_assert!(count < u32::MAX, "invariant: refcount overflow at slot {slot}");
-            self.refcount.set(idx, count + 1);
+        let Some(word) = self.slot_word.get(idx) else {
+            return false;
+        };
+        if !matches!(unpack_state(word), STATE_LOADING | STATE_LOADED | STATE_FAILED) {
+            return false;
         }
+        let count = self
+            .refcount
+            .get(idx)
+            .expect("invariant: refcount column is 1:1 with slot_word (see with_reserved)");
+        debug_assert!(count < u32::MAX, "invariant: refcount overflow at slot {slot}");
+        self.refcount.set(idx, count + 1);
+        true
     }
 
     /// Decrements the live-refcount of dense row `slot` — the carrier DETACH
@@ -766,6 +843,20 @@ impl<T: AssetBacking> Assets<T> {
     /// A no-op (`None`) if `slot` is out of range — same rationale as
     /// [`Self::inc_ref`].
     ///
+    /// # Gen-checked (F5 Decision 4) — closes the stale-decrement/reuse hole
+    ///
+    /// `gen_` is the carrier's BIND-time generation (the sibling
+    /// `MeshRefGen`/`MaterialRefGen` lane the `on_replace` hook captured while
+    /// the row was still live — see `boyko_scene::render_caps`'s hook doc). If
+    /// `gen_ != `[`GEN_UNSYNCED`]` and `gen_` does not match `slot`'s CURRENT
+    /// generation, this is a no-op (`None`, refcount untouched): the slot was
+    /// retired-and-reused underneath a lost/stale ref since this carrier last
+    /// synced, so decrementing here would corrupt the NEW tenant's refcount
+    /// (FIX-B / W2). `GEN_UNSYNCED` bypasses the check — the same-frame
+    /// bound-but-not-yet-synced window, where no reuse can have happened (a
+    /// reuse requires the slot to have gone `Retiring` then been freed by a
+    /// PRIOR frame's `retire_deferred_frees`).
+    ///
     /// # Only `on_replace` decrements (deviation from a literal 2-hook wire)
     ///
     /// The kernel's `on_replace` fires exactly once per value-departure event
@@ -782,9 +873,23 @@ impl<T: AssetBacking> Assets<T> {
     /// `on_replace` is wired to `dec_ref`; see `boyko_scene::render_caps`'s
     /// hook wiring.
     #[inline]
-    pub fn dec_ref(&mut self, slot: u32) -> Option<RetireTicket> {
+    pub fn dec_ref(&mut self, slot: u32, gen_: u32) -> Option<RetireTicket> {
         let idx = slot as usize;
         let word = self.slot_word.get(idx)?;
+        let cur_gen = unpack_generation(word);
+        if gen_ != GEN_UNSYNCED && gen_ != cur_gen {
+            return None;
+        }
+        // Tripwire (F5 Decision 4): a proceeding dec (i.e. control flow reaching
+        // this point, past the mismatch-return above) implies a gen match or the
+        // UNSYNCED bypass — restated explicitly so a future refactor that
+        // reorders this block cannot silently reintroduce the stale-decrement
+        // hole this check exists to close.
+        debug_assert!(
+            gen_ == GEN_UNSYNCED || gen_ == cur_gen,
+            "invariant: dec_ref must not proceed past the gen-check on a real mismatch \
+             (slot {slot}, gen_ {gen_}, cur_gen {cur_gen})"
+        );
         let state = unpack_state(word);
         if state == STATE_RETIRING || state == STATE_VACANT {
             return None;
@@ -1554,11 +1659,13 @@ mod tests {
     /// `(slot, gen, state)`-only model.
     ///
     /// The refcount/`Retiring` model is keyed by the DENSE SLOT INDEX (not by
-    /// `Handle`, i.e. not generation-checked) — this mirrors `inc_ref`/
-    /// `dec_ref`'s own real contract exactly: F2's hook-pushed `RefDelta`
-    /// carries only a raw `u32` slot (no generation lane; F5 adds one), so a
-    /// real apply-system fold can target ANY currently-minted slot regardless
-    /// of which generation currently occupies it.
+    /// `Handle`) and stays deliberately gen-oblivious (every `inc_ref`/
+    /// `dec_ref` call below passes [`GEN_UNSYNCED`], bypassing F5's gen-check)
+    /// — this proptest targets the refcount/idempotency/`free_epoch`
+    /// properties, not the gen-mismatch behavior (covered by the dedicated F5
+    /// unit tests), so a real apply-system fold can still be modeled as
+    /// targeting ANY currently-minted slot regardless of which generation
+    /// currently occupies it.
     ///
     /// `RemoveAt` on a handle whose slot the model has marked `Retiring` is
     /// deliberately SKIPPED (not routed to `assets.remove`), with a comment at
@@ -1730,10 +1837,30 @@ mod tests {
                         RefOp::IncRefAt(pick) => {
                             if let Some(&handle) = minted.get(pick % minted.len().max(1)) {
                                 let slot = handle.index();
+                                // F5 Decision 5: inc_ref now refuses a Retiring/Vacant slot
+                                // (resurrection refusal) — the model already tracks both sets
+                                // (maintained by DecRefAt/RemoveAt above), so this arm asserts
+                                // the refusal is a true no-op alongside the live-slot success
+                                // case, rather than skipping the call.
+                                let is_retiring = retiring_model.contains(&slot);
+                                let is_vacant = vacant_model.contains(&slot);
                                 let real_before = assets.refcount.get(slot as usize);
-                                assets.inc_ref(slot);
+                                let incremented = assets.inc_ref(slot);
                                 let real_after = assets.refcount.get(slot as usize);
-                                if let Some(before) = real_before {
+                                if is_retiring || is_vacant {
+                                    prop_assert!(
+                                        !incremented,
+                                        "inc_ref must refuse a Retiring/Vacant slot (F5 Decision 5)"
+                                    );
+                                    prop_assert_eq!(
+                                        real_after, real_before,
+                                        "a refused inc_ref must not mutate the refcount"
+                                    );
+                                } else if let Some(before) = real_before {
+                                    prop_assert!(
+                                        incremented,
+                                        "inc_ref on a live (Loading/Loaded/Failed) slot must succeed"
+                                    );
                                     prop_assert_eq!(
                                         real_after, Some(before + 1),
                                         "inc_ref must increment the real refcount column by exactly 1"
@@ -1764,7 +1891,11 @@ mod tests {
                                 }
 
                                 let epoch_before = assets.free_epoch();
-                                let ticket = assets.dec_ref(slot);
+                                // GEN_UNSYNCED bypasses F5's gen-check — this proptest's model
+                                // is gen-oblivious by design (see the module doc): it targets
+                                // the refcount/idempotency/free_epoch properties, not the
+                                // gen-mismatch behavior (covered by the dedicated F5 unit tests).
+                                let ticket = assets.dec_ref(slot, GEN_UNSYNCED);
 
                                 if is_retiring || is_vacant {
                                     prop_assert!(
@@ -1829,8 +1960,8 @@ mod tests {
     fn get_by_index_returns_none_for_loading_row_retired_via_dec_ref() {
         let mut assets = Assets::<u64>::with_reserved(4);
         let h = assets.reserve(); // Loading, live=false
-        assets.inc_ref(h.index());
-        let ticket = assets.dec_ref(h.index());
+        assert!(assets.inc_ref(h.index()), "inc_ref on a Loading row must succeed");
+        let ticket = assets.dec_ref(h.index(), GEN_UNSYNCED);
         assert!(ticket.is_some(), "refcount 1->0 must retire the row");
         assert_eq!(
             assets.get_by_index(h.index()),
@@ -1846,8 +1977,8 @@ mod tests {
         let mut assets = Assets::<u64>::with_reserved(4);
         let h = assets.reserve();
         assets.fail(h); // Failed, live=false
-        assets.inc_ref(h.index());
-        let ticket = assets.dec_ref(h.index());
+        assert!(assets.inc_ref(h.index()), "inc_ref on a Failed row must succeed");
+        let ticket = assets.dec_ref(h.index(), GEN_UNSYNCED);
         assert!(ticket.is_some(), "refcount 1->0 must retire the row");
         assert_eq!(
             assets.get_by_index(h.index()),
@@ -1870,8 +2001,8 @@ mod tests {
     fn remove_on_retiring_row_after_dec_ref_reaches_zero() {
         let mut assets = Assets::<u64>::with_reserved(4);
         let h = assets.add(1);
-        assets.inc_ref(h.index());
-        let ticket = assets.dec_ref(h.index());
+        assert!(assets.inc_ref(h.index()), "inc_ref on a Loaded row must succeed");
+        let ticket = assets.dec_ref(h.index(), GEN_UNSYNCED);
         assert!(ticket.is_some(), "refcount 1->0 must retire the row");
 
         // The SAME handle (dec_ref never bumps generation) still resolves via
@@ -1886,10 +2017,265 @@ mod tests {
     fn state_on_retiring_row_after_dec_ref_reaches_zero() {
         let mut assets = Assets::<u64>::with_reserved(4);
         let h = assets.add(1);
-        assets.inc_ref(h.index());
-        let ticket = assets.dec_ref(h.index());
+        assert!(assets.inc_ref(h.index()), "inc_ref on a Loaded row must succeed");
+        let ticket = assets.dec_ref(h.index(), GEN_UNSYNCED);
         assert!(ticket.is_some(), "refcount 1->0 must retire the row");
 
         let _ = assets.state(h);
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // F5 store-level tests: dec_ref's gen-check, inc_ref's state guard,
+    // try_generation / state_of_index's OOR-safe cross-crate probes.
+    // ════════════════════════════════════════════════════════════════════
+
+    /// `dec_ref` with a generation that does not match the slot's CURRENT
+    /// generation must no-op entirely — no refcount mutation, no `free_epoch`
+    /// bump, no `RetireTicket` (asset-streaming plan F5 Decision 4 — closes
+    /// the stale-decrement/reuse corruption hole).
+    #[test]
+    fn dec_ref_refuses_stale_generation_and_leaves_refcount_and_free_epoch_untouched() {
+        let mut assets = Assets::<u64>::with_reserved(4);
+        let h = assets.add(1);
+        let slot = h.index();
+        assert!(assets.inc_ref(slot), "inc_ref on a fresh Loaded row must succeed");
+
+        let cur_gen = assets.generation(slot);
+        let stale_gen = cur_gen.wrapping_add(1);
+        let epoch_before = assets.free_epoch();
+        let refcount_before = assets.refcount.get(slot as usize);
+
+        let ticket = assets.dec_ref(slot, stale_gen);
+
+        assert!(ticket.is_none(), "a gen-mismatched dec_ref must no-op (return None)");
+        assert_eq!(
+            assets.refcount.get(slot as usize),
+            refcount_before,
+            "a gen-mismatched dec_ref must not mutate the refcount"
+        );
+        assert_eq!(
+            assets.free_epoch(),
+            epoch_before,
+            "a gen-mismatched dec_ref must not bump free_epoch"
+        );
+        assert_eq!(
+            assets.state_of_index(slot),
+            Some(AssetLoadState::Loaded),
+            "the row must remain exactly as it was — still Loaded, not Retiring"
+        );
+    }
+
+    /// [`GEN_UNSYNCED`] bypasses the gen-check entirely — `dec_ref` must
+    /// decrement unconditionally regardless of the slot's real current
+    /// generation (the same-frame bound-but-not-yet-synced window).
+    #[test]
+    fn dec_ref_gen_unsynced_bypasses_the_gen_check() {
+        let mut assets = Assets::<u64>::with_reserved(4);
+        let h = assets.add(1);
+        let slot = h.index();
+        assert!(assets.inc_ref(slot), "inc_ref on a fresh Loaded row must succeed");
+
+        let ticket = assets.dec_ref(slot, GEN_UNSYNCED);
+
+        assert!(
+            ticket.is_some(),
+            "GEN_UNSYNCED must bypass the gen-check and decrement unconditionally, \
+             retiring the row on its 1->0 crossing"
+        );
+    }
+
+    /// `inc_ref` on an already-`Retiring` slot must refuse (the resurrection
+    /// hazard F5 Decision 5 guards against) — `false`, refcount untouched.
+    #[test]
+    fn inc_ref_refuses_a_retiring_slot_without_mutating_refcount() {
+        let mut assets = Assets::<u64>::with_reserved(4);
+        let h = assets.add(1);
+        let slot = h.index();
+        assert!(assets.inc_ref(slot), "inc_ref on a fresh Loaded row must succeed");
+        let ticket = assets.dec_ref(slot, GEN_UNSYNCED);
+        assert!(ticket.is_some(), "refcount 1->0 must retire the row (test precondition)");
+
+        let refcount_before = assets.refcount.get(slot as usize);
+        let incremented = assets.inc_ref(slot);
+
+        assert!(!incremented, "inc_ref must refuse a Retiring slot (F5 Decision 5)");
+        assert_eq!(
+            assets.refcount.get(slot as usize),
+            refcount_before,
+            "a refused inc_ref must not mutate the refcount"
+        );
+    }
+
+    /// `inc_ref` on a `Vacant` slot (never minted, or freed via
+    /// [`Assets::remove`]) must refuse — `false`, refcount untouched.
+    #[test]
+    fn inc_ref_refuses_a_vacant_slot_without_mutating_refcount() {
+        let mut assets = Assets::<u64>::with_reserved(4);
+        let h = assets.add(1);
+        let slot = h.index();
+        assert_eq!(assets.remove(h), Some(1), "must vacate the row (test precondition)");
+
+        let refcount_before = assets.refcount.get(slot as usize);
+        let incremented = assets.inc_ref(slot);
+
+        assert!(!incremented, "inc_ref must refuse a Vacant slot (F5 Decision 5)");
+        assert_eq!(
+            assets.refcount.get(slot as usize),
+            refcount_before,
+            "a refused inc_ref must not mutate the refcount"
+        );
+    }
+
+    /// [`Assets::try_generation`] must return `None` for an out-of-range slot
+    /// (a malformed/stale carrier's bare index), never panic — the OOR-safe
+    /// twin of the panicking [`Assets::generation`].
+    #[test]
+    fn try_generation_returns_none_out_of_range() {
+        let assets = Assets::<u64>::with_reserved(4);
+        assert_eq!(
+            assets.try_generation(9_999),
+            None,
+            "an out-of-range slot must be None, not panic"
+        );
+    }
+
+    /// [`Assets::try_generation`] must return `Some` matching the handle's own
+    /// generation for a live slot.
+    #[test]
+    fn try_generation_returns_some_for_a_live_slot() {
+        let mut assets = Assets::<u64>::with_reserved(4);
+        let h = assets.add(1);
+        assert_eq!(
+            assets.try_generation(h.index()),
+            Some(h.generation()),
+            "try_generation must match the handle's own generation"
+        );
+    }
+
+    /// [`Assets::state_of_index`] must return `None` for an out-of-range slot,
+    /// never panic.
+    #[test]
+    fn state_of_index_returns_none_out_of_range() {
+        let assets = Assets::<u64>::with_reserved(4);
+        assert_eq!(
+            assets.state_of_index(9_999),
+            None,
+            "an out-of-range slot must be None, not panic"
+        );
+    }
+
+    /// [`Assets::state_of_index`] must return `Some(Loaded)` for a live,
+    /// `Loaded` slot.
+    #[test]
+    fn state_of_index_returns_some_for_a_loaded_slot() {
+        let mut assets = Assets::<u64>::with_reserved(4);
+        let h = assets.add(1);
+        assert_eq!(
+            assets.state_of_index(h.index()),
+            Some(AssetLoadState::Loaded),
+            "a live Loaded slot must resolve"
+        );
+    }
+
+    /// [`Assets::state_of_index`] must return `None` for a `Vacant` slot — no
+    /// `AssetLoadState` mapping exists for it.
+    #[test]
+    fn state_of_index_returns_none_for_a_vacant_slot() {
+        let mut assets = Assets::<u64>::with_reserved(4);
+        let h = assets.add(1);
+        let slot = h.index();
+        assets.remove(h);
+        assert_eq!(
+            assets.state_of_index(slot),
+            None,
+            "a Vacant slot has no AssetLoadState mapping"
+        );
+    }
+
+    /// [`Assets::state_of_index`] must return `None` for a `Retiring` slot —
+    /// no `AssetLoadState` mapping exists for it either (mirrors the `Vacant`
+    /// case; this is the sanctioned cross-crate probe `validate_asset_refs`
+    /// relies on to detect a stale/dead carrier without panicking).
+    #[test]
+    fn state_of_index_returns_none_for_a_retiring_slot() {
+        let mut assets = Assets::<u64>::with_reserved(4);
+        let h = assets.add(1);
+        let slot = h.index();
+        assert!(assets.inc_ref(slot), "inc_ref on a fresh Loaded row must succeed");
+        assert!(
+            assets.dec_ref(slot, GEN_UNSYNCED).is_some(),
+            "refcount 1->0 must retire the row (test precondition)"
+        );
+        assert_eq!(
+            assets.state_of_index(slot),
+            None,
+            "a Retiring slot has no AssetLoadState mapping"
+        );
+    }
+
+    /// proptest: `dec_ref` with a generation that never matches the slot's
+    /// current one must NEVER mutate the refcount, across a wide, randomized
+    /// span of mismatched generations — a dedicated, focused companion to
+    /// [`refcount_oracle`]'s joint model, which is deliberately gen-oblivious
+    /// (see that module's doc: it targets the refcount/idempotency/
+    /// `free_epoch` properties, explicitly deferring gen-mismatch coverage to
+    /// "the dedicated F5 unit tests" — this proptest is that coverage, kept
+    /// separate rather than folded into the joint oracle's `RefOp` enum, to
+    /// preserve that module's own documented scope boundary).
+    ///
+    /// The no-mutation claim is proven INDIRECTLY (refcount is a private
+    /// field, inaccessible outside this exact test module) via a
+    /// non-corruption oracle: if the stale call had actually decremented,
+    /// the row would already be `Retiring` by the time the immediately
+    /// following CORRECTLY-gen'd `dec_ref` runs, and that call would then
+    /// observe the `Retiring`-idempotent `None` arm instead of the expected
+    /// zero-crossing `Some` — so requiring `Some` here transitively proves
+    /// the stale call left the refcount exactly where it was.
+    mod gen_check_proptest {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+            #[test]
+            fn dec_ref_never_mutates_on_a_generation_mismatch(gen_offset in 1u32..=1_000_000) {
+                let mut assets = Assets::<u64>::with_reserved(4);
+                let h = assets.add(1);
+                let slot = h.index();
+                prop_assert!(assets.inc_ref(slot), "inc_ref on a fresh Loaded row must succeed");
+
+                let cur_gen = assets.generation(slot);
+                // `gen_offset` is always in 1..=1_000_000, so `stale_gen` can only
+                // equal `cur_gen` via a wrap-around at exactly `u32::MAX + 1` steps —
+                // unreachable at this offset span — and real generations are 29-bit
+                // (see GEN_UNSYNCED's doc), so `stale_gen` lands on `GEN_UNSYNCED`
+                // only in the astronomically unlikely case `cur_gen == u32::MAX -
+                // gen_offset`; `prop_assume!` filters both edge cases defensively.
+                let stale_gen = cur_gen.wrapping_add(gen_offset);
+                prop_assume!(stale_gen != GEN_UNSYNCED && stale_gen != cur_gen);
+
+                let epoch_before = assets.free_epoch();
+                let ticket = assets.dec_ref(slot, stale_gen);
+
+                prop_assert!(ticket.is_none(), "a mismatched generation must no-op");
+                prop_assert_eq!(
+                    assets.free_epoch(), epoch_before,
+                    "a mismatched dec_ref must not bump free_epoch"
+                );
+                prop_assert_eq!(
+                    assets.state_of_index(slot), Some(AssetLoadState::Loaded),
+                    "the row must remain live & Loaded — the real decrement never happened"
+                );
+
+                // The transitive non-corruption proof — see this module's doc.
+                let real_ticket = assets.dec_ref(slot, cur_gen);
+                prop_assert!(
+                    real_ticket.is_some(),
+                    "the correctly gen'd dec_ref must still retire the row, proving the \
+                     stale call never touched the refcount"
+                );
+            }
+        }
     }
 }

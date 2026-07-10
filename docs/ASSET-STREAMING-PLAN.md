@@ -238,6 +238,58 @@ Ordering: F1 store under a green byte-identity gate → F2 lifecycle/refcount �
   insert-migration overlap path fires `on_insert` but NOT the table `on_replace` → the old slot's ref leaks).
   Also: hooks fire on `insert`, NOT on a raw `Query<&mut MeshHandle>` deref write (none exist in-tree today).
 
+**F5 locked mechanism (architect→soundness-critic, design-locked):**
+- Generation lanes `MeshRefGen(u32)`/`MaterialRefGen(u32)` are `#[require]`d by the carriers (co-presence
+  guaranteed; `Default = GEN_UNSYNCED = u32::MAX`, real gens are 29-bit so never collide). Reconciled with F2's
+  ACTUAL 2 hooks: lane is set/re-synced ONLY on the `+1` path (no `ClearRefGen`); on removal `on_replace(-1)` does
+  not rewrite it (dropped with the entity on despawn; orphaned-but-never-read on a bare remove; self-heals on
+  re-insert). `RefDelta` grows `{entity, gen}`; `on_replace(-1)` reads the sibling lane via `get_component`
+  (valid: despawn fires hooks PRE-structural-removal, `entity_api.rs:1035` before `:1071`) so the decrement
+  carries the BIND generation. `dec_ref(slot, gen)` gen-checks (mismatch → no-op — closes the FIX-B stale-decrement
+  corruption); `inc_ref → bool` state-guarded (refuses on Retiring/Vacant).
+- **BLOCKER FIX (critic C):** `apply_refcount_deltas` stamps the lane on `+1` **UNCONDITIONALLY** with the
+  attach-time `generation(slot)` — even when `inc_ref` REFUSES (resurrection: carrier binds an already-Retiring
+  slot). Otherwise the refused-bind carrier stays `GEN_UNSYNCED`, which both makes validate skip it AND bypasses
+  the dec gen-check → its later `-1` corrupts a reused slot's refcount (premature free / UAF at F6). With the
+  unconditional stamp: validate sees `Retiring != Loaded` → disables it; the `-1` carries the attach-gen → mismatches
+  the reused slot's gen → suppressed. Slot refcount still never rises (inc refused) → F5/F6 boundary airtight.
+  `GEN_UNSYNCED` is thus only the transient pre-`apply` `Default` (apply runs `.before(validate)`, per-system flush).
+- `validate_asset_refs`: `free_epoch` early-out (O(1), zero on churn-free/golden frames); on a churn frame a full
+  dense O(visible) `u32`-compare (the plan's per-row `dirty.test` gating is DROPPED — it had a visible-later hole);
+  gen-mismatch or `state != Loaded` → `disable::<RenderEnabled>` (mesh) / `insert(MaterialHandle(0))` (material).
+  Ordered `apply → validate → gather`.
+- `mesh_count = high_water()` (not `len()`) at `mesh_draw.rs:521/:559`, `csm_caster.rs:174` (fixes the hole where a
+  live index exceeds `len()` once a hole exists; byte-identical on hole-free goldens).
+- **Single point of failure (research: Bevy gets staleness free via a gen-keyed HashMap; we don't):** `validate`
+  is the SOLE staleness backstop for the bare-slot carriers → every raw `MeshHandle.0`/`MaterialHandle.0` read site
+  MUST be downstream of `validate` this frame; document each read site + audit completeness.
+
+**HARD PREREQ before async streaming (F6/F7) — F5's validate is deliberately disable-only + latent today:**
+- `fill` (Loading→Loaded) does NOT bump `free_epoch`, and `validate` never re-enables → a carrier bound while its
+  asset is Loading would be disabled and stranded invisible once it finishes loading. Latent in F5 (in-tree loads
+  are synchronous `add()`→Loaded; validate never fires on goldens). Before async `reserve`/`fill` streaming is
+  exercised, ADD: (a) `fill` bumps a validation epoch + `validate` gains an enable path; and (b) DECOUPLE staleness
+  from user visibility — `validate` disabling `RenderEnabled` fights `visibility_sync` (both drive that bit); use a
+  separate `RenderStale` EnableTag the gather also filters on, instead of reusing `RenderEnabled`. (Bevy PR #18734
+  is the same-frame-handle-swap race this defends against.)
+- (c) **Hard `validate → gather` scheduler edge (F5 review O1):** F5's `validate_asset_refs .before(gather_*)` is
+  currently pinned by ADD-ORDER only (deterministic today — NonSend systems are dispatcher-solo, lowest-index-first,
+  per-system flush, and `plugins.rs` adds AssetRefcountPlugin before the gather closure — but EMERGENT, not an
+  explicit contract). Before F6/F7 (when `validate` actually fires), fold the sketched
+  `add_asset_validate_systems(&mut ScheduleBuilder) -> SystemKey` helper into the host gather closure and add the
+  explicit `.before` edge (mirror `add_gpu_transform_pack`).
+- (d) **Material substitution (F5 review W1, DEFERRED to F8):** F5's `validate` does NOT substitute stale materials
+  (it disables stale MESHES only). Stale-material refcount corruption is already prevented by the `dec_ref` gen-check
+  at despawn; the VISIBLE substitution (point a stale material at the default slot 0) is inert until F8 (the raster
+  hardcodes material 0) and needs `Entity`-in-query / `RenderStale` infrastructure F8 will add — so it lands in F8,
+  not F5. (The F5 dev's `&mut MaterialHandle`-in-`validate` workaround was removed: it bypassed the hook contract and
+  dropped a retire ticket on a matching-gen Loading/Failed slot.)
+- (e) **Serialize/`#[require]` version-skew (F5 review, S0-S3 concern):** `load_archetype` builds archetypes from
+  the file's saved component-id list and does NOT run `#[require]` expansion → a `MeshHandle` row from a schema-older
+  save would lack `MeshRefGen` and be AND-filtered out of `validate`'s query (silent, no panic). Latent (no such
+  save in-tree; same-build round-trips serialize the lane). Also confirm the deserialize path does not fire the
+  carrier hooks without the lane present (a `-1` with `GEN_UNSYNCED` against a never-incremented refcount).
+
 ## Test plan
 
 - **PORT VERBATIM:** `assets.rs` ~30 unit + 256-proptest (`Assets::<u64>` via `impl_asset_pod_backing!`).

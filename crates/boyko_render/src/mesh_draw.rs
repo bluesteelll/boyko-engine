@@ -518,13 +518,17 @@ pub fn gather_mesh_draws(
     mesh_assets: NonSendRes<Assets<MeshGpu>>,
     mut scratch: ResMut<MeshRenderScratch>,
 ) {
-    let mesh_count = mesh_assets.len();
+    // asset-streaming plan F5: `high_water()`, not `len()` — a live `MeshHandle.0`
+    // can exceed the live COUNT once a hole exists (a freed-then-not-yet-reused
+    // slot); `high_water()` is the true index ceiling the bucket lanes must size to.
+    let mesh_count = mesh_assets.high_water();
     scratch.gather_mixed_into(
         mesh_count,
         |mesh_id| {
             let m = mesh_assets.mesh(MeshHandle(mesh_id));
             (m.index_count, m.index_type)
         },
+        // slot resolved by index; staleness is caught by validate_asset_refs earlier this frame (apply→validate→gather)
         || q.iter().map(|(h, col, pair)| (h.0, col, pair)),
     );
 }
@@ -556,13 +560,16 @@ pub fn gather_mesh_draws(
     mut scratch: ResMut<MeshRenderScratch>,
     denoise: Res<crate::ShadowDenoiseConfig>,
 ) {
-    let mesh_count = mesh_assets.len();
+    // asset-streaming plan F5: `high_water()`, not `len()` — see the non-hwrt
+    // variant's comment above.
+    let mesh_count = mesh_assets.high_water();
     scratch.gather_mixed_into(
         mesh_count,
         |mesh_id| {
             let m = mesh_assets.mesh(MeshHandle(mesh_id));
             (m.index_count, m.index_type)
         },
+        // slot resolved by index; staleness is caught by validate_asset_refs earlier this frame (apply→validate→gather)
         || q.iter().map(|(h, col, pair, _prev)| (h.0, col, pair)),
     );
     // The prev-instance ring is bound ONLY by the temporal-MV raster pipeline, so the O(N)
@@ -572,6 +579,7 @@ pub fn gather_mesh_draws(
     // here (`EnginePlugins` adds `ShadowDenoisePlugin` alongside this system). When ON, the
     // re-scatter reuses the SAME offsets over the SAME query order ⇒ index-aligned with `ring`.
     if denoise.temporal_enabled() {
+        // slot resolved by index; staleness is caught by validate_asset_refs earlier this frame (apply→validate→gather)
         scratch.gather_prev_ring_into(|| q.iter().map(|(h, col, _pair, prev)| (h.0, col, prev)));
     }
 }

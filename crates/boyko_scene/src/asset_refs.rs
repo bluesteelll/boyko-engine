@@ -30,6 +30,7 @@
 //! store's `AssetKind` (which would require threading a second, foreign type
 //! through this crate's queue for no benefit).
 
+use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_macros::Resource;
 
 /// Which `Assets<T>` table a [`RefDelta`] / [`FreeEntry`] routes to — the
@@ -44,16 +45,28 @@ pub enum AssetRefKind {
 }
 
 /// A single refcount delta pushed by a carrier hook (asset-streaming plan F2
-/// §1). POD, `Send` — no generation lane (F5 adds one for the gen-checked
-/// apply; F2's apply is ungated, matching the F2 scope note in
-/// `docs/ASSET-STREAMING-PLAN.md`).
+/// §1, gen-checked as of F5 §Decision 3). POD, `Send`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RefDelta {
+    /// The entity whose carrier pushed this delta — needed so the `+1` apply
+    /// path (asset-streaming plan F5) can stamp the carrier's
+    /// `MeshRefGen`/`MaterialRefGen` lane via `Commands::entity(entity)`. On
+    /// despawn the entity is gone by apply time (the delta is still valid —
+    /// only the lane re-sync becomes a moot no-op, never reached for a `-1`).
+    pub entity: Entity,
     /// Which store `slot` addresses.
     pub kind: AssetRefKind,
     /// The dense row the delta targets — a carrier's raw index
     /// (`MeshHandle(u32)` / `MaterialHandle(u16)` widened to `u32`).
     pub slot: u32,
+    /// The carrier's BIND-time generation, captured by `on_replace` from the
+    /// sibling `MeshRefGen`/`MaterialRefGen` lane while the row is still live
+    /// (asset-streaming plan F5 §Decision 3) — `apply_refcount_deltas` passes
+    /// this to `Assets::dec_ref`'s gen-check. Unused (set to
+    /// `boyko_ecs::ecs::core::asset::GEN_UNSYNCED`) on a `+1` delta: the
+    /// attach path re-derives the CURRENT generation directly from the store,
+    /// not from this field.
+    pub gen_: u32,
     /// `+1` on attach (`on_insert`), `-1` on detach (`on_replace`, which
     /// fires on BOTH an in-place overwrite and a genuine removal/despawn —
     /// see `render_caps.rs`'s hook wiring for why `on_remove` is NOT also
@@ -64,9 +77,11 @@ pub struct RefDelta {
 impl RefDelta {
     /// Constructs a delta. `const fn` — the hook call sites build one and
     /// push it in the same statement, no runtime cost beyond the `Vec::push`.
+    ///
+    /// `gen_` (not `gen`) — `gen` is a reserved keyword as of the 2024 edition.
     #[inline]
-    pub const fn new(kind: AssetRefKind, slot: u32, delta: i32) -> Self {
-        Self { kind, slot, delta }
+    pub const fn new(entity: Entity, kind: AssetRefKind, slot: u32, gen_: u32, delta: i32) -> Self {
+        Self { entity, kind, slot, gen_, delta }
     }
 }
 
@@ -162,9 +177,12 @@ mod tests {
 
     #[test]
     fn refcount_deltas_push_then_drain_yields_fifo_order() {
+        use boyko_ecs::ecs::identifiers::primitives::EntityId;
+
+        let e = Entity::new(EntityId(0), 0);
         let mut deltas = RefcountDeltas::default();
-        deltas.push(RefDelta::new(AssetRefKind::Mesh, 1, 1));
-        deltas.push(RefDelta::new(AssetRefKind::Material, 2, -1));
+        deltas.push(RefDelta::new(e, AssetRefKind::Mesh, 1, 0, 1));
+        deltas.push(RefDelta::new(e, AssetRefKind::Material, 2, 0, -1));
 
         let drained: Vec<RefDelta> = deltas.drain().collect();
 

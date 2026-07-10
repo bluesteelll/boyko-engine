@@ -63,6 +63,21 @@
 //! three-hook (`on_insert` `+1`/`on_replace` `-1`/`on_remove` `-1`) shape a
 //! first reading of the streaming plan might suggest.
 //!
+//! ## Generation lanes (asset-streaming plan F5) — one hook stamps both
+//!
+//! [`MeshRefGen`] / [`MaterialRefGen`] are `#[require]`d by
+//! [`MeshHandle`] / [`MaterialHandle`] respectively (structural co-presence —
+//! `boyko_render::validate_asset_refs`'s query never silently misses a
+//! renderable). They need NO independent third hook: `on_insert` pushes a
+//! `+1` `RefDelta` with `gen: GEN_UNSYNCED` (the ATTACH-time generation is
+//! re-derived directly from the store by `apply_refcount_deltas`, which then
+//! stamps the lane); `on_replace` reads the SIBLING lane (still live —
+//! despawn fires hooks pre-structural-removal, and an in-place overwrite
+//! fires `on_replace` pre-write) and forwards its value as the `-1` delta's
+//! `gen` — the exact BIND generation this carrier last synced against. See
+//! `boyko_render::asset_refcount`'s `apply_refcount_deltas` for the lane
+//! write-back and `Assets::dec_ref`'s doc for the gen-check this closes.
+//!
 //! ## Known gap: a migrating multi-component bundle `insert` skips `on_replace`
 //!
 //! The "on_replace fires for EVERY departure" claim above has ONE exception:
@@ -91,6 +106,7 @@
 //! `migrate_entity_insert`'s overlap path through `trigger_on_replace` too)
 //! is kernel-level work out of this crate's scope.
 
+use boyko_ecs::ecs::core::asset::GEN_UNSYNCED;
 use boyko_ecs::ecs::core::component::hooks::HookContext;
 use boyko_ecs::ecs::core::component::hooks::deferred_master::DeferredEcsMaster;
 use boyko_macros::Component;
@@ -122,7 +138,7 @@ use crate::transform::{GlobalTransform, Transform};
 /// deliberately NOT also wired.
 #[repr(transparent)]
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[require(Transform, GlobalTransform)]
+#[require(Transform, GlobalTransform, MeshRefGen)]
 #[component(on_insert = mesh_handle_on_insert, on_replace = mesh_handle_on_replace)]
 pub struct MeshHandle(pub u32);
 
@@ -137,8 +153,42 @@ pub struct MeshHandle(pub u32);
 /// wiring" section.
 #[repr(transparent)]
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[require(MaterialRefGen)]
 #[component(on_insert = material_handle_on_insert, on_replace = material_handle_on_replace)]
 pub struct MaterialHandle(pub u16);
+
+/// The generation [`MeshHandle`] last synced against its bound slot
+/// (asset-streaming plan F5) — `#[require]`d by `MeshHandle` so every
+/// renderable row structurally carries this lane (`validate_asset_refs`'s
+/// query never silently misses a row missing it — see [`MeshHandle`]'s
+/// "Generation lanes" doc for the write-back contract).
+///
+/// `Default = GEN_UNSYNCED` marks "bound this frame, not yet gen-stamped by
+/// `apply_refcount_deltas`" — the transient window between this carrier's
+/// `on_insert` firing and that system's next run (`.before` the validation
+/// read, per system flush — see `boyko_render::AssetRefcountPlugin`).
+#[repr(transparent)]
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MeshRefGen(pub u32);
+
+impl Default for MeshRefGen {
+    #[inline]
+    fn default() -> Self {
+        Self(GEN_UNSYNCED)
+    }
+}
+
+/// Material twin of [`MeshRefGen`] — see that type's doc.
+#[repr(transparent)]
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaterialRefGen(pub u32);
+
+impl Default for MaterialRefGen {
+    #[inline]
+    fn default() -> Self {
+        Self(GEN_UNSYNCED)
+    }
+}
 
 /// User-intent visibility — the persisted authoring state.
 ///
@@ -204,8 +254,11 @@ unsafe fn mesh_handle_on_insert(mut dm: DeferredEcsMaster<'_>, ctx: HookContext)
     let Some(&MeshHandle(slot)) = dm.get_component::<MeshHandle>(ctx.entity) else {
         return;
     };
+    // F5: `gen` is unused for a `+1` delta — `apply_refcount_deltas` re-derives
+    // the CURRENT generation directly from the store and stamps the sibling
+    // `MeshRefGen` lane itself (see the module doc's "Generation lanes" section).
     if let Some(deltas) = dm.resource_mut::<RefcountDeltas>() {
-        deltas.push(RefDelta::new(AssetRefKind::Mesh, slot, 1));
+        deltas.push(RefDelta::new(ctx.entity, AssetRefKind::Mesh, slot, GEN_UNSYNCED, 1));
     }
 }
 
@@ -222,8 +275,17 @@ unsafe fn mesh_handle_on_replace(mut dm: DeferredEcsMaster<'_>, ctx: HookContext
     let Some(&MeshHandle(slot)) = dm.get_component::<MeshHandle>(ctx.entity) else {
         return;
     };
+    // F5 Decision 3: capture the BIND generation from the sibling lane NOW,
+    // while it is still live (`on_replace` fires pre-departure on every path —
+    // in-place overwrite AND despawn, see the module doc's "Refcount hook
+    // wiring" fact 1/2). A lost lane (should not happen given the `#[require]`)
+    // defaults to `GEN_UNSYNCED`, which bypasses `dec_ref`'s gen-check —
+    // never corrupts a reused slot, only loses this one delta's staleness catch.
+    let lane_gen = dm
+        .get_component::<MeshRefGen>(ctx.entity)
+        .map_or(GEN_UNSYNCED, |g| g.0);
     if let Some(deltas) = dm.resource_mut::<RefcountDeltas>() {
-        deltas.push(RefDelta::new(AssetRefKind::Mesh, slot, -1));
+        deltas.push(RefDelta::new(ctx.entity, AssetRefKind::Mesh, slot, lane_gen, -1));
     }
 }
 
@@ -238,7 +300,7 @@ unsafe fn material_handle_on_insert(mut dm: DeferredEcsMaster<'_>, ctx: HookCont
         return;
     };
     if let Some(deltas) = dm.resource_mut::<RefcountDeltas>() {
-        deltas.push(RefDelta::new(AssetRefKind::Material, u32::from(slot), 1));
+        deltas.push(RefDelta::new(ctx.entity, AssetRefKind::Material, u32::from(slot), GEN_UNSYNCED, 1));
     }
 }
 
@@ -252,7 +314,11 @@ unsafe fn material_handle_on_replace(mut dm: DeferredEcsMaster<'_>, ctx: HookCon
     let Some(&MaterialHandle(slot)) = dm.get_component::<MaterialHandle>(ctx.entity) else {
         return;
     };
+    // F5 Decision 3 — see `mesh_handle_on_replace`'s doc for the full rationale.
+    let lane_gen = dm
+        .get_component::<MaterialRefGen>(ctx.entity)
+        .map_or(GEN_UNSYNCED, |g| g.0);
     if let Some(deltas) = dm.resource_mut::<RefcountDeltas>() {
-        deltas.push(RefDelta::new(AssetRefKind::Material, u32::from(slot), -1));
+        deltas.push(RefDelta::new(ctx.entity, AssetRefKind::Material, u32::from(slot), lane_gen, -1));
     }
 }

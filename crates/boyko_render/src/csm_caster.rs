@@ -171,7 +171,10 @@ pub fn gather_shadow_casters(
     mesh_assets: NonSendRes<Assets<MeshGpu>>,
     mut scratch: ResMut<CsmCasterScratch>,
 ) {
-    let mesh_count = mesh_assets.len();
+    // asset-streaming plan F5: `high_water()`, not `len()` — a live `MeshHandle.0` can
+    // exceed the live COUNT once a hole exists; see `mesh_draw::gather_mesh_draws`'s
+    // identical fix for the full rationale.
+    let mesh_count = mesh_assets.high_water();
     // The caster gather is ALL-STATIC (the CSM depth pass reads the caster affines from
     // this scratch's `batches`, never an interpolated ring), so every row takes the
     // `None` pair branch of the unified gather — `pair_ring` / `pair_out_slot` stay empty
@@ -182,6 +185,7 @@ pub fn gather_shadow_casters(
             let m = mesh_assets.mesh(MeshHandle(mesh_id));
             (m.index_count, m.index_type)
         },
+        // slot resolved by index; staleness is caught by validate_asset_refs earlier this frame (apply→validate→gather)
         || q.iter().map(|(h, col)| (h.0, col, None)),
     );
 }
