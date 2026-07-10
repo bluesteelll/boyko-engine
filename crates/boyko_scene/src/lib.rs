@@ -39,6 +39,7 @@
 //! [`propagate_transforms`]: crate::propagation::propagate_transforms
 //! [`TransformPropagationScratch`]: crate::propagation::TransformPropagationScratch
 
+pub mod asset_refs;
 pub mod bundles;
 pub mod camera;
 pub mod camera_plugin;
@@ -50,6 +51,7 @@ pub mod sets;
 pub mod transform;
 pub mod visibility_sync;
 
+pub use asset_refs::{AssetRefKind, DeferredFree, FreeEntry, RefDelta, RefcountDeltas};
 pub use bundles::{CameraRig, FlyCameraBundle, SpatialBundle, StaticProp};
 pub use camera::{
     ActiveCamera, Camera, FlyCamera, OrbitCamera, Projection, ViewUniform, Viewport,
@@ -71,6 +73,7 @@ pub use visibility_sync::visibility_sync;
 /// re-exported (same boundary as `boyko_ecs::prelude`); import them from
 /// `boyko_macros` directly.
 pub mod prelude {
+    pub use crate::asset_refs::{AssetRefKind, DeferredFree, FreeEntry, RefDelta, RefcountDeltas};
     pub use crate::bundles::{CameraRig, FlyCameraBundle, SpatialBundle, StaticProp};
     pub use crate::camera::{
         ActiveCamera, Camera, FlyCamera, OrbitCamera, Projection, ViewUniform, Viewport,

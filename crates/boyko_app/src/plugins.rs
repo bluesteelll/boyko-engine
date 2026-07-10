@@ -19,10 +19,10 @@ use boyko_render::instance_model::sync_prev_instance_model_cols;
 use boyko_render::MotionCamState;
 use boyko_render::light_system::LightTableStaging;
 use boyko_render::{
-    CsmCasterScratch, CsmPlugin, LightingConfig, LightingPlugin, MeshRenderScratch,
-    RayPlugin, Render3dPlugin, SdfPlugin, ShadowAtlasPlugin, ShadowDenoisePlugin,
-    add_gpu_transform_pack, gather_mesh_draws, gather_shadow_casters, snap_apply,
-    sync_csm_light_gate, sync_punctual_light_gate,
+    AssetRefcountPlugin, CsmCasterScratch, CsmPlugin, LightingConfig, LightingPlugin,
+    MeshRenderScratch, RayPlugin, Render3dPlugin, SdfPlugin, ShadowAtlasPlugin,
+    ShadowDenoisePlugin, add_gpu_transform_pack, gather_mesh_draws, gather_shadow_casters,
+    snap_apply, sync_csm_light_gate, sync_punctual_light_gate,
 };
 use boyko_scene::{CameraPlugin, FixedSet};
 
@@ -130,6 +130,14 @@ impl Plugin for EnginePlugins {
         // double-register propagation), then the S4 3D instance pack.
         app.add_plugin(CameraPlugin);
         app.add_plugin(Render3dPlugin);
+
+        // Asset-streaming plan F2: the refcount lifetime pipeline. Inserts
+        // `RefcountDeltas`/`DeferredFree` and registers `apply_refcount_deltas`
+        // (no ordering edge needed yet — see that system's doc). The `Assets<
+        // MeshGpu>`/`Assets<MaterialGpu>` resources it reads are inserted by
+        // `runner::run_windowed` before the frame loop starts, well after this
+        // `build()` call, so add-order here does not matter.
+        app.add_plugin(AssetRefcountPlugin);
 
         // The R4 lighting stack. LightingPlugin registers the light eviction
         // hooks as its FIRST action, inheriting its registration-first

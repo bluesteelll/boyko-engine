@@ -51,6 +51,12 @@
 //! encoder as its compute dispatch, BEFORE the dispatch — the load-bearing
 //! synchronisation between a prior GPU write and this dispatch's read/write.
 
+/// Asset-streaming plan F2 §1/§3 — the refcount lifetime apply system
+/// ([`apply_refcount_deltas`](asset_refcount::apply_refcount_deltas)) that folds
+/// the `MeshHandle`/`MaterialHandle` carrier hooks' pushed deltas into the two
+/// GPU asset tables, plus the [`AssetRefcountPlugin`](asset_refcount::AssetRefcountPlugin)
+/// that wires it into the app schedule.
+pub mod asset_refcount;
 pub mod barrier;
 /// Light-object bundle presets ([`DirectionalLightObject`] / [`PointLightObject`]
 /// / [`SpotLightObject`]) — named `#[derive(Bundle)]` mixes of scene spatial
@@ -240,6 +246,7 @@ pub mod ui;
 pub mod upload;
 pub mod view;
 
+pub use asset_refcount::{AssetRefcountPlugin, apply_refcount_deltas};
 pub use barrier::{PlannedBarrier, lower_barriers};
 pub use bundles::{DirectionalLightObject, MeshBundle, PointLightObject, SpotLightObject};
 pub use csm_config::{

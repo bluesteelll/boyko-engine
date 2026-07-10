@@ -164,6 +164,15 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
         MaterialId::DEFAULT,
         "invariant: the first Assets<MaterialGpu> row mints MaterialId::DEFAULT"
     );
+    // Asset-streaming plan F2: pin slot 0 NEVER-RETIRE. The default material is
+    // referenced by every entity that carries no explicit `MaterialHandle`
+    // (`MaterialHandle(0)`, potentially every entity in a scene), so its
+    // refcount is never a reliable "unused" signal — `dec_ref` reaching zero on
+    // this slot must stay `Loaded`, never transition to `Retiring`. There is no
+    // equivalent fixed-slot default mesh (a scene that spawns `MeshHandle`
+    // always names an explicitly-loaded mesh id), so only the material default
+    // is pinned here.
+    material_assets.pin(0);
     app.world_mut().insert_resource(material_assets);
     app.world_mut()
         .insert_non_send_resource(MaterialTable::new());

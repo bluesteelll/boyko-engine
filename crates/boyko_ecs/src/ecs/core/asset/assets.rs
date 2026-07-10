@@ -32,11 +32,21 @@
 //! `T` while the packed state stays non-`Loaded` (the `live` bitmap gates
 //! every read/drop path in this file).
 //!
-//! # Streaming fields land inert (F2+ wires them)
+//! # Streaming fields — refcount wired at F2, the rest still inert
 //!
-//! [`refcount`](Assets::refcount), [`free_epoch`](Assets::free_epoch),
-//! [`dirty`](Assets::dirty), and [`pinned`](Assets::pinned) exist as of this
-//! rung but are not yet consulted by any lifecycle decision.
+//! [`inc_ref`](Assets::inc_ref) / [`dec_ref`](Assets::dec_ref) (asset-streaming
+//! plan F2) are the refcount lifetime driver: a carrier hook (`on_insert` /
+//! `on_replace` on a `boyko_scene` `MeshHandle` / `MaterialHandle`) pushes a
+//! delta, a `boyko_render` apply system folds it in, and
+//! [`dec_ref`](Assets::dec_ref) reaching zero on an unpinned row marks it
+//! `Retiring` (see [`STATE_RETIRING`]), bumps
+//! [`free_epoch`](Assets::free_epoch), sets [`dirty`](Assets::dirty), and
+//! returns a [`RetireTicket`] the caller enqueues into the (still-undrained)
+//! deferred-free queue. [`pin`](Assets::pin) marks a row NEVER-RETIRE (slot 0,
+//! the default asset). The generation-checked validation (a `MeshRefGen`/
+//! `MaterialRefGen` lane pair, `validate_asset_refs`) and the actual
+//! fence-gated device teardown (`retire_deferred_frees`) are later rungs
+//! (F5/F6) — F2 only marks and enqueues.
 //!
 //! Removal (see [`Assets::remove`]) stays FULLY SYNCHRONOUS (immediate
 //! `take_at` + move-out + generation bump + free-list push) — the
@@ -74,9 +84,15 @@ const STATE_LOADING: u32 = 1;
 const STATE_LOADED: u32 = 2;
 /// [`Assets::reserve`]'d then [`Assets::fail`]'d — no value, like `Loading`.
 const STATE_FAILED: u32 = 3;
-/// Reserved for F6 (fence-gated deferred free): occupied-but-unreusable,
-/// awaiting a future `retire_deferred_frees` pass. Never written in F1.
-#[allow(dead_code)]
+/// Occupied-but-unreusable, awaiting a future fence-gated
+/// `retire_deferred_frees` pass (F6). Written by [`Assets::dec_ref`] (F2)
+/// when a row's refcount reaches zero on an unpinned `Loaded`/`Failed`/
+/// `Loading` row. A `Loaded`→`Retiring` row holds a valid `T` (nothing frees
+/// its `col` bytes until F6 actually retires it) and
+/// [`Assets::get_by_index`] still resolves it; a `Loading`/`Failed`→`Retiring`
+/// row never held a `T` at all (only inert scratch bytes) and does NOT
+/// resolve — see [`Assets::get_by_index`]'s doc for the `live`-gated
+/// discriminator between the two.
 const STATE_RETIRING: u32 = 4;
 
 /// Packs `generation` (high 29 bits) and `state` (low 3 bits) into one `u32`.
@@ -102,13 +118,32 @@ fn unpack_generation(word: u32) -> u32 {
     word >> STATE_BITS
 }
 
-/// Routing tag for the future fence-gated deferred-free queue (F6) — names
-/// which `Assets<T>` table a queued `FreeEntry` belongs to. Wraps the type's
-/// own [`ComponentId`] (already unique per asset type via
+/// Routing tag for the fence-gated deferred-free queue (F6) — names which
+/// `Assets<T>` table a queued free entry belongs to. Wraps the type's own
+/// [`ComponentId`] (already unique per asset type via
 /// [`AssetBacking::register_layout`]) rather than minting a second registry.
-/// Inert in F1 — nothing reads it yet.
+///
+/// `pub` (promoted from F1's `pub(crate)`) so [`RetireTicket::kind`] is
+/// reachable from a cross-crate caller (asset-streaming plan F2: the
+/// `boyko_render` apply system that calls [`Assets::dec_ref`]). The inner
+/// [`ComponentId`] stays private — callers carry the value opaquely; only
+/// this module constructs one (via [`Assets::with_reserved`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AssetKind(#[allow(dead_code)] ComponentId);
+pub struct AssetKind(#[allow(dead_code)] ComponentId);
+
+/// Signal returned by [`Assets::dec_ref`] when a row's refcount just reached
+/// zero and the row transitioned to `Retiring` (asset-streaming plan F2 §1).
+/// The caller (the streaming apply system) enqueues this into the
+/// fence-gated deferred-free queue; F2 defines the queue and enqueues, F6
+/// drains it. Never re-issued for the same retire — [`Assets::dec_ref`] is
+/// idempotent once a row is `Retiring`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetireTicket {
+    /// Which `Assets<T>` table [`Self::slot`] belongs to.
+    pub kind: AssetKind,
+    /// The dense row that just transitioned to `Retiring`.
+    pub slot: u32,
+}
 
 /// A world-global, per-asset-type storage table — registered as a
 /// [`Resource`] (or [`NonSendResource`] for a `!Send` element type) via the
@@ -141,8 +176,8 @@ pub struct Assets<T: AssetBacking> {
     live_count: usize,
     dirty_gen: u64,
     free_epoch: u64,
-    // Read starting F6 (the deferred-free queue's routing key). Inert in F1.
-    #[allow(dead_code)]
+    // The deferred-free queue's routing key, copied into every `RetireTicket`
+    // `dec_ref` returns (F2); F6 is the actual consumer of the routed value.
     id: AssetKind,
     _t: PhantomData<T>,
 }
@@ -425,19 +460,35 @@ impl<T: AssetBacking> Assets<T> {
     }
 
     /// Frees the row `handle` addresses, returning its value if the row was
-    /// `Loaded`, or `None` if it was `Loading`/`Failed` (there was never a
-    /// value to return).
+    /// `Loaded`, or `None` if it was `Loading`/`Failed`/`Retiring` (there was
+    /// never a value to return, or the row is not this method's to free —
+    /// see below).
     ///
     /// Synchronous (F1 semantics, unchanged from the pre-rewrite `Vec`-backed
     /// store): the value is moved out and the row recycled immediately — the
     /// deferred, fence-gated `Retiring` teardown is a later rung (F2/F6).
     /// Bumps the row's generation so the just-freed `handle` is rejected from
     /// this point on, including after the row is reused.
+    ///
+    /// # `Retiring` is a no-op (F2 — reachable-panic fix)
+    ///
+    /// `dec_ref`'s `Retiring` transition does NOT bump the row's generation,
+    /// so a still-matching `handle` for a just-retired row reaches this far.
+    /// A `Retiring` row is owned by the deferred-retire path — only a future
+    /// fence-gated `retire_deferred_frees` pass (F6) may `take_at` it. This
+    /// returns `None` WITHOUT clearing `live`, bumping the generation,
+    /// pushing the free-list, or touching `free_epoch`/`dirty`: doing any of
+    /// those here would let a manual `remove` double-take (or double-free-
+    /// list-push) the same row F6 will later retire through its own path.
     pub fn remove(&mut self, handle: Handle<T>) -> Option<T> {
         let idx = self.resolve_index(handle)?;
         let word = self.slot_word.get(idx).expect("invariant: idx < slot_word.len()");
         let generation = unpack_generation(word);
         let state = unpack_state(word);
+
+        if state == STATE_RETIRING {
+            return None;
+        }
 
         let value = match state {
             STATE_LOADED => {
@@ -462,7 +513,7 @@ impl<T: AssetBacking> Assets<T> {
                 None
             }
             _ => unreachable!(
-                "invariant: a matching generation implies a Loading/Loaded/Failed slot"
+                "invariant: a matching generation implies a Loading/Loaded/Failed slot (Retiring handled above)"
             ),
         };
 
@@ -509,7 +560,27 @@ impl<T: AssetBacking> Assets<T> {
     /// Resolves a dense row `index` DIRECTLY, bypassing the generation check
     /// — the sanctioned way a render carrier that stores only a raw `u32`
     /// index resolves back to its record. Returns `None` if `index` is out
-    /// of range or the row is not `Loaded`.
+    /// of range, or the row does not hold a valid, live `T`.
+    ///
+    /// # `Retiring` resolves ONLY when it holds a live `T` (F2 — UB fix)
+    ///
+    /// A `Loaded`→`Retiring` row (asset-streaming plan F2: [`Assets::dec_ref`]
+    /// reached zero on what was a `Loaded` row) is occupied-but-unreusable,
+    /// NOT freed — its `col` bytes are untouched until a future fence-gated
+    /// `retire_deferred_frees` pass (F6) actually moves the value out. So a
+    /// render carrier whose referent just became `Retiring` this frame must
+    /// keep resolving the SAME value it always did (no visible change, no
+    /// dangling read) until that later rung retires the row.
+    ///
+    /// A `Loading`/`Failed`→`Retiring` row, by contrast, NEVER held a real
+    /// `T` — [`Assets::reserve`]'s inert all-zero scratch bytes are not a
+    /// valid `T` (a zeroed niche, e.g. a `NonNull` field, is immediate UB the
+    /// instant `&T` is formed over it). [`live`](Self::live) is the precise
+    /// discriminator: only [`Assets::add`]/[`Assets::fill`] ever set it, so
+    /// `live.test(idx)` is exactly the "does this Retiring row hold a real
+    /// `T`" predicate — false for a `Loading`/`Failed`→`Retiring` row (which
+    /// therefore correctly returns `None`, exactly as it did before F2), true
+    /// for a `Loaded`→`Retiring` one.
     #[inline]
     pub fn get_by_index(&self, index: u32) -> Option<&T> {
         let idx = index as usize;
@@ -517,16 +588,43 @@ impl<T: AssetBacking> Assets<T> {
             return None;
         }
         let word = self.slot_word.get(idx).expect("invariant: idx < slot_word.len()");
-        if unpack_state(word) != STATE_LOADED {
+        let state = unpack_state(word);
+        let resolvable = match state {
+            STATE_LOADED => true,
+            // A Retiring row resolves only if it is the Loaded->Retiring case
+            // (holds a real T); a Loading/Failed->Retiring row's `live` bit
+            // was never set (see the field doc), so this excludes it.
+            STATE_RETIRING => self.live.test(idx),
+            _ => false,
+        };
+        if !resolvable {
             return None;
         }
-        let ptr = self.col.get_raw(idx).expect("invariant: a Loaded slot's row must be < col.count()");
-        // SAFETY: same as `get`.
+        let ptr = self
+            .col
+            .get_raw(idx)
+            .expect("invariant: a resolvable slot's row must be < col.count()");
+        // SAFETY: `resolvable` is true only for a Loaded row, or a Retiring
+        // row with `live.test(idx)` true (a Loaded->Retiring row) — both
+        // cases guarantee the data-column row holds a valid, initialized `T`
+        // written by `push_value`/`write_value_at`. A Loading/Failed row
+        // (never written a `T`, live=false) is excluded by `resolvable`
+        // above whether it is Loading/Failed/Retiring, so this never reads
+        // uninitialized scratch bytes as `&T`.
         Some(unsafe { &*ptr.cast::<T>() })
     }
 
     /// Returns the [`AssetLoadState`] of the row `handle` addresses, or
-    /// `None` if `handle` is out of range or stale.
+    /// `None` if `handle` is out of range, stale, or the row is `Retiring`.
+    ///
+    /// # `Retiring` does not resolve (F2)
+    ///
+    /// `dec_ref`'s `Retiring` transition does NOT bump the row's generation
+    /// (only [`Self::remove`]'s terminal `Vacant` transition does), so a
+    /// still-matching `handle` for a just-retired row reaches this far. A
+    /// `Retiring` row has no [`AssetLoadState`] mapping — it does not resolve
+    /// through `state`, mirroring [`Self::resolve_occupied`]'s
+    /// `STATE_LOADED`-only contract for [`Self::get`].
     #[inline]
     pub fn state(&self, handle: Handle<T>) -> Option<AssetLoadState> {
         let idx = self.resolve_index(handle)?;
@@ -535,8 +633,9 @@ impl<T: AssetBacking> Assets<T> {
             STATE_LOADING => Some(AssetLoadState::Loading),
             STATE_LOADED => Some(AssetLoadState::Loaded),
             STATE_FAILED => Some(AssetLoadState::Failed),
+            STATE_RETIRING => None,
             _ => unreachable!(
-                "invariant: a matching generation implies a Loading/Loaded/Failed slot"
+                "invariant: a matching generation implies a Loading/Loaded/Failed/Retiring slot"
             ),
         }
     }
@@ -603,20 +702,120 @@ impl<T: AssetBacking> Assets<T> {
     }
 
     /// Monotonic counter bumped on every free/generation-advance (streaming
-    /// plumbing — F5's validation early-out reads this). Inert in F1 (bumped
-    /// by [`Self::remove`], read by nothing yet).
+    /// plumbing — F5's validation early-out reads this; bumped by
+    /// [`Self::remove`] and, as of F2, by [`Self::dec_ref`] on a Retiring
+    /// transition).
     #[inline]
     #[allow(dead_code)]
     pub(crate) fn free_epoch(&self) -> u64 {
         self.free_epoch
     }
 
-    /// Marks dense row `slot` NEVER-RETIRE (streaming plumbing — F2 pins slot
-    /// 0, the default asset). Inert in F1: no retire path reads `pinned` yet.
+    /// Marks dense row `slot` NEVER-RETIRE (asset-streaming plan F2: pins
+    /// slot 0, the default asset). [`Self::dec_ref`] reaching zero on a
+    /// pinned row leaves it `Loaded` at refcount 0 instead of transitioning
+    /// to `Retiring`. `pub` (promoted from F1's `pub(crate)`) so a
+    /// cross-crate boot sequence (`boyko_app::runner`) can pin the default
+    /// material immediately after minting it.
     #[inline]
-    #[allow(dead_code)]
-    pub(crate) fn pin(&mut self, slot: u32) {
+    pub fn pin(&mut self, slot: u32) {
         self.pinned.set(slot as usize);
+    }
+
+    /// Increments the live-refcount of dense row `slot` — the carrier ATTACH
+    /// event (asset-streaming plan F2 §1: a `MeshHandle`/`MaterialHandle`
+    /// `on_insert` hook pushes `+1`, folded in by the `boyko_render` apply
+    /// system). Refcount is otherwise driven only by [`Self::dec_ref`];
+    /// [`Self::add`]/[`Self::reserve`] always mint a fresh row at refcount 0
+    /// (an unattached load has no owner yet).
+    ///
+    /// A no-op if `slot` is out of range: F2 carries no generation check on
+    /// the hook-pushed delta (F5 adds one), so a carrier value that never
+    /// resolved to a minted row must not panic.
+    #[inline]
+    pub fn inc_ref(&mut self, slot: u32) {
+        let idx = slot as usize;
+        if let Some(count) = self.refcount.get(idx) {
+            debug_assert!(count < u32::MAX, "invariant: refcount overflow at slot {slot}");
+            self.refcount.set(idx, count + 1);
+        }
+    }
+
+    /// Decrements the live-refcount of dense row `slot` — the carrier DETACH
+    /// event (asset-streaming plan F2 §1: a `MeshHandle`/`MaterialHandle`
+    /// `on_replace` hook pushes `-1`, folded in by the `boyko_render` apply
+    /// system). When the count reaches zero on an unpinned `Loaded`/
+    /// `Failed`/`Loading` row, the row transitions to `Retiring` (occupied-
+    /// but-unreusable, awaiting a future fence-gated `retire_deferred_frees`
+    /// pass — F6), bumps [`Self::free_epoch`], marks the row's `dirty` bit,
+    /// and this returns a [`RetireTicket`] the caller must enqueue into the
+    /// deferred-free queue.
+    ///
+    /// # Idempotent
+    ///
+    /// A row already `Retiring` is a no-op — `None`, refcount untouched. A
+    /// `Vacant` row (freed via [`Self::remove`], unreachable from the F2
+    /// hook pipeline in well-formed use) is likewise a no-op. This idempotent
+    /// guard is what F6's single-`take_at` contract relies on: a row can
+    /// never be enqueued (and later freed) twice.
+    ///
+    /// A pinned row (slot 0, the default asset — see [`Self::pin`]) never
+    /// transitions: reaching zero leaves it `Loaded` at refcount 0 and
+    /// returns `None`.
+    ///
+    /// A no-op (`None`) if `slot` is out of range — same rationale as
+    /// [`Self::inc_ref`].
+    ///
+    /// # Only `on_replace` decrements (deviation from a literal 2-hook wire)
+    ///
+    /// The kernel's `on_replace` fires exactly once per value-departure event
+    /// — an in-place overwrite (`add A, then insert B` on the same entity) OR
+    /// a genuine removal/despawn — always reading the correct dying/old
+    /// value (`migrate_entity_insert`/`migrate_entity_remove`). `on_remove`
+    /// fires ADDITIONALLY, but only for a genuine removal, reading the SAME
+    /// dying value `on_replace` already saw. Wiring an independent `dec_ref`
+    /// call on BOTH hooks would double-decrement every genuine removal
+    /// whenever the row's refcount is still `> 1` at that point (this
+    /// idempotent-on-Retiring guard only absorbs the duplicate when the
+    /// FIRST call already reached zero) — the common shared-handle case
+    /// (many entities referencing one mesh/material slot). So only
+    /// `on_replace` is wired to `dec_ref`; see `boyko_scene::render_caps`'s
+    /// hook wiring.
+    #[inline]
+    pub fn dec_ref(&mut self, slot: u32) -> Option<RetireTicket> {
+        let idx = slot as usize;
+        let word = self.slot_word.get(idx)?;
+        let state = unpack_state(word);
+        if state == STATE_RETIRING || state == STATE_VACANT {
+            return None;
+        }
+        let count = self
+            .refcount
+            .get(idx)
+            .expect("invariant: refcount column is 1:1 with slot_word (see with_reserved)");
+        debug_assert!(
+            count > 0,
+            "invariant: dec_ref underflow — refcount already 0 at slot {slot}"
+        );
+        let new_count = count.saturating_sub(1);
+        self.refcount.set(idx, new_count);
+        if new_count != 0 || self.pinned.test(idx) {
+            return None;
+        }
+        // The `Retiring || Vacant` early-return above already excludes every
+        // state but Loaded/Failed/Loading — this is a documentation-only
+        // invariant check, not a live branch (O1 cleanup: the prior
+        // `if !matches!(..) { return None }` guard here was dead code).
+        debug_assert!(
+            matches!(state, STATE_LOADED | STATE_FAILED | STATE_LOADING),
+            "invariant: dec_ref's zero-crossing transition state must be Loaded/Failed/Loading \
+             here — Retiring/Vacant are excluded by the early-return above"
+        );
+        let generation = unpack_generation(word);
+        self.slot_word.set(idx, pack_slot_word(generation, STATE_RETIRING));
+        self.free_epoch = self.free_epoch.wrapping_add(1);
+        self.dirty.set(idx);
+        Some(RetireTicket { kind: self.id, slot })
     }
 }
 
@@ -1347,5 +1546,350 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// proptest oracle: a random sequence of add/reserve/fill/fail/remove/get
+    /// PLUS `inc_ref`/`dec_ref` (asset-streaming plan F2 §1), modeling
+    /// `(slot, gen, state, refcount)` JOINTLY — an extension of [`oracle`]'s
+    /// `(slot, gen, state)`-only model.
+    ///
+    /// The refcount/`Retiring` model is keyed by the DENSE SLOT INDEX (not by
+    /// `Handle`, i.e. not generation-checked) — this mirrors `inc_ref`/
+    /// `dec_ref`'s own real contract exactly: F2's hook-pushed `RefDelta`
+    /// carries only a raw `u32` slot (no generation lane; F5 adds one), so a
+    /// real apply-system fold can target ANY currently-minted slot regardless
+    /// of which generation currently occupies it.
+    ///
+    /// `RemoveAt` on a handle whose slot the model has marked `Retiring` is
+    /// deliberately SKIPPED (not routed to `assets.remove`), with a comment at
+    /// the skip site — see that comment for why. This keeps this proptest
+    /// focused exactly on the refcount/idempotency/`free_epoch` properties
+    /// asset-streaming plan F2 §1 describes.
+    mod refcount_oracle {
+        use std::collections::{HashMap, HashSet};
+
+        use proptest::prelude::*;
+
+        use super::*;
+
+        #[derive(Clone, Debug)]
+        enum RefOp {
+            Add(u64),
+            Reserve,
+            FillAt(usize, u64),
+            FailAt(usize),
+            RemoveAt(usize),
+            GetAt(usize),
+            IncRefAt(usize),
+            DecRefAt(usize),
+        }
+
+        fn ref_op_strategy() -> impl Strategy<Value = RefOp> {
+            prop_oneof![
+                any::<u64>().prop_map(RefOp::Add),
+                Just(RefOp::Reserve),
+                (any::<usize>(), any::<u64>()).prop_map(|(i, v)| RefOp::FillAt(i, v)),
+                any::<usize>().prop_map(RefOp::FailAt),
+                any::<usize>().prop_map(RefOp::RemoveAt),
+                any::<usize>().prop_map(RefOp::GetAt),
+                any::<usize>().prop_map(RefOp::IncRefAt),
+                any::<usize>().prop_map(RefOp::DecRefAt),
+            ]
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(256))]
+            #[test]
+            fn assets_refcount_matches_model_oracle(ops in proptest::collection::vec(ref_op_strategy(), 1..300)) {
+                let mut assets = Assets::<u64>::with_reserved(16);
+                let mut oracle: HashMap<Handle<u64>, u64> = HashMap::new();
+                let mut reserved_pending: HashSet<Handle<u64>> = HashSet::new();
+                let mut minted: Vec<Handle<u64>> = Vec::new();
+                // Refcount + Retiring, keyed by dense slot index (see module doc).
+                let mut refcount_model: HashMap<u32, u32> = HashMap::new();
+                let mut retiring_model: HashSet<u32> = HashSet::new();
+                let mut vacant_model: HashSet<u32> = HashSet::new();
+                // The CURRENT (matching-generation) `Handle` occupying each slot, if
+                // any — needed because `dec_ref`/`inc_ref` (like the real F2 apply
+                // path) address a bare `u32` slot, not a generation-checked
+                // `Handle`: a `RefOp::*At(pick)` can pick a STALE `minted` entry
+                // whose generation no longer matches the slot's real occupant, yet
+                // `dec_ref`/`inc_ref` still act on whatever IS really there. This map
+                // is how a `DecRefAt` crossing-to-zero knows WHICH `oracle`/
+                // `reserved_pending` entry to retract, independent of which handle
+                // (possibly stale) `pick` happened to land on.
+                let mut current_occupant: HashMap<u32, Handle<u64>> = HashMap::new();
+
+                for op in ops {
+                    match op {
+                        RefOp::Add(value) => {
+                            let handle = assets.add(value);
+                            oracle.insert(handle, value);
+                            minted.push(handle);
+                            refcount_model.insert(handle.index(), 0);
+                            retiring_model.remove(&handle.index());
+                            vacant_model.remove(&handle.index());
+                            current_occupant.insert(handle.index(), handle);
+                        }
+                        RefOp::Reserve => {
+                            let handle = assets.reserve();
+                            reserved_pending.insert(handle);
+                            minted.push(handle);
+                            refcount_model.insert(handle.index(), 0);
+                            retiring_model.remove(&handle.index());
+                            vacant_model.remove(&handle.index());
+                            current_occupant.insert(handle.index(), handle);
+                        }
+                        RefOp::FillAt(pick, value) => {
+                            if let Some(&handle) = minted.get(pick % minted.len().max(1)) {
+                                let slot = handle.index();
+                                // `fill`'s precondition is `resolve_reserved`: state ∈
+                                // {Loading, Failed}. A slot the model marked Retiring
+                                // (via `dec_ref` reaching zero on what WAS a Loading row —
+                                // dec_ref accepts Loading too) now fails that check safely
+                                // (resolve_reserved's `matches!` has no arm for Retiring,
+                                // so it returns `None`, not a panic) — model this as a
+                                // forced-error case alongside the existing "not reserved"
+                                // case.
+                                let expected_ok =
+                                    reserved_pending.contains(&handle) && !retiring_model.contains(&slot);
+                                let real = assets.fill(handle, value);
+                                if expected_ok {
+                                    prop_assert!(real.is_ok(), "fill on a Reserved, non-Retiring row must succeed");
+                                    oracle.insert(handle, value);
+                                    reserved_pending.remove(&handle);
+                                } else {
+                                    prop_assert!(
+                                        real.is_err(),
+                                        "fill on a non-Reserved/stale/Retiring handle must error"
+                                    );
+                                }
+                            }
+                        }
+                        RefOp::FailAt(pick) => {
+                            if let Some(&handle) = minted.get(pick % minted.len().max(1)) {
+                                // Same safe-on-Retiring precondition as `fill` (see above);
+                                // a no-op either way, nothing to model.
+                                assets.fail(handle);
+                            }
+                        }
+                        RefOp::RemoveAt(pick) => {
+                            if let Some(&handle) = minted.get(pick % minted.len().max(1)) {
+                                let slot = handle.index();
+                                if retiring_model.contains(&slot) {
+                                    // KNOWN GAP (not this proptest's target — see the
+                                    // dedicated `remove_on_retiring_row_after_dec_ref_reaches_zero`
+                                    // probe below): `remove()`'s `resolve_index` only checks
+                                    // generation, and `dec_ref`'s Retiring transition does
+                                    // NOT bump generation — so the ORIGINAL handle still
+                                    // resolves, and `remove()`'s state match has no arm for
+                                    // Retiring, hitting `unreachable!()`. Skip calling
+                                    // `remove` here so THIS proptest stays focused on the
+                                    // refcount/idempotency/free_epoch properties it targets.
+                                    continue;
+                                }
+                                // `handle` genuinely resolves (matching generation)
+                                // against the slot's CURRENT occupant iff it is the
+                                // handle presently tracked as Loaded (`oracle`) or
+                                // Loading/Failed (`reserved_pending`) — the retiring
+                                // case is already excluded above, so these two sets
+                                // jointly cover every resolvable non-Retiring state
+                                // (mirrors the [`oracle`] proptest's own invariant).
+                                // A `pick` landing on a SUPERSEDED (stale-generation)
+                                // `minted` entry for an already-reused slot resolves
+                                // to neither set — a real, guaranteed no-op that must
+                                // NOT perturb this slot's refcount/retiring/vacant
+                                // model (the slot's true current occupant, at a
+                                // DIFFERENT generation, is untouched by the call).
+                                let is_current_occupant =
+                                    oracle.contains_key(&handle) || reserved_pending.contains(&handle);
+                                let was_occupied = oracle.contains_key(&handle);
+                                let real = assets.remove(handle);
+                                let model = if was_occupied { oracle.remove(&handle) } else { None };
+                                prop_assert_eq!(
+                                    real, model,
+                                    "remove() must match the oracle exactly, including a Reserved row's \
+                                     None with no underflow"
+                                );
+                                if is_current_occupant {
+                                    reserved_pending.remove(&handle);
+                                    refcount_model.insert(slot, 0);
+                                    retiring_model.remove(&slot);
+                                    vacant_model.insert(slot);
+                                    current_occupant.remove(&slot);
+                                }
+                            }
+                        }
+                        RefOp::GetAt(pick) => {
+                            if let Some(&handle) = minted.get(pick % minted.len().max(1)) {
+                                let real = assets.get(handle).copied();
+                                let model = oracle.get(&handle).copied();
+                                prop_assert_eq!(real, model, "get() must match the oracle exactly (never a stale or wrong value)");
+                            }
+                        }
+                        RefOp::IncRefAt(pick) => {
+                            if let Some(&handle) = minted.get(pick % minted.len().max(1)) {
+                                let slot = handle.index();
+                                let real_before = assets.refcount.get(slot as usize);
+                                assets.inc_ref(slot);
+                                let real_after = assets.refcount.get(slot as usize);
+                                if let Some(before) = real_before {
+                                    prop_assert_eq!(
+                                        real_after, Some(before + 1),
+                                        "inc_ref must increment the real refcount column by exactly 1"
+                                    );
+                                    if let Some(c) = refcount_model.get_mut(&slot) {
+                                        *c += 1;
+                                    }
+                                }
+                            }
+                        }
+                        RefOp::DecRefAt(pick) => {
+                            if let Some(&handle) = minted.get(pick % minted.len().max(1)) {
+                                let slot = handle.index();
+                                // Only exercise `dec_ref` when it stays within its own
+                                // documented precondition (never call it on a slot the
+                                // model knows has refcount 0 AND is neither Retiring nor
+                                // Vacant — that would trip `dec_ref`'s own
+                                // `debug_assert!(count > 0, ...)`, an invariant violation
+                                // by the CALLER, not a property of `dec_ref` itself; a
+                                // real caller never does this because the carrier hooks
+                                // always pair +1/-1). Calling it while Retiring or Vacant
+                                // is exactly the idempotency property this test targets.
+                                let count = refcount_model.get(&slot).copied().unwrap_or(0);
+                                let is_retiring = retiring_model.contains(&slot);
+                                let is_vacant = vacant_model.contains(&slot);
+                                if count == 0 && !is_retiring && !is_vacant {
+                                    continue;
+                                }
+
+                                let epoch_before = assets.free_epoch();
+                                let ticket = assets.dec_ref(slot);
+
+                                if is_retiring || is_vacant {
+                                    prop_assert!(
+                                        ticket.is_none(),
+                                        "dec_ref on an already-Retiring/Vacant slot must be idempotent (None)"
+                                    );
+                                    prop_assert_eq!(
+                                        assets.free_epoch(), epoch_before,
+                                        "an idempotent dec_ref (Retiring/Vacant) must not bump free_epoch again"
+                                    );
+                                } else if count > 1 {
+                                    prop_assert!(
+                                        ticket.is_none(),
+                                        "dec_ref must return None while the refcount stays above zero"
+                                    );
+                                    prop_assert_eq!(
+                                        assets.free_epoch(), epoch_before,
+                                        "a non-zero-crossing dec_ref must not bump free_epoch"
+                                    );
+                                    refcount_model.insert(slot, count - 1);
+                                } else {
+                                    // count == 1: this call crosses to zero.
+                                    prop_assert!(
+                                        ticket.is_some(),
+                                        "dec_ref reaching zero on an unpinned, non-Retiring row must return a RetireTicket"
+                                    );
+                                    prop_assert_eq!(
+                                        assets.free_epoch(), epoch_before + 1,
+                                        "the zero-crossing dec_ref must bump free_epoch by exactly 1"
+                                    );
+                                    refcount_model.insert(slot, 0);
+                                    retiring_model.insert(slot);
+                                    // A Retiring row is no longer Loaded — `get()`
+                                    // (`resolve_occupied`, STATE_LOADED-only) stops
+                                    // resolving it even though `get_by_index` still
+                                    // does (see `Assets::get_by_index`'s doc); drop it
+                                    // from the value oracle to match. `dec_ref` (like
+                                    // the real F2 apply path) addresses the bare slot,
+                                    // NOT `handle` (which may be a STALE `minted` pick
+                                    // superseded by a later Add/Reserve at this same
+                                    // index) — retract via `current_occupant`'s
+                                    // slot->CURRENT-handle mapping, not `handle` itself.
+                                    if let Some(&cur) = current_occupant.get(&slot) {
+                                        oracle.remove(&cur);
+                                        reserved_pending.remove(&cur);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// FIX C1 (UB): `get_by_index` must NOT resolve a `Loading`->`Retiring`
+    /// row — it never held a real `T` (only `reserve()`'s inert all-zero
+    /// scratch), so forming `&T` over it would be UB. `live.test(idx)` is
+    /// the discriminator (see `get_by_index`'s doc); this pins the `Loading`
+    /// half of that contract.
+    #[test]
+    fn get_by_index_returns_none_for_loading_row_retired_via_dec_ref() {
+        let mut assets = Assets::<u64>::with_reserved(4);
+        let h = assets.reserve(); // Loading, live=false
+        assets.inc_ref(h.index());
+        let ticket = assets.dec_ref(h.index());
+        assert!(ticket.is_some(), "refcount 1->0 must retire the row");
+        assert_eq!(
+            assets.get_by_index(h.index()),
+            None,
+            "a Loading->Retiring row never held a real T (live=false) — get_by_index must return \
+             None, not read the inert scratch bytes as &T"
+        );
+    }
+
+    /// Sibling of the Loading case for a `Failed` row.
+    #[test]
+    fn get_by_index_returns_none_for_failed_row_retired_via_dec_ref() {
+        let mut assets = Assets::<u64>::with_reserved(4);
+        let h = assets.reserve();
+        assets.fail(h); // Failed, live=false
+        assets.inc_ref(h.index());
+        let ticket = assets.dec_ref(h.index());
+        assert!(ticket.is_some(), "refcount 1->0 must retire the row");
+        assert_eq!(
+            assets.get_by_index(h.index()),
+            None,
+            "a Failed->Retiring row never held a real T (live=false) — get_by_index must return \
+             None, not read the inert scratch bytes as &T"
+        );
+    }
+
+    /// Miri-TB / debug-build documented-gap probe (NOT an F2 regression per
+    /// se — F2's own module doc concedes `state`/`remove` are not yet
+    /// Retiring-aware; F5/F6 are the rungs that add it): calling `remove()`
+    /// with the SAME (unchanged-generation) `Handle` a `dec_ref`-driven
+    /// Retiring transition just touched hits `remove()`'s exhaustive state
+    /// match, which has no arm for `Retiring` — `unreachable!()`. Recorded
+    /// here as an explicit, isolated, deterministic reproduction (found via
+    /// the `refcount_oracle` proptest's design, deliberately routed AROUND
+    /// this exact call above) rather than left silently undiscovered.
+    #[test]
+    fn remove_on_retiring_row_after_dec_ref_reaches_zero() {
+        let mut assets = Assets::<u64>::with_reserved(4);
+        let h = assets.add(1);
+        assets.inc_ref(h.index());
+        let ticket = assets.dec_ref(h.index());
+        assert!(ticket.is_some(), "refcount 1->0 must retire the row");
+
+        // The SAME handle (dec_ref never bumps generation) still resolves via
+        // `resolve_index`; `remove()`'s state match has no `Retiring` arm.
+        let _ = assets.remove(h);
+    }
+
+    /// Sibling of [`remove_on_retiring_row_after_dec_ref_reaches_zero`] for
+    /// `state()`, which has the identical exhaustive-match-with-no-Retiring-arm
+    /// shape.
+    #[test]
+    fn state_on_retiring_row_after_dec_ref_reaches_zero() {
+        let mut assets = Assets::<u64>::with_reserved(4);
+        let h = assets.add(1);
+        assets.inc_ref(h.index());
+        let ticket = assets.dec_ref(h.index());
+        assert!(ticket.is_some(), "refcount 1->0 must retire the row");
+
+        let _ = assets.state(h);
     }
 }

@@ -222,6 +222,22 @@ scatters each instance's `MaterialHandle.0` into a FIF-ringed instance-material 
 Ordering: F1 store under a green byte-identity gate → F2 lifecycle/refcount → F3/F4 remove last HashMaps
 (independent, may parallelise) → F5 validation → F6 teardown → F7 growth → F8 raster wiring → F-obj.
 
+**Invariants discovered during F2 review (load-bearing — do not regress):**
+- **HARD GATE (W2):** F5's generation-check MUST land before F6 (retire/reuse). Until F5, `inc_ref`/`dec_ref`
+  are generation-oblivious (RefDelta carries no gen); this is sound ONLY because no slot is retired-and-reused
+  until F6. A stale weak `Handle(slot)` decrementing a reused slot would corrupt the new tenant's refcount —
+  F5's gen-check closes it, so F6 (the first reuse) must not precede F5.
+- **Store read invariant (C1):** `get_by_index` (and `get`) resolve a row iff its `live` bit is set. `dec_ref`
+  may transition a `Loading`/`Failed` row (which has `live=0` and holds inert zeroed scratch, never a valid `T`)
+  to `Retiring`; such a row must resolve to `None` (forming `&T` over the scratch is UB — a zeroed `MeshGpu`
+  niche is immediate UB). Only a `Loaded→Retiring` row (`live=1`) resolves. `dec_ref` does not bump generation,
+  so `state()`/`remove()` must have an explicit `Retiring` arm (both return `None`; `remove` must NOT `take_at`
+  a Retiring row — the deferred-retire path in F6 is its sole owner) instead of `unreachable!()`.
+- **Carrier rebind contract (W1):** a `MeshHandle`/`MaterialHandle` may be rebound ONLY via spawn or a
+  SINGLE-component `insert` — never inside a migrating multi-component bundle that re-supplies the handle (the
+  insert-migration overlap path fires `on_insert` but NOT the table `on_replace` → the old slot's ref leaks).
+  Also: hooks fire on `insert`, NOT on a raw `Query<&mut MeshHandle>` deref write (none exist in-tree today).
+
 ## Test plan
 
 - **PORT VERBATIM:** `assets.rs` ~30 unit + 256-proptest (`Assets::<u64>` via `impl_asset_pod_backing!`).
