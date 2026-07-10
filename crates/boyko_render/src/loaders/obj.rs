@@ -1,8 +1,6 @@
 //! [`ObjMeshLoader`] — the Wavefront `.obj` mesh loader (asset-system rung
 //! A3b).
 
-use std::collections::HashMap;
-
 use boyko_ecs::ecs::core::asset::{Asset, AssetError, AssetLoader};
 use boyko_math::Vec3;
 
@@ -31,7 +29,8 @@ const DEFAULT_VERTEX_COLOR: [f32; 4] = [0.8, 0.8, 0.8, 1.0];
 ///
 /// A face with more than 3 corners is FAN-triangulated: corners `[0, k, k+1]`
 /// for `k` in `1..len-1`. Each unique `(v, vt, vn)` corner triple dedups to
-/// one output [`Vertex`] via a `HashMap` keyed on the raw (resolved) indices.
+/// one output [`Vertex`] via an indirect sort on the raw (resolved) indices
+/// (F-obj — no hashing: see [`dedup_corners`]).
 ///
 /// # Limitations (documented, not bugs)
 ///
@@ -61,9 +60,7 @@ impl AssetLoader for ObjMeshLoader {
         let mut positions: Vec<[f32; 3]> = Vec::new();
         let mut normals: Vec<[f32; 3]> = Vec::new();
         let mut uvs: Vec<[f32; 2]> = Vec::new();
-        let mut vertices: Vec<Vertex> = Vec::new();
-        let mut indices: Vec<u32> = Vec::new();
-        let mut dedup: HashMap<(i32, i32, i32), u32> = HashMap::new();
+        let mut corners: Vec<CornerRecord> = Vec::new();
 
         for line in text.lines() {
             let line = line.trim();
@@ -78,16 +75,17 @@ impl AssetLoader for ObjMeshLoader {
                 "v" => positions.push(parse_floats3(&rest)?),
                 "vn" => normals.push(parse_floats3(&rest)?),
                 "vt" => uvs.push(parse_floats2(&rest)?),
-                "f" => decode_face(&rest, &positions, &normals, &uvs, &mut vertices, &mut indices, &mut dedup)?,
+                "f" => decode_face(&rest, &positions, &normals, &uvs, &mut corners)?,
                 // "o" / "g" / "usemtl" / "mtllib" / unknown leading tokens: skipped.
                 _ => {}
             }
         }
 
-        if vertices.is_empty() || indices.is_empty() {
+        if corners.is_empty() {
             return Err(decode_error("obj file has no faces".to_owned()));
         }
 
+        let (vertices, indices) = dedup_corners(corners);
         Ok(MeshData { vertices, indices })
     }
 }
@@ -101,55 +99,108 @@ struct Corner {
     vn: Option<u32>,
 }
 
-/// Resolves one `f ...` line's corners, fan-triangulates, and dedups each
-/// corner via `dedup` into `vertices` + `indices`. See the module doc's
-/// grammar / triangulation / dedup / limitations sections.
+/// One face-corner's dedup key + realized [`Vertex`] payload, collected (in
+/// face-corner emission order, across the whole file) by [`decode_face`]
+/// ahead of the sort-dedup pass in [`dedup_corners`].
+#[derive(Clone, Copy)]
+struct CornerRecord {
+    /// `(v, vt, vn)` with a missing `vt`/`vn` encoded as `-1` — the same key
+    /// shape the retired `HashMap<(i32,i32,i32), u32>` dedup used.
+    key: (i32, i32, i32),
+    vertex: Vertex,
+}
+
+/// Resolves one `f ...` line's corners, fan-triangulates, and appends one
+/// [`CornerRecord`] per output triangle-corner to `out` (deferring dedup to
+/// [`dedup_corners`], run once after the whole file is streamed). See the
+/// module doc's grammar / triangulation / limitations sections.
 fn decode_face(
     fields: &[&str],
     positions: &[[f32; 3]],
     normals: &[[f32; 3]],
     uvs: &[[f32; 2]],
-    vertices: &mut Vec<Vertex>,
-    indices: &mut Vec<u32>,
-    dedup: &mut HashMap<(i32, i32, i32), u32>,
+    out: &mut Vec<CornerRecord>,
 ) -> Result<(), AssetError> {
     if fields.len() < 3 {
         return Err(decode_error(format!("a face needs at least 3 corners, found {}", fields.len())));
     }
 
-    let corners = fields
+    let face_corners = fields
         .iter()
         .map(|tok| parse_corner(tok, positions.len(), uvs.len(), normals.len()))
         .collect::<Result<Vec<Corner>, AssetError>>()?;
 
     // A face provides `vn` for every corner or none at all — the flat-normal
     // fallback computes one normal per output triangle when any corner omits it.
-    let has_vn = corners.iter().all(|c| c.vn.is_some());
+    let has_vn = face_corners.iter().all(|c| c.vn.is_some());
 
-    for k in 1..corners.len() - 1 {
-        let tri = [corners[0], corners[k], corners[k + 1]];
+    for k in 1..face_corners.len() - 1 {
+        let tri = [face_corners[0], face_corners[k], face_corners[k + 1]];
         let flat_normal = (!has_vn).then(|| {
             face_normal(positions[tri[0].v as usize], positions[tri[1].v as usize], positions[tri[2].v as usize])
         });
 
         for corner in tri {
             let key = (corner.v as i32, corner.vt.map_or(-1, |i| i as i32), corner.vn.map_or(-1, |i| i as i32));
-            let index = *dedup.entry(key).or_insert_with(|| {
-                let normal = match corner.vn {
-                    Some(i) => normals[i as usize],
-                    None => flat_normal.expect("invariant: has_vn is false whenever a corner's vn is None"),
-                };
-                vertices.push(Vertex {
-                    position: positions[corner.v as usize],
-                    normal,
-                    color: DEFAULT_VERTEX_COLOR,
-                });
-                (vertices.len() - 1) as u32
+            let normal = match corner.vn {
+                Some(i) => normals[i as usize],
+                None => flat_normal.expect("invariant: has_vn is false whenever a corner's vn is None"),
+            };
+            out.push(CornerRecord {
+                key,
+                vertex: Vertex { position: positions[corner.v as usize], normal, color: DEFAULT_VERTEX_COLOR },
             });
-            indices.push(index);
         }
     }
     Ok(())
+}
+
+/// Resolves the minimal unique vertex set from `corners` (collected in
+/// face-corner emission order) via an indirect sort on the dedup key: sort a
+/// permutation of corner indices by `key`, then walk the sorted runs of equal
+/// keys, emitting one dense vertex per run and scattering its id back into an
+/// index buffer sized to the original corner order.
+///
+/// Produces a vertex/index pair GEOMETRICALLY EQUIVALENT to the retired
+/// `HashMap<(i32,i32,i32), u32>` corner-key dedup — the same unique-vertex set
+/// and topology (one vertex per distinct corner key) — though the vertex
+/// NUMBERING (and thus the integer values in the index buffer) differs: this
+/// numbers vertices in sorted-key order, the `HashMap` numbered them in
+/// first-emission order. Nothing downstream depends on absolute vertex
+/// numbering, so the two meshes are interchangeable. First-emission still wins
+/// on a key collision (matching `HashMap::entry(..).or_insert_with(..)`, which
+/// never overwrites an existing key — see the module doc's flat-normal-fallback
+/// limitation for why that matters) — with an `O(n log n)` sort replacing
+/// hashing (F-obj). This is a cold, one-shot decode path; the sort also yields
+/// the smallest possible vertex buffer.
+fn dedup_corners(corners: Vec<CornerRecord>) -> (Vec<Vertex>, Vec<u32>) {
+    let mut order: Vec<u32> = (0..corners.len() as u32).collect();
+    order.sort_unstable_by_key(|&i| corners[i as usize].key);
+
+    let mut vertices: Vec<Vertex> = Vec::with_capacity(corners.len());
+    let mut indices: Vec<u32> = vec![0; corners.len()];
+
+    let mut i = 0;
+    while i < order.len() {
+        let key = corners[order[i] as usize].key;
+        let run_start = i;
+        i += 1;
+        while i < order.len() && corners[order[i] as usize].key == key {
+            i += 1;
+        }
+
+        let run = &order[run_start..i];
+        // First-emission wins on a key collision, matching the retired
+        // HashMap's `or_insert_with` (never overwrites an existing entry).
+        let first = *run.iter().min().expect("invariant: a sort run is never empty");
+        let new_id = vertices.len() as u32;
+        vertices.push(corners[first as usize].vertex);
+        for &orig in run {
+            indices[orig as usize] = new_id;
+        }
+    }
+
+    (vertices, indices)
 }
 
 /// Parses one face-corner token (`v`, `v/vt`, `v/vt/vn`, or `v//vn`),
@@ -397,6 +448,49 @@ f 1 2 3
             assert!((v.normal[2] - 1.0).abs() < 1e-6, "expected a +Z flat normal, got {:?}", v.normal);
             assert!(v.normal[0].abs() < 1e-6 && v.normal[1].abs() < 1e-6);
         }
+    }
+
+    /// Two vn-less faces share corners (same `v`, no `vt`/`vn`) but yield
+    /// DIFFERENT flat normals; the deduped shared vertex must keep the
+    /// FIRST-emitted face's normal. This locks `dedup_corners`'s `.min()`
+    /// first-emission-wins semantics — the one behavior a `run[0]`/`.max()`
+    /// regression could silently break (the retired `HashMap::or_insert_with`
+    /// never overwrote, so first-seen won). Every other decode test has
+    /// identical payloads on colliding keys, so only this one distinguishes
+    /// first- from last-emission selection.
+    #[test]
+    fn decode_flat_normal_collision_keeps_the_first_emitted_face_normal() {
+        // Triangle A (emitted first): v1,v2,v3 -> flat normal +Z.
+        // Triangle B (second):        v1,v3,v4 -> flat normal +X.
+        // v1 (0,0,0) and v3 (0,1,0) are shared corners; both must keep A's +Z.
+        let obj = "\
+v 0 0 0
+v 1 0 0
+v 0 1 0
+v 0 0 1
+f 1 2 3
+f 1 3 4
+";
+        let mesh = ObjMeshLoader::decode(obj.as_bytes()).expect("must decode");
+        assert_eq!(mesh.vertices.len(), 4, "v1,v2,v3,v4 are 4 distinct corner keys");
+        let normal_at = |pos: [f32; 3]| {
+            mesh.vertices
+                .iter()
+                .find(|v| v.position == pos)
+                .unwrap_or_else(|| panic!("vertex at {pos:?} must be present"))
+                .normal
+        };
+        // Shared v1 and v3 keep triangle A's +Z (first-emission wins), NOT B's +X.
+        for shared in [[0.0f32, 0.0, 0.0], [0.0, 1.0, 0.0]] {
+            let n = normal_at(shared);
+            assert!(
+                (n[2] - 1.0).abs() < 1e-6 && n[0].abs() < 1e-6 && n[1].abs() < 1e-6,
+                "shared corner {shared:?} must keep the first-emitted face A's +Z normal, got {n:?}"
+            );
+        }
+        // v4 (only in face B) carries B's own +X flat normal.
+        let n4 = normal_at([0.0, 0.0, 1.0]);
+        assert!((n4[0] - 1.0).abs() < 1e-6, "v4 (B-only) carries face B's +X normal, got {n4:?}");
     }
 
     /// An empty file has no faces — `Decode`.
