@@ -123,6 +123,13 @@ pub mod light_policy;
 pub mod light_reconcile;
 pub mod light_system;
 pub mod material;
+/// Asset-system rung A1 — the GPU-resident mirror of `Assets<MaterialGpu>`
+/// ([`MaterialTable`](material_table::MaterialTable)): a `MeshRegistry`-shaped device
+/// SSBO + a per-in-flight-frame staging ring, seeded from the world's
+/// [`Assets<MaterialGpu>`](boyko_ecs::ecs::core::asset::Assets) CPU authority, keyed by
+/// [`MaterialId`](material::MaterialId). Replaces the standalone mesh-materials rung
+/// M(-1) `MaterialRegistry`.
+pub mod material_table;
 /// The ECS-native bucketed instance gather (mesh foundation M3): the
 /// [`MeshRenderScratch`](mesh_draw::MeshRenderScratch) reused resource, the
 /// per-mesh [`DrawBatch`](mesh_draw::DrawBatch), and the
@@ -285,7 +292,8 @@ pub use light_system::{
     fold_light_table_slotted, light_seed_state, set_light_enabled_now, write_light_table,
 };
 pub use gbuffer_depth::{GBUFFER_T_MAX, assert_gbuffer_marcher_t_max_agree};
-pub use material::{MATERIAL_GPU_WORDS, MaterialGpu, MaterialId};
+pub use material::{MATERIAL_GPU_WORDS, Material, MaterialGpu, MaterialId};
+pub use material_table::MaterialTable;
 pub use mesh_registry::{
     MeshGpu, MeshRegistry, U16_INDEX_VERTEX_LIMIT, VERTEX_STRIDE as MESH_VERTEX_STRIDE, Vertex,
 };

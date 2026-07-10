@@ -15,6 +15,18 @@
 //! the shader's `MATERIAL_GPU_WORDS == 12` pin so a host/shader desync is a build
 //! error. The total is 48 B / 12 words — one material per 48 B, 65 536 materials in a
 //! ~3 MiB SSBO (L2-resident on the target GPUs).
+//!
+//! # Asset-system rung A1 — the CPU authority moved to `Assets<MaterialGpu>`
+//!
+//! [`MaterialGpu`] implements [`Asset`] with `Cpu = MaterialGpu` (the GPU layout IS
+//! its own decoded form — no separate loader/decode step exists yet). The world-global
+//! CPU authority is [`Assets<MaterialGpu>`](boyko_ecs::ecs::core::asset::Assets): mint
+//! via `Assets::add`, edit via `Assets::get_mut`. The GPU mirror
+//! ([`MaterialTable`](crate::material_table::MaterialTable)) reads that table to
+//! seed/refresh the device SSBO — it holds no host authority of its own. This replaces
+//! the standalone mesh-materials rung M(-1) `MaterialRegistry`.
+
+use boyko_ecs::ecs::core::asset::{Asset, Handle};
 
 /// The GPU material-table element — a std430-compatible POD, uploaded once / on-change.
 ///
@@ -69,15 +81,81 @@ const _: () = assert!(
 );
 const _: () = assert!(MATERIAL_GPU_WORDS == 12, "MATERIAL_GPU_WORDS must equal the shader's 12u");
 
+impl Asset for MaterialGpu {
+    /// [`MaterialGpu`] is its own decoded CPU form — no separate loader/decode step
+    /// exists yet (materials are authored directly in Rust at MVP-2; a future
+    /// asset-loading rung may add a file-backed decode).
+    type Cpu = MaterialGpu;
+}
+
+/// The asset-facing name for [`MaterialGpu`] — `Assets<Material>` mint call sites
+/// (`Assets::add`) read more naturally under this alias than the raw GPU-layout type
+/// name. A plain type alias, not a newtype: both names address the SAME
+/// [`Assets<T>`](boyko_ecs::ecs::core::asset::Assets) table.
+pub type Material = MaterialGpu;
+
 /// A material-table index handed to the G-buffer. 16-bit range (the `gNormal.BA` pack +
 /// the `SdfEdit.center.w` carrier); 65 536 materials. `0` is the engine default material.
+///
+/// SEALED (asset-system rung A1): the field is private. A live, table-resolvable id is
+/// minted ONLY from a fresh [`Assets<MaterialGpu>`](boyko_ecs::ecs::core::asset::Assets)
+/// [`Handle<MaterialGpu>`](boyko_ecs::ecs::core::asset::Handle) via
+/// [`from_handle`](Self::from_handle) (the render-carrier truncation of the asset
+/// table's `u32` row index to this 16-bit width).
+/// [`from_raw_for_tests`](Self::from_raw_for_tests) is the ONLY other constructor,
+/// reserved for golden/oracle test harnesses that stamp ids without booting a real
+/// `Assets` table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct MaterialId(pub u16);
+pub struct MaterialId(u16);
 
 impl MaterialId {
     /// The engine default material (table slot 0), used when an edit carries no explicit
     /// id and when an SDF hit's argmin attribution falls through to the fallback.
     pub const DEFAULT: MaterialId = MaterialId(0);
+
+    /// The registry-relative table index (`0` == [`Self::DEFAULT`]).
+    #[inline]
+    pub fn index(self) -> u16 {
+        self.0
+    }
+
+    /// Mints a `MaterialId` from a raw table index. Crate-private: the sole legitimate
+    /// cross-crate conversion is [`from_handle`](Self::from_handle) — a bare `u16`
+    /// constructor exposed crate-wide would let any caller fabricate an id that never
+    /// resolves to a real `Assets<MaterialGpu>` row.
+    #[inline]
+    pub(crate) fn from_index(index: u16) -> Self {
+        Self(index)
+    }
+
+    /// Mints the render carrier for a freshly-added
+    /// [`Assets<MaterialGpu>`](boyko_ecs::ecs::core::asset::Assets) row — the ONE
+    /// legitimate cross-crate conversion from a `Handle<MaterialGpu>` to this type.
+    /// Truncates the handle's `u32` row index to this type's 16-bit width: the asset
+    /// table permits up to `u32::MAX` rows, but the G-buffer / `SdfEdit` carrier only
+    /// reserves 16 bits, so growing an `Assets<MaterialGpu>` table past 65 536 rows and
+    /// then minting a carrier for a high row silently aliases ids. `debug_assert!`s the
+    /// index is in range; at asset-system rung A1 the only caller mints exactly one row
+    /// (index 0), far under the limit.
+    #[inline]
+    pub fn from_handle(handle: Handle<MaterialGpu>) -> Self {
+        let index = handle.index();
+        debug_assert!(
+            index <= u16::MAX as u32,
+            "invariant: the material table fits the 16-bit MaterialId range (65 536 slots)"
+        );
+        Self::from_index(index as u16)
+    }
+
+    /// Test/golden-harness escape hatch: mints a `MaterialId` OUTSIDE a real
+    /// [`Assets<MaterialGpu>`](boyko_ecs::ecs::core::asset::Assets) table (a harness
+    /// that stamps ids without booting one). NEVER call this from production code — an
+    /// id minted here may not resolve to a live table row.
+    #[doc(hidden)]
+    #[inline]
+    pub fn from_raw_for_tests(index: u16) -> Self {
+        Self(index)
+    }
 
     /// Bit-casts the id into the `f32` an `SdfEdit.center.w` free lane carries (the shader
     /// reads it back via `asuint(Buf[base + 3])`). A round-trip-safe `u16 → u32 → f32`

@@ -23,16 +23,19 @@ use boyko_input::{RawInputQueue, translate_win32, translate_win32_raw_mouse};
 use boyko_rhi_vulkan::window::CapturedMsg;
 
 #[cfg(windows)]
+use boyko_ecs::ecs::core::asset::Assets;
+#[cfg(windows)]
 use boyko_input::{ButtonState, KeyCode, RawInputEvent};
 #[cfg(windows)]
 use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
 #[cfg(windows)]
 use boyko_render::{
-    CsmCasterScratch, DdgiCaps, MeshRegistry, MeshRenderScratch, RayBackendPolicy, RayCaps,
-    ResolvedCsm, ResolvedShadowAtlas, RhiContext, SdfEditStaging, ShadowDenoiseConfig,
-    ShadowDenoiseMode, collect_sdf_edits, gbuffer_push_from_view, upload_atlas_ring,
-    upload_camera_ring, upload_csm_ring, upload_instance_models, upload_light_table,
-    upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
+    CsmCasterScratch, DdgiCaps, MaterialGpu, MaterialId, MaterialTable, MeshRegistry,
+    MeshRenderScratch, RayBackendPolicy, RayCaps, ResolvedCsm, ResolvedShadowAtlas, RhiContext,
+    SdfEditStaging, ShadowDenoiseConfig, ShadowDenoiseMode, collect_sdf_edits,
+    gbuffer_push_from_view, upload_atlas_ring, upload_camera_ring, upload_csm_ring,
+    upload_instance_models, upload_light_table, upload_pair_out_slot, upload_pair_ring,
+    upload_sdf_edit_list,
 };
 #[cfg(all(windows, feature = "hwrt"))]
 use boyko_render::{
@@ -76,6 +79,15 @@ pub(crate) struct WindowDesc {
 /// The frame clear color — a dark neutral (the empty-gather / background tone).
 #[cfg(windows)]
 const CLEAR_COLOR: [f32; 4] = [0.05, 0.07, 0.10, 1.0];
+
+/// Asset-system rung A1: the boot preallocation budget for
+/// [`Assets::<MaterialGpu>::with_reserved`] — the host does not know a game's material
+/// count generically, so this is a practical setup-time default (Principle 5: reserve
+/// once so `Assets::add` never reallocates the column mid-setup). `MaterialTable` hard-
+/// sizes its device table to the ACTUAL registered count at `boot_seed`, so an under-
+/// or over-estimate here costs nothing beyond one `Vec` growth.
+#[cfg(windows)]
+const MATERIAL_CAPACITY: usize = 256;
 
 /// The windowed runner body (host plan D6): boot → World residents →
 /// insert-if-absent `AppExit(false)` → `finish()` → frame loop → D2 teardown.
@@ -133,6 +145,26 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     app.world_mut().insert_non_send_resource(GpuDevice(ctx));
     app.world_mut()
         .insert_non_send_resource(MeshRegistry::new());
+    // Asset-system rung A1: `Assets<MaterialGpu>` is the CPU authority (a Resource,
+    // the same generic asset-kernel table every future asset type shares);
+    // `MaterialTable` is its GPU mirror (NonSend — it owns RHI buffers once
+    // `boot_seed` runs after `finish()` below, see there for the boot-ordering
+    // contract against `sync_gbuffer`). Slot 0 is minted here as the engine default
+    // material so a mesh/SDF hit that carries no explicit material id always resolves
+    // to a valid row; user startup mints more through `Assets::add`. The render
+    // carrier truncates a fresh `Handle`'s `u32` index to `MaterialId`'s 16-bit width
+    // at the mint site (`MaterialId::from_handle`) — slot 0's handle always mints
+    // `MaterialId::DEFAULT`, asserted below.
+    let mut material_assets = Assets::<MaterialGpu>::with_reserved(MATERIAL_CAPACITY);
+    let default_material = material_assets.add(MaterialGpu::default());
+    debug_assert_eq!(
+        MaterialId::from_handle(default_material),
+        MaterialId::DEFAULT,
+        "invariant: the first Assets<MaterialGpu> row mints MaterialId::DEFAULT"
+    );
+    app.world_mut().insert_resource(material_assets);
+    app.world_mut()
+        .insert_non_send_resource(MaterialTable::new());
     app.world_mut().insert_resource(WindowInfo {
         width: host.window.width(),
         height: host.window.height(),
@@ -243,6 +275,29 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // loop's first-frame `is_dirty()` block then performs the one-shot upload unchanged.
     app.world_mut().run_system(collect_sdf_edits);
 
+    // Asset-system rung A1: boot-seed the material table — hard-size + upload the
+    // device SSBO from whatever `finish()` drained into `Assets<MaterialGpu>` (every
+    // startup `Assets::add` call already landed, by the SAME order-proof
+    // `collect_sdf_edits` relies on above). This MUST run before the frame loop's
+    // first frame: `GBufferTargets::sync_gbuffer` (called lazily from inside
+    // `render_gbuffer_frame`, never during `WindowHost::boot` or `finish()`) writes
+    // the persistent resolve/vocab descriptor sets against `MaterialTable::table()`
+    // ONCE and never updates them per-frame, so the table must be live before that
+    // first bind.
+    //
+    // `boot_seed` needs `&Assets<MaterialGpu>` and `&mut MaterialTable` live at once;
+    // both live in the same World, so the resource is taken out (owned) for the
+    // duration of the call and reinserted immediately after — a one-time boot cost,
+    // never on the per-frame path.
+    let material_assets = app
+        .world_mut()
+        .remove_resource::<Assets<MaterialGpu>>()
+        .expect("invariant: Assets<MaterialGpu> was inserted before finish()");
+    app.world_mut()
+        .non_send_resource_mut::<MaterialTable>()
+        .boot_seed(&material_assets, ctx);
+    app.world_mut().insert_resource(material_assets);
+
     // A startup-requested exit is honored (plan D6): skip the loop, tear down.
     // BOTH frame-loop exits (normal Escape/close/AppExit AND a terminal render
     // error) return into this ONE teardown + destroy sequence below.
@@ -280,7 +335,8 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     debug_assert!(
         !app.world().contains_non_send_resource::<RhiContext>()
             && !app.world().contains_non_send_resource::<GpuDevice>()
-            && !app.world().contains_non_send_resource::<MeshRegistry>(),
+            && !app.world().contains_non_send_resource::<MeshRegistry>()
+            && !app.world().contains_non_send_resource::<MaterialTable>(),
         "invariant: the post-run World is GPU-evicted (plan D2)"
     );
 
@@ -736,6 +792,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             //     instances (mixed caster/receiver instances of one mesh are
             //     not separable on this path — split the mesh id if needed).
             let registry = world.non_send_resource::<MeshRegistry>();
+            // Asset-system rung A1: the World-owned material GPU mirror, threaded into
+            // `scene()` below so `GBufferScene.material_table` binds its device SSBO
+            // instead of a boot-owned buffer.
+            let material_table = world.non_send_resource::<MaterialTable>();
             let casters = world.resource::<CsmCasterScratch>();
             let caster_batches = casters.batches();
             let mut ci = 0usize;
@@ -904,6 +964,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 atrous_levels,
                 #[cfg(feature = "hwrt")]
                 temporal_enabled,
+                material_table,
                 ctx,
             );
 
@@ -911,8 +972,8 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             //    for slot `s` ends here — R0b).
             // SAFETY: `ctx`/`surface`/`swapchain`/`renderer` share the one
             // pinned device; every `scene` resource is live (owned by
-            // `host.gpu` / the World's `MeshRegistry`, both outliving the
-            // call); `present_extent` == the composite extent the camera
+            // `host.gpu` / the World's `MeshRegistry` / `MaterialTable`, all
+            // outliving the call); `present_extent` == the composite extent the camera
             // push `count`, `dispatch_group_count_x`, and the G-buffer targets
             // are sized to (all boot-fixed, plan D7); a `Some(readback)` is
             // the dump's host-visible staging, sized to the current swapchain
@@ -1127,8 +1188,8 @@ fn teardown(app: &mut App, host: WindowHost, ctx: &VulkanContext) {
     //     every column/UI resource; the registry teardown wait-idles the
     //     already-idle device — a benign no-op) and NEVER touches the device
     //     lifecycle;
-    //   - `MeshRegistry`: its buffers are destroyed through `ctx` under the
-    //     step-1 idle (`unsafe destroy` — the registry has no `Drop` glue);
+    //   - `MeshRegistry` / `MaterialTable`: their buffers are destroyed through
+    //     `ctx` under the step-1 idle (`unsafe destroy` — neither has `Drop` glue);
     //   - `GpuDevice`: the last world-resident `&'static` handle — no dangling
     //     `&'static` may remain in a live structure past this point.
     drop(app.world_mut().remove_non_send_resource::<RhiContext>());
@@ -1137,6 +1198,17 @@ fn teardown(app: &mut App, host: WindowHost, ctx: &VulkanContext) {
         // any mesh buffer; `ctx` is the context they were created on; the
         // registry is destroyed exactly once (just removed from the World).
         unsafe { registry.destroy(ctx) };
+    }
+    // Asset-system rung A1: `MaterialTable`'s table + staging ring are destroyed the
+    // SAME way, under the SAME step-1 idle contract. `Assets<MaterialGpu>` (the CPU
+    // authority) holds no GPU handle, so it needs no explicit eviction here — it
+    // drops normally along with the rest of the World.
+    if let Some(mut material_table) = app.world_mut().remove_non_send_resource::<MaterialTable>() {
+        // SAFETY: the device is idle (step 1) so no in-flight submit references
+        // the material table or its staging ring; `ctx` is the context they were
+        // created on; the table is destroyed exactly once (just removed from
+        // the World).
+        unsafe { material_table.destroy(ctx) };
     }
     // `GpuDevice` is a plain reference newtype (no `Drop` glue) — removal alone
     // ends its residency; the returned `Option` is discarded.

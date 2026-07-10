@@ -67,7 +67,7 @@ use boyko_sdf_math::SdfEdit;
 use boyko_render::{
     DDGI_UPDATE_UBO_BYTES, DdgiConfig, DdgiUpdateConfig, DdgiUpdateUbo, GI_MAX_RAYS, GPU_LIGHT_BYTES,
     GPU_LIGHT_WORDS, GPU_TRANSFORM3D_BYTES, GpuLight, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_BYTES,
-    LightHeaderGpu, LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialGpu, RESOLVED_CSM_BYTES,
+    LightHeaderGpu, LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialTable, RESOLVED_CSM_BYTES,
     RESOLVED_DDGI_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, ResolvedCsm, ResolvedShadowAtlas, SHADOW_DIM,
     Vertex, ddgi_update_dispatch_groups, fill_fibonacci_ray_table, pack_ddgi_update_ubo,
     resolve_ddgi,
@@ -216,19 +216,6 @@ fn zero_fill(base: NonNull<u8>, len: usize) {
     unsafe {
         core::ptr::write_bytes(base.as_ptr(), 0, len);
     }
-}
-
-/// Packs a [`MaterialGpu`] into the 12-word (`3 × vec4` std430) table element
-/// the marcher/resolve reads (the layout the fingerprint const-asserts in
-/// `boyko_render::material` pin).
-fn pack_material(m: &MaterialGpu) -> [u32; 12] {
-    let mut w = [0u32; 12];
-    for c in 0..4 {
-        w[c] = m.base_color[c].to_bits();
-        w[4 + c] = m.mrr[c].to_bits();
-        w[8 + c] = m.emissive[c].to_bits();
-    }
-    w
 }
 
 /// Packs a header + light list into the std430 light-table word stream
@@ -414,7 +401,6 @@ pub(crate) struct GpuSceneBundles {
     /// set has no binding 20).
     #[cfg(feature = "hwrt")]
     ray_shadow_ubo: Option<[BoundBuffer; FRAMES_IN_FLIGHT]>,
-    material_table: BoundBuffer,
     /// The device light table (resolve binding 6), [`LIGHT_TABLE_CAPACITY`] bytes.
     /// The recorder copies `light_upload_bytes` from the fenced slot's staging into
     /// it on a dirty frame (the rung L0-r0 async re-upload).
@@ -505,24 +491,11 @@ impl GpuSceneBundles {
         )
         .expect("invariant: coarse-cull tile-bound storage buffer create");
 
-        // ── The PBR material table (vocab binding 7 + resolve binding 4): ONE
-        // slot — the engine default mid-gray dielectric (every mesh pixel picks
-        // material 0 in R3).
-        let mat_words = pack_material(&MaterialGpu::default());
-        let material_table = RhiDevice::create_buffer(
-            device,
-            &BufferDesc {
-                size: (mat_words.len() as u64) * 4,
-                usage: BufferUsage::STORAGE,
-                location: MemoryLocation::HostVisibleCoherent,
-            },
-        )
-        .expect("invariant: PBR material table create");
-        {
-            let mapped = RhiDevice::buffer_mapped_ptr(device, &material_table)
-                .expect("invariant: host-visible material table is mapped");
-            write_words(mapped, &mat_words);
-        }
+        // ── The PBR material table (vocab binding 7 + resolve binding 4) is now
+        // `Assets<MaterialGpu>`/`MaterialTable`-owned (asset-system rung A1):
+        // `boyko_app::runner` boot-seeds `MaterialTable` (World NonSend) AFTER user
+        // `setup` and BEFORE the first frame's `sync_gbuffer` binds it, so `scene()`
+        // reads `material_table.table()` directly — no buffer is created here anymore.
 
         // ── The brick clip-map placeholders (vocab bindings 9..=15): the
         // marcher SPIR-V statically references them past the runtime gates, so
@@ -1359,7 +1332,6 @@ impl GpuSceneBundles {
             shadow_temporal_pipeline,
             #[cfg(feature = "hwrt")]
             ray_shadow_ubo,
-            material_table,
             light_table,
             light_staging,
             light_dir: DEFAULT_SUN_DIR,
@@ -1440,6 +1412,12 @@ impl GpuSceneBundles {
         // temporal reproject pass runs after the à-trous chain. `false` (the default) ⇒ the base 3-MRT
         // raster + no temporal pass ⇒ byte-identical.
         #[cfg(feature = "hwrt")] temporal_enabled: bool,
+        // Asset-system rung A1: the GPU mirror of the World-owned `Assets<MaterialGpu>`
+        // (boot-seeded by `boyko_app::runner` after user `setup`, before the first
+        // `sync_gbuffer` binds it). `material_table.table()` replaces the old
+        // boot-owned 1-slot stub; only slot 0 is ever registered this rung, so the
+        // bound bytes are byte-identical to that stub.
+        material_table: &'a MaterialTable,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -1574,7 +1552,7 @@ impl GpuSceneBundles {
             present_pipeline: &self.present_pipeline,
             present_layout: &self.present_layout,
             present_sampler: &self.present_sampler,
-            material_table: &self.material_table,
+            material_table: material_table.table(),
             light_table: &self.light_table,
             // The FENCED slot's staging (the ring the R4 race pin demands).
             light_staging: &self.light_staging[slot],
@@ -2040,7 +2018,10 @@ impl GpuSceneBundles {
                 RhiDevice::destroy_buffer(ctx, slot);
             }
             RhiDevice::destroy_buffer(ctx, self.light_table);
-            RhiDevice::destroy_buffer(ctx, self.material_table);
+            // Asset-system rung A1: the material table is now World-owned
+            // (`MaterialTable`); `boyko_app::runner`'s teardown destroys it
+            // separately, AFTER this fn returns (mirrors `MeshRegistry`'s teardown
+            // slot) — destroying it here too would double-free.
             for slot in self.camera_ring {
                 RhiDevice::destroy_buffer(ctx, slot);
             }

@@ -187,6 +187,21 @@ impl<T: Asset> Assets<T> {
         self.live == 0
     }
 
+    /// The slot-row count INCLUDING freed holes — `records.len()`, the high-water mark
+    /// of every row index ever minted. O(1).
+    ///
+    /// This is the size an INDEX-ADDRESSED GPU mirror (e.g. a material/mesh device
+    /// table keyed by `Handle::index()`) must allocate: [`len`](Self::len) is the LIVE
+    /// count, but a still-live [`Handle`]'s `index()` can exceed `len() - 1` once a
+    /// hole exists (some OTHER row was freed without being reused) — sizing a mirror
+    /// buffer by `len()` and then writing at `handle.index()` is an out-of-bounds write
+    /// the moment a hole exists. `high_water()` never shrinks below the max index ever
+    /// minted, even across `remove`.
+    #[inline]
+    pub fn high_water(&self) -> usize {
+        self.records.len()
+    }
+
     /// Returns the [`AssetLoadState`] of the row `handle` addresses, or
     /// `None` if `handle` is out of range or stale.
     ///
