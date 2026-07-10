@@ -2396,6 +2396,11 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         raster_pipeline_mv: None,
         #[cfg(feature = "hwrt")]
         mv_bind_group: None,
+        // F8-mv: the combined MV+PM mesh path — OFF in this harness (byte-identical).
+        #[cfg(feature = "hwrt")]
+        raster_pipeline_mvpm: None,
+        #[cfg(feature = "hwrt")]
+        mvpm_bind_group: None,
         // Rung-3b step 5b: the SDF motion-vector VIS path — OFF in this harness (byte-identical).
         #[cfg(feature = "hwrt")]
         vis_mv_pipeline: None,
@@ -3322,6 +3327,11 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         raster_pipeline_mv: None,
         #[cfg(feature = "hwrt")]
         mv_bind_group: None,
+        // F8-mv: the combined MV+PM mesh path — OFF in this harness (byte-identical).
+        #[cfg(feature = "hwrt")]
+        raster_pipeline_mvpm: None,
+        #[cfg(feature = "hwrt")]
+        mvpm_bind_group: None,
         // Rung-3b step 5b: the SDF motion-vector VIS path — OFF in this harness (byte-identical).
         #[cfg(feature = "hwrt")]
         vis_mv_pipeline: None,
@@ -8043,6 +8053,11 @@ fn run_showcase_body_ddgi(
         raster_pipeline_mv: None,
         #[cfg(feature = "hwrt")]
         mv_bind_group: None,
+        // F8-mv: the combined MV+PM mesh path — OFF in this harness (byte-identical).
+        #[cfg(feature = "hwrt")]
+        raster_pipeline_mvpm: None,
+        #[cfg(feature = "hwrt")]
+        mvpm_bind_group: None,
         // Rung-3b step 5b: the SDF motion-vector VIS path — OFF in this harness (byte-identical).
         #[cfg(feature = "hwrt")]
         vis_mv_pipeline: None,
@@ -9377,6 +9392,11 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         raster_pipeline_mv: None,
         #[cfg(feature = "hwrt")]
         mv_bind_group: None,
+        // F8-mv: the combined MV+PM mesh path — OFF in this harness (byte-identical).
+        #[cfg(feature = "hwrt")]
+        raster_pipeline_mvpm: None,
+        #[cfg(feature = "hwrt")]
+        mvpm_bind_group: None,
         // Rung-3b step 5b: the SDF motion-vector VIS path — OFF in this harness (byte-identical).
         #[cfg(feature = "hwrt")]
         vis_mv_pipeline: None,

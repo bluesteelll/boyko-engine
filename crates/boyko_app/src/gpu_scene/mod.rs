@@ -59,7 +59,8 @@ use boyko_rhi_vulkan::accel_build::{
 use boyko_rhi_vulkan::compute::{
     BUILD_TLAS_INSTANCES_PUSH_BYTES, build_tlas_instances_spirv, deferred_pbr_denoised_spirv,
     deferred_pbr_hwrt_spirv, deferred_pbr_vis_mv_spirv, deferred_pbr_vis_spirv,
-    gbuffer_mrt_mv_fs_spirv, gbuffer_mrt_mv_vs_spirv, shadow_atrous_spirv, shadow_temporal_spirv,
+    gbuffer_mrt_mv_fs_spirv, gbuffer_mrt_mv_vs_spirv, gbuffer_mrt_mvpm_fs_spirv,
+    gbuffer_mrt_mvpm_vs_spirv, shadow_atrous_spirv, shadow_temporal_spirv,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::swapchain::{ShadowVisActivation, TlasBuildActivation};
@@ -309,6 +310,24 @@ pub(crate) struct MotionVecResources {
     /// prev_instance_rings[i], motion_cam_ubo[i] }`. The recorder binds slot `s` at set 0 when the
     /// temporal gate opens.
     bind_groups: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// F8-mv: the combined `gbuffer_mrt_mvpm.{vs,fs}` graphics pipeline — identical to
+    /// [`Self::pipeline`] EXCEPT its set-0 layout ([`Self::mvpm_layout`]) also declares the
+    /// per-instance material SSBO at binding 3 (the nested `#if defined(MOTION_VECTORS)`
+    /// branch in the VS moves it there to dodge the binding-1 collision with
+    /// `prev_instances`). Selected instead of [`Self::pipeline`] when a temporal frame ALSO
+    /// carries a non-default material (F8-mv; MV+PM combined).
+    mvpm_pipeline: VulkanGraphicsPipeline,
+    /// F8-mv: the 4-binding set-0 layout the mvpm pipeline declares: binding 0 = the current
+    /// instance SSBO (VERTEX), binding 1 = the prev-instance SSBO (VERTEX), binding 2 = the
+    /// motion-cam UBO (VERTEX), binding 3 = the per-instance material SSBO (VERTEX). A
+    /// SEPARATE layout from [`Self::layout`] (3-binding) and
+    /// [`GpuSceneBundles::pm_instance_material_layout`] (2-binding).
+    mvpm_layout: VulkanBindGroupLayout,
+    /// F8-mv: per-FIF bind groups against [`Self::mvpm_layout`]: slot `i` binds
+    /// `{ instance_rings[i], prev_instance_rings[i], motion_cam_ubo[i],
+    /// pm_instance_material_rings[i] }`. The recorder binds slot `s` at set 0 when both the
+    /// temporal gate opens AND a non-default material is present this frame.
+    mvpm_bind_groups: [VulkanBindGroup; FRAMES_IN_FLIGHT],
 }
 
 /// The static-resource half of the windowed G-buffer scene (host plan R3):
@@ -1423,6 +1442,108 @@ impl GpuSceneBundles {
                     .expect("invariant: motion-vector bind group create")
                 });
 
+                // F8-mv: the combined MV+PM 4-binding set-0 layout — the 3-binding MV layout
+                // (current @0 / prev @1 / motion-cam @2) PLUS the per-instance material SSBO
+                // @3 (VERTEX; the VS's nested `#if defined(MOTION_VECTORS)` branch moves
+                // `instance_materials` here to dodge the binding-1 collision with
+                // `prev_instances`).
+                let mvpm_layout = RhiDevice::create_bind_group_layout(
+                    device,
+                    &BindGroupLayoutDesc {
+                        entries: &[
+                            BindGroupLayoutEntry {
+                                binding: 0,
+                                count: 1,
+                                kind: DescriptorKind::StorageBuffer,
+                                stage: ShaderStage::VERTEX,
+                            },
+                            BindGroupLayoutEntry {
+                                binding: 1,
+                                count: 1,
+                                kind: DescriptorKind::StorageBuffer,
+                                stage: ShaderStage::VERTEX,
+                            },
+                            BindGroupLayoutEntry {
+                                binding: 2,
+                                count: 1,
+                                kind: DescriptorKind::UniformBuffer,
+                                stage: ShaderStage::VERTEX,
+                            },
+                            BindGroupLayoutEntry {
+                                binding: 3,
+                                count: 1,
+                                kind: DescriptorKind::StorageBuffer,
+                                stage: ShaderStage::VERTEX,
+                            },
+                        ],
+                    },
+                )
+                .expect("invariant: mvpm bind-group layout create");
+
+                // F8-mv: the combined pipeline — identical to `mv_pipeline` (same 40-byte
+                // vertex layout, D32 depth, 88-byte VERTEX push, CullMode::None, no
+                // blend/bias, the same 4 color formats) EXCEPT the 4-binding `mvpm_layout`.
+                let mvpm_vs = RhiDevice::create_shader_module(device, gbuffer_mrt_mvpm_vs_spirv())
+                    .expect("invariant: mvpm vertex shader module create");
+                let mvpm_fs = RhiDevice::create_shader_module(device, gbuffer_mrt_mvpm_fs_spirv())
+                    .expect("invariant: mvpm fragment shader module create");
+                let mvpm_pipeline = RhiDevice::create_graphics_pipeline(
+                    device,
+                    &GraphicsPipelineDesc {
+                        vertex_module: &mvpm_vs,
+                        vertex_entry: c"main",
+                        fragment_module: &mvpm_fs,
+                        fragment_entry: c"main",
+                        color_formats: &[
+                            RASTER_COLOR_FORMAT,
+                            RASTER_COLOR_FORMAT,
+                            RASTER_COLOR_FORMAT,
+                            Format::R16G16Sfloat,
+                        ],
+                        depth_format: Some(Format::D32Sfloat),
+                        topology: PrimitiveTopology::TriangleList,
+                        vertex_layout: Some(VertexBufferLayout {
+                            stride: 40,
+                            attributes: &mv_attributes,
+                        }),
+                        push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
+                        bind_group_layout: Some(&mvpm_layout),
+                        blend: None,
+                        cull_mode: CullMode::None,
+                        depth_bias: None,
+                    },
+                )
+                .expect("invariant: mvpm graphics pipeline create");
+                // SAFETY: both modules were created on `device` and are consumed by the
+                // pipeline create; each is destroyed once; no GPU work is in flight yet.
+                unsafe {
+                    RhiDevice::destroy_shader_module(device, mvpm_fs);
+                    RhiDevice::destroy_shader_module(device, mvpm_vs);
+                }
+
+                // Per-FIF bind groups: slot `i` binds { instances[i], prev[i], motion_cam[i],
+                // pm_instance_material_rings[i] }.
+                let mvpm_bind_groups: [VulkanBindGroup; FRAMES_IN_FLIGHT] =
+                    core::array::from_fn(|i| {
+                        RhiDevice::create_bind_group(
+                            device,
+                            &BindGroupDesc {
+                                layout: &mvpm_layout,
+                                entries: &[
+                                    BindGroupEntry::StorageBuffer { buffer: &instance_rings[i] },
+                                    BindGroupEntry::StorageBuffer {
+                                        buffer: &prev_instance_rings[i],
+                                    },
+                                    BindGroupEntry::UniformBuffer { buffer: &motion_cam_ubo[i] },
+                                    BindGroupEntry::StorageBuffer {
+                                        buffer: &pm_instance_material_rings[i],
+                                    },
+                                ],
+                            },
+                        )
+                        .expect("invariant: mvpm bind group create")
+                    });
+
                 MotionVecResources {
                     pipeline: mv_pipeline,
                     layout: mv_layout,
@@ -1431,6 +1552,9 @@ impl GpuSceneBundles {
                     prev_instance_rings,
                     motion_cam_ubo,
                     bind_groups,
+                    mvpm_pipeline,
+                    mvpm_layout,
+                    mvpm_bind_groups,
                 }
             },
         );
@@ -1548,6 +1672,15 @@ impl GpuSceneBundles {
         if self.tlas.is_some() || self.mv.is_some() {
             return;
         }
+        // F8-mv (C2): `self.mv`/`self.tlas` are hwrt-only fields, so this reachability check
+        // must itself be hwrt-gated — an unguarded assert would not compile on the default
+        // (non-hwrt) build (no such field exists there).
+        #[cfg(feature = "hwrt")]
+        debug_assert!(
+            self.mv.is_none(),
+            "invariant: past the W3 early-return, so mv/mvpm resources are unreachable — \
+             the grow/rebind path below is the non-RT leg only"
+        );
 
         let s = token.slot();
         if needed <= self.instance_capacity[s] {
@@ -1594,6 +1727,14 @@ impl GpuSceneBundles {
         // OOB the instant the instance ring grows. Rebind BOTH of `pm_bind_groups[s]`'s
         // bindings (0 = the just-grown `instance_rings[s]`, 1 = the just-grown material
         // ring): forgetting either leaves the PM set pointing at a freed/undersized buffer.
+        //
+        // WARNING RT-LEG-GROWTH COUPLING (task#11): this rebind runs ONLY on the non-RT leg
+        // (the W3 cap above early-returns on an RT device). If RT-leg instance-family growth
+        // is ever enabled, EVERY descriptor set aliasing instance_rings/prev_instance_rings/
+        // motion_cam_ubo/pm_instance_material_rings MUST also be rebound here, or it dangles
+        // (an F7-C1-class UAF):
+        //   instance_bind_groups[s], pm_bind_groups[s] (@0 + @1), interp.interp_bg[s],
+        //   mv.bind_groups[s] (@0/@1/@2), mv.mvpm_bind_groups[s] (@0/@1/@2/@3).
         let new_pm_bytes = new_cap as u64 * PER_INSTANCE_MATERIAL_BYTES as u64;
         let new_pm_ring = RhiDevice::create_buffer(
             ctx,
@@ -1823,29 +1964,6 @@ impl GpuSceneBundles {
                     temporal_pipeline: self.shadow_temporal_pipeline.as_ref().map(|(p, _)| p),
                 }
             });
-
-        // Asset-streaming plan F8 §2.2 (MV>PM priority, finding 4): MV takes priority over PM
-        // (§2.3 below) — a material-bearing scene under temporal denoise silently renders
-        // default materials (the MV pipeline hardcodes id 0). This is a VALID combination (just
-        // degraded, never a crash: the MV FS writes an in-bounds id 0), so a WARN-ONCE surfaces
-        // the degradation without breaking a legitimate scene with a hard assert. The combined
-        // MV+PM variant is the tracked F8-mv follow-up.
-        #[cfg(feature = "hwrt")]
-        {
-            static WARNED_MV_OVER_PM: std::sync::atomic::AtomicBool =
-                std::sync::atomic::AtomicBool::new(false);
-            if any_non_default_material
-                && temporal_enabled
-                && self.mv.is_some()
-                && !WARNED_MV_OVER_PM.swap(true, std::sync::atomic::Ordering::Relaxed)
-            {
-                eprintln!(
-                    "boyko_app: F8: a material-bearing scene under temporal denoise renders \
-                     default materials (the MV pipeline hardcodes material id 0); the combined \
-                     MV+PM variant is the tracked F8-mv follow-up"
-                );
-            }
-        }
 
         GBufferScene {
             raster_pipeline: &self.raster_pipeline,
@@ -2105,6 +2223,19 @@ impl GpuSceneBundles {
             mv_bind_group: (temporal_enabled)
                 .then(|| self.mv.as_ref().map(|m| &m.bind_groups[slot]))
                 .flatten(),
+            // F8-mv: the combined MV+PM refs. `Some` iff BOTH temporal AND a non-default
+            // material are active this frame (a strict superset of `mesh_mvpm_active()`'s
+            // other conditions) AND `self.mv` exists (an RT + storage device) — mirrors the
+            // pure-MV shape above (`.then(...).flatten()`, not `.then_some`, so
+            // `self.mv.is_none()` yields `None`).
+            #[cfg(feature = "hwrt")]
+            raster_pipeline_mvpm: (temporal_enabled && any_non_default_material)
+                .then(|| self.mv.as_ref().map(|m| &m.mvpm_pipeline))
+                .flatten(),
+            #[cfg(feature = "hwrt")]
+            mvpm_bind_group: (temporal_enabled && any_non_default_material)
+                .then(|| self.mv.as_ref().map(|m| &m.mvpm_bind_groups[slot]))
+                .flatten(),
             // HW-RT Rung 3b step 5b: the SDF motion-vector VIS resolve refs. The pipeline is the
             // recorder's ref — gated on `temporal_enabled` (mirrors `raster_pipeline_mv`) so it is
             // `Some` only on a temporal frame with the MV resources. The layout + the motion-cam UBO
@@ -2320,6 +2451,14 @@ impl GpuSceneBundles {
             // (no-op).
             #[cfg(feature = "hwrt")]
             if let Some(mv) = self.mv {
+                // F8-mv: the combined mvpm bind groups/pipeline/layout, torn down BEFORE the
+                // pure-MV cluster below (bind groups first, then the pipeline/layout) — mirrors
+                // this whole block's ordering discipline.
+                for bg in mv.mvpm_bind_groups {
+                    RhiDevice::destroy_bind_group(ctx, bg);
+                }
+                RhiDevice::destroy_graphics_pipeline(ctx, mv.mvpm_pipeline);
+                RhiDevice::destroy_bind_group_layout(ctx, mv.mvpm_layout);
                 for bg in mv.bind_groups {
                     RhiDevice::destroy_bind_group(ctx, bg);
                 }

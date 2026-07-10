@@ -415,9 +415,18 @@ impl Renderer<'_> {
         // Asset-streaming plan F8: decide whether this frame uses the PER_INSTANCE_MATERIAL
         // pipeline. Present on BOTH cfg legs (materials are device-agnostic, unlike `mv`) —
         // `mesh_pm_active()` is the SINGLE source shared with the pipeline/set selection below.
-        // MV takes priority over PM (F8 §2.3): a temporal frame renders default materials
-        // (a graceful degradation, never a crash — the warn-once at `scene()` surfaces it).
+        // MV takes priority over PM (F8 §2.3) UNLESS both are active, in which case the
+        // combined mvpm pipeline (below) renders BOTH correctly (F8-mv).
         let pm_active = scene.mesh_pm_active();
+        // F8-mv: decide whether this frame uses the COMBINED MOTION_VECTORS +
+        // PER_INSTANCE_MATERIAL pipeline. `mesh_mvpm_active()` is the SINGLE source shared with
+        // the pipeline/set selection below; it is a strict AND of `mv_active`/`pm_active`'s
+        // gates plus the mvpm pipeline/bind-group presence, so it can only be true when both
+        // would otherwise fire. Non-hwrt build: `false` (mvpm is an MV extension, hwrt-only).
+        #[cfg(feature = "hwrt")]
+        let mvpm_active = scene.mesh_mvpm_active();
+        #[cfg(not(feature = "hwrt"))]
+        let mvpm_active = false;
         // The 4th MRT: the motion_vec Δuv target (R16G16Sfloat), CLEAR to (0,0) / STORE — a pixel
         // with no mesh fragment holds zero motion (the marcher overwrites SDF pixels in step 5b).
         // Built unconditionally so it outlives `cmd_begin_rendering`; the driver reads it ONLY when
@@ -511,10 +520,24 @@ impl Renderer<'_> {
         // motion-cam @2) + this frame's MV bind group; else the base raster pipeline + the shared
         // instance bind group (byte-identical). Both pipelines carry `.pipeline` + `.layout`; the
         // push (88 B) + the per-batch `base_instance` re-push are UNCHANGED across both.
-        // Asset-streaming plan F8 §2.3: the `pm_active` arm is present on BOTH cfg legs
-        // (materials are device-agnostic); only the `mv_active` arm is cfg-gated. Priority
-        // mv > pm > base.
-        let raster_pipeline = if mv_active {
+        // Asset-streaming plan F8 §2.3 / F8-mv: the `pm_active`/`mvpm_active` arms are present
+        // on BOTH cfg legs (materials are device-agnostic); only the `mv_active` arm is
+        // cfg-gated (`mvpm_active` itself resolves to `false` on a non-hwrt build, so its arm
+        // never fires there). Priority mvpm > mv > pm > base: `mvpm_active` implies both
+        // `mv_active` and `pm_active` would otherwise fire, so checking it FIRST renders both
+        // deltas together instead of falling into the mv-only (default-material) arm.
+        let raster_pipeline = if mvpm_active {
+            #[cfg(feature = "hwrt")]
+            {
+                scene
+                    .raster_pipeline_mvpm
+                    .expect("invariant: mvpm_active implies raster_pipeline_mvpm is Some")
+            }
+            #[cfg(not(feature = "hwrt"))]
+            {
+                scene.raster_pipeline
+            }
+        } else if mv_active {
             #[cfg(feature = "hwrt")]
             {
                 scene
@@ -532,7 +555,18 @@ impl Renderer<'_> {
         } else {
             scene.raster_pipeline
         };
-        let raster_set = if mv_active {
+        let raster_set = if mvpm_active {
+            #[cfg(feature = "hwrt")]
+            {
+                scene
+                    .mvpm_bind_group
+                    .expect("invariant: mvpm_active implies mvpm_bind_group is Some")
+            }
+            #[cfg(not(feature = "hwrt"))]
+            {
+                scene.instance_bind_group
+            }
+        } else if mv_active {
             #[cfg(feature = "hwrt")]
             {
                 scene
@@ -569,9 +603,16 @@ impl Renderer<'_> {
         // OOB-clamped id ring); both buffers are live (boot-minted or F7/F8-grown) and, on
         // any grow, `grow_instance_family_if_needed` rebound BOTH the PM set's @0 and @1
         // against slot `s`'s fence-waited buffers (F8 §7i), so neither descriptor points at
-        // a freed buffer. `vertex_offset`/`raster_viewport`/`raster_area`
-        // locals outlive the bracketed calls. On the legacy arm `draw(vertex_count, 1, 0, 0)`
-        // reads the merged vertex buffer; on the M3 arm the batch loop re-pushes each batch's
+        // a freed buffer. F8-mv: when `mvpm_active`, set 0 instead binds the combined group's
+        // FOUR bindings (`instances[s]` @0, `prev_instances[s]` @1, `MotionCam[s]` @2,
+        // `instance_materials[s]` @3) and the pipeline declares 4 color formats matching the
+        // 4-attachment `raster_rendering` (`color_attachment_count == 4` via `mv_active`,
+        // which `mesh_mvpm_active()` implies). All four are live, `INSTANCE_CAPACITY`-fixed
+        // rings on the RT leg (`grow_instance_family_if_needed`'s W3 gate never grows them
+        // there, so they are never rebound and never dangle). `vertex_offset`/
+        // `raster_viewport`/`raster_area` locals outlive the bracketed calls. On the legacy arm
+        // `draw(vertex_count, 1, 0, 0)` reads the merged vertex buffer; on the M3 arm the
+        // batch loop re-pushes each batch's
         // `base_instance` (4 bytes at offset 80, in-range of the declared 88-byte VERTEX push)
         // then `draw_indexed(index_count, instance_count, 0, 0, 0)` reads that batch's bound
         // vertex + index buffers (created on this device, carrying VERTEX/INDEX usage;

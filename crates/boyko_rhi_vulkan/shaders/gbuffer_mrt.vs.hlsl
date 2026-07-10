@@ -67,15 +67,23 @@
 // and (F8+, owner: material-drives-albedo-too) the material's `base_color`, which the
 // PM fragment sources `gAlbedo` from instead of the mesh vertex color. EVERYTHING new
 // is gated under `#ifdef PER_INSTANCE_MATERIAL`, so the base (no-define) compile is
-// byte-frozen — the `gbuffer_mrt.vs.spv` golden is untouched (mirrors the
-// MOTION_VECTORS discipline above; the two variants are mutually exclusive — never
-// compiled together this rung).
+// byte-frozen — the `gbuffer_mrt.vs.spv` golden is untouched.
+//
+// F8-mv (opt-in, compiled with BOTH `-D MOTION_VECTORS=1 -D PER_INSTANCE_MATERIAL=1`):
+// the two variants above ARE compiled together to produce the combined `gbuffer_mrt_mvpm`
+// pair. Their only interface collision is set-0 binding 1 (`prev_instances` under
+// MOTION_VECTORS vs. `instance_materials` under PER_INSTANCE_MATERIAL); resolved by a
+// nested `#if defined(MOTION_VECTORS)` inside the `PER_INSTANCE_MATERIAL` block below that
+// moves `instance_materials` to binding 3 ONLY on the combined compile — the PM-only compile
+// keeps binding 1 unchanged, so `gbuffer_mrt_pm.{vs,fs}.spv` stays byte-frozen too.
 //
 // Compiled offline (hermetic build — no SDK at `cargo build` time) with:
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T vs_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 gbuffer_mrt.vs.hlsl -Fo gbuffer_mrt.vs.spv
 //   (MOTION_VECTORS variant: add `-D MOTION_VECTORS=1 -Fo gbuffer_mrt_mv.vs.spv`)
 //   (PER_INSTANCE_MATERIAL variant: add `-D PER_INSTANCE_MATERIAL=1 -Fo gbuffer_mrt_pm.vs.spv`)
+//   (F8-mv combined variant: add `-D MOTION_VECTORS=1 -D PER_INSTANCE_MATERIAL=1
+//       -Fo gbuffer_mrt_mvpm.vs.spv`)
 
 struct PushConstants {
     float4x4 view_proj;        // perspective (or ortho) proj*view, column-major (was `mvp`)
@@ -127,14 +135,22 @@ struct PerInstanceMaterial {
     uint   id;
     uint3  _pad;
 };
-// Set 0, binding 1 (VERTEX). Indexed IDENTICALLY to `instances` @0 — the SAME
-// `pc.base_instance + SV_InstanceID` expression the model-matrix arm already uses
-// (M3-proven), so `instance_materials[i]` always names the SAME instance `instances[i]`
-// does. Declared ENTIRELY under this `#ifdef`, so the base variant never references
-// binding 1 — its layout stays the single-SSBO gate (mutually exclusive with
-// MOTION_VECTORS's OWN binding-1 use above; the two variants are never compiled
-// together this rung).
+// Set 0, binding 1 (VERTEX) on the PM-only compile. Indexed IDENTICALLY to `instances`
+// @0 — the SAME `pc.base_instance + SV_InstanceID` expression the model-matrix arm
+// already uses (M3-proven), so `instance_materials[i]` always names the SAME instance
+// `instances[i]` does. Declared ENTIRELY under this `#ifdef`, so the base variant never
+// references binding 1 — its layout stays the single-SSBO gate.
+//
+// F8-mv: on the COMBINED compile (`MOTION_VECTORS` also defined), binding 1 is already
+// taken by `prev_instances` above, so `instance_materials` moves to binding 3 (the next
+// free slot after `MotionCam` @2) — ONLY this nested branch differs between the PM-only
+// and combined compiles; the `#else` arm below is byte-identical to the PM-only source,
+// so `gbuffer_mrt_pm.vs.spv` is untouched by this change.
+#if defined(MOTION_VECTORS)
+[[vk::binding(3, 0)]] StructuredBuffer<PerInstanceMaterial> instance_materials;
+#else
 [[vk::binding(1, 0)]] StructuredBuffer<PerInstanceMaterial> instance_materials;
+#endif
 #endif
 
 // Field DECLARATION order fixes the SPIR-V vertex-input locations DXC auto-assigns

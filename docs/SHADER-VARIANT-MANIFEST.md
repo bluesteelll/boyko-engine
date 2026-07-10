@@ -40,10 +40,17 @@ there is no software VIS/DENOISED/MV `.spv`.
 
 ## `gbuffer_mrt.{vs,fs}.hlsl` — the mesh G-buffer raster
 
-| Variant | `MV` | `.spv` | Interface delta |
-|---|---|---|---|
-| base | — | `gbuffer_mrt.vs.spv` / `gbuffer_mrt.fs.spv` | 3 MRT attachments (albedo / normal+id / material). |
-| motion | `1` | `gbuffer_mrt_mv.vs.spv` / `gbuffer_mrt_mv.fs.spv` | **+ a 4th MRT** carrying per-pixel Δuv (prev-instance ring @1 + `MotionCam` UBO @2); static instance+camera ⇒ (0,0). |
+| Variant | `MV` | `MAT` | `.spv` | Interface delta |
+|---|---|---|---|---|
+| base | — | — | `gbuffer_mrt.vs.spv` / `gbuffer_mrt.fs.spv` | 3 MRT attachments (albedo / normal+id / material). |
+| motion | `1` | — | `gbuffer_mrt_mv.vs.spv` / `gbuffer_mrt_mv.fs.spv` | **+ a 4th MRT** carrying per-pixel Δuv (prev-instance ring @1 + `MotionCam` UBO @2); static instance+camera ⇒ (0,0). |
+| material | — | `1` | `gbuffer_mrt_pm.vs.spv` / `gbuffer_mrt_pm.fs.spv` | per-instance material PAYLOAD SSBO @1 (VERTEX) — `gAlbedo` sources the material's `base_color`, `gNormal.BA` packs the real material id; no 4th MRT. |
+| motion + material (F8-mv) | `1` | `1` | `gbuffer_mrt_mvpm.vs.spv` / `gbuffer_mrt_mvpm.fs.spv` | both deltas above, combined: the 4th MRT Δuv AND the material-driven albedo/id. The nested `#if defined(MOTION_VECTORS)` inside the `PER_INSTANCE_MATERIAL` block moves `instance_materials` from binding 1 → binding 3 (bindings 1/2 stay `prev_instances`/`MotionCam`) to resolve the collision — the `motion`/`material` rows' own `.spv` are untouched by this move (the `#else` arm is byte-identical to their source). |
+
+Reachability note: all four rows are independently reachable (`motion`/`material` are each opt-in
+via one `-D`; `motion + material` needs both) — the host selects among them by binding a different
+pipeline per frame (never a dynamic branch), gated on `mesh_mvpm_active()` checked BEFORE
+`mesh_mv_active()`/`mesh_pm_active()` at the recorder's selection site (priority mvpm > mv > pm > base).
 
 ## Shadow-denoise compute (separate shaders, not `-D` variants of the resolve)
 

@@ -1419,6 +1419,20 @@ pub struct GBufferScene<'a> {
     /// `Some`. `#[cfg(feature = "hwrt")]`.
     #[cfg(feature = "hwrt")]
     pub mv_bind_group: Option<&'a VulkanBindGroup>,
+    /// F8-mv: the combined MOTION_VECTORS + PER_INSTANCE_MATERIAL raster pipeline
+    /// (`gbuffer_mrt_mvpm.{vs,fs}`) — identical to [`Self::raster_pipeline_mv`] except its
+    /// set-0 layout also declares the per-instance material SSBO at binding 3. `Some` on an
+    /// RT + storage device (the same boot gate as [`Self::raster_pipeline_mv`]); `None`
+    /// otherwise. Bound instead of [`Self::raster_pipeline_mv`]/[`Self::raster_pipeline_pm`]
+    /// ONLY when [`Self::mesh_mvpm_active`] holds. `#[cfg(feature = "hwrt")]`.
+    #[cfg(feature = "hwrt")]
+    pub raster_pipeline_mvpm: Option<&'a VulkanGraphicsPipeline>,
+    /// F8-mv: this frame's combined set-0 bind group (slot `frame_index` of the mvpm
+    /// resources' per-FIF bind groups: `{ instances[i], prev_instances[i], motion_cam[i],
+    /// pm_instance_material_rings[i] }`). Bound at set 0 when the mvpm pipeline is selected.
+    /// `Some` iff [`Self::raster_pipeline_mvpm`] is `Some`. `#[cfg(feature = "hwrt")]`.
+    #[cfg(feature = "hwrt")]
+    pub mvpm_bind_group: Option<&'a VulkanBindGroup>,
     /// HW-RT Rung 3b step 5b: the SDF motion-vector VIS-variant resolve pipeline
     /// (`deferred_pbr_hwrt_vis_mv.comp`) — writes `gShadowVis` @21 (like the base VIS) AND each SDF
     /// pixel's camera-only `Δuv` to `motion_vec` @23. Bound instead of
@@ -1498,6 +1512,25 @@ impl GBufferScene<'_> {
     /// renders default materials (the tracked F8-mv follow-up), never a crash.
     pub(crate) fn mesh_pm_active(&self) -> bool {
         self.pm_enabled && self.raster_pipeline_pm.is_some() && self.pm_bind_group.is_some()
+    }
+
+    /// F8-mv — the SINGLE source of the "this frame draws with the combined
+    /// MOTION_VECTORS + PER_INSTANCE_MATERIAL pipeline" decision, so the raster pipeline/set
+    /// selection (`record_gbuffer`) can never diverge between the pipeline and bind-group
+    /// arms. `#[cfg(feature = "hwrt")]` — mvpm is an MV extension, and MV is hwrt-only.
+    ///
+    /// True iff BOTH [`Self::mesh_mv_active`] and [`Self::mesh_pm_active`] hold AND the mvpm
+    /// pipeline + this frame's mvpm bind group both exist (an RT + storage device built them
+    /// at boot). `mesh_mv_active()`/`mesh_pm_active()` stay SUPERSETS — unchanged by this
+    /// method — and mutual exclusion between the mv-only / pm-only / mvpm arms is enforced by
+    /// the recorder's `if mvpm_active { .. } else if mv_active { .. } else if pm_active { .. }`
+    /// ordering (mvpm checked FIRST).
+    #[cfg(feature = "hwrt")]
+    pub(crate) fn mesh_mvpm_active(&self) -> bool {
+        self.mesh_mv_active()
+            && self.mesh_pm_active()
+            && self.raster_pipeline_mvpm.is_some()
+            && self.mvpm_bind_group.is_some()
     }
 
     /// HW-RT Rung 3b step 5b — the SINGLE source of the "the VIS pass ALSO writes the SDF pixels'

@@ -614,6 +614,38 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// F8-mv: the combined MOTION_VECTORS + PER_INSTANCE_MATERIAL mesh-MRT G-buffer
+    /// PRODUCER vertex SPIR-V (`shaders/gbuffer_mrt_mvpm.vs.spv`, compiled from
+    /// `gbuffer_mrt.vs.hlsl` with BOTH `-D MOTION_VECTORS=1 -D PER_INSTANCE_MATERIAL=1`).
+    /// Identical to [`GBUFFER_MRT_MV_VS_SPV`] except it ALSO reads a per-instance material
+    /// PAYLOAD SSBO — moved to set-0 binding 3 (the nested `#if defined(MOTION_VECTORS)`
+    /// branch resolves the binding-1 collision with `prev_instances`) — and forwards the id
+    /// + `base_color` flat to the fragment, like [`GBUFFER_MRT_PM_VS_SPV`]. Bound into a
+    /// 4-attachment pipeline with a 4-binding set-0 layout (instances @0, prev_instances @1,
+    /// `MotionCam` @2, instance_materials @3, all VERTEX); selected only when temporal denoise
+    /// AND a non-default material are both active this frame (MV+PM combined, F8-mv). The base
+    /// [`GBUFFER_MRT_VS_SPV`]/[`GBUFFER_MRT_MV_VS_SPV`]/[`GBUFFER_MRT_PM_VS_SPV`] stay
+    /// byte-frozen (the step-2 byte-identity gate).
+    #[cfg(feature = "hwrt")]
+    GBUFFER_MRT_MVPM_VS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/gbuffer_mrt_mvpm.vs.spv")
+}
+
+embed_spirv! {
+    /// F8-mv: the combined MOTION_VECTORS + PER_INSTANCE_MATERIAL mesh-MRT G-buffer
+    /// PRODUCER fragment SPIR-V (`shaders/gbuffer_mrt_mvpm.fs.spv`, compiled from
+    /// `gbuffer_mrt.fs.hlsl` with BOTH `-D MOTION_VECTORS=1 -D PER_INSTANCE_MATERIAL=1`).
+    /// Writes the SAME 3 attribute MRTs + `SV_Depth` as [`GBUFFER_MRT_FS_SPV`], PLUS the 4th
+    /// MRT `motion_vec` Δuv (like [`GBUFFER_MRT_MV_FS_SPV`]) AND sources `gAlbedo`/`gNormal.BA`
+    /// from the forwarded per-instance material (like [`GBUFFER_MRT_PM_FS_SPV`]). Paired with
+    /// [`gbuffer_mrt_mvpm_vs_spirv`]; the `gbuffer_mrt.fs.hlsl` source is UNTOUCHED by F8-mv —
+    /// only the `-D` combination is new.
+    #[cfg(feature = "hwrt")]
+    GBUFFER_MRT_MVPM_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/gbuffer_mrt_mvpm.fs.spv")
+}
+
+embed_spirv! {
     /// The committed fullscreen-sample vertex SPIR-V (`shaders/fullscreen_sample.vs.hlsl`): a
     /// fullscreen triangle generating positions + UVs from `SV_VertexID` (no vertex buffer).
     /// The present-blit pass's VS.
@@ -1061,6 +1093,26 @@ pub fn gbuffer_mrt_pm_vs_spirv() -> &'static [u32] {
 #[inline]
 pub fn gbuffer_mrt_pm_fs_spirv() -> &'static [u32] {
     GBUFFER_MRT_PM_FS_SPV.as_words()
+}
+
+/// F8-mv combined MOTION_VECTORS + PER_INSTANCE_MATERIAL mesh-MRT gbuffer VERTEX SPIR-V as a
+/// `u32` word stream. Bound into the 4-attachment mvpm raster pipeline with the 4-binding
+/// set-0 layout (instances @0, prev_instances @1, `MotionCam` @2, instance_materials @3, all
+/// VERTEX) + the 88-byte VERTEX push. Paired with [`gbuffer_mrt_mvpm_fs_spirv`]; selected only
+/// when temporal denoise AND a non-default material are both active this frame.
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn gbuffer_mrt_mvpm_vs_spirv() -> &'static [u32] {
+    GBUFFER_MRT_MVPM_VS_SPV.as_words()
+}
+
+/// F8-mv combined MOTION_VECTORS + PER_INSTANCE_MATERIAL mesh-MRT gbuffer FRAGMENT SPIR-V as a
+/// `u32` word stream. Paired with [`gbuffer_mrt_mvpm_vs_spirv`]; writes the 4th MRT
+/// `motion_vec` (`Δuv`) AND sources `gAlbedo`/`gNormal.BA` from the per-instance material.
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn gbuffer_mrt_mvpm_fs_spirv() -> &'static [u32] {
+    GBUFFER_MRT_MVPM_FS_SPV.as_words()
 }
 
 /// The committed fullscreen-sample (present-blit) vertex SPIR-V as a `u32` word stream,
