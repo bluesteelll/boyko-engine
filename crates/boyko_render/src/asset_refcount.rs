@@ -28,6 +28,7 @@ use boyko_scene::{
 use crate::material::MaterialGpu;
 use crate::mesh::MeshGpu;
 use crate::mesh_assets::OrphanedMeshGpu;
+use crate::retired_gpu_buffers::RetiredGpuBuffers;
 
 /// The fence-gated retire delay (asset-streaming plan F6 Decision 1): a row
 /// enqueued at submission-epoch `N` is safe to free once the host observes
@@ -480,13 +481,14 @@ impl Plugin for AssetRefcountPlugin {
     }
 }
 
-/// Fence-gated drain of [`DeferredFree`] + [`OrphanedMeshGpu`] at `epoch`
-/// (asset-streaming plan F6): actually retires every store slot whose
-/// `retire_frame <= epoch` (moving its value out via
-/// [`Assets::retire`](boyko_ecs::ecs::core::asset::Assets::retire)) and frees
-/// the device resources ([`MeshGpu`]'s vertex/index buffers, and its BLAS
-/// under `hwrt`) it held — then does the same for every fill-rejected orphan
-/// past its gate.
+/// Fence-gated drain of [`DeferredFree`] + [`OrphanedMeshGpu`] +
+/// [`RetiredGpuBuffers`] at `epoch` (asset-streaming plan F6, extended by F7):
+/// actually retires every store slot whose `retire_frame <= epoch` (moving its
+/// value out via [`Assets::retire`](boyko_ecs::ecs::core::asset::Assets::retire))
+/// and frees the device resources ([`MeshGpu`]'s vertex/index buffers, and its
+/// BLAS under `hwrt`) it held — then does the same for every fill-rejected
+/// orphan past its gate, then drains every F7 grow-and-defer-old buffer past
+/// its gate (`RetiredGpuBuffers::drain_ready`).
 ///
 /// # Caller contract — MUST run after `wait_frame_in_flight` for THIS `epoch`
 ///
@@ -527,10 +529,13 @@ impl Plugin for AssetRefcountPlugin {
 ///
 /// A scene that never lets any asset's refcount reach zero (the golden scene:
 /// every load is held for the run's duration) never enqueues a `FreeEntry` or
-/// an orphan — `free.is_empty() && orphans.is_empty()` short-circuits with
-/// two `bool` reads and zero world mutation, zero device calls. The rewrite
-/// below is idempotent in any case (same store state -> same device calls),
-/// so this never perturbs a rendered frame.
+/// an orphan, and a scene whose GPU mirrors never outgrow their boot capacity
+/// never pushes a [`RetiredGpuBuffers`] entry — `free.is_empty() &&
+/// orphans_empty && retired_empty` (F7 C2: the early-out is extended, not
+/// narrowed — a growth-only frame with both F6 queues empty must still drain
+/// this queue) short-circuits with three `bool` reads and zero world mutation,
+/// zero device calls. The rewrite below is idempotent in any case (same store
+/// state -> same device calls), so this never perturbs a rendered frame.
 ///
 /// `scratch` is a host-owned, reusable buffer (parked across frames) — zero
 /// steady-state allocation.
@@ -549,7 +554,11 @@ pub fn retire_deferred_frees(
 
     let free_empty = world.resource::<DeferredFree>().is_empty();
     let orphans_empty = world.non_send_resource::<OrphanedMeshGpu>().is_empty();
-    if free_empty && orphans_empty {
+    let retired_empty = world.non_send_resource::<RetiredGpuBuffers>().is_empty();
+    // F7 C2: a growth-only frame (both F6 queues empty) must still drain a
+    // pending grow-and-defer-old buffer — narrowing this to `free_empty &&
+    // orphans_empty` would leak it (it is decoupled from refcount churn).
+    if free_empty && orphans_empty && retired_empty {
         return;
     }
 
@@ -597,6 +606,12 @@ pub fn retire_deferred_frees(
     }
 
     world.non_send_resource_mut::<OrphanedMeshGpu>().drain_ready(epoch, ctx);
+
+    // SAFETY: `epoch`'s fence was waited via `wait_frame_in_flight` (this fn's caller
+    // contract above) — the same fence-gate precondition the two drains above rely on.
+    unsafe {
+        world.non_send_resource_mut::<RetiredGpuBuffers>().drain_ready(epoch, ctx);
+    }
 }
 
 #[cfg(test)]
@@ -856,6 +871,60 @@ mod tests {
              recycled retired slots, not appended a fresh row for every spawn",
             assets.high_water(),
             create_count
+        );
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // F7 C2 regression: the early-out must require ALL THREE queues empty.
+    // ════════════════════════════════════════════════════════════════════════
+
+    /// Regression guard for the F7 C2 blocker fix: `retire_deferred_frees`'s
+    /// early-out is `free_empty && orphans_empty && retired_empty` — a
+    /// `free_empty && orphans_empty`-only guard (the pre-C2 shape) would skip
+    /// draining a pending grow-and-defer-old buffer whenever ordinary refcount
+    /// churn happens to be quiet, leaking it forever. `retire_deferred_frees`
+    /// itself cannot be called here (it takes `&VulkanContext` — see this
+    /// module's sibling churn-stress test doc), so this test reproduces the
+    /// EXACT guard expression verbatim against real `DeferredFree`/
+    /// `OrphanedMeshGpu`/`RetiredGpuBuffers` values.
+    #[test]
+    fn c2_early_out_requires_all_three_queues_empty_not_just_free_and_orphans() {
+        let free = DeferredFree::default();
+        let orphans = OrphanedMeshGpu::default();
+        let mut retired = RetiredGpuBuffers::default();
+
+        // All three empty: the golden early-out must fire.
+        assert!(
+            free.is_empty() && orphans.is_empty() && retired.is_empty(),
+            "test precondition: every queue starts empty"
+        );
+
+        // ONLY `retired` gains an entry (a growth-only frame with no refcount
+        // churn at all) — the pre-C2 `free_empty && orphans_empty`-only guard
+        // would still see `true && true` and wrongly early-out, leaking this
+        // pending grow-and-defer-old buffer forever.
+        retired.push(
+            boyko_rhi_vulkan::memory::BoundBuffer {
+                buffer: boyko_rhi_vulkan::ffi::VkBuffer::NULL,
+                offset: 0,
+                size: 0,
+                mapped: None,
+            },
+            0,
+        );
+
+        let free_empty = free.is_empty();
+        let orphans_empty = orphans.is_empty();
+        let retired_empty = retired.is_empty();
+        assert!(free_empty, "test precondition: DeferredFree stays empty");
+        assert!(orphans_empty, "test precondition: OrphanedMeshGpu stays empty");
+        assert!(!retired_empty, "test precondition: RetiredGpuBuffers now holds one entry");
+
+        assert!(
+            !(free_empty && orphans_empty && retired_empty),
+            "F7 C2: the extended early-out condition must NOT fire while a RetiredGpuBuffers \
+             entry is pending, even though the OTHER two queues are empty — a \
+             `free_empty && orphans_empty`-only guard (pre-C2) would leak it"
         );
     }
 }

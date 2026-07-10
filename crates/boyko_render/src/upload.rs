@@ -168,8 +168,11 @@ pub unsafe fn upload_instance_models(
     assert!(
         bytes.len() as u64 <= ring_slot.size,
         "instance ring overflow: {} gathered instances ({} bytes) exceed the \
-         {}-instance ({}-byte) slot (grow the boot instance capacity; dynamic \
-         growth is host plan R7)",
+         {}-instance ({}-byte) slot (asset-streaming plan F7: \
+         `GpuSceneBundles::grow_instance_family_if_needed` grows this ring on a non-RT \
+         device before this call; a live overflow here means either an RT device's hard \
+         INSTANCE_CAPACITY cap (F7 W3 — growth is out of scope there) or a caller-ordering \
+         bug that skipped the grow)",
         scratch.ring.len(),
         bytes.len(),
         ring_slot.size / 48,
@@ -242,8 +245,10 @@ pub unsafe fn upload_pair_ring(
     assert!(
         bytes.len() as u64 <= slot_buffer.size,
         "pair ring overflow: {} gathered pairs ({} bytes) exceed the {}-pair \
-         ({}-byte) slot (grow the boot instance capacity; dynamic growth is host \
-         plan R7)",
+         ({}-byte) slot (asset-streaming plan F7: `GpuSceneBundles::\
+         grow_instance_family_if_needed` grows this ring in lockstep with the instance \
+         ring on a non-RT device before this call — see `upload_instance_models`'s \
+         overflow message for the RT-capped / caller-ordering alternatives)",
         scratch.pair_ring.len(),
         bytes.len(),
         slot_buffer.size / GPU_TRANSFORM3D_BYTES as u64,
@@ -312,8 +317,10 @@ pub unsafe fn upload_pair_out_slot(
     assert!(
         bytes.len() as u64 <= slot_buffer.size,
         "out-slot ring overflow: {} gathered out-slots ({} bytes) exceed the {}-slot \
-         ({}-byte) buffer (grow the boot instance capacity; dynamic growth is host \
-         plan R7)",
+         ({}-byte) buffer (asset-streaming plan F7: `GpuSceneBundles::\
+         grow_instance_family_if_needed` grows this ring in lockstep with the instance \
+         ring on a non-RT device before this call — see `upload_instance_models`'s \
+         overflow message for the RT-capped / caller-ordering alternatives)",
         scratch.pair_out_slot.len(),
         bytes.len(),
         slot_buffer.size / 4,
@@ -379,7 +386,10 @@ pub unsafe fn upload_mesh_ids(
     assert!(
         bytes.len() as u64 <= slot.size,
         "mesh-id ring overflow: {} gathered mesh-ids ({} bytes) exceed the {}-slot \
-         ({}-byte) buffer (grow the boot instance capacity; dynamic growth is host plan R7)",
+         ({}-byte) buffer (asset-streaming plan F7 W3: an RT device hard-caps the whole \
+         instance family at INSTANCE_CAPACITY — the TLAS packer's `instance_arrays`/\
+         backing/scratch are sized once for it, so this ring never grows; reduce the \
+         scene's simultaneous drawable count or raise the boot INSTANCE_CAPACITY)",
         scratch.mesh_ids.len(),
         bytes.len(),
         slot.size / 4,
@@ -448,8 +458,11 @@ pub unsafe fn upload_prev_instance_models(
     assert!(
         bytes.len() as u64 <= ring_slot.size,
         "prev-instance ring overflow: {} gathered instances ({} bytes) exceed the \
-         {}-instance ({}-byte) slot (grow the boot instance capacity; dynamic growth is host \
-         plan R7)",
+         {}-instance ({}-byte) slot (asset-streaming plan F7 W3: an RT device hard-caps \
+         the whole instance family at INSTANCE_CAPACITY — the TLAS packer's \
+         `instance_arrays`/backing/scratch are sized once for it, so this ring never \
+         grows; reduce the scene's simultaneous drawable count or raise the boot \
+         INSTANCE_CAPACITY)",
         scratch.prev_ring.len(),
         bytes.len(),
         ring_slot.size / core::mem::size_of::<crate::InstanceModelCol>() as u64,

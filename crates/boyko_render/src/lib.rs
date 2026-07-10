@@ -203,6 +203,12 @@ pub mod ray_plugin;
 /// through the HWRT resolve's binding-20 UBO. Defaults byte-identical to the R2a-4b consts.
 pub mod ray_shadow_config;
 pub mod render3d_plugin;
+/// Asset-streaming plan F7 — the fence-gated retired-GPU-buffer queue
+/// ([`RetiredGpuBuffers`](retired_gpu_buffers::RetiredGpuBuffers)) a grown GPU mirror
+/// (the material table, the per-slot instance family) routes its superseded buffer
+/// through, drained by [`retire_deferred_frees`](asset_refcount::retire_deferred_frees)
+/// on the same fence horizon as every other F6/F7 device-free.
+pub mod retired_gpu_buffers;
 /// HW-RT Rung 3a Step 1 — the ECS-native shadow-denoise config
 /// ([`ShadowDenoiseConfig`](shadow_denoise_config::ShadowDenoiseConfig) +
 /// [`ResolvedShadowDenoise`](shadow_denoise_config::ResolvedShadowDenoise) Resources + the pure
@@ -273,6 +279,7 @@ pub use ray_shadow_config::{
     RESOLVED_RAY_SHADOW_BYTES, RayShadowConfig, ResolvedRayShadow, resolve_ray_shadow,
     resolve_ray_shadow_system,
 };
+pub use retired_gpu_buffers::RetiredGpuBuffers;
 pub use shadow_denoise_config::{
     MAX_ATROUS_LEVELS, RESOLVED_SHADOW_DENOISE_BYTES, RESOLVED_TEMPORAL_SHADOW_BYTES,
     ResolvedShadowDenoise, ResolvedTemporalShadow, ShadowDenoiseConfig, ShadowDenoiseMode,

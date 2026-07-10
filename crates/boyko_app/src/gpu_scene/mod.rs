@@ -41,11 +41,12 @@ use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::memory::BoundBuffer;
 use boyko_rhi_vulkan::rhi_impl::{
     ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline,
-    VulkanSampler, VulkanShaderModule,
+    VulkanSampler, VulkanShaderModule, rebind_storage_buffer,
 };
 use boyko_rhi_vulkan::swapchain::{
-    CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, GBUFFER_INSTANCE_MODEL_BYTES,
-    GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene, InterpActivation, PunctualDepthActivation,
+    CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
+    GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene,
+    InterpActivation, PunctualDepthActivation,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::accel::BoundAccelStruct;
@@ -68,9 +69,9 @@ use boyko_render::{
     DDGI_UPDATE_UBO_BYTES, DdgiConfig, DdgiUpdateConfig, DdgiUpdateUbo, GI_MAX_RAYS, GPU_LIGHT_BYTES,
     GPU_LIGHT_WORDS, GPU_TRANSFORM3D_BYTES, GpuLight, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_BYTES,
     LightHeaderGpu, LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialTable, RESOLVED_CSM_BYTES,
-    RESOLVED_DDGI_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, ResolvedCsm, ResolvedShadowAtlas, SHADOW_DIM,
-    Vertex, ddgi_update_dispatch_groups, fill_fibonacci_ray_table, pack_ddgi_update_ubo,
-    resolve_ddgi,
+    RESOLVED_DDGI_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, RETIRE_DELAY, ResolvedCsm, ResolvedShadowAtlas,
+    RetiredGpuBuffers, SHADOW_DIM, Vertex, ddgi_update_dispatch_groups, fill_fibonacci_ray_table,
+    pack_ddgi_update_ubo, resolve_ddgi,
 };
 #[cfg(feature = "hwrt")]
 use boyko_ecs::ecs::core::asset::Assets;
@@ -104,6 +105,14 @@ use tlas::TlasResources;
 /// `upload_instance_models` (buffer-overflow guard); dynamic growth is host
 /// plan R7.
 pub(crate) const INSTANCE_CAPACITY: usize = 1024;
+
+/// Asset-streaming plan F7 Q2: a sane upper bound on the non-RT instance family's
+/// grown capacity — mirrors `MESH_ADDR_CAP`'s role for the BLAS-address table.
+/// `debug_assert`-only (not a hard cap like `boyko_render::MaterialTable`'s
+/// `MAX_MATERIAL_ROWS` on the material side — there is no addressing-width limit
+/// here, only a runaway-leak sanity net): catches a leaking `MeshRenderScratch::ring`
+/// in dev without a release cost.
+pub(crate) const MAX_INSTANCE_CAP: usize = 1 << 22;
 
 /// HW-RT rung R2a-3: the per-mesh BLAS-address table capacity (the max distinct meshes the
 /// host's TLAS packer can reference). The table is a tiny host-visible `u64` column indexed by
@@ -339,6 +348,14 @@ pub(crate) struct GpuSceneBundles {
     /// every other frame the base 3-MRT raster pipeline draws (byte-identical OFF path).
     #[cfg(feature = "hwrt")]
     mv: Option<MotionVecResources>,
+    /// Asset-streaming plan F7 §7.3: PER-FIF-SLOT current capacity of the non-RT instance
+    /// family (`instance_rings[s]` + `interp.pairs[s]` + `interp.out_slot[s]`), starting at
+    /// [`INSTANCE_CAPACITY`]. Slots grow INDEPENDENTLY — one fenced slot at a time, in
+    /// lockstep across the three co-sized buffers — so this is a per-slot array, not a
+    /// single scalar (mirrors [`InterpGpuProd`]'s own per-slot `capacity`). On an RT device
+    /// (`tlas`/`mv` both `Some`) this stays pinned at [`INSTANCE_CAPACITY`] forever — the W3
+    /// runtime gate in [`Self::grow_instance_family_if_needed`] never grows it there.
+    instance_capacity: [u32; FRAMES_IN_FLIGHT],
     /// The DEGENERATE legacy vertex buffer (6 identical vertices ⇒ zero-area ⇒
     /// no fragments): pass A's legacy draw target on empty-gather frames —
     /// mirrors the showcase's `showcase_quad_vertices` discipline.
@@ -1315,6 +1332,7 @@ impl GpuSceneBundles {
             tlas,
             #[cfg(feature = "hwrt")]
             mv,
+            instance_capacity: [INSTANCE_CAPACITY as u32; FRAMES_IN_FLIGHT],
             vertex_buffer,
             marcher,
             vocab_layout,
@@ -1344,6 +1362,129 @@ impl GpuSceneBundles {
             csm,
             dispatch_group_count_x,
         }
+    }
+
+    /// Cheap, allocation-free steady-state check (asset-streaming plan F7 review W1):
+    /// `true` iff `needed` exceeds slot `slot`'s current instance-family capacity.
+    /// Touches no World resource at all (`host.gpu` is a plain `WindowHost` field) —
+    /// call this BEFORE paying for the (rare) [`Self::grow_instance_family_if_needed`]
+    /// path's NonSend `RetiredGpuBuffers` take-out. On an RT device this naturally
+    /// tracks the W3 hard cap too: `instance_capacity[slot]` never advances past
+    /// `INSTANCE_CAPACITY` there, so an RT overflow still reports `true` here (the
+    /// grow call itself then no-ops via the W3 gate and the caller's next upload trips
+    /// the documented hard `assert!`).
+    #[inline]
+    pub(crate) fn needs_instance_grow(&self, needed: u32, slot: usize) -> bool {
+        needed > self.instance_capacity[slot]
+    }
+
+    /// Asset-streaming plan F7 §7.3: grows the FENCED slot's non-RT instance family
+    /// (`instance_rings[s]` + `interp.pairs[s]` + `interp.out_slot[s]`, in lockstep) to
+    /// `next_pow2(needed)` iff `needed` exceeds that slot's current capacity — called
+    /// BEFORE `upload_instance_models` fills the (possibly grown) ring this frame.
+    ///
+    /// # W3 runtime gate (E1 Option B)
+    ///
+    /// An RT device (`self.tlas.is_some() || self.mv.is_some()`) hard-caps this family at
+    /// [`INSTANCE_CAPACITY`] and NEVER grows it here: the TLAS packer's `instance_arrays`
+    /// / backing / scratch (`tlas.rs`) are all sized ONCE for `INSTANCE_CAPACITY`, and
+    /// growing the ring without regrowing those would let the packer read a
+    /// `count > INSTANCE_CAPACITY` ring while writing a still-`INSTANCE_CAPACITY`-sized
+    /// `instance_arrays[fi]` — an out-of-bounds device write (device-lost). This is a
+    /// RUNTIME check (`tlas`/`mv` are `None` on a non-RT device even in an `hwrt` build),
+    /// never `#[cfg(feature = "hwrt")]` — a non-hwrt build has neither field at all, so
+    /// growth is unconditional there. A > `INSTANCE_CAPACITY` gather on an RT device trips
+    /// the LIVE hard `assert!` in `upload_mesh_ids`/`upload_prev_instance_models`
+    /// (`boyko_render::upload`) — documented, not silently grown.
+    ///
+    /// # Steady-state cost
+    ///
+    /// The caller is expected to have already consulted [`Self::needs_instance_grow`]
+    /// before paying for the NonSend take-out this call requires; the internal `needed
+    /// <= self.instance_capacity[s]` re-check below is a defensive belt-and-suspenders,
+    /// not the steady-state gate anymore.
+    ///
+    /// # No seed
+    ///
+    /// The reallocated buffers are `write_bytes(0)`-cleared only — `upload_instance_models`
+    /// (the caller's very next step) rewrites the whole ring this frame, and
+    /// `upload_pair_ring`/`upload_pair_out_slot` do the same for the interp pair/out-slot
+    /// lanes, so no device-side re-seed is needed (unlike the material table, which has no
+    /// per-frame full-rewrite guarantee).
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees `token` proves THIS frame's fence wait for slot `token.slot()`
+    /// — every descriptor set this fn repoints (`instance_bind_groups[s]`, `interp`'s
+    /// `interp_bg[s]`) is therefore non-command-buffer-pending.
+    pub(crate) unsafe fn grow_instance_family_if_needed(
+        &mut self,
+        needed: u32,
+        ctx: &VulkanContext,
+        token: &FrameWriteToken,
+        retired: &mut RetiredGpuBuffers,
+        epoch: u64,
+    ) {
+        #[cfg(feature = "hwrt")]
+        if self.tlas.is_some() || self.mv.is_some() {
+            return;
+        }
+
+        let s = token.slot();
+        if needed <= self.instance_capacity[s] {
+            return;
+        }
+        let new_cap = needed.next_power_of_two();
+        debug_assert!(new_cap.is_power_of_two());
+        debug_assert!(new_cap >= needed);
+        debug_assert!(
+            new_cap as usize <= MAX_INSTANCE_CAP,
+            "invariant: the grown instance-family capacity ({new_cap}) exceeds the sane \
+             MAX_INSTANCE_CAP bound ({MAX_INSTANCE_CAP}) — a likely gather leak"
+        );
+
+        let new_bytes = new_cap as u64 * GBUFFER_INSTANCE_MODEL_BYTES as u64;
+        let new_ring = RhiDevice::create_buffer(
+            ctx,
+            &BufferDesc {
+                size: new_bytes,
+                usage: BufferUsage::STORAGE,
+                location: MemoryLocation::HostVisibleCoherent,
+            },
+        )
+        .expect("invariant: grown instance-model SSBO ring slot create");
+        let mapped = RhiDevice::buffer_mapped_ptr(ctx, &new_ring)
+            .expect("invariant: host-visible grown instance SSBO is mapped");
+        // No seed (see this fn's doc): `upload_instance_models` rewrites the whole ring
+        // this frame; zero-fill only covers the gap until that write lands.
+        zero_fill(mapped, new_bytes as usize);
+
+        let old_ring = core::mem::replace(&mut self.instance_rings[s], new_ring);
+        retired.push(old_ring, epoch + RETIRE_DELAY);
+
+        // SAFETY: slot `s == token.slot()`'s fence was waited this frame (this fn's
+        // caller contract above) — `instance_bind_groups[s]`'s set is non-pending, so
+        // rewriting its binding in place is sound.
+        unsafe {
+            rebind_storage_buffer(ctx, &self.instance_bind_groups[s], 0, &self.instance_rings[s]);
+        }
+
+        // SAFETY: same fence contract as above — `interp.grow_slot`'s own precondition
+        // (slot `s`'s fence was waited this frame) — reallocates `pairs[s]`/`out_slot[s]`
+        // in lockstep and repoints ALL THREE of `interp_bg[s]`'s bindings, including
+        // `model_out`@2 against the just-grown `instance_rings[s]` passed in.
+        unsafe {
+            self.interp.grow_slot(
+                ctx,
+                s,
+                new_cap,
+                &self.instance_rings[s],
+                retired,
+                epoch + RETIRE_DELAY,
+            );
+        }
+
+        self.instance_capacity[s] = new_cap;
     }
 
     /// Assembles this frame's [`GBufferScene`] ON THE STACK (plan D7 — POD +

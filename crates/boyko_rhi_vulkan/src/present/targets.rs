@@ -363,6 +363,25 @@ const _: () = assert!(
 #[cfg(feature = "hwrt")]
 const TEMPORAL_OUT_FORMAT: Format = Format::R16G16Unorm;
 
+/// Asset-streaming plan F7 §5: the vocabulary set's material-buffer binding
+/// ([`GBufferTargets::vocab_set`]'s `scene.material_table` entry).
+const VOCAB_MATERIAL_BINDING: u32 = 7;
+
+/// Asset-streaming plan F7 §5: the resolve-family sets' material-buffer binding — the
+/// index [`resolve_software_entries`] emits `scene.material_table` at, shared verbatim
+/// by [`GBufferTargets::resolve_set`] and every HWRT resolve-family variant (they all
+/// consume [`resolve_software_entries`]'s output unmodified for this binding).
+const RESOLVE_MATERIAL_BINDING: u32 = 4;
+
+/// Asset-streaming plan F7 §5 (C1): the minimum material-bearing ring count — the two
+/// ALWAYS-present rings ([`GBufferTargets::vocab_set`] + [`GBufferTargets::resolve_set`]).
+/// A sanity floor for [`GBufferTargets::material_set_rings`]'s count debug_assert.
+/// `hwrt`-only: on a `not(hwrt)` build `material_set_rings()` always yields exactly these
+/// two (no `Option`-guarded ring exists to enumerate), so the floor check is not wired
+/// there (nothing to catch).
+#[cfg(feature = "hwrt")]
+const MATERIAL_SET_RING_COUNT_MIN: usize = 2;
+
 /// The binding count of the SOFTWARE deferred-resolve set (indices 0..=18). The HWRT variant is
 /// this plus one (binding 19 = the TLAS). Kept as ONE source so the exact-fill guards + both set
 /// builders agree. HW-RT rung R2a-4a raised [`MAX_BIND_GROUP_BINDINGS`](boyko_rhi::MAX_BIND_GROUP_BINDINGS)
@@ -468,6 +487,77 @@ fn resolve_software_entries<'a>(
             buffer: scene.ddgi_grid_ubo,
         },
     ]
+}
+
+impl GBufferTargets {
+    /// Asset-streaming plan F7 §5 (C1): THE canonical enumeration of every per-FIF
+    /// descriptor-set ring that binds the material buffer, paired with its binding
+    /// index — co-located with [`resolve_software_entries`] (the SOLE builder that
+    /// emits `scene.material_table`) so a reviewer sees the builder and the repoint
+    /// list together, and a new resolve variant added there must be added here too.
+    /// [`GBufferFrame::repoint_material_table`] walks EXACTLY this list; nothing else
+    /// enumerates the material-bearing sets.
+    #[cfg(not(feature = "hwrt"))]
+    fn material_set_rings(&self) -> impl Iterator<Item = (&[VulkanBindGroup; FRAMES_IN_FLIGHT], u32)> {
+        [
+            (&self.vocab_set, VOCAB_MATERIAL_BINDING),
+            (&self.resolve_set, RESOLVE_MATERIAL_BINDING),
+        ]
+        .into_iter()
+    }
+
+    /// HW-RT variant of [`Self::material_set_rings`]: the two always-present rings PLUS
+    /// every `Option`-guarded HWRT resolve-family ring that exists on this device/config
+    /// (`None` on the OFF path — flattened out, not enumerated).
+    #[cfg(feature = "hwrt")]
+    fn material_set_rings(&self) -> impl Iterator<Item = (&[VulkanBindGroup; FRAMES_IN_FLIGHT], u32)> {
+        [
+            Some((&self.vocab_set, VOCAB_MATERIAL_BINDING)),
+            Some((&self.resolve_set, RESOLVE_MATERIAL_BINDING)),
+            self.resolve_set_hwrt
+                .as_ref()
+                .map(|s| (s, RESOLVE_MATERIAL_BINDING)),
+            self.shadow_vis_resolve_set
+                .as_ref()
+                .map(|s| (s, RESOLVE_MATERIAL_BINDING)),
+            self.shadow_denoised_resolve_set
+                .as_ref()
+                .map(|s| (s, RESOLVE_MATERIAL_BINDING)),
+            self.shadow_vis_mv_resolve_set
+                .as_ref()
+                .map(|s| (s, RESOLVE_MATERIAL_BINDING)),
+            self.shadow_temporal_denoised_resolve_set
+                .as_ref()
+                .map(|s| (s, RESOLVE_MATERIAL_BINDING)),
+        ]
+        .into_iter()
+        .flatten()
+    }
+
+    /// Asset-streaming plan F7 §5 (C1, review O1): the count [`Self::material_set_rings`]
+    /// MUST yield for THIS already-built `self` — read directly off the SAME `Option`
+    /// fields `material_set_rings` enumerates (`.is_some()`), NOT re-derived from the
+    /// arming predicates `create`'s builders gate on. A predicate-based re-derivation is
+    /// unsound as a secondary check: a device where the arming predicate holds but a
+    /// specific ring's `create_bind_group` degraded to `None` (an internal builder
+    /// failure/degrade path, independent of the predicate) would make a predicate-based
+    /// count diverge from `material_set_rings().count()` and trip this debug_assert
+    /// SPURIOUSLY. Reading `self`'s own fields instead can only diverge from
+    /// `material_set_rings()` when a NEW field is added to `Self` without a matching
+    /// entry there — exactly the C1 regression this guard exists to catch.
+    ///
+    /// This debug_assert is a SECONDARY self-consistency net; the PRIMARY exhaustiveness
+    /// guarantees are `material_set_rings`'s co-location with `resolve_software_entries`
+    /// (a reviewer sees both together) and the headless C1 repoint-counter test (F7 §12).
+    #[cfg(feature = "hwrt")]
+    fn expected_material_ring_count(&self) -> usize {
+        MATERIAL_SET_RING_COUNT_MIN
+            + self.resolve_set_hwrt.is_some() as usize
+            + self.shadow_vis_resolve_set.is_some() as usize
+            + self.shadow_denoised_resolve_set.is_some() as usize
+            + self.shadow_vis_mv_resolve_set.is_some() as usize
+            + self.shadow_temporal_denoised_resolve_set.is_some() as usize
+    }
 }
 
 /// HW-RT rung 3a: the bundle [`GBufferTargets::build_shadow_denoise_sets`] returns — the VIS +
@@ -2661,6 +2751,31 @@ impl GBufferTargets {
         // failure leaves the previous (still-valid) targets in place.
         let fresh = Self::create(ctx, scene, extent)?;
 
+        // Asset-streaming plan F7 §5 (C1, review O1): a SECONDARY self-consistency net —
+        // every material-bearing ring `create` just built must be enumerated by
+        // `material_set_rings`, else a repointed material-table grow would silently miss
+        // one (a UAF the moment its buffer is later freed). `expected_material_ring_count`
+        // reads `fresh`'s own `Option` fields directly (not a re-derived arming predicate),
+        // so this cannot spuriously fire on a device where a ring degraded to `None` for a
+        // reason the predicate wouldn't see. The PRIMARY exhaustiveness guarantees are
+        // `material_set_rings`'s co-location with `resolve_software_entries` and the
+        // headless C1 repoint-counter test (F7 §12) — this debug_assert is a cheap backstop.
+        #[cfg(feature = "hwrt")]
+        {
+            let ring_count = fresh.material_set_rings().count();
+            debug_assert!(
+                ring_count >= MATERIAL_SET_RING_COUNT_MIN,
+                "invariant: at least the vocab + resolve material rings must always exist"
+            );
+            debug_assert_eq!(
+                ring_count,
+                fresh.expected_material_ring_count(),
+                "invariant (F7 C1): material_set_rings() must enumerate EXACTLY every \
+                 material-bearing ring create() built — a new resolve variant was added \
+                 without adding its ring to material_set_rings()"
+            );
+        }
+
         if let Some(old) = targets.take() {
             // SAFETY: the new targets were built above; the device was waited idle (a
             // replace), so no submission references the old targets; `destroy` consumes
@@ -2848,6 +2963,45 @@ impl GBufferFrame {
         Self { targets: None }
     }
 
+    /// Asset-streaming plan F7 §11.3 (Q3): `true` once the first
+    /// [`Renderer::render_gbuffer_frame`] has synced [`Self::targets`]. A material-table
+    /// grow before targets exist is safe either way (no set references the old buffer
+    /// yet, and the first sync binds the new one), but the runner gates the rebind on
+    /// this so [`MaterialTable::rebind_pending`](boyko_render::MaterialTable::rebind_pending)
+    /// is only cleared once a repoint actually happened.
+    #[inline]
+    pub fn targets_ready(&self) -> bool {
+        self.targets.is_some()
+    }
+
+    /// Asset-streaming plan F7 §5/§6: repoints the material-table binding of EVERY
+    /// material-bearing descriptor set for `fenced_slot` to `buf`
+    /// ([`GBufferTargets::material_set_rings`], one in-place `vkUpdateDescriptorSets`
+    /// each). A no-op until [`Self::targets_ready`] (frame 0, before the first sync).
+    ///
+    /// # Safety
+    ///
+    /// `fenced_slot`'s in-flight fence must already be waited THIS frame (via
+    /// [`Renderer::wait_frame_in_flight`]) — none of its descriptor sets is command-
+    /// buffer-pending (VUID-vkUpdateDescriptorSets-None-03047). `ctx` must be the live
+    /// context every set + `buf` were created on; `buf` must outlive every submit that
+    /// could read it.
+    pub unsafe fn repoint_material_table(
+        &self,
+        ctx: &VulkanContext,
+        fenced_slot: usize,
+        buf: &BoundBuffer,
+    ) {
+        let Some(targets) = self.targets.as_ref() else {
+            return;
+        };
+        for (ring, binding) in targets.material_set_rings() {
+            // SAFETY: `fenced_slot`'s set is non-pending (this fn's caller contract
+            // above); `ctx` is the live context both the set and `buf` were created on.
+            unsafe { crate::rhi_impl::rebind_storage_buffer(ctx, &ring[fenced_slot], binding, buf) };
+        }
+    }
+
     /// HW-RT rung 3a: the fenced à-trous edge-stop UBO ring slot the host memcpys
     /// [`ResolvedShadowDenoise`](boyko_render's `ResolvedShadowDenoise`) into each frame
     /// (the per-level à-trous sets bind `shadow_denoise_ubo[fi]` @4). Returns `None` when
@@ -2897,6 +3051,180 @@ impl GBufferFrame {
             // targets; they are destroyed exactly once (moved out of `self`).
             unsafe { targets.destroy(ctx) };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::texture::MAX_TEXTURE_LAYERS;
+
+    /// A device-inert `VulkanTexture` — every handle field is `VK_NULL_HANDLE`
+    /// (the `dummy_mesh_gpu`/`BoundBuffer::NULL` idiom `asset_streaming_f5_
+    /// validation.rs` established), so building a full `GBufferTargets` value in
+    /// a CPU unit test never calls a Vulkan function: `GBufferTargets` has no
+    /// `Drop` impl (teardown is the explicit `unsafe fn destroy(self, ctx)`
+    /// above), so a fake instance just drops its plain handle fields harmlessly.
+    fn null_texture() -> VulkanTexture {
+        VulkanTexture {
+            image: VkImage::NULL,
+            view: VkImageView::NULL,
+            memory: VkDeviceMemory::NULL,
+            layer_views: [VkImageView::NULL; MAX_TEXTURE_LAYERS],
+            active_layers: 1,
+            array_view: VkImageView::NULL,
+        }
+    }
+
+    fn null_bind_group() -> VulkanBindGroup {
+        VulkanBindGroup { descriptor_pool: VkDescriptorPool::NULL, descriptor_set: VkDescriptorSet::NULL }
+    }
+
+    fn tex_ring() -> [VulkanTexture; FRAMES_IN_FLIGHT] {
+        core::array::from_fn(|_| null_texture())
+    }
+
+    fn bg_ring() -> [VulkanBindGroup; FRAMES_IN_FLIGHT] {
+        core::array::from_fn(|_| null_bind_group())
+    }
+
+    /// A non-hwrt `GBufferTargets`: only the 14 always-present fields exist on
+    /// this build (every `shadow_*`/`motion_vec`/`temporal_*`/`resolve_set_hwrt`
+    /// field is `#[cfg(feature = "hwrt")]`-gated out entirely, not merely `None`).
+    #[cfg(not(feature = "hwrt"))]
+    fn fake_targets() -> GBufferTargets {
+        GBufferTargets {
+            depth: tex_ring(),
+            albedo: tex_ring(),
+            normal: tex_ring(),
+            material: tex_ring(),
+            lit: tex_ring(),
+            viewt: tex_ring(),
+            ssao: tex_ring(),
+            vocab_set: bg_ring(),
+            resolve_set: bg_ring(),
+            cull_set: None,
+            ssao_set: None,
+            ddgi_update_set: None,
+            present_set: bg_ring(),
+            extent: VkExtent2D::default(),
+        }
+    }
+
+    /// Asset-streaming plan F7 C1: on a `not(hwrt)` build `material_set_rings()`
+    /// always yields exactly the two always-present rings — no `Option`-guarded
+    /// HWRT ring exists to enumerate on this build (see that fn's doc); this is
+    /// the non-hwrt companion of the exhaustive hwrt combination test below
+    /// (`expected_material_ring_count`/`MATERIAL_SET_RING_COUNT_MIN` are
+    /// themselves `#[cfg(feature = "hwrt")]`-only, so there is nothing else to
+    /// cross-check here).
+    #[test]
+    #[cfg(not(feature = "hwrt"))]
+    fn material_set_rings_is_always_exactly_two_on_a_non_hwrt_build() {
+        let targets = fake_targets();
+        assert_eq!(
+            targets.material_set_rings().count(),
+            2,
+            "a not(hwrt) build has only vocab_set + resolve_set to enumerate"
+        );
+    }
+
+    /// A `GBufferTargets` with every ALWAYS-present field filled + the 5
+    /// material-bearing `Option`-guarded HWRT resolve rings set per the caller's
+    /// `bool`s (every OTHER hwrt-only field — `shadow_vis`/`motion_vec`/
+    /// `shadow_atrous_sets`/the two UBO rings/`shadow_temporal_set` — stays
+    /// `None`, since none of them is enumerated by `material_set_rings`).
+    #[cfg(feature = "hwrt")]
+    fn fake_targets(
+        resolve_set_hwrt: bool,
+        shadow_vis_resolve: bool,
+        shadow_denoised_resolve: bool,
+        shadow_vis_mv_resolve: bool,
+        shadow_temporal_denoised_resolve: bool,
+    ) -> GBufferTargets {
+        GBufferTargets {
+            depth: tex_ring(),
+            albedo: tex_ring(),
+            normal: tex_ring(),
+            material: tex_ring(),
+            lit: tex_ring(),
+            viewt: tex_ring(),
+            ssao: tex_ring(),
+            shadow_vis: None,
+            shadow_vis2: None,
+            motion_vec: None,
+            shadow_temporal_hist: None,
+            temporal_out: None,
+            vocab_set: bg_ring(),
+            resolve_set: bg_ring(),
+            resolve_set_hwrt: resolve_set_hwrt.then(bg_ring),
+            cull_set: None,
+            ssao_set: None,
+            shadow_vis_resolve_set: shadow_vis_resolve.then(bg_ring),
+            shadow_denoised_resolve_set: shadow_denoised_resolve.then(bg_ring),
+            shadow_atrous_sets: None,
+            shadow_denoise_ubo: None,
+            shadow_vis_mv_resolve_set: shadow_vis_mv_resolve.then(bg_ring),
+            temporal_shadow_ubo: None,
+            shadow_temporal_set: None,
+            shadow_temporal_denoised_resolve_set: shadow_temporal_denoised_resolve.then(bg_ring),
+            ddgi_update_set: None,
+            present_set: bg_ring(),
+            extent: VkExtent2D::default(),
+        }
+    }
+
+    /// Asset-streaming plan F7 C1 completeness (the UAF blocker's regression
+    /// guard): `material_set_rings().count()` must equal
+    /// `expected_material_ring_count()` — the SAME invariant `sync_gbuffer`'s
+    /// debug_assert checks at every (re)create — across EVERY arming
+    /// combination of the 5 `Option`-guarded HWRT resolve rings (2^5 = 32
+    /// combinations), exhaustively. A combination where they diverge would mean
+    /// a resolve variant's ring can silently escape `repoint_material_table`'s
+    /// walk — the exact C1 UAF this rung fixed.
+    #[test]
+    #[cfg(feature = "hwrt")]
+    fn material_set_rings_count_matches_expected_across_every_hwrt_arming_combination() {
+        for mask in 0u32..32 {
+            let flags =
+                [mask & 1 != 0, mask & 2 != 0, mask & 4 != 0, mask & 8 != 0, mask & 16 != 0];
+            let targets = fake_targets(flags[0], flags[1], flags[2], flags[3], flags[4]);
+
+            let actual = targets.material_set_rings().count();
+            let expected = targets.expected_material_ring_count();
+            assert_eq!(
+                actual, expected,
+                "mask {mask:05b}: material_set_rings().count() ({actual}) must equal \
+                 expected_material_ring_count() ({expected}) — a forgotten ring would \
+                 silently escape repoint_material_table's walk (C1)"
+            );
+
+            let armed_count = flags.iter().filter(|&&f| f).count();
+            assert_eq!(
+                expected,
+                MATERIAL_SET_RING_COUNT_MIN + armed_count,
+                "mask {mask:05b}: expected_material_ring_count must be the 2 always-present \
+                 rings plus exactly the armed optional rings"
+            );
+        }
+    }
+
+    /// The floor itself: even with every optional ring disarmed, at least the
+    /// vocab + resolve rings must be enumerated.
+    #[test]
+    #[cfg(feature = "hwrt")]
+    fn material_set_rings_never_drops_below_the_always_present_floor() {
+        let targets = fake_targets(false, false, false, false, false);
+        assert_eq!(targets.material_set_rings().count(), MATERIAL_SET_RING_COUNT_MIN);
+    }
+
+    /// Every optional ring armed: the count must reach the full 7-ring surface
+    /// design §5 documents (2 always-present + 5 optional).
+    #[test]
+    #[cfg(feature = "hwrt")]
+    fn material_set_rings_reaches_the_full_seven_ring_surface_when_everything_is_armed() {
+        let targets = fake_targets(true, true, true, true, true);
+        assert_eq!(targets.material_set_rings().count(), 7);
     }
 }
 

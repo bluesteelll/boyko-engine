@@ -567,6 +567,51 @@ pub struct VulkanBindGroup {
     pub(crate) descriptor_set: VkDescriptorSet,
 }
 
+/// Rewrites binding `binding` of `bg`'s descriptor set in place to point at `buffer` — a
+/// single `vkUpdateDescriptorSets` storage-buffer write, reusing the SAME device fn pointer
+/// [`VulkanCommandEncoder::bind_storage_buffer`]'s one-time compute-set write uses
+/// (`update_descriptor_sets`). Asset-streaming plan F7 §5: growing a GPU-mirrored SSBO
+/// repoints every descriptor set that binds it in place, without a `vkDeviceWaitIdle` —
+/// the surgical tool the present-crate rebind orchestration (`GBufferFrame::
+/// repoint_material_table`) and the host's per-slot instance-family growth both drive.
+///
+/// # Safety
+///
+/// The caller guarantees `bg`'s descriptor set is not bound to any command buffer currently
+/// pending execution (VUID-vkUpdateDescriptorSets-None-03047) — i.e. every submit that could
+/// reference it has already been fence-waited (the fenced-slot discipline every F7 caller
+/// relies on). `ctx` must be the live context `bg` and `buffer` were created on.
+pub unsafe fn rebind_storage_buffer(
+    ctx: &VulkanContext,
+    bg: &VulkanBindGroup,
+    binding: u32,
+    buffer: &BoundBuffer,
+) {
+    let buffer_info = VkDescriptorBufferInfo {
+        buffer: buffer.buffer,
+        offset: 0,
+        range: buffer.size,
+    };
+    let write = VkWriteDescriptorSet {
+        s_type: VkStructureType::WriteDescriptorSet,
+        p_next: ptr::null(),
+        dst_set: bg.descriptor_set,
+        dst_binding: binding,
+        dst_array_element: 0,
+        descriptor_count: 1,
+        descriptor_type: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+        p_image_info: ptr::null(),
+        p_buffer_info: &buffer_info,
+        p_texel_buffer_view: ptr::null(),
+    };
+    let fns = ctx.device_fns();
+    // SAFETY: `ctx.device()`/`ctx.device_fns()` are the live device + its command table
+    // (`ctx` is live per the caller contract above); the write references the live
+    // `buffer_info` local + `bg`'s live descriptor set; `bg`'s set is not command-buffer-
+    // pending (caller contract above), so updating it in place is sound.
+    unsafe { (fns.update_descriptor_sets)(ctx.device(), 1, &write, 0, ptr::null()) };
+}
+
 /// An owned fence ([`RhiApi::Fence`]).
 ///
 /// # Safety

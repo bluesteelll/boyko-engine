@@ -342,6 +342,41 @@ Ordering: F1 store under a green byte-identity gate → F2 lifecycle/refcount �
 - **Goldens** `dac6dbbb` + `58f6c6c3` re-run after F1/F5/F8 (SHA-256 of the framebuffer BMP; opaque draws
   order-independent + append-order-preserving mint ⇒ CPU-container swap invisible).
 
+**F7 as-built (SHIPPED — architect→critic→developer→code-reviewer→tester, full design = scratchpad `f7_design_v2.md`):**
+- **Scope LOCKED = E1 Option B (critic-confirmed):** the MaterialTable device SSBO + FIF staging grows on BOTH legs;
+  the per-FIF instance-capacity family (`instance_rings`+interp `pairs`/`out_slot`) grows on NON-RT devices only,
+  RUNTIME-gated on `self.tlas.is_none() && self.mv.is_none()` (W3 — an `hwrt` BUILD on a non-RT device still grows;
+  never `#[cfg]`). On an RT device the instance family stays HARD-CAPPED at `INSTANCE_CAPACITY`; the TLAS
+  instance-array + persistent backing + scratch regrow is **F7-hwrt (deferred, tracked)** — growing the ring there
+  without them OOB-writes the still-1024 `instance_arrays` (tlas.rs:34,38) → device-lost.
+- **Grow-and-defer-old reuses F6 verbatim:** `submission_epoch` clock + `retire_frame = epoch + FRAMES_IN_FLIGHT`;
+  old buffers ride a NEW `RetiredGpuBuffers` (`!Send Vec` teardown queue mirroring `OrphanedMeshGpu` — `BoundBuffer`
+  is `!Send`, can't enter the `Send` `DeferredFree`), drained at the F6 `retire_deferred_frees` site. Grow re-seeds
+  from the CPU authority (`write_bytes(0)` then `seed_rows`, holes zeroed, NO device→device copy).
+- **C1 (hwrt device-UAF, critic-caught — the F6-C1 class):** the material buffer is bound in **7 per-FIF set-rings**
+  (`vocab_set`@7, `resolve_set`@4, + 5 hwrt shadow-resolve variants @4), several built ONCE with no per-frame
+  update. A single present-crate choke-point `GBufferFrame::repoint_material_table(slot, buf)` walks the canonical
+  `GBufferTargets::material_set_rings()` list co-located with `resolve_software_entries`; a `sync_gbuffer` count
+  debug_assert (`material_set_rings().count() == expected_material_ring_count()`, both from the SAME built
+  `Option.is_some()`) is the exhaustive-by-construction net. A missed ring = a freed-material-buffer UAF on a
+  denoise-armed hwrt frame — verified by a 32-combination CPU test + the real-device C1 headless phase.
+- **W1 (FIF-rebind proof, re-grounded — NOT `epoch%FIF`, false after recreate resets frame_index):** rests on
+  (a) `rebind_pending[FIF]` = a PERSISTENT per-slot flag consumed on the slot's NEXT occupancy (not a horizon timer),
+  (b) `repoint_material_table` runs BEFORE the fenced slot's set is recorded (runner step 4.6 < step 7, guarded by a
+  step-6 `debug_assert`), (c) `recreate`'s `device_wait_idle` drains the old buffer's last use. FIX-E (rebind gated
+  ONLY on `rebind_pending`, DECOUPLED from `flush_if_dirty`) is LOAD-BEARING (a dirty-coupled rebind would let a slot
+  lag > FIF → UAF) and structurally guarded.
+- **W1-alloc (code-reviewer-caught, real Principle-1/5 violation):** the naive take-out/reinsert of the NonSend
+  resources every frame = 3 malloc+free/frame through `#[cold]` paths on the golden path. FIX: a cheap alloc-free
+  `needs_grow`/`needs_instance_grow` check runs every frame (plain `non_send_resource` deref); the `remove`/reinsert
+  dance runs ONLY inside `if grow_needed` (the rare grow frame). Guarded by `zero_alloc`+`structural` staying green.
+- **C3 (release-OOB, critic-caught):** every `upload.rs`/`flush_if_dirty` overflow guard stays a HARD `assert!`
+  (never downgraded) — dead-but-cheap on a growable path, LIVE on the capped RT path (a >`INSTANCE_CAPACITY` hwrt
+  gather MUST abort, not OOB-write). Verified by `asset_streaming_f7_rt_cap_headless.rs` (`catch_unwind`).
+- Gates GREEN: goldens `58f6c6c3` BOTH legs (growth inert on boot-capacity scenes); 33 CPU/Miri tests; F6 churn
+  regression BOTH legs; `asset_streaming_f7_grow_headless.rs` (material grow + multi-grow FIX-F + non-RT instance grow
+  + rebind-under-FIF, Phase B runtime-gated to non-RT) BOTH legs; `f7_rt_cap` hwrt.
+
 ## Open questions (non-blocking)
 
 1. **ComponentId budget:** each asset type consumes one id from the 512 cap (MeshGpu, MaterialGpu, + POD

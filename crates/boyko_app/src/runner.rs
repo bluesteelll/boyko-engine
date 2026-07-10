@@ -32,11 +32,11 @@ use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
 use boyko_render::{
     CsmCasterScratch, DdgiCaps, MaterialGpu, MaterialId, MaterialTable, MeshAssetsExt, MeshGpu,
     MeshRenderScratch, OrphanedMeshGpu, RayBackendPolicy, RayCaps, RenderEpoch, ResolvedCsm,
-    ResolvedShadowAtlas, RhiContext, SdfEditStaging, ShadowDenoiseConfig, ShadowDenoiseMode,
-    collect_sdf_edits, gbuffer_push_from_view, retire_deferred_frees, upload_atlas_ring,
-    upload_camera_ring, upload_csm_ring, upload_instance_models, upload_light_table,
-    upload_material_assets, upload_mesh_assets, upload_pair_out_slot, upload_pair_ring,
-    upload_sdf_edit_list,
+    ResolvedShadowAtlas, RetiredGpuBuffers, RhiContext, SdfEditStaging, ShadowDenoiseConfig,
+    ShadowDenoiseMode, collect_sdf_edits, gbuffer_push_from_view, retire_deferred_frees,
+    upload_atlas_ring, upload_camera_ring, upload_csm_ring, upload_instance_models,
+    upload_light_table, upload_material_assets, upload_mesh_assets, upload_pair_out_slot,
+    upload_pair_ring, upload_sdf_edit_list,
 };
 #[cfg(all(windows, feature = "hwrt"))]
 use boyko_render::{
@@ -182,6 +182,13 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     app.world_mut().insert_resource(material_assets);
     app.world_mut()
         .insert_non_send_resource(MaterialTable::new());
+    // Asset-streaming plan F7: the grow-and-defer-old fence queue for a GPU-mirrored
+    // SSBO's superseded buffer (the material table, the per-slot instance family).
+    // NonSend for the same reason as `OrphanedMeshGpu` — it owns `!Send` RHI buffers.
+    // Drained every frame by `retire_deferred_frees` alongside `DeferredFree` +
+    // `OrphanedMeshGpu`, and force-drained at shutdown below.
+    app.world_mut()
+        .insert_non_send_resource(RetiredGpuBuffers::default());
 
     // Asset-system rung A3b: the decode->upload staging queues. `AssetServer`
     // was not wired into `boyko_app` before this rung — it is minted here bare
@@ -558,6 +565,92 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             host.renderer.submission_epoch(),
             &mut host.retire_scratch,
         );
+
+        // 4.6/4.7 pre-checks. Asset-streaming plan F7 review W1 (MUST-FIX): read only
+        // `Copy` scalars through CHEAP, allocation-free resource accessors
+        // (`resource`/`non_send_resource[_mut]` deref through the slab, `#[inline]`) —
+        // deciding WHETHER either GPU mirror needs to grow BEFORE paying for any NonSend
+        // take-out/reinsert. `NonSendResources::insert`/`remove` heap-(de)allocate the
+        // box and are `#[cold]` (setup-only APIs in the kernel) — correct to pay on the
+        // rare grow frame, wrong to pay every frame on the golden/steady-state path.
+        let material_high_water = app.world().resource::<Assets<MaterialGpu>>().high_water();
+        let material_grow_needed = app
+            .world()
+            .non_send_resource::<MaterialTable>()
+            .needs_grow(material_high_water);
+        let instance_needed = app.world().resource::<MeshRenderScratch>().instance_count() as u32;
+        let instance_grow_needed = host.gpu.needs_instance_grow(instance_needed, s);
+
+        // 4.6/4.7 grow (rare path only). `MaterialTable::grow_if_needed` needs `&Assets<
+        // MaterialGpu>` (a Send Resource) + `&mut MaterialTable` + `&mut
+        // RetiredGpuBuffers` (both NonSend) live at once — the safe resource facade
+        // cannot split a live `&World` borrow across Send/NonSend storage, so
+        // `MaterialTable`/`RetiredGpuBuffers` are taken out (owned) for the call's
+        // duration and reinserted right after (the same boot `Assets<MaterialGpu>`
+        // take-out/reinsert idiom above) — but ONLY inside this `if`, so a non-growing
+        // frame never executes it. `RetiredGpuBuffers` is taken out ONCE and shared by
+        // both grows (never twice per frame).
+        if material_grow_needed || instance_grow_needed {
+            let mut retired = app
+                .world_mut()
+                .remove_non_send_resource::<RetiredGpuBuffers>()
+                .expect("invariant: RetiredGpuBuffers inserted at boot");
+
+            if material_grow_needed {
+                let mut material_table = app
+                    .world_mut()
+                    .remove_non_send_resource::<MaterialTable>()
+                    .expect("invariant: MaterialTable inserted at boot");
+                {
+                    let material_assets = app.world().resource::<Assets<MaterialGpu>>();
+                    material_table.grow_if_needed(
+                        material_assets,
+                        ctx,
+                        &mut retired,
+                        host.renderer.submission_epoch(),
+                    );
+                }
+                app.world_mut().insert_non_send_resource(material_table);
+            }
+
+            if instance_grow_needed {
+                // SAFETY: `token` proves slot `token.slot()`'s fence was waited THIS
+                // frame (the `wait_frame_in_flight` call above) — every set this may
+                // repoint is non-pending.
+                unsafe {
+                    host.gpu.grow_instance_family_if_needed(
+                        instance_needed,
+                        ctx,
+                        &token,
+                        &mut retired,
+                        host.renderer.submission_epoch(),
+                    );
+                }
+            }
+
+            app.world_mut().insert_non_send_resource(retired);
+        }
+
+        // 4.6 repoint (every frame, cheap). FIX-E (F7 §8, load-bearing): gated ONLY on
+        // `rebind_pending`, never on `material_grow_needed` THIS frame or on dirty state
+        // — a slot left lagging by a PRIOR frame's grow must still be repointed before
+        // its set is recorded (invariant (b) of the FIF-rebind proof). Cheap: only
+        // `non_send_resource[_mut]` derefs, no take-out/reinsert.
+        if host.frame.targets_ready() {
+            let rebind = app
+                .world_mut()
+                .non_send_resource_mut::<MaterialTable>()
+                .take_rebind_pending(s);
+            if rebind {
+                let material_table = app.world().non_send_resource::<MaterialTable>();
+                // SAFETY: `s == token.slot()` fenced this frame (`wait_frame_in_flight`
+                // above) — its sets are non-pending; `table()` reads the CURRENT
+                // (possibly just-grown) buffer.
+                unsafe {
+                    host.frame.repoint_material_table(ctx, s, material_table.table());
+                }
+            }
+        }
 
         // 5-pre. The R7 SDF edit list — the ONE-SHOT boot-static write (host plan R7).
         // The explicit post-`finish()` `collect_sdf_edits` (run in `run_windowed` above,
@@ -1051,6 +1144,14 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 ctx,
             );
 
+            // 6. Asset-streaming plan F7 §6/§8 (invariant W1-b): the fenced slot must
+            // be repointed before its descriptor sets are recorded/bound below —
+            // guards the FIF-rebind proof's invariant (b), not merely documents it.
+            debug_assert!(
+                !host.frame.targets_ready() || !material_table.rebind_pending(s),
+                "invariant (F7 W1-b): the fenced slot must be repointed before its set is recorded"
+            );
+
             // 7. Render + present, consuming the token (the host-write window
             //    for slot `s` ends here — R0b).
             // SAFETY: `ctx`/`surface`/`swapchain`/`renderer` share the one
@@ -1304,6 +1405,17 @@ fn teardown(app: &mut App, host: WindowHost, ctx: &VulkanContext) {
         // created on; the table is destroyed exactly once (just removed from
         // the World).
         unsafe { material_table.destroy(ctx) };
+    }
+    // Asset-streaming plan F7 O1: force-drain every residual `RetiredGpuBuffers`
+    // entry under the SAME step-1 device-idle contract as the F6 queues above. The
+    // `retire_deferred_frees(..., u64::MAX, ..)` call above already emptied this
+    // queue (every `retire_frame <= u64::MAX`) — this drain is UNCONDITIONAL and
+    // does not depend on that coincidence, mirroring the explicit teardown drain
+    // every other F6/F7 GPU-teardown queue gets.
+    if let Some(mut retired) = app.world_mut().remove_non_send_resource::<RetiredGpuBuffers>() {
+        // SAFETY: the device is idle (step 1) so no in-flight submission references
+        // any queued buffer; `ctx` is the context every entry was created on.
+        unsafe { retired.drain_all(ctx) };
     }
     // `GpuDevice` is a plain reference newtype (no `Drop` glue) — removal alone
     // ends its residency; the returned `Option` is discarded.
