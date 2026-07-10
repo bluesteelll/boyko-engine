@@ -11,7 +11,8 @@
 //! path (a missing file on disk), not just the unit-level `Assets` API.
 
 use boyko_ecs::ecs::core::asset::{
-    Asset, AssetError, AssetLoadState, AssetLoader, AssetServer, AssetStaging, Assets, HasLoaders, LoaderEntry,
+    Asset, AssetError, AssetLoadState, AssetLoader, AssetPaths, AssetServer, AssetStaging, Assets, HasLoaders,
+    LoaderEntry,
 };
 
 /// A minimal `Asset`/`AssetLoader` pair whose `decode` parses the first byte
@@ -79,11 +80,13 @@ fn write_temp_tag_file(bytes: &[u8], unique: &str) -> std::path::PathBuf {
 fn load_reserve_stage_fill_round_trips_the_decoded_value() {
     let path = write_temp_tag_file(&[0x11], "happy_path");
 
-    let mut server = AssetServer::new();
+    let server = AssetServer::new();
     let mut assets = Assets::<TagAsset>::with_reserved(4);
     let mut staging = AssetStaging::<TagAsset>::default();
+    let mut paths = AssetPaths::<TagAsset>::default();
 
-    let handle = server.load::<TagAsset>(path.to_str().expect("utf8 path"), &mut assets, &mut staging);
+    let handle =
+        server.load::<TagAsset>(path.to_str().expect("utf8 path"), &mut assets, &mut staging, &mut paths);
     std::fs::remove_file(&path).ok();
 
     assert_eq!(
@@ -116,11 +119,12 @@ fn load_reserve_stage_fill_round_trips_the_decoded_value() {
 /// contract on `AssetServer::load` documents.
 #[test]
 fn load_missing_file_yields_a_resolvable_failed_handle() {
-    let mut server = AssetServer::new();
+    let server = AssetServer::new();
     let mut assets = Assets::<TagAsset>::with_reserved(4);
     let mut staging = AssetStaging::<TagAsset>::default();
+    let mut paths = AssetPaths::<TagAsset>::default();
 
-    let handle = server.load::<TagAsset>("does/not/exist/on/disk.tag", &mut assets, &mut staging);
+    let handle = server.load::<TagAsset>("does/not/exist/on/disk.tag", &mut assets, &mut staging, &mut paths);
 
     assert_eq!(assets.state(handle), Some(AssetLoadState::Failed));
     assert!(assets.get(handle).is_none());
@@ -135,11 +139,12 @@ fn load_missing_file_yields_a_resolvable_failed_handle() {
 /// is sound across the whole pipeline, not just the `Assets` unit API.
 #[test]
 fn removing_a_failed_load_recycles_its_row_for_a_later_successful_load() {
-    let mut server = AssetServer::new();
+    let server = AssetServer::new();
     let mut assets = Assets::<TagAsset>::with_reserved(4);
     let mut staging = AssetStaging::<TagAsset>::default();
+    let mut paths = AssetPaths::<TagAsset>::default();
 
-    let failed = server.load::<TagAsset>("missing/one.tag", &mut assets, &mut staging);
+    let failed = server.load::<TagAsset>("missing/one.tag", &mut assets, &mut staging, &mut paths);
     assert_eq!(assets.state(failed), Some(AssetLoadState::Failed));
     assert_eq!(assets.len(), 0);
 
@@ -201,17 +206,27 @@ fn distinct_asset_types_load_independently_through_one_server() {
     let other_path = std::env::temp_dir().join("boyko_ecs_asset_pipeline_distinct_types.other");
     std::fs::write(&other_path, [0x00]).expect("test setup: write temp asset file");
 
-    let mut server = AssetServer::new();
+    let server = AssetServer::new();
 
     let mut tag_assets = Assets::<TagAsset>::with_reserved(4);
     let mut tag_staging = AssetStaging::<TagAsset>::default();
+    let mut tag_paths = AssetPaths::<TagAsset>::default();
     let mut other_assets = Assets::<OtherAsset>::with_reserved(4);
     let mut other_staging = AssetStaging::<OtherAsset>::default();
+    let mut other_paths = AssetPaths::<OtherAsset>::default();
 
-    let tag_handle =
-        server.load::<TagAsset>(tag_path.to_str().expect("utf8 path"), &mut tag_assets, &mut tag_staging);
-    let other_handle =
-        server.load::<OtherAsset>(other_path.to_str().expect("utf8 path"), &mut other_assets, &mut other_staging);
+    let tag_handle = server.load::<TagAsset>(
+        tag_path.to_str().expect("utf8 path"),
+        &mut tag_assets,
+        &mut tag_staging,
+        &mut tag_paths,
+    );
+    let other_handle = server.load::<OtherAsset>(
+        other_path.to_str().expect("utf8 path"),
+        &mut other_assets,
+        &mut other_staging,
+        &mut other_paths,
+    );
     std::fs::remove_file(&tag_path).ok();
     std::fs::remove_file(&other_path).ok();
 
@@ -225,10 +240,10 @@ fn distinct_asset_types_load_independently_through_one_server() {
     assert_eq!(staged_tag[0].cpu, TagCpu { tag: 0x99 }, "TagAsset's own loader must have decoded its file's bytes");
 
     // Repeating the SAME path for the SAME type still dedupes within that
-    // type's own intern entry, exercised through the SAME server instance
+    // type's own dedup index, exercised through the SAME server instance
     // that also serves the other, unrelated asset type above.
     let missing = "missing-cache-would-refail-if-broken.tag";
-    let tag_again = server.load::<TagAsset>(missing, &mut tag_assets, &mut tag_staging);
-    let tag_again_repeat = server.load::<TagAsset>(missing, &mut tag_assets, &mut tag_staging);
+    let tag_again = server.load::<TagAsset>(missing, &mut tag_assets, &mut tag_staging, &mut tag_paths);
+    let tag_again_repeat = server.load::<TagAsset>(missing, &mut tag_assets, &mut tag_staging, &mut tag_paths);
     assert_eq!(tag_again, tag_again_repeat, "repeated load of the same path for the same type must dedupe");
 }

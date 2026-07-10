@@ -2,8 +2,9 @@
 //!
 //! Storage + typed handles + loading, laid out as first-class kernel
 //! resources: [`Assets<T>`] is a per-asset-type [`Resource`](crate::ecs::core::resources::resource::Resource)
-//! table addressed by the 8-byte [`Handle<T>`]. [`AssetServer`] is the
-//! path→handle intern.
+//! table addressed by the 8-byte [`Handle<T>`]. [`AssetServer`] dispatches
+//! decode; [`AssetPaths<A>`] (asset-streaming plan F4) is the per-asset-type,
+//! HashMap-free path→handle dedup index it consults.
 //!
 //! # Scope — host-only, render-agnostic
 //!
@@ -49,6 +50,8 @@ pub mod backing;
 pub mod error;
 pub mod handle;
 pub mod loader;
+pub(crate) mod path_index;
+pub mod paths;
 pub mod server;
 pub mod staging;
 
@@ -58,5 +61,6 @@ pub use backing::{AssetBacking, register_asset_layout};
 pub use error::AssetError;
 pub use handle::Handle;
 pub use loader::{AssetLoader, HasLoaders, LoaderEntry};
+pub use paths::AssetPaths;
 pub use server::AssetServer;
 pub use staging::{AssetStaging, Staged};

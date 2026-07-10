@@ -1,10 +1,10 @@
-//! [`AssetServer`] — the path→[`Handle`] intern (rung A3a: reserve → decode →
-//! stage; the GPU-upload half of loading is rung A3b). Loader dispatch itself
-//! is `HasLoaders::LOADERS`, a compile-time-static const table (asset-
-//! streaming plan F3) — not part of this server.
+//! [`AssetServer`] — decode dispatch + dedup orchestration (rung A3a:
+//! reserve → decode → stage; the GPU-upload half of loading is rung A3b).
+//! Loader dispatch itself is `HasLoaders::LOADERS`, a compile-time-static
+//! const table (asset-streaming plan F3); path dedup itself is
+//! [`AssetPaths<A>`] (asset-streaming plan F4) — neither lives on this
+//! server, which is now a zero-sized coordinator.
 
-use std::any::TypeId;
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -14,22 +14,25 @@ use crate::ecs::core::asset::backing::AssetBacking;
 use crate::ecs::core::asset::error::AssetError;
 use crate::ecs::core::asset::handle::Handle;
 use crate::ecs::core::asset::loader::HasLoaders;
+use crate::ecs::core::asset::path_index::hash_path;
+use crate::ecs::core::asset::paths::AssetPaths;
 use crate::ecs::core::asset::staging::{AssetStaging, Staged};
 use crate::ecs::core::resources::register_new;
 use crate::ecs::core::resources::resource::Resource;
 use crate::ecs::identifiers::primitives::ResourceId;
 
-/// World-global path→[`Handle`] intern, registered as a [`Resource`].
+/// World-global loader dispatcher, registered as a [`Resource`].
 ///
 /// # Rung A3a scope — reserve, decode, stage; no GPU upload
 ///
-/// [`load`](Self::load) interns `(TypeId::of::<A>(), path)` and, the first
-/// time a path is requested for asset type `A`, reads the file, decodes it
-/// through the [`HasLoaders::LOADERS`] entry matching its extension,
-/// [`reserve`](Assets::reserve)s a row in `assets`, and queues the decoded
-/// value on `staging`. GPU upload (turning the queued value into a resident
-/// asset and calling [`Assets::fill`](crate::ecs::core::asset::assets::Assets::fill))
-/// is a separate, render-side pass — rung A3b.
+/// [`load`](Self::load) hashes `path` and probes the caller-supplied
+/// [`AssetPaths<A>`] dedup index (asset-streaming plan F4); on a miss it
+/// reads the file, decodes it through the [`HasLoaders::LOADERS`] entry
+/// matching its extension, [`reserve`](Assets::reserve)s a row in `assets`,
+/// and queues the decoded value on `staging`. GPU upload (turning the queued
+/// value into a resident asset and calling
+/// [`Assets::fill`](crate::ecs::core::asset::assets::Assets::fill)) is a
+/// separate, render-side pass — rung A3b.
 ///
 /// A read or decode failure does NOT panic and does NOT leave the row
 /// unminted: `load` still reserves a row (so the returned `Handle` is
@@ -38,27 +41,27 @@ use crate::ecs::identifiers::primitives::ResourceId;
 /// caller polls [`Assets::state`](crate::ecs::core::asset::assets::Assets::state)
 /// to observe the outcome.
 ///
-/// # Cold path
+/// # A zero-sized type (asset-streaming plan F4)
 ///
-/// `interned` is a `HashMap` — acceptable ONLY because path interning is a
-/// setup-time operation (asset declarations), never touched on the
-/// per-frame hot path. Mirrors the identical cold-path `HashMap` exception
-/// `resource_type_registry` documents for its `TypeId → ResourceId` map.
-/// Loader dispatch itself is no longer a runtime registry at all
-/// (asset-streaming plan F3): it is [`HasLoaders::LOADERS`], a compile-time
-/// `&'static` const table baked into the binary per asset type.
+/// `AssetServer` no longer owns a path→handle map: that intern is now
+/// [`AssetPaths<A>`], one per asset type, passed into `load` by the caller
+/// alongside `assets`/`staging` — the same per-type-resource shape that
+/// already keeps `Assets<A>`/`AssetStaging<A>` independent per asset type.
+/// Loader dispatch itself is also not a runtime registry (asset-streaming
+/// plan F3): it is [`HasLoaders::LOADERS`], a compile-time `&'static` const
+/// table baked into the binary per asset type. With both former `HashMap`s
+/// gone, `AssetServer` carries no state at all — a zero-sized `Resource`
+/// kept for its `decode_bytes`/`load` methods' call-site ergonomics.
 #[derive(Default)]
-pub struct AssetServer {
-    /// `(asset TypeId, path)` → the `(index, generation)` pair of the
-    /// [`Handle`] minted for that pair. Cold path only — see the struct doc.
-    interned: HashMap<(TypeId, String), (u32, u32)>,
-}
+pub struct AssetServer;
 
 impl AssetServer {
-    /// Creates an empty server with no interned paths.
+    /// Creates a server. `AssetServer` is zero-sized (see the struct doc) —
+    /// this exists for call-site symmetry with every other kernel resource
+    /// constructor.
     #[inline]
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 
     /// Decodes `bytes` as asset type `A`, linearly scanning `A::LOADERS`
@@ -88,26 +91,37 @@ impl AssetServer {
         (entry.decode)(bytes)
     }
 
-    /// Interns `path` for asset type `A`, returning the SAME [`Handle<A>`]
-    /// for every repeated call with an equal path (and the same `A`).
+    /// Dedupes `path` for asset type `A` against `paths`, returning the SAME
+    /// [`Handle<A>`] for every repeated call with an equal path (and the same
+    /// `A`).
     ///
     /// See the struct doc for the reserve→decode→stage pipeline and the
     /// failure-path contract (a read/decode error reserves + fails the row
-    /// rather than panicking).
+    /// rather than panicking). A dedup hit requires BOTH that `paths` has
+    /// seen this path's hash before AND that the handle it recorded still
+    /// resolves in `assets` (any of `Loading`/`Loaded`/`Failed` — see
+    /// [`Assets::state`]): a stale entry (the recorded slot's generation has
+    /// since moved on, e.g. after an external [`Assets::remove`]) falls
+    /// through to a fresh decode+reserve exactly like a never-seen path.
     ///
     /// `A: AssetBacking` (asset-streaming plan F1): `assets: &mut Assets<A>`
     /// requires it — `Assets<T>`'s own generic bound. `A: HasLoaders`
     /// (asset-streaming plan F3): `load` dispatches decode through `A`'s own
-    /// static loader table.
+    /// static loader table. `paths: &mut AssetPaths<A>` (asset-streaming plan
+    /// F4): the per-type dedup index, HashMap-free.
     pub fn load<A: HasLoaders + AssetBacking>(
-        &mut self,
+        &self,
         path: &str,
         assets: &mut Assets<A>,
         staging: &mut AssetStaging<A>,
+        paths: &mut AssetPaths<A>,
     ) -> Handle<A> {
-        let key = (TypeId::of::<A>(), path.to_owned());
-        if let Some(&(index, generation)) = self.interned.get(&key) {
-            return Handle::new(index, generation);
+        let hash = hash_path(path);
+        if let Some((index, generation)) = paths.index.lookup(hash) {
+            let handle = Handle::new(index, generation);
+            if assets.state(handle).is_some() {
+                return handle;
+            }
         }
 
         let handle = match std::fs::read(path) {
@@ -125,7 +139,7 @@ impl AssetServer {
             Err(io_err) => reserve_failed(assets, path, AssetError::Io(io_err.to_string())),
         };
 
-        self.interned.insert(key, (handle.index(), handle.generation()));
+        paths.index.insert(path, hash, handle.index(), handle.generation());
         handle
     }
 }
@@ -280,11 +294,13 @@ mod tests {
     /// unit: load's I/O failure path reserves+fails rather than panicking).
     #[test]
     fn load_missing_file_reserves_and_fails_without_panicking() {
-        let mut server = AssetServer::new();
+        let server = AssetServer::new();
         let mut assets = Assets::<Dummy>::with_reserved(4);
         let mut staging = AssetStaging::<Dummy>::default();
+        let mut paths = AssetPaths::<Dummy>::default();
 
-        let handle = server.load::<Dummy>("definitely/does/not/exist.bin", &mut assets, &mut staging);
+        let handle =
+            server.load::<Dummy>("definitely/does/not/exist.bin", &mut assets, &mut staging, &mut paths);
 
         assert_eq!(assets.state(handle), Some(AssetLoadState::Failed));
         assert!(assets.get(handle).is_none());
@@ -297,9 +313,10 @@ mod tests {
     /// stages a Staged entry bound to the reserved handle).
     #[test]
     fn load_success_stages_entry_bound_to_reserved_handle() {
-        let mut server = AssetServer::new();
+        let server = AssetServer::new();
         let mut assets = Assets::<TestAsset>::with_reserved(4);
         let mut staging = AssetStaging::<TestAsset>::default();
+        let mut paths = AssetPaths::<TestAsset>::default();
 
         let path =
             std::env::temp_dir().join(format!("boyko_ecs_asset_test_{}_{}.test", std::process::id(), line!()));
@@ -309,6 +326,7 @@ mod tests {
             path.to_str().expect("test setup: temp path must be valid UTF-8"),
             &mut assets,
             &mut staging,
+            &mut paths,
         );
 
         std::fs::remove_file(&path).ok();
@@ -331,62 +349,55 @@ mod tests {
     /// SAME handle is cached and returned on every repeat).
     #[test]
     fn load_dedupes_repeated_path_to_same_handle() {
-        let mut server = AssetServer::new();
+        let server = AssetServer::new();
         let mut assets = Assets::<Dummy>::with_reserved(4);
         let mut staging = AssetStaging::<Dummy>::default();
-        let a = server.load::<Dummy>("meshes/cube.gltf", &mut assets, &mut staging);
-        let b = server.load::<Dummy>("meshes/cube.gltf", &mut assets, &mut staging);
-        assert_eq!(a, b, "the same path must intern to the same handle");
+        let mut paths = AssetPaths::<Dummy>::default();
+        let a = server.load::<Dummy>("meshes/cube.gltf", &mut assets, &mut staging, &mut paths);
+        let b = server.load::<Dummy>("meshes/cube.gltf", &mut assets, &mut staging, &mut paths);
+        assert_eq!(a, b, "the same path must dedupe to the same handle");
     }
 
     /// Distinct paths mint distinct handles.
     #[test]
     fn load_distinct_paths_mint_distinct_handles() {
-        let mut server = AssetServer::new();
+        let server = AssetServer::new();
         let mut assets = Assets::<Dummy>::with_reserved(4);
         let mut staging = AssetStaging::<Dummy>::default();
-        let a = server.load::<Dummy>("meshes/cube.gltf", &mut assets, &mut staging);
-        let b = server.load::<Dummy>("meshes/sphere.gltf", &mut assets, &mut staging);
+        let mut paths = AssetPaths::<Dummy>::default();
+        let a = server.load::<Dummy>("meshes/cube.gltf", &mut assets, &mut staging, &mut paths);
+        let b = server.load::<Dummy>("meshes/sphere.gltf", &mut assets, &mut staging, &mut paths);
         assert_ne!(a, b, "distinct paths must not collide");
     }
 
     /// The SAME path string, requested for two DIFFERENT asset types, does
-    /// NOT collapse onto one `interned` entry — the key is `(TypeId, path)`,
-    /// so each type occupies its own entry, and each dedupes independently
-    /// within its own table/staging on a repeat call.
-    ///
-    /// (NOT tested via `a.index() != b.index()`: `Dummy` and `Other` mint
-    /// from two INDEPENDENT `Assets<T>` tables, so both handles legitimately
-    /// start at index 0 — comparing indices across tables proves nothing
-    /// about the intern keying. `interned`'s entry count, read directly since
-    /// this test module is a descendant of `AssetServer`'s own module, is
-    /// the actual `(TypeId, path)` keying property.)
+    /// NOT collapse onto one dedup entry: each type is dedupe'd through its
+    /// OWN [`AssetPaths<A>`] instance (asset-streaming plan F4), so two
+    /// independent per-type indexes can never alias by construction — there
+    /// is no shared keyed registry left to collapse onto in the first place.
+    /// Each type also dedupes independently within its own table/staging on
+    /// a repeat call.
     #[test]
     fn load_same_path_different_types_do_not_alias() {
-        let mut server = AssetServer::new();
+        let server = AssetServer::new();
         let mut dummy_assets = Assets::<Dummy>::with_reserved(4);
         let mut dummy_staging = AssetStaging::<Dummy>::default();
+        let mut dummy_paths = AssetPaths::<Dummy>::default();
         let mut other_assets = Assets::<Other>::with_reserved(4);
         let mut other_staging = AssetStaging::<Other>::default();
+        let mut other_paths = AssetPaths::<Other>::default();
 
-        let a = server.load::<Dummy>("shared/name.bin", &mut dummy_assets, &mut dummy_staging);
-        let b = server.load::<Other>("shared/name.bin", &mut other_assets, &mut other_staging);
-        assert_eq!(
-            server.interned.len(),
-            2,
-            "the same path for two distinct asset types must occupy two DISTINCT \
-             (TypeId, path) intern entries, not collapse onto one"
-        );
+        let a = server.load::<Dummy>("shared/name.bin", &mut dummy_assets, &mut dummy_staging, &mut dummy_paths);
+        let b = server.load::<Other>("shared/name.bin", &mut other_assets, &mut other_staging, &mut other_paths);
 
         // Each type dedupes independently within its own table/staging.
-        let a_again = server.load::<Dummy>("shared/name.bin", &mut dummy_assets, &mut dummy_staging);
-        let b_again = server.load::<Other>("shared/name.bin", &mut other_assets, &mut other_staging);
+        let a_again =
+            server.load::<Dummy>("shared/name.bin", &mut dummy_assets, &mut dummy_staging, &mut dummy_paths);
+        let b_again =
+            server.load::<Other>("shared/name.bin", &mut other_assets, &mut other_staging, &mut other_paths);
         assert_eq!(a, a_again, "Dummy's load of the shared path must dedupe to the same handle");
         assert_eq!(b, b_again, "Other's load of the shared path must dedupe to the same handle");
-        assert_eq!(
-            server.interned.len(),
-            2,
-            "repeat loads of an already-interned path must not grow the intern map further"
-        );
+        assert_eq!(dummy_assets.len(), 0, "the shared path never decodes on disk in this test (Failed, not Loaded)");
+        assert_eq!(other_assets.len(), 0, "same for the Other-typed load of the shared path");
     }
 }

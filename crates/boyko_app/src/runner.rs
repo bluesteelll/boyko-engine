@@ -23,7 +23,7 @@ use boyko_input::{RawInputQueue, translate_win32, translate_win32_raw_mouse};
 use boyko_rhi_vulkan::window::CapturedMsg;
 
 #[cfg(windows)]
-use boyko_ecs::ecs::core::asset::{AssetServer, AssetStaging, Assets};
+use boyko_ecs::ecs::core::asset::{AssetPaths, AssetServer, AssetStaging, Assets};
 #[cfg(windows)]
 use boyko_input::{ButtonState, KeyCode, RawInputEvent};
 #[cfg(windows)]
@@ -184,14 +184,22 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // is no runtime registration step). `AssetStaging<A>` is the NonSend
     // handoff queue `AssetServer::load` pushes into and the boot-one-shot
     // `upload_material_assets`/`upload_mesh_assets` drain (run explicitly below,
-    // after `finish()`). No scene calls `load` yet at this rung, so both queues
-    // stay empty at boot — zero effect, the wiring is the deliverable.
+    // after `finish()`). `AssetPaths<A>` (asset-streaming plan F4) is the
+    // HashMap-free path→handle dedup index `AssetServer::load` consults —
+    // wired alongside its matching `AssetStaging<A>` since both are per-type
+    // arguments the same `load` call threads through. No scene calls `load`
+    // yet at this rung, so every queue/index stays empty at boot — zero
+    // effect, the wiring is the deliverable.
     let asset_server = AssetServer::new();
     app.world_mut().insert_resource(asset_server);
     app.world_mut()
         .insert_non_send_resource(AssetStaging::<MaterialGpu>::default());
     app.world_mut()
         .insert_non_send_resource(AssetStaging::<MeshGpu>::default());
+    app.world_mut()
+        .insert_non_send_resource(AssetPaths::<MaterialGpu>::default());
+    app.world_mut()
+        .insert_non_send_resource(AssetPaths::<MeshGpu>::default());
 
     app.world_mut().insert_resource(WindowInfo {
         width: host.window.width(),
