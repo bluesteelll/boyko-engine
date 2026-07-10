@@ -49,6 +49,7 @@ pub mod handle;
 pub mod loader;
 pub mod server;
 pub(crate) mod slot;
+pub mod staging;
 
 pub use asset::{Asset, AssetLoadState};
 pub use assets::Assets;
@@ -56,3 +57,4 @@ pub use error::AssetError;
 pub use handle::Handle;
 pub use loader::AssetLoader;
 pub use server::AssetServer;
+pub use staging::{AssetStaging, Staged};

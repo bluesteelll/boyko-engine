@@ -16,6 +16,15 @@
 pub(crate) enum Slot<T> {
     /// A live asset value.
     Occupied(T),
+    /// A row minted by [`Assets::reserve`](crate::ecs::core::asset::assets::Assets::reserve)
+    /// that has no value yet: either still in flight
+    /// ([`AssetLoadState::Loading`](crate::ecs::core::asset::asset::AssetLoadState::Loading))
+    /// or the load failed
+    /// ([`AssetLoadState::Failed`](crate::ecs::core::asset::asset::AssetLoadState::Failed) —
+    /// the row STAYS `Reserved`, it never regains a value). Carries no `T`:
+    /// there is nothing to drop, and no placeholder value needs constructing
+    /// for a type that has no meaningful default.
+    Reserved,
     /// A freed row. `next_free` mirrors what was on top of
     /// [`Assets::free`](crate::ecs::core::asset::assets::Assets)'s LIFO
     /// stack at the moment this row was vacated — an intrusive echo of the

@@ -23,7 +23,13 @@ pub trait Asset: 'static + Sized {
     /// `Cpu` is dispatcher-serial by design (device calls are not
     /// thread-safe) — decode is the only half of loading that ever
     /// parallelizes.
-    type Cpu: Send;
+    ///
+    /// `+ 'static` (rung A3a): the loader registry type-erases a decoded
+    /// value as `Box<dyn Any + Send>` (a SAFE `TypeId`-checked downcast, no
+    /// hand-rolled unsafe thunk) — `Any` itself requires `'static`. Every
+    /// concrete `Cpu` today (`MaterialGpu`, `()`) already satisfies this
+    /// trivially (neither carries a borrowed lifetime).
+    type Cpu: Send + 'static;
 }
 
 /// The lifecycle state of one row in an

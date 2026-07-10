@@ -28,6 +28,24 @@ pub enum AssetError {
         /// The extension actually found on the path (lowercased, no dot).
         extension: String,
     },
+
+    /// The extension resolved to a loader registered for a DIFFERENT asset
+    /// type than the one requested — the loader-registry rung's runtime
+    /// erasure check (a downcast mismatch), e.g. `decode_bytes::<Material>`
+    /// called with an extension whose loader produces a `Mesh`.
+    LoaderTypeMismatch {
+        /// The extension whose registered loader does not match the
+        /// requested asset type.
+        extension: String,
+    },
+
+    /// [`Assets::fill`](crate::ecs::core::asset::assets::Assets::fill) or
+    /// [`Assets::fail`](crate::ecs::core::asset::assets::Assets::fail) was
+    /// called with a [`Handle`](crate::ecs::core::asset::handle::Handle)
+    /// that does not resolve to a `Reserved` row awaiting exactly this call:
+    /// the row is out of range, already `Occupied` (a double-fill), `Vacant`,
+    /// or the handle's generation is stale.
+    StaleHandle,
 }
 
 impl std::fmt::Display for AssetError {
@@ -37,6 +55,12 @@ impl std::fmt::Display for AssetError {
             AssetError::Decode(reason) => write!(f, "asset decode failed: {reason}"),
             AssetError::UnsupportedExtension { extension } => {
                 write!(f, "unsupported asset extension: '{extension}'")
+            }
+            AssetError::LoaderTypeMismatch { extension } => {
+                write!(f, "extension '{extension}' is registered for a different asset type")
+            }
+            AssetError::StaleHandle => {
+                write!(f, "handle does not resolve to a row awaiting fill/fail")
             }
         }
     }

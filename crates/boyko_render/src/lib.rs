@@ -113,6 +113,12 @@ pub mod gpu_transform3d;
 /// prev-shuffle) + its [`add_gpu_transform_pack`](gpu_transform_pack::add_gpu_transform_pack)
 /// wiring fn.
 pub mod gpu_transform_pack;
+/// Asset-system rung A3a — the GPU-upload SKELETON:
+/// [`GpuUpload`](gpu_upload::GpuUpload) (the trait a resident asset implements to
+/// turn its decoded CPU intermediate into a device record) + the generic
+/// [`upload_assets`](gpu_upload::upload_assets) drain that drives it. No concrete
+/// `GpuUpload` impl exists yet — rung A3b adds the first one.
+pub mod gpu_upload;
 /// The per-entity 48-byte model-affine instance column (mesh foundation M3):
 /// [`InstanceModelCol`](instance_model::InstanceModelCol), the exact SSBO layout the
 /// M1/M2 gbuffer VS reads, + its `GlobalTransform` pack system.
@@ -267,6 +273,7 @@ pub use gpu_transform3d::{
     GPU_TRANSFORM3D_BYTES, GpuTransform3D, TRS_PACKED_BYTES, TrsPacked,
 };
 pub use gpu_transform_pack::{add_gpu_transform_pack, pack_gpu_transforms};
+pub use gpu_upload::{GpuUpload, upload_assets};
 pub use instance_model::{INSTANCE_MODEL_COL_BYTES, InstanceModelCol, sync_instance_model_cols};
 // HW-RT rung 3b: the previous-frame model-affine sibling + its copy system (temporal motion
 // vectors). `not(hwrt)` builds never compile the column, so its instancing path is textually
