@@ -88,6 +88,13 @@ impl Asset for MaterialGpu {
     type Cpu = MaterialGpu;
 }
 
+// Asset-streaming plan F1: `Assets<MaterialGpu>`'s store-owned `ComponentPool`
+// needs `MaterialGpu: AssetBacking` to obtain its layout/`ComponentId`.
+// `MaterialGpu` is plain-old-data (`#[repr(C, align(16))]`, `Copy`, no `Drop`,
+// no device handle) — the POD macro path (`NEEDS_TEARDOWN = false`, no
+// `drop_fn`) fits it exactly.
+boyko_ecs::impl_asset_pod_backing!(MaterialGpu);
+
 /// The asset-facing name for [`MaterialGpu`] — `Assets<Material>` mint call sites
 /// (`Assets::add`) read more naturally under this alias than the raw GPU-layout type
 /// name. A plain type alias, not a newtype: both names address the SAME

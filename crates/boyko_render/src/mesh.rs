@@ -54,7 +54,8 @@
 //! the instance SSBO carries; the table stores the model-space mesh once and every
 //! instance reuses it.
 
-use boyko_ecs::ecs::core::asset::Asset;
+use boyko_ecs::ecs::core::asset::{Asset, AssetBacking, register_asset_layout};
+use boyko_ecs::ecs::identifiers::primitives::ComponentId;
 use boyko_rhi::enums::IndexType;
 use boyko_rhi_vulkan::memory::BoundBuffer;
 
@@ -125,6 +126,44 @@ impl Asset for MeshGpu {
     // itself; `MeshData` is the `Send`-safe decoded intermediate `ObjMeshLoader`
     // produces (asset-system rung A3b).
     type Cpu = MeshData;
+}
+
+impl MeshGpu {
+    /// The [`AssetBacking::register_layout`] drop glue for `MeshGpu` (asset-streaming
+    /// plan F1). `MeshGpu` implements no `Drop` (see the struct doc: device buffers are
+    /// torn down explicitly via [`MeshAssetsExt::destroy`](crate::mesh_assets::MeshAssetsExt::destroy),
+    /// under the caller's device-idle contract, never from a destructor) — this glue is
+    /// therefore DEVICE-INERT BY DESIGN: it moves the value out and lets Rust's ordinary
+    /// field-drop glue run (`BoundBuffer`/`BuiltBlas`/`IndexType`/integers all have
+    /// trivial drop), freeing NO device memory. It exists only so `Assets<MeshGpu>`'s
+    /// store-owned `ComponentPool` has a registered drop_fn to invoke on a live row
+    /// (`col.drop_at` / the terminal `Drop for Assets<T>`), matching `MeshGpu`'s existing
+    /// contract exactly (a bare `Drop for Assets<MeshGpu>` under the old `Vec<Slot<T>>`
+    /// storage would have run precisely this same trivial field-drop, nothing more). The
+    /// real, fence-gated device teardown (`destroy_buffer`/`destroy_blas`) arrives with
+    /// the streaming take-at-retire path at F6.
+    ///
+    /// # Safety
+    /// The caller (`ComponentPool::drop_at` / the terminal `Drop for Assets<MeshGpu>`)
+    /// guarantees `ptr` points at a valid, aligned, fully-initialized `MeshGpu`,
+    /// exclusively owned, not accessed again after this call — the standard `DropFn`
+    /// contract (`boyko_ecs`'s `component_registry::DropFn`).
+    unsafe fn drop_glue(ptr: *mut u8) {
+        // SAFETY: see this function's own doc — the caller upholds the `DropFn`
+        // contract. `drop_in_place` runs `MeshGpu`'s (trivial, field-wise) drop glue
+        // exactly once; no device call is made here (see the doc above).
+        unsafe { core::ptr::drop_in_place(ptr.cast::<MeshGpu>()) }
+    }
+}
+
+impl AssetBacking for MeshGpu {
+    // Resident asset record: teardown is manual (device-idle-gated), never a bare
+    // `Drop` — see `drop_glue`'s doc.
+    const NEEDS_TEARDOWN: bool = true;
+
+    fn register_layout() -> ComponentId {
+        register_asset_layout::<MeshGpu>(Some(MeshGpu::drop_glue))
+    }
 }
 
 // `Assets<MeshGpu>` is `!Send` (each record owns RHI buffers, device-bound and

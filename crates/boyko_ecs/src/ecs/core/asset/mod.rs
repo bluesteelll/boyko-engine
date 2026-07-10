@@ -2,33 +2,34 @@
 //!
 //! Storage + typed handles + loading, laid out as first-class kernel
 //! resources: [`Assets<T>`] is a per-asset-type [`Resource`](crate::ecs::core::resources::resource::Resource)
-//! table (the same Principle-0 precedent `MeshRegistry`/`MaterialRegistry`
-//! document in `boyko_render` — assets are integer-indexed, never
-//! pointer-addressed, so a plain `Vec`-backed table is correct), addressed
-//! by the 8-byte [`Handle<T>`]. [`AssetServer`] is the path→handle intern.
+//! table addressed by the 8-byte [`Handle<T>`]. [`AssetServer`] is the
+//! path→handle intern.
 //!
 //! # Scope — host-only, render-agnostic
 //!
 //! This module wires nothing a renderer reads: no device, no upload, no
 //! GPU-resident table. GPU residency (a `Material` table, textures,
-//! bindless indices) lands in `boyko_render` at later rungs (A1/A2) — the
-//! kernel core here cannot depend on `boyko_render` / `boyko_rhi_vulkan`,
-//! by design.
+//! bindless indices) lands in `boyko_render` at later rungs — the kernel
+//! core here cannot depend on `boyko_render` / `boyko_rhi_vulkan`, by
+//! design.
 //!
 //! [`AssetLoader::decode`](loader::AssetLoader::decode) is the pure-CPU
 //! decode half of loading (bytes → [`Asset::Cpu`]); it is `Send`-bound so a
-//! later rung (A5) can dispatch it across the threadpool. The GPU-upload
-//! half is dispatcher-serial by design and does not exist at this rung.
+//! later rung can dispatch it across the threadpool. The GPU-upload half is
+//! dispatcher-serial by design and does not exist at this rung.
 //!
-//! # Storage — a safe `Vec`-slotmap, not a new VA primitive
+//! # Storage — the shipped `DenseStore` recipe (asset-streaming plan F1)
 //!
-//! [`Slot<T>`](slot::Slot) is a plain `Occupied(T)` / `Vacant { .. }` enum
-//! row — NOT a hand-rolled `VmColumn`-style column. A bespoke `SlotColumn`
-//! primitive was rejected for this rung: dropping a `T: !Copy` through a raw
-//! byte column reintroduces double-free / drop-uninit UB, whereas
-//! `VmColumn` is sound only because it never drops. The enum row lets
-//! Rust's own `Drop` do the right thing (only `Occupied` payloads drop) with
-//! ZERO `unsafe`.
+//! `Assets<T>` is now a store-owned, standalone
+//! [`ComponentPool`](crate::ecs::memory::component_pool::ComponentPool)
+//! (`ComponentPool::new(id, reserve_rows)` directly — no archetype) plus an
+//! occupancy `LiveBitmap` and a LIFO free-list — the identical recipe
+//! `DenseStore` already ships for dense components. This **retracts** the
+//! former "a hand-rolled `SlotColumn` over a raw byte column is unsound"
+//! rationale: `DenseStore` already performs an occupancy-tracked,
+//! exactly-once drop over exactly this kind of standalone pool, so
+//! `Assets<T>` reuses it rather than a safe `Vec<Slot<T>>` slotmap. See
+//! [`assets`]'s module doc and [`backing`] for the full design.
 //!
 //! # Render-carrier reuse caveat
 //!
@@ -44,15 +45,16 @@
 #[allow(clippy::module_inception)]
 pub mod asset;
 pub mod assets;
+pub mod backing;
 pub mod error;
 pub mod handle;
 pub mod loader;
 pub mod server;
-pub(crate) mod slot;
 pub mod staging;
 
 pub use asset::{Asset, AssetLoadState};
 pub use assets::Assets;
+pub use backing::{AssetBacking, register_asset_layout};
 pub use error::AssetError;
 pub use handle::Handle;
 pub use loader::AssetLoader;

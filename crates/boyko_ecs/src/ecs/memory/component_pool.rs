@@ -1449,6 +1449,53 @@ impl ComponentPool {
         }
     }
 
+    /// Moves the value at `idx` out of the pool via a typed `ptr::read`,
+    /// WITHOUT invoking the registered `drop_fn` (asset-streaming plan F1).
+    ///
+    /// The slot becomes logically uninitialised — exactly [`Self::drop_at`]'s
+    /// post-condition — but instead of running drop glue in place and
+    /// discarding the value, this moves it out for the caller to own. This is
+    /// the primitive [`Assets::remove`](crate::ecs::core::asset::assets::Assets::remove)
+    /// / [`Assets::add`](crate::ecs::core::asset::assets::Assets::add)'s
+    /// slot-reuse path build on: a row that was `take_at`'d is exactly as
+    /// "logically dead" as one that was `drop_at`'d, so [`Self::write_at`]
+    /// may immediately overwrite it.
+    ///
+    /// # Safety
+    ///
+    /// * `idx < self.count()` — the slot must be live (initialised by a
+    ///   prior `add` / `add_typed` / `write_at`) — debug-asserted.
+    /// * `T` must match the pool's registered type exactly (size, alignment,
+    ///   `TypeId`) — debug-asserted.
+    /// * Caller holds exclusive access via `&mut self`.
+    /// * Caller does not read or drop this slot again until it is rewritten
+    ///   (`write_at`) — ownership of the value has moved to the caller via
+    ///   the returned `T`; the pool's bookkeeping (`len`) is unchanged, so the
+    ///   caller is responsible for whatever occupancy tracking (a `live`
+    ///   bitmap, a free-list) makes this exactly-once (never re-read,
+    ///   never re-dropped).
+    #[allow(dead_code)]
+    pub(crate) unsafe fn take_at<T: 'static>(&mut self, idx: usize) -> T {
+        debug_assert!(idx < self.len, "take_at: idx out of bounds");
+        debug_assert_eq!(
+            self.component_type_id,
+            TypeId::of::<T>(),
+            "ComponentPool::take_at: T = {} does not match pool's registered type",
+            std::any::type_name::<T>()
+        );
+        // SAFETY: `idx < self.len` (debug-asserted) ⇒ the slot was written by
+        //   a prior `add` / `add_typed` / `write_at` and holds a valid,
+        //   initialized `T` of the pool's registered type (the `TypeId`
+        //   debug_assert above). `&mut self` ⇒ exclusive access. `ptr::read`
+        //   performs a bitwise move-out WITHOUT running `T::drop` — unlike
+        //   `drop_at`, which runs `drop_fn` in place and returns nothing. The
+        //   caller now owns the returned value; the slot's bytes are a
+        //   "moved-from" `T` (still readable as raw bytes, but no longer a
+        //   valid live `T` per Rust's move semantics) until `write_at`
+        //   rewrites them.
+        unsafe { core::ptr::read(self.row_ptr(idx).cast::<T>()) }
+    }
+
     /// Swap-removes row `idx` for byte storage + tick storage. NO
     /// `drop_fn` invocation on either source or last slot (W-N2 tightening
     /// of plan §7.2).

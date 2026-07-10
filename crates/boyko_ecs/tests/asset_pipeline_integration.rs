@@ -36,6 +36,11 @@ impl Asset for TagAsset {
     type Cpu = TagCpu;
 }
 
+// Asset-streaming plan F1: `Assets<A>` (and therefore `AssetServer::load`)
+// requires `A: AssetBacking` in addition to `A: Asset` — a POD backing with
+// no device teardown is the correct fit for this host-only test type.
+boyko_ecs::impl_asset_pod_backing!(TagAsset);
+
 struct TagLoader;
 impl AssetLoader for TagLoader {
     type Out = TagAsset;
@@ -177,6 +182,7 @@ fn distinct_asset_types_load_independently_through_one_server() {
     impl Asset for OtherAsset {
         type Cpu = ();
     }
+    boyko_ecs::impl_asset_pod_backing!(OtherAsset);
     struct OtherLoader;
     impl AssetLoader for OtherLoader {
         type Out = OtherAsset;

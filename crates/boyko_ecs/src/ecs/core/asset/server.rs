@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 
 use crate::ecs::core::asset::asset::Asset;
 use crate::ecs::core::asset::assets::Assets;
+use crate::ecs::core::asset::backing::AssetBacking;
 use crate::ecs::core::asset::error::AssetError;
 use crate::ecs::core::asset::handle::Handle;
 use crate::ecs::core::asset::loader::AssetLoader;
@@ -133,7 +134,10 @@ impl AssetServer {
     /// See the struct doc for the reserve→decode→stage pipeline and the
     /// failure-path contract (a read/decode error reserves + fails the row
     /// rather than panicking).
-    pub fn load<A: Asset>(
+    ///
+    /// `A: AssetBacking` (asset-streaming plan F1): `assets: &mut Assets<A>`
+    /// requires it — `Assets<T>`'s own generic bound.
+    pub fn load<A: Asset + AssetBacking>(
         &mut self,
         path: &str,
         assets: &mut Assets<A>,
@@ -182,7 +186,7 @@ fn extension_of(path: &str) -> String {
 /// failure branches (I/O and decode) fall through.
 #[cold]
 #[inline(never)]
-fn reserve_failed<A: Asset>(assets: &mut Assets<A>, path: &str, err: AssetError) -> Handle<A> {
+fn reserve_failed<A: Asset + AssetBacking>(assets: &mut Assets<A>, path: &str, err: AssetError) -> Handle<A> {
     eprintln!("boyko_ecs: asset load failed for '{path}': {err}");
     let handle = assets.reserve();
     assets.fail(handle);
@@ -245,6 +249,11 @@ mod tests {
     impl Asset for TestAsset {
         type Cpu = TestCpu;
     }
+
+    // Asset-streaming plan F1: `Assets<A>` (and therefore `AssetServer::load`)
+    // requires `A: AssetBacking` in addition to `A: Asset` — a POD backing
+    // with no device teardown is the correct fit for every test type here.
+    crate::impl_asset_pod_backing!(Dummy, Other, TestAsset);
 
     struct TestLoader;
     impl AssetLoader for TestLoader {

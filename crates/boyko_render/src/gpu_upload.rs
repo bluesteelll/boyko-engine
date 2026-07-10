@@ -5,7 +5,7 @@
 //! ([`upload_material_assets`] / [`upload_mesh_assets`]) the runner calls
 //! between `finish()` and `MaterialTable::boot_seed` (asset-system rung A3b).
 
-use boyko_ecs::ecs::core::asset::{Asset, Assets, AssetStaging};
+use boyko_ecs::ecs::core::asset::{Asset, AssetBacking, Assets, AssetStaging};
 use boyko_ecs::ecs::core::system::{NonSendRes, NonSendResMut, ResMut};
 use boyko_rhi_vulkan::device::VulkanContext;
 
@@ -69,7 +69,10 @@ impl GpuUpload for MaterialGpu {
 /// without touching `assets` at all — the common case at boot (no scene loads
 /// from disk yet) and, later, on a per-frame call site with nothing newly
 /// decoded this frame.
-pub fn upload_assets<A: GpuUpload>(
+///
+/// `A: AssetBacking` (asset-streaming plan F1): `assets: &mut Assets<A>`
+/// requires it — `Assets<T>`'s own generic bound.
+pub fn upload_assets<A: GpuUpload + AssetBacking>(
     assets: &mut Assets<A>,
     staging: &mut AssetStaging<A>,
     ctx: &VulkanContext,
