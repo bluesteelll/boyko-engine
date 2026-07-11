@@ -50,9 +50,14 @@ pub(super) struct TlasResources {
     /// The cached device address of each `instance_arrays[fi]` (the per-frame build's
     /// instance-array address), filled once at create.
     instance_array_addr: [u64; FRAMES_IN_FLIGHT],
-    /// The built SSBO capacity in instances ([`INSTANCE_CAPACITY`]) — the sizing MAX + the
-    /// per-frame count's `debug_assert` bound.
-    capacity: u32,
+    /// The built SSBO capacity in instances, PER FIF SLOT ([`INSTANCE_CAPACITY`] at boot)
+    /// — the sizing MAX + the per-frame count's `debug_assert` bound. Asset-streaming
+    /// plan F7-hwrt (task#11, review O1): [`Self::grow_slot`] grows ONE slot at a time
+    /// (in lockstep with the caller's `instance_rings[s]`), so slots may sit at DIFFERENT
+    /// capacities between grows — a single shared scalar would go stale for whichever
+    /// slot last grew (mirrors [`InterpGpuProd::capacity`](super::interp::InterpGpuProd)'s
+    /// identical per-slot shape).
+    capacity: [u32; FRAMES_IN_FLIGHT],
     /// The last [`Assets::install_epoch`](boyko_ecs::ecs::core::asset::Assets::install_epoch) the
     /// `blas_addr` table reflects (interior-mutable: the table sync runs through `&self`). Starts
     /// `u64::MAX` so the first `sync_blas_addr` call always rewrites.
@@ -194,7 +199,7 @@ impl TlasResources {
             bind_groups,
             blas_addr,
             instance_array_addr,
-            capacity,
+            capacity: [capacity; FRAMES_IN_FLIGHT],
             blas_addr_epoch: core::cell::Cell::new(u64::MAX),
         }
     }
@@ -285,8 +290,8 @@ impl TlasResources {
     #[inline]
     pub(super) fn activation(&self, fi: usize, count: u32) -> TlasBuildActivation<'_> {
         debug_assert!(
-            count <= self.capacity,
-            "invariant: the per-frame drawable count fits the built TLAS capacity"
+            count <= self.capacity[fi],
+            "invariant: the per-frame drawable count fits slot fi's built TLAS capacity"
         );
         TlasBuildActivation {
             pipeline: &self.pipeline,
@@ -297,6 +302,123 @@ impl TlasResources {
             scratch_addr: self.tlas[fi].scratch_addr,
             count,
         }
+    }
+
+    /// Asset-streaming plan F7-hwrt (task#11): grows slot `s`'s TLAS-side buffers
+    /// (`mesh_id_rings[s]`, `instance_arrays[s]`) + rebuilds slot `s`'s [`PersistentTlas`]
+    /// to `new_cap` instances, in lockstep with the caller's ALREADY-grown
+    /// `instance_rings_s` (the SAME buffer the caller just repointed
+    /// `instance_bind_groups[s]`@0 against) — reallocating (not resizing) each buffer,
+    /// deferring the superseded one through `retired` at `retire_frame`. Repoints the
+    /// pack bind group `bind_groups[s]` (@0/@1/@3 — @2 `blas_addr` is frame-invariant,
+    /// untouched) and surfaces the new AS via the existing [`Self::resolve_accels`] (no
+    /// separate wiring needed there: it always reads `self.tlas[i].accel` fresh). The
+    /// CALLER is responsible for driving [`GBufferFrame::repoint_tlas_accel`]
+    /// (the resolve-family AS rebind) once `targets_ready()` — this fn only rebuilds the
+    /// pack-side wiring the PACK/BUILD passes read fresh every frame via
+    /// [`Self::activation`].
+    ///
+    /// # No seed
+    ///
+    /// `mesh_id_rings[s]`: the runner's `upload_mesh_ids` rewrites the whole mesh-id lane
+    /// THIS frame. `instance_arrays[s]`: the pack compute fully overwrites `[0..count)`
+    /// every frame (mirrors [`Self::create`]'s own no-seed reasoning for both buffers).
+    ///
+    /// # Panics
+    ///
+    /// Panics (`expect`) on any RHI/AS create failure — a device OOM on a post-boot grow
+    /// is a setup-adjacent failure, not a recoverable per-frame error (mirrors
+    /// [`Self::create`]'s boot-time panics).
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees slot `s`'s in-flight fence was waited THIS frame (the
+    /// `FrameWriteToken` proof [`GpuSceneBundles::grow_instance_family_rt`](super::GpuSceneBundles::grow_instance_family_rt)
+    /// holds) — `bind_groups[s]`'s descriptor set is therefore non-command-buffer-pending,
+    /// so rewriting its bindings in place is sound. The NEW `tlas[s].accel` is created but
+    /// not yet built (no submission references it), so replacing the old one needs no
+    /// fence proof of its own; only the OLD `accel`'s PRIOR uses matter, which
+    /// `RetiredGpuBuffers::push_tlas`'s doc proves safe at `retire_frame`.
+    #[cfg(feature = "hwrt")]
+    pub(super) unsafe fn grow_slot(
+        &mut self,
+        device: &VulkanContext,
+        s: usize,
+        new_cap: u32,
+        instance_rings_s: &BoundBuffer,
+        retired: &mut RetiredGpuBuffers,
+        retire_frame: u64,
+    ) {
+        let mesh_id_bytes = new_cap as u64 * 4;
+        let new_mesh_ids = {
+            let b = RhiDevice::create_buffer(
+                device,
+                &BufferDesc {
+                    size: mesh_id_bytes,
+                    usage: BufferUsage::STORAGE,
+                    location: MemoryLocation::HostVisibleCoherent,
+                },
+            )
+            .expect("invariant: grown R2a-3 mesh-id SSBO create");
+            let mapped = RhiDevice::buffer_mapped_ptr(device, &b)
+                .expect("invariant: host-visible grown R2a-3 mesh-id SSBO is mapped");
+            zero_fill(mapped, mesh_id_bytes as usize);
+            b
+        };
+        let old_mesh_ids = core::mem::replace(&mut self.mesh_id_rings[s], new_mesh_ids);
+        retired.push(old_mesh_ids, retire_frame);
+
+        // GPU-ONLY (never CPU-touched) → DEVICE-LOCAL VRAM, no seed (mirrors `create`'s
+        // own instance-array reasoning): the pack compute overwrites `[0..count)` every
+        // frame; the build reads only `[0..count)`.
+        let instance_array_bytes = new_cap as u64 * TLAS_INSTANCE_BYTES as u64;
+        let new_instance_array = RhiDevice::create_buffer(
+            device,
+            &BufferDesc {
+                size: instance_array_bytes,
+                usage: BufferUsage::STORAGE
+                    | BufferUsage::ACCEL_BUILD_INPUT
+                    | BufferUsage::SHADER_DEVICE_ADDRESS,
+                location: MemoryLocation::DeviceLocal,
+            },
+        )
+        .expect("invariant: grown R2a-3 instance-array SSBO create");
+        let old_instance_array = core::mem::replace(&mut self.instance_arrays[s], new_instance_array);
+        retired.push(old_instance_array, retire_frame);
+
+        self.instance_array_addr[s] = buffer_device_address(device, &self.instance_arrays[s])
+            .expect("invariant: grown R2a-3 instance-array device address");
+        debug_assert!(
+            self.instance_array_addr[s] != 0,
+            "invariant: the grown instance-array has a non-zero device address"
+        );
+
+        let new_tlas =
+            create_persistent_tlas(device, new_cap).expect("invariant: grown R2a-3 persistent TLAS create");
+        let old_tlas = core::mem::replace(&mut self.tlas[s], new_tlas);
+        retired.push_tlas(old_tlas, retire_frame);
+
+        const PACK_GROWN_BINDINGS: usize = 3;
+        let mut rebound = 0usize;
+        // SAFETY: slot `s`'s fence was waited this frame (this fn's caller contract
+        // above) — `bind_groups[s]`'s descriptor set is therefore non-pending, so
+        // rewriting its bindings in place is sound. @2 (`blas_addr`) is frame-invariant
+        // and untouched.
+        unsafe {
+            rebind_storage_buffer(device, &self.bind_groups[s], 0, instance_rings_s);
+            rebound += 1;
+            rebind_storage_buffer(device, &self.bind_groups[s], 1, &self.mesh_id_rings[s]);
+            rebound += 1;
+            rebind_storage_buffer(device, &self.bind_groups[s], 3, &self.instance_arrays[s]);
+            rebound += 1;
+        }
+        debug_assert_eq!(
+            rebound, PACK_GROWN_BINDINGS,
+            "invariant: exactly 3 pack bindings rebound (@0 instance ring / @1 mesh-id / \
+             @3 instance array; @2 blas_addr untouched)"
+        );
+
+        self.capacity[s] = new_cap;
     }
 
     /// R2a-4b: the per-FIF persistent TLAS handles — the frame-stable `rayQuery` trace targets the

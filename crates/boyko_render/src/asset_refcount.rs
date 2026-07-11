@@ -554,10 +554,12 @@ pub fn retire_deferred_frees(
 
     let free_empty = world.resource::<DeferredFree>().is_empty();
     let orphans_empty = world.non_send_resource::<OrphanedMeshGpu>().is_empty();
+    // `RetiredGpuBuffers::is_empty()` covers BOTH its lanes: the buffer lane (`entries`,
+    // F7) AND, under `hwrt`, the TLAS lane (`tlases`, F7-hwrt task#11) — a growth-only
+    // frame (both F6 queues empty) must still drain a pending grow-and-defer-old
+    // buffer OR TLAS; narrowing this to `free_empty && orphans_empty` would leak either
+    // (both are decoupled from refcount churn).
     let retired_empty = world.non_send_resource::<RetiredGpuBuffers>().is_empty();
-    // F7 C2: a growth-only frame (both F6 queues empty) must still drain a
-    // pending grow-and-defer-old buffer — narrowing this to `free_empty &&
-    // orphans_empty` would leak it (it is decoupled from refcount churn).
     if free_empty && orphans_empty && retired_empty {
         return;
     }

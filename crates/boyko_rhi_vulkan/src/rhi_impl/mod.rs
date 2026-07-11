@@ -35,9 +35,17 @@
 //! and the `'static` [`VkSemaphore`] for `Semaphore`.
 
 use core::ptr;
+#[cfg(feature = "hwrt")]
+use core::ffi::c_void;
 
 use boyko_rhi::{BindGroupEntry, BufferImageCopy, DescriptorKind, RhiApi, RhiQueue};
 
+#[cfg(feature = "hwrt")]
+use crate::accel::BoundAccelStruct;
+#[cfg(feature = "hwrt")]
+use crate::accel_ffi::{
+    ST_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR, VkWriteDescriptorSetAccelerationStructureKHR,
+};
 use crate::device::{DeviceFns, VulkanContext};
 use crate::error::VulkanError;
 use crate::ffi::*;
@@ -609,6 +617,60 @@ pub unsafe fn rebind_storage_buffer(
     // (`ctx` is live per the caller contract above); the write references the live
     // `buffer_info` local + `bg`'s live descriptor set; `bg`'s set is not command-buffer-
     // pending (caller contract above), so updating it in place is sound.
+    unsafe { (fns.update_descriptor_sets)(ctx.device(), 1, &write, 0, ptr::null()) };
+}
+
+/// Rewrites binding `binding` of `bg`'s descriptor set in place to point at `accel` — the
+/// HW-RT acceleration-structure counterpart of [`rebind_storage_buffer`]: a single
+/// `vkUpdateDescriptorSets` write through the SAME `VkWriteDescriptorSetAccelerationStructureKHR`
+/// `p_next` chain [`crate::rhi_impl::device::create_bind_group`]'s
+/// `BindGroupEntry::AccelerationStructure` arm uses (HW-RT rung R2a-4a). Asset-streaming
+/// plan F7-hwrt (task#11): growing the per-slot TLAS mints a NEW `VkAccelerationStructureKHR`
+/// handle — every resolve-family descriptor set that traces it must be repointed here, or
+/// it dangles at the freed handle the instant the old TLAS is retired.
+///
+/// # Safety
+///
+/// The caller guarantees `bg`'s descriptor set is not bound to any command buffer currently
+/// pending execution (VUID-vkUpdateDescriptorSets-None-03047) — the same fenced-slot
+/// discipline [`rebind_storage_buffer`] relies on. `ctx` must be the live context `bg` and
+/// `accel` were created on; `accel` must outlive every submit that could reference it.
+#[cfg(feature = "hwrt")]
+pub unsafe fn rebind_accel_struct(
+    ctx: &VulkanContext,
+    bg: &VulkanBindGroup,
+    binding: u32,
+    accel: &BoundAccelStruct,
+) {
+    let as_write = VkWriteDescriptorSetAccelerationStructureKHR {
+        s_type: ST_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+        _pad: 0,
+        p_next: ptr::null(),
+        acceleration_structure_count: 1,
+        _pad2: 0,
+        // `accel.handle` lives in the caller's live `&BoundAccelStruct` borrow (address
+        // stable for this call); taking its address does not copy the handle into a local.
+        p_acceleration_structures: &accel.handle,
+    };
+    let write = VkWriteDescriptorSet {
+        s_type: VkStructureType::WriteDescriptorSet,
+        p_next: (&as_write as *const VkWriteDescriptorSetAccelerationStructureKHR).cast::<c_void>(),
+        dst_set: bg.descriptor_set,
+        dst_binding: binding,
+        dst_array_element: 0,
+        descriptor_count: 1,
+        descriptor_type: VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
+        p_image_info: ptr::null(),
+        p_buffer_info: ptr::null(),
+        p_texel_buffer_view: ptr::null(),
+    };
+    let fns = ctx.device_fns();
+    // SAFETY: `ctx.device()`/`ctx.device_fns()` are the live device + its command table
+    // (`ctx` is live per the caller contract above); the write's `p_next` points at the
+    // live `as_write` local (alive for the whole call), whose `p_acceleration_structures`
+    // points at `accel.handle` inside the caller's live `&BoundAccelStruct` borrow (also
+    // alive for the whole call); `bg`'s set is not command-buffer-pending (caller contract
+    // above), so updating it in place is sound.
     unsafe { (fns.update_descriptor_sets)(ctx.device(), 1, &write, 0, ptr::null()) };
 }
 

@@ -1,47 +1,58 @@
-//! Asset-streaming plan F7 §12, W3 — REAL-DEVICE RT hard-cap test: on an RT device,
-//! a `> INSTANCE_CAPACITY` gather must trip the LIVE hard `assert!` in
-//! `upload_instance_models` (`upload.rs`) — growth is OUT OF SCOPE for the instance
-//! family on an RT device (E1 Option B; the TLAS packer's `instance_arrays`/backing/
-//! scratch are sized once for `INSTANCE_CAPACITY`, see design §3/§7.3).
+//! Asset-streaming plan F7-hwrt (task#11) — REAL-DEVICE RT-leg grow-past-cap test.
+//!
+//! REPURPOSED from the pre-task#11 `w3_rt_cap_traps_an_over_capacity_instance_gather_
+//! on_an_rt_device`, which asserted the RT hard-cap PANIC in `upload_instance_models`
+//! that task#11 REMOVES (RT-leg instance-family growth is now IN SCOPE — see
+//! `GpuSceneBundles::grow_instance_family_rt`). This file now proves the OPPOSITE: on
+//! an RT device, the SAME `> INSTANCE_CAPACITY` gather must GROW (the shared instance
+//! rings + the conditional `mv.grow_slot` + `tlas.grow_slot` + every AS-handle repoint
+//! via `repoint_tlas_accel`) instead of panicking — the run must complete its full
+//! frame budget cleanly.
+//!
+//! # No `catch_unwind` anymore
+//!
+//! The pre-task#11 version used `catch_unwind` because a panic was the EXPECTED,
+//! load-bearing signal on an RT device (and a non-panic was ambiguous: boot-unavailable
+//! or a legitimate non-RT growth path). Since task#11 removes the panic path entirely,
+//! NO panic is expected on ANY device now — any panic here (RT or non-RT) is a genuine
+//! regression, so this test lets it propagate as an ordinary test failure instead of
+//! swallowing it.
+//!
+//! # Runtime-gated, not compile-time (read before treating a pass as final)
+//!
+//! Whether the instance family grows via the non-RT (`grow_instance_family_nonrt`,
+//! already proven by the sibling phased test's Phase B) or RT
+//! (`grow_instance_family_rt`) path is a RUNTIME device-capability gate
+//! (`tlas.is_some()`), independent of the `hwrt` Cargo feature: an `hwrt`-feature build
+//! on a non-RT GPU still takes the non-RT path. This file's `--features hwrt` gate only
+//! ensures the RT-capable FFI/build surface compiles in; a LOAD-BEARING pass of the
+//! RT-LEG claim specifically still requires running on hardware that negotiates
+//! hardware ray tracing.
+//!
+//! # `MAX_INSTANCE_CAP` (the true ceiling) is NOT exercised here
+//!
+//! `MAX_INSTANCE_CAP` (1 << 22) stays the shared sanity-net ceiling for BOTH legs (no
+//! separate RT ceiling, per the orchestrator's decision) — a `debug_assert`-only guard,
+//! exactly like the non-RT leg's own (pre-existing, likewise untested-at-that-scale)
+//! ceiling. Spawning millions of drawables in a headless smoke to trip it is
+//! impractical (no existing test in this workspace does so for the non-RT leg either);
+//! the ceiling remains guarded by the `debug_assert!` in `grow_instance_family_nonrt`/
+//! `grow_instance_family_rt`, not by a dedicated headless test.
 //!
 //! # Asset-streaming plan F8 fold-in
 //!
-//! `spawn_many` now gives every drawable a SHARED non-default material (previously the
-//! implicit default `MaterialHandle(0)`), so the over-capacity gather this test traps is
-//! material-bearing — `pm_instance_material_rings` shares the SAME `INSTANCE_CAPACITY`
-//! hard cap as `instance_rings` (F8 §1.2/§7b), so on an RT device the pre-existing
-//! `upload_instance_models` hard assert still fires FIRST (the runner calls it before
-//! `upload_instance_materials`, `runner.rs`), but this now also proves F8 did not
-//! introduce a bypass of the RT hard cap (e.g. a reordering that uploads materials
-//! before the model assert, which would have OOB-written the un-grown material ring
-//! instead of aborting cleanly).
+//! `spawn_many` gives every drawable a SHARED non-default material, so the
+//! over-capacity gather this test drives is material-bearing — `pm_instance_material_
+//! rings` grows in lockstep with `instance_rings` on BOTH legs (F8 §1.2/§7b +
+//! F7-hwrt's `grow_shared_instance_rings`), so this also proves F8 did not introduce a
+//! bypass that OOB-writes an un-grown material ring.
 //!
 //! # Separate file (structural constraint)
 //!
-//! This scenario is EXPECTED TO PANIC — it cannot share an `App`/`#[test]` with
-//! `asset_streaming_f7_grow_headless.rs`'s phased run (that run's own `App::new()` +
-//! `add_plugins` already registered the process-global component hooks for this
-//! process; more importantly, a panic here would abort a shared multi-phase test
-//! mid-way, corrupting every phase after it). Kept in its OWN file with its OWN
-//! single `#[test]`, matching this workspace's one-windowed-`#[test]`-per-file
-//! convention (see the sibling file's module doc for the full reasoning: re-running
-//! `App::new()` + `add_plugins` a SECOND time in the same process re-registers
-//! process-global component hooks and panics).
-//!
-//! # Runtime-gated, not compile-time (read before treating a pass/fail as final)
-//!
-//! Whether the instance family hard-caps at `INSTANCE_CAPACITY` (RT) or grows past
-//! it (non-RT) is a RUNTIME device-capability gate (`tlas.is_some() || mv.is_some()`
-//! — design §7.3 step 1), independent of the `hwrt` Cargo feature: an `hwrt`-feature
-//! build on a non-RT GPU still takes the non-RT/grow path (already proven to work by
-//! the sibling phased test's Phase B). This test can therefore only assert a HARD
-//! panic when the device ACTUALLY negotiated hardware ray tracing. On any other
-//! device the same scenario is expected to render successfully via the non-RT growth
-//! path instead — NOT a failure of the cap (it was never armed). The test uses
-//! `catch_unwind` (not `#[should_panic]`, which cannot express a conditional
-//! expectation) and SKIPs (does not fail) when no panic occurred, mirroring this
-//! workspace's windowless-boot SKIP idiom. **A load-bearing pass requires
-//! `--features hwrt` on an RT-capable GPU.**
+//! This file keeps its OWN `App`/`#[test]`, matching this workspace's
+//! one-windowed-`#[test]`-per-file convention (see the sibling file's module doc: a
+//! second `App::new()` + `add_plugins` in the same process re-registers process-global
+//! component hooks and panics).
 //!
 //! # Running (the orchestrator, NOT a subagent)
 //!
@@ -135,7 +146,7 @@ fn setup_minimal_scene(
 
 fn spawn_many(mut commands: Commands, cube: Res<SharedCubeMesh>, mut materials: ResMut<Assets<MaterialGpu>>) {
     // Asset-streaming plan F8 fold-in: a SHARED non-default material for every drawable —
-    // see this file's module doc for why the over-capacity gather this test traps must be
+    // see this file's module doc for why the over-capacity gather this test drives must be
     // material-bearing.
     let pm_material = materials.add(MaterialGpu::new([0.9, 0.1, 0.1, 1.0], 1.0, 0.3, 0.5, [0.0, 0.0, 0.0], 0));
     for i in 0..DRAWABLES {
@@ -149,50 +160,39 @@ fn spawn_many(mut commands: Commands, cube: Res<SharedCubeMesh>, mut materials: 
     }
 }
 
-/// F7 §12 W3: on an RT device, a `> INSTANCE_CAPACITY` gather must trip the LIVE
-/// hard `assert!` — see this file's module doc for the runtime-gated SKIP
-/// discrimination (a load-bearing pass requires an RT-capable GPU).
+/// F7-hwrt (task#11): a `> INSTANCE_CAPACITY` gather must GROW (not panic) on every
+/// device tier — see this file's module doc for the RT-leg-specific load-bearing
+/// requirement.
 #[test]
-#[ignore = "needs a real windowed GPU device that negotiates hardware ray tracing; \
-            cargo test --features hwrt; --test-threads=1; a non-RT device SKIPs (see doc)"]
-fn w3_rt_cap_traps_an_over_capacity_instance_gather_on_an_rt_device() {
-    // `App::run` unwinds through plain Rust structures (no raw-pointer-holding guard
-    // is on this stack frame at the panic site inside a system) — the same
-    // reasoning `catch_unwind` relies on elsewhere in this workspace's windowed
-    // smokes that probe an expected-panic path.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut app = App::new();
-        app.insert_resource(FrameBudget(FRAMES));
-        app.insert_resource(SharedCubeMesh::default());
-        app.add_systems(exit_after_budget);
-        app.add_startup_system(setup_minimal_scene);
-        app.add_startup_system(spawn_many);
-        app.add_plugins(EnginePlugins::window("boyko_app F7 W3 RT-cap headless", 320, 240));
-        app.run()
-    }));
+#[ignore = "needs a real windowed GPU device; a load-bearing pass of the RT-leg growth \
+            claim requires --features hwrt on hardware that negotiates hardware ray \
+            tracing; cargo test --features hwrt; --test-threads=1"]
+fn rt_leg_grows_past_instance_capacity_instead_of_panicking() {
+    let mut app = App::new();
+    app.insert_resource(FrameBudget(FRAMES));
+    app.insert_resource(SharedCubeMesh::default());
+    app.add_systems(exit_after_budget);
+    app.add_startup_system(setup_minimal_scene);
+    app.add_startup_system(spawn_many);
+    app.add_plugins(EnginePlugins::window("boyko_app F7-hwrt RT-leg grow-past-cap headless", 320, 240));
+    let exit = app.run();
+    assert!(exit.0, "the windowed runner returns AppExit(true)");
 
-    match result {
-        Ok(_exit) => {
-            // No panic. Note `AppExit(true)` is returned BOTH by a graceful full
-            // run AND by an early windowless-boot bail-out (see
-            // `asset_streaming_f6_churn_headless.rs`'s doc) — `app` was moved into
-            // the closure above and is gone by now, so this arm cannot (and need
-            // not) distinguish the two: EITHER way, no panic here means this run
-            // is inconclusive for the RT-cap claim (boot was unavailable, or the
-            // device is non-RT and the non-RT growth path legitimately handled the
-            // over-capacity gather instead of the hard cap) — SKIP either way.
-            eprintln!(
-                "SKIP w3_rt_cap_traps_an_over_capacity_instance_gather_on_an_rt_device: the run \
-                 completed without panicking — either windowed boot was unavailable, or this \
-                 device did not negotiate hardware ray tracing (the non-RT growth path handled \
-                 the over-capacity gather instead of the hard cap); a load-bearing pass requires \
-                 an RT-capable GPU"
-            );
-        }
-        Err(_) => {
-            // The hard cap fired — the load-bearing RT-device pass. The panic
-            // payload was already consumed/printed by libtest's default hook; the
-            // panic itself (this test completing via the Err arm) IS the assertion.
-        }
+    // Boot-failure discrimination: on a windowless / GPU-less box the runner exits
+    // BEFORE the frame loop, so the budget is untouched — SKIP (mirrors the sibling F7
+    // file's / `asset_streaming_f6_churn_headless.rs`'s idiom).
+    let remaining = app.world().resource::<FrameBudget>().0;
+    if remaining == FRAMES {
+        eprintln!(
+            "SKIP rt_leg_grows_past_instance_capacity_instead_of_panicking: windowed \
+             boot unavailable"
+        );
+        return;
     }
+    assert_eq!(
+        remaining, 0,
+        "the frame loop must have run the full {FRAMES}-frame budget WITHOUT a panic — \
+         a > INSTANCE_CAPACITY gather must grow the instance family (non-RT or RT, \
+         whichever path this device took), not panic (task#11 removed the RT hard cap)"
+    );
 }

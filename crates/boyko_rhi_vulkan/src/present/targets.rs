@@ -15,6 +15,8 @@ use boyko_rhi::{
 #[cfg(feature = "hwrt")]
 use boyko_rhi::enums::{BarrierAccess, BarrierStage};
 
+#[cfg(feature = "hwrt")]
+use crate::accel::BoundAccelStruct;
 use crate::device::VulkanContext;
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
@@ -388,6 +390,14 @@ const MATERIAL_SET_RING_COUNT_MIN: usize = 2;
 /// 19 → 20; the software set stays EXACT at 19 (the under-fill tripwire).
 const RESOLVE_SOFTWARE_BINDINGS: usize = 19;
 
+/// Asset-streaming plan F7-hwrt (task#11): the binding index every HWRT resolve-family
+/// set's `AccelerationStructure` entry occupies — always the FIRST index past the
+/// [`RESOLVE_SOFTWARE_BINDINGS`] shared `0..=18` prefix (see e.g. `build_resolve_set`'s
+/// `BindGroupEntry::AccelerationStructure` chain link). Derived from the SAME source of
+/// truth so the two constants cannot drift.
+#[cfg(feature = "hwrt")]
+const TLAS_ACCEL_BINDING: u32 = RESOLVE_SOFTWARE_BINDINGS as u32;
+
 /// HW-RT rung 3a: the binding count of the VIS/DENOISED deferred-resolve set (indices 0..=21) — the
 /// 21 RESOLVE_INLINE-hwrt bindings (`RESOLVE_SOFTWARE_BINDINGS + 2` = the 19 shared + TLAS @19 +
 /// soft-shadow UBO @20) PLUS `gShadowVis` STORAGE image @21. The EXACT-fill tripwire for both the
@@ -553,6 +563,46 @@ impl GBufferTargets {
     fn expected_material_ring_count(&self) -> usize {
         MATERIAL_SET_RING_COUNT_MIN
             + self.resolve_set_hwrt.is_some() as usize
+            + self.shadow_vis_resolve_set.is_some() as usize
+            + self.shadow_denoised_resolve_set.is_some() as usize
+            + self.shadow_vis_mv_resolve_set.is_some() as usize
+            + self.shadow_temporal_denoised_resolve_set.is_some() as usize
+    }
+
+    /// Asset-streaming plan F7-hwrt (task#11): THE canonical enumeration of every per-FIF
+    /// AS-bearing descriptor-set ring, paired with [`TLAS_ACCEL_BINDING`] — the HWRT subset
+    /// of [`Self::material_set_rings`] MINUS the two software-only sets (`vocab_set`/
+    /// `resolve_set`, which declare no `AccelerationStructure` binding at all).
+    /// [`GBufferFrame::repoint_tlas_accel`] walks EXACTLY this list when the per-slot TLAS
+    /// grows — a resolve variant added without an entry here would dangle at the freed AS
+    /// handle the instant the superseded TLAS is retired (the C1-class UAF
+    /// [`Self::expected_tlas_accel_ring_count`]'s debug_assert guards against). The
+    /// MV-only sets (`shadow_vis_mv_resolve_set`/`shadow_temporal_denoised_resolve_set`)
+    /// are naturally `Option`-flattened away on a device with `mv.is_none()` — this is why
+    /// an `mv`-absent RT device (C1's Optional gap) does not affect the AS repoint: fewer
+    /// sets are simply enumerated, none missed.
+    #[cfg(feature = "hwrt")]
+    fn tlas_accel_sets(&self) -> impl Iterator<Item = (&[VulkanBindGroup; FRAMES_IN_FLIGHT], u32)> {
+        [
+            self.resolve_set_hwrt.as_ref(),
+            self.shadow_vis_resolve_set.as_ref(),
+            self.shadow_denoised_resolve_set.as_ref(),
+            self.shadow_vis_mv_resolve_set.as_ref(),
+            self.shadow_temporal_denoised_resolve_set.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|s| (s, TLAS_ACCEL_BINDING))
+    }
+
+    /// The count [`Self::tlas_accel_sets`] MUST yield for THIS already-built `self` — read
+    /// directly off the SAME `Option` fields it enumerates, mirroring
+    /// [`Self::expected_material_ring_count`]'s reasoning (a re-derived arming predicate
+    /// would spuriously diverge from a ring that degraded to `None` for an unrelated
+    /// internal reason).
+    #[cfg(feature = "hwrt")]
+    fn expected_tlas_accel_ring_count(&self) -> usize {
+        self.resolve_set_hwrt.is_some() as usize
             + self.shadow_vis_resolve_set.is_some() as usize
             + self.shadow_denoised_resolve_set.is_some() as usize
             + self.shadow_vis_mv_resolve_set.is_some() as usize
@@ -2774,6 +2824,18 @@ impl GBufferTargets {
                  material-bearing ring create() built — a new resolve variant was added \
                  without adding its ring to material_set_rings()"
             );
+
+            // Asset-streaming plan F7-hwrt (task#11): the AS-repoint counterpart of the
+            // material-ring check above — every AS-bearing ring `create` just built must
+            // be enumerated by `tlas_accel_sets`, else a TLAS grow's repoint would
+            // silently miss one (a UAF the moment the superseded TLAS is later freed).
+            debug_assert_eq!(
+                fresh.tlas_accel_sets().count(),
+                fresh.expected_tlas_accel_ring_count(),
+                "invariant (task#11): tlas_accel_sets() must enumerate EXACTLY every \
+                 AS-bearing ring create() built — a new resolve variant was added \
+                 without adding its ring to tlas_accel_sets()"
+            );
         }
 
         if let Some(old) = targets.take() {
@@ -2999,6 +3061,39 @@ impl GBufferFrame {
             // SAFETY: `fenced_slot`'s set is non-pending (this fn's caller contract
             // above); `ctx` is the live context both the set and `buf` were created on.
             unsafe { crate::rhi_impl::rebind_storage_buffer(ctx, &ring[fenced_slot], binding, buf) };
+        }
+    }
+
+    /// Asset-streaming plan F7-hwrt (task#11): repoints the AS binding of EVERY
+    /// AS-bearing descriptor set for `fenced_slot` to `accel`
+    /// ([`GBufferTargets::tlas_accel_sets`], one in-place `vkUpdateDescriptorSets` each) —
+    /// the acceleration-structure counterpart of [`Self::repoint_material_table`], fired
+    /// when the per-slot TLAS grows (a NEW `VkAccelerationStructureKHR` handle replaces
+    /// the old one). A no-op until [`Self::targets_ready`] (frame 0, before the first
+    /// sync) and a no-op on a device/config with no HWRT resolve rings
+    /// (`tlas_accel_sets` then yields nothing).
+    ///
+    /// # Safety
+    ///
+    /// `fenced_slot`'s in-flight fence must already be waited THIS frame (via
+    /// [`Renderer::wait_frame_in_flight`]) — none of its descriptor sets is command-
+    /// buffer-pending (VUID-vkUpdateDescriptorSets-None-03047). `ctx` must be the live
+    /// context every set + `accel` were created on; `accel` must outlive every submit
+    /// that could reference it.
+    #[cfg(feature = "hwrt")]
+    pub unsafe fn repoint_tlas_accel(
+        &self,
+        ctx: &VulkanContext,
+        fenced_slot: usize,
+        accel: &BoundAccelStruct,
+    ) {
+        let Some(targets) = self.targets.as_ref() else {
+            return;
+        };
+        for (ring, binding) in targets.tlas_accel_sets() {
+            // SAFETY: `fenced_slot`'s set is non-pending (this fn's caller contract
+            // above); `ctx` is the live context both the set and `accel` were created on.
+            unsafe { crate::rhi_impl::rebind_accel_struct(ctx, &ring[fenced_slot], binding, accel) };
         }
     }
 

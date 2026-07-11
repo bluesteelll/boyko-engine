@@ -330,6 +330,96 @@ pub(crate) struct MotionVecResources {
     mvpm_bind_groups: [VulkanBindGroup; FRAMES_IN_FLIGHT],
 }
 
+#[cfg(feature = "hwrt")]
+impl MotionVecResources {
+    /// Asset-streaming plan F7-hwrt (task#11): grows slot `s`'s `prev_instance_rings[s]`
+    /// to `new_cap` instances (48 B × `new_cap`, zero-filled, old buffer deferred) in
+    /// lockstep with the caller's ALREADY-grown `instance_rings_s`/`pm_ring_s` — the SAME
+    /// buffers [`GpuSceneBundles::grow_shared_instance_rings`] just repointed
+    /// `instance_bind_groups[s]`/`pm_bind_groups[s]` against, passed here BY REFERENCE
+    /// (this struct never owns or grows them itself). Rebinds `bind_groups[s]` (@0
+    /// current / @1 prev — @2 `motion_cam_ubo` untouched) and `mvpm_bind_groups[s]` (@0
+    /// current / @1 prev / @3 pm — @2 `motion_cam_ubo` untouched).
+    ///
+    /// # No seed
+    ///
+    /// `upload_prev_instance_models` rewrites the whole prev-ring THIS frame when the
+    /// temporal gate is armed (mirrors [`GpuSceneBundles::grow_shared_instance_rings`]'s
+    /// own no-seed reasoning) — zero-fill only covers the gap until that write lands.
+    ///
+    /// # Panics
+    ///
+    /// Panics (`expect`) on an RHI create/map failure — a device OOM on a post-boot grow
+    /// is setup-adjacent, not a recoverable per-frame error.
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees slot `s`'s in-flight fence was waited THIS frame (the
+    /// `FrameWriteToken` proof [`GpuSceneBundles::grow_instance_family_rt`] holds) —
+    /// neither `bind_groups[s]` nor `mvpm_bind_groups[s]` is command-buffer-pending, so
+    /// rewriting their bindings in place is sound. `instance_rings_s`/`pm_ring_s` are the
+    /// caller's live, already-grown buffers.
+    // Review O2 pins `instance_rings_s`/`pm_ring_s` as SEPARATE borrowed params (not
+    // grown here, not cloned) so the caller's split-borrow of `&mut self.mv` against
+    // `&self.instance_rings[s]`/`&self.pm_instance_material_rings[s]` stays disjoint —
+    // grouping them into a struct would only relocate the same two fields behind an
+    // extra indirection with no other caller to share it.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn grow_slot(
+        &mut self,
+        device: &VulkanContext,
+        s: usize,
+        new_cap: u32,
+        instance_rings_s: &BoundBuffer,
+        pm_ring_s: &BoundBuffer,
+        retired: &mut RetiredGpuBuffers,
+        retire_frame: u64,
+    ) {
+        let prev_bytes = new_cap as u64 * GBUFFER_INSTANCE_MODEL_BYTES as u64;
+        let new_prev = {
+            let b = RhiDevice::create_buffer(
+                device,
+                &BufferDesc {
+                    size: prev_bytes,
+                    usage: BufferUsage::STORAGE,
+                    location: MemoryLocation::HostVisibleCoherent,
+                },
+            )
+            .expect("invariant: grown prev-instance-model SSBO ring slot create");
+            let mapped = RhiDevice::buffer_mapped_ptr(device, &b)
+                .expect("invariant: host-visible grown prev-instance SSBO is mapped");
+            zero_fill(mapped, prev_bytes as usize);
+            b
+        };
+        let old_prev = core::mem::replace(&mut self.prev_instance_rings[s], new_prev);
+        retired.push(old_prev, retire_frame);
+
+        const MV_GROWN_BINDINGS: usize = 5;
+        let mut rebound = 0usize;
+        // SAFETY: slot `s`'s fence was waited this frame (this fn's caller contract
+        // above) — neither set is command-buffer-pending, so rewriting their bindings in
+        // place is sound. `motion_cam_ubo[s]` (@2 on both sets) is untouched: it does not
+        // share the instance-family index space and never grows.
+        unsafe {
+            rebind_storage_buffer(device, &self.bind_groups[s], 0, instance_rings_s);
+            rebound += 1;
+            rebind_storage_buffer(device, &self.bind_groups[s], 1, &self.prev_instance_rings[s]);
+            rebound += 1;
+            rebind_storage_buffer(device, &self.mvpm_bind_groups[s], 0, instance_rings_s);
+            rebound += 1;
+            rebind_storage_buffer(device, &self.mvpm_bind_groups[s], 1, &self.prev_instance_rings[s]);
+            rebound += 1;
+            rebind_storage_buffer(device, &self.mvpm_bind_groups[s], 3, pm_ring_s);
+            rebound += 1;
+        }
+        debug_assert_eq!(
+            rebound, MV_GROWN_BINDINGS,
+            "invariant: exactly 5 mv/mvpm bindings rebound (bind_groups@0/@1 + \
+             mvpm_bind_groups@0/@1/@3; @2 motion_cam_ubo untouched on both)"
+        );
+    }
+}
+
 /// The static-resource half of the windowed G-buffer scene (host plan R3):
 /// every pipeline / layout / sampler / seeded buffer `render_gbuffer_frame`
 /// needs beyond the swapchain + the extent-dependent `GBufferFrame` targets.
@@ -368,14 +458,28 @@ pub(crate) struct GpuSceneBundles {
     /// every other frame the base 3-MRT raster pipeline draws (byte-identical OFF path).
     #[cfg(feature = "hwrt")]
     mv: Option<MotionVecResources>,
-    /// Asset-streaming plan F7 §7.3: PER-FIF-SLOT current capacity of the non-RT instance
-    /// family (`instance_rings[s]` + `interp.pairs[s]` + `interp.out_slot[s]`), starting at
-    /// [`INSTANCE_CAPACITY`]. Slots grow INDEPENDENTLY — one fenced slot at a time, in
-    /// lockstep across the three co-sized buffers — so this is a per-slot array, not a
-    /// single scalar (mirrors [`InterpGpuProd`]'s own per-slot `capacity`). On an RT device
-    /// (`tlas`/`mv` both `Some`) this stays pinned at [`INSTANCE_CAPACITY`] forever — the W3
-    /// runtime gate in [`Self::grow_instance_family_if_needed`] never grows it there.
+    /// Asset-streaming plan F7 §7.3: PER-FIF-SLOT current capacity of the instance family
+    /// (`instance_rings[s]` + `interp.pairs[s]` + `interp.out_slot[s]`, plus — on the RT
+    /// leg — `tlas`'s + `mv`'s co-sized buffers), starting at [`INSTANCE_CAPACITY`]. Slots
+    /// grow INDEPENDENTLY — one fenced slot at a time, in lockstep across every co-sized
+    /// buffer — so this is a per-slot array, not a single scalar (mirrors
+    /// [`InterpGpuProd`]'s own per-slot `capacity`). Asset-streaming plan F7-hwrt
+    /// (task#11): the RT leg (`tlas.is_some()`) now ALSO grows this past
+    /// [`INSTANCE_CAPACITY`] via [`Self::grow_instance_family_rt`] — the former W3 hard
+    /// cap (pinning this forever at boot capacity on an RT device) is REMOVED; both legs
+    /// share the SAME [`MAX_INSTANCE_CAP`] ceiling (no separate RT ceiling).
     instance_capacity: [u32; FRAMES_IN_FLIGHT],
+    /// Asset-streaming plan F7-hwrt (task#11): `true` iff slot `s`'s [`TlasResources`]
+    /// minted a NEW `VkAccelerationStructureKHR` handle this grow (via
+    /// [`Self::grow_instance_family_rt`]) whose resolve-family descriptor sets have not
+    /// yet been repointed. The runner's per-frame repoint step (mirrors
+    /// [`MaterialTable::rebind_pending`](boyko_render::MaterialTable::rebind_pending)'s
+    /// FIX-E discipline) `core::mem::take`s this flag and drives
+    /// [`GBufferFrame::repoint_tlas_accel`](boyko_rhi_vulkan::present::GBufferFrame::repoint_tlas_accel)
+    /// — gated ONLY on this flag, never on "grew this frame", so a slot left lagging by a
+    /// prior grow still converges.
+    #[cfg(feature = "hwrt")]
+    pub(crate) tlas_accel_rebind_pending: [bool; FRAMES_IN_FLIGHT],
     /// Asset-streaming plan F8: the PER_INSTANCE_MATERIAL gbuffer producer pipeline
     /// (`gbuffer_mrt_pm.{vs,fs}` — the base pair recompiled with `-D
     /// PER_INSTANCE_MATERIAL=1`). Built UNCONDITIONALLY at boot (materials are not
@@ -394,12 +498,11 @@ pub(crate) struct GpuSceneBundles {
     /// [`PerInstanceMaterial`](boyko_render::PerInstanceMaterial)s = 32 B each,
     /// zero-seeded). The runner uploads `scratch.material_ids` into slot
     /// `token.slot()` ONLY on an `any_non_default_material` frame (Principle 1 — no
-    /// OFF-path upload cost). Grows in
-    /// LOCKSTEP with [`Self::instance_rings`] via
-    /// [`Self::grow_instance_family_if_needed`] on the non-RT leg; HARD-CAPPED at
-    /// [`INSTANCE_CAPACITY`] on an RT device (the F7 W3 gate) — its index space is
-    /// IDENTICAL to `instance_rings`, so the two MUST share capacity at all times (a
-    /// divergent capacity would OOB the instant the instance ring grows).
+    /// OFF-path upload cost). Grows in LOCKSTEP with [`Self::instance_rings`] via
+    /// [`Self::grow_shared_instance_rings`] on BOTH legs (asset-streaming plan F7-hwrt,
+    /// task#11 — the former RT hard cap is removed) — its index space is IDENTICAL to
+    /// `instance_rings`, so the two MUST share capacity at all times (a divergent
+    /// capacity would OOB the instant the instance ring grows).
     pub(crate) pm_instance_material_rings: [BoundBuffer; FRAMES_IN_FLIGHT],
     /// Asset-streaming plan F8: per-FIF bind groups against
     /// [`Self::pm_instance_material_layout`]: slot `i` binds `{ instance_rings[i] @0,
@@ -1572,6 +1675,8 @@ impl GpuSceneBundles {
             #[cfg(feature = "hwrt")]
             mv,
             instance_capacity: [INSTANCE_CAPACITY as u32; FRAMES_IN_FLIGHT],
+            #[cfg(feature = "hwrt")]
+            tlas_accel_rebind_pending: [false; FRAMES_IN_FLIGHT],
             raster_pipeline_pm,
             pm_instance_material_layout,
             pm_instance_material_rings,
@@ -1611,41 +1716,28 @@ impl GpuSceneBundles {
     /// `true` iff `needed` exceeds slot `slot`'s current instance-family capacity.
     /// Touches no World resource at all (`host.gpu` is a plain `WindowHost` field) —
     /// call this BEFORE paying for the (rare) [`Self::grow_instance_family_if_needed`]
-    /// path's NonSend `RetiredGpuBuffers` take-out. On an RT device this naturally
-    /// tracks the W3 hard cap too: `instance_capacity[slot]` never advances past
-    /// `INSTANCE_CAPACITY` there, so an RT overflow still reports `true` here (the
-    /// grow call itself then no-ops via the W3 gate and the caller's next upload trips
-    /// the documented hard `assert!`).
+    /// path's NonSend `RetiredGpuBuffers` take-out. Asset-streaming plan F7-hwrt
+    /// (task#11): on an RT device this now ALSO triggers REAL growth (the former W3
+    /// hard-cap early-return is removed) — [`Self::grow_instance_family_if_needed`]
+    /// dispatches to [`Self::grow_instance_family_rt`], which grows the TLAS/mv sides in
+    /// lockstep, past [`INSTANCE_CAPACITY`], up to the SAME [`MAX_INSTANCE_CAP`] ceiling
+    /// the non-RT leg shares (no separate RT ceiling).
     #[inline]
     pub(crate) fn needs_instance_grow(&self, needed: u32, slot: usize) -> bool {
         needed > self.instance_capacity[slot]
     }
 
-    /// Asset-streaming plan F7 §7.3: grows the FENCED slot's non-RT instance family
-    /// (`instance_rings[s]` + `interp.pairs[s]` + `interp.out_slot[s]`, in lockstep) to
-    /// `next_pow2(needed)` iff `needed` exceeds that slot's current capacity — called
-    /// BEFORE `upload_instance_models` fills the (possibly grown) ring this frame.
-    ///
-    /// # W3 runtime gate (E1 Option B)
-    ///
-    /// An RT device (`self.tlas.is_some() || self.mv.is_some()`) hard-caps this family at
-    /// [`INSTANCE_CAPACITY`] and NEVER grows it here: the TLAS packer's `instance_arrays`
-    /// / backing / scratch (`tlas.rs`) are all sized ONCE for `INSTANCE_CAPACITY`, and
-    /// growing the ring without regrowing those would let the packer read a
-    /// `count > INSTANCE_CAPACITY` ring while writing a still-`INSTANCE_CAPACITY`-sized
-    /// `instance_arrays[fi]` — an out-of-bounds device write (device-lost). This is a
-    /// RUNTIME check (`tlas`/`mv` are `None` on a non-RT device even in an `hwrt` build),
-    /// never `#[cfg(feature = "hwrt")]` — a non-hwrt build has neither field at all, so
-    /// growth is unconditional there. A > `INSTANCE_CAPACITY` gather on an RT device trips
-    /// the LIVE hard `assert!` in `upload_mesh_ids`/`upload_prev_instance_models`
-    /// (`boyko_render::upload`) — documented, not silently grown.
-    ///
-    /// # Steady-state cost
-    ///
-    /// The caller is expected to have already consulted [`Self::needs_instance_grow`]
-    /// before paying for the NonSend take-out this call requires; the internal `needed
-    /// <= self.instance_capacity[s]` re-check below is a defensive belt-and-suspenders,
-    /// not the steady-state gate anymore.
+    /// Asset-streaming plan F7-hwrt (task#11): the LOCKSTEP instance-family-ring grow
+    /// BOTH legs share — `instance_rings[s]` + `pm_instance_material_rings[s]` (defer
+    /// old, no seed) + rebind `instance_bind_groups[s]`@0 / `pm_bind_groups[s]`@0/@1 +
+    /// the interp pair/out-slot co-grow ([`InterpGpuProd::grow_slot`], which itself
+    /// repoints `interp_bg[s]`@0/@1/@2 against the just-grown `instance_rings[s]`).
+    /// Extracted from the pre-task#11 `grow_instance_family_if_needed`'s body — behavior
+    /// is IDENTICAL to that body's non-RT portion (verified by
+    /// [`Self::grow_instance_family_nonrt`], its sole caller before this split).
+    /// [`Self::grow_instance_family_rt`] is the second (new) caller. Does NOT touch
+    /// `self.instance_capacity[s]` — the caller sets it once its OWN leg's grow (mv/tlas
+    /// on the RT leg) has also landed.
     ///
     /// # No seed
     ///
@@ -1657,44 +1749,17 @@ impl GpuSceneBundles {
     ///
     /// # Safety
     ///
-    /// The caller guarantees `token` proves THIS frame's fence wait for slot `token.slot()`
-    /// — every descriptor set this fn repoints (`instance_bind_groups[s]`, `interp`'s
-    /// `interp_bg[s]`) is therefore non-command-buffer-pending.
-    pub(crate) unsafe fn grow_instance_family_if_needed(
+    /// The caller guarantees slot `s`'s in-flight fence was waited THIS frame — every
+    /// descriptor set this fn repoints (`instance_bind_groups[s]`, `pm_bind_groups[s]`,
+    /// `interp`'s `interp_bg[s]`) is therefore non-command-buffer-pending.
+    unsafe fn grow_shared_instance_rings(
         &mut self,
-        needed: u32,
+        s: usize,
+        new_cap: u32,
         ctx: &VulkanContext,
-        token: &FrameWriteToken,
         retired: &mut RetiredGpuBuffers,
         epoch: u64,
     ) {
-        #[cfg(feature = "hwrt")]
-        if self.tlas.is_some() || self.mv.is_some() {
-            return;
-        }
-        // F8-mv (C2): `self.mv`/`self.tlas` are hwrt-only fields, so this reachability check
-        // must itself be hwrt-gated — an unguarded assert would not compile on the default
-        // (non-hwrt) build (no such field exists there).
-        #[cfg(feature = "hwrt")]
-        debug_assert!(
-            self.mv.is_none(),
-            "invariant: past the W3 early-return, so mv/mvpm resources are unreachable — \
-             the grow/rebind path below is the non-RT leg only"
-        );
-
-        let s = token.slot();
-        if needed <= self.instance_capacity[s] {
-            return;
-        }
-        let new_cap = needed.next_power_of_two();
-        debug_assert!(new_cap.is_power_of_two());
-        debug_assert!(new_cap >= needed);
-        debug_assert!(
-            new_cap as usize <= MAX_INSTANCE_CAP,
-            "invariant: the grown instance-family capacity ({new_cap}) exceeds the sane \
-             MAX_INSTANCE_CAP bound ({MAX_INSTANCE_CAP}) — a likely gather leak"
-        );
-
         let new_bytes = new_cap as u64 * GBUFFER_INSTANCE_MODEL_BYTES as u64;
         let new_ring = RhiDevice::create_buffer(
             ctx,
@@ -1714,9 +1779,9 @@ impl GpuSceneBundles {
         let old_ring = core::mem::replace(&mut self.instance_rings[s], new_ring);
         retired.push(old_ring, epoch + RETIRE_DELAY);
 
-        // SAFETY: slot `s == token.slot()`'s fence was waited this frame (this fn's
-        // caller contract above) — `instance_bind_groups[s]`'s set is non-pending, so
-        // rewriting its binding in place is sound.
+        // SAFETY: slot `s`'s fence was waited this frame (this fn's caller contract
+        // above) — `instance_bind_groups[s]`'s set is non-pending, so rewriting its
+        // binding in place is sound.
         unsafe {
             rebind_storage_buffer(ctx, &self.instance_bind_groups[s], 0, &self.instance_rings[s]);
         }
@@ -1728,13 +1793,14 @@ impl GpuSceneBundles {
         // bindings (0 = the just-grown `instance_rings[s]`, 1 = the just-grown material
         // ring): forgetting either leaves the PM set pointing at a freed/undersized buffer.
         //
-        // WARNING RT-LEG-GROWTH COUPLING (task#11): this rebind runs ONLY on the non-RT leg
-        // (the W3 cap above early-returns on an RT device). If RT-leg instance-family growth
-        // is ever enabled, EVERY descriptor set aliasing instance_rings/prev_instance_rings/
-        // motion_cam_ubo/pm_instance_material_rings MUST also be rebound here, or it dangles
-        // (an F7-C1-class UAF):
-        //   instance_bind_groups[s], pm_bind_groups[s] (@0 + @1), interp.interp_bg[s],
-        //   mv.bind_groups[s] (@0/@1/@2), mv.mvpm_bind_groups[s] (@0/@1/@2/@3).
+        // RT-LEG-GROWTH COUPLING (task#11): DONE — RT-leg instance-family growth is
+        // implemented in [`Self::grow_instance_family_rt`] + `TlasResources::grow_slot` +
+        // `MotionVecResources::grow_slot`. The full rebind matrix (every descriptor set
+        // aliasing `instance_rings`/`prev_instance_rings`/`pm_instance_material_rings`/
+        // the TLAS AS handle) is enforced by the `PACK_GROWN_BINDINGS`/`MV_GROWN_BINDINGS`
+        // debug_asserts in those two `grow_slot`s plus
+        // `GBufferTargets::tlas_accel_sets`'s `expected_tlas_accel_ring_count` guard —
+        // NOT by hand-auditing this comment.
         let new_pm_bytes = new_cap as u64 * PER_INSTANCE_MATERIAL_BYTES as u64;
         let new_pm_ring = RhiDevice::create_buffer(
             ctx,
@@ -1752,10 +1818,10 @@ impl GpuSceneBundles {
         zero_fill(pm_mapped, new_pm_bytes as usize);
         let old_pm_ring = core::mem::replace(&mut self.pm_instance_material_rings[s], new_pm_ring);
         retired.push(old_pm_ring, epoch + RETIRE_DELAY);
-        // SAFETY: slot `s == token.slot()`'s fence was waited this frame (this fn's caller
-        // contract above) — `pm_bind_groups[s]`'s set is non-pending, so rewriting BOTH its
-        // bindings in place is sound. Binding 0 repoints to the SAME grown `instance_rings[s]`
-        // rebound above; binding 1 to the just-grown material ring.
+        // SAFETY: slot `s`'s fence was waited this frame (this fn's caller contract
+        // above) — `pm_bind_groups[s]`'s set is non-pending, so rewriting BOTH its
+        // bindings in place is sound. Binding 0 repoints to the SAME grown
+        // `instance_rings[s]` rebound above; binding 1 to the just-grown material ring.
         unsafe {
             rebind_storage_buffer(ctx, &self.pm_bind_groups[s], 0, &self.instance_rings[s]);
             rebind_storage_buffer(ctx, &self.pm_bind_groups[s], 1, &self.pm_instance_material_rings[s]);
@@ -1775,8 +1841,185 @@ impl GpuSceneBundles {
                 epoch + RETIRE_DELAY,
             );
         }
+    }
+
+    /// Asset-streaming plan F7 §7.3 (task#11: split out of the former
+    /// `grow_instance_family_if_needed`, MOVED VERBATIM — behavior byte-identical): grows
+    /// the FENCED slot's non-RT instance family via [`Self::grow_shared_instance_rings`]
+    /// to `next_pow2(needed)` iff `needed` exceeds that slot's current capacity — called
+    /// BEFORE `upload_instance_models` fills the (possibly grown) ring this frame.
+    ///
+    /// # Steady-state cost
+    ///
+    /// The caller is expected to have already consulted [`Self::needs_instance_grow`]
+    /// before paying for the NonSend take-out this call requires; the internal `needed
+    /// <= self.instance_capacity[s]` re-check below is a defensive belt-and-suspenders,
+    /// not the steady-state gate anymore.
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees `token` proves THIS frame's fence wait for slot `token.slot()`
+    /// — every descriptor set this fn repoints (`instance_bind_groups[s]`, `interp`'s
+    /// `interp_bg[s]`) is therefore non-command-buffer-pending.
+    unsafe fn grow_instance_family_nonrt(
+        &mut self,
+        needed: u32,
+        ctx: &VulkanContext,
+        token: &FrameWriteToken,
+        retired: &mut RetiredGpuBuffers,
+        epoch: u64,
+    ) {
+        let s = token.slot();
+        if needed <= self.instance_capacity[s] {
+            return;
+        }
+        let new_cap = needed.next_power_of_two();
+        debug_assert!(new_cap.is_power_of_two());
+        debug_assert!(new_cap >= needed);
+        debug_assert!(
+            new_cap as usize <= MAX_INSTANCE_CAP,
+            "invariant: the grown instance-family capacity ({new_cap}) exceeds the sane \
+             MAX_INSTANCE_CAP bound ({MAX_INSTANCE_CAP}) — a likely gather leak"
+        );
+
+        // SAFETY: `token` proves slot `s`'s fence was waited THIS frame (this fn's
+        // caller contract above) — every set `grow_shared_instance_rings` repoints is
+        // non-pending.
+        unsafe {
+            self.grow_shared_instance_rings(s, new_cap, ctx, retired, epoch);
+        }
 
         self.instance_capacity[s] = new_cap;
+    }
+
+    /// Asset-streaming plan F7-hwrt (task#11): grows the FENCED slot's RT instance family
+    /// — the shared rings ([`Self::grow_shared_instance_rings`]) PLUS the RT-only mv/tlas
+    /// sides — to `next_pow2(needed)` iff `needed` exceeds that slot's current capacity.
+    /// Only reachable once `self.tlas.is_some()` (the caller's dispatch gate in
+    /// [`Self::grow_instance_family_if_needed`]).
+    ///
+    /// # mv grow is CONDITIONAL
+    ///
+    /// An RT device without `shadow_denoise_storage_ok()` has `tlas.is_some()` but
+    /// `mv.is_none()` (see [`MotionVecResources`]'s own boot gate,
+    /// `ray_query_enabled() && shadow_denoise_storage_ok()`) — growing `mv`
+    /// unconditionally would panic on that real, test-box-invisible configuration.
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees `token` proves slot `token.slot()`'s fence was waited THIS
+    /// frame — every descriptor set this fn (transitively) repoints is non-pending.
+    #[cfg(feature = "hwrt")]
+    unsafe fn grow_instance_family_rt(
+        &mut self,
+        needed: u32,
+        ctx: &VulkanContext,
+        token: &FrameWriteToken,
+        retired: &mut RetiredGpuBuffers,
+        epoch: u64,
+    ) {
+        let s = token.slot();
+        if needed <= self.instance_capacity[s] {
+            return;
+        }
+        let new_cap = needed.next_power_of_two();
+        debug_assert!(new_cap.is_power_of_two());
+        debug_assert!(new_cap >= needed);
+        debug_assert!(
+            new_cap as usize <= MAX_INSTANCE_CAP,
+            "invariant: the grown instance-family capacity ({new_cap}) exceeds the sane \
+             MAX_INSTANCE_CAP bound ({MAX_INSTANCE_CAP}) — a likely gather leak"
+        );
+
+        // SAFETY: `token` proves slot `s`'s fence was waited THIS frame — every set
+        // `grow_shared_instance_rings` repoints is non-pending.
+        unsafe {
+            self.grow_shared_instance_rings(s, new_cap, ctx, retired, epoch);
+        }
+
+        if let Some(mv) = self.mv.as_mut() {
+            // SAFETY: `token` proves slot `s`'s fence was waited THIS frame — neither
+            // `bind_groups[s]` nor `mvpm_bind_groups[s]` is command-buffer-pending;
+            // `instance_rings[s]`/`pm_instance_material_rings[s]` are the just-grown
+            // buffers `grow_shared_instance_rings` produced above.
+            unsafe {
+                mv.grow_slot(
+                    ctx,
+                    s,
+                    new_cap,
+                    &self.instance_rings[s],
+                    &self.pm_instance_material_rings[s],
+                    retired,
+                    epoch + RETIRE_DELAY,
+                );
+            }
+        }
+
+        {
+            let tlas = self
+                .tlas
+                .as_mut()
+                .expect("invariant: grow_instance_family_rt is only reached when tlas.is_some()");
+            // SAFETY: `token` proves slot `s`'s fence was waited THIS frame —
+            // `bind_groups[s]` is non-pending; `instance_rings[s]` is the just-grown
+            // buffer above.
+            unsafe {
+                tlas.grow_slot(ctx, s, new_cap, &self.instance_rings[s], retired, epoch + RETIRE_DELAY);
+            }
+        }
+
+        self.instance_capacity[s] = new_cap;
+        self.tlas_accel_rebind_pending[s] = true;
+    }
+
+    /// Asset-streaming plan F7 §7.3, extended by F7-hwrt (task#11): grows the FENCED
+    /// slot's instance family (shared by both legs) iff `needed` exceeds that slot's
+    /// current capacity — called BEFORE `upload_instance_models` fills the (possibly
+    /// grown) ring this frame. Dispatches to [`Self::grow_instance_family_rt`] on an RT
+    /// device (`self.tlas.is_some()`), else [`Self::grow_instance_family_nonrt`].
+    /// `mv.is_some() ⟹ tlas.is_some()` (`mv`'s own boot gate additionally requires
+    /// `shadow_denoise_storage_ok()`, on top of the SAME `ray_query_enabled()` gate
+    /// `tlas` boots under), so checking `tlas.is_some()` alone is exhaustive — the former
+    /// `|| self.mv.is_some()` (the pre-task#11 W3 early-return) was redundant.
+    ///
+    /// # Safety
+    ///
+    /// The caller guarantees `token` proves THIS frame's fence wait for slot
+    /// `token.slot()` — every descriptor set either dispatch target repoints is
+    /// therefore non-command-buffer-pending.
+    pub(crate) unsafe fn grow_instance_family_if_needed(
+        &mut self,
+        needed: u32,
+        ctx: &VulkanContext,
+        token: &FrameWriteToken,
+        retired: &mut RetiredGpuBuffers,
+        epoch: u64,
+    ) {
+        #[cfg(feature = "hwrt")]
+        if self.tlas.is_some() {
+            // SAFETY: `token` proves slot `token.slot()`'s fence was waited THIS frame —
+            // every set `grow_instance_family_rt` (transitively) repoints is non-pending.
+            unsafe {
+                self.grow_instance_family_rt(needed, ctx, token, retired, epoch);
+            }
+            return;
+        }
+        // SAFETY: `token` proves slot `token.slot()`'s fence was waited THIS frame —
+        // every set `grow_instance_family_nonrt` (transitively) repoints is non-pending.
+        unsafe {
+            self.grow_instance_family_nonrt(needed, ctx, token, retired, epoch);
+        }
+    }
+
+    /// Asset-streaming plan F7-hwrt (task#11): slot `s`'s CURRENT persistent-TLAS
+    /// acceleration structure — the runner's `repoint_tlas_accel` rebind target once
+    /// [`Self::grow_instance_family_rt`] has flagged `tlas_accel_rebind_pending[s]`.
+    #[cfg(feature = "hwrt")]
+    pub(crate) fn current_tlas_accel(&self, s: usize) -> &BoundAccelStruct {
+        self.tlas
+            .as_ref()
+            .expect("invariant: current_tlas_accel is only called on an RT device (tlas.is_some())")
+            .resolve_accels()[s]
     }
 
     /// Assembles this frame's [`GBufferScene`] ON THE STACK (plan D7 — POD +

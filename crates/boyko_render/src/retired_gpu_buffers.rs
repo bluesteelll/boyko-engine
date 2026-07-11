@@ -9,17 +9,34 @@
 //! device-free. `BoundBuffer` is `!Send` (an RHI device handle), so this queue cannot
 //! live in the `Send` `DeferredFree`/`FreeEntry` (`boyko_scene`, which cannot depend on
 //! the Vulkan backend) — a dedicated `!Send` `NonSendResource` is therefore type-forced,
-//! mirroring `OrphanedMeshGpu`'s shape exactly.
+//! mirroring `OrphanedMeshGpu`'s shape exactly. Asset-streaming plan F7-hwrt (task#11)
+//! adds a SECOND, `hwrt`-gated lane (`tlases`) for a superseded PERSISTENT TLAS (the
+//! RT-leg instance-family grow's AS-side counterpart) — `PersistentTlas` is `!Send` too
+//! (it owns a `BoundAccelStruct`), so both lanes share this one queue's `!Send` contract.
 
 use boyko_ecs::ecs::core::resources::resource::NonSendResource;
 use boyko_rhi::RhiDevice;
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::memory::BoundBuffer;
+#[cfg(feature = "hwrt")]
+use boyko_rhi_vulkan::accel_build::{PersistentTlas, destroy_persistent_tlas};
 
 /// One retired buffer awaiting its fence horizon: the `!Send` device handle + the F6-style
 /// `retire_frame` stamp (`submission_epoch` at replacement time `+ RETIRE_DELAY`).
 struct RetiredBuffer {
     buf: BoundBuffer,
+    retire_frame: u64,
+}
+
+/// HW-RT rung (asset-streaming plan F7-hwrt, task#11): one retired PERSISTENT TLAS
+/// awaiting its fence horizon — the AS-side counterpart of [`RetiredBuffer`]. A SEPARATE
+/// lane (not folded into [`RetiredGpuBuffers::entries`]) because a [`PersistentTlas`]
+/// bundles THREE owned resources (the AS handle + its backing buffer + its build scratch)
+/// that must be freed AS-FIRST via [`destroy_persistent_tlas`], not a single `BoundBuffer`
+/// destroy.
+#[cfg(feature = "hwrt")]
+struct RetiredTlas {
+    tlas: PersistentTlas,
     retire_frame: u64,
 }
 
@@ -34,6 +51,12 @@ struct RetiredBuffer {
 #[derive(Default)]
 pub struct RetiredGpuBuffers {
     entries: Vec<RetiredBuffer>,
+    /// HW-RT rung (task#11): the TLAS-side retire lane, parallel to `entries` — a per-slot
+    /// TLAS grow (`gpu_scene::tlas::TlasResources::grow_slot`) routes the superseded
+    /// [`PersistentTlas`] here instead of `entries` (it is not a `BoundBuffer`). Drained by
+    /// [`Self::drain_ready`]/[`Self::drain_all`] on the SAME fence-gate as `entries`.
+    #[cfg(feature = "hwrt")]
+    tlases: Vec<RetiredTlas>,
 }
 
 impl NonSendResource for RetiredGpuBuffers {}
@@ -48,11 +71,49 @@ impl RetiredGpuBuffers {
         self.entries.push(RetiredBuffer { buf, retire_frame });
     }
 
-    /// `true` iff no retired buffer is awaiting teardown — the O(1) golden early-out (a
-    /// scene whose GPU mirrors never outgrow their boot capacity never pushes here).
+    /// Queues `t` (a superseded PERSISTENT TLAS — the RT-leg counterpart of [`Self::push`],
+    /// asset-streaming plan F7-hwrt, task#11) for device-free once the host observes
+    /// `epoch >= retire_frame`.
+    ///
+    /// # Why `retire_frame = epoch + RETIRE_DELAY` is safe for a per-frame-REBUILT TLAS
+    ///
+    /// `gpu_scene::tlas::TlasResources` rebuilds `tlas[s].accel` into every frame slot `s`
+    /// uses (unlike a write-once buffer, this AS is re-recorded-into via
+    /// `cmd_build_acceleration_structures` and re-traced by the resolve's `rayQuery` EVERY
+    /// time slot `s` is used) — but a grow that REPLACES it only ever fires for slot `s`
+    /// INSIDE that slot's own fenced window: the caller (`TlasResources::grow_slot`) runs
+    /// after `wait_frame_in_flight(s)` for THIS frame, so slot `s`'s LAST submission (its
+    /// pre-grow build + trace) has already completed. The SIBLING in-flight frame traces
+    /// `tlas[1 - s].accel`, a DIFFERENT `PersistentTlas` entirely — it never references the
+    /// one being retired here. Immediately after the replacement, `repoint_tlas_accel` (the
+    /// SAME fenced frame) rewrites every resolve-family descriptor set's AS binding away
+    /// from the old handle, so no descriptor set anywhere still points at it either — the
+    /// OLD `tlas.accel`'s only possible GPU references were slot `s`'s own already-fence-
+    /// waited submissions. `retire_frame = epoch + RETIRE_DELAY` (== `epoch +
+    /// FRAMES_IN_FLIGHT`) is therefore safe with slack to spare, exactly like every other
+    /// F6/F7 fence-gated retire.
+    #[cfg(feature = "hwrt")]
+    #[inline]
+    pub fn push_tlas(&mut self, t: PersistentTlas, retire_frame: u64) {
+        self.tlases.push(RetiredTlas { tlas: t, retire_frame });
+    }
+
+    /// `true` iff no retired buffer/TLAS is awaiting teardown — the O(1) golden early-out
+    /// (a scene whose GPU mirrors never outgrow their boot capacity never pushes here).
+    /// F7-hwrt (task#11) extends this to the `tlases` lane: a growth-only frame with an
+    /// empty `entries` but a pending retired TLAS must still report non-empty, or
+    /// `retire_deferred_frees`'s early-out (which reads only this fn) would leak it —
+    /// mirrors the F7 C2 fix's "extend, don't narrow" reasoning for the SAME early-out.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        #[cfg(feature = "hwrt")]
+        {
+            self.entries.is_empty() && self.tlases.is_empty()
+        }
+        #[cfg(not(feature = "hwrt"))]
+        {
+            self.entries.is_empty()
+        }
     }
 
     /// Destroys every entry whose `retire_frame <= epoch`, retaining the rest. Uses a
@@ -82,6 +143,26 @@ impl RetiredGpuBuffers {
             // so the by-value destroy frees it exactly once.
             unsafe { ctx.destroy_buffer(entry.buf) };
         }
+
+        // HW-RT rung (task#11): the TLAS lane, same scan shape, SAME fence-gate contract.
+        #[cfg(feature = "hwrt")]
+        {
+            let mut i = 0;
+            while i < self.tlases.len() {
+                if self.tlases[i].retire_frame > epoch {
+                    i += 1;
+                    continue;
+                }
+                let entry = self.tlases.swap_remove(i);
+                // SAFETY: `entry.retire_frame <= epoch` (checked above) — the caller's
+                // fence-wait contract (this fn's `# Safety`) guarantees every submit that
+                // could reference `entry.tlas` is GPU-complete (see `push_tlas`'s doc for
+                // the per-slot rebuild proof); `swap_remove` yields it exactly once, so the
+                // by-value destroy (AS-first-then-backing-then-scratch) frees it exactly
+                // once.
+                unsafe { destroy_persistent_tlas(ctx, entry.tlas) };
+            }
+        }
     }
 
     /// Destroys EVERY remaining entry regardless of its horizon — the teardown drain
@@ -98,6 +179,15 @@ impl RetiredGpuBuffers {
             // references `entry.buf`; `Vec::drain` yields each entry exactly once, so the
             // by-value destroy frees it exactly once.
             unsafe { ctx.destroy_buffer(entry.buf) };
+        }
+
+        // HW-RT rung (task#11): the TLAS lane, same contract.
+        #[cfg(feature = "hwrt")]
+        for entry in self.tlases.drain(..) {
+            // SAFETY: per this fn's contract the device is idle, so no submission
+            // references `entry.tlas`; `Vec::drain` yields each entry exactly once, so the
+            // by-value destroy (AS-first-then-backing-then-scratch) frees it exactly once.
+            unsafe { destroy_persistent_tlas(ctx, entry.tlas) };
         }
     }
 }

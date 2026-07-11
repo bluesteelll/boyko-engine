@@ -58,23 +58,39 @@
 //! assertions DO cross-check real state (`table().buffer` identity,
 //! `rebind_pending`, `is_empty()`).
 //!
-//! # Phase B is runtime-gated to non-RT devices (W3)
+//! # Phase B now runs on BOTH legs (asset-streaming plan F7-hwrt, task#11)
 //!
-//! `GpuSceneBundles::grow_instance_family_if_needed`'s own gate is
-//! `self.tlas.is_some() || self.mv.is_some()` (design §7.3 step 1) — RT instance
-//! growth is OUT OF SCOPE (E1 Option B). On an RT-capable device built with
-//! `--features hwrt`, `tlas.is_some()` — so Phase B's > `INSTANCE_CAPACITY` spawn
-//! would trip the LIVE hard `assert!` in `upload_instance_models` instead of
-//! growing, aborting this phased run before Phases A/D's assertions are ever
-//! checked. `instance_grow_out_of_scope` (below) reproduces the SAME condition
-//! `ctx.ray_query_enabled()` computes (`RayCaps.tier`, the world-visible mirror of
+//! `GpuSceneBundles::grow_instance_family_if_needed` dispatches to
+//! `grow_instance_family_rt` on an RT device (`self.tlas.is_some()`) instead of the
+//! former W3 early-return — RT-leg instance-family growth (the TLAS/mv sides grown in
+//! lockstep with the shared instance rings) is now IN SCOPE. Phase B's >
+//! `INSTANCE_CAPACITY` spawn therefore exercises the SAME execution smoke on BOTH the
+//! non-RT (`grow_instance_family_nonrt`) and RT (`grow_instance_family_rt`) paths —
+//! `is_rt_leg` (below, renamed from the pre-task#11 `instance_grow_out_of_scope`, whose
+//! name described behavior this rung removed) reproduces the SAME
+//! `ctx.ray_query_enabled()` condition (`RayCaps.tier`, the world-visible mirror of
 //! `DeviceCaps::rt_tier()` `runner.rs` inserts UNCONDITIONALLY at boot, ADDITIONALLY
-//! gated on the `hwrt` Cargo feature — see that fn's doc for why `RayCaps.tier`
-//! alone is not sufficient), so Phase B runs ONLY when instance growth is actually
-//! in scope. `FinalGrowStats`'s material-side assertions (`grow_transitions >= 2`,
-//! `rebind_pending` both `false`, `retired_is_empty`) hold on BOTH legs regardless;
-//! Phase B's own assertion is conditioned on whether it ran. The RT hard cap itself
-//! is verified separately, by `asset_streaming_f7_rt_cap_headless.rs`.
+//! gated on the `hwrt` Cargo feature — see that fn's doc for why `RayCaps.tier` alone is
+//! not sufficient) purely for the final assertions' diagnostic messages and the
+//! `InstanceCapacityAdvanced` structural claim below. `FinalGrowStats`'s material-side
+//! assertions (`grow_transitions >= 2`, `rebind_pending` both `false`,
+//! `retired_is_empty`) hold on BOTH legs regardless, as does Phase B's own assertion
+//! now (it must have run on EITHER leg). The RT hard cap that task#11 REMOVED is no
+//! longer asserted anywhere; `asset_streaming_f7_rt_cap_headless.rs` (repurposed by
+//! task#11 — see that file's module doc) now instead proves the RT leg's
+//! over-capacity gather SUCCEEDS via growth rather than panicking.
+//!
+//! # Reading `instance_capacity[*]` is structurally impossible from here
+//!
+//! `GpuSceneBundles`/`WindowHost`/`INSTANCE_CAPACITY` stay `pub(crate)` inside
+//! `boyko_app` (see "Public-API-only constraint" below) — no visibility modifier on a
+//! method of a `pub(crate)` type changes this, because the CONTAINING type itself is
+//! unreachable from this external integration-test crate. So there is no way for this
+//! file to numerically assert `instance_capacity[*] > INSTANCE_CAPACITY` post-grow; the
+//! RT-leg claim below is therefore ALSO an execution smoke (reaching the final
+//! assertions without a panic/device-lost already proves the RT-leg grow-and-rebind
+//! path — including every AS-handle repoint — held), exactly like the non-RT Phase B
+//! claim always was.
 //!
 //! # What "a grow happened" / "how many" means here (no private grow counter exists)
 //!
@@ -140,11 +156,12 @@ use boyko_render::{MaterialGpu, MaterialTable, MeshRenderScratch, RayCaps, Retir
 #[cfg(feature = "hwrt")]
 use boyko_render::{ShadowDenoiseConfig, ShadowDenoiseMode};
 
-/// `true` iff RT instance growth is OUT OF SCOPE on this run (W3 — the coordinator's
-/// finding): `GpuSceneBundles::grow_instance_family_if_needed`'s own gate is
-/// `self.tlas.is_some() || self.mv.is_some()`, and `tlas`/`mv` are built iff
-/// `ctx.ray_query_enabled()` — which is `#[cfg(feature = "hwrt")] {
-/// self.device_caps().ray_query } #[cfg(not(feature = "hwrt"))] { false }`
+/// `true` iff this run is on the RT leg (asset-streaming plan F7-hwrt, task#11 —
+/// renamed from the pre-task#11 `instance_grow_out_of_scope`, whose name described the
+/// former W3 behavior this rung removed; the CONDITION it computes is unchanged).
+/// `GpuSceneBundles::grow_instance_family_if_needed` dispatches on `self.tlas.is_some()`,
+/// and `tlas` is built iff `ctx.ray_query_enabled()` — which is `#[cfg(feature = "hwrt")]
+/// { self.device_caps().ray_query } #[cfg(not(feature = "hwrt"))] { false }`
 /// (`boyko_rhi_vulkan::device`). `RayCaps.tier` mirrors the RAW device probe
 /// (`DeviceCaps::rt_tier()`, inserted UNCONDITIONALLY at boot regardless of the
 /// `hwrt` Cargo feature — `runner.rs`), so on a NON-hwrt build the raw probe can
@@ -152,7 +169,7 @@ use boyko_render::{ShadowDenoiseConfig, ShadowDenoiseMode};
 /// exists there — checking `RayCaps.tier` ALONE would be wrong. This fn reproduces
 /// `ray_query_enabled()`'s EXACT compile-time-AND-runtime combination instead of
 /// approximating it.
-fn instance_grow_out_of_scope(caps: &RayCaps) -> bool {
+fn is_rt_leg(caps: &RayCaps) -> bool {
     cfg!(feature = "hwrt") && caps.tier != RtTier::Absent
 }
 
@@ -216,9 +233,9 @@ impl SharedCubeMesh {
 
 /// `true` iff Phase B (the > `INSTANCE_CAPACITY` drawable spawn) actually ran this
 /// run. Plain `Send` `Resource` (like `FinalGrowStats`), so it survives the
-/// runner's shutdown for the post-run assertions. `false` on an RT device (Phase B
-/// is skipped there — see `instance_grow_out_of_scope`'s doc; the RT hard cap is
-/// covered separately by `asset_streaming_f7_rt_cap_headless.rs`).
+/// runner's shutdown for the post-run assertions. Asset-streaming plan F7-hwrt
+/// (task#11): Phase B now runs unconditionally on BOTH legs (the former RT skip is
+/// removed), so this must read `true` regardless of device tier.
 #[derive(Resource, Default, Clone, Copy)]
 struct InstanceGrowRan(bool);
 
@@ -288,16 +305,15 @@ fn snapshot_pm_stats(scratch: Res<MeshRenderScratch>, mut stats: ResMut<FinalPmS
 }
 
 /// The phase driver: ONE system, gated on `FrameCounter`, that runs Phase A (steady
-/// material mint), then Phase B (one-shot instance-heavy spawn — SKIPPED on an RT
-/// device, see `instance_grow_out_of_scope`), then goes quiet for Phase D. See this
-/// file's module doc for why a single steady mint stream suffices for both
+/// material mint), then Phase B (one-shot instance-heavy spawn — asset-streaming plan
+/// F7-hwrt, task#11: now UNCONDITIONAL on both legs), then goes quiet for Phase D. See
+/// this file's module doc for why a single steady mint stream suffices for both
 /// "grow-past-boot (material)" and FIX-F.
 fn phase_driver(
     mut commands: Commands,
     mut materials: ResMut<Assets<MaterialGpu>>,
     mut frame: ResMut<FrameCounter>,
     mut instance_grow_ran: ResMut<InstanceGrowRan>,
-    caps: Res<RayCaps>,
     cube: Res<SharedCubeMesh>,
 ) {
     let f = frame.0;
@@ -317,39 +333,44 @@ fn phase_driver(
     }
 
     if f == PHASE_B_INSTANCE_SPAWN_AT_FRAME {
-        // Phase B: one-shot large batch — the non-RT instance-family grow
-        // execution smoke (§12 grow-past-boot, instance). SKIPPED on an RT device
-        // (W3 — `grow_instance_family_if_needed` is a no-op there BY DESIGN;
-        // spawning past `INSTANCE_CAPACITY` there instead trips the LIVE hard
-        // `assert!` in `upload_instance_models`, which `asset_streaming_f7_rt_cap_
-        // headless.rs` verifies separately). Running it here anyway on an RT
-        // device would abort THIS phased run before Phases A/D's assertions below
-        // ever get checked.
-        if !instance_grow_out_of_scope(&caps) {
-            // Asset-streaming plan F8 fold-in: every Phase-B drawable carries a SHARED
-            // non-default material (not just Phase A's fresh-material-per-drawable side
-            // effect — Phase A's own drawables already carry non-zero-indexed handles) —
-            // see this file's module doc for why this batch is ALSO the F8
-            // pm_instance_material_rings lockstep-growth execution smoke.
-            let pm_material = materials.add(MaterialGpu::new(
-                [0.9, 0.1, 0.1, 1.0],
-                1.0,
-                0.3,
-                0.5,
-                [0.0, 0.0, 0.0],
-                0,
-            ));
-            for i in 0..PHASE_B_INSTANCE_DRAWABLES {
-                commands.spawn(MeshBundle {
-                    material: MaterialHandle(pm_material.index() as u16),
-                    ..MeshBundle::new(
-                        cube.get(),
-                        Transform::from_translation(Vec3::new((i % 64) as f32, (i / 64) as f32, 0.0)),
-                    )
-                });
-            }
-            instance_grow_ran.0 = true;
+        // Review O3 (byte-identity guard): Phase A's steady 1-drawable/frame mint never
+        // exceeds INSTANCE_CAPACITY (800 << 1024), so the instance family must NOT have
+        // grown before this point on EITHER leg — every existing golden's byte-identity
+        // depends on this grow path staying dead absent an actual over-capacity gather.
+        assert!(
+            !instance_grow_ran.0,
+            "invariant (O3): instance-family growth must not have fired during Phase A \
+             (only {PHASE_A_MINT_FRAMES} drawables spawned, comfortably under \
+             INSTANCE_CAPACITY) — a golden-perturbing regression would trip this first"
+        );
+
+        // Phase B: one-shot large batch — the instance-family grow execution smoke
+        // (§12 grow-past-boot, instance), now exercised on BOTH legs (asset-streaming
+        // plan F7-hwrt, task#11 removed the RT skip).
+        //
+        // Asset-streaming plan F8 fold-in: every Phase-B drawable carries a SHARED
+        // non-default material (not just Phase A's fresh-material-per-drawable side
+        // effect — Phase A's own drawables already carry non-zero-indexed handles) —
+        // see this file's module doc for why this batch is ALSO the F8
+        // pm_instance_material_rings lockstep-growth execution smoke.
+        let pm_material = materials.add(MaterialGpu::new(
+            [0.9, 0.1, 0.1, 1.0],
+            1.0,
+            0.3,
+            0.5,
+            [0.0, 0.0, 0.0],
+            0,
+        ));
+        for i in 0..PHASE_B_INSTANCE_DRAWABLES {
+            commands.spawn(MeshBundle {
+                material: MaterialHandle(pm_material.index() as u16),
+                ..MeshBundle::new(
+                    cube.get(),
+                    Transform::from_translation(Vec3::new((i % 64) as f32, (i / 64) as f32, 0.0)),
+                )
+            });
         }
+        instance_grow_ran.0 = true;
     }
 
     // Phase D (every remaining frame): quiet — no further material/instance
@@ -476,59 +497,75 @@ fn f7_grow_and_defer_old_phased_headless() {
          table before every record, so neither slot should still be flagged pending"
     );
 
-    // No leak: every superseded buffer (from every grow across the whole run,
-    // including Phase A's multiple grows) must have drained past its RETIRE_DELAY
-    // horizon by the Phase D tail's end.
+    // No leak: every superseded buffer/TLAS (from every grow across the whole run,
+    // including Phase A's multiple material grows and, under `hwrt` on an RT device,
+    // Phase B's instance/TLAS grow) must have drained past its RETIRE_DELAY horizon by
+    // the Phase D tail's end. `RetiredGpuBuffers::is_empty()` covers BOTH its lanes
+    // (asset-streaming plan F7-hwrt, task#11 added the `tlases` lane) — no separate
+    // check is needed here.
     assert!(
         stats.retired_is_empty,
-        "every superseded material buffer (across ALL {} observed grows) must have \
-         drained past its RETIRE_DELAY horizon by the Phase D idle tail's end — a \
-         leaked entry here means RetiredGpuBuffers::drain_ready missed one",
+        "every superseded buffer/TLAS (across ALL {} observed material grows, plus any \
+         instance/TLAS grow) must have drained past its RETIRE_DELAY horizon by the \
+         Phase D idle tail's end — a leaked entry here means RetiredGpuBuffers::drain_ready \
+         missed one",
         stats.grow_transitions
     );
 
-    // Phase B: grow-past-boot (instance, non-RT) — EXECUTION SMOKE ONLY (see module
-    // doc). Conditional on the runtime device tier (`instance_grow_out_of_scope`,
-    // W3): on a NON-RT device this is LOAD-BEARING (Phase B must have run — a
-    // silently-skipped Phase B here would be a gating bug, not a legitimate RT
-    // skip); on an RT device Phase B is correctly skipped (growth is out of scope
-    // there BY DESIGN — the RT hard cap is verified separately by
-    // `asset_streaming_f7_rt_cap_headless.rs`). Reaching this assertion at all
-    // (rather than a panic) already proves whichever path ran did so without a
-    // device-lost.
+    // Phase B: grow-past-boot (instance) — EXECUTION SMOKE ONLY (see module doc).
+    // Asset-streaming plan F7-hwrt (task#11): Phase B now runs UNCONDITIONALLY on BOTH
+    // legs (the former RT skip removed) — a silently-skipped Phase B here is ALWAYS a
+    // gating bug, on either device tier. Reaching this assertion at all (rather than a
+    // panic/device-lost) already proves the grow-and-rebind path — non-RT or RT — held.
     let instance_grow_ran = app.world().resource::<InstanceGrowRan>().0;
-    let device_is_rt = instance_grow_out_of_scope(app.world().resource::<RayCaps>());
-    assert_eq!(
-        instance_grow_ran, !device_is_rt,
-        "Phase B (the > INSTANCE_CAPACITY drawable spawn) must run iff instance growth \
-         is in scope (non-RT device): instance_grow_ran={instance_grow_ran}, \
-         device_is_rt={device_is_rt}"
+    let device_is_rt = is_rt_leg(app.world().resource::<RayCaps>());
+    assert!(
+        instance_grow_ran,
+        "Phase B (the > INSTANCE_CAPACITY drawable spawn) must have run on EITHER leg \
+         (device_is_rt={device_is_rt}) — task#11 removed the RT-leg skip"
     );
 
-    // Asset-streaming plan F8 fold-in: on a non-RT device, Phase B's shared non-default
-    // material must have kept the PM pipeline-selection flag armed AND the material lane
-    // must have scaled past INSTANCE_CAPACITY in lockstep with the instance ring — reaching
-    // this assertion at all (rather than a panic inside `upload_instance_materials`) already
-    // proves the lockstep grow held (see this file's module doc); these two checks
-    // additionally rule out a SILENTLY SKIPPED material upload (a gating bug that never
-    // calls `upload_instance_materials`, which would leave the flag/lane looking inert
-    // instead of aborting).
-    if !device_is_rt {
-        let pm_stats = *app.world().resource::<FinalPmStats>();
-        assert!(
-            pm_stats.any_non_default_material_last,
-            "F8: any_non_default_material() must still read true at the end of the run — \
-             Phase B's shared non-default material (plus Phase A's own \
-             fresh-material-per-drawable drawables, all still live) must keep the PM gate armed"
-        );
-        assert!(
-            pm_stats.max_material_ids_len >= PHASE_B_INSTANCE_DRAWABLES as usize,
-            "F8: MeshRenderScratch::material_ids must have scaled to at least the \
-             post-Phase-B drawable count (observed max {}, expected >= {}) — a material \
-             lane that failed to grow past INSTANCE_CAPACITY in lockstep with the instance \
-             ring would have aborted this run via upload_instance_materials's hard assert \
-             before ever reaching here",
-            pm_stats.max_material_ids_len, PHASE_B_INSTANCE_DRAWABLES
+    // Asset-streaming plan F8 fold-in: Phase B's shared non-default material must have
+    // kept the PM pipeline-selection flag armed AND the material lane must have scaled
+    // past INSTANCE_CAPACITY in lockstep with the instance ring, on BOTH legs — reaching
+    // this assertion at all (rather than a panic inside `upload_instance_materials`)
+    // already proves the lockstep grow held (see this file's module doc); these two
+    // checks additionally rule out a SILENTLY SKIPPED material upload (a gating bug that
+    // never calls `upload_instance_materials`, which would leave the flag/lane looking
+    // inert instead of aborting).
+    let pm_stats = *app.world().resource::<FinalPmStats>();
+    assert!(
+        pm_stats.any_non_default_material_last,
+        "F8: any_non_default_material() must still read true at the end of the run — \
+         Phase B's shared non-default material (plus Phase A's own \
+         fresh-material-per-drawable drawables, all still live) must keep the PM gate armed"
+    );
+    assert!(
+        pm_stats.max_material_ids_len >= PHASE_B_INSTANCE_DRAWABLES as usize,
+        "F8: MeshRenderScratch::material_ids must have scaled to at least the \
+         post-Phase-B drawable count (observed max {}, expected >= {}) — a material \
+         lane that failed to grow past INSTANCE_CAPACITY in lockstep with the instance \
+         ring would have aborted this run via upload_instance_materials's hard assert \
+         before ever reaching here",
+        pm_stats.max_material_ids_len, PHASE_B_INSTANCE_DRAWABLES
+    );
+
+    // RT-only claim (asset-streaming plan F7-hwrt, task#11): on the RT leg, the SAME
+    // grow-past-boot batch above ALSO drove `grow_instance_family_rt` (the TLAS/mv
+    // sides), past INSTANCE_CAPACITY. `instance_capacity[*]`/`GpuSceneBundles` stay
+    // `pub(crate)` inside `boyko_app` (see "Reading instance_capacity[*] is structurally
+    // impossible from here" in this file's module doc) — no visibility change on an
+    // accessor can surface a `pub(crate)`-only TYPE to this external test crate, so this
+    // claim is necessarily the SAME execution-smoke evidence as the assertions above,
+    // scoped to the RT leg by `device_is_rt`: reaching here without a panic/device-lost
+    // on an RT device proves the RT-leg grow (shared rings + conditional mv + tlas +
+    // every AS-handle repoint) held.
+    if device_is_rt {
+        eprintln!(
+            "f7_grow_and_defer_old_phased_headless: RT leg reached the final assertions \
+             without a panic/device-lost after a > INSTANCE_CAPACITY gather — \
+             grow_instance_family_rt (shared rings + tlas.grow_slot + conditional \
+             mv.grow_slot + repoint_tlas_accel) held"
         );
     }
 }

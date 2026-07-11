@@ -650,6 +650,21 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     host.frame.repoint_material_table(ctx, s, material_table.table());
                 }
             }
+
+            // Asset-streaming plan F7-hwrt (task#11): the AS-handle counterpart of the
+            // material repoint above — gated ONLY on `tlas_accel_rebind_pending[s]`
+            // (`core::mem::take` clears it), NEVER on "grew this frame", so a slot left
+            // lagging by a PRIOR frame's TLAS grow still converges (the SAME FIX-E
+            // discipline `MaterialTable::rebind_pending` uses).
+            #[cfg(feature = "hwrt")]
+            if core::mem::take(&mut host.gpu.tlas_accel_rebind_pending[s]) {
+                // SAFETY: `s == token.slot()` fenced this frame (`wait_frame_in_flight`
+                // above) — its sets are non-pending; `current_tlas_accel(s)` reads the
+                // CURRENT (just-grown) persistent TLAS.
+                unsafe {
+                    host.frame.repoint_tlas_accel(ctx, s, host.gpu.current_tlas_accel(s));
+                }
+            }
         }
 
         // 5-pre. The R7 SDF edit list — the ONE-SHOT boot-static write (host plan R7).
