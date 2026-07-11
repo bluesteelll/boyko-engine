@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/boyko_ecs", "crates/boyko_macros", "crates/boyko_utils", "crates/boyko_threadpool", "crates/bench_bevy_vs_boyko", "crates/boyko_demo", "crates/boyko_rhi", "crates/boyko_rhi_vulkan", "crates/boyko_render", "crates/boyko_serialize", "crates/boyko_physics", "crates/boyko_math", "crates/boyko_sdf_math", "crates/boyko_shaderdsl", "crates/boyko_input", "crates/boyko_ui", "crates/boyko_scene", "crates/boyko_fontbake", "crates/boyko_app"]
+members = ["crates/boyko_ecs", "crates/boyko_macros", "crates/boyko_utils", "crates/boyko_threadpool", "crates/bench_bevy_vs_boyko", "crates/boyko_demo", "crates/boyko_rhi", "crates/boyko_rhi_vulkan", "crates/boyko_render", "crates/boyko_serialize", "crates/boyko_physics", "crates/boyko_math", "crates/boyko_sdf_math", "crates/boyko_shaderdsl", "crates/boyko_input", "crates/boyko_ui", "crates/boyko_scene", "crates/boyko_fontbake", "crates/boyko_app", "crates/boyko_image"]
 
 # Centralized lints opted into per-crate via `[lints] workspace = true`.
 # Only `boyko_threadpool` opts in today (Phase 9.1). Registers the

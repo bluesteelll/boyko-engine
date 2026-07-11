@@ -1,0 +1,22 @@
+[package]
+name = "boyko_image"
+version = "0.1.0"
+edition = "2024"
+description = "In-house PNG decoder (RFC 1950/1951 zlib+DEFLATE, PNG container). Zero third-party dependencies, `std` only. Decoupled leaf utility crate — no dependency on any other workspace crate, mirrors boyko_utils' role for image data."
+
+# INVIOLABLE: ZERO third-party deps. The engine is fully in-house; a codec is
+# exactly the kind of surface that would normally reach for `png`/`flate2`/
+# `image`, but the owner's explicit decision is to author the zlib/DEFLATE
+# decompressor and PNG container parser from the RFC/spec text ourselves.
+[dependencies]
+
+[dev-dependencies]
+# Workspace-pinned criterion 0.5 (same major as every other crate's bench) —
+# drives the inflate fast-table-vs-naive throughput bench.
+criterion.workspace = true
+
+# Proves the canonical-Huffman fast-table decode path (root+subtable lookup)
+# actually beats a bit-by-bit tree walk, per the plan's stated perf rationale.
+[[bench]]
+name = "inflate_throughput"
+harness = false
