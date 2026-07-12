@@ -242,14 +242,38 @@ void main(uint3 tid : SV_DispatchThreadID) {
     bool has_surface = view_t < VIEWT_BG;
 
     // --- W3 camera-only MV reconstruction (C1: the UNJITTERED shared camera basis) ----------
+    // The view ray for this pixel (shared basis) — used for BOTH the surface-point reprojection
+    // and the background point-at-infinity reprojection below.
     float3 ro, rd;
     generate_ray(px, py, w, h, camera_mode, cam_eye.xyz, cam_forward, cam_right, cam_up.xyz, ro, rd);
-    float3 P = ro + rd * view_t;
-    float4 prev_clip = mul(mc_prev_view_proj, float4(P, 1.0));
+
+    // W5-FIX (static-scene silhouette supersampling): a BACKGROUND pixel (`!has_surface`) MUST
+    // still accumulate — it is NOT a disocclusion. Under sub-pixel jitter a silhouette pixel FLIPS
+    // between mesh-covered and background across the Halton cycle; the previous code treated every
+    // uncovered frame as `reset_now` (full replace), which WIPED the accumulated color to the bare
+    // current sample, so an edge pixel only ever held the latest HARD state (mesh OR sky) — a
+    // shifted staircase, never the partial-coverage average that IS the anti-aliasing.
+    //
+    // A background pixel has no finite surface point, so it reprojects the POINT AT INFINITY along
+    // the view ray `rd` (a direction, `w = 0`): `mul(prev_view_proj, float4(rd, 0))`. This is
+    // rotation-correct AND translation-invariant — an infinitely-far sky point does not move under
+    // camera translation and moves correctly under rotation (the far-plane background MV Bevy uses),
+    // so a TEXTURED skybox tracks without smear, not just a flat sky. For a STATIC camera it
+    // collapses to the pixel's own screen UV (the ray's vanishing point projects back to pixel `p`),
+    // so `MV ≡ 0` and silhouette pixels accumulate their own history exactly. Only a genuine
+    // disocclusion (a reprojection that lands OFF-screen / behind the camera) or the host-forced
+    // reset (first armed frame / resize) still forces the single-frame replace.
+    float4 prev_clip;
+    if (has_surface) {
+        float3 P = ro + rd * view_t;
+        prev_clip = mul(mc_prev_view_proj, float4(P, 1.0));
+    } else {
+        prev_clip = mul(mc_prev_view_proj, float4(rd, 0.0));
+    }
     float2 prev_uv = clip_to_uv(prev_clip);
     bool off_screen = any(prev_uv < 0.0) || any(prev_uv > 1.0) || prev_clip.w <= 0.0;
 
-    bool reset_now = (pc.reset != 0u) || !has_surface || off_screen;
+    bool reset_now = (pc.reset != 0u) || off_screen;
 
     if (reset_now) {
         // Disocclusion / off-screen / host-forced reset: the I5-style single-frame fallback —

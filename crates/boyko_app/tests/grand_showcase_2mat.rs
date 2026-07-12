@@ -34,6 +34,7 @@ use boyko_app::prelude::*;
 use boyko_ecs::ecs::core::system::ResMut;
 use boyko_render::Material;
 use boyko_render::{AaConfig, AaMode};
+use boyko_render::ResolvedTaa;
 use boyko_render::{SsaoConfig, SsaoQuality};
 use boyko_render::generate_tangents;
 use boyko_render::mesh::Vertex;
@@ -197,6 +198,21 @@ fn grand_showcase_2mat_screenshot_dump() {
         // SETTLE_FRAMES window, so the frame-30 dump is a converged-static TAA image (the
         // orchestrator's partial oracle — in-motion quality is owner-gated).
         app.insert_resource(AaConfig { mode: AaMode::Taa });
+        // DIAGNOSTIC (TAA no-op investigation): override the temporal-resolve tunables from env so
+        // a variance-clip sweep needs no rebuild. `BOYKO_TAA_VG` = variance_gamma (clip AABB
+        // half-width in σ; a huge value ≈ "clip off"), `BOYKO_TAA_MIN` = min_blend (steady-state
+        // feedback floor), `BOYKO_TAA_DEF` = default_blend. Unset ⇒ the shipped v1 defaults.
+        let mut rt = ResolvedTaa::default();
+        if let Ok(v) = std::env::var("BOYKO_TAA_VG") {
+            if let Ok(f) = v.parse::<f32>() { rt.variance_gamma = f; }
+        }
+        if let Ok(v) = std::env::var("BOYKO_TAA_MIN") {
+            if let Ok(f) = v.parse::<f32>() { rt.min_blend = f; }
+        }
+        if let Ok(v) = std::env::var("BOYKO_TAA_DEF") {
+            if let Ok(f) = v.parse::<f32>() { rt.default_blend = f; }
+        }
+        app.insert_resource(rt);
     }
     // Render P7-Q2 owner-eval SSAO oracle: `BOYKO_SSAO=low`/`medium`/`high` arms the SSAO
     // compute pass on this 5-sphere scene (mirrors the `BOYKO_AA` knob above). Unset ⇒ the
