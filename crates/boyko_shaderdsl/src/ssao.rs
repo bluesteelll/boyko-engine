@@ -127,10 +127,13 @@ pub const SSAO_PRESETS: [SsaoParams; 3] = [
         strength: SSAO_STRENGTH,
         eps: SSAO_EPS,
     },
-    // High — the widest tap budget (3 slices × 6 steps × 2 = 36 taps).
+    // High — the widest tap budget (4 REAL evenly-spaced slices × 6 steps × 2 = 48 taps). Change B:
+    // 4 slices (stride 4 over the 16-entry SSAO_ROT -> 0/45/90/135°) now that Change A makes them
+    // distinct; 4 divides SSAO_ROT_N (16), the even-spacing constraint. (Was 3 slices, whose 3rd
+    // axis duplicated the 2nd under the pre-A hardcoded 2-axis glue — no real angular coverage.)
     SsaoParams {
         radius: 0.5,
-        slices: 3,
+        slices: 4,
         steps: 6,
         strength: 2.5,
         eps: 1.0e-4,

@@ -523,7 +523,7 @@ embed_spirv! {
 }
 
 embed_spirv! {
-    /// `SSAO_PARAMS[SSAO_QUALITY_HIGH]` — `sdf_ssao_high.comp.spv` (3 slices × 6 steps × 2 = 36 taps).
+    /// `SSAO_PARAMS[SSAO_QUALITY_HIGH]` — `sdf_ssao_high.comp.spv` (4 slices × 6 steps × 2 = 48 taps).
     SDF_SSAO_HIGH_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_ssao_high.comp.spv")
 }
@@ -1717,8 +1717,9 @@ pub const SSAO_PARAMS: [SsaoParams; 3] = [
         strength: SSAO_STRENGTH,
         eps: SSAO_EPS,
     },
-    // High — the widest tap budget (3 slices × 6 steps × 2 = 36 taps).
-    SsaoParams { radius: 0.5, slices: 3, steps: 6, strength: 2.5, eps: 1.0e-4 },
+    // High — the widest tap budget (4 REAL evenly-spaced slices × 6 steps × 2 = 48 taps; Change B —
+    // 4 divides SSAO_ROT_N(16) for even stride-4 spacing, now that Change A makes slices distinct).
+    SsaoParams { radius: 0.5, slices: 4, steps: 6, strength: 2.5, eps: 1.0e-4 },
 ];
 
 /// The LOW SSAO quality variant index into [`SSAO_PARAMS`] / [`sdf_ssao_spirv_variant`].

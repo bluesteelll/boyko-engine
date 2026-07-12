@@ -153,6 +153,15 @@ static const float2 SSAO_ROT[16] = {
     float2( -0.98078525,  0.19509032 ),  // 168.75 deg
 };
 
+// Even-slice base axis (Change A): slice `s` spans angle `s*(pi/SSAO_SLICES)` == `SSAO_ROT[s*STRIDE]`,
+// reusing the SAME bit-exact 16-entry rotation table (host + shader share the identical literals)
+// instead of a new per-N `(cos,sin)` table (no round-trip risk, no per-variant header). REQUIRES
+// `SSAO_SLICES` to DIVIDE `SSAO_ROT_N` (2/4/8/16) for exact even spacing — the host oracle asserts
+// this. `N=2` gives stride 8 -> `ROT[0]=(1,0)`, `ROT[8]=(0,1)`: byte-identical to the pre-A hardcoded
+// `(sl==0)?(1,0):(0,1)` pair, so the Medium variant stays frozen (the no-op proof). A common-glue
+// line (NOT in the swapped `SSAO_*` header block), so `variant_hlsl` carries it verbatim per variant.
+static const uint SSAO_BASE_STRIDE = SSAO_ROT_N / SSAO_SLICES;
+
 // --- Octahedral decode (BYTE-IDENTICAL to the resolve's `oct_decode` in deferred_pbr.hlsl;
 // the inverse of the marcher's oct_encode). gNormal.rg carries the octahedral normal; the
 // horizon step measures the neighbour's elevation above the tangent plane this normal defines.
@@ -270,12 +279,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
         float occ = 0.0;
         [unroll]
         for (uint sl = 0u; sl < SSAO_SLICES; ++sl) {
-            // The base slice axis (slices evenly split a half-turn: slice s at s*(pi/SLICES));
-            // pre-baked as integer-indexed `(cos, sin)` rotated by the per-pixel `rot`. Two
-            // slices -> axes (1,0) and (0,1) before rotation. The 2D screen axis is lifted to a
-            // 3D in-screen direction along the camera right/up basis (PERSPECTIVE) or the
-            // world x/y plane (ORTHO; right=+x, up=+y) — the same basis ray-gen builds from.
-            float2 base = (sl == 0u) ? float2(1.0, 0.0) : float2(0.0, 1.0);
+            // The base slice axis: slices EVENLY split a half-turn (slice s at s*(pi/SLICES)),
+            // read from the pre-baked `(cos, sin)` rotation table at stride `SSAO_BASE_STRIDE`
+            // (Change A — real angular coverage; the pre-A code hardcoded only 2 axes, so 3+ slices
+            // duplicated the (0,1) axis and added NO coverage). Then rotated by the per-pixel `rot`.
+            // The 2D screen axis is lifted to a 3D in-screen direction along the camera right/up
+            // basis (PERSPECTIVE) or the world x/y plane (ORTHO) — the same basis ray-gen builds from.
+            float2 base = SSAO_ROT[sl * SSAO_BASE_STRIDE];
             // Rotate the base axis by the per-pixel rotation: (c -s; s c) * base. This 2D screen
             // axis picks the neighbour PIXEL (the tap offset); the horizon math measures
             // elevation against the center surface normal N, NOT this direction.

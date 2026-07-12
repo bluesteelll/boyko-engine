@@ -2502,12 +2502,18 @@ pub fn golden_ssao_attributes(
     let steps_f = params.steps as f32;
     let mut occ = 0.0_f32;
     for sl in 0..params.slices {
-        // The base slice axis: slice 0 -> (1,0), EVERY other slice -> (0,1) before rotation —
-        // the EXACT `(sl == 0u) ? float2(1,0) : float2(0,1)` the shader bakes (so the High
-        // variant's slices 1 & 2 both start from (0,1), differing only by the per-pixel `rot`,
-        // matching the GPU bit-for-bit). The 2D screen axis picks the neighbour PIXEL (the tap
-        // offset); the horizon math measures elevation against the center normal, NOT this axis.
-        let base = if sl == 0 { (1.0_f32, 0.0) } else { (0.0, 1.0) };
+        // The base slice axis (Change A): slice `s` at angle `s*(pi/N)` == `SSAO_ROT[s*STRIDE]`,
+        // the EXACT `SSAO_ROT[sl * (SSAO_ROT_N / SSAO_SLICES)]` the shader bakes (evenly-spaced
+        // real slices; the pre-A code hardcoded only 2 axes). `SSAO_SLICES` must divide
+        // `SSAO_ROT_N` for exact spacing (asserted). The 2D screen axis picks the neighbour PIXEL
+        // (the tap offset); the horizon math measures elevation against the center normal, NOT this.
+        debug_assert_eq!(
+            SSAO_ROT_N % params.slices,
+            0,
+            "invariant: SSAO_SLICES ({}) must divide SSAO_ROT_N ({SSAO_ROT_N}) for even slice spacing",
+            params.slices
+        );
+        let base = SSAO_ROT[(sl * (SSAO_ROT_N / params.slices)) as usize];
         let sdir2 = (
             base.0 * rot.0 - base.1 * rot.1,
             base.0 * rot.1 + base.1 * rot.0,
