@@ -11,3 +11,4 @@ mod gbuffer;
 mod present_blit;
 mod scene;
 mod smaa;
+mod ssaa;

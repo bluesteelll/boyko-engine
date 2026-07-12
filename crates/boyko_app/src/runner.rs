@@ -30,13 +30,13 @@ use boyko_input::{ButtonState, KeyCode, RawInputEvent};
 use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
 #[cfg(windows)]
 use boyko_render::{
-    BindlessTextureTable, CsmCasterScratch, DdgiCaps, LightingConfig, MATERIAL_FLAG_TEXTURED,
-    Material, MaterialId, MaterialTable, MeshAssetsExt, MeshGpu, MeshRenderScratch,
-    OrphanedMeshGpu, OrphanedTextureGpu, RayBackendPolicy, RayCaps, RenderEpoch, ResolvedAa,
-    ResolvedCsm, ResolvedShadowAtlas, RetiredGpuBuffers, RhiContext, SdfEditStaging,
-    ShadowDenoiseConfig, ShadowDenoiseMode, TextureAssetsExt, TextureGpu, collect_sdf_edits,
-    gbuffer_push_from_view, retire_deferred_frees, upload_atlas_ring, upload_camera_ring,
-    upload_csm_ring, upload_instance_materials, upload_instance_materials_tex,
+    AaConfig, AaMode, BindlessTextureTable, CsmCasterScratch, DdgiCaps, LightingConfig,
+    MATERIAL_FLAG_TEXTURED, Material, MaterialId, MaterialTable, MeshAssetsExt, MeshGpu,
+    MeshRenderScratch, OrphanedMeshGpu, OrphanedTextureGpu, RayBackendPolicy, RayCaps,
+    RenderEpoch, ResolvedAa, ResolvedCsm, ResolvedShadowAtlas, RetiredGpuBuffers, RhiContext,
+    SdfEditStaging, ShadowDenoiseConfig, ShadowDenoiseMode, TextureAssetsExt, TextureGpu,
+    collect_sdf_edits, gbuffer_push_from_view, retire_deferred_frees, upload_atlas_ring,
+    upload_camera_ring, upload_csm_ring, upload_instance_materials, upload_instance_materials_tex,
     upload_instance_models, upload_light_table, upload_material_assets, upload_mesh_assets,
     upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list, upload_texture_assets,
 };
@@ -77,6 +77,12 @@ pub(crate) struct WindowDesc {
     pub(crate) width: u32,
     /// Requested client-area height in pixels.
     pub(crate) height: u32,
+    /// SSAA (AA campaign Stage 3): the owner-requested render scale — `0`/`1` mean off
+    /// (the DEFAULT, byte-identical to before SSAA existed); v1 honors ONLY `2`. Read
+    /// exactly once by [`crate::host::WindowHost::boot`]'s device-capability arming
+    /// probe, which is the SOLE authority over whether SSAA actually activates (a
+    /// request that cannot fit the device degrades to `Off`, never a panic).
+    pub(crate) ssaa_scale: u32,
 }
 
 /// The frame clear color — a dark neutral (the empty-gather / background tone).
@@ -390,6 +396,17 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     }
 
     app.finish();
+
+    // SSAA (AA campaign Stage 3, C1): resolution is a BOOT COMMITMENT — when the host
+    // armed the 2× composite extent (`WindowHost::boot`'s device-capability probe), the
+    // ECS mode MUST agree, so a 2× render is never left un-consumed (which would sample
+    // the 2× `lit` 1:1 through the unchanged present-blit crop — a cropped top-left
+    // quarter, never what an armed boot intends). This is TRUTHFUL, not the sole
+    // authority: the per-frame read site below is the backstop LOCK (host-authoritative
+    // regardless of what any startup system might have inserted).
+    if host.ssaa_armed {
+        app.world_mut().insert_resource(AaConfig { mode: AaMode::Ssaa });
+    }
 
     // The R7 SDF edit-list gather — run ONCE here, explicitly (host plan R7, the P0
     // order fix). `collect_sdf_edits` MUST observe every `SdfPrimitive` the user spawns,
@@ -1302,16 +1319,38 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             let terminator_wrap = world
                 .try_resource::<LightingConfig>()
                 .is_some_and(|cfg| cfg.terminator_softening > 0.0);
-            // Anti-aliasing Stage 1: read the resolved AA mode (`AaPlugin`'s
+            // Anti-aliasing Stage 1/2: read the resolved AA mode (`AaPlugin`'s
             // `resolve_aa_policy` is the single writer). No `#[cfg(hwrt)]` — AA is
             // feature-independent, unlike `denoise_armed` above. The SAME `try_resource`
             // pattern `terminator_wrap`/`ddgi_enabled` use: a host that omits `AaPlugin`
             // degrades to the default `Off` rather than panicking. Default/absent `Off` ⇒
             // `scene.aa == None` ⇒ byte-identical (the 0%-gate).
-            let aa_mode = world
+            let resolved_aa_mode = world
                 .try_resource::<ResolvedAa>()
                 .map(|r| r.mode)
                 .unwrap_or_default();
+            // SSAA (AA campaign Stage 3, C1) — the HOST-AUTHORITATIVE LOCK: resolution is
+            // a boot commitment (`WindowHost::boot`'s device-capability probe), so the
+            // per-frame mode MUST agree with it, never the reverse. `host.ssaa_armed` ⇒
+            // FORCE `Ssaa` regardless of what the ECS resolved (the post-`finish()`
+            // resident insertion above already makes this the truthful common case; this
+            // debug_assert catches any later system that stomped `AaConfig` back to
+            // something else). `!host.ssaa_armed` ⇒ any `Ssaa` the ECS resolved (e.g. a
+            // stale `AaConfig` from a prior boot's serialized state, or a test that
+            // requests SSAA on an unarmed host) DEGRADES to `Off` — the 2× render was
+            // never committed, so consuming it would sample uninitialized/OOB `.Load`
+            // coords in the downsample shader. Off/Fxaa/Smaa pass through unchanged.
+            let aa_mode = if host.ssaa_armed {
+                debug_assert!(
+                    matches!(resolved_aa_mode, AaMode::Ssaa),
+                    "invariant: SSAA boot-armed but ResolvedAa={resolved_aa_mode:?}"
+                );
+                AaMode::Ssaa
+            } else if matches!(resolved_aa_mode, AaMode::Ssaa) {
+                AaMode::Off
+            } else {
+                resolved_aa_mode
+            };
             let scene = host.gpu.scene(
                 mvp,
                 s,
@@ -1359,9 +1398,16 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // `host.gpu` / the World's `Assets<MeshGpu>` / `MaterialTable`, all
             // outliving the call); `present_extent` == the composite extent the camera
             // push `count`, `dispatch_group_count_x`, and the G-buffer targets
-            // are sized to (all boot-fixed, plan D7); a `Some(readback)` is
-            // the dump's host-visible staging, sized to the current swapchain
-            // extent by `HostDump::request` (`None` on the steady path).
+            // are sized to (all boot-fixed, plan D7); `aa_extent` == `host.native_extent`
+            // (boot-fixed, SSAA's `aa_out` size — see `render_gbuffer_frame`'s doc: it
+            // MUST stay boot-fixed, not the live window size, for the same resize-
+            // invariance `present_extent` already has); a `Some(readback)` is the dump's
+            // host-visible staging, sized to the current swapchain extent by
+            // `HostDump::request` (`None` on the steady path).
+            let aa_extent = VkExtent2D {
+                width: host.native_extent.0,
+                height: host.native_extent.1,
+            };
             unsafe {
                 host.renderer.render_gbuffer_frame(
                     token,
@@ -1374,6 +1420,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     host.window.height(),
                     CLEAR_COLOR,
                     present_extent,
+                    aa_extent,
                     readback,
                 )
             }
@@ -1543,6 +1590,8 @@ unsafe fn destroy_host_gpu_chain(host: WindowHost, ctx: &VulkanContext) {
         draw_scratch: _,
         retire_scratch: _,
         composite_extent: _,
+        ssaa_armed: _,
+        native_extent: _,
         light_uploaded_gen: _,
         swapchain,
         surface,

@@ -24,10 +24,16 @@
 //!
 //! # Extensibility
 //!
-//! Stage 1 landed `Off` + `Fxaa`. Stage 2 adds `Smaa` (3-pass morphological AA). Later
-//! stages ADD variants (`Taa`, `Ssaa`) to [`AaMode`] — a purely additive change; each new
-//! mode plugs into the SAME framework (a post-process pass at the resolve→present seam
-//! writing the shared `aa_out` target the present samples).
+//! Stage 1 landed `Off` + `Fxaa`. Stage 2 added `Smaa` (3-pass morphological AA). Stage 3
+//! adds `Ssaa` (2× ordered-grid supersampling) — a purely additive change; each new mode
+//! plugs into the SAME framework (a post-process pass at the resolve→present seam writing
+//! the shared `aa_out` target the present samples). Unlike `Fxaa`/`Smaa`, `Ssaa` is
+//! **boot-fixed, host-authoritative**: the render scale is decided once at
+//! `WindowHost::boot` (device-capability probe: `max_image_dimension_2d` + VRAM estimate,
+//! degrading to `Off` on failure — never a panic) and the per-frame read site in
+//! `boyko_app::runner` LOCKS the mode (`ssaa_armed ⇒ force Ssaa`, `!ssaa_armed ⇒ any Ssaa
+//! degrades to Off`). This crate only carries the enum word; it cannot see the boot
+//! resolution.
 
 use boyko_macros::Resource;
 
@@ -43,8 +49,9 @@ use boyko_ecs::ecs::core::system::{Res, ResMut};
 /// there is NO redundant `enabled: bool` — exactly as
 /// [`SsaoQuality`](crate::ssao_config::SsaoQuality) keys off its `Off` variant.
 ///
-/// Stage 1 implemented `Off` + `Fxaa`; Stage 2 adds `Smaa`. `Taa`/`Ssaa` land in later
-/// stages (additive).
+/// Stage 1 implemented `Off` + `Fxaa`; Stage 2 added `Smaa`; Stage 3 adds `Ssaa`
+/// (boot-fixed, host-authoritative — see `boyko_app::host::WindowHost` for the arming
+/// probe). `Taa` remains for a later stage (additive).
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum AaMode {
@@ -62,11 +69,20 @@ pub enum AaMode {
     /// diagonal/corner edges than FXAA at a higher per-frame cost (3 passes + 2 LUT
     /// reads vs FXAA's 1 pass).
     Smaa,
+    /// 2× ordered-grid supersampling — the whole deferred pipeline renders at 2× per axis
+    /// (4× pixels), then a linear-light box downsample (`shaders/ssaa_downsample.fs.hlsl`)
+    /// resolves into a native-size `aa_out` the present-blit samples 1:1. Quality-reference
+    /// AA (resolves geometry + shading + texture aliasing, not just post-process luma
+    /// edges). **Render-scaled and boot-fixed**: the 2× resolution is committed at
+    /// `WindowHost::boot` behind a device-capability probe (degrades to `Off`, never
+    /// panics); this mode cannot be toggled live like `Fxaa`/`Smaa` — changing it requires
+    /// a re-boot with a different `EnginePlugins::with_ssaa_scale`.
+    Ssaa,
 }
 
 impl AaMode {
     /// The stable mode word forwarded to the backend (the `#[repr(u32)]` discriminant).
-    /// `Off => 0`, `Fxaa => 1`, `Smaa => 2`.
+    /// `Off => 0`, `Fxaa => 1`, `Smaa => 2`, `Ssaa => 3`.
     #[inline]
     pub const fn as_word(self) -> u32 {
         self as u32
@@ -143,10 +159,12 @@ impl ResolvedAa {
 // ---- the resolve decision (pure — the AA analogue of `resolve_ssao`) ------------------
 
 /// Maps an [`AaConfig`] to its derived [`ResolvedAa`] — the pure AA resolve decision (the
-/// unit-testable core the cold system wraps). Currently an identity forward of the mode; it
-/// exists as a seam so a later stage can fold device-capability degrade (e.g. an SSAA extent
-/// the device cannot allocate → `Off`) into ONE place, mirroring how `resolve_ssao` centralises
-/// the SSAO variant decision.
+/// unit-testable core the cold system wraps). An identity forward of the mode: the SSAA
+/// device-capability degrade (an extent the device cannot allocate → `Off`) happens
+/// host-side at `WindowHost::boot`, BEFORE this crate ever sees a mode word — this crate
+/// cannot see the boot resolution, so the seam here stays identity. The doc'd degrade-seam
+/// intent still mirrors how `resolve_ssao` centralises the SSAO variant decision, for any
+/// future ECS-visible degrade this crate CAN decide.
 #[inline]
 pub fn resolve_aa(cfg: &AaConfig) -> ResolvedAa {
     ResolvedAa { mode: cfg.mode }
@@ -185,6 +203,7 @@ mod tests {
         // Capability is structural: every non-Off mode is enabled.
         assert!(AaConfig { mode: AaMode::Fxaa }.enabled(), "Fxaa must be enabled (mode != Off)");
         assert!(AaConfig { mode: AaMode::Smaa }.enabled(), "Smaa must be enabled (mode != Off)");
+        assert!(AaConfig { mode: AaMode::Ssaa }.enabled(), "Ssaa must be enabled (mode != Off)");
         assert!(!AaConfig { mode: AaMode::Off }.enabled(), "Off is the disabled state");
     }
 
@@ -194,6 +213,7 @@ mod tests {
         assert_eq!(AaMode::Off.as_word(), 0);
         assert_eq!(AaMode::Fxaa.as_word(), 1);
         assert_eq!(AaMode::Smaa.as_word(), 2);
+        assert_eq!(AaMode::Ssaa.as_word(), 3);
     }
 
     #[test]
@@ -201,6 +221,7 @@ mod tests {
         assert_eq!(resolve_aa(&AaConfig { mode: AaMode::Off }), ResolvedAa { mode: AaMode::Off });
         assert_eq!(resolve_aa(&AaConfig { mode: AaMode::Fxaa }), ResolvedAa { mode: AaMode::Fxaa });
         assert_eq!(resolve_aa(&AaConfig { mode: AaMode::Smaa }), ResolvedAa { mode: AaMode::Smaa });
+        assert_eq!(resolve_aa(&AaConfig { mode: AaMode::Ssaa }), ResolvedAa { mode: AaMode::Ssaa });
     }
 
     #[test]

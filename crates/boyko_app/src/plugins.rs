@@ -95,6 +95,12 @@ pub struct EnginePlugins {
     width: u32,
     /// Requested client-area height in pixels.
     height: u32,
+    /// SSAA (AA campaign Stage 3): the owner-requested render scale, default `0`
+    /// (off — byte-identical to before SSAA existed). Set via [`Self::with_ssaa_scale`];
+    /// `build` also honors `BOYKO_AA=ssaa` (the owner-eval channel) when this stays at
+    /// its default. Only `2` is ever honored past `build` — the host's device-capability
+    /// probe is the sole arming authority (see `crate::host::WindowHost::boot`).
+    ssaa_scale: u32,
 }
 
 impl EnginePlugins {
@@ -115,7 +121,18 @@ impl EnginePlugins {
             title,
             width,
             height,
+            ssaa_scale: 0,
         }
+    }
+
+    /// Requests SSAA (AA campaign Stage 3) at the given render scale — v1 honors ONLY
+    /// `2` (2× per axis); any other value is clamped to off by the host's boot-time
+    /// device-capability probe (`WindowHost::boot`), which is the sole arming authority
+    /// (dims + VRAM budget) and NEVER panics on a device that cannot fit the request.
+    #[inline]
+    pub fn with_ssaa_scale(mut self, scale: u32) -> Self {
+        self.ssaa_scale = scale;
+        self
     }
 }
 
@@ -285,10 +302,24 @@ impl Plugin for EnginePlugins {
             add_gpu_transform_pack(b).in_set(FixedSet::Snapshot);
         });
 
+        // SSAA (AA campaign Stage 3): the explicit builder wins when `>= 2`; otherwise
+        // `BOYKO_AA=ssaa` (the owner-eval channel, same env family the AA framework
+        // already reserves) requests the v1 default of `2`. Any other value the host
+        // does not honor (only `2` arms — see `WindowHost::boot`), so passing it through
+        // unclamped here is harmless: the host's device-capability probe is the sole
+        // arming authority.
+        let ssaa_scale = if self.ssaa_scale >= 2 {
+            self.ssaa_scale
+        } else if std::env::var("BOYKO_AA").as_deref() == Ok("ssaa") {
+            2
+        } else {
+            0
+        };
         let desc = WindowDesc {
             title: self.title,
             width: self.width,
             height: self.height,
+            ssaa_scale,
         };
         app.set_runner(Box::new(move |app: &mut App| {
             runner::run_windowed(app, desc)

@@ -89,7 +89,11 @@ impl Renderer<'_> {
     /// grid, and the camera UBO `count` were all sized to in `sync_gbuffer`). `extent` is
     /// the swapchain extent and governs ONLY pass C's clear render-area (step 8) and the
     /// readback region (step 9); the present-blit viewport is `min(extent, present_extent)`
-    /// at the origin for the exact 1:1 top-left composite present.
+    /// at the origin for the exact 1:1 top-left composite present. `aa_extent` (SSAA) is the
+    /// BOOT-FIXED native extent `aa_out` was actually allocated at (`sync_gbuffer`'s
+    /// `aa_extent` param) — the SSAA downsample pass's render-area/viewport MUST use this,
+    /// NOT `extent` (which tracks live window resizes while `aa_out` stays boot-fixed,
+    /// exactly like `present_extent`). Unread when `scene.ssaa` is `None`.
     ///
     /// # Safety
     ///
@@ -111,6 +115,7 @@ impl Renderer<'_> {
         view: VkImageView,
         extent: VkExtent2D,
         present_extent: VkExtent2D,
+        aa_extent: VkExtent2D,
         clear: [f32; 4],
         scene: &GBufferScene<'_>,
         targets: &GBufferTargets,
@@ -2165,18 +2170,21 @@ impl Renderer<'_> {
             .present_sample;
         self.record_graph_pass(present_sample, cmd, targets, scene, fi);
 
-        // Anti-aliasing Stage 1 (FXAA) / Stage 2 (SMAA). `sync_gbuffer` keeps
-        // `targets.aa_out.is_some() == (scene.aa.is_some() || scene.smaa.is_some())` in
-        // lockstep (an arm-state change forces a fence-safe resync, exactly like an extent
-        // change), so these always agree within a frame. Gate on `aa_out` (what `present_set`
-        // follows) so any transient mismatch degrades to "present samples lit, no AA pass" —
-        // never a panic. RAW barriers on `aa_out` only (the DDGI-update/TLAS-build
-        // precedent); `lit` needs none (already SHADER_READ_ONLY_OPTIMAL from
-        // `present_sample` above). Consumes `lit` after the framegraph's last declared use —
-        // safe until a transient-aliasing allocator lands; exempt this site then. OFF
-        // (`aa_out` is `None`) records nothing. FXAA is checked FIRST (byte-identical to the
-        // committed Stage-1 dispatch); `scene.aa`/`scene.smaa` are mutually exclusive by
-        // construction (`debug_assert!` in `GBufferTargets::create`).
+        // Anti-aliasing Stage 1 (FXAA) / Stage 2 (SMAA) / Stage 3 (SSAA). `sync_gbuffer` keeps
+        // `targets.aa_out.is_some() == (scene.aa.is_some() || scene.smaa.is_some() ||
+        // scene.ssaa.is_some())` in lockstep (an arm-state change forces a fence-safe resync,
+        // exactly like an extent change), so these always agree within a frame. Gate on
+        // `aa_out` (what `present_set` follows) so any transient mismatch degrades to "present
+        // samples lit, no AA pass" — never a panic. RAW barriers on `aa_out` only (the
+        // DDGI-update/TLAS-build precedent); `lit` needs none (already
+        // SHADER_READ_ONLY_OPTIMAL from `present_sample` above). Consumes `lit` after the
+        // framegraph's last declared use — safe until a transient-aliasing allocator lands;
+        // exempt this site then. OFF (`aa_out` is `None`) records nothing. FXAA is checked
+        // FIRST (byte-identical to the committed Stage-1 dispatch); `scene.aa`/`scene.smaa`/
+        // `scene.ssaa` are mutually exclusive by construction (`debug_assert!` in
+        // `GBufferTargets::create`). SSAA uses `aa_extent` (the BOOT-FIXED native extent
+        // `aa_out` was actually allocated at), NOT `extent` (live, tracks window resizes) or
+        // `present_extent` (2× under SSAA) — the crux difference from FXAA/SMAA.
         if targets.aa_out.is_some() {
             if let Some(fxaa) = scene.aa.as_ref() {
                 // SAFETY: recording is open; `present_sample` above left `lit` in
@@ -2190,6 +2198,14 @@ impl Renderer<'_> {
                 // `smaa_*_set` rings were built by `create()` under the same `scene.smaa`
                 // that gates this branch; `present_extent` sizes every SMAA target.
                 unsafe { self.record_smaa(cmd, targets, smaa, present_extent, fi) };
+            } else if let Some(ssaa) = scene.ssaa.as_ref() {
+                debug_assert!(targets.aa_out.is_some() && targets.downsample_set.is_some());
+                // SAFETY: recording is open; `present_sample` above left `lit` (the 2× ring)
+                // in SHADER_READ_ONLY_OPTIMAL; `aa_out`/`downsample_set` were built by
+                // `create()` under the same `scene.ssaa` that gates this branch, sized to
+                // `aa_extent` (the BOOT-FIXED native size, NOT `present_extent`, which is 2×
+                // under SSAA, and NOT the live `extent`, which tracks window resizes).
+                unsafe { self.record_ssaa(cmd, targets, ssaa, aa_extent, fi) };
             }
         }
 

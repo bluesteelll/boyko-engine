@@ -2342,6 +2342,9 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // AA Stage 2: OFF (the default) — NO SMAA pass recorded, byte-identical to the pre-AA
         // stream (the 0%-gate).
         smaa: None,
+        // AA Stage 3: OFF (the default) — NO SSAA pass recorded, `aa_out` stays sized to
+        // `present_extent` (native here), byte-identical to the pre-SSAA stream (the 0%-gate).
+        ssaa: None,
         // M3: the LEGACY merged draw (no instanced mesh — an EMPTY batch slice) —
         // `record_gbuffer` keeps `vkCmdDraw(vertex_count, 1, 0, 0)`, byte-identical to the
         // pre-M2 stream.
@@ -2502,7 +2505,7 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         let presented = unsafe {
             renderer.render_gbuffer_frame(
                 token, ctx, surface, &mut swapchain, &scene, &mut frame,
-                window.width(), window.height(), clear, present_extent, Some(&staging),
+                window.width(), window.height(), clear, present_extent, present_extent, Some(&staging),
             )
         }
         .unwrap_or_else(|e| panic!("brick dump frame ({path}) failed: {e:?}"));
@@ -2525,7 +2528,7 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
             let _ = unsafe {
                 renderer.render_gbuffer_frame(
                     token, ctx, surface, &mut swapchain, &scene, &mut frame,
-                    window.width(), window.height(), clear, present_extent, None,
+                    window.width(), window.height(), clear, present_extent, present_extent, None,
                 )
             }
             .unwrap_or_else(|e| panic!("brick dump drain frame ({path}) failed: {e:?}"));
@@ -2646,6 +2649,7 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
                 window.width(),
                 window.height(),
                 clear,
+                present_extent,
                 present_extent,
                 rb,
             )
@@ -3292,6 +3296,9 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // AA Stage 2: OFF (the default) — NO SMAA pass recorded, byte-identical to the pre-AA
         // stream (the 0%-gate).
         smaa: None,
+        // AA Stage 3: OFF (the default) — NO SSAA pass recorded, `aa_out` stays sized to
+        // `present_extent` (native here), byte-identical to the pre-SSAA stream (the 0%-gate).
+        ssaa: None,
         // M3: the LEGACY merged draw (no instanced mesh — an EMPTY batch slice) —
         // `record_gbuffer` keeps `vkCmdDraw(vertex_count, 1, 0, 0)`, byte-identical to the
         // pre-M2 stream.
@@ -3431,7 +3438,7 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         let presented = unsafe {
             renderer.render_gbuffer_frame(
                 token, ctx, surface, &mut swapchain, &scene, &mut frame,
-                window.width(), window.height(), clear, present_extent, Some(&staging),
+                window.width(), window.height(), clear, present_extent, present_extent, Some(&staging),
             )
         }
         .unwrap_or_else(|e| panic!("p0 cull readback frame (cull_on={cull_on}) failed: {e:?}"));
@@ -3453,7 +3460,7 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
             let _ = unsafe {
                 renderer.render_gbuffer_frame(
                     token, ctx, surface, &mut swapchain, &scene, &mut frame,
-                    window.width(), window.height(), clear, present_extent, None,
+                    window.width(), window.height(), clear, present_extent, present_extent, None,
                 )
             }
             .unwrap_or_else(|e| panic!("p0 cull drain frame (cull_on={cull_on}) failed: {e:?}"));
@@ -5931,6 +5938,7 @@ fn ab_present_one<'ctx>(
             window.height(),
             clear,
             present_extent,
+            present_extent,
             readback,
         )
     };
@@ -8025,6 +8033,9 @@ fn run_showcase_body_ddgi(
         // AA Stage 2: OFF (the default) — NO SMAA pass recorded, byte-identical to the
         // pre-AA stream (the 0%-gate).
         smaa: None,
+        // AA Stage 3: OFF (the default) — NO SSAA pass recorded, `aa_out` stays sized to
+        // `present_extent` (native here), byte-identical to the pre-SSAA stream (the 0%-gate).
+        ssaa: None,
         mesh_draw: &mesh_draws,
         csm_cascade_texture: &csm.cascade,
         csm_compare_sampler: &csm.sampler,
@@ -8212,7 +8223,7 @@ fn run_showcase_body_ddgi(
         let presented = unsafe {
             renderer.render_gbuffer_frame(
                 token, ctx, surface, &mut swapchain, &scene, &mut frame,
-                window.width(), window.height(), clear, present_extent, staging_arg,
+                window.width(), window.height(), clear, present_extent, present_extent, staging_arg,
             )
         }
         .unwrap_or_else(|e| panic!("showcase DDGI converge frame failed: {e:?}"));
@@ -8237,7 +8248,7 @@ fn run_showcase_body_ddgi(
             let _ = unsafe {
                 renderer.render_gbuffer_frame(
                     token, ctx, surface, &mut swapchain, &scene, &mut frame,
-                    window.width(), window.height(), clear, present_extent, None,
+                    window.width(), window.height(), clear, present_extent, present_extent, None,
                 )
             }
             .unwrap_or_else(|e| panic!("showcase DDGI drain frame failed: {e:?}"));
@@ -8460,7 +8471,7 @@ fn run_gpu_pass_cost_timing<'ctx>(
         let presented = unsafe {
             renderer.render_gbuffer_frame(
                 token, ctx, surface, swapchain, scene, frame,
-                window.width(), window.height(), *clear, present_extent, None,
+                window.width(), window.height(), *clear, present_extent, present_extent, None,
             )
         }
         .unwrap_or_else(|e| panic!("gpu_pass_cost frame failed: {e:?}"));
@@ -9364,6 +9375,9 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         // AA Stage 2: OFF (the default) — NO SMAA pass recorded, byte-identical to the
         // pre-AA stream (the 0%-gate).
         smaa: None,
+        // AA Stage 3: OFF (the default) — NO SSAA pass recorded, `aa_out` stays sized to
+        // `present_extent` (native here), byte-identical to the pre-SSAA stream (the 0%-gate).
+        ssaa: None,
         // M3: when the config carried instanced meshes, pass A runs the batch loop — one
         // INSTANCED INDEXED draw per registered mesh, each at its `base_instance` bucket
         // (the `use_model_matrix == 1` arm — `cfg.mvp` set its byte 84). Every legacy scene
@@ -9673,7 +9687,7 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
             let presented = unsafe {
                 renderer.render_gbuffer_frame(
                     token, ctx, surface, &mut swapchain, &scene, &mut frame,
-                    window.width(), window.height(), clear, present_extent, Some(&staging),
+                    window.width(), window.height(), clear, present_extent, present_extent, Some(&staging),
                 )
             }
             .unwrap_or_else(|e| panic!("showcase readback frame failed: {e:?}"));
@@ -9694,7 +9708,7 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
                     let _ = unsafe {
                         renderer.render_gbuffer_frame(
                             token, ctx, surface, &mut swapchain, &scene, &mut frame,
-                            window.width(), window.height(), clear, present_extent, None,
+                            window.width(), window.height(), clear, present_extent, present_extent, None,
                         )
                     }
                     .unwrap_or_else(|e| panic!("showcase drain frame failed: {e:?}"));

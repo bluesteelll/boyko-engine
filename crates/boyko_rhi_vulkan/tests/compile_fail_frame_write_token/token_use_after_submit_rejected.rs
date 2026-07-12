@@ -29,7 +29,7 @@ unsafe fn write_after_submit<'ctx>(
     // SAFETY: never executed — a compile-fail case; the call only needs to typecheck.
     let _ = unsafe {
         renderer.render_gbuffer_frame(
-            token, ctx, surface, swapchain, scene, frame, 64, 64, [0.0; 4], extent, None,
+            token, ctx, surface, swapchain, scene, frame, 64, 64, [0.0; 4], extent, extent, None,
         )
     };
     token.slot()

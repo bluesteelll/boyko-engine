@@ -171,7 +171,18 @@ fn setup(
 #[ignore = "needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the material-showcase screenshot"]
 fn grand_showcase_2mat_screenshot_dump() {
     let mut app = App::new();
-    app.add_plugins(EnginePlugins::window("boyko_engine grand showcase materials", 512, 512));
+    // SSAA (AA campaign Stage 3) is boot-fixed, host-authoritative: it cannot be armed by
+    // a plain `insert_resource` (unlike FXAA/SMAA below) — the render SCALE itself must be
+    // requested on the `EnginePlugins` builder so `WindowHost::boot`'s device-capability
+    // probe can commit the 2× `composite_extent` before `finish()` ever runs. The runner
+    // then inserts `AaConfig{Ssaa}` itself (host-authoritative) — no manual insert here.
+    let plugins = EnginePlugins::window("boyko_engine grand showcase materials", 512, 512);
+    let plugins = if std::env::var("BOYKO_AA").as_deref() == Ok("ssaa") {
+        plugins.with_ssaa_scale(2)
+    } else {
+        plugins
+    };
+    app.add_plugins(plugins);
     app.add_startup_system(setup);
     // Owner-eval AA oracle: `BOYKO_AA=fxaa`/`smaa` arms the FXAA/SMAA post-process pass on
     // this high-contrast 5-sphere scene (real silhouette edges for AA to smooth). Unset ⇒

@@ -746,6 +746,17 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// AA campaign Stage 3 — SSAA 2× downsample fragment SPIR-V
+    /// (`shaders/ssaa_downsample.fs.hlsl`): a linear-light 2×2 box filter that resolves the
+    /// 2× LIT ring into the native-size `aa_out`. Paired with [`fullscreen_sample_vs_spirv`]
+    /// (reuses the same fullscreen-triangle VS); reads `lit` via `.Load` (the bound sampler
+    /// is irrelevant), writes `aa_out`. Armed only when `scene.ssaa` is `Some` — boot-fixed,
+    /// host-authoritative (see `boyko_app::host::WindowHost`).
+    SSAA_DOWNSAMPLE_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/ssaa_downsample.fs.spv")
+}
+
+embed_spirv! {
     /// AA campaign Stage 2 — SMAA 1x pass 1 (edge detection) fragment SPIR-V
     /// (`shaders/smaa_edge.fs.hlsl`, ported verbatim from iryoku `SMAALumaEdgeDetectionPS`).
     /// Paired with [`fullscreen_sample_vs_spirv`] (all three SMAA passes share the same
@@ -1291,6 +1302,17 @@ pub fn fullscreen_sample_fs_spirv() -> &'static [u32] {
 #[inline]
 pub fn fxaa_fs_spirv() -> &'static [u32] {
     FXAA_FS_SPV.as_words()
+}
+
+/// The committed SSAA 2× downsample fragment SPIR-V as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// Paired with [`fullscreen_sample_vs_spirv`] in the SSAA downsample pipeline
+/// (`color_formats[0]` == `aa_out`'s format; the SAME `present_layout` FXAA/present reuse —
+/// see [`SsaaActivation`](crate::present::SsaaActivation)).
+#[inline]
+pub fn ssaa_downsample_fs_spirv() -> &'static [u32] {
+    SSAA_DOWNSAMPLE_FS_SPV.as_words()
 }
 
 /// The committed SMAA 1x pass-1 (edge detection) fragment SPIR-V as a `u32` word stream,

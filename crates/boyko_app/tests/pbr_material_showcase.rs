@@ -103,8 +103,11 @@ struct EvalKnobs {
     /// `BOYKO_CSM=off` — disables the CSM shadow-cascade insert (default: enabled).
     csm_off: bool,
     /// `BOYKO_AA` — the post-process anti-aliasing mode (`fxaa` → [`AaMode::Fxaa`], `smaa` →
-    /// [`AaMode::Smaa`], else [`AaMode::Off`], the default). The AA campaign visual-oracle
-    /// knob: unset ⇒ Off ⇒ byte-identical to the no-AA dump.
+    /// [`AaMode::Smaa`], `ssaa` → [`AaMode::Ssaa`] — ALSO arms
+    /// `EnginePlugins::with_ssaa_scale(2)` at the app-build call site below, since the mode
+    /// alone cannot scale the boot-fixed render resolution — else [`AaMode::Off`], the
+    /// default). The AA campaign visual-oracle knob: unset ⇒ Off ⇒ byte-identical to the
+    /// no-AA dump.
     aa_mode: AaMode,
 }
 
@@ -138,6 +141,7 @@ impl EvalKnobs {
         let aa_mode = match std::env::var("BOYKO_AA").ok().as_deref() {
             Some("fxaa") => AaMode::Fxaa,
             Some("smaa") => AaMode::Smaa,
+            Some("ssaa") => AaMode::Ssaa,
             _ => AaMode::Off,
         };
         Self {
@@ -286,7 +290,14 @@ fn pbr_material_showcase_screenshot_dump() {
     // 1280² — higher than Bevy's 960 (its 768 window hi-DPI-scaled), so texture detail
     // reads at least as sharply as the reference.
     // DIAGNOSTIC: env-tunable render size (BOYKO_WIN) to test supersampling vs aliasing.
-    app.add_plugins(EnginePlugins::window("boyko_engine PBR material showcase", knobs.win, knobs.win));
+    let plugins = EnginePlugins::window("boyko_engine PBR material showcase", knobs.win, knobs.win);
+    // SSAA (AA campaign Stage 3) is boot-fixed, host-authoritative: `knobs.aa_mode` alone
+    // cannot scale the render resolution — the builder must request the 2× composite
+    // extent BEFORE `WindowHost::boot`'s device-capability probe runs (see the module doc
+    // above + `EvalKnobs::aa_mode`'s doc).
+    let plugins =
+        if knobs.aa_mode == AaMode::Ssaa { plugins.with_ssaa_scale(2) } else { plugins };
+    app.add_plugins(plugins);
     app.add_startup_system(setup);
     // Owner-eval knobs: `apply_eval_lighting_knobs` sets the resolve tonemapper
     // (`BOYKO_TONEMAP`) AND the diffuse terminator softening (`BOYKO_WRAP`) on the

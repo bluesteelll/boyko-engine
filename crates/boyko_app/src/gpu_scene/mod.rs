@@ -32,14 +32,15 @@ use boyko_rhi_vulkan::ddgi::DdgiAtlas;
 use boyko_rhi_vulkan::compute::{
     B5_CAMERA_UBO_BYTES_M4, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, EDITLIST_BUFFER_WORDS,
     INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS,
-    LOCAL_SIZE_X, TILE_BOUND_BYTES, csm_depth_fs_spirv, csm_depth_vs_spirv, deferred_pbr_spirv,
+    LOCAL_SIZE_X, TILE_BOUND_BYTES, TILE_SIZE, csm_depth_fs_spirv, csm_depth_vs_spirv, deferred_pbr_spirv,
     deferred_pbr_wrap_spirv,
     encode_edit_list, fullscreen_sample_fs_spirv, fullscreen_sample_vs_spirv, fxaa_fs_spirv,
     gbuffer_mrt_fs_spirv,
     gbuffer_mrt_pm_fs_spirv, gbuffer_mrt_pm_vs_spirv, gbuffer_mrt_tex_fs_spirv,
     gbuffer_mrt_tex_vs_spirv, gbuffer_mrt_vs_spirv, interp_instances_spirv, punctual_depth_fs_spirv,
     punctual_depth_vs_spirv, sdf_gbuffer_composite_spirv, sdf_probe_update_spirv,
-    smaa_blend_fs_spirv, smaa_edge_fs_spirv, smaa_weight_fs_spirv, tile_grid_extent,
+    smaa_blend_fs_spirv, smaa_edge_fs_spirv, smaa_weight_fs_spirv, ssaa_downsample_fs_spirv,
+    tile_grid_extent,
 };
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::ffi::VkDescriptorSet;
@@ -51,7 +52,7 @@ use boyko_rhi_vulkan::rhi_impl::{
 use boyko_rhi_vulkan::swapchain::{
     AaActivation, CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
     GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene,
-    InterpActivation, PunctualDepthActivation, SmaaActivation,
+    InterpActivation, PunctualDepthActivation, SmaaActivation, SsaaActivation,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::accel::BoundAccelStruct;
@@ -670,6 +671,14 @@ pub(crate) struct GpuSceneBundles {
     /// Anti-aliasing Stage 2: the boot-resident `SearchTex` LUT (64×16, `R8_UNORM`),
     /// uploaded once via `boyko_render::upload_texture_2d_raw` and never touched again.
     smaa_search_tex: VulkanTexture,
+    /// Anti-aliasing Stage 3: the SSAA downsample fullscreen graphics pipeline
+    /// (`fullscreen_sample.vs` + `ssaa_downsample.fs`), built unconditionally at boot (like
+    /// [`Self::fxaa_pipeline`]) so records nothing until `AaMode::Ssaa` is host-armed.
+    /// `color_formats[0]` == `R8G8B8A8_UNORM` (`aa_out`'s format), NO push constants;
+    /// reuses [`Self::present_layout`] — the SAME 1-CIS shape [`Self::fxaa_pipeline`] uses.
+    /// Reuses [`Self::present_sampler`] (NEAREST — the shader's `.Load` ignores it) as the
+    /// SSAA sampler; no dedicated sampler field (unlike `fxaa_sampler`/`smaa_sampler`).
+    ssaa_pipeline: VulkanGraphicsPipeline,
     // ── CSM / atlas (bound-but-unread trios; depth passes OFF in R3) ─────────
     csm: CsmResources,
     /// `ceil(composite pixels / LOCAL_SIZE_X)` — the marcher + resolve dispatch
@@ -735,6 +744,18 @@ impl GpuSceneBundles {
     pub(crate) fn boot(ctx: &VulkanContext, composite: (u32, u32), swap_format: Format) -> Self {
         let (cw, ch) = composite;
         debug_assert!(cw > 0 && ch > 0, "invariant: boot composite extent is non-zero");
+        // SSAA (W1): `composite` is ALREADY 2× native when `WindowHost::boot` armed SSAA (it
+        // folds the scale into `composite_extent` before calling this fn), so every buffer
+        // sized from `(cw, ch)` here scales automatically — no SSAA-specific branch needed in
+        // this function. Full enumeration of what DOES vs does NOT key off `(cw, ch)`:
+        // - PIXEL-COUNT-DERIVED (scale with SSAA, verified by the `debug_assert!`s below):
+        //   `dispatch_group_count_x` (the marcher/resolve dispatch width) and `tiles_buffer`
+        //   (the P4b coarse-cull tile grid, via `tile_grid_extent(cw, ch)`).
+        // - RESOLUTION-INDEPENDENT (fixed capacity or per-frame CONTENTS, not sized from
+        //   `(cw, ch)`): `camera_ring`/`edit_list`/`light_table`/the vertex/instance rings/the
+        //   hwrt resources/the DDGI atlas — none of these buffers' byte SIZE is a function of
+        //   `(cw, ch)` (their per-frame *contents* may encode the composite dims, but that is
+        //   host-written data, not a boot-time allocation size).
         let device = ctx;
 
         // ── The edit-list SSBO (vocab binding 0), seeded EMPTY (count == 0):
@@ -780,6 +801,15 @@ impl GpuSceneBundles {
         // ── The P4b coarse-cull tile buffer (vocab binding 6), bound-but-unread
         // (the coarse cull is gated OFF).
         let (tw, th) = tile_grid_extent(cw, ch);
+        // SSAA (W1): the tile grid must cover the FULL composite extent on both axes — the
+        // per-axis analogue of the `dispatch_group_count_x` coverage assert below (a future
+        // edit that keyed either buffer to `native` instead of `composite` would silently
+        // under-cull/under-dispatch at any SSAA scale; this fires immediately in debug).
+        debug_assert!(
+            (tw as u64) * (TILE_SIZE as u64) >= cw as u64
+                && (th as u64) * (TILE_SIZE as u64) >= ch as u64,
+            "invariant: the coarse-cull tile grid covers the composite pixel extent at any SSAA scale"
+        );
         let tiles_buffer = RhiDevice::create_buffer(
             device,
             &BufferDesc {
@@ -1666,12 +1696,45 @@ impl GpuSceneBundles {
         )
         .expect("invariant: SMAA SearchTex LUT upload (boot stage)");
 
+        // Anti-aliasing Stage 3: the SSAA downsample fullscreen pipeline, built
+        // unconditionally here (like `fxaa_pipeline` above) so the host-armed mode
+        // (see `boyko_app::host::WindowHost`) can select it with no boot-time rebuild.
+        // Reuses `sample_vs` + `present_layout` (the same single-CombinedImageSampler
+        // shape FXAA uses) + `present_sampler` (NEAREST — the shader's `.Load` ignores
+        // it, so no dedicated sampler is built). `color_formats[0]` is `aa_out`'s format
+        // (`R8G8B8A8_UNORM`); NO push constants (the 2× ratio is compiled into the
+        // shader). Boot-time creation records no command / writes no pixel —
+        // byte-identical to the golden regardless of this pipeline's existence.
+        let ssaa_fs = RhiDevice::create_shader_module(device, ssaa_downsample_fs_spirv())
+            .expect("invariant: SSAA downsample fragment shader module create");
+        let ssaa_pipeline = RhiDevice::create_graphics_pipeline(
+            device,
+            &GraphicsPipelineDesc {
+                vertex_module: &sample_vs,
+                vertex_entry: c"main",
+                fragment_module: &ssaa_fs,
+                fragment_entry: c"main",
+                // `aa_out`'s format (R8G8B8A8_UNORM) — NOT `swap_format`.
+                color_formats: &[Format::R8G8B8A8Unorm],
+                depth_format: None,
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: None,
+                push_constant_bytes: 0,
+                bind_group_layout: Some(&present_layout),
+                blend: None,
+                cull_mode: CullMode::None,
+                depth_bias: None,
+            },
+        )
+        .expect("invariant: SSAA downsample graphics pipeline create");
+
         // The shader modules are consumed by pipeline creation; destroy them now
         // (mirrors the showcase's post-create module teardown).
         // SAFETY: every module was created on `ctx` above and is no longer
         // needed once its pipeline exists; each is destroyed exactly once; no
         // GPU work has been submitted yet.
         unsafe {
+            RhiDevice::destroy_shader_module(device, ssaa_fs);
             RhiDevice::destroy_shader_module(device, smaa_blend_fs);
             RhiDevice::destroy_shader_module(device, smaa_weight_fs);
             RhiDevice::destroy_shader_module(device, smaa_edge_fs);
@@ -2025,6 +2088,14 @@ impl GpuSceneBundles {
         );
 
         let dispatch_group_count_x = (cw * ch).div_ceil(LOCAL_SIZE_X);
+        // SSAA (W1): the dispatch grid must cover every composite pixel — see the
+        // enumeration comment at the top of this fn. A future edit that keyed this to
+        // `native` instead of `composite` would silently UNDER-DISPATCH the marcher/resolve
+        // at any SSAA scale (a correctness bug with no crash); this fires immediately in debug.
+        debug_assert!(
+            (dispatch_group_count_x as u64) * (LOCAL_SIZE_X as u64) >= (cw as u64) * (ch as u64),
+            "invariant: dispatch grid covers composite pixel count at any SSAA scale"
+        );
 
         Self {
             raster_pipeline,
@@ -2084,6 +2155,7 @@ impl GpuSceneBundles {
             smaa_sampler,
             smaa_area_tex,
             smaa_search_tex,
+            ssaa_pipeline,
             csm,
             dispatch_group_count_x,
         }
@@ -2869,6 +2941,15 @@ impl GpuSceneBundles {
                 area_tex: &self.smaa_area_tex,
                 search_tex: &self.smaa_search_tex,
             }),
+            // Anti-aliasing Stage 3: `AaMode::Ssaa` ⇒ `Some` — arms the SSAA downsample
+            // activation against the boot-built pipeline + the shared NEAREST
+            // `present_sampler` (the shader's `.Load` ignores it). Mutually exclusive with
+            // `aa`/`smaa` above by construction (same single-enum `matches!` discipline).
+            // UNLIKE `aa`/`smaa`, `aa_mode == Ssaa` here is host-authoritative — it can only
+            // occur when `boyko_app::runner`'s read-site lock forced it because the host
+            // armed the 2× `composite_extent` at boot (`WindowHost::ssaa_armed`).
+            ssaa: matches!(aa_mode, AaMode::Ssaa)
+                .then(|| SsaaActivation { pipeline: &self.ssaa_pipeline, sampler: &self.present_sampler }),
             mesh_draw,
             csm_cascade_texture: &self.csm.cascade,
             csm_compare_sampler: &self.csm.sampler,
@@ -3260,6 +3341,10 @@ impl GpuSceneBundles {
             RhiDevice::destroy_graphics_pipeline(ctx, self.smaa_blend_pipeline);
             RhiDevice::destroy_bind_group_layout(ctx, self.smaa_weight_layout);
             RhiDevice::destroy_bind_group_layout(ctx, self.smaa_blend_layout);
+            // Anti-aliasing Stage 3: the SSAA downsample pipeline — shares `present_layout`
+            // with `fxaa_pipeline`/`smaa_edge_pipeline` (destroyed before it, below). No
+            // dedicated sampler to tear down (reuses `present_sampler`, destroyed later).
+            RhiDevice::destroy_graphics_pipeline(ctx, self.ssaa_pipeline);
             RhiDevice::destroy_bind_group_layout(ctx, self.present_layout);
             RhiDevice::destroy_compute_pipeline(ctx, self.resolve_pipeline);
             // Render terminator-softening: the wrap-variant pipeline shares `resolve_layout`

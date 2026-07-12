@@ -96,8 +96,21 @@ pub(crate) struct WindowHost {
     /// The boot-fixed composite extent (plan D7): the G-buffer / marcher /
     /// camera-push extent, frozen at the boot client size. A window resize
     /// recreates the swapchain only; the present blit clamps to
-    /// `min(window, composite)`.
+    /// `min(window, composite)`. Under armed SSAA this is `2 * native_extent`
+    /// (see [`Self::ssaa_armed`]); otherwise it equals [`Self::native_extent`].
     pub(crate) composite_extent: (u32, u32),
+    /// SSAA (AA campaign Stage 3, W2): whether the boot device probe armed the 2×
+    /// supersample render scale — decided ONCE here, never per-frame. `true` ⇒
+    /// `composite_extent == 2 * native_extent` and the per-frame read site
+    /// (`runner::frame_loop`) LOCKS `AaMode::Ssaa`. `false` ⇒ `composite_extent ==
+    /// native_extent` and any `AaMode::Ssaa` resource-request degrades to `Off` — the
+    /// device-capability degrade seam `AaConfig`'s doc reserves, resolved host-side
+    /// because this layer is the only one that sees the boot resolution + device caps.
+    pub(crate) ssaa_armed: bool,
+    /// SSAA (W2): the pre-scale window client size (`window.width()`/`height()` at
+    /// boot) — ALWAYS the render extent `aa_out` uses (native, never 2×), regardless of
+    /// [`Self::ssaa_armed`]. Equals [`Self::composite_extent`] when SSAA is not armed.
+    pub(crate) native_extent: (u32, u32),
     /// Per-in-flight-slot record of the `LightTableGeneration` whose staged
     /// bytes were last written into that slot's light staging (host plan D5/R4).
     /// Seeded `u64::MAX` (≠ any real generation) so BOTH slots upload the real
@@ -172,7 +185,39 @@ impl WindowHost {
 
         // Plan D7: the composite extent is boot-fixed from the ACTUAL client
         // size the window came up at.
-        let composite_extent = (window.width(), window.height());
+        let native_extent = (window.width(), window.height());
+
+        // SSAA (AA campaign Stage 3, C1/C2/W2): the ONE place the 2x render scale is
+        // decided — a boot-time device-capability probe, never a per-frame choice.
+        // `desc.ssaa_scale` is the owner's request (0/1 == off; v1 honors ONLY `2`).
+        // Arms iff BOTH the device's `maxImageDimension2D` fits `native * 2` on every
+        // axis AND the estimated 2x ring VRAM cost stays under half the largest
+        // DEVICE_LOCAL heap; any failure degrades to `Off` — NEVER a panic, boot
+        // proceeds exactly as an unscaled boot would.
+        let caps = ctx.device_caps();
+        let want = desc.ssaa_scale;
+        let dims_ok = native_extent.0.saturating_mul(SSAA_SCALE) <= caps.max_image_dimension_2d
+            && native_extent.1.saturating_mul(SSAA_SCALE) <= caps.max_image_dimension_2d;
+        let est = ssaa_ring_bytes_estimate(native_extent, SSAA_SCALE);
+        let vram_ok = est < caps.device_local_heap_bytes / SSAA_VRAM_FRACTION_DEN;
+        let ssaa_armed = want == SSAA_SCALE && dims_ok && vram_ok;
+        // Cold, boot-once diagnostics (mirrors `query_device_caps`'s DDGI/shadow-denoise
+        // degrade logging) — never on the frame path, never a panic. Emitted UNCONDITIONALLY
+        // (not `#[cfg(debug_assertions)]`): a RELEASE-build degrade-to-Off must be observable,
+        // else an owner requesting `BOYKO_AA=ssaa` on a device that fails the dims/VRAM probe
+        // silently gets no supersampling with zero explanation (spec B11).
+        if want == SSAA_SCALE && !ssaa_armed {
+            eprintln!("SSAA 2x unavailable (dims_ok={dims_ok} vram_ok={vram_ok}) -> Off");
+        }
+        if want != 0 && want != 1 && want != SSAA_SCALE {
+            eprintln!("SSAA scale {want} unsupported (v1: 2x only) -> Off");
+        }
+        let composite_extent = if ssaa_armed {
+            (native_extent.0 * SSAA_SCALE, native_extent.1 * SSAA_SCALE)
+        } else {
+            native_extent
+        };
+
         let gpu = GpuSceneBundles::boot(ctx, composite_extent, swap_format);
 
         Ok(Self {
@@ -182,6 +227,8 @@ impl WindowHost {
             draw_scratch: DrawListScratch::new(),
             retire_scratch: Vec::new(),
             composite_extent,
+            ssaa_armed,
+            native_extent,
             // u64::MAX ≠ any real generation ⇒ both slots upload the ECS light
             // table on their first frames (host plan D5/R4).
             light_uploaded_gen: [u64::MAX; FRAMES_IN_FLIGHT],
@@ -190,4 +237,32 @@ impl WindowHost {
             window,
         })
     }
+}
+
+/// SSAA (W2): the v1 render scale — 2× per axis (4× pixels). The boot arming probe
+/// (see [`WindowHost::boot`]) admits ONLY this value; any other `WindowDesc::ssaa_scale`
+/// degrades to `Off`.
+const SSAA_SCALE: u32 = 2;
+
+/// SSAA (W2): the VRAM-budget divisor — arm only if the estimated 2× ring cost stays
+/// under `1 / SSAA_VRAM_FRACTION_DEN` of the largest `DEVICE_LOCAL` heap.
+const SSAA_VRAM_FRACTION_DEN: u64 = 2;
+
+/// SSAA (W2): a conservative VRAM estimate (bytes) for the `scale`× composite-extent
+/// CORE rings, used ONLY to decide whether to arm SSAA at boot — the real allocations
+/// flow through [`GpuSceneBundles::boot`] and are never sized from this number.
+/// `native` is the pre-scale `(width, height)`; the core rings cost ≈ 33 B/px ×
+/// `FRAMES_IN_FLIGHT`(2) = 66 B/px at NATIVE resolution, scaled by `scale²` (area) for
+/// the composite extent; `feature = "hwrt"` adds the RT ring cost (≈ 28 B/px × FIF(2)
+/// at native, same `scale²` scaling).
+const fn ssaa_ring_bytes_estimate(native: (u32, u32), scale: u32) -> u64 {
+    const CORE_BYTES_PER_NATIVE_PX: u64 = 66;
+    #[cfg(feature = "hwrt")]
+    const PER_NATIVE_PX: u64 = CORE_BYTES_PER_NATIVE_PX + 28;
+    #[cfg(not(feature = "hwrt"))]
+    const PER_NATIVE_PX: u64 = CORE_BYTES_PER_NATIVE_PX;
+
+    let native_px = native.0 as u64 * native.1 as u64;
+    let scale_sq = (scale as u64) * (scale as u64);
+    native_px * scale_sq * PER_NATIVE_PX
 }

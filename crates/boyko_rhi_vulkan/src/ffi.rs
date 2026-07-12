@@ -619,6 +619,10 @@ pub const VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT: VkFlags = 0x0000_0001;
 pub const VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT: VkFlags = 0x0000_0002;
 pub const VK_MEMORY_PROPERTY_HOST_COHERENT_BIT: VkFlags = 0x0000_0004;
 
+/// `VkMemoryHeapFlagBits` (SSAA W2 VRAM probe: `VkMemoryHeap::flags`, distinct field from
+/// `VkMemoryType::propertyFlags` above though numerically the same bit per the Vulkan spec).
+pub const VK_MEMORY_HEAP_DEVICE_LOCAL_BIT: VkFlags = 0x0000_0001;
+
 /// `VkBufferUsageFlagBits` (subset; the round-trip uses a transfer/storage
 /// buffer — the exact bits are immaterial to a host-visible map round-trip but
 /// must be a valid usage).
@@ -1298,6 +1302,11 @@ pub struct VkPhysicalDeviceLimitsBlob(pub [u8; 504]);
 // `maxMemoryAllocationCount`, `maxSamplerAllocationCount` (11 × 4 = 44 B), then 4 B pad to the
 // 8-aligned `VkDeviceSize bufferImageGranularity` @48 + `sparseAddressSpaceSize` @56, then
 // `maxBoundDescriptorSets` @64, and the six per-stage descriptor caps @68..92 in the order below.
+/// Offset of `maxImageDimension2D` (`u32`) within `VkPhysicalDeviceLimits` — the SECOND
+/// leading `u32` (`maxImageDimension1D` is @0). SSAA W2: the boot device probe reads this
+/// to decide whether `native * 2` fits the device's max 2D image extent on both axes
+/// before arming the 2× render scale.
+pub const LIMITS_OFF_MAX_IMAGE_DIMENSION_2D: usize = 4;
 /// Offset of `maxPerStageDescriptorSamplers` (`u32`) within `VkPhysicalDeviceLimits`.
 pub const LIMITS_OFF_MAX_PER_STAGE_SAMPLERS: usize = 68;
 /// Offset of `maxPerStageDescriptorUniformBuffers` (`u32`).
@@ -1311,6 +1320,7 @@ pub const LIMITS_OFF_MAX_PER_STAGE_STORAGE_IMAGES: usize = 84;
 
 // The read offsets must lie inside the blob (the last field read is a `u32` at 84 → 84..88 <= 504).
 const _: () = assert!(LIMITS_OFF_MAX_PER_STAGE_STORAGE_IMAGES + 4 <= 504);
+const _: () = assert!(LIMITS_OFF_MAX_IMAGE_DIMENSION_2D + 4 <= 504);
 
 /// Offset of `timestampPeriod` (`float`) within `VkPhysicalDeviceLimits` (HW-RT rung
 /// R0). Re-derived from the in-repo anchor `maxPerStageDescriptorStorageImages == 84`

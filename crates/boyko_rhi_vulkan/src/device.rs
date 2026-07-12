@@ -305,6 +305,17 @@ pub struct DeviceCaps {
     /// (R2a-2) is then never reached. RECORDED; consumed by the scratch-buffer suballocator
     /// at R2a-2 — do NOT trust the buffer memreq alignment for scratch.
     pub as_scratch_align: u64,
+    /// SSAA W2: `VkPhysicalDeviceLimits::maxImageDimension2D` — the device's max 2D image
+    /// extent per axis. The boot arming probe requires `native * SSAA_SCALE <=` this on
+    /// BOTH axes before committing the 2× `composite_extent`; on failure SSAA degrades to
+    /// `Off` (never a panic). RECORDED ONLY here — read via [`WindowHost::boot`]
+    /// (`boyko_app`), which this crate does not depend on.
+    pub max_image_dimension_2d: u32,
+    /// SSAA W2: the largest `DEVICE_LOCAL` heap size (bytes) reported by
+    /// `vkGetPhysicalDeviceMemoryProperties`. The boot arming probe requires the estimated
+    /// 2× ring VRAM cost to stay under half of this before committing SSAA; on failure SSAA
+    /// degrades to `Off` (never an allocation panic).
+    pub device_local_heap_bytes: u64,
 }
 
 impl DeviceCaps {
@@ -941,6 +952,14 @@ impl VulkanContext {
         device_caps.vendor_id = device_props.vendor_id;
         device_caps.device_id = device_props.device_id;
         device_caps.driver_version = device_props.driver_version;
+        // SSAA W2: populate the arming-probe caps `query_device_caps` left at placeholder
+        // zeros — `maxImageDimension2D` from the limits blob already read above, and the
+        // largest `DEVICE_LOCAL` heap from `memory_properties` (already returned by
+        // `pick_physical_device`, step 4). RECORDED ONLY: `boyko_app::WindowHost::boot`
+        // reads both to decide whether to arm the 2× SSAA composite extent.
+        device_caps.max_image_dimension_2d =
+            device_props.limits.read_u32(LIMITS_OFF_MAX_IMAGE_DIMENSION_2D);
+        device_caps.device_local_heap_bytes = max_device_local_heap_bytes(&memory_properties);
         if !device_caps.gbuffer_storage_format_ok {
             fail!(BootError::GbufferStorageFormatUnsupported);
         }
@@ -2987,7 +3006,28 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         // `feature="hwrt"` the boot site overwrites this from the AS-properties query when
         // the RT extensions were enabled; otherwise it stays `0` (the R1 value).
         as_scratch_align: 0,
+        // SSAA W2: placeholders — the boot site overwrites these from the physical-device
+        // limits blob (`maxImageDimension2D`) + the memory properties (`memory_properties`,
+        // already returned by `pick_physical_device`), the two inputs `query_device_caps`
+        // does not itself read (mirrors the `timestamp_period`/`vendor_id` placeholder
+        // pattern above).
+        max_image_dimension_2d: 0,
+        device_local_heap_bytes: 0,
     }
+}
+
+/// SSAA W2: the largest `DEVICE_LOCAL` heap size (bytes) among
+/// `mem_props.memory_heaps[..memory_heap_count]`. Zero heaps or no `DEVICE_LOCAL` heap
+/// (never observed on a real GPU, but the array can be empty on a stub in tests) yields `0`,
+/// which makes the SSAA VRAM-budget check fail closed (degrade to `Off`, never a panic).
+fn max_device_local_heap_bytes(mem_props: &VkPhysicalDeviceMemoryProperties) -> u64 {
+    let count = (mem_props.memory_heap_count as usize).min(VK_MAX_MEMORY_HEAPS);
+    mem_props.memory_heaps[..count]
+        .iter()
+        .filter(|heap| heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT != 0)
+        .map(|heap| heap.size)
+        .max()
+        .unwrap_or(0)
 }
 
 /// Creates a logical device with one queue from `queue_family_index`.
@@ -3454,6 +3494,8 @@ mod tests {
             device_id: 0,
             driver_version: 0,
             as_scratch_align: 0,
+            max_image_dimension_2d: 0,
+            device_local_heap_bytes: 0,
         }
     }
 

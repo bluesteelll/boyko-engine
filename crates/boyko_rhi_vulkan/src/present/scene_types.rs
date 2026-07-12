@@ -591,6 +591,32 @@ pub struct SmaaActivation<'a> {
     pub search_tex: &'a VulkanTexture,
 }
 
+/// Anti-aliasing Stage 3: the SSAA 2× downsample post-process activation threaded into
+/// [`GBufferScene::ssaa`] to turn the SSAA pass ON. Mirrors [`AaActivation`]'s borrow-bundle
+/// shape: a `Copy` pair of caller-owned pipeline/sampler borrows.
+///
+/// `None` on [`GBufferScene::ssaa`] is the OFF path (the DEFAULT — the 0%-gate): `aa_out`
+/// stays sized to `present_extent` (== native when off), no `downsample_set`, the
+/// present-blit samples `lit` directly, no SSAA pass recorded. `Some` arms the whole seam —
+/// mutually exclusive with [`GBufferScene::aa`] / [`GBufferScene::smaa`] at the populate site
+/// (`debug_assert!` at both `GBufferTargets::create` and the record site). Unlike
+/// `aa`/`smaa`, SSAA is host-authoritative: it can only be `Some` when the host armed the 2×
+/// `composite_extent` at boot (see `boyko_app::host::WindowHost`).
+#[derive(Clone, Copy)]
+pub struct SsaaActivation<'a> {
+    /// SSAA downsample fullscreen graphics pipeline (`fullscreen_sample.vs` +
+    /// `ssaa_downsample.fs`). Layout = [`GBufferScene::present_layout`] (1 CIS: `lit`), NO
+    /// push constants (the 2× ratio is compiled into the shader). `color_formats[0]` ==
+    /// `R8G8B8A8_UNORM` (`aa_out`'s format, native-sized under SSAA — see
+    /// [`GBufferTargets::aa_out`](crate::present::GBufferTargets)).
+    pub pipeline: &'a VulkanGraphicsPipeline,
+    /// NEAREST/ClampToEdge sampler bound WITH `lit` in `downsample_set` — the shared
+    /// `present_sampler`. The shader uses `.Load` (texelFetch), which bypasses filtering, so
+    /// the sampler is IGNORED; it exists only to satisfy the 1-CIS `present_layout` shape.
+    /// DISTINCT borrow role from [`AaActivation::sampler`] (FXAA's tap needs bilinear).
+    pub sampler: &'a VulkanSampler,
+}
+
 /// HW-RT rung 3a: the spatial (à-trous) RT soft-shadow DENOISE pass activation threaded into
 /// [`GBufferScene::shadow`] to turn the denoise pipeline ON. Mirrors [`SsaoActivation`]'s
 /// borrow-bundle shape: a `Copy` bundle of caller-owned pipeline/layout borrows plus the
@@ -1245,6 +1271,19 @@ pub struct GBufferScene<'a> {
     /// extent change, and the present-blit samples `aa_out` instead of `lit`. Mutually
     /// exclusive with [`Self::aa`] (`debug_assert!` — see [`SmaaActivation`]'s doc).
     pub smaa: Option<SmaaActivation<'a>>,
+    /// Anti-aliasing Stage 3: the SSAA 2× downsample post-process pass activation. `None` =
+    /// OFF, the 0%-gate (`aa_out` stays sized to `present_extent`, no `downsample_set`, the
+    /// present-blit samples `lit` directly, no SSAA pass recorded). `Some` arms the seam:
+    /// [`GBufferTargets`] sizes `aa_out` to the NATIVE `aa_extent` (not `present_extent`,
+    /// which is 2× under SSAA) + builds `downsample_set`, [`GBufferTargets::sync_gbuffer`]
+    /// treats an arm-state change exactly like an extent change, and the recorded downsample
+    /// pass resolves the 2× `lit` into native `aa_out` (the present-blit's unchanged 1:1 crop
+    /// then samples it). Mutually exclusive with [`Self::aa`] / [`Self::smaa`]
+    /// (`debug_assert!` — see [`SsaaActivation`]'s doc). UNLIKE `aa`/`smaa`, this is NOT a
+    /// live per-frame toggle: `Some` can only occur when the host armed the 2×
+    /// `composite_extent` at boot (`boyko_app::host::WindowHost`) — the render-scale
+    /// resolution is a boot commitment, not a per-frame choice.
+    pub ssaa: Option<SsaaActivation<'a>>,
     /// Mesh foundation M3: the per-mesh instanced-arm draw BATCH LIST. An EMPTY slice
     /// (every pre-M2 scene) records the LEGACY pass-A draw — `vkCmdDraw(vertex_count, 1,
     /// 0, 0)` over [`Self::vertex_buffer`] binding [`Self::instance_bind_group`] (the

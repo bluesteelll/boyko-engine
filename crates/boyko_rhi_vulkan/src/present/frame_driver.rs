@@ -750,6 +750,14 @@ impl<'ctx> Renderer<'ctx> {
     /// dispatched at (the clamped swapchain extent the caller sized `frame`'s targets
     /// + `scene.camera_uniform` + `scene.dispatch_group_count_x` to).
     ///
+    /// `aa_extent` (SSAA) is the BOOT-FIXED native extent `aa_out` is sized to under
+    /// `AaMode::Ssaa` (`host.native_extent`, NOT the live `width`/`height` — which track
+    /// window resizes while the swapchain-only resize contract leaves `aa_out` fixed,
+    /// exactly like `present_extent` already stays fixed under a resize). For
+    /// Off/Fxaa/Smaa this SHOULD equal `present_extent` (byte-identical to before SSAA
+    /// existed); the caller is responsible for that equality (this fn does not enforce
+    /// it, since `aa_extent` is read only when `scene.ssaa.is_some()`).
+    ///
     /// `token` is this frame's [`FrameWriteToken`] (minted by
     /// [`wait_frame_in_flight`](Self::wait_frame_in_flight)), consumed BY VALUE:
     /// the submit ends the frame's host-write window, so the affine consume makes
@@ -780,6 +788,7 @@ impl<'ctx> Renderer<'ctx> {
         height: u32,
         clear: [f32; 4],
         present_extent: VkExtent2D,
+        aa_extent: VkExtent2D,
         readback: Option<&BoundBuffer>,
     ) -> Result<bool, SwapchainError> {
         debug_assert_eq!(
@@ -814,7 +823,17 @@ impl<'ctx> Renderer<'ctx> {
                 // sibling slots. (The first call creates them.) The descriptor sets are
                 // written ONCE per composite extent.
                 |_this, frame| {
-                    GBufferTargets::sync_gbuffer(&mut frame.targets, ctx, scene, present_extent)
+                    // SSAA: `aa_out` is sized to the caller-supplied `aa_extent` (BOOT-FIXED
+                    // native, not `present_extent` — 2× under SSAA) — see
+                    // `GBufferTargets::sync_gbuffer`'s doc. For Off/Fxaa/Smaa,
+                    // `aa_extent == present_extent` (byte-identical to before SSAA existed).
+                    GBufferTargets::sync_gbuffer(
+                        &mut frame.targets,
+                        ctx,
+                        scene,
+                        present_extent,
+                        aa_extent,
+                    )
                 },
                 |this, frame, cmd, image, view, extent| {
                     // The framegraph drives the frame: re-declare the WHOLE G-buffer
@@ -835,6 +854,7 @@ impl<'ctx> Renderer<'ctx> {
                         view,
                         extent,
                         present_extent,
+                        aa_extent,
                         clear,
                         scene,
                         targets,
