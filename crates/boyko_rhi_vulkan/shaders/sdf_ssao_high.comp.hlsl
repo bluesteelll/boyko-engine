@@ -112,8 +112,8 @@ uint img_h() { return (img_h_raw != 0u) ? img_h_raw : IMG_H_DEFAULT; }
 
 // --- SSAO tuning (mirror boyko_shaderdsl::ssao; the eDSL span spells these SYMBOLICALLY) ---
 static const float SSAO_RADIUS   = 0.5;     // world-space sampling radius
-static const uint  SSAO_SLICES   = 4u;      // rotated screen-space slices
-static const float SSAO_SLICES_F = 4.0;     // the slice count as a float (the `occ / N` divisor)
+static const uint  SSAO_SLICES   = 8u;      // rotated screen-space slices
+static const float SSAO_SLICES_F = 8.0;     // the slice count as a float (the `occ / N` divisor)
 static const uint  SSAO_STEPS    = 6u;      // forward steps per half-slice
 static const float SSAO_STRENGTH = 2.5;     // occlusion strength multiplier
 static const float SSAO_EPS      = 1.0e-4;  // length(delta) divide-by-zero guard
@@ -126,31 +126,81 @@ static const float SSAO_VIEWT_BG = 1.0e30;
 static const float SSAO_RADIUS_PIX_MIN = 2.0;
 static const float SSAO_RADIUS_PIX_MAX = 24.0;
 
-// --- The integer-hash rotation table (bit-exact GPU↔host) ---------------------------------
+// --- The evenly-spaced rotation/base-axis table (bit-exact GPU↔host) ------------------------
 // A pre-baked `(cos, sin)` table for SSAO_ROT_N evenly-spaced angles over [0, pi): angle k =
-// k*(pi/16) for k = 0..15 (degrees 0, 11.25, 22.5, ..., 168.75). The per-pixel slot is chosen
-// by the integer hash `h & 15u` (NO float `fract`/`floor`), so the GPU and the host oracle pick
-// the SAME rotation bit-exactly. Q1 widened the table 4 -> 16 to decorrelate the angular
-// banding into high-frequency noise the depth-aware blur removes. The host mirror bakes the
-// IDENTICAL `f32`-rounded values (byte-value-identical literals).
-static const uint SSAO_ROT_N = 16u;
-static const float2 SSAO_ROT[16] = {
+// k*(pi/64) for k = 0..63 (a 2.8125° step). It serves BOTH (1) the per-slice BASE axes since
+// Change A (`SSAO_ROT[sl * SSAO_BASE_STRIDE]` — slice s at s*(pi/N); the strided entries are
+// bit-identical to the retired 16-entry table's) and (2) the per-pixel DITHER rotation slot
+// (see the pick site in `main`). Widened 16 -> 64: on an even-slice axis set the effective
+// dither classes = `SSAO_ROT_N / SSAO_SLICES`, and 16 entries left only 2 classes at 8 slices
+// — spatially-coherent streaks. The host mirror bakes the IDENTICAL `f32`-rounded values
+// (byte-value-identical literals).
+static const uint SSAO_ROT_N = 64u;
+static const float2 SSAO_ROT[64] = {
     float2(  1.00000000,  0.00000000 ),  //   0.00 deg
+    float2(  0.99879545,  0.04906768 ),  //   2.81 deg
+    float2(  0.99518472,  0.09801714 ),  //   5.62 deg
+    float2(  0.98917651,  0.14673047 ),  //   8.44 deg
     float2(  0.98078525,  0.19509032 ),  //  11.25 deg
+    float2(  0.97003126,  0.24298018 ),  //  14.06 deg
+    float2(  0.95694035,  0.29028466 ),  //  16.88 deg
+    float2(  0.94154406,  0.33688986 ),  //  19.69 deg
     float2(  0.92387950,  0.38268343 ),  //  22.50 deg
+    float2(  0.90398932,  0.42755508 ),  //  25.31 deg
+    float2(  0.88192129,  0.47139674 ),  //  28.12 deg
+    float2(  0.85772860,  0.51410276 ),  //  30.94 deg
     float2(  0.83146960,  0.55557024 ),  //  33.75 deg
+    float2(  0.80320752,  0.59569931 ),  //  36.56 deg
+    float2(  0.77301043,  0.63439327 ),  //  39.38 deg
+    float2(  0.74095112,  0.67155898 ),  //  42.19 deg
     float2(  0.70710677,  0.70710677 ),  //  45.00 deg
+    float2(  0.67155898,  0.74095112 ),  //  47.81 deg
+    float2(  0.63439327,  0.77301043 ),  //  50.62 deg
+    float2(  0.59569931,  0.80320752 ),  //  53.44 deg
     float2(  0.55557024,  0.83146960 ),  //  56.25 deg
+    float2(  0.51410276,  0.85772860 ),  //  59.06 deg
+    float2(  0.47139674,  0.88192129 ),  //  61.88 deg
+    float2(  0.42755508,  0.90398932 ),  //  64.69 deg
     float2(  0.38268343,  0.92387950 ),  //  67.50 deg
+    float2(  0.33688986,  0.94154406 ),  //  70.31 deg
+    float2(  0.29028466,  0.95694035 ),  //  73.12 deg
+    float2(  0.24298018,  0.97003126 ),  //  75.94 deg
     float2(  0.19509032,  0.98078525 ),  //  78.75 deg
+    float2(  0.14673047,  0.98917651 ),  //  81.56 deg
+    float2(  0.09801714,  0.99518472 ),  //  84.38 deg
+    float2(  0.04906768,  0.99879545 ),  //  87.19 deg
     float2(  0.00000000,  1.00000000 ),  //  90.00 deg
+    float2( -0.04906768,  0.99879545 ),  //  92.81 deg
+    float2( -0.09801714,  0.99518472 ),  //  95.62 deg
+    float2( -0.14673047,  0.98917651 ),  //  98.44 deg
     float2( -0.19509032,  0.98078525 ),  // 101.25 deg
+    float2( -0.24298018,  0.97003126 ),  // 104.06 deg
+    float2( -0.29028466,  0.95694035 ),  // 106.88 deg
+    float2( -0.33688986,  0.94154406 ),  // 109.69 deg
     float2( -0.38268343,  0.92387950 ),  // 112.50 deg
+    float2( -0.42755508,  0.90398932 ),  // 115.31 deg
+    float2( -0.47139674,  0.88192129 ),  // 118.12 deg
+    float2( -0.51410276,  0.85772860 ),  // 120.94 deg
     float2( -0.55557024,  0.83146960 ),  // 123.75 deg
+    float2( -0.59569931,  0.80320752 ),  // 126.56 deg
+    float2( -0.63439327,  0.77301043 ),  // 129.38 deg
+    float2( -0.67155898,  0.74095112 ),  // 132.19 deg
     float2( -0.70710677,  0.70710677 ),  // 135.00 deg
+    float2( -0.74095112,  0.67155898 ),  // 137.81 deg
+    float2( -0.77301043,  0.63439327 ),  // 140.62 deg
+    float2( -0.80320752,  0.59569931 ),  // 143.44 deg
     float2( -0.83146960,  0.55557024 ),  // 146.25 deg
+    float2( -0.85772860,  0.51410276 ),  // 149.06 deg
+    float2( -0.88192129,  0.47139674 ),  // 151.88 deg
+    float2( -0.90398932,  0.42755508 ),  // 154.69 deg
     float2( -0.92387950,  0.38268343 ),  // 157.50 deg
+    float2( -0.94154406,  0.33688986 ),  // 160.31 deg
+    float2( -0.95694035,  0.29028466 ),  // 163.12 deg
+    float2( -0.97003126,  0.24298018 ),  // 165.94 deg
     float2( -0.98078525,  0.19509032 ),  // 168.75 deg
+    float2( -0.98917651,  0.14673047 ),  // 171.56 deg
+    float2( -0.99518472,  0.09801714 ),  // 174.38 deg
+    float2( -0.99879545,  0.04906768 ),  // 177.19 deg
 };
 
 // Even-slice base axis (Change A): slice `s` spans angle `s*(pi/SSAO_SLICES)` == `SSAO_ROT[s*STRIDE]`,
@@ -256,13 +306,18 @@ void main(uint3 tid : SV_DispatchThreadID) {
             pix_radius = SSAO_RADIUS * ((float)h * 0.5) / RAYGEN_HALF_EXTENT;
         }
 
-        // The Hilbert+R2 rotation slot (bit-exact; NO float fract/floor/trig). ONE 64x64 Hilbert
-        // index per pixel drives two R2 channels: ALPHA1 -> the rotation slot, ALPHA2 -> the radial
-        // phase. `slot = (r2 * SSAO_ROT_N) >> 24` maps the Q0.24 fraction into [0, ROT_N) by an
-        // integer scale (a power-of-two table, so this is the top bits of r2). Because R2 is
-        // low-discrepancy, adjacent pixels get well-SPREAD (not random) slots — the dither lives in
-        // HIGH frequencies and the depth-aware blur removes it cleanly, unlike the prior white-noise
-        // hash whose low-frequency component survived the blur as "pixelated" blobs.
+        // The Hilbert+R2 rotation slot (bit-exact; NO float fract/floor/trig/DIV). ONE 64x64
+        // Hilbert index per pixel drives two R2 channels: ALPHA1 -> the rotation slot, ALPHA2 ->
+        // the radial phase. `slot = (r2 * SSAO_ROT_N) >> 24` maps the Q0.24 fraction into
+        // [0, ROT_N) by an integer scale. The table is 64 entries (was 16): on an EVEN-SLICE
+        // axis set, rotating the set by its own slice spacing maps it onto itself, so the
+        // EFFECTIVE dither classes = `SSAO_ROT_N / SSAO_SLICES` — 16 entries gave only TWO
+        // distinct sampling patterns at 8 slices, whose spatially-coherent Hilbert+R2 layout
+        // read as un-blurrable STREAKS radiating from contact regions. 64 entries keep >= 8
+        // classes at a 2.8125° step (4x finer), so the residual class-to-class estimator delta
+        // is small and fine-grained — noise the depth-aware resolve blur removes. The pick
+        // stays INTEGER (a continuous/rational rotation needs an FDiv, whose 2.5-ULP Vulkan
+        // tolerance breaks the bit-exact GPU<->host tap positions this shader is pinned to).
         uint hindex = ssao_hilbert(SSAO_HILBERT_W, px & (SSAO_HILBERT_W - 1u), py & (SSAO_HILBERT_W - 1u));
         uint slot = (ssao_r2(hindex, SSAO_R2_ALPHA1) * SSAO_ROT_N) >> 24u;
         float2 rot = SSAO_ROT[slot];

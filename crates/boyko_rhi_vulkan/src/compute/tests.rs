@@ -2875,7 +2875,7 @@ mod ssao_gather_tests {
 
     /// The EXACT per-pixel dither the gather applies (mirror of the `golden_ssao_attributes`
     /// Hilbert+R2 low-discrepancy basis): ONE 64x64 Hilbert index drives two R2 channels — ALPHA1
-    /// -> the rotation slot `(r2 * ROT_N) >> 24` over the 16-entry table, ALPHA2 -> the radial
+    /// -> the rotation slot `(r2 * ROT_N) >> 24` over the 64-entry table, ALPHA2 -> the radial
     /// step-phase `((r2 >> 16) + 1) / 256.0`. Returned as `(rot_slot, radial_phase)` so the
     /// determinism + decorrelation test can assert both.
     fn dither(px: u32, py: u32) -> (usize, f32) {
@@ -2918,8 +2918,11 @@ mod ssao_gather_tests {
                     "radial_phase must be bit-deterministic at ({px},{py})"
                 );
 
-                // (2) range: slot in [0, 16); phase strictly in (0, 1] (no self-tap, no overshoot).
-                assert!(slot < (super::super::SSAO_ROT_N as usize), "slot {slot} out of [0,16)");
+                // (2) range: slot in [0, 64); phase strictly in (0, 1] (no self-tap, no overshoot).
+                assert!(
+                    slot < (super::super::SSAO_ROT_N as usize),
+                    "slot {slot} out of [0, SSAO_ROT_N)"
+                );
                 assert!(
                     phase > 0.0 && phase <= 1.0,
                     "radial_phase {phase} must be in (0, 1] (strictly positive ⇒ no center \
@@ -2932,12 +2935,13 @@ mod ssao_gather_tests {
             }
         }
 
-        // (3) decorrelation: over a 64×64 block the dither spreads across the table and the phase
-        // band, and produces MANY distinct (slot, phase) pairs — proving neighbouring pixels do
-        // NOT march the same step radii (the coherent-ring root cause).
+        // (3) decorrelation: over a 64×64 block the dither spreads across the (now 64-entry —
+        // the even-slice class-collapse fix) table and the phase band, and produces MANY
+        // distinct (slot, phase) pairs — proving neighbouring pixels do NOT march the same
+        // step radii (the coherent-ring root cause).
         assert!(
-            seen_slots.len() >= 8,
-            "the 16-entry rotation must exercise a spread of slots over a 64×64 block (saw {}), \
+            seen_slots.len() >= 32,
+            "the 64-entry rotation must exercise a spread of slots over a 64×64 block (saw {}), \
              else the angular banding stays coherent",
             seen_slots.len()
         );
@@ -3103,8 +3107,8 @@ mod ssao_blur_tests {
             (blurred - 90.0 / 255.0).abs() < 1.0e-6,
             "an isolated pixel (all neighbours gated out) must blur to its OWN raw AO, got {blurred}"
         );
-        // Sanity: the radius constant is the one the resolve compiles in (Change C tuning: R=5,
-        // an 11x11 window — wide enough to dissolve the angular-undersampling blobs on GPU).
-        assert_eq!(SSAO_BLUR_R, 5, "the host blur radius must mirror the shader's SSAO_BLUR_R");
+        // Sanity: the radius constant is the one the resolve compiles in (GPU-tuned: R=7, a
+        // 15x15 window — wide enough to dissolve the angular-undersampling blobs).
+        assert_eq!(SSAO_BLUR_R, 7, "the host blur radius must mirror the shader's SSAO_BLUR_R");
     }
 }

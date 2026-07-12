@@ -241,4 +241,9 @@ fn ssao_blur_consts_host_match_edsl() {
         ssao::SSAO_BLUR_DEPTH_SIGMA.to_bits(),
         "SSAO_BLUR_DEPTH_SIGMA host vs eDSL"
     );
+    assert_eq!(
+        compute::SSAO_BLUR_GRAD_CLAMP.to_bits(),
+        ssao::SSAO_BLUR_GRAD_CLAMP.to_bits(),
+        "SSAO_BLUR_GRAD_CLAMP host vs eDSL"
+    );
 }

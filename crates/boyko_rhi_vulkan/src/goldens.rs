@@ -30,7 +30,7 @@ use crate::compute::{
     MESH_COLOR, MESH_DEPTH_CLEAR, MESH_DEPTH_T_MAX, MESH_RASTER_ALBEDO, PBR_FAR, PBR_LIGHT_COLOR, PBR_LIGHT_DIR,
     PBR_SKY_DIFFUSE, PBR_SKY_SPEC, SDF_CAM_Z, SDF_EPS, SDF_HALF_EXTENT, SDF_MAX_IT,
     SDF_T_MAX, SHADOW_HIT_EPS, SHADOW_K, SHADOW_MINT, SHADOW_MINT_STEP, SHADOW_NDOTL_EPS,
-    SHADOW_NORMAL_BIAS, SKY_SUN_EXPONENT, SSAO_BLUR_DEPTH_SIGMA, SSAO_BLUR_DEPTH_TOL, SSAO_BLUR_R, SSAO_BLUR_SPATIAL_SIGMA, SSAO_HILBERT_W, SSAO_R2_ALPHA1, SSAO_R2_ALPHA2, SSAO_RADIUS_PIX_MAX, SSAO_RADIUS_PIX_MIN,
+    SHADOW_NORMAL_BIAS, SKY_SUN_EXPONENT, SSAO_BLUR_DEPTH_SIGMA, SSAO_BLUR_DEPTH_TOL, SSAO_BLUR_GRAD_CLAMP, SSAO_BLUR_R, SSAO_BLUR_SPATIAL_SIGMA, SSAO_HILBERT_W, SSAO_R2_ALPHA1, SSAO_R2_ALPHA2, SSAO_RADIUS_PIX_MAX, SSAO_RADIUS_PIX_MIN,
     SSAO_ROT, SSAO_ROT_N, SSAO_VIEWT_BG, SUN_ENV_WEIGHT, SUN_KERNEL_EXPONENT_MAX, SUN_KERNEL_EXPONENT_MIN,
     SsaoParams, TILE_FLAG_EMPTY, TILE_SIZE, TileBound, composite_ray, depth_to_t,
     golden_f16_from_f32, pack_rgba, sdf_sphere,
@@ -2464,10 +2464,12 @@ pub fn golden_ssao_attributes(
         }
     };
 
-    // The Hilbert+R2 rotation slot (bit-exact vs HLSL: ONE 64x64 Hilbert index drives two R2
-    // channels). `slot = (r2 * SSAO_ROT_N) >> 24` maps the Q0.24 fraction into [0, ROT_N) by an
-    // integer scale (a power-of-two table). R2 is low-discrepancy, so adjacent pixels get well-
-    // spread (not random) slots — the dither lives in HIGH frequencies the blur removes cleanly.
+    // The Hilbert+R2 rotation slot (bit-exact vs HLSL — INTEGER pick, no div): ONE 64x64
+    // Hilbert index drives two R2 channels; `slot = (r2 * SSAO_ROT_N) >> 24` maps the Q0.24
+    // fraction into [0, ROT_N). The table is 64 entries (was 16): an even-slice axis set has
+    // only `SSAO_ROT_N / slices` EFFECTIVE dither classes (rotating the set by its slice
+    // spacing maps it onto itself) — 16 entries left 2 classes at 8 slices, whose coherent
+    // layout read as un-blurrable streaks; 64 keeps >= 8 classes at a 2.8125° step.
     let hindex = ssao_hilbert(SSAO_HILBERT_W, px & (SSAO_HILBERT_W - 1), py & (SSAO_HILBERT_W - 1));
     let slot = ((ssao_r2(hindex, SSAO_R2_ALPHA1).wrapping_mul(SSAO_ROT_N)) >> 24) as usize;
     let rot = SSAO_ROT[slot];
@@ -2588,9 +2590,34 @@ pub fn golden_ssao_blur(
     );
 
     // The center's `view_t` (the gate reference) — the SAME `gViewT.Load(coord)` the resolve
-    // reads. The center always passes `|view_t - view_t| == 0 <= tol` with weight 1, so
-    // `wsum >= 1`.
+    // reads. The center always passes (`dz_pred == 0` at zero offset ⇒ residual exactly 0) with
+    // weight 1, so `wsum >= 1`.
     let center_view_t = gbuf[(py as i32 * w + px as i32) as usize].view_t;
+
+    // The slope-aware (plane-fit) gate gradient — min-magnitude ONE-SIDED view_t differences
+    // from the 4 direct neighbours, clamped to ±SSAO_BLUR_GRAD_CLAMP. Mirrors the shader's
+    // hand-written pre-loop glue EXACTLY: the shader's coordinate-CLAMPED `Load` reads the
+    // center's own texel at an image edge (a zero diff) — here the bounds check supplies the
+    // same zero. Min-magnitude picks the in-surface side at a silhouette; the clamp bounds a
+    // both-sides-huge case (isolated pixel against the 1e30 background) so a cross-silhouette
+    // tap can never be "predicted" back inside the band. Tie (equal magnitudes) keeps the
+    // +side — the shader's `(abs(p) > abs(m)) ? m : p` ternary.
+    let one_sided = |dx: i32, dy: i32, sign: f32| -> f32 {
+        let cx = px as i32 + dx;
+        let cy = py as i32 + dy;
+        if cx < 0 || cy < 0 || cx >= w || cy >= h {
+            return 0.0;
+        }
+        let vt_n = gbuf[(cy * w + cx) as usize].view_t;
+        if sign > 0.0 { vt_n - center_view_t } else { center_view_t - vt_n }
+    };
+    let min_mag = |p: f32, m: f32| -> f32 { if p.abs() > m.abs() { m } else { p } };
+    // `.clamp` == the shader's `clamp(v, -C, C)` == the eDSL walk's `max(lo).min(hi)` chain for
+    // all FINITE inputs (the diffs are finite by construction — no NaN divergence risk).
+    let dzdx = min_mag(one_sided(1, 0, 1.0), one_sided(-1, 0, -1.0))
+        .clamp(-SSAO_BLUR_GRAD_CLAMP, SSAO_BLUR_GRAD_CLAMP);
+    let dzdy = min_mag(one_sided(0, 1, 1.0), one_sided(0, -1, -1.0))
+        .clamp(-SSAO_BLUR_GRAD_CLAMP, SSAO_BLUR_GRAD_CLAMP);
 
     let spatial_sigma2 = SSAO_BLUR_SPATIAL_SIGMA * SSAO_BLUR_SPATIAL_SIGMA;
     let depth_sigma2 = SSAO_BLUR_DEPTH_SIGMA * SSAO_BLUR_DEPTH_SIGMA;
@@ -2607,7 +2634,9 @@ pub fn golden_ssao_blur(
             }
             let idx = (cy * w + cx) as usize;
             let vt = gbuf[idx].view_t;
-            let dz = vt - center_view_t;
+            // The slope-aware RESIDUAL: dz = (vt - view_t) - dz_pred, dz_pred = dzdx*dx + dzdy*dy.
+            let dz_pred = dzdx * dx as f32 + dzdy * dy as f32;
+            let dz = vt - center_view_t - dz_pred;
             if dz.abs() > SSAO_BLUR_DEPTH_TOL {
                 continue; // silhouette gate (far-depth neighbour) — HARD reject, unchanged
             }

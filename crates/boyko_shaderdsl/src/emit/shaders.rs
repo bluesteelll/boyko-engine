@@ -749,14 +749,17 @@ pub fn emit_hlsl_ssao_blur_tap() -> String {
     //   view_t    → Input(1) (float_in[1] = "view_t")    — the enclosing resolve's center gViewT
     //   s         → Input(2) (float_in[2] = "s")         — the pre-bound `float s = gSsao.Load(c).r;`
     //   w_spatial → Input(3) (float_in[3] = "w_spatial") — the pre-bound spatial falloff weight
+    //   dz_pred   → Input(4) (float_in[4] = "dz_pred")   — the pre-bound plane-fit predicted
+    //               view_t offset (`dzdx*dx + dzdy*dy`, hand-written glue inside the loop)
     let sum = EmitCf::decl_param("ssao_sum", Emit::lit(0.0));
     let wsum = EmitCf::decl_param("ssao_wsum", Emit::lit(0.0));
     let vt = Emit::input(0);
     let view_t = Emit::input(1);
     let s = Emit::input(2);
     let w_spatial = Emit::input(3);
+    let dz_pred = Emit::input(4);
 
-    let _ = ssao::ssao_blur_tap_body::<EmitCf>(&sum, &wsum, vt, view_t, s, w_spatial);
+    let _ = ssao::ssao_blur_tap_body::<EmitCf>(&sum, &wsum, vt, view_t, s, w_spatial, dz_pred);
 
     // Pop the function body block and print it.
     let body_block = STMTS.with(|s| {
@@ -765,7 +768,7 @@ pub fn emit_hlsl_ssao_blur_tap() -> String {
             .expect("invariant: the function body block was pushed above")
     });
 
-    let float_in = ["vt", "view_t", "s", "w_spatial"];
+    let float_in = ["vt", "view_t", "s", "w_spatial", "dz_pred"];
     let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
     let vars = VARS.with(|v| v.borrow().clone());
     let names = Names {

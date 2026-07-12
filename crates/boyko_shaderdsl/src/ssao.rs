@@ -127,13 +127,15 @@ pub const SSAO_PRESETS: [SsaoParams; 3] = [
         strength: SSAO_STRENGTH,
         eps: SSAO_EPS,
     },
-    // High — the widest tap budget (4 REAL evenly-spaced slices × 6 steps × 2 = 48 taps). Change B:
-    // 4 slices (stride 4 over the 16-entry SSAO_ROT -> 0/45/90/135°) now that Change A makes them
-    // distinct; 4 divides SSAO_ROT_N (16), the even-spacing constraint. (Was 3 slices, whose 3rd
-    // axis duplicated the 2nd under the pre-A hardcoded 2-axis glue — no real angular coverage.)
+    // High — the widest tap budget (8 REAL evenly-spaced slices × 6 steps × 2 = 96 taps). Change B
+    // (owner-escalated): 8 slices (stride 2 over the 16-entry SSAO_ROT -> every 22.5°) — the noise
+    // is attacked at the SOURCE (the per-slice horizon-max is high-variance; the slice MEAN's
+    // variance falls ~1/N), which the visual oracle confirmed the blur alone cannot fully clean.
+    // 8 divides SSAO_ROT_N (16), the even-spacing constraint. High is the owner's opt-in quality
+    // tier; the cost lives only in the SSAO pass of scenes that arm it.
     SsaoParams {
         radius: 0.5,
-        slices: 4,
+        slices: 8,
         steps: 6,
         strength: 2.5,
         eps: 1.0e-4,
@@ -519,14 +521,14 @@ where
 /// `deferred_pbr.hlsl`). `R == 3` is a 7x7 tap window (the per-tap weight, not a uniform
 /// average, decides its actual contribution — see [`SSAO_BLUR_SPATIAL_SIGMA`]). Equals
 /// `boyko_rhi_vulkan::compute::SSAO_BLUR_R`.
-pub const SSAO_BLUR_R: i32 = 5;
+pub const SSAO_BLUR_R: i32 = 7;
 
 /// The resolve's SSAO blur bilateral DEPTH gate (`SSAO_BLUR_DEPTH_TOL` in `deferred_pbr.hlsl`),
 /// in `view_t` (world-distance) units: a neighbour tap is averaged in only when
 /// `abs(tap.view_t - center.view_t) <= SSAO_BLUR_DEPTH_TOL`, which keeps the blur within a flat
 /// surface while rejecting the mesh<->SDF silhouette (where `view_t` jumps far more than the
 /// tolerance). Equals `boyko_rhi_vulkan::compute::SSAO_BLUR_DEPTH_TOL`.
-pub const SSAO_BLUR_DEPTH_TOL: f32 = 0.1;
+pub const SSAO_BLUR_DEPTH_TOL: f32 = 1.0;
 
 /// Render P7 POLISH Change C — the resolve's SSAO blur bilateral SPATIAL falloff scale
 /// (`SSAO_BLUR_SPATIAL_SIGMA` in `deferred_pbr.hlsl`), in pixels. The per-tap spatial weight is
@@ -535,7 +537,7 @@ pub const SSAO_BLUR_DEPTH_TOL: f32 = 0.1;
 /// op-set has no `pow`/`exp`): taps near the sigma radius fade smoothly to zero weight instead
 /// of the old hard-cutoff uniform box average. Equals
 /// `boyko_rhi_vulkan::compute::SSAO_BLUR_SPATIAL_SIGMA`.
-pub const SSAO_BLUR_SPATIAL_SIGMA: f32 = 7.0;
+pub const SSAO_BLUR_SPATIAL_SIGMA: f32 = 100.0;
 
 /// Render P7 POLISH Change C — the resolve's SSAO blur bilateral DEPTH falloff scale
 /// (`SSAO_BLUR_DEPTH_SIGMA` in `deferred_pbr.hlsl`), in `view_t` (world-distance) units. The
@@ -545,7 +547,20 @@ pub const SSAO_BLUR_SPATIAL_SIGMA: f32 = 7.0;
 /// past the tolerance — the silhouette guard is unchanged); a near-tolerance tap now fades
 /// toward zero weight instead of counting fully. Equals
 /// `boyko_rhi_vulkan::compute::SSAO_BLUR_DEPTH_SIGMA`.
-pub const SSAO_BLUR_DEPTH_SIGMA: f32 = 0.1;
+pub const SSAO_BLUR_DEPTH_SIGMA: f32 = 1.0;
+
+/// The per-pixel view_t gradient CLAMP (`SSAO_BLUR_GRAD_CLAMP` in `deferred_pbr.hlsl`) for the
+/// slope-aware (plane-fit) depth gate: the blur predicts each tap's view_t from the center's
+/// local gradient (`dz_pred = dzdx*dx + dzdy*dy`, min-magnitude one-sided differences) and
+/// gates the RESIDUAL `vt - view_t - dz_pred`, so the bilateral band follows a sloped floor /
+/// curved surface instead of truncating the kernel. The gradient components are clamped to
+/// ±this value: a genuine surface slope stays below the silhouette threshold per pixel BY the
+/// existing gate's own definition, while a silhouette/background one-sided step (up to the
+/// 1e30 sentinel) would otherwise "predict" a cross-silhouette tap back inside the band —
+/// clamped, its residual stays huge and the tap is still rejected. Equals
+/// `boyko_rhi_vulkan::compute::SSAO_BLUR_GRAD_CLAMP` (and the hard gate tolerance,
+/// [`SSAO_BLUR_DEPTH_TOL`]).
+pub const SSAO_BLUR_GRAD_CLAMP: f32 = 0.1;
 
 /// The mesh/SDF G-buffer background sentinel (`1.0e30` in `deferred_pbr.hlsl` and the marcher's
 /// `gViewT` terminal writes) — a `view_t` at or above this is a non-lit / mesh / background
@@ -598,9 +613,17 @@ pub fn ssao_blur_tap_body<C: Cf>(
     view_t: C::Scalar,
     s: C::Scalar,
     w_spatial: C::Scalar,
+    dz_pred: C::Scalar,
 ) -> Flow {
-    // float dz = vt - view_t;  (a NAMED temp — both the gate and the depth weight read it).
-    let dz = C::temp_float("dz", vt.sub(view_t));
+    // float dz = vt - view_t - dz_pred;  (a NAMED temp — both the gate and the depth weight
+    // read it). SLOPE-AWARE (plane-fit) residual: `dz_pred = dzdx*dx + dzdy*dy` is the tap's
+    // EXPECTED view_t offset from the center's local depth gradient (hand-written glue — the
+    // walk owns dx/dy and the gradient; see [`ssao_blur_body`]). Gating the RESIDUAL instead of
+    // the raw difference keeps the bilateral band following a SLOPED floor / CURVED surface —
+    // the raw `vt - view_t` gate truncated the kernel to a near-1D sliver on any surface whose
+    // view_t drifts more than the tolerance across the kernel radius, which left the angular-
+    // undersampling noise un-averaged (the visual oracle's residual "dirt").
+    let dz = C::temp_float("dz", vt.sub(view_t).sub(dz_pred));
 
     // if (abs(dz) > SSAO_BLUR_DEPTH_TOL) { continue; }  — the silhouette guard (unchanged).
     let tol = C::named_lit("SSAO_BLUR_DEPTH_TOL", SSAO_BLUR_DEPTH_TOL);
@@ -720,6 +743,38 @@ where
     C: Cf,
     F: Fn(i32, i32) -> Option<(C::Scalar, C::Scalar)>,
 {
+    // The slope-aware (plane-fit) depth-gate gradient — min-magnitude ONE-SIDED view_t
+    // differences from the 4 direct neighbours, clamped to ±SSAO_BLUR_GRAD_CLAMP (mirrors the
+    // hand-written `deferred_pbr.hlsl` glue BEFORE the loop, bit-for-bit: an out-of-bounds
+    // neighbour contributes a ZERO diff — the shader's coordinate-clamped `Load` reads the
+    // center's own texel at the image edge, the same zero). Min-magnitude picks the in-surface
+    // side at a silhouette (the other side's step is huge); the clamp bounds a both-sides-huge
+    // case (an isolated pixel against the 1e30 background) so a cross-silhouette tap can never
+    // be "predicted" back inside the band. All FieldScalar ops (sub/abs/gt/select/min/max) —
+    // the Eval instantiation is the plain-f32 host oracle mirror.
+    let one_sided = |d: Option<(C::Scalar, C::Scalar)>, sign: f32| -> C::Scalar {
+        match d {
+            // +side: vt_n - view_t; -side: view_t - vt_n (sign folds the direction).
+            Some((vt_n, _)) => {
+                if sign > 0.0 {
+                    vt_n.sub(view_t)
+                } else {
+                    view_t.sub(vt_n)
+                }
+            }
+            None => C::Scalar::lit(0.0),
+        }
+    };
+    let min_mag = |a: C::Scalar, b: C::Scalar| -> C::Scalar {
+        // (abs(a) > abs(b)) ? b : a  — the min-magnitude pick (tie keeps `a`, the +side).
+        C::Scalar::select(a.abs().gt(b.abs()), b, a)
+    };
+    let clamp_grad = |v: C::Scalar| -> C::Scalar {
+        v.max(C::Scalar::lit(-SSAO_BLUR_GRAD_CLAMP)).min(C::Scalar::lit(SSAO_BLUR_GRAD_CLAMP))
+    };
+    let dzdx = clamp_grad(min_mag(one_sided(fetch(1, 0), 1.0), one_sided(fetch(-1, 0), -1.0)));
+    let dzdy = clamp_grad(min_mag(one_sided(fetch(0, 1), 1.0), one_sided(fetch(0, -1), -1.0)));
+
     // float ssao_sum = 0.0; float ssao_wsum = 0.0;
     let sum = C::decl_var("ssao_sum", C::Scalar::lit(0.0));
     let wsum = C::decl_var("ssao_wsum", C::Scalar::lit(0.0));
@@ -727,13 +782,18 @@ where
         for dx in -SSAO_BLUR_R..=SSAO_BLUR_R {
             // `int2 c = coord + int2(dx, dy); if (out of bounds) continue;`  — the hand-written
             // bounds/fetch seam; `dx == dy == 0` (the center) always resolves `Some`, always
-            // passes its own gate (|vt - view_t| == 0), and always carries `w_spatial ==
-            // w_depth == 1`, so `wsum >= 1` is guaranteed.
+            // passes its own gate (`dz_pred == 0` at zero offset, so the residual is exactly 0),
+            // and always carries `w_spatial == w_depth == 1`, so `wsum >= 1` is guaranteed.
             let Some((vt, s)) = fetch(dx, dy) else {
                 continue;
             };
             let w_spatial = C::Scalar::lit(ssao_spatial_weight(dx, dy));
-            let _ = ssao_blur_tap_body::<C>(&sum, &wsum, vt, view_t, s, w_spatial);
+            // float dz_pred = dzdx * dx + dzdy * dy;  (the tap's plane-fit predicted view_t
+            // offset — dx/dy are compile-time at each unrolled iteration, lifted as lits).
+            let dz_pred = dzdx
+                .mul(C::Scalar::lit(dx as f32))
+                .add(dzdy.mul(C::Scalar::lit(dy as f32)));
+            let _ = ssao_blur_tap_body::<C>(&sum, &wsum, vt, view_t, s, w_spatial, dz_pred);
         }
     }
 

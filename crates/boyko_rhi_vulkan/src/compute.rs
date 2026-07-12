@@ -523,7 +523,7 @@ embed_spirv! {
 }
 
 embed_spirv! {
-    /// `SSAO_PARAMS[SSAO_QUALITY_HIGH]` — `sdf_ssao_high.comp.spv` (4 slices × 6 steps × 2 = 48 taps).
+    /// `SSAO_PARAMS[SSAO_QUALITY_HIGH]` — `sdf_ssao_high.comp.spv` (8 slices × 6 steps × 2 = 96 taps).
     SDF_SSAO_HIGH_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_ssao_high.comp.spv")
 }
@@ -1717,9 +1717,10 @@ pub const SSAO_PARAMS: [SsaoParams; 3] = [
         strength: SSAO_STRENGTH,
         eps: SSAO_EPS,
     },
-    // High — the widest tap budget (4 REAL evenly-spaced slices × 6 steps × 2 = 48 taps; Change B —
-    // 4 divides SSAO_ROT_N(16) for even stride-4 spacing, now that Change A makes slices distinct).
-    SsaoParams { radius: 0.5, slices: 4, steps: 6, strength: 2.5, eps: 1.0e-4 },
+    // High — the widest tap budget (8 REAL evenly-spaced slices × 6 steps × 2 = 96 taps; Change B
+    // owner-escalated — 8 divides SSAO_ROT_N(16) for even stride-2 spacing; variance of the slice
+    // mean falls ~1/N, attacking the contact-shadow noise at the source).
+    SsaoParams { radius: 0.5, slices: 8, steps: 6, strength: 2.5, eps: 1.0e-4 },
 ];
 
 /// The LOW SSAO quality variant index into [`SSAO_PARAMS`] / [`sdf_ssao_spirv_variant`].
@@ -1735,13 +1736,18 @@ pub const SSAO_RADIUS_PIX_MIN: f32 = 2.0;
 /// The perspective screen-pixel radius clamp maximum (`SSAO_RADIUS_PIX_MAX`) — keeps taps
 /// inside a sane neighbourhood.
 pub const SSAO_RADIUS_PIX_MAX: f32 = 24.0;
-/// The integer-hash rotation table size (`SSAO_ROT_N`); the per-pixel slot is `hash &
-/// (SSAO_ROT_N - 1)` (a power-of-two mask == `% N`; NO float `fract`/`floor`, so the host and
-/// GPU pick the SAME rotation). Q1 widened this 4 -> 16 to decorrelate the angular banding.
-pub const SSAO_ROT_N: u32 = 16;
-/// The pre-baked `(cos, sin)` rotation table for the 16 evenly-spaced angles over [0, π):
-/// angle k = k·(π/16) for k = 0..15 (degrees 0, 11.25, 22.5, …, 168.75), BYTE-IDENTICAL to the
-/// shader's `SSAO_ROT[16]` so the host picks the same slot.
+/// The rotation table size (`SSAO_ROT_N`); the per-pixel slot is `(r2 * SSAO_ROT_N) >> 24`
+/// (an INTEGER scale of the Q0.24 R2 fraction; NO float `fract`/`floor`/div, so the host and
+/// GPU pick the SAME rotation bit-exactly). Widened 16 -> 64: an even-slice axis set has only
+/// `SSAO_ROT_N / SSAO_SLICES` EFFECTIVE dither classes (rotating the set by its own slice
+/// spacing maps it onto itself) — 16 entries left just 2 classes at 8 slices, whose coherent
+/// Hilbert+R2 layout read as un-blurrable streaks; 64 keeps >= 8 classes at a 2.8125° step.
+pub const SSAO_ROT_N: u32 = 64;
+/// The pre-baked `(cos, sin)` rotation table for the 64 evenly-spaced angles over [0, π):
+/// angle k = k·(π/64) for k = 0..63 (a 2.8125° step), BYTE-IDENTICAL to the shader's
+/// `SSAO_ROT[64]` so the host picks the same slot. Also the per-slice BASE axes (Change A —
+/// `SSAO_ROT[sl * (SSAO_ROT_N / slices)]`; the strided entries are bit-identical to the
+/// retired 16-entry table's).
 //
 // These literals are LOAD-BEARING: each must round to the EXACT `f32` the shader's
 // `float2(...)` literal carries (the integer-hash rotation slot must agree bit-for-bit
@@ -1750,50 +1756,104 @@ pub const SSAO_ROT_N: u32 = 16;
 // or truncate digits — either DIVERGES the host literal from the frozen shader table, the
 // exact drift this oracle exists to prevent. The `ssao_edsl_sync` cross-check pins the math.
 #[allow(clippy::approx_constant, clippy::excessive_precision)]
-pub const SSAO_ROT: [(f32, f32); 16] = [
+pub const SSAO_ROT: [(f32, f32); 64] = [
     (1.00000000, 0.00000000),
+    (0.99879545, 0.04906768),
+    (0.99518472, 0.09801714),
+    (0.98917651, 0.14673047),
     (0.98078525, 0.19509032),
+    (0.97003126, 0.24298018),
+    (0.95694035, 0.29028466),
+    (0.94154406, 0.33688986),
     (0.92387950, 0.38268343),
+    (0.90398932, 0.42755508),
+    (0.88192129, 0.47139674),
+    (0.85772860, 0.51410276),
     (0.83146960, 0.55557024),
+    (0.80320752, 0.59569931),
+    (0.77301043, 0.63439327),
+    (0.74095112, 0.67155898),
     (0.70710677, 0.70710677),
+    (0.67155898, 0.74095112),
+    (0.63439327, 0.77301043),
+    (0.59569931, 0.80320752),
     (0.55557024, 0.83146960),
+    (0.51410276, 0.85772860),
+    (0.47139674, 0.88192129),
+    (0.42755508, 0.90398932),
     (0.38268343, 0.92387950),
+    (0.33688986, 0.94154406),
+    (0.29028466, 0.95694035),
+    (0.24298018, 0.97003126),
     (0.19509032, 0.98078525),
+    (0.14673047, 0.98917651),
+    (0.09801714, 0.99518472),
+    (0.04906768, 0.99879545),
     (0.00000000, 1.00000000),
+    (-0.04906768, 0.99879545),
+    (-0.09801714, 0.99518472),
+    (-0.14673047, 0.98917651),
     (-0.19509032, 0.98078525),
+    (-0.24298018, 0.97003126),
+    (-0.29028466, 0.95694035),
+    (-0.33688986, 0.94154406),
     (-0.38268343, 0.92387950),
+    (-0.42755508, 0.90398932),
+    (-0.47139674, 0.88192129),
+    (-0.51410276, 0.85772860),
     (-0.55557024, 0.83146960),
+    (-0.59569931, 0.80320752),
+    (-0.63439327, 0.77301043),
+    (-0.67155898, 0.74095112),
     (-0.70710677, 0.70710677),
+    (-0.74095112, 0.67155898),
+    (-0.77301043, 0.63439327),
+    (-0.80320752, 0.59569931),
     (-0.83146960, 0.55557024),
+    (-0.85772860, 0.51410276),
+    (-0.88192129, 0.47139674),
+    (-0.90398932, 0.42755508),
     (-0.92387950, 0.38268343),
+    (-0.94154406, 0.33688986),
+    (-0.95694035, 0.29028466),
+    (-0.97003126, 0.24298018),
     (-0.98078525, 0.19509032),
+    (-0.98917651, 0.14673047),
+    (-0.99518472, 0.09801714),
+    (-0.99879545, 0.04906768),
 ];
 
 /// Render P7 POLISH — the SSAO depth-aware box-blur half-kernel radius (`SSAO_BLUR_R` in the
 /// resolve). `R == 3` is a 7×7 box: the inline blur of `gSsao` INSIDE the resolve's `ssao_mode
 /// != 0` combine that smooths the discrete-step HBAO RINGS. The host mirror [`golden_ssao_blur`]
 /// uses the SAME radius so the GPU and host averages agree texel-for-texel.
-pub const SSAO_BLUR_R: i32 = 5;
+pub const SSAO_BLUR_R: i32 = 7;
 /// Render P7 POLISH — the SSAO blur's bilateral DEPTH gate (`SSAO_BLUR_DEPTH_TOL` in the
 /// resolve), in `view_t` (world-distance) units. A neighbour tap is averaged in ONLY when
 /// `|tap.view_t - center.view_t| <= SSAO_BLUR_DEPTH_TOL`; this keeps the blur WITHIN a flat
 /// surface (the mesh floor has near-constant `view_t`) while REJECTING the mesh↔SDF silhouette
 /// (where `view_t` jumps far more than the tol), so AO never bleeds across the edge. `0.1` was
 /// chosen to sit comfortably inside that band. Mirrored bit-for-bit by [`golden_ssao_blur`].
-pub const SSAO_BLUR_DEPTH_TOL: f32 = 0.1;
+pub const SSAO_BLUR_DEPTH_TOL: f32 = 1.0;
 /// Render P7 POLISH Change C — the resolve's SSAO blur bilateral SPATIAL falloff scale
 /// (`SSAO_BLUR_SPATIAL_SIGMA` in the resolve), in pixels: the per-tap spatial weight is
 /// `clamp01(1 - (dx*dx+dy*dy) / (SSAO_BLUR_SPATIAL_SIGMA * SSAO_BLUR_SPATIAL_SIGMA))`, a
 /// polynomial (transcendental-free) radial falloff. Equals
 /// `boyko_shaderdsl::ssao::SSAO_BLUR_SPATIAL_SIGMA`; mirrored bit-for-bit by [`golden_ssao_blur`].
-pub const SSAO_BLUR_SPATIAL_SIGMA: f32 = 7.0;
+pub const SSAO_BLUR_SPATIAL_SIGMA: f32 = 100.0;
 /// Render P7 POLISH Change C — the resolve's SSAO blur bilateral DEPTH falloff scale
 /// (`SSAO_BLUR_DEPTH_SIGMA` in the resolve), in `view_t` units: the per-tap depth weight is
 /// `clamp01(1 - (dz*dz) / (SSAO_BLUR_DEPTH_SIGMA * SSAO_BLUR_DEPTH_SIGMA))`, softening the
 /// depth agreement WITHIN the hard [`SSAO_BLUR_DEPTH_TOL`] gate (which still rejects a tap
 /// outright past the tolerance). Equals `boyko_shaderdsl::ssao::SSAO_BLUR_DEPTH_SIGMA`;
 /// mirrored bit-for-bit by [`golden_ssao_blur`].
-pub const SSAO_BLUR_DEPTH_SIGMA: f32 = 0.1;
+pub const SSAO_BLUR_DEPTH_SIGMA: f32 = 1.0;
+/// The slope-aware depth-gate gradient clamp (`SSAO_BLUR_GRAD_CLAMP` in the resolve): the blur
+/// predicts each tap's view_t from the center's clamped local gradient (min-magnitude one-sided
+/// differences) and gates the RESIDUAL — the band follows a sloped/curved surface instead of
+/// truncating the kernel, while a silhouette/background step (clamped) still rejects. Equals
+/// `boyko_shaderdsl::ssao::SSAO_BLUR_GRAD_CLAMP`; mirrored bit-for-bit by [`golden_ssao_blur`].
+pub const SSAO_BLUR_GRAD_CLAMP: f32 = 0.1;
 
 
 /// P6 R1 cap: the maximum EXTRA shadow casters marched per pixel (the dominant-N bound).

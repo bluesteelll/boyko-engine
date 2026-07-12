@@ -7030,6 +7030,16 @@ fn p6_multilight_shadows_screenshot_dump() {
 /// disagreement propagated linearly through `dot(N, slice_dir)`.
 const SSAO_AO_TOL: i32 = 6;
 
+/// The SSAO-COMBINED lit tolerance — the AO channel's accepted GPU↔host divergence
+/// ([`SSAO_AO_TOL`]) PROPAGATES into the lit combine (the blurred `ao_final` scales the ambient
+/// terms, a ≤1× factor of the pixel, and the GPU blur averages the GPU's OWN raw AO bytes while
+/// the host oracle averages the host's — a regionally-coherent raw delta survives the average).
+/// So the lit comparison CANNOT be tighter than the AO budget it is a function of: the
+/// pre-Change-C ±[`DEFERRED_ARM1_TOL`] only held because the old narrow 7×7 hard-gated box
+/// happened to average the probed scenes' regional deltas under 2/255 — a margin accident, not
+/// a bound. Non-SSAO lit gates stay at the strict ±[`DEFERRED_ARM1_TOL`].
+const SSAO_LIT_TOL: i32 = SSAO_AO_TOL;
+
 /// The default SSAO light table fixture (`ssao_mode == 1`): one directional + one sky (so the
 /// ambient the SSAO modulates is non-trivial), NON-CLUSTERED, `shadow_mode == 0`. Mirrors the
 /// L0a/L0b degenerate spirit but with a real sky term + the SSAO mode armed.
@@ -7183,16 +7193,16 @@ fn ssao_combined_lit_matches_host() {
                     max_delta = d;
                 }
                 assert!(
-                    d <= DEFERRED_ARM1_TOL,
+                    d <= SSAO_LIT_TOL,
                     "[{name}] SSAO combined LIT texel ({px},{py}) got {got:?} want {want:?} \
-                     (SSAO oracle) exceeds ±{DEFERRED_ARM1_TOL}/255 (delta {d})"
+                     (SSAO oracle) exceeds ±{SSAO_LIT_TOL}/255 (delta {d})"
                 );
             }
         }
         assert!(lit_hits > 0, "[{name}] SSAO combined LIT: no SDF-lit pixel — the gate is vacuous");
         println!(
             "[{name}] SSAO combined LIT == host SSAO oracle: max delta {max_delta}/255 (tol \
-             {DEFERRED_ARM1_TOL}); {lit_hits} SDF-lit px"
+             {SSAO_LIT_TOL}); {lit_hits} SDF-lit px"
         );
     }
 }
@@ -7264,7 +7274,7 @@ fn ssao_variants_match_host() {
             assert!(lit_px > 0, "[q{quality} {name}] SSAO AO channel: no SDF-lit pixel (vacuous)");
 
             // (2) The combined LIT == the SSAO-aware resolve oracle fed the BLURRED per-variant SSAO
-            // term (the resolve blur is variant-independent: a fixed 7×7 depth-gated box).
+            // term (the resolve blur is variant-independent: a fixed 11×11 depth-gated bilateral).
             let mut max_lit_delta = 0i32;
             for py in 0..SDF_IMG_H {
                 for px in 0..SDF_IMG_W {
@@ -7283,15 +7293,15 @@ fn ssao_variants_match_host() {
                         max_lit_delta = d;
                     }
                     assert!(
-                        d <= DEFERRED_ARM1_TOL,
+                        d <= SSAO_LIT_TOL,
                         "[q{quality} {name}] SSAO combined LIT texel ({px},{py}) got {got:?} want \
-                         {want:?} (variant SSAO oracle) exceeds ±{DEFERRED_ARM1_TOL}/255 (delta {d})"
+                         {want:?} (variant SSAO oracle) exceeds ±{SSAO_LIT_TOL}/255 (delta {d})"
                     );
                 }
             }
             println!(
                 "[q{quality} {name}] variant SSAO == host: AO max delta {max_ao_delta}/255 (tol \
-                 {SSAO_AO_TOL}), LIT max delta {max_lit_delta}/255 (tol {DEFERRED_ARM1_TOL}); \
+                 {SSAO_AO_TOL}), LIT max delta {max_lit_delta}/255 (tol {SSAO_LIT_TOL}); \
                  {lit_px} SDF-lit px (slices={} steps={})",
                 params.slices, params.steps
             );
