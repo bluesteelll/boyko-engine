@@ -46,6 +46,19 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Run a native executable WITHOUT letting its stderr trip `$ErrorActionPreference='Stop'`.
+# In Windows PowerShell 5.1 a native command's stderr lines (e.g. cargo's normal "Finished
+# ..." status, which cargo writes to stderr) are wrapped as NativeCommandError records; under
+# 'Stop' that terminates the script even though the exe returned exit code 0. Relaxing the
+# preference ONLY around the native call keeps the cmdlet-level 'Stop' intact, and the caller
+# still gates on `$LASTEXITCODE` afterwards, so no failure is masked.
+function Invoke-Native {
+    param([Parameter(Mandatory)][string]$Exe, [string[]]$Args)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Exe $Args } finally { $ErrorActionPreference = $prev }
+}
+
 # --- minimal, section-scoped TOML-subset reader (PS 5.1 has no TOML parser) ------------
 function Read-Pins([string]$path) {
     if (-not (Test-Path -LiteralPath $path)) { throw "[golden] pins file not found: $path" }
@@ -107,7 +120,7 @@ if ($bmpDir -and -not (Test-Path -LiteralPath $bmpDir)) {
 # --- (1) force-compile the test binary; ABORT on build error ---------------------------
 Write-Host "[golden] compiling test binary '$bin' (--no-run) ..." -ForegroundColor Cyan
 $buildArgs = @('test', '-p', $crate) + $featArgs + @('--test', $bin, '--no-run')
-& cargo $buildArgs
+Invoke-Native -Exe 'cargo' -Args $buildArgs
 if ($LASTEXITCODE -ne 0) {
     throw "[golden] test binary '$bin' FAILED TO COMPILE - aborting. This is the cargo-check-skips-tests false-green: fix the build before trusting any hash."
 }
@@ -120,7 +133,7 @@ $start = Get-Date
 # --- render (windowed, single-threaded, #[ignore]d) ------------------------------------
 Write-Host "[golden] rendering '$name' ..." -ForegroundColor Cyan
 $runArgs = @('test', '-p', $crate) + $featArgs + @('--test', $bin, $name, '--', '--ignored', '--test-threads=1')
-& cargo $runArgs
+Invoke-Native -Exe 'cargo' -Args $runArgs
 if ($LASTEXITCODE -ne 0) {
     throw "[golden] render test '$name' returned non-zero - aborting."
 }
