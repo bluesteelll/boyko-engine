@@ -10,7 +10,7 @@ pub use crate::present::{
     FrameWriteToken, GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES,
     GBufferFrame, GBufferMeshDraw, GBufferScene, GBufferTargets, InterpActivation, PASS_COUNT,
     PunctualDepthActivation, Renderer, SCENE_MVP_BYTES, SampledComposite, Scene, SmaaActivation,
-    SsaaActivation, SsaoActivation, Surface, Swapchain, SwapchainError, TimedPass,
+    SsaaActivation, SsaoActivation, Surface, Swapchain, SwapchainError, TaaActivation, TimedPass,
     TimestampCollector, UiPass,
 };
 #[cfg(feature = "hwrt")]

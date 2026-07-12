@@ -30,15 +30,16 @@ use boyko_input::{ButtonState, KeyCode, RawInputEvent};
 use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
 #[cfg(windows)]
 use boyko_render::{
-    AaConfig, AaMode, BindlessTextureTable, CsmCasterScratch, DdgiCaps, LightingConfig,
-    MATERIAL_FLAG_TEXTURED, Material, MaterialId, MaterialTable, MeshAssetsExt, MeshGpu,
-    MeshRenderScratch, OrphanedMeshGpu, OrphanedTextureGpu, RayBackendPolicy, RayCaps,
+    AaConfig, AaMode, BindlessTextureTable, CsmCasterScratch, DdgiCaps, JitterState,
+    LightingConfig, MATERIAL_FLAG_TEXTURED, Material, MaterialId, MaterialTable, MeshAssetsExt,
+    MeshGpu, MeshRenderScratch, OrphanedMeshGpu, OrphanedTextureGpu, RayBackendPolicy, RayCaps,
     RenderEpoch, ResolvedAa, ResolvedCsm, ResolvedShadowAtlas, RetiredGpuBuffers, RhiContext,
     SdfEditStaging, ShadowDenoiseConfig, ShadowDenoiseMode, TextureAssetsExt, TextureGpu,
-    collect_sdf_edits, gbuffer_push_from_view, retire_deferred_frees, upload_atlas_ring,
-    upload_camera_ring, upload_csm_ring, upload_instance_materials, upload_instance_materials_tex,
-    upload_instance_models, upload_light_table, upload_material_assets, upload_mesh_assets,
-    upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list, upload_texture_assets,
+    advance_jitter, collect_sdf_edits, gbuffer_push_from_view, gbuffer_push_from_view_jittered,
+    ndc_jitter, retire_deferred_frees, upload_atlas_ring, upload_camera_ring, upload_csm_ring,
+    upload_instance_materials, upload_instance_materials_tex, upload_instance_models,
+    upload_light_table, upload_material_assets, upload_mesh_assets, upload_pair_out_slot,
+    upload_pair_ring, upload_sdf_edit_list, upload_texture_assets,
 };
 #[cfg(all(windows, feature = "hwrt"))]
 use boyko_render::{
@@ -866,12 +867,41 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             Some(d) => d.request(ctx, host.swapchain.extent()),
             None => None,
         };
+        // Anti-aliasing Stage 4 (TAA W2): the resolved mode read early — BEFORE the render block
+        // borrows `&World` immutably — so the jitter advance below can take `&mut World`.
+        // `try_resource` degrades to `Off` on a host that never composes `AaPlugin` (mirrors
+        // `resolved_aa_mode`'s later, fuller read for `host.gpu.scene`; SSAA's host-lock does not
+        // apply to TAA, so this narrower read is sufficient here).
+        let taa_armed_now = app
+            .world()
+            .try_resource::<ResolvedAa>()
+            .map(|r| r.mode)
+            .unwrap_or_default()
+            == AaMode::Taa;
+        // TAA W2: advance the jitter phase ONCE per frame (cold) — structurally gated on
+        // `taa_armed_now` (`advance_jitter`'s `armed` param): an armed frame cycles `phase`
+        // through `HALTON_8`; a disarmed frame freezes `phase` and clears `JitterState.armed`,
+        // so `ndc_jitter` returns the exact-zero offset below (OFF byte-identity). Read via the
+        // fallible `try_resource_mut` — CONSISTENT with the `taa_armed_now` guard above (M1): a
+        // host that never composes `AaPlugin` has no `JitterState` AND `taa_armed_now == false`,
+        // so skipping the advance (freezing the phase) is exactly correct — never a panic.
+        if let Some(jitter) = app.world_mut().try_resource_mut::<JitterState>() {
+            advance_jitter(jitter, taa_armed_now);
+        }
         // HW-RT Rung 3b step 5a: advance the MESH motion-vector camera pair BEFORE the render
         // block (the `advance` needs `&mut World` to persist this frame's `cur` as next frame's
         // `prev`; the render block borrows `&World`). Computed ONLY when temporal is on AND the
         // MV ring exists (an RT + storage device) — else `None`, and the runner uploads nothing +
         // the recorder takes the base 3-MRT raster (byte-identical). `marcher_view_proj_rows` is
         // the marcher-aligned proj·view the shaders reproject against (I-O1 majorness pin).
+        //
+        // TAA W3 note: TAA's resolve will ALSO need this UNJITTERED pair (Decision 3 — jitter
+        // must never reach `MotionCamState`, else a static camera would report spurious motion),
+        // via a DEDICATED ring (not this hwrt-only one — `MotionCamState::advance` is a
+        // ONE-call-per-frame contract, and this ring's mesh-MV consumer is unrelated to TAA's
+        // camera-only reconstruction). Wiring that dedicated ring is a W5 follow-up (it has no
+        // consumer yet — `GBufferScene::taa` stays `None` this rung), so `taa_armed_now` does NOT
+        // drive this block.
         #[cfg(feature = "hwrt")]
         let mv_cam = {
             let temporal_on = app
@@ -1231,7 +1261,19 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // The composite extent (P1-1: BOTH pushes derive their aspect
                 // from `(cw, ch)` — the authored Projection aspect is not
                 // consulted by the windowed host's pushes).
-                gbuffer_push_from_view(&view, cw, ch, instanced)
+                //
+                // TAA W2: the STRUCTURAL OFF-skip — a TAA-off frame calls the plain
+                // (non-jittered) fn, not `_jittered` with a zero offset (`no *0.0`, per the
+                // byte-identity discipline). `taa_armed_now` was read + `JitterState` advanced
+                // BEFORE this block (see above); `world.resource::<JitterState>()` reads the
+                // SAME already-advanced phase this frame's jitter derives from.
+                if taa_armed_now {
+                    let jitter_state = *world.resource::<JitterState>();
+                    let jitter = ndc_jitter(&jitter_state, cw, ch);
+                    gbuffer_push_from_view_jittered(&view, cw, ch, instanced, jitter)
+                } else {
+                    gbuffer_push_from_view(&view, cw, ch, instanced)
+                }
             } else {
                 let mut zeroed = [0u8; GBUFFER_PUSH_BYTES];
                 if instanced {

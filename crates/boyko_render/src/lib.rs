@@ -180,10 +180,13 @@ pub mod mesh_data;
 /// per-mesh [`DrawBatch`](mesh_draw::DrawBatch), and the
 /// count→prefix-sum→scatter [`gather_mesh_draws`](mesh_draw::gather_mesh_draws) system.
 pub mod mesh_draw;
-/// HW-RT rung 3b — the camera view-proj carry for temporal shadow-vis motion vectors
+/// HW-RT rung 3b + TAA W3 — the camera view-proj carry for temporal reprojection
 /// ([`MotionCam`](motion_cam::MotionCam) UBO + [`MotionCamState`](motion_cam::MotionCamState)
-/// persist Resource). `not(hwrt)` builds carry none of it.
-#[cfg(feature = "hwrt")]
+/// persist Resource). Un-walled from `#[cfg(feature = "hwrt")]` (TAA W3): the resolve's
+/// camera-only motion-vector reconstruction needs it on BOTH legs (a software TAA build has
+/// no `rayQuery`, so it cannot be `hwrt`-gated). `PrevInstanceModelCol` / mesh-MV stay
+/// `hwrt`-gated (v1.1, per-object mesh motion vectors) — this module carries only the
+/// CAMERA pair, which both the hwrt shadow-temporal denoiser and TAA read.
 pub mod motion_cam;
 /// HW-RT rung R1 — the dormant unified ray / acceleration-structure backend seam:
 /// the [`RayBackendConfig`](ray_backend::RayBackendConfig) derived carrier +
@@ -266,6 +269,16 @@ pub mod aa_plugin;
 pub mod smaa_luts;
 pub mod ssao_config;
 pub mod ssao_plugin;
+/// Anti-aliasing Stage 4 (TAA) — the raster-only sub-pixel jitter substrate: the [`HALTON_8`
+/// table](taa_jitter::HALTON_8), the [`JitterState`](taa_jitter::JitterState) `Resource`
+/// singleton, and the pure [`ndc_jitter`](taa_jitter::ndc_jitter) /
+/// [`advance_jitter`](taa_jitter::advance_jitter) fns. v1 jitters ONLY the raster mesh vertex
+/// push (see the module docs for the C1 rationale — the SDF marcher stays un-jittered).
+pub mod taa_jitter;
+/// Anti-aliasing Stage 4 (TAA) — the temporal-resolve history-reset control: the
+/// [`TaaState`](taa_state::TaaState) `Resource` singleton the host sets on a `Taa` mode
+/// transition or a resize, forcing the next resolve to replace rather than blend.
+pub mod taa_state;
 /// Per-vertex tangent generation (Lengyel's method,
 /// [`generate_tangents`](tangent::generate_tangents)) — a load-time, one-shot pass
 /// deriving [`Vertex::tangent`](mesh::Vertex::tangent) from a mesh's final
@@ -353,8 +366,8 @@ pub use instance_model::{INSTANCE_MODEL_COL_BYTES, InstanceModelCol, sync_instan
 // the pre-Rung-3b code.
 #[cfg(feature = "hwrt")]
 pub use instance_model::{PrevInstanceModelCol, sync_prev_instance_model_cols};
-// HW-RT rung 3b: the camera view-proj carry for motion-vector reprojection.
-#[cfg(feature = "hwrt")]
+// HW-RT rung 3b + TAA W3: the camera view-proj carry for motion-vector reprojection.
+// Un-walled from `hwrt` (TAA W3) — see the `mod motion_cam` doc for the rationale.
 pub use motion_cam::{MOTION_CAM_UBO_BYTES, MotionCam, MotionCamState};
 pub use mesh_draw::{
     DrawBatch, MeshRenderScratch, PER_INSTANCE_MATERIAL_BYTES, PER_INSTANCE_MATERIAL_TEX_BYTES,
@@ -407,6 +420,8 @@ pub use shadow_plugin::ShadowAtlasPlugin;
 pub use snap_interpolation::{SnapInterpolation, TeleportCommandsExt, snap_apply};
 pub use aa_config::{AaConfig, AaMode, ResolvedAa, resolve_aa, resolve_aa_policy};
 pub use aa_plugin::AaPlugin;
+pub use taa_jitter::{HALTON_8, JitterState, NdcJitter, advance_jitter, ndc_jitter};
+pub use taa_state::TaaState;
 pub use smaa_luts::{
     AREA_TEX_BYTES, AREA_TEX_H, AREA_TEX_SHA256, AREA_TEX_W, SEARCH_TEX_BYTES, SEARCH_TEX_H,
     SEARCH_TEX_SHA256, SEARCH_TEX_W,
@@ -426,10 +441,14 @@ pub use upload::{
     upload_shadow_denoise_ring, upload_temporal_shadow_ring,
 };
 #[cfg(feature = "hwrt")]
-pub use upload::{upload_mesh_ids, upload_motion_cam_ring, upload_prev_instance_models};
+pub use upload::{upload_mesh_ids, upload_prev_instance_models};
+// TAA W3: un-walled from `hwrt` — the resolve's camera-only MV reconstruction needs the
+// MotionCam ring upload on BOTH legs (see the `mod motion_cam` doc for the rationale).
+pub use upload::upload_motion_cam_ring;
 pub use view::{
     composite_from_view, composite_perspective_from_view, demo_view_proj_from_view,
-    gbuffer_push_from_view, marcher_view_proj_rows, view_proj_columns,
+    gbuffer_push_from_view, gbuffer_push_from_view_jittered, marcher_view_proj_rows,
+    marcher_view_proj_rows_jittered, view_proj_columns,
 };
 pub use ui::{
     pack_ui_instance, premultiply_rgba8, record_ui_rects, ui_rect_fs_spirv, ui_rect_vs_spirv,

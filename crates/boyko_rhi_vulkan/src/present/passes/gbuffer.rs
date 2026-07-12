@@ -2170,18 +2170,18 @@ impl Renderer<'_> {
             .present_sample;
         self.record_graph_pass(present_sample, cmd, targets, scene, fi);
 
-        // Anti-aliasing Stage 1 (FXAA) / Stage 2 (SMAA) / Stage 3 (SSAA). `sync_gbuffer` keeps
-        // `targets.aa_out.is_some() == (scene.aa.is_some() || scene.smaa.is_some() ||
-        // scene.ssaa.is_some())` in lockstep (an arm-state change forces a fence-safe resync,
-        // exactly like an extent change), so these always agree within a frame. Gate on
-        // `aa_out` (what `present_set` follows) so any transient mismatch degrades to "present
-        // samples lit, no AA pass" — never a panic. RAW barriers on `aa_out` only (the
-        // DDGI-update/TLAS-build precedent); `lit` needs none (already
-        // SHADER_READ_ONLY_OPTIMAL from `present_sample` above). Consumes `lit` after the
-        // framegraph's last declared use — safe until a transient-aliasing allocator lands;
+        // Anti-aliasing Stage 1 (FXAA) / Stage 2 (SMAA) / Stage 3 (SSAA) / Stage 4 (TAA).
+        // `sync_gbuffer` keeps `targets.aa_out.is_some() == (scene.aa.is_some() ||
+        // scene.smaa.is_some() || scene.ssaa.is_some() || scene.taa.is_some())` in lockstep (an
+        // arm-state change forces a fence-safe resync, exactly like an extent change), so these
+        // always agree within a frame. Gate on `aa_out` (what `present_set` follows) so any
+        // transient mismatch degrades to "present samples lit, no AA pass" — never a panic. RAW
+        // barriers on `aa_out` only (the DDGI-update/TLAS-build precedent); `lit` needs none
+        // (already SHADER_READ_ONLY_OPTIMAL from `present_sample` above). Consumes `lit` after
+        // the framegraph's last declared use — safe until a transient-aliasing allocator lands;
         // exempt this site then. OFF (`aa_out` is `None`) records nothing. FXAA is checked
         // FIRST (byte-identical to the committed Stage-1 dispatch); `scene.aa`/`scene.smaa`/
-        // `scene.ssaa` are mutually exclusive by construction (`debug_assert!` in
+        // `scene.ssaa`/`scene.taa` are mutually exclusive by construction (`debug_assert!` in
         // `GBufferTargets::create`). SSAA uses `aa_extent` (the BOOT-FIXED native extent
         // `aa_out` was actually allocated at), NOT `extent` (live, tracks window resizes) or
         // `present_extent` (2× under SSAA) — the crux difference from FXAA/SMAA.
@@ -2206,6 +2206,18 @@ impl Renderer<'_> {
                 // `aa_extent` (the BOOT-FIXED native size, NOT `present_extent`, which is 2×
                 // under SSAA, and NOT the live `extent`, which tracks window resizes).
                 unsafe { self.record_ssaa(cmd, targets, ssaa, aa_extent, fi) };
+            } else {
+                // Anti-aliasing Stage 4 (TAA) — landed as the W1-W4 framework arm only:
+                // `scene.taa` stays `None` on every current frame (no boot pipeline binds
+                // `TAA_RESOLVE_SPV` yet — see its doc in `compute.rs`), so this `else` arm is
+                // never reached in practice. The tripwire below turns a future "arm `scene.taa`
+                // without wiring `record_taa` here" mistake into a debug panic instead of a
+                // silent garbage-`aa_out` render (the `targets.aa_out.is_some()` outer gate
+                // would otherwise present an allocated-but-never-written image).
+                debug_assert!(
+                    scene.taa.is_none(),
+                    "invariant: scene.taa is Some but no record_taa dispatch is wired yet (W5 continuation)"
+                );
             }
         }
 

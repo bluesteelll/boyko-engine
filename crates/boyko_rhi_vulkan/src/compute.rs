@@ -438,6 +438,32 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// Anti-aliasing Stage 4 (TAA) — the temporal-resolve reproject+accumulate SPIR-V
+    /// (`shaders/taa_resolve.comp.hlsl`, Option B). Modeled on [`SHADOW_TEMPORAL_SPV`]'s
+    /// algorithm (reproject → neighborhood clamp → confidence-adaptive feedback →
+    /// disocclusion reset), generalized scalar→RGB. Bound to its OWN 8-binding layout {
+    /// @0 `gLit` COMBINED_IMAGE_SAMPLER (current LDR color), @1 `gViewT` r32f read (the depth
+    /// proxy the camera-only MV ray marches by), @2 `gHistIn` rgba16f read (`taa_hist[1-fi]`,
+    /// the framegraph's C1-fix read-sibling), @3 `gHistOut` rgba16f write (`taa_hist[fi]`), @4
+    /// `gAaOut` rgba8 write (the present-blit's input), @5 the `ResolvedTaa` tunables UBO (16
+    /// B), @6 the shared 80-byte Camera UBO (UNJITTERED — C1 cut), @7 the `MotionCam` UBO
+    /// (`boyko_render::motion_cam`, 128 B) } + a 4-byte `{ uint reset; }` push constant
+    /// (`boyko_render::taa_state::TaaState`). NOT `hwrt`-gated (TAA works on the pure-software
+    /// leg — its motion vector is reconstructed from `gViewT`, never a `rayQuery` trace).
+    ///
+    /// **W1-W4 landing note**: this `.spv` is compiled + embedded (the binding-layout contract
+    /// is pinned), but no boot pipeline binds it yet and no pass dispatches it this rung — the
+    /// boot pipeline/layout/sampler construction (mirroring [`SHADOW_TEMPORAL_SPV`]'s
+    /// `shadow_temporal_pipeline` boot-build pattern, unconditionally here), the per-FIF
+    /// resolve descriptor set, and the `gbuffer.rs::record_taa` dispatch are a W5 continuation
+    /// (`GBufferScene::taa` stays `None` on every current frame until then — see
+    /// `TaaActivation`'s doc in `present::scene_types`). The const-asserted length is the
+    /// anti-drift guard.
+    TAA_RESOLVE_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/taa_resolve.comp.spv")
+}
+
+embed_spirv! {
     /// The SDFDDGI I3 DDGI resolve-sample GPU-GOLDEN SPIR-V (`shaders/ddgi_probe_gi_resolve.comp.hlsl`).
     /// A standalone compute harness that runs the SAME `ddgi_probe_sample` the deferred resolve runs
     /// (both `#include "ddgi_resolve.hlsli"`) over host-supplied receiver samples and STOREs the
@@ -1077,6 +1103,17 @@ pub fn shadow_atrous_spirv() -> &'static [u32] {
 #[inline]
 pub fn shadow_temporal_spirv() -> &'static [u32] {
     SHADOW_TEMPORAL_SPV.as_words()
+}
+
+/// Anti-aliasing Stage 4 (TAA) — the temporal-resolve SPIR-V as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module). Bound to its
+/// own 8-binding layout (see [`TAA_RESOLVE_SPV`]'s doc for the full binding contract). NOT
+/// `hwrt`-gated. No boot pipeline binds this yet this rung (see [`TAA_RESOLVE_SPV`]'s W1-W4
+/// landing note) — the accessor is landed so the binding contract is exercised end-to-end
+/// (`include_bytes!` + the const-asserted length) ahead of the W5 continuation's boot wiring.
+#[inline]
+pub fn taa_resolve_spirv() -> &'static [u32] {
+    TAA_RESOLVE_SPV.as_words()
 }
 
 /// The SDFDDGI I3 DDGI resolve-sample GPU-GOLDEN SPIR-V as a `u32` word stream, ready for

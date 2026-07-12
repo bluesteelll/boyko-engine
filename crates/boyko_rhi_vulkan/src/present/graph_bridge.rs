@@ -126,12 +126,20 @@ pub(crate) struct GbufferPassPlan {
 /// No pass accesses ResId 11..16 (the `hwrt`-only images) on the current (non-temporal) frame, so
 /// the derived barrier set on THOSE resources is unchanged (byte-identical render); the VIS/à-
 /// trous/temporal passes (gated on `scene.shadow`) add the accesses when armed.
+///
+/// Anti-aliasing Stage 4 (TAA W4) appends TWO more images, LAST — AFTER `pbr`, UNCONDITIONALLY
+/// (both feature legs): `taa_hist` (the write ResId) + `taa_hist_read` (the C1-fix cross-frame
+/// read-sibling, mirroring `shadow_temporal_hist`/`shadow_temporal_hist_read`). They land at
+/// ResId 12/13 (`not(hwrt)`) or 18/19 (`hwrt`) — exactly the OLD `FRAMEGRAPH_IMAGE_COUNT`/
+/// `+1` on each leg — so every EARLIER ResId (0..old-count-1) is byte-unchanged and the buffers
+/// still begin at the NEW `FRAMEGRAPH_IMAGE_COUNT`. No pass accesses them on the current frame
+/// (`scene.taa` stays `None` until the resolve dispatch is wired, a W5 follow-up) ⇒ byte-identical.
 #[cfg(feature = "hwrt")]
-pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 18;
-/// See the `hwrt` variant: a `not(hwrt)` build keeps the count at 12 (11 base + `pbr`, no
-/// shadow-vis targets, byte-unchanged on every ResId 0..10).
+pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 20;
+/// See the `hwrt` variant: a `not(hwrt)` build keeps the count at 14 (11 base + `pbr` + TAA's
+/// `taa_hist`/`taa_hist_read`, no shadow-vis targets, byte-unchanged on every ResId 0..10).
 #[cfg(not(feature = "hwrt"))]
-pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 12;
+pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 14;
 
 /// The REAL [`BarrierSink`](crate::framegraph::BarrierSink) for the whole G-buffer
 /// frame (Steps 1c–1e): it resolves each derived barrier's logical `res` → the current
@@ -147,7 +155,8 @@ pub(crate) struct GbufferBarrierSink<'a> {
     pub(crate) cmd: VkCommandBuffer,
     /// The physical images resolved by image `ResId` index `0..FRAMEGRAPH_IMAGE_COUNT`
     /// — `[albedo, normal, material, depth, viewt, lit, ssao, cascade, atlas, ddgi_irr,
-    /// ddgi_depth, ..(hwrt-only).., pbr]` for the current frame slot (`ddgi_irr`/`ddgi_depth` are
+    /// ddgi_depth, ..(hwrt-only).., pbr, taa_hist, taa_hist_read]` for the current frame slot
+    /// (`ddgi_irr`/`ddgi_depth` are
     /// SDFDDGI I2 single-instance world-fixed atlases — NOT ringed; `pbr` — textured-PBR T6a's
     /// `gPbr` — IS ringed, like albedo/normal/etc., and is declared/bound LAST, AFTER every
     /// `hwrt`-only image, so it never perturbs their ResIds). MUST match the graph's declaration
@@ -196,13 +205,13 @@ pub(crate) struct GbufferBarrierSink<'a> {
 const _: () = {
     #[cfg(feature = "hwrt")]
     assert!(
-        FRAMEGRAPH_IMAGE_COUNT == 18,
-        "hwrt: 11 base + pbr (textured-PBR T6a) + shadow_vis + shadow_vis2 + motion_vec + shadow_temporal_hist + temporal_out + shadow_temporal_hist_read"
+        FRAMEGRAPH_IMAGE_COUNT == 20,
+        "hwrt: 11 base + pbr (textured-PBR T6a) + shadow_vis + shadow_vis2 + motion_vec + shadow_temporal_hist + temporal_out + shadow_temporal_hist_read + taa_hist + taa_hist_read"
     );
     #[cfg(not(feature = "hwrt"))]
     assert!(
-        FRAMEGRAPH_IMAGE_COUNT == 12,
-        "not(hwrt): the 11 base images + pbr (textured-PBR T6a), no shadow-vis targets"
+        FRAMEGRAPH_IMAGE_COUNT == 14,
+        "not(hwrt): the 11 base images + pbr (textured-PBR T6a) + taa_hist + taa_hist_read, no shadow-vis targets"
     );
 };
 
@@ -532,6 +541,43 @@ impl Renderer<'_> {
         // would use — so the resolve's first (and only) access this frame still derives a REAL,
         // discard-legal `UNDEFINED → GENERAL` transition, EVERY frame (the T6a first-touch design).
         let pbr = g.add_image_seeded("pbr", ResSync::undefined());
+        // Anti-aliasing Stage 4 (TAA W4): `taa_hist` (write) + `taa_hist_read` (the cross-frame
+        // read-sibling), declared LAST in the image block — AFTER `pbr`, BEFORE the first
+        // `add_buffer` — so ResId 0..(old FRAMEGRAPH_IMAGE_COUNT-1) stay byte-unchanged and the
+        // buffers still begin at the NEW `FRAMEGRAPH_IMAGE_COUNT` (the three `- FRAMEGRAPH_IMAGE_
+        // COUNT` buffer re-base sites re-base by the SAME const, so a buffer's LOGICAL sink slot is
+        // unchanged). UNCONDITIONAL (both feature legs — TAA is not `hwrt`-only, unlike
+        // `shadow_temporal_hist`). Declared exactly like the Rung-3b `shadow_temporal_hist` /
+        // `shadow_temporal_hist_read` pair (C1 fix precedent — see the comment above `pbr`'s
+        // sibling declaration): `taa_hist` is a CROSS-FRAME PERSISTENT parity ping-pong pool (frame
+        // `fi` WRITES `pool[fi]`, READS `pool[fi^1]`), so BOTH physical images must be
+        // framegraph-tracked for the graph to derive their cross-frame barriers:
+        //   * `taa_hist` (write ResId) = the `[fi]` WRITE — `seeded_readers_at_layout` (WAR: order
+        //     frame N's write after the sibling's still-pipelined read of the same image).
+        //   * `taa_hist_read` (read-sibling ResId) = the `[fi^1]` READ — `seeded_writer_at_layout`
+        //     (content-preserving RAW: orders frame N's read after — and makes visible — the
+        //     sibling frame N-1's write of that same physical image).
+        // The sink binds the read-sibling ResId to `taa_hist[fi^1]` (the ONE non-`[fi]` entry). NO
+        // pass names either ResId this rung (the resolve dispatch is a follow-up), so the graph
+        // routes ZERO barriers on them ⇒ the seed is inert and the render is byte-identical —
+        // EXACTLY the same "declared but not yet accessed" discipline `shadow_vis`/`motion_vec`
+        // used between their declaration rung and their first consuming pass.
+        let taa_hist = g.add_image_seeded(
+            "taa_hist",
+            ResSync::seeded_readers_at_layout(
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+            ),
+        );
+        let taa_hist_read = g.add_image_seeded(
+            "taa_hist_read",
+            ResSync::seeded_writer_at_layout(
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+            ),
+        );
         // --- Buffers (ResId FRAMEGRAPH_IMAGE_COUNT..+4) — ALL single instances shared by both in-flight
         // frames (audit B-002). light_table/tiles/grid/index end their frame consumed
         // by a COMPUTE read (resolve / marcher), so a dirty-frame re-write must order
@@ -1255,6 +1301,39 @@ impl Renderer<'_> {
             SubRange::COLOR,
         );
 
+        // Anti-aliasing Stage 4 (TAA W4, resolve dispatch = a W5 follow-up): the temporal-resolve
+        // pass declaration, positioned at the resolve→present seam (AFTER the deferred resolve's
+        // `lit` write above, BEFORE `present_sample`'s GENERAL→SHADER_READ_ONLY_OPTIMAL read) — the
+        // SAME seam FXAA/SMAA/SSAA occupy. Reads `lit` (this frame's shaded color) + `viewt` (the
+        // depth proxy the MV reconstruction needs) + `taa_hist_read` (the cross-frame history
+        // sibling, C1-fix shape — see the `taa_hist`/`taa_hist_read` declaration above); writes
+        // `taa_hist` (this frame's history slot). Gated on `scene.taa.is_some()`, which stays
+        // `None` until the resolve dispatch itself is wired (compute.rs registration + the boot
+        // pipeline + the per-FIF resolve set + `gbuffer.rs::record_taa`) — so THIS pass is
+        // declared-but-never-added on every current frame ⇒ the graph routes ZERO barriers on
+        // `taa_hist`/`taa_hist_read` ⇒ byte-identical (the same "declared ahead of its first
+        // consumer" discipline `shadow_vis`/`motion_vec` used between their ResId declaration rung
+        // and their first consuming pass).
+        if scene.taa.is_some() {
+            let _taa_resolve = g.add_pass("taa_resolve");
+            for &c in &[lit, viewt, taa_hist_read] {
+                g.image_access(
+                    c,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    SubRange::COLOR,
+                );
+            }
+            g.image_access(
+                taa_hist,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                SubRange::COLOR,
+            );
+        }
+
         // Pass `present_sample` (site 5c): lit GENERAL→SHADER_READ_ONLY for the
         // present-blit's FRAGMENT sample. The swapchain WSI barriers (sites 7/9) stay
         // hand-recorded, so the swapchain image is NOT a graph resource here.
@@ -1403,6 +1482,18 @@ impl Renderer<'_> {
                 // above), so it is bound here LAST too, UNCONDITIONALLY (both feature legs). RINGED
                 // (per-FIF), like albedo/normal/etc. above — bind the CURRENT frame slot's handle.
                 targets.pbr[fi].image,
+                // Anti-aliasing Stage 4 (TAA W4): `taa_hist` — the `[fi]` WRITE slot. `Option`-guarded
+                // (`None` until `GBufferScene::taa` is wired, W5 follow-up — resolves to
+                // [`VkImage::NULL`], inert like `shadow_temporal_hist` before its first consumer).
+                // UNCONDITIONAL (both feature legs — TAA is not `hwrt`-only).
+                targets.taa_hist.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
+                // TAA W4 (C1-fix shape): `taa_hist_read` — the CROSS-FRAME READ image = the SIBLING
+                // parity slot `taa_hist[fi ^ 1]` (the image frame N-1 wrote). Mirrors
+                // `shadow_temporal_hist_read`'s `[fi ^ 1]` bind EXACTLY — the one sink entry that is
+                // NOT `r[fi]` (binding `r[fi]` here would land the cross-frame RAW barrier on the
+                // WRITE image, not the read image — the exact false-green the C1 fix closed for the
+                // shadow-temporal precedent).
+                targets.taa_hist.as_ref().map_or(VkImage::NULL, |r| r[fi ^ 1].image),
             ],
             #[cfg(not(feature = "hwrt"))]
             buffers: [

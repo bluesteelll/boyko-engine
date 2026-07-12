@@ -39,7 +39,8 @@ use crate::gpu_transform3d::GPU_TRANSFORM3D_BYTES;
 use crate::mesh_draw::{
     MeshRenderScratch, PER_INSTANCE_MATERIAL_BYTES, PER_INSTANCE_MATERIAL_TEX_BYTES,
 };
-#[cfg(feature = "hwrt")]
+// TAA W3: un-walled from `hwrt` — the resolve's camera-only MV reconstruction needs the
+// MotionCam ring upload on BOTH legs (see `boyko_render::motion_cam`'s module doc).
 use crate::motion_cam::{MOTION_CAM_UBO_BYTES, MotionCam};
 use crate::view::composite_from_view;
 
@@ -646,7 +647,6 @@ pub unsafe fn upload_prev_instance_models(
 ///   contract as [`upload_csm_ring`]): the token proves that slot's in-flight fence was waited THIS
 ///   frame, so the slot's previous occupant finished every VERTEX read of this UBO and the sibling
 ///   in-flight frame binds the OTHER ring slot — race-free, lock-free.
-#[cfg(feature = "hwrt")]
 pub unsafe fn upload_motion_cam_ring(
     token: &FrameWriteToken,
     ring_slot: &BoundBuffer,

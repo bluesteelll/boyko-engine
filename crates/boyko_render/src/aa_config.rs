@@ -49,9 +49,15 @@ use boyko_ecs::ecs::core::system::{Res, ResMut};
 /// there is NO redundant `enabled: bool` — exactly as
 /// [`SsaoQuality`](crate::ssao_config::SsaoQuality) keys off its `Off` variant.
 ///
-/// Stage 1 implemented `Off` + `Fxaa`; Stage 2 added `Smaa`; Stage 3 adds `Ssaa`
+/// Stage 1 implemented `Off` + `Fxaa`; Stage 2 added `Smaa`; Stage 3 added `Ssaa`
 /// (boot-fixed, host-authoritative — see `boyko_app::host::WindowHost` for the arming
-/// probe). `Taa` remains for a later stage (additive).
+/// probe). Stage 4 adds `Taa` — camera-reprojection temporal supersampling, live-toggleable
+/// like `Fxaa`/`Smaa`. **v1 caveat**: only the raster mesh path is sub-pixel jittered (see
+/// [`crate::taa_jitter`] for the C1 rationale — the SDF marcher stays un-jittered, so
+/// SDF-marched pixels are temporally stable but un-supersampled); the temporal resolve is
+/// landed OFF-byte-identical and
+/// converged-static-validated, but in-motion quality (ghosting, disocclusion) is
+/// owner-gated, not yet visually blessed.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum AaMode {
@@ -78,11 +84,20 @@ pub enum AaMode {
     /// panics); this mode cannot be toggled live like `Fxaa`/`Smaa` — changing it requires
     /// a re-boot with a different `EnginePlugins::with_ssaa_scale`.
     Ssaa,
+    /// TAA (Temporal Anti-Aliasing) — camera-reprojection temporal supersampling: a per-frame
+    /// sub-pixel jitter of the raster mesh vertex push (`crate::taa_jitter`), accumulated
+    /// through a color-history ring reprojected by the camera's motion (`crate::motion_cam`)
+    /// and resolved with a variance-clipped, luma-weighted blend
+    /// (`boyko_rhi_vulkan::shaders::taa_resolve`). Live-toggleable like `Fxaa`/`Smaa` (native
+    /// resolution — no render-scale commitment, unlike `Ssaa`). **v1 scope**: only the raster
+    /// mesh path is jittered/supersampled (SDF-marched pixels stay stable but un-supersampled
+    /// — C1); in-motion quality is owner-gated (not yet visually blessed for motion).
+    Taa,
 }
 
 impl AaMode {
     /// The stable mode word forwarded to the backend (the `#[repr(u32)]` discriminant).
-    /// `Off => 0`, `Fxaa => 1`, `Smaa => 2`, `Ssaa => 3`.
+    /// `Off => 0`, `Fxaa => 1`, `Smaa => 2`, `Ssaa => 3`, `Taa => 4`.
     #[inline]
     pub const fn as_word(self) -> u32 {
         self as u32
@@ -204,6 +219,7 @@ mod tests {
         assert!(AaConfig { mode: AaMode::Fxaa }.enabled(), "Fxaa must be enabled (mode != Off)");
         assert!(AaConfig { mode: AaMode::Smaa }.enabled(), "Smaa must be enabled (mode != Off)");
         assert!(AaConfig { mode: AaMode::Ssaa }.enabled(), "Ssaa must be enabled (mode != Off)");
+        assert!(AaConfig { mode: AaMode::Taa }.enabled(), "Taa must be enabled (mode != Off)");
         assert!(!AaConfig { mode: AaMode::Off }.enabled(), "Off is the disabled state");
     }
 
@@ -214,6 +230,7 @@ mod tests {
         assert_eq!(AaMode::Fxaa.as_word(), 1);
         assert_eq!(AaMode::Smaa.as_word(), 2);
         assert_eq!(AaMode::Ssaa.as_word(), 3);
+        assert_eq!(AaMode::Taa.as_word(), 4);
     }
 
     #[test]
@@ -222,6 +239,7 @@ mod tests {
         assert_eq!(resolve_aa(&AaConfig { mode: AaMode::Fxaa }), ResolvedAa { mode: AaMode::Fxaa });
         assert_eq!(resolve_aa(&AaConfig { mode: AaMode::Smaa }), ResolvedAa { mode: AaMode::Smaa });
         assert_eq!(resolve_aa(&AaConfig { mode: AaMode::Ssaa }), ResolvedAa { mode: AaMode::Ssaa });
+        assert_eq!(resolve_aa(&AaConfig { mode: AaMode::Taa }), ResolvedAa { mode: AaMode::Taa });
     }
 
     #[test]

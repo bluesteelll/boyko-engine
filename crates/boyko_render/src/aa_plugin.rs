@@ -1,10 +1,15 @@
 //! The [`AaPlugin`] — inserts the owner-set [`AaConfig`] + its derived [`ResolvedAa`]
 //! companion and registers the cold [`resolve_aa_policy`] at the gather/setup boundary,
-//! symmetric with [`SsaoPlugin`](crate::ssao_plugin::SsaoPlugin).
+//! symmetric with [`SsaoPlugin`](crate::ssao_plugin::SsaoPlugin). Also inserts the TAA (Stage 4)
+//! substrate Resources — [`JitterState`] and [`TaaState`] — so `boyko_app::runner`'s per-frame
+//! reads/writes never panic on a missing Resource, mirroring how `AaConfig`/`ResolvedAa` are
+//! seeded here rather than left to the runner to insert-if-absent.
 
 use boyko_ecs::ecs::core::app::{App, Plugin};
 
 use crate::aa_config::{AaConfig, ResolvedAa, resolve_aa_policy};
+use crate::taa_jitter::JitterState;
+use crate::taa_state::TaaState;
 
 /// Registers the anti-aliasing config substrate: inserts [`AaConfig`] (default
 /// [`Off`](crate::aa_config::AaMode::Off) — the 0%-gate) and its derived [`ResolvedAa`]
@@ -35,6 +40,12 @@ impl Plugin for AaPlugin {
         // world is correct even before the first policy run.
         app.insert_resource(AaConfig::default());
         app.insert_resource(ResolvedAa::default());
+        // Anti-aliasing Stage 4 (TAA): the jitter-phase + history-reset substrate Resources.
+        // Both default to the 0%-gate shape (`JitterState { phase: 0, armed: false }`,
+        // `TaaState { reset: false, .. }`) — a world that never selects `AaMode::Taa` never
+        // observes a nonzero phase or a forced reset.
+        app.insert_resource(JitterState::default());
+        app.insert_resource(TaaState::default());
 
         app.add_systems_cfg(|b| {
             b.add_system(resolve_aa_policy);

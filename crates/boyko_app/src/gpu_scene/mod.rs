@@ -2950,6 +2950,14 @@ impl GpuSceneBundles {
             // armed the 2× `composite_extent` at boot (`WindowHost::ssaa_armed`).
             ssaa: matches!(aa_mode, AaMode::Ssaa)
                 .then(|| SsaaActivation { pipeline: &self.ssaa_pipeline, sampler: &self.present_sampler }),
+            // Anti-aliasing Stage 4: `TaaActivation`'s framework arm (W1) is landed, but the
+            // resolve dispatch itself — the boot pipeline/layout/sampler this field would borrow,
+            // `compute.rs` registration, the per-FIF resolve set, `gbuffer.rs::record_taa` — is a
+            // W5 follow-up (see `TaaActivation`'s doc for the full rationale). `None`
+            // UNCONDITIONALLY for now: selecting `AaMode::Taa` arms the raster-only jitter
+            // (`crate::runner`'s wiring) with no resolve to consume it yet — an explicitly
+            // acknowledged, honestly-labeled transitional state, not a bug.
+            taa: None,
             mesh_draw,
             csm_cascade_texture: &self.csm.cascade,
             csm_compare_sampler: &self.csm.sampler,

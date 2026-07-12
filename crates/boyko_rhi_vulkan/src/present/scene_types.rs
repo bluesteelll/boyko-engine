@@ -617,6 +617,43 @@ pub struct SsaaActivation<'a> {
     pub sampler: &'a VulkanSampler,
 }
 
+/// Anti-aliasing Stage 4: the TAA (Temporal Anti-Aliasing) temporal-resolve pass activation
+/// threaded into [`GBufferScene::taa`] to turn the TAA seam ON. Mirrors [`SmaaActivation`]'s
+/// borrow-bundle shape: a `Copy` bundle of caller-owned layout/format/sampler borrows.
+///
+/// `None` on [`GBufferScene::taa`] is the OFF path (the DEFAULT — the 0%-gate): no `aa_out`
+/// target, no `taa_hist` history ring, the present-blit samples `lit` directly, no resolve pass
+/// recorded. `Some` arms the seam: [`GBufferTargets`] allocates `aa_out` + `taa_hist`,
+/// [`GBufferTargets::sync_gbuffer`] treats an arm-state change exactly like an extent change,
+/// and (once the resolve dispatch is wired — a W5 follow-up) the recorded pass writes both
+/// `taa_hist[fi]` and `aa_out` directly (no dedicated FXAA/SMAA-style INPUT descriptor set: the
+/// resolve set binds `lit`/`viewt`/`taa_hist`/the camera + `MotionCam` UBOs itself). Mutually
+/// exclusive with [`GBufferScene::aa`] / [`GBufferScene::smaa`] / [`GBufferScene::ssaa`]
+/// (`debug_assert!` — see [`SsaaActivation`]'s doc for the same pattern).
+///
+/// **v1 (W1-W4) note**: this struct's shape is landed as the framework arm, but no boot pipeline
+/// binds [`Self::resolve_layout`] yet — [`GBufferScene::taa`] therefore stays `None` on every
+/// current frame (the resolve dispatch, `compute.rs` registration, and boot layout/sampler
+/// construction are a W5 follow-up). Selecting `AaMode::Taa` today arms the raster-only jitter
+/// (`crate::taa_jitter`, wired in `boyko_app::runner`) with no resolve to consume it — an
+/// explicitly acknowledged, honestly-labeled transitional state (see the TAA design doc's
+/// "W1-W4 CHECKPOINT" note), not a bug.
+#[derive(Clone, Copy)]
+pub struct TaaActivation<'a> {
+    /// The TAA resolve compute pipeline's bind-group LAYOUT. [`GBufferTargets`] would write a
+    /// per-FIF `taa_resolve_set` against it once per extent (the SSAO `ssao_set` precedent) once
+    /// the resolve dispatch lands.
+    pub resolve_layout: &'a VulkanBindGroupLayout,
+    /// `[R8G8B8A8_UNORM]` — `aa_out`'s format, carried here (rather than hard-coded at the call
+    /// site) so a future format change has one source of truth, mirroring [`SmaaActivation`]'s
+    /// `color_formats`-shaped fields.
+    pub color_formats: &'a [Format],
+    /// LINEAR/ClampToEdge sampler for the resolve's `lit` combined-image-sampler read (the same
+    /// resolve→AA-input seam FXAA's `fxaa_set` binds `lit` through). DISTINCT boot object from
+    /// [`AaActivation::sampler`]/[`SmaaActivation::sampler`].
+    pub linear_sampler: &'a VulkanSampler,
+}
+
 /// HW-RT rung 3a: the spatial (à-trous) RT soft-shadow DENOISE pass activation threaded into
 /// [`GBufferScene::shadow`] to turn the denoise pipeline ON. Mirrors [`SsaoActivation`]'s
 /// borrow-bundle shape: a `Copy` bundle of caller-owned pipeline/layout borrows plus the
@@ -1284,6 +1321,15 @@ pub struct GBufferScene<'a> {
     /// `composite_extent` at boot (`boyko_app::host::WindowHost`) — the render-scale
     /// resolution is a boot commitment, not a per-frame choice.
     pub ssaa: Option<SsaaActivation<'a>>,
+    /// Anti-aliasing Stage 4: the TAA temporal-resolve pass activation. `None` = OFF, the
+    /// 0%-gate (`aa_out`/`taa_hist` stay unallocated, the present-blit samples `lit` directly, no
+    /// resolve pass recorded). `Some` arms the seam (see [`TaaActivation`]'s doc for the full
+    /// shape + the v1 W1-W4 caveat: this field stays `None` on every current frame until the
+    /// resolve dispatch is wired, a W5 follow-up). Mutually exclusive with [`Self::aa`] /
+    /// [`Self::smaa`] / [`Self::ssaa`] (`debug_assert!` — see [`SsaaActivation`]'s doc for the
+    /// same pattern). Native resolution like `aa`/`smaa` (NOT render-scaled, unlike `ssaa`), so
+    /// — once wired — this WILL be a live per-frame toggle.
+    pub taa: Option<TaaActivation<'a>>,
     /// Mesh foundation M3: the per-mesh instanced-arm draw BATCH LIST. An EMPTY slice
     /// (every pre-M2 scene) records the LEGACY pass-A draw — `vkCmdDraw(vertex_count, 1,
     /// 0, 0)` over [`Self::vertex_buffer`] binding [`Self::instance_bind_group`] (the

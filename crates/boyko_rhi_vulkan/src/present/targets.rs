@@ -256,10 +256,20 @@ pub struct GBufferTargets {
     /// (ignored by the shader's `.Load`) against [`GBufferScene::present_layout`] — the same
     /// 1-CIS shape [`Self::fxaa_set`] uses. `None` when SSAA is off.
     pub(crate) downsample_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Anti-aliasing Stage 4 (TAA W4): the color-history PING-PONG ring `taa_hist`
+    /// (`R16G16B16A16_SFLOAT`, full-res, STORAGE), parity-indexed like
+    /// [`Self::depth`]/[`Self::lit`]/etc (`FRAMES_IN_FLIGHT == 2`, hard-asserted at the build
+    /// site — the SAME ping-pong discipline [`Self::shadow_temporal_hist`] uses). The resolve
+    /// (not yet recorded this rung — TAA W5 follow-up) reads `taa_hist[1-fi]` (the cross-frame
+    /// history) and writes `taa_hist[fi]` each frame it runs. `None` when TAA is off
+    /// (`GBufferScene::taa` is `None`) — the 0%-gate: no allocation, byte-identical to every
+    /// other `AaArm`. RGBA16F (not RGBA8) avoids per-blend re-quantization of the
+    /// already-8-bit-post-tonemap `lit` across many accumulation frames.
+    pub(crate) taa_hist: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
     /// Which AA mode ([`AaArm`]) was armed when these targets were built.
     /// [`GBufferTargets::sync_gbuffer`] compares this against `AaArm::from_scene(scene)` and
     /// forces the same fence-safe rebuild an extent change triggers on a mismatch — a live,
-    /// fence-safe runtime AA toggle across Off/Fxaa/Smaa.
+    /// fence-safe runtime AA toggle across Off/Fxaa/Smaa/Ssaa/Taa.
     pub(crate) aa_arm: AaArm,
     /// HW-RT rung 3a: the VIS-variant resolve descriptor set RING (one per in-flight frame), written
     /// ONCE against [`ShadowVisActivation::resolve_layout`](crate::present::scene_types::ShadowVisActivation::resolve_layout)
@@ -380,17 +390,25 @@ pub(crate) enum AaArm {
     /// at boot; the extent compare `sync_gbuffer` already performs on a mismatch covers the
     /// `aa_out` resize this arm entails (native, not `present_extent`, under `Ssaa`).
     Ssaa,
+    /// Anti-aliasing Stage 4: [`GBufferScene::taa`] (TAA) is armed. Native resolution
+    /// (`aa_extent == extent`, like `Fxaa`/`Smaa`) but ADDITIONALLY allocates the
+    /// [`GBufferTargets::taa_hist`] cross-frame history ring — an arm-state flip into/out of
+    /// `Taa` therefore forces the same fence-safe rebuild an extent change triggers, exactly
+    /// like every other `AaArm` transition.
+    Taa,
 }
 
 impl AaArm {
-    /// Derives the arm state from `scene` — `smaa` → `ssaa` → `aa`-first purely as a
-    /// defensive tie-break (the three are populated mutually-exclusively at the scene-build
+    /// Derives the arm state from `scene` — `smaa` → `ssaa` → `taa` → `aa`-first purely as a
+    /// defensive tie-break (the four are populated mutually-exclusively at the scene-build
     /// site; a `debug_assert!` in [`GBufferTargets::create`] makes that invariant explicit).
     fn from_scene(scene: &GBufferScene<'_>) -> Self {
         if scene.smaa.is_some() {
             AaArm::Smaa
         } else if scene.ssaa.is_some() {
             AaArm::Ssaa
+        } else if scene.taa.is_some() {
+            AaArm::Taa
         } else if scene.aa.is_some() {
             AaArm::Fxaa
         } else {
@@ -495,6 +513,25 @@ const _: () = assert!(
 /// read cannot race the accumulate write.
 #[cfg(feature = "hwrt")]
 const TEMPORAL_OUT_FORMAT: Format = Format::R16G16Unorm;
+
+/// Anti-aliasing Stage 4 (TAA W4): the color-history ring `taa_hist` format:
+/// `R16G16B16A16_SFLOAT` — SFLOAT (not UNORM, unlike `SHADOW_TEMPORAL_HIST_FORMAT`) because the
+/// carried lane is an accumulated LDR color, and RGBA16F avoids per-blend re-quantization of the
+/// already-8-bit-post-tonemap `lit` across many accumulation frames (an 8-bit history bands
+/// visibly; a UNORM history would re-introduce that at 16-bit precision too, since the resolve's
+/// blend is a repeated read-modify-write, not a single quantize).
+const TAA_HIST_FORMAT: Format = Format::R16G16B16A16Sfloat;
+
+// TAA W4 invariant: `taa_hist` is a PARITY-indexed cross-frame ping-pong POOL (frame `fi` writes
+// `pool[fi]`, reads `pool[fi^1]`) — the SAME shape [`SHADOW_TEMPORAL_HIST_FORMAT`]'s ring uses.
+// The parity index collapses onto the physical `[VulkanTexture; FRAMES_IN_FLIGHT]` ring ONLY at
+// FIF == 2 (parity == slot). UNCONDITIONAL (both feature legs — TAA is not `hwrt`-only, unlike
+// the shadow-temporal precedent this assert mirrors).
+const _: () = assert!(
+    FRAMES_IN_FLIGHT == 2,
+    "taa_hist is a PARITY-indexed cross-frame ping-pong pool; FIF>=3 needs the read/write \
+     descriptors + the sink taa_hist_read bind selected by PARITY, not the FIF slot"
+);
 
 /// Asset-streaming plan F7 §5: the vocabulary set's material-buffer binding
 /// ([`GBufferTargets::vocab_set`]'s `scene.material_table` entry).
@@ -1714,15 +1751,15 @@ impl DeferredSets {
 
         // Anti-aliasing Stage 1: the sampler [`AaActivation`](crate::present::scene_types::AaActivation)
         // carries, or `None` on the OFF path. `aa_sampler` is FXAA-only (feeds the `fxaa_set`
-        // builder below); it is `None` under SMAA/SSAA even though `aa_out` is `Some` (their
-        // final target). Lockstep invariant: `aa_out` arms iff ONE of the three post-process
-        // modes is armed — `scene.aa` (FXAA) XOR `scene.smaa` (SMAA) XOR `scene.ssaa` (SSAA) —
-        // all three routing through the same `aa_imgs` gate.
+        // builder below); it is `None` under SMAA/SSAA/TAA even though `aa_out` is `Some` (their
+        // final target). Lockstep invariant: `aa_out` arms iff ONE of the four post-process
+        // modes is armed — `scene.aa` (FXAA) XOR `scene.smaa` (SMAA) XOR `scene.ssaa` (SSAA) XOR
+        // `scene.taa` (TAA) — all four routing through the same `aa_imgs` gate.
         let aa_sampler = scene.aa.as_ref().map(|a| a.sampler);
         debug_assert_eq!(
             aa_out.is_some(),
-            scene.aa.is_some() || scene.smaa.is_some() || scene.ssaa.is_some(),
-            "invariant: aa_out arms/disarms with (scene.aa || scene.smaa || scene.ssaa)"
+            scene.aa.is_some() || scene.smaa.is_some() || scene.ssaa.is_some() || scene.taa.is_some(),
+            "invariant: aa_out arms/disarms with (scene.aa || scene.smaa || scene.ssaa || scene.taa)"
         );
 
         // The present-blit set RING, written ONCE here: slot `i` is one COMBINED_IMAGE_SAMPLER
@@ -3294,6 +3331,59 @@ impl GBufferTargets {
         RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
     }
 
+    /// Anti-aliasing Stage 4 (TAA W4): creates one slot of the `taa_hist` color-history ring — a
+    /// 2D [`TAA_HIST_FORMAT`] (`R16G16B16A16_SFLOAT`) image at `extent`. `STORAGE` (the resolve
+    /// reads/writes it — v1's history reproject is a manual `Load`-based reconstruction, mirroring
+    /// [`Self::create_shadow_temporal_hist_image`]) | `SAMPLED` (reserved, unused by v1 — kept for
+    /// shape-parity with every other GBuffer image, matching the shadow-temporal precedent's own
+    /// `STORAGE | SAMPLED` usage even though it too reads via `Load`).
+    fn create_taa_hist_image(
+        ctx: &VulkanContext,
+        extent: VkExtent2D,
+    ) -> Result<VulkanTexture, SwapchainError> {
+        let desc = TextureDesc {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+            format: TAA_HIST_FORMAT,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE | ImageUsage::SAMPLED,
+            array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
+        };
+        RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
+    }
+
+    /// Anti-aliasing Stage 4 (TAA W4): builds the FIF-ringed `taa_hist` target, DEGRADING to
+    /// `None` (leak-safe) on any per-slot create failure — the opt-in "recorded-not-fail-fast"
+    /// policy mirroring [`Self::build_denoise_ring`] (UNCONDITIONAL here, unlike that hwrt-only
+    /// helper — TAA is not hwrt-gated). Built LAST (after every fallible descriptor set) and never
+    /// propagates `Err`, so it needs NO teardown weaving into the earlier error ladder.
+    fn build_taa_hist_ring(
+        ctx: &VulkanContext,
+        extent: VkExtent2D,
+    ) -> Option<[VulkanTexture; FRAMES_IN_FLIGHT]> {
+        let mut slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for slot in slots.iter_mut() {
+            match Self::create_taa_hist_image(ctx, extent) {
+                Ok(t) => *slot = Some(t),
+                Err(_) => {
+                    // SAFETY: each `Some` slot was created on `ctx` just above, is referenced by no
+                    // submission (build phase), and is destroyed exactly once (the `take`).
+                    for s in slots.iter_mut() {
+                        if let Some(t) = s.take() {
+                            unsafe { RhiDevice::destroy_texture(ctx, t) };
+                        }
+                    }
+                    return None;
+                }
+            }
+        }
+        Some(slots.map(|s| s.expect("invariant: every taa_hist ring slot built above")))
+    }
+
     /// HW-RT Rung 3b: builds one FIF-ringed temporal denoise target, DEGRADING to `None` (leak-
     /// safe) on any per-slot create failure — the opt-in "recorded-not-fail-fast" policy: a device
     /// that faults on the RG16F/RGBA16 storage format disables temporal denoise rather than failing
@@ -3474,15 +3564,20 @@ impl GBufferTargets {
         aa_extent: VkExtent2D,
     ) -> Result<Self, SwapchainError> {
         // Anti-aliasing campaign O1: `scene.aa` (FXAA), `scene.smaa` (SMAA), `scene.ssaa`
-        // (SSAA) are mutually exclusive by construction (the `scene()` call site arms at most
-        // one) — an explicit, zero-release-cost invariant check.
+        // (SSAA), `scene.taa` (TAA) are mutually exclusive by construction (the `scene()` call
+        // site arms at most one) — an explicit, zero-release-cost invariant check.
         debug_assert!(
-            [scene.aa.is_some(), scene.smaa.is_some(), scene.ssaa.is_some()]
-                .into_iter()
-                .filter(|&armed| armed)
-                .count()
+            [
+                scene.aa.is_some(),
+                scene.smaa.is_some(),
+                scene.ssaa.is_some(),
+                scene.taa.is_some()
+            ]
+            .into_iter()
+            .filter(|&armed| armed)
+            .count()
                 <= 1,
-            "invariant: scene.aa, scene.smaa, scene.ssaa are mutually exclusive"
+            "invariant: scene.aa, scene.smaa, scene.ssaa, scene.taa are mutually exclusive"
         );
 
         // === Sub-bundle builds (order-preserving — see the `CoreImages` / `DeferredSets` docs). ===
@@ -3504,37 +3599,41 @@ impl GBufferTargets {
         };
 
         // Anti-aliasing campaign: the aa_out image ring, built ONLY when ANY of `scene.aa`
-        // (FXAA) / `scene.smaa` (SMAA) / `scene.ssaa` (SSAA) is armed — `None` is the
-        // 0%-gate (no image, no fxaa_set/smaa/downsample sets, present samples `lit`). Built
-        // after shadow-vis (so its own Err arm destroys shadow-vis + core, mirroring the
-        // existing image-stage error weave). Sized to `aa_extent` — NATIVE under SSAA
-        // (`present_extent`, i.e. `extent`, is 2× there), `== extent` for Off/Fxaa/Smaa
-        // (byte-identical sizing to before SSAA existed).
-        let aa_imgs: Option<AaImages> =
-            if scene.aa.is_some() || scene.smaa.is_some() || scene.ssaa.is_some() {
-                match AaImages::build(ctx, aa_extent) {
-                    Ok(a) => Some(a),
-                    Err(e) => {
-                        // SAFETY: the shadow-vis images (hwrt) + `core` were built above on `ctx`,
-                        // referenced by no submission; each destroyed exactly once, reverse acquisition
-                        // (shadow-vis → core).
-                        unsafe {
-                            #[cfg(feature = "hwrt")]
-                            if let Some(v) = shadow_vis_imgs {
-                                v.destroy(ctx);
-                            }
-                            core.destroy(ctx);
+        // (FXAA) / `scene.smaa` (SMAA) / `scene.ssaa` (SSAA) / `scene.taa` (TAA) is armed —
+        // `None` is the 0%-gate (no image, no fxaa_set/smaa/downsample sets, present samples
+        // `lit`). Built after shadow-vis (so its own Err arm destroys shadow-vis + core,
+        // mirroring the existing image-stage error weave). Sized to `aa_extent` — NATIVE under
+        // SSAA (`present_extent`, i.e. `extent`, is 2× there), `== extent` for
+        // Off/Fxaa/Smaa/Taa (byte-identical sizing to before SSAA existed). TAA's resolve writes
+        // `aa_out` directly (no dedicated FXAA/SMAA-style INPUT set — see `taa_hist` below).
+        let aa_armed = scene.aa.is_some()
+            || scene.smaa.is_some()
+            || scene.ssaa.is_some()
+            || scene.taa.is_some();
+        let aa_imgs: Option<AaImages> = if aa_armed {
+            match AaImages::build(ctx, aa_extent) {
+                Ok(a) => Some(a),
+                Err(e) => {
+                    // SAFETY: the shadow-vis images (hwrt) + `core` were built above on `ctx`,
+                    // referenced by no submission; each destroyed exactly once, reverse acquisition
+                    // (shadow-vis → core).
+                    unsafe {
+                        #[cfg(feature = "hwrt")]
+                        if let Some(v) = shadow_vis_imgs {
+                            v.destroy(ctx);
                         }
-                        return Err(e);
+                        core.destroy(ctx);
                     }
+                    return Err(e);
                 }
-            } else {
-                None
-            };
+            }
+        } else {
+            None
+        };
         debug_assert_eq!(
-            scene.aa.is_some() || scene.smaa.is_some() || scene.ssaa.is_some(),
+            aa_armed,
             aa_imgs.is_some(),
-            "invariant: aa_imgs must arm/disarm in lockstep with (scene.aa || scene.smaa || scene.ssaa)"
+            "invariant: aa_imgs must arm/disarm in lockstep with (scene.aa || scene.smaa || scene.ssaa || scene.taa)"
         );
         // SSAA-armed only: `aa_out`'s dims must equal the native `aa_extent`, not
         // `present_extent` (`extent`) — this is the crux invariant that keeps the present-blit's
@@ -3767,6 +3866,20 @@ impl GBufferTargets {
                 None => (None, None, None),
             };
 
+        // Anti-aliasing Stage 4 (TAA W4): the `taa_hist` cross-frame history ring, built LAST
+        // (after every fallible descriptor set) — DEGRADE-TO-NONE on any create failure
+        // (leak-safe, opt-in), mirroring the hwrt temporal rings' shape above (UNCONDITIONAL
+        // here — TAA is not hwrt-gated). Gated on `scene.taa.is_some()`, which stays `None`
+        // until the resolve dispatch itself is wired (compute.rs registration + the boot
+        // pipeline + the per-FIF resolve set + `gbuffer.rs::record_taa` — a W5 follow-up), so
+        // this is a `None` no-op on EVERY current frame ⇒ byte-identical. Sized to `aa_extent`
+        // (== `extent` for Taa — native resolution, like Fxaa/Smaa). TODO(TAA W5): once wired,
+        // mirror `build_and_clear_shadow_temporal_hist`'s boot UNDEFINED→GENERAL clear (the
+        // framegraph's `taa_hist` seed at `graph_bridge.rs` assumes a REAL GENERAL layout, not a
+        // fresh UNDEFINED image, on the first cross-frame read).
+        let taa_hist: Option<[VulkanTexture; FRAMES_IN_FLIGHT]> =
+            if scene.taa.is_some() { Self::build_taa_hist_ring(ctx, aa_extent) } else { None };
+
         Ok(Self {
             depth,
             albedo,
@@ -3800,6 +3913,7 @@ impl GBufferTargets {
             smaa_weight_set,
             smaa_blend_set,
             downsample_set,
+            taa_hist,
             aa_arm: AaArm::from_scene(scene),
             #[cfg(feature = "hwrt")]
             shadow_vis_resolve_set,
@@ -3938,6 +4052,15 @@ impl GBufferTargets {
         // slots — every slot of every ring (and the single set) is drained. Rung 3a (`hwrt`) adds
         // the two `Option`-guarded shadow-vis image RINGS, drained before ssao (reverse acquisition).
         unsafe {
+            // Anti-aliasing Stage 4 (TAA W4): the `taa_hist` history ring — the LAST resource
+            // `create()` builds (after every fallible descriptor set), so destroyed FIRST here
+            // (reverse acquisition). `Option`-guarded (`None` on every current frame — `scene.taa`
+            // stays unwired until the resolve dispatch lands, a W5 follow-up).
+            if let Some(r) = self.taa_hist {
+                for t in r {
+                    RhiDevice::destroy_texture(ctx, t);
+                }
+            }
             // Rung 3a: the spatial-denoise sets + UBO ring (LAST-acquired, so destroyed FIRST in
             // reverse acquisition). Each `Option`-guarded (present only on the denoise ON path — the
             // host keeps `scene.shadow == None` this rung, so these are `None` on every current
@@ -4306,6 +4429,7 @@ mod tests {
             smaa_weight_set: None,
             smaa_blend_set: None,
             downsample_set: None,
+            taa_hist: None,
             aa_arm: AaArm::Off,
             ddgi_update_set: None,
             present_set: bg_ring(),
@@ -4371,6 +4495,7 @@ mod tests {
             smaa_weight_set: None,
             smaa_blend_set: None,
             downsample_set: None,
+            taa_hist: None,
             aa_arm: AaArm::Off,
             shadow_vis_resolve_set: shadow_vis_resolve.then(bg_ring),
             shadow_denoised_resolve_set: shadow_denoised_resolve.then(bg_ring),

@@ -53,6 +53,8 @@ use boyko_scene::ViewUniform;
 
 use boyko_math::Mat4;
 
+use crate::taa_jitter::NdcJitter;
+
 /// Builds the marcher's PERSPECTIVE [`CompositePushConstants`] from a resolved
 /// [`ViewUniform`] and a `w × h` extent.
 ///
@@ -133,9 +135,30 @@ pub fn composite_from_view(view: &ViewUniform, w: u32, h: u32) -> CompositePushC
 ///   reconstruction — the static form of the motion-shadow class).
 ///
 /// PERSPECTIVE-only: an orthographic view (`fov_y == 0`) is debug-asserted out.
+///
+/// [`marcher_view_proj_rows`] is this function called with [`NdcJitter::default`] (the
+/// exact-zero offset) — the SINGLE construction site both the jittered and non-jittered raster
+/// projections share, so OFF byte-identity is provable (a zero jitter is an additive zero, not
+/// a separately-derived "unjittered" formula that could drift from this one).
+///
+/// # TAA raster-only jitter (C1)
+///
+/// `row2 == row3 == [fx, fy, fz, -tz]` (clip.z == clip.w — the perspective-divide row), so
+/// `row0 += jitter.jx * row3; row1 += jitter.jy * row3` is EXACT post-divide NDC jitter:
+/// dividing the perturbed `clip.xy` by the UNCHANGED `clip.w` shifts `ndc.xy` by exactly
+/// `jitter`. This is a purely host-side perturbation of a push-constant matrix — it does not
+/// touch the raster VS `.spv` or the frozen eDSL SDF marcher (the marcher is deliberately NOT
+/// jittered in v1 — see [`crate::taa_jitter`]'s module docs for the C1 rationale: the b5 UBO
+/// `cam_forward` this bridge's `forward` lane feeds is shared, raw, with deferred PBR / SSAO /
+/// CSM / froxel view-z reconstruction, so perturbing it would corrupt those).
 #[rustfmt::skip]
 #[inline]
-pub fn marcher_view_proj_rows(view: &ViewUniform, width: u32, height: u32) -> [[f32; 4]; 4] {
+pub fn marcher_view_proj_rows_jittered(
+    view: &ViewUniform,
+    width: u32,
+    height: u32,
+    jitter: NdcJitter,
+) -> [[f32; 4]; 4] {
     debug_assert!(
         view.fov_y > 0.0,
         "invariant: the marcher-aligned view-proj bridge is PERSPECTIVE-only (fov_y > 0)"
@@ -162,12 +185,34 @@ pub fn marcher_view_proj_rows(view: &ViewUniform, width: u32, height: u32) -> [[
     let (rx, ry, rz) = (right[0], right[1], right[2]);
     let (ux, uy, uz) = (up[0], up[1], up[2]);
     let (fx, fy, fz) = (forward[0], forward[1], forward[2]);
+    let row3 = [fx, fy, fz, -tz]; // clip.z == clip.w (perspective divide row)
     [
-        [sx * rx, sx * ry, sx * rz, sx * tx], // clip.x
-        [sy * ux, sy * uy, sy * uz, sy * ty], // clip.y (marcher y-flip)
-        [fx,      fy,      fz,      -tz],     // clip.z = forward·(P − eye)
-        [fx,      fy,      fz,      -tz],     // clip.w (perspective divide)
+        [
+            sx * rx + jitter.jx * row3[0],
+            sx * ry + jitter.jx * row3[1],
+            sx * rz + jitter.jx * row3[2],
+            sx * tx + jitter.jx * row3[3],
+        ], // clip.x, jittered
+        [
+            sy * ux + jitter.jy * row3[0],
+            sy * uy + jitter.jy * row3[1],
+            sy * uz + jitter.jy * row3[2],
+            sy * ty + jitter.jy * row3[3],
+        ], // clip.y (marcher y-flip), jittered
+        row3, // clip.z = forward·(P − eye)
+        row3, // clip.w (perspective divide) — UNCHANGED, so the jitter above is exact post-divide
     ]
+}
+
+/// PERSPECTIVE-only: an orthographic view (`fov_y == 0`) is debug-asserted out (delegates to
+/// [`marcher_view_proj_rows_jittered`]'s assert).
+///
+/// Delegates to [`marcher_view_proj_rows_jittered`] with [`NdcJitter::default`] — an exact
+/// `{0.0, 0.0}` offset, so `row0 += 0.0 * row3[k]` / `row1 += 0.0 * row3[k]` is an additive
+/// zero: byte-identical to the pre-TAA formula.
+#[inline]
+pub fn marcher_view_proj_rows(view: &ViewUniform, width: u32, height: u32) -> [[f32; 4]; 4] {
+    marcher_view_proj_rows_jittered(view, width, height, NdcJitter::default())
 }
 
 /// Builds the 88-byte gbuffer-raster VERTEX push (`{ float4x4 view_proj; float4
@@ -212,18 +257,26 @@ pub fn marcher_view_proj_rows(view: &ViewUniform, width: u32, height: u32) -> [[
 /// PERSPECTIVE-only: an orthographic view (`fov_y == 0`) is debug-asserted out
 /// — the ortho raster path is tied to the frozen SDF fixture constants and is
 /// not a host bridge (v1 scope).
+///
+/// # TAA raster-only jitter (C1)
+///
+/// `jitter` flows straight into [`marcher_view_proj_rows_jittered`] — the ONLY perturbed lane
+/// is this 88-byte VERTEX push's leading `view_proj` (bytes 0..64); `cam_eye` and the trailing
+/// selectors are untouched. [`gbuffer_push_from_view`] delegates here with
+/// [`NdcJitter::default`] (byte-identical to the pre-TAA push).
 #[rustfmt::skip]
-pub fn gbuffer_push_from_view(
+pub fn gbuffer_push_from_view_jittered(
     view: &ViewUniform,
     width: u32,
     height: u32,
     instanced: bool,
+    jitter: NdcJitter,
 ) -> [u8; GBUFFER_PUSH_BYTES] {
     let eye = [view.camera_pos.x, view.camera_pos.y, view.camera_pos.z];
     // The marcher-aligned proj·view (ROW-MAJOR math rows) — the SINGLE source of
     // the raster projection convention, shared with the Rung-3b `MotionCam`
-    // (see `marcher_view_proj_rows`).
-    let pv = marcher_view_proj_rows(view, width, height);
+    // (see `marcher_view_proj_rows_jittered`).
+    let pv = marcher_view_proj_rows_jittered(view, width, height, jitter);
 
     let mut out = [0u8; GBUFFER_PUSH_BYTES];
     for col in 0..4 {
@@ -243,6 +296,19 @@ pub fn gbuffer_push_from_view(
         out[84..88].copy_from_slice(&1u32.to_le_bytes());
     }
     out
+}
+
+/// Delegates to [`gbuffer_push_from_view_jittered`] with [`NdcJitter::default`] — an exact
+/// `{0.0, 0.0}` offset, so the emitted push is byte-identical to the pre-TAA formula (the
+/// single construction site both the jittered and non-jittered pushes share).
+#[inline]
+pub fn gbuffer_push_from_view(
+    view: &ViewUniform,
+    width: u32,
+    height: u32,
+    instanced: bool,
+) -> [u8; GBUFFER_PUSH_BYTES] {
+    gbuffer_push_from_view_jittered(view, width, height, instanced, NdcJitter::default())
 }
 
 /// Re-views a column-major [`Mat4`] as the demo `CameraUniform.view_proj` layout
@@ -409,5 +475,69 @@ mod tests {
     fn default_view_bridges_to_identity_matrix() {
         let cols = demo_view_proj_from_view(&ViewUniform::default());
         assert_eq!(cols, view_proj_columns(Mat4::IDENTITY));
+    }
+
+    /// TAA W2 (mandatory): [`marcher_view_proj_rows`] must be byte-identical to
+    /// [`marcher_view_proj_rows_jittered`] called with [`NdcJitter::default`] — the OFF
+    /// byte-identity proof (zero jitter = additive zero), checked at the bit level (`to_bits`)
+    /// so a `+0.0`/`-0.0` divergence would be caught, not masked by `==`'s zero-equivalence.
+    #[test]
+    fn marcher_view_proj_rows_matches_jittered_default() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let plain = marcher_view_proj_rows(&view, 640, 480);
+        let jittered_default =
+            marcher_view_proj_rows_jittered(&view, 640, 480, NdcJitter::default());
+        for row in 0..4 {
+            for col in 0..4 {
+                assert_eq!(
+                    plain[row][col].to_bits(),
+                    jittered_default[row][col].to_bits(),
+                    "row {row} col {col}: NdcJitter::default() must be an exact-zero delta"
+                );
+            }
+        }
+    }
+
+    /// TAA W2 (mandatory): a nonzero jitter DOES perturb the projection (guards against the
+    /// jittered fn silently ignoring `jitter`).
+    #[test]
+    fn marcher_view_proj_rows_jittered_perturbs_row0_row1_only() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let plain = marcher_view_proj_rows(&view, 640, 480);
+        let jitter = NdcJitter { jx: 0.01, jy: -0.02 };
+        let jittered = marcher_view_proj_rows_jittered(&view, 640, 480, jitter);
+        assert_ne!(plain[0], jittered[0], "row0 (clip.x) must be perturbed by jx");
+        assert_ne!(plain[1], jittered[1], "row1 (clip.y) must be perturbed by jy");
+        // row2/row3 (the perspective-divide row) stay UNCHANGED — the jitter is exact
+        // post-divide NDC jitter, not a re-derived projection.
+        assert_eq!(plain[2], jittered[2], "row2 (clip.z) must be untouched by raster jitter");
+        assert_eq!(plain[3], jittered[3], "row3 (clip.w) must be untouched by raster jitter");
+    }
+
+    /// TAA W2 (mandatory): [`gbuffer_push_from_view`] must be byte-identical to
+    /// [`gbuffer_push_from_view_jittered`] called with [`NdcJitter::default`].
+    #[test]
+    fn gbuffer_push_from_view_matches_jittered_default() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let plain = gbuffer_push_from_view(&view, 640, 480, true);
+        let jittered_default =
+            gbuffer_push_from_view_jittered(&view, 640, 480, true, NdcJitter::default());
+        assert_eq!(plain, jittered_default);
+    }
+
+    /// TAA W2: a nonzero jitter perturbs the emitted push's leading `view_proj` bytes (0..64)
+    /// but leaves `cam_eye` (64..80) and the trailing selectors (80..88) untouched.
+    #[test]
+    fn gbuffer_push_from_view_jittered_perturbs_only_view_proj_bytes() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let plain = gbuffer_push_from_view(&view, 640, 480, true);
+        let jitter = NdcJitter { jx: 0.01, jy: -0.02 };
+        let jittered = gbuffer_push_from_view_jittered(&view, 640, 480, true, jitter);
+        assert_ne!(&plain[0..64], &jittered[0..64], "the view_proj lane must be perturbed");
+        assert_eq!(&plain[64..88], &jittered[64..88], "cam_eye + selectors must be untouched");
     }
 }
