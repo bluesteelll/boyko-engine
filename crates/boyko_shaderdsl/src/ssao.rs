@@ -453,33 +453,45 @@ where
     ao.mul(ao)
 }
 
-// ---- The resolve's depth-aware box blur (Render P7 POLISH single-source) --------
+// ---- The resolve's bilateral SSAO blur (Render P7 POLISH single-source) ---------
 //
 // The LAST hand-written SSAO math (the horizon-step estimate above is already single-sourced):
-// `deferred_pbr.hlsl`'s inline 7x7 depth-gated box blur of `gSsao`, INSIDE the resolve's
+// `deferred_pbr.hlsl`'s inline 7x7 depth-gated blur of `gSsao`, INSIDE the resolve's
 // `ssao_mode != SSAO_MODE_OFF` combine (`deferred_pbr.hlsl`, the `is_sdf_lit` block), is
 // duplicated as plain Rust in the host oracle: `golden_ssao_blur`
-// (`boyko_rhi_vulkan::goldens`) mirrors the `(2*SSAO_BLUR_R+1)^2` gather, and the sibling
-// `ssao_combine` mirrors the `ao_class`/`min` fold that follows it in the SAME HLSL block. This
-// section single-sources BOTH halves as ONE generic body ([`ssao_blur_body`]), the same
-// leaf-reuse discipline [`ssao_estimate_body`] established for the horizon-step math.
+// (`boyko_rhi_vulkan::goldens`) mirrors the `(2*SSAO_BLUR_R+1)^2` weighted gather, and the
+// sibling `ssao_combine` mirrors the `ao_class`/`min` fold that follows it in the SAME HLSL
+// block. This section single-sources BOTH halves as ONE generic body ([`ssao_blur_body`]), the
+// same leaf-reuse discipline [`ssao_estimate_body`] established for the horizon-step math.
+//
+// Change C (this section) replaced the original HARD-BINARY uniform box average (every
+// in-tolerance tap counted equally) with a SMOOTH bilateral weight: a per-tap SPATIAL falloff
+// (`w_spatial`, radial, `SSAO_BLUR_SPATIAL_SIGMA`) times a per-tap DEPTH falloff (`w_depth`,
+// `SSAO_BLUR_DEPTH_SIGMA`) — both polynomial (no `pow`/`exp`, the eDSL scalar op-set has
+// neither). The HARD depth gate ([`SSAO_BLUR_DEPTH_TOL`]) stays as the silhouette guard (a
+// neighbour past the tolerance is skipped entirely, same as before); the smooth `w_depth`
+// weight operates WITHIN that gate, softening near-tolerance taps instead of counting them
+// fully. See [`SSAO_BLUR_SPATIAL_SIGMA`] / [`SSAO_BLUR_DEPTH_SIGMA`].
 //
 // # ZERO new eDSL leaves
 //
-// The gather reuses `sub`/`abs`/`gt` ([`FieldScalar`]) plus [`Cf::if_`]/[`Cf::cont`] — the SAME
-// early-continue idiom [`crate::brick::dist_to_brick_exit_body`]'s near-axis-parallel skip
-// uses. The fold reuses `ge`/[`Cf::select`]/`min`. No new `Cf`/`FieldScalar` method is added, so
-// the frozen marcher/field/shadow/brick/resolve `.spv` PHYSICALLY CANNOT fork.
+// The gather reuses `sub`/`mul`/`div`/`abs`/`gt`/`clamp01` ([`FieldScalar`]) plus
+// [`Cf::if_`]/[`Cf::cont`] — the SAME early-continue idiom
+// [`crate::brick::dist_to_brick_exit_body`]'s near-axis-parallel skip uses. The fold reuses
+// `ge`/[`Cf::select`]/`min`. No new `Cf`/`FieldScalar` method is added, so the frozen
+// marcher/field/shadow/brick/resolve `.spv` PHYSICALLY CANNOT fork.
 //
 // # The neighbour-fetch seam
 //
 // Like [`ssao_estimate_body`]'s `tap` closure, the `(2*SSAO_BLUR_R+1)^2` neighbourhood WALK
 // (the `for (dy) for (dx)` bounds test + the `gViewT`/`gSsao` reads) is HAND-WRITTEN glue
 // threaded in as `fetch: Fn(i32, i32) -> Option<(vt, s)>` (`None` == the shader's bounds
-// `continue`, `Some((vt, s))` == the in-bounds neighbour's `(gViewT, gSsao)` taps). Only the
-// PER-TAP depth gate + accumulate ([`ssao_blur_tap_body`]) is eDSL math — the walk itself is
-// plain Rust on BOTH backends (it needs no `Cf` induction variable: `SSAO_BLUR_R` is a
-// compile-time bound, and `Option` has no Emit representation).
+// `continue`, `Some((vt, s))` == the in-bounds neighbour's `(gViewT, gSsao)` taps). The walk
+// ALSO computes the per-tap `w_spatial` weight ([`ssao_spatial_weight`], it owns `dx`/`dy`) and
+// passes it as an extra scalar input. Only the PER-TAP depth gate + weight + accumulate
+// ([`ssao_blur_tap_body`]) is eDSL math — the walk itself is plain Rust on BOTH backends (it
+// needs no `Cf` induction variable: `SSAO_BLUR_R` is a compile-time bound, and `Option` has no
+// Emit representation).
 //
 // # Track 2: the SPAN-only Emit splice (resolved fork: no new loop-emit Cf facet)
 //
@@ -503,9 +515,11 @@ where
 // pins both generated spans to the committed `deferred_pbr.hlsl` splice (a `.contains` drift
 // gate, mirroring `ssao_horizon_step_matches_edsl_emit`).
 
-/// The resolve's SSAO depth-aware box-blur half-kernel radius (`SSAO_BLUR_R` in
-/// `deferred_pbr.hlsl`). `R == 3` is a 7x7 box. Equals `boyko_rhi_vulkan::compute::SSAO_BLUR_R`.
-pub const SSAO_BLUR_R: i32 = 3;
+/// The resolve's SSAO bilateral-blur half-kernel radius (`SSAO_BLUR_R` in
+/// `deferred_pbr.hlsl`). `R == 3` is a 7x7 tap window (the per-tap weight, not a uniform
+/// average, decides its actual contribution — see [`SSAO_BLUR_SPATIAL_SIGMA`]). Equals
+/// `boyko_rhi_vulkan::compute::SSAO_BLUR_R`.
+pub const SSAO_BLUR_R: i32 = 5;
 
 /// The resolve's SSAO blur bilateral DEPTH gate (`SSAO_BLUR_DEPTH_TOL` in `deferred_pbr.hlsl`),
 /// in `view_t` (world-distance) units: a neighbour tap is averaged in only when
@@ -513,6 +527,25 @@ pub const SSAO_BLUR_R: i32 = 3;
 /// surface while rejecting the mesh<->SDF silhouette (where `view_t` jumps far more than the
 /// tolerance). Equals `boyko_rhi_vulkan::compute::SSAO_BLUR_DEPTH_TOL`.
 pub const SSAO_BLUR_DEPTH_TOL: f32 = 0.1;
+
+/// Render P7 POLISH Change C — the resolve's SSAO blur bilateral SPATIAL falloff scale
+/// (`SSAO_BLUR_SPATIAL_SIGMA` in `deferred_pbr.hlsl`), in pixels. The per-tap spatial weight is
+/// the polynomial `clamp01(1 - (dx*dx + dy*dy) / (SSAO_BLUR_SPATIAL_SIGMA *
+/// SSAO_BLUR_SPATIAL_SIGMA))` — a transcendental-free stand-in for a gaussian (the eDSL scalar
+/// op-set has no `pow`/`exp`): taps near the sigma radius fade smoothly to zero weight instead
+/// of the old hard-cutoff uniform box average. Equals
+/// `boyko_rhi_vulkan::compute::SSAO_BLUR_SPATIAL_SIGMA`.
+pub const SSAO_BLUR_SPATIAL_SIGMA: f32 = 7.0;
+
+/// Render P7 POLISH Change C — the resolve's SSAO blur bilateral DEPTH falloff scale
+/// (`SSAO_BLUR_DEPTH_SIGMA` in `deferred_pbr.hlsl`), in `view_t` (world-distance) units. The
+/// per-tap depth weight is the polynomial `clamp01(1 - (dz*dz) / (SSAO_BLUR_DEPTH_SIGMA *
+/// SSAO_BLUR_DEPTH_SIGMA))` where `dz = tap.view_t - center.view_t`. This SOFTENS the depth
+/// agreement WITHIN the hard [`SSAO_BLUR_DEPTH_TOL`] gate (which still rejects a tap outright
+/// past the tolerance — the silhouette guard is unchanged); a near-tolerance tap now fades
+/// toward zero weight instead of counting fully. Equals
+/// `boyko_rhi_vulkan::compute::SSAO_BLUR_DEPTH_SIGMA`.
+pub const SSAO_BLUR_DEPTH_SIGMA: f32 = 0.1;
 
 /// The mesh/SDF G-buffer background sentinel (`1.0e30` in `deferred_pbr.hlsl` and the marcher's
 /// `gViewT` terminal writes) — a `view_t` at or above this is a non-lit / mesh / background
@@ -527,17 +560,32 @@ pub const SSAO_BLUR_DEPTH_TOL: f32 = 0.1;
 /// error).
 pub const SSAO_VIEWT_BG: f32 = 1.0e30;
 
-/// Accumulates ONE blur neighbour tap into the running `(sum, cnt)` box-filter accumulators —
-/// the resolve's `if (abs(vt - view_t) > SSAO_BLUR_DEPTH_TOL) { continue; } ssao_sum += s;
-/// ssao_cnt += 1.0;`.
+/// Accumulates ONE blur neighbour tap into the running `(sum, wsum)` BILATERAL-filter
+/// accumulators (Render P7 POLISH Change C — spatial-gaussian x depth-falloff, replacing the
+/// old hard-binary uniform box average) — the resolve's `float dz = vt - view_t; if (abs(dz) >
+/// SSAO_BLUR_DEPTH_TOL) { continue; } float w_depth = clamp01(1 - dz*dz/depth_sigma2); float w
+/// = w_spatial * w_depth; ssao_sum += w*s; ssao_wsum += w;`.
 ///
-/// `sum`/`cnt` are the caller's mutable accumulators (mirroring [`ssao_slice_body`]'s `hc_pos`/
-/// `hc_neg` `Var`s); `vt` is the tap's `gViewT`, `view_t` the CENTER pixel's `gViewT` (the gate
-/// reference, constant across all taps), and `s` the tap's `gSsao` sample. The depth-gate
-/// `continue` is `C::if_(cond, C::cont)?` — the SAME idiom
-/// [`crate::brick::dist_to_brick_exit_body`]'s near-axis-parallel skip uses: when the gate
-/// fires, `?` propagates the [`Flow::Break`] out of this function BEFORE the accumulate
-/// statements run, so a gated-out tap contributes neither to `sum` nor `cnt`.
+/// `sum`/`wsum` are the caller's mutable accumulators (mirroring [`ssao_slice_body`]'s
+/// `hc_pos`/`hc_neg` `Var`s); `vt` is the tap's `gViewT`, `view_t` the CENTER pixel's `gViewT`
+/// (the gate reference, constant across all taps), `s` the tap's `gSsao` sample, and
+/// `w_spatial` the tap's SPATIAL weight (`clamp01(1 - (dx*dx+dy*dy) / SSAO_BLUR_SPATIAL_SIGMA^2)`)
+/// — computed by the hand-written neighbourhood-walk glue (it owns `dx`/`dy`; this body does
+/// not), mirroring how [`ssao_slice_body`]'s `tap` seam supplies a value this body cannot
+/// derive itself.
+///
+/// The depth-gate `continue` is `C::if_(cond, C::cont)?` — the SAME idiom
+/// [`crate::brick::dist_to_brick_exit_body`]'s near-axis-parallel skip uses (UNCHANGED — the
+/// hard silhouette guard stays a binary reject, only the WEIGHT of an accepted tap is now
+/// smooth): when the gate fires, `?` propagates the [`Flow::Break`] out of this function BEFORE
+/// the weight/accumulate statements run, so a gated-out tap contributes neither to `sum` nor
+/// `wsum`. `dz` is materialized as a NAMED temp so the gate and the depth weight both read the
+/// SAME subtraction (not a recomputed `vt - view_t`).
+///
+/// The center tap (`dx == dy == 0`, `vt == view_t`) always has `w_spatial == 1` (zero offset)
+/// and `w_depth == 1` (`dz == 0`), so `w == 1` and `wsum >= 1` is guaranteed after the walk —
+/// the `max(wsum, 1.0)` divisor in [`ssao_blur_combine_body`] is a no-op guard, never an actual
+/// divide-by-zero rescue.
 ///
 /// Returns [`Flow::Continue`]`(())` on the accept path (the natural function tail); the caller
 /// (a plain Rust neighbourhood walk, see the module doc) discards the returned [`Flow`] — its
@@ -545,32 +593,53 @@ pub const SSAO_VIEWT_BG: f32 = 1.0e30;
 #[inline]
 pub fn ssao_blur_tap_body<C: Cf>(
     sum: &C::Var,
-    cnt: &C::Var,
+    wsum: &C::Var,
     vt: C::Scalar,
     view_t: C::Scalar,
     s: C::Scalar,
+    w_spatial: C::Scalar,
 ) -> Flow {
-    // if (abs(vt - view_t) > SSAO_BLUR_DEPTH_TOL) { continue; }  — the silhouette guard.
-    let tol = C::named_lit("SSAO_BLUR_DEPTH_TOL", SSAO_BLUR_DEPTH_TOL);
-    C::if_(vt.sub(view_t).abs().gt(tol), C::cont)?;
+    // float dz = vt - view_t;  (a NAMED temp — both the gate and the depth weight read it).
+    let dz = C::temp_float("dz", vt.sub(view_t));
 
-    // ssao_sum += s;  ssao_cnt += 1.0;
-    C::set_var(sum, C::get_var(sum).add(s));
-    C::set_var(cnt, C::get_var(cnt).add(C::Scalar::lit(1.0)));
+    // if (abs(dz) > SSAO_BLUR_DEPTH_TOL) { continue; }  — the silhouette guard (unchanged).
+    let tol = C::named_lit("SSAO_BLUR_DEPTH_TOL", SSAO_BLUR_DEPTH_TOL);
+    C::if_(dz.abs().gt(tol), C::cont)?;
+
+    // float depth_sigma2 = SSAO_BLUR_DEPTH_SIGMA * SSAO_BLUR_DEPTH_SIGMA;  (a NAMED temp —
+    // mirrors ssao_horizon_step_body's `r`/`r2` pattern, so the divisor prints `dz * dz /
+    // depth_sigma2`, NOT the precedence-wrong inline `dz*dz / SSAO_BLUR_DEPTH_SIGMA *
+    // SSAO_BLUR_DEPTH_SIGMA` the printer would emit for an un-materialized `Mul` divisor — see
+    // `ssao_horizon_step_body`'s `r2` doc for the same concern).
+    let depth_sigma = C::named_lit("SSAO_BLUR_DEPTH_SIGMA", SSAO_BLUR_DEPTH_SIGMA);
+    let depth_sigma2 = C::temp_float("depth_sigma2", depth_sigma.mul(depth_sigma));
+
+    // float w_depth = clamp01(1.0 - dz*dz / depth_sigma2);
+    let w_depth = C::temp_float(
+        "w_depth",
+        C::Scalar::lit(1.0).sub(dz.mul(dz).div(depth_sigma2)).clamp01(),
+    );
+
+    // float w = w_spatial * w_depth;
+    let w = C::temp_float("w", w_spatial.mul(w_depth));
+
+    // ssao_sum = ssao_sum + w * s;  ssao_wsum = ssao_wsum + w;
+    C::set_var(sum, C::get_var(sum).add(w.mul(s)));
+    C::set_var(wsum, C::get_var(wsum).add(w));
     Flow::Continue(())
 }
 
-/// Folds the accumulated box-filter `sum`/`cnt` into the resolve's final `ao_final` — the TAIL
-/// combine AFTER the `(2*SSAO_BLUR_R+1)^2` neighbourhood walk (`deferred_pbr.hlsl`'s
+/// Folds the accumulated bilateral-filter `sum`/`wsum` into the resolve's final `ao_final` —
+/// the TAIL combine AFTER the `(2*SSAO_BLUR_R+1)^2` neighbourhood walk (`deferred_pbr.hlsl`'s
 /// `ssao_mode != SSAO_MODE_OFF` combine, the second half of the block [`ssao_blur_tap_body`]
-/// covers the first half of). Authored ONCE over `C`; `sum`/`cnt` are the walk's running
+/// covers the first half of). Authored ONCE over `C`; `sum`/`wsum` are the walk's running
 /// accumulators (the SAME `C::Var`s [`ssao_blur_tap_body`] writes through — a suppressed-decl
-/// param on Emit, since `deferred_pbr.hlsl` declares `ssao_sum`/`ssao_cnt` in the hand-written
+/// param on Emit, since `deferred_pbr.hlsl` declares `ssao_sum`/`ssao_wsum` in the hand-written
 /// preamble above the loop), `view_t` the CENTER pixel's `gViewT`, `ao` its own A2 march AO
 /// factor (`gMaterial.g`).
 ///
 /// The plan's op order (`deferred_pbr.hlsl`, `ssao_mode != SSAO_MODE_OFF`):
-///   `ssao_blurred = ssao_sum / max(ssao_cnt, 1.0)`     (center always counts -> `cnt >= 1`)
+///   `ssao_blurred = ssao_sum / max(ssao_wsum, 1.0)`   (center always counts -> `wsum >= 1`)
 ///   `ao_class     = (view_t >= SSAO_VIEWT_BG) ? 1.0 : ao`
 ///   `ao_final     = min(ao_class, ssao_blurred)`
 ///
@@ -587,14 +656,14 @@ pub fn ssao_blur_tap_body<C: Cf>(
 #[inline]
 pub fn ssao_blur_combine_body<C: Cf>(
     sum: &C::Var,
-    cnt: &C::Var,
+    wsum: &C::Var,
     view_t: C::Scalar,
     ao: C::Scalar,
 ) -> C::Scalar {
-    // float ssao_blurred = ssao_sum / max(ssao_cnt, 1.0);
+    // float ssao_blurred = ssao_sum / max(ssao_wsum, 1.0);
     let ssao_blurred = C::temp_float(
         "ssao_blurred",
-        C::get_var(sum).div(C::get_var(cnt).max(C::Scalar::lit(1.0))),
+        C::get_var(sum).div(C::get_var(wsum).max(C::Scalar::lit(1.0))),
     );
 
     // float ao_class = (view_t >= 1.0e30) ? 1.0 : ao;
@@ -608,19 +677,38 @@ pub fn ssao_blur_combine_body<C: Cf>(
     ao_class.min(ssao_blurred)
 }
 
-/// Folds the resolve's SSAO depth-aware box blur + the `ao_class`/`min` combine into the final
-/// `ao_final` — the top-level body the `deferred_pbr.hlsl` `ssao_mode != SSAO_MODE_OFF` combine
-/// spells inline. Authored ONCE over `C`; `view_t` is the CENTER pixel's `gViewT`, `ao` its own
-/// A2 march AO factor (`gMaterial.g`), and `fetch(dx, dy)` the hand-written neighbour seam (see
-/// the module doc): `None` on an out-of-bounds neighbour (the shader's bounds `continue`),
-/// `Some((vt, s))` on an in-bounds one (its `gViewT`/`gSsao` taps).
+/// The resolve's blur SPATIAL falloff weight for a `(dx, dy)` integer pixel offset —
+/// `clamp01(1 - (dx*dx + dy*dy) / (SSAO_BLUR_SPATIAL_SIGMA * SSAO_BLUR_SPATIAL_SIGMA))`, the
+/// SAME polynomial (transcendental-free) radial falloff [`ssao_blur_tap_body`]'s `w_spatial`
+/// parameter expects. Shared by the [`ssao_blur_body`] host walk (which lifts the `f32` result
+/// into the backend via `C::Scalar::lit`, since `dx`/`dy` are compile-time-known at each
+/// unrolled iteration) and mirrored bit-for-bit by the hand-written `deferred_pbr.hlsl` glue
+/// (`float w_spatial = saturate(1.0 - float(dx*dx + dy*dy) / (SSAO_BLUR_SPATIAL_SIGMA *
+/// SSAO_BLUR_SPATIAL_SIGMA));`, computed BEFORE the generated tap span) and by the host oracle
+/// `golden_ssao_blur` (`boyko_rhi_vulkan`, which cannot import this crate).
+#[inline]
+fn ssao_spatial_weight(dx: i32, dy: i32) -> f32 {
+    let d2 = (dx * dx + dy * dy) as f32;
+    let sigma2 = SSAO_BLUR_SPATIAL_SIGMA * SSAO_BLUR_SPATIAL_SIGMA;
+    (1.0 - d2 / sigma2).clamp(0.0, 1.0)
+}
+
+/// Folds the resolve's SSAO bilateral blur (Change C: spatial-gaussian x depth-falloff,
+/// polynomial) + the `ao_class`/`min` combine into the final `ao_final` — the top-level body
+/// the `deferred_pbr.hlsl` `ssao_mode != SSAO_MODE_OFF` combine spells inline. Authored ONCE
+/// over `C`; `view_t` is the CENTER pixel's `gViewT`, `ao` its own A2 march AO factor
+/// (`gMaterial.g`), and `fetch(dx, dy)` the hand-written neighbour seam (see the module doc):
+/// `None` on an out-of-bounds neighbour (the shader's bounds `continue`), `Some((vt, s))` on an
+/// in-bounds one (its `gViewT`/`gSsao` taps).
 ///
 /// The `(2*SSAO_BLUR_R+1)^2` neighbourhood walk (`for dy in -R..=R { for dx in -R..=R { ... }
 /// }`) is a PLAIN Rust loop on both backends (it needs no `Cf::Iv`: the bound is a compile-time
-/// `i32` and `fetch`'s `Option` has no Emit shape); each accepted tap folds through
-/// [`ssao_blur_tap_body`], the ONLY per-tap math that is genuinely eDSL. The tail then folds
-/// through [`ssao_blur_combine_body`] (the `ao_class`/`min` combine). Returns the `ao_final`
-/// factor a caller stores (the shader writes it into the resolve's `ao_final` local).
+/// `i32` and `fetch`'s `Option` has no Emit shape). Each in-bounds tap's spatial weight is
+/// computed by the walk itself ([`ssao_spatial_weight`], mirroring the hand-written shader
+/// glue's `w_spatial`) and passed into [`ssao_blur_tap_body`], the ONLY per-tap math that is
+/// genuinely eDSL. The tail then folds through [`ssao_blur_combine_body`] (the `ao_class`/`min`
+/// combine). Returns the `ao_final` factor a caller stores (the shader writes it into the
+/// resolve's `ao_final` local).
 ///
 /// This is the Eval/Track-1 HOST composition entry (`ssao_blur_edsl_sync` locks it bit-identical
 /// to `golden_ssao_blur`); the Emit/Track-2 HLSL splice traces [`ssao_blur_tap_body`] and
@@ -632,22 +720,24 @@ where
     C: Cf,
     F: Fn(i32, i32) -> Option<(C::Scalar, C::Scalar)>,
 {
-    // float ssao_sum = 0.0; float ssao_cnt = 0.0;
+    // float ssao_sum = 0.0; float ssao_wsum = 0.0;
     let sum = C::decl_var("ssao_sum", C::Scalar::lit(0.0));
-    let cnt = C::decl_var("ssao_cnt", C::Scalar::lit(0.0));
+    let wsum = C::decl_var("ssao_wsum", C::Scalar::lit(0.0));
     for dy in -SSAO_BLUR_R..=SSAO_BLUR_R {
         for dx in -SSAO_BLUR_R..=SSAO_BLUR_R {
             // `int2 c = coord + int2(dx, dy); if (out of bounds) continue;`  — the hand-written
-            // bounds/fetch seam; `dx == dy == 0` (the center) always resolves `Some` and always
-            // passes its own gate (|vt - view_t| == 0), so `cnt >= 1` is guaranteed.
+            // bounds/fetch seam; `dx == dy == 0` (the center) always resolves `Some`, always
+            // passes its own gate (|vt - view_t| == 0), and always carries `w_spatial ==
+            // w_depth == 1`, so `wsum >= 1` is guaranteed.
             let Some((vt, s)) = fetch(dx, dy) else {
                 continue;
             };
-            let _ = ssao_blur_tap_body::<C>(&sum, &cnt, vt, view_t, s);
+            let w_spatial = C::Scalar::lit(ssao_spatial_weight(dx, dy));
+            let _ = ssao_blur_tap_body::<C>(&sum, &wsum, vt, view_t, s, w_spatial);
         }
     }
 
-    ssao_blur_combine_body::<C>(&sum, &cnt, view_t, ao)
+    ssao_blur_combine_body::<C>(&sum, &wsum, view_t, ao)
 }
 
 #[cfg(test)]
@@ -721,16 +811,21 @@ mod tests {
         );
     }
 
-    // ---- ssao_blur_body — the resolve's depth-aware box blur (mirrors
+    // ---- ssao_blur_body — the resolve's bilateral SSAO blur (mirrors
     // `boyko_rhi_vulkan::compute::ssao_blur_tests` texel-for-texel; `ao` is pinned to `1.0` in
     // the gather-only cases so `ao_class` is always `1.0` and `min(1.0, ssao_blurred) ==
-    // ssao_blurred` exactly — isolating the box-filter arithmetic these three tests target). ----
+    // ssao_blurred` exactly — isolating the bilateral-filter arithmetic these three tests
+    // target). Every fixture below is a UNIFORM-value neighbourhood (every accepted tap carries
+    // the SAME sample), so the weighted average reduces to that value regardless of the actual
+    // per-tap weights (a weighted mean of equal terms equals the term) — these tests are
+    // weight-invariant BY CONSTRUCTION and need no numeric change under Change C. ----
 
     #[test]
     fn dark_neighbourhood_averages_exactly() {
         // A crevice: every tap in-bounds and in-tol carries a dark AO sample (0.2); the blurred
-        // average of a UNIFORM neighbourhood must reproduce that value exactly (sum of N equal
-        // terms / N == the term, modulo the SAME rounding `golden_ssao_blur` performs).
+        // weighted average of a UNIFORM neighbourhood must reproduce that value exactly (a
+        // weighted sum of N equal terms / their weight sum == the term, modulo the SAME
+        // rounding `golden_ssao_blur` performs).
         const VIEW_T: f32 = 1.5;
         const DARK: f32 = 0.2;
         let fetch = |_dx: i32, _dy: i32| Some((VIEW_T, DARK));
@@ -769,9 +864,9 @@ mod tests {
     #[test]
     fn all_out_of_bounds_falls_back_to_center_only() {
         // Every neighbour is out of bounds (`fetch` returns `None`) EXCEPT the center
-        // (`dx == dy == 0`), which always resolves and always passes its own gate (`|Δt| ==
-        // 0`). `cnt >= 1` by construction — never a 0/0 NaN — and the blur must equal the
-        // center's own raw sample.
+        // (`dx == dy == 0`), which always resolves, always passes its own gate (`|Δt| == 0`),
+        // and always carries `w_spatial == w_depth == 1`. `wsum >= 1` by construction — never a
+        // 0/0 NaN — and the blur must equal the center's own raw sample.
         const VIEW_T: f32 = 1.5;
         const CENTER_S: f32 = 90.0 / 255.0;
         let fetch = |dx: i32, dy: i32| {

@@ -1773,7 +1773,7 @@ pub const SSAO_ROT: [(f32, f32); 16] = [
 /// resolve). `R == 3` is a 7×7 box: the inline blur of `gSsao` INSIDE the resolve's `ssao_mode
 /// != 0` combine that smooths the discrete-step HBAO RINGS. The host mirror [`golden_ssao_blur`]
 /// uses the SAME radius so the GPU and host averages agree texel-for-texel.
-pub const SSAO_BLUR_R: i32 = 3;
+pub const SSAO_BLUR_R: i32 = 5;
 /// Render P7 POLISH — the SSAO blur's bilateral DEPTH gate (`SSAO_BLUR_DEPTH_TOL` in the
 /// resolve), in `view_t` (world-distance) units. A neighbour tap is averaged in ONLY when
 /// `|tap.view_t - center.view_t| <= SSAO_BLUR_DEPTH_TOL`; this keeps the blur WITHIN a flat
@@ -1781,6 +1781,19 @@ pub const SSAO_BLUR_R: i32 = 3;
 /// (where `view_t` jumps far more than the tol), so AO never bleeds across the edge. `0.1` was
 /// chosen to sit comfortably inside that band. Mirrored bit-for-bit by [`golden_ssao_blur`].
 pub const SSAO_BLUR_DEPTH_TOL: f32 = 0.1;
+/// Render P7 POLISH Change C — the resolve's SSAO blur bilateral SPATIAL falloff scale
+/// (`SSAO_BLUR_SPATIAL_SIGMA` in the resolve), in pixels: the per-tap spatial weight is
+/// `clamp01(1 - (dx*dx+dy*dy) / (SSAO_BLUR_SPATIAL_SIGMA * SSAO_BLUR_SPATIAL_SIGMA))`, a
+/// polynomial (transcendental-free) radial falloff. Equals
+/// `boyko_shaderdsl::ssao::SSAO_BLUR_SPATIAL_SIGMA`; mirrored bit-for-bit by [`golden_ssao_blur`].
+pub const SSAO_BLUR_SPATIAL_SIGMA: f32 = 7.0;
+/// Render P7 POLISH Change C — the resolve's SSAO blur bilateral DEPTH falloff scale
+/// (`SSAO_BLUR_DEPTH_SIGMA` in the resolve), in `view_t` units: the per-tap depth weight is
+/// `clamp01(1 - (dz*dz) / (SSAO_BLUR_DEPTH_SIGMA * SSAO_BLUR_DEPTH_SIGMA))`, softening the
+/// depth agreement WITHIN the hard [`SSAO_BLUR_DEPTH_TOL`] gate (which still rejects a tap
+/// outright past the tolerance). Equals `boyko_shaderdsl::ssao::SSAO_BLUR_DEPTH_SIGMA`;
+/// mirrored bit-for-bit by [`golden_ssao_blur`].
+pub const SSAO_BLUR_DEPTH_SIGMA: f32 = 0.1;
 
 
 /// P6 R1 cap: the maximum EXTRA shadow casters marched per pixel (the dominant-N bound).

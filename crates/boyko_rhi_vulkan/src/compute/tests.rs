@@ -3003,30 +3003,52 @@ mod ssao_blur_tests {
     fn sharp_ring_is_smoothed() {
         // A constant-depth flat surface (every neighbour passes the depth gate) with a SHARP AO
         // discontinuity: the left half is fully-dark (byte 0), the right half fully-bright
-        // (byte 255). At the seam column the raw value is a hard step; the 7×7 box blur of a
-        // pixel ON the seam must land near the neighbourhood mean (~0.5), STRICTLY between the
-        // two raw extremes — i.e. the discontinuity is smoothed, not preserved.
+        // (byte 255).
+        //
+        // Render P7 POLISH Change C replaced the uniform box average with a bilateral SPATIAL x
+        // depth-falloff weight. This case is the R/sigma-ROBUST "uniform kernel is unchanged"
+        // property: a pixel FAR ENOUGH from the seam that NO dark tap falls inside the
+        // `SSAO_BLUR_R`-radius window (`px >= SEAM + SSAO_BLUR_R + 1`) sees only bright taps, so
+        // its weighted mean equals the bright value EXACTLY — independent of both
+        // `SSAO_BLUR_SPATIAL_SIGMA` and `SSAO_BLUR_R` (a weighted average of equal taps is that
+        // value). Its counterpart `sharp_ring_is_smoothed_at_narrower_offset` covers the "a sharp
+        // discontinuity WITHIN reach IS smoothed" direction with a sigma-robust inequality.
         const SEAM: i32 = 16;
         let (ssao, gbuf) = build(|x, _y| (if x < SEAM { 0 } else { 255 }, 1.5));
 
-        // A pixel just inside the bright half, within R of the seam: its raw byte is 255 → 1.0,
-        // but the blur pulls it down toward the mean because the dark half is in-kernel.
-        let px = (SEAM + 1) as u32;
+        // One column past the kernel reach from the seam: the nearest dark column (SEAM-1) is at
+        // `dx == -(SSAO_BLUR_R + 2)`, strictly outside the `[-R, R]` window, so no dark tap counts.
+        let px = (SEAM + SSAO_BLUR_R + 1) as u32;
+        let py = 16;
+        let raw = ssao[(py * W + px) as usize] as f32 / 255.0;
+        let blurred = golden_ssao_blur(&ssao, &gbuf, px, py, W, H);
+        assert!(
+            (blurred - raw).abs() < 1.0e-6,
+            "a pixel whose entire SSAO_BLUR_R-kernel is uniformly bright must blur to that value \
+             EXACTLY (weighted mean of equal taps), independent of SSAO_BLUR_SPATIAL_SIGMA / \
+             SSAO_BLUR_R: raw {raw} blurred {blurred}"
+        );
+    }
+
+    #[test]
+    fn sharp_ring_is_smoothed_at_narrower_offset() {
+        // The bilateral-weighted counterpart of the old `sharp_ring_is_smoothed`: a pixel ONE
+        // column closer to the seam than `sharp_ring_is_smoothed`'s fixture, so the nearest dark
+        // neighbour (`dx == -1`) sits well INSIDE the `SSAO_BLUR_SPATIAL_SIGMA == 2.0` radius and
+        // visibly pulls the blurred AO down from the raw bright value — proving the bilateral
+        // blur still smooths a sharp discontinuity when the discontinuity is close enough to
+        // fall within the spatial sigma.
+        const SEAM: i32 = 16;
+        let (ssao, gbuf) = build(|x, _y| (if x < SEAM { 0 } else { 255 }, 1.5));
+
+        let px = SEAM as u32; // the first bright column; the seam is one tap away (dx == -1)
         let py = 16;
         let raw = ssao[(py * W + px) as usize] as f32 / 255.0;
         let blurred = golden_ssao_blur(&ssao, &gbuf, px, py, W, H);
         assert!(
             blurred < raw - 0.05 && blurred > 0.1,
-            "the box blur must smooth the sharp ring: raw {raw} blurred {blurred} \
-             (expected strictly between the dark and bright extremes)"
-        );
-        // The exact 7×7 mean at the seam pixel: columns [px-R, px+R] = [SEAM-2, SEAM+4]; of the
-        // 7 columns, (SEAM-2, SEAM-1) are dark (0.0) and (SEAM..SEAM+4) are bright (1.0), each ×
-        // 7 rows → mean = 5/7. Confirms the gather order/bounds/center-counts arithmetic.
-        let expected = 5.0_f32 / 7.0;
-        assert!(
-            (blurred - expected).abs() < 1.0e-6,
-            "the 7×7 box mean must be exactly 5/7 at the seam pixel, got {blurred}"
+            "the bilateral blur must smooth a sharp ring within the spatial sigma radius: raw \
+             {raw} blurred {blurred} (expected strictly between the dark and bright extremes)"
         );
     }
 
@@ -3081,7 +3103,8 @@ mod ssao_blur_tests {
             (blurred - 90.0 / 255.0).abs() < 1.0e-6,
             "an isolated pixel (all neighbours gated out) must blur to its OWN raw AO, got {blurred}"
         );
-        // Sanity: the radius constant is the one the resolve compiles in.
-        assert_eq!(SSAO_BLUR_R, 3, "the host blur radius must mirror the shader's SSAO_BLUR_R");
+        // Sanity: the radius constant is the one the resolve compiles in (Change C tuning: R=5,
+        // an 11x11 window — wide enough to dissolve the angular-undersampling blobs on GPU).
+        assert_eq!(SSAO_BLUR_R, 5, "the host blur radius must mirror the shader's SSAO_BLUR_R");
     }
 }

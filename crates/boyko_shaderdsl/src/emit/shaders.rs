@@ -700,20 +700,24 @@ pub fn emit_hlsl_ssao() -> String {
     })
 }
 
-/// Generates the HLSL SSAO BLUR TAP span (Render P7 POLISH Track 2) — ONE box-filter
-/// neighbour's depth-gate + accumulate (`if (abs(vt - view_t) > SSAO_BLUR_DEPTH_TOL) { continue;
-/// } ssao_sum = ssao_sum + s; ssao_cnt = ssao_cnt + 1.0;`) — by tracing the generic
-/// [`crate::ssao::ssao_blur_tap_body`] over the [`EmitCf`] backend, and returns ONLY the span
-/// (NOT a wrapped function).
+/// Generates the HLSL SSAO BLUR TAP span (Render P7 POLISH Track 2, Change C) — ONE bilateral
+/// neighbour's depth-gate + weight + accumulate (`float dz = vt - view_t; if (abs(dz) >
+/// SSAO_BLUR_DEPTH_TOL) { continue; } float depth_sigma2 = SSAO_BLUR_DEPTH_SIGMA *
+/// SSAO_BLUR_DEPTH_SIGMA; float w_depth = clamp01(1.0 - dz*dz/depth_sigma2); float w =
+/// w_spatial * w_depth; ssao_sum = ssao_sum + w*s; ssao_wsum = ssao_wsum + w;`) — by tracing the
+/// generic [`crate::ssao::ssao_blur_tap_body`] over the [`EmitCf`] backend, and returns ONLY the
+/// span (NOT a wrapped function).
 ///
 /// Framing (b), mirroring [`emit_hlsl_ssao`]: a SPAN, not a whole function, and NOT the
 /// enclosing loop. The `(2*SSAO_BLUR_R+1)^2` neighbourhood WALK (`for (dy) for (dx)`, both
 /// SIGNED symmetric-range `<=`-terminated headers — no `Cf`/`Stmt` facet can print them), the
-/// bounds `continue`, and the `gViewT`/`gSsao` `Load` calls stay HAND-WRITTEN inline in
+/// bounds `continue`, the `gViewT`/`gSsao` `Load` calls, and the per-tap SPATIAL weight
+/// (`w_spatial`, which reads `dx`/`dy` the eDSL span never sees) stay HAND-WRITTEN inline in
 /// `deferred_pbr.hlsl` (around the `// === GENERATED ssao_blur_tap BEGIN/END ===` sentinels).
-/// The hand-written glue pre-binds `float s = gSsao.Load(c).r;` (mirroring how the SSAO
-/// horizon-step seam pre-binds `float3 Pp = ...;`) so the generated span reads `vt`/`view_t`/`s`
-/// by NAME; `vt`/`view_t` are already named locals in the committed glue.
+/// The hand-written glue pre-binds `float s = gSsao.Load(c).r;` and `float w_spatial = ...;`
+/// (mirroring how the SSAO horizon-step seam pre-binds `float3 Pp = ...;`) so the generated span
+/// reads `vt`/`view_t`/`s`/`w_spatial` by NAME; all four are already named locals in the
+/// committed glue.
 ///
 /// The span prints at DEPTH 5 (20-space indent; the committed site nests
 /// `main`→`if (ssao_mode != OFF)`→`for (dy)`→`for (dx)`→this tap body — the SAME depth
@@ -739,18 +743,20 @@ pub fn emit_hlsl_ssao_blur_tap() -> String {
     STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
 
     // Seed the span's inputs:
-    //   sum/cnt → suppressed-decl params "ssao_sum"/"ssao_cnt" (declared by the hand-written
-    //             preamble `float ssao_sum = 0.0; float ssao_cnt = 0.0;` ABOVE the loop)
-    //   vt      → Input(0) (float_in[0] = "vt")     — the hand-written `float vt = gViewT.Load(c);`
-    //   view_t  → Input(1) (float_in[1] = "view_t") — the enclosing resolve's center gViewT
-    //   s       → Input(2) (float_in[2] = "s")      — the pre-bound `float s = gSsao.Load(c).r;`
+    //   sum/wsum  → suppressed-decl params "ssao_sum"/"ssao_wsum" (declared by the hand-written
+    //               preamble `float ssao_sum = 0.0; float ssao_wsum = 0.0;` ABOVE the loop)
+    //   vt        → Input(0) (float_in[0] = "vt")        — the hand-written `float vt = gViewT.Load(c);`
+    //   view_t    → Input(1) (float_in[1] = "view_t")    — the enclosing resolve's center gViewT
+    //   s         → Input(2) (float_in[2] = "s")         — the pre-bound `float s = gSsao.Load(c).r;`
+    //   w_spatial → Input(3) (float_in[3] = "w_spatial") — the pre-bound spatial falloff weight
     let sum = EmitCf::decl_param("ssao_sum", Emit::lit(0.0));
-    let cnt = EmitCf::decl_param("ssao_cnt", Emit::lit(0.0));
+    let wsum = EmitCf::decl_param("ssao_wsum", Emit::lit(0.0));
     let vt = Emit::input(0);
     let view_t = Emit::input(1);
     let s = Emit::input(2);
+    let w_spatial = Emit::input(3);
 
-    let _ = ssao::ssao_blur_tap_body::<EmitCf>(&sum, &cnt, vt, view_t, s);
+    let _ = ssao::ssao_blur_tap_body::<EmitCf>(&sum, &wsum, vt, view_t, s, w_spatial);
 
     // Pop the function body block and print it.
     let body_block = STMTS.with(|s| {
@@ -759,7 +765,7 @@ pub fn emit_hlsl_ssao_blur_tap() -> String {
             .expect("invariant: the function body block was pushed above")
     });
 
-    let float_in = ["vt", "view_t", "s"];
+    let float_in = ["vt", "view_t", "s", "w_spatial"];
     let named_lit = NAMED_LITS.with(|n| n.borrow().clone());
     let vars = VARS.with(|v| v.borrow().clone());
     let names = Names {
@@ -788,14 +794,14 @@ pub fn emit_hlsl_ssao_blur_tap() -> String {
     })
 }
 
-/// Generates the HLSL SSAO BLUR COMBINE span (Render P7 POLISH Track 2) — the box-filter TAIL
-/// fold (`float ssao_blurred = ssao_sum / max(ssao_cnt, 1.0); float ao_class = (view_t >= 1.0e30)
-/// ? 1.0 : ao; ao_final = min(ao_class, ssao_blurred);`) — by tracing the generic
-/// [`crate::ssao::ssao_blur_combine_body`] over the [`EmitCf`] backend, and returns ONLY the span
-/// (NOT a wrapped function).
+/// Generates the HLSL SSAO BLUR COMBINE span (Render P7 POLISH Track 2, Change C) — the
+/// bilateral-filter TAIL fold (`float ssao_blurred = ssao_sum / max(ssao_wsum, 1.0); float
+/// ao_class = (view_t >= 1.0e30) ? 1.0 : ao; ao_final = min(ao_class, ssao_blurred);`) — by
+/// tracing the generic [`crate::ssao::ssao_blur_combine_body`] over the [`EmitCf`] backend, and
+/// returns ONLY the span (NOT a wrapped function).
 ///
 /// Framing (b): a SPAN, spliced AFTER the hand-written loop nest (which stays untouched — see
-/// [`emit_hlsl_ssao_blur_tap`]'s doc). `ssao_sum`/`ssao_cnt` are read back by NAME (the SAME
+/// [`emit_hlsl_ssao_blur_tap`]'s doc). `ssao_sum`/`ssao_wsum` are read back by NAME (the SAME
 /// suppressed-decl params the tap span writes through); `ao_final` is a suppressed-decl param
 /// too (declared earlier in the resolve as `float ao_final = ao;` — this span's tail is a BARE
 /// assignment, not a redecl).
@@ -823,18 +829,18 @@ pub fn emit_hlsl_ssao_blur_combine() -> String {
     STMTS.with(|s| s.borrow_mut().push(Block { stmts: Vec::new() }));
 
     // Seed the span's inputs:
-    //   sum/cnt  → suppressed-decl params "ssao_sum"/"ssao_cnt" (the SAME loop accumulators the
+    //   sum/wsum → suppressed-decl params "ssao_sum"/"ssao_wsum" (the SAME loop accumulators the
     //              tap span writes through)
     //   view_t   → Input(0) (float_in[0] = "view_t")
     //   ao       → Input(1) (float_in[1] = "ao")
     //   ao_final → suppressed-decl param "ao_final" (declared earlier in the resolve)
     let sum = EmitCf::decl_param("ssao_sum", Emit::lit(0.0));
-    let cnt = EmitCf::decl_param("ssao_cnt", Emit::lit(0.0));
+    let wsum = EmitCf::decl_param("ssao_wsum", Emit::lit(0.0));
     let view_t = Emit::input(0);
     let ao = Emit::input(1);
     let ao_final = EmitCf::decl_param("ao_final", Emit::lit(0.0));
 
-    let result = ssao::ssao_blur_combine_body::<EmitCf>(&sum, &cnt, view_t, ao);
+    let result = ssao::ssao_blur_combine_body::<EmitCf>(&sum, &wsum, view_t, ao);
     EmitCf::set_var(&ao_final, result);
 
     // Pop the function body block and print it.

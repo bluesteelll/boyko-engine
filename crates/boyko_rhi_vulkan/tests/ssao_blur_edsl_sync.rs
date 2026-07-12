@@ -231,4 +231,14 @@ fn ssao_blur_consts_host_match_edsl() {
         ssao::SSAO_VIEWT_BG.to_bits(),
         "SSAO_VIEWT_BG host vs eDSL"
     );
+    assert_eq!(
+        compute::SSAO_BLUR_SPATIAL_SIGMA.to_bits(),
+        ssao::SSAO_BLUR_SPATIAL_SIGMA.to_bits(),
+        "SSAO_BLUR_SPATIAL_SIGMA host vs eDSL"
+    );
+    assert_eq!(
+        compute::SSAO_BLUR_DEPTH_SIGMA.to_bits(),
+        ssao::SSAO_BLUR_DEPTH_SIGMA.to_bits(),
+        "SSAO_BLUR_DEPTH_SIGMA host vs eDSL"
+    );
 }

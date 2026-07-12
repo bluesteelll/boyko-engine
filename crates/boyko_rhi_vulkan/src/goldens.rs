@@ -30,7 +30,7 @@ use crate::compute::{
     MESH_COLOR, MESH_DEPTH_CLEAR, MESH_DEPTH_T_MAX, MESH_RASTER_ALBEDO, PBR_FAR, PBR_LIGHT_COLOR, PBR_LIGHT_DIR,
     PBR_SKY_DIFFUSE, PBR_SKY_SPEC, SDF_CAM_Z, SDF_EPS, SDF_HALF_EXTENT, SDF_MAX_IT,
     SDF_T_MAX, SHADOW_HIT_EPS, SHADOW_K, SHADOW_MINT, SHADOW_MINT_STEP, SHADOW_NDOTL_EPS,
-    SHADOW_NORMAL_BIAS, SKY_SUN_EXPONENT, SSAO_BLUR_DEPTH_TOL, SSAO_BLUR_R, SSAO_HILBERT_W, SSAO_R2_ALPHA1, SSAO_R2_ALPHA2, SSAO_RADIUS_PIX_MAX, SSAO_RADIUS_PIX_MIN,
+    SHADOW_NORMAL_BIAS, SKY_SUN_EXPONENT, SSAO_BLUR_DEPTH_SIGMA, SSAO_BLUR_DEPTH_TOL, SSAO_BLUR_R, SSAO_BLUR_SPATIAL_SIGMA, SSAO_HILBERT_W, SSAO_R2_ALPHA1, SSAO_R2_ALPHA2, SSAO_RADIUS_PIX_MAX, SSAO_RADIUS_PIX_MIN,
     SSAO_ROT, SSAO_ROT_N, SSAO_VIEWT_BG, SUN_ENV_WEIGHT, SUN_KERNEL_EXPONENT_MAX, SUN_KERNEL_EXPONENT_MIN,
     SsaoParams, TILE_FLAG_EMPTY, TILE_SIZE, TileBound, composite_ray, depth_to_t,
     golden_f16_from_f32, pack_rgba, sdf_sphere,
@@ -2547,20 +2547,25 @@ pub fn golden_ssao_attributes(
     ao * ao
 }
 
-/// Render P7 POLISH — the EXACT host mirror of the resolve's inline SSAO depth-aware box blur
-/// (`deferred_pbr.hlsl`, inside the `ssao_mode != 0` combine). Given the RAW per-pixel SSAO
-/// byte image (`ssao` — exactly what the GPU `gSsao` R8_UNORM holds; the C2 host builds it via
-/// [`golden_ssao_attributes`] quantized to `u8` by `(x * 255).round()`) and the host G-buffer
-/// (`gbuf`, for the per-pixel `view_t` depth gate), returns the blurred AO factor `[0,1]` at
-/// `(px, py)`.
+/// Render P7 POLISH Change C — the EXACT host mirror of the resolve's inline SSAO BILATERAL
+/// blur (`deferred_pbr.hlsl`, inside the `ssao_mode != 0` combine): a spatial-gaussian x
+/// depth-falloff WEIGHTED gather (replacing the old hard-binary uniform box average). Given the
+/// RAW per-pixel SSAO byte image (`ssao` — exactly what the GPU `gSsao` R8_UNORM holds; the C2
+/// host builds it via [`golden_ssao_attributes`] quantized to `u8` by `(x * 255).round()`) and
+/// the host G-buffer (`gbuf`, for the per-pixel `view_t` depth gate), returns the blurred AO
+/// factor `[0,1]` at `(px, py)`.
 ///
-/// The gather is the byte-for-byte mirror of the shader: average the `(2*R+1)²` neighbour taps
-/// (`R == `[`SSAO_BLUR_R`]) whose `gbuf[c].view_t` is within [`SSAO_BLUR_DEPTH_TOL`] of the
-/// center's, bounds-clamped to the image; the center always passes its own gate so the count is
-/// `≥ 1` (no divide-by-zero). The op-set is integer / `abs` / compare / the same
+/// The gather is the byte-for-byte mirror of the shader: over the `(2*R+1)²` neighbour taps
+/// (`R == `[`SSAO_BLUR_R`]), a neighbour whose `gbuf[c].view_t` is beyond [`SSAO_BLUR_DEPTH_TOL`]
+/// of the center's is REJECTED outright (the silhouette guard, unchanged from before Change C —
+/// a neighbour across the mesh↔SDF edge has a far `view_t` and never contributes, so the blur
+/// never bleeds AO over the silhouette); an ACCEPTED tap is weighted by `w_spatial * w_depth`
+/// (both `clamp01(1 - x²/sigma²)` polynomials, transcendental-free — see
+/// [`SSAO_BLUR_SPATIAL_SIGMA`] / [`SSAO_BLUR_DEPTH_SIGMA`]) and folds into a weighted mean
+/// `Σ(w·s) / max(Σw, 1.0)`. The center always passes its own gate with `w == 1`, so `Σw ≥ 1`
+/// (no divide-by-zero). The op-set is integer / `abs` / compare / `mul`/`div`/`clamp` / the same
 /// `byte / 255.0` UNORM decode — NO transcendental — so the host average rounds bit-identically
-/// to the GPU's. The depth gate is the silhouette guard: a neighbour across the mesh↔SDF edge
-/// has a far `view_t` and is rejected, so the blur never bleeds AO over the silhouette.
+/// to the GPU's.
 pub fn golden_ssao_blur(
     ssao: &[u8],
     gbuf: &[MarcherAttributes],
@@ -2583,12 +2588,16 @@ pub fn golden_ssao_blur(
     );
 
     // The center's `view_t` (the gate reference) — the SAME `gViewT.Load(coord)` the resolve
-    // reads. The center always passes `|view_t - view_t| == 0 <= tol`, so `cnt >= 1`.
+    // reads. The center always passes `|view_t - view_t| == 0 <= tol` with weight 1, so
+    // `wsum >= 1`.
     let center_view_t = gbuf[(py as i32 * w + px as i32) as usize].view_t;
 
+    let spatial_sigma2 = SSAO_BLUR_SPATIAL_SIGMA * SSAO_BLUR_SPATIAL_SIGMA;
+    let depth_sigma2 = SSAO_BLUR_DEPTH_SIGMA * SSAO_BLUR_DEPTH_SIGMA;
+
     let mut sum = 0.0_f32;
-    let mut cnt = 0.0_f32;
-    // Mirror the shader's nested `for (dy) for (dx)` order/bounds/gate EXACTLY.
+    let mut wsum = 0.0_f32;
+    // Mirror the shader's nested `for (dy) for (dx)` order/bounds/gate/weight EXACTLY.
     for dy in -SSAO_BLUR_R..=SSAO_BLUR_R {
         for dx in -SSAO_BLUR_R..=SSAO_BLUR_R {
             let cx = px as i32 + dx;
@@ -2598,15 +2607,27 @@ pub fn golden_ssao_blur(
             }
             let idx = (cy * w + cx) as usize;
             let vt = gbuf[idx].view_t;
-            if (vt - center_view_t).abs() > SSAO_BLUR_DEPTH_TOL {
-                continue; // silhouette gate (far-depth neighbour)
+            let dz = vt - center_view_t;
+            if dz.abs() > SSAO_BLUR_DEPTH_TOL {
+                continue; // silhouette gate (far-depth neighbour) — HARD reject, unchanged
             }
+            // w_spatial = clamp01(1 - (dx*dx+dy*dy) / spatial_sigma2)
+            let d2 = (dx * dx + dy * dy) as f32;
+            let w_spatial = (1.0 - d2 / spatial_sigma2).clamp(0.0, 1.0);
+            // w_depth = clamp01(1 - dz*dz / depth_sigma2)
+            let w_depth = (1.0 - dz * dz / depth_sigma2).clamp(0.0, 1.0);
+            let weight = w_spatial * w_depth;
             // The GPU reads `gSsao.Load(c).r` — the R8_UNORM decode of the raw byte.
-            sum += ssao[idx] as f32 / 255.0;
-            cnt += 1.0;
+            sum += weight * (ssao[idx] as f32 / 255.0);
+            wsum += weight;
         }
     }
-    sum / cnt.max(1.0)
+    debug_assert!(
+        wsum >= 1.0,
+        "invariant: the center tap always passes its own gate with w_spatial == w_depth == 1.0, \
+         so wsum must be >= 1.0, got {wsum}"
+    );
+    sum / wsum.max(1.0)
 }
 
 /// The CPU mirror of the `deferred_pbr` RESOLVE (PBR MVP-2): given the marcher's
