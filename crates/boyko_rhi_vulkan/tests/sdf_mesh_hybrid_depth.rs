@@ -434,6 +434,8 @@ fn run_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> (Vec<u32>, Vec<f32>) {
             dimension: TextureDimension::D2,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("offscreen depth texture");
 
@@ -448,6 +450,8 @@ fn run_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> (Vec<u32>, Vec<f32>) {
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("throwaway color texture");
 

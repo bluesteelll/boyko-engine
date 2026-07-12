@@ -622,3 +622,36 @@ pub struct ImageBarrierDesc<'a, A: RhiApi> {
     /// The subresource range the transition covers.
     pub range: ImageSubresourceRange,
 }
+
+/// Parameters for [`crate::encoder::RhiCommandEncoder::blit_image`] (textured-PBR
+/// T2 Decision D3) — a single, LINEAR-filtered, full-extent blit between two mip
+/// levels of the SAME image (the mip-chain generation step of a staged texture
+/// upload). Both the source and destination regions are the FULL extent of their
+/// respective mip level at texel offset `(0, 0, 0)`, single array layer — the only
+/// shape a mip-chain blit needs, so (unlike [`BufferImageCopy`]) no offset fields
+/// are exposed.
+pub struct ImageBlitDesc<'a, A: RhiApi> {
+    /// The image both the source and destination mip level belong to.
+    pub texture: &'a A::Texture,
+    /// Which aspect the blit reads/writes (typically [`ImageAspect::COLOR`]).
+    pub aspect: ImageAspect,
+    /// The source mip level, which MUST already be in `src_layout` (typically
+    /// [`ImageLayout::TransferSrcOptimal`]) via a prior
+    /// [`crate::encoder::RhiCommandEncoder::image_barrier`].
+    pub src_mip_level: u32,
+    /// The source mip level's full extent, in texels.
+    pub src_extent_w: u32,
+    /// The source mip level's full extent, in texels.
+    pub src_extent_h: u32,
+    /// The layout the source mip level is in.
+    pub src_layout: ImageLayout,
+    /// The destination mip level, which MUST already be in `dst_layout` (typically
+    /// [`ImageLayout::TransferDstOptimal`]) via a prior `image_barrier`.
+    pub dst_mip_level: u32,
+    /// The destination mip level's full extent, in texels.
+    pub dst_extent_w: u32,
+    /// The destination mip level's full extent, in texels.
+    pub dst_extent_h: u32,
+    /// The layout the destination mip level is in.
+    pub dst_layout: ImageLayout,
+}

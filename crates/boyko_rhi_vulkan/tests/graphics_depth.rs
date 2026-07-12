@@ -255,6 +255,8 @@ fn render_two_triangles(
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("offscreen color texture");
 
@@ -270,6 +272,8 @@ fn render_two_triangles(
             dimension: TextureDimension::D2,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("offscreen depth texture");
 

@@ -8,7 +8,7 @@
 //! plus direct `run_system` calls — the established ad-hoc-system test idiom,
 //! see `boyko_ecs/tests/phase14a_hooks_firing.rs`) but additionally wires
 //! [`validate_asset_refs`] and [`ValidateCursor`], and seeds BOTH
-//! `Assets<MeshGpu>` and `Assets<MaterialGpu>` with real rows — this suite's
+//! `Assets<MeshGpu>` and `Assets<Material>` with real rows — this suite's
 //! mesh coverage needs actual mesh slots, unlike `asset_refcount_integration.rs`'s
 //! material-only scope (see that file's doc for why `MeshGpu` was skipped
 //! there).
@@ -54,7 +54,7 @@ use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::system::Commands;
 
 use boyko_render::asset_refcount::{ValidateCursor, validate_asset_refs};
-use boyko_render::{MaterialGpu, MeshGpu, RenderEpoch, apply_refcount_deltas};
+use boyko_render::{Material, MeshGpu, RenderEpoch, apply_refcount_deltas};
 use boyko_scene::{DeferredFree, MaterialHandle, MaterialRefGen, MeshHandle, MeshRefGen, RefcountDeltas, RenderEnabled};
 
 use boyko_rhi::enums::IndexType;
@@ -82,7 +82,7 @@ fn dummy_mesh_gpu() -> MeshGpu {
 /// `world_with` for the established idiom). Both `material_assets` and
 /// `mesh_assets` are caller-seeded (rows already minted) BEFORE they move
 /// into the world, since only the caller knows which slot(s) to reference.
-fn world_with(material_assets: Assets<MaterialGpu>, mesh_assets: Assets<MeshGpu>) -> EcsMaster {
+fn world_with(material_assets: Assets<Material>, mesh_assets: Assets<MeshGpu>) -> EcsMaster {
     let mut ecs = EcsMaster::new();
     ecs.insert_resource(RefcountDeltas::default());
     ecs.insert_resource(DeferredFree::default());
@@ -114,7 +114,7 @@ fn refused_inc_still_stamps_the_lane_unconditionally_on_a_retiring_mesh_slot() {
     let mut mesh_assets = Assets::<MeshGpu>::with_reserved(4);
     let slot = mesh_assets.add(dummy_mesh_gpu()).index();
 
-    let mut ecs = world_with(Assets::<MaterialGpu>::with_reserved(4), mesh_assets);
+    let mut ecs = world_with(Assets::<Material>::with_reserved(4), mesh_assets);
 
     // Drive the slot to Retiring: a single owner attaches, then despawns.
     let a: Entity = ecs.run_system(move |mut cmds: Commands| cmds.spawn(MeshHandle(slot)).id());
@@ -174,8 +174,8 @@ fn refused_inc_still_stamps_the_lane_unconditionally_on_a_retiring_mesh_slot() {
 /// generic-over-`AssetBacking` `apply_one` body.
 #[test]
 fn refused_inc_still_stamps_the_lane_unconditionally_on_a_retiring_material_slot() {
-    let mut material_assets = Assets::<MaterialGpu>::with_reserved(4);
-    let slot = material_assets.add(MaterialGpu::default()).index() as u16;
+    let mut material_assets = Assets::<Material>::with_reserved(4);
+    let slot = material_assets.add(Material::default()).index() as u16;
 
     let mut ecs = world_with(material_assets, Assets::<MeshGpu>::with_reserved(4));
 
@@ -185,12 +185,12 @@ fn refused_inc_still_stamps_the_lane_unconditionally_on_a_retiring_material_slot
     ecs.run_system(apply_refcount_deltas);
 
     assert_eq!(
-        ecs.resource::<Assets<MaterialGpu>>().state_of_index(u32::from(slot)),
+        ecs.resource::<Assets<Material>>().state_of_index(u32::from(slot)),
         None,
         "the sole owner's despawn must have retired the slot (test precondition)"
     );
     let retiring_gen = ecs
-        .resource::<Assets<MaterialGpu>>()
+        .resource::<Assets<Material>>()
         .try_generation(u32::from(slot))
         .expect("a Retiring row is still in-range");
 
@@ -200,7 +200,7 @@ fn refused_inc_still_stamps_the_lane_unconditionally_on_a_retiring_material_slot
     ecs.run_system(apply_refcount_deltas);
 
     assert_eq!(
-        ecs.resource::<Assets<MaterialGpu>>().state_of_index(u32::from(slot)),
+        ecs.resource::<Assets<Material>>().state_of_index(u32::from(slot)),
         None,
         "a refused inc_ref must not resurrect the Retiring slot to Loaded"
     );
@@ -225,9 +225,9 @@ fn mesh_churn_leaves_material_lane_untouched_and_vice_versa() {
     let slot_mesh_a = mesh_assets.add(dummy_mesh_gpu()).index();
     let slot_mesh_b = mesh_assets.add(dummy_mesh_gpu()).index();
 
-    let mut material_assets = Assets::<MaterialGpu>::with_reserved(4);
-    let slot_mat_a = material_assets.add(MaterialGpu::default()).index() as u16;
-    let slot_mat_b = material_assets.add(MaterialGpu::default()).index() as u16;
+    let mut material_assets = Assets::<Material>::with_reserved(4);
+    let slot_mat_a = material_assets.add(Material::default()).index() as u16;
+    let slot_mat_b = material_assets.add(Material::default()).index() as u16;
 
     let mut ecs = world_with(material_assets, mesh_assets);
 
@@ -286,8 +286,8 @@ fn validate_asset_refs_is_a_no_op_on_a_stable_epoch() {
     let mut mesh_assets = Assets::<MeshGpu>::with_reserved(4);
     let slot_mesh = mesh_assets.add(dummy_mesh_gpu()).index();
 
-    let mut material_assets = Assets::<MaterialGpu>::with_reserved(4);
-    let slot_mat = material_assets.add(MaterialGpu::default()).index() as u16;
+    let mut material_assets = Assets::<Material>::with_reserved(4);
+    let slot_mat = material_assets.add(Material::default()).index() as u16;
 
     let mut ecs = world_with(material_assets, mesh_assets);
 
@@ -347,7 +347,7 @@ fn a_force_reused_mesh_slot_is_disabled_by_validate_without_refcount_corruption(
     let h = mesh_assets.add(dummy_mesh_gpu());
     let slot = h.index();
 
-    let mut ecs = world_with(Assets::<MaterialGpu>::with_reserved(4), mesh_assets);
+    let mut ecs = world_with(Assets::<Material>::with_reserved(4), mesh_assets);
 
     let e: Entity =
         ecs.run_system(move |mut cmds: Commands| cmds.spawn(MeshHandle(slot)).enable::<RenderEnabled>().id());

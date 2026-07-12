@@ -217,6 +217,8 @@ impl DdgiAtlas {
                 // — it preserves the byte-identical 0%-gate golden).
                 usage: atlas_usage,
                 array_layers: DDGI_ATLAS_LAYERS,
+                mip_levels: 1,
+                view_format: None,
             },
         )?;
 
@@ -234,6 +236,8 @@ impl DdgiAtlas {
                 // boot-clear/transition path is UNCHANGED.
                 usage: atlas_usage,
                 array_layers: DDGI_ATLAS_LAYERS,
+                mip_levels: 1,
+                view_format: None,
             },
         ) {
             Ok(t) => t,

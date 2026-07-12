@@ -26,8 +26,8 @@ test_name       = "engine_grand_showcase_512_screenshot_dump"
 bmp             = "D:\\tmp\\engine_grand_showcase.bmp"
 width           = 512
 height          = 512
-sha256_software = "58f6c6c3d986f7a393ea53b01c5021e7360cf6f1b32bf9db05d4d8bb98999dd5"
-sha256_hwrt     = "58f6c6c3d986f7a393ea53b01c5021e7360cf6f1b32bf9db05d4d8bb98999dd5"
+sha256_software = "a5ad662d2a56efd973487fe49063824c6be841ad07009f5099c0992a491ec718"
+sha256_hwrt     = "a5ad662d2a56efd973487fe49063824c6be841ad07009f5099c0992a491ec718"
 
 # Env the pin was blessed under. golden.ps1 SETS these explicitly (never inherits) and
 # CLEARS BOYKO_FORCE_SOFTWARE, so a stray shell env cannot silently change the pipeline.
@@ -48,8 +48,8 @@ test_name       = "grand_showcase_2mat_screenshot_dump"
 bmp             = "D:\\tmp\\grand_showcase_2mat.bmp"
 width           = 512
 height          = 512
-sha256_software = "ac09f13801b79bc4314618ff5385b12739e515aaa735ddb0d838b306882b9e91"
-sha256_hwrt     = "ac09f13801b79bc4314618ff5385b12739e515aaa735ddb0d838b306882b9e91"
+sha256_software = "f6147f9033fe3ffe6b468088211d4f25e5ba7ff84fdcca3b017bca16c4800684"
+sha256_hwrt     = "f6147f9033fe3ffe6b468088211d4f25e5ba7ff84fdcca3b017bca16c4800684"
 
 [grand_showcase_2mat.env]
 BOYKO_DISABLE_VALIDATION = "1"

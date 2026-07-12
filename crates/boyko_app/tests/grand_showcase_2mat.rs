@@ -32,15 +32,20 @@
 
 use boyko_app::prelude::*;
 use boyko_ecs::ecs::core::system::ResMut;
-use boyko_render::MaterialGpu;
+use boyko_render::Material;
+use boyko_render::generate_tangents;
 use boyko_render::mesh::Vertex;
 
 /// The sun direction TO the light (mirrors `shadow_denoise_eval`'s showcase sun).
 const SUN_DIR: [f32; 3] = [-0.40, 0.78, 0.48];
 
+// NOTE: pinned-golden scene — keeps its local mesh copy verbatim (incl. the
+// degenerate pole triangles); migrate to tests/common's fixed uv_sphere at the next
+// golden re-bless.
 /// Generates a UV-sphere (`stacks` latitude bands × `slices` longitude segments)
 /// of the given `radius`, centered at the model-space origin, with outward
-/// per-vertex normals and a uniform `color`. Winding is CCW-ish but the gbuffer
+/// per-vertex normals, a uniform `color`, spherical UVs (`u = theta/2π`, `v =
+/// phi/π`), and a generated tangent basis. Winding is CCW-ish but the gbuffer
 /// raster is `CullMode::None`, so it is not load-bearing. Vertex count stays well
 /// under the `Uint16` index limit for the sizes used here.
 fn uv_sphere(radius: f32, stacks: u32, slices: u32, color: [f32; 4]) -> (Vec<Vertex>, Vec<u32>) {
@@ -49,15 +54,15 @@ fn uv_sphere(radius: f32, stacks: u32, slices: u32, color: [f32; 4]) -> (Vec<Ver
     for i in 0..=stacks {
         let phi = (i as f32 / stacks as f32) * pi; // 0..π, north pole to south
         let (sp, cp) = phi.sin_cos();
+        let v = i as f32 / stacks as f32; // phi / π
         for j in 0..=slices {
             let theta = (j as f32 / slices as f32) * (2.0 * pi); // 0..2π
             let (st, ct) = theta.sin_cos();
             let n = [sp * ct, cp, sp * st]; // unit outward normal
-            verts.push(Vertex {
-                position: [n[0] * radius, n[1] * radius, n[2] * radius],
-                normal: n,
-                color,
-            });
+            let u = j as f32 / slices as f32; // theta / 2π
+            let mut vertex = Vertex::new([n[0] * radius, n[1] * radius, n[2] * radius], n, color);
+            vertex.uv = [u, v];
+            verts.push(vertex);
         }
     }
     let stride = slices + 1;
@@ -69,13 +74,14 @@ fn uv_sphere(radius: f32, stacks: u32, slices: u32, color: [f32; 4]) -> (Vec<Ver
             idx.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
         }
     }
+    generate_tangents(&mut verts, &idx);
     (verts, idx)
 }
 
 fn setup(
     mut commands: Commands,
     mut meshes: NonSendResMut<Assets<MeshGpu>>,
-    mut materials: ResMut<Assets<MaterialGpu>>,
+    mut materials: ResMut<Assets<Material>>,
     dev: NonSendRes<GpuDevice>,
 ) {
     // One smooth sphere mesh, reused for all five instances. The vertex color is
@@ -87,10 +93,10 @@ fn setup(
     // Five materials (LINEAR base_color). Dielectrics (metallic 0) show their
     // base_color as bright diffuse; metals (metallic 1) show base_color as a
     // tinted specular reflection + a highlight whose tightness reveals roughness.
-    let red = materials.add(MaterialGpu::new([0.72, 0.04, 0.04, 1.0], 0.0, 0.38, 0.5, [0.0; 3], 0));
-    let green = materials.add(MaterialGpu::new([0.05, 0.46, 0.10, 1.0], 0.0, 0.38, 0.5, [0.0; 3], 0));
-    let gold = materials.add(MaterialGpu::new([1.0, 0.71, 0.29, 1.0], 1.0, 0.13, 0.5, [0.0; 3], 0));
-    let blue = materials.add(MaterialGpu::new([0.20, 0.38, 0.92, 1.0], 1.0, 0.42, 0.5, [0.0; 3], 0));
+    let red = materials.add(Material::new([0.72, 0.04, 0.04, 1.0], 0.0, 0.38, 0.5, [0.0; 3], 0));
+    let green = materials.add(Material::new([0.05, 0.46, 0.10, 1.0], 0.0, 0.38, 0.5, [0.0; 3], 0));
+    let gold = materials.add(Material::new([1.0, 0.71, 0.29, 1.0], 1.0, 0.13, 0.5, [0.0; 3], 0));
+    let blue = materials.add(Material::new([0.20, 0.38, 0.92, 1.0], 1.0, 0.42, 0.5, [0.0; 3], 0));
 
     // The row: default(0) · red · green · gold-metal · blue-metal, left to right.
     let spacing = 1.55;

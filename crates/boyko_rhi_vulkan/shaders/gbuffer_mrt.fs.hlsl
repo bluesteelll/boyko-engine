@@ -57,11 +57,40 @@
 // statement is under `#ifdef/#else/#endif` the same way, `#else` CHARACTER-FOR-
 // CHARACTER the pre-F8+ line — the base compile is untouched by construction.
 //
+// Textured-PBR rung T6c TEXTURED variant (opt-in, compiled with `-D TEXTURED=1`): an
+// INDEPENDENT #ifdef axis from PER_INSTANCE_MATERIAL/MOTION_VECTORS (T6c plan Decision D4 /
+// locked decision 1 — never compiled together with either). Samples the bindless texture
+// array (set 1, binding 0 — a runtime-sized `Texture2D[]`, `NonUniformResourceIndex`-gated,
+// the SPIR-V descriptor-indexing proof this rung's hermetic test checks) through the shared
+// immutable sampler (set 1, binding 1):
+//   * gAlbedo sources the sampled+modulated albedo texture (falls back to `base_color` when
+//     the slot is `0` — the reserved T4 error-texture slot, never a real material's texture).
+//   * gNormal's world normal is TANGENT-SPACE normal-mapped when the normal-map slot is
+//     bound, else stays the geometric vertex normal. The TBN BASIS follows glTF/Mikktspace
+//     convention (`w` on the bitangent sign); the sampled GREEN channel is SEPARATELY
+//     negated per this engine's own convention for OpenGL-style input maps — see the FS
+//     `main`'s GREEN-CHANNEL CONVENTION block (not glTF/Mikktspace) for why.
+//   * A 4th MRT `SV_Target3 pbr` (`R16G16B16A16_SFLOAT`) carries `[metallic, roughness,
+//     AO-modulation, emissive-luminance-modulation]` — sampled from the metal-rough/AO/
+//     emissive textures when their slots are bound, else the material's scalar fallback
+//     (`tex_metallic`/`tex_roughness` for the first two; `1.0` for AO/emissive). The
+//     deferred SOFTWARE resolve (`deferred_pbr.hlsl`, T6a) reads this UNCONDITIONALLY when
+//     `MaterialGpu.mrr[3]`'s TEXTURED bit is set; the HARDWARE resolve variants have no
+//     `gPbr` binding (T6a plan Decision D1 — software-resolve-only), so under a
+//     hardware-ROUTED resolve the metallic/roughness/AO/emissive silently fall back to the
+//     material's scalar `mrr` even though gAlbedo/gNormal were still sampled.
+// EVERYTHING new is gated under `#ifdef TEXTURED`, so the base (no-`-D`) compile is
+// byte-frozen — the `gbuffer_mrt.fs.spv` golden is untouched (every existing `#ifdef
+// PER_INSTANCE_MATERIAL ... #else ... #endif` site is WRAPPED, unmodified, inside a new
+// outer `#ifdef TEXTURED ... #else ... #endif`, so neither its PM nor its base arm's
+// characters change).
+//
 // Compiled offline (hermetic build — no SDK at `cargo build` time) with:
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T ps_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 gbuffer_mrt.fs.hlsl -Fo gbuffer_mrt.fs.spv
 //   (MOTION_VECTORS variant: add `-D MOTION_VECTORS=1 -Fo gbuffer_mrt_mv.fs.spv`)
 //   (PER_INSTANCE_MATERIAL variant: add `-D PER_INSTANCE_MATERIAL=1 -Fo gbuffer_mrt_pm.fs.spv`)
+//   (TEXTURED variant: add `-D TEXTURED=1 -Fo gbuffer_mrt_tex.fs.spv`)
 
 // OQ-r0-B: the mesh's 16-bit material id. The default material (id 0); see the DEVIATION
 // note in the header for why this is a constant, not a fragment push, in r0.
@@ -97,6 +126,20 @@ struct PsIn {
     float4 cur_clip  : CURCLIP;    // mc_cur_view_proj  * cur_world  (marcher-aligned clip)
     float4 prev_clip : PREVCLIP;   // mc_prev_view_proj * prev_world (marcher-aligned clip)
 #endif
+#ifdef TEXTURED
+    float2 uv       : TEXUV;
+    float3 world_T  : TEXTANGENT;
+    float  tex_w    : TEXHAND;
+    nointerpolation float4 tex_base_color  : TEXBASECOLOR;
+    nointerpolation uint   tex_mat_id      : TEXMATID;
+    nointerpolation uint   tex_albedo      : TEXALBEDO;
+    nointerpolation uint   tex_normal      : TEXNORMALSLOT;
+    nointerpolation uint   tex_metal_rough : TEXMETALROUGH;
+    nointerpolation uint   tex_ao          : TEXAO;
+    nointerpolation uint   tex_emissive    : TEXEMISSIVE;
+    nointerpolation float  tex_metallic    : TEXMETALLIC;
+    nointerpolation float  tex_roughness   : TEXROUGHNESS;
+#endif
 };
 
 struct PsOut {
@@ -106,8 +149,26 @@ struct PsOut {
 #ifdef MOTION_VECTORS
     float2 motion_vec : SV_Target3; // -> motion_vec (R16G16_SFLOAT) Δuv, prev - cur
 #endif
+#ifdef TEXTURED
+    // -> gPbr (R16G16B16A16_SFLOAT): [metallic, roughness, AO-modulation,
+    // emissive-luminance-modulation]. MOTION_VECTORS and TEXTURED are never compiled
+    // together (T6c plan Decision D4), so both may occupy SV_Target3 without collision.
+    float4 pbr : SV_Target3;
+#endif
     float  depth    : SV_Depth;    // -> the shared D32 depth the marcher samples as `md`
 };
+
+#ifdef TEXTURED
+// Textured-PBR rung T6c: the bindless texture-array set (set 1 — DISTINCT from the gbuffer
+// producer's set 0). Binding 0 is a runtime-sized `SAMPLED_IMAGE` array
+// (`boyko_rhi_vulkan::bindless::BINDLESS_IMAGE_BINDING`); binding 1 is the ONE shared
+// immutable trilinear+anisotropic sampler
+// (`boyko_rhi_vulkan::bindless::BINDLESS_SAMPLER_BINDING`). Slot `0` is the T4 reserved
+// error-texture slot — `register` never issues it, so every real material slot is `!= 0`;
+// callers gate each sample with `slot != 0`.
+[[vk::binding(0, 1)]] Texture2D gTextures[] : register(t0, space1);
+[[vk::binding(1, 1)]] SamplerState gTexSampler : register(s0, space1);
+#endif
 
 #ifdef MOTION_VECTORS
 // Marcher-aligned clip -> [0,1]^2 screen UV. The projection (`marcher_view_proj_rows`)
@@ -155,27 +216,108 @@ PsOut main(PsIn input) {
     // so a material genuinely controls what the mesh looks like (not just `mrr`). The
     // `#else` arm is CHARACTER-FOR-CHARACTER the pre-F8+ line — the base (no-`-D`)
     // compile is byte-frozen (the `gbuffer_mrt.fs.spv` golden is untouched).
+    // T6c plan Decision D4: the ENTIRE pre-T6c `#ifdef PER_INSTANCE_MATERIAL / #else /
+    // #endif` block below is WRAPPED, byte-UNMODIFIED, inside a new outer `#ifdef TEXTURED /
+    // #else / #endif` — neither its PM nor its base line changes a single character, so both
+    // the base and PM compiles stay byte-frozen.
+#ifdef TEXTURED
+    // gAlbedo: the sampled albedo texture (sRGB view -> hw-linear on sample) modulated by
+    // the material's base_color, or base_color alone when no albedo texture is bound (T6c
+    // plan Decision 5). Slot `0` is the reserved T4 error-texture slot, never a real
+    // material's texture — gated `!= 0`.
+    float3 albedo_tex_rgb = float3(1.0, 1.0, 1.0);
+    if (input.tex_albedo != 0u) {
+        albedo_tex_rgb = gTextures[NonUniformResourceIndex(input.tex_albedo)].Sample(gTexSampler, input.uv).rgb;
+    }
+    float3 tex_albedo_out = (input.tex_albedo != 0u)
+        ? albedo_tex_rgb * input.tex_base_color.rgb
+        : input.tex_base_color.rgb;
+    output.albedo = float4(saturate(tex_albedo_out), 1.0);
+#else
 #ifdef PER_INSTANCE_MATERIAL
     output.albedo = float4(saturate(input.mat_albedo), 1.0);
 #else
     output.albedo = float4(saturate(input.color.rgb), 1.0);
 #endif
+#endif
     // gNormal: the octahedral world normal in RG + the packed 16-bit material id in BA.
     float3 n = normalize(input.normal);
+#ifdef TEXTURED
+    // Tangent-space normal mapping (T6c plan Decision 3): renormalize the interpolated
+    // geometric normal FIRST, Gram-Schmidt the interpolated tangent against it, derive the
+    // bitangent via the glTF/Mikktspace handedness sign (`w` multiplies the BITANGENT —
+    // matches `boyko_render::tangent`'s Lengyel `w` convention; THIS part of the basis IS
+    // glTF/Mikktspace), sample + unpack + renormalize the tangent-space normal (trilinear
+    // mip sampling denormalizes), then rotate it into world space via the TBN basis.
+    // `normal_slot == 0` keeps the geometric normal unperturbed. The sampled GREEN channel
+    // is separately negated below — see the GREEN-CHANNEL CONVENTION block: that negation
+    // is THIS ENGINE's own convention for OpenGL-style input maps, NOT glTF/Mikktspace.
+    //
+    // GREEN-CHANNEL CONVENTION (settled by the numeric real-bake oracle + the synthetic
+    // bump/marker ground-truth renders, 2026-07-12): the engine's native normal-map input
+    // convention is OpenGL-style (+G = a slope facing image-UP — the dominant third-party
+    // PBR convention), and under THIS engine's Lengyel bake the sampled green must be
+    // NEGATED. Why: on a v-down-parameterized mesh the real bake yields `w = +1` with
+    // `B = cross(N, T) * w` pointing image-DOWN (verified numerically on the actual
+    // `generate_tangents` output — NOT hand-derived), so a raw `+G` tilt would push the
+    // normal image-DOWN and a known-protruding OGL bump grid renders as vertically-inverted
+    // dents (the synthetic-marker render). Bevy renders the same file correctly WITHOUT a
+    // flip because its mikktspace tangents carry the OPPOSITE handedness on such meshes —
+    // the flip below reproduces the identical, physically-correct response in this basis.
+    // Brick-like content cannot adjudicate this convention (bump/dent ambiguity); only a
+    // known-geometry map can. DirectX-style (+G down) maps must be pre-flipped at pack time.
+    if (input.tex_normal != 0u) {
+        float3 N = n;
+        float3 T = normalize(input.world_T - dot(input.world_T, N) * N);
+        float3 B = cross(N, T) * input.tex_w;
+        float3 packed_n = gTextures[NonUniformResourceIndex(input.tex_normal)].Sample(gTexSampler, input.uv).xyz;
+        float3 n_ts = normalize(packed_n * 2.0 - 1.0);
+        n_ts.y = -n_ts.y;
+        n = normalize(T * n_ts.x + B * n_ts.y + N * n_ts.z);
+    }
+#endif
     float2 oct = oct_encode(n);
     // Asset-streaming plan F8: the PER_INSTANCE_MATERIAL variant packs the REAL
     // per-instance id (already CPU OOB-clamped, F8 §4.2); the base compile keeps the
     // compile-time default (the `#else` arm is CHARACTER-FOR-CHARACTER the pre-F8 line —
-    // the frozen-base guarantee by construction, F8 §3.2).
+    // the frozen-base guarantee by construction, F8 §3.2). T6c: the SAME wrap discipline as
+    // gAlbedo above — the inner block is byte-UNMODIFIED.
+#ifdef TEXTURED
+    float2 id_ba = pack_material_id_ba(input.tex_mat_id);
+#else
 #ifdef PER_INSTANCE_MATERIAL
     float2 id_ba = pack_material_id_ba(input.mat_id);
 #else
     float2 id_ba = pack_material_id_ba(DEFAULT_MESH_MATERIAL_ID);
 #endif
+#endif
     output.normal = float4(oct.x, oct.y, id_ba.x, id_ba.y);
     // gMaterial: shadow = 1, ao = 1, mask = 1 (SDF-lit -> Cook-Torrance in the resolve).
     // Analytic mesh shadow/AO via the SDF march is a charted follow-up, NOT P5.
     output.material = float4(1.0, 1.0, 1.0, 1.0);
+#ifdef TEXTURED
+    // gPbr (T6c plan Decision 5): [metallic, roughness, AO-modulation,
+    // emissive-luminance-modulation]. glTF channel convention for the packed metal-rough
+    // texture: metallic = B, roughness = G. AO/emissive default to `1.0` (no
+    // occlusion / no luminance mask) when their slots are unbound.
+    float pbr_metallic = input.tex_metallic;
+    float pbr_roughness = input.tex_roughness;
+    if (input.tex_metal_rough != 0u) {
+        float3 mr = gTextures[NonUniformResourceIndex(input.tex_metal_rough)].Sample(gTexSampler, input.uv).rgb;
+        pbr_metallic = mr.b;
+        pbr_roughness = mr.g;
+    }
+    float pbr_ao = 1.0;
+    if (input.tex_ao != 0u) {
+        pbr_ao = gTextures[NonUniformResourceIndex(input.tex_ao)].Sample(gTexSampler, input.uv).r;
+    }
+    float pbr_emissive = 1.0;
+    if (input.tex_emissive != 0u) {
+        float3 em = gTextures[NonUniformResourceIndex(input.tex_emissive)].Sample(gTexSampler, input.uv).rgb;
+        pbr_emissive = dot(em, float3(0.2126, 0.7152, 0.0722));
+    }
+    output.pbr = float4(pbr_metallic, pbr_roughness, pbr_ao, pbr_emissive);
+#endif
     // SV_Depth: the shared depth the marcher samples as `md`.
     //   * PERSPECTIVE (cam_mode == 1): `rd` is UNIT, so the marcher's `P = ro + rd*t_mesh`
     //     wants `t_mesh` = the EUCLIDEAN eye->surface distance => md = length(eye_rel) /

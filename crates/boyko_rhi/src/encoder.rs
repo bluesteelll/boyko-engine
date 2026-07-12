@@ -7,8 +7,8 @@
 
 use crate::api::RhiApi;
 use crate::descriptor::{
-    AsBuildEntry, BarrierDesc, BufferCopy, BufferImageCopy, ImageBarrierDesc, RenderArea,
-    RenderingDesc, Viewport,
+    AsBuildEntry, BarrierDesc, BufferCopy, BufferImageCopy, ImageBarrierDesc, ImageBlitDesc,
+    RenderArea, RenderingDesc, Viewport,
 };
 use crate::enums::{ImageLayout, IndexType, ShaderStage, TimestampStage};
 use crate::error::RhiError;
@@ -141,6 +141,22 @@ pub trait RhiCommandEncoder<A: RhiApi> {
         _regions: &[BufferImageCopy],
     ) {
         // Phase-6 S1 default seam: overridden by the Vulkan backend.
+    }
+
+    /// Records a LINEAR-filtered blit from one mip level of an image to another mip
+    /// level of the SAME image (`vkCmdBlitImage`, textured-PBR T2 Decision D3) — the
+    /// mip-chain generation step of a staged texture upload: level `i` is downsampled
+    /// from level `i - 1` by GPU-filtered blit rather than a re-upload. Both regions
+    /// are the full extent of their mip level; `desc.src_layout`/`desc.dst_layout` are
+    /// the layouts the caller transitioned each level to via a prior
+    /// [`Self::image_barrier`] (typically `TransferSrcOptimal` / `TransferDstOptimal`).
+    ///
+    /// The default body is a no-op marked `#[cold] #[inline(never)]`; the Vulkan
+    /// backend overrides it (mirrors [`Self::copy_buffer_to_image`]).
+    #[cold]
+    #[inline(never)]
+    fn blit_image(&mut self, _desc: &ImageBlitDesc<A>) {
+        // Textured-PBR T2 default seam: overridden by the Vulkan backend.
     }
 
     /// Binds a graphics pipeline for subsequent [`Self::draw`] calls (Phase-6 S0

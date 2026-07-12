@@ -28,6 +28,20 @@
 //! `float3(uv, layer)`). For `array_layers == 1` (every existing texture) the path is
 //! byte-identical: `view` is the single full-subresource view, the render-view set
 //! holds that same view in slot 0, and `array_view` is `NULL` (no array view created).
+//!
+//! # Mip levels + a decoupled view format (textured-PBR T2)
+//!
+//! [`TextureDesc::mip_levels`](boyko_rhi::TextureDesc::mip_levels) `> 1` builds a full
+//! mip chain (`VkImageCreateInfo::mip_levels`); the single-layer full-subresource
+//! `view` then spans `[0, mip_levels)` rather than just mip 0, so a sampler can select
+//! any LOD. [`TextureDesc::view_format`](boyko_rhi::TextureDesc::view_format) `Some(f)`
+//! with `f != format` additionally sets `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` on the
+//! image and creates every view in `f` instead of the image's own `format` (the
+//! sRGB-view trick — see `boyko_render::texture`'s `ColorSpace`). `mip_levels == 1` +
+//! `view_format == None` (every pre-T2 texture) is byte-identical to the prior
+//! single-mip, `flags: 0`, own-format path. A multi-layer texture (CSM) is never
+//! combined with `mip_levels > 1` (a `debug_assert!` in `create` traps it) — its
+//! per-layer RENDER views always target mip 0 only.
 
 use core::ptr;
 
@@ -137,8 +151,25 @@ impl VulkanTexture {
         let layers = (desc.array_layers as usize).clamp(1, MAX_TEXTURE_LAYERS) as u32;
         let is_array = layers > 1;
 
+        debug_assert!(desc.mip_levels >= 1, "invariant: texture mip_levels must be >= 1");
+        debug_assert!(
+            !(is_array && desc.mip_levels > 1),
+            "invariant: a multi-layer texture does not support multiple mip levels \
+             (T2 mip chains are for single-layer sampled textures only)"
+        );
+
         let image_type = desc.dimension.as_i32();
         let format = desc.format.as_i32();
+        // Textured-PBR T2 Decision D2: `view_format` decouples the SAMPLED view's
+        // format from the image's own (the sRGB-view trick). `None` (every pre-T2
+        // texture) keeps the view in the image's own format — byte-identical.
+        let mutable_format = desc.view_format.is_some_and(|vf| vf != desc.format);
+        let view_format = desc.view_format.map_or(format, |vf| vf.as_i32());
+        let create_flags: VkFlags = if mutable_format {
+            VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT
+        } else {
+            0
+        };
         // The agnostic `ImageUsage` bits equal the `VK_IMAGE_USAGE_*` bits (identity
         // cast, asserted in `abi_guard.rs`).
         let usage: VkFlags = desc.usage.bits();
@@ -165,7 +196,7 @@ impl VulkanTexture {
         let image_info = VkImageCreateInfo {
             s_type: VkStructureType::ImageCreateInfo,
             p_next: ptr::null(),
-            flags: 0,
+            flags: create_flags,
             image_type,
             format,
             extent: VkExtent3D {
@@ -173,7 +204,7 @@ impl VulkanTexture {
                 height: desc.height,
                 depth: desc.depth,
             },
-            mip_levels: 1,
+            mip_levels: desc.mip_levels,
             array_layers: layers,
             samples: VK_SAMPLE_COUNT_1_BIT,
             tiling: VK_IMAGE_TILING_OPTIMAL,
@@ -263,6 +294,17 @@ impl VulkanTexture {
         // `baseArrayLayer = i`, `layerCount = 1` — every cascade renders into its own
         // layer. On any view's failure, every view created so far + the image + memory
         // are torn down in reverse order (no leak).
+        //
+        // T2: the single-layer view's `level_count` spans the WHOLE mip chain
+        // (`desc.mip_levels`) so it doubles as the SAMPLED bindless view a fragment
+        // shader LODs across; every existing single-layer caller has `mip_levels ==
+        // 1`, so `level_count` stays `1` there — byte-identical. A multi-layer
+        // RENDER view always targets mip 0 only (`level_count: 1`), since an
+        // attachment renders into exactly one mip (the debug_assert above rejects
+        // `is_array && mip_levels > 1`, so this is never `> 1` for `is_array`
+        // anyway). The view's `format` is the decoupled `view_format` (T2 Decision
+        // D2; equals `format` when `desc.view_format` is `None`).
+        let view_level_count = if is_array { 1 } else { desc.mip_levels };
         let mut layer_views = [VkImageView::NULL; MAX_TEXTURE_LAYERS];
         for i in 0..layers as usize {
             let view_info = VkImageViewCreateInfo {
@@ -271,12 +313,12 @@ impl VulkanTexture {
                 flags: 0,
                 image,
                 view_type,
-                format,
+                format: view_format,
                 components,
                 subresource_range: VkImageSubresourceRange {
                     aspect_mask,
                     base_mip_level: 0,
-                    level_count: 1,
+                    level_count: view_level_count,
                     base_array_layer: i as u32,
                     layer_count: 1,
                 },
@@ -313,7 +355,7 @@ impl VulkanTexture {
                 flags: 0,
                 image,
                 view_type: VK_IMAGE_VIEW_TYPE_2D_ARRAY,
-                format,
+                format: view_format,
                 components,
                 subresource_range: VkImageSubresourceRange {
                     aspect_mask,
@@ -357,6 +399,18 @@ impl VulkanTexture {
             active_layers: layers,
             array_view,
         })
+    }
+
+    /// The full-subresource `VkImageView` (single-layer images: the only view; a
+    /// multi-layer image: layer 0's render view). T4 bindless: the raw handle
+    /// [`crate::bindless::write_bindless_texture`] writes into a texture-array
+    /// slot — the bindless verb takes a raw `VkImageView` (not a whole
+    /// `&VulkanTexture`) because a bindless slot outlives the specific texture
+    /// that wrote it (a later `register` call may repoint the same slot at a
+    /// different texture entirely).
+    #[inline]
+    pub fn view(&self) -> VkImageView {
+        self.view
     }
 
     /// The array SAMPLE view (`VK_IMAGE_VIEW_TYPE_2D_ARRAY`) over all layers — for a

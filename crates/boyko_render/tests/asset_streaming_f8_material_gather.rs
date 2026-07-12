@@ -10,7 +10,7 @@
 //! tuples — but the OOB clamp itself (`let id = if raw >= material_high_water { 0 } else
 //! { raw };`) is NOT inside `gather_mixed_into`; it lives in `gather_mesh_draws`'s query-map
 //! closure (mesh_draw.rs, both the hwrt and non-hwrt variants), which reads a REAL
-//! `Res<Assets<MaterialGpu>>` and a REAL `Query<..., Option<&MaterialHandle>>`. A hand-tuple
+//! `Res<Assets<Material>>` and a REAL `Query<..., Option<&MaterialHandle>>`. A hand-tuple
 //! unit test can only feed `gather_mixed_into` an ALREADY-clamped id — it cannot exercise the
 //! clamp comparison itself, nor the two SEPARATE `q.iter()` invocations (`bucket_lanes_mixed`'s
 //! count pass, `gather_mixed_into`'s scatter pass) a real ECS `Query` performs (a hand-built
@@ -27,7 +27,7 @@ use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::system::Commands;
 
-use boyko_render::{MaterialGpu, MeshBundle, MeshGpu, MeshRenderScratch, gather_mesh_draws};
+use boyko_render::{Material, MeshBundle, MeshGpu, MeshRenderScratch, gather_mesh_draws};
 use boyko_scene::Transform;
 use boyko_scene::render_caps::{MaterialHandle, MeshHandle, RenderEnabled};
 
@@ -58,7 +58,7 @@ fn dummy_mesh_gpu() -> MeshGpu {
 /// <RefcountDeltas>()` probe is `Option`-safe (a graceful no-op) when that resource is
 /// absent, so omitting it is sound (mirrors `asset_streaming_f5_validation.rs`'s
 /// `world_with`, minus the refcount-pipeline resources this suite does not exercise).
-fn world_with(mesh_assets: Assets<MeshGpu>, material_assets: Assets<MaterialGpu>) -> EcsMaster {
+fn world_with(mesh_assets: Assets<MeshGpu>, material_assets: Assets<Material>) -> EcsMaster {
     let mut ecs = EcsMaster::new();
     ecs.insert_non_send_resource(mesh_assets);
     ecs.insert_resource(material_assets);
@@ -94,10 +94,10 @@ fn oob_material_clamps_to_zero() {
     let mesh = mesh_assets.add(dummy_mesh_gpu());
     let mesh_idx = mesh.index();
 
-    let mut material_assets = Assets::<MaterialGpu>::with_reserved(4);
-    let default_slot = material_assets.add(MaterialGpu::default());
+    let mut material_assets = Assets::<Material>::with_reserved(4);
+    let default_slot = material_assets.add(Material::default());
     assert_eq!(default_slot.index(), 0, "test precondition: the first mint is slot 0");
-    let real_slot = material_assets.add(MaterialGpu::new(
+    let real_slot = material_assets.add(Material::new(
         [0.1, 0.2, 0.3, 1.0],
         0.0,
         0.5,
@@ -171,13 +171,13 @@ fn clamp_is_deterministic_across_both_passes() {
     let mesh_a = mesh_assets.add(dummy_mesh_gpu()).index();
     let mesh_b = mesh_assets.add(dummy_mesh_gpu()).index();
 
-    let mut material_assets = Assets::<MaterialGpu>::with_reserved(4);
-    let _default = material_assets.add(MaterialGpu::default()); // slot 0
+    let mut material_assets = Assets::<Material>::with_reserved(4);
+    let _default = material_assets.add(Material::default()); // slot 0
     let mat1 = material_assets
-        .add(MaterialGpu::new([0.2, 0.2, 0.9, 1.0], 0.0, 0.4, 0.5, [0.0, 0.0, 0.0], 0))
+        .add(Material::new([0.2, 0.2, 0.9, 1.0], 0.0, 0.4, 0.5, [0.0, 0.0, 0.0], 0))
         .index() as u16; // slot 1
     let mat2 = material_assets
-        .add(MaterialGpu::new([0.9, 0.6, 0.1, 1.0], 1.0, 0.2, 0.5, [0.0, 0.0, 0.0], 0))
+        .add(Material::new([0.9, 0.6, 0.1, 1.0], 1.0, 0.2, 0.5, [0.0, 0.0, 0.0], 0))
         .index() as u16; // slot 2
 
     let mut ecs = world_with(mesh_assets, material_assets);

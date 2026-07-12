@@ -1,21 +1,24 @@
-//! [`MaterialTable`] — the GPU-resident mirror of `Assets<MaterialGpu>` (asset-system
-//! rung A1: the mesh-materials fold).
+//! [`MaterialTable`] — the GPU-resident mirror of `Assets<Material>` (asset-system
+//! rung A1: the mesh-materials fold; textured-PBR rung T5 widened the CPU authority
+//! element from a bare `MaterialGpu` to `Material { gpu, textures }`).
 //!
 //! Rung A1 replaces the standalone `MaterialRegistry` (mesh-materials rung M(-1)) with
 //! a CPU-authority / GPU-mirror split, the same shape every future asset type follows:
 //!
-//! - **CPU authority**: [`Assets<MaterialGpu>`](boyko_ecs::ecs::core::asset::Assets), a
+//! - **CPU authority**: [`Assets<Material>`](boyko_ecs::ecs::core::asset::Assets), a
 //!   world-global [`Resource`](boyko_ecs::ecs::core::resources::resource::Resource) —
 //!   the SAME generic asset-kernel table every future asset type (mesh, texture, …)
 //!   will share. Minting a material is `Assets::add`, which returns a
-//!   [`Handle<MaterialGpu>`](boyko_ecs::ecs::core::asset::Handle); the render carrier
+//!   [`Handle<Material>`](boyko_ecs::ecs::core::asset::Handle); the render carrier
 //!   (a [`MaterialId`](crate::material::MaterialId)) truncates that handle's `u32`
 //!   index to the G-buffer's 16-bit width ([`MaterialId::from_handle`](crate::material::MaterialId::from_handle)).
 //! - **GPU mirror** (`MaterialTable`, this type): the device-resident SSBO + a
 //!   per-in-flight-frame staging ring, and NOTHING ELSE — no host authority of its
-//!   own. It reads `Assets<MaterialGpu>` to seed/refresh the device bytes, mirroring
-//!   the light table's staging-ring discipline (`boyko_app::gpu_scene`'s
-//!   `light_staging` + the L0-r0 generation protocol).
+//!   own. It reads `Assets<Material>` to seed/refresh the device bytes with ONLY each
+//!   row's `gpu` field (the `MaterialGpu` SSBO element; `textures` is a CPU-only
+//!   sidecar, never uploaded as a table row), mirroring the light table's
+//!   staging-ring discipline (`boyko_app::gpu_scene`'s `light_staging` + the L0-r0
+//!   generation protocol).
 //!
 //! `MaterialTable` is `!Send` (it owns RHI buffers, device-bound and
 //! single-thread-touch), so it is registered as a
@@ -25,7 +28,7 @@
 //! # Boot-seed vs. steady-state refresh
 //!
 //! [`boot_seed`](MaterialTable::boot_seed) is the ONE-TIME device-table allocation +
-//! seed, run after every startup mint into `Assets<MaterialGpu>` landed and BEFORE the
+//! seed, run after every startup mint into `Assets<Material>` landed and BEFORE the
 //! first frame's descriptor sets bind [`table`](MaterialTable::table)
 //! (`boyko_app::runner`'s boot-ordering contract). It is UNCONDITIONAL — never gated
 //! on `Assets::dirty_gen()` — see its doc for the boot-seed race a dirty-gen gate would
@@ -52,17 +55,18 @@ use boyko_rhi_vulkan::memory::BoundBuffer;
 use boyko_rhi_vulkan::swapchain::{FRAMES_IN_FLIGHT, FrameWriteToken};
 
 use crate::asset_refcount::RETIRE_DELAY;
-use crate::material::MaterialGpu;
+use crate::material::{MATERIAL_FLAG_TEXTURED, Material, MaterialGpu};
 use crate::retired_gpu_buffers::RetiredGpuBuffers;
 
 /// The hard growth cap for [`MaterialTable::grow_if_needed`] (asset-streaming plan F7
-/// Q2): [`crate::material::MaterialId`] truncates a `Handle<MaterialGpu>`'s index to a
+/// Q2): [`crate::material::MaterialId`] truncates a `Handle<Material>`'s index to a
 /// 16-bit width, so a device table beyond `1 << 16` rows is an addressing failure, not
 /// merely a sanity limit — this stays a HARD `assert!` (never `debug_assert!`).
 pub const MAX_MATERIAL_ROWS: usize = 1 << 16;
 
 /// The device-resident [`MaterialGpu`] SSBO + its per-in-flight staging ring — the GPU
-/// mirror of the world's [`Assets<MaterialGpu>`] CPU authority.
+/// mirror of the world's [`Assets<Material>`] CPU authority (only each row's `gpu`
+/// field is mirrored; `textures` stays host-side).
 pub struct MaterialTable {
     /// The device SSBO (`STORAGE | TRANSFER_DST`), hard-sized to
     /// `assets.high_water()` (NOT `assets.len()` — see [`boot_seed`](Self::boot_seed)'s
@@ -98,7 +102,7 @@ impl NonSendResource for MaterialTable {}
 impl MaterialTable {
     /// An un-seeded table with no device resources yet. Call
     /// [`boot_seed`](Self::boot_seed) once every startup mint into
-    /// `Assets<MaterialGpu>` has landed.
+    /// `Assets<Material>` has landed.
     #[inline]
     pub fn new() -> Self {
         Self {
@@ -121,7 +125,7 @@ impl MaterialTable {
     /// # Why unconditional (not gated on dirty_gen)
     ///
     /// A dirty-gen GATE (`if assets.dirty_gen() != seen_gen { seed }`) would be wrong
-    /// here: a freshly-populated `Assets<MaterialGpu>` starts at `dirty_gen() == 0`
+    /// here: a freshly-populated `Assets<Material>` starts at `dirty_gen() == 0`
     /// (only `get_mut` bumps it — `add` does not), so a table whose `seen_gen` also
     /// starts at `0` would see the comparison as "already caught up" and skip the seed
     /// entirely, leaving the SSBO unseeded when the one-shot descriptor bind captures
@@ -132,7 +136,7 @@ impl MaterialTable {
     ///
     /// # Why `high_water()`, not `len()` (the W1 fix)
     ///
-    /// Each occupied `(Handle, &MaterialGpu)` row is written at BYTE offset
+    /// Each occupied `(Handle, &Material)` row's `gpu` field is written at BYTE offset
     /// `handle.index() * size_of::<MaterialGpu>()` — the row's ABSOLUTE slot position,
     /// not its rank among live rows. [`Assets::len`](boyko_ecs::ecs::core::asset::Assets::len)
     /// is the LIVE count, which can be smaller than `handle.index() + 1` the moment a
@@ -154,7 +158,7 @@ impl MaterialTable {
     ///   time is a setup failure, not a recoverable per-frame error (the
     ///   [`MeshAssetsExt::register_mesh`](crate::mesh_assets::MeshAssetsExt::register_mesh)
     ///   precedent).
-    pub fn boot_seed(&mut self, assets: &Assets<MaterialGpu>, ctx: &VulkanContext) {
+    pub fn boot_seed(&mut self, assets: &Assets<Material>, ctx: &VulkanContext) {
         debug_assert!(
             self.table.is_none() && self.staging.is_none(),
             "invariant: boot_seed runs exactly once"
@@ -233,7 +237,7 @@ impl MaterialTable {
     /// [`FrameWriteToken`] proves THIS slot's in-flight fence was waited this frame,
     /// so the slot's previous occupant's recorded copy (if any) already retired.
     ///
-    /// At rung A1 no caller ever mutates `Assets<MaterialGpu>` after
+    /// At rung A1 no caller ever mutates `Assets<Material>` after
     /// [`boot_seed`](Self::boot_seed) (only slot 0 is ever registered), so
     /// `assets.dirty_gen()` never advances and this never actually re-stages — it is
     /// implemented fenced-correct now so a later rung (materials editable post-boot)
@@ -248,7 +252,7 @@ impl MaterialTable {
     ///   W1 note) fits the staging slot's size before the memcpy (the
     ///   [`upload_light_table`](crate::upload_light_table) discipline — a bound check
     ///   that gates unsafe memory access must not compile out in release).
-    pub fn flush_if_dirty(&mut self, assets: &Assets<MaterialGpu>, token: &FrameWriteToken) {
+    pub fn flush_if_dirty(&mut self, assets: &Assets<Material>, token: &FrameWriteToken) {
         let generation = assets.dirty_gen();
         if generation == self.seen_gen {
             return;
@@ -377,7 +381,7 @@ impl MaterialTable {
     /// failure, not a recoverable per-frame error.
     pub fn grow_if_needed(
         &mut self,
-        assets: &Assets<MaterialGpu>,
+        assets: &Assets<Material>,
         ctx: &VulkanContext,
         retired: &mut RetiredGpuBuffers,
         epoch: u64,
@@ -481,10 +485,26 @@ impl MaterialTable {
         }
     }
 
-    /// Writes every occupied `(Handle, &MaterialGpu)` row of `assets` into `dst`, at
-    /// BYTE offset `handle.index() * stride` — the row's ABSOLUTE slot position, not
-    /// its rank among live rows (a hole elsewhere is left untouched, not compacted
-    /// over).
+    /// Writes every occupied `(Handle, &Material)` row of `assets` into `dst` at BYTE
+    /// offset `handle.index() * stride` — the row's ABSOLUTE slot position, not its rank
+    /// among live rows (a hole elsewhere is left untouched, not compacted over). `textures`
+    /// is a CPU-only sidecar, never uploaded as a table row.
+    ///
+    /// # `MATERIAL_FLAG_TEXTURED` is RE-DERIVED here, not copied verbatim
+    ///
+    /// This is the ONE host→GPU copy boundary every `MaterialTable` write path
+    /// ([`boot_seed`](Self::boot_seed), [`flush_if_dirty`](Self::flush_if_dirty),
+    /// [`grow_if_needed`](Self::grow_if_needed)) funnels through, so it is also the ONE
+    /// place [`MATERIAL_FLAG_TEXTURED`] is made authoritative: the copied `mrr[3]` flags
+    /// OR the bit in when `textures.any()` and AND it out otherwise, regardless of
+    /// whatever bit `material.gpu.mrr[3]` already carries — a full derive, not a partial
+    /// OR. This closes the direct-field-mutation footgun (`mat.textures.albedo = slot`
+    /// after construction, or clearing `mat.textures` back to
+    /// [`MaterialTextures::NONE`](crate::material::MaterialTextures::NONE) without
+    /// touching `mat.gpu`) that would otherwise desync the uploaded bit from the texture
+    /// sidecar it gates. `material.gpu` itself is untouched (the derive works on a local
+    /// copy); every non-textured material's `flags` bit stays 0 (byte-identical to every
+    /// in-tree golden).
     ///
     /// # Safety
     /// The caller guarantees `dst` targets at least `assets.high_water() * stride`
@@ -493,26 +513,36 @@ impl MaterialTable {
     /// [`boot_seed`](Self::boot_seed)'s W1 note), and that no in-flight GPU work reads
     /// that range concurrently (boot-time seeding, or a fenced staging slot whose
     /// previous occupant's copy already retired).
-    unsafe fn seed_rows(dst: *mut u8, assets: &Assets<MaterialGpu>, stride: usize) {
+    unsafe fn seed_rows(dst: *mut u8, assets: &Assets<Material>, stride: usize) {
         let high_water = assets.high_water();
         for (handle, material) in assets.iter() {
             let row = handle.index() as usize;
             // Hard assert (not debug-only): this is the ONE per-row bound that
-            // actually gates the unsafe write below — an `Assets<MaterialGpu>` bug
+            // actually gates the unsafe write below — an `Assets<Material>` bug
             // that let `handle.index() >= high_water` through must not compile out in
             // release and silently corrupt neighbor GPU memory.
             assert!(
                 row < high_water,
-                "invariant: Handle::index() {row} exceeds Assets<MaterialGpu>'s own \
+                "invariant: Handle::index() {row} exceeds Assets<Material>'s own \
                  high_water() {high_water} — an Assets internal-consistency bug"
             );
+            // Derive-at-upload (grooming item B): re-derive MATERIAL_FLAG_TEXTURED from
+            // `textures.any()` on a LOCAL copy of `gpu` rather than trusting whatever bit
+            // `material.gpu.mrr[3]` already carries — see this fn's doc.
+            let mut gpu = material.gpu;
+            let flags = gpu.mrr[3].to_bits();
+            gpu.mrr[3] = f32::from_bits(if material.textures.any() {
+                flags | MATERIAL_FLAG_TEXTURED
+            } else {
+                flags & !MATERIAL_FLAG_TEXTURED
+            });
             // SAFETY: `dst` targets >= `high_water * stride` valid mapped bytes (this
             // fn's caller contract); `row < high_water` (hard-asserted above) keeps
-            // `row * stride .. + stride` in bounds; `material` is a distinct host
-            // reference `Assets` owns (no overlap with `dst`).
+            // `row * stride .. + stride` in bounds; `gpu` is a local, distinct from
+            // `dst` (no overlap).
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    (material as *const MaterialGpu).cast::<u8>(),
+                    (&gpu as *const MaterialGpu).cast::<u8>(),
                     dst.add(row * stride),
                     stride,
                 );
@@ -531,6 +561,88 @@ impl Default for MaterialTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::material::MaterialTextures;
+
+    // ── Derive-at-upload (grooming item B): `seed_rows` re-derives
+    // MATERIAL_FLAG_TEXTURED from `textures.any()` rather than trusting whatever bit
+    // `gpu.mrr[3]` already carries ────────────────────────────────────────────────
+
+    /// Runs `seed_rows` over a single-row `Assets<Material>` and returns that row's
+    /// staged `MaterialGpu`. The destination is a `MaterialGpu`-typed buffer (not a raw
+    /// `Vec<u8>`) so the write's target alignment (16 B) is satisfied by construction —
+    /// sidesteps an unrelated alignment concern that would otherwise need
+    /// `ptr::write_unaligned` reasoning in this test.
+    fn seed_one(material: Material) -> MaterialGpu {
+        let mut assets: Assets<Material> = Assets::with_reserved(4);
+        assets.add(material);
+        let stride = core::mem::size_of::<MaterialGpu>();
+        let mut dst = vec![MaterialGpu::default(); assets.high_water()];
+        // SAFETY: `dst` is sized to exactly `assets.high_water()` `MaterialGpu`
+        // elements (`high_water * stride` valid, writable, mapped-equivalent host
+        // bytes — a plain `Vec` allocation stands in for a mapped buffer here); no
+        // concurrent access exists in a single-threaded unit test.
+        unsafe {
+            MaterialTable::seed_rows(dst.as_mut_ptr().cast::<u8>(), &assets, stride);
+        }
+        dst[0]
+    }
+
+    #[test]
+    fn seed_rows_sets_the_textured_flag_for_a_directly_mutated_textures_sidecar() {
+        let mut mat = Material::default();
+        assert_eq!(
+            mat.gpu.mrr[3].to_bits() & MATERIAL_FLAG_TEXTURED,
+            0,
+            "Material::default's gpu carries no textured bit"
+        );
+        // Direct field mutation — bypasses `Material::with_textures`, the footgun
+        // grooming item B closes.
+        mat.textures.albedo = 5;
+
+        let staged = seed_one(mat);
+        assert_eq!(
+            staged.mrr[3].to_bits() & MATERIAL_FLAG_TEXTURED,
+            MATERIAL_FLAG_TEXTURED,
+            "seed_rows must derive the TEXTURED bit from textures.any(), not trust \
+             whatever gpu.mrr[3] already carries"
+        );
+    }
+
+    #[test]
+    fn seed_rows_clears_the_textured_flag_when_textures_is_reset_to_none_after_with_textures() {
+        let gpu = MaterialGpu::new([0.5, 0.5, 0.5, 1.0], 0.0, 0.5, 0.5, [0.0; 3], 0);
+        let textures = MaterialTextures { albedo: 7, ..MaterialTextures::NONE };
+        let mut mat = Material::with_textures(gpu, textures);
+        assert_eq!(
+            mat.gpu.mrr[3].to_bits() & MATERIAL_FLAG_TEXTURED,
+            MATERIAL_FLAG_TEXTURED,
+            "with_textures must have set the bit CPU-side"
+        );
+        // Direct field mutation clearing the sidecar WITHOUT touching `mat.gpu` —
+        // `mat.gpu` still carries the stale bit `with_textures` set; only the
+        // upload-boundary derive (not this CPU-side value) must reflect the clear.
+        mat.textures = MaterialTextures::NONE;
+
+        let staged = seed_one(mat);
+        assert_eq!(
+            staged.mrr[3].to_bits() & MATERIAL_FLAG_TEXTURED,
+            0,
+            "seed_rows must clear the TEXTURED bit when textures.any() is false, even \
+             though gpu.mrr[3] itself still carries the stale bit from the earlier \
+             with_textures call"
+        );
+    }
+
+    #[test]
+    fn seed_rows_leaves_a_non_textured_material_byte_identical_to_its_source_gpu() {
+        let mat = Material::default();
+        let staged = seed_one(mat);
+        assert_eq!(
+            staged, mat.gpu,
+            "a never-textured material's staged bytes must be byte-identical (the \
+             0%-gate every in-tree golden relies on)"
+        );
+    }
 
     /// A `MaterialTable` value with `capacity_rows`/`rebind_pending` set directly
     /// (private-field access — this test module is the SAME module as

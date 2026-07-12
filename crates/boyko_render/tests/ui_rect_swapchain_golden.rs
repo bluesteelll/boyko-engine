@@ -394,6 +394,8 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
             dimension: TextureDimension::D2,
             usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         },
     )
     .expect("SAMPLED composite scene texture");

@@ -48,11 +48,19 @@
 //!
 //! # The vertex contract
 //!
-//! [`Vertex`] mirrors the `gbuffer_mrt.vs` vertex input EXACTLY: `position` @0,
-//! `normal` @12, `color` @24, a 40-byte `#[repr(C)]` stride. The instanced arm reads
-//! these as MODEL-SPACE positions and transforms them by the per-instance 3x4 affine
-//! the instance SSBO carries; the table stores the model-space mesh once and every
-//! instance reuses it.
+//! [`Vertex`] mirrors the `gbuffer_mrt.vs` vertex input EXACTLY on its first three
+//! fields: `position` @0, `normal` @12, `color` @24 — FROZEN offsets, since every
+//! existing gbuffer pipeline (base/mv/pm/mvpm) declares its `VertexAttribute` array
+//! against them. The instanced arm reads `position` as a MODEL-SPACE position and
+//! transforms it by the per-instance 3x4 affine the instance SSBO carries; the table
+//! stores the model-space mesh once and every instance reuses it.
+//!
+//! Two fields were appended for normal mapping (a future textured pipeline, asset-
+//! streaming rung T6): `uv` @40 (`Float32x2`) and `tangent` @48 (`Float32x4`: the unit
+//! tangent `xyz` + the bitangent handedness sign `w`), for a 64-byte (one cache line)
+//! `#[repr(C)]` stride. NO existing pipeline declares these two attributes, so a mesh
+//! carrying `uv`/`tangent` renders BYTE-IDENTICALLY through the base/mv/pm/mvpm VS —
+//! the two trailing fields simply ride along, unread, in the wider stride.
 
 use boyko_ecs::ecs::core::asset::{Asset, AssetBacking, HasLoaders, LoaderEntry, register_asset_layout};
 use boyko_ecs::ecs::identifiers::primitives::ComponentId;
@@ -63,9 +71,13 @@ use crate::loaders::ObjMeshLoader;
 use crate::mesh_data::MeshData;
 
 /// The `gbuffer_mrt.vs` vertex: a model-space position (offset 0), an outward world
-/// normal (offset 12), and a linear RGBA color (offset 24). `#[repr(C)]` pins the exact
-/// 40-byte stride the gbuffer raster pipeline's `VertexBufferLayout` declares
-/// (position\@0 `Float32x3`, normal\@12 `Float32x3`, color\@24 `Float32x4`).
+/// normal (offset 12), a linear RGBA color (offset 24), a texture coordinate (offset
+/// 40), and a tangent-space basis (offset 48). `#[repr(C)]` pins the exact 64-byte
+/// stride (one cache line) the gbuffer raster pipeline's `VertexBufferLayout`
+/// declares. Every EXISTING pipeline (base/mv/pm/mvpm) only declares the first three
+/// attributes (position\@0 `Float32x3`, normal\@12 `Float32x3`, color\@24
+/// `Float32x4`) — `uv`/`tangent` are read by no shader yet (asset-streaming rung T6),
+/// so they do not change how any current mesh renders.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Vertex {
@@ -75,11 +87,35 @@ pub struct Vertex {
     pub normal: [f32; 3],
     /// Linear base color (passed through to the G-buffer albedo lane).
     pub color: [f32; 4],
+    /// Texture coordinates. `[0.0, 0.0]` on a mesh with no real UV data (a host
+    /// primitive built via [`Vertex::new`], or a `.obj` with no `vt` lines) — inert
+    /// until a textured pipeline (T6) declares this attribute.
+    pub uv: [f32; 2],
+    /// The tangent-space basis: `xyz` is the unit surface tangent, `w` is the
+    /// bitangent handedness sign (`±1`, `bitangent = cross(normal, tangent) * w`).
+    /// Identity `[1.0, 0.0, 0.0, 1.0]` on a mesh with no generated tangent basis —
+    /// see [`generate_tangents`](crate::tangent::generate_tangents). Inert until a
+    /// normal-mapped pipeline (T6) declares this attribute.
+    pub tangent: [f32; 4],
 }
 
 /// The byte stride of one [`Vertex`] — the gbuffer raster pipeline's vertex stride.
 pub const VERTEX_STRIDE: usize = core::mem::size_of::<Vertex>();
-const _: () = assert!(VERTEX_STRIDE == 40, "Vertex must be tightly packed at 40 bytes");
+const _: () = assert!(VERTEX_STRIDE == 64, "Vertex must be tightly packed at 64 bytes (one cache line)");
+
+impl Vertex {
+    /// Builds a vertex with the pre-T6 placeholder UV/tangent (`uv: [0.0, 0.0]`,
+    /// `tangent: [1.0, 0.0, 0.0, 1.0]` — the identity basis) — the shape every
+    /// call site without real texture data (host primitives, the legacy degenerate
+    /// vertex, a `.obj` with no `vt`) wants. A generator with real UV data sets
+    /// `.uv` on the result and runs
+    /// [`generate_tangents`](crate::tangent::generate_tangents) over the whole mesh
+    /// afterward (tangent generation needs the full triangle list, not one vertex).
+    #[inline]
+    pub const fn new(position: [f32; 3], normal: [f32; 3], color: [f32; 4]) -> Self {
+        Self { position, normal, color, uv: [0.0, 0.0], tangent: [1.0, 0.0, 0.0, 1.0] }
+    }
+}
 
 /// The `u16` index-width crossover (O3): a mesh whose UNIQUE vertex count is at or below
 /// this fits `Uint16` indices (halving the index buffer's footprint + bandwidth); above

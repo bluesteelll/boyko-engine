@@ -94,6 +94,15 @@ pub struct GBufferTargets {
     /// reads it, so its undefined contents are irrelevant (the 0%-gate is the byte-identical
     /// PIXELS + command stream, which the always-allocate preserves). RINGED (see [`Self::depth`]).
     pub(crate) ssao: [VulkanTexture; FRAMES_IN_FLIGHT],
+    /// Textured-PBR T6a: the `gPbr` deferred-resolve MRT lane RING (`R16G16B16A16_SFLOAT`
+    /// STORAGE|COLOR_ATTACHMENT): `r`=metallic, `g`=roughness, `b`=AO-texture modulation,
+    /// `a`=emissive-strength modulation. UNCONDITIONAL (both feature legs) but bound at the
+    /// SOFTWARE resolve set ONLY, binding 19 (the C1 fix — `RESOLVE_SOFTWARE_BINDINGS` itself
+    /// stays 19; `gPbr` is appended past it, never entering any HWRT-consumed array). T6a:
+    /// UNWRITTEN (no raster pass names it yet — T6c's textured raster adds the 4th MRT write);
+    /// the resolve's `.Load` is INSIDE the flag-gated branch, so a flag=0 material never reads it.
+    /// RINGED (see [`Self::depth`]).
+    pub(crate) pbr: [VulkanTexture; FRAMES_IN_FLIGHT],
     /// Rung 3a: the RT soft-shadow VISIBILITY target `shadow_vis` RING (`R16G16_UNORM` STORAGE,
     /// full-res): `R` = the per-pixel mesh visibility the VIS pass writes, `G` = the validity mask.
     /// SAME format as [`Self::shadow_vis2`] (the uniform-RG16 ping-pong — one `"rg16"` shader pin
@@ -153,9 +162,11 @@ pub struct GBufferTargets {
     /// bound; the resolve reads it only under `ssao_mode != 0` (0 every pre-P7 scene). @12/@13 =
     /// the CSM cascade combined-image + UBO; @14/@15 = the punctual shadow-atlas combined-image +
     /// UBO; @16/@17/@18 = the SDFDDGI probe irradiance + depth combined images + the `ResolvedDdgi`
-    /// grid UBO (all bound-but-unread when their header gate is 0). The software set is EXACT-FILL
-    /// at `RESOLVE_SOFTWARE_BINDINGS` (19), under the R2a-4a cap of `MAX_BIND_GROUP_BINDINGS` (20).
-    /// NO per-frame update.
+    /// grid UBO (all bound-but-unread when their header gate is 0). Textured-PBR T6a: `gPbr`
+    /// STORAGE image @19 (SOFTWARE-ONLY — the C1 fix; never entering any HWRT-consumed array),
+    /// bound-but-unread when the flag-gated branch is dead (every current material). The software
+    /// set is EXACT-FILL at `RESOLVE_SOFTWARE_TOTAL_BINDINGS` (20), under the cap of
+    /// `MAX_BIND_GROUP_BINDINGS` (24). NO per-frame update.
     ///
     /// A RING (one per in-flight frame): slot `i` binds `scene.camera_ring[i]` @5 +
     /// `scene.csm_cascade_ring[i]` @13 — the lock-free per-frame ring fix; every other binding is
@@ -309,6 +320,17 @@ const GVIEWT_FORMAT: Format = Format::R32Sfloat;
 /// fault on an unsupported format.
 const SSAO_FORMAT: Format = Format::R8Unorm;
 
+/// Textured-PBR T6a: the `gPbr` deferred-resolve MRT lane format: `R16G16B16A16_SFLOAT`
+/// (`r`=metallic, `g`=roughness, `b`=AO-texture modulation, `a`=emissive-strength modulation), a
+/// full-res STORAGE image the (T6c) textured raster writes and the SOFTWARE deferred resolve
+/// `.Load`s under the flag-gated `MATERIAL_FLAG_TEXTURED` branch. T6a: UNWRITTEN (no raster pass
+/// exists yet) — allocated but never dynamically read (every current material's flag bit is 0).
+/// `R16G16B16A16_SFLOAT`/`STORAGE_IMAGE` support is part of the Vulkan 1.0 CORE mandatory format
+/// table (unlike `R8_UNORM`/`R16G16_UNORM`, which need a boot probe), so the create — like
+/// [`GBUFFER_FORMAT`] — can never fault on an unsupported format. UNCONDITIONAL (both feature
+/// legs; the C1 fix keeps `gPbr` a SOFTWARE-resolve-only *binding*, not a `hwrt`-only *image*).
+const GPBR_FORMAT: Format = Format::R16G16B16A16Sfloat;
+
 /// Rung 3a: the RT soft-shadow VISIBILITY target `shadow_vis` format: `R16G16_UNORM`, a full-res
 /// STORAGE image the VIS pass writes (`R` = per-pixel mesh visibility, `G` = validity mask) and
 /// the à-trous denoise reads/writes. UNIFIED with [`SHADOW_VIS2_FORMAT`] to R16G16_UNORM (was RG8):
@@ -389,6 +411,17 @@ const MATERIAL_SET_RING_COUNT_MIN: usize = 2;
 /// builders agree. HW-RT rung R2a-4a raised [`MAX_BIND_GROUP_BINDINGS`](boyko_rhi::MAX_BIND_GROUP_BINDINGS)
 /// 19 → 20; the software set stays EXACT at 19 (the under-fill tripwire).
 const RESOLVE_SOFTWARE_BINDINGS: usize = 19;
+
+/// Textured-PBR T6a (the critic's C1 fix): the binding count of the SOFTWARE deferred-resolve set
+/// INCLUDING the SOFTWARE-ONLY `gPbr` binding 19 (`RESOLVE_SOFTWARE_BINDINGS + 1` = 20). A
+/// SEPARATE constant from [`RESOLVE_SOFTWARE_BINDINGS`] *deliberately*: `RESOLVE_SOFTWARE_BINDINGS`
+/// stays 19 and remains the UNTOUCHED derivation base every HWRT-family resolve set builds from
+/// (`TLAS_ACCEL_BINDING`/`RESOLVE_HWRT_*` all key off it) — bumping `RESOLVE_SOFTWARE_BINDINGS`
+/// itself would shift the TLAS 19→20 in every HWRT resolve set and overflow
+/// `RESOLVE_HWRT_VIS_MV_BINDINGS` past [`MAX_BIND_GROUP_BINDINGS`](boyko_rhi::MAX_BIND_GROUP_BINDINGS)
+/// (24). `gPbr` is appended ONLY to the software set (never into [`resolve_software_entries`]'s
+/// shared output), so no HWRT constant or `.spv` is affected.
+const RESOLVE_SOFTWARE_TOTAL_BINDINGS: usize = RESOLVE_SOFTWARE_BINDINGS + 1;
 
 /// Asset-streaming plan F7-hwrt (task#11): the binding index every HWRT resolve-family
 /// set's `AccelerationStructure` entry occupies — always the FIRST index past the
@@ -654,14 +687,17 @@ struct CoreImages {
     lit: [VulkanTexture; FRAMES_IN_FLIGHT],
     viewt: [VulkanTexture; FRAMES_IN_FLIGHT],
     ssao: [VulkanTexture; FRAMES_IN_FLIGHT],
+    /// Textured-PBR T6a: the `gPbr` MRT lane RING, built LAST (after `ssao`). UNCONDITIONAL (both
+    /// feature legs); UNWRITTEN this rung (no raster pass names it yet — T6c adds that).
+    pbr: [VulkanTexture; FRAMES_IN_FLIGHT],
 }
 
 impl CoreImages {
-    /// Allocates the seven always-present G-buffer image rings at `extent` in acquisition order
-    /// (depth → albedo → normal → material → lit → viewt → ssao). On any ring's partial failure the
-    /// slots already built in THAT ring are drained AND every fully-built prior ring is destroyed
-    /// (reverse acquisition), so nothing leaks; the orchestrator has no partials to reason about
-    /// beyond the bundles it built before this call.
+    /// Allocates the eight always-present G-buffer image rings at `extent` in acquisition order
+    /// (depth → albedo → normal → material → lit → viewt → ssao → pbr). On any ring's partial
+    /// failure the slots already built in THAT ring are drained AND every fully-built prior ring is
+    /// destroyed (reverse acquisition), so nothing leaks; the orchestrator has no partials to
+    /// reason about beyond the bundles it built before this call.
     fn build(ctx: &VulkanContext, extent: VkExtent2D) -> Result<Self, SwapchainError> {
         // SAFETY (shared by both closures): `ctx` is the live context each texture was created on;
         // none is referenced by any submission (the build phase, before any record/submit); each ring
@@ -689,6 +725,8 @@ impl CoreImages {
             dimension: TextureDimension::D2,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         };
         let mut depth_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
@@ -835,10 +873,35 @@ impl CoreImages {
         let ssao: [VulkanTexture; FRAMES_IN_FLIGHT] =
             ssao_slots.map(|s| s.expect("invariant: every ssao ring slot built before here"));
 
-        Ok(Self { depth, albedo, normal, material, lit, viewt, ssao })
+        // Textured-PBR T6a: the `gPbr` MRT lane, built LAST (UNCONDITIONAL, both feature legs).
+        // UNWRITTEN this rung (no producer names it — T6c's raster does); the SOFTWARE resolve's
+        // gPbr@19 read never dynamically observes its contents (the flag-gated `.Load` is dead for
+        // every current material), so the create needs no boot-clear.
+        let mut pbr_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for slot in pbr_slots.iter_mut() {
+            match GBufferTargets::create_pbr_image(ctx, extent) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => {
+                    drain_partial(&mut pbr_slots);
+                    destroy_ring(ssao);
+                    destroy_ring(viewt);
+                    destroy_ring(lit);
+                    destroy_ring(material);
+                    destroy_ring(normal);
+                    destroy_ring(albedo);
+                    destroy_ring(depth);
+                    return Err(e);
+                }
+            }
+        }
+        let pbr: [VulkanTexture; FRAMES_IN_FLIGHT] =
+            pbr_slots.map(|s| s.expect("invariant: every pbr ring slot built before here"));
+
+        Ok(Self { depth, albedo, normal, material, lit, viewt, ssao, pbr })
     }
 
-    /// Tears down the seven image rings in reverse acquisition order (ssao → depth), consuming
+    /// Tears down the eight image rings in reverse acquisition order (pbr → depth), consuming
     /// `self`.
     ///
     /// # Safety
@@ -849,6 +912,9 @@ impl CoreImages {
         // SAFETY: per the contract `ctx` is live and nothing references these textures; each was
         // created on `ctx` and is destroyed exactly once, in reverse acquisition order.
         unsafe {
+            for t in self.pbr {
+                RhiDevice::destroy_texture(ctx, t);
+            }
             for t in self.ssao {
                 RhiDevice::destroy_texture(ctx, t);
             }
@@ -1110,7 +1176,9 @@ impl DeferredSets {
         for slot in 0..FRAMES_IN_FLIGHT {
             // The 19 SHARED resolve bindings (0..=18) — built by the ONE helper the HWRT set also
             // consumes, so the two sets' first 19 bindings cannot drift (a drift = an invisible
-            // set↔shader-layout mismatch → device-lost). The software set uses them verbatim.
+            // set↔shader-layout mismatch → device-lost). Textured-PBR T6a (C1 fix): the software
+            // set appends its OWN 20th binding (`gPbr` @19) below — `resolve_software_entries`'s
+            // output itself is NEVER mutated, so `gPbr` cannot leak into any HWRT-consumed array.
             let imgs = ResolveSlotImages {
                 albedo: &core.albedo[slot],
                 normal: &core.normal[slot],
@@ -1119,17 +1187,32 @@ impl DeferredSets {
                 viewt: &core.viewt[slot],
                 ssao: &core.ssao[slot],
             };
-            let entries =
+            let shared =
                 resolve_software_entries(scene, &imgs, slot, cluster_grid_buf, light_index_buf);
-            // The software resolve set is EXACT-FILL at `RESOLVE_SOFTWARE_BINDINGS` (19), under the
-            // rung-1b cap of `MAX_BIND_GROUP_BINDINGS` (21). Keeping it EXACT (not `<= cap`) preserves
-            // the UNDER-FILL tripwire (a missing binding) AND the over-fill tripwire. The HWRT variant
-            // is a SEPARATE 21-binding set (TLAS @19 + shadow-params UBO @20), guarded against
-            // `RESOLVE_HWRT_BINDINGS` — the software fill is untouched.
+            // Textured-PBR T6a: append binding 19 (`gPbr`, SOFTWARE-ONLY) to the shared 19 →
+            // `RESOLVE_SOFTWARE_TOTAL_BINDINGS` (20) EXACT-fill. `BindGroupEntry` is not `Copy`
+            // (it holds resource refs), so MOVE the shared entries into 0..=18 via a by-value
+            // iterator chained with the `gPbr` entry — the same idiom the HWRT TLAS append below
+            // uses (`resolve_set_hwrt`'s `chained` builder).
+            let mut chained = shared.into_iter().chain(core::iter::once(
+                BindGroupEntry::StorageImage { texture: &core.pbr[slot] },
+            ));
+            let entries: [BindGroupEntry<'_, Vulkan>; RESOLVE_SOFTWARE_TOTAL_BINDINGS] =
+                core::array::from_fn(|_| {
+                    chained.next().expect(
+                        "invariant: the chained iterator yields exactly RESOLVE_SOFTWARE_TOTAL_BINDINGS entries",
+                    )
+                });
+            // The software resolve set is EXACT-FILL at `RESOLVE_SOFTWARE_TOTAL_BINDINGS` (20: the
+            // 19 shared bindings + `gPbr` @19), under the cap of `MAX_BIND_GROUP_BINDINGS` (24).
+            // Keeping it EXACT (not `<= cap`) preserves the UNDER-FILL tripwire (a missing binding)
+            // AND the over-fill tripwire. `RESOLVE_SOFTWARE_BINDINGS` (19) itself is UNTOUCHED and
+            // stays the HWRT-family derivation base — every HWRT resolve variant still fills its
+            // OWN separate count (21/22/24), guarded by its OWN constant.
             debug_assert_eq!(
                 entries.len(),
-                RESOLVE_SOFTWARE_BINDINGS,
-                "invariant: the software resolve set must declare EXACTLY {RESOLVE_SOFTWARE_BINDINGS} bindings (exact-fill)"
+                RESOLVE_SOFTWARE_TOTAL_BINDINGS,
+                "invariant: the software resolve set must declare EXACTLY {RESOLVE_SOFTWARE_TOTAL_BINDINGS} bindings (exact-fill)"
             );
             let desc = BindGroupDesc::<Vulkan> {
                 layout: scene.resolve_layout,
@@ -2204,6 +2287,8 @@ impl GBufferTargets {
             dimension: TextureDimension::D2,
             usage,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         };
         RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
     }
@@ -2226,6 +2311,8 @@ impl GBufferTargets {
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         };
         RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
     }
@@ -2248,6 +2335,32 @@ impl GBufferTargets {
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
+        };
+        RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
+    }
+
+    /// Textured-PBR T6a: creates one slot of the `gPbr` deferred-resolve MRT lane: a 2D
+    /// `R16G16B16A16_SFLOAT` image at `extent`. `STORAGE` (the SOFTWARE resolve's flag-gated
+    /// `.Load`) | `COLOR_ATTACHMENT` (the T6c textured raster's 4th MRT write; UNWRITTEN this
+    /// rung). `R16G16B16A16_SFLOAT`/`STORAGE_IMAGE` support is part of the Vulkan 1.0 CORE
+    /// mandatory format table (unlike `R8_UNORM`/`R16G16_UNORM`, which need a boot probe), so —
+    /// like [`Self::create_gbuffer_image`] — this create can never fault on an unsupported format.
+    fn create_pbr_image(
+        ctx: &VulkanContext,
+        extent: VkExtent2D,
+    ) -> Result<VulkanTexture, SwapchainError> {
+        let desc = TextureDesc {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+            format: GPBR_FORMAT,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
+            array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         };
         RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
     }
@@ -2272,6 +2385,8 @@ impl GBufferTargets {
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         };
         RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
     }
@@ -2294,6 +2409,8 @@ impl GBufferTargets {
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         };
         RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
     }
@@ -2315,6 +2432,8 @@ impl GBufferTargets {
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         };
         RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
     }
@@ -2336,6 +2455,8 @@ impl GBufferTargets {
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE | ImageUsage::SAMPLED,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         };
         RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
     }
@@ -2357,6 +2478,8 @@ impl GBufferTargets {
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE | ImageUsage::SAMPLED,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         };
         RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
     }
@@ -2632,7 +2755,7 @@ impl GBufferTargets {
 
         // Flatten the image + set bundles into the original local names so the remaining (infallible)
         // hwrt tail below + the `Self` construction stay byte-identical.
-        let CoreImages { depth, albedo, normal, material, lit, viewt, ssao } = core;
+        let CoreImages { depth, albedo, normal, material, lit, viewt, ssao, pbr } = core;
         #[cfg(feature = "hwrt")]
         let (shadow_vis, shadow_vis2) = match shadow_vis_imgs {
             Some(ShadowVisImages { shadow_vis, shadow_vis2 }) => {
@@ -2726,6 +2849,7 @@ impl GBufferTargets {
             lit,
             viewt,
             ssao,
+            pbr,
             #[cfg(feature = "hwrt")]
             shadow_vis,
             #[cfg(feature = "hwrt")]
@@ -2980,7 +3104,7 @@ impl GBufferTargets {
                     RhiDevice::destroy_texture(ctx, t);
                 }
             }
-            // The seven always-present G-buffer image RINGS (ssao → depth), via the `CoreImages`
+            // The eight always-present G-buffer image RINGS (pbr → depth), via the `CoreImages`
             // bundle's reverse-acquisition teardown.
             CoreImages {
                 depth: self.depth,
@@ -2990,6 +3114,7 @@ impl GBufferTargets {
                 lit: self.lit,
                 viewt: self.viewt,
                 ssao: self.ssao,
+                pbr: self.pbr,
             }
             .destroy(ctx);
         }
@@ -3196,6 +3321,7 @@ mod tests {
             lit: tex_ring(),
             viewt: tex_ring(),
             ssao: tex_ring(),
+            pbr: tex_ring(),
             vocab_set: bg_ring(),
             resolve_set: bg_ring(),
             cull_set: None,
@@ -3245,6 +3371,7 @@ mod tests {
             lit: tex_ring(),
             viewt: tex_ring(),
             ssao: tex_ring(),
+            pbr: tex_ring(),
             shadow_vis: None,
             shadow_vis2: None,
             motion_vec: None,
@@ -3320,6 +3447,41 @@ mod tests {
     fn material_set_rings_reaches_the_full_seven_ring_surface_when_everything_is_armed() {
         let targets = fake_targets(true, true, true, true, true);
         assert_eq!(targets.material_set_rings().count(), 7);
+    }
+
+    /// Textured-PBR T6a: `GBufferTargets::pbr` (the `gPbr` MRT-lane ring) exists on BOTH feature
+    /// legs and is sized `FRAMES_IN_FLIGHT`, like every other core G-buffer ring.
+    #[test]
+    fn pbr_ring_is_present_and_frames_in_flight_sized() {
+        #[cfg(not(feature = "hwrt"))]
+        let targets = fake_targets();
+        #[cfg(feature = "hwrt")]
+        let targets = fake_targets(false, false, false, false, false);
+
+        assert_eq!(targets.pbr.len(), FRAMES_IN_FLIGHT);
+    }
+
+    /// Textured-PBR T6a (the critic's C1 fix): the SOFTWARE resolve set's exact-fill grows to 20
+    /// (19 shared + the SOFTWARE-ONLY `gPbr` @19) while `RESOLVE_SOFTWARE_BINDINGS` itself — the
+    /// HWRT-family derivation base — stays 19, UNCHANGED.
+    #[test]
+    fn resolve_software_total_bindings_is_exact_fill_20() {
+        assert_eq!(RESOLVE_SOFTWARE_BINDINGS, 19);
+        assert_eq!(RESOLVE_SOFTWARE_TOTAL_BINDINGS, 20);
+        assert_eq!(RESOLVE_SOFTWARE_TOTAL_BINDINGS, RESOLVE_SOFTWARE_BINDINGS + 1);
+    }
+
+    /// Textured-PBR T6a (the critic's C1 fix): every HWRT-family resolve binding count derived
+    /// from `RESOLVE_SOFTWARE_BINDINGS` is UNCHANGED by the software-only `gPbr` append — the
+    /// TLAS stays at binding 19, and the largest HWRT set (`RESOLVE_HWRT_VIS_MV_BINDINGS`) stays
+    /// EXACTLY at the `MAX_BIND_GROUP_BINDINGS` cap (24), not 25 (which would panic the fixed
+    /// `[VkDescriptorSetLayoutBinding; 24]`-class arrays the rhi_impl backend allocates).
+    #[test]
+    #[cfg(feature = "hwrt")]
+    fn hwrt_resolve_binding_counts_unchanged_by_the_c1_fix() {
+        assert_eq!(TLAS_ACCEL_BINDING, 19, "TLAS must stay at binding 19 (unshifted by gPbr)");
+        assert_eq!(RESOLVE_HWRT_DENOISE_BINDINGS, 22);
+        assert_eq!(RESOLVE_HWRT_VIS_MV_BINDINGS, 24, "must stay exactly at MAX_BIND_GROUP_BINDINGS");
     }
 }
 

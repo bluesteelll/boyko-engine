@@ -60,7 +60,7 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::gpu_transform3d::GpuTransform3D;
 use crate::instance_model::InstanceModelCol;
-use crate::material::MaterialGpu;
+use crate::material::{Material, MaterialTextures};
 use crate::mesh::MeshGpu;
 use crate::mesh_assets::MeshAssetsExt;
 
@@ -114,7 +114,7 @@ pub struct DrawBatch {
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable, Default)]
 pub struct PerInstanceMaterial {
     /// The material's LINEAR `base_color` (`rgb` + alpha/cutoff `w`), copied from
-    /// `Assets<MaterialGpu>` at gather time — the PM fragment's `gAlbedo` source.
+    /// `Assets<Material>` at gather time — the PM fragment's `gAlbedo` source.
     /// Offset 0.
     pub base_color: [f32; 4],
     /// The OOB-clamped material slot (F8 §4.2) — packed into `gNormal.BA` by the PM
@@ -146,6 +146,103 @@ const _: () = assert!(
 const _: () = assert!(
     core::mem::offset_of!(PerInstanceMaterial, id) == 16,
     "PerInstanceMaterial::id must be at offset 16"
+);
+
+/// Textured-PBR rung T6c: the per-instance TEXTURED material payload —
+/// [`PerInstanceMaterial`]'s `base_color`/`id` PLUS the resolved row's five
+/// [`MaterialTextures`] bindless slots PLUS the FALLBACK `metallic`/`roughness`
+/// scalars the textured gbuffer fragment uses verbatim when the metal-rough
+/// texture slot is `0` (T6c plan Decision D3 — the gPbr override is
+/// UNCONDITIONAL, so `gPbr.rg` must carry the FINAL metallic/roughness even for an
+/// instance with no metal-rough texture bound).
+///
+/// `#[repr(C)]`, `Pod`/`Zeroable` (mirrors [`PerInstanceMaterial`]'s discipline):
+/// `base_color` (a `float4`) at offset 0, `material_id` at offset 16, the five
+/// texture slots at offsets 20-40, `metallic`/`roughness` at offsets 40/44 — a
+/// 48-byte (three-`float4`-lane) stride, the SAME "a `float4` cannot straddle a
+/// 16-byte boundary" discipline [`PerInstanceMaterial`]'s doc explains (no
+/// trailing pad needed: the eight scalar fields from offset 16 run contiguously to
+/// 48 with none crossing a 16-byte lane).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable, Default)]
+pub struct PerInstanceMaterialTex {
+    /// The material's LINEAR `base_color` (`rgb` + alpha/cutoff `w`). Offset 0.
+    pub base_color: [f32; 4],
+    /// The OOB-clamped material slot (mirrors [`PerInstanceMaterial::id`]). Offset 16.
+    pub material_id: u32,
+    /// Bindless albedo-texture slot (mirrors [`MaterialTextures::albedo`]). Offset 20.
+    pub albedo: u32,
+    /// Bindless normal-map slot (mirrors [`MaterialTextures::normal`]). Offset 24.
+    pub normal: u32,
+    /// Bindless metallic-roughness-texture slot (mirrors
+    /// [`MaterialTextures::metal_rough`]). Offset 28.
+    pub metal_rough: u32,
+    /// Bindless ambient-occlusion-texture slot (mirrors [`MaterialTextures::ao`]).
+    /// Offset 32.
+    pub ao: u32,
+    /// Bindless emissive-texture slot (mirrors [`MaterialTextures::emissive`]).
+    /// Offset 36.
+    pub emissive: u32,
+    /// The material's scalar metallic parameter (mirrors
+    /// [`MaterialGpu::metallic`](crate::material::MaterialGpu::metallic)) — the
+    /// textured fragment's gPbr override uses this verbatim when
+    /// [`Self::metal_rough`] is `0` (no texture bound). Offset 40.
+    pub metallic: f32,
+    /// The material's scalar roughness parameter (mirrors
+    /// [`MaterialGpu::roughness`](crate::material::MaterialGpu::roughness)).
+    /// Offset 44.
+    pub roughness: f32,
+}
+
+/// The byte size of one [`PerInstanceMaterialTex`] — the textured per-instance-material
+/// SSBO's per-instance stride (48 B: a `float4` `base_color` + six `uint`s (id + five
+/// texture slots) + two `f32` fallback scalars (metallic/roughness), exactly filling
+/// three 16-byte lanes with no explicit pad).
+pub const PER_INSTANCE_MATERIAL_TEX_BYTES: usize = 48;
+
+// The SAME layout-fingerprint discipline as `PerInstanceMaterial` above: a silent
+// drift here would corrupt every textured instance's payload silently — this struct
+// feeds a device-read SSBO (T6c).
+const _: () = assert!(
+    core::mem::size_of::<PerInstanceMaterialTex>() == PER_INSTANCE_MATERIAL_TEX_BYTES,
+    "PerInstanceMaterialTex must be 48 bytes (a float4 base_color + six uints + two \
+     f32 fallback scalars)"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterialTex, base_color) == 0,
+    "PerInstanceMaterialTex::base_color must be at offset 0"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterialTex, material_id) == 16,
+    "PerInstanceMaterialTex::material_id must be at offset 16"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterialTex, albedo) == 20,
+    "PerInstanceMaterialTex::albedo must be at offset 20"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterialTex, normal) == 24,
+    "PerInstanceMaterialTex::normal must be at offset 24"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterialTex, metal_rough) == 28,
+    "PerInstanceMaterialTex::metal_rough must be at offset 28"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterialTex, ao) == 32,
+    "PerInstanceMaterialTex::ao must be at offset 32"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterialTex, emissive) == 36,
+    "PerInstanceMaterialTex::emissive must be at offset 36"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterialTex, metallic) == 40,
+    "PerInstanceMaterialTex::metallic must be at offset 40 (T6c plan Decision D3)"
+);
+const _: () = assert!(
+    core::mem::offset_of!(PerInstanceMaterialTex, roughness) == 44,
+    "PerInstanceMaterialTex::roughness must be at offset 44 (T6c plan Decision D3)"
 );
 
 /// The reused per-frame mesh-render scratch (Principle-0 storage — a [`Resource`],
@@ -232,6 +329,34 @@ pub struct MeshRenderScratch {
     /// all-default scene, so the runner binds the FROZEN base pipeline (byte-identity by
     /// construction).
     any_non_default_material: bool,
+    /// Textured-PBR rung T6c: the parallel per-instance TEXTURED material payload
+    /// lane, mirroring `material_ids`' shape one level up ([`PerInstanceMaterialTex`]
+    /// carries `base_color`/`id` PLUS the resolved row's five bindless texture slots
+    /// PLUS the fallback metallic/roughness scalars). Populated by
+    /// [`gather_material_tex_into`](Self::gather_material_tex_into), called from
+    /// [`gather_mesh_draws`] right after the affine gather (mirrors the HW-RT
+    /// `gather_prev_ring_into` call-site pattern). `clear()` + scatter, backing
+    /// reservation persists.
+    pub material_tex: ScratchColumn<PerInstanceMaterialTex>,
+    /// The scatter write-head lane for [`material_tex`](Self::material_tex) — a
+    /// private twin of `cursors`/`prev_cursors`, reset to 0 so
+    /// [`gather_material_tex_into`](Self::gather_material_tex_into) can re-derive
+    /// each drawable's ring slot (`offsets[m] + material_tex_cursors[m]++`)
+    /// IDENTICALLY to the `ring` scatter, without disturbing `cursors`. Reused
+    /// across frames (`fit_len` re-zeros it), never a fresh allocation.
+    material_tex_cursors: ScratchColumn<u32>,
+    /// Textured-PBR rung T6c: `true` iff ANY instance scattered into
+    /// [`material_tex`](Self::material_tex) this gather carries at least one
+    /// non-zero bindless texture slot (an OR-reduce of
+    /// [`MaterialTextures::any`](crate::material::MaterialTextures::any), fused
+    /// into the [`gather_material_tex_into`](Self::gather_material_tex_into) scatter,
+    /// O(1) extra state) — the per-frame TEXTURED gbuffer pipeline-selection gate
+    /// (mirrors [`any_non_default_material`](Self::any_non_default_material)'s
+    /// shape). RESET to `false` at the top of every `gather_material_tex_into` call:
+    /// a persistent `Resource` field must not stay sticky-true after a texture is
+    /// removed. `false` on every non-textured scene, so the runner binds the
+    /// FROZEN base/pm pipeline (byte-identity by construction).
+    any_textured_material: bool,
     /// HW-RT Rung 3b: the PREVIOUS-frame instance ring — the 48-byte
     /// [`InstanceModelCol`] each drawable had LAST frame, scattered INDEX-ALIGNED with
     /// [`ring`](Self::ring) (`prev_ring[i]` is `ring[i]`'s prev-frame model). Filled from
@@ -270,12 +395,14 @@ impl Default for MeshRenderScratch {
         let model_id = register_asset_layout::<InstanceModelCol>(None);
         let pair_id = register_asset_layout::<GpuTransform3D>(None);
         let material_id = register_asset_layout::<PerInstanceMaterial>(None);
+        let material_tex_id = register_asset_layout::<PerInstanceMaterialTex>(None);
 
         let u32_rows = pool_reserve_rows(std::mem::size_of::<u32>());
         let batch_rows = pool_reserve_rows(std::mem::size_of::<DrawBatch>());
         let model_rows = pool_reserve_rows(std::mem::size_of::<InstanceModelCol>());
         let pair_rows = pool_reserve_rows(std::mem::size_of::<GpuTransform3D>());
         let material_rows = pool_reserve_rows(std::mem::size_of::<PerInstanceMaterial>());
+        let material_tex_rows = pool_reserve_rows(std::mem::size_of::<PerInstanceMaterialTex>());
 
         Self {
             counts: ScratchColumn::new(u32_id, u32_rows),
@@ -288,6 +415,9 @@ impl Default for MeshRenderScratch {
             pair_out_slot: ScratchColumn::new(u32_id, u32_rows),
             material_ids: ScratchColumn::new(material_id, material_rows),
             any_non_default_material: false,
+            material_tex: ScratchColumn::new(material_tex_id, material_tex_rows),
+            material_tex_cursors: ScratchColumn::new(u32_id, u32_rows),
+            any_textured_material: false,
             #[cfg(feature = "hwrt")]
             prev_ring: ScratchColumn::new(model_id, model_rows),
             #[cfg(feature = "hwrt")]
@@ -345,6 +475,16 @@ impl MeshRenderScratch {
     #[inline]
     pub fn any_non_default_material(&self) -> bool {
         self.any_non_default_material
+    }
+
+    /// Textured-PBR rung T6c: `true` iff ANY instance this gather carries at least one
+    /// bound bindless texture slot — the runner's TEXTURED raster-pipeline selection gate.
+    /// `false` on every non-textured scene, so the runner binds the byte-frozen base/pm
+    /// pipeline. Valid only after [`gather_material_tex_into`](Self::gather_material_tex_into)
+    /// has run this frame (called from [`gather_mesh_draws`] right after the affine gather).
+    #[inline]
+    pub fn any_textured_material(&self) -> bool {
+        self.any_textured_material
     }
 
     /// The UNIFIED gather core (refined-B, Decision 7): ONE count → prefix-sum →
@@ -729,6 +869,115 @@ impl MeshRenderScratch {
             "invariant: the prev-instance ring is index-aligned with the current ring"
         );
     }
+
+    /// Textured-PBR rung T6c: scatters the per-instance TEXTURED material payload
+    /// ([`PerInstanceMaterialTex`]) INDEX-ALIGNED with [`ring`](Self::ring), re-using
+    /// the offsets [`gather_mixed_into`](Self::gather_mixed_into) just computed — the
+    /// SAME index-alignment guarantee
+    /// [`gather_prev_ring_into`](Self::gather_prev_ring_into) documents (the SAME
+    /// `offsets`, the SAME per-mesh cursor advance via a PRIVATE cursor lane
+    /// ([`material_tex_cursors`](Self::material_tex_cursors)), the SAME `counts[m] ==
+    /// 0` skip). Call IMMEDIATELY after `gather_mixed_into` on the SAME frame, with a
+    /// factory yielding the SAME `(mesh_id, material_id)` rows — `material_id` is the
+    /// row's ALREADY-CLAMPED id, computed the same way [`gather_mesh_draws`]'s closure
+    /// does (`raw >= material_high_water -> 0`) — in the SAME order as the affine
+    /// gather's factory.
+    ///
+    /// `materials` resolves each row's `base_color`/`metallic`/`roughness` +
+    /// [`MaterialTextures`] bindless slots; `default_base_color`/`default_metallic`/
+    /// `default_roughness` are the pinned default's parameters (mirrors
+    /// [`gather_mesh_draws`]'s own precompute — Principle 1: the `id == 0` fast path
+    /// needs no per-instance store lookup). Also (re)computes
+    /// [`any_textured_material`](Self::any_textured_material) — an OR-reduce of
+    /// [`MaterialTextures::any`] fused into this scatter, RESET to `false` at the top
+    /// of every call (a persistent `Resource` field must not stay sticky-true after a
+    /// texture is removed).
+    ///
+    /// Called from [`gather_mesh_draws`] right after the affine gather (mirrors the
+    /// HW-RT `gather_prev_ring_into` call-site pattern); the existing `material_ids`
+    /// scatter in [`gather_mixed_into`] is untouched by this method.
+    pub fn gather_material_tex_into<F, J>(
+        &mut self,
+        materials: &Assets<Material>,
+        default_base_color: [f32; 4],
+        default_metallic: f32,
+        default_roughness: f32,
+        iter_input: F,
+    ) where
+        F: Fn() -> J,
+        J: Iterator<Item = (u32, u32)>,
+    {
+        self.any_textured_material = false;
+
+        let total = self.ring.len();
+        // A fresh cursor lane sized to the current mesh-lane length, reset to 0 —
+        // mirrors `gather_prev_ring_into`'s `prev_cursors` re-derivation exactly.
+        fit_len(&mut self.material_tex_cursors, self.offsets.len(), 0);
+
+        // Grow `material_tex` to exactly `total` — same clear + fill-push equivalence
+        // as `gather_mixed_into`'s `ring`/`material_ids` grow.
+        {
+            let mut view = self.material_tex.build_view();
+            view.clear();
+            for _ in 0..total {
+                view.push(PerInstanceMaterialTex::zeroed());
+            }
+        }
+        {
+            let mut view = self.material_tex.build_view();
+            let material_tex = view.as_mut_slice();
+            let offsets = self.offsets.as_read_slice();
+            let mut cursors_view = self.material_tex_cursors.build_view();
+            let cursors = cursors_view.as_mut_slice();
+            let counts = self.counts.as_read_slice();
+            for (mesh_id, material_id) in iter_input() {
+                let m = mesh_id as usize;
+                // FIX-C1 (asset-streaming plan F6): mirror `gather_mixed_into`'s skip
+                // EXACTLY — see `gather_prev_ring_into`'s identical comment.
+                if counts[m] == 0 {
+                    continue;
+                }
+                let slot = (offsets[m] + cursors[m]) as usize;
+                cursors[m] += 1;
+                // Principle 1 (review O1 fix): `material_id == 0` (the pinned default —
+                // every all-default / non-textured-material instance) short-circuits the
+                // store lookup entirely, mirroring `gather_mesh_draws`'s own `id == 0 ->
+                // default_base_color` fast path — the doc above claims this; this is what
+                // makes it true. The slot is ALWAYS written (never skipped): an id-0 row
+                // still needs its `PerInstanceMaterialTex` populated with the pinned
+                // default's REAL parameters (not the zeroed init the `view.push` loop
+                // above filled it with).
+                let (base_color, metallic, roughness, textures) = if material_id == 0 {
+                    (default_base_color, default_metallic, default_roughness, MaterialTextures::NONE)
+                } else {
+                    let row = materials.get_by_index(material_id);
+                    (
+                        row.map_or(default_base_color, |mat| mat.gpu.base_color),
+                        row.map_or(default_metallic, |mat| mat.gpu.metallic()),
+                        row.map_or(default_roughness, |mat| mat.gpu.roughness()),
+                        row.map_or(MaterialTextures::NONE, |mat| mat.textures),
+                    )
+                };
+                self.any_textured_material |= textures.any();
+                material_tex[slot] = PerInstanceMaterialTex {
+                    base_color,
+                    material_id,
+                    albedo: textures.albedo,
+                    normal: textures.normal,
+                    metal_rough: textures.metal_rough,
+                    ao: textures.ao,
+                    emissive: textures.emissive,
+                    metallic,
+                    roughness,
+                };
+            }
+        }
+        debug_assert_eq!(
+            self.material_tex.len(),
+            self.ring.len(),
+            "invariant: the textured material payload lane is index-aligned with the ring"
+        );
+    }
 }
 
 /// The ECS-native M3 gather SYSTEM: buckets every visible
@@ -800,7 +1049,7 @@ pub fn gather_mesh_draws(
     >,
     mesh_assets: NonSendRes<Assets<MeshGpu>>,
     mut scratch: ResMut<MeshRenderScratch>,
-    material_assets: Res<Assets<MaterialGpu>>,
+    material_assets: Res<Assets<Material>>,
 ) {
     // asset-streaming plan F5: `high_water()`, not `len()` — a live `MeshHandle.0`
     // can exceed the live COUNT once a hole exists (a freed-then-not-yet-reused
@@ -815,17 +1064,17 @@ pub fn gather_mesh_draws(
     // Asset-streaming plan F8+ (owner: material-drives-albedo-too): a plain reference
     // (not the `Res` wrapper) so the `move` closure below can COPY it into a fresh
     // inner closure on each of the two `iter_input()` invocations (`Res` itself does
-    // not derive `Copy`; `&Assets<MaterialGpu>` does).
-    let material_table: &Assets<MaterialGpu> = &material_assets;
+    // not derive `Copy`; `&Assets<Material>` does).
+    let material_table: &Assets<Material> = &material_assets;
     // Principle 1 (F8+ reviewer M1/M2): the default material's `base_color`, computed ONCE.
     // The `id == 0` fast path in the closure then needs NO per-instance store lookup — the
     // common / all-default / golden scene does zero material work — and the not-Loaded
     // fallback agrees with the pinned default's color (M2) instead of a stray mid-gray. Reads
     // slot 0's ACTUAL base_color ONCE (id 0 = the "default material" = whatever is pinned at
     // slot 0 — the slot-0-never-retires invariant), so it tracks the real default, not a
-    // hardcoded `MaterialGpu::default()` guess.
+    // hardcoded `Material::default()` guess.
     let default_base_color =
-        material_table.get_by_index(0).map_or([0.8, 0.8, 0.8, 1.0], |m| m.base_color);
+        material_table.get_by_index(0).map_or([0.8, 0.8, 0.8, 1.0], |m| m.gpu.base_color);
     scratch.gather_mixed_into(
         mesh_count,
         // INVARIANT (asset-streaming plan F6 FIX-2): never dereference a non-Loaded
@@ -849,9 +1098,31 @@ pub fn gather_mesh_draws(
                 let base_color = if id == 0 {
                     default_base_color
                 } else {
-                    material_table.get_by_index(id).map_or(default_base_color, |m| m.base_color)
+                    material_table.get_by_index(id).map_or(default_base_color, |m| m.gpu.base_color)
                 };
                 (h.0, col, pair, PerInstanceMaterial { base_color, id, _pad: [0; 3] })
+            })
+        },
+    );
+    // Textured-PBR rung T6c: the parallel TEXTURED material-payload scatter — a SECOND,
+    // index-aligned pass over the SAME query (mirrors HW-RT's `gather_prev_ring_into`
+    // call-site shape), re-using the offsets `gather_mixed_into` just fixed. Unlike PM's
+    // `material_ids` (fused into the PRIMARY scatter above, zero extra passes), this walks
+    // the query again — the id==0 fast path still needs no per-instance store lookup
+    // (Principle 1), but a non-textured scene still pays the O(N) walk itself; the flag
+    // this call computes (`any_textured_material`) gates the (costlier) upload below.
+    let default_metallic = material_table.get_by_index(0).map_or(0.0, |m| m.gpu.metallic());
+    let default_roughness = material_table.get_by_index(0).map_or(0.5, |m| m.gpu.roughness());
+    scratch.gather_material_tex_into(
+        material_table,
+        default_base_color,
+        default_metallic,
+        default_roughness,
+        || {
+            q.iter().map(move |(h, _col, _pair, mat_h)| {
+                let raw = mat_h.map_or(0u32, |m| u32::from(m.0));
+                let id = if raw >= material_high_water { 0 } else { raw };
+                (h.0, id)
             })
         },
     );
@@ -886,7 +1157,7 @@ pub fn gather_mesh_draws(
     mesh_assets: NonSendRes<Assets<MeshGpu>>,
     mut scratch: ResMut<MeshRenderScratch>,
     denoise: Res<crate::ShadowDenoiseConfig>,
-    material_assets: Res<Assets<MaterialGpu>>,
+    material_assets: Res<Assets<Material>>,
 ) {
     // asset-streaming plan F5: `high_water()`, not `len()` — see the non-hwrt
     // variant's comment above.
@@ -896,10 +1167,10 @@ pub fn gather_mesh_draws(
     let material_high_water = material_assets.high_water() as u32;
     // Asset-streaming plan F8+ (owner: material-drives-albedo-too) — see the non-hwrt
     // variant's comment above.
-    let material_table: &Assets<MaterialGpu> = &material_assets;
+    let material_table: &Assets<Material> = &material_assets;
     // Principle 1 (F8+ reviewer M1/M2) — see the non-hwrt variant's comment above.
     let default_base_color =
-        material_table.get_by_index(0).map_or([0.8, 0.8, 0.8, 1.0], |m| m.base_color);
+        material_table.get_by_index(0).map_or([0.8, 0.8, 0.8, 1.0], |m| m.gpu.base_color);
     scratch.gather_mixed_into(
         mesh_count,
         // INVARIANT (asset-streaming plan F6 FIX-2): never dereference a non-Loaded
@@ -917,9 +1188,30 @@ pub fn gather_mesh_draws(
                 let base_color = if id == 0 {
                     default_base_color
                 } else {
-                    material_table.get_by_index(id).map_or(default_base_color, |m| m.base_color)
+                    material_table.get_by_index(id).map_or(default_base_color, |m| m.gpu.base_color)
                 };
                 (h.0, col, pair, PerInstanceMaterial { base_color, id, _pad: [0; 3] })
+            })
+        },
+    );
+    // Textured-PBR rung T6c — see the non-hwrt variant's comment above. NOT gated on
+    // `feature = "hwrt"`-specific state: materials/textures are device-agnostic (the PM
+    // precedent), and even under a hardware-ROUTED resolve (RT device, not forced-software)
+    // the raster still writes gAlbedo/gNormal from sampled textures — only the SCALAR
+    // metallic/roughness/AO/emissive silently fall back to `Materials[id].mrr` there, since
+    // `gPbr` is a software-resolve-only binding (T6a plan Decision D1).
+    let default_metallic = material_table.get_by_index(0).map_or(0.0, |m| m.gpu.metallic());
+    let default_roughness = material_table.get_by_index(0).map_or(0.5, |m| m.gpu.roughness());
+    scratch.gather_material_tex_into(
+        material_table,
+        default_base_color,
+        default_metallic,
+        default_roughness,
+        || {
+            q.iter().map(move |(h, _col, _pair, _prev, mat_h)| {
+                let raw = mat_h.map_or(0u32, |m| u32::from(m.0));
+                let id = if raw >= material_high_water { 0 } else { raw };
+                (h.0, id)
             })
         },
     );

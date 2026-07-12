@@ -3,7 +3,7 @@
 
 use boyko_ecs::ecs::core::asset::{Asset, AssetError, AssetLoader};
 
-use crate::material::MaterialGpu;
+use crate::material::{Material, MaterialGpu};
 
 /// Loads a `.mat` file: a plain, in-house key-value text format (no
 /// `ron` / `serde` dependency) — one `key = value` (or `key: value`) pair per
@@ -29,7 +29,7 @@ use crate::material::MaterialGpu;
 pub struct RonMaterialLoader;
 
 impl AssetLoader for RonMaterialLoader {
-    type Out = MaterialGpu;
+    type Out = Material;
 
     const EXTENSIONS: &'static [&'static str] = &["mat"];
 
@@ -64,7 +64,7 @@ impl AssetLoader for RonMaterialLoader {
             }
         }
 
-        Ok(MaterialGpu::new(base_color, metallic, roughness, reflectance, emissive, 0))
+        Ok(MaterialGpu::new(base_color, metallic, roughness, reflectance, emissive, 0).into())
     }
 }
 
@@ -130,11 +130,12 @@ emissive = 0.05 0.1 0.2
 ";
         let mat = RonMaterialLoader::decode(text.as_bytes()).expect("well-formed .mat must decode");
 
-        assert_eq!(mat.base_color, [0.1, 0.2, 0.3, 1.0]);
-        assert_eq!(mat.metallic(), 0.6);
-        assert_eq!(mat.roughness(), 0.25);
-        assert_eq!(mat.reflectance(), 0.7);
-        assert_eq!(mat.emissive, [0.05, 0.1, 0.2, 0.0]);
+        assert_eq!(mat.gpu.base_color, [0.1, 0.2, 0.3, 1.0]);
+        assert_eq!(mat.gpu.metallic(), 0.6);
+        assert_eq!(mat.gpu.roughness(), 0.25);
+        assert_eq!(mat.gpu.reflectance(), 0.7);
+        assert_eq!(mat.gpu.emissive, [0.05, 0.1, 0.2, 0.0]);
+        assert_eq!(mat.textures, crate::material::MaterialTextures::NONE);
     }
 
     /// A missing recognized key falls back to `MaterialGpu::default`'s value.
@@ -144,11 +145,11 @@ emissive = 0.05 0.1 0.2
         let mat = RonMaterialLoader::decode(text.as_bytes()).expect("a partial .mat must still decode");
         let default = MaterialGpu::default();
 
-        assert_eq!(mat.base_color, [0.9, 0.9, 0.9, 1.0]);
-        assert_eq!(mat.metallic(), default.metallic());
-        assert_eq!(mat.roughness(), default.roughness());
-        assert_eq!(mat.reflectance(), default.reflectance());
-        assert_eq!(mat.emissive, default.emissive);
+        assert_eq!(mat.gpu.base_color, [0.9, 0.9, 0.9, 1.0]);
+        assert_eq!(mat.gpu.metallic(), default.metallic());
+        assert_eq!(mat.gpu.roughness(), default.roughness());
+        assert_eq!(mat.gpu.reflectance(), default.reflectance());
+        assert_eq!(mat.gpu.emissive, default.emissive);
     }
 
     /// An unparseable float surfaces `AssetError::Decode`.
@@ -164,7 +165,7 @@ emissive = 0.05 0.1 0.2
     fn decode_unknown_key_is_ignored() {
         let text = "sheen = 1.0\nmetallic = 0.3\n";
         let mat = RonMaterialLoader::decode(text.as_bytes()).expect("an unknown key must not fail decode");
-        assert_eq!(mat.metallic(), 0.3);
+        assert_eq!(mat.gpu.metallic(), 0.3);
     }
 
     /// A field with the wrong arity (too few / too many floats) errors.

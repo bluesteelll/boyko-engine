@@ -310,6 +310,17 @@ pub enum Format {
     /// Vulkan spec enumerant, cross-checked against `Format::R16G16B16A16Unorm` in `abi_guard` (the
     /// M2 lesson: a wrong format const is a silent dead-branch bug).
     R16G16B16A16Unorm = 91,
+    /// `VK_FORMAT_R16G16B16A16_SFLOAT` — four 16-bit (half) float channels (textured-PBR T6a:
+    /// the `gPbr` deferred-resolve MRT lane — `r`=metallic, `g`=roughness, `b`=AO-texture
+    /// modulation, `a`=emissive-strength modulation).
+    ///
+    /// The value is the canonical `VkFormat` enumerant `VK_FORMAT_R16G16B16A16_SFLOAT == 97`
+    /// (the 16-bit four-component SFLOAT block: R16=76, R16G16=83, R16G16B16A16 UNORM block
+    /// 84..91, R16G16B16A16_SFLOAT=97). VERIFIED against the Vulkan spec enumerant, cross-checked
+    /// against `Format::R16G16B16A16Sfloat` in `abi_guard` (the M2 lesson: a wrong format const is
+    /// a silent dead-branch bug). Storage-image support for this format is part of the Vulkan 1.0
+    /// CORE mandatory format table (unlike `R8_UNORM`/`R16G16_UNORM`, which need a boot probe).
+    R16G16B16A16Sfloat = 97,
     /// `VK_FORMAT_B10G11R11_UFLOAT_PACK32` — the packed R11G11B10 unsigned-float HDR
     /// format (SDFDDGI I1: the probe IRRADIANCE atlas, Decision D6 — stored WITHOUT the
     /// gamma encode so the resolve path is bit-exact). Despite the "R11G11B10F" shorthand
@@ -518,6 +529,9 @@ impl PrimitiveTopology {
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VertexFormat {
+    /// `VK_FORMAT_R32G32_SFLOAT` — two 32-bit floats (textured-PBR T6c: a vec2 UV
+    /// coordinate).
+    Float32x2 = 103,
     /// `VK_FORMAT_R32G32B32_SFLOAT` — three 32-bit floats (a vec3 position).
     Float32x3 = 106,
     /// `VK_FORMAT_R32G32B32A32_SFLOAT` — four 32-bit floats (a vec4 color).

@@ -98,14 +98,31 @@ pub struct TextureDesc {
     /// own layer) and one `VK_IMAGE_VIEW_TYPE_2D_ARRAY` SAMPLE view (the resolve
     /// samples `float3(uv, layer)`). Capped at the backend's `MAX_CASCADES`.
     pub array_layers: u32,
+    /// The number of mip levels in the image (textured-PBR T2). `1` (the default)
+    /// is today's single-level image — byte-identical to every existing texture. `>
+    /// 1` builds a full mip chain the caller fills via a mip-generating upload
+    /// (blit-based, see `boyko_render::texture::upload_texture_2d`); the caller's
+    /// full-subresource view then covers `[0, mip_levels)` so the sampler can select
+    /// any LOD.
+    pub mip_levels: u32,
+    /// The optional decoupled VIEW format (textured-PBR T2 Decision D2). `None` (the
+    /// default) makes the sampled view use `format` and creates the image WITHOUT
+    /// `VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` — byte-identical to every existing
+    /// texture. `Some(f)` with `f != format` creates the image MUTABLE and the
+    /// sampled view in `f` while the image itself stays `format` — the sRGB-view
+    /// trick: an `R8G8B8A8Unorm` image (which has mandatory `BLIT_SRC`/`BLIT_DST`
+    /// optimal-tiling support, unlike `R8G8B8A8Srgb`) generates its mip chain by
+    /// blit, then is SAMPLED through an `R8G8B8A8Srgb` view so the sampler hardware
+    /// does the sRGB→linear decode on read.
+    pub view_format: Option<Format>,
 }
 
 impl Default for TextureDesc {
-    /// A single-layer (`array_layers == 1`) texture — the byte-identical default for
-    /// every non-array image. The extent/format/dimension/usage fields have no
-    /// universal default and MUST be set by the caller; this impl exists so a caller
-    /// can spread `..TextureDesc::default()` to pick up `array_layers: 1` (and so the
-    /// CSM array texture is the only site that overrides it).
+    /// A single-layer, single-mip (`array_layers == 1`, `mip_levels == 1`,
+    /// `view_format == None`) texture — the byte-identical default for every
+    /// pre-T2 image. The extent/format/dimension/usage fields have no universal
+    /// default and MUST be set by the caller; this impl exists so a caller can
+    /// spread `..TextureDesc::default()` to pick up the shared defaults.
     #[inline]
     fn default() -> Self {
         TextureDesc {
@@ -116,6 +133,8 @@ impl Default for TextureDesc {
             dimension: TextureDimension::D2,
             usage: ImageUsage::NONE,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         }
     }
 }

@@ -85,6 +85,8 @@ impl CsmResources {
                 dimension: TextureDimension::D2,
                 usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
                 array_layers: 4,
+                mip_levels: 1,
+                view_format: None,
             },
         )
         .expect("invariant: CSM cascade array texture create (setup stage)");
@@ -140,7 +142,10 @@ impl CsmResources {
                 color_formats: &[],
                 depth_format: Some(Format::D32Sfloat),
                 topology: PrimitiveTopology::TriangleList,
-                vertex_layout: Some(VertexBufferLayout { stride: 40, attributes: &attributes }),
+                vertex_layout: Some(VertexBufferLayout {
+                    stride: MESH_VERTEX_STRIDE as u32,
+                    attributes: &attributes,
+                }),
                 push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                 bind_group_layout: Some(instance_layout),
                 blend: None,
@@ -160,6 +165,8 @@ impl CsmResources {
                 dimension: TextureDimension::D2,
                 usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
                 array_layers: SPOT_ATLAS_SLOTS,
+                mip_levels: 1,
+                view_format: None,
             },
         )
         .expect("invariant: shadow-atlas array texture create");
@@ -325,7 +332,10 @@ impl CsmResources {
                 color_formats: &[],
                 depth_format: Some(Format::D32Sfloat),
                 topology: PrimitiveTopology::TriangleList,
-                vertex_layout: Some(VertexBufferLayout { stride: 40, attributes: &attributes }),
+                vertex_layout: Some(VertexBufferLayout {
+                    stride: MESH_VERTEX_STRIDE as u32,
+                    attributes: &attributes,
+                }),
                 push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                 bind_group_layout: Some(instance_layout),
                 blend: None,

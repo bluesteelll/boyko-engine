@@ -298,6 +298,8 @@ impl CsmSceneResources {
                 // 4 layers (== MAX_CASCADES) so the 2D_ARRAY sample view exists; Rung A renders
                 // only layer 0.
                 array_layers: 4,
+                mip_levels: 1,
+                view_format: None,
             },
         )
         .expect("CSM cascade array texture");
@@ -374,6 +376,8 @@ impl CsmSceneResources {
                 dimension: TextureDimension::D2,
                 usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
                 array_layers: SPOT_ATLAS_SLOTS,
+                mip_levels: 1,
+                view_format: None,
             },
         )
         .expect("shadow-atlas array texture");
@@ -2162,6 +2166,11 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         BindGroupLayoutEntry { binding: 16, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 17, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 18, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        // Textured-PBR T6a (the critic's C1 fix): the SOFTWARE-ONLY `gPbr` STORAGE image @19.
+        // `GBufferTargets::create` now allocates `gPbr` UNCONDITIONALLY (both feature legs) and
+        // `DeferredSets::build`'s software resolve-set loop appends it past the shared 19 —
+        // the layout MUST declare it too, or `create_bind_group`'s entry-count check trips (P1a).
+        BindGroupLayoutEntry { binding: 19, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -2416,6 +2425,12 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         pm_enabled: false,
         raster_pipeline_pm: None,
         pm_bind_group: None,
+        // Textured-PBR T6c: TEXTURED is OFF in this low-level RHI harness (no ECS gather /
+        // texture asset store exists here) — byte-identical to the pre-T6c stream.
+        tex_enabled: false,
+        raster_pipeline_tex: None,
+        tex_bind_group: None,
+        bindless_set: None,
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -3108,6 +3123,11 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         BindGroupLayoutEntry { binding: 16, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 17, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 18, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        // Textured-PBR T6a (the critic's C1 fix): the SOFTWARE-ONLY `gPbr` STORAGE image @19.
+        // `GBufferTargets::create` now allocates `gPbr` UNCONDITIONALLY (both feature legs) and
+        // `DeferredSets::build`'s software resolve-set loop appends it past the shared 19 —
+        // the layout MUST declare it too, or `create_bind_group`'s entry-count check trips (P1a).
+        BindGroupLayoutEntry { binding: 19, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -3347,6 +3367,12 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         pm_enabled: false,
         raster_pipeline_pm: None,
         pm_bind_group: None,
+        // Textured-PBR T6c: TEXTURED is OFF in this low-level RHI harness (no ECS gather /
+        // texture asset store exists here) — byte-identical to the pre-T6c stream.
+        tex_enabled: false,
+        raster_pipeline_tex: None,
+        tex_bind_group: None,
+        bindless_set: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -7638,6 +7664,11 @@ fn run_showcase_body_ddgi(
         BindGroupLayoutEntry { binding: 16, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 17, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 18, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        // Textured-PBR T6a (the critic's C1 fix): the SOFTWARE-ONLY `gPbr` STORAGE image @19.
+        // `GBufferTargets::create` now allocates `gPbr` UNCONDITIONALLY (both feature legs) and
+        // `DeferredSets::build`'s software resolve-set loop appends it past the shared 19 —
+        // the layout MUST declare it too, or `create_bind_group`'s entry-count check trips (P1a).
+        BindGroupLayoutEntry { binding: 19, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -8073,6 +8104,12 @@ fn run_showcase_body_ddgi(
         pm_enabled: false,
         raster_pipeline_pm: None,
         pm_bind_group: None,
+        // Textured-PBR T6c: TEXTURED is OFF in this low-level RHI harness (no ECS gather /
+        // texture asset store exists here) — byte-identical to the pre-T6c stream.
+        tex_enabled: false,
+        raster_pipeline_tex: None,
+        tex_bind_group: None,
+        bindless_set: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -9018,6 +9055,11 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         BindGroupLayoutEntry { binding: 16, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 17, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 18, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        // Textured-PBR T6a (the critic's C1 fix): the SOFTWARE-ONLY `gPbr` STORAGE image @19.
+        // `GBufferTargets::create` now allocates `gPbr` UNCONDITIONALLY (both feature legs) and
+        // `DeferredSets::build`'s software resolve-set loop appends it past the shared 19 —
+        // the layout MUST declare it too, or `create_bind_group`'s entry-count check trips (P1a).
+        BindGroupLayoutEntry { binding: 19, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
     ];
     let resolve_layout = RhiDevice::create_bind_group_layout(
         device,
@@ -9412,6 +9454,12 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         pm_enabled: false,
         raster_pipeline_pm: None,
         pm_bind_group: None,
+        // Textured-PBR T6c: TEXTURED is OFF in this low-level RHI harness (no ECS gather /
+        // texture asset store exists here) — byte-identical to the pre-T6c stream.
+        tex_enabled: false,
+        raster_pipeline_tex: None,
+        tex_bind_group: None,
+        bindless_set: None,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };

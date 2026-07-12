@@ -51,7 +51,7 @@
 //!   proof that the free-list actually RECYCLED retired slots (a broken reuse
 //!   path would grow `high_water` 1:1 with every churn spawn, exactly like the
 //!   CPU-only `material_churn_over_many_epochs_...` sibling test proves for
-//!   `Assets<MaterialGpu>`).
+//!   `Assets<Material>`).
 //! - `Assets::free_epoch()` is EXACTLY `2 * CHURN_FRAMES` — each despawned
 //!   mesh's single owner reaching zero bumps it once at the `Retiring`
 //!   transition (`dec_ref`) and once more at the terminal free (`retire`); this

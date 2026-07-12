@@ -77,6 +77,25 @@
 // moves `instance_materials` to binding 3 ONLY on the combined compile — the PM-only compile
 // keeps binding 1 unchanged, so `gbuffer_mrt_pm.{vs,fs}.spv` stays byte-frozen too.
 //
+// Textured-PBR rung T6c TEXTURED variant (opt-in, compiled with `-D TEXTURED=1`): an
+// INDEPENDENT #ifdef axis from PER_INSTANCE_MATERIAL/MOTION_VECTORS — NEVER compiled
+// together with either (T6c plan Decision D4 / locked decision 1: TEXTURED × MOTION_VECTORS
+// is never built; under active temporal denoise a textured material renders base_color/
+// scalar through the MV/mvpm pipeline instead, with a one-time host-side warning). Reads a
+// per-instance TEXTURED material PAYLOAD SSBO (set 0, binding 1, VERTEX — its OWN dedicated
+// binding, indexed IDENTICALLY to `instances` @0, the SAME `pc.base_instance +
+// SV_InstanceID` expression the model-matrix arm already uses) and forwards it FLAT to the
+// fragment: `base_color`, the material id, the five bindless texture slots, and the
+// fallback `metallic`/`roughness` scalars. ADDITIONALLY reads the vertex `uv`/`tangent`
+// attributes (declared 4th/5th, so DXC auto-assigns them SPIR-V locations 3/4 — see the
+// field-order note below) to build the tangent-space basis the fragment normal-maps with:
+// `world_T = normalize(mul(m3, tangent.xyz))` — the PLAIN model 3x3 (`m3`, the SAME matrix
+// the instanced arm already builds for the position/eye_rel transform — NOT the
+// inverse-transpose normal matrix `nm` M4 computes), the glTF/Mikktspace convention —
+// forwarded as a perspective-correct varying alongside `uv` and the handedness sign
+// `tangent.w`. EVERYTHING new is gated under `#ifdef TEXTURED`, so the base (no-`-D`)
+// compile is byte-frozen — the `gbuffer_mrt.vs.spv` golden is untouched.
+//
 // Compiled offline (hermetic build — no SDK at `cargo build` time) with:
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T vs_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 gbuffer_mrt.vs.hlsl -Fo gbuffer_mrt.vs.spv
@@ -84,6 +103,7 @@
 //   (PER_INSTANCE_MATERIAL variant: add `-D PER_INSTANCE_MATERIAL=1 -Fo gbuffer_mrt_pm.vs.spv`)
 //   (F8-mv combined variant: add `-D MOTION_VECTORS=1 -D PER_INSTANCE_MATERIAL=1
 //       -Fo gbuffer_mrt_mvpm.vs.spv`)
+//   (TEXTURED variant: add `-D TEXTURED=1 -Fo gbuffer_mrt_tex.vs.spv`)
 
 struct PushConstants {
     float4x4 view_proj;        // perspective (or ortho) proj*view, column-major (was `mvp`)
@@ -153,6 +173,33 @@ struct PerInstanceMaterial {
 #endif
 #endif
 
+#ifdef TEXTURED
+// Textured-PBR rung T6c: the per-instance TEXTURED material PAYLOAD — PerInstanceMaterial's
+// `base_color`/id PLUS the resolved row's five bindless texture slots PLUS the FALLBACK
+// `metallic`/`roughness` scalars the fragment's gPbr override uses when the metal-rough
+// slot is `0` (the Rust host mirror is `boyko_render::mesh_draw::PerInstanceMaterialTex`).
+// NO explicit pad field: the eight trailing scalars (six `uint` + two `float`) run
+// contiguously from offset 16 to 48 with none straddling a 16-byte lane, so the natural
+// HLSL struct size is already 48 bytes — the SAME element stride the host uploads.
+struct PerInstanceMaterialTex {
+    float4 base_color;
+    uint   material_id;
+    uint   albedo;
+    uint   normal;
+    uint   metal_rough;
+    uint   ao;
+    uint   emissive;
+    float  metallic;
+    float  roughness;
+};
+// Set 0, binding 1 (VERTEX) on the TEXTURED compile — its OWN dedicated binding, NOT
+// PER_INSTANCE_MATERIAL's `instance_materials` above (TEXTURED is an INDEPENDENT #ifdef
+// axis, never compiled together with PER_INSTANCE_MATERIAL or MOTION_VECTORS — T6c plan
+// Decision D4). Indexed IDENTICALLY to `instances` @0 — the SAME `pc.base_instance +
+// SV_InstanceID` expression the model-matrix arm already uses (M3-proven).
+[[vk::binding(1, 0)]] StructuredBuffer<PerInstanceMaterialTex> instance_materials_tex;
+#endif
+
 // Field DECLARATION order fixes the SPIR-V vertex-input locations DXC auto-assigns
 // (this codebase uses no explicit `[[vk::location]]`): position -> 0, color -> 1,
 // normal -> 2. The vertex BUFFER offsets are independent of this order and are bound by
@@ -161,6 +208,13 @@ struct VsIn {
     float3 position : POSITION;  // SPIR-V location 0
     float4 color    : COLOR0;    // SPIR-V location 1
     float3 normal   : NORMAL;    // SPIR-V location 2
+#ifdef TEXTURED
+    // Textured-PBR rung T6c: declared 4th/5th, so DXC auto-assigns locations 3/4 (the
+    // field-order rule above) — matching `boyko_render::mesh::Vertex`'s uv@40/tangent@48
+    // vertex-buffer offsets, which the TEXTURED pipeline's `VertexAttribute` array binds.
+    float2 uv      : TEXCOORD0;  // SPIR-V location 3
+    float4 tangent : TANGENT;    // SPIR-V location 4 (xyz = unit tangent, w = handedness)
+#endif
 };
 
 struct VsOut {
@@ -183,6 +237,24 @@ struct VsOut {
     // a static object then has `cur_clip == prev_clip` per pixel ⇒ Δuv == 0 exactly).
     float4 cur_clip  : CURCLIP;     // mc_cur_view_proj  * cur_world
     float4 prev_clip : PREVCLIP;    // mc_prev_view_proj * prev_world
+#endif
+#ifdef TEXTURED
+    // uv/world_T/tex_w are perspective-correct (default) — T6c plan Decision D2/D3 (matches
+    // `normal`/`eye_rel` above; the fragment interpolates them the SAME way it always has).
+    float2 uv       : TEXUV;
+    float3 world_T  : TEXTANGENT;   // tangent transformed by the PLAIN model 3x3 (m3)
+    float  tex_w    : TEXHAND;      // tangent.w, the bitangent handedness sign
+    // flat (per-primitive constant) — the SAME instance's material payload for every pixel
+    // of a triangle, mirroring `mat_id`/`mat_albedo` above.
+    nointerpolation float4 tex_base_color  : TEXBASECOLOR;
+    nointerpolation uint   tex_mat_id      : TEXMATID;
+    nointerpolation uint   tex_albedo      : TEXALBEDO;
+    nointerpolation uint   tex_normal      : TEXNORMALSLOT;
+    nointerpolation uint   tex_metal_rough : TEXMETALROUGH;
+    nointerpolation uint   tex_ao          : TEXAO;
+    nointerpolation uint   tex_emissive    : TEXEMISSIVE;
+    nointerpolation float  tex_metallic    : TEXMETALLIC;
+    nointerpolation float  tex_roughness   : TEXROUGHNESS;
 #endif
 };
 
@@ -246,6 +318,23 @@ VsOut main(VsIn input, uint instance_id : SV_InstanceID) {
         output.mat_id = 0u;
         output.mat_albedo = float3(0.0, 0.0, 0.0);
 #endif
+#ifdef TEXTURED
+        // The TEXTURED pipeline never binds an empty (legacy, merged-draw) mesh_draw list
+        // either (mirrors the PER_INSTANCE_MATERIAL arm above) — defined-but-unread
+        // placeholders, kept only so every TEXTURED varying is initialized on every path.
+        output.uv = float2(0.0, 0.0);
+        output.world_T = float3(1.0, 0.0, 0.0);
+        output.tex_w = 1.0;
+        output.tex_base_color = float4(0.0, 0.0, 0.0, 1.0);
+        output.tex_mat_id = 0u;
+        output.tex_albedo = 0u;
+        output.tex_normal = 0u;
+        output.tex_metal_rough = 0u;
+        output.tex_ao = 0u;
+        output.tex_emissive = 0u;
+        output.tex_metallic = 0.0;
+        output.tex_roughness = 0.5;
+#endif
 #ifdef MOTION_VECTORS
         // The merged-draw arm has no per-instance model, so this geometry is static in world
         // space (`input.position` IS the world position — `mul(view_proj, p)` above). Motion
@@ -288,6 +377,38 @@ VsOut main(VsIn input, uint instance_id : SV_InstanceID) {
         PerInstanceMaterial pm = instance_materials[pc.base_instance + instance_id];
         output.mat_id = pm.id;
         output.mat_albedo = pm.base_color.xyz;
+#endif
+#ifdef TEXTURED
+        // T6c plan Decision D3: `world_T = normalize(mul(m3, tangent.xyz))` — the PLAIN
+        // model 3x3 (`m3`, reused from the position/eye_rel transform above), NOT the
+        // inverse-transpose normal matrix `nm` the M4 branch above may compute (a tangent is
+        // a SURFACE VECTOR, not a normal — it transforms with the plain Jacobian, unlike a
+        // normal, which needs the inverse-transpose under non-uniform scale). `uv`/`tex_w`
+        // pass through verbatim; the fragment renormalizes `world_T` after interpolation
+        // (Gram-Schmidt) so a non-unit or skewed interpolated tangent is corrected there.
+        output.uv = input.uv;
+        output.world_T = normalize(mul(m3, input.tangent.xyz));
+        // Review O2 (out of campaign scope — no mirrored instances today): the
+        // fragment's `B = cross(N, T) * w` handedness is correct only for a
+        // POSITIVE-determinant `m3` (a proper rotation/scale); a MIRRORED instance
+        // (negative-determinant scale, e.g. one negative axis) flips chirality and would
+        // need `w *= sign(det(m3))` here (the SAME `det` the M4 branch above already
+        // computes) to keep the bitangent — and thus the sampled normal map — correctly
+        // handed.
+        output.tex_w = input.tangent.w;
+        // Indexed IDENTICALLY to `instances[pc.base_instance + instance_id]` above (the
+        // SAME expression, M3-proven) — so the TEXTURED payload always names the SAME
+        // instance the model matrix does.
+        PerInstanceMaterialTex pmt = instance_materials_tex[pc.base_instance + instance_id];
+        output.tex_base_color = pmt.base_color;
+        output.tex_mat_id = pmt.material_id;
+        output.tex_albedo = pmt.albedo;
+        output.tex_normal = pmt.normal;
+        output.tex_metal_rough = pmt.metal_rough;
+        output.tex_ao = pmt.ao;
+        output.tex_emissive = pmt.emissive;
+        output.tex_metallic = pmt.metallic;
+        output.tex_roughness = pmt.roughness;
 #endif
 #ifdef MOTION_VECTORS
         // Per-object motion: read the SAME instance slot from the PREVIOUS-frame model ring

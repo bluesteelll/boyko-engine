@@ -240,6 +240,8 @@ fn vertex_buffer_mvp_triangle_golden_round_trip() {
             dimension: boyko_rhi::TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("offscreen color texture");
 

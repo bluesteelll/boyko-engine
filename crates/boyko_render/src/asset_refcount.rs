@@ -25,10 +25,12 @@ use boyko_scene::{
     RenderEnabled,
 };
 
-use crate::material::MaterialGpu;
+use crate::bindless::BindlessTextureTable;
+use crate::material::Material;
 use crate::mesh::MeshGpu;
 use crate::mesh_assets::OrphanedMeshGpu;
 use crate::retired_gpu_buffers::RetiredGpuBuffers;
+use crate::texture::OrphanedTextureGpu;
 
 /// The fence-gated retire delay (asset-streaming plan F6 Decision 1): a row
 /// enqueued at submission-epoch `N` is safe to free once the host observes
@@ -86,7 +88,7 @@ pub struct RenderEpoch(pub u64);
 pub fn apply_refcount_deltas(
     mut deltas: ResMut<RefcountDeltas>,
     mut free: ResMut<DeferredFree>,
-    mut material_assets: ResMut<Assets<MaterialGpu>>,
+    mut material_assets: ResMut<Assets<Material>>,
     mut mesh_assets: NonSendResMut<Assets<MeshGpu>>,
     epoch: Res<RenderEpoch>,
     mut cmd: Commands,
@@ -129,7 +131,7 @@ pub fn apply_refcount_deltas(
 
 /// Folds one delta into `assets`, routing a resulting retire ticket into
 /// `free`. Generic over the two concrete `AssetBacking` types
-/// (`MeshGpu`/`MaterialGpu`) so [`apply_refcount_deltas`] shares one body for
+/// (`MeshGpu`/`Material`) so [`apply_refcount_deltas`] shares one body for
 /// both branches — monomorphized, no dynamic dispatch. Returns `Some(gen)` on
 /// a `+1` delta (the attach-time generation the caller stamps into the
 /// type-specific lane — this function cannot name `MeshRefGen`/
@@ -488,7 +490,15 @@ impl Plugin for AssetRefcountPlugin {
 /// and frees the device resources ([`MeshGpu`]'s vertex/index buffers, and its
 /// BLAS under `hwrt`) it held — then does the same for every fill-rejected
 /// orphan past its gate, then drains every F7 grow-and-defer-old buffer past
-/// its gate (`RetiredGpuBuffers::drain_ready`).
+/// its gate (`RetiredGpuBuffers::drain_ready`). Textured-PBR rung T6b extends
+/// this with [`BindlessTextureTable::retire_ready_slots`] (the O1 bindless-slot
+/// fence-gated recycle, P1-5) and [`OrphanedTextureGpu::drain_ready`] — both
+/// under the SAME `epoch` gate, guarded on the table's presence (see the texture
+/// block below for why: `BindlessTextureTable::new` is a fallible boot step).
+/// There is no `Assets<TextureGpu>` refcount-driven retire branch yet: no
+/// `TextureHandle` carrier / refcount-hook producer exists in-tree (T7) to ever
+/// enqueue one — see this function's implementation comment at the texture block
+/// for the full argument.
 ///
 /// # Caller contract — MUST run after `wait_frame_in_flight` for THIS `epoch`
 ///
@@ -560,7 +570,20 @@ pub fn retire_deferred_frees(
     // buffer OR TLAS; narrowing this to `free_empty && orphans_empty` would leak either
     // (both are decoupled from refcount churn).
     let retired_empty = world.non_send_resource::<RetiredGpuBuffers>().is_empty();
-    if free_empty && orphans_empty && retired_empty {
+    // Textured-PBR T6b: two more independent queues, the same F7-C2 shape — a
+    // texture-only frame (every queue above empty) must still drain a pending
+    // fill-reject orphan OR a fence-staged bindless-slot recycle; narrowing this
+    // early-out would leak either. `OrphanedTextureGpu` is unconditional infra
+    // (inserted before the fallible `BindlessTextureTable::new` boot step, see
+    // `run_windowed`), always present here. `BindlessTextureTable` itself may be
+    // ABSENT — its creation is fallible, and a failed boot force-drains this
+    // queue (via `teardown`'s unconditional `retire_deferred_frees(..., u64::MAX,
+    // ..)` call) BEFORE the table was ever inserted; absence reads as "empty"
+    // (nothing could be staged in a table that was never created).
+    let tex_orphans_empty = world.non_send_resource::<OrphanedTextureGpu>().is_empty();
+    let bindless_recycle_empty = !world.contains_non_send_resource::<BindlessTextureTable>()
+        || world.non_send_resource::<BindlessTextureTable>().is_empty();
+    if free_empty && orphans_empty && retired_empty && tex_orphans_empty && bindless_recycle_empty {
         return;
     }
 
@@ -598,9 +621,9 @@ pub fn retire_deferred_frees(
             }
         }
         {
-            let material_assets = world.resource_mut::<Assets<MaterialGpu>>();
+            let material_assets = world.resource_mut::<Assets<Material>>();
             for entry in scratch.iter().filter(|e| e.kind == AssetRefKind::Material) {
-                // `MaterialGpu` is `NEEDS_TEARDOWN = false` (device-free POD) — no
+                // `Material` is `NEEDS_TEARDOWN = false` (device-free POD) — no
                 // destroy call needed, only the store-slot retire.
                 let _ = material_assets.retire(entry.slot);
             }
@@ -614,13 +637,42 @@ pub fn retire_deferred_frees(
     unsafe {
         world.non_send_resource_mut::<RetiredGpuBuffers>().drain_ready(epoch, ctx);
     }
+
+    // Textured-PBR rung T6b: the bindless-slot fence-gated recycle (P1-5) +
+    // `OrphanedTextureGpu`'s fill-reject teardown, under the SAME `epoch` fence-gate
+    // contract as every drain above. Guarded on presence (see the early-out's doc
+    // above): a failed `BindlessTextureTable::new` boot step never inserted the
+    // table, and there is nothing staged for a table that was never created.
+    //
+    // `BindlessTextureTable` is temporarily taken OUT of the World (rather than
+    // fetched alongside `OrphanedTextureGpu` via two simultaneous
+    // `non_send_resource_mut` calls, which the World's non-send API has no helper
+    // for) so it can be threaded as `OrphanedTextureGpu::drain_ready`'s
+    // `aux: &mut BindlessTextureTable` — mirrors `MaterialTable::boot_seed`'s
+    // "take out, use, reinsert" shape (`run_windowed`, boyko_app).
+    //
+    // No `Assets<TextureGpu>` refcount-driven retire branch runs here (unlike the
+    // mesh/material scratch loop above): that would need a `TextureHandle` carrier
+    // component and a `boyko_scene::AssetRefKind::Texture` producer feeding
+    // `DeferredFree` — neither exists in-tree yet (no material references a
+    // texture until T7) — so no `FreeEntry` for a texture can ever be enqueued.
+    // Wiring a scratch-filtered branch that can never execute would be dead code
+    // masquerading as a real guard; this is deliberately left for the rung that
+    // adds the carrier + hook wiring.
+    if let Some(mut bindless_table) = world.remove_non_send_resource::<BindlessTextureTable>() {
+        bindless_table.retire_ready_slots(epoch);
+        world
+            .non_send_resource_mut::<OrphanedTextureGpu>()
+            .drain_ready(epoch, ctx, &mut bindless_table);
+        world.insert_non_send_resource(bindless_table);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// `apply_one` is generic over `AssetBacking`; `MaterialGpu` (a local,
+    /// `apply_one` is generic over `AssetBacking`; `Material` (a local,
     /// device-free `AssetBacking` type — `NEEDS_TEARDOWN = false`) exercises it
     /// without any device dependency. `MeshGpu` cannot be used here: it needs a
     /// real device to construct a value, which this unit test has none of.
@@ -633,8 +685,8 @@ mod tests {
     /// violation, not a property this test should exercise).
     #[test]
     fn apply_one_inc_then_dec_to_zero_enqueues_a_free_entry() {
-        let mut assets = Assets::<MaterialGpu>::with_reserved(4);
-        let handle = assets.add(MaterialGpu::default());
+        let mut assets = Assets::<Material>::with_reserved(4);
+        let handle = assets.add(Material::default());
         let slot = handle.index();
         let mut free = DeferredFree::default();
         const EPOCH: u64 = 10;
@@ -664,8 +716,8 @@ mod tests {
     /// already-0 row.
     #[test]
     fn apply_one_double_dec_past_zero_is_idempotent() {
-        let mut assets = Assets::<MaterialGpu>::with_reserved(4);
-        let handle = assets.add(MaterialGpu::default());
+        let mut assets = Assets::<Material>::with_reserved(4);
+        let handle = assets.add(Material::default());
         let slot = handle.index();
         let mut free = DeferredFree::default();
         const EPOCH: u64 = 10;
@@ -698,11 +750,11 @@ mod tests {
     }
 
     /// CPU churn stress (asset-streaming plan F6): a long-running simulated
-    /// spawn/despawn churn over `Assets<MaterialGpu>`, driving the EXACT same
+    /// spawn/despawn churn over `Assets<Material>`, driving the EXACT same
     /// `apply_one` (enqueue) -> `DeferredFree::drain_ready` (fence-gate) ->
     /// `Assets::retire` (terminal free) pipeline
     /// [`retire_deferred_frees`]'s material branch runs — MINUS the actual
-    /// device call (`MaterialGpu` is `NEEDS_TEARDOWN = false`; its branch in
+    /// device call (`Material` is `NEEDS_TEARDOWN = false`; its branch in
     /// `retire_deferred_frees` is ALREADY just `let _ = material_assets.retire(..)`
     /// with no device touch, so this test exercises that branch's real logic
     /// verbatim, not a stand-in). `retire_deferred_frees` itself cannot be
@@ -736,7 +788,7 @@ mod tests {
         const DRAIN_TAIL_EPOCHS: u64 = 16; // >> RETIRE_DELAY — drains every straggler.
         const MAX_CHURN_PER_EPOCH: usize = 3;
 
-        let mut assets = Assets::<MaterialGpu>::with_reserved(INITIAL_SLOTS);
+        let mut assets = Assets::<Material>::with_reserved(INITIAL_SLOTS);
         let mut free = DeferredFree::default();
         let mut scratch: Vec<FreeEntry> = Vec::new();
         let mut rng = Xorshift32(0xC0FF_EE01);
@@ -748,12 +800,12 @@ mod tests {
         let mut create_count: u64 = 0;
         let mut destroy_count: u64 = 0;
 
-        let spawn = |assets: &mut Assets<MaterialGpu>,
+        let spawn = |assets: &mut Assets<Material>,
                      free: &mut DeferredFree,
                      epoch: u64,
                      live_slots: &mut Vec<u32>,
                      create_count: &mut u64| {
-            let handle = assets.add(MaterialGpu::default());
+            let handle = assets.add(Material::default());
             let slot = handle.index();
             *create_count += 1;
             // A `+1` delta's return is the lane-stamp generation (see `apply_one`'s
@@ -813,7 +865,7 @@ mod tests {
                     gen_before_retire
                 );
                 let taken = assets.retire(entry.slot);
-                assert!(taken.is_some(), "a Loaded->Retiring MaterialGpu row always holds a value");
+                assert!(taken.is_some(), "a Loaded->Retiring Material row always holds a value");
                 destroy_count += 1;
             }
         }
@@ -823,7 +875,7 @@ mod tests {
         // these are never churned, only counted, proving churn coexists with a stable
         // baseline population without cross-contamination.
         for _ in 0..INITIAL_SLOTS {
-            let h = assets.add(MaterialGpu::default());
+            let h = assets.add(Material::default());
             create_count += 1;
             live_slots.push(h.index());
         }

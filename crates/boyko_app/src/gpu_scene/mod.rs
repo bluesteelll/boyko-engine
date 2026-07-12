@@ -33,12 +33,14 @@ use boyko_rhi_vulkan::compute::{
     B5_CAMERA_UBO_BYTES_M4, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, EDITLIST_BUFFER_WORDS,
     INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS,
     LOCAL_SIZE_X, TILE_BOUND_BYTES, csm_depth_fs_spirv, csm_depth_vs_spirv, deferred_pbr_spirv,
+    deferred_pbr_wrap_spirv,
     encode_edit_list, fullscreen_sample_fs_spirv, fullscreen_sample_vs_spirv, gbuffer_mrt_fs_spirv,
-    gbuffer_mrt_pm_fs_spirv, gbuffer_mrt_pm_vs_spirv, gbuffer_mrt_vs_spirv, interp_instances_spirv,
-    punctual_depth_fs_spirv, punctual_depth_vs_spirv, sdf_gbuffer_composite_spirv,
-    sdf_probe_update_spirv, tile_grid_extent,
+    gbuffer_mrt_pm_fs_spirv, gbuffer_mrt_pm_vs_spirv, gbuffer_mrt_tex_fs_spirv,
+    gbuffer_mrt_tex_vs_spirv, gbuffer_mrt_vs_spirv, interp_instances_spirv, punctual_depth_fs_spirv,
+    punctual_depth_vs_spirv, sdf_gbuffer_composite_spirv, sdf_probe_update_spirv, tile_grid_extent,
 };
 use boyko_rhi_vulkan::device::VulkanContext;
+use boyko_rhi_vulkan::ffi::VkDescriptorSet;
 use boyko_rhi_vulkan::memory::BoundBuffer;
 use boyko_rhi_vulkan::rhi_impl::{
     ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline,
@@ -68,12 +70,14 @@ use boyko_rhi_vulkan::texture::VulkanTexture;
 use boyko_sdf_math::SdfEdit;
 
 use boyko_render::{
-    DDGI_UPDATE_UBO_BYTES, DdgiConfig, DdgiUpdateConfig, DdgiUpdateUbo, GI_MAX_RAYS, GPU_LIGHT_BYTES,
-    GPU_LIGHT_WORDS, GPU_TRANSFORM3D_BYTES, GpuLight, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_BYTES,
-    LightHeaderGpu, LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialTable, PER_INSTANCE_MATERIAL_BYTES,
-    RESOLVED_CSM_BYTES, RESOLVED_DDGI_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, RETIRE_DELAY, ResolvedCsm,
-    ResolvedShadowAtlas, RetiredGpuBuffers, SHADOW_DIM, Vertex, ddgi_update_dispatch_groups,
-    fill_fibonacci_ray_table, pack_ddgi_update_ubo, resolve_ddgi,
+    BindlessTextureTable, DDGI_UPDATE_UBO_BYTES, DdgiConfig, DdgiUpdateConfig, DdgiUpdateUbo,
+    GI_MAX_RAYS, GPU_LIGHT_BYTES, GPU_LIGHT_WORDS, GPU_TRANSFORM3D_BYTES, GpuLight,
+    LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_BYTES, LightHeaderGpu, LightingConfig, M_SLOTS,
+    MAX_LIGHTS, MaterialTable, MESH_VERTEX_STRIDE, PER_INSTANCE_MATERIAL_BYTES,
+    PER_INSTANCE_MATERIAL_TEX_BYTES, RESOLVED_CSM_BYTES, RESOLVED_DDGI_BYTES,
+    RESOLVED_SHADOW_ATLAS_BYTES, RETIRE_DELAY, ResolvedCsm, ResolvedShadowAtlas, RetiredGpuBuffers,
+    SHADOW_DIM, Vertex, ddgi_update_dispatch_groups, fill_fibonacci_ray_table, pack_ddgi_update_ubo,
+    resolve_ddgi,
 };
 #[cfg(feature = "hwrt")]
 use boyko_ecs::ecs::core::asset::Assets;
@@ -108,6 +112,23 @@ use tlas::TlasResources;
 /// plan R7.
 pub(crate) const INSTANCE_CAPACITY: usize = 1024;
 
+/// Textured-PBR T6c (review O3): the boot capacity of
+/// [`TexturedResources::tex_instance_material_rings`] — an INDEPENDENT literal (not
+/// [`INSTANCE_CAPACITY`] itself) so the const-assert immediately below actually guards
+/// drift: the tex ring does NOT participate in F7 growth (see `TexturedResources`'s
+/// doc), so the two are pinned EQUAL today by design — a future edit to either literal
+/// alone is now a BUILD ERROR, not a silent capacity mismatch.
+/// `upload_instance_materials_tex`'s own overflow `assert!` compares against the
+/// ACTUAL device buffer's `size`, so this pin is not load-bearing for that check —
+/// only for keeping the two boot budgets in sync.
+const TEX_INSTANCE_CAPACITY: usize = 1024;
+const _: () = assert!(
+    TEX_INSTANCE_CAPACITY == INSTANCE_CAPACITY,
+    "TEX_INSTANCE_CAPACITY must track INSTANCE_CAPACITY (T6c: the TEXTURED \
+     instance-material ring does not participate in F7 growth, so it is pinned to the \
+     boot instance budget, not a separately-tunable capacity)"
+);
+
 /// Asset-streaming plan F7 Q2: a sane upper bound on the non-RT instance family's
 /// grown capacity — mirrors `MESH_ADDR_CAP`'s role for the BLAS-address table.
 /// `debug_assert`-only (not a hard cap like `boyko_render::MaterialTable`'s
@@ -140,6 +161,10 @@ const _: () = assert!(
 /// The mesh-raster G-buffer color format — MUST equal the recorder's
 /// `GBUFFER_FORMAT` (`R8G8B8A8_UNORM`), the same pin the showcase carries.
 const RASTER_COLOR_FORMAT: Format = Format::R8G8B8A8Unorm;
+
+/// Textured-PBR T6c: the `gPbr` 4th MRT color format the TEXTURED raster pipeline declares
+/// — MUST equal `GBufferTargets`'s `gPbr` ring format (T6a's `R16G16B16A16_SFLOAT`).
+const TEX_GPBR_COLOR_FORMAT: Format = Format::R16G16B16A16Sfloat;
 
 /// The MARCHER's cast-shadow direction (`L`, direction TO the light) — the A1
 /// analytic SDF soft-shadow march lane of the marcher push. The host's SDF edit
@@ -276,7 +301,7 @@ fn pack_light_table(header: &LightHeaderGpu, lights: &[GpuLight]) -> Vec<u32> {
 #[cfg(feature = "hwrt")]
 pub(crate) struct MotionVecResources {
     /// The `gbuffer_mrt_mv.{vs,fs}` graphics pipeline: identical to the base raster pipeline
-    /// (40-byte vertex layout, D32 depth, 88-byte VERTEX push, `CullMode::None`, no blend/bias)
+    /// (64-byte vertex layout, D32 depth, 88-byte VERTEX push, `CullMode::None`, no blend/bias)
     /// EXCEPT for a 4th color format `R16G16Sfloat` (the `motion_vec` Δuv attachment) and its set-0
     /// layout ([`Self::layout`]).
     pipeline: VulkanGraphicsPipeline,
@@ -509,6 +534,13 @@ pub(crate) struct GpuSceneBundles {
     /// pm_instance_material_rings[i] @1 }`. The recorder binds slot `s` at set 0 when the
     /// PM pipeline is selected.
     pm_bind_groups: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// Textured-PBR T6c: the TEXTURED gbuffer producer pipeline resources, built LAZILY via
+    /// [`Self::build_textured_resources`] (called from `run_windowed` AFTER the bindless
+    /// texture-array table exists — its fallible create is deferred past `boot()`/
+    /// `finish()`, see `runner.rs`'s boot-order comment). `None` until that call lands (or
+    /// permanently, if the bindless table create failed and the runner already tore down
+    /// before reaching it); `Some` for the whole remaining process lifetime afterward.
+    tex: Option<TexturedResources>,
     /// The DEGENERATE legacy vertex buffer (6 identical vertices ⇒ zero-area ⇒
     /// no fragments): pass A's legacy draw target on empty-gather frames —
     /// mirrors the showcase's `showcase_quad_vertices` discipline.
@@ -529,6 +561,16 @@ pub(crate) struct GpuSceneBundles {
     // ── Resolve (pass C) ─────────────────────────────────────────────────────
     resolve_pipeline: ComputePipeline,
     resolve_layout: VulkanBindGroupLayout,
+    /// Render terminator-softening: the SOFTWARE-RESOLVE-ONLY diffuse light-wrap variant
+    /// pipeline (`deferred_pbr_wrap.comp`, `-D TERMINATOR_WRAP=1`), built UNCONDITIONALLY at
+    /// boot alongside [`Self::resolve_pipeline`] (mirroring that pipeline's own always-built
+    /// discipline — the variant is device-agnostic, not RT-gated). Bound to the SAME
+    /// [`Self::resolve_layout`] as the base resolve (the variant changes only the diffuse
+    /// accumulation math, no descriptor — no separate layout is built). Selected instead of
+    /// [`Self::resolve_pipeline`] by [`Self::scene`]'s `terminator_wrap` gate, ONLY when
+    /// `LightingConfig::terminator_softening > 0`; every other frame binds the base pipeline
+    /// (the byte-identical 0%-gate — `deferred_pbr.hlsl`'s frozen-base discipline).
+    resolve_pipeline_wrap: ComputePipeline,
     /// HW-RT rung R2a-4b: the HWRT-variant deferred resolve pipeline (`deferred_pbr_hwrt.comp`)
     /// paired with its 20-binding layout (the 19 software bindings plus binding 19
     /// `AccelerationStructure`). Built at boot ONLY on an RT device (`ray_query_enabled`) under
@@ -592,6 +634,50 @@ pub(crate) struct GpuSceneBundles {
     /// `ceil(composite pixels / LOCAL_SIZE_X)` — the marcher + resolve dispatch
     /// width, boot-fixed to the composite extent (plan D7).
     dispatch_group_count_x: u32,
+}
+
+/// Textured-PBR T6c: the TEXTURED gbuffer producer pipeline resources — see
+/// [`GpuSceneBundles::tex`] / [`GpuSceneBundles::build_textured_resources`] for the
+/// lazy-build rationale (the bindless texture-array table's descriptor-set LAYOUT, a
+/// `create_graphics_pipeline_bindless` input, does not exist at `GpuSceneBundles::boot()`
+/// time).
+struct TexturedResources {
+    /// The 2-SET TEXTURED gbuffer producer pipeline (`gbuffer_mrt_tex.{vs,fs}`) — set 0 =
+    /// [`Self::tex_instance_material_layout`] (VERTEX), set 1 = the bindless texture-array
+    /// set's layout (FRAGMENT), built via
+    /// [`VulkanContext::create_graphics_pipeline_bindless`].
+    raster_pipeline_tex: VulkanGraphicsPipeline,
+    /// The 2-binding set-0 layout [`Self::raster_pipeline_tex`] declares: instances @0
+    /// (VERTEX, the SAME shared `instance_rings`) + instance_materials_tex @1 (VERTEX, its
+    /// own per-slot ring). A SEPARATE layout from
+    /// [`GpuSceneBundles`]'s `pm_instance_material_layout` (a wider element stride —
+    /// `PerInstanceMaterialTex`, 48 B, vs `PerInstanceMaterial`'s 32 B).
+    tex_instance_material_layout: VulkanBindGroupLayout,
+    /// The per-slot TEXTURED instance-material SSBO ring ([`INSTANCE_CAPACITY`]
+    /// [`PerInstanceMaterialTex`](boyko_render::PerInstanceMaterialTex)s = 48 B each,
+    /// zero-seeded). The runner uploads `scratch.material_tex` into slot `token.slot()`
+    /// ONLY on an `any_textured_material` frame (Principle 1 — no OFF-path upload cost).
+    ///
+    /// This RING ITSELF does NOT participate in the F7/F7-hwrt lockstep instance-family
+    /// grow (a disclosed T6c limitation, see the developer report): a scene whose gathered
+    /// instance count grows past [`INSTANCE_CAPACITY`] while using textured materials hits
+    /// `upload_instance_materials_tex`'s hard capacity assert rather than silently
+    /// corrupting memory. (Its bind-group BINDING — [`Self::tex_bind_groups`]'s binding 1
+    /// — is correspondingly never rebound either, since there is no grown buffer for it to
+    /// point at.)
+    pub(crate) tex_instance_material_rings: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// Per-FIF bind groups against [`Self::tex_instance_material_layout`]: slot `i` binds
+    /// `{ instance_rings[i] @0, tex_instance_material_rings[i] @1 }`. The recorder binds
+    /// slot `s` at set 0 when the TEXTURED pipeline is selected. Binding 0 points at the
+    /// SHARED, growable `instance_rings` — [`GpuSceneBundles::grow_shared_instance_rings`]
+    /// rebinds it in lockstep (review W1 fix; mirrors `pm_bind_groups[s]`@0), so a grow
+    /// past [`INSTANCE_CAPACITY`] on a LATER non-textured frame cannot leave this pointing
+    /// at a freed ring for a STILL-LATER textured frame.
+    tex_bind_groups: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// The bindless texture-array descriptor SET, cached by value (a `Copy` FFI handle —
+    /// its LAYOUT is baked into [`Self::raster_pipeline_tex`]'s `VkPipelineLayout`, not
+    /// retained here). Bound at set 1 by the recorder every TEXTURED frame.
+    bindless_set: VkDescriptorSet,
 }
 
 impl GpuSceneBundles {
@@ -664,7 +750,7 @@ impl GpuSceneBundles {
         .expect("invariant: coarse-cull tile-bound storage buffer create");
 
         // ── The PBR material table (vocab binding 7 + resolve binding 4) is now
-        // `Assets<MaterialGpu>`/`MaterialTable`-owned (asset-system rung A1):
+        // `Assets<Material>`/`MaterialTable`-owned (asset-system rung A1):
         // `boyko_app::runner` boot-seeds `MaterialTable` (World NonSend) AFTER user
         // `setup` and BEFORE the first frame's `sync_gbuffer` binds it, so `scene()`
         // reads `material_table.table()` directly — no buffer is created here anymore.
@@ -737,11 +823,7 @@ impl GpuSceneBundles {
         // ── The DEGENERATE legacy vertex buffer (6 identical vertices ⇒ two
         // zero-area triangles ⇒ no fragments): pass A's target on empty-gather
         // frames — the raster pass then only clears depth to far.
-        let degenerate = Vertex {
-            position: [0.0, 0.0, 0.0],
-            normal: [0.0, 0.0, 1.0],
-            color: [1.0, 1.0, 1.0, 1.0],
-        };
+        let degenerate = Vertex::new([0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]);
         let legacy_vertices = [degenerate; 6];
         let vertex_bytes = core::mem::size_of_val(&legacy_vertices) as u64;
         let vertex_buffer = RhiDevice::create_buffer(
@@ -850,7 +932,10 @@ impl GpuSceneBundles {
                 color_formats: &[RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT],
                 depth_format: Some(Format::D32Sfloat),
                 topology: PrimitiveTopology::TriangleList,
-                vertex_layout: Some(VertexBufferLayout { stride: 40, attributes: &attributes }),
+                vertex_layout: Some(VertexBufferLayout {
+                    stride: MESH_VERTEX_STRIDE as u32,
+                    attributes: &attributes,
+                }),
                 push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                 bind_group_layout: Some(&instance_layout),
                 blend: None,
@@ -898,7 +983,10 @@ impl GpuSceneBundles {
                 color_formats: &[RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT],
                 depth_format: Some(Format::D32Sfloat),
                 topology: PrimitiveTopology::TriangleList,
-                vertex_layout: Some(VertexBufferLayout { stride: 40, attributes: &attributes }),
+                vertex_layout: Some(VertexBufferLayout {
+                    stride: MESH_VERTEX_STRIDE as u32,
+                    attributes: &attributes,
+                }),
                 push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
                 bind_group_layout: Some(&pm_instance_material_layout),
                 blend: None,
@@ -1006,14 +1094,34 @@ impl GpuSceneBundles {
             BindGroupLayoutEntry { binding: 15, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
             // SDFDDGI I0: the DDGI probe-irradiance combined image @16 + depth combined image @17 +
             // the `ResolvedDdgi` grid UBO @18 (bound-but-unread; the resolve `.spv` statically
-            // references all three). The set is now EXACT-FILL at 19/19 (== MAX_BIND_GROUP_BINDINGS).
+            // references all three). `resolve_entries` itself is EXACT-FILL at 19/19 and is the
+            // SHARED derivation base for every HWRT-family layout below (`hwrt_entries`/
+            // `denoise_entries`/`vis_mv_entries` all read it directly) — it MUST stay 19 and
+            // UNTOUCHED (textured-PBR T6a's C1 fix: bumping it would shift the HWRT TLAS 19→20).
             BindGroupLayoutEntry { binding: 16, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
             BindGroupLayoutEntry { binding: 17, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
             BindGroupLayoutEntry { binding: 18, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
         ];
+        // Textured-PBR T6a (the critic's C1 fix): binding 19 = `gPbr` (StorageImage) —
+        // SOFTWARE-RESOLVE-ONLY. Appended to a SEPARATE vec (mirroring `hwrt_entries`'s idiom
+        // below) so `resolve_entries` itself is NEVER mutated — every HWRT-family layout
+        // (`hwrt_entries`/`denoise_entries`/`vis_mv_entries`) still derives from the untouched
+        // 19-entry base, so TLAS stays @19 and their binding counts (21/22/24) are unaffected.
+        let mut resolve_software_layout_entries = resolve_entries.to_vec();
+        resolve_software_layout_entries.push(BindGroupLayoutEntry {
+            binding: 19,
+            count: 1,
+            kind: DescriptorKind::StorageImage,
+            stage: ShaderStage::COMPUTE,
+        });
+        debug_assert_eq!(
+            resolve_software_layout_entries.len(),
+            20,
+            "invariant: the software resolve layout is EXACT-FILL at 20 (19 shared + gPbr @19)"
+        );
         let resolve_layout = RhiDevice::create_bind_group_layout(
             device,
-            &BindGroupLayoutDesc { entries: &resolve_entries },
+            &BindGroupLayoutDesc { entries: &resolve_software_layout_entries },
         )
         .expect("invariant: deferred resolve bind-group layout create");
         let resolve_pipeline = RhiDevice::create_compute_pipeline(
@@ -1027,6 +1135,24 @@ impl GpuSceneBundles {
             },
         )
         .expect("invariant: deferred resolve compute pipeline create");
+
+        // Render terminator-softening: the `-D TERMINATOR_WRAP=1` variant pipeline, built
+        // unconditionally (device-agnostic — not RT-gated) alongside `resolve_pipeline`, reusing
+        // the SAME `resolve_layout` (the variant adds no binding; see `deferred_pbr_wrap_spirv`'s
+        // doc). Selected per-frame by `scene`'s `terminator_wrap` gate.
+        let resolve_wrap_cs = RhiDevice::create_shader_module(device, deferred_pbr_wrap_spirv())
+            .expect("invariant: terminator-wrap deferred resolve compute shader module create");
+        let resolve_pipeline_wrap = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &resolve_wrap_cs,
+                entry: c"main",
+                push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+                bind_group_layout: Some(&resolve_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: terminator-wrap deferred resolve compute pipeline create");
 
         // ── HW-RT rung R2a-4b: the HWRT-variant resolve pipeline + its 20-binding layout.
         // Built ONLY on an RT device (`ray_query_enabled`) under `feature = "hwrt"` — the SAME
@@ -1318,6 +1444,7 @@ impl GpuSceneBundles {
             RhiDevice::destroy_shader_module(device, sample_fs);
             RhiDevice::destroy_shader_module(device, sample_vs);
             RhiDevice::destroy_shader_module(device, resolve_cs);
+            RhiDevice::destroy_shader_module(device, resolve_wrap_cs);
             RhiDevice::destroy_shader_module(device, cs);
             RhiDevice::destroy_shader_module(device, fs);
             RhiDevice::destroy_shader_module(device, vs);
@@ -1382,7 +1509,7 @@ impl GpuSceneBundles {
                 )
                 .expect("invariant: motion-vector bind-group layout create");
 
-                // The MV pipeline: identical to `raster_pipeline` (same 40-byte vertex layout, D32
+                // The MV pipeline: identical to `raster_pipeline` (same 64-byte vertex layout, D32
                 // depth, 88-byte VERTEX push, CullMode::None, no blend/bias) EXCEPT a 4th color
                 // format `R16G16Sfloat` (the motion_vec Δuv attachment) + the 3-binding MV layout.
                 let mv_vs = RhiDevice::create_shader_module(device, gbuffer_mrt_mv_vs_spirv())
@@ -1410,7 +1537,7 @@ impl GpuSceneBundles {
                         depth_format: Some(Format::D32Sfloat),
                         topology: PrimitiveTopology::TriangleList,
                         vertex_layout: Some(VertexBufferLayout {
-                            stride: 40,
+                            stride: MESH_VERTEX_STRIDE as u32,
                             attributes: &mv_attributes,
                         }),
                         push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
@@ -1583,7 +1710,7 @@ impl GpuSceneBundles {
                 )
                 .expect("invariant: mvpm bind-group layout create");
 
-                // F8-mv: the combined pipeline — identical to `mv_pipeline` (same 40-byte
+                // F8-mv: the combined pipeline — identical to `mv_pipeline` (same 64-byte
                 // vertex layout, D32 depth, 88-byte VERTEX push, CullMode::None, no
                 // blend/bias, the same 4 color formats) EXCEPT the 4-binding `mvpm_layout`.
                 let mvpm_vs = RhiDevice::create_shader_module(device, gbuffer_mrt_mvpm_vs_spirv())
@@ -1606,7 +1733,7 @@ impl GpuSceneBundles {
                         depth_format: Some(Format::D32Sfloat),
                         topology: PrimitiveTopology::TriangleList,
                         vertex_layout: Some(VertexBufferLayout {
-                            stride: 40,
+                            stride: MESH_VERTEX_STRIDE as u32,
                             attributes: &mv_attributes,
                         }),
                         push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
@@ -1681,6 +1808,10 @@ impl GpuSceneBundles {
             pm_instance_material_layout,
             pm_instance_material_rings,
             pm_bind_groups,
+            // Textured-PBR T6c: built LAZILY (see `Self::build_textured_resources`'s doc) —
+            // `boot()` itself never constructs the TEXTURED pipeline (the bindless
+            // texture-array table does not exist yet at this call site).
+            tex: None,
             vertex_buffer,
             marcher,
             vocab_layout,
@@ -1690,6 +1821,7 @@ impl GpuSceneBundles {
             clipmap,
             resolve_pipeline,
             resolve_layout,
+            resolve_pipeline_wrap,
             #[cfg(feature = "hwrt")]
             resolve_pipeline_hwrt,
             #[cfg(feature = "hwrt")]
@@ -1712,6 +1844,150 @@ impl GpuSceneBundles {
         }
     }
 
+    /// Textured-PBR T6c: builds the TEXTURED gbuffer producer pipeline + its dedicated
+    /// per-instance-material SSBO ring + per-FIF bind groups, storing them in [`Self::tex`]
+    /// for the remaining process lifetime. Called ONCE from `run_windowed`, AFTER the
+    /// bindless texture-array table (`BindlessTextureTable`) exists — its creation is
+    /// deferred past `boot()`/`finish()` (`runner.rs`'s boot-order comment: the fallible
+    /// create needs `AssetRefcountPlugin` resources only guaranteed present after every
+    /// plugin's `build()` has run), so the TEXTURED pipeline's set-1 layout
+    /// (`bindless.set().set_layout()`) is unavailable at [`Self::boot`] time.
+    ///
+    /// Mirrors [`Self::boot`]'s PM pipeline construction (@862-947 of the pre-T6c source),
+    /// widened for the 2-set layout ([`VulkanContext::create_graphics_pipeline_bindless`])
+    /// and the 5-attribute textured vertex layout (position/normal/color/uv/tangent).
+    ///
+    /// # Panics
+    /// Panics (`expect("invariant: ...")`) on any RHI create failure — mirrors
+    /// [`Self::boot`]'s contract (a device OOM at scene-boot time is a setup failure).
+    pub(crate) fn build_textured_resources(
+        &mut self,
+        ctx: &VulkanContext,
+        bindless: &BindlessTextureTable,
+    ) {
+        let device = ctx;
+
+        // ── The set-0 TEXTURED instance-material layout + the FIF-ringed SSBOs + bind
+        // groups. A SEPARATE layout from `pm_instance_material_layout` (a wider element
+        // stride — `PerInstanceMaterialTex`, 48 B, vs `PerInstanceMaterial`'s 32 B).
+        let tex_instance_material_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::VERTEX,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::VERTEX,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: TEX instance-material bind-group layout create");
+
+        // ── The 2-SET TEXTURED mesh-MRT G-buffer producer graphics pipeline (pass A).
+        // Set 0 = `tex_instance_material_layout` (VERTEX); set 1 = the bindless
+        // texture-array set's layout (FRAGMENT) — via `create_graphics_pipeline_bindless`
+        // (T6c plan Decision D5), NOT the generic `RhiDevice::create_graphics_pipeline`.
+        let tex_vs = RhiDevice::create_shader_module(device, gbuffer_mrt_tex_vs_spirv())
+            .expect("invariant: TEX mesh-MRT vertex shader module create");
+        let tex_fs = RhiDevice::create_shader_module(device, gbuffer_mrt_tex_fs_spirv())
+            .expect("invariant: TEX mesh-MRT fragment shader module create");
+        // The widened 5-attribute vertex layout (T6c plan Decision D6): position@0/
+        // normal@12/color@24 (unchanged from the base pipeline) + uv@40/tangent@48 (new —
+        // `boyko_render::mesh::Vertex`'s trailing fields), all against the SAME 64-byte
+        // `MESH_VERTEX_STRIDE` (every mesh already carries this stride, T3).
+        let tex_attributes = [
+            VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
+            VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
+            VertexAttribute { location: 3, offset: 40, format: VertexFormat::Float32x2 },
+            VertexAttribute { location: 4, offset: 48, format: VertexFormat::Float32x4 },
+        ];
+        let raster_pipeline_tex = ctx
+            .create_graphics_pipeline_bindless(
+                &GraphicsPipelineDesc {
+                    vertex_module: &tex_vs,
+                    vertex_entry: c"main",
+                    fragment_module: &tex_fs,
+                    fragment_entry: c"main",
+                    // 3 base G-buffer attachments + the 4th `gPbr` (T6a) — always 4 color
+                    // formats declared; the recorder's `color_attachment_count` matches the
+                    // bound rendering scope (4 on every TEXTURED frame, W2-b).
+                    color_formats: &[
+                        RASTER_COLOR_FORMAT,
+                        RASTER_COLOR_FORMAT,
+                        RASTER_COLOR_FORMAT,
+                        TEX_GPBR_COLOR_FORMAT,
+                    ],
+                    depth_format: Some(Format::D32Sfloat),
+                    topology: PrimitiveTopology::TriangleList,
+                    vertex_layout: Some(VertexBufferLayout {
+                        stride: MESH_VERTEX_STRIDE as u32,
+                        attributes: &tex_attributes,
+                    }),
+                    push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
+                    bind_group_layout: Some(&tex_instance_material_layout),
+                    blend: None,
+                    cull_mode: CullMode::None,
+                    depth_bias: None,
+                },
+                bindless.set().set_layout(),
+            )
+            .expect("invariant: TEX mesh-MRT graphics pipeline create");
+        // SAFETY: both modules were created on `device` and are consumed by the pipeline
+        // create; each is destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, tex_fs);
+            RhiDevice::destroy_shader_module(device, tex_vs);
+        }
+
+        let tex_material_ring_bytes = (TEX_INSTANCE_CAPACITY * PER_INSTANCE_MATERIAL_TEX_BYTES) as u64;
+        let tex_instance_material_rings: [BoundBuffer; FRAMES_IN_FLIGHT] =
+            core::array::from_fn(|_| {
+                let b = RhiDevice::create_buffer(
+                    device,
+                    &BufferDesc {
+                        size: tex_material_ring_bytes,
+                        usage: BufferUsage::STORAGE,
+                        location: MemoryLocation::HostVisibleCoherent,
+                    },
+                )
+                .expect("invariant: TEX instance-material SSBO ring slot create");
+                let mapped = RhiDevice::buffer_mapped_ptr(device, &b)
+                    .expect("invariant: host-visible TEX instance-material SSBO is mapped");
+                zero_fill(mapped, tex_material_ring_bytes as usize);
+                b
+            });
+        let tex_bind_groups: [VulkanBindGroup; FRAMES_IN_FLIGHT] = core::array::from_fn(|i| {
+            RhiDevice::create_bind_group(
+                device,
+                &BindGroupDesc {
+                    layout: &tex_instance_material_layout,
+                    entries: &[
+                        BindGroupEntry::StorageBuffer { buffer: &self.instance_rings[i] },
+                        BindGroupEntry::StorageBuffer { buffer: &tex_instance_material_rings[i] },
+                    ],
+                },
+            )
+            .expect("invariant: TEX instance-material bind group create")
+        });
+
+        self.tex = Some(TexturedResources {
+            raster_pipeline_tex,
+            tex_instance_material_layout,
+            tex_instance_material_rings,
+            tex_bind_groups,
+            bindless_set: bindless.set().set(),
+        });
+    }
+
     /// Cheap, allocation-free steady-state check (asset-streaming plan F7 review W1):
     /// `true` iff `needed` exceeds slot `slot`'s current instance-family capacity.
     /// Touches no World resource at all (`host.gpu` is a plain `WindowHost` field) —
@@ -1729,9 +2005,10 @@ impl GpuSceneBundles {
 
     /// Asset-streaming plan F7-hwrt (task#11): the LOCKSTEP instance-family-ring grow
     /// BOTH legs share — `instance_rings[s]` + `pm_instance_material_rings[s]` (defer
-    /// old, no seed) + rebind `instance_bind_groups[s]`@0 / `pm_bind_groups[s]`@0/@1 +
-    /// the interp pair/out-slot co-grow ([`InterpGpuProd::grow_slot`], which itself
-    /// repoints `interp_bg[s]`@0/@1/@2 against the just-grown `instance_rings[s]`).
+    /// old, no seed) + rebind `instance_bind_groups[s]`@0 / `pm_bind_groups[s]`@0/@1 /
+    /// (textured-PBR T6c review W1) `tex_bind_groups[s]`@0 + the interp pair/out-slot
+    /// co-grow ([`InterpGpuProd::grow_slot`], which itself repoints `interp_bg[s]`@0/@1/@2
+    /// against the just-grown `instance_rings[s]`).
     /// Extracted from the pre-task#11 `grow_instance_family_if_needed`'s body — behavior
     /// is IDENTICAL to that body's non-RT portion (verified by
     /// [`Self::grow_instance_family_nonrt`], its sole caller before this split).
@@ -1751,7 +2028,8 @@ impl GpuSceneBundles {
     ///
     /// The caller guarantees slot `s`'s in-flight fence was waited THIS frame — every
     /// descriptor set this fn repoints (`instance_bind_groups[s]`, `pm_bind_groups[s]`,
-    /// `interp`'s `interp_bg[s]`) is therefore non-command-buffer-pending.
+    /// `tex_bind_groups[s]` when `self.tex.is_some()`, `interp`'s `interp_bg[s]`) is
+    /// therefore non-command-buffer-pending.
     unsafe fn grow_shared_instance_rings(
         &mut self,
         s: usize,
@@ -1825,6 +2103,31 @@ impl GpuSceneBundles {
         unsafe {
             rebind_storage_buffer(ctx, &self.pm_bind_groups[s], 0, &self.instance_rings[s]);
             rebind_storage_buffer(ctx, &self.pm_bind_groups[s], 1, &self.pm_instance_material_rings[s]);
+        }
+
+        // Textured-PBR T6c (review W1 — latent silent device-UAF fix): `tex_bind_groups[s]`'s
+        // binding 0 shares the SAME growable `instance_rings[s]` index space as
+        // `pm_bind_groups[s]`'s binding 0 — a mechanical mirror of the rebind immediately
+        // above, restricted to the ONE growable binding. Binding 1
+        // (`tex_instance_material_rings[s]`) is FIXED at boot `INSTANCE_CAPACITY` (T6c's
+        // disclosed non-participation in this grow — see `TexturedResources`'s doc) and is
+        // therefore NOT rebound here (there is no grown buffer to point it at). WITHOUT this
+        // rebind, growing `instance_rings[s]` would defer the OLD ring (freed
+        // `RETIRE_DELAY` frames later, see `retired.push` above) while `tex_bind_groups[s]`
+        // @0 kept pointing at it — a later TEXTURED frame would then bind a descriptor
+        // referencing freed device memory (a silent device-UAF; no validation layer on this
+        // box to catch it). `self.tex` may be `None` (the TEXTURED pipeline never got built
+        // — e.g. the bindless table failed to create), in which case there is no
+        // `tex_bind_groups[s]` to rebind.
+        if let Some(tex) = self.tex.as_ref() {
+            // SAFETY: slot `s`'s fence was waited this frame (this fn's caller contract
+            // above) — `tex.tex_bind_groups[s]`'s set is non-pending, so rewriting its
+            // binding 0 in place is sound. Repoints to the SAME just-grown
+            // `instance_rings[s]` the `instance_bind_groups[s]`/`pm_bind_groups[s]`@0
+            // rebinds above use.
+            unsafe {
+                rebind_storage_buffer(ctx, &tex.tex_bind_groups[s], 0, &self.instance_rings[s]);
+            }
         }
 
         // SAFETY: same fence contract as above — `interp.grow_slot`'s own precondition
@@ -2090,7 +2393,7 @@ impl GpuSceneBundles {
         // temporal reproject pass runs after the à-trous chain. `false` (the default) ⇒ the base 3-MRT
         // raster + no temporal pass ⇒ byte-identical.
         #[cfg(feature = "hwrt")] temporal_enabled: bool,
-        // Asset-system rung A1: the GPU mirror of the World-owned `Assets<MaterialGpu>`
+        // Asset-system rung A1: the GPU mirror of the World-owned `Assets<Material>`
         // (boot-seeded by `boyko_app::runner` after user `setup`, before the first
         // `sync_gbuffer` binds it). `material_table.table()` replaces the old
         // boot-owned 1-slot stub; only slot 0 is ever registered this rung, so the
@@ -2102,6 +2405,18 @@ impl GpuSceneBundles {
         // every all-default scene (the goldens), so the recorder binds the FROZEN base
         // pipeline (byte-identity by construction, F8 §2.4).
         any_non_default_material: bool,
+        // Textured-PBR T6c: `true` iff THIS gather scattered at least one bound bindless
+        // texture slot (`MeshRenderScratch::any_textured_material`, read by the runner
+        // AFTER `gather_material_tex_into`). Gates `raster_pipeline_tex`/`tex_bind_group`/
+        // `bindless_set` below — `false` on every non-textured scene, so the recorder binds
+        // the FROZEN base/pm pipeline.
+        any_textured_material: bool,
+        // Render terminator-softening: `true` iff `LightingConfig::terminator_softening > 0`
+        // (read by the runner from the `LightingConfig` resource, the SAME `world.try_resource`
+        // pattern `ddgi_enabled` uses). Selects [`Self::resolve_pipeline_wrap`] in place of
+        // [`Self::resolve_pipeline`] below — `false` (the default) binds the base pipeline, the
+        // byte-identical 0%-gate (`deferred_pbr.hlsl`'s frozen-base discipline).
+        terminator_wrap: bool,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -2249,7 +2564,14 @@ impl GpuSceneBundles {
             light_index_alloc: None,
             cluster_cull_push: [0u8; 16],
             cluster_count: 0,
-            resolve_pipeline: &self.resolve_pipeline,
+            // Render terminator-softening: swap in the wrap-variant pipeline when armed (the
+            // `terminator_wrap` param doc above); both pipelines share `resolve_layout` (the
+            // variant adds no descriptor), so no other field here changes.
+            resolve_pipeline: if terminator_wrap {
+                &self.resolve_pipeline_wrap
+            } else {
+                &self.resolve_pipeline
+            },
             resolve_layout: &self.resolve_layout,
             // R2a-4b: the HWRT resolve pipeline+layout+per-FIF TLAS triple — `Some` only when the
             // boot built the HWRT resources (RT device + hwrt) AND the TLAS ring exists. All three
@@ -2511,6 +2833,23 @@ impl GpuSceneBundles {
             pm_enabled: any_non_default_material,
             raster_pipeline_pm: any_non_default_material.then_some(&self.raster_pipeline_pm),
             pm_bind_group: any_non_default_material.then(|| &self.pm_bind_groups[slot]),
+            // Textured-PBR T6c: the TEXTURED gate + refs. `tex_enabled` is the per-frame
+            // `any_textured_material` read; the pipeline/bind-group/bindless-set refs are
+            // `Some` iff BOTH `any_textured_material` AND `self.tex` exists (`self.tex` is
+            // built LAZILY after boot — see `Self::build_textured_resources`; it may be
+            // permanently `None` if that build never ran). `false`/`None` on every
+            // non-textured scene ⇒ the recorder binds the FROZEN base/pm pipeline. This
+            // frame's bind group is `tex.tex_bind_groups[slot]` (the FENCED slot).
+            tex_enabled: any_textured_material,
+            raster_pipeline_tex: any_textured_material
+                .then(|| self.tex.as_ref().map(|t| &t.raster_pipeline_tex))
+                .flatten(),
+            tex_bind_group: any_textured_material
+                .then(|| self.tex.as_ref().map(|t| &t.tex_bind_groups[slot]))
+                .flatten(),
+            bindless_set: any_textured_material
+                .then(|| self.tex.as_ref().map(|t| t.bindless_set))
+                .flatten(),
         }
     }
 
@@ -2521,6 +2860,17 @@ impl GpuSceneBundles {
     #[inline]
     pub(crate) fn interp_pair_slot(&self, slot: usize) -> &BoundBuffer {
         &self.interp.pairs[slot]
+    }
+
+    /// Textured-PBR T6c: the FENCED slot's TEXTURED instance-material SSBO — the write
+    /// target of the runner's per-frame
+    /// [`upload_instance_materials_tex`](boyko_render::upload_instance_materials_tex).
+    /// Returns `None` if [`Self::build_textured_resources`] never ran (`self.tex` absent —
+    /// e.g. the bindless texture table failed to create). The sibling in-flight frame binds
+    /// the OTHER slot — the same lock-free discipline as the base instance ring.
+    #[inline]
+    pub(crate) fn tex_instance_material_slot(&self, slot: usize) -> Option<&BoundBuffer> {
+        self.tex.as_ref().map(|t| &t.tex_instance_material_rings[slot])
     }
 
     /// HW-RT rung R2a-3: the FENCED slot's mesh-id SSBO — the write target of the runner's
@@ -2634,6 +2984,9 @@ impl GpuSceneBundles {
             RhiDevice::destroy_graphics_pipeline(ctx, self.present_pipeline);
             RhiDevice::destroy_bind_group_layout(ctx, self.present_layout);
             RhiDevice::destroy_compute_pipeline(ctx, self.resolve_pipeline);
+            // Render terminator-softening: the wrap-variant pipeline shares `resolve_layout`
+            // with `resolve_pipeline` — both pipelines are destroyed before their shared layout.
+            RhiDevice::destroy_compute_pipeline(ctx, self.resolve_pipeline_wrap);
             RhiDevice::destroy_bind_group_layout(ctx, self.resolve_layout);
             // HW-RT rung R2a-4b: the HWRT resolve pipeline + its 21-binding layout, `Option`-guarded
             // (present only on an RT device under `feature = "hwrt"`). Pipeline before layout.
@@ -2686,6 +3039,24 @@ impl GpuSceneBundles {
             RhiDevice::destroy_bind_group_layout(ctx, self.pm_instance_material_layout);
             for b in self.pm_instance_material_rings {
                 RhiDevice::destroy_buffer(ctx, b);
+            }
+            // Textured-PBR T6c: the TEXTURED resources bind the SHARED `instance_rings` (@0)
+            // plus their own instance-material ring (@1); torn down BEFORE the shared instance
+            // bind groups/rings below (bind groups first, then the pipeline/layout, then the
+            // owned buffers) — mirrors the PM teardown ordering immediately above.
+            // `Option`-guarded: `self.tex` is `None` if `build_textured_resources` never ran
+            // (e.g. the bindless texture table failed to create). The bindless texture-array
+            // descriptor SET/layout itself is owned and torn down separately by
+            // `BindlessTextureTable::destroy` — not touched here.
+            if let Some(tex) = self.tex {
+                for bg in tex.tex_bind_groups {
+                    RhiDevice::destroy_bind_group(ctx, bg);
+                }
+                RhiDevice::destroy_graphics_pipeline(ctx, tex.raster_pipeline_tex);
+                RhiDevice::destroy_bind_group_layout(ctx, tex.tex_instance_material_layout);
+                for b in tex.tex_instance_material_rings {
+                    RhiDevice::destroy_buffer(ctx, b);
+                }
             }
             // HW-RT Rung 3b step 5a: the MESH motion-vector resources bind the SHARED
             // `instance_rings` (@0) plus their own prev-instance + motion-cam UBO rings; torn down

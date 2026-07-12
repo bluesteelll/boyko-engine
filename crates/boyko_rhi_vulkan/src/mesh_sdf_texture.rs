@@ -92,6 +92,8 @@ impl MeshSdfTexture {
                 dimension: TextureDimension::D3,
                 usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
                 array_layers: 1,
+                mip_levels: 1,
+                view_format: None,
             },
         )?;
 

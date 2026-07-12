@@ -6,6 +6,7 @@ use boyko_math::Vec3;
 
 use crate::mesh::{MeshGpu, Vertex};
 use crate::mesh_data::MeshData;
+use crate::tangent::generate_tangents;
 
 /// The neutral vertex color OBJ carries no channel for — the flat-shaded
 /// gbuffer albedo lane [`Vertex::color`] defaults to.
@@ -16,11 +17,16 @@ const DEFAULT_VERTEX_COLOR: [f32; 4] = [0.8, 0.8, 0.8, 1.0];
 ///
 /// # Grammar
 ///
-/// `v x y z` (position), `vn x y z` (normal), `vt u v` (texcoord — parsed for
-/// correct negative-index resolution and dedup-key shape, then DISCARDED, see
-/// the limitations below), `f ...` (a face: 3+ corners, each `v`, `v/vt`,
+/// `v x y z` (position), `vn x y z` (normal), `vt u v` (texcoord — carried into
+/// the output [`Vertex::uv`]), `f ...` (a face: 3+ corners, each `v`, `v/vt`,
 /// `v/vt/vn`, or `v//vn`). `o` / `g` / `usemtl` / `mtllib` / a blank / a `#`
 /// comment / any other unrecognized leading token is skipped, not an error.
+///
+/// After dedup, [`generate_tangents`](crate::tangent::generate_tangents) runs once
+/// over the whole mesh (a post-pass — tangent generation needs the full triangle
+/// list). A `.obj` with no `vt` lines leaves every `uv` at `[0.0, 0.0]`, so every
+/// tangent falls back to the arbitrary orthonormal case (harmless — unread
+/// without a normal map).
 ///
 /// Face-corner indices are 1-based OR negative-relative (O2): a negative
 /// index resolves as `pool_len + idx`, where `pool_len` is the relevant pool's
@@ -85,7 +91,8 @@ impl AssetLoader for ObjMeshLoader {
             return Err(decode_error("obj file has no faces".to_owned()));
         }
 
-        let (vertices, indices) = dedup_corners(corners);
+        let (mut vertices, indices) = dedup_corners(corners);
+        generate_tangents(&mut vertices, &indices);
         Ok(MeshData { vertices, indices })
     }
 }
@@ -146,10 +153,10 @@ fn decode_face(
                 Some(i) => normals[i as usize],
                 None => flat_normal.expect("invariant: has_vn is false whenever a corner's vn is None"),
             };
-            out.push(CornerRecord {
-                key,
-                vertex: Vertex { position: positions[corner.v as usize], normal, color: DEFAULT_VERTEX_COLOR },
-            });
+            let uv = corner.vt.map_or([0.0, 0.0], |i| uvs[i as usize]);
+            let mut vertex = Vertex::new(positions[corner.v as usize], normal, DEFAULT_VERTEX_COLOR);
+            vertex.uv = uv;
+            out.push(CornerRecord { key, vertex });
         }
     }
     Ok(())
@@ -396,8 +403,8 @@ f 1//1 2//1 3//1 4//1
         assert_eq!(mesh.indices.len(), 6, "one quad fan-triangulates to 2 triangles (6 indices)");
     }
 
-    /// Both `f v//vn` and `f v/vt/vn` corner forms parse (the `vt` is
-    /// discarded from the output `Vertex`, but must not break decode).
+    /// Both `f v//vn` and `f v/vt/vn` corner forms parse (a corner with no `vt`
+    /// leaves `Vertex::uv` at `[0.0, 0.0]`; neither form breaks decode).
     #[test]
     fn decode_accepts_v_slash_slash_vn_and_v_slash_vt_slash_vn_forms() {
         let obj = "\

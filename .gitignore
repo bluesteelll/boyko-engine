@@ -20,3 +20,8 @@ graphify-out/
 
 # mdBook build output (the source is book/src/; CI rebuilds for GitHub Pages)
 /book/output/
+
+# Owner-provided PBR material packs (large, externally-sourced texture sets — never
+# committed; see assets/materials/README.md for the folder convention).
+/assets/materials/*
+!/assets/materials/README.md

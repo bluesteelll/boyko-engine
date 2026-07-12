@@ -134,7 +134,7 @@ impl Plugin for EnginePlugins {
         // Asset-streaming plan F2: the refcount lifetime pipeline. Inserts
         // `RefcountDeltas`/`DeferredFree` and registers `apply_refcount_deltas`
         // (no ordering edge needed yet — see that system's doc). The `Assets<
-        // MeshGpu>`/`Assets<MaterialGpu>` resources it reads are inserted by
+        // MeshGpu>`/`Assets<Material>` resources it reads are inserted by
         // `runner::run_windowed` before the frame loop starts, well after this
         // `build()` call, so add-order here does not matter.
         app.add_plugin(AssetRefcountPlugin);

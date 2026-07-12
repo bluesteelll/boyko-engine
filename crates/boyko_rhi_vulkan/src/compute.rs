@@ -307,9 +307,39 @@ embed_spirv! {
     /// precision — is absorbed by the `ddgi_probe_gi_resolve` golden's tight ULP tolerance. NB: pinning
     /// MORE sites `precise` was reverted — it perturbed DXC's global optimization enough to drift the
     /// GI-OFF PBR path off the golden). GI still OFF by default → the injection never runs →
-    /// byte-identical pixels (the 0%-gate); only `ddgi_indirect=true` samples.
+    /// byte-identical pixels (the 0%-gate); only `ddgi_indirect=true` samples. Textured-PBR T6a: the
+    /// `gPbr` STORAGE image @19 (SOFTWARE-ONLY, `#if !HWRT`) + the `MATERIAL_FLAG_TEXTURED_BIT`-gated
+    /// metallic/roughness/AO/emissive override — the file grows further; the flag bit is 0 on every
+    /// current material (the injection never dynamically fires) → byte-identical pixels (the 0%-gate).
+    /// The HWRT-family `.spv` below are BYTE-IDENTICAL to their pre-T6a state (verified by recompile
+    /// diff — everything T6a adds is inside `#if !HWRT`/`#else`-mirrored blocks).
     DEFERRED_PBR_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/deferred_pbr.comp.spv")
+}
+
+embed_spirv! {
+    /// The Render terminator-softening SOFTWARE-RESOLVE-ONLY variant SPIR-V
+    /// (`shaders/deferred_pbr_wrap.comp.spv`, compiled `-T cs_6_0 -D TERMINATOR_WRAP=1`).
+    ///
+    /// Compiled from the SAME `deferred_pbr.hlsl` with the `#if TERMINATOR_WRAP` diffuse
+    /// light-wrap arm active at both direct-light accumulation sites (`diff * nol_wrapped(NoL,
+    /// ts) + spec * NoL` instead of the physical `(diff + spec) * NoL` clamp) — the frozen-base
+    /// discipline (mirrors `gbuffer_mrt.fs.hlsl`'s `#ifdef` variants): [`DEFERRED_PBR_SPV`]
+    /// above (`TERMINATOR_WRAP` undefined) preprocesses CHARACTER-IDENTICAL to the pre-feature
+    /// source, so this variant is a strictly ADDITIVE compile that never perturbs the base
+    /// module's bytes (a runtime `if (ts > 0.0) {..} else {..}` guard was tried first and
+    /// rejected: the mere PRESENCE of the extra branch/loads drifted DXC's FMA fusion in the
+    /// base module even on the `ts == 0` path).
+    ///
+    /// Selected by the host ONLY when `LightingConfig::terminator_softening > 0` (the
+    /// `gpu_scene::GpuSceneBundles::scene` `terminator_wrap` gate); every other frame binds
+    /// [`DEFERRED_PBR_SPV`]. Reuses the SAME 20-binding software resolve layout as
+    /// [`DEFERRED_PBR_SPV`] (the variant changes only diffuse-accumulation math, no
+    /// descriptor), so no separate bind-group layout is built for it. An `HWRT +
+    /// TERMINATOR_WRAP` combo is explicitly OUT OF SCOPE this rung — never compiled, never
+    /// selected (the HWRT-family `.spv` below are unaffected by this variant).
+    DEFERRED_PBR_WRAP_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/deferred_pbr_wrap.comp.spv")
 }
 
 embed_spirv! {
@@ -320,8 +350,11 @@ embed_spirv! {
     /// `RaytracingAccelerationStructure`, averaged) instead of the CSM shadow-map sample, so the module
     /// carries `OpCapability RayQueryKHR` + `SPV_KHR_ray_query` + the 20th descriptor. Gated behind
     /// `feature = "hwrt"` + a runtime `ctx.ray_query_enabled()` +
-    /// `RayBackendConfig.table[Shadow][Mesh] == HardwareTri`; the software `.spv` above stays the frozen
-    /// 65456-byte golden artifact (the `#else` is byte-verbatim, verified by a recompile temp-diff).
+    /// `RayBackendConfig.table[Shadow][Mesh] == HardwareTri`; THIS `.spv` stays byte-verbatim across
+    /// changes scoped to the software-only `#if !HWRT` arm (e.g. textured-PBR T6a's `gPbr` binding +
+    /// flag-gated override) — the `#else` arm this file compiles is byte-verbatim, verified by a
+    /// recompile temp-diff. The SOFTWARE `.spv` above is NOT byte-frozen (it grows per rung; the
+    /// PIXEL-GOLDEN, not a byte count, is its authority).
     #[cfg(feature = "hwrt")]
     DEFERRED_PBR_HWRT_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/deferred_pbr_hwrt.comp.spv")
@@ -539,7 +572,10 @@ embed_spirv! {
 embed_spirv! {
     /// The committed mesh-MRT G-buffer PRODUCER vertex SPIR-V (`shaders/gbuffer_mrt.vs.hlsl`).
     /// Vertex layout: position (loc 0, offset 0) + world normal (loc 2, offset 12) + color
-    /// (loc 1, offset 24), a 40-byte stride. Reads the set-0 `InstanceModelCol` SSBO + the
+    /// (loc 1, offset 24). The shader itself declares no stride (a `VkVertexInputBindingDescription`
+    /// property the HOST pipeline sets, `boyko_render::mesh::VERTEX_STRIDE` — 64 bytes since the
+    /// trailing `uv`/`tangent` fields were appended; this shader reads only the first 3 attributes,
+    /// so it is unaffected). Reads the set-0 `InstanceModelCol` SSBO + the
     /// 88-byte `{ view_proj; cam_eye; base_instance; use_model_matrix }` VERTEX push
     /// ([`GBUFFER_PUSH_BYTES`](crate::swapchain::GBUFFER_PUSH_BYTES)); `use_model_matrix == 0`
     /// is the legacy merged-draw arm, `== 1` the instanced arm. Exported for the host layer
@@ -643,6 +679,44 @@ embed_spirv! {
     #[cfg(feature = "hwrt")]
     GBUFFER_MRT_MVPM_FS_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/gbuffer_mrt_mvpm.fs.spv")
+}
+
+embed_spirv! {
+    /// Textured-PBR rung T6c TEXTURED-variant mesh-MRT G-buffer PRODUCER vertex SPIR-V
+    /// (`shaders/gbuffer_mrt_tex.vs.spv`, compiled from `gbuffer_mrt.vs.hlsl` with
+    /// `-D TEXTURED=1`). An INDEPENDENT #ifdef axis from PER_INSTANCE_MATERIAL/
+    /// MOTION_VECTORS (never compiled together with either — T6c plan Decision D4). Reads a
+    /// per-instance TEXTURED material PAYLOAD SSBO (set-0 binding 1, VERTEX —
+    /// `PerInstanceMaterialTex`) at the SAME `pc.base_instance + SV_InstanceID` index the
+    /// model-matrix arm already uses, PLUS the vertex `uv`/`tangent` attributes (declared
+    /// 4th/5th, DXC-assigned SPIR-V locations 3/4), building the tangent-space basis
+    /// `world_T = normalize(mul(m3, tangent.xyz))` (the PLAIN model 3x3, glTF/Mikktspace
+    /// convention). Bound into the 2-set TEXTURED raster pipeline (set 0 = the
+    /// `PerInstanceMaterialTex` layout, VERTEX; set 1 = the bindless texture-array set,
+    /// FRAGMENT) with the widened 64-byte `MESH_VERTEX_STRIDE` vertex layout (position@0 /
+    /// normal@12 / color@24 / uv@40 / tangent@48). The base [`GBUFFER_MRT_VS_SPV`] stays the
+    /// byte-frozen 3-MRT golden (never recompiled by T6c — the ENTIRE new axis is
+    /// `#ifdef TEXTURED`-gated).
+    GBUFFER_MRT_TEX_VS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/gbuffer_mrt_tex.vs.spv")
+}
+
+embed_spirv! {
+    /// Textured-PBR rung T6c TEXTURED-variant mesh-MRT G-buffer PRODUCER fragment SPIR-V
+    /// (`shaders/gbuffer_mrt_tex.fs.spv`, compiled from `gbuffer_mrt.fs.hlsl` with
+    /// `-D TEXTURED=1`). Samples the bindless texture array (set 1, `NonUniformResourceIndex`-
+    /// gated — see the `textured_nonuniform_spirv` hermetic proof) for gAlbedo (modulated by
+    /// `base_color`), performs tangent-space normal mapping into gNormal (the TBN basis is
+    /// glTF/Mikktspace convention; the sampled green channel is separately negated per this
+    /// engine's own convention for OpenGL-style input maps — see `gbuffer_mrt.fs.hlsl`'s
+    /// GREEN-CHANNEL CONVENTION block; geometric normal when unbound), and writes a 4th MRT
+    /// `SV_Target3 pbr` (`R16G16B16A16_SFLOAT`) carrying `[metallic, roughness, AO-modulation,
+    /// emissive-luminance-modulation]` (glTF metal-rough channel convention: metallic = B,
+    /// roughness = G) — read by the deferred SOFTWARE resolve's flag-gated `gPbr.Load`
+    /// (T6a). Paired with [`gbuffer_mrt_tex_vs_spirv`]; the base [`GBUFFER_MRT_FS_SPV`] stays
+    /// byte-frozen (never recompiled by T6c).
+    GBUFFER_MRT_TEX_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/gbuffer_mrt_tex.fs.spv")
 }
 
 embed_spirv! {
@@ -857,6 +931,19 @@ pub fn sdf_gbuffer_composite_spirv() -> &'static [u32] {
 #[inline]
 pub fn deferred_pbr_spirv() -> &'static [u32] {
     DEFERRED_PBR_SPV.as_words()
+}
+
+/// The Render terminator-softening variant SPIR-V (`-D TERMINATOR_WRAP=1`) as a `u32` word
+/// stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// Binds into the SAME 20-binding software resolve layout as [`deferred_pbr_spirv`] (the
+/// variant changes only the diffuse accumulation math, no descriptor). Selected instead of
+/// [`deferred_pbr_spirv`] only when `LightingConfig::terminator_softening > 0`; NOT
+/// `#[cfg(feature = "hwrt")]`-gated (a software-resolve-only variant, see [`DEFERRED_PBR_WRAP_SPV`]).
+#[inline]
+pub fn deferred_pbr_wrap_spirv() -> &'static [u32] {
+    DEFERRED_PBR_WRAP_SPV.as_words()
 }
 
 /// The R2a-4b HWRT-variant deferred-resolve SPIR-V (`shaders/deferred_pbr_hwrt.comp.spv`) as a `u32`
@@ -1113,6 +1200,27 @@ pub fn gbuffer_mrt_mvpm_vs_spirv() -> &'static [u32] {
 #[inline]
 pub fn gbuffer_mrt_mvpm_fs_spirv() -> &'static [u32] {
     GBUFFER_MRT_MVPM_FS_SPV.as_words()
+}
+
+/// Textured-PBR rung T6c TEXTURED-variant mesh-MRT gbuffer VERTEX SPIR-V as a `u32` word
+/// stream. Bound into the 2-set TEXTURED raster pipeline (set 0 = the `PerInstanceMaterialTex`
+/// layout, VERTEX; set 1 = the bindless texture-array set, FRAGMENT) with the widened 64-byte
+/// `MESH_VERTEX_STRIDE` vertex layout. Paired with [`gbuffer_mrt_tex_fs_spirv`]; selected only
+/// on a frame with at least one textured material AND no active temporal denoise (TEXTURED is
+/// never compiled with MOTION_VECTORS — T6c plan Decision D4). NOT `#[cfg(feature = "hwrt")]`
+/// — materials/textures are device-agnostic.
+#[inline]
+pub fn gbuffer_mrt_tex_vs_spirv() -> &'static [u32] {
+    GBUFFER_MRT_TEX_VS_SPV.as_words()
+}
+
+/// Textured-PBR rung T6c TEXTURED-variant mesh-MRT gbuffer FRAGMENT SPIR-V as a `u32` word
+/// stream. Paired with [`gbuffer_mrt_tex_vs_spirv`]; samples the bindless texture array for
+/// gAlbedo/gNormal (tangent-space normal mapping) and writes the 4th MRT `pbr` (metallic/
+/// roughness/AO/emissive) the deferred software resolve reads under the TEXTURED flag.
+#[inline]
+pub fn gbuffer_mrt_tex_fs_spirv() -> &'static [u32] {
+    GBUFFER_MRT_TEX_FS_SPV.as_words()
 }
 
 /// The committed fullscreen-sample (present-blit) vertex SPIR-V as a `u32` word stream,
@@ -3708,6 +3816,31 @@ pub const PBR_SKY_SPEC: [f32; 3] = [0.10, 0.10, 0.12];
 /// `sdf_field.hlsli`). Used as the argmin seed in [`pick_material_id`] so the host
 /// oracle initializes its nearest-surface search identically to the GPU marcher.
 pub const PBR_FAR: f32 = 1.0e9;
+
+// --- PBR P1 — the HDR sun disc in the reflected environment (mirrors deferred_pbr.hlsl) ----
+
+/// The sun-kernel exponent clamp floor (mirrors the shader's `SUN_KERNEL_EXPONENT_MIN`): a
+/// fully rough surface (GGX alpha -> 1) maps its Blinn-Phong-equivalent exponent to `n -> 0`;
+/// floored at 1 so the kernel stays a valid (if very broad) cosine lobe.
+pub const SUN_KERNEL_EXPONENT_MIN: f32 = 1.0;
+/// The sun-kernel exponent clamp ceiling (mirrors the shader's `SUN_KERNEL_EXPONENT_MAX`):
+/// guards the `pow` blowup as alpha -> 0 (a mirror-smooth surface) while keeping the disc
+/// visibly wider than one screen pixel.
+pub const SUN_KERNEL_EXPONENT_MAX: f32 = 2048.0;
+/// The default gate on the env sun-disc contribution (mirrors the shader's `SUN_ENV_WEIGHT`).
+/// Owner-retunable at the visual gate; `1.0` keeps the disc's peak commensurate with the
+/// material's own DFG-weighted specular tint (the kernel already peaks at exactly 1.0 only
+/// where `R` points at the light and falls off sharply elsewhere).
+pub const SUN_ENV_WEIGHT: f32 = 1.0;
+
+// --- Render sky background — the visible sun disc baked into the BACKGROUND (mask == 0) ----
+
+/// The FIXED cosine-power exponent of the sky background's sun disc (mirrors the shader's
+/// `SKY_SUN_EXPONENT`). Unlike `sun_kernel_exponent` (roughness-driven, for the metal's own
+/// reflected sun-disc term), this is a single moderate exponent (~512, a tight but clearly
+/// visible disc) used for every directional light — the background is a flat environment
+/// element, not a BRDF lobe. Owner-retunable.
+pub const SKY_SUN_EXPONENT: f32 = 512.0;
 
 
 /// The Hilbert tile edge (`SSAO_HILBERT_W`; XeGTAO uses level 6 = 64) — the host mirror of the

@@ -149,6 +149,10 @@ impl From<VulkanError> for RhiError {
                 | BootError::ViewtStorageFormatUnsupported
                 | BootError::GbufferColorAttachmentFormatUnsupported
                 | BootError::SsaoStorageFormatUnsupported
+                // T-dev: a device that cannot get the 5-bit bindless descriptor-indexing
+                // prerequisite enabled — same generic backend-boot-failure category as the
+                // format-unsupported device rejections above.
+                | BootError::BindlessUnsupported
                 // SDFDDGI I0: a device whose per-stage descriptor limits cannot satisfy the resolve
                 // set's actual per-type need — external input, projected as a generic backend boot
                 // failure (the same category as the format-unsupported device rejections above).

@@ -362,6 +362,36 @@ pub enum ClusterSelectMode {
     Auto,
 }
 
+// ---- Light-header word 7 bit budget (the shared shadow/GI-gate + output-stage word) --
+//
+// Word 7 (`sky_diffuse.w` — the header lane NEVER read by the L0a sky ambient, which
+// only consumes `sky_diffuse.rgb`, words 4..6) is ONE spare std430 word repurposed to
+// carry every resolve-side boolean gate / small enum this crate has added since P6 R1,
+// rather than growing `LIGHT_HEADER_WORDS` (which would shift `LIGHT_HEADER_BASE` and
+// re-encode every golden). Each sub-field below is independently masked (the "BIT-N
+// INDEPENDENCE PIN" proven per-field in `light_table.hlsli`), so setting one never
+// perturbs another, and every sub-field defaults to `0` on a config that never touches
+// it — the shared 0%-gate anchor every pre-existing golden pins. THIS is the
+// authoritative map; the per-field detail (exact mask/shift, 0%-gate proof) lives at
+// each site named below.
+//
+//   bits     field                   owning Rust file
+//   0        shadow_mode             goldens.rs (`GoldenLightHeader`) — predates this
+//                                     type; no `LightingConfig` field owns it
+//   1        contact_shadow_mode     goldens.rs (`GoldenLightHeader`) — ditto
+//   2        csm_mode                this file: CSM_MODE_BIT / LightingConfig::csm_shadows
+//   3        punctual_shadow_mode    this file: PUNCTUAL_MODE_BIT / LightingConfig::punctual_shadows
+//   4        ddgi_mode               this file: DDGI_MODE_BIT / LightingConfig::ddgi_indirect
+//   5..7     (free)                  —
+//   8..11    tonemap operator        this file: TONEMAP_MODE_SHIFT/_MASK / LightingConfig::tonemapper
+//   12..19   terminator softening    this file: TERMINATOR_SOFT_SHIFT/_MASK / LightingConfig::terminator_softening
+//   20..31   (free)                  —
+//
+// Shader-side decode: `light_table.hlsli`'s `load_shadow_mode` / `load_contact_shadow_mode`
+// / `load_csm_mode` / `load_punctual_shadow_mode` / `load_ddgi_mode` / `load_tonemap_mode`
+// / `load_terminator_softening` cluster. Host packing of bits 0/1: `goldens.rs`'s
+// `GoldenLightHeader` (the P6 R1 / Shadow-Phase-3 literals, near its other word-7 writers).
+
 /// The bit position of the resolve's `csm_mode` gate inside light-header word 7
 /// (`sky_diffuse.w`, never read by the L0a sky ambient). Mirrors the shader's
 /// `load_csm_mode` (`light_table.hlsli`: `(LightBuf[7] >> 2) & 1`); bits 0/1/3 of the
@@ -386,10 +416,58 @@ pub const PUNCTUAL_MODE_BIT: u32 = 3;
 /// every pre-SDFDDGI scene ⇒ word 7 bit 4 stays 0, the byte-identical 0%-gate.
 pub const DDGI_MODE_BIT: u32 = 4;
 
+/// The resolve's output-stage tonemap curve — packed into light-header word 7
+/// bits [`TONEMAP_MODE_SHIFT`..+4) by [`LightHeaderGpu::new`]. `#[repr(u32)]` so
+/// `self as u32` is the wire value. `Aces` = 0 ⇒ zero bits ⇒ word 7 byte-identical
+/// on every default scene (the 0%-gate). All curves are linear-in → linear[0,1]-out;
+/// the shared manual OETF (`pow(x, 1/2.2)`) is applied after, unchanged.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Tonemapper {
+    /// Stephen Hill ACES-fitted (today's curve). The BYTE-IDENTICAL default.
+    #[default]
+    Aces = 0,
+    /// Khronos PBR Neutral — LUT-free, hue-preserving, gentle toe (no shadow crush).
+    Neutral = 1,
+    /// Reinhard-Jodie — cheap hybrid luminance/per-channel, hue-preserving.
+    ReinhardJodie = 2,
+}
+
+/// Word-7 sub-field for the tonemap mode: bits 8..11 (4 bits, 16 operators).
+/// Above the shadow/GI gate bits (0..4); bits 5..7 stay free.
+pub const TONEMAP_MODE_SHIFT: u32 = 8;
+/// The 4-bit mask for the tonemap sub-field (bits [`TONEMAP_MODE_SHIFT`]..+4).
+pub const TONEMAP_MODE_MASK: u32 = 0xF;
+
+/// Word-7 sub-field for the diffuse terminator-softening amount: bits 12..19 (8 bits,
+/// 0..255 = softening 0.0..1.0). Above the tonemap sub-field (8..11); bits 20..31 stay
+/// free. 0 ⇒ OFF ⇒ byte-identical (the 0%-gate).
+pub const TERMINATOR_SOFT_SHIFT: u32 = 12;
+/// The 8-bit mask for the terminator-softening sub-field (bits
+/// [`TERMINATOR_SOFT_SHIFT`]..+8).
+pub const TERMINATOR_SOFT_MASK: u32 = 0xFF;
+
 /// The global lighting config (Decision 3) — a `World`-singleton resource. `exposure`
 /// defaults to identity (`1.0`) and `sky_*` default to the resolve's old `SKY_*`
 /// constants, so a world that never inserts a non-default config reproduces today's
 /// image (the 0%-gate anchor).
+///
+/// # Field taxonomy
+///
+/// - **Output stage** (applied once, after all lighting is accumulated):
+///   [`exposure`](Self::exposure), [`tonemapper`](Self::tonemapper),
+///   [`terminator_softening`](Self::terminator_softening).
+/// - **Sky ambient** (the L0a hemisphere term): [`sky_diffuse`](Self::sky_diffuse),
+///   [`sky_spec`](Self::sky_spec).
+/// - **Cluster policy** (L1 froxel cull gate): [`clusters_enabled`](Self::clusters_enabled),
+///   [`cluster_select`](Self::cluster_select).
+/// - **Derived gates** (owner-set only in a harness that holds their lock-step
+///   contract; production writers are the named sync systems, see each field's own
+///   doc): [`csm_shadows`](Self::csm_shadows), [`punctual_shadows`](Self::punctual_shadows),
+///   [`ddgi_indirect`](Self::ddgi_indirect).
+///
+/// See the "Light-header word 7 bit budget" table above this type for exactly which
+/// word-7 bits each packed field occupies.
 #[derive(Resource, Clone, Copy, Debug, PartialEq)]
 pub struct LightingConfig {
     /// Global exposure — the FINAL multiply on accumulated linear radiance. DEFAULT 1.0
@@ -453,6 +531,18 @@ pub struct LightingConfig {
     /// gated resolve block is EMPTY (no probe sample yet), so even an armed gate leaves the
     /// pixels byte-identical; later rungs (I3) wire the probe-irradiance injection.
     pub ddgi_indirect: bool,
+    /// The resolve's output-stage tonemap curve — packed into light-header word 7 bits
+    /// [`TONEMAP_MODE_SHIFT`..+4) by [`Self::tonemap_bits`]. DEFAULT [`Tonemapper::Aces`]
+    /// (word 7 bits 8..11 stay 0 — the byte-identical 0%-gate).
+    pub tonemapper: Tonemapper,
+    /// Softens the diffuse light terminator — the harsh `max(dot(N,L),0)` boundary that
+    /// turns normal-map bump slopes into hard dark islands under grazing light — into a
+    /// wrapped ramp (`nol_wrapped`, Valve/half-Lambert style), packed into light-header
+    /// word 7 bits [`TERMINATOR_SOFT_SHIFT`..+8) by [`Self::terminator_bits`]. DEFAULT
+    /// `0.0` (word 7 bits 12..19 stay 0 — the byte-identical 0%-gate, the physically-sharp
+    /// default); ~0.15-0.3 gives a soft film-like falloff. Applied ONLY to the diffuse NoL
+    /// of direct lights — specular NoL and the shadow-gating NoL comparisons are untouched.
+    pub terminator_softening: f32,
 }
 
 impl Default for LightingConfig {
@@ -468,6 +558,8 @@ impl Default for LightingConfig {
             csm_shadows: false,
             punctual_shadows: false,
             ddgi_indirect: false,
+            tonemapper: Tonemapper::Aces,
+            terminator_softening: 0.0,
         }
     }
 }
@@ -482,6 +574,31 @@ impl LightingConfig {
         ((self.csm_shadows as u32) << CSM_MODE_BIT)
             | ((self.punctual_shadows as u32) << PUNCTUAL_MODE_BIT)
             | ((self.ddgi_indirect as u32) << DDGI_MODE_BIT)
+    }
+
+    /// Word-7 tonemap sub-field bits (0 for [`Tonemapper::Aces`] ⇒ the 0%-gate).
+    #[inline]
+    pub const fn tonemap_bits(&self) -> u32 {
+        (self.tonemapper as u32) << TONEMAP_MODE_SHIFT
+    }
+
+    /// Word-7 terminator-softening sub-field bits (0 for the 0.0 default ⇒ the 0%-gate).
+    #[inline]
+    pub const fn terminator_bits(&self) -> u32 {
+        // Hand-rolled clamp (const-fn parity with `tonemap_bits` — L1 review G3):
+        // `f32::clamp` is a trait-free inherent method but was not yet usable from a
+        // `const fn` on this toolchain when this was written; the plain if/else below
+        // is unconditionally const-evaluable.
+        let x = self.terminator_softening;
+        let clamped = if x < 0.0 {
+            0.0
+        } else if x > 1.0 {
+            1.0
+        } else {
+            x
+        };
+        let q = (clamped * 255.0 + 0.5) as u32;
+        (q & TERMINATOR_SOFT_MASK) << TERMINATOR_SOFT_SHIFT
     }
 }
 
@@ -799,12 +916,19 @@ impl LightHeaderGpu {
     /// `cfg`. The L1 `cluster_params` are zero in L0 (`clusters_enabled` reflects `cfg`,
     /// but the dims stay 0 until L1 mints the grid). Word 7 (`sky_diffuse.w`) carries
     /// the shadow-gate bits ([`LightingConfig::shadow_gate_word`] — CSM bit
-    /// [`CSM_MODE_BIT`]; 0 for a default config, the 0%-gate).
+    /// [`CSM_MODE_BIT`]; 0 for a default config, the 0%-gate) ORed with the tonemap
+    /// sub-field ([`LightingConfig::tonemap_bits`] — bits [`TONEMAP_MODE_SHIFT`]..+4)
+    /// ORed with the terminator-softening sub-field
+    /// ([`LightingConfig::terminator_bits`] — bits [`TERMINATOR_SOFT_SHIFT`]..+8).
     #[inline]
     pub fn new(l0a_count: u32, point_spot_count: u32, cfg: &LightingConfig) -> Self {
         debug_assert!(cfg.exposure > 0.0 && cfg.exposure.is_finite(), "invariant: exposure > 0");
         let light_count = l0a_count + point_spot_count;
         debug_assert!(light_count <= MAX_LIGHTS, "invariant: light_count <= MAX_LIGHTS");
+        debug_assert!(
+            (cfg.tonemapper as u32) <= TONEMAP_MODE_MASK,
+            "invariant: tonemapper fits the 4-bit word-7 sub-field"
+        );
         Self {
             counts_exposure: [
                 f32::from_bits(light_count),
@@ -816,7 +940,7 @@ impl LightHeaderGpu {
                 cfg.sky_diffuse[0],
                 cfg.sky_diffuse[1],
                 cfg.sky_diffuse[2],
-                f32::from_bits(cfg.shadow_gate_word()),
+                f32::from_bits(cfg.shadow_gate_word() | cfg.tonemap_bits() | cfg.terminator_bits()),
             ],
             sky_spec: [cfg.sky_spec[0], cfg.sky_spec[1], cfg.sky_spec[2], 0.0],
             // L0: clusters off (dims zero); `clusters_enabled` is reported for the resolve
@@ -974,8 +1098,14 @@ mod tests {
         assert!(!cfg.punctual_shadows);
         // The DDGI gate defaults OFF (the byte-identical 0%-gate).
         assert!(!cfg.ddgi_indirect);
+        // The tonemapper defaults to ACES (today's curve, the byte-identical 0%-gate).
+        assert_eq!(cfg.tonemapper, Tonemapper::Aces);
+        // Terminator softening defaults OFF (the physically-sharp, byte-identical 0%-gate).
+        assert_eq!(cfg.terminator_softening, 0.0);
         // Word 7 is exactly 0 for a default config (the 0%-gate anchor).
         assert_eq!(cfg.shadow_gate_word(), 0);
+        assert_eq!(cfg.tonemap_bits(), 0);
+        assert_eq!(cfg.terminator_bits(), 0);
     }
 
     #[test]
@@ -1013,6 +1143,106 @@ mod tests {
             both.shadow_gate_word(),
             (1 << CSM_MODE_BIT) | (1 << PUNCTUAL_MODE_BIT) | (1 << DDGI_MODE_BIT)
         );
+    }
+
+    #[test]
+    fn tonemapper_default_is_aces() {
+        assert_eq!(Tonemapper::default(), Tonemapper::Aces);
+    }
+
+    #[test]
+    fn tonemap_bits_zero_for_aces() {
+        let cfg = LightingConfig { tonemapper: Tonemapper::Aces, ..LightingConfig::default() };
+        assert_eq!(cfg.tonemap_bits(), 0);
+    }
+
+    #[test]
+    fn header_word7_is_zero_for_default_config() {
+        // The byte-identity anchor: a default config's header word 7 (sky_diffuse.w) is
+        // exactly 0.0 bits — no shadow/GI gate, no tonemap mode.
+        let h = LightHeaderGpu::new(1, 0, &LightingConfig::default());
+        assert_eq!(h.sky_diffuse[3].to_bits(), 0);
+    }
+
+    #[test]
+    fn tonemap_mode_bits_are_independent_of_the_shadow_gate_bits() {
+        let cfg = LightingConfig { tonemapper: Tonemapper::Neutral, ..LightingConfig::default() };
+        let h = LightHeaderGpu::new(1, 0, &cfg);
+        let word7 = h.sky_diffuse[3].to_bits();
+        assert_eq!(
+            (word7 >> TONEMAP_MODE_SHIFT) & TONEMAP_MODE_MASK,
+            Tonemapper::Neutral as u32
+        );
+        // Bits 0..4 (shadow/contact/CSM/punctual/DDGI gates) must stay untouched.
+        assert_eq!(word7 & 0x1F, 0, "tonemap mode must not touch the shadow/GI gate bits 0..4");
+    }
+
+    #[test]
+    fn tonemap_mode_coexists_with_a_shadow_gate() {
+        let cfg = LightingConfig {
+            tonemapper: Tonemapper::Neutral,
+            csm_shadows: true,
+            ..LightingConfig::default()
+        };
+        let h = LightHeaderGpu::new(1, 0, &cfg);
+        let word7 = h.sky_diffuse[3].to_bits();
+        assert_eq!(
+            (word7 >> TONEMAP_MODE_SHIFT) & TONEMAP_MODE_MASK,
+            Tonemapper::Neutral as u32
+        );
+        assert_ne!(word7 & (1 << CSM_MODE_BIT), 0, "the csm bit must still be armed");
+    }
+
+    #[test]
+    fn terminator_bits_zero_for_default() {
+        let cfg = LightingConfig { terminator_softening: 0.0, ..LightingConfig::default() };
+        assert_eq!(cfg.terminator_bits(), 0);
+    }
+
+    #[test]
+    fn terminator_softening_bits_are_independent_of_the_shadow_and_tonemap_bits() {
+        let cfg = LightingConfig { terminator_softening: 0.2, ..LightingConfig::default() };
+        let h = LightHeaderGpu::new(1, 0, &cfg);
+        let word7 = h.sky_diffuse[3].to_bits();
+        let expected = (0.2_f32 * 255.0).round() as u32;
+        assert_eq!((word7 >> TERMINATOR_SOFT_SHIFT) & TERMINATOR_SOFT_MASK, expected);
+        // Shadow/GI gate bits 0..4 must stay untouched.
+        assert_eq!(word7 & 0x1F, 0, "terminator softening must not touch the shadow/GI gate bits 0..4");
+        // The tonemap sub-field 8..11 must stay untouched (Aces default -> 0).
+        assert_eq!(
+            (word7 >> TONEMAP_MODE_SHIFT) & TONEMAP_MODE_MASK,
+            0,
+            "terminator softening must not touch the tonemap sub-field 8..11"
+        );
+    }
+
+    #[test]
+    fn terminator_softening_coexists_with_a_tonemapper_and_a_shadow_gate() {
+        let cfg = LightingConfig {
+            terminator_softening: 0.2,
+            tonemapper: Tonemapper::Neutral,
+            csm_shadows: true,
+            ..LightingConfig::default()
+        };
+        let h = LightHeaderGpu::new(1, 0, &cfg);
+        let word7 = h.sky_diffuse[3].to_bits();
+        let expected = (0.2_f32 * 255.0).round() as u32;
+        assert_eq!((word7 >> TERMINATOR_SOFT_SHIFT) & TERMINATOR_SOFT_MASK, expected);
+        assert_eq!(
+            (word7 >> TONEMAP_MODE_SHIFT) & TONEMAP_MODE_MASK,
+            Tonemapper::Neutral as u32,
+            "the tonemap sub-field must still carry Neutral"
+        );
+        assert_ne!(word7 & (1 << CSM_MODE_BIT), 0, "the csm bit must still be armed");
+    }
+
+    #[test]
+    fn terminator_bits_clamps_out_of_range_softening() {
+        let over = LightingConfig { terminator_softening: 1.5, ..LightingConfig::default() };
+        assert_eq!((over.terminator_bits() >> TERMINATOR_SOFT_SHIFT) & TERMINATOR_SOFT_MASK, 255);
+
+        let under = LightingConfig { terminator_softening: -1.0, ..LightingConfig::default() };
+        assert_eq!((under.terminator_bits() >> TERMINATOR_SOFT_SHIFT) & TERMINATOR_SOFT_MASK, 0);
     }
 
     #[test]

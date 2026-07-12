@@ -55,6 +55,10 @@ static const uint LIGHT_KIND_SKY         = 3u;
 static const uint LIGHT_KIND_MASK         = 0xFFFFu; // the kind enum lives in the low 16 bits
 static const uint LIGHT_FLAG_CASTS_SHADOW = 0x10000u; // bit 16: this light casts an SDF shadow
 
+// See `boyko_render::light`'s "Light-header word 7 bit budget" table (in that crate's
+// source, right above `CSM_MODE_BIT`) for the authoritative map of every sub-field the
+// `load_*` cluster below decodes.
+
 // === P6 R1 — the resolve shadow_mode, sourced from a SPARE header word =================
 //
 // Header word 7 (`counts_exposure`/`sky_diffuse`'s tail — `sky_diffuse.w`, NEVER read by the
@@ -140,6 +144,40 @@ static const uint DDGI_MODE_ON  = 1u;
 
 uint load_ddgi_mode(StructuredBuffer<uint> LightBuf) {
     return (LightBuf[7] >> 4) & 1u;
+}
+
+// === Tonemapper select — the resolve output-stage tonemap curve, packed in word 7 BITS 8..11 ====
+//
+// The resolve's final tonemap operator (applied to the accumulated linear radiance BEFORE the
+// manual gamma OETF) is a 4-bit field at bits 8..11 of the SAME header word 7 that carries
+// `shadow_mode`/`contact_shadow_mode`/`csm_mode`/`punctual_shadow_mode`/`ddgi_mode` (bits 0..4).
+// Bits 5..7 stay free (unused). Reads ONLY bits 8..11, so it never perturbs the shadow/GI gates —
+// and vice-versa. On every pre-tonemapper-select scene word 7's bits 8..11 are 0 ⇒
+// `load_tonemap_mode == TONEMAP_ACES` ⇒ the resolve calls the SAME `aces_fitted` it always did →
+// byte-identical to today (the 0%-gate). Host writer: `boyko_render::light::LightingConfig::
+// tonemap_bits` (via `LightHeaderGpu::new`).
+static const uint TONEMAP_ACES           = 0u;
+static const uint TONEMAP_NEUTRAL        = 1u;
+static const uint TONEMAP_REINHARD_JODIE = 2u;
+
+uint load_tonemap_mode(StructuredBuffer<uint> LightBuf) {
+    return (LightBuf[7] >> 8) & 0xFu;
+}
+
+// === Render terminator-softening — the diffuse light-wrap amount, packed in word 7 BITS 12..19 ===
+//
+// Softens the DIFFUSE terminator of direct lights (the harsh `max(dot(n,l),0)` clip) into a
+// wrapped ramp (`nol_wrapped`, Valve/half-Lambert style), so normal-mapped bump slopes fade into
+// shadow instead of clipping to hard dark islands under grazing light. An 8-bit fixed-point field
+// at bits 12..19 of the SAME header word 7 that carries the shadow/GI gates (bits 0..4) and the
+// tonemap sub-field (bits 8..11); bits 5..7 and 20..31 stay free. Reads ONLY bits 12..19, so it
+// never perturbs the other sub-fields — and vice-versa. On every pre-softening scene word 7's bits
+// 12..19 are 0 ⇒ `load_terminator_softening == 0.0` ⇒ `nol_wrapped(nol, 0.0) == saturate(nol)` ⇒
+// byte-identical to today (the 0%-gate). Applied ONLY to the diffuse NoL of direct lights —
+// specular NoL and the shadow-gating NoL comparisons stay untouched. Host writer:
+// `boyko_render::light::LightingConfig::terminator_bits` (via `LightHeaderGpu::new`).
+float load_terminator_softening(StructuredBuffer<uint> LightBuf) {
+    return (float)((LightBuf[7] >> 12) & 0xFFu) / 255.0;
 }
 
 // === Shadow Phase 5 Inc-1-GPU — the per-light atlas-slot field, packed in the kind word ========

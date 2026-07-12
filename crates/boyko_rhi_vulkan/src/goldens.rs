@@ -30,8 +30,8 @@ use crate::compute::{
     MESH_COLOR, MESH_DEPTH_CLEAR, MESH_DEPTH_T_MAX, MESH_RASTER_ALBEDO, PBR_FAR, PBR_LIGHT_COLOR, PBR_LIGHT_DIR,
     PBR_SKY_DIFFUSE, PBR_SKY_SPEC, SDF_CAM_Z, SDF_EPS, SDF_HALF_EXTENT, SDF_MAX_IT,
     SDF_T_MAX, SHADOW_HIT_EPS, SHADOW_K, SHADOW_MINT, SHADOW_MINT_STEP, SHADOW_NDOTL_EPS,
-    SHADOW_NORMAL_BIAS, SSAO_BLUR_DEPTH_TOL, SSAO_BLUR_R, SSAO_HILBERT_W, SSAO_R2_ALPHA1, SSAO_R2_ALPHA2, SSAO_RADIUS_PIX_MAX, SSAO_RADIUS_PIX_MIN,
-    SSAO_ROT, SSAO_ROT_N, SSAO_VIEWT_BG,
+    SHADOW_NORMAL_BIAS, SKY_SUN_EXPONENT, SSAO_BLUR_DEPTH_TOL, SSAO_BLUR_R, SSAO_HILBERT_W, SSAO_R2_ALPHA1, SSAO_R2_ALPHA2, SSAO_RADIUS_PIX_MAX, SSAO_RADIUS_PIX_MIN,
+    SSAO_ROT, SSAO_ROT_N, SSAO_VIEWT_BG, SUN_ENV_WEIGHT, SUN_KERNEL_EXPONENT_MAX, SUN_KERNEL_EXPONENT_MIN,
     SsaoParams, TILE_FLAG_EMPTY, TILE_SIZE, TileBound, composite_ray, depth_to_t,
     golden_f16_from_f32, pack_rgba, sdf_sphere,
 };
@@ -1246,6 +1246,16 @@ impl Default for GoldenMaterial {
     }
 }
 
+/// Textured-PBR T6a: a host mirror of `boyko_render::MATERIAL_FLAG_TEXTURED` — a bit in
+/// [`GoldenMaterial::mrr`]'s bitcast `flags` lane (`mrr[3]`), set iff the material carries a
+/// texture sidecar. The vulkan crate cannot depend on `boyko_render` (the dependency runs the
+/// other way; see [`GoldenMaterial`]'s doc), so this is a SEPARATE literal, cross-checked
+/// against the real constant by a `boyko_render`-side test (which CAN see both crates via its
+/// `boyko_rhi_vulkan` dev-dependency). [`GoldenMaterial::new`] never sets this bit (`mrr[3]`
+/// stays `0.0`), so every EXISTING golden input is inert under
+/// [`golden_deferred_resolve_with_pbr`]'s flag-gated override.
+pub const GOLDEN_MATERIAL_FLAG_TEXTURED: u32 = 1;
+
 /// A host light-table element mirroring `boyko_render::light::GpuLight` (3 std430 `vec4`
 /// lanes, 48 B). The vulkan crate cannot depend on `boyko_render`, so the golden carries
 /// its own POD mirror; the layout is the SAME the shader's `GpuLight` reads. LINEAR.
@@ -1442,6 +1452,9 @@ pub(crate) fn golden_f16_to_f32(h: u16) -> f32 {
 
 /// A host light-table header mirroring `boyko_render::light::LightHeaderGpu` (4 std430
 /// `vec4` lanes, 64 B). Carries the split counts + exposure (Decision 3 / O3).
+///
+/// See `boyko_render::light`'s "Light-header word 7 bit budget" table for the full bit
+/// map this type's `with_*_mode` builders below pack into (word 7 / `sky_diffuse.w`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GoldenLightHeader {
     /// `[bitcast(light_count), exposure, bitcast(l0a_count), bitcast(point_spot_count)]`.
@@ -1762,10 +1775,181 @@ pub(crate) fn env_brdf_approx(roughness: f32, nov: f32) -> [f32; 2] {
     [-1.04 * a004 + r[2], 1.04 * a004 + r[3]]
 }
 
+/// HLSL `reflect(i, n)` intrinsic mirror (PBR P0-B): `i - 2.0 * dot(i, n) * n`, the reference
+/// formula every DXC target lowers to. `d = dot(i, n) * 2.0` is a scalar op computed ONCE (the
+/// scalar-then-vector grouping, not `2.0 * (dot(i,n) * n)`), matching the HLSL expression order.
+#[inline]
+pub(crate) fn v_reflect(i: [f32; 3], n: [f32; 3]) -> [f32; 3] {
+    let d = v_dot(i, n) * 2.0;
+    [i[0] - n[0] * d, i[1] - n[1] * d, i[2] - n[2] * d]
+}
+
+/// PBR P0-D multi-scatter energy compensation (mirrors the resolve's hoisted
+/// `energy_comp` term): `Ess = max(dfg.x + dfg.y, 1e-4)` (the Fdez-Aguera scale+bias energy
+/// estimate — NOT `1/dfg.y`), `energy_comp = 1 + f0 * (1/Ess - 1)`. `dfg` is
+/// [`env_brdf_approx`]`(roughness, NoV)`, computed ONCE per pixel by the caller and reused at
+/// every specular site (direct + ambient).
+#[inline]
+pub(crate) fn multi_scatter_energy_comp(dfg: [f32; 2], f0: [f32; 3]) -> [f32; 3] {
+    let ess = (dfg[0] + dfg[1]).max(1e-4);
+    let inv_ess_m1 = 1.0 / ess - 1.0;
+    [
+        1.0 + f0[0] * inv_ess_m1,
+        1.0 + f0[1] * inv_ess_m1,
+        1.0 + f0[2] * inv_ess_m1,
+    ]
+}
+
+/// PBR metal fix: decoupled specular occlusion (mirrors the resolve's hoisted `spec_ao`
+/// term — Filament `SpecularAO_Lagarde` == Bevy deferred `specular_occlusion`):
+/// `saturate(pow(NoV + ao, exp2(-16*roughness - 1)) - 1 + ao)`. Diffuse AO (`ao`/`ao_final`)
+/// correctly darkens Lambert ambient, but a metal has `diffuse == 0` — its ambient SPECULAR
+/// is its ENTIRE appearance, so multiplying that by diffuse AO reads as "AO-darkened matte
+/// paint", not metal. `spec_ao` stays ~1 for smooth/metal surfaces and only gently occludes
+/// rough+cavity surfaces, matching every competitor's diffuse/specular AO split. Computed
+/// ONCE per pixel by the caller (NoV + roughness + ao only) and reused at every ambient-
+/// specular site.
+#[inline]
+pub(crate) fn specular_ao(nov: f32, roughness: f32, ao: f32) -> f32 {
+    let exponent = (-16.0 * roughness - 1.0).exp2();
+    ((nov + ao).powf(exponent) - 1.0 + ao).clamp(0.0, 1.0)
+}
+
+/// PBR P1: the Blinn-Phong-equivalent specular exponent from the GGX alpha (roughness^2) —
+/// mirrors the resolve's `sun_kernel_exponent`. `n = 2/alpha^2 - 2` (the standard Phong<->GGX
+/// exponent conversion) blows up as `alpha -> 0` (a mirror-smooth surface), so it is clamped
+/// to [`SUN_KERNEL_EXPONENT_MIN`, `SUN_KERNEL_EXPONENT_MAX`]: a smooth metal (low alpha) gets a
+/// tight, sharp sun disc; a rough metal (`alpha -> 1`) gets a broad, soft glint (`n -> 0`,
+/// floored at 1).
+#[inline]
+pub(crate) fn sun_kernel_exponent(alpha: f32) -> f32 {
+    let n = 2.0 / (alpha * alpha).max(1e-6) - 2.0;
+    n.clamp(SUN_KERNEL_EXPONENT_MIN, SUN_KERNEL_EXPONENT_MAX)
+}
+
+/// PBR P1: the analytic HDR sun-disc kernel — mirrors the resolve's `sun_kernel`:
+/// `pow(saturate(dot(dir, sun_dir)), sun_kernel_exponent(alpha))`. `dir` is the REFLECTION
+/// vector `R`; `sun_dir` is the directional light's unit direction `l`.
+#[inline]
+pub(crate) fn sun_kernel(dir: [f32; 3], sun_dir: [f32; 3], alpha: f32) -> f32 {
+    let c = v_dot(dir, sun_dir).clamp(0.0, 1.0);
+    c.powf(sun_kernel_exponent(alpha))
+}
+
+/// The 3x3 matrices of the Stephen Hill ACES-fitted tonemap (PBR P0-C), byte-mirroring the
+/// resolve's `ACES_IN` — row-major as written, `mul(M, v)`-style (row i dotted with `v`).
+const ACES_IN: [[f32; 3]; 3] = [
+    [0.59719, 0.35458, 0.04823],
+    [0.07600, 0.90834, 0.01566],
+    [0.02840, 0.13383, 0.83777],
+];
+
+/// The output-side matrix of the Hill ACES fit (PBR P0-C), byte-mirroring the resolve's
+/// `ACES_OUT`.
+const ACES_OUT: [[f32; 3]; 3] = [
+    [1.60475, -0.53108, -0.07367],
+    [-0.10208, 1.10813, -0.00605],
+    [-0.00327, -0.07276, 1.07602],
+];
+
+/// `mul(m, v)` mirror (row-major `m`, row `i` dotted with `v`, accumulated in column order
+/// 0,1,2 — no reassociation) — the exact op-order the resolve's `aces_fitted` uses for both
+/// `ACES_IN` and `ACES_OUT`.
+#[inline]
+fn mat3_mul_vec3(m: &[[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
+    [
+        m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+        m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+        m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+    ]
+}
+
+/// The Stephen Hill ACES-fitted filmic tonemap (PBR P0-C), byte-mirroring the resolve's
+/// `aces_fitted`: `c = mul(ACES_IN, c); a = c*(c+0.0245786)-0.000090537; b =
+/// c*(0.983729*c+0.432951)+0.238081; return saturate(mul(ACES_OUT, a/b));` — SAME op order,
+/// no reassociation.
+#[inline]
+pub(crate) fn aces_fitted(c: [f32; 3]) -> [f32; 3] {
+    let c = mat3_mul_vec3(&ACES_IN, c);
+    let a = [
+        c[0] * (c[0] + 0.0245786) - 0.000090537,
+        c[1] * (c[1] + 0.0245786) - 0.000090537,
+        c[2] * (c[2] + 0.0245786) - 0.000090537,
+    ];
+    let b = [
+        c[0] * (0.983729 * c[0] + 0.432_951) + 0.238081,
+        c[1] * (0.983729 * c[1] + 0.432_951) + 0.238081,
+        c[2] * (0.983729 * c[2] + 0.432_951) + 0.238081,
+    ];
+    let ratio = [a[0] / b[0], a[1] / b[1], a[2] / b[2]];
+    let out = mat3_mul_vec3(&ACES_OUT, ratio);
+    [out[0].clamp(0.0, 1.0), out[1].clamp(0.0, 1.0), out[2].clamp(0.0, 1.0)]
+}
+
+/// The resolve's OUTPUT stage (PBR P0-C): the Hill ACES-fitted tonemap applied to the
+/// exposed linear radiance, THEN the manual gamma-2.2 OETF (`gLit`/the swapchain are linear
+/// UNORM end to end — no hardware sRGB encode; see the resolve's `aces_fitted` doc comment for
+/// the OETF verification). Byte-mirrors `lit = aces_fitted(lit); lit = pow(lit, 1.0/2.2);`
+/// EXACTLY (same op order, same two-step sequence).
+#[inline]
+pub(crate) fn tonemap_and_oetf(lit: [f32; 3]) -> [f32; 3] {
+    const OETF_GAMMA_EXP: f32 = 1.0 / 2.2;
+    let t = aces_fitted(lit);
+    [
+        t[0].powf(OETF_GAMMA_EXP),
+        t[1].powf(OETF_GAMMA_EXP),
+        t[2].powf(OETF_GAMMA_EXP),
+    ]
+}
+
+/// The resolve's PROCEDURAL SKY BACKGROUND (mask == 0 pixels): mirrors the shader's
+/// background branch op-order EXACTLY — scan the light table's L0a front block for a SKY
+/// entry (`kind == Sky`, the SAME block the LIT arm's ambient loop reads) and fold in every
+/// DIRECTIONAL light's fixed-exponent sun disc (`pow(saturate(dot(rd, l)), SKY_SUN_EXPONENT)`,
+/// accumulated in TABLE order), then `sky = lerp(ground, sky, saturate(dot(rd, UP)*0.5+0.5));
+/// sky += sun_disc; sky *= header.exposure();` (the FINAL multiply, O3), then
+/// [`tonemap_and_oetf`]. Returns `None` when the table carries NO sky entry — the caller keeps
+/// the dark pass-through (a scene without a SkyLight has no sky to render), matching the
+/// shader's `has_sky` gate.
+fn golden_sky_background(rd: [f32; 3], header: &GoldenLightHeader, lights: &[GoldenLight]) -> Option<u32> {
+    let count = header.l0a_count() as usize;
+    let mut sky_color: Option<[f32; 3]> = None;
+    let mut ground_color = [0.0_f32; 3];
+    let mut sun_disc = [0.0_f32; 3];
+    for li in lights.iter().take(count) {
+        match li.kind() {
+            GOLDEN_LIGHT_KIND_SKY => {
+                sky_color = Some([li.color_cone[0], li.color_cone[1], li.color_cone[2]]);
+                ground_color = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
+            }
+            GOLDEN_LIGHT_KIND_DIRECTIONAL => {
+                let l = v_normalize([li.dir_kind[0], li.dir_kind[1], li.dir_kind[2]]);
+                let k = v_dot(rd, l).clamp(0.0, 1.0).powf(SKY_SUN_EXPONENT);
+                sun_disc[0] += li.color_cone[0] * k;
+                sun_disc[1] += li.color_cone[1] * k;
+                sun_disc[2] += li.color_cone[2] * k;
+            }
+            _ => {}
+        }
+    }
+    let sky_color = sky_color?;
+    const UP: [f32; 3] = [0.0, 1.0, 0.0];
+    let hemi = (v_dot(rd, UP) * 0.5 + 0.5).clamp(0.0, 1.0);
+    let exposure = header.exposure();
+    let sky = [
+        (ground_color[0] + (sky_color[0] - ground_color[0]) * hemi + sun_disc[0]) * exposure,
+        (ground_color[1] + (sky_color[1] - ground_color[1]) * hemi + sun_disc[1]) * exposure,
+        (ground_color[2] + (sky_color[2] - ground_color[2]) * hemi + sun_disc[2]) * exposure,
+    ];
+    Some(pack_rgba(tonemap_and_oetf(sky)))
+}
+
 /// The per-pixel G-buffer attributes the PBR MVP-2 marcher writes, modelling the EXACT GPU
 /// UNORM pack so [`golden_deferred_resolve`] can re-decode them and run the host BRDF
 /// within ±2/255 of the GPU. On the mask == 0 arms (mesh / background / empty) `base_rgb`
-/// round-trips byte-identically (the 0%-gate).
+/// is the RAW quantized base — a table WITHOUT a SKY entry keeps the byte-identical
+/// pass-through of this field (the 0%-gate); with a SKY entry the resolve renders the
+/// procedural sky over it instead (see [`golden_deferred_resolve`]'s doc).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MarcherAttributes {
     /// gAlbedo R8G8B8: the RAW LINEAR base color (the picked material's `base_color.rgb`
@@ -2427,13 +2611,35 @@ pub fn golden_ssao_blur(
 /// resolve loads them back (UNORM decode), decodes the oct normal + 16-bit id, fetches
 /// `materials[id]`, and runs the SAME Cook-Torrance the resolve runs (GGX D + height-
 /// correlated Smith V + Schlick F + Lambert + EnvBRDFApprox ambient; shadow modulates the
-/// direct term, ao the ambient), then re-quantizes via [`pack_rgba`]. On the mask == 0
-/// arms it round-trips `base` byte-identically (the 0%-gate). `rd` is the pixel's ray
-/// direction (the view dir is `-rd`); supply the SAME `composite_ray` the marcher used.
+/// direct term. PBR metal fix: AO is DECOUPLED — diffuse ambient by `ao`, specular ambient
+/// by the roughness-aware [`specular_ao`]), then re-quantizes via [`pack_rgba`]. On the mask == 0 arms
+/// it renders the PROCEDURAL SKY BACKGROUND along `rd` (the constant-path defaults — one
+/// directional + `ground == sky`, exposure 1.0 — reproduce
+/// [`golden_deferred_resolve_table`]'s background arm fed the degenerate 0%-gate table
+/// BYTE-FOR-BYTE). `rd` is the pixel's ray direction (the view dir is `-rd`); supply the
+/// SAME `composite_ray` the marcher used.
 pub fn golden_deferred_resolve(
     attrs: MarcherAttributes,
     rd: [f32; 3],
     materials: &[GoldenMaterial],
+) -> u32 {
+    golden_deferred_resolve_with_pbr(attrs, rd, materials, None)
+}
+
+/// Textured-PBR T6a: [`golden_deferred_resolve`] PLUS an OPTIONAL `gPbr` texel sample
+/// (`[metallic, roughness, ao_modulation, emissive_modulation]`), mirroring the SOFTWARE
+/// resolve's `MATERIAL_FLAG_TEXTURED_BIT` override (`deferred_pbr.hlsl`'s `#if !HWRT` block:
+/// `metallic`/`roughness` are REPLACED, `ao` is MULTIPLIED, `emissive` is MULTIPLIED). The
+/// override applies ONLY when BOTH `gpbr` is `Some` AND `mat.mrr[3]`'s bitcast flags carry
+/// [`GOLDEN_MATERIAL_FLAG_TEXTURED`]. [`golden_deferred_resolve`] is a thin `None`-forwarding
+/// wrapper, so EVERY existing call site is untouched; every EXISTING [`GoldenMaterial`] leaves
+/// `mrr[3] == 0.0` ([`GoldenMaterial::new`]), so this override is a bit-identical no-op for
+/// every current oracle input (the flag=0 byte-identity invariant T6a requires).
+pub fn golden_deferred_resolve_with_pbr(
+    attrs: MarcherAttributes,
+    rd: [f32; 3],
+    materials: &[GoldenMaterial],
+    gpbr: Option<[f32; 4]>,
 ) -> u32 {
     let base = [
         attrs.base_rgb[0] as f32 / 255.0,
@@ -2441,8 +2647,21 @@ pub fn golden_deferred_resolve(
         attrs.base_rgb[2] as f32 / 255.0,
     ];
     if attrs.mask != 1 {
-        // mesh / background / empty: pass the base through byte-identically (the 0%-gate).
-        return pack_rgba(base);
+        // mesh / background / empty: render the SAME analytic sky the LIT arm's ambient
+        // samples (PBR sky background) — the constant-path's degenerate defaults
+        // (`ground == sky == PBR_SKY_DIFFUSE`) fold the hemisphere lerp to a flat no-op
+        // (the SAME fold `golden_deferred_resolve_table`'s LIT-arm ambient uses, see its doc
+        // comment), so only the sun disc varies with `rd`. No exposure multiply (this path's
+        // implicit exposure is 1.0, matching `golden_deferred_resolve_table`'s degenerate
+        // 0%-gate table — `x * 1.0 == x` exactly).
+        let l = v_normalize(PBR_LIGHT_DIR);
+        let sun_k = v_dot(rd, l).clamp(0.0, 1.0).powf(SKY_SUN_EXPONENT);
+        let sky = [
+            PBR_SKY_DIFFUSE[0] + PBR_LIGHT_COLOR[0] * sun_k,
+            PBR_SKY_DIFFUSE[1] + PBR_LIGHT_COLOR[1] * sun_k,
+            PBR_SKY_DIFFUSE[2] + PBR_LIGHT_COLOR[2] * sun_k,
+        ];
+        return pack_rgba(tonemap_and_oetf(sky));
     }
 
     // Decode the world normal from the oct RG bytes (the SAME UNORM round-trip the GPU did).
@@ -2452,9 +2671,31 @@ pub fn golden_deferred_resolve(
         .copied()
         .unwrap_or_default();
 
-    let metallic = mat.mrr[0];
-    let roughness = mat.mrr[1].clamp(0.045, 1.0);
+    let mut metallic = mat.mrr[0];
+    let mut roughness = mat.mrr[1].clamp(0.045, 1.0);
     let reflectance = mat.mrr[2];
+    let shadow = attrs.shadow as f32 / 255.0;
+    let mut ao = attrs.ao as f32 / 255.0;
+    let mut emissive = mat.emissive;
+
+    // Textured-PBR T6a: mirrors `deferred_pbr.hlsl`'s `#if !HWRT` `MATERIAL_FLAG_TEXTURED_BIT`
+    // override — `reflectance` is left UNTOUCHED (no texture channel carries it yet);
+    // `metallic`/`roughness`/`ao`/`emissive` are REASSIGNED, matching the shader's override
+    // exactly (`roughness` re-clamped to the SAME `[0.045, 1.0]` floor). `gpbr.is_none()` (every
+    // [`golden_deferred_resolve`] call) or `mrr[3]`'s flag bit unset (every EXISTING
+    // [`GoldenMaterial`]) makes this a no-op — the values below are then bit-for-bit copies of
+    // their pre-branch assignment (the flag=0 byte-identity invariant).
+    if let Some(pbr) = gpbr
+        && mat.mrr[3].to_bits() & GOLDEN_MATERIAL_FLAG_TEXTURED != 0
+    {
+        metallic = pbr[0];
+        roughness = pbr[1].clamp(0.045, 1.0);
+        ao *= pbr[2];
+        for e in emissive.iter_mut().take(3) {
+            *e *= pbr[3];
+        }
+    }
+
     let a = roughness * roughness;
 
     // f0: dielectric reflectance lerped toward base by metallic; diffuse killed by metallic.
@@ -2478,29 +2719,58 @@ pub fn golden_deferred_resolve(
     let noh = v_dot(n, hvec).clamp(0.0, 1.0);
     let loh = v_dot(l, hvec).clamp(0.0, 1.0);
 
-    let shadow = attrs.shadow as f32 / 255.0;
-    let ao = attrs.ao as f32 / 255.0;
+    // PBR P0-D: the SAME per-pixel term the resolve hoists before its light loop, reused at
+    // both the direct and ambient specular sites below.
+    let dfg = env_brdf_approx(roughness, nov);
+    let energy_comp = multi_scatter_energy_comp(dfg, f0);
+
+    // PBR P1: the reflection vector, hoisted once (mirrors the resolve's hoisted `R`). Unlike
+    // the sky gradient below (which folds to a flat no-op since `PBR_SKY_DIFFUSE ==
+    // PBR_SKY_SPEC`), the sun-disc kernel is NOT degenerate in `r` — it must be computed.
+    let r = v_reflect(rd, n);
+    let sun_k = sun_kernel(r, l, a);
 
     // Direct term: (Lambert diffuse + D*V*F specular) * NoL * shadow * light color.
     let d_term = d_ggx(noh, a);
     let v_term = v_smith_ggx_correlated(nov, nol, a);
     let f_term = f_schlick(loh, f0);
     let pi = core::f32::consts::PI;
+    // PBR metal fix: decoupled specular occlusion, hoisted once per pixel (see
+    // `specular_ao`'s doc) and reused at both ambient-specular sites below.
+    let spec_ao = specular_ao(nov, roughness, ao);
     let mut lit = [0.0_f32; 3];
     for c in 0..3 {
-        let spec = d_term * v_term * f_term[c];
+        let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
         let diff = diffuse_color[c] * (1.0 / pi);
         let direct = (diff + spec) * (nol * shadow) * PBR_LIGHT_COLOR[c];
 
-        // Ambient: EnvBRDFApprox specular against the sky + hemisphere diffuse, * ao.
-        let dfg = env_brdf_approx(roughness, nov);
-        let spec_ambient = (f0[c] * dfg[0] + dfg[1]) * PBR_SKY_SPEC[c];
-        let diff_ambient = diffuse_color[c] * PBR_SKY_DIFFUSE[c];
-        let ambient = (spec_ambient + diff_ambient) * ao;
+        // Ambient accumulator, mirroring the table oracle's `ambient[c]` (zero-initialized,
+        // the directional's PBR P1 sun disc added first, the sky term second — the SAME
+        // per-light iteration order as the degenerate 2-entry table).
+        let mut ambient = 0.0_f32;
 
-        lit[c] = direct + ambient + mat.emissive[c];
+        // PBR P1: the HDR sun disc — a SECOND, roughness-widened specular response from the
+        // SAME directional light, sampled along `r` instead of `l`. NOT shadow-modulated
+        // (AO-gated only, mirroring the sky ambient's own AO gate). PBR metal fix: a
+        // SPECULAR term, decoupled onto `spec_ao` (not the diffuse `ao`).
+        let sun_spec = (f0[c] * dfg[0] + dfg[1]) * PBR_LIGHT_COLOR[c] * sun_k * energy_comp[c] * SUN_ENV_WEIGHT;
+        ambient += sun_spec * spec_ao;
+
+        // Ambient: EnvBRDFApprox specular against the sky + hemisphere diffuse. PBR P0-B's
+        // reflection-vector gradient reduces to the FLAT `PBR_SKY_SPEC` here because this
+        // degenerate table's sky == ground (`PBR_SKY_DIFFUSE == PBR_SKY_SPEC`, see
+        // `golden_deferred_resolve_table`'s doc): `lerp(ground, sky, refl_hemi) == sky` for
+        // any `refl_hemi` when ground == sky, so the reflect/hemi/steepen computation is a
+        // byte-identical no-op and is skipped. PBR metal fix: diffuse ambient stays on the
+        // diffuse `ao`; specular ambient (a metal's ENTIRE appearance) decouples onto
+        // `spec_ao`.
+        let spec_ambient = (f0[c] * dfg[0] + dfg[1]) * PBR_SKY_SPEC[c] * energy_comp[c];
+        let diff_ambient = diffuse_color[c] * PBR_SKY_DIFFUSE[c];
+        ambient += diff_ambient * ao + spec_ambient * spec_ao;
+
+        lit[c] = direct + ambient + emissive[c];
     }
-    pack_rgba(lit)
+    pack_rgba(tonemap_and_oetf(lit))
 }
 
 /// The host mirror of the resolve's Render P7 SSAO ambient-AO combine (`deferred_pbr.hlsl`):
@@ -2541,13 +2811,16 @@ pub(crate) fn ssao_combine(ssao_mode: u32, ao: f32, view_t: f32, ssao: f32) -> f
 ///
 /// # W1 byte-identity op-order (HARD requirement)
 /// The per-light direct expression is `(diff + spec) * (nol * shadow) * color` with the
-/// accumulator initialized to `0.0`; the sky ambient is `(spec_ambient + diff_ambient) *
-/// ao` accumulated from `0.0`; the FINAL `* exposure` is literally last. Because
-/// `0.0 + x == x` and `x * 1.0 == x` are exact, a degenerate table — one directional
-/// (dir = +Z, color = white, illuminance = 1.0) + one sky (`sky == ground ==`
-/// [`PBR_SKY_DIFFUSE`]) with exposure 1.0 — reproduces [`golden_deferred_resolve`]
-/// BYTE-FOR-BYTE (the directional matches `LIGHT_DIR`/`LIGHT_COLOR`; the sky `lerp` folds
-/// since sky == ground). No reassociation is permitted.
+/// accumulator initialized to `0.0`; the sky ambient is `diff_ambient * ao + spec_ambient *
+/// spec_ao` (PBR metal fix: decoupled diffuse/specular AO) accumulated from `0.0`; the
+/// FINAL `* exposure` is literally last. Because `0.0 + x == x` and `x * 1.0 == x` are
+/// exact, a degenerate table — one directional (dir = +Z, color = white, illuminance = 1.0)
+/// plus one sky (`sky == ground ==` [`PBR_SKY_DIFFUSE`]) with exposure 1.0 — reproduces
+/// [`golden_deferred_resolve`] BYTE-FOR-BYTE (the directional matches
+/// `LIGHT_DIR`/`LIGHT_COLOR`; the sky `lerp` folds since sky == ground). No reassociation is
+/// permitted. This BYTE-FOR-BYTE equivalence covers the mask == 0 arm too:
+/// `golden_deferred_resolve`'s background sky uses the SAME degenerate defaults (see its
+/// doc), so the mask == 0 sweep folds identically.
 #[allow(clippy::too_many_arguments)]
 pub fn golden_deferred_resolve_table(
     attrs: MarcherAttributes,
@@ -2588,8 +2861,10 @@ pub fn golden_deferred_resolve_table_ssao(
         attrs.base_rgb[2] as f32 / 255.0,
     ];
     if attrs.mask != 1 {
-        // mesh / background / empty: pass the base through byte-identically (the 0%-gate).
-        return pack_rgba(base);
+        // mesh / background / empty: render the PROCEDURAL SKY along the view ray (mirrors
+        // the resolve's background branch) when the table carries a SKY entry; otherwise
+        // keep the byte-identical dark pass-through (the 0%-gate: no SkyLight, no sky).
+        return golden_sky_background(rd, header, lights).unwrap_or_else(|| pack_rgba(base));
     }
 
     let n = oct_decode([attrs.oct_rg[0] as f32 / 255.0, attrs.oct_rg[1] as f32 / 255.0]);
@@ -2627,6 +2902,17 @@ pub fn golden_deferred_resolve_table_ssao(
     // The hemisphere "up" the sky lerp interpolates against (world up).
     const UP: [f32; 3] = [0.0, 1.0, 0.0];
     let hemi = v_dot(n, UP) * 0.5 + 0.5;
+    // PBR P0-D: the SAME per-pixel term the resolve hoists before its light loop, reused at
+    // every specular site below (direct directional/point/spot + sky ambient).
+    let dfg_v = env_brdf_approx(roughness, nov);
+    let energy_comp = multi_scatter_energy_comp(dfg_v, f0);
+    // PBR P1: the reflection vector, hoisted ONCE (mirrors the resolve's hoisted `R`) — feeds
+    // BOTH the sky-gradient ambient specular below AND the per-directional HDR sun-disc term.
+    // reflect(-v, n) == reflect(rd, n) since v == -rd (double negation is exact).
+    let r = v_reflect(rd, n);
+    // PBR metal fix: decoupled specular occlusion, hoisted once per pixel (see
+    // `specular_ao`'s doc) and reused at every ambient-specular site below.
+    let spec_ao = specular_ao(nov, roughness, ao_final);
 
     let mut lit_direct = [0.0_f32; 3];
     let mut ambient = [0.0_f32; 3];
@@ -2642,22 +2928,40 @@ pub fn golden_deferred_resolve_table_ssao(
                 let d_term = d_ggx(noh, a);
                 let v_term = v_smith_ggx_correlated(nov, nol, a);
                 let f_term = f_schlick(loh, f0);
+                // PBR P1: the HDR sun-disc kernel for THIS directional light, sampled along
+                // `r` (not `l`) — the analytic environment's bright-sun response.
+                let sun_k = sun_kernel(r, l, a);
                 for c in 0..3 {
-                    let spec = d_term * v_term * f_term[c];
+                    let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
                     let diff = diffuse_color[c] * (1.0 / pi);
                     lit_direct[c] += (diff + spec) * (nol * shadow) * li.color_cone[c];
+                    // PBR P1: a SECOND, roughness-widened specular response from this SAME
+                    // light, added to the ambient — NOT shadow-modulated (AO-gated only,
+                    // mirroring the sky ambient specular's own AO gate below).
+                    let sun_spec = (f0[c] * dfg_v[0] + dfg_v[1]) * li.color_cone[c] * sun_k * energy_comp[c] * SUN_ENV_WEIGHT;
+                    ambient[c] += sun_spec * spec_ao;
                 }
             }
             GOLDEN_LIGHT_KIND_SKY => {
+                // PBR P0-B: the ambient specular samples the sky/ground gradient along the
+                // REFLECTION vector `R` (PBR P1: hoisted above the loop as `r`; a metal must
+                // mirror its surroundings), while the diffuse hemisphere stays along `n`
+                // (Lambert integrates the whole hemisphere).
                 let sky = [li.color_cone[0], li.color_cone[1], li.color_cone[2]];
                 let ground = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
-                let dfg = env_brdf_approx(roughness, nov);
+                let refl_hemi_lin = v_dot(r, UP) * 0.5 + 0.5;
+                // PBR metal fix: steepen the reflected hemisphere (smoothstep) so a metal
+                // sweeps a real bright-cap -> dark-belly gradient instead of a flat mid-tone.
+                // The DIFFUSE `hemi` above stays LINEAR — only the specular lobe steepens.
+                let refl_hemi = refl_hemi_lin * refl_hemi_lin * (3.0 - 2.0 * refl_hemi_lin);
                 for c in 0..3 {
-                    // hemisphere diffuse = lerp(ground, sky, hemi); spec = EnvBRDFApprox.
+                    // hemisphere diffuse = lerp(ground, sky, hemi); spec = EnvBRDFApprox
+                    // against lerp(ground, sky, refl_hemi), P0-D energy-compensated.
                     let hemi_c = ground[c] + (sky[c] - ground[c]) * hemi;
-                    let spec_ambient = (f0[c] * dfg[0] + dfg[1]) * sky[c];
+                    let refl_c = ground[c] + (sky[c] - ground[c]) * refl_hemi;
+                    let spec_ambient = (f0[c] * dfg_v[0] + dfg_v[1]) * refl_c * energy_comp[c];
                     let diff_ambient = diffuse_color[c] * hemi_c;
-                    ambient[c] += (spec_ambient + diff_ambient) * ao_final;
+                    ambient[c] += diff_ambient * ao_final + spec_ambient * spec_ao;
                 }
             }
             // Point/spot (kinds 1/2) are the L0b block (handled after this loop).
@@ -2716,7 +3020,7 @@ pub fn golden_deferred_resolve_table_ssao(
         let v_term = v_smith_ggx_correlated(nov, nol, a);
         let f_term = f_schlick(loh, f0);
         for c in 0..3 {
-            let spec = d_term * v_term * f_term[c];
+            let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
             let diff = diffuse_color[c] * (1.0 / pi);
             lit_direct[c] += (diff + spec) * (nol * shadow) * atten * li.color_cone[c];
         }
@@ -2727,7 +3031,7 @@ pub fn golden_deferred_resolve_table_ssao(
     for c in 0..3 {
         lit[c] = (lit_direct[c] + ambient[c] + mat.emissive[c]) * exposure;
     }
-    pack_rgba(lit)
+    pack_rgba(tonemap_and_oetf(lit))
 }
 
 /// The P6 R1 MULTI-LIGHT SDF-shadow CPU mirror of the `deferred_pbr` resolve — the
@@ -2786,7 +3090,10 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
         attrs.base_rgb[2] as f32 / 255.0,
     ];
     if attrs.mask != 1 {
-        return pack_rgba(base);
+        // mesh / background / empty: render the PROCEDURAL SKY along the view ray (mirrors
+        // the resolve's background branch) when the table carries a SKY entry; otherwise
+        // keep the byte-identical dark pass-through (the 0%-gate: no SkyLight, no sky).
+        return golden_sky_background(rd, header, lights).unwrap_or_else(|| pack_rgba(base));
     }
 
     let n = oct_decode([attrs.oct_rg[0] as f32 / 255.0, attrs.oct_rg[1] as f32 / 255.0]);
@@ -2821,6 +3128,17 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
     let pi = core::f32::consts::PI;
     const UP: [f32; 3] = [0.0, 1.0, 0.0];
     let hemi = v_dot(n, UP) * 0.5 + 0.5;
+    // PBR P0-D: the SAME per-pixel term the resolve hoists before its light loop, reused at
+    // every specular site below (direct directional/point/spot + sky ambient).
+    let dfg_v = env_brdf_approx(roughness, nov);
+    let energy_comp = multi_scatter_energy_comp(dfg_v, f0);
+    // PBR P1: the reflection vector, hoisted ONCE (mirrors the resolve's hoisted `R`) — feeds
+    // BOTH the sky-gradient ambient specular below AND the per-directional HDR sun-disc term.
+    // reflect(-v, n) == reflect(rd, n) since v == -rd (double negation is exact).
+    let r = v_reflect(rd, n);
+    // PBR metal fix: decoupled specular occlusion, hoisted once per pixel (see
+    // `specular_ao`'s doc) and reused at every ambient-specular site below.
+    let spec_ao = specular_ao(nov, roughness, ao_final);
 
     // P6 R1: the shadow_mode gate + the surface world position `P` (hoisted, mirroring the
     // shader) + the dominant-N march counter.
@@ -2868,21 +3186,37 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
                 let d_term = d_ggx(noh, a);
                 let v_term = v_smith_ggx_correlated(nov, nol, a);
                 let f_term = f_schlick(loh, f0);
+                // PBR P1: the HDR sun-disc kernel for THIS directional light, sampled along
+                // `r` (not `l`) — the analytic environment's bright-sun response.
+                let sun_k = sun_kernel(r, l, a);
                 for c in 0..3 {
-                    let spec = d_term * v_term * f_term[c];
+                    let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
                     let diff = diffuse_color[c] * (1.0 / pi);
                     lit_direct[c] += (diff + spec) * (nol * vis) * li.color_cone[c];
+                    // PBR P1: a SECOND, roughness-widened specular response from this SAME
+                    // light, added to the ambient — NOT shadow-modulated (AO-gated only,
+                    // mirroring the sky ambient specular's own AO gate below).
+                    let sun_spec = (f0[c] * dfg_v[0] + dfg_v[1]) * li.color_cone[c] * sun_k * energy_comp[c] * SUN_ENV_WEIGHT;
+                    ambient[c] += sun_spec * spec_ao;
                 }
             }
             GOLDEN_LIGHT_KIND_SKY => {
+                // PBR P0-B: ambient specular samples the sky/ground gradient along `R` (PBR
+                // P1: hoisted above the loop as `r`) instead of the flat sky color; diffuse
+                // stays along n.
                 let sky = [li.color_cone[0], li.color_cone[1], li.color_cone[2]];
                 let ground = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
-                let dfg = env_brdf_approx(roughness, nov);
+                let refl_hemi_lin = v_dot(r, UP) * 0.5 + 0.5;
+                // PBR metal fix: steepen the reflected hemisphere (smoothstep) so a metal
+                // sweeps a real bright-cap -> dark-belly gradient instead of a flat mid-tone.
+                // The DIFFUSE `hemi` above stays LINEAR — only the specular lobe steepens.
+                let refl_hemi = refl_hemi_lin * refl_hemi_lin * (3.0 - 2.0 * refl_hemi_lin);
                 for c in 0..3 {
                     let hemi_c = ground[c] + (sky[c] - ground[c]) * hemi;
-                    let spec_ambient = (f0[c] * dfg[0] + dfg[1]) * sky[c];
+                    let refl_c = ground[c] + (sky[c] - ground[c]) * refl_hemi;
+                    let spec_ambient = (f0[c] * dfg_v[0] + dfg_v[1]) * refl_c * energy_comp[c];
                     let diff_ambient = diffuse_color[c] * hemi_c;
-                    ambient[c] += (spec_ambient + diff_ambient) * ao_final;
+                    ambient[c] += diff_ambient * ao_final + spec_ambient * spec_ao;
                 }
             }
             _ => {}
@@ -2937,7 +3271,7 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
             marched += 1;
         }
         for c in 0..3 {
-            let spec = d_term * v_term * f_term[c];
+            let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
             let diff = diffuse_color[c] * (1.0 / pi);
             lit_direct[c] += (diff + spec) * (nol * vis) * atten * li.color_cone[c];
         }
@@ -2948,7 +3282,7 @@ pub fn golden_deferred_resolve_table_shadowed_ssao<F: Fn([f32; 3]) -> f32>(
     for c in 0..3 {
         lit[c] = (lit_direct[c] + ambient[c] + mat.emissive[c]) * exposure;
     }
-    pack_rgba(lit)
+    pack_rgba(tonemap_and_oetf(lit))
 }
 
 /// The host cluster-cull config (mirrors `boyko_render::light::ClusterConfig`). The vulkan
@@ -3184,6 +3518,17 @@ pub fn golden_deferred_resolve_clustered(
     let pi = core::f32::consts::PI;
     const UP: [f32; 3] = [0.0, 1.0, 0.0];
     let hemi = v_dot(n, UP) * 0.5 + 0.5;
+    // PBR P0-D: the SAME per-pixel term the resolve hoists before its light loop, reused at
+    // every specular site below (direct directional/point/spot + sky ambient).
+    let dfg_v = env_brdf_approx(roughness, nov);
+    let energy_comp = multi_scatter_energy_comp(dfg_v, f0);
+    // PBR P1: the reflection vector, hoisted ONCE (mirrors the resolve's hoisted `R`) — feeds
+    // BOTH the sky-gradient ambient specular below AND the per-directional HDR sun-disc term.
+    // reflect(-v, n) == reflect(rd, n) since v == -rd (double negation is exact).
+    let r = v_reflect(rd, n);
+    // PBR metal fix: decoupled specular occlusion, hoisted once per pixel (see
+    // `specular_ao`'s doc) and reused at every ambient-specular site below.
+    let spec_ao = specular_ao(nov, roughness, ao);
 
     // The no-`P` front block (directionals + sky) is GLOBAL — identical to the table resolve.
     let mut lit_direct = [0.0_f32; 3];
@@ -3200,21 +3545,37 @@ pub fn golden_deferred_resolve_clustered(
                 let d_term = d_ggx(noh, a);
                 let v_term = v_smith_ggx_correlated(nov, nol, a);
                 let f_term = f_schlick(loh, f0);
+                // PBR P1: the HDR sun-disc kernel for THIS directional light, sampled along
+                // `r` (not `l`) — the analytic environment's bright-sun response.
+                let sun_k = sun_kernel(r, l, a);
                 for c in 0..3 {
-                    let spec = d_term * v_term * f_term[c];
+                    let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
                     let diff = diffuse_color[c] * (1.0 / pi);
                     lit_direct[c] += (diff + spec) * (nol * shadow) * li.color_cone[c];
+                    // PBR P1: a SECOND, roughness-widened specular response from this SAME
+                    // light, added to the ambient — NOT shadow-modulated (AO-gated only,
+                    // mirroring the sky ambient specular's own AO gate below).
+                    let sun_spec = (f0[c] * dfg_v[0] + dfg_v[1]) * li.color_cone[c] * sun_k * energy_comp[c] * SUN_ENV_WEIGHT;
+                    ambient[c] += sun_spec * spec_ao;
                 }
             }
             GOLDEN_LIGHT_KIND_SKY => {
+                // PBR P0-B: ambient specular samples the sky/ground gradient along `R` (PBR
+                // P1: hoisted above the loop as `r`) instead of the flat sky color; diffuse
+                // stays along n.
                 let sky = [li.color_cone[0], li.color_cone[1], li.color_cone[2]];
                 let ground = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
-                let dfg = env_brdf_approx(roughness, nov);
+                let refl_hemi_lin = v_dot(r, UP) * 0.5 + 0.5;
+                // PBR metal fix: steepen the reflected hemisphere (smoothstep) so a metal
+                // sweeps a real bright-cap -> dark-belly gradient instead of a flat mid-tone.
+                // The DIFFUSE `hemi` above stays LINEAR — only the specular lobe steepens.
+                let refl_hemi = refl_hemi_lin * refl_hemi_lin * (3.0 - 2.0 * refl_hemi_lin);
                 for c in 0..3 {
                     let hemi_c = ground[c] + (sky[c] - ground[c]) * hemi;
-                    let spec_ambient = (f0[c] * dfg[0] + dfg[1]) * sky[c];
+                    let refl_c = ground[c] + (sky[c] - ground[c]) * refl_hemi;
+                    let spec_ambient = (f0[c] * dfg_v[0] + dfg_v[1]) * refl_c * energy_comp[c];
                     let diff_ambient = diffuse_color[c] * hemi_c;
-                    ambient[c] += (spec_ambient + diff_ambient) * ao;
+                    ambient[c] += diff_ambient * ao + spec_ambient * spec_ao;
                 }
             }
             _ => {}
@@ -3267,7 +3628,7 @@ pub fn golden_deferred_resolve_clustered(
         let v_term = v_smith_ggx_correlated(nov, nol, a);
         let f_term = f_schlick(loh, f0);
         for c in 0..3 {
-            let spec = d_term * v_term * f_term[c];
+            let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
             let diff = diffuse_color[c] * (1.0 / pi);
             lit_direct[c] += (diff + spec) * (nol * shadow) * atten * li.color_cone[c];
         }
@@ -3278,7 +3639,7 @@ pub fn golden_deferred_resolve_clustered(
     for c in 0..3 {
         lit[c] = (lit_direct[c] + ambient[c] + mat.emissive[c]) * exposure;
     }
-    pack_rgba(lit)
+    pack_rgba(tonemap_and_oetf(lit))
 }
 
 /// The P6 R1 MULTI-LIGHT SDF-shadow CPU mirror of the L1 CLUSTERED `deferred_pbr` resolve —
@@ -3349,6 +3710,17 @@ pub fn golden_deferred_resolve_clustered_shadowed<F: Fn([f32; 3]) -> f32>(
     let pi = core::f32::consts::PI;
     const UP: [f32; 3] = [0.0, 1.0, 0.0];
     let hemi = v_dot(n, UP) * 0.5 + 0.5;
+    // PBR P0-D: the SAME per-pixel term the resolve hoists before its light loop, reused at
+    // every specular site below (direct directional/point/spot + sky ambient).
+    let dfg_v = env_brdf_approx(roughness, nov);
+    let energy_comp = multi_scatter_energy_comp(dfg_v, f0);
+    // PBR P1: the reflection vector, hoisted ONCE (mirrors the resolve's hoisted `R`) — feeds
+    // BOTH the sky-gradient ambient specular below AND the per-directional HDR sun-disc term.
+    // reflect(-v, n) == reflect(rd, n) since v == -rd (double negation is exact).
+    let r = v_reflect(rd, n);
+    // PBR metal fix: decoupled specular occlusion, hoisted once per pixel (see
+    // `specular_ao`'s doc) and reused at every ambient-specular site below.
+    let spec_ao = specular_ao(nov, roughness, ao);
 
     let multi_light = header.shadow_mode() != 0;
     let p = [
@@ -3391,21 +3763,37 @@ pub fn golden_deferred_resolve_clustered_shadowed<F: Fn([f32; 3]) -> f32>(
                 let d_term = d_ggx(noh, a);
                 let v_term = v_smith_ggx_correlated(nov, nol, a);
                 let f_term = f_schlick(loh, f0);
+                // PBR P1: the HDR sun-disc kernel for THIS directional light, sampled along
+                // `r` (not `l`) — the analytic environment's bright-sun response.
+                let sun_k = sun_kernel(r, l, a);
                 for c in 0..3 {
-                    let spec = d_term * v_term * f_term[c];
+                    let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
                     let diff = diffuse_color[c] * (1.0 / pi);
                     lit_direct[c] += (diff + spec) * (nol * vis) * li.color_cone[c];
+                    // PBR P1: a SECOND, roughness-widened specular response from this SAME
+                    // light, added to the ambient — NOT shadow-modulated (AO-gated only,
+                    // mirroring the sky ambient specular's own AO gate below).
+                    let sun_spec = (f0[c] * dfg_v[0] + dfg_v[1]) * li.color_cone[c] * sun_k * energy_comp[c] * SUN_ENV_WEIGHT;
+                    ambient[c] += sun_spec * spec_ao;
                 }
             }
             GOLDEN_LIGHT_KIND_SKY => {
+                // PBR P0-B: ambient specular samples the sky/ground gradient along `R` (PBR
+                // P1: hoisted above the loop as `r`) instead of the flat sky color; diffuse
+                // stays along n.
                 let sky = [li.color_cone[0], li.color_cone[1], li.color_cone[2]];
                 let ground = [li.pos_range[0], li.pos_range[1], li.pos_range[2]];
-                let dfg = env_brdf_approx(roughness, nov);
+                let refl_hemi_lin = v_dot(r, UP) * 0.5 + 0.5;
+                // PBR metal fix: steepen the reflected hemisphere (smoothstep) so a metal
+                // sweeps a real bright-cap -> dark-belly gradient instead of a flat mid-tone.
+                // The DIFFUSE `hemi` above stays LINEAR — only the specular lobe steepens.
+                let refl_hemi = refl_hemi_lin * refl_hemi_lin * (3.0 - 2.0 * refl_hemi_lin);
                 for c in 0..3 {
                     let hemi_c = ground[c] + (sky[c] - ground[c]) * hemi;
-                    let spec_ambient = (f0[c] * dfg[0] + dfg[1]) * sky[c];
+                    let refl_c = ground[c] + (sky[c] - ground[c]) * refl_hemi;
+                    let spec_ambient = (f0[c] * dfg_v[0] + dfg_v[1]) * refl_c * energy_comp[c];
                     let diff_ambient = diffuse_color[c] * hemi_c;
-                    ambient[c] += (spec_ambient + diff_ambient) * ao;
+                    ambient[c] += diff_ambient * ao + spec_ambient * spec_ao;
                 }
             }
             _ => {}
@@ -3461,7 +3849,7 @@ pub fn golden_deferred_resolve_clustered_shadowed<F: Fn([f32; 3]) -> f32>(
             marched += 1;
         }
         for c in 0..3 {
-            let spec = d_term * v_term * f_term[c];
+            let spec = d_term * v_term * f_term[c] * energy_comp[c]; // PBR P0-D
             let diff = diffuse_color[c] * (1.0 / pi);
             lit_direct[c] += (diff + spec) * (nol * vis) * atten * li.color_cone[c];
         }
@@ -3472,7 +3860,7 @@ pub fn golden_deferred_resolve_clustered_shadowed<F: Fn([f32; 3]) -> f32>(
     for c in 0..3 {
         lit[c] = (lit_direct[c] + ambient[c] + mat.emissive[c]) * exposure;
     }
-    pack_rgba(lit)
+    pack_rgba(tonemap_and_oetf(lit))
 }
 
 /// Reconstructs the `(ray_origin, ray_dir)` for the coarse ray through tile
@@ -4236,4 +4624,83 @@ pub fn probe_sample(
     }
     let inv = 1.0 / sum_w;
     [sum_irr[0] * inv, sum_irr[1] * inv, sum_irr[2] * inv]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A SDF-lit `MarcherAttributes` (mask == 1) with plausible mid-range G-buffer bytes and a
+    /// finite `view_t` — enough to exercise the full Cook-Torrance path in
+    /// [`golden_deferred_resolve_with_pbr`] without any shadow/GI-mode header wiring (the
+    /// zero-`LightHeader` default this oracle's degenerate-table siblings use).
+    fn lit_attrs() -> MarcherAttributes {
+        MarcherAttributes {
+            base_rgb: [180, 120, 90],
+            oct_rg: [140, 160],
+            mat_id: 0,
+            shadow: 255,
+            ao: 200,
+            mask: 1,
+            view_t: 4.0,
+        }
+    }
+
+    const RD: [f32; 3] = [0.0, 0.0, -1.0];
+
+    /// Textured-PBR T6a: [`GoldenMaterial::new`] never sets the `mrr[3]` flag bit (every
+    /// EXISTING oracle input), so [`golden_deferred_resolve_with_pbr`]'s override must be inert
+    /// REGARDLESS of what `gpbr` sample is supplied — matching [`golden_deferred_resolve`]'s
+    /// `None`-forwarding output exactly. This is the flag=0 byte-identity invariant T6a requires.
+    #[test]
+    fn textured_override_is_inert_when_flag_bit_unset() {
+        let attrs = lit_attrs();
+        let mats = [GoldenMaterial::new([0.6, 0.3, 0.2, 1.0], 0.2, 0.4, 0.5, [0.0, 0.0, 0.0])];
+        assert_eq!(mats[0].mrr[3].to_bits() & GOLDEN_MATERIAL_FLAG_TEXTURED, 0);
+
+        let without_pbr = golden_deferred_resolve(attrs, RD, &mats);
+        // A deliberately DIFFERENT-looking sample: if the flag gate were broken (always-live),
+        // this would visibly change the packed output.
+        let with_pbr_but_flag_unset =
+            golden_deferred_resolve_with_pbr(attrs, RD, &mats, Some([0.95, 0.05, 0.1, 3.0]));
+
+        assert_eq!(
+            without_pbr, with_pbr_but_flag_unset,
+            "an Option::Some gPbr sample must be a no-op when mrr[3]'s flag bit is unset"
+        );
+    }
+
+    /// The converse of the inertness test: WITH the flag bit set AND a `gpbr` sample supplied,
+    /// the override must actually change the output relative to the unmodulated material — proof
+    /// the gate is live, not merely always-false-by-construction.
+    #[test]
+    fn textured_override_changes_output_when_flag_bit_set_and_sample_supplied() {
+        let attrs = lit_attrs();
+        let mut textured = GoldenMaterial::new([0.6, 0.3, 0.2, 1.0], 0.2, 0.4, 0.5, [0.1, 0.05, 0.02]);
+        textured.mrr[3] = f32::from_bits(GOLDEN_MATERIAL_FLAG_TEXTURED);
+        let mats = [textured];
+
+        let unmodulated = golden_deferred_resolve_with_pbr(attrs, RD, &mats, None);
+        let modulated =
+            golden_deferred_resolve_with_pbr(attrs, RD, &mats, Some([0.95, 0.05, 0.2, 4.0]));
+
+        assert_ne!(
+            unmodulated, modulated,
+            "a live gPbr sample on a flag-set material must change the packed LIT output"
+        );
+    }
+
+    /// `None` is a pure notational shorthand for "no sample" — passing it through
+    /// `golden_deferred_resolve_with_pbr` directly must match the [`golden_deferred_resolve`]
+    /// convenience wrapper bit-for-bit, on EVERY mask arm (lit + background).
+    #[test]
+    fn golden_deferred_resolve_is_exactly_the_none_wrapper() {
+        let mats = [GoldenMaterial::default()];
+        for attrs in [lit_attrs(), MarcherAttributes { mask: 0, ..lit_attrs() }] {
+            assert_eq!(
+                golden_deferred_resolve(attrs, RD, &mats),
+                golden_deferred_resolve_with_pbr(attrs, RD, &mats, None)
+            );
+        }
+    }
 }

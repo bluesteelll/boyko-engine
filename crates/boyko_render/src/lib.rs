@@ -61,6 +61,12 @@
 /// [`RETIRE_DELAY`](asset_refcount::RETIRE_DELAY).
 pub mod asset_refcount;
 pub mod barrier;
+/// T4 — [`BindlessTextureTable`](bindless::BindlessTextureTable): the bindless
+/// texture-array descriptor set owner (free-list slot allocator + fence-gated
+/// slot recycle + magenta error texture). Registered as a `NonSendResource` at
+/// boot by `boyko_app::runner` (textured-PBR rung T6b) — no pipeline binds its
+/// descriptor set yet (T6c).
+pub mod bindless;
 /// Light-object bundle presets ([`DirectionalLightObject`] / [`PointLightObject`]
 /// / [`SpotLightObject`]) — named `#[derive(Bundle)]` mixes of scene spatial
 /// components with this crate's light components (std-lib S6). Cycle-free: render
@@ -141,14 +147,14 @@ pub mod light_system;
 /// impls: [`ObjMeshLoader`](loaders::ObjMeshLoader) (Wavefront `.obj` →
 /// [`MeshData`](mesh_data::MeshData)) and
 /// [`RonMaterialLoader`](loaders::RonMaterialLoader) (a `.mat` text KV format
-/// → [`MaterialGpu`](material::MaterialGpu)). In-house, no `ron`/`serde`
+/// → [`Material`](material::Material)). In-house, no `ron`/`serde`
 /// dependency.
 pub mod loaders;
 pub mod material;
-/// Asset-system rung A1 — the GPU-resident mirror of `Assets<MaterialGpu>`
+/// Asset-system rung A1 — the GPU-resident mirror of `Assets<Material>`
 /// ([`MaterialTable`](material_table::MaterialTable)): a `MeshRegistry`-shaped device
-/// SSBO + a per-in-flight-frame staging ring, seeded from the world's
-/// [`Assets<MaterialGpu>`](boyko_ecs::ecs::core::asset::Assets) CPU authority, keyed by
+/// SSBO + a per-in-flight-frame staging ring, seeded from ONLY the `gpu` field of the
+/// world's [`Assets<Material>`](boyko_ecs::ecs::core::asset::Assets) CPU authority, keyed by
 /// [`MaterialId`](material::MaterialId). Replaces the standalone mesh-materials rung
 /// M(-1) `MaterialRegistry`.
 pub mod material_table;
@@ -248,6 +254,27 @@ pub mod shadow_plugin;
 pub mod snap_interpolation;
 pub mod ssao_config;
 pub mod ssao_plugin;
+/// Per-vertex tangent generation (Lengyel's method,
+/// [`generate_tangents`](tangent::generate_tangents)) — a load-time, one-shot pass
+/// deriving [`Vertex::tangent`](mesh::Vertex::tangent) from a mesh's final
+/// `position`/`normal`/`uv`. Run by the `cube`/`plane` primitives and the `.obj`
+/// loader's post-dedup pass.
+pub mod tangent;
+/// Textured-PBR campaign rung T2 — [`TextureGpu`](texture::TextureGpu): the
+/// GPU-resident, mip-chained, bindless-registered texture asset record, its
+/// [`ColorSpace`](texture::ColorSpace) sRGB/linear format mapping,
+/// [`mip_levels_for`](texture::mip_levels_for), the mip-generating staged upload
+/// [`upload_texture_2d`](texture::upload_texture_2d), the domain API
+/// ([`TextureAssetsExt`](texture::TextureAssetsExt)), and the F6-style
+/// fill-reject queue [`OrphanedTextureGpu`](texture::OrphanedTextureGpu). Loadable
+/// (registered + upload-drained + fence-gated-retired) as of rung T6b, but still
+/// pixel-dormant — no material references a texture yet and no pipeline binds
+/// the bindless set (T6c).
+pub mod texture;
+/// Textured-PBR campaign rung T2 — [`TextureData`](texture_data::TextureData): the
+/// `Send`-safe CPU intermediate [`PngTextureLoader`](loaders::PngTextureLoader)
+/// decodes into, `TextureGpu`'s `Asset::Cpu`.
+pub mod texture_data;
 pub mod ui;
 /// Token-typed per-slot ring uploads (host plan R3/R4): the fence-proved camera +
 /// instance-model + light-table-staging + CSM-cascade-UBO memcpys the windowed host
@@ -257,6 +284,7 @@ pub mod view;
 
 pub use asset_refcount::{AssetRefcountPlugin, RETIRE_DELAY, RenderEpoch, apply_refcount_deltas, retire_deferred_frees};
 pub use barrier::{PlannedBarrier, lower_barriers};
+pub use bindless::BindlessTextureTable;
 pub use bundles::{DirectionalLightObject, MeshBundle, PointLightObject, SpotLightObject};
 pub use csm_config::{
     CascadeData, CsmConfig, MAX_CASCADES, RESOLVED_CSM_BYTES, ResolvedCsm, resolve_csm,
@@ -304,7 +332,9 @@ pub use gpu_transform3d::{
     GPU_TRANSFORM3D_BYTES, GpuTransform3D, TRS_PACKED_BYTES, TrsPacked,
 };
 pub use gpu_transform_pack::{add_gpu_transform_pack, pack_gpu_transforms};
-pub use gpu_upload::{GpuUpload, upload_assets, upload_material_assets, upload_mesh_assets};
+pub use gpu_upload::{
+    GpuUpload, upload_assets, upload_material_assets, upload_mesh_assets, upload_texture_assets,
+};
 pub use instance_model::{INSTANCE_MODEL_COL_BYTES, InstanceModelCol, sync_instance_model_cols};
 // HW-RT rung 3b: the previous-frame model-affine sibling + its copy system (temporal motion
 // vectors). `not(hwrt)` builds never compile the column, so its instancing path is textually
@@ -315,7 +345,8 @@ pub use instance_model::{PrevInstanceModelCol, sync_prev_instance_model_cols};
 #[cfg(feature = "hwrt")]
 pub use motion_cam::{MOTION_CAM_UBO_BYTES, MotionCam, MotionCamState};
 pub use mesh_draw::{
-    DrawBatch, MeshRenderScratch, PER_INSTANCE_MATERIAL_BYTES, PerInstanceMaterial, gather_mesh_draws,
+    DrawBatch, MeshRenderScratch, PER_INSTANCE_MATERIAL_BYTES, PER_INSTANCE_MATERIAL_TEX_BYTES,
+    PerInstanceMaterial, PerInstanceMaterialTex, gather_mesh_draws,
 };
 pub use light_plugin::LightingPlugin;
 pub use light_reconcile::light_reconcile;
@@ -330,6 +361,7 @@ pub use light::{
     LIGHT_HEADER_WORDS, LIGHT_KIND_DIRECTIONAL, LIGHT_KIND_POINT, LIGHT_KIND_SKY, LIGHT_KIND_SPOT,
     LightEnabled, LightHeaderGpu, LightTableDirty, LightingConfig, MAX_LIGHTS,
     MAX_LIGHTS_PER_CLUSTER, PUNCTUAL_MODE_BIT, PointLight, SPOT_COS_OUTER_MAX, SkyLight, SpotLight,
+    TERMINATOR_SOFT_MASK, TERMINATOR_SOFT_SHIFT, TONEMAP_MODE_MASK, TONEMAP_MODE_SHIFT, Tonemapper,
     cluster_index,
 };
 pub use light_policy::{CLUSTER_HI, CLUSTER_LO, LightStats, select_lighting_cull};
@@ -339,8 +371,10 @@ pub use light_system::{
     fold_light_table_slotted, light_seed_state, set_light_enabled_now, write_light_table,
 };
 pub use gbuffer_depth::{GBUFFER_T_MAX, assert_gbuffer_marcher_t_max_agree};
-pub use loaders::{ObjMeshLoader, RonMaterialLoader};
-pub use material::{MATERIAL_GPU_WORDS, Material, MaterialGpu, MaterialId};
+pub use loaders::{ObjMeshLoader, PngTextureLoader, RonMaterialLoader};
+pub use material::{
+    MATERIAL_FLAG_TEXTURED, MATERIAL_GPU_WORDS, Material, MaterialGpu, MaterialId, MaterialTextures,
+};
 pub use material_table::MaterialTable;
 pub use mesh::{MeshGpu, U16_INDEX_VERTEX_LIMIT, VERTEX_STRIDE as MESH_VERTEX_STRIDE, Vertex};
 pub use mesh_assets::{MeshAssetsExt, OrphanedMeshGpu, build_mesh_gpu};
@@ -361,11 +395,17 @@ pub use shadow_plugin::ShadowAtlasPlugin;
 pub use snap_interpolation::{SnapInterpolation, TeleportCommandsExt, snap_apply};
 pub use ssao_config::{ResolvedSsao, SsaoConfig, SsaoQuality, resolve_ssao, resolve_ssao_policy};
 pub use ssao_plugin::SsaoPlugin;
+pub use tangent::generate_tangents;
+pub use texture::{
+    ColorSpace, OrphanedTextureGpu, TextureAssetsExt, TextureGpu, build_texture_gpu,
+    load_material_folder, mip_levels_for, upload_texture_2d,
+};
+pub use texture_data::TextureData;
 pub use upload::{
     upload_atlas_ring, upload_camera_ring, upload_csm_ring, upload_instance_materials,
-    upload_instance_models, upload_light_table, upload_pair_out_slot, upload_pair_ring,
-    upload_ray_shadow_ring, upload_sdf_edit_list, upload_shadow_denoise_ring,
-    upload_temporal_shadow_ring,
+    upload_instance_materials_tex, upload_instance_models, upload_light_table,
+    upload_pair_out_slot, upload_pair_ring, upload_ray_shadow_ring, upload_sdf_edit_list,
+    upload_shadow_denoise_ring, upload_temporal_shadow_ring,
 };
 #[cfg(feature = "hwrt")]
 pub use upload::{upload_mesh_ids, upload_motion_cam_ring, upload_prev_instance_models};

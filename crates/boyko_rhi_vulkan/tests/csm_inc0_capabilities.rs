@@ -181,6 +181,8 @@ fn array_depth_texture_creates() {
             // device by the gbuffer depth at `swapchain.rs`).
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
             array_layers: CASCADES,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("4-layer D32 array depth texture creates");
 
@@ -252,6 +254,8 @@ fn depth_only_pipeline_draws_indexed_into_array_layer() {
             dimension: TextureDimension::D2,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
             array_layers: CASCADES,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("array depth target");
 

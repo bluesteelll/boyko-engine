@@ -270,6 +270,8 @@ fn render_text_golden(rhi: &mut RhiContext) -> Vec<u8> {
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("offscreen output texture");
 

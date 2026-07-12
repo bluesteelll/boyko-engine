@@ -36,7 +36,9 @@ use crate::shadow_denoise_config::{
     ResolvedTemporalShadow,
 };
 use crate::gpu_transform3d::GPU_TRANSFORM3D_BYTES;
-use crate::mesh_draw::{MeshRenderScratch, PER_INSTANCE_MATERIAL_BYTES};
+use crate::mesh_draw::{
+    MeshRenderScratch, PER_INSTANCE_MATERIAL_BYTES, PER_INSTANCE_MATERIAL_TEX_BYTES,
+};
 #[cfg(feature = "hwrt")]
 use crate::motion_cam::{MOTION_CAM_UBO_BYTES, MotionCam};
 use crate::view::composite_from_view;
@@ -249,6 +251,74 @@ pub unsafe fn upload_instance_materials(
     let mapped = ring_slot
         .mapped
         .expect("invariant: the instance-material ring slot is host-visible mapped");
+    // SAFETY: per this fn's contract `mapped` targets >= `ring_slot.size` valid mapped
+    // host-coherent bytes, and `bytes.len() <= ring_slot.size` is hard-asserted above — the
+    // write is in-bounds. The borrowed `FrameWriteToken` + the slot-identity contract prove
+    // this slot's in-flight fence was waited THIS frame (the slot's previous occupant finished
+    // its VERTEX reads of the material SSBO; the sibling frame binds the other slot) —
+    // race-free, lock-free. `bytes` is the scratch's own heap buffer, a distinct
+    // non-overlapping region.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+    }
+}
+
+/// Textured-PBR rung T6c: uploads the gathered per-instance
+/// [`MeshRenderScratch::material_tex`] lane (base_color + material id + five bindless
+/// texture slots + the metallic/roughness fallback scalars, a
+/// [`PerInstanceMaterialTex`](crate::mesh_draw::PerInstanceMaterialTex) per instance) into
+/// ONE TEXTURED instance-material-SSBO ring slot — ONE contiguous `bytemuck` memcpy, zero
+/// staging, zero allocation (mirrors [`upload_instance_materials`]'s discipline exactly).
+///
+/// Called ONLY on a frame with [`MeshRenderScratch::any_textured_material`] (Principle 1 —
+/// a non-textured frame does ZERO material-upload work); the caller (the runner) is
+/// responsible for that gate. The lane is index-aligned with the instance ring
+/// (`instance_materials_tex[i]` names the SAME instance `instances[i]` does).
+///
+/// # Panics
+///
+/// Panics if the gathered lane exceeds the slot's capacity — the SAME hard overflow
+/// discipline as [`upload_instance_materials`]. UNLIKE `upload_instance_materials`'s ring,
+/// the TEXTURED instance-material ring does NOT participate in the F7/F7-hwrt lockstep
+/// grow (a disclosed T6c limitation): it stays fixed at its boot
+/// [`crate::mesh_draw::PerInstanceMaterialTex`]-stride capacity for the whole process
+/// lifetime, so a scene whose gathered instance count grows past that capacity while using
+/// textured materials panics here rather than silently corrupting memory.
+///
+/// # Safety
+///
+/// * `ring_slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at least
+///   `ring_slot.size` valid, persistently-mapped bytes.
+/// * `ring_slot` is the FENCED slot's buffer — `tex_instance_material_rings[token.slot()]`
+///   (the same token/slot contract as [`upload_instance_materials`]).
+pub unsafe fn upload_instance_materials_tex(
+    token: &FrameWriteToken,
+    ring_slot: &BoundBuffer,
+    scratch: &MeshRenderScratch,
+) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    if scratch.material_tex.is_empty() {
+        return;
+    }
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.material_tex.as_read_slice());
+    assert!(
+        bytes.len() as u64 <= ring_slot.size,
+        "TEXTURED instance-material ring overflow: {} gathered material payloads ({} bytes) \
+         exceed the {}-instance ({}-byte) slot (T6c: this ring does NOT participate in F7 \
+         growth — reduce the scene's simultaneous drawable count or raise the boot \
+         INSTANCE_CAPACITY)",
+        scratch.material_tex.len(),
+        bytes.len(),
+        ring_slot.size / PER_INSTANCE_MATERIAL_TEX_BYTES as u64,
+        ring_slot.size
+    );
+
+    let mapped = ring_slot
+        .mapped
+        .expect("invariant: the TEXTURED instance-material ring slot is host-visible mapped");
     // SAFETY: per this fn's contract `mapped` targets >= `ring_slot.size` valid mapped
     // host-coherent bytes, and `bytes.len() <= ring_slot.size` is hard-asserted above — the
     // write is in-bounds. The borrowed `FrameWriteToken` + the slot-identity contract prove

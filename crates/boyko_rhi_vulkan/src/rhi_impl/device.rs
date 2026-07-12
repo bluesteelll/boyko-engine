@@ -875,6 +875,296 @@ impl RhiDevice<Vulkan> for VulkanContext {
         &self,
         desc: &GraphicsPipelineDesc<Vulkan>,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
+        // Textured-PBR T6c (plan Decision D5): the real work moved to `build_graphics_pipeline`
+        // (a Vulkan-only inherent method, below) so it can be shared with
+        // `create_graphics_pipeline_bindless`'s 2-set path. `set1: None` here reuses the
+        // IDENTICAL code path (not merely a `None`-gated branch) every pre-T6c caller took —
+        // byte-identical `VkPipelineLayoutCreateInfo` by construction.
+        self.build_graphics_pipeline(desc, None)
+    }
+
+    unsafe fn destroy_graphics_pipeline(&self, pipeline: VulkanGraphicsPipeline) {
+        // SAFETY: both handles were created on this device by
+        // `create_graphics_pipeline`, no submission using the pipeline is pending
+        // (caller contract), and the by-value move destroys each exactly once.
+        // Reverse creation order: the pipeline (created last) is destroyed before its
+        // dedicated empty layout (created first).
+        unsafe {
+            (self.device_fns().destroy_pipeline)(self.device(), pipeline.pipeline, ptr::null());
+            (self.device_fns().destroy_pipeline_layout)(
+                self.device(),
+                pipeline.layout,
+                ptr::null(),
+            );
+        }
+    }
+
+    fn create_fence(&self, signaled: bool) -> Result<VulkanFence, VulkanError> {
+        let fence_info = VkFenceCreateInfo {
+            s_type: VkStructureType::FenceCreateInfo,
+            p_next: ptr::null(),
+            // `VK_FENCE_CREATE_SIGNALED_BIT` == 0x1.
+            flags: if signaled { 0x0000_0001 } else { 0 },
+        };
+        let mut fence = VkFence::NULL;
+        // SAFETY: `device` is live; `fence_info` is fully initialized; `&mut
+        // fence` is a valid out-pointer; NULL allocator.
+        let raw = unsafe {
+            (self.device_fns().create_fence)(self.device(), &fence_info, ptr::null(), &mut fence)
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkCreateFence", result));
+        }
+        Ok(VulkanFence { fence })
+    }
+
+    unsafe fn destroy_fence(&self, fence: VulkanFence) {
+        // SAFETY: `fence.fence` was created on this device, is not pending (caller
+        // contract), and the by-value move destroys it exactly once.
+        unsafe { (self.device_fns().destroy_fence)(self.device(), fence.fence, ptr::null()) };
+    }
+
+    fn wait_fence(&self, fence: &VulkanFence, timeout_ns: u64) -> Result<(), VulkanError> {
+        // SAFETY: `device` is live; `&fence.fence` names one live fence;
+        // `wait_all = VK_TRUE` blocks until it is signaled (or the timeout
+        // elapses). After this returns `Ok` the submission that signals it has
+        // completed — the fence-before-readback discipline.
+        let raw = unsafe {
+            (self.device_fns().wait_for_fences)(
+                self.device(),
+                1,
+                &fence.fence,
+                VK_TRUE,
+                timeout_ns,
+            )
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkWaitForFences", result));
+        }
+        Ok(())
+    }
+
+    fn reset_fence(&self, fence: &VulkanFence) -> Result<(), VulkanError> {
+        // SAFETY: `device` is live; `&fence.fence` names one live fence to reset
+        // to unsignaled (no submission referencing it is pending — caller resets
+        // only after a `wait_fence`).
+        let raw =
+            unsafe { (self.device_fns().reset_fences)(self.device(), 1, &fence.fence) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkResetFences", result));
+        }
+        Ok(())
+    }
+
+    fn create_query_pool(&self, desc: &QueryPoolDesc) -> Result<VulkanQueryPool, VulkanError> {
+        debug_assert!(desc.count > 0, "invariant: a query pool needs >= 1 query");
+        let create_info = VkQueryPoolCreateInfo {
+            s_type: VkStructureType::QueryPoolCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            query_type: VK_QUERY_TYPE_TIMESTAMP,
+            query_count: desc.count,
+            // A TIMESTAMP pool sets no pipeline-statistics flags.
+            pipeline_statistics: 0,
+        };
+        let mut pool = VkQueryPool::NULL;
+        // SAFETY: `device` is live; `create_info` is fully initialized (a TIMESTAMP pool of
+        // `count` queries); `&mut pool` is a valid out-pointer; NULL allocator. The queries
+        // are UNDEFINED at creation — the caller resets them before the first write.
+        let raw = unsafe {
+            (self.device_fns().create_query_pool)(self.device(), &create_info, ptr::null(), &mut pool)
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkCreateQueryPool", result));
+        }
+        Ok(VulkanQueryPool { pool, count: desc.count })
+    }
+
+    unsafe fn destroy_query_pool(&self, pool: VulkanQueryPool) {
+        // SAFETY: `pool.pool` was created on this device, no submission writing/reading it is
+        // pending (caller contract), and the by-value move destroys it exactly once.
+        unsafe { (self.device_fns().destroy_query_pool)(self.device(), pool.pool, ptr::null()) };
+    }
+
+    fn read_query_pool_ns(
+        &self,
+        pool: &VulkanQueryPool,
+        pair_count: u32,
+        scratch: &mut [u64],
+        out_ns: &mut [f64],
+    ) -> Result<(), VulkanError> {
+        let query_count = pair_count * 2;
+        debug_assert!(
+            query_count <= pool.count,
+            "invariant: 2 * pair_count must fit the pool's query count"
+        );
+        debug_assert!(
+            scratch.len() >= query_count as usize,
+            "invariant: scratch must hold 2 * pair_count raw timestamps"
+        );
+        debug_assert!(
+            out_ns.len() >= pair_count as usize,
+            "invariant: out_ns must hold pair_count ns values"
+        );
+
+        // SAFETY: `device` is live; `pool.pool` is a live TIMESTAMP pool whose `[0..query_count)`
+        // queries were reset + written this frame (caller contract, after `wait_fence`);
+        // `scratch.as_mut_ptr()` names `query_count` `u64` slots (asserted above) — `data_size`
+        // is exactly that many bytes and `stride` is 8 (one `u64` per query). `64_BIT | WAIT_BIT`
+        // reads each result as a 64-bit value, blocking until it is available. NULL is not passed.
+        let raw = unsafe {
+            (self.device_fns().get_query_pool_results)(
+                self.device(),
+                pool.pool,
+                0,
+                query_count,
+                (query_count as usize) * 8,
+                scratch.as_mut_ptr().cast::<c_void>(),
+                8,
+                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT,
+            )
+        };
+        let result = VkResult::from_raw(raw);
+        // `WAIT_BIT` makes the call return ONLY once every requested query is available, so the sole
+        // success code here is `VK_SUCCESS`; the positive non-error `VK_NOT_READY`/`VK_INCOMPLETE`
+        // (which `is_success()` would also accept, meaning an unwritten/partial query) cannot occur.
+        // Callers MUST read only WRITTEN (begin,end) pairs — an unwritten query would block this call
+        // forever and never reach here (the timing harnesses enforce this: the isolated smoke reads 1
+        // pair; the combined harness asserts all four passes active). So `is_success()` here is
+        // unambiguously a fully-available result.
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkGetQueryPoolResults", result));
+        }
+
+        // Mask each raw timestamp to the queue family's valid bits BEFORE subtracting (high
+        // bits above the valid width are hardware garbage), then × `timestampPeriod`. The
+        // `wrapping_sub` + post-subtraction mask handles a counter wrap across the pair.
+        let caps = self.device_caps();
+        let mask = caps.timestamp_mask();
+        let period = caps.timestamp_period as f64;
+        for i in 0..pair_count as usize {
+            let begin = scratch[2 * i] & mask;
+            let end = scratch[2 * i + 1] & mask;
+            let ticks = end.wrapping_sub(begin) & mask;
+            out_ns[i] = ticks as f64 * period;
+        }
+        Ok(())
+    }
+
+    // ===== HW-RT ACCELERATION-STRUCTURE VERBS (rung R2a-1; `feature="hwrt"` overrides) =====
+    // Each delegates to a `crate::accel` inherent helper (the real `vkGet*`/`vkCreate*` FFI).
+    // Present ONLY under `hwrt`; a default build inherits the `#[cold]` erroring defaults.
+
+    #[cfg(feature = "hwrt")]
+    fn get_acceleration_structure_build_sizes(
+        &self,
+        kind: boyko_rhi::AsKind,
+        geometry: &boyko_rhi::AsGeometryDesc,
+    ) -> Result<boyko_rhi::AsBuildSizes, VulkanError> {
+        self.build_sizes(kind, geometry)
+    }
+
+    #[cfg(feature = "hwrt")]
+    fn create_acceleration_structure(
+        &self,
+        kind: boyko_rhi::AsKind,
+        buffer: &BoundBuffer,
+        size: u64,
+    ) -> Result<crate::accel::BoundAccelStruct, VulkanError> {
+        self.create_accel(kind, buffer.buffer, size)
+    }
+
+    #[cfg(feature = "hwrt")]
+    fn get_acceleration_structure_device_address(
+        &self,
+        accel: &crate::accel::BoundAccelStruct,
+    ) -> Result<u64, VulkanError> {
+        self.accel_device_address(accel)
+    }
+
+    #[cfg(feature = "hwrt")]
+    fn get_buffer_device_address(&self, buffer: &BoundBuffer) -> Result<u64, VulkanError> {
+        self.buffer_device_address(buffer.buffer)
+    }
+
+    #[cfg(feature = "hwrt")]
+    unsafe fn destroy_acceleration_structure(&self, accel: crate::accel::BoundAccelStruct) {
+        // SAFETY: the RhiDevice contract — the GPU is no longer using `accel` (caller
+        // fence-waited/`wait_idle`'d) and it is destroyed once (by-value move).
+        unsafe { self.destroy_accel(accel) };
+    }
+
+    fn create_command_encoder(&self) -> Result<VulkanCommandEncoder, VulkanError> {
+        let layouts = self.compute_layouts()?;
+        // SAFETY: the device is live; `layouts` are this device's shared compute
+        // layouts; the encoder takes a raw pointer to this context's `DeviceFns`
+        // (which outlives any encoder built from `&self`).
+        let enc = unsafe {
+            VulkanCommandEncoder::new(
+                self.device(),
+                self.device_fns() as *const DeviceFns,
+                self.queue_family_index(),
+                layouts.set_layout,
+                layouts.pipeline_layout,
+            )
+        };
+        // HW-RT rung R2a-1: wire the AS command table (a raw pointer into this context, which
+        // outlives the encoder) so `cmd_build_acceleration_structures` can reach the FFI; null
+        // when ray query is off. No-op on a non-hwrt build.
+        #[cfg(feature = "hwrt")]
+        let enc = enc.map(|mut e| {
+            let p = self
+                .accel_fns_opt()
+                .map_or(ptr::null(), |f| f as *const crate::accel::AccelFns);
+            e.set_accel_fns(p);
+            e
+        });
+        enc
+    }
+
+    unsafe fn destroy_command_encoder(&self, enc: VulkanCommandEncoder) {
+        // SAFETY: `enc` was created on this device, its last submission has
+        // completed (caller contract), and the by-value move destroys it exactly
+        // once. `destroy` tears down the descriptor pool + command pool (which
+        // frees the set + command buffer) in reverse order.
+        unsafe { enc.destroy(self.device(), self.device_fns()) };
+    }
+
+    fn wait_idle(&self) -> Result<(), VulkanError> {
+        // SAFETY: `device` is live; `vkDeviceWaitIdle` blocks until every queue is
+        // idle — the belt-and-braces teardown sync (plan W4).
+        let raw = unsafe { (self.device_fns().device_wait_idle)(self.device()) };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkDeviceWaitIdle", result));
+        }
+        Ok(())
+    }
+}
+
+impl VulkanContext {
+    /// The shared graphics-pipeline builder (textured-PBR T6c, plan Decision D5): builds the
+    /// `VkPipelineLayout` from `desc.bind_group_layout` at set 0 plus, when `set1` is `Some`,
+    /// a SECOND raw `VkDescriptorSetLayout` at set 1 (FRAGMENT-visible — the caller passes
+    /// [`crate::bindless::VulkanBindlessSet::set_layout`] directly, no wrapper type), then
+    /// builds the rest of the pipeline state exactly as before. `set1: None` is the path
+    /// EVERY existing caller (`RhiDevice::create_graphics_pipeline`) takes — the produced
+    /// `VkPipelineLayoutCreateInfo` is BYTE-IDENTICAL to the pre-T6c single-set (or zero-set)
+    /// layout: `set_layout_count`/`p_set_layouts[0]`/the push range are computed the SAME way,
+    /// just from a 2-element inline array instead of a scalar local (the driver reads only the
+    /// first `set_layout_count` entries either way, so the extra unread slot is inert). This
+    /// fn is the SOLE body both `create_graphics_pipeline` and
+    /// [`Self::create_graphics_pipeline_bindless`] call — a shared code path, not a
+    /// `None`-gated branch, so every pre-T6c pipeline's layout is untouched BY CONSTRUCTION.
+    fn build_graphics_pipeline(
+        &self,
+        desc: &GraphicsPipelineDesc<Vulkan>,
+        set1: Option<VkDescriptorSetLayout>,
+    ) -> Result<VulkanGraphicsPipeline, VulkanError> {
         let device = self.device();
         let fns = self.device_fns();
 
@@ -885,9 +1175,10 @@ impl RhiDevice<Vulkan> for VulkanContext {
         //     when `desc.bind_group_layout` is `Some`, so a `bind_descriptor_set` can
         //     bind a matching group before the sampling draw; `None` keeps the
         //     rungs-2..4 no-descriptor path byte-identical (count 0, null array).
+        //     Textured-PBR T6c ADDS an optional SECOND set (`set1`) — see this fn's doc.
         //     Created first; if pipeline creation fails below, it is torn down before
         //     the error returns (reverse-order rollback). The `push_range` +
-        //     `set_layout` locals must outlive the create call, so they are bound
+        //     `set_layouts` locals must outlive the create call, so they are bound
         //     here (the layout-info pointers below reference them). ---
         // The push range spans `VERTEX | FRAGMENT`: every existing graphics shader pushes from the
         // VERTEX stage only (the gbuffer/cascade/spot pipelines), and a fragment stage that declares
@@ -903,16 +1194,34 @@ impl RhiDevice<Vulkan> for VulkanContext {
             size: desc.push_constant_bytes,
         };
         let has_push = desc.push_constant_bytes > 0;
-        let set_layout = desc
+        let set0 = desc
             .bind_group_layout
             .map_or(VkDescriptorSetLayout::NULL, |bgl| bgl.set_layout);
-        let has_set = desc.bind_group_layout.is_some();
+        let has_set0 = desc.bind_group_layout.is_some();
+        // Textured-PBR T6c (D5): a set-1-only layout (skipping set 0) is not a shape this
+        // engine ever needs — the textured raster pipeline always declares BOTH the
+        // `PerInstanceMaterialTex` layout at set 0 and the bindless layout at set 1.
+        debug_assert!(
+            set1.is_none() || has_set0,
+            "invariant: a set-1 (bindless) pipeline layout always also declares set 0"
+        );
+        // `set_layout_count` is EXACTLY `u32::from(has_set0)` when `set1` is `None` — the
+        // byte-identical value `create_graphics_pipeline`'s pre-T6c code computed — and `2`
+        // only when `set1` is `Some` (T6c's textured pipeline). The array always holds both
+        // slots; the driver reads only the first `set_layout_count` of them.
+        let set_layouts: [VkDescriptorSetLayout; 2] = [set0, set1.unwrap_or(VkDescriptorSetLayout::NULL)];
+        let set_layout_count: u32 = if set1.is_some() { 2 } else { u32::from(has_set0) };
+        let has_any_set = set_layout_count > 0;
         let pl_info = VkPipelineLayoutCreateInfo {
             s_type: VkStructureType::PipelineLayoutCreateInfo,
             p_next: ptr::null(),
             flags: 0,
-            set_layout_count: u32::from(has_set),
-            p_set_layouts: if has_set { &set_layout } else { ptr::null() },
+            set_layout_count,
+            p_set_layouts: if has_any_set {
+                set_layouts.as_ptr()
+            } else {
+                ptr::null()
+            },
             push_constant_range_count: u32::from(has_push),
             p_push_constant_ranges: if has_push {
                 &push_range
@@ -922,12 +1231,13 @@ impl RhiDevice<Vulkan> for VulkanContext {
         };
         let mut layout = VkPipelineLayout::NULL;
         // SAFETY: `device` is live; `pl_info` is fully initialized with either zero
-        // descriptor sets (null array valid for count 0) or one set pointing at the
-        // `set_layout` local (the caller's live bind-group set-layout, alive for this
-        // whole fn) when `has_set`, and either zero push ranges (null array valid for
-        // count 0) or one range pointing at the `push_range` local (alive for this
-        // whole fn) when `has_push`; `&mut layout` is a valid out-pointer; NULL
-        // allocator.
+        // descriptor sets (null array valid for count 0) or `set_layout_count` sets
+        // pointing at the live `set_layouts` inline array (alive for this whole fn) — slot
+        // 0 the caller's live bind-group set-layout when `has_set0`, slot 1 the caller's
+        // live bindless set-layout when `set1.is_some()` — and either zero push ranges
+        // (null array valid for count 0) or one range pointing at the `push_range` local
+        // (alive for this whole fn) when `has_push`; `&mut layout` is a valid out-pointer;
+        // NULL allocator.
         let raw =
             unsafe { (fns.create_pipeline_layout)(device, &pl_info, ptr::null(), &mut layout) };
         let result = VkResult::from_raw(raw);
@@ -1320,265 +1630,20 @@ impl RhiDevice<Vulkan> for VulkanContext {
         Ok(VulkanGraphicsPipeline { pipeline, layout })
     }
 
-    unsafe fn destroy_graphics_pipeline(&self, pipeline: VulkanGraphicsPipeline) {
-        // SAFETY: both handles were created on this device by
-        // `create_graphics_pipeline`, no submission using the pipeline is pending
-        // (caller contract), and the by-value move destroys each exactly once.
-        // Reverse creation order: the pipeline (created last) is destroyed before its
-        // dedicated empty layout (created first).
-        unsafe {
-            (self.device_fns().destroy_pipeline)(self.device(), pipeline.pipeline, ptr::null());
-            (self.device_fns().destroy_pipeline_layout)(
-                self.device(),
-                pipeline.layout,
-                ptr::null(),
-            );
-        }
-    }
-
-    fn create_fence(&self, signaled: bool) -> Result<VulkanFence, VulkanError> {
-        let fence_info = VkFenceCreateInfo {
-            s_type: VkStructureType::FenceCreateInfo,
-            p_next: ptr::null(),
-            // `VK_FENCE_CREATE_SIGNALED_BIT` == 0x1.
-            flags: if signaled { 0x0000_0001 } else { 0 },
-        };
-        let mut fence = VkFence::NULL;
-        // SAFETY: `device` is live; `fence_info` is fully initialized; `&mut
-        // fence` is a valid out-pointer; NULL allocator.
-        let raw = unsafe {
-            (self.device_fns().create_fence)(self.device(), &fence_info, ptr::null(), &mut fence)
-        };
-        let result = VkResult::from_raw(raw);
-        if !result.is_success() {
-            return Err(VulkanError::Vk("vkCreateFence", result));
-        }
-        Ok(VulkanFence { fence })
-    }
-
-    unsafe fn destroy_fence(&self, fence: VulkanFence) {
-        // SAFETY: `fence.fence` was created on this device, is not pending (caller
-        // contract), and the by-value move destroys it exactly once.
-        unsafe { (self.device_fns().destroy_fence)(self.device(), fence.fence, ptr::null()) };
-    }
-
-    fn wait_fence(&self, fence: &VulkanFence, timeout_ns: u64) -> Result<(), VulkanError> {
-        // SAFETY: `device` is live; `&fence.fence` names one live fence;
-        // `wait_all = VK_TRUE` blocks until it is signaled (or the timeout
-        // elapses). After this returns `Ok` the submission that signals it has
-        // completed — the fence-before-readback discipline.
-        let raw = unsafe {
-            (self.device_fns().wait_for_fences)(
-                self.device(),
-                1,
-                &fence.fence,
-                VK_TRUE,
-                timeout_ns,
-            )
-        };
-        let result = VkResult::from_raw(raw);
-        if !result.is_success() {
-            return Err(VulkanError::Vk("vkWaitForFences", result));
-        }
-        Ok(())
-    }
-
-    fn reset_fence(&self, fence: &VulkanFence) -> Result<(), VulkanError> {
-        // SAFETY: `device` is live; `&fence.fence` names one live fence to reset
-        // to unsignaled (no submission referencing it is pending — caller resets
-        // only after a `wait_fence`).
-        let raw =
-            unsafe { (self.device_fns().reset_fences)(self.device(), 1, &fence.fence) };
-        let result = VkResult::from_raw(raw);
-        if !result.is_success() {
-            return Err(VulkanError::Vk("vkResetFences", result));
-        }
-        Ok(())
-    }
-
-    fn create_query_pool(&self, desc: &QueryPoolDesc) -> Result<VulkanQueryPool, VulkanError> {
-        debug_assert!(desc.count > 0, "invariant: a query pool needs >= 1 query");
-        let create_info = VkQueryPoolCreateInfo {
-            s_type: VkStructureType::QueryPoolCreateInfo,
-            p_next: ptr::null(),
-            flags: 0,
-            query_type: VK_QUERY_TYPE_TIMESTAMP,
-            query_count: desc.count,
-            // A TIMESTAMP pool sets no pipeline-statistics flags.
-            pipeline_statistics: 0,
-        };
-        let mut pool = VkQueryPool::NULL;
-        // SAFETY: `device` is live; `create_info` is fully initialized (a TIMESTAMP pool of
-        // `count` queries); `&mut pool` is a valid out-pointer; NULL allocator. The queries
-        // are UNDEFINED at creation — the caller resets them before the first write.
-        let raw = unsafe {
-            (self.device_fns().create_query_pool)(self.device(), &create_info, ptr::null(), &mut pool)
-        };
-        let result = VkResult::from_raw(raw);
-        if !result.is_success() {
-            return Err(VulkanError::Vk("vkCreateQueryPool", result));
-        }
-        Ok(VulkanQueryPool { pool, count: desc.count })
-    }
-
-    unsafe fn destroy_query_pool(&self, pool: VulkanQueryPool) {
-        // SAFETY: `pool.pool` was created on this device, no submission writing/reading it is
-        // pending (caller contract), and the by-value move destroys it exactly once.
-        unsafe { (self.device_fns().destroy_query_pool)(self.device(), pool.pool, ptr::null()) };
-    }
-
-    fn read_query_pool_ns(
+    /// Textured-PBR T6c (plan Decision D5): builds a 2-set graphics pipeline — set 0 exactly
+    /// as `desc.bind_group_layout` declares (the TEXTURED raster's `PerInstanceMaterialTex`
+    /// SSBO layout, VERTEX), set 1 = `set1_layout` (the bindless texture-array set's raw
+    /// `VkDescriptorSetLayout`, FRAGMENT-visible —
+    /// [`crate::bindless::VulkanBindlessSet::set_layout`]). A Vulkan-only, ADDITIVE inherent
+    /// method: `boyko_rhi::GraphicsPipelineDesc` itself is UNCHANGED (no new field), so every
+    /// one of its existing construction sites across the workspace (other gbuffer/CSM/UI/test
+    /// pipelines) needs no edit and takes the untouched [`Self::build_graphics_pipeline`]`(desc,
+    /// None)` path via `RhiDevice::create_graphics_pipeline`.
+    pub fn create_graphics_pipeline_bindless(
         &self,
-        pool: &VulkanQueryPool,
-        pair_count: u32,
-        scratch: &mut [u64],
-        out_ns: &mut [f64],
-    ) -> Result<(), VulkanError> {
-        let query_count = pair_count * 2;
-        debug_assert!(
-            query_count <= pool.count,
-            "invariant: 2 * pair_count must fit the pool's query count"
-        );
-        debug_assert!(
-            scratch.len() >= query_count as usize,
-            "invariant: scratch must hold 2 * pair_count raw timestamps"
-        );
-        debug_assert!(
-            out_ns.len() >= pair_count as usize,
-            "invariant: out_ns must hold pair_count ns values"
-        );
-
-        // SAFETY: `device` is live; `pool.pool` is a live TIMESTAMP pool whose `[0..query_count)`
-        // queries were reset + written this frame (caller contract, after `wait_fence`);
-        // `scratch.as_mut_ptr()` names `query_count` `u64` slots (asserted above) — `data_size`
-        // is exactly that many bytes and `stride` is 8 (one `u64` per query). `64_BIT | WAIT_BIT`
-        // reads each result as a 64-bit value, blocking until it is available. NULL is not passed.
-        let raw = unsafe {
-            (self.device_fns().get_query_pool_results)(
-                self.device(),
-                pool.pool,
-                0,
-                query_count,
-                (query_count as usize) * 8,
-                scratch.as_mut_ptr().cast::<c_void>(),
-                8,
-                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT,
-            )
-        };
-        let result = VkResult::from_raw(raw);
-        // `WAIT_BIT` makes the call return ONLY once every requested query is available, so the sole
-        // success code here is `VK_SUCCESS`; the positive non-error `VK_NOT_READY`/`VK_INCOMPLETE`
-        // (which `is_success()` would also accept, meaning an unwritten/partial query) cannot occur.
-        // Callers MUST read only WRITTEN (begin,end) pairs — an unwritten query would block this call
-        // forever and never reach here (the timing harnesses enforce this: the isolated smoke reads 1
-        // pair; the combined harness asserts all four passes active). So `is_success()` here is
-        // unambiguously a fully-available result.
-        if !result.is_success() {
-            return Err(VulkanError::Vk("vkGetQueryPoolResults", result));
-        }
-
-        // Mask each raw timestamp to the queue family's valid bits BEFORE subtracting (high
-        // bits above the valid width are hardware garbage), then × `timestampPeriod`. The
-        // `wrapping_sub` + post-subtraction mask handles a counter wrap across the pair.
-        let caps = self.device_caps();
-        let mask = caps.timestamp_mask();
-        let period = caps.timestamp_period as f64;
-        for i in 0..pair_count as usize {
-            let begin = scratch[2 * i] & mask;
-            let end = scratch[2 * i + 1] & mask;
-            let ticks = end.wrapping_sub(begin) & mask;
-            out_ns[i] = ticks as f64 * period;
-        }
-        Ok(())
-    }
-
-    // ===== HW-RT ACCELERATION-STRUCTURE VERBS (rung R2a-1; `feature="hwrt"` overrides) =====
-    // Each delegates to a `crate::accel` inherent helper (the real `vkGet*`/`vkCreate*` FFI).
-    // Present ONLY under `hwrt`; a default build inherits the `#[cold]` erroring defaults.
-
-    #[cfg(feature = "hwrt")]
-    fn get_acceleration_structure_build_sizes(
-        &self,
-        kind: boyko_rhi::AsKind,
-        geometry: &boyko_rhi::AsGeometryDesc,
-    ) -> Result<boyko_rhi::AsBuildSizes, VulkanError> {
-        self.build_sizes(kind, geometry)
-    }
-
-    #[cfg(feature = "hwrt")]
-    fn create_acceleration_structure(
-        &self,
-        kind: boyko_rhi::AsKind,
-        buffer: &BoundBuffer,
-        size: u64,
-    ) -> Result<crate::accel::BoundAccelStruct, VulkanError> {
-        self.create_accel(kind, buffer.buffer, size)
-    }
-
-    #[cfg(feature = "hwrt")]
-    fn get_acceleration_structure_device_address(
-        &self,
-        accel: &crate::accel::BoundAccelStruct,
-    ) -> Result<u64, VulkanError> {
-        self.accel_device_address(accel)
-    }
-
-    #[cfg(feature = "hwrt")]
-    fn get_buffer_device_address(&self, buffer: &BoundBuffer) -> Result<u64, VulkanError> {
-        self.buffer_device_address(buffer.buffer)
-    }
-
-    #[cfg(feature = "hwrt")]
-    unsafe fn destroy_acceleration_structure(&self, accel: crate::accel::BoundAccelStruct) {
-        // SAFETY: the RhiDevice contract — the GPU is no longer using `accel` (caller
-        // fence-waited/`wait_idle`'d) and it is destroyed once (by-value move).
-        unsafe { self.destroy_accel(accel) };
-    }
-
-    fn create_command_encoder(&self) -> Result<VulkanCommandEncoder, VulkanError> {
-        let layouts = self.compute_layouts()?;
-        // SAFETY: the device is live; `layouts` are this device's shared compute
-        // layouts; the encoder takes a raw pointer to this context's `DeviceFns`
-        // (which outlives any encoder built from `&self`).
-        let enc = unsafe {
-            VulkanCommandEncoder::new(
-                self.device(),
-                self.device_fns() as *const DeviceFns,
-                self.queue_family_index(),
-                layouts.set_layout,
-                layouts.pipeline_layout,
-            )
-        };
-        // HW-RT rung R2a-1: wire the AS command table (a raw pointer into this context, which
-        // outlives the encoder) so `cmd_build_acceleration_structures` can reach the FFI; null
-        // when ray query is off. No-op on a non-hwrt build.
-        #[cfg(feature = "hwrt")]
-        let enc = enc.map(|mut e| {
-            let p = self
-                .accel_fns_opt()
-                .map_or(ptr::null(), |f| f as *const crate::accel::AccelFns);
-            e.set_accel_fns(p);
-            e
-        });
-        enc
-    }
-
-    unsafe fn destroy_command_encoder(&self, enc: VulkanCommandEncoder) {
-        // SAFETY: `enc` was created on this device, its last submission has
-        // completed (caller contract), and the by-value move destroys it exactly
-        // once. `destroy` tears down the descriptor pool + command pool (which
-        // frees the set + command buffer) in reverse order.
-        unsafe { enc.destroy(self.device(), self.device_fns()) };
-    }
-
-    fn wait_idle(&self) -> Result<(), VulkanError> {
-        // SAFETY: `device` is live; `vkDeviceWaitIdle` blocks until every queue is
-        // idle — the belt-and-braces teardown sync (plan W4).
-        let raw = unsafe { (self.device_fns().device_wait_idle)(self.device()) };
-        let result = VkResult::from_raw(raw);
-        if !result.is_success() {
-            return Err(VulkanError::Vk("vkDeviceWaitIdle", result));
-        }
-        Ok(())
+        desc: &GraphicsPipelineDesc<Vulkan>,
+        set1_layout: VkDescriptorSetLayout,
+    ) -> Result<VulkanGraphicsPipeline, VulkanError> {
+        self.build_graphics_pipeline(desc, Some(set1_layout))
     }
 }

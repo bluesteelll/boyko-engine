@@ -101,6 +101,15 @@ pub enum BootError {
     /// [`Self::GbufferStorageFormatUnsupported`] so the SSAO image can never fault on an
     /// unsupported format.
     SsaoStorageFormatUnsupported,
+    /// T-dev: the chosen GPU does not advertise (or the driver failed to enable) all 5
+    /// `VkPhysicalDeviceDescriptorIndexingFeatures` bits the bindless prerequisite needs
+    /// (`shaderSampledImageArrayNonUniformIndexing`, `runtimeDescriptorArray`,
+    /// `descriptorBindingPartiallyBound`, `descriptorBindingVariableDescriptorCount`,
+    /// `descriptorBindingSampledImageUpdateAfterBind`) — the textured-PBR T4 bindless
+    /// descriptor path cannot function without them. A CLEAR boot fail-fast beats a
+    /// silent bindless-disabled degrade or an opaque shader fault later; mirrors
+    /// [`Self::GbufferStorageFormatUnsupported`]'s discipline.
+    BindlessUnsupported,
     /// SDFDDGI I0: the chosen GPU's per-stage descriptor limits cannot satisfy the deferred
     /// resolve set's ACTUAL declared per-type descriptor counts (the resolve set grew to 19
     /// bindings with the 3 DDGI bindings + the CSM/atlas ones). A device below the real need is
@@ -178,15 +187,18 @@ pub enum RtTier {
 /// alongside the `dynamicRendering` fail-fast.
 ///
 /// A small POD recorded on the [`VulkanContext`] and exposed read-only via
-/// [`VulkanContext::device_caps`]. P1b records `bindless_capable` for a FUTURE bindless
-/// path (it is NOT consumed yet — declaring an unused capability is intentional
-/// forward wiring, not dead code); `gbuffer_storage_format_ok` is asserted at boot, so
-/// a context that exists always has it `true` (the fail-fast rejects a GPU without it).
+/// [`VulkanContext::device_caps`]. `gbuffer_storage_format_ok` / `bindless_capable` are
+/// asserted at boot, so a context that exists always has them `true` (the fail-fast
+/// rejects a GPU without them).
 #[derive(Clone, Copy, Debug)]
 pub struct DeviceCaps {
-    /// Whether the GPU advertises the Vulkan 1.2 `descriptorIndexing` +
-    /// `runtimeDescriptorArray` features (the bindless prerequisite). RECORDED ONLY in
-    /// P1b — a future bindless G-buffer path reads it; nothing consumes it yet.
+    /// Whether the GPU advertises (T-dev: AND enables) the 5 `VkPhysicalDeviceDescriptorIndexingFeatures`
+    /// bits the bindless path needs: `shaderSampledImageArrayNonUniformIndexing`,
+    /// `runtimeDescriptorArray`, `descriptorBindingPartiallyBound`,
+    /// `descriptorBindingVariableDescriptorCount`,
+    /// `descriptorBindingSampledImageUpdateAfterBind`. Boot fail-fast: a booted context
+    /// always has this `true` — [`BootError::BindlessUnsupported`] rejects a GPU
+    /// lacking any of the 5.
     pub bindless_capable: bool,
     /// Whether `R8G8B8A8_UNORM` supports `STORAGE_IMAGE` under OPTIMAL tiling (the P1b
     /// G-buffer color images are compute-store targets). Always `true` on a booted
@@ -511,6 +523,9 @@ pub struct DeviceFns {
     /// upload (the symmetric counterpart of `cmd_copy_image_to_buffer`; Vulkan 1.0
     /// core, always present).
     pub cmd_copy_buffer_to_image: PfnVkCmdCopyBufferToImage,
+    /// `vkCmdBlitImage` — the textured-PBR T2 mip-chain-generation blit (Decision
+    /// D3; Vulkan 1.0 core, always present).
+    pub cmd_blit_image: PfnVkCmdBlitImage,
     // --- Phase-6 S0 rung-2 graphics-pipeline + draw commands, Vulkan 1.0 core,
     //     always loaded. ---
     pub create_graphics_pipelines: PfnVkCreateGraphicsPipelines,
@@ -903,10 +918,11 @@ impl VulkanContext {
             };
 
         // --- 5b. Query the minimal device caps ONCE (Render P1b), alongside the
-        // `dynamicRendering` fail-fast in `create_device`. `bindless_capable` is
-        // recorded only; `gbuffer_storage_format_ok` is fail-fast here so a context
-        // that exists always has it (a marcher storage-image store can never fault on
-        // an unsupported format). Core-guaranteed on the RTX 3060.
+        // `dynamicRendering` fail-fast in `create_device`. `gbuffer_storage_format_ok`
+        // and (T-dev) `bindless_capable` are fail-fast here so a context that exists
+        // always has them (a marcher storage-image store can never fault on an
+        // unsupported format; the bindless descriptor path can never fault on
+        // unenabled descriptor-indexing bits). Core-guaranteed on the RTX 3060.
         let mut device_caps = query_device_caps(&instance_fns, physical_device);
         // HW-RT rung R0: populate the two timestamp caps `query_device_caps` left at
         // placeholder zeros — the `timestampPeriod` from the physical-device limits blob +
@@ -946,6 +962,13 @@ impl VulkanContext {
         // never fault on an unsupported format. Core-guaranteed on the RTX 3060.
         if !device_caps.r8_unorm_storage_ok {
             fail!(BootError::SsaoStorageFormatUnsupported);
+        }
+        // T-dev: the textured-PBR T4 bindless descriptor path needs the 5
+        // descriptor-indexing bits `create_device` enables — fail-fast here (mirroring
+        // the format checks) so a GPU that cannot get them enabled is rejected at boot,
+        // not discovered as an opaque shader fault later.
+        if !device_caps.bindless_capable {
+            fail!(BootError::BindlessUnsupported);
         }
 
         // HW-RT rung R2a-1: query ray-query support ONCE (presence + feature + props) BEFORE
@@ -1073,9 +1096,8 @@ impl VulkanContext {
     }
 
     /// The minimal physical-device capabilities queried at boot (Render P1b). A booted
-    /// context always has `gbuffer_storage_format_ok == true` (the boot fail-fast
-    /// rejects a GPU lacking it); `bindless_capable` is recorded for a future bindless
-    /// path.
+    /// context always has `gbuffer_storage_format_ok == true` and (T-dev)
+    /// `bindless_capable == true` — both are boot fail-fasts rejecting a GPU lacking them.
     #[inline]
     pub fn device_caps(&self) -> DeviceCaps {
         self.device_caps
@@ -1796,6 +1818,7 @@ fn load_device_fns(
                 device,
                 c"vkCmdCopyBufferToImage",
             )?,
+            cmd_blit_image: load_device_command(gdpa, device, c"vkCmdBlitImage")?,
             // Phase-6 S0 rung-2 graphics-pipeline + draw commands (Vulkan 1.0 core).
             create_graphics_pipelines: load_device_command(
                 gdpa,
@@ -2437,6 +2460,36 @@ fn zeroed_features13() -> VkPhysicalDeviceVulkan13Features {
     }
 }
 
+/// A zeroed [`VkPhysicalDeviceDescriptorIndexingFeatures`] except for `s_type` (T-dev) —
+/// the shared template BOTH the `bindless_capable` query ([`query_device_caps`]) and
+/// device creation ([`create_device`]) build on, mirroring [`zeroed_features13`].
+fn zeroed_descriptor_indexing_features() -> VkPhysicalDeviceDescriptorIndexingFeatures {
+    VkPhysicalDeviceDescriptorIndexingFeatures {
+        s_type: VkStructureType::PhysicalDeviceDescriptorIndexingFeatures,
+        p_next: ptr::null_mut(),
+        shader_input_attachment_array_dynamic_indexing: VK_FALSE,
+        shader_uniform_texel_buffer_array_dynamic_indexing: VK_FALSE,
+        shader_storage_texel_buffer_array_dynamic_indexing: VK_FALSE,
+        shader_uniform_buffer_array_non_uniform_indexing: VK_FALSE,
+        shader_sampled_image_array_non_uniform_indexing: VK_FALSE,
+        shader_storage_buffer_array_non_uniform_indexing: VK_FALSE,
+        shader_storage_image_array_non_uniform_indexing: VK_FALSE,
+        shader_input_attachment_array_non_uniform_indexing: VK_FALSE,
+        shader_uniform_texel_buffer_array_non_uniform_indexing: VK_FALSE,
+        shader_storage_texel_buffer_array_non_uniform_indexing: VK_FALSE,
+        descriptor_binding_uniform_buffer_update_after_bind: VK_FALSE,
+        descriptor_binding_sampled_image_update_after_bind: VK_FALSE,
+        descriptor_binding_storage_image_update_after_bind: VK_FALSE,
+        descriptor_binding_storage_buffer_update_after_bind: VK_FALSE,
+        descriptor_binding_uniform_texel_buffer_update_after_bind: VK_FALSE,
+        descriptor_binding_storage_texel_buffer_update_after_bind: VK_FALSE,
+        descriptor_binding_update_unused_while_pending: VK_FALSE,
+        descriptor_binding_partially_bound: VK_FALSE,
+        descriptor_binding_variable_descriptor_count: VK_FALSE,
+        runtime_descriptor_array: VK_FALSE,
+    }
+}
+
 /// Whether the GPU supports the Vulkan 1.3 `dynamicRendering` feature
 /// (Correction #2 / OQ-6 fail-fast). Queries `vkGetPhysicalDeviceFeatures2` with a
 /// chained [`VkPhysicalDeviceVulkan13Features`] and reads back `dynamic_rendering`.
@@ -2641,40 +2694,39 @@ fn is_device_extension_present(
     exts.iter().any(|e| cstr_array_eq(&e.extension_name, want))
 }
 
-/// Queries the minimal Render P1b [`DeviceCaps`]: whether the GPU advertises the
-/// bindless prerequisite (Vulkan 1.2 `descriptorIndexing` + `runtimeDescriptorArray`,
-/// chained into `vkGetPhysicalDeviceFeatures2`), whether `R8G8B8A8_UNORM` supports
-/// `STORAGE_IMAGE` under OPTIMAL tiling (`vkGetPhysicalDeviceFormatProperties`), and
-/// (Lighting L0b / W2) whether `R32_SFLOAT` supports `STORAGE_IMAGE` for the `gViewT`
-/// lane.
+/// Queries the minimal Render P1b [`DeviceCaps`]: whether the GPU advertises (T-dev)
+/// the 5 bindless-prerequisite `VkPhysicalDeviceDescriptorIndexingFeatures` bits
+/// (chained into `vkGetPhysicalDeviceFeatures2` — the SAME granular struct
+/// `create_device` enables), whether `R8G8B8A8_UNORM` supports `STORAGE_IMAGE` under
+/// OPTIMAL tiling (`vkGetPhysicalDeviceFormatProperties`), and (Lighting L0b / W2)
+/// whether `R32_SFLOAT` supports `STORAGE_IMAGE` for the `gViewT` lane.
 ///
-/// `bindless_capable` is recorded only (a future bindless path reads it); the caller
-/// fail-fasts on `!gbuffer_storage_format_ok` and `!viewt_storage_format_ok` so the
-/// marcher's G-buffer / `gViewT` stores can never fault on an unsupported format. P1b
-/// enables NEITHER feature at device
-/// creation — the shader declares explicit storage-image formats (so
-/// `shaderStorageImageWriteWithoutFormat` is not needed) and bindless is unused.
+/// The caller fail-fasts on `!bindless_capable`, `!gbuffer_storage_format_ok`, and
+/// `!viewt_storage_format_ok` so the bindless descriptor path / the marcher's G-buffer
+/// / `gViewT` stores can never fault on an unsupported or unenabled feature.
 fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> DeviceCaps {
-    // --- bindless_capable: read the Vulkan 1.2 core feature bools via features2. ---
-    // SAFETY: `VkPhysicalDeviceVulkan12Features` is `#[repr(C)]` with only an `s_type`
-    // enum, a pointer, and `VkBool32`s — all-zero is a valid initial bit pattern (a
-    // null `p_next` + `FALSE` bools); the driver overwrites every bool it owns through
-    // the `p_next` chain below. `s_type`/`p_next` are then set explicitly.
-    let mut features12: VkPhysicalDeviceVulkan12Features = unsafe { mem::zeroed() };
-    features12.s_type = VkStructureType::PhysicalDeviceVulkan12Features;
-    features12.p_next = ptr::null_mut();
+    // --- bindless_capable: read the 5 granular descriptor-indexing bits via features2.
+    // Reusing `zeroed_descriptor_indexing_features()` (the same builder `create_device`
+    // uses to ENABLE the struct) keeps the query and the enable chain reading/writing
+    // the identical field layout.
+    let mut descriptor_indexing = zeroed_descriptor_indexing_features();
     let mut features2 = VkPhysicalDeviceFeatures2 {
         s_type: VkStructureType::PhysicalDeviceFeatures2,
-        p_next: (&mut features12 as *mut VkPhysicalDeviceVulkan12Features).cast(),
+        p_next: (&mut descriptor_indexing as *mut VkPhysicalDeviceDescriptorIndexingFeatures)
+            .cast(),
         features: [VK_FALSE; 55],
     };
     // SAFETY: `physical_device` is a valid enumerated GPU; `features2` is a
-    // fully-initialized `#[repr(C)]` struct whose `p_next` chains the live `features12`
-    // local (both outlive the call). The driver writes the supported feature bools
-    // through the out-pointer + the chained struct.
+    // fully-initialized `#[repr(C)]` struct whose `p_next` chains the live
+    // `descriptor_indexing` local (both outlive the call). The driver writes the
+    // supported feature bools through the out-pointer + the chained struct.
     unsafe { (fns.get_physical_device_features2)(physical_device, &mut features2) };
-    let bindless_capable = features12.descriptor_indexing == VK_TRUE
-        && features12.runtime_descriptor_array == VK_TRUE;
+    let bindless_capable = descriptor_indexing.shader_sampled_image_array_non_uniform_indexing
+        == VK_TRUE
+        && descriptor_indexing.runtime_descriptor_array == VK_TRUE
+        && descriptor_indexing.descriptor_binding_partially_bound == VK_TRUE
+        && descriptor_indexing.descriptor_binding_variable_descriptor_count == VK_TRUE
+        && descriptor_indexing.descriptor_binding_sampled_image_update_after_bind == VK_TRUE;
 
     // --- gbuffer_storage_format_ok: STORAGE_IMAGE on R8G8B8A8_UNORM, OPTIMAL tiling. ---
     let mut format_props = VkFormatProperties {
@@ -2946,6 +2998,11 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
 /// `cmd_begin_rendering`, which faults without the feature enabled. Support is
 /// verified up front by [`supports_dynamic_rendering`] (Correction #2). When
 /// `windowed`, the `VK_KHR_swapchain` device extension is additionally enabled.
+///
+/// T-dev: ALSO enables core `samplerAnisotropy` (via `p_enabled_features`, the T2
+/// aniso-sampler prerequisite) and the 5-bit bindless `descriptorIndexing` granular
+/// struct (via `p_next`, the T4 bindless prerequisite) on BOTH the default and hwrt
+/// builds — device-state only, no pipeline/shader/descriptor change.
 fn create_device(
     fns: &InstanceFns,
     physical_device: VkPhysicalDevice,
@@ -2953,9 +3010,8 @@ fn create_device(
     windowed: bool,
     // HW-RT rung R2a-1: when `true` (only ever set under `feature="hwrt"` after
     // `supports_ray_query` returned true), the 3 RT extension strings are appended + the RT
-    // feature structs are chained into `p_next`. HARD `false` on every non-hwrt build (the
-    // caller passes `RT_ENABLE_DEFAULT`), so the RT arm below is dead + gated → the
-    // device-create bytes are the R1 extension array + `p_next = &features13`.
+    // feature structs are chained off `features13.p_next`. HARD `false` on every non-hwrt
+    // build (the caller passes `RT_ENABLE_DEFAULT`), so the RT arm below is dead + gated.
     enable_ray_query: bool,
 ) -> Result<VkDevice, BootError> {
     let _ = enable_ray_query; // read only on the hwrt arm below (silences the OFF build).
@@ -2996,17 +3052,13 @@ fn create_device(
         ext_count += 1;
     }
 
-    // The p_next chain head is the always-present `dynamicRendering` feature struct. On the
-    // hwrt arm the RT feature structs are prepended so the chain becomes
-    // rayQuery → accelerationStructure → bufferDeviceAddress → features13. `mut` is used only
-    // by that gated arm; on a default build the head is never reassigned (byte-identical R1).
-    #[cfg_attr(not(feature = "hwrt"), allow(unused_mut))]
-    let mut p_next: *const c_void =
-        (&features13 as *const VkPhysicalDeviceVulkan13Features).cast();
-
-    // HW-RT rung R2a-1: enable the 3 RT extensions + chain the RT feature structs. Only ever
-    // reached when `enable_ray_query` (⇒ `feature="hwrt"` AND `supports_ray_query`). The
-    // feature locals live on this frame + are read only during the call.
+    // HW-RT rung R2a-1: enable the 3 RT extensions + chain the RT feature structs off
+    // `features13.p_next`. Only ever reached when `enable_ray_query` (⇒
+    // `feature="hwrt"` AND `supports_ray_query`). The feature locals live on this frame
+    // + are read only during the call. Mutating `features13.p_next` HERE — before
+    // `descriptor_indexing` (below) takes a pointer to `features13` — means every write
+    // to `features13` is complete before any other struct's `p_next` observes its
+    // address, so the chain is built tail-first with no read-after-mutate hazard.
     #[cfg(feature = "hwrt")]
     let (_rt_ray_query, _rt_accel, _rt_bda);
     #[cfg(feature = "hwrt")]
@@ -3024,18 +3076,22 @@ fn create_device(
         ext_count += 1;
         ext_ptrs[ext_count] = VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME.as_ptr();
         ext_count += 1;
-        // Build the chain rayQuery → accel → bda → features13 (each ENABLE bit TRUE). The
-        // feature-struct `p_next` fields are `*mut c_void`; the chain tail is `features13`
-        // (input-only during `vkCreateDevice`, never written through the chain), so the
-        // `*const → *mut` cast of the head is sound.
-        _rt_ray_query = VkPhysicalDeviceRayQueryFeaturesKHR {
-            s_type: ST_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
-            p_next: p_next as *mut c_void,
-            ray_query: VK_TRUE,
+        // Build tail-first: bda (tail, p_next null) → accel → rayQuery, then hook the
+        // head onto `features13.p_next`. Final walk order: descriptorIndexing →
+        // features13 → rayQuery → accel → bda (each ENABLE bit TRUE). The feature-struct
+        // `p_next` fields are `*mut c_void`; every struct in the chain is input-only
+        // during `vkCreateDevice` (never written back through it), so the
+        // `*const → *mut` casts are sound.
+        _rt_bda = VkPhysicalDeviceBufferDeviceAddressFeatures {
+            s_type: ST_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
+            p_next: ptr::null_mut(),
+            buffer_device_address: VK_TRUE,
+            buffer_device_address_capture_replay: VK_FALSE,
+            buffer_device_address_multi_device: VK_FALSE,
         };
         _rt_accel = VkPhysicalDeviceAccelerationStructureFeaturesKHR {
             s_type: ST_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
-            p_next: (&_rt_ray_query as *const VkPhysicalDeviceRayQueryFeaturesKHR)
+            p_next: (&_rt_bda as *const VkPhysicalDeviceBufferDeviceAddressFeatures)
                 .cast::<c_void>() as *mut c_void,
             acceleration_structure: VK_TRUE,
             acceleration_structure_capture_replay: VK_FALSE,
@@ -3043,16 +3099,49 @@ fn create_device(
             acceleration_structure_host_commands: VK_FALSE,
             descriptor_binding_acceleration_structure_update_after_bind: VK_FALSE,
         };
-        _rt_bda = VkPhysicalDeviceBufferDeviceAddressFeatures {
-            s_type: ST_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
+        _rt_ray_query = VkPhysicalDeviceRayQueryFeaturesKHR {
+            s_type: ST_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
             p_next: (&_rt_accel as *const VkPhysicalDeviceAccelerationStructureFeaturesKHR)
                 .cast::<c_void>() as *mut c_void,
-            buffer_device_address: VK_TRUE,
-            buffer_device_address_capture_replay: VK_FALSE,
-            buffer_device_address_multi_device: VK_FALSE,
+            ray_query: VK_TRUE,
         };
-        p_next = (&_rt_bda as *const VkPhysicalDeviceBufferDeviceAddressFeatures).cast();
+        features13.p_next = (&_rt_ray_query as *const VkPhysicalDeviceRayQueryFeaturesKHR)
+            .cast::<c_void>() as *mut c_void;
     }
+
+    // T-dev: the granular bindless feature struct, present on BOTH the default and hwrt
+    // builds (bindless is device-agnostic, unlike the RT structs above). Enables exactly
+    // the 5 bits `DeviceCaps::bindless_capable` gates (mirrors
+    // `zeroed_descriptor_indexing_features` — the same builder `query_device_caps` uses
+    // to READ these bits, so the query and the enable chain never drift). Deliberately
+    // carries NO `buffer_device_address` field, so it coexists cleanly with the hwrt
+    // arm's standalone `VkPhysicalDeviceBufferDeviceAddressFeatures` above (no
+    // VUID-VkDeviceCreateInfo-pNext-02830 collision). Built LAST so its `p_next` observes
+    // `features13` fully finalized (including the hwrt arm's mutation above).
+    let mut descriptor_indexing = zeroed_descriptor_indexing_features();
+    descriptor_indexing.shader_sampled_image_array_non_uniform_indexing = VK_TRUE;
+    descriptor_indexing.runtime_descriptor_array = VK_TRUE;
+    descriptor_indexing.descriptor_binding_partially_bound = VK_TRUE;
+    descriptor_indexing.descriptor_binding_variable_descriptor_count = VK_TRUE;
+    descriptor_indexing.descriptor_binding_sampled_image_update_after_bind = VK_TRUE;
+    descriptor_indexing.p_next =
+        (&features13 as *const VkPhysicalDeviceVulkan13Features).cast::<c_void>() as *mut c_void;
+
+    // The p_next chain head is ALWAYS the bindless descriptor-indexing struct:
+    // descriptorIndexing → features13 → (hwrt only) rayQuery → accelerationStructure →
+    // bufferDeviceAddress. Unlike the pre-T-dev chain, the head never changes shape
+    // between builds — the RT sub-chain hangs off `features13.p_next` instead.
+    let p_next: *const c_void =
+        (&descriptor_indexing as *const VkPhysicalDeviceDescriptorIndexingFeatures).cast();
+
+    // Core (Vulkan 1.0) features passed via `p_enabled_features`, NOT `pNext` (the two
+    // are mutually exclusive — VUID-VkDeviceCreateInfo-pNext-00373). `samplerAnisotropy`
+    // is the T2 aniso-sampler prerequisite; every other core bit stays `VK_FALSE`
+    // (`Default` on every `VkBool32` field is `0`).
+    let enabled_features = VkPhysicalDeviceFeatures {
+        sampler_anisotropy: VK_TRUE,
+        ..Default::default()
+    };
 
     let create_info = VkDeviceCreateInfo {
         s_type: VkStructureType::DeviceCreateInfo,
@@ -3068,18 +3157,19 @@ fn create_device(
         } else {
             ext_ptrs.as_ptr()
         },
-        p_enabled_features: ptr::null(),
+        p_enabled_features: (&enabled_features as *const VkPhysicalDeviceFeatures).cast(),
     };
 
     let mut device = VkDevice::NULL;
     // SAFETY: `physical_device` is valid; `create_info` is a fully-initialized
-    // `#[repr(C)]` struct whose `p_queue_create_infos`/`p_queue_priorities`
-    // pointers (`&queue_info`, `&priority`), the `p_next` feature chain (`&features13`,
-    // plus the RT feature structs on the hwrt arm — all frame locals that outlive the
-    // call), and the extension-name array (`ext_ptrs`) all outlive the call; `&mut device`
-    // is a valid out-pointer; NULL allocator picks the default. The dynamic-rendering
-    // feature is verified supported above (Correction #2); the RT extensions are appended
-    // only when `supports_ray_query` returned true (caller).
+    // `#[repr(C)]` struct whose `p_queue_create_infos`/`p_queue_priorities` pointers
+    // (`&queue_info`, `&priority`), the `p_next` feature chain (`&descriptor_indexing` →
+    // `&features13` → the RT feature structs on the hwrt arm — all frame locals that
+    // outlive the call), the `p_enabled_features` pointer (`&enabled_features`, also a
+    // frame local), and the extension-name array (`ext_ptrs`) all outlive the call;
+    // `&mut device` is a valid out-pointer; NULL allocator picks the default. The
+    // dynamic-rendering feature is verified supported above (Correction #2); the RT
+    // extensions are appended only when `supports_ray_query` returned true (caller).
     let raw =
         unsafe { (fns.create_device)(physical_device, &create_info, ptr::null(), &mut device) };
     let result = VkResult::from_raw(raw);

@@ -198,6 +198,8 @@ fn render_probe(device: &VulkanContext) -> Vec<u8> {
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("output texture O (COLOR_ATTACHMENT | TRANSFER_SRC)");
 

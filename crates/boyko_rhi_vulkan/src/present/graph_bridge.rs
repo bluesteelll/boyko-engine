@@ -97,30 +97,41 @@ pub(crate) struct GbufferPassPlan {
 /// The number of IMAGE resources the whole-frame graph declares (Steps 1d/1e), in the
 /// FIXED ResId order the sink resolves by: albedo=0, normal=1, material=2, depth=3,
 /// viewt=4, lit=5, ssao=6, cascade=7, atlas=8, ddgi_irr=9, ddgi_depth=10. Buffer ResIds
-/// follow, offset by this. SDFDDGI I2 appended the two DDGI atlas storage images (9/10) —
-/// declared UNCONDITIONALLY (seeded with the boot `SHADER_READ_ONLY_OPTIMAL` layout) but only
-/// ACCESSED on the `ddgi_update`/`resolve` passes that name them, so the OFF-path barrier set
-/// (which never routes a barrier at ResId 9/10) is byte-unchanged.
+/// follow, offset by this on a `not(hwrt)` build. SDFDDGI I2 appended the two DDGI atlas storage
+/// images (9/10) — declared UNCONDITIONALLY (seeded with the boot `SHADER_READ_ONLY_OPTIMAL`
+/// layout) but only ACCESSED on the `ddgi_update`/`resolve` passes that name them, so the OFF-path
+/// barrier set (which never routes a barrier at ResId 9/10) is byte-unchanged.
 ///
-/// `feature = "hwrt"`: the count is cfg-selected `11 → 16`. Declared LAST in the image block
-/// (AFTER `ddgi_depth`, BEFORE the first `add_buffer`), so EVERY existing image ResId 0..10 is
-/// byte-unchanged and the buffers still begin at ResId `FRAMEGRAPH_IMAGE_COUNT` on BOTH builds by
-/// construction (their numeric ResIds shift +5 on hwrt, absorbed by this const — the three
-/// `- FRAMEGRAPH_IMAGE_COUNT` buffer re-base sites re-base by the SAME const, so a buffer's LOGICAL
-/// sink slot is unchanged):
+/// `feature = "hwrt"`: the count is cfg-selected `12 → 18`. The SIX `hwrt`-only images
+/// (`shadow_vis` (ResId 11) .. `shadow_temporal_hist_read` (ResId 16)) are declared LAST in the
+/// image block, AFTER `ddgi_depth`, BEFORE the first `add_buffer` — their ResIds 11..16 are
+/// UNCHANGED by T6a's addition below (byte-unchanged doc/comments throughout that block):
 /// - Rung 3a: `shadow_vis` (ResId 11) + `shadow_vis2` (ResId 12) — the à-trous ping-pong.
 /// - Rung 3b: `motion_vec` (ResId 13, RG16F) + `shadow_temporal_hist` (ResId 14, RGBA16, seeded
 ///   GENERAL cross-frame) + `temporal_out` (ResId 15, RG16) — the temporal reproject targets.
+/// - Rung 3b C1/H2: `shadow_temporal_hist_read` (ResId 16) — the cross-frame sibling/READ image.
 ///
-/// In the current step NO pass accesses ResId 11..15, so the derived barrier set is unchanged
-/// (byte-identical render); the VIS/à-trous passes (gated on `scene.shadow`) and the temporal pass
-/// (steps 5-6) add the accesses later.
+/// Textured-PBR T6a appends `pbr` (the `gPbr` deferred-resolve MRT lane) as the LAST image, AFTER
+/// every `hwrt`-only image (or right after `ddgi_depth` on a `not(hwrt)` build, where there is no
+/// `hwrt` block) — so it lands at ResId 11 (`not(hwrt)`) / 17 (`hwrt`), i.e. exactly the OLD
+/// `FRAMEGRAPH_IMAGE_COUNT` value on each leg, and the buffers still begin at the NEW
+/// `FRAMEGRAPH_IMAGE_COUNT` on both builds by construction (the three `- FRAMEGRAPH_IMAGE_COUNT`
+/// buffer re-base sites re-base by the SAME const, so a buffer's LOGICAL sink slot is unchanged).
+/// `pbr` is declared UNCONDITIONALLY (both feature legs) via `add_image_seeded` with
+/// `ResSync::undefined()` — a fresh, discard-legal UNDEFINED→GENERAL transition is derived EVERY
+/// frame at the `resolve` pass's unconditional `image_access` (no producer pass writes `pbr` this
+/// rung; the `seeded` flag exempts it from `compile`'s unwritten-transient-read authoring guard,
+/// which would otherwise correctly flag an always-read-never-written transient image).
+///
+/// No pass accesses ResId 11..16 (the `hwrt`-only images) on the current (non-temporal) frame, so
+/// the derived barrier set on THOSE resources is unchanged (byte-identical render); the VIS/à-
+/// trous/temporal passes (gated on `scene.shadow`) add the accesses when armed.
 #[cfg(feature = "hwrt")]
-pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 17;
-/// See the `hwrt` variant: a `not(hwrt)` build keeps the count at 11 (no shadow-vis targets,
-/// byte-unchanged).
+pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 18;
+/// See the `hwrt` variant: a `not(hwrt)` build keeps the count at 12 (11 base + `pbr`, no
+/// shadow-vis targets, byte-unchanged on every ResId 0..10).
 #[cfg(not(feature = "hwrt"))]
-pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 11;
+pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 12;
 
 /// The REAL [`BarrierSink`](crate::framegraph::BarrierSink) for the whole G-buffer
 /// frame (Steps 1c–1e): it resolves each derived barrier's logical `res` → the current
@@ -136,19 +147,22 @@ pub(crate) struct GbufferBarrierSink<'a> {
     pub(crate) cmd: VkCommandBuffer,
     /// The physical images resolved by image `ResId` index `0..FRAMEGRAPH_IMAGE_COUNT`
     /// — `[albedo, normal, material, depth, viewt, lit, ssao, cascade, atlas, ddgi_irr,
-    /// ddgi_depth]` for the current frame slot (the last two SDFDDGI I2, single-instance
-    /// world-fixed atlases — NOT ringed). MUST match the graph's declaration order. A pass
-    /// that does NOT declare an optional image (e.g. cascade when CSM is off, or the DDGI
-    /// atlases when the update pass is off) never routes a barrier naming that ResId, so its
+    /// ddgi_depth, ..(hwrt-only).., pbr]` for the current frame slot (`ddgi_irr`/`ddgi_depth` are
+    /// SDFDDGI I2 single-instance world-fixed atlases — NOT ringed; `pbr` — textured-PBR T6a's
+    /// `gPbr` — IS ringed, like albedo/normal/etc., and is declared/bound LAST, AFTER every
+    /// `hwrt`-only image, so it never perturbs their ResIds). MUST match the graph's declaration
+    /// order. A pass that does NOT declare an optional image (e.g. cascade when CSM is off, or the
+    /// DDGI atlases when the update pass is off) never routes a barrier naming that ResId, so its
     /// slot may hold [`VkImage::NULL`] harmlessly.
     ///
-    /// Rung 3a (`hwrt`): the array grows by TWO — `shadow_vis` (ResId 11) + `shadow_vis2`
-    /// (ResId 12), the ringed RT soft-shadow-visibility targets — declared LAST in the image
-    /// block. Each slot carries the current frame slot's handle when the targets are allocated, or
-    /// [`VkImage::NULL`] when the device lacks `RG8`/`RG16` UNORM storage (the DDGI-degrade mirror —
-    /// the targets are `Option`-guarded on the boot probe). In THIS step no pass names ResId 11/12,
-    /// so their slots are never handed to the driver either way; steps 4-6 add the passes that read
-    /// them (gated on the same `shadow_denoise_storage_ok()` predicate).
+    /// Rung 3a (`hwrt`): the array grows by SIX — `shadow_vis` (ResId 11) + `shadow_vis2` (ResId
+    /// 12), the ringed RT soft-shadow-visibility targets, declared right AFTER `ddgi_depth`
+    /// (`pbr` is appended LAST, past this whole block, so these ResIds are UNCHANGED by T6a). Each
+    /// slot carries the current frame slot's handle when the targets are allocated, or
+    /// [`VkImage::NULL`] when the device lacks `RG8`/`RG16` UNORM storage (the DDGI-degrade mirror
+    /// — the targets are `Option`-guarded on the boot probe). In THIS step no pass names ResId
+    /// 11/12, so their slots are never handed to the driver either way; steps 4-6 add the passes
+    /// that read them (gated on the same `shadow_denoise_storage_ok()` predicate).
     pub(crate) images: [VkImage; FRAMEGRAPH_IMAGE_COUNT],
     /// The physical buffers resolved by `res.index() - FRAMEGRAPH_IMAGE_COUNT` (the graph's
     /// FIXED buffer declaration order): `[light_table, tiles, grid, index, alloc,
@@ -174,7 +188,7 @@ pub(crate) struct GbufferBarrierSink<'a> {
 }
 
 /// Compile-time guard that [`GbufferBarrierSink::images`] is exactly [`FRAMEGRAPH_IMAGE_COUNT`]
-/// long on BOTH builds (`13` under `hwrt`, `11` otherwise). The field's `[VkImage;
+/// long on BOTH builds (`18` under `hwrt`, `12` otherwise). The field's `[VkImage;
 /// FRAMEGRAPH_IMAGE_COUNT]` type already ties the two; this pins the concrete count so an
 /// accidental const edit (e.g. adding a third shadow target without growing the const) trips
 /// here, and the `record_graph_pass` array literal — whose element count the compiler checks
@@ -182,11 +196,14 @@ pub(crate) struct GbufferBarrierSink<'a> {
 const _: () = {
     #[cfg(feature = "hwrt")]
     assert!(
-        FRAMEGRAPH_IMAGE_COUNT == 17,
-        "hwrt: 11 base + shadow_vis + shadow_vis2 + motion_vec + shadow_temporal_hist + temporal_out + shadow_temporal_hist_read"
+        FRAMEGRAPH_IMAGE_COUNT == 18,
+        "hwrt: 11 base + pbr (textured-PBR T6a) + shadow_vis + shadow_vis2 + motion_vec + shadow_temporal_hist + temporal_out + shadow_temporal_hist_read"
     );
     #[cfg(not(feature = "hwrt"))]
-    assert!(FRAMEGRAPH_IMAGE_COUNT == 11, "not(hwrt): the 11 base images, no shadow-vis targets");
+    assert!(
+        FRAMEGRAPH_IMAGE_COUNT == 12,
+        "not(hwrt): the 11 base images + pbr (textured-PBR T6a), no shadow-vis targets"
+    );
 };
 
 impl crate::framegraph::BarrierSink for GbufferBarrierSink<'_> {
@@ -248,8 +265,8 @@ impl crate::framegraph::BarrierSink for GbufferBarrierSink<'_> {
         // `record_gbuffer` recording). Every `arr[i].image` was resolved from the
         // `images[res.index()]` slot (a live G-buffer image for the current frame);
         // `res.index()` is in `0..FRAMEGRAPH_IMAGE_COUNT` for every image barrier the
-        // whole-frame graph derives (images are ResId `0..FRAMEGRAPH_IMAGE_COUNT` — `0..11`,
-        // or `0..13` under `hwrt` with the two Rung 3a shadow-vis targets). The masks/layouts/
+        // whole-frame graph derives (images are ResId `0..FRAMEGRAPH_IMAGE_COUNT` — `0..12`,
+        // or `0..18` under `hwrt`). The masks/layouts/
         // subresource are the graph-derived Vk values that reproduce the hand path's
         // transitions. `arr[..n]` (a stack array) outlives the call; the count == `n`.
         // No memory or buffer barriers (`0, ptr::null(), 0, ptr::null()`), matching the
@@ -360,11 +377,13 @@ impl Renderer<'_> {
     /// `tests/framegraph_gbuffer_equiv.rs::build_maximal_frame` (minus the swapchain
     /// image, whose WSI barriers stay hand-recorded). Resources are declared in a FIXED
     /// order that pins the ResIds the [`GbufferBarrierSink`] resolves by: images
-    /// albedo=0..atlas=8, then SDFDDGI I2 ddgi_irr=9/ddgi_depth=10 (then, under `hwrt`, the two
-    /// Rung 3a shadow-vis targets shadow_vis=11/shadow_vis2=12), then buffers
+    /// albedo=0..atlas=8, then SDFDDGI I2 ddgi_irr=9/ddgi_depth=10 (then, under `hwrt`, the SIX
+    /// Rung 3a/3b shadow-vis + temporal targets shadow_vis=11..shadow_temporal_hist_read=16),
+    /// then textured-PBR T6a's `pbr`=11 (`not(hwrt)`) / =17 (`hwrt`) — declared LAST in the image
+    /// block, past every `hwrt`-only image, so it never perturbs their ResIds — then buffers
     /// light_table..alloc, ddgi_classification/ddgi_ray_table, then the (conditional) interp trio —
     /// each buffer at `FRAMEGRAPH_IMAGE_COUNT + slot`, so a buffer's LOGICAL sink slot
-    /// (`ResId - FRAMEGRAPH_IMAGE_COUNT`) is cfg-invariant even though its numeric ResId shifts +2
+    /// (`ResId - FRAMEGRAPH_IMAGE_COUNT`) is cfg-invariant even though its numeric ResId shifts
     /// under `hwrt` (absorbed by the const).
     ///
     /// Zero heap allocation (the arenas keep capacity across `reset`); the per-frame
@@ -498,6 +517,21 @@ impl Renderer<'_> {
                 VK_ACCESS_SHADER_WRITE_BIT,
             ),
         ); // ResId 16
+        // Textured-PBR T6a: `pbr` (the `gPbr` deferred-resolve MRT lane), declared LAST in the
+        // image block — AFTER every `hwrt`-only image, BEFORE the first `add_buffer` — so it lands
+        // at ResId 11 (`not(hwrt)`) / 17 (`hwrt`), i.e. exactly the OLD `FRAMEGRAPH_IMAGE_COUNT` on
+        // each leg, WITHOUT perturbing the `hwrt`-only images' ResIds 11..16 above. UNCONDITIONAL
+        // (both feature legs). RINGED (per-FIF, like albedo/normal/etc.) ⇒ plain `add_image`-style
+        // sync would be correct too, but T6a's resolve `image_access` below is UNCONDITIONAL (no
+        // producer pass ever writes `pbr` this rung — the flag-gated `.Load` never dynamically
+        // fires), which `compile`'s DEBUG-ONLY authoring guard would otherwise flag as "reads a
+        // transient image with no prior producer" (a genuine, but here INTENTIONAL, pattern: the
+        // read exists purely to keep the STORAGE_IMAGE descriptor's bound layout valid, not for its
+        // data). `add_image_seeded` with `ResSync::undefined()` marks it "seeded" (exempting the
+        // guard) while keeping the SAME `layout = UNDEFINED` starting state a plain `add_image`
+        // would use — so the resolve's first (and only) access this frame still derives a REAL,
+        // discard-legal `UNDEFINED → GENERAL` transition, EVERY frame (the T6a first-touch design).
+        let pbr = g.add_image_seeded("pbr", ResSync::undefined());
         // --- Buffers (ResId FRAMEGRAPH_IMAGE_COUNT..+4) — ALL single instances shared by both in-flight
         // frames (audit B-002). light_table/tiles/grid/index end their frame consumed
         // by a COMPUTE read (resolve / marcher), so a dirty-frame re-write must order
@@ -677,6 +711,25 @@ impl Renderer<'_> {
         if scene.mesh_mv_active() {
             g.image_access(
                 motion_vec,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                SubRange::COLOR,
+            );
+        }
+        // Textured-PBR T6c: when the TEXTURED path is active, the raster pass ALSO writes the
+        // `pbr` 4th MRT (metallic/roughness/AO-modulation/emissive-modulation). Declare its
+        // COLOR_ATTACHMENT_WRITE so the graph orders it before the resolve's UNCONDITIONAL
+        // `pbr` read (declared below, T6a) — the SAME `mesh_tex_active()` predicate the
+        // recorder binds the TEXTURED pipeline under (W1: gate-divergence risk, mirrors
+        // `mesh_mv_active` above). TEXTURED and MOTION_VECTORS are mutually exclusive (T6c
+        // plan Decision D4), so this and the `motion_vec` write above never both fire the same
+        // frame. OFF (the default / non-textured scene) ⇒ no access ⇒ the graph routes ZERO
+        // EXTRA barriers on `pbr` beyond the resolve's own first-touch UNDEFINED → GENERAL ⇒
+        // byte-identical (T6a's gate).
+        if scene.mesh_tex_active() {
+            g.image_access(
+                pbr,
                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -1064,6 +1117,22 @@ impl Renderer<'_> {
                 SubRange::COLOR,
             );
         }
+        // Textured-PBR T6a: the resolve ALWAYS declares this read (UNLIKE `ssao` below, which is
+        // gated on its producer pass having run) — `pbr` has NO producer this rung, and the plan
+        // wants its layout ACTIVELY GENERAL (not left `UNDEFINED`, unlike the `ssao`-off precedent)
+        // so the statically-referenced `gPbr` STORAGE_IMAGE descriptor is always in a valid layout.
+        // `pbr` is `add_image_seeded` (see its declaration above), so this derives a real, discard-
+        // legal `UNDEFINED → GENERAL` transition every frame rather than tripping the unwritten-
+        // transient-read authoring guard. The SPIR-V `.Load` behind this binding is inside the
+        // flag-gated branch, so a flag=0 material (every current one) never dynamically reads the
+        // discarded content — pixel output is byte-identical.
+        g.image_access(
+            pbr,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_IMAGE_LAYOUT_GENERAL,
+            SubRange::COLOR,
+        );
         if ssao_pass.is_some() {
             g.image_access(
                 ssao,
@@ -1329,6 +1398,11 @@ impl Renderer<'_> {
                     .shadow_temporal_hist
                     .as_ref()
                     .map_or(VkImage::NULL, |r| r[fi ^ 1].image),
+                // Textured-PBR T6a: `pbr` (the `gPbr` deferred-resolve MRT lane) — declared LAST in
+                // the image block (ResId 11 `not(hwrt)` / 17 `hwrt`, past every `hwrt`-only image
+                // above), so it is bound here LAST too, UNCONDITIONALLY (both feature legs). RINGED
+                // (per-FIF), like albedo/normal/etc. above — bind the CURRENT frame slot's handle.
+                targets.pbr[fi].image,
             ],
             #[cfg(not(feature = "hwrt"))]
             buffers: [

@@ -151,6 +151,8 @@ fn p1a_vocabulary_set_creates_clean_host() {
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("R8G8B8A8 storage image");
 
@@ -338,6 +340,8 @@ fn p1a_vocabulary_storage_image_matches_golden() {
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("R8G8B8A8 storage image");
 

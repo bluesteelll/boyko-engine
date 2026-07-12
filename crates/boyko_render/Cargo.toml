@@ -56,6 +56,10 @@ boyko-math = { path = "../boyko_math" }
 # is the only surface used here (the generator/threadpool paths are not linked on the
 # render hot path). The metrics tables themselves become ECS-resident (boyko_ui).
 boyko-fontbake = { path = "../boyko_fontbake" }
+# Textured-PBR T2: the in-house, zero-third-party-dependency PNG decoder
+# (`decode_png`) the `PngTextureLoader` asset loader decodes raw texture bytes
+# through. A true leaf (depends on nothing in the workspace).
+boyko_image = { path = "../boyko_image" }
 # S4: the 3D GPU instance (`Gpu3dInstance`) is a `bytemuck::Pod` component whose
 # column uploads zero-copy via `cast_slice` (same discipline as the demo's 2D
 # `GpuInstance`). The `derive` feature gives the `Pod` / `Zeroable` derives.

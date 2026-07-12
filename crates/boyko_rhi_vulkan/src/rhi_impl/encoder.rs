@@ -13,9 +13,9 @@ use core::ffi::c_void;
 use core::ptr;
 
 use boyko_rhi::{
-    BarrierDesc, BufferBarrier, BufferCopy, BufferImageCopy, ImageBarrierDesc, ImageLayout,
-    ImageSubresourceRange, IndexType, RenderArea, RenderingDesc, RhiCommandEncoder, ShaderStage,
-    TimestampStage, Viewport,
+    BarrierDesc, BufferBarrier, BufferCopy, BufferImageCopy, ImageBarrierDesc, ImageBlitDesc,
+    ImageLayout, ImageSubresourceRange, IndexType, RenderArea, RenderingDesc, RhiCommandEncoder,
+    ShaderStage, TimestampStage, Viewport,
 };
 
 use crate::device::DeviceFns;
@@ -1123,6 +1123,63 @@ impl RhiCommandEncoder<Vulkan> for VulkanCommandEncoder {
             return;
         }
         self.copy_buffer_to_image_many(src.buffer, dst.image, dst_layout.as_i32(), regions);
+    }
+
+    fn blit_image(&mut self, desc: &ImageBlitDesc<Vulkan>) {
+        debug_assert!(
+            desc.src_extent_w > 0 && desc.src_extent_h > 0,
+            "invariant: blit_image source extent must be non-zero"
+        );
+        debug_assert!(
+            desc.dst_extent_w > 0 && desc.dst_extent_h > 0,
+            "invariant: blit_image destination extent must be non-zero"
+        );
+        let subresource = |mip_level: u32| VkImageSubresourceLayers {
+            aspect_mask: desc.aspect.bits(),
+            mip_level,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        let blit = VkImageBlit {
+            src_subresource: subresource(desc.src_mip_level),
+            src_offsets: [
+                VkOffset3D::default(),
+                VkOffset3D {
+                    x: desc.src_extent_w as i32,
+                    y: desc.src_extent_h as i32,
+                    z: 1,
+                },
+            ],
+            dst_subresource: subresource(desc.dst_mip_level),
+            dst_offsets: [
+                VkOffset3D::default(),
+                VkOffset3D {
+                    x: desc.dst_extent_w as i32,
+                    y: desc.dst_extent_h as i32,
+                    z: 1,
+                },
+            ],
+        };
+        // SAFETY: recording is open; `desc.texture.image` is a live image whose
+        // `src_mip_level` is currently in `desc.src_layout` and whose `dst_mip_level`
+        // is currently in `desc.dst_layout` (the caller transitioned each via a prior
+        // `image_barrier`, per this fn's own doc); one fully-initialized `VkImageBlit`
+        // (the `blit` local, alive for the call) names both in-bounds full-extent
+        // regions. `self.fns` points into the context's boxed fn-table (alive per the
+        // type contract).
+        let fns = unsafe { &*self.fns };
+        unsafe {
+            (fns.cmd_blit_image)(
+                self.command_buffer,
+                desc.texture.image,
+                desc.src_layout.as_i32(),
+                desc.texture.image,
+                desc.dst_layout.as_i32(),
+                1,
+                &blit,
+                VK_FILTER_LINEAR,
+            );
+        }
     }
 }
 

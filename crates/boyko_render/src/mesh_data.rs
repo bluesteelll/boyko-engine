@@ -20,7 +20,10 @@ use crate::mesh::Vertex;
 /// runs for a host-authored mesh.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MeshData {
-    /// Model-space vertices (position + normal + color — see [`Vertex`]).
+    /// Model-space vertices (position + normal + color + uv + tangent — see
+    /// [`Vertex`]). [`ObjMeshLoader`](crate::loaders::ObjMeshLoader) generates the
+    /// tangent basis as a post-dedup pass; `uv` is `[0.0, 0.0]` on a `.obj` with no
+    /// `vt` lines.
     pub vertices: Vec<Vertex>,
     /// Triangle indices into `vertices` (a flat list of 3-tuples).
     pub indices: Vec<u32>,

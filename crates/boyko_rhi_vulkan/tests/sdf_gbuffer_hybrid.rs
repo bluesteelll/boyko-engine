@@ -129,6 +129,8 @@ impl CsmResolveDummies {
                 dimension: TextureDimension::D2,
                 usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
                 array_layers: 4,
+                mip_levels: 1,
+                view_format: None,
             })
             .expect("CSM dummy cascade array texture");
         let sampler = device
@@ -156,6 +158,8 @@ impl CsmResolveDummies {
                 dimension: TextureDimension::D2,
                 usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
                 array_layers: 16,
+                mip_levels: 1,
+                view_format: None,
             })
             .expect("shadow-atlas dummy array texture (M_SLOTS layers)");
         let atlas_sampler = device
@@ -903,6 +907,8 @@ fn run_gbuffer_hybrid_m4(
             dimension: TextureDimension::D2,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("offscreen depth texture (sampled)");
 
@@ -921,6 +927,8 @@ fn run_gbuffer_hybrid_m4(
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("G-buffer albedo storage+color image");
     let normal = device
@@ -932,6 +940,8 @@ fn run_gbuffer_hybrid_m4(
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("G-buffer normal storage+color image");
     let material = device
@@ -943,6 +953,8 @@ fn run_gbuffer_hybrid_m4(
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("G-buffer material storage+color image");
     // Deferred split: the LIT image is the resolve's STORAGE store output; TRANSFER_SRC so
@@ -956,6 +968,8 @@ fn run_gbuffer_hybrid_m4(
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("deferred resolve lit storage image");
     // Lighting L0b: the gViewT lane — an R32_SFLOAT STORAGE image the marcher stores the
@@ -977,6 +991,8 @@ fn run_gbuffer_hybrid_m4(
             dimension: TextureDimension::D2,
             usage: viewt_usage,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("Lighting L0b gViewT storage image");
     // Render P7 GROUP C1: the SSAO term `gSsao` — an R8_UNORM STORAGE image bound at resolve
@@ -992,6 +1008,8 @@ fn run_gbuffer_hybrid_m4(
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("Render P7 SSAO gSsao storage image");
 
@@ -1887,6 +1905,8 @@ fn run_gbuffer_hybrid_ssao(
             dimension: TextureDimension::D2,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("offscreen depth texture (sampled)");
     let make_gbuf = |usage: ImageUsage, label: &str| {
@@ -1899,6 +1919,8 @@ fn run_gbuffer_hybrid_ssao(
                 dimension: TextureDimension::D2,
                 usage,
                 array_layers: 1,
+                mip_levels: 1,
+                view_format: None,
             })
             .unwrap_or_else(|e| panic!("{label}: {e:?}"))
     };
@@ -1915,6 +1937,8 @@ fn run_gbuffer_hybrid_ssao(
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("Lighting L0b gViewT storage image");
     // The SSAO term `gSsao` — R8_UNORM STORAGE, the SSAO pass WRITES it + the resolve READS it; it
@@ -1928,6 +1952,8 @@ fn run_gbuffer_hybrid_ssao(
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("Render P7 SSAO gSsao storage image");
 
@@ -4925,6 +4951,8 @@ fn run_gbuffer_hybrid_lit_clustered(
             dimension: TextureDimension::D2,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("offscreen depth texture (sampled)");
 
@@ -4939,6 +4967,8 @@ fn run_gbuffer_hybrid_lit_clustered(
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("G-buffer albedo storage+color image");
     let normal = device
@@ -4954,6 +4984,8 @@ fn run_gbuffer_hybrid_lit_clustered(
             // oracle's UNORM decode is bit-identical to the GPU resolve's gNormal load.
             usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC | ImageUsage::COLOR_ATTACHMENT,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("G-buffer normal storage+color image");
     let material = device
@@ -4965,6 +4997,8 @@ fn run_gbuffer_hybrid_lit_clustered(
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("G-buffer material storage+color image");
     let lit = device
@@ -4976,6 +5010,8 @@ fn run_gbuffer_hybrid_lit_clustered(
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("deferred resolve lit storage image");
     let viewt = device
@@ -4990,6 +5026,8 @@ fn run_gbuffer_hybrid_lit_clustered(
             // from the marcher's independent CPU re-derivation), so both sides shade the SAME P.
             usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("Lighting L0b gViewT storage image");
     // Render P7 GROUP C1: the SSAO term `gSsao` — an R8_UNORM STORAGE image bound at resolve
@@ -5004,6 +5042,8 @@ fn run_gbuffer_hybrid_lit_clustered(
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("Render P7 SSAO gSsao storage image");
 

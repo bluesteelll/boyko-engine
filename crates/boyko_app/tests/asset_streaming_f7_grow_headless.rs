@@ -28,14 +28,14 @@
 //!
 //! # What the boot material-table capacity actually is (corrects an earlier draft)
 //!
-//! `MaterialTable::boot_seed` sizes the device table to `Assets::<MaterialGpu>::
+//! `MaterialTable::boot_seed` sizes the device table to `Assets::<Material>::
 //! high_water()` AT `boot_seed` TIME (`runner.rs`: `app.finish()` — which drains
-//! every `add_startup_system` — runs BEFORE `boot_seed`). `Assets::<MaterialGpu>::
+//! every `add_startup_system` — runs BEFORE `boot_seed`). `Assets::<Material>::
 //! with_reserved(256)` (`runner.rs`'s `MATERIAL_CAPACITY`) is only the Vec's
 //! preallocated STORAGE reservation (avoids reallocation up to 256 rows) — it is
 //! NOT the device table's row capacity. This test's `setup_minimal_scene` startup
 //! system mints no material of its own (only a mesh + minimal lights/camera), so by
-//! `boot_seed` time `Assets::<MaterialGpu>::high_water() == 1` (only the runner's own
+//! `boot_seed` time `Assets::<Material>::high_water() == 1` (only the runner's own
 //! pinned default material, minted directly in `run_windowed` before `finish()`).
 //! The device table's boot ROW capacity is therefore exactly **1**, not 256 — Phase
 //! A below (a steady 1-material/frame post-boot mint) crosses the
@@ -152,7 +152,7 @@
 use boyko_app::prelude::*;
 use boyko_ecs::prelude::*;
 use boyko_macros::Resource;
-use boyko_render::{MaterialGpu, MaterialTable, MeshRenderScratch, RayCaps, RetiredGpuBuffers, RtTier};
+use boyko_render::{Material, MaterialTable, MeshRenderScratch, RayCaps, RetiredGpuBuffers, RtTier};
 #[cfg(feature = "hwrt")]
 use boyko_render::{ShadowDenoiseConfig, ShadowDenoiseMode};
 
@@ -311,7 +311,7 @@ fn snapshot_pm_stats(scratch: Res<MeshRenderScratch>, mut stats: ResMut<FinalPmS
 /// "grow-past-boot (material)" and FIX-F.
 fn phase_driver(
     mut commands: Commands,
-    mut materials: ResMut<Assets<MaterialGpu>>,
+    mut materials: ResMut<Assets<Material>>,
     mut frame: ResMut<FrameCounter>,
     mut instance_grow_ran: ResMut<InstanceGrowRan>,
     cube: Res<SharedCubeMesh>,
@@ -323,8 +323,8 @@ fn phase_driver(
         // Phase A: one fresh material per frame, each carried by its own freshly
         // spawned drawable (so the mesh-draw gather + the material-bearing resolve
         // sets are both live while the grow happens, not just an inert
-        // `Assets<MaterialGpu>` row).
-        let handle = materials.add(MaterialGpu::default());
+        // `Assets<Material>` row).
+        let handle = materials.add(Material::default());
         commands.spawn(MeshBundle {
             material: MaterialHandle(handle.index() as u16),
             ..MeshBundle::new(cube.get(), Transform::default())
@@ -353,7 +353,7 @@ fn phase_driver(
         // effect — Phase A's own drawables already carry non-zero-indexed handles) —
         // see this file's module doc for why this batch is ALSO the F8
         // pm_instance_material_rings lockstep-growth execution smoke.
-        let pm_material = materials.add(MaterialGpu::new(
+        let pm_material = materials.add(Material::new(
             [0.9, 0.1, 0.1, 1.0],
             1.0,
             0.3,

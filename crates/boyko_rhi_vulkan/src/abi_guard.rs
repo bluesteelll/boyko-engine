@@ -35,10 +35,11 @@ use crate::ffi::{
     VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
     VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_FILTER_LINEAR,
     VK_FILTER_NEAREST, VK_FORMAT_B10G11R11_UFLOAT_PACK32, VK_FORMAT_B8G8R8A8_SRGB,
-    VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_D32_SFLOAT, VK_FORMAT_R16G16B16A16_UNORM,
-    VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R16G16_UNORM,
+    VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_D32_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT,
+    VK_FORMAT_R16G16B16A16_UNORM, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R16G16_UNORM,
     VK_FORMAT_R16_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
-    VK_FORMAT_R32_SFLOAT, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8_UNORM,
+    VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32_SFLOAT, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM,
+    VK_FORMAT_R8G8_UNORM,
     VK_FORMAT_R8_SNORM, VK_FORMAT_R8_UNORM,
     VK_FORMAT_UNDEFINED,
     VK_IMAGE_ASPECT_COLOR_BIT,
@@ -287,6 +288,12 @@ const _: () = assert!(
     Format::R16G16Unorm.as_i32() == VK_FORMAT_R16G16_UNORM,
     "Format::R16G16Unorm must equal VK_FORMAT_R16G16_UNORM"
 );
+// Textured-PBR T6a: the `gPbr` deferred-resolve MRT lane format (`as_i32()` mapped in
+// `create_texture`). Pinned to the canonical enumerant (`VK_FORMAT_R16G16B16A16_SFLOAT == 97`).
+const _: () = assert!(
+    Format::R16G16B16A16Sfloat.as_i32() == VK_FORMAT_R16G16B16A16_SFLOAT,
+    "Format::R16G16B16A16Sfloat must equal VK_FORMAT_R16G16B16A16_SFLOAT"
+);
 // SDFDDGI I1: the probe IRRADIANCE atlas format (`R11G11B10F`-no-gamma, Decision D6;
 // `as_i32()` mapped in `create_texture`).
 const _: () = assert!(
@@ -384,6 +391,10 @@ const _: () = assert!(
 // ===========================================================================
 
 // --- VertexFormat `as_i32()` (mapped in `create_graphics_pipeline`). ---
+const _: () = assert!(
+    VertexFormat::Float32x2.as_i32() == VK_FORMAT_R32G32_SFLOAT,
+    "VertexFormat::Float32x2 must equal VK_FORMAT_R32G32_SFLOAT"
+);
 const _: () = assert!(
     VertexFormat::Float32x3.as_i32() == VK_FORMAT_R32G32B32_SFLOAT,
     "VertexFormat::Float32x3 must equal VK_FORMAT_R32G32B32_SFLOAT"

@@ -90,6 +90,7 @@ use boyko_scene::render_caps::MeshHandle;
 use crate::mesh::{MeshGpu, U16_INDEX_VERTEX_LIMIT, Vertex};
 #[cfg(feature = "hwrt")]
 use crate::mesh::VERTEX_STRIDE;
+use crate::tangent::generate_tangents;
 
 /// The mesh-domain API over the world's [`Assets<MeshGpu>`] table (asset-system
 /// rung A2). See the module doc for the fold's shape, the `mesh`-vs-`get`
@@ -335,6 +336,73 @@ pub fn build_mesh_gpu(ctx: &VulkanContext, vertices: &[Vertex], indices: &[u32])
     }
 }
 
+/// The pure (host-only) geometry for [`MeshAssetsExt::cube`]: 24 unique vertices
+/// (per-face outward normals + planar UVs + a Lengyel-generated tangent basis —
+/// exact/analytic here, since every face is a single planar quad) and 36 indices.
+/// Factored out of `cube` so the vertex/UV/tangent math is unit-testable without a
+/// `VulkanContext` — the GPU upload stays in `cube` itself.
+pub(crate) fn cube_geometry(size: f32) -> ([Vertex; 24], [u32; 36]) {
+    const COLOR: [f32; 4] = [0.82, 0.82, 0.82, 1.0];
+    // Corner-order-matched planar UV: corner `c` of every face gets `QUAD_UV[c]`,
+    // consistent with the `(0,1,2)`+`(0,2,3)` two-triangle fan below.
+    const QUAD_UV: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    let h = size * 0.5;
+    // Six faces × four corners; each face carries its own outward normal so
+    // the G-buffer normal lane is face-correct (no vertex-normal averaging).
+    // Faces: +X, -X, +Y, -Y, +Z, -Z. Corner order is consistent per face so
+    // one index pattern (two triangles per quad) covers all six.
+    let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
+        ([1.0, 0.0, 0.0], [[h, -h, -h], [h, h, -h], [h, h, h], [h, -h, h]]),
+        ([-1.0, 0.0, 0.0], [[-h, -h, h], [-h, h, h], [-h, h, -h], [-h, -h, -h]]),
+        ([0.0, 1.0, 0.0], [[-h, h, -h], [-h, h, h], [h, h, h], [h, h, -h]]),
+        ([0.0, -1.0, 0.0], [[-h, -h, h], [-h, -h, -h], [h, -h, -h], [h, -h, h]]),
+        ([0.0, 0.0, 1.0], [[-h, -h, h], [h, -h, h], [h, h, h], [-h, h, h]]),
+        ([0.0, 0.0, -1.0], [[h, -h, -h], [-h, -h, -h], [-h, h, -h], [h, h, -h]]),
+    ];
+    let mut vertices = [Vertex::new([0.0; 3], [0.0; 3], COLOR); 24];
+    let mut indices = [0u32; 36];
+    for (f, (normal, corners)) in faces.iter().enumerate() {
+        for (c, corner) in corners.iter().enumerate() {
+            let mut v = Vertex::new(*corner, *normal, COLOR);
+            v.uv = QUAD_UV[c];
+            vertices[f * 4 + c] = v;
+        }
+        let base = (f * 4) as u32;
+        indices[f * 6..f * 6 + 6].copy_from_slice(&[
+            base,
+            base + 1,
+            base + 2,
+            base,
+            base + 2,
+            base + 3,
+        ]);
+    }
+    generate_tangents(&mut vertices, &indices);
+    (vertices, indices)
+}
+
+/// The pure (host-only) geometry for [`MeshAssetsExt::plane`]: 4 vertices (a flat
+/// `+Y`-normal quad with a planar UV) + 6 indices, tangent-generated the same way
+/// as [`cube_geometry`]. Factored out for the same testability reason.
+pub(crate) fn plane_geometry(size: f32) -> ([Vertex; 4], [u32; 6]) {
+    const COLOR: [f32; 4] = [0.62, 0.62, 0.62, 1.0];
+    const NORMAL: [f32; 3] = [0.0, 1.0, 0.0];
+    let h = size * 0.5;
+    let mut vertices = [
+        Vertex::new([-h, 0.0, -h], NORMAL, COLOR),
+        Vertex::new([-h, 0.0, h], NORMAL, COLOR),
+        Vertex::new([h, 0.0, h], NORMAL, COLOR),
+        Vertex::new([h, 0.0, -h], NORMAL, COLOR),
+    ];
+    vertices[0].uv = [0.0, 0.0];
+    vertices[1].uv = [0.0, 1.0];
+    vertices[2].uv = [1.0, 1.0];
+    vertices[3].uv = [1.0, 0.0];
+    let indices = [0u32, 1, 2, 0, 2, 3];
+    generate_tangents(&mut vertices, &indices);
+    (vertices, indices)
+}
+
 impl MeshAssetsExt for Assets<MeshGpu> {
     fn register_mesh(
         &mut self,
@@ -347,58 +415,12 @@ impl MeshAssetsExt for Assets<MeshGpu> {
     }
 
     fn cube(&mut self, ctx: &VulkanContext, size: f32) -> MeshHandle {
-        const COLOR: [f32; 4] = [0.82, 0.82, 0.82, 1.0];
-        let h = size * 0.5;
-        // Six faces × four corners; each face carries its own outward normal so
-        // the G-buffer normal lane is face-correct (no vertex-normal averaging).
-        // Faces: +X, -X, +Y, -Y, +Z, -Z. Corner order is consistent per face so
-        // one index pattern (two triangles per quad) covers all six.
-        let faces: [([f32; 3], [[f32; 3]; 4]); 6] = [
-            ([1.0, 0.0, 0.0], [[h, -h, -h], [h, h, -h], [h, h, h], [h, -h, h]]),
-            ([-1.0, 0.0, 0.0], [[-h, -h, h], [-h, h, h], [-h, h, -h], [-h, -h, -h]]),
-            ([0.0, 1.0, 0.0], [[-h, h, -h], [-h, h, h], [h, h, h], [h, h, -h]]),
-            ([0.0, -1.0, 0.0], [[-h, -h, h], [-h, -h, -h], [h, -h, -h], [h, -h, h]]),
-            ([0.0, 0.0, 1.0], [[-h, -h, h], [h, -h, h], [h, h, h], [-h, h, h]]),
-            ([0.0, 0.0, -1.0], [[h, -h, -h], [-h, -h, -h], [-h, h, -h], [h, h, -h]]),
-        ];
-        let mut vertices = [Vertex {
-            position: [0.0; 3],
-            normal: [0.0; 3],
-            color: COLOR,
-        }; 24];
-        let mut indices = [0u32; 36];
-        for (f, (normal, corners)) in faces.iter().enumerate() {
-            for (c, corner) in corners.iter().enumerate() {
-                vertices[f * 4 + c] = Vertex {
-                    position: *corner,
-                    normal: *normal,
-                    color: COLOR,
-                };
-            }
-            let base = (f * 4) as u32;
-            indices[f * 6..f * 6 + 6].copy_from_slice(&[
-                base,
-                base + 1,
-                base + 2,
-                base,
-                base + 2,
-                base + 3,
-            ]);
-        }
+        let (vertices, indices) = cube_geometry(size);
         self.register_mesh(ctx, &vertices, &indices)
     }
 
     fn plane(&mut self, ctx: &VulkanContext, size: f32) -> MeshHandle {
-        const COLOR: [f32; 4] = [0.62, 0.62, 0.62, 1.0];
-        const NORMAL: [f32; 3] = [0.0, 1.0, 0.0];
-        let h = size * 0.5;
-        let vertices = [
-            Vertex { position: [-h, 0.0, -h], normal: NORMAL, color: COLOR },
-            Vertex { position: [-h, 0.0, h], normal: NORMAL, color: COLOR },
-            Vertex { position: [h, 0.0, h], normal: NORMAL, color: COLOR },
-            Vertex { position: [h, 0.0, -h], normal: NORMAL, color: COLOR },
-        ];
-        let indices = [0u32, 1, 2, 0, 2, 3];
+        let (vertices, indices) = plane_geometry(size);
         self.register_mesh(ctx, &vertices, &indices)
     }
 

@@ -1,12 +1,12 @@
 //! Asset-streaming plan F2 §1/§3 — ECS integration coverage for the refcount
 //! lifetime driver: `MaterialHandle` carrier hooks (`boyko_scene::render_caps`)
 //! pushing `RefDelta`s into `RefcountDeltas`, folded by `apply_refcount_deltas`
-//! (this crate) into `Assets<MaterialGpu>`, retiring into `DeferredFree`.
+//! (this crate) into `Assets<Material>`, retiring into `DeferredFree`.
 //!
 //! `MaterialHandle` (a bare `u16` carrier, no `#[require(...)]`) is the vehicle
 //! — `MeshHandle` mirrors the identical two-hook wiring (see
 //! `boyko_scene::render_caps`'s module doc) but its asset (`MeshGpu`) owns RHI
-//! buffers and cannot be minted without a real device. `MaterialGpu` is POD
+//! buffers and cannot be minted without a real device. `Material` is POD
 //! (`Default`, no device handle) and needs none. `Assets<MeshGpu>` is still
 //! inserted EMPTY (a `NonSendResMut<Assets<MeshGpu>>` is one of
 //! `apply_refcount_deltas`'s four system params, resolved unconditionally) so
@@ -39,7 +39,7 @@ use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;
 use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::system::Commands;
 
-use boyko_render::{MaterialGpu, MeshGpu, RenderEpoch, apply_refcount_deltas};
+use boyko_render::{Material, MeshGpu, RenderEpoch, apply_refcount_deltas};
 use boyko_scene::{DeferredFree, MaterialHandle, RefcountDeltas};
 
 /// Builds an `EcsMaster` with the F2 refcount pipeline's resources inserted
@@ -48,7 +48,7 @@ use boyko_scene::{DeferredFree, MaterialHandle, RefcountDeltas};
 /// test harness; see `boyko_ecs/tests/phase14a_hooks_firing.rs`). `material_assets`
 /// is caller-seeded (rows already minted) BEFORE it moves into the world, since
 /// only the caller knows which slot(s) to reference from a `MaterialHandle`.
-fn world_with(material_assets: Assets<MaterialGpu>) -> EcsMaster {
+fn world_with(material_assets: Assets<Material>) -> EcsMaster {
     let mut ecs = EcsMaster::new();
     ecs.insert_resource(RefcountDeltas::default());
     ecs.insert_resource(DeferredFree::default());
@@ -77,8 +77,8 @@ fn despawn(ecs: &mut EcsMaster, e: Entity) {
 
 #[test]
 fn single_owner_insert_then_despawn_drives_refcount_to_one_then_retiring() {
-    let mut material_assets = Assets::<MaterialGpu>::with_reserved(4);
-    let slot = material_assets.add(MaterialGpu::default()).index() as u16;
+    let mut material_assets = Assets::<Material>::with_reserved(4);
+    let slot = material_assets.add(Material::default()).index() as u16;
 
     let mut ecs = world_with(material_assets);
 
@@ -114,9 +114,9 @@ fn single_owner_insert_then_despawn_drives_refcount_to_one_then_retiring() {
 
 #[test]
 fn inplace_rebind_balances_old_decrement_and_new_increment() {
-    let mut material_assets = Assets::<MaterialGpu>::with_reserved(4);
-    let slot_old = material_assets.add(MaterialGpu::default()).index() as u16;
-    let slot_new = material_assets.add(MaterialGpu::default()).index() as u16;
+    let mut material_assets = Assets::<Material>::with_reserved(4);
+    let slot_old = material_assets.add(Material::default()).index() as u16;
+    let slot_new = material_assets.add(Material::default()).index() as u16;
 
     let mut ecs = world_with(material_assets);
 
@@ -178,8 +178,8 @@ fn inplace_rebind_balances_old_decrement_and_new_increment() {
 
 #[test]
 fn shared_handle_despawn_one_decrements_by_exactly_one_not_two() {
-    let mut material_assets = Assets::<MaterialGpu>::with_reserved(4);
-    let slot = material_assets.add(MaterialGpu::default()).index() as u16;
+    let mut material_assets = Assets::<Material>::with_reserved(4);
+    let slot = material_assets.add(Material::default()).index() as u16;
 
     let mut ecs = world_with(material_assets);
 

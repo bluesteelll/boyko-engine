@@ -25,6 +25,19 @@
 //! ([`MaterialTable`](crate::material_table::MaterialTable)) reads that table to
 //! seed/refresh the device SSBO — it holds no host authority of its own. This replaces
 //! the standalone mesh-materials rung M(-1) `MaterialRegistry`.
+//!
+//! # Textured-PBR rung T5 — `Material` splits into `{ gpu, textures }`
+//!
+//! [`Material`] is no longer a bare alias for [`MaterialGpu`]: it is the CPU authority
+//! struct `{ gpu: MaterialGpu, textures: MaterialTextures }`. [`MaterialGpu`] KEEPS its
+//! FROZEN 48-byte std430 layout unchanged — it is still the exact element the device SSBO
+//! ([`MaterialTable`](crate::material_table::MaterialTable)) uploads. [`MaterialTextures`]
+//! is a CPU-only, POD sidecar of five bindless texture slots (textured-PBR T2's
+//! [`BindlessTextureTable`](crate::bindless::BindlessTextureTable) indices), read by the
+//! per-instance texture gather (T5's dormant [`mesh_draw::PerInstanceMaterialTex`] lane;
+//! T6 wires it into a shader pipeline). `Asset`/`AssetBacking`/`HasLoaders` moved from
+//! `MaterialGpu` to `Material` — `Assets<Material>` (not `Assets<MaterialGpu>`) is now the
+//! world-global CPU authority every call site mints/edits.
 
 use boyko_ecs::ecs::core::asset::{Asset, Handle, HasLoaders, LoaderEntry};
 
@@ -39,7 +52,11 @@ use crate::loaders::RonMaterialLoader;
 ///   metallic-roughness parameters packed into one lane. `flags` is reserved (0 in MVP-2).
 /// - `emissive` (off 32): `rgb` = LINEAR emissive radiance, `w` unused.
 ///
-/// All values are LINEAR (the resolve tonemaps + applies the OETF once at output).
+/// All values are LINEAR. PBR P0-C: the deferred resolve (`deferred_pbr.hlsl`) Hill
+/// ACES-fits the exposed radiance THEN manually gamma-2.2 encodes it once, right before the
+/// single `gLit` store — `gLit` (R8G8B8A8_UNORM) and the swapchain (`pick_surface_format`
+/// prefers `*_UNORM` over `*_SRGB`) are linear UNORM end to end, so nothing downstream
+/// hardware-encodes sRGB and the OETF must be manual.
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialGpu {
@@ -83,38 +100,182 @@ const _: () = assert!(
 );
 const _: () = assert!(MATERIAL_GPU_WORDS == 12, "MATERIAL_GPU_WORDS must equal the shader's 12u");
 
-impl Asset for MaterialGpu {
-    /// [`MaterialGpu`] is its own decoded CPU form — no separate loader/decode step
-    /// exists yet (materials are authored directly in Rust at MVP-2; a future
-    /// asset-loading rung may add a file-backed decode).
-    type Cpu = MaterialGpu;
+/// A bit in [`MaterialGpu::mrr`]'s bitcast `flags` lane (`mrr[3]`): set iff the
+/// material's [`MaterialTextures`] carries at least one non-zero bindless slot
+/// (textured-PBR rung T5). A material minted via [`Material::new`] / [`Material::default`]
+/// / [`From<MaterialGpu>`](Material) never sets this bit (`flags` stays whatever the
+/// caller passed, `0` in every non-textured constructor) — so a non-textured material's
+/// `MaterialGpu` bytes are BYTE-IDENTICAL to the pre-T5 shape, and every in-tree golden
+/// holds. The shader-side READ of this bit is a later rung (T6).
+///
+/// AUTHORITATIVE derivation happens at the host→GPU upload boundary
+/// ([`MaterialTable::seed_rows`](crate::material_table::MaterialTable), grooming item
+/// B): every copy of a row's bytes into the device SSBO re-derives this bit from
+/// `textures.any()` — ORed in when a slot is bound, ANDed out otherwise — regardless of
+/// whatever value `gpu.mrr[3]` already carries, so direct field mutation of `gpu` or
+/// `textures` after construction can never desync the two on the device.
+/// [`Material::with_textures`] also sets it CPU-side, as a convenience mirror for a
+/// reader that inspects `gpu.mrr[3]` before the next upload — not the sole source of
+/// truth.
+pub const MATERIAL_FLAG_TEXTURED: u32 = 1;
+
+/// The CPU-only sidecar of bindless texture slots a [`Material`] carries alongside its
+/// [`MaterialGpu`] SSBO element (textured-PBR rung T5).
+///
+/// Each field is a RESOLVED bindless index into
+/// [`BindlessTextureTable`](crate::bindless::BindlessTextureTable) — `0` means "no
+/// texture, fall back to the matching [`MaterialGpu`] scalar/vector parameter" (documented
+/// per-field below). Slots are set by textured-PBR T7 (upload texture → register in the
+/// bindless table → store the returned slot here); this type is POD infrastructure only —
+/// it depends on NEITHER `crate::texture::TextureGpu` NOR
+/// `Handle<TextureGpu>` (a trivial `u32`-only gather, zero dependency on the T2 texture
+/// asset types, HYBRID-perf: the per-instance texture gather stays a flat struct copy).
+///
+/// # Append-only-texture caveat
+///
+/// A cached slot here is valid ONLY while the world's texture table is APPEND-ONLY (never
+/// frees/recycles a bindless slot) — identical to `MeshHandle` / [`MaterialId`]'s
+/// truncation/staleness caveat. A streaming-free texture table (where a slot could be
+/// recycled out from under a cached `MaterialTextures`) is DEFERRED, mirroring
+/// asset-streaming plan task#13 (`MaterialStale` substitution) for the material side.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialTextures {
+    /// Bindless slot of the albedo (base-color) texture; `0` = none, use
+    /// [`MaterialGpu::base_color`].
+    pub albedo: u32,
+    /// Bindless slot of the tangent-space normal map; `0` = none, use the mesh's vertex
+    /// normal unperturbed.
+    pub normal: u32,
+    /// Bindless slot of the packed metallic-roughness texture; `0` = none, use
+    /// [`MaterialGpu::mrr`]'s `x`/`y` (metallic/roughness) scalars.
+    pub metal_rough: u32,
+    /// Bindless slot of the ambient-occlusion texture; `0` = none, AO defaults to `1`
+    /// (no occlusion).
+    pub ao: u32,
+    /// Bindless slot of the emissive texture; `0` = none, use [`MaterialGpu::emissive`].
+    pub emissive: u32,
 }
 
-// Asset-streaming plan F1: `Assets<MaterialGpu>`'s store-owned `ComponentPool`
-// needs `MaterialGpu: AssetBacking` to obtain its layout/`ComponentId`.
-// `MaterialGpu` is plain-old-data (`#[repr(C, align(16))]`, `Copy`, no `Drop`,
-// no device handle) — the POD macro path (`NEEDS_TEARDOWN = false`, no
-// `drop_fn`) fits it exactly.
-boyko_ecs::impl_asset_pod_backing!(MaterialGpu);
+impl MaterialTextures {
+    /// No bindless textures bound — every field `0`. The non-textured default every
+    /// [`Material::new`] / [`Material::default`] / [`From<MaterialGpu>`](Material) mint
+    /// carries.
+    pub const NONE: Self = Self { albedo: 0, normal: 0, metal_rough: 0, ao: 0, emissive: 0 };
 
-impl HasLoaders for MaterialGpu {
+    /// `true` iff at least one slot is bound (non-zero) — the gate
+    /// [`Material::with_textures`] consults to set [`MATERIAL_FLAG_TEXTURED`].
+    #[inline]
+    pub fn any(&self) -> bool {
+        self.albedo | self.normal | self.metal_rough | self.ao | self.emissive != 0
+    }
+}
+
+/// The CPU material authority (textured-PBR rung T5): the FROZEN 48-byte
+/// [`MaterialGpu`] SSBO element plus its CPU-only [`MaterialTextures`] sidecar.
+///
+/// `Assets<Material>` (not `Assets<MaterialGpu>`) is the world-global CPU authority —
+/// mint via `Assets::add`, edit via `Assets::get_mut`. The device SSBO
+/// ([`MaterialTable`](crate::material_table::MaterialTable)) mirrors ONLY `gpu` (the
+/// `textures` sidecar is host-side, consumed by the per-instance texture gather, never
+/// uploaded as a table row itself).
+///
+/// # [`MATERIAL_FLAG_TEXTURED`] is derived at upload, not trusted from `gpu`
+///
+/// `gpu.mrr[3]`'s [`MATERIAL_FLAG_TEXTURED`] bit is RE-DERIVED from
+/// `textures.`[`any`](MaterialTextures::any)`()` at every host→GPU copy
+/// ([`MaterialTable::seed_rows`](crate::material_table::MaterialTable), the sole site
+/// that packs a row's bytes into the device SSBO) — set when a slot is bound, cleared
+/// otherwise — so direct field mutation of either `gpu` or `textures` after
+/// construction (e.g. `mat.textures.albedo = slot`) can never desync the two on the
+/// device; only the value staged for the next upload is authoritative.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Material {
+    /// The 48-byte std430 SSBO element the device table mirrors.
+    pub gpu: MaterialGpu,
+    /// The CPU-only bindless-texture sidecar (textured-PBR T5/T7).
+    pub textures: MaterialTextures,
+}
+
+impl Material {
+    /// Builds a NON-TEXTURED material from LINEAR parameters — identical signature to
+    /// [`MaterialGpu::new`], which this delegates to; `textures` starts at
+    /// [`MaterialTextures::NONE`]. `flags` is passed through verbatim (byte-identical
+    /// `gpu` to a direct `MaterialGpu::new` call — no [`MATERIAL_FLAG_TEXTURED`] bit is
+    /// ever set here).
+    #[inline]
+    pub fn new(
+        base_color: [f32; 4],
+        metallic: f32,
+        roughness: f32,
+        reflectance: f32,
+        emissive: [f32; 3],
+        flags: u32,
+    ) -> Self {
+        Self {
+            gpu: MaterialGpu::new(base_color, metallic, roughness, reflectance, emissive, flags),
+            textures: MaterialTextures::NONE,
+        }
+    }
+
+    /// Builds a material from an existing [`MaterialGpu`] plus a [`MaterialTextures`]
+    /// sidecar, setting [`MATERIAL_FLAG_TEXTURED`] in `gpu.mrr[3]` iff
+    /// `textures.any()`. The ONLY constructor that can produce a TEXTURED material
+    /// (textured-PBR T7's authoring entry point).
+    #[inline]
+    pub fn with_textures(mut gpu: MaterialGpu, textures: MaterialTextures) -> Self {
+        if textures.any() {
+            gpu.mrr[3] = f32::from_bits(gpu.mrr[3].to_bits() | MATERIAL_FLAG_TEXTURED);
+        }
+        Self { gpu, textures }
+    }
+}
+
+impl From<MaterialGpu> for Material {
+    /// Wraps a bare [`MaterialGpu`] with [`MaterialTextures::NONE`] — byte-identical
+    /// `gpu` bytes, no [`MATERIAL_FLAG_TEXTURED`] bit set.
+    #[inline]
+    fn from(gpu: MaterialGpu) -> Self {
+        Self { gpu, textures: MaterialTextures::NONE }
+    }
+}
+
+impl Default for Material {
+    /// The engine default material (table slot 0): [`MaterialGpu::default`] with no
+    /// textures.
+    #[inline]
+    fn default() -> Self {
+        Self { gpu: MaterialGpu::default(), textures: MaterialTextures::NONE }
+    }
+}
+
+impl Asset for Material {
+    /// [`Material`] is its own decoded CPU form — no separate loader/decode step exists
+    /// yet beyond [`RonMaterialLoader`] (materials are authored directly in Rust or via
+    /// the in-house `.mat` text format).
+    type Cpu = Material;
+}
+
+// Asset-streaming plan F1 / textured-PBR T5: `Assets<Material>`'s store-owned
+// `ComponentPool` needs `Material: AssetBacking` to obtain its layout/`ComponentId`.
+// `Material` is plain-old-data (`#[repr(C)]`, `Copy`, no `Drop`, no device handle — both
+// `MaterialGpu` and `MaterialTextures` are POD) — the POD macro path
+// (`NEEDS_TEARDOWN = false`, no `drop_fn`) fits it exactly.
+boyko_ecs::impl_asset_pod_backing!(Material);
+
+impl HasLoaders for Material {
     /// One entry: the in-house `.mat` text-format loader. Asset-streaming
     /// plan F3 — a compile-time-static table, no runtime registration.
     const LOADERS: &'static [LoaderEntry<Self>] = &[LoaderEntry::of::<RonMaterialLoader>()];
 }
 
-/// The asset-facing name for [`MaterialGpu`] — `Assets<Material>` mint call sites
-/// (`Assets::add`) read more naturally under this alias than the raw GPU-layout type
-/// name. A plain type alias, not a newtype: both names address the SAME
-/// [`Assets<T>`](boyko_ecs::ecs::core::asset::Assets) table.
-pub type Material = MaterialGpu;
-
 /// A material-table index handed to the G-buffer. 16-bit range (the `gNormal.BA` pack +
 /// the `SdfEdit.center.w` carrier); 65 536 materials. `0` is the engine default material.
 ///
 /// SEALED (asset-system rung A1): the field is private. A live, table-resolvable id is
-/// minted ONLY from a fresh [`Assets<MaterialGpu>`](boyko_ecs::ecs::core::asset::Assets)
-/// [`Handle<MaterialGpu>`](boyko_ecs::ecs::core::asset::Handle) via
+/// minted ONLY from a fresh [`Assets<Material>`](boyko_ecs::ecs::core::asset::Assets)
+/// [`Handle<Material>`](boyko_ecs::ecs::core::asset::Handle) via
 /// [`from_handle`](Self::from_handle) (the render-carrier truncation of the asset
 /// table's `u32` row index to this 16-bit width).
 /// [`from_raw_for_tests`](Self::from_raw_for_tests) is the ONLY other constructor,
@@ -137,23 +298,23 @@ impl MaterialId {
     /// Mints a `MaterialId` from a raw table index. Crate-private: the sole legitimate
     /// cross-crate conversion is [`from_handle`](Self::from_handle) — a bare `u16`
     /// constructor exposed crate-wide would let any caller fabricate an id that never
-    /// resolves to a real `Assets<MaterialGpu>` row.
+    /// resolves to a real `Assets<Material>` row.
     #[inline]
     pub(crate) fn from_index(index: u16) -> Self {
         Self(index)
     }
 
     /// Mints the render carrier for a freshly-added
-    /// [`Assets<MaterialGpu>`](boyko_ecs::ecs::core::asset::Assets) row — the ONE
-    /// legitimate cross-crate conversion from a `Handle<MaterialGpu>` to this type.
+    /// [`Assets<Material>`](boyko_ecs::ecs::core::asset::Assets) row — the ONE
+    /// legitimate cross-crate conversion from a `Handle<Material>` to this type.
     /// Truncates the handle's `u32` row index to this type's 16-bit width: the asset
     /// table permits up to `u32::MAX` rows, but the G-buffer / `SdfEdit` carrier only
-    /// reserves 16 bits, so growing an `Assets<MaterialGpu>` table past 65 536 rows and
+    /// reserves 16 bits, so growing an `Assets<Material>` table past 65 536 rows and
     /// then minting a carrier for a high row silently aliases ids. `debug_assert!`s the
     /// index is in range; at asset-system rung A1 the only caller mints exactly one row
     /// (index 0), far under the limit.
     #[inline]
-    pub fn from_handle(handle: Handle<MaterialGpu>) -> Self {
+    pub fn from_handle(handle: Handle<Material>) -> Self {
         let index = handle.index();
         debug_assert!(
             index <= u16::MAX as u32,
@@ -163,7 +324,7 @@ impl MaterialId {
     }
 
     /// Test/golden-harness escape hatch: mints a `MaterialId` OUTSIDE a real
-    /// [`Assets<MaterialGpu>`](boyko_ecs::ecs::core::asset::Assets) table (a harness
+    /// [`Assets<Material>`](boyko_ecs::ecs::core::asset::Assets) table (a harness
     /// that stamps ids without booting one). NEVER call this from production code — an
     /// id minted here may not resolve to a live table row.
     #[doc(hidden)]
@@ -233,5 +394,89 @@ impl Default for MaterialGpu {
     #[inline]
     fn default() -> Self {
         MaterialGpu::new([0.8, 0.8, 0.8, 1.0], 0.0, 0.5, 0.5, [0.0, 0.0, 0.0], 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`Material::new`] must produce a `gpu` byte-identical to a direct
+    /// [`MaterialGpu::new`] call with the same parameters, plus
+    /// [`MaterialTextures::NONE`] — the byte-identity contract T5's plan depends on.
+    #[test]
+    fn material_new_matches_material_gpu_new_and_carries_no_textures() {
+        let base_color = [0.1, 0.2, 0.3, 1.0];
+        let emissive = [0.05, 0.1, 0.2];
+        let mat = Material::new(base_color, 0.6, 0.25, 0.7, emissive, 0);
+        let gpu = MaterialGpu::new(base_color, 0.6, 0.25, 0.7, emissive, 0);
+
+        assert_eq!(mat.gpu, gpu, "Material::new's gpu field must byte-match MaterialGpu::new");
+        assert_eq!(mat.textures, MaterialTextures::NONE, "a non-textured mint carries no textures");
+        assert!(!mat.textures.any());
+    }
+
+    /// [`Material::default`] must match [`MaterialGpu::default`] plus no textures.
+    #[test]
+    fn material_default_matches_material_gpu_default_and_carries_no_textures() {
+        let mat = Material::default();
+        assert_eq!(mat.gpu, MaterialGpu::default());
+        assert_eq!(mat.textures, MaterialTextures::NONE);
+    }
+
+    /// [`From<MaterialGpu>`] wraps the value verbatim with no textures — the conversion
+    /// used by every pre-T5 call site that only ever produced a bare `MaterialGpu`.
+    #[test]
+    fn from_material_gpu_preserves_gpu_bytes_with_no_textures() {
+        let gpu = MaterialGpu::new([0.4, 0.5, 0.6, 1.0], 1.0, 0.1, 0.5, [0.0; 3], 0);
+        let mat: Material = gpu.into();
+        assert_eq!(mat.gpu, gpu);
+        assert_eq!(mat.textures, MaterialTextures::NONE);
+    }
+
+    /// [`Material::with_textures`] sets [`MATERIAL_FLAG_TEXTURED`] in `gpu.mrr[3]` when
+    /// `textures.any()`, while preserving `base_color` / `mrr.x` (metallic) / `mrr.y`
+    /// (roughness) / `emissive`.
+    #[test]
+    fn with_textures_sets_the_textured_flag_and_preserves_scalar_params() {
+        let base_color = [0.7, 0.2, 0.2, 1.0];
+        let emissive = [0.0, 0.3, 0.0];
+        let gpu = MaterialGpu::new(base_color, 1.0, 0.4, 0.5, emissive, 0);
+        let textures = MaterialTextures { albedo: 3, normal: 0, metal_rough: 0, ao: 0, emissive: 0 };
+
+        let mat = Material::with_textures(gpu, textures);
+
+        assert_eq!(
+            mat.gpu.mrr[3].to_bits() & MATERIAL_FLAG_TEXTURED,
+            MATERIAL_FLAG_TEXTURED,
+            "with_textures must set the TEXTURED bit when any texture slot is bound"
+        );
+        assert_eq!(mat.gpu.base_color, base_color, "base_color must be preserved verbatim");
+        assert_eq!(mat.gpu.metallic(), gpu.metallic(), "metallic must be preserved verbatim");
+        assert_eq!(mat.gpu.roughness(), gpu.roughness(), "roughness must be preserved verbatim");
+        assert_eq!(mat.gpu.emissive, gpu.emissive, "emissive must be preserved verbatim");
+        assert_eq!(mat.textures, textures);
+    }
+
+    /// [`Material::with_textures`] with an all-zero [`MaterialTextures`] must NOT set the
+    /// TEXTURED flag — byte-identical to a plain [`From<MaterialGpu>`] conversion.
+    #[test]
+    fn with_textures_leaves_the_flag_clear_when_no_slot_is_bound() {
+        let gpu = MaterialGpu::default();
+        let mat = Material::with_textures(gpu, MaterialTextures::NONE);
+        assert_eq!(mat.gpu, gpu, "an all-zero textures sidecar must not perturb gpu bytes");
+        assert_eq!(mat.gpu.mrr[3].to_bits() & MATERIAL_FLAG_TEXTURED, 0);
+    }
+
+    /// [`MaterialTextures::any`] is `false` only for [`MaterialTextures::NONE`]; any single
+    /// non-zero slot flips it `true`.
+    #[test]
+    fn material_textures_any_is_true_iff_a_slot_is_bound() {
+        assert!(!MaterialTextures::NONE.any());
+        assert!(MaterialTextures { albedo: 1, ..MaterialTextures::NONE }.any());
+        assert!(MaterialTextures { normal: 1, ..MaterialTextures::NONE }.any());
+        assert!(MaterialTextures { metal_rough: 1, ..MaterialTextures::NONE }.any());
+        assert!(MaterialTextures { ao: 1, ..MaterialTextures::NONE }.any());
+        assert!(MaterialTextures { emissive: 1, ..MaterialTextures::NONE }.any());
     }
 }

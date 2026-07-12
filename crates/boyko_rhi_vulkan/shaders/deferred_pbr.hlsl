@@ -45,19 +45,52 @@
 // ("rgba8")]]` pins each G-buffer `OpTypeImage` to `Rgba8` (shaderStorageImageWriteWithoutFormat
 // is OFF); `gViewT` is pinned `r32f` and `gSsao` `r8`.
 //
-// # BRDF (the Filament/Karis real-time convergence — single scatter)
+// # BRDF (the Filament/Karis real-time convergence, PBR P0 — multi-scatter compensated)
 //
 //   D = GGX/Trowbridge-Reitz; V = height-correlated Smith visibility (folds 1/(4 NoL NoV));
 //   F = Schlick; diffuse = Lambert (albedo/PI). Metallic-roughness:
 //     f0 = lerp(0.16*reflectance^2, base, metallic);  diffuse = base*(1-metallic).
 //   Direct light: one analytic directional light, modulated by the A1 shadow.
-//   Ambient/IBL: analytic EnvBRDFApprox (Karis mobile) for specular + a hemisphere
-//   diffuse ambient, modulated by the A2 AO. No IBL texture, no LUT (MVP-2).
-//   The host oracle (`golden_deferred_resolve` in compute.rs) models this identically.
+//   Ambient/IBL: analytic EnvBRDFApprox (Karis mobile) specular sampled along the
+//   REFLECTION vector against a STEEPENED sky/ground gradient (PBR P0-B — a metal mirrors
+//   its surroundings, not a flat tint; the smoothstep gives it a real bright-cap/dark-belly
+//   split instead of a flat mid-tone) + a hemisphere diffuse ambient sampled along N. AO is
+//   DECOUPLED (the PBR metal fix): diffuse ambient is modulated by the A2 AO (`ao_final`),
+//   ambient SPECULAR by a separate roughness-aware `spec_ao` (Filament SpecularAO_Lagarde,
+//   ~1 for smooth/metal) — a metal's diffuse is 0, so its ambient specular IS its entire
+//   appearance and must not be AO-darkened like matte paint. A 1-mul multi-scatter
+//   energy-compensation term (PBR P0-D) recovers the single-scatter GGX energy loss at high
+//   roughness, applied at every specular site (direct + ambient). No IBL texture, no LUT (MVP-2).
+//   OUTPUT: the accumulated linear radiance is exposure-scaled, then tonemapped by the
+//   SELECTED operator (`tonemap_select`, word-7 bits 8..11 — DEFAULT Hill ACES-fitted,
+//   hue-preserving highlight rolloff, PBR P0-C; Khronos PBR Neutral / Reinhard-Jodie are
+//   selectable via `LightingConfig::tonemapper`), then manually gamma-2.2 encoded (the
+//   gLit/swapchain chain is linear UNORM end to end — no hardware sRGB). The host oracle
+//   (`golden_deferred_resolve*` in goldens.rs) models this identically.
 //
 // Compiled offline (hermetic build — no SDK at `cargo build` time) with:
 //   dxc.exe -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 deferred_pbr.hlsl \
 //       -Fo deferred_pbr.comp.spv
+//   (TERMINATOR_WRAP variant, SOFTWARE-RESOLVE-ONLY: add `-D TERMINATOR_WRAP=1
+//       -Fo deferred_pbr_wrap.comp.spv` — the diffuse terminator light-wrap at both
+//       direct-light accumulation sites, frozen-base discipline: with the flag UNDEFINED
+//       this source preprocesses CHARACTER-IDENTICAL to the pre-feature file, so the base
+//       `.spv` above is untouched by construction. An HWRT + TERMINATOR_WRAP combo is
+//       explicitly OUT OF SCOPE this rung — never compiled, never selected by the host.)
+//   (HWRT variant, feature="hwrt": add `-T cs_6_5 -D HWRT=1
+//       -Fo deferred_pbr_hwrt.comp.spv` — RESOLVE_INLINE, the default SHADOW_STAGE; see
+//       compute.rs's `DEFERRED_PBR_HWRT_SPV` embed doc.)
+//   (HWRT VIS variant: add `-T cs_6_5 -D HWRT=1 -D SHADOW_STAGE=1
+//       -Fo deferred_pbr_hwrt_vis.comp.spv` — writes gShadowVis and returns before
+//       lighting, the à-trous spatial-denoise pre-pass; see compute.rs's
+//       `DEFERRED_PBR_VIS_SPV` embed doc.)
+//   (HWRT DENOISED variant: add `-T cs_6_5 -D HWRT=1 -D SHADOW_STAGE=2
+//       -Fo deferred_pbr_hwrt_denoised.comp.spv` — reads the à-trous output instead of
+//       tracing; see compute.rs's `DEFERRED_PBR_DENOISED_SPV` embed doc.)
+//   (HWRT VIS+MOTION_VECTORS variant: add `-T cs_6_5 -D HWRT=1 -D SHADOW_STAGE=1
+//       -D MOTION_VECTORS=1 -Fo deferred_pbr_hwrt_vis_mv.comp.spv` — VIS plus the
+//       per-pixel camera-only motion vector the temporal shadow denoiser reprojects with;
+//       see compute.rs's `DEFERRED_PBR_VIS_MV_SPV` embed doc.)
 
 static const float PI = 3.14159265358979323846;
 
@@ -276,6 +309,28 @@ cbuffer ResolvedDdgi : register(b18) {
     uint   gDdgiMode;       // mirrors ResolvedDdgi.ddgi_mode_word (the resolve gates on the header bit)
     uint3  _gDdgiPad;       // pad to the 48-byte ResolvedDdgi stride
 };
+
+#if !HWRT
+// Textured-PBR T6a (binding 19, SOFTWARE-RESOLVE-ONLY; the critic's C1 fix): the `gPbr`
+// deferred-resolve MRT lane the (T6c) textured raster writes — r=metallic, g=roughness,
+// b=AO-texture modulation, a=emissive-strength modulation. Declared ENTIRELY under `#if
+// !HWRT` so no HWRT `.spv` ever references it (the byte-identity gate — mirrors the TLAS's
+// `#if HWRT` symmetry at the SAME binding index; the two arms are mutually exclusive
+// compiles of this ONE source file, never both present in the same `.spv`). The `.Load`
+// below is INSIDE the flag-gated branch, so it never executes for a flag=0 material (every
+// current material) — the discarded/unwritten contents are never observed.
+[[vk::binding(19)]] [[vk::image_format("rgba16f")]] RWTexture2D<float4> gPbr;
+
+// A bit in `MaterialGpu.mrr.w`'s bitcast `flags` lane, set iff the material carries a
+// texture sidecar (mirrors `boyko_render::MATERIAL_FLAG_TEXTURED`). The Rust-side copies
+// of this bit (the `MATERIAL_FLAG_TEXTURED` const and its two callers,
+// `MaterialTable::seed_rows`'s derive-at-upload and `Material::with_textures`'s CPU-side
+// mirror) are cross-checked against the shader's `.spv` output by the runtime test
+// `textured_pbr_t6a_host_shader_agreement.rs`; this HLSL literal agrees with them by
+// source-comment convention (there is no machine-checked host↔shader assert on the value
+// `1u` itself — unlike e.g. `MATERIAL_GPU_WORDS`, which IS const-asserted host-side).
+static const uint MATERIAL_FLAG_TEXTURED_BIT = 1u;
+#endif
 
 #if HWRT
 // binding 19 (t19): the per-frame TLAS (R2a-3 `PersistentTlas.accel`) the HWRT mesh-shadow variant
@@ -553,6 +608,29 @@ float3 safe_normalize(float3 a) {
     }
     return a / len;
 }
+
+// === Render terminator-softening — PREPROCESSOR VARIANT `TERMINATOR_WRAP` (frozen-base
+// discipline, mirrors `gbuffer_mrt.fs.hlsl`'s `#ifdef`/`#else`/`#endif` convention) ===========
+//
+// A runtime `if (ts > 0.0) {...} else {VERBATIM original}` guard was tried first and dropped:
+// even on the `ts == 0` (OFF) path, the mere PRESENCE of the extra branch + loads perturbed
+// DXC's FMA fusion in the surrounding function, drifting the base resolve's pixels off the
+// golden. The fix moves the choice to the PREPROCESSOR instead: with `TERMINATOR_WRAP`
+// undefined (the base compile, `deferred_pbr.comp.spv`), every site below preprocesses to a
+// token stream CHARACTER-IDENTICAL to the pre-feature source (the `#else` arms), so DXC's
+// codegen for the base is untouched BY CONSTRUCTION — no branch, no dead code, nothing for the
+// optimizer to see differently. The wrap arm carries NO `if (ts > 0.0)` runtime check (the
+// variant itself IS the opt-in: the host selects `deferred_pbr_wrap.comp.spv` only when
+// `LightingConfig::terminator_softening > 0`, see `deferred_pbr_wrap_spirv` in `compute.rs`).
+#if TERMINATOR_WRAP
+// Diffuse-terminator wrap (Valve/half-Lambert family): w=0 reduces EXACTLY to
+// saturate(nol) (the byte-identity anchor); w>0 ramps the terminator over a band of
+// width ~w so normal-mapped bump slopes fade into shadow instead of clipping to
+// black islands. DIFFUSE ONLY — specular keeps the physical clamp.
+float nol_wrapped(float nol, float w) {
+    return saturate((nol + w) / (1.0 + w));
+}
+#endif
 
 // === CSM Increment 1b/3 — the cascade shadow-map visibility sample (Rung B: N cascades) =======
 //
@@ -874,6 +952,51 @@ float2 env_brdf_approx(float roughness, float NoV) {
     return float2(-1.04, 1.04) * a004 + r.zw;
 }
 
+// === PBR P1 — the HDR sun disc in the reflected environment =================================
+//
+// The environment the reflection vector `R` samples (the LIGHT_KIND_SKY gradient below) gets a
+// bright "sun disc" baked in for every directional light — the canonical chrome cue (a sharp
+// highlight sliding across a smooth metal's curvature) a flat sky-gradient alone cannot produce.
+// `sun_kernel_exponent` is the cheap analytic stand-in for prefiltered-cubemap mip selection: it
+// maps the GGX alpha (roughness^2) to a Blinn-Phong-equivalent cosine-power exponent
+// (`n = 2/alpha^2 - 2`, the standard Phong<->GGX conversion), clamped to avoid the `pow` blowup
+// as alpha -> 0 (a mirror-smooth surface) while staying a valid (if very broad) lobe as
+// alpha -> 1 (fully rough). At roughness 0.13 (alpha ~= 0.0169) this clamps to the MAX (a tight
+// ~1.5-degree-half-width disc); at roughness 0.42 (alpha ~= 0.1764) it lands at n ~= 62 (a broad
+// ~8.5-degree glint) — the sharp-vs-soft contrast the visual gate calls for.
+static const float SUN_KERNEL_EXPONENT_MIN = 1.0;
+static const float SUN_KERNEL_EXPONENT_MAX = 2048.0;
+
+float sun_kernel_exponent(float alpha) {
+    float n = 2.0 / max(alpha * alpha, 1e-6) - 2.0;
+    return clamp(n, SUN_KERNEL_EXPONENT_MIN, SUN_KERNEL_EXPONENT_MAX);
+}
+
+// The analytic sun-disc kernel: `pow(saturate(dot(dir, sun_dir)), k(alpha))`. `dir` is the
+// REFLECTION vector `R` (not the surface normal — the disc must slide with the view, the
+// mirror cue), `sun_dir` is the directional light's unit direction. Peaks at exactly 1.0 where
+// `R` points at the light (a smooth metal shows a pinpoint glint there) and falls off per
+// `sun_kernel_exponent` — sharp on a low-roughness surface, broad on a high-roughness one.
+float sun_kernel(float3 dir, float3 sun_dir, float alpha) {
+    float c = saturate(dot(dir, sun_dir));
+    return pow(c, sun_kernel_exponent(alpha));
+}
+
+// The default gate on the env sun-disc contribution — owner-retunable at the visual gate.
+// `1.0` keeps the disc's peak commensurate with the material's own DFG-weighted specular tint
+// (the kernel itself already peaks at exactly 1.0 only where `R` points at the light and falls
+// off sharply everywhere else, so a unity weight is not overbearing away from the highlight).
+static const float SUN_ENV_WEIGHT = 1.0;
+
+// === Render sky background — the visible sun disc baked into the BACKGROUND (mask == 0) =====
+//
+// The background branch renders the SAME analytic sky the metals reflect (`sky_kernel`
+// below), so a bare pixel is coherent with the reflected environment instead of a dark void.
+// `SKY_SUN_EXPONENT` is a FIXED, moderate cosine-power exponent (unlike `sun_kernel_exponent`,
+// NOT roughness-driven — the background is a flat environment element, not a BRDF lobe): ~512
+// reads as a tight but clearly visible sun disc against the sky gradient. Owner-retunable.
+static const float SKY_SUN_EXPONENT = 512.0;
+
 // === Render Shadow Phase 3 — SSCS screen-space march ========================================
 
 // Interleaved-Gradient Noise (Jorge Jimenez) — a cheap per-pixel hash in [0,1), used to
@@ -993,6 +1116,65 @@ float sscs_march(float3 P, float3 n, float3 l, float t_max, float NoL, uint px, 
     return saturate(1.0 - occlusion);
 }
 
+// === PBR P0-C — Stephen Hill ACES-fitted filmic tonemap + manual gamma-2.2 OETF ===============
+//
+// Pre-P0 the accumulated linear radiance was stored via a RAW `clamp(lit, 0, 1)`: a peaked
+// GGX highlight clips to a flat white disk, destroying the Fresnel edge-tint that reads as
+// metal. This fit (the SAME matrices/rational form Bevy `AcesFitted` / Godot use) rolls off
+// highlights while staying near-identity in the midtones and preserving hue in the shoulder,
+// so a bright specular highlight fades toward white gracefully instead of clipping.
+//
+// OETF verification (blocking, see the PBR P0 batch report): `gLit` (R8G8B8A8_UNORM) and the
+// swapchain (`pick_surface_format` in `present/surface.rs` tries `*_UNORM` BEFORE `*_SRGB`, so
+// a device advertising both — every consumer GPU — picks UNORM) are linear UNORM end to end;
+// the present-blit (`fullscreen_sample.fs.hlsl`) is a raw `Sample` passthrough with no format
+// reinterpretation. Nothing in this chain hardware-encodes sRGB, so the resolve must
+// gamma-encode itself here (one manual `pow(lit, 1/2.2)` after the tonemap) or the whole frame
+// reads too dark on display. The host oracle mirrors both ops in the SAME order
+// (`aces_fitted` then the gamma power) — see `tonemap_and_oetf` in `goldens.rs`.
+static const float3x3 ACES_IN  = { 0.59719, 0.35458, 0.04823,  0.07600, 0.90834, 0.01566,  0.02840, 0.13383, 0.83777 };
+static const float3x3 ACES_OUT = { 1.60475, -0.53108, -0.07367, -0.10208, 1.10813, -0.00605, -0.00327, -0.07276, 1.07602 };
+static const float OETF_GAMMA_EXP = 1.0 / 2.2;
+
+float3 aces_fitted(float3 c) {
+    c = mul(ACES_IN, c);
+    float3 a = c * (c + 0.0245786) - 0.000090537;
+    float3 b = c * (0.983729 * c + 0.4329510) + 0.238081;
+    return saturate(mul(ACES_OUT, a / b));
+}
+
+// Khronos PBR Neutral — LUT-free, hue-preserving, gentle toe. Linear Rec.709 in →
+// linear[0,1] out (no gamma; the shared OETF follows). Source: KhronosGroup/ToneMapping.
+float3 khronos_pbr_neutral(float3 color) {
+    const float startCompression = 0.8 - 0.04; // 0.76
+    const float desaturation     = 0.15;
+    float x = min(color.r, min(color.g, color.b));
+    float offset = (x < 0.08) ? (x - 6.25 * x * x) : 0.04;
+    color -= offset;
+    float peak = max(color.r, max(color.g, color.b));
+    if (peak < startCompression) return color;
+    const float d = 1.0 - startCompression; // 0.24
+    float newPeak = 1.0 - d * d / (peak + d - startCompression);
+    color *= newPeak / peak;
+    float g = 1.0 - 1.0 / (desaturation * (peak - newPeak) + 1.0);
+    return lerp(color, newPeak.xxx, g);
+}
+
+// Reinhard-Jodie — cheap hybrid, hue-preserving. Linear in → linear[0,1] out.
+float3 reinhard_jodie(float3 v) {
+    float l = dot(v, float3(0.2126, 0.7152, 0.0722)); // Rec.709 luma
+    float3 tv = v / (1.0 + v);
+    return saturate(lerp(v / (1.0 + l), tv, tv));
+}
+
+// Curve selector — the ACES arm calls the UNCHANGED aces_fitted, so mode 0 is
+// bit-identical to today's expression. Unknown modes fall through to ACES.
+float3 tonemap_select(float3 c, uint mode) {
+    if (mode == TONEMAP_NEUTRAL)         return khronos_pbr_neutral(c);
+    if (mode == TONEMAP_REINHARD_JODIE)  return reinhard_jodie(c);
+    return aces_fitted(c); // TONEMAP_ACES (0) and any unknown → today's curve
+}
+
 [numthreads(64, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
     uint idx = tid.x;
@@ -1036,6 +1218,23 @@ void main(uint3 tid : SV_DispatchThreadID) {
         float metallic    = m.mrr.x;
         float roughness   = clamp(m.mrr.y, 0.045, 1.0); // fp32 floor (no fp16 floor needed)
         float reflectance = m.mrr.z;
+#if !HWRT
+        // Textured-PBR T6a (SOFTWARE-RESOLVE-ONLY): the `MATERIAL_FLAG_TEXTURED_BIT` override.
+        // `reflectance` above is left UNTOUCHED (no texture channel carries it yet); `metallic`/
+        // `roughness`/`ao`/`emissive` are REASSIGNED, never reordered — for a flag=0 material
+        // (every current material) the branch is DEAD and every value stays a bit-for-bit copy of
+        // its pre-branch assignment (the flag=0 byte-identity invariant). `ao` is the OUTER
+        // `is_sdf_lit`-scope A2 SDF-march AO (declared above `is_sdf_lit`'s body start); reassigning
+        // it here propagates into `ao_final` below (the SSAO combine reads THIS `ao`).
+        float3 emissive = m.emissive.rgb;
+        if (asuint(m.mrr.w) & MATERIAL_FLAG_TEXTURED_BIT) {
+            float4 pbr = gPbr.Load(coord);
+            metallic  = pbr.r;
+            roughness = clamp(pbr.g, 0.045, 1.0);
+            ao        = ao * pbr.b;
+            emissive  = emissive * pbr.a;
+        }
+#endif
         float a = roughness * roughness;                 // GGX alpha = perceptual^2
 
         // Metallic-roughness split: dielectric f0 from reflectance (0.5 -> 4% F0); metals
@@ -1050,16 +1249,35 @@ void main(uint3 tid : SV_DispatchThreadID) {
         float3 v = -rd;
         float NoV = max(dot(n, v), 1e-4);
 
+        // PBR P0-D: multi-scatter energy compensation — ONE per-pixel term (view +
+        // roughness only), hoisted here (before the light loop) and REUSED at every
+        // specular site below (both direct-light sites + the sky ambient specular) so
+        // `env_brdf_approx` runs exactly once per pixel (Principle 1 — no duplicate ALU).
+        // Single-scatter GGX loses energy at high roughness (up to ~40%), so a rough metal
+        // (no diffuse fallback) came out too dark/desaturated. `Ess = dfg.x + dfg.y` is the
+        // Fdez-Aguera scale+bias energy estimate (NOT `1/dfg.y`); `energy_comp` redistributes
+        // the lost energy back into the metal's own f0 tint.
+        float2 dfg_v = env_brdf_approx(roughness, NoV);
+        float  Ess = max(dfg_v.x + dfg_v.y, 1e-4);
+        float3 energy_comp = 1.0 + f0 * (1.0 / Ess - 1.0);
+
+        // PBR P1: the REFLECTION vector, hoisted ONCE per pixel (view + normal only) so BOTH
+        // the sky-gradient ambient specular (LIGHT_KIND_SKY) and the per-directional HDR
+        // sun-disc term (LIGHT_KIND_DIRECTIONAL, below) reuse the SAME `R` — a pixel with N
+        // directional lights costs one `reflect`, not N.
+        float3 R = reflect(-v, n);
+
         // The hemisphere factor the sky lerp interpolates against (world up).
         float hemi = dot(n, LIGHT_UP) * 0.5 + 0.5;
 
         // L0a: loop the no-`P` front block of the table (directionals + sky). The W1
         // op-order is PINNED to the host oracle (`golden_deferred_resolve_table`):
-        //   direct  += (diff + spec) * (NoL * shadow) * L.color   (accumulator from 0)
-        //   ambient += (spec_ambient + diff_ambient) * ao          (accumulator from 0)
-        //   lit      = (direct + ambient + emissive) * exposure     (* exposure LAST)
+        //   direct  += (diff + spec) * (NoL * shadow) * L.color        (accumulator from 0)
+        //   ambient += diff_ambient * ao_final + spec_ambient * spec_ao (PBR metal fix:
+        //              decoupled diffuse-AO/specular-AO, accumulator from 0)
+        //   lit      = (direct + ambient + emissive) * exposure          (* exposure LAST)
         // No reassociation — a degenerate 1-directional + 1-sky table at exposure 1.0 is
-        // bit-identical to the old LIGHT_DIR/LIGHT_COLOR/SKY_* path.
+        // bit-identical to the old LIGHT_DIR/LIGHT_COLOR/SKY_* path (pre-metal-fix).
         LightHeader H = load_light_header(LightBuf);
 
         // P6 R1: the resolve shadow_mode (header word 7; 0 on every pre-P6 scene → the
@@ -1089,6 +1307,16 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // 0%-gate). Read ONCE here, consumed at the GATED (empty at I0) injection site after the L0a
         // ambient accumulation below.
         uint ddgi_mode = load_ddgi_mode(LightBuf);
+        // Render terminator-softening (`#if TERMINATOR_WRAP` variant — the frozen-base
+        // discipline note above `nol_wrapped`): the diffuse light-wrap amount, header word 7
+        // bits 12..19. Read ONCE here (a wave-uniform header broadcast), consumed at each
+        // direct-light diffuse accumulation site below via `nol_wrapped` (DIFFUSE ONLY —
+        // specular keeps the physical NoL clamp). Declared ENTIRELY under `TERMINATOR_WRAP` so
+        // the base compile references neither `ts` nor `load_terminator_softening` (the latter
+        // stays an unreferenced, harmless function in the shared `light_table.hlsli`).
+#if TERMINATOR_WRAP
+        float ts = load_terminator_softening(LightBuf);
+#endif
         float view_t = gViewT.Load(coord);
         float3 P = ro + rd * view_t;
 #ifdef MOTION_VECTORS
@@ -1158,6 +1386,15 @@ void main(uint3 tid : SV_DispatchThreadID) {
             ao_final = min(ao_class, ssao_blurred);
             // === GENERATED ssao_blur_combine END ===
         }
+
+        // PBR metal fix: decoupled specular occlusion (Filament SpecularAO_Lagarde ==
+        // Bevy deferred `specular_occlusion`), hoisted ONCE per pixel (NoV + roughness +
+        // ao_final only) and reused at every ambient-specular site below. Diffuse AO
+        // (ao_final) darkens Lambert ambient correctly, but a metal has diffuse == 0 — its
+        // ambient SPECULAR is its ENTIRE appearance, so multiplying that by ao_final reads
+        // as "AO-darkened matte paint", not metal. `spec_ao` stays ~1 for smooth/metal
+        // surfaces and only gently occludes rough+cavity, matching every competitor's split.
+        float spec_ao = saturate(pow(NoV + ao_final, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao_final);
 
         float3 lit_direct = float3(0.0, 0.0, 0.0);
         float3 ambient = float3(0.0, 0.0, 0.0);
@@ -1304,24 +1541,69 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 if (contact_mode == CONTACT_SHADOW_MODE_ON && NoL > 0.0) {
                     vis *= sscs_march(P, n, l, T_MAX, NoL, px, py, w, h);
                 }
-                float3 hvec = normalize(v + l);
+                // PBR P0-A.1: safe_normalize parity with the punctual site below — the
+                // intrinsic `normalize(0)` is NaN when `v` is near-opposite `l` (a
+                // near-grazing/back-facing directional receiver); NoL then zeroes the NaN
+                // spec's contribution on the host but not on the GPU (NaN * 0 == NaN).
+                float3 hvec = safe_normalize(v + l);
                 float NoH = saturate(dot(n, hvec));
                 float LoH = saturate(dot(l, hvec));
                 float  D = D_GGX(NoH, a);
                 float  V = V_SmithGGXCorrelated(NoV, NoL, a); // folds 1/(4 NoL NoV)
                 float3 F = F_Schlick(LoH, f0);
-                float3 spec = (D * V) * F;
+                float3 spec = (D * V) * F * energy_comp; // PBR P0-D: multi-scatter energy comp
                 float3 diff = diffuse_color * (1.0 / PI);
+                // Render terminator-softening (`#if TERMINATOR_WRAP` variant — the frozen-base
+                // discipline note above `nol_wrapped`): DIFFUSE ONLY, `spec` keeps the physical
+                // NoL clamp. No runtime check (the variant itself is the opt-in); the `#else`
+                // arm is CHARACTER-FOR-CHARACTER the pre-feature statement, so the base
+                // compile's token stream — and DXC's codegen for this whole function — is
+                // untouched by construction.
+#if TERMINATOR_WRAP
+                lit_direct += (diff * nol_wrapped(NoL, ts) + spec * NoL) * vis * L.color;
+#else
                 lit_direct += (diff + spec) * (NoL * vis) * L.color;
+#endif
+
+                // PBR P1 — the HDR sun disc: a SECOND, roughness-widened specular response
+                // from this SAME directional light, sampled along the REFLECTION vector `R`
+                // (not `l`) instead of the direct Cook-Torrance half-vector lobe above. Uses
+                // the SAME DFG + energy_comp weighting the sky ambient specular uses (P0-B/
+                // P0-D), so the glint shades consistently with the flat-gradient reflection.
+                // INTENTIONAL double-count with the direct lobe (both widen with roughness
+                // together — the industry-standard sky-cubemap + directional-light overlap;
+                // real-time engines carry the sun both ways). NOT shadow/vis-modulated (only
+                // AO-gated, mirroring the sky ambient's own AO gate) — this is an environment
+                // term, not a direct-light term. `SUN_ENV_WEIGHT` is the single tuning knob.
+                float sun_k = sun_kernel(R, l, a);
+                float3 sun_spec_ambient = (f0 * dfg_v.x + dfg_v.y) * L.color * sun_k * energy_comp * SUN_ENV_WEIGHT;
+                // PBR metal fix: sun_spec_ambient is a SPECULAR term (the environment glint) —
+                // decoupled from diffuse ao_final onto spec_ao (see the `spec_ao` doc above).
+                ambient += sun_spec_ambient * spec_ao;
             } else if (light_kind(L) == LIGHT_KIND_SKY) {
-                // Hemisphere ambient: lerp(ground, sky, hemi) diffuse + EnvBRDFApprox spec.
+                // Hemisphere ambient: diffuse integrates the FULL hemisphere around N
+                // (Lambert), so `hemi_color = lerp(ground, sky, hemi)` keeps sampling along
+                // N. PBR P0-B: the specular lobe is narrow and view-dependent — a metal must
+                // MIRROR its surroundings, not show the identical flat sky tint from every
+                // angle — so the specular term samples the SAME sky/ground gradient along
+                // the REFLECTION vector `R` (PBR P1: hoisted above the light loop) instead of N.
                 float3 sky_color = L.color;       // upper hemisphere
                 float3 ground_color = L.pos;      // lower hemisphere (packed in pos lane)
-                float2 dfg = env_brdf_approx(roughness, NoV);
                 float3 hemi_color = lerp(ground_color, sky_color, hemi);
-                float3 spec_ambient = (f0 * dfg.x + dfg.y) * sky_color;
+                float  refl_hemi = dot(R, LIGHT_UP) * 0.5 + 0.5; // same up-axis as `hemi`
+                // PBR metal fix: steepen the reflected hemisphere (smoothstep) so a metal
+                // sweeps a real bright-cap -> dark-belly gradient instead of a flat mid-tone.
+                // The DIFFUSE `hemi` above stays LINEAR — only the specular lobe steepens.
+                refl_hemi = refl_hemi * refl_hemi * (3.0 - 2.0 * refl_hemi);
+                float3 refl_color = lerp(ground_color, sky_color, refl_hemi);
+                // PBR P0-D: `dfg_v`/`energy_comp` are the SAME per-pixel terms hoisted
+                // above the light loop (reused, not recomputed).
+                float3 spec_ambient = (f0 * dfg_v.x + dfg_v.y) * refl_color * energy_comp;
                 float3 diff_ambient = diffuse_color * hemi_color;
-                ambient += (spec_ambient + diff_ambient) * ao_final;
+                // PBR metal fix: decoupled AO — diffuse ambient darkens with ao_final, but
+                // specular ambient (a metal's ENTIRE appearance, diffuse == 0) darkens only
+                // with the roughness-aware spec_ao (see the `spec_ao` doc above).
+                ambient += diff_ambient * ao_final + spec_ambient * spec_ao;
             }
             // Point/spot (kinds 1/2) are the L0b block — not in the L0a front block.
         }
@@ -1466,7 +1748,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
             float  D = D_GGX(NoH, a);
             float  V = V_SmithGGXCorrelated(NoV, NoL, a);
             float3 F = F_Schlick(LoH, f0);
-            float3 spec = (D * V) * F;
+            float3 spec = (D * V) * F * energy_comp; // PBR P0-D: multi-scatter energy comp
             float3 diff = diffuse_color * (1.0 / PI);
             // P6 R1: `vis` DEFAULTS to `shadow` (the marcher's gMaterial.r channel) — the
             // EXACT legacy L0b/L1 point/spot modulation (`(NoL * shadow) * atten`), so a
@@ -1498,15 +1780,75 @@ void main(uint3 tid : SV_DispatchThreadID) {
             if (contact_mode == CONTACT_SHADOW_MODE_ON && NoL > 0.0) {
                 vis *= sscs_march(P, n, l, sqrt(d2), NoL, px, py, w, h);
             }
+            // Render terminator-softening (`#if TERMINATOR_WRAP` variant — the frozen-base
+            // discipline note above `nol_wrapped`): DIFFUSE ONLY, `spec` keeps the physical NoL
+            // clamp. The `#else` arm is CHARACTER-FOR-CHARACTER the pre-feature statement (the
+            // base compile's token stream is untouched by construction).
+#if TERMINATOR_WRAP
+            lit_direct += (diff * nol_wrapped(NoL, ts) + spec * NoL) * (vis * punctual_shadow) * atten * L.color;
+#else
             lit_direct += (diff + spec) * (NoL * vis * punctual_shadow) * atten * L.color;
+#endif
         }
 
-        // O3: exposure is the FINAL multiply on the accumulated LINEAR radiance.
+        // O3: exposure is the FINAL multiply on the accumulated LINEAR radiance, THEN the
+        // PBR P0-C filmic tonemap (hue-preserving highlight rolloff), THEN the manual gamma
+        // OETF (see `aces_fitted`'s doc comment for why the OETF is manual, not hardware).
+        // Textured-PBR T6a: the SOFTWARE arm sums the (possibly texture-modulated) local
+        // `emissive`; the HWRT arm is CHARACTER-FOR-CHARACTER the pre-T6a line (no `emissive`
+        // local exists under `HWRT` — the HWRT `.spv` is untouched by this rung).
+#if !HWRT
+        lit = (lit_direct + ambient + emissive) * H.exposure;
+#else
         lit = (lit_direct + ambient + m.emissive.rgb) * H.exposure;
+#endif
+        lit = tonemap_select(lit, load_tonemap_mode(LightBuf));
+        lit = pow(lit, OETF_GAMMA_EXP);
     } else {
-        // mesh / background / empty (mask == 0): PASS THE BASE THROUGH byte-identically
-        // (the 0%-gate). No PBR, no material fetch, no normal/id decode.
-        lit = base;
+        // mesh / background / empty (mask == 0): render the PROCEDURAL SKY along the view
+        // ray instead of the flat base pass-through, so the visible background matches the
+        // SkyLight gradient the metals reflect (an otherwise-incoherent scene: a metal shows
+        // a bright sky the viewer never sees, floating against a dark void). A scene with NO
+        // SKY entry in the light table keeps the byte-identical dark pass-through (the
+        // 0%-gate: a scene without a SkyLight has no sky to render). No material fetch, no
+        // normal/id decode — the light-table scan is the only extra work, and it runs ONLY
+        // for background pixels (cheap: no geometry/lighting there).
+        float3 ro_bg, rd_bg;
+        generate_ray(px, py, w, h, camera_mode, cam_eye.xyz, cam_forward, cam_right, cam_up.xyz, ro_bg, rd_bg);
+
+        LightHeader H_bg = load_light_header(LightBuf);
+        bool has_sky = false;
+        float3 sky_color = float3(0.0, 0.0, 0.0);
+        float3 ground_color = float3(0.0, 0.0, 0.0);
+        float3 sun_disc = float3(0.0, 0.0, 0.0);
+        for (uint bi = 0u; bi < H_bg.l0a_count; ++bi) {
+            LightElem BL = load_light(LightBuf, bi);
+            if (light_kind(BL) == LIGHT_KIND_SKY) {
+                has_sky = true;
+                sky_color = BL.color;      // upper hemisphere (L.color)
+                ground_color = BL.pos;     // lower hemisphere (packed in the pos lane)
+            } else if (light_kind(BL) == LIGHT_KIND_DIRECTIONAL) {
+                // A visible sun disc for every directional light — the SAME `pow`-kernel
+                // shape the metal's own sun-disc term uses (`sun_kernel`), but a FIXED
+                // exponent (the background is a flat environment element, not a BRDF lobe).
+                float3 bl = normalize(BL.dir);
+                sun_disc += BL.color * pow(saturate(dot(rd_bg, bl)), SKY_SUN_EXPONENT);
+            }
+        }
+
+        if (has_sky) {
+            float3 sky = lerp(ground_color, sky_color, saturate(dot(rd_bg, LIGHT_UP) * 0.5 + 0.5));
+            sky += sun_disc;
+            // O3: exposure is the FINAL multiply on the linear radiance, THEN the SAME
+            // tonemap + manual gamma OETF the lit path applies (`aces_fitted`'s doc comment).
+            sky *= H_bg.exposure;
+            sky = tonemap_select(sky, load_tonemap_mode(LightBuf));
+            sky = pow(sky, OETF_GAMMA_EXP);
+            lit = sky;
+        } else {
+            // No SkyLight in this scene's table — keep the dark pass-through byte-identical.
+            lit = base;
+        }
     }
 
 #if SHADOW_STAGE == SHADOW_STAGE_VIS

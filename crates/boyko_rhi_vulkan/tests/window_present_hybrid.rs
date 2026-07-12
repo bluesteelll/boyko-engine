@@ -361,6 +361,8 @@ fn run_composite(device: &VulkanContext, edits: &[SdfEdit], buffer: &boyko_rhi_v
             dimension: TextureDimension::D2,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("offscreen depth texture");
 
@@ -374,6 +376,8 @@ fn run_composite(device: &VulkanContext, edits: &[SdfEdit], buffer: &boyko_rhi_v
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("throwaway color texture");
 
@@ -826,6 +830,8 @@ fn windowed_hybrid_composite_present_is_validation_clean_and_renders_composite()
             dimension: TextureDimension::D2,
             usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         },
     )
     .expect("SAMPLED composite texture (R8G8B8A8_UNORM)");

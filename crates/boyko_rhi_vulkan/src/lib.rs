@@ -96,6 +96,12 @@ pub mod accel_ffi;
 /// from the default/golden build (byte-identical).
 #[cfg(feature = "hwrt")]
 pub mod accel_build;
+/// T4 — the bindless texture-array descriptor set: the dedicated 2-binding
+/// UPDATE_AFTER_BIND layout ([`bindless::VulkanBindlessSet`]) + its shared
+/// trilinear+anisotropic immutable sampler + the per-slot incremental write verb
+/// ([`bindless::write_bindless_texture`]). See the module docs for the layout
+/// shape decision and the device-UAF-safety argument.
+pub mod bindless;
 pub mod brick_atlas;
 pub mod compute;
 pub mod ddgi;

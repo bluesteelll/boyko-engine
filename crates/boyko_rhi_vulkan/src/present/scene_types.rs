@@ -155,6 +155,8 @@ impl Scene {
             dimension: TextureDimension::D2,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         };
         let texture = RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)?;
 
@@ -362,7 +364,9 @@ pub const GBUFFER_IDENTITY_INSTANCE: [f32; 12] = [
 /// non-empty; the recorder OVERWRITES the push's `base_instance` word per batch.
 pub struct GBufferMeshDraw<'a> {
     /// The mesh's MODEL-SPACE vertex buffer (position\@0 / normal\@12 / color\@24, the
-    /// gbuffer raster pipeline's 40-byte stride). Bound at vertex binding 0 for pass A.
+    /// gbuffer raster pipeline's `VERTEX_STRIDE`-wide stride, 64 bytes since `uv`\@40 /
+    /// `tangent`\@48 were appended — this pipeline reads only the first 3 attributes).
+    /// Bound at vertex binding 0 for pass A.
     pub vertex_buffer: &'a BoundBuffer,
     /// The mesh's index buffer, `index_type`-wide, bound before the indexed draw.
     pub index_buffer: &'a BoundBuffer,
@@ -1487,6 +1491,32 @@ pub struct GBufferScene<'a> {
     /// pm_instance_material_rings[i] @1 }`). Bound at set 0 when the PM pipeline is
     /// selected. `Some` iff [`Self::pm_enabled`].
     pub pm_bind_group: Option<&'a VulkanBindGroup>,
+    /// Textured-PBR T6c: `true` iff THIS frame's TEXTURED gather scattered at least one
+    /// bound bindless texture slot (`MeshRenderScratch::any_textured_material`) — the
+    /// per-frame TEXTURED raster-pipeline selection gate. NOT `#[cfg(feature = "hwrt")]` —
+    /// materials/textures are device-agnostic (mirrors [`Self::pm_enabled`]). `false` on
+    /// every non-textured scene ⇒ the recorder binds the FROZEN base/pm pipeline.
+    pub tex_enabled: bool,
+    /// Textured-PBR T6c: the TEXTURED gbuffer producer pipeline (`gbuffer_mrt_tex.{vs,fs}`)
+    /// — a 2-SET pipeline (set 0 = the `PerInstanceMaterialTex` layout, VERTEX; set 1 = the
+    /// bindless texture-array set, FRAGMENT — built via
+    /// [`VulkanContext::create_graphics_pipeline_bindless`]), built UNCONDITIONALLY at boot
+    /// (materials/textures are device-agnostic, like `pm`). `Some` iff [`Self::tex_enabled`]
+    /// (belt-and-suspenders); bound instead of
+    /// [`Self::raster_pipeline`]/[`Self::raster_pipeline_pm`] ONLY when
+    /// [`Self::mesh_tex_active`] holds.
+    pub raster_pipeline_tex: Option<&'a VulkanGraphicsPipeline>,
+    /// Textured-PBR T6c: this frame's TEXTURED set-0 bind group (slot `frame_index` of the
+    /// TEX resources' per-FIF bind groups: `{ instance_rings[i] @0,
+    /// tex_instance_material_rings[i] @1 }`). Bound at set 0 when the TEXTURED pipeline is
+    /// selected. `Some` iff [`Self::tex_enabled`].
+    pub tex_bind_group: Option<&'a VulkanBindGroup>,
+    /// Textured-PBR T6c: the raw bindless texture-array descriptor SET (its LAYOUT is
+    /// already baked into [`Self::raster_pipeline_tex`]'s `VkPipelineLayout` at boot — this
+    /// is only the per-frame BIND) — bound at set 1 by `cmd_bind_descriptor_sets` when the
+    /// TEXTURED pipeline is selected. `Some` iff the boot-time `BindlessTextureTable` create
+    /// succeeded (`boyko_render::bindless::BindlessTextureTable::new` is fallible).
+    pub bindless_set: Option<VkDescriptorSet>,
 }
 
 impl GBufferScene<'_> {
@@ -1512,6 +1542,30 @@ impl GBufferScene<'_> {
     /// renders default materials (the tracked F8-mv follow-up), never a crash.
     pub(crate) fn mesh_pm_active(&self) -> bool {
         self.pm_enabled && self.raster_pipeline_pm.is_some() && self.pm_bind_group.is_some()
+    }
+
+    /// Textured-PBR T6c — the SINGLE source of the "this frame draws with the TEXTURED
+    /// gbuffer pipeline" decision, so the framegraph barrier declaration
+    /// (`declare_gbuffer_graph`) and the draw recording (`record_gbuffer`) can never diverge
+    /// (the W1 lesson, mirroring [`Self::mesh_mv_active`]). NOT `#[cfg(feature = "hwrt")]` —
+    /// TEXTURED works on the software leg (materials/textures are device-agnostic, like PM).
+    ///
+    /// True iff [`Self::tex_enabled`] AND the TEXTURED pipeline + this frame's TEX bind
+    /// group + the bindless descriptor set all exist AND no MV frame is active this frame
+    /// (TEXTURED is NEVER compiled with MOTION_VECTORS — T6c plan Decision D4; under active
+    /// temporal denoise a textured material renders base_color/scalar through the MV/mvpm
+    /// pipeline instead, with a one-time host-side warning at the recorder's selection
+    /// site).
+    pub(crate) fn mesh_tex_active(&self) -> bool {
+        #[cfg(feature = "hwrt")]
+        let mv = self.mesh_mv_active();
+        #[cfg(not(feature = "hwrt"))]
+        let mv = false;
+        !mv
+            && self.tex_enabled
+            && self.raster_pipeline_tex.is_some()
+            && self.tex_bind_group.is_some()
+            && self.bindless_set.is_some()
     }
 
     /// F8-mv — the SINGLE source of the "this frame draws with the combined

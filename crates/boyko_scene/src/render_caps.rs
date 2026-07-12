@@ -106,7 +106,7 @@
 //! `migrate_entity_insert`'s overlap path through `trigger_on_replace` too)
 //! is kernel-level work out of this crate's scope.
 
-use boyko_ecs::ecs::core::asset::GEN_UNSYNCED;
+use boyko_ecs::ecs::core::asset::{GEN_UNSYNCED, Handle};
 use boyko_ecs::ecs::core::component::hooks::HookContext;
 use boyko_ecs::ecs::core::component::hooks::deferred_master::DeferredEcsMaster;
 use boyko_macros::Component;
@@ -156,6 +156,31 @@ pub struct MeshHandle(pub u32);
 #[require(MaterialRefGen)]
 #[component(on_insert = material_handle_on_insert, on_replace = material_handle_on_replace)]
 pub struct MaterialHandle(pub u16);
+
+impl MaterialHandle {
+    /// Mints the render carrier from a fresh `Assets<T>` row's [`Handle`] — truncates
+    /// the handle's `u32` row index to this type's `u16` width (mirrors
+    /// `boyko_render::MaterialId::from_handle`'s identical truncation on the GPU-side
+    /// sibling carrier). Generic over `T` (rather than a concrete `Material`) because
+    /// `boyko_scene` sits BELOW `boyko_render` in the crate layering and cannot name
+    /// `boyko_render::Material`.
+    ///
+    /// # Panics (debug)
+    /// `debug_assert!`s `handle.index() <= u16::MAX` — the material table is
+    /// documented to stay under 65 536 rows (the same 16-bit carrier bound
+    /// `MaterialId` enforces); a table grown past that would silently alias ids were
+    /// this check compiled out, which is why it stays even in release as a
+    /// `debug_assert!` (matching `MaterialId::from_handle`'s own choice).
+    #[inline]
+    pub fn from_handle<T>(handle: Handle<T>) -> Self {
+        let index = handle.index();
+        debug_assert!(
+            index <= u16::MAX as u32,
+            "invariant: the material table fits the 16-bit MaterialHandle range (65 536 slots)"
+        );
+        Self(index as u16)
+    }
+}
 
 /// The generation [`MeshHandle`] last synced against its bound slot
 /// (asset-streaming plan F5) — `#[require]`d by `MeshHandle` so every

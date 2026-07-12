@@ -70,7 +70,7 @@
 use boyko_app::prelude::*;
 use boyko_ecs::prelude::*;
 use boyko_macros::Resource;
-use boyko_render::MaterialGpu;
+use boyko_render::Material;
 
 /// Frames left before the test requests exit. Mirrors
 /// `asset_streaming_f6_churn_headless.rs`'s / the sibling F7 file's budget idiom.
@@ -144,11 +144,11 @@ fn setup_minimal_scene(
     });
 }
 
-fn spawn_many(mut commands: Commands, cube: Res<SharedCubeMesh>, mut materials: ResMut<Assets<MaterialGpu>>) {
+fn spawn_many(mut commands: Commands, cube: Res<SharedCubeMesh>, mut materials: ResMut<Assets<Material>>) {
     // Asset-streaming plan F8 fold-in: a SHARED non-default material for every drawable —
     // see this file's module doc for why the over-capacity gather this test drives must be
     // material-bearing.
-    let pm_material = materials.add(MaterialGpu::new([0.9, 0.1, 0.1, 1.0], 1.0, 0.3, 0.5, [0.0, 0.0, 0.0], 0));
+    let pm_material = materials.add(Material::new([0.9, 0.1, 0.1, 1.0], 1.0, 0.3, 0.5, [0.0, 0.0, 0.0], 0));
     for i in 0..DRAWABLES {
         commands.spawn(MeshBundle {
             material: MaterialHandle(pm_material.index() as u16),

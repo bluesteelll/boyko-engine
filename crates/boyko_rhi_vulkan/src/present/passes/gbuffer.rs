@@ -4,6 +4,7 @@
 //! [`GbufferBarrierSink`](super::super::graph_bridge::GbufferBarrierSink).
 
 use core::ptr;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::compute::{
     CoarseMode, DEFAULT_MARCHER_OMEGA, FineMarcherPush, INTERP_INSTANCES_PUSH_BYTES, LOCAL_SIZE_X,
@@ -21,6 +22,33 @@ use super::super::scene_types::{
 };
 use super::super::targets::GBufferTargets;
 use super::super::{COLOR_SUBRESOURCE_RANGE, SwapchainError};
+
+/// Textured-PBR T6c (plan Decision D4): prints a ONE-TIME diagnostic when a textured
+/// material is active on a frame that also has the temporal motion-vector pipeline
+/// active — TEXTURED is never compiled with MOTION_VECTORS, so that frame renders the
+/// material's `base_color`/scalar `mrr` instead of sampled textures (the MV/mvpm arm
+/// takes priority). A process-wide latch keeps this off the steady-state hot path
+/// (Principle 1: no per-frame `AtomicBool` load cost beyond the one `swap` on the FIRST
+/// occurrence — every subsequent call short-circuits `WARNED.load` first) and avoids
+/// spamming stderr every frame the two features overlap.
+#[cold]
+#[inline(never)]
+fn warn_textured_suppressed_by_motion_vectors() {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    // Relaxed: a diagnostic latch, not a cross-thread synchronization point — the render
+    // loop is single-threaded through this call site, and a racing double-print (were this
+    // ever called from multiple threads) would be a harmless cosmetic duplicate, not UB.
+    if WARNED.load(Ordering::Relaxed) {
+        return;
+    }
+    WARNED.store(true, Ordering::Relaxed);
+    eprintln!(
+        "boyko_rhi_vulkan: a textured material is active while the temporal motion-vector \
+         gbuffer pipeline is also active this frame — TEXTURED is never compiled with \
+         MOTION_VECTORS (textured-PBR T6c plan Decision D4), so textured material(s) render \
+         base_color/scalar mrr instead of sampled textures until temporal denoise is off."
+    );
+}
 
 impl Renderer<'_> {
     /// Records the Render-P1c on-screen 3-pass G-buffer frame into `cmd`. The barrier
@@ -427,6 +455,20 @@ impl Renderer<'_> {
         let mvpm_active = scene.mesh_mvpm_active();
         #[cfg(not(feature = "hwrt"))]
         let mvpm_active = false;
+        // Textured-PBR T6c: decide whether this frame uses the TEXTURED pipeline. Present on
+        // BOTH cfg legs (materials/textures are device-agnostic, like `pm`) — `mesh_tex_active()`
+        // is the SINGLE source shared with `declare_gbuffer_graph`'s `pbr` write declaration
+        // (W1). `mesh_tex_active()` is ALREADY `false` whenever `mv_active` holds (T6c plan
+        // Decision D4: TEXTURED is never compiled with MOTION_VECTORS), so this tier check needs
+        // no explicit `!mv_active` guard of its own.
+        let tex_active = scene.mesh_tex_active();
+        // T6c plan Decision D4: under an active MV/mvpm frame, a textured material renders
+        // base_color/scalar via the MV/mvpm pipeline instead of sampled textures (`tex_active`
+        // above is false). Warn ONCE per process (not every frame — Principle 1, avoid I-cache/
+        // hot-path bloat + stderr spam) so the suppression is visible without a per-frame cost.
+        if mv_active && scene.tex_enabled {
+            warn_textured_suppressed_by_motion_vectors();
+        }
         // The 4th MRT: the motion_vec Δuv target (R16G16Sfloat), CLEAR to (0,0) / STORE — a pixel
         // with no mesh fragment holds zero motion (the marcher overwrites SDF pixels in step 5b).
         // Built unconditionally so it outlives `cmd_begin_rendering`; the driver reads it ONLY when
@@ -463,16 +505,40 @@ impl Renderer<'_> {
                 color: VkClearColorValue { float32: [0.0, 0.0, 0.0, 0.0] },
             },
         };
+        // Textured-PBR T6c: the 4th MRT under the TEXTURED path — `gPbr`
+        // (`R16G16B16A16_SFLOAT`), CLEAR to the T6a neutral (metallic 0, roughness 0.5, ao 1,
+        // emissive 1) / STORE. Mutually exclusive with `motion_vec_attachment` above (TEXTURED
+        // is never compiled with MOTION_VECTORS, T6c plan Decision D4), so at most one of the
+        // two is ever selected into the 4th array slot below. `image_view` is NULL (present-
+        // but-unread) when `tex_active` is false.
+        let pbr_view = if tex_active { targets.pbr[fi].view } else { VkImageView::NULL };
+        let pbr_attachment = VkRenderingAttachmentInfo {
+            s_type: VkStructureType::RenderingAttachmentInfo,
+            p_next: ptr::null(),
+            image_view: pbr_view,
+            image_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            resolve_mode: 0,
+            resolve_image_view: VkImageView::NULL,
+            resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+            load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+            store_op: VK_ATTACHMENT_STORE_OP_STORE,
+            clear_value: VkClearValue {
+                color: VkClearColorValue { float32: [0.0, 0.5, 1.0, 1.0] },
+            },
+        };
         // The color-attachment array is ALWAYS 4 elements (so the ptr is valid for both counts and
         // the array outlives the bracketed calls — the lifetime caution). `color_attachment_count`
-        // selects 3 (base) vs 4 (MV); on the base path the 4th element is present-but-unread.
+        // selects 3 (base) vs 4 (MV or TEXTURED); on the base path the 4th element is
+        // present-but-unread. `mv_active`/`tex_active` are mutually exclusive (D4), so the 4th
+        // slot picks EITHER the motion_vec OR the pbr attachment, never a mix of the two.
+        let fourth_attachment = if mv_active { motion_vec_attachment } else { pbr_attachment };
         let raster_color_attachments = [
             albedo_attachment,
             normal_attachment,
             material_attachment,
-            motion_vec_attachment,
+            fourth_attachment,
         ];
-        let color_attachment_count: u32 = if mv_active { 4 } else { 3 };
+        let color_attachment_count: u32 = if mv_active || tex_active { 4 } else { 3 };
         let depth_attachment = VkRenderingAttachmentInfo {
             s_type: VkStructureType::RenderingAttachmentInfo,
             p_next: ptr::null(),
@@ -548,6 +614,10 @@ impl Renderer<'_> {
             {
                 scene.raster_pipeline
             }
+        } else if tex_active {
+            scene
+                .raster_pipeline_tex
+                .expect("invariant: tex_active implies raster_pipeline_tex is Some")
         } else if pm_active {
             scene
                 .raster_pipeline_pm
@@ -577,6 +647,10 @@ impl Renderer<'_> {
             {
                 scene.instance_bind_group
             }
+        } else if tex_active {
+            scene
+                .tex_bind_group
+                .expect("invariant: tex_active implies tex_bind_group is Some")
         } else if pm_active {
             scene
                 .pm_bind_group
@@ -609,7 +683,19 @@ impl Renderer<'_> {
         // 4-attachment `raster_rendering` (`color_attachment_count == 4` via `mv_active`,
         // which `mesh_mvpm_active()` implies). All four are live, `INSTANCE_CAPACITY`-fixed
         // rings on the RT leg (`grow_instance_family_if_needed`'s W3 gate never grows them
-        // there, so they are never rebound and never dangle). `vertex_offset`/
+        // there, so they are never rebound and never dangle). Textured-PBR T6c: when
+        // `tex_active`, set 0 instead binds the TEX group's TWO bindings — `instances[s]` @0
+        // (the SAME gather-filled model ring) + `instance_materials_tex[s]` @1 (the
+        // gather-filled `PerInstanceMaterialTex` ring) — AND, immediately after, set 1 is
+        // ALSO bound to the bindless texture-array descriptor SET (`scene.bindless_set`, a
+        // live `VkDescriptorSet` allocated by `BindlessTextureTable::new` and never
+        // destroyed before this point — its owning `BindlessTextureTable` outlives every
+        // frame until the runner's teardown); the pipeline's LAYOUT already declares this
+        // set (built via `create_graphics_pipeline_bindless` at boot), so this bind's
+        // `first_set = 1` matches a real layout slot. `raster_pipeline.layout` is the SAME
+        // 2-set layout in that case, and the pipeline declares 4 color formats (3 base +
+        // `gPbr`) matching the 4-attachment `raster_rendering` (`color_attachment_count ==
+        // 4` via `tex_active`). `vertex_offset`/
         // `raster_viewport`/`raster_area` locals outlive the bracketed calls. On the legacy arm
         // `draw(vertex_count, 1, 0, 0)` reads the merged vertex buffer; on the M3 arm the
         // batch loop re-pushes each batch's
@@ -640,6 +726,27 @@ impl Renderer<'_> {
                 0,
                 ptr::null(),
             );
+            // Textured-PBR T6c: when the TEXTURED pipeline is selected, ALSO bind the bindless
+            // texture-array descriptor SET at set 1 (FRAGMENT-visible) — its LAYOUT is already
+            // baked into `raster_pipeline.layout` at boot via
+            // `VulkanContext::create_graphics_pipeline_bindless`, so this is purely a per-frame
+            // set bind, mirroring the set-0 bind immediately above. `bindless_set` is a local so
+            // `&bindless_set` is a valid single-element pointer for the call.
+            if tex_active {
+                let bindless_set = scene
+                    .bindless_set
+                    .expect("invariant: tex_active implies bindless_set is Some");
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    raster_pipeline.layout,
+                    1,
+                    1,
+                    &bindless_set,
+                    0,
+                    ptr::null(),
+                );
+            }
             (self.fns.cmd_push_constants)(
                 cmd,
                 raster_pipeline.layout,

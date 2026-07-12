@@ -285,6 +285,8 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("G-buffer albedo texture");
     let normal_tex = device
@@ -296,6 +298,8 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("G-buffer normal texture");
 
@@ -309,6 +313,8 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
             dimension: TextureDimension::D2,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("G-buffer depth texture");
 
@@ -323,6 +329,8 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
             dimension: TextureDimension::D2,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
             array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
         })
         .expect("final output texture O");
 

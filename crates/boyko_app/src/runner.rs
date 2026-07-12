@@ -30,13 +30,15 @@ use boyko_input::{ButtonState, KeyCode, RawInputEvent};
 use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
 #[cfg(windows)]
 use boyko_render::{
-    CsmCasterScratch, DdgiCaps, MaterialGpu, MaterialId, MaterialTable, MeshAssetsExt, MeshGpu,
-    MeshRenderScratch, OrphanedMeshGpu, RayBackendPolicy, RayCaps, RenderEpoch, ResolvedCsm,
+    BindlessTextureTable, CsmCasterScratch, DdgiCaps, LightingConfig, MATERIAL_FLAG_TEXTURED,
+    Material, MaterialId, MaterialTable, MeshAssetsExt, MeshGpu, MeshRenderScratch,
+    OrphanedMeshGpu, OrphanedTextureGpu, RayBackendPolicy, RayCaps, RenderEpoch, ResolvedCsm,
     ResolvedShadowAtlas, RetiredGpuBuffers, RhiContext, SdfEditStaging, ShadowDenoiseConfig,
-    ShadowDenoiseMode, collect_sdf_edits, gbuffer_push_from_view, retire_deferred_frees,
-    upload_atlas_ring, upload_camera_ring, upload_csm_ring, upload_instance_materials,
-    upload_instance_models, upload_light_table, upload_material_assets, upload_mesh_assets,
-    upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
+    ShadowDenoiseMode, TextureAssetsExt, TextureGpu, collect_sdf_edits, gbuffer_push_from_view,
+    retire_deferred_frees, upload_atlas_ring, upload_camera_ring, upload_csm_ring,
+    upload_instance_materials, upload_instance_materials_tex, upload_instance_models,
+    upload_light_table, upload_material_assets, upload_mesh_assets, upload_pair_out_slot,
+    upload_pair_ring, upload_sdf_edit_list, upload_texture_assets,
 };
 #[cfg(all(windows, feature = "hwrt"))]
 use boyko_render::{
@@ -82,7 +84,7 @@ pub(crate) struct WindowDesc {
 const CLEAR_COLOR: [f32; 4] = [0.05, 0.07, 0.10, 1.0];
 
 /// Asset-system rung A1: the boot preallocation budget for
-/// [`Assets::<MaterialGpu>::with_reserved`] — the host does not know a game's material
+/// [`Assets::<Material>::with_reserved`] — the host does not know a game's material
 /// count generically, so this is a practical setup-time default (Principle 5: reserve
 /// once so `Assets::add` never reallocates the column mid-setup). `MaterialTable` hard-
 /// sizes its device table to the ACTUAL registered count at `boot_seed`, so an under-
@@ -136,6 +138,47 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
         }
     };
 
+    // Textured-PBR rung T6c (fix, post-review): create the bindless texture-array
+    // descriptor set (T4) HERE — immediately after the host boots, BEFORE any World
+    // insertion or `app.finish()` — so it can be inserted as a World resident a
+    // startup system can `NonSendResMut<BindlessTextureTable>` (T7's texture-loading
+    // shape: decode -> register_texture -> slot -> Material::with_textures, run from
+    // the user's `setup` startup system, which drains DURING `finish()` below —
+    // requesting a resource not yet in the World panics, the exact bug this
+    // reordering fixes; see `textured_smoke.rs`).
+    //
+    // `BindlessTextureTable::new` is FALLIBLE. Doing it at THIS point — before any
+    // `insert_non_send_resource`/`insert_resource` call below and before
+    // `app.finish()` — keeps its failure unwind MINIMAL and self-contained: nothing
+    // has been inserted into the World yet (no World resident to evict) and no
+    // plugin's `build()` has run yet (`AssetRefcountPlugin`'s `DeferredFree`/
+    // `RenderEpoch` — which the FULL `teardown()` below force-drains via
+    // `retire_deferred_frees` — do not exist in the World until `app.finish()`
+    // runs). Calling the full `teardown()` here would panic on THOSE missing
+    // resources — the same class of bug this whole fix addresses, just shifted to
+    // the failure path instead of the happy path. So this failure branch destroys
+    // ONLY the host's GPU chain (mirrors `WindowHost::boot`'s own failure branch
+    // above, generalized to the now-live `host`) + the device singleton, exactly
+    // like the two failure branches above it.
+    let bindless_texture_table = match BindlessTextureTable::new(ctx) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("boyko_app: bindless texture table creation failed - exiting ({e:?})");
+            // SAFETY: `host` was just booted on `ctx` above; no GPU work was ever
+            // submitted (the frame loop has not started, nothing was drawn); no
+            // World resident references any host/device resource yet (nothing was
+            // inserted); `destroy_host_gpu_chain` waits the device idle (the
+            // renderer's `Drop`) before destroying `host`'s explicit RHI resources;
+            // no `&'static VulkanContext` reference survives past
+            // `destroy_singleton` below.
+            unsafe {
+                destroy_host_gpu_chain(host, ctx);
+                VulkanContext::destroy_singleton();
+            }
+            return AppExit(true);
+        }
+    };
+
     // ── World residents BEFORE `finish()` so the startup one-shots drain WITH
     // the device present (plan D2 step 4 / D6). The GPU handles are NonSend:
     // all GPU access stays runner-thread-only. `Assets<MeshGpu>` starts empty —
@@ -153,7 +196,7 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // by `retire_deferred_frees` alongside `DeferredFree`, and at shutdown below.
     app.world_mut()
         .insert_non_send_resource(OrphanedMeshGpu::default());
-    // Asset-system rung A1: `Assets<MaterialGpu>` is the CPU authority (a Resource,
+    // Asset-system rung A1: `Assets<Material>` is the CPU authority (a Resource,
     // the same generic asset-kernel table every future asset type shares);
     // `MaterialTable` is its GPU mirror (NonSend — it owns RHI buffers once
     // `boot_seed` runs after `finish()` below, see there for the boot-ordering
@@ -163,12 +206,12 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // carrier truncates a fresh `Handle`'s `u32` index to `MaterialId`'s 16-bit width
     // at the mint site (`MaterialId::from_handle`) — slot 0's handle always mints
     // `MaterialId::DEFAULT`, asserted below.
-    let mut material_assets = Assets::<MaterialGpu>::with_reserved(MATERIAL_CAPACITY);
-    let default_material = material_assets.add(MaterialGpu::default());
+    let mut material_assets = Assets::<Material>::with_reserved(MATERIAL_CAPACITY);
+    let default_material = material_assets.add(Material::default());
     debug_assert_eq!(
         MaterialId::from_handle(default_material),
         MaterialId::DEFAULT,
-        "invariant: the first Assets<MaterialGpu> row mints MaterialId::DEFAULT"
+        "invariant: the first Assets<Material> row mints MaterialId::DEFAULT"
     );
     // Asset-streaming plan F2: pin slot 0 NEVER-RETIRE. The default material is
     // referenced by every entity that carries no explicit `MaterialHandle`
@@ -190,10 +233,42 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     app.world_mut()
         .insert_non_send_resource(RetiredGpuBuffers::default());
 
+    // Textured-PBR rung T6b: `Assets<TextureGpu>` is the GPU-resident texture asset
+    // table (`TextureGpu` owns its `VulkanTexture` directly, mirroring
+    // `Assets<MeshGpu>` — see `texture.rs`'s module doc: "no separate mirror").
+    // Registered NonSend even though `TextureGpu`'s CURRENT field composition
+    // happens to satisfy Rust's auto-`Send` algorithm (its `VulkanTexture` holds no
+    // raw-mapped-pointer field, unlike `MeshGpu`'s `BoundBuffer::mapped:
+    // Option<NonNull<u8>>`, which is what actually makes `MeshGpu` `!Send`):
+    // `texture.rs`'s own module doc already declares this asset non-`Send` BY
+    // DESIGN ("owns a non-Send RHI texture"), matching the engine's
+    // dispatcher-only device-object policy (`boyko_rhi_vulkan::ffi`'s handle-`Send`
+    // SAFETY note: "cross-thread access is governed later by the dispatcher-only
+    // NonSendResource model, not a blanket Sync") rather than an accident of
+    // today's struct layout that a future field addition (e.g. a host-mapped
+    // readback view) could silently flip.
+    //
+    // Textured-PBR rung T6c (fix, post-review): `bindless_texture_table` was
+    // ALREADY created (fallibly) right after the host boot above — its failure
+    // already returned before reaching here. Inserted alongside `Assets<TextureGpu>`/
+    // `OrphanedTextureGpu` (the rest of the texture-asset resource group) so a
+    // startup `setup` system can `NonSendResMut<BindlessTextureTable>` it, exactly
+    // like it already does `NonSendResMut<Assets<TextureGpu>>` (T7's texture-loading
+    // shape needs BOTH live during `finish()`'s startup-system drain).
+    app.world_mut()
+        .insert_non_send_resource(bindless_texture_table);
+    app.world_mut()
+        .insert_non_send_resource(Assets::<TextureGpu>::default());
+    // Textured-PBR rung T6b: the F6-style fill-reject orphan teardown queue
+    // (mirrors `OrphanedMeshGpu` — a `TextureGpu` orphan owns a live device image
+    // + bindless slot with no `Drop` to free them).
+    app.world_mut()
+        .insert_non_send_resource(OrphanedTextureGpu::default());
+
     // Asset-system rung A3b: the decode->upload staging queues. `AssetServer`
     // was not wired into `boyko_app` before this rung — it is minted here bare
     // (asset-streaming plan F3: loader dispatch is a compile-time-static
-    // `HasLoaders` const-table on `MeshGpu`/`MaterialGpu` themselves, so there
+    // `HasLoaders` const-table on `MeshGpu`/`Material` themselves, so there
     // is no runtime registration step). `AssetStaging<A>` is the NonSend
     // handoff queue `AssetServer::load` pushes into and the boot-one-shot
     // `upload_material_assets`/`upload_mesh_assets` drain (run explicitly below,
@@ -206,13 +281,17 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     let asset_server = AssetServer::new();
     app.world_mut().insert_resource(asset_server);
     app.world_mut()
-        .insert_non_send_resource(AssetStaging::<MaterialGpu>::default());
+        .insert_non_send_resource(AssetStaging::<Material>::default());
     app.world_mut()
         .insert_non_send_resource(AssetStaging::<MeshGpu>::default());
     app.world_mut()
-        .insert_non_send_resource(AssetPaths::<MaterialGpu>::default());
+        .insert_non_send_resource(AssetStaging::<TextureGpu>::default());
+    app.world_mut()
+        .insert_non_send_resource(AssetPaths::<Material>::default());
     app.world_mut()
         .insert_non_send_resource(AssetPaths::<MeshGpu>::default());
+    app.world_mut()
+        .insert_non_send_resource(AssetPaths::<TextureGpu>::default());
 
     app.world_mut().insert_resource(WindowInfo {
         width: host.window.width(),
@@ -324,20 +403,38 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // loop's first-frame `is_dirty()` block then performs the one-shot upload unchanged.
     app.world_mut().run_system(collect_sdf_edits);
 
+    // Textured-PBR rung T6c (fix, post-review): build the TEXTURED gbuffer producer
+    // pipeline (a 2-set layout needing the bindless texture-array table's
+    // descriptor-set LAYOUT, which does not exist at `GpuSceneBundles::boot()` time
+    // — see that fn's doc). `BindlessTextureTable` was created + inserted into the
+    // World BEFORE `finish()` above (so a startup `setup` system could
+    // `NonSendResMut<BindlessTextureTable>` it to register textures — see
+    // `textured_smoke.rs`); read it back here via a World borrow instead of the old
+    // local variable. `&mut host.gpu` (a plain `WindowHost` field, not a World
+    // resident) and the World's `&BindlessTextureTable` are disjoint objects, so
+    // this borrow cannot conflict with anything the drained startup systems did to
+    // the table — `finish()` has already fully run by this point, so the two
+    // accesses are SEQUENTIAL (setup's writes, then this read), never concurrent.
+    let bindless_texture_table = app.world().non_send_resource::<BindlessTextureTable>();
+    host.gpu.build_textured_resources(ctx, bindless_texture_table);
+
     // Asset-system rung A3b: drain any decoded-but-not-yet-uploaded assets BEFORE
     // `MaterialTable::boot_seed` below sizes/uploads the device SSBO from
-    // `Assets<MaterialGpu>` — a loaded material must be `fill`ed (and therefore
+    // `Assets<Material>` — a loaded material must be `fill`ed (and therefore
     // counted in `high_water`) before that seed runs. Materials FIRST (the
     // ordering `boot_seed` requires), then meshes (no ordering dependency on
     // `boot_seed`, but run alongside as one boot-time asset-drain block). This is
     // a BOOT ONE-SHOT, not a per-frame system (keeps the frame loop unchanged):
     // at A3b no scene calls `AssetServer::load`, so both drains are empty and
     // this costs nothing beyond the `staging.is_empty()` check (byte-identical).
+    // Textured-PBR T6b adds the texture drain alongside (also empty at boot —
+    // dormant until a later rung loads a texture).
     app.world_mut().run_system(upload_material_assets);
     app.world_mut().run_system(upload_mesh_assets);
+    app.world_mut().run_system(upload_texture_assets);
 
     // Asset-system rung A1: boot-seed the material table — hard-size + upload the
-    // device SSBO from whatever `finish()` drained into `Assets<MaterialGpu>` (every
+    // device SSBO from whatever `finish()` drained into `Assets<Material>` (every
     // startup `Assets::add` call already landed, by the SAME order-proof
     // `collect_sdf_edits` relies on above). This MUST run before the frame loop's
     // first frame: `GBufferTargets::sync_gbuffer` (called lazily from inside
@@ -346,14 +443,14 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // ONCE and never updates them per-frame, so the table must be live before that
     // first bind.
     //
-    // `boot_seed` needs `&Assets<MaterialGpu>` and `&mut MaterialTable` live at once;
+    // `boot_seed` needs `&Assets<Material>` and `&mut MaterialTable` live at once;
     // both live in the same World, so the resource is taken out (owned) for the
     // duration of the call and reinserted immediately after — a one-time boot cost,
     // never on the per-frame path.
     let material_assets = app
         .world_mut()
-        .remove_resource::<Assets<MaterialGpu>>()
-        .expect("invariant: Assets<MaterialGpu> was inserted before finish()");
+        .remove_resource::<Assets<Material>>()
+        .expect("invariant: Assets<Material> was inserted before finish()");
     app.world_mut()
         .non_send_resource_mut::<MaterialTable>()
         .boot_seed(&material_assets, ctx);
@@ -397,8 +494,10 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
         !app.world().contains_non_send_resource::<RhiContext>()
             && !app.world().contains_non_send_resource::<GpuDevice>()
             && !app.world().contains_non_send_resource::<Assets<MeshGpu>>()
-            && !app.world().contains_non_send_resource::<MaterialTable>(),
-        "invariant: the post-run World is GPU-evicted (plan D2)"
+            && !app.world().contains_non_send_resource::<MaterialTable>()
+            && !app.world().contains_non_send_resource::<Assets<TextureGpu>>()
+            && !app.world().contains_non_send_resource::<BindlessTextureTable>(),
+        "invariant: the post-run World is GPU-evicted (plan D2 + textured-PBR T6b)"
     );
 
     AppExit(true)
@@ -573,7 +672,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // take-out/reinsert. `NonSendResources::insert`/`remove` heap-(de)allocate the
         // box and are `#[cold]` (setup-only APIs in the kernel) — correct to pay on the
         // rare grow frame, wrong to pay every frame on the golden/steady-state path.
-        let material_high_water = app.world().resource::<Assets<MaterialGpu>>().high_water();
+        let material_high_water = app.world().resource::<Assets<Material>>().high_water();
         let material_grow_needed = app
             .world()
             .non_send_resource::<MaterialTable>()
@@ -582,11 +681,11 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         let instance_grow_needed = host.gpu.needs_instance_grow(instance_needed, s);
 
         // 4.6/4.7 grow (rare path only). `MaterialTable::grow_if_needed` needs `&Assets<
-        // MaterialGpu>` (a Send Resource) + `&mut MaterialTable` + `&mut
+        // Material>` (a Send Resource) + `&mut MaterialTable` + `&mut
         // RetiredGpuBuffers` (both NonSend) live at once — the safe resource facade
         // cannot split a live `&World` borrow across Send/NonSend storage, so
         // `MaterialTable`/`RetiredGpuBuffers` are taken out (owned) for the call's
-        // duration and reinserted right after (the same boot `Assets<MaterialGpu>`
+        // duration and reinserted right after (the same boot `Assets<Material>`
         // take-out/reinsert idiom above) — but ONLY inside this `if`, so a non-growing
         // frame never executes it. `RetiredGpuBuffers` is taken out ONCE and shared by
         // both grows (never twice per frame).
@@ -602,7 +701,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     .remove_non_send_resource::<MaterialTable>()
                     .expect("invariant: MaterialTable inserted at boot");
                 {
-                    let material_assets = app.world().resource::<Assets<MaterialGpu>>();
+                    let material_assets = app.world().resource::<Assets<Material>>();
                     material_table.grow_if_needed(
                         material_assets,
                         ctx,
@@ -681,6 +780,38 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // perturb change-detection ticks (running a system stamps ticks), and v1 scope is
         // boot-static — so a post-boot `SdfPrimitive` spawn is silently ignored (the scope
         // line; the dynamic per-frame edit path is a deferred campaign).
+        //
+        // Textured-PBR rung T5 (D6): the textured path is mesh-only in v1 — the deferred
+        // resolve cannot distinguish an SDF-marched pixel from a mesh-rasterized one, so a
+        // TEXTURED material bound to an SDF primitive would silently misbehave once a later
+        // rung wires texture sampling into the resolve. `collect_sdf_edits`
+        // (`boyko_render::sdf_edit`) itself has NO `Assets<Material>` access — adding one
+        // would panic every headless SDF-gather harness that does not insert that resource
+        // (this kernel has no `Option<Res<R>>` SystemParam; `Res<T>::get_param` panics on a
+        // missing resource) — so this frame-loop site (which already holds BOTH the
+        // gathered edits and the world's `Assets<Material>`) is the nearest place this check
+        // can run without perturbing any existing caller. Debug-only, compiled out in
+        // release; the whole block runs at most once (the first `is_dirty()` frame).
+        #[cfg(debug_assertions)]
+        {
+            let staging = app.world().resource::<SdfEditStaging>();
+            if staging.is_dirty() {
+                let material_assets = app.world().resource::<Assets<Material>>();
+                for edit in staging.edits() {
+                    let id = MaterialId::from_center_w_bits(edit.center[3]);
+                    let textured = material_assets
+                        .get_by_index(u32::from(id.index()))
+                        .is_some_and(|m| m.gpu.mrr[3].to_bits() & MATERIAL_FLAG_TEXTURED != 0);
+                    debug_assert!(
+                        !textured,
+                        "SDF primitive carries material id {} which is TEXTURED — the \
+                         textured path is mesh-only in v1 (the deferred resolve cannot \
+                         distinguish an SDF-marched pixel from a mesh-rasterized one)",
+                        id.index()
+                    );
+                }
+            }
+        }
         {
             let staging = app.world_mut().resource_mut::<SdfEditStaging>();
             if staging.is_dirty() {
@@ -778,6 +909,21 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // lockstep, live until teardown, the fenced slot `s == token.slot()`).
                 unsafe {
                     upload_instance_materials(&token, &host.gpu.pm_instance_material_rings[s], scratch);
+                }
+            }
+
+            // 5b'''. Textured-PBR T6c: the gathered per-instance TEXTURED material payload
+            //        lane — gated on `any_textured_material` (Principle 1: a non-textured
+            //        frame does ZERO material-upload work). `tex_instance_material_slot`
+            //        returns `None` if the TEXTURED pipeline never got built (bindless table
+            //        create failure), in which case there is nothing to upload into.
+            if scratch.any_textured_material()
+                && let Some(tex_slot) = host.gpu.tex_instance_material_slot(s)
+            {
+                // SAFETY: `tex_slot` — same provenance contract as `pm_instance_material_rings[s]`
+                // above (boot-minted, live until teardown, the fenced slot `s == token.slot()`).
+                unsafe {
+                    upload_instance_materials_tex(&token, tex_slot, scratch);
                 }
             }
 
@@ -1148,6 +1294,14 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 let atrous_levels = if spatial { cfg.clamped_levels() } else { 0 };
                 (spatial || temporal, atrous_levels, temporal)
             };
+            // Render terminator-softening: `true` iff the world carries a `LightingConfig`
+            // resource with `terminator_softening > 0` — the SAME `world.try_resource` pattern
+            // `ddgi_enabled` above uses. Absent (the default host that never sets it) or `0.0`
+            // (the plugin-inserted default), `terminator_wrap` is `false` → `scene()` binds the
+            // base resolve pipeline → byte-identical (the 0%-gate).
+            let terminator_wrap = world
+                .try_resource::<LightingConfig>()
+                .is_some_and(|cfg| cfg.terminator_softening > 0.0);
             let scene = host.gpu.scene(
                 mvp,
                 s,
@@ -1171,6 +1325,11 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // Asset-streaming plan F8: the per-frame PER_INSTANCE_MATERIAL pipeline gate,
                 // read from the SAME `scratch` the instance-model upload above just read.
                 scratch.any_non_default_material(),
+                // Textured-PBR T6c: the per-frame TEXTURED pipeline gate, read from the SAME
+                // `scratch` — `gather_mesh_draws` always runs `gather_material_tex_into` right
+                // after the affine gather (mesh_draw.rs), so this flag is fresh every frame.
+                scratch.any_textured_material(),
+                terminator_wrap,
                 ctx,
             );
 
@@ -1349,6 +1508,49 @@ fn dump_diagnostics(app: &App) {
     );
 }
 
+/// The D2 teardown's steps 1+2 — unbundle the host and drop the renderer FIRST: its
+/// `Drop` performs the `vkDeviceWaitIdle` (frame_driver.rs), so everything after runs
+/// under an idle device. Then destroy the extent-dependent targets and the static
+/// scene bundles EXPLICITLY (no `Drop` glue on RHI resources), and only then drop
+/// swapchain → surface → window (the surface before the window it borrows).
+///
+/// Touches NO World resident — factored out of [`teardown`] (textured-PBR T6c, fix
+/// post-review) so a pre-`finish()` boot failure (`BindlessTextureTable::new`'s `Err`
+/// branch in `run_windowed`) can reuse this EXACT host-destroy sequence without
+/// pulling in `teardown`'s step 3 (which touches World residents / plugin resources
+/// that do not exist yet before `finish()` runs).
+///
+/// # Safety
+/// `ctx` is the live context every resource in `host` was created on; no submission
+/// is in flight past this call (the renderer's `Drop`, first, waits the device idle).
+#[cfg(windows)]
+unsafe fn destroy_host_gpu_chain(host: WindowHost, ctx: &VulkanContext) {
+    let WindowHost {
+        renderer,
+        frame,
+        gpu,
+        draw_scratch: _,
+        retire_scratch: _,
+        composite_extent: _,
+        light_uploaded_gen: _,
+        swapchain,
+        surface,
+        window,
+    } = host;
+    drop(renderer);
+    // SAFETY: the renderer drop above waited the device idle, so no submission
+    // references the targets or the scene bundles; per this fn's own contract `ctx`
+    // is the live context they were created on; each is destroyed exactly once
+    // (by-value moves).
+    unsafe {
+        frame.destroy(ctx);
+        gpu.destroy(ctx);
+    }
+    drop(swapchain);
+    drop(surface);
+    drop(window);
+}
+
 /// The D2 teardown steps 1–3 — a named, ordered sequence; every step is
 /// load-bearing. EVICTS everything; it does NOT end the singleton.
 ///
@@ -1366,35 +1568,12 @@ fn dump_diagnostics(app: &App) {
 /// (non-`Drop`) RHI resources.
 #[cfg(windows)]
 fn teardown(app: &mut App, host: WindowHost, ctx: &VulkanContext) {
-    // Steps 1+2 — unbundle the host and drop the renderer FIRST: its `Drop`
-    // performs the `vkDeviceWaitIdle` (frame_driver.rs), so everything after
-    // runs under an idle device. Then destroy the extent-dependent targets and
-    // the static scene bundles EXPLICITLY (no `Drop` glue on RHI resources),
-    // and only then drop swapchain → surface → window (the surface before the
-    // window it borrows).
-    let WindowHost {
-        renderer,
-        frame,
-        gpu,
-        draw_scratch: _,
-        retire_scratch: _,
-        composite_extent: _,
-        light_uploaded_gen: _,
-        swapchain,
-        surface,
-        window,
-    } = host;
-    drop(renderer);
-    // SAFETY: the renderer drop above waited the device idle, so no submission
-    // references the targets or the scene bundles; `ctx` is the live context
-    // they were created on; each is destroyed exactly once (by-value moves).
-    unsafe {
-        frame.destroy(ctx);
-        gpu.destroy(ctx);
-    }
-    drop(swapchain);
-    drop(surface);
-    drop(window);
+    // Steps 1+2 — see `destroy_host_gpu_chain`'s doc.
+    // SAFETY: `host` was booted on `ctx` and no submission is in flight past this
+    // call (the frame loop's own per-frame fence wait / the renderer's `Drop`
+    // inside `destroy_host_gpu_chain` guarantees this) — the same contract every
+    // prior caller of this inlined sequence relied on.
+    unsafe { destroy_host_gpu_chain(host, ctx) };
 
     // Step 3 — EVICT every device-referencing World resident (the runner
     // borrows the App and cannot drop it — explicit eviction is the
@@ -1426,7 +1605,7 @@ fn teardown(app: &mut App, host: WindowHost, ctx: &VulkanContext) {
         unsafe { mesh_assets.destroy(ctx) };
     }
     // Asset-system rung A1: `MaterialTable`'s table + staging ring are destroyed the
-    // SAME way, under the SAME step-1 idle contract. `Assets<MaterialGpu>` (the CPU
+    // SAME way, under the SAME step-1 idle contract. `Assets<Material>` (the CPU
     // authority) holds no GPU handle, so it needs no explicit eviction here — it
     // drops normally along with the rest of the World.
     if let Some(mut material_table) = app.world_mut().remove_non_send_resource::<MaterialTable>() {
@@ -1446,6 +1625,45 @@ fn teardown(app: &mut App, host: WindowHost, ctx: &VulkanContext) {
         // SAFETY: the device is idle (step 1) so no in-flight submission references
         // any queued buffer; `ctx` is the context every entry was created on.
         unsafe { retired.drain_all(ctx) };
+    }
+    // Textured-PBR rung T6b (openQ2): `Assets<TextureGpu>::destroy` — frees each
+    // registered `VulkanTexture` and returns its bindless slot — MUST run BEFORE
+    // `BindlessTextureTable::destroy` (which frees the descriptor set + the
+    // magenta error texture): a slot returned mid-destroy still needs a LIVE
+    // table to return it TO. Both under the SAME step-1 device-idle contract as
+    // every other teardown call above. Textured-PBR rung T6c (fix, post-review):
+    // `BindlessTextureTable::new`'s fallible creation now runs BEFORE `finish()`
+    // (`run_windowed`), with its OWN minimal unwind on `Err` (`destroy_host_gpu_chain`
+    // + `destroy_singleton`, no World touch) — that failure path never reaches this
+    // fn anymore, so by the time `teardown` runs, both tables are ALWAYS present.
+    //
+    // Grooming fix (item C): the removal order is `bindless_table` OUTER,
+    // `texture_assets` INNER — never a `remove::<A>() && let remove::<B>()` let-chain.
+    // A let-chain TAKES the first resource unconditionally, and if the second `remove`
+    // is `None` the chain's body never runs — the first value then silently drops at
+    // the end of the statement with NO `destroy` call (a real leak: `TextureGpu` owns
+    // device images/views that only `ctx.destroy_texture` frees, never a bare Rust
+    // `Drop`). Checking `bindless_table` FIRST means a missing table leaves
+    // `texture_assets` untouched in the World (never taken, so nothing to leak here);
+    // a present table but missing assets still gets destroyed via the `else` arm.
+    // Every combination this fn can observe either destroys exactly what it removed,
+    // or removes nothing.
+    if let Some(mut bindless_table) = app.world_mut().remove_non_send_resource::<BindlessTextureTable>() {
+        if let Some(mut texture_assets) =
+            app.world_mut().remove_non_send_resource::<Assets<TextureGpu>>()
+        {
+            // SAFETY: the device is idle (step 1) so no in-flight submit
+            // references any texture image or the bindless descriptor set;
+            // `ctx` is the context both were created on; each table is
+            // destroyed exactly once (just removed from the World).
+            unsafe { texture_assets.destroy(ctx, &mut bindless_table) };
+            bindless_table.destroy(ctx);
+        } else {
+            // No `Assets<TextureGpu>` was taken (defensive path — see above), so
+            // there is nothing to return a bindless slot for; the table itself was
+            // already removed from the World and must still be destroyed here.
+            bindless_table.destroy(ctx);
+        }
     }
     // `GpuDevice` is a plain reference newtype (no `Drop` glue) — removal alone
     // ends its residency; the returned `Option` is discarded.

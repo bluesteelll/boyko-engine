@@ -562,14 +562,45 @@ pub enum VkStructureType {
     Win32SurfaceCreateInfoKhr = 1_000_009_000,
     SwapchainCreateInfoKhr = 1_000_001_000,
     PresentInfoKhr = 1_000_001_001,
-    /// `VkPhysicalDeviceVulkan12Features` — chained into features2 to READ the
-    /// Vulkan 1.2 core feature bools (Render P1b `bindless_capable` query).
+    /// `VkPhysicalDeviceVulkan12Features` — the Vulkan 1.2 aggregate feature struct.
+    /// Declared for ABI completeness; NOT used by the T-dev bindless query/enable path
+    /// (which reads/writes the GRANULAR `VkPhysicalDeviceDescriptorIndexingFeatures`
+    /// instead — see [`VkStructureType::PhysicalDeviceDescriptorIndexingFeatures`] for
+    /// why the aggregate is avoided in the `vkCreateDevice` chain).
     /// vulkan_core.h: `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES = 51`.
     PhysicalDeviceVulkan12Features = 51,
     /// `VkPhysicalDeviceVulkan13Features` — chained to enable dynamic rendering.
     PhysicalDeviceVulkan13Features = 53,
     RenderingInfo = 1_000_044_000,
     RenderingAttachmentInfo = 1_000_044_001,
+    /// `VkPhysicalDeviceDescriptorIndexingFeatures` — the GRANULAR bindless feature
+    /// struct (T-dev), chained into `VkPhysicalDeviceFeatures2` to READ and into
+    /// `VkDeviceCreateInfo` to ENABLE the 5 descriptor-indexing bits `bindless_capable`
+    /// gates. Deliberately the granular struct, NOT the `VkPhysicalDeviceVulkan12Features`
+    /// aggregate: the aggregate also carries `bufferDeviceAddress`, which would collide
+    /// with the hwrt arm's standalone `VkPhysicalDeviceBufferDeviceAddressFeatures` in the
+    /// same `pNext` chain (VUID-VkDeviceCreateInfo-pNext-02830 forbids a promoted core
+    /// struct's aggregate alongside its own granular sub-struct). vulkan_core.h:
+    /// `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES = 1000161001`.
+    PhysicalDeviceDescriptorIndexingFeatures = 1_000_161_001,
+    /// `VkDescriptorSetLayoutBindingFlagsCreateInfo` (T4 bindless) — chained into
+    /// `VkDescriptorSetLayoutCreateInfo.pNext` to declare the PARTIALLY_BOUND /
+    /// UPDATE_AFTER_BIND / VARIABLE_DESCRIPTOR_COUNT flags per binding (the bindless
+    /// texture array binding needs all three; the paired immutable-sampler binding
+    /// needs none). Same `VK_EXT_descriptor_indexing` extension family as
+    /// [`Self::PhysicalDeviceDescriptorIndexingFeatures`] (extension number 161).
+    /// vulkan_core.h: `VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO
+    /// = 1000161000`.
+    DescriptorSetLayoutBindingFlagsCreateInfo = 1_000_161_000,
+    /// `VkDescriptorSetVariableDescriptorCountAllocateInfo` (T4 bindless) — chained
+    /// into `VkDescriptorSetAllocateInfo.pNext` to supply the RUNTIME descriptor
+    /// count for the layout's VARIABLE_DESCRIPTOR_COUNT binding at allocation time
+    /// (the bindless texture array is declared with capacity `N` but allocated with
+    /// the actual runtime size — this engine always allocates the full capacity, see
+    /// `boyko_rhi_vulkan::bindless`). vulkan_core.h:
+    /// `VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO =
+    /// 1000161003`.
+    DescriptorSetVariableDescriptorCountAllocateInfo = 1_000_161_003,
 }
 
 // ---------------------------------------------------------------------------
@@ -664,6 +695,47 @@ pub const VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: i32 = 3;
 /// `VkDescriptorType::VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER` (Render P1a: a read-only
 /// constant buffer).
 pub const VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER: i32 = 6;
+
+/// `VkDescriptorType::VK_DESCRIPTOR_TYPE_SAMPLER` (T4 bindless: the shared
+/// trilinear+anisotropic sampler baked as an IMMUTABLE sampler at the bindless
+/// layout's second binding — never written at runtime, so this constant is used
+/// only at layout-create time, not in any [`crate::rhi_impl::VulkanBindGroup`]
+/// write path).
+pub const VK_DESCRIPTOR_TYPE_SAMPLER: i32 = 0;
+
+// --- T4 bindless (`VK_EXT_descriptor_indexing`) binding-flag + create-flag bits.
+//     `VkDescriptorBindingFlagBits` values from vulkan_core.h; see
+//     `boyko_rhi_vulkan::bindless` for where each is applied. ---
+
+/// `VkDescriptorBindingFlagBits::VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT` — the
+/// binding may be updated while a descriptor set using it is bound to a command
+/// buffer that is not yet executing, WITHOUT invalidating that command buffer
+/// (requires the layout's `UPDATE_AFTER_BIND_POOL` create bit + a pool created with
+/// the matching bit).
+pub const VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT: VkFlags = 0x0000_0001;
+/// `VkDescriptorBindingFlagBits::VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT` — a
+/// descriptor at this binding need not be written for every index the runtime
+/// array declares; only slots actually SAMPLED by a shader invocation must hold a
+/// valid descriptor. The bindless table still writes the error texture into every
+/// slot at init (a stale/unwritten index is a bug-shaped access, not a
+/// spec-legal one this bit alone would excuse — see `BindlessTextureTable::new`).
+pub const VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT: VkFlags = 0x0000_0002;
+/// `VkDescriptorBindingFlagBits::VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT`
+/// — the LAST binding in the layout may be allocated with a descriptor count `<=`
+/// its declared `descriptorCount`, supplied via
+/// [`VkDescriptorSetVariableDescriptorCountAllocateInfo`] at allocation time.
+pub const VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT: VkFlags = 0x0000_0008;
+
+/// `VkDescriptorPoolCreateFlagBits::VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT`
+/// — the pool may allocate sets whose layout carries the
+/// `UPDATE_AFTER_BIND_POOL` create bit.
+pub const VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT: VkFlags = 0x0000_0002;
+/// `VkDescriptorSetLayoutCreateFlagBits::VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT`
+/// — the layout may be used to allocate a set from an UPDATE_AFTER_BIND pool, and
+/// its UPDATE_AFTER_BIND-flagged bindings may be updated after being bound (T4:
+/// the whole point of a bindless layout — live incremental per-slot writes with no
+/// pipeline/command-buffer rebuild).
+pub const VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT: VkFlags = 0x0000_0002;
 
 /// `VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE`.
 pub const VK_PIPELINE_BIND_POINT_COMPUTE: i32 = 1;
@@ -875,9 +947,20 @@ pub const VK_FORMAT_R16G16_SFLOAT: i32 = 83;
 /// (the 16-bit four-component UNORM block: R16=70, R16G16=77, R16G16B16A16=91) — pinned to the
 /// ACTUAL enumerant, cross-checked against `Format::R16G16B16A16Unorm` in `abi_guard`.
 pub const VK_FORMAT_R16G16B16A16_UNORM: i32 = 91;
+/// `VkFormat::VK_FORMAT_R16G16B16A16_SFLOAT` — four 16-bit (half) floats (textured-PBR T6a: the
+/// `gPbr` deferred-resolve MRT lane — metallic/roughness/AO-modulation/emissive-modulation). The
+/// value is 97 (the 16-bit four-component SFLOAT block: R16=76, R16G16=83, R16G16B16A16_SFLOAT=97)
+/// — pinned to the ACTUAL enumerant, cross-checked against `Format::R16G16B16A16Sfloat` in
+/// `abi_guard`.
+pub const VK_FORMAT_R16G16B16A16_SFLOAT: i32 = 97;
 /// `VkFormat::VK_FORMAT_R32_SFLOAT` — a single 32-bit float (Lighting L0b: the
 /// `gViewT` G-buffer storage-image lane carrying the marcher's surface ray param `t`).
 pub const VK_FORMAT_R32_SFLOAT: i32 = 100;
+/// `VkFormat::VK_FORMAT_R32G32_SFLOAT` — two 32-bit floats (textured-PBR T6c: a vec2
+/// vertex UV coordinate). The value is 103 (the 32-bit two-component SFLOAT block:
+/// R32=100, R32G32=101..103, R32G32_SFLOAT=103) — pinned to the ACTUAL enumerant,
+/// cross-checked against `VertexFormat::Float32x2` in `abi_guard`.
+pub const VK_FORMAT_R32G32_SFLOAT: i32 = 103;
 /// `VkFormat::VK_FORMAT_R32G32B32_SFLOAT` — three 32-bit floats (a vec3 vertex
 /// position, Phase-6 S0 rung 3).
 pub const VK_FORMAT_R32G32B32_SFLOAT: i32 = 106;
@@ -1010,6 +1093,14 @@ pub const VK_IMAGE_VIEW_TYPE_3D: i32 = 2;
 /// `VkImageTiling::VK_IMAGE_TILING_OPTIMAL`.
 pub const VK_IMAGE_TILING_OPTIMAL: i32 = 0;
 
+/// `VkImageCreateFlagBits::VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` (textured-PBR T2
+/// Decision D2): the image may be viewed through an image view of a DIFFERENT but
+/// compatible format than the image's own — the sRGB-view trick (a mutable
+/// `R8G8B8A8_UNORM` image sampled through an `R8G8B8A8_SRGB` view). Set only when
+/// [`boyko_rhi::TextureDesc::view_format`] is `Some(f)` with `f != format`; `0`
+/// (the byte-identical default) for every pre-T2 texture.
+pub const VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT: VkFlags = 0x0000_0008;
+
 /// `VkImageLayout` discriminants used by the S0 transfer/storage transitions
 /// (the buffer-path `VK_ACCESS_TRANSFER_*`/stage consts are reused for images).
 pub const VK_IMAGE_LAYOUT_GENERAL: i32 = 1;
@@ -1096,6 +1187,10 @@ pub const VK_SAMPLE_COUNT_1_BIT: VkFlags = 0x0000_0001;
 pub const VK_FILTER_NEAREST: i32 = 0;
 /// `VkFilter::VK_FILTER_LINEAR` — bilinear interpolation.
 pub const VK_FILTER_LINEAR: i32 = 1;
+/// `VkSamplerMipmapMode::VK_SAMPLER_MIPMAP_MODE_LINEAR` — interpolated (trilinear
+/// when paired with `VK_FILTER_LINEAR` mag/min) mip sampling. T4: the bindless
+/// table's shared sampler.
+pub const VK_SAMPLER_MIPMAP_MODE_LINEAR: i32 = 1;
 /// `VkSamplerMipmapMode::VK_SAMPLER_MIPMAP_MODE_NEAREST` — no mip interpolation
 /// (rung-5 textures have a single mip level).
 pub const VK_SAMPLER_MIPMAP_MODE_NEAREST: i32 = 0;
@@ -1161,7 +1256,10 @@ pub struct VkDeviceCreateInfo {
     pub pp_enabled_layer_names: *const *const c_char,
     pub enabled_extension_count: u32,
     pub pp_enabled_extension_names: *const *const c_char,
-    /// `const VkPhysicalDeviceFeatures*` — left null (no features requested).
+    /// `const VkPhysicalDeviceFeatures*` (T-dev: points to a stack-local
+    /// [`VkPhysicalDeviceFeatures`] enabling `samplerAnisotropy`). NEVER combined with a
+    /// `VkPhysicalDeviceFeatures2` in `pNext` — the two are mutually exclusive
+    /// (VUID-VkDeviceCreateInfo-pNext-00373).
     pub p_enabled_features: *const c_void,
 }
 
@@ -1892,6 +1990,38 @@ pub struct VkDescriptorSetAllocateInfo {
     pub p_set_layouts: *const VkDescriptorSetLayout,
 }
 
+/// `VkDescriptorSetLayoutBindingFlagsCreateInfo` (T4 bindless) — chained into
+/// [`VkDescriptorSetLayoutCreateInfo::p_next`] to supply one [`VkFlags`] of
+/// [`VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT`] /
+/// [`VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT`] /
+/// [`VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT`] per binding, in the SAME
+/// order as the layout's `p_bindings` array (`binding_count` MUST equal the
+/// layout's `binding_count`, or the driver reads/writes past one of the two
+/// arrays).
+#[repr(C)]
+pub struct VkDescriptorSetLayoutBindingFlagsCreateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub binding_count: u32,
+    /// `const VkDescriptorBindingFlags*` — one flags word per binding, positionally
+    /// paired with the layout's `p_bindings[i]`.
+    pub p_binding_flags: *const VkFlags,
+}
+
+/// `VkDescriptorSetVariableDescriptorCountAllocateInfo` (T4 bindless) — chained
+/// into [`VkDescriptorSetAllocateInfo::p_next`] to supply the RUNTIME descriptor
+/// count for each set's VARIABLE_DESCRIPTOR_COUNT-flagged binding (the LAST
+/// binding in the layout) at allocation time. `descriptor_set_count` MUST equal
+/// the enclosing alloc-info's `descriptor_set_count`.
+#[repr(C)]
+pub struct VkDescriptorSetVariableDescriptorCountAllocateInfo {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    pub descriptor_set_count: u32,
+    /// `const uint32_t*` — one runtime count per set being allocated.
+    pub p_descriptor_counts: *const u32,
+}
+
 /// `VkDescriptorBufferInfo`.
 ///
 /// `#[derive(Clone, Copy)]`: a plain POD with no Drop, so the bind-group create path
@@ -2375,6 +2505,19 @@ pub struct VkOffset3D {
     pub z: i32,
 }
 
+/// `VkImageBlit` — one mip-to-mip blit region for `vkCmdBlitImage` (textured-PBR
+/// T2 Decision D3, the mip-chain-generation blit). `srcOffsets`/`dstOffsets` are the
+/// two opposite corners of the (axis-aligned) source/destination box; a mip-chain
+/// blit always uses `[(0,0,0), (extent_w, extent_h, 1)]` (the full mip level).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkImageBlit {
+    pub src_subresource: VkImageSubresourceLayers,
+    pub src_offsets: [VkOffset3D; 2],
+    pub dst_subresource: VkImageSubresourceLayers,
+    pub dst_offsets: [VkOffset3D; 2],
+}
+
 /// `VkPhysicalDeviceFeatures2` — the head struct for `vkGetPhysicalDeviceFeatures2`
 /// (S0 fail-fast `dynamicRendering` support query). The `features` member is the
 /// large `VkPhysicalDeviceFeatures` block (55 `VkBool32`s = 220 bytes), reserved
@@ -2429,13 +2572,13 @@ pub struct VkFormatProperties {
     pub buffer_features: VkFlags,
 }
 
-/// `VkPhysicalDeviceVulkan12Features` — chained into `VkPhysicalDeviceFeatures2` to
-/// READ the Vulkan 1.2 core feature bools (the Render P1b device-caps query reads
-/// `descriptor_indexing` + `runtime_descriptor_array` for the *recorded-only*
-/// `bindless_capable` cap; NOT enabled at device creation in P1b). The struct is
-/// declared field-exact so the driver, walking `p_next`, writes every bool it owns
-/// without reading past our footprint; the size/align guard below pins the ABI. All
-/// fields are `VkBool32`, written BY the driver.
+/// `VkPhysicalDeviceVulkan12Features` — the Vulkan 1.2 aggregate feature struct.
+/// Declared field-exact (ABI completeness / a future reader of other 1.2 bits), but
+/// NOT used by the T-dev bindless query/enable path — see
+/// [`VkPhysicalDeviceDescriptorIndexingFeatures`] for the granular struct that path
+/// reads/writes instead. The struct is declared field-exact so the driver, walking
+/// `p_next`, writes every bool it owns without reading past our footprint; the
+/// size/align guard below pins the ABI. All fields are `VkBool32`, written BY the driver.
 #[repr(C)]
 pub struct VkPhysicalDeviceVulkan12Features {
     pub s_type: VkStructureType,
@@ -2489,6 +2632,115 @@ pub struct VkPhysicalDeviceVulkan12Features {
     pub subgroup_broadcast_dynamic_id: VkBool32,
 }
 
+/// `VkPhysicalDeviceFeatures` — the CORE (Vulkan 1.0) feature-enable struct passed via
+/// [`VkDeviceCreateInfo::p_enabled_features`] (T-dev: `samplerAnisotropy`). Field-exact,
+/// in `vulkan_core.h` declaration order, so a raw pointer cast is ABI-correct.
+///
+/// Deliberately NOT chained through `VkPhysicalDeviceFeatures2`/`pNext` — the two are
+/// mutually exclusive at `vkCreateDevice` (VUID-VkDeviceCreateInfo-pNext-00373: a
+/// `VkPhysicalDeviceFeatures2` in `pNext` supersedes `p_enabled_features`, so combining
+/// them is invalid). `#[derive(Default)]` gives the all-`VK_FALSE` baseline (every
+/// `VkBool32` is `u32`, whose `Default` is `0`); callers flip only the bits they enable.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct VkPhysicalDeviceFeatures {
+    pub robust_buffer_access: VkBool32,
+    pub full_draw_index_uint32: VkBool32,
+    pub image_cube_array: VkBool32,
+    pub independent_blend: VkBool32,
+    pub geometry_shader: VkBool32,
+    pub tessellation_shader: VkBool32,
+    pub sample_rate_shading: VkBool32,
+    pub dual_src_blend: VkBool32,
+    pub logic_op: VkBool32,
+    pub multi_draw_indirect: VkBool32,
+    pub draw_indirect_first_instance: VkBool32,
+    pub depth_clamp: VkBool32,
+    pub depth_bias_clamp: VkBool32,
+    pub fill_mode_non_solid: VkBool32,
+    pub depth_bounds: VkBool32,
+    pub wide_lines: VkBool32,
+    pub large_points: VkBool32,
+    pub alpha_to_one: VkBool32,
+    pub multi_viewport: VkBool32,
+    pub sampler_anisotropy: VkBool32,
+    pub texture_compression_etc2: VkBool32,
+    pub texture_compression_astc_ldr: VkBool32,
+    pub texture_compression_bc: VkBool32,
+    pub occlusion_query_precise: VkBool32,
+    pub pipeline_statistics_query: VkBool32,
+    pub vertex_pipeline_stores_and_atomics: VkBool32,
+    pub fragment_stores_and_atomics: VkBool32,
+    pub shader_tessellation_and_geometry_point_size: VkBool32,
+    pub shader_image_gather_extended: VkBool32,
+    pub shader_storage_image_extended_formats: VkBool32,
+    pub shader_storage_image_multisample: VkBool32,
+    pub shader_storage_image_read_without_format: VkBool32,
+    pub shader_storage_image_write_without_format: VkBool32,
+    pub shader_uniform_buffer_array_dynamic_indexing: VkBool32,
+    pub shader_sampled_image_array_dynamic_indexing: VkBool32,
+    pub shader_storage_buffer_array_dynamic_indexing: VkBool32,
+    pub shader_storage_image_array_dynamic_indexing: VkBool32,
+    pub shader_clip_distance: VkBool32,
+    pub shader_cull_distance: VkBool32,
+    pub shader_float64: VkBool32,
+    pub shader_int64: VkBool32,
+    pub shader_int16: VkBool32,
+    pub shader_resource_residency: VkBool32,
+    pub shader_resource_min_lod: VkBool32,
+    pub sparse_binding: VkBool32,
+    pub sparse_residency_buffer: VkBool32,
+    pub sparse_residency_image_2d: VkBool32,
+    pub sparse_residency_image_3d: VkBool32,
+    pub sparse_residency_2_samples: VkBool32,
+    pub sparse_residency_4_samples: VkBool32,
+    pub sparse_residency_8_samples: VkBool32,
+    pub sparse_residency_16_samples: VkBool32,
+    pub sparse_residency_aliased: VkBool32,
+    pub variable_multisample_rate: VkBool32,
+    pub inherited_queries: VkBool32,
+}
+
+/// `VkPhysicalDeviceDescriptorIndexingFeatures` (T-dev) — the GRANULAR bindless
+/// feature struct. Chained into `VkPhysicalDeviceFeatures2` to READ (the
+/// `bindless_capable` query) and into `VkDeviceCreateInfo` to ENABLE exactly the 5
+/// bits the query gates: `shader_sampled_image_array_non_uniform_indexing`,
+/// `runtime_descriptor_array`, `descriptor_binding_partially_bound`,
+/// `descriptor_binding_variable_descriptor_count`,
+/// `descriptor_binding_sampled_image_update_after_bind`. Field-exact (in
+/// `vulkan_core.h` declaration order — identical to the tail of
+/// [`VkPhysicalDeviceVulkan12Features`] from `shader_input_attachment_array_dynamic_indexing`
+/// through `runtime_descriptor_array`), so the driver, walking `p_next`, writes/reads
+/// every bool it owns without stepping past our footprint. Deliberately carries NO
+/// `buffer_device_address` field (unlike the `Vulkan12Features` aggregate), so it
+/// coexists cleanly with the hwrt arm's standalone
+/// `VkPhysicalDeviceBufferDeviceAddressFeatures` in the same `pNext` chain.
+#[repr(C)]
+pub struct VkPhysicalDeviceDescriptorIndexingFeatures {
+    pub s_type: VkStructureType,
+    pub p_next: *mut c_void,
+    pub shader_input_attachment_array_dynamic_indexing: VkBool32,
+    pub shader_uniform_texel_buffer_array_dynamic_indexing: VkBool32,
+    pub shader_storage_texel_buffer_array_dynamic_indexing: VkBool32,
+    pub shader_uniform_buffer_array_non_uniform_indexing: VkBool32,
+    pub shader_sampled_image_array_non_uniform_indexing: VkBool32,
+    pub shader_storage_buffer_array_non_uniform_indexing: VkBool32,
+    pub shader_storage_image_array_non_uniform_indexing: VkBool32,
+    pub shader_input_attachment_array_non_uniform_indexing: VkBool32,
+    pub shader_uniform_texel_buffer_array_non_uniform_indexing: VkBool32,
+    pub shader_storage_texel_buffer_array_non_uniform_indexing: VkBool32,
+    pub descriptor_binding_uniform_buffer_update_after_bind: VkBool32,
+    pub descriptor_binding_sampled_image_update_after_bind: VkBool32,
+    pub descriptor_binding_storage_image_update_after_bind: VkBool32,
+    pub descriptor_binding_storage_buffer_update_after_bind: VkBool32,
+    pub descriptor_binding_uniform_texel_buffer_update_after_bind: VkBool32,
+    pub descriptor_binding_storage_texel_buffer_update_after_bind: VkBool32,
+    pub descriptor_binding_update_unused_while_pending: VkBool32,
+    pub descriptor_binding_partially_bound: VkBool32,
+    pub descriptor_binding_variable_descriptor_count: VkBool32,
+    pub runtime_descriptor_array: VkBool32,
+}
+
 /// `VkPresentInfoKHR`.
 #[repr(C)]
 pub struct VkPresentInfoKhr {
@@ -2526,6 +2778,11 @@ const _: () = assert!(core::mem::align_of::<VkImageCreateInfo>() == 8);
 const _: () = assert!(core::mem::size_of::<VkImageSubresourceLayers>() == 16);
 const _: () = assert!(core::mem::size_of::<VkBufferImageCopy>() == 56);
 const _: () = assert!(core::mem::align_of::<VkBufferImageCopy>() == 8);
+// T2 mip-chain blit: `VkImageBlit` is `VkImageSubresourceLayers` (16 bytes) +
+// `[VkOffset3D; 2]` (24 bytes) x2 = 80 bytes, 4-byte aligned (every field is
+// `i32`/`u32`, no 8-byte member).
+const _: () = assert!(core::mem::size_of::<VkImageBlit>() == 80);
+const _: () = assert!(core::mem::align_of::<VkImageBlit>() == 4);
 // 16-byte head (sType + 4 pad + pNext) + [VkBool32; 55] = 220 bytes → 236, rounded
 // up to the struct's 8-byte alignment = 240.
 const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceFeatures2>() == 240);
@@ -2539,6 +2796,27 @@ const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceFeatures2>() == 8);
 const _: () = assert!(core::mem::size_of::<VkFormatProperties>() == 12);
 const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceVulkan12Features>() == 208);
 const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceVulkan12Features>() == 8);
+// T-dev bindless device-feature layout guards. `VkPhysicalDeviceFeatures` is READ by
+// the driver through `p_enabled_features` (55 `VkBool32`s = 220 bytes, 4-byte aligned —
+// no pointer member, unlike the sType-headed feature structs above).
+// `VkPhysicalDeviceDescriptorIndexingFeatures` is written/read BY the driver through the
+// `p_next` chain: the 16-byte head (sType + 4 pad + pNext) + 20 `VkBool32`s (80 bytes) =
+// 96, already 8-byte aligned (no rounding needed).
+const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceFeatures>() == 220);
+const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceFeatures>() == 4);
+const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceDescriptorIndexingFeatures>() == 96);
+const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceDescriptorIndexingFeatures>() == 8);
+// T4 bindless: both `p_next`-chained structs are READ by the driver (we author every
+// byte), but a wrong field ORDER still misfeeds the driver a garbage count/pointer
+// (a real OOB-read hazard, not just a Rust-side type error) — pinned like every other
+// chained struct in this file. Both are the 16-byte sType+pNext head + one `u32` count
+// (padded to 8) + one pointer = 32 bytes, 8-byte aligned.
+const _: () = assert!(core::mem::size_of::<VkDescriptorSetLayoutBindingFlagsCreateInfo>() == 32);
+const _: () = assert!(core::mem::align_of::<VkDescriptorSetLayoutBindingFlagsCreateInfo>() == 8);
+const _: () =
+    assert!(core::mem::size_of::<VkDescriptorSetVariableDescriptorCountAllocateInfo>() == 32);
+const _: () =
+    assert!(core::mem::align_of::<VkDescriptorSetVariableDescriptorCountAllocateInfo>() == 8);
 
 // FFI layout guards for the new structs. The callback-data struct is written BY
 // the driver and read through the callback, so its size/align must match the C
@@ -3341,6 +3619,23 @@ pub type PfnVkCmdCopyBufferToImage = unsafe extern "system" fn(
     dst_image_layout: i32,
     region_count: u32,
     p_regions: *const VkBufferImageCopy,
+);
+
+/// `PFN_vkCmdBlitImage` — the textured-PBR T2 mip-chain-generation blit (Decision
+/// D3): a LINEAR-filtered, format-converting copy between two mip levels of an
+/// image (here always the SAME image for both `src_image`/`dst_image`).
+pub type PfnVkCmdBlitImage = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    src_image: VkImage,
+    // `src_image_layout`: `VkImageLayout` the source image is in (`TRANSFER_SRC_OPTIMAL`).
+    src_image_layout: i32,
+    dst_image: VkImage,
+    // `dst_image_layout`: `VkImageLayout` the destination image is in (`TRANSFER_DST_OPTIMAL`).
+    dst_image_layout: i32,
+    region_count: u32,
+    p_regions: *const VkImageBlit,
+    // `filter`: `VkFilter` (`VK_FILTER_LINEAR` for mip-chain downsampling).
+    filter: i32,
 );
 
 /// `PFN_vkGetPhysicalDeviceFeatures2` — the S0 fail-fast `dynamicRendering`
