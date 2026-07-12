@@ -32,13 +32,13 @@ use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
 use boyko_render::{
     BindlessTextureTable, CsmCasterScratch, DdgiCaps, LightingConfig, MATERIAL_FLAG_TEXTURED,
     Material, MaterialId, MaterialTable, MeshAssetsExt, MeshGpu, MeshRenderScratch,
-    OrphanedMeshGpu, OrphanedTextureGpu, RayBackendPolicy, RayCaps, RenderEpoch, ResolvedCsm,
-    ResolvedShadowAtlas, RetiredGpuBuffers, RhiContext, SdfEditStaging, ShadowDenoiseConfig,
-    ShadowDenoiseMode, TextureAssetsExt, TextureGpu, collect_sdf_edits, gbuffer_push_from_view,
-    retire_deferred_frees, upload_atlas_ring, upload_camera_ring, upload_csm_ring,
-    upload_instance_materials, upload_instance_materials_tex, upload_instance_models,
-    upload_light_table, upload_material_assets, upload_mesh_assets, upload_pair_out_slot,
-    upload_pair_ring, upload_sdf_edit_list, upload_texture_assets,
+    OrphanedMeshGpu, OrphanedTextureGpu, RayBackendPolicy, RayCaps, RenderEpoch, ResolvedAa,
+    ResolvedCsm, ResolvedShadowAtlas, RetiredGpuBuffers, RhiContext, SdfEditStaging,
+    ShadowDenoiseConfig, ShadowDenoiseMode, TextureAssetsExt, TextureGpu, collect_sdf_edits,
+    gbuffer_push_from_view, retire_deferred_frees, upload_atlas_ring, upload_camera_ring,
+    upload_csm_ring, upload_instance_materials, upload_instance_materials_tex,
+    upload_instance_models, upload_light_table, upload_material_assets, upload_mesh_assets,
+    upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list, upload_texture_assets,
 };
 #[cfg(all(windows, feature = "hwrt"))]
 use boyko_render::{
@@ -1302,6 +1302,16 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             let terminator_wrap = world
                 .try_resource::<LightingConfig>()
                 .is_some_and(|cfg| cfg.terminator_softening > 0.0);
+            // Anti-aliasing Stage 1: read the resolved AA mode (`AaPlugin`'s
+            // `resolve_aa_policy` is the single writer). No `#[cfg(hwrt)]` — AA is
+            // feature-independent, unlike `denoise_armed` above. The SAME `try_resource`
+            // pattern `terminator_wrap`/`ddgi_enabled` use: a host that omits `AaPlugin`
+            // degrades to the default `Off` rather than panicking. Default/absent `Off` ⇒
+            // `scene.aa == None` ⇒ byte-identical (the 0%-gate).
+            let aa_mode = world
+                .try_resource::<ResolvedAa>()
+                .map(|r| r.mode)
+                .unwrap_or_default();
             let scene = host.gpu.scene(
                 mvp,
                 s,
@@ -1330,6 +1340,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // after the affine gather (mesh_draw.rs), so this flag is fresh every frame.
                 scratch.any_textured_material(),
                 terminator_wrap,
+                aa_mode,
                 ctx,
             );
 

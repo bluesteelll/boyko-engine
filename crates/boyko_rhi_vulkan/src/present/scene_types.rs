@@ -526,6 +526,25 @@ pub struct SsaoActivation<'a> {
     pub layout: &'a VulkanBindGroupLayout,
 }
 
+/// Anti-aliasing Stage 1: the FXAA post-process pass activation threaded into
+/// [`GBufferScene::aa`] to turn the AA pass ON. Mirrors [`SsaoActivation`]'s borrow-bundle
+/// shape: a `Copy` pair of caller-owned pipeline/sampler borrows.
+///
+/// `None` on [`GBufferScene::aa`] is the OFF path (the DEFAULT — the 0%-gate): no `aa_out`
+/// target, no `fxaa_set`, the present-blit samples `lit` directly, no FXAA pass recorded.
+/// `Some` arms the whole seam.
+#[derive(Clone, Copy)]
+pub struct AaActivation<'a> {
+    /// FXAA fullscreen graphics pipeline (`fullscreen_sample.vs` + `fxaa.fs`). Its pipeline
+    /// layout declares `present_layout` at set 0 plus an 8-byte VERTEX|FRAGMENT push range
+    /// (`rcp_frame`). `color_formats[0]` == `R8G8B8A8_UNORM` (`aa_out`'s format), NOT the
+    /// swapchain format.
+    pub pipeline: &'a VulkanGraphicsPipeline,
+    /// LINEAR/ClampToEdge sampler bound WITH `lit` in `fxaa_set` (FXAA's sub-texel tap needs
+    /// bilinear filtering). DISTINCT from the NEAREST `present_sampler`.
+    pub sampler: &'a VulkanSampler,
+}
+
 /// HW-RT rung 3a: the spatial (à-trous) RT soft-shadow DENOISE pass activation threaded into
 /// [`GBufferScene::shadow`] to turn the denoise pipeline ON. Mirrors [`SsaoActivation`]'s
 /// borrow-bundle shape: a `Copy` bundle of caller-owned pipeline/layout borrows plus the
@@ -1164,6 +1183,14 @@ pub struct GBufferScene<'a> {
     /// the store. The caller MUST set the scene's light table `ssao_mode` in lock-step (`!= 0` ON,
     /// `0` OFF) — the resolve's structural gate that decides whether the combine reads the image.
     pub ssao: Option<SsaoActivation<'a>>,
+    /// Anti-aliasing Stage 1: the FXAA post-process pass activation. `None` = OFF, the
+    /// 0%-gate (no `aa_out` target, no `fxaa_set`, the present-blit samples `lit` directly,
+    /// no FXAA pass recorded). `Some` arms the whole seam: [`GBufferTargets`] allocates
+    /// `aa_out` + builds `fxaa_set`, [`GBufferTargets::sync_gbuffer`] treats an arm-state
+    /// change exactly like an extent change (a fence-safe rebuild), and the present-blit
+    /// samples `aa_out` instead of `lit`. Toggling `Some`↔`None` between frames is a genuine
+    /// live runtime switch, not a boot-only choice.
+    pub aa: Option<AaActivation<'a>>,
     /// Mesh foundation M3: the per-mesh instanced-arm draw BATCH LIST. An EMPTY slice
     /// (every pre-M2 scene) records the LEGACY pass-A draw — `vkCmdDraw(vertex_count, 1,
     /// 0, 0)` over [`Self::vertex_buffer`] binding [`Self::instance_bind_group`] (the

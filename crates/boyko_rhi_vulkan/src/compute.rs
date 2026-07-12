@@ -736,6 +736,16 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// FXAA 3.11 compact fragment SPIR-V (`shaders/fxaa.fs.hlsl`, three-source-validated
+    /// against Lottes FXAA3_11 / Rodriguez compact form / Bevy's shipped `fxaa.wgsl`): a
+    /// 12-tap edge-only luma post-process. Paired with [`fullscreen_sample_vs_spirv`] (the
+    /// FXAA pipeline reuses the same fullscreen-triangle VS); reads `lit` (LINEAR sampler),
+    /// writes `aa_out`. Stage-1 anti-aliasing pass — armed only when `scene.aa` is `Some`.
+    FXAA_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/fxaa.fs.spv")
+}
+
+embed_spirv! {
     /// Pillar B increment B2: the per-instance TRS interpolation compute PRE-PASS
     /// (`interp_instances.comp`, refined-B). One invocation per DYNAMIC instance reads a
     /// 96-byte `TransformPair` at binding 0 + its output slot at binding 1, interpolates at the
@@ -1241,6 +1251,17 @@ pub fn fullscreen_sample_vs_spirv() -> &'static [u32] {
 #[inline]
 pub fn fullscreen_sample_fs_spirv() -> &'static [u32] {
     FULLSCREEN_SAMPLE_FS_SPV.as_words()
+}
+
+/// The committed FXAA 3.11 compact fragment SPIR-V as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+///
+/// Paired with [`fullscreen_sample_vs_spirv`] in the FXAA post-process pipeline
+/// (`color_formats[0]` == `aa_out`'s format, NOT the swapchain format — see
+/// [`AaActivation`](crate::present::AaActivation)).
+#[inline]
+pub fn fxaa_fs_spirv() -> &'static [u32] {
+    FXAA_FS_SPV.as_words()
 }
 
 /// The committed Render P7 SSAO (HBAO-lite) SPIR-V as a `u32` word stream, ready for

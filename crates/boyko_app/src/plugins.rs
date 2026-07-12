@@ -197,6 +197,16 @@ impl Plugin for EnginePlugins {
         // `Spatial` for a headless flight-check.
         app.add_plugin(ShadowDenoisePlugin);
 
+        // Anti-aliasing Stage 1 — unlike `SsaoPlugin` above (deliberately NOT composed: the
+        // windowed host has no SSAO pipeline/targets yet, so composing it would ship a
+        // silently-dead knob), `AaPlugin` HAS a live consumer (the FXAA post-process pass
+        // wired into `gpu_scene::scene`/`record_gbuffer`) — mirrors `ShadowDenoisePlugin`'s
+        // live wiring. Injects `resolve_aa_policy` (reads `AaConfig`, writes `ResolvedAa`;
+        // no render-resource conflict with any other system → scheduled independently).
+        // The default `AaMode::Off` keeps every host world byte-identical (`scene.aa` stays
+        // `None`), so composing it unconditionally is safe.
+        app.add_plugin(boyko_render::AaPlugin);
+
         // The R7 SDF instance path (composed by DEFAULT): inserts the
         // `SdfEditStaging` gather scratch and registers the one-shot startup
         // `collect_sdf_edits` gather. An entity carrying `SdfPrimitive` is direct-

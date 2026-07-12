@@ -2336,6 +2336,9 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // Render P7: SSAO OFF (the default) — NO SSAO pass recorded, byte-identical to the pre-P7
         // stream (the 0%-gate). These golden/cull-comparison presents assert the existing stream.
         ssao: None,
+        // AA Stage 1: OFF (the default) — NO FXAA pass recorded, present samples `lit` directly,
+        // byte-identical to the pre-AA stream (the 0%-gate).
+        aa: None,
         // M3: the LEGACY merged draw (no instanced mesh — an EMPTY batch slice) —
         // `record_gbuffer` keeps `vkCmdDraw(vertex_count, 1, 0, 0)`, byte-identical to the
         // pre-M2 stream.
@@ -3280,6 +3283,9 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // Render P7: SSAO OFF (the default) — NO SSAO pass recorded, byte-identical to the pre-P7
         // stream (the 0%-gate). These golden/cull-comparison presents assert the existing stream.
         ssao: None,
+        // AA Stage 1: OFF (the default) — NO FXAA pass recorded, present samples `lit` directly,
+        // byte-identical to the pre-AA stream (the 0%-gate).
+        aa: None,
         // M3: the LEGACY merged draw (no instanced mesh — an EMPTY batch slice) —
         // `record_gbuffer` keeps `vkCmdDraw(vertex_count, 1, 0, 0)`, byte-identical to the
         // pre-M2 stream.
@@ -8007,6 +8013,9 @@ fn run_showcase_body_ddgi(
         ssao: cfg
             .ssao_quality
             .map(|_| SsaoActivation { pipeline: &ssao_pipeline, layout: &ssao_layout }),
+        // AA Stage 1: OFF (the default) — NO FXAA pass recorded, present samples `lit`
+        // directly, byte-identical to the pre-AA stream (the 0%-gate).
+        aa: None,
         mesh_draw: &mesh_draws,
         csm_cascade_texture: &csm.cascade,
         csm_compare_sampler: &csm.sampler,
@@ -9340,6 +9349,9 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         ssao: cfg
             .ssao_quality
             .map(|_| SsaoActivation { pipeline: &ssao_pipeline, layout: &ssao_layout }),
+        // AA Stage 1: OFF (the default) — NO FXAA pass recorded, present samples `lit`
+        // directly, byte-identical to the pre-AA stream (the 0%-gate).
+        aa: None,
         // M3: when the config carried instanced meshes, pass A runs the batch loop — one
         // INSTANCED INDEXED draw per registered mesh, each at its `base_instance` bucket
         // (the `use_model_matrix == 1` arm — `cfg.mvp` set its byte 84). Every legacy scene

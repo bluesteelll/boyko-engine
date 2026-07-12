@@ -48,10 +48,10 @@ mod targets;
 pub use frame_driver::{FrameWriteToken, Renderer};
 pub use gpu_timing::{PASS_COUNT, TimedPass, TimestampCollector};
 pub use scene_types::{
-    BrickActivation, CsmDepthActivation, DdgiUpdateActivation, GBUFFER_IDENTITY_INSTANCE,
-    GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene,
-    InterpActivation, PunctualDepthActivation, SCENE_MVP_BYTES, SampledComposite, Scene,
-    SsaoActivation, UiPass,
+    AaActivation, BrickActivation, CsmDepthActivation, DdgiUpdateActivation,
+    GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw,
+    GBufferScene, InterpActivation, PunctualDepthActivation, SCENE_MVP_BYTES, SampledComposite,
+    Scene, SsaoActivation, UiPass,
 };
 #[cfg(feature = "hwrt")]
 pub use scene_types::{ShadowVisActivation, TlasBuildActivation};

@@ -65,8 +65,8 @@ use std::path::PathBuf;
 use boyko_app::prelude::*;
 use boyko_ecs::ecs::core::system::{NonSendResMut, ResMut};
 use boyko_render::{
-    BindlessTextureTable, LightingConfig, Material, MaterialGpu, TextureGpu, Tonemapper,
-    load_material_folder,
+    AaConfig, AaMode, BindlessTextureTable, LightingConfig, Material, MaterialGpu, TextureGpu,
+    Tonemapper, load_material_folder,
 };
 
 use common::{floor_plane, uv_sphere};
@@ -102,6 +102,10 @@ struct EvalKnobs {
     win: u32,
     /// `BOYKO_CSM=off` — disables the CSM shadow-cascade insert (default: enabled).
     csm_off: bool,
+    /// `BOYKO_AA` — the post-process anti-aliasing mode (`fxaa` → [`AaMode::Fxaa`], else
+    /// [`AaMode::Off`], the default). The Stage-1 AA visual-oracle knob: unset ⇒ Off ⇒
+    /// byte-identical to the no-AA dump.
+    aa_mode: AaMode,
 }
 
 impl EvalKnobs {
@@ -131,7 +135,20 @@ impl EvalKnobs {
             std::env::var("BOYKO_WRAP").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
         let win = std::env::var("BOYKO_WIN").ok().and_then(|s| s.parse().ok()).unwrap_or(1280);
         let csm_off = std::env::var("BOYKO_CSM").ok().as_deref() == Some("off");
-        Self { texture_dir, sun_intensity, jitter, tonemapper, terminator_softening, win, csm_off }
+        let aa_mode = match std::env::var("BOYKO_AA").ok().as_deref() {
+            Some("fxaa") => AaMode::Fxaa,
+            _ => AaMode::Off,
+        };
+        Self {
+            texture_dir,
+            sun_intensity,
+            jitter,
+            tonemapper,
+            terminator_softening,
+            win,
+            csm_off,
+            aa_mode,
+        }
     }
 }
 
@@ -281,5 +298,9 @@ fn pbr_material_showcase_screenshot_dump() {
     if !knobs.csm_off {
         app.insert_resource(CsmConfig { cascade_count: 3, ..CsmConfig::default() });
     }
+    // Owner-eval AA knob: `BOYKO_AA=fxaa` overrides the `AaPlugin`-inserted default
+    // (`AaMode::Off`) to arm the FXAA post-process pass — the Stage-1 AA visual oracle.
+    // Unset ⇒ Off ⇒ the same command stream / pixels as the no-AA dump.
+    app.insert_resource(AaConfig { mode: knobs.aa_mode });
     app.run();
 }

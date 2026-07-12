@@ -6,6 +6,7 @@
 //! `swapchain.rs` (audit W4).
 
 mod clear;
+mod fxaa;
 mod gbuffer;
 mod present_blit;
 mod scene;

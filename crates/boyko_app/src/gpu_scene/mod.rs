@@ -34,7 +34,8 @@ use boyko_rhi_vulkan::compute::{
     INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS,
     LOCAL_SIZE_X, TILE_BOUND_BYTES, csm_depth_fs_spirv, csm_depth_vs_spirv, deferred_pbr_spirv,
     deferred_pbr_wrap_spirv,
-    encode_edit_list, fullscreen_sample_fs_spirv, fullscreen_sample_vs_spirv, gbuffer_mrt_fs_spirv,
+    encode_edit_list, fullscreen_sample_fs_spirv, fullscreen_sample_vs_spirv, fxaa_fs_spirv,
+    gbuffer_mrt_fs_spirv,
     gbuffer_mrt_pm_fs_spirv, gbuffer_mrt_pm_vs_spirv, gbuffer_mrt_tex_fs_spirv,
     gbuffer_mrt_tex_vs_spirv, gbuffer_mrt_vs_spirv, interp_instances_spirv, punctual_depth_fs_spirv,
     punctual_depth_vs_spirv, sdf_gbuffer_composite_spirv, sdf_probe_update_spirv, tile_grid_extent,
@@ -47,7 +48,7 @@ use boyko_rhi_vulkan::rhi_impl::{
     VulkanSampler, VulkanShaderModule, rebind_storage_buffer,
 };
 use boyko_rhi_vulkan::swapchain::{
-    CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
+    AaActivation, CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
     GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene,
     InterpActivation, PunctualDepthActivation,
 };
@@ -70,8 +71,8 @@ use boyko_rhi_vulkan::texture::VulkanTexture;
 use boyko_sdf_math::SdfEdit;
 
 use boyko_render::{
-    BindlessTextureTable, DDGI_UPDATE_UBO_BYTES, DdgiConfig, DdgiUpdateConfig, DdgiUpdateUbo,
-    GI_MAX_RAYS, GPU_LIGHT_BYTES, GPU_LIGHT_WORDS, GPU_TRANSFORM3D_BYTES, GpuLight,
+    AaMode, BindlessTextureTable, DDGI_UPDATE_UBO_BYTES, DdgiConfig, DdgiUpdateConfig,
+    DdgiUpdateUbo, GI_MAX_RAYS, GPU_LIGHT_BYTES, GPU_LIGHT_WORDS, GPU_TRANSFORM3D_BYTES, GpuLight,
     LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_BYTES, LightHeaderGpu, LightingConfig, M_SLOTS,
     MAX_LIGHTS, MaterialTable, MESH_VERTEX_STRIDE, PER_INSTANCE_MATERIAL_BYTES,
     PER_INSTANCE_MATERIAL_TEX_BYTES, RESOLVED_CSM_BYTES, RESOLVED_DDGI_BYTES,
@@ -629,6 +630,15 @@ pub(crate) struct GpuSceneBundles {
     present_layout: VulkanBindGroupLayout,
     present_sampler: VulkanSampler,
     depth_sampler: VulkanSampler,
+    /// Anti-aliasing Stage 1: the FXAA fullscreen graphics pipeline
+    /// (`fullscreen_sample.vs` + `fxaa.fs`), built unconditionally at boot (like
+    /// [`Self::present_pipeline`]) so the mode can flip at runtime. `color_formats[0]`
+    /// == `R8G8B8A8_UNORM` (`aa_out`'s format), NOT the swapchain format; reuses
+    /// [`Self::present_layout`].
+    fxaa_pipeline: VulkanGraphicsPipeline,
+    /// Anti-aliasing Stage 1: the dedicated LINEAR/ClampToEdge sampler FXAA's sub-texel
+    /// tap needs — DISTINCT from the NEAREST [`Self::present_sampler`].
+    fxaa_sampler: VulkanSampler,
     // ── CSM / atlas (bound-but-unread trios; depth passes OFF in R3) ─────────
     csm: CsmResources,
     /// `ceil(composite pixels / LOCAL_SIZE_X)` — the marcher + resolve dispatch
@@ -1435,12 +1445,56 @@ impl GpuSceneBundles {
         )
         .expect("invariant: present-blit graphics pipeline create");
 
+        // Anti-aliasing Stage 1: the FXAA fullscreen pipeline + its dedicated LINEAR
+        // sampler, built unconditionally here (like `present_pipeline` above) so the mode
+        // can flip at runtime without a boot-time rebuild. Reuses `sample_vs` (the
+        // fullscreen-triangle VS) and `present_layout` (the same single-
+        // CombinedImageSampler shape); `color_formats[0]` is `aa_out`'s format
+        // (`R8G8B8A8_UNORM`), NOT the swapchain format. Boot-time creation records no
+        // command / writes no pixel — byte-identical to the golden regardless of this
+        // pipeline's existence.
+        let fxaa_sampler = RhiDevice::create_sampler(
+            device,
+            &SamplerDesc {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                address_mode: AddressMode::ClampToEdge,
+                mip: MipMode::None,
+                compare: None,
+            },
+        )
+        .expect("invariant: FXAA linear/clamp sampler create");
+        let fxaa_fs = RhiDevice::create_shader_module(device, fxaa_fs_spirv())
+            .expect("invariant: FXAA fragment shader module create");
+        let fxaa_pipeline = RhiDevice::create_graphics_pipeline(
+            device,
+            &GraphicsPipelineDesc {
+                vertex_module: &sample_vs,
+                vertex_entry: c"main",
+                fragment_module: &fxaa_fs,
+                fragment_entry: c"main",
+                // `aa_out`'s format (== `boyko_rhi_vulkan`'s private `GBUFFER_FORMAT`
+                // constant, R8G8B8A8_UNORM) — NOT `swap_format`.
+                color_formats: &[Format::R8G8B8A8Unorm],
+                depth_format: None,
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: None,
+                push_constant_bytes: 8,
+                bind_group_layout: Some(&present_layout),
+                blend: None,
+                cull_mode: CullMode::None,
+                depth_bias: None,
+            },
+        )
+        .expect("invariant: FXAA graphics pipeline create");
+
         // The shader modules are consumed by pipeline creation; destroy them now
         // (mirrors the showcase's post-create module teardown).
         // SAFETY: every module was created on `ctx` above and is no longer
         // needed once its pipeline exists; each is destroyed exactly once; no
         // GPU work has been submitted yet.
         unsafe {
+            RhiDevice::destroy_shader_module(device, fxaa_fs);
             RhiDevice::destroy_shader_module(device, sample_fs);
             RhiDevice::destroy_shader_module(device, sample_vs);
             RhiDevice::destroy_shader_module(device, resolve_cs);
@@ -1839,6 +1893,8 @@ impl GpuSceneBundles {
             present_layout,
             present_sampler,
             depth_sampler,
+            fxaa_pipeline,
+            fxaa_sampler,
             csm,
             dispatch_group_count_x,
         }
@@ -2417,6 +2473,11 @@ impl GpuSceneBundles {
         // [`Self::resolve_pipeline`] below — `false` (the default) binds the base pipeline, the
         // byte-identical 0%-gate (`deferred_pbr.hlsl`'s frozen-base discipline).
         terminator_wrap: bool,
+        // Anti-aliasing Stage 1: the owner-resolved AA technique
+        // ([`boyko_render::ResolvedAa::mode`]). `AaMode::Off` (the default) ⇒
+        // `GBufferScene::aa == None` (the 0%-gate: no `aa_out`, no FXAA pass, present
+        // samples `lit`). `AaMode::Fxaa` arms the FXAA activation below.
+        aa_mode: AaMode,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -2600,6 +2661,11 @@ impl GpuSceneBundles {
             lighting_flags: LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
             light_dir: self.light_dir,
             ssao: None,
+            // Anti-aliasing Stage 1: `AaMode::Off` (the default) ⇒ `None` — the 0%-gate
+            // (no `aa_out`, no FXAA pass, present samples `lit`). `AaMode::Fxaa` arms the
+            // FXAA activation against the boot-built pipeline + dedicated LINEAR sampler.
+            aa: matches!(aa_mode, AaMode::Fxaa)
+                .then(|| AaActivation { pipeline: &self.fxaa_pipeline, sampler: &self.fxaa_sampler }),
             mesh_draw,
             csm_cascade_texture: &self.csm.cascade,
             csm_compare_sampler: &self.csm.sampler,
@@ -2982,6 +3048,7 @@ impl GpuSceneBundles {
         unsafe {
             self.csm.destroy(ctx);
             RhiDevice::destroy_graphics_pipeline(ctx, self.present_pipeline);
+            RhiDevice::destroy_graphics_pipeline(ctx, self.fxaa_pipeline);
             RhiDevice::destroy_bind_group_layout(ctx, self.present_layout);
             RhiDevice::destroy_compute_pipeline(ctx, self.resolve_pipeline);
             // Render terminator-softening: the wrap-variant pipeline shares `resolve_layout`
@@ -3110,6 +3177,7 @@ impl GpuSceneBundles {
             }
             RhiDevice::destroy_bind_group_layout(ctx, self.instance_layout);
             RhiDevice::destroy_sampler(ctx, self.present_sampler);
+            RhiDevice::destroy_sampler(ctx, self.fxaa_sampler);
             RhiDevice::destroy_sampler(ctx, self.depth_sampler);
             RhiDevice::destroy_buffer(ctx, self.vertex_buffer);
             RhiDevice::destroy_buffer(ctx, self.tiles_buffer);

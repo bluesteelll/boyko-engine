@@ -2165,7 +2165,24 @@ impl Renderer<'_> {
             .present_sample;
         self.record_graph_pass(present_sample, cmd, targets, scene, fi);
 
-        // === Pass C: present-blit the LIT image (the resolve's output) into the swapchain. ===
+        // Anti-aliasing Stage 1 (FXAA). `sync_gbuffer` keeps `targets.aa_out.is_some() ==
+        // scene.aa.is_some()` in lockstep (an arm-state change forces a fence-safe resync,
+        // exactly like an extent change), so these always agree within a frame. Gate on
+        // `aa_out` (what `present_set` follows) so any transient mismatch degrades to
+        // "present samples lit, no FXAA" — never a panic. RAW barriers on `aa_out` only
+        // (the DDGI-update/TLAS-build precedent); `lit` needs none (already
+        // SHADER_READ_ONLY_OPTIMAL from `present_sample` above). Consumes `lit` after the
+        // framegraph's last declared use — safe until a transient-aliasing allocator lands;
+        // exempt this site then. OFF (`aa_out` is `None`) records nothing.
+        if let (Some(_), Some(activation)) = (targets.aa_out.as_ref(), scene.aa.as_ref()) {
+            // SAFETY: recording is open; `present_sample` above left `lit` in
+            // SHADER_READ_ONLY_OPTIMAL; `aa_out`/`fxaa_set` were built by `create()` under the
+            // same `scene.aa` that gates this branch; `present_extent` sizes `aa_out`.
+            unsafe { self.record_fxaa(cmd, targets, activation, present_extent, fi) };
+        }
+
+        // === Pass C: present-blit the LIT image (the resolve's output, or `aa_out` when
+        // AA is armed) into the swapchain. ===
 
         // (7) Barrier (swapchain color): UNDEFINED → COLOR_ATTACHMENT_OPTIMAL.
         let to_color = VkImageMemoryBarrier {

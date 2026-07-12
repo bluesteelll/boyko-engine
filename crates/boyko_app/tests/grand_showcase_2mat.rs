@@ -33,6 +33,7 @@
 use boyko_app::prelude::*;
 use boyko_ecs::ecs::core::system::ResMut;
 use boyko_render::Material;
+use boyko_render::{AaConfig, AaMode};
 use boyko_render::generate_tangents;
 use boyko_render::mesh::Vertex;
 
@@ -172,5 +173,11 @@ fn grand_showcase_2mat_screenshot_dump() {
     let mut app = App::new();
     app.add_plugins(EnginePlugins::window("boyko_engine grand showcase materials", 512, 512));
     app.add_startup_system(setup);
+    // Owner-eval AA oracle: `BOYKO_AA=fxaa` arms the FXAA post-process pass on this
+    // high-contrast 5-sphere scene (real silhouette edges for FXAA to smooth). Unset ⇒ the
+    // `AaPlugin` default (`AaMode::Off`) ⇒ the pinned `f6147f90` golden is unchanged.
+    if std::env::var("BOYKO_AA").as_deref() == Ok("fxaa") {
+        app.insert_resource(AaConfig { mode: AaMode::Fxaa });
+    }
     app.run();
 }

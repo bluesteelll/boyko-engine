@@ -201,6 +201,25 @@ pub struct GBufferTargets {
     /// A RING when `Some` (one per in-flight frame): slot `i` binds `scene.camera_ring[i]` @4 — the
     /// lock-free per-frame ring fix. The recorder selects `ssao_set[self.frame_index]`.
     pub(crate) ssao_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Anti-aliasing Stage 1: the FXAA post-process OUTPUT image RING (one per in-flight
+    /// frame), `COLOR_ATTACHMENT | SAMPLED`, `R8G8B8A8_UNORM` (== [`GBUFFER_FORMAT`]), sized
+    /// to `present_extent` — `None` when AA is off ([`GBufferScene::aa`] is `None`), the
+    /// 0%-gate: `present_set` then samples `lit` and no FXAA pass is recorded.
+    ///
+    /// `aa_out`/`fxaa_set` carry NO material table and NO acceleration structure —
+    /// deliberately OUT of [`Self::material_set_rings`]/[`Self::tlas_accel_sets`] (F7/task#11
+    /// enumerations).
+    pub(crate) aa_out: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
+    /// Anti-aliasing Stage 1: the FXAA INPUT descriptor set RING (one per in-flight frame),
+    /// each a single `CombinedImageSampler` binding `lit[i]` (never `aa_out`) + the LINEAR/
+    /// ClampToEdge [`AaActivation::sampler`](crate::present::scene_types::AaActivation::sampler)
+    /// against [`GBufferScene::present_layout`]. `None` when AA is off.
+    pub(crate) fxaa_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Whether AA was armed (`scene.aa.is_some()`) when these targets were built.
+    /// [`GBufferTargets::sync_gbuffer`] compares this against the CURRENT `scene.aa` and
+    /// forces the same fence-safe rebuild an extent change triggers on a mismatch — a live,
+    /// fence-safe runtime AA toggle.
+    pub(crate) aa_armed: bool,
     /// HW-RT rung 3a: the VIS-variant resolve descriptor set RING (one per in-flight frame), written
     /// ONCE against [`ShadowVisActivation::resolve_layout`](crate::present::scene_types::ShadowVisActivation::resolve_layout)
     /// — the 21 RESOLVE_INLINE-hwrt bindings PLUS `gShadowVis` STORAGE image @21 fed slot `i`'s
@@ -1029,6 +1048,64 @@ impl ShadowVisImages {
     }
 }
 
+/// Anti-aliasing Stage 1: the FXAA output image RING (`aa_out`), built right after [`CoreImages`]
+/// iff `scene.aa` is armed. UNCONDITIONAL (both feature legs — unlike [`ShadowVisImages`], AA is
+/// not `hwrt`-only). A one-field bundle (mirroring [`ShadowVisImages`]'s shape) so
+/// [`GBufferTargets::create`] can `?`-propagate a build failure with a self-contained error path.
+struct AaImages {
+    aa_out: [VulkanTexture; FRAMES_IN_FLIGHT],
+}
+
+impl AaImages {
+    /// Allocates the `aa_out` ring at `extent`: `COLOR_ATTACHMENT | SAMPLED`,
+    /// [`GBUFFER_FORMAT`] (`R8G8B8A8_UNORM`) — the FXAA pass's full-screen-triangle render
+    /// target, later sampled by the present-blit. On a mid-ring failure the partial ring is
+    /// drained (reverse acquisition); the orchestrator owns the prior [`CoreImages`], which it
+    /// tears down on this method's `Err`.
+    fn build(ctx: &VulkanContext, extent: VkExtent2D) -> Result<Self, SwapchainError> {
+        let mut slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] = [const { None }; FRAMES_IN_FLIGHT];
+        for slot in slots.iter_mut() {
+            match GBufferTargets::create_gbuffer_image(
+                ctx,
+                extent,
+                ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+            ) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => {
+                    // SAFETY: `ctx` is live; no submission references these textures (build
+                    // phase); the partial ring [0..i) is drained exactly once.
+                    unsafe {
+                        for s in slots.iter_mut() {
+                            if let Some(t) = s.take() {
+                                RhiDevice::destroy_texture(ctx, t);
+                            }
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let aa_out: [VulkanTexture; FRAMES_IN_FLIGHT] =
+            slots.map(|s| s.expect("invariant: every aa_out ring slot built before here"));
+        Ok(Self { aa_out })
+    }
+
+    /// Tears down the `aa_out` ring, consuming `self`.
+    ///
+    /// # Safety
+    ///
+    /// `ctx` is live; no submission references these textures; each is destroyed exactly once.
+    unsafe fn destroy(self, ctx: &VulkanContext) {
+        // SAFETY: per the contract `ctx` is live and nothing references these textures; each was
+        // created on `ctx` and is destroyed exactly once.
+        unsafe {
+            for t in self.aa_out {
+                RhiDevice::destroy_texture(ctx, t);
+            }
+        }
+    }
+}
+
 /// The per-extent deferred descriptor SETS bound ONCE against the [`CoreImages`] rings + `scene` (NO
 /// per-frame update). Built as one bundle so [`GBufferTargets::create`]'s error ladder no longer
 /// re-lists the image teardown at every set (the cross-bundle O(n²) collapse): [`Self::build`] drains
@@ -1045,12 +1122,18 @@ struct DeferredSets {
     present_set: [VulkanBindGroup; FRAMES_IN_FLIGHT],
     #[cfg(feature = "hwrt")]
     resolve_set_hwrt: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Anti-aliasing Stage 1: the FXAA INPUT set RING, `None` when AA is off ([`Self::build`]'s
+    /// `aa_out` param is `None`). Built LAST so its own error path tears down every prior set;
+    /// no upstream path knows about it.
+    fxaa_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
 }
 
 impl DeferredSets {
-    /// Writes the seven deferred descriptor sets ONCE against `core` + `scene`. `cluster_grid_buf` /
+    /// Writes the deferred descriptor sets ONCE against `core` + `scene`. `cluster_grid_buf` /
     /// `light_index_buf` are the L1 buffers (or the light-table placeholder when L1 is off), computed
-    /// once by the caller and shared with the hwrt denoise/temporal set builders. On any set's partial
+    /// once by the caller and shared with the hwrt denoise/temporal set builders. `aa_out` is the
+    /// AA target ring (`Some` only when `scene.aa` is armed) — it re-points `present_set` to sample
+    /// `aa_out` instead of `lit` and feeds the FXAA input set. On any set's partial
     /// failure the slots already built in THAT set are drained + every fully-built prior set destroyed
     /// (reverse acquisition); the orchestrator owns the image rings, which it tears down on this
     /// method's `Err`.
@@ -1060,6 +1143,7 @@ impl DeferredSets {
         core: &CoreImages,
         cluster_grid_buf: &BoundBuffer,
         light_index_buf: &BoundBuffer,
+        aa_out: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
     ) -> Result<DeferredSets, SwapchainError> {
         // The marcher vocabulary set, written ONCE here (NO per-frame update). The
         // entry order matches the layout: SSBO @0, sampled depth @1, storage albedo @2,
@@ -1416,17 +1500,31 @@ impl DeferredSets {
             None => None,
         };
 
+        // Anti-aliasing Stage 1: the sampler [`AaActivation`](crate::present::scene_types::AaActivation)
+        // carries, or `None` on the OFF path. Lockstep invariant: `aa_out` is `Some` iff `scene.aa`
+        // is `Some` (both derive from the same `scene.aa.is_some()` arm at the call site).
+        let aa_sampler = scene.aa.as_ref().map(|a| a.sampler);
+        debug_assert_eq!(
+            aa_out.is_some(),
+            aa_sampler.is_some(),
+            "invariant: aa_out and scene.aa must arm/disarm together"
+        );
+
         // The present-blit set RING, written ONCE here: slot `i` is one COMBINED_IMAGE_SAMPLER
-        // pointing at `lit[i]` (the resolve's output for that slot) + the scene's present
-        // sampler. RINGED so the present samples the SAME slot the resolve wrote this frame (the
-        // `lit` ring made a single present set stale — it would sample a sibling slot's image).
+        // pointing at `aa_out[i]` when AA is armed, else `lit[i]` (the resolve's output for that
+        // slot) + the scene's present sampler (UNCHANGED — the `None` arm is line-exact with the
+        // pre-AA stream). RINGED so the present samples the SAME slot the resolve/FXAA wrote this
+        // frame (a single present set would go stale — it would sample a sibling slot's image).
         // On a failure at slot `i`, the slots already built [0..i) plus every prior set ring
         // (vocab/resolve/cull/ssao/ddgi) MUST be destroyed (no leak).
         let mut present_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
         for (slot, dst) in present_slots.iter_mut().enumerate() {
             let entries = [BindGroupEntry::CombinedImage {
-                texture: &core.lit[slot],
+                texture: match aa_out {
+                    Some(a) => &a[slot],
+                    None => &core.lit[slot],
+                },
                 sampler: scene.present_sampler,
             }];
             let desc = BindGroupDesc::<Vulkan> {
@@ -1589,6 +1687,80 @@ impl DeferredSets {
                 _ => None,
             };
 
+        // Anti-aliasing Stage 1: the FXAA INPUT set RING, built LAST (after every other fallible
+        // set, including the HWRT resolve variant) so its own error path tears down everything
+        // prior; no upstream path knows about it. Slot `i` binds `lit[i]` — the FXAA pass's
+        // INPUT, never `aa_out` (the pass's OUTPUT, which appears in no set but `present_set`) —
+        // plus the dedicated LINEAR/ClampToEdge `aa_sampler`, against `scene.present_layout` (the
+        // same single-`CombinedImageSampler` shape `present_set` uses). `None` when AA is off.
+        let fxaa_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = match aa_sampler {
+            Some(sampler) => {
+                let mut fxaa_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+                    [const { None }; FRAMES_IN_FLIGHT];
+                let mut failure: Option<crate::error::VulkanError> = None;
+                for (slot, dst) in fxaa_slots.iter_mut().enumerate() {
+                    let entries =
+                        [BindGroupEntry::CombinedImage { texture: &core.lit[slot], sampler }];
+                    let desc =
+                        BindGroupDesc::<Vulkan> { layout: scene.present_layout, entries: &entries };
+                    match RhiDevice::create_bind_group(ctx, &desc) {
+                        Ok(g) => *dst = Some(g),
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                    }
+                }
+                if let Some(e) = failure {
+                    // SAFETY: the fxaa slots already built [0..slot) + the present ring + the
+                    // (optional) HWRT resolve ring + the (optional) ddgi-update/ssao/cull + the
+                    // resolve & vocab rings were created on `ctx`; referenced by no submission;
+                    // each destroyed exactly once (reverse acquisition). The optional sets are
+                    // `Option`-guarded; the images are owned by the caller.
+                    unsafe {
+                        for s in fxaa_slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        #[cfg(feature = "hwrt")]
+                        if let Some(hs) = resolve_set_hwrt {
+                            for g in hs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in present_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        if let Some(du) = ddgi_update_set {
+                            RhiDevice::destroy_bind_group(ctx, du);
+                        }
+                        if let Some(ss) = ssao_set {
+                            for g in ss {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(cs) = cull_set {
+                            for g in cs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in resolve_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        for g in vocab_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    return Err(SwapchainError::DepthImage(e));
+                }
+                Some(fxaa_slots.map(|s| {
+                    s.expect("invariant: every fxaa ring slot built before reaching here")
+                }))
+            }
+            None => None,
+        };
+
         Ok(DeferredSets {
             vocab_set,
             resolve_set,
@@ -1598,22 +1770,30 @@ impl DeferredSets {
             present_set,
             #[cfg(feature = "hwrt")]
             resolve_set_hwrt,
+            fxaa_set,
         })
     }
 
-    /// Tears down the deferred sets in reverse acquisition order (resolve-hwrt → present →
+    /// Tears down the deferred sets in reverse acquisition order (fxaa → resolve-hwrt → present →
     /// ddgi-update → ssao → cull → resolve → vocab), consuming `self`.
     ///
     /// # Safety
     ///
     /// `ctx` is live; no submission references these descriptor sets; each is destroyed exactly once
-    /// (the by-value `self`). The `cull`/`ssao`/`ddgi-update`/`resolve-hwrt` sets are `Option`-guarded
-    /// (present only when their feature was wired).
+    /// (the by-value `self`). The `cull`/`ssao`/`ddgi-update`/`resolve-hwrt`/`fxaa` sets are
+    /// `Option`-guarded (present only when their feature was wired).
     unsafe fn destroy(self, ctx: &VulkanContext) {
         // SAFETY: per the contract `ctx` is live and nothing references these sets; each was created
         // on `ctx` and is destroyed exactly once, in reverse acquisition order.
         unsafe {
-            // R2a-4b: the HWRT resolve set RING (last-acquired), `Option`-guarded (present only on an
+            // Anti-aliasing Stage 1: the FXAA input set RING (last-acquired), `Option`-guarded
+            // (present only when `scene.aa` was armed).
+            if let Some(fs) = self.fxaa_set {
+                for g in fs {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            // R2a-4b: the HWRT resolve set RING, `Option`-guarded (present only on an
             // RT device under `feature = "hwrt"` + config HardwareTri).
             #[cfg(feature = "hwrt")]
             if let Some(hs) = self.resolve_set_hwrt {
@@ -2680,14 +2860,13 @@ impl GBufferTargets {
             }
         };
 
-        // The L1 froxel buffers (or the light-table placeholder when L1 is off) — computed ONCE and
-        // shared with the deferred-set builder AND the hwrt denoise/temporal set builders below.
-        let cluster_grid_buf = scene.cluster_grid.unwrap_or(scene.light_table);
-        let light_index_buf = scene.light_index.unwrap_or(scene.light_table);
-
-        let deferred =
-            match DeferredSets::build(ctx, scene, &core, cluster_grid_buf, light_index_buf) {
-                Ok(s) => s,
+        // Anti-aliasing Stage 1: the aa_out image ring, built ONLY when `scene.aa` is armed —
+        // `None` is the 0%-gate (no image, no fxaa_set, present samples `lit`). Built after
+        // shadow-vis (so its own Err arm destroys shadow-vis + core, mirroring the existing
+        // image-stage error weave).
+        let aa_imgs: Option<AaImages> = if scene.aa.is_some() {
+            match AaImages::build(ctx, extent) {
+                Ok(a) => Some(a),
                 Err(e) => {
                     // SAFETY: the shadow-vis images (hwrt) + `core` were built above on `ctx`,
                     // referenced by no submission; each destroyed exactly once, reverse acquisition
@@ -2701,7 +2880,47 @@ impl GBufferTargets {
                     }
                     return Err(e);
                 }
-            };
+            }
+        } else {
+            None
+        };
+        debug_assert_eq!(
+            scene.aa.is_some(),
+            aa_imgs.is_some(),
+            "invariant: aa_imgs must arm/disarm in lockstep with scene.aa"
+        );
+
+        // The L1 froxel buffers (or the light-table placeholder when L1 is off) — computed ONCE and
+        // shared with the deferred-set builder AND the hwrt denoise/temporal set builders below.
+        let cluster_grid_buf = scene.cluster_grid.unwrap_or(scene.light_table);
+        let light_index_buf = scene.light_index.unwrap_or(scene.light_table);
+
+        let deferred = match DeferredSets::build(
+            ctx,
+            scene,
+            &core,
+            cluster_grid_buf,
+            light_index_buf,
+            aa_imgs.as_ref().map(|a| &a.aa_out),
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                // SAFETY: `aa_imgs` + the shadow-vis images (hwrt) + `core` were built above on
+                // `ctx`, referenced by no submission; each destroyed exactly once, reverse
+                // acquisition (aa_imgs → shadow-vis → core).
+                unsafe {
+                    if let Some(a) = aa_imgs {
+                        a.destroy(ctx);
+                    }
+                    #[cfg(feature = "hwrt")]
+                    if let Some(v) = shadow_vis_imgs {
+                        v.destroy(ctx);
+                    }
+                    core.destroy(ctx);
+                }
+                return Err(e);
+            }
+        };
 
         // HW-RT rung 3a: the spatial-denoise descriptor sets + the à-trous edge-stop UBO ring.
         // Built ONLY when the scene wires `scene.shadow` (the step-7 gate; the host keeps it `None`
@@ -2738,12 +2957,16 @@ impl GBufferTargets {
             ),
             Ok(None) => (None, None, None, None),
             Err(e) => {
-                // SAFETY: the deferred sets + the shadow-vis images + `core` were built above on
-                // `ctx`, referenced by no submission; each is destroyed exactly once, in reverse
-                // acquisition order (deferred sets → shadow-vis → core). `build_shadow_denoise_sets`
-                // already drained its OWN partial allocations before returning `Err`.
+                // SAFETY: the deferred sets + `aa_imgs` + the shadow-vis images + `core` were built
+                // above on `ctx`, referenced by no submission; each is destroyed exactly once, in
+                // reverse acquisition order (deferred sets → aa_imgs → shadow-vis → core).
+                // `build_shadow_denoise_sets` already drained its OWN partial allocations before
+                // returning `Err`.
                 unsafe {
                     deferred.destroy(ctx);
+                    if let Some(a) = aa_imgs {
+                        a.destroy(ctx);
+                    }
                     if let Some(v) = shadow_vis_imgs {
                         v.destroy(ctx);
                     }
@@ -2756,6 +2979,7 @@ impl GBufferTargets {
         // Flatten the image + set bundles into the original local names so the remaining (infallible)
         // hwrt tail below + the `Self` construction stay byte-identical.
         let CoreImages { depth, albedo, normal, material, lit, viewt, ssao, pbr } = core;
+        let aa_out: Option<[VulkanTexture; FRAMES_IN_FLIGHT]> = aa_imgs.map(|a| a.aa_out);
         #[cfg(feature = "hwrt")]
         let (shadow_vis, shadow_vis2) = match shadow_vis_imgs {
             Some(ShadowVisImages { shadow_vis, shadow_vis2 }) => {
@@ -2772,6 +2996,7 @@ impl GBufferTargets {
             present_set,
             #[cfg(feature = "hwrt")]
             resolve_set_hwrt,
+            fxaa_set,
         } = deferred;
 
         // HW-RT Rung 3b: the three temporal denoise target rings (motion_vec RG16F,
@@ -2866,6 +3091,9 @@ impl GBufferTargets {
             resolve_set_hwrt,
             cull_set,
             ssao_set,
+            aa_out,
+            fxaa_set,
+            aa_armed: scene.aa.is_some(),
             #[cfg(feature = "hwrt")]
             shadow_vis_resolve_set,
             #[cfg(feature = "hwrt")]
@@ -2889,9 +3117,11 @@ impl GBufferTargets {
     }
 
     /// Ensures the G-buffer images + descriptor sets exist and match `extent`,
-    /// (re)building them through `ctx` when absent (first frame) or stale (resize).
-    /// The vocabulary + present descriptor sets are re-written here — and ONLY here —
-    /// so the per-frame recorder records no `vkUpdateDescriptorSets`.
+    /// (re)building them through `ctx` when absent (first frame), stale (resize), OR an
+    /// anti-aliasing arm-state change (`scene.aa.is_some()` flips) — a genuine, fence-safe
+    /// live AA toggle riding the SAME rebuild path a resize uses. The vocabulary + present
+    /// descriptor sets are re-written here — and ONLY here — so the per-frame recorder
+    /// records no `vkUpdateDescriptorSets`.
     ///
     /// The caller ([`Renderer::render_gbuffer_frame`]) calls this only after
     /// fence-waiting the frame slot, so no in-flight frame still references the old
@@ -2907,6 +3137,7 @@ impl GBufferTargets {
         if let Some(t) = targets.as_ref()
             && t.extent.width == extent.width
             && t.extent.height == extent.height
+            && t.aa_armed == scene.aa.is_some()
         {
             return Ok(());
         }
@@ -3065,6 +3296,7 @@ impl GBufferTargets {
                 present_set: self.present_set,
                 #[cfg(feature = "hwrt")]
                 resolve_set_hwrt: self.resolve_set_hwrt,
+                fxaa_set: self.fxaa_set,
             }
             .destroy(ctx);
             // HW-RT Rung 3b: the three temporal denoise target RINGS (motion_vec / hist /
@@ -3100,6 +3332,14 @@ impl GBufferTargets {
             }
             #[cfg(feature = "hwrt")]
             if let Some(r) = self.shadow_vis {
+                for t in r {
+                    RhiDevice::destroy_texture(ctx, t);
+                }
+            }
+            // Anti-aliasing Stage 1: the aa_out image RING (built AFTER shadow-vis, so destroyed
+            // BEFORE core here — the same reverse-acquisition placement as shadow-vis).
+            // `Option`-guarded (`None` when AA was off).
+            if let Some(r) = self.aa_out {
                 for t in r {
                     RhiDevice::destroy_texture(ctx, t);
                 }
@@ -3326,6 +3566,9 @@ mod tests {
             resolve_set: bg_ring(),
             cull_set: None,
             ssao_set: None,
+            aa_out: None,
+            fxaa_set: None,
+            aa_armed: false,
             ddgi_update_set: None,
             present_set: bg_ring(),
             extent: VkExtent2D::default(),
@@ -3382,6 +3625,9 @@ mod tests {
             resolve_set_hwrt: resolve_set_hwrt.then(bg_ring),
             cull_set: None,
             ssao_set: None,
+            aa_out: None,
+            fxaa_set: None,
+            aa_armed: false,
             shadow_vis_resolve_set: shadow_vis_resolve.then(bg_ring),
             shadow_denoised_resolve_set: shadow_denoised_resolve.then(bg_ring),
             shadow_atrous_sets: None,

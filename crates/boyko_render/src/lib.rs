@@ -252,6 +252,14 @@ pub mod shadow_plugin;
 /// and the [`TeleportCommandsExt`](snap_interpolation::TeleportCommandsExt) command
 /// sugar.
 pub mod snap_interpolation;
+/// The anti-aliasing config substrate: the owner-set [`AaConfig`](aa_config::AaConfig)
+/// ([`AaMode`](aa_config::AaMode) — `Off`/`Fxaa`/…), its derived
+/// [`ResolvedAa`](aa_config::ResolvedAa) carrier, and the cold
+/// [`resolve_aa_policy`](aa_config::resolve_aa_policy). Mirrors the SSAO substrate; the
+/// render driver reads `ResolvedAa` to build the post-process AA pass at the resolve→present
+/// seam (`Off` = the byte-identical 0%-gate).
+pub mod aa_config;
+pub mod aa_plugin;
 pub mod ssao_config;
 pub mod ssao_plugin;
 /// Per-vertex tangent generation (Lengyel's method,
@@ -393,6 +401,8 @@ pub use sdf_edit::{
 pub use shadow_marker::CastsPunctualShadow;
 pub use shadow_plugin::ShadowAtlasPlugin;
 pub use snap_interpolation::{SnapInterpolation, TeleportCommandsExt, snap_apply};
+pub use aa_config::{AaConfig, AaMode, ResolvedAa, resolve_aa, resolve_aa_policy};
+pub use aa_plugin::AaPlugin;
 pub use ssao_config::{ResolvedSsao, SsaoConfig, SsaoQuality, resolve_ssao, resolve_ssao_policy};
 pub use ssao_plugin::SsaoPlugin;
 pub use tangent::generate_tangents;
