@@ -35,12 +35,19 @@ struct VsOut {
     float2 uv       : TEXCOORD0;
 };
 
-// --- Quality knobs (FXAA 3.11 "PC quality" preset 12 taps) --------------------------------
+// --- Quality knobs (FXAA 3.11 "PC extreme quality" preset, 12 taps) -----------------------
 // The edge is only treated when the local contrast exceeds a floor; the floor scales with the
-// brighter luma so dark regions are not over-smoothed. Values are Lottes' recommended defaults.
-static const float EDGE_THRESHOLD_MIN = 0.0312;
-static const float EDGE_THRESHOLD_MAX = 0.125;
-static const float SUBPIXEL_QUALITY   = 0.75;
+// brighter luma so dark regions are not over-smoothed. Raised from Lottes' "High" tier
+// (0.0312 / 0.125) to his "Ultra/Extreme" tier (0.0156 / 0.063) so fainter silhouette steps
+// are also treated — on the deferred gamma `lit` target the sphere-vs-sky contrast is modest,
+// so the "High" floor left most of the staircase below the edge gate (owner: "almost no
+// effect"). SUBPIXEL_QUALITY raised 0.75 -> 1.0 (max sub-pixel term): FXAA is the CHEAP
+// fallback (TAA is the temporal path), so we want the strongest per-frame smoothing FXAA can
+// give; the interiors of the smooth-shaded sphere bodies carry no high-frequency luma, so the
+// sub-pixel low-pass does not over-blur them (visually verified on the 5-sphere scene).
+static const float EDGE_THRESHOLD_MIN = 0.0156;
+static const float EDGE_THRESHOLD_MAX = 0.063;
+static const float SUBPIXEL_QUALITY   = 1.0;
 static const int   ITERATIONS         = 12;
 
 // Per-iteration step multipliers along the edge (FXAA_QUALITY preset): small near the pixel,
