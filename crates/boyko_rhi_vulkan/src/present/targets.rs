@@ -215,11 +215,38 @@ pub struct GBufferTargets {
     /// ClampToEdge [`AaActivation::sampler`](crate::present::scene_types::AaActivation::sampler)
     /// against [`GBufferScene::present_layout`]. `None` when AA is off.
     pub(crate) fxaa_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
-    /// Whether AA was armed (`scene.aa.is_some()`) when these targets were built.
-    /// [`GBufferTargets::sync_gbuffer`] compares this against the CURRENT `scene.aa` and
+    /// Anti-aliasing Stage 2: the SMAA `edges` output image RING (one per in-flight frame),
+    /// `COLOR_ATTACHMENT | SAMPLED`, `R8G8_UNORM`, sized to `present_extent` — `None` when
+    /// SMAA is off ([`GBufferScene::smaa`] is `None`).
+    ///
+    /// `smaa_edges`/`smaa_weights`/the three `smaa_*_set` rings carry NO material table and
+    /// NO acceleration structure — deliberately OUT of
+    /// [`Self::material_set_rings`]/[`Self::tlas_accel_sets`] (F7/task#11 enumerations), the
+    /// same exclusion `aa_out`/`fxaa_set` carry.
+    pub(crate) smaa_edges: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
+    /// Anti-aliasing Stage 2: the SMAA `weights` output image RING (one per in-flight frame),
+    /// `COLOR_ATTACHMENT | SAMPLED`, `R8G8B8A8_UNORM`, sized to `present_extent` — `None` when
+    /// SMAA is off.
+    pub(crate) smaa_weights: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
+    /// Anti-aliasing Stage 2: pass 1's INPUT descriptor set RING (one per in-flight frame),
+    /// one `CombinedImageSampler` binding `lit[i]` against [`GBufferScene::present_layout`]
+    /// (the same 1-CIS layout `fxaa_set` uses). `None` when SMAA is off.
+    pub(crate) smaa_edge_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Anti-aliasing Stage 2: pass 2's INPUT descriptor set RING, 3 `CombinedImageSampler`s
+    /// binding `{ smaa_edges[i] @0, area_tex @1, search_tex @2 }` against
+    /// [`SmaaActivation::weight_layout`](crate::present::scene_types::SmaaActivation::weight_layout).
+    /// `None` when SMAA is off.
+    pub(crate) smaa_weight_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Anti-aliasing Stage 2: pass 3's INPUT descriptor set RING, 2 `CombinedImageSampler`s
+    /// binding `{ lit[i] @0, smaa_weights[i] @1 }` against
+    /// [`SmaaActivation::blend_layout`](crate::present::scene_types::SmaaActivation::blend_layout).
+    /// `None` when SMAA is off.
+    pub(crate) smaa_blend_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Which AA mode ([`AaArm`]) was armed when these targets were built.
+    /// [`GBufferTargets::sync_gbuffer`] compares this against `AaArm::from_scene(scene)` and
     /// forces the same fence-safe rebuild an extent change triggers on a mismatch — a live,
-    /// fence-safe runtime AA toggle.
-    pub(crate) aa_armed: bool,
+    /// fence-safe runtime AA toggle across Off/Fxaa/Smaa.
+    pub(crate) aa_arm: AaArm,
     /// HW-RT rung 3a: the VIS-variant resolve descriptor set RING (one per in-flight frame), written
     /// ONCE against [`ShadowVisActivation::resolve_layout`](crate::present::scene_types::ShadowVisActivation::resolve_layout)
     /// — the 21 RESOLVE_INLINE-hwrt bindings PLUS `gShadowVis` STORAGE image @21 fed slot `i`'s
@@ -318,11 +345,52 @@ pub struct GBufferTargets {
     pub(crate) extent: VkExtent2D,
 }
 
+/// Anti-aliasing campaign: which AA mode [`GBufferTargets`] is CURRENTLY armed for —
+/// replaces the Stage-1 `aa_armed: bool`, closing the Fxaa↔Smaa fixed-extent resync gap a
+/// boolean cannot see (a boolean only distinguishes Off↔non-Off; two DIFFERENT armed modes
+/// both want `aa_out`, so a runtime Fxaa↔Smaa switch at fixed extent would not otherwise
+/// trigger the rebuild that swaps `fxaa_set` for the SMAA sets). Local to this crate
+/// (`AaMode` lives in the higher-layer `boyko_render`, so the arm state is derived from
+/// `scene.aa`/`scene.smaa` presence, never imported).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AaArm {
+    /// Neither [`GBufferScene::aa`] nor [`GBufferScene::smaa`] is armed — the 0%-gate.
+    Off,
+    /// [`GBufferScene::aa`] (FXAA) is armed.
+    Fxaa,
+    /// [`GBufferScene::smaa`] (SMAA 1x) is armed.
+    Smaa,
+}
+
+impl AaArm {
+    /// Derives the arm state from `scene` — `smaa`-first purely as a defensive tie-break
+    /// (the two are populated mutually-exclusively at the scene-build site; a
+    /// `debug_assert!` in [`GBufferTargets::create`] makes that invariant explicit).
+    fn from_scene(scene: &GBufferScene<'_>) -> Self {
+        if scene.smaa.is_some() {
+            AaArm::Smaa
+        } else if scene.aa.is_some() {
+            AaArm::Fxaa
+        } else {
+            AaArm::Off
+        }
+    }
+}
+
 /// The G-buffer color format (albedo / normal / material): `R8G8B8A8_UNORM`, the
 /// STORAGE-image store target the marcher writes (matches the P1b offscreen driver's
 /// `GBUFFER_FORMAT`). The ALBEDO image is also `SAMPLED` (the present-blit) — never
 /// stretched; presented 1:1 in the swapchain's top-left like [`SampledComposite`].
 const GBUFFER_FORMAT: Format = Format::R8G8B8A8Unorm;
+
+/// The SMAA `edges` target format: `R8G8_UNORM` (R = west/left edge, G = north/top edge) — a
+/// Vulkan MANDATORY format with guaranteed `COLOR_ATTACHMENT_BIT` + `SAMPLED_IMAGE_FILTER_LINEAR_BIT`
+/// format-feature support (no fallback needed — W2's decision).
+const SMAA_EDGES_FORMAT: Format = Format::R8G8Unorm;
+
+/// The SMAA `weights` target format: `R8G8B8A8_UNORM` (== [`GBUFFER_FORMAT`]) — the 4-channel
+/// per-pixel blending weight (left/top/right/bottom).
+const SMAA_WEIGHTS_FORMAT: Format = Format::R8G8B8A8Unorm;
 
 /// The Lighting-L0b `gViewT` lane format: `R32_SFLOAT`, a STORAGE image the marcher
 /// stores the full-fp32 surface ray param `t` into and the resolve reads to reconstruct
@@ -1106,11 +1174,110 @@ impl AaImages {
     }
 }
 
+/// Anti-aliasing Stage 2: the SMAA `edges`/`weights` output image RINGS, built right after
+/// [`AaImages`] iff `scene.smaa` is armed. UNCONDITIONAL (both feature legs). A two-field
+/// bundle (mirroring [`AaImages`]'s shape) so [`GBufferTargets::create`] can `?`-propagate a
+/// build failure with a self-contained error path.
+struct SmaaImages {
+    edges: [VulkanTexture; FRAMES_IN_FLIGHT],
+    weights: [VulkanTexture; FRAMES_IN_FLIGHT],
+}
+
+impl SmaaImages {
+    /// Allocates the `edges` ring (`R8G8_UNORM`) then the `weights` ring
+    /// (`R8G8B8A8_UNORM`), both `COLOR_ATTACHMENT | SAMPLED` at `extent`, via
+    /// [`GBufferTargets::create_gbuffer_image_fmt`]. On a mid-ring failure the partial rings
+    /// are drained (reverse acquisition: weights' partial slots, then the fully-built
+    /// `edges` ring); the orchestrator owns the prior bundles ([`AaImages`]/[`CoreImages`]),
+    /// which it tears down on this method's `Err`.
+    fn build(ctx: &VulkanContext, extent: VkExtent2D) -> Result<Self, SwapchainError> {
+        let mut edge_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for slot in edge_slots.iter_mut() {
+            match GBufferTargets::create_gbuffer_image_fmt(
+                ctx,
+                extent,
+                SMAA_EDGES_FORMAT,
+                ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+            ) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => {
+                    // SAFETY: `ctx` is live; no submission references these textures (build
+                    // phase); the partial ring [0..i) is drained exactly once.
+                    unsafe {
+                        for s in edge_slots.iter_mut() {
+                            if let Some(t) = s.take() {
+                                RhiDevice::destroy_texture(ctx, t);
+                            }
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let edges: [VulkanTexture; FRAMES_IN_FLIGHT] =
+            edge_slots.map(|s| s.expect("invariant: every smaa_edges ring slot built before here"));
+
+        let mut weight_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for slot in weight_slots.iter_mut() {
+            match GBufferTargets::create_gbuffer_image_fmt(
+                ctx,
+                extent,
+                SMAA_WEIGHTS_FORMAT,
+                ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+            ) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => {
+                    // SAFETY: `ctx` is live; no submission references these textures; the
+                    // partial `weights` ring [0..i) plus the fully-built `edges` ring are
+                    // each drained exactly once (reverse acquisition).
+                    unsafe {
+                        for s in weight_slots.iter_mut() {
+                            if let Some(t) = s.take() {
+                                RhiDevice::destroy_texture(ctx, t);
+                            }
+                        }
+                        for t in edges {
+                            RhiDevice::destroy_texture(ctx, t);
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let weights: [VulkanTexture; FRAMES_IN_FLIGHT] = weight_slots
+            .map(|s| s.expect("invariant: every smaa_weights ring slot built before here"));
+
+        Ok(Self { edges, weights })
+    }
+
+    /// Tears down the `weights` ring then the `edges` ring (reverse acquisition), consuming
+    /// `self`.
+    ///
+    /// # Safety
+    ///
+    /// `ctx` is live; no submission references these textures; each is destroyed exactly once.
+    unsafe fn destroy(self, ctx: &VulkanContext) {
+        // SAFETY: per the contract `ctx` is live and nothing references these textures; each
+        // was created on `ctx` and is destroyed exactly once, in reverse acquisition order.
+        unsafe {
+            for t in self.weights {
+                RhiDevice::destroy_texture(ctx, t);
+            }
+            for t in self.edges {
+                RhiDevice::destroy_texture(ctx, t);
+            }
+        }
+    }
+}
+
 /// The per-extent deferred descriptor SETS bound ONCE against the [`CoreImages`] rings + `scene` (NO
 /// per-frame update). Built as one bundle so [`GBufferTargets::create`]'s error ladder no longer
 /// re-lists the image teardown at every set (the cross-bundle O(n²) collapse): [`Self::build`] drains
 /// only the sets it built, and the orchestrator tears down the images. Acquisition order (matched by
-/// [`Self::destroy`] in reverse): vocab → resolve → cull → ssao → ddgi-update → present → resolve-hwrt.
+/// [`Self::destroy`] in reverse): vocab → resolve → cull → ssao → ddgi-update → present →
+/// resolve-hwrt → fxaa → smaa (edge → weight → blend).
 /// Flattened into the [`GBufferTargets`] set fields at `create` time, so `present/` readers keep the
 /// same `targets.<x>` paths.
 struct DeferredSets {
@@ -1123,20 +1290,31 @@ struct DeferredSets {
     #[cfg(feature = "hwrt")]
     resolve_set_hwrt: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Anti-aliasing Stage 1: the FXAA INPUT set RING, `None` when AA is off ([`Self::build`]'s
-    /// `aa_out` param is `None`). Built LAST so its own error path tears down every prior set;
-    /// no upstream path knows about it.
+    /// `aa_out` param is `None`). Built AFTER every hwrt-family set (so its own error path tears
+    /// down every prior set); no upstream path knows about it.
     fxaa_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Anti-aliasing Stage 2: pass 1's (edge) INPUT set RING — `None` when SMAA is off. THE NEW
+    /// TERMINAL fallible set (W1), built LAST (after `fxaa_set`) so its own error path tears down
+    /// every prior set including `fxaa_set` (Option-guarded no-op under SMAA, present for
+    /// symmetry).
+    smaa_edge_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Anti-aliasing Stage 2: pass 2's (weight) INPUT set RING — `None` when SMAA is off.
+    smaa_weight_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Anti-aliasing Stage 2: pass 3's (blend) INPUT set RING — `None` when SMAA is off.
+    smaa_blend_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
 }
 
 impl DeferredSets {
     /// Writes the deferred descriptor sets ONCE against `core` + `scene`. `cluster_grid_buf` /
     /// `light_index_buf` are the L1 buffers (or the light-table placeholder when L1 is off), computed
     /// once by the caller and shared with the hwrt denoise/temporal set builders. `aa_out` is the
-    /// AA target ring (`Some` only when `scene.aa` is armed) — it re-points `present_set` to sample
-    /// `aa_out` instead of `lit` and feeds the FXAA input set. On any set's partial
-    /// failure the slots already built in THAT set are drained + every fully-built prior set destroyed
-    /// (reverse acquisition); the orchestrator owns the image rings, which it tears down on this
-    /// method's `Err`.
+    /// AA target ring (`Some` when either `scene.aa` or `scene.smaa` is armed) — it re-points
+    /// `present_set` to sample `aa_out` instead of `lit` and feeds the FXAA input set. `smaa_imgs`
+    /// is the SMAA `edges`/`weights` target bundle (`Some` only when `scene.smaa` is armed) — it
+    /// feeds the three SMAA sets (edge → weight → blend, built in that order, AFTER `fxaa_set`).
+    /// On any set's partial failure the slots already built in THAT set are drained + every
+    /// fully-built prior set destroyed (reverse acquisition); the orchestrator owns the image
+    /// rings, which it tears down on this method's `Err`.
     fn build(
         ctx: &VulkanContext,
         scene: &GBufferScene<'_>,
@@ -1144,6 +1322,7 @@ impl DeferredSets {
         cluster_grid_buf: &BoundBuffer,
         light_index_buf: &BoundBuffer,
         aa_out: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        smaa_imgs: Option<&SmaaImages>,
     ) -> Result<DeferredSets, SwapchainError> {
         // The marcher vocabulary set, written ONCE here (NO per-frame update). The
         // entry order matches the layout: SSBO @0, sampled depth @1, storage albedo @2,
@@ -1501,13 +1680,15 @@ impl DeferredSets {
         };
 
         // Anti-aliasing Stage 1: the sampler [`AaActivation`](crate::present::scene_types::AaActivation)
-        // carries, or `None` on the OFF path. Lockstep invariant: `aa_out` is `Some` iff `scene.aa`
-        // is `Some` (both derive from the same `scene.aa.is_some()` arm at the call site).
+        // carries, or `None` on the OFF path. `aa_sampler` is FXAA-only (feeds the `fxaa_set`
+        // builder below); it is `None` under SMAA even though `aa_out` is `Some` (SMAA's final
+        // target). Lockstep invariant: `aa_out` arms iff EITHER post-process mode is armed —
+        // `scene.aa` (FXAA) OR `scene.smaa` (SMAA) — both routing through the same `aa_imgs` gate.
         let aa_sampler = scene.aa.as_ref().map(|a| a.sampler);
         debug_assert_eq!(
             aa_out.is_some(),
-            aa_sampler.is_some(),
-            "invariant: aa_out and scene.aa must arm/disarm together"
+            scene.aa.is_some() || scene.smaa.is_some(),
+            "invariant: aa_out arms/disarms with (scene.aa || scene.smaa)"
         );
 
         // The present-blit set RING, written ONCE here: slot `i` is one COMBINED_IMAGE_SAMPLER
@@ -1761,6 +1942,267 @@ impl DeferredSets {
             None => None,
         };
 
+        // Anti-aliasing Stage 2: the SMAA lockstep invariant (mirrors the `aa_sampler`
+        // check above) — `smaa_imgs` is `Some` iff `scene.smaa` is `Some` (both derive from
+        // the same `scene.smaa.is_some()` arm at the `create()` call site).
+        debug_assert_eq!(
+            smaa_imgs.is_some(),
+            scene.smaa.is_some(),
+            "invariant: smaa_imgs and scene.smaa must arm/disarm together"
+        );
+
+        // Anti-aliasing Stage 2: the three SMAA sets (edge → weight → blend), the NEW TERMINAL
+        // fallible set (W1) — built LAST, after `fxaa_set` (mutually exclusive with it — never
+        // both `Some`), so their own error path tears down EVERY prior set, `fxaa_set` included
+        // (an `Option`-guarded no-op under SMAA, present for symmetry with the fxaa_set ladder
+        // above). `None` when SMAA is off.
+        let (smaa_edge_set, smaa_weight_set, smaa_blend_set) = match (scene.smaa.as_ref(), smaa_imgs) {
+            (Some(smaa), Some(imgs)) => {
+                // Pass 1 (edge): scene.present_layout, lit[i] + smaa.sampler (mirrors fxaa_set's
+                // own shape exactly, distinct sampler).
+                let mut edge_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+                    [const { None }; FRAMES_IN_FLIGHT];
+                let mut failure: Option<crate::error::VulkanError> = None;
+                for (slot, dst) in edge_slots.iter_mut().enumerate() {
+                    let entries = [BindGroupEntry::CombinedImage {
+                        texture: &core.lit[slot],
+                        sampler: smaa.sampler,
+                    }];
+                    let desc = BindGroupDesc::<Vulkan> {
+                        layout: scene.present_layout,
+                        entries: &entries,
+                    };
+                    match RhiDevice::create_bind_group(ctx, &desc) {
+                        Ok(g) => *dst = Some(g),
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                    }
+                }
+                if let Some(e) = failure {
+                    // SAFETY: the edge slots already built [0..slot) + everything built prior
+                    // (the `fxaa_set` `Option`-guarded no-op under SMAA + the (optional) HWRT
+                    // resolve ring + the present ring + the (optional) ddgi-update/ssao/cull +
+                    // the resolve & vocab rings) were created on `ctx`; referenced by no
+                    // submission; each destroyed exactly once (reverse acquisition).
+                    unsafe {
+                        for s in edge_slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(fs) = fxaa_set {
+                            for g in fs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        #[cfg(feature = "hwrt")]
+                        if let Some(hs) = resolve_set_hwrt {
+                            for g in hs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in present_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        if let Some(du) = ddgi_update_set {
+                            RhiDevice::destroy_bind_group(ctx, du);
+                        }
+                        if let Some(ss) = ssao_set {
+                            for g in ss {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(cs) = cull_set {
+                            for g in cs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in resolve_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        for g in vocab_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    return Err(SwapchainError::DepthImage(e));
+                }
+                let edge_set: [VulkanBindGroup; FRAMES_IN_FLIGHT] = edge_slots.map(|s| {
+                    s.expect("invariant: every smaa edge ring slot built before reaching here")
+                });
+
+                // Pass 2 (weight): smaa.weight_layout, edges[i] + area_tex + search_tex.
+                let mut weight_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+                    [const { None }; FRAMES_IN_FLIGHT];
+                let mut failure: Option<crate::error::VulkanError> = None;
+                for (slot, dst) in weight_slots.iter_mut().enumerate() {
+                    let entries = [
+                        BindGroupEntry::CombinedImage {
+                            texture: &imgs.edges[slot],
+                            sampler: smaa.sampler,
+                        },
+                        BindGroupEntry::CombinedImage {
+                            texture: smaa.area_tex,
+                            sampler: smaa.sampler,
+                        },
+                        BindGroupEntry::CombinedImage {
+                            texture: smaa.search_tex,
+                            sampler: smaa.sampler,
+                        },
+                    ];
+                    let desc = BindGroupDesc::<Vulkan> {
+                        layout: smaa.weight_layout,
+                        entries: &entries,
+                    };
+                    match RhiDevice::create_bind_group(ctx, &desc) {
+                        Ok(g) => *dst = Some(g),
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                    }
+                }
+                if let Some(e) = failure {
+                    // SAFETY: the weight slots already built [0..slot) + the fully-built
+                    // `edge_set` + everything built prior were created on `ctx`; referenced by
+                    // no submission; each destroyed exactly once (reverse acquisition).
+                    unsafe {
+                        for s in weight_slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in edge_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        if let Some(fs) = fxaa_set {
+                            for g in fs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        #[cfg(feature = "hwrt")]
+                        if let Some(hs) = resolve_set_hwrt {
+                            for g in hs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in present_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        if let Some(du) = ddgi_update_set {
+                            RhiDevice::destroy_bind_group(ctx, du);
+                        }
+                        if let Some(ss) = ssao_set {
+                            for g in ss {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(cs) = cull_set {
+                            for g in cs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in resolve_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        for g in vocab_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    return Err(SwapchainError::DepthImage(e));
+                }
+                let weight_set: [VulkanBindGroup; FRAMES_IN_FLIGHT] = weight_slots.map(|s| {
+                    s.expect("invariant: every smaa weight ring slot built before reaching here")
+                });
+
+                // Pass 3 (blend): smaa.blend_layout, lit[i] + weights[i].
+                let mut blend_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+                    [const { None }; FRAMES_IN_FLIGHT];
+                let mut failure: Option<crate::error::VulkanError> = None;
+                for (slot, dst) in blend_slots.iter_mut().enumerate() {
+                    let entries = [
+                        BindGroupEntry::CombinedImage {
+                            texture: &core.lit[slot],
+                            sampler: smaa.sampler,
+                        },
+                        BindGroupEntry::CombinedImage {
+                            texture: &imgs.weights[slot],
+                            sampler: smaa.sampler,
+                        },
+                    ];
+                    let desc =
+                        BindGroupDesc::<Vulkan> { layout: smaa.blend_layout, entries: &entries };
+                    match RhiDevice::create_bind_group(ctx, &desc) {
+                        Ok(g) => *dst = Some(g),
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                    }
+                }
+                if let Some(e) = failure {
+                    // SAFETY: the blend slots already built [0..slot) + the fully-built
+                    // `weight_set` + `edge_set` + everything built prior were created on `ctx`;
+                    // referenced by no submission; each destroyed exactly once (reverse
+                    // acquisition).
+                    unsafe {
+                        for s in blend_slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in weight_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        for g in edge_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        if let Some(fs) = fxaa_set {
+                            for g in fs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        #[cfg(feature = "hwrt")]
+                        if let Some(hs) = resolve_set_hwrt {
+                            for g in hs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in present_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        if let Some(du) = ddgi_update_set {
+                            RhiDevice::destroy_bind_group(ctx, du);
+                        }
+                        if let Some(ss) = ssao_set {
+                            for g in ss {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(cs) = cull_set {
+                            for g in cs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in resolve_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        for g in vocab_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    return Err(SwapchainError::DepthImage(e));
+                }
+                let blend_set: [VulkanBindGroup; FRAMES_IN_FLIGHT] = blend_slots.map(|s| {
+                    s.expect("invariant: every smaa blend ring slot built before reaching here")
+                });
+
+                (Some(edge_set), Some(weight_set), Some(blend_set))
+            }
+            _ => (None, None, None),
+        };
+
         Ok(DeferredSets {
             vocab_set,
             resolve_set,
@@ -1771,6 +2213,9 @@ impl DeferredSets {
             #[cfg(feature = "hwrt")]
             resolve_set_hwrt,
             fxaa_set,
+            smaa_edge_set,
+            smaa_weight_set,
+            smaa_blend_set,
         })
     }
 
@@ -1780,14 +2225,32 @@ impl DeferredSets {
     /// # Safety
     ///
     /// `ctx` is live; no submission references these descriptor sets; each is destroyed exactly once
-    /// (the by-value `self`). The `cull`/`ssao`/`ddgi-update`/`resolve-hwrt`/`fxaa` sets are
+    /// (the by-value `self`). The `cull`/`ssao`/`ddgi-update`/`resolve-hwrt`/`fxaa`/`smaa_*` sets are
     /// `Option`-guarded (present only when their feature was wired).
     unsafe fn destroy(self, ctx: &VulkanContext) {
         // SAFETY: per the contract `ctx` is live and nothing references these sets; each was created
         // on `ctx` and is destroyed exactly once, in reverse acquisition order.
         unsafe {
-            // Anti-aliasing Stage 1: the FXAA input set RING (last-acquired), `Option`-guarded
-            // (present only when `scene.aa` was armed).
+            // Anti-aliasing Stage 2: the three SMAA sets (last-acquired), `Option`-guarded
+            // (present only when `scene.smaa` was armed). Reverse build order: blend → weight →
+            // edge.
+            if let Some(bs) = self.smaa_blend_set {
+                for g in bs {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            if let Some(ws) = self.smaa_weight_set {
+                for g in ws {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            if let Some(es) = self.smaa_edge_set {
+                for g in es {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            // Anti-aliasing Stage 1: the FXAA input set RING, `Option`-guarded (present only
+            // when `scene.aa` was armed).
             if let Some(fs) = self.fxaa_set {
                 for g in fs {
                     RhiDevice::destroy_bind_group(ctx, g);
@@ -2473,6 +2936,32 @@ impl GBufferTargets {
         RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
     }
 
+    /// Anti-aliasing Stage 2 (W4 — Decision "left byte-for-byte untouched"): a
+    /// FORMAT-PARAMETERIZED sibling of [`Self::create_gbuffer_image`], used ONLY by
+    /// [`SmaaImages`] (the SMAA `edges`/`weights` targets need `R8G8_UNORM`/`R8G8B8A8_UNORM`
+    /// respectively — NOT the fixed [`GBUFFER_FORMAT`] `create_gbuffer_image` hardcodes). A
+    /// NEW standalone function, not a re-point of `create_gbuffer_image` — every existing
+    /// caller of `create_gbuffer_image` stays byte-for-byte unchanged.
+    fn create_gbuffer_image_fmt(
+        ctx: &VulkanContext,
+        extent: VkExtent2D,
+        format: Format,
+        usage: ImageUsage,
+    ) -> Result<VulkanTexture, SwapchainError> {
+        let desc = TextureDesc {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+            format,
+            dimension: TextureDimension::D2,
+            usage,
+            array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
+        };
+        RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
+    }
+
     /// Creates the Lighting-L0b `gViewT` lane: a 2D `R32_SFLOAT` STORAGE image at `extent`
     /// (the marcher's surface ray param `t`). A separate helper from
     /// [`Self::create_gbuffer_image`] because the lane is `R32_SFLOAT`, not the RGBA8
@@ -2842,6 +3331,14 @@ impl GBufferTargets {
         scene: &GBufferScene<'_>,
         extent: VkExtent2D,
     ) -> Result<Self, SwapchainError> {
+        // Anti-aliasing campaign O1: `scene.aa` (FXAA) and `scene.smaa` (SMAA) are mutually
+        // exclusive by construction (the `scene()` call site arms at most one) — an explicit,
+        // zero-release-cost invariant check.
+        debug_assert!(
+            !(scene.aa.is_some() && scene.smaa.is_some()),
+            "invariant: scene.aa and scene.smaa are mutually exclusive"
+        );
+
         // === Sub-bundle builds (order-preserving — see the `CoreImages` / `DeferredSets` docs). ===
         // Each `build` drains its OWN partials on failure; the orchestrator tears down the
         // (fully-built) earlier bundles in reverse acquisition order — the cross-bundle O(n²)
@@ -2860,11 +3357,11 @@ impl GBufferTargets {
             }
         };
 
-        // Anti-aliasing Stage 1: the aa_out image ring, built ONLY when `scene.aa` is armed —
-        // `None` is the 0%-gate (no image, no fxaa_set, present samples `lit`). Built after
-        // shadow-vis (so its own Err arm destroys shadow-vis + core, mirroring the existing
-        // image-stage error weave).
-        let aa_imgs: Option<AaImages> = if scene.aa.is_some() {
+        // Anti-aliasing campaign: the aa_out image ring, built ONLY when EITHER `scene.aa`
+        // (FXAA) or `scene.smaa` (SMAA) is armed — `None` is the 0%-gate (no image, no
+        // fxaa_set/smaa sets, present samples `lit`). Built after shadow-vis (so its own Err
+        // arm destroys shadow-vis + core, mirroring the existing image-stage error weave).
+        let aa_imgs: Option<AaImages> = if scene.aa.is_some() || scene.smaa.is_some() {
             match AaImages::build(ctx, extent) {
                 Ok(a) => Some(a),
                 Err(e) => {
@@ -2885,9 +3382,41 @@ impl GBufferTargets {
             None
         };
         debug_assert_eq!(
-            scene.aa.is_some(),
+            scene.aa.is_some() || scene.smaa.is_some(),
             aa_imgs.is_some(),
-            "invariant: aa_imgs must arm/disarm in lockstep with scene.aa"
+            "invariant: aa_imgs must arm/disarm in lockstep with (scene.aa || scene.smaa)"
+        );
+
+        // Anti-aliasing Stage 2: the SMAA `edges`/`weights` image rings, built ONLY when
+        // `scene.smaa` is armed — built AFTER `aa_imgs` so its own Err arm destroys aa_imgs +
+        // shadow-vis + core, mirroring the existing image-stage error weave.
+        let smaa_imgs: Option<SmaaImages> = if scene.smaa.is_some() {
+            match SmaaImages::build(ctx, extent) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    // SAFETY: `aa_imgs` + the shadow-vis images (hwrt) + `core` were built above
+                    // on `ctx`, referenced by no submission; each destroyed exactly once, reverse
+                    // acquisition (aa_imgs → shadow-vis → core).
+                    unsafe {
+                        if let Some(a) = aa_imgs {
+                            a.destroy(ctx);
+                        }
+                        #[cfg(feature = "hwrt")]
+                        if let Some(v) = shadow_vis_imgs {
+                            v.destroy(ctx);
+                        }
+                        core.destroy(ctx);
+                    }
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
+        debug_assert_eq!(
+            scene.smaa.is_some(),
+            smaa_imgs.is_some(),
+            "invariant: smaa_imgs must arm/disarm in lockstep with scene.smaa"
         );
 
         // The L1 froxel buffers (or the light-table placeholder when L1 is off) — computed ONCE and
@@ -2902,13 +3431,17 @@ impl GBufferTargets {
             cluster_grid_buf,
             light_index_buf,
             aa_imgs.as_ref().map(|a| &a.aa_out),
+            smaa_imgs.as_ref(),
         ) {
             Ok(s) => s,
             Err(e) => {
-                // SAFETY: `aa_imgs` + the shadow-vis images (hwrt) + `core` were built above on
-                // `ctx`, referenced by no submission; each destroyed exactly once, reverse
-                // acquisition (aa_imgs → shadow-vis → core).
+                // SAFETY: `smaa_imgs` + `aa_imgs` + the shadow-vis images (hwrt) + `core` were
+                // built above on `ctx`, referenced by no submission; each destroyed exactly
+                // once, reverse acquisition (smaa_imgs → aa_imgs → shadow-vis → core).
                 unsafe {
+                    if let Some(s) = smaa_imgs {
+                        s.destroy(ctx);
+                    }
                     if let Some(a) = aa_imgs {
                         a.destroy(ctx);
                     }
@@ -2957,13 +3490,16 @@ impl GBufferTargets {
             ),
             Ok(None) => (None, None, None, None),
             Err(e) => {
-                // SAFETY: the deferred sets + `aa_imgs` + the shadow-vis images + `core` were built
-                // above on `ctx`, referenced by no submission; each is destroyed exactly once, in
-                // reverse acquisition order (deferred sets → aa_imgs → shadow-vis → core).
-                // `build_shadow_denoise_sets` already drained its OWN partial allocations before
-                // returning `Err`.
+                // SAFETY: the deferred sets + `smaa_imgs` + `aa_imgs` + the shadow-vis images +
+                // `core` were built above on `ctx`, referenced by no submission; each is
+                // destroyed exactly once, in reverse acquisition order (deferred sets →
+                // smaa_imgs → aa_imgs → shadow-vis → core). `build_shadow_denoise_sets`
+                // already drained its OWN partial allocations before returning `Err`.
                 unsafe {
                     deferred.destroy(ctx);
+                    if let Some(s) = smaa_imgs {
+                        s.destroy(ctx);
+                    }
                     if let Some(a) = aa_imgs {
                         a.destroy(ctx);
                     }
@@ -2980,6 +3516,10 @@ impl GBufferTargets {
         // hwrt tail below + the `Self` construction stay byte-identical.
         let CoreImages { depth, albedo, normal, material, lit, viewt, ssao, pbr } = core;
         let aa_out: Option<[VulkanTexture; FRAMES_IN_FLIGHT]> = aa_imgs.map(|a| a.aa_out);
+        let (smaa_edges, smaa_weights) = match smaa_imgs {
+            Some(SmaaImages { edges, weights }) => (Some(edges), Some(weights)),
+            None => (None, None),
+        };
         #[cfg(feature = "hwrt")]
         let (shadow_vis, shadow_vis2) = match shadow_vis_imgs {
             Some(ShadowVisImages { shadow_vis, shadow_vis2 }) => {
@@ -2997,6 +3537,9 @@ impl GBufferTargets {
             #[cfg(feature = "hwrt")]
             resolve_set_hwrt,
             fxaa_set,
+            smaa_edge_set,
+            smaa_weight_set,
+            smaa_blend_set,
         } = deferred;
 
         // HW-RT Rung 3b: the three temporal denoise target rings (motion_vec RG16F,
@@ -3093,7 +3636,12 @@ impl GBufferTargets {
             ssao_set,
             aa_out,
             fxaa_set,
-            aa_armed: scene.aa.is_some(),
+            smaa_edges,
+            smaa_weights,
+            smaa_edge_set,
+            smaa_weight_set,
+            smaa_blend_set,
+            aa_arm: AaArm::from_scene(scene),
             #[cfg(feature = "hwrt")]
             shadow_vis_resolve_set,
             #[cfg(feature = "hwrt")]
@@ -3118,10 +3666,10 @@ impl GBufferTargets {
 
     /// Ensures the G-buffer images + descriptor sets exist and match `extent`,
     /// (re)building them through `ctx` when absent (first frame), stale (resize), OR an
-    /// anti-aliasing arm-state change (`scene.aa.is_some()` flips) — a genuine, fence-safe
-    /// live AA toggle riding the SAME rebuild path a resize uses. The vocabulary + present
-    /// descriptor sets are re-written here — and ONLY here — so the per-frame recorder
-    /// records no `vkUpdateDescriptorSets`.
+    /// anti-aliasing arm-state change (`AaArm::from_scene(scene)` flips — Off↔Fxaa↔Smaa) —
+    /// a genuine, fence-safe live AA toggle riding the SAME rebuild path a resize uses. The
+    /// vocabulary + present descriptor sets are re-written here — and ONLY here — so the
+    /// per-frame recorder records no `vkUpdateDescriptorSets`.
     ///
     /// The caller ([`Renderer::render_gbuffer_frame`]) calls this only after
     /// fence-waiting the frame slot, so no in-flight frame still references the old
@@ -3137,7 +3685,7 @@ impl GBufferTargets {
         if let Some(t) = targets.as_ref()
             && t.extent.width == extent.width
             && t.extent.height == extent.height
-            && t.aa_armed == scene.aa.is_some()
+            && t.aa_arm == AaArm::from_scene(scene)
         {
             return Ok(());
         }
@@ -3297,6 +3845,9 @@ impl GBufferTargets {
                 #[cfg(feature = "hwrt")]
                 resolve_set_hwrt: self.resolve_set_hwrt,
                 fxaa_set: self.fxaa_set,
+                smaa_edge_set: self.smaa_edge_set,
+                smaa_weight_set: self.smaa_weight_set,
+                smaa_blend_set: self.smaa_blend_set,
             }
             .destroy(ctx);
             // HW-RT Rung 3b: the three temporal denoise target RINGS (motion_vec / hist /
@@ -3332,6 +3883,19 @@ impl GBufferTargets {
             }
             #[cfg(feature = "hwrt")]
             if let Some(r) = self.shadow_vis {
+                for t in r {
+                    RhiDevice::destroy_texture(ctx, t);
+                }
+            }
+            // Anti-aliasing Stage 2: the smaa_weights then smaa_edges image RINGS (built AFTER
+            // aa_imgs, so destroyed BEFORE aa_out here — reverse acquisition). `Option`-guarded
+            // (`None` when SMAA was off).
+            if let Some(r) = self.smaa_weights {
+                for t in r {
+                    RhiDevice::destroy_texture(ctx, t);
+                }
+            }
+            if let Some(r) = self.smaa_edges {
                 for t in r {
                     RhiDevice::destroy_texture(ctx, t);
                 }
@@ -3568,7 +4132,12 @@ mod tests {
             ssao_set: None,
             aa_out: None,
             fxaa_set: None,
-            aa_armed: false,
+            smaa_edges: None,
+            smaa_weights: None,
+            smaa_edge_set: None,
+            smaa_weight_set: None,
+            smaa_blend_set: None,
+            aa_arm: AaArm::Off,
             ddgi_update_set: None,
             present_set: bg_ring(),
             extent: VkExtent2D::default(),
@@ -3627,7 +4196,12 @@ mod tests {
             ssao_set: None,
             aa_out: None,
             fxaa_set: None,
-            aa_armed: false,
+            smaa_edges: None,
+            smaa_weights: None,
+            smaa_edge_set: None,
+            smaa_weight_set: None,
+            smaa_blend_set: None,
+            aa_arm: AaArm::Off,
             shadow_vis_resolve_set: shadow_vis_resolve.then(bg_ring),
             shadow_denoised_resolve_set: shadow_denoised_resolve.then(bg_ring),
             shadow_atrous_sets: None,

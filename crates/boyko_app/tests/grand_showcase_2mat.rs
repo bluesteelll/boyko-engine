@@ -173,11 +173,13 @@ fn grand_showcase_2mat_screenshot_dump() {
     let mut app = App::new();
     app.add_plugins(EnginePlugins::window("boyko_engine grand showcase materials", 512, 512));
     app.add_startup_system(setup);
-    // Owner-eval AA oracle: `BOYKO_AA=fxaa` arms the FXAA post-process pass on this
-    // high-contrast 5-sphere scene (real silhouette edges for FXAA to smooth). Unset ⇒ the
-    // `AaPlugin` default (`AaMode::Off`) ⇒ the pinned `f6147f90` golden is unchanged.
+    // Owner-eval AA oracle: `BOYKO_AA=fxaa`/`smaa` arms the FXAA/SMAA post-process pass on
+    // this high-contrast 5-sphere scene (real silhouette edges for AA to smooth). Unset ⇒
+    // the `AaPlugin` default (`AaMode::Off`) ⇒ the pinned `f6147f90` golden is unchanged.
     if std::env::var("BOYKO_AA").as_deref() == Ok("fxaa") {
         app.insert_resource(AaConfig { mode: AaMode::Fxaa });
+    } else if std::env::var("BOYKO_AA").as_deref() == Ok("smaa") {
+        app.insert_resource(AaConfig { mode: AaMode::Smaa });
     }
     app.run();
 }

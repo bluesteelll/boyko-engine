@@ -102,9 +102,9 @@ struct EvalKnobs {
     win: u32,
     /// `BOYKO_CSM=off` — disables the CSM shadow-cascade insert (default: enabled).
     csm_off: bool,
-    /// `BOYKO_AA` — the post-process anti-aliasing mode (`fxaa` → [`AaMode::Fxaa`], else
-    /// [`AaMode::Off`], the default). The Stage-1 AA visual-oracle knob: unset ⇒ Off ⇒
-    /// byte-identical to the no-AA dump.
+    /// `BOYKO_AA` — the post-process anti-aliasing mode (`fxaa` → [`AaMode::Fxaa`], `smaa` →
+    /// [`AaMode::Smaa`], else [`AaMode::Off`], the default). The AA campaign visual-oracle
+    /// knob: unset ⇒ Off ⇒ byte-identical to the no-AA dump.
     aa_mode: AaMode,
 }
 
@@ -137,6 +137,7 @@ impl EvalKnobs {
         let csm_off = std::env::var("BOYKO_CSM").ok().as_deref() == Some("off");
         let aa_mode = match std::env::var("BOYKO_AA").ok().as_deref() {
             Some("fxaa") => AaMode::Fxaa,
+            Some("smaa") => AaMode::Smaa,
             _ => AaMode::Off,
         };
         Self {

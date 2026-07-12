@@ -260,6 +260,10 @@ pub mod snap_interpolation;
 /// seam (`Off` = the byte-identical 0%-gate).
 pub mod aa_config;
 pub mod aa_plugin;
+/// Anti-aliasing Stage 2 — the embedded SMAA 1x LUT binaries ([`smaa_luts::AREA_TEX_BYTES`] /
+/// [`smaa_luts::SEARCH_TEX_BYTES`]) extracted from the canonical iryoku headers, pinned by
+/// SHA-256 in this module's own unit tests.
+pub mod smaa_luts;
 pub mod ssao_config;
 pub mod ssao_plugin;
 /// Per-vertex tangent generation (Lengyel's method,
@@ -403,12 +407,16 @@ pub use shadow_plugin::ShadowAtlasPlugin;
 pub use snap_interpolation::{SnapInterpolation, TeleportCommandsExt, snap_apply};
 pub use aa_config::{AaConfig, AaMode, ResolvedAa, resolve_aa, resolve_aa_policy};
 pub use aa_plugin::AaPlugin;
+pub use smaa_luts::{
+    AREA_TEX_BYTES, AREA_TEX_H, AREA_TEX_SHA256, AREA_TEX_W, SEARCH_TEX_BYTES, SEARCH_TEX_H,
+    SEARCH_TEX_SHA256, SEARCH_TEX_W,
+};
 pub use ssao_config::{ResolvedSsao, SsaoConfig, SsaoQuality, resolve_ssao, resolve_ssao_policy};
 pub use ssao_plugin::SsaoPlugin;
 pub use tangent::generate_tangents;
 pub use texture::{
     ColorSpace, OrphanedTextureGpu, TextureAssetsExt, TextureGpu, build_texture_gpu,
-    load_material_folder, mip_levels_for, upload_texture_2d,
+    load_material_folder, mip_levels_for, upload_texture_2d, upload_texture_2d_raw,
 };
 pub use texture_data::TextureData;
 pub use upload::{

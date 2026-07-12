@@ -38,7 +38,8 @@ use boyko_rhi_vulkan::compute::{
     gbuffer_mrt_fs_spirv,
     gbuffer_mrt_pm_fs_spirv, gbuffer_mrt_pm_vs_spirv, gbuffer_mrt_tex_fs_spirv,
     gbuffer_mrt_tex_vs_spirv, gbuffer_mrt_vs_spirv, interp_instances_spirv, punctual_depth_fs_spirv,
-    punctual_depth_vs_spirv, sdf_gbuffer_composite_spirv, sdf_probe_update_spirv, tile_grid_extent,
+    punctual_depth_vs_spirv, sdf_gbuffer_composite_spirv, sdf_probe_update_spirv,
+    smaa_blend_fs_spirv, smaa_edge_fs_spirv, smaa_weight_fs_spirv, tile_grid_extent,
 };
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::ffi::VkDescriptorSet;
@@ -50,7 +51,7 @@ use boyko_rhi_vulkan::rhi_impl::{
 use boyko_rhi_vulkan::swapchain::{
     AaActivation, CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
     GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene,
-    InterpActivation, PunctualDepthActivation,
+    InterpActivation, PunctualDepthActivation, SmaaActivation,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::accel::BoundAccelStruct;
@@ -71,14 +72,15 @@ use boyko_rhi_vulkan::texture::VulkanTexture;
 use boyko_sdf_math::SdfEdit;
 
 use boyko_render::{
-    AaMode, BindlessTextureTable, DDGI_UPDATE_UBO_BYTES, DdgiConfig, DdgiUpdateConfig,
-    DdgiUpdateUbo, GI_MAX_RAYS, GPU_LIGHT_BYTES, GPU_LIGHT_WORDS, GPU_TRANSFORM3D_BYTES, GpuLight,
-    LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_BYTES, LightHeaderGpu, LightingConfig, M_SLOTS,
-    MAX_LIGHTS, MaterialTable, MESH_VERTEX_STRIDE, PER_INSTANCE_MATERIAL_BYTES,
-    PER_INSTANCE_MATERIAL_TEX_BYTES, RESOLVED_CSM_BYTES, RESOLVED_DDGI_BYTES,
-    RESOLVED_SHADOW_ATLAS_BYTES, RETIRE_DELAY, ResolvedCsm, ResolvedShadowAtlas, RetiredGpuBuffers,
-    SHADOW_DIM, Vertex, ddgi_update_dispatch_groups, fill_fibonacci_ray_table, pack_ddgi_update_ubo,
-    resolve_ddgi,
+    AREA_TEX_BYTES, AREA_TEX_H, AREA_TEX_W, AaMode, BindlessTextureTable, DDGI_UPDATE_UBO_BYTES,
+    DdgiConfig, DdgiUpdateConfig, DdgiUpdateUbo, GI_MAX_RAYS, GPU_LIGHT_BYTES, GPU_LIGHT_WORDS,
+    GPU_TRANSFORM3D_BYTES, GpuLight, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_BYTES, LightHeaderGpu,
+    LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialTable, MESH_VERTEX_STRIDE,
+    PER_INSTANCE_MATERIAL_BYTES, PER_INSTANCE_MATERIAL_TEX_BYTES, RESOLVED_CSM_BYTES,
+    RESOLVED_DDGI_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, RETIRE_DELAY, ResolvedCsm,
+    ResolvedShadowAtlas, RetiredGpuBuffers, SEARCH_TEX_BYTES, SEARCH_TEX_H, SEARCH_TEX_W,
+    SHADOW_DIM, Vertex, ddgi_update_dispatch_groups, fill_fibonacci_ray_table,
+    pack_ddgi_update_ubo, resolve_ddgi, upload_texture_2d_raw,
 };
 #[cfg(feature = "hwrt")]
 use boyko_ecs::ecs::core::asset::Assets;
@@ -639,6 +641,35 @@ pub(crate) struct GpuSceneBundles {
     /// Anti-aliasing Stage 1: the dedicated LINEAR/ClampToEdge sampler FXAA's sub-texel
     /// tap needs — DISTINCT from the NEAREST [`Self::present_sampler`].
     fxaa_sampler: VulkanSampler,
+    /// Anti-aliasing Stage 2: pass 1 (edge detection) fullscreen graphics pipeline
+    /// (`fullscreen_sample.vs` + `smaa_edge.fs`), built unconditionally at boot (like
+    /// [`Self::fxaa_pipeline`]). `color_formats[0]` == `R8G8_UNORM` (`smaa_edges`' format);
+    /// reuses [`Self::present_layout`] (1 CIS: `lit`).
+    smaa_edge_pipeline: VulkanGraphicsPipeline,
+    /// Anti-aliasing Stage 2: pass 2 (blending-weight calculation) fullscreen graphics
+    /// pipeline (`smaa_weight.fs`). `color_formats[0]` == `R8G8B8A8_UNORM` (`smaa_weights`'
+    /// format); layout = [`Self::smaa_weight_layout`] (3 CIS).
+    smaa_weight_pipeline: VulkanGraphicsPipeline,
+    /// Anti-aliasing Stage 2: pass 3 (neighborhood blending) fullscreen graphics pipeline
+    /// (`smaa_blend.fs`). `color_formats[0]` == `R8G8B8A8_UNORM` (`aa_out`'s format — the
+    /// same target FXAA's single pass writes); layout = [`Self::smaa_blend_layout`] (2 CIS).
+    smaa_blend_pipeline: VulkanGraphicsPipeline,
+    /// Anti-aliasing Stage 2: the 3-CIS bind-group LAYOUT `{ edges @0, areaTex @1, searchTex
+    /// @2 }` [`Self::smaa_weight_pipeline`] declares at set 0.
+    smaa_weight_layout: VulkanBindGroupLayout,
+    /// Anti-aliasing Stage 2: the 2-CIS bind-group LAYOUT `{ lit @0, weights @1 }`
+    /// [`Self::smaa_blend_pipeline`] declares at set 0.
+    smaa_blend_layout: VulkanBindGroupLayout,
+    /// Anti-aliasing Stage 2: the dedicated LINEAR/ClampToEdge sampler EVERY SMAA tap uses
+    /// (`lit`, `edges`, `weights`, `areaTex`, `searchTex`) — a SEPARATE boot object from
+    /// [`Self::fxaa_sampler`] (isolation; the FXAA path stays untouched).
+    smaa_sampler: VulkanSampler,
+    /// Anti-aliasing Stage 2: the boot-resident `AreaTex` LUT (160×560, `R8G8_UNORM`),
+    /// uploaded once via `boyko_render::upload_texture_2d_raw` and never touched again.
+    smaa_area_tex: VulkanTexture,
+    /// Anti-aliasing Stage 2: the boot-resident `SearchTex` LUT (64×16, `R8_UNORM`),
+    /// uploaded once via `boyko_render::upload_texture_2d_raw` and never touched again.
+    smaa_search_tex: VulkanTexture,
     // ── CSM / atlas (bound-but-unread trios; depth passes OFF in R3) ─────────
     csm: CsmResources,
     /// `ceil(composite pixels / LOCAL_SIZE_X)` — the marcher + resolve dispatch
@@ -1488,12 +1519,162 @@ impl GpuSceneBundles {
         )
         .expect("invariant: FXAA graphics pipeline create");
 
+        // Anti-aliasing Stage 2: the SMAA 1x boot bundle — 2 dedicated layouts, 1 dedicated
+        // sampler, 3 fullscreen pipelines, 2 boot-resident LUTs — built UNCONDITIONALLY here
+        // (like `fxaa_pipeline` above) so the mode can flip at runtime without a boot-time
+        // rebuild. Reuses `sample_vs` (the fullscreen-triangle VS shared by all three SMAA
+        // passes) and `present_layout` (the edge pass's 1-CIS shape). Boot-time creation
+        // records no command / samples no OFF pixel — byte-identical to the golden
+        // regardless of this bundle's existence.
+        let smaa_weight_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::CombinedImageSampler,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::CombinedImageSampler,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        count: 1,
+                        kind: DescriptorKind::CombinedImageSampler,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: SMAA weight bind-group layout create");
+        let smaa_blend_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::CombinedImageSampler,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::CombinedImageSampler,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: SMAA blend bind-group layout create");
+        let smaa_sampler = RhiDevice::create_sampler(
+            device,
+            &SamplerDesc {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                address_mode: AddressMode::ClampToEdge,
+                mip: MipMode::None,
+                compare: None,
+            },
+        )
+        .expect("invariant: SMAA linear/clamp sampler create");
+        let smaa_edge_fs = RhiDevice::create_shader_module(device, smaa_edge_fs_spirv())
+            .expect("invariant: SMAA edge fragment shader module create");
+        let smaa_edge_pipeline = RhiDevice::create_graphics_pipeline(
+            device,
+            &GraphicsPipelineDesc {
+                vertex_module: &sample_vs,
+                vertex_entry: c"main",
+                fragment_module: &smaa_edge_fs,
+                fragment_entry: c"main",
+                // `smaa_edges`' format (R8G8_UNORM) — NOT `swap_format`.
+                color_formats: &[Format::R8G8Unorm],
+                depth_format: None,
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: None,
+                push_constant_bytes: 16,
+                bind_group_layout: Some(&present_layout),
+                blend: None,
+                cull_mode: CullMode::None,
+                depth_bias: None,
+            },
+        )
+        .expect("invariant: SMAA edge graphics pipeline create");
+        let smaa_weight_fs = RhiDevice::create_shader_module(device, smaa_weight_fs_spirv())
+            .expect("invariant: SMAA weight fragment shader module create");
+        let smaa_weight_pipeline = RhiDevice::create_graphics_pipeline(
+            device,
+            &GraphicsPipelineDesc {
+                vertex_module: &sample_vs,
+                vertex_entry: c"main",
+                fragment_module: &smaa_weight_fs,
+                fragment_entry: c"main",
+                // `smaa_weights`' format (R8G8B8A8_UNORM) — NOT `swap_format`.
+                color_formats: &[Format::R8G8B8A8Unorm],
+                depth_format: None,
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: None,
+                push_constant_bytes: 16,
+                bind_group_layout: Some(&smaa_weight_layout),
+                blend: None,
+                cull_mode: CullMode::None,
+                depth_bias: None,
+            },
+        )
+        .expect("invariant: SMAA weight graphics pipeline create");
+        let smaa_blend_fs = RhiDevice::create_shader_module(device, smaa_blend_fs_spirv())
+            .expect("invariant: SMAA blend fragment shader module create");
+        let smaa_blend_pipeline = RhiDevice::create_graphics_pipeline(
+            device,
+            &GraphicsPipelineDesc {
+                vertex_module: &sample_vs,
+                vertex_entry: c"main",
+                fragment_module: &smaa_blend_fs,
+                fragment_entry: c"main",
+                // `aa_out`'s format (R8G8B8A8_UNORM) — NOT `swap_format`.
+                color_formats: &[Format::R8G8B8A8Unorm],
+                depth_format: None,
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: None,
+                push_constant_bytes: 16,
+                bind_group_layout: Some(&smaa_blend_layout),
+                blend: None,
+                cull_mode: CullMode::None,
+                depth_bias: None,
+            },
+        )
+        .expect("invariant: SMAA blend graphics pipeline create");
+        let smaa_area_tex = upload_texture_2d_raw(
+            device,
+            AREA_TEX_W,
+            AREA_TEX_H,
+            AREA_TEX_BYTES,
+            Format::R8G8Unorm,
+        )
+        .expect("invariant: SMAA AreaTex LUT upload (boot stage)");
+        let smaa_search_tex = upload_texture_2d_raw(
+            device,
+            SEARCH_TEX_W,
+            SEARCH_TEX_H,
+            SEARCH_TEX_BYTES,
+            Format::R8Unorm,
+        )
+        .expect("invariant: SMAA SearchTex LUT upload (boot stage)");
+
         // The shader modules are consumed by pipeline creation; destroy them now
         // (mirrors the showcase's post-create module teardown).
         // SAFETY: every module was created on `ctx` above and is no longer
         // needed once its pipeline exists; each is destroyed exactly once; no
         // GPU work has been submitted yet.
         unsafe {
+            RhiDevice::destroy_shader_module(device, smaa_blend_fs);
+            RhiDevice::destroy_shader_module(device, smaa_weight_fs);
+            RhiDevice::destroy_shader_module(device, smaa_edge_fs);
             RhiDevice::destroy_shader_module(device, fxaa_fs);
             RhiDevice::destroy_shader_module(device, sample_fs);
             RhiDevice::destroy_shader_module(device, sample_vs);
@@ -1895,6 +2076,14 @@ impl GpuSceneBundles {
             depth_sampler,
             fxaa_pipeline,
             fxaa_sampler,
+            smaa_edge_pipeline,
+            smaa_weight_pipeline,
+            smaa_blend_pipeline,
+            smaa_weight_layout,
+            smaa_blend_layout,
+            smaa_sampler,
+            smaa_area_tex,
+            smaa_search_tex,
             csm,
             dispatch_group_count_x,
         }
@@ -2666,6 +2855,20 @@ impl GpuSceneBundles {
             // FXAA activation against the boot-built pipeline + dedicated LINEAR sampler.
             aa: matches!(aa_mode, AaMode::Fxaa)
                 .then(|| AaActivation { pipeline: &self.fxaa_pipeline, sampler: &self.fxaa_sampler }),
+            // Anti-aliasing Stage 2: `AaMode::Smaa` ⇒ `Some` — arms the 3-pass SMAA activation
+            // against the boot-built pipelines/layouts/sampler/LUTs. Mutually exclusive with
+            // `aa` above by construction (`matches!` on the SAME `aa_mode`, and `AaMode` is a
+            // single enum — at most one arm matches).
+            smaa: matches!(aa_mode, AaMode::Smaa).then(|| SmaaActivation {
+                edge_pipeline: &self.smaa_edge_pipeline,
+                weight_pipeline: &self.smaa_weight_pipeline,
+                blend_pipeline: &self.smaa_blend_pipeline,
+                weight_layout: &self.smaa_weight_layout,
+                blend_layout: &self.smaa_blend_layout,
+                sampler: &self.smaa_sampler,
+                area_tex: &self.smaa_area_tex,
+                search_tex: &self.smaa_search_tex,
+            }),
             mesh_draw,
             csm_cascade_texture: &self.csm.cascade,
             csm_compare_sampler: &self.csm.sampler,
@@ -3049,6 +3252,14 @@ impl GpuSceneBundles {
             self.csm.destroy(ctx);
             RhiDevice::destroy_graphics_pipeline(ctx, self.present_pipeline);
             RhiDevice::destroy_graphics_pipeline(ctx, self.fxaa_pipeline);
+            // Anti-aliasing Stage 2: the three SMAA pipelines — `smaa_edge_pipeline` shares
+            // `present_layout` with `fxaa_pipeline` (both destroyed before it, below); the
+            // weight/blend pipelines' own dedicated layouts are destroyed right after.
+            RhiDevice::destroy_graphics_pipeline(ctx, self.smaa_edge_pipeline);
+            RhiDevice::destroy_graphics_pipeline(ctx, self.smaa_weight_pipeline);
+            RhiDevice::destroy_graphics_pipeline(ctx, self.smaa_blend_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.smaa_weight_layout);
+            RhiDevice::destroy_bind_group_layout(ctx, self.smaa_blend_layout);
             RhiDevice::destroy_bind_group_layout(ctx, self.present_layout);
             RhiDevice::destroy_compute_pipeline(ctx, self.resolve_pipeline);
             // Render terminator-softening: the wrap-variant pipeline shares `resolve_layout`
@@ -3178,6 +3389,12 @@ impl GpuSceneBundles {
             RhiDevice::destroy_bind_group_layout(ctx, self.instance_layout);
             RhiDevice::destroy_sampler(ctx, self.present_sampler);
             RhiDevice::destroy_sampler(ctx, self.fxaa_sampler);
+            RhiDevice::destroy_sampler(ctx, self.smaa_sampler);
+            // Anti-aliasing Stage 2: the two boot-resident SMAA LUT textures (no dependents —
+            // no set still references them once the SMAA sets above are torn down by the
+            // `Renderer`/`GBufferTargets` teardown that runs before this fn).
+            RhiDevice::destroy_texture(ctx, self.smaa_area_tex);
+            RhiDevice::destroy_texture(ctx, self.smaa_search_tex);
             RhiDevice::destroy_sampler(ctx, self.depth_sampler);
             RhiDevice::destroy_buffer(ctx, self.vertex_buffer);
             RhiDevice::destroy_buffer(ctx, self.tiles_buffer);

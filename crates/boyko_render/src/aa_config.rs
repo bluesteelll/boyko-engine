@@ -24,10 +24,10 @@
 //!
 //! # Extensibility
 //!
-//! Stage 1 lands `Off` + `Fxaa`. Later stages ADD variants (`Smaa`, `Taa`, `Ssaa`) to
-//! [`AaMode`] — a purely additive change; each new mode plugs into the SAME framework (a
-//! post-process pass at the resolve→present seam writing the shared `aa_out` target the
-//! present samples).
+//! Stage 1 landed `Off` + `Fxaa`. Stage 2 adds `Smaa` (3-pass morphological AA). Later
+//! stages ADD variants (`Taa`, `Ssaa`) to [`AaMode`] — a purely additive change; each new
+//! mode plugs into the SAME framework (a post-process pass at the resolve→present seam
+//! writing the shared `aa_out` target the present samples).
 
 use boyko_macros::Resource;
 
@@ -43,7 +43,8 @@ use boyko_ecs::ecs::core::system::{Res, ResMut};
 /// there is NO redundant `enabled: bool` — exactly as
 /// [`SsaoQuality`](crate::ssao_config::SsaoQuality) keys off its `Off` variant.
 ///
-/// Stage 1 implements `Off` + `Fxaa`; `Smaa`/`Taa`/`Ssaa` land in later stages (additive).
+/// Stage 1 implemented `Off` + `Fxaa`; Stage 2 adds `Smaa`. `Taa`/`Ssaa` land in later
+/// stages (additive).
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum AaMode {
@@ -55,11 +56,17 @@ pub enum AaMode {
     /// FXAA (Fast Approximate Anti-Aliasing) — a single-pass luma-edge post-process
     /// (`shaders/fxaa.fs.hlsl`). Cheap spatial AA, no history / motion vectors / jitter.
     Fxaa,
+    /// SMAA 1x (Enhanced Subpixel Morphological Antialiasing, PRESET_HIGH) — a 3-pass
+    /// morphological post-process (edge detection → blending-weight calculation →
+    /// neighborhood blending; `shaders/smaa_{edge,weight,blend}.fs.hlsl`). Sharper
+    /// diagonal/corner edges than FXAA at a higher per-frame cost (3 passes + 2 LUT
+    /// reads vs FXAA's 1 pass).
+    Smaa,
 }
 
 impl AaMode {
     /// The stable mode word forwarded to the backend (the `#[repr(u32)]` discriminant).
-    /// `Off => 0`, `Fxaa => 1`.
+    /// `Off => 0`, `Fxaa => 1`, `Smaa => 2`.
     #[inline]
     pub const fn as_word(self) -> u32 {
         self as u32
@@ -177,6 +184,7 @@ mod tests {
     fn enabled_is_structural_mode_not_off() {
         // Capability is structural: every non-Off mode is enabled.
         assert!(AaConfig { mode: AaMode::Fxaa }.enabled(), "Fxaa must be enabled (mode != Off)");
+        assert!(AaConfig { mode: AaMode::Smaa }.enabled(), "Smaa must be enabled (mode != Off)");
         assert!(!AaConfig { mode: AaMode::Off }.enabled(), "Off is the disabled state");
     }
 
@@ -185,12 +193,14 @@ mod tests {
         // The backend forwards the `#[repr(u32)]` discriminant as a stable mode word.
         assert_eq!(AaMode::Off.as_word(), 0);
         assert_eq!(AaMode::Fxaa.as_word(), 1);
+        assert_eq!(AaMode::Smaa.as_word(), 2);
     }
 
     #[test]
     fn resolve_forwards_the_mode() {
         assert_eq!(resolve_aa(&AaConfig { mode: AaMode::Off }), ResolvedAa { mode: AaMode::Off });
         assert_eq!(resolve_aa(&AaConfig { mode: AaMode::Fxaa }), ResolvedAa { mode: AaMode::Fxaa });
+        assert_eq!(resolve_aa(&AaConfig { mode: AaMode::Smaa }), ResolvedAa { mode: AaMode::Smaa });
     }
 
     #[test]

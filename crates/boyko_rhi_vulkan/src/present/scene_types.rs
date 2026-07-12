@@ -545,6 +545,52 @@ pub struct AaActivation<'a> {
     pub sampler: &'a VulkanSampler,
 }
 
+/// Anti-aliasing Stage 2: the SMAA 1x (3-pass morphological AA) post-process activation
+/// threaded into [`GBufferScene::smaa`] to turn the SMAA pass ON. Mirrors [`AaActivation`]'s
+/// borrow-bundle shape (a `Copy` bundle of caller-owned pipeline/layout/sampler/LUT borrows);
+/// a PARALLEL field, not an enum sharing `AaActivation`'s slot — [`GBufferScene::aa`] stays
+/// byte-for-byte unchanged (Decision 1).
+///
+/// `None` on [`GBufferScene::smaa`] is the OFF path (the DEFAULT — the 0%-gate): no `aa_out`
+/// target, no `smaa_{edge,weight,blend}_set`, the present-blit samples `lit` directly, no SMAA
+/// pass recorded. `Some` arms the whole seam. Mutually exclusive with [`GBufferScene::aa`] at
+/// the populate site (`debug_assert!` at both `GBufferTargets::create` and the record site).
+#[derive(Clone, Copy)]
+pub struct SmaaActivation<'a> {
+    /// Pass-1 (edge detection) fullscreen graphics pipeline (`fullscreen_sample.vs` +
+    /// `smaa_edge.fs`). Layout = [`GBufferScene::present_layout`] (1 CIS: `lit`) + a 16-byte
+    /// FRAGMENT push range (`rt_metrics`). `color_formats[0]` == `R8G8_UNORM` (`edges`'
+    /// format).
+    pub edge_pipeline: &'a VulkanGraphicsPipeline,
+    /// Pass-2 (blending-weight calculation) fullscreen graphics pipeline (`smaa_weight.fs`).
+    /// Layout = [`Self::weight_layout`] (3 CIS) + a 16-byte FRAGMENT push range.
+    /// `color_formats[0]` == `R8G8B8A8_UNORM` (`weights`' format).
+    pub weight_pipeline: &'a VulkanGraphicsPipeline,
+    /// Pass-3 (neighborhood blending) fullscreen graphics pipeline (`smaa_blend.fs`). Layout
+    /// = [`Self::blend_layout`] (2 CIS) + a 16-byte FRAGMENT push range. `color_formats[0]`
+    /// == `R8G8B8A8_UNORM` (`aa_out`'s format — the same target FXAA's single pass writes).
+    pub blend_pipeline: &'a VulkanGraphicsPipeline,
+    /// The 3-CIS bind-group LAYOUT `{ edges @0, areaTex @1, searchTex @2 }` [`Self::weight_pipeline`]
+    /// declares at set 0. [`GBufferTargets`] writes a
+    /// `smaa_weight_set` against it once per extent.
+    pub weight_layout: &'a VulkanBindGroupLayout,
+    /// The 2-CIS bind-group LAYOUT `{ lit @0, weights @1 }` [`Self::blend_pipeline`] declares
+    /// at set 0. [`GBufferTargets`] writes a `smaa_blend_set` against it once per extent.
+    pub blend_layout: &'a VulkanBindGroupLayout,
+    /// LINEAR/ClampToEdge sampler bound with EVERY SMAA tap (`lit`, `edges`, `weights`,
+    /// `areaTex`, `searchTex` — Open Q2: a single sampler suffices for the whole 1x path,
+    /// including the manual-decode diagonal search's bilinear `edgesTex` reads). DISTINCT
+    /// boot object from [`AaActivation::sampler`] (FXAA path untouched).
+    pub sampler: &'a VulkanSampler,
+    /// Boot-resident `AreaTex` (160×560, `R8G8_UNORM`), `ShaderReadOnlyOptimal` forever —
+    /// `boyko_render::smaa_luts::AREA_TEX_BYTES` uploaded once at boot via
+    /// `boyko_render::upload_texture_2d_raw`.
+    pub area_tex: &'a VulkanTexture,
+    /// Boot-resident `SearchTex` (64×16, `R8_UNORM`), `ShaderReadOnlyOptimal` forever —
+    /// `boyko_render::smaa_luts::SEARCH_TEX_BYTES` uploaded once at boot.
+    pub search_tex: &'a VulkanTexture,
+}
+
 /// HW-RT rung 3a: the spatial (à-trous) RT soft-shadow DENOISE pass activation threaded into
 /// [`GBufferScene::shadow`] to turn the denoise pipeline ON. Mirrors [`SsaoActivation`]'s
 /// borrow-bundle shape: a `Copy` bundle of caller-owned pipeline/layout borrows plus the
@@ -1191,6 +1237,14 @@ pub struct GBufferScene<'a> {
     /// samples `aa_out` instead of `lit`. Toggling `Some`↔`None` between frames is a genuine
     /// live runtime switch, not a boot-only choice.
     pub aa: Option<AaActivation<'a>>,
+    /// Anti-aliasing Stage 2: the SMAA 1x post-process pass activation. `None` = OFF, the
+    /// 0%-gate (no `aa_out` target, no `smaa_{edge,weight,blend}_set`, the present-blit
+    /// samples `lit` directly, no SMAA pass recorded). `Some` arms the 3-pass seam:
+    /// [`GBufferTargets`] allocates `aa_out` + `smaa_edges`/`smaa_weights` + builds the three
+    /// SMAA sets, [`GBufferTargets::sync_gbuffer`] treats an arm-state change exactly like an
+    /// extent change, and the present-blit samples `aa_out` instead of `lit`. Mutually
+    /// exclusive with [`Self::aa`] (`debug_assert!` — see [`SmaaActivation`]'s doc).
+    pub smaa: Option<SmaaActivation<'a>>,
     /// Mesh foundation M3: the per-mesh instanced-arm draw BATCH LIST. An EMPTY slice
     /// (every pre-M2 scene) records the LEGACY pass-A draw — `vkCmdDraw(vertex_count, 1,
     /// 0, 0)` over [`Self::vertex_buffer`] binding [`Self::instance_bind_group`] (the

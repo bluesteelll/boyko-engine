@@ -746,6 +746,35 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// AA campaign Stage 2 — SMAA 1x pass 1 (edge detection) fragment SPIR-V
+    /// (`shaders/smaa_edge.fs.hlsl`, ported verbatim from iryoku `SMAALumaEdgeDetectionPS`).
+    /// Paired with [`fullscreen_sample_vs_spirv`] (all three SMAA passes share the same
+    /// fullscreen-triangle VS); reads `lit`, writes `edges` (R8G8). Armed only when
+    /// `scene.smaa` is `Some`.
+    SMAA_EDGE_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/smaa_edge.fs.spv")
+}
+
+embed_spirv! {
+    /// AA campaign Stage 2 — SMAA 1x pass 2 (blending-weight calculation) fragment SPIR-V
+    /// (`shaders/smaa_weight.fs.hlsl`, ported verbatim from iryoku
+    /// `SMAABlendingWeightCalculationPS`, PRESET_HIGH diagonal + corner detection). Reads
+    /// `edges` + the boot-resident `areaTex`/`searchTex` LUTs, writes `weights` (RGBA8).
+    /// Armed only when `scene.smaa` is `Some`.
+    SMAA_WEIGHT_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/smaa_weight.fs.spv")
+}
+
+embed_spirv! {
+    /// AA campaign Stage 2 — SMAA 1x pass 3 (neighborhood blending) fragment SPIR-V
+    /// (`shaders/smaa_blend.fs.hlsl`, ported verbatim from iryoku
+    /// `SMAANeighborhoodBlendingPS`). Reads `lit` + pass 2's `weights`, writes `aa_out` (the
+    /// same target FXAA's single pass writes). Armed only when `scene.smaa` is `Some`.
+    SMAA_BLEND_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/smaa_blend.fs.spv")
+}
+
+embed_spirv! {
     /// Pillar B increment B2: the per-instance TRS interpolation compute PRE-PASS
     /// (`interp_instances.comp`, refined-B). One invocation per DYNAMIC instance reads a
     /// 96-byte `TransformPair` at binding 0 + its output slot at binding 1, interpolates at the
@@ -1262,6 +1291,32 @@ pub fn fullscreen_sample_fs_spirv() -> &'static [u32] {
 #[inline]
 pub fn fxaa_fs_spirv() -> &'static [u32] {
     FXAA_FS_SPV.as_words()
+}
+
+/// The committed SMAA 1x pass-1 (edge detection) fragment SPIR-V as a `u32` word stream,
+/// ready for [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+/// Paired with [`fullscreen_sample_vs_spirv`] in the SMAA edge pipeline.
+#[inline]
+pub fn smaa_edge_fs_spirv() -> &'static [u32] {
+    SMAA_EDGE_FS_SPV.as_words()
+}
+
+/// The committed SMAA 1x pass-2 (blending-weight calculation) fragment SPIR-V as a `u32`
+/// word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module). Paired
+/// with [`fullscreen_sample_vs_spirv`] in the SMAA weight pipeline.
+#[inline]
+pub fn smaa_weight_fs_spirv() -> &'static [u32] {
+    SMAA_WEIGHT_FS_SPV.as_words()
+}
+
+/// The committed SMAA 1x pass-3 (neighborhood blending) fragment SPIR-V as a `u32` word
+/// stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module). Paired
+/// with [`fullscreen_sample_vs_spirv`] in the SMAA blend pipeline.
+#[inline]
+pub fn smaa_blend_fs_spirv() -> &'static [u32] {
+    SMAA_BLEND_FS_SPV.as_words()
 }
 
 /// The committed Render P7 SSAO (HBAO-lite) SPIR-V as a `u32` word stream, ready for

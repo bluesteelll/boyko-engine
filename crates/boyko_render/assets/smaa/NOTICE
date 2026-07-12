@@ -1,0 +1,20 @@
+SMAA Area & Search lookup textures (AreaTex.bin, SearchTex.bin)
+================================================================
+
+These two binary lookup tables are the canonical precomputed SMAA textures,
+extracted byte-for-byte from the reference implementation:
+
+    https://github.com/iryoku/smaa  (Textures/AreaTex.h, Textures/SearchTex.h)
+
+  AreaTex.bin   — 160 x 560, R8G8 (VK_FORMAT_R8G8_UNORM),   179200 bytes
+  SearchTex.bin —  64 x  16, R8   (VK_FORMAT_R8_UNORM),       1024 bytes
+
+Copyright (C) 2013 Jorge Jimenez, Jose I. Echevarria, Belen Masia,
+Fernando Navarro, Diego Gutierrez.
+
+Released under the MIT license. The MIT license clarification in the SMAA
+repository states the attribution notice is required in source distributions
+(which this NOTICE satisfies) but not in binary/compiled distributions.
+
+The paper: "SMAA: Enhanced Subpixel Morphological Antialiasing",
+Computer Graphics Forum (Proc. EUROGRAPHICS 2012), 31(2), 2012.

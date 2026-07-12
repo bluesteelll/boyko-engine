@@ -345,6 +345,182 @@ fn upload_mipped_pixels(
     record
 }
 
+/// Format-generic, single-mip staged upload (AA campaign Stage 2 — the SMAA LUT sibling of
+/// [`upload_texture_2d`], which hardcodes RGBA8 4B/px + a mip-blit chain and cannot ingest the
+/// SMAA `AreaTex`/`SearchTex` LUTs' `R8G8`/`R8` formats). Builds a `w`x`h` `SAMPLED |
+/// TRANSFER_DST` texture at `format`, stages `bytes` into mip 0 via a single fenced
+/// staged-upload submit (forks [`crate::bindless::create_solid_color_texture`]'s
+/// `upload_solid_pixels` shape, generalized to an arbitrary format + caller-supplied byte
+/// buffer instead of a repeated solid fill), and finishes `ShaderReadOnlyOptimal` — the
+/// texture is sample-ready before this call returns (no per-frame LUT barrier is ever
+/// needed).
+///
+/// `bytes_per_pixel` is derived from `format`: `R8Unorm` → 1, `R8G8Unorm` → 2,
+/// `R8G8B8A8Unorm` → 4. Any other format is `debug_assert`-unreachable (this seam is used
+/// ONLY by the boot-time LUT uploads today) and returns [`VulkanError::Unsupported`] in
+/// release, rather than silently misreading `bytes`' length.
+///
+/// On any partial failure every object created so far is torn down before the error returns
+/// (no leak) — mirrors [`upload_texture_2d`] / [`create_solid_color_texture`](crate::bindless::create_solid_color_texture).
+///
+/// # Panics (debug)
+/// `debug_assert!`s that `bytes.len() == w * h * bytes_per_pixel(format)` and that `w`/`h`
+/// are non-zero.
+pub fn upload_texture_2d_raw(
+    ctx: &VulkanContext,
+    w: u32,
+    h: u32,
+    bytes: &[u8],
+    format: Format,
+) -> Result<VulkanTexture, VulkanError> {
+    debug_assert!(w > 0 && h > 0, "invariant: texture extent is non-zero");
+    let bpp = match format {
+        Format::R8Unorm => 1u64,
+        Format::R8G8Unorm => 2,
+        Format::R8G8B8A8Unorm => 4,
+        // SAFETY-adjacent invariant (not `unsafe`): this seam is used only for the boot-time
+        // LUT uploads today, all of which are one of the three formats above.
+        _ => return Err(VulkanError::Unsupported("upload_texture_2d_raw: unhandled format")),
+    };
+    debug_assert_eq!(
+        bytes.len() as u64,
+        (w as u64) * (h as u64) * bpp,
+        "invariant: bytes must be exactly w * h * bytes_per_pixel(format)"
+    );
+
+    let texture = ctx.create_texture(&TextureDesc {
+        width: w,
+        height: h,
+        depth: 1,
+        format,
+        dimension: TextureDimension::D2,
+        usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
+        array_layers: 1,
+        mip_levels: 1,
+        view_format: None,
+    })?;
+
+    if let Err(e) = upload_raw_pixels(ctx, &texture, w, h, bytes) {
+        // SAFETY: `texture` was just created on `ctx`, owned exclusively here, and the
+        // upload's own submit (if any ran) is fence-waited internally before this error
+        // could surface; destroy it once on this edge.
+        unsafe { ctx.destroy_texture(texture) };
+        return Err(e);
+    }
+    Ok(texture)
+}
+
+/// The staged upload + layout-transition submit for [`upload_texture_2d_raw`] — mirrors
+/// [`crate::bindless`]'s `upload_solid_pixels` exactly (staging buffer →
+/// `copy_buffer_to_image` → UNDEFINED→TRANSFER_DST→SHADER_READ_ONLY barriers → one fenced
+/// submit), generalized to a caller-supplied (not repeated-fill) byte buffer.
+fn upload_raw_pixels(
+    ctx: &VulkanContext,
+    texture: &VulkanTexture,
+    w: u32,
+    h: u32,
+    bytes: &[u8],
+) -> Result<(), VulkanError> {
+    let size = bytes.len() as u64;
+    let staging = ctx.create_buffer(&BufferDesc {
+        size,
+        usage: BufferUsage::TRANSFER_SRC,
+        location: MemoryLocation::HostVisibleCoherent,
+    })?;
+    let Some(dst) = ctx.buffer_mapped_ptr(&staging) else {
+        // SAFETY: `staging` was just created, never submitted; destroy it once on this edge.
+        unsafe { ctx.destroy_buffer(staging) };
+        return Err(VulkanError::Unsupported("staging buffer not host-mapped"));
+    };
+    // SAFETY: `dst` is the persistently-mapped first byte of the host-coherent staging
+    // buffer (exactly `size` bytes, just created); `bytes` is a distinct, non-overlapping
+    // allocation of `size` bytes; this is the unique writer before any submission binds the
+    // buffer. Host-coherent ⇒ no flush.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.as_ptr(), bytes.len());
+    }
+
+    let mut encoder = match ctx.create_command_encoder() {
+        Ok(e) => e,
+        Err(e) => {
+            // SAFETY: `staging` was just created, never submitted; destroy once.
+            unsafe { ctx.destroy_buffer(staging) };
+            return Err(e);
+        }
+    };
+    let fence = match ctx.create_fence(false) {
+        Ok(f) => f,
+        Err(e) => {
+            // SAFETY: `encoder`/`staging` were just created, never submitted; destroy each
+            // once.
+            unsafe {
+                ctx.destroy_command_encoder(encoder);
+                ctx.destroy_buffer(staging);
+            }
+            return Err(e);
+        }
+    };
+
+    let region = [BufferImageCopy {
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        aspect: ImageAspect::COLOR,
+        mip_level: 0,
+        base_array_layer: 0,
+        layer_count: 1,
+        image_offset_x: 0,
+        image_offset_y: 0,
+        image_offset_z: 0,
+        image_extent_w: w,
+        image_extent_h: h,
+        image_extent_d: 1,
+    }];
+
+    let record = (|| -> Result<(), VulkanError> {
+        encoder.begin()?;
+        // UNDEFINED → TRANSFER_DST_OPTIMAL (the copy destination).
+        encoder.image_barrier(&ImageBarrierDesc {
+            texture,
+            src_stage: BarrierStage::TOP_OF_PIPE,
+            dst_stage: BarrierStage::TRANSFER,
+            src_access: BarrierAccess::NONE,
+            dst_access: BarrierAccess::TRANSFER_WRITE,
+            old_layout: ImageLayout::Undefined,
+            new_layout: ImageLayout::TransferDstOptimal,
+            range: ImageSubresourceRange::COLOR,
+        });
+        encoder.copy_buffer_to_image(&staging, texture, ImageLayout::TransferDstOptimal, &region);
+        // TRANSFER_DST_OPTIMAL → SHADER_READ_ONLY_OPTIMAL (sample-ready).
+        encoder.image_barrier(&ImageBarrierDesc {
+            texture,
+            src_stage: BarrierStage::TRANSFER,
+            dst_stage: BarrierStage::FRAGMENT_SHADER,
+            src_access: BarrierAccess::TRANSFER_WRITE,
+            dst_access: BarrierAccess::SHADER_READ,
+            old_layout: ImageLayout::TransferDstOptimal,
+            new_layout: ImageLayout::ShaderReadOnlyOptimal,
+            range: ImageSubresourceRange::COLOR,
+        });
+        encoder.end()?;
+        let queue = ctx.rhi_queue();
+        queue.submit(&encoder, &fence)?;
+        ctx.wait_fence(&fence, u64::MAX)?;
+        Ok(())
+    })();
+
+    // Tear down the setup-class transients. The submit (if it ran) is fence-waited above.
+    // SAFETY: `encoder`/`fence`/`staging` were created on `ctx`; the encoder's only
+    // submission (if any) completed (fence-waited above on the Ok path, or never submitted
+    // on an error path), and each is moved by value ⇒ destroyed once.
+    unsafe {
+        ctx.destroy_command_encoder(encoder);
+        ctx.destroy_fence(fence);
+        ctx.destroy_buffer(staging);
+    }
+    record
+}
+
 /// One GPU-resident, mip-chained, bindless-registered texture asset: the OWNED
 /// [`VulkanTexture`] plus the bindless slot it was registered into and the draw-time
 /// metadata a future sampling shader needs (`width`, `height`, `mip_levels`).
