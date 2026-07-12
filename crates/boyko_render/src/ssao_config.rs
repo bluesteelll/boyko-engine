@@ -27,17 +27,29 @@
 //! pass, the resolve's AO-combine off). The resolve maps `Off` to
 //! `ResolvedSsao { variant: None, ssao_mode_word: 0 }`, the no-pass anchor.
 //!
-//! # No live render consumer yet (the named follow-up)
+//! # The live render consumer
 //!
-//! The deferred-render ECS system that READS [`ResolvedSsao`] each frame — picking the
-//! pre-compiled variant pipeline ([`boyko_rhi_vulkan`]'s `sdf_ssao_spirv_variant`) and
-//! setting the resolve's `with_ssao_mode` from `ssao_mode_word` — is the explicit LARGER
-//! follow-up (the deferred pipeline is test-driven today, not a `boyko_render` system).
-//! TASK 3 lands the Resource + policy + plugin, unit-tested, ready for that consumer.
+//! The deferred-render pipeline selection ([`boyko_rhi_vulkan`]'s `sdf_ssao_spirv_variant`,
+//! bound by `boyko_app::gpu_scene`'s boot + `scene()`) reads [`ResolvedSsao::variant`]
+//! through `boyko_app::runner`'s per-frame `World` read (the same `try_resource` pattern
+//! `ResolvedAa` uses) — it does NOT run as an ECS system, since the RHI pipeline objects
+//! are host-owned, not `World` state.
+//!
+//! The resolve's `ssao_mode` header gate (word 11) is a SEPARATE seam: it is armed by
+//! [`sync_ssao_light_gate`], the cold bridge from [`SsaoConfig`] into
+//! [`LightingConfig::ssao_mode`](crate::light::LightingConfig::ssao_mode), mirroring
+//! [`sync_ddgi_light_gate`](crate::ddgi_config::sync_ddgi_light_gate)'s shape (a single
+//! cold config Resource, no caster dependency). It is registered by the composing app
+//! (`boyko_app::EnginePlugins`, alongside `sync_csm_light_gate`/`sync_punctual_light_gate`),
+//! not by [`SsaoPlugin`](crate::ssao_plugin::SsaoPlugin) itself — the SAME cross-plugin
+//! registration discipline those two systems document (it bridges this plugin's
+//! [`SsaoConfig`] and `LightingPlugin`'s [`LightingConfig`](crate::light::LightingConfig)).
 
 use boyko_macros::Resource;
 
 use boyko_ecs::ecs::core::system::{Res, ResMut};
+
+use crate::light::{LightTableDirty, LightingConfig};
 
 // ---- SsaoQuality (the owner-set quality knob; capability is structural) --------------
 
@@ -183,6 +195,43 @@ pub fn resolve_ssao(cfg: &SsaoConfig) -> ResolvedSsao {
 #[allow(clippy::needless_pass_by_value)]
 pub fn resolve_ssao_policy(cfg: Res<SsaoConfig>, mut resolved: ResMut<ResolvedSsao>) {
     *resolved = resolve_ssao(&cfg);
+}
+
+// ---- the light-header gate bridge (mirrors `sync_ddgi_light_gate`) -------------------
+
+/// Bridges the [`SsaoConfig`] gate and the [`LightingConfig`] header gate — the SSAO
+/// analogue of
+/// [`sync_ddgi_light_gate`](crate::ddgi_config::sync_ddgi_light_gate) (a single cold
+/// config Resource read directly, no caster dependency — unlike
+/// [`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate)/
+/// [`sync_punctual_light_gate`](crate::shadow_atlas::sync_punctual_light_gate), which also
+/// gate on a live caster count). It is the SOLE production writer of
+/// [`LightingConfig::ssao_mode`], keeping the header's word-11 SSAO gate in lock-step
+/// with the structural predicate [`SsaoConfig::enabled`].
+///
+/// # Value-gated write
+///
+/// `cfg.ssao_mode` is written only on an actual flip, so a static frame does zero work
+/// and never dirties the light table (mirrors `sync_ddgi_light_gate`'s value gate).
+///
+/// # Registration — app-wired (matches `sync_ddgi_light_gate` / `sync_punctual_light_gate`)
+///
+/// NOT registered by [`SsaoPlugin`](crate::ssao_plugin::SsaoPlugin): it bridges this
+/// plugin's [`SsaoConfig`] and `LightingPlugin`'s [`LightingConfig`], so only the
+/// composing app (which adds BOTH) may register it — in the same builder closure as the
+/// other light-gate sync systems.
+#[allow(clippy::needless_pass_by_value)]
+pub fn sync_ssao_light_gate(
+    ssao: Res<SsaoConfig>,
+    mut cfg: ResMut<LightingConfig>,
+    mut dirty: ResMut<LightTableDirty>,
+) {
+    let on = ssao.enabled();
+    // Value gate BEFORE the `DerefMut`: flip-only write, flip-only table dirtying.
+    if cfg.ssao_mode != on {
+        cfg.ssao_mode = on;
+        dirty.0 = true;
+    }
 }
 
 #[cfg(test)]

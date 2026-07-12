@@ -428,7 +428,10 @@ pub use smaa_luts::{
     AREA_TEX_BYTES, AREA_TEX_H, AREA_TEX_SHA256, AREA_TEX_W, SEARCH_TEX_BYTES, SEARCH_TEX_H,
     SEARCH_TEX_SHA256, SEARCH_TEX_W,
 };
-pub use ssao_config::{ResolvedSsao, SsaoConfig, SsaoQuality, resolve_ssao, resolve_ssao_policy};
+pub use ssao_config::{
+    ResolvedSsao, SsaoConfig, SsaoQuality, resolve_ssao, resolve_ssao_policy,
+    sync_ssao_light_gate,
+};
 pub use ssao_plugin::SsaoPlugin;
 pub use tangent::generate_tangents;
 pub use texture::{

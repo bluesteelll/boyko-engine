@@ -39,8 +39,9 @@ use boyko_rhi_vulkan::compute::{
     gbuffer_mrt_pm_fs_spirv, gbuffer_mrt_pm_vs_spirv, gbuffer_mrt_tex_fs_spirv,
     gbuffer_mrt_tex_vs_spirv, gbuffer_mrt_vs_spirv, interp_instances_spirv, punctual_depth_fs_spirv,
     punctual_depth_vs_spirv, sdf_gbuffer_composite_spirv, sdf_probe_update_spirv,
-    smaa_blend_fs_spirv, smaa_edge_fs_spirv, smaa_weight_fs_spirv, ssaa_downsample_fs_spirv,
-    taa_resolve_spirv, tile_grid_extent,
+    sdf_ssao_spirv_variant, smaa_blend_fs_spirv, smaa_edge_fs_spirv, smaa_weight_fs_spirv,
+    SSAO_QUALITY_COUNT, SSAO_QUALITY_HIGH, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM,
+    ssaa_downsample_fs_spirv, taa_resolve_spirv, tile_grid_extent,
 };
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::ffi::VkDescriptorSet;
@@ -52,7 +53,8 @@ use boyko_rhi_vulkan::rhi_impl::{
 use boyko_rhi_vulkan::swapchain::{
     AaActivation, CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
     GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene,
-    InterpActivation, PunctualDepthActivation, SmaaActivation, SsaaActivation, TaaActivation,
+    InterpActivation, PunctualDepthActivation, SmaaActivation, SsaaActivation, SsaoActivation,
+    TaaActivation,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::accel::BoundAccelStruct;
@@ -693,6 +695,26 @@ pub(crate) struct GpuSceneBundles {
     /// resolve's `gLit` combined-image-sampler tap — DISTINCT boot object from
     /// [`Self::fxaa_sampler`]/[`Self::smaa_sampler`].
     taa_linear_sampler: VulkanSampler,
+    // ── Render P7-Q2: SSAO (dormant → live) ───────────────────────────────────
+    /// Render P7-Q2: the [`SSAO_QUALITY_COUNT`] pre-compiled SSAO quality-variant compute
+    /// pipelines (`sdf_ssao_{low,medium,high}.comp`), built unconditionally at boot (like
+    /// [`Self::fxaa_pipeline`]/[`Self::ssaa_pipeline`]/[`Self::taa_resolve_pipeline`]
+    /// above) so the owner-resolved quality
+    /// ([`boyko_render::ResolvedSsao::variant`]) can select a pipeline with no boot-time
+    /// rebuild. All three share [`Self::ssao_layout`] (the SSAO shader interface is
+    /// identical across variants — only the baked tap-budget constants differ, Mechanism
+    /// C) — indexed by `SSAO_QUALITY_LOW`/`_MEDIUM`/`_HIGH` (0/1/2). Boot-time creation
+    /// records no command / samples no pixel — byte-identical to the golden regardless of
+    /// this array's existence (`GBufferScene::ssao` stays `None` unless a non-`Off`
+    /// `SsaoQuality` is host-resolved). Mirrors the test harness's
+    /// (`window_present_gbuffer.rs`) SSAO boot bundle, widened to all 3 variants.
+    ssao_pipelines: [ComputePipeline; SSAO_QUALITY_COUNT],
+    /// Render P7-Q2: the DEDICATED 5-binding SSAO bind-group LAYOUT { `gNormal` @0,
+    /// `gMaterial` @1, `gViewT` @2 STORAGE images READ, the `ssao` out STORAGE image @3
+    /// WRITE, the camera UBO @4 } — matching `sdf_ssao.comp`'s set 0, shared by every
+    /// entry of [`Self::ssao_pipelines`]. [`GBufferTargets`] writes an `ssao_set` against
+    /// it once per extent when [`GBufferScene::ssao`] is armed.
+    ssao_layout: VulkanBindGroupLayout,
     // ── CSM / atlas (bound-but-unread trios; depth passes OFF in R3) ─────────
     csm: CsmResources,
     /// `ceil(composite pixels / LOCAL_SIZE_X)` — the marcher + resolve dispatch
@@ -1796,6 +1818,72 @@ impl GpuSceneBundles {
         )
         .expect("invariant: TAA resolve compute pipeline create");
 
+        // Render P7-Q2: the SSAO compute pass — 3 pre-compiled quality-variant pipelines
+        // sharing ONE dedicated 5-binding layout, built UNCONDITIONALLY here (like
+        // `fxaa_pipeline`/`ssaa_pipeline`/`taa_resolve_pipeline` above) so the
+        // owner-resolved quality (`boyko_render::ResolvedSsao::variant`) can bind a
+        // variant with no boot-time rebuild. Mirrors the test harness's SSAO boot bundle
+        // (`window_present_gbuffer.rs`'s `ssao_layout`/`ssao_pipeline` construction),
+        // widened to build all 3 variants instead of one. Boot-time creation records no
+        // command / samples no pixel — byte-identical to the golden regardless of this
+        // bundle's existence (`GBufferScene::ssao` stays `None` unless a non-`Off`
+        // `SsaoQuality` is host-resolved).
+        let ssao_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: Render P7 SSAO bind-group layout create");
+        let ssao_cs_low = RhiDevice::create_shader_module(device, sdf_ssao_spirv_variant(SSAO_QUALITY_LOW))
+            .expect("invariant: SSAO LOW compute shader module create");
+        let ssao_pipeline_low = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &ssao_cs_low,
+                entry: c"main",
+                push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+                bind_group_layout: Some(&ssao_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: SSAO LOW compute pipeline create");
+        let ssao_cs_medium = RhiDevice::create_shader_module(device, sdf_ssao_spirv_variant(SSAO_QUALITY_MEDIUM))
+            .expect("invariant: SSAO MEDIUM compute shader module create");
+        let ssao_pipeline_medium = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &ssao_cs_medium,
+                entry: c"main",
+                push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+                bind_group_layout: Some(&ssao_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: SSAO MEDIUM compute pipeline create");
+        let ssao_cs_high = RhiDevice::create_shader_module(device, sdf_ssao_spirv_variant(SSAO_QUALITY_HIGH))
+            .expect("invariant: SSAO HIGH compute shader module create");
+        let ssao_pipeline_high = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &ssao_cs_high,
+                entry: c"main",
+                push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+                bind_group_layout: Some(&ssao_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: SSAO HIGH compute pipeline create");
+        // Indexed by `SSAO_QUALITY_LOW`/`_MEDIUM`/`_HIGH` (0/1/2) — `ResolvedSsao::variant`
+        // selects directly into this array.
+        let ssao_pipelines = [ssao_pipeline_low, ssao_pipeline_medium, ssao_pipeline_high];
+
         // The shader modules are consumed by pipeline creation; destroy them now
         // (mirrors the showcase's post-create module teardown).
         // SAFETY: every module was created on `ctx` above and is no longer
@@ -1803,6 +1891,9 @@ impl GpuSceneBundles {
         // GPU work has been submitted yet.
         unsafe {
             RhiDevice::destroy_shader_module(device, taa_resolve_cs);
+            RhiDevice::destroy_shader_module(device, ssao_cs_high);
+            RhiDevice::destroy_shader_module(device, ssao_cs_medium);
+            RhiDevice::destroy_shader_module(device, ssao_cs_low);
             RhiDevice::destroy_shader_module(device, ssaa_fs);
             RhiDevice::destroy_shader_module(device, smaa_blend_fs);
             RhiDevice::destroy_shader_module(device, smaa_weight_fs);
@@ -2228,6 +2319,8 @@ impl GpuSceneBundles {
             taa_resolve_pipeline,
             taa_resolve_layout,
             taa_linear_sampler,
+            ssao_pipelines,
+            ssao_layout,
             csm,
             dispatch_group_count_x,
         }
@@ -2718,8 +2811,10 @@ impl GpuSceneBundles {
     /// refs, zero alloc): the static bundles + this frame's `mvp` push, the
     /// fenced slot's instance bind group, and the gathered draw batch list.
     ///
-    /// R4 wiring: SDF empty, brick/coarse/SSAO/atlas/interp OFF (their
-    /// always-bound resources are valid placeholders); lighting is ECS-owned —
+    /// R4 wiring: SDF empty, brick/coarse/atlas/interp OFF (their always-bound resources
+    /// are valid placeholders); Render P7-Q2 SSAO is armed from `ssao_variant` (see its
+    /// param doc) — OFF (`None`) unless the owner resolved a non-`Off` `SsaoQuality`;
+    /// lighting is ECS-owned —
     /// `light_upload` is `Some(staged_bytes)` on a frame whose staging slot was
     /// just rewritten (the recorder then records the staging→table copy), and
     /// `csm` is `Some(resolved)` when the runner's arming predicate holds (a
@@ -2817,11 +2912,25 @@ impl GpuSceneBundles {
         // never reads `World` directly. Read ONLY when `aa_mode == AaMode::Taa` arms
         // `TaaActivation::reset` below; ignored (and harmless) otherwise.
         taa_reset: bool,
+        // Render P7-Q2: the owner-resolved SSAO quality's variant index
+        // ([`boyko_render::ResolvedSsao::variant`]) — `Some(0/1/2)` for Low/Medium/High,
+        // `None` for [`boyko_render::SsaoQuality::Off`] (the default). Threaded from
+        // `boyko_app::runner` the SAME way `aa_mode` is (a per-frame `World` read via
+        // `try_resource`), so the RHI layer never reads `World` directly. Selects
+        // `Self::ssao_pipelines[v]` below; `None` ⇒ `GBufferScene::ssao == None` (the
+        // 0%-gate). The resolve's `ssao_mode` header gate is armed SEPARATELY, in
+        // lock-step, by `boyko_render::sync_ssao_light_gate` (through the
+        // `collect_lights` → light-table upload pipeline, independent of this fn).
+        ssao_variant: Option<usize>,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
             light_upload.unwrap_or(0) <= LIGHT_TABLE_CAPACITY,
             "invariant: the staged light table fits the device table capacity"
+        );
+        debug_assert!(
+            ssao_variant.is_none_or(|v| v < SSAO_QUALITY_COUNT),
+            "invariant: ssao_variant must index Self::ssao_pipelines (0..SSAO_QUALITY_COUNT)"
         );
         // Interp arming (refined-B): the raster VS ALWAYS reads the shared instance
         // ring (`instance_bind_groups[slot]`) — no bind swap. When the gather produced
@@ -2999,7 +3108,18 @@ impl GpuSceneBundles {
             coarse_mode: CoarseMode::EmptySkipOnly,
             lighting_flags: LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
             light_dir: self.light_dir,
-            ssao: None,
+            // Render P7-Q2: `ssao_variant.is_some()` (the owner-resolved `SsaoQuality != Off`)
+            // ⇒ `Some` — arms the SSAO compute activation against the selected pre-compiled
+            // variant pipeline (`Self::ssao_pipelines[v]`) + the SHARED `ssao_layout`. `None`
+            // (the default, `SsaoQuality::Off`) ⇒ the 0%-gate: no SSAO pass recorded,
+            // `GBufferTargets` never builds `ssao_set`. The resolve's `ssao_mode` header gate
+            // is armed in LOCK-STEP by the SEPARATE `boyko_render::sync_ssao_light_gate`
+            // system (bridges `SsaoConfig` into `LightingConfig::ssao_mode`, word 11 of the
+            // light header) — not by this fn (see `ssao_variant`'s param doc above).
+            ssao: ssao_variant.map(|v| SsaoActivation {
+                pipeline: &self.ssao_pipelines[v],
+                layout: &self.ssao_layout,
+            }),
             // Anti-aliasing Stage 1: `AaMode::Off` (the default) ⇒ `None` — the 0%-gate
             // (no `aa_out`, no FXAA pass, present samples `lit`). `AaMode::Fxaa` arms the
             // FXAA activation against the boot-built pipeline + dedicated LINEAR sampler.
@@ -3407,8 +3527,9 @@ impl GpuSceneBundles {
     }
 
     /// Tears every bundle down in reverse dependency order — the showcase
-    /// teardown list, minus the resources R3 does not create (staging, SSAO
-    /// pipeline, per-mesh instanced buffers).
+    /// teardown list, minus the resources R3 does not create (staging,
+    /// per-mesh instanced buffers). Render P7-Q2's SSAO pipelines/layout ARE
+    /// created here (see [`Self::ssao_pipelines`]) and are torn down below.
     ///
     /// # Safety
     /// The device is idle (the caller dropped the `Renderer`, whose `Drop`
@@ -3446,6 +3567,14 @@ impl GpuSceneBundles {
             // before its layout — else a per-renderer boot leaks a pipeline + layout + sampler.
             RhiDevice::destroy_compute_pipeline(ctx, self.taa_resolve_pipeline);
             RhiDevice::destroy_bind_group_layout(ctx, self.taa_resolve_layout);
+            // Render P7-Q2: the 3 SSAO pipelines share `ssao_layout` — pipelines before the
+            // shared layout (reverse creation order), built UNCONDITIONALLY at boot (every
+            // config incl. `SsaoQuality::Off`), like fxaa/smaa/ssaa/taa above.
+            let [ssao_low, ssao_medium, ssao_high] = self.ssao_pipelines;
+            RhiDevice::destroy_compute_pipeline(ctx, ssao_low);
+            RhiDevice::destroy_compute_pipeline(ctx, ssao_medium);
+            RhiDevice::destroy_compute_pipeline(ctx, ssao_high);
+            RhiDevice::destroy_bind_group_layout(ctx, self.ssao_layout);
             // HW-RT rung R2a-4b: the HWRT resolve pipeline + its 21-binding layout, `Option`-guarded
             // (present only on an RT device under `feature = "hwrt"`). Pipeline before layout.
             #[cfg(feature = "hwrt")]

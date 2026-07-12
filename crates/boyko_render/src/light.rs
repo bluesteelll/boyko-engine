@@ -140,7 +140,9 @@ const _: () = assert!(GPU_LIGHT_WORDS == 12, "GPU_LIGHT_WORDS must equal the sha
 ///   point/spot rows that need `gViewT`/`P` (L0b).
 /// - `sky_diffuse` (off 16): ambient hemisphere diffuse `rgb` (replaces the resolve's
 ///   `SKY_DIFFUSE` constant), `w` unused.
-/// - `sky_spec` (off 32): ambient specular `rgb` (replaces `SKY_SPEC`), `w` unused.
+/// - `sky_spec` (off 32): ambient specular `rgb` (replaces `SKY_SPEC`), `w` = Render
+///   P7-Q2's `ssao_mode` gate (bit-cast `u32`, `0`/`1` — the resolve's SSAO-combine
+///   switch; see [`LightingConfig::ssao_mode`]).
 /// - `cluster_params` (off 48): L1 froxel dims `x/y/z` (bit-cast `u32`), `w` =
 ///   bit-cast `clusters_enabled` (`u32`; `0` ⇒ L1 OFF, loop the flat table). **Zero in
 ///   L0** (L1 fills these).
@@ -152,7 +154,7 @@ pub struct LightHeaderGpu {
     pub counts_exposure: [f32; 4],
     /// Ambient hemisphere diffuse `rgb`, `w` unused.
     pub sky_diffuse: [f32; 4],
-    /// Ambient specular `rgb`, `w` unused.
+    /// Ambient specular `rgb`, `w` = the Render P7-Q2 `ssao_mode` gate (bit-cast `u32`).
     pub sky_spec: [f32; 4],
     /// L1 cluster params (zero in L0): `[bitcast(dim_x), bitcast(dim_y), bitcast(dim_z),
     /// bitcast(clusters_enabled)]`.
@@ -531,6 +533,23 @@ pub struct LightingConfig {
     /// gated resolve block is EMPTY (no probe sample yet), so even an armed gate leaves the
     /// pixels byte-identical; later rungs (I3) wire the probe-irradiance injection.
     pub ddgi_indirect: bool,
+    /// The resolve's SSAO-combine gate — written into light-header word 11 (`sky_spec.w`,
+    /// the ambient-specular lane's otherwise-unused `w`) by [`LightHeaderGpu::new`].
+    /// Unlike `csm_shadows`/`punctual_shadows`/`ddgi_indirect` above (which share word 7's
+    /// bit-packed budget via [`Self::shadow_gate_word`]), this gate owns its OWN dedicated
+    /// word — no packing needed (Render P7-Q2's `ssao_mode` is a whole-word `0`/`1`, the
+    /// same shape `GoldenLightHeader::with_ssao_mode` pins). DEFAULT `false` (word 11 stays
+    /// `0.0` — the byte-identical 0%-gate, INDEPENDENT of every other gate).
+    ///
+    /// # Single-writer / lock-step contract (Render P7-Q2 live consumer)
+    ///
+    /// Like the shadow/GI gates, this is DERIVED state: its single production writer is
+    /// [`sync_ssao_light_gate`](crate::ssao_config::sync_ssao_light_gate), which keeps the
+    /// header gate in lock-step with the structural SSAO predicate
+    /// [`SsaoConfig::enabled`](crate::ssao_config::SsaoConfig::enabled) — mirrors
+    /// [`sync_ddgi_light_gate`](crate::ddgi_config::sync_ddgi_light_gate)'s bridge shape (a
+    /// single cold config Resource, no caster dependency).
+    pub ssao_mode: bool,
     /// The resolve's output-stage tonemap curve — packed into light-header word 7 bits
     /// [`TONEMAP_MODE_SHIFT`..+4) by [`Self::tonemap_bits`]. DEFAULT [`Tonemapper::Aces`]
     /// (word 7 bits 8..11 stay 0 — the byte-identical 0%-gate).
@@ -558,6 +577,7 @@ impl Default for LightingConfig {
             csm_shadows: false,
             punctual_shadows: false,
             ddgi_indirect: false,
+            ssao_mode: false,
             tonemapper: Tonemapper::Aces,
             terminator_softening: 0.0,
         }
@@ -919,7 +939,9 @@ impl LightHeaderGpu {
     /// [`CSM_MODE_BIT`]; 0 for a default config, the 0%-gate) ORed with the tonemap
     /// sub-field ([`LightingConfig::tonemap_bits`] — bits [`TONEMAP_MODE_SHIFT`]..+4)
     /// ORed with the terminator-softening sub-field
-    /// ([`LightingConfig::terminator_bits`] — bits [`TERMINATOR_SOFT_SHIFT`]..+8).
+    /// ([`LightingConfig::terminator_bits`] — bits [`TERMINATOR_SOFT_SHIFT`]..+8). Word 11
+    /// (`sky_spec.w`) carries [`LightingConfig::ssao_mode`] verbatim (a whole-word `0`/`1`,
+    /// no packing — see that field's doc).
     #[inline]
     pub fn new(l0a_count: u32, point_spot_count: u32, cfg: &LightingConfig) -> Self {
         debug_assert!(cfg.exposure > 0.0 && cfg.exposure.is_finite(), "invariant: exposure > 0");
@@ -942,7 +964,15 @@ impl LightHeaderGpu {
                 cfg.sky_diffuse[2],
                 f32::from_bits(cfg.shadow_gate_word() | cfg.tonemap_bits() | cfg.terminator_bits()),
             ],
-            sky_spec: [cfg.sky_spec[0], cfg.sky_spec[1], cfg.sky_spec[2], 0.0],
+            sky_spec: [
+                cfg.sky_spec[0],
+                cfg.sky_spec[1],
+                cfg.sky_spec[2],
+                // Render P7-Q2: the resolve's SSAO-combine gate (word 11, previously
+                // always 0.0 — `sky_spec.w` was otherwise unused). `false` (the default)
+                // keeps this lane `0.0`, byte-identical to every pre-P7-Q2 golden.
+                f32::from_bits(u32::from(cfg.ssao_mode)),
+            ],
             // L0: clusters off (dims zero); `clusters_enabled` is reported for the resolve
             // gate but the L1 grid is not minted until the L1 rung.
             cluster_params: [
@@ -1026,6 +1056,16 @@ impl LightHeaderGpu {
     #[inline]
     pub fn ddgi_mode(&self) -> bool {
         (self.sky_diffuse[3].to_bits() >> DDGI_MODE_BIT) & 1 != 0
+    }
+
+    /// Whether the resolve's SSAO-combine gate is armed (word 11, bit-cast back from
+    /// `sky_spec.w`) — the host mirror of the shader's `load_ssao_mode`. Unlike
+    /// [`csm_mode`](Self::csm_mode)/[`punctual_mode`](Self::punctual_mode)/
+    /// [`ddgi_mode`](Self::ddgi_mode) (word 7 bits), this gate owns its own whole word —
+    /// no bit shift, mirrors [`Self::clusters_enabled`]'s shape.
+    #[inline]
+    pub fn ssao_mode(&self) -> bool {
+        self.sky_spec[3].to_bits() != 0
     }
 
     /// Whether the L1 cluster path is enabled (`cluster_params.w` bit-cast `!= 0`). `false`

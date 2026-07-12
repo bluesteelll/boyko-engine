@@ -48,6 +48,8 @@
 //! | `BOYKO_WRAP` | diffuse terminator softening, `[0,1]` | `0.0` |
 //! | `BOYKO_WIN` | window width/height in pixels (square) | `1280` |
 //! | `BOYKO_CSM=off` | disables the CSM shadow-cascade insert | enabled (3 cascades) |
+//! | `BOYKO_AA` | post-process AA mode (`fxaa` \| `smaa` \| `ssaa`) | off |
+//! | `BOYKO_SSAO` | Render P7-Q2 SSAO quality (`low` \| `medium` \| `high`) | off |
 //! | `BOYKO_HOST_DUMP=<path.bmp>` | HOST-LEVEL (`boyko_app::host_dump`): arms the screenshot capture | disabled |
 //! | `BOYKO_DISABLE_VALIDATION=1` | operator convention — NOT read by `run_windowed` (which hardcodes `enable_validation: false` already); kept for uniformity with `boyko_rhi_vulkan`/`boyko_render` test harnesses that DO read it | n/a |
 //!
@@ -65,8 +67,8 @@ use std::path::PathBuf;
 use boyko_app::prelude::*;
 use boyko_ecs::ecs::core::system::{NonSendResMut, ResMut};
 use boyko_render::{
-    AaConfig, AaMode, BindlessTextureTable, LightingConfig, Material, MaterialGpu, TextureGpu,
-    Tonemapper, load_material_folder,
+    AaConfig, AaMode, BindlessTextureTable, LightingConfig, Material, MaterialGpu, SsaoConfig,
+    SsaoQuality, TextureGpu, Tonemapper, load_material_folder,
 };
 
 use common::{floor_plane, uv_sphere};
@@ -109,6 +111,11 @@ struct EvalKnobs {
     /// default). The AA campaign visual-oracle knob: unset ⇒ Off ⇒ byte-identical to the
     /// no-AA dump.
     aa_mode: AaMode,
+    /// `BOYKO_SSAO` — the Render P7-Q2 SSAO quality (`low` → [`SsaoQuality::Low`],
+    /// `medium` → [`SsaoQuality::Medium`], `high` → [`SsaoQuality::High`] — else
+    /// [`SsaoQuality::Off`], the default). The SSAO visual-oracle knob: unset ⇒ Off ⇒
+    /// byte-identical to the no-SSAO dump.
+    ssao_quality: SsaoQuality,
 }
 
 impl EvalKnobs {
@@ -144,6 +151,12 @@ impl EvalKnobs {
             Some("ssaa") => AaMode::Ssaa,
             _ => AaMode::Off,
         };
+        let ssao_quality = match std::env::var("BOYKO_SSAO").ok().as_deref() {
+            Some("low") => SsaoQuality::Low,
+            Some("medium") => SsaoQuality::Medium,
+            Some("high") => SsaoQuality::High,
+            _ => SsaoQuality::Off,
+        };
         Self {
             texture_dir,
             sun_intensity,
@@ -153,6 +166,7 @@ impl EvalKnobs {
             win,
             csm_off,
             aa_mode,
+            ssao_quality,
         }
     }
 }
@@ -314,5 +328,12 @@ fn pbr_material_showcase_screenshot_dump() {
     // (`AaMode::Off`) to arm the FXAA post-process pass — the Stage-1 AA visual oracle.
     // Unset ⇒ Off ⇒ the same command stream / pixels as the no-AA dump.
     app.insert_resource(AaConfig { mode: knobs.aa_mode });
+    // Render P7-Q2 owner-eval SSAO knob: `BOYKO_SSAO=low`/`medium`/`high` overrides the
+    // `SsaoPlugin`-inserted default (`SsaoQuality::Off`) to arm the SSAO compute pass —
+    // the live consumer's visual oracle. Unset ⇒ Off ⇒ the same command stream / pixels
+    // as the no-SSAO dump.
+    if knobs.ssao_quality != SsaoQuality::Off {
+        app.insert_resource(SsaoConfig { quality: knobs.ssao_quality });
+    }
     app.run();
 }

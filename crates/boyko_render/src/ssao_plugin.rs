@@ -21,17 +21,19 @@ use crate::ssao_config::{ResolvedSsao, SsaoConfig, resolve_ssao_policy};
 /// `select_lighting_cull` `.before` `collect_lights`. This plugin is the SSAO analogue:
 /// owner-set `SsaoConfig` plus derived `ResolvedSsao` plus the cold `resolve_ssao_policy`.
 ///
-/// # Ordering vs. the render point (the named follow-up)
+/// # Ordering vs. the render point (the live consumer)
 ///
-/// `resolve_ssao_policy` must run BEFORE the deferred-render ECS system that READS
-/// [`ResolvedSsao`] to pick the variant pipeline + set the resolve's `with_ssao_mode`.
-/// That consumer is the explicit LARGER follow-up (the deferred pipeline is test-driven
-/// today, not a `boyko_render` system), so there is no `SystemKey` to `.before` here yet.
-/// When that system lands it should be co-registered with `resolve_ssao_policy` in one
-/// closure (so the `.before(render_point)` edge is expressible at the call site), exactly
-/// as [`LightingPlugin`](crate::light_plugin::LightingPlugin) co-registers the policy
-/// `.before(collect)`. The selection is recomputed every frame, so a loose one-frame
-/// stagger before the consumer lands is self-correcting (the config is cold owner state).
+/// `resolve_ssao_policy` writes [`ResolvedSsao`] every frame; `boyko_app::runner` reads
+/// it through `World::try_resource` (the SAME per-frame `World` read `ResolvedAa` uses)
+/// to pick the variant pipeline and arm `GBufferScene::ssao` — NOT an ECS system (the RHI
+/// pipeline objects are host-owned), so there is no `SystemKey` to `.before` here. The
+/// selection is recomputed every frame, so a loose one-frame stagger is self-correcting
+/// (the config is cold owner state).
+///
+/// The resolve's `ssao_mode` header gate is a SEPARATE seam armed by
+/// [`sync_ssao_light_gate`](crate::ssao_config::sync_ssao_light_gate), registered by the
+/// composing app (NOT by this plugin — see that system's doc for why), mirroring
+/// [`sync_ddgi_light_gate`](crate::ddgi_config::sync_ddgi_light_gate).
 #[derive(Default)]
 pub struct SsaoPlugin;
 

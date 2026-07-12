@@ -21,8 +21,9 @@ use boyko_render::light_system::LightTableStaging;
 use boyko_render::{
     AssetRefcountPlugin, CsmCasterScratch, CsmPlugin, LightingConfig, LightingPlugin,
     MeshRenderScratch, RayPlugin, Render3dPlugin, SdfPlugin, ShadowAtlasPlugin,
-    ShadowDenoisePlugin, add_gpu_transform_pack, gather_mesh_draws, gather_shadow_casters,
-    snap_apply, sync_csm_light_gate, sync_punctual_light_gate,
+    ShadowDenoisePlugin, SsaoPlugin, add_gpu_transform_pack, gather_mesh_draws,
+    gather_shadow_casters, snap_apply, sync_csm_light_gate, sync_punctual_light_gate,
+    sync_ssao_light_gate,
 };
 use boyko_scene::{CameraPlugin, FixedSet};
 
@@ -172,13 +173,18 @@ impl Plugin for EnginePlugins {
         // + sun reconcile before the cascade fit) — all Changed-gated, so the
         // cross-plugin stagger is self-correcting per their type-level docs.
         //
-        // SSAO is deliberately NOT composed: `SsaoPlugin` is config-only (no
-        // GPU cost at boot), but the windowed host creates no SSAO pipeline /
-        // targets yet, so composing it would ship a silently-dead
-        // `SsaoConfig` knob. It lands together with the host SSAO pass.
+        // Render P7-Q2: `SsaoPlugin` — the SSAO quality config substrate. UNLIKE its old
+        // config-only state, the windowed host now boots the SSAO pipeline/layout
+        // (`gpu_scene::GpuSceneBundles::boot`) and arms `GBufferScene::ssao` from the
+        // resolved selection (`boyko_app::runner`'s per-frame `World` read — the same
+        // `try_resource` pattern `ResolvedAa` uses), so this is a LIVE consumer, mirroring
+        // `ShadowDenoisePlugin`/`AaPlugin` below. The default `SsaoQuality::Off` keeps
+        // every host world byte-identical (`scene.ssao` stays `None`, the resolve's
+        // `ssao_mode` header gate stays 0), so composing it unconditionally is safe.
         app.insert_resource(LightTableStaging::default());
         app.insert_resource(LightingConfig::default());
         app.add_plugin(LightingPlugin);
+        app.add_plugin(SsaoPlugin);
         app.add_plugin(CsmPlugin);
         // ShadowAtlasPlugin (the punctual host rung) — the spot/point analogue of CsmPlugin:
         // it seeds the owner-set `ShadowConfig` (default DISABLED — the 0%-gate; overwrite it
@@ -280,6 +286,12 @@ impl Plugin for EnginePlugins {
             // same cross-plugin add-order discipline as csm (self-correcting under a one-frame lag,
             // gated off by the default DISABLED ShadowConfig).
             b.add_system(sync_punctual_light_gate).after(casters);
+            // Render P7-Q2: the SSAO header-gate bridge — mirrors `sync_csm_light_gate`/
+            // `sync_punctual_light_gate`'s cross-plugin registration (it bridges
+            // `SsaoPlugin`'s `SsaoConfig` and `LightingPlugin`'s `LightingConfig`), but
+            // reads `SsaoConfig` directly (no `ResolvedSsao`/caster dependency — mirrors
+            // `sync_ddgi_light_gate`'s shape), so it carries no ordering edge here.
+            b.add_system(sync_ssao_light_gate);
             // The unified gather runs after BOTH the affine pack and the snap
             // collapse (snap-before-gather is load-bearing — the gather reads the
             // collapsed pair).

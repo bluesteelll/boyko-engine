@@ -33,7 +33,8 @@ use boyko_render::{
     AaConfig, AaMode, BindlessTextureTable, CsmCasterScratch, DdgiCaps, JitterState,
     LightingConfig, MATERIAL_FLAG_TEXTURED, Material, MaterialId, MaterialTable, MeshAssetsExt,
     MeshGpu, MeshRenderScratch, OrphanedMeshGpu, OrphanedTextureGpu, RayBackendPolicy, RayCaps,
-    RenderEpoch, ResolvedAa, ResolvedCsm, ResolvedShadowAtlas, ResolvedTaa, RetiredGpuBuffers,
+    RenderEpoch, ResolvedAa, ResolvedCsm, ResolvedShadowAtlas, ResolvedSsao, ResolvedTaa,
+    RetiredGpuBuffers,
     RhiContext, SdfEditStaging, ShadowDenoiseConfig, ShadowDenoiseMode, TaaState,
     TextureAssetsExt, TextureGpu, advance_jitter, collect_sdf_edits, gbuffer_push_from_view,
     gbuffer_push_from_view_jittered, ndc_jitter, retire_deferred_frees, upload_atlas_ring,
@@ -1448,6 +1449,14 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 .try_resource::<ResolvedAa>()
                 .map(|r| r.mode)
                 .unwrap_or_default();
+            // Render P7-Q2: read the resolved SSAO selection (`SsaoPlugin`'s
+            // `resolve_ssao_policy` is the single writer). The SAME `try_resource` pattern
+            // `resolved_aa_mode` uses: a host that omits `SsaoPlugin` degrades to `None`
+            // (no variant) rather than panicking. Default/absent `None` ⇒ `scene.ssao ==
+            // None` ⇒ byte-identical (the 0%-gate; the resolve's `ssao_mode` header gate is
+            // armed separately by `boyko_render::sync_ssao_light_gate`, in lock-step with
+            // `SsaoConfig`).
+            let ssao_variant = world.try_resource::<ResolvedSsao>().and_then(|r| r.variant);
             // SSAA (AA campaign Stage 3, C1) — the HOST-AUTHORITATIVE LOCK: resolution is
             // a boot commitment (`WindowHost::boot`'s device-capability probe), so the
             // per-frame mode MUST agree with it, never the reverse. `host.ssaa_armed` ⇒
@@ -1500,6 +1509,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 terminator_wrap,
                 aa_mode,
                 taa_reset_flag,
+                ssao_variant,
                 ctx,
             );
 

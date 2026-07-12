@@ -34,6 +34,7 @@ use boyko_app::prelude::*;
 use boyko_ecs::ecs::core::system::ResMut;
 use boyko_render::Material;
 use boyko_render::{AaConfig, AaMode};
+use boyko_render::{SsaoConfig, SsaoQuality};
 use boyko_render::generate_tangents;
 use boyko_render::mesh::Vertex;
 
@@ -196,6 +197,19 @@ fn grand_showcase_2mat_screenshot_dump() {
         // SETTLE_FRAMES window, so the frame-30 dump is a converged-static TAA image (the
         // orchestrator's partial oracle — in-motion quality is owner-gated).
         app.insert_resource(AaConfig { mode: AaMode::Taa });
+    }
+    // Render P7-Q2 owner-eval SSAO oracle: `BOYKO_SSAO=low`/`medium`/`high` arms the SSAO
+    // compute pass on this 5-sphere scene (mirrors the `BOYKO_AA` knob above). Unset ⇒ the
+    // `SsaoPlugin` default (`SsaoQuality::Off`) ⇒ `scene.ssao == None` ⇒ the pinned
+    // `f6147f90` golden is unchanged (the 0%-gate).
+    let ssao_quality = match std::env::var("BOYKO_SSAO").as_deref() {
+        Ok("low") => SsaoQuality::Low,
+        Ok("medium") => SsaoQuality::Medium,
+        Ok("high") => SsaoQuality::High,
+        _ => SsaoQuality::Off,
+    };
+    if ssao_quality != SsaoQuality::Off {
+        app.insert_resource(SsaoConfig { quality: ssao_quality });
     }
     app.run();
 }
