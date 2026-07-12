@@ -202,6 +202,49 @@ pub fn resolve_aa_policy(cfg: Res<AaConfig>, mut resolved: ResMut<ResolvedAa>) {
     *resolved = resolve_aa(&cfg);
 }
 
+// ---- ResolvedTaa (the temporal-resolve UBO tunables — Stage 4, mirrors ResolvedTemporalShadow) --
+
+/// The packed UBO the TAA temporal-resolve pass reads (`taa_resolve.comp.hlsl`'s `cbuffer
+/// ResolvedTaa` at binding 5) — mirrors
+/// [`ResolvedTemporalShadow`](crate::shadow_denoise_config::ResolvedTemporalShadow)'s shape
+/// (std140 vec4, 16 B, `#[derive(Resource)]`, field order matching the shader byte-for-byte).
+///
+/// v1 has no owner-facing `TaaConfig` to resolve from — the tunables are fixed, owner-tunable
+/// NAMED CONSTANTS (`Default::default`), carried as a `World` Resource (Principle 0: the UBO's
+/// source of truth lives in the engine's own storage, not a host constant) so a future live-tune
+/// policy system has a single insertion point.
+#[repr(C)]
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct ResolvedTaa {
+    /// Feedback weight given to the CURRENT frame right after a reset (confidence == 1) — a
+    /// low-confidence blend, mostly replace. Offset 0.
+    pub default_blend: f32,
+    /// Steady-state feedback floor (confidence → ∞) — a converged/static view trusts history
+    /// almost entirely. Offset 4.
+    pub min_blend: f32,
+    /// The 3×3 neighborhood variance-clip AABB half-width scale (× σ, Salvi-style). Offset 8.
+    pub variance_gamma: f32,
+    /// std140 padding (unread) — keeps the 16-byte vec4 stride explicit. Offset 12.
+    pub _pad: f32,
+}
+
+// Layout pin: 4 × 4 = 16 B = one std140 vec4 slot — the shader's `cbuffer ResolvedTaa` stride.
+const _: () = assert!(core::mem::size_of::<ResolvedTaa>() == 16);
+
+/// The byte size of the host-coherent TAA tunables UBO — `size_of::<ResolvedTaa>()` (16 B).
+/// Hosts size their UBO slots from THIS constant. Mirrors
+/// [`RESOLVED_TEMPORAL_SHADOW_BYTES`](crate::shadow_denoise_config::RESOLVED_TEMPORAL_SHADOW_BYTES).
+pub const RESOLVED_TAA_BYTES: usize = core::mem::size_of::<ResolvedTaa>();
+
+impl Default for ResolvedTaa {
+    /// `default_blend = 0.1`, `min_blend = 0.015`, `variance_gamma = 1.0` — the shipped v1
+    /// tuning (a never-run world already carries these, matching a never-armed TAA's inert UBO).
+    #[inline]
+    fn default() -> Self {
+        Self { default_blend: 0.1, min_blend: 0.015, variance_gamma: 1.0, _pad: 0.0 }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

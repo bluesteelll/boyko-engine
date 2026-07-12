@@ -40,7 +40,7 @@ use boyko_rhi_vulkan::compute::{
     gbuffer_mrt_tex_vs_spirv, gbuffer_mrt_vs_spirv, interp_instances_spirv, punctual_depth_fs_spirv,
     punctual_depth_vs_spirv, sdf_gbuffer_composite_spirv, sdf_probe_update_spirv,
     smaa_blend_fs_spirv, smaa_edge_fs_spirv, smaa_weight_fs_spirv, ssaa_downsample_fs_spirv,
-    tile_grid_extent,
+    taa_resolve_spirv, tile_grid_extent,
 };
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::ffi::VkDescriptorSet;
@@ -52,7 +52,7 @@ use boyko_rhi_vulkan::rhi_impl::{
 use boyko_rhi_vulkan::swapchain::{
     AaActivation, CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
     GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene,
-    InterpActivation, PunctualDepthActivation, SmaaActivation, SsaaActivation,
+    InterpActivation, PunctualDepthActivation, SmaaActivation, SsaaActivation, TaaActivation,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::accel::BoundAccelStruct;
@@ -679,6 +679,20 @@ pub(crate) struct GpuSceneBundles {
     /// Reuses [`Self::present_sampler`] (NEAREST — the shader's `.Load` ignores it) as the
     /// SSAA sampler; no dedicated sampler field (unlike `fxaa_sampler`/`smaa_sampler`).
     ssaa_pipeline: VulkanGraphicsPipeline,
+    /// Anti-aliasing Stage 4 (TAA W5): the temporal-resolve compute pipeline
+    /// (`taa_resolve.comp`), built unconditionally at boot (like [`Self::ssaa_pipeline`]) —
+    /// NOT hwrt-gated. Bound + dispatched by `record_taa` when `scene.taa.is_some()`.
+    taa_resolve_pipeline: ComputePipeline,
+    /// Anti-aliasing Stage 4 (TAA W5): the DEDICATED 8-binding bind-group LAYOUT
+    /// [`Self::taa_resolve_pipeline`] declares at set 0 — { `gLit` CIS @0, `gViewT` @1,
+    /// `gHistIn` @2, `gHistOut` @3, `gAaOut` @4 STORAGE images, the `ResolvedTaa` UBO @5, the
+    /// camera UBO @6, the `MotionCam` UBO @7 }. [`GBufferTargets`] writes a per-FIF
+    /// `taa_resolve_set` against it once per extent.
+    taa_resolve_layout: VulkanBindGroupLayout,
+    /// Anti-aliasing Stage 4 (TAA W5): the dedicated LINEAR/ClampToEdge sampler for the
+    /// resolve's `gLit` combined-image-sampler tap — DISTINCT boot object from
+    /// [`Self::fxaa_sampler`]/[`Self::smaa_sampler`].
+    taa_linear_sampler: VulkanSampler,
     // ── CSM / atlas (bound-but-unread trios; depth passes OFF in R3) ─────────
     csm: CsmResources,
     /// `ceil(composite pixels / LOCAL_SIZE_X)` — the marcher + resolve dispatch
@@ -1728,12 +1742,67 @@ impl GpuSceneBundles {
         )
         .expect("invariant: SSAA downsample graphics pipeline create");
 
+        // Anti-aliasing Stage 4 (TAA W5): the temporal-resolve compute pipeline + its DEDICATED
+        // 8-binding layout { `gLit` COMBINED_IMAGE_SAMPLER @0, `gViewT` STORAGE @1, `gHistIn`
+        // STORAGE @2, `gHistOut` STORAGE @3, `gAaOut` STORAGE @4, the `ResolvedTaa` UBO @5, the
+        // camera UBO @6 (UNJITTERED — C1 cut), the `MotionCam` UBO @7 } + a 4-byte `{ uint reset;
+        // }` push constant (`boyko_render::taa_state::TaaState`) + a DEDICATED LINEAR/ClampToEdge
+        // sampler for the `gLit` tap. Built UNCONDITIONALLY here (like `fxaa_pipeline`/
+        // `ssaa_pipeline` above) — TAA is NOT hwrt-gated (its motion vector reconstructs from
+        // `gViewT`, never a `rayQuery` trace), mirroring `shadow_temporal_pipeline`'s boot-build
+        // pattern but unconditional. Boot-time creation records no command / samples no OFF pixel
+        // — byte-identical to the golden regardless of this pipeline's existence (`GBufferScene::
+        // taa` stays `None` unless `AaMode::Taa` is selected).
+        let taa_linear_sampler = RhiDevice::create_sampler(
+            device,
+            &SamplerDesc {
+                mag_filter: Filter::Linear,
+                min_filter: Filter::Linear,
+                address_mode: AddressMode::ClampToEdge,
+                mip: MipMode::None,
+                compare: None,
+            },
+        )
+        .expect("invariant: TAA resolve linear/clamp sampler create");
+        let taa_resolve_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: TAA resolve bind-group layout create");
+        let taa_resolve_cs = RhiDevice::create_shader_module(device, taa_resolve_spirv())
+            .expect("invariant: TAA resolve compute shader module create");
+        let taa_resolve_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &taa_resolve_cs,
+                entry: c"main",
+                // The shader reads the reset flag via a 4-byte `{ uint reset; }` COMPUTE push
+                // range (`boyko_render::taa_state::TaaState::advance`'s consumed-this-frame bit).
+                push_constant_bytes: 4,
+                bind_group_layout: Some(&taa_resolve_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: TAA resolve compute pipeline create");
+
         // The shader modules are consumed by pipeline creation; destroy them now
         // (mirrors the showcase's post-create module teardown).
         // SAFETY: every module was created on `ctx` above and is no longer
         // needed once its pipeline exists; each is destroyed exactly once; no
         // GPU work has been submitted yet.
         unsafe {
+            RhiDevice::destroy_shader_module(device, taa_resolve_cs);
             RhiDevice::destroy_shader_module(device, ssaa_fs);
             RhiDevice::destroy_shader_module(device, smaa_blend_fs);
             RhiDevice::destroy_shader_module(device, smaa_weight_fs);
@@ -2156,6 +2225,9 @@ impl GpuSceneBundles {
             smaa_area_tex,
             smaa_search_tex,
             ssaa_pipeline,
+            taa_resolve_pipeline,
+            taa_resolve_layout,
+            taa_linear_sampler,
             csm,
             dispatch_group_count_x,
         }
@@ -2739,6 +2811,12 @@ impl GpuSceneBundles {
         // `GBufferScene::aa == None` (the 0%-gate: no `aa_out`, no FXAA pass, present
         // samples `lit`). `AaMode::Fxaa` arms the FXAA activation below.
         aa_mode: AaMode,
+        // Anti-aliasing Stage 4 (TAA W5): `boyko_render::taa_state::TaaState::advance`'s
+        // consumed-this-frame reset flag (`true` on TAA's first armed frame or a resize) —
+        // threaded from `boyko_app::runner` the SAME way `terminator_wrap` is, so the RHI layer
+        // never reads `World` directly. Read ONLY when `aa_mode == AaMode::Taa` arms
+        // `TaaActivation::reset` below; ignored (and harmless) otherwise.
+        taa_reset: bool,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -2950,14 +3028,18 @@ impl GpuSceneBundles {
             // armed the 2× `composite_extent` at boot (`WindowHost::ssaa_armed`).
             ssaa: matches!(aa_mode, AaMode::Ssaa)
                 .then(|| SsaaActivation { pipeline: &self.ssaa_pipeline, sampler: &self.present_sampler }),
-            // Anti-aliasing Stage 4: `TaaActivation`'s framework arm (W1) is landed, but the
-            // resolve dispatch itself — the boot pipeline/layout/sampler this field would borrow,
-            // `compute.rs` registration, the per-FIF resolve set, `gbuffer.rs::record_taa` — is a
-            // W5 follow-up (see `TaaActivation`'s doc for the full rationale). `None`
-            // UNCONDITIONALLY for now: selecting `AaMode::Taa` arms the raster-only jitter
-            // (`crate::runner`'s wiring) with no resolve to consume it yet — an explicitly
-            // acknowledged, honestly-labeled transitional state, not a bug.
-            taa: None,
+            // Anti-aliasing Stage 4 (W5): `AaMode::Taa` ⇒ `Some` — arms the temporal-resolve
+            // activation against the boot-built pipeline/layout/sampler. Mutually exclusive with
+            // `aa`/`smaa`/`ssaa` above by construction (same single-enum `matches!` discipline).
+            // `reset` is the runner's already-consumed `TaaState::advance()` result for THIS
+            // frame (see this fn's `taa_reset` param doc).
+            taa: matches!(aa_mode, AaMode::Taa).then(|| TaaActivation {
+                resolve_pipeline: &self.taa_resolve_pipeline,
+                resolve_layout: &self.taa_resolve_layout,
+                color_formats: &[Format::R8G8B8A8Unorm],
+                linear_sampler: &self.taa_linear_sampler,
+                reset: taa_reset,
+            }),
             mesh_draw,
             csm_cascade_texture: &self.csm.cascade,
             csm_compare_sampler: &self.csm.sampler,
@@ -3359,6 +3441,11 @@ impl GpuSceneBundles {
             // with `resolve_pipeline` — both pipelines are destroyed before their shared layout.
             RhiDevice::destroy_compute_pipeline(ctx, self.resolve_pipeline_wrap);
             RhiDevice::destroy_bind_group_layout(ctx, self.resolve_layout);
+            // TAA W5 (C3 fix): the taa_resolve compute pipeline + its 8-binding layout, both built
+            // UNCONDITIONALLY at boot (every config incl. AaMode::Off), like fxaa/smaa/ssaa. Pipeline
+            // before its layout — else a per-renderer boot leaks a pipeline + layout + sampler.
+            RhiDevice::destroy_compute_pipeline(ctx, self.taa_resolve_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.taa_resolve_layout);
             // HW-RT rung R2a-4b: the HWRT resolve pipeline + its 21-binding layout, `Option`-guarded
             // (present only on an RT device under `feature = "hwrt"`). Pipeline before layout.
             #[cfg(feature = "hwrt")]
@@ -3483,6 +3570,7 @@ impl GpuSceneBundles {
             RhiDevice::destroy_sampler(ctx, self.present_sampler);
             RhiDevice::destroy_sampler(ctx, self.fxaa_sampler);
             RhiDevice::destroy_sampler(ctx, self.smaa_sampler);
+            RhiDevice::destroy_sampler(ctx, self.taa_linear_sampler);
             // Anti-aliasing Stage 2: the two boot-resident SMAA LUT textures (no dependents —
             // no set still references them once the SMAA sets above are torn down by the
             // `Renderer`/`GBufferTargets` teardown that runs before this fn).

@@ -1,13 +1,14 @@
 //! The [`AaPlugin`] — inserts the owner-set [`AaConfig`] + its derived [`ResolvedAa`]
 //! companion and registers the cold [`resolve_aa_policy`] at the gather/setup boundary,
 //! symmetric with [`SsaoPlugin`](crate::ssao_plugin::SsaoPlugin). Also inserts the TAA (Stage 4)
-//! substrate Resources — [`JitterState`] and [`TaaState`] — so `boyko_app::runner`'s per-frame
-//! reads/writes never panic on a missing Resource, mirroring how `AaConfig`/`ResolvedAa` are
-//! seeded here rather than left to the runner to insert-if-absent.
+//! substrate Resources — [`JitterState`], [`TaaState`], [`ResolvedTaa`], and [`MotionCamState`] —
+//! so `boyko_app::runner`'s per-frame reads/writes never panic on a missing Resource, mirroring
+//! how `AaConfig`/`ResolvedAa` are seeded here rather than left to the runner to insert-if-absent.
 
 use boyko_ecs::ecs::core::app::{App, Plugin};
 
-use crate::aa_config::{AaConfig, ResolvedAa, resolve_aa_policy};
+use crate::aa_config::{AaConfig, ResolvedAa, ResolvedTaa, resolve_aa_policy};
+use crate::motion_cam::MotionCamState;
 use crate::taa_jitter::JitterState;
 use crate::taa_state::TaaState;
 
@@ -40,12 +41,22 @@ impl Plugin for AaPlugin {
         // world is correct even before the first policy run.
         app.insert_resource(AaConfig::default());
         app.insert_resource(ResolvedAa::default());
-        // Anti-aliasing Stage 4 (TAA): the jitter-phase + history-reset substrate Resources.
-        // Both default to the 0%-gate shape (`JitterState { phase: 0, armed: false }`,
-        // `TaaState { reset: false, .. }`) — a world that never selects `AaMode::Taa` never
-        // observes a nonzero phase or a forced reset.
+        // Anti-aliasing Stage 4 (TAA): the jitter-phase + history-reset + resolve-tunables
+        // substrate Resources. All default to the 0%-gate shape (`JitterState { phase: 0, armed:
+        // false }`, `TaaState { reset: false, .. }`, `ResolvedTaa::default()`'s shipped v1
+        // tuning) — a world that never selects `AaMode::Taa` never observes a nonzero phase or a
+        // forced reset.
         app.insert_resource(JitterState::default());
         app.insert_resource(TaaState::default());
+        app.insert_resource(ResolvedTaa::default());
+        // W5: `MotionCamState` is un-walled from `hwrt` (W3) — the TAA resolve's camera-only MV
+        // reconstruction needs it on BOTH legs. Inserted here (UNCONDITIONALLY, unlike
+        // `boyko_app::plugins`'s hwrt-gated insert for the mesh-shadow MV consumer) so a
+        // `not(hwrt)` — or an hwrt build with the shadow-denoise temporal mode off — world still
+        // has it when `AaMode::Taa` is armed. Both insertion sites write the SAME `default()`
+        // (`prev_view_proj: None`), so composing both plugins is idempotent (config-phase only —
+        // neither `advance()` call has run yet).
+        app.insert_resource(MotionCamState::default());
 
         app.add_systems_cfg(|b| {
             b.add_system(resolve_aa_policy);

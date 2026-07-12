@@ -451,13 +451,11 @@ embed_spirv! {
     /// (`boyko_render::taa_state::TaaState`). NOT `hwrt`-gated (TAA works on the pure-software
     /// leg — its motion vector is reconstructed from `gViewT`, never a `rayQuery` trace).
     ///
-    /// **W1-W4 landing note**: this `.spv` is compiled + embedded (the binding-layout contract
-    /// is pinned), but no boot pipeline binds it yet and no pass dispatches it this rung — the
-    /// boot pipeline/layout/sampler construction (mirroring [`SHADOW_TEMPORAL_SPV`]'s
-    /// `shadow_temporal_pipeline` boot-build pattern, unconditionally here), the per-FIF
-    /// resolve descriptor set, and the `gbuffer.rs::record_taa` dispatch are a W5 continuation
-    /// (`GBufferScene::taa` stays `None` on every current frame until then — see
-    /// `TaaActivation`'s doc in `present::scene_types`). The const-asserted length is the
+    /// **W5**: bound at boot (`boyko_app::gpu_scene::GpuSceneBundles::boot`, mirroring
+    /// [`SHADOW_TEMPORAL_SPV`]'s `shadow_temporal_pipeline` boot-build pattern, unconditionally
+    /// here) and dispatched by `present::passes::taa::Renderer::record_taa` when
+    /// `GBufferScene::taa.is_some()` (`AaMode::Taa` armed) — see `TaaActivation`'s doc in
+    /// `present::scene_types` for the full activation shape. The const-asserted length is the
     /// anti-drift guard.
     TAA_RESOLVE_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/taa_resolve.comp.spv")
@@ -1108,9 +1106,9 @@ pub fn shadow_temporal_spirv() -> &'static [u32] {
 /// Anti-aliasing Stage 4 (TAA) — the temporal-resolve SPIR-V as a `u32` word stream, ready for
 /// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module). Bound to its
 /// own 8-binding layout (see [`TAA_RESOLVE_SPV`]'s doc for the full binding contract). NOT
-/// `hwrt`-gated. No boot pipeline binds this yet this rung (see [`TAA_RESOLVE_SPV`]'s W1-W4
-/// landing note) — the accessor is landed so the binding contract is exercised end-to-end
-/// (`include_bytes!` + the const-asserted length) ahead of the W5 continuation's boot wiring.
+/// `hwrt`-gated. Bound at boot (W5) by `boyko_app::gpu_scene::GpuSceneBundles::boot` into
+/// `taa_resolve_pipeline`, dispatched by `crate::present::passes::taa::Renderer::record_taa`
+/// when `GBufferScene::taa.is_some()`.
 #[inline]
 pub fn taa_resolve_spirv() -> &'static [u32] {
     TAA_RESOLVE_SPV.as_words()

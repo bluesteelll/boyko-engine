@@ -623,26 +623,49 @@ pub struct SsaaActivation<'a> {
 ///
 /// `None` on [`GBufferScene::taa`] is the OFF path (the DEFAULT — the 0%-gate): no `aa_out`
 /// target, no `taa_hist` history ring, the present-blit samples `lit` directly, no resolve pass
-/// recorded. `Some` arms the seam: [`GBufferTargets`] allocates `aa_out` + `taa_hist`,
-/// [`GBufferTargets::sync_gbuffer`] treats an arm-state change exactly like an extent change,
-/// and (once the resolve dispatch is wired — a W5 follow-up) the recorded pass writes both
-/// `taa_hist[fi]` and `aa_out` directly (no dedicated FXAA/SMAA-style INPUT descriptor set: the
-/// resolve set binds `lit`/`viewt`/`taa_hist`/the camera + `MotionCam` UBOs itself). Mutually
-/// exclusive with [`GBufferScene::aa`] / [`GBufferScene::smaa`] / [`GBufferScene::ssaa`]
-/// (`debug_assert!` — see [`SsaaActivation`]'s doc for the same pattern).
+/// recorded. `Some` arms the seam: [`GBufferTargets`] allocates `aa_out` + `taa_hist` + the
+/// resolve's own `taa_ubo`/`taa_motion_cam_ubo` rings + `taa_resolve_set`,
+/// [`GBufferTargets::sync_gbuffer`] treats an arm-state change exactly like an extent change, and
+/// [`crate::present::passes::gbuffer`]'s `record_taa` dispatches [`Self::resolve_pipeline`] at the
+/// resolve→present seam, writing both `taa_hist[fi]` and `aa_out` directly (no dedicated
+/// FXAA/SMAA-style INPUT descriptor set: the resolve set binds `lit`/`viewt`/`taa_hist`/the
+/// tunables + camera + `MotionCam` UBOs itself). Mutually exclusive with [`GBufferScene::aa`] /
+/// [`GBufferScene::smaa`] / [`GBufferScene::ssaa`] (`debug_assert!` — see [`SsaaActivation`]'s
+/// doc for the same pattern).
 ///
-/// **v1 (W1-W4) note**: this struct's shape is landed as the framework arm, but no boot pipeline
-/// binds [`Self::resolve_layout`] yet — [`GBufferScene::taa`] therefore stays `None` on every
-/// current frame (the resolve dispatch, `compute.rs` registration, and boot layout/sampler
-/// construction are a W5 follow-up). Selecting `AaMode::Taa` today arms the raster-only jitter
-/// (`crate::taa_jitter`, wired in `boyko_app::runner`) with no resolve to consume it — an
-/// explicitly acknowledged, honestly-labeled transitional state (see the TAA design doc's
-/// "W1-W4 CHECKPOINT" note), not a bug.
+/// # Why a DEDICATED `MotionCam` ring (not the hwrt mesh-shadow `motion_cam_ubo`)
+///
+/// TAA and the hwrt temporal shadow denoiser are independently armable features that can BOTH be
+/// live in the same frame. `MotionCamState::advance` is a ONE-call-per-frame contract per
+/// `Resource` instance — a second `advance()` call in the same frame (one per consumer) would
+/// corrupt the persisted `prev` for whichever ran second. `boyko_app::runner` therefore advances
+/// `MotionCamState` AT MOST ONCE per frame (reusing the hwrt mesh-shadow producer's pair when it
+/// already ran this frame) and uploads that ONE pair into EACH consumer's OWN GPU ring — TAA's
+/// dedicated `taa_motion_cam_ubo` (built in [`GBufferTargets`], NOT sourced from `GBufferScene`,
+/// mirroring how `taa_ubo` is self-contained there) is that separate destination.
+///
+/// # Compute, not graphics — recorded BEFORE `present_sample` (unlike FXAA/SMAA/SSAA)
+///
+/// The resolve is a COMPUTE dispatch reading `lit`/`viewt`/`taa_hist_read` at `GENERAL` (the
+/// framegraph's `taa_resolve` pass, declared BEFORE `present_sample` — see `graph_bridge.rs`),
+/// straight out of the deferred resolve's write, rather than at `SHADER_READ_ONLY_OPTIMAL` the
+/// way FXAA/SMAA/SSAA's FRAGMENT passes read `lit` AFTER `present_sample`'s transition. `record_taa`
+/// is therefore recorded immediately after the main resolve dispatch, BEFORE
+/// `present_sample`'s graph pass — see `gbuffer.rs`'s record-site ordering comment.
 #[derive(Clone, Copy)]
 pub struct TaaActivation<'a> {
-    /// The TAA resolve compute pipeline's bind-group LAYOUT. [`GBufferTargets`] would write a
-    /// per-FIF `taa_resolve_set` against it once per extent (the SSAO `ssao_set` precedent) once
-    /// the resolve dispatch lands.
+    /// The TAA temporal-resolve compute pipeline (`taa_resolve.comp` /
+    /// [`crate::compute::taa_resolve_spirv`]): its layout declares [`Self::resolve_layout`] at
+    /// `set 0` + a 4-byte `{ uint reset; }` COMPUTE push range (`boyko_render::taa_state::TaaState`).
+    /// Built UNCONDITIONALLY at boot (NOT `hwrt`-gated — the resolve's motion vector reconstructs
+    /// from `gViewT`, never a `rayQuery` trace), mirroring [`AaActivation::pipeline`]'s
+    /// always-built discipline.
+    pub resolve_pipeline: &'a ComputePipeline,
+    /// The TAA resolve compute pipeline's bind-group LAYOUT — the DEDICATED 8-binding shape {
+    /// `gLit` COMBINED_IMAGE_SAMPLER @0, `gViewT` STORAGE @1, `gHistIn` STORAGE @2, `gHistOut`
+    /// STORAGE @3, `gAaOut` STORAGE @4, the `ResolvedTaa` UBO @5, the camera UBO @6
+    /// (UNJITTERED — C1 cut), the `MotionCam` UBO @7 }. [`GBufferTargets`] writes a per-FIF
+    /// `taa_resolve_set` against it once per extent (the SSAO `ssao_set` precedent).
     pub resolve_layout: &'a VulkanBindGroupLayout,
     /// `[R8G8B8A8_UNORM]` — `aa_out`'s format, carried here (rather than hard-coded at the call
     /// site) so a future format change has one source of truth, mirroring [`SmaaActivation`]'s
@@ -652,6 +675,12 @@ pub struct TaaActivation<'a> {
     /// resolve→AA-input seam FXAA's `fxaa_set` binds `lit` through). DISTINCT boot object from
     /// [`AaActivation::sampler`]/[`SmaaActivation::sampler`].
     pub linear_sampler: &'a VulkanSampler,
+    /// `true` ⇒ this frame's resolve must force `blend_factor == 1.0` (full replace, never blend)
+    /// — [`boyko_render::taa_state::TaaState::advance`]'s consumed-this-frame result, threaded
+    /// from `boyko_app::runner` (the SAME "the runner resolves; the RHI only carries the scalar"
+    /// discipline `GBufferScene::terminator_wrap`-shaped fields use). Pushed as the pipeline's
+    /// 4-byte `{ uint reset; }` COMPUTE range.
+    pub reset: bool,
 }
 
 /// HW-RT rung 3a: the spatial (à-trous) RT soft-shadow DENOISE pass activation threaded into
@@ -1324,11 +1353,15 @@ pub struct GBufferScene<'a> {
     /// Anti-aliasing Stage 4: the TAA temporal-resolve pass activation. `None` = OFF, the
     /// 0%-gate (`aa_out`/`taa_hist` stay unallocated, the present-blit samples `lit` directly, no
     /// resolve pass recorded). `Some` arms the seam (see [`TaaActivation`]'s doc for the full
-    /// shape + the v1 W1-W4 caveat: this field stays `None` on every current frame until the
-    /// resolve dispatch is wired, a W5 follow-up). Mutually exclusive with [`Self::aa`] /
-    /// [`Self::smaa`] / [`Self::ssaa`] (`debug_assert!` — see [`SsaaActivation`]'s doc for the
-    /// same pattern). Native resolution like `aa`/`smaa` (NOT render-scaled, unlike `ssaa`), so
-    /// — once wired — this WILL be a live per-frame toggle.
+    /// shape). Mutually exclusive with [`Self::aa`] / [`Self::smaa`] / [`Self::ssaa`]
+    /// (`debug_assert!` — see [`SsaaActivation`]'s doc for the same pattern). Native resolution
+    /// like `aa`/`smaa` (NOT render-scaled, unlike `ssaa`) — a live per-frame toggle.
+    ///
+    /// **v1 motion-quality caveat** (see [`AaMode::Taa`](boyko_render's `AaMode::Taa`)'s doc):
+    /// only the raster mesh path is sub-pixel jittered (C1 — SDF-marched pixels stay temporally
+    /// stable but un-supersampled); the resolve is landed OFF-byte-identical and
+    /// converged-static-validated, but in-motion quality (ghosting, disocclusion) is owner-gated,
+    /// not yet visually blessed.
     pub taa: Option<TaaActivation<'a>>,
     /// Mesh foundation M3: the per-mesh instanced-arm draw BATCH LIST. An EMPTY slice
     /// (every pre-M2 scene) records the LEGACY pass-A draw — `vkCmdDraw(vertex_count, 1,

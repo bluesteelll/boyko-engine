@@ -2152,6 +2152,29 @@ impl Renderer<'_> {
             unsafe { tc.write_end(self.fns, cmd, fi, TimedPass::DeferredResolve) };
         }
 
+        // Anti-aliasing Stage 4 (TAA W5): the temporal-resolve pass — recorded HERE, BEFORE
+        // `present_sample`'s `lit` GENERAL→SHADER_READ_ONLY_OPTIMAL transition below. TAA is a
+        // COMPUTE dispatch that reads `lit` at `GENERAL`, straight out of the resolve's write
+        // (the framegraph's `taa_resolve` pass is declared in that exact position — see
+        // `graph_bridge.rs`), the OPPOSITE ordering FXAA/SMAA/SSAA use (FRAGMENT graphics
+        // pipelines reading `lit` AFTER the SHADER_READ_ONLY_OPTIMAL transition, below). Gated on
+        // `scene.taa.is_some()` AND `targets.taa_resolve_set.is_some()` (kept in lockstep by
+        // `GBufferTargets::create`) — `None` on every other `AaMode` records nothing here.
+        if let Some(taa) = scene.taa.as_ref()
+            && targets.taa_resolve_set.is_some()
+        {
+            let taa_pass = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .taa_resolve
+                .expect("invariant: scene.taa.is_some() ⇒ the taa_resolve pass was declared");
+            // SAFETY: recording is open; `aa_out`/`taa_hist`/`taa_resolve_set` were built by
+            // `create()` under the same `scene.taa` that gates this branch; `taa_pass` was
+            // declared this frame under the same gate (the invariant above).
+            unsafe { self.record_taa(cmd, targets, taa, taa_pass, scene, fi) };
+        }
+
         // (5c) LIT: GENERAL → SHADER_READ_ONLY_OPTIMAL for the present-blit sample. The
         // present now samples LIT (the resolve's output), NOT albedo (the deletion target
         // of the old step-6 albedo→SHADER_READ_ONLY barrier — albedo stays GENERAL,
@@ -2170,7 +2193,8 @@ impl Renderer<'_> {
             .present_sample;
         self.record_graph_pass(present_sample, cmd, targets, scene, fi);
 
-        // Anti-aliasing Stage 1 (FXAA) / Stage 2 (SMAA) / Stage 3 (SSAA) / Stage 4 (TAA).
+        // Anti-aliasing Stage 1 (FXAA) / Stage 2 (SMAA) / Stage 3 (SSAA). Stage 4 (TAA) was
+        // ALREADY recorded above (before `present_sample` — see that block's ordering comment).
         // `sync_gbuffer` keeps `targets.aa_out.is_some() == (scene.aa.is_some() ||
         // scene.smaa.is_some() || scene.ssaa.is_some() || scene.taa.is_some())` in lockstep (an
         // arm-state change forces a fence-safe resync, exactly like an extent change), so these
@@ -2207,16 +2231,12 @@ impl Renderer<'_> {
                 // under SSAA, and NOT the live `extent`, which tracks window resizes).
                 unsafe { self.record_ssaa(cmd, targets, ssaa, aa_extent, fi) };
             } else {
-                // Anti-aliasing Stage 4 (TAA) — landed as the W1-W4 framework arm only:
-                // `scene.taa` stays `None` on every current frame (no boot pipeline binds
-                // `TAA_RESOLVE_SPV` yet — see its doc in `compute.rs`), so this `else` arm is
-                // never reached in practice. The tripwire below turns a future "arm `scene.taa`
-                // without wiring `record_taa` here" mistake into a debug panic instead of a
-                // silent garbage-`aa_out` render (the `targets.aa_out.is_some()` outer gate
-                // would otherwise present an allocated-but-never-written image).
+                // `aa_out.is_some()` with none of aa/smaa/ssaa matched ⇒ TAA is the reason
+                // (the four arms are mutually exclusive by construction); `record_taa` already
+                // ran above — nothing left to do here.
                 debug_assert!(
-                    scene.taa.is_none(),
-                    "invariant: scene.taa is Some but no record_taa dispatch is wired yet (W5 continuation)"
+                    scene.taa.is_some(),
+                    "invariant: aa_out is armed but none of aa/smaa/ssaa/taa matched"
                 );
             }
         }

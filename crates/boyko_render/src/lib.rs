@@ -418,7 +418,9 @@ pub use sdf_edit::{
 pub use shadow_marker::CastsPunctualShadow;
 pub use shadow_plugin::ShadowAtlasPlugin;
 pub use snap_interpolation::{SnapInterpolation, TeleportCommandsExt, snap_apply};
-pub use aa_config::{AaConfig, AaMode, ResolvedAa, resolve_aa, resolve_aa_policy};
+pub use aa_config::{
+    AaConfig, AaMode, RESOLVED_TAA_BYTES, ResolvedAa, ResolvedTaa, resolve_aa, resolve_aa_policy,
+};
 pub use aa_plugin::AaPlugin;
 pub use taa_jitter::{HALTON_8, JitterState, NdcJitter, advance_jitter, ndc_jitter};
 pub use taa_state::TaaState;
@@ -438,7 +440,7 @@ pub use upload::{
     upload_atlas_ring, upload_camera_ring, upload_csm_ring, upload_instance_materials,
     upload_instance_materials_tex, upload_instance_models, upload_light_table,
     upload_pair_out_slot, upload_pair_ring, upload_ray_shadow_ring, upload_sdf_edit_list,
-    upload_shadow_denoise_ring, upload_temporal_shadow_ring,
+    upload_shadow_denoise_ring, upload_taa_ring, upload_temporal_shadow_ring,
 };
 #[cfg(feature = "hwrt")]
 pub use upload::{upload_mesh_ids, upload_prev_instance_models};

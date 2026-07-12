@@ -33,13 +33,14 @@ use boyko_render::{
     AaConfig, AaMode, BindlessTextureTable, CsmCasterScratch, DdgiCaps, JitterState,
     LightingConfig, MATERIAL_FLAG_TEXTURED, Material, MaterialId, MaterialTable, MeshAssetsExt,
     MeshGpu, MeshRenderScratch, OrphanedMeshGpu, OrphanedTextureGpu, RayBackendPolicy, RayCaps,
-    RenderEpoch, ResolvedAa, ResolvedCsm, ResolvedShadowAtlas, RetiredGpuBuffers, RhiContext,
-    SdfEditStaging, ShadowDenoiseConfig, ShadowDenoiseMode, TextureAssetsExt, TextureGpu,
-    advance_jitter, collect_sdf_edits, gbuffer_push_from_view, gbuffer_push_from_view_jittered,
-    ndc_jitter, retire_deferred_frees, upload_atlas_ring, upload_camera_ring, upload_csm_ring,
-    upload_instance_materials, upload_instance_materials_tex, upload_instance_models,
-    upload_light_table, upload_material_assets, upload_mesh_assets, upload_pair_out_slot,
-    upload_pair_ring, upload_sdf_edit_list, upload_texture_assets,
+    RenderEpoch, ResolvedAa, ResolvedCsm, ResolvedShadowAtlas, ResolvedTaa, RetiredGpuBuffers,
+    RhiContext, SdfEditStaging, ShadowDenoiseConfig, ShadowDenoiseMode, TaaState,
+    TextureAssetsExt, TextureGpu, advance_jitter, collect_sdf_edits, gbuffer_push_from_view,
+    gbuffer_push_from_view_jittered, ndc_jitter, retire_deferred_frees, upload_atlas_ring,
+    upload_camera_ring, upload_csm_ring, upload_instance_materials, upload_instance_materials_tex,
+    upload_instance_models, upload_light_table, upload_material_assets, upload_mesh_assets,
+    upload_motion_cam_ring, upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
+    upload_taa_ring, upload_texture_assets,
 };
 #[cfg(all(windows, feature = "hwrt"))]
 use boyko_render::{
@@ -878,6 +879,25 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             .map(|r| r.mode)
             .unwrap_or_default()
             == AaMode::Taa;
+        // Anti-aliasing Stage 4 (TAA W5): the history-reset transition detection — captured
+        // BEFORE `advance_jitter` (below) overwrites `JitterState.armed`, so `taa_was_armed` is
+        // exactly "was Taa armed LAST frame". `!taa_was_armed` catches a transition INTO `Taa`;
+        // `extent_changed` catches a resize (`taa_hist`'s allocated shape just changed under
+        // `sync_gbuffer`, so the sibling parity slot's prior contents are meaningless at the new
+        // resolution). Either forces `TaaState::mark_reset()`, so the resolve replaces rather
+        // than blends its first post-transition frame (mirrors the shadow-temporal denoiser's I5
+        // disocclusion fallback). `TaaState::advance()` then runs every frame regardless of arm
+        // state (cheap, cold — a checked-and-cleared flag, not a sticky one), consuming this
+        // frame's reset bit into `taa_reset_flag` for `host.gpu.scene`'s `taa_reset` param below.
+        let taa_was_armed = app.world().try_resource::<JitterState>().is_some_and(|j| j.armed);
+        let mut taa_reset_flag = false;
+        if let Some(taa_state) = app.world_mut().try_resource_mut::<TaaState>() {
+            let extent_changed = taa_state.extent_changed(cw, ch);
+            if taa_armed_now && (!taa_was_armed || extent_changed) {
+                taa_state.mark_reset();
+            }
+            taa_reset_flag = taa_state.advance();
+        }
         // TAA W2: advance the jitter phase ONCE per frame (cold) — structurally gated on
         // `taa_armed_now` (`advance_jitter`'s `armed` param): an armed frame cycles `phase`
         // through `HALTON_8`; a disarmed frame freezes `phase` and clears `JitterState.armed`,
@@ -894,14 +914,6 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // MV ring exists (an RT + storage device) — else `None`, and the runner uploads nothing +
         // the recorder takes the base 3-MRT raster (byte-identical). `marcher_view_proj_rows` is
         // the marcher-aligned proj·view the shaders reproject against (I-O1 majorness pin).
-        //
-        // TAA W3 note: TAA's resolve will ALSO need this UNJITTERED pair (Decision 3 — jitter
-        // must never reach `MotionCamState`, else a static camera would report spurious motion),
-        // via a DEDICATED ring (not this hwrt-only one — `MotionCamState::advance` is a
-        // ONE-call-per-frame contract, and this ring's mesh-MV consumer is unrelated to TAA's
-        // camera-only reconstruction). Wiring that dedicated ring is a W5 follow-up (it has no
-        // consumer yet — `GBufferScene::taa` stays `None` this rung), so `taa_armed_now` does NOT
-        // drive this block.
         #[cfg(feature = "hwrt")]
         let mv_cam = {
             let temporal_on = app
@@ -919,6 +931,37 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             } else {
                 None
             }
+        };
+        // Anti-aliasing Stage 4 (TAA W5): TAA's OWN `MotionCam` pair — REUSES `mv_cam`'s result
+        // when the hwrt mesh-shadow MV producer already advanced `MotionCamState` THIS frame
+        // (same camera, same frame ⇒ same pair; a second `advance()` call would double-consume
+        // the ONE-call-per-frame contract and corrupt `prev` — see `TaaActivation`'s "why a
+        // dedicated ring" doc). Otherwise (mv_cam absent — `not(hwrt)`, or hwrt with temporal
+        // off) advances `MotionCamState` itself, exactly once. `None` when TAA is not armed this
+        // frame (the byte-identical 0%-gate: no advance beyond the one above, no upload).
+        let taa_motion_cam: Option<boyko_render::MotionCam> = if taa_armed_now {
+            #[cfg(feature = "hwrt")]
+            {
+                if let Some(cam) = mv_cam {
+                    Some(cam)
+                } else {
+                    let view = *app.world().resource::<ViewUniform>();
+                    let cur = boyko_render::marcher_view_proj_rows(&view, cw, ch);
+                    Some(
+                        app.world_mut()
+                            .resource_mut::<boyko_render::MotionCamState>()
+                            .advance(cur),
+                    )
+                }
+            }
+            #[cfg(not(feature = "hwrt"))]
+            {
+                let view = *app.world().resource::<ViewUniform>();
+                let cur = boyko_render::marcher_view_proj_rows(&view, cw, ch);
+                Some(app.world_mut().resource_mut::<boyko_render::MotionCamState>().advance(cur))
+            }
+        } else {
+            None
         };
         let mut draws = host.draw_scratch.take();
         let presented = {
@@ -1162,6 +1205,40 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     unsafe {
                         upload_temporal_shadow_ring(&token, temporal_slot, resolved_temporal);
                     }
+                }
+            }
+
+            // 5d'''''. Anti-aliasing Stage 4 (TAA W5): the resolve's tunables UBO
+            // (`ResolvedTaa`) + its DEDICATED `MotionCam` UBO — into the renderer's
+            // `taa_ubo[s]`/`taa_motion_cam_ubo[s]`. NOT `hwrt`-gated (mirrors the à-trous/
+            // temporal uploads above, minus the feature gate). `taa_ubo_slot`/
+            // `taa_motion_cam_ubo_slot` are `None` until the targets sync (frame 0) OR TAA is
+            // not armed (the rings were never minted) — in both the resolve is not recorded, so
+            // the (absent) slots are never read. `taa_motion_cam` is `None` on the SAME
+            // `!taa_armed_now` condition (computed above, before this block), so the two `if
+            // let`s below either both fire or both stay silent.
+            if let Some(taa_ubo_slot) = host.frame.taa_ubo_slot(s) {
+                let resolved_taa = world.resource::<ResolvedTaa>();
+                // SAFETY: `taa_ubo_slot` is the renderer's `taa_ubo[s]` — a live host-coherent
+                // >= RESOLVED_TAA_BYTES UNIFORM buffer minted when `scene.taa` first armed (in
+                // `build_taa_resolve_set`), live until the targets are torn down (device-idle).
+                // The FENCED slot `s == token.slot()`: the borrowed `FrameWriteToken` proves
+                // this slot's in-flight fence was waited THIS frame (the previous occupant's
+                // resolve retired; the sibling frame binds the other slot) — the same
+                // borrow-is-fence-proof shape as `upload_shadow_denoise_ring`.
+                unsafe {
+                    upload_taa_ring(&token, taa_ubo_slot, resolved_taa);
+                }
+            }
+            if let Some(mc_slot) = host.frame.taa_motion_cam_ubo_slot(s)
+                && let Some(cam) = taa_motion_cam.as_ref()
+            {
+                // SAFETY: `mc_slot` is the renderer's `taa_motion_cam_ubo[s]` — same provenance
+                // contract as `taa_ubo_slot` above (minted alongside it in
+                // `build_taa_resolve_set`, live until teardown, the fenced slot `s ==
+                // token.slot()`).
+                unsafe {
+                    upload_motion_cam_ring(&token, mc_slot, cam);
                 }
             }
 
@@ -1422,6 +1499,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 scratch.any_textured_material(),
                 terminator_wrap,
                 aa_mode,
+                taa_reset_flag,
                 ctx,
             );
 

@@ -12,3 +12,4 @@ mod present_blit;
 mod scene;
 mod smaa;
 mod ssaa;
+mod taa;

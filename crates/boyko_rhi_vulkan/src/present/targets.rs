@@ -3,16 +3,10 @@
 //! recreate). Split out of the former monolithic `swapchain.rs` (audit W4).
 
 use boyko_rhi::{
-    BindGroupDesc, BindGroupEntry, Format, ImageUsage, RhiDevice,
-    TextureDesc, TextureDimension,
+    BindGroupDesc, BindGroupEntry, BufferDesc, BufferUsage, Format, ImageAspect, ImageBarrierDesc,
+    ImageLayout, ImageSubresourceRange, ImageUsage, MemoryLocation, RhiCommandEncoder, RhiDevice,
+    RhiQueue, TextureDesc, TextureDimension,
 };
-#[cfg(feature = "hwrt")]
-use boyko_rhi::{BufferDesc, BufferUsage, MemoryLocation};
-#[cfg(feature = "hwrt")]
-use boyko_rhi::{
-    ImageAspect, ImageBarrierDesc, ImageLayout, ImageSubresourceRange, RhiCommandEncoder, RhiQueue,
-};
-#[cfg(feature = "hwrt")]
 use boyko_rhi::enums::{BarrierAccess, BarrierStage};
 
 #[cfg(feature = "hwrt")]
@@ -256,16 +250,38 @@ pub struct GBufferTargets {
     /// (ignored by the shader's `.Load`) against [`GBufferScene::present_layout`] — the same
     /// 1-CIS shape [`Self::fxaa_set`] uses. `None` when SSAA is off.
     pub(crate) downsample_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
-    /// Anti-aliasing Stage 4 (TAA W4): the color-history PING-PONG ring `taa_hist`
+    /// Anti-aliasing Stage 4 (TAA W4/W5): the color-history PING-PONG ring `taa_hist`
     /// (`R16G16B16A16_SFLOAT`, full-res, STORAGE), parity-indexed like
     /// [`Self::depth`]/[`Self::lit`]/etc (`FRAMES_IN_FLIGHT == 2`, hard-asserted at the build
-    /// site — the SAME ping-pong discipline [`Self::shadow_temporal_hist`] uses). The resolve
-    /// (not yet recorded this rung — TAA W5 follow-up) reads `taa_hist[1-fi]` (the cross-frame
-    /// history) and writes `taa_hist[fi]` each frame it runs. `None` when TAA is off
-    /// (`GBufferScene::taa` is `None`) — the 0%-gate: no allocation, byte-identical to every
-    /// other `AaArm`. RGBA16F (not RGBA8) avoids per-blend re-quantization of the
-    /// already-8-bit-post-tonemap `lit` across many accumulation frames.
+    /// site — the SAME ping-pong discipline [`Self::shadow_temporal_hist`] uses). BOOT-CLEARED
+    /// `UNDEFINED → GENERAL` at build time (the M2 fix — mirrors
+    /// [`Self::build_and_clear_shadow_temporal_hist`]'s discipline: the framegraph's `taa_hist`
+    /// seed assumes a REAL `GENERAL` layout, not a fresh `UNDEFINED` image, on the first
+    /// cross-frame read). `record_taa` reads `taa_hist[1-fi]` (the cross-frame history) and
+    /// writes `taa_hist[fi]` each frame it runs. `None` when TAA is off (`GBufferScene::taa` is
+    /// `None`) — the 0%-gate: no allocation, byte-identical to every other `AaArm`. RGBA16F (not
+    /// RGBA8) avoids per-blend re-quantization of the already-8-bit-post-tonemap `lit` across
+    /// many accumulation frames.
     pub(crate) taa_hist: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
+    /// Anti-aliasing Stage 4 (TAA W5): the resolve's OWN tunables UBO ring (16 B
+    /// `HostVisibleCoherent` per FIF slot, zero-seeded, mirrors [`Self::temporal_shadow_ubo`]) —
+    /// `ResolvedTaa`'s `default_blend`/`min_blend`/`variance_gamma`. `None` when TAA is off.
+    pub(crate) taa_ubo: Option<[BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// Anti-aliasing Stage 4 (TAA W5): the resolve's OWN DEDICATED `MotionCam` UBO ring (128 B
+    /// `HostVisibleCoherent` per FIF slot, zero-seeded) — SEPARATE from the hwrt mesh-shadow
+    /// `motion_cam_ubo` (see [`TaaActivation`](crate::present::scene_types::TaaActivation)'s "why
+    /// a dedicated ring" doc). `None` when TAA is off.
+    pub(crate) taa_motion_cam_ubo: Option<[BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// Anti-aliasing Stage 4 (TAA W5): the temporal-resolve descriptor set RING (one 8-binding set
+    /// per in-flight frame), written ONCE against
+    /// [`TaaActivation::resolve_layout`](crate::present::scene_types::TaaActivation::resolve_layout).
+    /// Slot `fi` binds `gLit` @0 = `lit[fi]` (+ the LINEAR sampler), `gViewT` @1 = `viewt[fi]`,
+    /// `gHistIn` @2 = `taa_hist[1-fi]` (the cross-frame READ), `gHistOut` @3 = `taa_hist[fi]` (the
+    /// WRITE), `gAaOut` @4 = `aa_out[fi]`, the `ResolvedTaa` UBO @5 = `taa_ubo[fi]`, the camera
+    /// UBO @6 = `scene.camera_ring[fi]` (UNJITTERED), the `MotionCam` UBO @7 =
+    /// `taa_motion_cam_ubo[fi]`. `None` when TAA is off. The recorder selects
+    /// `taa_resolve_set[self.frame_index]`.
+    pub(crate) taa_resolve_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Which AA mode ([`AaArm`]) was armed when these targets were built.
     /// [`GBufferTargets::sync_gbuffer`] compares this against `AaArm::from_scene(scene)` and
     /// forces the same fence-safe rebuild an extent change triggers on a mismatch — a live,
@@ -818,6 +834,20 @@ struct ShadowTemporalSets {
     denoised: [VulkanBindGroup; FRAMES_IN_FLIGHT],
 }
 
+/// Anti-aliasing Stage 4 (TAA W5): the bundle [`GBufferTargets::build_taa_resolve_set`] returns —
+/// the tunables UBO ring, the DEDICATED `MotionCam` UBO ring, and the 8-binding resolve set ring.
+/// Moved field-by-field into the [`GBufferTargets`] `Option`s at `create` time.
+struct TaaResolveSets {
+    /// The `ResolvedTaa` tunables UBO ring (16 B `HostVisibleCoherent` per FIF slot, zero-seeded).
+    taa_ubo: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// The DEDICATED `MotionCam` UBO ring (128 B `HostVisibleCoherent` per FIF slot, zero-seeded)
+    /// — SEPARATE from the hwrt mesh-shadow `motion_cam_ubo` (see `TaaActivation`'s doc).
+    motion_cam_ubo: [BoundBuffer; FRAMES_IN_FLIGHT],
+    /// The 8-binding resolve set ring (`gLit`/`gViewT`/`gHistIn`/`gHistOut`/`gAaOut` + the tunables
+    /// + camera + `MotionCam` UBOs).
+    set: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+}
+
 /// The always-present G-buffer image RINGS (one texture per in-flight frame), built FIRST in
 /// [`GBufferTargets::create`] — the lock-free cross-frame Write-After-Read fix (frame N+1 writes
 /// slot `i`'s images while frame N reads slot `j`'s). Extracted into a bundle so `create` builds
@@ -1199,7 +1229,12 @@ impl AaImages {
             match GBufferTargets::create_gbuffer_image(
                 ctx,
                 aa_extent,
-                ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+                // COLOR_ATTACHMENT (FXAA/SMAA/SSAA write it via a fragment pass) | SAMPLED (the
+                // present-blit samples it) | STORAGE (the TAA compute resolve `.Store`s into it as
+                // a UAV — C1 fix: a UAV store on an image without STORAGE usage is device-lost UB).
+                // R8G8B8A8_UNORM is a Vulkan-mandatory STORAGE_IMAGE format, so the extra bit
+                // cannot fault; the added usage does not change the FXAA/SMAA/SSAA rendered pixels.
+                ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED | ImageUsage::STORAGE,
             ) {
                 Ok(t) => *slot = Some(t),
                 Err(e) => {
@@ -3384,6 +3419,297 @@ impl GBufferTargets {
         Some(slots.map(|s| s.expect("invariant: every taa_hist ring slot built above")))
     }
 
+    /// Anti-aliasing Stage 4 (TAA W5, the M2 fix): builds the FIF-ringed `taa_hist` target AND
+    /// boot-clears BOTH physical slots before the first frame reads them — mirrors
+    /// [`Self::build_and_clear_shadow_temporal_hist`]'s C1/H2 discipline (UNCONDITIONAL here,
+    /// unlike that hwrt-only helper). `taa_hist` is a CROSS-FRAME PERSISTENT parity ping-pong
+    /// pool; the framegraph seeds its ResIds at `GENERAL` (`graph_bridge.rs`'s `taa_hist`/
+    /// `taa_hist_read` declaration), which ASSUMES the image already holds a real `GENERAL`
+    /// layout — but a fresh image is `UNDEFINED`. This clears each slot to `[0, 0, 0, 0]` (RGB =
+    /// 0, confidence = 0 — inert; `TaaState.reset` forces `blend_factor == 1.0` on the frame that
+    /// actually reads it, so the cleared color is never blended) and transitions
+    /// `UNDEFINED` → `GENERAL`, satisfying the seed's layout assumption AND making the clear
+    /// visible to the first `COMPUTE` read.
+    ///
+    /// Called from [`Self::create`] (like `build_taa_hist_ring` was), NOT a boot-only one-shot:
+    /// `sync_gbuffer`'s resize path rebuilds targets through `create`, so a resize RE-clears the
+    /// fresh pool. DEGRADES to `None` (leak-safe, TAA off ⇒ byte-identical) on any build /
+    /// encoder / submit / fence failure, like [`Self::build_denoise_ring`].
+    fn build_and_clear_taa_hist(
+        ctx: &VulkanContext,
+        extent: VkExtent2D,
+    ) -> Option<[VulkanTexture; FRAMES_IN_FLIGHT]> {
+        let pool = Self::build_taa_hist_ring(ctx, extent)?;
+
+        match Self::boot_clear_taa_hist(ctx, &pool) {
+            Ok(()) => Some(pool),
+            Err(_) => {
+                // Degrade to None (opt-in, no dependents). The boot-clear submit (if it ran)
+                // faulted — drain the device so no in-flight clear still references the pool
+                // before destroy.
+                let _ = RhiDevice::wait_idle(ctx);
+                // SAFETY: each pool texture was created on `ctx` in `build_taa_hist_ring`; the
+                // device is drained above ⇒ no submission references them; each is moved by value
+                // out of `pool` ⇒ destroyed exactly once.
+                for t in pool {
+                    unsafe { RhiDevice::destroy_texture(ctx, t) };
+                }
+                None
+            }
+        }
+    }
+
+    /// Records + submits ONE encoder that boot-clears BOTH `pool` slots (`UNDEFINED` →
+    /// `TRANSFER_DST_OPTIMAL` → clear → `GENERAL`) and fence-waits it — mirrors
+    /// [`Self::boot_clear_shadow_temporal_hist`] (UNCONDITIONAL here, unlike that hwrt-only
+    /// helper). The encoder + fence are setup-class transients torn down here on every path.
+    fn boot_clear_taa_hist(
+        ctx: &VulkanContext,
+        pool: &[VulkanTexture; FRAMES_IN_FLIGHT],
+    ) -> Result<(), SwapchainError> {
+        let mut encoder =
+            RhiDevice::create_command_encoder(ctx).map_err(SwapchainError::DepthImage)?;
+        let fence = match RhiDevice::create_fence(ctx, false) {
+            Ok(f) => f,
+            Err(e) => {
+                // SAFETY: `encoder` was just created on `ctx`, never submitted; destroy once.
+                unsafe { RhiDevice::destroy_command_encoder(ctx, encoder) };
+                return Err(SwapchainError::DepthImage(e));
+            }
+        };
+
+        // The full COLOR range of a 2D single-layer image (per `create_taa_hist_image`).
+        let range = ImageSubresourceRange {
+            aspect: ImageAspect::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+
+        let record = (|| -> Result<(), SwapchainError> {
+            encoder.begin().map_err(SwapchainError::DepthImage)?;
+
+            // Both slots: UNDEFINED → TRANSFER_DST_OPTIMAL (a fresh image has no prior contents,
+            // so UNDEFINED discards — this is the clear destination).
+            for tex in pool {
+                encoder.image_barrier(&ImageBarrierDesc {
+                    texture: tex,
+                    src_stage: BarrierStage::TOP_OF_PIPE,
+                    dst_stage: BarrierStage::TRANSFER,
+                    src_access: BarrierAccess::NONE,
+                    dst_access: BarrierAccess::TRANSFER_WRITE,
+                    old_layout: ImageLayout::Undefined,
+                    new_layout: ImageLayout::TransferDstOptimal,
+                    range,
+                });
+            }
+
+            // Clear each slot to RGB = 0, confidence = 0 — inert (the first read that actually
+            // consumes it does so under a host-forced `TaaState.reset`, replacing rather than
+            // blending it).
+            for tex in pool {
+                encoder.clear_color_image(
+                    tex,
+                    ImageLayout::TransferDstOptimal,
+                    [0.0, 0.0, 0.0, 0.0],
+                    range,
+                );
+            }
+
+            // Both slots: TRANSFER_DST_OPTIMAL → GENERAL, made available to
+            // COMPUTE_SHADER/SHADER_READ — the first resolve read must SEE the clear, and GENERAL
+            // also satisfies the framegraph's `taa_hist`/`taa_hist_read` seed layout assumption.
+            for tex in pool {
+                encoder.image_barrier(&ImageBarrierDesc {
+                    texture: tex,
+                    src_stage: BarrierStage::TRANSFER,
+                    dst_stage: BarrierStage::COMPUTE_SHADER,
+                    src_access: BarrierAccess::TRANSFER_WRITE,
+                    dst_access: BarrierAccess::SHADER_READ,
+                    old_layout: ImageLayout::TransferDstOptimal,
+                    new_layout: ImageLayout::General,
+                    range,
+                });
+            }
+
+            encoder.end().map_err(SwapchainError::DepthImage)?;
+            let queue = ctx.rhi_queue();
+            queue.submit(&encoder, &fence).map_err(SwapchainError::DepthImage)?;
+            RhiDevice::wait_fence(ctx, &fence, u64::MAX).map_err(SwapchainError::DepthImage)?;
+            Ok(())
+        })();
+
+        // Tear down the setup-class transients. The submit (if it ran) is fence-waited on the Ok
+        // path.
+        // SAFETY: encoder/fence were created on `ctx`; the encoder's only submission (if any) is
+        // fence-waited above on the Ok path (or never submitted / faulted on an error path), and
+        // each is moved by value ⇒ destroyed exactly once.
+        unsafe {
+            RhiDevice::destroy_command_encoder(ctx, encoder);
+            RhiDevice::destroy_fence(ctx, fence);
+        }
+        record
+    }
+
+    /// Anti-aliasing Stage 4 (TAA W5): builds the temporal-resolve descriptor set + its two OWN
+    /// UBO rings — the `ResolvedTaa` tunables ring (16 B) and the DEDICATED `MotionCam` ring
+    /// (128 B, SEPARATE from the hwrt mesh-shadow `motion_cam_ubo` — see `TaaActivation`'s "why a
+    /// dedicated ring" doc for the ONE-call-per-frame `MotionCamState::advance` rationale).
+    /// Mirrors [`Self::build_shadow_temporal_sets`]'s shape (own UBO ring(s) + one set), built
+    /// LAST in [`Self::create`] (after `taa_hist`, which it binds) and DEGRADES-TO-`None` on any
+    /// failure (leak-safe, opt-in — UNCONDITIONAL here, unlike the hwrt-only temporal builder).
+    /// `None` when `scene.taa` is absent (the 0%-gate) or `taa_hist`/`aa_out` failed to allocate.
+    fn build_taa_resolve_set(
+        ctx: &VulkanContext,
+        scene: &GBufferScene<'_>,
+        lit: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        viewt: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        taa_hist: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        aa_out: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+    ) -> Option<TaaResolveSets> {
+        let (taa, hist, out) = match (scene.taa.as_ref(), taa_hist, aa_out) {
+            (Some(t), Some(h), Some(o)) => (t, h, o),
+            _ => return None,
+        };
+
+        // (1) The `ResolvedTaa` tunables UBO ring — 16 B, zero-seeded (the host memcpys each
+        // armed frame). On a slot's failure, drain [0..i).
+        let mut taa_ubo_slots: [Option<BoundBuffer>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for (i, dst) in taa_ubo_slots.iter_mut().enumerate() {
+            let b = match RhiDevice::create_buffer(
+                ctx,
+                &BufferDesc {
+                    size: crate::present::TAA_UBO_BYTES,
+                    usage: BufferUsage::UNIFORM,
+                    location: MemoryLocation::HostVisibleCoherent,
+                },
+            ) {
+                Ok(b) => b,
+                Err(_) => {
+                    // Degrade to None (opt-in, no dependents): drain the [0..i) UBO slots.
+                    // SAFETY: each was created on `ctx`, never submitted; destroy each once.
+                    unsafe {
+                        for s in taa_ubo_slots.iter_mut().take(i) {
+                            if let Some(b) = s.take() {
+                                RhiDevice::destroy_buffer(ctx, b);
+                            }
+                        }
+                    }
+                    return None;
+                }
+            };
+            if let Some(p) = RhiDevice::buffer_mapped_ptr(ctx, &b) {
+                // SAFETY: `p` is the host-coherent mapping of a freshly-created >= 16-byte UNIFORM
+                // buffer; writing `TAA_UBO_BYTES` zeroes stays in-bounds; byte `0` is a valid init
+                // for the `f32` tunable lanes (host-overwritten before first read).
+                unsafe {
+                    core::ptr::write_bytes(p.as_ptr(), 0, crate::present::TAA_UBO_BYTES as usize);
+                }
+            }
+            *dst = Some(b);
+        }
+        let taa_ubo: [BoundBuffer; FRAMES_IN_FLIGHT] =
+            taa_ubo_slots.map(|s| s.expect("invariant: every TAA tunables UBO ring slot built"));
+
+        // (2) The DEDICATED `MotionCam` UBO ring — 128 B, zero-seeded. On a slot's failure, drain
+        // [0..i) + the tunables ring.
+        let mut mc_slots: [Option<BoundBuffer>; FRAMES_IN_FLIGHT] = [const { None }; FRAMES_IN_FLIGHT];
+        for (i, dst) in mc_slots.iter_mut().enumerate() {
+            let b = match RhiDevice::create_buffer(
+                ctx,
+                &BufferDesc {
+                    size: crate::present::TAA_MOTION_CAM_UBO_BYTES,
+                    usage: BufferUsage::UNIFORM,
+                    location: MemoryLocation::HostVisibleCoherent,
+                },
+            ) {
+                Ok(b) => b,
+                Err(_) => {
+                    // SAFETY: the [0..i) MotionCam slots + the whole tunables ring were created on
+                    // `ctx`, never submitted; destroy each once (reverse acquisition).
+                    unsafe {
+                        for s in mc_slots.iter_mut().take(i) {
+                            if let Some(b) = s.take() {
+                                RhiDevice::destroy_buffer(ctx, b);
+                            }
+                        }
+                        for b in taa_ubo {
+                            RhiDevice::destroy_buffer(ctx, b);
+                        }
+                    }
+                    return None;
+                }
+            };
+            if let Some(p) = RhiDevice::buffer_mapped_ptr(ctx, &b) {
+                // SAFETY: `p` is the host-coherent mapping of a freshly-created >= 128-byte
+                // UNIFORM buffer; writing `TAA_MOTION_CAM_UBO_BYTES` zeroes stays in-bounds; byte
+                // `0` is a valid init for the `float4x4` lanes (host-overwritten before first
+                // read — a zeroed pair yields `MV == 0`, the disocclusion-safe seed).
+                unsafe {
+                    core::ptr::write_bytes(
+                        p.as_ptr(),
+                        0,
+                        crate::present::TAA_MOTION_CAM_UBO_BYTES as usize,
+                    );
+                }
+            }
+            *dst = Some(b);
+        }
+        let motion_cam_ubo: [BoundBuffer; FRAMES_IN_FLIGHT] =
+            mc_slots.map(|s| s.expect("invariant: every TAA MotionCam UBO ring slot built"));
+
+        // (3) The 8-binding resolve set ring. Slot `fi` binds `gLit` @0 = `lit[fi]` (+ the LINEAR
+        // sampler), `gViewT` @1 = `viewt[fi]`, `gHistIn` @2 = `taa_hist[1-fi]` (the cross-frame
+        // READ — bound DIRECTLY, not framegraph-tracked), `gHistOut` @3 = `taa_hist[fi]` (the
+        // WRITE), `gAaOut` @4 = `aa_out[fi]`, the `ResolvedTaa` UBO @5 = `taa_ubo[fi]`, the camera
+        // UBO @6 = `scene.camera_ring[fi]` (UNJITTERED, C1 cut), the `MotionCam` UBO @7 =
+        // `motion_cam_ubo[fi]`. On a slot's failure, drain [0..slot) + both UBO rings.
+        let mut set_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for (slot, dst) in set_slots.iter_mut().enumerate() {
+            let prev = FRAMES_IN_FLIGHT - 1 - slot;
+            let entries = [
+                BindGroupEntry::CombinedImage { texture: &lit[slot], sampler: taa.linear_sampler },
+                BindGroupEntry::StorageImage { texture: &viewt[slot] },
+                BindGroupEntry::StorageImage { texture: &hist[prev] },
+                BindGroupEntry::StorageImage { texture: &hist[slot] },
+                BindGroupEntry::StorageImage { texture: &out[slot] },
+                BindGroupEntry::UniformBuffer { buffer: &taa_ubo[slot] },
+                BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
+                BindGroupEntry::UniformBuffer { buffer: &motion_cam_ubo[slot] },
+            ];
+            let desc = BindGroupDesc::<Vulkan> { layout: taa.resolve_layout, entries: &entries };
+            match RhiDevice::create_bind_group(ctx, &desc) {
+                Ok(g) => *dst = Some(g),
+                Err(_) => {
+                    // SAFETY: the [0..slot) resolve sets + both whole UBO rings were created on
+                    // `ctx`, never submitted; destroy each once (reverse acquisition: sets → mc →
+                    // taa_ubo).
+                    unsafe {
+                        for s in set_slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for b in motion_cam_ubo {
+                            RhiDevice::destroy_buffer(ctx, b);
+                        }
+                        for b in taa_ubo {
+                            RhiDevice::destroy_buffer(ctx, b);
+                        }
+                    }
+                    return None;
+                }
+            }
+        }
+        let set: [VulkanBindGroup; FRAMES_IN_FLIGHT] =
+            set_slots.map(|s| s.expect("invariant: every TAA resolve set slot built"));
+
+        Some(TaaResolveSets { taa_ubo, motion_cam_ubo, set })
+    }
+
     /// HW-RT Rung 3b: builds one FIF-ringed temporal denoise target, DEGRADING to `None` (leak-
     /// safe) on any per-slot create failure — the opt-in "recorded-not-fail-fast" policy: a device
     /// that faults on the RG16F/RGBA16 storage format disables temporal denoise rather than failing
@@ -3866,19 +4192,29 @@ impl GBufferTargets {
                 None => (None, None, None),
             };
 
-        // Anti-aliasing Stage 4 (TAA W4): the `taa_hist` cross-frame history ring, built LAST
-        // (after every fallible descriptor set) — DEGRADE-TO-NONE on any create failure
-        // (leak-safe, opt-in), mirroring the hwrt temporal rings' shape above (UNCONDITIONAL
-        // here — TAA is not hwrt-gated). Gated on `scene.taa.is_some()`, which stays `None`
-        // until the resolve dispatch itself is wired (compute.rs registration + the boot
-        // pipeline + the per-FIF resolve set + `gbuffer.rs::record_taa` — a W5 follow-up), so
-        // this is a `None` no-op on EVERY current frame ⇒ byte-identical. Sized to `aa_extent`
-        // (== `extent` for Taa — native resolution, like Fxaa/Smaa). TODO(TAA W5): once wired,
-        // mirror `build_and_clear_shadow_temporal_hist`'s boot UNDEFINED→GENERAL clear (the
-        // framegraph's `taa_hist` seed at `graph_bridge.rs` assumes a REAL GENERAL layout, not a
-        // fresh UNDEFINED image, on the first cross-frame read).
+        // Anti-aliasing Stage 4 (TAA W4/W5, the M2 fix): the `taa_hist` cross-frame history ring,
+        // built LAST (after every fallible descriptor set) — DEGRADE-TO-NONE on any create/clear
+        // failure (leak-safe, opt-in), mirroring the hwrt temporal rings' shape above
+        // (UNCONDITIONAL here — TAA is not hwrt-gated). Gated on `scene.taa.is_some()`, so this is
+        // a `None` no-op on every other `AaMode` ⇒ byte-identical. Sized to `aa_extent` (==
+        // `extent` for Taa — native resolution, like Fxaa/Smaa). `build_and_clear_taa_hist`
+        // boot-clears BOTH physical slots `UNDEFINED → GENERAL` (mirrors
+        // `build_and_clear_shadow_temporal_hist`'s C1/H2 discipline — the framegraph's `taa_hist`
+        // seed assumes a REAL GENERAL layout, not a fresh UNDEFINED image, on the first
+        // cross-frame read).
         let taa_hist: Option<[VulkanTexture; FRAMES_IN_FLIGHT]> =
-            if scene.taa.is_some() { Self::build_taa_hist_ring(ctx, aa_extent) } else { None };
+            if scene.taa.is_some() { Self::build_and_clear_taa_hist(ctx, aa_extent) } else { None };
+
+        // Anti-aliasing Stage 4 (TAA W5): the resolve's own tunables + DEDICATED `MotionCam` UBO
+        // rings + the 8-binding resolve set. Built LAST (after `taa_hist`/`aa_out`, which it
+        // binds) and DEGRADE-TO-NONE (opt-in, no dependents) — like the hwrt temporal sets, it
+        // needs no teardown weaving. `None` on the OFF path (TAA off, or `taa_hist`/`aa_out`
+        // failed to allocate) ⇒ byte-identical.
+        let (taa_ubo, taa_motion_cam_ubo, taa_resolve_set) =
+            match Self::build_taa_resolve_set(ctx, scene, &lit, &viewt, taa_hist.as_ref(), aa_out.as_ref()) {
+                Some(sets) => (Some(sets.taa_ubo), Some(sets.motion_cam_ubo), Some(sets.set)),
+                None => (None, None, None),
+            };
 
         Ok(Self {
             depth,
@@ -3914,6 +4250,9 @@ impl GBufferTargets {
             smaa_blend_set,
             downsample_set,
             taa_hist,
+            taa_ubo,
+            taa_motion_cam_ubo,
+            taa_resolve_set,
             aa_arm: AaArm::from_scene(scene),
             #[cfg(feature = "hwrt")]
             shadow_vis_resolve_set,
@@ -4052,10 +4391,28 @@ impl GBufferTargets {
         // slots — every slot of every ring (and the single set) is drained. Rung 3a (`hwrt`) adds
         // the two `Option`-guarded shadow-vis image RINGS, drained before ssao (reverse acquisition).
         unsafe {
-            // Anti-aliasing Stage 4 (TAA W4): the `taa_hist` history ring — the LAST resource
-            // `create()` builds (after every fallible descriptor set), so destroyed FIRST here
-            // (reverse acquisition). `Option`-guarded (`None` on every current frame — `scene.taa`
-            // stays unwired until the resolve dispatch lands, a W5 follow-up).
+            // Anti-aliasing Stage 4 (TAA W5): the resolve set + its two UBO rings — acquired LAST
+            // (after `taa_hist`, in `build_taa_resolve_set`), so destroyed FIRST here (before the
+            // history ring they bind). `Option`-guarded (`None` on every non-TAA `AaArm`).
+            if let Some(s) = self.taa_resolve_set {
+                for g in s {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            if let Some(r) = self.taa_motion_cam_ubo {
+                for b in r {
+                    RhiDevice::destroy_buffer(ctx, b);
+                }
+            }
+            if let Some(r) = self.taa_ubo {
+                for b in r {
+                    RhiDevice::destroy_buffer(ctx, b);
+                }
+            }
+            // Anti-aliasing Stage 4 (TAA W4): the `taa_hist` history ring — the LAST IMAGE
+            // `create()` builds (after every fallible descriptor set), so destroyed FIRST among
+            // the images (reverse acquisition; the resolve set/UBOs above bind it, so they are
+            // destroyed first overall). `Option`-guarded (`None` on every non-TAA `AaArm`).
             if let Some(r) = self.taa_hist {
                 for t in r {
                     RhiDevice::destroy_texture(ctx, t);
@@ -4351,6 +4708,27 @@ impl GBufferFrame {
             .map(|ring| &ring[slot])
     }
 
+    /// Anti-aliasing Stage 4 (TAA W5): the fenced TAA tunables UBO ring slot the host memcpys
+    /// [`ResolvedTaa`](boyko_render's `ResolvedTaa`) into each frame (the resolve set binds
+    /// `taa_ubo[fi]` @5). Returns `None` when the targets are not yet synced (frame 0) OR TAA is
+    /// not armed (the `taa_ubo` ring was never minted) — in both cases the resolve is not
+    /// recorded, so the (absent) slot is never read. Per-FIF ringed under the same WAR discipline
+    /// as [`Self::shadow_denoise_ubo_slot`]. NOT `hwrt`-gated.
+    #[inline]
+    pub fn taa_ubo_slot(&self, slot: usize) -> Option<&BoundBuffer> {
+        self.targets.as_ref().and_then(|t| t.taa_ubo.as_ref()).map(|ring| &ring[slot])
+    }
+
+    /// Anti-aliasing Stage 4 (TAA W5): the fenced DEDICATED `MotionCam` UBO ring slot the host
+    /// memcpys [`MotionCam`](boyko_render's `MotionCam`) into each frame (the resolve set binds
+    /// `taa_motion_cam_ubo[fi]` @7) — SEPARATE from the hwrt mesh-shadow `motion_cam_ubo` (see
+    /// `TaaActivation`'s doc). Returns `None` when the targets are not yet synced OR TAA is not
+    /// armed. NOT `hwrt`-gated.
+    #[inline]
+    pub fn taa_motion_cam_ubo_slot(&self, slot: usize) -> Option<&BoundBuffer> {
+        self.targets.as_ref().and_then(|t| t.taa_motion_cam_ubo.as_ref()).map(|ring| &ring[slot])
+    }
+
     /// Tears down the per-extent G-buffer targets through `ctx`, consuming `self`. The
     /// caller MUST have made the device idle (dropped the [`Renderer`], whose `Drop`
     /// waits idle) so no submission still references them.
@@ -4430,6 +4808,9 @@ mod tests {
             smaa_blend_set: None,
             downsample_set: None,
             taa_hist: None,
+            taa_ubo: None,
+            taa_motion_cam_ubo: None,
+            taa_resolve_set: None,
             aa_arm: AaArm::Off,
             ddgi_update_set: None,
             present_set: bg_ring(),
@@ -4496,6 +4877,9 @@ mod tests {
             smaa_blend_set: None,
             downsample_set: None,
             taa_hist: None,
+            taa_ubo: None,
+            taa_motion_cam_ubo: None,
+            taa_resolve_set: None,
             aa_arm: AaArm::Off,
             shadow_vis_resolve_set: shadow_vis_resolve.then(bg_ring),
             shadow_denoised_resolve_set: shadow_denoised_resolve.then(bg_ring),

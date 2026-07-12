@@ -99,6 +99,21 @@ pub const SHADOW_DENOISE_UBO_BYTES: u64 = 16;
 #[cfg(feature = "hwrt")]
 pub const TEMPORAL_SHADOW_UBO_BYTES: u64 = 16;
 
+/// Anti-aliasing Stage 4 (TAA W5): the byte size of the TAA resolve's tunables UBO — the
+/// RHI-layer MIRROR of `boyko_render::RESOLVED_TAA_BYTES` (`size_of::<ResolvedTaa>()`, one std140
+/// vec4 = 16 B). The RHI cannot depend on `boyko_render` (the render crate sits ABOVE it), so the
+/// value is duplicated here — mirrors [`TEMPORAL_SHADOW_UBO_BYTES`]'s pattern, UNCONDITIONAL
+/// (TAA is NOT `hwrt`-gated). The RHI mints the per-FIF `taa_ubo` ring at this size
+/// (`default_blend` @0, `min_blend` @4, `variance_gamma` @8, pad @12); the host writes
+/// `ResolvedTaa`'s 16 bytes into the fenced slot.
+pub const TAA_UBO_BYTES: u64 = 16;
+
+/// Anti-aliasing Stage 4 (TAA W5): the byte size of the TAA resolve's DEDICATED `MotionCam` UBO —
+/// the RHI-layer MIRROR of `boyko_render::MOTION_CAM_UBO_BYTES` (two `float4x4`, 128 B). A
+/// SEPARATE ring from the hwrt mesh-shadow `motion_cam_ubo` (see `TaaActivation`'s doc for the
+/// "why a dedicated ring" rationale) — UNCONDITIONAL (both feature legs).
+pub const TAA_MOTION_CAM_UBO_BYTES: u64 = 128;
+
 /// Errors from surface / swapchain / present operations.
 #[derive(Debug)]
 pub enum SwapchainError {

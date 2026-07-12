@@ -89,6 +89,14 @@ pub(crate) struct GbufferPassPlan {
     pub(crate) shadow_temporal: Option<crate::framegraph::PassId>,
     /// The always-present deferred resolve pass.
     pub(crate) resolve: crate::framegraph::PassId,
+    /// Anti-aliasing Stage 4 (TAA W5): the temporal-resolve pass (`scene.taa.is_some()`).
+    /// Recorded AFTER the main resolve dispatch, BEFORE `present_sample` (it reads `lit` at
+    /// `GENERAL`, straight out of the resolve's write — see `TaaActivation`'s "Compute, not
+    /// graphics" doc). Reads `lit`/`viewt`/`taa_hist_read`, writes `taa_hist[fi]`; `aa_out`'s
+    /// UNDEFINED→GENERAL→SHADER_READ_ONLY_OPTIMAL barriers are hand-recorded (untracked, like
+    /// every other AA mode's `aa_out`). `Some` iff `scene.taa.is_some()` (the "member is Some
+    /// iff its body is recorded" invariant).
+    pub(crate) taa_resolve: Option<crate::framegraph::PassId>,
     /// The always-present present-sample pass: only the `lit` GENERAL→SHADER_READ_ONLY
     /// transition (site 5c). The swapchain WSI barriers stay hand-recorded.
     pub(crate) present_sample: crate::framegraph::PassId,
@@ -132,8 +140,8 @@ pub(crate) struct GbufferPassPlan {
 /// read-sibling, mirroring `shadow_temporal_hist`/`shadow_temporal_hist_read`). They land at
 /// ResId 12/13 (`not(hwrt)`) or 18/19 (`hwrt`) — exactly the OLD `FRAMEGRAPH_IMAGE_COUNT`/
 /// `+1` on each leg — so every EARLIER ResId (0..old-count-1) is byte-unchanged and the buffers
-/// still begin at the NEW `FRAMEGRAPH_IMAGE_COUNT`. No pass accesses them on the current frame
-/// (`scene.taa` stays `None` until the resolve dispatch is wired, a W5 follow-up) ⇒ byte-identical.
+/// still begin at the NEW `FRAMEGRAPH_IMAGE_COUNT`. No pass accesses them unless `scene.taa` is
+/// `Some` (`AaMode::Taa` armed — W5's `taa_resolve` pass) ⇒ byte-identical on every other mode.
 #[cfg(feature = "hwrt")]
 pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 20;
 /// See the `hwrt` variant: a `not(hwrt)` build keeps the count at 14 (11 base + `pbr` + TAA's
@@ -1301,22 +1309,41 @@ impl Renderer<'_> {
             SubRange::COLOR,
         );
 
-        // Anti-aliasing Stage 4 (TAA W4, resolve dispatch = a W5 follow-up): the temporal-resolve
-        // pass declaration, positioned at the resolve→present seam (AFTER the deferred resolve's
-        // `lit` write above, BEFORE `present_sample`'s GENERAL→SHADER_READ_ONLY_OPTIMAL read) — the
-        // SAME seam FXAA/SMAA/SSAA occupy. Reads `lit` (this frame's shaded color) + `viewt` (the
-        // depth proxy the MV reconstruction needs) + `taa_hist_read` (the cross-frame history
-        // sibling, C1-fix shape — see the `taa_hist`/`taa_hist_read` declaration above); writes
-        // `taa_hist` (this frame's history slot). Gated on `scene.taa.is_some()`, which stays
-        // `None` until the resolve dispatch itself is wired (compute.rs registration + the boot
-        // pipeline + the per-FIF resolve set + `gbuffer.rs::record_taa`) — so THIS pass is
-        // declared-but-never-added on every current frame ⇒ the graph routes ZERO barriers on
-        // `taa_hist`/`taa_hist_read` ⇒ byte-identical (the same "declared ahead of its first
-        // consumer" discipline `shadow_vis`/`motion_vec` used between their ResId declaration rung
-        // and their first consuming pass).
-        if scene.taa.is_some() {
-            let _taa_resolve = g.add_pass("taa_resolve");
-            for &c in &[lit, viewt, taa_hist_read] {
+        // Anti-aliasing Stage 4 (TAA W5): the temporal-resolve pass declaration, positioned at the
+        // resolve→present seam — AFTER the deferred resolve's `lit` write above, BEFORE
+        // `present_sample`'s GENERAL→SHADER_READ_ONLY_OPTIMAL read. UNLIKE FXAA/SMAA/SSAA (which
+        // read `lit` AFTER `present_sample`'s transition, at `SHADER_READ_ONLY_OPTIMAL`, FRAGMENT
+        // stage), TAA is a COMPUTE dispatch that reads `lit` at `GENERAL` straight out of the
+        // resolve's write — so `gbuffer.rs::record_taa` MUST be recorded (in this exact
+        // declaration order) BEFORE `present_sample`, not after (see `TaaActivation`'s "Compute,
+        // not graphics" doc). Reads `lit` (this frame's shaded color) + `viewt` (the depth proxy
+        // the MV reconstruction needs) + `taa_hist_read` (the cross-frame history sibling, C1-fix
+        // shape — see the `taa_hist`/`taa_hist_read` declaration above); writes `taa_hist` (this
+        // frame's history slot). Gated on `scene.taa.is_some()` — `None` (OFF/FXAA/SMAA/SSAA)
+        // declares no pass ⇒ the graph routes ZERO barriers on `taa_hist`/`taa_hist_read` ⇒
+        // byte-identical (the same "declared ahead of its first consumer" discipline
+        // `shadow_vis`/`motion_vec` used between their ResId declaration rung and their first
+        // consuming pass). `aa_out`'s own barriers are hand-recorded in `record_taa` (it is not a
+        // framegraph-tracked resource — see [`FRAMEGRAPH_IMAGE_COUNT`]'s doc).
+        let taa_resolve_pass = scene.taa.is_some().then(|| {
+            let taa_resolve = g.add_pass("taa_resolve");
+            // C2 fix: `lit` @0 is bound as a COMBINED_IMAGE_SAMPLER, whose descriptor records
+            // SHADER_READ_ONLY_OPTIMAL (rhi_impl/device.rs) — the graph MUST leave `lit` in THAT
+            // layout at the dispatch, not GENERAL (a recorded-vs-actual layout divergence is
+            // spec-UB / a validation error). The deferred resolve wrote `lit` in GENERAL, so this
+            // read derives the GENERAL->SHADER_READ_ONLY transition BEFORE the taa_resolve dispatch;
+            // `present_sample`'s later `lit`->SHADER_READ read then finds it already in layout and
+            // derives no barrier (matching FXAA/SMAA/SSAA, which read `lit` at SHADER_READ_ONLY).
+            g.image_access(
+                lit,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                SubRange::COLOR,
+            );
+            // `viewt` (gViewT r32f) + `taa_hist_read` (gHistIn rgba16f) are bound as STORAGE images
+            // (RWTexture2D), read in GENERAL — unchanged.
+            for &c in &[viewt, taa_hist_read] {
                 g.image_access(
                     c,
                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -1332,7 +1359,8 @@ impl Renderer<'_> {
                 VK_IMAGE_LAYOUT_GENERAL,
                 SubRange::COLOR,
             );
-        }
+            taa_resolve
+        });
 
         // Pass `present_sample` (site 5c): lit GENERAL→SHADER_READ_ONLY for the
         // present-blit's FRAGMENT sample. The swapchain WSI barriers (sites 7/9) stay
@@ -1370,6 +1398,7 @@ impl Renderer<'_> {
             #[cfg(feature = "hwrt")]
             shadow_temporal: shadow_temporal_pass,
             resolve,
+            taa_resolve: taa_resolve_pass,
             present_sample,
         });
     }
@@ -1482,9 +1511,9 @@ impl Renderer<'_> {
                 // above), so it is bound here LAST too, UNCONDITIONALLY (both feature legs). RINGED
                 // (per-FIF), like albedo/normal/etc. above — bind the CURRENT frame slot's handle.
                 targets.pbr[fi].image,
-                // Anti-aliasing Stage 4 (TAA W4): `taa_hist` — the `[fi]` WRITE slot. `Option`-guarded
-                // (`None` until `GBufferScene::taa` is wired, W5 follow-up — resolves to
-                // [`VkImage::NULL`], inert like `shadow_temporal_hist` before its first consumer).
+                // Anti-aliasing Stage 4 (TAA W4/W5): `taa_hist` — the `[fi]` WRITE slot. `Option`-
+                // guarded (`None` when `AaMode::Taa` is off, or on an allocation-degraded device —
+                // resolves to [`VkImage::NULL`], inert since no pass names this ResId then).
                 // UNCONDITIONAL (both feature legs — TAA is not `hwrt`-only).
                 targets.taa_hist.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
                 // TAA W4 (C1-fix shape): `taa_hist_read` — the CROSS-FRAME READ image = the SIBLING

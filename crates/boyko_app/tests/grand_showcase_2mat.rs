@@ -191,6 +191,11 @@ fn grand_showcase_2mat_screenshot_dump() {
         app.insert_resource(AaConfig { mode: AaMode::Fxaa });
     } else if std::env::var("BOYKO_AA").as_deref() == Ok("smaa") {
         app.insert_resource(AaConfig { mode: AaMode::Smaa });
+    } else if std::env::var("BOYKO_AA").as_deref() == Ok("taa") {
+        // TAA is a live-toggle mode (like FXAA/SMAA); the static-camera scene converges over the
+        // SETTLE_FRAMES window, so the frame-30 dump is a converged-static TAA image (the
+        // orchestrator's partial oracle — in-motion quality is owner-gated).
+        app.insert_resource(AaConfig { mode: AaMode::Taa });
     }
     app.run();
 }

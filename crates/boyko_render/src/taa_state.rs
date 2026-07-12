@@ -28,6 +28,10 @@ pub struct TaaState {
     pub reset: bool,
     /// Frames elapsed since the last reset (saturates rather than wraps — an owner diagnostic).
     pub frames_since_reset: u32,
+    /// The composite extent `(w, h)` [`Self::extent_changed`] last compared against — the
+    /// resize-detection carry. Defaults to `(0, 0)`, so the very first call (any real extent)
+    /// reports "changed" — harmless: frame 0 has no history to protect either way.
+    pub last_extent: (u32, u32),
 }
 
 impl TaaState {
@@ -36,6 +40,22 @@ impl TaaState {
     pub fn mark_reset(&mut self) {
         self.reset = true;
         self.frames_since_reset = 0;
+    }
+
+    /// Compares `(w, h)` against [`Self::last_extent`], updating it unconditionally (so the NEXT
+    /// call compares against THIS frame's extent) and returning whether it differed.
+    ///
+    /// A `taa_hist` resize reallocates the ring at the new extent (`GBufferTargets::sync_gbuffer`'s
+    /// fence-safe rebuild) — the sibling parity slot's PRIOR contents are meaningless at the new
+    /// resolution, so the caller combines this with [`Self::mark_reset`] to force a full-replace
+    /// resolve on the first post-resize frame (mirrors the shadow-temporal denoiser's disocclusion
+    /// reset — never blend a freshly boot-cleared history slot as if it were real accumulation).
+    #[inline]
+    #[must_use]
+    pub fn extent_changed(&mut self, w: u32, h: u32) -> bool {
+        let changed = self.last_extent != (w, h);
+        self.last_extent = (w, h);
+        changed
     }
 
     /// Advances one frame: returns whether THIS frame must reset (consuming the flag), and
@@ -67,7 +87,7 @@ mod tests {
 
     #[test]
     fn mark_reset_arms_and_zeros_the_age() {
-        let mut state = TaaState { reset: false, frames_since_reset: 42 };
+        let mut state = TaaState { reset: false, frames_since_reset: 42, last_extent: (0, 0) };
         state.mark_reset();
         assert!(state.reset);
         assert_eq!(state.frames_since_reset, 0);
