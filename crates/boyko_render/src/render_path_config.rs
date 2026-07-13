@@ -123,20 +123,26 @@ const FORWARD_PLUS_IMPLEMENTED: bool = true;
 /// reverse-Z raster) followed by `vb_resolve` (the fused compute fetch+bary+shade). A
 /// `VisibilityBuffer` request now resolves for real, subject to [`cap_vb_v1_consumers`]'s
 /// scope cut (pre-light consumers + TAA still degrade until R9 lands their thin-aux
-/// producers) and [`VB_SDF_IMPLEMENTED`] (the SDF leg still collapses to `Mesh` until R10).
+/// producers). As of rung R10 [`VB_SDF_IMPLEMENTED`] is also `true`, so the SDF leg no longer
+/// collapses to `Mesh` under VB.
 const VB_IMPLEMENTED: bool = true;
 
 /// Whether the `VisibilityBuffer` path's SDF leg (fused `sdf_forward_march` composited via the
 /// view-Z ownership gate, or the future geo/shade split) has landed under VB specifically.
-/// `false` until rung R10: unlike `Forward`/`ForwardPlus` (whose own `SDF_FORWARD_IMPLEMENTED`
-/// flipped `true` at rung R-SDFFWD), VB's `vb_raster`/`vb_resolve` pair has no SDF-composite
-/// wiring yet — a `VisibilityBuffer × {Both, Sdf}` request degrades its legs to `Mesh`
-/// ([`RenderPathDegrade::LegsCollapsedToMeshPreVbSdf`]) exactly like the retired
-/// `LegsCollapsedToMeshPreSdfForward` rule did for Forward before R-SDFFWD landed — see
-/// [`degrade_ladder`]'s doc for why that OLDER rule can no longer serve this purpose (it reads
-/// [`SDF_FORWARD_IMPLEMENTED`], which is `true` today, so it is unconditionally dead for EVERY
-/// non-Deferred path, VB included; a fresh, VB-scoped rule is required).
-const VB_SDF_IMPLEMENTED: bool = false;
+/// `true` as of rung R10: `declare_vb_graph`/`record_vb` now declare/record the SAME
+/// `sdf_forward_march` compute pass the Forward family uses — the `HAS_MESH` variant composited
+/// AFTER `vb_resolve` under `Both`, the mesh-less variant as the sole `lit` producer over
+/// `vb_sky` under `Sdf` (where `vb_raster`/`vb_resolve` are `mesh_leg`-gated OFF entirely — they
+/// need the Decision-0 geometry table, which carries no slot with no mesh leg). A
+/// `VisibilityBuffer × {Both, Sdf}` request therefore resolves CLEAN now, arming
+/// `sdf_forward_marched` (`resolve_rules`) exactly as `Forward × {Both, Sdf}` does.
+///
+/// Like `SDF_FORWARD_IMPLEMENTED`'s effect on the older `LegsCollapsedToMeshPreSdfForward` rule,
+/// flipping this `true` makes [`degrade_ladder`]'s VB-scoped legs-collapse rule
+/// ([`RenderPathDegrade::LegsCollapsedToMeshPreVbSdf`]) unconditionally dead in production — the
+/// rule stays parameterized (threaded `false` by its isolation unit test) but is never reached
+/// through the public [`resolve_render_path`] entry point again.
+const VB_SDF_IMPLEMENTED: bool = true;
 
 /// Whether the SDF-forward-march leg (Decision 6, the fused march-then-shade or the geo/shade
 /// split under a non-Deferred path) has landed yet. `true` as of rung R-SDFFWD: the
@@ -543,12 +549,18 @@ pub enum RenderPathDegrade {
     /// is forced OFF for this resolve ([`cap_forward_v1_consumers`]).
     ForwardTaaNotYetImplemented,
     /// [`RenderPath::VisibilityBuffer`] was requested with a non-[`GeometryLegs::Mesh`] leg set
-    /// (`Both`/`Sdf`) before [`VB_SDF_IMPLEMENTED`] lands (rung R10) — collapsed to
+    /// (`Both`/`Sdf`) before [`VB_SDF_IMPLEMENTED`] landed (rung R10) — collapsed to
     /// [`GeometryLegs::Mesh`]. The VB-scoped sibling of
     /// [`LegsCollapsedToMeshPreSdfForward`](Self::LegsCollapsedToMeshPreSdfForward), needed
     /// because that OLDER rule reads [`SDF_FORWARD_IMPLEMENTED`] (`true` today), which makes it
     /// unconditionally dead for every non-Deferred path — including `VisibilityBuffer` — so it
-    /// can no longer gate VB's own (still-unimplemented) SDF leg.
+    /// could not gate VB's own SDF leg while that was still unimplemented.
+    ///
+    /// As of rung R10 [`VB_SDF_IMPLEMENTED`] is `true`, so THIS rule is now unconditionally dead
+    /// in production too (like its Forward-family sibling): it is only ever constructed by the
+    /// [`degrade_ladder`] isolation unit test, which threads `vb_sdf_implemented = false`
+    /// directly. Kept as a live variant so that test — and any future device that must fall back
+    /// off the VB SDF path — retains a typed degrade reason.
     LegsCollapsedToMeshPreVbSdf,
     /// Rung R8 (VB v1 scope cut, mirrors [`ForwardPreLightConsumersNotYetImplemented`](Self::ForwardPreLightConsumersNotYetImplemented)):
     /// a pre-light consumer was requested alongside `VisibilityBuffer`, which has no split
@@ -794,7 +806,9 @@ fn degrade_ladder(
 
     // Rung R8: VB's own SDF-composite gate (see this fn's doc, rule 4) — a fresh rule because
     // the one above is unconditionally dead for VB (and every other non-Deferred path) once
-    // `sdf_forward_implemented` is `true` in production.
+    // `sdf_forward_implemented` is `true` in production. Rung R10: `VB_SDF_IMPLEMENTED` is now
+    // `true` too, so in production this rule is ALSO dead — it only fires when the isolation unit
+    // test threads `vb_sdf_implemented = false`.
     if matches!(path, RenderPath::VisibilityBuffer) && !matches!(legs, GeometryLegs::Mesh) && !vb_sdf_implemented
     {
         degrades.push(RenderPathDegrade::LegsCollapsedToMeshPreVbSdf);
@@ -1535,23 +1549,44 @@ mod tests {
     }
 
     #[test]
-    fn vb_both_legs_collapse_and_both_consumer_caps_stack_three_reasons() {
-        // VB x Both (SDF leg not yet composited under VB, R10) with SSAO+TAA both requested:
-        // the legs-collapse rule AND both consumer-level caps fire in one call (within the
-        // 4-slot RenderPathDegradeLog capacity).
+    fn vb_both_legs_survive_and_both_consumer_caps_stack_two_reasons() {
+        // Rung R10: VB x Both no longer collapses its legs (VB_SDF_IMPLEMENTED landed) — the SDF
+        // leg is composited via `sdf_forward_march` after `vb_resolve`. With SSAO+TAA both
+        // requested through the PUBLIC entry point, the legs stay `Both` (`sdf_forward_marched`
+        // arms), and only the two VB-v1 consumer caps still fire (no legs-collapse reason).
         let consumers = RenderPathConsumers { ssao_on: true, taa_on: true, ..Default::default() };
         let (resolved, degrades) = resolve_vb_v1(GeometryLegs::Both, consumers);
         assert_eq!(resolved.path, RenderPath::VisibilityBuffer);
-        assert_eq!(resolved.legs, GeometryLegs::Mesh, "Both collapses to Mesh pre-R10");
+        assert_eq!(resolved.legs, GeometryLegs::Both, "Both survives post-R10");
+        assert!(resolved.mesh_leg && resolved.sdf_leg);
+        assert!(resolved.sdf_forward_marched, "the SDF leg forward-marches under VB post-R10");
+        // SSAO capped off -> `pre_light` false -> the geo/shade split stays off (fused only,
+        // VB v1) for BOTH the mesh and sdf legs.
+        assert!(!resolved.mesh_geo_shade_split);
+        assert!(!resolved.sdf_geo_shade_split);
         let reasons: Vec<_> = degrades.reasons().collect();
         assert_eq!(
             reasons,
             [
-                RenderPathDegrade::LegsCollapsedToMeshPreVbSdf,
                 RenderPathDegrade::VbPreLightConsumersNotYetImplemented,
                 RenderPathDegrade::VbTaaNotYetImplemented,
             ]
         );
+    }
+
+    #[test]
+    fn vb_sdf_only_resolves_clean_and_forward_marches_post_r10() {
+        // Rung R10: VB x Sdf (mesh-less) resolves CLEAN — the legs stay `Sdf`, `sdf_forward_marched`
+        // arms, and `vb_geometry_table` is OFF (no mesh leg -> no Decision-0 table slot -> the
+        // `vb_raster`/`vb_resolve` pair is `mesh_leg`-gated OFF at record time).
+        let (resolved, degrades) = resolve_vb_v1(GeometryLegs::Sdf, RenderPathConsumers::default());
+        assert_eq!(resolved.path, RenderPath::VisibilityBuffer);
+        assert_eq!(resolved.legs, GeometryLegs::Sdf);
+        assert!(degrades.is_clean());
+        assert!(!resolved.mesh_leg && resolved.sdf_leg);
+        assert!(resolved.sdf_forward_marched);
+        assert!(!resolved.vb_geometry_table, "no mesh leg -> no VB geometry table");
+        assert_eq!(resolved.depth_kind, DepthKind::HardwareReverseZ);
     }
 
     #[test]

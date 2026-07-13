@@ -410,167 +410,280 @@ impl Renderer<'_> {
             (self.fns.cmd_end_rendering)(cmd);
         }
 
-        // === Pass `vb_raster`: the mesh id-raster pass (Decision 9) — writes `vb_id` (COLOR,
-        // R32G32_UINT) + `vb_depth` (DEPTH, HW reverse-Z, first-touch `GREATER`, write ON). ===
-        // SAFETY: recording is open; `record_vb_pass` records the graph's derived
-        // UNDEFINED→COLOR_ATTACHMENT_OPTIMAL (`vb_id`) + UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL
-        // (`vb_depth`) barriers-in for the "vb_raster" pass into `cmd`.
-        self.record_vb_pass(plan.vb_raster, cmd, targets, forward, vb, scene, fi);
-
-        let vb_raster_pipeline =
-            scene.vb_raster_pipeline.expect("invariant: a VisibilityBuffer-resolved scene always carries vb_raster_pipeline");
-
-        let vb_id_attachment = VkRenderingAttachmentInfo {
-            s_type: VkStructureType::RenderingAttachmentInfo,
-            p_next: ptr::null(),
-            image_view: vb.vb_id[fi].view,
-            image_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            resolve_mode: 0,
-            resolve_image_view: VkImageView::NULL,
-            resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
-            load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
-            store_op: VK_ATTACHMENT_STORE_OP_STORE,
-            clear_value: VkClearValue { color: VkClearColorValue { uint32: VB_ID_CLEAR } },
-        };
-        let vb_depth_attachment = VkRenderingAttachmentInfo {
-            s_type: VkStructureType::RenderingAttachmentInfo,
-            p_next: ptr::null(),
-            image_view: forward.depth[fi].view,
-            image_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-            resolve_mode: 0,
-            resolve_image_view: VkImageView::NULL,
-            resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
-            load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
-            store_op: VK_ATTACHMENT_STORE_OP_STORE,
-            clear_value: VkClearValue {
-                depth_stencil: VkClearDepthStencilValue { depth: VB_DEPTH_CLEAR, stencil: 0 },
-            },
-        };
-        let vb_rendering = VkRenderingInfo {
-            s_type: VkStructureType::RenderingInfo,
-            p_next: ptr::null(),
-            flags: 0,
-            render_area: full_area,
-            layer_count: 1,
-            view_mask: 0,
-            color_attachment_count: 1,
-            p_color_attachments: &vb_id_attachment,
-            p_depth_attachment: (&vb_depth_attachment as *const VkRenderingAttachmentInfo).cast(),
-            p_stencil_attachment: ptr::null(),
-        };
-        // SAFETY: recording is open; `vb_rendering` names the live `vb_id` view (now
-        // COLOR_ATTACHMENT_OPTIMAL) + the live `vb_depth` (`forward.depth[fi]`, REUSED verbatim)
-        // view (now DEPTH_ATTACHMENT_OPTIMAL); `vb_raster_pipeline` (1-set, built against
-        // `vb_layout0` — its VS references only `instances`/the push, a bound-but-unread subset
-        // of `vb_set0`) + the 88-byte VERTEX push range belong to this device (caller contract);
-        // `vb_set0[fi]` is a live descriptor set. `full_viewport`/`full_area` outlive the
-        // bracketed calls; each `DrawBatch`'s per-instance draw reads that batch's bound
-        // vertex+index buffers. Begin/End bracket the pass exactly.
-        unsafe {
-            (self.fns.cmd_begin_rendering)(cmd, &vb_rendering);
-            (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vb_raster_pipeline.pipeline);
-            (self.fns.cmd_bind_descriptor_sets)(
+        // === Passes `vb_raster` + `vb_resolve` — rung R10: recorded ONLY under `mesh_leg`
+        // (a `VisibilityBuffer x Sdf` frame skips both — the Decision-0 geometry table they
+        // re-fetch through carries no slot with no mesh leg; see `declare_vb_graph`'s matching
+        // gate). `vb_sky`'s `lit` write above stands for the sky; `sdf_forward_march` below
+        // composites the SDF field over whatever the mesh raster/resolve left. ===
+        if scene.resolved_render_path.mesh_leg {
+            // === Pass `vb_raster`: the mesh id-raster pass (Decision 9) — writes `vb_id` (COLOR,
+            // R32G32_UINT) + `vb_depth` (DEPTH, HW reverse-Z, first-touch `GREATER`, write ON). ===
+            // SAFETY: recording is open; `record_vb_pass` records the graph's derived
+            // UNDEFINED→COLOR_ATTACHMENT_OPTIMAL (`vb_id`) + UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL
+            // (`vb_depth`) barriers-in for the "vb_raster" pass into `cmd`.
+            self.record_vb_pass(
+                plan.vb_raster.expect("invariant: mesh_leg => vb_raster pass declared (declare_vb_graph)"),
                 cmd,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                vb_raster_pipeline.layout,
-                0,
-                1,
-                &vb_set0[fi].descriptor_set,
-                0,
-                ptr::null(),
+                targets,
+                forward,
+                vb,
+                scene,
+                fi,
             );
-            (self.fns.cmd_push_constants)(
-                cmd,
-                vb_raster_pipeline.layout,
-                VK_SHADER_STAGE_VERTEX_BIT,
-                0,
-                scene.mvp.len() as u32,
-                scene.mvp.as_ptr().cast(),
-            );
-            (self.fns.cmd_set_viewport)(cmd, 0, 1, &full_viewport);
-            (self.fns.cmd_set_scissor)(cmd, 0, 1, &full_area);
-            for batch in scene.mesh_draw {
-                let base = batch.base_instance;
+
+            let vb_raster_pipeline =
+                scene.vb_raster_pipeline.expect("invariant: a VisibilityBuffer-resolved scene always carries vb_raster_pipeline");
+
+            let vb_id_attachment = VkRenderingAttachmentInfo {
+                s_type: VkStructureType::RenderingAttachmentInfo,
+                p_next: ptr::null(),
+                image_view: vb.vb_id[fi].view,
+                image_layout: VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                resolve_mode: 0,
+                resolve_image_view: VkImageView::NULL,
+                resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+                store_op: VK_ATTACHMENT_STORE_OP_STORE,
+                clear_value: VkClearValue { color: VkClearColorValue { uint32: VB_ID_CLEAR } },
+            };
+            let vb_depth_attachment = VkRenderingAttachmentInfo {
+                s_type: VkStructureType::RenderingAttachmentInfo,
+                p_next: ptr::null(),
+                image_view: forward.depth[fi].view,
+                image_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                resolve_mode: 0,
+                resolve_image_view: VkImageView::NULL,
+                resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+                store_op: VK_ATTACHMENT_STORE_OP_STORE,
+                clear_value: VkClearValue {
+                    depth_stencil: VkClearDepthStencilValue { depth: VB_DEPTH_CLEAR, stencil: 0 },
+                },
+            };
+            let vb_rendering = VkRenderingInfo {
+                s_type: VkStructureType::RenderingInfo,
+                p_next: ptr::null(),
+                flags: 0,
+                render_area: full_area,
+                layer_count: 1,
+                view_mask: 0,
+                color_attachment_count: 1,
+                p_color_attachments: &vb_id_attachment,
+                p_depth_attachment: (&vb_depth_attachment as *const VkRenderingAttachmentInfo).cast(),
+                p_stencil_attachment: ptr::null(),
+            };
+            // SAFETY: recording is open; `vb_rendering` names the live `vb_id` view (now
+            // COLOR_ATTACHMENT_OPTIMAL) + the live `vb_depth` (`forward.depth[fi]`, REUSED verbatim)
+            // view (now DEPTH_ATTACHMENT_OPTIMAL); `vb_raster_pipeline` (1-set, built against
+            // `vb_layout0` — its VS references only `instances`/the push, a bound-but-unread subset
+            // of `vb_set0`) + the 88-byte VERTEX push range belong to this device (caller contract);
+            // `vb_set0[fi]` is a live descriptor set. `full_viewport`/`full_area` outlive the
+            // bracketed calls; each `DrawBatch`'s per-instance draw reads that batch's bound
+            // vertex+index buffers. Begin/End bracket the pass exactly.
+            unsafe {
+                (self.fns.cmd_begin_rendering)(cmd, &vb_rendering);
+                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vb_raster_pipeline.pipeline);
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    vb_raster_pipeline.layout,
+                    0,
+                    1,
+                    &vb_set0[fi].descriptor_set,
+                    0,
+                    ptr::null(),
+                );
                 (self.fns.cmd_push_constants)(
                     cmd,
                     vb_raster_pipeline.layout,
                     VK_SHADER_STAGE_VERTEX_BIT,
-                    GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
-                    4,
-                    (&base as *const u32).cast(),
+                    0,
+                    scene.mvp.len() as u32,
+                    scene.mvp.as_ptr().cast(),
                 );
-                (self.fns.cmd_bind_vertex_buffers)(cmd, 0, 1, &batch.vertex_buffer.buffer, &vertex_offset);
-                (self.fns.cmd_bind_index_buffer)(cmd, batch.index_buffer.buffer, 0, batch.index_type);
-                (self.fns.cmd_draw_indexed)(cmd, batch.index_count, batch.instance_count, 0, 0, 0);
+                (self.fns.cmd_set_viewport)(cmd, 0, 1, &full_viewport);
+                (self.fns.cmd_set_scissor)(cmd, 0, 1, &full_area);
+                for batch in scene.mesh_draw {
+                    let base = batch.base_instance;
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        vb_raster_pipeline.layout,
+                        VK_SHADER_STAGE_VERTEX_BIT,
+                        GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
+                        4,
+                        (&base as *const u32).cast(),
+                    );
+                    (self.fns.cmd_bind_vertex_buffers)(cmd, 0, 1, &batch.vertex_buffer.buffer, &vertex_offset);
+                    (self.fns.cmd_bind_index_buffer)(cmd, batch.index_buffer.buffer, 0, batch.index_type);
+                    (self.fns.cmd_draw_indexed)(cmd, batch.index_count, batch.instance_count, 0, 0, 0);
+                }
+                (self.fns.cmd_end_rendering)(cmd);
             }
-            (self.fns.cmd_end_rendering)(cmd);
+
+            // === Pass `vb_resolve`: the FUSED resolve compute pass (Decision 5) — reads `vb_id`,
+            // re-fetches geometry via the Decision-0 table (Set 2), shades, writes `lit` (STORAGE,
+            // extending `vb_sky`'s COLOR write, C5). ===
+            // SAFETY: recording is open; `record_vb_pass` records the graph's derived
+            // COLOR_ATTACHMENT_OPTIMAL→SHADER_READ_ONLY_OPTIMAL barrier for `vb_id` + the
+            // COLOR_ATTACHMENT_OPTIMAL→GENERAL barrier for `lit` (+ the cascade/atlas
+            // →SHADER_READ_ONLY_OPTIMAL barriers when armed) for the "vb_resolve" pass into `cmd`.
+            self.record_vb_pass(
+                plan.vb_resolve.expect("invariant: mesh_leg => vb_resolve pass declared (declare_vb_graph)"),
+                cmd,
+                targets,
+                forward,
+                vb,
+                scene,
+                fi,
+            );
+
+            let vb_resolve_pipeline = scene
+                .vb_resolve_pipeline
+                .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_resolve_pipeline");
+            let vb_geometry_set = scene
+                .vb_geometry_set
+                .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_geometry_set");
+            // SAFETY: recording is open; `vb_resolve_pipeline` (the 3-set compute pipeline: Set 0 =
+            // `vb_set0[fi]`, Set 1 = `forward.set1[fi]` — the Forward-family shadow set REUSED
+            // VERBATIM, Set 2 = `vb_geometry_set` — the Decision-0 geometry table, bound directly,
+            // no ring) belongs to this device (caller contract); `scene.mvp` is the SAME 88-byte
+            // push whose leading 64 bytes are the `view_proj` matrix `vb_resolve.comp.hlsl`'s
+            // push constant reads (the SAME matrix `vb_raster.vs.hlsl` used, `GBUFFER_PUSH_BYTES`
+            // layout parity); `scene.dispatch_group_count_x` covers `present_extent.width *
+            // present_extent.height` pixels at the shader's `numthreads(64,1,1)` 1D grid (the SAME
+            // grid the deferred marcher/resolve/`sdf_forward_march` dispatch at).
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vb_resolve_pipeline.pipeline);
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    vb_resolve_pipeline.layout,
+                    0,
+                    1,
+                    &vb_set0[fi].descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    vb_resolve_pipeline.layout,
+                    1,
+                    1,
+                    &forward.set1[fi].descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    vb_resolve_pipeline.layout,
+                    2,
+                    1,
+                    &vb_geometry_set.set(),
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    vb_resolve_pipeline.layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    64,
+                    scene.mvp.as_ptr().cast(),
+                );
+                (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+            }
         }
 
-        // === Pass `vb_resolve`: the FUSED resolve compute pass (Decision 5) — reads `vb_id`,
-        // re-fetches geometry via the Decision-0 table (Set 2), shades, writes `lit` (STORAGE,
-        // extending `vb_sky`'s COLOR write, C5). ===
-        // SAFETY: recording is open; `record_vb_pass` records the graph's derived
-        // COLOR_ATTACHMENT_OPTIMAL→SHADER_READ_ONLY_OPTIMAL barrier for `vb_id` + the
-        // COLOR_ATTACHMENT_OPTIMAL→GENERAL barrier for `lit` (+ the cascade/atlas
-        // →SHADER_READ_ONLY_OPTIMAL barriers when armed) for the "vb_resolve" pass into `cmd`.
-        self.record_vb_pass(plan.vb_resolve, cmd, targets, forward, vb, scene, fi);
+        // === Pass `sdf_forward_march` — rung R10: the fused SDF march-then-shade COMPUTE pass,
+        // the SAME body `record_forward` records (that fn's own doc has the full C5 rationale).
+        // Recorded ONLY when `scene.path_has_sdf_forward()` holds. Extends the `lit` write above
+        // (`vb_resolve`'s GENERAL store under `Both`, or `vb_sky`'s COLOR write under `Sdf`) and
+        // marches THIS frame's `lit` pixels the raster/sky did not already paint (a miss writes
+        // nothing — the sky/mesh color stands, the pass's own doc). ===
+        if scene.path_has_sdf_forward() {
+            let sdf_forward_pass = plan
+                .sdf_forward_march
+                .expect("invariant: scene.path_has_sdf_forward() => sdf_forward_march pass declared");
+            // SAFETY: recording is open; `record_vb_pass` records the graph's derived `lit`
+            // ->GENERAL barrier (+ the `vb_depth` DEPTH_ATTACHMENT_OPTIMAL->SHADER_READ_ONLY_OPTIMAL
+            // barrier under `mesh_leg`, or the cascade/atlas/light_table producer barriers under
+            // `!mesh_leg`) for the "sdf_forward_march" pass into `cmd`.
+            self.record_vb_pass(sdf_forward_pass, cmd, targets, forward, vb, scene, fi);
 
-        let vb_resolve_pipeline = scene
-            .vb_resolve_pipeline
-            .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_resolve_pipeline");
-        let vb_geometry_set = scene
-            .vb_geometry_set
-            .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_geometry_set");
-        // SAFETY: recording is open; `vb_resolve_pipeline` (the 3-set compute pipeline: Set 0 =
-        // `vb_set0[fi]`, Set 1 = `forward.set1[fi]` — the Forward-family shadow set REUSED
-        // VERBATIM, Set 2 = `vb_geometry_set` — the Decision-0 geometry table, bound directly,
-        // no ring) belongs to this device (caller contract); `scene.mvp` is the SAME 88-byte
-        // push whose leading 64 bytes are the `view_proj` matrix `vb_resolve.comp.hlsl`'s
-        // push constant reads (the SAME matrix `vb_raster.vs.hlsl` used, `GBUFFER_PUSH_BYTES`
-        // layout parity); `scene.dispatch_group_count_x` covers `present_extent.width *
-        // present_extent.height` pixels at the shader's `numthreads(64,1,1)` 1D grid (the SAME
-        // grid the deferred marcher/resolve/`sdf_forward_march` dispatch at).
-        unsafe {
-            (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vb_resolve_pipeline.pipeline);
-            (self.fns.cmd_bind_descriptor_sets)(
-                cmd,
-                VK_PIPELINE_BIND_POINT_COMPUTE,
-                vb_resolve_pipeline.layout,
-                0,
-                1,
-                &vb_set0[fi].descriptor_set,
-                0,
-                ptr::null(),
-            );
-            (self.fns.cmd_bind_descriptor_sets)(
-                cmd,
-                VK_PIPELINE_BIND_POINT_COMPUTE,
-                vb_resolve_pipeline.layout,
-                1,
-                1,
-                &forward.set1[fi].descriptor_set,
-                0,
-                ptr::null(),
-            );
-            (self.fns.cmd_bind_descriptor_sets)(
-                cmd,
-                VK_PIPELINE_BIND_POINT_COMPUTE,
-                vb_resolve_pipeline.layout,
-                2,
-                1,
-                &vb_geometry_set.set(),
-                0,
-                ptr::null(),
-            );
-            (self.fns.cmd_push_constants)(
-                cmd,
-                vb_resolve_pipeline.layout,
-                VK_SHADER_STAGE_COMPUTE_BIT,
-                0,
-                64,
-                scene.mvp.as_ptr().cast(),
-            );
-            (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+            // Decision 4's ownership gate: the `HAS_MESH` variant needs the reverse-Z decode
+            // `A`/`B` (`scene.sdf_forward_view_z_a`/`_b`) to bound the march at the mesh surface;
+            // the mesh-less variant never reads them (`SdfForwardMarchPush::sdf_only`'s doc).
+            let (pipeline, push) = if scene.resolved_render_path.mesh_leg {
+                let p = scene.sdf_forward_march_pipeline.expect(
+                    "invariant: scene.path_has_sdf_forward() requires scene.sdf_forward_march_pipeline",
+                );
+                let push = crate::compute::SdfForwardMarchPush::has_mesh(
+                    present_extent.width,
+                    present_extent.height,
+                    scene.sdf_forward_view_z_a,
+                    scene.sdf_forward_view_z_b,
+                    scene.light_dir,
+                );
+                (p, push)
+            } else {
+                let p = scene.sdf_forward_march_sdfonly_pipeline.expect(
+                    "invariant: scene.path_has_sdf_forward() requires scene.sdf_forward_march_sdfonly_pipeline",
+                );
+                let push = crate::compute::SdfForwardMarchPush::sdf_only(
+                    present_extent.width,
+                    present_extent.height,
+                    scene.light_dir,
+                );
+                (p, push)
+            };
+            let sdf_forward_set = targets
+                .sdf_forward_set
+                .as_ref()
+                .expect("invariant: scene.path_has_sdf_forward() => targets.sdf_forward_set is built");
+            let push_bytes = push.as_bytes();
+            // SAFETY: recording is open; `pipeline` (the `HAS_MESH` or mesh-less compute variant,
+            // selected by `mesh_leg`) + its 2-set layout (Set 0 = `sdf_forward_set[fi]`, the SAME
+            // path-independent vocab ring the Forward family binds — it references `forward.depth`,
+            // which VB reuses as `vb_depth`; Set 1 = `forward.set1[fi]`, the Forward-family shadow
+            // set REUSED VERBATIM, the same one `vb_resolve` binds) belong to this device (caller
+            // contract); both descriptor sets are live, written once per extent; `push_bytes` is
+            // exactly `SDF_FORWARD_MARCH_PUSH_BYTES` (40) at offset 0; `scene.dispatch_group_count_x`
+            // covers `present_extent.width * present_extent.height` pixels at the shader's
+            // `numthreads(64,1,1)` 1D grid (the SAME grid `vb_resolve`/the deferred marcher use).
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    pipeline.layout,
+                    0,
+                    1,
+                    &sdf_forward_set[fi].descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    pipeline.layout,
+                    1,
+                    1,
+                    &forward.set1[fi].descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    pipeline.layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    crate::compute::SDF_FORWARD_MARCH_PUSH_BYTES,
+                    push_bytes.as_ptr().cast(),
+                );
+                (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+            }
         }
 
         // === Present-blit `lit` into the swapchain — byte-for-byte port of `record_forward`'s

@@ -302,3 +302,69 @@ BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
+[vb_both]
+# Multi-paradigm render-path plan, rung R10: the VisibilityBuffer x Both golden. Clones [vb_mesh]'s
+# five-sphere grand_showcase_2mat scene + production boyko_app::runner/gpu_scene::GpuSceneBundles
+# boot path verbatim, with ONE delta: RenderPathConfig{path: VisibilityBuffer, legs: Both} instead
+# of {VisibilityBuffer, Mesh}. See crates/boyko_app/tests/vb_both.rs.
+#
+# VB_SDF_IMPLEMENTED is now true, so Both no longer collapses to Mesh under VB -- the resolver
+# honors sdf_leg == true, arming sdf_forward_marched and the HAS_MESH sdf_forward_march COMPUTE
+# dispatch AFTER vb_resolve (declare_vb_graph's sdf_forward_march arm + record_vb). This scene's
+# SDF edit-list is boot-seeded EMPTY (count == 0) -- the march finds NO hit anywhere and writes
+# NOTHING to gLit, leaving the five spheres vb_resolve painted untouched. The frame is therefore
+# EXPECTED byte-for-byte identical to the mesh-only VB frame [vb_mesh] (f4719cbf), EXACTLY as
+# forward_both == forward_mesh (f93b5aad) proves for the Forward family -- the O3 shared-frame
+# oracle. The pre-filled sha256_* below are [vb_mesh]'s hashes; the orchestrator VERIFIES the
+# equality on a real windowed GPU device (vb_both_screenshot_dump, #[ignore]) rather than blessing
+# a fresh value. If a divergence is found, re-render + re-bless via
+# `scripts\golden.ps1 -Pin vb_both -Bless` (and `-Hwrt -Bless`) AFTER the owner's visual sign-off.
+crate           = "boyko-app"
+test_binary     = "vb_both"
+test_name       = "vb_both_screenshot_dump"
+bmp             = "D:\tmp\vb_both.bmp"
+width           = 512
+height          = 512
+sha256_software = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+sha256_hwrt     = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+
+[vb_both.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\tmp\vb_both.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
+[vb_sdf_only]
+# Multi-paradigm render-path plan, rung R10: VisibilityBuffer x Sdf (mesh-less) -- the FIRST scene
+# exercising GeometryLegs::Sdf under the VisibilityBuffer path. No mesh entities are spawned
+# (GeometryLegs::Sdf's "zero mesh cost" contract), booted through the REAL production
+# boyko_app::runner/gpu_scene::GpuSceneBundles path with RenderPathConfig{path: VisibilityBuffer,
+# legs: Sdf}. See crates/boyko_app/tests/vb_sdf_only.rs.
+#
+# sdf_leg == true arms sdf_forward_marched and the MESH-LESS sdf_forward_march_sdfonly_pipeline
+# variant; mesh_leg == false gates vb_raster/vb_resolve OFF entirely (they need the Decision-0
+# geometry table, absent with no mesh leg), so vb_sky + the mesh-less march are the sole gLit
+# producers. This scene's SDF edit-list is boot-seeded EMPTY (count == 0) -- the march finds NO hit
+# and writes NOTHING to gLit, so the frame is the forward_sky.{vs,fs}.hlsl analytic sky/ground
+# gradient + sun disc ONLY. vb_sky REUSES the compiled forward_sky SPIR-V verbatim, so with the
+# same camera/sun uniforms the frame is EXPECTED byte-identical to [sdf_forward_only] (a1256bde,
+# the Forward x Sdf sky-only frame) -- the O3 shared-frame oracle. The pre-filled sha256_* below
+# are [sdf_forward_only]'s hashes; the orchestrator VERIFIES the equality on a real windowed GPU
+# device (vb_sdf_only_screenshot_dump, #[ignore]). If the separate vb_sky pipeline object diverges
+# by any ULP, re-render + re-bless via `scripts\golden.ps1 -Pin vb_sdf_only -Bless` (and
+# `-Hwrt -Bless`) AFTER the owner's visual sign-off on the freshly-dumped BMP.
+crate           = "boyko-app"
+test_binary     = "vb_sdf_only"
+test_name       = "vb_sdf_only_screenshot_dump"
+bmp             = "D:\tmp\vb_sdf_only.bmp"
+width           = 512
+height          = 512
+sha256_software = "a1256bde136464915fa3be3b456c8a9a5ab669fe19f24164be73ccbcc0858a17"
+sha256_hwrt     = "a1256bde136464915fa3be3b456c8a9a5ab669fe19f24164be73ccbcc0858a17"
+
+[vb_sdf_only.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\tmp\vb_sdf_only.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"

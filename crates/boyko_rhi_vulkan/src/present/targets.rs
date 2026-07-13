@@ -2604,9 +2604,11 @@ impl DeferredSets {
         // `scene.depth_sampler` as a harmless bound-but-ignored placeholder — the shader's
         // unfiltered `.Load`, the SAME idiom `vocab_set`'s own `gDepth`@1 binding uses).
         // `forward.depth[i]` is ALWAYS valid here regardless of `mesh_leg`:
-        // `path_has_sdf_forward()` implies `TargetsProfile::ForwardMesh`, under which `forward`
-        // is `Some` and its `depth` ring is allocated for EVERY leg set
-        // (`ForwardTargets::build`'s doc) — the mesh-less compute variant simply never reads it
+        // `path_has_sdf_forward()` implies `TargetsProfile::ForwardMesh` OR (rung R10)
+        // `TargetsProfile::VbMesh` — `create()` builds `ForwardTargets` under BOTH (targets.rs's
+        // `matches!(profile, ForwardMesh | VbMesh)`), so `forward` is `Some` and its `depth` ring
+        // is allocated for EVERY leg set (`ForwardTargets::build`'s doc) — the mesh-less compute
+        // variant simply never reads it
         // (bound-but-unread, the R2 contract), which is why ONE shared layout serves both
         // pipeline variants (`GBufferScene::sdf_forward_march_layout`'s doc).
         let sdf_forward_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = if scene.path_has_sdf_forward()
@@ -2618,7 +2620,7 @@ impl DeferredSets {
                 .brick_levels_ubo
                 .expect("invariant: path_has_sdf_forward() requires scene.brick_levels_ubo");
             let forward_depth = forward.expect(
-                "invariant: path_has_sdf_forward() implies TargetsProfile::ForwardMesh (forward is Some)",
+                "invariant: path_has_sdf_forward() implies ForwardMesh or VbMesh (both build forward; forward is Some)",
             );
             let mut sdf_forward_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
                 [const { None }; FRAMES_IN_FLIGHT];

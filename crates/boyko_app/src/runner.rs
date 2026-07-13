@@ -1526,16 +1526,24 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // `HAS_MESH` push's reverse-Z decode `A`/`B`
             // (`boyko_render::view::forward_view_z_coeffs`), precomputed from the SAME
             // `view.near`/`view.far` the `forward_gbuffer_push_from_view` arm above used to
-            // ENCODE the Forward mesh depth this frame (`forward_view_proj_rows`'s own
-            // derivation) — the algebraic inverse the compute pass's `HAS_MESH` variant applies
-            // to the SAMPLED depth. Don't-care off the Forward-family + perspective-camera arm
-            // (the mesh-less push variant never reads them; a camera-less or Deferred-resolved
-            // frame never builds this pass at all — `SdfForwardMarchPush::sdf_only`'s doc).
+            // ENCODE the mesh depth this frame (`forward_view_proj_rows`'s own derivation, REUSED
+            // verbatim by `vb_raster` — the mvp arm was widened to `VisibilityBuffer` at rung R8) —
+            // the algebraic inverse the compute pass's `HAS_MESH` variant applies to the SAMPLED
+            // depth.
+            //
+            // Rung R10: the gate is the SEMANTIC "the `HAS_MESH` march will dispatch this frame"
+            // predicate — `sdf_forward_marched && mesh_leg` — NOT a per-path `matches!`. That
+            // predicate is exactly what `record_forward`/`record_vb` read to select the `HAS_MESH`
+            // pipeline variant (the mesh-less `sdf_only` variant never reads A/B), so it folds in
+            // `VisibilityBuffer × Both` (previously excluded — the R8 `matches!`-widening lesson:
+            // a hardcoded `Forward | ForwardPlus` here fed VB×Both a degenerate `A = B = 0` decode)
+            // WITHOUT re-enumerating paths. Don't-care (`0.0, 0.0`) off it: the `sdf_only` variant
+            // ignores them, and a Deferred / camera-less frame never builds this pass at all
+            // (`SdfForwardMarchPush::sdf_only`'s doc).
             let (sdf_forward_view_z_a, sdf_forward_view_z_b) = if view.fov_y > 0.0
-                && matches!(
-                    host.resolved_render_path.path,
-                    boyko_render::RenderPath::Forward | boyko_render::RenderPath::ForwardPlus
-                ) {
+                && host.resolved_render_path.sdf_forward_marched
+                && host.resolved_render_path.mesh_leg
+            {
                 boyko_render::view::forward_view_z_coeffs(view.near, view.far)
             } else {
                 (0.0, 0.0)

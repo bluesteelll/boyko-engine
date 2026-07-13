@@ -2643,19 +2643,36 @@ pub(crate) struct VbPassPlan {
     /// only the pixels its own geometry fetch covers, leaving the sky color standing elsewhere
     /// (the SAME "misses write nothing" contract `sdf_forward_march` documents).
     pub(crate) vb_sky: crate::framegraph::PassId,
-    /// The always-present mesh id-raster pass (`vb_raster.{vs,fs}.hlsl`, Decision 9): writes
-    /// `vb_id` (`ColorAttachmentWrite`/`COLOR_ATTACHMENT_OPTIMAL`, R32G32_UINT) + the VB-only
-    /// reverse-Z `vb_depth` (`DepthStencilAttachmentWrite`/`DEPTH_ATTACHMENT_OPTIMAL`, first-touch,
-    /// `GREATER`, Decision 4). Early-Z-clean (no `SV_Depth`/`discard`/UAV in the FS).
-    pub(crate) vb_raster: crate::framegraph::PassId,
-    /// The always-present FUSED resolve compute pass (`vb_resolve.comp.hlsl`, Decision 5): reads
-    /// `vb_id` (`ShaderRead`/`SHADER_READ_ONLY_OPTIMAL`, COMPUTE) and writes `lit` (`ShaderWrite`/
-    /// `GENERAL`, extending `vb_sky`'s COLOR write, C5). Reads `cascade`/`atlas` inline (COMPUTE)
-    /// when armed, reads `light_table` (COMPUTE) when [`Self::light_upload`] ran this frame.
-    pub(crate) vb_resolve: crate::framegraph::PassId,
+    /// The mesh id-raster pass (`vb_raster.{vs,fs}.hlsl`, Decision 9): writes `vb_id`
+    /// (`ColorAttachmentWrite`/`COLOR_ATTACHMENT_OPTIMAL`, R32G32_UINT) + the VB-only reverse-Z
+    /// `vb_depth` (`DepthStencilAttachmentWrite`/`DEPTH_ATTACHMENT_OPTIMAL`, first-touch, `GREATER`,
+    /// Decision 4). Early-Z-clean (no `SV_Depth`/`discard`/UAV in the FS).
+    ///
+    /// Rung R10: `Some` only when `resolved_render_path.mesh_leg` — a `VisibilityBuffer × Sdf`
+    /// (mesh-less) frame gates this OFF entirely (it needs the Decision-0 geometry table, which
+    /// carries no slot with no mesh leg) and leaves `lit` for `vb_sky` + [`Self::sdf_forward_march`]
+    /// alone. `record_vb` reads the SAME `mesh_leg` predicate, so a `None` here is never recorded.
+    pub(crate) vb_raster: Option<crate::framegraph::PassId>,
+    /// The FUSED resolve compute pass (`vb_resolve.comp.hlsl`, Decision 5): reads `vb_id`
+    /// (`ShaderRead`/`SHADER_READ_ONLY_OPTIMAL`, COMPUTE) and writes `lit` (`ShaderWrite`/`GENERAL`,
+    /// extending `vb_sky`'s COLOR write, C5). Reads `cascade`/`atlas` inline (COMPUTE) when armed,
+    /// reads `light_table` (COMPUTE) when [`Self::light_upload`] ran this frame. Rung R10: `Some`
+    /// under the SAME `mesh_leg` gate as [`Self::vb_raster`] (they are a pair — the resolve reads
+    /// the raster's `vb_id`).
+    pub(crate) vb_resolve: Option<crate::framegraph::PassId>,
+    /// Rung R10: the fused `sdf_forward_march` COMPUTE pass (`shaders/sdf_forward_march.comp.hlsl`,
+    /// the SAME pass the Forward family declares — [`ForwardPassPlan::sdf_forward_march`]). `Some`
+    /// iff [`GBufferScene::path_has_sdf_forward`](super::scene_types::GBufferScene::path_has_sdf_forward)
+    /// (`== resolved_render_path.sdf_forward_marched`). Writes `lit` (`ShaderWrite`/`GENERAL`,
+    /// extending `vb_resolve`'s STORAGE write under `Both`, or `vb_sky`'s COLOR write under `Sdf`,
+    /// C5); reads `vb_depth` (COMPUTE/`SHADER_READ_ONLY_OPTIMAL`) ONLY under `mesh_leg` (the
+    /// `HAS_MESH` variant samples the mesh surface to bound the march — the SAME conditional read
+    /// `declare_forward_graph`'s own `sdf_forward_march` arm declares).
+    pub(crate) sdf_forward_march: Option<crate::framegraph::PassId>,
     /// The always-present present-sample pass: the `lit` `GENERAL` → `SHADER_READ_ONLY_OPTIMAL`
-    /// transition (C5: derived from `vb_resolve`'s producer access). The swapchain WSI barriers
-    /// stay hand-recorded, exactly like [`ForwardPassPlan::present_sample`].
+    /// transition (C5: derived from the LAST `lit` producer's access — `vb_resolve` under `Mesh`,
+    /// `sdf_forward_march` when it ran, else `vb_sky`). The swapchain WSI barriers stay
+    /// hand-recorded, exactly like [`ForwardPassPlan::present_sample`].
     pub(crate) present_sample: crate::framegraph::PassId,
 }
 
@@ -2930,79 +2947,162 @@ impl Renderer<'_> {
             SubRange::COLOR,
         );
 
-        // Pass `vb_raster` (always present): writes `vb_id` (COLOR, first-touch) + `vb_depth`
-        // (DEPTH, first-touch, `GREATER`, write ON — Decision 4). Reads `vb_instance_ring`
-        // (VERTEX).
-        let vb_raster = g.add_pass("vb_raster");
-        g.image_access(
-            vb_id,
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            SubRange::COLOR,
-        );
-        g.image_access(
-            vb_depth,
-            FRAG,
-            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-            SubRange::DEPTH,
-        );
-        g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
-
-        // Pass `vb_resolve` (always present, FUSED): reads `vb_id` (COMPUTE,
-        // COLOR_ATTACHMENT_OPTIMAL→SHADER_READ_ONLY_OPTIMAL) and writes `lit` (COMPUTE,
-        // COLOR_ATTACHMENT_OPTIMAL→GENERAL, extending `vb_sky`'s COLOR write, C5). Reads
-        // `vb_instance_ring` (COMPUTE, for the per-instance material ring lookup) + `light_table`/
-        // `cascade`/`atlas` when armed this frame.
-        let vb_resolve = g.add_pass("vb_resolve");
-        g.image_access(
-            vb_id,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_ACCESS_SHADER_READ_BIT,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            SubRange::COLOR,
-        );
-        g.image_access(
-            lit,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_ACCESS_SHADER_WRITE_BIT,
-            VK_IMAGE_LAYOUT_GENERAL,
-            SubRange::COLOR,
-        );
-        g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
-        if light_upload.is_some() {
-            g.buffer_access(light_table, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
-        }
-        if csm.is_some() {
-            let active = (scene.csm.as_ref().map(|c| c.active_count).unwrap_or(1) as usize)
-                .clamp(1, MAX_CASCADES) as u32;
+        // Passes `vb_raster` + `vb_resolve` — rung R10: `mesh_leg`-gated as a PAIR (`vb_resolve`
+        // re-fetches through the Decision-0 geometry table `vb_raster` populates `vb_id` for). A
+        // `VisibilityBuffer × Sdf` (mesh-less) frame skips BOTH — the table carries no slot with
+        // no registered mesh, so `vb_sky` + `sdf_forward_march` become the sole `lit` producers
+        // (see `sdf_forward_march` below). `record_vb` reads the SAME `mesh_leg` predicate, so a
+        // `None` here is never recorded (and `vb_id`/`vb_depth` — always `add_image`d above for a
+        // fixed ResId order — simply stay untouched, sampled by nothing).
+        let mesh_leg = scene.resolved_render_path.mesh_leg;
+        let (vb_raster, vb_resolve) = if mesh_leg {
+            // Pass `vb_raster`: writes `vb_id` (COLOR, first-touch) + `vb_depth` (DEPTH,
+            // first-touch, `GREATER`, write ON — Decision 4). Reads `vb_instance_ring` (VERTEX).
+            let vb_raster = g.add_pass("vb_raster");
             g.image_access(
-                cascade,
+                vb_id,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                SubRange::COLOR,
+            );
+            g.image_access(
+                vb_depth,
+                FRAG,
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                SubRange::DEPTH,
+            );
+            g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+
+            // Pass `vb_resolve` (FUSED): reads `vb_id` (COMPUTE,
+            // COLOR_ATTACHMENT_OPTIMAL→SHADER_READ_ONLY_OPTIMAL) and writes `lit` (COMPUTE,
+            // COLOR_ATTACHMENT_OPTIMAL→GENERAL, extending `vb_sky`'s COLOR write, C5). Reads
+            // `vb_instance_ring` (COMPUTE, for the per-instance material ring lookup) + `light_table`/
+            // `cascade`/`atlas` when armed this frame.
+            let vb_resolve = g.add_pass("vb_resolve");
+            g.image_access(
+                vb_id,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 VK_ACCESS_SHADER_READ_BIT,
                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                SubRange::depth_layers(active),
+                SubRange::COLOR,
             );
-        }
-        if atlas_pass.is_some() {
-            let active = (scene
-                .atlas_punctual
-                .as_ref()
-                .map(|a| a.active_layers)
-                .unwrap_or(1) as usize)
-                .clamp(1, MAX_TEXTURE_LAYERS) as u32;
             g.image_access(
-                atlas,
+                lit,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_SHADER_READ_BIT,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                SubRange::depth_layers(active),
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                SubRange::COLOR,
             );
-        }
+            g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+            if light_upload.is_some() {
+                g.buffer_access(light_table, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+            }
+            if csm.is_some() {
+                let active = (scene.csm.as_ref().map(|c| c.active_count).unwrap_or(1) as usize)
+                    .clamp(1, MAX_CASCADES) as u32;
+                g.image_access(
+                    cascade,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    SubRange::depth_layers(active),
+                );
+            }
+            if atlas_pass.is_some() {
+                let active = (scene
+                    .atlas_punctual
+                    .as_ref()
+                    .map(|a| a.active_layers)
+                    .unwrap_or(1) as usize)
+                    .clamp(1, MAX_TEXTURE_LAYERS) as u32;
+                g.image_access(
+                    atlas,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    SubRange::depth_layers(active),
+                );
+            }
+            (Some(vb_raster), Some(vb_resolve))
+        } else {
+            (None, None)
+        };
 
-        // Pass `present_sample`: `lit` GENERAL → SHADER_READ_ONLY_OPTIMAL for the present-blit's
-        // FRAGMENT sample (C5). The swapchain WSI barriers stay hand-recorded.
+        // Pass `sdf_forward_march` — rung R10: the fused SDF march-then-shade COMPUTE pass, the
+        // SAME pass `declare_forward_graph` declares (that fn's own doc has the full C5 rationale).
+        // Gated on `scene.path_has_sdf_forward()` (`== resolved_render_path.sdf_forward_marched`).
+        // Writes `lit` (COMPUTE/STORAGE/GENERAL) — under `Both` it extends `vb_resolve`'s GENERAL
+        // write (COMPUTE→COMPUTE WAW, no layout change); under `Sdf` it extends `vb_sky`'s COLOR
+        // write (COLOR_ATTACHMENT_OPTIMAL→GENERAL, the SAME transition the deferred resolve's own
+        // `lit` write establishes). Reads `vb_depth` (COMPUTE/SHADER_READ_ONLY_OPTIMAL) ONLY under
+        // `mesh_leg` (the `HAS_MESH` variant samples the mesh surface to bound the march; the
+        // mesh-less variant never references the binding).
+        //
+        // Under `!mesh_leg` this pass is the SOLE reader of the shadow/light vocab it shades with
+        // (there is no `vb_resolve` to transition `cascade`/`atlas`/`light_table` this frame), so
+        // it declares those reads HERE to derive the csm/atlas/light_upload producer barriers.
+        // Under `mesh_leg`, `vb_resolve` already declared them and made the writes visible to
+        // COMPUTE reads; this later same-queue read inherits that (no extra barrier needed), so
+        // re-declaring would be redundant — matching how the Forward path's own `sdf_forward_march`
+        // relies on `forward_opaque`'s prior reads.
+        let sdf_forward_march = if scene.path_has_sdf_forward() {
+            let p = g.add_pass("sdf_forward_march");
+            g.image_access(
+                lit,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                SubRange::COLOR,
+            );
+            if mesh_leg {
+                g.image_access(
+                    vb_depth,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    SubRange::DEPTH,
+                );
+            } else {
+                if light_upload.is_some() {
+                    g.buffer_access(light_table, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+                }
+                if csm.is_some() {
+                    let active = (scene.csm.as_ref().map(|c| c.active_count).unwrap_or(1) as usize)
+                        .clamp(1, MAX_CASCADES) as u32;
+                    g.image_access(
+                        cascade,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        SubRange::depth_layers(active),
+                    );
+                }
+                if atlas_pass.is_some() {
+                    let active = (scene
+                        .atlas_punctual
+                        .as_ref()
+                        .map(|a| a.active_layers)
+                        .unwrap_or(1) as usize)
+                        .clamp(1, MAX_TEXTURE_LAYERS) as u32;
+                    g.image_access(
+                        atlas,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        SubRange::depth_layers(active),
+                    );
+                }
+            }
+            Some(p)
+        } else {
+            None
+        };
+
+        // Pass `present_sample`: `lit` → SHADER_READ_ONLY_OPTIMAL for the present-blit's FRAGMENT
+        // sample (C5, derived from the LAST `lit` producer). The swapchain WSI barriers stay
+        // hand-recorded.
         let present_sample = g.add_pass("present_sample");
         g.image_access(
             lit,
@@ -3014,7 +3114,16 @@ impl Renderer<'_> {
 
         g.compile();
 
-        self.vb_pass_plan = Some(VbPassPlan { light_upload, csm, atlas: atlas_pass, vb_sky, vb_raster, vb_resolve, present_sample });
+        self.vb_pass_plan = Some(VbPassPlan {
+            light_upload,
+            csm,
+            atlas: atlas_pass,
+            vb_sky,
+            vb_raster,
+            vb_resolve,
+            sdf_forward_march,
+            present_sample,
+        });
     }
 
     /// Multi-paradigm render-path plan, rung R8: the [`VbBarrierSink`] sibling of
