@@ -305,6 +305,46 @@ pub fn forward_view_proj_rows(view: &ViewUniform, width: u32, height: u32) -> [[
     ]
 }
 
+/// Multi-paradigm render-path plan, rung R-SDFFWD (Decision 4's consumer half): inverts
+/// [`forward_view_proj_rows`]'s reverse-Z depth encode back to view-space depth
+/// (`view_z = dot(forward, P) − tz`, the SAME `view_z` that fn's `row3 · [P, 1]` computes before
+/// the perspective divide) from a SAMPLED `depth ∈ [0, 1]` (HW reverse-Z) and the SAME
+/// `near`/`far` the encode used.
+///
+/// # The exact inverse
+///
+/// [`forward_view_proj_rows`]'s doc derives `depth(view_z) = A + B / view_z` with
+/// `A = −near / (far − near)`, `B = near · far / (far − near)`. Solving for `view_z`:
+///
+/// ```text
+/// depth = A + B / view_z
+/// depth − A = B / view_z
+/// view_z = B / (depth − A)
+/// ```
+///
+/// `A < 0` (since `0 < near < far`) and `depth ≥ 0`, so `depth − A ≥ −A = near / (far − near) > 0`
+/// strictly — the divide never sees zero for any `depth` in the valid `[0, 1]` range (including
+/// the Forward `depth` CLEAR sentinel `0.0`, the "nothing drawn yet" background, which recovers
+/// `view_z == far` — the farthest a reconstructed pixel can be, so a background pixel never wins
+/// the SDF-forward-march ownership gate's `z_sdf < z_mesh_view` test by construction).
+///
+/// This is a DIFFERENT reconstruction from the deferred marcher's — Deferred's `depth` is
+/// custom-linear (`gbuffer_mrt.fs.hlsl`'s `MESH_DEPTH_T_MAX`/`GBUFFER_T_MAX`-normalized encode,
+/// read directly as a Euclidean `t`), while Forward/ForwardPlus write standard HARDWARE
+/// reverse-Z depth (Decision 4) — a pixel here must invert THIS encode, never the marcher's.
+///
+/// PERSPECTIVE-only (mirrors [`forward_view_proj_rows`]'s `near > 0`/`far > near` invariants,
+/// debug-asserted here identically since the caller reconstructs against the SAME frustum that
+/// wrote the sampled depth).
+#[inline]
+pub fn forward_view_z_from_depth(depth: f32, near: f32, far: f32) -> f32 {
+    debug_assert!(near > 0.0 && far > near, "invariant: a valid reverse-Z frustum needs 0 < near < far");
+    let range = far - near;
+    let a = -near / range;
+    let b = near * far / range;
+    b / (depth - a)
+}
+
 /// Builds the 88-byte gbuffer-raster VERTEX push (`{ float4x4 view_proj; float4
 /// cam_eye; uint base_instance; uint use_model_matrix }` —
 /// [`GBUFFER_PUSH_BYTES`]) from a resolved PERSPECTIVE [`ViewUniform`], for the
@@ -750,5 +790,57 @@ mod tests {
         assert_eq!(forward_rz[1], marcher[1], "clip.y row must match Deferred's raster exactly");
         assert_eq!(forward_rz[3], marcher[3], "clip.w row must match Deferred's raster exactly");
         assert_ne!(forward_rz[2], marcher[2], "clip.z (depth) must differ -- reverse-Z vs custom-linear");
+    }
+
+    // ---- rung R-SDFFWD: `forward_view_z_from_depth` (the SDF-forward-march ownership gate's
+    // ---- view-Z reconstruction) round-trips against `forward_view_proj_rows`'s own encode -----
+
+    /// Round-trip: for a point at `eye + t * forward` (so `view_z == t` exactly, by
+    /// [`forward_view_proj_rows`]'s `clip.w == view_z` construction), encoding through the real
+    /// GPU-bound matrix and dividing by `clip.w` reproduces the depth a fragment shader would
+    /// sample; [`forward_view_z_from_depth`] must recover the ORIGINAL `t` from that depth alone
+    /// (plus `near`/`far`) -- proving the inverse is the exact algebraic mirror of the encode this
+    /// module's own construction site emits, not an independently-derived approximation.
+    #[test]
+    fn forward_view_z_from_depth_round_trips_forward_view_proj_rows() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let m = forward_view_proj_rows(&view, 640, 480);
+        let eye = view.camera_pos;
+        let fwd = view.cam_forward;
+
+        let steps = 16;
+        for i in 0..=steps {
+            let t = view.near + (view.far - view.near) * (i as f32 / steps as f32);
+            let p = [eye.x + fwd.x * t, eye.y + fwd.y * t, eye.z + fwd.z * t];
+            let (ndc, clip_w) = apply_row_major(m, p);
+            assert!((clip_w - t).abs() <= 1e-2, "clip.w must equal view_z == t at t={t}, got {clip_w}");
+
+            let recovered = forward_view_z_from_depth(ndc[2], view.near, view.far);
+            let tol = t.abs() * 1e-3 + 1e-3;
+            assert!(
+                (recovered - t).abs() <= tol,
+                "round-trip failed at t={t}: depth={}, recovered={recovered}",
+                ndc[2]
+            );
+        }
+    }
+
+    /// The two anchor points [`forward_view_proj_rows_reverse_z_depth_at_near_and_far`] pins
+    /// (`depth(near) == 1.0`, `depth(far) == 0.0`) must invert back to `near`/`far` exactly --
+    /// the closed-form check that does not depend on marching the matrix at all.
+    #[test]
+    fn forward_view_z_from_depth_recovers_near_and_far_anchors() {
+        let near = 0.1_f32;
+        let far = 100.0_f32;
+        assert!(
+            (forward_view_z_from_depth(1.0, near, far) - near).abs() <= 1e-4,
+            "depth == 1.0 (reverse-Z near sentinel) must recover view_z == near"
+        );
+        assert!(
+            (forward_view_z_from_depth(0.0, near, far) - far).abs() <= 1e-2,
+            "depth == 0.0 (reverse-Z far sentinel, ALSO the FORWARD_DEPTH_CLEAR background) \
+             must recover view_z == far"
+        );
     }
 }
