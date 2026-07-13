@@ -20,13 +20,14 @@
 //!
 //! # Rung-staged degrades (plan §H)
 //!
-//! Only `Deferred` is implemented as of R1 — [`FORWARD_IMPLEMENTED`], [`FORWARD_PLUS_IMPLEMENTED`],
-//! [`VB_IMPLEMENTED`], and [`SDF_FORWARD_IMPLEMENTED`] are all `false`, so ANY non-Deferred
-//! [`RenderPath`] request degrades to `Deferred` today (a [`RenderPathDegrade::PathNotYetImplemented`]
-//! reason). Each const flips `true` as its rung lands (R4/R5/R8/R-SDFFWD respectively) — no other
-//! code in this module changes; the degrade ladder ([`resolve_render_path`]) and the pure rule
-//! set ([`resolve_rules`]) are ALREADY correct for the fully-landed plan, tested directly against
-//! the rule (not gated behind the rung consts) so they are live today, not dead until later rungs.
+//! Only `Deferred` was implemented as of R1 — [`FORWARD_IMPLEMENTED`] (R4b-b),
+//! [`FORWARD_PLUS_IMPLEMENTED`] (R5), and [`SDF_FORWARD_IMPLEMENTED`] (R-SDFFWD) have since
+//! flipped `true`; [`VB_IMPLEMENTED`] (R8) remains `false`, so a `VisibilityBuffer` request still
+//! degrades to `Deferred` today (a [`RenderPathDegrade::PathNotYetImplemented`] reason). Each
+//! const flips `true` as its rung lands — no other code in this module changes; the degrade
+//! ladder ([`resolve_render_path`]) and the pure rule set ([`resolve_rules`]) are ALREADY correct
+//! for the fully-landed plan, tested directly against the rule (not gated behind the rung consts)
+//! so they are live today, not dead until later rungs.
 //!
 //! Rung R2 added a single combined `DEFERRED_LEG_DISABLE_IMPLEMENTED` guard (`false`); rung R3
 //! split it into a per-leg pair (mesh-only / sdf-only) — the SAME "rung-staged const per landed
@@ -121,10 +122,15 @@ const FORWARD_PLUS_IMPLEMENTED: bool = true;
 const VB_IMPLEMENTED: bool = false;
 
 /// Whether the SDF-forward-march leg (Decision 6, the fused march-then-shade or the geo/shade
-/// split under a non-Deferred path) has landed yet. Lifted `true` at rung R-SDFFWD. `false`
-/// today ⇒ any non-Deferred path requesting a non-[`GeometryLegs::Mesh`] leg set (`Both` or
-/// `Sdf`) degrades that leg set to `Mesh` ([`RenderPathDegrade::LegsCollapsedToMeshPreSdfForward`]).
-const SDF_FORWARD_IMPLEMENTED: bool = false;
+/// split under a non-Deferred path) has landed yet. `true` as of rung R-SDFFWD: the
+/// `sdf_forward_march` compute pass (`boyko_rhi_vulkan::present::graph_bridge::declare_forward_graph`'s
+/// `sdf_forward_march` arm + `record_forward`) is now the sole `lit` producer for the SDF leg
+/// under a Forward-family path — a `Both`/`Sdf` request no longer degrades. `false` before this
+/// rung meant any non-Deferred path requesting a non-[`GeometryLegs::Mesh`] leg set (`Both` or
+/// `Sdf`) degraded that leg set to `Mesh` ([`RenderPathDegrade::LegsCollapsedToMeshPreSdfForward`]);
+/// that degrade is now UNREACHABLE for `Forward`/`ForwardPlus` (kept live for a hypothetical
+/// future path family via [`degrade_ladder`]'s own parameterized `sdf_forward_implemented` arg).
+const SDF_FORWARD_IMPLEMENTED: bool = true;
 
 // Multi-paradigm render-path plan: `Deferred`'s per-leg disable landed both legs — `Sdf` at rung
 // R3 (`mesh_depth_neutral_clear`), `Mesh` at rung R3b (`viewt_from_depth`, this module's doc).
@@ -524,13 +530,19 @@ pub enum RenderPathDegrade {
 /// per-leg-disable rule — the one case that USED to co-fire with a path-level demotion — was
 /// removed once both `Deferred` legs landed; see this module's doc.)
 ///
-/// Rung R4b added [`cap_forward_v1_consumers`], a FOURTH (independent) rule that can co-occur
-/// with `LegsCollapsedToMeshPreSdfForward`: `RenderPath::Forward × {Both, Sdf}` with a pre-light
-/// consumer AND TAA both requested stacks THREE reasons in one call (legs-collapse +
-/// `ForwardPreLightConsumersNotYetImplemented` + `ForwardTaaNotYetImplemented`) — `degrade_ladder`
-/// itself still emits at most one path-level XOR one legs-level reason, but `cap_forward_v1_consumers`
-/// runs AFTER the ladder and adds up to two more. The array is sized to 4 slots (headroom for one
-/// more future rule; a fixed array needs no heap allocation either way, Principle 5).
+/// Rung R4b added [`cap_forward_v1_consumers`], a FOURTH (independent) rule that COULD co-occur
+/// with `LegsCollapsedToMeshPreSdfForward` while `SDF_FORWARD_IMPLEMENTED` was still `false`:
+/// `RenderPath::Forward × {Both, Sdf}` with a pre-light consumer AND TAA both requested stacked
+/// THREE reasons in one call (legs-collapse + `ForwardPreLightConsumersNotYetImplemented` +
+/// `ForwardTaaNotYetImplemented`). Rung R-SDFFWD lifted `SDF_FORWARD_IMPLEMENTED` to `true`, so
+/// `LegsCollapsedToMeshPreSdfForward` is UNREACHABLE through the public [`resolve_render_path`]
+/// entry point today (every non-Deferred path either demotes to `Deferred` at the PATH level —
+/// never reaching the legs-level rule — or is SDF-forward-implemented and never triggers it); it
+/// stays live only as a rule `degrade_ladder` itself still encodes (tested directly, a future path
+/// family could reintroduce the 3-stack). `cap_forward_v1_consumers` alone still stacks TWO
+/// reasons (`ForwardPreLightConsumersNotYetImplemented` + `ForwardTaaNotYetImplemented`) on a
+/// `Forward`/`ForwardPlus` request today. The array stays sized to 4 slots (headroom for a future
+/// rule combination; a fixed array needs no heap allocation either way, Principle 5).
 /// `boyko_app::runner` iterates [`Self::reasons`] and `warn!`s each ONCE.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RenderPathDegradeLog {
@@ -614,8 +626,16 @@ pub fn resolve_rules(
         || consumers.shadow_temporal_on
         || consumers.ssr_on;
 
-    let needs_depth_prepass =
-        matches!(path, RenderPath::ForwardPlus) || (matches!(path, RenderPath::Forward) && pre_light);
+    // Multi-paradigm render-path plan, rung R-SDFFWD: `mesh_leg` gates the prepass too — its
+    // ENTIRE purpose is the zero-overdraw early-Z contract for `forward_opaque`'s MESH draws
+    // (Decision 4); under `GeometryLegs::Sdf` (no mesh leg) there is nothing for it to cull, so a
+    // `ForwardPlus`-resolved `Sdf`-only frame would otherwise record a begin/end depth-only pass
+    // that draws (and reads back) NOTHING — a wasted GPU round-trip, not a correctness bug (the
+    // SAME single predicate this fn computes is read at BOTH `declare_forward_graph` and
+    // `record_forward` via `GBufferScene::path_needs_depth_prepass`, so declaring the pass OFF
+    // here means it is never recorded either — no separate gate needed at either call site).
+    let needs_depth_prepass = mesh_leg
+        && (matches!(path, RenderPath::ForwardPlus) || (matches!(path, RenderPath::Forward) && pre_light));
     // Decision 8: the prepass ALSO writes motion only when a PRE-LIGHT motion consumer
     // (shadow_temporal) is armed; a TAA-only (post-light) config keeps the cheaper
     // mesh_forward-writes-motion form (not encoded here — a per-pass framegraph decision).
@@ -880,8 +900,8 @@ mod tests {
     fn every_non_deferred_path_degrades_today() {
         // Rung R4b-b landed `Forward` for real (`FORWARD_IMPLEMENTED == true`); rung R5 landed
         // `ForwardPlus` too (`FORWARD_PLUS_IMPLEMENTED == true`) — both are EXCLUDED from this
-        // loop (see `forward_both_lands_on_forward_with_legs_collapsed_to_mesh` +
-        // `forward_plus_both_lands_on_forward_plus_with_legs_collapsed_to_mesh` + the
+        // loop (see `forward_both_and_sdf_stay_as_requested_once_sdf_forward_lands` +
+        // `forward_plus_both_and_sdf_stay_as_requested_once_sdf_forward_lands` + the
         // `cap_forward_v1_consumers` truth-table block below for their real behavior).
         // `VisibilityBuffer` still degrades to `Deferred` today.
         let path = RenderPath::VisibilityBuffer;
@@ -895,33 +915,36 @@ mod tests {
     // ---- rung R4b-b: `Forward` is real through the public `resolve_render_path` entry point ---
 
     #[test]
-    fn forward_both_lands_on_forward_with_legs_collapsed_to_mesh() {
-        // `SDF_FORWARD_IMPLEMENTED` is still `false` (R-SDFFWD has not landed) — a non-`Mesh`
-        // leg set collapses to `Mesh` (the pre-existing ladder rule), independent of `Forward`
-        // itself now being implemented.
-        let cfg = RenderPathConfig { path: RenderPath::Forward, legs: GeometryLegs::Both };
-        let (resolved, degrades) = resolve_render_path(&cfg, RenderPathConsumers::default(), caps_ok());
-        assert_eq!(resolved.path, RenderPath::Forward);
-        assert_eq!(resolved.legs, GeometryLegs::Mesh);
-        let reasons: Vec<_> = degrades.reasons().collect();
-        assert_eq!(reasons, [RenderPathDegrade::LegsCollapsedToMeshPreSdfForward]);
+    fn forward_both_and_sdf_stay_as_requested_once_sdf_forward_lands() {
+        // Rung R-SDFFWD: `SDF_FORWARD_IMPLEMENTED` is now `true` — a non-`Mesh` leg set no
+        // longer collapses under `Forward`; `sdf_forward_marched` arms whenever the FINAL legs
+        // carry the SDF leg (`sdf_leg && path != Deferred`).
+        for (legs, sdf_leg) in [(GeometryLegs::Both, true), (GeometryLegs::Sdf, true), (GeometryLegs::Mesh, false)] {
+            let cfg = RenderPathConfig { path: RenderPath::Forward, legs };
+            let (resolved, degrades) = resolve_render_path(&cfg, RenderPathConsumers::default(), caps_ok());
+            assert_eq!(resolved.path, RenderPath::Forward);
+            assert_eq!(resolved.legs, legs, "{legs:?} must stay as requested — no legs-collapse");
+            assert!(degrades.is_clean(), "{legs:?}: no degrade once SDF-forward-march has landed");
+            assert_eq!(resolved.sdf_leg, sdf_leg);
+            assert_eq!(resolved.sdf_forward_marched, sdf_leg, "{legs:?}: sdf_forward_marched == sdf_leg under Forward");
+        }
     }
 
     // ---- rung R5: `ForwardPlus` is real through the public `resolve_render_path` entry point ---
 
     #[test]
-    fn forward_plus_both_lands_on_forward_plus_with_legs_collapsed_to_mesh() {
-        // `SDF_FORWARD_IMPLEMENTED` is still `false` (R-SDFFWD has not landed) — every non-`Mesh`
-        // leg set (`Both` AND `Sdf`) collapses to `Mesh`, independent of `ForwardPlus` itself now
-        // being implemented.
+    fn forward_plus_both_and_sdf_stay_as_requested_once_sdf_forward_lands() {
+        // Rung R-SDFFWD: mirrors `forward_both_and_sdf_stay_as_requested_once_sdf_forward_lands`
+        // for `ForwardPlus` — every leg set resolves clean, `sdf_forward_marched` tracks `sdf_leg`.
         for legs in [GeometryLegs::Both, GeometryLegs::Sdf] {
             let cfg = RenderPathConfig { path: RenderPath::ForwardPlus, legs };
             let (resolved, degrades) =
                 resolve_render_path(&cfg, RenderPathConsumers::default(), caps_ok());
             assert_eq!(resolved.path, RenderPath::ForwardPlus);
-            assert_eq!(resolved.legs, GeometryLegs::Mesh, "{legs:?} must collapse to Mesh");
-            let reasons: Vec<_> = degrades.reasons().collect();
-            assert_eq!(reasons, [RenderPathDegrade::LegsCollapsedToMeshPreSdfForward]);
+            assert_eq!(resolved.legs, legs, "{legs:?} must stay as requested — no legs-collapse");
+            assert!(degrades.is_clean(), "{legs:?}: no degrade once SDF-forward-march has landed");
+            assert!(resolved.sdf_leg);
+            assert!(resolved.sdf_forward_marched);
         }
     }
 
@@ -1130,19 +1153,18 @@ mod tests {
     }
 
     #[test]
-    fn forward_legs_collapse_and_consumer_caps_stack_three_reasons() {
-        // Forward x Both, before SDF-forward-march lands, with SSAO+TAA both requested: the
-        // legs-level degrade (ladder) AND both consumer-level caps (this fn) fire in one call --
-        // proving the 4-slot RenderPathDegradeLog headroom is exercised, not just declared.
+    fn forward_both_consumer_caps_stack_two_reasons() {
+        // Rung R-SDFFWD: Forward x Both, with SSAO+TAA both requested — the legs no longer
+        // collapse (SDF-forward-march has landed), so only the two consumer-level caps
+        // (`cap_forward_v1_consumers`) fire in one call.
         let consumers = RenderPathConsumers { ssao_on: true, taa_on: true, ..Default::default() };
         let (resolved, degrades) = resolve_forward_v1(GeometryLegs::Both, consumers);
         assert_eq!(resolved.path, RenderPath::Forward);
-        assert_eq!(resolved.legs, GeometryLegs::Mesh, "Both collapses to Mesh pre-SDF-forward");
+        assert_eq!(resolved.legs, GeometryLegs::Both, "Both stays as requested — no legs-collapse");
         let reasons: Vec<_> = degrades.reasons().collect();
         assert_eq!(
             reasons,
             [
-                RenderPathDegrade::LegsCollapsedToMeshPreSdfForward,
                 RenderPathDegrade::ForwardPreLightConsumersNotYetImplemented,
                 RenderPathDegrade::ForwardTaaNotYetImplemented,
             ]
@@ -1219,21 +1241,34 @@ mod tests {
     }
 
     #[test]
-    fn forward_plus_legs_collapse_and_consumer_caps_stack_three_reasons() {
+    fn forward_plus_both_consumer_caps_stack_two_reasons() {
+        // Rung R-SDFFWD: mirrors `forward_both_consumer_caps_stack_two_reasons` for `ForwardPlus`
+        // — legs stay `Both` (no collapse), only the two consumer-level caps fire.
         let consumers = RenderPathConsumers { ssao_on: true, taa_on: true, ..Default::default() };
         let (resolved, degrades) = resolve_forward_plus(GeometryLegs::Both, consumers);
         assert_eq!(resolved.path, RenderPath::ForwardPlus);
-        assert_eq!(resolved.legs, GeometryLegs::Mesh, "Both collapses to Mesh pre-SDF-forward");
-        assert!(resolved.needs_depth_prepass);
+        assert_eq!(resolved.legs, GeometryLegs::Both, "Both stays as requested — no legs-collapse");
+        assert!(resolved.needs_depth_prepass, "mesh_leg is true under Both — the prepass stays armed");
         let reasons: Vec<_> = degrades.reasons().collect();
         assert_eq!(
             reasons,
             [
-                RenderPathDegrade::LegsCollapsedToMeshPreSdfForward,
                 RenderPathDegrade::ForwardPreLightConsumersNotYetImplemented,
                 RenderPathDegrade::ForwardTaaNotYetImplemented,
             ]
         );
+    }
+
+    #[test]
+    fn forward_plus_sdf_only_never_needs_the_prepass() {
+        // Rung R-SDFFWD: the mesh_leg gate on `needs_depth_prepass` — `ForwardPlus x Sdf` (no
+        // mesh leg) has nothing for the depth prepass to cull, so it stays OFF despite
+        // `ForwardPlus`'s otherwise-unconditional trigger.
+        let resolved =
+            resolve_rules(RenderPath::ForwardPlus, GeometryLegs::Sdf, RenderPathConsumers::default(), caps_ok());
+        assert!(!resolved.mesh_leg && resolved.sdf_leg);
+        assert!(!resolved.needs_depth_prepass, "no mesh leg -> the prepass has nothing to cull");
+        assert!(!resolved.prepass_writes_motion);
     }
 
     #[test]

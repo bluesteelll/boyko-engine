@@ -2270,6 +2270,16 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         forward_instance_ring: None,
         forward_instance_material_ring: None,
         forward_prepass_pipeline: None,
+        // Multi-paradigm render-path plan, rung R-SDFFWD: `None` — this harness never resolves
+        // `sdf_forward_marched` (`GBufferScene::sdf_forward_march_pipeline`'s doc: `Option` exists
+        // so a non-Forward-SDF test can say so honestly instead of threading a
+        // semantically-wrong placeholder).
+        sdf_forward_march_pipeline: None,
+        sdf_forward_march_sdfonly_pipeline: None,
+        sdf_forward_march_layout: None,
+        brick_levels_ubo: None,
+        sdf_forward_view_z_a: 0.0,
+        sdf_forward_view_z_b: 0.0,
         tiles_buffer: &tiles_buffer,
         // Brick bindings 9..=14: the ACTIVATED clip-map's REAL per-level resources. Level 0's grid +
         // atlas at @9/@10, level 1 at @11/@12, level 2 at @13/@14 — the genuine 3-level cache (NOT the
@@ -3263,6 +3273,16 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         forward_instance_ring: None,
         forward_instance_material_ring: None,
         forward_prepass_pipeline: None,
+        // Multi-paradigm render-path plan, rung R-SDFFWD: `None` — this harness never resolves
+        // `sdf_forward_marched` (`GBufferScene::sdf_forward_march_pipeline`'s doc: `Option` exists
+        // so a non-Forward-SDF test can say so honestly instead of threading a
+        // semantically-wrong placeholder).
+        sdf_forward_march_pipeline: None,
+        sdf_forward_march_sdfonly_pipeline: None,
+        sdf_forward_march_layout: None,
+        brick_levels_ubo: None,
+        sdf_forward_view_z_a: 0.0,
+        sdf_forward_view_z_b: 0.0,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),
@@ -8180,6 +8200,16 @@ fn run_showcase_body_ddgi(
         forward_instance_ring: None,
         forward_instance_material_ring: None,
         forward_prepass_pipeline: None,
+        // Multi-paradigm render-path plan, rung R-SDFFWD: `None` — this harness never resolves
+        // `sdf_forward_marched` (`GBufferScene::sdf_forward_march_pipeline`'s doc: `Option` exists
+        // so a non-Forward-SDF test can say so honestly instead of threading a
+        // semantically-wrong placeholder).
+        sdf_forward_march_pipeline: None,
+        sdf_forward_march_sdfonly_pipeline: None,
+        sdf_forward_march_layout: None,
+        brick_levels_ubo: None,
+        sdf_forward_view_z_a: 0.0,
+        sdf_forward_view_z_b: 0.0,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),
@@ -9592,6 +9622,16 @@ fn run_showcase_body(
         forward_instance_ring: None,
         forward_instance_material_ring: None,
         forward_prepass_pipeline: None,
+        // Multi-paradigm render-path plan, rung R-SDFFWD: `None` — this harness never resolves
+        // `sdf_forward_marched` (`GBufferScene::sdf_forward_march_pipeline`'s doc: `Option` exists
+        // so a non-Forward-SDF test can say so honestly instead of threading a
+        // semantically-wrong placeholder).
+        sdf_forward_march_pipeline: None,
+        sdf_forward_march_sdfonly_pipeline: None,
+        sdf_forward_march_layout: None,
+        brick_levels_ubo: None,
+        sdf_forward_view_z_a: 0.0,
+        sdf_forward_view_z_b: 0.0,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),

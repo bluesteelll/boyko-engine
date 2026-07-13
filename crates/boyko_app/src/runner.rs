@@ -1450,6 +1450,25 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 }
                 zeroed
             };
+
+            // Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march`
+            // `HAS_MESH` push's reverse-Z decode `A`/`B`
+            // (`boyko_render::view::forward_view_z_coeffs`), precomputed from the SAME
+            // `view.near`/`view.far` the `forward_gbuffer_push_from_view` arm above used to
+            // ENCODE the Forward mesh depth this frame (`forward_view_proj_rows`'s own
+            // derivation) — the algebraic inverse the compute pass's `HAS_MESH` variant applies
+            // to the SAMPLED depth. Don't-care off the Forward-family + perspective-camera arm
+            // (the mesh-less push variant never reads them; a camera-less or Deferred-resolved
+            // frame never builds this pass at all — `SdfForwardMarchPush::sdf_only`'s doc).
+            let (sdf_forward_view_z_a, sdf_forward_view_z_b) = if view.fov_y > 0.0
+                && matches!(
+                    host.resolved_render_path.path,
+                    boyko_render::RenderPath::Forward | boyko_render::RenderPath::ForwardPlus
+                ) {
+                boyko_render::view::forward_view_z_coeffs(view.near, view.far)
+            } else {
+                (0.0, 0.0)
+            };
             // The lerp alpha (host plan R5): `overstep_fraction()` in [0, 1),
             // sampled in Main AFTER the fixed loop settled (a mid-catch-up read
             // could see overstep >= timestep; the value saturates at
@@ -1613,6 +1632,12 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // `host.ssaa_armed`'s threading). Dead-but-threaded: `scene()` converts it
                 // into the plain-POD `ResolvedRenderPathGpu` and nothing downstream reads it.
                 host.resolved_render_path,
+                // Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march`
+                // `HAS_MESH` push's reverse-Z decode A/B, computed above at the SAME site `mvp`
+                // is built (the SAME `view.near`/`view.far` `forward_gbuffer_push_from_view`
+                // used).
+                sdf_forward_view_z_a,
+                sdf_forward_view_z_b,
                 ctx,
             );
 

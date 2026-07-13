@@ -428,6 +428,15 @@ pub struct GBufferTargets {
     /// ring made the single set stale: it would sample a sibling slot's image). The recorder
     /// selects `present_set[self.frame_index]`.
     pub(crate) present_set: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march` compute pass's
+    /// Set-0 vocabulary descriptor set RING (one per in-flight frame), written ONCE against
+    /// [`GBufferScene::sdf_forward_march_layout`] — see [`DeferredSets::sdf_forward_set`]'s doc
+    /// for the entry order + why this lives HERE (needs `lit[i]`, built after `ForwardTargets`).
+    /// `Some` iff [`GBufferScene::path_has_sdf_forward`] holds; `None` under every Deferred
+    /// config and every Forward-family config with the SDF leg absent (the 0%-gate). The recorder
+    /// selects `sdf_forward_set[self.frame_index]`; Set 1 is [`ForwardTargets::set1`] (the shadow
+    /// set, reused verbatim — no separate ring here).
+    pub(crate) sdf_forward_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Multi-paradigm render-path plan, rung R4b-b — the Forward v1 mesh path's OWN depth image
     /// ring + descriptor sets ([`ForwardTargets`]). `Some` iff `profile ==
     /// `[`TargetsProfile::ForwardMesh`]` (built at [`Self::create`]'s TOP, before the unconditional
@@ -1899,7 +1908,7 @@ impl SmaaImages {
 /// re-lists the image teardown at every set (the cross-bundle O(n²) collapse): [`Self::build`] drains
 /// only the sets it built, and the orchestrator tears down the images. Acquisition order (matched by
 /// [`Self::destroy`] in reverse): vocab → resolve → cull → ssao → viewt-from-depth → ddgi-update →
-/// present → resolve-hwrt → fxaa → smaa (edge → weight → blend) → ssaa downsample.
+/// present → sdf-forward-march → resolve-hwrt → fxaa → smaa (edge → weight → blend) → ssaa downsample.
 /// Flattened into the [`GBufferTargets`] set fields at `create` time, so `present/` readers keep the
 /// same `targets.<x>` paths.
 struct DeferredSets {
@@ -1913,6 +1922,13 @@ struct DeferredSets {
     viewt_from_depth_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     ddgi_update_set: Option<VulkanBindGroup>,
     present_set: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march` pass's Set-0
+    /// vocabulary set — `None` unless [`GBufferScene::path_has_sdf_forward`] holds. Built AFTER
+    /// `present_set` (both need `core.lit[i]`, so this is the same "needs `core`" point
+    /// `present_set` is built at — see [`GBufferTargets::forward`]'s doc for why it cannot live
+    /// inside `ForwardTargets::build`, which runs BEFORE `core` exists), so its own error path
+    /// tears down every prior set including `present_set`.
+    sdf_forward_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     #[cfg(feature = "hwrt")]
     resolve_set_hwrt: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Anti-aliasing Stage 1: the FXAA INPUT set RING, `None` when AA is off ([`Self::build`]'s
@@ -1944,10 +1960,19 @@ impl DeferredSets {
     /// armed) — it feeds the three SMAA sets (edge → weight → blend, built in that order, AFTER
     /// `fxaa_set`). The SSAA `downsample_set` sampler is derived internally from `scene.ssaa`
     /// (mirrors how `aa_sampler` is derived from `scene.aa` above — no separate param, `scene` is
-    /// already threaded through); it is built LAST (after `smaa_*_set`).
+    /// already threaded through); it is built LAST (after `smaa_*_set`). `forward` is
+    /// [`GBufferTargets::forward`]'s already-built value (`Some` iff `TargetsProfile::ForwardMesh`)
+    /// — needed for `sdf_forward_set`'s `gForwardDepth` binding, which must reference the SAME
+    /// `forward.depth[i]` ring `record_forward` samples.
     /// On any set's partial failure the slots already built in THAT set are drained + every
     /// fully-built prior set destroyed (reverse acquisition); the orchestrator owns the image
     /// rings, which it tears down on this method's `Err`.
+    ///
+    /// `#[allow(clippy::too_many_arguments)]`: `forward` (rung R-SDFFWD) joins the existing
+    /// AA-bundle params — every argument is a distinct borrow the sets bind; grouping them into
+    /// a struct would only move the argument list (the SAME rationale
+    /// `build_shadow_denoise_sets`'s own `#[allow]` documents).
+    #[allow(clippy::too_many_arguments)]
     fn build(
         ctx: &VulkanContext,
         scene: &GBufferScene<'_>,
@@ -1956,6 +1981,7 @@ impl DeferredSets {
         light_index_buf: &BoundBuffer,
         aa_out: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
         smaa_imgs: Option<&SmaaImages>,
+        forward: Option<&ForwardTargets>,
     ) -> Result<DeferredSets, SwapchainError> {
         // The marcher vocabulary set, written ONCE here (NO per-frame update). The
         // entry order matches the layout: SSBO @0, sampled depth @1, storage albedo @2,
@@ -2459,6 +2485,118 @@ impl DeferredSets {
         let present_set: [VulkanBindGroup; FRAMES_IN_FLIGHT] = present_slots
             .map(|s| s.expect("invariant: every present ring slot built before reaching here"));
 
+        // Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march` pass's Set-0
+        // vocabulary RING, built HERE — the same point `present_set` is built, both needing
+        // `core.lit[i]` (which does not exist before `core`; `ForwardTargets::build` runs BEFORE
+        // it, so this set cannot live there — see `GBufferTargets::forward`'s doc). Gated on
+        // `scene.path_has_sdf_forward()` (`== resolved_render_path.sdf_forward_marched`): `None`
+        // under every Deferred config AND every Forward-family config with the SDF leg absent
+        // (`GeometryLegs::Mesh`) — the 0%-gate. Entry order matches the shader's own binding
+        // table (`shaders/sdf_forward_march.comp.hlsl`'s header doc): edit-list `Buf` @0,
+        // `LightBuf` @1, `Materials` @2, `Camera` UBO @3, `gLit` STORAGE @4, `PointerGrid`/
+        // `BrickAtlas` @5/6, `PointerGrid1`/`BrickAtlas1` @7/8, `PointerGrid2`/`BrickAtlas2`
+        // @9/10, `BrickLevels` UBO @11, `gForwardDepth` SAMPLED @12 (paired with
+        // `scene.depth_sampler` as a harmless bound-but-ignored placeholder — the shader's
+        // unfiltered `.Load`, the SAME idiom `vocab_set`'s own `gDepth`@1 binding uses).
+        // `forward.depth[i]` is ALWAYS valid here regardless of `mesh_leg`:
+        // `path_has_sdf_forward()` implies `TargetsProfile::ForwardMesh`, under which `forward`
+        // is `Some` and its `depth` ring is allocated for EVERY leg set
+        // (`ForwardTargets::build`'s doc) — the mesh-less compute variant simply never reads it
+        // (bound-but-unread, the R2 contract), which is why ONE shared layout serves both
+        // pipeline variants (`GBufferScene::sdf_forward_march_layout`'s doc).
+        let sdf_forward_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = if scene.path_has_sdf_forward()
+        {
+            let layout = scene
+                .sdf_forward_march_layout
+                .expect("invariant: path_has_sdf_forward() requires scene.sdf_forward_march_layout");
+            let brick_levels_ubo = scene
+                .brick_levels_ubo
+                .expect("invariant: path_has_sdf_forward() requires scene.brick_levels_ubo");
+            let forward_depth = forward.expect(
+                "invariant: path_has_sdf_forward() implies TargetsProfile::ForwardMesh (forward is Some)",
+            );
+            let mut sdf_forward_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+                [const { None }; FRAMES_IN_FLIGHT];
+            let mut failure: Option<crate::error::VulkanError> = None;
+            for (slot, dst) in sdf_forward_slots.iter_mut().enumerate() {
+                let entries = [
+                    BindGroupEntry::StorageBuffer { buffer: scene.edit_list },
+                    BindGroupEntry::StorageBuffer { buffer: scene.light_table },
+                    BindGroupEntry::StorageBuffer { buffer: scene.material_table },
+                    BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
+                    BindGroupEntry::StorageImage { texture: &core.lit[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: scene.pointer_grid },
+                    BindGroupEntry::CombinedImage { texture: scene.atlas, sampler: scene.atlas_sampler },
+                    BindGroupEntry::StorageBuffer { buffer: scene.level_grids[0] },
+                    BindGroupEntry::CombinedImage {
+                        texture: scene.level_atlases[0],
+                        sampler: scene.level_atlas_samplers[0],
+                    },
+                    BindGroupEntry::StorageBuffer { buffer: scene.level_grids[1] },
+                    BindGroupEntry::CombinedImage {
+                        texture: scene.level_atlases[1],
+                        sampler: scene.level_atlas_samplers[1],
+                    },
+                    BindGroupEntry::UniformBuffer { buffer: brick_levels_ubo },
+                    BindGroupEntry::SampledImage {
+                        texture: &forward_depth.depth[slot],
+                        sampler: scene.depth_sampler,
+                    },
+                ];
+                let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
+                match RhiDevice::create_bind_group(ctx, &desc) {
+                    Ok(g) => *dst = Some(g),
+                    Err(e) => {
+                        failure = Some(e);
+                        break;
+                    }
+                }
+            }
+            if let Some(e) = failure {
+                // SAFETY: the sdf-forward slots already built [0..slot) + the present ring + the
+                // (optional) ddgi-update/ssao/cull rings + the resolve & vocab rings were created
+                // on `ctx`, referenced by no submission; each destroyed exactly once (reverse
+                // acquisition). The optional sets are `Option`-guarded; the images are owned by
+                // the caller.
+                unsafe {
+                    for s in sdf_forward_slots.iter_mut() {
+                        if let Some(g) = s.take() {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    for g in present_set {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                    if let Some(du) = ddgi_update_set {
+                        RhiDevice::destroy_bind_group(ctx, du);
+                    }
+                    if let Some(ss) = ssao_set {
+                        for g in ss {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    if let Some(cs) = cull_set {
+                        for g in cs {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    for g in resolve_set {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                    for g in vocab_set {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                }
+                return Err(SwapchainError::DepthImage(e));
+            }
+            Some(
+                sdf_forward_slots
+                    .map(|s| s.expect("invariant: every sdf-forward ring slot built before reaching here")),
+            )
+        } else {
+            None
+        };
+
         // R2a-4b: the HWRT-variant resolve set RING — built ONLY when the scene wires BOTH the
         // 21-binding HWRT resolve layout AND the per-FIF TLAS handles (i.e. under `feature = "hwrt"`
         // + `ctx.ray_query_enabled()` + config HardwareTri). `None` on every software path ⇒ the
@@ -2542,6 +2680,11 @@ impl DeferredSets {
                                     RhiDevice::destroy_bind_group(ctx, g);
                                 }
                             }
+                            if let Some(sfs) = sdf_forward_set {
+                                for g in sfs {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
+                            }
                             for g in present_set {
                                 RhiDevice::destroy_bind_group(ctx, g);
                             }
@@ -2613,6 +2756,11 @@ impl DeferredSets {
                         #[cfg(feature = "hwrt")]
                         if let Some(hs) = resolve_set_hwrt {
                             for g in hs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(sfs) = sdf_forward_set {
+                            for g in sfs {
                                 RhiDevice::destroy_bind_group(ctx, g);
                             }
                         }
@@ -2709,6 +2857,11 @@ impl DeferredSets {
                                 RhiDevice::destroy_bind_group(ctx, g);
                             }
                         }
+                        if let Some(sfs) = sdf_forward_set {
+                            for g in sfs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
                         for g in present_set {
                             RhiDevice::destroy_bind_group(ctx, g);
                         }
@@ -2793,6 +2946,11 @@ impl DeferredSets {
                                 RhiDevice::destroy_bind_group(ctx, g);
                             }
                         }
+                        if let Some(sfs) = sdf_forward_set {
+                            for g in sfs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
                         for g in present_set {
                             RhiDevice::destroy_bind_group(ctx, g);
                         }
@@ -2872,6 +3030,11 @@ impl DeferredSets {
                         #[cfg(feature = "hwrt")]
                         if let Some(hs) = resolve_set_hwrt {
                             for g in hs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(sfs) = sdf_forward_set {
+                            for g in sfs {
                                 RhiDevice::destroy_bind_group(ctx, g);
                             }
                         }
@@ -2975,6 +3138,11 @@ impl DeferredSets {
                                 RhiDevice::destroy_bind_group(ctx, g);
                             }
                         }
+                        if let Some(sfs) = sdf_forward_set {
+                            for g in sfs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
                         for g in present_set {
                             RhiDevice::destroy_bind_group(ctx, g);
                         }
@@ -3015,6 +3183,7 @@ impl DeferredSets {
             viewt_from_depth_set,
             ddgi_update_set,
             present_set,
+            sdf_forward_set,
             #[cfg(feature = "hwrt")]
             resolve_set_hwrt,
             fxaa_set,
@@ -3026,15 +3195,15 @@ impl DeferredSets {
     }
 
     /// Tears down the deferred sets in reverse acquisition order (ssaa-downsample → smaa →
-    /// fxaa → resolve-hwrt → present → ddgi-update → viewt-from-depth → ssao → cull → resolve →
-    /// vocab), consuming `self`.
+    /// fxaa → resolve-hwrt → sdf-forward-march → present → ddgi-update → viewt-from-depth → ssao →
+    /// cull → resolve → vocab), consuming `self`.
     ///
     /// # Safety
     ///
     /// `ctx` is live; no submission references these descriptor sets; each is destroyed exactly once
     /// (the by-value `self`). The `cull`/`ssao`/`viewt_from_depth`/`ddgi-update`/`resolve-hwrt`/
-    /// `fxaa`/`smaa_*`/`downsample` sets are `Option`-guarded (present only when their feature was
-    /// wired).
+    /// `sdf-forward-march`/`fxaa`/`smaa_*`/`downsample` sets are `Option`-guarded (present only when
+    /// their feature was wired).
     unsafe fn destroy(self, ctx: &VulkanContext) {
         // SAFETY: per the contract `ctx` is live and nothing references these sets; each was created
         // on `ctx` and is destroyed exactly once, in reverse acquisition order.
@@ -3076,6 +3245,14 @@ impl DeferredSets {
             #[cfg(feature = "hwrt")]
             if let Some(hs) = self.resolve_set_hwrt {
                 for g in hs {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            // Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march` Set-0
+            // vocabulary set, `Option`-guarded (present only when `scene.path_has_sdf_forward()`
+            // held). Built AFTER `present_set` (so destroyed BEFORE it, reverse acquisition).
+            if let Some(sfs) = self.sdf_forward_set {
+                for g in sfs {
                     RhiDevice::destroy_bind_group(ctx, g);
                 }
             }
@@ -4910,6 +5087,7 @@ impl GBufferTargets {
             light_index_buf,
             aa_imgs.as_ref().map(|a| &a.aa_out),
             smaa_imgs.as_ref(),
+            forward.as_ref(),
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -5090,6 +5268,7 @@ impl GBufferTargets {
             viewt_from_depth_set,
             ddgi_update_set,
             present_set,
+            sdf_forward_set,
             #[cfg(feature = "hwrt")]
             resolve_set_hwrt,
             fxaa_set,
@@ -5254,6 +5433,7 @@ impl GBufferTargets {
             shadow_temporal_denoised_resolve_set,
             ddgi_update_set,
             present_set,
+            sdf_forward_set,
             forward,
             extent,
         })
@@ -5500,9 +5680,10 @@ impl GBufferTargets {
                     RhiDevice::destroy_bind_group(ctx, g);
                 }
             }
-            // The deferred descriptor SETS (resolve-hwrt → present → ddgi-update → viewt-from-depth
-            // → ssao → cull → resolve → vocab), via the `DeferredSets` bundle's reverse-acquisition
-            // teardown — the SAME order + `Option`-guards the old flat teardown used.
+            // The deferred descriptor SETS (resolve-hwrt → sdf-forward-march → present →
+            // ddgi-update → viewt-from-depth → ssao → cull → resolve → vocab), via the
+            // `DeferredSets` bundle's reverse-acquisition teardown — the SAME order +
+            // `Option`-guards the old flat teardown used.
             DeferredSets {
                 vocab_set: self.vocab_set,
                 resolve_set: self.resolve_set,
@@ -5511,6 +5692,7 @@ impl GBufferTargets {
                 viewt_from_depth_set: self.viewt_from_depth_set,
                 ddgi_update_set: self.ddgi_update_set,
                 present_set: self.present_set,
+                sdf_forward_set: self.sdf_forward_set,
                 #[cfg(feature = "hwrt")]
                 resolve_set_hwrt: self.resolve_set_hwrt,
                 fxaa_set: self.fxaa_set,
@@ -5863,6 +6045,7 @@ mod tests {
             aa_arm: AaArm::Off,
             ddgi_update_set: None,
             present_set: bg_ring(),
+            sdf_forward_set: None,
             forward: None,
             extent: VkExtent2D::default(),
         }
@@ -5949,6 +6132,7 @@ mod tests {
             shadow_temporal_denoised_resolve_set: shadow_temporal_denoised_resolve.then(bg_ring),
             ddgi_update_set: None,
             present_set: bg_ring(),
+            sdf_forward_set: None,
             forward: None,
             extent: VkExtent2D::default(),
         }

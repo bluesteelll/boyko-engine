@@ -33,7 +33,8 @@ use boyko_rhi_vulkan::compute::{
     B5_CAMERA_UBO_BYTES_M4, CAM_MODE_ORTHO, CAM_MODE_PERSPECTIVE, COMPOSITE_PUSH_CONSTANT_BYTES,
     CoarseMode, EDITLIST_BUFFER_WORDS,
     INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS,
-    LOCAL_SIZE_X, TILE_BOUND_BYTES, TILE_SIZE, csm_depth_fs_spirv, csm_depth_vs_spirv, deferred_pbr_spirv,
+    LOCAL_SIZE_X, M4_LEVEL_PARAMS_BYTES, SDF_FORWARD_MARCH_PUSH_BYTES, TILE_BOUND_BYTES, TILE_SIZE,
+    csm_depth_fs_spirv, csm_depth_vs_spirv, deferred_pbr_spirv,
     deferred_pbr_wrap_spirv,
     depth_prepass_fs_spirv, depth_prepass_vs_spirv,
     encode_edit_list, forward_opaque_fs_spirv, forward_opaque_froxel_fs_spirv, forward_opaque_vs_spirv,
@@ -42,7 +43,8 @@ use boyko_rhi_vulkan::compute::{
     gbuffer_mrt_fs_spirv,
     gbuffer_mrt_pm_fs_spirv, gbuffer_mrt_pm_vs_spirv, gbuffer_mrt_tex_fs_spirv,
     gbuffer_mrt_tex_vs_spirv, gbuffer_mrt_vs_spirv, interp_instances_spirv, punctual_depth_fs_spirv,
-    punctual_depth_vs_spirv, sdf_gbuffer_composite_spirv, sdf_probe_update_spirv,
+    punctual_depth_vs_spirv, sdf_forward_march_spirv, sdf_forward_march_sdfonly_spirv,
+    sdf_gbuffer_composite_spirv, sdf_probe_update_spirv,
     sdf_ssao_spirv_variant, smaa_blend_fs_spirv, smaa_edge_fs_spirv, smaa_weight_fs_spirv,
     SSAO_ATROUS_PUSH_BYTES, ssao_atrous_read8_spirv, ssao_atrous_spirv, ssao_atrous_write8_spirv,
     SSAO_QUALITY_COUNT, SSAO_QUALITY_HIGH, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM,
@@ -599,6 +601,13 @@ pub(crate) struct GpuSceneBundles {
     /// The brick clip-map baked from the EMPTY edit field — the valid
     /// bound-but-unread placeholders for vocab bindings 9..=15 (brick OFF).
     clipmap: BrickClipmap,
+    /// Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march` pass's dedicated
+    /// BrickLevels UBO (Set-0 binding 11, `BRICK_LEVELS * M4_LEVEL_PARAMS_BYTES` = 144 B) — a
+    /// STANDALONE buffer, distinct from `camera_ring`'s own M4Level tail (this pass's Camera @3
+    /// stays the plain 80-byte Forward shape). Zero-seeded, single (NOT ringed — never rewritten:
+    /// `brick_enabled = brick_trilinear = brick_levels = 0` every frame this rung, an explicit
+    /// 0%-gate mirroring the deferred marcher's own first-landed M1/M2/M4 activation).
+    brick_levels_ubo: BoundBuffer,
     // ── Resolve (pass C) ─────────────────────────────────────────────────────
     resolve_pipeline: ComputePipeline,
     resolve_layout: VulkanBindGroupLayout,
@@ -832,6 +841,23 @@ pub(crate) struct GpuSceneBundles {
     /// [`Self::forward_layout0`] (the SAME unified layout `forward_pipeline` uses), Set 1 =
     /// [`Self::forward_layout1`] (UNCHANGED, shared verbatim).
     forward_plus_pipeline: VulkanGraphicsPipeline,
+    /// Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march` `HAS_MESH`
+    /// compute pipeline (`sdf_forward_march.comp.hlsl` compiled with `-D HAS_MESH=1`). Built
+    /// UNCONDITIONALLY at boot (the Forward v1 trio's own "cheap, no per-frame cost either way"
+    /// precedent — `ResolvedRenderPath` does not reach `boot()`'s call site); only a
+    /// Forward-family-resolved boot with the SDF leg present ever RECORDS it. Built against
+    /// [`Self::sdf_forward_march_layout`] (Set 0) + `forward_layout1` (Set 1, the shadow set —
+    /// REUSED VERBATIM, no separate layout).
+    sdf_forward_march_pipeline: ComputePipeline,
+    /// The `sdf_forward_march` mesh-less compute pipeline (compiled with no `-D`). Built
+    /// UNCONDITIONALLY alongside [`Self::sdf_forward_march_pipeline`], against the SAME
+    /// [`Self::sdf_forward_march_layout`] (the code-review-fixed "one layout object per pipeline
+    /// family" discipline `forward_layout0` already establishes).
+    sdf_forward_march_sdfonly_pipeline: ComputePipeline,
+    /// The `sdf_forward_march` pass's dedicated 13-binding Set-0 bind-group LAYOUT — see
+    /// `boyko_rhi_vulkan::present::scene_types::GBufferScene::sdf_forward_march_layout`'s doc for
+    /// the full binding table this fn's `boot` construction site mirrors.
+    sdf_forward_march_layout: VulkanBindGroupLayout,
     /// `ceil(composite pixels / LOCAL_SIZE_X)` — the marcher + resolve dispatch
     /// width, boot-fixed to the composite extent (plan D7).
     dispatch_group_count_x: u32,
@@ -948,6 +974,30 @@ impl GpuSceneBundles {
             zero_fill(mapped, B5_CAMERA_UBO_BYTES_M4);
             b
         });
+
+        // ── Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march` pass's OWN
+        // dedicated BrickLevels UBO (Set-0 binding 11) — a STANDALONE buffer, distinct from
+        // `camera_ring`'s own M4Level tail (this pass's Camera @3 stays the plain 80-byte Forward
+        // shape — `boyko_render::view::forward_gbuffer_push_from_view`'s contract, no M4 tail).
+        // Single (NOT ringed), zero-seeded, never rewritten: `brick_enabled = brick_trilinear =
+        // brick_levels = 0` every frame this rung (the explicit 0%-gate `SdfForwardMarchPush`'s
+        // doc documents), so its contents are never read.
+        const SDF_FORWARD_BRICK_LEVELS_UBO_BYTES: usize =
+            boyko_sdf_math::brick::BRICK_LEVELS * M4_LEVEL_PARAMS_BYTES;
+        let brick_levels_ubo = RhiDevice::create_buffer(
+            device,
+            &BufferDesc {
+                size: SDF_FORWARD_BRICK_LEVELS_UBO_BYTES as u64,
+                usage: BufferUsage::UNIFORM,
+                location: MemoryLocation::HostVisibleCoherent,
+            },
+        )
+        .expect("invariant: sdf_forward_march BrickLevels uniform buffer create");
+        {
+            let mapped = RhiDevice::buffer_mapped_ptr(device, &brick_levels_ubo)
+                .expect("invariant: host-visible BrickLevels UBO is mapped");
+            zero_fill(mapped, SDF_FORWARD_BRICK_LEVELS_UBO_BYTES);
+        }
 
         // ── The P4b coarse-cull tile buffer (vocab binding 6), bound-but-unread
         // (the coarse cull is gated OFF).
@@ -2420,6 +2470,86 @@ impl GpuSceneBundles {
             RhiDevice::destroy_shader_module(device, forward_plus_vs);
         }
 
+        // ── Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march` pass's Set-0
+        // vocabulary bind-group LAYOUT (13 bindings, matching the shader's own binding table doc
+        // — `shaders/sdf_forward_march.comp.hlsl`'s header) + its TWO compute pipeline variants.
+        // Built UNCONDITIONALLY at boot (the Forward v1 trio's own "cheap, no per-frame cost
+        // either way" precedent — `ResolvedRenderPath` does not reach `boot()`'s call site); only
+        // a Forward-family-resolved boot with the SDF leg present ever RECORDS the pass. BOTH
+        // pipeline variants are built against this ONE layout object (the code-review-fixed "one
+        // layout per pipeline family" discipline `forward_layout0` already establishes) at Set 0,
+        // + `forward_layout1` at Set 1 (the shadow set, REUSED VERBATIM — no separate layout).
+        let sdf_forward_march_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    // t0: edit-list header (READ-ONLY).
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                    // t1: LightBuf (Lighting L0 light table).
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                    // t2: Materials (PBR material table).
+                    BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                    // b3: Camera (80-byte extent/camera block).
+                    BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                    // u4: gLit STORAGE image.
+                    BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    // t5: M1/M4 level-0 pointer grid.
+                    BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                    // t6/s6: M2/M4 level-0 trilinear atlas (combined).
+                    BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+                    // t7: M4 level-1 pointer grid.
+                    BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                    // t8/s8: M4 level-1 trilinear atlas (combined).
+                    BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+                    // t9: M4 level-2 pointer grid.
+                    BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                    // t10/s10: M4 level-2 trilinear atlas (combined).
+                    BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+                    // b11: BrickLevels UBO (M4Level clip-map geometry, don't-care while brick_levels==0).
+                    BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                    // t12: gForwardDepth SAMPLED (declared for BOTH pipeline variants — the R2
+                    // bound-but-unread contract; the mesh-less SPIR-V never statically references it).
+                    BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::SampledImage, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: sdf_forward_march Set-0 bind-group layout create");
+        let sdf_forward_march_cs = RhiDevice::create_shader_module(device, sdf_forward_march_spirv())
+            .expect("invariant: sdf_forward_march HAS_MESH compute shader module create");
+        let sdf_forward_march_pipeline = ctx
+            .create_compute_pipeline_forward(
+                &ComputePipelineDesc {
+                    module: &sdf_forward_march_cs,
+                    entry: c"main",
+                    push_constant_bytes: SDF_FORWARD_MARCH_PUSH_BYTES,
+                    bind_group_layout: Some(&sdf_forward_march_layout),
+                    spec_constants: &[],
+                },
+                forward_layout1.set_layout(),
+            )
+            .expect("invariant: sdf_forward_march HAS_MESH compute pipeline create");
+        let sdf_forward_march_sdfonly_cs =
+            RhiDevice::create_shader_module(device, sdf_forward_march_sdfonly_spirv())
+                .expect("invariant: sdf_forward_march mesh-less compute shader module create");
+        let sdf_forward_march_sdfonly_pipeline = ctx
+            .create_compute_pipeline_forward(
+                &ComputePipelineDesc {
+                    module: &sdf_forward_march_sdfonly_cs,
+                    entry: c"main",
+                    push_constant_bytes: SDF_FORWARD_MARCH_PUSH_BYTES,
+                    bind_group_layout: Some(&sdf_forward_march_layout),
+                    spec_constants: &[],
+                },
+                forward_layout1.set_layout(),
+            )
+            .expect("invariant: sdf_forward_march mesh-less compute pipeline create");
+        // SAFETY: both modules were created on `device` and are consumed by their respective
+        // pipeline create calls above; each is destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, sdf_forward_march_sdfonly_cs);
+            RhiDevice::destroy_shader_module(device, sdf_forward_march_cs);
+        }
+
         // ── The B3 interpolation pre-pass (host plan R5, refined-B): the pair /
         // out-slot SSBO rings + bind groups + compute pipeline, sized to the same
         // INSTANCE_CAPACITY as the affine instance ring. Its model_out target is the
@@ -2793,6 +2923,7 @@ impl GpuSceneBundles {
             camera_ring,
             tiles_buffer,
             clipmap,
+            brick_levels_ubo,
             resolve_pipeline,
             resolve_layout,
             resolve_pipeline_wrap,
@@ -2842,6 +2973,9 @@ impl GpuSceneBundles {
             forward_layout1,
             forward_prepass_pipeline,
             forward_plus_pipeline,
+            sdf_forward_march_pipeline,
+            sdf_forward_march_sdfonly_pipeline,
+            sdf_forward_march_layout,
             dispatch_group_count_x,
         }
     }
@@ -3460,6 +3594,15 @@ impl GpuSceneBundles {
         // only orphan-rule-clean seam). DEAD-BUT-THREADED: nothing reads `GBufferScene::
         // resolved_render_path` yet (R2 wires the declarator dispatch).
         resolved_render_path: boyko_render::ResolvedRenderPath,
+        // Multi-paradigm render-path plan, rung R-SDFFWD: the host-precomputed
+        // `boyko_render::view::forward_view_z_coeffs(view.near, view.far)` reverse-Z decode pair
+        // — `SdfForwardMarchPush::has_mesh`'s `view_z_a`/`view_z_b` arguments. `boyko_app::runner`
+        // computes these at the SAME site it builds `mvp` via `forward_gbuffer_push_from_view`
+        // (which needs the identical `view.near`/`view.far`), so `scene()` itself never touches
+        // `ViewUniform`. Don't-care under every other leg/path (see
+        // `GBufferScene::sdf_forward_view_z_a`'s doc).
+        sdf_forward_view_z_a: f32,
+        sdf_forward_view_z_b: f32,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -4048,6 +4191,17 @@ impl GpuSceneBundles {
             // the SAME `Some(...)` ALWAYS discipline as the Forward v1 trio above; only ever
             // RECORDED when `GBufferScene::path_needs_depth_prepass` holds.
             forward_prepass_pipeline: Some(&self.forward_prepass_pipeline),
+            // Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march` pipeline
+            // pair + their shared Set-0 layout — genuinely exist at every boot (built
+            // UNCONDITIONALLY, `boot`'s doc), the SAME `Some(...)` ALWAYS discipline as the
+            // Forward v1 trio above; only ever RECORDED when `GBufferScene::path_has_sdf_forward`
+            // holds.
+            sdf_forward_march_pipeline: Some(&self.sdf_forward_march_pipeline),
+            sdf_forward_march_sdfonly_pipeline: Some(&self.sdf_forward_march_sdfonly_pipeline),
+            sdf_forward_march_layout: Some(&self.sdf_forward_march_layout),
+            brick_levels_ubo: Some(&self.brick_levels_ubo),
+            sdf_forward_view_z_a,
+            sdf_forward_view_z_b,
             // Multi-paradigm render-path plan, rung R1: the plain-POD conversion (see this
             // fn's `resolved_render_path` param doc for why it cannot be a `From` impl).
             resolved_render_path: to_gpu_resolved_render_path(&resolved_render_path),
@@ -4198,6 +4352,18 @@ impl GpuSceneBundles {
             // layout to tear down.
             RhiDevice::destroy_graphics_pipeline(ctx, self.forward_prepass_pipeline);
             RhiDevice::destroy_graphics_pipeline(ctx, self.forward_plus_pipeline);
+            // Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march` pipeline
+            // pair + their shared dedicated Set-0 layout, created right after the ForwardPlus
+            // pair above — destroyed here, same reverse-acquisition order. Each pipeline OWNS
+            // its own 2-set pipeline layout (`create_compute_pipeline_forward`'s doc), so
+            // `destroy_compute_pipeline` tears that down too; `sdf_forward_march_layout` is the
+            // SEPARATE Set-0 `VkDescriptorSetLayout` object both pipelines' layouts embed a copy
+            // of at creation (Vulkan permits destroying a descriptor-set-layout handle once every
+            // pipeline layout built against it exists — the SAME precedent `forward_layout1`
+            // being destroyed before `forward_plus_pipeline`, above, already establishes).
+            RhiDevice::destroy_compute_pipeline(ctx, self.sdf_forward_march_pipeline);
+            RhiDevice::destroy_compute_pipeline(ctx, self.sdf_forward_march_sdfonly_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.sdf_forward_march_layout);
             RhiDevice::destroy_graphics_pipeline(ctx, self.present_pipeline);
             RhiDevice::destroy_graphics_pipeline(ctx, self.fxaa_pipeline);
             // Anti-aliasing Stage 2: the three SMAA pipelines — `smaa_edge_pipeline` shares
@@ -4377,6 +4543,7 @@ impl GpuSceneBundles {
             RhiDevice::destroy_buffer(ctx, self.vertex_buffer);
             RhiDevice::destroy_buffer(ctx, self.tiles_buffer);
             self.clipmap.destroy(ctx);
+            RhiDevice::destroy_buffer(ctx, self.brick_levels_ubo);
             for slot in self.light_staging {
                 RhiDevice::destroy_buffer(ctx, slot);
             }

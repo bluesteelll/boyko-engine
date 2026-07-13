@@ -345,6 +345,20 @@ pub fn forward_view_z_from_depth(depth: f32, near: f32, far: f32) -> f32 {
     b / (depth - a)
 }
 
+/// Multi-paradigm render-path plan, rung R-SDFFWD: precomputes [`forward_view_z_from_depth`]'s
+/// `A`/`B` reverse-Z decode coefficients (`A = -near/(far-near)`, `B = near*far/(far-near)`) for a
+/// host caller that needs to push them into a shader instead of calling that fn per-pixel — the
+/// `sdf_forward_march` compute pass's `SdfForwardMarchPush::has_mesh` contract
+/// (`boyko_rhi_vulkan::compute::SdfForwardMarchPush`): the shader reads `view_z = B / (depth -
+/// A)`, [`forward_view_z_from_depth`]'s own body, ported to HLSL so the pass needs no `near`/`far`
+/// fields of its own.
+#[inline]
+pub fn forward_view_z_coeffs(near: f32, far: f32) -> (f32, f32) {
+    debug_assert!(near > 0.0 && far > near, "invariant: a valid reverse-Z frustum needs 0 < near < far");
+    let range = far - near;
+    (-near / range, near * far / range)
+}
+
 /// Builds the 88-byte gbuffer-raster VERTEX push (`{ float4x4 view_proj; float4
 /// cam_eye; uint base_instance; uint use_model_matrix }` —
 /// [`GBUFFER_PUSH_BYTES`]) from a resolved PERSPECTIVE [`ViewUniform`], for the

@@ -1742,4 +1742,121 @@ impl VulkanContext {
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
         self.build_graphics_pipeline(desc, Some(set1_layout), VK_COMPARE_OP_EQUAL, false)
     }
+
+    /// Multi-paradigm render-path plan, rung R-SDFFWD: builds a 2-set COMPUTE pipeline — Set 0 =
+    /// `desc.bind_group_layout` (REQUIRED; unlike [`RhiDevice::create_compute_pipeline`]'s
+    /// optional `None` = device-shared fallback, a 2-set compute pipeline always owns a dedicated
+    /// layout), Set 1 = `set1_layout` (a layout built elsewhere and reused verbatim — the SAME
+    /// "one physical descriptor set shared by two Vulkan pipelines" idiom
+    /// [`Self::create_graphics_pipeline_forward`] already establishes on the graphics side; the
+    /// `sdf_forward_march` compute pass's OWN Set 1 is `GBufferScene::forward_layout1`, the
+    /// Forward-family shadow set reused verbatim by BOTH the `HAS_MESH` and mesh-less compute
+    /// pipeline variants).
+    ///
+    /// Mirrors [`RhiDevice::create_compute_pipeline`]'s dedicated-layout push-range sizing (the
+    /// FULL `COMPUTE_PUSH_CONSTANT_RANGE_BYTES` shared budget, regardless of `desc
+    /// .push_constant_bytes`'s own smaller size — a pipeline may use fewer bytes than its layout
+    /// declares) and [`Self::build_graphics_pipeline`]'s 2-set `p_set_layouts`/`set_layout_count`
+    /// construction, specialized to a single COMPUTE stage (no vertex input / rasterization
+    /// state, no specialization constants — this pass's two variants are separate compiled SPIR-V
+    /// modules, not one spec-constant-branched module).
+    pub fn create_compute_pipeline_forward(
+        &self,
+        desc: &ComputePipelineDesc<Vulkan>,
+        set1_layout: VkDescriptorSetLayout,
+    ) -> Result<ComputePipeline, VulkanError> {
+        if desc.push_constant_bytes == 0
+            || !desc.push_constant_bytes.is_multiple_of(4)
+            || desc.push_constant_bytes > COMPUTE_PUSH_CONSTANT_RANGE_BYTES
+        {
+            return Err(VulkanError::Unsupported(
+                "push_constant_bytes must be a multiple of 4 within the shared compute push range",
+            ));
+        }
+        let bgl = desc.bind_group_layout.expect(
+            "invariant: create_compute_pipeline_forward always builds a dedicated 2-set layout \
+             (Set 0 is required, unlike create_compute_pipeline's optional device-shared fallback)",
+        );
+        let set_layouts = [bgl.set_layout, set1_layout];
+        let push_range = VkPushConstantRange {
+            stage_flags: VK_SHADER_STAGE_COMPUTE_BIT,
+            offset: 0,
+            size: COMPUTE_PUSH_CONSTANT_RANGE_BYTES,
+        };
+        let pl_info = VkPipelineLayoutCreateInfo {
+            s_type: VkStructureType::PipelineLayoutCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            set_layout_count: 2,
+            p_set_layouts: set_layouts.as_ptr(),
+            push_constant_range_count: 1,
+            p_push_constant_ranges: &push_range,
+        };
+        let mut pipeline_layout = VkPipelineLayout::NULL;
+        // SAFETY: `self.device()` is live; `pl_info` is fully initialized referencing the
+        // `set_layouts` local (both the caller's live Set-0 vocabulary layout and the live Set-1
+        // shadow layout, alive for this whole fn) + the `push_range` local (alive for this whole
+        // fn); `&mut pipeline_layout` is a valid out-pointer; NULL allocator.
+        let raw = unsafe {
+            (self.device_fns().create_pipeline_layout)(
+                self.device(),
+                &pl_info,
+                ptr::null(),
+                &mut pipeline_layout,
+            )
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkCreatePipelineLayout(compute-forward)", result));
+        }
+
+        let stage = VkPipelineShaderStageCreateInfo {
+            s_type: VkStructureType::PipelineShaderStageCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            stage: VK_SHADER_STAGE_COMPUTE_BIT,
+            module: desc.module.module,
+            p_name: desc.entry.as_ptr(),
+            p_specialization_info: ptr::null(),
+        };
+        let cp_info = VkComputePipelineCreateInfo {
+            s_type: VkStructureType::ComputePipelineCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            stage,
+            layout: pipeline_layout,
+            base_pipeline_handle: VkPipeline::NULL,
+            base_pipeline_index: -1,
+        };
+        let mut pipeline = VkPipeline::NULL;
+        // SAFETY: `self.device()` is live; null pipeline cache (`0`) is valid; one create-info is
+        // fully initialized, referencing the live shader module + the just-created dedicated
+        // `pipeline_layout`; `&mut pipeline` is a valid out-pointer for the single pipeline; NULL
+        // allocator. The module is owned by the caller's `VulkanShaderModule`, alive for this call.
+        let raw = unsafe {
+            (self.device_fns().create_compute_pipelines)(
+                self.device(),
+                0,
+                1,
+                &cp_info,
+                ptr::null(),
+                &mut pipeline,
+            )
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            // SAFETY: `pipeline_layout` was just created on this device above and is not yet
+            // owned by any pipeline (this create failed); destroying it once here prevents a leak
+            // on this error path.
+            unsafe {
+                (self.device_fns().destroy_pipeline_layout)(
+                    self.device(),
+                    pipeline_layout,
+                    ptr::null(),
+                )
+            };
+            return Err(VulkanError::from(ComputeError::VkError("vkCreateComputePipelines", result)));
+        }
+        Ok(ComputePipeline { pipeline, layout: pipeline_layout, owns_layout: true })
+    }
 }

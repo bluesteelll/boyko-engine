@@ -1997,6 +1997,62 @@ pub struct GBufferScene<'a> {
     /// `None` in every test fixture that never resolves a Forward-family path — same `Option`/
     /// `None` rationale as [`Self::forward_pipeline`].
     pub forward_prepass_pipeline: Option<&'a VulkanGraphicsPipeline>,
+
+    // ---- Multi-paradigm render-path plan, rung R-SDFFWD: the SDF forward-march compute pass ---
+    //
+    // Built UNCONDITIONALLY at `boyko_app::gpu_scene::GpuSceneBundles::boot` (the
+    // `forward_pipeline` precedent — cheap to create, no per-frame cost either way), so
+    // PRODUCTION always threads `Some(...)` here regardless of `resolved_render_path
+    // .sdf_forward_marched`; only recorded when [`GBufferScene::path_has_sdf_forward`] holds
+    // (`declare_forward_graph`/`record_forward`). `None` in every test fixture that never
+    // resolves a Forward-family path — same `Option`/`None` rationale as [`Self::forward_pipeline`].
+    /// The `sdf_forward_march` `HAS_MESH` compute pipeline (`shaders/sdf_forward_march.comp.hlsl`
+    /// compiled with `-D HAS_MESH=1`, [`crate::compute::sdf_forward_march_spirv`]): marches the
+    /// SDF field, bounds the march at the sampled Forward reverse-Z `forward_depth` (Decision 4's
+    /// ownership gate), shades inline, and stores into `lit` (STORAGE). Selected when the
+    /// resolved legs carry the mesh leg too (`resolved_render_path.mesh_leg`); paired with
+    /// [`Self::sdf_forward_march_sdfonly_pipeline`] for the mesh-less leg set. Both variants are
+    /// built against the SAME [`Self::sdf_forward_march_layout`] (the code-review-fixed "one
+    /// layout object per pipeline family" discipline [`Self::forward_layout0`] already
+    /// establishes) — the mesh-less SPIR-V simply never references the layout's `t12`
+    /// (`gForwardDepth`) slot (bound-but-unread, the R2 contract).
+    pub sdf_forward_march_pipeline: Option<&'a ComputePipeline>,
+    /// The `sdf_forward_march` mesh-less compute pipeline (compiled with no `-D`,
+    /// [`crate::compute::sdf_forward_march_sdfonly_spirv`]): never samples `forward_depth` (every
+    /// hit is owned — `sdf_owns = hit` unconditionally). Selected when the resolved legs are
+    /// exactly `GeometryLegs::Sdf` (`!resolved_render_path.mesh_leg`). See
+    /// [`Self::sdf_forward_march_pipeline`]'s doc for the shared-layout discipline.
+    pub sdf_forward_march_sdfonly_pipeline: Option<&'a ComputePipeline>,
+    /// The `sdf_forward_march` pass's dedicated Set-0 bind-group LAYOUT (13 bindings: edit-list
+    /// `Buf` @0, `LightBuf` @1, `Materials` @2, `Camera` UBO @3, `gLit` STORAGE @4,
+    /// `PointerGrid`/`BrickAtlas` @5/6, `PointerGrid1`/`BrickAtlas1` @7/8, `PointerGrid2`/
+    /// `BrickAtlas2` @9/10, `BrickLevels` UBO @11, `gForwardDepth` SAMPLED @12 — the shader's own
+    /// binding table doc). [`GBufferTargets`] writes an `sdf_forward_set` against it (Set 0) once
+    /// per extent when [`Self::path_has_sdf_forward`] holds; Set 1 is
+    /// [`Self::forward_layout1`] (the Forward-family shadow set, reused VERBATIM — this pass's
+    /// own Set-1 binding table is a byte-for-byte copy of `forward_opaque.fs.hlsl`'s).
+    pub sdf_forward_march_layout: Option<&'a VulkanBindGroupLayout>,
+    /// The `sdf_forward_march` pass's dedicated BrickLevels UBO (Set-0 binding 11, 144 B = 3 ×
+    /// 48-byte `M4Level` lanes) — a STANDALONE buffer, DISTINCT from the deferred marcher's own
+    /// b5 UBO tail (which packs the SAME `M4Level` array INSIDE the widened camera block): this
+    /// pass's own Camera @3 stays the plain 80-byte Forward shape
+    /// (`boyko_render::view::forward_gbuffer_push_from_view`'s contract), so the levels need
+    /// their own dedicated UBO. Zero-seeded at boot, never rewritten — `brick_enabled =
+    /// brick_trilinear = brick_levels = 0` is threaded into every `SdfForwardMarchPush` this
+    /// rung (the M1/M2/M4 acceleration is genuinely live in the compiled SPIR-V but dynamically
+    /// inactive, mirroring the deferred marcher's own first-landed 0%-gate), so this UBO's
+    /// contents are never read (`pc.brick_levels == 0` makes every `m2_levels[...]` access
+    /// unreachable). `None` in every test fixture that never resolves a Forward-family path.
+    pub brick_levels_ubo: Option<&'a BoundBuffer>,
+    /// The host-precomputed [`boyko_render::view::forward_view_z_coeffs`] `A` coefficient for
+    /// this frame's reverse-Z decode (`view_z = B / (depth - A)`) — [`SdfForwardMarchPush::
+    /// has_mesh`](crate::compute::SdfForwardMarchPush::has_mesh)'s `view_z_a` argument. Don't-care
+    /// under every OTHER leg/path (the mesh-less pipeline variant never reads it; a Deferred scene
+    /// never builds this pass at all) — mirrors [`Self::light_dir`]'s always-present, sometimes-
+    /// unread threading discipline.
+    pub sdf_forward_view_z_a: f32,
+    /// The `B` coefficient sibling of [`Self::sdf_forward_view_z_a`].
+    pub sdf_forward_view_z_b: f32,
 }
 
 impl GBufferScene<'_> {
@@ -2188,6 +2244,19 @@ impl GBufferScene<'_> {
     #[inline]
     pub(crate) fn path_needs_depth_prepass(&self) -> bool {
         self.resolved_render_path.needs_depth_prepass
+    }
+
+    /// Multi-paradigm render-path plan, rung R-SDFFWD — the SINGLE source of "does this frame
+    /// need the `sdf_forward_march` pass" decision, used at BOTH `declare_forward_graph` and
+    /// `record_forward` (the O1 single-predicate rule, mirroring [`Self::path_needs_depth_prepass`]).
+    /// `== resolved_render_path.sdf_forward_marched` (`sdf_leg && path != Deferred` —
+    /// `resolve_rules`'s doc): `true` for every Forward-family resolve carrying the SDF leg
+    /// (`GeometryLegs::Both` or `Sdf`), regardless of `mesh_leg` (the `HAS_MESH`/mesh-less
+    /// pipeline variant selection is a SEPARATE decision, keyed off `mesh_leg` directly at the
+    /// record site).
+    #[inline]
+    pub(crate) fn path_has_sdf_forward(&self) -> bool {
+        self.resolved_render_path.sdf_forward_marched
     }
 }
 

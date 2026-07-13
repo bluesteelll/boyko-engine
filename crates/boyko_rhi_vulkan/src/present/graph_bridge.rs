@@ -210,10 +210,18 @@ pub(crate) struct ForwardPassPlan {
     /// instance-model ring (VERTEX) when interp armed, reads `ClusterGrid`/`LightIndexList`
     /// (FRAGMENT) when [`Self::light_cull`] ran this frame.
     pub(crate) forward_opaque: crate::framegraph::PassId,
-    /// The always-present present-sample pass: the `lit` `COLOR_ATTACHMENT_OPTIMAL` →
-    /// `SHADER_READ_ONLY_OPTIMAL` transition (C5: the framegraph derives this from the
-    /// producer/consumer access pair, not a hardcoded source layout). The swapchain WSI
-    /// barriers stay hand-recorded, exactly like [`GbufferPassPlan::present_sample`].
+    /// Multi-paradigm render-path plan, rung R-SDFFWD: the fused SDF march-then-shade compute
+    /// pass — writes `lit` (STORAGE, extending `forward_opaque`'s COLOR write, C5) and, when the
+    /// resolved legs also carry the mesh leg, reads `forward_depth` to bound the march at the
+    /// mesh surface (Decision 4). `Some` iff [`GBufferScene::path_has_sdf_forward`] holds
+    /// (`ForwardMesh` profile with the SDF leg present — the O1 single-predicate rule, mirrored
+    /// at both this declare site and `record_forward`).
+    pub(crate) sdf_forward_march: Option<crate::framegraph::PassId>,
+    /// The always-present present-sample pass: the `lit` `COLOR_ATTACHMENT_OPTIMAL` (or, when
+    /// [`Self::sdf_forward_march`] ran, `GENERAL`) → `SHADER_READ_ONLY_OPTIMAL` transition (C5:
+    /// the framegraph derives this from the producer/consumer access pair, not a hardcoded
+    /// source layout). The swapchain WSI barriers stay hand-recorded, exactly like
+    /// [`GbufferPassPlan::present_sample`].
     pub(crate) present_sample: crate::framegraph::PassId,
 }
 
@@ -2300,11 +2308,54 @@ impl Renderer<'_> {
             );
         }
 
+        // Pass `sdf_forward_march` — Multi-paradigm render-path plan, rung R-SDFFWD: the fused
+        // SDF march-then-shade COMPUTE pass. Gated on [`GBufferScene::path_has_sdf_forward`] (`==
+        // resolved_render_path.sdf_forward_marched` — Forward-family with the SDF leg present,
+        // the O1 single-predicate rule shared with `record_forward`). Declared AFTER
+        // `forward_opaque` (whose raster COLOR write it extends, C5) and BEFORE `present_sample`
+        // (its reader): writes `lit` at COMPUTE/STORAGE_WRITE/GENERAL — the graph derives
+        // `forward_opaque`'s COLOR_ATTACHMENT_OPTIMAL → GENERAL transition here, then
+        // `present_sample`'s GENERAL → SHADER_READ_ONLY_OPTIMAL below (the SAME 3-state chain the
+        // deferred resolve's own `lit` write establishes, `declare_deferred_graph`'s doc). Reads
+        // `forward_depth` at COMPUTE/SHADER_READ/SHADER_READ_ONLY_OPTIMAL ONLY when the resolved
+        // legs also carry the mesh leg (`resolved_render_path.mesh_leg` — the `HAS_MESH` compute
+        // variant samples it to bound the march at the mesh surface; the mesh-less variant never
+        // references the binding, so declaring the read under `!mesh_leg` would derive a spurious
+        // barrier the recorder never needs). No buffer/vocab-resource accesses are declared here
+        // (the SDF field/material/brick buffers are boot-seeded/untracked, the SAME precedent the
+        // deferred `marcher` pass's own declaration establishes — this file's `marcher` pass doc).
+        let sdf_forward_march = if scene.path_has_sdf_forward() {
+            let p = g.add_pass("sdf_forward_march");
+            g.image_access(
+                lit,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                SubRange::COLOR,
+            );
+            if scene.resolved_render_path.mesh_leg {
+                g.image_access(
+                    forward_depth,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    SubRange::DEPTH,
+                );
+            }
+            Some(p)
+        } else {
+            None
+        };
+
         // Pass `present_sample` (site 5c): `lit` COLOR_ATTACHMENT_OPTIMAL→SHADER_READ_ONLY_OPTIMAL
         // for the present-blit's FRAGMENT sample (C5: derived from the producer/consumer access
         // pair, not a hardcoded source layout — the SAME `present_sample` shape
         // `declare_deferred_graph` declares, just against `forward_opaque`'s COLOR write instead
-        // of the resolve's STORAGE write). The swapchain WSI barriers stay hand-recorded.
+        // of the resolve's STORAGE write). Rung R-SDFFWD: when `sdf_forward_march` ran this frame,
+        // `lit` is already `GENERAL` from that pass's write, so this derives GENERAL →
+        // SHADER_READ_ONLY_OPTIMAL (the deferred resolve's own transition shape); when it did not
+        // run, this is UNCHANGED from rung R4b-b (`forward_opaque`'s COLOR_ATTACHMENT_OPTIMAL →
+        // SHADER_READ_ONLY_OPTIMAL). The swapchain WSI barriers stay hand-recorded.
         let present_sample = g.add_pass("present_sample");
         g.image_access(
             lit,
@@ -2324,6 +2375,7 @@ impl Renderer<'_> {
             atlas: atlas_pass,
             light_cull,
             forward_opaque,
+            sdf_forward_march,
             present_sample,
         });
     }

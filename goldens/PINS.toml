@@ -194,3 +194,71 @@ BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\forwardplus_mesh.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
+[forward_both]
+# Multi-paradigm render-path plan, rung R-SDFFWD: Forward x Both -- clones [forward_mesh]'s
+# five-sphere grand_showcase_2mat scene + production boyko_app::runner/gpu_scene::GpuSceneBundles
+# boot path verbatim, with ONE delta: RenderPathConfig{path: Forward, legs: Both} instead of
+# {path: Forward, legs: Mesh}. See crates/boyko_app/tests/forward_both.rs.
+#
+# SDF_FORWARD_IMPLEMENTED is now true, so Both no longer collapses to Mesh under Forward
+# (LegsCollapsedToMeshPreSdfForward is unreachable for this combo) -- the resolver honors
+# sdf_leg == true, arming sdf_forward_marched and the sdf_forward_march HAS_MESH compute dispatch
+# (declare_forward_graph's sdf_forward_march arm + record_forward). This scene's SDF edit-list is
+# boot-seeded EMPTY (count == 0, GpuSceneBundles::boot's doc) -- the march finds NO hit anywhere
+# and writes NOTHING to gLit (the "misses write nothing" contract), so forward_opaque's mesh-raster
+# color stands untouched. EXPECTED byte-identical to [forward_mesh]'s
+# f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad.
+#
+# UNBLESSED placeholders -- the sha256_* values below are NOT real hashes. Re-render on a real
+# windowed GPU device (forward_both_screenshot_dump, #[ignore]) and re-bless via
+# `scripts\golden.ps1 -Pin forward_both -Bless` (and `-Hwrt -Bless`) AFTER the owner's visual
+# sign-off on the freshly-dumped BMP, per this repo's golden discipline (do NOT hand-edit these
+# values otherwise).
+crate           = "boyko-app"
+test_binary     = "forward_both"
+test_name       = "forward_both_screenshot_dump"
+bmp             = "D:\\tmp\\forward_both.bmp"
+width           = 512
+height          = 512
+sha256_software = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad"
+sha256_hwrt     = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad"
+
+[forward_both.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\forward_both.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
+[sdf_forward_only]
+# Multi-paradigm render-path plan, rung R-SDFFWD: Forward x Sdf (mesh-less) -- the FIRST scene
+# exercising GeometryLegs::Sdf under a Forward-family path. No mesh entities are spawned
+# (GeometryLegs::Sdf's "zero mesh cost" contract), booted through the REAL production
+# boyko_app::runner/gpu_scene::GpuSceneBundles path with RenderPathConfig{path: Forward,
+# legs: Sdf}. See crates/boyko_app/tests/sdf_forward_only.rs.
+#
+# sdf_leg == true arms sdf_forward_marched and the MESH-LESS sdf_forward_march_sdfonly_pipeline
+# variant (mesh_leg == false, so record_forward never samples forward_depth). This scene's SDF
+# edit-list is boot-seeded EMPTY (count == 0) -- the march finds NO hit anywhere and writes
+# NOTHING to gLit, so the frame is expected to be forward_sky.{vs,fs}.hlsl's analytic sky/ground
+# gradient + sun disc ONLY (sky-only, no geometry drawn over it).
+#
+# UNBLESSED placeholders -- the sha256_* values below are NOT real hashes. Re-render on a real
+# windowed GPU device (sdf_forward_only_screenshot_dump, #[ignore]) and re-bless via
+# `scripts\golden.ps1 -Pin sdf_forward_only -Bless` (and `-Hwrt -Bless`) AFTER the owner's visual
+# sign-off on the freshly-dumped BMP, per this repo's golden discipline (do NOT hand-edit these
+# values otherwise).
+crate           = "boyko-app"
+test_binary     = "sdf_forward_only"
+test_name       = "sdf_forward_only_screenshot_dump"
+bmp             = "D:\\tmp\\sdf_forward_only.bmp"
+width           = 512
+height          = 512
+sha256_software = "a1256bde136464915fa3be3b456c8a9a5ab669fe19f24164be73ccbcc0858a17"
+sha256_hwrt     = "a1256bde136464915fa3be3b456c8a9a5ab669fe19f24164be73ccbcc0858a17"
+
+[sdf_forward_only.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\sdf_forward_only.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"

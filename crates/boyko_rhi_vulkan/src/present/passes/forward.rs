@@ -6,15 +6,19 @@
 //!
 //! # v1 SCOPE CUT (mirrors `forward_opaque.fs.hlsl`'s own doc — R4b-a)
 //!
-//! Mesh-only (the resolver collapses `Forward × {Both, Sdf}` to `Mesh` pre-R-SDFFWD), NO
-//! SSAO/DDGI/shadow-denoise/motion vector/TAA — `cap_forward_v1_consumers`
+//! NO SSAO/DDGI/shadow-denoise/motion vector/TAA — `cap_forward_v1_consumers`
 //! (`boyko_render::render_path_config`) forces every one of those consumers off structurally
 //! (under BOTH `Forward` and `ForwardPlus`, rung R5), so this recorder writes no thin-aux MRT and
 //! no motion. Shadows (CSM + punctual atlas) ARE in scope — `forward_opaque.fs.hlsl` samples them
 //! inline via `shadow_apply.hlsli`. Rung R5 (ForwardPlus) added the `depth_prepass` + `light_cull`
 //! passes (Decision 4's EQUAL-depth early-Z contract + froxel light reuse) — plain `Forward`
 //! stays all-lights/no-prepass, unchanged from R4b-a; see [`GBufferScene::path_needs_depth_prepass`]
-//! for the single predicate that gates both this recorder and `declare_forward_graph`.
+//! for the single predicate that gates both this recorder and `declare_forward_graph` (rung
+//! R-SDFFWD gated it ADDITIONALLY on `mesh_leg` — nothing for the prepass to cull with no mesh
+//! leg). Rung R-SDFFWD lifted the pre-R-SDFFWD mesh-only leg collapse
+//! (`LegsCollapsedToMeshPreSdfForward`): `Forward`/`ForwardPlus` now honor `GeometryLegs::Both`/
+//! `Sdf` too, via the `sdf_forward_march` fused march-then-shade compute pass this recorder adds
+//! right after `forward_opaque` (see that pass's own record-site doc below).
 //!
 //! # Why a SEPARATE record body, not a `record_gbuffer` branch
 //!
@@ -54,12 +58,14 @@ const FORWARD_LIT_CLEAR: [f32; 4] = [0.05, 0.05, 0.1, 1.0];
 const FORWARD_DEPTH_CLEAR: f32 = 0.0;
 
 impl Renderer<'_> {
-    /// Records the Forward v1 on-screen frame: `interp? → light_upload? → csm? → atlas? →
-    /// forward_opaque → present-blit` — EXACTLY [`Renderer::declare_forward_graph`]'s declaration
-    /// order (code-review P1-2: `compile()` derives barriers in declaration order, so this
-    /// recorder's order must match it pass-for-pass, not merely "light_upload somewhere before
-    /// forward_opaque"). Mirrors the Deferred recorder's own placement (`light_upload` right
-    /// after the geometry pass, before `csm`/`atlas`).
+    /// Records the Forward on-screen frame: `interp? → depth_prepass? → light_upload? →
+    /// light_cull? → csm? → atlas? → forward_opaque → sdf_forward_march? → present-blit` —
+    /// EXACTLY [`Renderer::declare_forward_graph`]'s declaration order (code-review P1-2:
+    /// `compile()` derives barriers in declaration order, so this recorder's order must match it
+    /// pass-for-pass, not merely "light_upload somewhere before forward_opaque"). Mirrors the
+    /// Deferred recorder's own placement (`light_upload` right after the geometry pass, before
+    /// `csm`/`atlas`). Rung R-SDFFWD: `sdf_forward_march` is declared/recorded AFTER
+    /// `forward_opaque` (extends its `lit` write) and BEFORE the present-blit (its reader).
     ///
     /// # Safety
     ///
@@ -810,6 +816,98 @@ impl Renderer<'_> {
                 }
             }
             (self.fns.cmd_end_rendering)(cmd);
+        }
+
+        // === Multi-paradigm render-path plan, rung R-SDFFWD: the fused SDF march-then-shade
+        // COMPUTE pass. Recorded ONLY when `scene.path_has_sdf_forward()` holds — the O1
+        // single-predicate rule shared with `declare_forward_graph`. Extends `forward_opaque`'s
+        // COLOR write (C5: COLOR_ATTACHMENT_OPTIMAL → GENERAL → SHADER_READ_ONLY_OPTIMAL, the
+        // graph derives the transitions from the declared accesses at `sdf_forward_march`/
+        // `present_sample`); marches THIS frame's `lit` pixels the raster pass did not already
+        // paint (a miss writes nothing — the sky/mesh color stands, this pass's own doc). ===
+        if scene.path_has_sdf_forward() {
+            let sdf_forward_pass = plan
+                .sdf_forward_march
+                .expect("invariant: scene.path_has_sdf_forward() ⇒ sdf_forward_march pass declared");
+            // SAFETY: recording is open; `record_forward_pass` records the graph's derived
+            // COLOR_ATTACHMENT_OPTIMAL→GENERAL barrier for `lit` (+ the DEPTH_ATTACHMENT_OPTIMAL→
+            // SHADER_READ_ONLY_OPTIMAL barrier for `forward_depth`, when the mesh leg is present)
+            // for the "sdf_forward_march" pass into `cmd`.
+            self.record_forward_pass(sdf_forward_pass, cmd, targets, forward, scene, fi);
+
+            // Decision 4's ownership gate consumer half: the `HAS_MESH` variant needs the
+            // reverse-Z decode `A`/`B` (`scene.sdf_forward_view_z_a`/`_b`,
+            // `boyko_render::view::forward_view_z_coeffs`); the mesh-less variant never reads
+            // them (`SdfForwardMarchPush::sdf_only`'s doc).
+            let (pipeline, push) = if scene.resolved_render_path.mesh_leg {
+                let p = scene.sdf_forward_march_pipeline.expect(
+                    "invariant: scene.path_has_sdf_forward() requires scene.sdf_forward_march_pipeline",
+                );
+                let push = crate::compute::SdfForwardMarchPush::has_mesh(
+                    present_extent.width,
+                    present_extent.height,
+                    scene.sdf_forward_view_z_a,
+                    scene.sdf_forward_view_z_b,
+                    scene.light_dir,
+                );
+                (p, push)
+            } else {
+                let p = scene.sdf_forward_march_sdfonly_pipeline.expect(
+                    "invariant: scene.path_has_sdf_forward() requires scene.sdf_forward_march_sdfonly_pipeline",
+                );
+                let push = crate::compute::SdfForwardMarchPush::sdf_only(
+                    present_extent.width,
+                    present_extent.height,
+                    scene.light_dir,
+                );
+                (p, push)
+            };
+            let sdf_forward_set = targets
+                .sdf_forward_set
+                .as_ref()
+                .expect("invariant: scene.path_has_sdf_forward() ⇒ targets.sdf_forward_set is built");
+            let push_bytes = push.as_bytes();
+            // SAFETY: recording is open; `pipeline` (the `HAS_MESH` or mesh-less compute variant,
+            // selected by `mesh_leg`) + its 2-set layout (Set 0 = `sdf_forward_set[fi]`, Set 1 =
+            // `forward.set1[fi]` — the Forward-family shadow set REUSED VERBATIM by BOTH pipeline
+            // variants, `GBufferScene::sdf_forward_march_layout`'s doc) belong to this device
+            // (caller contract); `sdf_forward_set[fi]`/`forward.set1[fi]` are live descriptor sets
+            // written once per extent; `push_bytes` is exactly `SDF_FORWARD_MARCH_PUSH_BYTES` (40)
+            // at offset 0; `scene.dispatch_group_count_x` covers `present_extent.width *
+            // present_extent.height` pixels at the shader's `numthreads(64,1,1)` 1D grid (the SAME
+            // grid the deferred marcher/resolve dispatch at).
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    pipeline.layout,
+                    0,
+                    1,
+                    &sdf_forward_set[fi].descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    pipeline.layout,
+                    1,
+                    1,
+                    &forward.set1[fi].descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    pipeline.layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    crate::compute::SDF_FORWARD_MARCH_PUSH_BYTES,
+                    push_bytes.as_ptr().cast(),
+                );
+                (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+            }
         }
 
         // === Present-blit `lit` into the swapchain — byte-for-byte port of `record_gbuffer`'s
