@@ -1222,6 +1222,18 @@ void main(uint3 tid : SV_DispatchThreadID) {
         float  Ess = max(dfg_v.x + dfg_v.y, 1e-4);
         float3 energy_comp = 1.0 + f0 * (1.0 / Ess - 1.0);
 
+        // Multi-Paradigm Render-Path Rung-4a (Decision 3): the per-pixel `Surface` carrier
+        // (`pbr_lighting.hlsli`) — bundles the hoisted terms every direct-light + ambient
+        // evaluation below now shares via `eval_pbr_direct_bsdf`/`eval_pbr_ambient_hemi`/
+        // `eval_pbr_sun_disc` instead of re-deriving the bare locals per call site.
+        Surface surf;
+        surf.n = n;
+        surf.NoV = NoV;
+        surf.a = a;
+        surf.f0 = f0;
+        surf.diffuse_color = diffuse_color;
+        surf.energy_comp = energy_comp;
+
         // PBR P1: the REFLECTION vector, hoisted ONCE per pixel (view + normal only) so BOTH
         // the sky-gradient ambient specular (LIGHT_KIND_SKY) and the per-directional HDR
         // sun-disc term (LIGHT_KIND_DIRECTIONAL, below) reuse the SAME `R` — a pixel with N
@@ -1481,14 +1493,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 // intrinsic `normalize(0)` is NaN when `v` is near-opposite `l` (a
                 // near-grazing/back-facing directional receiver); NoL then zeroes the NaN
                 // spec's contribution on the host but not on the GPU (NaN * 0 == NaN).
-                float3 hvec = safe_normalize(v + l);
-                float NoH = saturate(dot(n, hvec));
-                float LoH = saturate(dot(l, hvec));
-                float  D = D_GGX(NoH, a);
-                float  V = V_SmithGGXCorrelated(NoV, NoL, a); // folds 1/(4 NoL NoV)
-                float3 F = F_Schlick(LoH, f0);
-                float3 spec = (D * V) * F * energy_comp; // PBR P0-D: multi-scatter energy comp
-                float3 diff = diffuse_color * (1.0 / PI);
+                // Multi-Paradigm Render-Path Rung-4a (Decision 3): the D/V/F/spec/diff
+                // Cook-Torrance combination is the SHARED `eval_pbr_direct_bsdf`
+                // (`pbr_lighting.hlsli`) — identical body to the point/spot site below, now
+                // single-sourced.
+                PbrDirectTerms bsdf = eval_pbr_direct_bsdf(surf, v, l, NoL);
                 // Render terminator-softening (`#if TERMINATOR_WRAP` variant — the frozen-base
                 // discipline note above `nol_wrapped`): DIFFUSE ONLY, `spec` keeps the physical
                 // NoL clamp. No runtime check (the variant itself is the opt-in); the `#else`
@@ -1496,9 +1505,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 // compile's token stream — and DXC's codegen for this whole function — is
                 // untouched by construction.
 #if TERMINATOR_WRAP
-                lit_direct += (diff * nol_wrapped(NoL, ts) + spec * NoL) * vis * L.color;
+                lit_direct += (bsdf.diffuse * nol_wrapped(NoL, ts) + bsdf.specular * NoL) * vis * L.color;
 #else
-                lit_direct += (diff + spec) * (NoL * vis) * L.color;
+                lit_direct += (bsdf.diffuse + bsdf.specular) * (NoL * vis) * L.color;
 #endif
 
                 // PBR P1 — the HDR sun disc: a SECOND, roughness-widened specular response
@@ -1511,8 +1520,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 // real-time engines carry the sun both ways). NOT shadow/vis-modulated (only
                 // AO-gated, mirroring the sky ambient's own AO gate) — this is an environment
                 // term, not a direct-light term. `SUN_ENV_WEIGHT` is the single tuning knob.
+                // Rung-4a: the DFG/energy_comp weighting is the SHARED `eval_pbr_sun_disc`
+                // (`pbr_lighting.hlsli`); `SUN_ENV_WEIGHT` stays here (declared AFTER this
+                // file's `#include "pbr_lighting.hlsli"`, so the header cannot reference it).
                 float sun_k = sun_kernel(R, l, a);
-                float3 sun_spec_ambient = (f0 * dfg_v.x + dfg_v.y) * L.color * sun_k * energy_comp * SUN_ENV_WEIGHT;
+                float3 sun_spec_ambient = eval_pbr_sun_disc(surf, dfg_v, sun_k, L.color) * SUN_ENV_WEIGHT;
                 // PBR metal fix: sun_spec_ambient is a SPECULAR term (the environment glint) —
                 // decoupled from diffuse ao_final onto spec_ao (see the `spec_ao` doc above).
                 ambient += sun_spec_ambient * spec_ao;
@@ -1523,23 +1535,12 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 // MIRROR its surroundings, not show the identical flat sky tint from every
                 // angle — so the specular term samples the SAME sky/ground gradient along
                 // the REFLECTION vector `R` (PBR P1: hoisted above the light loop) instead of N.
+                // Rung-4a: the full combination (hemi lerp + steepened reflected hemisphere +
+                // decoupled-AO combine, the PBR metal fix) is the SHARED `eval_pbr_ambient_hemi`
+                // (`pbr_lighting.hlsli`).
                 float3 sky_color = L.color;       // upper hemisphere
                 float3 ground_color = L.pos;      // lower hemisphere (packed in pos lane)
-                float3 hemi_color = lerp(ground_color, sky_color, hemi);
-                float  refl_hemi = dot(R, LIGHT_UP) * 0.5 + 0.5; // same up-axis as `hemi`
-                // PBR metal fix: steepen the reflected hemisphere (smoothstep) so a metal
-                // sweeps a real bright-cap -> dark-belly gradient instead of a flat mid-tone.
-                // The DIFFUSE `hemi` above stays LINEAR — only the specular lobe steepens.
-                refl_hemi = refl_hemi * refl_hemi * (3.0 - 2.0 * refl_hemi);
-                float3 refl_color = lerp(ground_color, sky_color, refl_hemi);
-                // PBR P0-D: `dfg_v`/`energy_comp` are the SAME per-pixel terms hoisted
-                // above the light loop (reused, not recomputed).
-                float3 spec_ambient = (f0 * dfg_v.x + dfg_v.y) * refl_color * energy_comp;
-                float3 diff_ambient = diffuse_color * hemi_color;
-                // PBR metal fix: decoupled AO — diffuse ambient darkens with ao_final, but
-                // specular ambient (a metal's ENTIRE appearance, diffuse == 0) darkens only
-                // with the roughness-aware spec_ao (see the `spec_ao` doc above).
-                ambient += diff_ambient * ao_final + spec_ambient * spec_ao;
+                ambient += eval_pbr_ambient_hemi(surf, R, dfg_v, sky_color, ground_color, hemi, ao_final, spec_ao);
             }
             // Point/spot (kinds 1/2) are the L0b block — not in the L0a front block.
         }
@@ -1673,19 +1674,15 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 }
             }
             // The SAME Cook-Torrance direct term as the directional path, scaled by the
-            // distance/cone attenuation and the light's canonical (baked-I) color. The
-            // half-vector uses `safe_normalize` (host `v_normalize` parity): at a back-facing
-            // surface `v + l` can be ~zero, and the intrinsic `normalize(0) == NaN` would
-            // poison `spec` and (since `NaN * (NoL == 0) == NaN`) blacken the pixel.
-            float3 hvec = safe_normalize(v + l);
+            // distance/cone attenuation and the light's canonical (baked-I) color.
+            // Multi-Paradigm Render-Path Rung-4a (Decision 3): the SHARED
+            // `eval_pbr_direct_bsdf` (`pbr_lighting.hlsli`) — identical body to the
+            // directional site above, including the `safe_normalize` half-vector parity
+            // (host `v_normalize`; at a back-facing surface `v + l` can be ~zero, and the
+            // intrinsic `normalize(0) == NaN` would poison `spec` and, since
+            // `NaN * (NoL == 0) == NaN`, blacken the pixel).
             float NoL = max(dot(n, l), 0.0);
-            float NoH = saturate(dot(n, hvec));
-            float LoH = saturate(dot(l, hvec));
-            float  D = D_GGX(NoH, a);
-            float  V = V_SmithGGXCorrelated(NoV, NoL, a);
-            float3 F = F_Schlick(LoH, f0);
-            float3 spec = (D * V) * F * energy_comp; // PBR P0-D: multi-scatter energy comp
-            float3 diff = diffuse_color * (1.0 / PI);
+            PbrDirectTerms bsdf = eval_pbr_direct_bsdf(surf, v, l, NoL);
             // P6 R1: `vis` DEFAULTS to `shadow` (the marcher's gMaterial.r channel) — the
             // EXACT legacy L0b/L1 point/spot modulation (`(NoL * shadow) * atten`), so a
             // `shadow_mode==0` scene is BYTE-IDENTICAL to today (the 0%-gate; the L0b/L1
@@ -1721,9 +1718,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
             // clamp. The `#else` arm is CHARACTER-FOR-CHARACTER the pre-feature statement (the
             // base compile's token stream is untouched by construction).
 #if TERMINATOR_WRAP
-            lit_direct += (diff * nol_wrapped(NoL, ts) + spec * NoL) * (vis * punctual_shadow) * atten * L.color;
+            lit_direct += (bsdf.diffuse * nol_wrapped(NoL, ts) + bsdf.specular * NoL) * (vis * punctual_shadow) * atten * L.color;
 #else
-            lit_direct += (diff + spec) * (NoL * vis * punctual_shadow) * atten * L.color;
+            lit_direct += (bsdf.diffuse + bsdf.specular) * (NoL * vis * punctual_shadow) * atten * L.color;
 #endif
         }
 

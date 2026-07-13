@@ -12,17 +12,33 @@
 // This is the PERMANENT BRDF seam (Decision 3): later rungs `#include` this header
 // from `forward_opaque.fs.hlsl`, `vb_resolve.hlsl`/`vb_shade.hlsl`, and
 // `sdf_forward_march.hlsl`/`sdf_shade.hlsl` so Cook-Torrance/GGX exists exactly once
-// across every render path. Rung-0 extracts only the primitives that are PURE
-// functions of their parameters (no G-buffer/cbuffer reads); the `eval_pbr_direct`/
-// `eval_pbr_ambient` public surface (§C) lands in a later rung once the other paths
-// need it.
+// across every render path. Rung-0 extracted only the primitives that are PURE
+// functions of their parameters (no G-buffer/cbuffer reads) and explicitly deferred
+// the `eval_pbr_direct`/`eval_pbr_ambient` public surface (§C) "to a later rung once
+// the other paths need it".
+//
+// Rung-4a (this deepening) is that rung's FIRST half: it factors the parts of
+// `deferred_pbr.hlsl`'s light loop that are STILL pure functions of already-hoisted
+// per-pixel values — the `Surface` carrier, the D/V/F/spec/diff Cook-Torrance
+// combination (`eval_pbr_direct_bsdf`, byte-for-byte duplicated between the
+// directional and point/spot loop bodies before this rung), and the sky-hemisphere /
+// sun-disc ambient terms (`eval_pbr_ambient_hemi` / `eval_pbr_sun_disc`). The
+// shadow-visibility COMBINATION (Decision 7 / `shadow_apply.hlsli`) and the
+// per-light attenuation/terminator-wrap modulation stay in `deferred_pbr.hlsl`: they
+// read per-source textures/TLAS/SSBOs (CSM/atlas/HWRT — resolve-specific, not pure)
+// and differ in shape between the directional and punctual light sites, so folding
+// them in now would force an artificial reassociation of the existing multiply
+// chains for zero behavioral gain. R4b (the Forward FS) is expected to show the
+// REAL cross-path shape that outer modulation needs; only then does widening this
+// surface stop being a guess.
 //
 // # INCLUDE CONTRACT (precondition)
 //
 // `static const float PI` MUST be declared in the including TU BEFORE this header is
-// `#include`d — `D_GGX` below reads it. The including TU owns the constant; this
-// header references it (the same pattern `sdf_field.hlsli` uses for its `Buf`
-// precondition).
+// `#include`d — `D_GGX` below reads it. `static const float3 LIGHT_UP` MUST also be
+// declared before the `#include` — `eval_pbr_ambient_hemi` below reads it. The
+// including TU owns both constants; this header references them (the same pattern
+// `sdf_field.hlsli` uses for its `Buf` precondition).
 
 // --- Cook-Torrance / GGX terms (Filament real-time forms) -----------------------------
 
@@ -67,4 +83,82 @@ float3 safe_normalize(float3 a) {
         return float3(0.0, 0.0, 0.0);
     }
     return a / len;
+}
+
+// --- Rung-4a public surface: the per-pixel Surface carrier + the shared direct/ambient
+// evaluations (see the file header for exactly what stays in `deferred_pbr.hlsl` and why) ----
+
+// Surface — the per-pixel PBR parameters `deferred_pbr.hlsl::main()` hoists ONCE
+// (view/roughness/metallic-derived), shared by every light sample AND the ambient
+// terms below. Field order matches the hoist order in `main()`.
+struct Surface {
+    float3 n;              // world normal
+    float  NoV;             // max(dot(n, V), eps) — V is pixel-constant, hoisted once
+    float  a;                // GGX alpha = roughness^2
+    float3 f0;                 // dielectric/metal Fresnel reflectance at normal incidence
+    float3 diffuse_color;       // albedo * (1 - metallic)
+    float3 energy_comp;          // PBR P0-D multi-scatter energy compensation (view+roughness only)
+};
+
+// The (diffuse, specular) pair `eval_pbr_direct_bsdf` returns. The caller applies its
+// own NoL / shadow-visibility / attenuation / terminator-wrap modulation — see the
+// file header for why that stays at the call site.
+struct PbrDirectTerms {
+    float3 diffuse;
+    float3 specular;
+};
+
+// eval_pbr_direct_bsdf — the Cook-Torrance direct-light BSDF combination: D_GGX *
+// V_SmithGGXCorrelated * F_Schlick specular (energy-compensated) + Lambert diffuse.
+// TOKEN-FOR-TOKEN identical to the block `deferred_pbr.hlsl`'s directional and
+// point/spot light-loop bodies each duplicated inline before this rung — a pure
+// function of its parameters (no texture/buffer reads), so Forward FS / VB shade /
+// SDF forward shade share this EXACT evaluation (Decision 3's single-BRDF-source
+// requirement).
+PbrDirectTerms eval_pbr_direct_bsdf(Surface s, float3 v, float3 l, float NoL) {
+    float3 hvec = safe_normalize(v + l);
+    float NoH = saturate(dot(s.n, hvec));
+    float LoH = saturate(dot(l, hvec));
+    float  D = D_GGX(NoH, s.a);
+    float  V = V_SmithGGXCorrelated(s.NoV, NoL, s.a); // folds 1/(4 NoL NoV)
+    float3 F = F_Schlick(LoH, s.f0);
+    PbrDirectTerms r;
+    r.specular = (D * V) * F * s.energy_comp; // PBR P0-D: multi-scatter energy comp
+    r.diffuse = s.diffuse_color * (1.0 / PI);
+    return r;
+}
+
+// eval_pbr_ambient_hemi — the sky/ground hemisphere ambient term (PBR P0-B / the PBR
+// metal fix): Lambert diffuse against the up-axis hemisphere lerp, plus a
+// reflection-vector-sampled specular tint (a metal mirrors its surroundings, not a
+// flat sky tint), with DECOUPLED AO — diffuse ambient darkens with `ao_final`, but
+// ambient specular darkens only with the roughness-aware `spec_ao` (a metal's
+// diffuse is 0, so its ambient specular is its entire appearance and must not be
+// AO-darkened like matte paint). TOKEN-FOR-TOKEN identical to the `LIGHT_KIND_SKY`
+// block of `main()`'s light loop. Pure function of its parameters (no texture reads).
+float3 eval_pbr_ambient_hemi(Surface s, float3 R, float2 dfg, float3 sky_color,
+                              float3 ground_color, float hemi, float ao_final, float spec_ao) {
+    float3 hemi_color = lerp(ground_color, sky_color, hemi);
+    float  refl_hemi = dot(R, LIGHT_UP) * 0.5 + 0.5; // same up-axis as `hemi`
+    // PBR metal fix: steepen the reflected hemisphere (smoothstep) so a metal sweeps a
+    // real bright-cap -> dark-belly gradient instead of a flat mid-tone. The DIFFUSE
+    // `hemi` stays LINEAR — only the specular lobe steepens.
+    refl_hemi = refl_hemi * refl_hemi * (3.0 - 2.0 * refl_hemi);
+    float3 refl_color = lerp(ground_color, sky_color, refl_hemi);
+    float3 spec_ambient = (s.f0 * dfg.x + dfg.y) * refl_color * s.energy_comp;
+    float3 diff_ambient = s.diffuse_color * hemi_color;
+    return diff_ambient * ao_final + spec_ambient * spec_ao;
+}
+
+// eval_pbr_sun_disc — the PBR P1 HDR sun-disc term: a second, roughness-widened
+// specular response from a directional light sampled along the REFLECTION vector `R`
+// (not the direct Cook-Torrance half-vector lobe) — the chrome cue a flat sky
+// gradient alone cannot produce. TOKEN-FOR-TOKEN identical to the
+// `LIGHT_KIND_DIRECTIONAL` sun-disc block of `main()`'s light loop, EXCEPT the final
+// `* SUN_ENV_WEIGHT` multiply stays at the call site: that constant (and
+// `sun_kernel`, which produces `sun_k`) is declared AFTER this header's `#include`
+// point in `deferred_pbr.hlsl`, so this header cannot reference it without a forward
+// declaration. `sun_k` is the caller-evaluated `sun_kernel(R, l, alpha)`.
+float3 eval_pbr_sun_disc(Surface s, float2 dfg, float sun_k, float3 light_color) {
+    return (s.f0 * dfg.x + dfg.y) * light_color * sun_k * s.energy_comp;
 }
