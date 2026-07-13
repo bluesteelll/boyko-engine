@@ -239,6 +239,17 @@ impl Plugin for EnginePlugins {
         // dead-but-threaded: nothing downstream reads the resolved carrier yet.
         app.add_plugin(RenderPathPlugin);
 
+        // Dev/test launch seam: `BOYKO_RENDER_PATH` / `BOYKO_GEOMETRY_LEGS` override the
+        // `Deferred + Both` anchor `RenderPathPlugin` just seeded, so `scripts/run-scene.ps1` can
+        // launch ANY windowed example in ANY paradigm without editing the scene. Runs DURING
+        // `build()`, BEFORE any scene's own post-`add_plugins` `insert_resource(RenderPathConfig)`
+        // (e.g. a golden test's explicit config), so an explicit choice still wins — a stray env
+        // var never clobbers a pinned golden. `None` (both env vars unset — the golden-run case)
+        // leaves the byte-identity anchor untouched.
+        if let Some(cfg) = render_path_config_from_env() {
+            app.insert_resource(cfg);
+        }
+
         // The R7 SDF instance path (composed by DEFAULT): inserts the
         // `SdfEditStaging` gather scratch and registers the one-shot startup
         // `collect_sdf_edits` gather. An entity carrying `SdfPrimitive` is direct-
@@ -350,4 +361,51 @@ impl Plugin for EnginePlugins {
     fn name(&self) -> &'static str {
         "boyko_app::EnginePlugins"
     }
+}
+
+/// Parses the `BOYKO_RENDER_PATH` / `BOYKO_GEOMETRY_LEGS` dev/test launch env vars into a
+/// [`boyko_render::RenderPathConfig`] override (Multi-paradigm render-path plan — the launcher
+/// seam `scripts/run-scene.ps1` drives).
+///
+/// Returns `None` when BOTH are unset (the common/golden case), so [`EnginePlugins::build`] leaves
+/// `RenderPathPlugin`'s `Deferred + Both` byte-identity anchor exactly as seeded. When EITHER is
+/// set, the unset axis keeps its anchor value (path→`Deferred`, legs→`Both`). Values are
+/// case-insensitive and accept friendly aliases; an unrecognized value falls back to that axis's
+/// anchor with an `eprintln` diagnostic (never a panic — a mistyped var must not crash the app).
+fn render_path_config_from_env() -> Option<boyko_render::RenderPathConfig> {
+    use boyko_render::{GeometryLegs, RenderPath};
+
+    let path_var = std::env::var("BOYKO_RENDER_PATH").ok();
+    let legs_var = std::env::var("BOYKO_GEOMETRY_LEGS").ok();
+    if path_var.is_none() && legs_var.is_none() {
+        return None;
+    }
+
+    let path = match path_var.as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("deferred") => RenderPath::Deferred,
+        Some("forward") => RenderPath::Forward,
+        Some("forwardplus" | "forward+" | "forward_plus" | "clustered") => RenderPath::ForwardPlus,
+        Some("visibilitybuffer" | "vb" | "visibility_buffer" | "visbuffer") => {
+            RenderPath::VisibilityBuffer
+        }
+        Some(other) => {
+            eprintln!(
+                "[boyko] BOYKO_RENDER_PATH='{other}' unrecognized -> Deferred (valid: deferred|forward|forwardplus|vb)"
+            );
+            RenderPath::Deferred
+        }
+    };
+
+    let legs = match legs_var.as_deref().map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("both") => GeometryLegs::Both,
+        Some("mesh") => GeometryLegs::Mesh,
+        Some("sdf") => GeometryLegs::Sdf,
+        Some(other) => {
+            eprintln!("[boyko] BOYKO_GEOMETRY_LEGS='{other}' unrecognized -> Both (valid: both|mesh|sdf)");
+            GeometryLegs::Both
+        }
+    };
+
+    eprintln!("[boyko] render-path override from env: {path:?} x {legs:?}");
+    Some(boyko_render::RenderPathConfig { path, legs })
 }
