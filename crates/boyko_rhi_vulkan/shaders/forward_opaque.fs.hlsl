@@ -13,12 +13,15 @@
 //   * **Legs.** `Forward × Mesh` ONLY — the resolver (`boyko_render::render_path_config`)
 //     collapses `Forward × {Both, Sdf}` to `Mesh` until R-SDFFWD lands (the existing
 //     pre-SDF-forward-march ladder rule), so this shader is never asked to composite an SDF hit.
-//   * **Lights.** ALL-LIGHTS: this loop reads the ENTIRE flat light table
-//     (`[0, l0a_count)` directionals+sky, `[l0a_count, light_count)` point/spot) with NO cluster/
-//     froxel lookup — `cluster_cull.hlsl`'s `ClusterGrid`/`LightIndexList` are NOT bound here.
-//     `#ifdef FROXEL` is the seam a future ForwardPlus rung (R5) fills in (reusing the froxel
-//     SSBOs the deferred resolve already shares with `cluster_cull.hlsl` verbatim, per the
-//     plan's §G variant-selection chain) — left as a comment, not code, until that rung.
+//   * **Lights.** ALL-LIGHTS on the base (this file's DEFAULT, `-D FROXEL` undefined) compile:
+//     the point/spot loop reads the ENTIRE flat light table (`[0, l0a_count)` directionals+sky,
+//     `[l0a_count, light_count)` point/spot). Rung R5 (ForwardPlus) added a SECOND compile of
+//     this SAME source, `-D FROXEL=1` → `forward_opaque_froxel.fs.spv`: inside `#ifdef FROXEL`
+//     the point/spot loop instead walks the pixel's froxel slice via `cluster_cull.hlsl`'s
+//     `ClusterGrid`/`LightIndexList` (Set 0 bindings 5/6, froxel-compile-only — see that block's
+//     doc), token-for-token the SAME lookup `deferred_pbr.hlsl`'s L1 block performs. The base
+//     compile's tokens are byte-for-byte unperturbed by the `#else` arm, so `forward_opaque.fs.spv`
+//     (plain `Forward`) stays byte-identical to its pre-R5 build.
 //   * **Pre-light consumers.** NONE — no SSAO/DDGI/shadow-denoise/shadow-temporal. The resolver
 //     (`cap_forward_v1_consumers`) forces every one of these OFF for a `Forward` boot with a warn
 //     (`RenderPathDegrade::ForwardPreLightConsumersNotYetImplemented`), so `ao_final` below is a
@@ -68,9 +71,14 @@
 // `csm_pcf_disc`/`atlas_pcf_disc` are already two near-identical siblings in `shadow_apply.hlsli`
 // for an analogous "HLSL < 6.6 cannot pass texture/sampler handles" reason).
 //
-// Compiled offline (hermetic build — no SDK at `cargo build` time) with:
+// Compiled offline (hermetic build — no SDK at `cargo build` time) TWICE from this ONE source
+// (rung R5 / ForwardPlus, the fixed-priority-variant idiom):
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T ps_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 forward_opaque.fs.hlsl -Fo forward_opaque.fs.spv
+//   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T ps_6_0 -E main -D FROXEL=1 \
+//       -fspv-target-env=vulkan1.3 forward_opaque.fs.hlsl -Fo forward_opaque_froxel.fs.spv
+// The FIRST invocation (no `-D`) is the base `Forward` variant — byte-identical to its pre-R5
+// build (verified `cmp`); the SECOND is the `ForwardPlus` froxel variant (`#ifdef FROXEL` below).
 
 // `pbr_lighting.hlsli`'s INCLUDE CONTRACT precondition: `PI` + `LIGHT_UP` in scope first.
 static const float PI = 3.14159265358979323846;
@@ -108,6 +116,19 @@ struct MaterialGpu {
     float4 emissive;
 };
 [[vk::binding(4, 0)]] StructuredBuffer<MaterialGpu> Materials;
+
+// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the froxel cluster-grid pair, Set 0
+// bindings 5/6 — compiled in ONLY for the `-D FROXEL=1` variant (`forward_opaque_froxel.fs.spv`);
+// the base (Forward, this file's default compile) never declares them, so its Set 0 stays
+// byte-identical at 5 bindings and `forward_opaque.fs.spv` stays byte-identical to the pre-R5
+// build. Byte-identical shape to `deferred_pbr.hlsl`'s `ClusterGrid`/`LightIndexList` (bindings
+// 8/9 there) — the L1 cluster-cull pass (`cluster_cull.hlsl`) writes both, reused verbatim; the
+// lookup helpers (`load_cluster_params`/`cluster_xy_tile`/`cluster_z_slice`/
+// `cluster_linear_index`) are `light_table.hlsli`'s shared L1 helpers, already `#include`d above.
+#ifdef FROXEL
+[[vk::binding(5, 0)]] StructuredBuffer<uint2> ClusterGrid;
+[[vk::binding(6, 0)]] StructuredBuffer<uint> LightIndexList;
+#endif
 
 // --- Set 1 (Forward shadow, §G — RENUMBERED from Set 2, boot-panic fix): CSM + punctual atlas --
 // --- `shadow_apply.hlsli`'s INCLUDE CONTRACT precondition (fixed names, Forward's OWN binding --
@@ -283,9 +304,43 @@ float4 main(PsIn input) : SV_Target0 {
         // Point/spot (kinds 1/2) are the L0b block below, not this front block.
     }
 
-    // L0b: the flat point/spot block `[l0a_count, light_count)`. ALL-LIGHTS -- no cluster/froxel
-    // lookup this rung (the plan's `#ifdef FROXEL` seam, left for R5/ForwardPlus).
+    // L0b / L1: the point/spot block. Rung R5 (ForwardPlus, `#ifdef FROXEL`): map this pixel to
+    // its froxel and walk ONLY the cluster's point/spot indices (`ClusterGrid`/`LightIndexList`,
+    // token-for-token the SAME lookup `deferred_pbr.hlsl`'s L1 cluster block performs) instead of
+    // the flat `[l0a_count, light_count)` scan — the `use_clusters` runtime gate (from the SAME
+    // `cp.clusters_enabled` header lane the deferred resolve reads) preserves the L1 0%-gate: a
+    // frame with no cull pass armed falls back to the IDENTICAL flat walk the base (non-FROXEL)
+    // compile always runs. `view_z` is the SAME perspective view-space depth this file's own CSM
+    // cascade-select already computes inline (Forward v1 is perspective-only, per
+    // `forward_opaque.vs.hlsl`'s doc); `px`/`py`/`w`/`h` come from the rasterized fragment
+    // coordinate + the Camera UBO's image dimensions (no compute-shader dispatch coordinate
+    // exists in a raster fragment shader). The shared loop BODY below (BSDF combine, punctual
+    // shadow, attenuation) is UNCHANGED between the two arms -- only the index-list SOURCE
+    // differs, so a `-D FROXEL=1` recompile cannot perturb the flat-walk lighting math.
+#ifdef FROXEL
+    ClusterParams cp = load_cluster_params(LightBuf);
+    bool use_clusters = cp.clusters_enabled != 0u;
+    uint ps_count;   // number of point/spot lights to walk
+    uint ps_offset;  // base into LightIndexList (clusters) or the flat block
+    if (use_clusters) {
+        float view_z = dot(cam_forward.xyz, P - cam_eye.xyz);
+        uint px = (uint)input.position.x;
+        uint py = (uint)input.position.y;
+        uint2 tile = cluster_xy_tile(px, py, img_w_raw, img_h_raw, cp);
+        uint zsl = cluster_z_slice(view_z, cp);
+        uint cluster = cluster_linear_index(tile.x, tile.y, zsl, cp.dim_x, cp.dim_z);
+        uint2 cell = ClusterGrid[cluster];
+        ps_offset = cell.x;  // offset into LightIndexList
+        ps_count = cell.y;   // count of indices in this froxel's slice
+    } else {
+        ps_offset = H.l0a_count;                  // flat block base
+        ps_count = H.light_count - H.l0a_count;    // flat block length
+    }
+    for (uint jj = 0u; jj < ps_count; ++jj) {
+        uint j = use_clusters ? LightIndexList[ps_offset + jj] : (ps_offset + jj);
+#else
     for (uint j = H.l0a_count; j < H.light_count; ++j) {
+#endif
         LightElem L = load_light(LightBuf, j);
         float3 toL = L.pos - P;
         float d2 = dot(toL, toL);

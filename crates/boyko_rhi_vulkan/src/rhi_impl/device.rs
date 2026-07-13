@@ -877,11 +877,11 @@ impl RhiDevice<Vulkan> for VulkanContext {
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
         // Textured-PBR T6c (plan Decision D5): the real work moved to `build_graphics_pipeline`
         // (a Vulkan-only inherent method, below) so it can be shared with
-        // `create_graphics_pipeline_bindless`'s 2-set path. `set1: None, VK_COMPARE_OP_LESS`
-        // here reuses the IDENTICAL code path (not merely a `None`-gated branch) every
-        // pre-T6c/pre-R4b-b caller took — byte-identical `VkPipelineLayoutCreateInfo`/
-        // depth-stencil state by construction.
-        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_LESS)
+        // `create_graphics_pipeline_bindless`'s 2-set path. `set1: None, VK_COMPARE_OP_LESS,
+        // depth_write: true` here reuses the IDENTICAL code path (not merely a `None`-gated
+        // branch) every pre-T6c/pre-R4b-b caller took — byte-identical
+        // `VkPipelineLayoutCreateInfo`/depth-stencil state by construction.
+        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_LESS, true)
     }
 
     unsafe fn destroy_graphics_pipeline(&self, pipeline: VulkanGraphicsPipeline) {
@@ -1183,6 +1183,7 @@ impl VulkanContext {
         desc: &GraphicsPipelineDesc<Vulkan>,
         set1: Option<VkDescriptorSetLayout>,
         depth_compare: i32,
+        depth_write: bool,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
         let device = self.device();
         let fns = self.device_fns();
@@ -1510,21 +1511,27 @@ impl VulkanContext {
         };
 
         // Depth-stencil state (Phase-6 S0 rung 4). Declared ONLY when a depth format
-        // is present: depth test + write enabled, compare op `depth_compare` (`LESS` for
+        // is present: depth test enabled, compare op `depth_compare` (`LESS` for
         // every Deferred/CSM/atlas caller — nearer fragment wins; `GREATER` for Forward's
         // hardware reverse-Z, rung R4b-b Decision 4 — nearer fragment has the LARGER stored
-        // depth), no depth-bounds, no stencil. A `None` `depth_format` (rungs 1..3) leaves
-        // both the depth-stencil pointer null and `depth_attachment_format` UNDEFINED, so
-        // the rung-2/3 no-depth pipelines stay byte-identical. The `depth_state` local must
-        // outlive the create call, so it is bound here. The agnostic `Format` discriminant
-        // equals the `VkFormat` constant (asserted in `abi_guard.rs`); `VK_COMPARE_OP_LESS`/
-        // `VK_COMPARE_OP_GREATER` are the FFI constants.
+        // depth; `EQUAL` for ForwardPlus's zero-overdraw `forward_opaque` pass, rung R5), no
+        // depth-bounds, no stencil. `depth_write` (rung R5) is `true` for every pre-R5 caller
+        // (byte-identical `VK_TRUE`) and `false` ONLY for the ForwardPlus `forward_opaque`
+        // variant, which relies entirely on `depth_prepass`'s own GREATER+write-ON pass to
+        // have already committed the final depth value — an EQUAL test with writes disabled
+        // costs no depth bandwidth and cannot perturb the prepass-owned value. A `None`
+        // `depth_format` (rungs 1..3) leaves both the depth-stencil pointer null and
+        // `depth_attachment_format` UNDEFINED, so the rung-2/3 no-depth pipelines stay
+        // byte-identical. The `depth_state` local must outlive the create call, so it is
+        // bound here. The agnostic `Format` discriminant equals the `VkFormat` constant
+        // (asserted in `abi_guard.rs`); `VK_COMPARE_OP_LESS`/`VK_COMPARE_OP_GREATER`/
+        // `VK_COMPARE_OP_EQUAL` are the FFI constants.
         let depth_state = VkPipelineDepthStencilStateCreateInfo {
             s_type: VkStructureType::PipelineDepthStencilStateCreateInfo,
             p_next: ptr::null(),
             flags: 0,
             depth_test_enable: VK_TRUE,
-            depth_write_enable: VK_TRUE,
+            depth_write_enable: if depth_write { VK_TRUE } else { VK_FALSE },
             depth_compare_op: depth_compare,
             depth_bounds_test_enable: VK_FALSE,
             stencil_test_enable: VK_FALSE,
@@ -1666,12 +1673,14 @@ impl VulkanContext {
         desc: &GraphicsPipelineDesc<Vulkan>,
         set1_layout: VkDescriptorSetLayout,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
-        self.build_graphics_pipeline(desc, Some(set1_layout), VK_COMPARE_OP_LESS)
+        self.build_graphics_pipeline(desc, Some(set1_layout), VK_COMPARE_OP_LESS, true)
     }
 
-    /// Multi-paradigm render-path plan, rung R4b-b: builds Forward v1's mesh raster pipeline —
-    /// set 0 exactly as `desc.bind_group_layout` declares (`forward_opaque.vs/fs.hlsl`'s
-    /// 5-binding core set: instances/instance_materials/Camera/LightBuf/Materials), set 1 =
+    /// Multi-paradigm render-path plan, rung R4b-b (Set 0 unified at rung R5): builds plain
+    /// `Forward`'s mesh raster pipeline — set 0 exactly as `desc.bind_group_layout` declares
+    /// (the UNIFIED Forward-family 7-binding core set: instances/instance_materials/Camera/
+    /// LightBuf/Materials/ClusterGrid/LightIndexList — this base FS references only the first 5,
+    /// a subset, the SAME idiom `forward_sky_pipeline` uses), set 1 =
     /// `set1_layout` (the CSM + punctual-atlas shadow set, `forward_opaque.fs.hlsl`'s Set 1 —
     /// renumbered from an original Set 2 design: with no bindless texture table this v1 rung,
     /// Set 1 is free, so the pipeline layout is a plain 2-set `[Set0, Set1]`, the SAME shape
@@ -1690,6 +1699,47 @@ impl VulkanContext {
         desc: &GraphicsPipelineDesc<Vulkan>,
         set1_layout: VkDescriptorSetLayout,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
-        self.build_graphics_pipeline(desc, Some(set1_layout), VK_COMPARE_OP_GREATER)
+        self.build_graphics_pipeline(desc, Some(set1_layout), VK_COMPARE_OP_GREATER, true)
+    }
+
+    /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): builds the `depth_prepass`
+    /// pipeline — a DEPTH-ONLY pipeline (`desc.color_formats` empty, zero color attachments;
+    /// `build_graphics_pipeline`'s existing CSM/atlas depth-only shape, the SAME one
+    /// `RhiDevice::create_graphics_pipeline` already builds for the cascade/spot-atlas depth
+    /// passes) with set 0 ONLY (`desc.bind_group_layout`, reused from
+    /// [`Self::create_graphics_pipeline_forward`]'s own `forward_layout0` — the prepass VS
+    /// references only its `instances` binding, a subset of that layout, the SAME
+    /// bound-but-unread-subset idiom `forward_sky_pipeline` already relies on) — no set 1.
+    /// `VK_COMPARE_OP_GREATER` (Decision 4, hardware reverse-Z) with depth WRITE ON: this pass
+    /// is `forward_opaque`'s sole depth producer under `ForwardPlus`, committing the final
+    /// per-pixel depth before any color work runs.
+    pub fn create_graphics_pipeline_forward_prepass(
+        &self,
+        desc: &GraphicsPipelineDesc<Vulkan>,
+    ) -> Result<VulkanGraphicsPipeline, VulkanError> {
+        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_GREATER, true)
+    }
+
+    /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): builds the `forward_opaque`
+    /// FROXEL pipeline variant — the SAME 2-set `[Set0, Set1]` shape
+    /// [`Self::create_graphics_pipeline_forward`] builds (`set1_layout` = the UNCHANGED
+    /// CSM/punctual shadow set), but `VK_COMPARE_OP_EQUAL` with depth WRITE OFF (Decision 4's
+    /// EQUAL-depth zero-overdraw contract): `depth_prepass` already committed the final depth
+    /// this frame, so `forward_opaque` under `ForwardPlus` only TESTS against it — a fragment
+    /// survives iff its interpolated depth exactly matches the prepass-written value, letting
+    /// hardware early-Z reject every occluded fragment before the froxel-culled inline shade
+    /// runs. `desc.bind_group_layout` is the UNIFIED 7-binding `forward_layout0` (declares
+    /// `ClusterGrid`/`LightIndexList` at bindings 5/6) — the SAME layout object
+    /// [`Self::create_graphics_pipeline_forward`] builds its pipeline against (rung R5
+    /// code-review fix: exactly ONE Set-0 layout for the whole Forward family, since Vulkan
+    /// treats two structurally-identical-but-distinct `VkDescriptorSetLayout` handles as
+    /// pipeline/descriptor-set INCOMPATIBLE — never two separate layout objects for one
+    /// descriptor set).
+    pub fn create_graphics_pipeline_forward_plus(
+        &self,
+        desc: &GraphicsPipelineDesc<Vulkan>,
+        set1_layout: VkDescriptorSetLayout,
+    ) -> Result<VulkanGraphicsPipeline, VulkanError> {
+        self.build_graphics_pipeline(desc, Some(set1_layout), VK_COMPARE_OP_EQUAL, false)
     }
 }

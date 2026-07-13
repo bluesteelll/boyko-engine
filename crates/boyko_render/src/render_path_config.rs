@@ -105,9 +105,16 @@ use boyko_macros::Resource;
 /// pre-light consumers + TAA still degrade until a later rung lands their producers).
 const FORWARD_IMPLEMENTED: bool = true;
 
-/// Whether the `ForwardPlus` [`RenderPath`] has a landed declarator/pipeline yet. Lifted `true`
-/// at rung R5.
-const FORWARD_PLUS_IMPLEMENTED: bool = false;
+/// Whether the `ForwardPlus` [`RenderPath`] has a landed declarator/pipeline yet. `true` as of
+/// rung R5: `declare_forward_graph`/`record_forward` (`boyko_rhi_vulkan::present`) now serve
+/// BOTH `Forward` and `ForwardPlus` (Decision 2's shared per-path declarator — the SAME
+/// framegraph/recorder machinery selects the depth-prepass + EQUAL-depth + froxel-FS variants
+/// when the resolved path is `ForwardPlus`, mesh-only via `Forward`'s own pre-R-SDFFWD legs
+/// collapse). `cap_forward_v1_consumers` was WIDENED (below) to also cap `ForwardPlus`'s
+/// pre-light consumers + TAA off this rung — the prepass lands ONLY for its own zero-overdraw
+/// early-Z contract (Decision 4), not yet for a consumer producer chain (that is a LATER rung's
+/// scope, `needs_depth_prepass` staying the sole ForwardPlus-unconditional trigger).
+const FORWARD_PLUS_IMPLEMENTED: bool = true;
 
 /// Whether the `VisibilityBuffer` [`RenderPath`] has a landed declarator/pipeline yet. Lifted
 /// `true` at rung R8.
@@ -493,14 +500,17 @@ pub enum RenderPathDegrade {
     /// (`Both`/`Sdf`) before the SDF-forward-march rung lands — collapsed to
     /// [`GeometryLegs::Mesh`].
     LegsCollapsedToMeshPreSdfForward,
-    /// Rung R4b (Forward v1 scope cut): a pre-light consumer (SSAO/DDGI/shadow-denoise-spatial/
-    /// shadow-temporal/SSR/hwrt-denoise-or-vis) was requested alongside [`RenderPath::Forward`],
-    /// which has no depth-prepass / thin-aux producer yet — every one of those consumers is
-    /// forced OFF for this resolve ([`cap_forward_v1_consumers`]).
+    /// Rung R4b (Forward v1 scope cut; widened to [`RenderPath::ForwardPlus`] at rung R5): a
+    /// pre-light consumer (SSAO/DDGI/shadow-denoise-spatial/shadow-temporal/SSR/
+    /// hwrt-denoise-or-vis) was requested alongside a Forward-family path, which has no
+    /// thin-aux producer yet — every one of those consumers is forced OFF for this resolve
+    /// ([`cap_forward_v1_consumers`]). Under `ForwardPlus` this does NOT disable the depth
+    /// prepass itself (`needs_depth_prepass` stays `true` unconditionally for that path) — only
+    /// the consumer-driven `thin_aux`/split flags.
     ForwardPreLightConsumersNotYetImplemented,
-    /// Rung R4b (Forward v1 scope cut): TAA was requested alongside [`RenderPath::Forward`],
-    /// which writes no motion vector yet — TAA is forced OFF for this resolve
-    /// ([`cap_forward_v1_consumers`]).
+    /// Rung R4b (Forward v1 scope cut; widened to [`RenderPath::ForwardPlus`] at rung R5): TAA
+    /// was requested alongside a Forward-family path, which writes no motion vector yet — TAA
+    /// is forced OFF for this resolve ([`cap_forward_v1_consumers`]).
     ForwardTaaNotYetImplemented,
 }
 
@@ -715,11 +725,11 @@ fn degrade_ladder(
     (path, legs, degrades)
 }
 
-// ---- Forward v1 scope cut (rung R4b, orchestrator-directed) ---------------------------
+// ---- Forward v1 scope cut (rung R4b, orchestrator-directed; widened to ForwardPlus at R5) ----
 
 /// Rung R4b: `RenderPath::Forward`'s v1 declarator has NO depth prepass, NO thin-aux producer
 /// (no `SSAO`/`DDGI`/shadow-denoise-spatial/shadow-temporal/SSR support — [`resolve_rules`]'s
-/// `needs_depth_prepass` MUST stay `false` under Forward this rung), and writes no motion
+/// `needs_depth_prepass` MUST stay `false` under plain `Forward` this rung), and writes no motion
 /// vector (no TAA). Any pre-light consumer OR TAA requested alongside `RenderPath::Forward` is
 /// forced OFF here — BEFORE [`resolve_rules`] computes `needs_depth_prepass`/`thin_aux`/
 /// `mesh_geo_shade_split`/`sdf_geo_shade_split` from the (adjusted) [`RenderPathConsumers`] — so
@@ -728,25 +738,34 @@ fn degrade_ladder(
 /// plus prepass suppressed by app flag => consumer -> Off, warn" row, specialized to Forward
 /// v1's full scope cut). `hwrt_denoise_or_vis_on` is folded into the SAME cap as the five
 /// `pre_light`-union consumers: it drives [`ShadowSources::HWRT_VIS`], which — like SSAO/DDGI —
-/// needs its own pre-tail producer chain (`shadow_vis`/à-trous/temporal) that Forward v1 does
-/// not declare either.
+/// needs its own pre-tail producer chain (`shadow_vis`/à-trous/temporal) that neither Forward
+/// variant declares yet.
 ///
-/// A no-op (returns `consumers` unchanged, pushes nothing) for every OTHER `path` — `ForwardPlus`
-/// still degrades to `Deferred` via the ladder (unimplemented), and `Deferred`/`VisibilityBuffer`
-/// are untouched by this rung's scope cut.
+/// Rung R5 (ForwardPlus) WIDENED this cap to `RenderPath::ForwardPlus` too — SCOPE: the R5
+/// `depth_prepass` exists for its OWN zero-overdraw early-Z contract (Decision 4) and the froxel
+/// `#ifdef FROXEL` light reuse (Decision 6's `#ifdef FROXEL` seam), NOT yet for a pre-light
+/// consumer producer chain (SSAO/DDGI/shadow-denoise/SSR still have no thin-aux MRT under either
+/// Forward variant). `ForwardPlus`'s `needs_depth_prepass` stays `true` regardless of this cap
+/// (`resolve_rules`'s `matches!(path, RenderPath::ForwardPlus)` unconditional arm — the prepass
+/// is structural to the path, not consumer-gated), so capping the FIVE consumers + TAA here only
+/// suppresses `thin_aux`/`mesh_geo_shade_split`/`sdf_geo_shade_split`/`ShadowSources::HWRT_VIS`,
+/// exactly mirroring plain Forward's own scope cut.
 ///
-/// Lifted (narrowed, then removed) once Forward's depth prepass + thin-aux producers + motion
-/// MRT land (R4c+); until then this is Forward's OWN rung-staged gate, independent of
-/// [`degrade_ladder`]'s path/legs-level rules (mirrors how [`resolve_rules`] itself stays a pure,
-/// "fully landed" truth table that a direct caller — see this module's tests — can exercise
-/// AHEAD of any rung gate; this fn is the rung-staged gate `resolve_render_path` applies before
-/// handing `resolve_rules` its inputs).
+/// A no-op (returns `consumers` unchanged, pushes nothing) for every OTHER `path` —
+/// `Deferred`/`VisibilityBuffer` are untouched by this rung's scope cut.
+///
+/// Lifted (narrowed, then removed) once the Forward family's thin-aux producers + motion MRT
+/// land (a later rung); until then this is the Forward family's OWN rung-staged gate,
+/// independent of [`degrade_ladder`]'s path/legs-level rules (mirrors how [`resolve_rules`]
+/// itself stays a pure, "fully landed" truth table that a direct caller — see this module's
+/// tests — can exercise AHEAD of any rung gate; this fn is the rung-staged gate
+/// `resolve_render_path` applies before handing `resolve_rules` its inputs).
 fn cap_forward_v1_consumers(
     path: RenderPath,
     mut consumers: RenderPathConsumers,
     degrades: &mut RenderPathDegradeLog,
 ) -> RenderPathConsumers {
-    if !matches!(path, RenderPath::Forward) {
+    if !matches!(path, RenderPath::Forward | RenderPath::ForwardPlus) {
         return consumers;
     }
 
@@ -859,18 +878,18 @@ mod tests {
 
     #[test]
     fn every_non_deferred_path_degrades_today() {
-        // Rung R4b-b landed `Forward` for real (`FORWARD_IMPLEMENTED == true`) — it is EXCLUDED
-        // from this loop (see `forward_both_lands_on_forward_with_legs_collapsed_to_mesh` +
-        // the `cap_forward_v1_consumers` truth-table block below for its real behavior).
-        // `ForwardPlus`/`VisibilityBuffer` still degrade to `Deferred` today.
-        for path in [RenderPath::ForwardPlus, RenderPath::VisibilityBuffer] {
-            let cfg = RenderPathConfig { path, legs: GeometryLegs::Both };
-            let (resolved, degrades) =
-                resolve_render_path(&cfg, RenderPathConsumers::default(), caps_ok());
-            assert_eq!(resolved.path, RenderPath::Deferred, "{path:?} must degrade to Deferred today");
-            let reasons: Vec<_> = degrades.reasons().collect();
-            assert_eq!(reasons, [RenderPathDegrade::PathNotYetImplemented(path)]);
-        }
+        // Rung R4b-b landed `Forward` for real (`FORWARD_IMPLEMENTED == true`); rung R5 landed
+        // `ForwardPlus` too (`FORWARD_PLUS_IMPLEMENTED == true`) — both are EXCLUDED from this
+        // loop (see `forward_both_lands_on_forward_with_legs_collapsed_to_mesh` +
+        // `forward_plus_both_lands_on_forward_plus_with_legs_collapsed_to_mesh` + the
+        // `cap_forward_v1_consumers` truth-table block below for their real behavior).
+        // `VisibilityBuffer` still degrades to `Deferred` today.
+        let path = RenderPath::VisibilityBuffer;
+        let cfg = RenderPathConfig { path, legs: GeometryLegs::Both };
+        let (resolved, degrades) = resolve_render_path(&cfg, RenderPathConsumers::default(), caps_ok());
+        assert_eq!(resolved.path, RenderPath::Deferred, "{path:?} must degrade to Deferred today");
+        let reasons: Vec<_> = degrades.reasons().collect();
+        assert_eq!(reasons, [RenderPathDegrade::PathNotYetImplemented(path)]);
     }
 
     // ---- rung R4b-b: `Forward` is real through the public `resolve_render_path` entry point ---
@@ -886,6 +905,24 @@ mod tests {
         assert_eq!(resolved.legs, GeometryLegs::Mesh);
         let reasons: Vec<_> = degrades.reasons().collect();
         assert_eq!(reasons, [RenderPathDegrade::LegsCollapsedToMeshPreSdfForward]);
+    }
+
+    // ---- rung R5: `ForwardPlus` is real through the public `resolve_render_path` entry point ---
+
+    #[test]
+    fn forward_plus_both_lands_on_forward_plus_with_legs_collapsed_to_mesh() {
+        // `SDF_FORWARD_IMPLEMENTED` is still `false` (R-SDFFWD has not landed) — every non-`Mesh`
+        // leg set (`Both` AND `Sdf`) collapses to `Mesh`, independent of `ForwardPlus` itself now
+        // being implemented.
+        for legs in [GeometryLegs::Both, GeometryLegs::Sdf] {
+            let cfg = RenderPathConfig { path: RenderPath::ForwardPlus, legs };
+            let (resolved, degrades) =
+                resolve_render_path(&cfg, RenderPathConsumers::default(), caps_ok());
+            assert_eq!(resolved.path, RenderPath::ForwardPlus);
+            assert_eq!(resolved.legs, GeometryLegs::Mesh, "{legs:?} must collapse to Mesh");
+            let reasons: Vec<_> = degrades.reasons().collect();
+            assert_eq!(reasons, [RenderPathDegrade::LegsCollapsedToMeshPreSdfForward]);
+        }
     }
 
     #[test]
@@ -1112,9 +1149,96 @@ mod tests {
         );
     }
 
+    // ---- rung R5: ForwardPlus scope cut (`cap_forward_v1_consumers` widened) truth table ---
+    //
+    // `FORWARD_PLUS_IMPLEMENTED` is `true` as of rung R5 — these tests mirror the Forward v1
+    // block above exactly, with ONE structural difference: `needs_depth_prepass` stays `true`
+    // for `ForwardPlus` regardless of the cap (`resolve_rules`'s unconditional `ForwardPlus` arm,
+    // Decision 4) — only the consumer-driven `thin_aux`/`mesh_geo_shade_split`/
+    // `sdf_geo_shade_split`/`ShadowSources::HWRT_VIS` fields stay capped off.
+
+    /// Resolves a `ForwardPlus` request through the real, public [`resolve_render_path`] entry
+    /// point — the `resolve_forward_v1` sibling for `ForwardPlus`.
+    fn resolve_forward_plus(
+        legs: GeometryLegs,
+        consumers: RenderPathConsumers,
+    ) -> (ResolvedRenderPath, RenderPathDegradeLog) {
+        let cfg = RenderPathConfig { path: RenderPath::ForwardPlus, legs };
+        resolve_render_path(&cfg, consumers, caps_ok())
+    }
+
+    #[test]
+    fn forward_plus_mesh_clean_lands_on_forward_plus_with_no_degrades() {
+        let (resolved, degrades) =
+            resolve_forward_plus(GeometryLegs::Mesh, RenderPathConsumers::default());
+        assert_eq!(resolved.path, RenderPath::ForwardPlus);
+        assert!(degrades.is_clean());
+        assert!(resolved.mesh_leg && !resolved.sdf_leg);
+        assert!(resolved.needs_depth_prepass, "ForwardPlus always runs the depth prepass");
+        assert!(!resolved.prepass_writes_motion, "no shadow_temporal armed -> no motion in the prepass");
+        assert_eq!(resolved.thin_aux, ThinAuxMask::NONE, "no consumer requested -> no thin-aux channel");
+        assert_eq!(resolved.depth_kind, DepthKind::HardwareReverseZ);
+    }
+
+    #[test]
+    fn forward_plus_pre_light_consumer_is_capped_off_with_a_warn() {
+        for (consumers, label) in [
+            (RenderPathConsumers { ssao_on: true, ..Default::default() }, "ssao"),
+            (RenderPathConsumers { ddgi_on: true, ..Default::default() }, "ddgi"),
+            (RenderPathConsumers { shadow_denoise_spatial_on: true, ..Default::default() }, "shadow_denoise_spatial"),
+            (RenderPathConsumers { shadow_temporal_on: true, ..Default::default() }, "shadow_temporal"),
+            (RenderPathConsumers { ssr_on: true, ..Default::default() }, "ssr"),
+            (RenderPathConsumers { hwrt_denoise_or_vis_on: true, ..Default::default() }, "hwrt_denoise_or_vis"),
+        ] {
+            let (resolved, degrades) = resolve_forward_plus(GeometryLegs::Mesh, consumers);
+            assert_eq!(resolved.path, RenderPath::ForwardPlus, "{label}: path itself does not degrade");
+            assert!(
+                resolved.needs_depth_prepass,
+                "{label}: the prepass stays on -- ForwardPlus's own unconditional trigger"
+            );
+            assert!(!resolved.mesh_geo_shade_split, "{label}: split stays capped off under R5 scope");
+            assert!(!resolved.sdf_geo_shade_split);
+            assert_eq!(resolved.thin_aux, ThinAuxMask::NONE, "{label}: no thin-aux under R5 scope");
+            let reasons: Vec<_> = degrades.reasons().collect();
+            assert_eq!(
+                reasons,
+                [RenderPathDegrade::ForwardPreLightConsumersNotYetImplemented],
+                "{label}: exactly one capped-consumer warn"
+            );
+        }
+    }
+
+    #[test]
+    fn forward_plus_taa_is_capped_off_with_a_warn() {
+        let consumers = RenderPathConsumers { taa_on: true, ..Default::default() };
+        let (resolved, degrades) = resolve_forward_plus(GeometryLegs::Mesh, consumers);
+        assert_eq!(resolved.path, RenderPath::ForwardPlus);
+        assert_eq!(resolved.thin_aux, ThinAuxMask::NONE, "TAA capped off -> no MOTION channel armed");
+        let reasons: Vec<_> = degrades.reasons().collect();
+        assert_eq!(reasons, [RenderPathDegrade::ForwardTaaNotYetImplemented]);
+    }
+
+    #[test]
+    fn forward_plus_legs_collapse_and_consumer_caps_stack_three_reasons() {
+        let consumers = RenderPathConsumers { ssao_on: true, taa_on: true, ..Default::default() };
+        let (resolved, degrades) = resolve_forward_plus(GeometryLegs::Both, consumers);
+        assert_eq!(resolved.path, RenderPath::ForwardPlus);
+        assert_eq!(resolved.legs, GeometryLegs::Mesh, "Both collapses to Mesh pre-SDF-forward");
+        assert!(resolved.needs_depth_prepass);
+        let reasons: Vec<_> = degrades.reasons().collect();
+        assert_eq!(
+            reasons,
+            [
+                RenderPathDegrade::LegsCollapsedToMeshPreSdfForward,
+                RenderPathDegrade::ForwardPreLightConsumersNotYetImplemented,
+                RenderPathDegrade::ForwardTaaNotYetImplemented,
+            ]
+        );
+    }
+
     #[test]
     fn cap_forward_v1_consumers_is_a_noop_for_every_other_path() {
-        for path in [RenderPath::Deferred, RenderPath::ForwardPlus, RenderPath::VisibilityBuffer] {
+        for path in [RenderPath::Deferred, RenderPath::VisibilityBuffer] {
             let consumers = RenderPathConsumers {
                 ssao_on: true,
                 taa_on: true,

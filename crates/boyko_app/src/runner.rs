@@ -1414,20 +1414,25 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // from `(cw, ch)` — the authored Projection aspect is not
                 // consulted by the windowed host's pushes).
                 //
-                // Multi-paradigm render-path plan, rung R4b-b: a `Forward`-resolved boot builds
-                // its push from `forward_gbuffer_push_from_view` (the reverse-Z projection,
+                // Multi-paradigm render-path plan, rung R4b-b (widened to `ForwardPlus` at rung
+                // R5): a Forward-family-resolved boot builds its push from
+                // `forward_gbuffer_push_from_view` (the reverse-Z projection,
                 // `boyko_render::view::forward_view_proj_rows`) instead of the Deferred
                 // `gbuffer_push_from_view` — a cold, boot-resolved host-side branch (Decision 1:
-                // the two paths are mutually exclusive per boot, `host.resolved_render_path`
-                // never changes mid-run). Forward v1 has no TAA (the resolver's
-                // `ForwardTaaNotYetImplemented` degrade), so this arm never jitters.
+                // the paths are mutually exclusive per boot, `host.resolved_render_path` never
+                // changes mid-run). Neither Forward variant has TAA yet (the resolver's
+                // `ForwardTaaNotYetImplemented` degrade, widened to `ForwardPlus` at R5), so this
+                // arm never jitters.
                 //
                 // TAA W2: the STRUCTURAL OFF-skip — a TAA-off Deferred frame calls the plain
                 // (non-jittered) fn, not `_jittered` with a zero offset (`no *0.0`, per the
                 // byte-identity discipline). `taa_armed_now` was read + `JitterState` advanced
                 // BEFORE this block (see above); `world.resource::<JitterState>()` reads the
                 // SAME already-advanced phase this frame's jitter derives from.
-                if host.resolved_render_path.path == boyko_render::RenderPath::Forward {
+                if matches!(
+                    host.resolved_render_path.path,
+                    boyko_render::RenderPath::Forward | boyko_render::RenderPath::ForwardPlus
+                ) {
                     forward_gbuffer_push_from_view(&view, cw, ch, instanced)
                 } else if taa_armed_now {
                     let jitter_state = *world.resource::<JitterState>();

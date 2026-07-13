@@ -458,13 +458,17 @@ pub(crate) struct ForwardTargets {
     /// `record_forward`. RINGED (the SAME cross-frame Write-After-Read fix
     /// [`GBufferTargets::depth`]'s doc explains).
     pub(crate) depth: [VulkanTexture; FRAMES_IN_FLIGHT],
-    /// Forward's Set-0 (core) bind-group RING, written ONCE per extent against
-    /// [`GBufferScene::forward_layout0`](super::scene_types::GBufferScene::forward_layout0) — 5
-    /// bindings, entries sourced from EXISTING per-frame buffers (no new upload path): `instances`
-    /// @0 = `scene.forward_instance_ring[i]`, `instance_materials` @1 =
+    /// Forward-family Set-0 (core) bind-group RING, written ONCE per extent against
+    /// [`GBufferScene::forward_layout0`](super::scene_types::GBufferScene::forward_layout0) — the
+    /// UNIFIED 7-binding layout (rung R5 code-review fix: ONE layout object shared by every
+    /// Forward-family pipeline, never two structurally-identical-but-distinct handles), entries
+    /// sourced from EXISTING per-frame buffers (no new upload path): `instances` @0 =
+    /// `scene.forward_instance_ring[i]`, `instance_materials` @1 =
     /// `scene.forward_instance_material_ring[i]`, `Camera` @2 = `scene.camera_ring[i]`,
-    /// `LightBuf` @3 = `scene.light_table`, `Materials` @4 = `scene.material_table`. RINGED (slot
-    /// `i` binds `camera_ring[i]`/the instance rings' slot `i`, the lock-free per-frame-ring fix).
+    /// `LightBuf` @3 = `scene.light_table`, `Materials` @4 = `scene.material_table`,
+    /// `ClusterGrid` @5 / `LightIndexList` @6 = `scene.cluster_grid`/`scene.light_index` (or the
+    /// `scene.light_table` placeholder when unarmed — [`Self::build`]'s doc). RINGED (slot `i`
+    /// binds `camera_ring[i]`/the instance rings' slot `i`, the lock-free per-frame-ring fix).
     pub(crate) set0: [VulkanBindGroup; FRAMES_IN_FLIGHT],
     /// Forward's Set-1 (shadow) bind-group RING, written ONCE per extent against
     /// [`GBufferScene::forward_layout1`](super::scene_types::GBufferScene::forward_layout1) — 4
@@ -555,22 +559,41 @@ impl ForwardTargets {
         // `vocab_set`'s own build loop above) — the prior `.expect()` form leaked the already-
         // built `depth` ring (and, for `set1`'s failure, the already-built `set0` ring) on any
         // `create_bind_group` failure.
+        // Multi-paradigm render-path plan, rung R5 (ForwardPlus, code-review fix): `forward_layout0`
+        // is now the ONE UNIFIED 7-binding layout shared by EVERY Forward-family pipeline
+        // (`GpuSceneBundles::boot`'s doc) — so this descriptor set is ALWAYS built with 7
+        // entries, regardless of path. An earlier revision branched entry COUNT on
+        // `scene.path_is_forward_plus()` against TWO DISTINCT layout objects (a 5-binding one
+        // for `Forward`, a 7-binding one for `ForwardPlus`); Vulkan treats structurally-
+        // identical-but-distinct `VkDescriptorSetLayout` handles as INCOMPATIBLE with a pipeline
+        // built against the other handle (silent no-op with validation disabled) — the bug this
+        // unification fixes. `ClusterGrid`/`LightIndexList` fall back to `scene.light_table`
+        // when the real L1 cull buffers are not wired (`scene.cluster_grid`/`scene.light_index`
+        // `None`, e.g. under plain `Forward` or an unarmed `ForwardPlus` boot) — the SAME
+        // bound-but-unread placeholder idiom the deferred resolve's OWN `cluster_grid_buf`/
+        // `light_index_buf` locals already establish (`GBufferTargets::resolve_software_entries`'s
+        // call site): `forward_opaque_froxel.fs.hlsl` gates every access behind the runtime
+        // `clusters_enabled` header bit (and the BASE `forward_opaque.fs.hlsl` never declares
+        // bindings 5/6 at all), so an unarmed/unread binding is inert either way.
+        let cluster_grid_buf = scene.cluster_grid.unwrap_or(scene.light_table);
+        let light_index_buf = scene.light_index.unwrap_or(scene.light_table);
         let mut set0_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
         for (i, slot) in set0_slots.iter_mut().enumerate() {
-            let desc = BindGroupDesc {
-                layout: forward_layout0,
-                entries: &[
-                    BindGroupEntry::StorageBuffer { buffer: &forward_instance_ring[i] },
-                    BindGroupEntry::StorageBuffer {
-                        buffer: &forward_instance_material_ring[i],
-                    },
-                    BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[i] },
-                    BindGroupEntry::StorageBuffer { buffer: scene.light_table },
-                    BindGroupEntry::StorageBuffer { buffer: scene.material_table },
-                ],
-            };
-            match RhiDevice::create_bind_group(ctx, &desc) {
+            let entries = [
+                BindGroupEntry::StorageBuffer { buffer: &forward_instance_ring[i] },
+                BindGroupEntry::StorageBuffer {
+                    buffer: &forward_instance_material_ring[i],
+                },
+                BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[i] },
+                BindGroupEntry::StorageBuffer { buffer: scene.light_table },
+                BindGroupEntry::StorageBuffer { buffer: scene.material_table },
+                BindGroupEntry::StorageBuffer { buffer: cluster_grid_buf },
+                BindGroupEntry::StorageBuffer { buffer: light_index_buf },
+            ];
+            let result =
+                RhiDevice::create_bind_group(ctx, &BindGroupDesc { layout: forward_layout0, entries: &entries });
+            match result {
                 Ok(g) => *slot = Some(g),
                 Err(e) => {
                     // SAFETY: every drained `set0` slot + the fully-built `depth` ring were
@@ -756,16 +779,22 @@ impl TargetsProfile {
     /// [`AaArm::from_scene`]'s derive-from-scene precedent). `#[inline]` — a couple of `bool`/
     /// `u32` reads, no allocation.
     ///
-    /// `RenderPath::Forward` (discriminant `1`) is checked BEFORE the `(mesh_leg, sdf_leg)`
-    /// match (rung R4b-b) — a `Forward`-resolved carrier still reports `mesh_leg`/`sdf_leg` per
-    /// its (possibly leg-collapsed) `GeometryLegs`, but the Deferred-family match below has no
-    /// arm for it; branching on `path` first keeps that match exhaustive over the `Deferred`
-    /// family alone, unchanged from rung R3b.
+    /// `RenderPath::Forward`/`RenderPath::ForwardPlus` (discriminants `1`/`2`) are checked
+    /// BEFORE the `(mesh_leg, sdf_leg)` match (rung R4b-b, widened at rung R5) — a
+    /// Forward-family-resolved carrier still reports `mesh_leg`/`sdf_leg` per its (possibly
+    /// leg-collapsed) `GeometryLegs`, but the Deferred-family match below has no arm for it;
+    /// branching on `path` first keeps that match exhaustive over the `Deferred` family alone,
+    /// unchanged from rung R3b. `ForwardPlus` reuses `ForwardMesh`'s SAME allocation body
+    /// (`GBufferTargets::create` branches on `resolved_render_path.path` internally where the
+    /// two paths diverge — the extra `ForwardTargets::build` Set-0 growth, `targets.rs`'s own
+    /// doc — not on a distinct `TargetsProfile` variant).
     #[inline]
     pub(crate) fn from_scene(scene: &GBufferScene<'_>) -> Self {
         let rp = &scene.resolved_render_path;
-        if rp.path == 1 {
-            // RenderPath::Forward == 1 (boyko_render::render_path_config::RenderPath).
+        if scene.path_is_forward() {
+            // RenderPath::Forward == 1, RenderPath::ForwardPlus == 2
+            // (boyko_render::render_path_config::RenderPath) — the SAME single predicate
+            // `declare_frame_graph`'s dispatch uses (`GBufferScene::path_is_forward`'s doc).
             debug_assert!(rp.mesh_leg, "invariant: Forward v1 is mesh-only (pre-R-SDFFWD collapse)");
             return TargetsProfile::ForwardMesh;
         }

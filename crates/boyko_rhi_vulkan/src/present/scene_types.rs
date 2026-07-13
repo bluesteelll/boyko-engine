@@ -1916,17 +1916,23 @@ pub struct GBufferScene<'a> {
     // just to satisfy the compiler — exactly the kind of "compiles but is nonsense if ever read"
     // trap `Option::None` exists to make impossible. `Option` lets those fixtures say `None`
     // (an honest "Forward is not wired here") instead.
-    /// The Forward v1 mesh raster pipeline (`forward_opaque.{vs,fs}.hlsl`) — a plain 2-Vulkan-set
-    /// layout (set 0 = [`Self::forward_layout0`]'s 5 bindings, set 1 = [`Self::forward_layout1`]'s
-    /// 4 bindings), `VK_COMPARE_OP_GREATER` depth test (Decision 4, hardware reverse-Z). Built
-    /// via [`VulkanContext::create_graphics_pipeline_forward`]. Boot-panic fix: an earlier
+    /// The Forward-family opaque mesh raster pipeline — EITHER the plain `Forward` variant
+    /// (`forward_opaque.fs.hlsl`'s base compile, `VK_COMPARE_OP_GREATER`, depth-write ON) OR the
+    /// `ForwardPlus` froxel variant (`forward_opaque_froxel.fs.hlsl`, `VK_COMPARE_OP_EQUAL`,
+    /// depth-write OFF), selected at the `GpuSceneBundles::scene()` seam. A plain 2-Vulkan-set
+    /// layout (set 0 = [`Self::forward_layout0`]'s 7 bindings, set 1 = [`Self::forward_layout1`]'s
+    /// 4 bindings) EITHER WAY — rung R5 code-review fix: exactly ONE Set-0 layout OBJECT for the
+    /// whole family, not two structurally-identical-but-distinct handles (a real Vulkan
+    /// pipeline/descriptor-set incompatibility bug an earlier revision shipped). Built via
+    /// [`VulkanContext::create_graphics_pipeline_forward`]/
+    /// [`VulkanContext::create_graphics_pipeline_forward_plus`]. Boot-panic fix: an earlier
     /// revision used a 3-set `[Set0, <empty Set1 placeholder>, Set2]` shape — a zero-binding
     /// bind-group layout is REJECTED by `RhiDevice::create_bind_group_layout`'s own
     /// `1..=MAX_BIND_GROUP_BINDINGS` invariant, crashing `GpuSceneBundles::boot`.
     /// `forward_opaque.fs.hlsl`'s shadow bindings were renumbered from Set 2 to Set 1 instead
     /// (that shader's doc), eliminating the placeholder. `None` in every test fixture that never
-    /// resolves `Forward` (`TargetsProfile::from_scene`/`record_forward` are the only readers,
-    /// both gated on `resolved_render_path.path == Forward`, so a `None` here is never `.expect`-ed).
+    /// resolves a Forward-family path (`TargetsProfile::from_scene`/`record_forward` are the only
+    /// readers, both gated on [`Self::path_is_forward`], so a `None` here is never `.expect`-ed).
     pub forward_pipeline: Option<&'a VulkanGraphicsPipeline>,
     /// Code-review follow-up (rung R4b-b): the Forward v1 sky BACKGROUND pipeline
     /// (`forward_sky.{vs,fs}.hlsl`) — replicates the deferred resolve's `mask == 0` analytic
@@ -1941,14 +1947,21 @@ pub struct GBufferScene<'a> {
     /// (which keeps its own real depth test/write). Same `Option`/`None`-in-non-Forward-fixtures
     /// rationale as [`Self::forward_pipeline`].
     pub forward_sky_pipeline: Option<&'a VulkanGraphicsPipeline>,
-    /// The Forward v1 Set-0 (core) bind-group LAYOUT — 5 bindings: `instances` @0 (VERTEX,
-    /// [`Self::forward_instance_ring`]), `instance_materials` @1 (VERTEX,
+    /// The UNIFIED Forward-family Set-0 (core) bind-group LAYOUT — 7 bindings: `instances` @0
+    /// (VERTEX, [`Self::forward_instance_ring`]), `instance_materials` @1 (VERTEX,
     /// [`Self::forward_instance_material_ring`]), `Camera` @2 (FRAGMENT, [`Self::camera_ring`]),
     /// `LightBuf` @3 (FRAGMENT, [`Self::light_table`]), `Materials` @4 (FRAGMENT,
-    /// [`Self::material_table`]) — byte-identical binding SHAPE to `forward_opaque.fs.hlsl`'s
-    /// doc. [`GBufferTargets`] writes the per-FIF bind group against this layout once per extent
-    /// (the `vocab_layout`/`resolve_layout` precedent). See [`Self::forward_pipeline`]'s doc for
-    /// the `Option` rationale.
+    /// [`Self::material_table`]), `ClusterGrid` @5 / `LightIndexList` @6 (FRAGMENT,
+    /// [`Self::cluster_grid`]/[`Self::light_index`], or the [`Self::light_table`] placeholder
+    /// when unarmed) — byte-identical binding SHAPE to `forward_opaque.fs.hlsl`'s doc.
+    /// [`GBufferTargets`] writes the per-FIF bind group against this SAME layout once per extent
+    /// (the `vocab_layout`/`resolve_layout` precedent). Rung R5 code-review fix: ONE layout
+    /// object for BOTH `Forward` (the base FS references only a 5-binding subset — a pipeline
+    /// layout may always be a superset of what a shader stage declares) AND `ForwardPlus` (the
+    /// froxel FS references all 7) — an earlier revision built two structurally-identical-but-
+    /// distinct layout handles, which is a genuine Vulkan pipeline/descriptor-set incompatibility
+    /// (not merely a style choice). See [`Self::forward_pipeline`]'s doc for the `Option`
+    /// rationale.
     pub forward_layout0: Option<&'a VulkanBindGroupLayout>,
     /// The Forward v1 Set-1 (shadow) bind-group LAYOUT — 4 bindings: `gCsm`+`gCsmCmp` @0
     /// (FRAGMENT, COMBINED_IMAGE_SAMPLER, [`Self::csm_cascade_texture`] +
@@ -1973,6 +1986,17 @@ pub struct GBufferScene<'a> {
     /// [`Self::forward_instance_ring`]. See [`Self::forward_pipeline`]'s doc for the `Option`
     /// rationale.
     pub forward_instance_material_ring: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
+
+    // ---- Multi-paradigm render-path plan, rung R5: the ForwardPlus depth PRE-PASS -----------
+    /// The `depth_prepass` pipeline (`depth_prepass.{vs,fs}.hlsl`) — a depth-only
+    /// (`VK_COMPARE_OP_GREATER`, depth-write ON) pipeline reusing [`Self::forward_layout0`] as
+    /// its ONLY set (the VS references only the `instances` binding, a subset of that layout —
+    /// the SAME bound-but-unread-subset idiom [`Self::forward_sky_pipeline`] already
+    /// establishes). Built UNCONDITIONALLY at boot (the `forward_pipeline` precedent); recorded
+    /// only when [`GBufferScene::path_needs_depth_prepass`] holds (`ForwardPlus`, this rung).
+    /// `None` in every test fixture that never resolves a Forward-family path — same `Option`/
+    /// `None` rationale as [`Self::forward_pipeline`].
+    pub forward_prepass_pipeline: Option<&'a VulkanGraphicsPipeline>,
 }
 
 impl GBufferScene<'_> {
@@ -2126,14 +2150,44 @@ impl GBufferScene<'_> {
         self.resolved_render_path.sdf_leg && !self.resolved_render_path.mesh_leg
     }
 
-    /// Multi-paradigm render-path plan, rung R4b-b — the SINGLE source of "is this frame's
-    /// declarator/recorder the `Forward` path" decision, so `declare_frame_graph`'s dispatch and
-    /// `render_gbuffer_frame`'s record-site dispatch (`record_forward` vs `record_gbuffer`) can
-    /// never diverge (the W1 lesson, mirroring [`Self::path_has_raster`]). `RenderPath::Forward`
-    /// is discriminant `1` (`boyko_render::render_path_config::RenderPath`).
+    /// Multi-paradigm render-path plan, rung R4b-b (widened at rung R5) — the SINGLE source of
+    /// "is this frame's declarator/recorder the Forward FAMILY" decision, so
+    /// `declare_frame_graph`'s dispatch and `render_gbuffer_frame`'s record-site dispatch
+    /// (`record_forward` vs `record_gbuffer`) can never diverge (the W1 lesson, mirroring
+    /// [`Self::path_has_raster`]). `RenderPath::Forward` is discriminant `1`,
+    /// `RenderPath::ForwardPlus` is discriminant `2` (`boyko_render::render_path_config
+    /// ::RenderPath`) — `ForwardPlus` reuses `declare_forward_graph`/`record_forward`/
+    /// `ForwardTargets` verbatim (Decision 2's per-path declarator is shared, not duplicated;
+    /// the two paths diverge only in WHICH passes/pipelines that shared machinery selects).
     #[inline]
     pub(crate) fn path_is_forward(&self) -> bool {
-        self.resolved_render_path.path == 1
+        matches!(self.resolved_render_path.path, 1 | 2)
+    }
+
+    /// Multi-paradigm render-path plan, rung R5 — `true` iff the resolved path is EXACTLY
+    /// `RenderPath::ForwardPlus` (discriminant `2`), NOT plain `Forward`. The single source of
+    /// the `light_cull` pass's path-level gate, used at BOTH `declare_forward_graph` and
+    /// `record_forward` (the O1 single-predicate rule): the base `Forward` pipeline's Set 0 has
+    /// no `ClusterGrid`/`LightIndexList` bindings, so `light_cull` must never be declared OR
+    /// recorded under plain `Forward` even if a scene fixture happens to wire the cull
+    /// pipeline/buffers (a hand-built test harness, e.g. — production never does this today).
+    #[inline]
+    pub(crate) fn path_is_forward_plus(&self) -> bool {
+        self.resolved_render_path.path == 2
+    }
+
+    /// Multi-paradigm render-path plan, rung R5 (ForwardPlus) — the SINGLE source of "does this
+    /// frame need the `depth_prepass` pass" decision (Decision 4's EQUAL-depth early-Z contract),
+    /// used at BOTH `declare_forward_graph` and `record_forward` (the O1 single-predicate rule, a
+    /// declare/record parity `debug_assert!` guards it). A plain field read of the boot-resolved
+    /// carrier — `ResolvedRenderPath::needs_depth_prepass` is `true` for `ForwardPlus`
+    /// UNCONDITIONALLY (`resolve_rules`), and for `Forward` only when a pre-light consumer is
+    /// armed, which `cap_forward_v1_consumers` still forces off this rung (SCOPE: the prepass
+    /// lands for ForwardPlus's zero-overdraw early-Z, not for consumer wiring yet) — so in
+    /// practice this predicate is `true` iff `ForwardPlus`.
+    #[inline]
+    pub(crate) fn path_needs_depth_prepass(&self) -> bool {
+        self.resolved_render_path.needs_depth_prepass
     }
 }
 

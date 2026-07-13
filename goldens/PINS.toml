@@ -156,3 +156,41 @@ BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\forward_mesh.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
+[forwardplus_mesh]
+# Multi-paradigm render-path plan, rung R5: the ForwardPlus v1 mesh-only golden. Clones
+# [forward_mesh] verbatim -- the SAME grand_showcase_2mat five-sphere scene, the SAME production
+# boyko_app::runner/gpu_scene::GpuSceneBundles boot path -- with ONE delta: RenderPathConfig{path:
+# ForwardPlus, legs: Mesh} instead of {path: Forward, legs: Mesh}. See
+# crates/boyko_app/tests/forwardplus_mesh.rs.
+#
+# ForwardPlus adds a depth PRE-PASS (Decision 4's EQUAL-depth zero-overdraw early-Z contract:
+# depth_prepass.{vs,fs}.hlsl writes forward_depth GREATER+write-ON, then forward_opaque tests
+# EQUAL+write-OFF against it) + the forward_opaque_froxel.fs.hlsl FS variant (Set 0 grows by 2
+# bindings: ClusterGrid/LightIndexList @5/6). This scene arms NO L1 clustered-cull machinery
+# (boyko_app::gpu_scene has never wired GBufferScene::cluster_cull/cluster_grid/light_index/
+# light_index_alloc to Some -- a separate, unlanded L1-app-integration rung, out of R5 scope), so
+# the froxel FS's runtime clusters_enabled bit reads 0 and takes the IDENTICAL flat-block branch
+# forward_opaque.fs.hlsl's base compile always takes (the SAME L1 0%-gate the deferred resolve
+# uses) -- pixel output is expected to be pixel-identical (or ULP-level FP-reorder-only) to
+# [forward_mesh]'s f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad.
+#
+# UNBLESSED placeholders -- the sha256_* values below are NOT real hashes. Re-render on a real
+# windowed GPU device (forwardplus_mesh_screenshot_dump, #[ignore]) and re-bless via
+# `scripts\golden.ps1 -Pin forwardplus_mesh -Bless` (and `-Hwrt -Bless`) AFTER the owner's visual
+# sign-off on the freshly-dumped BMP, per this repo's golden discipline (do NOT hand-edit these
+# values otherwise).
+crate           = "boyko-app"
+test_binary     = "forwardplus_mesh"
+test_name       = "forwardplus_mesh_screenshot_dump"
+bmp             = "D:\\tmp\\forwardplus_mesh.bmp"
+width           = 512
+height          = 512
+sha256_software = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad"
+sha256_hwrt     = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad"
+
+[forwardplus_mesh.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\forwardplus_mesh.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"

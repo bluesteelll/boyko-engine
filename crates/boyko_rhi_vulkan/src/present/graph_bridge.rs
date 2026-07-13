@@ -171,6 +171,12 @@ pub(crate) struct ForwardPassPlan {
     /// ([`crate::present::scene_types::GBufferScene::forward_instance_ring`] is that SAME ring,
     /// exposed raw). `Some` iff `scene.interp.is_some()`.
     pub(crate) interp: Option<crate::framegraph::PassId>,
+    /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS
+    /// (Decision 4's EQUAL-depth early-Z contract) — writes `forward_depth` FIRST among the
+    /// Forward pass sequence, before `forward_opaque` tests `EQUAL` against it. `Some` iff
+    /// [`GBufferScene::path_needs_depth_prepass`] holds (`ForwardPlus` this rung — the O1
+    /// single-predicate rule, mirrored at both this declare site and `record_forward`).
+    pub(crate) depth_prepass: Option<crate::framegraph::PassId>,
     /// The async light-table re-upload (`scene.light_dirty && scene.light_upload_bytes > 0`) —
     /// the SAME gate [`GbufferPassPlan::light_upload`] uses.
     pub(crate) light_upload: Option<crate::framegraph::PassId>,
@@ -185,11 +191,24 @@ pub(crate) struct ForwardPassPlan {
     /// The sparse spot/point atlas depth pass (`scene.atlas_punctual.is_some()`) — see
     /// [`Self::csm`]'s doc for the ordering rationale.
     pub(crate) atlas: Option<crate::framegraph::PassId>,
+    /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the L1 clustered froxel
+    /// light-cull pass (`cluster_cull.hlsl`) — the SAME "4-buffers-Some" gate
+    /// [`GbufferPassPlan::light_cull`] uses (`scene.cluster_cull`/`cluster_grid`/`light_index`/
+    /// `light_index_alloc` all `Some`), duplicated into Forward's own small graph (the
+    /// established `forward.rs` duplication discipline — see [`ForwardPassPlan`]'s own doc for
+    /// why this is a SEPARATE, decoupled ResId space). Declared between `light_upload` and
+    /// `forward_opaque`; `forward_opaque` under `ForwardPlus` reads its `ClusterGrid`/
+    /// `LightIndexList` writes.
+    pub(crate) light_cull: Option<crate::framegraph::PassId>,
     /// The always-present Forward mesh raster + inline-shade pass: writes `lit`
     /// (`ColorAttachmentWrite`/`COLOR_ATTACHMENT_OPTIMAL`, Decision 2's C5 per-path `lit`-producer
-    /// access) + the Forward-only reverse-Z `forward_depth`
-    /// (`DepthStencilAttachmentWrite`/`DEPTH_ATTACHMENT_OPTIMAL`), reads `cascade`/`atlas` inline
-    /// (FRAGMENT) when armed, reads the shared instance-model ring (VERTEX) when interp armed.
+    /// access) + the Forward-only reverse-Z `forward_depth` — under plain `Forward`
+    /// `DepthStencilAttachmentWrite`/`DEPTH_ATTACHMENT_OPTIMAL` (first-touch, `GREATER`); under
+    /// `ForwardPlus` (rung R5) `DepthStencilAttachmentRead` (`EQUAL`, depth-write OFF —
+    /// `depth_prepass` already committed the value) since [`Self::depth_prepass`] is `Some` and
+    /// wrote it first. Reads `cascade`/`atlas` inline (FRAGMENT) when armed, reads the shared
+    /// instance-model ring (VERTEX) when interp armed, reads `ClusterGrid`/`LightIndexList`
+    /// (FRAGMENT) when [`Self::light_cull`] ran this frame.
     pub(crate) forward_opaque: crate::framegraph::PassId,
     /// The always-present present-sample pass: the `lit` `COLOR_ATTACHMENT_OPTIMAL` →
     /// `SHADER_READ_ONLY_OPTIMAL` transition (C5: the framegraph derives this from the
@@ -489,13 +508,18 @@ impl crate::framegraph::BarrierSink for GbufferBarrierSink<'_> {
     }
 }
 
-/// Multi-paradigm render-path plan, rung R4b-b: the [`BarrierSink`](crate::framegraph::BarrierSink)
-/// for Forward v1's small, PRIVATE per-frame graph (see [`ForwardPassPlan`]'s doc for why this is
-/// a SEPARATE sink type from [`GbufferBarrierSink`], not a shared/extended one). Resolves the
-/// FIXED local ResId order [`Renderer::declare_forward_graph`] declares — images `[lit=0,
-/// forward_depth=1, cascade=2, atlas=3]`, buffers `[light_table=0, instance_model_ring=1]` (buffer
-/// ResIds offset by `FORWARD_IMAGE_COUNT`) — to the current frame's physical handles. Lives only
-/// for the duration of one `record_pass` call inside [`Renderer::record_forward`].
+/// Multi-paradigm render-path plan, rung R4b-b (buffers grown at rung R5): the
+/// [`BarrierSink`](crate::framegraph::BarrierSink) for Forward v1's small, PRIVATE per-frame
+/// graph (see [`ForwardPassPlan`]'s doc for why this is a SEPARATE sink type from
+/// [`GbufferBarrierSink`], not a shared/extended one). Resolves the FIXED local ResId order
+/// [`Renderer::declare_forward_graph`] declares — images `[lit=0, forward_depth=1, cascade=2,
+/// atlas=3]` (UNCHANGED at rung R5: `depth_prepass` writes the SAME `forward_depth` ResId, no
+/// new image), buffers `[light_table=0, instance_model_ring=1, light_index_alloc=2,
+/// cluster_grid=3, light_index=4]` (buffer ResIds offset by `FORWARD_IMAGE_COUNT`; the 3 L1
+/// cluster-cull buffers appended at rung R5, mirroring `GbufferBarrierSink`'s OWN
+/// `[grid, index, alloc]` ordering for the SAME resources) — to the current frame's physical
+/// handles. Lives only for the duration of one `record_pass` call inside
+/// [`Renderer::record_forward`].
 pub(crate) struct ForwardBarrierSink<'a> {
     pub(crate) fns: &'a DeviceFns,
     pub(crate) cmd: VkCommandBuffer,
@@ -505,11 +529,12 @@ pub(crate) struct ForwardBarrierSink<'a> {
     /// resolve's Set-2-equivalent bindings reference (`scene.csm_cascade_texture`/
     /// `scene.shadow_atlas_texture`).
     pub(crate) images: [VkImage; FORWARD_IMAGE_COUNT],
-    /// `[light_table, instance_model_ring]`. A pass that does not declare an access on an
-    /// unarmed resource (e.g. `instance_model_ring` when `scene.interp` is `None`) never routes
-    /// a barrier naming it, so an inert `VkBuffer::NULL` there is harmless (the same
-    /// "ungated slot may hold NULL" rule [`GbufferBarrierSink`] documents).
-    pub(crate) buffers: [VkBuffer; 2],
+    /// `[light_table, instance_model_ring, light_index_alloc, cluster_grid, light_index]`. A
+    /// pass that does not declare an access on an unarmed resource (e.g. `instance_model_ring`
+    /// when `scene.interp` is `None`, or the L1 trio when [`ForwardPassPlan::light_cull`] is
+    /// `None`) never routes a barrier naming it, so an inert `VkBuffer::NULL` there is harmless
+    /// (the same "ungated slot may hold NULL" rule [`GbufferBarrierSink`] documents).
+    pub(crate) buffers: [VkBuffer; 5],
 }
 
 /// The number of IMAGE resources [`Renderer::declare_forward_graph`] declares — see
@@ -651,25 +676,23 @@ impl Renderer<'_> {
     /// directly — so a future path addition only ever ADDS a match arm here.
     ///
     /// The `Deferred` arm (`declare_deferred_graph`, unchanged, byte-identical to the pre-R2
-    /// `declare_gbuffer_graph`) and, as of rung R4b-b, the `Forward` arm
-    /// (`declare_forward_graph`, the v1 mesh-only scope cut) are implemented; the R1 resolver
-    /// (`boyko_render::render_path_config::resolve_render_path` — a crate this one sits BELOW
-    /// in the dependency graph, hence the plain-text reference rather than an intra-doc link)
-    /// still degrades `ForwardPlus`/`VisibilityBuffer` to `Deferred` at boot
-    /// (`FORWARD_PLUS_IMPLEMENTED`/`VB_IMPLEMENTED` are `false`), so those two arms stay
-    /// structurally unreachable and `unreachable!` rather than stubbed — each names the rung
-    /// that will fill it in.
+    /// `declare_gbuffer_graph`) and, as of rung R4b-b, the `Forward` FAMILY arm
+    /// (`declare_forward_graph`, shared verbatim by `Forward` and `ForwardPlus` — Decision 2's
+    /// one-declarator-per-path-FAMILY, `ForwardPlus` landing at rung R5) are implemented; the R1
+    /// resolver (`boyko_render::render_path_config::resolve_render_path` — a crate this one sits
+    /// BELOW in the dependency graph, hence the plain-text reference rather than an intra-doc
+    /// link) still degrades `VisibilityBuffer` to `Deferred` at boot (`VB_IMPLEMENTED` is
+    /// `false`), so that arm stays structurally unreachable and `unreachable!` rather than
+    /// stubbed — it names the rung that will fill it in.
     pub(crate) fn declare_frame_graph(&mut self, scene: &GBufferScene<'_>) {
         match scene.resolved_render_path.path {
             // RenderPath::Deferred == 0 (render_path_config.rs) — the only rung-landed path.
             0 => self.declare_deferred_graph(scene),
-            // RenderPath::Forward == 1 — rung R4b-b (this rung).
-            1 => self.declare_forward_graph(scene),
-            // RenderPath::ForwardPlus == 2 — lands at rung R5.
-            2 => unreachable!(
-                "resolver degrades unimplemented paths to Deferred (R1 degrade ladder); \
-                 RenderPath::ForwardPlus's declarator lands at rung R5"
-            ),
+            // RenderPath::Forward == 1 (rung R4b-b) / RenderPath::ForwardPlus == 2 (rung R5) —
+            // ONE shared declarator (Decision 2); `declare_forward_graph` internally branches on
+            // `GBufferScene::path_needs_depth_prepass`/`path_is_forward_plus` where the two paths
+            // diverge (the depth prepass + EQUAL-depth + froxel-Set0 growth).
+            1 | 2 => self.declare_forward_graph(scene),
             // RenderPath::VisibilityBuffer == 3 — lands at rung R8.
             3 => unreachable!(
                 "resolver degrades unimplemented paths to Deferred (R1 degrade ladder); \
@@ -2003,6 +2026,25 @@ impl Renderer<'_> {
             ResSync::seeded_readers(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
         );
         let instance_model_ring = g.add_buffer("instance_model_ring");
+        // Multi-paradigm render-path plan, rung R5 (ForwardPlus): the L1 cluster-cull trio —
+        // the SAME single-instance, cross-frame-shared buffers `declare_deferred_graph` declares
+        // (`grid`/`index`/`alloc` there), seeded identically: `light_index_alloc` ends its frame
+        // on the cull's atomic WRITES with no draining read (writer seed); `cluster_grid`/
+        // `light_index` end their frame consumed by `forward_opaque`'s FRAGMENT read (not
+        // Deferred's COMPUTE resolve — Forward's own reader stage), so a dirty-frame re-cull
+        // must order after the sibling in-flight frame's still-pipelined FRAGMENT read.
+        let light_index_alloc = g.add_buffer_seeded(
+            "light_index_alloc",
+            ResSync::seeded_writer(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT),
+        );
+        let cluster_grid = g.add_buffer_seeded(
+            "cluster_grid",
+            ResSync::seeded_readers(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+        );
+        let light_index = g.add_buffer_seeded(
+            "light_index",
+            ResSync::seeded_readers(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+        );
 
         // Pass `interp` — gated `scene.interp.is_some()`, the SAME activation
         // `declare_deferred_graph`'s own `interp` pass reads. Writes `instance_model_ring`
@@ -2020,16 +2062,88 @@ impl Renderer<'_> {
             None
         };
 
+        // Pass `depth_prepass` — Multi-paradigm render-path plan, rung R5 (ForwardPlus,
+        // Decision 4's EQUAL-depth early-Z contract). Gated by [`GBufferScene::
+        // path_needs_depth_prepass`] (the O1 single-predicate rule shared with `record_forward`).
+        // Declared right after `interp` (the earliest point `instance_model_ring` is valid to
+        // read) and BEFORE every other Forward pass — the FIRST writer of `forward_depth` this
+        // frame under `ForwardPlus` (first-touch UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL, `GREATER`,
+        // write ON); `forward_opaque`'s later `EQUAL` test then only READS the value this pass
+        // committed (declared at the `forward_opaque` site below).
+        let depth_prepass = if scene.path_needs_depth_prepass() {
+            let p = g.add_pass("depth_prepass");
+            g.image_access(
+                forward_depth,
+                FRAG,
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                SubRange::DEPTH,
+            );
+            if interp.is_some() {
+                g.buffer_access(
+                    instance_model_ring,
+                    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                );
+            }
+            Some(p)
+        } else {
+            None
+        };
+
         // Pass `light_upload` (async light-table re-upload) — the SAME gate
         // `declare_deferred_graph`'s own `light_upload` pass uses. Code-review P1-2: declared
         // BEFORE `csm`/`atlas`/`forward_opaque` (matching `record_forward`'s ACTUAL record order
-        // — `interp? → csm? → atlas? → light_upload? → forward_opaque → present_sample` — this
-        // pass just needs to precede `forward_opaque`, the reader; `compile()` derives barriers in
-        // DECLARATION order, so a pass declared AFTER its reader would emit the TRANSFER_WRITE →
-        // SHADER_READ barrier the wrong way around — the exact bug this fix closes).
+        // — `interp? → depth_prepass? → light_upload? → light_cull? → csm? → atlas? →
+        // forward_opaque → present_sample`, rung R5 widened — this pass just needs to precede
+        // `forward_opaque`, the reader; `compile()` derives barriers in DECLARATION order, so a
+        // pass declared AFTER its reader would emit the TRANSFER_WRITE → SHADER_READ barrier the
+        // wrong way around — the exact bug this fix closes).
         let light_upload = if scene.light_dirty && scene.light_upload_bytes > 0 {
             let p = g.add_pass("light_upload");
             g.buffer_access(light_table, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+            Some(p)
+        } else {
+            None
+        };
+
+        // Pass `light_cull` (L1 clustered froxel cull) — Multi-paradigm render-path plan, rung
+        // R5 (ForwardPlus). Gated EXACTLY as `declare_deferred_graph`'s own `light_cull` pass
+        // (the "4-buffers-Some" predicate: the cull pipeline AND all three cluster buffers are
+        // `Some`) AND `ForwardPlus` — the base `Forward` pipeline's Set 0 declares no
+        // `ClusterGrid`/`LightIndexList` bindings at all, so this pass would be meaningless (and
+        // unusable) under plain `Forward`. Resets `light_index_alloc` (transfer), reads the light
+        // table, writes `cluster_grid`/`light_index` — byte-for-byte the SAME access shape
+        // `GbufferPassPlan::light_cull`'s declaration site uses.
+        let light_cull = if scene.path_is_forward_plus()
+            && scene.cluster_cull.is_some()
+            && scene.cluster_grid.is_some()
+            && scene.light_index.is_some()
+            && scene.light_index_alloc.is_some()
+        {
+            const RW: u32 = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            let p = g.add_pass("light_cull");
+            g.buffer_access(
+                light_index_alloc,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+            );
+            g.buffer_access(light_index_alloc, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, RW);
+            g.buffer_access(
+                light_table,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+            );
+            g.buffer_access(
+                cluster_grid,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+            );
+            g.buffer_access(
+                light_index,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+            );
             Some(p)
         } else {
             None
@@ -2072,16 +2186,17 @@ impl Renderer<'_> {
         };
 
         // Pass `forward_opaque` (always present): writes `lit` (COLOR, first-touch
-        // UNDEFINED→COLOR_ATTACHMENT_OPTIMAL — Decision 2's C5 per-path producer access) + writes
-        // `forward_depth` (DEPTH, first-touch UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL, HW reverse-Z);
-        // reads `cascade`/`atlas` inline at FRAGMENT (→SHADER_READ_ONLY_OPTIMAL) when their depth
+        // UNDEFINED→COLOR_ATTACHMENT_OPTIMAL — Decision 2's C5 per-path producer access); the
+        // `forward_depth` access depends on `depth_prepass` (rung R5, Decision 4) — see below.
+        // Reads `cascade`/`atlas` inline at FRAGMENT (→SHADER_READ_ONLY_OPTIMAL) when their depth
         // pass ran this frame — gated on the SAME `scene.csm`/`scene.atlas_punctual` predicate the
         // producer used, so an unarmed shadow source routes zero barriers on it, exactly like the
         // Deferred resolve's conditional reads; reads `instance_model_ring` (VERTEX) when interp
         // armed (the COMPUTE→VERTEX barrier this read derives is what orders `interp`'s write
         // before it); reads `light_table` (FRAGMENT) when `light_upload` ran this frame (the
         // TRANSFER→FRAGMENT barrier this derives orders the copy before the FS's light-table
-        // load — code-review P1-2: this read was MISSING entirely before this fix).
+        // load — code-review P1-2: this read was MISSING entirely before this fix); reads
+        // `cluster_grid`/`light_index` (FRAGMENT) when `light_cull` ran this frame (rung R5).
         let forward_opaque = g.add_pass("forward_opaque");
         g.image_access(
             lit,
@@ -2090,13 +2205,30 @@ impl Renderer<'_> {
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             SubRange::COLOR,
         );
-        g.image_access(
-            forward_depth,
-            FRAG,
-            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-            SubRange::DEPTH,
-        );
+        if depth_prepass.is_some() {
+            // ForwardPlus (rung R5): `depth_prepass` already wrote `forward_depth` this frame
+            // (first-touch, `GREATER`, write ON) — `forward_opaque`'s `EQUAL` test (depth-write
+            // OFF, `create_graphics_pipeline_forward_plus`) only READS it, so the graph derives
+            // the WRITE→READ barrier between the two passes, not a second first-touch write.
+            g.image_access(
+                forward_depth,
+                FRAG,
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                SubRange::DEPTH,
+            );
+        } else {
+            // Plain `Forward` (no prepass this rung either — `cap_forward_v1_consumers` still
+            // caps pre-light consumers off): the SOLE, first-touch writer of `forward_depth` —
+            // byte-identical to rung R4b-b.
+            g.image_access(
+                forward_depth,
+                FRAG,
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                SubRange::DEPTH,
+            );
+        }
         // Code-review P1-1: `cascade`/`atlas` are `Format::D32Sfloat` DEPTH images — the read
         // MUST declare `SubRange::depth_layers(active)` (DEPTH aspect, the SAME layered range the
         // producer wrote), not `SubRange::COLOR` (a spec violation: the derived
@@ -2150,6 +2282,23 @@ impl Renderer<'_> {
                 VK_ACCESS_SHADER_READ_BIT,
             );
         }
+        // Multi-paradigm render-path plan, rung R5 (ForwardPlus): the froxel `ClusterGrid`/
+        // `LightIndexList` reads `forward_opaque_froxel.fs.hlsl` performs every frame, gated on
+        // `light_cull.is_some()` — the SAME "only need the barrier when a write happened THIS
+        // frame" discipline `light_upload`'s read gate above uses (the cross-frame seed already
+        // covers the steady-state read).
+        if light_cull.is_some() {
+            g.buffer_access(
+                cluster_grid,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+            );
+            g.buffer_access(
+                light_index,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+            );
+        }
 
         // Pass `present_sample` (site 5c): `lit` COLOR_ATTACHMENT_OPTIMAL→SHADER_READ_ONLY_OPTIMAL
         // for the present-blit's FRAGMENT sample (C5: derived from the producer/consumer access
@@ -2169,9 +2318,11 @@ impl Renderer<'_> {
 
         self.forward_pass_plan = Some(ForwardPassPlan {
             interp,
+            depth_prepass,
             light_upload,
             csm,
             atlas: atlas_pass,
+            light_cull,
             forward_opaque,
             present_sample,
         });
@@ -2350,16 +2501,21 @@ impl Renderer<'_> {
         self.frame_graph.record_pass(pass, &mut sink);
     }
 
-    /// Multi-paradigm render-path plan, rung R4b-b: the [`ForwardBarrierSink`] sibling of
-    /// [`Self::record_graph_pass`] — drives one [`ForwardPassPlan`] pass's derived barriers
-    /// (declared by [`Self::declare_forward_graph`]) into `cmd`, resolving Forward's OWN small
-    /// ResId space (`[lit, forward_depth, cascade, atlas]` images; `[light_table,
-    /// instance_model_ring]` buffers — [`ForwardBarrierSink`]'s doc) to the current frame's
-    /// physical handles. `lit` is read from `targets` (the SAME [`GBufferTargets::lit`] ring
-    /// Option 2's full deferred allocation always builds — Forward reuses it verbatim, C5);
-    /// `forward_depth`/the Forward-only descriptor sets are read from `forward` (the current
-    /// frame's [`ForwardTargets`], which the caller has already `.expect()`-ed present, mirroring
-    /// how [`Self::record_graph_pass`]'s caller unwraps `self.gbuffer_pass_plan`).
+    /// Multi-paradigm render-path plan, rung R4b-b (buffers grown at rung R5): the
+    /// [`ForwardBarrierSink`] sibling of [`Self::record_graph_pass`] — drives one
+    /// [`ForwardPassPlan`] pass's derived barriers (declared by [`Self::declare_forward_graph`])
+    /// into `cmd`, resolving Forward's OWN small ResId space (`[lit, forward_depth, cascade,
+    /// atlas]` images; `[light_table, instance_model_ring, light_index_alloc, cluster_grid,
+    /// light_index]` buffers — [`ForwardBarrierSink`]'s doc) to the current frame's physical
+    /// handles. `lit` is read from `targets` (the SAME [`GBufferTargets::lit`] ring Option 2's
+    /// full deferred allocation always builds — Forward reuses it verbatim, C5); `forward_depth`/
+    /// the Forward-only descriptor sets are read from `forward` (the current frame's
+    /// [`ForwardTargets`], which the caller has already `.expect()`-ed present, mirroring how
+    /// [`Self::record_graph_pass`]'s caller unwraps `self.gbuffer_pass_plan`). The L1 trio falls
+    /// back to `scene.light_table` when unarmed (`GBufferScene::cluster_grid`/`light_index` are
+    /// `None`) — the SAME bound-but-unread placeholder idiom `ForwardTargets::build`'s Set-0
+    /// entries use; an unarmed frame never routes a barrier naming ResId 2/3/4 anyway
+    /// (`declare_forward_graph`'s `light_cull.is_some()` gate), so the placeholder is inert.
     pub(crate) fn record_forward_pass(
         &self,
         pass: crate::framegraph::PassId,
@@ -2393,6 +2549,13 @@ impl Renderer<'_> {
                     .expect("invariant: a Forward-resolved scene always carries forward_instance_ring")
                     [fi]
                     .buffer,
+                // Multi-paradigm render-path plan, rung R5 (ForwardPlus): the L1 cluster-cull
+                // trio, single-instance (NOT ringed) — the SAME physical buffers
+                // `record_graph_pass`'s own `[cluster_grid, light_index, light_index_alloc]`
+                // slots resolve for Deferred.
+                scene.light_index_alloc.map_or(scene.light_table.buffer, |b| b.buffer),
+                scene.cluster_grid.map_or(scene.light_table.buffer, |b| b.buffer),
+                scene.light_index.map_or(scene.light_table.buffer, |b| b.buffer),
             ],
         };
         self.frame_graph.record_pass(pass, &mut sink);

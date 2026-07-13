@@ -6,11 +6,15 @@
 //!
 //! # v1 SCOPE CUT (mirrors `forward_opaque.fs.hlsl`'s own doc — R4b-a)
 //!
-//! Mesh-only (the resolver collapses `Forward × {Both, Sdf}` to `Mesh` pre-R-SDFFWD), all-lights
-//! (no froxel), NO SSAO/DDGI/shadow-denoise/motion vector/TAA — `cap_forward_v1_consumers`
-//! (`boyko_render::render_path_config`) forces every one of those consumers off structurally, so
-//! this recorder has no prepass, no thin-aux MRT, and writes no motion. Shadows (CSM + punctual
-//! atlas) ARE in scope — `forward_opaque.fs.hlsl` samples them inline via `shadow_apply.hlsli`.
+//! Mesh-only (the resolver collapses `Forward × {Both, Sdf}` to `Mesh` pre-R-SDFFWD), NO
+//! SSAO/DDGI/shadow-denoise/motion vector/TAA — `cap_forward_v1_consumers`
+//! (`boyko_render::render_path_config`) forces every one of those consumers off structurally
+//! (under BOTH `Forward` and `ForwardPlus`, rung R5), so this recorder writes no thin-aux MRT and
+//! no motion. Shadows (CSM + punctual atlas) ARE in scope — `forward_opaque.fs.hlsl` samples them
+//! inline via `shadow_apply.hlsli`. Rung R5 (ForwardPlus) added the `depth_prepass` + `light_cull`
+//! passes (Decision 4's EQUAL-depth early-Z contract + froxel light reuse) — plain `Forward`
+//! stays all-lights/no-prepass, unchanged from R4b-a; see [`GBufferScene::path_needs_depth_prepass`]
+//! for the single predicate that gates both this recorder and `declare_forward_graph`.
 //!
 //! # Why a SEPARATE record body, not a `record_gbuffer` branch
 //!
@@ -30,7 +34,9 @@ use crate::memory::BoundBuffer;
 use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS};
 
 use super::super::frame_driver::Renderer;
-use super::super::scene_types::{GBUFFER_PUSH_BASE_INSTANCE_OFFSET, GBufferScene};
+use super::super::scene_types::{
+    CLUSTER_CULL_PUSH_BYTES, GBUFFER_PUSH_BASE_INSTANCE_OFFSET, GBufferScene, LIGHT_CULL_LOCAL_SIZE_X,
+};
 use super::super::targets::{ForwardTargets, GBufferTargets};
 use super::super::{COLOR_SUBRESOURCE_RANGE, SwapchainError};
 
@@ -151,6 +157,130 @@ impl Renderer<'_> {
             // (the COMPUTE→VERTEX RAW barrier derived at `forward_opaque`, the reader) — NOT here.
         }
 
+        let vertex_offset: VkDeviceSize = 0;
+
+        // === Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS
+        // (Decision 4's EQUAL-depth zero-overdraw contract). Recorded FIRST among the Forward
+        // geometry passes (right after `interp`, the earliest point `instance_model_ring` is
+        // valid to read), BEFORE `light_upload`/`light_cull`/`csm`/`atlas` — matching
+        // `declare_forward_graph`'s DECLARATION order exactly. Writes `forward_depth`
+        // (first-touch, `VK_COMPARE_OP_GREATER`, write ON); `forward_opaque`'s later `EQUAL`
+        // test (write OFF) only reads the value this pass commits. Recorded ONLY when
+        // `scene.path_needs_depth_prepass()` holds (`ForwardPlus` this rung — the O1
+        // single-predicate rule shared with `declare_forward_graph`). ===
+        if scene.path_needs_depth_prepass() {
+            let depth_prepass_pass = plan
+                .depth_prepass
+                .expect("invariant: path_needs_depth_prepass() ⇒ depth_prepass pass declared");
+            // SAFETY: recording is open; `record_forward_pass` records the graph's derived
+            // UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL barrier-in for the "depth_prepass" pass into
+            // `cmd`.
+            self.record_forward_pass(depth_prepass_pass, cmd, targets, forward, scene, fi);
+
+            let prepass_pipeline = scene
+                .forward_prepass_pipeline
+                .expect("invariant: a ForwardPlus-resolved scene always carries forward_prepass_pipeline");
+            let prepass_depth_attachment = VkRenderingAttachmentInfo {
+                s_type: VkStructureType::RenderingAttachmentInfo,
+                p_next: ptr::null(),
+                image_view: forward.depth[fi].view,
+                image_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                resolve_mode: 0,
+                resolve_image_view: VkImageView::NULL,
+                resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+                store_op: VK_ATTACHMENT_STORE_OP_STORE,
+                clear_value: VkClearValue {
+                    depth_stencil: VkClearDepthStencilValue { depth: FORWARD_DEPTH_CLEAR, stencil: 0 },
+                },
+            };
+            let prepass_area = VkRect2D { offset: VkOffset2D { x: 0, y: 0 }, extent: present_extent };
+            let prepass_rendering = VkRenderingInfo {
+                s_type: VkStructureType::RenderingInfo,
+                p_next: ptr::null(),
+                flags: 0,
+                render_area: prepass_area,
+                layer_count: 1,
+                view_mask: 0,
+                // DEPTH-ONLY: zero color attachments (Decision 4 / `depth_prepass.fs.hlsl`'s
+                // doc: an empty fragment entry point, no `SV_Target`).
+                color_attachment_count: 0,
+                p_color_attachments: ptr::null(),
+                p_depth_attachment: (&prepass_depth_attachment as *const VkRenderingAttachmentInfo).cast(),
+                p_stencil_attachment: ptr::null(),
+            };
+            let prepass_viewport = VkViewport {
+                x: 0.0,
+                y: 0.0,
+                width: present_extent.width as f32,
+                height: present_extent.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            };
+            // SAFETY: recording is open; `prepass_rendering` names the live `forward_depth` view
+            // (now DEPTH_ATTACHMENT_OPTIMAL), no color attachments; `prepass_pipeline` (declaring
+            // ZERO color formats + `Format::D32Sfloat` + `VK_COMPARE_OP_GREATER` + depth-write ON
+            // + the SAME UNIFIED `forward_layout0` Set-0 layout `forward.set0[fi]` was written
+            // against, no Set 1 — rung R5 code-review fix: exactly ONE Set-0 layout OBJECT for
+            // every Forward-family pipeline, so this pipeline is layout-compatible with
+            // `forward.set0[fi]` regardless of whether the boot path is `Forward`/`ForwardPlus`)
+            // + the 88-byte VERTEX push range belong to this device (caller contract);
+            // `forward.set0[fi]` is a live descriptor set written once per extent (the prepass VS
+            // reads only its `instances` binding, a subset of what the set declares — the SAME
+            // bound-but-unread-subset idiom `forward_sky_pipeline` already relies on). `scene.mvp`
+            // is the SAME 88-byte push `forward_opaque` reads
+            // below. `vertex_offset`/`prepass_viewport`/`prepass_area` outlive the bracketed
+            // calls; the legacy arm's `draw` reads the merged vertex buffer, the instanced arm's
+            // per-batch `draw_indexed` reads each batch's bound vertex+index buffers. Begin/End
+            // bracket the pass exactly.
+            unsafe {
+                (self.fns.cmd_begin_rendering)(cmd, &prepass_rendering);
+                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, prepass_pipeline.pipeline);
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    prepass_pipeline.layout,
+                    0,
+                    1,
+                    &forward.set0[fi].descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    prepass_pipeline.layout,
+                    VK_SHADER_STAGE_VERTEX_BIT,
+                    0,
+                    scene.mvp.len() as u32,
+                    scene.mvp.as_ptr().cast(),
+                );
+                (self.fns.cmd_set_viewport)(cmd, 0, 1, &prepass_viewport);
+                (self.fns.cmd_set_scissor)(cmd, 0, 1, &prepass_area);
+                if scene.mesh_draw.is_empty() {
+                    (self.fns.cmd_bind_vertex_buffers)(cmd, 0, 1, &scene.vertex_buffer.buffer, &vertex_offset);
+                    (self.fns.cmd_draw)(cmd, scene.vertex_count, 1, 0, 0);
+                } else {
+                    for batch in scene.mesh_draw {
+                        let base = batch.base_instance;
+                        (self.fns.cmd_push_constants)(
+                            cmd,
+                            prepass_pipeline.layout,
+                            VK_SHADER_STAGE_VERTEX_BIT,
+                            GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
+                            4,
+                            (&base as *const u32).cast(),
+                        );
+                        (self.fns.cmd_bind_vertex_buffers)(cmd, 0, 1, &batch.vertex_buffer.buffer, &vertex_offset);
+                        (self.fns.cmd_bind_index_buffer)(cmd, batch.index_buffer.buffer, 0, batch.index_type);
+                        (self.fns.cmd_draw_indexed)(cmd, batch.index_count, batch.instance_count, 0, 0, 0);
+                    }
+                }
+                (self.fns.cmd_end_rendering)(cmd);
+            }
+            // `forward_depth`'s WRITE→READ barrier before `forward_opaque`'s EQUAL test is
+            // derived by the graph at `forward_opaque` (the reader) — NOT here.
+        }
+
         // === Lighting L0-r0: ASYNC light-table re-upload — byte-for-byte port of
         // `record_gbuffer`'s own `light_upload` block. Recorded ONLY on a dirty frame.
         // Code-review P1-2: recorded HERE (right after `interp`, before `csm`/`atlas`) to match
@@ -183,7 +313,76 @@ impl Renderer<'_> {
             }
         }
 
-        let vertex_offset: VkDeviceSize = 0;
+        // === Multi-paradigm render-path plan, rung R5 (ForwardPlus): the L1 clustered froxel
+        // light-cull pass — byte-for-byte port of `record_gbuffer`'s own L1 cull block
+        // (`present/passes/gbuffer.rs`), duplicated here per this module's established
+        // duplication discipline (see this file's own doc). Recorded ONLY when
+        // `scene.path_is_forward_plus()` holds (the O1 single-predicate rule shared with
+        // `declare_forward_graph`'s `light_cull` gate — the base `Forward` pipeline's Set 0 has
+        // no `ClusterGrid`/`LightIndexList` bindings) AND the scene wires the cull pipeline +
+        // cull set (the SAME "4-buffers-Some" gate `declare_forward_graph` uses). ===
+        if scene.path_is_forward_plus()
+            && let (Some(cull_pipeline), Some(cull_set), Some(_grid), Some(_index), Some(alloc)) = (
+                scene.cluster_cull,
+                targets.cull_set.as_ref().map(|s| &s[self.frame_index]),
+                scene.cluster_grid,
+                scene.light_index,
+                scene.light_index_alloc,
+            )
+        {
+            // (L1-0) Reset the global slice-allocation counter to 0 (a transfer fill), then
+            // order the fill before the cull's atomic reads/writes (TRANSFER→COMPUTE). See
+            // `record_gbuffer`'s own L1-0 comment for the full rationale.
+            // SAFETY: recording is open; `alloc` is a live device-local STORAGE buffer (≥ 4 B,
+            // the single u32 counter); `cmd_fill_buffer` zero-fills it (Vulkan 1.0 core). The
+            // FILL is GPU work (not a barrier), so it runs unconditionally — only the following
+            // barrier is graph-driven.
+            unsafe {
+                (self.fns.cmd_fill_buffer)(cmd, alloc.buffer, 0, VK_WHOLE_SIZE, 0);
+            }
+            let light_cull = plan
+                .light_cull
+                .expect("invariant: cull wired + ForwardPlus ⇒ light_cull pass declared");
+            // SAFETY: recording is open; `record_forward_pass` records the graph's derived
+            // TRANSFER→COMPUTE barrier for the "light_cull" pass into `cmd`, ordering the fill's
+            // TRANSFER write before the cull's COMPUTE atomics on the GPU timeline.
+            self.record_forward_pass(light_cull, cmd, targets, forward, scene, fi);
+
+            // (L1-1) Bind the cull pipeline + the cull set (written ONCE at sync_gbuffer), push
+            // the 16-byte ClusterCullPush, dispatch over CLUSTER_COUNT froxels.
+            let cull_groups = scene.cluster_count.div_ceil(LIGHT_CULL_LOCAL_SIZE_X);
+            // SAFETY: recording is open; the cull pipeline + its layout (declaring `cull_layout`
+            // at set 0 + the 16-byte COMPUTE push range) are live on this device (caller
+            // contract); the cull set binds the camera UBO + light table + the cluster buffers;
+            // `cull_groups` covers `cluster_count` froxels at the 64-wide group; the push bytes
+            // are exactly `CLUSTER_CULL_PUSH_BYTES` (16) at offset 0; `&cull_set.descriptor_set`
+            // is a single-element local alive for the call (first_set 0, count 1).
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cull_pipeline.pipeline);
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    cull_pipeline.layout,
+                    0,
+                    1,
+                    &cull_set.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    cull_pipeline.layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    CLUSTER_CULL_PUSH_BYTES,
+                    scene.cluster_cull_push.as_ptr().cast(),
+                );
+                (self.fns.cmd_dispatch)(cmd, cull_groups, 1, 1);
+            }
+            // (L1-2) The cull's ClusterGrid + LightIndexList writes are made available + visible
+            // to `forward_opaque`'s reads by the graph: derived at `forward_opaque` (the
+            // reader) — NOT here.
+        }
 
         // === CSM cascade DEPTH pass — byte-for-byte port of `record_gbuffer`'s own `csm` block
         // (see this module's doc). Recorded ONLY when `scene.csm.is_some()`; runs BEFORE
@@ -414,8 +613,11 @@ impl Renderer<'_> {
         }
 
         // === Pass `forward_opaque`: the mesh raster + inline-shade pass. Writes `lit` (COLOR,
-        // Decision 2's C5 per-path producer access) + `forward_depth` (HW reverse-Z, Decision 4);
-        // no `SV_Depth`/`discard`/UAV in `forward_opaque.fs.hlsl` ⇒ early-Z stays live. ===
+        // Decision 2's C5 per-path producer access); tests `forward_depth` (HW reverse-Z,
+        // Decision 4) — plain `Forward` still WRITES it (`GREATER`, first-touch); `ForwardPlus`
+        // (rung R5) only READS it (`EQUAL`, write OFF — `depth_prepass` already committed the
+        // value). NO `SV_Depth`/`discard`/UAV in `forward_opaque.fs.hlsl` (either FS variant)
+        // ⇒ early-Z stays live. ===
         // SAFETY: recording is open; `record_forward_pass` records the graph's derived
         // UNDEFINED→COLOR_ATTACHMENT_OPTIMAL (`lit`) + UNDEFINED→DEPTH_ATTACHMENT_OPTIMAL
         // (`forward_depth`) barriers-in, plus the cascade/atlas →SHADER_READ_ONLY_OPTIMAL
@@ -447,6 +649,15 @@ impl Renderer<'_> {
             store_op: VK_ATTACHMENT_STORE_OP_STORE,
             clear_value: VkClearValue { color: VkClearColorValue { float32: FORWARD_LIT_CLEAR } },
         };
+        // Rung R5 (ForwardPlus): when `depth_prepass` already wrote `forward_depth` this frame,
+        // the EQUAL test must LOAD that value, not CLEAR it (a CLEAR would erase the prepass'
+        // committed depth before the test ever runs). Plain `Forward` (no prepass) keeps the
+        // ORIGINAL first-touch CLEAR — byte-identical to rung R4b-b.
+        let forward_depth_load_op = if scene.path_needs_depth_prepass() {
+            VK_ATTACHMENT_LOAD_OP_LOAD
+        } else {
+            VK_ATTACHMENT_LOAD_OP_CLEAR
+        };
         let forward_depth_attachment = VkRenderingAttachmentInfo {
             s_type: VkStructureType::RenderingAttachmentInfo,
             p_next: ptr::null(),
@@ -455,8 +666,10 @@ impl Renderer<'_> {
             resolve_mode: 0,
             resolve_image_view: VkImageView::NULL,
             resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
-            load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+            load_op: forward_depth_load_op,
             store_op: VK_ATTACHMENT_STORE_OP_STORE,
+            // Ignored by Vulkan when `load_op != CLEAR` (the `ForwardPlus` arm) — harmless to
+            // leave populated either way.
             clear_value: VkClearValue {
                 depth_stencil: VkClearDepthStencilValue { depth: FORWARD_DEPTH_CLEAR, stencil: 0 },
             },
@@ -494,13 +707,22 @@ impl Renderer<'_> {
         // written once per extent; `draw(3, 1, 0, 0)` is the `SV_VertexID` fullscreen triangle
         // (no vertex buffer).
         //
-        // `forward_pipeline` (declaring ONE color format + `Format::D32Sfloat` +
-        // `VK_COMPARE_OP_GREATER` + the plain 2-set `[Set0, Set1]` layout, built by
-        // `VulkanContext::create_graphics_pipeline_forward` — boot-panic fix: no placeholder set,
-        // `forward_opaque.fs.hlsl`'s shadow bindings live at Set 1, not Set 2) + the 88-byte
-        // VERTEX push range belong to this device (caller contract); `forward.set0[fi]` (bound
-        // at set 0) and `forward.set1[fi]` (bound at set 1) are live descriptor sets written once
-        // per extent against `scene.forward_layout0`/`scene.forward_layout1`. `scene.mvp` is the
+        // `forward_pipeline` (the local below, resolved from `scene.forward_pipeline` — declaring
+        // ONE color format + `Format::D32Sfloat` + the plain 2-set `[Set0, Set1]` layout, built
+        // by `VulkanContext::create_graphics_pipeline_forward`/`create_graphics_pipeline_forward_plus`
+        // — boot-panic fix: no placeholder set, `forward_opaque.fs.hlsl`'s shadow bindings live at
+        // Set 1, not Set 2). Compare op + depth-write differ by path (Decision 4): plain `Forward`
+        // = `VK_COMPARE_OP_GREATER` + write ON (this pass is the sole depth producer); `ForwardPlus`
+        // (rung R5) = `VK_COMPARE_OP_EQUAL` + write OFF (`depth_prepass` already committed the
+        // value, recorded above). BOTH variants are built against the SAME UNIFIED `forward_layout0`
+        // (rung R5 code-review fix — the 5-vs-7-binding split was a real Vulkan pipeline/
+        // descriptor-set-layout INCOMPATIBILITY bug: two structurally-identical-but-distinct
+        // `VkDescriptorSetLayout` handles are not interchangeable, and the base FS's SPIR-V is
+        // still valid against the grown 7-binding layout since it only references a SUBSET of
+        // it). The 88-byte VERTEX push range belongs to this device (caller contract);
+        // `forward.set0[fi]` (bound at set 0, ALWAYS the unified 7-binding shape) and
+        // `forward.set1[fi]` (bound at set 1, unchanged shape) are live descriptor sets written
+        // once per extent against `scene.forward_layout0`/`scene.forward_layout1`. `scene.mvp` is the
         // SAME 88-byte push [`Renderer::record_gbuffer`]'s raster pass reads, host-assembled with
         // `boyko_render::view::forward_view_proj_rows` instead of `gbuffer_push_from_view` on a
         // `Forward`-resolved boot (the two paths are boot-mutually-exclusive, so reusing the

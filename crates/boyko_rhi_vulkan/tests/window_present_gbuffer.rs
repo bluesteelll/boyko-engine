@@ -2269,6 +2269,7 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         forward_layout1: None,
         forward_instance_ring: None,
         forward_instance_material_ring: None,
+        forward_prepass_pipeline: None,
         tiles_buffer: &tiles_buffer,
         // Brick bindings 9..=14: the ACTIVATED clip-map's REAL per-level resources. Level 0's grid +
         // atlas at @9/@10, level 1 at @11/@12, level 2 at @13/@14 — the genuine 3-level cache (NOT the
@@ -3261,6 +3262,7 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         forward_layout1: None,
         forward_instance_ring: None,
         forward_instance_material_ring: None,
+        forward_prepass_pipeline: None,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),
@@ -8177,6 +8179,7 @@ fn run_showcase_body_ddgi(
         forward_layout1: None,
         forward_instance_ring: None,
         forward_instance_material_ring: None,
+        forward_prepass_pipeline: None,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),
@@ -9588,6 +9591,7 @@ fn run_showcase_body(
         forward_layout1: None,
         forward_instance_ring: None,
         forward_instance_material_ring: None,
+        forward_prepass_pipeline: None,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),

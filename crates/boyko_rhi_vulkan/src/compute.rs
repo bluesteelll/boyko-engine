@@ -703,6 +703,39 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS vertex
+    /// SPIR-V (`shaders/depth_prepass.vs.hlsl`) — a position-only subset of
+    /// [`FORWARD_OPAQUE_VS_SPV`] (same instance SSBO + push shape, no normal/mat_id export).
+    /// Paired with [`DEPTH_PREPASS_FS_SPV`] in
+    /// [`VulkanContext::create_graphics_pipeline_forward_prepass`].
+    DEPTH_PREPASS_VS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/depth_prepass.vs.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS fragment
+    /// SPIR-V (`shaders/depth_prepass.fs.hlsl`) — an empty entry point (zero color attachments;
+    /// this RHI's pipeline builder requires a fragment module unconditionally). Paired with
+    /// [`DEPTH_PREPASS_VS_SPV`].
+    DEPTH_PREPASS_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/depth_prepass.fs.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the `forward_opaque` FROXEL
+    /// fragment SPIR-V — `shaders/forward_opaque.fs.hlsl` recompiled with `-D FROXEL=1`
+    /// (see that file's header). Declares `ClusterGrid`/`LightIndexList` @5/6, a subset of the
+    /// UNIFIED 7-binding `forward_layout0` every Forward-family pipeline is built against
+    /// (rung R5 code-review fix — ONE Set-0 layout object, never two distinct handles); Set 1
+    /// (shadow) is UNCHANGED, shared verbatim with [`FORWARD_OPAQUE_FS_SPV`]. Paired with
+    /// [`FORWARD_OPAQUE_VS_SPV`] (the VS is IDENTICAL — only the fragment shader's light-loop
+    /// source differs by the `#ifdef FROXEL` compile flag) in
+    /// [`VulkanContext::create_graphics_pipeline_forward_plus`].
+    FORWARD_OPAQUE_FROXEL_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/forward_opaque_froxel.fs.spv")
+}
+
+embed_spirv! {
     /// The committed mesh-MRT G-buffer PRODUCER fragment SPIR-V (`shaders/gbuffer_mrt.fs.hlsl`):
     /// writes albedo/normal/material as 3 MRT in the marcher's exact encoding (mask=1) + the
     /// marcher-aligned `SV_Depth` (euclidean under perspective, axial under ortho). Paired with
@@ -1382,6 +1415,30 @@ pub fn forward_sky_vs_spirv() -> &'static [u32] {
 #[inline]
 pub fn forward_sky_fs_spirv() -> &'static [u32] {
     FORWARD_SKY_FS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS VERTEX
+/// SPIR-V as a `u32` word stream. Paired with [`depth_prepass_fs_spirv`] in
+/// [`VulkanContext::create_graphics_pipeline_forward_prepass`].
+#[inline]
+pub fn depth_prepass_vs_spirv() -> &'static [u32] {
+    DEPTH_PREPASS_VS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS FRAGMENT
+/// SPIR-V (an empty entry point) as a `u32` word stream. Paired with [`depth_prepass_vs_spirv`].
+#[inline]
+pub fn depth_prepass_fs_spirv() -> &'static [u32] {
+    DEPTH_PREPASS_FS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the `forward_opaque` FROXEL
+/// FRAGMENT SPIR-V as a `u32` word stream. Paired with [`forward_opaque_vs_spirv`] (the SAME
+/// vertex shader — only the fragment shines through a different `#ifdef FROXEL` compile) in
+/// [`VulkanContext::create_graphics_pipeline_forward_plus`].
+#[inline]
+pub fn forward_opaque_froxel_fs_spirv() -> &'static [u32] {
+    FORWARD_OPAQUE_FROXEL_FS_SPV.as_words()
 }
 
 /// The Rung-3b MOTION_VECTORS-variant mesh-MRT gbuffer VERTEX SPIR-V as a `u32` word stream.

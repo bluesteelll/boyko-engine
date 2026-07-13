@@ -1184,6 +1184,13 @@ pub const VK_COMPARE_OP_ALWAYS: i32 = 7;
 /// (Decision 4): the Forward path's reverse-Z depth-test compare op (a LARGER stored
 /// depth is nearer under reverse-Z, so the fragment with the greater `z` wins).
 pub const VK_COMPARE_OP_GREATER: i32 = 4;
+/// `VkCompareOp::VK_COMPARE_OP_EQUAL` — multi-paradigm render-path plan, rung R5
+/// (ForwardPlus): the EQUAL-depth zero-overdraw compare op `forward_opaque` tests
+/// against under `ForwardPlus` (depth-write OFF), after `depth_prepass` has already
+/// written the exact same reverse-Z value with `VK_COMPARE_OP_GREATER` — a fragment
+/// survives only if its interpolated depth exactly matches the prepass-written value,
+/// so hardware early-Z rejects every occluded fragment before the inline shade runs.
+pub const VK_COMPARE_OP_EQUAL: i32 = 2;
 
 /// `VkAttachmentLoadOp` / `VkAttachmentStoreOp` discriminants for dynamic rendering.
 pub const VK_ATTACHMENT_LOAD_OP_LOAD: i32 = 0;
