@@ -14,7 +14,7 @@ use crate::memory::BoundBuffer;
 use super::graph_bridge::GbufferPassPlan;
 use super::scene_types::{GBufferScene, SampledComposite, Scene, UiPass};
 use super::swapchain::swapchain_image_for;
-use super::targets::{GBufferFrame, GBufferTargets};
+use super::targets::{GBufferFrame, GBufferTargets, TargetsProfile};
 use super::{FRAMES_IN_FLIGHT, Surface, Swapchain, SwapchainError};
 
 /// Per-frame-in-flight CPU↔GPU sync: an acquire semaphore + an in-flight fence.
@@ -827,12 +827,16 @@ impl<'ctx> Renderer<'ctx> {
                     // native, not `present_extent` — 2× under SSAA) — see
                     // `GBufferTargets::sync_gbuffer`'s doc. For Off/Fxaa/Smaa,
                     // `aa_extent == present_extent` (byte-identical to before SSAA existed).
+                    // Multi-paradigm render-path plan, rung R2: `TargetsProfile::from_scene`
+                    // derives the (today: always-`DeferredFull`) profile the R3+ path-conditional
+                    // allocation seam threads through.
                     GBufferTargets::sync_gbuffer(
                         &mut frame.targets,
                         ctx,
                         scene,
                         present_extent,
                         aa_extent,
+                        TargetsProfile::from_scene(scene),
                     )
                 },
                 |this, frame, cmd, image, view, extent| {
@@ -841,8 +845,11 @@ impl<'ctx> Renderer<'ctx> {
                     // the resulting `GbufferPassPlan` — BEFORE the `&self`
                     // `record_gbuffer` borrow, which then reads the compiled per-pass
                     // barrier plan through it. Zero-alloc (`reset` retains capacity); a
-                    // per-frame `compile` is cheap for a ~11-pass line.
-                    this.declare_gbuffer_graph(scene);
+                    // per-frame `compile` is cheap for a ~11-pass line. Multi-paradigm
+                    // render-path plan, rung R2: dispatches through `declare_frame_graph`,
+                    // which selects the per-path declarator from `scene.resolved_render_path
+                    // .path` (today: always the `Deferred` arm, `declare_deferred_graph`).
+                    this.declare_frame_graph(scene);
 
                     let targets = frame.targets.as_ref().expect(
                         "invariant: sync_gbuffer made the targets present before record",

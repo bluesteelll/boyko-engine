@@ -28,6 +28,17 @@
 //! set ([`resolve_rules`]) are ALREADY correct for the fully-landed plan, tested directly against
 //! the rule (not gated behind the rung consts) so they are live today, not dead until later rungs.
 //!
+//! Rung R2 adds [`DEFERRED_LEG_DISABLE_IMPLEMENTED`] (`false` today, lifted `true` at rung R3):
+//! while `false`, a `Deferred × {Mesh, Sdf}` request degrades its LEGS to `Both`
+//! ([`RenderPathDegrade::DeferredLegDisableNotYetImplemented`]) — R2 built the `Option<PassId>`
+//! plumbing (`declare_deferred_graph`'s `raster`/`marcher` passes, `path_has_raster`/
+//! `path_has_marcher`) but NOT the goldens + the marcher's `HAS_MESH` compiled variant a real
+//! leg-off Deferred frame needs (plan §H, R3 row), so this guard keeps every leg-off Deferred
+//! config unreachable until R3 explicitly lifts it. This rule fires ONLY when the FINAL
+//! (post-path-demotion) `path == Deferred`; the legs-collapse-to-`Mesh` rule below fires ONLY
+//! when the final `path != Deferred` — the two are mutually exclusive by construction (see
+//! [`degrade_ladder`]'s doc), so they never co-fire in the same call.
+//!
 //! # Rev 5 — the single `pre_light_consumers` predicate (MANDATORY)
 //!
 //! [`resolve_rules`] computes ONE local union — `ssao ∥ ddgi ∥ shadow_denoise_spatial ∥
@@ -70,6 +81,16 @@ const VB_IMPLEMENTED: bool = false;
 /// today ⇒ any non-Deferred path requesting a non-[`GeometryLegs::Mesh`] leg set (`Both` or
 /// `Sdf`) degrades that leg set to `Mesh` ([`RenderPathDegrade::LegsCollapsedToMeshPreSdfForward`]).
 const SDF_FORWARD_IMPLEMENTED: bool = false;
+
+/// Whether `Deferred`'s leg-disable (mesh-only skips the marcher pass only, O2; sdf-only skips
+/// the mesh raster pass + vertex pipelines) has landed yet. Lifted `true` at rung R3, once R3
+/// adds the `deferred_mesh_only`/`deferred_sdf_only` goldens and the marcher's `HAS_MESH`
+/// compiled variant (plan §H). `false` today ⇒ a `Deferred × {Mesh, Sdf}` request degrades its
+/// LEGS to [`GeometryLegs::Both`] ([`RenderPathDegrade::DeferredLegDisableNotYetImplemented`]) —
+/// R2 built the framegraph's `Option<PassId>` seam (`raster`/`marcher` in
+/// `boyko_rhi_vulkan::present::graph_bridge::GbufferPassPlan`) but this const keeps every
+/// leg-off Deferred config unreachable until R3's goldens land.
+const DEFERRED_LEG_DISABLE_IMPLEMENTED: bool = false;
 
 // ---- RenderPath / GeometryLegs (the owner-set knobs; capability is structural) --------
 
@@ -438,16 +459,21 @@ pub enum RenderPathDegrade {
     /// (`Both`/`Sdf`) before the SDF-forward-march rung lands — collapsed to
     /// [`GeometryLegs::Mesh`].
     LegsCollapsedToMeshPreSdfForward,
+    /// `Deferred` was requested with a non-[`GeometryLegs::Both`] leg set (`Mesh`/`Sdf`) before
+    /// rung R3 lands the leg-disable goldens + the marcher's `HAS_MESH` compiled variant —
+    /// collapsed to [`GeometryLegs::Both`] (plan §H, R2 row).
+    DeferredLegDisableNotYetImplemented,
 }
 
-/// A fixed-capacity log of [`RenderPathDegrade`] reasons. [`degrade_ladder`]'s three rules are
-/// mutually short-circuiting — a path-level demotion (`PathNotYetImplemented` or
-/// `VbDeviceCapMissing`) always forces `path == Deferred`, which is exactly the guard the
-/// legs-level rule (`LegsCollapsedToMeshPreSdfForward`) requires to be FALSE before it can fire
-/// — so today's ladder never emits more than ONE reason per call. The array is sized to 2 slots
-/// defensively (a future ladder revision could add an independent legs-only check that stacks
-/// with a path-level one), so a fixed array needs no heap allocation either way (Principle 5).
-/// `boyko_app::runner` iterates [`Self::reasons`] and `warn!`s each ONCE.
+/// A fixed-capacity log of [`RenderPathDegrade`] reasons. [`degrade_ladder`]'s FOUR rules stack
+/// at most TWO deep per call: at most ONE path-level rule fires (`PathNotYetImplemented` XOR
+/// `VbDeviceCapMissing` — the latter needs `path_implemented == true`, which the former's arm
+/// never reaches), and at most ONE legs-level rule fires (`DeferredLegDisableNotYetImplemented`
+/// XOR `LegsCollapsedToMeshPreSdfForward` — the FIRST requires the FINAL `path == Deferred`, the
+/// SECOND requires the FINAL `path != Deferred`; mutually exclusive by construction, so they
+/// never co-fire). The array is sized to 2 slots for exactly this worst case (a fixed array
+/// needs no heap allocation either way, Principle 5). `boyko_app::runner` iterates
+/// [`Self::reasons`] and `warn!`s each ONCE.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RenderPathDegradeLog {
     reasons: [Option<RenderPathDegrade>; 2],
@@ -595,20 +621,28 @@ pub fn resolve_rules(
 /// than reading the module consts directly) so it stays independently unit-testable — the SAME
 /// "test the rule directly" discipline [`resolve_rules`] uses for the Rev-5 predicate.
 /// [`resolve_render_path`] is the ONLY caller that threads the real
-/// [`FORWARD_IMPLEMENTED`]/[`FORWARD_PLUS_IMPLEMENTED`]/[`VB_IMPLEMENTED`]/[`SDF_FORWARD_IMPLEMENTED`]
-/// consts; a test can thread `true` early to exercise e.g. the VB device-cap degrade in
-/// isolation, before `VB_IMPLEMENTED` itself lands.
+/// [`FORWARD_IMPLEMENTED`]/[`FORWARD_PLUS_IMPLEMENTED`]/[`VB_IMPLEMENTED`]/
+/// [`SDF_FORWARD_IMPLEMENTED`]/[`DEFERRED_LEG_DISABLE_IMPLEMENTED`] consts; a test can thread
+/// `true` early to exercise e.g. the VB device-cap degrade in isolation, before `VB_IMPLEMENTED`
+/// itself lands.
 ///
 /// Order: (1) an unimplemented path collapses to `Deferred`; (2) a `VisibilityBuffer` path that
 /// survived (1) but whose device lacks the geometry-table cap ALSO collapses to `Deferred`; (3)
-/// a non-Deferred path (post 1/2) requesting a non-`Mesh` leg set before the SDF-forward-march
-/// rung lands collapses the legs to `Mesh`. Never a panic — degrade-not-panic by construction.
+/// a FINAL `path == Deferred` (whether requested directly or reached via (1)/(2)) requesting a
+/// non-`Both` leg set before rung R3 lands collapses the legs to `Both`
+/// ([`RenderPathDegrade::DeferredLegDisableNotYetImplemented`], rung R2); (4) a FINAL
+/// `path != Deferred` requesting a non-`Mesh` leg set before the SDF-forward-march rung lands
+/// collapses the legs to `Mesh`. Rules (3) and (4) gate on COMPLEMENTARY `path == Deferred` /
+/// `path != Deferred` conditions, so at most one of them ever fires in a single call (see
+/// [`RenderPathDegradeLog`]'s doc for why the log never needs more than 2 slots). Never a panic
+/// — degrade-not-panic by construction.
 fn degrade_ladder(
     requested_path: RenderPath,
     requested_legs: GeometryLegs,
     caps: RenderPathDeviceCaps,
     path_implemented: bool,
     sdf_forward_implemented: bool,
+    deferred_leg_disable_implemented: bool,
 ) -> (RenderPath, GeometryLegs, RenderPathDegradeLog) {
     let mut degrades = RenderPathDegradeLog::default();
 
@@ -625,6 +659,16 @@ fn degrade_ladder(
     }
 
     let mut legs = requested_legs;
+    // Rung R2: fires ONLY when the FINAL path is Deferred (whether requested directly or
+    // reached via the path-level demotion above) — mutually exclusive with the SDF-forward
+    // legs-collapse rule below, which fires ONLY when the final path is NOT Deferred.
+    if matches!(path, RenderPath::Deferred)
+        && !matches!(legs, GeometryLegs::Both)
+        && !deferred_leg_disable_implemented
+    {
+        degrades.push(RenderPathDegrade::DeferredLegDisableNotYetImplemented);
+        legs = GeometryLegs::Both;
+    }
     if !matches!(path, RenderPath::Deferred) && !matches!(legs, GeometryLegs::Mesh) && !sdf_forward_implemented
     {
         degrades.push(RenderPathDegrade::LegsCollapsedToMeshPreSdfForward);
@@ -645,9 +689,10 @@ fn degrade_ladder(
 ///
 /// Applies the rung-staged [`degrade_ladder`] against the REQUESTED `(path, legs)` first (using
 /// the real [`FORWARD_IMPLEMENTED`]/[`FORWARD_PLUS_IMPLEMENTED`]/[`VB_IMPLEMENTED`]/
-/// [`SDF_FORWARD_IMPLEMENTED`] consts), then computes every derived field via [`resolve_rules`]
-/// against the FINAL (post-degrade) `(path, legs)` — so e.g. `depth_kind`/`thin_aux`/`shadow`
-/// always describe what will ACTUALLY be recorded, never the owner's un-degraded request.
+/// [`SDF_FORWARD_IMPLEMENTED`]/[`DEFERRED_LEG_DISABLE_IMPLEMENTED`] consts), then computes every
+/// derived field via [`resolve_rules`] against the FINAL (post-degrade) `(path, legs)` — so e.g.
+/// `depth_kind`/`thin_aux`/`shadow` always describe what will ACTUALLY be recorded, never the
+/// owner's un-degraded request.
 #[inline]
 pub fn resolve_render_path(
     cfg: &RenderPathConfig,
@@ -660,8 +705,14 @@ pub fn resolve_render_path(
         RenderPath::ForwardPlus => FORWARD_PLUS_IMPLEMENTED,
         RenderPath::VisibilityBuffer => VB_IMPLEMENTED,
     };
-    let (path, legs, degrades) =
-        degrade_ladder(cfg.path, cfg.legs, caps, path_implemented, SDF_FORWARD_IMPLEMENTED);
+    let (path, legs, degrades) = degrade_ladder(
+        cfg.path,
+        cfg.legs,
+        caps,
+        path_implemented,
+        SDF_FORWARD_IMPLEMENTED,
+        DEFERRED_LEG_DISABLE_IMPLEMENTED,
+    );
     (resolve_rules(path, legs, consumers, caps), degrades)
 }
 
@@ -723,15 +774,34 @@ mod tests {
     }
 
     #[test]
-    fn deferred_never_degrades_regardless_of_legs() {
-        for legs in [GeometryLegs::Both, GeometryLegs::Mesh, GeometryLegs::Sdf] {
-            let cfg = RenderPathConfig { path: RenderPath::Deferred, legs };
-            let (resolved, degrades) =
-                resolve_render_path(&cfg, RenderPathConsumers::default(), caps_ok());
-            assert!(degrades.is_clean(), "Deferred x {legs:?} must never degrade");
-            assert_eq!(resolved.path, RenderPath::Deferred);
-            assert_eq!(resolved.legs, legs);
-        }
+    fn deferred_both_never_degrades() {
+        let cfg = RenderPathConfig { path: RenderPath::Deferred, legs: GeometryLegs::Both };
+        let (resolved, degrades) = resolve_render_path(&cfg, RenderPathConsumers::default(), caps_ok());
+        assert!(degrades.is_clean(), "Deferred x Both must never degrade -- the byte-identity anchor");
+        assert_eq!(resolved.path, RenderPath::Deferred);
+        assert_eq!(resolved.legs, GeometryLegs::Both);
+    }
+
+    // ---- rung R2: Deferred leg-disable is not implemented until R3 --------------------
+
+    #[test]
+    fn deferred_mesh_only_degrades_legs_to_both_before_r3() {
+        let cfg = RenderPathConfig { path: RenderPath::Deferred, legs: GeometryLegs::Mesh };
+        let (resolved, degrades) = resolve_render_path(&cfg, RenderPathConsumers::default(), caps_ok());
+        assert_eq!(resolved.path, RenderPath::Deferred);
+        assert_eq!(resolved.legs, GeometryLegs::Both, "Deferred leg-disable is not implemented until R3");
+        let reasons: Vec<_> = degrades.reasons().collect();
+        assert_eq!(reasons, [RenderPathDegrade::DeferredLegDisableNotYetImplemented]);
+    }
+
+    #[test]
+    fn deferred_sdf_only_degrades_legs_to_both_before_r3() {
+        let cfg = RenderPathConfig { path: RenderPath::Deferred, legs: GeometryLegs::Sdf };
+        let (resolved, degrades) = resolve_render_path(&cfg, RenderPathConsumers::default(), caps_ok());
+        assert_eq!(resolved.path, RenderPath::Deferred);
+        assert_eq!(resolved.legs, GeometryLegs::Both, "Deferred leg-disable is not implemented until R3");
+        let reasons: Vec<_> = degrades.reasons().collect();
+        assert_eq!(reasons, [RenderPathDegrade::DeferredLegDisableNotYetImplemented]);
     }
 
     // ---- VB-without-cap degrade (tested directly against the ladder, not gated on ------
@@ -745,6 +815,7 @@ mod tests {
             caps_missing(),
             true, // hypothetically landed, to exercise the device-cap rule in isolation
             true,
+            true, // isolate: the Deferred-leg-disable rule must not co-fire with this one
         );
         assert_eq!(path, RenderPath::Deferred);
         assert_eq!(legs, GeometryLegs::Mesh);
@@ -760,6 +831,7 @@ mod tests {
             caps_ok(),
             true,
             true,
+            true,
         );
         assert_eq!(path, RenderPath::VisibilityBuffer);
         assert!(degrades.is_clean());
@@ -768,8 +840,12 @@ mod tests {
     #[test]
     fn unimplemented_path_short_circuits_before_the_device_cap_check() {
         // Today (VB_IMPLEMENTED == false), a VB request degrades for
-        // PathNotYetImplemented, NOT VbDeviceCapMissing, regardless of device caps.
-        let cfg = RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Mesh };
+        // PathNotYetImplemented, NOT VbDeviceCapMissing, regardless of device caps. `legs:
+        // Both` keeps this test focused on the path-level ladder order alone (a `Mesh` leg
+        // request here would ALSO trip the R2 Deferred-leg-disable rule once the demotion
+        // lands `path == Deferred`, which is a separate concern covered by
+        // `deferred_mesh_only_degrades_legs_to_both_before_r3`).
+        let cfg = RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Both };
         let (resolved, degrades) =
             resolve_render_path(&cfg, RenderPathConsumers::default(), caps_missing());
         assert_eq!(resolved.path, RenderPath::Deferred);
@@ -783,7 +859,7 @@ mod tests {
     fn non_mesh_legs_collapse_to_mesh_before_sdf_forward_lands() {
         for legs in [GeometryLegs::Both, GeometryLegs::Sdf] {
             let (path, resolved_legs, degrades) =
-                degrade_ladder(RenderPath::Forward, legs, caps_ok(), true, false);
+                degrade_ladder(RenderPath::Forward, legs, caps_ok(), true, false, false);
             assert_eq!(path, RenderPath::Forward);
             assert_eq!(resolved_legs, GeometryLegs::Mesh);
             let reasons: Vec<_> = degrades.reasons().collect();
@@ -794,7 +870,7 @@ mod tests {
     #[test]
     fn mesh_only_legs_never_collapse() {
         let (path, legs, degrades) =
-            degrade_ladder(RenderPath::Forward, GeometryLegs::Mesh, caps_ok(), true, false);
+            degrade_ladder(RenderPath::Forward, GeometryLegs::Mesh, caps_ok(), true, false, false);
         assert_eq!(path, RenderPath::Forward);
         assert_eq!(legs, GeometryLegs::Mesh);
         assert!(degrades.is_clean());
@@ -804,7 +880,7 @@ mod tests {
     fn legs_stay_as_requested_once_sdf_forward_lands() {
         for legs in [GeometryLegs::Both, GeometryLegs::Sdf, GeometryLegs::Mesh] {
             let (path, resolved_legs, degrades) =
-                degrade_ladder(RenderPath::ForwardPlus, legs, caps_ok(), true, true);
+                degrade_ladder(RenderPath::ForwardPlus, legs, caps_ok(), true, true, true);
             assert_eq!(path, RenderPath::ForwardPlus);
             assert_eq!(resolved_legs, legs);
             assert!(degrades.is_clean());

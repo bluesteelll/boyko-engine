@@ -471,6 +471,43 @@ impl AaArm {
     }
 }
 
+/// Multi-paradigm render-path plan, rung R2 (§B "Per-path framegraph") — the geometry-leg
+/// profile [`GBufferTargets::sync_gbuffer`]/[`GBufferTargets::create`] allocate against.
+/// Derived from `scene.resolved_render_path` at the call site (the [`AaArm::from_scene`]
+/// derive-from-scene precedent) and threaded down as an explicit parameter — the seam the plan
+/// names for R3's path-conditional allocation (mesh-only skips the SDF images, sdf-only skips
+/// the vertex/instance images and the `STORAGE` usage bit, P2-b). This rung ALWAYS resolves to
+/// [`DeferredFull`](Self::DeferredFull): the resolver's R2 guard
+/// (`boyko_render::render_path_config::DEFERRED_LEG_DISABLE_IMPLEMENTED == false`) degrades
+/// every `Deferred × {Mesh, Sdf}` request to `Both`, so no other profile is reachable yet;
+/// [`GBufferTargets::create`] asserts the threaded value matches [`Self::from_scene`]. R3 lifts
+/// the guard and adds the `Mesh`-only / `Sdf`-only arms — NO allocation behavior changes this
+/// rung.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TargetsProfile {
+    /// Both geometry legs, the full Deferred image/descriptor-set contract — today's ONLY
+    /// reachable profile.
+    DeferredFull,
+}
+
+impl TargetsProfile {
+    /// Derives the profile from the boot-resolved render-path carrier (mirrors
+    /// [`AaArm::from_scene`]'s derive-from-scene precedent). `#[inline]` — a couple of `bool`
+    /// reads, no allocation.
+    #[inline]
+    pub(crate) fn from_scene(scene: &GBufferScene<'_>) -> Self {
+        // R2 guard: the resolver degrades every `Deferred x {Mesh, Sdf}` request to `Both`
+        // (`DEFERRED_LEG_DISABLE_IMPLEMENTED == false`), so `mesh_leg`/`sdf_leg` are both `true`
+        // on any frame that reaches here. R3 lifts the guard and this match grows a
+        // `Mesh`-only / `Sdf`-only arm.
+        debug_assert!(
+            scene.resolved_render_path.mesh_leg && scene.resolved_render_path.sdf_leg,
+            "invariant: the R2 resolver guard keeps Deferred at GeometryLegs::Both until R3"
+        );
+        TargetsProfile::DeferredFull
+    }
+}
+
 /// The G-buffer color format (albedo / normal / material): `R8G8B8A8_UNORM`, the
 /// STORAGE-image store target the marcher writes (matches the P1b offscreen driver's
 /// `GBUFFER_FORMAT`). The ALBEDO image is also `SAMPLED` (the present-blit) — never
@@ -4272,12 +4309,28 @@ impl GBufferTargets {
     /// On any partial failure every object created so far in this call is torn down
     /// in reverse order before the error returns (no leak on the error path), exactly
     /// like [`Scene::sync_depth`]'s build-before-teardown discipline.
+    ///
+    /// `profile` is the [`TargetsProfile`] rung R2 threads down from the caller (mirrors
+    /// `aa_extent`'s explicit-parameter discipline) — asserted below against a fresh
+    /// [`TargetsProfile::from_scene`] derivation (an O1-style parity check). This rung it is
+    /// always [`TargetsProfile::DeferredFull`]; NO allocation reads it yet (R3 makes it real).
     fn create(
         ctx: &VulkanContext,
         scene: &GBufferScene<'_>,
         extent: VkExtent2D,
         aa_extent: VkExtent2D,
+        profile: TargetsProfile,
     ) -> Result<Self, SwapchainError> {
+        // Multi-paradigm render-path plan, rung R2: the threaded `profile` must match what
+        // `scene.resolved_render_path` would derive directly — the SAME "declare/record can
+        // never diverge" discipline `path_has_raster`/`path_has_marcher` enforce in
+        // `graph_bridge.rs`/`gbuffer.rs` (W1).
+        debug_assert_eq!(
+            profile,
+            TargetsProfile::from_scene(scene),
+            "invariant: the threaded TargetsProfile must match scene.resolved_render_path"
+        );
+
         // Anti-aliasing campaign O1: `scene.aa` (FXAA), `scene.smaa` (SMAA), `scene.ssaa`
         // (SSAA), `scene.taa` (TAA) are mutually exclusive by construction (the `scene()` call
         // site arms at most one) — an explicit, zero-release-cost invariant check.
@@ -4798,12 +4851,18 @@ impl GBufferTargets {
     /// targets; on a REPLACE this additionally waits the device idle (a sibling
     /// frame-in-flight slot may still reference the old images — the same
     /// belt-and-braces [`Scene::sync_depth`] uses) before destroying them.
+    ///
+    /// `profile` is rung R2's [`TargetsProfile`] seam — see its doc. Threaded straight through
+    /// to [`Self::create`] on a (re)build; unread on the fast-path `extent`/`aa_arm` match
+    /// above (a profile-only change with no extent/AA change cannot occur today — R3 revisits
+    /// this once a live path/legs toggle exists, which Decision 1 forbids in any case).
     pub(crate) fn sync_gbuffer(
         targets: &mut Option<Self>,
         ctx: &VulkanContext,
         scene: &GBufferScene<'_>,
         extent: VkExtent2D,
         aa_extent: VkExtent2D,
+        profile: TargetsProfile,
     ) -> Result<(), SwapchainError> {
         if let Some(t) = targets.as_ref()
             && t.extent.width == extent.width
@@ -4825,7 +4884,7 @@ impl GBufferTargets {
 
         // Build the new targets BEFORE tearing down the old ones, so an allocation
         // failure leaves the previous (still-valid) targets in place.
-        let fresh = Self::create(ctx, scene, extent, aa_extent)?;
+        let fresh = Self::create(ctx, scene, extent, aa_extent, profile)?;
 
         // Asset-streaming plan F7 §5 (C1, review O1): a SECONDARY self-consistency net —
         // every material-bearing ring `create` just built must be enumerated by

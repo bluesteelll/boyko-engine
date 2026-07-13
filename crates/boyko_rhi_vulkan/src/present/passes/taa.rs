@@ -40,7 +40,7 @@ impl Renderer<'_> {
     /// lockstep by [`GBufferTargets::create`]); `activation.resolve_pipeline`'s layout matches
     /// `taa_resolve_set`'s (8 bindings + a 4-byte COMPUTE push range); `fi` is this frame's
     /// in-flight slot; the "taa_resolve" pass must be declared in [`Renderer::frame_graph`]
-    /// (the caller's `scene.taa.is_some()` gate implies `declare_gbuffer_graph` declared it —
+    /// (the caller's `scene.taa.is_some()` gate implies `declare_deferred_graph` declared it —
     /// see `graph_bridge.rs`).
     pub(crate) unsafe fn record_taa(
         &self,

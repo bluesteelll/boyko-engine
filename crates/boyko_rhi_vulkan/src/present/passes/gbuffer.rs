@@ -177,14 +177,23 @@ impl Renderer<'_> {
         // These two batched barriers are DRIVEN by `frame_graph`'s "raster" pass — the
         // graph derives the color + depth transitions, and `GbufferBarrierSink` records
         // them into the two `vkCmdPipelineBarrier` calls. The per-frame plan is set by
-        // `declare_gbuffer_graph` just before this record; every barrier site below
+        // `declare_deferred_graph` just before this record; every barrier site below
         // fetches it the same way.
         // SAFETY: recording is open; `record_graph_pass` records the graph's derived
         // barriers for the "raster" pass into `cmd` against the live G-buffer targets.
         let plan = self
             .gbuffer_pass_plan
             .as_ref()
-            .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
+            .expect("invariant: declare_frame_graph ran before record_gbuffer");
+        // Multi-paradigm render-path plan, rung R2 (O1 hard rule / W1 lesson): the declare site
+        // (`declare_deferred_graph`) and this record site MUST agree on whether the raster pass
+        // exists — both call the SAME `scene.path_has_raster()` predicate, so this can never
+        // trip unless the two sites diverge.
+        debug_assert_eq!(
+            plan.raster.is_some(),
+            scene.path_has_raster(),
+            "W1: declare/record predicate desync (raster)"
+        );
 
         // === Pillar B B3: the per-instance TRS INTERPOLATION compute PRE-PASS. Recorded ONLY
         // when the scene wires the activation (`scene.interp.is_some()`); otherwise skipped
@@ -366,7 +375,14 @@ impl Renderer<'_> {
         // barriers for the "raster" pass into `cmd` against the live G-buffer targets. When the
         // interp pass ran, this also emits the COMPUTE→VERTEX RAW barrier on the SHARED interp
         // model-out ring (the instance ring the raster VS reads).
-        self.record_graph_pass(plan.raster, cmd, targets, scene, fi);
+        //
+        // Multi-paradigm render-path plan, rung R2: `Some` iff `scene.path_has_raster()` (the
+        // `debug_assert_eq!` above already pinned this) — under the R2 resolver guard this is
+        // `Some` on every currently reachable frame, so the `if let` is byte-identical to the
+        // pre-R2 unconditional call.
+        if let Some(raster_pass) = plan.raster {
+            self.record_graph_pass(raster_pass, cmd, targets, scene, fi);
+        }
 
         // (2) Dynamic rendering at the marcher's extent: 3 MRT color attachments
         // (albedo@0, normal@1, material@2; CLEAR/STORE) + the depth attachment (CLEAR to
@@ -439,7 +455,7 @@ impl Renderer<'_> {
         // (an RT + storage device). OFF (the default / non-hwrt build) ⇒ the base 3-MRT raster ⇒
         // byte-identical. Evaluated ONCE; drives the attachment count, the color-array ptr, the
         // pipeline/layout, and the set-0 bind below.
-        // `mesh_mv_active()` is the SINGLE source shared with `declare_gbuffer_graph` (W1: the
+        // `mesh_mv_active()` is the SINGLE source shared with `declare_deferred_graph` (W1: the
         // barrier declaration and this write must never disagree).
         #[cfg(feature = "hwrt")]
         let mv_active = scene.mesh_mv_active();
@@ -462,7 +478,7 @@ impl Renderer<'_> {
         let mvpm_active = false;
         // Textured-PBR T6c: decide whether this frame uses the TEXTURED pipeline. Present on
         // BOTH cfg legs (materials/textures are device-agnostic, like `pm`) — `mesh_tex_active()`
-        // is the SINGLE source shared with `declare_gbuffer_graph`'s `pbr` write declaration
+        // is the SINGLE source shared with `declare_deferred_graph`'s `pbr` write declaration
         // (W1). `mesh_tex_active()` is ALREADY `false` whenever `mv_active` holds (T6c plan
         // Decision D4: TEXTURED is never compiled with MOTION_VECTORS), so this tier check needs
         // no explicit `!mv_active` guard of its own.
@@ -708,115 +724,125 @@ impl Renderer<'_> {
         // then `draw_indexed(index_count, instance_count, 0, 0, 0)` reads that batch's bound
         // vertex + index buffers (created on this device, carrying VERTEX/INDEX usage;
         // `index_type` a valid `VkIndexType`). Begin/End bracket pass A exactly.
-        unsafe {
-            (self.fns.cmd_begin_rendering)(cmd, &raster_rendering);
-            (self.fns.cmd_bind_pipeline)(
-                cmd,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                raster_pipeline.pipeline,
-            );
-            // M3: the instanced batch loop binds the SHARED N-instance model SSBO ONCE
-            // (set 0); the legacy (empty-slice) arm binds the 1-element identity dummy
-            // (bound-but-unread). Both bind a VALID set 0 so the VS's static `instances`
-            // reference is satisfied. The shared SSBO is `scene.instance_bind_group` for
-            // both arms (M3 repurposed it as the gather-filled N-instance ring on the
-            // instanced path); every batch indexes it by `base_instance + SV_InstanceID`.
-            (self.fns.cmd_bind_descriptor_sets)(
-                cmd,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                raster_pipeline.layout,
-                0,
-                1,
-                &raster_set.descriptor_set,
-                0,
-                ptr::null(),
-            );
-            // Textured-PBR T6c: when the TEXTURED pipeline is selected, ALSO bind the bindless
-            // texture-array descriptor SET at set 1 (FRAGMENT-visible) — its LAYOUT is already
-            // baked into `raster_pipeline.layout` at boot via
-            // `VulkanContext::create_graphics_pipeline_bindless`, so this is purely a per-frame
-            // set bind, mirroring the set-0 bind immediately above. `bindless_set` is a local so
-            // `&bindless_set` is a valid single-element pointer for the call.
-            if tex_active {
-                let bindless_set = scene
-                    .bindless_set
-                    .expect("invariant: tex_active implies bindless_set is Some");
+        //
+        // Multi-paradigm render-path plan, rung R2 (Decision 2 / O1): the whole raster
+        // begin/end-rendering block is gated on `plan.raster.is_some()` — the SAME gate the
+        // raster barriers use, single-sourced from `scene.path_has_raster()` at declare time
+        // (the `debug_assert_eq!` at this fn's top guards declare/record never diverging;
+        // review R2/P2-2: one gate expression per leg, mirroring the marcher). Under the R2
+        // resolver guard this is `Some` on every currently reachable frame, so the `if` is
+        // byte-identical to the pre-R2 unconditional block.
+        if plan.raster.is_some() {
+            unsafe {
+                (self.fns.cmd_begin_rendering)(cmd, &raster_rendering);
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    raster_pipeline.pipeline,
+                );
+                // M3: the instanced batch loop binds the SHARED N-instance model SSBO ONCE
+                // (set 0); the legacy (empty-slice) arm binds the 1-element identity dummy
+                // (bound-but-unread). Both bind a VALID set 0 so the VS's static `instances`
+                // reference is satisfied. The shared SSBO is `scene.instance_bind_group` for
+                // both arms (M3 repurposed it as the gather-filled N-instance ring on the
+                // instanced path); every batch indexes it by `base_instance + SV_InstanceID`.
                 (self.fns.cmd_bind_descriptor_sets)(
                     cmd,
                     VK_PIPELINE_BIND_POINT_GRAPHICS,
                     raster_pipeline.layout,
+                    0,
                     1,
-                    1,
-                    &bindless_set,
+                    &raster_set.descriptor_set,
                     0,
                     ptr::null(),
                 );
-            }
-            (self.fns.cmd_push_constants)(
-                cmd,
-                raster_pipeline.layout,
-                VK_SHADER_STAGE_VERTEX_BIT,
-                0,
-                scene.mvp.len() as u32,
-                scene.mvp.as_ptr().cast(),
-            );
-            (self.fns.cmd_set_viewport)(cmd, 0, 1, &raster_viewport);
-            (self.fns.cmd_set_scissor)(cmd, 0, 1, &raster_area);
-            if scene.mesh_draw.is_empty() {
-                // LEGACY arm: byte-identical to the pre-M2 stream — a non-indexed,
-                // single-instance draw over the scene's merged vertex buffer. The shared
-                // set 0 + the `use_model_matrix == 0` push (caller contract) make the bound
-                // SSBO bound-but-unread.
-                (self.fns.cmd_bind_vertex_buffers)(
-                    cmd,
-                    0,
-                    1,
-                    &scene.vertex_buffer.buffer,
-                    &vertex_offset,
-                );
-                (self.fns.cmd_draw)(cmd, scene.vertex_count, 1, 0, 0);
-            } else {
-                // M3 INSTANCED batch loop: one indexed draw per registered mesh. `scene.
-                // mvp`'s `use_model_matrix == 1` (caller contract) selects the VS arm that
-                // reads `instances[base_instance + SV_InstanceID]`. Each batch overwrites
-                // the push's `base_instance` word (offset 80, 4 bytes) with its bucket
-                // offset — NONZERO for every mesh after the first (the C1 proof) — then
-                // binds its own vertex+index buffers (with its O3 index width) and draws
-                // its instance bucket.
-                for batch in scene.mesh_draw {
-                    let base = batch.base_instance;
-                    (self.fns.cmd_push_constants)(
+                // Textured-PBR T6c: when the TEXTURED pipeline is selected, ALSO bind the bindless
+                // texture-array descriptor SET at set 1 (FRAGMENT-visible) — its LAYOUT is already
+                // baked into `raster_pipeline.layout` at boot via
+                // `VulkanContext::create_graphics_pipeline_bindless`, so this is purely a per-frame
+                // set bind, mirroring the set-0 bind immediately above. `bindless_set` is a local so
+                // `&bindless_set` is a valid single-element pointer for the call.
+                if tex_active {
+                    let bindless_set = scene
+                        .bindless_set
+                        .expect("invariant: tex_active implies bindless_set is Some");
+                    (self.fns.cmd_bind_descriptor_sets)(
                         cmd,
+                        VK_PIPELINE_BIND_POINT_GRAPHICS,
                         raster_pipeline.layout,
-                        VK_SHADER_STAGE_VERTEX_BIT,
-                        GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
-                        4,
-                        (&base as *const u32).cast(),
+                        1,
+                        1,
+                        &bindless_set,
+                        0,
+                        ptr::null(),
                     );
+                }
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    raster_pipeline.layout,
+                    VK_SHADER_STAGE_VERTEX_BIT,
+                    0,
+                    scene.mvp.len() as u32,
+                    scene.mvp.as_ptr().cast(),
+                );
+                (self.fns.cmd_set_viewport)(cmd, 0, 1, &raster_viewport);
+                (self.fns.cmd_set_scissor)(cmd, 0, 1, &raster_area);
+                if scene.mesh_draw.is_empty() {
+                    // LEGACY arm: byte-identical to the pre-M2 stream — a non-indexed,
+                    // single-instance draw over the scene's merged vertex buffer. The shared
+                    // set 0 + the `use_model_matrix == 0` push (caller contract) make the bound
+                    // SSBO bound-but-unread.
                     (self.fns.cmd_bind_vertex_buffers)(
                         cmd,
                         0,
                         1,
-                        &batch.vertex_buffer.buffer,
+                        &scene.vertex_buffer.buffer,
                         &vertex_offset,
                     );
-                    (self.fns.cmd_bind_index_buffer)(
-                        cmd,
-                        batch.index_buffer.buffer,
-                        0,
-                        batch.index_type,
-                    );
-                    (self.fns.cmd_draw_indexed)(
-                        cmd,
-                        batch.index_count,
-                        batch.instance_count,
-                        0,
-                        0,
-                        0,
-                    );
+                    (self.fns.cmd_draw)(cmd, scene.vertex_count, 1, 0, 0);
+                } else {
+                    // M3 INSTANCED batch loop: one indexed draw per registered mesh. `scene.
+                    // mvp`'s `use_model_matrix == 1` (caller contract) selects the VS arm that
+                    // reads `instances[base_instance + SV_InstanceID]`. Each batch overwrites
+                    // the push's `base_instance` word (offset 80, 4 bytes) with its bucket
+                    // offset — NONZERO for every mesh after the first (the C1 proof) — then
+                    // binds its own vertex+index buffers (with its O3 index width) and draws
+                    // its instance bucket.
+                    for batch in scene.mesh_draw {
+                        let base = batch.base_instance;
+                        (self.fns.cmd_push_constants)(
+                            cmd,
+                            raster_pipeline.layout,
+                            VK_SHADER_STAGE_VERTEX_BIT,
+                            GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
+                            4,
+                            (&base as *const u32).cast(),
+                        );
+                        (self.fns.cmd_bind_vertex_buffers)(
+                            cmd,
+                            0,
+                            1,
+                            &batch.vertex_buffer.buffer,
+                            &vertex_offset,
+                        );
+                        (self.fns.cmd_bind_index_buffer)(
+                            cmd,
+                            batch.index_buffer.buffer,
+                            0,
+                            batch.index_type,
+                        );
+                        (self.fns.cmd_draw_indexed)(
+                            cmd,
+                            batch.index_count,
+                            batch.instance_count,
+                            0,
+                            0,
+                            0,
+                        );
+                    }
                 }
+                (self.fns.cmd_end_rendering)(cmd);
             }
-            (self.fns.cmd_end_rendering)(cmd);
         }
 
         // The marcher's INPUT barriers — depth→sampled, color→general, lit/viewt/ssao
@@ -859,7 +885,7 @@ impl Renderer<'_> {
             let plan = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
+                .expect("invariant: declare_frame_graph ran before record_gbuffer");
             let light_upload = plan
                 .light_upload
                 .expect("invariant: light_dirty ⇒ light_upload pass declared");
@@ -917,7 +943,7 @@ impl Renderer<'_> {
             let coarse = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .expect("invariant: declare_frame_graph ran before record_gbuffer")
                 .coarse
                 .expect("invariant: scene.coarse.is_some() ⇒ coarse pass declared");
             self.record_graph_pass(coarse, cmd, targets, scene, fi);
@@ -1038,37 +1064,51 @@ impl Renderer<'_> {
         // COMPUTE-read).
         // SAFETY: recording is open; `record_graph_pass` records the graph's derived
         // input barriers for the "marcher" pass into `cmd` against the live G-buffer targets.
-        let marcher = self
+        //
+        // Multi-paradigm render-path plan, rung R2 (Decision 2 / O1): `plan.marcher` is `Some`
+        // iff `scene.path_has_marcher()` — the SAME predicate `declare_deferred_graph`'s
+        // `marcher` pass declaration checks. The `debug_assert_eq!` guards the two never
+        // diverging (W1); under the R2 resolver guard this is `Some`/`true` on every currently
+        // reachable frame, so the `if let` is byte-identical to the pre-R2 unconditional
+        // dispatch.
+        let marcher_plan = self
             .gbuffer_pass_plan
             .as_ref()
-            .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+            .expect("invariant: declare_frame_graph ran before record_gbuffer")
             .marcher;
-        self.record_graph_pass(marcher, cmd, targets, scene, fi);
-        unsafe {
-            (self.fns.cmd_bind_pipeline)(
-                cmd,
-                VK_PIPELINE_BIND_POINT_COMPUTE,
-                scene.marcher.pipeline,
-            );
-            (self.fns.cmd_bind_descriptor_sets)(
-                cmd,
-                VK_PIPELINE_BIND_POINT_COMPUTE,
-                scene.marcher.layout,
-                0,
-                1,
-                &targets.vocab_set[self.frame_index].descriptor_set,
-                0,
-                ptr::null(),
-            );
-            (self.fns.cmd_push_constants)(
-                cmd,
-                scene.marcher.layout,
-                VK_SHADER_STAGE_COMPUTE_BIT,
-                0,
-                GBUFFER_MARCHER_PUSH_BYTES,
-                marcher_push_bytes.as_ptr().cast(),
-            );
-            (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+        debug_assert_eq!(
+            marcher_plan.is_some(),
+            scene.path_has_marcher(),
+            "W1: declare/record predicate desync (marcher)"
+        );
+        if let Some(marcher_pass) = marcher_plan {
+            self.record_graph_pass(marcher_pass, cmd, targets, scene, fi);
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    scene.marcher.pipeline,
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    scene.marcher.layout,
+                    0,
+                    1,
+                    &targets.vocab_set[self.frame_index].descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    scene.marcher.layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    GBUFFER_MARCHER_PUSH_BYTES,
+                    marcher_push_bytes.as_ptr().cast(),
+                );
+                (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+            }
         }
 
         // (5a) PBR MVP-2: make the marcher's gAlbedo + gNormal + gMaterial STORES available
@@ -1117,7 +1157,7 @@ impl Renderer<'_> {
             let ssao_pass = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .expect("invariant: declare_frame_graph ran before record_gbuffer")
                 .ssao
                 .expect("invariant: scene.ssao.is_some() ⇒ ssao pass declared");
             self.record_graph_pass(ssao_pass, cmd, targets, scene, fi);
@@ -1218,7 +1258,7 @@ impl Renderer<'_> {
             let plan = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
+                .expect("invariant: declare_frame_graph ran before record_gbuffer");
             for level in 0..atrous_levels {
                 let atrous_pass = plan.ssao_atrous[level as usize].expect(
                     "invariant: level < ssao_atrous_levels ⇒ ssao_atrous[level] declared",
@@ -1310,7 +1350,7 @@ impl Renderer<'_> {
             let ddgi_update_pass = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .expect("invariant: declare_frame_graph ran before record_gbuffer")
                 .ddgi_update
                 .expect("invariant: scene.ddgi_update.is_some() ⇒ ddgi_update pass declared");
             // HW-RT rung R0: open the DdgiUpdate bracket BEFORE the pass's input barriers +
@@ -1402,7 +1442,7 @@ impl Renderer<'_> {
             let light_cull = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .expect("invariant: declare_frame_graph ran before record_gbuffer")
                 .light_cull
                 .expect("invariant: cull wired ⇒ light_cull pass declared");
             self.record_graph_pass(light_cull, cmd, targets, scene, fi);
@@ -1479,7 +1519,7 @@ impl Renderer<'_> {
             let csm_pass = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .expect("invariant: declare_frame_graph ran before record_gbuffer")
                 .csm
                 .expect("invariant: scene.csm.is_some() ⇒ csm pass declared");
             // HW-RT rung R0: open the CsmDepth bracket BEFORE the pass's barrier-in +
@@ -1688,7 +1728,7 @@ impl Renderer<'_> {
             let atlas_pass = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .expect("invariant: declare_frame_graph ran before record_gbuffer")
                 .atlas
                 .expect("invariant: scene.atlas_punctual.is_some() ⇒ atlas pass declared");
             // HW-RT rung R0: open the PunctualDepth bracket BEFORE the pass's barrier-in +
@@ -1928,7 +1968,7 @@ impl Renderer<'_> {
             let plan = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
+                .expect("invariant: declare_frame_graph ran before record_gbuffer");
             // (a) The VIS pre-pass. Its input barriers (gNormal/gViewT store→load already visible,
             // the build→VIS AS barrier, the `shadow_vis` first-touch UNDEFINED→GENERAL) are DRIVEN
             // by the graph's "shadow_vis" pass, recorded here.
@@ -1939,7 +1979,7 @@ impl Renderer<'_> {
             // 24-binding set when temporal is active (`sdf_mv_active()`). That variant writes
             // `gShadowVis` @21 (bit-identical to the base VIS) AND each SDF pixel's camera-only `Δuv`
             // to `motion_vec` @23. `sdf_mv_active()` is the SINGLE source shared with
-            // `declare_gbuffer_graph` (the `motion_vec` STORAGE write is declared under the SAME
+            // `declare_deferred_graph` (the `motion_vec` STORAGE write is declared under the SAME
             // predicate — W1: the barrier declaration and this write must never disagree). `Some`
             // implies the boot MV pipeline exists (⇒ RT + storage), a strict superset of the VIS-MV
             // set-build gate, so both `expect`s hold (they trip loudly on a future gate loosening,
@@ -1991,7 +2031,7 @@ impl Renderer<'_> {
             // "shadow_atrous" passes recorded here).
             //
             // W1: the SAME `.clamp(1, MAX_ATROUS_LEVELS)` the graph-declare site
-            // (`declare_gbuffer_graph`) and the host `clamped_levels()` use — all three agree by
+            // (`declare_deferred_graph`) and the host `clamped_levels()` use — all three agree by
             // construction (floor at 1 so it can never be an empty ping-pong, ceiling at the
             // per-level array bound). A prior `.min(atrous_sets.len())` here dropped the floor, so a
             // `levels == 0` author config would have recorded ZERO à-trous passes while the graph
@@ -2088,7 +2128,7 @@ impl Renderer<'_> {
             let plan = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
+                .expect("invariant: declare_frame_graph ran before record_gbuffer");
             let temporal_pass = plan
                 .shadow_temporal
                 .expect("invariant: scene.temporal_active() ⇒ shadow_temporal pass declared");
@@ -2136,7 +2176,7 @@ impl Renderer<'_> {
         let resolve = self
             .gbuffer_pass_plan
             .as_ref()
-            .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+            .expect("invariant: declare_frame_graph ran before record_gbuffer")
             .resolve;
         // HW-RT rung R0: open the DeferredResolve bracket BEFORE the resolve's input barriers
         // + dispatch. This spans the WHOLE resolve dispatch, INCLUDING the inline SDF
@@ -2292,7 +2332,7 @@ impl Renderer<'_> {
             let taa_pass = self
                 .gbuffer_pass_plan
                 .as_ref()
-                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+                .expect("invariant: declare_frame_graph ran before record_gbuffer")
                 .taa_resolve
                 .expect("invariant: scene.taa.is_some() ⇒ the taa_resolve pass was declared");
             // SAFETY: recording is open; `aa_out`/`taa_hist`/`taa_resolve_set` were built by
@@ -2315,7 +2355,7 @@ impl Renderer<'_> {
         let present_sample = self
             .gbuffer_pass_plan
             .as_ref()
-            .expect("invariant: declare_gbuffer_graph ran before record_gbuffer")
+            .expect("invariant: declare_frame_graph ran before record_gbuffer")
             .present_sample;
         self.record_graph_pass(present_sample, cmd, targets, scene, fi);
 

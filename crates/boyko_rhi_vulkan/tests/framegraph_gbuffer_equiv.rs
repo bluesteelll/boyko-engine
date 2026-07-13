@@ -58,7 +58,7 @@ struct Frame {
 fn build_maximal_frame() -> Frame {
     let mut g = FrameGraph::with_capacity(16, 16, 64);
 
-    // Images. MIRRORS `declare_gbuffer_graph`: ringed resources start undefined;
+    // Images. MIRRORS `declare_deferred_graph`: ringed resources start undefined;
     // the SINGLE-INSTANCE cascade/atlas are seeded with the sibling in-flight
     // frame's end-of-frame consumer scopes (the cross-frame WAR fix, B-002/B-003).
     let albedo = g.add_image("albedo");
@@ -82,7 +82,7 @@ fn build_maximal_frame() -> Frame {
     // handle its cross-frame ordering — NOT seeded.
     let swapchain = g.add_image("swapchain");
     // Buffers — all single instances shared by both in-flight frames (seeded,
-    // mirroring `declare_gbuffer_graph`): light_table/tiles/grid/index end their
+    // mirroring `declare_deferred_graph`): light_table/tiles/grid/index end their
     // frame consumed by a COMPUTE read; `alloc` ends on the cull's undrained
     // atomic writes (writer seed → full memory dependency for the next reset).
     let light_table = g.add_buffer_seeded(
@@ -496,7 +496,7 @@ fn compile_is_idempotent_and_reset_reuses_capacity() {
 }
 
 /// Pillar B B3 refined-B: the interp-ON path is PURELY ADDITIVE, and the SHARED instance
-/// ring (`interp_model_out`, `declare_gbuffer_graph`'s ResId 20 after the SDFDDGI I2 buffer
+/// ring (`interp_model_out`, `declare_deferred_graph`'s ResId 20 after the SDFDDGI I2 buffer
 /// reshuffle — DDGI classification/ray-table took ResIds 16/17, so the interp trio shifted to
 /// 18/19/20) that the interp compute writes is read at VERTEX by THREE passes — the raster
 /// G-buffer pass AND the CSM cascade depth pass AND the punctual atlas depth pass, all binding
@@ -506,7 +506,7 @@ fn compile_is_idempotent_and_reset_reuses_capacity() {
 /// single barrier covers all three readers by Vulkan memory-dependency semantics (a memory
 /// dependency makes the interp write available/visible to every subsequent same-stage access;
 /// the later csm/atlas VERTEX reads need no re-barrier). The refined-B topology faithful to
-/// `declare_gbuffer_graph`:
+/// `declare_deferred_graph`:
 ///   - `interp` pass: `buffer_access(interp_model_out, COMPUTE, WRITE)` — the compute write
 ///     of the ring's dynamic slots (the `add_pass("interp")` block in graph_bridge.rs);
 ///   - `raster` pass: `buffer_access(interp_model_out, VERTEX, READ)` — the ONLY declared read
@@ -551,13 +551,13 @@ fn interp_prepass_adds_exactly_one_shared_ring_compute_to_vertex_barrier() {
     let lit = g.add_image("lit");
     let cascade = g.add_image("cascade");
     let atlas = g.add_image("atlas");
-    // The B3 interp SSBOs. `interp_model_out` (ResId 20 in `declare_gbuffer_graph` after the
+    // The B3 interp SSBOs. `interp_model_out` (ResId 20 in `declare_deferred_graph` after the
     // SDFDDGI I2 buffer reshuffle — DDGI classification/ray-table occupy 16/17, so the interp
     // trio is 18/19/20) is the SHARED instance ring; `interp_pairs` is the host-written pair
     // input. Both FIF-ringed / frame-private ⇒ `add_buffer` (undefined seed), so no cross-frame
     // ordering — only the intra-frame COMPUTE→VERTEX RAW is derived. ResIds are declared BEFORE
-    // the interp pass (which accesses them), mirroring `declare_gbuffer_graph`. This test builds
-    // its OWN local frame (not `declare_gbuffer_graph`), so the absolute ResId numbering does not
+    // the interp pass (which accesses them), mirroring `declare_deferred_graph`. This test builds
+    // its OWN local frame (not `declare_deferred_graph`), so the absolute ResId numbering does not
     // affect it — the note keeps the cross-reference accurate.
     let interp_pairs = g.add_buffer("interp_pairs");
     let interp_model_out = g.add_buffer("interp_model_out");
@@ -671,7 +671,7 @@ fn interp_prepass_adds_exactly_one_shared_ring_compute_to_vertex_barrier() {
 /// pack(COMPUTE-READ) RAW on the shared instance ring at the pack (the first COMPUTE reader), and
 /// (2) pack(COMPUTE-WRITE) → build(AS_BUILD-READ) RAW on `tlas_instances` at the build — and no
 /// core-resource barrier perturbation. This builds its OWN local frame (not
-/// `declare_gbuffer_graph`), so the absolute ResId numbering is irrelevant; it isolates the
+/// `declare_deferred_graph`), so the absolute ResId numbering is irrelevant; it isolates the
 /// pack/build barrier derivation.
 #[cfg(feature = "hwrt")]
 #[test]
@@ -757,7 +757,7 @@ fn tlas_off_path_zero_new_barriers() {
     let normal = g.add_image("normal");
     let material = g.add_image("material");
     let depth = g.add_image("depth");
-    // `tlas_instances` declared (fixed ResId, as in `declare_gbuffer_graph`) but NEVER accessed
+    // `tlas_instances` declared (fixed ResId, as in `declare_deferred_graph`) but NEVER accessed
     // (tlas off ⇒ no pack/build pass).
     let _tlas_instances = g.add_buffer("tlas_instances");
 
@@ -775,7 +775,7 @@ fn tlas_off_path_zero_new_barriers() {
     );
 }
 
-/// HW-RT rung R2a-3 (RISK-2 regression pin): a FAITHFUL MIRROR of `declare_gbuffer_graph`'s
+/// HW-RT rung R2a-3 (RISK-2 regression pin): a FAITHFUL MIRROR of `declare_deferred_graph`'s
 /// buffer declaration order under `hwrt` + interp ON + tlas ON, asserting the exact ResId → sink
 /// slot mapping the [`GbufferBarrierSink`](graph_bridge) resolves by (`sink_slot = ResId - 18`,
 /// the FRAMEGRAPH_IMAGE_COUNT offset under hwrt after Rung 3a's two shadow-vis + Rung 3b's three
@@ -787,7 +787,7 @@ fn tlas_off_path_zero_new_barriers() {
 /// offset re-bases by the same const.
 ///
 /// The mirror declares 18 placeholder IMAGES first (the ResId 0..17 the real graph consumes under
-/// hwrt, so the buffers start at ResId 18), then the buffers in `declare_gbuffer_graph`'s EXACT
+/// hwrt, so the buffers start at ResId 18), then the buffers in `declare_deferred_graph`'s EXACT
 /// order: light_table..alloc (18..22), ddgi_classification/ray_table (23/24), tlas_instances (25,
 /// unconditional under hwrt), then the interp trio (26/27/28). The sink `buffers` array positions
 /// (graph_bridge.rs `record_graph_pass`) MUST match this: slot 5=ddgi_class, 6=ddgi_ray,
@@ -806,7 +806,7 @@ fn hwrt_resid_18_sink_slot_mapping_pinned() {
 
     let mut g = FrameGraph::with_capacity(20, 8, 32);
     // 18 placeholder images (ResIds 0..=17) under hwrt, matching the real graph's image span so the
-    // buffers begin at ResId 18 exactly as in `declare_gbuffer_graph` (Rung 3a added shadow_vis /
+    // buffers begin at ResId 18 exactly as in `declare_deferred_graph` (Rung 3a added shadow_vis /
     // shadow_vis2, Rung 3b added motion_vec / shadow_temporal_hist / temporal_out, Rung 3b C1/H2
     // added shadow_temporal_hist_read, textured-PBR T6a added `pbr` — all LAST in the image block,
     // before the first add_buffer).
@@ -817,7 +817,7 @@ fn hwrt_resid_18_sink_slot_mapping_pinned() {
     ] {
         g.add_image(name);
     }
-    // Buffers in `declare_gbuffer_graph`'s EXACT order.
+    // Buffers in `declare_deferred_graph`'s EXACT order.
     let light_table = g.add_buffer("light_table");
     let _tiles = g.add_buffer("tiles");
     let _grid = g.add_buffer("grid");

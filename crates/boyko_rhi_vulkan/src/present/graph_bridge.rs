@@ -32,15 +32,22 @@ pub(crate) struct GbufferPassPlan {
     /// draw SSBO is derived at the raster pass (the draw-buffer READER) and emitted by
     /// `record_pass(raster)` — after this pass's dispatch wrote the draw columns.
     pub(crate) interp: Option<crate::framegraph::PassId>,
-    /// The always-present 3-MRT + depth raster pass (sites 0/1).
-    pub(crate) raster: crate::framegraph::PassId,
+    /// The 3-MRT + depth mesh raster pass (sites 0/1). Multi-paradigm render-path plan, rung
+    /// R2 (Decision 2 / O1): `Some` iff [`GBufferScene::path_has_raster`] holds. Under Deferred
+    /// (the only reachable path today), the resolver's R2 guard
+    /// (`DEFERRED_LEG_DISABLE_IMPLEMENTED == false`) keeps `GeometryLegs` pinned to `Both`, so
+    /// this is `Some` on every current frame — byte-identical to the pre-R2 always-present pass.
+    pub(crate) raster: Option<crate::framegraph::PassId>,
     /// The async light-table re-upload (`scene.light_dirty && light_upload_bytes>0`).
     pub(crate) light_upload: Option<crate::framegraph::PassId>,
     /// The P0 coarse tile-cull (`scene.coarse.is_some()`).
     pub(crate) coarse: Option<crate::framegraph::PassId>,
-    /// The always-present marcher pass. Its `record_pass` emits the collapsed input
-    /// transitions (depth→sampled, color→general, lit/viewt first-touch — sites 3/3b/4).
-    pub(crate) marcher: crate::framegraph::PassId,
+    /// The SDF marcher pass. Its `record_pass` emits the collapsed input transitions
+    /// (depth→sampled, color→general, lit/viewt first-touch — sites 3/3b/4). Multi-paradigm
+    /// render-path plan, rung R2 (Decision 2 / O1): `Some` iff
+    /// [`GBufferScene::path_has_marcher`] holds — see [`Self::raster`]'s doc for the R2 guard
+    /// that keeps this `Some` on every currently reachable frame.
+    pub(crate) marcher: Option<crate::framegraph::PassId>,
     /// The SSAO pass (`scene.ssao.is_some()`).
     pub(crate) ssao: Option<crate::framegraph::PassId>,
     /// The SSAO edge-avoiding à-trous denoise chain: one pass per dispatch level (`scene.ssao`
@@ -403,10 +410,49 @@ impl crate::framegraph::BarrierSink for GbufferBarrierSink<'_> {
 }
 
 impl Renderer<'_> {
+    /// Multi-paradigm render-path plan, rung R2 (§B "Per-path framegraph", Decision 2): the
+    /// SINGLE dispatch point `render_gbuffer_frame` calls to (re)declare the whole-frame graph,
+    /// selecting the per-path declarator from `scene.resolved_render_path.path`. Every current
+    /// call site goes through this fn — never `declare_deferred_graph` (or a future sibling)
+    /// directly — so a future path addition only ever ADDS a match arm here.
+    ///
+    /// The `Deferred` arm is the ONLY implemented one today (`declare_deferred_graph`,
+    /// unchanged, byte-identical to the pre-R2 `declare_gbuffer_graph`); the R1 resolver
+    /// (`boyko_render::render_path_config::resolve_render_path` — a crate this one sits BELOW
+    /// in the dependency graph, hence the plain-text reference rather than an intra-doc link)
+    /// degrades every other `RenderPath` request to `Deferred` at boot
+    /// (`FORWARD_IMPLEMENTED`/`FORWARD_PLUS_IMPLEMENTED`/`VB_IMPLEMENTED` are all `false`), so
+    /// the other three arms are structurally unreachable and `unreachable!` rather than
+    /// stubbed — each names the rung that will fill it in.
+    pub(crate) fn declare_frame_graph(&mut self, scene: &GBufferScene<'_>) {
+        match scene.resolved_render_path.path {
+            // RenderPath::Deferred == 0 (render_path_config.rs) — the only rung-landed path.
+            0 => self.declare_deferred_graph(scene),
+            // RenderPath::Forward == 1 — lands at rung R4.
+            1 => unreachable!(
+                "resolver degrades unimplemented paths to Deferred (R1 degrade ladder); \
+                 RenderPath::Forward's declarator lands at rung R4"
+            ),
+            // RenderPath::ForwardPlus == 2 — lands at rung R5.
+            2 => unreachable!(
+                "resolver degrades unimplemented paths to Deferred (R1 degrade ladder); \
+                 RenderPath::ForwardPlus's declarator lands at rung R5"
+            ),
+            // RenderPath::VisibilityBuffer == 3 — lands at rung R8.
+            3 => unreachable!(
+                "resolver degrades unimplemented paths to Deferred (R1 degrade ladder); \
+                 RenderPath::VisibilityBuffer's declarator lands at rung R8"
+            ),
+            other => unreachable!(
+                "invariant: ResolvedRenderPathGpu::path is a RenderPath discriminant in 0..=3, got {other}"
+            ),
+        }
+    }
+
     /// Steps 1d/1e: re-declare the WHOLE G-buffer frame into `self.frame_graph`
     /// (`reset` + declare + `compile`), config-gated from `scene`, and store the
-    /// per-pass [`GbufferPassPlan`] in `self.gbuffer_pass_plan`. Called by
-    /// `render_gbuffer_frame` every frame, immediately before the `&self`
+    /// per-pass [`GbufferPassPlan`] in `self.gbuffer_pass_plan`. Called ONLY by
+    /// [`Self::declare_frame_graph`]'s `Deferred` arm, immediately before the `&self`
     /// `record_gbuffer`, which drives each pass's derived barriers through it.
     ///
     /// The declared accesses MUST mirror `record_gbuffer`'s real `(stage, access,
@@ -424,8 +470,12 @@ impl Renderer<'_> {
     /// under `hwrt` (absorbed by the const).
     ///
     /// Zero heap allocation (the arenas keep capacity across `reset`); the per-frame
-    /// `compile` walks a ~11-pass line (cheap).
-    pub(crate) fn declare_gbuffer_graph(&mut self, scene: &GBufferScene<'_>) {
+    /// `compile` walks a ~11-pass line (cheap). Multi-paradigm render-path plan, rung R2: the
+    /// `raster`/`marcher` passes are now `Option`-gated on
+    /// [`GBufferScene::path_has_raster`]/[`GBufferScene::path_has_marcher`] (O1 single
+    /// predicate) — every OTHER declaration in this fn is byte-for-byte unchanged from the
+    /// pre-R2 `declare_gbuffer_graph`.
+    pub(crate) fn declare_deferred_graph(&mut self, scene: &GBufferScene<'_>) {
         use crate::framegraph::{ResSync, SubRange};
 
         // The (EARLY|LATE)_FRAGMENT_TESTS stage pair the depth-write barriers use.
@@ -764,73 +814,85 @@ impl Renderer<'_> {
             (None, None)
         };
 
-        // Pass `raster` (sites 0/1): the 3-MRT G-buffer + depth.
-        let raster = g.add_pass("raster");
-        // Pillar B B3 (refined-B): when the interp pass ran, the raster VS READS the SHARED
-        // model-out ring the compute wrote — the graph derives the COMPUTE(WRITE)→VERTEX(READ)
-        // RAW barrier here (the reader). The ring is consumed at the VERTEX stage (the raster +
-        // shadow VS index `instances[...]`), so declare a VERTEX_SHADER/SHADER_READ access.
-        // Declared ONLY when the interp pass exists, so the OFF path derives nothing.
-        if let Some(model_out) = interp_model_out {
-            g.buffer_access(
-                model_out,
-                VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
-                VK_ACCESS_SHADER_READ_BIT,
-            );
-        }
-        for &c in &[albedo, normal, material] {
+        // Pass `raster` (sites 0/1): the 3-MRT G-buffer + depth. Multi-paradigm render-path
+        // plan, rung R2 (Decision 2 / O1): gated on `scene.path_has_raster()` — the SAME
+        // predicate `record_gbuffer`'s raster begin/end-rendering block checks (a
+        // `debug_assert_eq!` there guards the two never diverging). Under the R2 resolver
+        // guard (`DEFERRED_LEG_DISABLE_IMPLEMENTED == false`) `GeometryLegs` stays pinned to
+        // `Both` under `Deferred`, so this is `true` on every currently reachable frame — the
+        // declaration order and every `image_access`/`buffer_access` call below are BYTE-FOR-
+        // BYTE unchanged from the pre-R2 unconditional form, just nested one level deeper.
+        let raster = if scene.path_has_raster() {
+            let p = g.add_pass("raster");
+            // Pillar B B3 (refined-B): when the interp pass ran, the raster VS READS the SHARED
+            // model-out ring the compute wrote — the graph derives the COMPUTE(WRITE)→VERTEX(READ)
+            // RAW barrier here (the reader). The ring is consumed at the VERTEX stage (the raster +
+            // shadow VS index `instances[...]`), so declare a VERTEX_SHADER/SHADER_READ access.
+            // Declared ONLY when the interp pass exists, so the OFF path derives nothing.
+            if let Some(model_out) = interp_model_out {
+                g.buffer_access(
+                    model_out,
+                    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                );
+            }
+            for &c in &[albedo, normal, material] {
+                g.image_access(
+                    c,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    SubRange::COLOR,
+                );
+            }
+            // HW-RT Rung 3b step 5a: when the mesh-MV path is active, the raster pass ALSO writes the
+            // `motion_vec` 4th MRT (the mesh Δuv). Declare its COLOR_ATTACHMENT_WRITE so the graph
+            // transitions it UNDEFINED → COLOR_ATTACHMENT_OPTIMAL (first-touch, like the other ring
+            // color targets) and orders the later temporal-pass read after it. The gate is
+            // `mesh_mv_active()` — the SAME predicate the recorder binds the MV pipeline under (NOT
+            // `temporal_enabled` alone), so the graph never declares a write the recorder won't emit
+            // (W1: gate-divergence on a storage-ok-but-no-ray-query device). OFF (default / non-hwrt)
+            // ⇒ no access ⇒ the graph routes ZERO barriers on `motion_vec` ⇒ byte-identical.
+            #[cfg(feature = "hwrt")]
+            if scene.mesh_mv_active() {
+                g.image_access(
+                    motion_vec,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    SubRange::COLOR,
+                );
+            }
+            // Textured-PBR T6c: when the TEXTURED path is active, the raster pass ALSO writes the
+            // `pbr` 4th MRT (metallic/roughness/AO-modulation/emissive-modulation). Declare its
+            // COLOR_ATTACHMENT_WRITE so the graph orders it before the resolve's UNCONDITIONAL
+            // `pbr` read (declared below, T6a) — the SAME `mesh_tex_active()` predicate the
+            // recorder binds the TEXTURED pipeline under (W1: gate-divergence risk, mirrors
+            // `mesh_mv_active` above). TEXTURED and MOTION_VECTORS are mutually exclusive (T6c
+            // plan Decision D4), so this and the `motion_vec` write above never both fire the same
+            // frame. OFF (the default / non-textured scene) ⇒ no access ⇒ the graph routes ZERO
+            // EXTRA barriers on `pbr` beyond the resolve's own first-touch UNDEFINED → GENERAL ⇒
+            // byte-identical (T6a's gate).
+            if scene.mesh_tex_active() {
+                g.image_access(
+                    pbr,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    SubRange::COLOR,
+                );
+            }
             g.image_access(
-                c,
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                SubRange::COLOR,
+                depth,
+                FRAG,
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                SubRange::DEPTH,
             );
-        }
-        // HW-RT Rung 3b step 5a: when the mesh-MV path is active, the raster pass ALSO writes the
-        // `motion_vec` 4th MRT (the mesh Δuv). Declare its COLOR_ATTACHMENT_WRITE so the graph
-        // transitions it UNDEFINED → COLOR_ATTACHMENT_OPTIMAL (first-touch, like the other ring
-        // color targets) and orders the later temporal-pass read after it. The gate is
-        // `mesh_mv_active()` — the SAME predicate the recorder binds the MV pipeline under (NOT
-        // `temporal_enabled` alone), so the graph never declares a write the recorder won't emit
-        // (W1: gate-divergence on a storage-ok-but-no-ray-query device). OFF (default / non-hwrt)
-        // ⇒ no access ⇒ the graph routes ZERO barriers on `motion_vec` ⇒ byte-identical.
-        #[cfg(feature = "hwrt")]
-        if scene.mesh_mv_active() {
-            g.image_access(
-                motion_vec,
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                SubRange::COLOR,
-            );
-        }
-        // Textured-PBR T6c: when the TEXTURED path is active, the raster pass ALSO writes the
-        // `pbr` 4th MRT (metallic/roughness/AO-modulation/emissive-modulation). Declare its
-        // COLOR_ATTACHMENT_WRITE so the graph orders it before the resolve's UNCONDITIONAL
-        // `pbr` read (declared below, T6a) — the SAME `mesh_tex_active()` predicate the
-        // recorder binds the TEXTURED pipeline under (W1: gate-divergence risk, mirrors
-        // `mesh_mv_active` above). TEXTURED and MOTION_VECTORS are mutually exclusive (T6c
-        // plan Decision D4), so this and the `motion_vec` write above never both fire the same
-        // frame. OFF (the default / non-textured scene) ⇒ no access ⇒ the graph routes ZERO
-        // EXTRA barriers on `pbr` beyond the resolve's own first-touch UNDEFINED → GENERAL ⇒
-        // byte-identical (T6a's gate).
-        if scene.mesh_tex_active() {
-            g.image_access(
-                pbr,
-                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                SubRange::COLOR,
-            );
-        }
-        g.image_access(
-            depth,
-            FRAG,
-            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-            SubRange::DEPTH,
-        );
+            Some(p)
+        } else {
+            None
+        };
 
         // Pass `light_upload` (async light-table re-upload) — gated exactly as the hand
         // site: `light_dirty && light_upload_bytes > 0`.
@@ -873,34 +935,45 @@ impl Renderer<'_> {
         // UNDEFINED→GENERAL. (lit/ssao first-touch UNDEFINED→GENERAL are placed by the
         // graph at their own true first-use — resolve / ssao — a sound-superset re-order
         // of the hand path's eager site-(4) batch; see the module docs + equiv tests.)
-        let marcher = g.add_pass("marcher");
-        g.image_access(
-            depth,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_ACCESS_SHADER_READ_BIT,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            SubRange::DEPTH,
-        );
-        // The marcher READS the coarse tile bounds ONLY when the coarse pass ran (its
-        // push gates the read off otherwise, and the hand path emits NO tiles barrier
-        // when coarse is off). Declaring it unconditionally would derive a spurious
-        // first-touch tiles barrier the hand path never records.
-        if coarse.is_some() {
-            g.buffer_access(
-                tiles,
+        // Multi-paradigm render-path plan, rung R2 (Decision 2 / O1): gated on
+        // `scene.path_has_marcher()` — the SAME predicate `record_gbuffer`'s marcher dispatch
+        // checks (a `debug_assert_eq!` there guards parity). See [`Self::declare_deferred_graph`]'s
+        // `raster` doc for why this is `true` on every currently reachable frame; every
+        // `image_access`/`buffer_access` call below is unchanged from the pre-R2 unconditional
+        // form, just nested one level deeper.
+        let marcher = if scene.path_has_marcher() {
+            let p = g.add_pass("marcher");
+            g.image_access(
+                depth,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                SubRange::DEPTH,
             );
-        }
-        for &c in &[albedo, normal, material, viewt] {
-            g.image_access(
-                c,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                RW,
-                VK_IMAGE_LAYOUT_GENERAL,
-                SubRange::COLOR,
-            );
-        }
+            // The marcher READS the coarse tile bounds ONLY when the coarse pass ran (its
+            // push gates the read off otherwise, and the hand path emits NO tiles barrier
+            // when coarse is off). Declaring it unconditionally would derive a spurious
+            // first-touch tiles barrier the hand path never records.
+            if coarse.is_some() {
+                g.buffer_access(
+                    tiles,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                );
+            }
+            for &c in &[albedo, normal, material, viewt] {
+                g.image_access(
+                    c,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    RW,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    SubRange::COLOR,
+                );
+            }
+            Some(p)
+        } else {
+            None
+        };
 
         // Pass `ssao` — gated `scene.ssao.is_some()`. Reads normal/material/viewt (all
         // already SHADER_READ-visible from the marcher store→load), writes ssao.

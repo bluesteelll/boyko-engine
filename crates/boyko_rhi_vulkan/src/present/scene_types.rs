@@ -1857,7 +1857,7 @@ pub struct GBufferScene<'a> {
 impl GBufferScene<'_> {
     /// HW-RT Rung 3b step 5a — the SINGLE source of the "the raster pass writes the mesh
     /// motion-vector 4th MRT this frame" decision, so the framegraph barrier declaration
-    /// (`declare_gbuffer_graph`) and the draw recording (`record_gbuffer`) can never diverge.
+    /// (`declare_deferred_graph`) and the draw recording (`record_gbuffer`) can never diverge.
     ///
     /// True iff temporal is on AND the MV pipeline + this frame's MV bind group both exist (an
     /// RT + RG16-storage device built them at boot). The pipeline/bind-group presence is NOT
@@ -1881,7 +1881,7 @@ impl GBufferScene<'_> {
 
     /// Textured-PBR T6c — the SINGLE source of the "this frame draws with the TEXTURED
     /// gbuffer pipeline" decision, so the framegraph barrier declaration
-    /// (`declare_gbuffer_graph`) and the draw recording (`record_gbuffer`) can never diverge
+    /// (`declare_deferred_graph`) and the draw recording (`record_gbuffer`) can never diverge
     /// (the W1 lesson, mirroring [`Self::mesh_mv_active`]). NOT `#[cfg(feature = "hwrt")]` —
     /// TEXTURED works on the software leg (materials/textures are device-agnostic, like PM).
     ///
@@ -1924,7 +1924,7 @@ impl GBufferScene<'_> {
 
     /// HW-RT Rung 3b step 5b — the SINGLE source of the "the VIS pass ALSO writes the SDF pixels'
     /// camera-only motion vector to `motion_vec` this frame" decision, so the framegraph barrier
-    /// declaration (`declare_gbuffer_graph`) and the VIS-pass recording (`record_gbuffer`) can never
+    /// declaration (`declare_deferred_graph`) and the VIS-pass recording (`record_gbuffer`) can never
     /// diverge (the W1 lesson, mirroring [`Self::mesh_mv_active`]).
     ///
     /// True iff temporal is on AND the VIS-MV pipeline + its build-time inputs (the 24-binding
@@ -1947,7 +1947,7 @@ impl GBufferScene<'_> {
     }
 
     /// HW-RT Rung 3b step 6 — the SINGLE source of the "the temporal reproject+accumulate pass runs
-    /// this frame" decision, so the framegraph declaration (`declare_gbuffer_graph`: the temporal
+    /// this frame" decision, so the framegraph declaration (`declare_deferred_graph`: the temporal
     /// pass + the resolve's `temporal_out`-vs-à-trous read) and the recording (`record_gbuffer`: the
     /// temporal dispatch + the DENOISED resolve set selection) can never diverge (the W1 lesson,
     /// mirroring [`Self::mesh_mv_active`] / [`Self::sdf_mv_active`]).
@@ -1959,6 +1959,29 @@ impl GBufferScene<'_> {
     #[cfg(feature = "hwrt")]
     pub(crate) fn temporal_active(&self) -> bool {
         self.shadow.as_ref().is_some_and(|sh| sh.temporal)
+    }
+
+    /// Multi-paradigm render-path plan, rung R2 (Decision 2 / O1) — the SINGLE source of "does
+    /// this frame's declarator/recorder emit the mesh raster pass" decision, so
+    /// `declare_deferred_graph`'s `raster` pass declaration and `record_gbuffer`'s raster
+    /// begin/end-rendering block can never diverge (the W1 lesson, mirroring
+    /// [`Self::mesh_mv_active`]).
+    ///
+    /// `== resolved_render_path.mesh_leg`. The R1 resolver's R2 guard
+    /// (`boyko_render::render_path_config::DEFERRED_LEG_DISABLE_IMPLEMENTED == false`) degrades
+    /// every `Deferred × {Mesh, Sdf}` request to `Both`, so this is `true` on every frame
+    /// reachable today — Deferred's byte-identity anchor is untouched by this rung.
+    #[inline]
+    pub(crate) fn path_has_raster(&self) -> bool {
+        self.resolved_render_path.mesh_leg
+    }
+
+    /// Sibling of [`Self::path_has_raster`] for the SDF marcher pass — `== resolved_render_path
+    /// .sdf_leg`. See [`Self::path_has_raster`]'s doc for the R2 guard that keeps this `true` on
+    /// every currently reachable frame.
+    #[inline]
+    pub(crate) fn path_has_marcher(&self) -> bool {
+        self.resolved_render_path.sdf_leg
     }
 }
 
