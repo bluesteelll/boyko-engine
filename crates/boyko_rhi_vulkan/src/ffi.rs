@@ -1180,6 +1180,10 @@ pub const VK_COMPARE_OP_LESS_OR_EQUAL: i32 = 3;
 /// `VkCompareOp::VK_COMPARE_OP_ALWAYS` (CSM Increment 0: pinned in `abi_guard.rs` for
 /// the agnostic [`CompareOp::Always`](boyko_rhi::enums::CompareOp) discriminant).
 pub const VK_COMPARE_OP_ALWAYS: i32 = 7;
+/// `VkCompareOp::VK_COMPARE_OP_GREATER` — multi-paradigm render-path plan, rung R4b-b
+/// (Decision 4): the Forward path's reverse-Z depth-test compare op (a LARGER stored
+/// depth is nearer under reverse-Z, so the fragment with the greater `z` wins).
+pub const VK_COMPARE_OP_GREATER: i32 = 4;
 
 /// `VkAttachmentLoadOp` / `VkAttachmentStoreOp` discriminants for dynamic rendering.
 pub const VK_ATTACHMENT_LOAD_OP_LOAD: i32 = 0;

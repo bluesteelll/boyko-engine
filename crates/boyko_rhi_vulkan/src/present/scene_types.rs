@@ -1895,11 +1895,84 @@ pub struct GBufferScene<'a> {
     pub bindless_set: Option<VkDescriptorSet>,
     /// Multi-paradigm render-path plan, rung R1: the boot-committed render-path selection,
     /// threaded down from `boyko_app::runner`'s ONE-TIME `resolve_render_path` call (Decision
-    /// 1 — never re-derived per frame, unlike `aa`/`ssao` above). DEAD-BUT-THREADED: nothing in
-    /// this crate reads it yet (R2 wires the per-path declarator dispatch). See
-    /// [`ResolvedRenderPathGpu`]'s doc for the `boyko_render` → `boyko_rhi_vulkan` boundary
+    /// 1 — never re-derived per frame, unlike `aa`/`ssao` above). As of rung R4b-b this is READ
+    /// (`declare_frame_graph`'s dispatch, `TargetsProfile::from_scene`), not merely threaded.
+    /// See [`ResolvedRenderPathGpu`]'s doc for the `boyko_render` → `boyko_rhi_vulkan` boundary
     /// crossing.
     pub resolved_render_path: ResolvedRenderPathGpu,
+
+    // ---- Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh pipeline ---------
+    //
+    // Built UNCONDITIONALLY at `boyko_app::gpu_scene::GpuSceneBundles::boot` (the
+    // `ssao_pipelines` precedent — cheap to create, no per-frame cost either way), so PRODUCTION
+    // always threads `Some(...)` here, regardless of `resolved_render_path.path`; only a
+    // `Forward`-resolved boot ever RECORDS the pass (`declare_forward_graph`/`record_forward`).
+    //
+    // Code-review fix: these 5 fields were originally plain non-`Option` references. That forced
+    // EVERY `GBufferScene`-constructing test fixture that never exercises `Forward` (every
+    // fixture in `window_present_gbuffer.rs`) to thread a type-matching-but-semantically-WRONG
+    // placeholder (e.g. `&raster_pipeline` standing in for `forward_pipeline`, `&vocab_layout`
+    // for both `forward_layout0`/`forward_layout1` despite their different binding counts/shapes)
+    // just to satisfy the compiler — exactly the kind of "compiles but is nonsense if ever read"
+    // trap `Option::None` exists to make impossible. `Option` lets those fixtures say `None`
+    // (an honest "Forward is not wired here") instead.
+    /// The Forward v1 mesh raster pipeline (`forward_opaque.{vs,fs}.hlsl`) — a plain 2-Vulkan-set
+    /// layout (set 0 = [`Self::forward_layout0`]'s 5 bindings, set 1 = [`Self::forward_layout1`]'s
+    /// 4 bindings), `VK_COMPARE_OP_GREATER` depth test (Decision 4, hardware reverse-Z). Built
+    /// via [`VulkanContext::create_graphics_pipeline_forward`]. Boot-panic fix: an earlier
+    /// revision used a 3-set `[Set0, <empty Set1 placeholder>, Set2]` shape — a zero-binding
+    /// bind-group layout is REJECTED by `RhiDevice::create_bind_group_layout`'s own
+    /// `1..=MAX_BIND_GROUP_BINDINGS` invariant, crashing `GpuSceneBundles::boot`.
+    /// `forward_opaque.fs.hlsl`'s shadow bindings were renumbered from Set 2 to Set 1 instead
+    /// (that shader's doc), eliminating the placeholder. `None` in every test fixture that never
+    /// resolves `Forward` (`TargetsProfile::from_scene`/`record_forward` are the only readers,
+    /// both gated on `resolved_render_path.path == Forward`, so a `None` here is never `.expect`-ed).
+    pub forward_pipeline: Option<&'a VulkanGraphicsPipeline>,
+    /// Code-review follow-up (rung R4b-b): the Forward v1 sky BACKGROUND pipeline
+    /// (`forward_sky.{vs,fs}.hlsl`) — replicates the deferred resolve's `mask == 0` analytic
+    /// sky/ground gradient + sun disc for uncovered pixels (`deferred_pbr.hlsl:1369-1414`).
+    /// REUSES [`Self::forward_layout0`] as its ONLY set (its FS reads just `Camera`/`LightBuf`,
+    /// a subset — the SAME "shader references a subset of what its layout declares" idiom
+    /// [`Self::forward_pipeline`]'s own Set-0 VS-only bindings already establish); `depth_format:
+    /// None` (no depth attachment declared — Vulkan permits this within a dynamic-rendering scope
+    /// that DOES bind one, the pipeline simply neither tests nor writes it), so
+    /// [`Renderer::record_forward`](super::frame_driver::Renderer::record_forward) draws it
+    /// FIRST inside `forward_opaque`'s SAME `begin_rendering` scope, before the opaque mesh loop
+    /// (which keeps its own real depth test/write). Same `Option`/`None`-in-non-Forward-fixtures
+    /// rationale as [`Self::forward_pipeline`].
+    pub forward_sky_pipeline: Option<&'a VulkanGraphicsPipeline>,
+    /// The Forward v1 Set-0 (core) bind-group LAYOUT — 5 bindings: `instances` @0 (VERTEX,
+    /// [`Self::forward_instance_ring`]), `instance_materials` @1 (VERTEX,
+    /// [`Self::forward_instance_material_ring`]), `Camera` @2 (FRAGMENT, [`Self::camera_ring`]),
+    /// `LightBuf` @3 (FRAGMENT, [`Self::light_table`]), `Materials` @4 (FRAGMENT,
+    /// [`Self::material_table`]) — byte-identical binding SHAPE to `forward_opaque.fs.hlsl`'s
+    /// doc. [`GBufferTargets`] writes the per-FIF bind group against this layout once per extent
+    /// (the `vocab_layout`/`resolve_layout` precedent). See [`Self::forward_pipeline`]'s doc for
+    /// the `Option` rationale.
+    pub forward_layout0: Option<&'a VulkanBindGroupLayout>,
+    /// The Forward v1 Set-1 (shadow) bind-group LAYOUT — 4 bindings: `gCsm`+`gCsmCmp` @0
+    /// (FRAGMENT, COMBINED_IMAGE_SAMPLER, [`Self::csm_cascade_texture`] +
+    /// [`Self::csm_compare_sampler`]), `CsmCascades` UBO @1 (FRAGMENT,
+    /// [`Self::csm_cascade_ring`]), `gShadowAtlas`+`gShadowAtlasCmp` @2 (FRAGMENT,
+    /// COMBINED_IMAGE_SAMPLER, [`Self::shadow_atlas_texture`] + [`Self::shadow_atlas_sampler`]),
+    /// `ShadowAtlas` UBO @3 (FRAGMENT, [`Self::shadow_atlas_ubo`]) — byte-identical binding
+    /// SHAPE to `forward_opaque.fs.hlsl`'s doc (a DIFFERENT binding-number layout than the
+    /// deferred resolve's single compute set, same underlying resources). NOT the bindless
+    /// texture table (unlike Deferred/TEXTURED's Set 1) — this v1 pipeline has none. See
+    /// [`Self::forward_pipeline`]'s doc for the `Option` rationale.
+    pub forward_layout1: Option<&'a VulkanBindGroupLayout>,
+    /// The RAW per-FIF instance-model SSBO ring (`InstanceModelCol`) — the SAME
+    /// `instance_rings` [`Self::instance_bind_group`]/[`Self::pm_bind_group`] already bind, now
+    /// ALSO exposed as raw buffer references so [`GBufferTargets`] can fold them into Forward's
+    /// OWN 5-binding Set 0 (a different grouping than any existing bind group). Zero new
+    /// allocation — a plumbing-only reference. See [`Self::forward_pipeline`]'s doc for the
+    /// `Option` rationale.
+    pub forward_instance_ring: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// The RAW per-FIF `PerInstanceMaterial` SSBO ring — the SAME ring [`Self::pm_bind_group`]
+    /// already binds at its own binding 1, exposed raw for the same reason as
+    /// [`Self::forward_instance_ring`]. See [`Self::forward_pipeline`]'s doc for the `Option`
+    /// rationale.
+    pub forward_instance_material_ring: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
 }
 
 impl GBufferScene<'_> {
@@ -2051,6 +2124,16 @@ impl GBufferScene<'_> {
     #[inline]
     pub(crate) fn path_has_mesh_depth_neutral_clear(&self) -> bool {
         self.resolved_render_path.sdf_leg && !self.resolved_render_path.mesh_leg
+    }
+
+    /// Multi-paradigm render-path plan, rung R4b-b — the SINGLE source of "is this frame's
+    /// declarator/recorder the `Forward` path" decision, so `declare_frame_graph`'s dispatch and
+    /// `render_gbuffer_frame`'s record-site dispatch (`record_forward` vs `record_gbuffer`) can
+    /// never diverge (the W1 lesson, mirroring [`Self::path_has_raster`]). `RenderPath::Forward`
+    /// is discriminant `1` (`boyko_render::render_path_config::RenderPath`).
+    #[inline]
+    pub(crate) fn path_is_forward(&self) -> bool {
+        self.resolved_render_path.path == 1
     }
 }
 

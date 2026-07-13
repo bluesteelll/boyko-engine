@@ -538,6 +538,19 @@ pub struct VulkanBindGroupLayout {
     pub(crate) entry_count: usize,
 }
 
+impl VulkanBindGroupLayout {
+    /// Multi-paradigm render-path plan, rung R4b-b: the raw `VkDescriptorSetLayout` handle —
+    /// a public accessor for cross-crate callers that need to hand a layout to a MULTI-SET
+    /// pipeline builder taking raw handles (e.g.
+    /// [`VulkanContext::create_graphics_pipeline_forward`]'s `set1_placeholder`/`set2_layout`
+    /// parameters), mirroring [`crate::bindless::VulkanBindlessSet::set_layout`]'s existing
+    /// public-accessor precedent for the SAME `create_graphics_pipeline_bindless` shape.
+    #[inline]
+    pub fn set_layout(&self) -> VkDescriptorSetLayout {
+        self.set_layout
+    }
+}
+
 /// One layout entry's `(binding, kind)` pair, retained by [`VulkanBindGroupLayout`]
 /// for the `create_bind_group` cross-check (Render P1a, review M1/M2). A trivial POD
 /// (`Copy`, no heap), read only on the create/debug path — never on the per-frame

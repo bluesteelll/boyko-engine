@@ -35,7 +35,9 @@ use boyko_rhi_vulkan::compute::{
     INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS,
     LOCAL_SIZE_X, TILE_BOUND_BYTES, TILE_SIZE, csm_depth_fs_spirv, csm_depth_vs_spirv, deferred_pbr_spirv,
     deferred_pbr_wrap_spirv,
-    encode_edit_list, fullscreen_sample_fs_spirv, fullscreen_sample_vs_spirv, fxaa_fs_spirv,
+    encode_edit_list, forward_opaque_fs_spirv, forward_opaque_vs_spirv, forward_sky_fs_spirv,
+    forward_sky_vs_spirv, fullscreen_sample_fs_spirv,
+    fullscreen_sample_vs_spirv, fxaa_fs_spirv,
     gbuffer_mrt_fs_spirv,
     gbuffer_mrt_pm_fs_spirv, gbuffer_mrt_pm_vs_spirv, gbuffer_mrt_tex_fs_spirv,
     gbuffer_mrt_tex_vs_spirv, gbuffer_mrt_vs_spirv, interp_instances_spirv, punctual_depth_fs_spirv,
@@ -789,6 +791,21 @@ pub(crate) struct GpuSceneBundles {
     ssao_atrous_layout: VulkanBindGroupLayout,
     // ── CSM / atlas (bound-but-unread trios; depth passes OFF in R3) ─────────
     csm: CsmResources,
+    // ── Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh raster
+    // pipeline + its own descriptor-set layouts (see `boot`'s doc for why these are
+    // built UNCONDITIONALLY, not gated on `ResolvedRenderPath`). ──────────────────
+    /// The Forward v1 mesh raster pipeline (`forward_opaque.{vs,fs}.hlsl`) — a plain 2-set
+    /// `[Set0, Set1]` layout (no placeholder — see `boot`'s doc for the boot-panic fix that
+    /// renumbered the shadow set from Set 2 to Set 1).
+    forward_pipeline: VulkanGraphicsPipeline,
+    /// Code-review follow-up (rung R4b-b): the Forward v1 sky background pipeline
+    /// (`forward_sky.{vs,fs}.hlsl`) — reuses `forward_layout0`, no depth attachment declared
+    /// (`boot`'s doc).
+    forward_sky_pipeline: VulkanGraphicsPipeline,
+    /// The Forward Set-0 (core) bind-group layout — 5 bindings (`GpuSceneBundles::boot`'s doc).
+    forward_layout0: VulkanBindGroupLayout,
+    /// The Forward Set-1 (shadow) bind-group layout — 4 bindings (CSM + punctual atlas).
+    forward_layout1: VulkanBindGroupLayout,
     /// `ceil(composite pixels / LOCAL_SIZE_X)` — the marcher + resolve dispatch
     /// width, boot-fixed to the composite extent (plan D7).
     dispatch_group_count_x: u32,
@@ -2081,6 +2098,179 @@ impl GpuSceneBundles {
         // valid descriptors); both depth passes stay OFF in R3.
         let csm = CsmResources::create(device, &instance_layout);
 
+        // ── Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh raster
+        // pipeline + its own Set-0 (core)/Set-2 (shadow) bind-group layouts. Built
+        // UNCONDITIONALLY at boot (the `ssao_pipelines` precedent — `ResolvedRenderPath`
+        // does not reach `boot()`'s call site, and the pipeline is cheap to create; only a
+        // `Forward`-resolved boot ever RECORDS the pass). Set 0 binding shape MUST match
+        // `forward_opaque.vs/fs.hlsl`'s doc exactly: instances @0 (VERTEX), instance_materials
+        // @1 (VERTEX), Camera @2 (FRAGMENT), LightBuf @3 (FRAGMENT), Materials @4 (FRAGMENT).
+        let forward_layout0 = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::VERTEX,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::VERTEX,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        count: 1,
+                        kind: DescriptorKind::UniformBuffer,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 4,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: Forward Set-0 bind-group layout create");
+        // Set 1 binding shape: `gCsm`+`gCsmCmp` @0 (FRAGMENT, combined), `CsmCascades` @1
+        // (FRAGMENT), `gShadowAtlas`+`gShadowAtlasCmp` @2 (FRAGMENT, combined), `ShadowAtlas`
+        // @3 (FRAGMENT) — `forward_opaque.fs.hlsl`'s OWN binding numbers (a DIFFERENT layout
+        // than the deferred resolve's single compute set, same underlying resources).
+        //
+        // Boot-panic fix: renumbered from an original Set 2 design (with an empty Set-1
+        // PLACEHOLDER layout in between, for Vulkan's contiguous-set-index rule). A zero-binding
+        // `BindGroupLayoutDesc` violates `create_bind_group_layout`'s own `1..=
+        // MAX_BIND_GROUP_BINDINGS` invariant (`rhi_impl/device.rs:205`) — a real
+        // `GpuSceneBundles::boot` panic. `forward_opaque.fs.hlsl`'s shadow bindings were
+        // renumbered to Set 1 instead (that shader's doc), so Forward is a plain 2-set
+        // `[Set0, Set1]` pipeline — no placeholder needed.
+        let forward_layout1 = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::CombinedImageSampler,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::UniformBuffer,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        count: 1,
+                        kind: DescriptorKind::CombinedImageSampler,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        count: 1,
+                        kind: DescriptorKind::UniformBuffer,
+                        stage: ShaderStage::FRAGMENT,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: Forward Set-1 bind-group layout create");
+        let forward_vs = RhiDevice::create_shader_module(device, forward_opaque_vs_spirv())
+            .expect("invariant: Forward mesh vertex shader module create");
+        let forward_fs = RhiDevice::create_shader_module(device, forward_opaque_fs_spirv())
+            .expect("invariant: Forward mesh fragment shader module create");
+        let forward_pipeline = ctx
+            .create_graphics_pipeline_forward(
+                &GraphicsPipelineDesc {
+                    vertex_module: &forward_vs,
+                    vertex_entry: c"main",
+                    fragment_module: &forward_fs,
+                    fragment_entry: c"main",
+                    // ONE color attachment (`lit`, reused from the Deferred allocation, C5) —
+                    // unlike the 3/4-MRT Deferred raster pipelines.
+                    color_formats: &[RASTER_COLOR_FORMAT],
+                    // Forward's OWN reverse-Z depth image (a SEPARATE allocation from Deferred's
+                    // custom-linear `depth` — Decision 4); the format is the SAME `D32Sfloat`.
+                    depth_format: Some(Format::D32Sfloat),
+                    topology: PrimitiveTopology::TriangleList,
+                    vertex_layout: Some(VertexBufferLayout {
+                        stride: MESH_VERTEX_STRIDE as u32,
+                        attributes: &attributes,
+                    }),
+                    push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
+                    bind_group_layout: Some(&forward_layout0),
+                    blend: None,
+                    cull_mode: CullMode::None,
+                    depth_bias: None,
+                },
+                forward_layout1.set_layout(),
+            )
+            .expect("invariant: Forward mesh graphics pipeline create");
+        // SAFETY: both modules were created on `device` and are consumed by the pipeline
+        // create; each is destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, forward_fs);
+            RhiDevice::destroy_shader_module(device, forward_vs);
+        }
+
+        // ── Code-review follow-up (rung R4b-b): the Forward v1 sky BACKGROUND pipeline
+        // (`forward_sky.{vs,fs}.hlsl`) — replicates the deferred resolve's analytic sky/ground
+        // gradient + sun disc for `mask == 0` pixels (`deferred_pbr.hlsl:1369-1414`), drawn FIRST
+        // inside `forward_opaque`'s SAME dynamic-rendering scope so opaque geometry then draws
+        // over it. REUSES `forward_layout0` (its FS reads only Camera @2 + LightBuf @3, a subset
+        // of that layout's 5 bindings — the SAME "bound-but-unread subset" idiom every other
+        // pipeline in this fn's set already relies on) via the ORDINARY `create_graphics_pipeline`
+        // (a plain 1-set pipeline — the sky FS never reads the shadow Set-1 layout, so
+        // `create_graphics_pipeline_forward`'s 2-set shape is unneeded here). `depth_format:
+        // None`: no depth attachment declared (Vulkan permits recording a pipeline with
+        // `depthAttachmentFormat == UNDEFINED` inside a rendering scope that DOES bind a depth
+        // attachment — this pipeline simply neither tests nor writes it), so `record_forward`
+        // draws it with depth test/write OFF while `forward_pipeline`'s own real
+        // `VK_COMPARE_OP_GREATER` depth-write pass (drawn right after, same scope) is untouched.
+        // No vertex buffer (`vertex_layout: None`, `SV_VertexID`-only fullscreen triangle) and no
+        // push constants (`push_constant_bytes: 0`).
+        let sky_vs = RhiDevice::create_shader_module(device, forward_sky_vs_spirv())
+            .expect("invariant: Forward sky vertex shader module create");
+        let sky_fs = RhiDevice::create_shader_module(device, forward_sky_fs_spirv())
+            .expect("invariant: Forward sky fragment shader module create");
+        let forward_sky_pipeline = RhiDevice::create_graphics_pipeline(
+            device,
+            &GraphicsPipelineDesc {
+                vertex_module: &sky_vs,
+                vertex_entry: c"main",
+                fragment_module: &sky_fs,
+                fragment_entry: c"main",
+                color_formats: &[RASTER_COLOR_FORMAT],
+                depth_format: None,
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: None,
+                push_constant_bytes: 0,
+                bind_group_layout: Some(&forward_layout0),
+                blend: None,
+                cull_mode: CullMode::None,
+                depth_bias: None,
+            },
+        )
+        .expect("invariant: Forward sky graphics pipeline create");
+        // SAFETY: both modules were created on `device` and are consumed by the pipeline
+        // create; each is destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, sky_fs);
+            RhiDevice::destroy_shader_module(device, sky_vs);
+        }
+
         // ── The B3 interpolation pre-pass (host plan R5, refined-B): the pair /
         // out-slot SSBO rings + bind groups + compute pipeline, sized to the same
         // INSTANCE_CAPACITY as the affine instance ring. Its model_out target is the
@@ -2497,6 +2687,10 @@ impl GpuSceneBundles {
             viewt_from_depth_pipeline,
             viewt_from_depth_layout,
             csm,
+            forward_pipeline,
+            forward_sky_pipeline,
+            forward_layout0,
+            forward_layout1,
             dispatch_group_count_x,
         }
     }
@@ -3669,6 +3863,20 @@ impl GpuSceneBundles {
             bindless_set: any_textured_material
                 .then(|| self.tex.as_ref().map(|t| t.bindless_set))
                 .flatten(),
+            // Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh pipeline + its
+            // descriptor-set layouts (built UNCONDITIONALLY at boot, `GpuSceneBundles::boot`'s
+            // doc) + the raw instance-model/instance-material ring refs `ForwardTargets::build`
+            // (`boyko_rhi_vulkan::present::targets`) folds into Forward's OWN Set-0 bind group.
+            // Code-review fix: `Some(...)` ALWAYS — these resources genuinely exist at every
+            // boot regardless of `resolved_render_path.path` (the `Option` on `GBufferScene`
+            // exists so a NON-production test fixture can honestly say `None` instead of
+            // threading a semantically-wrong placeholder; production never needs to).
+            forward_pipeline: Some(&self.forward_pipeline),
+            forward_sky_pipeline: Some(&self.forward_sky_pipeline),
+            forward_layout0: Some(&self.forward_layout0),
+            forward_layout1: Some(&self.forward_layout1),
+            forward_instance_ring: Some(&self.instance_rings),
+            forward_instance_material_ring: Some(&self.pm_instance_material_rings),
             // Multi-paradigm render-path plan, rung R1: the plain-POD conversion (see this
             // fn's `resolved_render_path` param doc for why it cannot be a `From` impl).
             resolved_render_path: to_gpu_resolved_render_path(&resolved_render_path),
@@ -3804,6 +4012,14 @@ impl GpuSceneBundles {
         // (mirrors the showcase teardown at window_present_gbuffer ~8504..8551).
         unsafe {
             self.csm.destroy(ctx);
+            // Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh raster pipeline
+            // + its descriptor-set layouts, created right after `csm` in `boot` — destroyed
+            // here, right after it (reverse acquisition). The sky pipeline was created right
+            // after `forward_pipeline`, so it is destroyed right after it here too.
+            RhiDevice::destroy_graphics_pipeline(ctx, self.forward_pipeline);
+            RhiDevice::destroy_graphics_pipeline(ctx, self.forward_sky_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.forward_layout0);
+            RhiDevice::destroy_bind_group_layout(ctx, self.forward_layout1);
             RhiDevice::destroy_graphics_pipeline(ctx, self.present_pipeline);
             RhiDevice::destroy_graphics_pipeline(ctx, self.fxaa_pipeline);
             // Anti-aliasing Stage 2: the three SMAA pipelines — `smaa_edge_pipeline` shares

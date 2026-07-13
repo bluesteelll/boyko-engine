@@ -92,22 +92,18 @@ use boyko_macros::Resource;
 
 // ---- rung-staged implementation flags (plan §H) ---------------------------------------
 
-/// Whether the `Forward` [`RenderPath`] has a landed declarator/pipeline yet. STILL `false`:
-/// rung R4b ships in two halves. R4b-a landed this module's [`cap_forward_v1_consumers`] scope
-/// cut, `forward_opaque.{vs,fs}.hlsl`, and `boyko_render::view::forward_view_proj_rows`. R4b-b
-/// (`declare_forward_graph`, the Forward `TargetsProfile`, boot-time pipeline/set creation, the
-/// recorder) has NOT landed yet — `graph_bridge.rs::declare_frame_graph`'s `Forward` arm is
-/// still `unreachable!()`. Flipping this to `true` before R4b-b lands would let
-/// `resolve_render_path` return `path == Forward` at boot, which `declare_frame_graph` would
-/// then hit as its `unreachable!()` arm on the very first frame — a real boot-time panic, not a
-/// theoretical one (caught in review). `true` lands WITH R4b-b, alongside the
-/// `declare_forward_graph` arm that makes `Forward` an actually-reachable path. Until then, every
-/// `Forward` request degrades to `Deferred` ([`RenderPathDegrade::PathNotYetImplemented`]).
-/// [`cap_forward_v1_consumers`] is unit-tested directly against its own pipeline (mirrors how
-/// [`resolve_rules`]'s Rev-5 rules are tested ahead of any rung landing — see this module's
-/// tests), so the v1 scope-cut behavior is provably correct TODAY, ready to activate the instant
-/// this flips.
-const FORWARD_IMPLEMENTED: bool = false;
+/// Whether the `Forward` [`RenderPath`] has a landed declarator/pipeline yet. `true` as of
+/// rung R4b-b: `graph_bridge.rs::declare_frame_graph`'s `Forward` arm now dispatches to
+/// `declare_forward_graph`, the `TargetsProfile::ForwardMesh` allocation exists, the boot-time
+/// pipeline/descriptor-set creation is wired (`boyko_app::gpu_scene`), and `record_forward`
+/// records the pass. R4b-a landed this module's [`cap_forward_v1_consumers`] scope cut,
+/// `forward_opaque.{vs,fs}.hlsl`, and `boyko_render::view::forward_view_proj_rows`; R4b-b landed
+/// the GPU wiring half that makes `Forward` an actually-reachable path — flipping this const was
+/// gated on that declarator existing (a `Forward` resolve before R4b-b landed would have hit
+/// `declare_frame_graph`'s `unreachable!()` arm on the very first frame). Every `Forward` request
+/// now resolves to `RenderPath::Forward` (subject to [`cap_forward_v1_consumers`]'s scope cut —
+/// pre-light consumers + TAA still degrade until a later rung lands their producers).
+const FORWARD_IMPLEMENTED: bool = true;
 
 /// Whether the `ForwardPlus` [`RenderPath`] has a landed declarator/pipeline yet. Lifted `true`
 /// at rung R5.
@@ -568,9 +564,11 @@ impl RenderPathDegradeLog {
 /// 4/6/7/8) — computed from the FINAL (post-degrade) `path`/`legs`, with no knowledge of which
 /// rung has landed (that is [`resolve_render_path`]'s degrade-ladder concern, applied BEFORE
 /// this fn is called). Kept as its own fn (rather than inlined into [`resolve_render_path`]) so
-/// it is directly unit-testable against a HYPOTHETICAL fully-landed path (e.g. `Forward` with
-/// `FORWARD_IMPLEMENTED` still `false`) — the Rev-5 MOTION-only `prepass_writes_motion` rule
-/// must be provably correct TODAY, not merely once R4 lands.
+/// it is directly unit-testable against a HYPOTHETICAL fully-landed path (e.g. `ForwardPlus`/
+/// `VisibilityBuffer`, still `false` as of R4b-b) — the Rev-5 MOTION-only `prepass_writes_motion`
+/// rule must be provably correct TODAY for those paths too, not merely once their own rung lands.
+/// `Forward` itself is real as of R4b-b ([`FORWARD_IMPLEMENTED`] `true`), so its own truth table
+/// is exercised through the public [`resolve_render_path`] entry point (this module's tests).
 ///
 /// # The Rev-5 single predicate
 ///
@@ -792,12 +790,10 @@ fn cap_forward_v1_consumers(
 /// independent of the ladder), then computes every derived field via [`resolve_rules`] against
 /// the FINAL `(path, legs)` and the (possibly capped) consumers — so e.g.
 /// `depth_kind`/`thin_aux`/`shadow`/`needs_depth_prepass` always describe what will ACTUALLY be
-/// recorded, never the owner's un-degraded/un-capped request. With [`FORWARD_IMPLEMENTED`] still
-/// `false` (R4b-b has not landed — see its doc), the ladder always demotes a `Forward` request to
-/// `Deferred` BEFORE [`cap_forward_v1_consumers`] ever sees `path == Forward`, so that fn is a
-/// no-op here today; its own behavior against a HYPOTHETICAL landed `Forward` is proven directly
-/// by this module's tests (the same "test the rule ahead of the rung" discipline
-/// [`resolve_rules`]'s Rev-5 tests already use).
+/// recorded, never the owner's un-degraded/un-capped request. [`FORWARD_IMPLEMENTED`] is `true`
+/// as of rung R4b-b, so a `Forward` request now reaches [`cap_forward_v1_consumers`] for real
+/// (through THIS fn, not only through the module's own direct-pipeline tests) — its scope-cut
+/// behavior (forcing every pre-light consumer + TAA off) is exercised end-to-end here.
 #[inline]
 pub fn resolve_render_path(
     cfg: &RenderPathConfig,
@@ -863,12 +859,11 @@ mod tests {
 
     #[test]
     fn every_non_deferred_path_degrades_today() {
-        // `FORWARD_IMPLEMENTED` is still `false` (R4b-b — `declare_forward_graph` — has not
-        // landed; see its doc). `Forward`'s v1 scope-cut behavior (`cap_forward_v1_consumers`)
-        // is proven directly against the internal pipeline in its own truth-table block below
-        // (the "test the rule ahead of the rung" discipline), NOT through `resolve_render_path`,
-        // which still degrades every one of these three paths to `Deferred` today.
-        for path in [RenderPath::Forward, RenderPath::ForwardPlus, RenderPath::VisibilityBuffer] {
+        // Rung R4b-b landed `Forward` for real (`FORWARD_IMPLEMENTED == true`) — it is EXCLUDED
+        // from this loop (see `forward_both_lands_on_forward_with_legs_collapsed_to_mesh` +
+        // the `cap_forward_v1_consumers` truth-table block below for its real behavior).
+        // `ForwardPlus`/`VisibilityBuffer` still degrade to `Deferred` today.
+        for path in [RenderPath::ForwardPlus, RenderPath::VisibilityBuffer] {
             let cfg = RenderPathConfig { path, legs: GeometryLegs::Both };
             let (resolved, degrades) =
                 resolve_render_path(&cfg, RenderPathConsumers::default(), caps_ok());
@@ -876,6 +871,21 @@ mod tests {
             let reasons: Vec<_> = degrades.reasons().collect();
             assert_eq!(reasons, [RenderPathDegrade::PathNotYetImplemented(path)]);
         }
+    }
+
+    // ---- rung R4b-b: `Forward` is real through the public `resolve_render_path` entry point ---
+
+    #[test]
+    fn forward_both_lands_on_forward_with_legs_collapsed_to_mesh() {
+        // `SDF_FORWARD_IMPLEMENTED` is still `false` (R-SDFFWD has not landed) — a non-`Mesh`
+        // leg set collapses to `Mesh` (the pre-existing ladder rule), independent of `Forward`
+        // itself now being implemented.
+        let cfg = RenderPathConfig { path: RenderPath::Forward, legs: GeometryLegs::Both };
+        let (resolved, degrades) = resolve_render_path(&cfg, RenderPathConsumers::default(), caps_ok());
+        assert_eq!(resolved.path, RenderPath::Forward);
+        assert_eq!(resolved.legs, GeometryLegs::Mesh);
+        let reasons: Vec<_> = degrades.reasons().collect();
+        assert_eq!(reasons, [RenderPathDegrade::LegsCollapsedToMeshPreSdfForward]);
     }
 
     #[test]
@@ -997,44 +1007,31 @@ mod tests {
         }
     }
 
-    // ---- rung R4b: Forward v1 scope cut (`cap_forward_v1_consumers`) truth table -------
+    // ---- rung R4b-b: Forward v1 scope cut (`cap_forward_v1_consumers`) truth table -----
     //
-    // `FORWARD_IMPLEMENTED` is still `false` (R4b-b has not landed — `declare_frame_graph`'s
-    // `Forward` arm in `boyko_rhi_vulkan::present::graph_bridge` is still `unreachable!()`), so
-    // `resolve_render_path` itself always demotes a `Forward` request to `Deferred` today (see
-    // `every_non_deferred_path_degrades_today` above) — routing THESE tests through it would
-    // just re-prove the ladder, not `cap_forward_v1_consumers`. Instead this block drives the
-    // internal pipeline directly with a HYPOTHETICAL `path_implemented = true`, mirroring the
-    // SAME "test the rule ahead of the rung" discipline `resolve_rules`'s own Rev-5 tests already
-    // use (e.g. `motion_only_shadow_temporal_arms_depth_prepass_under_forward` above) — so the
-    // v1 scope-cut behavior is provably correct TODAY and activates unchanged the instant
-    // `FORWARD_IMPLEMENTED` flips at R4b-b.
+    // `FORWARD_IMPLEMENTED` is `true` as of rung R4b-b (`declare_forward_graph` landed —
+    // `boyko_rhi_vulkan::present::graph_bridge::declare_frame_graph`'s `Forward` arm is real), so
+    // these tests now route through the PUBLIC `resolve_render_path` entry point directly — the
+    // same "the resolve fn is the gate" discipline every other truth-table block in this module
+    // uses (see `every_non_deferred_path_degrades_today` above for the sibling paths that still
+    // route through the same fn while un-implemented).
 
-    /// Drives `degrade_ladder` (with a HYPOTHETICAL `path_implemented = true` for `Forward` —
-    /// see this block's header) -> `cap_forward_v1_consumers` -> `resolve_rules`, the SAME
-    /// three-stage pipeline `resolve_render_path` runs, threading the REAL
-    /// [`SDF_FORWARD_IMPLEMENTED`] const so the legs-collapse rule behaves exactly as it does in
-    /// production today.
-    fn resolve_forward_v1_hypothetical(
+    /// Resolves a `Forward` request through the real, public [`resolve_render_path`] entry point
+    /// (kept as a thin named helper — not inlined — purely to keep this block's call sites
+    /// concise; it is no longer a hypothetical pipeline, `FORWARD_IMPLEMENTED` being `true` means
+    /// this is byte-for-byte what production `boyko_app::runner` calls at boot).
+    fn resolve_forward_v1(
         legs: GeometryLegs,
         consumers: RenderPathConsumers,
     ) -> (ResolvedRenderPath, RenderPathDegradeLog) {
-        let (path, legs, mut degrades) = degrade_ladder(
-            RenderPath::Forward,
-            legs,
-            caps_ok(),
-            true, // HYPOTHETICAL: Forward landed (R4b-b) -- the const under test stays untouched
-            SDF_FORWARD_IMPLEMENTED,
-        );
-        assert_eq!(path, RenderPath::Forward, "path_implemented=true must keep Forward (not degrade it)");
-        let consumers = cap_forward_v1_consumers(path, consumers, &mut degrades);
-        (resolve_rules(path, legs, consumers, caps_ok()), degrades)
+        let cfg = RenderPathConfig { path: RenderPath::Forward, legs };
+        resolve_render_path(&cfg, consumers, caps_ok())
     }
 
     #[test]
     fn forward_mesh_clean_lands_on_forward_with_no_degrades() {
         let (resolved, degrades) =
-            resolve_forward_v1_hypothetical(GeometryLegs::Mesh, RenderPathConsumers::default());
+            resolve_forward_v1(GeometryLegs::Mesh, RenderPathConsumers::default());
         assert_eq!(resolved.path, RenderPath::Forward);
         assert!(degrades.is_clean());
         assert!(resolved.mesh_leg && !resolved.sdf_leg);
@@ -1054,7 +1051,7 @@ mod tests {
             (RenderPathConsumers { ssr_on: true, ..Default::default() }, "ssr"),
             (RenderPathConsumers { hwrt_denoise_or_vis_on: true, ..Default::default() }, "hwrt_denoise_or_vis"),
         ] {
-            let (resolved, degrades) = resolve_forward_v1_hypothetical(GeometryLegs::Mesh, consumers);
+            let (resolved, degrades) = resolve_forward_v1(GeometryLegs::Mesh, consumers);
             assert_eq!(resolved.path, RenderPath::Forward, "{label}: path itself does not degrade");
             assert!(!resolved.needs_depth_prepass, "{label}: must stay capped off under Forward v1");
             assert!(!resolved.mesh_geo_shade_split);
@@ -1072,7 +1069,7 @@ mod tests {
     #[test]
     fn forward_taa_is_capped_off_with_a_warn() {
         let consumers = RenderPathConsumers { taa_on: true, ..Default::default() };
-        let (resolved, degrades) = resolve_forward_v1_hypothetical(GeometryLegs::Mesh, consumers);
+        let (resolved, degrades) = resolve_forward_v1(GeometryLegs::Mesh, consumers);
         assert_eq!(resolved.path, RenderPath::Forward);
         assert_eq!(resolved.thin_aux, ThinAuxMask::NONE, "TAA capped off -> no MOTION channel armed");
         let reasons: Vec<_> = degrades.reasons().collect();
@@ -1082,7 +1079,7 @@ mod tests {
     #[test]
     fn forward_pre_light_and_taa_both_capped_stack_two_reasons() {
         let consumers = RenderPathConsumers { ssao_on: true, taa_on: true, ..Default::default() };
-        let (resolved, degrades) = resolve_forward_v1_hypothetical(GeometryLegs::Mesh, consumers);
+        let (resolved, degrades) = resolve_forward_v1(GeometryLegs::Mesh, consumers);
         assert_eq!(resolved.path, RenderPath::Forward);
         assert!(!resolved.needs_depth_prepass);
         let reasons: Vec<_> = degrades.reasons().collect();
@@ -1101,7 +1098,7 @@ mod tests {
         // legs-level degrade (ladder) AND both consumer-level caps (this fn) fire in one call --
         // proving the 4-slot RenderPathDegradeLog headroom is exercised, not just declared.
         let consumers = RenderPathConsumers { ssao_on: true, taa_on: true, ..Default::default() };
-        let (resolved, degrades) = resolve_forward_v1_hypothetical(GeometryLegs::Both, consumers);
+        let (resolved, degrades) = resolve_forward_v1(GeometryLegs::Both, consumers);
         assert_eq!(resolved.path, RenderPath::Forward);
         assert_eq!(resolved.legs, GeometryLegs::Mesh, "Both collapses to Mesh pre-SDF-forward");
         let reasons: Vec<_> = degrades.reasons().collect();

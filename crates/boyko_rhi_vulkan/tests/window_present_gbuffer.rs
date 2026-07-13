@@ -2259,6 +2259,16 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         vocab_layout: &vocab_layout,
         edit_list: &edit_list,
         camera_ring: &camera_ring,
+        // Multi-paradigm render-path plan, rung R4b-b: `None` — this fixture never resolves
+        // `RenderPath::Forward` (`GBufferScene::forward_pipeline`'s doc: `Option` exists so a
+        // non-Forward test can say so honestly instead of threading a semantically-wrong
+        // placeholder like `&raster_pipeline`/`&vocab_layout`).
+        forward_pipeline: None,
+        forward_sky_pipeline: None,
+        forward_layout0: None,
+        forward_layout1: None,
+        forward_instance_ring: None,
+        forward_instance_material_ring: None,
         tiles_buffer: &tiles_buffer,
         // Brick bindings 9..=14: the ACTIVATED clip-map's REAL per-level resources. Level 0's grid +
         // atlas at @9/@10, level 1 at @11/@12, level 2 at @13/@14 — the genuine 3-level cache (NOT the
@@ -3241,6 +3251,16 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         vocab_layout: &vocab_layout,
         edit_list: &edit_list,
         camera_ring: &camera_ring,
+        // Multi-paradigm render-path plan, rung R4b-b: `None` — this fixture never resolves
+        // `RenderPath::Forward` (`GBufferScene::forward_pipeline`'s doc: `Option` exists so a
+        // non-Forward test can say so honestly instead of threading a semantically-wrong
+        // placeholder like `&raster_pipeline`/`&vocab_layout`).
+        forward_pipeline: None,
+        forward_sky_pipeline: None,
+        forward_layout0: None,
+        forward_layout1: None,
+        forward_instance_ring: None,
+        forward_instance_material_ring: None,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),
@@ -5780,6 +5800,15 @@ fn engine_deferred_mesh_only_512_screenshot_dump() {
     );
 }
 
+// Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh-only golden used to live
+// here as `engine_forward_mesh_512_screenshot_dump`. Code-review re-route: this harness's
+// `run_showcase_body` independently re-implements boot + scene assembly (it does NOT go through
+// `boyko_app::gpu_scene`), so it could never actually exercise `RenderPath::Forward` with real
+// resources. The golden moved to `crates/boyko_app/tests/forward_mesh.rs`
+// (`forward_mesh_screenshot_dump`), which boots through the REAL production
+// `boyko_app::runner`/`gpu_scene::GpuSceneBundles` path — see `goldens/PINS.toml`'s
+// `[forward_mesh]` pin (`crate = "boyko-app"`).
+
 /// The GRAND flagship showcase screenshot with SDFDDGI **GI ON** — the FIRST render (rung I4) that
 /// arms the live probe-update pass AND the resolve's GI-injection gate. The warm sun drives the
 /// probe update, whose converged indirect irradiance the resolve injects onto the two SDF spheres
@@ -8138,6 +8167,16 @@ fn run_showcase_body_ddgi(
         vocab_layout: &vocab_layout,
         edit_list: &edit_list,
         camera_ring: &camera_ring,
+        // Multi-paradigm render-path plan, rung R4b-b: `None` — this fixture never resolves
+        // `RenderPath::Forward` (`GBufferScene::forward_pipeline`'s doc: `Option` exists so a
+        // non-Forward test can say so honestly instead of threading a semantically-wrong
+        // placeholder like `&raster_pipeline`/`&vocab_layout`).
+        forward_pipeline: None,
+        forward_sky_pipeline: None,
+        forward_layout0: None,
+        forward_layout1: None,
+        forward_instance_ring: None,
+        forward_instance_material_ring: None,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),
@@ -9539,6 +9578,16 @@ fn run_showcase_body(
         vocab_layout: &vocab_layout,
         edit_list: &edit_list,
         camera_ring: &camera_ring,
+        // Multi-paradigm render-path plan, rung R4b-b: `None` — this fixture never resolves
+        // `RenderPath::Forward` (`GBufferScene::forward_pipeline`'s doc: `Option` exists so a
+        // non-Forward test can say so honestly instead of threading a semantically-wrong
+        // placeholder like `&raster_pipeline`/`&vocab_layout`).
+        forward_pipeline: None,
+        forward_sky_pipeline: None,
+        forward_layout0: None,
+        forward_layout1: None,
+        forward_instance_ring: None,
+        forward_instance_material_ring: None,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),

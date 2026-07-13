@@ -877,10 +877,11 @@ impl RhiDevice<Vulkan> for VulkanContext {
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
         // Textured-PBR T6c (plan Decision D5): the real work moved to `build_graphics_pipeline`
         // (a Vulkan-only inherent method, below) so it can be shared with
-        // `create_graphics_pipeline_bindless`'s 2-set path. `set1: None` here reuses the
-        // IDENTICAL code path (not merely a `None`-gated branch) every pre-T6c caller took —
-        // byte-identical `VkPipelineLayoutCreateInfo` by construction.
-        self.build_graphics_pipeline(desc, None)
+        // `create_graphics_pipeline_bindless`'s 2-set path. `set1: None, VK_COMPARE_OP_LESS`
+        // here reuses the IDENTICAL code path (not merely a `None`-gated branch) every
+        // pre-T6c/pre-R4b-b caller took — byte-identical `VkPipelineLayoutCreateInfo`/
+        // depth-stencil state by construction.
+        self.build_graphics_pipeline(desc, None, VK_COMPARE_OP_LESS)
     }
 
     unsafe fn destroy_graphics_pipeline(&self, pipeline: VulkanGraphicsPipeline) {
@@ -1155,15 +1156,33 @@ impl VulkanContext {
     /// EVERY existing caller (`RhiDevice::create_graphics_pipeline`) takes — the produced
     /// `VkPipelineLayoutCreateInfo` is BYTE-IDENTICAL to the pre-T6c single-set (or zero-set)
     /// layout: `set_layout_count`/`p_set_layouts[0]`/the push range are computed the SAME way,
-    /// just from a 2-element inline array instead of a scalar local (the driver reads only the
-    /// first `set_layout_count` entries either way, so the extra unread slot is inert). This
-    /// fn is the SOLE body both `create_graphics_pipeline` and
-    /// [`Self::create_graphics_pipeline_bindless`] call — a shared code path, not a
-    /// `None`-gated branch, so every pre-T6c pipeline's layout is untouched BY CONSTRUCTION.
+    /// just from a 3-element inline array instead of a scalar local (the driver reads only the
+    /// first `set_layout_count` entries either way, so the extra unread slots are inert). This
+    /// fn is the SOLE body `create_graphics_pipeline`, [`Self::create_graphics_pipeline_bindless`],
+    /// AND (multi-paradigm render-path plan, rung R4b-b) [`Self::create_graphics_pipeline_forward`]
+    /// call — a shared code path, not a `None`-gated branch, so every pre-T6c/pre-R4b-b pipeline's
+    /// layout is untouched BY CONSTRUCTION.
+    ///
+    /// Rung R4b-b boot-panic fix: an earlier revision of this fn took a THIRD `set2` parameter so
+    /// `forward_opaque.fs.hlsl`'s (then Set-2) shadow bindings could sit past an empty Set-1
+    /// placeholder. That placeholder was a ZERO-BINDING [`BindGroupLayoutDesc`], which
+    /// [`RhiDevice::create_bind_group_layout`]'s own `1..=MAX_BIND_GROUP_BINDINGS` invariant
+    /// REJECTS — a real `GpuSceneBundles::boot` panic (`debug_assert!` in `create_bind_group_layout`,
+    /// `device.rs:205`), caught post-implementation. The shader's shadow bindings were renumbered
+    /// to Set 1 instead (`forward_opaque.fs.hlsl`'s doc), so Forward is a plain 2-set
+    /// `[Set0, Set1]` pipeline — the SAME shape [`Self::create_graphics_pipeline_bindless`]
+    /// already builds, no placeholder needed. `set2` was removed; `set1` now serves BOTH the
+    /// bindless texture set (T6c) AND Forward's shadow set (R4b-b) — two DIFFERENT call sites,
+    /// never both at once.
+    ///
+    /// `depth_compare` (rung R4b-b): the depth-test compare op, `VK_COMPARE_OP_LESS` for every
+    /// pre-R4b-b caller (Deferred's custom-linear depth, nearer = smaller `z`) or
+    /// `VK_COMPARE_OP_GREATER` for Forward's hardware reverse-Z (Decision 4, nearer = larger `z`).
     fn build_graphics_pipeline(
         &self,
         desc: &GraphicsPipelineDesc<Vulkan>,
         set1: Option<VkDescriptorSetLayout>,
+        depth_compare: i32,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
         let device = self.device();
         let fns = self.device_fns();
@@ -1198,18 +1217,19 @@ impl VulkanContext {
             .bind_group_layout
             .map_or(VkDescriptorSetLayout::NULL, |bgl| bgl.set_layout);
         let has_set0 = desc.bind_group_layout.is_some();
-        // Textured-PBR T6c (D5): a set-1-only layout (skipping set 0) is not a shape this
-        // engine ever needs — the textured raster pipeline always declares BOTH the
-        // `PerInstanceMaterialTex` layout at set 0 and the bindless layout at set 1.
+        // Textured-PBR T6c (D5) / rung R4b-b: a set-1-only layout (skipping set 0) is not a
+        // shape this engine ever needs — both `set1` callers (the TEXTURED raster pipeline's
+        // bindless set, Forward's shadow set) always declare set 0 too.
         debug_assert!(
             set1.is_none() || has_set0,
-            "invariant: a set-1 (bindless) pipeline layout always also declares set 0"
+            "invariant: a set-1 pipeline layout always also declares set 0"
         );
-        // `set_layout_count` is EXACTLY `u32::from(has_set0)` when `set1` is `None` — the
-        // byte-identical value `create_graphics_pipeline`'s pre-T6c code computed — and `2`
-        // only when `set1` is `Some` (T6c's textured pipeline). The array always holds both
-        // slots; the driver reads only the first `set_layout_count` of them.
-        let set_layouts: [VkDescriptorSetLayout; 2] = [set0, set1.unwrap_or(VkDescriptorSetLayout::NULL)];
+        // `set_layout_count` is EXACTLY `u32::from(has_set0)` when `set1` is `None` (the
+        // byte-identical value `create_graphics_pipeline`'s pre-T6c code computed) or `2` when
+        // `set1` is `Some` (T6c's textured pipeline OR R4b-b's Forward pipeline). The array
+        // always holds both slots; the driver reads only the first `set_layout_count` of them.
+        let set_layouts: [VkDescriptorSetLayout; 2] =
+            [set0, set1.unwrap_or(VkDescriptorSetLayout::NULL)];
         let set_layout_count: u32 = if set1.is_some() { 2 } else { u32::from(has_set0) };
         let has_any_set = set_layout_count > 0;
         let pl_info = VkPipelineLayoutCreateInfo {
@@ -1234,10 +1254,10 @@ impl VulkanContext {
         // descriptor sets (null array valid for count 0) or `set_layout_count` sets
         // pointing at the live `set_layouts` inline array (alive for this whole fn) — slot
         // 0 the caller's live bind-group set-layout when `has_set0`, slot 1 the caller's
-        // live bindless set-layout when `set1.is_some()` — and either zero push ranges
-        // (null array valid for count 0) or one range pointing at the `push_range` local
-        // (alive for this whole fn) when `has_push`; `&mut layout` is a valid out-pointer;
-        // NULL allocator.
+        // live bindless set-layout (T6c) or Forward's shadow set-layout (R4b-b) when
+        // `set1.is_some()` — and either zero push ranges (null array valid for count 0) or
+        // one range pointing at the `push_range` local (alive for this whole fn) when
+        // `has_push`; `&mut layout` is a valid out-pointer; NULL allocator.
         let raw =
             unsafe { (fns.create_pipeline_layout)(device, &pl_info, ptr::null(), &mut layout) };
         let result = VkResult::from_raw(raw);
@@ -1490,20 +1510,22 @@ impl VulkanContext {
         };
 
         // Depth-stencil state (Phase-6 S0 rung 4). Declared ONLY when a depth format
-        // is present: depth test + write enabled, compare op LESS (nearer fragment
-        // wins), no depth-bounds, no stencil. A `None` `depth_format` (rungs 1..3)
-        // leaves both the depth-stencil pointer null and `depth_attachment_format`
-        // UNDEFINED, so the rung-2/3 no-depth pipelines stay byte-identical. The
-        // `depth_state` local must outlive the create call, so it is bound here. The
-        // agnostic `Format` discriminant equals the `VkFormat` constant (asserted in
-        // `abi_guard.rs`); `VK_COMPARE_OP_LESS` is the FFI constant.
+        // is present: depth test + write enabled, compare op `depth_compare` (`LESS` for
+        // every Deferred/CSM/atlas caller — nearer fragment wins; `GREATER` for Forward's
+        // hardware reverse-Z, rung R4b-b Decision 4 — nearer fragment has the LARGER stored
+        // depth), no depth-bounds, no stencil. A `None` `depth_format` (rungs 1..3) leaves
+        // both the depth-stencil pointer null and `depth_attachment_format` UNDEFINED, so
+        // the rung-2/3 no-depth pipelines stay byte-identical. The `depth_state` local must
+        // outlive the create call, so it is bound here. The agnostic `Format` discriminant
+        // equals the `VkFormat` constant (asserted in `abi_guard.rs`); `VK_COMPARE_OP_LESS`/
+        // `VK_COMPARE_OP_GREATER` are the FFI constants.
         let depth_state = VkPipelineDepthStencilStateCreateInfo {
             s_type: VkStructureType::PipelineDepthStencilStateCreateInfo,
             p_next: ptr::null(),
             flags: 0,
             depth_test_enable: VK_TRUE,
             depth_write_enable: VK_TRUE,
-            depth_compare_op: VK_COMPARE_OP_LESS,
+            depth_compare_op: depth_compare,
             depth_bounds_test_enable: VK_FALSE,
             stencil_test_enable: VK_FALSE,
             front: VkStencilOpState::default(),
@@ -1644,6 +1666,30 @@ impl VulkanContext {
         desc: &GraphicsPipelineDesc<Vulkan>,
         set1_layout: VkDescriptorSetLayout,
     ) -> Result<VulkanGraphicsPipeline, VulkanError> {
-        self.build_graphics_pipeline(desc, Some(set1_layout))
+        self.build_graphics_pipeline(desc, Some(set1_layout), VK_COMPARE_OP_LESS)
+    }
+
+    /// Multi-paradigm render-path plan, rung R4b-b: builds Forward v1's mesh raster pipeline —
+    /// set 0 exactly as `desc.bind_group_layout` declares (`forward_opaque.vs/fs.hlsl`'s
+    /// 5-binding core set: instances/instance_materials/Camera/LightBuf/Materials), set 1 =
+    /// `set1_layout` (the CSM + punctual-atlas shadow set, `forward_opaque.fs.hlsl`'s Set 1 —
+    /// renumbered from an original Set 2 design: with no bindless texture table this v1 rung,
+    /// Set 1 is free, so the pipeline layout is a plain 2-set `[Set0, Set1]`, the SAME shape
+    /// [`Self::create_graphics_pipeline_bindless`] builds; a `set2`-with-empty-set1-placeholder
+    /// shape was tried first and rejected — `RhiDevice::create_bind_group_layout`'s own
+    /// `1..=MAX_BIND_GROUP_BINDINGS` invariant forbids a zero-binding layout, which crashed
+    /// `GpuSceneBundles::boot`, `build_graphics_pipeline`'s doc). Depth-tests
+    /// `VK_COMPARE_OP_GREATER` (Decision 4: hardware reverse-Z — a nearer fragment has the LARGER
+    /// stored depth), unlike every other graphics pipeline in this engine (`VK_COMPARE_OP_LESS`,
+    /// Deferred's custom-linear depth). A Vulkan-only, ADDITIVE inherent method (the
+    /// [`Self::create_graphics_pipeline_bindless`] precedent): `boyko_rhi::GraphicsPipelineDesc`
+    /// itself is UNCHANGED (no new field), so every pre-existing pipeline construction site
+    /// across the workspace needs no edit.
+    pub fn create_graphics_pipeline_forward(
+        &self,
+        desc: &GraphicsPipelineDesc<Vulkan>,
+        set1_layout: VkDescriptorSetLayout,
+    ) -> Result<VulkanGraphicsPipeline, VulkanError> {
+        self.build_graphics_pipeline(desc, Some(set1_layout), VK_COMPARE_OP_GREATER)
     }
 }

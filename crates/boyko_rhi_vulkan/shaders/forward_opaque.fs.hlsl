@@ -28,19 +28,21 @@
 //   * **Material.** NON-TEXTURED ONLY: `base_color`/`metallic`/`roughness`/`emissive` come from
 //     the `Materials` SSBO (`MaterialGpu`, byte-identical to the deferred resolve's binding 4),
 //     keyed by the VS-forwarded flat `mat_id`. `#ifdef TEXTURED` is a seam for a later rung
-//     (mirrors `gbuffer_mrt.fs.hlsl`'s own TEXTURED variant) — the bindless texture table (§G
-//     Set 1) is therefore OMITTED entirely from this v1 pipeline (not merely unbound-but-
-//     declared): the fragment shader references no `Texture2D[]`, so the boot-time pipeline
-//     layout needs no Set 1 at all until a textured variant lands (documented deviation from
-//     §G's "Set 1 bound identically to Deferred/Forward TEXTURED, even if unused" — v1
-//     minimalism, since this shader never emits a `NonUniformResourceIndex` reference).
+//     (mirrors `gbuffer_mrt.fs.hlsl`'s own TEXTURED variant) — the bindless texture table is
+//     therefore OMITTED entirely from this v1 pipeline (not merely unbound-but-declared): the
+//     fragment shader references no `Texture2D[]`, so a textured variant lands as its OWN 3-set
+//     pipeline (Set0/Set1-bindless/Set2-shadow) later, not by widening this one.
 //   * **Shadows** (IN SCOPE): CSM cascades + the sparse spot/point atlas, sampled INLINE via
 //     `shadow_apply.hlsli`'s `csm_visibility`/`spot_atlas_visibility`/`punctual_atlas_visibility`
-//     — the SAME leaf functions (Decision 7) the deferred resolve calls, at Forward's OWN Set 2
-//     bindings (a DIFFERENT descriptor set/binding layout than Deferred's single compute set,
-//     but the SAME global/type NAMES `shadow_apply.hlsli`'s INCLUDE CONTRACT requires — see that
-//     header's doc for the "fixed names, different binding numbers" idiom, mirroring
-//     `sdf_field.hlsli`'s `Buf` precondition).
+//     — the SAME leaf functions (Decision 7) the deferred resolve calls, at Forward's OWN **Set 1**
+//     bindings (renumbered from the plan's original Set 2 — see the Set-1 block's own doc for
+//     why: with no bindless texture table this v1 rung, Set 1 is free, and a 2-set `[Set0, Set1]`
+//     pipeline layout needs no empty-placeholder set to stay contiguous, unlike a 3-set
+//     `[Set0, <empty Set1>, Set2]` shape, which a boot-time `create_bind_group_layout` invariant
+//     rejects outright — a zero-binding layout is never valid). A DIFFERENT descriptor
+//     set/binding layout than Deferred's single compute set, but the SAME global/type NAMES
+//     `shadow_apply.hlsli`'s INCLUDE CONTRACT requires — see that header's doc for the "fixed
+//     names, different binding numbers" idiom, mirroring `sdf_field.hlsli`'s `Buf` precondition.
 //
 // # Shadow baked-term simplification (mesh-only)
 //
@@ -107,8 +109,16 @@ struct MaterialGpu {
 };
 [[vk::binding(4, 0)]] StructuredBuffer<MaterialGpu> Materials;
 
-// --- Set 2 (Forward shadow, §G): CSM + punctual atlas -- `shadow_apply.hlsli`'s INCLUDE ------
-// --- CONTRACT precondition (fixed names, Forward's OWN binding numbers) --------------------
+// --- Set 1 (Forward shadow, §G — RENUMBERED from Set 2, boot-panic fix): CSM + punctual atlas --
+// --- `shadow_apply.hlsli`'s INCLUDE CONTRACT precondition (fixed names, Forward's OWN binding --
+// --- numbers). Originally Set 2 with an empty Set 1 placeholder (Vulkan requires contiguous ---
+// --- set indices 0..N); the placeholder's ZERO-BINDING layout violated
+// `create_bind_group_layout`'s own `1..=MAX_BIND_GROUP_BINDINGS` invariant (a real boot panic in
+// `GpuSceneBundles::boot`, caught in review). Renumbered to Set 1 so the pipeline layout is a
+// plain 2-set `[Set0, Set1]` — no placeholder needed, matching the existing
+// `create_graphics_pipeline_bindless` 2-set shape. Set 1 is therefore NOT the bindless texture
+// table here (unlike Deferred/TEXTURED, where Set 1 IS the bindless set) — this v1 pipeline has
+// no texture table at all (the file header's scope-cut note), so Set 1 is free for shadow. ---
 
 static const uint MAX_CASCADES = 4u;
 struct CascadeData {
@@ -117,9 +127,9 @@ struct CascadeData {
     float    texel_size;
     float2   _pad;
 };
-[[vk::binding(0, 2)]] Texture2DArray<float> gCsm : register(t12);
-[[vk::binding(0, 2)]] SamplerComparisonState gCsmCmp : register(s12);
-[[vk::binding(1, 2)]] cbuffer CsmCascades {
+[[vk::binding(0, 1)]] Texture2DArray<float> gCsm : register(t12);
+[[vk::binding(0, 1)]] SamplerComparisonState gCsmCmp : register(s12);
+[[vk::binding(1, 1)]] cbuffer CsmCascades {
     CascadeData gCascades[MAX_CASCADES];
     uint gCsmActive;
     uint gCsmMode;
@@ -132,9 +142,9 @@ struct FaceTransform {
     float3   light_pos;
     float    inv_range;
 };
-[[vk::binding(2, 2)]] Texture2DArray<float> gShadowAtlas : register(t14);
-[[vk::binding(2, 2)]] SamplerComparisonState gShadowAtlasCmp : register(s14);
-[[vk::binding(3, 2)]] cbuffer ShadowAtlas {
+[[vk::binding(2, 1)]] Texture2DArray<float> gShadowAtlas : register(t14);
+[[vk::binding(2, 1)]] SamplerComparisonState gShadowAtlasCmp : register(s14);
+[[vk::binding(3, 1)]] cbuffer ShadowAtlas {
     FaceTransform gFaces[M_SLOTS];
     uint gAtlasActive;
     uint gAtlasMode;

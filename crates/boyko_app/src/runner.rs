@@ -36,8 +36,9 @@ use boyko_render::{
     RenderEpoch, ResolvedAa, ResolvedCsm, ResolvedShadowAtlas, ResolvedSsao, ResolvedTaa,
     RetiredGpuBuffers,
     RhiContext, SdfEditStaging, ShadowDenoiseConfig, ShadowDenoiseMode, TaaState,
-    TextureAssetsExt, TextureGpu, advance_jitter, collect_sdf_edits, gbuffer_push_from_view,
-    gbuffer_push_from_view_jittered, ndc_jitter, retire_deferred_frees, upload_atlas_ring,
+    TextureAssetsExt, TextureGpu, advance_jitter, collect_sdf_edits, forward_gbuffer_push_from_view,
+    gbuffer_push_from_view, gbuffer_push_from_view_jittered, ndc_jitter, retire_deferred_frees,
+    upload_atlas_ring,
     upload_camera_ring, upload_csm_ring, upload_instance_materials, upload_instance_materials_tex,
     upload_instance_models, upload_light_table, upload_material_assets, upload_mesh_assets,
     upload_motion_cam_ring, upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
@@ -1413,12 +1414,22 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // from `(cw, ch)` — the authored Projection aspect is not
                 // consulted by the windowed host's pushes).
                 //
-                // TAA W2: the STRUCTURAL OFF-skip — a TAA-off frame calls the plain
+                // Multi-paradigm render-path plan, rung R4b-b: a `Forward`-resolved boot builds
+                // its push from `forward_gbuffer_push_from_view` (the reverse-Z projection,
+                // `boyko_render::view::forward_view_proj_rows`) instead of the Deferred
+                // `gbuffer_push_from_view` — a cold, boot-resolved host-side branch (Decision 1:
+                // the two paths are mutually exclusive per boot, `host.resolved_render_path`
+                // never changes mid-run). Forward v1 has no TAA (the resolver's
+                // `ForwardTaaNotYetImplemented` degrade), so this arm never jitters.
+                //
+                // TAA W2: the STRUCTURAL OFF-skip — a TAA-off Deferred frame calls the plain
                 // (non-jittered) fn, not `_jittered` with a zero offset (`no *0.0`, per the
                 // byte-identity discipline). `taa_armed_now` was read + `JitterState` advanced
                 // BEFORE this block (see above); `world.resource::<JitterState>()` reads the
                 // SAME already-advanced phase this frame's jitter derives from.
-                if taa_armed_now {
+                if host.resolved_render_path.path == boyko_render::RenderPath::Forward {
+                    forward_gbuffer_push_from_view(&view, cw, ch, instanced)
+                } else if taa_armed_now {
                     let jitter_state = *world.resource::<JitterState>();
                     let jitter = ndc_jitter(&jitter_state, cw, ch);
                     gbuffer_push_from_view_jittered(&view, cw, ch, instanced, jitter)

@@ -428,9 +428,235 @@ pub struct GBufferTargets {
     /// ring made the single set stale: it would sample a sibling slot's image). The recorder
     /// selects `present_set[self.frame_index]`.
     pub(crate) present_set: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// Multi-paradigm render-path plan, rung R4b-b — the Forward v1 mesh path's OWN depth image
+    /// ring + descriptor sets ([`ForwardTargets`]). `Some` iff `profile ==
+    /// `[`TargetsProfile::ForwardMesh`]` (built at [`Self::create`]'s TOP, before the unconditional
+    /// deferred-body allocation below — see that fn's doc for the "full allocation + additive
+    /// `ForwardTargets`" v1 choice). `None` under every `Deferred*` profile (the 0%-gate: no
+    /// extra image, no extra descriptor set, byte-identical Deferred allocation).
+    pub(crate) forward: Option<ForwardTargets>,
     /// The extent the images were created at (so [`GBufferTargets::sync_gbuffer`] can
     /// detect a resize and reallocate).
     pub(crate) extent: VkExtent2D,
+}
+
+/// Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh path's own per-extent
+/// targets — a D32 HARDWARE REVERSE-Z depth image ring (a SEPARATE allocation from
+/// [`GBufferTargets::depth`]'s custom-linear depth, Decision 4) plus the two Forward-only
+/// descriptor set rings (Set 0 core, Set 1 shadow — §G, renumbered from Set 2 — see
+/// [`Self::set1`]'s doc for the boot-panic fix). Built ONLY when
+/// [`TargetsProfile::ForwardMesh`] is threaded into [`GBufferTargets::create`]; `lit`
+/// ([`GBufferTargets::lit`]) is REUSED verbatim as Forward's color-attachment target (the C5
+/// per-path `lit`-producer-access discipline: Forward declares `ColorAttachmentWrite`, Deferred
+/// declares `StorageWrite`, on the SAME physical image — the two paths are boot-mutually-
+/// exclusive, so there is no cross-path contention).
+pub(crate) struct ForwardTargets {
+    /// The D32_SFLOAT reverse-Z depth image RING (one per in-flight frame):
+    /// `DEPTH_STENCIL_ATTACHMENT` (rasterize into, `VK_COMPARE_OP_GREATER`) | `SAMPLED`
+    /// (a future consumer's inv-proj reconstruct). Re-cleared to `0.0` (the reverse-Z
+    /// "nothing drawn yet" sentinel — farther than any real `depth ∈ (0, 1]`) every frame by
+    /// `record_forward`. RINGED (the SAME cross-frame Write-After-Read fix
+    /// [`GBufferTargets::depth`]'s doc explains).
+    pub(crate) depth: [VulkanTexture; FRAMES_IN_FLIGHT],
+    /// Forward's Set-0 (core) bind-group RING, written ONCE per extent against
+    /// [`GBufferScene::forward_layout0`](super::scene_types::GBufferScene::forward_layout0) — 5
+    /// bindings, entries sourced from EXISTING per-frame buffers (no new upload path): `instances`
+    /// @0 = `scene.forward_instance_ring[i]`, `instance_materials` @1 =
+    /// `scene.forward_instance_material_ring[i]`, `Camera` @2 = `scene.camera_ring[i]`,
+    /// `LightBuf` @3 = `scene.light_table`, `Materials` @4 = `scene.material_table`. RINGED (slot
+    /// `i` binds `camera_ring[i]`/the instance rings' slot `i`, the lock-free per-frame-ring fix).
+    pub(crate) set0: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// Forward's Set-1 (shadow) bind-group RING, written ONCE per extent against
+    /// [`GBufferScene::forward_layout1`](super::scene_types::GBufferScene::forward_layout1) — 4
+    /// bindings, entries sourced from the SAME cascade/atlas resources the deferred resolve binds
+    /// at 12-15: `gCsm`+`gCsmCmp` @0 (combined, `scene.csm_cascade_texture` +
+    /// `scene.csm_compare_sampler`), `CsmCascades` @1 = `scene.csm_cascade_ring[i]`,
+    /// `gShadowAtlas`+`gShadowAtlasCmp` @2 (combined, `scene.shadow_atlas_texture` +
+    /// `scene.shadow_atlas_sampler`), `ShadowAtlas` @3 = `scene.shadow_atlas_ubo` (single,
+    /// NOT ringed — mirrors the resolve's own binding 15). RINGED (slot `i` binds
+    /// `csm_cascade_ring[i]`, the SAME lock-free per-frame-ring fix `resolve_set`'s CSM binding
+    /// uses).
+    ///
+    /// Boot-panic fix: this was originally Set 2, with a zero-binding Set-1 PLACEHOLDER layout
+    /// declared between it and Set 0 (Vulkan's set-index contiguity rule). A zero-binding
+    /// [`BindGroupLayoutDesc`](boyko_rhi::BindGroupLayoutDesc) is REJECTED by
+    /// `create_bind_group_layout`'s own `1..=MAX_BIND_GROUP_BINDINGS` invariant
+    /// (`rhi_impl/device.rs:205`) — a real `GpuSceneBundles::boot` panic. `forward_opaque.fs.hlsl`'s
+    /// shadow bindings were renumbered to Set 1 instead, so the pipeline layout is a plain 2-set
+    /// `[Set0, Set1]` and no placeholder exists.
+    pub(crate) set1: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+}
+
+impl ForwardTargets {
+    /// Allocates the reverse-Z depth ring + the two descriptor set rings at `extent`, against
+    /// `scene`'s boot-built [`GBufferScene::forward_layout0`]/[`GBufferScene::forward_layout1`].
+    /// On any partial failure the slots already built are drained (mirrors [`CoreImages::build`]'s
+    /// reverse-acquisition discipline); the caller has nothing else to tear down for THIS bundle.
+    fn build(
+        ctx: &VulkanContext,
+        scene: &GBufferScene<'_>,
+        extent: VkExtent2D,
+    ) -> Result<Self, SwapchainError> {
+        // The caller only reaches this fn under `TargetsProfile::ForwardMesh` (`GBufferTargets
+        // ::create`'s doc), which is derived from a `Forward`-resolved `ResolvedRenderPath` —
+        // production ALWAYS threads `Some(...)` for these 5 fields at that point
+        // (`GBufferScene::forward_pipeline`'s doc: built unconditionally at boot). `None` here
+        // would mean a test fixture forced `TargetsProfile::ForwardMesh` without also wiring the
+        // real Forward resources — an authoring bug this `expect` surfaces immediately rather
+        // than silently building against a bind-group layout that does not exist.
+        let forward_layout0 = scene
+            .forward_layout0
+            .expect("invariant: TargetsProfile::ForwardMesh requires scene.forward_layout0");
+        let forward_layout1 = scene
+            .forward_layout1
+            .expect("invariant: TargetsProfile::ForwardMesh requires scene.forward_layout1");
+        let forward_instance_ring = scene
+            .forward_instance_ring
+            .expect("invariant: TargetsProfile::ForwardMesh requires scene.forward_instance_ring");
+        let forward_instance_material_ring = scene.forward_instance_material_ring.expect(
+            "invariant: TargetsProfile::ForwardMesh requires scene.forward_instance_material_ring",
+        );
+
+        let depth_desc = TextureDesc {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+            format: Format::D32Sfloat,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT | ImageUsage::SAMPLED,
+            array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
+        };
+        let mut depth_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for slot in depth_slots.iter_mut() {
+            match RhiDevice::create_texture(ctx, &depth_desc).map_err(SwapchainError::DepthImage) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => {
+                    // SAFETY: every drained slot was created on `ctx` above, referenced by no
+                    // submission (the build phase); `Option::take` leaves the slot `None` so each
+                    // is destroyed exactly once.
+                    unsafe {
+                        for built in depth_slots.iter_mut() {
+                            if let Some(t) = built.take() {
+                                RhiDevice::destroy_texture(ctx, t);
+                            }
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let depth: [VulkanTexture; FRAMES_IN_FLIGHT] =
+            depth_slots.map(|s| s.expect("invariant: every forward depth ring slot built before here"));
+
+        // Code-review P2-1: fallible, reverse-acquisition-draining creation (mirrors
+        // `vocab_set`'s own build loop above) — the prior `.expect()` form leaked the already-
+        // built `depth` ring (and, for `set1`'s failure, the already-built `set0` ring) on any
+        // `create_bind_group` failure.
+        let mut set0_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for (i, slot) in set0_slots.iter_mut().enumerate() {
+            let desc = BindGroupDesc {
+                layout: forward_layout0,
+                entries: &[
+                    BindGroupEntry::StorageBuffer { buffer: &forward_instance_ring[i] },
+                    BindGroupEntry::StorageBuffer {
+                        buffer: &forward_instance_material_ring[i],
+                    },
+                    BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[i] },
+                    BindGroupEntry::StorageBuffer { buffer: scene.light_table },
+                    BindGroupEntry::StorageBuffer { buffer: scene.material_table },
+                ],
+            };
+            match RhiDevice::create_bind_group(ctx, &desc) {
+                Ok(g) => *slot = Some(g),
+                Err(e) => {
+                    // SAFETY: every drained `set0` slot + the fully-built `depth` ring were
+                    // created on `ctx` above, referenced by no submission (the build phase);
+                    // each destroyed exactly once.
+                    unsafe {
+                        for s in set0_slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for t in depth {
+                            RhiDevice::destroy_texture(ctx, t);
+                        }
+                    }
+                    return Err(SwapchainError::DepthImage(e));
+                }
+            }
+        }
+        let set0: [VulkanBindGroup; FRAMES_IN_FLIGHT] =
+            set0_slots.map(|s| s.expect("invariant: every forward Set-0 ring slot built before here"));
+
+        let mut set1_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for (i, slot) in set1_slots.iter_mut().enumerate() {
+            let desc = BindGroupDesc {
+                layout: forward_layout1,
+                entries: &[
+                    BindGroupEntry::CombinedImage {
+                        texture: scene.csm_cascade_texture,
+                        sampler: scene.csm_compare_sampler,
+                    },
+                    BindGroupEntry::UniformBuffer { buffer: &scene.csm_cascade_ring[i] },
+                    BindGroupEntry::CombinedImage {
+                        texture: scene.shadow_atlas_texture,
+                        sampler: scene.shadow_atlas_sampler,
+                    },
+                    BindGroupEntry::UniformBuffer { buffer: scene.shadow_atlas_ubo },
+                ],
+            };
+            match RhiDevice::create_bind_group(ctx, &desc) {
+                Ok(g) => *slot = Some(g),
+                Err(e) => {
+                    // SAFETY: every drained `set1` slot + the fully-built `set0` ring + the
+                    // fully-built `depth` ring were created on `ctx` above, referenced by no
+                    // submission (the build phase); each destroyed exactly once (reverse
+                    // acquisition: set1 -> set0 -> depth).
+                    unsafe {
+                        for s in set1_slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in set0 {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        for t in depth {
+                            RhiDevice::destroy_texture(ctx, t);
+                        }
+                    }
+                    return Err(SwapchainError::DepthImage(e));
+                }
+            }
+        }
+        let set1: [VulkanBindGroup; FRAMES_IN_FLIGHT] =
+            set1_slots.map(|s| s.expect("invariant: every forward Set-1 ring slot built before here"));
+
+        Ok(Self { depth, set0, set1 })
+    }
+
+    /// Tears the depth ring down. The descriptor sets are pool-owned (freed with their pool at
+    /// device teardown, the SAME discipline every other `VulkanBindGroup` in this module follows
+    /// — none of `GBufferTargets`'s OTHER `destroy` bodies free a `VulkanBindGroup` individually
+    /// either).
+    ///
+    /// # Safety
+    /// Every image was created on `ctx`, the device is idle (the caller's teardown waited), and
+    /// each is destroyed exactly once (by-value).
+    unsafe fn destroy(self, ctx: &VulkanContext) {
+        // SAFETY: per the contract `ctx` is live + idle and nothing references these images.
+        unsafe {
+            for t in self.depth {
+                RhiDevice::destroy_texture(ctx, t);
+            }
+        }
+    }
 }
 
 /// Anti-aliasing campaign: which AA mode [`GBufferTargets`] is CURRENTLY armed for —
@@ -516,15 +742,33 @@ pub(crate) enum TargetsProfile {
     /// Only the SDF marched leg (`GeometryLegs::Sdf`) — reachable as of rung R3, allocation
     /// identical to `DeferredFull` this rung (see this type's doc).
     DeferredSdfOnly,
+    /// Multi-paradigm render-path plan, rung R4b-b: `RenderPath::Forward` (v1, mesh-only —
+    /// the resolver collapses `Forward × {Both, Sdf}` to `Mesh` until R-SDFFWD lands, so this is
+    /// the only reachable Forward profile today). [`GBufferTargets::create`] runs its UNCHANGED
+    /// `DeferredFull`-shaped allocation body REGARDLESS of this profile (Option 2 — "full +
+    /// additive `ForwardTargets`", the v1 minimalism choice; see [`GBufferTargets::forward`]'s
+    /// doc) and ADDITIONALLY builds a [`ForwardTargets`] bundle at the top of `create`.
+    ForwardMesh,
 }
 
 impl TargetsProfile {
     /// Derives the profile from the boot-resolved render-path carrier (mirrors
-    /// [`AaArm::from_scene`]'s derive-from-scene precedent). `#[inline]` — a couple of `bool`
-    /// reads, no allocation.
+    /// [`AaArm::from_scene`]'s derive-from-scene precedent). `#[inline]` — a couple of `bool`/
+    /// `u32` reads, no allocation.
+    ///
+    /// `RenderPath::Forward` (discriminant `1`) is checked BEFORE the `(mesh_leg, sdf_leg)`
+    /// match (rung R4b-b) — a `Forward`-resolved carrier still reports `mesh_leg`/`sdf_leg` per
+    /// its (possibly leg-collapsed) `GeometryLegs`, but the Deferred-family match below has no
+    /// arm for it; branching on `path` first keeps that match exhaustive over the `Deferred`
+    /// family alone, unchanged from rung R3b.
     #[inline]
     pub(crate) fn from_scene(scene: &GBufferScene<'_>) -> Self {
         let rp = &scene.resolved_render_path;
+        if rp.path == 1 {
+            // RenderPath::Forward == 1 (boyko_render::render_path_config::RenderPath).
+            debug_assert!(rp.mesh_leg, "invariant: Forward v1 is mesh-only (pre-R-SDFFWD collapse)");
+            return TargetsProfile::ForwardMesh;
+        }
         match (rp.mesh_leg, rp.sdf_leg) {
             (true, true) => TargetsProfile::DeferredFull,
             (false, true) => TargetsProfile::DeferredSdfOnly,
@@ -1122,13 +1366,23 @@ impl CoreImages {
 
         // LIT: the deferred resolve's STORAGE store output; also SAMPLED by the
         // present-blit (pass C) and TRANSFER_SRC so an offscreen golden could read it back.
+        // Multi-paradigm render-path plan, rung R4b-b: ALSO `COLOR_ATTACHMENT` — Forward v1
+        // reuses this SAME ring as `forward_opaque`'s color-attachment write target (Decision
+        // 2's C5 per-path producer access, `ForwardTargets`'s doc: "full + additive
+        // ForwardTargets", Option 2). Purely PERMISSIVE for Deferred: no Deferred pass ever
+        // transitions `lit` to `COLOR_ATTACHMENT_OPTIMAL` (its own resolve writes it via
+        // STORAGE/GENERAL), so this extra allowed-usage bit changes neither Deferred's derived
+        // barriers nor its rendered pixels — an unexercised capability, byte-identical output.
         let mut lit_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
         for slot in lit_slots.iter_mut() {
             match GBufferTargets::create_gbuffer_image(
                 ctx,
                 extent,
-                ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::TRANSFER_SRC,
+                ImageUsage::STORAGE
+                    | ImageUsage::SAMPLED
+                    | ImageUsage::TRANSFER_SRC
+                    | ImageUsage::COLOR_ATTACHMENT,
             ) {
                 Ok(t) => *slot = Some(t),
                 Err(e) => {
@@ -4467,6 +4721,18 @@ impl GBufferTargets {
             "invariant: scene.aa, scene.smaa, scene.ssaa, scene.taa are mutually exclusive"
         );
 
+        // Multi-paradigm render-path plan, rung R4b-b: built ONLY under `ForwardMesh`, at the TOP
+        // of `create` (before the deferred body's sub-bundle builds), so an early failure here
+        // has nothing else to tear down yet. The deferred body below then runs UNCONDITIONALLY
+        // (Option 2 — "full + additive `ForwardTargets`", see [`Self::forward`]'s doc) — a
+        // `ForwardMesh` profile pays the full Deferred allocation too; VRAM minimization for
+        // Forward is a follow-up (see this rung's report).
+        let forward = if matches!(profile, TargetsProfile::ForwardMesh) {
+            Some(ForwardTargets::build(ctx, scene, extent)?)
+        } else {
+            None
+        };
+
         // === Sub-bundle builds (order-preserving — see the `CoreImages` / `DeferredSets` docs). ===
         // Each `build` drains its OWN partials on failure; the orchestrator tears down the
         // (fully-built) earlier bundles in reverse acquisition order — the cross-bundle O(n²)
@@ -4949,6 +5215,7 @@ impl GBufferTargets {
             shadow_temporal_denoised_resolve_set,
             ddgi_update_set,
             present_set,
+            forward,
             extent,
         })
     }
@@ -5298,6 +5565,12 @@ impl GBufferTargets {
                 pbr: self.pbr,
             }
             .destroy(ctx);
+            // Multi-paradigm render-path plan, rung R4b-b: `ForwardTargets` was built FIRST in
+            // `create` (before `core`), so it is destroyed LAST here (reverse acquisition).
+            // `Option`-guarded (`None` under every `Deferred*` profile).
+            if let Some(f) = self.forward {
+                f.destroy(ctx);
+            }
         }
     }
 }
@@ -5551,6 +5824,7 @@ mod tests {
             aa_arm: AaArm::Off,
             ddgi_update_set: None,
             present_set: bg_ring(),
+            forward: None,
             extent: VkExtent2D::default(),
         }
     }
@@ -5636,6 +5910,7 @@ mod tests {
             shadow_temporal_denoised_resolve_set: shadow_temporal_denoised_resolve.then(bg_ring),
             ddgi_update_set: None,
             present_set: bg_ring(),
+            forward: None,
             extent: VkExtent2D::default(),
         }
     }

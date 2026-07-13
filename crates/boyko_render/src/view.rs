@@ -401,6 +401,53 @@ pub fn gbuffer_push_from_view(
     gbuffer_push_from_view_jittered(view, width, height, instanced, NdcJitter::default())
 }
 
+/// Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh raster's 88-byte VERTEX
+/// push, built from [`forward_view_proj_rows`] (the reverse-Z projection) instead of
+/// [`marcher_view_proj_rows`] — the SAME byte layout [`gbuffer_push_from_view`] emits (`{
+/// float4x4 view_proj; float4 cam_eye; uint base_instance; uint use_model_matrix }`,
+/// [`GBUFFER_PUSH_BYTES`]), consumed by `forward_opaque.vs.hlsl` (byte-identical push contract
+/// to `gbuffer_mrt.vs.hlsl`'s, per that shader's doc — "ONLY the matrix CONTENT differs").
+///
+/// No jittered sibling (unlike [`gbuffer_push_from_view_jittered`]): Forward v1 has no TAA (the
+/// resolver's `ForwardTaaNotYetImplemented` degrade forces it off) — a future TAA-under-Forward
+/// rung adds one, mirroring [`forward_view_proj_rows`]'s own "no jittered sibling yet" doc.
+///
+/// PERSPECTIVE-only (delegates to [`forward_view_proj_rows`]'s `fov_y > 0` / `near`/`far`
+/// invariants — debug-asserted there). `boyko_app::runner` selects this fn instead of
+/// [`gbuffer_push_from_view`] at the SAME `mvp` assembly site, branching on the boot-committed
+/// `ResolvedRenderPath::path == RenderPath::Forward` (a cold, boot-resolved host-side branch —
+/// the two paths are mutually exclusive per boot, Decision 1).
+#[inline]
+pub fn forward_gbuffer_push_from_view(
+    view: &ViewUniform,
+    width: u32,
+    height: u32,
+    instanced: bool,
+) -> [u8; GBUFFER_PUSH_BYTES] {
+    let eye = [view.camera_pos.x, view.camera_pos.y, view.camera_pos.z];
+    let pv = forward_view_proj_rows(view, width, height);
+
+    let mut out = [0u8; GBUFFER_PUSH_BYTES];
+    for col in 0..4 {
+        for row in 0..4 {
+            let b = pv[row][col].to_le_bytes();
+            out[(col * 4 + row) * 4..(col * 4 + row) * 4 + 4].copy_from_slice(&b);
+        }
+    }
+    // cam_eye push lane (bytes 64..80): xyz = eye, w = 1.0 (perspective mode) — byte-identical
+    // shape to `gbuffer_push_from_view_jittered`'s.
+    let cam_eye = [eye[0], eye[1], eye[2], 1.0_f32];
+    for (i, f) in cam_eye.iter().enumerate() {
+        out[64 + i * 4..64 + i * 4 + 4].copy_from_slice(&f.to_le_bytes());
+    }
+    // Trailing selectors: base_instance (@80) stays 0 (the recorder overwrites it per batch);
+    // use_model_matrix (@84) selects the instanced VS arm.
+    if instanced {
+        out[84..88].copy_from_slice(&1u32.to_le_bytes());
+    }
+    out
+}
+
 /// Re-views a column-major [`Mat4`] as the demo `CameraUniform.view_proj` layout
 /// (`[[f32; 4]; 4]`, each inner array a COLUMN — the WGSL `mat4x4` upload form).
 ///

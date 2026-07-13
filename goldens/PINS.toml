@@ -114,3 +114,45 @@ sha256_hwrt     = "65cb2004f3a8bcace12896cd2a5c4f959e2e7ae53d2f75f8b4ea21d9ee004
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
+[forward_mesh]
+# Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh-only golden. Code-review
+# golden re-route: the original window_present_gbuffer.rs harness test could never actually
+# exercise RenderPath::Forward (that harness independently re-implements boot + scene assembly,
+# bypassing boyko_app::gpu_scene's real Forward wiring, so its GBufferScene literals carried
+# semantically-wrong placeholder values). This pin now boots through the REAL production
+# boyko_app::runner/gpu_scene::GpuSceneBundles path (the grand_showcase_2mat pattern) with
+# RenderPathConfig{path: Forward, legs: Mesh} inserted as a Resource before app.run() --
+# see crates/boyko_app/tests/forward_mesh.rs. Reuses grand_showcase_2mat's EXACT five-sphere
+# scene verbatim (same mesh/materials/sun/sky/camera), so the dumped BMP is a DIRECT visual
+# comparator against the Deferred f6147f90 golden -- only the render path differs.
+# forward_opaque.fs.hlsl shades every mesh pixel inline (all-lights, no froxel) against the SAME
+# shared BRDF + combined CSM/punctual shadow visibility the deferred resolve uses (Set 1, this
+# scene has no CSM/atlas armed so those bindings are bound-but-unread).
+#
+# BACKGROUND = analytic sky (code-review follow-up): forward_sky.{vs,fs}.hlsl replicates the
+# deferred resolve's mask==0 sky/ground gradient + visible sun disc (deferred_pbr.hlsl:1369-1414)
+# token-for-token, drawn first inside forward_opaque's own begin_rendering scope (depth test/write
+# off) so opaque mesh geometry then draws over it -- matching the Deferred f6147f90 golden's
+# background instead of a flat clear color, confirmed on real GPU (owner-verified render: five
+# spheres, correct materials/highlights, all 6 Deferred pins byte-identical).
+#
+# UNBLESSED placeholders -- the sha256_* values below are NOT real hashes. Re-render on a real
+# windowed GPU device (forward_mesh_screenshot_dump, #[ignore]) and re-bless via
+# `scripts\golden.ps1 -Pin forward_mesh -Bless` (and `-Hwrt -Bless`) AFTER the owner's visual
+# sign-off on the freshly-dumped BMP, per this repo's golden discipline (do NOT hand-edit these
+# values otherwise).
+crate           = "boyko-app"
+test_binary     = "forward_mesh"
+test_name       = "forward_mesh_screenshot_dump"
+bmp             = "D:\\tmp\\forward_mesh.bmp"
+width           = 512
+height          = 512
+sha256_software = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad"
+sha256_hwrt     = "f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad"
+
+[forward_mesh.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\forward_mesh.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"

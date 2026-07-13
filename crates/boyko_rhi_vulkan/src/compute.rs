@@ -656,6 +656,53 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R4b: the Forward v1 mesh raster VERTEX SPIR-V
+    /// (`shaders/forward_opaque.vs.hlsl`). Emits a REAL hardware reverse-Z `SV_Position.z`
+    /// (`boyko_render::view::forward_view_proj_rows`, NOT the Deferred custom-linear encode);
+    /// the SAME 88-byte VERTEX push shape + set-0 `InstanceModelCol` SSBO layout as
+    /// [`GBUFFER_MRT_VS_SPV`] — only the matrix CONTENT + the trailing forwarded `mat_id`
+    /// (instead of `PerInstanceMaterial`'s full payload) differ. See that file's header for the
+    /// full v1 scope cut.
+    FORWARD_OPAQUE_VS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/forward_opaque.vs.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R4b: the Forward v1 mesh raster FRAGMENT SPIR-V
+    /// (`shaders/forward_opaque.fs.hlsl`). Shades every covered pixel inline against the full
+    /// light table (all-lights, no froxel) via the SAME shared BRDF (`pbr_lighting.hlsli`) +
+    /// combined CSM/punctual shadow visibility (`shadow_apply.hlsli`) the deferred resolve uses.
+    /// NO `SV_Depth`/`discard`/UAV — early-Z stays live. Set 0 (camera/light/materials + the
+    /// VS instance SSBOs) + Set 1 (CSM/atlas, its OWN binding numbers — boot-panic fix:
+    /// renumbered from an original Set 2 design, see `rhi_impl/device.rs::build_graphics_pipeline`'s
+    /// doc) — no bindless texture table this v1 rung. See that file's header for the full v1
+    /// scope cut.
+    FORWARD_OPAQUE_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/forward_opaque.fs.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R4b-b (code-review follow-up): the Forward v1 sky
+    /// BACKGROUND vertex SPIR-V (`shaders/forward_sky.vs.hlsl`) — a full-screen triangle, NO
+    /// vertex buffer, NO descriptor bindings (`SV_VertexID`-only, the `fullscreen_sample.vs.hlsl`
+    /// idiom). Paired with [`FORWARD_SKY_FS_SPV`].
+    FORWARD_SKY_VS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/forward_sky.vs.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R4b-b (code-review follow-up): the Forward v1 sky
+    /// BACKGROUND fragment SPIR-V (`shaders/forward_sky.fs.hlsl`) — replicates the deferred
+    /// resolve's `mask == 0` background branch (analytic sky/ground gradient + visible sun disc,
+    /// `deferred_pbr.hlsl:1369-1414`) so a Forward frame's uncovered pixels match a Deferred
+    /// frame's instead of staying flat-clear/black. Drawn FIRST inside `forward_opaque`'s SAME
+    /// dynamic-rendering scope, depth test/write OFF (`depth_format: None`), so opaque mesh
+    /// geometry then draws over it. Paired with [`FORWARD_SKY_VS_SPV`].
+    FORWARD_SKY_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/forward_sky.fs.spv")
+}
+
+embed_spirv! {
     /// The committed mesh-MRT G-buffer PRODUCER fragment SPIR-V (`shaders/gbuffer_mrt.fs.hlsl`):
     /// writes albedo/normal/material as 3 MRT in the marcher's exact encoding (mask=1) + the
     /// marcher-aligned `SV_Depth` (euclidean under perspective, axial under ortho). Paired with
@@ -1305,6 +1352,36 @@ pub fn gbuffer_mrt_vs_spirv() -> &'static [u32] {
 #[inline]
 pub fn gbuffer_mrt_fs_spirv() -> &'static [u32] {
     GBUFFER_MRT_FS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh raster VERTEX SPIR-V as a
+/// `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module). Paired with
+/// [`forward_opaque_fs_spirv`] in [`VulkanContext::create_graphics_pipeline_forward`].
+#[inline]
+pub fn forward_opaque_vs_spirv() -> &'static [u32] {
+    FORWARD_OPAQUE_VS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh raster FRAGMENT SPIR-V as a
+/// `u32` word stream. Paired with [`forward_opaque_vs_spirv`].
+#[inline]
+pub fn forward_opaque_fs_spirv() -> &'static [u32] {
+    FORWARD_OPAQUE_FS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R4b-b (code-review follow-up): the Forward v1 sky
+/// background VERTEX SPIR-V as a `u32` word stream. Paired with [`forward_sky_fs_spirv`].
+#[inline]
+pub fn forward_sky_vs_spirv() -> &'static [u32] {
+    FORWARD_SKY_VS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R4b-b (code-review follow-up): the Forward v1 sky
+/// background FRAGMENT SPIR-V as a `u32` word stream. Paired with [`forward_sky_vs_spirv`].
+#[inline]
+pub fn forward_sky_fs_spirv() -> &'static [u32] {
+    FORWARD_SKY_FS_SPV.as_words()
 }
 
 /// The Rung-3b MOTION_VECTORS-variant mesh-MRT gbuffer VERTEX SPIR-V as a `u32` word stream.

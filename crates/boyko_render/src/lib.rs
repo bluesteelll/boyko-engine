@@ -472,8 +472,9 @@ pub use upload::{upload_mesh_ids, upload_prev_instance_models};
 pub use upload::upload_motion_cam_ring;
 pub use view::{
     composite_from_view, composite_perspective_from_view, demo_view_proj_from_view,
-    gbuffer_push_from_view, gbuffer_push_from_view_jittered, marcher_view_proj_rows,
-    marcher_view_proj_rows_jittered, view_proj_columns,
+    forward_gbuffer_push_from_view, forward_view_proj_rows, gbuffer_push_from_view,
+    gbuffer_push_from_view_jittered, marcher_view_proj_rows, marcher_view_proj_rows_jittered,
+    view_proj_columns,
 };
 pub use ui::{
     pack_ui_instance, premultiply_rgba8, record_ui_rects, ui_rect_fs_spirv, ui_rect_vs_spirv,

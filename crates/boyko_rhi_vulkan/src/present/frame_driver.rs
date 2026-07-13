@@ -11,7 +11,7 @@ use crate::device::{DeviceFns, SwapchainDeviceFns, VulkanContext};
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
 
-use super::graph_bridge::GbufferPassPlan;
+use super::graph_bridge::{ForwardPassPlan, GbufferPassPlan};
 use super::scene_types::{GBufferScene, SampledComposite, Scene, UiPass};
 use super::swapchain::swapchain_image_for;
 use super::targets::{GBufferFrame, GBufferTargets, TargetsProfile};
@@ -66,7 +66,16 @@ pub struct Renderer<'ctx> {
     /// [`render_gbuffer_frame`](Self::render_gbuffer_frame). Optional members are
     /// `None` when their pass was config-gated off this frame, so `record_gbuffer`
     /// records that pass's graph barriers only when it also records the pass body.
+    /// `Some` only on a `Deferred`-resolved frame (`declare_deferred_graph`'s output);
+    /// `None` on a `Forward`-resolved frame (see [`Self::forward_pass_plan`]).
     pub(crate) gbuffer_pass_plan: Option<GbufferPassPlan>,
+    /// Multi-paradigm render-path plan, rung R4b-b: the `Forward` sibling of
+    /// [`Self::gbuffer_pass_plan`] — re-declared PER FRAME by `declare_forward_graph` over the
+    /// SAME shared [`Self::frame_graph`] (see [`super::graph_bridge::ForwardPassPlan`]'s doc for
+    /// why this is a decoupled, private ResId space rather than an extension of
+    /// [`GbufferPassPlan`]). `Some` only on a `Forward`-resolved frame; `None` on a
+    /// `Deferred`-resolved frame.
+    pub(crate) forward_pass_plan: Option<ForwardPassPlan>,
 }
 
 impl<'ctx> Renderer<'ctx> {
@@ -219,6 +228,7 @@ impl<'ctx> Renderer<'ctx> {
             submission_epoch: 0,
             frame_graph,
             gbuffer_pass_plan: None,
+            forward_pass_plan: None,
         })
     }
 
@@ -855,24 +865,48 @@ impl<'ctx> Renderer<'ctx> {
                         "invariant: sync_gbuffer made the targets present before record",
                     );
 
-                    this.record_gbuffer(
-                        cmd,
-                        image,
-                        view,
-                        extent,
-                        present_extent,
-                        aa_extent,
-                        clear,
-                        scene,
-                        targets,
-                        readback,
-                        // HW-RT rung R2a-3: the AS command table (for the per-frame TLAS build),
-                        // resolved from `ctx` — `None` on a non-RT device (the recorder then skips
-                        // the tlas block even if `scene.tlas` were somehow `Some`). Gated so the
-                        // `not(hwrt)` signature is unchanged.
-                        #[cfg(feature = "hwrt")]
-                        ctx.accel_fns_opt(),
-                    )
+                    // Multi-paradigm render-path plan, rung R4b-b: mirrors
+                    // `declare_frame_graph`'s dispatch (`scene.path_is_forward()` is the SAME
+                    // predicate that fn's caller — `declare_forward_graph` vs
+                    // `declare_deferred_graph` — used, the W1 single-predicate discipline). A
+                    // `Forward`-resolved frame records `record_forward` instead of
+                    // `record_gbuffer`; the two are mutually exclusive per boot (Decision 1).
+                    if scene.path_is_forward() {
+                        let fwd = targets.forward.as_ref().expect(
+                            "invariant: TargetsProfile::ForwardMesh built ForwardTargets before record",
+                        );
+                        this.record_forward(
+                            cmd,
+                            image,
+                            view,
+                            extent,
+                            present_extent,
+                            clear,
+                            scene,
+                            targets,
+                            fwd,
+                            readback,
+                        )
+                    } else {
+                        this.record_gbuffer(
+                            cmd,
+                            image,
+                            view,
+                            extent,
+                            present_extent,
+                            aa_extent,
+                            clear,
+                            scene,
+                            targets,
+                            readback,
+                            // HW-RT rung R2a-3: the AS command table (for the per-frame TLAS build),
+                            // resolved from `ctx` — `None` on a non-RT device (the recorder then skips
+                            // the tlas block even if `scene.tlas` were somehow `Some`). Gated so the
+                            // `not(hwrt)` signature is unchanged.
+                            #[cfg(feature = "hwrt")]
+                            ctx.accel_fns_opt(),
+                        )
+                    }
                 },
             )
         }
