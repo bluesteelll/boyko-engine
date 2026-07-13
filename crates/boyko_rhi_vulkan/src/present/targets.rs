@@ -795,7 +795,17 @@ impl TargetsProfile {
             // RenderPath::Forward == 1, RenderPath::ForwardPlus == 2
             // (boyko_render::render_path_config::RenderPath) — the SAME single predicate
             // `declare_frame_graph`'s dispatch uses (`GBufferScene::path_is_forward`'s doc).
-            debug_assert!(rp.mesh_leg, "invariant: Forward v1 is mesh-only (pre-R-SDFFWD collapse)");
+            //
+            // Multi-paradigm render-path plan, rung R-SDFFWD: `mesh_leg` is NO LONGER guaranteed
+            // `true` here — `SDF_FORWARD_IMPLEMENTED` lifted, so `GeometryLegs::Sdf` (mesh_leg ==
+            // false) is now a real, honored request under a Forward-family path (the
+            // `sdf_forward_march` pass is the sole `lit` producer on that leg set; see
+            // `GBufferScene::sdf_forward_march`'s doc). `ForwardMesh` is still the ONE
+            // `TargetsProfile` variant for every Forward-family boot (mesh_leg true OR false) —
+            // `ForwardTargets::build` always allocates the reverse-Z `depth` ring + the Set-0/Set-1
+            // rings regardless of leg set (a harmless extra allocation on a mesh-less boot, the
+            // SAME "shared allocation body" precedent this fn's own doc already establishes for
+            // `Forward` vs `ForwardPlus`).
             return TargetsProfile::ForwardMesh;
         }
         match (rp.mesh_leg, rp.sdf_leg) {

@@ -57,6 +57,21 @@ fn extract_fn(src: &str, sig: &str) -> String {
     panic!("unbalanced braces extracting `{sig}` — the function never closed");
 }
 
+/// Reads `shaders/sdf_forward_march.comp.hlsl` (LF-normalized) — the rung R-SDFFWD SDF
+/// forward-march pass, whose brick-atlas/soft-shadow spans are VERBATIM copies of
+/// `sdf_gbuffer_composite.hlsl`'s own generated spans (see that file's header doc). Every test
+/// below that pins a span copied into this file asserts against it in ADDITION to
+/// `sdf_gbuffer_composite.hlsl` (never in place of it).
+fn read_forward_march_shader() -> String {
+    let shader_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/shaders/sdf_forward_march.comp.hlsl"
+    );
+    std::fs::read_to_string(shader_path)
+        .expect("invariant: shaders/sdf_forward_march.comp.hlsl must exist next to this crate")
+        .replace("\r\n", "\n")
+}
+
 #[test]
 fn sdf_field_smin_smax_match_edsl_emit() {
     // Generate the HLSL field bodies from the eDSL (LF-normalized).
@@ -123,6 +138,9 @@ fn m2_decode_matches_edsl_emit() {
     // pins the spliced scale body to the generator. A hand-edit — which would silently
     // diverge the GPU brick decode from the host oracle the trilinear fetch is golden-
     // compared against — fails CI here.
+    //
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM (its own M2
+    // brick-atlas acceleration) — pinned against that file too.
     let generated = boyko_shaderdsl::emit::emit_hlsl_decode_snorm8().replace("\r\n", "\n");
     let m2_decode = extract_fn(&generated, "float m2_decode(float n, float band_half) {");
 
@@ -137,6 +155,15 @@ fn m2_decode_matches_edsl_emit() {
     assert!(
         shader.contains(&m2_decode),
         "sdf_gbuffer_composite.hlsl `m2_decode` DRIFTED from boyko_shaderdsl::emit — the committed \
+         body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl --features emit \
+         --bin emit_field` and re-splice the m2_decode body between the GENERATED decode_snorm8 \
+         sentinels.\n--- expected (eDSL-generated) ---\n{m2_decode}"
+    );
+
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&m2_decode),
+        "sdf_forward_march.comp.hlsl `m2_decode` DRIFTED from boyko_shaderdsl::emit — the committed \
          body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl --features emit \
          --bin emit_field` and re-splice the m2_decode body between the GENERATED decode_snorm8 \
          sentinels.\n--- expected (eDSL-generated) ---\n{m2_decode}"
@@ -169,6 +196,16 @@ fn m2_cubic_eval_matches_edsl_emit() {
          --features emit --bin emit_field` and re-splice the m2_cubic_eval body between the \
          GENERATED m2_cubic_eval sentinels.\n--- expected (eDSL-generated) ---\n{m2_cubic_eval}"
     );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too.
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&m2_cubic_eval),
+        "sdf_forward_march.comp.hlsl `m2_cubic_eval` DRIFTED from boyko_shaderdsl::emit — the \
+         committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
+         --features emit --bin emit_field` and re-splice the m2_cubic_eval body between the \
+         GENERATED m2_cubic_eval sentinels.\n--- expected (eDSL-generated) ---\n{m2_cubic_eval}"
+    );
 }
 
 #[test]
@@ -195,6 +232,16 @@ fn m2_jcgt_cubic_coeffs_matches_edsl_emit() {
         shader.contains(&m2_jcgt),
         "sdf_gbuffer_composite.hlsl `m2_jcgt_cubic_coeffs` DRIFTED from boyko_shaderdsl::emit — the \
          committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
+         --features emit --bin emit_field` and re-splice the m2_jcgt_cubic_coeffs body between the \
+         GENERATED m2_jcgt_cubic_coeffs sentinels.\n--- expected (eDSL-generated) ---\n{m2_jcgt}"
+    );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too.
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&m2_jcgt),
+        "sdf_forward_march.comp.hlsl `m2_jcgt_cubic_coeffs` DRIFTED from boyko_shaderdsl::emit — \
+         the committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
          --features emit --bin emit_field` and re-splice the m2_jcgt_cubic_coeffs body between the \
          GENERATED m2_jcgt_cubic_coeffs sentinels.\n--- expected (eDSL-generated) ---\n{m2_jcgt}"
     );
@@ -230,6 +277,17 @@ fn dist_to_brick_exit_matches_edsl_emit() {
     assert!(
         shader.contains(&dist),
         "sdf_gbuffer_composite.hlsl `dist_to_brick_exit` DRIFTED from boyko_shaderdsl::emit — the \
+         committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
+         --features emit --bin emit_field` and re-splice the dist_to_brick_exit body between the \
+         GENERATED dist_to_brick_exit sentinels.\n--- expected (eDSL-generated) ---\n{dist}"
+    );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too (its own M1
+    // empty-space-skip acceleration).
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&dist),
+        "sdf_forward_march.comp.hlsl `dist_to_brick_exit` DRIFTED from boyko_shaderdsl::emit — the \
          committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
          --features emit --bin emit_field` and re-splice the dist_to_brick_exit body between the \
          GENERATED dist_to_brick_exit sentinels.\n--- expected (eDSL-generated) ---\n{dist}"
@@ -271,6 +329,17 @@ fn brick_cell_class_matches_edsl_emit() {
     assert!(
         shader.contains(&bcc),
         "sdf_gbuffer_composite.hlsl `brick_cell_class` DRIFTED from boyko_shaderdsl::emit — the \
+         committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
+         --features emit --bin emit_field` and re-splice the brick_cell_class body between the \
+         GENERATED brick_cell_class sentinels (the 3 call sites stay UNCHANGED).\n\
+         --- expected (eDSL-generated) ---\n{bcc}"
+    );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too.
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&bcc),
+        "sdf_forward_march.comp.hlsl `brick_cell_class` DRIFTED from boyko_shaderdsl::emit — the \
          committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
          --features emit --bin emit_field` and re-splice the brick_cell_class body between the \
          GENERATED brick_cell_class sentinels (the 3 call sites stay UNCHANGED).\n\
@@ -318,6 +387,17 @@ fn m2_regula_falsi_matches_edsl_emit() {
          GENERATED m2_regula_falsi sentinels (the 2 call sites stay UNCHANGED).\n\
          --- expected (eDSL-generated) ---\n{rf}"
     );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too.
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&rf),
+        "sdf_forward_march.comp.hlsl `m2_regula_falsi` DRIFTED from boyko_shaderdsl::emit — the \
+         committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
+         --features emit --bin emit_field` and re-splice the m2_regula_falsi body between the \
+         GENERATED m2_regula_falsi sentinels (the 2 call sites stay UNCHANGED).\n\
+         --- expected (eDSL-generated) ---\n{rf}"
+    );
 }
 
 #[test]
@@ -342,6 +422,17 @@ fn sdf_soft_shadow_matches_edsl_emit() {
     assert!(
         shader.contains(&generated),
         "sdf_gbuffer_composite.hlsl `sdf_soft_shadow` span DRIFTED from boyko_shaderdsl::emit — the \
+         committed span no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
+         --features emit --bin emit_field` and re-splice between the GENERATED sdf_soft_shadow \
+         sentinels (the dot preamble stays hand-written).\n--- expected (eDSL-generated) ---\n{generated}"
+    );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too (its own primary-
+    // light analytic soft shadow).
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&generated),
+        "sdf_forward_march.comp.hlsl `sdf_soft_shadow` span DRIFTED from boyko_shaderdsl::emit — the \
          committed span no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
          --features emit --bin emit_field` and re-splice between the GENERATED sdf_soft_shadow \
          sentinels (the dot preamble stays hand-written).\n--- expected (eDSL-generated) ---\n{generated}"
@@ -410,6 +501,17 @@ fn m2_surface_hit_refine_matches_edsl_emit() {
          --features emit --bin emit_field` and re-splice between the GENERATED m2_surface_hit_refine \
          sentinels (the integer preamble + the 3 call sites stay hand-written).\n\
          --- expected (eDSL-generated) ---\n{generated}"
+    );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too.
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&generated),
+        "sdf_forward_march.comp.hlsl `m2_surface_hit` refine span DRIFTED from \
+         boyko_shaderdsl::emit — the committed span no longer matches the generator. Re-run \
+         `cargo run -p boyko_shaderdsl --features emit --bin emit_field` and re-splice between the \
+         GENERATED m2_surface_hit_refine sentinels (the integer preamble + the 3 call sites stay \
+         hand-written).\n--- expected (eDSL-generated) ---\n{generated}"
     );
 }
 
@@ -693,6 +795,17 @@ fn select_level_matches_edsl_emit() {
          sentinels (the `int select_level(float3 p) {{` signature + the closing `}}` stay \
          hand-written).\n--- expected (eDSL-generated) ---\n{generated}"
     );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too.
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&generated),
+        "sdf_forward_march.comp.hlsl `select_level` scan span DRIFTED from boyko_shaderdsl::emit — \
+         the committed span no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
+         --features emit --bin emit_field` and re-splice between the GENERATED select_level \
+         sentinels (the `int select_level(float3 p) {{` signature + the closing `}}` stay \
+         hand-written).\n--- expected (eDSL-generated) ---\n{generated}"
+    );
 }
 
 #[test]
@@ -725,6 +838,17 @@ fn m2_brick_span_matches_edsl_emit() {
     assert!(
         shader.contains(&generated),
         "sdf_gbuffer_composite.hlsl `m2_brick_span` body span DRIFTED from boyko_shaderdsl::emit — \
+         the committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
+         --features emit --bin emit_field` and re-splice between the GENERATED m2_brick_span \
+         sentinels (the `bool m2_brick_span(...) {{` signature + the closing `}}` stay \
+         hand-written).\n--- expected (eDSL-generated) ---\n{generated}"
+    );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too.
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&generated),
+        "sdf_forward_march.comp.hlsl `m2_brick_span` body span DRIFTED from boyko_shaderdsl::emit — \
          the committed body no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
          --features emit --bin emit_field` and re-splice between the GENERATED m2_brick_span \
          sentinels (the `bool m2_brick_span(...) {{` signature + the closing `}}` stay \
@@ -771,6 +895,18 @@ fn m2_brick_cubic_hit_matches_edsl_emit() {
          --features emit --bin emit_field` and re-splice between the GENERATED m2_brick_cubic_hit \
          sentinels (the signature, the `t_exit <= t_enter` early-out, the `const uint W` decl, and the \
          closing `}}` stay hand-written).\n--- expected (eDSL-generated) ---\n{generated}"
+    );
+
+    // Rung R-SDFFWD: `sdf_forward_march.comp.hlsl` copies this span VERBATIM too.
+    let forward_march = read_forward_march_shader();
+    assert!(
+        forward_march.contains(&generated),
+        "sdf_forward_march.comp.hlsl `m2_brick_cubic_hit` body span DRIFTED from \
+         boyko_shaderdsl::emit — the committed body no longer matches the generator. Re-run `cargo \
+         run -p boyko_shaderdsl --features emit --bin emit_field` and re-splice between the \
+         GENERATED m2_brick_cubic_hit sentinels (the signature, the `t_exit <= t_enter` early-out, \
+         the `const uint W` decl, and the closing `}}` stay hand-written).\n\
+         --- expected (eDSL-generated) ---\n{generated}"
     );
 }
 

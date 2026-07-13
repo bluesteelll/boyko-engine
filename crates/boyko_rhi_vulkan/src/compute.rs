@@ -736,6 +736,32 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R-SDFFWD: the SDF forward-march FUSED
+    /// march-then-shade compute SPIR-V, `HAS_MESH` variant (`shaders/sdf_forward_march.comp.hlsl`
+    /// compiled with `-D HAS_MESH=1`). Marches the SDF field (the M1/M2/M4 brick/clip-map
+    /// acceleration + the analytic A1 soft-shadow march are VERBATIM copies of
+    /// `sdf_gbuffer_composite.hlsl`'s own spans, wired to real shared resources but threaded OFF
+    /// this rung), then runs the full Cook-Torrance shade (a TOKEN-FOR-TOKEN clone of
+    /// `forward_opaque.fs.hlsl`'s own light loop) and stores directly into the Forward `lit`
+    /// STORAGE image. Samples the Forward reverse-Z `forward_depth` image to bound the march at
+    /// the mesh surface (Decision 4's ownership gate — `sdf_owns = hit && t < t_mesh`). Paired
+    /// with [`SDF_FORWARD_MARCH_SDFONLY_SPV`] (the mesh-less sibling compile).
+    SDF_FORWARD_MARCH_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_forward_march.comp.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R-SDFFWD: the SDF forward-march FUSED
+    /// march-then-shade compute SPIR-V, mesh-less variant (`shaders/sdf_forward_march.comp.hlsl`
+    /// compiled with no `-D`). Used under `GeometryLegs::Sdf` (no raster mesh leg): never samples
+    /// `forward_depth` (the ownership gate collapses to `sdf_owns = hit` — every hit is owned),
+    /// so its Set-0 layout still reserves the depth-image slot (bound-but-unread, the R2
+    /// contract) but its SPIR-V never references it. Paired with [`SDF_FORWARD_MARCH_SPV`].
+    SDF_FORWARD_MARCH_SDFONLY_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_forward_march_sdfonly.comp.spv")
+}
+
+embed_spirv! {
     /// The committed mesh-MRT G-buffer PRODUCER fragment SPIR-V (`shaders/gbuffer_mrt.fs.hlsl`):
     /// writes albedo/normal/material as 3 MRT in the marcher's exact encoding (mask=1) + the
     /// marcher-aligned `SV_Depth` (euclidean under perspective, axial under ortho). Paired with
@@ -1439,6 +1465,20 @@ pub fn depth_prepass_fs_spirv() -> &'static [u32] {
 #[inline]
 pub fn forward_opaque_froxel_fs_spirv() -> &'static [u32] {
     FORWARD_OPAQUE_FROXEL_FS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R-SDFFWD: the SDF forward-march `HAS_MESH` compute
+/// SPIR-V as a `u32` word stream. Paired with [`sdf_forward_march_sdfonly_spirv`].
+#[inline]
+pub fn sdf_forward_march_spirv() -> &'static [u32] {
+    SDF_FORWARD_MARCH_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R-SDFFWD: the SDF forward-march mesh-less compute
+/// SPIR-V as a `u32` word stream. Paired with [`sdf_forward_march_spirv`].
+#[inline]
+pub fn sdf_forward_march_sdfonly_spirv() -> &'static [u32] {
+    SDF_FORWARD_MARCH_SDFONLY_SPV.as_words()
 }
 
 /// The Rung-3b MOTION_VECTORS-variant mesh-MRT gbuffer VERTEX SPIR-V as a `u32` word stream.
@@ -2838,6 +2878,112 @@ impl FineMarcherPush {
         // the std430 holes), so its `size_of` bytes are a fully-initialized, alignment-valid POD bit
         // pattern. The `&self` borrow keeps the struct alive for the slice's lifetime; the slice is
         // read-only (no aliasing write).
+        unsafe {
+            slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
+        }
+    }
+}
+
+/// Multi-paradigm render-path plan, rung R-SDFFWD: `#[repr(C)]` the SDF forward-march compute
+/// pass's OWN dedicated push constant (`shaders/sdf_forward_march.comp.hlsl`) — a NEW pass, not
+/// sharing [`FineMarcherPush`]/[`GBUFFER_MARCHER_PUSH_BYTES`] (this pass has no coarse-cull, no
+/// A2 AO, no MDF; it needs the reverse-Z view-Z decode constants instead). 40 bytes, HLSL
+/// scalar-packed (the const-asserts below pin every offset):
+///
+///   offset  0 : u32     extent_w        render extent width (dispatch bound `idx < w*h`)
+///   offset  4 : u32     extent_h        render extent height
+///   offset  8 : f32     view_z_a        HAS_MESH reverse-Z decode `A` (don't-care w/o HAS_MESH)
+///   offset 12 : f32     view_z_b        HAS_MESH reverse-Z decode `B`
+///   offset 16 : [f32;3] light_dir       primary directional light direction (un-normalized)
+///   offset 28 : u32     brick_enabled   M1 empty-skip gate; 0 = OFF (this rung's host default)
+///   offset 32 : u32     brick_trilinear M2 trilinear+cubic gate; 0 = OFF
+///   offset 36 : u32     brick_levels    M4 clip-map level count; 0 = OFF
+///
+/// `view_z_a`/`view_z_b` mirror [`boyko_render::view::forward_view_z_from_depth`]'s own `A`/`B`
+/// derivation (`A = -near/(far-near)`, `B = near*far/(far-near)`) exactly — the shader's
+/// `view_z = view_z_b / (depth - view_z_a)` is that function's algebraic inverse, ported to HLSL
+/// so the compute pass does not need `near`/`far` themselves.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SdfForwardMarchPush {
+    /// Render extent width — the dispatch bounds `idx < extent_w * extent_h`.
+    pub extent_w: u32,
+    /// Render extent height.
+    pub extent_h: u32,
+    /// HAS_MESH reverse-Z decode `A` (don't-care on the mesh-less SDFONLY variant).
+    pub view_z_a: f32,
+    /// HAS_MESH reverse-Z decode `B`.
+    pub view_z_b: f32,
+    /// The primary directional light direction (un-normalized; the shader normalizes it).
+    pub light_dir: [f32; 3],
+    /// M1 empty-space-skip gate: non-zero reads the pointer-grid bindings. `0` = OFF (the
+    /// analytic-only march — this rung's host default; see this struct's doc).
+    pub brick_enabled: u32,
+    /// M2 trilinear+JCGT-cubic SURFACE-brick gate. `0` = OFF (this rung's host default).
+    pub brick_trilinear: u32,
+    /// M4 clip-map LEVEL COUNT. `0` = OFF (no level is ever selected — this rung's host
+    /// default).
+    pub brick_levels: u32,
+}
+
+/// Byte size of [`SdfForwardMarchPush`] — the SDF forward-march pass's COMPUTE push range.
+pub const SDF_FORWARD_MARCH_PUSH_BYTES: u32 = core::mem::size_of::<SdfForwardMarchPush>() as u32;
+
+const _: () = assert!(core::mem::offset_of!(SdfForwardMarchPush, extent_w) == 0);
+const _: () = assert!(core::mem::offset_of!(SdfForwardMarchPush, extent_h) == 4);
+const _: () = assert!(core::mem::offset_of!(SdfForwardMarchPush, view_z_a) == 8);
+const _: () = assert!(core::mem::offset_of!(SdfForwardMarchPush, view_z_b) == 12);
+const _: () = assert!(core::mem::offset_of!(SdfForwardMarchPush, light_dir) == 16);
+const _: () = assert!(core::mem::offset_of!(SdfForwardMarchPush, brick_enabled) == 28);
+const _: () = assert!(core::mem::offset_of!(SdfForwardMarchPush, brick_trilinear) == 32);
+const _: () = assert!(core::mem::offset_of!(SdfForwardMarchPush, brick_levels) == 36);
+const _: () = assert!(SDF_FORWARD_MARCH_PUSH_BYTES == 40, "SdfForwardMarchPush must be 40 bytes");
+
+impl SdfForwardMarchPush {
+    /// Builds the push for a mesh-less (`GeometryLegs::Sdf`) dispatch: `view_z_a`/`view_z_b`
+    /// are don't-care (the SDFONLY variant never reads them). The brick/clip-map acceleration
+    /// stays OFF (`brick_enabled = brick_trilinear = 0`, `brick_levels = 0`) — see this struct's
+    /// doc for why that is a deliberate, precedented 0%-gate rather than a missing feature.
+    #[inline]
+    pub const fn sdf_only(extent_w: u32, extent_h: u32, light_dir: [f32; 3]) -> Self {
+        Self {
+            extent_w,
+            extent_h,
+            view_z_a: 0.0,
+            view_z_b: 0.0,
+            light_dir,
+            brick_enabled: 0,
+            brick_trilinear: 0,
+            brick_levels: 0,
+        }
+    }
+
+    /// Builds the push for a `HAS_MESH` dispatch: `view_z_a`/`view_z_b` are the reverse-Z decode
+    /// constants [`boyko_render::view::forward_view_z_from_depth`] itself derives from
+    /// `near`/`far` (`A = -near/(far-near)`, `B = near*far/(far-near)`) — the caller passes them
+    /// precomputed so this pass needs no `near`/`far` fields of its own.
+    #[inline]
+    pub const fn has_mesh(extent_w: u32, extent_h: u32, view_z_a: f32, view_z_b: f32, light_dir: [f32; 3]) -> Self {
+        Self {
+            extent_w,
+            extent_h,
+            view_z_a,
+            view_z_b,
+            light_dir,
+            brick_enabled: 0,
+            brick_trilinear: 0,
+            brick_levels: 0,
+        }
+    }
+
+    /// Re-views the push constants as their raw 40-byte slice for `push_constants`.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `Self` is `#[repr(C)]` with only `u32` / `f32` / `[f32; 3]` fields (all `Copy`,
+        // every offset + the 40-byte total pinned by the const-asserts above, no uninit padding),
+        // so its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern. The
+        // `&self` borrow keeps the struct alive for the slice's lifetime; the slice is read-only
+        // (no aliasing write).
         unsafe {
             slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
         }
