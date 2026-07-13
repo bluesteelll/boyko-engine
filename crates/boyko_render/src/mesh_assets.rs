@@ -296,6 +296,27 @@ pub fn build_mesh_gpu(
                 );
                 bytes.extend_from_slice(&(i as u16).to_le_bytes());
             }
+            // Code review P2-1 (Decision 0 / VB geometry-table fetch): a `Uint16` index buffer
+            // with an ODD `index_count` (a real, common case — every mesh's `index_count` is a
+            // multiple of 3, which is frequently odd) leaves `bytes.len()` a multiple of 2 but
+            // NOT of 4. `vb_geom_fetch.hlsli`'s `vb_load_index` reads the LAST index via one
+            // 4-byte-aligned `ByteAddressBuffer::Load` (loading both 16-bit halves of the
+            // containing word, then masking to the half it needs) — for the last index of an
+            // odd-count buffer, that 4-byte load's upper half falls 2 bytes past
+            // `bytes.len()`. This engine does not enable `robustBufferAccess` (`device.rs`'s
+            // `enabled_features`), so that would be a genuine OOB `STORAGE_BUFFER` read past this
+            // buffer's allocated end. Pad the ALLOCATION (not the index count/`MeshGpu::
+            // index_count`, which stays the real, unpadded value — `vkCmdDrawIndexed`'s
+            // fixed-function index fetch never reads past `index_count` regardless of the
+            // underlying buffer's byte size) to the next 4-byte multiple; the pad byte's VALUE is
+            // irrelevant (the fetch masks it away), zeroed here only for cleanliness (no
+            // genuinely-uninitialized host memory left mapped). Unconditional (not gated on
+            // `ctx.vb_geometry_table_armed()`): two harmless trailing zero bytes in a
+            // `VERTEX|INDEX`-only buffer are never read by the fixed-function index fetch on ANY
+            // path, so padding costs nothing even when the VB table is never used.
+            if !bytes.len().is_multiple_of(4) {
+                bytes.extend_from_slice(&[0u8, 0u8]);
+            }
             bytes
         }
         IndexType::Uint32 => {
@@ -538,6 +559,74 @@ impl MeshAssetsExt for Assets<MeshGpu> {
         self.get_by_index(h.0)
             .and_then(|m| m.blas.as_ref())
             .map_or(0, |b| b.device_address)
+    }
+}
+
+/// Multi-paradigm render-path plan, rung R8 — the host-authored-registration half of the
+/// register_mesh geometry-table-slot gap [`build_mesh_gpu`]'s own doc flags: `register_mesh`/
+/// `cube`/`plane` ([`MeshAssetsExt`]) always thread `None` for [`build_mesh_gpu`]'s
+/// `geometry_table` parameter, so a host-authored mesh (spawned directly by app/test code, not
+/// streamed through [`GpuUpload`](crate::gpu_upload::GpuUpload)) never claims a VB
+/// geometry-table slot — its `geometry_slot` stays [`VB_GEOMETRY_RESERVED_SLOT`] forever, which
+/// would make it unresolvable through `gMeshVerts[]`/`gMeshIndices[]` under a VB-resolved boot.
+///
+/// A SEPARATE extension trait (not a widened [`MeshAssetsExt`]) so this rung's fix stays
+/// ADDITIVE: widening `register_mesh`'s own signature would force a `None`/`Option` argument
+/// onto every one of its ~20 existing call sites across unrelated examples/tests/showcases,
+/// well outside this rung's scope. `register_mesh_vb`/`cube_vb`/`plane_vb` mirror their
+/// [`MeshAssetsExt`] counterparts exactly, with ONE extra parameter: the live
+/// [`MeshGeometryTable`] to claim a slot in (typically `NonSendResMut<MeshGeometryTableSlot>`'s
+/// `.0.as_mut()` in the caller's own startup system — `boyko_app::runner` inserts that resource,
+/// `Some(...)`-armed, BEFORE `app.finish()` drains any startup system, so it is always available
+/// to a `setup` fn that wants it, on EVERY boot — `None` on a non-VB boot, in which case a
+/// caller falls back to the plain [`MeshAssetsExt`] method).
+pub trait MeshAssetsVbExt {
+    /// [`MeshAssetsExt::register_mesh`], but ALSO claims `geometry_table`'s next slot for this
+    /// mesh (`build_mesh_gpu`'s `Some(geometry_table)` arm) — the VB-aware sibling.
+    ///
+    /// # Panics
+    /// Same contract as [`MeshAssetsExt::register_mesh`].
+    fn register_mesh_vb(
+        &mut self,
+        ctx: &VulkanContext,
+        vertices: &[Vertex],
+        indices: &[u32],
+        geometry_table: &mut MeshGeometryTable,
+    ) -> MeshHandle;
+
+    /// [`MeshAssetsExt::cube`], VB-aware (see [`Self::register_mesh_vb`]).
+    ///
+    /// # Panics
+    /// Same contract as [`MeshAssetsExt::cube`].
+    fn cube_vb(&mut self, ctx: &VulkanContext, size: f32, geometry_table: &mut MeshGeometryTable) -> MeshHandle;
+
+    /// [`MeshAssetsExt::plane`], VB-aware (see [`Self::register_mesh_vb`]).
+    ///
+    /// # Panics
+    /// Same contract as [`MeshAssetsExt::plane`].
+    fn plane_vb(&mut self, ctx: &VulkanContext, size: f32, geometry_table: &mut MeshGeometryTable) -> MeshHandle;
+}
+
+impl MeshAssetsVbExt for Assets<MeshGpu> {
+    fn register_mesh_vb(
+        &mut self,
+        ctx: &VulkanContext,
+        vertices: &[Vertex],
+        indices: &[u32],
+        geometry_table: &mut MeshGeometryTable,
+    ) -> MeshHandle {
+        let mesh = build_mesh_gpu(ctx, vertices, indices, Some(geometry_table));
+        MeshHandle(self.add(mesh).index())
+    }
+
+    fn cube_vb(&mut self, ctx: &VulkanContext, size: f32, geometry_table: &mut MeshGeometryTable) -> MeshHandle {
+        let (vertices, indices) = cube_geometry(size);
+        self.register_mesh_vb(ctx, &vertices, &indices, geometry_table)
+    }
+
+    fn plane_vb(&mut self, ctx: &VulkanContext, size: f32, geometry_table: &mut MeshGeometryTable) -> MeshHandle {
+        let (vertices, indices) = plane_geometry(size);
+        self.register_mesh_vb(ctx, &vertices, &indices, geometry_table)
     }
 }
 

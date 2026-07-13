@@ -42,7 +42,7 @@ use boyko_render::{
     upload_camera_ring, upload_csm_ring, upload_instance_materials, upload_instance_materials_tex,
     upload_instance_models, upload_light_table, upload_material_assets, upload_mesh_assets,
     upload_motion_cam_ring, upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
-    upload_taa_ring, upload_texture_assets,
+    upload_taa_ring, upload_texture_assets, upload_vb_instance_rows,
 };
 #[cfg(all(windows, feature = "hwrt"))]
 use boyko_render::{
@@ -480,7 +480,14 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     ctx.set_vb_geometry_table_armed(resolved_render_path.vb_geometry_table);
     let mesh_geometry_table_slot = if resolved_render_path.vb_geometry_table {
         match boyko_render::MeshGeometryTable::new(ctx) {
-            Ok(table) => boyko_render::MeshGeometryTableSlot(Some(table)),
+            Ok(table) => {
+                // Multi-paradigm render-path plan, rung R8: `vb_resolve_pipeline`'s Set 2 needs
+                // this table's live descriptor-set layout (`GpuSceneBundles::vb_resolve_pipeline`'s
+                // doc) — build it HERE, right after the table itself exists, before any frame
+                // records against it.
+                host.gpu.build_vb_resolve_pipeline(ctx, table.set());
+                boyko_render::MeshGeometryTableSlot(Some(table))
+            }
             Err(e) => {
                 eprintln!(
                     "boyko_app: MeshGeometryTable::new failed ({e:?}) - VB geometry table disabled"
@@ -1065,6 +1072,19 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         } else {
             None
         };
+        // Multi-paradigm render-path plan, rung R8 (Decision 0): builds the VB-path instance
+        // ring from the SAME gather `gather_mesh_draws` already populated this frame (a PARALLEL
+        // fold over `ring`/`mesh_ids`, no second ECS query — `sync_vb_instance_ring_system`'s
+        // doc). Run via `World::run_system` (the SAME one-shot idiom `upload_material_assets`/
+        // `upload_mesh_assets` use at boot) so the scheduler's disjoint-borrow machinery — not a
+        // manual `World::resource_mut`/`World::non_send_resource` pair — resolves the
+        // NonSend-asset-table-vs-Resource split. Gated on the boot-resolved path (Decision 1:
+        // never a per-frame path branch on FRAMEGRAPH SHAPE, but this is a plain data-prep step,
+        // not a shape change) — a Deferred/Forward boot pays zero cost here.
+        if host.resolved_render_path.path == boyko_render::RenderPath::VisibilityBuffer {
+            app.world_mut().run_system(boyko_render::sync_vb_instance_ring_system);
+        }
+
         let mut draws = host.draw_scratch.take();
         let presented = {
             let world = app.world();
@@ -1090,6 +1110,20 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // fenced slot `s == token.slot()`).
             unsafe {
                 upload_instance_models(&token, &host.gpu.instance_rings[s], scratch);
+            }
+
+            // 5b'. Multi-paradigm render-path plan, rung R8 (Decision 0): the gathered VB-path
+            //      instance ring — gated on the boot-resolved path (`sync_vb_instance_ring_system`
+            //      above already skipped populating `scratch.vb_ring` on any other boot, so
+            //      `upload_vb_instance_rows` itself would just upload zero bytes there anyway;
+            //      the explicit gate documents intent and avoids the dead upload call).
+            if host.resolved_render_path.path == boyko_render::RenderPath::VisibilityBuffer {
+                // SAFETY: `host.gpu.vb_instance_rings[s]` — same provenance contract as
+                // `instance_rings[s]` above (boot-minted, live until teardown, the fenced slot
+                // `s == token.slot()`).
+                unsafe {
+                    upload_vb_instance_rows(&token, &host.gpu.vb_instance_rings[s], scratch);
+                }
             }
 
             // 5b''. Asset-streaming plan F8: the gathered per-instance material-id lane —
@@ -1442,14 +1476,22 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // consulted by the windowed host's pushes).
                 //
                 // Multi-paradigm render-path plan, rung R4b-b (widened to `ForwardPlus` at rung
-                // R5): a Forward-family-resolved boot builds its push from
+                // R5, widened to `VisibilityBuffer` at rung R8 — the bug this comment now
+                // documents): a Forward-family-OR-VB-resolved boot builds its push from
                 // `forward_gbuffer_push_from_view` (the reverse-Z projection,
                 // `boyko_render::view::forward_view_proj_rows`) instead of the Deferred
                 // `gbuffer_push_from_view` — a cold, boot-resolved host-side branch (Decision 1:
                 // the paths are mutually exclusive per boot, `host.resolved_render_path` never
-                // changes mid-run). Neither Forward variant has TAA yet (the resolver's
-                // `ForwardTaaNotYetImplemented` degrade, widened to `ForwardPlus` at R5), so this
-                // arm never jitters.
+                // changes mid-run). `vb_raster.vs.hlsl` reads this SAME `scene.mvp` push as its
+                // `pc.view_proj` and its pipeline is built `VK_COMPARE_OP_GREATER` against a
+                // `0.0` clear (Decision 4, HW reverse-Z) — feeding it the Deferred custom-linear
+                // matrix instead produces depth values inconsistent with that reverse-Z GREATER
+                // test, failing the depth test for every fragment (zero `vb_id` writes, the
+                // rung-R8 GPU regression: the dumped frame degenerated to the sky-only pin
+                // because `vb_resolve` saw the sentinel-cleared `vb_id` everywhere). Neither
+                // Forward variant nor VB v1 has TAA yet (the resolver's
+                // `ForwardTaaNotYetImplemented`/`VbTaaNotYetImplemented` degrades), so this arm
+                // never jitters.
                 //
                 // TAA W2: the STRUCTURAL OFF-skip — a TAA-off Deferred frame calls the plain
                 // (non-jittered) fn, not `_jittered` with a zero offset (`no *0.0`, per the
@@ -1458,7 +1500,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // SAME already-advanced phase this frame's jitter derives from.
                 if matches!(
                     host.resolved_render_path.path,
-                    boyko_render::RenderPath::Forward | boyko_render::RenderPath::ForwardPlus
+                    boyko_render::RenderPath::Forward
+                        | boyko_render::RenderPath::ForwardPlus
+                        | boyko_render::RenderPath::VisibilityBuffer
                 ) {
                     forward_gbuffer_push_from_view(&view, cw, ch, instanced)
                 } else if taa_armed_now {
@@ -1622,6 +1666,16 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             } else {
                 resolved_aa_mode
             };
+            // Multi-paradigm render-path plan, rung R8: the live Decision-0 geometry table's
+            // Set, read from `World` here (the ONE per-frame `World` read `scene()` itself
+            // avoids by taking this as a plain param — this fn's own doc). `None` on every boot
+            // that never armed the table (`MeshGeometryTableSlot(None)` — every non-VB boot, or a
+            // VB boot whose device lacks the descriptor-indexing prerequisite).
+            let vb_geometry_set = world
+                .non_send_resource::<boyko_render::MeshGeometryTableSlot>()
+                .0
+                .as_ref()
+                .map(boyko_render::MeshGeometryTable::set);
             let scene = host.gpu.scene(
                 mvp,
                 s,
@@ -1665,6 +1719,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // used).
                 sdf_forward_view_z_a,
                 sdf_forward_view_z_b,
+                vb_geometry_set,
                 ctx,
             );
 

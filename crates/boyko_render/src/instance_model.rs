@@ -200,14 +200,15 @@ pub fn sync_prev_instance_model_cols(
 /// because a VB shading pass holds only `(instance_id, triangle_id)` per pixel with no
 /// per-draw binding — see Decision 0.
 ///
-/// # Structurally unreachable today
+/// # Reachable as of rung R8
 ///
-/// See `mesh_geometry_table`'s module doc: `VB_IMPLEMENTED == false` keeps
-/// `ResolvedRenderPath.mesh_geo_shade_split`/the VB declarator unreachable, so nothing
-/// constructs a ring of these rows yet — this rung ships the data structure + the pure
-/// pack helper [`VbInstanceRow::from_model_col`] (Principle 1: a future VB gather,
-/// R8/R9, selects THIS packing fn at boot instead of [`InstanceModelCol`]'s, never a
-/// per-instance branch), pinned by the offset const-asserts below.
+/// [`crate::mesh_draw::MeshRenderScratch::sync_vb_instance_ring`] builds a ring of these rows
+/// (from the SAME `ring`/`mesh_ids` gather output [`InstanceModelCol`]'s own scatter
+/// populates) on a `VisibilityBuffer`-resolved boot; `boyko_render::upload::
+/// upload_vb_instance_rows` uploads it into `GpuSceneBundles::vb_instance_rings`. Deferred/
+/// Forward/ForwardPlus never construct this ring (Principle 1: the boot-resolved path selects
+/// WHICH gather/upload pair runs, never a per-instance branch), pinned by the offset
+/// const-asserts below.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 pub struct VbInstanceRow {

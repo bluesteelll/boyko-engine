@@ -200,21 +200,26 @@ pub struct DeviceCaps {
     /// always has this `true` — [`BootError::BindlessUnsupported`] rejects a GPU
     /// lacking any of the 5.
     pub bindless_capable: bool,
-    /// Multi-paradigm render-path plan, Decision 0 / rung R1: whether the GPU advertises
+    /// Multi-paradigm render-path plan, Decision 0 / rung R1 (widened at rung R8, code review
+    /// P1-2 fix): whether the GPU advertises BOTH
     /// `VkPhysicalDeviceDescriptorIndexingFeatures::shaderStorageBufferArrayNonUniformIndexing`
-    /// — the `VisibilityBuffer` render path's bindless per-mesh geometry table needs it to
-    /// index `gMeshVerts[]`/`gMeshIndices[]` by a wave-non-uniform `mesh_id`
-    /// (`NonUniformResourceIndex`). RECORDED ONLY (NO boot fail-fast, unlike
+    /// (indexing `gMeshVerts[]`/`gMeshIndices[]` by a wave-non-uniform `mesh_id`,
+    /// `NonUniformResourceIndex`) AND `descriptorBindingStorageBufferUpdateAfterBind` (the VB
+    /// geometry table's Set-2 UPDATE_AFTER_BIND pool/layout, `geometry_bindless.rs`) — the
+    /// CONJUNCTION of both, not just the first: `create_device` conditionally enables BOTH bits
+    /// under the SAME `enable_vb_geometry_table` gate this field ultimately drives (below), so
+    /// querying only one while enabling both risked a hard `VK_ERROR_FEATURE_NOT_PRESENT`
+    /// `vkCreateDevice` failure on a device advertising the first but not the second (the P1-2
+    /// bug this rung's code review caught). RECORDED ONLY (NO boot fail-fast, unlike
     /// [`bindless_capable`](Self::bindless_capable)'s 5-bit group): VisibilityBuffer is
     /// opt-in and near-universal-but-not-guaranteed, so an unsupported device degrades the
     /// path to `Deferred` at boot (`boyko_render::render_path_config::resolve_render_path`'s
     /// `RenderPathDeviceCaps` input — this crate sits BELOW `boyko_render` in the dependency
     /// graph, so it cannot doc-link that type), never a boot failure. Read from the SAME
     /// `descriptor_indexing` features-2 query
-    /// [`bindless_capable`](Self::bindless_capable) already runs (`query_device_caps`); NOT
-    /// separately enabled at `create_device` (R1 exposes the QUERY only — no consumer requests
-    /// the feature yet, so enabling an unsupported bit at device-create would be a real,
-    /// untested boot-behavior change for zero benefit this rung).
+    /// [`bindless_capable`](Self::bindless_capable) already runs (`query_device_caps`); `create_device`
+    /// enables both bits IFF this cap is `true` (the "query before request" precedent
+    /// `enable_ray_query` establishes).
     pub storage_buffer_array_non_uniform_indexing_ok: bool,
     /// Whether `R8G8B8A8_UNORM` supports `STORAGE_IMAGE` under OPTIMAL tiling (the P1b
     /// G-buffer color images are compute-store targets). Always `true` on a booted
@@ -1066,6 +1071,19 @@ impl VulkanContext {
         #[cfg(not(feature = "hwrt"))]
         let enable_ray_query = RT_ENABLE_DEFAULT;
 
+        // Multi-paradigm render-path plan, rung R8: enable the VB geometry table's two
+        // descriptor-indexing bits (`shaderStorageBufferArrayNonUniformIndexing` +
+        // `descriptorBindingStorageBufferUpdateAfterBind`) IFF the device already advertised
+        // support (`device_caps.storage_buffer_array_non_uniform_indexing_ok`, queried above,
+        // step 5b — the SAME "query before request" precedent `enable_ray_query` establishes).
+        // Gated, not unconditional: a device that lacks the bit would otherwise fail
+        // `vkCreateDevice` outright (requesting an unsupported feature bit is a hard error, not
+        // a silent no-op) — closing R-VBGEO's documented "device-create gap" without risking a
+        // boot regression on a device that lacks the bit (VB itself degrades to Deferred at
+        // resolve time on such a device, `resolve_render_path`'s `VbDeviceCapMissing` rule; this
+        // gate makes that degrade the ONLY behavior change, never a device-create failure).
+        let enable_vb_geometry_table = device_caps.storage_buffer_array_non_uniform_indexing_ok;
+
         // --- 6. Create the logical device + retrieve the queue. ---
         let device = match create_device(
             &instance_fns,
@@ -1073,6 +1091,7 @@ impl VulkanContext {
             queue_family_index,
             config.windowed,
             enable_ray_query,
+            enable_vb_geometry_table,
         ) {
             Ok(d) => d,
             Err(e) => fail!(e),
@@ -2832,11 +2851,18 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         && descriptor_indexing.descriptor_binding_partially_bound == VK_TRUE
         && descriptor_indexing.descriptor_binding_variable_descriptor_count == VK_TRUE
         && descriptor_indexing.descriptor_binding_sampled_image_update_after_bind == VK_TRUE;
-    // Multi-paradigm render-path plan, Decision 0 / rung R1: read from the SAME
-    // `descriptor_indexing` local the 5-bit `bindless_capable` group above already queried —
-    // no second `vkGetPhysicalDeviceFeatures2` call needed.
-    let storage_buffer_array_non_uniform_indexing_ok =
-        descriptor_indexing.shader_storage_buffer_array_non_uniform_indexing == VK_TRUE;
+    // Multi-paradigm render-path plan, Decision 0 / rung R1 (code review P1-2 fix): read from
+    // the SAME `descriptor_indexing` local the 5-bit `bindless_capable` group above already
+    // queried — no second `vkGetPhysicalDeviceFeatures2` call needed. BOTH bits `create_device`
+    // conditionally enables under `enable_vb_geometry_table` (below) MUST be queried and ANDed
+    // into this ONE cap: enabling `descriptor_binding_storage_buffer_update_after_bind` without
+    // having queried it (the original bug) risks a hard `VK_ERROR_FEATURE_NOT_PRESENT`
+    // `vkCreateDevice` failure — on ANY boot, Deferred included, since `enable_vb_geometry_table`
+    // was the sole gate and it read only the FIRST bit.
+    let storage_buffer_array_non_uniform_indexing_ok = descriptor_indexing
+        .shader_storage_buffer_array_non_uniform_indexing
+        == VK_TRUE
+        && descriptor_indexing.descriptor_binding_storage_buffer_update_after_bind == VK_TRUE;
 
     // --- gbuffer_storage_format_ok: STORAGE_IMAGE on R8G8B8A8_UNORM, OPTIMAL tiling. ---
     let mut format_props = VkFormatProperties {
@@ -3179,6 +3205,13 @@ fn create_device(
     // feature structs are chained off `features13.p_next`. HARD `false` on every non-hwrt
     // build (the caller passes `RT_ENABLE_DEFAULT`), so the RT arm below is dead + gated.
     enable_ray_query: bool,
+    // Multi-paradigm render-path plan, rung R8 (Decision 0 / R-VBGEO's documented device-create
+    // gap, now closed): when `true` (only ever set after the caller queried
+    // `DeviceCaps::storage_buffer_array_non_uniform_indexing_ok`), enables
+    // `shaderStorageBufferArrayNonUniformIndexing` +
+    // `descriptorBindingStorageBufferUpdateAfterBind` on the granular descriptor-indexing
+    // struct below — the VB geometry table's (`MeshGeometryTable`) two prerequisite bits.
+    enable_vb_geometry_table: bool,
 ) -> Result<VkDevice, BootError> {
     let _ = enable_ray_query; // read only on the hwrt arm below (silences the OFF build).
     // Correction #2 (OQ-6): fail fast with a CLEAR error if the GPU does not
@@ -3290,21 +3323,18 @@ fn create_device(
     descriptor_indexing.descriptor_binding_partially_bound = VK_TRUE;
     descriptor_indexing.descriptor_binding_variable_descriptor_count = VK_TRUE;
     descriptor_indexing.descriptor_binding_sampled_image_update_after_bind = VK_TRUE;
-    // Multi-paradigm render-path plan, rung R-VBGEO: deliberately does NOT enable
-    // `shader_storage_buffer_array_non_uniform_indexing` / `descriptor_binding_storage_
-    // buffer_update_after_bind` here — mirrors `DeviceCaps::storage_buffer_array_non_
-    // uniform_indexing_ok`'s own R1 doc ("enabling an unsupported bit at device-create
-    // would be a real, untested boot-behavior change for zero benefit this rung"). R-VBGEO
-    // builds `MeshGeometryTable`'s CPU-testable machinery + the Vulkan Set-3 layout/pool/set
-    // construction code (`geometry_bindless.rs`), but `VB_IMPLEMENTED == false` keeps
-    // `ResolvedRenderPath.vb_geometry_table` false for every resolve today, so no live code
-    // path ever constructs a `MeshGeometryTable` — enabling these two bits now would be
-    // exactly the same premature, untested change R1 already declined. Whichever rung
-    // actually constructs a LIVE `MeshGeometryTable` (R8+) MUST first query BOTH bits
-    // (mirroring `enable_ray_query`'s conditional-enable precedent: query the physical
-    // device's support before requesting it, never force an unsupported bit), thread that
-    // bool into this fn, and set these two fields here — the sole remaining device-create
-    // gap for a real Set-3 UPDATE_AFTER_BIND storage-buffer array to function.
+    // Multi-paradigm render-path plan, rung R8 (code review P1-2 fix): closes R-VBGEO's
+    // documented device-create gap — `enable_vb_geometry_table` is `true` only after the caller
+    // queried `DeviceCaps::storage_buffer_array_non_uniform_indexing_ok`, which is now the
+    // CONJUNCTION of BOTH bits this arm enables (`query_device_caps`'s doc — the original P1
+    // bug queried only the first bit while enabling both, risking a hard
+    // `VK_ERROR_FEATURE_NOT_PRESENT` on a device with the first but not the second). The SAME
+    // "query before request" precedent `enable_ray_query` establishes above, now for BOTH bits,
+    // so requesting either here can never fail `vkCreateDevice` on a device that lacks it.
+    if enable_vb_geometry_table {
+        descriptor_indexing.shader_storage_buffer_array_non_uniform_indexing = VK_TRUE;
+        descriptor_indexing.descriptor_binding_storage_buffer_update_after_bind = VK_TRUE;
+    }
     descriptor_indexing.p_next =
         (&features13 as *const VkPhysicalDeviceVulkan13Features).cast::<c_void>() as *mut c_void;
 

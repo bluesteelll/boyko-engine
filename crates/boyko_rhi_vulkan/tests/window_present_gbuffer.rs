@@ -2280,6 +2280,16 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         brick_levels_ubo: None,
         sdf_forward_view_z_a: 0.0,
         sdf_forward_view_z_b: 0.0,
+        // Multi-paradigm render-path plan, rung R8: this harness never resolves
+        // `VisibilityBuffer` (it independently re-implements boot/scene assembly, `forward_mesh
+        // .rs`'s doc) — `None` for every VB field, the same "Option lets a non-VB fixture say so
+        // honestly" rationale as the Forward fields above.
+        vb_raster_pipeline: None,
+        vb_sky_pipeline: None,
+        vb_resolve_pipeline: None,
+        vb_layout0: None,
+        vb_instance_ring: None,
+        vb_geometry_set: None,
         tiles_buffer: &tiles_buffer,
         // Brick bindings 9..=14: the ACTIVATED clip-map's REAL per-level resources. Level 0's grid +
         // atlas at @9/@10, level 1 at @11/@12, level 2 at @13/@14 — the genuine 3-level cache (NOT the
@@ -3283,6 +3293,16 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         brick_levels_ubo: None,
         sdf_forward_view_z_a: 0.0,
         sdf_forward_view_z_b: 0.0,
+        // Multi-paradigm render-path plan, rung R8: this harness never resolves
+        // `VisibilityBuffer` (it independently re-implements boot/scene assembly, `forward_mesh
+        // .rs`'s doc) — `None` for every VB field, the same "Option lets a non-VB fixture say so
+        // honestly" rationale as the Forward fields above.
+        vb_raster_pipeline: None,
+        vb_sky_pipeline: None,
+        vb_resolve_pipeline: None,
+        vb_layout0: None,
+        vb_instance_ring: None,
+        vb_geometry_set: None,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),
@@ -8210,6 +8230,16 @@ fn run_showcase_body_ddgi(
         brick_levels_ubo: None,
         sdf_forward_view_z_a: 0.0,
         sdf_forward_view_z_b: 0.0,
+        // Multi-paradigm render-path plan, rung R8: this harness never resolves
+        // `VisibilityBuffer` (it independently re-implements boot/scene assembly, `forward_mesh
+        // .rs`'s doc) — `None` for every VB field, the same "Option lets a non-VB fixture say so
+        // honestly" rationale as the Forward fields above.
+        vb_raster_pipeline: None,
+        vb_sky_pipeline: None,
+        vb_resolve_pipeline: None,
+        vb_layout0: None,
+        vb_instance_ring: None,
+        vb_geometry_set: None,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),
@@ -9632,6 +9662,16 @@ fn run_showcase_body(
         brick_levels_ubo: None,
         sdf_forward_view_z_a: 0.0,
         sdf_forward_view_z_b: 0.0,
+        // Multi-paradigm render-path plan, rung R8: this harness never resolves
+        // `VisibilityBuffer` (it independently re-implements boot/scene assembly, `forward_mesh
+        // .rs`'s doc) — `None` for every VB field, the same "Option lets a non-VB fixture say so
+        // honestly" rationale as the Forward fields above.
+        vb_raster_pipeline: None,
+        vb_sky_pipeline: None,
+        vb_resolve_pipeline: None,
+        vb_layout0: None,
+        vb_instance_ring: None,
+        vb_geometry_set: None,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),

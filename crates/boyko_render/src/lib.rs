@@ -403,7 +403,7 @@ pub use instance_model::{PrevInstanceModelCol, sync_prev_instance_model_cols};
 pub use motion_cam::{MOTION_CAM_UBO_BYTES, MotionCam, MotionCamState};
 pub use mesh_draw::{
     DrawBatch, MeshRenderScratch, PER_INSTANCE_MATERIAL_BYTES, PER_INSTANCE_MATERIAL_TEX_BYTES,
-    PerInstanceMaterial, PerInstanceMaterialTex, gather_mesh_draws,
+    PerInstanceMaterial, PerInstanceMaterialTex, gather_mesh_draws, sync_vb_instance_ring_system,
 };
 pub use light_plugin::LightingPlugin;
 pub use light_reconcile::light_reconcile;
@@ -434,7 +434,7 @@ pub use material::{
 };
 pub use material_table::MaterialTable;
 pub use mesh::{MeshGpu, U16_INDEX_VERTEX_LIMIT, VERTEX_STRIDE as MESH_VERTEX_STRIDE, Vertex};
-pub use mesh_assets::{MeshAssetsExt, OrphanedMeshGpu, build_mesh_gpu};
+pub use mesh_assets::{MeshAssetsExt, MeshAssetsVbExt, OrphanedMeshGpu, build_mesh_gpu};
 pub use mesh_data::MeshData;
 pub use mesh_geometry_table::{
     MESH_GEOMETRY_META_BYTES, MeshGeometryMeta, MeshGeometryTable, MeshGeometryTableSlot,
@@ -479,7 +479,7 @@ pub use upload::{
     upload_atlas_ring, upload_camera_ring, upload_csm_ring, upload_instance_materials,
     upload_instance_materials_tex, upload_instance_models, upload_light_table,
     upload_pair_out_slot, upload_pair_ring, upload_ray_shadow_ring, upload_sdf_edit_list,
-    upload_shadow_denoise_ring, upload_taa_ring, upload_temporal_shadow_ring,
+    upload_shadow_denoise_ring, upload_taa_ring, upload_temporal_shadow_ring, upload_vb_instance_rows,
 };
 #[cfg(feature = "hwrt")]
 pub use upload::{upload_mesh_ids, upload_prev_instance_models};

@@ -59,10 +59,11 @@ use boyko_scene::render_caps::{MaterialHandle, MeshHandle, RenderEnabled};
 use bytemuck::{Pod, Zeroable};
 
 use crate::gpu_transform3d::GpuTransform3D;
-use crate::instance_model::InstanceModelCol;
+use crate::instance_model::{InstanceModelCol, VbInstanceRow};
 use crate::material::{Material, MaterialTextures};
 use crate::mesh::MeshGpu;
 use crate::mesh_assets::MeshAssetsExt;
+use crate::mesh_geometry_table::VB_GEOMETRY_RESERVED_SLOT;
 
 /// One per-mesh instanced draw (mesh foundation M3) — the consumer issues exactly ONE
 /// `vkCmdDrawIndexed(index_count, instance_count, 0, 0, base_instance)` per batch
@@ -377,6 +378,14 @@ pub struct MeshRenderScratch {
     /// (`fit_len` re-zeros it), never a fresh allocation on the hot path.
     #[cfg(feature = "hwrt")]
     prev_cursors: ScratchColumn<u32>,
+    /// Multi-paradigm render-path plan, rung R8 (Decision 0): the VB-path instance ring —
+    /// `vb_ring[i]` is [`ring`](Self::ring) instance `i`'s affine PLUS its resolved
+    /// geometry-table `mesh_id` ([`VbInstanceRow`]), built by
+    /// [`sync_vb_instance_ring`](Self::sync_vb_instance_ring) ONLY when the boot-resolved path
+    /// is `VisibilityBuffer` — a Deferred/Forward boot never calls it, so this lane stays empty
+    /// (the zero-cost path-toggle discipline: an unused `ScratchColumn` costs an unbacked VA
+    /// reservation, no committed pages). `clear()` + scatter, backing reservation persists.
+    pub vb_ring: ScratchColumn<VbInstanceRow>,
 }
 
 /// Constructs every lane fresh: registers ONE [`boyko_ecs`] `ComponentId` per
@@ -403,6 +412,8 @@ impl Default for MeshRenderScratch {
         let pair_rows = pool_reserve_rows(std::mem::size_of::<GpuTransform3D>());
         let material_rows = pool_reserve_rows(std::mem::size_of::<PerInstanceMaterial>());
         let material_tex_rows = pool_reserve_rows(std::mem::size_of::<PerInstanceMaterialTex>());
+        let vb_row_id = register_asset_layout::<VbInstanceRow>(None);
+        let vb_row_rows = pool_reserve_rows(std::mem::size_of::<VbInstanceRow>());
 
         Self {
             counts: ScratchColumn::new(u32_id, u32_rows),
@@ -422,6 +433,7 @@ impl Default for MeshRenderScratch {
             prev_ring: ScratchColumn::new(model_id, model_rows),
             #[cfg(feature = "hwrt")]
             prev_cursors: ScratchColumn::new(u32_id, u32_rows),
+            vb_ring: ScratchColumn::new(vb_row_id, vb_row_rows),
         }
     }
 }
@@ -443,6 +455,42 @@ fn fit_len(col: &mut ScratchColumn<u32>, min_len: usize, fill: u32) {
 }
 
 impl MeshRenderScratch {
+    /// Multi-paradigm render-path plan, rung R8 (Decision 0): builds [`vb_ring`](Self::vb_ring)
+    /// from the ALREADY-scattered [`ring`](Self::ring)/[`mesh_ids`](Self::mesh_ids) pair — a
+    /// PARALLEL fold over the SAME gather output (no second ECS query, the SAME pattern
+    /// `material_ids`/`material_tex` establish one level up). For instance `i`, resolves the
+    /// asset `mesh_ids[i]` to its Decision-0 geometry-table slot via `mesh_assets`
+    /// (`MeshGpu::geometry_slot`) and packs `VbInstanceRow::from_model_col(&ring[i], slot)`.
+    ///
+    /// Call this AFTER [`gather_mesh_draws`] (or [`gather_mixed_into`](Self::gather_mixed_into))
+    /// populates `ring`/`mesh_ids` for the frame, and ONLY when the boot-resolved
+    /// [`RenderPath`](crate::render_path_config::RenderPath) is `VisibilityBuffer` — the caller's
+    /// own gate, not this fn's (mirrors every other path-conditional producer in this codebase:
+    /// the CALL SITE decides whether to run, this fn is unconditionally correct either way).
+    ///
+    /// A mesh registered via the plain [`MeshAssetsExt`](crate::mesh_assets::MeshAssetsExt)
+    /// methods (not the VB-aware [`MeshAssetsVbExt`](crate::mesh_assets::MeshAssetsVbExt)
+    /// siblings) never claimed a geometry-table slot, so its resolved `geometry_slot` reads
+    /// [`VB_GEOMETRY_RESERVED_SLOT`](crate::mesh_geometry_table::VB_GEOMETRY_RESERVED_SLOT) here
+    /// — the degenerate (zero-triangle) slot, which the compute fetch's own `tri_count` clamp
+    /// makes safe (never a GPU-undefined `%0`), not a silently wrong geometry read.
+    fn sync_vb_instance_ring(&mut self, mesh_assets: &Assets<MeshGpu>) {
+        let ring_slice = self.ring.as_read_slice();
+        let mesh_ids_slice = self.mesh_ids.as_read_slice();
+        debug_assert_eq!(
+            ring_slice.len(),
+            mesh_ids_slice.len(),
+            "invariant: ring/mesh_ids are scattered in lock-step (parallel lanes)"
+        );
+        let mut view = self.vb_ring.build_view();
+        view.clear();
+        for (model, &mesh_id) in ring_slice.iter().zip(mesh_ids_slice.iter()) {
+            let geometry_slot =
+                mesh_assets.get_by_index(mesh_id).map_or(VB_GEOMETRY_RESERVED_SLOT, |m| m.geometry_slot);
+            view.push(VbInstanceRow::from_model_col(model, geometry_slot));
+        }
+    }
+
     /// The number of distinct meshes with at least one visible instance this frame —
     /// `batches.len()` after a [`gather_mixed_into`](Self::gather_mixed_into). The Principle-1
     /// one-draw-per-mesh count.
@@ -978,6 +1026,24 @@ impl MeshRenderScratch {
             "invariant: the textured material payload lane is index-aligned with the ring"
         );
     }
+}
+
+/// Multi-paradigm render-path plan, rung R8 (Decision 0): the ECS-native SYSTEM wrapper over
+/// [`MeshRenderScratch::sync_vb_instance_ring`] — a `NonSendRes<Assets<MeshGpu>>` + a
+/// `ResMut<MeshRenderScratch>` are TWO DISJOINT resources (a NonSend asset table and a plain
+/// Resource), so the scheduler's own disjoint-borrow machinery is what makes calling THIS
+/// system sound; a manual `World::resource_mut` + `World::non_send_resource` pair through the
+/// SAME `&mut World` handle cannot express the split safely. `boyko_app::runner` drives this via
+/// `World::run_system`, the SAME one-shot-system idiom `upload_material_assets`/
+/// `upload_mesh_assets` already use for their own boot-time asset drains, gated on the
+/// boot-resolved path being `VisibilityBuffer` (Decision 1's own "call-site decides" discipline —
+/// this system itself is unconditionally correct either way).
+#[allow(clippy::needless_pass_by_value)]
+pub fn sync_vb_instance_ring_system(
+    mesh_assets: NonSendRes<Assets<MeshGpu>>,
+    mut scratch: ResMut<MeshRenderScratch>,
+) {
+    scratch.sync_vb_instance_ring(&mesh_assets);
 }
 
 /// The ECS-native M3 gather SYSTEM: buckets every visible

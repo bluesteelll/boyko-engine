@@ -12,6 +12,7 @@ use crate::compute::CoarseMode;
 use crate::device::VulkanContext;
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
+use crate::geometry_bindless::VulkanGeometryBindlessSet;
 use crate::rhi_impl::{
     ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline, VulkanSampler,
 };
@@ -996,7 +997,7 @@ pub struct TlasBuildActivation<'a> {
 #[repr(C)]
 pub struct ResolvedRenderPathGpu {
     /// `RenderPath` discriminant (`Deferred = 0`, `Forward = 1`, `ForwardPlus = 2`,
-    /// `VisibilityBuffer = 3`).
+    /// `VisibilityBuffer = 3` — see [`RENDER_PATH_VISIBILITY_BUFFER`]).
     pub path: u32,
     /// `GeometryLegs` discriminant (`Both = 0`, `Mesh = 1`, `Sdf = 2`).
     pub legs: u32,
@@ -1025,6 +1026,12 @@ pub struct ResolvedRenderPathGpu {
     /// `ShadowSources::bits()`.
     pub shadow: u32,
 }
+
+/// Code review P2-5: the `RenderPath::VisibilityBuffer` discriminant
+/// (`boyko_render::render_path_config::RenderPath`), named instead of a bare `3` literal at
+/// [`GBufferScene::path_is_vb`]'s comparison site — mirrors [`ResolvedRenderPathGpu::path`]'s
+/// own doc table.
+pub(crate) const RENDER_PATH_VISIBILITY_BUFFER: u32 = 3;
 
 impl Default for ResolvedRenderPathGpu {
     /// `Deferred + Both`, every derived flag off, `depth_kind = CustomLinear` — the byte-identity
@@ -2053,6 +2060,66 @@ pub struct GBufferScene<'a> {
     pub sdf_forward_view_z_a: f32,
     /// The `B` coefficient sibling of [`Self::sdf_forward_view_z_a`].
     pub sdf_forward_view_z_b: f32,
+
+    // ---- Multi-paradigm render-path plan, rung R8: the VisibilityBuffer FUSED v1 path -------
+    //
+    // Built UNCONDITIONALLY at `boyko_app::gpu_scene::GpuSceneBundles::boot` (the
+    // `forward_pipeline` precedent — cheap to create, no per-frame cost either way), so
+    // PRODUCTION always threads `Some(...)` here regardless of `resolved_render_path.path`; only
+    // a `VisibilityBuffer`-resolved boot ever RECORDS `vb_raster`/`vb_resolve`
+    // (`declare_vb_graph`/`record_vb`). `None` in every test fixture that never resolves VB —
+    // same `Option`/`None` rationale as [`Self::forward_pipeline`].
+    /// The `vb_raster` mesh id-raster pipeline (`vb_raster.{vs,fs}.hlsl`): writes ONLY
+    /// `SV_Target0 = uint2(instance_id, raw SV_PrimitiveID)` into the `vb_id` `R32G32_UINT`
+    /// color attachment, `VK_COMPARE_OP_GREATER` HW reverse-Z depth-write ON (Decision 4/9). A
+    /// plain 1-Vulkan-set pipeline built against [`Self::vb_layout0`] (its VS references only
+    /// the `instances`/`Camera` subset — the SAME bound-but-unread-subset idiom
+    /// [`Self::forward_sky_pipeline`] establishes).
+    pub vb_raster_pipeline: Option<&'a VulkanGraphicsPipeline>,
+    /// The VB v1 sky BACKGROUND pipeline — REUSES the EXISTING compiled `forward_sky.{vs,fs}.hlsl`
+    /// SPIR-V verbatim (byte-identical shader modules to [`Self::forward_sky_pipeline`]'s own),
+    /// built as a NEW pipeline OBJECT against [`Self::vb_layout0`] (a DIFFERENT descriptor-set
+    /// layout object than [`Self::forward_layout0`] — Vulkan pipeline-layout compatibility needs
+    /// the SAME layout object the pipeline was built with, so a new object is required even
+    /// though the shader source is unchanged). Reuse is sound because `vb_layout0` places
+    /// `Camera`/`LightBuf` at the SAME binding numbers (2/3) the sky FS's fixed SPIR-V already
+    /// references (`vb_geom_fetch.hlsli`'s Set-numbering doc explains the analogous discipline).
+    pub vb_sky_pipeline: Option<&'a VulkanGraphicsPipeline>,
+    /// The `vb_resolve` FUSED compute pipeline (`vb_resolve.comp.hlsl`, `mesh_geo_shade_split ==
+    /// false` — SSAO/DDGI/shadow-denoise/TAA capped off this rung, `cap_vb_v1_consumers`): unpacks
+    /// `vb_id`, re-fetches the covered triangle's geometry via the Decision-0 table (Set 2), shades
+    /// ALL-LIGHTS, and writes `lit` (STORAGE). A 3-Vulkan-set pipeline: Set 0 = [`Self::vb_layout0`],
+    /// Set 1 = [`Self::forward_layout1`] (the shadow set, REUSED VERBATIM — the SAME reuse
+    /// `sdf_forward_march_pipeline` already establishes), Set 2 = [`Self::vb_geometry_set`]'s
+    /// layout.
+    pub vb_resolve_pipeline: Option<&'a ComputePipeline>,
+    /// The VB-only Set-0 (core + images) bind-group LAYOUT — 7 bindings: `gVbInstances` @0
+    /// (VERTEX+COMPUTE, [`Self::vb_instance_ring`]), `instance_materials` @1 (COMPUTE,
+    /// [`Self::forward_instance_material_ring`] — the SAME per-instance-material ring the Forward
+    /// family already threads, indexed identically by global instance id), `Camera` @2
+    /// (VERTEX+COMPUTE+FRAGMENT, [`Self::camera_ring`]), `LightBuf` @3 (COMPUTE+FRAGMENT,
+    /// [`Self::light_table`]), `Materials` @4 (COMPUTE, [`Self::material_table`]), `gVbId` @5
+    /// (COMPUTE, SAMPLED, [`VbTargets::vb_id`](super::targets::VbTargets::vb_id)), `gLit` @6
+    /// (COMPUTE, STORAGE, the shared `lit` target) — see `vb_resolve.comp.hlsl`'s own binding
+    /// table doc. [`GBufferTargets`] writes the per-FIF bind group against this layout once per
+    /// extent (the `forward_layout0` precedent). `None` rationale as [`Self::forward_pipeline`].
+    pub vb_layout0: Option<&'a VulkanBindGroupLayout>,
+    /// The RAW per-FIF `VbInstanceRow` (64 B) SSBO ring — Decision 0's VB-path instance row
+    /// (byte-identical leading 48 bytes to `InstanceModelCol`, plus an appended `mesh_id` lane).
+    /// A DEDICATED ring, distinct from [`Self::forward_instance_ring`] (`InstanceModelCol`, 48 B)
+    /// — built from [`boyko_render::mesh_draw::MeshRenderScratch::vb_ring`], uploaded ONLY on a
+    /// `VisibilityBuffer`-resolved boot. `None` rationale as [`Self::forward_pipeline`].
+    pub vb_instance_ring: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
+    /// The Decision-0 bindless per-mesh geometry table's OWN Set (`gMeshVerts[]`/
+    /// `gMeshIndices[]`/`gMeshMeta` — `boyko_render::mesh_geometry_table::MeshGeometryTable::set()`),
+    /// threaded down as the raw low-level type (this crate cannot depend on `boyko_render`, which
+    /// sits ABOVE it in the dependency graph — the SAME plain-reference boundary crossing
+    /// [`Self::resolved_render_path`]'s doc explains for `ResolvedRenderPathGpu`). `Some` only
+    /// when [`ResolvedRenderPath::vb_geometry_table`](boyko_render::render_path_config::ResolvedRenderPath::vb_geometry_table)
+    /// is armed (a live `MeshGeometryTable` exists); `None` otherwise (including on a device that
+    /// lacks the descriptor-indexing prerequisite — VB itself degrades to `Deferred` at resolve
+    /// time in that case, so this field is never read on such a boot).
+    pub vb_geometry_set: Option<&'a VulkanGeometryBindlessSet>,
 }
 
 impl GBufferScene<'_> {
@@ -2257,6 +2324,19 @@ impl GBufferScene<'_> {
     #[inline]
     pub(crate) fn path_has_sdf_forward(&self) -> bool {
         self.resolved_render_path.sdf_forward_marched
+    }
+
+    /// Multi-paradigm render-path plan, rung R8 — the SINGLE source of "is this frame's
+    /// declarator/recorder the `VisibilityBuffer` path" decision, so `declare_frame_graph`'s
+    /// dispatch and `render_gbuffer_frame`'s record-site dispatch (`record_vb` vs
+    /// `record_forward`/`record_gbuffer`) can never diverge (the SAME W1 lesson
+    /// [`Self::path_is_forward`]'s doc explains). Compares against
+    /// [`RENDER_PATH_VISIBILITY_BUFFER`] (code review P2-5: a named const instead of a bare `3`
+    /// literal — `RenderPath::VisibilityBuffer`'s discriminant,
+    /// `boyko_render::render_path_config::RenderPath`).
+    #[inline]
+    pub(crate) fn path_is_vb(&self) -> bool {
+        self.resolved_render_path.path == RENDER_PATH_VISIBILITY_BUFFER
     }
 }
 

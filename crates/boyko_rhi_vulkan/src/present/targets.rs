@@ -437,6 +437,14 @@ pub struct GBufferTargets {
     /// selects `sdf_forward_set[self.frame_index]`; Set 1 is [`ForwardTargets::set1`] (the shadow
     /// set, reused verbatim — no separate ring here).
     pub(crate) sdf_forward_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Multi-paradigm render-path plan, rung R8: the `vb_resolve` FUSED compute pass's Set-0
+    /// vocabulary descriptor set RING, written ONCE against [`GBufferScene::vb_layout0`] — see
+    /// [`DeferredSets`]'s `vb_set0` field doc for the entry order + why this lives HERE (needs
+    /// `lit[i]` + `vb.vb_id[i]`). `Some` iff [`GBufferScene::path_is_vb`] holds; `None` under
+    /// every other path (the 0%-gate). The recorder selects `vb_set0[self.frame_index]`; Set 1 is
+    /// [`ForwardTargets::set1`] (the shadow set, reused verbatim); Set 2 is
+    /// [`GBufferScene::vb_geometry_set`] (the Decision-0 geometry table, bound directly — no ring).
+    pub(crate) vb_set0: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Multi-paradigm render-path plan, rung R4b-b — the Forward v1 mesh path's OWN depth image
     /// ring + descriptor sets ([`ForwardTargets`]). `Some` iff `profile ==
     /// `[`TargetsProfile::ForwardMesh`]` (built at [`Self::create`]'s TOP, before the unconditional
@@ -444,6 +452,11 @@ pub struct GBufferTargets {
     /// `ForwardTargets`" v1 choice). `None` under every `Deferred*` profile (the 0%-gate: no
     /// extra image, no extra descriptor set, byte-identical Deferred allocation).
     pub(crate) forward: Option<ForwardTargets>,
+    /// Multi-paradigm render-path plan, rung R8 — the VisibilityBuffer v1 path's OWN per-extent
+    /// targets ([`VbTargets`]). `Some` iff `profile == `[`TargetsProfile::VbMesh`]` (built at
+    /// [`Self::create`]'s TOP, right after [`Self::forward`] — VB REUSES `ForwardTargets` for its
+    /// depth ring + Set-1 shadow set, see [`VbTargets`]'s doc). `None` under every other profile.
+    pub(crate) vb: Option<VbTargets>,
     /// The extent the images were created at (so [`GBufferTargets::sync_gbuffer`] can
     /// detect a resize and reallocate).
     pub(crate) extent: VkExtent2D,
@@ -691,6 +704,73 @@ impl ForwardTargets {
     }
 }
 
+/// Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 path's own per-extent `vb_id`
+/// image RING (`R32G32_UINT`, Decision 9) — the ONLY VB-specific IMAGE this rung allocates. Built
+/// at [`GBufferTargets::create`]'s TOP, alongside [`ForwardTargets`] (needs only `extent`, no
+/// dependency on `core`'s images), which VB REUSES verbatim for its depth ring + Set-1 shadow set
+/// (`vb_raster`/`vb_resolve` both bind [`ForwardTargets::depth`]/[`ForwardTargets::set1`] — see
+/// [`GBufferScene::vb_resolve_pipeline`]'s doc). The Set-0 descriptor set that BINDS `vb_id`
+/// (`GBufferTargets::vb_set0`) is built separately, at the SAME "needs `core.lit`" point
+/// `sdf_forward_set` is (Option 2 — additive, needs images `create`'s later sub-bundles own).
+pub(crate) struct VbTargets {
+    /// The `R32G32_UINT` id-channel image RING: `COLOR_ATTACHMENT` (raster write, `vb_raster`) |
+    /// `SAMPLED` (`.Load` unfiltered fetch, `vb_resolve`). Cleared to the sentinel `(0xFFFFFFFF,
+    /// 0)` every frame by `record_vb` (mirrors `ForwardTargets::depth`'s per-frame re-clear).
+    pub(crate) vb_id: [VulkanTexture; FRAMES_IN_FLIGHT],
+}
+
+impl VbTargets {
+    /// Allocates the `vb_id` ring at `extent`. Reverse-acquisition draining on partial failure
+    /// (mirrors [`ForwardTargets::build`]'s own depth-ring loop).
+    fn build(ctx: &VulkanContext, extent: VkExtent2D) -> Result<Self, SwapchainError> {
+        let vb_id_desc = TextureDesc {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+            format: Format::R32G32Uint,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+            array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
+        };
+        let mut vb_id_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] = [const { None }; FRAMES_IN_FLIGHT];
+        for slot in vb_id_slots.iter_mut() {
+            match RhiDevice::create_texture(ctx, &vb_id_desc).map_err(SwapchainError::DepthImage) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => {
+                    // SAFETY: every drained slot was created on `ctx` above, referenced by no
+                    // submission (the build phase); `Option::take` leaves the slot `None` so each
+                    // is destroyed exactly once.
+                    unsafe {
+                        for built in vb_id_slots.iter_mut() {
+                            if let Some(t) = built.take() {
+                                RhiDevice::destroy_texture(ctx, t);
+                            }
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let vb_id: [VulkanTexture; FRAMES_IN_FLIGHT] =
+            vb_id_slots.map(|s| s.expect("invariant: every vb_id ring slot built before here"));
+        Ok(Self { vb_id })
+    }
+
+    /// # Safety
+    /// Every image was created on `ctx`, the device is idle (the caller's teardown waited), and
+    /// each is destroyed exactly once (by-value).
+    unsafe fn destroy(self, ctx: &VulkanContext) {
+        // SAFETY: per the contract `ctx` is live + idle and nothing references these images.
+        unsafe {
+            for t in self.vb_id {
+                RhiDevice::destroy_texture(ctx, t);
+            }
+        }
+    }
+}
+
 /// Anti-aliasing campaign: which AA mode [`GBufferTargets`] is CURRENTLY armed for —
 /// replaces the Stage-1 `aa_armed: bool`, closing the Fxaa↔Smaa fixed-extent resync gap a
 /// boolean cannot see (a boolean only distinguishes Off↔non-Off; two DIFFERENT armed modes
@@ -781,6 +861,14 @@ pub(crate) enum TargetsProfile {
     /// additive `ForwardTargets`", the v1 minimalism choice; see [`GBufferTargets::forward`]'s
     /// doc) and ADDITIONALLY builds a [`ForwardTargets`] bundle at the top of `create`.
     ForwardMesh,
+    /// Multi-paradigm render-path plan, rung R8: `RenderPath::VisibilityBuffer` (v1, fused
+    /// `vb_resolve` — the resolver collapses `VisibilityBuffer × {Both, Sdf}` to `Mesh` until R10
+    /// lands, so this is the only reachable VB profile today). [`GBufferTargets::create`] runs
+    /// its UNCHANGED `DeferredFull`-shaped allocation body REGARDLESS of this profile (the SAME
+    /// Option-2 additive discipline `ForwardMesh` uses) and ADDITIONALLY builds a [`VbTargets`]
+    /// bundle (the `vb_id` ring) AND a [`ForwardTargets`] bundle (REUSED for the depth ring +
+    /// Set-1 shadow set — `VbTargets`'s doc) at the top of `create`.
+    VbMesh,
 }
 
 impl TargetsProfile {
@@ -800,6 +888,14 @@ impl TargetsProfile {
     #[inline]
     pub(crate) fn from_scene(scene: &GBufferScene<'_>) -> Self {
         let rp = &scene.resolved_render_path;
+        // Multi-paradigm render-path plan, rung R8: checked BEFORE the Forward-family check —
+        // `RenderPath::VisibilityBuffer` (discriminant 3) and `Forward`/`ForwardPlus`
+        // (discriminants 1/2) are boot-mutually-exclusive resolved paths (Decision 1), so the
+        // check order between the two is a style choice, not a correctness one; VB first mirrors
+        // this plan's own rung ordering (VB landed after Forward/ForwardPlus).
+        if scene.path_is_vb() {
+            return TargetsProfile::VbMesh;
+        }
         if scene.path_is_forward() {
             // RenderPath::Forward == 1, RenderPath::ForwardPlus == 2
             // (boyko_render::render_path_config::RenderPath) — the SAME single predicate
@@ -1929,6 +2025,11 @@ struct DeferredSets {
     /// inside `ForwardTargets::build`, which runs BEFORE `core` exists), so its own error path
     /// tears down every prior set including `present_set`.
     sdf_forward_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Multi-paradigm render-path plan, rung R8: the VB v1 (fused `vb_resolve`) Set-0 vocabulary
+    /// set — `None` unless [`GBufferScene::path_is_vb`] holds. Built AFTER `sdf_forward_set`
+    /// (both need `core.lit[i]`), so its own error path tears down every prior set including
+    /// `sdf_forward_set`.
+    vb_set0: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     #[cfg(feature = "hwrt")]
     resolve_set_hwrt: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Anti-aliasing Stage 1: the FXAA INPUT set RING, `None` when AA is off ([`Self::build`]'s
@@ -1982,6 +2083,10 @@ impl DeferredSets {
         aa_out: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
         smaa_imgs: Option<&SmaaImages>,
         forward: Option<&ForwardTargets>,
+        // Multi-paradigm render-path plan, rung R8: [`GBufferTargets::vb`]'s already-built value
+        // (`Some` iff `TargetsProfile::VbMesh`) — needed for `vb_set0`'s `gVbId` binding, which
+        // must reference the SAME `vb.vb_id[i]` ring `record_vb` writes via the raster pass.
+        vb: Option<&VbTargets>,
     ) -> Result<DeferredSets, SwapchainError> {
         // The marcher vocabulary set, written ONCE here (NO per-frame update). The
         // entry order matches the layout: SSBO @0, sampled depth @1, storage albedo @2,
@@ -2597,6 +2702,97 @@ impl DeferredSets {
             None
         };
 
+        // Multi-paradigm render-path plan, rung R8: the VB v1 (fused `vb_resolve`) Set-0
+        // vocabulary RING — built HERE, the SAME "needs `core.lit`" point `sdf_forward_set` is
+        // (`gLit` @6 references `core.lit[i]`; `gVbId` @5 references `vb.vb_id[i]`, built at the
+        // TOP alongside `forward` — see `VbTargets`'s doc). Gated on `scene.path_is_vb()`: `None`
+        // under every other path — the 0%-gate. Entry order matches `vb_resolve.comp.hlsl`'s own
+        // binding table doc: `gVbInstances` @0, `instance_materials` @1, `Camera` @2, `LightBuf`
+        // @3, `Materials` @4, `gVbId` @5 (SAMPLED, paired with `scene.depth_sampler` as a
+        // harmless bound-but-ignored placeholder — the shader's unfiltered `.Load`, the SAME
+        // idiom `sdf_forward_set`'s own `gForwardDepth`@12 binding uses), `gLit` @6 (STORAGE).
+        let vb_set0: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = if scene.path_is_vb() {
+            let layout = scene.vb_layout0.expect("invariant: path_is_vb() requires scene.vb_layout0");
+            let vb_instance_ring = scene
+                .vb_instance_ring
+                .expect("invariant: path_is_vb() requires scene.vb_instance_ring");
+            let instance_material_ring = scene.forward_instance_material_ring.expect(
+                "invariant: path_is_vb() requires scene.forward_instance_material_ring",
+            );
+            let vb_id_ring = &vb
+                .expect("invariant: path_is_vb() implies TargetsProfile::VbMesh (vb is Some)")
+                .vb_id;
+            let mut vb_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] = [const { None }; FRAMES_IN_FLIGHT];
+            let mut failure: Option<crate::error::VulkanError> = None;
+            for (slot, dst) in vb_slots.iter_mut().enumerate() {
+                let entries = [
+                    BindGroupEntry::StorageBuffer { buffer: &vb_instance_ring[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: &instance_material_ring[slot] },
+                    BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: scene.light_table },
+                    BindGroupEntry::StorageBuffer { buffer: scene.material_table },
+                    BindGroupEntry::SampledImage {
+                        texture: &vb_id_ring[slot],
+                        sampler: scene.depth_sampler,
+                    },
+                    BindGroupEntry::StorageImage { texture: &core.lit[slot] },
+                ];
+                let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
+                match RhiDevice::create_bind_group(ctx, &desc) {
+                    Ok(g) => *dst = Some(g),
+                    Err(e) => {
+                        failure = Some(e);
+                        break;
+                    }
+                }
+            }
+            if let Some(e) = failure {
+                // SAFETY: the vb slots already built [0..slot) + the sdf-forward + present +
+                // (optional) ddgi-update/ssao/cull + the resolve & vocab rings were created on
+                // `ctx`, referenced by no submission; each destroyed exactly once (reverse
+                // acquisition). The optional sets are `Option`-guarded; the images are owned by
+                // the caller.
+                unsafe {
+                    for s in vb_slots.iter_mut() {
+                        if let Some(g) = s.take() {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    if let Some(sfs) = sdf_forward_set {
+                        for g in sfs {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    for g in present_set {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                    if let Some(du) = ddgi_update_set {
+                        RhiDevice::destroy_bind_group(ctx, du);
+                    }
+                    if let Some(ss) = ssao_set {
+                        for g in ss {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    if let Some(cs) = cull_set {
+                        for g in cs {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    for g in resolve_set {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                    for g in vocab_set {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                }
+                return Err(SwapchainError::DepthImage(e));
+            }
+            Some(vb_slots.map(|s| s.expect("invariant: every vb Set-0 ring slot built before reaching here")))
+        } else {
+            None
+        };
+
         // R2a-4b: the HWRT-variant resolve set RING — built ONLY when the scene wires BOTH the
         // 21-binding HWRT resolve layout AND the per-FIF TLAS handles (i.e. under `feature = "hwrt"`
         // + `ctx.ray_query_enabled()` + config HardwareTri). `None` on every software path ⇒ the
@@ -3184,6 +3380,7 @@ impl DeferredSets {
             ddgi_update_set,
             present_set,
             sdf_forward_set,
+            vb_set0,
             #[cfg(feature = "hwrt")]
             resolve_set_hwrt,
             fxaa_set,
@@ -3245,6 +3442,14 @@ impl DeferredSets {
             #[cfg(feature = "hwrt")]
             if let Some(hs) = self.resolve_set_hwrt {
                 for g in hs {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            // Multi-paradigm render-path plan, rung R8: the VB v1 Set-0 vocabulary set,
+            // `Option`-guarded (present only when `scene.path_is_vb()` held). Built AFTER
+            // `sdf_forward_set` (so destroyed BEFORE it, reverse acquisition).
+            if let Some(vs) = self.vb_set0 {
+                for g in vs {
                     RhiDevice::destroy_bind_group(ctx, g);
                 }
             }
@@ -4943,8 +5148,31 @@ impl GBufferTargets {
         // (Option 2 — "full + additive `ForwardTargets`", see [`Self::forward`]'s doc) — a
         // `ForwardMesh` profile pays the full Deferred allocation too; VRAM minimization for
         // Forward is a follow-up (see this rung's report).
-        let forward = if matches!(profile, TargetsProfile::ForwardMesh) {
-            Some(ForwardTargets::build(ctx, scene, extent)?)
+        // Multi-paradigm render-path plan, rung R8: built ONLY under `VbMesh`, BEFORE `forward`
+        // (nothing else has been built yet, so a failure here needs no teardown — the SAME
+        // "first fallible thing, `?` is safe" reasoning `forward`'s own build below relies on).
+        let vb = if matches!(profile, TargetsProfile::VbMesh) {
+            Some(VbTargets::build(ctx, extent)?)
+        } else {
+            None
+        };
+
+        // `forward` is built under EITHER `ForwardMesh` OR `VbMesh` — VB REUSES `ForwardTargets`
+        // verbatim for its depth ring + Set-1 shadow set (`VbTargets`'s doc). Explicit `match`
+        // (not `?`) because a failure here, under `VbMesh`, must first tear down the ALREADY-BUILT
+        // `vb` above.
+        let forward = if matches!(profile, TargetsProfile::ForwardMesh | TargetsProfile::VbMesh) {
+            match ForwardTargets::build(ctx, scene, extent) {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    // SAFETY: `vb` (if built, under `VbMesh`) was created on `ctx` above,
+                    // referenced by no submission; destroyed once on this edge.
+                    if let Some(v) = vb {
+                        unsafe { v.destroy(ctx) };
+                    }
+                    return Err(e);
+                }
+            }
         } else {
             None
         };
@@ -5088,6 +5316,7 @@ impl GBufferTargets {
             aa_imgs.as_ref().map(|a| &a.aa_out),
             smaa_imgs.as_ref(),
             forward.as_ref(),
+            vb.as_ref(),
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -5269,6 +5498,7 @@ impl GBufferTargets {
             ddgi_update_set,
             present_set,
             sdf_forward_set,
+            vb_set0,
             #[cfg(feature = "hwrt")]
             resolve_set_hwrt,
             fxaa_set,
@@ -5434,7 +5664,9 @@ impl GBufferTargets {
             ddgi_update_set,
             present_set,
             sdf_forward_set,
+            vb_set0,
             forward,
+            vb,
             extent,
         })
     }
@@ -5693,6 +5925,7 @@ impl GBufferTargets {
                 ddgi_update_set: self.ddgi_update_set,
                 present_set: self.present_set,
                 sdf_forward_set: self.sdf_forward_set,
+                vb_set0: self.vb_set0,
                 #[cfg(feature = "hwrt")]
                 resolve_set_hwrt: self.resolve_set_hwrt,
                 fxaa_set: self.fxaa_set,
@@ -5791,6 +6024,12 @@ impl GBufferTargets {
             // `Option`-guarded (`None` under every `Deferred*` profile).
             if let Some(f) = self.forward {
                 f.destroy(ctx);
+            }
+            // Multi-paradigm render-path plan, rung R8: `VbTargets` was built FIRST in `create`
+            // (before `forward`/`core`), so it is destroyed LAST here (reverse acquisition).
+            // `Option`-guarded (`None` under every non-`VbMesh` profile).
+            if let Some(v) = self.vb {
+                v.destroy(ctx);
             }
         }
     }
@@ -6046,7 +6285,9 @@ mod tests {
             ddgi_update_set: None,
             present_set: bg_ring(),
             sdf_forward_set: None,
+            vb_set0: None,
             forward: None,
+            vb: None,
             extent: VkExtent2D::default(),
         }
     }
@@ -6133,7 +6374,9 @@ mod tests {
             ddgi_update_set: None,
             present_set: bg_ring(),
             sdf_forward_set: None,
+            vb_set0: None,
             forward: None,
+            vb: None,
             extent: VkExtent2D::default(),
         }
     }

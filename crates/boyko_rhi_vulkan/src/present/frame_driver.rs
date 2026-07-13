@@ -11,7 +11,7 @@ use crate::device::{DeviceFns, SwapchainDeviceFns, VulkanContext};
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
 
-use super::graph_bridge::{ForwardPassPlan, GbufferPassPlan};
+use super::graph_bridge::{ForwardPassPlan, GbufferPassPlan, VbPassPlan};
 use super::scene_types::{GBufferScene, SampledComposite, Scene, UiPass};
 use super::swapchain::swapchain_image_for;
 use super::targets::{GBufferFrame, GBufferTargets, TargetsProfile};
@@ -76,6 +76,12 @@ pub struct Renderer<'ctx> {
     /// [`GbufferPassPlan`]). `Some` only on a `Forward`-resolved frame; `None` on a
     /// `Deferred`-resolved frame.
     pub(crate) forward_pass_plan: Option<ForwardPassPlan>,
+    /// Multi-paradigm render-path plan, rung R8: the `VisibilityBuffer` sibling of
+    /// [`Self::forward_pass_plan`] — re-declared PER FRAME by `declare_vb_graph` over the SAME
+    /// shared [`Self::frame_graph`] (see [`super::graph_bridge::VbPassPlan`]'s doc for why this
+    /// is its OWN decoupled, private ResId space). `Some` only on a `VisibilityBuffer`-resolved
+    /// frame; `None` otherwise.
+    pub(crate) vb_pass_plan: Option<VbPassPlan>,
 }
 
 impl<'ctx> Renderer<'ctx> {
@@ -229,6 +235,7 @@ impl<'ctx> Renderer<'ctx> {
             frame_graph,
             gbuffer_pass_plan: None,
             forward_pass_plan: None,
+            vb_pass_plan: None,
         })
     }
 
@@ -871,7 +878,33 @@ impl<'ctx> Renderer<'ctx> {
                     // `declare_deferred_graph` — used, the W1 single-predicate discipline). A
                     // `Forward`-resolved frame records `record_forward` instead of
                     // `record_gbuffer`; the two are mutually exclusive per boot (Decision 1).
-                    if scene.path_is_forward() {
+                    if scene.path_is_vb() {
+                        // Multi-paradigm render-path plan, rung R8: mirrors the `path_is_forward()`
+                        // dispatch immediately below (the SAME W1 single-predicate discipline) — a
+                        // `VisibilityBuffer`-resolved frame records `record_vb` instead of
+                        // `record_forward`/`record_gbuffer`; the three are mutually exclusive per
+                        // boot (Decision 1). VB REUSES `ForwardTargets` (depth ring + Set-1 shadow
+                        // set) alongside its OWN `VbTargets` (`vb_id` ring) — `VbTargets`'s doc.
+                        let fwd = targets.forward.as_ref().expect(
+                            "invariant: TargetsProfile::VbMesh built ForwardTargets before record",
+                        );
+                        let vb = targets.vb.as_ref().expect(
+                            "invariant: TargetsProfile::VbMesh built VbTargets before record",
+                        );
+                        this.record_vb(
+                            cmd,
+                            image,
+                            view,
+                            extent,
+                            present_extent,
+                            clear,
+                            scene,
+                            targets,
+                            fwd,
+                            vb,
+                            readback,
+                        )
+                    } else if scene.path_is_forward() {
                         let fwd = targets.forward.as_ref().expect(
                             "invariant: TargetsProfile::ForwardMesh built ForwardTargets before record",
                         );

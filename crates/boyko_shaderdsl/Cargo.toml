@@ -34,6 +34,14 @@ name = "emit_ssao_variants"
 path = "src/bin/emit_ssao_variants.rs"
 required-features = ["emit"]
 
+# Multi-paradigm render-path plan, rung R8 — prints the Visibility-Buffer analytic
+# barycentric/attribute-interpolation HLSL spans (`vb.rs`, rung R7) for hand-splice into
+# `vb_geom_fetch.hlsli`.
+[[bin]]
+name = "emit_vb"
+path = "src/bin/emit_vb.rs"
+required-features = ["emit"]
+
 # The SDFDDGI I2 probe-update-pass shader emitter (writes ONE `sdf_probe_update.comp.hlsl`; A-1).
 # Named `emit_probe_gi` (NOT `_update`): Windows installer-detection forces UAC elevation on any
 # exe whose name contains "update"/"setup"/"install"/"patch" (os error 740 when the test harness

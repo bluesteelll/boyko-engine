@@ -38,7 +38,8 @@ use crate::ffi::{
     VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_D32_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT,
     VK_FORMAT_R16G16B16A16_UNORM, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R16G16_UNORM,
     VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_UNORM, VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
-    VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32_SFLOAT, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM,
+    VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32_SFLOAT, VK_FORMAT_R8G8B8A8_SRGB,
+    VK_FORMAT_R8G8B8A8_UNORM,
     VK_FORMAT_R8G8_UNORM,
     VK_FORMAT_R8_SNORM, VK_FORMAT_R8_UNORM,
     VK_FORMAT_UNDEFINED,
@@ -251,6 +252,12 @@ const _: () = assert!(
 const _: () = assert!(
     Format::R8Snorm.as_i32() == VK_FORMAT_R8_SNORM,
     "Format::R8Snorm must equal VK_FORMAT_R8_SNORM"
+);
+// Multi-paradigm render-path plan, rung R8: the `vb_id` Visibility-Buffer id-channel format
+// (`as_i32()` mapped in `create_texture`).
+const _: () = assert!(
+    Format::R32G32Uint.as_i32() == VK_FORMAT_R32G32_UINT,
+    "Format::R32G32Uint must equal VK_FORMAT_R32G32_UINT"
 );
 // Render P7: the SSAO term `gSsao` format (`as_i32()` mapped in `create_texture`).
 const _: () = assert!(

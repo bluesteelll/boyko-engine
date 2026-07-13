@@ -49,7 +49,7 @@ use boyko_rhi_vulkan::compute::{
     SSAO_ATROUS_PUSH_BYTES, ssao_atrous_read8_spirv, ssao_atrous_spirv, ssao_atrous_write8_spirv,
     SSAO_QUALITY_COUNT, SSAO_QUALITY_HIGH, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM,
     ssaa_downsample_fs_spirv, taa_resolve_spirv, tile_grid_extent, VIEWT_FROM_DEPTH_PUSH_BYTES,
-    viewt_from_depth_spirv,
+    vb_raster_fs_spirv, vb_raster_vs_spirv, vb_resolve_spirv, viewt_from_depth_spirv,
 };
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::ffi::VkDescriptorSet;
@@ -861,6 +861,54 @@ pub(crate) struct GpuSceneBundles {
     /// `ceil(composite pixels / LOCAL_SIZE_X)` — the marcher + resolve dispatch
     /// width, boot-fixed to the composite extent (plan D7).
     dispatch_group_count_x: u32,
+    // ── Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 FUSED path's own
+    // pipelines + Set-0 layout + instance ring (see `boot`'s doc — built UNCONDITIONALLY, the
+    // SAME "cheap, no per-frame cost either way" precedent as the Forward v1 trio). ──────
+    /// The VB-only Set-0 (core + images) bind-group layout — 7 bindings: `gVbInstances` @0,
+    /// `instance_materials` @1, `Camera` @2, `LightBuf` @3, `Materials` @4, `gVbId` @5 (SAMPLED),
+    /// `gLit` @6 (STORAGE). Camera/LightBuf at bindings 2/3 (matching `forward_layout0`'s own
+    /// numbering) so [`Self::vb_sky_pipeline`] can reuse `forward_sky.{vs,fs}.hlsl`'s compiled
+    /// SPIR-V verbatim against a NEW pipeline object built for THIS layout.
+    vb_layout0: VulkanBindGroupLayout,
+    /// The `vb_raster` mesh id-raster pipeline (`vb_raster.{vs,fs}.hlsl`) — a plain 1-set
+    /// pipeline (Set 0 = [`Self::vb_layout0`], its VS reads only `gVbInstances`/the push, a
+    /// bound-but-unread subset).
+    vb_raster_pipeline: VulkanGraphicsPipeline,
+    /// The VB v1 sky background pipeline — REUSES `forward_sky.{vs,fs}.hlsl`'s compiled SPIR-V
+    /// verbatim (`GBufferScene::vb_sky_pipeline`'s doc), built as a NEW pipeline object against
+    /// [`Self::vb_layout0`].
+    vb_sky_pipeline: VulkanGraphicsPipeline,
+    /// The `vb_resolve` FUSED compute pipeline (`vb_resolve.comp.hlsl`) — a 3-set pipeline: Set 0
+    /// = [`Self::vb_layout0`], Set 1 = [`Self::forward_layout1`] (the shadow set, REUSED
+    /// verbatim), Set 2 = the Decision-0 geometry table's own Set. Built LAZILY
+    /// ([`Self::build_vb_resolve_pipeline`], mirroring [`Self::tex`]'s deferred-build shape) —
+    /// Set 2's layout does not exist at [`Self::boot`]'s call site (the live `MeshGeometryTable`
+    /// is a World `NonSendResource`, `boyko_render::mesh_geometry_table::MeshGeometryTableSlot`,
+    /// constructed by `boyko_app::runner` only on a `VisibilityBuffer`-resolved boot). `None` on
+    /// every OTHER boot (the 0%-gate).
+    vb_resolve_pipeline: Option<ComputePipeline>,
+    /// The per-slot VB instance-model SSBO ring ([`INSTANCE_CAPACITY`] ×
+    /// [`boyko_render::instance_model::VB_INSTANCE_ROW_BYTES`] (64 B) each, zero-seeded) — a
+    /// DEDICATED ring, distinct from [`Self::instance_rings`] (`InstanceModelCol`, 48 B).
+    /// Rung R8 v1 scope cut: FIXED at [`INSTANCE_CAPACITY`], no growth-past-cap support yet
+    /// (mirrors the pre-F7 state of `instance_rings` itself — the golden scene's instance count
+    /// is far below this cap). Uploaded by `boyko_render::upload::upload_vb_instance_rows` from
+    /// `MeshRenderScratch::vb_ring` (`boyko_app::runner`, gated on a `VisibilityBuffer`-resolved
+    /// boot).
+    ///
+    /// Code review P2-2 (documented deviation, not fixed this rung): built UNCONDITIONALLY in
+    /// [`Self::boot`] — the SAME "cheap, no per-frame cost either way" precedent
+    /// `vb_layout0`/`vb_raster_pipeline`/`vb_sky_pipeline` follow — rather than `Option`-gated
+    /// on `ResolvedRenderPath.path == VisibilityBuffer` the way [`Self::vb_resolve_pipeline`]
+    /// (which genuinely CANNOT exist before the geometry table does) is. Unlike those three
+    /// pipeline objects (a few hundred bytes of driver-side pipeline state each), this ring is
+    /// `INSTANCE_CAPACITY * 64` bytes **per in-flight frame** of real HOST-VISIBLE device memory
+    /// — a measurable, not merely nominal, cost paid on every non-VB boot (Deferred included),
+    /// violating the plan's "zero-cost leg/path toggle" invariant more concretely than the
+    /// pipeline objects do. Gating this allocation behind `ResolvedRenderPath.path ==
+    /// VisibilityBuffer` (an `Option<[BoundBuffer; FRAMES_IN_FLIGHT]>`, mirroring
+    /// `vb_resolve_pipeline`'s own `Option` shape) is a follow-up, not done this rung.
+    pub(crate) vb_instance_rings: [BoundBuffer; FRAMES_IN_FLIGHT],
 }
 
 /// Textured-PBR T6c: the TEXTURED gbuffer producer pipeline resources — see
@@ -2885,6 +2933,159 @@ impl GpuSceneBundles {
             },
         );
 
+        // ── Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 (fused
+        // `vb_resolve`) Set-0 layout + `vb_raster`/`vb_sky` pipelines — built UNCONDITIONALLY at
+        // boot (the Forward v1 trio's own "cheap, no per-frame cost either way" precedent).
+        // `vb_resolve_pipeline` itself is built LAZILY (`build_vb_resolve_pipeline`, mirroring
+        // `build_textured_resources`'s deferred-build shape) because its Set 2 needs the
+        // Decision-0 geometry table's layout, which does not exist at this call site (the SAME
+        // "does not exist yet" reason `tex` is lazy — see that field's doc).
+        //
+        // Binding numbers match `forward_layout0`'s own for the shared subset (instances @0,
+        // instance_materials @1, Camera @2, LightBuf @3, Materials @4) so `vb_sky_pipeline` can
+        // reuse `forward_sky.{vs,fs}.hlsl`'s compiled SPIR-V verbatim (its FS references ONLY
+        // Camera @2 + LightBuf @3, a bound-but-unread subset). `gVbId` @5 (SAMPLED) + `gLit` @6
+        // (STORAGE) are VB-only, appended after the shared subset.
+        let vb_layout0 = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::VERTEX | ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        count: 1,
+                        kind: DescriptorKind::UniformBuffer,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 4,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 5,
+                        count: 1,
+                        kind: DescriptorKind::SampledImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 6,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: VB Set-0 bind-group layout create");
+
+        let vb_raster_vs = RhiDevice::create_shader_module(device, vb_raster_vs_spirv())
+            .expect("invariant: VB raster vertex shader module create");
+        let vb_raster_fs = RhiDevice::create_shader_module(device, vb_raster_fs_spirv())
+            .expect("invariant: VB raster fragment shader module create");
+        // Rung-R8 GPU regression fix (code review): `RhiDevice::create_graphics_pipeline` (the
+        // PLAIN builder) hardcodes `VK_COMPARE_OP_LESS` + depth-write ON — the standard forward-Z
+        // contract. `vb_raster`'s depth image is cleared to `0.0` and needs `VK_COMPARE_OP_GREATER`
+        // (Decision 4, hardware reverse-Z): under `LESS` against a `0.0` clear, a reverse-Z depth
+        // value (always `> 0.0`) NEVER satisfies the test, so EVERY fragment failed depth and
+        // `vb_id`/`vb_depth` never received a single write (confirmed by a GPU diagnostic: zero
+        // non-sentinel pixels even after the `mvp`-matrix fix). `create_graphics_pipeline_vb_raster`
+        // (the 1-set GREATER-compare, write-ON builder — mirrors `create_graphics_pipeline_forward`'s
+        // own reverse-Z contract) is the correct one.
+        let vb_raster_pipeline = ctx
+            .create_graphics_pipeline_vb_raster(&GraphicsPipelineDesc {
+                vertex_module: &vb_raster_vs,
+                vertex_entry: c"main",
+                fragment_module: &vb_raster_fs,
+                fragment_entry: c"main",
+                // The `vb_id` R32G32_UINT color attachment + VB's OWN reverse-Z depth
+                // (`forward.depth`, REUSED — `VbTargets`'s doc).
+                color_formats: &[Format::R32G32Uint],
+                depth_format: Some(Format::D32Sfloat),
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: Some(VertexBufferLayout {
+                    stride: MESH_VERTEX_STRIDE as u32,
+                    attributes: &attributes,
+                }),
+                push_constant_bytes: GBUFFER_PUSH_BYTES as u32,
+                bind_group_layout: Some(&vb_layout0),
+                blend: None,
+                cull_mode: CullMode::None,
+                depth_bias: None,
+            })
+            .expect("invariant: VB raster graphics pipeline create");
+        // SAFETY: both modules were created on `device` and are consumed by the pipeline
+        // create; each is destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_raster_fs);
+            RhiDevice::destroy_shader_module(device, vb_raster_vs);
+        }
+
+        // The VB v1 sky pipeline — REUSES the EXISTING `forward_sky.{vs,fs}.hlsl` compiled
+        // SPIR-V verbatim (byte-identical shader modules to `forward_sky_pipeline`'s own), a NEW
+        // pipeline object built against `vb_layout0` (`GBufferScene::vb_sky_pipeline`'s doc).
+        let vb_sky_vs = RhiDevice::create_shader_module(device, forward_sky_vs_spirv())
+            .expect("invariant: VB sky vertex shader module create");
+        let vb_sky_fs = RhiDevice::create_shader_module(device, forward_sky_fs_spirv())
+            .expect("invariant: VB sky fragment shader module create");
+        let vb_sky_pipeline = RhiDevice::create_graphics_pipeline(
+            device,
+            &GraphicsPipelineDesc {
+                vertex_module: &vb_sky_vs,
+                vertex_entry: c"main",
+                fragment_module: &vb_sky_fs,
+                fragment_entry: c"main",
+                color_formats: &[RASTER_COLOR_FORMAT],
+                depth_format: None,
+                topology: PrimitiveTopology::TriangleList,
+                vertex_layout: None,
+                push_constant_bytes: 0,
+                bind_group_layout: Some(&vb_layout0),
+                blend: None,
+                cull_mode: CullMode::None,
+                depth_bias: None,
+            },
+        )
+        .expect("invariant: VB sky graphics pipeline create");
+        // SAFETY: both modules were created on `device` and are consumed by the pipeline
+        // create; each is destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_sky_fs);
+            RhiDevice::destroy_shader_module(device, vb_sky_vs);
+        }
+
+        // The per-slot VB instance-model SSBO ring — Decision 0's 64-byte `VbInstanceRow` stride
+        // (a DEDICATED ring, distinct from `instance_rings`' 48-byte `InstanceModelCol`), sized
+        // to the SAME `INSTANCE_CAPACITY` (rung R8 v1 scope cut: no growth-past-cap support yet).
+        let vb_instance_ring_bytes =
+            (INSTANCE_CAPACITY * boyko_render::instance_model::VB_INSTANCE_ROW_BYTES) as u64;
+        let vb_instance_rings: [BoundBuffer; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+            ctx.create_buffer(&BufferDesc {
+                size: vb_instance_ring_bytes,
+                usage: BufferUsage::STORAGE,
+                location: MemoryLocation::HostVisibleCoherent,
+            })
+            .expect("invariant: VB instance ring buffer create")
+        });
+
         let dispatch_group_count_x = (cw * ch).div_ceil(LOCAL_SIZE_X);
         // SSAA (W1): the dispatch grid must cover every composite pixel — see the
         // enumeration comment at the top of this fn. A future edit that keyed this to
@@ -2977,6 +3178,12 @@ impl GpuSceneBundles {
             sdf_forward_march_sdfonly_pipeline,
             sdf_forward_march_layout,
             dispatch_group_count_x,
+            vb_layout0,
+            vb_raster_pipeline,
+            vb_sky_pipeline,
+            // Built LAZILY — see `Self::vb_resolve_pipeline`'s doc.
+            vb_resolve_pipeline: None,
+            vb_instance_rings,
         }
     }
 
@@ -3122,6 +3329,44 @@ impl GpuSceneBundles {
             tex_bind_groups,
             bindless_set: bindless.set().set(),
         });
+    }
+
+    /// Multi-paradigm render-path plan, rung R8: builds [`Self::vb_resolve_pipeline`] (the
+    /// FUSED `vb_resolve.comp.hlsl` compute pipeline) — deferred past [`Self::boot`] for the
+    /// SAME reason [`Self::build_textured_resources`] is (that fn's doc): `geometry_set`'s
+    /// descriptor-set LAYOUT (Set 2, the Decision-0 bindless geometry table) does not exist at
+    /// `boot()`'s call site — the live `MeshGeometryTable` is constructed by `boyko_app::runner`
+    /// only on a `VisibilityBuffer`-resolved boot, AFTER `boot()` returns. Called ONCE, from
+    /// `runner.rs`, immediately after a successful `MeshGeometryTable::new`.
+    pub(crate) fn build_vb_resolve_pipeline(
+        &mut self,
+        ctx: &VulkanContext,
+        geometry_set: &boyko_rhi_vulkan::geometry_bindless::VulkanGeometryBindlessSet,
+    ) {
+        let device = ctx;
+        let vb_resolve_cs = RhiDevice::create_shader_module(device, vb_resolve_spirv())
+            .expect("invariant: VB resolve compute shader module create");
+        let vb_resolve_pipeline = ctx
+            .create_compute_pipeline_vb(
+                &ComputePipelineDesc {
+                    module: &vb_resolve_cs,
+                    entry: c"main",
+                    // The 64-byte push constant (`vb_resolve.comp.hlsl`'s `PushConstants`: one
+                    // `float4x4 view_proj`).
+                    push_constant_bytes: 64,
+                    bind_group_layout: Some(&self.vb_layout0),
+                    spec_constants: &[],
+                },
+                self.forward_layout1.set_layout(),
+                geometry_set.set_layout(),
+            )
+            .expect("invariant: VB resolve compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_resolve_cs);
+        }
+        self.vb_resolve_pipeline = Some(vb_resolve_pipeline);
     }
 
     /// Cheap, allocation-free steady-state check (asset-streaming plan F7 review W1):
@@ -3603,6 +3848,13 @@ impl GpuSceneBundles {
         // `GBufferScene::sdf_forward_view_z_a`'s doc).
         sdf_forward_view_z_a: f32,
         sdf_forward_view_z_b: f32,
+        // Multi-paradigm render-path plan, rung R8: the live Decision-0 geometry table's Set,
+        // threaded from `boyko_app::runner`'s World read (`NonSendRes<MeshGeometryTableSlot>`) —
+        // `scene()` itself never touches `World` (the SAME "host reads, threads the plain value"
+        // discipline every other config knob above follows). `Some` only on a
+        // `VisibilityBuffer`-resolved boot with the device-cap armed
+        // (`resolved_render_path.vb_geometry_table`); `None` otherwise.
+        vb_geometry_set: Option<&'a boyko_rhi_vulkan::geometry_bindless::VulkanGeometryBindlessSet>,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -4202,6 +4454,19 @@ impl GpuSceneBundles {
             brick_levels_ubo: Some(&self.brick_levels_ubo),
             sdf_forward_view_z_a,
             sdf_forward_view_z_b,
+            // Multi-paradigm render-path plan, rung R8: the VB v1 pipelines + layout + instance
+            // ring — `vb_layout0`/`vb_raster_pipeline`/`vb_sky_pipeline`/`vb_instance_rings` exist
+            // at EVERY boot (built UNCONDITIONALLY, `boot`'s doc, the SAME `Some(...)` ALWAYS
+            // discipline as the Forward v1 trio above); `vb_resolve_pipeline` is `Some` only
+            // AFTER `build_vb_resolve_pipeline` ran (a `VisibilityBuffer`-resolved boot with the
+            // device-cap armed); `vb_geometry_set` is threaded straight from this fn's own param
+            // (the live table itself lives in `World`, not on `Self`).
+            vb_raster_pipeline: Some(&self.vb_raster_pipeline),
+            vb_sky_pipeline: Some(&self.vb_sky_pipeline),
+            vb_resolve_pipeline: self.vb_resolve_pipeline.as_ref(),
+            vb_layout0: Some(&self.vb_layout0),
+            vb_instance_ring: Some(&self.vb_instance_rings),
+            vb_geometry_set,
             // Multi-paradigm render-path plan, rung R1: the plain-POD conversion (see this
             // fn's `resolved_render_path` param doc for why it cannot be a `From` impl).
             resolved_render_path: to_gpu_resolved_render_path(&resolved_render_path),

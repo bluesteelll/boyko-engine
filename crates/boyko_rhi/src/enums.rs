@@ -347,6 +347,12 @@ pub enum Format {
     /// G-buffer lane storing the marcher's surface ray parameter `t` for world-position
     /// reconstruction in the deferred resolve).
     R32Sfloat = 100,
+    /// `VK_FORMAT_R32G32_UINT` — two 32-bit unsigned integers (Multi-paradigm render-path plan,
+    /// rung R8: the `vb_id` Visibility-Buffer id channel — `R` = `instance_id`, `G` = raw
+    /// `SV_PrimitiveID`, Decision 9). The value is 101 (R32=100, R32G32=101..103,
+    /// R32G32_UINT=101) — pinned to the ACTUAL enumerant, cross-checked against
+    /// `VK_FORMAT_R32G32_UINT` in `abi_guard`.
+    R32G32Uint = 101,
     /// `VK_FORMAT_R32G32B32_SFLOAT` — three 32-bit floats (deferred position use).
     R32G32B32Sfloat = 106,
     /// `VK_FORMAT_D32_SFLOAT` — a 32-bit float depth attachment (deferred S1 use).

@@ -199,6 +199,66 @@ pub unsafe fn upload_instance_models(
     }
 }
 
+/// Multi-paradigm render-path plan, rung R8 (Decision 0): uploads the gathered 64-byte
+/// [`VbInstanceRow`](crate::instance_model::VbInstanceRow) VB-path instance ring
+/// ([`MeshRenderScratch::vb_ring`], built by
+/// [`MeshRenderScratch::sync_vb_instance_ring`](crate::mesh_draw::MeshRenderScratch::sync_vb_instance_ring))
+/// into ONE VB instance-SSBO ring slot — mirrors [`upload_instance_models`] exactly (ONE
+/// contiguous `bytemuck` memcpy, zero staging, zero allocation), against a DEDICATED ring
+/// (distinct from the 48-byte `InstanceModelCol` ring [`upload_instance_models`] targets).
+///
+/// Called ONLY on a `VisibilityBuffer`-resolved boot (the caller's own gate, `boyko_app::runner`
+/// — this fn is unconditionally correct either way, the SAME "call-site decides" discipline
+/// [`MeshRenderScratch::sync_vb_instance_ring`]'s doc states).
+///
+/// # Panics
+///
+/// Panics if the gathered ring exceeds the slot's capacity — the SAME hard overflow discipline
+/// as [`upload_instance_models`].
+///
+/// # Safety
+///
+/// * `ring_slot` is a LIVE host-visible buffer minted by `RhiDevice::create_buffer`
+///   (`HostVisibleCoherent`) and not yet destroyed: its `mapped` pointer targets at least
+///   `ring_slot.size` valid, persistently-mapped bytes.
+/// * `ring_slot` is the FENCED slot's buffer — `vb_instance_rings[token.slot()]` (the same
+///   token/slot contract as [`upload_instance_models`]).
+pub unsafe fn upload_vb_instance_rows(
+    token: &FrameWriteToken,
+    ring_slot: &BoundBuffer,
+    scratch: &MeshRenderScratch,
+) {
+    // The borrow IS the fence proof — see `upload_camera_ring`.
+    let _ = token;
+
+    if scratch.vb_ring.is_empty() {
+        return;
+    }
+    let bytes: &[u8] = bytemuck::cast_slice(scratch.vb_ring.as_read_slice());
+    assert!(
+        bytes.len() as u64 <= ring_slot.size,
+        "VB instance ring overflow: {} gathered instances ({} bytes) exceed the \
+         {}-instance ({}-byte) slot (rung R8 v1 has no growth-past-INSTANCE_CAPACITY support \
+         for the VB ring yet — mirrors the pre-F7 `instance_rings` state)",
+        scratch.vb_ring.len(),
+        bytes.len(),
+        ring_slot.size / 64,
+        ring_slot.size
+    );
+
+    let mapped =
+        ring_slot.mapped.expect("invariant: the VB instance ring slot is host-visible mapped");
+    // SAFETY: per this fn's contract `mapped` targets >= `ring_slot.size` valid mapped
+    // host-coherent bytes, and `bytes.len() <= ring_slot.size` is hard-asserted above — the
+    // write is in-bounds. The borrowed `FrameWriteToken` + the slot-identity contract prove
+    // this slot's in-flight fence was waited THIS frame (race-free, lock-free, the SAME
+    // reasoning as `upload_instance_models`). `bytes` is the scratch's own buffer, a distinct
+    // non-overlapping region.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+    }
+}
+
 /// Asset-streaming plan F8+ (owner: material-drives-albedo-too): uploads the gathered
 /// per-instance [`MeshRenderScratch::material_ids`] lane (id + `base_color`, a
 /// [`PerInstanceMaterial`](crate::mesh_draw::PerInstanceMaterial) per instance) into ONE

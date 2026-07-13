@@ -14,30 +14,29 @@
 //! of `{index_width, vertex_count, index_count}` rows, the SAME shape
 //! [`MaterialTable`](crate::material_table::MaterialTable) uses for `MaterialGpu[]`.
 //!
-//! # Structurally unreachable today (by design)
+//! # Reachable as of rung R8
 //!
 //! `ResolvedRenderPath.vb_geometry_table` is `path == VisibilityBuffer && mesh_leg &&
-//! device supports it`, computed in `render_path_config::resolve_rules` — but
-//! `render_path_config::resolve_render_path`'s degrade ladder demotes ANY
-//! `VisibilityBuffer` request to `Deferred` BEFORE `resolve_rules` runs, because
-//! `VB_IMPLEMENTED == false` (that module's own rung-staged const). So
-//! `vb_geometry_table` is `false` for EVERY resolve today, and
-//! [`MeshGeometryTableSlot`] is always constructed `None` at the boot seam
-//! (`boyko_app::runner`) — this whole module compiles and unit-tests cleanly, but no
-//! live boot ever calls [`MeshGeometryTable::new`]. This is deliberate (R-VBGEO ships
-//! the DATA layer only; R8 flips `VB_IMPLEMENTED` and wires the actual raster/resolve
-//! passes that read Set 3).
+//! device supports it`, computed in `render_path_config::resolve_rules`. `VB_IMPLEMENTED`
+//! (that module's own rung-staged const) flipped `true` at rung R8, so a
+//! `VisibilityBuffer` request that survives the device-cap degrade now genuinely resolves
+//! `vb_geometry_table == true` — `boyko_app::runner`'s boot seam then constructs a LIVE
+//! [`MeshGeometryTable`] (`MeshGeometryTableSlot(Some(table))`), and the VB Set-2 geometry
+//! set it owns is bound by `vb_resolve.comp.hlsl` (Decision 0). `MeshGeometryTableSlot`
+//! stays `None` on every other boot (Deferred/Forward/ForwardPlus, or a VB request that
+//! degraded for a missing device cap) — the 0%-gate.
 //!
-//! # `mesh_id` — where it lives, how the instance gather will read it (R8+)
+//! # `mesh_id` — where it lives, how the instance gather reads it (R8)
 //!
 //! [`MeshGeometryTable::register`] returns the allocated slot index, stored as
 //! [`MeshGpu::geometry_slot`](crate::mesh::MeshGpu::geometry_slot) — mirroring how a
 //! texture's bindless slot is stored on [`MaterialTextures`](crate::material::MaterialTextures)
-//! at the OWNING asset record, not in a separate handle→slot side table. A future VB
-//! instance gather (R8/R9) resolves `MeshHandle → &MeshGpu → geometry_slot` at
-//! DrawBatch-gather time (the SAME pattern `DrawBatch::index_count`/`index_type` already
-//! use — "copied from the asset table at gather time") and appends it as the
-//! [`VbInstanceRow::mesh_id`](crate::instance_model::VbInstanceRow::mesh_id) lane.
+//! at the OWNING asset record, not in a separate handle→slot side table. The VB instance-ring
+//! builder (`crate::mesh_draw::MeshRenderScratch::sync_vb_instance_ring`) resolves
+//! `MeshHandle → &MeshGpu → geometry_slot` from the SAME `mesh_ids` lane
+//! [`gather_mesh_draws`](crate::mesh_draw::gather_mesh_draws) already scatters (the SAME
+//! "copied from the asset table" pattern `DrawBatch::index_count`/`index_type` use) and packs
+//! it as the [`VbInstanceRow::mesh_id`](crate::instance_model::VbInstanceRow::mesh_id) lane.
 
 use bytemuck::{Pod, Zeroable};
 
@@ -252,6 +251,7 @@ impl MeshGeometryTable {
             );
         }
 
+
         Ok(Self { set, meta_buffer, alloc: BindlessSlotAllocator::new(capacity) })
     }
 
@@ -295,6 +295,27 @@ impl MeshGeometryTable {
             // every submission sampling this slot until the matching `unregister`);
             // this is a freshly-allocated slot with no prior in-flight reference — the
             // fence-gated recycle only applies to a REUSED slot.
+            // Root cause (rung R8 GPU debug, round 6): `vertex_buffer.offset`/
+            // `index_buffer.offset` is `HostVisibleBlock::create_bound_buffer`'s
+            // SUB-ALLOCATION offset — where THIS buffer's own, freshly-`vkCreateBuffer`'d
+            // `VkBuffer` is `vkBindBufferMemory`'d within the SHARED `VkDeviceMemory` block
+            // (confirmed by reading `memory.rs`: EVERY `create_bound_buffer` call mints a
+            // DISTINCT `VkBuffer` object with its OWN buffer-relative addressing starting at
+            // 0 — there is no single "pool `VkBuffer`" multiple meshes share). A
+            // `VkDescriptorBufferInfo.offset` is BYTES FROM THE START OF THAT `VkBuffer`
+            // (buffer-relative), NOT a memory-bind offset — passing the ~1 MB sub-allocation
+            // offset here asked the descriptor to start reading 1 MB into a buffer that is
+            // only `vertex_buffer.size` (76 KB for this mesh) bytes long, hundreds of KB out
+            // of bounds. Without `robustBufferAccess` (not enabled) and with validation off
+            // on this box, that surfaced as a silent zero read, not a crash or a VUID — DXC's
+            // `NonUniformResourceIndex`, the write mechanics, the layout, and the pipeline
+            // were all sound the whole time (confirmed by the round-4/5 construction-time
+            // slot-0/2 diagnostic writes, which happened to pass a literal `0` and therefore
+            // worked). `create_bind_group`'s OWN `StorageBuffer`/`UniformBuffer` arm
+            // (`rhi_impl/device.rs`) already hardcodes `offset: 0` for the exact same
+            // reason — every `BoundBuffer` is its own dedicated `VkBuffer`, so `0` is always
+            // "the whole buffer" regardless of where it lives in the shared block. Match that
+            // established, engine-wide convention here.
             unsafe {
                 write_geometry_buffer_slot(
                     ctx,
@@ -302,7 +323,7 @@ impl MeshGeometryTable {
                     GEOMETRY_VERTS_BINDING,
                     slot,
                     vertex_buffer.buffer,
-                    vertex_buffer.offset,
+                    0,
                     vertex_buffer.size,
                 );
                 write_geometry_buffer_slot(
@@ -311,7 +332,7 @@ impl MeshGeometryTable {
                     GEOMETRY_INDICES_BINDING,
                     slot,
                     index_buffer.buffer,
-                    index_buffer.offset,
+                    0,
                     index_buffer.size,
                 );
             }

@@ -966,6 +966,12 @@ pub const VK_FORMAT_R16G16B16A16_SFLOAT: i32 = 97;
 /// `VkFormat::VK_FORMAT_R32_SFLOAT` — a single 32-bit float (Lighting L0b: the
 /// `gViewT` G-buffer storage-image lane carrying the marcher's surface ray param `t`).
 pub const VK_FORMAT_R32_SFLOAT: i32 = 100;
+/// `VkFormat::VK_FORMAT_R32G32_UINT` — two 32-bit unsigned integers (Multi-paradigm render-path
+/// plan, rung R8: the `vb_id` Visibility-Buffer id channel — `R` = `instance_id`, `G` = raw
+/// `SV_PrimitiveID`, Decision 9). The value is 101 (the 32-bit two-component UINT block:
+/// R32=100, R32G32=101..103, R32G32_UINT=101) — pinned to the ACTUAL enumerant, cross-checked
+/// against `Format::R32G32Uint` in `abi_guard`.
+pub const VK_FORMAT_R32G32_UINT: i32 = 101;
 /// `VkFormat::VK_FORMAT_R32G32_SFLOAT` — two 32-bit floats (textured-PBR T6c: a vec2
 /// vertex UV coordinate). The value is 103 (the 32-bit two-component SFLOAT block:
 /// R32=100, R32G32=101..103, R32G32_SFLOAT=103) — pinned to the ACTUAL enumerant,
@@ -2382,12 +2388,18 @@ pub struct VkImageMemoryBarrier {
     pub subresource_range: VkImageSubresourceRange,
 }
 
-/// `VkClearColorValue` (the `float32[4]` member of the union — the only variant
-/// the clear uses). A bare `[f32; 4]` matches the union's size/align (16 bytes).
+/// `VkClearColorValue` — the real Vulkan union `{ float32[4]; int32[4]; uint32[4]; }`. Multi-
+/// paradigm render-path plan, rung R8: widened from a bare `float32`-only struct to a proper
+/// `union` (both variants are the same 16-byte size/align) so the `vb_id` `R32G32_UINT` color
+/// attachment can be cleared to its sentinel `(0xFFFFFFFF, 0)` via `uint32`, alongside every
+/// existing `float32` clear (UNORM/SFLOAT color targets), which is unaffected — a union read of
+/// `float32` after a `float32` write (the only pattern every existing call site uses) is
+/// unchanged.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct VkClearColorValue {
+pub union VkClearColorValue {
     pub float32: [f32; 4],
+    pub uint32: [u32; 4],
 }
 
 /// `VkClearDepthStencilValue` (the `{ float depth; uint32_t stencil; }` member of

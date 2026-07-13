@@ -684,14 +684,13 @@ impl Renderer<'_> {
     /// directly — so a future path addition only ever ADDS a match arm here.
     ///
     /// The `Deferred` arm (`declare_deferred_graph`, unchanged, byte-identical to the pre-R2
-    /// `declare_gbuffer_graph`) and, as of rung R4b-b, the `Forward` FAMILY arm
-    /// (`declare_forward_graph`, shared verbatim by `Forward` and `ForwardPlus` — Decision 2's
-    /// one-declarator-per-path-FAMILY, `ForwardPlus` landing at rung R5) are implemented; the R1
-    /// resolver (`boyko_render::render_path_config::resolve_render_path` — a crate this one sits
-    /// BELOW in the dependency graph, hence the plain-text reference rather than an intra-doc
-    /// link) still degrades `VisibilityBuffer` to `Deferred` at boot (`VB_IMPLEMENTED` is
-    /// `false`), so that arm stays structurally unreachable and `unreachable!` rather than
-    /// stubbed — it names the rung that will fill it in.
+    /// `declare_gbuffer_graph`), the `Forward` FAMILY arm (`declare_forward_graph`, shared
+    /// verbatim by `Forward` and `ForwardPlus` — Decision 2's one-declarator-per-path-FAMILY,
+    /// `ForwardPlus` landing at rung R5), and, as of rung R8, the `VisibilityBuffer` arm
+    /// (`declare_vb_graph`, the FUSED v1 declarator) are all implemented — every arm of the R1
+    /// resolver's `RenderPath` enum (`boyko_render::render_path_config::RenderPath` — a crate
+    /// this one sits BELOW in the dependency graph, hence the plain-text reference rather than
+    /// an intra-doc link) now reaches a real declarator.
     pub(crate) fn declare_frame_graph(&mut self, scene: &GBufferScene<'_>) {
         match scene.resolved_render_path.path {
             // RenderPath::Deferred == 0 (render_path_config.rs) — the only rung-landed path.
@@ -701,11 +700,10 @@ impl Renderer<'_> {
             // `GBufferScene::path_needs_depth_prepass`/`path_is_forward_plus` where the two paths
             // diverge (the depth prepass + EQUAL-depth + froxel-Set0 growth).
             1 | 2 => self.declare_forward_graph(scene),
-            // RenderPath::VisibilityBuffer == 3 — lands at rung R8.
-            3 => unreachable!(
-                "resolver degrades unimplemented paths to Deferred (R1 degrade ladder); \
-                 RenderPath::VisibilityBuffer's declarator lands at rung R8"
-            ),
+            // RenderPath::VisibilityBuffer == 3 (rung R8): the FUSED v1 declarator
+            // (`mesh_geo_shade_split == false` — SSAO/DDGI/shadow-denoise/TAA all structurally
+            // capped off this rung, `cap_vb_v1_consumers`).
+            3 => self.declare_vb_graph(scene),
             other => unreachable!(
                 "invariant: ResolvedRenderPathGpu::path is a RenderPath discriminant in 0..=3, got {other}"
             ),
@@ -2608,6 +2606,460 @@ impl Renderer<'_> {
                 scene.light_index_alloc.map_or(scene.light_table.buffer, |b| b.buffer),
                 scene.cluster_grid.map_or(scene.light_table.buffer, |b| b.buffer),
                 scene.light_index.map_or(scene.light_table.buffer, |b| b.buffer),
+            ],
+        };
+        self.frame_graph.record_pass(pass, &mut sink);
+    }
+}
+
+/// Multi-paradigm render-path plan, rung R8: the FUSED VisibilityBuffer v1 path's per-frame
+/// `PassId` map (`declare_vb_graph`) — a private, per-frame ResId space (`self.frame_graph` is
+/// fully `reset()` + re-declared every frame regardless of path, the SAME trade-off
+/// [`ForwardPassPlan`]'s doc explains). `record_vb` reads this to drive each pass's derived
+/// barriers through [`VbBarrierSink`].
+///
+/// V1 scope cut (mirrors `cap_vb_v1_consumers`): no `interp` (the VB instance ring
+/// [`GBufferScene::vb_instance_ring`] is a plain CPU `bytemuck` upload,
+/// `boyko_render::upload::upload_vb_instance_rows` — no GPU-side interpolation this rung, a
+/// documented v1 simplification), no depth prepass (`mesh_geo_shade_split == false`, fused
+/// only), no froxel/light-cull (VB v1 shades ALL-LIGHTS, mirrors plain `Forward`'s own base
+/// compile).
+#[derive(Clone, Copy)]
+pub(crate) struct VbPassPlan {
+    /// The async light-table re-upload (`scene.light_dirty && scene.light_upload_bytes > 0`) —
+    /// the SAME gate [`ForwardPassPlan::light_upload`] uses.
+    pub(crate) light_upload: Option<crate::framegraph::PassId>,
+    /// The CSM cascade depth pass (`scene.csm.is_some()`) — declared BEFORE `vb_resolve` (which
+    /// samples the cascade inline via `shadow_apply.hlsli`), the SAME dependency order
+    /// [`ForwardPassPlan::csm`] observes.
+    pub(crate) csm: Option<crate::framegraph::PassId>,
+    /// The sparse spot/point atlas depth pass (`scene.atlas_punctual.is_some()`) — see
+    /// [`Self::csm`]'s doc.
+    pub(crate) atlas: Option<crate::framegraph::PassId>,
+    /// The always-present sky BACKGROUND pass — REUSES `forward_sky.{vs,fs}.hlsl`'s compiled
+    /// SPIR-V verbatim against a NEW pipeline object (`GBufferScene::vb_sky_pipeline`'s doc):
+    /// writes `lit` (`ColorAttachmentWrite`/`COLOR_ATTACHMENT_OPTIMAL`, first touch, Decision 2's
+    /// C5 per-path `lit`-producer access) for every pixel; `vb_resolve` (below) then overwrites
+    /// only the pixels its own geometry fetch covers, leaving the sky color standing elsewhere
+    /// (the SAME "misses write nothing" contract `sdf_forward_march` documents).
+    pub(crate) vb_sky: crate::framegraph::PassId,
+    /// The always-present mesh id-raster pass (`vb_raster.{vs,fs}.hlsl`, Decision 9): writes
+    /// `vb_id` (`ColorAttachmentWrite`/`COLOR_ATTACHMENT_OPTIMAL`, R32G32_UINT) + the VB-only
+    /// reverse-Z `vb_depth` (`DepthStencilAttachmentWrite`/`DEPTH_ATTACHMENT_OPTIMAL`, first-touch,
+    /// `GREATER`, Decision 4). Early-Z-clean (no `SV_Depth`/`discard`/UAV in the FS).
+    pub(crate) vb_raster: crate::framegraph::PassId,
+    /// The always-present FUSED resolve compute pass (`vb_resolve.comp.hlsl`, Decision 5): reads
+    /// `vb_id` (`ShaderRead`/`SHADER_READ_ONLY_OPTIMAL`, COMPUTE) and writes `lit` (`ShaderWrite`/
+    /// `GENERAL`, extending `vb_sky`'s COLOR write, C5). Reads `cascade`/`atlas` inline (COMPUTE)
+    /// when armed, reads `light_table` (COMPUTE) when [`Self::light_upload`] ran this frame.
+    pub(crate) vb_resolve: crate::framegraph::PassId,
+    /// The always-present present-sample pass: the `lit` `GENERAL` → `SHADER_READ_ONLY_OPTIMAL`
+    /// transition (C5: derived from `vb_resolve`'s producer access). The swapchain WSI barriers
+    /// stay hand-recorded, exactly like [`ForwardPassPlan::present_sample`].
+    pub(crate) present_sample: crate::framegraph::PassId,
+}
+
+/// Multi-paradigm render-path plan, rung R8: the [`BarrierSink`](crate::framegraph::BarrierSink)
+/// for VB v1's small, PRIVATE per-frame graph — the SAME "own decoupled ResId space" discipline
+/// [`ForwardBarrierSink`]'s doc explains for the Forward family. Resolves the FIXED local ResId
+/// order [`Renderer::declare_vb_graph`] declares — images `[lit=0, vb_id=1, vb_depth=2,
+/// cascade=3, atlas=4]`, buffers `[light_table=0, vb_instance_ring=1]` — to the current frame's
+/// physical handles. Lives only for the duration of one `record_pass` call inside
+/// [`Renderer::record_vb`].
+pub(crate) struct VbBarrierSink<'a> {
+    pub(crate) fns: &'a DeviceFns,
+    pub(crate) cmd: VkCommandBuffer,
+    /// `[lit, vb_id, vb_depth, cascade, atlas]` — see this type's doc for the fixed order. `lit`
+    /// is the current frame slot's [`GBufferTargets::lit`] image (C5-reused, the SAME physical
+    /// image every path's `lit` producer writes); `vb_id`/`vb_depth` are the current frame slot's
+    /// [`VbTargets`](super::targets::VbTargets)/[`ForwardTargets`](super::targets::ForwardTargets)
+    /// images (VB reuses `ForwardTargets::depth` verbatim for `vb_depth` — `VbTargets`'s doc);
+    /// `cascade`/`atlas` are the SAME single-instance, world-fixed textures every other path's
+    /// shadow chain references.
+    pub(crate) images: [VkImage; VB_IMAGE_COUNT],
+    /// `[light_table, vb_instance_ring]`. A pass that does not declare an access on an unarmed
+    /// resource never routes a barrier naming it, so an inert `VkBuffer::NULL` there is harmless
+    /// (the SAME "ungated slot may hold NULL" rule [`ForwardBarrierSink`] documents).
+    pub(crate) buffers: [VkBuffer; 2],
+}
+
+/// The number of IMAGE resources [`Renderer::declare_vb_graph`] declares — see
+/// [`VbBarrierSink::images`]'s doc for the fixed order. A PRIVATE, per-frame ResId space (mirrors
+/// [`FORWARD_IMAGE_COUNT`]'s own doc — never related to [`FRAMEGRAPH_IMAGE_COUNT`]).
+const VB_IMAGE_COUNT: usize = 5;
+
+impl crate::framegraph::BarrierSink for VbBarrierSink<'_> {
+    fn image_barriers(&mut self, src_stage: u32, dst_stage: u32, group: &[crate::framegraph::ImgBarrier]) {
+        debug_assert!(
+            group.len() <= crate::framegraph::MAX_PASS_BARRIERS,
+            "image barrier group ({}) exceeds MAX_PASS_BARRIERS",
+            group.len()
+        );
+        let n = group.len();
+        let arr: [VkImageMemoryBarrier; crate::framegraph::MAX_PASS_BARRIERS] =
+            core::array::from_fn(|i| {
+                if i < n {
+                    let b = group[i];
+                    VkImageMemoryBarrier {
+                        s_type: VkStructureType::ImageMemoryBarrier,
+                        p_next: ptr::null(),
+                        src_access_mask: b.src_access,
+                        dst_access_mask: b.dst_access,
+                        old_layout: b.old_layout,
+                        new_layout: b.new_layout,
+                        src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                        dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                        image: self.images[b.res.index()],
+                        subresource_range: VkImageSubresourceRange {
+                            aspect_mask: b.subresource.aspect,
+                            base_mip_level: b.subresource.base_mip,
+                            level_count: b.subresource.mip_count,
+                            base_array_layer: b.subresource.base_layer,
+                            layer_count: b.subresource.layer_count,
+                        },
+                    }
+                } else {
+                    VkImageMemoryBarrier {
+                        s_type: VkStructureType::ImageMemoryBarrier,
+                        p_next: ptr::null(),
+                        src_access_mask: 0,
+                        dst_access_mask: 0,
+                        old_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                        new_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                        src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                        dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                        image: VkImage::NULL,
+                        subresource_range: COLOR_SUBRESOURCE_RANGE,
+                    }
+                }
+            });
+        // SAFETY: the command buffer is open (this sink is only driven inside the open
+        // `record_vb` recording). Every `arr[i].image` was resolved from the
+        // `images[res.index()]` slot (a live VB target for the current frame); `res.index()` is
+        // in `0..VB_IMAGE_COUNT` for every image barrier this small graph derives. `arr[..n]`
+        // (a stack array) outlives the call; the count == `n`. No memory or buffer barriers,
+        // matching [`ForwardBarrierSink::image_barriers`].
+        unsafe {
+            (self.fns.cmd_pipeline_barrier)(
+                self.cmd,
+                src_stage,
+                dst_stage,
+                0,
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                n as u32,
+                arr.as_ptr().cast(),
+            );
+        }
+    }
+
+    fn buffer_barriers(&mut self, src_stage: u32, dst_stage: u32, group: &[crate::framegraph::BufBarrier]) {
+        debug_assert!(
+            group.len() <= crate::framegraph::MAX_PASS_BARRIERS,
+            "buffer barrier group ({}) exceeds MAX_PASS_BARRIERS",
+            group.len()
+        );
+        let n = group.len();
+        let arr: [VkBufferMemoryBarrier; crate::framegraph::MAX_PASS_BARRIERS] =
+            core::array::from_fn(|i| {
+                if i < n {
+                    let b = group[i];
+                    VkBufferMemoryBarrier {
+                        s_type: VkStructureType::BufferMemoryBarrier,
+                        p_next: ptr::null(),
+                        src_access_mask: b.src_access,
+                        dst_access_mask: b.dst_access,
+                        src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                        dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                        buffer: self.buffers[b.res.index() - VB_IMAGE_COUNT],
+                        offset: 0,
+                        size: VK_WHOLE_SIZE,
+                    }
+                } else {
+                    VkBufferMemoryBarrier {
+                        s_type: VkStructureType::BufferMemoryBarrier,
+                        p_next: ptr::null(),
+                        src_access_mask: 0,
+                        dst_access_mask: 0,
+                        src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                        dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                        buffer: VkBuffer::NULL,
+                        offset: 0,
+                        size: VK_WHOLE_SIZE,
+                    }
+                }
+            });
+        // SAFETY: the command buffer is open (this sink is only driven inside the open
+        // `record_vb` recording). Every `arr[i].buffer` was resolved from the
+        // `buffers[res.index() - VB_IMAGE_COUNT]` slot (a live scene buffer for this frame); a
+        // buffer barrier's `res.index()` is always `>= VB_IMAGE_COUNT` and `< VB_IMAGE_COUNT +
+        // buffers.len()`. `arr[..n]` outlives the call; the count == `n`.
+        unsafe {
+            (self.fns.cmd_pipeline_barrier)(
+                self.cmd,
+                src_stage,
+                dst_stage,
+                0,
+                0,
+                ptr::null(),
+                n as u32,
+                arr.as_ptr().cast(),
+                0,
+                ptr::null(),
+            );
+        }
+    }
+}
+
+impl Renderer<'_> {
+    /// Multi-paradigm render-path plan, rung R8: (re)declares the FUSED VisibilityBuffer v1
+    /// frame graph into `self.frame_graph` — `light_upload? → csm? → atlas? → vb_sky → vb_raster
+    /// → vb_resolve → present_sample` — mirrors [`Self::declare_forward_graph`]'s shape, trimmed
+    /// to VB v1's scope cut (see [`VbPassPlan`]'s doc). Stores the result in
+    /// [`Self::vb_pass_plan`]; [`Self::record_vb`] then drives each pass's derived barriers
+    /// through it. Called ONLY by [`Self::declare_frame_graph`]'s `VisibilityBuffer` arm.
+    pub(crate) fn declare_vb_graph(&mut self, scene: &GBufferScene<'_>) {
+        use crate::framegraph::{ResSync, SubRange};
+
+        const FRAG: u32 =
+            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+
+        self.gbuffer_pass_plan = None;
+        self.forward_pass_plan = None;
+        let g = &mut self.frame_graph;
+        g.reset();
+
+        // --- Images (FIXED local ResId order — see `VbBarrierSink::images`'s doc). `lit` is a
+        // FRESH `add_image` (undefined first touch) — VB's OWN producer access
+        // (`ColorAttachmentWrite` via `vb_sky`, then `ShaderWrite` via `vb_resolve`), never the
+        // Deferred/Forward access this same physical image carries on another boot (C5: every
+        // path is boot-mutually-exclusive).
+        //
+        // Code review (P1-1): the seed stage MUST track the path's actual SHADING-PASS stage,
+        // not be copy-pasted from a sibling path's declarator. `declare_forward_graph` seeds
+        // `cascade`/`atlas`/`light_table` at FRAGMENT_SHADER because `forward_opaque` (the
+        // reader) is a raster FRAGMENT shader; VB's shading consumer is `vb_resolve`, a COMPUTE
+        // pass — seeding at FRAGMENT_SHADER here would under-order a dirty-frame re-write against
+        // the SIBLING in-flight frame's still-pipelined COMPUTE read (a real WAR hazard: torn
+        // shadows/lights under a dynamically-changing light/CSM/atlas frame), the SAME class of
+        // bug `declare_deferred_graph`'s own compute-seeded `cascade`/`atlas`/`light_table`
+        // avoid (its `resolve` reader is ALSO compute — graph_bridge.rs's deferred declarator,
+        // the precedent this fn now matches instead of Forward's).
+        let lit = g.add_image("lit");
+        let vb_id = g.add_image("vb_id");
+        let vb_depth = g.add_image("vb_depth");
+        let cascade = g.add_image_seeded(
+            "cascade",
+            ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+        );
+        let atlas = g.add_image_seeded(
+            "atlas",
+            ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+        );
+        debug_assert_eq!(
+            atlas.index() + 1,
+            VB_IMAGE_COUNT,
+            "invariant: declare_vb_graph's image declarations must match VB_IMAGE_COUNT"
+        );
+
+        // --- Buffers (light_table=0, vb_instance_ring=1). `light_table`'s seed stage is COMPUTE
+        // for the SAME P1-1 reason as `cascade`/`atlas` above (`vb_resolve` is its reader, not a
+        // fragment shader). `vb_instance_ring` is frame-private (a sibling in-flight frame
+        // touches a DIFFERENT ring slot), so `add_buffer` (undefined) — no `interp` producer
+        // this rung (V1 scope cut, `VbPassPlan`'s doc).
+        let light_table = g.add_buffer_seeded(
+            "light_table",
+            ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+        );
+        let vb_instance_ring = g.add_buffer("vb_instance_ring");
+
+        // Pass `light_upload` (async light-table re-upload) — the SAME gate
+        // `declare_forward_graph`'s own `light_upload` pass uses.
+        let light_upload = if scene.light_dirty && scene.light_upload_bytes > 0 {
+            let p = g.add_pass("light_upload");
+            g.buffer_access(light_table, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+            Some(p)
+        } else {
+            None
+        };
+
+        // Pass `csm` (cascade depth) — gated `scene.csm.is_some()`, declared BEFORE `vb_resolve`
+        // (which samples the cascade inline). Same shape `declare_forward_graph`'s `csm` pass
+        // declares.
+        let csm = if let Some(csm_act) = &scene.csm {
+            let active = (csm_act.active_count as usize).clamp(1, MAX_CASCADES) as u32;
+            let p = g.add_pass("csm_depth");
+            g.image_access(
+                cascade,
+                FRAG,
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                SubRange::depth_layers(active),
+            );
+            Some(p)
+        } else {
+            None
+        };
+
+        // Pass `atlas` (spot/point atlas depth) — gated `scene.atlas_punctual.is_some()`.
+        let atlas_pass = if let Some(atlas_act) = &scene.atlas_punctual {
+            let active = (atlas_act.active_layers as usize).clamp(1, MAX_TEXTURE_LAYERS) as u32;
+            let p = g.add_pass("atlas_depth");
+            g.image_access(
+                atlas,
+                FRAG,
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                SubRange::depth_layers(active),
+            );
+            Some(p)
+        } else {
+            None
+        };
+
+        // Pass `vb_sky` (always present): writes `lit` (COLOR, first-touch
+        // UNDEFINED→COLOR_ATTACHMENT_OPTIMAL — Decision 2's C5 per-path producer access).
+        let vb_sky = g.add_pass("vb_sky");
+        g.image_access(
+            lit,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            SubRange::COLOR,
+        );
+
+        // Pass `vb_raster` (always present): writes `vb_id` (COLOR, first-touch) + `vb_depth`
+        // (DEPTH, first-touch, `GREATER`, write ON — Decision 4). Reads `vb_instance_ring`
+        // (VERTEX).
+        let vb_raster = g.add_pass("vb_raster");
+        g.image_access(
+            vb_id,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            SubRange::COLOR,
+        );
+        g.image_access(
+            vb_depth,
+            FRAG,
+            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            SubRange::DEPTH,
+        );
+        g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+
+        // Pass `vb_resolve` (always present, FUSED): reads `vb_id` (COMPUTE,
+        // COLOR_ATTACHMENT_OPTIMAL→SHADER_READ_ONLY_OPTIMAL) and writes `lit` (COMPUTE,
+        // COLOR_ATTACHMENT_OPTIMAL→GENERAL, extending `vb_sky`'s COLOR write, C5). Reads
+        // `vb_instance_ring` (COMPUTE, for the per-instance material ring lookup) + `light_table`/
+        // `cascade`/`atlas` when armed this frame.
+        let vb_resolve = g.add_pass("vb_resolve");
+        g.image_access(
+            vb_id,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            SubRange::COLOR,
+        );
+        g.image_access(
+            lit,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_GENERAL,
+            SubRange::COLOR,
+        );
+        g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+        if light_upload.is_some() {
+            g.buffer_access(light_table, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+        }
+        if csm.is_some() {
+            let active = (scene.csm.as_ref().map(|c| c.active_count).unwrap_or(1) as usize)
+                .clamp(1, MAX_CASCADES) as u32;
+            g.image_access(
+                cascade,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                SubRange::depth_layers(active),
+            );
+        }
+        if atlas_pass.is_some() {
+            let active = (scene
+                .atlas_punctual
+                .as_ref()
+                .map(|a| a.active_layers)
+                .unwrap_or(1) as usize)
+                .clamp(1, MAX_TEXTURE_LAYERS) as u32;
+            g.image_access(
+                atlas,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                SubRange::depth_layers(active),
+            );
+        }
+
+        // Pass `present_sample`: `lit` GENERAL → SHADER_READ_ONLY_OPTIMAL for the present-blit's
+        // FRAGMENT sample (C5). The swapchain WSI barriers stay hand-recorded.
+        let present_sample = g.add_pass("present_sample");
+        g.image_access(
+            lit,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            SubRange::COLOR,
+        );
+
+        g.compile();
+
+        self.vb_pass_plan = Some(VbPassPlan { light_upload, csm, atlas: atlas_pass, vb_sky, vb_raster, vb_resolve, present_sample });
+    }
+
+    /// Multi-paradigm render-path plan, rung R8: the [`VbBarrierSink`] sibling of
+    /// [`Self::record_forward_pass`] — drives one [`VbPassPlan`] pass's derived barriers
+    /// (declared by [`Self::declare_vb_graph`]) into `cmd`, resolving VB's OWN small ResId space
+    /// (`[lit, vb_id, vb_depth, cascade, atlas]` images; `[light_table, vb_instance_ring]`
+    /// buffers — [`VbBarrierSink`]'s doc) to the current frame's physical handles. `lit` is read
+    /// from `targets` (the SAME [`GBufferTargets::lit`] ring every path reuses, C5); `vb_id` from
+    /// `vb` (the current frame's [`VbTargets`](super::targets::VbTargets)); `vb_depth` from
+    /// `forward` (VB REUSES [`ForwardTargets::depth`](super::targets::ForwardTargets::depth)
+    /// verbatim — `VbTargets`'s doc).
+    ///
+    /// `#[allow(clippy::too_many_arguments)]`: one extra `&VbTargets` param over
+    /// [`Self::record_forward_pass`]'s own 7 (VB reuses `forward`'s depth/shadow set but ALSO
+    /// needs its own `vb_id` image) — grouping the resource params into a struct would only move
+    /// the argument list, the SAME rationale `build_shadow_denoise_sets`'s own `#[allow]`
+    /// documents.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_vb_pass(
+        &self,
+        pass: crate::framegraph::PassId,
+        cmd: VkCommandBuffer,
+        targets: &GBufferTargets,
+        forward: &super::targets::ForwardTargets,
+        vb: &super::targets::VbTargets,
+        scene: &GBufferScene<'_>,
+        fi: usize,
+    ) {
+        let mut sink = VbBarrierSink {
+            fns: self.fns,
+            cmd,
+            images: [
+                targets.lit[fi].image,
+                vb.vb_id[fi].image,
+                forward.depth[fi].image,
+                scene.csm_cascade_texture.image,
+                scene.shadow_atlas_texture.image,
+            ],
+            buffers: [
+                scene.light_table.buffer,
+                scene
+                    .vb_instance_ring
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_instance_ring")
+                    [fi]
+                    .buffer,
             ],
         };
         self.frame_graph.record_pass(pass, &mut sink);

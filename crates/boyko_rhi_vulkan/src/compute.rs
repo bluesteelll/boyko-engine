@@ -703,6 +703,37 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 mesh id-raster VERTEX
+    /// SPIR-V (`shaders/vb_raster.vs.hlsl`) — reads the 64-byte `VbInstanceRow` SSBO (byte-
+    /// identical leading 48 bytes to `InstanceModelCol` + an appended `mesh_id` lane) and exports
+    /// a flat `instance_id = base_instance + SV_InstanceID` interpolant (Decision 9 — no FS-side
+    /// `SV_InstanceID` read). Paired with [`VB_RASTER_FS_SPV`].
+    VB_RASTER_VS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_raster.vs.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 mesh id-raster FRAGMENT
+    /// SPIR-V (`shaders/vb_raster.fs.hlsl`) — writes ONLY `SV_Target0 = uint2(instance_id, raw
+    /// SV_PrimitiveID)` (Decision 9) into the `vb_id` `R32G32_UINT` color attachment. NO
+    /// `SV_Depth`/`discard`/UAV — early-Z stays live. Paired with [`VB_RASTER_VS_SPV`].
+    VB_RASTER_FS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_raster.fs.spv")
+}
+
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 FUSED resolve compute
+    /// SPIR-V (`shaders/vb_resolve.comp.hlsl`, `mesh_geo_shade_split == false`). Unpacks `vb_id`,
+    /// re-fetches the covered triangle's geometry via the Decision-0 bindless table (Set 2,
+    /// `vb_geom_fetch.hlsli`), shades ALL-LIGHTS (a TOKEN-FOR-TOKEN clone of
+    /// `forward_opaque.fs.hlsl`'s own light loop), and writes `lit` (STORAGE). A 3-set pipeline:
+    /// Set 0 = the VB-only core+images vocabulary, Set 1 = the Forward-family shadow set (REUSED
+    /// verbatim), Set 2 = the geometry table's own Set.
+    VB_RESOLVE_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_resolve.comp.spv")
+}
+
+embed_spirv! {
     /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS vertex
     /// SPIR-V (`shaders/depth_prepass.vs.hlsl`) — a position-only subset of
     /// [`FORWARD_OPAQUE_VS_SPV`] (same instance SSBO + push shape, no normal/mat_id export).
@@ -1441,6 +1472,28 @@ pub fn forward_sky_vs_spirv() -> &'static [u32] {
 #[inline]
 pub fn forward_sky_fs_spirv() -> &'static [u32] {
     FORWARD_SKY_FS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 mesh id-raster VERTEX
+/// SPIR-V as a `u32` word stream. Paired with [`vb_raster_fs_spirv`].
+#[inline]
+pub fn vb_raster_vs_spirv() -> &'static [u32] {
+    VB_RASTER_VS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 mesh id-raster FRAGMENT
+/// SPIR-V as a `u32` word stream. Paired with [`vb_raster_vs_spirv`].
+#[inline]
+pub fn vb_raster_fs_spirv() -> &'static [u32] {
+    VB_RASTER_FS_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 FUSED resolve compute
+/// SPIR-V as a `u32` word stream, ready for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+#[inline]
+pub fn vb_resolve_spirv() -> &'static [u32] {
+    VB_RESOLVE_SPV.as_words()
 }
 
 /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS VERTEX

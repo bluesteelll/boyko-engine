@@ -262,3 +262,43 @@ BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\sdf_forward_only.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
+[vb_mesh]
+# Multi-paradigm render-path plan, rung R8: the VisibilityBuffer v1 (FUSED vb_resolve) mesh-only
+# golden. Clones [forward_mesh]'s five-sphere grand_showcase_2mat scene + production
+# boyko_app::runner/gpu_scene::GpuSceneBundles boot path, with ONE delta: RenderPathConfig{path:
+# VisibilityBuffer, legs: Mesh} instead of {path: Forward, legs: Mesh}. See
+# crates/boyko_app/tests/vb_mesh.rs.
+#
+# vb_raster (R32G32_UINT id + HW reverse-Z depth) -> vb_resolve (fused compute: geometry
+# re-fetch via the Decision-0 bindless table + analytic barycentric interpolation + the SAME
+# shared BRDF + shadow_apply.hlsli the deferred resolve/Forward/ForwardPlus all use). The
+# five spheres share ONE MeshHandle (one register_mesh_vb call, five spawns), so the SAME
+# vkCmdDrawIndexed's SV_InstanceID ranges 0..5 against one index buffer -- the Decision 9
+# (VB1) instance>0 SV_PrimitiveID-normalization fixture this rung's gate calls for, already
+# satisfied by the existing scene (no separate fixture needed).
+#
+# NOT expected byte-identical to [forward_mesh]/[forward_both] (f93b5aad...) -- the geometry
+# re-fetch's analytic barycentric interpolation is a genuinely different floating-point path
+# than the rasterizer's own hardware interpolation the other paths rely on; the orchestrator
+# compares the dumped BMP visually against those goldens (same geometry/lighting/materials).
+#
+# UNBLESSED placeholders -- the sha256_* values below are NOT real hashes. Re-render on a real
+# windowed GPU device (vb_mesh_screenshot_dump, #[ignore]) and re-bless via
+# `scripts\golden.ps1 -Pin vb_mesh -Bless` (and `-Hwrt -Bless`) AFTER the owner's visual sign-off
+# on the freshly-dumped BMP, per this repo's golden discipline (do NOT hand-edit these values
+# otherwise).
+crate           = "boyko-app"
+test_binary     = "vb_mesh"
+test_name       = "vb_mesh_screenshot_dump"
+bmp             = "D:\\tmp\\vb_mesh.bmp"
+width           = 512
+height          = 512
+sha256_software = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+sha256_hwrt     = "f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1"
+
+[vb_mesh.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
