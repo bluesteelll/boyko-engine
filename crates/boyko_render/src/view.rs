@@ -215,6 +215,96 @@ pub fn marcher_view_proj_rows(view: &ViewUniform, width: u32, height: u32) -> [[
     marcher_view_proj_rows_jittered(view, width, height, NdcJitter::default())
 }
 
+/// Multi-paradigm render-path plan, rung R4b (Forward render path v1, Decision 4): the FORWARD
+/// raster's REVERSE-Z projection — a row-major proj·view matrix in the SAME (right/up/forward)
+/// basis convention as [`marcher_view_proj_rows`] (identical clip.x/clip.y rows: extent-derived
+/// aspect, the marcher y-flip — screen x/y placement matches Deferred's raster exactly), but with
+/// a REAL depth row instead of Deferred's `clip.z == clip.w` convention (Deferred's raster FS
+/// overwrites `SV_Depth` with a custom-linear encode, so its vertex-shader clip.z is a throwaway
+/// `1.0` after the divide — see [`marcher_view_proj_rows_jittered`]'s doc). Forward's `depth`
+/// image is standard HARDWARE reverse-Z (no `SV_Depth` write, early-Z stays live), so the vertex
+/// shader's clip.z must carry a real, monotonic depth this time — this function is that encode's
+/// SINGLE construction site, kept separate from (and never touching) the Deferred one above.
+///
+/// # Reverse-Z depth encode
+///
+/// Standard Vulkan depth range `[0,1]`, REVERSED so `view_z == near` maps to `depth == 1` and
+/// `view_z == far` maps to `depth == 0` (the numerically superior float-depth distribution —
+/// precision concentrates near the camera, matching the eye's own float32 mantissa density).
+/// Solving `depth(view_z) = A + B / view_z` for the two anchor points:
+///
+/// ```text
+/// A + B/near = 1      A = -near / (far - near)
+/// A + B/far  = 0   =>  B =  near * far / (far - near)
+/// ```
+///
+/// Expressed against WORLD `P` (since `view_z = dot(forward, P) - tz` is itself the row-major dot
+/// `row3 · [P, 1]`), `clip.z`'s row is `A · row3 + [0, 0, 0, B]`. `clip.w` stays `row3` (`view_z`)
+/// — the SAME standard perspective-divide row [`marcher_view_proj_rows`] uses, unchanged. The
+/// matching pipeline state (Forward's boot-time depth-stencil state) is `VK_COMPARE_OP_GREATER`
+/// (a nearer fragment has a LARGER stored depth) with a `0.0` depth CLEAR (the "nothing drawn yet"
+/// sentinel — farther, in reverse-Z terms, than any real `depth ∈ (0, 1]`).
+///
+/// PERSPECTIVE-only (mirrors [`marcher_view_proj_rows`]'s `fov_y > 0` invariant); `view.near > 0.0`
+/// and `view.far > view.near` are debug-asserted (a degenerate frustum divides by zero in `A`/`B`
+/// above). `width`/`height` are the render EXTENT (not `ViewUniform::aspect`), matching every
+/// other bridge fn in this module (the extent-derived-aspect precedent — see
+/// [`gbuffer_push_from_view_jittered`]'s doc for why an authored aspect is deliberately not
+/// consulted).
+///
+/// No jittered sibling yet (unlike [`marcher_view_proj_rows_jittered`]): Forward v1 has no TAA
+/// (the plan's v1 scope cut, [`crate::render_path_config::RenderPathDegrade::ForwardTaaNotYetImplemented`]) —
+/// a future ForwardPlus/TAA-under-Forward rung adds a `forward_view_proj_rows_jittered` sibling
+/// mirroring [`marcher_view_proj_rows_jittered`]'s `jitter.jx * row3` / `jitter.jy * row3` pattern
+/// (still exact post-divide NDC jitter here, since `row3` — the perspective-divide row — is
+/// unchanged from the Deferred construction).
+#[rustfmt::skip]
+#[inline]
+pub fn forward_view_proj_rows(view: &ViewUniform, width: u32, height: u32) -> [[f32; 4]; 4] {
+    debug_assert!(
+        view.fov_y > 0.0,
+        "invariant: the forward reverse-Z projection is PERSPECTIVE-only (fov_y > 0)"
+    );
+    debug_assert!(width > 0 && height > 0, "invariant: the composite extent is non-zero");
+    debug_assert!(
+        view.near > 0.0 && view.far > view.near,
+        "invariant: a valid reverse-Z frustum needs 0 < near < far"
+    );
+
+    let eye = [view.camera_pos.x, view.camera_pos.y, view.camera_pos.z];
+    let forward = [view.cam_forward.x, view.cam_forward.y, view.cam_forward.z];
+    let right = [view.cam_right.x, view.cam_right.y, view.cam_right.z];
+    let up = [view.cam_up.x, view.cam_up.y, view.cam_up.z];
+    let tan = (view.fov_y * 0.5).tan();
+    // Extent-derived, matching `marcher_view_proj_rows` exactly — NOT `view.aspect`.
+    let aspect = (width as f32) / (height as f32);
+
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let tx = -dot(right, eye);
+    let ty = -dot(up, eye);
+    let tz = dot(forward, eye); // in-front view depth: view_z = forward·P − tz
+
+    let sx = 1.0 / (aspect * tan);
+    let sy = -1.0 / tan;
+    let (rx, ry, rz) = (right[0], right[1], right[2]);
+    let (ux, uy, uz) = (up[0], up[1], up[2]);
+    let (fx, fy, fz) = (forward[0], forward[1], forward[2]);
+    let row3 = [fx, fy, fz, -tz]; // clip.w = view_z = dot(forward, P) − tz
+
+    // Reverse-Z depth encode (this fn's doc): clip.z = A * view_z + B, expressed against `row3`.
+    let range = view.far - view.near;
+    let a = -view.near / range;
+    let b = view.near * view.far / range;
+    let row2 = [a * row3[0], a * row3[1], a * row3[2], a * row3[3] + b];
+
+    [
+        [sx * rx, sx * ry, sx * rz, sx * tx], // clip.x
+        [sy * ux, sy * uy, sy * uz, sy * ty], // clip.y (marcher y-flip)
+        row2,                                  // clip.z (reverse-Z depth)
+        row3,                                  // clip.w (perspective divide, unchanged)
+    ]
+}
+
 /// Builds the 88-byte gbuffer-raster VERTEX push (`{ float4x4 view_proj; float4
 /// cam_eye; uint base_instance; uint use_model_matrix }` —
 /// [`GBUFFER_PUSH_BYTES`]) from a resolved PERSPECTIVE [`ViewUniform`], for the
@@ -539,5 +629,79 @@ mod tests {
         let jittered = gbuffer_push_from_view_jittered(&view, 640, 480, true, jitter);
         assert_ne!(&plain[0..64], &jittered[0..64], "the view_proj lane must be perturbed");
         assert_eq!(&plain[64..88], &jittered[64..88], "cam_eye + selectors must be untouched");
+    }
+
+    // ---- rung R4b: `forward_view_proj_rows` (the Forward reverse-Z projection) -----------
+
+    /// Applies a row-major proj·view `m` (as returned by [`marcher_view_proj_rows`] /
+    /// [`forward_view_proj_rows`]) to a world point, returning `(ndc, clip_w)`.
+    fn apply_row_major(m: [[f32; 4]; 4], p: [f32; 3]) -> ([f32; 3], f32) {
+        let ph = [p[0], p[1], p[2], 1.0];
+        let clip: [f32; 4] = core::array::from_fn(|row| {
+            m[row][0] * ph[0] + m[row][1] * ph[1] + m[row][2] * ph[2] + m[row][3] * ph[3]
+        });
+        ([clip[0] / clip[3], clip[1] / clip[3], clip[2] / clip[3]], clip[3])
+    }
+
+    /// The forward reverse-Z projection maps `view_z == near` to `depth == 1.0` and
+    /// `view_z == far` to `depth == 0.0` — the reversed Vulkan `[0,1]` depth range this fn's doc
+    /// derives, checked against two points on the camera's forward axis (`clip.w == view_z` by
+    /// construction, so placing a point at `eye + view_z * forward` gives an exact `view_z`).
+    #[test]
+    fn forward_view_proj_rows_reverse_z_depth_at_near_and_far() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let m = forward_view_proj_rows(&view, 640, 480);
+
+        let eye = view.camera_pos;
+        let fwd = view.cam_forward;
+        let near_point = [eye.x + fwd.x * view.near, eye.y + fwd.y * view.near, eye.z + fwd.z * view.near];
+        let far_point = [eye.x + fwd.x * view.far, eye.y + fwd.y * view.far, eye.z + fwd.z * view.far];
+
+        let (ndc_near, w_near) = apply_row_major(m, near_point);
+        let (ndc_far, w_far) = apply_row_major(m, far_point);
+
+        assert!((w_near - view.near).abs() <= 1e-4, "clip.w must equal view_z at the near point");
+        assert!((w_far - view.far).abs() <= 1e-2, "clip.w must equal view_z at the far point");
+        assert!((ndc_near[2] - 1.0).abs() <= 1e-4, "reverse-Z: near maps to depth 1.0, got {}", ndc_near[2]);
+        assert!(ndc_far[2].abs() <= 1e-4, "reverse-Z: far maps to depth 0.0, got {}", ndc_far[2]);
+    }
+
+    /// Depth is MONOTONIC DECREASING in `view_z` under reverse-Z (a nearer fragment has a
+    /// LARGER stored depth — the `VK_COMPARE_OP_GREATER` pipeline state this fn's doc pins).
+    #[test]
+    fn forward_view_proj_rows_reverse_z_is_monotonic_decreasing() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let m = forward_view_proj_rows(&view, 640, 480);
+        let eye = view.camera_pos;
+        let fwd = view.cam_forward;
+
+        let mut prev_depth = f32::INFINITY;
+        let steps = 8;
+        for i in 0..=steps {
+            let t = view.near + (view.far - view.near) * (i as f32 / steps as f32);
+            let p = [eye.x + fwd.x * t, eye.y + fwd.y * t, eye.z + fwd.z * t];
+            let (ndc, _) = apply_row_major(m, p);
+            assert!(ndc[2] <= prev_depth + 1e-6, "depth must not increase as view_z grows (t={t})");
+            prev_depth = ndc[2];
+        }
+    }
+
+    /// clip.x / clip.y (screen placement) and clip.w (the perspective-divide row) are IDENTICAL
+    /// to [`marcher_view_proj_rows`]'s — only clip.z (the depth row) differs. This is the
+    /// screen-alignment invariant Forward's raster needs to place geometry at the same pixels
+    /// Deferred would (Decision 4 changes ONLY the depth contract, never x/y).
+    #[test]
+    fn forward_view_proj_rows_shares_xy_and_w_rows_with_marcher() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let marcher = marcher_view_proj_rows(&view, 640, 480);
+        let forward_rz = forward_view_proj_rows(&view, 640, 480);
+
+        assert_eq!(forward_rz[0], marcher[0], "clip.x row must match Deferred's raster exactly");
+        assert_eq!(forward_rz[1], marcher[1], "clip.y row must match Deferred's raster exactly");
+        assert_eq!(forward_rz[3], marcher[3], "clip.w row must match Deferred's raster exactly");
+        assert_ne!(forward_rz[2], marcher[2], "clip.z (depth) must differ -- reverse-Z vs custom-linear");
     }
 }

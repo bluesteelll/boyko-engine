@@ -32,13 +32,28 @@
 // REAL cross-path shape that outer modulation needs; only then does widening this
 // surface stop being a guess.
 //
+// Rung-4b (Forward render path R4b, alongside the `shadow_apply.hlsli` extraction) adds a
+// SECOND, independent relocation from the SAME resolve span: the output-stage tonemap
+// operators (`aces_fitted`/`khronos_pbr_neutral`/`reinhard_jodie`/`tonemap_select` + their
+// `ACES_IN`/`ACES_OUT`/`OETF_GAMMA_EXP` constants) — pure functions of `(color, mode)` with
+// no texture/buffer reads beyond the `TONEMAP_*` mode constants (`light_table.hlsli`, now
+// `#include`d directly by this header — see below), so every render path applies the OWNER-
+// SELECTED tonemap curve identically, not a hand-copied duplicate. TOKEN-FOR-TOKEN cut from
+// `deferred_pbr.hlsl`'s "PBR P0-C" span, same Decision-3 image-golden-authoritative gate as
+// every other extraction in this file.
+//
 // # INCLUDE CONTRACT (precondition)
 //
 // `static const float PI` MUST be declared in the including TU BEFORE this header is
 // `#include`d — `D_GGX` below reads it. `static const float3 LIGHT_UP` MUST also be
 // declared before the `#include` — `eval_pbr_ambient_hemi` below reads it. The
 // including TU owns both constants; this header references them (the same pattern
-// `sdf_field.hlsli` uses for its `Buf` precondition).
+// `sdf_field.hlsli` uses for its `Buf` precondition). This header itself `#include`s
+// `light_table.hlsli` (guarded, safe to double-include) for the `TONEMAP_*` mode
+// constants `tonemap_select` switches on — the including TU does NOT need to include it
+// separately first.
+
+#include "light_table.hlsli"
 
 // --- Cook-Torrance / GGX terms (Filament real-time forms) -----------------------------
 
@@ -161,4 +176,66 @@ float3 eval_pbr_ambient_hemi(Surface s, float3 R, float2 dfg, float3 sky_color,
 // declaration. `sun_k` is the caller-evaluated `sun_kernel(R, l, alpha)`.
 float3 eval_pbr_sun_disc(Surface s, float2 dfg, float sun_k, float3 light_color) {
     return (s.f0 * dfg.x + dfg.y) * light_color * sun_k * s.energy_comp;
+}
+
+// --- Rung-4b: the output-stage tonemap operators (VERBATIM cut of the resolve's "PBR P0-C"
+// span) — shared by every render path's final `lit` write ------------------------------------
+
+// === PBR P0-C — Stephen Hill ACES-fitted filmic tonemap + manual gamma-2.2 OETF ===============
+//
+// Pre-P0 the accumulated linear radiance was stored via a RAW `clamp(lit, 0, 1)`: a peaked
+// GGX highlight clips to a flat white disk, destroying the Fresnel edge-tint that reads as
+// metal. This fit (the SAME matrices/rational form Bevy `AcesFitted` / Godot use) rolls off
+// highlights while staying near-identity in the midtones and preserving hue in the shoulder,
+// so a bright specular highlight fades toward white gracefully instead of clipping.
+//
+// OETF verification (blocking, see the PBR P0 batch report): `gLit` (R8G8B8A8_UNORM) and the
+// swapchain (`pick_surface_format` in `present/surface.rs` tries `*_UNORM` BEFORE `*_SRGB`, so
+// a device advertising both — every consumer GPU — picks UNORM) are linear UNORM end to end;
+// the present-blit (`fullscreen_sample.fs.hlsl`) is a raw `Sample` passthrough with no format
+// reinterpretation. Nothing in this chain hardware-encodes sRGB, so a `lit` writer must
+// gamma-encode itself here (one manual `pow(lit, 1/2.2)` after the tonemap) or the whole frame
+// reads too dark on display. The host oracle mirrors both ops in the SAME order
+// (`aces_fitted` then the gamma power) — see `tonemap_and_oetf` in `goldens.rs`.
+static const float3x3 ACES_IN  = { 0.59719, 0.35458, 0.04823,  0.07600, 0.90834, 0.01566,  0.02840, 0.13383, 0.83777 };
+static const float3x3 ACES_OUT = { 1.60475, -0.53108, -0.07367, -0.10208, 1.10813, -0.00605, -0.00327, -0.07276, 1.07602 };
+static const float OETF_GAMMA_EXP = 1.0 / 2.2;
+
+float3 aces_fitted(float3 c) {
+    c = mul(ACES_IN, c);
+    float3 a = c * (c + 0.0245786) - 0.000090537;
+    float3 b = c * (0.983729 * c + 0.4329510) + 0.238081;
+    return saturate(mul(ACES_OUT, a / b));
+}
+
+// Khronos PBR Neutral — LUT-free, hue-preserving, gentle toe. Linear Rec.709 in →
+// linear[0,1] out (no gamma; the shared OETF follows). Source: KhronosGroup/ToneMapping.
+float3 khronos_pbr_neutral(float3 color) {
+    const float startCompression = 0.8 - 0.04; // 0.76
+    const float desaturation     = 0.15;
+    float x = min(color.r, min(color.g, color.b));
+    float offset = (x < 0.08) ? (x - 6.25 * x * x) : 0.04;
+    color -= offset;
+    float peak = max(color.r, max(color.g, color.b));
+    if (peak < startCompression) return color;
+    const float d = 1.0 - startCompression; // 0.24
+    float newPeak = 1.0 - d * d / (peak + d - startCompression);
+    color *= newPeak / peak;
+    float g = 1.0 - 1.0 / (desaturation * (peak - newPeak) + 1.0);
+    return lerp(color, newPeak.xxx, g);
+}
+
+// Reinhard-Jodie — cheap hybrid, hue-preserving. Linear in → linear[0,1] out.
+float3 reinhard_jodie(float3 v) {
+    float l = dot(v, float3(0.2126, 0.7152, 0.0722)); // Rec.709 luma
+    float3 tv = v / (1.0 + v);
+    return saturate(lerp(v / (1.0 + l), tv, tv));
+}
+
+// Curve selector — the ACES arm calls the UNCHANGED aces_fitted, so mode 0 is
+// bit-identical to today's expression. Unknown modes fall through to ACES.
+float3 tonemap_select(float3 c, uint mode) {
+    if (mode == TONEMAP_NEUTRAL)         return khronos_pbr_neutral(c);
+    if (mode == TONEMAP_REINHARD_JODIE)  return reinhard_jodie(c);
+    return aces_fitted(c); // TONEMAP_ACES (0) and any unknown → today's curve
 }
