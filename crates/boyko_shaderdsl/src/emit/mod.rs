@@ -27,8 +27,10 @@ use crate::scalar::FieldScalar;
 
 mod cf;
 mod shaders;
+mod vb;
 
 pub use shaders::*;
+pub use vb::*;
 
 thread_local! {
     /// The build-time SSA arena. Recorded into by [`Emit`]'s [`FieldScalar`] ops,

@@ -59,6 +59,7 @@ pub mod shadow;
 pub mod sor;
 pub mod ssao;
 pub mod surface;
+pub mod vb;
 
 #[cfg(feature = "emit")]
 pub mod emit;
@@ -116,4 +117,8 @@ pub use ssao::{
 pub use surface::{
     EPS as M2_SURFACE_EPS, M2_REFINE_ITERS, M2_REFINE_RELAX, T_MAX as M2_SURFACE_T_MAX,
     m2_surface_hit_refine_body,
+};
+pub use vb::{
+    BaryBasis, NEAR_CLIP_DENOM_EPS, NEAR_CLIP_W_EPSILON, vb_barycentric_eval_body,
+    vb_barycentric_grad_body, vb_interp_body, vb_near_clip_body, vb_uv_grad_body,
 };
