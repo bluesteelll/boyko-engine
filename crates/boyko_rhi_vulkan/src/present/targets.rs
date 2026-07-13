@@ -475,19 +475,35 @@ impl AaArm {
 /// profile [`GBufferTargets::sync_gbuffer`]/[`GBufferTargets::create`] allocate against.
 /// Derived from `scene.resolved_render_path` at the call site (the [`AaArm::from_scene`]
 /// derive-from-scene precedent) and threaded down as an explicit parameter — the seam the plan
-/// names for R3's path-conditional allocation (mesh-only skips the SDF images, sdf-only skips
-/// the vertex/instance images and the `STORAGE` usage bit, P2-b). This rung ALWAYS resolves to
-/// [`DeferredFull`](Self::DeferredFull): the resolver's R2 guard
-/// (`boyko_render::render_path_config::DEFERRED_LEG_DISABLE_IMPLEMENTED == false`) degrades
-/// every `Deferred × {Mesh, Sdf}` request to `Both`, so no other profile is reachable yet;
-/// [`GBufferTargets::create`] asserts the threaded value matches [`Self::from_scene`]. R3 lifts
-/// the guard and adds the `Mesh`-only / `Sdf`-only arms — NO allocation behavior changes this
-/// rung.
+/// names for path-conditional allocation.
+///
+/// # Rung R3 status — profile IDENTITY landed, allocation DIFFERENCE deferred
+///
+/// `DeferredSdfOnly` is now reachable (`DEFERRED_SDF_ONLY_IMPLEMENTED == true`), but
+/// [`GBufferTargets::create`] does NOT yet branch its allocation on `profile` — the vocab/
+/// present descriptor sets are written ONCE per extent against a FIXED binding layout shared by
+/// every `Deferred` config (this module's own doc, "written ONCE per extent"), so dropping an
+/// image here would need a SECOND descriptor-set layout, a larger, separately-scoped change
+/// (see the R3 rung report's honest VRAM accounting). This variant exists so the profile
+/// IDENTITY is real today — `TargetsProfile::from_scene` no longer trips its `debug_assert!` on
+/// `Deferred × Sdf` — ready for a future rung to actually branch allocation on it.
+/// `DeferredMeshOnly` stays unreachable (`DEFERRED_MESH_ONLY_IMPLEMENTED == false`, the R3-audited
+/// `gViewT` producer gap), matched exhaustively (not `unreachable!()`) so a future landing only
+/// has to fill this arm's allocation body, not add the arm itself.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+// The shared `Deferred` prefix names the `RenderPath::Deferred` family explicitly (the plan §H
+// R3 row's own naming — `TargetsProfile::{DeferredFull,DeferredMeshOnly,DeferredSdfOnly}` — kept
+// verbatim rather than renamed for a lint, since a future `Forward`/`VisibilityBuffer` sibling
+// enum will need the SAME "which path family" prefix discipline for readability at call sites).
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum TargetsProfile {
-    /// Both geometry legs, the full Deferred image/descriptor-set contract — today's ONLY
-    /// reachable profile.
+    /// Both geometry legs, the full Deferred image/descriptor-set contract.
     DeferredFull,
+    /// Only the mesh raster leg (`GeometryLegs::Mesh`) — unreachable today, see this type's doc.
+    DeferredMeshOnly,
+    /// Only the SDF marched leg (`GeometryLegs::Sdf`) — reachable as of rung R3, allocation
+    /// identical to `DeferredFull` this rung (see this type's doc).
+    DeferredSdfOnly,
 }
 
 impl TargetsProfile {
@@ -496,15 +512,28 @@ impl TargetsProfile {
     /// reads, no allocation.
     #[inline]
     pub(crate) fn from_scene(scene: &GBufferScene<'_>) -> Self {
-        // R2 guard: the resolver degrades every `Deferred x {Mesh, Sdf}` request to `Both`
-        // (`DEFERRED_LEG_DISABLE_IMPLEMENTED == false`), so `mesh_leg`/`sdf_leg` are both `true`
-        // on any frame that reaches here. R3 lifts the guard and this match grows a
-        // `Mesh`-only / `Sdf`-only arm.
-        debug_assert!(
-            scene.resolved_render_path.mesh_leg && scene.resolved_render_path.sdf_leg,
-            "invariant: the R2 resolver guard keeps Deferred at GeometryLegs::Both until R3"
-        );
-        TargetsProfile::DeferredFull
+        let rp = &scene.resolved_render_path;
+        match (rp.mesh_leg, rp.sdf_leg) {
+            (true, true) => TargetsProfile::DeferredFull,
+            (false, true) => TargetsProfile::DeferredSdfOnly,
+            (true, false) => {
+                // invariant: `DEFERRED_MESH_ONLY_IMPLEMENTED == false` keeps `Deferred x Mesh`
+                // resolver-degraded to `Both` until the R3-audited `gViewT` producer gap is
+                // resolved (see `boyko_render::render_path_config`'s module doc) — unreachable
+                // today; matched exhaustively so a future landing only fills this arm's body.
+                debug_assert!(
+                    false,
+                    "invariant: Deferred x Mesh is resolver-degraded to Both (gViewT producer gap, R3)"
+                );
+                TargetsProfile::DeferredMeshOnly
+            }
+            (false, false) => {
+                // invariant: `GeometryLegs` has no "both off" state (no `None` variant) — a
+                // resolved carrier can never report neither leg present.
+                debug_assert!(false, "invariant: a resolved render path always has >=1 leg");
+                TargetsProfile::DeferredFull
+            }
+        }
     }
 }
 
@@ -4312,8 +4341,10 @@ impl GBufferTargets {
     ///
     /// `profile` is the [`TargetsProfile`] rung R2 threads down from the caller (mirrors
     /// `aa_extent`'s explicit-parameter discipline) — asserted below against a fresh
-    /// [`TargetsProfile::from_scene`] derivation (an O1-style parity check). This rung it is
-    /// always [`TargetsProfile::DeferredFull`]; NO allocation reads it yet (R3 makes it real).
+    /// [`TargetsProfile::from_scene`] derivation (an O1-style parity check). As of rung R3 it may
+    /// be [`TargetsProfile::DeferredSdfOnly`] too, but this fn does NOT yet branch its allocation
+    /// on `profile` — see [`TargetsProfile`]'s doc for why (the fixed, once-per-extent vocab set
+    /// layout) and the R3 rung report for the honest VRAM accounting.
     fn create(
         ctx: &VulkanContext,
         scene: &GBufferScene<'_>,

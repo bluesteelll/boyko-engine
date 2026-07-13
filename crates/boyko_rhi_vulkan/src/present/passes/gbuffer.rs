@@ -377,9 +377,10 @@ impl Renderer<'_> {
         // model-out ring (the instance ring the raster VS reads).
         //
         // Multi-paradigm render-path plan, rung R2: `Some` iff `scene.path_has_raster()` (the
-        // `debug_assert_eq!` above already pinned this) — under the R2 resolver guard this is
-        // `Some` on every currently reachable frame, so the `if let` is byte-identical to the
-        // pre-R2 unconditional call.
+        // `debug_assert_eq!` above already pinned this) — `None` under `Deferred × Sdf` (rung R3;
+        // `mesh_depth_neutral_clear` below is its depth-clear replacement), `Some` on every other
+        // currently reachable frame, so the `if let` is byte-identical to the pre-R2
+        // unconditional call there.
         if let Some(raster_pass) = plan.raster {
             self.record_graph_pass(raster_pass, cmd, targets, scene, fi);
         }
@@ -841,6 +842,66 @@ impl Renderer<'_> {
                         );
                     }
                 }
+                (self.fns.cmd_end_rendering)(cmd);
+            }
+        }
+
+        // Multi-paradigm render-path plan, rung R3 (§E leg-disable / the O2 audit finding): the
+        // mesh-depth NEUTRAL CLEAR — `Deferred × Sdf`'s replacement for the raster pass's own
+        // depth-clear producer (see `mesh_depth_neutral_clear`'s doc in `graph_bridge.rs` +
+        // `GBufferScene::path_has_mesh_depth_neutral_clear`'s doc for the full rationale). `Some`
+        // iff `scene.path_has_mesh_depth_neutral_clear()`, mutually exclusive with `plan.raster`
+        // by construction (W1 parity, the SAME predicate `declare_deferred_graph` checks).
+        debug_assert_eq!(
+            plan.mesh_depth_neutral_clear.is_some(),
+            scene.path_has_mesh_depth_neutral_clear(),
+            "W1: declare/record predicate desync (mesh_depth_neutral_clear)"
+        );
+        if let Some(depth_clear_pass) = plan.mesh_depth_neutral_clear {
+            self.record_graph_pass(depth_clear_pass, cmd, targets, scene, fi);
+            let depth_only_attachment = VkRenderingAttachmentInfo {
+                s_type: VkStructureType::RenderingAttachmentInfo,
+                p_next: ptr::null(),
+                image_view: targets.depth[fi].view,
+                image_layout: VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                resolve_mode: 0,
+                resolve_image_view: VkImageView::NULL,
+                resolve_image_layout: VK_IMAGE_LAYOUT_UNDEFINED,
+                load_op: VK_ATTACHMENT_LOAD_OP_CLEAR,
+                store_op: VK_ATTACHMENT_STORE_OP_STORE,
+                clear_value: VkClearValue {
+                    depth_stencil: VkClearDepthStencilValue { depth: 1.0, stencil: 0 },
+                },
+            };
+            let depth_only_area =
+                VkRect2D { offset: VkOffset2D { x: 0, y: 0 }, extent: present_extent };
+            let depth_only_rendering = VkRenderingInfo {
+                s_type: VkStructureType::RenderingInfo,
+                p_next: ptr::null(),
+                flags: 0,
+                render_area: depth_only_area,
+                layer_count: 1,
+                view_mask: 0,
+                color_attachment_count: 0,
+                p_color_attachments: ptr::null(),
+                p_depth_attachment: (&depth_only_attachment as *const VkRenderingAttachmentInfo)
+                    .cast(),
+                p_stencil_attachment: ptr::null(),
+            };
+            // SAFETY: recording is open; `depth_only_rendering` names only the live depth view
+            // (now `DEPTH_ATTACHMENT_OPTIMAL`, transitioned by the barrier
+            // `record_graph_pass` just emitted) with `color_attachment_count == 0` (no color
+            // attachment array is needed — `p_color_attachments` is a valid null ptr for a
+            // zero-length array per the Vulkan spec); dynamic rendering is enabled on this
+            // device (the SAME capability every other `cmd_begin_rendering` call in this fn
+            // relies on); `depth_only_area` is within the depth image's extent (==
+            // `present_extent`, matching every other G-buffer target this frame). No draw is
+            // recorded — the clear alone (LOAD_OP_CLEAR/STORE_OP_STORE, depth = 1.0) leaves the
+            // whole image at the far-plane sentinel, reproducing the raster pass's OWN depth
+            // clear value exactly (`MESH_DEPTH_CLEAR` / `DEPTH_CLEAR` == 1.0), so the
+            // byte-UNCHANGED marcher reads "no mesh" for every pixel this frame.
+            unsafe {
+                (self.fns.cmd_begin_rendering)(cmd, &depth_only_rendering);
                 (self.fns.cmd_end_rendering)(cmd);
             }
         }

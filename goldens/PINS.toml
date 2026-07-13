@@ -56,3 +56,31 @@ BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\grand_showcase_2mat.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
+[deferred_sdf_only]
+# Multi-paradigm render-path plan, rung R3 (Deferred leg-disable, sdf leg): the SAME
+# grand_showcase room with resolved_render_path.mesh_leg forced OFF (GeometryLegs::Sdf). The
+# mesh raster gbuffer pass (boxes/walls/floor) is skipped, and so is EVERY mesh-shadow producer
+# it feeds -- CSM cascade depth, the punctual spot/point atlas depth, and (hwrt leg) the TLAS
+# pack/build + the shadow_vis/a-trous/temporal denoise chain (mesh-shadow producers are
+# mesh-leg-owned; the SDF leg's shadow is the marcher's own baked soft march, unaffected --
+# GpuSceneBundles::scene() P1 fix). The hwrt leg is therefore TLAS-less BY DESIGN under this
+# config (no mesh instances to build an acceleration structure from) and renders IDENTICAL to
+# software -- sha256_hwrt is expected to equal sha256_software (kept as its own pin, not
+# assumed, since every other pin in this file blesses both legs independently). Only the two
+# SDF spheres remain, composited by the byte-UNCHANGED marcher against the new
+# mesh_depth_neutral_clear pass's far-plane depth. Re-render + re-bless after the P1 scene-
+# assembly gate fix landed (do NOT hand-edit sha256_*).
+crate           = "boyko_rhi_vulkan"
+test_binary     = "window_present_gbuffer"
+test_name       = "engine_deferred_sdf_only_512_screenshot_dump"
+bmp             = "D:\\tmp\\deferred_sdf_only.bmp"
+width           = 512
+height          = 512
+sha256_software = "ffcc0ac6f70a6cdcd113e343ef2d65a9a3f8134478917f35bec73991d3d5515f"
+sha256_hwrt     = "ffcc0ac6f70a6cdcd113e343ef2d65a9a3f8134478917f35bec73991d3d5515f"
+
+[deferred_sdf_only.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"

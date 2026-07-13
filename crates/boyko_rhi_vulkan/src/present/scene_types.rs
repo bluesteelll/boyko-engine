@@ -1967,21 +1967,42 @@ impl GBufferScene<'_> {
     /// begin/end-rendering block can never diverge (the W1 lesson, mirroring
     /// [`Self::mesh_mv_active`]).
     ///
-    /// `== resolved_render_path.mesh_leg`. The R1 resolver's R2 guard
-    /// (`boyko_render::render_path_config::DEFERRED_LEG_DISABLE_IMPLEMENTED == false`) degrades
-    /// every `Deferred × {Mesh, Sdf}` request to `Both`, so this is `true` on every frame
-    /// reachable today — Deferred's byte-identity anchor is untouched by this rung.
+    /// `== resolved_render_path.mesh_leg`. Rung R3 lifted `DEFERRED_SDF_ONLY_IMPLEMENTED`
+    /// (`boyko_render::render_path_config`), so `Deferred × Sdf` now reaches here with this
+    /// `false` — see [`Self::path_has_mesh_depth_neutral_clear`] for the pass that replaces the
+    /// raster pass's depth-clear producer on that leg. `Deferred × Mesh` still degrades to `Both`
+    /// (`DEFERRED_MESH_ONLY_IMPLEMENTED` stays `false`, the R3-audited `gViewT` producer gap), so
+    /// this is `true` on every frame reachable today EXCEPT `Deferred × Sdf`.
     #[inline]
     pub(crate) fn path_has_raster(&self) -> bool {
         self.resolved_render_path.mesh_leg
     }
 
     /// Sibling of [`Self::path_has_raster`] for the SDF marcher pass — `== resolved_render_path
-    /// .sdf_leg`. See [`Self::path_has_raster`]'s doc for the R2 guard that keeps this `true` on
-    /// every currently reachable frame.
+    /// .sdf_leg`. See [`Self::path_has_raster`]'s doc for the R3 guard state.
     #[inline]
     pub(crate) fn path_has_marcher(&self) -> bool {
         self.resolved_render_path.sdf_leg
+    }
+
+    /// Multi-paradigm render-path plan, rung R3 (§E leg-disable / the O2 audit finding) — the
+    /// SINGLE source of "does this frame's declarator/recorder emit the mesh-depth NEUTRAL
+    /// CLEAR pass" decision, so `declare_deferred_graph`'s `mesh_depth_neutral_clear` pass
+    /// declaration and `record_gbuffer`'s depth-only clear block can never diverge (the W1
+    /// lesson, mirroring [`Self::path_has_raster`]).
+    ///
+    /// `== sdf_leg && !mesh_leg` (`GeometryLegs::Sdf` exactly) — mutually exclusive with
+    /// [`Self::path_has_raster`] by construction, since the two predicates partition
+    /// `mesh_leg`'s two states. Under `Deferred × Sdf` the raster pass (the depth image's normal
+    /// clear + `DEPTH_ATTACHMENT_OPTIMAL` producer) is skipped, so nothing gives the marcher's
+    /// `gDepth.Load` at binding 1 a defined value; this pass reproduces JUST the depth half of
+    /// the raster pass's own clear (`CLEAR` to the far-plane sentinel, `DEPTH_ATTACHMENT_OPTIMAL`)
+    /// so the marcher deterministically reads "no mesh" for every pixel — the SAME code path an
+    /// entirely mesh-less scene already exercises byte-identically today
+    /// (`sdf_gbuffer_composite.hlsl`'s own documented 0%-gate), with ZERO shader change.
+    #[inline]
+    pub(crate) fn path_has_mesh_depth_neutral_clear(&self) -> bool {
+        self.resolved_render_path.sdf_leg && !self.resolved_render_path.mesh_leg
     }
 }
 

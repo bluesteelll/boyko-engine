@@ -5656,6 +5656,89 @@ fn engine_grand_showcase_512_screenshot_dump() {
     );
 }
 
+/// Multi-paradigm render-path plan, rung R3 (§E leg-disable / O2 audit) — the `Deferred × Sdf`
+/// leg-disable golden: the SAME [`grand_showcase_config`] room, but with the resolved render
+/// path's `mesh_leg` forced OFF (`GeometryLegs::Sdf`). The mesh raster gbuffer pass (boxes/
+/// walls/floor) is skipped, and so are EVERY mesh-shadow producer it feeds — CSM cascade depth,
+/// the punctual spot/point atlas depth, and (under `hwrt`) the TLAS pack/build + the
+/// shadow_vis/à-trous/temporal denoise chain (mesh-shadow producers are mesh-leg-owned; the SDF
+/// leg's shadow is the marcher's own baked soft march, unaffected — see the P1 fix in
+/// `GpuSceneBundles::scene()`, `boyko_app/src/gpu_scene/mod.rs`, and this fn's own gate below).
+/// Only the two SDF spheres remain, composited by the byte-UNCHANGED marcher against the new
+/// `mesh_depth_neutral_clear` pass's far-plane depth (see `graph_bridge.rs`'s doc for why no
+/// `HAS_MESH` shader variant was needed). Dumps a TRUE 512×512 BMP to [`DEFERRED_SDF_ONLY_BMP`]
+/// for the owner's RTX visual sign-off.
+const DEFERRED_SDF_ONLY_BMP: &str = r"D:\tmp\deferred_sdf_only.bmp";
+
+/// Multi-paradigm render-path plan, rung R3 (code-review P2-2) — a hand mirror of
+/// `boyko_app::gpu_scene::to_gpu_resolved_render_path` (private to that crate, so this
+/// low-level RHI test cannot call it directly; see
+/// `boyko_app::gpu_scene::tests::to_gpu_resolved_render_path_round_trips_a_non_default_carrier`
+/// for the AUTHORITATIVE field-for-field round-trip that pin covers). Field-for-field copy into
+/// the plain-POD [`ResolvedRenderPathGpu`], same discriminant/`bits()` encoding
+/// `boyko_render::RenderPath`/`GeometryLegs`/`DepthKind`/`ThinAuxMask`/`ShadowSources` already
+/// use as their `#[repr(u32)]`/`#[repr(transparent)]` wire form.
+fn resolved_render_path_gpu_from(r: &boyko_render::ResolvedRenderPath) -> ResolvedRenderPathGpu {
+    ResolvedRenderPathGpu {
+        path: r.path as u32,
+        legs: r.legs as u32,
+        mesh_leg: r.mesh_leg,
+        sdf_leg: r.sdf_leg,
+        sdf_forward_marched: r.sdf_forward_marched,
+        needs_depth_prepass: r.needs_depth_prepass,
+        prepass_writes_motion: r.prepass_writes_motion,
+        mesh_geo_shade_split: r.mesh_geo_shade_split,
+        sdf_geo_shade_split: r.sdf_geo_shade_split,
+        sdf_surface_cache: r.sdf_surface_cache,
+        vb_geometry_table: r.vb_geometry_table,
+        depth_kind: r.depth_kind as u32,
+        thin_aux: r.thin_aux.bits(),
+        shadow: r.shadow.bits(),
+    }
+}
+
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
+/// orchestrator runs it on the GPU to dump the screenshot.
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the deferred-sdf-only leg-disable screenshot"]
+fn engine_deferred_sdf_only_512_screenshot_dump() {
+    // Multi-paradigm render-path plan, rung R3 (code-review P2-2): drive the REAL boot resolver
+    // (`boyko_render::resolve_render_path`) instead of hand-building the carrier, so this golden
+    // covers the config -> resolver -> carrier -> frame seam end-to-end (`boyko-render` is a
+    // dev-only back-edge dependency added for exactly this — see this crate's `Cargo.toml`).
+    let cfg = boyko_render::RenderPathConfig {
+        path: boyko_render::RenderPath::Deferred,
+        legs: boyko_render::GeometryLegs::Sdf,
+    };
+    let (resolved, degrades) = boyko_render::resolve_render_path(
+        &cfg,
+        boyko_render::RenderPathConsumers::default(),
+        boyko_render::RenderPathDeviceCaps::default(),
+    );
+    assert!(degrades.is_clean(), "Deferred x Sdf must resolve clean at rung R3 (no degrade)");
+    assert!(!resolved.mesh_leg && resolved.sdf_leg, "invariant: GeometryLegs::Sdf resolves mesh_leg=false");
+    let resolved_render_path = resolved_render_path_gpu_from(&resolved);
+
+    run_showcase_dump_with_render_path(
+        "boyko_engine deferred sdf-only 512",
+        DEFERRED_SDF_ONLY_BMP,
+        grand_showcase_config(),
+        resolved_render_path,
+    );
+}
+
+// NOTE (rung R3 Phase-1 audit finding (a)): a `Deferred × Mesh` sibling golden
+// (`engine_deferred_mesh_only_512_screenshot_dump`) is intentionally NOT added here. The R3
+// audit found the marcher is the SOLE producer of the `gViewT` lane for MESH-owned pixels too
+// (`sdf_gbuffer_composite.hlsl`'s `gViewT[...] = (own_pixel && mask==1.0) ? t : (has_mesh ?
+// t_mesh : 1.0e30)`, both terminal write sites), and every `gViewT` consumer (the resolve's `P =
+// ro + rd*view_t` reconstruction, SSAO's mesh/SDF `view_t` classification) reads it
+// UNCONDITIONALLY under `mask == 1` -- mesh pixels included. Skipping the marcher entirely (the
+// plan's O2 "verified" mesh-only design) leaves `gViewT` wholly unwritten -- a real correctness
+// bug, not a cosmetic gap. `boyko_render::render_path_config::DEFERRED_MESH_ONLY_IMPLEMENTED`
+// stays `false` (the resolver keeps degrading `Deferred × Mesh` to `Both`) until an approved
+// gViewT producer-replacement design lands; see this rung's report for the full finding.
+
 /// The GRAND flagship showcase screenshot with SDFDDGI **GI ON** — the FIRST render (rung I4) that
 /// arms the live probe-update pass AND the resolve's GI-injection gate. The warm sun drives the
 /// probe update, whose converged indirect irradiance the resolve injects onto the two SDF spheres
@@ -7299,7 +7382,21 @@ fn engine_mdf_shadow_512_screenshot_dump() {
 /// `cfg` builder arms `ssao_mode == 1`; `scene.ssao = Some(..)` records the pass that writes it).
 fn run_showcase_dump(window_title: &str, bmp_path: &str, cfg: ShowcaseConfig, interactive: bool) {
     with_windowed_present(window_title, "engine_showcase_512", |bp| {
-        run_showcase_body(bp, bmp_path, cfg, interactive)
+        run_showcase_body(bp, bmp_path, cfg, interactive, ResolvedRenderPathGpu::default())
+    });
+}
+
+/// Multi-paradigm render-path plan, rung R3: sibling of [`run_showcase_dump`] that forces the
+/// scene fixture's [`ResolvedRenderPathGpu`] instead of the byte-identity default — the R3
+/// leg-disable golden tests thread `Deferred × Sdf` (mesh raster leg off) through here.
+fn run_showcase_dump_with_render_path(
+    window_title: &str,
+    bmp_path: &str,
+    cfg: ShowcaseConfig,
+    resolved_render_path: ResolvedRenderPathGpu,
+) {
+    with_windowed_present(window_title, "engine_showcase_512", |bp| {
+        run_showcase_body(bp, bmp_path, cfg, false, resolved_render_path)
     });
 }
 
@@ -8667,9 +8764,39 @@ fn engine_grand_showcase_512_gpu_pass_cost() {
     });
 }
 
-fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfig, interactive: bool) {
+/// Multi-paradigm render-path plan, rung R3: `resolved_render_path` is threaded through so the
+/// R3 leg-disable golden tests (`engine_deferred_sdf_only_512_screenshot_dump`) can force the
+/// scene fixture's [`ResolvedRenderPathGpu`] to a non-default leg set without duplicating this
+/// whole body. `run_showcase_dump` passes [`ResolvedRenderPathGpu::default()`] (Deferred + Both,
+/// the byte-identity anchor) — every existing showcase test is untouched.
+fn run_showcase_body(
+    bp: BootPresent<'_, '_>,
+    bmp_path: &str,
+    cfg: ShowcaseConfig,
+    interactive: bool,
+    resolved_render_path: ResolvedRenderPathGpu,
+) {
     let BootPresent { window, ctx, surface, mut swapchain, mut renderer, is_bgra, swap_color_format } =
         bp;
+
+    // Multi-paradigm render-path plan, rung R3 (P1 fix, code-review CHANGES_REQUIRED): mirror
+    // the production `GpuSceneBundles::scene()` gate -- CSM cascade depth + the punctual
+    // spot/point atlas depth are MESH-LEG-OWNED mesh-shadow producers (they rasterize MESH
+    // casters only; the SDF leg gets its shadows from the marcher's baked soft march). Under
+    // `!mesh_leg` (`Deferred x Sdf`) they must be structurally ABSENT, suppressed HERE before
+    // ANY use of `cfg.csm`/`cfg.spot_atlas` in this fn (incl. the light-header
+    // `with_csm_mode`/`with_punctual_shadow_mode` bits below, which would otherwise claim a
+    // shadow pass ran that this gate never records -- a header/pass mismatch). This hand-
+    // assembled test fixture shares the SAME single-source-of-truth gate the production seam
+    // uses (`resolved_render_path.mesh_leg`), so it cannot silently diverge from it. `Deferred ×
+    // Both`/`Mesh` keep `mesh_leg == true` ⇒ `.filter(|_| true)` is the identity ⇒
+    // byte-identical to every pre-R3 showcase test.
+    let mesh_leg = resolved_render_path.mesh_leg;
+    let cfg = ShowcaseConfig {
+        csm: cfg.csm.filter(|_| mesh_leg),
+        spot_atlas: cfg.spot_atlas.filter(|_| mesh_leg),
+        ..cfg
+    };
 
     let device: &VulkanContext = ctx;
     let sdf = &cfg.sdf;
@@ -9546,10 +9673,11 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         raster_pipeline_tex: None,
         tex_bind_group: None,
         bindless_set: None,
-        // Multi-paradigm render-path plan, rung R1: dead-but-threaded — this harness has no
-        // ECS `ResolvedRenderPath` to convert, so it carries the byte-identity default
-        // (Deferred + Both, every derived flag off).
-        resolved_render_path: ResolvedRenderPathGpu::default(),
+        // Multi-paradigm render-path plan, rung R3: threaded from this fn's own parameter --
+        // `run_showcase_dump` passes the byte-identity default (Deferred + Both, every
+        // derived flag off); `run_showcase_dump_with_render_path` forces the R3
+        // leg-disable goldens' `Deferred x Sdf` carrier.
+        resolved_render_path,
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };

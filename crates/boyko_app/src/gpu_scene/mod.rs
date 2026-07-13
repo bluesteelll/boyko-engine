@@ -3079,6 +3079,25 @@ impl GpuSceneBundles {
             ssao_variant.is_some() || ssao_atrous_levels == 0,
             "invariant: ssao_atrous_levels > 0 requires ssao_variant.is_some() (resolve_ssao forces this)"
         );
+
+        // Multi-paradigm render-path plan, rung R3 (P1 fix — orchestrator architecture
+        // decision): mesh-shadow producers (CSM cascade depth, the punctual spot/point atlas
+        // depth, and under `hwrt` the per-frame TLAS pack/build + the shadow_vis/à-trous/
+        // temporal denoise chain) are MESH-LEG-OWNED — they rasterize/trace MESH casters only.
+        // The SDF leg gets its shadows from the marcher's baked soft march
+        // (`ShadowSources::SDF_SOFT_MARCH`), never from these. Under `!mesh_leg` (`Deferred ×
+        // Sdf`) they must be structurally ABSENT (capability = component presence, not a
+        // runtime flag), suppressed HERE — the single scene-assembly seam — so every downstream
+        // use in this fn (the `csm`/`atlas_punctual` `GBufferScene` fields below, and the
+        // `hwrt` `tlas`/`shadow` activations, which key off `csm.is_some()`/`tlas_enabled`)
+        // derives from the SAME gated locals and can never disagree. `Deferred × Both`/`Mesh`
+        // keep `mesh_leg == true` ⇒ `.filter(|_| true)` is the identity ⇒ byte-identical.
+        let mesh_leg = resolved_render_path.mesh_leg;
+        let csm = csm.filter(|_| mesh_leg);
+        let atlas = atlas.filter(|_| mesh_leg);
+        #[cfg(feature = "hwrt")]
+        let tlas_enabled = tlas_enabled && mesh_leg;
+
         // Interp arming (refined-B): the raster VS ALWAYS reads the shared instance
         // ring (`instance_bind_groups[slot]`) — no bind swap. When the gather produced
         // DYNAMIC instances, the interp compute overwrites that ring's dynamic slots

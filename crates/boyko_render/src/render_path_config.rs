@@ -28,16 +28,46 @@
 //! set ([`resolve_rules`]) are ALREADY correct for the fully-landed plan, tested directly against
 //! the rule (not gated behind the rung consts) so they are live today, not dead until later rungs.
 //!
-//! Rung R2 adds [`DEFERRED_LEG_DISABLE_IMPLEMENTED`] (`false` today, lifted `true` at rung R3):
-//! while `false`, a `Deferred × {Mesh, Sdf}` request degrades its LEGS to `Both`
-//! ([`RenderPathDegrade::DeferredLegDisableNotYetImplemented`]) — R2 built the `Option<PassId>`
-//! plumbing (`declare_deferred_graph`'s `raster`/`marcher` passes, `path_has_raster`/
-//! `path_has_marcher`) but NOT the goldens + the marcher's `HAS_MESH` compiled variant a real
-//! leg-off Deferred frame needs (plan §H, R3 row), so this guard keeps every leg-off Deferred
-//! config unreachable until R3 explicitly lifts it. This rule fires ONLY when the FINAL
-//! (post-path-demotion) `path == Deferred`; the legs-collapse-to-`Mesh` rule below fires ONLY
-//! when the final `path != Deferred` — the two are mutually exclusive by construction (see
-//! [`degrade_ladder`]'s doc), so they never co-fire in the same call.
+//! Rung R2 added a single combined `DEFERRED_LEG_DISABLE_IMPLEMENTED` guard (`false`); rung R3
+//! SPLITS it into [`DEFERRED_SDF_ONLY_IMPLEMENTED`] / [`DEFERRED_MESH_ONLY_IMPLEMENTED`] — one
+//! const per leg, the SAME "rung-staged const per landed capability" idiom every other flag in
+//! this module already uses ([`FORWARD_IMPLEMENTED`] etc.) — because the two legs landed at
+//! DIFFERENT confidence levels (plan §H R3 row + the R3 rung audit):
+//!
+//! - **`Deferred × Sdf`** (mesh raster leg off): [`DEFERRED_SDF_ONLY_IMPLEMENTED`] is `true` —
+//!   the raster gbuffer pass is skipped, a `mesh_depth_neutral_clear` pass
+//!   (`boyko_rhi_vulkan::present::graph_bridge`) replaces its depth-clear producer so the
+//!   marcher's mesh-depth sample deterministically reads the far-plane sentinel (the SAME
+//!   "no mesh in the scene" code path the marcher already handles byte-identically), reusing
+//!   `sdf_gbuffer_composite.hlsl` UNCHANGED (no `HAS_MESH` compiled variant this rung — a
+//!   deliberate, documented deviation from the plan's literal text; see the R3 rung report for
+//!   the risk analysis). Every MESH-shadow producer the raster pass fed is ALSO structurally
+//!   suppressed — CSM cascade depth, the punctual spot/point atlas depth, and (under `hwrt`) the
+//!   TLAS pack/build + the shadow_vis/à-trous/temporal denoise chain — because mesh-shadow
+//!   producers are mesh-leg-owned (they rasterize/trace MESH casters only; the SDF leg's shadow
+//!   is the marcher's own baked soft march). `GpuSceneBundles::scene()`
+//!   (`boyko_app::gpu_scene`) is the single scene-assembly seam that gates this (capability =
+//!   component presence, not a runtime flag); `declare_deferred_graph` carries a
+//!   `debug_assert!` belt-and-braces check the seam was not missed. VRAM/boot-time pipeline
+//!   creation for the mesh raster leg (vertex buffer, instance rings, raster pipelines) is NOT
+//!   yet gated this rung — an honest, documented follow-up (see the R3 rung report).
+//! - **`Deferred × Mesh`** (SDF leg off): [`DEFERRED_MESH_ONLY_IMPLEMENTED`] stays `false` — the
+//!   R3 audit found the marcher is the SOLE producer of the `gViewT` lane for MESH-owned pixels
+//!   too (`sdf_gbuffer_composite.hlsl`'s `gViewT[...] = (own_pixel && mask==1.0) ? t : (has_mesh
+//!   ? t_mesh : 1.0e30)`, both terminal write sites), and every `gViewT` consumer (the resolve's
+//!   `P = ro + rd*view_t` reconstruction, SSAO's `view_t` mesh/SDF classification) reads it
+//!   UNCONDITIONALLY under `mask == 1` — mesh pixels included, not just SDF ones. Skipping the
+//!   marcher entirely (the plan's O2 "verified" mesh-only design) therefore leaves `gViewT`
+//!   wholly unwritten (no producer, no clear) for a leg the plan's own "Untouched" list forbids
+//!   patching via `gbuffer_mrt.fs.hlsl` (a new MRT write) or `deferred_pbr.hlsl`'s frozen
+//!   binding-count sets (a new depth binding) — an architecture-level gap requiring an approved
+//!   producer-replacement design, not a developer-turn workaround. This const stays `false`
+//!   until that design lands (see the R3 rung report's Phase-1 audit finding (a)).
+//!
+//! Both rules fire ONLY when the FINAL (post-path-demotion) `path == Deferred`; the
+//! legs-collapse-to-`Mesh` rule below fires ONLY when the final `path != Deferred` — the two
+//! groups are mutually exclusive by construction (see [`degrade_ladder`]'s doc), so they never
+//! co-fire in the same call.
 //!
 //! # Rev 5 — the single `pre_light_consumers` predicate (MANDATORY)
 //!
@@ -82,15 +112,22 @@ const VB_IMPLEMENTED: bool = false;
 /// `Sdf`) degrades that leg set to `Mesh` ([`RenderPathDegrade::LegsCollapsedToMeshPreSdfForward`]).
 const SDF_FORWARD_IMPLEMENTED: bool = false;
 
-/// Whether `Deferred`'s leg-disable (mesh-only skips the marcher pass only, O2; sdf-only skips
-/// the mesh raster pass + vertex pipelines) has landed yet. Lifted `true` at rung R3, once R3
-/// adds the `deferred_mesh_only`/`deferred_sdf_only` goldens and the marcher's `HAS_MESH`
-/// compiled variant (plan §H). `false` today ⇒ a `Deferred × {Mesh, Sdf}` request degrades its
-/// LEGS to [`GeometryLegs::Both`] ([`RenderPathDegrade::DeferredLegDisableNotYetImplemented`]) —
-/// R2 built the framegraph's `Option<PassId>` seam (`raster`/`marcher` in
-/// `boyko_rhi_vulkan::present::graph_bridge::GbufferPassPlan`) but this const keeps every
-/// leg-off Deferred config unreachable until R3's goldens land.
-const DEFERRED_LEG_DISABLE_IMPLEMENTED: bool = false;
+/// Whether `Deferred × Sdf` (the mesh raster leg off) has landed. `true` as of rung R3: the
+/// `mesh_depth_neutral_clear` pass (`boyko_rhi_vulkan::present::graph_bridge`) replaces the
+/// raster pass's depth-clear, giving the (UNCHANGED) marcher a deterministic "no mesh" depth to
+/// sample every frame. `false` ⇒ a `Deferred × Sdf` request degrades its LEGS to
+/// [`GeometryLegs::Both`] ([`RenderPathDegrade::DeferredLegDisableNotYetImplemented`]). See this
+/// module's doc for the full R3 rationale (incl. why the plan's literal `HAS_MESH` compiled
+/// variant was deliberately not built this rung).
+const DEFERRED_SDF_ONLY_IMPLEMENTED: bool = true;
+
+/// Whether `Deferred × Mesh` (the SDF leg off) has landed. Still `false` — the R3 audit found the
+/// marcher is the sole producer of `gViewT` for MESH-owned pixels too, and skipping the marcher
+/// entirely (the plan's O2 mesh-only design) leaves every `gViewT` consumer reading an unwritten
+/// image. See this module's doc for the full finding; this const stays `false` until an approved
+/// gViewT producer-replacement design lands. `false` ⇒ a `Deferred × Mesh` request degrades its
+/// LEGS to [`GeometryLegs::Both`] ([`RenderPathDegrade::DeferredLegDisableNotYetImplemented`]).
+const DEFERRED_MESH_ONLY_IMPLEMENTED: bool = false;
 
 // ---- RenderPath / GeometryLegs (the owner-set knobs; capability is structural) --------
 
@@ -459,9 +496,11 @@ pub enum RenderPathDegrade {
     /// (`Both`/`Sdf`) before the SDF-forward-march rung lands — collapsed to
     /// [`GeometryLegs::Mesh`].
     LegsCollapsedToMeshPreSdfForward,
-    /// `Deferred` was requested with a non-[`GeometryLegs::Both`] leg set (`Mesh`/`Sdf`) before
-    /// rung R3 lands the leg-disable goldens + the marcher's `HAS_MESH` compiled variant —
-    /// collapsed to [`GeometryLegs::Both`] (plan §H, R2 row).
+    /// `Deferred` was requested with a leg whose own per-leg flag has not landed —
+    /// collapsed to [`GeometryLegs::Both`]. As of rung R3, `Sdf` is landed
+    /// ([`DEFERRED_SDF_ONLY_IMPLEMENTED`]) so this fires only for `Mesh`
+    /// ([`DEFERRED_MESH_ONLY_IMPLEMENTED`] — blocked on the R3-audited `gViewT`
+    /// producer gap, see this module's doc).
     DeferredLegDisableNotYetImplemented,
 }
 
@@ -622,27 +661,29 @@ pub fn resolve_rules(
 /// "test the rule directly" discipline [`resolve_rules`] uses for the Rev-5 predicate.
 /// [`resolve_render_path`] is the ONLY caller that threads the real
 /// [`FORWARD_IMPLEMENTED`]/[`FORWARD_PLUS_IMPLEMENTED`]/[`VB_IMPLEMENTED`]/
-/// [`SDF_FORWARD_IMPLEMENTED`]/[`DEFERRED_LEG_DISABLE_IMPLEMENTED`] consts; a test can thread
-/// `true` early to exercise e.g. the VB device-cap degrade in isolation, before `VB_IMPLEMENTED`
-/// itself lands.
+/// [`SDF_FORWARD_IMPLEMENTED`]/[`DEFERRED_SDF_ONLY_IMPLEMENTED`]/[`DEFERRED_MESH_ONLY_IMPLEMENTED`]
+/// consts; a test can thread `true` early to exercise e.g. the VB device-cap degrade in
+/// isolation, before `VB_IMPLEMENTED` itself lands.
 ///
 /// Order: (1) an unimplemented path collapses to `Deferred`; (2) a `VisibilityBuffer` path that
 /// survived (1) but whose device lacks the geometry-table cap ALSO collapses to `Deferred`; (3)
-/// a FINAL `path == Deferred` (whether requested directly or reached via (1)/(2)) requesting a
-/// non-`Both` leg set before rung R3 lands collapses the legs to `Both`
-/// ([`RenderPathDegrade::DeferredLegDisableNotYetImplemented`], rung R2); (4) a FINAL
-/// `path != Deferred` requesting a non-`Mesh` leg set before the SDF-forward-march rung lands
-/// collapses the legs to `Mesh`. Rules (3) and (4) gate on COMPLEMENTARY `path == Deferred` /
-/// `path != Deferred` conditions, so at most one of them ever fires in a single call (see
-/// [`RenderPathDegradeLog`]'s doc for why the log never needs more than 2 slots). Never a panic
-/// — degrade-not-panic by construction.
+/// a FINAL `path == Deferred` (whether requested directly or reached via (1)/(2)) requesting
+/// `Mesh` before `deferred_mesh_only_implemented` lands, OR `Sdf` before
+/// `deferred_sdf_only_implemented` lands, collapses the legs to `Both`
+/// ([`RenderPathDegrade::DeferredLegDisableNotYetImplemented`] — rung R3 SPLIT the single R2 flag
+/// into one per leg, see this module's doc); (4) a FINAL `path != Deferred` requesting a
+/// non-`Mesh` leg set before the SDF-forward-march rung lands collapses the legs to `Mesh`. Rules
+/// (3) and (4) gate on COMPLEMENTARY `path == Deferred` / `path != Deferred` conditions, so at
+/// most one of them ever fires in a single call (see [`RenderPathDegradeLog`]'s doc for why the
+/// log never needs more than 2 slots). Never a panic — degrade-not-panic by construction.
 fn degrade_ladder(
     requested_path: RenderPath,
     requested_legs: GeometryLegs,
     caps: RenderPathDeviceCaps,
     path_implemented: bool,
     sdf_forward_implemented: bool,
-    deferred_leg_disable_implemented: bool,
+    deferred_mesh_only_implemented: bool,
+    deferred_sdf_only_implemented: bool,
 ) -> (RenderPath, GeometryLegs, RenderPathDegradeLog) {
     let mut degrades = RenderPathDegradeLog::default();
 
@@ -659,13 +700,16 @@ fn degrade_ladder(
     }
 
     let mut legs = requested_legs;
-    // Rung R2: fires ONLY when the FINAL path is Deferred (whether requested directly or
-    // reached via the path-level demotion above) — mutually exclusive with the SDF-forward
-    // legs-collapse rule below, which fires ONLY when the final path is NOT Deferred.
-    if matches!(path, RenderPath::Deferred)
-        && !matches!(legs, GeometryLegs::Both)
-        && !deferred_leg_disable_implemented
-    {
+    // Rung R3: fires ONLY when the FINAL path is Deferred (whether requested directly or
+    // reached via the path-level demotion above) AND the REQUESTED leg's own per-leg flag has
+    // not landed — mutually exclusive with the SDF-forward legs-collapse rule below, which
+    // fires ONLY when the final path is NOT Deferred.
+    let leg_not_yet_implemented = match legs {
+        GeometryLegs::Both => false,
+        GeometryLegs::Mesh => !deferred_mesh_only_implemented,
+        GeometryLegs::Sdf => !deferred_sdf_only_implemented,
+    };
+    if matches!(path, RenderPath::Deferred) && leg_not_yet_implemented {
         degrades.push(RenderPathDegrade::DeferredLegDisableNotYetImplemented);
         legs = GeometryLegs::Both;
     }
@@ -689,10 +733,10 @@ fn degrade_ladder(
 ///
 /// Applies the rung-staged [`degrade_ladder`] against the REQUESTED `(path, legs)` first (using
 /// the real [`FORWARD_IMPLEMENTED`]/[`FORWARD_PLUS_IMPLEMENTED`]/[`VB_IMPLEMENTED`]/
-/// [`SDF_FORWARD_IMPLEMENTED`]/[`DEFERRED_LEG_DISABLE_IMPLEMENTED`] consts), then computes every
-/// derived field via [`resolve_rules`] against the FINAL (post-degrade) `(path, legs)` — so e.g.
-/// `depth_kind`/`thin_aux`/`shadow` always describe what will ACTUALLY be recorded, never the
-/// owner's un-degraded request.
+/// [`SDF_FORWARD_IMPLEMENTED`]/[`DEFERRED_MESH_ONLY_IMPLEMENTED`]/[`DEFERRED_SDF_ONLY_IMPLEMENTED`]
+/// consts), then computes every derived field via [`resolve_rules`] against the FINAL
+/// (post-degrade) `(path, legs)` — so e.g. `depth_kind`/`thin_aux`/`shadow` always describe what
+/// will ACTUALLY be recorded, never the owner's un-degraded request.
 #[inline]
 pub fn resolve_render_path(
     cfg: &RenderPathConfig,
@@ -711,7 +755,8 @@ pub fn resolve_render_path(
         caps,
         path_implemented,
         SDF_FORWARD_IMPLEMENTED,
-        DEFERRED_LEG_DISABLE_IMPLEMENTED,
+        DEFERRED_MESH_ONLY_IMPLEMENTED,
+        DEFERRED_SDF_ONLY_IMPLEMENTED,
     );
     (resolve_rules(path, legs, consumers, caps), degrades)
 }
@@ -782,26 +827,29 @@ mod tests {
         assert_eq!(resolved.legs, GeometryLegs::Both);
     }
 
-    // ---- rung R2: Deferred leg-disable is not implemented until R3 --------------------
+    // ---- rung R3: Deferred x Sdf lands; Deferred x Mesh stays blocked ------------------
 
     #[test]
-    fn deferred_mesh_only_degrades_legs_to_both_before_r3() {
+    fn deferred_mesh_only_still_degrades_legs_to_both_at_r3() {
+        // The R3 audit found the marcher is the sole `gViewT` producer for MESH-owned pixels
+        // too (see this module's doc) -- `DEFERRED_MESH_ONLY_IMPLEMENTED` stays `false` until an
+        // approved producer-replacement design lands, so this leg keeps degrading.
         let cfg = RenderPathConfig { path: RenderPath::Deferred, legs: GeometryLegs::Mesh };
         let (resolved, degrades) = resolve_render_path(&cfg, RenderPathConsumers::default(), caps_ok());
         assert_eq!(resolved.path, RenderPath::Deferred);
-        assert_eq!(resolved.legs, GeometryLegs::Both, "Deferred leg-disable is not implemented until R3");
+        assert_eq!(resolved.legs, GeometryLegs::Both, "Deferred x Mesh stays blocked past R3 (gViewT gap)");
         let reasons: Vec<_> = degrades.reasons().collect();
         assert_eq!(reasons, [RenderPathDegrade::DeferredLegDisableNotYetImplemented]);
     }
 
     #[test]
-    fn deferred_sdf_only_degrades_legs_to_both_before_r3() {
+    fn deferred_sdf_only_no_longer_degrades_at_r3() {
         let cfg = RenderPathConfig { path: RenderPath::Deferred, legs: GeometryLegs::Sdf };
         let (resolved, degrades) = resolve_render_path(&cfg, RenderPathConsumers::default(), caps_ok());
         assert_eq!(resolved.path, RenderPath::Deferred);
-        assert_eq!(resolved.legs, GeometryLegs::Both, "Deferred leg-disable is not implemented until R3");
-        let reasons: Vec<_> = degrades.reasons().collect();
-        assert_eq!(reasons, [RenderPathDegrade::DeferredLegDisableNotYetImplemented]);
+        assert_eq!(resolved.legs, GeometryLegs::Sdf, "Deferred x Sdf lands at R3 -- no degrade");
+        assert!(degrades.is_clean());
+        assert!(!resolved.mesh_leg && resolved.sdf_leg);
     }
 
     // ---- VB-without-cap degrade (tested directly against the ladder, not gated on ------
@@ -815,7 +863,8 @@ mod tests {
             caps_missing(),
             true, // hypothetically landed, to exercise the device-cap rule in isolation
             true,
-            true, // isolate: the Deferred-leg-disable rule must not co-fire with this one
+            true, // isolate: the Deferred-leg-disable rules must not co-fire with this one
+            true,
         );
         assert_eq!(path, RenderPath::Deferred);
         assert_eq!(legs, GeometryLegs::Mesh);
@@ -829,6 +878,7 @@ mod tests {
             RenderPath::VisibilityBuffer,
             GeometryLegs::Mesh,
             caps_ok(),
+            true,
             true,
             true,
             true,
@@ -859,7 +909,7 @@ mod tests {
     fn non_mesh_legs_collapse_to_mesh_before_sdf_forward_lands() {
         for legs in [GeometryLegs::Both, GeometryLegs::Sdf] {
             let (path, resolved_legs, degrades) =
-                degrade_ladder(RenderPath::Forward, legs, caps_ok(), true, false, false);
+                degrade_ladder(RenderPath::Forward, legs, caps_ok(), true, false, false, false);
             assert_eq!(path, RenderPath::Forward);
             assert_eq!(resolved_legs, GeometryLegs::Mesh);
             let reasons: Vec<_> = degrades.reasons().collect();
@@ -870,7 +920,7 @@ mod tests {
     #[test]
     fn mesh_only_legs_never_collapse() {
         let (path, legs, degrades) =
-            degrade_ladder(RenderPath::Forward, GeometryLegs::Mesh, caps_ok(), true, false, false);
+            degrade_ladder(RenderPath::Forward, GeometryLegs::Mesh, caps_ok(), true, false, false, false);
         assert_eq!(path, RenderPath::Forward);
         assert_eq!(legs, GeometryLegs::Mesh);
         assert!(degrades.is_clean());
@@ -880,11 +930,30 @@ mod tests {
     fn legs_stay_as_requested_once_sdf_forward_lands() {
         for legs in [GeometryLegs::Both, GeometryLegs::Sdf, GeometryLegs::Mesh] {
             let (path, resolved_legs, degrades) =
-                degrade_ladder(RenderPath::ForwardPlus, legs, caps_ok(), true, true, true);
+                degrade_ladder(RenderPath::ForwardPlus, legs, caps_ok(), true, true, true, true);
             assert_eq!(path, RenderPath::ForwardPlus);
             assert_eq!(resolved_legs, legs);
             assert!(degrades.is_clean());
         }
+    }
+
+    // ---- rung R3: degrade_ladder direct — per-leg independence (Deferred) --------------
+
+    #[test]
+    fn deferred_ladder_degrades_only_the_not_yet_implemented_leg() {
+        // Mesh-only implemented, sdf-only not: a Mesh request stays; a Sdf request degrades.
+        let (path, legs, degrades) =
+            degrade_ladder(RenderPath::Deferred, GeometryLegs::Mesh, caps_ok(), true, false, true, false);
+        assert_eq!(path, RenderPath::Deferred);
+        assert_eq!(legs, GeometryLegs::Mesh);
+        assert!(degrades.is_clean());
+
+        let (path, legs, degrades) =
+            degrade_ladder(RenderPath::Deferred, GeometryLegs::Sdf, caps_ok(), true, false, true, false);
+        assert_eq!(path, RenderPath::Deferred);
+        assert_eq!(legs, GeometryLegs::Both);
+        let reasons: Vec<_> = degrades.reasons().collect();
+        assert_eq!(reasons, [RenderPathDegrade::DeferredLegDisableNotYetImplemented]);
     }
 
     // ---- has_mesh / has_sdf table --------------------------------------------------------

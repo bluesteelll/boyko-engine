@@ -33,11 +33,24 @@ pub(crate) struct GbufferPassPlan {
     /// `record_pass(raster)` — after this pass's dispatch wrote the draw columns.
     pub(crate) interp: Option<crate::framegraph::PassId>,
     /// The 3-MRT + depth mesh raster pass (sites 0/1). Multi-paradigm render-path plan, rung
-    /// R2 (Decision 2 / O1): `Some` iff [`GBufferScene::path_has_raster`] holds. Under Deferred
-    /// (the only reachable path today), the resolver's R2 guard
-    /// (`DEFERRED_LEG_DISABLE_IMPLEMENTED == false`) keeps `GeometryLegs` pinned to `Both`, so
-    /// this is `Some` on every current frame — byte-identical to the pre-R2 always-present pass.
+    /// R2 (Decision 2 / O1): `Some` iff [`GBufferScene::path_has_raster`] holds. Rung R3 lifted
+    /// `DEFERRED_SDF_ONLY_IMPLEMENTED`, so `Deferred × Sdf` now reaches here with this `None` —
+    /// see [`Self::mesh_depth_neutral_clear`] for the pass that replaces this one's depth-clear
+    /// producer on that leg. `Deferred × Mesh` still degrades to `Both` (the R3-audited `gViewT`
+    /// producer gap), so this is `Some` on every current frame EXCEPT `Deferred × Sdf`.
     pub(crate) raster: Option<crate::framegraph::PassId>,
+    /// Multi-paradigm render-path plan, rung R3 (§E leg-disable / the O2 audit finding) — the
+    /// mesh-depth NEUTRAL CLEAR pass: `Deferred × Sdf`'s replacement for [`Self::raster`]'s
+    /// depth-clear producer. `Some` iff [`GBufferScene::path_has_mesh_depth_neutral_clear`]
+    /// holds (`== sdf_leg && !mesh_leg`, mutually exclusive with [`Self::raster`] by
+    /// construction). A depth-ONLY dynamic-rendering scope (no color attachments, no draw) that
+    /// CLEARs the shared depth image to the far-plane sentinel, giving the marcher's
+    /// (byte-UNCHANGED) `gDepth.Load` a deterministic "no mesh in the scene" reading every
+    /// pixel — the SAME code path an entirely mesh-less scene already exercises byte-identically
+    /// today. See [`GBufferScene::path_has_mesh_depth_neutral_clear`]'s doc for the full
+    /// rationale (incl. why this reuses the existing marcher `.spv` unchanged rather than a new
+    /// compiled `HAS_MESH` variant).
+    pub(crate) mesh_depth_neutral_clear: Option<crate::framegraph::PassId>,
     /// The async light-table re-upload (`scene.light_dirty && light_upload_bytes>0`).
     pub(crate) light_upload: Option<crate::framegraph::PassId>,
     /// The P0 coarse tile-cull (`scene.coarse.is_some()`).
@@ -45,8 +58,8 @@ pub(crate) struct GbufferPassPlan {
     /// The SDF marcher pass. Its `record_pass` emits the collapsed input transitions
     /// (depth→sampled, color→general, lit/viewt first-touch — sites 3/3b/4). Multi-paradigm
     /// render-path plan, rung R2 (Decision 2 / O1): `Some` iff
-    /// [`GBufferScene::path_has_marcher`] holds — see [`Self::raster`]'s doc for the R2 guard
-    /// that keeps this `Some` on every currently reachable frame.
+    /// [`GBufferScene::path_has_marcher`] holds — see [`Self::raster`]'s doc for the R3 guard
+    /// state.
     pub(crate) marcher: Option<crate::framegraph::PassId>,
     /// The SSAO pass (`scene.ssao.is_some()`).
     pub(crate) ssao: Option<crate::framegraph::PassId>,
@@ -484,6 +497,27 @@ impl Renderer<'_> {
         // The marcher/SSAO storage-image read|write access on the G-buffer attributes.
         const RW: u32 = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
 
+        // Multi-paradigm render-path plan, rung R3 (P1 fix invariant guard — orchestrator
+        // architecture decision): mesh-shadow producers (CSM cascade depth, the punctual
+        // spot/point atlas depth, and under `hwrt` the per-frame TLAS pack/build + the
+        // shadow_vis/à-trous/temporal denoise chain) are MESH-LEG-OWNED — they rasterize/trace
+        // MESH casters only, never SDF ones (the SDF leg's shadow is the marcher's baked soft
+        // march). `GpuSceneBundles::scene()` (`boyko_app::gpu_scene`) is the single
+        // scene-assembly seam that suppresses them to `None` under `!mesh_leg`; this
+        // `debug_assert!` is the framegraph-side belt-and-braces check that the seam was not
+        // missed (a scene fixture assembled elsewhere — e.g. a hand-built test harness — that
+        // forgets the gate trips here instead of silently rasterizing invisible mesh shadows
+        // into unused cascade/atlas targets).
+        debug_assert!(
+            scene.resolved_render_path.mesh_leg || (scene.csm.is_none() && scene.atlas_punctual.is_none()),
+            "invariant: mesh-shadow activation without mesh leg (scene-assembly gate missed)"
+        );
+        #[cfg(feature = "hwrt")]
+        debug_assert!(
+            scene.resolved_render_path.mesh_leg || (scene.tlas.is_none() && scene.shadow.is_none()),
+            "invariant: mesh-shadow activation without mesh leg (scene-assembly gate missed)"
+        );
+
         let g = &mut self.frame_graph;
         g.reset();
 
@@ -817,11 +851,12 @@ impl Renderer<'_> {
         // Pass `raster` (sites 0/1): the 3-MRT G-buffer + depth. Multi-paradigm render-path
         // plan, rung R2 (Decision 2 / O1): gated on `scene.path_has_raster()` — the SAME
         // predicate `record_gbuffer`'s raster begin/end-rendering block checks (a
-        // `debug_assert_eq!` there guards the two never diverging). Under the R2 resolver
-        // guard (`DEFERRED_LEG_DISABLE_IMPLEMENTED == false`) `GeometryLegs` stays pinned to
-        // `Both` under `Deferred`, so this is `true` on every currently reachable frame — the
-        // declaration order and every `image_access`/`buffer_access` call below are BYTE-FOR-
-        // BYTE unchanged from the pre-R2 unconditional form, just nested one level deeper.
+        // `debug_assert_eq!` there guards the two never diverging). Rung R3 lifted
+        // `DEFERRED_SDF_ONLY_IMPLEMENTED`, so `Deferred × Sdf` now reaches here `false` — see
+        // `mesh_depth_neutral_clear` below for its depth-clear replacement. Every other
+        // currently reachable `Deferred` config still has `mesh_leg == true`, so the
+        // declaration order and every `image_access`/`buffer_access` call below stay BYTE-FOR-
+        // BYTE unchanged from the pre-R2 unconditional form there.
         let raster = if scene.path_has_raster() {
             let p = g.add_pass("raster");
             // Pillar B B3 (refined-B): when the interp pass ran, the raster VS READS the SHARED
@@ -882,6 +917,35 @@ impl Renderer<'_> {
                     SubRange::COLOR,
                 );
             }
+            g.image_access(
+                depth,
+                FRAG,
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                SubRange::DEPTH,
+            );
+            Some(p)
+        } else {
+            None
+        };
+
+        // Pass `mesh_depth_neutral_clear` (§E leg-disable / the R3 O2 audit finding): under
+        // `Deferred × Sdf` the raster pass above is skipped, so NOTHING transitions/clears the
+        // shared depth image the marcher samples at binding 1 (`gDepth`) — without a
+        // replacement the marcher's `.Load` would read UNDEFINED (garbage) depth, making
+        // `has_mesh` effectively random per pixel instead of universally `false` (the correct
+        // "no mesh in the scene" classification the marcher already handles byte-identically,
+        // see `sdf_gbuffer_composite.hlsl`'s own 0%-gate doc). This depth-ONLY clear pass (no
+        // color attachments, no draw) reproduces EXACTLY the depth half of the raster pass's own
+        // clear (CLEAR to the far-plane sentinel, `DEPTH_ATTACHMENT_OPTIMAL`), so the marcher
+        // deterministically reads "no mesh" for every pixel — ZERO shader changes. `Some` iff
+        // `scene.path_has_mesh_depth_neutral_clear()` — the SAME predicate `record_gbuffer`'s
+        // depth-only begin/end-rendering block checks (W1 parity, mirroring `raster`/`marcher`).
+        // Mutually exclusive with `raster` by construction (raster iff mesh_leg; this iff
+        // sdf_leg && !mesh_leg), so the two never both fire and depth has exactly one producer
+        // every frame.
+        let mesh_depth_neutral_clear = if scene.path_has_mesh_depth_neutral_clear() {
+            let p = g.add_pass("mesh_depth_neutral_clear");
             g.image_access(
                 depth,
                 FRAG,
@@ -1565,6 +1629,7 @@ impl Renderer<'_> {
         self.gbuffer_pass_plan = Some(GbufferPassPlan {
             interp,
             raster,
+            mesh_depth_neutral_clear,
             light_upload,
             coarse,
             marcher,

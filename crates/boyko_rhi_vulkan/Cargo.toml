@@ -97,3 +97,11 @@ boyko-input = { path = "../boyko_input" }
 # line makes `boyko_rhi_vulkan::goldens::*` available to every integration test
 # (and only there) without shipping the host mirrors in a default/production build.
 boyko_rhi_vulkan = { path = ".", features = ["goldens"] }
+# Test-only (multi-paradigm render-path plan, rung R3, code-review P2-2). `boyko-render`'s
+# NORMAL dependency graph already runs the other way (`boyko-render` depends on this crate),
+# so this is a dev-dependency BACK-EDGE — Cargo explicitly supports this pattern (dev-deps are
+# excluded from the library's own dependency resolution, so no real cycle exists for the
+# shipped artifact). Lets `tests/window_present_gbuffer.rs`'s R3 leg-disable golden drive the
+# REAL boot resolver (`resolve_render_path`) instead of hand-building a `ResolvedRenderPathGpu`,
+# covering the config -> resolver -> carrier -> frame seam end-to-end.
+boyko-render = { path = "../boyko_render" }
