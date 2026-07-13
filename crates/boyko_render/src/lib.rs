@@ -230,6 +230,20 @@ pub mod shadow_denoise_config;
 /// HW-RT Rung 3a Step 1 — the [`ShadowDenoisePlugin`](shadow_denoise_plugin::ShadowDenoisePlugin)
 /// that seeds the config substrate and schedules the cold resolve single-writer.
 pub mod shadow_denoise_plugin;
+/// Multi-paradigm render-path plan, rung R1 — the config surface + boot-lock resolver: the
+/// owner-set [`RenderPathConfig`](render_path_config::RenderPathConfig)
+/// ([`RenderPath`](render_path_config::RenderPath) / [`GeometryLegs`](render_path_config::GeometryLegs)),
+/// its derived [`ResolvedRenderPath`](render_path_config::ResolvedRenderPath) carrier (Decision
+/// 1: resolved exactly ONCE, at boot — no per-frame policy system), the pure
+/// [`resolve_render_path`](render_path_config::resolve_render_path) entry point (Rev 5's single
+/// `pre_light_consumers` predicate), and the [`DepthKind`](render_path_config::DepthKind) /
+/// [`ThinAuxMask`](render_path_config::ThinAuxMask) / [`ShadowSources`](render_path_config::ShadowSources)
+/// sub-vocabulary.
+pub mod render_path_config;
+/// Multi-paradigm render-path plan, rung R1 — the
+/// [`RenderPathPlugin`](render_path_plugin::RenderPathPlugin) that seeds the config substrate.
+/// No per-frame system (Decision 1 — see [`render_path_config`]'s module doc).
+pub mod render_path_plugin;
 /// Host plan R7 — the SDF instance path: the per-entity
 /// [`SdfPrimitive`](sdf_edit::SdfPrimitive) component (an `SdfEdit` carrier), the reused
 /// [`SdfEditStaging`](sdf_edit::SdfEditStaging) gather scratch, the one-shot startup
@@ -340,6 +354,12 @@ pub use shadow_denoise_config::{
     resolve_temporal_shadow_policy,
 };
 pub use shadow_denoise_plugin::ShadowDenoisePlugin;
+pub use render_path_config::{
+    DepthKind, GeometryLegs, RenderPath, RenderPathConfig, RenderPathConsumers,
+    RenderPathDegrade, RenderPathDegradeLog, RenderPathDeviceCaps, ResolvedRenderPath,
+    ShadowSources, ThinAuxMask, resolve_render_path, resolve_rules,
+};
+pub use render_path_plugin::RenderPathPlugin;
 // HW-RT rung R1: re-export `RtTier` (defined in `boyko_rhi_vulkan::device`) since the
 // crate surfaces the ray-caps tier (`RayCaps`) — a consumer that fills `RayCaps` from a
 // device query gets the tier type from here.

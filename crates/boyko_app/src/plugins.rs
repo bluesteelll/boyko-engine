@@ -20,7 +20,7 @@ use boyko_render::MotionCamState;
 use boyko_render::light_system::LightTableStaging;
 use boyko_render::{
     AssetRefcountPlugin, CsmCasterScratch, CsmPlugin, LightingConfig, LightingPlugin,
-    MeshRenderScratch, RayPlugin, Render3dPlugin, SdfPlugin, ShadowAtlasPlugin,
+    MeshRenderScratch, RayPlugin, Render3dPlugin, RenderPathPlugin, SdfPlugin, ShadowAtlasPlugin,
     ShadowDenoisePlugin, SsaoPlugin, add_gpu_transform_pack, gather_mesh_draws,
     gather_shadow_casters, snap_apply, sync_csm_light_gate, sync_punctual_light_gate,
     sync_ssao_light_gate,
@@ -229,6 +229,15 @@ impl Plugin for EnginePlugins {
         // The default `AaMode::Off` keeps every host world byte-identical (`scene.aa` stays
         // `None`), so composing it unconditionally is safe.
         app.add_plugin(boyko_render::AaPlugin);
+
+        // Multi-paradigm render-path plan, rung R1 — `RenderPathPlugin`: seeds the owner-set
+        // `RenderPathConfig` (default `Deferred + Both`, the byte-identity anchor) + its derived
+        // `ResolvedRenderPath`. UNLIKE `AaPlugin`/`SsaoPlugin` above it registers NO per-frame
+        // system (Decision 1 — path/legs are a ONE-TIME boot commitment, never re-derived per
+        // frame); `boyko_app::runner` calls `resolve_render_path` directly at boot and overrides
+        // this plugin's default, the SAME `DdgiCaps`/`RayCaps` override precedent. R1 is
+        // dead-but-threaded: nothing downstream reads the resolved carrier yet.
+        app.add_plugin(RenderPathPlugin);
 
         // The R7 SDF instance path (composed by DEFAULT): inserts the
         // `SdfEditStaging` gather scratch and registers the one-shot startup

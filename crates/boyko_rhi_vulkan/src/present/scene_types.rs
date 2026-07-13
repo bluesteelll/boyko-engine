@@ -935,6 +935,81 @@ pub struct TlasBuildActivation<'a> {
     pub count: u32,
 }
 
+/// Multi-paradigm render-path plan, rung R1 — a plain POD mirror of
+/// `boyko_render::render_path_config::ResolvedRenderPath`, carried across the
+/// `boyko_render` → `boyko_rhi_vulkan` dependency-DIRECTION seam: this crate sits BELOW
+/// `boyko_render` in the dependency graph (`boyko_render` depends on `boyko_rhi_vulkan`, never
+/// the reverse — see `boyko_render`'s crate-root doc), so it cannot NAME that type — the SAME
+/// reason `AaMode`/`ResolvedSsao` never appear on [`GBufferScene`] directly.
+/// `boyko_app::gpu_scene::GpuSceneBundles::scene` converts at the frame-assembly seam (the
+/// `aa_mode: AaMode` parameter → `matches!`-derived `Option<AaActivation>` fields precedent),
+/// except this carrier has no RHI resources to select yet (R1 wires nothing downstream), so the
+/// conversion here is a plain field-by-field copy into primitive/enum-discriminant form.
+///
+/// # R1 status — DEAD-BUT-THREADED
+///
+/// Nothing in this crate reads this field yet (R2 wires the per-path declarator dispatch). Its
+/// presence is a zero-behavior-change plumbing rung: threading the boot-committed render-path
+/// selection down to the frame-assembly seam before any consumer exists, so R2 only ADDS reads,
+/// never a new write site. `#[repr(C)]`, `Copy` — mirrors `ResolvedRenderPath`'s own shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct ResolvedRenderPathGpu {
+    /// `RenderPath` discriminant (`Deferred = 0`, `Forward = 1`, `ForwardPlus = 2`,
+    /// `VisibilityBuffer = 3`).
+    pub path: u32,
+    /// `GeometryLegs` discriminant (`Both = 0`, `Mesh = 1`, `Sdf = 2`).
+    pub legs: u32,
+    /// `ResolvedRenderPath::mesh_leg`.
+    pub mesh_leg: bool,
+    /// `ResolvedRenderPath::sdf_leg`.
+    pub sdf_leg: bool,
+    /// `ResolvedRenderPath::sdf_forward_marched`.
+    pub sdf_forward_marched: bool,
+    /// `ResolvedRenderPath::needs_depth_prepass`.
+    pub needs_depth_prepass: bool,
+    /// `ResolvedRenderPath::prepass_writes_motion`.
+    pub prepass_writes_motion: bool,
+    /// `ResolvedRenderPath::mesh_geo_shade_split`.
+    pub mesh_geo_shade_split: bool,
+    /// `ResolvedRenderPath::sdf_geo_shade_split`.
+    pub sdf_geo_shade_split: bool,
+    /// `ResolvedRenderPath::sdf_surface_cache`.
+    pub sdf_surface_cache: bool,
+    /// `ResolvedRenderPath::vb_geometry_table`.
+    pub vb_geometry_table: bool,
+    /// `DepthKind` discriminant (`CustomLinear = 0`, `HardwareReverseZ = 1`).
+    pub depth_kind: u32,
+    /// `ThinAuxMask::bits()`.
+    pub thin_aux: u32,
+    /// `ShadowSources::bits()`.
+    pub shadow: u32,
+}
+
+impl Default for ResolvedRenderPathGpu {
+    /// `Deferred + Both`, every derived flag off, `depth_kind = CustomLinear` — the byte-identity
+    /// anchor, matching `boyko_render::render_path_config::ResolvedRenderPath::default()`.
+    #[inline]
+    fn default() -> Self {
+        Self {
+            path: 0,
+            legs: 0,
+            mesh_leg: true,
+            sdf_leg: true,
+            sdf_forward_marched: false,
+            needs_depth_prepass: false,
+            prepass_writes_motion: false,
+            mesh_geo_shade_split: false,
+            sdf_geo_shade_split: false,
+            sdf_surface_cache: false,
+            vb_geometry_table: false,
+            depth_kind: 0,
+            thin_aux: 0,
+            shadow: 0,
+        }
+    }
+}
+
 pub struct GBufferScene<'a> {
     /// The mesh-raster graphics pipeline (pass A). Render P5-r0: a 3-MRT G-buffer
     /// PRODUCER — the fronto-parallel quad is drawn into the D32 depth image AND the three
@@ -1770,6 +1845,13 @@ pub struct GBufferScene<'a> {
     /// TEXTURED pipeline is selected. `Some` iff the boot-time `BindlessTextureTable` create
     /// succeeded (`boyko_render::bindless::BindlessTextureTable::new` is fallible).
     pub bindless_set: Option<VkDescriptorSet>,
+    /// Multi-paradigm render-path plan, rung R1: the boot-committed render-path selection,
+    /// threaded down from `boyko_app::runner`'s ONE-TIME `resolve_render_path` call (Decision
+    /// 1 — never re-derived per frame, unlike `aa`/`ssao` above). DEAD-BUT-THREADED: nothing in
+    /// this crate reads it yet (R2 wires the per-path declarator dispatch). See
+    /// [`ResolvedRenderPathGpu`]'s doc for the `boyko_render` → `boyko_rhi_vulkan` boundary
+    /// crossing.
+    pub resolved_render_path: ResolvedRenderPathGpu,
 }
 
 impl GBufferScene<'_> {

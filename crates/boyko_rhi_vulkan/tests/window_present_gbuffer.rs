@@ -89,7 +89,7 @@ use boyko_rhi_vulkan::swapchain::{
     BrickActivation, CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
     GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferFrame,
     GBufferMeshDraw, GBufferScene, InterpActivation, PASS_COUNT, PunctualDepthActivation, Renderer,
-    SsaoActivation, Surface, Swapchain, TimestampCollector,
+    ResolvedRenderPathGpu, SsaoActivation, Surface, Swapchain, TimestampCollector,
 };
 use boyko_rhi_vulkan::window::{CapturedMsg, Window};
 
@@ -2449,6 +2449,10 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         raster_pipeline_tex: None,
         tex_bind_group: None,
         bindless_set: None,
+        // Multi-paradigm render-path plan, rung R1: dead-but-threaded — this harness has no
+        // ECS `ResolvedRenderPath` to convert, so it carries the byte-identity default
+        // (Deferred + Both, every derived flag off).
+        resolved_render_path: ResolvedRenderPathGpu::default(),
     };
 
     // The composite's native size — drives the G-buffer alloc + the 1:1 top-left present.
@@ -3410,6 +3414,10 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         raster_pipeline_tex: None,
         tex_bind_group: None,
         bindless_set: None,
+        // Multi-paradigm render-path plan, rung R1: dead-but-threaded — this harness has no
+        // ECS `ResolvedRenderPath` to convert, so it carries the byte-identity default
+        // (Deferred + Both, every derived flag off).
+        resolved_render_path: ResolvedRenderPathGpu::default(),
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -8166,6 +8174,10 @@ fn run_showcase_body_ddgi(
         raster_pipeline_tex: None,
         tex_bind_group: None,
         bindless_set: None,
+        // Multi-paradigm render-path plan, rung R1: dead-but-threaded — this harness has no
+        // ECS `ResolvedRenderPath` to convert, so it carries the byte-identity default
+        // (Deferred + Both, every derived flag off).
+        resolved_render_path: ResolvedRenderPathGpu::default(),
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };
@@ -9534,6 +9546,10 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         raster_pipeline_tex: None,
         tex_bind_group: None,
         bindless_set: None,
+        // Multi-paradigm render-path plan, rung R1: dead-but-threaded — this harness has no
+        // ECS `ResolvedRenderPath` to convert, so it carries the byte-identity default
+        // (Deferred + Both, every derived flag off).
+        resolved_render_path: ResolvedRenderPathGpu::default(),
     };
 
     let present_extent = VkExtent2D { width: COMPOSITE_W, height: COMPOSITE_H };

@@ -10,6 +10,7 @@
 //! D8); the runner's non-Windows arm exits gracefully before this module is
 //! ever needed.
 
+use boyko_render::ResolvedRenderPath;
 use boyko_rhi::Format;
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::ffi::{VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM};
@@ -111,6 +112,15 @@ pub(crate) struct WindowHost {
     /// boot) — ALWAYS the render extent `aa_out` uses (native, never 2×), regardless of
     /// [`Self::ssaa_armed`]. Equals [`Self::composite_extent`] when SSAA is not armed.
     pub(crate) native_extent: (u32, u32),
+    /// Multi-paradigm render-path plan, rung R1: the boot-committed render-path selection
+    /// (Decision 1) — resolved exactly ONCE by `run_windowed`, right after this struct boots
+    /// (device caps + the World's config Resources are both live by then), and written into
+    /// this field (the `ssaa_armed` precedent: a host-authoritative boot commitment, never a
+    /// per-frame `World` read). Seeded to [`ResolvedRenderPath::default`] here (`Deferred +
+    /// Both`, the byte-identity anchor) so the field is never observed uninitialized between
+    /// [`Self::boot`] returning and the runner's boot-lock write. Threaded into
+    /// `GpuSceneBundles::scene()` every frame; DEAD-BUT-THREADED at R1 (nothing reads it yet).
+    pub(crate) resolved_render_path: ResolvedRenderPath,
     /// Per-in-flight-slot record of the `LightTableGeneration` whose staged
     /// bytes were last written into that slot's light staging (host plan D5/R4).
     /// Seeded `u64::MAX` (≠ any real generation) so BOTH slots upload the real
@@ -229,6 +239,7 @@ impl WindowHost {
             composite_extent,
             ssaa_armed,
             native_extent,
+            resolved_render_path: ResolvedRenderPath::default(),
             // u64::MAX ≠ any real generation ⇒ both slots upload the ECS light
             // table on their first frames (host plan D5/R4).
             light_uploaded_gen: [u64::MAX; FRAMES_IN_FLIGHT],

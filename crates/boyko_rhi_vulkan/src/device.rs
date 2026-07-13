@@ -200,6 +200,22 @@ pub struct DeviceCaps {
     /// always has this `true` — [`BootError::BindlessUnsupported`] rejects a GPU
     /// lacking any of the 5.
     pub bindless_capable: bool,
+    /// Multi-paradigm render-path plan, Decision 0 / rung R1: whether the GPU advertises
+    /// `VkPhysicalDeviceDescriptorIndexingFeatures::shaderStorageBufferArrayNonUniformIndexing`
+    /// — the `VisibilityBuffer` render path's bindless per-mesh geometry table needs it to
+    /// index `gMeshVerts[]`/`gMeshIndices[]` by a wave-non-uniform `mesh_id`
+    /// (`NonUniformResourceIndex`). RECORDED ONLY (NO boot fail-fast, unlike
+    /// [`bindless_capable`](Self::bindless_capable)'s 5-bit group): VisibilityBuffer is
+    /// opt-in and near-universal-but-not-guaranteed, so an unsupported device degrades the
+    /// path to `Deferred` at boot (`boyko_render::render_path_config::resolve_render_path`'s
+    /// `RenderPathDeviceCaps` input — this crate sits BELOW `boyko_render` in the dependency
+    /// graph, so it cannot doc-link that type), never a boot failure. Read from the SAME
+    /// `descriptor_indexing` features-2 query
+    /// [`bindless_capable`](Self::bindless_capable) already runs (`query_device_caps`); NOT
+    /// separately enabled at `create_device` (R1 exposes the QUERY only — no consumer requests
+    /// the feature yet, so enabling an unsupported bit at device-create would be a real,
+    /// untested boot-behavior change for zero benefit this rung).
+    pub storage_buffer_array_non_uniform_indexing_ok: bool,
     /// Whether `R8G8B8A8_UNORM` supports `STORAGE_IMAGE` under OPTIMAL tiling (the P1b
     /// G-buffer color images are compute-store targets). Always `true` on a booted
     /// context — boot fails with [`BootError::GbufferStorageFormatUnsupported`]
@@ -2763,6 +2779,11 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         && descriptor_indexing.descriptor_binding_partially_bound == VK_TRUE
         && descriptor_indexing.descriptor_binding_variable_descriptor_count == VK_TRUE
         && descriptor_indexing.descriptor_binding_sampled_image_update_after_bind == VK_TRUE;
+    // Multi-paradigm render-path plan, Decision 0 / rung R1: read from the SAME
+    // `descriptor_indexing` local the 5-bit `bindless_capable` group above already queried —
+    // no second `vkGetPhysicalDeviceFeatures2` call needed.
+    let storage_buffer_array_non_uniform_indexing_ok =
+        descriptor_indexing.shader_storage_buffer_array_non_uniform_indexing == VK_TRUE;
 
     // --- gbuffer_storage_format_ok: STORAGE_IMAGE on R8G8B8A8_UNORM, OPTIMAL tiling. ---
     let mut format_props = VkFormatProperties {
@@ -3020,6 +3041,7 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
 
     DeviceCaps {
         bindless_capable,
+        storage_buffer_array_non_uniform_indexing_ok,
         gbuffer_storage_format_ok,
         viewt_storage_format_ok,
         gbuffer_color_attachment_format_ok,
@@ -3521,6 +3543,7 @@ mod tests {
     fn rt_caps(ray_query: bool, ray_reorder: bool) -> DeviceCaps {
         DeviceCaps {
             bindless_capable: false,
+            storage_buffer_array_non_uniform_indexing_ok: false,
             gbuffer_storage_format_ok: true,
             viewt_storage_format_ok: true,
             gbuffer_color_attachment_format_ok: true,

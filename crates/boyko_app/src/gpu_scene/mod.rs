@@ -54,8 +54,8 @@ use boyko_rhi_vulkan::rhi_impl::{
 use boyko_rhi_vulkan::swapchain::{
     AaActivation, CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
     GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene,
-    InterpActivation, PunctualDepthActivation, SmaaActivation, SsaaActivation, SsaoActivation,
-    TaaActivation,
+    InterpActivation, PunctualDepthActivation, ResolvedRenderPathGpu, SmaaActivation,
+    SsaaActivation, SsaoActivation, TaaActivation,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::accel::BoundAccelStruct;
@@ -294,6 +294,35 @@ fn pack_light_table(header: &LightHeaderGpu, lights: &[GpuLight]) -> Vec<u32> {
         }
     }
     words
+}
+
+/// Multi-paradigm render-path plan, rung R1: converts the `boyko_render::ResolvedRenderPath`
+/// boot carrier into its plain-POD [`ResolvedRenderPathGpu`] mirror for [`GBufferScene`] —
+/// THE `boyko_render` → `boyko_rhi_vulkan` boundary-crossing seam (see
+/// [`GpuSceneBundles::scene`]'s `resolved_render_path` param doc for why this is a free fn,
+/// not a `From` impl: neither `ResolvedRenderPath` nor `ResolvedRenderPathGpu` is local to
+/// this crate, so a `From` impl anywhere in `boyko_app` would violate the orphan rule).
+/// Field-by-field, no allocation, no branch beyond the `#[repr(u32)]`/newtype `as`/`.bits()`
+/// casts — mirrors how `pack_ddgi_update_ubo` packs a `boyko_render` carrier into its device
+/// byte-mirror.
+#[inline]
+fn to_gpu_resolved_render_path(r: &boyko_render::ResolvedRenderPath) -> ResolvedRenderPathGpu {
+    ResolvedRenderPathGpu {
+        path: r.path as u32,
+        legs: r.legs as u32,
+        mesh_leg: r.mesh_leg,
+        sdf_leg: r.sdf_leg,
+        sdf_forward_marched: r.sdf_forward_marched,
+        needs_depth_prepass: r.needs_depth_prepass,
+        prepass_writes_motion: r.prepass_writes_motion,
+        mesh_geo_shade_split: r.mesh_geo_shade_split,
+        sdf_geo_shade_split: r.sdf_geo_shade_split,
+        sdf_surface_cache: r.sdf_surface_cache,
+        vb_geometry_table: r.vb_geometry_table,
+        depth_kind: r.depth_kind as u32,
+        thin_aux: r.thin_aux.bits(),
+        shadow: r.shadow.bits(),
+    }
 }
 
 /// HW-RT Rung 3b step 5a: the MESH motion-vector raster resources — the `gbuffer_mrt_mv`
@@ -3027,6 +3056,15 @@ impl GpuSceneBundles {
         // `SsaoActivation::atrous_levels`; `0` ⇒ the recorder dispatches NO à-trous pass (the
         // resolve reads the raw gather — the byte-identical pre-dispatch-wiring path).
         ssao_atrous_levels: u32,
+        // Multi-paradigm render-path plan, rung R1: the boot-committed render-path selection
+        // (`WindowHost::resolved_render_path` — Decision 1, resolved ONCE, never re-derived
+        // per frame, unlike every other arming input above). Converted at THIS seam into the
+        // plain-POD [`ResolvedRenderPathGpu`] (`boyko_render` → `boyko_rhi_vulkan` dependency
+        // direction — this crate cannot see `boyko_rhi_vulkan` types the other way around, so
+        // the conversion cannot live as a `From` impl in either crate; a free fn here is the
+        // only orphan-rule-clean seam). DEAD-BUT-THREADED: nothing reads `GBufferScene::
+        // resolved_render_path` yet (R2 wires the declarator dispatch).
+        resolved_render_path: boyko_render::ResolvedRenderPath,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -3530,6 +3568,9 @@ impl GpuSceneBundles {
             bindless_set: any_textured_material
                 .then(|| self.tex.as_ref().map(|t| t.bindless_set))
                 .flatten(),
+            // Multi-paradigm render-path plan, rung R1: the plain-POD conversion (see this
+            // fn's `resolved_render_path` param doc for why it cannot be a `From` impl).
+            resolved_render_path: to_gpu_resolved_render_path(&resolved_render_path),
         }
     }
 
@@ -3894,5 +3935,57 @@ impl DrawListScratch {
         self.buf = unsafe {
             core::mem::transmute::<Vec<GBufferMeshDraw<'_>>, Vec<GBufferMeshDraw<'static>>>(v)
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use boyko_render::{
+        GeometryLegs, RenderPath, RenderPathConsumers, RenderPathDeviceCaps, ResolvedRenderPath,
+        resolve_rules,
+    };
+
+    use super::*;
+
+    /// P2-1(a): the 0%-gate carrier converts to the `ResolvedRenderPathGpu` 0%-gate default —
+    /// a never-resolved world's `GBufferScene::resolved_render_path` matches what a booted world
+    /// resolving the default `RenderPathConfig` would ALSO produce (byte-identity anchor).
+    #[test]
+    fn to_gpu_resolved_render_path_default_matches_gpu_default() {
+        let default_resolved = ResolvedRenderPath::default();
+        assert_eq!(to_gpu_resolved_render_path(&default_resolved), ResolvedRenderPathGpu::default());
+    }
+
+    /// P2-1(b): a rich, non-default carrier (Forward + SSAO + shadow-temporal — both pre-light
+    /// consumers armed, so `needs_depth_prepass`/`prepass_writes_motion`/`thin_aux` are all
+    /// non-trivially set) round-trips through [`to_gpu_resolved_render_path`] field-for-field.
+    /// Built via `resolve_rules` (not a hand-written literal) so the derived fields are a
+    /// REALISTIC, internally-consistent combination, not a possibly-inconsistent guess.
+    #[test]
+    fn to_gpu_resolved_render_path_round_trips_a_non_default_carrier() {
+        let consumers =
+            RenderPathConsumers { ssao_on: true, shadow_temporal_on: true, ..RenderPathConsumers::default() };
+        let caps = RenderPathDeviceCaps::new(true);
+        let resolved = resolve_rules(RenderPath::Forward, GeometryLegs::Mesh, consumers, caps);
+
+        // Sanity: this carrier is genuinely non-default (both Decision-8 flags fired).
+        assert!(resolved.needs_depth_prepass);
+        assert!(resolved.prepass_writes_motion);
+
+        let gpu = to_gpu_resolved_render_path(&resolved);
+        assert_eq!(gpu.path, resolved.path as u32);
+        assert_eq!(gpu.legs, resolved.legs as u32);
+        assert_eq!(gpu.mesh_leg, resolved.mesh_leg);
+        assert_eq!(gpu.sdf_leg, resolved.sdf_leg);
+        assert_eq!(gpu.sdf_forward_marched, resolved.sdf_forward_marched);
+        assert_eq!(gpu.needs_depth_prepass, resolved.needs_depth_prepass);
+        assert_eq!(gpu.prepass_writes_motion, resolved.prepass_writes_motion);
+        assert_eq!(gpu.mesh_geo_shade_split, resolved.mesh_geo_shade_split);
+        assert_eq!(gpu.sdf_geo_shade_split, resolved.sdf_geo_shade_split);
+        assert_eq!(gpu.sdf_surface_cache, resolved.sdf_surface_cache);
+        assert_eq!(gpu.vb_geometry_table, resolved.vb_geometry_table);
+        assert_eq!(gpu.depth_kind, resolved.depth_kind as u32);
+        assert_eq!(gpu.thin_aux, resolved.thin_aux.bits());
+        assert_eq!(gpu.shadow, resolved.shadow.bits());
     }
 }

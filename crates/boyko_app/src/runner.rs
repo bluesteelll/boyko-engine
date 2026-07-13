@@ -392,6 +392,79 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
         }
     }
 
+    // Multi-paradigm render-path plan, rung R1 (Decision 1 — the `ssaa_armed` boot-lock
+    // precedent): resolve `RenderPathConfig` + the boot-time pre-light-consumer snapshot +
+    // the device's VB geometry-table capability into ONE immutable `ResolvedRenderPath`,
+    // exactly once, before the frame loop starts (AFTER the `BOYKO_SHADOW_DENOISE` env
+    // override above, so the shadow-denoise consumer snapshot reflects the flight-check
+    // knob). `world.try_resource` degrades every missing config Resource to its structural
+    // "off" default (a host that composes a SUBSET of `EnginePlugins`'s plugins never
+    // panics here) — the SAME graceful pattern `ddgi_enabled`/`terminator_wrap` use inside
+    // the frame loop. R1 is dead-but-threaded: `host.resolved_render_path` is written below
+    // but nothing downstream reads it yet (R2 wires the declarator dispatch).
+    let render_path_cfg = app
+        .world()
+        .try_resource::<boyko_render::RenderPathConfig>()
+        .copied()
+        .unwrap_or_default();
+    // Hardware-traced/denoised shadow visibility is armed only on a ray-capable device
+    // (`ray_query_enabled()` is unconditionally `false` on a `not(hwrt)` build, so this
+    // expression needs no separate `#[cfg]` split) AND the author's `ShadowDenoiseConfig`
+    // wanting spatial or temporal denoise — the SAME two conditions `frame_loop`'s
+    // `denoise_armed` folds into `scene.shadow`'s per-frame gate, computed here at boot
+    // since `ResolvedRenderPath`'s shadow-source arming is itself a boot commitment, never
+    // a per-frame re-derivation.
+    let hwrt_denoise_or_vis_on = ctx.ray_query_enabled()
+        && app
+            .world()
+            .try_resource::<boyko_render::ShadowDenoiseConfig>()
+            .is_some_and(|cfg| cfg.spatial_enabled() || cfg.temporal_enabled());
+    let render_path_consumers = boyko_render::RenderPathConsumers {
+        ssao_on: app.world().try_resource::<boyko_render::SsaoConfig>().is_some_and(|c| c.enabled()),
+        ddgi_on: app.world().try_resource::<boyko_render::DdgiConfig>().is_some_and(|c| c.enabled()),
+        shadow_denoise_spatial_on: app
+            .world()
+            .try_resource::<boyko_render::ShadowDenoiseConfig>()
+            .is_some_and(|c| c.spatial_enabled()),
+        shadow_temporal_on: app
+            .world()
+            .try_resource::<boyko_render::ShadowDenoiseConfig>()
+            .is_some_and(|c| c.temporal_enabled()),
+        // No `SsrConfig` exists yet (out of scope this rung) — the plan §A default.
+        ssr_on: false,
+        taa_on: app.world().try_resource::<AaConfig>().is_some_and(|c| matches!(c.mode, AaMode::Taa)),
+        csm_on: app.world().try_resource::<boyko_render::CsmConfig>().is_some_and(|c| c.enabled()),
+        punctual_shadows_on: app
+            .world()
+            .try_resource::<boyko_render::ShadowConfig>()
+            .is_some_and(|c| c.enabled()),
+        hwrt_denoise_or_vis_on,
+        // No owner-facing SDF-shadow toggle exists yet — mirrors Deferred's current
+        // unconditional non-hwrt SDF soft shadow (see `RenderPathConsumers::sdf_shadows_wanted`'s doc).
+        sdf_shadows_wanted: true,
+    };
+    let render_path_caps = boyko_render::RenderPathDeviceCaps::new(
+        ctx.device_caps().storage_buffer_array_non_uniform_indexing_ok,
+    );
+    let (resolved_render_path, render_path_degrades) =
+        boyko_render::resolve_render_path(&render_path_cfg, render_path_consumers, render_path_caps);
+    // Warn-once boot diagnostics (mirrors `WindowHost::boot`'s SSAA degrade `eprintln!` —
+    // no logging crate is wired into this workspace, so `eprintln!` is the established
+    // boot-diagnostic channel). Never a panic — degrade-not-panic by construction.
+    for degrade in render_path_degrades.reasons() {
+        eprintln!("boyko_app: render path degraded ({degrade:?})");
+    }
+    host.resolved_render_path = resolved_render_path;
+    // OVERRIDE the `RenderPathPlugin`'s default `ResolvedRenderPath` with the real
+    // boot-resolved value — the SAME `DdgiCaps`/`RayCaps` post-boot override precedent
+    // above (this fn's `DdgiCaps::new(..)`/`RayCaps::new(..)` inserts). Without this, a
+    // future `Res<ResolvedRenderPath>` consumer (R2's declarator dispatch) would read the
+    // plugin's stale `Deferred + Both` default forever, even when the owner requested (and
+    // this boot-lock resolved) something else — the host field above is the per-frame RHI
+    // seam's source of truth, but the World Resource must ALSO be genuinely authoritative
+    // for any ECS-side reader.
+    app.world_mut().insert_resource(resolved_render_path);
+
     // ── Windowed `AppExit` semantics: insert-IF-ABSENT (plan D6; the legacy
     // headless path keeps its unconditional insert).
     if !app.world().contains_resource::<AppExit>() {
@@ -1519,6 +1592,11 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 taa_reset_flag,
                 ssao_variant,
                 ssao_atrous_levels,
+                // Multi-paradigm render-path plan, rung R1: the boot-committed selection
+                // (Decision 1 — a HOST field, never a per-frame `World` read, mirroring
+                // `host.ssaa_armed`'s threading). Dead-but-threaded: `scene()` converts it
+                // into the plain-POD `ResolvedRenderPathGpu` and nothing downstream reads it.
+                host.resolved_render_path,
                 ctx,
             );
 
@@ -1731,6 +1809,7 @@ unsafe fn destroy_host_gpu_chain(host: WindowHost, ctx: &VulkanContext) {
         composite_extent: _,
         ssaa_armed: _,
         native_extent: _,
+        resolved_render_path: _,
         light_uploaded_gen: _,
         swapchain,
         surface,
