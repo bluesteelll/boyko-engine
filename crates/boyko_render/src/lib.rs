@@ -415,7 +415,7 @@ pub use light_system::{
     LightTableStaging, SetLightEnabledById, collect_lights, evict_light, fold_light_table,
     fold_light_table_slotted, light_seed_state, set_light_enabled_now, write_light_table,
 };
-pub use gbuffer_depth::{GBUFFER_T_MAX, assert_gbuffer_marcher_t_max_agree};
+pub use gbuffer_depth::{GBUFFER_T_MAX, assert_gbuffer_marcher_t_max_agree, mesh_view_t_norm};
 pub use loaders::{ObjMeshLoader, PngTextureLoader, RonMaterialLoader};
 pub use material::{
     MATERIAL_FLAG_TEXTURED, MATERIAL_GPU_WORDS, Material, MaterialGpu, MaterialId, MaterialTextures,

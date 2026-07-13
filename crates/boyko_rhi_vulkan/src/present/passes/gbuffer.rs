@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::compute::{
     CoarseMode, DEFAULT_MARCHER_OMEGA, FineMarcherPush, INTERP_INSTANCES_PUSH_BYTES, LOCAL_SIZE_X,
-    tile_grid_extent,
+    VIEWT_FROM_DEPTH_PUSH_BYTES, ViewtFromDepthPush, tile_grid_extent,
 };
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
@@ -903,6 +903,76 @@ impl Renderer<'_> {
             unsafe {
                 (self.fns.cmd_begin_rendering)(cmd, &depth_only_rendering);
                 (self.fns.cmd_end_rendering)(cmd);
+            }
+        }
+
+        // Multi-paradigm render-path plan, rung R3b (§E leg-disable / the R3 audit finding): the
+        // `viewt_from_depth` `gViewT`-producer — `Deferred × Mesh`'s replacement for the
+        // (undispatched) marcher's `gViewT` write (see `viewt_from_depth`'s doc in
+        // `graph_bridge.rs` + `ViewtFromDepthActivation`'s doc for the full rationale). `Some`
+        // iff `scene.viewt_from_depth.is_some()`, mutually exclusive with
+        // `plan.mesh_depth_neutral_clear` by construction (W1 parity: `plan.viewt_from_depth`
+        // and `scene.viewt_from_depth` are TWO separate `Option`s that must move in lock-step —
+        // `declare_deferred_graph` derives the former directly from the latter).
+        debug_assert_eq!(
+            plan.viewt_from_depth.is_some(),
+            scene.viewt_from_depth.is_some(),
+            "W1: declare/record predicate desync (viewt_from_depth)"
+        );
+        if let Some(viewt_from_depth_pass) = plan.viewt_from_depth {
+            self.record_graph_pass(viewt_from_depth_pass, cmd, targets, scene, fi);
+            let activation = scene
+                .viewt_from_depth
+                .as_ref()
+                .expect("invariant: plan.viewt_from_depth.is_some() ⇒ scene.viewt_from_depth.is_some() (W1)");
+            let push = ViewtFromDepthPush::new(
+                present_extent.width,
+                present_extent.height,
+                activation.mesh_view_t_norm,
+            );
+            let push_bytes = push.as_bytes();
+            let set = &targets
+                .viewt_from_depth_set
+                .as_ref()
+                .expect(
+                    "invariant: scene.viewt_from_depth.is_some() ⇒ GBufferTargets::create wrote viewt_from_depth_set",
+                )[self.frame_index];
+            let group_x = present_extent.width.div_ceil(8);
+            let group_y = present_extent.height.div_ceil(8);
+            // SAFETY: recording is open; `activation.pipeline` + its layout (declaring
+            // `activation.layout` at set 0 AND the 12-byte COMPUTE push range) are live on this
+            // device (caller contract); `set` binds the now-transitioned depth (SHADER_READ, by
+            // the `record_graph_pass` call above) + `gViewT` (GENERAL) images; `group_x`/`group_y`
+            // cover `present_extent` (the 8×8-tile ceiling of the SAME extent the depth/gViewT
+            // images are sized to); `&set.descriptor_set` is a single-element local alive for the
+            // call (first_set 0, count 1, zero dynamic offsets); `push_bytes` is
+            // `VIEWT_FROM_DEPTH_PUSH_BYTES` (12) bytes at offset 0, exactly the declared push
+            // range, and the backing `push` local outlives the call.
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    activation.pipeline.pipeline,
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    activation.pipeline.layout,
+                    0,
+                    1,
+                    &set.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    activation.pipeline.layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    VIEWT_FROM_DEPTH_PUSH_BYTES,
+                    push_bytes.as_ptr().cast(),
+                );
+                (self.fns.cmd_dispatch)(cmd, group_x, group_y, 1);
             }
         }
 

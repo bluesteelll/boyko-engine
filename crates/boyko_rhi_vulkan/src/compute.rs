@@ -528,6 +528,21 @@ embed_spirv! {
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_tile_cull.comp.spv")
 }
 
+embed_spirv! {
+    /// Multi-paradigm render-path plan, rung R3b (`Deferred × Mesh` — the SDF leg fully off):
+    /// the `gViewT` producer replacement (`shaders/viewt_from_depth.comp.hlsl`). A full-screen,
+    /// 8×8-tiled pass that reproduces the SDF marcher's own mesh-depth → `t_mesh` conversion
+    /// (`sdf_gbuffer_composite.hlsl`'s `mesh_norm`/`t_mesh`/`gViewT` sentinel logic, byte-for-
+    /// byte) for every pixel, so a mesh-only frame — which never dispatches the marcher — still
+    /// gives the resolve/SSAO a real `gViewT` lane. Bound to its OWN dedicated 2-binding layout
+    /// { SAMPLED depth @0, STORAGE `gViewT` @1 } + the 12-byte [`ViewtFromDepthPush`] (`img_w`,
+    /// `img_h`, the host-precomputed `mesh_norm`). See [`ViewtFromDepthPush`]'s doc for the
+    /// `mesh_norm` single-source-of-truth (`boyko_render::gbuffer_depth::mesh_view_t_norm` — a
+    /// dev-only back-edge from this crate, so not a doc-linkable path here).
+    VIEWT_FROM_DEPTH_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/viewt_from_depth.comp.spv")
+}
+
 // The committed Render P7-Q2 SSAO (HBAO-lite, no-trig) quality-VARIANT SPIR-V — one PRE-COMPILED
 // `.spv` per `boyko_shaderdsl::ssao::SSAO_PRESETS` row (Mechanism C: a variant is selected at
 // runtime by binding a different pipeline, NEVER by a dynamic loop bound, so every `[unroll]`
@@ -1213,6 +1228,13 @@ pub fn cluster_cull_spirv() -> &'static [u32] {
 #[inline]
 pub fn sdf_tile_cull_spirv() -> &'static [u32] {
     SDF_TILE_CULL_SPV.as_words()
+}
+
+/// Multi-paradigm render-path plan, rung R3b: the `viewt_from_depth` gViewT-producer SPIR-V as
+/// a `u32` word stream. See [`VIEWT_FROM_DEPTH_SPV`]'s doc.
+#[inline]
+pub fn viewt_from_depth_spirv() -> &'static [u32] {
+    VIEWT_FROM_DEPTH_SPV.as_words()
 }
 
 /// The committed CSM Increment-1b Rung-A cascade DEPTH-PASS vertex SPIR-V as a `u32` word
@@ -2733,6 +2755,61 @@ impl ClusterCullPush {
         // offset + the 16-byte total pinned by the const-asserts above, no uninit padding),
         // so its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern.
         // The `&self` borrow keeps the struct alive for the slice's lifetime; read-only.
+        unsafe {
+            slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
+        }
+    }
+}
+
+/// Multi-paradigm render-path plan, rung R3b: the `viewt_from_depth` compute push constants
+/// (mirrors `viewt_from_depth.comp.hlsl`'s `ViewtFromDepthPush`). `#[repr(C)]`, 12 B (`u32, u32,
+/// f32`), the offsets pinned by the const-asserts below so a host/shader desync is a build
+/// error (the same discipline as [`ClusterCullPush`]).
+///
+/// `mesh_norm` is the ONLY field this shader's `mesh_norm` selection reads — it is NOT
+/// recomputed in HLSL from `camera_mode` (that would be a THIRD hand-written copy of the
+/// marcher's `mesh_norm` ternary, alongside `sdf_gbuffer_composite.hlsl` and
+/// `sdf_tile_cull.hlsl`). The host caller MUST derive it via
+/// `boyko_render::gbuffer_depth::mesh_view_t_norm` (the single-sourced Rust mirror of that same
+/// ternary, over [`CAM_MODE_PERSPECTIVE`]/[`MESH_DEPTH_T_MAX`]/[`SDF_TRACE_T_MAX`]) — never by
+/// re-deriving the branch ad hoc at the call site.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewtFromDepthPush {
+    /// The runtime extent width — the dispatch bounds guard (`ceil(img_w/8)` groups may run
+    /// threads past the real extent; the shader discards `tid.x >= img_w`).
+    pub img_w: u32,
+    /// The runtime extent height — same bounds-guard role as [`Self::img_w`].
+    pub img_h: u32,
+    /// The host-precomputed mesh-depth ray-t normalizer (`boyko_render::gbuffer_depth::
+    /// mesh_view_t_norm`): [`MESH_DEPTH_T_MAX`] under `CAM_MODE_PERSPECTIVE`, [`SDF_TRACE_T_MAX`]
+    /// under ortho — EXACTLY the marcher's own `mesh_norm` value for this frame's camera.
+    pub mesh_norm: f32,
+}
+
+/// Byte size of [`ViewtFromDepthPush`] — the `viewt_from_depth` pipeline's declared COMPUTE push
+/// range (12 B).
+pub const VIEWT_FROM_DEPTH_PUSH_BYTES: u32 = core::mem::size_of::<ViewtFromDepthPush>() as u32;
+
+const _: () = assert!(core::mem::offset_of!(ViewtFromDepthPush, img_w) == 0);
+const _: () = assert!(core::mem::offset_of!(ViewtFromDepthPush, img_h) == 4);
+const _: () = assert!(core::mem::offset_of!(ViewtFromDepthPush, mesh_norm) == 8);
+const _: () = assert!(VIEWT_FROM_DEPTH_PUSH_BYTES == 12, "ViewtFromDepthPush must be 12 bytes");
+
+impl ViewtFromDepthPush {
+    /// Builds the push from the runtime extent + the host-precomputed mesh-depth normalizer.
+    #[inline]
+    pub const fn new(img_w: u32, img_h: u32, mesh_norm: f32) -> Self {
+        Self { img_w, img_h, mesh_norm }
+    }
+
+    /// Re-views the push constants as their raw 12-byte slice for `push_constants`.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `Self` is `#[repr(C)]` with only `u32` / `f32` fields (all `Copy`, every
+        // offset + the 12-byte total pinned by the const-asserts above, no uninit padding), so
+        // its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern. The
+        // `&self` borrow keeps the struct alive for the slice's lifetime; read-only.
         unsafe {
             slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
         }

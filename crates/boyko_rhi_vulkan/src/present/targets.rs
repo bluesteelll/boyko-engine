@@ -195,6 +195,16 @@ pub struct GBufferTargets {
     /// A RING when `Some` (one per in-flight frame): slot `i` binds `scene.camera_ring[i]` @4 — the
     /// lock-free per-frame ring fix. The recorder selects `ssao_set[self.frame_index]`.
     pub(crate) ssao_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Multi-paradigm render-path plan, rung R3b: the `viewt_from_depth` descriptor set, written
+    /// ONCE against [`ViewtFromDepthActivation::layout`] (2 bindings: SAMPLED depth @0, STORAGE
+    /// `gViewT` @1) — `None` unless [`GBufferScene::viewt_from_depth`] is armed (`Deferred ×
+    /// Mesh`). The recorder then skips the pass entirely (the 0%-gate, byte-identical
+    /// command stream under every other leg). NO per-frame update.
+    ///
+    /// A RING when `Some` (one per in-flight frame): slot `i` binds `core.depth[i]`/`core.viewt[i]`
+    /// — the SAME per-FIF images the marcher's vocab set / `ssao_set` bind. The recorder selects
+    /// `viewt_from_depth_set[self.frame_index]`.
+    pub(crate) viewt_from_depth_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// The SSAO à-trous denoise chain's interior ping-pong ring RING `ssao_ring_a`
     /// (`R16_UNORM` STORAGE, full-res) — mirrors `shadow_vis`'s per-FIF ringing (the cross-frame
     /// WAR fix, like [`Self::ssao`]). `Option`-guarded: `Some` when the device advertises
@@ -477,19 +487,18 @@ impl AaArm {
 /// derive-from-scene precedent) and threaded down as an explicit parameter — the seam the plan
 /// names for path-conditional allocation.
 ///
-/// # Rung R3 status — profile IDENTITY landed, allocation DIFFERENCE deferred
+/// # Rung R3/R3b status — profile IDENTITY landed for both legs, allocation DIFFERENCE deferred
 ///
-/// `DeferredSdfOnly` is now reachable (`DEFERRED_SDF_ONLY_IMPLEMENTED == true`), but
+/// `DeferredSdfOnly` (rung R3) and `DeferredMeshOnly` (rung R3b) are BOTH reachable now, but
 /// [`GBufferTargets::create`] does NOT yet branch its allocation on `profile` — the vocab/
 /// present descriptor sets are written ONCE per extent against a FIXED binding layout shared by
 /// every `Deferred` config (this module's own doc, "written ONCE per extent"), so dropping an
 /// image here would need a SECOND descriptor-set layout, a larger, separately-scoped change
-/// (see the R3 rung report's honest VRAM accounting). This variant exists so the profile
-/// IDENTITY is real today — `TargetsProfile::from_scene` no longer trips its `debug_assert!` on
-/// `Deferred × Sdf` — ready for a future rung to actually branch allocation on it.
-/// `DeferredMeshOnly` stays unreachable (`DEFERRED_MESH_ONLY_IMPLEMENTED == false`, the R3-audited
-/// `gViewT` producer gap), matched exhaustively (not `unreachable!()`) so a future landing only
-/// has to fill this arm's allocation body, not add the arm itself.
+/// (see the R3 rung report's honest VRAM accounting; R3b's `viewt_from_depth_set` IS its own
+/// dedicated Option-gated ring, but the shared vocab/resolve/present rings are unaffected). These
+/// variants exist so the profile IDENTITY is real today — `TargetsProfile::from_scene` covers
+/// every `(mesh_leg, sdf_leg)` combination without a `debug_assert!` trip — ready for a future
+/// rung to actually branch allocation on `profile`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 // The shared `Deferred` prefix names the `RenderPath::Deferred` family explicitly (the plan §H
 // R3 row's own naming — `TargetsProfile::{DeferredFull,DeferredMeshOnly,DeferredSdfOnly}` — kept
@@ -499,7 +508,10 @@ impl AaArm {
 pub(crate) enum TargetsProfile {
     /// Both geometry legs, the full Deferred image/descriptor-set contract.
     DeferredFull,
-    /// Only the mesh raster leg (`GeometryLegs::Mesh`) — unreachable today, see this type's doc.
+    /// Only the mesh raster leg (`GeometryLegs::Mesh`) — reachable as of rung R3b, allocation
+    /// identical to `DeferredFull` this rung (see this type's doc). The `viewt_from_depth`
+    /// producer's own dedicated set is Option-gated separately (`GBufferTargets::
+    /// viewt_from_depth_set`), not tracked by this profile.
     DeferredMeshOnly,
     /// Only the SDF marched leg (`GeometryLegs::Sdf`) — reachable as of rung R3, allocation
     /// identical to `DeferredFull` this rung (see this type's doc).
@@ -516,17 +528,7 @@ impl TargetsProfile {
         match (rp.mesh_leg, rp.sdf_leg) {
             (true, true) => TargetsProfile::DeferredFull,
             (false, true) => TargetsProfile::DeferredSdfOnly,
-            (true, false) => {
-                // invariant: `DEFERRED_MESH_ONLY_IMPLEMENTED == false` keeps `Deferred x Mesh`
-                // resolver-degraded to `Both` until the R3-audited `gViewT` producer gap is
-                // resolved (see `boyko_render::render_path_config`'s module doc) — unreachable
-                // today; matched exhaustively so a future landing only fills this arm's body.
-                debug_assert!(
-                    false,
-                    "invariant: Deferred x Mesh is resolver-degraded to Both (gViewT producer gap, R3)"
-                );
-                TargetsProfile::DeferredMeshOnly
-            }
+            (true, false) => TargetsProfile::DeferredMeshOnly,
             (false, false) => {
                 // invariant: `GeometryLegs` has no "both off" state (no `None` variant) — a
                 // resolved carrier can never report neither leg present.
@@ -1603,8 +1605,8 @@ impl SmaaImages {
 /// per-frame update). Built as one bundle so [`GBufferTargets::create`]'s error ladder no longer
 /// re-lists the image teardown at every set (the cross-bundle O(n²) collapse): [`Self::build`] drains
 /// only the sets it built, and the orchestrator tears down the images. Acquisition order (matched by
-/// [`Self::destroy`] in reverse): vocab → resolve → cull → ssao → ddgi-update → present →
-/// resolve-hwrt → fxaa → smaa (edge → weight → blend) → ssaa downsample.
+/// [`Self::destroy`] in reverse): vocab → resolve → cull → ssao → viewt-from-depth → ddgi-update →
+/// present → resolve-hwrt → fxaa → smaa (edge → weight → blend) → ssaa downsample.
 /// Flattened into the [`GBufferTargets`] set fields at `create` time, so `present/` readers keep the
 /// same `targets.<x>` paths.
 struct DeferredSets {
@@ -1612,6 +1614,10 @@ struct DeferredSets {
     resolve_set: [VulkanBindGroup; FRAMES_IN_FLIGHT],
     cull_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     ssao_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Multi-paradigm render-path plan, rung R3b: the `viewt_from_depth` set — `None` unless
+    /// [`GBufferScene::viewt_from_depth`] is armed. Built AFTER `ssao_set` (so its own error
+    /// path tears down every prior set including `ssao_set`), BEFORE `ddgi_update_set`.
+    viewt_from_depth_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     ddgi_update_set: Option<VulkanBindGroup>,
     present_set: [VulkanBindGroup; FRAMES_IN_FLIGHT],
     #[cfg(feature = "hwrt")]
@@ -1957,6 +1963,78 @@ impl DeferredSets {
             }
             None => None,
         };
+
+        // Multi-paradigm render-path plan, rung R3b (`Deferred × Mesh` — the SDF leg fully off):
+        // the `viewt_from_depth` set, written ONCE here when the pass is wired (SAMPLED depth
+        // @0, STORAGE `gViewT` @1 WRITE) — matching `viewt_from_depth.comp`'s set 0. `None`
+        // unless `scene.viewt_from_depth` is armed (`GeometryLegs::Mesh` exactly); the recorder
+        // then skips the pass entirely (the 0%-gate — byte-identical command stream under
+        // `Both`/`Sdf`). The `gViewT` image is the SAME one the marcher writes under every
+        // OTHER leg, and the SAME one `ssao_set`/the resolve read.
+        let viewt_from_depth_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> =
+            if let Some(activation) = &scene.viewt_from_depth {
+                // Build FRAMES_IN_FLIGHT identical copies, slot `i` binding `core.depth[i]` @0 /
+                // `core.viewt[i]` @1 (the per-FIF ring the marcher's vocab set / `ssao_set` also
+                // bind). On a failure at slot `i`, the slots already built [0..i) plus the prior
+                // ssao/cull/resolve/vocab rings MUST be destroyed.
+                let mut viewt_from_depth_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+                    [const { None }; FRAMES_IN_FLIGHT];
+                let mut failure: Option<crate::error::VulkanError> = None;
+                for (slot, dst) in viewt_from_depth_slots.iter_mut().enumerate() {
+                    let entries = [
+                        BindGroupEntry::SampledImage {
+                            texture: &core.depth[slot],
+                            sampler: scene.depth_sampler,
+                        },
+                        BindGroupEntry::StorageImage { texture: &core.viewt[slot] },
+                    ];
+                    let desc =
+                        BindGroupDesc::<Vulkan> { layout: activation.layout, entries: &entries };
+                    match RhiDevice::create_bind_group(ctx, &desc) {
+                        Ok(g) => *dst = Some(g),
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                    }
+                }
+                if let Some(e) = failure {
+                    // SAFETY: the viewt_from_depth slots already built [0..slot) + the (optional)
+                    // ssao/cull rings + the resolve + vocab rings were created on `ctx`;
+                    // referenced by no submission; each destroyed exactly once (reverse
+                    // acquisition: viewt_from_depth → ssao → cull → resolve → vocab). The images
+                    // are owned by the caller.
+                    unsafe {
+                        for s in viewt_from_depth_slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(ss) = ssao_set {
+                            for g in ss {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(cs) = cull_set {
+                            for g in cs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in resolve_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        for g in vocab_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    return Err(SwapchainError::DepthImage(e));
+                }
+                Some(viewt_from_depth_slots.map(|s| {
+                    s.expect("invariant: every viewt_from_depth ring slot built before reaching here")
+                }))
+            } else {
+                None
+            };
 
         // SDFDDGI I2: the SINGLE (non-ringed) probe-update set, written ONCE here when the update
         // pass is wired (`Buf` @0 R, `gIrrOut` @1 W, `gDepthOut` @2 W storage images, `Classification`
@@ -2641,6 +2719,7 @@ impl DeferredSets {
             resolve_set,
             cull_set,
             ssao_set,
+            viewt_from_depth_set,
             ddgi_update_set,
             present_set,
             #[cfg(feature = "hwrt")]
@@ -2654,14 +2733,15 @@ impl DeferredSets {
     }
 
     /// Tears down the deferred sets in reverse acquisition order (ssaa-downsample → smaa →
-    /// fxaa → resolve-hwrt → present → ddgi-update → ssao → cull → resolve → vocab), consuming
-    /// `self`.
+    /// fxaa → resolve-hwrt → present → ddgi-update → viewt-from-depth → ssao → cull → resolve →
+    /// vocab), consuming `self`.
     ///
     /// # Safety
     ///
     /// `ctx` is live; no submission references these descriptor sets; each is destroyed exactly once
-    /// (the by-value `self`). The `cull`/`ssao`/`ddgi-update`/`resolve-hwrt`/`fxaa`/`smaa_*`/
-    /// `downsample` sets are `Option`-guarded (present only when their feature was wired).
+    /// (the by-value `self`). The `cull`/`ssao`/`viewt_from_depth`/`ddgi-update`/`resolve-hwrt`/
+    /// `fxaa`/`smaa_*`/`downsample` sets are `Option`-guarded (present only when their feature was
+    /// wired).
     unsafe fn destroy(self, ctx: &VulkanContext) {
         // SAFETY: per the contract `ctx` is live and nothing references these sets; each was created
         // on `ctx` and is destroyed exactly once, in reverse acquisition order.
@@ -2713,6 +2793,14 @@ impl DeferredSets {
             // update pass was wired).
             if let Some(du) = self.ddgi_update_set {
                 RhiDevice::destroy_bind_group(ctx, du);
+            }
+            // Multi-paradigm render-path plan, rung R3b: the `viewt_from_depth` set,
+            // `Option`-guarded (present only under `Deferred × Mesh`). Built AFTER `ssao_set`
+            // (so destroyed BEFORE it, reverse acquisition).
+            if let Some(vs) = self.viewt_from_depth_set {
+                for g in vs {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
             }
             if let Some(ss) = self.ssao_set {
                 for g in ss {
@@ -4694,6 +4782,7 @@ impl GBufferTargets {
             resolve_set,
             cull_set,
             ssao_set,
+            viewt_from_depth_set,
             ddgi_update_set,
             present_set,
             #[cfg(feature = "hwrt")]
@@ -4821,6 +4910,7 @@ impl GBufferTargets {
             resolve_set_hwrt,
             cull_set,
             ssao_set,
+            viewt_from_depth_set,
             ssao_ring_a,
             ssao_ring_b,
             ssao_atrous_read8_set,
@@ -5104,14 +5194,15 @@ impl GBufferTargets {
                     RhiDevice::destroy_bind_group(ctx, g);
                 }
             }
-            // The deferred descriptor SETS (resolve-hwrt → present → ddgi-update → ssao → cull →
-            // resolve → vocab), via the `DeferredSets` bundle's reverse-acquisition teardown — the
-            // SAME order + `Option`-guards the old flat teardown used.
+            // The deferred descriptor SETS (resolve-hwrt → present → ddgi-update → viewt-from-depth
+            // → ssao → cull → resolve → vocab), via the `DeferredSets` bundle's reverse-acquisition
+            // teardown — the SAME order + `Option`-guards the old flat teardown used.
             DeferredSets {
                 vocab_set: self.vocab_set,
                 resolve_set: self.resolve_set,
                 cull_set: self.cull_set,
                 ssao_set: self.ssao_set,
+                viewt_from_depth_set: self.viewt_from_depth_set,
                 ddgi_update_set: self.ddgi_update_set,
                 present_set: self.present_set,
                 #[cfg(feature = "hwrt")]
@@ -5437,6 +5528,7 @@ mod tests {
             resolve_set: bg_ring(),
             cull_set: None,
             ssao_set: None,
+            viewt_from_depth_set: None,
             ssao_ring_a: None,
             ssao_ring_b: None,
             ssao_atrous_read8_set: None,
@@ -5513,6 +5605,7 @@ mod tests {
             resolve_set_hwrt: resolve_set_hwrt.then(bg_ring),
             cull_set: None,
             ssao_set: None,
+            viewt_from_depth_set: None,
             ssao_ring_a: None,
             ssao_ring_b: None,
             ssao_atrous_read8_set: None,

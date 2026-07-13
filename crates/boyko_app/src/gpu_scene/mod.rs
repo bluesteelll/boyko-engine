@@ -30,7 +30,8 @@ use boyko_rhi::SpecConstant;
 use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
 use boyko_rhi_vulkan::ddgi::DdgiAtlas;
 use boyko_rhi_vulkan::compute::{
-    B5_CAMERA_UBO_BYTES_M4, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, EDITLIST_BUFFER_WORDS,
+    B5_CAMERA_UBO_BYTES_M4, CAM_MODE_ORTHO, CAM_MODE_PERSPECTIVE, COMPOSITE_PUSH_CONSTANT_BYTES,
+    CoarseMode, EDITLIST_BUFFER_WORDS,
     INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS,
     LOCAL_SIZE_X, TILE_BOUND_BYTES, TILE_SIZE, csm_depth_fs_spirv, csm_depth_vs_spirv, deferred_pbr_spirv,
     deferred_pbr_wrap_spirv,
@@ -42,7 +43,8 @@ use boyko_rhi_vulkan::compute::{
     sdf_ssao_spirv_variant, smaa_blend_fs_spirv, smaa_edge_fs_spirv, smaa_weight_fs_spirv,
     SSAO_ATROUS_PUSH_BYTES, ssao_atrous_read8_spirv, ssao_atrous_spirv, ssao_atrous_write8_spirv,
     SSAO_QUALITY_COUNT, SSAO_QUALITY_HIGH, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM,
-    ssaa_downsample_fs_spirv, taa_resolve_spirv, tile_grid_extent,
+    ssaa_downsample_fs_spirv, taa_resolve_spirv, tile_grid_extent, VIEWT_FROM_DEPTH_PUSH_BYTES,
+    viewt_from_depth_spirv,
 };
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::ffi::VkDescriptorSet;
@@ -55,7 +57,7 @@ use boyko_rhi_vulkan::swapchain::{
     AaActivation, CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
     GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene,
     InterpActivation, PunctualDepthActivation, ResolvedRenderPathGpu, SmaaActivation,
-    SsaaActivation, SsaoActivation, TaaActivation,
+    SsaaActivation, SsaoActivation, TaaActivation, ViewtFromDepthActivation,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::accel::BoundAccelStruct;
@@ -84,7 +86,7 @@ use boyko_render::{
     RESOLVED_DDGI_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, RETIRE_DELAY, ResolvedCsm,
     ResolvedShadowAtlas, RetiredGpuBuffers, SEARCH_TEX_BYTES, SEARCH_TEX_H, SEARCH_TEX_W,
     SHADOW_DIM, Vertex, ddgi_update_dispatch_groups, fill_fibonacci_ray_table,
-    pack_ddgi_update_ubo, resolve_ddgi, upload_texture_2d_raw,
+    mesh_view_t_norm, pack_ddgi_update_ubo, resolve_ddgi, upload_texture_2d_raw,
 };
 #[cfg(feature = "hwrt")]
 use boyko_ecs::ecs::core::asset::Assets;
@@ -745,6 +747,20 @@ pub(crate) struct GpuSceneBundles {
     /// entry of [`Self::ssao_pipelines`]. [`GBufferTargets`] writes an `ssao_set` against
     /// it once per extent when [`GBufferScene::ssao`] is armed.
     ssao_layout: VulkanBindGroupLayout,
+    /// Multi-paradigm render-path plan, rung R3b (`Deferred × Mesh` — the SDF leg fully off): the
+    /// `viewt_from_depth` compute pipeline (`viewt_from_depth.comp.hlsl` /
+    /// [`viewt_from_depth_spirv`]), the `gViewT` producer that stands in for the (undispatched)
+    /// marcher on a mesh-only frame. Built UNCONDITIONALLY at boot (like
+    /// [`Self::ssao_pipelines`] above — the pipeline itself needs no device precondition to
+    /// CREATE; [`GBufferScene::path_has_viewt_from_depth`] gates whether it is actually
+    /// dispatched, so a `Both`/`Sdf`-resolved boot pays only this one negligible pipeline
+    /// object, never a descriptor set/dispatch/VRAM cost).
+    viewt_from_depth_pipeline: ComputePipeline,
+    /// The DEDICATED 2-binding `viewt_from_depth` bind-group LAYOUT { SAMPLED depth @0, STORAGE
+    /// `gViewT` @1 } — matching `viewt_from_depth.comp`'s set 0. [`GBufferTargets`] writes a
+    /// `viewt_from_depth_set` against it once per extent when
+    /// [`GBufferScene::path_has_viewt_from_depth`] holds.
+    viewt_from_depth_layout: VulkanBindGroupLayout,
     /// The SSAO edge-avoiding à-trous denoise chain: the `level == 0` pipeline variant
     /// (`ssao_atrous_read8.comp` / [`ssao_atrous_read8_spirv`]) — `gAoIn` pinned `r8` (reads the
     /// frozen `gSsao` gather endpoint), `gAoOut` pinned `r16` (writes ring 0). Built UNCONDITIONALLY
@@ -2002,12 +2018,44 @@ impl GpuSceneBundles {
         )
         .expect("invariant: SSAO à-trous write8 compute pipeline create");
 
+        // Multi-paradigm render-path plan, rung R3b (`Deferred × Mesh` — the SDF leg fully off):
+        // the `viewt_from_depth` `gViewT`-producer pipeline — the dedicated 2-binding layout
+        // { SAMPLED depth @0, STORAGE `gViewT` @1 } + the 12-byte `ViewtFromDepthPush` COMPUTE
+        // push range. Built UNCONDITIONALLY here (like `ssao_pipelines`/`ssao_atrous_*` above —
+        // the pipeline itself needs no device precondition to CREATE); `GBufferScene::
+        // path_has_viewt_from_depth` gates whether the pass is DECLARED/RECORDED/dispatched, so a
+        // `Both`/`Sdf`-resolved boot pays only this one negligible pipeline object.
+        let viewt_from_depth_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::SampledImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: viewt_from_depth bind-group layout create");
+        let viewt_from_depth_cs = RhiDevice::create_shader_module(device, viewt_from_depth_spirv())
+            .expect("invariant: viewt_from_depth compute shader module create");
+        let viewt_from_depth_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &viewt_from_depth_cs,
+                entry: c"main",
+                push_constant_bytes: VIEWT_FROM_DEPTH_PUSH_BYTES,
+                bind_group_layout: Some(&viewt_from_depth_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: viewt_from_depth compute pipeline create");
+
         // The shader modules are consumed by pipeline creation; destroy them now
         // (mirrors the showcase's post-create module teardown).
         // SAFETY: every module was created on `ctx` above and is no longer
         // needed once its pipeline exists; each is destroyed exactly once; no
         // GPU work has been submitted yet.
         unsafe {
+            RhiDevice::destroy_shader_module(device, viewt_from_depth_cs);
             RhiDevice::destroy_shader_module(device, ssao_atrous_write8_cs);
             RhiDevice::destroy_shader_module(device, ssao_atrous_interior_cs);
             RhiDevice::destroy_shader_module(device, ssao_atrous_read8_cs);
@@ -2446,6 +2494,8 @@ impl GpuSceneBundles {
             ssao_atrous_interior_pipeline,
             ssao_atrous_write8_pipeline,
             ssao_atrous_layout,
+            viewt_from_depth_pipeline,
+            viewt_from_depth_layout,
             csm,
             dispatch_group_count_x,
         }
@@ -3098,6 +3148,28 @@ impl GpuSceneBundles {
         #[cfg(feature = "hwrt")]
         let tlas_enabled = tlas_enabled && mesh_leg;
 
+        // Multi-paradigm render-path plan, rung R3b — the SDF-owned-producer half of the R3
+        // scene-assembly seam (the mirror-image gate to `mesh_leg` above): SDFDDGI's probe-update
+        // pass injects indirect irradiance onto `is_sdf_lit` pixels ONLY (the SDF leg's own
+        // geometry) — it is SDF-OWNED, so it must be structurally ABSENT under `!sdf_leg`
+        // (`Deferred × Mesh`), suppressed HERE at the same single seam. `Deferred × Both`/`Sdf`
+        // keep `sdf_leg == true` ⇒ `&& true` is the identity ⇒ byte-identical. (The P0 coarse
+        // tile-cull is ALSO SDF-owned/marcher-serving, but `coarse: None` unconditionally below —
+        // never wired by this production seam yet — so it needs no additional gate here; the
+        // async `light_upload` is light-generic, not leg-owned, so it is untouched.)
+        let sdf_leg = resolved_render_path.sdf_leg;
+        let ddgi_enabled = ddgi_enabled && sdf_leg;
+
+        // Multi-paradigm render-path plan, rung R3b: the `viewt_from_depth` push's mesh-depth
+        // ray-t normalizer needs THIS frame's camera mode — read from the SAME `cam_eye.w` lane
+        // (`mvp` bytes @76..80, `GBUFFER_PUSH_BYTES`'s doc: 0.0 = ortho, 1.0 = perspective) the
+        // raster VERTEX push already carries (there is only ONE camera per frame; no second
+        // source to desync from). Don't-care under every OTHER leg (the pass is not recorded).
+        let camera_mode_w = f32::from_le_bytes(
+            mvp[76..80].try_into().expect("invariant: mvp is GBUFFER_PUSH_BYTES (>= 80) long"),
+        );
+        let camera_mode = if camera_mode_w != 0.0 { CAM_MODE_PERSPECTIVE } else { CAM_MODE_ORTHO };
+
         // Interp arming (refined-B): the raster VS ALWAYS reads the shared instance
         // ring (`instance_bind_groups[slot]`) — no bind swap. When the gather produced
         // DYNAMIC instances, the interp compute overwrites that ring's dynamic slots
@@ -3205,6 +3277,16 @@ impl GpuSceneBundles {
             mvp,
             instance_bind_group,
             marcher: &self.marcher,
+            // Multi-paradigm render-path plan, rung R3b (`Deferred × Mesh` — the SDF leg fully
+            // off): armed exactly when the resolved legs are `GeometryLegs::Mesh` (`mesh_leg &&
+            // !sdf_leg`) — the marcher is not dispatched then, so this pass is the sole `gViewT`
+            // producer. `Deferred × Both`/`Sdf` keep this `None` (the marcher itself writes
+            // `gViewT`) — byte-identical to every pre-R3b frame.
+            viewt_from_depth: (mesh_leg && !sdf_leg).then(|| ViewtFromDepthActivation {
+                pipeline: &self.viewt_from_depth_pipeline,
+                layout: &self.viewt_from_depth_layout,
+                mesh_view_t_norm: mesh_view_t_norm(camera_mode),
+            }),
             vocab_layout: &self.vocab_layout,
             edit_list: &self.edit_list,
             camera_ring: &self.camera_ring,
@@ -3762,6 +3844,11 @@ impl GpuSceneBundles {
             RhiDevice::destroy_compute_pipeline(ctx, self.ssao_atrous_interior_pipeline);
             RhiDevice::destroy_compute_pipeline(ctx, self.ssao_atrous_write8_pipeline);
             RhiDevice::destroy_bind_group_layout(ctx, self.ssao_atrous_layout);
+            // Multi-paradigm render-path plan, rung R3b: the `viewt_from_depth` pipeline + its
+            // 2-binding layout, built UNCONDITIONALLY at boot (like the SSAO pipelines above).
+            // Pipeline before its layout (reverse creation order).
+            RhiDevice::destroy_compute_pipeline(ctx, self.viewt_from_depth_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.viewt_from_depth_layout);
             // HW-RT rung R2a-4b: the HWRT resolve pipeline + its 21-binding layout, `Option`-guarded
             // (present only on an RT device under `feature = "hwrt"`). Pipeline before layout.
             #[cfg(feature = "hwrt")]

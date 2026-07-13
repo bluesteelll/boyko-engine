@@ -539,6 +539,46 @@ pub struct SsaoActivation<'a> {
     pub atrous_levels: u32,
 }
 
+/// Multi-paradigm render-path plan, rung R3b (`Deferred × Mesh` — the SDF leg fully off) —
+/// threaded into [`GBufferScene::viewt_from_depth`] to turn the `viewt_from_depth`
+/// `gViewT`-producer pass ON. The R3 audit (`sdf_gbuffer_composite.hlsl`, both terminal
+/// `gViewT` write sites) found the SDF marcher is the SOLE writer of `gViewT` even for
+/// MESH-owned pixels; under `Deferred × Mesh` the marcher is not dispatched at all
+/// (`GBufferScene::marcher` pass is `None`), so nothing writes `gViewT` for the resolve's `P =
+/// ro + rd*view_t` reconstruction / SSAO's mesh/SDF classification. This pass reproduces JUST
+/// the marcher's mesh-depth → `gViewT` conversion (`mesh_norm`/`t_mesh`, byte-for-byte) for
+/// every pixel.
+///
+/// `None` on [`GBufferScene::viewt_from_depth`] is the OFF path (the DEFAULT — every leg except
+/// `Deferred × Mesh`, the 0%-gate): no `viewt_from_depth_set`, no framegraph pass, no dispatch —
+/// capability = component presence, not a runtime flag. `Some` arms the whole seam; the caller
+/// MUST supply it exactly when the resolved leg set is `GeometryLegs::Mesh`
+/// (`mesh_leg && !sdf_leg`) — `declare_deferred_graph` (`graph_bridge.rs`) carries a
+/// `debug_assert!` belt-and-braces check the seam was not missed (mirrors the R3
+/// mesh-shadow-producer invariant guards).
+///
+/// `#[derive(Clone, Copy)]` — a pair of borrows + a scalar the caller flips between frames with
+/// no re-record, mirroring [`SsaoActivation`]'s shape.
+#[derive(Clone, Copy)]
+pub struct ViewtFromDepthActivation<'a> {
+    /// The `viewt_from_depth` compute pipeline (`viewt_from_depth.comp.hlsl` /
+    /// [`crate::compute::viewt_from_depth_spirv`]): its layout declares [`Self::layout`] at
+    /// `set 0` + the 12-byte [`crate::compute::ViewtFromDepthPush`] COMPUTE push range. The
+    /// caller OWNS the pipeline + layout and tears them down; the `'a` lifetime ties this
+    /// activation to those borrows for the frame call — mirrors [`SsaoActivation::pipeline`].
+    pub pipeline: &'a ComputePipeline,
+    /// The DEDICATED 2-binding `viewt_from_depth` bind-group LAYOUT { SAMPLED depth @0, STORAGE
+    /// `gViewT` @1 } — matching `viewt_from_depth.comp`'s set 0. [`GBufferTargets`] writes a
+    /// `viewt_from_depth_set` against it once per extent (pointing at the per-extent depth +
+    /// `gViewT` images), mirroring [`SsaoActivation::layout`].
+    pub layout: &'a VulkanBindGroupLayout,
+    /// The host-precomputed mesh-depth ray-t normalizer this frame's push carries
+    /// (`boyko_render::gbuffer_depth::mesh_view_t_norm` — see
+    /// [`crate::compute::ViewtFromDepthPush`]'s doc for why it is NOT re-derived in HLSL): the
+    /// SAME value the marcher's own `mesh_norm` ternary would select for this frame's camera.
+    pub mesh_view_t_norm: f32,
+}
+
 /// Anti-aliasing Stage 1: the FXAA post-process pass activation threaded into
 /// [`GBufferScene::aa`] to turn the AA pass ON. Mirrors [`SsaoActivation`]'s borrow-bundle
 /// shape: a `Copy` pair of caller-owned pipeline/sampler borrows.
@@ -1042,6 +1082,14 @@ pub struct GBufferScene<'a> {
     /// The P1b SDF G-buffer marcher compute pipeline (its layout declares
     /// `vocab_layout` at `set 0`). Byte-untouched from P1b (pass B).
     pub marcher: &'a ComputePipeline,
+    /// Multi-paradigm render-path plan, rung R3b (`Deferred × Mesh` — the SDF leg fully off):
+    /// the `viewt_from_depth` activation — the `gViewT` producer that stands in for the
+    /// (undispatched) marcher on a mesh-only frame. `None` (the default, every OTHER leg) ⇒ NO
+    /// descriptor set (`GBufferTargets` never builds `viewt_from_depth_set`), NO framegraph pass,
+    /// NO dispatch — the 0%-gate, capability = component presence (not a runtime flag). `Some`
+    /// iff the caller resolved `mesh_leg && !sdf_leg` (`GeometryLegs::Mesh`) — see
+    /// [`ViewtFromDepthActivation`]'s doc.
+    pub viewt_from_depth: Option<ViewtFromDepthActivation<'a>>,
     /// The vocabulary bind-group LAYOUT { SSBO @0, sampled depth @1, storage albedo
     /// @2, storage normal @3, storage material @4, UNIFORM camera @5, STORAGE tiles
     /// @6, STORAGE material-table @7, STORAGE `gViewT` @8, STORAGE `PointerGrid` @9,
@@ -1967,12 +2015,12 @@ impl GBufferScene<'_> {
     /// begin/end-rendering block can never diverge (the W1 lesson, mirroring
     /// [`Self::mesh_mv_active`]).
     ///
-    /// `== resolved_render_path.mesh_leg`. Rung R3 lifted `DEFERRED_SDF_ONLY_IMPLEMENTED`
-    /// (`boyko_render::render_path_config`), so `Deferred × Sdf` now reaches here with this
-    /// `false` — see [`Self::path_has_mesh_depth_neutral_clear`] for the pass that replaces the
-    /// raster pass's depth-clear producer on that leg. `Deferred × Mesh` still degrades to `Both`
-    /// (`DEFERRED_MESH_ONLY_IMPLEMENTED` stays `false`, the R3-audited `gViewT` producer gap), so
-    /// this is `true` on every frame reachable today EXCEPT `Deferred × Sdf`.
+    /// `== resolved_render_path.mesh_leg`. Rung R3 lifted the SDF-only leg-disable
+    /// (`boyko_render::render_path_config`), so `Deferred × Sdf` reaches here with this `false`
+    /// — see [`Self::path_has_mesh_depth_neutral_clear`] for the pass that replaces the raster
+    /// pass's depth-clear producer on that leg. Rung R3b lifted the mesh-only leg-disable too
+    /// (the `viewt_from_depth` producer, [`GBufferScene::viewt_from_depth`]), so this is `true`
+    /// on every reachable `Deferred` frame EXCEPT `Deferred × Sdf`.
     #[inline]
     pub(crate) fn path_has_raster(&self) -> bool {
         self.resolved_render_path.mesh_leg

@@ -84,3 +84,33 @@ sha256_hwrt     = "ffcc0ac6f70a6cdcd113e343ef2d65a9a3f8134478917f35bec73991d3d55
 BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
+[deferred_mesh_only]
+# Multi-paradigm render-path plan, rung R3b (Deferred leg-disable, mesh leg -- the mirror-image
+# of [deferred_sdf_only]): the SAME grand_showcase room with resolved_render_path.sdf_leg forced
+# OFF (GeometryLegs::Mesh). The SDF marcher is not dispatched at all (no two SDF spheres), so the
+# scene renders ONLY the mesh boxes/walls/floor with their CSM + punctual-atlas shadows (mesh-leg-
+# owned producers, unaffected -- mesh_leg is true here). The new viewt_from_depth compute pass
+# replaces the marcher as the sole gViewT producer for every pixel, so the resolve/SSAO still see
+# a real mesh surface depth exactly as under GeometryLegs::Both. The hwrt leg keeps its TLAS armed
+# as normal (mesh instances exist to build an acceleration structure from), unlike the sdf-only
+# sibling pin above.
+#
+# UNBLESSED placeholders -- the sha256_* values below are NOT real hashes. Re-render on a real
+# windowed GPU device (engine_deferred_mesh_only_512_screenshot_dump, #[ignore]) and re-bless via
+# `scripts\golden.ps1 -Pin deferred_mesh_only -Bless` (and `-Hwrt -Bless`) AFTER the owner's
+# visual sign-off on the freshly-dumped BMP, per this repo's golden discipline (do NOT hand-edit
+# these values otherwise).
+crate           = "boyko_rhi_vulkan"
+test_binary     = "window_present_gbuffer"
+test_name       = "engine_deferred_mesh_only_512_screenshot_dump"
+bmp             = "D:\\tmp\\deferred_mesh_only.bmp"
+width           = 512
+height          = 512
+sha256_software = "65cb2004f3a8bcace12896cd2a5c4f959e2e7ae53d2f75f8b4ea21d9ee004ada"
+sha256_hwrt     = "65cb2004f3a8bcace12896cd2a5c4f959e2e7ae53d2f75f8b4ea21d9ee004ada"
+
+[deferred_mesh_only.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"

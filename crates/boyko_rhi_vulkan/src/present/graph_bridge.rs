@@ -34,10 +34,11 @@ pub(crate) struct GbufferPassPlan {
     pub(crate) interp: Option<crate::framegraph::PassId>,
     /// The 3-MRT + depth mesh raster pass (sites 0/1). Multi-paradigm render-path plan, rung
     /// R2 (Decision 2 / O1): `Some` iff [`GBufferScene::path_has_raster`] holds. Rung R3 lifted
-    /// `DEFERRED_SDF_ONLY_IMPLEMENTED`, so `Deferred × Sdf` now reaches here with this `None` —
-    /// see [`Self::mesh_depth_neutral_clear`] for the pass that replaces this one's depth-clear
-    /// producer on that leg. `Deferred × Mesh` still degrades to `Both` (the R3-audited `gViewT`
-    /// producer gap), so this is `Some` on every current frame EXCEPT `Deferred × Sdf`.
+    /// the SDF-only leg-disable, so `Deferred × Sdf` reaches here with this `None` — see
+    /// [`Self::mesh_depth_neutral_clear`] for the pass that replaces this one's depth-clear
+    /// producer on that leg. Both `Deferred` legs are landed as of rung R3b (see
+    /// [`Self::viewt_from_depth`]), so this is `Some` on every reachable `Deferred` frame EXCEPT
+    /// `Deferred × Sdf`.
     pub(crate) raster: Option<crate::framegraph::PassId>,
     /// Multi-paradigm render-path plan, rung R3 (§E leg-disable / the O2 audit finding) — the
     /// mesh-depth NEUTRAL CLEAR pass: `Deferred × Sdf`'s replacement for [`Self::raster`]'s
@@ -51,6 +52,22 @@ pub(crate) struct GbufferPassPlan {
     /// rationale (incl. why this reuses the existing marcher `.spv` unchanged rather than a new
     /// compiled `HAS_MESH` variant).
     pub(crate) mesh_depth_neutral_clear: Option<crate::framegraph::PassId>,
+    /// Multi-paradigm render-path plan, rung R3b (`Deferred × Mesh` — the SDF leg fully off): the
+    /// `viewt_from_depth` `gViewT`-producer pass, [`Self::mesh_depth_neutral_clear`]'s
+    /// mirror-image. `Some` iff [`GBufferScene::viewt_from_depth`] is armed (capability =
+    /// component presence — mirrors [`Self::ssao`]'s gate on `scene.ssao.is_some()`, NOT a
+    /// leg-predicate fn: the declare site here and the record site both read the SAME `scene`
+    /// field, so the two cannot diverge by construction). The caller MUST arm it exactly under
+    /// `mesh_leg && !sdf_leg` (mutually exclusive with [`Self::mesh_depth_neutral_clear`] by
+    /// construction); the belt-and-braces `debug_assert!` in [`Renderer::declare_deferred_graph`]
+    /// guards that seam (mirrors the R3 mesh-shadow-producer invariant checks). Under `Deferred ×
+    /// Mesh` the marcher ([`Self::marcher`]) is `None`, so nothing writes `gViewT`; this
+    /// full-screen compute pass reproduces JUST the marcher's mesh-depth → `gViewT` conversion
+    /// (`sdf_gbuffer_composite.hlsl`'s `mesh_norm`/`t_mesh` logic) for every pixel. Declared here
+    /// (after the depth producer, before the marcher) so its `record_pass` derives the
+    /// raster/mesh_depth_neutral_clear → viewt_from_depth depth-read barrier the SAME way the
+    /// marcher's own depth-read barrier is derived under every other leg.
+    pub(crate) viewt_from_depth: Option<crate::framegraph::PassId>,
     /// The async light-table re-upload (`scene.light_dirty && light_upload_bytes>0`).
     pub(crate) light_upload: Option<crate::framegraph::PassId>,
     /// The P0 coarse tile-cull (`scene.coarse.is_some()`).
@@ -518,6 +535,22 @@ impl Renderer<'_> {
             "invariant: mesh-shadow activation without mesh leg (scene-assembly gate missed)"
         );
 
+        // Multi-paradigm render-path plan, rung R3b (§E leg-disable / the R3b audit finding): the
+        // `viewt_from_depth` belt-and-braces check, mirroring the mesh-shadow-producer guards
+        // above — the scene-assembly seam (`GpuSceneBundles::scene()`) MUST arm
+        // `scene.viewt_from_depth` exactly when the resolved legs are `GeometryLegs::Mesh`
+        // (`mesh_leg && !sdf_leg`), never more (an armed activation under `Both`/`Sdf` would
+        // dispatch a redundant/wrong-owner producer) and never less (an unarmed one under
+        // `Deferred × Mesh` leaves `gViewT` wholly unwritten — the R3b bug this pass exists to
+        // close). A hand-built test fixture that forgets the gate trips here instead of silently
+        // shipping a stale/undefined `gViewT` lane.
+        debug_assert_eq!(
+            scene.viewt_from_depth.is_some(),
+            scene.resolved_render_path.mesh_leg && !scene.resolved_render_path.sdf_leg,
+            "invariant: viewt_from_depth activation must be armed iff mesh_leg && !sdf_leg \
+             (scene-assembly gate missed)"
+        );
+
         let g = &mut self.frame_graph;
         g.reset();
 
@@ -851,8 +884,8 @@ impl Renderer<'_> {
         // Pass `raster` (sites 0/1): the 3-MRT G-buffer + depth. Multi-paradigm render-path
         // plan, rung R2 (Decision 2 / O1): gated on `scene.path_has_raster()` — the SAME
         // predicate `record_gbuffer`'s raster begin/end-rendering block checks (a
-        // `debug_assert_eq!` there guards the two never diverging). Rung R3 lifted
-        // `DEFERRED_SDF_ONLY_IMPLEMENTED`, so `Deferred × Sdf` now reaches here `false` — see
+        // `debug_assert_eq!` there guards the two never diverging). Since rung R3 landed
+        // the SDF-only leg, `Deferred × Sdf` reaches here `false` — see
         // `mesh_depth_neutral_clear` below for its depth-clear replacement. Every other
         // currently reachable `Deferred` config still has `mesh_leg == true`, so the
         // declaration order and every `image_access`/`buffer_access` call below stay BYTE-FOR-
@@ -952,6 +985,40 @@ impl Renderer<'_> {
                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
                 SubRange::DEPTH,
+            );
+            Some(p)
+        } else {
+            None
+        };
+
+        // Pass `viewt_from_depth` (§E leg-disable / the R3b audit finding): `Deferred × Mesh`'s
+        // `gViewT`-producer replacement for the (undispatched) marcher. `Some` iff
+        // `scene.viewt_from_depth.is_some()` — the SAME field `record_gbuffer`'s dispatch block
+        // reads (capability = component presence, mirroring `scene.ssao.is_some()`'s gate — the
+        // two sites read the SAME `scene` field, so they cannot diverge by construction; no W1
+        // predicate fn is needed the way `mesh_depth_neutral_clear` above needs one, since that
+        // pass has NO caller-supplied Option to key off). Declared right after the depth producer
+        // (`raster` or `mesh_depth_neutral_clear`, whichever ran) and before `marcher` — the SAME
+        // slot the marcher itself would occupy under every other leg, so its depth-read barrier
+        // derives identically. Reads depth (the SAME SHADER_READ_ONLY access the marcher declares
+        // below) + WRITES gViewT (every dispatched pixel is written exactly once — no prior-frame
+        // value survives, unlike the marcher's RW batch which shares one access across four
+        // attribute images).
+        let viewt_from_depth = if scene.viewt_from_depth.is_some() {
+            let p = g.add_pass("viewt_from_depth");
+            g.image_access(
+                depth,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                SubRange::DEPTH,
+            );
+            g.image_access(
+                viewt,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                SubRange::COLOR,
             );
             Some(p)
         } else {
@@ -1630,6 +1697,7 @@ impl Renderer<'_> {
             interp,
             raster,
             mesh_depth_neutral_clear,
+            viewt_from_depth,
             light_upload,
             coarse,
             marcher,

@@ -66,7 +66,7 @@ use boyko_rhi::{
     PrimitiveTopology, QueryPoolDesc, RhiDevice, SamplerDesc, ShaderStage, TextureDesc,
     TextureDimension, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
-use boyko_rhi_vulkan::compute::{B5_CAMERA_UBO_BYTES_M4, B5_CAMERA_UBO_BYTES_MESH_SDF, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, CompositePushConstants, csm_depth_fs_spirv, csm_depth_vs_spirv, punctual_depth_fs_spirv, punctual_depth_vs_spirv, EDITLIST_BUFFER_WORDS, GOLDEN_LIGHT_HEADER_BASE_WORDS, GOLDEN_LIGHT_KIND_DIRECTIONAL, GOLDEN_LIGHT_KIND_POINT, GOLDEN_LIGHT_KIND_SPOT, INTERP_INSTANCES_PUSH_BYTES, interp_instances_spirv, LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET, MESH_SDF_PARAMS_OFFSET, MeshSdfParams, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_TRACE_T_MAX, SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, CompositeCamera, encode_edit_list, deferred_pbr_spirv, composite_pixel_ray, DEFAULT_MARCHER_OMEGA, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, DEFAULT_LIGHT_DIR, mesh_depth_for_z, sdf_gbuffer_composite_spirv, sdf_op, sdf_ssao_spirv_variant, sdf_tile_cull_spirv, tile_grid_extent, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM, SSAO_QUALITY_HIGH};
+use boyko_rhi_vulkan::compute::{B5_CAMERA_UBO_BYTES_M4, B5_CAMERA_UBO_BYTES_MESH_SDF, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, CompositePushConstants, csm_depth_fs_spirv, csm_depth_vs_spirv, punctual_depth_fs_spirv, punctual_depth_vs_spirv, EDITLIST_BUFFER_WORDS, GOLDEN_LIGHT_HEADER_BASE_WORDS, GOLDEN_LIGHT_KIND_DIRECTIONAL, GOLDEN_LIGHT_KIND_POINT, GOLDEN_LIGHT_KIND_SPOT, INTERP_INSTANCES_PUSH_BYTES, interp_instances_spirv, LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET, MESH_SDF_PARAMS_OFFSET, MeshSdfParams, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_TRACE_T_MAX, SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, CompositeCamera, encode_edit_list, deferred_pbr_spirv, composite_pixel_ray, DEFAULT_MARCHER_OMEGA, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, DEFAULT_LIGHT_DIR, mesh_depth_for_z, sdf_gbuffer_composite_spirv, sdf_op, sdf_ssao_spirv_variant, sdf_tile_cull_spirv, tile_grid_extent, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM, SSAO_QUALITY_HIGH, viewt_from_depth_spirv};
 use boyko_rhi_vulkan::goldens::{GoldenLight, GoldenLightHeader, golden_composite_pixel_ex, golden_deferred_resolve, golden_marcher_attributes, GoldenMaterial};
 use boyko_rhi_vulkan::mesh_sdf_texture::MeshSdfTexture;
 use boyko_sdf_math::mesh_sdf::{BakeMesh, MeshSdfField};
@@ -90,6 +90,7 @@ use boyko_rhi_vulkan::swapchain::{
     GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferFrame,
     GBufferMeshDraw, GBufferScene, InterpActivation, PASS_COUNT, PunctualDepthActivation, Renderer,
     ResolvedRenderPathGpu, SsaoActivation, Surface, Swapchain, TimestampCollector,
+    ViewtFromDepthActivation,
 };
 use boyko_rhi_vulkan::window::{CapturedMsg, Window};
 
@@ -2336,6 +2337,10 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // Render P7: SSAO OFF (the default) — NO SSAO pass recorded, byte-identical to the pre-P7
         // stream (the 0%-gate). These golden/cull-comparison presents assert the existing stream.
         ssao: None,
+        // Multi-paradigm render-path plan, rung R3b: this harness's `resolved_render_path` is
+        // `ResolvedRenderPathGpu::default()` (`Deferred × Both`), so the marcher itself is the
+        // sole `gViewT` producer — `viewt_from_depth` stays `None` (the 0%-gate).
+        viewt_from_depth: None,
         // The SSAO à-trous denoise chain's stable boot pipelines/layout — not wired by this
         // harness (it never dispatches à-trous).
         ssao_atrous_read8_pipeline: None,
@@ -3303,6 +3308,10 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // Render P7: SSAO OFF (the default) — NO SSAO pass recorded, byte-identical to the pre-P7
         // stream (the 0%-gate). These golden/cull-comparison presents assert the existing stream.
         ssao: None,
+        // Multi-paradigm render-path plan, rung R3b: this harness's `resolved_render_path` is
+        // `ResolvedRenderPathGpu::default()` (`Deferred × Both`), so the marcher itself is the
+        // sole `gViewT` producer — `viewt_from_depth` stays `None` (the 0%-gate).
+        viewt_from_depth: None,
         // The SSAO à-trous denoise chain's stable boot pipelines/layout — not wired by this
         // harness (it never dispatches à-trous).
         ssao_atrous_read8_pipeline: None,
@@ -5727,17 +5736,49 @@ fn engine_deferred_sdf_only_512_screenshot_dump() {
     );
 }
 
-// NOTE (rung R3 Phase-1 audit finding (a)): a `Deferred × Mesh` sibling golden
-// (`engine_deferred_mesh_only_512_screenshot_dump`) is intentionally NOT added here. The R3
-// audit found the marcher is the SOLE producer of the `gViewT` lane for MESH-owned pixels too
-// (`sdf_gbuffer_composite.hlsl`'s `gViewT[...] = (own_pixel && mask==1.0) ? t : (has_mesh ?
-// t_mesh : 1.0e30)`, both terminal write sites), and every `gViewT` consumer (the resolve's `P =
-// ro + rd*view_t` reconstruction, SSAO's mesh/SDF `view_t` classification) reads it
-// UNCONDITIONALLY under `mask == 1` -- mesh pixels included. Skipping the marcher entirely (the
-// plan's O2 "verified" mesh-only design) leaves `gViewT` wholly unwritten -- a real correctness
-// bug, not a cosmetic gap. `boyko_render::render_path_config::DEFERRED_MESH_ONLY_IMPLEMENTED`
-// stays `false` (the resolver keeps degrading `Deferred × Mesh` to `Both`) until an approved
-// gViewT producer-replacement design lands; see this rung's report for the full finding.
+/// Multi-paradigm render-path plan, rung R3b (§E leg-disable / the R3 audit finding (a)) — the
+/// `Deferred × Mesh` leg-disable golden: the SAME [`grand_showcase_config`] room, but with the
+/// resolved render path's `sdf_leg` forced OFF (`GeometryLegs::Mesh`). The SDF marcher is not
+/// dispatched at all (`GBufferScene::marcher` pass is `None`), so the two SDF spheres are ABSENT
+/// and NO marcher dispatch runs; the new `viewt_from_depth` compute pass reproduces the marcher's
+/// mesh-depth → `gViewT` conversion for every pixel instead, so the resolve's `P = ro +
+/// rd*view_t` reconstruction and SSAO's mesh/SDF classification see the REAL mesh surface exactly
+/// as they would under `Both` (the R3 audit's "gViewT wholly unwritten" bug this rung closes).
+/// Mesh-shadow producers (CSM, the punctual atlas, and under `hwrt` the TLAS/shadow-vis chain)
+/// stay ON — they are mesh-leg-owned and `mesh_leg` is `true` here (the mirror-image of
+/// `engine_deferred_sdf_only_512_screenshot_dump`'s suppression under `!mesh_leg`). Dumps a TRUE
+/// 512×512 BMP to [`DEFERRED_MESH_ONLY_BMP`] for the owner's RTX visual sign-off.
+const DEFERRED_MESH_ONLY_BMP: &str = r"D:\tmp\deferred_mesh_only.bmp";
+
+/// `#[ignore]`: needs a real RTX windowed device. Run with `BOYKO_DISABLE_VALIDATION=1`; the
+/// orchestrator runs it on the GPU to dump the screenshot.
+#[test]
+#[ignore = "needs a real RTX windowed device; the orchestrator runs it on the GPU to dump the deferred-mesh-only leg-disable screenshot"]
+fn engine_deferred_mesh_only_512_screenshot_dump() {
+    // Multi-paradigm render-path plan, rung R3b: drive the REAL boot resolver
+    // (`boyko_render::resolve_render_path`) instead of hand-building the carrier, so this golden
+    // covers the config -> resolver -> carrier -> frame seam end-to-end (mirrors the sibling
+    // `engine_deferred_sdf_only_512_screenshot_dump` golden exactly, `Sdf` -> `Mesh`).
+    let cfg = boyko_render::RenderPathConfig {
+        path: boyko_render::RenderPath::Deferred,
+        legs: boyko_render::GeometryLegs::Mesh,
+    };
+    let (resolved, degrades) = boyko_render::resolve_render_path(
+        &cfg,
+        boyko_render::RenderPathConsumers::default(),
+        boyko_render::RenderPathDeviceCaps::default(),
+    );
+    assert!(degrades.is_clean(), "Deferred x Mesh must resolve clean at rung R3b (no degrade)");
+    assert!(resolved.mesh_leg && !resolved.sdf_leg, "invariant: GeometryLegs::Mesh resolves sdf_leg=false");
+    let resolved_render_path = resolved_render_path_gpu_from(&resolved);
+
+    run_showcase_dump_with_render_path(
+        "boyko_engine deferred mesh-only 512",
+        DEFERRED_MESH_ONLY_BMP,
+        grand_showcase_config(),
+        resolved_render_path,
+    );
+}
 
 /// The GRAND flagship showcase screenshot with SDFDDGI **GI ON** — the FIRST render (rung I4) that
 /// arms the live probe-update pass AND the resolve's GI-injection gate. The warm sun drives the
@@ -8156,6 +8197,10 @@ fn run_showcase_body_ddgi(
         ssao_atrous_interior_pipeline: None,
         ssao_atrous_write8_pipeline: None,
         ssao_atrous_layout: None,
+        // Multi-paradigm render-path plan, rung R3b: this DDGI harness's `resolved_render_path`
+        // is `ResolvedRenderPathGpu::default()` (`Deferred × Both`), so the marcher itself is the
+        // sole `gViewT` producer — `viewt_from_depth` stays `None` (the 0%-gate).
+        viewt_from_depth: None,
         // AA Stage 1: OFF (the default) — NO FXAA pass recorded, present samples `lit`
         // directly, byte-identical to the pre-AA stream (the 0%-gate).
         aa: None,
@@ -9347,10 +9392,40 @@ fn run_showcase_body(
     )
     .expect("Render P7 SSAO compute pipeline");
 
+    // Multi-paradigm render-path plan, rung R3b (`Deferred × Mesh` — the SDF leg fully off): the
+    // `viewt_from_depth` compute pass (dedicated 2-binding set { SAMPLED depth @0, STORAGE
+    // `gViewT` @1 }). It reproduces the marcher's own mesh-depth → `gViewT` conversion for every
+    // pixel, standing in for the (undispatched) marcher on a mesh-only frame. Always created
+    // (harmless when unused — mirrors the SSAO pipeline above); `scene.viewt_from_depth` below is
+    // armed ONLY when `resolved_render_path` resolves `mesh_leg && !sdf_leg`.
+    let viewt_from_depth_entries = [
+        BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::SampledImage, stage: ShaderStage::COMPUTE },
+        BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+    ];
+    let viewt_from_depth_layout = RhiDevice::create_bind_group_layout(
+        device,
+        &BindGroupLayoutDesc { entries: &viewt_from_depth_entries },
+    )
+    .expect("viewt_from_depth bind-group layout");
+    let viewt_from_depth_cs = RhiDevice::create_shader_module(device, viewt_from_depth_spirv())
+        .expect("viewt_from_depth compute shader module");
+    let viewt_from_depth_pipeline = RhiDevice::create_compute_pipeline(
+        device,
+        &ComputePipelineDesc {
+            module: &viewt_from_depth_cs,
+            entry: c"main",
+            push_constant_bytes: boyko_rhi_vulkan::compute::VIEWT_FROM_DEPTH_PUSH_BYTES,
+            bind_group_layout: Some(&viewt_from_depth_layout),
+            spec_constants: &[],
+        },
+    )
+    .expect("viewt_from_depth compute pipeline");
+
     // The shader modules are consumed by pipeline creation; destroy them now.
     // SAFETY: every module was created on `ctx` above + is no longer needed once its pipeline
     // is created; each is destroyed exactly once.
     unsafe {
+        RhiDevice::destroy_shader_module(device, viewt_from_depth_cs);
         RhiDevice::destroy_shader_module(device, sample_fs);
         RhiDevice::destroy_shader_module(device, sample_vs);
         RhiDevice::destroy_shader_module(device, ssao_cs);
@@ -9541,6 +9616,18 @@ fn run_showcase_body(
         ssao_atrous_interior_pipeline: None,
         ssao_atrous_write8_pipeline: None,
         ssao_atrous_layout: None,
+        // Multi-paradigm render-path plan, rung R3b (`Deferred × Mesh` — the SDF leg fully off):
+        // armed exactly when the REAL boot-resolved legs are `GeometryLegs::Mesh` (`mesh_leg &&
+        // !sdf_leg`) — the marcher is not dispatched then, so this pass is the sole `gViewT`
+        // producer. `mesh_view_t_norm` mirrors the marcher's own `mesh_norm` selection for THIS
+        // harness's camera (`cfg.camera.camera_mode`, the SAME camera the marcher/resolve/SSAO
+        // read from the b5 UBO). `Deferred × Both`/`Sdf` keep this `None` (the marcher itself
+        // writes `gViewT`) — byte-identical to every pre-R3b showcase.
+        viewt_from_depth: (mesh_leg && !resolved_render_path.sdf_leg).then(|| ViewtFromDepthActivation {
+            pipeline: &viewt_from_depth_pipeline,
+            layout: &viewt_from_depth_layout,
+            mesh_view_t_norm: boyko_render::mesh_view_t_norm(cfg.camera.camera_mode),
+        }),
         // AA Stage 1: OFF (the default) — NO FXAA pass recorded, present samples `lit`
         // directly, byte-identical to the pre-AA stream (the 0%-gate).
         aa: None,
@@ -9803,6 +9890,8 @@ fn run_showcase_body(
             RhiDevice::destroy_bind_group_layout(device, present_layout);
             RhiDevice::destroy_compute_pipeline(device, ssao_pipeline);
             RhiDevice::destroy_bind_group_layout(device, ssao_layout);
+            RhiDevice::destroy_compute_pipeline(device, viewt_from_depth_pipeline);
+            RhiDevice::destroy_bind_group_layout(device, viewt_from_depth_layout);
             RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
             RhiDevice::destroy_bind_group_layout(device, resolve_layout);
             RhiDevice::destroy_compute_pipeline(device, marcher);
@@ -9965,6 +10054,8 @@ fn run_showcase_body(
         RhiDevice::destroy_bind_group_layout(device, present_layout);
         RhiDevice::destroy_compute_pipeline(device, ssao_pipeline);
         RhiDevice::destroy_bind_group_layout(device, ssao_layout);
+        RhiDevice::destroy_compute_pipeline(device, viewt_from_depth_pipeline);
+        RhiDevice::destroy_bind_group_layout(device, viewt_from_depth_layout);
         RhiDevice::destroy_compute_pipeline(device, resolve_pipeline);
         RhiDevice::destroy_bind_group_layout(device, resolve_layout);
         RhiDevice::destroy_compute_pipeline(device, marcher);
