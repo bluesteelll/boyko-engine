@@ -16,6 +16,7 @@ use crate::material::Material;
 use crate::mesh::MeshGpu;
 use crate::mesh_assets::build_mesh_gpu;
 use crate::mesh_data::MeshData;
+use crate::mesh_geometry_table::MeshGeometryTableSlot;
 use crate::texture::{TextureGpu, build_texture_gpu};
 use crate::texture_data::TextureData;
 
@@ -37,16 +38,24 @@ pub trait GpuUpload: Asset {
 }
 
 impl GpuUpload for MeshGpu {
-    /// `build_mesh_gpu` needs only the device context — no extra per-type state.
-    type Aux = ();
+    /// Multi-paradigm render-path plan, rung R-VBGEO (Decision 0 / Rev-5 streaming
+    /// invariant): the always-present [`MeshGeometryTableSlot`] wrapper resource
+    /// (`None` unless `ResolvedRenderPath.vb_geometry_table` was armed at boot — see
+    /// that type's doc) — the STREAMED mesh path (this impl) is the ONE registration
+    /// site that threads `Option<&mut MeshGeometryTable>` all the way through
+    /// `build_mesh_gpu`, satisfying "every runtime-streamed mesh claims a slot when
+    /// armed" without widening `MeshAssetsExt::register_mesh`'s public signature (see
+    /// `build_mesh_gpu`'s doc for the host-authored-path scope cut).
+    type Aux = MeshGeometryTableSlot;
 
     /// Builds the resident mesh through the EXACT SAME device path
     /// [`MeshAssetsExt::register_mesh`](crate::mesh_assets::MeshAssetsExt::register_mesh)
     /// uses for a host-authored mesh: create + fill the vertex/index buffers
-    /// (index width chosen by O3), and build the BLAS eagerly on an RT device.
+    /// (index width chosen by O3), build the BLAS eagerly on an RT device, and — when
+    /// `aux.0` holds a live table — claim its geometry-table slot.
     #[inline]
-    fn upload(cpu: MeshData, ctx: &VulkanContext, _aux: &mut Self::Aux) -> Self {
-        build_mesh_gpu(ctx, &cpu.vertices, &cpu.indices)
+    fn upload(cpu: MeshData, ctx: &VulkanContext, aux: &mut Self::Aux) -> Self {
+        build_mesh_gpu(ctx, &cpu.vertices, &cpu.indices, aux.0.as_mut())
     }
 }
 
@@ -139,12 +148,21 @@ pub fn upload_material_assets(
 /// buffers, so this table itself is the GPU-resident mesh table — no separate
 /// mirror). See [`upload_material_assets`] for why this is a distinct,
 /// non-generic wrapper rather than one generic-over-`A` system.
+///
+/// Multi-paradigm render-path plan, rung R-VBGEO: also threads the world's
+/// [`MeshGeometryTableSlot`] (mirrors [`upload_texture_assets`]'s
+/// `NonSendResMut<BindlessTextureTable>` thread one level down) so every mesh this
+/// drain uploads claims a geometry-table slot when armed. `boyko_app::runner` inserts
+/// `MeshGeometryTableSlot` right after `resolve_render_path`, BEFORE this system's
+/// first call — the Rev-5 "flag reaches the registration site before the first mesh
+/// upload" gate.
 pub fn upload_mesh_assets(
     mut assets: NonSendResMut<Assets<MeshGpu>>,
     mut staging: NonSendResMut<AssetStaging<MeshGpu>>,
     ctx: NonSendRes<RhiContext>,
+    mut geometry_table: NonSendResMut<MeshGeometryTableSlot>,
 ) {
-    upload_assets(&mut assets, &mut staging, ctx.context(), &mut ());
+    upload_assets(&mut assets, &mut staging, ctx.context(), &mut geometry_table);
 }
 
 /// Boot one-shot (textured-PBR rung T6b): drains `AssetStaging<TextureGpu>` into

@@ -466,6 +466,33 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // for any ECS-side reader.
     app.world_mut().insert_resource(resolved_render_path);
 
+    // Multi-paradigm render-path plan, rung R-VBGEO (Decision 0 / Rev-5 streaming
+    // invariant): commit `vb_geometry_table` onto `ctx` and construct the (always
+    // `None` today) `MeshGeometryTableSlot` wrapper resource — BOTH before
+    // `app.finish()` (which drains every startup system, incl. a user `setup` that may
+    // call `MeshAssetsExt::cube`/`plane`/`register_mesh`) and before the
+    // `upload_mesh_assets` boot drain below, so the flag is available at EVERY
+    // mesh-registration site, host-authored or streamed, before the FIRST mesh upload
+    // (the Rev-5 gate). `VB_IMPLEMENTED == false` keeps `vb_geometry_table` false for
+    // every resolve today (see `render_path_config`'s module doc), so this always sets
+    // `ctx`'s flag to `false` and constructs `MeshGeometryTableSlot(None)` — zero cost,
+    // no device calls, until `VB_IMPLEMENTED` lands (a later rung).
+    ctx.set_vb_geometry_table_armed(resolved_render_path.vb_geometry_table);
+    let mesh_geometry_table_slot = if resolved_render_path.vb_geometry_table {
+        match boyko_render::MeshGeometryTable::new(ctx) {
+            Ok(table) => boyko_render::MeshGeometryTableSlot(Some(table)),
+            Err(e) => {
+                eprintln!(
+                    "boyko_app: MeshGeometryTable::new failed ({e:?}) - VB geometry table disabled"
+                );
+                boyko_render::MeshGeometryTableSlot(None)
+            }
+        }
+    } else {
+        boyko_render::MeshGeometryTableSlot(None)
+    };
+    app.world_mut().insert_non_send_resource(mesh_geometry_table_slot);
+
     // ── Windowed `AppExit` semantics: insert-IF-ABSENT (plan D6; the legacy
     // headless path keeps its unconditional insert).
     if !app.world().contains_resource::<AppExit>() {

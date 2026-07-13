@@ -90,6 +90,7 @@ use boyko_scene::render_caps::MeshHandle;
 use crate::mesh::{MeshGpu, U16_INDEX_VERTEX_LIMIT, Vertex};
 #[cfg(feature = "hwrt")]
 use crate::mesh::VERTEX_STRIDE;
+use crate::mesh_geometry_table::{MeshGeometryTable, VB_GEOMETRY_RESERVED_SLOT, mesh_buffer_usage};
 use crate::tangent::generate_tangents;
 
 /// The mesh-domain API over the world's [`Assets<MeshGpu>`] table (asset-system
@@ -191,10 +192,33 @@ pub trait MeshAssetsExt {
 /// host-authored `register_mesh` call uses — a pure refactor of
 /// `register_mesh`'s prior inline body, byte-identical to the pre-A3b behavior.
 ///
+/// # Rung R-VBGEO — `geometry_table` (Decision 0 / P2-b)
+///
+/// `geometry_table` is the [`MeshGeometryTable`] to ALSO claim a slot in, when armed —
+/// threaded so the STREAMED mesh-upload drain
+/// ([`GpuUpload for MeshGpu`](crate::gpu_upload::GpuUpload)) can pass
+/// `Some(&mut table)` (the Rev-5 "every runtime-streamed mesh" invariant). The
+/// STORAGE-usage-bit decision itself ([`mesh_buffer_usage`]) reads
+/// `ctx.vb_geometry_table_armed()` — a flag threaded via `ctx` (already a parameter at
+/// EVERY registration call site), so it applies UNIVERSALLY regardless of whether this
+/// call passes a table. Host-authored primitives (`register_mesh`/`cube`/`plane`) pass
+/// `None` this rung: threading `Option<&mut MeshGeometryTable>` through THEIR public
+/// signatures would touch every one of their ~20 call sites across `boyko_app`
+/// (showcases/tests/examples), well beyond this rung's "data layer only" scope —
+/// `VB_IMPLEMENTED == false` keeps `vb_geometry_table_armed()` `false` on every boot
+/// today regardless, so this is a documented, currently-inert scope cut, not a
+/// correctness gap; a later rung that actually needs host-authored meshes IN the VB
+/// geometry table can widen `register_mesh`'s signature then.
+///
 /// # Panics
 /// Same contract as [`MeshAssetsExt::register_mesh`]: a buffer create / map
 /// failure at asset-registration time is a setup failure.
-pub fn build_mesh_gpu(ctx: &VulkanContext, vertices: &[Vertex], indices: &[u32]) -> MeshGpu {
+pub fn build_mesh_gpu(
+    ctx: &VulkanContext,
+    vertices: &[Vertex],
+    indices: &[u32],
+    geometry_table: Option<&mut MeshGeometryTable>,
+) -> MeshGpu {
     debug_assert!(!vertices.is_empty(), "invariant: a mesh has at least one vertex");
     debug_assert!(!indices.is_empty(), "invariant: an indexed mesh has at least one index");
     let vertex_count = vertices.len();
@@ -224,8 +248,18 @@ pub fn build_mesh_gpu(ctx: &VulkanContext, vertices: &[Vertex], indices: &[u32])
             BufferUsage::NONE
         }
     };
-    let vertex_usage = BufferUsage::VERTEX | as_bits;
-    let index_usage = BufferUsage::INDEX | as_bits;
+    // Multi-paradigm render-path plan, rung R-VBGEO (Decision 0 / P2-b): the
+    // STORAGE_BUFFER usage bit is ONLY added when the boot-committed
+    // `vb_geometry_table` flag is armed (read through `ctx`, the channel already
+    // present at every registration call site) — otherwise `vb_bits == BufferUsage::NONE`
+    // and the usage is EXACTLY today's `VERTEX`/`INDEX`-only (byte-identical
+    // registration). `VB_IMPLEMENTED == false` keeps this flag `false` on every boot
+    // today (see `mesh_geometry_table`'s module doc), so `vb_bits` is always `NONE` in
+    // practice — this is the pure fn `mesh_buffer_usage` proves, unit-tested without a
+    // device.
+    let vb_bits = mesh_buffer_usage(ctx.vb_geometry_table_armed());
+    let vertex_usage = BufferUsage::VERTEX | as_bits | vb_bits;
+    let index_usage = BufferUsage::INDEX | as_bits | vb_bits;
 
     // --- Vertex buffer: copy the model-space vertices in once. ---
     let vertex_bytes = core::mem::size_of_val(vertices) as u64;
@@ -325,6 +359,28 @@ pub fn build_mesh_gpu(ctx: &VulkanContext, vertices: &[Vertex], indices: &[u32])
         }
     };
 
+    // Multi-paradigm render-path plan, rung R-VBGEO (Decision 0 / Rev-5 streaming
+    // invariant): claim a geometry-table slot for this mesh IFF the caller threaded a
+    // live table AND the boot-committed flag is armed — the two checks are threaded
+    // independently (see this fn's doc), but every REAL caller keeps them in lockstep
+    // (`GpuUpload for MeshGpu::upload` only ever passes `Some` when the SAME
+    // `ctx.vb_geometry_table_armed()` is `true` — see that impl's doc), so a mesh's
+    // buffers and its geometry-table registration are never inconsistent in practice.
+    // `register_mesh`/`cube`/`plane` always pass `None` this rung (documented scope
+    // cut above), so `geometry_slot` stays `VB_GEOMETRY_RESERVED_SLOT` for every
+    // host-authored mesh today.
+    let geometry_slot = match geometry_table {
+        Some(table) if ctx.vb_geometry_table_armed() => table.register(
+            ctx,
+            &vertex_buffer,
+            vertex_count as u32,
+            &index_buffer,
+            indices.len() as u32,
+            index_type,
+        ),
+        _ => VB_GEOMETRY_RESERVED_SLOT,
+    };
+
     MeshGpu {
         vertex_buffer,
         index_buffer,
@@ -333,6 +389,7 @@ pub fn build_mesh_gpu(ctx: &VulkanContext, vertices: &[Vertex], indices: &[u32])
         vertex_count: vertex_count as u32,
         #[cfg(feature = "hwrt")]
         blas,
+        geometry_slot,
     }
 }
 
@@ -410,7 +467,9 @@ impl MeshAssetsExt for Assets<MeshGpu> {
         vertices: &[Vertex],
         indices: &[u32],
     ) -> MeshHandle {
-        let mesh = build_mesh_gpu(ctx, vertices, indices);
+        // `None`: host-authored registration does not thread the VB geometry table
+        // this rung — see `build_mesh_gpu`'s doc for the scope cut.
+        let mesh = build_mesh_gpu(ctx, vertices, indices, None);
         MeshHandle(self.add(mesh).index())
     }
 

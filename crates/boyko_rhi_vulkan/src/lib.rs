@@ -117,6 +117,14 @@ pub mod device;
 pub mod error;
 pub mod ffi;
 pub mod framegraph;
+/// Multi-paradigm render-path plan, rung R-VBGEO (Decision 0 / P2-c) — the
+/// `VisibilityBuffer` path's own Set-3 geometry descriptor set:
+/// [`geometry_bindless::VulkanGeometryBindlessSet`] (two bindless `STORAGE_BUFFER`
+/// runtime arrays `gMeshVerts[]`/`gMeshIndices[]` + the plain `gMeshMeta[]` SSBO
+/// binding) + its per-slot write verb
+/// ([`geometry_bindless::write_geometry_buffer_slot`]). A sibling of, not a reuse of,
+/// [`bindless::VulkanBindlessSet`] — see the module doc for why.
+pub mod geometry_bindless;
 pub mod memory;
 pub mod mesh_sdf_texture;
 pub mod present;

@@ -48,6 +48,7 @@ fn dummy_mesh_gpu() -> MeshGpu {
         vertex_count: 8,
         #[cfg(feature = "hwrt")]
         blas: None,
+        geometry_slot: 0,
     }
 }
 

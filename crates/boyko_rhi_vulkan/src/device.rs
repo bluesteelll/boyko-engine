@@ -339,6 +339,14 @@ pub struct DeviceCaps {
     /// 2× ring VRAM cost to stay under half of this before committing SSAA; on failure SSAA
     /// degrades to `Off` (never an allocation panic).
     pub device_local_heap_bytes: u64,
+    /// Multi-paradigm render-path plan, rung R-VBGEO (Decision 0 / P2-c):
+    /// `VkPhysicalDeviceLimits::maxBoundDescriptorSets`. The `VisibilityBuffer` path's
+    /// bindless geometry table lives in its own Set 3 (Set 0/1/2 + Set 3 = 4 bound sets),
+    /// so `MeshGeometryTable::new` `debug_assert!`s this is `>= 4` at construction — the
+    /// Vulkan spec's guaranteed floor is exactly 4, so this always holds on a conformant
+    /// device; RECORDED (not a boot fail-fast) since a booted context never needs this
+    /// value until a live `MeshGeometryTable` is actually constructed (R8+).
+    pub max_bound_descriptor_sets: u32,
 }
 
 impl DeviceCaps {
@@ -662,6 +670,25 @@ pub struct VulkanContext {
     /// is absent from a default build, so `VulkanContext`'s layout is textually R1 there.
     #[cfg(feature = "hwrt")]
     accel_fns: Option<crate::accel::AccelFns>,
+    /// Multi-paradigm render-path plan, rung R-VBGEO (Decision 0 / Rev-5 streaming
+    /// invariant): whether the boot-committed `ResolvedRenderPath.vb_geometry_table` is
+    /// `true` for this run. Set EXACTLY ONCE, by `boyko_app::runner`, right after
+    /// `resolve_render_path` — BEFORE `app.finish()` drains any startup system that might
+    /// register a mesh, and BEFORE the boot one-shot `upload_mesh_assets` drain (the
+    /// Rev-5 "flag reaches the registration site before the first mesh upload" gate).
+    /// `OnceCell` (not a plain field) because `VulkanContext` is fully constructed at
+    /// `boot()`/`boot_singleton()` time, BEFORE the render-path resolve exists — the SAME
+    /// "settable once after construction, read many times, single-threaded" shape
+    /// [`Self::compute_layouts`] already uses. Read via [`Self::vb_geometry_table_armed`]
+    /// (defaults to `false` if never set — every current boot leaves it unset, since
+    /// `VB_IMPLEMENTED == false` in `boyko_render::render_path_config` keeps
+    /// `vb_geometry_table` false for every resolve today). `ctx: &VulkanContext` is
+    /// already the channel present at EVERY mesh-registration call site
+    /// (`build_mesh_gpu`/`register_mesh`/`cube`/`plane`/the streamed `GpuUpload` path), so
+    /// this is a zero-signature-change way to thread the flag universally (mirrors
+    /// `DeviceCaps::storage_buffer_array_non_uniform_indexing_ok`'s "device/context config
+    /// already reaches every call site" channel, one layer up).
+    vb_geometry_table_armed: OnceCell<bool>,
 }
 
 /// The retained OWNING pointer behind [`VulkanContext::boot_singleton`] /
@@ -993,6 +1020,11 @@ impl VulkanContext {
         device_caps.max_image_dimension_2d =
             device_props.limits.read_u32(LIMITS_OFF_MAX_IMAGE_DIMENSION_2D);
         device_caps.device_local_heap_bytes = max_device_local_heap_bytes(&memory_properties);
+        // Multi-paradigm render-path plan, rung R-VBGEO: populate the placeholder
+        // `query_device_caps` left at zero — mirrors `max_image_dimension_2d` immediately
+        // above (the same physical-device limits blob, a different offset).
+        device_caps.max_bound_descriptor_sets =
+            device_props.limits.read_u32(LIMITS_OFF_MAX_BOUND_DESCRIPTOR_SETS);
         if !device_caps.gbuffer_storage_format_ok {
             fail!(BootError::GbufferStorageFormatUnsupported);
         }
@@ -1114,6 +1146,7 @@ impl VulkanContext {
             device_block: OnceCell::new(),
             #[cfg(feature = "hwrt")]
             accel_fns,
+            vb_geometry_table_armed: OnceCell::new(),
         })
     }
 
@@ -1153,6 +1186,26 @@ impl VulkanContext {
     #[inline]
     pub fn device_caps(&self) -> DeviceCaps {
         self.device_caps
+    }
+
+    /// Multi-paradigm render-path plan, rung R-VBGEO: commits the boot-resolved
+    /// `ResolvedRenderPath.vb_geometry_table` flag exactly once (`boyko_app::runner`,
+    /// right after `resolve_render_path`, before `app.finish()` / the `upload_mesh_assets`
+    /// boot drain). A second call (there is none in the current boot sequence) is a
+    /// harmless no-op — `OnceCell::set` on an already-set cell silently keeps the first
+    /// value, since every caller in this codebase sets the SAME boot-resolved value.
+    #[inline]
+    pub fn set_vb_geometry_table_armed(&self, armed: bool) {
+        let _ = self.vb_geometry_table_armed.set(armed);
+    }
+
+    /// Whether the boot-committed `ResolvedRenderPath.vb_geometry_table` is armed —
+    /// `false` until [`Self::set_vb_geometry_table_armed`] runs (every mesh-registration
+    /// call site reads this through the `ctx: &VulkanContext` parameter it already takes,
+    /// so no new parameter threads the flag — see the field's own doc).
+    #[inline]
+    pub fn vb_geometry_table_armed(&self) -> bool {
+        self.vb_geometry_table_armed.get().copied().unwrap_or(false)
     }
 
     /// The resolved device command table.
@@ -3081,6 +3134,11 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         // pattern above).
         max_image_dimension_2d: 0,
         device_local_heap_bytes: 0,
+        // Multi-paradigm render-path plan, rung R-VBGEO: placeholder — the boot site
+        // overwrites this from the physical-device limits blob (`maxBoundDescriptorSets`),
+        // the SAME input `query_device_caps` does not itself read (mirrors the
+        // `max_image_dimension_2d` placeholder immediately above).
+        max_bound_descriptor_sets: 0,
     }
 }
 
@@ -3232,6 +3290,21 @@ fn create_device(
     descriptor_indexing.descriptor_binding_partially_bound = VK_TRUE;
     descriptor_indexing.descriptor_binding_variable_descriptor_count = VK_TRUE;
     descriptor_indexing.descriptor_binding_sampled_image_update_after_bind = VK_TRUE;
+    // Multi-paradigm render-path plan, rung R-VBGEO: deliberately does NOT enable
+    // `shader_storage_buffer_array_non_uniform_indexing` / `descriptor_binding_storage_
+    // buffer_update_after_bind` here — mirrors `DeviceCaps::storage_buffer_array_non_
+    // uniform_indexing_ok`'s own R1 doc ("enabling an unsupported bit at device-create
+    // would be a real, untested boot-behavior change for zero benefit this rung"). R-VBGEO
+    // builds `MeshGeometryTable`'s CPU-testable machinery + the Vulkan Set-3 layout/pool/set
+    // construction code (`geometry_bindless.rs`), but `VB_IMPLEMENTED == false` keeps
+    // `ResolvedRenderPath.vb_geometry_table` false for every resolve today, so no live code
+    // path ever constructs a `MeshGeometryTable` — enabling these two bits now would be
+    // exactly the same premature, untested change R1 already declined. Whichever rung
+    // actually constructs a LIVE `MeshGeometryTable` (R8+) MUST first query BOTH bits
+    // (mirroring `enable_ray_query`'s conditional-enable precedent: query the physical
+    // device's support before requesting it, never force an unsupported bit), thread that
+    // bool into this fn, and set these two fields here — the sole remaining device-create
+    // gap for a real Set-3 UPDATE_AFTER_BIND storage-buffer array to function.
     descriptor_indexing.p_next =
         (&features13 as *const VkPhysicalDeviceVulkan13Features).cast::<c_void>() as *mut c_void;
 
@@ -3566,6 +3639,7 @@ mod tests {
             as_scratch_align: 0,
             max_image_dimension_2d: 0,
             device_local_heap_bytes: 0,
+            max_bound_descriptor_sets: 0,
         }
     }
 

@@ -171,6 +171,15 @@ pub mod mesh;
 /// [`build_mesh_gpu`](mesh_assets::build_mesh_gpu), shared with
 /// [`GpuUpload`](gpu_upload::GpuUpload) for `MeshGpu`.
 pub mod mesh_assets;
+/// Multi-paradigm render-path plan, rung R-VBGEO (Decision 0 / C1) — the bindless
+/// per-mesh geometry table [`MeshGeometryTable`](mesh_geometry_table::MeshGeometryTable)
+/// (a sibling of [`BindlessTextureTable`](bindless::BindlessTextureTable)): the VB-only
+/// Set-3 device object + the `gMeshMeta[]` backing buffer + the reused
+/// [`BindlessSlotAllocator`](bindless::BindlessSlotAllocator), plus the
+/// [`MeshGeometryTableSlot`](mesh_geometry_table::MeshGeometryTableSlot) always-present
+/// `Option` wrapper resource. Structurally unreachable until `VB_IMPLEMENTED` lands
+/// (see the module doc) — R-VBGEO ships the data layer only.
+pub mod mesh_geometry_table;
 /// Asset-system rung A3b — [`MeshData`](mesh_data::MeshData): the `Send`-safe
 /// CPU intermediate [`ObjMeshLoader`](loaders::ObjMeshLoader) decodes into,
 /// now `MeshGpu`'s `Asset::Cpu` (replacing the pre-A3b `()` placeholder).
@@ -380,7 +389,10 @@ pub use gpu_transform_pack::{add_gpu_transform_pack, pack_gpu_transforms};
 pub use gpu_upload::{
     GpuUpload, upload_assets, upload_material_assets, upload_mesh_assets, upload_texture_assets,
 };
-pub use instance_model::{INSTANCE_MODEL_COL_BYTES, InstanceModelCol, sync_instance_model_cols};
+pub use instance_model::{
+    INSTANCE_MODEL_COL_BYTES, InstanceModelCol, VB_INSTANCE_ROW_BYTES, VbInstanceRow,
+    sync_instance_model_cols,
+};
 // HW-RT rung 3b: the previous-frame model-affine sibling + its copy system (temporal motion
 // vectors). `not(hwrt)` builds never compile the column, so its instancing path is textually
 // the pre-Rung-3b code.
@@ -424,6 +436,10 @@ pub use material_table::MaterialTable;
 pub use mesh::{MeshGpu, U16_INDEX_VERTEX_LIMIT, VERTEX_STRIDE as MESH_VERTEX_STRIDE, Vertex};
 pub use mesh_assets::{MeshAssetsExt, OrphanedMeshGpu, build_mesh_gpu};
 pub use mesh_data::MeshData;
+pub use mesh_geometry_table::{
+    MESH_GEOMETRY_META_BYTES, MeshGeometryMeta, MeshGeometryTable, MeshGeometryTableSlot,
+    VB_GEOMETRY_RESERVED_SLOT, index_width_bytes, mesh_buffer_usage, tri_count,
+};
 pub use shadow_atlas::{
     ATLAS_SLOT_MASK, ATLAS_SLOT_SHIFT, CASTS_SHADOW_BIT, FaceTransform, M_SLOTS, POINT_FACE_COUNT,
     PointShadowInput, PunctualResolveSet, PunctualSlotAssignment, RESOLVED_SHADOW_ATLAS_BYTES,

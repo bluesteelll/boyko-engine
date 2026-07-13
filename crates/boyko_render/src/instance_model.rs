@@ -186,3 +186,93 @@ pub fn sync_prev_instance_model_cols(
         prev.rows = cur.rows;
     }
 }
+
+/// Multi-paradigm render-path plan, rung R-VBGEO (plan §Data structures) — the
+/// `VisibilityBuffer` path's OWN instance row: [`InstanceModelCol`]'s 48-byte 3×4
+/// row-major affine (byte-identical leading bytes, offset 0..48) plus an appended
+/// `mesh_id: u32` lane (offset 48, Decision 0's geometry-table slot) padded to a
+/// 64-byte std430-stable stride.
+///
+/// A VB-path-CONDITIONAL row shape, NOT a widening of [`InstanceModelCol`] itself:
+/// Deferred/Forward keep the 48-byte column EXACTLY (byte-identity — this type is
+/// never read by any pipeline those paths bind). The VB compute fetch
+/// (`vb_geom_fetch.hlsli`, R8) needs `mesh_id` PER INSTANCE (not per-draw/push-constant)
+/// because a VB shading pass holds only `(instance_id, triangle_id)` per pixel with no
+/// per-draw binding — see Decision 0.
+///
+/// # Structurally unreachable today
+///
+/// See `mesh_geometry_table`'s module doc: `VB_IMPLEMENTED == false` keeps
+/// `ResolvedRenderPath.mesh_geo_shade_split`/the VB declarator unreachable, so nothing
+/// constructs a ring of these rows yet — this rung ships the data structure + the pure
+/// pack helper [`VbInstanceRow::from_model_col`] (Principle 1: a future VB gather,
+/// R8/R9, selects THIS packing fn at boot instead of [`InstanceModelCol`]'s, never a
+/// per-instance branch), pinned by the offset const-asserts below.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct VbInstanceRow {
+    /// The SAME interleaved `[linear_row.xyz | translation_component]` quads as
+    /// [`InstanceModelCol::rows`] — byte-identical leading 48 bytes (offset 0..48).
+    pub affine: [[f32; 4]; 3],
+    /// The Decision-0 geometry-table slot (this instance's mesh's `mesh_id`) — the key
+    /// the VB compute fetch resolves `gMeshIndices[]`/`gMeshVerts[]`/`gMeshMeta[]`
+    /// through. Offset 48.
+    pub mesh_id: u32,
+    /// Pads the row to a 64-byte std430-stable stride — unused, always zero. Offset 52.
+    pub _pad: [u32; 3],
+}
+
+/// The byte size of one [`VbInstanceRow`] — the VB-path instance SSBO's per-instance
+/// stride (64 B: [`InstanceModelCol`]'s 48-byte affine + a `uint` `mesh_id` + a
+/// 12-byte pad to the next std430 lane).
+pub const VB_INSTANCE_ROW_BYTES: usize = 64;
+
+const _: () = assert!(
+    size_of::<VbInstanceRow>() == VB_INSTANCE_ROW_BYTES,
+    "VbInstanceRow must be 64 bytes (InstanceModelCol's 48-byte affine + a mesh_id uint, padded)"
+);
+const _: () = assert!(align_of::<VbInstanceRow>() == 4);
+const _: () = assert!(core::mem::offset_of!(VbInstanceRow, affine) == 0);
+const _: () = assert!(core::mem::offset_of!(VbInstanceRow, mesh_id) == 48);
+// The leading 48 bytes MUST byte-match `InstanceModelCol` — Deferred/Forward read
+// exactly that layout; the VB path reads the SAME leading bytes plus the appended lane.
+const _: () = assert!(core::mem::offset_of!(VbInstanceRow, affine) == core::mem::offset_of!(InstanceModelCol, rows));
+
+impl VbInstanceRow {
+    /// Packs an [`InstanceModelCol`] (the already-computed 3×4 affine) plus its
+    /// resolved `mesh_id` into the VB-path row shape — the "second packing fn selected
+    /// at boot" Principle 1 calls for (a future VB gather, R8/R9, calls this instead of
+    /// writing `InstanceModelCol` directly; no per-instance path branch is needed
+    /// since the boot-resolved path selects WHICH gather runs, not a per-row check).
+    #[inline]
+    pub const fn from_model_col(model: &InstanceModelCol, mesh_id: u32) -> Self {
+        Self { affine: model.rows, mesh_id, _pad: [0; 3] }
+    }
+}
+
+#[cfg(test)]
+mod vb_instance_row_tests {
+    use super::*;
+
+    #[test]
+    fn from_model_col_copies_the_affine_and_mesh_id_verbatim() {
+        let model = InstanceModelCol {
+            rows: [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]],
+        };
+        let row = VbInstanceRow::from_model_col(&model, 42);
+        assert_eq!(row.affine, model.rows);
+        assert_eq!(row.mesh_id, 42);
+        assert_eq!(row._pad, [0, 0, 0]);
+    }
+
+    #[test]
+    fn vb_instance_row_leading_bytes_match_instance_model_col_byte_for_byte() {
+        let model = InstanceModelCol {
+            rows: [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0], [9.0, 10.0, 11.0, 12.0]],
+        };
+        let row = VbInstanceRow::from_model_col(&model, 7);
+        let model_bytes = bytemuck::bytes_of(&model);
+        let row_bytes = bytemuck::bytes_of(&row);
+        assert_eq!(&row_bytes[0..INSTANCE_MODEL_COL_BYTES], model_bytes);
+    }
+}

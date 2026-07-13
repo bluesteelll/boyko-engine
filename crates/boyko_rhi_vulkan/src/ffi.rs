@@ -1334,10 +1334,18 @@ pub const LIMITS_OFF_MAX_PER_STAGE_STORAGE_BUFFERS: usize = 76;
 pub const LIMITS_OFF_MAX_PER_STAGE_SAMPLED_IMAGES: usize = 80;
 /// Offset of `maxPerStageDescriptorStorageImages` (`u32`).
 pub const LIMITS_OFF_MAX_PER_STAGE_STORAGE_IMAGES: usize = 84;
+/// Offset of `maxBoundDescriptorSets` (`u32`) within `VkPhysicalDeviceLimits` — the
+/// field immediately preceding `maxPerStageDescriptorSamplers` @68 (see the field-order
+/// comment above `LIMITS_OFF_MAX_IMAGE_DIMENSION_2D`). Multi-paradigm render-path plan,
+/// rung R-VBGEO (Decision 0 / P2-c): `MeshGeometryTable::new` asserts this is `>= 4`
+/// (the `VisibilityBuffer` path's Set-3 geometry table needs a 4th bound descriptor set
+/// alongside Set 0/1/2 — the Vulkan-guaranteed floor).
+pub const LIMITS_OFF_MAX_BOUND_DESCRIPTOR_SETS: usize = 64;
 
 // The read offsets must lie inside the blob (the last field read is a `u32` at 84 → 84..88 <= 504).
 const _: () = assert!(LIMITS_OFF_MAX_PER_STAGE_STORAGE_IMAGES + 4 <= 504);
 const _: () = assert!(LIMITS_OFF_MAX_IMAGE_DIMENSION_2D + 4 <= 504);
+const _: () = assert!(LIMITS_OFF_MAX_BOUND_DESCRIPTOR_SETS + 4 <= 504);
 
 /// Offset of `timestampPeriod` (`float`) within `VkPhysicalDeviceLimits` (HW-RT rung
 /// R0). Re-derived from the in-repo anchor `maxPerStageDescriptorStorageImages == 84`
