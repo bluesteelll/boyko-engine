@@ -6,7 +6,7 @@
 //! the runner calls between `finish()` and `MaterialTable::boot_seed` (asset-system
 //! rung A3b; [`upload_texture_assets`] added textured-PBR rung T6b).
 
-use boyko_ecs::ecs::core::asset::{Asset, AssetBacking, Assets, AssetStaging};
+use boyko_ecs::ecs::core::asset::{Asset, AssetBacking, Assets, AssetStaging, Handle};
 use boyko_ecs::ecs::core::system::{NonSendRes, NonSendResMut, ResMut};
 use boyko_rhi_vulkan::device::VulkanContext;
 
@@ -16,7 +16,7 @@ use crate::material::Material;
 use crate::mesh::MeshGpu;
 use crate::mesh_assets::build_mesh_gpu;
 use crate::mesh_data::MeshData;
-use crate::mesh_geometry_table::MeshGeometryTableSlot;
+use crate::mesh_geometry_table::{MeshGeometryTableSlot, VB_GEOMETRY_RESERVED_SLOT};
 use crate::texture::{TextureGpu, build_texture_gpu};
 use crate::texture_data::TextureData;
 
@@ -163,6 +163,73 @@ pub fn upload_mesh_assets(
     mut geometry_table: NonSendResMut<MeshGeometryTableSlot>,
 ) {
     upload_assets(&mut assets, &mut staging, ctx.context(), &mut geometry_table);
+}
+
+/// Boot one-shot (Multi-paradigm render-path plan): back-fill a VB geometry-table slot for every
+/// HOST-AUTHORED mesh that does not have one yet, so a `VisibilityBuffer` boot renders ANY scene's
+/// meshes — not only those a scene happened to register through the VB-aware
+/// [`MeshAssetsVbExt::register_mesh_vb`](crate::mesh_assets::MeshAssetsVbExt::register_mesh_vb).
+///
+/// # Why this exists
+///
+/// [`MeshAssetsExt::register_mesh`](crate::mesh_assets::MeshAssetsExt::register_mesh)/`cube`/`plane`
+/// (what nearly every scene calls) already create STORAGE-usage-capable vertex/index buffers when
+/// the table is armed ([`build_mesh_gpu`] reads `ctx.vb_geometry_table_armed()` for the usage bits,
+/// INDEPENDENTLY of the threaded table) — they simply pass `None` for the table and so leave
+/// `geometry_slot == VB_GEOMETRY_RESERVED_SLOT`. Under a VB boot those meshes therefore had
+/// STORAGE-ready buffers but no bindless slot, so `vb_resolve` re-fetched the degenerate zero-count
+/// slot 0 and drew nothing. This drain claims the missing slots ONCE at boot, from the buffers the
+/// registration already built — the same `MeshGeometryTable::register` call the streamed path and
+/// `register_mesh_vb` use, just applied after the fact.
+///
+/// # Idempotent / no-op unless armed
+///
+/// A `None` table slot (every non-VB boot) returns immediately — so Deferred / Forward / ForwardPlus
+/// are byte-identical (this system never runs its body). Meshes that already hold a real slot
+/// (streamed, or `register_mesh_vb`) are skipped (their slot is `>= 1`), so re-running is harmless
+/// and the existing VB goldens (`vb_mesh`/`vb_both`/`vb_sdf_only`, which use `register_mesh_vb`)
+/// stay byte-identical. `boyko_app::runner` calls this right after [`upload_mesh_assets`], after
+/// `finish()` has drained every startup `register_mesh`.
+///
+/// # Scope
+///
+/// Boot-static, exactly like the SDF-edit gather (`collect_sdf_edits`): a mesh registered at
+/// RUNTIME (post-boot) under VB would need this re-run — no scene does that today, and the whole
+/// host mesh/SDF assembly is boot-static this rung.
+pub fn backfill_vb_geometry_slots(
+    mut assets: NonSendResMut<Assets<MeshGpu>>,
+    ctx: NonSendRes<RhiContext>,
+    mut geometry_table: NonSendResMut<MeshGeometryTableSlot>,
+) {
+    // Not a VB boot (`MeshGeometryTableSlot(None)`) → nothing to back-fill (the 0%-gate — keeps
+    // every non-VB path byte-identical).
+    let Some(table) = geometry_table.0.as_mut() else {
+        return;
+    };
+    let ctx = ctx.context();
+
+    // `iter()` borrows `assets` immutably; collect the handles of the still-reserved (host-authored)
+    // meshes first, then re-borrow mutably via `get_mut` to claim + stamp each slot. One small boot
+    // allocation, pre-sized to the live count — never on the per-frame path.
+    let mut pending: Vec<Handle<MeshGpu>> = Vec::with_capacity(assets.len());
+    for (handle, mesh) in assets.iter() {
+        if mesh.geometry_slot == VB_GEOMETRY_RESERVED_SLOT {
+            pending.push(handle);
+        }
+    }
+    for handle in pending {
+        if let Some(mesh) = assets.get_mut(handle) {
+            let slot = table.register(
+                ctx,
+                &mesh.vertex_buffer,
+                mesh.vertex_count,
+                &mesh.index_buffer,
+                mesh.index_count,
+                mesh.index_type,
+            );
+            mesh.geometry_slot = slot;
+        }
+    }
 }
 
 /// Boot one-shot (textured-PBR rung T6b): drains `AssetStaging<TextureGpu>` into

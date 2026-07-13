@@ -41,6 +41,7 @@ use boyko_render::{
     upload_atlas_ring,
     upload_camera_ring, upload_csm_ring, upload_instance_materials, upload_instance_materials_tex,
     upload_instance_models, upload_light_table, upload_material_assets, upload_mesh_assets,
+    backfill_vb_geometry_slots,
     upload_motion_cam_ring, upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
     upload_taa_ring, upload_texture_assets, upload_vb_instance_rows,
 };
@@ -560,6 +561,15 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     app.world_mut().run_system(upload_material_assets);
     app.world_mut().run_system(upload_mesh_assets);
     app.world_mut().run_system(upload_texture_assets);
+
+    // Multi-paradigm render-path plan: under a VisibilityBuffer boot, back-fill a geometry-table
+    // slot for every HOST-AUTHORED mesh (`register_mesh`/`cube`/`plane`, which register with the
+    // reserved slot) so ANY scene's meshes are re-fetchable by `vb_resolve` — not just those that
+    // used the VB-aware `register_mesh_vb`. A no-op (returns immediately) on every non-VB boot
+    // (`MeshGeometryTableSlot(None)`), so Deferred/Forward/ForwardPlus stay byte-identical; meshes
+    // that already hold a real slot (streamed / `register_mesh_vb`) are skipped. Runs after the
+    // mesh drain above (streamed meshes present) and before the frame loop's first VB resolve.
+    app.world_mut().run_system(backfill_vb_geometry_slots);
 
     // Asset-system rung A1: boot-seed the material table — hard-size + upload the
     // device SSBO from whatever `finish()` drained into `Assets<Material>` (every

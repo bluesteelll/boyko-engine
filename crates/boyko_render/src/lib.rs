@@ -387,7 +387,8 @@ pub use gpu_transform3d::{
 };
 pub use gpu_transform_pack::{add_gpu_transform_pack, pack_gpu_transforms};
 pub use gpu_upload::{
-    GpuUpload, upload_assets, upload_material_assets, upload_mesh_assets, upload_texture_assets,
+    GpuUpload, backfill_vb_geometry_slots, upload_assets, upload_material_assets,
+    upload_mesh_assets, upload_texture_assets,
 };
 pub use instance_model::{
     INSTANCE_MODEL_COL_BYTES, InstanceModelCol, VB_INSTANCE_ROW_BYTES, VbInstanceRow,

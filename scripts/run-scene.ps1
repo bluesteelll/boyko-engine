@@ -107,6 +107,12 @@ $mode = if ($Dump -ne '') { "dump -> $Dump" } else { 'interactive' }
 Write-Host "[run-scene] $Scene | $Path x $Legs | $mode$(if($Hwrt){' | hwrt'})$(if($Release){' | release'})" -ForegroundColor Green
 Write-Host "[run-scene] cargo $($cargoArgs -join ' ')"
 
+# Relax the Stop preference ONLY around the native cargo call: in PS 5.1 cargo's normal status
+# lines go to stderr and are wrapped as NativeCommandError records, which under 'Stop' would
+# terminate the script even on a clean exit. We gate on $LASTEXITCODE afterwards instead.
 Push-Location $repo
+$prev = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
 try { & cargo @cargoArgs }
-finally { Pop-Location }
+finally { $ErrorActionPreference = $prev; Pop-Location }
+if ($LASTEXITCODE -ne 0) { Write-Warning "[run-scene] cargo exited $LASTEXITCODE" }
