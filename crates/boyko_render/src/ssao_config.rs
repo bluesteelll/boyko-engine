@@ -25,7 +25,7 @@
 //!
 //! [`SsaoConfig::default`] is [`SsaoQuality::Off`] — byte-identical to today (no SSAO
 //! pass, the resolve's AO-combine off). The resolve maps `Off` to
-//! `ResolvedSsao { variant: None, ssao_mode_word: 0 }`, the no-pass anchor.
+//! `ResolvedSsao { variant: None, ssao_mode_word: 0, atrous_levels: 0 }`, the no-pass anchor.
 //!
 //! # The live render consumer
 //!
@@ -96,10 +96,16 @@ impl SsaoQuality {
 
 // ---- SsaoConfig (the owner-set Resource — mirrors LightingConfig) ---------------------
 
-/// The global SSAO config (Render P7-Q2 TASK 3) — a `World`-singleton Resource the owner
-/// sets, the SSAO analogue of [`LightingConfig`](crate::light::LightingConfig). Carries
-/// ONLY the [`SsaoQuality`] knob: enablement is structural (`quality != Off`), so there is
-/// no separate flag.
+/// The maximum SSAO à-trous denoise pass count — bounds [`SsaoConfig::atrous_levels`]'s
+/// per-level ROLE-KEYED pipeline/set arrays (`boyko_rhi_vulkan::present`). Kept equal to
+/// `boyko_rhi_vulkan::present::MAX_SSAO_ATROUS_LEVELS` (the RHI cannot depend on
+/// `boyko_render`, which sits ABOVE it); a cross-crate integration test asserts the equality.
+pub const MAX_SSAO_ATROUS_LEVELS: u32 = 5;
+
+/// The global SSAO config (Render P7-Q2 TASK 3 + the à-trous denoise follow-up) — a
+/// `World`-singleton Resource the owner sets, the SSAO analogue of
+/// [`LightingConfig`](crate::light::LightingConfig). Carries the [`SsaoQuality`] knob
+/// (enablement is structural: `quality != Off`) plus the à-trous denoise pass count.
 ///
 /// `#[derive(Resource)]` via [`boyko_macros::Resource`] (the same derive path
 /// `LightingConfig` uses).
@@ -107,13 +113,22 @@ impl SsaoQuality {
 pub struct SsaoConfig {
     /// The owner-set SSAO quality. [`Off`](SsaoQuality::Off) (the default) ⇒ no pass.
     pub quality: SsaoQuality,
+    /// The owner-set SSAO à-trous denoise pass count — moved OUT of the resolve's former
+    /// inline bilateral blur into a dedicated edge-avoiding à-trous compute chain (mirroring
+    /// [`ShadowDenoiseConfig`](crate::shadow_denoise_config::ShadowDenoiseConfig)'s `levels`).
+    /// `0` ⇒ the denoise is OFF (the resolve reads the raw `sdf_ssao` gather unfiltered — the
+    /// 0%-gate default); `1` clamps UP to `2` ([`clamped_atrous_levels`](Self::clamped_atrous_levels),
+    /// since a single-level filter would need a 4th R8<->R8 pipeline variant); `2..=`[`MAX_SSAO_ATROUS_LEVELS`]
+    /// runs that many passes at hole steps `{1, 2, 4, ...}`. Default `3` (steps `{1,2,4}`, a
+    /// ~29px footprint / 75 taps — ample for the AO gather's low raw-tap-count noise floor).
+    pub atrous_levels: u32,
 }
 
 impl Default for SsaoConfig {
     #[inline]
     fn default() -> Self {
         // Off == today (the 0%-gate anchor): a default world runs no SSAO pass.
-        Self { quality: SsaoQuality::Off }
+        Self { quality: SsaoQuality::Off, atrous_levels: 3 }
     }
 }
 
@@ -125,6 +140,25 @@ impl SsaoConfig {
     #[inline]
     pub const fn enabled(&self) -> bool {
         !matches!(self.quality, SsaoQuality::Off)
+    }
+
+    /// The CLAMPED à-trous denoise pass count the render driver dispatches — `0` (denoise off,
+    /// raw gather) or `2..=`[`MAX_SSAO_ATROUS_LEVELS`] (`1` floors UP to `2`; a run above the max
+    /// clamps DOWN). Mirrors
+    /// [`ShadowDenoiseConfig::clamped_levels`](crate::shadow_denoise_config::ShadowDenoiseConfig::clamped_levels)'s
+    /// shape, except the floor is `0`-or-`2` (not `1`) — the SSAO à-trous role-keyed pipeline
+    /// scheme has no single-pass R8-in/R8-out variant (see [`SsaoConfig::atrous_levels`]'s doc).
+    #[inline]
+    pub const fn clamped_atrous_levels(&self) -> u32 {
+        if self.atrous_levels == 0 {
+            0
+        } else if self.atrous_levels == 1 {
+            2
+        } else if self.atrous_levels > MAX_SSAO_ATROUS_LEVELS {
+            MAX_SSAO_ATROUS_LEVELS
+        } else {
+            self.atrous_levels
+        }
     }
 }
 
@@ -146,6 +180,10 @@ pub struct ResolvedSsao {
     pub variant: Option<usize>,
     /// The resolve's SSAO-combine mode word: `0` ⇒ AO-combine off (no pass), `1` ⇒ on.
     pub ssao_mode_word: u32,
+    /// The CLAMPED à-trous denoise pass count ([`SsaoConfig::clamped_atrous_levels`]) — `0` when
+    /// SSAO itself is off (`variant == None`; the à-trous chain is meaningless with no gather to
+    /// filter), else `0` (denoise off, raw gather) or `2..=`[`MAX_SSAO_ATROUS_LEVELS`].
+    pub atrous_levels: u32,
 }
 
 impl Default for ResolvedSsao {
@@ -174,7 +212,10 @@ pub fn resolve_ssao(cfg: &SsaoConfig) -> ResolvedSsao {
     // `ssao_mode_word` is the structural enablement, derived from the SAME `variant` so the
     // two can never disagree: a bound variant ⇒ combine on, no variant ⇒ off.
     let ssao_mode_word = u32::from(variant.is_some());
-    ResolvedSsao { variant, ssao_mode_word }
+    // The à-trous chain is meaningless when SSAO itself is off (no gather to filter) — forced to
+    // 0 regardless of `cfg.atrous_levels` so the two settings can never disagree.
+    let atrous_levels = if variant.is_some() { cfg.clamped_atrous_levels() } else { 0 };
+    ResolvedSsao { variant, ssao_mode_word, atrous_levels }
 }
 
 // ---- the cold StrategyPolicy system (mirrors `select_lighting_cull`) ------------------
@@ -249,7 +290,7 @@ mod tests {
     fn enabled_is_structural_quality_not_off() {
         // Capability is structural: every non-Off quality is enabled with a real variant.
         for q in [SsaoQuality::Low, SsaoQuality::Medium, SsaoQuality::High] {
-            let cfg = SsaoConfig { quality: q };
+            let cfg = SsaoConfig { quality: q, atrous_levels: 3 };
             assert!(cfg.enabled(), "{q:?} must be enabled (quality != Off)");
             assert!(cfg.quality.variant().is_some(), "{q:?} must select a variant");
         }
@@ -258,23 +299,37 @@ mod tests {
 
     #[test]
     fn resolve_maps_each_quality_to_its_variant_and_mode_word() {
-        // Off → no pass (the 0%-gate).
-        let off = resolve_ssao(&SsaoConfig { quality: SsaoQuality::Off });
-        assert_eq!(off, ResolvedSsao { variant: None, ssao_mode_word: 0 });
+        // Off → no pass (the 0%-gate); the à-trous chain is forced to 0 regardless of
+        // `atrous_levels` (no gather to filter).
+        let off = resolve_ssao(&SsaoConfig { quality: SsaoQuality::Off, atrous_levels: 3 });
+        assert_eq!(off, ResolvedSsao { variant: None, ssao_mode_word: 0, atrous_levels: 0 });
 
-        // Low/Medium/High → variant 0/1/2, combine on.
+        // Low/Medium/High → variant 0/1/2, combine on, the default atrous_levels (3) passes
+        // through clamped_atrous_levels() unchanged (already in 2..=MAX).
         assert_eq!(
-            resolve_ssao(&SsaoConfig { quality: SsaoQuality::Low }),
-            ResolvedSsao { variant: Some(0), ssao_mode_word: 1 }
+            resolve_ssao(&SsaoConfig { quality: SsaoQuality::Low, atrous_levels: 3 }),
+            ResolvedSsao { variant: Some(0), ssao_mode_word: 1, atrous_levels: 3 }
         );
         assert_eq!(
-            resolve_ssao(&SsaoConfig { quality: SsaoQuality::Medium }),
-            ResolvedSsao { variant: Some(1), ssao_mode_word: 1 }
+            resolve_ssao(&SsaoConfig { quality: SsaoQuality::Medium, atrous_levels: 3 }),
+            ResolvedSsao { variant: Some(1), ssao_mode_word: 1, atrous_levels: 3 }
         );
         assert_eq!(
-            resolve_ssao(&SsaoConfig { quality: SsaoQuality::High }),
-            ResolvedSsao { variant: Some(2), ssao_mode_word: 1 }
+            resolve_ssao(&SsaoConfig { quality: SsaoQuality::High, atrous_levels: 3 }),
+            ResolvedSsao { variant: Some(2), ssao_mode_word: 1, atrous_levels: 3 }
         );
+    }
+
+    #[test]
+    fn clamped_atrous_levels_bounds_the_dispatch_count() {
+        let clamped = |atrous_levels: u32| {
+            SsaoConfig { quality: SsaoQuality::Medium, atrous_levels }.clamped_atrous_levels()
+        };
+        assert_eq!(clamped(0), 0, "0 stays 0 (denoise off)");
+        assert_eq!(clamped(1), 2, "1 floors UP to 2 (no single-pass R8-in/R8-out variant)");
+        assert_eq!(clamped(2), 2);
+        assert_eq!(clamped(5), MAX_SSAO_ATROUS_LEVELS);
+        assert_eq!(clamped(99), MAX_SSAO_ATROUS_LEVELS, "99 clamps down to MAX");
     }
 
     #[test]

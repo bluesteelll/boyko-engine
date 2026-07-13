@@ -2336,6 +2336,12 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // Render P7: SSAO OFF (the default) — NO SSAO pass recorded, byte-identical to the pre-P7
         // stream (the 0%-gate). These golden/cull-comparison presents assert the existing stream.
         ssao: None,
+        // The SSAO à-trous denoise chain's stable boot pipelines/layout — not wired by this
+        // harness (it never dispatches à-trous).
+        ssao_atrous_read8_pipeline: None,
+        ssao_atrous_interior_pipeline: None,
+        ssao_atrous_write8_pipeline: None,
+        ssao_atrous_layout: None,
         // AA Stage 1: OFF (the default) — NO FXAA pass recorded, present samples `lit` directly,
         // byte-identical to the pre-AA stream (the 0%-gate).
         aa: None,
@@ -3293,6 +3299,12 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // Render P7: SSAO OFF (the default) — NO SSAO pass recorded, byte-identical to the pre-P7
         // stream (the 0%-gate). These golden/cull-comparison presents assert the existing stream.
         ssao: None,
+        // The SSAO à-trous denoise chain's stable boot pipelines/layout — not wired by this
+        // harness (it never dispatches à-trous).
+        ssao_atrous_read8_pipeline: None,
+        ssao_atrous_interior_pipeline: None,
+        ssao_atrous_write8_pipeline: None,
+        ssao_atrous_layout: None,
         // AA Stage 1: OFF (the default) — NO FXAA pass recorded, present samples `lit` directly,
         // byte-identical to the pre-AA stream (the 0%-gate).
         aa: None,
@@ -8032,7 +8044,13 @@ fn run_showcase_body_ddgi(
         light_dir: marcher_light_dir(&cfg.light_elems),
         ssao: cfg
             .ssao_quality
-            .map(|_| SsaoActivation { pipeline: &ssao_pipeline, layout: &ssao_layout }),
+            .map(|_| SsaoActivation { pipeline: &ssao_pipeline, layout: &ssao_layout, atrous_levels: 0 }),
+        // The SSAO à-trous denoise chain's stable boot pipelines/layout — not wired by this
+        // harness (it never dispatches à-trous).
+        ssao_atrous_read8_pipeline: None,
+        ssao_atrous_interior_pipeline: None,
+        ssao_atrous_write8_pipeline: None,
+        ssao_atrous_layout: None,
         // AA Stage 1: OFF (the default) — NO FXAA pass recorded, present samples `lit`
         // directly, byte-identical to the pre-AA stream (the 0%-gate).
         aa: None,
@@ -9377,7 +9395,13 @@ fn run_showcase_body(bp: BootPresent<'_, '_>, bmp_path: &str, cfg: ShowcaseConfi
         // pass + `ssao_mode == 0` (the byte-identical 0%-gate `_off` reference for the quality ladder).
         ssao: cfg
             .ssao_quality
-            .map(|_| SsaoActivation { pipeline: &ssao_pipeline, layout: &ssao_layout }),
+            .map(|_| SsaoActivation { pipeline: &ssao_pipeline, layout: &ssao_layout, atrous_levels: 0 }),
+        // The SSAO à-trous denoise chain's stable boot pipelines/layout — not wired by this
+        // harness (it never dispatches à-trous).
+        ssao_atrous_read8_pipeline: None,
+        ssao_atrous_interior_pipeline: None,
+        ssao_atrous_write8_pipeline: None,
+        ssao_atrous_layout: None,
         // AA Stage 1: OFF (the default) — NO FXAA pass recorded, present samples `lit`
         // directly, byte-identical to the pre-AA stream (the 0%-gate).
         aa: None,

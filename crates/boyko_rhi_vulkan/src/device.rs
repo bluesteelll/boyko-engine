@@ -258,6 +258,13 @@ pub struct DeviceCaps {
     /// degrades the shadow denoise gracefully (mirrors the DDGI pair). `#[cfg(feature = "hwrt")]`.
     #[cfg(feature = "hwrt")]
     pub rg16_unorm_storage_ok: bool,
+    /// The SSAO à-trous denoise chain: whether `R16_UNORM` supports `STORAGE_IMAGE` under
+    /// OPTIMAL tiling (the interior ping-pong ring's format — 16-bit avoids the cumulative
+    /// 8-bit rounding of a multi-level filter, mirroring [`rg16_unorm_storage_ok`](Self::rg16_unorm_storage_ok)'s
+    /// rationale one channel narrower). RECORDED ONLY (NO boot fail-fast): the SSAO à-trous
+    /// denoise is software (NOT `hwrt`-gated, unlike the shadow-visibility denoiser) — a device
+    /// missing it degrades to the raw (un-denoised) `sdf_ssao` gather, never a boot failure.
+    pub r16_unorm_storage_ok: bool,
     /// HW-RT rung R0: `VkPhysicalDeviceLimits::timestampPeriod` — nanoseconds per GPU
     /// timestamp tick (multiply a masked tick delta by this to get ns). RECORDED (not a
     /// boot fail-fast): a `<= 0` or `> 1000` value (an implausible period, or a wrong-offset
@@ -358,6 +365,16 @@ impl DeviceCaps {
     #[inline]
     pub const fn shadow_denoise_storage_ok(&self) -> bool {
         self.rg16_unorm_storage_ok
+    }
+
+    /// The SSAO à-trous denoise chain: whether `R16_UNORM` supports `STORAGE_IMAGE` under
+    /// OPTIMAL tiling — the precondition for the interior ping-pong ring's WRITEs. When `false`,
+    /// the ring is not allocated and the resolve reads the raw (un-denoised) `sdf_ssao` gather —
+    /// graceful degradation (software, mirrors [`Self::shadow_denoise_storage_ok`]'s pattern one
+    /// channel narrower, but NOT `hwrt`-gated).
+    #[inline]
+    pub const fn ssao_atrous_storage_ok(&self) -> bool {
+        self.r16_unorm_storage_ok
     }
 
     /// HW-RT rung R0: whether GPU timestamp measurement is USABLE on this device — the
@@ -2973,6 +2990,34 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         (rg8_ok, rg16_ok)
     };
 
+    // --- r16_unorm_storage_ok: STORAGE_IMAGE on R16_UNORM, OPTIMAL tiling — the SSAO à-trous
+    // denoise chain's interior ping-pong ring precondition. Software (NOT `hwrt`-gated), mirrors
+    // the `rg16_unorm_storage_ok` QUERY shape one channel narrower; NO boot fail-fast (the
+    // denoise is opt-in — a missing feature degrades to the raw un-denoised gather).
+    let r16_unorm_storage_ok = {
+        let mut r16_props = VkFormatProperties {
+            linear_tiling_features: 0,
+            optimal_tiling_features: 0,
+            buffer_features: 0,
+        };
+        // SAFETY: `physical_device` is valid; `R16_UNORM` is a valid `VkFormat`; `&mut
+        // r16_props` is a valid out-pointer for the `#[repr(C)]` `VkFormatProperties` the
+        // driver fully overwrites.
+        unsafe {
+            (fns.get_physical_device_format_properties)(
+                physical_device,
+                crate::ffi::VK_FORMAT_R16_UNORM,
+                &mut r16_props,
+            )
+        };
+        let ok = (r16_props.optimal_tiling_features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+        #[cfg(debug_assertions)]
+        if !ok {
+            eprintln!("SSAO à-trous denoise disabled: R16 UNORM storage unsupported");
+        }
+        ok
+    };
+
     DeviceCaps {
         bindless_capable,
         gbuffer_storage_format_ok,
@@ -2987,6 +3032,7 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         rg8_unorm_storage_ok,
         #[cfg(feature = "hwrt")]
         rg16_unorm_storage_ok,
+        r16_unorm_storage_ok,
         // HW-RT rung R0: placeholders — the boot site overwrites these from the physical-
         // device limits (`timestampPeriod`) + the chosen queue family (`timestampValidBits`),
         // the two inputs `query_device_caps` does not itself read.
@@ -3486,6 +3532,7 @@ mod tests {
             rg8_unorm_storage_ok: true,
             #[cfg(feature = "hwrt")]
             rg16_unorm_storage_ok: true,
+            r16_unorm_storage_ok: true,
             timestamp_period: 1.0,
             timestamp_valid_bits: 64,
             ray_query,

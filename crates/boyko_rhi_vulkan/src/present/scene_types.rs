@@ -524,6 +524,19 @@ pub struct SsaoActivation<'a> {
     /// against it once per extent (pointing at the per-extent G-buffer + `ssao` images + the
     /// scene's camera UBO).
     pub layout: &'a VulkanBindGroupLayout,
+    /// The SSAO edge-avoiding à-trous denoise chain: the CLAMPED number of passes to dispatch
+    /// THIS frame — `0` (denoise off, the resolve reads the raw gather) or
+    /// `2..=`[`crate::present::MAX_SSAO_ATROUS_LEVELS`] (`boyko_render::SsaoConfig::clamped_atrous_levels`'s
+    /// contract, threaded by the host). The chain's pipelines/layout/sets are STABLE
+    /// [`GBufferScene`] fields (`ssao_atrous_read8_pipeline` etc.) — DECOUPLED from THIS per-frame
+    /// activation, mirroring `ShadowVisActivation`'s "the set-builder reads the stable boot
+    /// signals, not the per-frame gate" discipline (the "set=None panic when the gate opens late"
+    /// trap `build_shadow_denoise_sets`'s doc names). `0` records NO à-trous pass (byte-identical
+    /// to the pre-dispatch-wiring path) regardless of whether the device supports the interior
+    /// ring format — a SEPARATE 0%-gate from that device-capability degrade (an owner-authored `0`
+    /// vs a device lacking `R16_UNORM` storage are two different reasons for the same "no à-trous
+    /// pass" outcome; the recorder checks [`GBufferTargets`]'s role-keyed sets for the latter).
+    pub atrous_levels: u32,
 }
 
 /// Anti-aliasing Stage 1: the FXAA post-process pass activation threaded into
@@ -1321,6 +1334,47 @@ pub struct GBufferScene<'a> {
     /// the store. The caller MUST set the scene's light table `ssao_mode` in lock-step (`!= 0` ON,
     /// `0` OFF) — the resolve's structural gate that decides whether the combine reads the image.
     pub ssao: Option<SsaoActivation<'a>>,
+    /// The SSAO edge-avoiding à-trous denoise chain's `level == 0` pipeline variant
+    /// (`ssao_atrous_read8.comp` / [`crate::compute::ssao_atrous_read8_spirv`]) — `gAoIn` pinned
+    /// `r8` (reads the frozen `gSsao` gather endpoint), `gAoOut` pinned `r16` (writes ring 0). Its
+    /// layout is [`Self::ssao_atrous_layout`]. UNCONDITIONAL (both feature legs, NOT `hwrt`-gated
+    /// — SOFTWARE) + ALWAYS BUILT (unlike the RT-gated shadow denoise, this pipeline needs no
+    /// device precondition to CREATE — only the interior ring IMAGE needs `R16_UNORM` storage,
+    /// checked separately by [`GBufferTargets`]'s degrade). DECOUPLED from the per-frame
+    /// [`Self::ssao`] activation (mirroring `Self::atrous_layout_denoise_hwrt`'s "the
+    /// set-builder reads the stable boot signals" discipline) — [`GBufferTargets::create`] reads
+    /// THIS field directly to build the role-keyed sets, so a later frame that arms
+    /// [`SsaoActivation::atrous_levels`] finds them already built (no resize/rebuild needed).
+    /// `Option`-typed for uniformity with `resolve_layout_denoise_hwrt`'s shape (a host that
+    /// never wires the boot à-trous pipelines threads `None`, e.g. a minimal test harness that
+    /// exercises only the gather); production ([`crate::present::passes::gbuffer`]'s caller)
+    /// always threads `Some`.
+    pub ssao_atrous_read8_pipeline: Option<&'a ComputePipeline>,
+    /// The SSAO à-trous chain's INTERIOR pipeline variant (`ssao_atrous.comp` /
+    /// [`crate::compute::ssao_atrous_spirv`]): both `gAoIn`/`gAoOut` pinned `r16` (the two
+    /// ping-pong rings). Its layout is [`Self::ssao_atrous_layout`]. Built in lock-step with
+    /// [`Self::ssao_atrous_read8_pipeline`] (same discipline, same doc).
+    pub ssao_atrous_interior_pipeline: Option<&'a ComputePipeline>,
+    /// The SSAO à-trous chain's LAST-level pipeline variant (`ssao_atrous_write8.comp` /
+    /// [`crate::compute::ssao_atrous_write8_spirv`]): `gAoIn` pinned `r16` (reads a ring),
+    /// `gAoOut` pinned `r8` (writes BACK into the frozen `gSsao` endpoint the resolve reads — the
+    /// C1 fix). Its layout is [`Self::ssao_atrous_layout`]. Built in lock-step with
+    /// [`Self::ssao_atrous_read8_pipeline`] (same discipline, same doc).
+    pub ssao_atrous_write8_pipeline: Option<&'a ComputePipeline>,
+    /// The SSAO à-trous chain's DEDICATED 4-binding bind-group LAYOUT { `gAoIn` STORAGE image @0
+    /// (R), `gAoOut` STORAGE image @1 (W), `gViewT` STORAGE image @2 (R), the camera UNIFORM
+    /// buffer @3 } — IDENTICAL across all three pipeline variants above (only the bound VIEW +
+    /// the `[[vk::image_format]]` pin differ — see `ssao_atrous.comp.hlsl`'s header doc). Unlike
+    /// the shadow à-trous layout, this pass carries NO `gNormal` (depth-plane-fit-only edge stop)
+    /// and NO tunables UBO (baked `static const`). [`GBufferTargets`] writes FIVE role-keyed sets
+    /// against it ONCE per extent (`ssao_atrous_read8_set` / `ssao_atrous_interior_from0_set` /
+    /// `ssao_atrous_interior_from1_set` / `ssao_atrous_write8_from0_set` /
+    /// `ssao_atrous_write8_from1_set` — see [`crate::present::ssao_atrous_step`]'s role→set
+    /// mapping) WHEN [`Self::ssao_atrous_read8_pipeline`] is `Some` AND the device supports
+    /// `R16_UNORM` STORAGE ([`crate::device::DeviceCaps::ssao_atrous_storage_ok`]); `None` sets
+    /// otherwise — mirroring the DDGI/shadow-denoise graceful-degrade discipline (opt-in, never a
+    /// boot fault).
+    pub ssao_atrous_layout: Option<&'a VulkanBindGroupLayout>,
     /// Anti-aliasing Stage 1: the FXAA post-process pass activation. `None` = OFF, the
     /// 0%-gate (no `aa_out` target, no `fxaa_set`, the present-blit samples `lit` directly,
     /// no FXAA pass recorded). `Some` arms the whole seam: [`GBufferTargets`] allocates

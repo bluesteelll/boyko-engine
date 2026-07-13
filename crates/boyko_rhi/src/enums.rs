@@ -278,6 +278,16 @@ pub enum Format {
     R8G8Unorm = 16,
     /// `VK_FORMAT_R16_SFLOAT` — a compact single-channel float (deferred SDF use).
     R16Sfloat = 76,
+    /// `VK_FORMAT_R16_UNORM` — a single unsigned-normalized 16-bit channel mapping the 16-bit
+    /// word onto `[0, 1]` (the SSAO à-trous denoise chain's interior ping-pong ring — 16-bit
+    /// precision avoids the cumulative 8-bit rounding a multi-level filter would accrue between
+    /// the two frozen `R8_UNORM` endpoints; one channel narrower than [`Self::R16G16Unorm`]).
+    ///
+    /// The value is the canonical `VkFormat` enumerant `VK_FORMAT_R16_UNORM == 70` (the 16-bit
+    /// single-component UNORM block: R16_UNORM=70, R16G16_UNORM=77). VERIFIED against the Vulkan
+    /// spec enumerant, NOT a copied guess; cross-checked against `VK_FORMAT_R16_UNORM` in
+    /// `abi_guard`.
+    R16Unorm = 70,
     /// `VK_FORMAT_R16G16_UNORM` — two unsigned-normalized 16-bit channels mapping each
     /// 16-bit word onto `[0, 1]` (Rung 3a: the à-trous ping-pong target `shadow_vis2` —
     /// 16-bit precision avoids the 3× cumulative 8-bit rounding a multi-level filter would

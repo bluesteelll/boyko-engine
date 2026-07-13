@@ -429,8 +429,8 @@ pub use smaa_luts::{
     SEARCH_TEX_SHA256, SEARCH_TEX_W,
 };
 pub use ssao_config::{
-    ResolvedSsao, SsaoConfig, SsaoQuality, resolve_ssao, resolve_ssao_policy,
-    sync_ssao_light_gate,
+    MAX_SSAO_ATROUS_LEVELS, ResolvedSsao, SsaoConfig, SsaoQuality, resolve_ssao,
+    resolve_ssao_policy, sync_ssao_light_gate,
 };
 pub use ssao_plugin::SsaoPlugin;
 pub use tangent::generate_tangents;

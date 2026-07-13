@@ -43,6 +43,15 @@ pub(crate) struct GbufferPassPlan {
     pub(crate) marcher: crate::framegraph::PassId,
     /// The SSAO pass (`scene.ssao.is_some()`).
     pub(crate) ssao: Option<crate::framegraph::PassId>,
+    /// The SSAO edge-avoiding à-trous denoise chain: one pass per dispatch level (`scene.ssao`
+    /// carries the per-frame level count `SsaoActivation::atrous_levels`, `0` or
+    /// `2..=MAX_SSAO_ATROUS_LEVELS`). UNCONDITIONAL (both feature legs — SOFTWARE, NOT
+    /// `hwrt`-gated, unlike [`Self::shadow_atrous`]). Exactly `atrous_levels` are populated; the
+    /// unused tail slots stay `None`. Each level's role (read the R8 `gSsao` endpoint / an
+    /// interior R16 ring / write BACK into `gSsao`) is [`crate::present::ssao_atrous_step`]'s
+    /// [`crate::present::AtrousStepRole`].
+    pub(crate) ssao_atrous:
+        [Option<crate::framegraph::PassId>; crate::present::MAX_SSAO_ATROUS_LEVELS as usize],
     /// SDFDDGI I2: the probe-update pass (`scene.ddgi_update.is_some()`). Writes the two atlas
     /// storage images + the classification buffer; the update→resolve barrier is DERIVED at the
     /// resolve (the atlas reader), NOT hand-written.
@@ -135,19 +144,28 @@ pub(crate) struct GbufferPassPlan {
 /// the derived barrier set on THOSE resources is unchanged (byte-identical render); the VIS/à-
 /// trous/temporal passes (gated on `scene.shadow`) add the accesses when armed.
 ///
-/// Anti-aliasing Stage 4 (TAA W4) appends TWO more images, LAST — AFTER `pbr`, UNCONDITIONALLY
+/// Anti-aliasing Stage 4 (TAA W4) appends TWO more images — AFTER `pbr`, UNCONDITIONALLY
 /// (both feature legs): `taa_hist` (the write ResId) + `taa_hist_read` (the C1-fix cross-frame
 /// read-sibling, mirroring `shadow_temporal_hist`/`shadow_temporal_hist_read`). They land at
 /// ResId 12/13 (`not(hwrt)`) or 18/19 (`hwrt`) — exactly the OLD `FRAMEGRAPH_IMAGE_COUNT`/
 /// `+1` on each leg — so every EARLIER ResId (0..old-count-1) is byte-unchanged and the buffers
 /// still begin at the NEW `FRAMEGRAPH_IMAGE_COUNT`. No pass accesses them unless `scene.taa` is
 /// `Some` (`AaMode::Taa` armed — W5's `taa_resolve` pass) ⇒ byte-identical on every other mode.
+///
+/// The SSAO à-trous denoise chain's RHI DISPATCH WIRING follow-up appends TWO more images, LAST —
+/// AFTER `taa_hist_read`, UNCONDITIONALLY (both feature legs — SOFTWARE, NOT `hwrt`-gated):
+/// `ssao_ring_a` + `ssao_ring_b` (the two `R16_UNORM` interior ping-pong rings). They land at
+/// ResId 14/15 (`not(hwrt)`) or 20/21 (`hwrt`) — exactly the OLD `FRAMEGRAPH_IMAGE_COUNT`/`+1` on
+/// each leg (mirroring the TAA-append precedent immediately above), so every EARLIER ResId is
+/// byte-unchanged. No pass accesses them unless the SSAO à-trous chain's per-frame level count
+/// (`SsaoActivation::atrous_levels`) is `> 0` ⇒ byte-identical on the `N == 0` OFF path.
 #[cfg(feature = "hwrt")]
-pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 20;
-/// See the `hwrt` variant: a `not(hwrt)` build keeps the count at 14 (11 base + `pbr` + TAA's
-/// `taa_hist`/`taa_hist_read`, no shadow-vis targets, byte-unchanged on every ResId 0..10).
+pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 22;
+/// See the `hwrt` variant: a `not(hwrt)` build keeps the count at 16 (11 base + `pbr` + TAA's
+/// `taa_hist`/`taa_hist_read` + the SSAO à-trous `ssao_ring_a`/`ssao_ring_b`, no shadow-vis
+/// targets, byte-unchanged on every ResId 0..10).
 #[cfg(not(feature = "hwrt"))]
-pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 14;
+pub(crate) const FRAMEGRAPH_IMAGE_COUNT: usize = 16;
 
 /// The REAL [`BarrierSink`](crate::framegraph::BarrierSink) for the whole G-buffer
 /// frame (Steps 1c–1e): it resolves each derived barrier's logical `res` → the current
@@ -163,14 +181,16 @@ pub(crate) struct GbufferBarrierSink<'a> {
     pub(crate) cmd: VkCommandBuffer,
     /// The physical images resolved by image `ResId` index `0..FRAMEGRAPH_IMAGE_COUNT`
     /// — `[albedo, normal, material, depth, viewt, lit, ssao, cascade, atlas, ddgi_irr,
-    /// ddgi_depth, ..(hwrt-only).., pbr, taa_hist, taa_hist_read]` for the current frame slot
-    /// (`ddgi_irr`/`ddgi_depth` are
+    /// ddgi_depth, ..(hwrt-only).., pbr, taa_hist, taa_hist_read, ssao_ring_a, ssao_ring_b]` for
+    /// the current frame slot (`ddgi_irr`/`ddgi_depth` are
     /// SDFDDGI I2 single-instance world-fixed atlases — NOT ringed; `pbr` — textured-PBR T6a's
     /// `gPbr` — IS ringed, like albedo/normal/etc., and is declared/bound LAST, AFTER every
-    /// `hwrt`-only image, so it never perturbs their ResIds). MUST match the graph's declaration
-    /// order. A pass that does NOT declare an optional image (e.g. cascade when CSM is off, or the
-    /// DDGI atlases when the update pass is off) never routes a barrier naming that ResId, so its
-    /// slot may hold [`VkImage::NULL`] harmlessly.
+    /// `hwrt`-only image, so it never perturbs their ResIds; `ssao_ring_a`/`ssao_ring_b` — the
+    /// SSAO à-trous denoise chain's interior ping-pong rings — are appended LAST of all, mirroring
+    /// `pbr`'s "append at the end" discipline). MUST match the graph's declaration order. A pass
+    /// that does NOT declare an optional image (e.g. cascade when CSM is off, or the DDGI atlases
+    /// when the update pass is off) never routes a barrier naming that ResId, so its slot may hold
+    /// [`VkImage::NULL`] harmlessly.
     ///
     /// Rung 3a (`hwrt`): the array grows by SIX — `shadow_vis` (ResId 11) + `shadow_vis2` (ResId
     /// 12), the ringed RT soft-shadow-visibility targets, declared right AFTER `ddgi_depth`
@@ -205,7 +225,7 @@ pub(crate) struct GbufferBarrierSink<'a> {
 }
 
 /// Compile-time guard that [`GbufferBarrierSink::images`] is exactly [`FRAMEGRAPH_IMAGE_COUNT`]
-/// long on BOTH builds (`18` under `hwrt`, `12` otherwise). The field's `[VkImage;
+/// long on BOTH builds (`22` under `hwrt`, `16` otherwise). The field's `[VkImage;
 /// FRAMEGRAPH_IMAGE_COUNT]` type already ties the two; this pins the concrete count so an
 /// accidental const edit (e.g. adding a third shadow target without growing the const) trips
 /// here, and the `record_graph_pass` array literal — whose element count the compiler checks
@@ -213,13 +233,13 @@ pub(crate) struct GbufferBarrierSink<'a> {
 const _: () = {
     #[cfg(feature = "hwrt")]
     assert!(
-        FRAMEGRAPH_IMAGE_COUNT == 20,
-        "hwrt: 11 base + pbr (textured-PBR T6a) + shadow_vis + shadow_vis2 + motion_vec + shadow_temporal_hist + temporal_out + shadow_temporal_hist_read + taa_hist + taa_hist_read"
+        FRAMEGRAPH_IMAGE_COUNT == 22,
+        "hwrt: 11 base + pbr (textured-PBR T6a) + shadow_vis + shadow_vis2 + motion_vec + shadow_temporal_hist + temporal_out + shadow_temporal_hist_read + taa_hist + taa_hist_read + ssao_ring_a + ssao_ring_b"
     );
     #[cfg(not(feature = "hwrt"))]
     assert!(
-        FRAMEGRAPH_IMAGE_COUNT == 14,
-        "not(hwrt): the 11 base images + pbr (textured-PBR T6a) + taa_hist + taa_hist_read, no shadow-vis targets"
+        FRAMEGRAPH_IMAGE_COUNT == 16,
+        "not(hwrt): the 11 base images + pbr (textured-PBR T6a) + taa_hist + taa_hist_read + ssao_ring_a + ssao_ring_b, no shadow-vis targets"
     );
 };
 
@@ -586,6 +606,20 @@ impl Renderer<'_> {
                 VK_ACCESS_SHADER_WRITE_BIT,
             ),
         );
+        // The SSAO à-trous denoise chain's two interior ping-pong rings (`R16_UNORM`), declared
+        // LAST in the image block — AFTER `taa_hist_read`, BEFORE the first `add_buffer` — so
+        // every EARLIER ResId (0..old-count-1, incl. every `hwrt`-only + `pbr` + TAA image) stays
+        // byte-unchanged and the buffers still begin at the NEW `FRAMEGRAPH_IMAGE_COUNT` (mirrors
+        // `pbr`'s / `taa_hist`'s "append at the end" append discipline exactly — see their
+        // declarations above). UNCONDITIONAL (both feature legs — SOFTWARE, NOT `hwrt`-gated,
+        // unlike `shadow_vis`/`shadow_vis2`). FRAME-PRIVATE (ringed, written+read within one
+        // frame, like the G-buffer ring images) ⇒ plain `add_image` (undefined first-touch) — NOT
+        // a cross-frame seed like `taa_hist`/`shadow_temporal_hist` (the à-trous chain never reads
+        // a sibling in-flight frame's slot). No pass names either ResId this call (the ssao_atrous
+        // pass declarations below add the accesses when `N > 0`), so an `N == 0` frame routes ZERO
+        // barriers on them ⇒ inert, byte-identical.
+        let ssao_ring_a = g.add_image("ssao_ring_a");
+        let ssao_ring_b = g.add_image("ssao_ring_b");
         // --- Buffers (ResId FRAMEGRAPH_IMAGE_COUNT..+4) — ALL single instances shared by both in-flight
         // frames (audit B-002). light_table/tiles/grid/index end their frame consumed
         // by a COMPUTE read (resolve / marcher), so a dirty-frame re-write must order
@@ -892,6 +926,85 @@ impl Renderer<'_> {
         } else {
             None
         };
+
+        // The SSAO edge-avoiding à-trous denoise chain: `atrous_levels` passes (`0` or
+        // `2..=MAX_SSAO_ATROUS_LEVELS`), declared ONLY when `scene.ssao.is_some()` (mirrors the
+        // gather pass's gate — à-trous cannot run without a fresh gather). UNCONDITIONAL (both
+        // feature legs — SOFTWARE, NOT `hwrt`-gated, unlike the shadow-visibility à-trous below).
+        // Level `k`'s (in, out) ResId pair is [`crate::present::ssao_atrous_step`]'s
+        // [`crate::present::AtrousStepRole`], folding the R8 `ssao` (`gSsao`) endpoint in as the
+        // virtual "ring -1" / "ring N" slot: `Read8` reads `ssao`/writes `ssao_ring_a`; `Interior`
+        // ping-pongs `ssao_ring_a`/`ssao_ring_b`; `Write8` reads a ring/writes BACK into `ssao` —
+        // so the chain orders `ssao`: gather-write → level-0-read → .. → last-level-write →
+        // resolve-read (the resolve's conditional `ssao` read below derives the FINAL barrier).
+        let ssao_atrous_levels = scene
+            .ssao
+            .as_ref()
+            .map_or(0u32, |a| a.atrous_levels.min(crate::present::MAX_SSAO_ATROUS_LEVELS));
+        debug_assert!(
+            ssao_atrous_levels == 0 || ssao_pass.is_some(),
+            "invariant: ssao_atrous_levels > 0 requires the gather pass (scene.ssao.is_some())"
+        );
+        // W2 (degrade-path gate coupling): this declarator gates the pass count on `scene.ssao` +
+        // levels ONLY; the RECORDER (`record_gbuffer`) additionally requires the 5 role-keyed sets,
+        // which are `None` on a device lacking `R16_UNORM` STORAGE (`ssao_atrous_storage_ok()` false).
+        // On such a device declared = N but recorded = 0. This is SAFE by DIRECTION (declared > recorded
+        // is inert — a phantom pass's derived barriers are simply never emitted, and the NULL ring
+        // images are never named by a recorded barrier) AND by CONSTRUCTION: the resolve's `ssao` RAW
+        // barrier is derived from the declared `Write8` `ssao`-write, whose COMPUTE/SHADER_WRITE stage/
+        // access masks are IDENTICAL to the gather's `ssao`-write — so the gather-write → resolve-read
+        // ordering holds even when zero à-trous passes actually run. INVARIANT TO PRESERVE: `Write8`'s
+        // `ssao`-write stage/access mask MUST stay == the gather's, or this degrade-path barrier is
+        // silently lost. (The recorded > declared direction — which WOULD trip `plan.ssao_atrous[level]
+        // .expect(..)` — cannot occur: both sides clamp the SAME `scene.ssao.atrous_levels`.)
+        // O1: the contract is `0 || 2..=MAX` (the host's `clamped_atrous_levels`), asserted where the
+        // RHI first consumes it so a future raw-`1` never records a lone `Read8` that never writes back.
+        debug_assert!(
+            ssao_atrous_levels == 0
+                || (2..=crate::present::MAX_SSAO_ATROUS_LEVELS).contains(&ssao_atrous_levels),
+            "invariant: ssao_atrous_levels is 0 or 2..=MAX (clamped_atrous_levels); got {ssao_atrous_levels}"
+        );
+        let mut ssao_atrous: [Option<crate::framegraph::PassId>;
+            crate::present::MAX_SSAO_ATROUS_LEVELS as usize] =
+            [None; crate::present::MAX_SSAO_ATROUS_LEVELS as usize];
+        for (level, slot) in ssao_atrous
+            .iter_mut()
+            .enumerate()
+            .take(ssao_atrous_levels as usize)
+        {
+            let level = level as u32;
+            let rings = [ssao_ring_a, ssao_ring_b];
+            let (in_res, out_res) = match crate::present::ssao_atrous_step(level, ssao_atrous_levels) {
+                crate::present::AtrousStepRole::Read8 => (ssao, rings[0]),
+                crate::present::AtrousStepRole::Interior { in_ring } => {
+                    (rings[in_ring as usize], rings[1 - in_ring as usize])
+                }
+                crate::present::AtrousStepRole::Write8 { in_ring } => (rings[in_ring as usize], ssao),
+            };
+            let p = g.add_pass("ssao_atrous");
+            g.image_access(
+                viewt,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                SubRange::COLOR,
+            );
+            g.image_access(
+                in_res,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                SubRange::COLOR,
+            );
+            g.image_access(
+                out_res,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                SubRange::COLOR,
+            );
+            *slot = Some(p);
+        }
 
         // HW-RT rung 3a: the RT soft-shadow VIS pre-pass + the `levels` à-trous passes — declared
         // ONLY when `scene.shadow.is_some()` (the step-7 gate; the host keeps it a literal `None`
@@ -1383,6 +1496,7 @@ impl Renderer<'_> {
             coarse,
             marcher,
             ssao: ssao_pass,
+            ssao_atrous,
             ddgi_update,
             light_cull,
             csm,
@@ -1523,6 +1637,14 @@ impl Renderer<'_> {
                 // WRITE image, not the read image — the exact false-green the C1 fix closed for the
                 // shadow-temporal precedent).
                 targets.taa_hist.as_ref().map_or(VkImage::NULL, |r| r[fi ^ 1].image),
+                // The SSAO à-trous denoise chain's two interior ping-pong rings — declared LAST in
+                // the image block (ResId 14/15 `not(hwrt)` / 20/21 `hwrt`, past every earlier
+                // image), bound here LAST too, UNCONDITIONALLY (both feature legs). RINGED
+                // (per-FIF) — bind the CURRENT frame slot's handle. `Option`-guarded (`None` on a
+                // device lacking `R16_UNORM` storage — resolves to [`VkImage::NULL`], inert since
+                // no pass names either ResId when `atrous_levels == 0`).
+                targets.ssao_ring_a.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
+                targets.ssao_ring_b.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
             ],
             #[cfg(not(feature = "hwrt"))]
             buffers: [

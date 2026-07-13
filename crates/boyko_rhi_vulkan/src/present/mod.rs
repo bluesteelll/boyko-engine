@@ -81,6 +81,81 @@ pub const FRAMES_IN_FLIGHT: usize = 2;
 #[cfg(feature = "hwrt")]
 pub const MAX_ATROUS_LEVELS: u32 = 5;
 
+/// The SSAO edge-avoiding à-trous denoise chain: the max pass count the recorder can dispatch —
+/// the RHI-layer MIRROR of `boyko_render::ssao_config::MAX_SSAO_ATROUS_LEVELS` (the RHI cannot
+/// depend on `boyko_render`, mirroring [`MAX_ATROUS_LEVELS`]'s duplication rationale). Kept equal
+/// (5); a cross-crate integration test asserts the equality. Software (NOT `hwrt`-gated) — unlike
+/// [`MAX_ATROUS_LEVELS`], every leg builds this. [`ssao_atrous_step`]'s 5 ROLE-KEYED
+/// pipelines/sets are N-INDEPENDENT, so a level count up to this max is a LIVE per-frame choice
+/// (no rebuild) — see `present::scene_types::SsaoActivation`.
+pub const MAX_SSAO_ATROUS_LEVELS: u32 = 5;
+
+/// The SSAO à-trous chain's C1 role selection for dispatch level `level` of `n` total passes
+/// (`n` in `{0} ∪ {2..=`[`MAX_SSAO_ATROUS_LEVELS`]`}` — `boyko_render::SsaoConfig::clamped_atrous_levels`'s
+/// contract). PURE (no GPU handle): the recorder ([`crate::present::passes::gbuffer`]), the
+/// descriptor-set builder ([`GBufferTargets::build_ssao_atrous_sets`]), the framegraph declarator
+/// ([`GbufferPassPlan::ssao_atrous`]'s ResId chain), and any headless test harness that dispatches
+/// the SAME N-pass chain all call THIS one function for the level→role mapping, so they can never
+/// diverge.
+///
+/// Because the intermediate ping-pong is TWO rings (not one uniform format like the shadow
+/// à-trous), the two chain ENDPOINTS need DIFFERENT pipeline variants from the interior:
+/// - `level == 0`: [`AtrousStepRole::Read8`] — reads the frozen R8 `gSsao` endpoint, writes ring 0.
+/// - `level == n - 1` (`n >= 2`): [`AtrousStepRole::Write8`] — reads `ring[in_ring]`, writes BACK
+///   into the frozen R8 `gSsao` endpoint.
+/// - otherwise (`0 < level < n - 1`): [`AtrousStepRole::Interior`] — reads `ring[in_ring]`, writes
+///   `ring[1 - in_ring]` (both R16).
+///
+/// `in_ring = (level - 1) % 2` for every non-`Read8` role: level `k`'s input is whatever level
+/// `k - 1` wrote (level 0 always writes ring 0, so level 1 reads ring 0 == `(1-1)%2`, level 2
+/// reads ring 1 == `(2-1)%2`, etc. — a uniform ping-pong once you fold the two R8 endpoints in as
+/// virtual "ring -1" / "ring n" slots).
+///
+/// # Panics (debug only)
+///
+/// `debug_assert!`s `level < n` — the caller's loop bound (`0..n`) already guarantees this; a
+/// violation is a caller bug, not a runtime condition.
+#[inline]
+pub fn ssao_atrous_step(level: u32, n: u32) -> AtrousStepRole {
+    debug_assert!(
+        level < n,
+        "invariant: ssao_atrous_step is called for level in 0..n"
+    );
+    if level == 0 {
+        AtrousStepRole::Read8
+    } else if level == n - 1 {
+        AtrousStepRole::Write8 { in_ring: (level - 1) % 2 }
+    } else {
+        AtrousStepRole::Interior { in_ring: (level - 1) % 2 }
+    }
+}
+
+/// The role [`ssao_atrous_step`] selects for one SSAO à-trous dispatch level — which of the 5
+/// role-keyed pipeline/descriptor-set pairs ([`present::scene_types::SsaoActivation`]'s
+/// `atrous_read8_pipeline`/`atrous_interior_pipeline`/`atrous_write8_pipeline` +
+/// [`GBufferTargets`]'s five `ssao_atrous_*_set` rings) the caller binds for that level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtrousStepRole {
+    /// Level 0: `gAoIn` = the frozen R8 `gSsao` endpoint, `gAoOut` = R16 ring 0. Selects the
+    /// `read8` pipeline variant + the `ssao_atrous_read8_set`.
+    Read8,
+    /// An interior level (`0 < level < n - 1`): `gAoIn` = R16 `ring[in_ring]`, `gAoOut` = R16
+    /// `ring[1 - in_ring]`. Selects the `interior` pipeline variant + `ssao_atrous_interior_from0_set`
+    /// (`in_ring == 0`) or `ssao_atrous_interior_from1_set` (`in_ring == 1`).
+    Interior {
+        /// The ring index (0 or 1) `gAoIn` reads from; `gAoOut` writes the OTHER ring.
+        in_ring: u32,
+    },
+    /// The last level (`level == n - 1`, `n >= 2`): `gAoIn` = R16 `ring[in_ring]`, `gAoOut` = the
+    /// frozen R8 `gSsao` endpoint (the write-back). Selects the `write8` pipeline variant +
+    /// `ssao_atrous_write8_from0_set` (`in_ring == 0`) or `ssao_atrous_write8_from1_set`
+    /// (`in_ring == 1`).
+    Write8 {
+        /// The ring index (0 or 1) `gAoIn` reads from.
+        in_ring: u32,
+    },
+}
+
 /// HW-RT rung 3a: the byte size of the à-trous edge-stop UBO — the RHI-layer MIRROR of
 /// `boyko_render::RESOLVED_SHADOW_DENOISE_BYTES` (`size_of::<ResolvedShadowDenoise>()`, one std140
 /// vec4 = 16 B). The RHI mints the per-FIF `shadow_denoise_ubo` ring at this size (`sigma_z` @0,

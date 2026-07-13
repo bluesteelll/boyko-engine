@@ -37,7 +37,7 @@ use crate::ffi::{
     VK_FILTER_NEAREST, VK_FORMAT_B10G11R11_UFLOAT_PACK32, VK_FORMAT_B8G8R8A8_SRGB,
     VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_D32_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT,
     VK_FORMAT_R16G16B16A16_UNORM, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R16G16_UNORM,
-    VK_FORMAT_R16_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
+    VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_UNORM, VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
     VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32_SFLOAT, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM,
     VK_FORMAT_R8G8_UNORM,
     VK_FORMAT_R8_SNORM, VK_FORMAT_R8_UNORM,
@@ -287,6 +287,12 @@ const _: () = assert!(
 const _: () = assert!(
     Format::R16G16Unorm.as_i32() == VK_FORMAT_R16G16_UNORM,
     "Format::R16G16Unorm must equal VK_FORMAT_R16G16_UNORM"
+);
+// The SSAO à-trous denoise chain's interior ping-pong ring format (`as_i32()` mapped in
+// `create_texture`). Pinned to the canonical enumerant (`VK_FORMAT_R16_UNORM == 70`).
+const _: () = assert!(
+    Format::R16Unorm.as_i32() == VK_FORMAT_R16_UNORM,
+    "Format::R16Unorm must equal VK_FORMAT_R16_UNORM"
 );
 // Textured-PBR T6a: the `gPbr` deferred-resolve MRT lane format (`as_i32()` mapped in
 // `create_texture`). Pinned to the canonical enumerant (`VK_FORMAT_R16G16B16A16_SFLOAT == 97`).

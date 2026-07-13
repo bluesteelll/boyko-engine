@@ -940,6 +940,12 @@ pub const VK_FORMAT_R16_SFLOAT: i32 = 76;
 /// R16G16_UNORM=77) — pinned to the ACTUAL enumerant, cross-checked against
 /// `Format::R16G16Unorm` in `abi_guard`.
 pub const VK_FORMAT_R16G16_UNORM: i32 = 77;
+/// `VkFormat::VK_FORMAT_R16_UNORM` — a single unsigned-normalized 16-bit channel (the SSAO
+/// à-trous denoise chain's interior ping-pong ring; 16-bit avoids the cumulative 8-bit rounding
+/// of a multi-level filter, one channel narrower than [`VK_FORMAT_R16G16_UNORM`]). The value is
+/// 70 (the 16-bit single-component UNORM block) — pinned to the ACTUAL enumerant, cross-checked
+/// against `Format::R16Unorm` in `abi_guard`.
+pub const VK_FORMAT_R16_UNORM: i32 = 70;
 /// `VkFormat::VK_FORMAT_R16G16_SFLOAT` — two 16-bit (half) floats (SDFDDGI I1: the probe
 /// DEPTH/visibility atlas's two Chebyshev moments `E[d]`/`E[d²]`). The value is 83 (the
 /// 16-bit-per-component SFLOAT block: R16=76, R16G16=83) — the M2 lesson: the const is

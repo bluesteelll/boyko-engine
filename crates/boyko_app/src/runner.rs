@@ -1457,6 +1457,14 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // armed separately by `boyko_render::sync_ssao_light_gate`, in lock-step with
             // `SsaoConfig`).
             let ssao_variant = world.try_resource::<ResolvedSsao>().and_then(|r| r.variant);
+            // The SSAO edge-avoiding à-trous denoise chain: the resolved, ALREADY-CLAMPED pass
+            // count (`ResolvedSsao::atrous_levels` — `0` or `2..=MAX_SSAO_ATROUS_LEVELS`; forced
+            // to `0` by `resolve_ssao` whenever `ssao_variant` is `None`, so the two can never
+            // disagree). The SAME `try_resource` pattern `ssao_variant` uses: a host that omits
+            // `SsaoPlugin` degrades to `0` (no à-trous dispatch) rather than panicking.
+            let ssao_atrous_levels = world
+                .try_resource::<ResolvedSsao>()
+                .map_or(0, |r| r.atrous_levels);
             // SSAA (AA campaign Stage 3, C1) — the HOST-AUTHORITATIVE LOCK: resolution is
             // a boot commitment (`WindowHost::boot`'s device-capability probe), so the
             // per-frame mode MUST agree with it, never the reverse. `host.ssaa_armed` ⇒
@@ -1510,6 +1518,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 aa_mode,
                 taa_reset_flag,
                 ssao_variant,
+                ssao_atrous_levels,
                 ctx,
             );
 

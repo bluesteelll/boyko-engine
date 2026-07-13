@@ -60,6 +60,25 @@ These are distinct `.hlsl`, listed here for the temporal/spatial pipeline pictur
 The mode matrix (None / Spatial / Temporal / Both) is a **host** selection of which of these passes run
 between the VIS producer and the DENOISED consumer — see `BOYKO_SHADOW_DENOISE`.
 
+## SSAO à-trous denoise compute — `ssao_atrous.comp.hlsl` (3 format-pin variants)
+
+Render P7 POLISH follow-up: the SSAO denoise moved OUT of `deferred_pbr.hlsl`'s resolve (the former
+inline 15x15 bilateral blur) into a dedicated multi-pass edge-avoiding à-trous compute chain, mirroring
+`shadow_atrous.comp.hlsl` — Dammertz 5-tap B3-spline, `step = 1 << level` per dispatch — but
+TRANSCENDENTAL-FREE (integer/mul/div/clamp/min/max only, no `exp`/`pow` edge-stops) so the bit-exact
+host oracle (`golden_ssao_atrous`, `boyko_rhi_vulkan::goldens`) survives. Software (NOT `hwrt`-gated).
+
+| Variant | `-D` flag | `.spv` | `gAoIn` pin | `gAoOut` pin | Used for |
+|---|---|---|---|---|---|
+| interior | (none) | `ssao_atrous.comp.spv` | `r16` | `r16` | every level except the first and last |
+| read8 | `SSAO_ATROUS_READ_R8=1` | `ssao_atrous_read8.comp.spv` | `r8` | `r16` | level 0 (reads the raw `sdf_ssao` R8_UNORM gather) |
+| write8 | `SSAO_ATROUS_WRITE_R8=1` | `ssao_atrous_write8.comp.spv` | `r16` | `r8` | the LAST level (writes back into the frozen `gSsao` R8_UNORM the resolve reads) |
+
+The bind-group LAYOUT is IDENTICAL across all three (4 bindings: `gAoIn`/`gAoOut`/`gViewT`/Camera UBO
++ a 4-byte `{ uint step; }` push) — only the two `OpTypeImage` pins differ. Recipe: `cs_6_0`, e.g.
+`dxc -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 -D SSAO_ATROUS_READ_R8=1 ssao_atrous.comp.hlsl
+-Fo ssao_atrous_read8.comp.spv`.
+
 ## Why these stay N `.spv` (do NOT try to spec-const-collapse)
 
 A specialization constant is resolved at *pipeline-create* and can only change a **value** (a loop bound,

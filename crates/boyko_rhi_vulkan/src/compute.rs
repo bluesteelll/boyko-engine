@@ -267,8 +267,9 @@ embed_spirv! {
     /// Render P7 POLISH: the single `gSsao` center tap becomes an inline 7×7 (`R == 3`) depth-gated
     /// box blur (`gViewT` bilateral gate at `SSAO_BLUR_DEPTH_TOL == 0.1`) to kill the discrete-step
     /// SSAO RINGS — still inside the SAME `ssao_mode != 0` combine (NO new pass; the 0%-gate holds,
-    /// `ssao_mode == 0` never executes the loop). The host mirror is `golden_ssao_blur`; the gather
-    /// order/bounds/gate are byte-mirrored so GPU == host within ±2/255; 25280 → 26608 bytes.
+    /// `ssao_mode == 0` never executes the loop). [Later SUPERSEDED: the denoise moved OUT of the
+    /// resolve into the `ssao_atrous.comp` edge-avoiding à-trous pass chain; the resolve now reads the
+    /// already-filtered `gSsao` directly. The host mirror is now `golden_ssao_atrous`.]; ... bytes.
     /// Render Shadow Phase 3: Screen-Space Contact Shadows (SSCS) add `project_to_screen` (the exact
     /// `generate_ray` inverse) + `sscs_march` (an unrolled 8-step screen-space depth march) multiplied
     /// into the per-light `vis` at both lighting sites, gated by `contact_shadow_mode` (header word 7
@@ -417,6 +418,37 @@ embed_spirv! {
     #[cfg(feature = "hwrt")]
     SHADOW_ATROUS_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/shadow_atrous.comp.spv")
+}
+
+embed_spirv! {
+    /// The SSAO à-trous edge-avoiding denoise filter, INTERIOR pin (`shaders/ssao_atrous.comp.spv`,
+    /// `ssao_atrous.comp.hlsl` compiled with no `-D`): `gAoIn`/`gAoOut` both `r16`. Bound to the SHARED
+    /// 4-binding à-trous layout { @0 `gAoIn`, @1 `gAoOut`, @2 `gViewT`, @3 the shared 80-byte Camera
+    /// UBO } + a 4-byte `{ uint step; }` push. Selected for every level EXCEPT the first (reads the R8
+    /// gather) and the last (writes back to the R8 `gSsao`) — software (NOT `hwrt`-gated: the SSAO
+    /// denoise gate is depth-plane-fit only, no `rayQuery`).
+    SSAO_ATROUS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/ssao_atrous.comp.spv")
+}
+
+embed_spirv! {
+    /// The SSAO à-trous edge-avoiding denoise filter, READ-R8 pin
+    /// (`shaders/ssao_atrous_read8.comp.spv`, `-D SSAO_ATROUS_READ_R8=1`): `gAoIn` pinned `r8` (reads
+    /// the `sdf_ssao` gather's raw R8_UNORM output), `gAoOut` pinned `r16`. Selected for LEVEL 0 only
+    /// (`N >= 2`). Same 4-binding layout as [`SSAO_ATROUS_SPV`]; only the `gAoIn` `OpTypeImage` pin
+    /// differs.
+    SSAO_ATROUS_READ8_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/ssao_atrous_read8.comp.spv")
+}
+
+embed_spirv! {
+    /// The SSAO à-trous edge-avoiding denoise filter, WRITE-R8 pin
+    /// (`shaders/ssao_atrous_write8.comp.spv`, `-D SSAO_ATROUS_WRITE_R8=1`): `gAoIn` pinned `r16`,
+    /// `gAoOut` pinned `r8` (writes back into the frozen `gSsao` R8_UNORM image the resolve reads at
+    /// binding 11). Selected for the LAST level only. Same 4-binding layout as [`SSAO_ATROUS_SPV`];
+    /// only the `gAoOut` `OpTypeImage` pin differs.
+    SSAO_ATROUS_WRITE8_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/ssao_atrous_write8.comp.spv")
 }
 
 embed_spirv! {
@@ -1090,6 +1122,29 @@ pub fn deferred_pbr_denoised_spirv() -> &'static [u32] {
 #[inline]
 pub fn shadow_atrous_spirv() -> &'static [u32] {
     SHADOW_ATROUS_SPV.as_words()
+}
+
+/// The SSAO à-trous denoise filter, INTERIOR pin (`r16`/`r16`), as a `u32` word stream. Bound to
+/// the shared 4-binding à-trous layout (see [`SSAO_ATROUS_SPV`]). Software — built unconditionally
+/// (NOT `hwrt`-gated).
+#[inline]
+pub fn ssao_atrous_spirv() -> &'static [u32] {
+    SSAO_ATROUS_SPV.as_words()
+}
+
+/// The SSAO à-trous denoise filter, READ-R8 pin (`r8`/`r16`), as a `u32` word stream — LEVEL 0
+/// only (reads the raw `sdf_ssao` gather output). See [`SSAO_ATROUS_READ8_SPV`].
+#[inline]
+pub fn ssao_atrous_read8_spirv() -> &'static [u32] {
+    SSAO_ATROUS_READ8_SPV.as_words()
+}
+
+/// The SSAO à-trous denoise filter, WRITE-R8 pin (`r16`/`r8`), as a `u32` word stream — the LAST
+/// level only (writes back into the frozen `gSsao` the resolve reads). See
+/// [`SSAO_ATROUS_WRITE8_SPV`].
+#[inline]
+pub fn ssao_atrous_write8_spirv() -> &'static [u32] {
+    SSAO_ATROUS_WRITE8_SPV.as_words()
 }
 
 /// The Rung-3b TEMPORAL shadow-vis reproject+accumulate SPIR-V as a `u32` word stream. Bound to its
@@ -1823,37 +1878,39 @@ pub const SSAO_ROT: [(f32, f32); 64] = [
     (-0.99879545, 0.04906768),
 ];
 
-/// Render P7 POLISH — the SSAO depth-aware box-blur half-kernel radius (`SSAO_BLUR_R` in the
-/// resolve). `R == 3` is a 7×7 box: the inline blur of `gSsao` INSIDE the resolve's `ssao_mode
-/// != 0` combine that smooths the discrete-step HBAO RINGS. The host mirror [`golden_ssao_blur`]
-/// uses the SAME radius so the GPU and host averages agree texel-for-texel.
-pub const SSAO_BLUR_R: i32 = 7;
-/// Render P7 POLISH — the SSAO blur's bilateral DEPTH gate (`SSAO_BLUR_DEPTH_TOL` in the
-/// resolve), in `view_t` (world-distance) units. A neighbour tap is averaged in ONLY when
-/// `|tap.view_t - center.view_t| <= SSAO_BLUR_DEPTH_TOL`; this keeps the blur WITHIN a flat
-/// surface (the mesh floor has near-constant `view_t`) while REJECTING the mesh↔SDF silhouette
-/// (where `view_t` jumps far more than the tol), so AO never bleeds across the edge. `0.1` was
-/// chosen to sit comfortably inside that band. Mirrored bit-for-bit by [`golden_ssao_blur`].
+/// The Dammertz 5-tap B3-spline weights for the SSAO à-trous kernel (`SSAO_ATROUS_H` in
+/// `ssao_atrous.comp.hlsl`), for offsets `-2..=2`. EXACT `f32` literals. Equals
+/// `boyko_shaderdsl::ssao::SSAO_ATROUS_H` and `shadow_atrous.comp.hlsl`'s `ATROUS_H`.
+pub const SSAO_ATROUS_H: [f32; 5] = [0.0625, 0.25, 0.375, 0.25, 0.0625];
+/// The SSAO à-trous per-pass normalization guard (`SSAO_ATROUS_W_EPS` in
+/// `ssao_atrous.comp.hlsl`). Equals `boyko_shaderdsl::ssao::SSAO_ATROUS_W_EPS`.
+pub const SSAO_ATROUS_W_EPS: f32 = 1.0e-4;
+/// The SSAO à-trous plane-fit RESIDUAL depth gate (`SSAO_BLUR_DEPTH_TOL` in
+/// `ssao_atrous.comp.hlsl`), in linear view-Z (world-distance) units. A neighbour tap is
+/// averaged in ONLY when `|residual| <= SSAO_BLUR_DEPTH_TOL` (the plane-fit residual, not the
+/// raw difference); this keeps the filter WITHIN a flat/sloped surface while REJECTING the
+/// mesh↔SDF silhouette. Equals `boyko_shaderdsl::ssao::SSAO_BLUR_DEPTH_TOL`; mirrored bit-for-bit
+/// by [`golden_ssao_atrous`].
 pub const SSAO_BLUR_DEPTH_TOL: f32 = 1.0;
-/// Render P7 POLISH Change C — the resolve's SSAO blur bilateral SPATIAL falloff scale
-/// (`SSAO_BLUR_SPATIAL_SIGMA` in the resolve), in pixels: the per-tap spatial weight is
-/// `clamp01(1 - (dx*dx+dy*dy) / (SSAO_BLUR_SPATIAL_SIGMA * SSAO_BLUR_SPATIAL_SIGMA))`, a
-/// polynomial (transcendental-free) radial falloff. Equals
-/// `boyko_shaderdsl::ssao::SSAO_BLUR_SPATIAL_SIGMA`; mirrored bit-for-bit by [`golden_ssao_blur`].
-pub const SSAO_BLUR_SPATIAL_SIGMA: f32 = 100.0;
-/// Render P7 POLISH Change C — the resolve's SSAO blur bilateral DEPTH falloff scale
-/// (`SSAO_BLUR_DEPTH_SIGMA` in the resolve), in `view_t` units: the per-tap depth weight is
+/// The SSAO à-trous per-pass DEPTH falloff scale (`SSAO_BLUR_DEPTH_SIGMA` in
+/// `ssao_atrous.comp.hlsl`), in linear view-Z units: the per-tap depth weight is
 /// `clamp01(1 - (dz*dz) / (SSAO_BLUR_DEPTH_SIGMA * SSAO_BLUR_DEPTH_SIGMA))`, softening the
-/// depth agreement WITHIN the hard [`SSAO_BLUR_DEPTH_TOL`] gate (which still rejects a tap
-/// outright past the tolerance). Equals `boyko_shaderdsl::ssao::SSAO_BLUR_DEPTH_SIGMA`;
-/// mirrored bit-for-bit by [`golden_ssao_blur`].
+/// depth agreement WITHIN the hard [`SSAO_BLUR_DEPTH_TOL`] gate. Equals
+/// `boyko_shaderdsl::ssao::SSAO_BLUR_DEPTH_SIGMA`; mirrored bit-for-bit by
+/// [`golden_ssao_atrous`].
 pub const SSAO_BLUR_DEPTH_SIGMA: f32 = 1.0;
-/// The slope-aware depth-gate gradient clamp (`SSAO_BLUR_GRAD_CLAMP` in the resolve): the blur
-/// predicts each tap's view_t from the center's clamped local gradient (min-magnitude one-sided
-/// differences) and gates the RESIDUAL — the band follows a sloped/curved surface instead of
-/// truncating the kernel, while a silhouette/background step (clamped) still rejects. Equals
-/// `boyko_shaderdsl::ssao::SSAO_BLUR_GRAD_CLAMP`; mirrored bit-for-bit by [`golden_ssao_blur`].
+/// The SSAO à-trous slope-aware depth-gate gradient clamp (`SSAO_BLUR_GRAD_CLAMP` in
+/// `ssao_atrous.comp.hlsl`): each pass predicts a tap's linear-Z from the center's clamped local
+/// gradient (min-magnitude one-sided differences at the fixed ±1 offset) and gates the
+/// SVGF step-scaled RESIDUAL — the band follows a sloped/curved surface instead of truncating
+/// the kernel, while a silhouette/background step (clamped) still rejects. Equals
+/// `boyko_shaderdsl::ssao::SSAO_BLUR_GRAD_CLAMP`; mirrored bit-for-bit by [`golden_ssao_atrous`].
 pub const SSAO_BLUR_GRAD_CLAMP: f32 = 0.1;
+
+/// The SSAO à-trous push-constant size (`{ uint step; }`, `ssao_atrous.comp.hlsl`'s
+/// `SsaoAtrousPush`) — 4 bytes, the single-`u32` hole-`step` compute push range (mirrors
+/// `shadow_atrous.comp.hlsl`'s own 4-byte `step` push).
+pub const SSAO_ATROUS_PUSH_BYTES: u32 = 4;
 
 
 /// P6 R1 cap: the maximum EXTRA shadow casters marched per pixel (the dominant-N bound).

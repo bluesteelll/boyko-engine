@@ -30,7 +30,7 @@ use crate::compute::{
     MESH_COLOR, MESH_DEPTH_CLEAR, MESH_DEPTH_T_MAX, MESH_RASTER_ALBEDO, PBR_FAR, PBR_LIGHT_COLOR, PBR_LIGHT_DIR,
     PBR_SKY_DIFFUSE, PBR_SKY_SPEC, SDF_CAM_Z, SDF_EPS, SDF_HALF_EXTENT, SDF_MAX_IT,
     SDF_T_MAX, SHADOW_HIT_EPS, SHADOW_K, SHADOW_MINT, SHADOW_MINT_STEP, SHADOW_NDOTL_EPS,
-    SHADOW_NORMAL_BIAS, SKY_SUN_EXPONENT, SSAO_BLUR_DEPTH_SIGMA, SSAO_BLUR_DEPTH_TOL, SSAO_BLUR_GRAD_CLAMP, SSAO_BLUR_R, SSAO_BLUR_SPATIAL_SIGMA, SSAO_HILBERT_W, SSAO_R2_ALPHA1, SSAO_R2_ALPHA2, SSAO_RADIUS_PIX_MAX, SSAO_RADIUS_PIX_MIN,
+    SHADOW_NORMAL_BIAS, SKY_SUN_EXPONENT, SSAO_ATROUS_H, SSAO_ATROUS_W_EPS, SSAO_BLUR_DEPTH_SIGMA, SSAO_BLUR_DEPTH_TOL, SSAO_BLUR_GRAD_CLAMP, SSAO_HILBERT_W, SSAO_R2_ALPHA1, SSAO_R2_ALPHA2, SSAO_RADIUS_PIX_MAX, SSAO_RADIUS_PIX_MIN,
     SSAO_ROT, SSAO_ROT_N, SSAO_VIEWT_BG, SUN_ENV_WEIGHT, SUN_KERNEL_EXPONENT_MAX, SUN_KERNEL_EXPONENT_MIN,
     SsaoParams, TILE_FLAG_EMPTY, TILE_SIZE, TileBound, composite_ray, depth_to_t,
     golden_f16_from_f32, pack_rgba, sdf_sphere,
@@ -2549,114 +2549,164 @@ pub fn golden_ssao_attributes(
     ao * ao
 }
 
-/// Render P7 POLISH Change C — the EXACT host mirror of the resolve's inline SSAO BILATERAL
-/// blur (`deferred_pbr.hlsl`, inside the `ssao_mode != 0` combine): a spatial-gaussian x
-/// depth-falloff WEIGHTED gather (replacing the old hard-binary uniform box average). Given the
-/// RAW per-pixel SSAO byte image (`ssao` — exactly what the GPU `gSsao` R8_UNORM holds; the C2
-/// host builds it via [`golden_ssao_attributes`] quantized to `u8` by `(x * 255).round()`) and
-/// the host G-buffer (`gbuf`, for the per-pixel `view_t` depth gate), returns the blurred AO
-/// factor `[0,1]` at `(px, py)`.
-///
-/// The gather is the byte-for-byte mirror of the shader: over the `(2*R+1)²` neighbour taps
-/// (`R == `[`SSAO_BLUR_R`]), a neighbour whose `gbuf[c].view_t` is beyond [`SSAO_BLUR_DEPTH_TOL`]
-/// of the center's is REJECTED outright (the silhouette guard, unchanged from before Change C —
-/// a neighbour across the mesh↔SDF edge has a far `view_t` and never contributes, so the blur
-/// never bleeds AO over the silhouette); an ACCEPTED tap is weighted by `w_spatial * w_depth`
-/// (both `clamp01(1 - x²/sigma²)` polynomials, transcendental-free — see
-/// [`SSAO_BLUR_SPATIAL_SIGMA`] / [`SSAO_BLUR_DEPTH_SIGMA`]) and folds into a weighted mean
-/// `Σ(w·s) / max(Σw, 1.0)`. The center always passes its own gate with `w == 1`, so `Σw ≥ 1`
-/// (no divide-by-zero). The op-set is integer / `abs` / compare / `mul`/`div`/`clamp` / the same
-/// `byte / 255.0` UNORM decode — NO transcendental — so the host average rounds bit-identically
-/// to the GPU's.
-pub fn golden_ssao_blur(
-    ssao: &[u8],
+/// Quantizes `v` (clamped to `[0,1]`) to an R16_UNORM code point — `(v * 65535).round()`,
+/// matching the SSAO à-trous chain's INTERIOR ping-pong storage. Shared by [`golden_ssao_atrous`],
+/// the GPU-vs-host test harness, and the `ssao_atrous_edsl_sync` Track-1 sync test (ONE
+/// quantization convention — see the SSAO à-trous plan's "inter-pass precision" note). Round-half-up
+/// matches NVIDIA/Vulkan UNORM store rounding on the non-negative `[0,1]` domain.
+#[inline]
+pub fn quantize_r16_unorm(v: f32) -> u16 {
+    (v.clamp(0.0, 1.0) * 65535.0).round() as u16
+}
+
+/// Decodes an R16_UNORM code point back to `[0,1]` — the GPU's `Load` decode of an R16_UNORM
+/// storage image (the SSAO à-trous chain's interior ping-pong read).
+#[inline]
+pub fn decode_r16_unorm(code: u16) -> f32 {
+    f32::from(code) / 65535.0
+}
+
+/// Quantizes `v` (clamped to `[0,1]`) to an R8_UNORM code point — `(v * 255).round()`, matching
+/// the SSAO à-trous chain's TWO FROZEN ENDPOINTS (the raw `sdf_ssao` gather output, the final
+/// filtered `gSsao` the resolve reads). Shared with [`golden_ssao_attributes`]'s quantization
+/// convention (byte-identical rounding).
+#[inline]
+pub fn quantize_r8_unorm(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// Linear view-Z for a pixel, reconstructed BIT-CONSISTENT with `ssao_atrous.comp.hlsl` /
+/// `shadow_atrous.comp.hlsl`'s `linear_view_z`: PERSPECTIVE `dot(rd, cam_forward) * view_t`,
+/// ORTHO `view_t` (a verbatim no-op — the bit-exact SSAO test fixtures are all ORTHO, so this
+/// switch from the raw ray-param `view_t` gate is numerically free there). `rd` is the pixel's
+/// own ray direction (`composite_ray`'s second return) — NOT the center pixel's, for a
+/// neighbour tap.
+#[inline]
+pub fn linear_view_z(camera: CompositeCamera, rd: [f32; 3], view_t: f32) -> f32 {
+    match camera {
+        CompositeCamera::Perspective { forward, .. } => {
+            let z_view = rd[0] * forward[0] + rd[1] * forward[1] + rd[2] * forward[2];
+            z_view * view_t
+        }
+        CompositeCamera::Ortho => view_t,
+    }
+}
+
+/// ONE SSAO à-trous pass over the WHOLE image — the host oracle mirror of
+/// `ssao_atrous.comp.hlsl`'s `main()` for a single dispatch (`step = 1 << level`). `cur` is the
+/// previous pass's DECODED `[0,1]` buffer (row-major, `img_w * img_h`); `gbuf` supplies each
+/// pixel's `view_t` for the linear-Z reconstruct. Returns the RAW (unquantized) filtered buffer —
+/// [`golden_ssao_atrous`] applies the inter-pass quantization convention around each call.
+fn ssao_atrous_pass(
+    cur: &[f32],
     gbuf: &[MarcherAttributes],
-    px: u32,
-    py: u32,
     img_w: u32,
     img_h: u32,
-) -> f32 {
+    camera: CompositeCamera,
+    step: i32,
+) -> Vec<f32> {
     let w = img_w as i32;
     let h = img_h as i32;
-    debug_assert_eq!(
-        ssao.len(),
-        (img_w as usize) * (img_h as usize),
-        "invariant: SSAO blur raw image length must equal img_w * img_h"
-    );
-    debug_assert_eq!(
-        gbuf.len(),
-        (img_w as usize) * (img_h as usize),
-        "invariant: SSAO blur gbuf length must equal img_w * img_h"
-    );
-
-    // The center's `view_t` (the gate reference) — the SAME `gViewT.Load(coord)` the resolve
-    // reads. The center always passes (`dz_pred == 0` at zero offset ⇒ residual exactly 0) with
-    // weight 1, so `wsum >= 1`.
-    let center_view_t = gbuf[(py as i32 * w + px as i32) as usize].view_t;
-
-    // The slope-aware (plane-fit) gate gradient — min-magnitude ONE-SIDED view_t differences
-    // from the 4 direct neighbours, clamped to ±SSAO_BLUR_GRAD_CLAMP. Mirrors the shader's
-    // hand-written pre-loop glue EXACTLY: the shader's coordinate-CLAMPED `Load` reads the
-    // center's own texel at an image edge (a zero diff) — here the bounds check supplies the
-    // same zero. Min-magnitude picks the in-surface side at a silhouette; the clamp bounds a
-    // both-sides-huge case (isolated pixel against the 1e30 background) so a cross-silhouette
-    // tap can never be "predicted" back inside the band. Tie (equal magnitudes) keeps the
-    // +side — the shader's `(abs(p) > abs(m)) ? m : p` ternary.
-    let one_sided = |dx: i32, dy: i32, sign: f32| -> f32 {
-        let cx = px as i32 + dx;
-        let cy = py as i32 + dy;
-        if cx < 0 || cy < 0 || cx >= w || cy >= h {
-            return 0.0;
-        }
-        let vt_n = gbuf[(cy * w + cx) as usize].view_t;
-        if sign > 0.0 { vt_n - center_view_t } else { center_view_t - vt_n }
+    let idx_of = |x: i32, y: i32| -> usize { (y * w + x) as usize };
+    let z_at = |x: i32, y: i32| -> f32 {
+        let (_, rd) = composite_ray(x as u32, y as u32, img_w, img_h, camera);
+        linear_view_z(camera, rd, gbuf[idx_of(x, y)].view_t)
     };
-    let min_mag = |p: f32, m: f32| -> f32 { if p.abs() > m.abs() { m } else { p } };
-    // `.clamp` == the shader's `clamp(v, -C, C)` == the eDSL walk's `max(lo).min(hi)` chain for
-    // all FINITE inputs (the diffs are finite by construction — no NaN divergence risk).
-    let dzdx = min_mag(one_sided(1, 0, 1.0), one_sided(-1, 0, -1.0))
-        .clamp(-SSAO_BLUR_GRAD_CLAMP, SSAO_BLUR_GRAD_CLAMP);
-    let dzdy = min_mag(one_sided(0, 1, 1.0), one_sided(0, -1, -1.0))
-        .clamp(-SSAO_BLUR_GRAD_CLAMP, SSAO_BLUR_GRAD_CLAMP);
 
-    let spatial_sigma2 = SSAO_BLUR_SPATIAL_SIGMA * SSAO_BLUR_SPATIAL_SIGMA;
-    let depth_sigma2 = SSAO_BLUR_DEPTH_SIGMA * SSAO_BLUR_DEPTH_SIGMA;
+    let mut out = vec![0.0_f32; cur.len()];
+    for py in 0..h {
+        for px in 0..w {
+            let s_c = cur[idx_of(px, py)];
+            let z_c = z_at(px, py);
 
-    let mut sum = 0.0_f32;
-    let mut wsum = 0.0_f32;
-    // Mirror the shader's nested `for (dy) for (dx)` order/bounds/gate/weight EXACTLY.
-    for dy in -SSAO_BLUR_R..=SSAO_BLUR_R {
-        for dx in -SSAO_BLUR_R..=SSAO_BLUR_R {
-            let cx = px as i32 + dx;
-            let cy = py as i32 + dy;
-            if cx < 0 || cy < 0 || cx >= w || cy >= h {
-                continue; // bounds
+            // The slope-aware (plane-fit) depth-gate gradient — min-magnitude ONE-SIDED
+            // linear-Z differences at the FIXED ±1 pixel offset (coordinate-clamped: an
+            // image-edge "neighbour" reuses the border pixel — the shader's clamp).
+            let cx = |dx: i32| (px + dx).clamp(0, w - 1);
+            let cy = |dy: i32| (py + dy).clamp(0, h - 1);
+            let z_xp = z_at(cx(1), py);
+            let z_xm = z_at(cx(-1), py);
+            let z_yp = z_at(px, cy(1));
+            let z_ym = z_at(px, cy(-1));
+            let min_mag = |a: f32, b: f32| -> f32 { if a.abs() > b.abs() { b } else { a } };
+            let dzdx = min_mag(z_xp - z_c, z_c - z_xm)
+                .clamp(-SSAO_BLUR_GRAD_CLAMP, SSAO_BLUR_GRAD_CLAMP);
+            let dzdy = min_mag(z_yp - z_c, z_c - z_ym)
+                .clamp(-SSAO_BLUR_GRAD_CLAMP, SSAO_BLUR_GRAD_CLAMP);
+
+            let depth_sigma2 = SSAO_BLUR_DEPTH_SIGMA * SSAO_BLUR_DEPTH_SIGMA;
+            let mut sum = 0.0_f32;
+            let mut wsum = 0.0_f32;
+            for oy in -2..=2i32 {
+                for ox in -2..=2i32 {
+                    let tx = (px + ox * step).clamp(0, w - 1);
+                    let ty = (py + oy * step).clamp(0, h - 1);
+                    let s = cur[idx_of(tx, ty)];
+                    let z_t = z_at(tx, ty);
+                    let h_weight = SSAO_ATROUS_H[(ox + 2) as usize] * SSAO_ATROUS_H[(oy + 2) as usize];
+                    let dz_pred = dzdx * (ox * step) as f32 + dzdy * (oy * step) as f32;
+                    let dz = z_t - z_c - dz_pred;
+                    if dz.abs() > SSAO_BLUR_DEPTH_TOL {
+                        continue; // silhouette gate — HARD reject
+                    }
+                    let w_depth = (1.0 - dz * dz / depth_sigma2).clamp(0.0, 1.0);
+                    let weight = h_weight * w_depth;
+                    sum += weight * s;
+                    wsum += weight;
+                }
             }
-            let idx = (cy * w + cx) as usize;
-            let vt = gbuf[idx].view_t;
-            // The slope-aware RESIDUAL: dz = (vt - view_t) - dz_pred, dz_pred = dzdx*dx + dzdy*dy.
-            let dz_pred = dzdx * dx as f32 + dzdy * dy as f32;
-            let dz = vt - center_view_t - dz_pred;
-            if dz.abs() > SSAO_BLUR_DEPTH_TOL {
-                continue; // silhouette gate (far-depth neighbour) — HARD reject, unchanged
-            }
-            // w_spatial = clamp01(1 - (dx*dx+dy*dy) / spatial_sigma2)
-            let d2 = (dx * dx + dy * dy) as f32;
-            let w_spatial = (1.0 - d2 / spatial_sigma2).clamp(0.0, 1.0);
-            // w_depth = clamp01(1 - dz*dz / depth_sigma2)
-            let w_depth = (1.0 - dz * dz / depth_sigma2).clamp(0.0, 1.0);
-            let weight = w_spatial * w_depth;
-            // The GPU reads `gSsao.Load(c).r` — the R8_UNORM decode of the raw byte.
-            sum += weight * (ssao[idx] as f32 / 255.0);
-            wsum += weight;
+            out[idx_of(px, py)] = if wsum > SSAO_ATROUS_W_EPS { sum / wsum } else { s_c };
         }
     }
-    debug_assert!(
-        wsum >= 1.0,
-        "invariant: the center tap always passes its own gate with w_spatial == w_depth == 1.0, \
-         so wsum must be >= 1.0, got {wsum}"
-    );
-    sum / wsum.max(1.0)
+    out
+}
+
+/// The multi-pass SSAO à-trous edge-avoiding denoise chain — the host oracle mirror of the
+/// SHIPPED `ssao_atrous.comp.hlsl` dispatched `levels` times (mirrors
+/// `shadow_atrous.comp.hlsl`'s Dammertz filter, transcendental-free — the depth gate is the SAME
+/// plane-fit residual + polynomial falloff the RETIRED inline resolve blur used, now gating
+/// LINEAR-Z (see [`linear_view_z`]) instead of the raw `gViewT` ray-param). `raw_ssao` is the R8
+/// gather output ([`golden_ssao_attributes`] quantized via [`quantize_r8_unorm`]); `levels == 0`
+/// returns `raw_ssao` UNCHANGED (the denoise-off byte-identical path).
+///
+/// INTER-PASS QUANTIZATION (research-specified, ONE shared convention — see [`quantize_r16_unorm`]
+/// / [`quantize_r8_unorm`]): every pass except the LAST rounds its output to R16_UNORM (the
+/// interior ping-pong ring's physical format); the LAST pass rounds to R8_UNORM (the frozen
+/// `gSsao` endpoint). This mirrors the actual GPU store/load precision loss between dispatches,
+/// so the host and GPU results agree within the existing SSAO tolerance band.
+pub fn golden_ssao_atrous(
+    raw_ssao: &[u8],
+    gbuf: &[MarcherAttributes],
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    levels: u32,
+) -> Vec<u8> {
+    let n = (img_w as usize) * (img_h as usize);
+    debug_assert_eq!(raw_ssao.len(), n, "invariant: raw_ssao length must equal img_w * img_h");
+    debug_assert_eq!(gbuf.len(), n, "invariant: gbuf length must equal img_w * img_h");
+
+    if levels == 0 {
+        return raw_ssao.to_vec();
+    }
+
+    let mut cur: Vec<f32> = raw_ssao.iter().map(|&b| f32::from(b) / 255.0).collect();
+    for level in 0..levels {
+        let step = 1i32 << level;
+        let raw_next = ssao_atrous_pass(&cur, gbuf, img_w, img_h, camera, step);
+        let is_last = level + 1 == levels;
+        cur = raw_next
+            .into_iter()
+            .map(|v| {
+                if is_last {
+                    f32::from(quantize_r8_unorm(v)) / 255.0
+                } else {
+                    decode_r16_unorm(quantize_r16_unorm(v))
+                }
+            })
+            .collect();
+    }
+    cur.iter().map(|&v| quantize_r8_unorm(v)).collect()
 }
 
 /// The CPU mirror of the `deferred_pbr` RESOLVE (PBR MVP-2): given the marcher's

@@ -333,7 +333,7 @@ fn pbr_material_showcase_screenshot_dump() {
     // the live consumer's visual oracle. Unset ⇒ Off ⇒ the same command stream / pixels
     // as the no-SSAO dump.
     if knobs.ssao_quality != SsaoQuality::Off {
-        app.insert_resource(SsaoConfig { quality: knobs.ssao_quality });
+        app.insert_resource(SsaoConfig { quality: knobs.ssao_quality, ..Default::default() });
     }
     app.run();
 }

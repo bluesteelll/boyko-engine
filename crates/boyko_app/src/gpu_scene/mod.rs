@@ -40,6 +40,7 @@ use boyko_rhi_vulkan::compute::{
     gbuffer_mrt_tex_vs_spirv, gbuffer_mrt_vs_spirv, interp_instances_spirv, punctual_depth_fs_spirv,
     punctual_depth_vs_spirv, sdf_gbuffer_composite_spirv, sdf_probe_update_spirv,
     sdf_ssao_spirv_variant, smaa_blend_fs_spirv, smaa_edge_fs_spirv, smaa_weight_fs_spirv,
+    SSAO_ATROUS_PUSH_BYTES, ssao_atrous_read8_spirv, ssao_atrous_spirv, ssao_atrous_write8_spirv,
     SSAO_QUALITY_COUNT, SSAO_QUALITY_HIGH, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM,
     ssaa_downsample_fs_spirv, taa_resolve_spirv, tile_grid_extent,
 };
@@ -715,6 +716,32 @@ pub(crate) struct GpuSceneBundles {
     /// entry of [`Self::ssao_pipelines`]. [`GBufferTargets`] writes an `ssao_set` against
     /// it once per extent when [`GBufferScene::ssao`] is armed.
     ssao_layout: VulkanBindGroupLayout,
+    /// The SSAO edge-avoiding à-trous denoise chain: the `level == 0` pipeline variant
+    /// (`ssao_atrous_read8.comp` / [`ssao_atrous_read8_spirv`]) — `gAoIn` pinned `r8` (reads the
+    /// frozen `gSsao` gather endpoint), `gAoOut` pinned `r16` (writes ring 0). Built UNCONDITIONALLY
+    /// at boot (like [`Self::ssao_pipelines`] — the pipeline itself needs no device precondition to
+    /// CREATE, only the interior ring IMAGE needs `R16_UNORM` storage, checked separately by
+    /// [`GBufferTargets`]'s degrade). Shares [`Self::ssao_atrous_layout`] with the other two
+    /// variants below.
+    ssao_atrous_read8_pipeline: ComputePipeline,
+    /// The SSAO à-trous chain's INTERIOR pipeline variant (`ssao_atrous.comp` /
+    /// [`ssao_atrous_spirv`]): both `gAoIn`/`gAoOut` pinned `r16` (the two ping-pong rings). Built
+    /// in lock-step with [`Self::ssao_atrous_read8_pipeline`] (same discipline, same doc).
+    ssao_atrous_interior_pipeline: ComputePipeline,
+    /// The SSAO à-trous chain's LAST-level pipeline variant (`ssao_atrous_write8.comp` /
+    /// [`ssao_atrous_write8_spirv`]): `gAoIn` pinned `r16` (reads a ring), `gAoOut` pinned `r8`
+    /// (writes BACK into the frozen `gSsao` endpoint the resolve reads — the C1 fix). Built in
+    /// lock-step with [`Self::ssao_atrous_read8_pipeline`] (same discipline, same doc).
+    ssao_atrous_write8_pipeline: ComputePipeline,
+    /// The SSAO à-trous chain's DEDICATED 4-binding bind-group LAYOUT { `gAoIn` STORAGE image @0
+    /// (R), `gAoOut` STORAGE image @1 (W), `gViewT` STORAGE image @2 (R), the camera UNIFORM
+    /// buffer @3 } — IDENTICAL across all three pipeline variants above (only the bound VIEW + the
+    /// `[[vk::image_format]]` pin differ). Shared with `sdf_ssao`'s design ONE step narrower (no
+    /// `gMaterial`, no `gNormal` — the à-trous gate is depth-plane-fit only). [`GBufferTargets`]
+    /// writes FIVE role-keyed sets against it once per extent
+    /// ([`boyko_rhi_vulkan::present::ssao_atrous_step`]'s role→set mapping) when the device
+    /// supports `R16_UNORM` STORAGE.
+    ssao_atrous_layout: VulkanBindGroupLayout,
     // ── CSM / atlas (bound-but-unread trios; depth passes OFF in R3) ─────────
     csm: CsmResources,
     /// `ceil(composite pixels / LOCAL_SIZE_X)` — the marcher + resolve dispatch
@@ -1884,12 +1911,77 @@ impl GpuSceneBundles {
         // selects directly into this array.
         let ssao_pipelines = [ssao_pipeline_low, ssao_pipeline_medium, ssao_pipeline_high];
 
+        // The SSAO edge-avoiding à-trous denoise chain (RHI DISPATCH WIRING follow-up to the
+        // gather above): the shared 4-binding layout { `gAoIn` @0 (R), `gAoOut` @1 (W) STORAGE
+        // images, `gViewT` @2 (R) STORAGE image, the camera UNIFORM buffer @3 } — matching
+        // `ssao_atrous.comp.hlsl`'s set 0 — plus the three role-keyed pipeline variants
+        // (read8/interior/write8; see that shader's header doc for the R8<->R16 format-pin
+        // rationale). Built UNCONDITIONALLY at boot (like `ssao_pipelines` above — the pipeline
+        // itself needs NO device precondition to CREATE; only the interior ring IMAGE needs
+        // `R16_UNORM` storage, checked separately by `GBufferTargets`'s degrade,
+        // `ssao_atrous_storage_ok()`). A 4-byte `{ uint step }` COMPUTE push range
+        // (`SSAO_ATROUS_PUSH_BYTES`) — the current à-trous level's hole width.
+        let ssao_atrous_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: SSAO à-trous bind-group layout create");
+        let ssao_atrous_read8_cs = RhiDevice::create_shader_module(device, ssao_atrous_read8_spirv())
+            .expect("invariant: SSAO à-trous read8 compute shader module create");
+        let ssao_atrous_read8_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &ssao_atrous_read8_cs,
+                entry: c"main",
+                push_constant_bytes: SSAO_ATROUS_PUSH_BYTES,
+                bind_group_layout: Some(&ssao_atrous_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: SSAO à-trous read8 compute pipeline create");
+        let ssao_atrous_interior_cs = RhiDevice::create_shader_module(device, ssao_atrous_spirv())
+            .expect("invariant: SSAO à-trous interior compute shader module create");
+        let ssao_atrous_interior_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &ssao_atrous_interior_cs,
+                entry: c"main",
+                push_constant_bytes: SSAO_ATROUS_PUSH_BYTES,
+                bind_group_layout: Some(&ssao_atrous_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: SSAO à-trous interior compute pipeline create");
+        let ssao_atrous_write8_cs = RhiDevice::create_shader_module(device, ssao_atrous_write8_spirv())
+            .expect("invariant: SSAO à-trous write8 compute shader module create");
+        let ssao_atrous_write8_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &ssao_atrous_write8_cs,
+                entry: c"main",
+                push_constant_bytes: SSAO_ATROUS_PUSH_BYTES,
+                bind_group_layout: Some(&ssao_atrous_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: SSAO à-trous write8 compute pipeline create");
+
         // The shader modules are consumed by pipeline creation; destroy them now
         // (mirrors the showcase's post-create module teardown).
         // SAFETY: every module was created on `ctx` above and is no longer
         // needed once its pipeline exists; each is destroyed exactly once; no
         // GPU work has been submitted yet.
         unsafe {
+            RhiDevice::destroy_shader_module(device, ssao_atrous_write8_cs);
+            RhiDevice::destroy_shader_module(device, ssao_atrous_interior_cs);
+            RhiDevice::destroy_shader_module(device, ssao_atrous_read8_cs);
             RhiDevice::destroy_shader_module(device, taa_resolve_cs);
             RhiDevice::destroy_shader_module(device, ssao_cs_high);
             RhiDevice::destroy_shader_module(device, ssao_cs_medium);
@@ -2321,6 +2413,10 @@ impl GpuSceneBundles {
             taa_linear_sampler,
             ssao_pipelines,
             ssao_layout,
+            ssao_atrous_read8_pipeline,
+            ssao_atrous_interior_pipeline,
+            ssao_atrous_write8_pipeline,
+            ssao_atrous_layout,
             csm,
             dispatch_group_count_x,
         }
@@ -2922,6 +3018,15 @@ impl GpuSceneBundles {
         // lock-step, by `boyko_render::sync_ssao_light_gate` (through the
         // `collect_lights` → light-table upload pipeline, independent of this fn).
         ssao_variant: Option<usize>,
+        // The SSAO edge-avoiding à-trous denoise chain: the owner-resolved, ALREADY-CLAMPED pass
+        // count ([`boyko_render::ResolvedSsao::atrous_levels`] — `0` or
+        // `2..=boyko_render::MAX_SSAO_ATROUS_LEVELS`). Threaded from `boyko_app::runner` the SAME
+        // way `ssao_variant` is; `resolve_ssao` already forces this to `0` whenever
+        // `ssao_variant.is_none()` (SSAO itself off), so the two can never disagree — no
+        // additional `debug_assert` needed beyond the ceiling clamp below. Feeds
+        // `SsaoActivation::atrous_levels`; `0` ⇒ the recorder dispatches NO à-trous pass (the
+        // resolve reads the raw gather — the byte-identical pre-dispatch-wiring path).
+        ssao_atrous_levels: u32,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -2931,6 +3036,10 @@ impl GpuSceneBundles {
         debug_assert!(
             ssao_variant.is_none_or(|v| v < SSAO_QUALITY_COUNT),
             "invariant: ssao_variant must index Self::ssao_pipelines (0..SSAO_QUALITY_COUNT)"
+        );
+        debug_assert!(
+            ssao_variant.is_some() || ssao_atrous_levels == 0,
+            "invariant: ssao_atrous_levels > 0 requires ssao_variant.is_some() (resolve_ssao forces this)"
         );
         // Interp arming (refined-B): the raster VS ALWAYS reads the shared instance
         // ring (`instance_bind_groups[slot]`) — no bind swap. When the gather produced
@@ -3119,7 +3228,18 @@ impl GpuSceneBundles {
             ssao: ssao_variant.map(|v| SsaoActivation {
                 pipeline: &self.ssao_pipelines[v],
                 layout: &self.ssao_layout,
+                atrous_levels: ssao_atrous_levels,
             }),
+            // The SSAO à-trous chain's STABLE boot pipelines/layout — ALWAYS `Some` (built
+            // UNCONDITIONALLY above, no RT/device gate for the pipeline CREATE itself).
+            // DECOUPLED from `ssao` above (which is `None` whenever SSAO itself is off): the
+            // set-builder (`GBufferTargets::build_ssao_atrous_sets`) reads THESE fields directly,
+            // so the role-keyed sets exist before a later frame arms `ssao.atrous_levels` — no
+            // resize/rebuild needed (mirrors `resolve_layout_denoise_hwrt`'s decoupling doc).
+            ssao_atrous_read8_pipeline: Some(&self.ssao_atrous_read8_pipeline),
+            ssao_atrous_interior_pipeline: Some(&self.ssao_atrous_interior_pipeline),
+            ssao_atrous_write8_pipeline: Some(&self.ssao_atrous_write8_pipeline),
+            ssao_atrous_layout: Some(&self.ssao_atrous_layout),
             // Anti-aliasing Stage 1: `AaMode::Off` (the default) ⇒ `None` — the 0%-gate
             // (no `aa_out`, no FXAA pass, present samples `lit`). `AaMode::Fxaa` arms the
             // FXAA activation against the boot-built pipeline + dedicated LINEAR sampler.
@@ -3575,6 +3695,13 @@ impl GpuSceneBundles {
             RhiDevice::destroy_compute_pipeline(ctx, ssao_medium);
             RhiDevice::destroy_compute_pipeline(ctx, ssao_high);
             RhiDevice::destroy_bind_group_layout(ctx, self.ssao_layout);
+            // The SSAO à-trous denoise chain: the 3 role-keyed pipelines share
+            // `ssao_atrous_layout` — pipelines before the shared layout (reverse creation order),
+            // built UNCONDITIONALLY at boot (every config, like the gather pipelines above).
+            RhiDevice::destroy_compute_pipeline(ctx, self.ssao_atrous_read8_pipeline);
+            RhiDevice::destroy_compute_pipeline(ctx, self.ssao_atrous_interior_pipeline);
+            RhiDevice::destroy_compute_pipeline(ctx, self.ssao_atrous_write8_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.ssao_atrous_layout);
             // HW-RT rung R2a-4b: the HWRT resolve pipeline + its 21-binding layout, `Option`-guarded
             // (present only on an RT device under `feature = "hwrt"`). Pipeline before layout.
             #[cfg(feature = "hwrt")]

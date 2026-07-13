@@ -195,6 +195,44 @@ pub struct GBufferTargets {
     /// A RING when `Some` (one per in-flight frame): slot `i` binds `scene.camera_ring[i]` @4 — the
     /// lock-free per-frame ring fix. The recorder selects `ssao_set[self.frame_index]`.
     pub(crate) ssao_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// The SSAO à-trous denoise chain's interior ping-pong ring RING `ssao_ring_a`
+    /// (`R16_UNORM` STORAGE, full-res) — mirrors `shadow_vis`'s per-FIF ringing (the cross-frame
+    /// WAR fix, like [`Self::ssao`]). `Option`-guarded: `Some` when the device advertises
+    /// `R16_UNORM` STORAGE ([`crate::device::DeviceCaps::ssao_atrous_storage_ok`]), `None`
+    /// otherwise — the DDGI/shadow-denoise degrade discipline (opt-in, a device missing the format
+    /// degrades to the raw un-denoised gather, never a boot fault). UNCONDITIONAL (both feature
+    /// legs — SOFTWARE, NOT `hwrt`-gated).
+    pub(crate) ssao_ring_a: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
+    /// The SSAO à-trous denoise chain's SECOND interior ping-pong ring `ssao_ring_b` — SAME
+    /// format/degrade policy as [`Self::ssao_ring_a`] (built together, `None` together).
+    pub(crate) ssao_ring_b: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
+    /// The SSAO à-trous denoise chain's `level == 0` descriptor set RING (`gAoIn` @0 = the frozen
+    /// R8 `gSsao[fi]` endpoint, `gAoOut` @1 = `ssao_ring_a[fi]`, `gViewT` @2 = `viewt[fi]`, the
+    /// camera UBO @3 = `scene.camera_ring[fi]`), written against
+    /// [`SsaoActivation::atrous_layout`]. Selected by [`crate::present::AtrousStepRole::Read8`]
+    /// ([`crate::present::ssao_atrous_step`]). `None` in lock-step with [`Self::ssao_ring_a`].
+    pub(crate) ssao_atrous_read8_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// The SSAO à-trous denoise chain's INTERIOR descriptor set RING reading `ssao_ring_a`
+    /// (`gAoIn` @0 = `ssao_ring_a[fi]`, `gAoOut` @1 = `ssao_ring_b[fi]`). Selected by
+    /// [`crate::present::AtrousStepRole::Interior`]`{ in_ring: 0 }`. `None` in lock-step with
+    /// [`Self::ssao_ring_a`].
+    pub(crate) ssao_atrous_interior_from0_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// The SSAO à-trous denoise chain's INTERIOR descriptor set RING reading `ssao_ring_b`
+    /// (`gAoIn` @0 = `ssao_ring_b[fi]`, `gAoOut` @1 = `ssao_ring_a[fi]`). Selected by
+    /// [`crate::present::AtrousStepRole::Interior`]`{ in_ring: 1 }`. `None` in lock-step with
+    /// [`Self::ssao_ring_a`].
+    pub(crate) ssao_atrous_interior_from1_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// The SSAO à-trous denoise chain's LAST-level descriptor set RING reading `ssao_ring_a`
+    /// (`gAoIn` @0 = `ssao_ring_a[fi]`, `gAoOut` @1 = the frozen R8 `gSsao[fi]` endpoint — the
+    /// write-BACK the resolve reads). Selected by
+    /// [`crate::present::AtrousStepRole::Write8`]`{ in_ring: 0 }`. `None` in lock-step with
+    /// [`Self::ssao_ring_a`].
+    pub(crate) ssao_atrous_write8_from0_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// The SSAO à-trous denoise chain's LAST-level descriptor set RING reading `ssao_ring_b`
+    /// (`gAoIn` @0 = `ssao_ring_b[fi]`, `gAoOut` @1 = the frozen R8 `gSsao[fi]` endpoint).
+    /// Selected by [`crate::present::AtrousStepRole::Write8`]`{ in_ring: 1 }`. `None` in lock-step
+    /// with [`Self::ssao_ring_a`].
+    pub(crate) ssao_atrous_write8_from1_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Anti-aliasing Stage 1/3: the FXAA/SSAA post-process OUTPUT image RING (one per
     /// in-flight frame), `COLOR_ATTACHMENT | SAMPLED`, `R8G8B8A8_UNORM` (== [`GBUFFER_FORMAT`]).
     /// `None` when AA is off ([`GBufferScene::aa`]/`smaa`/`ssaa` are all `None`), the
@@ -462,6 +500,15 @@ const GVIEWT_FORMAT: Format = Format::R32Sfloat;
 /// ([`crate::device::DeviceCaps::r8_unorm_storage_ok`]), so the SSAO image create can never
 /// fault on an unsupported format.
 const SSAO_FORMAT: Format = Format::R8Unorm;
+
+/// The SSAO edge-avoiding à-trous denoise chain's INTERIOR ping-pong ring format:
+/// `R16_UNORM`, a full-res STORAGE image — 16-bit avoids the cumulative 8-bit rounding a
+/// multi-level filter would accrue (one channel narrower than `SHADOW_VIS_FORMAT`'s RG16
+/// design; SSAO is single-channel AO, not a `(vis, validity)` pair). `R16_UNORM`/`STORAGE_IMAGE`
+/// support is device-probed at boot ([`crate::device::DeviceCaps::ssao_atrous_storage_ok`]) —
+/// RECORDED-not-fail-fast (mirrors `SHADOW_VIS_FORMAT`'s degrade policy), UNCONDITIONAL (both
+/// feature legs — the SSAO à-trous denoise is software, NOT `hwrt`-gated).
+const SSAO_ATROUS_RING_FORMAT: Format = Format::R16Unorm;
 
 /// Textured-PBR T6a: the `gPbr` deferred-resolve MRT lane format: `R16G16B16A16_SFLOAT`
 /// (`r`=metallic, `g`=roughness, `b`=AO-texture modulation, `a`=emissive-strength modulation), a
@@ -818,6 +865,29 @@ struct ShadowDenoiseSets {
     atrous: [[VulkanBindGroup; FRAMES_IN_FLIGHT]; crate::present::MAX_ATROUS_LEVELS as usize],
     /// The à-trous edge-stop UBO ring (16 B `HostVisibleCoherent` per FIF slot, zero-seeded).
     ubo: [BoundBuffer; FRAMES_IN_FLIGHT],
+}
+
+/// The SSAO à-trous denoise chain: the bundle [`GBufferTargets::build_ssao_atrous_sets`] returns —
+/// the FIVE role-keyed descriptor set rings [`crate::present::ssao_atrous_step`]'s
+/// [`crate::present::AtrousStepRole`] selects between. Moved field-by-field into the
+/// [`GBufferTargets`] `Option`s at `create` time. UNCONDITIONAL (both feature legs — SOFTWARE,
+/// NOT `hwrt`-gated, unlike [`ShadowDenoiseSets`]).
+struct SsaoAtrousSets {
+    /// `level == 0`'s set RING: `gAoIn` @0 = the frozen R8 `gSsao[i]` endpoint, `gAoOut` @1 =
+    /// `ssao_ring_a[i]`.
+    read8: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// An interior set RING reading `ssao_ring_a`: `gAoIn` @0 = `ssao_ring_a[i]`, `gAoOut` @1 =
+    /// `ssao_ring_b[i]`.
+    interior_from0: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// An interior set RING reading `ssao_ring_b`: `gAoIn` @0 = `ssao_ring_b[i]`, `gAoOut` @1 =
+    /// `ssao_ring_a[i]`.
+    interior_from1: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// The LAST-level set RING reading `ssao_ring_a`: `gAoIn` @0 = `ssao_ring_a[i]`, `gAoOut` @1 =
+    /// the frozen R8 `gSsao[i]` endpoint (the write-BACK the resolve reads).
+    write8_from0: [VulkanBindGroup; FRAMES_IN_FLIGHT],
+    /// The LAST-level set RING reading `ssao_ring_b`: `gAoIn` @0 = `ssao_ring_b[i]`, `gAoOut` @1 =
+    /// the frozen R8 `gSsao[i]` endpoint.
+    write8_from1: [VulkanBindGroup; FRAMES_IN_FLIGHT],
 }
 
 /// HW-RT Rung 3b step 6: the bundle [`GBufferTargets::build_shadow_temporal_sets`] returns — the
@@ -1199,6 +1269,99 @@ impl ShadowVisImages {
                 RhiDevice::destroy_texture(ctx, t);
             }
             for t in self.shadow_vis {
+                RhiDevice::destroy_texture(ctx, t);
+            }
+        }
+    }
+}
+
+/// The SSAO à-trous denoise chain: the two `R16_UNORM` interior ping-pong image RINGS
+/// (`ssao_ring_a` + `ssao_ring_b`), built together right after [`ShadowVisImages`] (or right
+/// after [`CoreImages`] on a `not(hwrt)` build) iff the device advertises `R16_UNORM` storage
+/// ([`crate::device::DeviceCaps::ssao_atrous_storage_ok`]). UNCONDITIONAL (both feature legs —
+/// SOFTWARE, NOT `hwrt`-gated), mirroring [`ShadowVisImages`]'s bundle shape one channel
+/// narrower (single AO lane, not a `(vis, validity)` pair) and gated on a SEPARATE device probe.
+/// A bundle so [`GBufferTargets::create`] builds them in one call with a self-draining error
+/// path; flattened into the two `Option` fields at `create` time.
+struct SsaoAtrousImages {
+    ssao_ring_a: [VulkanTexture; FRAMES_IN_FLIGHT],
+    ssao_ring_b: [VulkanTexture; FRAMES_IN_FLIGHT],
+}
+
+impl SsaoAtrousImages {
+    /// Allocates the two `R16_UNORM` ping-pong rings at `extent`, or `Ok(None)` on a device
+    /// lacking `R16_UNORM` storage (the DDGI/shadow-denoise degrade discipline: the à-trous
+    /// denoise is opt-in, a missing format disables it — the resolve then reads the raw,
+    /// un-denoised gather, never a boot fault). On a mid-ring failure the partial ring is drained
+    /// AND the (fully-built) first ring destroyed (reverse acquisition); the orchestrator owns
+    /// the prior bundles, which it tears down on this method's `Err`.
+    fn build(ctx: &VulkanContext, extent: VkExtent2D) -> Result<Option<Self>, SwapchainError> {
+        if !ctx.device_caps().ssao_atrous_storage_ok() {
+            return Ok(None);
+        }
+        let mut a_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] = [const { None }; FRAMES_IN_FLIGHT];
+        for slot in a_slots.iter_mut() {
+            match GBufferTargets::create_ssao_atrous_ring_image(ctx, extent) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => {
+                    // SAFETY: `ctx` is live; no submission references these textures (build
+                    // phase); the partial ring [0..i) is drained exactly once.
+                    unsafe {
+                        for s in a_slots.iter_mut() {
+                            if let Some(t) = s.take() {
+                                RhiDevice::destroy_texture(ctx, t);
+                            }
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let ssao_ring_a: [VulkanTexture; FRAMES_IN_FLIGHT] =
+            a_slots.map(|s| s.expect("invariant: every ssao_ring_a slot built before here"));
+
+        let mut b_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] = [const { None }; FRAMES_IN_FLIGHT];
+        for slot in b_slots.iter_mut() {
+            match GBufferTargets::create_ssao_atrous_ring_image(ctx, extent) {
+                Ok(t) => *slot = Some(t),
+                Err(e) => {
+                    // SAFETY: `ctx` is live; no submission references these textures; the
+                    // partial `ssao_ring_b` ring [0..i) plus the fully-built `ssao_ring_a` ring
+                    // are each drained exactly once (reverse acquisition).
+                    unsafe {
+                        for s in b_slots.iter_mut() {
+                            if let Some(t) = s.take() {
+                                RhiDevice::destroy_texture(ctx, t);
+                            }
+                        }
+                        for t in ssao_ring_a {
+                            RhiDevice::destroy_texture(ctx, t);
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let ssao_ring_b: [VulkanTexture; FRAMES_IN_FLIGHT] =
+            b_slots.map(|s| s.expect("invariant: every ssao_ring_b slot built before here"));
+
+        Ok(Some(Self { ssao_ring_a, ssao_ring_b }))
+    }
+
+    /// Tears down the two ping-pong rings in reverse acquisition order (`ssao_ring_b` →
+    /// `ssao_ring_a`).
+    ///
+    /// # Safety
+    ///
+    /// `ctx` is live; no submission references these textures; each is destroyed exactly once.
+    unsafe fn destroy(self, ctx: &VulkanContext) {
+        // SAFETY: per the contract `ctx` is live and nothing references these textures; each was
+        // created on `ctx` and is destroyed exactly once, in reverse acquisition order.
+        unsafe {
+            for t in self.ssao_ring_b {
+                RhiDevice::destroy_texture(ctx, t);
+            }
+            for t in self.ssao_ring_a {
                 RhiDevice::destroy_texture(ctx, t);
             }
         }
@@ -2785,6 +2948,209 @@ impl GBufferTargets {
         Ok(Some(ShadowDenoiseSets { vis_resolve, denoised_resolve, atrous, ubo }))
     }
 
+    /// The SSAO à-trous denoise chain: builds the FIVE role-keyed descriptor sets
+    /// ([`crate::present::ssao_atrous_step`]'s [`crate::present::AtrousStepRole`] selects
+    /// between). UNCONDITIONAL (both feature legs — SOFTWARE, NOT `hwrt`-gated).
+    ///
+    /// DECOUPLED from the per-frame `scene.ssao` activation (which may be `None` at THIS create
+    /// call — SSAO starts OFF by default, `SsaoConfig::default()`): gates on the STABLE boot
+    /// signals (`scene.ssao_atrous_layout` + the ring images) so a later frame that arms
+    /// [`SsaoActivation::atrous_levels`] finds the sets already built — the "set=None panic when
+    /// the gate opens late" trap [`Self::build_shadow_denoise_sets`]'s doc names. Returns
+    /// `Ok(None)` when `scene.ssao_atrous_layout` is `None` (a host that never wired the boot
+    /// pipelines) or the ring images are `None` (the device lacks `R16_UNORM` storage,
+    /// [`crate::device::DeviceCaps::ssao_atrous_storage_ok`]) — the byte-identical OFF path (the
+    /// resolve then reads the raw, un-denoised gather). `Ok(Some(_))` on the ON path (both
+    /// present). On ANY internal `create_bind_group` failure the method drains ITS OWN partial
+    /// allocations (reverse acquisition: the ring already built [0..slot) + every prior fully-built
+    /// ring, LATEST first) and returns the `VulkanError`; the outer `?`-arm then drains every
+    /// bundle built before this call.
+    ///
+    /// Each set binds `gAoIn` @0 / `gAoOut` @1 (the role-keyed STORAGE-image pair), `gViewT` @2
+    /// (READ, slot `i`), the camera UBO @3 (`scene.camera_ring[i]`) — exactly the à-trous shader's
+    /// 4-binding interface (`ssao_atrous.comp.hlsl`).
+    fn build_ssao_atrous_sets(
+        ctx: &VulkanContext,
+        scene: &GBufferScene<'_>,
+        viewt: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        ssao: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        ssao_ring_a: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        ssao_ring_b: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+    ) -> Result<Option<SsaoAtrousSets>, crate::error::VulkanError> {
+        let (layout, ring_a, ring_b) = match (scene.ssao_atrous_layout, ssao_ring_a, ssao_ring_b) {
+            (Some(l), Some(a), Some(b)) => (l, a, b),
+            _ => return Ok(None),
+        };
+
+        // Builds ONE 4-binding set for `slot`: `gAoIn` @0 = `in_ring[slot]`, `gAoOut` @1 =
+        // `out_ring[slot]`, `gViewT` @2 = `viewt[slot]`, the camera UBO @3 =
+        // `scene.camera_ring[slot]`.
+        let build_set = |in_ring: &[VulkanTexture; FRAMES_IN_FLIGHT],
+                          out_ring: &[VulkanTexture; FRAMES_IN_FLIGHT],
+                          slot: usize|
+         -> Result<VulkanBindGroup, crate::error::VulkanError> {
+            let entries = [
+                BindGroupEntry::StorageImage { texture: &in_ring[slot] },
+                BindGroupEntry::StorageImage { texture: &out_ring[slot] },
+                BindGroupEntry::StorageImage { texture: &viewt[slot] },
+                BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
+            ];
+            let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
+            RhiDevice::create_bind_group(ctx, &desc)
+        };
+
+        // (1) `read8`: `gAoIn` = the frozen R8 `ssao` endpoint, `gAoOut` = `ring_a`.
+        let mut read8_opt: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for (slot, dst) in read8_opt.iter_mut().enumerate() {
+            match build_set(ssao, ring_a, slot) {
+                Ok(g) => *dst = Some(g),
+                Err(e) => {
+                    // SAFETY: the [0..slot) read8 slots were created on `ctx`, never submitted;
+                    // destroy each once.
+                    unsafe {
+                        for s in read8_opt.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let read8: [VulkanBindGroup; FRAMES_IN_FLIGHT] =
+            read8_opt.map(|s| s.expect("invariant: every read8 set slot built"));
+
+        // (2) `interior_from0`: `gAoIn` = `ring_a`, `gAoOut` = `ring_b`.
+        let mut i0_opt: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] = [const { None }; FRAMES_IN_FLIGHT];
+        for (slot, dst) in i0_opt.iter_mut().enumerate() {
+            match build_set(ring_a, ring_b, slot) {
+                Ok(g) => *dst = Some(g),
+                Err(e) => {
+                    // SAFETY: the [0..slot) interior_from0 slots + the read8 ring were created on
+                    // `ctx`, never submitted; destroy each once (reverse acquisition).
+                    unsafe {
+                        for s in i0_opt.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in read8 {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let interior_from0: [VulkanBindGroup; FRAMES_IN_FLIGHT] =
+            i0_opt.map(|s| s.expect("invariant: every interior_from0 set slot built"));
+
+        // (3) `interior_from1`: `gAoIn` = `ring_b`, `gAoOut` = `ring_a`.
+        let mut i1_opt: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] = [const { None }; FRAMES_IN_FLIGHT];
+        for (slot, dst) in i1_opt.iter_mut().enumerate() {
+            match build_set(ring_b, ring_a, slot) {
+                Ok(g) => *dst = Some(g),
+                Err(e) => {
+                    // SAFETY: the [0..slot) interior_from1 slots + interior_from0 + read8 were
+                    // created on `ctx`, never submitted; destroy each once (reverse acquisition).
+                    unsafe {
+                        for s in i1_opt.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in interior_from0 {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        for g in read8 {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let interior_from1: [VulkanBindGroup; FRAMES_IN_FLIGHT] =
+            i1_opt.map(|s| s.expect("invariant: every interior_from1 set slot built"));
+
+        // (4) `write8_from0`: `gAoIn` = `ring_a`, `gAoOut` = the frozen R8 `ssao` endpoint
+        // (the write-BACK the resolve reads).
+        let mut w0_opt: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] = [const { None }; FRAMES_IN_FLIGHT];
+        for (slot, dst) in w0_opt.iter_mut().enumerate() {
+            match build_set(ring_a, ssao, slot) {
+                Ok(g) => *dst = Some(g),
+                Err(e) => {
+                    // SAFETY: the [0..slot) write8_from0 slots + interior_from1 + interior_from0 +
+                    // read8 were created on `ctx`, never submitted; destroy each once (reverse
+                    // acquisition).
+                    unsafe {
+                        for s in w0_opt.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in interior_from1 {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        for g in interior_from0 {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        for g in read8 {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let write8_from0: [VulkanBindGroup; FRAMES_IN_FLIGHT] =
+            w0_opt.map(|s| s.expect("invariant: every write8_from0 set slot built"));
+
+        // (5) `write8_from1`: `gAoIn` = `ring_b`, `gAoOut` = the frozen R8 `ssao` endpoint.
+        let mut w1_opt: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] = [const { None }; FRAMES_IN_FLIGHT];
+        for (slot, dst) in w1_opt.iter_mut().enumerate() {
+            match build_set(ring_b, ssao, slot) {
+                Ok(g) => *dst = Some(g),
+                Err(e) => {
+                    // SAFETY: the [0..slot) write8_from1 slots + every prior ring were created on
+                    // `ctx`, never submitted; destroy each once (reverse acquisition).
+                    unsafe {
+                        for s in w1_opt.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in write8_from0 {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        for g in interior_from1 {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        for g in interior_from0 {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        for g in read8 {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        let write8_from1: [VulkanBindGroup; FRAMES_IN_FLIGHT] =
+            w1_opt.map(|s| s.expect("invariant: every write8_from1 set slot built"));
+
+        Ok(Some(SsaoAtrousSets {
+            read8,
+            interior_from0,
+            interior_from1,
+            write8_from0,
+            write8_from1,
+        }))
+    }
+
     /// HW-RT Rung 3b step 5b: builds the SDF motion-vector VIS-variant resolve set RING (one 24-entry
     /// set per in-flight frame) against the boot VIS-MV layout ([`GBufferScene::vis_mv_layout`]).
     ///
@@ -3214,6 +3580,29 @@ impl GBufferTargets {
             height: extent.height,
             depth: 1,
             format: SSAO_FORMAT,
+            dimension: TextureDimension::D2,
+            usage: ImageUsage::STORAGE,
+            array_layers: 1,
+            mip_levels: 1,
+            view_format: None,
+        };
+        RhiDevice::create_texture(ctx, &desc).map_err(SwapchainError::DepthImage)
+    }
+
+    /// The SSAO à-trous denoise chain: creates one slot of an interior ping-pong ring
+    /// (`ssao_ring_a` or `ssao_ring_b`): a 2D `R16_UNORM` STORAGE image at `extent`. The caller
+    /// only invokes this after `ssao_atrous_storage_ok()` is `true` (the boot probe), so the
+    /// create cannot fault on an unsupported storage format (the `shadow_vis` create's
+    /// probe-gated-not-fail-fast discipline).
+    fn create_ssao_atrous_ring_image(
+        ctx: &VulkanContext,
+        extent: VkExtent2D,
+    ) -> Result<VulkanTexture, SwapchainError> {
+        let desc = TextureDesc {
+            width: extent.width,
+            height: extent.height,
+            depth: 1,
+            format: SSAO_ATROUS_RING_FORMAT,
             dimension: TextureDimension::D2,
             usage: ImageUsage::STORAGE,
             array_layers: 1,
@@ -3910,8 +4299,9 @@ impl GBufferTargets {
         // Each `build` drains its OWN partials on failure; the orchestrator tears down the
         // (fully-built) earlier bundles in reverse acquisition order — the cross-bundle O(n²)
         // teardown-ladder collapse. The SUCCESSFUL create ORDER is preserved EXACTLY: core images →
-        // shadow-vis images → deferred sets → (hwrt) denoise sets → temporal images → mv set →
-        // temporal sets, so the render stays byte-identical.
+        // shadow-vis images → SSAO à-trous ring images → deferred sets → (hwrt) denoise sets → SSAO
+        // à-trous sets → temporal images → mv set → temporal sets, so the render stays
+        // byte-identical.
         let core = CoreImages::build(ctx, extent)?;
 
         #[cfg(feature = "hwrt")]
@@ -3924,14 +4314,36 @@ impl GBufferTargets {
             }
         };
 
+        // The SSAO à-trous denoise chain's two interior ping-pong ring images. UNCONDITIONAL (both
+        // feature legs — SOFTWARE, NOT `hwrt`-gated); built right after `shadow_vis_imgs` so its
+        // own Err arm destroys shadow-vis (hwrt) + core, mirroring the existing image-stage error
+        // weave. `None` on a device lacking `R16_UNORM` storage (the DDGI/shadow-denoise degrade).
+        let ssao_atrous_imgs = match SsaoAtrousImages::build(ctx, extent) {
+            Ok(v) => v,
+            Err(e) => {
+                // SAFETY: the shadow-vis images (hwrt) + `core` were built above on `ctx`,
+                // referenced by no submission; each destroyed exactly once, reverse acquisition
+                // (shadow-vis → core).
+                unsafe {
+                    #[cfg(feature = "hwrt")]
+                    if let Some(v) = shadow_vis_imgs {
+                        v.destroy(ctx);
+                    }
+                    core.destroy(ctx);
+                }
+                return Err(e);
+            }
+        };
+
         // Anti-aliasing campaign: the aa_out image ring, built ONLY when ANY of `scene.aa`
         // (FXAA) / `scene.smaa` (SMAA) / `scene.ssaa` (SSAA) / `scene.taa` (TAA) is armed —
         // `None` is the 0%-gate (no image, no fxaa_set/smaa/downsample sets, present samples
-        // `lit`). Built after shadow-vis (so its own Err arm destroys shadow-vis + core,
-        // mirroring the existing image-stage error weave). Sized to `aa_extent` — NATIVE under
-        // SSAA (`present_extent`, i.e. `extent`, is 2× there), `== extent` for
-        // Off/Fxaa/Smaa/Taa (byte-identical sizing to before SSAA existed). TAA's resolve writes
-        // `aa_out` directly (no dedicated FXAA/SMAA-style INPUT set — see `taa_hist` below).
+        // `lit`). Built after the SSAO à-trous ring images (so its own Err arm destroys those +
+        // shadow-vis + core, mirroring the existing image-stage error weave). Sized to
+        // `aa_extent` — NATIVE under SSAA (`present_extent`, i.e. `extent`, is 2× there), `==
+        // extent` for Off/Fxaa/Smaa/Taa (byte-identical sizing to before SSAA existed). TAA's
+        // resolve writes `aa_out` directly (no dedicated FXAA/SMAA-style INPUT set — see
+        // `taa_hist` below).
         let aa_armed = scene.aa.is_some()
             || scene.smaa.is_some()
             || scene.ssaa.is_some()
@@ -3940,10 +4352,13 @@ impl GBufferTargets {
             match AaImages::build(ctx, aa_extent) {
                 Ok(a) => Some(a),
                 Err(e) => {
-                    // SAFETY: the shadow-vis images (hwrt) + `core` were built above on `ctx`,
-                    // referenced by no submission; each destroyed exactly once, reverse acquisition
-                    // (shadow-vis → core).
+                    // SAFETY: the SSAO à-trous ring images + the shadow-vis images (hwrt) + `core`
+                    // were built above on `ctx`, referenced by no submission; each destroyed
+                    // exactly once, reverse acquisition (ssao_atrous_imgs → shadow-vis → core).
                     unsafe {
+                        if let Some(s) = ssao_atrous_imgs {
+                            s.destroy(ctx);
+                        }
                         #[cfg(feature = "hwrt")]
                         if let Some(v) = shadow_vis_imgs {
                             v.destroy(ctx);
@@ -3976,12 +4391,16 @@ impl GBufferTargets {
             match SmaaImages::build(ctx, extent) {
                 Ok(s) => Some(s),
                 Err(e) => {
-                    // SAFETY: `aa_imgs` + the shadow-vis images (hwrt) + `core` were built above
-                    // on `ctx`, referenced by no submission; each destroyed exactly once, reverse
-                    // acquisition (aa_imgs → shadow-vis → core).
+                    // SAFETY: `aa_imgs` + the SSAO à-trous ring images + the shadow-vis images
+                    // (hwrt) + `core` were built above on `ctx`, referenced by no submission; each
+                    // destroyed exactly once, reverse acquisition (aa_imgs → ssao_atrous_imgs →
+                    // shadow-vis → core).
                     unsafe {
                         if let Some(a) = aa_imgs {
                             a.destroy(ctx);
+                        }
+                        if let Some(s) = ssao_atrous_imgs {
+                            s.destroy(ctx);
                         }
                         #[cfg(feature = "hwrt")]
                         if let Some(v) = shadow_vis_imgs {
@@ -4017,15 +4436,19 @@ impl GBufferTargets {
         ) {
             Ok(s) => s,
             Err(e) => {
-                // SAFETY: `smaa_imgs` + `aa_imgs` + the shadow-vis images (hwrt) + `core` were
-                // built above on `ctx`, referenced by no submission; each destroyed exactly
-                // once, reverse acquisition (smaa_imgs → aa_imgs → shadow-vis → core).
+                // SAFETY: `smaa_imgs` + `aa_imgs` + the SSAO à-trous ring images + the shadow-vis
+                // images (hwrt) + `core` were built above on `ctx`, referenced by no submission;
+                // each destroyed exactly once, reverse acquisition (smaa_imgs → aa_imgs →
+                // ssao_atrous_imgs → shadow-vis → core).
                 unsafe {
                     if let Some(s) = smaa_imgs {
                         s.destroy(ctx);
                     }
                     if let Some(a) = aa_imgs {
                         a.destroy(ctx);
+                    }
+                    if let Some(s) = ssao_atrous_imgs {
+                        s.destroy(ctx);
                     }
                     #[cfg(feature = "hwrt")]
                     if let Some(v) = shadow_vis_imgs {
@@ -4072,11 +4495,12 @@ impl GBufferTargets {
             ),
             Ok(None) => (None, None, None, None),
             Err(e) => {
-                // SAFETY: the deferred sets + `smaa_imgs` + `aa_imgs` + the shadow-vis images +
-                // `core` were built above on `ctx`, referenced by no submission; each is
-                // destroyed exactly once, in reverse acquisition order (deferred sets →
-                // smaa_imgs → aa_imgs → shadow-vis → core). `build_shadow_denoise_sets`
-                // already drained its OWN partial allocations before returning `Err`.
+                // SAFETY: the deferred sets + `smaa_imgs` + `aa_imgs` + the SSAO à-trous ring
+                // images + the shadow-vis images + `core` were built above on `ctx`, referenced
+                // by no submission; each is destroyed exactly once, in reverse acquisition order
+                // (deferred sets → smaa_imgs → aa_imgs → ssao_atrous_imgs → shadow-vis → core).
+                // `build_shadow_denoise_sets` already drained its OWN partial allocations before
+                // returning `Err`.
                 unsafe {
                     deferred.destroy(ctx);
                     if let Some(s) = smaa_imgs {
@@ -4085,6 +4509,52 @@ impl GBufferTargets {
                     if let Some(a) = aa_imgs {
                         a.destroy(ctx);
                     }
+                    if let Some(s) = ssao_atrous_imgs {
+                        s.destroy(ctx);
+                    }
+                    if let Some(v) = shadow_vis_imgs {
+                        v.destroy(ctx);
+                    }
+                    core.destroy(ctx);
+                }
+                return Err(SwapchainError::DepthImage(e));
+            }
+        };
+
+        // The SSAO à-trous denoise chain's FIVE role-keyed descriptor sets. UNCONDITIONAL (both
+        // feature legs — SOFTWARE, NOT `hwrt`-gated), built right after the (hwrt) shadow denoise
+        // sets so its own Err arm destroys deferred + smaa_imgs + aa_imgs + ssao_atrous_imgs +
+        // shadow-vis (hwrt) + core, mirroring the existing set-stage error weave. DECOUPLED from
+        // `scene.ssao` (see `build_ssao_atrous_sets`'s doc) — `None` when the boot pipelines /
+        // ring images are absent.
+        let ssao_atrous_sets = match Self::build_ssao_atrous_sets(
+            ctx,
+            scene,
+            &core.viewt,
+            &core.ssao,
+            ssao_atrous_imgs.as_ref().map(|r| &r.ssao_ring_a),
+            ssao_atrous_imgs.as_ref().map(|r| &r.ssao_ring_b),
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                // SAFETY: the deferred sets + `smaa_imgs` + `aa_imgs` + the SSAO à-trous ring
+                // images + the shadow-vis images (hwrt) + `core` were built above on `ctx`,
+                // referenced by no submission; each destroyed exactly once, reverse acquisition
+                // (deferred sets → smaa_imgs → aa_imgs → ssao_atrous_imgs → shadow-vis → core).
+                // `build_ssao_atrous_sets` already drained its OWN partial allocations before
+                // returning `Err`.
+                unsafe {
+                    deferred.destroy(ctx);
+                    if let Some(s) = smaa_imgs {
+                        s.destroy(ctx);
+                    }
+                    if let Some(a) = aa_imgs {
+                        a.destroy(ctx);
+                    }
+                    if let Some(s) = ssao_atrous_imgs {
+                        s.destroy(ctx);
+                    }
+                    #[cfg(feature = "hwrt")]
                     if let Some(v) = shadow_vis_imgs {
                         v.destroy(ctx);
                     }
@@ -4101,6 +4571,32 @@ impl GBufferTargets {
         let (smaa_edges, smaa_weights) = match smaa_imgs {
             Some(SmaaImages { edges, weights }) => (Some(edges), Some(weights)),
             None => (None, None),
+        };
+        let (ssao_ring_a, ssao_ring_b) = match ssao_atrous_imgs {
+            Some(SsaoAtrousImages { ssao_ring_a, ssao_ring_b }) => (Some(ssao_ring_a), Some(ssao_ring_b)),
+            None => (None, None),
+        };
+        let (
+            ssao_atrous_read8_set,
+            ssao_atrous_interior_from0_set,
+            ssao_atrous_interior_from1_set,
+            ssao_atrous_write8_from0_set,
+            ssao_atrous_write8_from1_set,
+        ) = match ssao_atrous_sets {
+            Some(SsaoAtrousSets {
+                read8,
+                interior_from0,
+                interior_from1,
+                write8_from0,
+                write8_from1,
+            }) => (
+                Some(read8),
+                Some(interior_from0),
+                Some(interior_from1),
+                Some(write8_from0),
+                Some(write8_from1),
+            ),
+            None => (None, None, None, None, None),
         };
         #[cfg(feature = "hwrt")]
         let (shadow_vis, shadow_vis2) = match shadow_vis_imgs {
@@ -4241,6 +4737,13 @@ impl GBufferTargets {
             resolve_set_hwrt,
             cull_set,
             ssao_set,
+            ssao_ring_a,
+            ssao_ring_b,
+            ssao_atrous_read8_set,
+            ssao_atrous_interior_from0_set,
+            ssao_atrous_interior_from1_set,
+            ssao_atrous_write8_from0_set,
+            ssao_atrous_write8_from1_set,
             aa_out,
             fxaa_set,
             smaa_edges,
@@ -4479,6 +4982,38 @@ impl GBufferTargets {
                     RhiDevice::destroy_buffer(ctx, b);
                 }
             }
+            // The SSAO à-trous denoise chain's FIVE role-keyed descriptor sets — LAST-acquired (in
+            // `build_ssao_atrous_sets`, after `deferred`), so destroyed FIRST here (before
+            // `deferred`'s `ssao_set`, which binds the SAME `ssao`/`viewt` images but is an
+            // independent set — order between the two does not matter functionally, only that
+            // both precede the images below). UNCONDITIONAL (both feature legs — SOFTWARE, NOT
+            // `hwrt`-gated). Each `Option`-guarded (`None` on a device lacking `R16_UNORM`
+            // storage, or when the boot pipelines were never wired).
+            if let Some(s) = self.ssao_atrous_write8_from1_set {
+                for g in s {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            if let Some(s) = self.ssao_atrous_write8_from0_set {
+                for g in s {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            if let Some(s) = self.ssao_atrous_interior_from1_set {
+                for g in s {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            if let Some(s) = self.ssao_atrous_interior_from0_set {
+                for g in s {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            if let Some(s) = self.ssao_atrous_read8_set {
+                for g in s {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
             // The deferred descriptor SETS (resolve-hwrt → present → ddgi-update → ssao → cull →
             // resolve → vocab), via the `DeferredSets` bundle's reverse-acquisition teardown — the
             // SAME order + `Option`-guards the old flat teardown used.
@@ -4531,6 +5066,19 @@ impl GBufferTargets {
             }
             #[cfg(feature = "hwrt")]
             if let Some(r) = self.shadow_vis {
+                for t in r {
+                    RhiDevice::destroy_texture(ctx, t);
+                }
+            }
+            // The SSAO à-trous denoise chain's two interior ping-pong image RINGS — grouped with
+            // the shadow-vis images above (both denoise ring pairs, `Option`-guarded on a device
+            // storage-format probe). UNCONDITIONAL (both feature legs — SOFTWARE, NOT `hwrt`-gated).
+            if let Some(r) = self.ssao_ring_b {
+                for t in r {
+                    RhiDevice::destroy_texture(ctx, t);
+                }
+            }
+            if let Some(r) = self.ssao_ring_a {
                 for t in r {
                     RhiDevice::destroy_texture(ctx, t);
                 }
@@ -4799,6 +5347,13 @@ mod tests {
             resolve_set: bg_ring(),
             cull_set: None,
             ssao_set: None,
+            ssao_ring_a: None,
+            ssao_ring_b: None,
+            ssao_atrous_read8_set: None,
+            ssao_atrous_interior_from0_set: None,
+            ssao_atrous_interior_from1_set: None,
+            ssao_atrous_write8_from0_set: None,
+            ssao_atrous_write8_from1_set: None,
             aa_out: None,
             fxaa_set: None,
             smaa_edges: None,
@@ -4868,6 +5423,13 @@ mod tests {
             resolve_set_hwrt: resolve_set_hwrt.then(bg_ring),
             cull_set: None,
             ssao_set: None,
+            ssao_ring_a: None,
+            ssao_ring_b: None,
+            ssao_atrous_read8_set: None,
+            ssao_atrous_interior_from0_set: None,
+            ssao_atrous_interior_from1_set: None,
+            ssao_atrous_write8_from0_set: None,
+            ssao_atrous_write8_from1_set: None,
             aa_out: None,
             fxaa_set: None,
             smaa_edges: None,

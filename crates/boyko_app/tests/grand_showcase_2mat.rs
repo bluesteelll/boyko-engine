@@ -203,14 +203,20 @@ fn grand_showcase_2mat_screenshot_dump() {
         // half-width in σ; a huge value ≈ "clip off"), `BOYKO_TAA_MIN` = min_blend (steady-state
         // feedback floor), `BOYKO_TAA_DEF` = default_blend. Unset ⇒ the shipped v1 defaults.
         let mut rt = ResolvedTaa::default();
-        if let Ok(v) = std::env::var("BOYKO_TAA_VG") {
-            if let Ok(f) = v.parse::<f32>() { rt.variance_gamma = f; }
+        if let Ok(v) = std::env::var("BOYKO_TAA_VG")
+            && let Ok(f) = v.parse::<f32>()
+        {
+            rt.variance_gamma = f;
         }
-        if let Ok(v) = std::env::var("BOYKO_TAA_MIN") {
-            if let Ok(f) = v.parse::<f32>() { rt.min_blend = f; }
+        if let Ok(v) = std::env::var("BOYKO_TAA_MIN")
+            && let Ok(f) = v.parse::<f32>()
+        {
+            rt.min_blend = f;
         }
-        if let Ok(v) = std::env::var("BOYKO_TAA_DEF") {
-            if let Ok(f) = v.parse::<f32>() { rt.default_blend = f; }
+        if let Ok(v) = std::env::var("BOYKO_TAA_DEF")
+            && let Ok(f) = v.parse::<f32>()
+        {
+            rt.default_blend = f;
         }
         app.insert_resource(rt);
     }
@@ -225,7 +231,7 @@ fn grand_showcase_2mat_screenshot_dump() {
         _ => SsaoQuality::Off,
     };
     if ssao_quality != SsaoQuality::Off {
-        app.insert_resource(SsaoConfig { quality: ssao_quality });
+        app.insert_resource(SsaoConfig { quality: ssao_quality, ..Default::default() });
     }
     app.run();
 }

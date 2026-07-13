@@ -2967,21 +2967,30 @@ mod ssao_gather_tests {
     }
 }
 
-/// Render P7 POLISH — the SSAO depth-aware box-blur host mirror ([`golden_ssao_blur`]) tests.
-/// Proves the inline resolve blur on the host side: (1) a sharp AO RING is smoothed toward its
-/// neighbourhood mean, and (2) the bilateral DEPTH gate prevents bleed across a silhouette (a
-/// `view_t` jump > [`SSAO_BLUR_DEPTH_TOL`]). Pure host math; runs device-less.
+/// The SSAO edge-avoiding à-trous denoise host mirror ([`golden_ssao_atrous`]) tests. Proves the
+/// N=3-pass chain on the host side: (1) a sharp AO discontinuity is smoothed toward its
+/// neighbourhood mean WITHIN the chain's effective footprint, unchanged FAR from it, and (2) the
+/// bilateral DEPTH gate prevents bleed across a silhouette (a `view_t` jump > [`SSAO_BLUR_DEPTH_TOL`]).
+/// Pure host math; runs device-less.
 #[cfg(test)]
-mod ssao_blur_tests {
-    use super::super::{SSAO_BLUR_DEPTH_TOL, SSAO_BLUR_R, SSAO_VIEWT_BG};
-    use crate::goldens::{golden_ssao_blur, MarcherAttributes};
+mod ssao_atrous_tests {
+    use super::super::SSAO_BLUR_DEPTH_TOL;
+    use crate::compute::CompositeCamera;
+    use crate::goldens::{golden_ssao_atrous, MarcherAttributes};
 
-    const W: u32 = 32;
-    const H: u32 = 32;
+    const W: u32 = 48;
+    const H: u32 = 48;
+    /// `N = 3` passes (steps `{1, 2, 4}`), the default `SsaoConfig::atrous_levels` — see
+    /// `boyko_render::ssao_config`.
+    const LEVELS: u32 = 3;
+    /// The chain's effective footprint half-width: `sum(2 * step)` over `steps {1,2,4}` == 14 px
+    /// (the plan's "~14px footprint" for N=3). A pixel at least this far from a discontinuity
+    /// sees ONLY same-side taps at every pass.
+    const REACH: i32 = 14;
 
     /// A `W×H` synthetic G-buffer from a per-pixel `(ssao_byte, view_t)` field. Only the
-    /// `view_t` lane (the blur's depth gate) is meaningful here; `mask`/the rest are inert (the
-    /// blur reads neither). Returns `(raw_ssao_bytes, gbuf)`.
+    /// `view_t` lane (the depth gate) is meaningful here; `mask`/the rest are inert (the filter
+    /// reads neither). Returns `(raw_ssao_bytes, gbuf)`.
     fn build<F: Fn(i32, i32) -> (u8, f32)>(field: F) -> (Vec<u8>, Vec<MarcherAttributes>) {
         let mut ssao = Vec::with_capacity((W * H) as usize);
         let mut gbuf = Vec::with_capacity((W * H) as usize);
@@ -3004,55 +3013,46 @@ mod ssao_blur_tests {
     }
 
     #[test]
-    fn sharp_ring_is_smoothed() {
+    fn sharp_ring_is_smoothed_far_stays_exact() {
         // A constant-depth flat surface (every neighbour passes the depth gate) with a SHARP AO
         // discontinuity: the left half is fully-dark (byte 0), the right half fully-bright
-        // (byte 255).
-        //
-        // Render P7 POLISH Change C replaced the uniform box average with a bilateral SPATIAL x
-        // depth-falloff weight. This case is the R/sigma-ROBUST "uniform kernel is unchanged"
-        // property: a pixel FAR ENOUGH from the seam that NO dark tap falls inside the
-        // `SSAO_BLUR_R`-radius window (`px >= SEAM + SSAO_BLUR_R + 1`) sees only bright taps, so
-        // its weighted mean equals the bright value EXACTLY — independent of both
-        // `SSAO_BLUR_SPATIAL_SIGMA` and `SSAO_BLUR_R` (a weighted average of equal taps is that
-        // value). Its counterpart `sharp_ring_is_smoothed_at_narrower_offset` covers the "a sharp
-        // discontinuity WITHIN reach IS smoothed" direction with a sigma-robust inequality.
-        const SEAM: i32 = 16;
+        // (byte 255). A pixel FAR ENOUGH from the seam that NO dark tap falls inside the
+        // chain's effective footprint (REACH) sees only bright taps at every pass, so its
+        // filtered value equals the bright value EXACTLY (a weighted mean of equal taps is that
+        // value, and the R8/R16 round-trip quantization is a no-op on an already-uniform image).
+        const SEAM: i32 = 20;
         let (ssao, gbuf) = build(|x, _y| (if x < SEAM { 0 } else { 255 }, 1.5));
 
-        // One column past the kernel reach from the seam: the nearest dark column (SEAM-1) is at
-        // `dx == -(SSAO_BLUR_R + 2)`, strictly outside the `[-R, R]` window, so no dark tap counts.
-        let px = (SEAM + SSAO_BLUR_R + 1) as u32;
-        let py = 16;
-        let raw = ssao[(py * W + px) as usize] as f32 / 255.0;
-        let blurred = golden_ssao_blur(&ssao, &gbuf, px, py, W, H);
-        assert!(
-            (blurred - raw).abs() < 1.0e-6,
-            "a pixel whose entire SSAO_BLUR_R-kernel is uniformly bright must blur to that value \
-             EXACTLY (weighted mean of equal taps), independent of SSAO_BLUR_SPATIAL_SIGMA / \
-             SSAO_BLUR_R: raw {raw} blurred {blurred}"
+        let px = (SEAM + REACH + 1) as u32;
+        let py = 24;
+        let raw = ssao[(py * W + px) as usize];
+        let out = golden_ssao_atrous(&ssao, &gbuf, W, H, CompositeCamera::Ortho, LEVELS);
+        let filtered = out[(py * W + px) as usize];
+        assert_eq!(
+            filtered, raw,
+            "a pixel whose entire à-trous footprint is uniformly bright must filter to that \
+             value EXACTLY, got {filtered} raw {raw}"
         );
     }
 
     #[test]
-    fn sharp_ring_is_smoothed_at_narrower_offset() {
-        // The bilateral-weighted counterpart of the old `sharp_ring_is_smoothed`: a pixel ONE
-        // column closer to the seam than `sharp_ring_is_smoothed`'s fixture, so the nearest dark
-        // neighbour (`dx == -1`) sits well INSIDE the `SSAO_BLUR_SPATIAL_SIGMA == 2.0` radius and
-        // visibly pulls the blurred AO down from the raw bright value — proving the bilateral
-        // blur still smooths a sharp discontinuity when the discontinuity is close enough to
-        // fall within the spatial sigma.
-        const SEAM: i32 = 16;
+    fn sharp_ring_is_smoothed_near_seam() {
+        // The counterpart: a pixel close enough to the seam (well inside REACH) that dark taps
+        // DO fall inside the footprint at the wider passes — the filtered value must visibly
+        // pull down from the raw bright value (proving the chain still smooths a nearby
+        // discontinuity).
+        const SEAM: i32 = 20;
         let (ssao, gbuf) = build(|x, _y| (if x < SEAM { 0 } else { 255 }, 1.5));
 
-        let px = SEAM as u32; // the first bright column; the seam is one tap away (dx == -1)
-        let py = 16;
-        let raw = ssao[(py * W + px) as usize] as f32 / 255.0;
-        let blurred = golden_ssao_blur(&ssao, &gbuf, px, py, W, H);
+        let px = SEAM as u32; // the first bright column; the seam is one tap away
+        let py = 24;
+        let raw = ssao[(py * W + px) as usize] as f32;
+        let out = golden_ssao_atrous(&ssao, &gbuf, W, H, CompositeCamera::Ortho, LEVELS);
+        let filtered = out[(py * W + px) as usize] as f32;
         assert!(
-            blurred < raw - 0.05 && blurred > 0.1,
-            "the bilateral blur must smooth a sharp ring within the spatial sigma radius: raw \
-             {raw} blurred {blurred} (expected strictly between the dark and bright extremes)"
+            filtered < raw - 10.0,
+            "the à-trous chain must smooth a sharp ring within its effective footprint: raw \
+             {raw} filtered {filtered}"
         );
     }
 
@@ -3060,55 +3060,52 @@ mod ssao_blur_tests {
     fn depth_gate_prevents_silhouette_bleed() {
         // A silhouette: the left half is a NEAR surface (`view_t = 1.5`, dark AO byte 40) and the
         // right half is a FAR surface (`view_t = 1.5 + 10*tol`, bright AO byte 255) — a `view_t`
-        // jump far beyond the gate. A near-surface pixel ON the boundary must blur ONLY with its
-        // near-side (in-tol) neighbours, so its blurred AO stays near the dark value and is NOT
-        // pulled up by the far-side bright taps (no cross-silhouette bleed).
-        const SEAM: i32 = 16;
+        // jump far beyond the gate. A near-surface pixel ON the boundary must filter ONLY with
+        // its near-side (in-tol) neighbours at EVERY pass, so its filtered AO stays near the dark
+        // value and is NOT pulled up by the far-side bright taps (no cross-silhouette bleed).
+        const SEAM: i32 = 20;
         const DARK: u8 = 40;
         let near_t = 1.5_f32;
         let far_t = 1.5_f32 + 10.0 * SSAO_BLUR_DEPTH_TOL;
         let (ssao, gbuf) = build(|x, _y| {
-            if x < SEAM {
-                (DARK, near_t)
-            } else {
-                (255, far_t)
-            }
+            if x < SEAM { (DARK, near_t) } else { (255, far_t) }
         });
 
-        // The last near-side column (within R of the seam, so far-side taps ARE inside the
-        // kernel window but must be REJECTED by the depth gate).
         let px = (SEAM - 1) as u32;
-        let py = 16;
-        let blurred = golden_ssao_blur(&ssao, &gbuf, px, py, W, H);
-        let dark = DARK as f32 / 255.0;
+        let py = 24;
+        let out = golden_ssao_atrous(&ssao, &gbuf, W, H, CompositeCamera::Ortho, LEVELS);
+        let filtered = out[(py * W + px) as usize];
         assert!(
-            (blurred - dark).abs() < 1.0e-6,
-            "the depth gate must reject far-side taps: a near-surface pixel must blur to the \
-             near AO {dark} (got {blurred}), NOT bleed the far-side bright AO across the \
-             silhouette"
+            filtered <= DARK + 5,
+            "the depth gate must reject far-side taps at every pass: a near-surface pixel must \
+             filter close to the near AO {DARK} (got {filtered}), NOT bleed the far-side bright \
+             AO across the silhouette"
         );
     }
 
     #[test]
     fn center_always_counts_no_divide_by_zero() {
         // An ISOLATED lit pixel surrounded by a far background (every neighbour fails the depth
-        // gate): the blur must still count the CENTER (cnt ≥ 1) and return the center's own raw
-        // AO — never a 0/0 NaN.
+        // gate at every pass): the filter must still count the CENTER (weight >= 0.140625, the
+        // B3 kernel's own-tap weight) and converge to (approximately) the center's own raw AO —
+        // never a 0/0 NaN. The R16/R8 round-trip quantization between passes may shift the
+        // result by a few counts, so allow a small tolerance.
         let (ssao, gbuf) = build(|x, y| {
-            if x == 16 && y == 16 {
-                (90, 1.5)
-            } else {
-                (255, SSAO_VIEWT_BG) // far background — rejected by the gate
-            }
+            if x == 24 && y == 24 { (90, 1.5) } else { (255, super::super::SSAO_VIEWT_BG) }
         });
-        let blurred = golden_ssao_blur(&ssao, &gbuf, 16, 16, W, H);
-        assert!(blurred.is_finite(), "the center always counts — never 0/0 NaN, got {blurred}");
+        let out = golden_ssao_atrous(&ssao, &gbuf, W, H, CompositeCamera::Ortho, LEVELS);
+        let filtered = out[(24 * W + 24) as usize];
         assert!(
-            (blurred - 90.0 / 255.0).abs() < 1.0e-6,
-            "an isolated pixel (all neighbours gated out) must blur to its OWN raw AO, got {blurred}"
+            filtered.abs_diff(90) <= 2,
+            "an isolated pixel (all neighbours gated out at every pass) must filter close to \
+             its OWN raw AO, got {filtered}"
         );
-        // Sanity: the radius constant is the one the resolve compiles in (GPU-tuned: R=7, a
-        // 15x15 window — wide enough to dissolve the angular-undersampling blobs).
-        assert_eq!(SSAO_BLUR_R, 7, "the host blur radius must mirror the shader's SSAO_BLUR_R");
+    }
+
+    #[test]
+    fn levels_zero_is_byte_identical_to_raw_gather() {
+        let (ssao, gbuf) = build(|x, y| (((x + y) * 7) as u8, 1.5));
+        let out = golden_ssao_atrous(&ssao, &gbuf, W, H, CompositeCamera::Ortho, 0);
+        assert_eq!(out, ssao, "levels == 0 must return the raw gather byte-identical");
     }
 }

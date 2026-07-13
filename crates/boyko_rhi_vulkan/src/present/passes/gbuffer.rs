@@ -1151,8 +1151,134 @@ impl Renderer<'_> {
             // The SSAO pass's `ssao` WRITES (COMPUTE/SHADER_WRITE) are ordered before the
             // resolve's `gSsao.Load` READS (COMPUTE/SHADER_READ) by the graph: it derives
             // this COMPUTE→COMPUTE, GENERAL→GENERAL image barrier on `ssao` at the resolve
-            // (the `ssao` reader), so `record_pass(resolve)` emits it before the resolve
-            // dispatch (still after this SSAO dispatch's write) — NOT here.
+            // (the `ssao` reader) UNLESS the à-trous chain below runs (`atrous_levels > 0`),
+            // in which case the graph instead derives it at the à-trous chain's LEVEL 0 (the
+            // FIRST reader of the raw gather) — `record_pass(resolve)` / this block's first
+            // `record_graph_pass` call emits whichever applies, still after this dispatch's
+            // write — NOT here.
+        }
+
+        // === The SSAO edge-avoiding à-trous denoise chain (RHI DISPATCH WIRING — the deferred
+        // half of the R8<->R16 C1 endpoint solution). Recorded ONLY when `scene.ssao.is_some()`
+        // (mirrors the gather pass's gate — à-trous cannot run without a fresh gather) AND
+        // `activation.atrous_levels > 0` (the owner-authored 0%-gate:
+        // `SsaoConfig::clamped_atrous_levels() == 0`) AND the FIVE role-keyed sets all exist
+        // (`None` on a device lacking `R16_UNORM` storage — the graceful degrade,
+        // `ssao_atrous_storage_ok()`). Otherwise skipped entirely — NO bind, NO dispatch, NO
+        // barrier — so the resolve reads the raw, un-denoised gather (the byte-identical
+        // pre-dispatch-wiring path).
+        //
+        // Belt-and-suspenders (the shadow à-trous precedent): the sets are built DECOUPLED from
+        // this per-frame gate (on the STABLE boot signals, `GBufferTargets::build_ssao_atrous_
+        // sets`), so `scene.ssao.is_some()` normally implies them; a future gate mismatch
+        // DEGRADES GRACEFULLY (this whole block simply does not run) instead of an `expect`
+        // panic on a `None` set.
+        //
+        // `N` (`atrous_levels`, clamped to `MAX_SSAO_ATROUS_LEVELS`) dispatches are recorded,
+        // level `k`'s (pipeline, set) pair selected by [`crate::present::ssao_atrous_step`]'s
+        // [`crate::present::AtrousStepRole`] — `Read8` (level 0: reads the frozen R8 `gSsao`,
+        // writes ring 0) / `Interior` (ping-pongs the two R16 rings) / `Write8` (the last level:
+        // reads a ring, writes BACK into `gSsao` — the resolve's UNCHANGED binding then reads the
+        // FILTERED result). Each pushes `step = 1 << level` (a 4-byte `{ uint step }`). ===
+        if let Some(activation) = &scene.ssao
+            && activation.atrous_levels > 0
+            && let (
+                Some(read8_set),
+                Some(interior_from0_set),
+                Some(interior_from1_set),
+                Some(write8_from0_set),
+                Some(write8_from1_set),
+            ) = (
+                targets.ssao_atrous_read8_set.as_ref(),
+                targets.ssao_atrous_interior_from0_set.as_ref(),
+                targets.ssao_atrous_interior_from1_set.as_ref(),
+                targets.ssao_atrous_write8_from0_set.as_ref(),
+                targets.ssao_atrous_write8_from1_set.as_ref(),
+            )
+        {
+            let read8_pipeline = scene
+                .ssao_atrous_read8_pipeline
+                .expect("invariant: the SSAO à-trous sets built ⇒ the boot read8 pipeline is Some");
+            let interior_pipeline = scene.ssao_atrous_interior_pipeline.expect(
+                "invariant: the SSAO à-trous sets built ⇒ the boot interior pipeline is Some",
+            );
+            let write8_pipeline = scene
+                .ssao_atrous_write8_pipeline
+                .expect("invariant: the SSAO à-trous sets built ⇒ the boot write8 pipeline is Some");
+            let atrous_levels = activation.atrous_levels.min(crate::present::MAX_SSAO_ATROUS_LEVELS);
+            // O1: pin the `0 || 2..=MAX` contract (host `clamped_atrous_levels`) at the RHI boundary —
+            // the SAME assert the declarator makes, so a raw `1` (which `ssao_atrous_step(0,1)` would
+            // route as a lone `Read8` that never writes back to `gSsao`) trips loudly rather than
+            // silently wasting a dispatch + leaving the resolve on the raw gather.
+            debug_assert!(
+                atrous_levels == 0
+                    || (2..=crate::present::MAX_SSAO_ATROUS_LEVELS).contains(&atrous_levels),
+                "invariant: ssao à-trous levels is 0 or 2..=MAX at the RHI boundary; got {atrous_levels}"
+            );
+            let plan = self
+                .gbuffer_pass_plan
+                .as_ref()
+                .expect("invariant: declare_gbuffer_graph ran before record_gbuffer");
+            for level in 0..atrous_levels {
+                let atrous_pass = plan.ssao_atrous[level as usize].expect(
+                    "invariant: level < ssao_atrous_levels ⇒ ssao_atrous[level] declared",
+                );
+                // SAFETY: recording is open; `record_graph_pass` records the "ssao_atrous" pass's
+                // derived RAW barriers (the gather-write → level-0-read on the first iteration,
+                // the ring ping-pong on every iteration, the last level's write → resolve-read
+                // implicitly ordering before the resolve's later `image_access`) into `cmd`.
+                self.record_graph_pass(atrous_pass, cmd, targets, scene, fi);
+                let (pipeline, set) = match crate::present::ssao_atrous_step(level, atrous_levels) {
+                    crate::present::AtrousStepRole::Read8 => {
+                        (read8_pipeline, &read8_set[self.frame_index])
+                    }
+                    crate::present::AtrousStepRole::Interior { in_ring: 0 } => {
+                        (interior_pipeline, &interior_from0_set[self.frame_index])
+                    }
+                    crate::present::AtrousStepRole::Interior { .. } => {
+                        (interior_pipeline, &interior_from1_set[self.frame_index])
+                    }
+                    crate::present::AtrousStepRole::Write8 { in_ring: 0 } => {
+                        (write8_pipeline, &write8_from0_set[self.frame_index])
+                    }
+                    crate::present::AtrousStepRole::Write8 { .. } => {
+                        (write8_pipeline, &write8_from1_set[self.frame_index])
+                    }
+                };
+                let step: u32 = 1u32 << level;
+                // SAFETY: recording is open; the selected à-trous pipeline variant + its shared
+                // 4-binding layout are live on this device (caller contract); `set` binds
+                // `gAoIn`/`gAoOut` (the role-keyed pair) + `gViewT` + the camera UBO; the 4-byte
+                // `{ uint step }` push covers the pipeline's declared COMPUTE range;
+                // `dispatch_group_count_x` covers the pixel count; `&set.descriptor_set` is a
+                // single-element local alive for the call.
+                unsafe {
+                    (self.fns.cmd_bind_pipeline)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        pipeline.pipeline,
+                    );
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        pipeline.layout,
+                        0,
+                        1,
+                        &set.descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        pipeline.layout,
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0,
+                        4,
+                        (&step as *const u32).cast(),
+                    );
+                    (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+                }
+            }
         }
 
         // === SDFDDGI I2: the probe-update compute pass. Recorded ONLY when the scene wires the

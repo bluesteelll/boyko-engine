@@ -57,6 +57,9 @@ use boyko_rhi_vulkan::compute::{
     // Render P7-Q2: the quality-VARIANT SSAO `.spv` selector + the host preset table.
     sdf_ssao_spirv_variant, SSAO_PARAMS,
     SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM, SSAO_QUALITY_HIGH,
+    // The SSAO edge-avoiding à-trous denoise chain: the three role-keyed `.spv` variants + the
+    // push-constant size.
+    SSAO_ATROUS_PUSH_BYTES, ssao_atrous_read8_spirv, ssao_atrous_spirv, ssao_atrous_write8_spirv,
     GOLDEN_LIGHT_HEADER_BASE_WORDS,
     composite_pixel_ray, deferred_pbr_spirv, mesh_depth_for_z,
     pack_rgba, pixel_world_xy,
@@ -81,12 +84,15 @@ use boyko_rhi_vulkan::goldens::{
     golden_composite_pixel_ex_omega_lit, golden_deferred_resolve, golden_deferred_resolve_clustered,
     golden_deferred_resolve_table, golden_deferred_resolve_table_shadowed,
     golden_deferred_resolve_table_shadowed_ssao, golden_gbuffer, golden_marcher_attributes,
-    golden_ssao_attributes, golden_ssao_blur, golden_tile_bound,
+    golden_ssao_attributes, golden_ssao_atrous, golden_tile_bound,
 };
 use boyko_rhi_vulkan::brick_atlas::{BrickAtlas, BrickClipmap};
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::memory::BoundBuffer;
-use boyko_rhi_vulkan::rhi_impl::{VulkanBindGroup, VulkanBindGroupLayout, VulkanSampler};
+use boyko_rhi_vulkan::present::{AtrousStepRole, MAX_SSAO_ATROUS_LEVELS, ssao_atrous_step};
+use boyko_rhi_vulkan::rhi_impl::{
+    ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanSampler,
+};
 use boyko_rhi_vulkan::texture::VulkanTexture;
 
 /// CSM Increment 1b (Rung A): the OFF-path cascade descriptor TRIO every resolve set must bind
@@ -1759,6 +1765,26 @@ fn run_gbuffer_hybrid_m4(
     (out, tiles_out, viewt_out)
 }
 
+/// The SSAO edge-avoiding à-trous denoise chain's per-run test resources
+/// ([`run_gbuffer_hybrid_ssao`], built ONLY when `atrous_levels > 0`) — the two R16_UNORM
+/// interior ping-pong rings, the shared 4-binding layout, the three role-keyed pipeline
+/// variants, and the FIVE role-keyed sets [`ssao_atrous_step`]'s [`AtrousStepRole`] selects
+/// between. Mirrors the production `GBufferTargets`/`gpu_scene` wiring, minus the device-format-
+/// degrade path (this harness assumes `R16_UNORM` storage on a booted RTX device).
+struct SsaoAtrousTestRes {
+    ring_a: VulkanTexture,
+    ring_b: VulkanTexture,
+    layout: VulkanBindGroupLayout,
+    read8_pipeline: ComputePipeline,
+    interior_pipeline: ComputePipeline,
+    write8_pipeline: ComputePipeline,
+    read8_set: VulkanBindGroup,
+    interior_from0_set: VulkanBindGroup,
+    interior_from1_set: VulkanBindGroup,
+    write8_from0_set: VulkanBindGroup,
+    write8_from1_set: VulkanBindGroup,
+}
+
 /// Render P7 — the SSAO-enabled OFFSCREEN harness. The no-brick / no-cull marcher → **SSAO** →
 /// resolve path (a self-contained sibling of [`run_gbuffer_hybrid_m4`]'s OFF path), recording the
 /// dedicated 5-binding SSAO compute pass BETWEEN the marcher→resolve store-to-load barrier and the
@@ -1776,6 +1802,15 @@ fn run_gbuffer_hybrid_m4(
 /// `SSAO_PARAMS` / the `SSAO_QUALITY_*` constants — the SAME 5-binding layout drives any variant,
 /// so only the loaded `.spv` differs). Feed `SSAO_PARAMS[quality]` to [`golden_ssao_attributes`] for
 /// the matching host oracle. `SSAO_QUALITY_MEDIUM` == today's shipped path (byte-identical to pre-Q2).
+///
+/// The SSAO edge-avoiding à-trous denoise chain (RHI DISPATCH WIRING follow-up): `atrous_levels`
+/// (`0` or `2..=MAX_SSAO_ATROUS_LEVELS`) dispatches the SAME N-pass chain the production recorder
+/// (`present::passes::gbuffer`) runs, using the SAME role-keyed (pipeline, set) selection
+/// ([`ssao_atrous_step`]) BETWEEN the SSAO gather's `ssao`-write barrier and the resolve dispatch.
+/// `atrous_levels == 0` records NO à-trous pass — the `ssao_r8` readback stays the RAW, un-denoised
+/// gather output (byte-identical to the pre-dispatch-wiring harness). `atrous_levels > 0` writes the
+/// FILTERED result BACK into `gSsao` (the C1 endpoint solution), so `ssao_r8` is then the FINAL
+/// à-trous output, and the resolve's `.Load` (unchanged binding) reads the SAME filtered value.
 #[allow(clippy::too_many_arguments)]
 fn run_gbuffer_hybrid_ssao(
     ctx: &VulkanContext,
@@ -1784,7 +1819,12 @@ fn run_gbuffer_hybrid_ssao(
     light_dir: [f32; 3],
     light_table_words: &[u32],
     quality: usize,
+    atrous_levels: u32,
 ) -> (Vec<u8>, Vec<u8>) {
+    debug_assert!(
+        atrous_levels == 0 || (2..=MAX_SSAO_ATROUS_LEVELS).contains(&atrous_levels),
+        "invariant: atrous_levels must be 0 or 2..=MAX_SSAO_ATROUS_LEVELS"
+    );
     let device: &VulkanContext = ctx;
     let queue = ctx.rhi_queue();
 
@@ -2194,6 +2234,113 @@ fn run_gbuffer_hybrid_ssao(
         })
         .expect("SSAO bind group");
 
+    // The SSAO edge-avoiding à-trous denoise chain: built ONLY when `atrous_levels > 0` (see
+    // `SsaoAtrousTestRes`'s doc). `None` records NO à-trous dispatch below (the byte-identical
+    // pre-dispatch-wiring path).
+    let atrous_res: Option<SsaoAtrousTestRes> = (atrous_levels > 0).then(|| {
+        let make_ring = |label: &str| {
+            device
+                .create_texture(&TextureDesc {
+                    width: SDF_IMG_W,
+                    height: SDF_IMG_H,
+                    depth: 1,
+                    format: Format::R16Unorm,
+                    dimension: TextureDimension::D2,
+                    usage: ImageUsage::STORAGE,
+                    array_layers: 1,
+                    mip_levels: 1,
+                    view_format: None,
+                })
+                .unwrap_or_else(|e| panic!("{label}: {e:?}"))
+        };
+        let ring_a = make_ring("SSAO à-trous ring_a");
+        let ring_b = make_ring("SSAO à-trous ring_b");
+
+        let atrous_kinds = [
+            DescriptorKind::StorageImage, DescriptorKind::StorageImage,
+            DescriptorKind::StorageImage, DescriptorKind::UniformBuffer,
+        ];
+        let atrous_layout_entries: Vec<BindGroupLayoutEntry> = atrous_kinds
+            .iter()
+            .enumerate()
+            .map(|(i, &kind)| BindGroupLayoutEntry { binding: i as u32, count: 1, kind, stage: ShaderStage::COMPUTE })
+            .collect();
+        let layout = device
+            .create_bind_group_layout(&BindGroupLayoutDesc { entries: &atrous_layout_entries })
+            .expect("SSAO à-trous bind-group layout");
+
+        let read8_cs = device.create_shader_module(ssao_atrous_read8_spirv()).expect("SSAO à-trous read8 cs");
+        let read8_pipeline = device
+            .create_compute_pipeline(&ComputePipelineDesc {
+                module: &read8_cs,
+                entry: c"main",
+                push_constant_bytes: SSAO_ATROUS_PUSH_BYTES,
+                bind_group_layout: Some(&layout),
+                spec_constants: &[],
+            })
+            .expect("SSAO à-trous read8 pipeline");
+        let interior_cs = device.create_shader_module(ssao_atrous_spirv()).expect("SSAO à-trous interior cs");
+        let interior_pipeline = device
+            .create_compute_pipeline(&ComputePipelineDesc {
+                module: &interior_cs,
+                entry: c"main",
+                push_constant_bytes: SSAO_ATROUS_PUSH_BYTES,
+                bind_group_layout: Some(&layout),
+                spec_constants: &[],
+            })
+            .expect("SSAO à-trous interior pipeline");
+        let write8_cs = device.create_shader_module(ssao_atrous_write8_spirv()).expect("SSAO à-trous write8 cs");
+        let write8_pipeline = device
+            .create_compute_pipeline(&ComputePipelineDesc {
+                module: &write8_cs,
+                entry: c"main",
+                push_constant_bytes: SSAO_ATROUS_PUSH_BYTES,
+                bind_group_layout: Some(&layout),
+                spec_constants: &[],
+            })
+            .expect("SSAO à-trous write8 pipeline");
+        // SAFETY: every module was created on `device` above and is no longer needed once its
+        // pipeline exists; each is destroyed exactly once; no GPU work has been submitted yet.
+        unsafe {
+            device.destroy_shader_module(write8_cs);
+            device.destroy_shader_module(interior_cs);
+            device.destroy_shader_module(read8_cs);
+        }
+
+        let make_set = |in_img: &VulkanTexture, out_img: &VulkanTexture| {
+            device
+                .create_bind_group(&BindGroupDesc {
+                    layout: &layout,
+                    entries: &[
+                        BindGroupEntry::StorageImage { texture: in_img },
+                        BindGroupEntry::StorageImage { texture: out_img },
+                        BindGroupEntry::StorageImage { texture: &viewt },
+                        BindGroupEntry::UniformBuffer { buffer: &camera_uniform },
+                    ],
+                })
+                .expect("SSAO à-trous set")
+        };
+        let read8_set = make_set(&ssao, &ring_a);
+        let interior_from0_set = make_set(&ring_a, &ring_b);
+        let interior_from1_set = make_set(&ring_b, &ring_a);
+        let write8_from0_set = make_set(&ring_a, &ssao);
+        let write8_from1_set = make_set(&ring_b, &ssao);
+
+        SsaoAtrousTestRes {
+            ring_a,
+            ring_b,
+            layout,
+            read8_pipeline,
+            interior_pipeline,
+            write8_pipeline,
+            read8_set,
+            interior_from0_set,
+            interior_from1_set,
+            write8_from0_set,
+            write8_from1_set,
+        }
+    });
+
     let fence = device.create_fence(false).expect("fence");
     let mut encoder = device.create_command_encoder().expect("command encoder");
     encoder.begin().expect("begin");
@@ -2318,6 +2465,64 @@ fn run_gbuffer_hybrid_ssao(
         range: ImageSubresourceRange::COLOR,
     });
 
+    // --- The SSAO edge-avoiding à-trous denoise chain (RHI DISPATCH WIRING): `atrous_levels`
+    // dispatches BETWEEN the SSAO gather's `ssao`-write barrier above and the resolve dispatch
+    // below, using the SAME role-keyed (pipeline, set) selection the production recorder
+    // (`present::passes::gbuffer`) runs (`ssao_atrous_step`). `None` (`atrous_levels == 0`)
+    // records nothing — the resolve then reads the RAW gather output (byte-identical to the
+    // pre-dispatch-wiring harness). ---
+    if let Some(res) = &atrous_res {
+        // First-touch UNDEFINED → GENERAL for the two interior rings (mirrors the lit/viewt/ssao
+        // batch earlier — a fresh image needs its initial layout transition before any dispatch
+        // touches it).
+        for tex in [&res.ring_a, &res.ring_b] {
+            encoder.image_barrier(&ImageBarrierDesc {
+                texture: tex,
+                src_stage: BarrierStage::TOP_OF_PIPE,
+                dst_stage: BarrierStage::COMPUTE_SHADER,
+                src_access: BarrierAccess::NONE,
+                dst_access: BarrierAccess::SHADER_WRITE | BarrierAccess::SHADER_READ,
+                old_layout: ImageLayout::Undefined,
+                new_layout: ImageLayout::General,
+                range: ImageSubresourceRange::COLOR,
+            });
+        }
+        for level in 0..atrous_levels {
+            let (pipeline, set) = match ssao_atrous_step(level, atrous_levels) {
+                AtrousStepRole::Read8 => (&res.read8_pipeline, &res.read8_set),
+                AtrousStepRole::Interior { in_ring: 0 } => {
+                    (&res.interior_pipeline, &res.interior_from0_set)
+                }
+                AtrousStepRole::Interior { .. } => (&res.interior_pipeline, &res.interior_from1_set),
+                AtrousStepRole::Write8 { in_ring: 0 } => (&res.write8_pipeline, &res.write8_from0_set),
+                AtrousStepRole::Write8 { .. } => (&res.write8_pipeline, &res.write8_from1_set),
+            };
+            encoder.bind_compute_pipeline(pipeline);
+            encoder.bind_descriptor_set_compute(set, pipeline);
+            let step: u32 = 1u32 << level;
+            encoder.push_compute_constants(pipeline, ShaderStage::COMPUTE, 0, &step.to_le_bytes());
+            encoder.dispatch(group_count_x(), 1, 1);
+            // A conservative full barrier before the NEXT dispatch (or the resolve, after the
+            // last level) — RW/RW on both rings + `ssao` covers the RAW (this level's `gAoIn`
+            // read must see the previous writer) AND WAR (a ring's next writer must wait for a
+            // prior level's `gAoIn` read of it) hazards without tracking per-image access
+            // precisely (a test harness — the production recorder derives TIGHT per-image
+            // barriers via the framegraph).
+            for tex in [&res.ring_a, &res.ring_b, &ssao] {
+                encoder.image_barrier(&ImageBarrierDesc {
+                    texture: tex,
+                    src_stage: BarrierStage::COMPUTE_SHADER,
+                    dst_stage: BarrierStage::COMPUTE_SHADER,
+                    src_access: BarrierAccess::SHADER_READ | BarrierAccess::SHADER_WRITE,
+                    dst_access: BarrierAccess::SHADER_READ | BarrierAccess::SHADER_WRITE,
+                    old_layout: ImageLayout::General,
+                    new_layout: ImageLayout::General,
+                    range: ImageSubresourceRange::COLOR,
+                });
+            }
+        }
+    }
+
     // --- Resolve dispatch (consumes the SSAO term under `ssao_mode != 0`). ---
     encoder.bind_compute_pipeline(&resolve_compute);
     encoder.bind_descriptor_set_compute(&resolve_bind_group, &resolve_compute);
@@ -2391,6 +2596,22 @@ fn run_gbuffer_hybrid_ssao(
     unsafe {
         device.destroy_command_encoder(encoder);
         device.destroy_fence(fence);
+        // The SSAO à-trous denoise chain's test resources (present only when `atrous_levels >
+        // 0`) — sets → pipelines → modules-already-destroyed → layout → ring images (reverse
+        // acquisition).
+        if let Some(res) = atrous_res {
+            device.destroy_bind_group(res.write8_from1_set);
+            device.destroy_bind_group(res.write8_from0_set);
+            device.destroy_bind_group(res.interior_from1_set);
+            device.destroy_bind_group(res.interior_from0_set);
+            device.destroy_bind_group(res.read8_set);
+            device.destroy_compute_pipeline(res.write8_pipeline);
+            device.destroy_compute_pipeline(res.interior_pipeline);
+            device.destroy_compute_pipeline(res.read8_pipeline);
+            device.destroy_bind_group_layout(res.layout);
+            device.destroy_texture(res.ring_b);
+            device.destroy_texture(res.ring_a);
+        }
         device.destroy_bind_group(ssao_bind_group);
         device.destroy_bind_group(resolve_bind_group);
         device.destroy_bind_group(bind_group);
@@ -7094,8 +7315,12 @@ fn ssao_ao_channel_matches_host_oracle() {
     let table = pack_light_table(&header, &lights);
 
     for (name, edits) in p4b_scenes() {
-        let (_lit, ssao) =
-            run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table, SSAO_QUALITY_MEDIUM);
+        // `atrous_levels = 0`: this gate compares the RAW gather readback directly against the
+        // unfiltered host oracle, so the harness must dispatch NO à-trous pass (the `ssao`
+        // readback stays the raw gather output — the byte-identical pre-dispatch-wiring path).
+        let (_lit, ssao) = run_gbuffer_hybrid_ssao(
+            &ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table, SSAO_QUALITY_MEDIUM, 0,
+        );
         assert_eq!(ssao.len(), PIXELS as usize, "[{name}] SSAO R8 readback size");
 
         let gbuf = ssao_host_gbuffer(&edits, flags, DEFAULT_LIGHT_DIR);
@@ -7133,32 +7358,32 @@ fn ssao_ao_channel_matches_host_oracle() {
     }
 }
 
-/// **C2 golden — the combined LIT == the host SSAO-aware resolve oracle (±2/255).** The GPU LIT
-/// readback (SSAO ON) must match `golden_deferred_resolve_table_shadowed_ssao` fed the per-pixel
-/// host SSAO term, within the EXISTING ±2/255 (AO modulates only ambient — no relaxation).
-#[test]
-fn ssao_combined_lit_matches_host() {
-    let Some(ctx) = boot_render_or_skip("ssao_combined_lit_matches_host") else {
-        return;
-    };
+/// **C2 golden — the combined LIT == the host SSAO-aware resolve oracle (±2/255), at à-trous
+/// level count `n`.** The GPU LIT readback (SSAO ON, `n`-pass à-trous dispatched) must match
+/// `golden_deferred_resolve_table_shadowed_ssao` fed the per-pixel host SSAO term AFTER the SAME
+/// `n`-pass host à-trous oracle, within the EXISTING ±2/255 (AO modulates only ambient — no
+/// relaxation). Shared by [`ssao_combined_lit_matches_host`] (`n = 3`, the production default)
+/// and the N=2/N=5 headless coverage tests below (`n = 2` exercises the write8 pipeline's input
+/// ring immediately after read8 — no interior pass; `n = MAX_SSAO_ATROUS_LEVELS` exercises the
+/// full ring-reuse chain).
+fn check_ssao_combined_lit_matches_host_at_n(ctx: &VulkanContext, n: u32) {
     let flags = LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO;
     let (header, lights) = ssao_light_table();
     let table = pack_light_table(&header, &lights);
     let materials = host_material_table();
 
     for (name, edits) in p4b_scenes() {
-        let (lit, _ssao) =
-            run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table, SSAO_QUALITY_MEDIUM);
+        let (lit, _ssao) = run_gbuffer_hybrid_ssao(
+            ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table, SSAO_QUALITY_MEDIUM, n,
+        );
         assert_eq!(lit.len(), READBACK_BYTES as usize);
 
         let gbuf = ssao_host_gbuffer(&edits, flags, DEFAULT_LIGHT_DIR);
         let field = |q: [f32; 3]| boyko_sdf_math::sdf_edit_list(&edits, q);
-        // Render P7 POLISH: the resolve now BLURS `gSsao` (a 7×7 depth-gated box) before the
-        // combine, so the host must feed the SSAO-aware resolve mirror the BLURRED per-pixel
-        // term, NOT the raw single tap. Build the RAW host SSAO byte image ONCE — the SAME
-        // `(host * 255).round() as u8` quantization the AO-channel golden asserts the GPU
-        // `gSsao` against — then `golden_ssao_blur` over it per pixel mirrors the resolve's
-        // inline gather exactly (so GPU == host within ±2/255 holds despite the blur).
+        // Build the RAW host SSAO byte image ONCE (the SAME `(host * 255).round() as u8`
+        // quantization the AO-channel golden asserts the GPU `gSsao` against), then run it
+        // through the SAME n-pass host à-trous oracle the GPU chain dispatches, so the resolve's
+        // `gSsao.Load` reads the FILTERED result, not the raw gather.
         let raw_ssao: Vec<u8> = (0..PIXELS)
             .map(|i| {
                 let px = i % SDF_IMG_W;
@@ -7170,6 +7395,8 @@ fn ssao_combined_lit_matches_host() {
                 (a * 255.0).round() as u8
             })
             .collect();
+        let filtered_ssao =
+            golden_ssao_atrous(&raw_ssao, &gbuf, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, n);
         let mut max_delta = 0i32;
         let mut lit_hits = 0u64;
         for py in 0..SDF_IMG_H {
@@ -7177,10 +7404,10 @@ fn ssao_combined_lit_matches_host() {
                 let idx = (py * SDF_IMG_W + px) as usize;
                 let attrs = gbuf[idx];
                 let (ro, rd) = composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
-                // The per-pixel BLURRED host SSAO term (the 7×7 depth-gated box over the raw
-                // host SSAO image — the exact mirror of the resolve's inline blur), fed into the
-                // SSAO-aware resolve mirror.
-                let ao = golden_ssao_blur(&raw_ssao, &gbuf, px, py, SDF_IMG_W, SDF_IMG_H);
+                // The per-pixel FILTERED SSAO term the resolve reads (the harness dispatched `n`
+                // à-trous passes, writing the result BACK into `gSsao` — the C1 endpoint
+                // solution), fed into the SSAO-aware resolve mirror.
+                let ao = filtered_ssao[idx] as f32 / 255.0;
                 let want = unpack_packed_rgb(golden_deferred_resolve_table_shadowed_ssao(
                     attrs, ro, rd, &materials, &header, &lights, &field, ao,
                 ));
@@ -7194,17 +7421,55 @@ fn ssao_combined_lit_matches_host() {
                 }
                 assert!(
                     d <= SSAO_LIT_TOL,
-                    "[{name}] SSAO combined LIT texel ({px},{py}) got {got:?} want {want:?} \
+                    "[n={n} {name}] SSAO combined LIT texel ({px},{py}) got {got:?} want {want:?} \
                      (SSAO oracle) exceeds ±{SSAO_LIT_TOL}/255 (delta {d})"
                 );
             }
         }
-        assert!(lit_hits > 0, "[{name}] SSAO combined LIT: no SDF-lit pixel — the gate is vacuous");
+        assert!(lit_hits > 0, "[n={n} {name}] SSAO combined LIT: no SDF-lit pixel — the gate is vacuous");
         println!(
-            "[{name}] SSAO combined LIT == host SSAO oracle: max delta {max_delta}/255 (tol \
+            "[n={n} {name}] SSAO combined LIT == host SSAO oracle: max delta {max_delta}/255 (tol \
              {SSAO_LIT_TOL}); {lit_hits} SDF-lit px"
         );
     }
+}
+
+/// **C2 golden — the combined LIT == the host SSAO-aware resolve oracle at the production
+/// default à-trous level count (`n = 3`).** See
+/// [`check_ssao_combined_lit_matches_host_at_n`]'s doc.
+#[test]
+fn ssao_combined_lit_matches_host() {
+    let Some(ctx) = boot_render_or_skip("ssao_combined_lit_matches_host") else {
+        return;
+    };
+    check_ssao_combined_lit_matches_host_at_n(&ctx, 3);
+}
+
+/// **N=2 headless coverage — the SSAO à-trous chain's MINIMUM level count.** `n = 2` is the
+/// floor `SsaoConfig::clamped_atrous_levels` allows (a `1` request floors UP to `2`): level 0 is
+/// `read8`, level 1 is IMMEDIATELY `write8` — no interior pass, exercising the `write8` pipeline
+/// variant's input ring directly off `read8`'s output (`ring_a`, `in_ring == 0`), the
+/// `ssao_atrous_step` boundary case `level == n - 1 == 1` right after `level == 0`.
+#[test]
+fn ssao_atrous_n2_lit_matches_host() {
+    let Some(ctx) = boot_render_or_skip("ssao_atrous_n2_lit_matches_host") else {
+        return;
+    };
+    check_ssao_combined_lit_matches_host_at_n(&ctx, 2);
+}
+
+/// **N=5 headless coverage — the SSAO à-trous chain's MAXIMUM level count
+/// ([`MAX_SSAO_ATROUS_LEVELS`]).** Exercises the full ring-reuse chain (`read8` → 3 interior
+/// passes ping-ponging `ring_a`/`ring_b` → `write8`), including the `N >= 4` case where a ring is
+/// written, read, and written AGAIN (level 0 writes `ring_a`, level 2 writes `ring_a` again after
+/// level 1 read it — the WAR hazard the harness's per-level barrier covers) before the final
+/// `write8` reads `ring_b` (`in_ring == 1`, the OTHER role-keyed set from N=2's `in_ring == 0`).
+#[test]
+fn ssao_atrous_n5_lit_matches_host() {
+    let Some(ctx) = boot_render_or_skip("ssao_atrous_n5_lit_matches_host") else {
+        return;
+    };
+    check_ssao_combined_lit_matches_host_at_n(&ctx, MAX_SSAO_ATROUS_LEVELS);
 }
 
 /// **Render P7-Q2 golden — EVERY pre-compiled SSAO quality variant matches its host oracle.** For
@@ -7232,13 +7497,19 @@ fn ssao_variants_match_host() {
     let table = pack_light_table(&header, &lights);
     let materials = host_material_table();
 
+    // The production default à-trous pass count (mirrors `ssao_combined_lit_matches_host`'s `N`).
+    const N: u32 = 3;
+
     for quality in [SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM, SSAO_QUALITY_HIGH] {
         let params = &SSAO_PARAMS[quality];
         for (name, edits) in p4b_scenes() {
-            let (lit, ssao) =
-                run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table, quality);
+            // Part (1) below reads the RAW gather AO channel directly (compared against the
+            // UNFILTERED per-pixel host oracle), so THIS call dispatches NO à-trous pass
+            // (`atrous_levels = 0`) — the `ssao` readback stays the raw gather output.
+            let (_lit0, ssao) = run_gbuffer_hybrid_ssao(
+                &ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table, quality, 0,
+            );
             assert_eq!(ssao.len(), PIXELS as usize, "[q{quality} {name}] SSAO R8 readback size");
-            assert_eq!(lit.len(), READBACK_BYTES as usize, "[q{quality} {name}] LIT readback size");
 
             let gbuf = ssao_host_gbuffer(&edits, flags, DEFAULT_LIGHT_DIR);
 
@@ -7273,8 +7544,17 @@ fn ssao_variants_match_host() {
             }
             assert!(lit_px > 0, "[q{quality} {name}] SSAO AO channel: no SDF-lit pixel (vacuous)");
 
-            // (2) The combined LIT == the SSAO-aware resolve oracle fed the BLURRED per-variant SSAO
-            // term (the resolve blur is variant-independent: a fixed 11×11 depth-gated bilateral).
+            // (2) The combined LIT == the SSAO-aware resolve oracle fed the per-variant SSAO term
+            // AFTER the production-default `N`-pass à-trous chain — a SECOND harness call
+            // dispatching `N` passes (Part (1) above needed the RAW gather, so it ran with
+            // `atrous_levels = 0`).
+            let (lit, _ssao_n) = run_gbuffer_hybrid_ssao(
+                &ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table, quality, N,
+            );
+            assert_eq!(lit.len(), READBACK_BYTES as usize, "[q{quality} {name}] LIT readback size");
+            let filtered_ssao = golden_ssao_atrous(
+                &raw_ssao, &gbuf, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, N,
+            );
             let mut max_lit_delta = 0i32;
             for py in 0..SDF_IMG_H {
                 for px in 0..SDF_IMG_W {
@@ -7282,7 +7562,7 @@ fn ssao_variants_match_host() {
                     let attrs = gbuf[idx];
                     let (ro, rd) =
                         composite_pixel_ray(px, py, SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho);
-                    let ao = golden_ssao_blur(&raw_ssao, &gbuf, px, py, SDF_IMG_W, SDF_IMG_H);
+                    let ao = filtered_ssao[idx] as f32 / 255.0;
                     let want = unpack_packed_rgb(golden_deferred_resolve_table_shadowed_ssao(
                         attrs, ro, rd, &materials, &header, &lights,
                         &|q: [f32; 3]| boyko_sdf_math::sdf_edit_list(&edits, q), ao,
@@ -7332,8 +7612,11 @@ fn ssao_off_lit_is_byte_identical() {
         // The SSAO harness with the header DISARMED (`ssao_mode == 0`): the SSAO pass still RUNS +
         // writes the image, but the resolve never reads it (the structural `if` is false), so the
         // lit output must be byte-for-byte the pre-SSAO image.
+        // `atrous_levels = 3` (the production default): proves the 0%-gate holds even when the
+        // à-trous chain genuinely dispatches — `ssao_mode == 0` means the resolve never reads
+        // `gSsao` regardless of whether it holds the raw or the filtered result.
         let (with_pass, _ssao) = run_gbuffer_hybrid_ssao(
-            &ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table_off, SSAO_QUALITY_MEDIUM,
+            &ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table_off, SSAO_QUALITY_MEDIUM, 3,
         );
         assert_eq!(pre.len(), with_pass.len());
         assert_eq!(
@@ -7362,8 +7645,10 @@ fn ssao_flat_region_invariance() {
 
     let (h_on, l_on) = ssao_light_table();
     let (h_off, l_off) = ssao_light_table_off();
-    let on = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_on, &l_on), SSAO_QUALITY_MEDIUM).0;
-    let off = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_off, &l_off), SSAO_QUALITY_MEDIUM).0;
+    // `atrous_levels = 0`: this gate compares LIT-ON vs LIT-OFF pixel-for-pixel and is orthogonal
+    // to the à-trous chain (the gather's flat-region invariance property, not the denoise's).
+    let on = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_on, &l_on), SSAO_QUALITY_MEDIUM, 0).0;
+    let off = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_off, &l_off), SSAO_QUALITY_MEDIUM, 0).0;
 
     // The interior band: lit SDF pixels strictly inside the box footprint (≥ FLAT_MARGIN px from
     // the silhouette), where the surface is flat and SSAO must not darken.
@@ -7435,8 +7720,10 @@ fn ssao_darkens_a_concavity() {
 
     let (h_on, l_on) = ssao_light_table();
     let (h_off, l_off) = ssao_light_table_off();
-    let (on, ssao) = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_on, &l_on), SSAO_QUALITY_MEDIUM);
-    let off = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_off, &l_off), SSAO_QUALITY_MEDIUM).0;
+    // `atrous_levels = 0`: `ssao` below is read as the RAW gather (the non-vacuity proof is about
+    // the gather's occlusion, not the denoise).
+    let (on, ssao) = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_on, &l_on), SSAO_QUALITY_MEDIUM, 0);
+    let off = run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &pack_light_table(&h_off, &l_off), SSAO_QUALITY_MEDIUM, 0).0;
 
     let gbuf = ssao_host_gbuffer(&edits, flags, DEFAULT_LIGHT_DIR);
     // The AO floor that proves a real occlusion (1.0 = no occlusion; 0.85 = a meaningful crevice).
@@ -7603,8 +7890,11 @@ fn ssao_darkens_mesh_near_sdf_occluder() {
     let table = pack_light_table(&header, &lights);
     let edits = mesh_ssao_occluder();
 
-    let (_lit, ssao) =
-        run_gbuffer_hybrid_ssao(&ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table, SSAO_QUALITY_MEDIUM);
+    // `atrous_levels = 0`: `ssao` below is compared directly against the UNFILTERED host oracle
+    // (the mesh-AO non-vacuity proof is about the gather, not the denoise).
+    let (_lit, ssao) = run_gbuffer_hybrid_ssao(
+        &ctx, &edits, flags, DEFAULT_LIGHT_DIR, &table, SSAO_QUALITY_MEDIUM, 0,
+    );
     assert_eq!(ssao.len(), PIXELS as usize, "SSAO R8 readback size");
 
     let gbuf = ssao_host_gbuffer(&edits, flags, DEFAULT_LIGHT_DIR);
