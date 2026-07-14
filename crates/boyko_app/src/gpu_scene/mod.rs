@@ -4633,6 +4633,10 @@ impl GpuSceneBundles {
             vb_classify_scan_pipeline: self.vb_classify_scan_pipeline.as_ref(),
             vb_classify_scatter_pipeline: self.vb_classify_scatter_pipeline.as_ref(),
             vb_shade_pipeline: self.vb_shade_pipeline.as_ref(),
+            // VB-P2 classification plan, rung P2b: the classify `scan` pass's loop-bound push
+            // constant (`GBufferScene::vb_classify_material_count`'s own doc — a valid upper
+            // bound on any live `MaterialId` this frame could reference).
+            vb_classify_material_count: material_table.capacity_rows(),
             // Multi-paradigm render-path plan, rung R1: the plain-POD conversion (see this
             // fn's `resolved_render_path` param doc for why it cannot be a `From` impl).
             resolved_render_path: to_gpu_resolved_render_path(&resolved_render_path),

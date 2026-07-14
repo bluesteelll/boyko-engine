@@ -239,6 +239,16 @@ void main(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID) {
     float3 n = normalize(geo.world_normal);
     float3 P = geo.world_pos;
 
+    // VB-P2 classification plan, rung P2b note: the classify-table's `mat` (this group's
+    // uniform material id, `cls_g2m(gid.x)` above) and `pm.id` (this PIXEL's own per-instance
+    // material id, read here) are the SAME value by construction (`vb_classify_count.comp.hlsl`/
+    // `vb_classify_scatter.comp.hlsl` both bin `instance_materials[id.instance_id].id` == `mat`
+    // into this exact group). This is the uniformity invariant TV0's bindless texture index
+    // (keyed off the GROUP's `mat`, not the pixel's `pm.id`) relies on -- masked by byte-identity
+    // this rung (flat materials shade identically either way). `vb_shade` is not dispatched until
+    // P2c (this pass is dark infra until then); HLSL has no runtime assert facility, so the
+    // invariant is documented here rather than checked in-shader -- P2c's forced-classified
+    // golden re-run is the actual verification (see the plan's "Open items").
     PerInstanceMaterial pm = instance_materials[id.instance_id];
     MaterialGpu m = Materials[pm.id];
 

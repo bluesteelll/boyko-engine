@@ -2142,6 +2142,20 @@ pub struct GBufferScene<'a> {
     /// lacks the descriptor-indexing prerequisite — VB itself degrades to `Deferred` at resolve
     /// time in that case, so this field is never read on such a boot).
     pub vb_geometry_set: Option<&'a VulkanGeometryBindlessSet>,
+    /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2b: the classify
+    /// `scan` pass's `present_material_count` push-constant LOOP BOUND (`vb_classify_scan.comp
+    /// .hlsl`'s `PushConstants.material_count` — never an OFFSET into `gClassify`, see that
+    /// file's + `vb_classify_common.hlsli`'s doc). Sourced from
+    /// `boyko_render::material_table::MaterialTable::capacity_rows()` (the material table's row
+    /// capacity, NOT the frame's distinct material-id count the plan's D2 describes — a P2b
+    /// simplification: `capacity_rows` is a valid, always-safe upper bound because every live
+    /// `MaterialId` is `< capacity_rows` by construction, so `scan`'s `[0, material_count)` sweep
+    /// still folds every material id the frame could reference). This crate cannot depend on
+    /// `boyko_render` (which sits ABOVE it in the dependency graph — the SAME plain-value
+    /// boundary crossing [`Self::resolved_render_path`]'s doc explains), so this is threaded as a
+    /// plain `u32`, mirroring [`Self::dispatch_group_count_x`]'s own threading. Unread outside a
+    /// `VisibilityBuffer`-resolved boot (`record_vb`'s `mesh_leg` gate).
+    pub vb_classify_material_count: u32,
 }
 
 impl GBufferScene<'_> {

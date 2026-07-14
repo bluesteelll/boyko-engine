@@ -2653,6 +2653,34 @@ pub(crate) struct VbPassPlan {
     /// carries no slot with no mesh leg) and leaves `lit` for `vb_sky` + [`Self::sdf_forward_march`]
     /// alone. `record_vb` reads the SAME `mesh_leg` predicate, so a `None` here is never recorded.
     pub(crate) vb_raster: Option<crate::framegraph::PassId>,
+    /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2b: the `fill` pass
+    /// (two `vkCmdFillBuffer`s — zeros `counts[MAX]`, sentinels `group_to_mat[G+MAX]` with
+    /// `0xFFFFFFFF`, critic P1-1) declared as the FIRST producer on the `gclassify` ResId
+    /// (`TRANSFER_WRITE`). `Some` under the SAME `mesh_leg` gate as [`Self::vb_raster`] (a
+    /// `VisibilityBuffer × Sdf` frame has no mesh pixels to classify). The classify chain's
+    /// output is UNUSED this rung — [`Self::vb_resolve`] (below) still shades every pixel — so
+    /// P2b only validates the four passes run without hanging/corrupting real hardware and that
+    /// the framegraph's derived RAW/WAW barrier chain on the single `gclassify` ResId (P1-3) is
+    /// correct (each pass's own RW access auto-chains a barrier against the prior pass's pending
+    /// write — `crate::framegraph::sync::transition`).
+    pub(crate) vb_classify_fill: Option<crate::framegraph::PassId>,
+    /// The `count` classify compute pass (`vb_classify_count.comp.hlsl`): reads `vb_id` (COMPUTE,
+    /// `SHADER_READ_ONLY_OPTIMAL`) — the SAME image [`Self::vb_resolve`] reads; this pass runs
+    /// FIRST so it derives the `COLOR_ATTACHMENT_OPTIMAL`→`SHADER_READ_ONLY_OPTIMAL` barrier,
+    /// and `vb_resolve`'s later same-layout read needs none — and reads+writes `gclassify`
+    /// (COMPUTE, RW: `InterlockedAdd(counts[mat], 1)` per non-sentinel pixel). `Some` under the
+    /// SAME gate as [`Self::vb_classify_fill`].
+    pub(crate) vb_classify_count: Option<crate::framegraph::PassId>,
+    /// The `scan` classify compute pass (`vb_classify_scan.comp.hlsl`, a SINGLE workgroup):
+    /// reads+writes `gclassify` only (COMPUTE, RW — the two chained exclusive-prefix-sum phases
+    /// over `counts`/`offsets`/`cursors`/`gbase`/`group_to_mat`). `Some` under the SAME gate as
+    /// [`Self::vb_classify_fill`].
+    pub(crate) vb_classify_scan: Option<crate::framegraph::PassId>,
+    /// The `scatter` classify compute pass (`vb_classify_scatter.comp.hlsl`): the SAME `vb_id` +
+    /// `gclassify` access shape as [`Self::vb_classify_count`] (`InterlockedAdd(cursors[mat], 1)`
+    /// then `pixel_list[slot] = py*w+px`). `Some` under the SAME gate as
+    /// [`Self::vb_classify_fill`].
+    pub(crate) vb_classify_scatter: Option<crate::framegraph::PassId>,
     /// The FUSED resolve compute pass (`vb_resolve.comp.hlsl`, Decision 5): reads `vb_id`
     /// (`ShaderRead`/`SHADER_READ_ONLY_OPTIMAL`, COMPUTE) and writes `lit` (`ShaderWrite`/`GENERAL`,
     /// extending `vb_sky`'s COLOR write, C5). Reads `cascade`/`atlas` inline (COMPUTE) when armed,
@@ -2680,8 +2708,8 @@ pub(crate) struct VbPassPlan {
 /// for VB v1's small, PRIVATE per-frame graph — the SAME "own decoupled ResId space" discipline
 /// [`ForwardBarrierSink`]'s doc explains for the Forward family. Resolves the FIXED local ResId
 /// order [`Renderer::declare_vb_graph`] declares — images `[lit=0, vb_id=1, vb_depth=2,
-/// cascade=3, atlas=4]`, buffers `[light_table=0, vb_instance_ring=1]` — to the current frame's
-/// physical handles. Lives only for the duration of one `record_pass` call inside
+/// cascade=3, atlas=4]`, buffers `[light_table=0, vb_instance_ring=1, gclassify=2]` — to the
+/// current frame's physical handles. Lives only for the duration of one `record_pass` call inside
 /// [`Renderer::record_vb`].
 pub(crate) struct VbBarrierSink<'a> {
     pub(crate) fns: &'a DeviceFns,
@@ -2694,10 +2722,12 @@ pub(crate) struct VbBarrierSink<'a> {
     /// `cascade`/`atlas` are the SAME single-instance, world-fixed textures every other path's
     /// shadow chain references.
     pub(crate) images: [VkImage; VB_IMAGE_COUNT],
-    /// `[light_table, vb_instance_ring]`. A pass that does not declare an access on an unarmed
-    /// resource never routes a barrier naming it, so an inert `VkBuffer::NULL` there is harmless
-    /// (the SAME "ungated slot may hold NULL" rule [`ForwardBarrierSink`] documents).
-    pub(crate) buffers: [VkBuffer; 2],
+    /// `[light_table, vb_instance_ring, gclassify]`. A pass that does not declare an access on an
+    /// unarmed resource never routes a barrier naming it, so an inert `VkBuffer::NULL` there is
+    /// harmless (the SAME "ungated slot may hold NULL" rule [`ForwardBarrierSink`] documents).
+    /// `gclassify` — VB-P2 classification plan rung P2b: the current frame slot's
+    /// [`VbClassifyTargets::gclassify`](super::targets::VbClassifyTargets::gclassify) buffer.
+    pub(crate) buffers: [VkBuffer; 3],
 }
 
 /// The number of IMAGE resources [`Renderer::declare_vb_graph`] declares — see
@@ -2881,16 +2911,18 @@ impl Renderer<'_> {
             "invariant: declare_vb_graph's image declarations must match VB_IMAGE_COUNT"
         );
 
-        // --- Buffers (light_table=0, vb_instance_ring=1). `light_table`'s seed stage is COMPUTE
-        // for the SAME P1-1 reason as `cascade`/`atlas` above (`vb_resolve` is its reader, not a
-        // fragment shader). `vb_instance_ring` is frame-private (a sibling in-flight frame
-        // touches a DIFFERENT ring slot), so `add_buffer` (undefined) — no `interp` producer
-        // this rung (V1 scope cut, `VbPassPlan`'s doc).
+        // --- Buffers (light_table=0, vb_instance_ring=1, gclassify=2). `light_table`'s seed
+        // stage is COMPUTE for the SAME P1-1 reason as `cascade`/`atlas` above (`vb_resolve` is
+        // its reader, not a fragment shader). `vb_instance_ring`/`gclassify` are frame-private (a
+        // sibling in-flight frame touches a DIFFERENT ring slot), so `add_buffer` (undefined) — no
+        // `interp` producer this rung (V1 scope cut, `VbPassPlan`'s doc); `gclassify`'s own FIRST
+        // producer this frame is the `fill` pass (VB-P2 classification plan rung P2b).
         let light_table = g.add_buffer_seeded(
             "light_table",
             ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
         );
         let vb_instance_ring = g.add_buffer("vb_instance_ring");
+        let gclassify = g.add_buffer("gclassify");
 
         // Pass `light_upload` (async light-table re-upload) — the SAME gate
         // `declare_forward_graph`'s own `light_upload` pass uses.
@@ -2955,7 +2987,7 @@ impl Renderer<'_> {
         // `None` here is never recorded (and `vb_id`/`vb_depth` — always `add_image`d above for a
         // fixed ResId order — simply stay untouched, sampled by nothing).
         let mesh_leg = scene.resolved_render_path.mesh_leg;
-        let (vb_raster, vb_resolve) = if mesh_leg {
+        let (vb_classify_fill, vb_classify_count, vb_classify_scan, vb_classify_scatter, vb_raster, vb_resolve) = if mesh_leg {
             // Pass `vb_raster`: writes `vb_id` (COLOR, first-touch) + `vb_depth` (DEPTH,
             // first-touch, `GREATER`, write ON — Decision 4). Reads `vb_instance_ring` (VERTEX).
             let vb_raster = g.add_pass("vb_raster");
@@ -2974,6 +3006,70 @@ impl Renderer<'_> {
                 SubRange::DEPTH,
             );
             g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+
+            // VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2b: the
+            // classify chain `fill -> count -> scan -> scatter`, declared BEFORE `vb_resolve`
+            // (below) — mesh_leg-gated alongside `vb_raster`/`vb_resolve` (no mesh pixels to
+            // classify with no mesh leg). Every pass's `gclassify` access is a plain
+            // `buffer_access` on the SAME single ResId; the framegraph's `transition` (sync.rs)
+            // fires a RAW/WAW barrier whenever the prior pass left a pending write, so
+            // `fill`(TRANSFER_WRITE) -> `count`(RW) -> `scan`(RW) -> `scatter`(RW) auto-chains a
+            // conservative whole-buffer barrier between every consecutive pair (P1-3, verified by
+            // construction — no manual barrier / split ResId needed).
+            //
+            // Output is UNUSED this rung (`vb_shade` is not dispatched until P2c) — `vb_resolve`
+            // still shades every pixel — so P2b validates only that the four passes run without
+            // hanging/corrupting on real hardware and that this barrier chain is correct.
+            let vb_classify_fill = g.add_pass("vb_classify_fill");
+            g.buffer_access(gclassify, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+
+            // Pass `vb_classify_count`: reads `vb_id` (COMPUTE, SHADER_READ_ONLY_OPTIMAL — the
+            // SAME image `vb_resolve` reads below; this pass runs FIRST so it derives the
+            // COLOR_ATTACHMENT_OPTIMAL->SHADER_READ_ONLY_OPTIMAL barrier, and `vb_resolve`'s later
+            // same-layout read needs none) and RW `gclassify` (`InterlockedAdd(counts[mat], 1)`
+            // per non-sentinel pixel). `instance_materials`/`Camera` are NOT tracked as separate
+            // ResIds in this graph (mirrors `vb_resolve`'s own arm below, which never declares an
+            // access for them either — a host-fenced ring, not a framegraph-tracked resource).
+            let vb_classify_count = g.add_pass("vb_classify_count");
+            g.buffer_access(
+                gclassify,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            );
+            g.image_access(
+                vb_id,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                SubRange::COLOR,
+            );
+
+            // Pass `vb_classify_scan`: a single workgroup, RW `gclassify` only (no image/other
+            // buffer access — the two chained exclusive-prefix-sum phases touch only the
+            // M-arrays + `group_to_mat`, all within `gclassify`).
+            let vb_classify_scan = g.add_pass("vb_classify_scan");
+            g.buffer_access(
+                gclassify,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            );
+
+            // Pass `vb_classify_scatter`: the SAME `vb_id` + `gclassify` access shape as
+            // `vb_classify_count` above (`InterlockedAdd(cursors[mat], 1)` then
+            // `pixel_list[slot] = py*w+px`).
+            let vb_classify_scatter = g.add_pass("vb_classify_scatter");
+            g.buffer_access(
+                gclassify,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            );
+            g.image_access(
+                vb_id,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                SubRange::COLOR,
+            );
 
             // Pass `vb_resolve` (FUSED): reads `vb_id` (COMPUTE,
             // COLOR_ATTACHMENT_OPTIMAL→SHADER_READ_ONLY_OPTIMAL) and writes `lit` (COMPUTE,
@@ -3025,9 +3121,16 @@ impl Renderer<'_> {
                     SubRange::depth_layers(active),
                 );
             }
-            (Some(vb_raster), Some(vb_resolve))
+            (
+                Some(vb_classify_fill),
+                Some(vb_classify_count),
+                Some(vb_classify_scan),
+                Some(vb_classify_scatter),
+                Some(vb_raster),
+                Some(vb_resolve),
+            )
         } else {
-            (None, None)
+            (None, None, None, None, None, None)
         };
 
         // Pass `sdf_forward_march` — rung R10: the fused SDF march-then-shade COMPUTE pass, the
@@ -3120,6 +3223,10 @@ impl Renderer<'_> {
             atlas: atlas_pass,
             vb_sky,
             vb_raster,
+            vb_classify_fill,
+            vb_classify_count,
+            vb_classify_scan,
+            vb_classify_scatter,
             vb_resolve,
             sdf_forward_march,
             present_sample,
@@ -3129,7 +3236,7 @@ impl Renderer<'_> {
     /// Multi-paradigm render-path plan, rung R8: the [`VbBarrierSink`] sibling of
     /// [`Self::record_forward_pass`] — drives one [`VbPassPlan`] pass's derived barriers
     /// (declared by [`Self::declare_vb_graph`]) into `cmd`, resolving VB's OWN small ResId space
-    /// (`[lit, vb_id, vb_depth, cascade, atlas]` images; `[light_table, vb_instance_ring]`
+    /// (`[lit, vb_id, vb_depth, cascade, atlas]` images; `[light_table, vb_instance_ring, gclassify]`
     /// buffers — [`VbBarrierSink`]'s doc) to the current frame's physical handles. `lit` is read
     /// from `targets` (the SAME [`GBufferTargets::lit`] ring every path reuses, C5); `vb_id` from
     /// `vb` (the current frame's [`VbTargets`](super::targets::VbTargets)); `vb_depth` from
@@ -3168,6 +3275,12 @@ impl Renderer<'_> {
                     .vb_instance_ring
                     .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_instance_ring")
                     [fi]
+                    .buffer,
+                targets
+                    .vb_classify
+                    .as_ref()
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries targets.vb_classify")
+                    .gclassify[fi]
                     .buffer,
             ],
         };

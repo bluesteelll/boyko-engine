@@ -332,6 +332,20 @@ impl MaterialTable {
         high_water > self.capacity_rows as usize
     }
 
+    /// The table's current row capacity (`assets.high_water()` at
+    /// [`boot_seed`](Self::boot_seed), grown by [`grow_if_needed`](Self::grow_if_needed)) —
+    /// every live [`MaterialId`](crate::material::MaterialId) is `< capacity_rows()` by
+    /// construction. VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md) threads this
+    /// as the classify `scan` pass's `present_material_count` LOOP BOUND (a P2b simplification
+    /// over the plan's D2 "frame's distinct material ids" — see that plan's rung table): a valid,
+    /// always-safe upper bound since it still folds every material id the frame could reference.
+    /// `0` before [`boot_seed`](Self::boot_seed) runs (the [`new`](Self::new) default) — never
+    /// panics.
+    #[inline]
+    pub fn capacity_rows(&self) -> u32 {
+        self.capacity_rows
+    }
+
     /// Grows the device table + FIF staging ring to `next_power_of_two(assets.
     /// high_water())` iff that exceeds the table's current row capacity, re-seeding
     /// the new buffers from `assets` and routing the superseded ones through
