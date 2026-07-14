@@ -1,5 +1,7 @@
-// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2a (dark infra,
-// unwired). `vb_shade` -- the material-classified shading dispatch ("The pipeline" step 5):
+// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), authored rung P2a, wired as a
+// selectable `lit` producer at rung P2c (`Renderer::declare_vb_graph`/`record_vb`, host-selected
+// via `GBufferScene::vb_use_classified`). `vb_shade` -- the material-classified shading dispatch
+// ("The pipeline" step 5):
 // `vkCmdDispatch(G + present_material_count, 1, 1)` (a REGULAR dispatch, NOT
 // `vkCmdDispatchIndirect` -- the FFI lacks indirect dispatch, plan D2). Each group `g`:
 // `mat=group_to_mat[g]`; SENTINEL -> return; `slot=(g-gbase[mat])*64+(tid&63)`;
@@ -16,9 +18,10 @@
 // `gLit[uint2(px,py)]=...`) is CHARACTER-IDENTICAL to `vb_resolve.comp.hlsl`'s own -- DO NOT
 // edit that span without also re-verifying `vb_resolve.comp.hlsl` line-for-line. Per-pixel
 // shading is independent of HOW a pixel's `(px,py)` was selected, so regrouping cannot change
-// any pixel's output bytes: for today's flat (non-textured) materials this pass, once wired
-// (rung P2c), must reproduce the SAME `vb_mesh`/`vb_both`/`vb_sdf_only` goldens the fused
-// `vb_resolve` produces -- a moved hash is a bug, not a re-pin.
+// any pixel's output bytes: for today's flat (non-textured) materials, this pass (forced via
+// `BOYKO_VB_FORCE_CLASSIFIED=1`, rung P2c) must reproduce the SAME
+// `vb_mesh`/`vb_both`/`vb_sdf_only` goldens the fused `vb_resolve` produces -- a moved hash is a
+// bug, not a re-pin.
 //
 // # Sentinel / miss handling
 //
@@ -239,17 +242,32 @@ void main(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID) {
     float3 n = normalize(geo.world_normal);
     float3 P = geo.world_pos;
 
-    // VB-P2 classification plan, rung P2b note: the classify-table's `mat` (this group's
-    // uniform material id, `cls_g2m(gid.x)` above) and `pm.id` (this PIXEL's own per-instance
-    // material id, read here) are the SAME value by construction (`vb_classify_count.comp.hlsl`/
-    // `vb_classify_scatter.comp.hlsl` both bin `instance_materials[id.instance_id].id` == `mat`
-    // into this exact group). This is the uniformity invariant TV0's bindless texture index
-    // (keyed off the GROUP's `mat`, not the pixel's `pm.id`) relies on -- masked by byte-identity
-    // this rung (flat materials shade identically either way). `vb_shade` is not dispatched until
-    // P2c (this pass is dark infra until then); HLSL has no runtime assert facility, so the
-    // invariant is documented here rather than checked in-shader -- P2c's forced-classified
-    // golden re-run is the actual verification (see the plan's "Open items").
+    // VB-P2 classification plan, rung P2b note (now DISPATCHED as of rung P2c): the
+    // classify-table's `mat` (this group's uniform material id, `cls_g2m(gid.x)` above) and
+    // `pm.id` (this PIXEL's own per-instance material id, read here) are the SAME value by
+    // construction (`vb_classify_count.comp.hlsl`/`vb_classify_scatter.comp.hlsl` both bin
+    // `instance_materials[id.instance_id].id` == `mat` into this exact group). This is the
+    // uniformity invariant TV0's bindless texture index (keyed off the GROUP's `mat`, not the
+    // pixel's `pm.id`) relies on -- masked by byte-identity this rung (flat materials shade
+    // identically either way). HLSL has no runtime assert facility, so the invariant stays
+    // DOCUMENTED rather than checked in-shader by default (the debug guard below is the cheap
+    // in-shader alternative, opt-in only) -- P2c's forced-classified golden re-run is the actual
+    // verification (see the plan's "Open items").
     PerInstanceMaterial pm = instance_materials[id.instance_id];
+
+#ifdef VB_SHADE_DEBUG
+    // Diagnostic-only invariant guard (never compiled into the shipped `vb_shade.comp.spv` --
+    // no `-D VB_SHADE_DEBUG` in this file's header doc's dxc invocation, so this block is DEAD
+    // in every frozen build and the output stays byte-identical with it absent). GPU asserts
+    // aren't available and validation is off on this box, so a violation PAINTS solid magenta
+    // instead of shading normally, making a classify-scatter bug visually obvious in a debug
+    // recompile rather than silently mis-shading.
+    if (pm.id != mat) {
+        gLit[uint2(px, py)] = float4(1.0, 0.0, 1.0, 1.0);
+        return;
+    }
+#endif
+
     MaterialGpu m = Materials[pm.id];
 
     float3 v = normalize(cam_eye.xyz - P);

@@ -520,263 +520,364 @@ impl Renderer<'_> {
                 (self.fns.cmd_end_rendering)(cmd);
             }
 
-            // === VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2b: the
+            // === VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2c: the
             // classify chain `fill -> count -> scan -> scatter` — populates `gClassify` on real
-            // hardware, validating it runs without hanging/corrupting + the framegraph's derived
-            // barrier chain (P1-3). Its output is UNUSED this rung (`vb_shade` is not dispatched
-            // until P2c) — `vb_resolve` below still shades every pixel, so the frame stays
-            // byte-identical. ===
-
-            // Pass `vb_classify_fill`: two `vkCmdFillBuffer`s zero `counts[MAX]` and sentinel
-            // `group_to_mat[G+MAX]` with `0xFFFFFFFF` (critic P1-1 — decouples correctness from
-            // the scan's per-frame loop bound). Word offsets mirror
-            // `vb_classify_common.hlsli`'s own sync-pin: `counts_off = 0`, `group_to_mat_off =
-            // 4*MAX` (both word offsets, ×4 for bytes); `group_to_mat`'s reserved CAPACITY is
-            // `G+MAX` (P1-2 — fixed per extent, not per frame), so the sentinel fill covers the
-            // WHOLE reserved region regardless of this frame's live material count.
-            // SAFETY: recording is open; `record_vb_pass` records the graph's derived
-            // TRANSFER_WRITE producer access for the "vb_classify_fill" pass into `cmd` (the
-            // FIRST access on `gclassify` this frame).
-            self.record_vb_pass(
-                plan.vb_classify_fill
-                    .expect("invariant: mesh_leg => vb_classify_fill pass declared (declare_vb_graph)"),
-                cmd,
-                targets,
-                forward,
-                vb,
-                scene,
-                fi,
-            );
-            let gclassify_buf = targets
-                .vb_classify
-                .as_ref()
-                .expect("invariant: a VisibilityBuffer-resolved scene always carries targets.vb_classify")
-                .gclassify[fi]
-                .buffer;
-            let counts_bytes: VkDeviceSize = VB_CLASSIFY_MAX_MATERIAL_ROWS * 4;
-            let group_to_mat_off_bytes: VkDeviceSize = 4 * VB_CLASSIFY_MAX_MATERIAL_ROWS * 4;
-            let group_to_mat_bytes: VkDeviceSize =
-                (scene.dispatch_group_count_x as VkDeviceSize + VB_CLASSIFY_MAX_MATERIAL_ROWS) * 4;
-            // SAFETY: recording is open; `gclassify_buf` is the live per-FIF `gClassify` buffer
-            // (`STORAGE | TRANSFER_DST`, sized per `VbClassifyTargets::build`'s doc); both fill
-            // regions lie within its bounds (`counts` is the buffer's first `MAX*4` bytes;
-            // `group_to_mat`'s `[4*MAX*4, 4*MAX*4 + (G+MAX)*4)` range is its own reserved region,
-            // per the sync-pin doc above — both fully inside the buffer `VbClassifyTargets::build`
-            // allocates).
-            unsafe {
-                (self.fns.cmd_fill_buffer)(cmd, gclassify_buf, 0, counts_bytes, 0);
-                (self.fns.cmd_fill_buffer)(
+            // hardware ONLY when the classified path is selected (`scene.vb_use_classified`, plan
+            // P1-4) — mirrors `declare_vb_graph`'s matching gate, so a `!vb_use_classified` frame
+            // records NONE of these four passes (ZERO classify tax, not merely an unread output as
+            // rung P2b left it). `vb_shade` (below) is the sole consumer of `gClassify`. ===
+            if scene.vb_use_classified {
+                // Pass `vb_classify_fill`: two `vkCmdFillBuffer`s zero `counts[MAX]` and sentinel
+                // `group_to_mat[G+MAX]` with `0xFFFFFFFF` (critic P1-1 — decouples correctness from
+                // the scan's per-frame loop bound). Word offsets mirror
+                // `vb_classify_common.hlsli`'s own sync-pin: `counts_off = 0`, `group_to_mat_off =
+                // 4*MAX` (both word offsets, ×4 for bytes); `group_to_mat`'s reserved CAPACITY is
+                // `G+MAX` (P1-2 — fixed per extent, not per frame), so the sentinel fill covers the
+                // WHOLE reserved region regardless of this frame's live material count.
+                // SAFETY: recording is open; `record_vb_pass` records the graph's derived
+                // TRANSFER_WRITE producer access for the "vb_classify_fill" pass into `cmd` (the
+                // FIRST access on `gclassify` this frame).
+                self.record_vb_pass(
+                    plan.vb_classify_fill.expect(
+                        "invariant: mesh_leg && vb_use_classified => vb_classify_fill pass declared (declare_vb_graph)",
+                    ),
                     cmd,
-                    gclassify_buf,
-                    group_to_mat_off_bytes,
-                    group_to_mat_bytes,
-                    0xFFFF_FFFF,
+                    targets,
+                    forward,
+                    vb,
+                    scene,
+                    fi,
                 );
+                let gclassify_buf = targets
+                    .vb_classify
+                    .as_ref()
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries targets.vb_classify")
+                    .gclassify[fi]
+                    .buffer;
+                let counts_bytes: VkDeviceSize = VB_CLASSIFY_MAX_MATERIAL_ROWS * 4;
+                let group_to_mat_off_bytes: VkDeviceSize = 4 * VB_CLASSIFY_MAX_MATERIAL_ROWS * 4;
+                let group_to_mat_bytes: VkDeviceSize =
+                    (scene.dispatch_group_count_x as VkDeviceSize + VB_CLASSIFY_MAX_MATERIAL_ROWS) * 4;
+                // SAFETY: recording is open; `gclassify_buf` is the live per-FIF `gClassify` buffer
+                // (`STORAGE | TRANSFER_DST`, sized per `VbClassifyTargets::build`'s doc); both fill
+                // regions lie within its bounds (`counts` is the buffer's first `MAX*4` bytes;
+                // `group_to_mat`'s `[4*MAX*4, 4*MAX*4 + (G+MAX)*4)` range is its own reserved region,
+                // per the sync-pin doc above — both fully inside the buffer `VbClassifyTargets::build`
+                // allocates).
+                unsafe {
+                    (self.fns.cmd_fill_buffer)(cmd, gclassify_buf, 0, counts_bytes, 0);
+                    (self.fns.cmd_fill_buffer)(
+                        cmd,
+                        gclassify_buf,
+                        group_to_mat_off_bytes,
+                        group_to_mat_bytes,
+                        0xFFFF_FFFF,
+                    );
+                }
+
+                // Pass `vb_classify_count`: one thread per composite pixel, `InterlockedAdd
+                // (counts[mat], 1)` for every non-SENTINEL pixel's material id.
+                // SAFETY: recording is open; `record_vb_pass` records the graph's derived
+                // COLOR_ATTACHMENT_OPTIMAL->SHADER_READ_ONLY_OPTIMAL barrier (`vb_id`, the FIRST
+                // reader this frame — `vb_shade`'s later same-layout read needs none) + the
+                // TRANSFER_WRITE->SHADER_READ|SHADER_WRITE barrier (`gclassify`, chained from
+                // `vb_classify_fill`) for the "vb_classify_count" pass.
+                self.record_vb_pass(
+                    plan.vb_classify_count.expect(
+                        "invariant: mesh_leg && vb_use_classified => vb_classify_count pass declared (declare_vb_graph)",
+                    ),
+                    cmd,
+                    targets,
+                    forward,
+                    vb,
+                    scene,
+                    fi,
+                );
+                let vb_classify_count_pipeline = scene
+                    .vb_classify_count_pipeline
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_classify_count_pipeline");
+                // SAFETY: recording is open; `vb_classify_count_pipeline` (1-set, built against
+                // `vb_layout0`) belongs to this device (caller contract); `vb_set0[fi]` is a live
+                // descriptor set; `scene.dispatch_group_count_x` covers `present_extent.width *
+                // present_extent.height` pixels at the shader's `numthreads(64,1,1)` 1D grid (the
+                // SAME grid `vb_shade` dispatches at). The pipeline's push-constant range (4 bytes,
+                // declared but unread by this shader — the shared compute-push-range convention this
+                // RHI mandates, `DdgiUpdateActivation`'s own doc) is never written; nothing pushes.
+                unsafe {
+                    (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vb_classify_count_pipeline.pipeline);
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        vb_classify_count_pipeline.layout,
+                        0,
+                        1,
+                        &vb_set0[fi].descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+                }
+
+                // Pass `vb_classify_scan`: a single workgroup performing the two chained
+                // exclusive-prefix-sum phases (`counts -> offsets`/`cursors`, `gc -> gbase` +
+                // `group_to_mat` fill) over the LIVE `[0, material_count)` prefix.
+                // SAFETY: recording is open; `record_vb_pass` records the graph's derived
+                // SHADER_WRITE->SHADER_READ|SHADER_WRITE barrier (`gclassify`, chained from
+                // `vb_classify_count`) for the "vb_classify_scan" pass — P1-3.
+                self.record_vb_pass(
+                    plan.vb_classify_scan.expect(
+                        "invariant: mesh_leg && vb_use_classified => vb_classify_scan pass declared (declare_vb_graph)",
+                    ),
+                    cmd,
+                    targets,
+                    forward,
+                    vb,
+                    scene,
+                    fi,
+                );
+                let vb_classify_scan_pipeline = scene
+                    .vb_classify_scan_pipeline
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_classify_scan_pipeline");
+                // SAFETY: recording is open; `vb_classify_scan_pipeline`'s 4-byte push constant
+                // (`PushConstants { uint material_count; }`, `vb_classify_scan.comp.hlsl`) is
+                // written from `scene.vb_classify_material_count` (a plain `u32` local, `'static`
+                // for the duration of this call); the pointer is valid and the push call happens
+                // before the dispatch reads it.
+                unsafe {
+                    (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vb_classify_scan_pipeline.pipeline);
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        vb_classify_scan_pipeline.layout,
+                        0,
+                        1,
+                        &vb_set0[fi].descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        vb_classify_scan_pipeline.layout,
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0,
+                        4,
+                        (&scene.vb_classify_material_count as *const u32).cast(),
+                    );
+                    (self.fns.cmd_dispatch)(cmd, 1, 1, 1);
+                }
+
+                // Pass `vb_classify_scatter`: one thread per composite pixel, claims a slot in its
+                // material's `pixel_list` region and stores the pixel's linear index there.
+                // SAFETY: recording is open; `record_vb_pass` records the graph's derived
+                // SHADER_WRITE->SHADER_READ|SHADER_WRITE barrier (`gclassify`, chained from
+                // `vb_classify_scan`) + the (already-SHADER_READ_ONLY_OPTIMAL, same-layout, no-op)
+                // `vb_id` read for the "vb_classify_scatter" pass.
+                self.record_vb_pass(
+                    plan.vb_classify_scatter.expect(
+                        "invariant: mesh_leg && vb_use_classified => vb_classify_scatter pass declared (declare_vb_graph)",
+                    ),
+                    cmd,
+                    targets,
+                    forward,
+                    vb,
+                    scene,
+                    fi,
+                );
+                let vb_classify_scatter_pipeline = scene.vb_classify_scatter_pipeline.expect(
+                    "invariant: a VisibilityBuffer-resolved scene always carries vb_classify_scatter_pipeline",
+                );
+                // SAFETY: recording is open; same contract as `vb_classify_count_pipeline` above —
+                // 1-set pipeline, `vb_set0[fi]` live, `dispatch_group_count_x` covers every pixel;
+                // this shader also declares no push constant, so nothing pushes.
+                unsafe {
+                    (self.fns.cmd_bind_pipeline)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        vb_classify_scatter_pipeline.pipeline,
+                    );
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        vb_classify_scatter_pipeline.layout,
+                        0,
+                        1,
+                        &vb_set0[fi].descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+                }
             }
 
-            // Pass `vb_classify_count`: one thread per composite pixel, `InterlockedAdd
-            // (counts[mat], 1)` for every non-SENTINEL pixel's material id.
-            // SAFETY: recording is open; `record_vb_pass` records the graph's derived
-            // COLOR_ATTACHMENT_OPTIMAL->SHADER_READ_ONLY_OPTIMAL barrier (`vb_id`, the FIRST
-            // reader this frame — `vb_resolve`'s later same-layout read needs none) + the
-            // TRANSFER_WRITE->SHADER_READ|SHADER_WRITE barrier (`gclassify`, chained from
-            // `vb_classify_fill`) for the "vb_classify_count" pass.
-            self.record_vb_pass(
-                plan.vb_classify_count
-                    .expect("invariant: mesh_leg => vb_classify_count pass declared (declare_vb_graph)"),
-                cmd,
-                targets,
-                forward,
-                vb,
-                scene,
-                fi,
-            );
-            let vb_classify_count_pipeline = scene
-                .vb_classify_count_pipeline
-                .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_classify_count_pipeline");
-            // SAFETY: recording is open; `vb_classify_count_pipeline` (1-set, built against
-            // `vb_layout0`) belongs to this device (caller contract); `vb_set0[fi]` is a live
-            // descriptor set; `scene.dispatch_group_count_x` covers `present_extent.width *
-            // present_extent.height` pixels at the shader's `numthreads(64,1,1)` 1D grid (the
-            // SAME grid `vb_resolve` dispatches at). The pipeline's push-constant range (4 bytes,
-            // declared but unread by this shader — the shared compute-push-range convention this
-            // RHI mandates, `DdgiUpdateActivation`'s own doc) is never written; nothing pushes.
-            unsafe {
-                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vb_classify_count_pipeline.pipeline);
-                (self.fns.cmd_bind_descriptor_sets)(
+            // === The `lit`-producer choice (plan P1-4): `vb_shade` (material-classified) when
+            // `scene.vb_use_classified`, else the fused `vb_resolve` — mutually exclusive by
+            // construction, exactly one runs per frame (mirrors `declare_vb_graph`'s matching
+            // branch). ===
+            if scene.vb_use_classified {
+                // === Pass `vb_shade`: the material-classified shading compute pass (VB-P2
+                // classification plan rung P2c) — re-fetches geometry via the Decision-0 table
+                // (Set 2) for each classify-table pixel, shades, writes `lit` (STORAGE, extending
+                // `vb_sky`'s COLOR write, C5). Byte-identical to `vb_resolve`'s own shading tail by
+                // construction (plan D3). ===
+                // SAFETY: recording is open; `record_vb_pass` records the graph's derived
+                // (already-SHADER_READ_ONLY_OPTIMAL, no-op) `vb_id` read + the SHADER_WRITE->
+                // SHADER_READ `gclassify` barrier (chained from `vb_classify_scatter`) + the
+                // COLOR_ATTACHMENT_OPTIMAL→GENERAL barrier for `lit` (+ the cascade/atlas
+                // →SHADER_READ_ONLY_OPTIMAL barriers when armed) for the "vb_shade" pass into `cmd`.
+                self.record_vb_pass(
+                    plan.vb_shade.expect(
+                        "invariant: mesh_leg && vb_use_classified => vb_shade pass declared (declare_vb_graph)",
+                    ),
                     cmd,
-                    VK_PIPELINE_BIND_POINT_COMPUTE,
-                    vb_classify_count_pipeline.layout,
-                    0,
-                    1,
-                    &vb_set0[fi].descriptor_set,
-                    0,
-                    ptr::null(),
+                    targets,
+                    forward,
+                    vb,
+                    scene,
+                    fi,
                 );
-                (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
-            }
 
-            // Pass `vb_classify_scan`: a single workgroup performing the two chained
-            // exclusive-prefix-sum phases (`counts -> offsets`/`cursors`, `gc -> gbase` +
-            // `group_to_mat` fill) over the LIVE `[0, material_count)` prefix.
-            // SAFETY: recording is open; `record_vb_pass` records the graph's derived
-            // SHADER_WRITE->SHADER_READ|SHADER_WRITE barrier (`gclassify`, chained from
-            // `vb_classify_count`) for the "vb_classify_scan" pass — P1-3.
-            self.record_vb_pass(
-                plan.vb_classify_scan
-                    .expect("invariant: mesh_leg => vb_classify_scan pass declared (declare_vb_graph)"),
-                cmd,
-                targets,
-                forward,
-                vb,
-                scene,
-                fi,
-            );
-            let vb_classify_scan_pipeline = scene
-                .vb_classify_scan_pipeline
-                .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_classify_scan_pipeline");
-            // SAFETY: recording is open; `vb_classify_scan_pipeline`'s 4-byte push constant
-            // (`PushConstants { uint material_count; }`, `vb_classify_scan.comp.hlsl`) is
-            // written from `scene.vb_classify_material_count` (a plain `u32` local, `'static`
-            // for the duration of this call); the pointer is valid and the push call happens
-            // before the dispatch reads it.
-            unsafe {
-                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vb_classify_scan_pipeline.pipeline);
-                (self.fns.cmd_bind_descriptor_sets)(
+                let vb_shade_pipeline = scene
+                    .vb_shade_pipeline
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_shade_pipeline");
+                let vb_geometry_set = scene
+                    .vb_geometry_set
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_geometry_set");
+                // SAFETY: recording is open; `vb_shade_pipeline` (the 3-set compute pipeline: Set 0 =
+                // `vb_set0[fi]`, Set 1 = `forward.set1[fi]` — the Forward-family shadow set REUSED
+                // VERBATIM, Set 2 = `vb_geometry_set` — the Decision-0 geometry table, bound directly,
+                // no ring, the SAME triple `vb_resolve_pipeline` binds) belongs to this device (caller
+                // contract); `scene.mvp`'s leading 64 bytes are the SAME `view_proj` matrix
+                // `vb_resolve.comp.hlsl`'s push constant reads (`vb_shade.comp.hlsl`'s push is the
+                // identical 64-byte shape, plan D3); `scene.dispatch_group_count_x +
+                // scene.vb_classify_material_count` is the D2 over-dispatch (`G +
+                // present_material_count` groups — the classify chain's `scan` pass populated
+                // `group_to_mat[0..total_groups)` with real material ids and left
+                // `[total_groups, G+MAX)` SENTINEL from `fill`; `vb_shade` early-outs on every
+                // surplus group's SENTINEL read).
+                unsafe {
+                    (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vb_shade_pipeline.pipeline);
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        vb_shade_pipeline.layout,
+                        0,
+                        1,
+                        &vb_set0[fi].descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        vb_shade_pipeline.layout,
+                        1,
+                        1,
+                        &forward.set1[fi].descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        vb_shade_pipeline.layout,
+                        2,
+                        1,
+                        &vb_geometry_set.set(),
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        vb_shade_pipeline.layout,
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0,
+                        64,
+                        scene.mvp.as_ptr().cast(),
+                    );
+                    (self.fns.cmd_dispatch)(
+                        cmd,
+                        scene.dispatch_group_count_x + scene.vb_classify_material_count,
+                        1,
+                        1,
+                    );
+                }
+            } else {
+                // === Pass `vb_resolve`: the FUSED resolve compute pass (Decision 5) — reads `vb_id`,
+                // re-fetches geometry via the Decision-0 table (Set 2), shades, writes `lit` (STORAGE,
+                // extending `vb_sky`'s COLOR write, C5). ===
+                // SAFETY: recording is open; `record_vb_pass` records the graph's derived
+                // COLOR_ATTACHMENT_OPTIMAL→SHADER_READ_ONLY_OPTIMAL barrier for `vb_id` + the
+                // COLOR_ATTACHMENT_OPTIMAL→GENERAL barrier for `lit` (+ the cascade/atlas
+                // →SHADER_READ_ONLY_OPTIMAL barriers when armed) for the "vb_resolve" pass into `cmd`.
+                self.record_vb_pass(
+                    plan.vb_resolve.expect(
+                        "invariant: mesh_leg && !vb_use_classified => vb_resolve pass declared (declare_vb_graph)",
+                    ),
                     cmd,
-                    VK_PIPELINE_BIND_POINT_COMPUTE,
-                    vb_classify_scan_pipeline.layout,
-                    0,
-                    1,
-                    &vb_set0[fi].descriptor_set,
-                    0,
-                    ptr::null(),
+                    targets,
+                    forward,
+                    vb,
+                    scene,
+                    fi,
                 );
-                (self.fns.cmd_push_constants)(
-                    cmd,
-                    vb_classify_scan_pipeline.layout,
-                    VK_SHADER_STAGE_COMPUTE_BIT,
-                    0,
-                    4,
-                    (&scene.vb_classify_material_count as *const u32).cast(),
-                );
-                (self.fns.cmd_dispatch)(cmd, 1, 1, 1);
-            }
 
-            // Pass `vb_classify_scatter`: one thread per composite pixel, claims a slot in its
-            // material's `pixel_list` region and stores the pixel's linear index there.
-            // SAFETY: recording is open; `record_vb_pass` records the graph's derived
-            // SHADER_WRITE->SHADER_READ|SHADER_WRITE barrier (`gclassify`, chained from
-            // `vb_classify_scan`) + the (already-SHADER_READ_ONLY_OPTIMAL, same-layout, no-op)
-            // `vb_id` read for the "vb_classify_scatter" pass.
-            self.record_vb_pass(
-                plan.vb_classify_scatter
-                    .expect("invariant: mesh_leg => vb_classify_scatter pass declared (declare_vb_graph)"),
-                cmd,
-                targets,
-                forward,
-                vb,
-                scene,
-                fi,
-            );
-            let vb_classify_scatter_pipeline = scene.vb_classify_scatter_pipeline.expect(
-                "invariant: a VisibilityBuffer-resolved scene always carries vb_classify_scatter_pipeline",
-            );
-            // SAFETY: recording is open; same contract as `vb_classify_count_pipeline` above —
-            // 1-set pipeline, `vb_set0[fi]` live, `dispatch_group_count_x` covers every pixel;
-            // this shader also declares no push constant, so nothing pushes.
-            unsafe {
-                (self.fns.cmd_bind_pipeline)(
-                    cmd,
-                    VK_PIPELINE_BIND_POINT_COMPUTE,
-                    vb_classify_scatter_pipeline.pipeline,
-                );
-                (self.fns.cmd_bind_descriptor_sets)(
-                    cmd,
-                    VK_PIPELINE_BIND_POINT_COMPUTE,
-                    vb_classify_scatter_pipeline.layout,
-                    0,
-                    1,
-                    &vb_set0[fi].descriptor_set,
-                    0,
-                    ptr::null(),
-                );
-                (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
-            }
-
-            // === Pass `vb_resolve`: the FUSED resolve compute pass (Decision 5) — reads `vb_id`,
-            // re-fetches geometry via the Decision-0 table (Set 2), shades, writes `lit` (STORAGE,
-            // extending `vb_sky`'s COLOR write, C5). ===
-            // SAFETY: recording is open; `record_vb_pass` records the graph's derived
-            // COLOR_ATTACHMENT_OPTIMAL→SHADER_READ_ONLY_OPTIMAL barrier for `vb_id` + the
-            // COLOR_ATTACHMENT_OPTIMAL→GENERAL barrier for `lit` (+ the cascade/atlas
-            // →SHADER_READ_ONLY_OPTIMAL barriers when armed) for the "vb_resolve" pass into `cmd`.
-            self.record_vb_pass(
-                plan.vb_resolve.expect("invariant: mesh_leg => vb_resolve pass declared (declare_vb_graph)"),
-                cmd,
-                targets,
-                forward,
-                vb,
-                scene,
-                fi,
-            );
-
-            let vb_resolve_pipeline = scene
-                .vb_resolve_pipeline
-                .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_resolve_pipeline");
-            let vb_geometry_set = scene
-                .vb_geometry_set
-                .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_geometry_set");
-            // SAFETY: recording is open; `vb_resolve_pipeline` (the 3-set compute pipeline: Set 0 =
-            // `vb_set0[fi]`, Set 1 = `forward.set1[fi]` — the Forward-family shadow set REUSED
-            // VERBATIM, Set 2 = `vb_geometry_set` — the Decision-0 geometry table, bound directly,
-            // no ring) belongs to this device (caller contract); `scene.mvp` is the SAME 88-byte
-            // push whose leading 64 bytes are the `view_proj` matrix `vb_resolve.comp.hlsl`'s
-            // push constant reads (the SAME matrix `vb_raster.vs.hlsl` used, `GBUFFER_PUSH_BYTES`
-            // layout parity); `scene.dispatch_group_count_x` covers `present_extent.width *
-            // present_extent.height` pixels at the shader's `numthreads(64,1,1)` 1D grid (the SAME
-            // grid the deferred marcher/resolve/`sdf_forward_march` dispatch at).
-            unsafe {
-                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vb_resolve_pipeline.pipeline);
-                (self.fns.cmd_bind_descriptor_sets)(
-                    cmd,
-                    VK_PIPELINE_BIND_POINT_COMPUTE,
-                    vb_resolve_pipeline.layout,
-                    0,
-                    1,
-                    &vb_set0[fi].descriptor_set,
-                    0,
-                    ptr::null(),
-                );
-                (self.fns.cmd_bind_descriptor_sets)(
-                    cmd,
-                    VK_PIPELINE_BIND_POINT_COMPUTE,
-                    vb_resolve_pipeline.layout,
-                    1,
-                    1,
-                    &forward.set1[fi].descriptor_set,
-                    0,
-                    ptr::null(),
-                );
-                (self.fns.cmd_bind_descriptor_sets)(
-                    cmd,
-                    VK_PIPELINE_BIND_POINT_COMPUTE,
-                    vb_resolve_pipeline.layout,
-                    2,
-                    1,
-                    &vb_geometry_set.set(),
-                    0,
-                    ptr::null(),
-                );
-                (self.fns.cmd_push_constants)(
-                    cmd,
-                    vb_resolve_pipeline.layout,
-                    VK_SHADER_STAGE_COMPUTE_BIT,
-                    0,
-                    64,
-                    scene.mvp.as_ptr().cast(),
-                );
-                (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+                let vb_resolve_pipeline = scene
+                    .vb_resolve_pipeline
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_resolve_pipeline");
+                let vb_geometry_set = scene
+                    .vb_geometry_set
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_geometry_set");
+                // SAFETY: recording is open; `vb_resolve_pipeline` (the 3-set compute pipeline: Set 0 =
+                // `vb_set0[fi]`, Set 1 = `forward.set1[fi]` — the Forward-family shadow set REUSED
+                // VERBATIM, Set 2 = `vb_geometry_set` — the Decision-0 geometry table, bound directly,
+                // no ring) belongs to this device (caller contract); `scene.mvp` is the SAME 88-byte
+                // push whose leading 64 bytes are the `view_proj` matrix `vb_resolve.comp.hlsl`'s
+                // push constant reads (the SAME matrix `vb_raster.vs.hlsl` used, `GBUFFER_PUSH_BYTES`
+                // layout parity); `scene.dispatch_group_count_x` covers `present_extent.width *
+                // present_extent.height` pixels at the shader's `numthreads(64,1,1)` 1D grid (the SAME
+                // grid the deferred marcher/resolve/`sdf_forward_march` dispatch at).
+                unsafe {
+                    (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vb_resolve_pipeline.pipeline);
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        vb_resolve_pipeline.layout,
+                        0,
+                        1,
+                        &vb_set0[fi].descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        vb_resolve_pipeline.layout,
+                        1,
+                        1,
+                        &forward.set1[fi].descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        vb_resolve_pipeline.layout,
+                        2,
+                        1,
+                        &vb_geometry_set.set(),
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        vb_resolve_pipeline.layout,
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0,
+                        64,
+                        scene.mvp.as_ptr().cast(),
+                    );
+                    (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+                }
             }
         }
 

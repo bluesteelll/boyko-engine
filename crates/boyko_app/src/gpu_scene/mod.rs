@@ -4057,6 +4057,20 @@ impl GpuSceneBundles {
         let sdf_leg = resolved_render_path.sdf_leg;
         let ddgi_enabled = ddgi_enabled && sdf_leg;
 
+        // VB-P2 classification plan, rung P2c (the P1-4 owner-decided selector,
+        // `GBufferScene::vb_use_classified`'s own doc): `BOYKO_VB_FORCE_CLASSIFIED` is the
+        // orchestrator's dev/golden channel to force the classified `vb_shade` path on real
+        // hardware ahead of TV0 — mirrors `boyko_app::plugins`'s `BOYKO_AA`/`BOYKO_RENDER_PATH`
+        // launch-env seam. Read once per frame (this fn's own per-frame assembly seam, not a
+        // hot inner loop) rather than cached at boot, so a running process can be toggled by
+        // re-launch without a rebuild.
+        let vb_force_classified = std::env::var("BOYKO_VB_FORCE_CLASSIFIED").is_ok();
+        // TV0 will OR-in the VB textured-material gate here (a VB-specific
+        // `mesh_tex_active_this_frame`, once VB textures exist) — no such gate exists yet, so
+        // production stays `vb_use_classified == vb_force_classified` (`false` unless the env
+        // var is set) and the fast fused `vb_resolve` shades every VB frame (P1-4's perf point).
+        let vb_use_classified = vb_force_classified;
+
         // Multi-paradigm render-path plan, rung R3b: the `viewt_from_depth` push's mesh-depth
         // ray-t normalizer needs THIS frame's camera mode — read from the SAME `cam_eye.w` lane
         // (`mvp` bytes @76..80, `GBUFFER_PUSH_BYTES`'s doc: 0.0 = ortho, 1.0 = perspective) the
@@ -4637,6 +4651,10 @@ impl GpuSceneBundles {
             // constant (`GBufferScene::vb_classify_material_count`'s own doc — a valid upper
             // bound on any live `MaterialId` this frame could reference).
             vb_classify_material_count: material_table.capacity_rows(),
+            // VB-P2 classification plan, rung P2c: the classified-vs-fused `lit`-producer
+            // selector (`GBufferScene::vb_use_classified`'s own doc) — the per-frame local
+            // computed above.
+            vb_use_classified,
             // Multi-paradigm render-path plan, rung R1: the plain-POD conversion (see this
             // fn's `resolved_render_path` param doc for why it cannot be a `From` impl).
             resolved_render_path: to_gpu_resolved_render_path(&resolved_render_path),

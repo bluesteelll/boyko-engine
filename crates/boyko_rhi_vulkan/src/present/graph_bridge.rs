@@ -2653,23 +2653,21 @@ pub(crate) struct VbPassPlan {
     /// carries no slot with no mesh leg) and leaves `lit` for `vb_sky` + [`Self::sdf_forward_march`]
     /// alone. `record_vb` reads the SAME `mesh_leg` predicate, so a `None` here is never recorded.
     pub(crate) vb_raster: Option<crate::framegraph::PassId>,
-    /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2b: the `fill` pass
-    /// (two `vkCmdFillBuffer`s — zeros `counts[MAX]`, sentinels `group_to_mat[G+MAX]` with
-    /// `0xFFFFFFFF`, critic P1-1) declared as the FIRST producer on the `gclassify` ResId
-    /// (`TRANSFER_WRITE`). `Some` under the SAME `mesh_leg` gate as [`Self::vb_raster`] (a
-    /// `VisibilityBuffer × Sdf` frame has no mesh pixels to classify). The classify chain's
-    /// output is UNUSED this rung — [`Self::vb_resolve`] (below) still shades every pixel — so
-    /// P2b only validates the four passes run without hanging/corrupting real hardware and that
-    /// the framegraph's derived RAW/WAW barrier chain on the single `gclassify` ResId (P1-3) is
-    /// correct (each pass's own RW access auto-chains a barrier against the prior pass's pending
-    /// write — `crate::framegraph::sync::transition`).
+    /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2b (gate widened at
+    /// rung P2c): the `fill` pass (two `vkCmdFillBuffer`s — zeros `counts[MAX]`, sentinels
+    /// `group_to_mat[G+MAX]` with `0xFFFFFFFF`, critic P1-1) declared as the FIRST producer on
+    /// the `gclassify` ResId (`TRANSFER_WRITE`). `Some` iff `mesh_leg &&
+    /// scene.vb_use_classified` (rung P2c narrowed this from the P2b-era `mesh_leg`-only gate,
+    /// plan P1-4: a `!vb_use_classified` frame pays ZERO classify tax — the chain is not even
+    /// declared). The classify chain's output feeds [`Self::vb_shade`] (below) when armed; when
+    /// unarmed, [`Self::vb_resolve`] alone shades every pixel.
     pub(crate) vb_classify_fill: Option<crate::framegraph::PassId>,
     /// The `count` classify compute pass (`vb_classify_count.comp.hlsl`): reads `vb_id` (COMPUTE,
-    /// `SHADER_READ_ONLY_OPTIMAL`) — the SAME image [`Self::vb_resolve`] reads; this pass runs
-    /// FIRST so it derives the `COLOR_ATTACHMENT_OPTIMAL`→`SHADER_READ_ONLY_OPTIMAL` barrier,
-    /// and `vb_resolve`'s later same-layout read needs none — and reads+writes `gclassify`
-    /// (COMPUTE, RW: `InterlockedAdd(counts[mat], 1)` per non-sentinel pixel). `Some` under the
-    /// SAME gate as [`Self::vb_classify_fill`].
+    /// `SHADER_READ_ONLY_OPTIMAL`) — the SAME image [`Self::vb_resolve`]/[`Self::vb_shade`] read;
+    /// this pass runs FIRST so it derives the `COLOR_ATTACHMENT_OPTIMAL`→`SHADER_READ_ONLY_OPTIMAL`
+    /// barrier, and the `lit`-producer's later same-layout read needs none — and reads+writes
+    /// `gclassify` (COMPUTE, RW: `InterlockedAdd(counts[mat], 1)` per non-sentinel pixel). `Some`
+    /// under the SAME gate as [`Self::vb_classify_fill`].
     pub(crate) vb_classify_count: Option<crate::framegraph::PassId>,
     /// The `scan` classify compute pass (`vb_classify_scan.comp.hlsl`, a SINGLE workgroup):
     /// reads+writes `gclassify` only (COMPUTE, RW — the two chained exclusive-prefix-sum phases
@@ -2684,10 +2682,24 @@ pub(crate) struct VbPassPlan {
     /// The FUSED resolve compute pass (`vb_resolve.comp.hlsl`, Decision 5): reads `vb_id`
     /// (`ShaderRead`/`SHADER_READ_ONLY_OPTIMAL`, COMPUTE) and writes `lit` (`ShaderWrite`/`GENERAL`,
     /// extending `vb_sky`'s COLOR write, C5). Reads `cascade`/`atlas` inline (COMPUTE) when armed,
-    /// reads `light_table` (COMPUTE) when [`Self::light_upload`] ran this frame. Rung R10: `Some`
-    /// under the SAME `mesh_leg` gate as [`Self::vb_raster`] (they are a pair — the resolve reads
-    /// the raster's `vb_id`).
+    /// reads `light_table` (COMPUTE) when [`Self::light_upload`] ran this frame. Rung P2c: `Some`
+    /// iff `mesh_leg && !scene.vb_use_classified` — mutually exclusive with [`Self::vb_shade`] by
+    /// construction (exactly one of the two is the frame's `lit` producer; the fused-vs-classified
+    /// selector, plan P1-4).
     pub(crate) vb_resolve: Option<crate::framegraph::PassId>,
+    /// VB-P2 classification plan, rung P2c: the material-classified shading compute pass
+    /// (`vb_shade.comp.hlsl`) — the [`Self::vb_resolve`] SIBLING `lit` producer, selected instead
+    /// of the fused resolve when `scene.vb_use_classified` holds. Reads `vb_id` (COMPUTE,
+    /// `SHADER_READ_ONLY_OPTIMAL` — already transitioned by [`Self::vb_classify_count`], the
+    /// FIRST reader this frame when this pass is armed, so this read derives no further barrier)
+    /// and `gclassify` (COMPUTE, `SHADER_READ` only — `vb_shade` never writes it, unlike the
+    /// classify chain's own RW access) and writes `lit` (COMPUTE, `SHADER_WRITE`/`GENERAL`,
+    /// extending `vb_sky`'s COLOR write, C5 — the SAME transition [`Self::vb_resolve`] derives).
+    /// Reads `vb_instance_ring` (COMPUTE, the geometry-fetch instance-row lookup — the SAME read
+    /// [`Self::vb_resolve`] declares) and `cascade`/`atlas`/`light_table` inline when armed (the
+    /// SAME conditional reads [`Self::vb_resolve`] declares — `vb_shade`'s shading tail is
+    /// character-identical, plan D3). `Some` iff `mesh_leg && scene.vb_use_classified`.
+    pub(crate) vb_shade: Option<crate::framegraph::PassId>,
     /// Rung R10: the fused `sdf_forward_march` COMPUTE pass (`shaders/sdf_forward_march.comp.hlsl`,
     /// the SAME pass the Forward family declares — [`ForwardPassPlan::sdf_forward_march`]). `Some`
     /// iff [`GBufferScene::path_has_sdf_forward`](super::scene_types::GBufferScene::path_has_sdf_forward)
@@ -2861,12 +2873,16 @@ impl crate::framegraph::BarrierSink for VbBarrierSink<'_> {
 }
 
 impl Renderer<'_> {
-    /// Multi-paradigm render-path plan, rung R8: (re)declares the FUSED VisibilityBuffer v1
-    /// frame graph into `self.frame_graph` — `light_upload? → csm? → atlas? → vb_sky → vb_raster
-    /// → vb_resolve → present_sample` — mirrors [`Self::declare_forward_graph`]'s shape, trimmed
-    /// to VB v1's scope cut (see [`VbPassPlan`]'s doc). Stores the result in
-    /// [`Self::vb_pass_plan`]; [`Self::record_vb`] then drives each pass's derived barriers
-    /// through it. Called ONLY by [`Self::declare_frame_graph`]'s `VisibilityBuffer` arm.
+    /// Multi-paradigm render-path plan, rung R8 (the `lit`-producer branch widened at VB-P2
+    /// classification plan rung P2c): (re)declares the VisibilityBuffer v1 frame graph into
+    /// `self.frame_graph` — `light_upload? → csm? → atlas? → vb_sky → vb_raster → (classify?)
+    /// → vb_shade | vb_resolve → present_sample` — mirrors [`Self::declare_forward_graph`]'s
+    /// shape, trimmed to VB v1's scope cut (see [`VbPassPlan`]'s doc). The classify chain
+    /// (`fill`/`count`/`scan`/`scatter`) and the `vb_shade` vs `vb_resolve` `lit`-producer choice
+    /// both key off `scene.vb_use_classified` (plan P1-4); exactly one of `vb_shade`/`vb_resolve`
+    /// is ever `Some`. Stores the result in [`Self::vb_pass_plan`]; [`Self::record_vb`] then
+    /// drives each pass's derived barriers through it. Called ONLY by
+    /// [`Self::declare_frame_graph`]'s `VisibilityBuffer` arm.
     pub(crate) fn declare_vb_graph(&mut self, scene: &GBufferScene<'_>) {
         use crate::framegraph::{ResSync, SubRange};
 
@@ -2987,9 +3003,17 @@ impl Renderer<'_> {
         // `None` here is never recorded (and `vb_id`/`vb_depth` — always `add_image`d above for a
         // fixed ResId order — simply stay untouched, sampled by nothing).
         let mesh_leg = scene.resolved_render_path.mesh_leg;
-        let (vb_classify_fill, vb_classify_count, vb_classify_scan, vb_classify_scatter, vb_raster, vb_resolve) = if mesh_leg {
+        // VB-P2 classification plan, rung P2c (the P1-4 owner-decided selector,
+        // `GBufferScene::vb_use_classified`'s own doc): the classified-vs-fused `lit`-producer
+        // choice, read ONCE here so the classify-chain gate and the `vb_shade`/`vb_resolve`
+        // branch below can never disagree (the W1 single-predicate discipline).
+        let use_classified = scene.vb_use_classified;
+        let (vb_classify_fill, vb_classify_count, vb_classify_scan, vb_classify_scatter, vb_raster, vb_resolve, vb_shade) = if mesh_leg {
             // Pass `vb_raster`: writes `vb_id` (COLOR, first-touch) + `vb_depth` (DEPTH,
             // first-touch, `GREATER`, write ON — Decision 4). Reads `vb_instance_ring` (VERTEX).
+            // Declared UNCONDITIONALLY under `mesh_leg` — BOTH the fused (`vb_resolve`) and
+            // classified (`vb_shade`) `lit`-producer arms re-fetch geometry through the `vb_id`
+            // this pass writes.
             let vb_raster = g.add_pass("vb_raster");
             g.image_access(
                 vb_id,
@@ -3007,130 +3031,215 @@ impl Renderer<'_> {
             );
             g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_VERTEX_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
 
-            // VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2b: the
-            // classify chain `fill -> count -> scan -> scatter`, declared BEFORE `vb_resolve`
-            // (below) — mesh_leg-gated alongside `vb_raster`/`vb_resolve` (no mesh pixels to
-            // classify with no mesh leg). Every pass's `gclassify` access is a plain
-            // `buffer_access` on the SAME single ResId; the framegraph's `transition` (sync.rs)
-            // fires a RAW/WAW barrier whenever the prior pass left a pending write, so
-            // `fill`(TRANSFER_WRITE) -> `count`(RW) -> `scan`(RW) -> `scatter`(RW) auto-chains a
-            // conservative whole-buffer barrier between every consecutive pair (P1-3, verified by
-            // construction — no manual barrier / split ResId needed).
-            //
-            // Output is UNUSED this rung (`vb_shade` is not dispatched until P2c) — `vb_resolve`
-            // still shades every pixel — so P2b validates only that the four passes run without
-            // hanging/corrupting on real hardware and that this barrier chain is correct.
-            let vb_classify_fill = g.add_pass("vb_classify_fill");
-            g.buffer_access(gclassify, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+            // VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2c: the
+            // classify chain `fill -> count -> scan -> scatter`, declared BEFORE the `lit`
+            // producer (below) — gated on `use_classified` (P1-4: a `!use_classified` frame pays
+            // ZERO classify tax, the chain is not even declared, not merely unread as rung P2b
+            // left it). Every pass's `gclassify` access is a plain `buffer_access` on the SAME
+            // single ResId; the framegraph's `transition` (sync.rs) fires a RAW/WAW barrier
+            // whenever the prior pass left a pending write, so `fill`(TRANSFER_WRITE) ->
+            // `count`(RW) -> `scan`(RW) -> `scatter`(RW) auto-chains a conservative whole-buffer
+            // barrier between every consecutive pair (P1-3, verified by construction — no manual
+            // barrier / split ResId needed). Populates `gclassify` for `vb_shade` (below) to
+            // consume.
+            let (vb_classify_fill, vb_classify_count, vb_classify_scan, vb_classify_scatter) =
+                if use_classified {
+                    let vb_classify_fill = g.add_pass("vb_classify_fill");
+                    g.buffer_access(
+                        gclassify,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_ACCESS_TRANSFER_WRITE_BIT,
+                    );
 
-            // Pass `vb_classify_count`: reads `vb_id` (COMPUTE, SHADER_READ_ONLY_OPTIMAL — the
-            // SAME image `vb_resolve` reads below; this pass runs FIRST so it derives the
-            // COLOR_ATTACHMENT_OPTIMAL->SHADER_READ_ONLY_OPTIMAL barrier, and `vb_resolve`'s later
-            // same-layout read needs none) and RW `gclassify` (`InterlockedAdd(counts[mat], 1)`
-            // per non-sentinel pixel). `instance_materials`/`Camera` are NOT tracked as separate
-            // ResIds in this graph (mirrors `vb_resolve`'s own arm below, which never declares an
-            // access for them either — a host-fenced ring, not a framegraph-tracked resource).
-            let vb_classify_count = g.add_pass("vb_classify_count");
-            g.buffer_access(
-                gclassify,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-            );
-            g.image_access(
-                vb_id,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_SHADER_READ_BIT,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                SubRange::COLOR,
-            );
+                    // Pass `vb_classify_count`: reads `vb_id` (COMPUTE, SHADER_READ_ONLY_OPTIMAL
+                    // — the SAME image the `lit` producer reads below; this pass runs FIRST so it
+                    // derives the COLOR_ATTACHMENT_OPTIMAL->SHADER_READ_ONLY_OPTIMAL barrier, and
+                    // every later same-layout read needs none) and RW `gclassify`
+                    // (`InterlockedAdd(counts[mat], 1)` per non-sentinel pixel).
+                    // `instance_materials`/`Camera` are NOT tracked as separate ResIds in this
+                    // graph (mirrors the `lit` producer's own arm below, which never declares an
+                    // access for them either — a host-fenced ring, not a framegraph-tracked
+                    // resource).
+                    let vb_classify_count = g.add_pass("vb_classify_count");
+                    g.buffer_access(
+                        gclassify,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                    g.image_access(
+                        vb_id,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        SubRange::COLOR,
+                    );
 
-            // Pass `vb_classify_scan`: a single workgroup, RW `gclassify` only (no image/other
-            // buffer access — the two chained exclusive-prefix-sum phases touch only the
-            // M-arrays + `group_to_mat`, all within `gclassify`).
-            let vb_classify_scan = g.add_pass("vb_classify_scan");
-            g.buffer_access(
-                gclassify,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-            );
+                    // Pass `vb_classify_scan`: a single workgroup, RW `gclassify` only (no
+                    // image/other buffer access — the two chained exclusive-prefix-sum phases
+                    // touch only the M-arrays + `group_to_mat`, all within `gclassify`).
+                    let vb_classify_scan = g.add_pass("vb_classify_scan");
+                    g.buffer_access(
+                        gclassify,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
 
-            // Pass `vb_classify_scatter`: the SAME `vb_id` + `gclassify` access shape as
-            // `vb_classify_count` above (`InterlockedAdd(cursors[mat], 1)` then
-            // `pixel_list[slot] = py*w+px`).
-            let vb_classify_scatter = g.add_pass("vb_classify_scatter");
-            g.buffer_access(
-                gclassify,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-            );
-            g.image_access(
-                vb_id,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_SHADER_READ_BIT,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                SubRange::COLOR,
-            );
+                    // Pass `vb_classify_scatter`: the SAME `vb_id` + `gclassify` access shape as
+                    // `vb_classify_count` above (`InterlockedAdd(cursors[mat], 1)` then
+                    // `pixel_list[slot] = py*w+px`).
+                    let vb_classify_scatter = g.add_pass("vb_classify_scatter");
+                    g.buffer_access(
+                        gclassify,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                    g.image_access(
+                        vb_id,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        SubRange::COLOR,
+                    );
 
-            // Pass `vb_resolve` (FUSED): reads `vb_id` (COMPUTE,
-            // COLOR_ATTACHMENT_OPTIMAL→SHADER_READ_ONLY_OPTIMAL) and writes `lit` (COMPUTE,
-            // COLOR_ATTACHMENT_OPTIMAL→GENERAL, extending `vb_sky`'s COLOR write, C5). Reads
-            // `vb_instance_ring` (COMPUTE, for the per-instance material ring lookup) + `light_table`/
-            // `cascade`/`atlas` when armed this frame.
-            let vb_resolve = g.add_pass("vb_resolve");
-            g.image_access(
-                vb_id,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_SHADER_READ_BIT,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                SubRange::COLOR,
-            );
-            g.image_access(
-                lit,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_SHADER_WRITE_BIT,
-                VK_IMAGE_LAYOUT_GENERAL,
-                SubRange::COLOR,
-            );
-            g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
-            if light_upload.is_some() {
-                g.buffer_access(light_table, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
-            }
-            if csm.is_some() {
-                let active = (scene.csm.as_ref().map(|c| c.active_count).unwrap_or(1) as usize)
-                    .clamp(1, MAX_CASCADES) as u32;
+                    (
+                        Some(vb_classify_fill),
+                        Some(vb_classify_count),
+                        Some(vb_classify_scan),
+                        Some(vb_classify_scatter),
+                    )
+                } else {
+                    (None, None, None, None)
+                };
+
+            // The `lit`-producer choice (plan P1-4): `vb_shade` (material-classified, reads
+            // `gclassify`) when `use_classified`, else the fused `vb_resolve` — mutually
+            // exclusive by construction, exactly one runs per frame.
+            let (vb_resolve, vb_shade) = if use_classified {
+                // Pass `vb_shade`: reads `vb_id` (COMPUTE, SHADER_READ_ONLY_OPTIMAL — already
+                // transitioned by `vb_classify_count` above, so this read derives no further
+                // barrier) and `gclassify` (COMPUTE, SHADER_READ ONLY — `vb_shade` never writes
+                // it, unlike the classify chain's own RW access) and writes `lit` (COMPUTE,
+                // COLOR_ATTACHMENT_OPTIMAL→GENERAL, extending `vb_sky`'s COLOR write, C5). Reads
+                // `vb_instance_ring` (COMPUTE, the geometry-fetch instance-row lookup) +
+                // `light_table`/`cascade`/`atlas` when armed this frame — the SAME conditional
+                // reads `vb_resolve`'s own arm declares (`vb_shade`'s shading tail is
+                // character-identical, plan D3).
+                let vb_shade = g.add_pass("vb_shade");
                 g.image_access(
-                    cascade,
+                    vb_id,
                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                     VK_ACCESS_SHADER_READ_BIT,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    SubRange::depth_layers(active),
+                    SubRange::COLOR,
                 );
-            }
-            if atlas_pass.is_some() {
-                let active = (scene
-                    .atlas_punctual
-                    .as_ref()
-                    .map(|a| a.active_layers)
-                    .unwrap_or(1) as usize)
-                    .clamp(1, MAX_TEXTURE_LAYERS) as u32;
+                g.buffer_access(
+                    gclassify,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                );
                 g.image_access(
-                    atlas,
+                    lit,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    SubRange::COLOR,
+                );
+                g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+                if light_upload.is_some() {
+                    g.buffer_access(light_table, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+                }
+                if csm.is_some() {
+                    let active = (scene.csm.as_ref().map(|c| c.active_count).unwrap_or(1) as usize)
+                        .clamp(1, MAX_CASCADES) as u32;
+                    g.image_access(
+                        cascade,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        SubRange::depth_layers(active),
+                    );
+                }
+                if atlas_pass.is_some() {
+                    let active = (scene
+                        .atlas_punctual
+                        .as_ref()
+                        .map(|a| a.active_layers)
+                        .unwrap_or(1) as usize)
+                        .clamp(1, MAX_TEXTURE_LAYERS) as u32;
+                    g.image_access(
+                        atlas,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        SubRange::depth_layers(active),
+                    );
+                }
+                (None, Some(vb_shade))
+            } else {
+                // Pass `vb_resolve` (FUSED): reads `vb_id` (COMPUTE,
+                // COLOR_ATTACHMENT_OPTIMAL→SHADER_READ_ONLY_OPTIMAL) and writes `lit` (COMPUTE,
+                // COLOR_ATTACHMENT_OPTIMAL→GENERAL, extending `vb_sky`'s COLOR write, C5). Reads
+                // `vb_instance_ring` (COMPUTE, for the per-instance material ring lookup) +
+                // `light_table`/`cascade`/`atlas` when armed this frame.
+                let vb_resolve = g.add_pass("vb_resolve");
+                g.image_access(
+                    vb_id,
                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                     VK_ACCESS_SHADER_READ_BIT,
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                    SubRange::depth_layers(active),
+                    SubRange::COLOR,
                 );
-            }
+                g.image_access(
+                    lit,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    SubRange::COLOR,
+                );
+                g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+                if light_upload.is_some() {
+                    g.buffer_access(light_table, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+                }
+                if csm.is_some() {
+                    let active = (scene.csm.as_ref().map(|c| c.active_count).unwrap_or(1) as usize)
+                        .clamp(1, MAX_CASCADES) as u32;
+                    g.image_access(
+                        cascade,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        SubRange::depth_layers(active),
+                    );
+                }
+                if atlas_pass.is_some() {
+                    let active = (scene
+                        .atlas_punctual
+                        .as_ref()
+                        .map(|a| a.active_layers)
+                        .unwrap_or(1) as usize)
+                        .clamp(1, MAX_TEXTURE_LAYERS) as u32;
+                    g.image_access(
+                        atlas,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        SubRange::depth_layers(active),
+                    );
+                }
+                (Some(vb_resolve), None)
+            };
+
             (
-                Some(vb_classify_fill),
-                Some(vb_classify_count),
-                Some(vb_classify_scan),
-                Some(vb_classify_scatter),
+                vb_classify_fill,
+                vb_classify_count,
+                vb_classify_scan,
+                vb_classify_scatter,
                 Some(vb_raster),
-                Some(vb_resolve),
+                vb_resolve,
+                vb_shade,
             )
         } else {
-            (None, None, None, None, None, None)
+            (None, None, None, None, None, None, None)
         };
 
         // Pass `sdf_forward_march` — rung R10: the fused SDF march-then-shade COMPUTE pass, the
@@ -3228,6 +3337,7 @@ impl Renderer<'_> {
             vb_classify_scan,
             vb_classify_scatter,
             vb_resolve,
+            vb_shade,
             sdf_forward_march,
             present_sample,
         });

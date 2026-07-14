@@ -2153,9 +2153,31 @@ pub struct GBufferScene<'a> {
     /// still folds every material id the frame could reference). This crate cannot depend on
     /// `boyko_render` (which sits ABOVE it in the dependency graph — the SAME plain-value
     /// boundary crossing [`Self::resolved_render_path`]'s doc explains), so this is threaded as a
-    /// plain `u32`, mirroring [`Self::dispatch_group_count_x`]'s own threading. Unread outside a
-    /// `VisibilityBuffer`-resolved boot (`record_vb`'s `mesh_leg` gate).
+    /// plain `u32`, mirroring [`Self::dispatch_group_count_x`]'s own threading. Read at TWO
+    /// `record_vb` sites within the `mesh_leg` gate: the `scan` pass's push constant
+    /// (unconditional under `mesh_leg`, rung P2b) and — rung P2c — `vb_shade`'s over-dispatch
+    /// group count (`dispatch_group_count_x + vb_classify_material_count`, plan D2), the latter
+    /// ONLY under [`Self::vb_use_classified`].
     pub vb_classify_material_count: u32,
+    /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2c (the P1-4
+    /// owner-decided selector): `true` iff THIS frame's `lit` producer is the material-classified
+    /// `vb_shade` pipeline (classify passes + `vb_shade`) instead of the fused `vb_resolve` — the
+    /// SINGLE source both [`Renderer::declare_vb_graph`](super::graph_bridge::Renderer::declare_vb_graph)
+    /// and `Renderer::record_vb` read (the SAME W1 "declare/record parity" discipline every other
+    /// per-frame selector in this file follows, e.g. [`Self::mesh_tex_active`]). Computed once per
+    /// frame at the `GpuSceneBundles::scene()` assembly seam: `force ||
+    /// mesh_tex_active_this_frame`, where `force` is the `BOYKO_VB_FORCE_CLASSIFIED` dev/golden
+    /// env var (the orchestrator's channel to exercise `vb_shade` on real hardware ahead of TV0 —
+    /// mirrors `boyko_app::plugins`'s `BOYKO_AA`/`BOYKO_RENDER_PATH` launch-env seam) and
+    /// `mesh_tex_active_this_frame` is `false` for now (no VB-specific texture gate exists yet —
+    /// TV0 lands one). So in production today `vb_use_classified == force`: `false` unless
+    /// `BOYKO_VB_FORCE_CLASSIFIED=1`, and the fast fused `vb_resolve` shades every VB frame
+    /// (P1-4's perf point — flat scenes pay zero classify tax). Gates BOTH the classify passes
+    /// (`fill`/`count`/`scan`/`scatter` — `mesh_leg && vb_use_classified`) and the `lit`-producer
+    /// choice (`vb_shade` when `true`, `vb_resolve` when `false`) — exactly one of the two ever
+    /// produces `lit` per frame (mutually exclusive by construction, mirroring
+    /// [`Self::path_has_raster`]/[`Self::path_has_mesh_depth_neutral_clear`]'s own partition).
+    pub vb_use_classified: bool,
 }
 
 impl GBufferScene<'_> {
