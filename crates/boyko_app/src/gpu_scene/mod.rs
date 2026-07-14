@@ -49,7 +49,8 @@ use boyko_rhi_vulkan::compute::{
     SSAO_ATROUS_PUSH_BYTES, ssao_atrous_read8_spirv, ssao_atrous_spirv, ssao_atrous_write8_spirv,
     SSAO_QUALITY_COUNT, SSAO_QUALITY_HIGH, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM,
     ssaa_downsample_fs_spirv, taa_resolve_spirv, tile_grid_extent, VIEWT_FROM_DEPTH_PUSH_BYTES,
-    vb_raster_fs_spirv, vb_raster_vs_spirv, vb_resolve_spirv, viewt_from_depth_spirv,
+    vb_classify_count_spirv, vb_classify_scan_spirv, vb_classify_scatter_spirv,
+    vb_raster_fs_spirv, vb_raster_vs_spirv, vb_resolve_spirv, vb_shade_spirv, viewt_from_depth_spirv,
 };
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::ffi::VkDescriptorSet;
@@ -887,6 +888,28 @@ pub(crate) struct GpuSceneBundles {
     /// constructed by `boyko_app::runner` only on a `VisibilityBuffer`-resolved boot). `None` on
     /// every OTHER boot (the 0%-gate).
     vb_resolve_pipeline: Option<ComputePipeline>,
+    // ── VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2a (dark infra,
+    // unwired): the four classify/shade pipelines. Built LAZILY by
+    // [`Self::build_vb_classify_pipelines`], the SAME deferred-build shape as
+    // [`Self::vb_resolve_pipeline`] (`vb_shade` needs the geometry table's Set-2 layout, which
+    // does not exist at [`Self::boot`]'s call site). Nothing declares/records against these
+    // this rung — `record_vb`/`declare_vb_graph` are untouched; the fused `vb_resolve` still
+    // shades every VB frame. `None` on every boot that never calls that fn. ──────────────────
+    /// The `count` classify compute pipeline (`vb_classify_count.comp.hlsl`) — a 1-set
+    /// pipeline built against [`Self::vb_layout0`] via the GENERIC
+    /// `RhiDevice::create_compute_pipeline` (plan P2-1 — no dedicated `_vb1` helper).
+    vb_classify_count_pipeline: Option<ComputePipeline>,
+    /// The `scan` classify compute pipeline (`vb_classify_scan.comp.hlsl`) — a 1-set pipeline,
+    /// built the SAME way as [`Self::vb_classify_count_pipeline`].
+    vb_classify_scan_pipeline: Option<ComputePipeline>,
+    /// The `scatter` classify compute pipeline (`vb_classify_scatter.comp.hlsl`) — a 1-set
+    /// pipeline, built the SAME way as [`Self::vb_classify_count_pipeline`].
+    vb_classify_scatter_pipeline: Option<ComputePipeline>,
+    /// The `vb_shade` material-classified shading compute pipeline (`vb_shade.comp.hlsl`) — a
+    /// 3-set pipeline built via [`VulkanContext::create_compute_pipeline_vb`], mirroring
+    /// [`Self::vb_resolve_pipeline`]'s own pipeline shape (Set 0 = `vb_layout0`, Set 1 =
+    /// `forward_layout1`, Set 2 = the geometry table's own Set).
+    vb_shade_pipeline: Option<ComputePipeline>,
     /// The per-slot VB instance-model SSBO ring ([`INSTANCE_CAPACITY`] ×
     /// [`boyko_render::instance_model::VB_INSTANCE_ROW_BYTES`] (64 B) each, zero-seeded) — a
     /// DEDICATED ring, distinct from [`Self::instance_rings`] (`InstanceModelCol`, 48 B).
@@ -2992,6 +3015,21 @@ impl GpuSceneBundles {
                         kind: DescriptorKind::StorageImage,
                         stage: ShaderStage::COMPUTE,
                     },
+                    // VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2a
+                    // (dark infra): `gClassify` @7 (COMPUTE-only STORAGE_BUFFER, the packed
+                    // classify buffer `shaders/vb_classify_common.hlsli` declares). Added to
+                    // this ONE shared layout object BEFORE any VB pipeline is built below (R5 —
+                    // a set built against a DIFFERENT, structurally-identical layout object is
+                    // silently incompatible with a pipeline built against this one), so
+                    // `vb_raster_pipeline`/`vb_sky_pipeline`/`vb_resolve_pipeline` all rebuild
+                    // against the 8-binding layout; bound-but-unread by their frozen SPIR-V
+                    // (none of the three declares a `binding(7,0)`).
+                    BindGroupLayoutEntry {
+                        binding: 7,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
                 ],
             },
         )
@@ -3183,6 +3221,12 @@ impl GpuSceneBundles {
             vb_sky_pipeline,
             // Built LAZILY — see `Self::vb_resolve_pipeline`'s doc.
             vb_resolve_pipeline: None,
+            // VB-P2 classification plan, rung P2a: built LAZILY by
+            // `Self::build_vb_classify_pipelines` — see that fn's doc.
+            vb_classify_count_pipeline: None,
+            vb_classify_scan_pipeline: None,
+            vb_classify_scatter_pipeline: None,
+            vb_shade_pipeline: None,
             vb_instance_rings,
         }
     }
@@ -3367,6 +3411,119 @@ impl GpuSceneBundles {
             RhiDevice::destroy_shader_module(device, vb_resolve_cs);
         }
         self.vb_resolve_pipeline = Some(vb_resolve_pipeline);
+    }
+
+    /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2a (dark infra,
+    /// unwired): builds the three 1-set classify pipelines (`vb_classify_count`/`_scan`/
+    /// `_scatter`, each via the GENERIC `RhiDevice::create_compute_pipeline` against
+    /// [`Self::vb_layout0`] — plan P2-1, no dedicated `_vb1` helper) + the 3-set `vb_shade`
+    /// pipeline (via [`VulkanContext::create_compute_pipeline_vb`], the SAME 3-set builder
+    /// [`Self::build_vb_resolve_pipeline`] uses — Set 0 = `vb_layout0`, Set 1 =
+    /// `forward_layout1`, Set 2 = `geometry_set`). Deferred past [`Self::boot`] for the SAME
+    /// reason [`Self::build_vb_resolve_pipeline`] is (that fn's doc): `vb_shade` needs the
+    /// Decision-0 geometry table's Set-2 layout, which does not exist at `boot()`'s call site.
+    /// Called ONCE, from `runner.rs`, immediately after [`Self::build_vb_resolve_pipeline`].
+    ///
+    /// DARK INFRA (rung P2a): nothing declares/records against these four pipelines yet —
+    /// `record_vb`/`declare_vb_graph` are untouched, the fused `vb_resolve` still shades every
+    /// VB frame. This fn only builds+stores them so a later rung (P2b/P2c) can wire them in
+    /// without another plumbing pass.
+    pub(crate) fn build_vb_classify_pipelines(
+        &mut self,
+        ctx: &VulkanContext,
+        geometry_set: &boyko_rhi_vulkan::geometry_bindless::VulkanGeometryBindlessSet,
+    ) {
+        let device = ctx;
+
+        let vb_classify_count_cs = RhiDevice::create_shader_module(device, vb_classify_count_spirv())
+            .expect("invariant: VB classify count compute shader module create");
+        let vb_classify_count_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &vb_classify_count_cs,
+                entry: c"main",
+                push_constant_bytes: 4,
+                bind_group_layout: Some(&self.vb_layout0),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: VB classify count compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_classify_count_cs);
+        }
+
+        let vb_classify_scan_cs = RhiDevice::create_shader_module(device, vb_classify_scan_spirv())
+            .expect("invariant: VB classify scan compute shader module create");
+        let vb_classify_scan_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &vb_classify_scan_cs,
+                entry: c"main",
+                // The 4-byte `PushConstants { uint material_count; }` (`vb_classify_scan.comp
+                // .hlsl`'s own -- a LOOP BOUND only, see that file's + `vb_classify_common.hlsli`'s
+                // doc).
+                push_constant_bytes: 4,
+                bind_group_layout: Some(&self.vb_layout0),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: VB classify scan compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_classify_scan_cs);
+        }
+
+        let vb_classify_scatter_cs =
+            RhiDevice::create_shader_module(device, vb_classify_scatter_spirv())
+                .expect("invariant: VB classify scatter compute shader module create");
+        let vb_classify_scatter_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &vb_classify_scatter_cs,
+                entry: c"main",
+                push_constant_bytes: 4,
+                bind_group_layout: Some(&self.vb_layout0),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: VB classify scatter compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_classify_scatter_cs);
+        }
+
+        let vb_shade_cs = RhiDevice::create_shader_module(device, vb_shade_spirv())
+            .expect("invariant: VB shade compute shader module create");
+        let vb_shade_pipeline = ctx
+            .create_compute_pipeline_vb(
+                &ComputePipelineDesc {
+                    module: &vb_shade_cs,
+                    entry: c"main",
+                    // The SAME 64-byte push constant `vb_resolve_pipeline` declares (view_proj)
+                    // -- `vb_shade`'s shading tail is character-identical (plan D3), so its
+                    // push-constant shape is too.
+                    push_constant_bytes: 64,
+                    bind_group_layout: Some(&self.vb_layout0),
+                    spec_constants: &[],
+                },
+                self.forward_layout1.set_layout(),
+                geometry_set.set_layout(),
+            )
+            .expect("invariant: VB shade compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_shade_cs);
+        }
+
+        self.vb_classify_count_pipeline = Some(vb_classify_count_pipeline);
+        self.vb_classify_scan_pipeline = Some(vb_classify_scan_pipeline);
+        self.vb_classify_scatter_pipeline = Some(vb_classify_scatter_pipeline);
+        self.vb_shade_pipeline = Some(vb_shade_pipeline);
     }
 
     /// Cheap, allocation-free steady-state check (asset-streaming plan F7 review W1):
@@ -4467,6 +4624,15 @@ impl GpuSceneBundles {
             vb_layout0: Some(&self.vb_layout0),
             vb_instance_ring: Some(&self.vb_instance_rings),
             vb_geometry_set,
+            // VB-P2 classification plan, rung P2a (dark infra): `Some` only AFTER
+            // `build_vb_classify_pipelines` ran (the SAME `vb_resolve_pipeline` `Option` shape
+            // above). Nothing reads these fields yet — `record_vb`/`declare_vb_graph` are
+            // untouched this rung; threaded here so a later rung (P2b/P2c) needs no further
+            // plumbing.
+            vb_classify_count_pipeline: self.vb_classify_count_pipeline.as_ref(),
+            vb_classify_scan_pipeline: self.vb_classify_scan_pipeline.as_ref(),
+            vb_classify_scatter_pipeline: self.vb_classify_scatter_pipeline.as_ref(),
+            vb_shade_pipeline: self.vb_shade_pipeline.as_ref(),
             // Multi-paradigm render-path plan, rung R1: the plain-POD conversion (see this
             // fn's `resolved_render_path` param doc for why it cannot be a `From` impl).
             resolved_render_path: to_gpu_resolved_render_path(&resolved_render_path),

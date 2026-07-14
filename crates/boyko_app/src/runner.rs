@@ -487,6 +487,12 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
                 // doc) — build it HERE, right after the table itself exists, before any frame
                 // records against it.
                 host.gpu.build_vb_resolve_pipeline(ctx, table.set());
+                // VB-P2 classification plan, rung P2a (dark infra): builds the classify/shade
+                // pipelines right alongside the fused resolve pipeline — needs the SAME
+                // geometry-table Set-2 layout `vb_shade` shares with `vb_resolve`. Nothing
+                // declares/records against them yet (`record_vb`/`declare_vb_graph` are
+                // untouched this rung).
+                host.gpu.build_vb_classify_pipelines(ctx, table.set());
                 boyko_render::MeshGeometryTableSlot(Some(table))
             }
             Err(e) => {

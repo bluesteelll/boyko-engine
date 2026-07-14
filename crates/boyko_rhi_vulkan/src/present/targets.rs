@@ -11,6 +11,7 @@ use boyko_rhi::enums::{BarrierAccess, BarrierStage};
 
 #[cfg(feature = "hwrt")]
 use crate::accel::BoundAccelStruct;
+use crate::compute::LOCAL_SIZE_X;
 use crate::device::VulkanContext;
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
@@ -457,6 +458,13 @@ pub struct GBufferTargets {
     /// [`Self::create`]'s TOP, right after [`Self::forward`] — VB REUSES `ForwardTargets` for its
     /// depth ring + Set-1 shadow set, see [`VbTargets`]'s doc). `None` under every other profile.
     pub(crate) vb: Option<VbTargets>,
+    /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2a (dark infra,
+    /// unwired): the packed `gClassify` buffer RING ([`VbClassifyTargets`]). `Some` iff
+    /// `profile == `[`TargetsProfile::VbMesh`]` (the SAME gate [`Self::vb`] uses — built at
+    /// [`Self::create`]'s TOP, right after [`Self::vb`]). `None` under every other profile.
+    /// Nothing declares/records against this buffer yet (`record_vb`/`declare_vb_graph` are
+    /// untouched this rung) — [`Self::vb_set0`] binds it at `b7`, bound-but-unread.
+    pub(crate) vb_classify: Option<VbClassifyTargets>,
     /// The extent the images were created at (so [`GBufferTargets::sync_gbuffer`] can
     /// detect a resize and reallocate).
     pub(crate) extent: VkExtent2D,
@@ -766,6 +774,103 @@ impl VbTargets {
         unsafe {
             for t in self.vb_id {
                 RhiDevice::destroy_texture(ctx, t);
+            }
+        }
+    }
+}
+
+/// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2a (dark infra,
+/// unwired). The material system's hard 16-bit addressing cap, mirrored here (host mirror of
+/// `boyko_render::material_table::MAX_MATERIAL_ROWS`) because this crate cannot depend on
+/// `boyko_render` (which sits ABOVE it in the dependency graph — the SAME plain-value boundary
+/// crossing `GBufferScene::vb_geometry_set`'s doc explains). The `gClassify` buffer's M-arrays
+/// (`counts`/`offsets`/`cursors`/`gbase`) are pre-sized to this cap (plan P1-2) so their
+/// sub-region layout is FIXED and never invalidated by `MaterialTable` growth. SHADER mirror:
+/// `shaders/vb_classify_common.hlsli`'s `VB_MAX_MATERIAL_ROWS` — keep both in sync.
+pub(crate) const VB_CLASSIFY_MAX_MATERIAL_ROWS: u64 = 1 << 16;
+
+/// VB-P2 classification plan, rung P2a. `group_to_mat[g] == VB_GROUP_SENTINEL` marks a
+/// dispatch group past `total_groups` (the plan's `fill` pass sentinel-fill, P1-1) — unused by
+/// this rung's dark infra (nothing writes/reads `gClassify` yet), kept here as the host-side
+/// mirror of `shaders/vb_classify_common.hlsli`'s own constant for a future rung's use.
+#[allow(dead_code)]
+pub(crate) const VB_GROUP_SENTINEL: u32 = 0xFFFF_FFFF;
+
+/// VB-P2 classification plan, rung P2a (dark infra, unwired): the packed `gClassify`
+/// byte-address buffer RING (one per in-flight frame — STORAGE | TRANSFER_DST,
+/// `MemoryLocation::DeviceLocal`, never mapped: a future rung's `fill`/`count`/`scan`/
+/// `scatter`/`vb_shade` passes are all GPU-side, no CPU read/write path is needed). Layout
+/// (word offsets): `[counts(MAX) | offsets(MAX) | cursors(MAX) | gbase(MAX) |
+/// group_to_mat(G+MAX) | pixel_list(w*h)]` — see `shaders/vb_classify_common.hlsli`'s header
+/// for the exact host<->shader sync-pinned offset formula this buffer's SIZE mirrors.
+///
+/// `group_to_mat`'s reserved capacity is `G + VB_CLASSIFY_MAX_MATERIAL_ROWS` (NOT `G +
+/// present_material_count`, the tighter per-frame live length the plan's D2 over-dispatch
+/// actually walks) — pre-sizing to the material system's hard cap keeps every offset from
+/// `pixel_list` onward FIXED across every frame, exactly like the M-arrays (P1-2). The extra
+/// reserved bytes vs a `present_material_count`-tight sizing are at most
+/// `VB_CLASSIFY_MAX_MATERIAL_ROWS * 4` = 256 KiB per FIF — negligible next to `pixel_list`'s
+/// own `w*h*4` bytes (~8 MiB at 1080p).
+pub(crate) struct VbClassifyTargets {
+    /// The packed classify buffer RING. Nothing reads or writes it this rung — `vb_set0`
+    /// binds `gclassify[fi]` at `b7`, bound-but-unread (the R5 "one shared layout object"
+    /// rule this crate's own VB Set-0 doc explains).
+    pub(crate) gclassify: [BoundBuffer; FRAMES_IN_FLIGHT],
+}
+
+impl VbClassifyTargets {
+    /// Allocates the `gClassify` buffer ring at `extent`, sized per this struct's doc.
+    /// Reverse-acquisition draining on partial failure (mirrors [`VbTargets::build`]'s own
+    /// loop).
+    fn build(ctx: &VulkanContext, extent: VkExtent2D) -> Result<Self, SwapchainError> {
+        // `G = ceil(w*h / 64)` — the SAME per-pixel dispatch-group count
+        // `GpuSceneBundles::dispatch_group_count_x` computes host-side (`LOCAL_SIZE_X` = 64,
+        // the classify/shade compute family's own group size).
+        let group_count_x = (extent.width * extent.height).div_ceil(LOCAL_SIZE_X);
+        let total_words = 5 * VB_CLASSIFY_MAX_MATERIAL_ROWS
+            + group_count_x as u64
+            + (extent.width as u64) * (extent.height as u64);
+        let total_bytes = total_words * 4;
+
+        let mut slots: [Option<BoundBuffer>; FRAMES_IN_FLIGHT] = [const { None }; FRAMES_IN_FLIGHT];
+        for slot in slots.iter_mut() {
+            match RhiDevice::create_buffer(
+                ctx,
+                &BufferDesc {
+                    size: total_bytes,
+                    usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+                    location: MemoryLocation::DeviceLocal,
+                },
+            ) {
+                Ok(b) => *slot = Some(b),
+                Err(e) => {
+                    // SAFETY: every drained slot was created on `ctx` above, referenced by no
+                    // submission (the build phase); `Option::take` leaves the slot `None` so
+                    // each is destroyed exactly once.
+                    unsafe {
+                        for built in slots.iter_mut() {
+                            if let Some(b) = built.take() {
+                                RhiDevice::destroy_buffer(ctx, b);
+                            }
+                        }
+                    }
+                    return Err(SwapchainError::DepthImage(e));
+                }
+            }
+        }
+        let gclassify: [BoundBuffer; FRAMES_IN_FLIGHT] =
+            slots.map(|s| s.expect("invariant: every VB classify buffer ring slot built before here"));
+        Ok(Self { gclassify })
+    }
+
+    /// # Safety
+    /// Every buffer was created on `ctx`, the device is idle (the caller's teardown waited),
+    /// and each is destroyed exactly once (by-value).
+    unsafe fn destroy(self, ctx: &VulkanContext) {
+        // SAFETY: per the contract `ctx` is live + idle and nothing references these buffers.
+        unsafe {
+            for b in self.gclassify {
+                RhiDevice::destroy_buffer(ctx, b);
             }
         }
     }
@@ -2087,6 +2192,10 @@ impl DeferredSets {
         // (`Some` iff `TargetsProfile::VbMesh`) — needed for `vb_set0`'s `gVbId` binding, which
         // must reference the SAME `vb.vb_id[i]` ring `record_vb` writes via the raster pass.
         vb: Option<&VbTargets>,
+        // VB-P2 classification plan, rung P2a: [`GBufferTargets::vb_classify`]'s already-built
+        // value (`Some` iff `TargetsProfile::VbMesh`, the SAME gate `vb` uses) — needed for
+        // `vb_set0`'s new `b7` binding (`gclassify[i]`, bound-but-unread this rung).
+        vb_classify: Option<&VbClassifyTargets>,
     ) -> Result<DeferredSets, SwapchainError> {
         // The marcher vocabulary set, written ONCE here (NO per-frame update). The
         // entry order matches the layout: SSBO @0, sampled depth @1, storage albedo @2,
@@ -2713,6 +2822,11 @@ impl DeferredSets {
         // @3, `Materials` @4, `gVbId` @5 (SAMPLED, paired with `scene.depth_sampler` as a
         // harmless bound-but-ignored placeholder — the shader's unfiltered `.Load`, the SAME
         // idiom `sdf_forward_set`'s own `gForwardDepth`@12 binding uses), `gLit` @6 (STORAGE).
+        //
+        // VB-P2 classification plan, rung P2a (dark infra): `b7` = `gclassify[i]` — bound but
+        // UNREAD by `vb_sky`/`vb_raster`/`vb_resolve`'s frozen SPIR-V (P2a's byte-identity
+        // requirement: every VB Set-0 pipeline shares this ONE layout object, R5, so a set with
+        // 8 entries binds cleanly to a pipeline built before `b7` existed).
         let vb_set0: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = if scene.path_is_vb() {
             let layout = scene.vb_layout0.expect("invariant: path_is_vb() requires scene.vb_layout0");
             let vb_instance_ring = scene
@@ -2724,6 +2838,9 @@ impl DeferredSets {
             let vb_id_ring = &vb
                 .expect("invariant: path_is_vb() implies TargetsProfile::VbMesh (vb is Some)")
                 .vb_id;
+            let gclassify_ring = &vb_classify
+                .expect("invariant: path_is_vb() implies TargetsProfile::VbMesh (vb_classify is Some)")
+                .gclassify;
             let mut vb_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] = [const { None }; FRAMES_IN_FLIGHT];
             let mut failure: Option<crate::error::VulkanError> = None;
             for (slot, dst) in vb_slots.iter_mut().enumerate() {
@@ -2738,6 +2855,7 @@ impl DeferredSets {
                         sampler: scene.depth_sampler,
                     },
                     BindGroupEntry::StorageImage { texture: &core.lit[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: &gclassify_ring[slot] },
                 ];
                 let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
                 match RhiDevice::create_bind_group(ctx, &desc) {
@@ -5159,18 +5277,44 @@ impl GBufferTargets {
             None
         };
 
-        // `forward` is built under EITHER `ForwardMesh` OR `VbMesh` — VB REUSES `ForwardTargets`
-        // verbatim for its depth ring + Set-1 shadow set (`VbTargets`'s doc). Explicit `match`
-        // (not `?`) because a failure here, under `VbMesh`, must first tear down the ALREADY-BUILT
-        // `vb` above.
-        let forward = if matches!(profile, TargetsProfile::ForwardMesh | TargetsProfile::VbMesh) {
-            match ForwardTargets::build(ctx, scene, extent) {
-                Ok(f) => Some(f),
+        // VB-P2 classification plan, rung P2a (dark infra): built ONLY under `VbMesh`, right
+        // after `vb` (the SAME gate, the SAME "sibling" placement `VbClassifyTargets`'s doc
+        // describes) — nothing else besides `vb` has been built yet, so a failure here only
+        // needs to tear down `vb`.
+        let vb_classify = if matches!(profile, TargetsProfile::VbMesh) {
+            match VbClassifyTargets::build(ctx, extent) {
+                Ok(v) => Some(v),
                 Err(e) => {
                     // SAFETY: `vb` (if built, under `VbMesh`) was created on `ctx` above,
                     // referenced by no submission; destroyed once on this edge.
                     if let Some(v) = vb {
                         unsafe { v.destroy(ctx) };
+                    }
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
+
+        // `forward` is built under EITHER `ForwardMesh` OR `VbMesh` — VB REUSES `ForwardTargets`
+        // verbatim for its depth ring + Set-1 shadow set (`VbTargets`'s doc). Explicit `match`
+        // (not `?`) because a failure here, under `VbMesh`, must first tear down the ALREADY-BUILT
+        // `vb_classify`/`vb` above.
+        let forward = if matches!(profile, TargetsProfile::ForwardMesh | TargetsProfile::VbMesh) {
+            match ForwardTargets::build(ctx, scene, extent) {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    // SAFETY: `vb_classify`/`vb` (if built, under `VbMesh`) were created on
+                    // `ctx` above, referenced by no submission; each destroyed once on this
+                    // edge, reverse acquisition (`vb_classify` then `vb`).
+                    unsafe {
+                        if let Some(vc) = vb_classify {
+                            vc.destroy(ctx);
+                        }
+                        if let Some(v) = vb {
+                            v.destroy(ctx);
+                        }
                     }
                     return Err(e);
                 }
@@ -5319,6 +5463,7 @@ impl GBufferTargets {
             smaa_imgs.as_ref(),
             forward.as_ref(),
             vb.as_ref(),
+            vb_classify.as_ref(),
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -5669,6 +5814,7 @@ impl GBufferTargets {
             vb_set0,
             forward,
             vb,
+            vb_classify,
             extent,
         })
     }
@@ -6027,6 +6173,12 @@ impl GBufferTargets {
             if let Some(f) = self.forward {
                 f.destroy(ctx);
             }
+            // VB-P2 classification plan, rung P2a: `VbClassifyTargets` was built right after
+            // `vb` (before `forward`), so it is destroyed BEFORE `vb` here (reverse
+            // acquisition). `Option`-guarded (`None` under every non-`VbMesh` profile).
+            if let Some(vc) = self.vb_classify {
+                vc.destroy(ctx);
+            }
             // Multi-paradigm render-path plan, rung R8: `VbTargets` was built FIRST in `create`
             // (before `forward`/`core`), so it is destroyed LAST here (reverse acquisition).
             // `Option`-guarded (`None` under every non-`VbMesh` profile).
@@ -6290,6 +6442,7 @@ mod tests {
             vb_set0: None,
             forward: None,
             vb: None,
+            vb_classify: None,
             extent: VkExtent2D::default(),
         }
     }
@@ -6379,6 +6532,7 @@ mod tests {
             vb_set0: None,
             forward: None,
             vb: None,
+            vb_classify: None,
             extent: VkExtent2D::default(),
         }
     }

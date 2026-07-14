@@ -2093,16 +2093,38 @@ pub struct GBufferScene<'a> {
     /// `sdf_forward_march_pipeline` already establishes), Set 2 = [`Self::vb_geometry_set`]'s
     /// layout.
     pub vb_resolve_pipeline: Option<&'a ComputePipeline>,
-    /// The VB-only Set-0 (core + images) bind-group LAYOUT — 7 bindings: `gVbInstances` @0
-    /// (VERTEX+COMPUTE, [`Self::vb_instance_ring`]), `instance_materials` @1 (COMPUTE,
-    /// [`Self::forward_instance_material_ring`] — the SAME per-instance-material ring the Forward
-    /// family already threads, indexed identically by global instance id), `Camera` @2
-    /// (VERTEX+COMPUTE+FRAGMENT, [`Self::camera_ring`]), `LightBuf` @3 (COMPUTE+FRAGMENT,
+    /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2a (dark infra,
+    /// unwired): the `count` classify compute pipeline (`vb_classify_count.comp.hlsl`) — a
+    /// 1-Vulkan-set pipeline built against [`Self::vb_layout0`]. `Some` only AFTER
+    /// `GpuSceneBundles::build_vb_classify_pipelines` ran (the SAME `Option` shape as
+    /// [`Self::vb_resolve_pipeline`]). UNREAD this rung — `record_vb`/`declare_vb_graph` are
+    /// untouched; threaded here so a later rung (P2b/P2c) needs no further plumbing.
+    pub vb_classify_count_pipeline: Option<&'a ComputePipeline>,
+    /// The `scan` classify compute pipeline (`vb_classify_scan.comp.hlsl`) — a 1-Vulkan-set
+    /// pipeline, the SAME `Option`/UNREAD rationale as [`Self::vb_classify_count_pipeline`].
+    pub vb_classify_scan_pipeline: Option<&'a ComputePipeline>,
+    /// The `scatter` classify compute pipeline (`vb_classify_scatter.comp.hlsl`) — a
+    /// 1-Vulkan-set pipeline, the SAME `Option`/UNREAD rationale as
+    /// [`Self::vb_classify_count_pipeline`].
+    pub vb_classify_scatter_pipeline: Option<&'a ComputePipeline>,
+    /// The `vb_shade` material-classified shading compute pipeline (`vb_shade.comp.hlsl`) — a
+    /// 3-Vulkan-set pipeline (Set 0 = [`Self::vb_layout0`], Set 1 = [`Self::forward_layout1`],
+    /// Set 2 = [`Self::vb_geometry_set`]'s layout), the SAME `Option`/UNREAD rationale as
+    /// [`Self::vb_classify_count_pipeline`].
+    pub vb_shade_pipeline: Option<&'a ComputePipeline>,
+    /// The VB-only Set-0 (core + images + classify) bind-group LAYOUT — 8 bindings:
+    /// `gVbInstances` @0 (VERTEX+COMPUTE, [`Self::vb_instance_ring`]), `instance_materials` @1
+    /// (COMPUTE, [`Self::forward_instance_material_ring`] — the SAME per-instance-material ring
+    /// the Forward family already threads, indexed identically by global instance id), `Camera`
+    /// @2 (VERTEX+COMPUTE+FRAGMENT, [`Self::camera_ring`]), `LightBuf` @3 (COMPUTE+FRAGMENT,
     /// [`Self::light_table`]), `Materials` @4 (COMPUTE, [`Self::material_table`]), `gVbId` @5
     /// (COMPUTE, SAMPLED, [`VbTargets::vb_id`](super::targets::VbTargets::vb_id)), `gLit` @6
     /// (COMPUTE, STORAGE, the shared `lit` target) — see `vb_resolve.comp.hlsl`'s own binding
-    /// table doc. [`GBufferTargets`] writes the per-FIF bind group against this layout once per
-    /// extent (the `forward_layout0` precedent). `None` rationale as [`Self::forward_pipeline`].
+    /// table doc. `gClassify` @7 (COMPUTE, STORAGE_BUFFER, the packed classify buffer — VB-P2
+    /// classification plan rung P2a; bound-but-unread by every pipeline's frozen SPIR-V except
+    /// the classify/`vb_shade` family). [`GBufferTargets`] writes the per-FIF bind group against
+    /// this layout once per extent (the `forward_layout0` precedent). `None` rationale as
+    /// [`Self::forward_pipeline`].
     pub vb_layout0: Option<&'a VulkanBindGroupLayout>,
     /// The RAW per-FIF `VbInstanceRow` (64 B) SSBO ring — Decision 0's VB-path instance row
     /// (byte-identical leading 48 bytes to `InstanceModelCol`, plus an appended `mesh_id` lane).

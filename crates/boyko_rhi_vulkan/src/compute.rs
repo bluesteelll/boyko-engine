@@ -734,6 +734,48 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2a (dark infra,
+    /// unwired): the `count` classify compute SPIR-V (`shaders/vb_classify_count.comp.hlsl`) —
+    /// one thread per composite pixel, `InterlockedAdd(counts[mat], 1)` for every mesh-covered
+    /// pixel's material id. A 1-set pipeline (Set 0 = `vb_layout0`, built via the generic
+    /// `RhiDevice::create_compute_pipeline`, plan P2-1 — no dedicated `_vb1` helper).
+    VB_CLASSIFY_COUNT_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_classify_count.comp.spv")
+}
+
+embed_spirv! {
+    /// VB-P2 classification plan, rung P2a: the `scan` classify compute SPIR-V
+    /// (`shaders/vb_classify_scan.comp.hlsl`) — a SINGLE workgroup performing the two chained
+    /// exclusive prefix sums (`counts->offsets`/`cursors`, `gc->gbase`+`group_to_mat` fill) over
+    /// the frame's live `[0, material_count)` M-array prefix. A 1-set pipeline (Set 0 =
+    /// `vb_layout0`).
+    VB_CLASSIFY_SCAN_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_classify_scan.comp.spv")
+}
+
+embed_spirv! {
+    /// VB-P2 classification plan, rung P2a: the `scatter` classify compute SPIR-V
+    /// (`shaders/vb_classify_scatter.comp.hlsl`) — one thread per composite pixel, claims a
+    /// `pixel_list` slot (`InterlockedAdd(cursors[mat], 1)`) and stores its linear pixel index.
+    /// A 1-set pipeline (Set 0 = `vb_layout0`).
+    VB_CLASSIFY_SCATTER_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_classify_scatter.comp.spv")
+}
+
+embed_spirv! {
+    /// VB-P2 classification plan, rung P2a: the `vb_shade` material-classified shading compute
+    /// SPIR-V (`shaders/vb_shade.comp.hlsl`) — `vb_resolve.comp.hlsl`'s body plus an ~8-line
+    /// classify-table pixel-selection prologue swap (plan D3, byte-identical by construction);
+    /// the shading tail is character-identical to [`VB_RESOLVE_SPV`]'s own source. A 3-set
+    /// pipeline: Set 0 = `vb_layout0`, Set 1 = the Forward-family shadow set (REUSED verbatim),
+    /// Set 2 = the Decision-0 geometry table's own Set — built via
+    /// [`crate::device::VulkanContext::create_compute_pipeline_vb`], mirroring
+    /// [`VB_RESOLVE_SPV`]'s own pipeline shape.
+    VB_SHADE_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_shade.comp.spv")
+}
+
+embed_spirv! {
     /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS vertex
     /// SPIR-V (`shaders/depth_prepass.vs.hlsl`) — a position-only subset of
     /// [`FORWARD_OPAQUE_VS_SPV`] (same instance SSBO + push shape, no normal/mat_id export).
@@ -1494,6 +1536,34 @@ pub fn vb_raster_fs_spirv() -> &'static [u32] {
 #[inline]
 pub fn vb_resolve_spirv() -> &'static [u32] {
     VB_RESOLVE_SPV.as_words()
+}
+
+/// VB-P2 classification plan, rung P2a: the `count` classify compute SPIR-V as a `u32` word
+/// stream, ready for [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module).
+#[inline]
+pub fn vb_classify_count_spirv() -> &'static [u32] {
+    VB_CLASSIFY_COUNT_SPV.as_words()
+}
+
+/// VB-P2 classification plan, rung P2a: the `scan` classify compute SPIR-V as a `u32` word
+/// stream.
+#[inline]
+pub fn vb_classify_scan_spirv() -> &'static [u32] {
+    VB_CLASSIFY_SCAN_SPV.as_words()
+}
+
+/// VB-P2 classification plan, rung P2a: the `scatter` classify compute SPIR-V as a `u32` word
+/// stream.
+#[inline]
+pub fn vb_classify_scatter_spirv() -> &'static [u32] {
+    VB_CLASSIFY_SCATTER_SPV.as_words()
+}
+
+/// VB-P2 classification plan, rung P2a: the `vb_shade` material-classified shading compute
+/// SPIR-V as a `u32` word stream.
+#[inline]
+pub fn vb_shade_spirv() -> &'static [u32] {
+    VB_SHADE_SPV.as_words()
 }
 
 /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS VERTEX
