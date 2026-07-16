@@ -803,6 +803,14 @@ fn load_slot(
     match PngTextureLoader::decode(&bytes) {
         Ok(mut data) => {
             data.color_space = spec.color_space;
+            // NORMAL-MAP CONVENTION (owner-set 2026-07-16): this engine's CANONICAL
+            // tangent-space normal convention is DIRECTX (green-down: +G = a slope facing
+            // image-BOTTOM) -- the Unreal Engine convention. The engine NEVER re-signs a
+            // normal map: not here, and not in the TEXTURED shaders (which read the map with
+            // no negation). An `assets/materials/<pack>/pbr/normal.png` is REQUIRED to already
+            // be DirectX-convention; OpenGL-convention downloads (`*-ogl` vendor files) are
+            // converted ONCE, offline, at asset-prep time (`scripts/normal_ogl_to_dx.py`).
+            // See that script + `gbuffer_mrt.fs.hlsl`'s GREEN-CHANNEL CONVENTION block.
             let handle = textures.register_texture(ctx, bindless, &data);
             let slot = textures.texture(handle).bindless_slot;
             println!("load_material_folder: loaded {} <- {}", spec.label, path.display());

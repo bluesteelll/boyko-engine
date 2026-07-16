@@ -249,30 +249,27 @@ PsOut main(PsIn input) {
     // matches `boyko_render::tangent`'s Lengyel `w` convention; THIS part of the basis IS
     // glTF/Mikktspace), sample + unpack + renormalize the tangent-space normal (trilinear
     // mip sampling denormalizes), then rotate it into world space via the TBN basis.
-    // `normal_slot == 0` keeps the geometric normal unperturbed. The sampled GREEN channel
-    // is separately negated below — see the GREEN-CHANNEL CONVENTION block: that negation
-    // is THIS ENGINE's own convention for OpenGL-style input maps, NOT glTF/Mikktspace.
+    // `normal_slot == 0` keeps the geometric normal unperturbed.
     //
-    // GREEN-CHANNEL CONVENTION (settled by the numeric real-bake oracle + the synthetic
-    // bump/marker ground-truth renders, 2026-07-12): the engine's native normal-map input
-    // convention is OpenGL-style (+G = a slope facing image-UP — the dominant third-party
-    // PBR convention), and under THIS engine's Lengyel bake the sampled green must be
-    // NEGATED. Why: on a v-down-parameterized mesh the real bake yields `w = +1` with
-    // `B = cross(N, T) * w` pointing image-DOWN (verified numerically on the actual
-    // `generate_tangents` output — NOT hand-derived), so a raw `+G` tilt would push the
-    // normal image-DOWN and a known-protruding OGL bump grid renders as vertically-inverted
-    // dents (the synthetic-marker render). Bevy renders the same file correctly WITHOUT a
-    // flip because its mikktspace tangents carry the OPPOSITE handedness on such meshes —
-    // the flip below reproduces the identical, physically-correct response in this basis.
-    // Brick-like content cannot adjudicate this convention (bump/dent ambiguity); only a
-    // known-geometry map can. DirectX-style (+G down) maps must be pre-flipped at pack time.
+    // GREEN-CHANNEL CONVENTION (owner-set 2026-07-16): this engine's CANONICAL tangent-space
+    // normal convention is DIRECTX -- green-down (+G = a slope facing image-BOTTOM), the
+    // Unreal Engine convention. NO in-shader negation is applied, and that is correct BY
+    // CONSTRUCTION: `generate_tangents` orients the bitangent `B` along +V, and +V is
+    // image-DOWN for this engine's v-down UV parameterizations (e.g. `uv_sphere`: v=0 at the
+    // north pole), so a canonical DirectX map's +G multiplies +B the physically-correct way
+    // as-is.
+    //
+    // OpenGL-convention source packs (green-up -- what third-party vendors ship, incl. the
+    // owner's `*-ogl` files) are CONVERTED ONCE AT LOAD by `boyko_render::texture`'s
+    // `load_slot` (green inverted; the analogue of Unreal's "Flip Green Channel" import
+    // option) -- the sign lives in the asset pipeline, never bent into this shader. See that
+    // fn's NORMAL-MAP CONVENTION block. This supersedes the 2026-07-12 in-shader negation.
     if (input.tex_normal != 0u) {
         float3 N = n;
         float3 T = normalize(input.world_T - dot(input.world_T, N) * N);
         float3 B = cross(N, T) * input.tex_w;
         float3 packed_n = gTextures[NonUniformResourceIndex(input.tex_normal)].Sample(gTexSampler, input.uv).xyz;
         float3 n_ts = normalize(packed_n * 2.0 - 1.0);
-        n_ts.y = -n_ts.y;
         n = normalize(T * n_ts.x + B * n_ts.y + N * n_ts.z);
     }
 #endif
