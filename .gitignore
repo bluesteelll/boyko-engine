@@ -25,3 +25,12 @@ graphify-out/
 # committed; see assets/materials/README.md for the folder convention).
 /assets/materials/*
 !/assets/materials/README.md
+
+# Pristine pre-conversion normal maps left behind by scripts/normal_ogl_to_dx.py.
+# The green-channel inversion is its own inverse, so the committed DirectX map fully
+# determines the OpenGL source — these backups are a local convenience, not history.
+*.ogl.bak
+
+# Local drop folder for third-party reference material (papers, vendor sample code).
+# Externally copyrighted and large — cite these from docs/ instead of vendoring them.
+/info/
