@@ -22,7 +22,9 @@ use boyko_app::prelude::*;
 use boyko_ecs::prelude::*;
 use boyko_macros::Resource;
 use boyko_render::light_system::LightTableGeneration;
-use boyko_render::{CsmCasterScratch, LightingConfig, MeshRenderScratch, ResolvedCsm, RhiContext};
+use boyko_render::{
+    CsmCasterBounds, CsmCasterScratch, LightingConfig, MeshRenderScratch, ResolvedCsm, RhiContext,
+};
 use boyko_scene::ViewUniform;
 
 /// The room camera's authored eye — must survive spawn → propagate → resolve.
@@ -189,6 +191,19 @@ fn room_smoke_ten_frames_then_clean_teardown() {
         app.world().resource::<LightingConfig>().csm_shadows,
         "the light-header CSM gate synced ON (lock-step with the armed depth pass)"
     );
+
+    // CSM auto-fit plan (`docs/CSM-AUTOFIT-PLAN.md`) rung C5, test T22 (first row):
+    // `reduce_caster_bounds` is now WIRED (`boyko_app::plugins`), but this scene never
+    // sets `fit_mode` (stays the plugin default `Fixed`), so the reducer's own 0%-gate
+    // (csm_caster.rs) returns `EMPTY` every frame. Asserting `total_batches > 0` HERE
+    // would CONTRADICT that gate — see the sibling
+    // `room_smoke_catch_all_fit.rs::room_smoke_catch_all_fit_folds_complete_caster_bounds`
+    // for the assertion that actually needs a non-`Fixed` mode to hold.
+    // What this pins: the Resource still exists (`resource::<T>()` panics otherwise) and
+    // is exactly the documented `EMPTY` seed under `Fixed` — no regression from wiring
+    // the reducer into a scene that never opts into a caster mode.
+    let bounds = *app.world().resource::<CsmCasterBounds>();
+    assert_eq!(bounds, CsmCasterBounds::EMPTY, "Fixed mode's 0%-gate: the reducer folds nothing");
 
     // The host probe: the depth pass was armed on presented frames, and the
     // light-upload gate actually GATED — a bounded number of catch-up uploads

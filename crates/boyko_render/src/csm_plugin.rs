@@ -81,3 +81,62 @@ impl Plugin for CsmPlugin {
         "boyko_render::CsmPlugin"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use core::f32::consts::FRAC_PI_3;
+
+    use boyko_ecs::ecs::core::app::App;
+    use boyko_ecs::ecs::core::system::Commands;
+    use boyko_math::{Affine3A, Vec3};
+    use boyko_scene::{Projection, ViewUniform};
+
+    use super::CsmPlugin;
+    use crate::csm_config::{CsmConfig, CsmFit, ResolvedCsm, resolve_csm};
+    use crate::light::DirectionalLight;
+
+    /// CSM auto-fit plan (`docs/CSM-AUTOFIT-PLAN.md`) rung C5, test T15 (disposition
+    /// finding I): a world that adds ONLY `CsmPlugin` — no `CsmCasterScratch`, and none
+    /// of `reduce_caster_bounds` / `CsmFitSet` / `CsmResolveSet`'s app wiring (that
+    /// lives in `boyko_app::plugins`, rung C5, not here) — must NOT panic in
+    /// `Res::get_param` fetching `CsmCasterBounds` / `CsmFitState` (the OLD design read
+    /// `CsmCasterScratch` directly and did panic there), and must degrade to exactly the
+    /// fit a direct `resolve_csm(cfg, view, sun, CsmFit::NONE)` call produces — a silent
+    /// no-op, never a crash (D7).
+    #[test]
+    fn bare_csm_plugin_world_runs_without_the_reducer() {
+        let mut app = App::new();
+        app.add_plugin(CsmPlugin);
+
+        // Scene-realistic `CsmConfig` — the same `cascade_count: 3` idiom every in-tree
+        // scene uses (e.g. `examples/room.rs:29`) — so the fit is actually EXERCISED
+        // rather than short-circuited by the plugin's own disabled (`cascade_count == 0`)
+        // seed. `fit_mode` is left untouched at the plugin default `Fixed`, which is
+        // exactly the "reducer not registered" scenario this test pins.
+        let cfg = CsmConfig { cascade_count: 3, ..CsmConfig::default() };
+        app.insert_resource(cfg);
+
+        let eye = Vec3::new(0.0, 2.0, 0.0);
+        let forward = Vec3::new(0.0, 0.0, -1.0);
+        let world_xf = Affine3A::look_at_rh(eye, eye + forward, Vec3::new(0.0, 1.0, 0.0));
+        let proj = Projection::Perspective { fov_y: FRAC_PI_3, aspect: 16.0 / 9.0, near: 0.1, far: 1000.0 };
+        let view = ViewUniform::from_camera(world_xf, proj);
+        app.insert_resource(view);
+
+        let sun_dir = [0.3_f32, -1.0, 0.2];
+        app.world_mut().run_system(move |mut cmds: Commands| {
+            cmds.spawn(DirectionalLight { direction: sun_dir, color: [1.0; 3], illuminance: 10_000.0 });
+        });
+
+        // 2 frames — the "silent no-op" must hold every frame, not just frame 0.
+        app.run_n(2);
+
+        let got = *app.world().resource::<ResolvedCsm>();
+        let want = resolve_csm(&cfg, &view, sun_dir, CsmFit::NONE);
+        assert_eq!(
+            got, want,
+            "a bare CsmPlugin world (no reducer wired) must degrade to today's Fixed fit, \
+             byte-identical to a direct CsmFit::NONE call"
+        );
+    }
+}

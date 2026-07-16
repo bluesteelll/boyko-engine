@@ -19,11 +19,11 @@ use boyko_render::instance_model::sync_prev_instance_model_cols;
 use boyko_render::MotionCamState;
 use boyko_render::light_system::LightTableStaging;
 use boyko_render::{
-    AssetRefcountPlugin, CsmCasterScratch, CsmPlugin, LightingConfig, LightingPlugin,
-    MeshRenderScratch, RayPlugin, Render3dPlugin, RenderPathPlugin, SdfPlugin, ShadowAtlasPlugin,
-    ShadowDenoisePlugin, SsaoPlugin, add_gpu_transform_pack, gather_mesh_draws,
-    gather_shadow_casters, snap_apply, sync_csm_light_gate, sync_punctual_light_gate,
-    sync_ssao_light_gate,
+    AssetRefcountPlugin, CsmCasterScratch, CsmFitSet, CsmPlugin, CsmResolveSet, LightingConfig,
+    LightingPlugin, MeshRenderScratch, RayPlugin, Render3dPlugin, RenderPathPlugin, SdfPlugin,
+    ShadowAtlasPlugin, ShadowDenoisePlugin, SsaoPlugin, add_gpu_transform_pack,
+    gather_mesh_draws, gather_shadow_casters, reduce_caster_bounds, snap_apply,
+    sync_csm_light_gate, sync_punctual_light_gate, sync_ssao_light_gate,
 };
 use boyko_scene::{CameraPlugin, FixedSet};
 
@@ -299,6 +299,26 @@ impl Plugin for EnginePlugins {
             b.add_system(sync_prev_instance_model_cols).before(pack);
             let casters = b.add_system(gather_shadow_casters).after(pack).key();
             b.add_system(sync_csm_light_gate).after(casters);
+            // CSM auto-fit plan (`docs/CSM-AUTOFIT-PLAN.md`) rung C5: `reduce_caster_bounds`
+            // is the UNWIRED EXPORTED API `CsmPlugin` deliberately does not register (mirrors
+            // `gather_shadow_casters` itself) — this is the app that co-registers it. `.after
+            // (casters)` folds THIS frame's finished gather output, not last frame's scratch
+            // (D7 — `CsmCasterScratch` is single-writer, `gather_shadow_casters` owns it).
+            // `.in_set(CsmFitSet)` gives `resolve_csm_cascades` (which joins `CsmResolveSet` in
+            // `CsmPlugin`, csm_plugin.rs:76) something to order against below. Without this
+            // registration `CsmCasterBounds` stays the `EMPTY` seed `CsmPlugin` inserts, so
+            // every `CsmFitMode` renders as `Fixed` (D7/T15) — never a panic, always a no-op.
+            b.add_system(reduce_caster_bounds).after(casters).in_set(CsmFitSet);
+            // `CsmFitSet → CsmResolveSet`: `resolve_csm_cascades` must observe THIS frame's
+            // folded bounds, not a one-frame-stale value (D11 — no accepted stagger, unlike
+            // the cold-owner-state cross-plugin staggers documented elsewhere in this file).
+            // Declared HERE (not inside `CsmPlugin`) because this closure is the first one that
+            // gives `CsmFitSet` a member; a `configure_set` inside `CsmPlugin` alone would warn
+            // W1501 (memberless set) in a bare-`CsmPlugin` world (D11). `App::add_systems_cfg`
+            // threads the SAME Main builder through every closure/plugin (app.rs:313-319), so
+            // this edge resolves against `CsmFitSet`'s membership above and `CsmResolveSet`'s
+            // membership in `CsmPlugin` regardless of registration order.
+            b.configure_set(CsmResolveSet).after(CsmFitSet);
             // The punctual header-gate ⇄ depth-pass lock-step (mirrors the csm sync): after the
             // SAME caster gather so the gate's caster predicate is THIS frame's. It reads
             // `ResolvedShadowAtlas.mode_word` (written by `resolve_shadow_atlas` in
