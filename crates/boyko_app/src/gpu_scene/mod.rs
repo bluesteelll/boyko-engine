@@ -50,7 +50,8 @@ use boyko_rhi_vulkan::compute::{
     SSAO_QUALITY_COUNT, SSAO_QUALITY_HIGH, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM,
     ssaa_downsample_fs_spirv, taa_resolve_spirv, tile_grid_extent, VIEWT_FROM_DEPTH_PUSH_BYTES,
     vb_classify_count_spirv, vb_classify_scan_spirv, vb_classify_scatter_spirv,
-    vb_raster_fs_spirv, vb_raster_vs_spirv, vb_resolve_spirv, vb_shade_spirv, viewt_from_depth_spirv,
+    vb_raster_fs_spirv, vb_raster_vs_spirv, vb_resolve_spirv, vb_shade_spirv, vb_shade_tex_spirv,
+    viewt_from_depth_spirv,
 };
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::ffi::VkDescriptorSet;
@@ -910,6 +911,17 @@ pub(crate) struct GpuSceneBundles {
     /// [`Self::vb_resolve_pipeline`]'s own pipeline shape (Set 0 = `vb_layout0`, Set 1 =
     /// `forward_layout1`, Set 2 = the geometry table's own Set).
     vb_shade_pipeline: Option<ComputePipeline>,
+    /// Textured-PBR rung TV0 (`RENDER-PARITY-PLAN.md` §2.3): the `vb_shade` TEXTURED-variant
+    /// shading compute pipeline (`vb_shade.comp.hlsl`, `-D TEXTURED=1`, `vb_shade_tex.comp.spv`)
+    /// — a 4-set pipeline built via [`VulkanContext::create_compute_pipeline_vb_textured`]
+    /// (Set 0 = `vb_layout0`, Set 1 = `forward_layout1`, Set 2 = the geometry table's own Set,
+    /// Set 3 = the shared bindless texture-array table's Set — REUSED verbatim, R5). Built
+    /// LAZILY by [`Self::build_vb_shade_textured_pipeline`], the SAME deferred-build shape as
+    /// [`Self::vb_shade_pipeline`] widened by ONE more dependency (the bindless table's Set-3
+    /// layout, which ALSO does not exist at [`Self::boot`]'s call site). `None` until that fn
+    /// runs (a `VisibilityBuffer`-resolved boot with BOTH the geometry table AND the bindless
+    /// table armed).
+    vb_shade_tex_pipeline: Option<ComputePipeline>,
     /// The per-slot VB instance-model SSBO ring ([`INSTANCE_CAPACITY`] ×
     /// [`boyko_render::instance_model::VB_INSTANCE_ROW_BYTES`] (64 B) each, zero-seeded) — a
     /// DEDICATED ring, distinct from [`Self::instance_rings`] (`InstanceModelCol`, 48 B).
@@ -3227,6 +3239,9 @@ impl GpuSceneBundles {
             vb_classify_scan_pipeline: None,
             vb_classify_scatter_pipeline: None,
             vb_shade_pipeline: None,
+            // Textured-PBR rung TV0: built LAZILY by `Self::build_vb_shade_textured_pipeline`
+            // — see that fn's doc.
+            vb_shade_tex_pipeline: None,
             vb_instance_rings,
         }
     }
@@ -3524,6 +3539,58 @@ impl GpuSceneBundles {
         self.vb_classify_scan_pipeline = Some(vb_classify_scan_pipeline);
         self.vb_classify_scatter_pipeline = Some(vb_classify_scatter_pipeline);
         self.vb_shade_pipeline = Some(vb_shade_pipeline);
+    }
+
+    /// Textured-PBR rung TV0 (`RENDER-PARITY-PLAN.md` §2.3): builds
+    /// [`Self::vb_shade_tex_pipeline`] (the `vb_shade.comp.hlsl` `-D TEXTURED=1` compute
+    /// pipeline) — deferred past [`Self::boot`]/[`Self::build_vb_classify_pipelines`] for a
+    /// widened version of the SAME reason those two are (their own docs): this pipeline needs
+    /// BOTH the Decision-0 geometry table's Set-2 layout (`geometry_set`, constructed by
+    /// `boyko_app::runner` only on a `VisibilityBuffer`-resolved boot) AND the shared bindless
+    /// texture-array table's Set-3 layout (`bindless.set().set_layout()`, built even later —
+    /// after `app.finish()` drains every plugin/startup system, `Self::build_textured_resources`'s
+    /// own doc). Called ONCE, from `runner.rs`, immediately after
+    /// [`Self::build_textured_resources`] — the LAST of the three dependencies to become
+    /// available — gated on the geometry table existing (mirrors
+    /// [`Self::build_vb_classify_pipelines`]'s own call-site gate).
+    ///
+    /// # Panics
+    /// Panics (`expect("invariant: ...")`) on any RHI create failure — mirrors
+    /// [`Self::boot`]'s contract (a device OOM at scene-boot time is a setup failure).
+    pub(crate) fn build_vb_shade_textured_pipeline(
+        &mut self,
+        ctx: &VulkanContext,
+        geometry_set: &boyko_rhi_vulkan::geometry_bindless::VulkanGeometryBindlessSet,
+        bindless: &BindlessTextureTable,
+    ) {
+        let device = ctx;
+
+        let vb_shade_tex_cs = RhiDevice::create_shader_module(device, vb_shade_tex_spirv())
+            .expect("invariant: VB shade TEXTURED compute shader module create");
+        let vb_shade_tex_pipeline = ctx
+            .create_compute_pipeline_vb_textured(
+                &ComputePipelineDesc {
+                    module: &vb_shade_tex_cs,
+                    entry: c"main",
+                    // The SAME 64-byte push constant `vb_shade_pipeline`/`vb_resolve_pipeline`
+                    // declare (view_proj) -- the TEXTURED shading tail reads the SAME geometry-
+                    // fetch reprojection matrix, unchanged shape.
+                    push_constant_bytes: 64,
+                    bind_group_layout: Some(&self.vb_layout0),
+                    spec_constants: &[],
+                },
+                self.forward_layout1.set_layout(),
+                geometry_set.set_layout(),
+                bindless.set().set_layout(),
+            )
+            .expect("invariant: VB shade TEXTURED compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_shade_tex_cs);
+        }
+
+        self.vb_shade_tex_pipeline = Some(vb_shade_tex_pipeline);
     }
 
     /// Cheap, allocation-free steady-state check (asset-streaming plan F7 review W1):
@@ -4065,11 +4132,15 @@ impl GpuSceneBundles {
         // hot inner loop) rather than cached at boot, so a running process can be toggled by
         // re-launch without a rebuild.
         let vb_force_classified = std::env::var("BOYKO_VB_FORCE_CLASSIFIED").is_ok();
-        // TV0 will OR-in the VB textured-material gate here (a VB-specific
-        // `mesh_tex_active_this_frame`, once VB textures exist) — no such gate exists yet, so
-        // production stays `vb_use_classified == vb_force_classified` (`false` unless the env
-        // var is set) and the fast fused `vb_resolve` shades every VB frame (P1-4's perf point).
-        let vb_use_classified = vb_force_classified;
+        // Textured-PBR rung TV0: the VB sibling of `any_textured_material`'s own
+        // `raster_pipeline_tex`/`tex_bind_group`/`bindless_set` gating below — `true` iff THIS
+        // frame's gather bound a non-zero material texture slot AND the TEXTURED `vb_shade`
+        // pipeline + the TEXTURED resources both exist (mirrors `GBufferScene::vb_tex_active`'s
+        // own condition, evaluated here pre-construction since `GBufferScene` does not exist
+        // yet at this seam).
+        let vb_tex_active_this_frame =
+            any_textured_material && self.vb_shade_tex_pipeline.is_some() && self.tex.is_some();
+        let vb_use_classified = vb_force_classified || vb_tex_active_this_frame;
 
         // Multi-paradigm render-path plan, rung R3b: the `viewt_from_depth` push's mesh-depth
         // ray-t normalizer needs THIS frame's camera mode — read from the SAME `cam_eye.w` lane
@@ -4655,6 +4726,13 @@ impl GpuSceneBundles {
             // selector (`GBufferScene::vb_use_classified`'s own doc) — the per-frame local
             // computed above.
             vb_use_classified,
+            // Textured-PBR rung TV0: the TEXTURED `vb_shade` pipeline + the raw TEXTURED
+            // instance-material ring, threaded the SAME way `raster_pipeline_tex`/`bindless_set`
+            // above are — `Some` iff `self.tex` exists (device-agnostic, unconditioned on
+            // `any_textured_material`: `GBufferTargets` needs the ring reference to build
+            // `vb_set0_tex` once per extent, independent of any SPECIFIC frame's texture usage).
+            vb_shade_tex_pipeline: self.vb_shade_tex_pipeline.as_ref(),
+            vb_tex_instance_material_ring: self.tex.as_ref().map(|t| &t.tex_instance_material_rings),
             // Multi-paradigm render-path plan, rung R1: the plain-POD conversion (see this
             // fn's `resolved_render_path` param doc for why it cannot be a `From` impl).
             resolved_render_path: to_gpu_resolved_render_path(&resolved_render_path),

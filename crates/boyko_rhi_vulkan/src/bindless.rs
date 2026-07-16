@@ -204,19 +204,25 @@ pub fn create_bindless_texture_set(ctx: &VulkanContext) -> Result<VulkanBindless
     let device = ctx.device();
     let fns = ctx.device_fns();
 
+    // Both bindings are visible to FRAGMENT (the Deferred `gbuffer_mrt.fs` TEXTURED consumer)
+    // AND COMPUTE: rung TV0's `vb_shade_tex.comp` reuses this SAME bindless layout OBJECT (R5)
+    // as its Set 3. Without `COMPUTE_BIT` the compute stage is not permitted to touch
+    // `gTextures[]`/`gTexSampler`, so every `SampleGrad` silently returns 0 on a validation-off
+    // device — the TV0 all-black-textured-sphere bug. Widening only ADDS a stage: the Deferred
+    // fragment path (and its goldens) is byte-unaffected.
     let bindings = [
         VkDescriptorSetLayoutBinding {
             binding: BINDLESS_IMAGE_BINDING,
             descriptor_type: VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
             descriptor_count: BINDLESS_TEXTURE_CAPACITY,
-            stage_flags: VK_SHADER_STAGE_FRAGMENT_BIT,
+            stage_flags: VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
             p_immutable_samplers: ptr::null(),
         },
         VkDescriptorSetLayoutBinding {
             binding: BINDLESS_SAMPLER_BINDING,
             descriptor_type: VK_DESCRIPTOR_TYPE_SAMPLER,
             descriptor_count: 1,
-            stage_flags: VK_SHADER_STAGE_FRAGMENT_BIT,
+            stage_flags: VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT,
             // Immutable: baked into the layout, never written via
             // `vkUpdateDescriptorSets` — `&sampler` outlives this call (a local
             // alive for the whole function).

@@ -446,6 +446,20 @@ pub struct GBufferTargets {
     /// [`ForwardTargets::set1`] (the shadow set, reused verbatim); Set 2 is
     /// [`GBufferScene::vb_geometry_set`] (the Decision-0 geometry table, bound directly — no ring).
     pub(crate) vb_set0: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Textured-PBR rung TV0 (`RENDER-PARITY-PLAN.md` §2.3): the `vb_shade` TEXTURED-variant
+    /// Set-0 vocabulary descriptor set RING, written ONCE against
+    /// [`GBufferScene::vb_layout0`] — a DISTINCT descriptor SET instance from [`Self::vb_set0`]
+    /// against the SAME layout object (binding 1 points at
+    /// [`GBufferScene::vb_tex_instance_material_ring`]'s wider `PerInstanceMaterialTex` ring
+    /// instead of [`GBufferScene::forward_instance_material_ring`]'s `PerInstanceMaterial` one;
+    /// every other entry is IDENTICAL to `vb_set0`'s own). `Some` iff [`GBufferScene::path_is_vb`]
+    /// holds AND [`GBufferScene::vb_tex_instance_material_ring`] AND
+    /// [`GBufferScene::vb_shade_tex_pipeline`] are both `Some` (the TEXTURED resources + the
+    /// TEXTURED `vb_shade` pipeline both exist — mirrors `vb_set0`'s own `path_is_vb` gate,
+    /// narrowed further). Built right after `vb_set0` (both need `lit[i]` + `vb.vb_id[i]`); the
+    /// recorder selects `vb_set0_tex[self.frame_index]` in place of `vb_set0` when
+    /// [`GBufferScene::vb_tex_active`] holds this frame.
+    pub(crate) vb_set0_tex: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Multi-paradigm render-path plan, rung R4b-b — the Forward v1 mesh path's OWN depth image
     /// ring + descriptor sets ([`ForwardTargets`]). `Some` iff `profile ==
     /// `[`TargetsProfile::ForwardMesh`]` (built at [`Self::create`]'s TOP, before the unconditional
@@ -2135,6 +2149,12 @@ struct DeferredSets {
     /// (both need `core.lit[i]`), so its own error path tears down every prior set including
     /// `sdf_forward_set`.
     vb_set0: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Textured-PBR rung TV0: the `vb_shade` TEXTURED-variant Set-0 vocabulary set — `None`
+    /// unless `vb_set0` is also built AND both [`GBufferScene::vb_tex_instance_material_ring`]/
+    /// [`GBufferScene::vb_shade_tex_pipeline`] are `Some`. Built immediately after `vb_set0`
+    /// (both need `core.lit[i]` + `vb.vb_id[i]`), so its own error path tears down every prior
+    /// set including `vb_set0`.
+    vb_set0_tex: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     #[cfg(feature = "hwrt")]
     resolve_set_hwrt: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Anti-aliasing Stage 1: the FXAA INPUT set RING, `None` when AA is off ([`Self::build`]'s
@@ -2913,6 +2933,110 @@ impl DeferredSets {
             None
         };
 
+        // Textured-PBR rung TV0 (`RENDER-PARITY-PLAN.md` §2.3): the `vb_shade` TEXTURED-variant
+        // Set-0 vocabulary RING — a DISTINCT descriptor SET instance from `vb_set0` against the
+        // SAME `vb_layout0` layout object (R5: Vulkan's `STORAGE_BUFFER` binding shape carries no
+        // element-stride constraint, so binding `vb_tex_instance_material_ring` — the wider
+        // `PerInstanceMaterialTex` ring — at binding 1 needs no second layout). Every OTHER entry
+        // is IDENTICAL to `vb_set0`'s own. Built immediately after `vb_set0` (both need
+        // `core.lit`/`vb.vb_id`, the SAME "needs `core`" point). `None` unless `vb_set0` itself
+        // was built AND BOTH `scene.vb_tex_instance_material_ring`/`scene.vb_shade_tex_pipeline`
+        // are `Some` (the TEXTURED resources + the TEXTURED `vb_shade` pipeline both exist).
+        let vb_set0_tex: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = if scene.path_is_vb()
+            && let (Some(tex_material_ring), Some(_)) =
+                (scene.vb_tex_instance_material_ring, scene.vb_shade_tex_pipeline)
+        {
+            let layout = scene.vb_layout0.expect("invariant: path_is_vb() requires scene.vb_layout0");
+            let vb_instance_ring = scene
+                .vb_instance_ring
+                .expect("invariant: path_is_vb() requires scene.vb_instance_ring");
+            let vb_id_ring = &vb
+                .expect("invariant: path_is_vb() implies TargetsProfile::VbMesh (vb is Some)")
+                .vb_id;
+            let gclassify_ring = &vb_classify
+                .expect("invariant: path_is_vb() implies TargetsProfile::VbMesh (vb_classify is Some)")
+                .gclassify;
+            let mut vb_tex_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+                [const { None }; FRAMES_IN_FLIGHT];
+            let mut failure: Option<crate::error::VulkanError> = None;
+            for (slot, dst) in vb_tex_slots.iter_mut().enumerate() {
+                let entries = [
+                    BindGroupEntry::StorageBuffer { buffer: &vb_instance_ring[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: &tex_material_ring[slot] },
+                    BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: scene.light_table },
+                    BindGroupEntry::StorageBuffer { buffer: scene.material_table },
+                    BindGroupEntry::SampledImage {
+                        texture: &vb_id_ring[slot],
+                        sampler: scene.depth_sampler,
+                    },
+                    BindGroupEntry::StorageImage { texture: &core.lit[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: &gclassify_ring[slot] },
+                ];
+                let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
+                match RhiDevice::create_bind_group(ctx, &desc) {
+                    Ok(g) => *dst = Some(g),
+                    Err(e) => {
+                        failure = Some(e);
+                        break;
+                    }
+                }
+            }
+            if let Some(e) = failure {
+                // SAFETY: the vb-tex slots already built [0..slot) + `vb_set0` (fully built) +
+                // the sdf-forward + present + (optional) ddgi-update/ssao/cull + the resolve &
+                // vocab rings were created on `ctx`, referenced by no submission; each destroyed
+                // exactly once (reverse acquisition). The optional sets are `Option`-guarded; the
+                // images are owned by the caller.
+                unsafe {
+                    for s in vb_tex_slots.iter_mut() {
+                        if let Some(g) = s.take() {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    if let Some(vs) = vb_set0 {
+                        for g in vs {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    if let Some(sfs) = sdf_forward_set {
+                        for g in sfs {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    for g in present_set {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                    if let Some(du) = ddgi_update_set {
+                        RhiDevice::destroy_bind_group(ctx, du);
+                    }
+                    if let Some(ss) = ssao_set {
+                        for g in ss {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    if let Some(cs) = cull_set {
+                        for g in cs {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    for g in resolve_set {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                    for g in vocab_set {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                }
+                return Err(SwapchainError::DepthImage(e));
+            }
+            Some(
+                vb_tex_slots
+                    .map(|s| s.expect("invariant: every vb-tex Set-0 ring slot built before reaching here")),
+            )
+        } else {
+            None
+        };
+
         // R2a-4b: the HWRT-variant resolve set RING — built ONLY when the scene wires BOTH the
         // 21-binding HWRT resolve layout AND the per-FIF TLAS handles (i.e. under `feature = "hwrt"`
         // + `ctx.ray_query_enabled()` + config HardwareTri). `None` on every software path ⇒ the
@@ -3501,6 +3625,7 @@ impl DeferredSets {
             present_set,
             sdf_forward_set,
             vb_set0,
+            vb_set0_tex,
             #[cfg(feature = "hwrt")]
             resolve_set_hwrt,
             fxaa_set,
@@ -3562,6 +3687,15 @@ impl DeferredSets {
             #[cfg(feature = "hwrt")]
             if let Some(hs) = self.resolve_set_hwrt {
                 for g in hs {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            // Textured-PBR rung TV0: the `vb_shade` TEXTURED-variant Set-0 vocabulary set,
+            // `Option`-guarded (present only when `scene.path_is_vb()` held AND the TEXTURED
+            // resources + TEXTURED `vb_shade` pipeline both exist). Built AFTER `vb_set0` (so
+            // destroyed BEFORE it, reverse acquisition).
+            if let Some(vt) = self.vb_set0_tex {
+                for g in vt {
                     RhiDevice::destroy_bind_group(ctx, g);
                 }
             }
@@ -5646,6 +5780,7 @@ impl GBufferTargets {
             present_set,
             sdf_forward_set,
             vb_set0,
+            vb_set0_tex,
             #[cfg(feature = "hwrt")]
             resolve_set_hwrt,
             fxaa_set,
@@ -5812,6 +5947,7 @@ impl GBufferTargets {
             present_set,
             sdf_forward_set,
             vb_set0,
+            vb_set0_tex,
             forward,
             vb,
             vb_classify,
@@ -6074,6 +6210,7 @@ impl GBufferTargets {
                 present_set: self.present_set,
                 sdf_forward_set: self.sdf_forward_set,
                 vb_set0: self.vb_set0,
+                vb_set0_tex: self.vb_set0_tex,
                 #[cfg(feature = "hwrt")]
                 resolve_set_hwrt: self.resolve_set_hwrt,
                 fxaa_set: self.fxaa_set,
@@ -6440,6 +6577,7 @@ mod tests {
             present_set: bg_ring(),
             sdf_forward_set: None,
             vb_set0: None,
+            vb_set0_tex: None,
             forward: None,
             vb: None,
             vb_classify: None,
@@ -6530,6 +6668,7 @@ mod tests {
             present_set: bg_ring(),
             sdf_forward_set: None,
             vb_set0: None,
+            vb_set0_tex: None,
             forward: None,
             vb: None,
             vb_classify: None,

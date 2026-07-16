@@ -897,6 +897,7 @@ impl<'ctx> Renderer<'ctx> {
                             view,
                             extent,
                             present_extent,
+                            aa_extent,
                             clear,
                             scene,
                             targets,

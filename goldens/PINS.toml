@@ -368,3 +368,47 @@ BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\tmp\vb_sdf_only.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
+[vb_mesh_tex]
+# Textured-PBR rung TV0 (RENDER-PARITY-PLAN.md Sec 2.3 / VB-P2-CLASSIFICATION-PLAN.md): the
+# VisibilityBuffer TEXTURED golden -- [vb_mesh]'s five-sphere scene with a REAL textured
+# material (crates/boyko_app/assets/pbr_fixtures/synth_bumps) shared across four instances,
+# rendered through RenderPath::VisibilityBuffer x GeometryLegs::Mesh. See
+# crates/boyko_app/tests/vb_mesh_tex.rs.
+#
+# Textures force GBufferScene::vb_tex_active() -> vb_use_classified onto the material-classified
+# vb_shade_tex.comp.spv pipeline automatically (no BOYKO_VB_FORCE_CLASSIFIED needed): Set 0 binds
+# vb_set0_tex (the wider PerInstanceMaterialTex ring at b1, against the SAME vb_layout0 layout
+# object as the base vb_set0, R5), Set 3 adds the shared bindless texture-array table (the SAME
+# layout object gbuffer_mrt.fs.hlsl's TEXTURED variant binds).
+#
+# This pin is NOT byte-comparable to any other pin: it is its own frozen bytes, and what makes
+# those bytes CORRECT is VB-vs-Deferred parity on an IDENTICAL scene. vb_mesh_tex.rs's eval fn
+# (vb_mesh_tex_aa_screenshot_dump, BOYKO_PATH=vb|deferred) renders both halves from the same
+# `setup`, which is the only harness that can: the launcher's BOYKO_RENDER_PATH seam is applied
+# inside EnginePlugins::build(), so a test's own post-add_plugins insert_resource wins over it.
+# Measured at bless (synth_bumps, 512, AA off): mean |delta| 0.030/255, max 3/255, zero pixels
+# over 8 -- the residual is sampler ULP + shading-order, not a path difference. Re-checked on the
+# alley-brick-wall pack (640 and 1280 solo): max 5-6/255, same verdict.
+#
+# BLESSED 2026-07-16 after the owner's visual sign-off (five-sphere synth_bumps dump + the
+# Deferred side-by-side + a 1280 solo brick close-up). synth_bumps' normal.png is the DirectX
+# conversion of the baker's OpenGL output (scripts/normal_ogl_to_dx.py) -- the engine re-signs
+# nothing, so re-baking that fixture WITHOUT re-converting would move these bytes and invert the
+# relief this golden exists to prove. sha256_hwrt EQUALS sha256_software here: the scene has no
+# shadow receivers (no ground plane), so the ray backend has nothing to change -- kept as its own
+# pin so a future scene edit cannot silently drop the HW-RT leg's coverage.
+crate           = "boyko-app"
+test_binary     = "vb_mesh_tex"
+test_name       = "vb_mesh_tex_screenshot_dump"
+bmp             = "D:\\tmp\\vb_mesh_tex.bmp"
+width           = 512
+height          = 512
+sha256_software = "5d8f8854cfb123d14d04c2cc0977364714a1916e2314ccb9248956e6456092b6"
+sha256_hwrt     = "5d8f8854cfb123d14d04c2cc0977364714a1916e2314ccb9248956e6456092b6"
+
+[vb_mesh_tex.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_tex.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"

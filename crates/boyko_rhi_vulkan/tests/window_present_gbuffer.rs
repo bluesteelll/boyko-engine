@@ -2300,6 +2300,10 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // VB-P2 classification plan, rung P2c: unread by this harness (never resolves VB) —
         // `false` (the fused `vb_resolve` default) is the honest value for a non-VB fixture.
         vb_use_classified: false,
+        // Textured-PBR rung TV0: unread by this harness (never resolves VB, the same rationale
+        // as the VB fields above).
+        vb_shade_tex_pipeline: None,
+        vb_tex_instance_material_ring: None,
         tiles_buffer: &tiles_buffer,
         // Brick bindings 9..=14: the ACTIVATED clip-map's REAL per-level resources. Level 0's grid +
         // atlas at @9/@10, level 1 at @11/@12, level 2 at @13/@14 — the genuine 3-level cache (NOT the
@@ -3323,6 +3327,10 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // VB-P2 classification plan, rung P2c: unread by this harness (never resolves VB) —
         // `false` (the fused `vb_resolve` default) is the honest value for a non-VB fixture.
         vb_use_classified: false,
+        // Textured-PBR rung TV0: unread by this harness (never resolves VB, the same rationale
+        // as the VB fields above).
+        vb_shade_tex_pipeline: None,
+        vb_tex_instance_material_ring: None,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),
@@ -8270,6 +8278,10 @@ fn run_showcase_body_ddgi(
         // VB-P2 classification plan, rung P2c: unread by this harness (never resolves VB) —
         // `false` (the fused `vb_resolve` default) is the honest value for a non-VB fixture.
         vb_use_classified: false,
+        // Textured-PBR rung TV0: unread by this harness (never resolves VB, the same rationale
+        // as the VB fields above).
+        vb_shade_tex_pipeline: None,
+        vb_tex_instance_material_ring: None,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),
@@ -9712,6 +9724,10 @@ fn run_showcase_body(
         // VB-P2 classification plan, rung P2c: unread by this harness (never resolves VB) —
         // `false` (the fused `vb_resolve` default) is the honest value for a non-VB fixture.
         vb_use_classified: false,
+        // Textured-PBR rung TV0: unread by this harness (never resolves VB, the same rationale
+        // as the VB fields above).
+        vb_shade_tex_pipeline: None,
+        vb_tex_instance_material_ring: None,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
         atlas: clipmap.atlas(0).texture(),

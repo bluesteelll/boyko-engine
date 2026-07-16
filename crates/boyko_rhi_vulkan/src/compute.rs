@@ -776,6 +776,20 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// Textured-PBR rung TV0 (`RENDER-PARITY-PLAN.md` §2.3): the `vb_shade` TEXTURED-variant
+    /// shading compute SPIR-V (`shaders/vb_shade.comp.hlsl`, `-D TEXTURED=1`) — [`VB_SHADE_SPV`]'s
+    /// SAME source, splicing a bindless-texture material eval (Set 3) into the material-eval
+    /// locals, a near-verbatim copy of `gbuffer_mrt.fs.hlsl`'s own TEXTURED block. A 4-set
+    /// pipeline: Set 0 = `vb_layout0` (a DISTINCT descriptor SET against the SAME layout object,
+    /// binding the wider `PerInstanceMaterialTex` ring at b1), Set 1 = the Forward-family shadow
+    /// set (REUSED verbatim), Set 2 = the Decision-0 geometry table's own Set, Set 3 = the shared
+    /// bindless texture-array table (REUSED verbatim, R5) — built via
+    /// [`crate::device::VulkanContext::create_compute_pipeline_vb_textured`].
+    VB_SHADE_TEX_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_shade_tex.comp.spv")
+}
+
+embed_spirv! {
     /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS vertex
     /// SPIR-V (`shaders/depth_prepass.vs.hlsl`) — a position-only subset of
     /// [`FORWARD_OPAQUE_VS_SPV`] (same instance SSBO + push shape, no normal/mat_id export).
@@ -1564,6 +1578,13 @@ pub fn vb_classify_scatter_spirv() -> &'static [u32] {
 #[inline]
 pub fn vb_shade_spirv() -> &'static [u32] {
     VB_SHADE_SPV.as_words()
+}
+
+/// Textured-PBR rung TV0: the `vb_shade` TEXTURED-variant shading compute SPIR-V as a `u32`
+/// word stream.
+#[inline]
+pub fn vb_shade_tex_spirv() -> &'static [u32] {
+    VB_SHADE_TEX_SPV.as_words()
 }
 
 /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS VERTEX

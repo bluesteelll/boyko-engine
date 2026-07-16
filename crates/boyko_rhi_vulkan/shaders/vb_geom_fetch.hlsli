@@ -37,7 +37,9 @@
 //
 // `Vertex` (host: `boyko_render::mesh::Vertex`, 64 B): `position` @0 (float3), `normal` @12
 // (float3), `color` @24 (float4), `uv` @40 (float2), `tangent` @48 (float4). This file reads
-// `position`/`normal`/`color`/`uv` (unread: `tangent` — no TEXTURED normal-mapping this rung).
+// `position`/`normal`/`color`/`uv` unconditionally; TV0 rung (`RENDER-PARITY-PLAN.md` §2.3)
+// ALSO reads `tangent` under `#ifdef TEXTURED` (the world-tangent + handedness the TBN normal
+// map needs) — the base (non-`TEXTURED`) compile leaves it unread, byte-frozen.
 
 struct VbInstanceRow {
     float4 r0;
@@ -86,17 +88,21 @@ uint vb_load_index(uint mesh_id, uint idx, uint index_width) {
     return ib.Load(idx * 4u);
 }
 
-// One re-fetched mesh vertex (the fields this pipeline actually reads — `tangent` is skipped,
-// no TEXTURED normal-mapping this rung).
+// One re-fetched mesh vertex (the fields this pipeline actually reads — `tangent` is skipped
+// under the base (non-`TEXTURED`) compile; TV0's `#ifdef TEXTURED` adds it back for tangent-
+// space normal mapping, mirroring `gbuffer_mrt.vs.hlsl`'s own `TEXTURED`-only `tangent` read).
 struct VbVertex {
     float3 position;
     float3 normal;
     float4 color;
     float2 uv;
+#ifdef TEXTURED
+    float4 tangent;
+#endif
 };
 
 // Loads mesh `mesh_id`'s vertex `vidx` at the 64-byte `Vertex` stride (this file's own doc pins
-// the offsets: position@0/normal@12/color@24/uv@40).
+// the offsets: position@0/normal@12/color@24/uv@40/tangent@48).
 VbVertex vb_load_vertex(uint mesh_id, uint vidx) {
     ByteAddressBuffer vb = gMeshVerts[NonUniformResourceIndex(mesh_id)];
     uint base = vidx * 64u;
@@ -105,6 +111,9 @@ VbVertex vb_load_vertex(uint mesh_id, uint vidx) {
     v.normal   = asfloat(vb.Load3(base + 12u));
     v.color    = asfloat(vb.Load4(base + 24u));
     v.uv       = asfloat(vb.Load2(base + 40u));
+#ifdef TEXTURED
+    v.tangent  = asfloat(vb.Load4(base + 48u));
+#endif
     return v;
 }
 
@@ -471,6 +480,17 @@ struct VbGeomFetchResult {
     float3 world_normal;
     float4 vertex_color;
     float2 uv;
+#ifdef TEXTURED
+    // TV0 (`RENDER-PARITY-PLAN.md` §2.3): the perspective-correct interpolated world tangent
+    // (Gram-Schmidt-corrected against the shading normal at the sample site, mirroring
+    // `gbuffer_mrt.fs.hlsl`'s TBN build), the FLAT (nearest-vertex, never interpolated)
+    // handedness sign (matches `gbuffer_mrt.vs.hlsl`'s `nointerpolation tex_w`), and the UV
+    // screen-space derivative pair `vb_uv_grad` emits — `(du/dx, du/dy, dv/dx, dv/dy)`, ready to
+    // split into `SampleGrad`'s `ddx`/`ddy` arguments.
+    float3 world_tangent;
+    float  tex_w;
+    float4 uv_grad;
+#endif
 };
 
 // The Decision-0/Decision-9 per-pixel geometry re-fetch: `(instance_id, raw_prim_id)` ->
@@ -523,6 +543,14 @@ VbGeomFetchResult vb_geom_fetch(uint instance_id, uint raw_prim_id, float2 pixel
     float3 world_n0 = mul(m3, v0.normal);
     float3 world_n1 = mul(m3, v1.normal);
     float3 world_n2 = mul(m3, v2.normal);
+#ifdef TEXTURED
+    // TV0: the world tangent transforms with the PLAIN model 3x3 (a surface vector, not a
+    // normal — the SAME `m3` reuse `gbuffer_mrt.vs.hlsl`'s TEXTURED arm documents, never the
+    // inverse-transpose normal matrix).
+    float3 world_t0 = mul(m3, v0.tangent.xyz);
+    float3 world_t1 = mul(m3, v1.tangent.xyz);
+    float3 world_t2 = mul(m3, v2.tangent.xyz);
+#endif
 
     float4 clip0 = mul(view_proj, float4(world_p0, 1.0));
     float4 clip1 = mul(view_proj, float4(world_p1, 1.0));
@@ -559,11 +587,19 @@ VbGeomFetchResult vb_geom_fetch(uint instance_id, uint raw_prim_id, float2 pixel
     result.vertex_color.y = vb_interp(grad.dlambda_dx, grad.dlambda_dy, sx0, sy0, pixel_xy.x, pixel_xy.y, float3(v0.color.y, v1.color.y, v2.color.y), w3).x;
     result.vertex_color.z = vb_interp(grad.dlambda_dx, grad.dlambda_dy, sx0, sy0, pixel_xy.x, pixel_xy.y, float3(v0.color.z, v1.color.z, v2.color.z), w3).x;
     result.vertex_color.w = vb_interp(grad.dlambda_dx, grad.dlambda_dy, sx0, sy0, pixel_xy.x, pixel_xy.y, float3(v0.color.w, v1.color.w, v2.color.w), w3).x;
-    // #ifdef TEXTURED seam (a later rung): `uv` would feed `SampleGrad` via `vb_uv_grad`'s
-    // derivative pair; v1's non-textured material path never samples a texture, so `uv` is
-    // reconstructed here (perspective-correct, via `vb_interp`) but left unread by the shading
-    // tail (`vb_resolve.comp.hlsl`).
+    // `uv` is reconstructed here (perspective-correct, via `vb_interp`) regardless of
+    // `TEXTURED` — v1's non-textured material path never samples a texture, so it is left
+    // unread by the base shading tail (`vb_resolve.comp.hlsl`).
     result.uv.x = vb_interp(grad.dlambda_dx, grad.dlambda_dy, sx0, sy0, pixel_xy.x, pixel_xy.y, float3(v0.uv.x, v1.uv.x, v2.uv.x), w3).x;
     result.uv.y = vb_interp(grad.dlambda_dx, grad.dlambda_dy, sx0, sy0, pixel_xy.x, pixel_xy.y, float3(v0.uv.y, v1.uv.y, v2.uv.y), w3).x;
+#ifdef TEXTURED
+    result.world_tangent.x = vb_interp(grad.dlambda_dx, grad.dlambda_dy, sx0, sy0, pixel_xy.x, pixel_xy.y, float3(world_t0.x, world_t1.x, world_t2.x), w3).x;
+    result.world_tangent.y = vb_interp(grad.dlambda_dx, grad.dlambda_dy, sx0, sy0, pixel_xy.x, pixel_xy.y, float3(world_t0.y, world_t1.y, world_t2.y), w3).x;
+    result.world_tangent.z = vb_interp(grad.dlambda_dx, grad.dlambda_dy, sx0, sy0, pixel_xy.x, pixel_xy.y, float3(world_t0.z, world_t1.z, world_t2.z), w3).x;
+    // Flat (nearest-vertex, v0 — the provoking vertex) handedness sign, never interpolated —
+    // matches `gbuffer_mrt.vs.hlsl`'s `nointerpolation tex_w` convention.
+    result.tex_w = v0.tangent.w;
+    result.uv_grad = vb_uv_grad(grad.dlambda_dx, grad.dlambda_dy, sx0, sy0, pixel_xy.x, pixel_xy.y, float3(v0.uv.x, v1.uv.x, v2.uv.x), float3(v0.uv.y, v1.uv.y, v2.uv.y), w3);
+#endif
     return result;
 }

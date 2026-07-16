@@ -25,7 +25,11 @@
 //! per-resource sync state machine — the actual industrial win — is fully here.
 
 use super::ids::{PassId, ResId};
-use super::sync::{transition, BufBarrier, ImgBarrier, ResSync, SubRange, WRITE_ACCESS_MASK};
+use super::sync::{transition, BufBarrier, ImgBarrier, ResSync, SubRange};
+// Read only by the `#[cfg(debug_assertions)]` read-has-producer check in `compile`, so a
+// release build would see this import as unused.
+#[cfg(debug_assertions)]
+use super::sync::WRITE_ACCESS_MASK;
 use crate::ffi::VK_IMAGE_LAYOUT_UNDEFINED;
 
 /// The per-pass slice into the flat derived-barrier arenas: the image + buffer

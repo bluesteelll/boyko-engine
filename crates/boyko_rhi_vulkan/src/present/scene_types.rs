@@ -2166,18 +2166,45 @@ pub struct GBufferScene<'a> {
     /// and `Renderer::record_vb` read (the SAME W1 "declare/record parity" discipline every other
     /// per-frame selector in this file follows, e.g. [`Self::mesh_tex_active`]). Computed once per
     /// frame at the `GpuSceneBundles::scene()` assembly seam: `force ||
-    /// mesh_tex_active_this_frame`, where `force` is the `BOYKO_VB_FORCE_CLASSIFIED` dev/golden
-    /// env var (the orchestrator's channel to exercise `vb_shade` on real hardware ahead of TV0 —
-    /// mirrors `boyko_app::plugins`'s `BOYKO_AA`/`BOYKO_RENDER_PATH` launch-env seam) and
-    /// `mesh_tex_active_this_frame` is `false` for now (no VB-specific texture gate exists yet —
-    /// TV0 lands one). So in production today `vb_use_classified == force`: `false` unless
-    /// `BOYKO_VB_FORCE_CLASSIFIED=1`, and the fast fused `vb_resolve` shades every VB frame
-    /// (P1-4's perf point — flat scenes pay zero classify tax). Gates BOTH the classify passes
-    /// (`fill`/`count`/`scan`/`scatter` — `mesh_leg && vb_use_classified`) and the `lit`-producer
-    /// choice (`vb_shade` when `true`, `vb_resolve` when `false`) — exactly one of the two ever
-    /// produces `lit` per frame (mutually exclusive by construction, mirroring
+    /// vb_tex_active_this_frame`, where `force` is the `BOYKO_VB_FORCE_CLASSIFIED` dev/golden
+    /// env var (the orchestrator's channel to exercise `vb_shade` on real hardware — mirrors
+    /// `boyko_app::plugins`'s `BOYKO_AA`/`BOYKO_RENDER_PATH` launch-env seam) and (rung TV0)
+    /// `vb_tex_active_this_frame` is [`Self::vb_tex_active`]'s own per-frame gather ("any VB
+    /// instance bound a non-zero material texture slot this frame" — the VB-specific sibling of
+    /// [`Self::mesh_tex_active`]). So in production `vb_use_classified` is `true` whenever a
+    /// textured material is in play under VB (landing textures on the classified pipeline,
+    /// TV0's whole point) OR `BOYKO_VB_FORCE_CLASSIFIED=1`; the fast fused `vb_resolve` still
+    /// shades every OTHER (flat) VB frame (P1-4's perf point — flat scenes pay zero classify
+    /// tax). Gates BOTH the classify passes (`fill`/`count`/`scan`/`scatter` —
+    /// `mesh_leg && vb_use_classified`) and the `lit`-producer choice (`vb_shade`/`vb_shade_tex`
+    /// when `true`, `vb_resolve` when `false`) — exactly one of the two ever produces `lit` per
+    /// frame (mutually exclusive by construction, mirroring
     /// [`Self::path_has_raster`]/[`Self::path_has_mesh_depth_neutral_clear`]'s own partition).
     pub vb_use_classified: bool,
+    /// Textured-PBR rung TV0 (`RENDER-PARITY-PLAN.md` §2.3): the `vb_shade` TEXTURED-variant
+    /// shading compute pipeline (`vb_shade.comp.hlsl`, `-D TEXTURED=1`) — a 4-Vulkan-set
+    /// pipeline (Set 0 = [`Self::vb_layout0`], Set 1 = [`Self::forward_layout1`], Set 2 =
+    /// [`Self::vb_geometry_set`]'s layout, Set 3 = the shared bindless texture-array table's
+    /// layout — [`Self::bindless_set`]'s own object). `Some` only AFTER
+    /// `GpuSceneBundles::build_vb_shade_textured_pipeline` ran (needs BOTH the Decision-0
+    /// geometry table's Set-2 layout AND the bindless table's Set-3 layout — neither exists at
+    /// `GpuSceneBundles::boot`'s call site, the SAME two-dependency deferred-build reason
+    /// [`Self::vb_shade_pipeline`]/[`Self::raster_pipeline_tex`] are each individually `Option`).
+    pub vb_shade_tex_pipeline: Option<&'a ComputePipeline>,
+    /// Textured-PBR rung TV0: the RAW per-FIF TEXTURED instance-material SSBO ring
+    /// (`PerInstanceMaterialTex`, 48 B/instance) — the SAME ring
+    /// [`Self::raster_pipeline_tex`]/`tex_bind_group` bind at their own Set-0 binding 1
+    /// (`boyko_app::gpu_scene::TexturedResources::tex_instance_material_rings`), exposed raw so
+    /// [`GBufferTargets`](super::targets::GBufferTargets) can fold it into the VB TEXTURED
+    /// Set-0 bind group (`vb_set0_tex`) at binding 1 — a DIFFERENT buffer than
+    /// [`Self::forward_instance_material_ring`] (`PerInstanceMaterial`, 32 B) `vb_set0`'s own
+    /// binding 1 points at, bound against the SAME `vb_layout0` layout object (Vulkan's
+    /// `STORAGE_BUFFER` binding shape carries no element-stride constraint — R5's "one shared
+    /// layout, a distinct set" rule, not "one shared set"). `Some` iff the TEXTURED resources
+    /// exist (`GpuSceneBundles::build_textured_resources` ran) — device-agnostic, unconditioned
+    /// on `resolved_render_path.path` (mirrors [`Self::forward_instance_material_ring`]'s own
+    /// unconditional-once-built threading).
+    pub vb_tex_instance_material_ring: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
 }
 
 impl GBufferScene<'_> {
@@ -2226,6 +2253,25 @@ impl GBufferScene<'_> {
             && self.tex_enabled
             && self.raster_pipeline_tex.is_some()
             && self.tex_bind_group.is_some()
+            && self.bindless_set.is_some()
+    }
+
+    /// Textured-PBR rung TV0 (`RENDER-PARITY-PLAN.md` §2.3) — the VB sibling of
+    /// [`Self::mesh_tex_active`]: the SINGLE source of the "this VB frame's material eval needs
+    /// the TEXTURED `vb_shade` pipeline" decision, feeding [`Self::vb_use_classified`]'s OR-in at
+    /// the `GpuSceneBundles::scene()` assembly seam (so the classify-chain gate, the `lit`-
+    /// producer choice, AND the Set-0/Set-3 pipeline selection can never disagree — the SAME W1
+    /// discipline [`Self::vb_use_classified`]'s own doc explains).
+    ///
+    /// True iff [`Self::tex_enabled`] (this frame's `any_textured_material` gather — device- and
+    /// path-agnostic) AND the TEXTURED `vb_shade` pipeline, the TEXTURED instance-material ring,
+    /// and the bindless descriptor set all exist. Unlike [`Self::mesh_tex_active`] there is no
+    /// motion-vector exclusion — VB v1 has no motion-vector consumer at all
+    /// (`cap_vb_v1_consumers`).
+    pub(crate) fn vb_tex_active(&self) -> bool {
+        self.tex_enabled
+            && self.vb_shade_tex_pipeline.is_some()
+            && self.vb_tex_instance_material_ring.is_some()
             && self.bindless_set.is_some()
     }
 

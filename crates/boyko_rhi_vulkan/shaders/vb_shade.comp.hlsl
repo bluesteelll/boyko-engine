@@ -32,19 +32,27 @@
 // # Shading (cloned from `forward_opaque.fs.hlsl`, token-for-token where noted -- see
 // `vb_resolve.comp.hlsl`'s own header doc for the full rationale, unchanged here)
 //
-// # Material (v1 scope cut -- NON-TEXTURED ONLY)
+// # Material (base compile -- NON-TEXTURED ONLY)
 //
-// `#ifdef TEXTURED` seam for a later rung (TV0): the whole-lights loop below is where a FUTURE
-// per-material-uniform bindless texture fetch would key off `mat = group_to_mat[gid.x]` (the
-// uniform index every thread in this GROUP shares -- the entire point of classification,
-// avoiding `NonUniformResourceIndex`/intra-wave sampler divergence); v1's non-textured tail
-// never samples a texture, so no seam is implemented here yet.
+// TV0 (`RENDER-PARITY-PLAN.md` §2.3 / `docs/VB-P2-CLASSIFICATION-PLAN.md`'s "Open items"):
+// compiled with `-D TEXTURED=1` (a SEPARATE `.spv`, `vb_shade_tex.comp.spv`; the base
+// `vb_shade.comp.spv` stays byte-frozen), the whole-lights loop below keys the bindless
+// texture fetch off THIS GROUP's uniform `mat = group_to_mat[gid.x]` invariant (P2b's
+// debug-assert proves `mat == instance_materials[id.instance_id].id` per group) -- every
+// thread in the group samples `gTextures[]` at effectively the SAME index, the entire payoff
+// of landing textures on the classified pipeline instead of the fused `vb_resolve`
+// (`NonUniformResourceIndex` is kept as a correctness belt since the compiler cannot prove
+// the invariant statically, not because the index is genuinely divergent).
 //
 // # Bindings
 //
 //   Set 0 (VB core + images + classify -- `vb_layout0`; NOT `forward_layout0`):
 //     b0/u0: StructuredBuffer<VbInstanceRow>      gVbInstances    (`vb_geom_fetch.hlsli`)
-//     t1   : StructuredBuffer<PerInstanceMaterial> instance_materials
+//     t1   : StructuredBuffer<PerInstanceMaterial> instance_materials (base) OR
+//            StructuredBuffer<PerInstanceMaterialTex> instance_materials_tex (`-D TEXTURED`,
+//            binds the WIDER 48 B ring -- a distinct descriptor SET instance against the SAME
+//            `vb_layout0` layout OBJECT, since Vulkan's `STORAGE_BUFFER` binding shape does not
+//            encode the bound buffer's element stride)
 //     b2   : cbuffer Camera                                       80-byte extent/camera block
 //     t3   : StructuredBuffer<uint>                LightBuf        Lighting L0 light table
 //     t4   : StructuredBuffer<MaterialGpu>          Materials      PBR material table
@@ -58,6 +66,9 @@
 //   Set 1 (shadow) -- VERBATIM copy of `vb_resolve.comp.hlsl`'s own Set-1 block (see that
 //   file's header doc).
 //   Set 2 (geometry) -- `vb_geom_fetch.hlsli`'s own `gMeshVerts[]`/`gMeshIndices[]`/`gMeshMeta`.
+//   Set 3 (`-D TEXTURED` ONLY) -- the shared bindless texture-array table, the SAME layout
+//   OBJECT `gbuffer_mrt.fs.hlsl`'s TEXTURED variant binds (R5 -- one shared layout, never a
+//   structurally-identical-but-distinct handle): `gTextures[]` @0 + `gTexSampler` @1.
 //
 // # Push constant (64 bytes -- the geometry-fetch reprojection matrix, UNCHANGED shape from
 // `vb_resolve.comp.hlsl`'s own -- no `material_count` field: this file's prologue derives
@@ -68,14 +79,36 @@
 // Compiled offline (hermetic build -- no SDK at `cargo build` time) with:
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 vb_shade.comp.hlsl -Fo vb_shade.comp.spv
+//   (TEXTURED variant: add `-D TEXTURED=1 -Fo vb_shade_tex.comp.spv`)
 // Validated with:
 //   C:\VulkanSDK\1.4.350.0\Bin\spirv-val.exe vb_shade.comp.spv
+//   C:\VulkanSDK\1.4.350.0\Bin\spirv-val.exe vb_shade_tex.comp.spv
 
 // binding 0 (`gVbInstances`, the `VbInstanceRow` SSBO) is declared inside `vb_geom_fetch.hlsli`
 // itself (that file's own INCLUDE CONTRACT -- self-contained, needs nothing pre-declared).
 #include "vb_pack.hlsli"
 #include "vb_geom_fetch.hlsli"
 
+#ifdef TEXTURED
+// binding 1 (TEXTURED variant): the per-instance TEXTURED material payload -- byte-identical
+// 48 B shape to `boyko_render::mesh_draw::PerInstanceMaterialTex` / `gbuffer_mrt.vs.hlsl`'s own
+// declaration. A DEDICATED binding-1 buffer (a wider ring than the base `PerInstanceMaterial`)
+// -- the host binds a DISTINCT descriptor SET against the SAME `vb_layout0` layout OBJECT for a
+// textured frame (Vulkan's `STORAGE_BUFFER` binding shape carries no element-stride
+// constraint), never a second layout.
+struct PerInstanceMaterialTex {
+    float4 base_color;
+    uint   material_id;
+    uint   albedo;
+    uint   normal;
+    uint   metal_rough;
+    uint   ao;
+    uint   emissive;
+    float  metallic;
+    float  roughness;
+};
+[[vk::binding(1, 0)]] StructuredBuffer<PerInstanceMaterialTex> instance_materials_tex;
+#else
 // binding 1: the per-instance material payload -- byte-identical shape to
 // `vb_resolve.comp.hlsl`'s own declaration.
 struct PerInstanceMaterial {
@@ -84,6 +117,7 @@ struct PerInstanceMaterial {
     uint3  _pad;
 };
 [[vk::binding(1, 0)]] StructuredBuffer<PerInstanceMaterial> instance_materials;
+#endif
 
 // binding 2: the extent/camera UNIFORM block -- byte-identical shape to
 // `vb_resolve.comp.hlsl`'s own declaration.
@@ -121,6 +155,18 @@ Texture2D<uint2> gVbId : register(t5);
 // see that file's INCLUDE CONTRACT doc) can be fed `img_w_raw`/`img_h_raw` from this file's
 // `main()` below.
 #include "vb_classify_common.hlsli"
+
+#ifdef TEXTURED
+// Set 3 (TEXTURED variant ONLY, TV0): the shared bindless texture-array table -- the SAME
+// layout OBJECT `gbuffer_mrt.fs.hlsl`'s own TEXTURED Set 1 binds (R5, `bindless.set()
+// .set_layout()`), just a different Vulkan set INDEX here (Set 3 is the Vulkan-guaranteed
+// floor for this 4-set pipeline -- `vb_geom_fetch.hlsli`'s own doc has the Set-numbering
+// precedent). A runtime-sized `Texture2D[]` (binding 0) + the ONE shared immutable sampler
+// (binding 1). Slot `0` is the reserved T4 error-texture slot -- every real material slot is
+// `!= 0`; every sample below is gated `slot != 0`.
+[[vk::binding(0, 3)]] Texture2D gTextures[] : register(t0, space3);
+[[vk::binding(1, 3)]] SamplerState gTexSampler : register(s0, space3);
+#endif
 
 // --- Shading (cloned from `forward_opaque.fs.hlsl` -- see `vb_resolve.comp.hlsl`'s header
 // doc) -----------------------------------------------------------------------------------
@@ -253,7 +299,11 @@ void main(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID) {
     // DOCUMENTED rather than checked in-shader by default (the debug guard below is the cheap
     // in-shader alternative, opt-in only) -- P2c's forced-classified golden re-run is the actual
     // verification (see the plan's "Open items").
+#ifdef TEXTURED
+    PerInstanceMaterialTex pmt = instance_materials_tex[id.instance_id];
+#else
     PerInstanceMaterial pm = instance_materials[id.instance_id];
+#endif
 
 #ifdef VB_SHADE_DEBUG
     // Diagnostic-only invariant guard (never compiled into the shipped `vb_shade.comp.spv` --
@@ -268,16 +318,90 @@ void main(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID) {
     }
 #endif
 
+#ifdef TEXTURED
+    // TV0 (`RENDER-PARITY-PLAN.md` §2.3): a near-verbatim splice of `gbuffer_mrt.fs.hlsl`'s
+    // TEXTURED block (lines 223-320), retargeted to feed THIS pass's `base`/`metallic`/
+    // `roughness`/`n`/`emissive`/`reflectance` locals directly (no G-buffer MRT intermediate --
+    // Decision 5's pure-VB re-fetch-and-shade-from-scratch model) instead of writing them to
+    // `gAlbedo`/`gNormal`/`gPbr`. The FINAL combine (AO/emissive texture MODULATING the
+    // material's own scalar, metallic/roughness texture OVERRIDING the fallback) mirrors
+    // `deferred_pbr.hlsl`'s own `MATERIAL_FLAG_TEXTURED_BIT` arm (its `gPbr` consumer) exactly,
+    // since this pass has no separate resolve stage to apply that combine downstream.
+    MaterialGpu mt = Materials[pmt.material_id];
+
+    float2 ddx_uv = float2(geo.uv_grad.x, geo.uv_grad.z);
+    float2 ddy_uv = float2(geo.uv_grad.y, geo.uv_grad.w);
+
+    // Albedo: sampled (sRGB view -> hw-linear on sample) modulated by base_color, or
+    // base_color alone when no albedo texture is bound. Slot `0` is the reserved T4
+    // error-texture slot, never a real material's texture -- gated `!= 0`.
+    float3 albedo_tex_rgb = float3(1.0, 1.0, 1.0);
+    if (pmt.albedo != 0u) {
+        albedo_tex_rgb = gTextures[NonUniformResourceIndex(pmt.albedo)].SampleGrad(gTexSampler, geo.uv, ddx_uv, ddy_uv).rgb;
+    }
+    float3 base = (pmt.albedo != 0u) ? albedo_tex_rgb * pmt.base_color.rgb : pmt.base_color.rgb;
+
+    // Tangent-space normal mapping: renormalize the interpolated geometric normal FIRST,
+    // Gram-Schmidt the interpolated tangent against it, derive the bitangent via the
+    // glTF/Mikktspace handedness sign (`tex_w` multiplies the BITANGENT), sample + unpack +
+    // renormalize the tangent-space normal, then rotate it into world space via the TBN basis.
+    // `normal == 0` keeps the geometric normal unperturbed. NO green-channel negation: the
+    // engine's CANONICAL normal convention is DIRECTX (green-down, Unreal-style) and OpenGL
+    // source packs are converted ONCE AT LOAD (`boyko_render::texture`'s `load_slot`), so the
+    // map sampled here is already canonical (owner-set 2026-07-16; see `gbuffer_mrt.fs.hlsl`'s
+    // GREEN-CHANNEL CONVENTION block for the full derivation), NOT glTF/Mikktspace.
+    if (pmt.normal != 0u) {
+        float3 N = n;
+        float3 T = normalize(geo.world_tangent - dot(geo.world_tangent, N) * N);
+        float3 B = cross(N, T) * geo.tex_w;
+        float3 packed_n = gTextures[NonUniformResourceIndex(pmt.normal)].SampleGrad(gTexSampler, geo.uv, ddx_uv, ddy_uv).xyz;
+        float3 n_ts = normalize(packed_n * 2.0 - 1.0);
+        n = normalize(T * n_ts.x + B * n_ts.y + N * n_ts.z);
+    }
+
+    // Metallic/roughness: glTF ORM channel convention (metallic = B, roughness = G) when the
+    // metal-rough slot is bound, else the material's scalar fallback (`gPbr`'s "unbound ->
+    // scalar fallback" contract).
+    float metallic = pmt.metallic;
+    float roughness = pmt.roughness;
+    if (pmt.metal_rough != 0u) {
+        float3 mr = gTextures[NonUniformResourceIndex(pmt.metal_rough)].SampleGrad(gTexSampler, geo.uv, ddx_uv, ddy_uv).rgb;
+        metallic = mr.b;
+        roughness = mr.g;
+    }
+    roughness = clamp(roughness, 0.045, 1.0); // fp32 floor, mirrors the deferred resolve
+
+    // AO: modulates the Deferred-mesh-pixel baseline (this pass's `ao_final` below), mirroring
+    // `deferred_pbr.hlsl`'s `ao * pbr.b` combine.
+    float ao_tex = 1.0;
+    if (pmt.ao != 0u) {
+        ao_tex = gTextures[NonUniformResourceIndex(pmt.ao)].SampleGrad(gTexSampler, geo.uv, ddx_uv, ddy_uv).r;
+    }
+
+    // Emissive: a luminance MASK (Rec.709 weights) modulating the material's own emissive
+    // color, mirroring `deferred_pbr.hlsl`'s `emissive * pbr.a` combine.
+    float emissive_mask = 1.0;
+    if (pmt.emissive != 0u) {
+        float3 em = gTextures[NonUniformResourceIndex(pmt.emissive)].SampleGrad(gTexSampler, geo.uv, ddx_uv, ddy_uv).rgb;
+        emissive_mask = dot(em, float3(0.2126, 0.7152, 0.0722));
+    }
+
+    float reflectance = mt.mrr.z; // no texture channel carries reflectance yet (mirrors deferred)
+    float3 emissive = mt.emissive.rgb * emissive_mask;
+#else
     MaterialGpu m = Materials[pm.id];
+#endif
 
     float3 v = normalize(cam_eye.xyz - P);
     float NoV = max(dot(n, v), 1e-4);
 
+#ifndef TEXTURED
     float3 base = m.base_color.rgb;
     float metallic = m.mrr.x;
     float roughness = clamp(m.mrr.y, 0.045, 1.0); // fp32 floor, mirrors the deferred resolve
     float reflectance = m.mrr.z;
     float3 emissive = m.emissive.rgb;
+#endif
     float a = roughness * roughness; // GGX alpha = perceptual^2
 
     float3 f0 = lerp(0.16 * reflectance * reflectance, base, metallic);
@@ -300,8 +424,13 @@ void main(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID) {
 
     // v1 scope cut (mirrors `forward_opaque.fs.hlsl`'s own note): no SSAO/DDGI consumer is ever
     // armed under VB v1 (`cap_vb_v1_consumers`) -- `ao_final` stays the Deferred-mesh-pixel
-    // constant `1.0`.
+    // constant `1.0`, TIMES the AO-texture mask under TEXTURED (mirrors `deferred_pbr.hlsl`'s
+    // `ao * pbr.b` combine -- no separate SSAO term either way).
+#ifdef TEXTURED
+    float ao_final = ao_tex;
+#else
     float ao_final = 1.0;
+#endif
     float spec_ao = saturate(pow(NoV + ao_final, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao_final);
 
     LightHeader H = load_light_header(LightBuf);

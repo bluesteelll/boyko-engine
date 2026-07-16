@@ -28,10 +28,14 @@ use boyko_ecs::ecs::core::asset::{AssetPaths, AssetServer, AssetStaging, Assets}
 use boyko_input::{ButtonState, KeyCode, RawInputEvent};
 #[cfg(windows)]
 use boyko_render::light_system::{LightTableGeneration, LightTableStaging};
+// Read only by the `#[cfg(debug_assertions)]` textured-SDF guard in the frame loop, so a
+// release build would see this import as unused.
+#[cfg(all(windows, debug_assertions))]
+use boyko_render::MATERIAL_FLAG_TEXTURED;
 #[cfg(windows)]
 use boyko_render::{
     AaConfig, AaMode, BindlessTextureTable, CsmCasterScratch, DdgiCaps, JitterState,
-    LightingConfig, MATERIAL_FLAG_TEXTURED, Material, MaterialId, MaterialTable, MeshAssetsExt,
+    LightingConfig, Material, MaterialId, MaterialTable, MeshAssetsExt,
     MeshGpu, MeshRenderScratch, OrphanedMeshGpu, OrphanedTextureGpu, RayBackendPolicy, RayCaps,
     RenderEpoch, ResolvedAa, ResolvedCsm, ResolvedShadowAtlas, ResolvedSsao, ResolvedTaa,
     RetiredGpuBuffers,
@@ -552,6 +556,19 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // accesses are SEQUENTIAL (setup's writes, then this read), never concurrent.
     let bindless_texture_table = app.world().non_send_resource::<BindlessTextureTable>();
     host.gpu.build_textured_resources(ctx, bindless_texture_table);
+
+    // Textured-PBR rung TV0 (`RENDER-PARITY-PLAN.md` §2.3): build the `vb_shade` TEXTURED
+    // compute pipeline — needs BOTH the Decision-0 geometry table's Set-2 layout (built above,
+    // right after `MeshGeometryTable::new`) AND the bindless table's Set-3 layout (just built by
+    // `build_textured_resources` above — the LAST of the two dependencies to exist), so this
+    // call is the LATEST point either builder could run. `Option`-guarded: a no-op (`vb_shade_tex_pipeline`
+    // stays `None`) on any boot without a live geometry table (`MeshGeometryTableSlot(None)` —
+    // mirrors `build_vb_resolve_pipeline`/`build_vb_classify_pipelines`'s own gate).
+    if let Some(table) =
+        app.world().non_send_resource::<boyko_render::MeshGeometryTableSlot>().0.as_ref()
+    {
+        host.gpu.build_vb_shade_textured_pipeline(ctx, table.set(), bindless_texture_table);
+    }
 
     // Asset-system rung A3b: drain any decoded-but-not-yet-uploaded assets BEFORE
     // `MaterialTable::boot_seed` below sizes/uploads the device SSBO from

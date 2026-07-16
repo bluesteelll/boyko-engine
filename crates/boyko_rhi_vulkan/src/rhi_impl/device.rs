@@ -1990,4 +1990,122 @@ impl VulkanContext {
         }
         Ok(ComputePipeline { pipeline, layout: pipeline_layout, owns_layout: true })
     }
+
+    /// Textured-PBR rung TV0 (`RENDER-PARITY-PLAN.md` §2.3 / `docs/VB-P2-CLASSIFICATION-PLAN.md`):
+    /// builds a 4-set COMPUTE pipeline for the `vb_shade` TEXTURED variant (`vb_shade_tex.comp.spv`,
+    /// `-D TEXTURED=1`) — Set 0 = `desc.bind_group_layout` (REQUIRED, `vb_layout0`, the SAME layout
+    /// object the base `vb_shade`/`vb_resolve` pipelines are built against — R5, a textured frame
+    /// binds a DIFFERENT descriptor SET instance against this SAME layout object, never a second
+    /// layout), Set 1 = `set1_layout` (`GBufferScene::forward_layout1`, the Forward-family shadow
+    /// set, REUSED VERBATIM), Set 2 = `set2_layout` (the Decision-0 geometry table's OWN Set), Set 3
+    /// = `set3_layout` (the shared bindless texture-array table — the SAME layout object
+    /// `gbuffer_mrt.fs.hlsl`'s TEXTURED variant binds, `BindlessTextureTable::set().set_layout()`).
+    /// Otherwise a byte-for-byte mirror of [`Self::create_compute_pipeline_vb`]'s push-range
+    /// sizing and pipeline-layout/pipeline construction, widened from 3 to 4 set layouts.
+    /// Vulkan's guaranteed `maxBoundDescriptorSets` floor is exactly 4
+    /// (`DeviceCaps::max_bound_descriptor_sets`'s own doc — `MeshGeometryTable::new` already
+    /// `debug_assert!`s this at construction for every `VisibilityBuffer`-resolved boot, textured
+    /// or not), so no additional floor check is needed here.
+    pub fn create_compute_pipeline_vb_textured(
+        &self,
+        desc: &ComputePipelineDesc<Vulkan>,
+        set1_layout: VkDescriptorSetLayout,
+        set2_layout: VkDescriptorSetLayout,
+        set3_layout: VkDescriptorSetLayout,
+    ) -> Result<ComputePipeline, VulkanError> {
+        if desc.push_constant_bytes == 0
+            || !desc.push_constant_bytes.is_multiple_of(4)
+            || desc.push_constant_bytes > COMPUTE_PUSH_CONSTANT_RANGE_BYTES
+        {
+            return Err(VulkanError::Unsupported(
+                "push_constant_bytes must be a multiple of 4 within the shared compute push range",
+            ));
+        }
+        let bgl = desc.bind_group_layout.expect(
+            "invariant: create_compute_pipeline_vb_textured always builds a dedicated 4-set layout \
+             (Set 0 is required, unlike create_compute_pipeline's optional device-shared fallback)",
+        );
+        let set_layouts = [bgl.set_layout, set1_layout, set2_layout, set3_layout];
+        let push_range = VkPushConstantRange {
+            stage_flags: VK_SHADER_STAGE_COMPUTE_BIT,
+            offset: 0,
+            size: COMPUTE_PUSH_CONSTANT_RANGE_BYTES,
+        };
+        let pl_info = VkPipelineLayoutCreateInfo {
+            s_type: VkStructureType::PipelineLayoutCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            set_layout_count: 4,
+            p_set_layouts: set_layouts.as_ptr(),
+            push_constant_range_count: 1,
+            p_push_constant_ranges: &push_range,
+        };
+        let mut pipeline_layout = VkPipelineLayout::NULL;
+        // SAFETY: `self.device()` is live; `pl_info` is fully initialized referencing the
+        // `set_layouts` local (the caller's live Set-0 VB vocabulary layout, the live Set-1 shadow
+        // layout, the live Set-2 geometry-table layout, and the live Set-3 bindless-texture layout,
+        // all alive for this whole fn) + the `push_range` local (alive for this whole fn); `&mut
+        // pipeline_layout` is a valid out-pointer; NULL allocator.
+        let raw = unsafe {
+            (self.device_fns().create_pipeline_layout)(
+                self.device(),
+                &pl_info,
+                ptr::null(),
+                &mut pipeline_layout,
+            )
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkCreatePipelineLayout(compute-vb-textured)", result));
+        }
+
+        let stage = VkPipelineShaderStageCreateInfo {
+            s_type: VkStructureType::PipelineShaderStageCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            stage: VK_SHADER_STAGE_COMPUTE_BIT,
+            module: desc.module.module,
+            p_name: desc.entry.as_ptr(),
+            p_specialization_info: ptr::null(),
+        };
+        let cp_info = VkComputePipelineCreateInfo {
+            s_type: VkStructureType::ComputePipelineCreateInfo,
+            p_next: ptr::null(),
+            flags: 0,
+            stage,
+            layout: pipeline_layout,
+            base_pipeline_handle: VkPipeline::NULL,
+            base_pipeline_index: -1,
+        };
+        let mut pipeline = VkPipeline::NULL;
+        // SAFETY: `self.device()` is live; null pipeline cache (`0`) is valid; one create-info is
+        // fully initialized, referencing the live shader module + the just-created dedicated
+        // `pipeline_layout`; `&mut pipeline` is a valid out-pointer for the single pipeline; NULL
+        // allocator. The module is owned by the caller's `VulkanShaderModule`, alive for this call.
+        let raw = unsafe {
+            (self.device_fns().create_compute_pipelines)(
+                self.device(),
+                0,
+                1,
+                &cp_info,
+                ptr::null(),
+                &mut pipeline,
+            )
+        };
+        let result = VkResult::from_raw(raw);
+        if !result.is_success() {
+            // SAFETY: `pipeline_layout` was just created on this device above and is not yet
+            // owned by any pipeline (this create failed); destroying it once here prevents a leak
+            // on this error path.
+            unsafe {
+                (self.device_fns().destroy_pipeline_layout)(
+                    self.device(),
+                    pipeline_layout,
+                    ptr::null(),
+                )
+            };
+            return Err(VulkanError::from(ComputeError::VkError("vkCreateComputePipelines", result)));
+        }
+        Ok(ComputePipeline { pipeline, layout: pipeline_layout, owns_layout: true })
+    }
 }

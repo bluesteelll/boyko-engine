@@ -71,6 +71,7 @@ impl Renderer<'_> {
         view: VkImageView,
         extent: VkExtent2D,
         present_extent: VkExtent2D,
+        aa_extent: VkExtent2D,
         clear: [f32; 4],
         scene: &GBufferScene<'_>,
         targets: &GBufferTargets,
@@ -736,24 +737,50 @@ impl Renderer<'_> {
                     fi,
                 );
 
-                let vb_shade_pipeline = scene
-                    .vb_shade_pipeline
-                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_shade_pipeline");
+                // Textured-PBR rung TV0 (`RENDER-PARITY-PLAN.md` §2.3): select the TEXTURED
+                // `vb_shade` pipeline + its OWN Set-0 vocabulary set (`vb_set0_tex`, the wider
+                // `PerInstanceMaterialTex` ring at b1) when this frame's VB gather bound a
+                // non-zero material texture slot (`GBufferScene::vb_tex_active`'s own doc) — the
+                // base classified pipeline/set otherwise. Mutually exclusive by construction
+                // (`vb_tex_active` implies `vb_use_classified`, since it feeds that selector's
+                // OR-in at the `GpuSceneBundles::scene()` assembly seam).
+                let textured = scene.vb_tex_active();
+                let (vb_shade_pipeline, vb_shade_set0) = if textured {
+                    (
+                        scene.vb_shade_tex_pipeline.expect(
+                            "invariant: GBufferScene::vb_tex_active() => scene.vb_shade_tex_pipeline is Some",
+                        ),
+                        targets.vb_set0_tex.as_ref().expect(
+                            "invariant: GBufferScene::vb_tex_active() => targets.vb_set0_tex is built",
+                        ),
+                    )
+                } else {
+                    (
+                        scene.vb_shade_pipeline.expect(
+                            "invariant: a VisibilityBuffer-resolved scene always carries vb_shade_pipeline",
+                        ),
+                        vb_set0,
+                    )
+                };
                 let vb_geometry_set = scene
                     .vb_geometry_set
                     .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_geometry_set");
-                // SAFETY: recording is open; `vb_shade_pipeline` (the 3-set compute pipeline: Set 0 =
-                // `vb_set0[fi]`, Set 1 = `forward.set1[fi]` — the Forward-family shadow set REUSED
-                // VERBATIM, Set 2 = `vb_geometry_set` — the Decision-0 geometry table, bound directly,
-                // no ring, the SAME triple `vb_resolve_pipeline` binds) belongs to this device (caller
-                // contract); `scene.mvp`'s leading 64 bytes are the SAME `view_proj` matrix
+                // SAFETY: recording is open; `vb_shade_pipeline` (the compute pipeline: Set 0 =
+                // `vb_shade_set0[fi]` (`vb_set0[fi]` or, when `textured`, `vb_set0_tex[fi]`), Set 1 =
+                // `forward.set1[fi]` — the Forward-family shadow set REUSED VERBATIM, Set 2 =
+                // `vb_geometry_set` — the Decision-0 geometry table, bound directly, no ring, the
+                // SAME triple `vb_resolve_pipeline` binds — PLUS, when `textured`, a 4th Set 3 =
+                // `scene.bindless_set` — the shared bindless texture-array table, its LAYOUT already
+                // baked into the TEXTURED pipeline's `VkPipelineLayout` at boot, mirroring
+                // `record_gbuffer`'s own `tex_active` bindless-set bind) belongs to this device
+                // (caller contract); `scene.mvp`'s leading 64 bytes are the SAME `view_proj` matrix
                 // `vb_resolve.comp.hlsl`'s push constant reads (`vb_shade.comp.hlsl`'s push is the
-                // identical 64-byte shape, plan D3); `scene.dispatch_group_count_x +
+                // identical 64-byte shape regardless of `-D TEXTURED`, plan D3); `scene.dispatch_group_count_x +
                 // scene.vb_classify_material_count` is the D2 over-dispatch (`G +
                 // present_material_count` groups — the classify chain's `scan` pass populated
                 // `group_to_mat[0..total_groups)` with real material ids and left
-                // `[total_groups, G+MAX)` SENTINEL from `fill`; `vb_shade` early-outs on every
-                // surplus group's SENTINEL read).
+                // `[total_groups, G+MAX)` SENTINEL from `fill`; `vb_shade`/`vb_shade_tex` early-outs
+                // on every surplus group's SENTINEL read).
                 unsafe {
                     (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vb_shade_pipeline.pipeline);
                     (self.fns.cmd_bind_descriptor_sets)(
@@ -762,7 +789,7 @@ impl Renderer<'_> {
                         vb_shade_pipeline.layout,
                         0,
                         1,
-                        &vb_set0[fi].descriptor_set,
+                        &vb_shade_set0[fi].descriptor_set,
                         0,
                         ptr::null(),
                     );
@@ -786,6 +813,21 @@ impl Renderer<'_> {
                         0,
                         ptr::null(),
                     );
+                    if textured {
+                        let bindless_set = scene
+                            .bindless_set
+                            .expect("invariant: GBufferScene::vb_tex_active() => scene.bindless_set is Some");
+                        (self.fns.cmd_bind_descriptor_sets)(
+                            cmd,
+                            VK_PIPELINE_BIND_POINT_COMPUTE,
+                            vb_shade_pipeline.layout,
+                            3,
+                            1,
+                            &bindless_set,
+                            0,
+                            ptr::null(),
+                        );
+                    }
                     (self.fns.cmd_push_constants)(
                         cmd,
                         vb_shade_pipeline.layout,
@@ -977,6 +1019,45 @@ impl Renderer<'_> {
         // GENERAL→SHADER_READ_ONLY_OPTIMAL barrier for the "present_sample" pass into `cmd`.
         self.record_vb_pass(plan.present_sample, cmd, targets, forward, vb, scene, fi);
 
+        // Anti-aliasing resolve (VB). When AA is armed, `sync_gbuffer` rewires `present_set` to
+        // sample `aa_out` (path-agnostic), but the FXAA/SMAA/SSAA dispatch used to live ONLY in
+        // `record_gbuffer` (Deferred) -- so under VB the resolved `lit` was never anti-aliased into
+        // `aa_out`, and the present-blit below sampled a never-written (black) image. Mirror
+        // `record_gbuffer`'s AA block verbatim: FXAA/SMAA read `present_extent`; SSAA reads the
+        // BOOT-FIXED `aa_extent` (`present_extent` is 2x under SSAA). TAA cannot occur under VB
+        // (`cap_vb_v1_consumers` forces `scene.taa` off), so the fall-through is a debug-only
+        // invariant guard, never a live path. OFF (`aa_out` is `None`) records nothing -> the
+        // AA-off VB command stream is byte-identical to before this block existed.
+        if targets.aa_out.is_some() {
+            if let Some(fxaa) = scene.aa.as_ref() {
+                // SAFETY: recording is open; `present_sample` above left `lit` in
+                // SHADER_READ_ONLY_OPTIMAL; `aa_out`/`fxaa_set` were built by `create()` under the
+                // same `scene.aa` that gates this branch; `present_extent` sizes `aa_out`.
+                unsafe { self.record_fxaa(cmd, targets, fxaa, present_extent, fi) };
+            } else if let Some(smaa) = scene.smaa.as_ref() {
+                // SAFETY: recording is open; `present_sample` above left `lit` in
+                // SHADER_READ_ONLY_OPTIMAL; `aa_out`/the SMAA edge/weight targets + the three
+                // `smaa_*_set` rings were built by `create()` under the same `scene.smaa` that
+                // gates this branch; `present_extent` sizes every SMAA target.
+                unsafe { self.record_smaa(cmd, targets, smaa, present_extent, fi) };
+            } else if let Some(ssaa) = scene.ssaa.as_ref() {
+                debug_assert!(targets.aa_out.is_some() && targets.downsample_set.is_some());
+                // SAFETY: recording is open; `present_sample` above left `lit` (the 2x ring) in
+                // SHADER_READ_ONLY_OPTIMAL; `aa_out`/`downsample_set` were built by `create()`
+                // under the same `scene.ssaa` that gates this branch, sized to the BOOT-FIXED
+                // `aa_extent` (NOT `present_extent`, which is 2x under SSAA).
+                unsafe { self.record_ssaa(cmd, targets, ssaa, aa_extent, fi) };
+            } else {
+                // VB caps TAA off (`cap_vb_v1_consumers`), so an armed `aa_out` with none of
+                // aa/smaa/ssaa matched is an invariant violation (unlike `record_gbuffer`'s
+                // equivalent else, which documents "TAA already ran above").
+                debug_assert!(
+                    false,
+                    "invariant: VB aa_out armed but none of aa/smaa/ssaa matched (taa is capped under VB)"
+                );
+            }
+        }
+
         let to_color = VkImageMemoryBarrier {
             s_type: VkStructureType::ImageMemoryBarrier,
             p_next: ptr::null(),
@@ -1048,7 +1129,8 @@ impl Renderer<'_> {
         // COLOR_ATTACHMENT_OPTIMAL); dynamic rendering is enabled. `scene.present_pipeline` +
         // its bind-group layout belong to this device and its declared color format equals the
         // swapchain's; `targets.present_set[fi]` binds `lit[fi]` (now SHADER_READ_ONLY_OPTIMAL —
-        // the SAME slot `vb_resolve` just wrote) + sampler at set 0; `blit_viewport`/
+        // the SAME slot `vb_resolve` just wrote), OR `aa_out[fi]` when AA is armed (the AA pass
+        // above left it SHADER_READ_ONLY_OPTIMAL) + sampler at set 0; `blit_viewport`/
         // `blit_scissor` outlive the bracketed calls; `draw(3, 1, 0, 0)` is the `SV_VertexID`
         // fullscreen triangle. Begin/End bracket the pass exactly.
         unsafe {
