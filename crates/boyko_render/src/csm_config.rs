@@ -27,13 +27,26 @@
 //!
 //! # The fit (perspective-only this phase)
 //!
-//! [`resolve_csm`] is a PURE function of `(cfg, view, sun_dir)`: PSSM split distances →
+//! [`resolve_csm`] is a PURE function of `(cfg, view, sun_dir, fit)`: PSSM split distances →
 //! per-cascade world-space frustum-slice corners → a rotation-invariant bounding-SPHERE
 //! fit (the anti-shimmer body) → a texel-snapped light view → an orthographic
 //! `view_proj`. The camera read is [`ViewUniform`]; it carries no orthographic
 //! half-extents, so this phase asserts a perspective camera (critic W3).
+//!
+//! # Caster-aware split-range fit (`docs/CSM-AUTOFIT-PLAN.md`, rung C3, default OFF)
+//!
+//! [`CsmFit`] is the already-decided split-range decision `resolve_csm` applies —
+//! `resolve_csm` itself does not consult [`CsmConfig::fit_mode`]. [`resolve_csm_cascades`]
+//! computes it via the private `select_fit` gate: [`CsmFitMode::Fixed`] (the DEFAULT)
+//! selects [`CsmFit::NONE`] immediately, without reading [`CsmCasterBounds`] or
+//! [`CsmFitState`] — textually today's math, so a pinned scene that never sets `fit_mode`
+//! is byte-identical to before this rung. [`CsmFitMode::Shrink`] / [`CsmFitMode::CatchAll`]
+//! fit the split range to the caster-derived `far_eff` (an anti-shimmer log-quantized,
+//! Schmitt-latched value — see [`grid_value`] / [`latch_cell`]), requiring
+//! [`reduce_caster_bounds`](crate::csm_caster::reduce_caster_bounds) to be app-registered
+//! (rung C5); without it every mode renders as `Fixed`.
 
-use boyko_macros::Resource;
+use boyko_macros::{Resource, SystemSet};
 
 use boyko_ecs::ecs::core::iters::query::Query;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
@@ -71,9 +84,10 @@ const UP_PARALLEL_THRESHOLD: f32 = 0.99;
 /// floor keeps every `view_proj` finite and invertible (W5 zero-radius floor).
 const MIN_DIAMETER: f32 = 1.0e-3;
 
-// ---- the log-quantization grid + Schmitt latch (C1, dark — `docs/CSM-AUTOFIT-PLAN.md`
-// Decision D6). Nothing in this file calls these yet; C2/C3 wire a caller through
-// `resolve_csm_cascades`. Zero behavior change in this rung. ----------------------------
+// ---- the log-quantization grid + Schmitt latch (`docs/CSM-AUTOFIT-PLAN.md` Decision D6).
+// Landed dark in C1; rung C3 wires the first caller (`select_fit`, called from
+// `resolve_csm_cascades`). Under the default `CsmFitMode::Fixed` these functions are still
+// never called — the fit-mode 0%-gate short-circuits before `select_fit` reaches them. ----
 
 /// Log2 step of the far grid: `far_eff ∈ {2^(k/4)}` (ratio ≈ 1.18921 = `2^(1/4)`). The
 /// ANTI-SHIMMER parameter (D6/D9), NOT an owner-facing tuning knob — exposing it would let
@@ -104,8 +118,9 @@ const FIT_SHRINK_BAND_CELLS: i32 = 2;
 
 /// `latch_cell`'s "never latched" sentinel for `prev_k` — `i32::MIN`, so it can never
 /// collide with a real grid cell (a legitimate `k` stays within a few hundred of zero for
-/// any plausible scene scale). Rung C3 promotes this to `CsmFitState::UNLATCHED`, defined to
-/// the SAME value, so that promotion is a value-preserving rewire, not a behavior change.
+/// any plausible scene scale). Promoted to the public [`CsmFitState::UNLATCHED`] (rung C3):
+/// that associated const is DEFINED as this private const, not a second `i32::MIN` literal,
+/// so the two sentinels can never drift apart.
 const FIT_UNLATCHED: i32 = i32::MIN;
 
 /// The minimum exponent `exp2i` can represent as a NORMAL `f32` (IEEE-754 exponent field
@@ -134,6 +149,40 @@ const DEFAULT_DEPTH_BIAS_CONSTANT: f32 = 0.0015;
 /// The default slope-scaled depth bias (the rasterizer `depthBiasSlopeFactor` term).
 const DEFAULT_DEPTH_BIAS_SLOPE: f32 = 1.5;
 
+// ---- CsmFitMode (the cascade split-range policy knob, `docs/CSM-AUTOFIT-PLAN.md`) -----
+
+/// The cascade split-RANGE policy — the owner's sharpness/coverage lever. Capability is
+/// STRUCTURAL: [`Fixed`](CsmFitMode::Fixed) IS "auto-fit off" (the 0%-gate); there is no
+/// separate flag. Mirrors
+/// [`ShadowDenoiseMode`](crate::shadow_denoise_config::ShadowDenoiseMode) / `AaMode`.
+///
+/// The caster modes ([`Shrink`](CsmFitMode::Shrink) / [`CatchAll`](CsmFitMode::CatchAll))
+/// require [`reduce_caster_bounds`](crate::csm_caster::reduce_caster_bounds) to be
+/// app-registered (`docs/CSM-AUTOFIT-PLAN.md` rung C5). Without it [`CsmCasterBounds`]
+/// never leaves [`CsmCasterBounds::EMPTY`], the fit never latches, and EVERY mode renders
+/// as `Fixed` — silently, at zero cost.
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum CsmFitMode {
+    /// Split `[view.near, min(view.far, shadow_distance)]` — today's math, BIT-IDENTICAL.
+    /// The DEFAULT: a world that never sets this renders byte-identically to today, and the
+    /// caster bounds/latch state are never read (0 ns).
+    #[default]
+    Fixed,
+    /// F-shrink: all `N` cascades split `[view.near, far_eff]`. One extra cascade over the
+    /// caster range; receivers beyond `far_eff` are FULLY LIT with no cross-fade
+    /// (`shadow_apply.hlsli`'s `sel >= gCsmActive` early-out) — a HARD terminator that
+    /// relocates into the visible scene and jumps up to 29.3% per latch transition. Maximum
+    /// sub-range subdivision, at the cost of the terminator.
+    Shrink,
+    /// F-catch-all: cascades `0..N-2` split `[view.near, far_eff]`; cascade `N-1` is
+    /// RESERVED for `[far_eff, far_cap]`, so distant shadows survive and the last split
+    /// stays at `shadow_distance` exactly as today (no terminator). One of `N` cascades is
+    /// spent on caster-free range. `cascade_count < 2` degenerates to `Fixed` (cannot
+    /// reserve the only cascade). RECOMMENDED ON-mode.
+    CatchAll,
+}
+
 // ---- CsmConfig (the owner-set Resource — mirrors SsaoConfig) --------------------------
 
 /// The global CSM config (CSM Inc-1a) — a `World`-singleton Resource the owner sets, the
@@ -160,6 +209,9 @@ pub struct CsmConfig {
     pub depth_bias_constant: f32,
     /// Slope-scaled depth-bias term (rasterizer `depthBiasSlopeFactor`).
     pub depth_bias_slope: f32,
+    /// The cascade split-RANGE policy. Default [`CsmFitMode::Fixed`] (the golden-preserving
+    /// 0%-gate) — see [`CsmFitMode`].
+    pub fit_mode: CsmFitMode,
 }
 
 impl Default for CsmConfig {
@@ -177,6 +229,7 @@ impl Default for CsmConfig {
             normal_bias: DEFAULT_NORMAL_BIAS,
             depth_bias_constant: DEFAULT_DEPTH_BIAS_CONSTANT,
             depth_bias_slope: DEFAULT_DEPTH_BIAS_SLOPE,
+            fit_mode: CsmFitMode::Fixed,
         }
     }
 }
@@ -301,8 +354,10 @@ pub use crate::csm_marker::ShadowCaster;
 /// 0`). Else, for each cascade `i in 0..min(cascade_count, MAX_CASCADES)`:
 ///
 /// 1. **PSSM split** — `split_i` blends a logarithmic and a uniform partition of
-///    `[near, far_cap]` by `λ`, where `far_cap = min(view.far, shadow_distance)`. The
-///    splits are a fixed function of `(near, far_cap, λ, N)` — static, no shimmer.
+///    `[near, pssm_far]` by `λ`, where `pssm_far` is `far_cap_today =
+///    min(view.far, shadow_distance)` when `fit.far_eff` is `None`, or the caster-fitted
+///    `far_eff` otherwise (see "The `fit` parameter" below). The splits are a fixed
+///    function of `(near, pssm_far, λ, pssm_n)` — static, no shimmer.
 /// 2. **8 frustum-slice corners** in WORLD space for `depth ∈ [near_i, split_i]`, from the
 ///    camera eye + orthonormal basis + `fov_y` / `aspect`.
 /// 3. **Bounding-SPHERE fit** — the sphere of the 8 corners. The radius is rotation
@@ -338,8 +393,35 @@ pub use crate::csm_marker::ShadowCaster;
 /// [`ViewUniform`] carries no orthographic half-extents, so the frustum-corner step needs
 /// `fov_y` / `aspect`. An orthographic camera (`fov_y == 0`) trips a `debug_assert!`; in
 /// release it produces a degenerate (zero-radius-floored) fit rather than UB.
+///
+/// # The `fit` parameter (`docs/CSM-AUTOFIT-PLAN.md` rung C3)
+///
+/// `resolve_csm` does NOT consult [`CsmConfig::fit_mode`] — it is driven entirely by the
+/// already-decided `fit: CsmFit`, which [`resolve_csm_cascades`] computes from `fit_mode` +
+/// the caster bounds + the anti-shimmer latch BEFORE calling in. This keeps the fit
+/// mechanics (this function) oblivious to mode NAMES, so a new mode is a
+/// `resolve_csm_cascades`-side change only.
+///
+/// - [`CsmFit::NONE`] (`far_eff: None`) ⇒ TEXTUALLY today's fit: the PSSM split range is
+///   `[near, far_cap_today]` over all `count` cascades, and the sun-axis pull-back stays
+///   `z_far = 2·diameter` / `eye = center + sun·(z_far·0.5)` — the D10 byte-identity claim,
+///   pinned by `fixed_mode_is_bit_identical_to_today`.
+/// - `Some(far_eff)` with `reserve_tail: false` (`Shrink`) ⇒ all `count` cascades split
+///   `[near, far_eff]`.
+/// - `Some(far_eff)` with `reserve_tail: true` (`CatchAll`) ⇒ cascades `0..count-1` split
+///   `[near, far_eff]`; cascade `count-1` is reserved for `[far_eff, far_cap_today]`
+///   (`near_i`'s cross-cascade chaining is untouched, so the reserved cascade naturally
+///   slices that tail range).
+///
+/// The sun-axis pull-back (D5, the `z_far`/`eye` term) is UNCHANGED in every mode this
+/// rung — that edit is rung C4.
 #[inline]
-pub fn resolve_csm(cfg: &CsmConfig, view: &ViewUniform, sun_dir: [f32; 3]) -> ResolvedCsm {
+pub fn resolve_csm(
+    cfg: &CsmConfig,
+    view: &ViewUniform,
+    sun_dir: [f32; 3],
+    fit: CsmFit,
+) -> ResolvedCsm {
     if !cfg.enabled() {
         return ResolvedCsm::DISABLED;
     }
@@ -350,7 +432,6 @@ pub fn resolve_csm(cfg: &CsmConfig, view: &ViewUniform, sun_dir: [f32; 3]) -> Re
     );
 
     let count = (cfg.cascade_count as usize).min(MAX_CASCADES);
-    let n = count as f32;
 
     let eye = view.camera_pos.xyz();
     let forward = view.cam_forward.xyz();
@@ -360,8 +441,30 @@ pub fn resolve_csm(cfg: &CsmConfig, view: &ViewUniform, sun_dir: [f32; 3]) -> Re
     let near = view.near;
     // The last cascade's far is capped at the owner's shadow distance (and never beyond the
     // camera far). `enabled()` guarantees `shadow_distance > 0`; clamp to `> near` so the
-    // partition is well-formed even for a misconfigured near/distance pair.
-    let far_cap = view.far.min(cfg.shadow_distance).max(near + MIN_DIAMETER);
+    // partition is well-formed even for a misconfigured near/distance pair. Renamed (not
+    // rewritten) from `far_cap` -- `fit.far_eff == None` still reduces to EXACTLY this
+    // value (D10's byte-identity claim).
+    let far_cap_today = view.far.min(cfg.shadow_distance).max(near + MIN_DIAMETER);
+
+    debug_assert!(
+        fit.far_eff.is_none_or(|f| f.is_finite() && f > near && f <= far_cap_today),
+        "resolve_csm: fit.far_eff must be finite, > near, and <= far_cap_today"
+    );
+    debug_assert!(
+        !fit.reserve_tail || count >= 2,
+        "resolve_csm: fit.reserve_tail requires at least 2 cascades (got count={count})"
+    );
+
+    // docs/CSM-AUTOFIT-PLAN.md algorithm C edit 1: `fit.far_eff == None` reduces to
+    // EXACTLY today's math (`pssm_far = far_cap_today`, `pssm_n = count`, no reserved
+    // tail). `Some(f)` with `reserve_tail` is `CatchAll` (cascade `count-1` is reserved for
+    // `[f, far_cap_today]`); `Some(f)` without is `Shrink` (all `count` cascades split
+    // `[near, f]`).
+    let (pssm_far, pssm_n, tail) = match fit.far_eff {
+        None => (far_cap_today, count, None),
+        Some(f) if fit.reserve_tail => (f, count - 1, Some(far_cap_today)),
+        Some(f) => (f, count, None),
+    };
 
     let sun = Vec3::new(sun_dir[0], sun_dir[1], sun_dir[2]);
     // The light direction the W5 guard compares against world-up; a degenerate (zero) sun
@@ -401,7 +504,14 @@ pub fn resolve_csm(cfg: &CsmConfig, view: &ViewUniform, sun_dir: [f32; 3]) -> Re
 
     let mut near_i = near;
     for (i, slot) in cascades.iter_mut().enumerate().take(count) {
-        let split_i = pssm_split(near, far_cap, cfg.lambda, i + 1, n);
+        // docs/CSM-AUTOFIT-PLAN.md algorithm C edit 2: the reserved tail cascade
+        // (`CatchAll`'s `count-1`) takes `far_cap_today` DIRECTLY, not another PSSM split
+        // -- `near_i` still chains from the previous split (untouched below), so this
+        // cascade naturally slices `[far_eff, far_cap_today]`.
+        let split_i = match tail {
+            Some(t) if i == count - 1 => t,
+            _ => pssm_split(near, pssm_far, cfg.lambda, i + 1, pssm_n as f32),
+        };
 
         // 8 world-space frustum-slice corners for depth ∈ [near_i, split_i].
         let corners = slice_corners(&rig, near_i, split_i);
@@ -555,11 +665,11 @@ fn sphere_radius(corners: &[Vec3; 8], center: Vec3) -> f32 {
     max_sq.sqrt()
 }
 
-// ---- the log-quantization grid + Schmitt latch (C1, dark) -----------------------------
+// ---- the log-quantization grid + Schmitt latch ------------------------------------------
 //
-// Nothing in this file calls these yet — `resolve_csm` still takes only `(cfg, view,
-// sun_dir)`. Landed standalone (`docs/CSM-AUTOFIT-PLAN.md` Decision D6) so the exactness
-// and no-limit-cycle properties are unit-testable before C2/C3 wire a caller through them.
+// Landed standalone in C1 (`docs/CSM-AUTOFIT-PLAN.md` Decision D6) so the exactness and
+// no-limit-cycle properties were unit-testable before a caller existed. Rung C3's
+// `select_fit` is now that caller — reached only when `cfg.fit_mode != Fixed`.
 
 /// Exact `2^q` as `f32`, built directly from its IEEE-754 bits (sign `0`, exponent field
 /// `q + 127`, mantissa `0`) — NOT `powf`, which is a libm call with no cross-platform
@@ -694,10 +804,10 @@ pub fn latch_cell(raw: f32, prev_k: i32) -> i32 {
     prev_k
 }
 
-// ---- CsmCasterBounds (C2, dark — `docs/CSM-AUTOFIT-PLAN.md`). Folded once per frame by
+// ---- CsmCasterBounds (`docs/CSM-AUTOFIT-PLAN.md`). Folded once per frame by
 // `csm_caster::reduce_caster_bounds` from `CsmCasterScratch`'s existing gather output.
-// Nothing reads this Resource yet in this rung; C3 wires `resolve_csm_cascades` as its
-// first consumer. ---------------------------------------------------------------------
+// Landed dark in C2; rung C3's `select_fit` (called from `resolve_csm_cascades`) is its
+// first consumer, reached only when `cfg.fit_mode != Fixed`. -----------------------------
 
 /// The caster-derived fit input, folded once per frame by
 /// [`reduce_caster_bounds`](crate::csm_caster::reduce_caster_bounds) from
@@ -717,13 +827,15 @@ pub fn latch_cell(raw: f32, prev_k: i32) -> i32 {
 ///
 /// Not `#[repr(C)]`, no size pin — this never reaches the GPU (a CPU-only fit input). 36 B.
 ///
-/// # Dark this rung (C2)
+/// # Read only when `fit_mode != Fixed` (rung C3)
 ///
-/// Nothing reads this Resource yet. [`CsmPlugin`](crate::csm_plugin::CsmPlugin) inserts
-/// [`CsmCasterBounds::EMPTY`] so a bare-`CsmPlugin` world never panics resolving it, but
-/// the fold only runs once the owning app registers
+/// [`select_fit`] reads this Resource, but ONLY past the `CsmFitMode::Fixed` 0%-gate — a
+/// world that never sets `fit_mode` never reads it. [`CsmPlugin`](crate::csm_plugin::CsmPlugin)
+/// inserts [`CsmCasterBounds::EMPTY`] so a bare-`CsmPlugin` world never panics resolving
+/// it, but the fold only runs once the owning app registers
 /// [`reduce_caster_bounds`](crate::csm_caster::reduce_caster_bounds) — an unwired exported
-/// API (rung C5). Until then this Resource stays `EMPTY` forever: inert, zero cost.
+/// API (rung C5). Until then this Resource stays `EMPTY` forever: inert, zero cost, and
+/// the fit falls back to `Fixed` for any non-`Fixed` mode too (never latches).
 #[derive(Resource, Clone, Copy, Debug, PartialEq)]
 pub struct CsmCasterBounds {
     /// Max VIEW-space depth over all caster instances, reduced PER INSTANCE — each
@@ -777,13 +889,154 @@ impl Default for CsmCasterBounds {
     }
 }
 
+// ---- CsmFitState (C3, the anti-shimmer latch — `docs/CSM-AUTOFIT-PLAN.md` D6) ---------
+
+/// The anti-shimmer hysteresis latch — CPU-ONLY state, deliberately NOT inside the
+/// `#[repr(C)]` GPU-uploaded [`ResolvedCsm`] (that would entangle `DISABLED`/`Default`/
+/// `PartialEq` with frame state and break the 336 B contract's purity). [`resolve_csm_cascades`]
+/// is its SINGLE writer (the one-producer-per-field discipline).
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Default)]
+pub struct CsmFitState {
+    /// The latched grid cell of `far_eff`. [`CsmFitState::UNLATCHED`] ⇒ never latched ⇒
+    /// the fit falls back to `Fixed` (ground-truth constraint 3 — a world that never has
+    /// usable casters never latches).
+    pub far_k: i32,
+}
+
+impl CsmFitState {
+    /// Never latched. Defined AS the private [`FIT_UNLATCHED`] sentinel (not a second
+    /// `i32::MIN` literal), so the two can never drift apart — `latch_cell`'s "fresh latch"
+    /// branch and this Resource's "never latched" state are the SAME value by construction.
+    pub const UNLATCHED: i32 = FIT_UNLATCHED;
+}
+
+// `Default::default()` gives `far_k == 0`, which is a VALID grid cell, NOT `UNLATCHED` —
+// `CsmPlugin` inserts `CsmFitState { far_k: CsmFitState::UNLATCHED }` explicitly; this
+// derive exists only for the Resource trait's derive-completeness, never for insertion
+// (`resolve_csm_cascades` debug-asserts the inserted state is `UNLATCHED` on frame 0 via
+// its own gate logic never HOLD-ing a value it has not itself latched).
+
+// ---- CsmFit (C3, the already-decided fit handed to the pure resolve) ------------------
+
+/// The already-latched fit decision handed to the PURE [`resolve_csm`]. [`CsmFit::NONE`] ==
+/// "Fixed / unlatched / no usable bounds" == today's fit EXACTLY — `resolve_csm` does not
+/// consult [`CsmConfig::fit_mode`] at all; the caller ([`resolve_csm_cascades`], via
+/// [`select_fit`]) has already decided.
+///
+/// # `caster_aabb` deferred to rung C4
+///
+/// The sun-axis pull-back term (`docs/CSM-AUTOFIT-PLAN.md` D5) is NOT implemented this
+/// rung: [`resolve_csm`]'s `z_far` / `eye` pull-back stays `2.0 * diameter` /
+/// `center + sun * (z_far * 0.5)`, UNCHANGED in every mode. A `caster_aabb` field on this
+/// struct would therefore be unused dead weight this rung; rung C4 adds it alongside the
+/// pull-back edit it drives.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub struct CsmFit {
+    /// The quantized, latched split far. `None` ⇒ `far_cap_today` (today's math).
+    pub far_eff: Option<f32>,
+    /// `true` ⇒ reserve cascade `count - 1` for `[far_eff, far_cap_today]` (`CatchAll`).
+    /// Meaningless when `far_eff` is `None`.
+    pub reserve_tail: bool,
+}
+
+impl CsmFit {
+    /// `Fixed` / unlatched / no usable bounds — today's fit exactly.
+    pub const NONE: Self = Self { far_eff: None, reserve_tail: false };
+}
+
+// ---- CsmResolveSet (the cross-plugin caster-bounds → fit-resolve ordering seam) -------
+
+/// The `Main`-schedule ordering seam that pins [`resolve_csm_cascades`] AFTER the
+/// caster-bounds fold ([`reduce_caster_bounds`](crate::csm_caster::reduce_caster_bounds),
+/// [`CsmFitSet`](crate::csm_caster::CsmFitSet)) — the CSM-fit analogue of
+/// [`DdgiResolveSet`](crate::ddgi_config::DdgiResolveSet) /
+/// [`PunctualResolveSet`](crate::shadow_atlas::PunctualResolveSet).
+///
+/// # Why a named set, not add-order
+///
+/// `reduce_caster_bounds` is registered at a DIFFERENT call site than
+/// `resolve_csm_cascades` (rung C5 wires the app-level edge), so their per-system
+/// `SystemKey`s are not co-visible — a `.after(key)` edge cannot cross that boundary. A
+/// set-to-set edge is pinned BY NAME and holds regardless of registration order:
+/// [`CsmPlugin`](crate::csm_plugin::CsmPlugin) joins `resolve_csm_cascades`
+/// `.in_set(CsmResolveSet)`; the owning app (rung C5) configures
+/// `CsmResolveSet.after(CsmFitSet)`.
+#[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CsmResolveSet;
+
 // ---- the cold StrategyPolicy system (mirrors resolve_ssao_policy) ---------------------
+
+/// The pure, World-free fit-selection core (`docs/CSM-AUTOFIT-PLAN.md` algorithm B, rung
+/// C3) [`resolve_csm_cascades`] wraps — mirrors
+/// [`reduce_bounds_into`](crate::csm_caster::reduce_bounds_into)'s pure-core idiom, so the
+/// gate + latch decision is unit-testable without constructing `Res`/`ResMut`.
+///
+/// # The gate, in order (section 8's edge-case table)
+///
+/// 1. `Fixed` ⇒ [`CsmFit::NONE`] IMMEDIATELY — `bounds`/`state` are not read past this
+///    line (D10: zero staleness exposure on every existing golden).
+/// 2. `CatchAll` with `cfg.cascade_count < 2` ⇒ [`CsmFit::NONE`] (cannot reserve the only
+///    cascade) — checked BEFORE the latch, so it never touches `state`.
+/// 3. `bounds.is_usable()`:
+///    - Usable, but `raw_far <= near + MIN_DIAMETER` (every caster behind/at the camera)
+///      ⇒ [`CsmFit::NONE`] — nothing usable to fit, and NOT latched (a degenerate value
+///      must never become a Schmitt-latch anchor).
+///    - Usable ⇒ [`latch_cell`] on `raw_far` clamped to `[near + MIN_DIAMETER,
+///      far_cap_today]`; `state.far_k` is updated to the new cell.
+///    - Not usable, but `state.far_k != UNLATCHED` ⇒ HOLD: reuse `state.far_k` UNCHANGED
+///      (the streaming/blink-strobe fix, D7) — never reset once latched.
+///    - Not usable and never latched ⇒ [`CsmFit::NONE`] (ground-truth constraint 3: a
+///      world that never has usable casters never latches).
+/// 4. `far_eff = grid_value(k)` clamped to `[near + MIN_DIAMETER, far_cap_today]`. If
+///    `far_eff >= far_cap_today` (casters already reach the shadow distance) ⇒
+///    [`CsmFit::NONE`] — nothing to shrink, and it would otherwise give `CatchAll` a
+///    zero-width reserved tail.
+/// 5. Otherwise: `CsmFit { far_eff: Some(far_eff), reserve_tail: fit_mode == CatchAll }`.
+#[inline]
+fn select_fit(
+    cfg: &CsmConfig,
+    near: f32,
+    far_cap_today: f32,
+    bounds: &CsmCasterBounds,
+    state: &mut CsmFitState,
+) -> CsmFit {
+    if cfg.fit_mode == CsmFitMode::Fixed {
+        return CsmFit::NONE;
+    }
+    if cfg.fit_mode == CsmFitMode::CatchAll && cfg.cascade_count < 2 {
+        return CsmFit::NONE;
+    }
+
+    let k = if bounds.is_usable() {
+        let raw = bounds.raw_far;
+        if raw <= near + MIN_DIAMETER {
+            return CsmFit::NONE;
+        }
+        let clamped = raw.clamp(near + MIN_DIAMETER, far_cap_today);
+        let k = latch_cell(clamped, state.far_k);
+        state.far_k = k;
+        k
+    } else if state.far_k != CsmFitState::UNLATCHED {
+        state.far_k
+    } else {
+        return CsmFit::NONE;
+    };
+
+    let far_eff = grid_value(k).clamp(near + MIN_DIAMETER, far_cap_today);
+    if far_eff >= far_cap_today {
+        return CsmFit::NONE;
+    }
+
+    CsmFit { far_eff: Some(far_eff), reserve_tail: cfg.fit_mode == CsmFitMode::CatchAll }
+}
 
 /// The cold CSM resolve policy — reads [`CsmConfig`] + the active [`ViewUniform`] + the
 /// PRIMARY directional light, and writes the derived [`ResolvedCsm`]. The CSM analogue of
 /// [`resolve_ssao_policy`](crate::ssao_config::resolve_ssao_policy) /
 /// [`select_lighting_cull`](crate::light_policy::select_lighting_cull). It is the SINGLE
-/// owner of [`ResolvedCsm`] (the one-producer write discipline).
+/// owner of [`ResolvedCsm`] (the one-producer write discipline). It is ALSO the SINGLE
+/// writer of [`CsmFitState`] (`docs/CSM-AUTOFIT-PLAN.md` rung C3) — the anti-shimmer latch
+/// the caster fit modes carry across frames.
 ///
 /// # Primary sun selection
 ///
@@ -792,6 +1045,13 @@ impl Default for CsmCasterBounds {
 /// marcher writes into `gMaterial.R` and the lighting resolve treats as the sun. With no
 /// directional light present, [`ResolvedCsm`] is left at [`ResolvedCsm::DISABLED`] (no sun
 /// ⇒ no cascades).
+///
+/// # The caster fit gate (rung C3)
+///
+/// `bounds`/`state` feed [`select_fit`], which decides — per [`CsmConfig::fit_mode`] — the
+/// [`CsmFit`] handed to [`resolve_csm`]. Under the default [`CsmFitMode::Fixed`],
+/// `select_fit` returns [`CsmFit::NONE`] immediately WITHOUT reading `bounds`/`state`, so a
+/// pinned scene that never sets `fit_mode` is byte-identical to before this rung (D10).
 ///
 /// Cold by construction (zero hot-path cost): a single fit run once per frame; the per-row
 /// render path never reads [`CsmConfig`].
@@ -804,6 +1064,8 @@ pub fn resolve_csm_cascades(
     cfg: Res<CsmConfig>,
     view: Res<ViewUniform>,
     suns: Query<&DirectionalLight>,
+    bounds: Res<CsmCasterBounds>,
+    mut state: ResMut<CsmFitState>,
     mut out: ResMut<ResolvedCsm>,
 ) {
     // The primary sun: the first directional light. No directional ⇒ the disabled selection
@@ -827,7 +1089,11 @@ pub fn resolve_csm_cascades(
         return;
     }
 
-    *out = resolve_csm(&cfg, &view, sun.direction);
+    let near = view.near;
+    let far_cap_today = view.far.min(cfg.shadow_distance).max(near + MIN_DIAMETER);
+    let fit = select_fit(&cfg, near, far_cap_today, &bounds, &mut state);
+
+    *out = resolve_csm(&cfg, &view, sun.direction, fit);
 }
 
 #[cfg(test)]
@@ -889,7 +1155,7 @@ mod tests {
     #[test]
     fn disabled_config_is_the_all_zero_zero_gate() {
         let view = perspective_view(Vec3::new(0.0, 2.0, 0.0), 0.0, 0.0);
-        let resolved = resolve_csm(&CsmConfig::default(), &view, [0.3, -1.0, 0.2]);
+        let resolved = resolve_csm(&CsmConfig::default(), &view, [0.3, -1.0, 0.2], CsmFit::NONE);
         assert_eq!(resolved, ResolvedCsm::DISABLED);
         assert_eq!(resolved.csm_mode_word, 0);
         assert_eq!(resolved.active_count, 0);
@@ -901,14 +1167,14 @@ mod tests {
     #[test]
     fn default_resolved_matches_resolving_the_default_config() {
         let view = perspective_view(Vec3::new(0.0, 2.0, 0.0), 0.0, 0.0);
-        assert_eq!(ResolvedCsm::default(), resolve_csm(&CsmConfig::default(), &view, [0.0, -1.0, 0.0]));
+        assert_eq!(ResolvedCsm::default(), resolve_csm(&CsmConfig::default(), &view, [0.0, -1.0, 0.0], CsmFit::NONE));
     }
 
     #[test]
     fn pssm_splits_monotonic_and_last_equals_far_cap() {
         let view = perspective_view(Vec3::new(0.0, 2.0, 0.0), 0.0, 0.0);
         let cfg = enabled_cfg();
-        let resolved = resolve_csm(&cfg, &view, [0.3, -1.0, 0.2]);
+        let resolved = resolve_csm(&cfg, &view, [0.3, -1.0, 0.2], CsmFit::NONE);
         assert_eq!(resolved.active_count, 4);
 
         let far_cap = view.far.min(cfg.shadow_distance);
@@ -935,7 +1201,7 @@ mod tests {
         let eye = Vec3::new(5.0, 3.0, -2.0);
         let sun = [0.3, -1.0, 0.2];
 
-        let base = resolve_csm(&cfg, &perspective_view(eye, 0.0, 0.0), sun);
+        let base = resolve_csm(&cfg, &perspective_view(eye, 0.0, 0.0), sun, CsmFit::NONE);
         // Rotating the camera yaw/pitch permutes the corner set but not the radius — the
         // anti-shimmer property. texel_size = diameter / resolution, so equal texel_size ⇒
         // equal diameter.
@@ -945,7 +1211,7 @@ mod tests {
             (1.3, -0.5),
             (-2.1, 0.2),
         ] {
-            let rotated = resolve_csm(&cfg, &perspective_view(eye, yaw, pitch), sun);
+            let rotated = resolve_csm(&cfg, &perspective_view(eye, yaw, pitch), sun, CsmFit::NONE);
             for i in 0..4 {
                 let a = base.cascades[i].texel_size;
                 let b = rotated.cascades[i].texel_size;
@@ -965,8 +1231,8 @@ mod tests {
         let cfg = enabled_cfg();
         let view = perspective_view(Vec3::new(1.5, 4.0, -3.0), 0.6, -0.2);
         let sun = [0.2, -1.0, 0.35];
-        let a = resolve_csm(&cfg, &view, sun);
-        let b = resolve_csm(&cfg, &view, sun);
+        let a = resolve_csm(&cfg, &view, sun, CsmFit::NONE);
+        let b = resolve_csm(&cfg, &view, sun, CsmFit::NONE);
         assert_eq!(a, b, "the fit must be a deterministic (idempotent) function of its inputs");
     }
 
@@ -977,7 +1243,7 @@ mod tests {
         let cfg = enabled_cfg();
         let view = perspective_view(Vec3::new(0.0, 2.0, 0.0), 0.0, 0.0);
         for &sun in &[[0.0_f32, 1.0, 0.0], [0.0, -1.0, 0.0], [0.001, 1.0, 0.001]] {
-            let resolved = resolve_csm(&cfg, &view, sun);
+            let resolved = resolve_csm(&cfg, &view, sun, CsmFit::NONE);
             for (i, c) in resolved.cascades.iter().enumerate().take(4) {
                 assert!(all_finite(&c.view_proj), "cascade {i} view_proj must be finite for sun {sun:?}");
                 assert!(
@@ -999,7 +1265,7 @@ mod tests {
             ..CsmConfig::default()
         };
         let view = perspective_view(Vec3::new(0.0, 2.0, 0.0), 0.0, 0.0);
-        let resolved = resolve_csm(&cfg, &view, [0.0, -1.0, 0.0]);
+        let resolved = resolve_csm(&cfg, &view, [0.0, -1.0, 0.0], CsmFit::NONE);
         let c = &resolved.cascades[0];
         assert!(all_finite(&c.view_proj), "degenerate slice view_proj must be finite");
         assert!(det4(&c.view_proj).abs() > 1.0e-30, "degenerate slice view_proj must be non-singular");
@@ -1032,7 +1298,7 @@ mod tests {
             let yaw = (next() - 0.5) * core::f32::consts::TAU;
             let pitch = (next() - 0.5) * (core::f32::consts::FRAC_PI_2 - 0.05) * 2.0;
             let sun = [next() - 0.5, -(0.2 + next() * 0.8), next() - 0.5];
-            let resolved = resolve_csm(&cfg, &perspective_view(eye, yaw, pitch), sun);
+            let resolved = resolve_csm(&cfg, &perspective_view(eye, yaw, pitch), sun, CsmFit::NONE);
             for (i, c) in resolved.cascades.iter().enumerate().take(4) {
                 assert!(
                     all_finite(&c.view_proj),
@@ -1050,7 +1316,7 @@ mod tests {
             ..CsmConfig::default()
         };
         let view = perspective_view(Vec3::new(0.0, 2.0, 0.0), 0.0, 0.0);
-        let resolved = resolve_csm(&cfg, &view, [0.0, -1.0, 0.0]);
+        let resolved = resolve_csm(&cfg, &view, [0.0, -1.0, 0.0], CsmFit::NONE);
         assert_eq!(resolved.active_count, MAX_CASCADES as u32);
     }
 
@@ -1099,7 +1365,7 @@ mod tests {
             (Vec3::new(-3.0, 8.0, 4.0), -1.2, 0.3, [0.1, 0.7, -0.6]),
         ] {
             let view = perspective_view(eye, yaw, pitch);
-            let resolved = resolve_csm(&cfg, &view, sun_dir);
+            let resolved = resolve_csm(&cfg, &view, sun_dir, CsmFit::NONE);
             let sun = Vec3::new(sun_dir[0], sun_dir[1], sun_dir[2]).normalize();
             let (light_right, light_up) = light_basis(sun);
 
@@ -1151,10 +1417,256 @@ mod tests {
         }
     }
 
-    // ---- C1: the log-quantization grid + Schmitt latch -----------------------------------
+    // ---- C3: the fit-mode knob + gate (T1-T9, T12, docs/CSM-AUTOFIT-PLAN.md section 10) ---
+
+    /// The near/far_cap_today pair the C3 tests share (matches `enabled_cfg`'s
+    /// `shadow_distance: 30.0` under a far-clipped `view.far: 1000.0`).
+    const TEST_NEAR: f32 = 0.1;
+    const TEST_FAR_CAP: f32 = 30.0;
+
+    /// A usable `CsmCasterBounds` at the given `raw_far` (one resolved-of-one batch).
+    fn usable_bounds(raw_far: f32) -> CsmCasterBounds {
+        CsmCasterBounds { raw_far, resolved_batches: 1, total_batches: 1, ..CsmCasterBounds::EMPTY }
+    }
+
+    #[test]
+    fn fixed_mode_is_bit_identical_to_today() {
+        // Even with fully USABLE, populated caster bounds and a live latch, `Fixed` must
+        // select CsmFit::NONE and must NOT touch the latch state (D10 -- bounds/state are
+        // NEVER READ under Fixed).
+        let cfg = CsmConfig { fit_mode: CsmFitMode::Fixed, ..enabled_cfg() };
+        let view = perspective_view(Vec3::new(0.0, 2.0, 0.0), 0.0, 0.0);
+        let mut state = CsmFitState { far_k: 42 };
+        let state_before = state;
+
+        let fit = select_fit(&cfg, TEST_NEAR, TEST_FAR_CAP, &usable_bounds(5.0), &mut state);
+        assert_eq!(fit, CsmFit::NONE, "Fixed must select CsmFit::NONE regardless of usable bounds");
+        assert_eq!(state, state_before, "Fixed must never write the latch state");
+
+        // The wider byte-identity claim (D10) is pinned by the pre-C3 suite above: every
+        // test at csm_config.rs's `resolve_csm` call sites passes with only a mechanical
+        // `, CsmFit::NONE` argument added -- those already re-derive the SAME
+        // matrices/splits/pull-back this `CsmFit::NONE` path carries.
+        let sun = [0.3_f32, -1.0, 0.2];
+        let a = resolve_csm(&cfg, &view, sun, fit);
+        let b = resolve_csm(&cfg, &view, sun, CsmFit::NONE);
+        assert_eq!(a, b, "Fixed's selected fit must resolve identically to CsmFit::NONE");
+    }
+
+    #[test]
+    fn fit_is_bit_identical_at_rest() {
+        // Property S1 (D6): a static camera + an already-decided fit resolves
+        // bit-identically frame to frame -- shadows are exactly as rock-solid as today.
+        let cfg = CsmConfig { fit_mode: CsmFitMode::CatchAll, ..enabled_cfg() };
+        let view = perspective_view(Vec3::new(1.0, 3.0, -4.0), 0.4, -0.1);
+        let sun = [0.2_f32, -1.0, 0.35];
+        let fit = CsmFit { far_eff: Some(5.0), reserve_tail: true };
+
+        let a = resolve_csm(&cfg, &view, sun, fit);
+        let b = resolve_csm(&cfg, &view, sun, fit);
+        assert_eq!(a, b, "resolving the SAME (cfg, view, sun, fit) twice must be bit-identical");
+    }
+
+    #[test]
+    fn camera_dolly_pop_count_and_magnitude_are_bounded() {
+        // Property S2 (D6): sweeping the caster-depth signal `raw_far` (what a camera
+        // dolly toward/away from a fixed caster set changes) monotonically over 8 grid
+        // cells (a ratio of exactly 4x, `grid_value(-4)..grid_value(4)`, fine-grained at
+        // 500 steps/cell -- the same resolution `latch_has_no_limit_cycle` uses) must
+        // trigger at most one latch transition per grid-cell boundary crossed, and every
+        // transition's magnitude must stay inside the documented +18.92% / -29.3% band.
+        const STEPS: usize = 4000;
+        let cfg = CsmConfig { fit_mode: CsmFitMode::CatchAll, ..enabled_cfg() };
+        let lo = grid_value(-4);
+        let hi = grid_value(4);
+        let cells_span = grid_cell(hi) - grid_cell(lo);
+
+        let run_sweep = |from: f32, to: f32, max_ratio: f32, min_ratio: f32| -> i32 {
+            let mut state = CsmFitState { far_k: CsmFitState::UNLATCHED };
+            let mut prev_k = CsmFitState::UNLATCHED;
+            let mut transitions = 0i32;
+            for i in 0..=STEPS {
+                let t = i as f32 / STEPS as f32;
+                let raw = from * (to / from).powf(t);
+                let fit = select_fit(&cfg, TEST_NEAR, TEST_FAR_CAP, &usable_bounds(raw), &mut state);
+                assert!(fit.far_eff.is_some(), "raw {raw} in [{lo},{hi}] must always be usable");
+                if state.far_k != prev_k {
+                    if prev_k != CsmFitState::UNLATCHED {
+                        transitions += 1;
+                        let ratio = grid_value(state.far_k) / grid_value(prev_k);
+                        assert!(
+                            ratio <= max_ratio && ratio >= min_ratio,
+                            "transition ratio {ratio} outside the documented band [{min_ratio}, {max_ratio}]"
+                        );
+                    }
+                    prev_k = state.far_k;
+                }
+            }
+            transitions
+        };
+
+        // Receding (growing raw): immediate, at most one transition per cell, ratio > 1.
+        let grow_transitions = run_sweep(lo, hi, 1.1893, 1.0);
+        assert!(
+            grow_transitions <= cells_span,
+            "receding sweep must trigger at most one transition per grid-cell boundary \
+             crossed ({grow_transitions} transitions over {cells_span} boundaries)"
+        );
+
+        // Approaching (shrinking raw): only after 2 full cells, ratio < 1.
+        let shrink_transitions = run_sweep(hi, lo, 1.0, 1.0 / 1.414_22);
+        assert!(
+            shrink_transitions <= cells_span / 2 + 1,
+            "approaching sweep must trigger at most one transition per TWO grid-cell \
+             boundaries crossed ({shrink_transitions} transitions, span {cells_span})"
+        );
+    }
+
+    #[test]
+    fn unlatched_or_no_casters_falls_back_to_fixed() {
+        // Ground-truth constraint 3: EMPTY bounds + never-latched state must fall back to
+        // Fixed under BOTH caster modes.
+        for mode in [CsmFitMode::Shrink, CsmFitMode::CatchAll] {
+            let cfg = CsmConfig { fit_mode: mode, ..enabled_cfg() };
+            let mut state = CsmFitState { far_k: CsmFitState::UNLATCHED };
+            let fit = select_fit(&cfg, TEST_NEAR, TEST_FAR_CAP, &CsmCasterBounds::EMPTY, &mut state);
+            assert_eq!(fit, CsmFit::NONE, "{mode:?}: EMPTY + unlatched must fall back to Fixed");
+            assert_eq!(
+                state.far_k,
+                CsmFitState::UNLATCHED,
+                "{mode:?}: must not latch off EMPTY/unusable bounds"
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_bounds_hold_the_latch() {
+        let cfg = CsmConfig { fit_mode: CsmFitMode::CatchAll, ..enabled_cfg() };
+        let mut state = CsmFitState { far_k: CsmFitState::UNLATCHED };
+
+        let fit_latched = select_fit(&cfg, TEST_NEAR, TEST_FAR_CAP, &usable_bounds(3.0), &mut state);
+        assert!(fit_latched.far_eff.is_some());
+        let k_latched = state.far_k;
+
+        // Next frame: a mesh is streaming in -- resolved < total (incomplete fold).
+        let incomplete = CsmCasterBounds { raw_far: 9.0, resolved_batches: 1, total_batches: 2, ..CsmCasterBounds::EMPTY };
+        let fit_held = select_fit(&cfg, TEST_NEAR, TEST_FAR_CAP, &incomplete, &mut state);
+        assert_eq!(state.far_k, k_latched, "an incomplete fold must not move the latch");
+        assert_eq!(
+            fit_held, fit_latched,
+            "an incomplete fold must reproduce the previous frame's fit exactly"
+        );
+    }
+
+    #[test]
+    fn blinking_caster_does_not_strobe() {
+        let cfg = CsmConfig { fit_mode: CsmFitMode::CatchAll, ..enabled_cfg() };
+        let mut state = CsmFitState { far_k: CsmFitState::UNLATCHED };
+
+        let bounds = usable_bounds(4.0);
+        let fit0 = select_fit(&cfg, TEST_NEAR, TEST_FAR_CAP, &bounds, &mut state);
+        assert!(fit0.far_eff.is_some());
+
+        for i in 0..10 {
+            let this_frame = if i % 2 == 0 { bounds } else { CsmCasterBounds::EMPTY };
+            let fit = select_fit(&cfg, TEST_NEAR, TEST_FAR_CAP, &this_frame, &mut state);
+            assert_eq!(fit, fit0, "frame {i}: a blinking caster set must never strobe the fit");
+        }
+    }
+
+    #[test]
+    fn casters_behind_camera_fall_back_to_fixed() {
+        let cfg = CsmConfig { fit_mode: CsmFitMode::Shrink, ..enabled_cfg() };
+        let mut state = CsmFitState { far_k: CsmFitState::UNLATCHED };
+
+        let behind = usable_bounds(TEST_NEAR);
+        let fit = select_fit(&cfg, TEST_NEAR, TEST_FAR_CAP, &behind, &mut state);
+        assert_eq!(fit, CsmFit::NONE, "raw_far <= near + MIN_DIAMETER must fall back to Fixed");
+        assert_eq!(
+            state.far_k,
+            CsmFitState::UNLATCHED,
+            "a degenerate raw_far must never become a latch anchor"
+        );
+    }
+
+    #[test]
+    fn casters_reaching_shadow_distance_fall_back_to_fixed() {
+        let cfg = CsmConfig { fit_mode: CsmFitMode::CatchAll, ..enabled_cfg() };
+        let mut state = CsmFitState { far_k: CsmFitState::UNLATCHED };
+
+        // Casters already at the shadow distance -- the clamped/quantized far_eff lands
+        // AT (or past) far_cap_today.
+        let far = usable_bounds(TEST_FAR_CAP);
+        let fit = select_fit(&cfg, TEST_NEAR, TEST_FAR_CAP, &far, &mut state);
+        assert_eq!(
+            fit, CsmFit::NONE,
+            "far_eff >= far_cap_today must fall back to Fixed (nothing to shrink)"
+        );
+    }
+
+    #[test]
+    fn catch_all_with_one_cascade_degenerates_to_fixed() {
+        let cfg = CsmConfig { fit_mode: CsmFitMode::CatchAll, cascade_count: 1, ..CsmConfig::default() };
+        let mut state = CsmFitState { far_k: CsmFitState::UNLATCHED };
+
+        let fit = select_fit(&cfg, TEST_NEAR, TEST_FAR_CAP, &usable_bounds(3.0), &mut state);
+        assert_eq!(fit, CsmFit::NONE, "CatchAll with < 2 cascades cannot reserve the only cascade");
+        assert_eq!(
+            state.far_k,
+            CsmFitState::UNLATCHED,
+            "the degenerate CatchAll check must run BEFORE the latch is ever touched"
+        );
+    }
+
+    #[test]
+    fn shrink_relocates_the_terminator_catch_all_does_not() {
+        // D2's documented trade-off: Shrink's last split IS far_eff (a hard, un-cross-faded
+        // terminator relocated into the visible scene); CatchAll reserves cascade N-1 for
+        // `[far_eff, far_cap]`, so its last split stays at far_cap exactly as today.
+        let view = perspective_view(Vec3::new(0.0, 2.0, 0.0), 0.0, 0.0);
+        let sun = [0.3_f32, -1.0, 0.2];
+        let far_eff = 5.0_f32;
+
+        let cfg_shrink = CsmConfig { fit_mode: CsmFitMode::Shrink, ..enabled_cfg() };
+        let shrink = resolve_csm(
+            &cfg_shrink, &view, sun,
+            CsmFit { far_eff: Some(far_eff), reserve_tail: false },
+        );
+        let n = shrink.active_count as usize;
+        assert!(
+            (shrink.cascades[n - 1].split_far - far_eff).abs() < 1.0e-3,
+            "Shrink's last split must equal far_eff (the hard terminator), got {}",
+            shrink.cascades[n - 1].split_far
+        );
+        assert!(
+            shrink.cascades[n - 1].split_far < cfg_shrink.shadow_distance - 1.0,
+            "Shrink's terminator must relocate well short of shadow_distance"
+        );
+
+        let cfg_catch = CsmConfig { fit_mode: CsmFitMode::CatchAll, ..enabled_cfg() };
+        let catch = resolve_csm(
+            &cfg_catch, &view, sun,
+            CsmFit { far_eff: Some(far_eff), reserve_tail: true },
+        );
+        let m = catch.active_count as usize;
+        assert!(
+            (catch.cascades[m - 2].split_far - far_eff).abs() < 1.0e-3,
+            "CatchAll's second-to-last split must equal far_eff, got {}",
+            catch.cascades[m - 2].split_far
+        );
+        let far_cap = view.far.min(cfg_catch.shadow_distance);
+        assert!(
+            (catch.cascades[m - 1].split_far - far_cap).abs() <= 1.0e-2 * far_cap,
+            "CatchAll's last split must equal far_cap (no terminator), got {}",
+            catch.cascades[m - 1].split_far
+        );
+    }
+
+    // ---- the log-quantization grid + Schmitt latch (T10, T17, T18, T19) -------------------
     // Tests T10, T17, T18, T19 (docs/CSM-AUTOFIT-PLAN.md D6, section 10) plus targeted
-    // edge/adversarial coverage. Nothing in this file calls `grid_value`/`grid_cell`/
-    // `latch_cell` yet (C1 is dark) -- these pin the primitives standalone.
+    // edge/adversarial coverage of `grid_value`/`grid_cell`/`latch_cell` in ISOLATION (the
+    // primitives standalone) -- `select_fit`'s own T1-T9/T12 tests, just above, cover them
+    // wired through the fit gate.
 
     /// The next representable f32 strictly ABOVE a positive, finite `x` (not `f32::MAX`).
     /// A local bit-stepping helper (mirrors the module's own bit-decomposition style) so

@@ -75,7 +75,11 @@ pub mod bundles;
 /// CSM Inc-1a — the cascade-fit ECS policy ([`CsmConfig`](csm_config::CsmConfig) +
 /// [`ResolvedCsm`](csm_config::ResolvedCsm) Resources + the pure
 /// [`resolve_csm`](csm_config::resolve_csm) fit + the cold
-/// [`resolve_csm_cascades`](csm_config::resolve_csm_cascades) policy).
+/// [`resolve_csm_cascades`](csm_config::resolve_csm_cascades) policy). The
+/// `docs/CSM-AUTOFIT-PLAN.md` caster-aware split-range fit
+/// ([`CsmFitMode`](csm_config::CsmFitMode) knob, default OFF + byte-identical +
+/// [`CsmCasterBounds`](csm_config::CsmCasterBounds) +
+/// [`CsmFitState`](csm_config::CsmFitState) latch) lives here too.
 pub mod csm_config;
 /// CSM Increment 2 — the ECS-native shadow-caster gather
 /// ([`CsmCasterScratch`](csm_caster::CsmCasterScratch) reused resource +
@@ -335,8 +339,8 @@ pub use barrier::{PlannedBarrier, lower_barriers};
 pub use bindless::BindlessTextureTable;
 pub use bundles::{DirectionalLightObject, MeshBundle, PointLightObject, SpotLightObject};
 pub use csm_config::{
-    CascadeData, CsmCasterBounds, CsmConfig, MAX_CASCADES, RESOLVED_CSM_BYTES, ResolvedCsm,
-    resolve_csm, resolve_csm_cascades,
+    CascadeData, CsmCasterBounds, CsmConfig, CsmFit, CsmFitMode, CsmFitState, CsmResolveSet,
+    MAX_CASCADES, RESOLVED_CSM_BYTES, ResolvedCsm, resolve_csm, resolve_csm_cascades,
 };
 pub use csm_caster::{
     CsmCasterScratch, CsmFitSet, gather_shadow_casters, reduce_bounds_into, reduce_caster_bounds,

@@ -63,7 +63,7 @@ use boyko_macros::{Resource, SystemSet};
 use boyko_scene::ViewUniform;
 use boyko_scene::render_caps::{MeshHandle, RenderEnabled};
 
-use crate::csm_config::{CsmCasterBounds, ResolvedCsm};
+use crate::csm_config::{CsmCasterBounds, CsmConfig, CsmFitMode, ResolvedCsm};
 use crate::csm_marker::ShadowCaster;
 use crate::instance_model::InstanceModelCol;
 use crate::light::{LightTableDirty, LightingConfig};
@@ -317,9 +317,16 @@ pub fn reduce_bounds_into(
     CsmCasterBounds { raw_far, world_min, world_max, resolved_batches, total_batches }
 }
 
-/// The cold caster-bounds fold SYSTEM (`docs/CSM-AUTOFIT-PLAN.md` rung C2) — folds
+/// The cold caster-bounds fold SYSTEM (`docs/CSM-AUTOFIT-PLAN.md` rung C2/C3) — folds
 /// [`CsmCasterScratch`]'s `batches()` + `ring()` (the shadow-caster gather's OUTPUT, NOT
 /// a second query — D7) into [`CsmCasterBounds`] via [`reduce_bounds_into`].
+///
+/// # The `fit_mode` 0%-gate (algorithm A step 1, rung C3)
+///
+/// Under the default [`CsmFitMode::Fixed`] the fold never runs: `out` is written to
+/// [`CsmCasterBounds::EMPTY`] and the per-instance abs-matrix walk is skipped entirely —
+/// the same 0-ns default [`CsmConfig`] already guarantees for [`resolve_csm_cascades`]'s
+/// side of the gate.
 ///
 /// # Registration — unwired-API (matches [`gather_shadow_casters`])
 ///
@@ -332,23 +339,29 @@ pub fn reduce_bounds_into(
 ///
 /// **Without registration, [`CsmCasterBounds`] never leaves the
 /// [`CsmPlugin`](crate::csm_plugin::CsmPlugin)-inserted [`CsmCasterBounds::EMPTY`]** —
-/// nothing folds it, so it can never become `is_usable()`, so a future fit (rung C3)
-/// never latches, so every fit mode renders as `Fixed`: today's picture, silently, at
+/// nothing folds it, so it can never become `is_usable()`, so the fit (rung C3) never
+/// latches, so every non-`Fixed` mode renders as `Fixed`: today's picture, silently, at
 /// zero cost.
 ///
 /// # `NonSend`
 ///
 /// Reads `NonSendRes<Assets<MeshGpu>>` (the same class [`gather_shadow_casters`] reads),
-/// so this system runs main-thread-only. The pin does NOT propagate to a future fit: it
-/// will read only `Res<CsmCasterBounds>`, staying thread-agnostic (D7,
-/// `docs/CSM-AUTOFIT-PLAN.md` §7).
+/// so this system runs main-thread-only. The pin does NOT propagate to the fit: it reads
+/// only `Res<CsmCasterBounds>`, staying thread-agnostic (D7, `docs/CSM-AUTOFIT-PLAN.md`
+/// §7).
 #[allow(clippy::needless_pass_by_value)]
 pub fn reduce_caster_bounds(
+    cfg: Res<CsmConfig>,
     view: Res<ViewUniform>,
     scratch: Res<CsmCasterScratch>,
     mesh_assets: NonSendRes<Assets<MeshGpu>>,
     mut out: ResMut<CsmCasterBounds>,
 ) {
+    if cfg.fit_mode == CsmFitMode::Fixed {
+        *out = CsmCasterBounds::EMPTY;
+        return;
+    }
+
     let eye = view.camera_pos.xyz();
     let forward = view.cam_forward.xyz();
     *out = reduce_bounds_into(

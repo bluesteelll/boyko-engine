@@ -5,7 +5,9 @@
 
 use boyko_ecs::ecs::core::app::{App, Plugin};
 
-use crate::csm_config::{CsmCasterBounds, CsmConfig, ResolvedCsm, resolve_csm_cascades};
+use crate::csm_config::{
+    CsmCasterBounds, CsmConfig, CsmFitState, CsmResolveSet, ResolvedCsm, resolve_csm_cascades,
+};
 
 /// Registers the CSM config substrate: inserts [`CsmConfig`] (default DISABLED —
 /// `cascade_count == 0`, the 0%-gate) and its derived [`ResolvedCsm`] companion, and
@@ -57,15 +59,21 @@ impl Plugin for CsmPlugin {
         // before the first policy run.
         app.insert_resource(CsmConfig::default());
         app.insert_resource(ResolvedCsm::default());
-        // CSM auto-fit plan (`docs/CSM-AUTOFIT-PLAN.md`) rung C2/D7: a future fit's input.
+        // CSM auto-fit plan (`docs/CSM-AUTOFIT-PLAN.md`) rung C2/D7: the fit's caster input.
         // Inserted here so a bare-`CsmPlugin` world never panics resolving it (`Res::
         // get_param`'s missing-resource panic) even before the owning app wires the
         // unwired `reduce_caster_bounds` reducer (rung C5). `EMPTY` never becomes
         // `is_usable()`, so an unregistered reducer silently keeps the fit at `Fixed`.
         app.insert_resource(CsmCasterBounds::EMPTY);
+        // Rung C3: the anti-shimmer latch. MUST be `UNLATCHED`, not `CsmFitState::default()`
+        // (which gives `far_k == 0`, a VALID grid cell) — see `CsmFitState`'s own doc.
+        app.insert_resource(CsmFitState { far_k: CsmFitState::UNLATCHED });
 
+        // `resolve_csm_cascades` joins `CsmResolveSet` — the by-name ordering seam a
+        // future app wiring (rung C5) pins AFTER `CsmFitSet` (`reduce_caster_bounds`), so
+        // the caster-bounds fold this frame is visible to the fit resolve this frame.
         app.add_systems_cfg(|b| {
-            b.add_system(resolve_csm_cascades);
+            b.add_system(resolve_csm_cascades).in_set(CsmResolveSet);
         });
     }
 
