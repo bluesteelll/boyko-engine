@@ -63,6 +63,11 @@ use boyko_rhi_vulkan::memory::BoundBuffer;
 
 /// A device-inert `MeshGpu` — see this file's module doc ("`MeshGpu` without
 /// a device") for why a `VkBuffer::NULL`-handled dummy is sound here.
+///
+/// CSM auto-fit plan rung C0: `local_min`/`local_max` are DARK this rung (no test
+/// in this suite reads them), so the degenerate-mesh representation `build_mesh_gpu`
+/// documents (`MeshGpu::local_min`'s doc) is used here too, for consistency with a
+/// `vertex_count: 0` dummy that has no real geometry to bound.
 fn dummy_mesh_gpu() -> MeshGpu {
     let dummy_buf = || BoundBuffer { buffer: VkBuffer::NULL, offset: 0, size: 0, mapped: None };
     MeshGpu {
@@ -74,6 +79,8 @@ fn dummy_mesh_gpu() -> MeshGpu {
         #[cfg(feature = "hwrt")]
         blas: None,
         geometry_slot: 0,
+        local_min: [f32::INFINITY; 3],
+        local_max: [f32::NEG_INFINITY; 3],
     }
 }
 

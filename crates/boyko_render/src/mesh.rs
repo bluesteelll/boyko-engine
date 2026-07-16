@@ -167,6 +167,22 @@ pub struct MeshGpu {
     /// R-VBGEO's host-authored `cube`/`plane`/`register_mesh` scope cut — see
     /// `build_mesh_gpu`'s doc).
     pub geometry_slot: u32,
+    /// CSM auto-fit plan, rung C0: this mesh's model-space AABB minimum, folded over
+    /// `vertices[].position` (mesh.rs:85). Durable per-mesh data ON THE RECORD — the same
+    /// shape of datum as `blas` above (Principle 0: NOT a parallel `HashMap<MeshHandle,
+    /// Aabb>` side table). Minted once in
+    /// [`build_mesh_gpu`](crate::mesh_assets::build_mesh_gpu); CPU-only, never uploaded to
+    /// the GPU. Dark this rung — nothing reads it yet (the caster-bounds fold, rung C2,
+    /// is the first consumer).
+    ///
+    /// An empty vertex slice (never legal — `build_mesh_gpu` debug-asserts non-empty) would
+    /// fold to `[f32::INFINITY; 3]`, an INVERTED box paired with `local_max`'s
+    /// `[f32::NEG_INFINITY; 3]`: `local_min[i] > local_max[i]` on every axis, which cannot
+    /// be mistaken for a real (possibly degenerate point-sized) AABB — see
+    /// `build_mesh_gpu`'s doc for why a zeroed box was rejected instead.
+    pub local_min: [f32; 3],
+    /// Model-space AABB maximum. See [`Self::local_min`] for the fold + degenerate case.
+    pub local_max: [f32; 3],
 }
 
 impl Asset for MeshGpu {

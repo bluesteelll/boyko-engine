@@ -38,6 +38,11 @@ use boyko_rhi_vulkan::memory::BoundBuffer;
 
 /// A device-inert `MeshGpu` — see this file's module doc for why a `VkBuffer::NULL`-handled
 /// dummy is sound here (mirrors `asset_streaming_f5_validation.rs::dummy_mesh_gpu`).
+///
+/// CSM auto-fit plan rung C0: `local_min`/`local_max` are DARK this rung (no test in this
+/// suite reads them); `index_count`/`vertex_count` mirror a unit cube
+/// (`mesh_assets::cube_geometry(1.0)`), so the AABB is set to that same unit cube's bounds
+/// for consistency, even though nothing here checks it.
 fn dummy_mesh_gpu() -> MeshGpu {
     let dummy_buf = || BoundBuffer { buffer: VkBuffer::NULL, offset: 0, size: 0, mapped: None };
     MeshGpu {
@@ -49,6 +54,8 @@ fn dummy_mesh_gpu() -> MeshGpu {
         #[cfg(feature = "hwrt")]
         blas: None,
         geometry_slot: 0,
+        local_min: [-0.5; 3],
+        local_max: [0.5; 3],
     }
 }
 

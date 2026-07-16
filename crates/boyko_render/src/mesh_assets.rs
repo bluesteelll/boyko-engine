@@ -180,6 +180,28 @@ pub trait MeshAssetsExt {
     fn blas_address(&self, h: MeshHandle) -> u64;
 }
 
+/// The pure (host-only) model-space AABB fold over `vertices[].position`
+/// ([`MeshGpu::local_min`]/[`MeshGpu::local_max`], CSM auto-fit plan rung C0).
+/// Factored out of [`build_mesh_gpu`] for the same reason [`cube_geometry`] is
+/// factored out of `cube` — unit-testable without a `VulkanContext`.
+///
+/// An empty slice folds to an INVERTED box (`min > max` on every axis): a zeroed box
+/// at the origin would silently read as a valid degenerate point-sized mesh, whereas
+/// an inverted box cannot be mistaken for any real AABB. `build_mesh_gpu`'s own
+/// `debug_assert!(!vertices.is_empty(), ..)` already rejects this case in debug
+/// builds; this representation is the release-mode backstop.
+fn local_aabb(vertices: &[Vertex]) -> ([f32; 3], [f32; 3]) {
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for v in vertices {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(v.position[axis]);
+            max[axis] = max[axis].max(v.position[axis]);
+        }
+    }
+    (min, max)
+}
+
 /// The device work behind [`MeshAssetsExt::register_mesh`]: creates + fills the
 /// vertex/index RHI buffers (index width chosen by O3), and — on an RT device —
 /// builds the mesh's BLAS eagerly, returning the assembled [`MeshGpu`] (NOT yet
@@ -222,6 +244,18 @@ pub fn build_mesh_gpu(
     debug_assert!(!vertices.is_empty(), "invariant: a mesh has at least one vertex");
     debug_assert!(!indices.is_empty(), "invariant: an indexed mesh has at least one index");
     let vertex_count = vertices.len();
+
+    // CSM auto-fit plan, rung C0: the model-space AABB fold. ONE pass over `vertices`
+    // (not a second one layered onto the buffer-fill copy below, which is a bulk
+    // `copy_nonoverlapping`, not a loop) — `local_aabb` is factored into its own fn
+    // purely so it is unit-testable without a `VulkanContext` (mirrors `cube_geometry`'s
+    // factoring above the trait impl).
+    let (local_min, local_max) = local_aabb(vertices);
+    debug_assert!(
+        (0..3).all(|axis| local_min[axis] <= local_max[axis]),
+        "invariant: build_mesh_gpu is called with a non-empty vertex slice \
+         (see the debug_assert above) — an inverted box means that invariant broke"
+    );
     let index_type = if vertex_count <= U16_INDEX_VERTEX_LIMIT {
         IndexType::Uint16
     } else {
@@ -411,6 +445,8 @@ pub fn build_mesh_gpu(
         #[cfg(feature = "hwrt")]
         blas,
         geometry_slot,
+        local_min,
+        local_max,
     }
 }
 
@@ -703,5 +739,23 @@ impl OrphanedMeshGpu {
                 ctx.destroy_buffer(mesh.index_buffer);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CSM auto-fit plan T16: `cube_geometry`'s 24 vertices span `[-h, h]` on every axis
+    /// (`h = size * 0.5`, see the faces table in `cube_geometry`) — `local_aabb` must
+    /// recover exactly that half-edge box, without a `VulkanContext`.
+    #[test]
+    fn local_aabb_of_cube_is_half_edge() {
+        let size = 2.0_f32;
+        let (vertices, _indices) = cube_geometry(size);
+        let (min, max) = local_aabb(&vertices);
+        let h = size * 0.5;
+        assert_eq!(min, [-h, -h, -h]);
+        assert_eq!(max, [h, h, h]);
     }
 }
