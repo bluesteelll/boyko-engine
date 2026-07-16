@@ -44,7 +44,11 @@
 //! fit the split range to the caster-derived `far_eff` (an anti-shimmer log-quantized,
 //! Schmitt-latched value — see [`grid_value`] / [`latch_cell`]), requiring
 //! [`reduce_caster_bounds`](crate::csm_caster::reduce_caster_bounds) to be app-registered
-//! (rung C5); without it every mode renders as `Fixed`.
+//! (rung C5); without it every mode renders as `Fixed`. The caster modes ALSO grow the
+//! light eye's sun-axis pull-back ([`CsmFit::caster_aabb`], rung C4) to keep capturing any
+//! caster up-sun of the fitted sphere — otherwise shrinking the split range's `diameter`
+//! (the fit's entire point) would silently shrink that capture too and clip an up-sun
+//! caster (D5).
 
 use boyko_macros::{Resource, SystemSet};
 
@@ -115,6 +119,14 @@ const FIT_GRID_TABLE: [f32; 4] = [
 /// camera recedes), so pops there are free, while shrink is the *scrutinised* direction (the
 /// shadow grows on screen), so pops there are made rare.
 const FIT_SHRINK_BAND_CELLS: i32 = 2;
+
+/// Caps the sun-axis pull-back (`docs/CSM-AUTOFIT-PLAN.md` D5, rung C4) at
+/// `MAX_PULLBACK_RATIO * diameter`, so `z_far <= (1 + MAX_PULLBACK_RATIO) * diameter` (5x
+/// today's `2x`) — bounding the depth-precision / bias-scale drift a far up-sun caster could
+/// otherwise inflate without limit. A correctness parameter (D9), NOT an owner-facing tuning
+/// knob, for the same reason `FIT_GRID_CELLS_PER_OCTAVE` is not: exposing it lets an owner
+/// set a value that clips casters again.
+const MAX_PULLBACK_RATIO: f32 = 4.0;
 
 /// `latch_cell`'s "never latched" sentinel for `prev_k` — `i32::MIN`, so it can never
 /// collide with a real grid cell (a legitimate `k` stays within a few hundred of zero for
@@ -373,9 +385,14 @@ pub use crate::csm_marker::ShadowCaster;
 ///    frame and each shadow texel keeps a stable world footprint).
 /// 6. **Matrix assembly** — the PROVEN on-screen convention (the exact form the committed
 ///    depth-VS + resolve SPIR-V were validated against pixel-by-pixel in the windowed
-///    harness): the light eye is pulled back along `+sun_dir` by `z_far/2`
-///    (`z_far = 2·diameter`, bounding casters between the sun and the slice), and the
-///    combined `view_proj` maps world → light clip as `clip.x = x_lv/r`,
+///    harness): the light eye is pulled back along `+sun_dir` by `pull_back` world units
+///    (`docs/CSM-AUTOFIT-PLAN.md` D5, rung C4) — `diameter` under [`CsmFit::NONE`] (today,
+///    bounding casters between the sun and the slice symmetrically), or grown to also cover
+///    any caster up-sun of the fitted sphere when `fit.caster_aabb` is populated, clamped to
+///    `[diameter, MAX_PULLBACK_RATIO * diameter]` so it never shrinks below today's capture
+///    and never grows unbounded. `z_far = pull_back + diameter` (down-sun capture stays
+///    `diameter`, as today), and the combined `view_proj` maps world → light clip as
+///    `clip.x = x_lv/r`,
 ///    `clip.y = -y_lv/r` (the engine's framebuffer Y-flip — the SAME flip the camera
 ///    projection carries), `clip.z = (z_lv - z_near)/(z_far - z_near)` (Vulkan `[0,1]`,
 ///    depth GROWING away from the sun into the scene), `clip.w = 1`. The W5 zero-radius
@@ -402,10 +419,11 @@ pub use crate::csm_marker::ShadowCaster;
 /// mechanics (this function) oblivious to mode NAMES, so a new mode is a
 /// `resolve_csm_cascades`-side change only.
 ///
-/// - [`CsmFit::NONE`] (`far_eff: None`) ⇒ TEXTUALLY today's fit: the PSSM split range is
-///   `[near, far_cap_today]` over all `count` cascades, and the sun-axis pull-back stays
-///   `z_far = 2·diameter` / `eye = center + sun·(z_far·0.5)` — the D10 byte-identity claim,
-///   pinned by `fixed_mode_is_bit_identical_to_today`.
+/// - [`CsmFit::NONE`] (`far_eff: None`, `caster_aabb: None`) ⇒ TEXTUALLY today's fit: the
+///   PSSM split range is `[near, far_cap_today]` over all `count` cascades, and the
+///   sun-axis pull-back reduces to `pull_back = diameter` ⇒ `z_far = 2·diameter` /
+///   `eye = center + sun·(z_far·0.5)` — the D10 byte-identity claim, pinned by
+///   `fixed_mode_is_bit_identical_to_today`.
 /// - `Some(far_eff)` with `reserve_tail: false` (`Shrink`) ⇒ all `count` cascades split
 ///   `[near, far_eff]`.
 /// - `Some(far_eff)` with `reserve_tail: true` (`CatchAll`) ⇒ cascades `0..count-1` split
@@ -413,8 +431,10 @@ pub use crate::csm_marker::ShadowCaster;
 ///   (`near_i`'s cross-cascade chaining is untouched, so the reserved cascade naturally
 ///   slices that tail range).
 ///
-/// The sun-axis pull-back (D5, the `z_far`/`eye` term) is UNCHANGED in every mode this
-/// rung — that edit is rung C4.
+/// The sun-axis pull-back (`docs/CSM-AUTOFIT-PLAN.md` D5, rung C4) is driven independently
+/// by `fit.caster_aabb` — populated by the SAME caster modes that populate `far_eff`, but
+/// logically separate (a `Shrink`/`CatchAll` fit with `caster_aabb: None`, as a synthetic
+/// test input, still shrinks the split range without growing the pull-back).
 #[inline]
 pub fn resolve_csm(
     cfg: &CsmConfig,
@@ -500,6 +520,11 @@ pub fn resolve_csm(
     let light_right = up_hint.cross(fwd).normalize();
     let light_up = fwd.cross(light_right);
 
+    // docs/CSM-AUTOFIT-PLAN.md D5 (rung C4): the 8 world corners of the caster union AABB,
+    // hoisted once (the AABB itself is constant across cascades — only the per-cascade
+    // `center` the pull-back is measured from varies).
+    let caster_corners = fit.caster_aabb.map(|(mn, mx)| aabb_corners(mn, mx));
+
     let mut cascades = [CascadeData::ZERO; MAX_CASCADES];
 
     let mut near_i = near;
@@ -538,9 +563,40 @@ pub fn resolve_csm(
 
         // Matrix assembly (doc step 6 — the PROVEN on-screen convention; see the fn doc
         // for why this must NOT be re-derived through generic look_at/ortho helpers).
-        // The light eye is pulled back along +sun by z_far/2 (= the sphere diameter).
-        let z_far = 2.0 * diameter;
-        let eye = center + sun * (z_far * 0.5);
+        //
+        // docs/CSM-AUTOFIT-PLAN.md algorithm C edit 3 (D5, rung C4): the light eye pulls
+        // back along +sun far enough to also capture any caster UP-SUN of the fitted
+        // sphere -- otherwise shrinking `diameter` (the caster-fit's entire point) would
+        // silently clip an up-sun caster (a ceiling beam, a tall pillar) that the
+        // un-fitted `z_far = 2*diameter` used to capture for free. `None` (Fixed /
+        // unlatched / no usable bounds) reduces to `up_need = diameter` with ZERO extra
+        // float ops -- see `fixed_mode_is_bit_identical_to_today` for the exactness proof.
+        let up_need = match &caster_corners {
+            None => diameter,
+            Some(corners) => {
+                let mut raw_up = f32::MIN;
+                for &c in corners {
+                    raw_up = raw_up.max(sun.dot(c - center));
+                }
+                // <= 0 => every corner is down-sun (or AT the center) of this cascade;
+                // nothing to grow for -- fall back to today's symmetric pull-back.
+                if raw_up > 0.0 {
+                    grid_ceil(raw_up)
+                } else {
+                    diameter
+                }
+            }
+        };
+        // >= diameter ALWAYS (never worse than today) and <= MAX_PULLBACK_RATIO * diameter
+        // (bounded depth-precision / bias-scale drift, D5/D9).
+        let pull_back = up_need.clamp(diameter, MAX_PULLBACK_RATIO * diameter);
+        debug_assert!(
+            pull_back >= diameter,
+            "resolve_csm: pull_back must never fall below diameter (D5 invariant)"
+        );
+        // Down-sun capture stays `diameter`, exactly as today.
+        let z_far = pull_back + diameter;
+        let eye = center + sun * pull_back;
         let tx = -light_right.dot(eye);
         let ty = -light_up.dot(eye);
         let tz = -fwd.dot(eye);
@@ -634,6 +690,25 @@ fn slice_corners(rig: &FrustumRig, depth_near: f32, depth_far: f32) -> [Vec3; 8]
         for &sy in &[-1.0_f32, 1.0] {
             for &sx in &[-1.0_f32, 1.0] {
                 corners[k] = center + rig.right * (hw * sx) + rig.up * (hh * sy);
+                k += 1;
+            }
+        }
+    }
+    corners
+}
+
+/// The 8 world-space corners of the AABB `[mn, mx]` — `docs/CSM-AUTOFIT-PLAN.md` D5 (rung
+/// C4): the sun-axis pull-back's caster-coverage term reads the caster union AABB as its 8
+/// corners (not just `mn`/`mx`), since the up-sun-most CORNER, not the up-sun-most face, is
+/// what the light eye must clear.
+#[inline]
+fn aabb_corners(mn: [f32; 3], mx: [f32; 3]) -> [Vec3; 8] {
+    let mut corners = [Vec3::ZERO; 8];
+    let mut k = 0;
+    for &x in &[mn[0], mx[0]] {
+        for &y in &[mn[1], mx[1]] {
+            for &z in &[mn[2], mx[2]] {
+                corners[k] = Vec3::new(x, y, z);
                 k += 1;
             }
         }
@@ -767,6 +842,18 @@ fn grid_cell_clamp(_x: f32) -> f32 {
     f32::MIN_POSITIVE
 }
 
+/// The smallest grid value strictly greater than `x`: `grid_value(grid_cell(x) + 1)`.
+/// `x` must be finite and `> 0` (debug_assert, inherited from [`grid_cell`]). Used by the
+/// sun-axis pull-back (`docs/CSM-AUTOFIT-PLAN.md` D5, rung C4) to quantize `up_need` onto
+/// the SAME log grid `far_eff` lives on, so a caster's up-sun capture requirement is rounded
+/// UP to a frame-stable value (never clips, mirrors `latch_cell`'s grow branch) instead of
+/// tracking the caster's exact depth continuously — which would make the pull-back itself a
+/// shimmer channel.
+#[inline]
+fn grid_ceil(x: f32) -> f32 {
+    grid_value(grid_cell(x) + 1)
+}
+
 /// The asymmetric Schmitt latch (D6). `prev_k` is the previously latched cell (or
 /// `FIT_UNLATCHED` for a fresh latch — mirrors `CsmFitState::UNLATCHED`, wired in C3).
 ///
@@ -845,9 +932,9 @@ pub struct CsmCasterBounds {
     /// lateral extremes would otherwise inflate this value by their lateral separation
     /// (D4). Valid iff `resolved_batches > 0`.
     pub raw_far: f32,
-    /// World-space UNION AABB minimum of all caster instances. Kept ONLY for a future
-    /// sun-axis pull-back term (D5, rung C4), where a union bound is exactly what is
-    /// wanted — NOT for `raw_far` (see its doc).
+    /// World-space UNION AABB minimum of all caster instances. Used ONLY by the sun-axis
+    /// pull-back term ([`CsmFit::caster_aabb`], `docs/CSM-AUTOFIT-PLAN.md` D5, rung C4),
+    /// where a union bound is exactly what is wanted — NOT for `raw_far` (see its doc).
     pub world_min: [f32; 3],
     /// World-space union AABB maximum. See [`Self::world_min`].
     pub world_max: [f32; 3],
@@ -923,13 +1010,13 @@ impl CsmFitState {
 /// consult [`CsmConfig::fit_mode`] at all; the caller ([`resolve_csm_cascades`], via
 /// [`select_fit`]) has already decided.
 ///
-/// # `caster_aabb` deferred to rung C4
+/// # `caster_aabb` — the sun-axis pull-back input (`docs/CSM-AUTOFIT-PLAN.md` D5, rung C4)
 ///
-/// The sun-axis pull-back term (`docs/CSM-AUTOFIT-PLAN.md` D5) is NOT implemented this
-/// rung: [`resolve_csm`]'s `z_far` / `eye` pull-back stays `2.0 * diameter` /
-/// `center + sun * (z_far * 0.5)`, UNCHANGED in every mode. A `caster_aabb` field on this
-/// struct would therefore be unused dead weight this rung; rung C4 adds it alongside the
-/// pull-back edit it drives.
+/// Shrinking `diameter` (the split-range fit's entire point) would, unfixed, also shrink
+/// the up-sun caster capture `resolve_csm`'s light eye pull-back provides — silently
+/// vanishing a caster between the sun and the fitted slice (a ceiling beam, a tall pillar).
+/// `caster_aabb` carries the world union caster AABB so `resolve_csm` can grow the pull-back
+/// to cover it. `None` ⇒ `pull_back = diameter`, today's math EXACTLY (byte-identical).
 #[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct CsmFit {
     /// The quantized, latched split far. `None` ⇒ `far_cap_today` (today's math).
@@ -937,11 +1024,15 @@ pub struct CsmFit {
     /// `true` ⇒ reserve cascade `count - 1` for `[far_eff, far_cap_today]` (`CatchAll`).
     /// Meaningless when `far_eff` is `None`.
     pub reserve_tail: bool,
+    /// The world-space union caster AABB (`CsmCasterBounds::world_min`/`world_max`), for the
+    /// sun-axis pull-back. `None` ⇒ `pull_back = diameter` (today, byte-identical) — the
+    /// value under `Fixed` / unlatched / no usable bounds.
+    pub caster_aabb: Option<([f32; 3], [f32; 3])>,
 }
 
 impl CsmFit {
     /// `Fixed` / unlatched / no usable bounds — today's fit exactly.
-    pub const NONE: Self = Self { far_eff: None, reserve_tail: false };
+    pub const NONE: Self = Self { far_eff: None, reserve_tail: false, caster_aabb: None };
 }
 
 // ---- CsmResolveSet (the cross-plugin caster-bounds → fit-resolve ordering seam) -------
@@ -991,7 +1082,13 @@ pub struct CsmResolveSet;
 ///    `far_eff >= far_cap_today` (casters already reach the shadow distance) ⇒
 ///    [`CsmFit::NONE`] — nothing to shrink, and it would otherwise give `CatchAll` a
 ///    zero-width reserved tail.
-/// 5. Otherwise: `CsmFit { far_eff: Some(far_eff), reserve_tail: fit_mode == CatchAll }`.
+/// 5. Otherwise: `CsmFit { far_eff: Some(far_eff), reserve_tail: fit_mode == CatchAll,
+///    caster_aabb: Some((bounds.world_min, bounds.world_max)) }` — the CURRENT frame's
+///    bounds, even on the HOLD path (rung C4, `docs/CSM-AUTOFIT-PLAN.md` D5): unlike
+///    `far_eff`, the sun-axis pull-back this drives is not itself a shimmer channel (its
+///    own grid-quantized [`grid_ceil`] already makes it frame-stable) and is clamped to
+///    `[diameter, MAX_PULLBACK_RATIO * diameter]` regardless of input, so a stale/partial
+///    AABB during a HOLD frame degrades no worse than `pull_back == diameter` (today).
 #[inline]
 fn select_fit(
     cfg: &CsmConfig,
@@ -1027,7 +1124,11 @@ fn select_fit(
         return CsmFit::NONE;
     }
 
-    CsmFit { far_eff: Some(far_eff), reserve_tail: cfg.fit_mode == CsmFitMode::CatchAll }
+    CsmFit {
+        far_eff: Some(far_eff),
+        reserve_tail: cfg.fit_mode == CsmFitMode::CatchAll,
+        caster_aabb: Some((bounds.world_min, bounds.world_max)),
+    }
 }
 
 /// The cold CSM resolve policy — reads [`CsmConfig`] + the active [`ViewUniform`] + the
@@ -1100,7 +1201,7 @@ pub fn resolve_csm_cascades(
 mod tests {
     use super::*;
 
-    use boyko_math::{Affine3A, Vec3};
+    use boyko_math::{Affine3A, Vec3, Vec4};
     use boyko_scene::Projection;
 
     /// A perspective `ViewUniform` from `eye`, oriented by `yaw` / `pitch` (radians), FOV
@@ -1460,7 +1561,7 @@ mod tests {
         let cfg = CsmConfig { fit_mode: CsmFitMode::CatchAll, ..enabled_cfg() };
         let view = perspective_view(Vec3::new(1.0, 3.0, -4.0), 0.4, -0.1);
         let sun = [0.2_f32, -1.0, 0.35];
-        let fit = CsmFit { far_eff: Some(5.0), reserve_tail: true };
+        let fit = CsmFit { far_eff: Some(5.0), reserve_tail: true, caster_aabb: None };
 
         let a = resolve_csm(&cfg, &view, sun, fit);
         let b = resolve_csm(&cfg, &view, sun, fit);
@@ -1630,7 +1731,7 @@ mod tests {
         let cfg_shrink = CsmConfig { fit_mode: CsmFitMode::Shrink, ..enabled_cfg() };
         let shrink = resolve_csm(
             &cfg_shrink, &view, sun,
-            CsmFit { far_eff: Some(far_eff), reserve_tail: false },
+            CsmFit { far_eff: Some(far_eff), reserve_tail: false, caster_aabb: None },
         );
         let n = shrink.active_count as usize;
         assert!(
@@ -1646,7 +1747,7 @@ mod tests {
         let cfg_catch = CsmConfig { fit_mode: CsmFitMode::CatchAll, ..enabled_cfg() };
         let catch = resolve_csm(
             &cfg_catch, &view, sun,
-            CsmFit { far_eff: Some(far_eff), reserve_tail: true },
+            CsmFit { far_eff: Some(far_eff), reserve_tail: true, caster_aabb: None },
         );
         let m = catch.active_count as usize;
         assert!(
@@ -1659,6 +1760,126 @@ mod tests {
             (catch.cascades[m - 1].split_far - far_cap).abs() <= 1.0e-2 * far_cap,
             "CatchAll's last split must equal far_cap (no terminator), got {}",
             catch.cascades[m - 1].split_far
+        );
+    }
+
+    // ---- C4: the sun-axis pull-back (T11, docs/CSM-AUTOFIT-PLAN.md D5, section 8/10) ------
+
+    #[test]
+    fn up_sun_caster_shadow_survives_the_shrink() {
+        // docs/CSM-AUTOFIT-PLAN.md D5 (rung C4) -- the vanishing-shadow regression this
+        // rung fixes: today's `z_far = 2*diameter` gives an up-sun caster capture of
+        // exactly `diameter`. Shrinking `diameter` (the caster fit's entire point) would,
+        // unfixed, shrink that capture too and silently clip a caster placed up-sun of the
+        // fitted sphere (D5's "ceiling beam" example) -- a correctness regression, not a
+        // trade-off. This pins section 8's three `up_need` rows in one hand-verifiable
+        // scene: a 90-degree FOV / 1:1 aspect camera at the world origin looking down -Z,
+        // so the frustum-slice corners (and the fitted sphere they derive) are simple,
+        // round numbers -- eliminating trig-precision guesswork from the caster placement
+        // below.
+        let view = ViewUniform {
+            camera_pos: Vec4::new(0.0, 0.0, 0.0, 1.0),
+            cam_forward: Vec4::new(0.0, 0.0, -1.0, 0.0),
+            cam_right: Vec4::new(1.0, 0.0, 0.0, 0.0),
+            cam_up: Vec4::new(0.0, 1.0, 0.0, 0.0),
+            fov_y: core::f32::consts::FRAC_PI_2,
+            aspect: 1.0,
+            near: 1.0,
+            far: 1000.0,
+            ..ViewUniform::IDENTITY
+        };
+        let sun_dir = [0.0_f32, 0.0, 1.0];
+        let sun = Vec3::new(sun_dir[0], sun_dir[1], sun_dir[2]);
+        // CatchAll's minimum cascade count (2): cascade 0 splits `[near, far_eff]` with
+        // `pssm_n == count - 1 == 1`, so `pssm_split`'s ratio is `idx / n == 1 / 1 == 1.0`
+        // and `split_0 == far_eff` EXACTLY (both the log and uniform terms reduce to `far`
+        // at ratio 1) -- one less unknown in the hand-derivation below.
+        let far_eff = 5.0_f32;
+        let cfg = CsmConfig { fit_mode: CsmFitMode::CatchAll, cascade_count: 2, ..CsmConfig::default() };
+
+        // Cascade 0's REAL fitted sphere, reproduced via the SAME functions `resolve_csm`
+        // calls internally for the SAME (view, near, far_eff, cascade index) -- `caster_aabb`
+        // does not affect the split/corners/sphere steps at all (only the Z pull-back this
+        // test exercises), so this is exact, not a guess.
+        let rig = FrustumRig {
+            eye: view.camera_pos.xyz(),
+            forward: view.cam_forward.xyz(),
+            right: view.cam_right.xyz(),
+            up: view.cam_up.xyz(),
+            half_tan: (view.fov_y * 0.5).tan(),
+            aspect: view.aspect,
+        };
+        let split0 = pssm_split(view.near, far_eff, cfg.lambda, 1, 1.0);
+        let corners0 = slice_corners(&rig, view.near, split0);
+        let center0 = sphere_center(&corners0);
+        let radius0 = sphere_radius(&corners0, center0);
+        let diameter0 = (2.0 * radius0).ceil().max(1.0e-3);
+
+        // Recovers z_far from cascade 0's Z row: `pv[2] = fwd / zr` component-wise, and
+        // `fwd` (= `-sun`, already unit-length here) makes the row's magnitude exactly
+        // `1 / zr` -- independent of `resolve_csm`'s own locals.
+        let z_far_of = |m: &[[f32; 4]; 4]| -> f32 {
+            let row2 = Vec3::new(m[0][2], m[1][2], m[2][2]);
+            1.0 / row2.length() + LIGHT_Z_NEAR
+        };
+        let resolve_with = |point: Vec3| -> ResolvedCsm {
+            let p = [point.x, point.y, point.z];
+            let fit = CsmFit { far_eff: Some(far_eff), reserve_tail: true, caster_aabb: Some((p, p)) };
+            resolve_csm(&cfg, &view, sun_dir, fit)
+        };
+
+        // ---- Case A: a caster genuinely up-sun of the fitted sphere's OWN edge (2x the
+        // diameter, offset by +1 to a guaranteed-odd integer so it can never exactly
+        // coincide with a `2^(k/4)` grid boundary -- `diameter0` is itself always an exact
+        // integer, via `.ceil()`) must still land inside cascade 0's depth range. Under
+        // today's un-fitted `pull_back == diameter0`, this caster (up-sun distance >
+        // diameter0) would have been clipped -- the regression this rung fixes.
+        let up_sun_dist = 2.0 * diameter0 + 1.0;
+        let up_sun_point = center0 + sun * up_sun_dist;
+        let resolved_a = resolve_with(up_sun_point);
+        let m_a = &resolved_a.cascades[0].view_proj;
+        let c = clip(m_a, up_sun_point);
+        assert!(
+            (0.0..=1.0).contains(&c[2]),
+            "the up-sun caster must map inside [LIGHT_Z_NEAR, z_far] of cascade 0's clip Z \
+             (clip.z = {}, up_sun_dist = {up_sun_dist}, diameter0 = {diameter0})",
+            c[2]
+        );
+        let z_far_a = z_far_of(m_a);
+        assert!(
+            z_far_a >= 2.0 * diameter0 - 1.0e-2,
+            "pull_back must never fall below diameter (D5): z_far {z_far_a} must be >= \
+             2*diameter0 {}",
+            2.0 * diameter0
+        );
+        assert!(
+            z_far_a <= 5.0 * diameter0 + 1.0e-2,
+            "z_far {z_far_a} must stay <= 5*diameter0 {} (MAX_PULLBACK_RATIO bound)",
+            5.0 * diameter0
+        );
+
+        // ---- Case B: every caster corner DOWN-sun of the centre (`up_need <= 0`) -- the
+        // pull-back must fall back to EXACTLY today's `diameter0` (not merely "small").
+        let down_sun_point = center0 - sun * 10.0;
+        let resolved_b = resolve_with(down_sun_point);
+        let z_far_b = z_far_of(&resolved_b.cascades[0].view_proj);
+        assert!(
+            (z_far_b - 2.0 * diameter0).abs() < 1.0e-2,
+            "up_need <= 0 must fall back to pull_back == diameter (z_far == 2*diameter0): \
+             got {z_far_b}, expected {}",
+            2.0 * diameter0
+        );
+
+        // ---- Case C: a far up-sun caster -- the pull-back must clamp at
+        // MAX_PULLBACK_RATIO * diameter0, not track the caster's raw (unbounded) distance.
+        let far_up_sun_point = center0 + sun * (diameter0 * 1000.0);
+        let resolved_c = resolve_with(far_up_sun_point);
+        let z_far_c = z_far_of(&resolved_c.cascades[0].view_proj);
+        assert!(
+            (z_far_c - (MAX_PULLBACK_RATIO + 1.0) * diameter0).abs() < 1.0e-1,
+            "a far up-sun caster must clamp z_far at (MAX_PULLBACK_RATIO + 1) * diameter0, \
+             got {z_far_c}, expected {}",
+            (MAX_PULLBACK_RATIO + 1.0) * diameter0
         );
     }
 
