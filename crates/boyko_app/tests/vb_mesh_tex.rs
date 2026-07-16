@@ -128,6 +128,11 @@ enum Solo {
     Yes,
 }
 
+// The seven params after `solo` ARE `setup`/`setup_solo`'s system signature, threaded through
+// verbatim so the two layouts share one scene body. Bundling them behind a struct would hide the
+// declarative signature the ECS reads (the same reasoning `csm_caster::gather_shadow_casters`
+// gives for its own allow).
+#[allow(clippy::too_many_arguments)]
 fn build_scene(
     solo: Solo,
     mut commands: Commands,
