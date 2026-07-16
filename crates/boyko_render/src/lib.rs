@@ -335,10 +335,13 @@ pub use barrier::{PlannedBarrier, lower_barriers};
 pub use bindless::BindlessTextureTable;
 pub use bundles::{DirectionalLightObject, MeshBundle, PointLightObject, SpotLightObject};
 pub use csm_config::{
-    CascadeData, CsmConfig, MAX_CASCADES, RESOLVED_CSM_BYTES, ResolvedCsm, resolve_csm,
-    resolve_csm_cascades,
+    CascadeData, CsmCasterBounds, CsmConfig, MAX_CASCADES, RESOLVED_CSM_BYTES, ResolvedCsm,
+    resolve_csm, resolve_csm_cascades,
 };
-pub use csm_caster::{CsmCasterScratch, gather_shadow_casters, sync_csm_light_gate};
+pub use csm_caster::{
+    CsmCasterScratch, CsmFitSet, gather_shadow_casters, reduce_bounds_into, reduce_caster_bounds,
+    sync_csm_light_gate,
+};
 pub use csm_marker::ShadowCaster;
 pub use csm_plugin::CsmPlugin;
 pub use ddgi_config::{

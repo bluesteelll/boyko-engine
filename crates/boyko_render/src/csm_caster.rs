@@ -59,10 +59,11 @@ use boyko_ecs::ecs::core::asset::Assets;
 use boyko_ecs::ecs::core::iters::query::filter_enable::Enabled;
 use boyko_ecs::ecs::core::iters::query::{Query, With};
 use boyko_ecs::ecs::core::system::{NonSendRes, Res, ResMut};
-use boyko_macros::Resource;
+use boyko_macros::{Resource, SystemSet};
+use boyko_scene::ViewUniform;
 use boyko_scene::render_caps::{MeshHandle, RenderEnabled};
 
-use crate::csm_config::ResolvedCsm;
+use crate::csm_config::{CsmCasterBounds, ResolvedCsm};
 use crate::csm_marker::ShadowCaster;
 use crate::instance_model::InstanceModelCol;
 use crate::light::{LightTableDirty, LightingConfig};
@@ -194,6 +195,173 @@ pub fn gather_shadow_casters(
         // `.batches`/`.ring`, never `.material_ids`) — a constant default payload feeds the
         // shared gather core's material lane inertly (asset-streaming plan F8+).
         || q.iter().map(|(h, col)| (h.0, col, None, PerInstanceMaterial::default())),
+    );
+}
+
+/// CSM auto-fit plan (`docs/CSM-AUTOFIT-PLAN.md`) rung C2 — the cross-plugin ordering
+/// seam for [`reduce_caster_bounds`]. Mirrors
+/// [`DdgiResolveSet`](crate::ddgi_config::DdgiResolveSet) /
+/// [`PunctualResolveSet`](crate::shadow_atlas::PunctualResolveSet): a set-to-set edge
+/// pinned BY NAME holds regardless of plugin add-order, where a per-system `.after(key)`
+/// edge cannot cross a plugin boundary.
+///
+/// Dark this rung: nothing joins or orders against this set yet. A future fit (rung C3)
+/// pins its resolve `.after_set(CsmFitSet)`; the owning app (rung C5) puts
+/// [`reduce_caster_bounds`] `.in_set(CsmFitSet)` at its registration site.
+#[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CsmFitSet;
+
+/// The pure, World-free core of the caster-bounds fold (`docs/CSM-AUTOFIT-PLAN.md`
+/// Decisions D4/D7, algorithm A) — unit-testable without an ECS, mirroring the
+/// closure-meta idiom [`gather_shadow_casters`] itself uses just above (`|mesh_id| {
+/// .. }`).
+///
+/// Folds `batches` + `ring` (a caster gather's OUTPUT — see [`CsmCasterScratch`]) into a
+/// [`CsmCasterBounds`]: the per-instance view-space depth extreme (`raw_far`) plus the
+/// union world AABB (`world_min`/`world_max`, kept only for a future sun-axis term, D5).
+/// A batch whose `mesh_aabb(mesh_id)` is `None` — the mesh has not resolved `Loaded` yet
+/// (the F6 never-deref invariant, mirrored from [`gather_shadow_casters`]'s own
+/// `try_get` above) — is SKIPPED and NOT counted as resolved. The SAME skip applies to a
+/// `Loaded` mesh whose local AABB is the INVERTED sentinel a zero-vertex `MeshGpu` folds
+/// to (`local_min[i] > local_max[i]` on every axis — see `MeshGpu::local_min`'s doc):
+/// its centre would compute to NaN, which must never poison `raw_far`/`world_min`/
+/// `world_max`, so it is treated exactly like a non-`Loaded` slot rather than dereferenced.
+///
+/// # D4 — per instance, never a projected union AABB
+///
+/// `raw_far` is the max, OVER INSTANCES, of that instance's own world-AABB extreme along
+/// `forward` — never the projection of the union AABB. Two casters at the same depth but
+/// opposite lateral extremes would otherwise inflate `raw_far` by their lateral
+/// separation (the union-AABB error D4 refutes: e.g. `world x = ±50` at `|fwd.x| = 0.5`
+/// would add ~25 of spurious depth). Each instance's world AABB is the Arvo abs-matrix
+/// transform of its mesh's local AABB through [`InstanceModelCol::rows`] (3×4
+/// row-major): `wc[r] = Σⱼ rows[r][j]·lc[j] + rows[r][3]`, `wh[r] = Σⱼ |rows[r][j]|·lh[j]`
+/// — exact for any linear map, including shear, and strictly dominates a
+/// bounding-sphere route (no sqrt, no √3 circumscription loss, and a sphere via
+/// max-column-norm underestimates under shear).
+///
+/// # Cost
+///
+/// O(instances + batches), cold, no allocation. One `Option`/inverted-box branch per
+/// BATCH; the per-instance inner loop is branch-free (`min`/`max`/`abs` only).
+pub fn reduce_bounds_into(
+    batches: &[DrawBatch],
+    ring: &[InstanceModelCol],
+    eye: [f32; 3],
+    forward: [f32; 3],
+    mesh_aabb: impl Fn(u32) -> Option<([f32; 3], [f32; 3])>,
+) -> CsmCasterBounds {
+    let total_batches = batches.len() as u32;
+    let mut resolved_batches: u32 = 0;
+    let mut raw_far = f32::NEG_INFINITY;
+    let mut world_min = [f32::INFINITY; 3];
+    let mut world_max = [f32::NEG_INFINITY; 3];
+
+    for batch in batches {
+        let Some((mn, mx)) = mesh_aabb(batch.mesh_id) else {
+            continue; // not yet Loaded (F6 invariant) — skip, do not count as resolved.
+        };
+        // C0's zero-vertex sentinel is an INVERTED box (min > max on every axis); its
+        // centre is NaN, so it is skipped exactly like a non-Loaded slot instead of
+        // poisoning the fold.
+        if mn[0] > mx[0] || mn[1] > mx[1] || mn[2] > mx[2] {
+            continue;
+        }
+        resolved_batches += 1;
+
+        let lc = [(mn[0] + mx[0]) * 0.5, (mn[1] + mx[1]) * 0.5, (mn[2] + mx[2]) * 0.5];
+        let lh = [(mx[0] - mn[0]) * 0.5, (mx[1] - mn[1]) * 0.5, (mx[2] - mn[2]) * 0.5];
+
+        let base = batch.base_instance as usize;
+        let count = batch.instance_count as usize;
+        debug_assert!(
+            base + count <= ring.len(),
+            "reduce_bounds_into: batch range [{base}, {}) exceeds the ring's {} instances",
+            base + count,
+            ring.len()
+        );
+
+        for inst in &ring[base..base + count] {
+            // Arvo abs-matrix transform of the local AABB (center lc, half-extent lh)
+            // through this instance's row-major 3×4 affine — exact for any linear map,
+            // including shear (D4). Branch-free: `abs`/`min`/`max` only.
+            let mut wc = [0.0f32; 3];
+            let mut wh = [0.0f32; 3];
+            for r in 0..3 {
+                let row = inst.rows[r];
+                wc[r] = row[0] * lc[0] + row[1] * lc[1] + row[2] * lc[2] + row[3];
+                wh[r] = row[0].abs() * lh[0] + row[1].abs() * lh[1] + row[2].abs() * lh[2];
+            }
+
+            for r in 0..3 {
+                world_min[r] = world_min[r].min(wc[r] - wh[r]);
+                world_max[r] = world_max[r].max(wc[r] + wh[r]);
+            }
+
+            // The per-instance view-space depth extreme along `forward` — the D4 fix:
+            // this is `max`'d PER INSTANCE, so a laterally spread caster set can never
+            // inflate `raw_far` the way projecting the union AABB would.
+            let d_center = forward[0] * (wc[0] - eye[0])
+                + forward[1] * (wc[1] - eye[1])
+                + forward[2] * (wc[2] - eye[2]);
+            let d_half =
+                forward[0].abs() * wh[0] + forward[1].abs() * wh[1] + forward[2].abs() * wh[2];
+            raw_far = raw_far.max(d_center + d_half);
+        }
+    }
+
+    if resolved_batches == 0 {
+        return CsmCasterBounds { total_batches, ..CsmCasterBounds::EMPTY };
+    }
+
+    CsmCasterBounds { raw_far, world_min, world_max, resolved_batches, total_batches }
+}
+
+/// The cold caster-bounds fold SYSTEM (`docs/CSM-AUTOFIT-PLAN.md` rung C2) — folds
+/// [`CsmCasterScratch`]'s `batches()` + `ring()` (the shadow-caster gather's OUTPUT, NOT
+/// a second query — D7) into [`CsmCasterBounds`] via [`reduce_bounds_into`].
+///
+/// # Registration — unwired-API (matches [`gather_shadow_casters`])
+///
+/// This system is NOT registered in [`CsmPlugin`](crate::csm_plugin::CsmPlugin) (nor any
+/// plugin), exactly as [`gather_shadow_casters`] is an unwired exported API: it requires
+/// the world's `Assets<MeshGpu>` `NonSend` resource and [`CsmCasterScratch`] (itself
+/// unwired — the owning app inserts + populates it), so the owning app co-registers this
+/// system `.after(gather_shadow_casters)` and `.in_set(CsmFitSet)` when it wires the real
+/// CSM caster path (rung C5).
+///
+/// **Without registration, [`CsmCasterBounds`] never leaves the
+/// [`CsmPlugin`](crate::csm_plugin::CsmPlugin)-inserted [`CsmCasterBounds::EMPTY`]** —
+/// nothing folds it, so it can never become `is_usable()`, so a future fit (rung C3)
+/// never latches, so every fit mode renders as `Fixed`: today's picture, silently, at
+/// zero cost.
+///
+/// # `NonSend`
+///
+/// Reads `NonSendRes<Assets<MeshGpu>>` (the same class [`gather_shadow_casters`] reads),
+/// so this system runs main-thread-only. The pin does NOT propagate to a future fit: it
+/// will read only `Res<CsmCasterBounds>`, staying thread-agnostic (D7,
+/// `docs/CSM-AUTOFIT-PLAN.md` §7).
+#[allow(clippy::needless_pass_by_value)]
+pub fn reduce_caster_bounds(
+    view: Res<ViewUniform>,
+    scratch: Res<CsmCasterScratch>,
+    mesh_assets: NonSendRes<Assets<MeshGpu>>,
+    mut out: ResMut<CsmCasterBounds>,
+) {
+    let eye = view.camera_pos.xyz();
+    let forward = view.cam_forward.xyz();
+    *out = reduce_bounds_into(
+        scratch.batches(),
+        scratch.ring(),
+        [eye.x, eye.y, eye.z],
+        [forward.x, forward.y, forward.z],
+        // F6 invariant: never dereference a non-Loaded slot (mirrors
+        // gather_shadow_casters's own try_get above).
+        |mesh_id| {
+            let m = mesh_assets.try_get(MeshHandle(mesh_id))?;
+            Some((m.local_min, m.local_max))
+        },
     );
 }
 
@@ -454,6 +622,206 @@ mod tests {
         assert!(
             scratch.0.ring.capacity() >= ring_cap_after_big,
             "the caster ring retains its reserved capacity across a smaller frame"
+        );
+    }
+
+    // ---- reduce_bounds_into (rung C2, docs/CSM-AUTOFIT-PLAN.md) -----------------------
+
+    /// An identity-rotation, unit-scale instance at world translation `t` — the caster-
+    /// bounds analogue of [`affine`] (no mesh-id/ordinal encoding needed here; only the
+    /// world position matters).
+    fn identity_instance_at(t: [f32; 3]) -> InstanceModelCol {
+        InstanceModelCol {
+            rows: [
+                [1.0, 0.0, 0.0, t[0]],
+                [0.0, 1.0, 0.0, t[1]],
+                [0.0, 0.0, 1.0, t[2]],
+            ],
+        }
+    }
+
+    /// T13 — a batch whose mesh has not resolved `Loaded` (`mesh_aabb -> None`, the F6
+    /// invariant) is SKIPPED: it must not be counted as resolved, and the fold must not
+    /// panic.
+    #[test]
+    fn reduce_skips_non_loaded_mesh() {
+        let batches = [
+            DrawBatch {
+                mesh_id: 0,
+                index_count: 6,
+                index_type: IndexType::Uint16,
+                base_instance: 0,
+                instance_count: 1,
+            },
+            DrawBatch {
+                mesh_id: 1,
+                index_count: 6,
+                index_type: IndexType::Uint16,
+                base_instance: 1,
+                instance_count: 1,
+            },
+        ];
+        let ring = [
+            identity_instance_at([0.0, 0.0, 0.0]),
+            identity_instance_at([0.0, 0.0, 5.0]),
+        ];
+
+        // Mesh 0 resolves; mesh 1 simulates a mesh still streaming in (not yet Loaded).
+        let bounds = reduce_bounds_into(&batches, &ring, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], |mesh_id| {
+            if mesh_id == 0 {
+                Some(([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]))
+            } else {
+                None
+            }
+        });
+
+        assert_eq!(bounds.total_batches, 2, "the gather emitted 2 batches this frame");
+        assert_eq!(
+            bounds.resolved_batches, 1,
+            "the non-Loaded mesh's batch must be skipped, not counted as resolved"
+        );
+        assert!(
+            !bounds.is_usable(),
+            "an incomplete fold (resolved < total) must not be usable as a fit input"
+        );
+    }
+
+    /// The C0 zero-vertex sentinel is an INVERTED box (`local_min = [+inf;3]`, `local_max
+    /// = [-inf;3]`) — its centre computes to NaN. `reduce_bounds_into` must treat it
+    /// EXACTLY like a non-Loaded slot (skip, do not count as resolved), never dereference
+    /// it into a NaN-poisoned fold. Reachable in practice: `tests/asset_streaming_f5_validation.rs`
+    /// constructs such a dummy `MeshGpu`.
+    #[test]
+    fn reduce_skips_inverted_box_like_non_loaded_mesh() {
+        let batches = [DrawBatch {
+            mesh_id: 0,
+            index_count: 6,
+            index_type: IndexType::Uint16,
+            base_instance: 0,
+            instance_count: 1,
+        }];
+        let ring = [identity_instance_at([1.0, 2.0, 3.0])];
+
+        let bounds = reduce_bounds_into(&batches, &ring, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], |_| {
+            Some(([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]))
+        });
+
+        assert_eq!(bounds.total_batches, 1);
+        assert_eq!(
+            bounds.resolved_batches, 0,
+            "an inverted (zero-vertex sentinel) box must be skipped, not resolved"
+        );
+        assert!(!bounds.is_usable());
+        assert_eq!(
+            bounds.raw_far, 0.0,
+            "an all-skipped fold must equal EMPTY, not a NaN-poisoned value"
+        );
+        assert!(bounds.raw_far.is_finite());
+        assert!(bounds.world_min.iter().all(|v| v.is_finite()));
+        assert!(bounds.world_max.iter().all(|v| v.is_finite()));
+    }
+
+    /// T20 — D4's exactness/conservativeness: a rotated, non-uniformly-scaled, AND
+    /// SHEARED instance (not a pure rotation/scale, so a bounding-sphere route would
+    /// underestimate). The abs-matrix (Arvo) transform must produce a world AABB that
+    /// contains all 8 manually-transformed local-box corners.
+    #[test]
+    fn reduce_matches_manual_transform_for_sheared_instance() {
+        let a = [[1.5_f32, 0.6, -0.3], [-0.2, 2.0, 0.4], [0.1, -0.5, 0.8]];
+        let t = [3.0_f32, -2.0, 5.0];
+
+        let inst = InstanceModelCol {
+            rows: [
+                [a[0][0], a[0][1], a[0][2], t[0]],
+                [a[1][0], a[1][1], a[1][2], t[1]],
+                [a[2][0], a[2][1], a[2][2], t[2]],
+            ],
+        };
+
+        let local_min = [-1.0_f32, -2.0, -0.5];
+        let local_max = [3.0_f32, 1.0, 2.0];
+
+        let batches = [DrawBatch {
+            mesh_id: 0,
+            index_count: 6,
+            index_type: IndexType::Uint16,
+            base_instance: 0,
+            instance_count: 1,
+        }];
+        let ring = [inst];
+
+        let bounds = reduce_bounds_into(&batches, &ring, [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], |_| {
+            Some((local_min, local_max))
+        });
+
+        const EPS: f32 = 1.0e-4;
+        for &lx in &[local_min[0], local_max[0]] {
+            for &ly in &[local_min[1], local_max[1]] {
+                for &lz in &[local_min[2], local_max[2]] {
+                    let w = [
+                        a[0][0] * lx + a[0][1] * ly + a[0][2] * lz + t[0],
+                        a[1][0] * lx + a[1][1] * ly + a[1][2] * lz + t[1],
+                        a[2][0] * lx + a[2][1] * ly + a[2][2] * lz + t[2],
+                    ];
+                    for r in 0..3 {
+                        assert!(
+                            w[r] >= bounds.world_min[r] - EPS && w[r] <= bounds.world_max[r] + EPS,
+                            "corner ({lx},{ly},{lz}) world coord {w:?} axis {r} must land \
+                             inside [world_min, world_max] = [{:?}, {:?}]",
+                            bounds.world_min,
+                            bounds.world_max
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// T21 — the union-AABB error (D). Two caster instances at the SAME view-space depth
+    /// (~3) but opposite lateral extremes (`world x = +-50`), viewed along an oblique
+    /// `forward` with `|fwd.x| = 0.5`. Projecting a UNION AABB would add ~`0.5 * 50 = 25`
+    /// of spurious depth (raw_far -> ~28); the per-instance reduction must not.
+    #[test]
+    fn laterally_spread_casters_do_not_inflate_raw_far() {
+        let fwd = [0.5_f32, 0.0, -(0.75_f32).sqrt()];
+        let target_depth = 3.0_f32;
+        // Solve for the z that places each instance at exactly `target_depth` along `fwd`
+        // from the origin eye, so the ONLY thing that differs between the two instances
+        // is their lateral (x) position.
+        let z_for = |x: f32| (target_depth - fwd[0] * x) / fwd[2];
+
+        let xa = 50.0_f32;
+        let xb = -50.0_f32;
+        let inst_a = identity_instance_at([xa, 0.0, z_for(xa)]);
+        let inst_b = identity_instance_at([xb, 0.0, z_for(xb)]);
+
+        let batches = [
+            DrawBatch {
+                mesh_id: 0,
+                index_count: 6,
+                index_type: IndexType::Uint16,
+                base_instance: 0,
+                instance_count: 2,
+            },
+        ];
+        let ring = [inst_a, inst_b];
+        // A small local box so d_half is negligible next to the depth assertion's tolerance.
+        let local_min = [-0.05_f32; 3];
+        let local_max = [0.05_f32; 3];
+
+        let bounds =
+            reduce_bounds_into(&batches, &ring, [0.0, 0.0, 0.0], fwd, |_| Some((local_min, local_max)));
+
+        assert!(
+            (bounds.raw_far - target_depth).abs() < 0.5,
+            "raw_far ({}) must stay near the true per-instance depth (~{target_depth}), \
+             not the union-AABB error (~28)",
+            bounds.raw_far
+        );
+        assert!(
+            bounds.raw_far < 15.0,
+            "raw_far ({}) must not inflate toward the union-AABB projection (~28)",
+            bounds.raw_far
         );
     }
 }

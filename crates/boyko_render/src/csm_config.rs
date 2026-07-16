@@ -694,6 +694,89 @@ pub fn latch_cell(raw: f32, prev_k: i32) -> i32 {
     prev_k
 }
 
+// ---- CsmCasterBounds (C2, dark — `docs/CSM-AUTOFIT-PLAN.md`). Folded once per frame by
+// `csm_caster::reduce_caster_bounds` from `CsmCasterScratch`'s existing gather output.
+// Nothing reads this Resource yet in this rung; C3 wires `resolve_csm_cascades` as its
+// first consumer. ---------------------------------------------------------------------
+
+/// The caster-derived fit input, folded once per frame by
+/// [`reduce_caster_bounds`](crate::csm_caster::reduce_caster_bounds) from
+/// [`CsmCasterScratch`](crate::csm_caster::CsmCasterScratch)'s existing `batches()` +
+/// `ring()` — the shadow-caster gather's OUTPUT, not a second query (Decision D7,
+/// `docs/CSM-AUTOFIT-PLAN.md`).
+///
+/// # NOT a caster-presence authority
+///
+/// [`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate) (`csm_mode_word == 1
+/// && batch_count() > 0`) remains the SINGLE predicate for "do we have casters" and is
+/// untouched by this type. The counters here exist ONLY to tell a future fit whether this
+/// frame's fold is usable as an input — a batch whose mesh has not yet resolved `Loaded`
+/// (streaming) is SKIPPED (the F6 never-deref invariant), which makes the fold
+/// INCOMPLETE, not caster-less. Never read `resolved_batches`/`total_batches` to decide
+/// whether shadows are on; that decision belongs exclusively to `sync_csm_light_gate`.
+///
+/// Not `#[repr(C)]`, no size pin — this never reaches the GPU (a CPU-only fit input). 36 B.
+///
+/// # Dark this rung (C2)
+///
+/// Nothing reads this Resource yet. [`CsmPlugin`](crate::csm_plugin::CsmPlugin) inserts
+/// [`CsmCasterBounds::EMPTY`] so a bare-`CsmPlugin` world never panics resolving it, but
+/// the fold only runs once the owning app registers
+/// [`reduce_caster_bounds`](crate::csm_caster::reduce_caster_bounds) — an unwired exported
+/// API (rung C5). Until then this Resource stays `EMPTY` forever: inert, zero cost.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+pub struct CsmCasterBounds {
+    /// Max VIEW-space depth over all caster instances, reduced PER INSTANCE — each
+    /// instance's own world AABB (the abs-matrix/Arvo transform of its mesh's model-space
+    /// AABB) is individually projected onto the view axis, then `max`'d. Deliberately NOT
+    /// the projection of the union AABB: two casters at the same depth but opposite
+    /// lateral extremes would otherwise inflate this value by their lateral separation
+    /// (D4). Valid iff `resolved_batches > 0`.
+    pub raw_far: f32,
+    /// World-space UNION AABB minimum of all caster instances. Kept ONLY for a future
+    /// sun-axis pull-back term (D5, rung C4), where a union bound is exactly what is
+    /// wanted — NOT for `raw_far` (see its doc).
+    pub world_min: [f32; 3],
+    /// World-space union AABB maximum. See [`Self::world_min`].
+    pub world_max: [f32; 3],
+    /// Batches whose mesh resolved via `try_get` to a `Loaded`, valid (non-inverted) AABB
+    /// and contributed to the fold.
+    pub resolved_batches: u32,
+    /// Batches the gather emitted this frame. `resolved_batches < total_batches` ⇒ the
+    /// fold is INCOMPLETE (a streaming mesh, or a zero-vertex placeholder — see
+    /// `reduce_bounds_into`'s doc).
+    pub total_batches: u32,
+}
+
+impl CsmCasterBounds {
+    /// No caster batches folded — every field's zero value, and the value a
+    /// disabled/unregistered/streaming-incomplete fold holds.
+    pub const EMPTY: Self = Self {
+        raw_far: 0.0,
+        world_min: [0.0; 3],
+        world_max: [0.0; 3],
+        resolved_batches: 0,
+        total_batches: 0,
+    };
+
+    /// Whether this frame's fold is a usable fit input: at least one batch contributed,
+    /// and EVERY emitted batch resolved (no streaming/inverted-box gap). A future fit
+    /// (C3) must HOLD its previous decision, not read a partial fold, when this is false.
+    #[inline]
+    pub fn is_usable(&self) -> bool {
+        self.resolved_batches > 0 && self.resolved_batches == self.total_batches
+    }
+}
+
+impl Default for CsmCasterBounds {
+    /// `Default == EMPTY` — a `CsmCasterBounds` inserted before the first fold (or on a
+    /// world where the reducer is never registered) already reads as "no usable bounds."
+    #[inline]
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
+
 // ---- the cold StrategyPolicy system (mirrors resolve_ssao_policy) ---------------------
 
 /// The cold CSM resolve policy — reads [`CsmConfig`] + the active [`ViewUniform`] + the
