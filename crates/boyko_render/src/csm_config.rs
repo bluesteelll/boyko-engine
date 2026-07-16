@@ -33,14 +33,17 @@
 //! `view_proj`. The camera read is [`ViewUniform`]; it carries no orthographic
 //! half-extents, so this phase asserts a perspective camera (critic W3).
 //!
-//! # Caster-aware split-range fit (`docs/CSM-AUTOFIT-PLAN.md`, rung C3, default OFF)
+//! # Caster-aware split-range fit (`docs/CSM-AUTOFIT-PLAN.md`, rung C3; default `CatchAll`)
 //!
 //! [`CsmFit`] is the already-decided split-range decision `resolve_csm` applies —
 //! `resolve_csm` itself does not consult [`CsmConfig::fit_mode`]. [`resolve_csm_cascades`]
-//! computes it via the private `select_fit` gate: [`CsmFitMode::Fixed`] (the DEFAULT)
-//! selects [`CsmFit::NONE`] immediately, without reading [`CsmCasterBounds`] or
-//! [`CsmFitState`] — textually today's math, so a pinned scene that never sets `fit_mode`
-//! is byte-identical to before this rung. [`CsmFitMode::Shrink`] / [`CsmFitMode::CatchAll`]
+//! computes it via the private `select_fit` gate: [`CsmFitMode::Fixed`] selects
+//! [`CsmFit::NONE`] immediately, without reading [`CsmCasterBounds`] or [`CsmFitState`] —
+//! textually the pre-fit math, so it remains the exact byte-for-byte opt-out.
+//! [`CsmFitMode::CatchAll`] is the DEFAULT as of 2026-07-16 (owner call): splitting by the
+//! camera range spent cascades on caster-free space while the tail cascade smeared whatever
+//! fell into it, and fitting the range costs nothing to fix that.
+//! [`CsmFitMode::Shrink`] / [`CsmFitMode::CatchAll`]
 //! fit the split range to the caster-derived `far_eff` (an anti-shimmer log-quantized,
 //! Schmitt-latched value — see [`grid_value`] / [`latch_cell`]), requiring
 //! [`reduce_caster_bounds`](crate::csm_caster::reduce_caster_bounds) to be app-registered
@@ -160,26 +163,47 @@ const DEFAULT_NORMAL_BIAS: f32 = 1.5;
 const DEFAULT_DEPTH_BIAS_CONSTANT: f32 = 0.0015;
 /// The default slope-scaled depth bias (the rasterizer `depthBiasSlopeFactor` term).
 const DEFAULT_DEPTH_BIAS_SLOPE: f32 = 1.5;
+/// The default cascade split-RANGE policy — fit the range to the casters, keeping the last
+/// cascade as the catch-all for everything beyond them. Owner call, 2026-07-16: it costs
+/// nothing over [`CsmFitMode::Fixed`] (same cascades, same resolution, same draws) and stops
+/// the tail cascade from smearing casters that fall off the previous cascade's edge. See
+/// [`CsmFitMode::CatchAll`] for the measured numbers and the trade it makes.
+const DEFAULT_FIT_MODE: CsmFitMode = CsmFitMode::CatchAll;
 
 // ---- CsmFitMode (the cascade split-range policy knob, `docs/CSM-AUTOFIT-PLAN.md`) -----
 
 /// The cascade split-RANGE policy — the owner's sharpness/coverage lever. Capability is
-/// STRUCTURAL: [`Fixed`](CsmFitMode::Fixed) IS "auto-fit off" (the 0%-gate); there is no
-/// separate flag. Mirrors
-/// [`ShadowDenoiseMode`](crate::shadow_denoise_config::ShadowDenoiseMode) / `AaMode`.
+/// STRUCTURAL: [`Fixed`](CsmFitMode::Fixed) IS "auto-fit off"; there is no separate flag.
+/// Mirrors [`ShadowDenoiseMode`](crate::shadow_denoise_config::ShadowDenoiseMode) / `AaMode`
+/// in shape — but NOT in which variant is default (see below).
+///
+/// # This knob does NOT trade quality for performance
+///
+/// Every variant costs the same on the GPU: same cascade count, same map resolution, same
+/// draws, same shader. The only cost is a cold, once-per-frame O(caster instances) CPU fold
+/// (`Fixed` skips even that). What the variants trade is WHERE the sharpness lands and
+/// whether distant receivers keep a shadow. The quality/perf levers are
+/// [`CsmConfig::resolution`] and [`CsmConfig::cascade_count`], which really do cost VRAM and
+/// a depth pass each.
 ///
 /// The caster modes ([`Shrink`](CsmFitMode::Shrink) / [`CatchAll`](CsmFitMode::CatchAll))
 /// require [`reduce_caster_bounds`](crate::csm_caster::reduce_caster_bounds) to be
 /// app-registered (`docs/CSM-AUTOFIT-PLAN.md` rung C5). Without it [`CsmCasterBounds`]
 /// never leaves [`CsmCasterBounds::EMPTY`], the fit never latches, and EVERY mode renders
-/// as `Fixed` — silently, at zero cost.
+/// as `Fixed` — silently, at zero cost. `EnginePlugins` registers it; a bare `CsmPlugin`
+/// world does not, which is why that degradation is graceful rather than a panic.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum CsmFitMode {
-    /// Split `[view.near, min(view.far, shadow_distance)]` — today's math, BIT-IDENTICAL.
-    /// The DEFAULT: a world that never sets this renders byte-identically to today, and the
-    /// caster bounds/latch state are never read (0 ns).
-    #[default]
+    /// Split `[view.near, min(view.far, shadow_distance)]` — the camera's whole shadow range,
+    /// ignoring where casters actually are. BIT-IDENTICAL to the pre-auto-fit engine, and the
+    /// caster bounds/latch state are never read (0 ns), so this is the exact opt-out for a
+    /// scene that wants the old bytes back.
+    ///
+    /// NOT the default (owner call, 2026-07-16): splitting by the camera spends cascades on
+    /// caster-free range while the tail cascade smears the casters that fall into it — at the
+    /// shipped config a receiver just past cascade 1's edge lands on a 22-unit cascade whose
+    /// texel is ~3.6 screen px. Paying that by default bought nothing.
     Fixed,
     /// F-shrink: all `N` cascades split `[view.near, far_eff]`. One extra cascade over the
     /// caster range; receivers beyond `far_eff` are FULLY LIT with no cross-fade
@@ -191,7 +215,17 @@ pub enum CsmFitMode {
     /// RESERVED for `[far_eff, far_cap]`, so distant shadows survive and the last split
     /// stays at `shadow_distance` exactly as today (no terminator). One of `N` cascades is
     /// spent on caster-free range. `cascade_count < 2` degenerates to `Fixed` (cannot
-    /// reserve the only cascade). RECOMMENDED ON-mode.
+    /// reserve the only cascade).
+    ///
+    /// **The DEFAULT** (owner call, 2026-07-16, after an eval on `examples/room.rs`'s scene):
+    /// it keeps the casters inside a tight cascade instead of letting them fall off its edge
+    /// into the oversized tail, and it costs nothing to do so. Measured there: a receiver at
+    /// view-depth ~8 goes from texel 0.0366 (~3.6 screen px) to 0.0112 (~1.1 px) — 3.2×,
+    /// which also narrows the 13-tap PCF penumbra by the same factor, since that tent is
+    /// measured in TEXELS. The trade, stated honestly: a receiver at ~6 gets ~20% coarser
+    /// (0.0093 → 0.0112), because this mode redistributes sharpness toward the casters rather
+    /// than adding any.
+    #[default]
     CatchAll,
 }
 
@@ -221,8 +255,9 @@ pub struct CsmConfig {
     pub depth_bias_constant: f32,
     /// Slope-scaled depth-bias term (rasterizer `depthBiasSlopeFactor`).
     pub depth_bias_slope: f32,
-    /// The cascade split-RANGE policy. Default [`CsmFitMode::Fixed`] (the golden-preserving
-    /// 0%-gate) — see [`CsmFitMode`].
+    /// The cascade split-RANGE policy. Default [`CsmFitMode::CatchAll`] (fit the split range
+    /// to the casters, reserving the last cascade for the rest) — see [`CsmFitMode`] for the
+    /// measured trade and for why this is not a quality/perf knob.
     pub fit_mode: CsmFitMode,
 }
 
@@ -230,7 +265,9 @@ impl Default for CsmConfig {
     /// The DISABLED default (`cascade_count == 0` — the 0%-gate): a default world resolves
     /// the all-zero [`ResolvedCsm`] and touches no render path. The remaining fields carry
     /// the research defaults so that flipping `cascade_count` to a positive value yields a
-    /// usable fit without further tuning.
+    /// usable fit without further tuning — which now includes fitting the split range to the
+    /// casters ([`CsmFitMode::CatchAll`]), since splitting by the camera instead spends
+    /// cascades on caster-free range at no saving.
     #[inline]
     fn default() -> Self {
         Self {
@@ -241,7 +278,7 @@ impl Default for CsmConfig {
             normal_bias: DEFAULT_NORMAL_BIAS,
             depth_bias_constant: DEFAULT_DEPTH_BIAS_CONSTANT,
             depth_bias_slope: DEFAULT_DEPTH_BIAS_SLOPE,
-            fit_mode: CsmFitMode::Fixed,
+            fit_mode: DEFAULT_FIT_MODE,
         }
     }
 }

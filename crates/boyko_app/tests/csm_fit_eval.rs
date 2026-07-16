@@ -106,10 +106,14 @@ fn setup(
 #[ignore = "needs a real windowed GPU device; orchestrator-run CsmFitMode owner-eval dump"]
 fn csm_fit_eval_screenshot_dump() {
     let win: u32 = std::env::var("BOYKO_WIN").ok().and_then(|s| s.parse().ok()).unwrap_or(900);
+    // An UNSET `BOYKO_CSM_FIT` renders the engine's own default rather than a hardcoded mode, so
+    // this dump answers "what does a scene that never sets fit_mode look like?" — the question the
+    // goldens cannot answer here (no byte-golden exercises CSM + casters through CsmConfig).
     let fit_mode = match std::env::var("BOYKO_CSM_FIT").ok().as_deref() {
+        Some("fixed") => CsmFitMode::Fixed,
         Some("shrink") => CsmFitMode::Shrink,
         Some("catchall") => CsmFitMode::CatchAll,
-        _ => CsmFitMode::Fixed,
+        _ => CsmConfig::default().fit_mode,
     };
     println!("csm_fit_eval: fit_mode={fit_mode:?} win={win}");
 

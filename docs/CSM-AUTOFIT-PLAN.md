@@ -1,6 +1,39 @@
 # Architecture: CSM caster-aware far-plane fit (`CsmFitMode` knob)
 
-**Status:** final. Supersedes the three candidate passes. Every critic finding is either fixed or explicitly refuted below (§0).
+**Status:** final, and SHIPPED (rungs C0–C6). Supersedes the three candidate passes. Every critic finding is either fixed or explicitly refuted below (§0).
+
+> ## ⚠️ POST-SHIP AMENDMENT (2026-07-16) — the default is now `CatchAll`, not `Fixed`
+>
+> This document is written throughout on the premise that the default is `CsmFitMode::Fixed`, which
+> is what rungs C0–C5 shipped and what made every rung golden-free. **After the rung-C6 eval the
+> owner changed that call: `CsmConfig::default().fit_mode` is now `CatchAll`.** Read every
+> "default `Fixed`" / "no golden moves because the default is `Fixed`" statement below as historical.
+>
+> What the eval measured on `examples/room.rs`'s scene (the shipped config: `cascade_count: 3`,
+> `shadow_distance: 30`, `resolution: 2048`, λ 0.8), taken from `resolve_csm`'s own output:
+>
+> | | splits | texels |
+> |---|---|---|
+> | `Fixed` | 2.55 / 7.59 / 30.00 | 0.0034 / 0.0093 / **0.0366** |
+> | `CatchAll` | 1.67 / 8.98 / 30.00 | 0.0024 / **0.0112** / 0.0361 |
+>
+> A receiver at view-depth ~8 falls off `Fixed`'s cascade-1 edge into the 22-unit tail and its
+> 0.0366 texel (~3.6 screen px at 900p); `CatchAll` keeps it in cascade 1 at 0.0112 — 3.2×, which
+> narrows the 13-tap PCF penumbra by the same factor because that tent is measured in TEXELS. A
+> receiver at ~6 gets ~20% coarser (0.0093 → 0.0112). So the mode redistributes sharpness toward
+> the casters rather than adding any — but it costs nothing to do so, which is why paying `Fixed`'s
+> blur by default bought nothing.
+>
+> **§11's "MOVES A GOLDEN: none" still holds, and that is itself a finding, not a reassurance:**
+> flipping the default moved ZERO of the five frozen goldens, because none of them exercises CSM +
+> casters through `CsmConfig` (`grand_showcase` mirrors the cascade math by hand at the RHI level;
+> the VB scenes have no shadow receivers). The default change is therefore **ungated by byte
+> goldens** — the verification was the C6 eval render plus `room_smoke_catch_all_fit`. This is the
+> same gap `docs/`'s host-path lesson already records: host render rungs need a golden-independent
+> visual regression.
+>
+> Open Question 1 below (the 13-tap PCF tent) is **not** superseded and is now the strongest
+> remaining lever: the tent and the fit compound multiplicatively.
 
 ---
 
