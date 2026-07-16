@@ -71,6 +71,52 @@ const UP_PARALLEL_THRESHOLD: f32 = 0.99;
 /// floor keeps every `view_proj` finite and invertible (W5 zero-radius floor).
 const MIN_DIAMETER: f32 = 1.0e-3;
 
+// ---- the log-quantization grid + Schmitt latch (C1, dark — `docs/CSM-AUTOFIT-PLAN.md`
+// Decision D6). Nothing in this file calls these yet; C2/C3 wire a caller through
+// `resolve_csm_cascades`. Zero behavior change in this rung. ----------------------------
+
+/// Log2 step of the far grid: `far_eff ∈ {2^(k/4)}` (ratio ≈ 1.18921 = `2^(1/4)`). The
+/// ANTI-SHIMMER parameter (D6/D9), NOT an owner-facing tuning knob — exposing it would let
+/// an owner set e.g. `1` cell/octave and reintroduce the texel-snap shimmer the grid exists
+/// to bound. 4 cells per octave ⇒ the grid is exactly representable at every power of two
+/// (`grid_value(4*n) == 2^n` exactly).
+const FIT_GRID_CELLS_PER_OCTAVE: i32 = 4;
+
+/// Grid mantissa thresholds `2^(0/4), 2^(1/4), 2^(2/4), 2^(3/4)` — the SAME table both
+/// `grid_value` multiplies by and `grid_cell` compares against, which is why the round-trip
+/// `grid_cell(grid_value(k)) == k` is exact (D6): scaling a normalized float by an exact
+/// power of two only ever rewrites its exponent field, so the mantissa `grid_cell` recovers
+/// from `grid_value(k)`'s bits is bit-identical to the entry that produced it.
+const FIT_GRID_TABLE: [f32; 4] = [
+    1.0,
+    1.189_207_1,
+    core::f32::consts::SQRT_2, // 2^(2/4) exactly — clippy::approx_constant prefers the named constant
+    1.681_792_8,
+];
+
+/// The Schmitt shrink band, in grid cells: `latch_cell` only shrinks once `raw` has fallen
+/// `FIT_SHRINK_BAND_CELLS` full cells below the latched cell's value (2 cells ≈ −29.3%).
+/// Grow is unconditional/immediate (no band) — the asymmetry is principled, not an
+/// oversight (D6): grow is the *masked* direction (the shadow shrinks on screen while the
+/// camera recedes), so pops there are free, while shrink is the *scrutinised* direction (the
+/// shadow grows on screen), so pops there are made rare.
+const FIT_SHRINK_BAND_CELLS: i32 = 2;
+
+/// `latch_cell`'s "never latched" sentinel for `prev_k` — `i32::MIN`, so it can never
+/// collide with a real grid cell (a legitimate `k` stays within a few hundred of zero for
+/// any plausible scene scale). Rung C3 promotes this to `CsmFitState::UNLATCHED`, defined to
+/// the SAME value, so that promotion is a value-preserving rewire, not a behavior change.
+const FIT_UNLATCHED: i32 = i32::MIN;
+
+/// The minimum exponent `exp2i` can represent as a NORMAL `f32` (IEEE-754 exponent field
+/// `1`, unbiased `1 - 127`). Below this the bit pattern is either subnormal or zero —
+/// outside `exp2i`'s exact-power-of-two domain.
+const EXP2I_MIN_EXPONENT: i32 = -126;
+
+/// The maximum exponent `exp2i` can represent as a NORMAL `f32` (exponent field `254`,
+/// unbiased `254 - 127`); one past this is the reserved Inf/NaN exponent field `255`.
+const EXP2I_MAX_EXPONENT: i32 = 127;
+
 /// The default cascade count — `0`, the DISABLED 0%-gate (mirrors `SsaoQuality::Off`).
 const DEFAULT_CASCADE_COUNT: u32 = 0;
 /// The default shadow-map resolution per cascade (research default, a common 2K tile).
@@ -509,6 +555,145 @@ fn sphere_radius(corners: &[Vec3; 8], center: Vec3) -> f32 {
     max_sq.sqrt()
 }
 
+// ---- the log-quantization grid + Schmitt latch (C1, dark) -----------------------------
+//
+// Nothing in this file calls these yet — `resolve_csm` still takes only `(cfg, view,
+// sun_dir)`. Landed standalone (`docs/CSM-AUTOFIT-PLAN.md` Decision D6) so the exactness
+// and no-limit-cycle properties are unit-testable before C2/C3 wire a caller through them.
+
+/// Exact `2^q` as `f32`, built directly from its IEEE-754 bits (sign `0`, exponent field
+/// `q + 127`, mantissa `0`) — NOT `powf`, which is a libm call with no cross-platform
+/// bit-exactness guarantee and would silently break the `grid_cell`/`grid_value` round-trip
+/// (D6, T10). `f32::from_bits` is a safe reinterpretation of an already-valid bit pattern,
+/// not a transmute.
+#[inline]
+fn exp2i(q: i32) -> f32 {
+    debug_assert!(
+        (EXP2I_MIN_EXPONENT..=EXP2I_MAX_EXPONENT).contains(&q),
+        "exp2i: exponent {q} outside the safe normal f32 range [{EXP2I_MIN_EXPONENT}, {EXP2I_MAX_EXPONENT}]"
+    );
+    let q = if (EXP2I_MIN_EXPONENT..=EXP2I_MAX_EXPONENT).contains(&q) {
+        q
+    } else {
+        exp2i_clamp(q)
+    };
+    let bits = ((q + 127) as u32) << 23;
+    f32::from_bits(bits)
+}
+
+/// Clamps an out-of-range exponent into `exp2i`'s safe normal range — `#[cold]` /
+/// `#[inline(never)]` per Principle 3 (I-cache): only a pathological `k` (many octaves off
+/// scene scale) reaches this, so it stays off `exp2i`'s straight-line bit-shift body.
+#[cold]
+#[inline(never)]
+fn exp2i_clamp(q: i32) -> i32 {
+    q.clamp(EXP2I_MIN_EXPONENT, EXP2I_MAX_EXPONENT)
+}
+
+/// The far-grid value of cell `k`: `FIT_GRID_TABLE[k mod 4] · 2^(k div 4)`. Exact — a
+/// normalized mantissa times an exact power of two only ever rewrites the exponent field, so
+/// this never rounds (unlike a `powf`/`powi` reconstruction, which would accumulate error
+/// across octaves). This exactness, together with `grid_cell`'s matching bit decomposition,
+/// is what makes `grid_cell(grid_value(k)) == k` hold bit-for-bit on every platform (D6,
+/// T10) — a property `powf(1.18921, k)` cannot give.
+#[inline]
+pub fn grid_value(k: i32) -> f32 {
+    let phase = k.rem_euclid(FIT_GRID_CELLS_PER_OCTAVE) as usize;
+    let exp = k.div_euclid(FIT_GRID_CELLS_PER_OCTAVE);
+    debug_assert!(
+        (EXP2I_MIN_EXPONENT..=EXP2I_MAX_EXPONENT).contains(&exp),
+        "grid_value: k={k} decodes to exponent {exp}, outside the safe range [{EXP2I_MIN_EXPONENT}, {EXP2I_MAX_EXPONENT}]"
+    );
+    FIT_GRID_TABLE[phase] * exp2i(exp)
+}
+
+/// Recovers the grid cell `k` such that `grid_value(k) <= x < grid_value(k + 1)`, from `x`'s
+/// IEEE-754 bits: the exponent field gives `k`'s octave directly, and the mantissa field —
+/// reassembled with the bias exponent so it reads as a value in `[1.0, 2.0)` — is compared
+/// against the SAME `FIT_GRID_TABLE` thresholds `grid_value` multiplies by. Scaling a float
+/// by an exact power of two rewrites ONLY its exponent field, so the mantissa recovered here
+/// from a `grid_value(k)` input is bit-identical to the `FIT_GRID_TABLE` entry that produced
+/// it — which is why `grid_cell(grid_value(k)) == k` is exact, not approximate (D6, T10).
+///
+/// `x` must be finite and `> 0` (debug_assert). A subnormal, zero, negative, infinite or NaN
+/// `x` — never produced by a well-formed caster/camera distance — is clamped to the smallest
+/// normal magnitude by the `#[cold]` path below rather than mis-decoded (a subnormal's
+/// mantissa has no implicit leading `1`, so reading its bits through the normal-number path
+/// would silently recover the wrong exponent).
+#[inline]
+pub fn grid_cell(x: f32) -> i32 {
+    debug_assert!(
+        x.is_finite() && x > 0.0,
+        "grid_cell: x must be finite and > 0, got {x}"
+    );
+    let x = if x.is_finite() && x >= f32::MIN_POSITIVE {
+        x
+    } else {
+        grid_cell_clamp(x)
+    };
+
+    let bits = x.to_bits();
+    let exp = ((bits >> 23) & 0xFF) as i32 - 127;
+    // Reassemble the mantissa bits with the bias exponent field (127) so the value reads in
+    // [1.0, 2.0) — the SAME domain FIT_GRID_TABLE lives in.
+    let m = f32::from_bits((bits & 0x007F_FFFF) | 0x3F80_0000);
+
+    // Branchless: FIT_GRID_TABLE is sorted, so the count of thresholds `<= m` IS the phase.
+    let phase = (m >= FIT_GRID_TABLE[1]) as i32
+        + (m >= FIT_GRID_TABLE[2]) as i32
+        + (m >= FIT_GRID_TABLE[3]) as i32;
+
+    exp * FIT_GRID_CELLS_PER_OCTAVE + phase
+}
+
+/// Clamps a non-finite / non-positive / subnormal `x` to the smallest NORMAL `f32` magnitude
+/// before `grid_cell` decodes its bits — `#[cold]` / `#[inline(never)]` per Principle 3
+/// (I-cache): grid inputs are scene-scale (metre) camera/caster distances, so this path
+/// fires only under a misconfigured scene or an adversarial test, and keeping it out of
+/// `grid_cell`'s body keeps that body a straight-line bit decode.
+#[cold]
+#[inline(never)]
+fn grid_cell_clamp(_x: f32) -> f32 {
+    f32::MIN_POSITIVE
+}
+
+/// The asymmetric Schmitt latch (D6). `prev_k` is the previously latched cell (or
+/// `FIT_UNLATCHED` for a fresh latch — mirrors `CsmFitState::UNLATCHED`, wired in C3).
+///
+/// - **Fresh** (`prev_k == FIT_UNLATCHED`) or **grow** (`raw > grid_value(prev_k)`):
+///   immediate — `grid_cell(raw) + 1`, the cell whose value always satisfies `far_eff >=
+///   raw` (T10's never-clips property). Grow MUST be immediate: `far_eff` is a HARD upper
+///   bound the `Shrink` fit mode caps `far_cap` at (D2), so a delayed grow would clip
+///   casters the frame `raw` first exceeds it.
+/// - **Shrink** (`raw < grid_value(prev_k - FIT_SHRINK_BAND_CELLS)`): only after `raw` has
+///   fallen a full 2 cells (≈ −29.3%) below the latched value — `grid_cell(raw) + 1`.
+/// - **Else**: sticky — returns `prev_k` unchanged. This is what discharges the anti-dither
+///   obligation (T18): any oscillation smaller than the grow/shrink bands re-quantizes zero
+///   times, because neither predicate above trips.
+///
+/// No limit cycle: after a grow `prev_k -> k+1`, `raw` is just above `grid_value(k) ==
+/// grid_value((k+1) - 1) > grid_value((k+1) - 2)`, so the shrink predicate is false at the
+/// instant the grow lands — the latch cannot immediately re-trigger shrink on the same
+/// sample.
+#[inline]
+pub fn latch_cell(raw: f32, prev_k: i32) -> i32 {
+    debug_assert!(
+        raw.is_finite() && raw > 0.0,
+        "latch_cell: raw must be finite and > 0, got {raw}"
+    );
+
+    if prev_k == FIT_UNLATCHED {
+        return grid_cell(raw) + 1;
+    }
+    if raw > grid_value(prev_k) {
+        return grid_cell(raw) + 1;
+    }
+    if raw < grid_value(prev_k - FIT_SHRINK_BAND_CELLS) {
+        return grid_cell(raw) + 1;
+    }
+    prev_k
+}
+
 // ---- the cold StrategyPolicy system (mirrors resolve_ssao_policy) ---------------------
 
 /// The cold CSM resolve policy — reads [`CsmConfig`] + the active [`ViewUniform`] + the
@@ -881,5 +1066,422 @@ mod tests {
                 c0[0]
             );
         }
+    }
+
+    // ---- C1: the log-quantization grid + Schmitt latch -----------------------------------
+    // Tests T10, T17, T18, T19 (docs/CSM-AUTOFIT-PLAN.md D6, section 10) plus targeted
+    // edge/adversarial coverage. Nothing in this file calls `grid_value`/`grid_cell`/
+    // `latch_cell` yet (C1 is dark) -- these pin the primitives standalone.
+
+    /// The next representable f32 strictly ABOVE a positive, finite `x` (not `f32::MAX`).
+    /// A local bit-stepping helper (mirrors the module's own bit-decomposition style) so
+    /// the threshold-boundary tests below do not depend on `f32::next_up`'s stabilization.
+    fn ulp_above(x: f32) -> f32 {
+        debug_assert!(x.is_finite() && x > 0.0, "ulp_above: x must be finite and > 0");
+        f32::from_bits(x.to_bits() + 1)
+    }
+
+    /// The next representable f32 strictly BELOW a positive, finite `x` (not the smallest
+    /// positive subnormal).
+    fn ulp_below(x: f32) -> f32 {
+        debug_assert!(x.is_finite() && x > 0.0, "ulp_below: x must be finite and > 0");
+        f32::from_bits(x.to_bits() - 1)
+    }
+
+    /// `2^n` built directly from IEEE-754 bits -- an oracle INDEPENDENT of `exp2i` (a
+    /// separate implementation of the same bit trick, not a call into the code under
+    /// test), for pinning `grid_value`'s exact-octave-boundary claim without relying on
+    /// `f32::powi` (not guaranteed bit-exact the way a direct exponent-field write is).
+    fn exact_pow2(n: i32) -> f32 {
+        debug_assert!((EXP2I_MIN_EXPONENT..=EXP2I_MAX_EXPONENT).contains(&n));
+        f32::from_bits(((n + 127) as u32) << 23)
+    }
+
+    #[test]
+    fn grid_cell_grid_value_round_trip() {
+        // Exhaustive (not sampled) over the FULL safe exponent range: the round-trip is a
+        // bit-identity claim (D6/T10), not a statistical one. `k` safe range is
+        // `[EXP2I_MIN_EXPONENT*4, EXP2I_MAX_EXPONENT*4 + 3]` -- one step past either end
+        // decodes to an out-of-range exponent (pinned separately below).
+        let k_min = EXP2I_MIN_EXPONENT * FIT_GRID_CELLS_PER_OCTAVE;
+        let k_max = EXP2I_MAX_EXPONENT * FIT_GRID_CELLS_PER_OCTAVE + (FIT_GRID_CELLS_PER_OCTAVE - 1);
+        for k in k_min..=k_max {
+            let v = grid_value(k);
+            assert!(v.is_finite() && v > 0.0, "grid_value({k}) = {v} must be finite and positive");
+            assert_eq!(
+                grid_cell(v),
+                k,
+                "grid_cell(grid_value({k})) must round-trip bit-exactly; grid_value({k}) = {v} \
+                 (bits {:#010x}), decoded back to {}",
+                v.to_bits(),
+                grid_cell(v)
+            );
+        }
+
+        // Wide sweep of arbitrary positive x: random NORMAL f32 bit patterns (deterministic
+        // xorshift64, matching this module's own random-sweep style at
+        // `every_view_proj_element_finite_for_random_camera_and_sun`), exponent field kept
+        // inside [1, 253] (unbiased [-126, 126]) so `grid_cell(x)+1` always stays inside the
+        // safe k range above -- the bracket and never-clips properties are pinned over the
+        // grid's full safe operating domain, not just a narrow band around 1.0.
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next_bits = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..20_000 {
+            let bits = next_bits();
+            let exp_field = 1 + (bits % 253) as u32; // 1..=253 -> unbiased -126..=126
+            let mantissa = ((bits >> 20) & 0x007F_FFFF) as u32;
+            let x = f32::from_bits((exp_field << 23) | mantissa);
+            assert!(x.is_finite() && x > 0.0, "generator bug: x = {x}");
+
+            let cell = grid_cell(x);
+            let lo = grid_value(cell);
+            let hi = grid_value(cell + 1);
+            assert!(
+                lo <= x,
+                "grid_value(grid_cell(x)) must be <= x (x = {x}, cell = {cell}, grid_value(cell) = {lo})"
+            );
+            assert!(
+                x < hi,
+                "x must be < grid_value(grid_cell(x)+1) (x = {x}, cell = {cell}, grid_value(cell+1) = {hi})"
+            );
+            // The load-bearing never-clips property (D6): the grid must never report a
+            // far_eff smaller than the raw distance that produced it -- `Shrink`'s
+            // correctness depends on this holding for every raw the fit can plausibly see.
+            assert!(
+                hi >= x,
+                "grid must never clip: grid_value(grid_cell(raw)+1) must be >= raw (raw = {x}, got {hi})"
+            );
+        }
+    }
+
+    #[test]
+    fn grid_value_is_exact_at_every_octave_boundary() {
+        // The module doc's own claim (csm_config.rs ~L82): "grid_value(4*n) == 2^n exactly"
+        // (4 cells/octave -> the grid is exactly representable at every power of two).
+        // `exact_pow2` is an INDEPENDENT bit-construction oracle, not `f32::powi`.
+        for n in -100..=100 {
+            let k = n * FIT_GRID_CELLS_PER_OCTAVE;
+            let expected = exact_pow2(n);
+            assert_eq!(
+                grid_value(k),
+                expected,
+                "grid_value({k}) must be EXACTLY 2^{n} (bit-exact octave boundary), got {}",
+                grid_value(k)
+            );
+        }
+    }
+
+    #[test]
+    fn grid_cell_places_threshold_values_in_the_upper_cell() {
+        // Exact table entries + one ULP on either side, at the phase boundaries
+        // FIT_GRID_TABLE encodes -- the compare in `grid_cell` is `m >= TABLE[phase]`, so a
+        // threshold value itself belongs to the UPPER cell, not the lower one.
+        for (phase, &threshold) in FIT_GRID_TABLE.iter().enumerate().skip(1) {
+            let phase = phase as i32;
+            assert_eq!(
+                grid_cell(threshold),
+                phase,
+                "the exact table threshold FIT_GRID_TABLE[{phase}] = {threshold} must decode to phase {phase}"
+            );
+            assert_eq!(
+                grid_cell(ulp_above(threshold)),
+                phase,
+                "one ULP above the threshold must stay in phase {phase}"
+            );
+            assert_eq!(
+                grid_cell(ulp_below(threshold)),
+                phase - 1,
+                "one ULP below the threshold must fall into the PRIOR phase {}",
+                phase - 1
+            );
+        }
+        // The octave wrap: 2.0 == grid_value(4) (phase 0 of the next octave); one ULP below
+        // it must land in phase 3 of THIS octave, not wrap incorrectly into phase 0.
+        assert_eq!(grid_cell(2.0), FIT_GRID_CELLS_PER_OCTAVE, "2.0 must decode to k=4 (phase 0, exp 1)");
+        assert_eq!(
+            grid_cell(ulp_below(2.0)),
+            FIT_GRID_CELLS_PER_OCTAVE - 1,
+            "one ULP below 2.0 must fall into the LAST phase of the exp-0 octave"
+        );
+    }
+
+    #[test]
+    fn grid_cell_clamps_subnormal_input_up_to_the_smallest_normal_cell() {
+        // A subnormal x is FINITE and > 0 -- it satisfies grid_cell's documented
+        // debug_assert contract -- but is below f32::MIN_POSITIVE, so it exercises the
+        // #[cold] clamp path THROUGH the public API (not bypassing it).
+        let smallest_subnormal = f32::from_bits(1); // ~1.4e-45
+        let mid_subnormal = f32::MIN_POSITIVE / 2.0;
+        let min_positive_cell = grid_cell(f32::MIN_POSITIVE);
+        assert_eq!(
+            grid_cell(smallest_subnormal),
+            min_positive_cell,
+            "the smallest positive subnormal must clamp UP to the same cell as f32::MIN_POSITIVE, never below it"
+        );
+        assert_eq!(
+            grid_cell(mid_subnormal),
+            min_positive_cell,
+            "a mid-range subnormal must also clamp up to f32::MIN_POSITIVE's cell"
+        );
+        // f32::MIN_POSITIVE itself is NOT subnormal -- the boundary condition
+        // (`x >= f32::MIN_POSITIVE`) must NOT clamp it away from its true decoded cell.
+        assert_eq!(
+            min_positive_cell,
+            EXP2I_MIN_EXPONENT * FIT_GRID_CELLS_PER_OCTAVE,
+            "f32::MIN_POSITIVE must decode to the bottom of the safe grid range, not be clamped"
+        );
+    }
+
+    #[test]
+    fn grid_cell_clamp_helper_returns_min_positive_for_any_input() {
+        // Direct pin of the #[cold] clamp path `grid_cell` falls back to for a non-finite /
+        // negative / zero x that would slip past a RELEASE build's disabled debug_assert.
+        // Called directly (bypassing `grid_cell`'s own debug_assert gate) so this test does
+        // not depend on debug_assertions being off -- it pins the helper's OWN
+        // unconditional behavior, per Principle 3's #[cold] discipline.
+        for x in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0, 0.0, -0.0, f32::MIN_POSITIVE / 2.0] {
+            assert_eq!(
+                grid_cell_clamp(x),
+                f32::MIN_POSITIVE,
+                "grid_cell_clamp must floor ANY input to the smallest normal f32 magnitude, got {} for x={x}",
+                grid_cell_clamp(x)
+            );
+        }
+    }
+
+    #[test]
+    fn exp2i_clamp_helper_clamps_to_the_safe_exponent_range() {
+        assert_eq!(exp2i_clamp(1_000_000), EXP2I_MAX_EXPONENT, "an overlarge exponent clamps to the max");
+        assert_eq!(exp2i_clamp(-1_000_000), EXP2I_MIN_EXPONENT, "an underlarge exponent clamps to the min");
+        assert_eq!(exp2i_clamp(EXP2I_MAX_EXPONENT), EXP2I_MAX_EXPONENT, "an in-range exponent is unchanged");
+        assert_eq!(exp2i_clamp(EXP2I_MIN_EXPONENT), EXP2I_MIN_EXPONENT, "an in-range exponent is unchanged");
+    }
+
+    #[test]
+    #[should_panic(expected = "must be finite and > 0")]
+    fn grid_cell_debug_asserts_on_non_positive_input() {
+        let _ = grid_cell(0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside the safe range")]
+    fn grid_value_debug_asserts_on_out_of_range_k() {
+        // One step past the safe range's top boundary (pinned exact at the boundary by
+        // `grid_cell_grid_value_round_trip` above).
+        let k_max = EXP2I_MAX_EXPONENT * FIT_GRID_CELLS_PER_OCTAVE + (FIT_GRID_CELLS_PER_OCTAVE - 1);
+        let _ = grid_value(k_max + 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "must be finite and > 0")]
+    fn latch_cell_debug_asserts_on_non_positive_raw() {
+        let _ = latch_cell(-1.0, FIT_UNLATCHED);
+    }
+
+    #[test]
+    fn latch_grows_immediately_shrinks_after_two_cells() {
+        // A fresh latch lands ONE cell above raw (never-clips on frame 1: `grid_cell(raw)+1`).
+        let k0 = latch_cell(grid_value(10), FIT_UNLATCHED);
+        assert_eq!(k0, 11, "a fresh latch must land exactly one cell above raw");
+
+        // ---- GROW: crosses immediately, at exactly one cell (18.92%) ----------------------
+        let v = grid_value(k0); // the latched far_eff
+        let grown = latch_cell(ulp_above(v), k0);
+        assert_eq!(
+            grown,
+            k0 + 1,
+            "raw crossing grid_value(prev_k) by even one ULP must grow the latch IMMEDIATELY \
+             by exactly one cell, not wait"
+        );
+        assert_eq!(
+            latch_cell(v, k0),
+            k0,
+            "raw exactly AT the latched value must not grow (strict '>', not '>=')"
+        );
+        assert_eq!(
+            latch_cell(ulp_below(v), k0),
+            k0,
+            "raw just below the latched value must not grow"
+        );
+
+        // ---- SHRINK: sticky through one full cell, only trips after two -------------------
+        // One cell below the latched value must stay sticky (shrink needs TWO full cells).
+        assert_eq!(
+            latch_cell(grid_value(k0 - 1), k0),
+            k0,
+            "raw ONE cell below the latched value must stay sticky"
+        );
+        // Exactly at the two-cell threshold is the boundary, NOT strictly past it -- the
+        // predicate is `raw < grid_value(prev_k-2)`, so equality must still be sticky.
+        let two_cells_down = grid_value(k0 - 2);
+        assert_eq!(
+            latch_cell(two_cells_down, k0),
+            k0,
+            "raw AT the two-cell threshold must still be sticky (strict '<', not '<=')"
+        );
+        // One ULP past the two-cell threshold must shrink, landing exactly 2 cells below the
+        // previous latch -- the documented -29.3% pop magnitude (D6).
+        let shrunk = latch_cell(ulp_below(two_cells_down), k0);
+        assert_eq!(
+            shrunk,
+            k0 - 2,
+            "shrink must reland exactly two cells below the previous latch (~-29.3%), the \
+             documented pop magnitude, got a jump to {shrunk} instead of {}",
+            k0 - 2
+        );
+    }
+
+    #[test]
+    fn latch_has_no_limit_cycle() {
+        // (a) MONOTONE up-then-down sweep: at most one latch transition per grid-cell
+        // BOUNDARY the raw signal itself crosses. Proved in the doc: after a grow,
+        // `raw > grid_value(k) == grid_value((k+1)-2)`'s complement holds, so the shrink
+        // predicate is false the instant a grow lands -- no immediate re-trigger.
+        let r0 = grid_value(0); // 1.0
+        let peak = grid_value(8); // 2 octaves up, exactly 8 grid cells above r0
+        let cells_up = grid_cell(peak) - grid_cell(r0);
+        assert_eq!(cells_up, 8, "sweep must span exactly 8 grid-cell boundaries going up");
+
+        const STEPS: usize = 4000;
+        let mut k = FIT_UNLATCHED;
+        let mut transitions = 0i32;
+
+        // Up leg: r0 -> peak, log-uniform steps (uniform ratio steps across a log-spaced grid,
+        // fine enough -- 500 steps/cell -- that no cell boundary is ever skipped in one step).
+        for i in 0..=STEPS {
+            let t = i as f32 / STEPS as f32;
+            let raw = r0 * (peak / r0).powf(t);
+            let new_k = latch_cell(raw, k);
+            if new_k != k {
+                transitions += 1;
+            }
+            k = new_k;
+        }
+        // Down leg: peak -> r0.
+        for i in 0..=STEPS {
+            let t = i as f32 / STEPS as f32;
+            let raw = peak * (r0 / peak).powf(t);
+            let new_k = latch_cell(raw, k);
+            if new_k != k {
+                transitions += 1;
+            }
+            k = new_k;
+        }
+
+        let cells_traversed = 2 * cells_up; // each boundary crossed once up, once down
+        assert!(
+            transitions <= cells_traversed,
+            "a monotone up-then-down sweep must trigger AT MOST one latch transition per grid \
+             cell boundary the raw signal crosses ({transitions} transitions over \
+             {cells_traversed} boundary crossings) -- more would mean the latch amplifies the \
+             input's own crossing rate (a limit cycle)"
+        );
+        // Returning raw to its starting value must settle the latch back near its starting
+        // cell, not leave it drifted -- drift would itself be a symptom of a ratchet bug.
+        let k_start = latch_cell(r0, FIT_UNLATCHED);
+        assert!(
+            (k - k_start).abs() <= 1,
+            "after returning raw to its starting value the latch must settle back near its \
+             starting cell, not drift (k_start = {k_start}, k_end = {k})"
+        );
+
+        // (b) ADVERSARIAL: a +/-9% oscillation astride a grid line must produce ZERO latch
+        // transitions -- this directly refutes the "measure-zero dither" hand-wave (critic
+        // finding B). The centre is placed EXACTLY on a grid line boundary (the tightest,
+        // most delicate placement floating-point-wise) and, by construction, a fresh latch
+        // established there sits at the geometric MIDPOINT of its own 2-cell sticky band
+        // (`line == grid_value(k_line - 1)`), which is the worst-case-symmetric position: the
+        // theoretical safe margin is ~+18.9% on the grow side and ~-15.9% on the shrink side
+        // from `line` itself. +/-9% sits comfortably (with several points of margin) inside
+        // BOTH, while still being a real, non-trivial-amplitude oscillation, not an
+        // infinitesimal wobble.
+        let line = grid_value(5);
+        let k_line = latch_cell(line, FIT_UNLATCHED);
+        let hi = line * 1.09;
+        let lo = line * 0.91;
+        let mut k2 = k_line;
+        let mut dither_transitions = 0i32;
+        for cycle in 0..500 {
+            let raw = if cycle % 2 == 0 { hi } else { lo };
+            let new_k = latch_cell(raw, k2);
+            if new_k != k2 {
+                dither_transitions += 1;
+            }
+            k2 = new_k;
+        }
+        assert_eq!(
+            dither_transitions, 0,
+            "a +/-9% oscillation astride a grid line must never re-quantize (0 transitions); \
+             got {dither_transitions} -- this would refute the latch's no-limit-cycle claim"
+        );
+    }
+
+    /// A DELIBERATE adversarial construction beyond the spec's ask, per the mandate to try
+    /// to construct a cycling input: D6's own text scopes the no-limit-cycle guarantee to
+    /// oscillations of amplitude "< 18.92% (grow side) / < 41.4% (shrink side)" -- NOT to an
+    /// arbitrarily large alternating input. This test demonstrates that scope is REAL: an
+    /// input alternating between two values ~2.4x apart (raw amplitude ~138%, far outside the
+    /// documented dither band) settles into a PERSISTENT 2-cycle that never converges. This is
+    /// expected for any two-threshold hysteresis given an adversarially alternating input
+    /// (proved analytically: a grow always lands at the SAME k for a fixed high sample, a
+    /// shrink always lands at the SAME k for a fixed low sample, so the pair is a stable
+    /// period-2 orbit) and does NOT violate D6's claim -- but it is reported here explicitly
+    /// so the amplitude qualifier is not lost by a future reader of the doc comment. See the
+    /// tester report for the full derivation.
+    #[test]
+    fn latch_sustains_a_two_cycle_only_far_outside_the_documented_dither_band() {
+        let a = grid_value(10); // high sample
+        let b = grid_value(5); // low sample, > 2 cells below (grid_cell(a)+1) - 2
+        let mut k = FIT_UNLATCHED;
+        let mut trace = Vec::with_capacity(40);
+        for i in 0..40 {
+            let raw = if i % 2 == 0 { a } else { b };
+            k = latch_cell(raw, k);
+            trace.push(k);
+        }
+        // The tail must show a genuine, PERSISTENT alternation between exactly two distinct
+        // cells -- not a converged fixed point and not a monotone drift.
+        for w in trace[trace.len() - 10..].windows(2) {
+            assert_ne!(w[0], w[1], "trace must keep alternating every sample: {trace:?}");
+        }
+        let tail_set: std::collections::HashSet<i32> = trace[trace.len() - 10..].iter().copied().collect();
+        assert_eq!(
+            tail_set.len(),
+            2,
+            "the sustained tail alternation must be between exactly 2 distinct cells: {trace:?}"
+        );
+    }
+
+    #[test]
+    fn grid_is_monotone_step_over_a_decade() {
+        const STEPS: usize = 200_000;
+        let lo = 1.0_f32;
+        let hi = 10.0_f32;
+        let mut prev_cell = grid_cell(lo);
+        let mut distinct = std::collections::BTreeSet::new();
+        distinct.insert(prev_cell);
+        for i in 1..=STEPS {
+            let x = lo + (hi - lo) * (i as f32 / STEPS as f32);
+            let cell = grid_cell(x);
+            assert!(
+                cell >= prev_cell,
+                "grid_cell must be non-decreasing over the decade (x = {x}, prev cell {prev_cell}, cell {cell})"
+            );
+            distinct.insert(cell);
+            prev_cell = cell;
+        }
+        let count = distinct.len();
+        // A decade spans `4 * log2(10)` grid cells exactly, by the grid's own definition
+        // (4 cells/octave, and a decade is log2(10) ~= 3.32 octaves) ~= 13.29.
+        let expected = 10.0_f32.ln() / core::f32::consts::LN_2 * FIT_GRID_CELLS_PER_OCTAVE as f32;
+        assert!(
+            (count as f32 - expected).abs() <= 2.0,
+            "a decade must contain ~4*log2(10) ~= {expected:.2} distinct grid cells, got {count}"
+        );
     }
 }
