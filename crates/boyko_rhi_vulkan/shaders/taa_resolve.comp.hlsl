@@ -10,21 +10,22 @@
 // reset), generalized scalar→RGB; `shadow_temporal.comp.hlsl` itself is UNTOUCHED (reference
 // only — a separate `.spv` isolates TAA).
 //
-// # v1 scope (C1): camera-only motion, raster-mesh-only jitter
+// # v1 scope (C1/C2): camera-only motion, differential (jitter-free) reprojection
 //
 // The motion vector is reconstructed ENTIRELY from `gViewT` (the marcher-aligned depth proxy)
-// + the UNJITTERED shared camera basis + `MotionCam.prev_view_proj` — NO per-pixel motion-vector
-// producer is read (that per-object mesh-MV path is `hwrt`-only and gated on the shadow-denoise
-// temporal mode, an unrelated feature — see `boyko_render::motion_cam`'s module docs). This is
-// exact for a moving camera over STATIC geometry (the canonical TAA case) and for a fully static
-// scene (`MV ≡ 0` — the pinned W3 proof: `P` is reconstructed ON the current unjittered ray
-// through pixel `p`; a static camera has `prev_view_proj == cur_view_proj`, so
-// `proj_cur(P) == uv(p)` exactly). A moving MESH reprojects camera-only in v1 (ghosts like a
-// moving SDF body already does with the mesh shadow) — a strictly smaller, pre-existing-class
-// gap, not a new regression. Jitter itself only ever perturbed the RASTER vertex push (never the
-// marcher / this shader's camera basis — see `boyko_render::taa_jitter`'s module docs for the
-// full C1 rationale), so this shader's camera reconstruction is UNAWARE of jitter by
-// construction — exactly as required for the static-convergence proof to hold.
+// + the shader's OWN camera basis (`cam_forward`/`cam_right`/`cam_up`, b6 — which C1's
+// `TaaConfig::jitter_scope == RasterAndBasis` MAY shear per-pixel) + the `MotionCam`
+// `cur_view_proj`/`prev_view_proj` pair (`boyko_render::motion_cam`'s `MotionCamState::advance`,
+// fed `marcher_view_proj_rows` — ALWAYS built with zero jitter, independent of the b6 shear) —
+// NO per-pixel motion-vector producer is read (that per-object mesh-MV path is `hwrt`-only and
+// gated on the shadow-denoise temporal mode, an unrelated feature). C2 reprojects the DIFFERENCE
+// between `cur_view_proj` and `prev_view_proj` rather than `prev_view_proj` alone (see the
+// reprojection block below for the formula), which is exact for a moving camera over STATIC
+// geometry (the canonical TAA case) and for a fully static scene (`MV ≡ 0`: a static camera has
+// `prev_view_proj == cur_view_proj` bit-for-bit, so the differential is exactly zero regardless
+// of whether the ray that produced `P` was sheared). A moving MESH reprojects camera-only in v1
+// (ghosts like a moving SDF body already does with the mesh shadow) — a strictly smaller,
+// pre-existing-class gap, not a new regression.
 //
 // # The history ring `taa_hist` (R16G16B16A16_SFLOAT, GENERAL, per-FIF, cross-frame seeded)
 //
@@ -46,7 +47,7 @@
 //
 // # Correctness under motion (the #1 sensitivity, mirroring the temporal shadow denoiser)
 //
-//   1. Camera MV reprojects a moving camera over static geometry EXACTLY (v1 scope, C1).
+//   1. Camera MV reprojects a moving camera over static geometry EXACTLY (v1 scope, C1/C2).
 //   2. Variance clip (toward the AABB center) — any residual reprojection error (a moving mesh,
 //      which reprojects camera-only in v1) is clamped toward the current-frame neighborhood, so
 //      a wrong reprojection is pulled toward a locally-valid value, never a double-image ghost.
@@ -102,9 +103,12 @@ cbuffer ResolvedTaa : register(b5) {
 
 // binding 6: the camera/extent UNIFORM block — byte-identical field layout to the marcher /
 // resolve / SSAO / à-trous / shadow-temporal `Camera` (see `ray_gen.hlsli`'s doc: "Both
-// including TUs declare the SAME 80-byte cbuffer Camera"). UNJITTERED (C1 cut) — the shared b5
-// UBO deferred PBR/SSAO/CSM/froxel-cull also read raw, so this reconstruction's ray agrees with
-// every other consumer's view-z by construction.
+// including TUs declare the SAME 80-byte cbuffer Camera"). NOT necessarily unjittered as of C1:
+// `boyko_render::upload_camera_ring_sheared` writes this SAME ring slot with `cam_forward`
+// SHEARED by the per-pixel jitter offset whenever `TaaConfig::jitter_scope == RasterAndBasis` is
+// armed, so this shader's `generate_ray` may sample a jittered sub-pixel position — matching
+// every other consumer of this ring on that frame. The C2 differential reprojection below does
+// not depend on this basis being unjittered (see the module doc).
 cbuffer Camera : register(b6) {
     uint   count;        // total pixel count = img_w * img_h
     uint   img_w_raw;    // runtime extent width  (0 => IMG_W_DEFAULT)
@@ -123,9 +127,11 @@ cbuffer Camera : register(b6) {
 
 // binding 7: the `MotionCam` UBO — the current + last frame's marcher-aligned proj·view pair
 // (`boyko_render::motion_cam::MotionCam::to_bytes`, 128 B, column-major std140 — the SAME
-// convention `gbuffer_mrt.vs.hlsl`'s `MotionCam` cbuffer consumes via `mul(m, v)`). v1 reads
-// ONLY `mc_prev_view_proj` (the W3 formula); `mc_cur_view_proj` is bound for shape-parity /
-// v1.1 (a future per-object reprojection cross-check).
+// convention `gbuffer_mrt.vs.hlsl`'s `MotionCam` cbuffer consumes via `mul(m, v)`). Both fields
+// are built from `marcher_view_proj_rows` (`boyko_render::view`), which is ALWAYS called with
+// zero jitter — independent of the b6 camera basis above, which C1's `RasterAndBasis` scope MAY
+// shear. C2 reads BOTH `mc_cur_view_proj` and `mc_prev_view_proj` (the differential
+// reprojection below); a future v1.1 per-object cross-check remains a candidate consumer too.
 [[vk::binding(7, 0)]] cbuffer MotionCam : register(b7) {
     float4x4 mc_cur_view_proj;
     float4x4 mc_prev_view_proj;
@@ -241,11 +247,16 @@ void main(uint3 tid : SV_DispatchThreadID) {
     float view_t = gViewT.Load(coord);
     bool has_surface = view_t < VIEWT_BG;
 
-    // --- W3 camera-only MV reconstruction (C1: the UNJITTERED shared camera basis) ----------
-    // The view ray for this pixel (shared basis) — used for BOTH the surface-point reprojection
-    // and the background point-at-infinity reprojection below.
+    // --- W3/C2 camera-only MV reconstruction (differential — jitter-free by construction) ----
+    // The view ray for this pixel under the shader's OWN (possibly C1-sheared) camera basis —
+    // used for BOTH the surface-point reprojection and the background point-at-infinity
+    // reprojection below.
     float3 ro, rd;
     generate_ray(px, py, w, h, camera_mode, cam_eye.xyz, cam_forward, cam_right, cam_up.xyz, ro, rd);
+
+    // This pixel's own UNJITTERED screen-space UV (pixel center) — the history grid's own
+    // addressing, and the reprojection target when nothing moved.
+    float2 pixel_uv = (float2(px, py) + 0.5) / float2(w, h);
 
     // W5-FIX (static-scene silhouette supersampling): a BACKGROUND pixel (`!has_surface`) MUST
     // still accumulate — it is NOT a disocclusion. Under sub-pixel jitter a silhouette pixel FLIPS
@@ -255,23 +266,46 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // shifted staircase, never the partial-coverage average that IS the anti-aliasing.
     //
     // A background pixel has no finite surface point, so it reprojects the POINT AT INFINITY along
-    // the view ray `rd` (a direction, `w = 0`): `mul(prev_view_proj, float4(rd, 0))`. This is
+    // the view ray `rd` (a direction, `w = 0`): `mul(view_proj, float4(rd, 0))`. This is
     // rotation-correct AND translation-invariant — an infinitely-far sky point does not move under
     // camera translation and moves correctly under rotation (the far-plane background MV Bevy uses),
-    // so a TEXTURED skybox tracks without smear, not just a flat sky. For a STATIC camera it
-    // collapses to the pixel's own screen UV (the ray's vanishing point projects back to pixel `p`),
-    // so `MV ≡ 0` and silhouette pixels accumulate their own history exactly. Only a genuine
-    // disocclusion (a reprojection that lands OFF-screen / behind the camera) or the host-forced
-    // reset (first armed frame / resize) still forces the single-frame replace.
-    float4 prev_clip;
+    // so a TEXTURED skybox tracks without smear, not just a flat sky.
+    //
+    // C2 (jitter-free fix): `mc_cur_view_proj`/`mc_prev_view_proj` are ALWAYS built with zero
+    // jitter (see the module doc), independent of `cam_forward` above, which C1's `RasterAndBasis`
+    // scope MAY shear. Reprojecting `P` through `mc_prev_view_proj` alone therefore no longer
+    // collapses to `pixel_uv` for a static camera whenever the basis is sheared — `P` sits on a
+    // sheared ray, so `proj(P)` lands off `pixel_uv` by the shear itself, wobbling every frame
+    // with the Halton phase. The fix reprojects `P` through BOTH `cur` and `prev`, and displaces
+    // `pixel_uv` by the DELTA between them rather than using the raw `prev`-projected UV:
+    //
+    //   history_uv = pixel_uv + (uv(prev_clip) - uv(cur_clip))
+    //
+    // For a STATIC camera `mc_prev_view_proj == mc_cur_view_proj` bit-for-bit, so the delta is
+    // two evaluations of the IDENTICAL matrix against the IDENTICAL `P` — exactly zero — and
+    // `history_uv == pixel_uv` BY CONSTRUCTION, independent of whether the ray that produced `P`
+    // was sheared. This also cancels any common-mode floating-point error in the camera-basis
+    // reconstruction, so it is strictly more accurate than the pre-C2 code even when the basis is
+    // NOT sheared (`RasterOnly` / jitter disarmed). Only a genuine disocclusion (a reprojection
+    // that lands OFF-screen / behind the camera) or the host-forced reset (first armed frame /
+    // resize) still forces the single-frame replace.
+    float4 cur_clip, prev_clip;
     if (has_surface) {
         float3 P = ro + rd * view_t;
+        cur_clip = mul(mc_cur_view_proj, float4(P, 1.0));
         prev_clip = mul(mc_prev_view_proj, float4(P, 1.0));
     } else {
+        cur_clip = mul(mc_cur_view_proj, float4(rd, 0.0));
         prev_clip = mul(mc_prev_view_proj, float4(rd, 0.0));
     }
-    float2 prev_uv = clip_to_uv(prev_clip);
-    bool off_screen = any(prev_uv < 0.0) || any(prev_uv > 1.0) || prev_clip.w <= 0.0;
+    float2 history_uv = pixel_uv + (clip_to_uv(prev_clip) - clip_to_uv(cur_clip));
+    // Both `cur_clip.w` and `prev_clip.w` gate the divide `clip_to_uv` performs above: a
+    // behind-camera `cur_clip.w <= 0.0` would make `clip_to_uv(cur_clip)` itself degenerate
+    // (dividing by a non-positive `w`), corrupting the delta the SAME way a degenerate
+    // `prev_clip.w` would corrupt `prev_uv` in the pre-C2 code — so both sides of the
+    // differential need the guard, not just the historical `prev` side.
+    bool off_screen =
+        any(history_uv < 0.0) || any(history_uv > 1.0) || prev_clip.w <= 0.0 || cur_clip.w <= 0.0;
 
     bool reset_now = (pc.reset != 0u) || off_screen;
 
@@ -305,13 +339,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
     float3 aabb_max = mean + variance_gamma * sigma;
 
     // --- History reproject + clip -------------------------------------------------------------
-    float3 hist_raw = sample_history_catmull_rom(prev_uv, w, h);
+    float3 hist_raw = sample_history_catmull_rom(history_uv, w, h);
     float3 hist_clipped = clip_toward_aabb_center(hist_raw, aabb_min, aabb_max);
 
     // Nearest-tap confidence fetch (mirrors shadow_temporal's "bilinear color + nearest
     // metadata" split — blending a frame-count-like quantity would corrupt its meaning).
     int2 nearest_tc = clamp(
-        int2(round(prev_uv * float2(w, h) - 0.5)),
+        int2(round(history_uv * float2(w, h) - 0.5)),
         int2(0, 0),
         int2((int)w - 1, (int)h - 1)
     );

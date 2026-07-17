@@ -8,7 +8,14 @@
 #     scripts\golden.ps1 -Pin <name> [-Hwrt] -Bless
 # and only AFTER a visual owner sign-off on the freshly-dumped BMP.
 #
-# Verify a pin (no write):  scripts\golden.ps1 -Pin <name> [-Hwrt] -Check
+# Verify a pin (no write):  scripts\golden.ps1 -Pin <name> [-Hwrt]
+#   (checking IS the no-flag default -- there is no -Check parameter; passing one is a binding
+#    error. The script takes only -Pin / -Hwrt / -Bless.)
+#
+# A pin whose sha256_* is the literal "PENDING" is UNBLESSED: -Check reports it and exits 2 with a
+# hint rather than passing. That is also the way to ADD a leg by hand -- -Bless only OVERWRITES an
+# existing key, so a section missing e.g. sha256_hwrt makes the script throw; seed it with PENDING
+# first.
 #
 # Format is a flat, section-scoped TOML subset (see scripts\golden.ps1 :: Read-Pins).
 # `sha256_hwrt` may equal `sha256_software` (the HW-RT shadow path was made
@@ -412,3 +419,90 @@ BOYKO_DISABLE_VALIDATION = "1"
 BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\vb_mesh_tex.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
+[taa_armed]
+# AA Stage 4 rung T0: the ARMED-TAA gate. Until this pin existed, every one of the other pins
+# rendered with `AaMode::Off` (the default), so the whole temporal path -- the jitter, the history
+# ring, the reprojection, the variance clamp, the reset transition -- carried ZERO regression
+# protection: an ON-path change could only be caught by someone re-running an eval by hand.
+#
+# This pin renders `AaMode::Taa` at its shipped default `jitter_scope = RasterOnly`, i.e. exactly
+# what a world that sets `AaConfig { mode: Taa }` and nothing else gets today. Its sibling
+# [taa_armed_basis] pins the opt-in shear; the PAIR is the point -- the two must differ, and
+# `-Check`ing both is what proves `JitterScope` still selects anything at all.
+#
+# `BOYKO_TAA_PHASE` is deliberately NOT set: an unpinned phase cycles HALTON_8 across the 30
+# `SETTLE_FRAMES` presented before the readback, so these bytes exercise REAL multi-phase temporal
+# accumulation rather than convergence onto a single frozen offset. Determinism was proven before
+# blessing -- two separate processes at an identical phase produced 0 differing pixels out of
+# 810000 (crates/boyko_app/tests/taa_jitter_eval.rs, the A0 control). The corollary: this pin is
+# legitimately sensitive to `host_dump::SETTLE_FRAMES` and to the Halton table. If either changes,
+# these bytes SHOULD move, and that is the pin doing its job -- not a flake to bless away.
+#
+# sha256_hwrt DIVERGES from sha256_software here, unlike most pins in this file -- and that is
+# correct, not a defect. Under `hwrt` the DIRECTIONAL shadow term is a rayQuery mesh trace, not the
+# CSM cascade lookup: deferred_pbr.hlsl's `#if HWRT` arm never calls csm_visibility at all (which is
+# also why the four deferred_pbr_hwrt_* blobs are byte-identical across CSM-kernel edits -- DXC
+# eliminates the uncalled function). The two legs therefore render genuinely different shadows, and
+# TAA accumulates those different inputs. Each leg is pinned on its own -Bless run.
+#
+# NB an earlier draft of this comment claimed the ray backend "has nothing to change here" because
+# the scene's directional shadow is CSM. The bless disproved it on the spot: the legs' hashes
+# differ. Left recorded because the wrong version was plausible enough to write.
+crate           = "boyko-app"
+test_binary     = "taa_jitter_eval"
+test_name       = "taa_jitter_eval_screenshot_dump"
+bmp             = "D:\tmp\taa_armed.bmp"
+width           = 512
+height          = 512
+sha256_software = "ee3a8a8cf32897f21b64428c4e549e3e89eed2efe9e99ab0e4afb35af357322b"
+sha256_hwrt     = "109c7055dfeebe1a67e50b9b9b0eacc609eff4aa752cfe2de47fc44d69883889"
+
+[taa_armed.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\tmp\taa_armed.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+BOYKO_AA                 = "taa"
+BOYKO_WIN                = "512"
+
+[taa_armed_basis]
+# AA Stage 4 rung T0 (sibling): the same armed-TAA scene through rung C1's OPT-IN b5 camera-basis
+# shear (`jitter_scope = RasterAndBasis`), the path that finally makes the Halton jitter reach the
+# shading sample position rather than only the raster mesh vertex push.
+#
+# Why it is worth its own bytes: the shear is the campaign's keystone and its ONLY structural
+# guard today is that `RasterOnly` stays the default. This pin is what would catch a regression
+# that silently disarms the shear -- a failure mode with NO other symptom, because a disarmed
+# shear renders a perfectly plausible picture (it is precisely the picture we shipped for months).
+# Proven live at bless: with the mesh leg disabled, Halton phase 0 vs phase 4 goes from 0 differing
+# pixels under `RasterOnly` to 70662 (8.72%) here.
+#
+# These bytes MUST differ from [taa_armed]'s. If the two pins ever agree, the shear is dead.
+#
+# Rung C2 is baked into these bytes: C1 shipped with the shear leaking into taa_resolve's OWN
+# reprojection (it built `P` from the sheared basis, then reprojected it with an UNJITTERED
+# `mc_prev_view_proj`), so the history lookup wobbled with the Halton phase and progressively
+# BLURRED the history instead of accumulating it. The owner caught it by eye on a mesh cube's edge
+# while a whole-frame "intermediate tone" metric was reporting the blur as a 10-point ANTIALIASING
+# GAIN -- the metric cannot tell blur from AA. Fixed by reprojecting differentially,
+# `history_uv = pixel_uv + (prev_uv - cur_uv)`, which is exactly zero for a static camera BY
+# CONSTRUCTION. Post-fix, the marched sphere still antialiases (0.0% -> 38.3% edge-ramp share vs AA
+# off, measured on the SDF-only leg) while the cube's edge profile is now identical to [taa_armed]'s.
+crate           = "boyko-app"
+test_binary     = "taa_jitter_eval"
+test_name       = "taa_jitter_eval_screenshot_dump"
+bmp             = "D:\tmp\taa_armed_basis.bmp"
+width           = 512
+height          = 512
+sha256_software = "bce9c1b52853f6d9a6f95a8bc6bac944b290da99b7c8623775e6e8a10630cc45"
+sha256_hwrt     = "1ca18c7a21fab8a1d0c7cc467f22ad0720285e2253edac25949c08c13622e59c"
+
+[taa_armed_basis.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\tmp\taa_armed_basis.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+BOYKO_AA                 = "taa"
+BOYKO_TAA_SCOPE          = "basis"
+BOYKO_WIN                = "512"
