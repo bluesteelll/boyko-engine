@@ -209,16 +209,19 @@ struct CascadeData {
 };
 
 // binding 13 (b13): the cascade UBO — byte-mirrors `boyko_render::ResolvedCsm` (336 B): the inline
-// `CascadeData[MAX_CASCADES]` (4 × 80 = 320 B) + `active_count` + `csm_mode_word` + 8 B pad. The
-// host uploads `ResolvedCsm` verbatim each frame. `gCsmMode` mirrors `csm_mode_word` (a redundant
-// copy of the header bit, carried for completeness); the resolve gates on the HEADER's
-// `load_csm_mode` (the single source of truth), NOT this field.
+// `CascadeData[MAX_CASCADES]` (4 × 80 = 320 B) + `active_count` + `csm_mode_word` +
+// `pcf_kernel_word` + 4 B pad. The host uploads `ResolvedCsm` verbatim each frame. `gCsmMode`
+// mirrors `csm_mode_word` (a redundant copy of the header bit, carried for completeness); the
+// resolve gates on the HEADER's `load_csm_mode` (the single source of truth), NOT this field.
+// `gCsmPcfKernel` (rung E1) mirrors `pcf_kernel_word` — `csm_pcf_disc` (`shadow_apply.hlsli`)
+// branches on it directly.
 static const uint MAX_CASCADES = 4u;
 cbuffer CsmCascades : register(b13) {
     CascadeData gCascades[MAX_CASCADES];
-    uint gCsmActive;   // number of valid cascades (0 = disabled); mirrors ResolvedCsm.active_count
-    uint gCsmMode;     // mirrors ResolvedCsm.csm_mode_word (the resolve gates on the header bit)
-    uint2 _gCsmPad;    // pad to the 336-byte ResolvedCsm stride
+    uint gCsmActive;      // number of valid cascades (0 = disabled); mirrors ResolvedCsm.active_count
+    uint gCsmMode;        // mirrors ResolvedCsm.csm_mode_word (the resolve gates on the header bit)
+    uint gCsmPcfKernel;   // mirrors ResolvedCsm.pcf_kernel_word (rung E1: the CsmPcfKernel word)
+    uint _gCsmPad;        // pad to the 336-byte ResolvedCsm stride
 };
 
 // Multi-paradigm render-path plan, rung R4b (Decision 3/7 extraction): `CSM_NORMAL_BIAS` moved

@@ -206,8 +206,11 @@ const CSM_SHADOW_DIM: u32 = 2048;
 /// the demo fit array + the host golden are sized from one source.
 const CSM_MAX_CASCADES: usize = boyko_rhi_vulkan::texture::MAX_CASCADES;
 /// CSM Increment 1b: the byte size of the host cascade UBO — a `ResolvedCsm` mirror (336 B:
-/// `[CascadeData; 4]` + `active_count` + `csm_mode_word` + pad). The resolve reads
-/// `gCascades[0].view_proj` from it; the depth pass pushes the SAME matrix.
+/// `[CascadeData; 4]` + `active_count` + `csm_mode_word` + `pcf_kernel_word` + pad). The
+/// resolve reads `gCascades[0].view_proj` from it; the depth pass pushes the SAME matrix.
+/// `Self::upload` never writes `pcf_kernel_word` — the zero-initialized `bytes` array leaves
+/// it `0` (`CsmPcfKernel::Tent13`, rung E1's load-bearing default), so this harness renders
+/// with the crawl-free kernel unconditionally.
 const CSM_UBO_BYTES: u64 = 336;
 /// CSM Increment 1b: the host-side normal-bias FACTOR — MUST equal the resolve shader's
 /// `CSM_NORMAL_BIAS` (`deferred_pbr.hlsl`) so the host matrix golden reprojects EXACTLY as the

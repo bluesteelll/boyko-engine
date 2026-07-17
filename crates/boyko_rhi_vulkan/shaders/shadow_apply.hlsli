@@ -50,8 +50,10 @@
 //   * `Texture2DArray<float> gCsm` + `SamplerComparisonState gCsmCmp` — the cascade
 //     depth-map array + its PCF comparison sampler, ONE combined descriptor (the
 //     `register(tN)`/`register(sN)` SAME-NUMBER collapse idiom).
-//   * a `cbuffer` exposing `CascadeData gCascades[MAX_CASCADES]` and `uint gCsmActive`
-//     (the valid-cascade count) — the includer's own `CsmCascades`-shaped UBO.
+//   * a `cbuffer` exposing `CascadeData gCascades[MAX_CASCADES]`, `uint gCsmActive` (the
+//     valid-cascade count), and `uint gCsmPcfKernel` (rung E1: the `CsmPcfKernel` mode word
+//     `csm_pcf_disc` branches on — MUST byte-mirror `boyko_render::CsmPcfKernel::as_word`) —
+//     the includer's own `CsmCascades`-shaped UBO.
 //   * `static const uint M_SLOTS` — the atlas-array capacity (`16` today), MUST equal
 //     `boyko_render::shadow_atlas::M_SLOTS`.
 //   * `struct FaceTransform { float4x4 view_proj; float3 light_pos; float inv_range; }`
@@ -90,10 +92,11 @@ static const float SPOT_SHADOW_NORMAL_BIAS = 0.02;
 // As a PROPORTION of the SELECTED cascade's VIEW-Z range [prev_split, split_far]. Inside the
 // trailing `overlap*range` slice the resolve ALSO samples cascade `c+1` and `mix`es the two
 // visibilities so the cascade boundary is a smooth gradient instead of a hard resolution
-// seam. No TAA on this engine => an ANALYTIC ramp, not a dither (a dither would shimmer
-// without temporal accumulation). `0.2` = the band is the last 20% of each cascade — wide
-// enough to hide the seam, narrow enough that the common pixel samples ONE cascade.
-// Owner-retunable; mirrors the host `csm_select_blend` golden's constant.
+// seam. TAA (`AaMode::Taa`) is OPT-IN and OFF by default, so this band must stand on its own
+// as an ANALYTIC ramp, not a dither (a dither would shimmer on any frame TAA is not armed to
+// smooth). `0.2` = the band is the last 20% of each cascade — wide enough to hide the seam,
+// narrow enough that the common pixel samples ONE cascade. Owner-retunable; mirrors the host
+// `csm_select_blend` golden's constant.
 static const float CSM_OVERLAP_PROPORTION = 0.2;
 
 // === CSM Increment 1b/3 — the cascade shadow-map visibility sample (Rung B: N cascades) =======
@@ -136,32 +139,74 @@ float shadow_grazing_scale(float nol) {
 // function of the camera pose (no cross-frame race), and a 3 mrad yaw flips shadow-edge pixels at
 // near-full swing (max channel delta 226/255).
 //
-// The fix is SPATIAL, not temporal (this engine deliberately has NO TAA — the analytic-ramp
-// convention, see CSM_OVERLAP_PROPORTION): widen the binary edge into a ~4-texel tent ramp so
-// sub-pixel motion produces proportional visibility deltas instead of full flips.
+// The fix is SPATIAL, not solely temporal: TAA (`AaMode::Taa`) is OPT-IN and OFF by default
+// (the analytic-ramp convention, see CSM_OVERLAP_PROPORTION), so this kernel must kill the
+// crawl standalone by widening the binary edge into a texel-wide tent ramp so sub-pixel
+// motion produces proportional visibility deltas instead of full flips.
 //
+// === CSM Rung E1 — the `CsmPcfKernel` mode-word constants (MUST byte-mirror
+// `boyko_render::CsmPcfKernel`'s `#[repr(u32)]` discriminants). `TENT13 == 0` is LOAD-BEARING
+// (see that enum's doc): a zeroed UBO (the disabled selection, or any producer that never
+// sets `CsmConfig::pcf_kernel`) degrades to the crawl-free kernel, never a crawling one. ===
+static const uint CSM_PCF_KERNEL_TENT13 = 0u;
+static const uint CSM_PCF_KERNEL_CROSS5 = 1u;
+static const uint CSM_PCF_KERNEL_BILINEAR1 = 2u;
+
+// `csm_pcf_disc` SELECTS its tap pattern via `gCsmPcfKernel` through a wave-UNIFORM runtime
+// branch (the word is identical for every pixel in every wave, the SAME idiom
+// `deferred_pbr.hlsl`'s `shadow_mode` uses) — NOT a `-D` shader variant: no new descriptor,
+// no new `.spv`, just a few extra instructions in the compiled module (I-cache, not
+// per-lane divergence). The DEFAULT arm (`gCsmPcfKernel == CSM_PCF_KERNEL_TENT13`) is the
 // 13-tap TENT DISC over the hardware 2x2 comparison taps, all with COMPILE-TIME texel offsets
 // (the `int2` offset overload — SPIR-V ConstOffset caps offsets at [-8, 7]; no dimension query,
 // no per-tap UV math; offsets clamp at the map edge per the sampler address mode). Taps: center
 // (w 4), the ±2 ring of 8 (w 2), the ±4 axis ring of 4 (w 1) — sum 24. With the hardware 2x2
-// bilinear under each tap the kernel integrates a smooth ~10-texel footprint (2048-map texel =
-// 0.0078 wu ⇒ ~0.08 wu penumbra ≈ 2-3 screen px at room viewing distance — wide enough that a
-// 1-2 px/frame camera drift moves the edge by a FRACTION of its ramp, killing the crawl, while
-// the sun shadow still reads crisp). The A/B harness verified the 3x3 (1-px ramp) variant was
-// NOT wide enough: shadow-edge flip counts barely moved; ramp width must exceed the per-frame
-// image drift by 2-3x.
+// bilinear under each tap the kernel integrates a smooth ~10-texel footprint. MEASURED (from
+// `resolve_csm`'s own outputs, the shipped `CsmFitMode::CatchAll` fit, 2048-map resolution):
+// per-cascade `texel_size` 0.0024 / 0.0112 / 0.0361 world units (cascade diameters 4.9 / 22.9 /
+// 73.9 wu) ⇒ a ~10-texel penumbra of ~9-11 SCREEN PX at every cascade's FAR edge, widening to
+// ~30-52 screen px at its NEAR edge (the same world-space blur subtends more screen pixels
+// closer to the camera) — wide enough that a 1-2 px/frame camera drift moves the edge by a
+// FRACTION of its ramp, killing the crawl, while the sun shadow still reads crisp. The A/B
+// harness verified the 3x3 (1-px ramp) variant was NOT wide enough: shadow-edge flip counts
+// barely moved; ramp width must exceed the per-frame image drift by 2-3x.
 //
-// The tap pattern is FIXED (no per-pixel rotation/noise): screen-anchored noise would reintroduce
-// exactly the temporal boil this kernel removes (the no-TAA analytic-ramp convention again).
-// Cost: +12 comparison taps per shadowed sample, only inside the csm_mode / shadow_mode
-// structural gates (the 0%-gate scenes never run any of this).
+// The two narrower arms (`CSM_PCF_KERNEL_CROSS5`/`CSM_PCF_KERNEL_BILINEAR1`) trade this ramp
+// for sharpness — see `boyko_render::CsmPcfKernel`'s doc for their measured support and the
+// crawl each re-admits; they are intended for a scene running `AaMode::Taa` with
+// `jitter_scope == RasterAndBasis` (rung C1), where temporal accumulation supplies the sample
+// variance a narrower spatial kernel alone cannot.
+//
+// The tap pattern within each arm is FIXED (no per-pixel rotation/noise): screen-anchored
+// noise would reintroduce exactly the temporal boil the wide kernels remove, and TAA is OFF
+// by default, so there is no accumulation to hide it. Cost: up to +12 comparison taps per
+// shadowed sample (Tent13), fewer for the narrower arms, only inside the csm_mode /
+// shadow_mode structural gates (the 0%-gate scenes never run any of this).
 //
 // Two sibling helpers (not one) because HLSL < 6.6 cannot pass texture/sampler objects as
-// arguments portably; each hardcodes its own combined-descriptor pair.
+// arguments portably; each hardcodes its own combined-descriptor pair. `atlas_pcf_disc` (the
+// spot/point atlas) is UNCHANGED by rung E1 — this kernel selector is CSM-only:
+// `FaceTransform` has no spare pad for a mode word, and the motivating measurement (cascade
+// texel size varying across the fit) is a CSM-specific property the atlas does not share.
 
 float csm_pcf_disc(float2 uv, float layer, float ref) {
     float3 c = float3(uv, layer);
     float v;
+    if (gCsmPcfKernel == CSM_PCF_KERNEL_BILINEAR1) {
+        // Bilinear1: the bare hardware 2x2 comparison — 1 tap, no disc.
+        return gCsm.SampleCmpLevelZero(gCsmCmp, c, ref);
+    }
+    if (gCsmPcfKernel == CSM_PCF_KERNEL_CROSS5) {
+        // Cross5: centre (w 4) + the ±2 axis ring of 4 (w 2), sum 12 — ~6-texel support.
+        v  = gCsm.SampleCmpLevelZero(gCsmCmp, c, ref) * (4.0 / 12.0);
+        v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2(-2,  0)) * (2.0 / 12.0);
+        v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 2,  0)) * (2.0 / 12.0);
+        v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 0, -2)) * (2.0 / 12.0);
+        v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 0,  2)) * (2.0 / 12.0);
+        return v;
+    }
+    // Tent13 (gCsmPcfKernel == CSM_PCF_KERNEL_TENT13 == 0, the DEFAULT arm — also the
+    // fallback for any other value): VERBATIM, unchanged from the pre-E1 body.
     v  = gCsm.SampleCmpLevelZero(gCsmCmp, c, ref) * (4.0 / 24.0);
     v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2(-2,  0)) * (2.0 / 24.0);
     v += gCsm.SampleCmpLevelZero(gCsmCmp, c, ref, int2( 2,  0)) * (2.0 / 24.0);
@@ -220,9 +265,9 @@ float csm_sample_cascade(uint c, float3 P, float3 n, float nol) {
         return 1.0;
     }
     float ref = ndc.z;
-    // PCF: 13-tap tent disc over the hardware 2x2 comparisons (LessOrEqual) — the tent-weighted
-    // lit fraction of a ~10-texel footprint at array layer `c` (anti-scintillation, see
-    // `csm_pcf_disc`).
+    // PCF: `csm_pcf_disc` (LessOrEqual, anti-scintillation) — the kernel-weighted lit fraction
+    // at array layer `c`, over the SUPPORT `gCsmPcfKernel` selects (rung E1; default Tent13, a
+    // ~10-texel footprint — see `csm_pcf_disc`'s doc for every kernel's measured support).
     return csm_pcf_disc(uv, (float)c, ref);
 }
 

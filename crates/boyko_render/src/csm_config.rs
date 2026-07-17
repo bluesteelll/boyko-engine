@@ -169,6 +169,11 @@ const DEFAULT_DEPTH_BIAS_SLOPE: f32 = 1.5;
 /// the tail cascade from smearing casters that fall off the previous cascade's edge. See
 /// [`CsmFitMode::CatchAll`] for the measured numbers and the trade it makes.
 const DEFAULT_FIT_MODE: CsmFitMode = CsmFitMode::CatchAll;
+/// The default CSM shadow-edge PCF kernel — [`CsmPcfKernel::Tent13`], the crawl-free anchor
+/// (rung E1). `Tent13 == 0` is load-bearing (see that variant's doc); this constant exists for
+/// `CsmConfig::default`'s consistency with [`DEFAULT_FIT_MODE`], not because a non-zero
+/// default was ever considered.
+const DEFAULT_PCF_KERNEL: CsmPcfKernel = CsmPcfKernel::Tent13;
 
 // ---- CsmFitMode (the cascade split-range policy knob, `docs/CSM-AUTOFIT-PLAN.md`) -----
 
@@ -229,6 +234,75 @@ pub enum CsmFitMode {
     CatchAll,
 }
 
+// ---- CsmPcfKernel (the CSM shadow-edge PCF tap-count knob, rung E1) -------------------
+
+/// The CSM shadow-edge PCF kernel — the owner's SHARPNESS/anti-crawl trade (rung E1). Every
+/// variant samples the SAME `gCsm`/`gCsmCmp` combined descriptor (binding 12) through a
+/// wave-UNIFORM runtime branch in `csm_pcf_disc` (`shadow_apply.hlsli`) — no extra `.spv`, no
+/// per-lane divergence (the word is identical for every pixel in every wave; `deferred_pbr.hlsl`'s
+/// `shadow_mode` uses the same idiom). `#[repr(u32)]` so it forwards to the shader's
+/// `gCsmPcfKernel` (via [`ResolvedCsm::pcf_kernel_word`]) as a stable mode word. CSM-only —
+/// the spot/point atlas (`atlas_pcf_disc`) is unaffected; `FaceTransform` has no spare pad, and
+/// the motivating measurement (cascade-texel variance across the fit) does not apply there.
+///
+/// # The penumbra IS the anti-crawl ramp — this is NOT a free perf knob
+///
+/// Measured from `resolve_csm`'s own outputs (the shipped [`CsmFitMode::CatchAll`] fit,
+/// 2048-map resolution): [`Tent13`](Self::Tent13)'s ~10-texel footprint is a ~9–11 screen-px
+/// penumbra at every cascade's FAR edge, widening to ~30–52 screen px at its NEAR edge
+/// (`csm_pcf_disc`'s doc in `shadow_apply.hlsli` has the full derivation). A single-tap compare
+/// CRAWLS under sub-pixel camera motion (the shadow-motion A/B harness: a 3 mrad yaw flips
+/// shadow-edge pixels at near-full swing, 226/255); PCF cures it by turning the binary edge into
+/// a ramp, so NARROWING the kernel re-admits crawl — the tap count is the only cost term, and
+/// every variant binds the identical descriptor and runs the identical `.spv`, so this is a pure
+/// sharpness/anti-crawl trade, not a quality/perf lever like [`CsmConfig::resolution`].
+///
+/// # Why a narrower kernel is safe once TAA is armed
+///
+/// Rung C1 (`TaaConfig::jitter_scope == RasterAndBasis`, `crate::taa_config`) is the host-side
+/// camera-basis shear that makes TAA's Halton jitter reach the shading sample position — proven
+/// bit-exactly: with the mesh leg disabled, phase 0 vs phase 4 went from 0 differing pixels
+/// (jitter reached no SDF shading at all) to 70 662. With [`AaMode::Taa`](crate::aa_config::AaMode::Taa)
+/// armed and the shear on, temporal accumulation supplies the sample variance a narrower spatial
+/// kernel alone cannot — so [`Cross5`](Self::Cross5)/[`Bilinear1`](Self::Bilinear1) become
+/// viable trades. TAA is OPT-IN and OFF by default (`AaMode::Off`), so this knob's OWN default
+/// must stand alone without it.
+#[repr(u32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum CsmPcfKernel {
+    /// The 13-tap tent disc (center w4, the ±2 ring of 8 w2, the ±4 axis ring of 4 w1, sum 24)
+    /// — ~10-texel support with the hardware 2x2 bilinear folded in. The crawl-free anchor: the
+    /// shadow-motion A/B harness proved a 3x3 (1-texel) kernel did NOT suppress crawl, and this
+    /// is the narrowest kernel that did. **The DEFAULT** — `Tent13 == 0` is LOAD-BEARING (not a
+    /// coincidence): a zeroed [`ResolvedCsm`] UBO (the disabled selection, or any producer that
+    /// never sets [`CsmConfig::pcf_kernel`]) MUST degrade to this crawl-free kernel, never to a
+    /// crawling one.
+    #[default]
+    Tent13,
+    /// A 5-tap cross (center w4, the ±2 axis ring of 4 w2, sum 12) — ~6-texel support, about
+    /// half `Tent13`'s footprint. Sharper cascade edges at the cost of some crawl resistance;
+    /// intended for a scene running `AaMode::Taa` (rung C1's basis shear), where temporal
+    /// accumulation supplies the sample variance `Tent13`'s wider spatial ramp exists to fake.
+    Cross5,
+    /// The bare hardware 2x2 PCF comparison — 1 tap, no disc, ~2-texel support (the hardware
+    /// bilinear alone). The sharpest edge this engine can produce. **CRAWLS without TAA** — a
+    /// near-identical single-tap kernel is what the shadow-motion A/B harness measured flipping
+    /// shadow-edge pixels at near-full swing under a 3 mrad camera yaw; only pair this with
+    /// `AaMode::Taa` + `jitter_scope == RasterAndBasis`, and even then expect visible boil the
+    /// wider kernels do not have.
+    Bilinear1,
+}
+
+impl CsmPcfKernel {
+    /// The stable mode word forwarded to the shader as `gCsmPcfKernel`
+    /// ([`ResolvedCsm::pcf_kernel_word`]) — the `#[repr(u32)]` discriminant. `Tent13 => 0`,
+    /// `Cross5 => 1`, `Bilinear1 => 2`.
+    #[inline]
+    pub const fn as_word(self) -> u32 {
+        self as u32
+    }
+}
+
 // ---- CsmConfig (the owner-set Resource — mirrors SsaoConfig) --------------------------
 
 /// The global CSM config (CSM Inc-1a) — a `World`-singleton Resource the owner sets, the
@@ -259,6 +333,10 @@ pub struct CsmConfig {
     /// to the casters, reserving the last cascade for the rest) — see [`CsmFitMode`] for the
     /// measured trade and for why this is not a quality/perf knob.
     pub fit_mode: CsmFitMode,
+    /// The CSM shadow-edge PCF kernel (rung E1) — the owner's sharpness/anti-crawl trade.
+    /// Default [`CsmPcfKernel::Tent13`] (the crawl-free anchor) — see [`CsmPcfKernel`] for the
+    /// measured penumbra numbers and the honest trade each variant makes.
+    pub pcf_kernel: CsmPcfKernel,
 }
 
 impl Default for CsmConfig {
@@ -266,7 +344,8 @@ impl Default for CsmConfig {
     /// the all-zero [`ResolvedCsm`] and touches no render path. The remaining fields carry
     /// the research defaults so that flipping `cascade_count` to a positive value yields a
     /// usable fit without further tuning — which now includes fitting the split range to the
-    /// casters ([`CsmFitMode::CatchAll`]), since splitting by the camera instead spends
+    /// casters ([`CsmFitMode::CatchAll`]) and the crawl-free PCF kernel
+    /// ([`CsmPcfKernel::Tent13`], rung E1), since splitting by the camera instead spends
     /// cascades on caster-free range at no saving.
     #[inline]
     fn default() -> Self {
@@ -279,6 +358,7 @@ impl Default for CsmConfig {
             depth_bias_constant: DEFAULT_DEPTH_BIAS_CONSTANT,
             depth_bias_slope: DEFAULT_DEPTH_BIAS_SLOPE,
             fit_mode: DEFAULT_FIT_MODE,
+            pcf_kernel: DEFAULT_PCF_KERNEL,
         }
     }
 }
@@ -352,28 +432,35 @@ pub struct ResolvedCsm {
     /// on. Derived from the SAME enable predicate as `active_count`, so the two never
     /// disagree.
     pub csm_mode_word: u32,
-    /// Padding to a 16-byte stride after the two trailing `u32` words.
-    pub _pad: [u32; 2],
+    /// The CSM shadow-edge PCF kernel selection ([`CsmPcfKernel::as_word`], rung E1) — mirrors
+    /// the shader's `gCsmPcfKernel`. `0` ([`CsmPcfKernel::Tent13`]) is the crawl-free default
+    /// AND the value a zeroed/disabled UBO carries (see that variant's doc): a producer that
+    /// never sets [`CsmConfig::pcf_kernel`] degrades to the safe kernel, never a crawling one.
+    pub pcf_kernel_word: u32,
+    /// Padding to a 16-byte stride after the three trailing `u32` words.
+    pub _pad: u32,
 }
 
-// Layout pin: 80 × 4 + 4 + 4 + 8 = 320 + 16 = 336 B.
+// Layout pin: 80 × 4 + 4 + 4 + 4 + 4 = 320 + 16 = 336 B.
 const _: () = assert!(size_of::<ResolvedCsm>() == 336);
 
 /// The byte size of the host-coherent CSM cascade UBO — `size_of::<ResolvedCsm>()`
-/// (336 B: `[CascadeData; 4]` + `active_count` + `csm_mode_word` + pad). The resolve
-/// binds a UBO of exactly this shape at binding 13; hosts size their cascade-UBO
+/// (336 B: `[CascadeData; 4]` + `active_count` + `csm_mode_word` + `pcf_kernel_word` + pad).
+/// The resolve binds a UBO of exactly this shape at binding 13; hosts size their cascade-UBO
 /// ring slots from THIS constant (single source — no hand-copied `336`).
 pub const RESOLVED_CSM_BYTES: usize = size_of::<ResolvedCsm>();
 
 impl ResolvedCsm {
     /// The disabled selection — all-zero cascades, `active_count == 0`, `csm_mode_word ==
-    /// 0`. The resolve of a disabled [`CsmConfig`] and the value [`ResolvedCsm::default`]
+    /// 0`, `pcf_kernel_word == 0` ([`CsmPcfKernel::Tent13`], harmless here since shadows are
+    /// off). The resolve of a disabled [`CsmConfig`] and the value [`ResolvedCsm::default`]
     /// returns.
     pub const DISABLED: Self = Self {
         cascades: [CascadeData::ZERO; MAX_CASCADES],
         active_count: 0,
         csm_mode_word: 0,
-        _pad: [0; 2],
+        pcf_kernel_word: 0,
+        _pad: 0,
     };
 }
 
@@ -472,6 +559,11 @@ pub use crate::csm_marker::ShadowCaster;
 /// by `fit.caster_aabb` — populated by the SAME caster modes that populate `far_eff`, but
 /// logically separate (a `Shrink`/`CatchAll` fit with `caster_aabb: None`, as a synthetic
 /// test input, still shrinks the split range without growing the pull-back).
+///
+/// # The PCF kernel (rung E1)
+///
+/// `resolved.pcf_kernel_word` is `cfg.pcf_kernel.as_word()` verbatim — a config knob, not
+/// part of the fit, so it carries through unchanged regardless of `fit`.
 #[inline]
 pub fn resolve_csm(
     cfg: &CsmConfig,
@@ -682,7 +774,8 @@ pub fn resolve_csm(
         cascades,
         active_count: count as u32,
         csm_mode_word: 1,
-        _pad: [0; 2],
+        pcf_kernel_word: cfg.pcf_kernel.as_word(),
+        _pad: 0,
     }
 }
 

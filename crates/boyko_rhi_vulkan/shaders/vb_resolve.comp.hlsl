@@ -152,7 +152,8 @@ struct CascadeData {
     CascadeData gCascades[MAX_CASCADES];
     uint gCsmActive;
     uint gCsmMode;
-    uint2 _gCsmPad;
+    uint gCsmPcfKernel;   // rung E1: the CsmPcfKernel word — `csm_pcf_disc` branches on it
+    uint _gCsmPad;
 };
 
 static const uint M_SLOTS = 16u;

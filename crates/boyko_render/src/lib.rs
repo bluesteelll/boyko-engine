@@ -347,8 +347,9 @@ pub use barrier::{PlannedBarrier, lower_barriers};
 pub use bindless::BindlessTextureTable;
 pub use bundles::{DirectionalLightObject, MeshBundle, PointLightObject, SpotLightObject};
 pub use csm_config::{
-    CascadeData, CsmCasterBounds, CsmConfig, CsmFit, CsmFitMode, CsmFitState, CsmResolveSet,
-    MAX_CASCADES, RESOLVED_CSM_BYTES, ResolvedCsm, resolve_csm, resolve_csm_cascades,
+    CascadeData, CsmCasterBounds, CsmConfig, CsmFit, CsmFitMode, CsmFitState, CsmPcfKernel,
+    CsmResolveSet, MAX_CASCADES, RESOLVED_CSM_BYTES, ResolvedCsm, resolve_csm,
+    resolve_csm_cascades,
 };
 pub use csm_caster::{
     CsmCasterScratch, CsmFitSet, gather_shadow_casters, reduce_bounds_into, reduce_caster_bounds,
