@@ -1,12 +1,14 @@
-//! HW-RT Rung 3b — the camera view-proj carry for temporal shadow-vis motion vectors.
+//! The camera view-proj carry for temporal reprojection — HW-RT rung 3b (shadow-vis motion
+//! vectors) and AA Stage 4 W3 (TAA's camera-only history reprojection).
 //!
-//! The temporal denoiser reprojects each pixel's shadow term into the previous frame. That
-//! reprojection needs the camera's CURRENT and PREVIOUS `view_proj` in the shaders that write
-//! motion vectors (the raster gbuffer VS for mesh pixels, the marcher/VIS front-matter for SDF
-//! pixels). No shader has a camera `view_proj` today — the camera reaches shaders only as the
-//! decomposed basis (eye + orthonormal axes + FOV), and the sole `view_proj` matrices in flight
-//! are LIGHT matrices (CSM cascades / punctual faces). This module supplies the missing camera
-//! matrices as a small dedicated UBO.
+//! A temporal pass reprojects each pixel into the previous frame. That reprojection needs the
+//! camera's CURRENT and PREVIOUS `view_proj` in the consuming shader (the raster gbuffer VS for
+//! mesh pixels, the marcher/VIS front-matter for SDF pixels, and `taa_resolve`, which
+//! reconstructs its motion vector in-shader from `gViewT` + this pair rather than reading an MV
+//! texture). No shader has a camera `view_proj` otherwise — the camera reaches shaders only as
+//! the decomposed basis (eye + orthonormal axes + FOV), and the sole `view_proj` matrices in
+//! flight are LIGHT matrices (CSM cascades / punctual faces). This module supplies the missing
+//! camera matrices as a small dedicated UBO.
 //!
 //! # Principle 0 / ECS-native
 //!
@@ -24,10 +26,19 @@
 //! convention mismatch would smear every reprojected pixel, so the two producers and this
 //! upload are pinned to one construction.
 //!
-//! # HW-RT-walled
+//! # NOT `hwrt`-walled (un-walled by AA Stage 4 W3)
 //!
-//! The module is compiled only under `#[cfg(feature = "hwrt")]` (gated at the `mod` in `lib.rs`)
-//! — a `not(hwrt)` build carries none of it.
+//! The `mod` in `lib.rs` is unconditional. It was `#[cfg(feature = "hwrt")]`-gated when rung 3b
+//! introduced it for the shadow-temporal denoiser, but TAA's resolve reconstructs its motion
+//! vector from this camera pair on BOTH legs — and TAA carries no `rayQuery`, so it cannot be
+//! `hwrt`-gated. A `not(hwrt)` build therefore carries this module and its
+//! [`upload_motion_cam_ring`](crate::upload_motion_cam_ring) upload.
+//!
+//! What stays `hwrt`-gated is the PER-OBJECT half: `PrevInstanceModelCol` and the mesh motion
+//! vectors that ride on it (v1.1) — deliberately NOT linked here, since that item does not exist
+//! in a `not(hwrt)` build and an intra-doc link to it would not resolve. This module carries only
+//! the CAMERA pair. That split is the reason TAA v1 cannot reproject a MOVING object's history —
+//! a known, surfaced v1 limitation, not an oversight.
 
 use boyko_macros::Resource;
 
