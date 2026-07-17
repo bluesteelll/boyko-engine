@@ -1,14 +1,17 @@
 //! The [`AaPlugin`] — inserts the owner-set [`AaConfig`] + its derived [`ResolvedAa`]
 //! companion and registers the cold [`resolve_aa_policy`] at the gather/setup boundary,
 //! symmetric with [`SsaoPlugin`](crate::ssao_plugin::SsaoPlugin). Also inserts the TAA (Stage 4)
-//! substrate Resources — [`JitterState`], [`TaaState`], [`ResolvedTaa`], and [`MotionCamState`] —
-//! so `boyko_app::runner`'s per-frame reads/writes never panic on a missing Resource, mirroring
-//! how `AaConfig`/`ResolvedAa` are seeded here rather than left to the runner to insert-if-absent.
+//! substrate Resources — [`JitterState`], [`TaaState`], [`TaaConfig`], [`ResolvedTaa`], and
+//! [`MotionCamState`] — and registers [`resolve_taa_policy`] (TAA rung C1: the missing
+//! `ResolvedTaa` single-writer) alongside [`resolve_aa_policy`], so `boyko_app::runner`'s
+//! per-frame reads/writes never panic on a missing Resource, mirroring how `AaConfig`/
+//! `ResolvedAa` are seeded here rather than left to the runner to insert-if-absent.
 
 use boyko_ecs::ecs::core::app::{App, Plugin};
 
 use crate::aa_config::{AaConfig, ResolvedAa, ResolvedTaa, resolve_aa_policy};
 use crate::motion_cam::MotionCamState;
+use crate::taa_config::{TaaConfig, resolve_taa_policy};
 use crate::taa_jitter::JitterState;
 use crate::taa_state::TaaState;
 
@@ -41,13 +44,15 @@ impl Plugin for AaPlugin {
         // world is correct even before the first policy run.
         app.insert_resource(AaConfig::default());
         app.insert_resource(ResolvedAa::default());
-        // Anti-aliasing Stage 4 (TAA): the jitter-phase + history-reset + resolve-tunables
-        // substrate Resources. All default to the 0%-gate shape (`JitterState { phase: 0, armed:
-        // false }`, `TaaState { reset: false, .. }`, `ResolvedTaa::default()`'s shipped v1
-        // tuning) — a world that never selects `AaMode::Taa` never observes a nonzero phase or a
-        // forced reset.
+        // Anti-aliasing Stage 4 (TAA): the jitter-phase + history-reset + author-config +
+        // resolve-tunables substrate Resources. All default to the 0%-gate shape (`JitterState
+        // { phase: 0, armed: false }`, `TaaState { reset: false, .. }`, `TaaConfig::default()`'s
+        // raster-only jitter scope, `ResolvedTaa::default()`'s shipped v1 tuning) — a world that
+        // never selects `AaMode::Taa` never observes a nonzero phase or a forced reset, and a
+        // world that never opts into `JitterScope::RasterAndBasis` never shears the b5 basis.
         app.insert_resource(JitterState::default());
         app.insert_resource(TaaState::default());
+        app.insert_resource(TaaConfig::default());
         app.insert_resource(ResolvedTaa::default());
         // W5: `MotionCamState` is un-walled from `hwrt` (W3) — the TAA resolve's camera-only MV
         // reconstruction needs it on BOTH legs. Inserted here (UNCONDITIONALLY, unlike
@@ -60,6 +65,10 @@ impl Plugin for AaPlugin {
 
         app.add_systems_cfg(|b| {
             b.add_system(resolve_aa_policy);
+            // TAA rung C1: the missing `ResolvedTaa` single-writer (module doc). Reads
+            // `TaaConfig`, writes `ResolvedTaa` — the same cold, once/frame shape as
+            // `resolve_aa_policy` above.
+            b.add_system(resolve_taa_policy);
         });
     }
 

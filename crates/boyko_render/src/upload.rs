@@ -43,11 +43,17 @@ use crate::mesh_draw::{
 // TAA W3: un-walled from `hwrt` — the resolve's camera-only MV reconstruction needs the
 // MotionCam ring upload on BOTH legs (see `boyko_render::motion_cam`'s module doc).
 use crate::motion_cam::{MOTION_CAM_UBO_BYTES, MotionCam};
-use crate::view::composite_from_view;
+use crate::view::composite_from_view_sheared;
 
-/// Writes the 80-byte b5 camera block (the marcher / resolve / SSAO
-/// `CompositePushConstants` image) into ONE camera-ring slot from the resolved
-/// engine view — the per-frame camera upload of the production G-buffer path.
+/// [`upload_camera_ring`] with an optional TAA rung-C1 b5 camera-basis shear
+/// ([`composite_from_view_sheared`]) — the SAME `(jx, jy)`
+/// [`crate::taa_jitter::NdcJitter`] the raster gbuffer push already applies, so the
+/// marcher/resolve/SSAO/CSM/froxel-shared basis samples the identical final-NDC sub-pixel
+/// position (I2) when the caller opts in via `TaaConfig::jitter_scope ==
+/// JitterScope::RasterAndBasis`. `ndc_jitter == None` is byte-identical to
+/// [`upload_camera_ring`] (a structural skip — see
+/// [`composite_perspective_from_view_sheared`](crate::view::composite_perspective_from_view_sheared)'s
+/// doc for why a computed `Some([0.0, 0.0])` is NOT an equivalent substitute).
 ///
 /// `width`/`height` are the COMPOSITE extent (boot-fixed, plan D7): they size
 /// the push's `count = width * height` dispatch bound AND its aspect lane, so
@@ -75,18 +81,19 @@ use crate::view::composite_from_view;
 ///   the slot's previous occupant finished every GPU read of this buffer (the
 ///   sibling in-flight frame binds the OTHER slot). Passing a different slot's
 ///   buffer re-opens the `80bf033` write-after-read race.
-pub unsafe fn upload_camera_ring(
+pub unsafe fn upload_camera_ring_sheared(
     token: &FrameWriteToken,
     ring_slot: &BoundBuffer,
     view: &ViewUniform,
     width: u32,
     height: u32,
+    ndc_jitter: Option<[f32; 2]>,
 ) {
     // The borrow IS the fence proof (mint-gated); no slot index is re-derivable
     // from the buffer, so the slot identity is the caller's contract.
     let _ = token;
 
-    let pc = composite_from_view(view, width, height);
+    let pc = composite_from_view_sheared(view, width, height, ndc_jitter);
     let bytes = pc.as_bytes();
     debug_assert_eq!(
         bytes.len(),
@@ -122,6 +129,36 @@ pub unsafe fn upload_camera_ring(
     // view (no overlap).
     unsafe {
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.as_ptr(), bytes.len());
+    }
+}
+
+/// Writes the 80-byte b5 camera block (the marcher / resolve / SSAO
+/// `CompositePushConstants` image) into ONE camera-ring slot from the resolved
+/// engine view — the per-frame camera upload of the production G-buffer path.
+///
+/// Delegates to [`upload_camera_ring_sheared`] with `ndc_jitter = None` — byte-identical to
+/// the pre-C1-lift upload (the structural skip; see that fn's doc).
+///
+/// # Panics
+///
+/// Same as [`upload_camera_ring_sheared`].
+///
+/// # Safety
+///
+/// Same contract as [`upload_camera_ring_sheared`].
+pub unsafe fn upload_camera_ring(
+    token: &FrameWriteToken,
+    ring_slot: &BoundBuffer,
+    view: &ViewUniform,
+    width: u32,
+    height: u32,
+) {
+    // SAFETY: forwards this fn's own preconditions verbatim to
+    // `upload_camera_ring_sheared` — `token`/`ring_slot`/`view` are unchanged, and `None`
+    // selects the byte-identical unsheared path (mirrors `composite_from_view`'s own
+    // `_sheared(..., None)` delegation).
+    unsafe {
+        upload_camera_ring_sheared(token, ring_slot, view, width, height, None);
     }
 }
 

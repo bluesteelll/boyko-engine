@@ -39,11 +39,11 @@ use boyko_render::{
     MeshGpu, MeshRenderScratch, OrphanedMeshGpu, OrphanedTextureGpu, RayBackendPolicy, RayCaps,
     RenderEpoch, ResolvedAa, ResolvedCsm, ResolvedShadowAtlas, ResolvedSsao, ResolvedTaa,
     RetiredGpuBuffers,
-    RhiContext, SdfEditStaging, ShadowDenoiseConfig, ShadowDenoiseMode, TaaState,
+    RhiContext, SdfEditStaging, ShadowDenoiseConfig, ShadowDenoiseMode, TaaConfig, TaaState,
     TextureAssetsExt, TextureGpu, advance_jitter, collect_sdf_edits, forward_gbuffer_push_from_view,
     gbuffer_push_from_view, gbuffer_push_from_view_jittered, ndc_jitter, retire_deferred_frees,
     upload_atlas_ring,
-    upload_camera_ring, upload_csm_ring, upload_instance_materials, upload_instance_materials_tex,
+    upload_camera_ring_sheared, upload_csm_ring, upload_instance_materials, upload_instance_materials_tex,
     upload_instance_models, upload_light_table, upload_material_assets, upload_mesh_assets,
     backfill_vb_geometry_slots,
     upload_motion_cam_ring, upload_pair_out_slot, upload_pair_ring, upload_sdf_edit_list,
@@ -1123,6 +1123,25 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             let world = app.world();
             let view = *world.resource::<ViewUniform>();
 
+            // TAA rung C1: the b5 camera-basis shear -- gated on `TaaConfig::jitter_scope ==
+            // RasterAndBasis` AND `taa_armed_now` (the structural skip: `None` on EITHER being
+            // false, never a computed `Some([0.0, 0.0])` -- see
+            // `composite_perspective_from_view_sheared`'s doc for why the latter is not an
+            // equivalent substitute). Reuses the SAME `JitterState`/`ndc_jitter` the raster
+            // gbuffer push reads below (I2: the marcher and raster must sample the exact same
+            // final-NDC sub-pixel position) -- a second read of the same cold, pure Resource,
+            // not a second jitter phase; `JitterState` is guaranteed present whenever
+            // `TaaConfig` is (both inserted together by `AaPlugin::build`).
+            let basis_shear: Option<[f32; 2]> = if taa_armed_now
+                && world.try_resource::<TaaConfig>().is_some_and(|c| c.basis_shear_enabled())
+            {
+                let jitter_state = *world.resource::<JitterState>();
+                let j = ndc_jitter(&jitter_state, cw, ch);
+                Some([j.jx, j.jy])
+            } else {
+                None
+            };
+
             // 5a. The 80-byte b5 camera block into slot `s` (plan D7: the
             //     composite extent, not the window extent).
             // SAFETY: `host.gpu.camera_ring[s]` is a live host-visible buffer
@@ -1132,7 +1151,14 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // the fenced slot's buffer (`s == token.slot()`), satisfying both
             // upload preconditions.
             unsafe {
-                upload_camera_ring(&token, &host.gpu.camera_ring[s], &view, cw, ch);
+                upload_camera_ring_sheared(
+                    &token,
+                    &host.gpu.camera_ring[s],
+                    &view,
+                    cw,
+                    ch,
+                    basis_shear,
+                );
             }
 
             // 5b. The gathered instance-model ring into slot `s` —

@@ -55,6 +55,95 @@ use boyko_math::Mat4;
 
 use crate::taa_jitter::NdcJitter;
 
+/// TAA rung C1: the b5 camera-basis SHEAR — the marcher/resolve/SSAO/CSM/froxel-shared b5
+/// forward basis, perturbed so `generate_ray`'s (the marcher's) reconstructed ray samples the
+/// EXACT SAME final-NDC sub-pixel position the raster jitter
+/// (`crate::taa_jitter::NdcJitter`, `row0 += jx*row3; row1 += jy*row3` in
+/// [`marcher_view_proj_rows_jittered`]) already shifts to — lifting the C1 cut
+/// (`crate::taa_jitter`'s module doc) under
+/// [`JitterScope::RasterAndBasis`](crate::taa_config::JitterScope::RasterAndBasis). See
+/// `docs/TAA-PLAN.md` Decision 1 for the architecture-level derivation this fn implements.
+///
+/// # The shear (derivation)
+///
+/// `ray_gen.hlsli`'s PERSPECTIVE branch (`generate_ray`) computes
+/// `dir = fwd + right·(ndc_x·aspect·tan) + up·(ndc_y·tan)`. This is LINEAR in `(ndc_x, ndc_y)`,
+/// so for any constant offset `(dx, dy)`:
+///
+/// ```text
+/// dir(fwd, ndc + (dx, dy)) = dir(fwd, ndc) + right·(dx·aspect·tan) + up·(dy·tan)
+///                           = dir(fwd + right·(dx·aspect·tan) + up·(dy·tan), ndc)
+/// ```
+///
+/// i.e. shearing `fwd` by `right·(dx·aspect·tan) + up·(dy·tan)` is EXACTLY equivalent, in real
+/// arithmetic, to shifting `ray_gen.hlsli`'s own `ndc` by `(dx, dy)` (IEEE re-association gives
+/// a few-ULP difference in practice — see this module's tests for the measured bound).
+///
+/// `ray_gen.hlsli`'s `ndc_x` matches the raster's final NDC.x directly (both increase
+/// rightward, no flip: `NDC.x_raster = right·(P-eye)/(view_z·aspect·tan) == ndc_x_raygen`), but
+/// its `ndc_y` is the NEGATION of the raster's final NDC.y: Vulkan clip.y+ points down
+/// (`sy = -1/tan` in [`marcher_view_proj_rows_jittered`]), while `ray_gen.hlsli`'s own `ndc_y`
+/// flips AGAIN to keep "up" pointing up (`float ndc_y = -(...)`), so
+/// `NDC.y_raster == -ndc_y_raygen`. A raster shift of `(jx, jy)` — the SAME [`NdcJitter`] the
+/// raster consumers apply — therefore corresponds to a ray-gen-space shift of `(jx, -jy)`:
+///
+/// ```text
+/// fwd' = fwd + right * (jx * aspect * tan_half_fov) - up * (jy * tan_half_fov)
+/// ```
+///
+/// which is exactly `docs/TAA-PLAN.md` Decision 1's `fwd' = fwd + right·(2jx/w·aspect·tanHalfFov)
+/// + up·(-2jy/h·tanHalfFov)` — [`NdcJitter::jx`]/[`NdcJitter::jy`] already ARE `2jx/w`/`2jy/h`
+/// ([`crate::taa_jitter::ndc_jitter`]'s own formula).
+///
+/// # Structural zero (not an arithmetic identity)
+///
+/// `ndc_jitter == None` returns `view.cam_forward` completely UNTOUCHED — a structural skip, not
+/// a `+ right*0.0 - up*0.0` computation (which can flip a `-0.0` sign bit and byte-change the
+/// UBO — the SAME discipline [`crate::taa_jitter::ndc_jitter`]'s module doc documents for the
+/// raster jitter). `Some([0.0, 0.0])` is therefore NOT an equivalent substitute for `None`; a
+/// caller intending the OFF path must pass `None`. The host call site
+/// (`boyko_app::runner`) gates on `JitterScope::RasterAndBasis` AND the frame's TAA-armed state,
+/// producing `None` when either is false.
+///
+/// Only `.xyz` is sheared — `cam_forward.w` (`tan(fovY/2)`) and `cam_right.w` (`aspect`) are
+/// untouched (set by [`CompositePushConstants::perspective`] from `fov_y`/`w`/`h`, unrelated to
+/// the shear).
+#[inline]
+pub fn composite_perspective_from_view_sheared(
+    view: &ViewUniform,
+    w: u32,
+    h: u32,
+    ndc_jitter: Option<[f32; 2]>,
+) -> CompositePushConstants {
+    let eye = view.camera_pos;
+    let right = view.cam_right;
+    let up = view.cam_up;
+    let (fwd_x, fwd_y, fwd_z) = match ndc_jitter {
+        None => (view.cam_forward.x, view.cam_forward.y, view.cam_forward.z),
+        Some([jx, jy]) => {
+            let tan_half_fov = (view.fov_y * 0.5).tan();
+            // Extent-derived, matching every other bridge fn in this module -- NOT `view.aspect`.
+            let aspect = (w as f32) / (h as f32);
+            let sx = jx * aspect * tan_half_fov;
+            let sy = jy * tan_half_fov;
+            (
+                view.cam_forward.x + right.x * sx - up.x * sy,
+                view.cam_forward.y + right.y * sx - up.y * sy,
+                view.cam_forward.z + right.z * sx - up.z * sy,
+            )
+        }
+    };
+    CompositePushConstants::perspective(
+        [eye.x, eye.y, eye.z],
+        [fwd_x, fwd_y, fwd_z],
+        [right.x, right.y, right.z],
+        [up.x, up.y, up.z],
+        view.fov_y,
+        w,
+        h,
+    )
+}
+
 /// Builds the marcher's PERSPECTIVE [`CompositePushConstants`] from a resolved
 /// [`ViewUniform`] and a `w × h` extent.
 ///
@@ -69,21 +158,40 @@ use crate::taa_jitter::NdcJitter;
 /// For the prior forward camera this is byte-identical to the old hand-fed
 /// `CompositePushConstants::perspective([0,0,3], [0,0,-1], [1,0,0], [0,1,0],
 /// FRAC_PI_3, w, h)`.
+///
+/// Delegates to [`composite_perspective_from_view_sheared`] with `ndc_jitter = None` — a
+/// structural skip (not an arithmetic identity), so this stays byte-identical to the
+/// pre-C1-lift formula. The single construction site both the sheared and unsheared
+/// PERSPECTIVE b5 pushes share (mirrors [`marcher_view_proj_rows`]/
+/// [`marcher_view_proj_rows_jittered`]'s shape).
 #[inline]
 pub fn composite_perspective_from_view(view: &ViewUniform, w: u32, h: u32) -> CompositePushConstants {
-    let eye = view.camera_pos;
-    let fwd = view.cam_forward;
-    let right = view.cam_right;
-    let up = view.cam_up;
-    CompositePushConstants::perspective(
-        [eye.x, eye.y, eye.z],
-        [fwd.x, fwd.y, fwd.z],
-        [right.x, right.y, right.z],
-        [up.x, up.y, up.z],
-        view.fov_y,
-        w,
-        h,
-    )
+    composite_perspective_from_view_sheared(view, w, h, None)
+}
+
+/// [`composite_from_view`] with an optional TAA rung-C1 b5 camera-basis shear — routes ORTHO vs
+/// PERSPECTIVE exactly as [`composite_from_view`] does; `ndc_jitter` is IGNORED on the ORTHO
+/// branch (TAA is perspective-only — `docs/TAA-PLAN.md`: "Ortho cameras cannot be sheared"), so
+/// an orthographic camera's push is identical regardless of the jitter argument. A perspective
+/// camera routes to [`composite_perspective_from_view_sheared`].
+#[inline]
+pub fn composite_from_view_sheared(
+    view: &ViewUniform,
+    w: u32,
+    h: u32,
+    ndc_jitter: Option<[f32; 2]>,
+) -> CompositePushConstants {
+    // `fov_y == 0.0` is the orthographic sentinel (perspective FOVs are > 0). The
+    // ORTHO fixture is camera-basis-free (the shader ignores it), so the frozen
+    // `ortho(w, h)` layout is emitted verbatim — the golden stays byte-exact,
+    // regardless of `ndc_jitter` (TAA is perspective-only).
+    if view.fov_y == 0.0 {
+        let pc = CompositePushConstants::ortho(w, h);
+        debug_assert_eq!(pc.camera_mode, CAM_MODE_ORTHO);
+        pc
+    } else {
+        composite_perspective_from_view_sheared(view, w, h, ndc_jitter)
+    }
 }
 
 /// Builds the marcher's [`CompositePushConstants`] from a resolved
@@ -95,18 +203,12 @@ pub fn composite_perspective_from_view(view: &ViewUniform, w: u32, h: u32) -> Co
 /// bit-frozen [`CompositePushConstants::ortho`] golden path so an ORTHO golden
 /// stays byte-exact. A perspective camera routes to
 /// [`composite_perspective_from_view`].
+///
+/// Delegates to [`composite_from_view_sheared`] with `ndc_jitter = None` — the structural skip,
+/// byte-identical to today.
 #[inline]
 pub fn composite_from_view(view: &ViewUniform, w: u32, h: u32) -> CompositePushConstants {
-    // `fov_y == 0.0` is the orthographic sentinel (perspective FOVs are > 0). The
-    // ORTHO fixture is camera-basis-free (the shader ignores it), so the frozen
-    // `ortho(w, h)` layout is emitted verbatim — the golden stays byte-exact.
-    if view.fov_y == 0.0 {
-        let pc = CompositePushConstants::ortho(w, h);
-        debug_assert_eq!(pc.camera_mode, CAM_MODE_ORTHO);
-        pc
-    } else {
-        composite_perspective_from_view(view, w, h)
-    }
+    composite_from_view_sheared(view, w, h, None)
 }
 
 /// The marcher-aligned proj·view matrix (ROW-MAJOR math rows) from a resolved
@@ -147,10 +249,13 @@ pub fn composite_from_view(view: &ViewUniform, w: u32, h: u32) -> CompositePushC
 /// `row0 += jitter.jx * row3; row1 += jitter.jy * row3` is EXACT post-divide NDC jitter:
 /// dividing the perturbed `clip.xy` by the UNCHANGED `clip.w` shifts `ndc.xy` by exactly
 /// `jitter`. This is a purely host-side perturbation of a push-constant matrix — it does not
-/// touch the raster VS `.spv` or the frozen eDSL SDF marcher (the marcher is deliberately NOT
-/// jittered in v1 — see [`crate::taa_jitter`]'s module docs for the C1 rationale: the b5 UBO
+/// touch the raster VS `.spv` or the frozen eDSL SDF marcher (the marcher stays UNjittered by
+/// DEFAULT in v1 — see [`crate::taa_jitter`]'s module docs for the C1 rationale: the b5 UBO
 /// `cam_forward` this bridge's `forward` lane feeds is shared, raw, with deferred PBR / SSAO /
-/// CSM / froxel view-z reconstruction, so perturbing it would corrupt those).
+/// CSM / froxel view-z reconstruction, so perturbing it unconditionally would corrupt those).
+/// Rung C1 adds an OPT-IN sibling that DOES perturb that shared basis exactly, via a linear
+/// shear rather than the `+ jitter*row3` trick above — see
+/// [`composite_perspective_from_view_sheared`]'s doc.
 #[rustfmt::skip]
 #[inline]
 pub fn marcher_view_proj_rows_jittered(
@@ -856,5 +961,210 @@ mod tests {
             "depth == 0.0 (reverse-Z far sentinel, ALSO the FORWARD_DEPTH_CLEAR background) \
              must recover view_z == far"
         );
+    }
+
+    // ---- TAA rung C1: `composite_perspective_from_view_sheared` (the b5 camera-basis shear) --
+
+    /// TAA W2-mirroring OFF-gate: [`composite_perspective_from_view`] must be byte-identical
+    /// (bit-level, `to_bits`) to [`composite_perspective_from_view_sheared`] called with `None`
+    /// -- the structural-skip proof (a computed `-0.0` sign flip would be caught here, not
+    /// masked by `==`'s zero-equivalence).
+    #[test]
+    fn composite_perspective_from_view_sheared_none_matches_unsheared() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let plain = composite_perspective_from_view(&view, 640, 480);
+        let sheared_none = composite_perspective_from_view_sheared(&view, 640, 480, None);
+        assert_eq!(plain.count, sheared_none.count);
+        assert_eq!(plain.img_w, sheared_none.img_w);
+        assert_eq!(plain.img_h, sheared_none.img_h);
+        assert_eq!(plain.camera_mode, sheared_none.camera_mode);
+        for i in 0..4 {
+            assert_eq!(plain.cam_eye[i].to_bits(), sheared_none.cam_eye[i].to_bits());
+            assert_eq!(plain.cam_forward[i].to_bits(), sheared_none.cam_forward[i].to_bits());
+            assert_eq!(plain.cam_right[i].to_bits(), sheared_none.cam_right[i].to_bits());
+            assert_eq!(plain.cam_up[i].to_bits(), sheared_none.cam_up[i].to_bits());
+        }
+    }
+
+    /// A nonzero shear perturbs ONLY `cam_forward.xyz` -- `cam_forward.w` (`tan(fovY/2)`),
+    /// `cam_eye`, `cam_right`, `cam_up`, and the scalar header fields are all untouched (the
+    /// shear is a pure basis perturbation, not a re-derivation of the whole push). Uses the
+    /// YAWED (non-axis-aligned) camera fixture -- the axis-aligned `forward_perspective_camera`
+    /// has `right.z == up.z == 0`, so `forward.z` is legitimately UNPERTURBED for that fixture
+    /// (the shear only adds multiples of `right`/`up`); a genuinely oblique basis is needed to
+    /// exercise all three components.
+    #[test]
+    fn composite_perspective_from_view_sheared_perturbs_only_cam_forward_xyz() {
+        let (global, projection) = yawed_perspective_camera(0.7, FRAC_PI_3);
+        let view = ViewUniform::from_camera(global, projection);
+        let plain = composite_perspective_from_view(&view, 640, 480);
+        let sheared = composite_perspective_from_view_sheared(&view, 640, 480, Some([0.01, -0.02]));
+
+        assert_ne!(plain.cam_forward[0], sheared.cam_forward[0], "forward.x must be perturbed");
+        assert_ne!(plain.cam_forward[1], sheared.cam_forward[1], "forward.y must be perturbed");
+        assert_ne!(plain.cam_forward[2], sheared.cam_forward[2], "forward.z must be perturbed");
+        assert_eq!(plain.cam_forward[3], sheared.cam_forward[3], "tan(fovY/2) must be untouched");
+        assert_eq!(plain.cam_eye, sheared.cam_eye, "cam_eye must be untouched");
+        assert_eq!(plain.cam_right, sheared.cam_right, "cam_right (incl. aspect) must be untouched");
+        assert_eq!(plain.cam_up, sheared.cam_up, "cam_up must be untouched");
+        assert_eq!(plain.count, sheared.count);
+        assert_eq!(plain.img_w, sheared.img_w);
+        assert_eq!(plain.img_h, sheared.img_h);
+        assert_eq!(plain.camera_mode, sheared.camera_mode);
+    }
+
+    /// TAA is perspective-only (`docs/TAA-PLAN.md`: "Ortho cameras cannot be sheared"):
+    /// [`composite_from_view_sheared`] on an orthographic view emits the SAME bit-frozen
+    /// `CompositePushConstants::ortho` golden regardless of the jitter argument.
+    #[test]
+    fn composite_from_view_sheared_ortho_ignores_jitter() {
+        let view = ViewUniform::from_camera(
+            Affine3A::IDENTITY,
+            Projection::Orthographic { half_height: 1.0, aspect: 1.0, near: 0.0, far: 100.0 },
+        );
+        let none = composite_from_view_sheared(&view, 64, 64, None);
+        let some = composite_from_view_sheared(&view, 64, 64, Some([0.3, -0.4]));
+        assert_eq!(none, some);
+        assert_eq!(none, CompositePushConstants::ortho(64, 64));
+    }
+
+    // ---- Gate 1: a CPU mirror of `ray_gen.hlsli`'s PERSPECTIVE branch, asserting the shear
+    // ---- identity `dir(fwd', ndc) == dir(fwd, ndc + delta)` (first-order exact; a few-ULP
+    // ---- IEEE re-association error, NOT bit-identity -- see the derivation in
+    // ---- `composite_perspective_from_view_sheared`'s doc). ------------------------------------
+
+    /// A bit-faithful Rust mirror of `ray_gen.hlsli`'s PERSPECTIVE `generate_ray` DIRECTION
+    /// (the shear never touches the ORIGIN, which is just `cam_eye`): `dir = fwd +
+    /// right*(ndc_x*aspect*tan) + up*(ndc_y*tan)`, normalized. Plain component-wise IEEE ops,
+    /// same operation ORDER as the shader (`ray_gen.hlsli:63-65`) -- mirrors that file's own
+    /// "no rsqrt/fast-math" determinism discipline.
+    fn ray_gen_dir_mirror(
+        fwd: [f32; 3],
+        right: [f32; 3],
+        up: [f32; 3],
+        ndc_x: f32,
+        ndc_y: f32,
+        aspect: f32,
+        tan_half_fov: f32,
+    ) -> [f32; 3] {
+        let sx = ndc_x * aspect * tan_half_fov;
+        let sy = ndc_y * tan_half_fov;
+        let d = [
+            fwd[0] + right[0] * sx + up[0] * sy,
+            fwd[1] + right[1] * sx + up[1] * sy,
+            fwd[2] + right[2] * sx + up[2] * sy,
+        ];
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        [d[0] / len, d[1] / len, d[2] / len]
+    }
+
+    /// `ray_gen.hlsli:59-60`'s pixel-to-NDC map (PERSPECTIVE branch), reproduced verbatim.
+    fn pixel_to_ndc(px: u32, py: u32, w: u32, h: u32) -> (f32, f32) {
+        let ndc_x = ((px as f32 + 0.5) / w as f32) * 2.0 - 1.0;
+        let ndc_y = -(((py as f32 + 0.5) / h as f32) * 2.0 - 1.0);
+        (ndc_x, ndc_y)
+    }
+
+    /// A rotated (non-axis-aligned) perspective camera -- a yaw around world-Y by `theta`
+    /// radians -- so Gate 1 exercises a genuinely oblique orthonormal basis, not just the
+    /// axis-aligned fixture every other test in this module uses.
+    fn yawed_perspective_camera(theta: f32, fov_y: f32) -> (Affine3A, Projection) {
+        let (s, c) = theta.sin_cos();
+        // Row-major world = R * local (see `Mat3::from_columns`'s doc: `mul_vec(e_x) == column
+        // 0`), a standard right-handed rotation about +Y.
+        let matrix3 = Mat3::from_rows(
+            Vec3::new(c, 0.0, s),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(-s, 0.0, c),
+        );
+        let global = Affine3A { matrix3, translation: Vec3::new(1.5, -0.5, 2.0) };
+        let projection = Projection::Perspective { fov_y, aspect: 1.0, near: 0.1, far: 100.0 };
+        (global, projection)
+    }
+
+    /// Gate 1 (the strongest gate; host-only, no GPU): asserts the shear identity
+    /// `normalize(dir(fwd', ndc_p)) ~= normalize(dir(fwd, ndc_p + (jx, -jy)))` for a spread of
+    /// pixels x jitters x aspects x FOVs x camera orientations, via the REAL shipped
+    /// [`composite_perspective_from_view_sheared`] (not a re-implementation of the shear).
+    ///
+    /// # Tolerance
+    ///
+    /// The identity is EXACT in real arithmetic (see that fn's doc derivation) but NOT
+    /// bit-exact in IEEE: `(fwd + right*dx*a*t) + right*(ndc_x*a*t)` (the sheared-basis path)
+    /// and `fwd + right*((ndc_x+dx)*a*t)` (the shifted-ndc path) differ by float
+    /// re-association -- a few-ULP-scale error on EACH of the 3 components going into
+    /// `normalize`, not an exact match. `TOL = 1e-5` (absolute, on unit-length normalized
+    /// components) is chosen as ~1e2 ULP of f32 (`f32::EPSILON ~= 1.19e-7`) -- generous enough
+    /// to absorb the sqrt/div in `normalize` and the widest FOV/aspect cases below, while still
+    /// being far tighter than any perceptible (sub-ULP-of-a-pixel) visual error. MEASURED worst
+    /// case across this exact sweep (all pixels/jitters/extents/FOVs/yaws below):
+    /// `max_err == 1.1920929e-7` -- EXACTLY 1 ULP of `f32::EPSILON`, ~84x tighter than `TOL`. On
+    /// any regression the panic message reports the actual measured value.
+    #[test]
+    fn sheared_b5_forward_matches_shifted_ndc_ray_gen_within_tolerance() {
+        const TOL: f32 = 1e-5;
+        let mut max_err = 0.0_f32;
+
+        let jitters = [[0.0_f32, 0.0_f32], [0.001, -0.0015], [0.01, 0.02], [-0.03, 0.015], [0.02, -0.02]];
+        let extents = [(640_u32, 480_u32), (1920, 1080), (256, 1024), (64, 64)];
+        let fovs = [0.35_f32, core::f32::consts::FRAC_PI_3, 1.9]; // ~20deg / 60deg / ~109deg
+        let yaws = [0.0_f32, 0.7, -1.2];
+
+        for &yaw in &yaws {
+            for &fov_y in &fovs {
+                let (global, projection) = yawed_perspective_camera(yaw, fov_y);
+                let view = ViewUniform::from_camera(global, projection);
+                let tan_half_fov = (fov_y * 0.5).tan();
+
+                for &(w, h) in &extents {
+                    let aspect = w as f32 / h as f32;
+                    for &[jx, jy] in &jitters {
+                        let pc = composite_perspective_from_view_sheared(&view, w, h, Some([jx, jy]));
+                        let sheared_fwd = [pc.cam_forward[0], pc.cam_forward[1], pc.cam_forward[2]];
+                        let right = [pc.cam_right[0], pc.cam_right[1], pc.cam_right[2]];
+                        let up = [pc.cam_up[0], pc.cam_up[1], pc.cam_up[2]];
+                        let unsheared_fwd = [view.cam_forward.x, view.cam_forward.y, view.cam_forward.z];
+
+                        // A spread of pixels across the frame (corners + center + off-center).
+                        let pixels = [
+                            (0, 0),
+                            (w - 1, 0),
+                            (0, h - 1),
+                            (w - 1, h - 1),
+                            (w / 2, h / 2),
+                            (w / 4, 3 * h / 4),
+                        ];
+                        for &(px, py) in &pixels {
+                            let (ndc_x, ndc_y) = pixel_to_ndc(px, py, w, h);
+
+                            let dir_sheared = ray_gen_dir_mirror(
+                                sheared_fwd, right, up, ndc_x, ndc_y, aspect, tan_half_fov,
+                            );
+                            // Delta-ndc-y sign flip -- see `composite_perspective_from_view_sheared`'s
+                            // doc: a raster/NdcJitter shift of `(jx, jy)` is a ray-gen-space shift of
+                            // `(jx, -jy)`.
+                            let dir_shifted = ray_gen_dir_mirror(
+                                unsheared_fwd, right, up, ndc_x + jx, ndc_y - jy, aspect, tan_half_fov,
+                            );
+
+                            for k in 0..3 {
+                                let err = (dir_sheared[k] - dir_shifted[k]).abs();
+                                max_err = max_err.max(err);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            max_err <= TOL,
+            "Gate 1: sheared-basis vs shifted-ndc ray direction diverges by {max_err} (> TOL {TOL}) \
+             across the pixel/jitter/aspect/FOV/orientation sweep"
+        );
+        // A non-negative finite measurement -- guards against a vacuous sweep (e.g. every case
+        // skipped) silently passing at `max_err == 0.0`.
+        assert!(max_err.is_finite());
     }
 }

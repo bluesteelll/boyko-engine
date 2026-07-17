@@ -1,15 +1,29 @@
-//! TAA raster-only sub-pixel jitter (the C1-scoped v1: marcher/SDF jitter is CUT — see the
-//! module docs on [`crate::view::marcher_view_proj_rows_jittered`]).
+//! TAA raster-only sub-pixel jitter (the C1-scoped v1 DEFAULT: marcher/SDF jitter is opt-in —
+//! see the module docs on [`crate::view::marcher_view_proj_rows_jittered`]).
 //!
-//! # Why raster-only (C1)
+//! # Why raster-only BY DEFAULT (C1)
 //!
 //! The b5 UBO `cam_forward` is O1-normalized and shared, RAW, by deferred PBR / SSAO / shadow
 //! CSM-cascade-select / froxel light-slice view-z reconstruction — passes that run regardless
 //! of the AA mode. Perturbing it to jitter the SDF marcher would inject a per-frame,
-//! Halton-phase-correlated wobble into all of those. The only clean fix (a shader-visible b5
-//! UBO split) touches the frozen eDSL-marcher `.spv` — the project's red line — so v1 TAA
-//! jitters ONLY the raster mesh vertex push; SDF-marched pixels stay temporally stable but
-//! un-supersampled.
+//! Halton-phase-correlated wobble into all of those UNLESS the perturbation is EXACTLY the
+//! shear [`crate::view::composite_perspective_from_view_sheared`] applies (algebraically
+//! absorbed by `generate_ray`'s own linear NDC formula — see that fn's doc for the derivation),
+//! which is why v1 defaults to raster-only (`TaaConfig::jitter_scope ==
+//! JitterScope::RasterOnly`) rather than jittering the shared basis unconditionally: an
+//! explicit opt-in keeps every consumer's default behaviour byte-unchanged. This module's
+//! [`NdcJitter`] is shared by BOTH the raster mesh push and (when opted in) the b5 shear, so a
+//! world that never sets `jitter_scope = RasterAndBasis` renders exactly as before —
+//! SDF-marched pixels stay temporally stable but un-supersampled.
+//!
+//! # The opt-in lift (`JitterScope::RasterAndBasis`, `crate::taa_config`)
+//!
+//! Setting `TaaConfig::jitter_scope = JitterScope::RasterAndBasis` makes `boyko_app::runner`
+//! pass this module's `(jx, jy)` into
+//! [`composite_perspective_from_view_sheared`](crate::view::composite_perspective_from_view_sheared)
+//! as well, so the SDF marcher (and every other b5-consuming pass) supersamples too — a pure
+//! HOST-side data perturbation of the SAME push-constant struct, touching zero shaders / `.spv`
+//! artifacts. See `docs/TAA-PLAN.md` Decision 1 for the full derivation.
 //!
 //! # Principle 0 / ECS-native
 //!

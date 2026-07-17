@@ -296,11 +296,19 @@ pub mod aa_plugin;
 pub mod smaa_luts;
 pub mod ssao_config;
 pub mod ssao_plugin;
+/// TAA rung C1 — the author-facing [`TaaConfig`](taa_config::TaaConfig) tunable surface (the
+/// full knob declaration, clean-architecture-first-time) + the cold
+/// [`resolve_taa_policy`](taa_config::resolve_taa_policy) single-writer that completes the
+/// [`ResolvedTaa`](aa_config::ResolvedTaa) substrate. Only
+/// [`TaaConfig::jitter_scope`](taa_config::TaaConfig::jitter_scope) is wired this rung — see
+/// the module doc.
+pub mod taa_config;
 /// Anti-aliasing Stage 4 (TAA) — the raster-only sub-pixel jitter substrate: the [`HALTON_8`
 /// table](taa_jitter::HALTON_8), the [`JitterState`](taa_jitter::JitterState) `Resource`
 /// singleton, and the pure [`ndc_jitter`](taa_jitter::ndc_jitter) /
-/// [`advance_jitter`](taa_jitter::advance_jitter) fns. v1 jitters ONLY the raster mesh vertex
-/// push (see the module docs for the C1 rationale — the SDF marcher stays un-jittered).
+/// [`advance_jitter`](taa_jitter::advance_jitter) fns. v1 defaults to jittering ONLY the raster
+/// mesh vertex push (see the module docs for the C1 rationale — rung C1 adds an opt-in b5
+/// camera-basis shear via [`taa_config::TaaConfig::jitter_scope`]).
 pub mod taa_jitter;
 /// Anti-aliasing Stage 4 (TAA) — the temporal-resolve history-reset control: the
 /// [`TaaState`](taa_state::TaaState) `Resource` singleton the host sets on a `Taa` mode
@@ -466,6 +474,10 @@ pub use aa_config::{
     AaConfig, AaMode, RESOLVED_TAA_BYTES, ResolvedAa, ResolvedTaa, resolve_aa, resolve_aa_policy,
 };
 pub use aa_plugin::AaPlugin;
+pub use taa_config::{
+    BlendMode, ClampShape, ClampSpace, ClipMode, DisocclusionTest, HistoryFilter, JitterScope,
+    JitterSequence, MvSource, SharpenMode, TaaConfig, resolve_taa, resolve_taa_policy,
+};
 pub use taa_jitter::{HALTON_8, JitterState, NdcJitter, advance_jitter, ndc_jitter};
 pub use taa_state::TaaState;
 pub use smaa_luts::{
@@ -484,10 +496,11 @@ pub use texture::{
 };
 pub use texture_data::TextureData;
 pub use upload::{
-    upload_atlas_ring, upload_camera_ring, upload_csm_ring, upload_instance_materials,
-    upload_instance_materials_tex, upload_instance_models, upload_light_table,
-    upload_pair_out_slot, upload_pair_ring, upload_ray_shadow_ring, upload_sdf_edit_list,
-    upload_shadow_denoise_ring, upload_taa_ring, upload_temporal_shadow_ring, upload_vb_instance_rows,
+    upload_atlas_ring, upload_camera_ring, upload_camera_ring_sheared, upload_csm_ring,
+    upload_instance_materials, upload_instance_materials_tex, upload_instance_models,
+    upload_light_table, upload_pair_out_slot, upload_pair_ring, upload_ray_shadow_ring,
+    upload_sdf_edit_list, upload_shadow_denoise_ring, upload_taa_ring, upload_temporal_shadow_ring,
+    upload_vb_instance_rows,
 };
 #[cfg(feature = "hwrt")]
 pub use upload::{upload_mesh_ids, upload_prev_instance_models};
@@ -495,7 +508,8 @@ pub use upload::{upload_mesh_ids, upload_prev_instance_models};
 // MotionCam ring upload on BOTH legs (see the `mod motion_cam` doc for the rationale).
 pub use upload::upload_motion_cam_ring;
 pub use view::{
-    composite_from_view, composite_perspective_from_view, demo_view_proj_from_view,
+    composite_from_view, composite_from_view_sheared, composite_perspective_from_view,
+    composite_perspective_from_view_sheared, demo_view_proj_from_view,
     forward_gbuffer_push_from_view, forward_view_proj_rows, gbuffer_push_from_view,
     gbuffer_push_from_view_jittered, marcher_view_proj_rows, marcher_view_proj_rows_jittered,
     view_proj_columns,

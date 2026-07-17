@@ -89,9 +89,12 @@ pub enum AaMode {
     /// through a color-history ring reprojected by the camera's motion (`crate::motion_cam`)
     /// and resolved with a variance-clipped, luma-weighted blend
     /// (`boyko_rhi_vulkan::shaders::taa_resolve`). Live-toggleable like `Fxaa`/`Smaa` (native
-    /// resolution — no render-scale commitment, unlike `Ssaa`). **v1 scope**: only the raster
-    /// mesh path is jittered/supersampled (SDF-marched pixels stay stable but un-supersampled
-    /// — C1); in-motion quality is owner-gated (not yet visually blessed for motion).
+    /// resolution — no render-scale commitment, unlike `Ssaa`). **v1 scope**: by DEFAULT only
+    /// the raster mesh path is jittered/supersampled (SDF-marched pixels stay stable but
+    /// un-supersampled — C1); rung C1 adds an opt-in b5 camera-basis shear
+    /// (`crate::taa_config::TaaConfig::jitter_scope == RasterAndBasis`) that lifts the cut
+    /// without touching the frozen eDSL-marcher `.spv` — see [`crate::taa_jitter`]'s module doc.
+    /// In-motion quality is owner-gated (not yet visually blessed for motion).
     Taa,
 }
 
@@ -239,9 +242,14 @@ pub const RESOLVED_TAA_BYTES: usize = core::mem::size_of::<ResolvedTaa>();
 impl Default for ResolvedTaa {
     /// `default_blend = 0.1`, `min_blend = 0.015`, `variance_gamma = 1.0` — the shipped v1
     /// tuning (a never-run world already carries these, matching a never-armed TAA's inert UBO).
+    /// Equals `resolve_taa(&TaaConfig::default())` — the SAME map
+    /// [`resolve_taa_policy`](crate::taa_config::resolve_taa_policy) runs every frame (the
+    /// single-source-of-truth shape [`ResolvedShadowDenoise::default`](crate::shadow_denoise_config::ResolvedShadowDenoise)
+    /// uses), so a never-run policy already carries the resolve of the default config rather
+    /// than an independently-hardcoded literal that could drift from it.
     #[inline]
     fn default() -> Self {
-        Self { default_blend: 0.1, min_blend: 0.015, variance_gamma: 1.0, _pad: 0.0 }
+        crate::taa_config::resolve_taa(&crate::taa_config::TaaConfig::default())
     }
 }
 
