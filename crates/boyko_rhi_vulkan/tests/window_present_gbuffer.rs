@@ -67,7 +67,7 @@ use boyko_rhi::{
     TextureDimension, VertexAttribute, VertexBufferLayout, VertexFormat,
 };
 use boyko_rhi_vulkan::compute::{B5_CAMERA_UBO_BYTES_M4, B5_CAMERA_UBO_BYTES_MESH_SDF, COMPOSITE_PUSH_CONSTANT_BYTES, CoarseMode, CompositePushConstants, csm_depth_fs_spirv, csm_depth_vs_spirv, punctual_depth_fs_spirv, punctual_depth_vs_spirv, EDITLIST_BUFFER_WORDS, GOLDEN_LIGHT_HEADER_BASE_WORDS, GOLDEN_LIGHT_KIND_DIRECTIONAL, GOLDEN_LIGHT_KIND_POINT, GOLDEN_LIGHT_KIND_SPOT, INTERP_INSTANCES_PUSH_BYTES, interp_instances_spirv, LOCAL_SIZE_X, M2_GRID_PARAMS_OFFSET, MESH_SDF_PARAMS_OFFSET, MeshSdfParams, MESH_DEPTH_CLEAR, SDF_CAMERA_Z, SDF_TRACE_T_MAX, SDF_VIEW_HALF_EXTENT, SdfEdit, TILE_BOUND_BYTES, CompositeCamera, encode_edit_list, deferred_pbr_spirv, composite_pixel_ray, DEFAULT_MARCHER_OMEGA, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS, DEFAULT_LIGHT_DIR, mesh_depth_for_z, sdf_gbuffer_composite_spirv, sdf_op, sdf_ssao_spirv_variant, sdf_tile_cull_spirv, tile_grid_extent, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM, SSAO_QUALITY_HIGH, viewt_from_depth_spirv};
-use boyko_rhi_vulkan::goldens::{GoldenLight, GoldenLightHeader, golden_composite_pixel_ex, golden_deferred_resolve, golden_marcher_attributes, GoldenMaterial};
+use boyko_rhi_vulkan::goldens::{GoldenLight, GoldenLightHeader, golden_deferred_resolve, golden_marcher_attributes, GoldenMaterial};
 use boyko_rhi_vulkan::mesh_sdf_texture::MeshSdfTexture;
 use boyko_sdf_math::mesh_sdf::{BakeMesh, MeshSdfField};
 use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
@@ -104,7 +104,7 @@ use boyko_sdf_math::brick::{BRICK_LEVELS, PointerGrid};
 /// resolution*, so a larger extent keeps the SAME framing (the r=0.5 sphere stays centered,
 /// occupying the central ~half of the view, with the mesh quad over the left part) and only
 /// raises the sample density. The golden is recomputed at this extent via the extent-aware
-/// `golden_*` oracles (`golden_composite_pixel_ex` / `golden_marcher_attributes`), so it
+/// `golden_*` oracles (`golden_deferred_resolve` / `golden_marcher_attributes`), so it
 /// re-blesses automatically — the frozen field, the offscreen tests, and the brick path are
 /// all untouched (this test simply marches the same field at a finer grid). 512×512 is large
 /// enough for the owner to evaluate the brick-ON vs analytic A/B by eye; the whole sphere is
@@ -1724,16 +1724,16 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         .expect("invariant: some pixel must be over neither (background)");
 
     let depth_at = |px, py| expected_mesh_depth(px, py);
-    // The mesh-occludes (a) + background (d) texels are mask == 0 PASS-THROUGH arms — the
-    // resolve emits `base` byte-identically (the 0%-gate), so the old inline composite is
-    // still the truth there. PBR MVP-2 only changed the SDF-LIT arm.
-    // Live-computed at the COMPOSITE extent via the extent-aware ORTHO oracle, so the golden
-    // re-blesses automatically at 512×512 (the frozen 64×64 `golden_composite_pixel` is the
-    // `_ex` forwarder at `(SDF_IMG_W, SDF_IMG_H)`; here we forward at `(COMPOSITE_W, COMPOSITE_H)`).
-    // Render P5: a_want (mesh-occludes) is now a RASTER-PBR producer (mask == 1) — computed below
-    // alongside b_want via the PBR oracle, NOT the old flat MESH_COLOR pass-through.
-    let d_want =
-        golden_composite_pixel_ex(&sdf, depth_at(dx, dy), dx, dy, COMPOSITE_W, COMPOSITE_H, CompositeCamera::Ortho);
+    // PBR MVP-2 (commit 8e48f7f) + Render P5: EVERY discriminator texel is now a deferred-PBR
+    // producer, so all three goldens come from the SAME oracle the windowed present dispatches
+    // (`golden_deferred_resolve ∘ golden_marcher_attributes`, lighting ON, default light, default
+    // omega): a (mesh-occludes) is a raster-PBR mask==1 surface, b (SDF) is full Cook-Torrance,
+    // and d (background, mask==0) is the analytic PBR SKY the resolve paints on a miss. The old
+    // flat `SDF_BACKGROUND` is NO LONGER the truth here — this windowed path dispatches
+    // `deferred_pbr.hlsl` (which paints the sky whenever the table carries a SKY entry, and
+    // `DEGENERATE_LIGHT_TABLE` does), not the standalone `sdf_depth_composite.hlsl` that still
+    // emits the flat background. Live-computed at the COMPOSITE extent so the goldens re-bless
+    // automatically at 512×512. `d_want` is computed alongside a/b below.
     // The SDF-LIT texel (b) is now FULL Cook-Torrance (the owner-acknowledged behavioral
     // change, PBR plan call F), NOT the old `base*vis` composite — so its golden comes from
     // the PBR oracle (`golden_deferred_resolve ∘ golden_marcher_attributes`) with the SAME
@@ -1756,6 +1756,17 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         DEFAULT_MARCHER_OMEGA, b_flags, DEFAULT_LIGHT_DIR,
     );
     let a_want = golden_deferred_resolve(a_attrs, a_rd, &materials);
+
+    // d (background) is a mask==0 miss: the resolve paints the analytic PBR sky. The degenerate
+    // table's sky == the constant path's, so `golden_deferred_resolve`'s no-table sky matches the
+    // GPU's table-driven sky within the store quant (the same equivalence
+    // `lighting_l0_host_oracle::degenerate_table_is_byte_identical_to_the_constant_path` proves).
+    let (_, d_rd) = composite_pixel_ray(dx, dy, COMPOSITE_W, COMPOSITE_H, CompositeCamera::Ortho);
+    let d_attrs = golden_marcher_attributes(
+        &sdf, &materials, depth_at(dx, dy), dx, dy, COMPOSITE_W, COMPOSITE_H, CompositeCamera::Ortho,
+        DEFAULT_MARCHER_OMEGA, b_flags, DEFAULT_LIGHT_DIR,
+    );
+    let d_want = golden_deferred_resolve(d_attrs, d_rd, &materials);
     assert!(
         !goldens_close(a_want, b_want),
         "invariant: the raster-PBR mesh and the SDF lit color must differ beyond +/-{CHANNEL_TOL}"

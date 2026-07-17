@@ -4,7 +4,7 @@ error[E0382]: borrow of moved value: `token`
 21 |     token: FrameWriteToken,
    |     ----- move occurs because `token` has type `FrameWriteToken`, which does not implement the `Copy` trait
 ...
-32 |             token, ctx, surface, swapchain, scene, frame, 64, 64, [0.0; 4], extent, None,
+32 |             token, ctx, surface, swapchain, scene, frame, 64, 64, [0.0; 4], extent, extent, None,
    |             ----- value moved here
 ...
 35 |     token.slot()
