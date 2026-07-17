@@ -175,14 +175,17 @@ pub const SHADOW_DENOISE_UBO_BYTES: u64 = 16;
 #[cfg(feature = "hwrt")]
 pub const TEMPORAL_SHADOW_UBO_BYTES: u64 = 16;
 
-/// Anti-aliasing Stage 4 (TAA W5): the byte size of the TAA resolve's tunables UBO — the
-/// RHI-layer MIRROR of `boyko_render::RESOLVED_TAA_BYTES` (`size_of::<ResolvedTaa>()`, one std140
-/// vec4 = 16 B). The RHI cannot depend on `boyko_render` (the render crate sits ABOVE it), so the
-/// value is duplicated here — mirrors [`TEMPORAL_SHADOW_UBO_BYTES`]'s pattern, UNCONDITIONAL
-/// (TAA is NOT `hwrt`-gated). The RHI mints the per-FIF `taa_ubo` ring at this size
-/// (`default_blend` @0, `min_blend` @4, `variance_gamma` @8, pad @12); the host writes
-/// `ResolvedTaa`'s 16 bytes into the fenced slot.
-pub const TAA_UBO_BYTES: u64 = 16;
+/// Anti-aliasing Stage 4 (TAA W5) + rung T2: the byte size of the TAA resolve's tunables UBO —
+/// the RHI-layer MIRROR of `boyko_render::RESOLVED_TAA_BYTES` (`size_of::<ResolvedTaa>()`,
+/// THREE std140 vec4 slots = 48 B; grew from 16 B at rung T2). The RHI cannot depend on
+/// `boyko_render` (the render crate sits ABOVE it), so the value is duplicated here — mirrors
+/// [`TEMPORAL_SHADOW_UBO_BYTES`]'s pattern, UNCONDITIONAL (TAA is NOT `hwrt`-gated). The RHI
+/// mints the per-FIF `taa_ubo` ring at this size (`default_blend` @0, `min_blend` @4,
+/// `variance_gamma` @8, pad @12, then the T2 mode words `clamp_word`/`clamp_space_word`/
+/// `clip_word`/`blend_word` @16..32, `disable_luma_weight`/`history_filter_word`/
+/// `disocclusion_word`/`depth_tol` @32..48); the host writes `ResolvedTaa`'s 48 bytes into the
+/// fenced slot.
+pub const TAA_UBO_BYTES: u64 = 48;
 
 /// Anti-aliasing Stage 4 (TAA W5): the byte size of the TAA resolve's DEDICATED `MotionCam` UBO —
 /// the RHI-layer MIRROR of `boyko_render::MOTION_CAM_UBO_BYTES` (two `float4x4`, 128 B). A

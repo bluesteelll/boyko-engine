@@ -205,17 +205,19 @@ pub fn resolve_aa_policy(cfg: Res<AaConfig>, mut resolved: ResMut<ResolvedAa>) {
     *resolved = resolve_aa(&cfg);
 }
 
-// ---- ResolvedTaa (the temporal-resolve UBO tunables — Stage 4, mirrors ResolvedTemporalShadow) --
+// ---- ResolvedTaa (the temporal-resolve UBO tunables — Stage 4 C1 + rung T2) -----------------
 
 /// The packed UBO the TAA temporal-resolve pass reads (`taa_resolve.comp.hlsl`'s `cbuffer
-/// ResolvedTaa` at binding 5) — mirrors
-/// [`ResolvedTemporalShadow`](crate::shadow_denoise_config::ResolvedTemporalShadow)'s shape
-/// (std140 vec4, 16 B, `#[derive(Resource)]`, field order matching the shader byte-for-byte).
+/// ResolvedTaa` at binding 5) — `#[repr(C)]`, `#[derive(Resource)]`, std140, THREE vec4 slots
+/// (48 B), field order matching the shader byte-for-byte (see the shader's `cbuffer ResolvedTaa`
+/// doc — the two are PINNED to each other).
 ///
-/// v1 has no owner-facing `TaaConfig` to resolve from — the tunables are fixed, owner-tunable
-/// NAMED CONSTANTS (`Default::default`), carried as a `World` Resource (Principle 0: the UBO's
-/// source of truth lives in the engine's own storage, not a host constant) so a future live-tune
-/// policy system has a single insertion point.
+/// Grew 16 -> 48 B at rung T2 (`crate::taa_config`): the first vec4 (`default_blend`/
+/// `min_blend`/`variance_gamma`/`_pad`) is UNCHANGED from C1, byte-for-byte; the trailing two
+/// vec4s are the eight T2 mode words/scalars [`resolve_taa`](crate::taa_config::resolve_taa)
+/// forwards from [`TaaConfig`](crate::taa_config::TaaConfig). [`resolve_taa_policy`](crate::taa_config::resolve_taa_policy)
+/// is the SINGLE writer (Principle 0: the UBO's source of truth lives in the engine's own
+/// storage, not a host constant).
 #[repr(C)]
 #[derive(Resource, Clone, Copy, Debug, PartialEq)]
 pub struct ResolvedTaa {
@@ -227,26 +229,67 @@ pub struct ResolvedTaa {
     pub min_blend: f32,
     /// The 3×3 neighborhood variance-clip AABB half-width scale (× σ, Salvi-style). Offset 8.
     pub variance_gamma: f32,
-    /// std140 padding (unread) — keeps the 16-byte vec4 stride explicit. Offset 12.
+    /// std140 padding (unread) — keeps the first 16-byte vec4 stride explicit (UNCHANGED from
+    /// C1). Offset 12.
     pub _pad: f32,
+
+    /// [`ClampShape`](crate::taa_config::ClampShape) mode word — the neighborhood bound shape.
+    /// `0` (`Variance`, the shipped `mean ± γσ` AABB) is the shipped default — LOAD-BEARING (a
+    /// zeroed/never-resolved UBO must clip exactly as today). Offset 16.
+    pub clamp_word: u32,
+    /// [`ClampSpace`](crate::taa_config::ClampSpace) mode word — the color space the clamp is
+    /// evaluated in. `0` (`Rgb`, the shipped direct-RGB clip) is the shipped default. Offset 20.
+    pub clamp_space_word: u32,
+    /// [`ClipMode`](crate::taa_config::ClipMode) mode word — how an out-of-bound history sample
+    /// is pulled back. `0` (`TowardCenter`, the shipped Karis/Lottes directional clip) is the
+    /// shipped default. Offset 24.
+    pub clip_word: u32,
+    /// [`BlendMode`](crate::taa_config::BlendMode) mode word — the temporal feedback strategy.
+    /// `0` (`ConfidenceAdaptive`, the shipped ramp) is the shipped default. Offset 28.
+    pub blend_word: u32,
+
+    /// Whether the Karis inverse-tonemap luma weight is SKIPPED — INVERTED from
+    /// [`TaaConfig::luma_weight`](crate::taa_config::TaaConfig::luma_weight) so the
+    /// zero-is-shipped-default invariant holds: the shipped default APPLIES the weight
+    /// (`luma_weight == true`), so `0` here means "apply it" (the shipped shape) and `1` means
+    /// "skip it" (a flat, un-weighted blend). Offset 32.
+    pub disable_luma_weight: u32,
+    /// [`HistoryFilter`](crate::taa_config::HistoryFilter) mode word — the history
+    /// reconstruction filter. `0` (`CatmullRom`, the shipped 16-tap separable bicubic) is the
+    /// shipped default. Offset 36.
+    pub history_filter_word: u32,
+    /// [`DisocclusionTest`](crate::taa_config::DisocclusionTest) mode word — the history-reset
+    /// test. `0` (`OffScreenOnly`, the shipped off-screen/behind-camera test) is the shipped
+    /// default. **UNREAD by `taa_resolve.comp.hlsl` this rung** — see that enum's doc for why (a
+    /// depth-based variant needs a previous-frame depth binding the resolve does not have; out
+    /// of scope for T2). Offset 40.
+    pub disocclusion_word: u32,
+    /// The relative depth-mismatch tolerance a future depth-based disocclusion test would
+    /// consume — forwarded from
+    /// [`TaaConfig::depth_tol`](crate::taa_config::TaaConfig::depth_tol). **UNREAD by the
+    /// shader this rung** (paired with [`disocclusion_word`](Self::disocclusion_word)'s
+    /// inertness). Offset 44.
+    pub depth_tol: f32,
 }
 
-// Layout pin: 4 × 4 = 16 B = one std140 vec4 slot — the shader's `cbuffer ResolvedTaa` stride.
-const _: () = assert!(core::mem::size_of::<ResolvedTaa>() == 16);
+// Layout pin: 12 × 4 = 48 B = three std140 vec4 slots — the shader's `cbuffer ResolvedTaa`
+// stride (rung T2 grew this from 16 B; see the struct doc). A change is a deliberate decision,
+// not an accident (the GPU side reads this stride at binding 5).
+const _: () = assert!(core::mem::size_of::<ResolvedTaa>() == 48);
 
-/// The byte size of the host-coherent TAA tunables UBO — `size_of::<ResolvedTaa>()` (16 B).
-/// Hosts size their UBO slots from THIS constant. Mirrors
+/// The byte size of the host-coherent TAA tunables UBO — `size_of::<ResolvedTaa>()` (48 B, rung
+/// T2; was 16 B through C1). Hosts size their UBO slots from THIS constant (see
+/// `boyko_rhi_vulkan::present::TAA_UBO_BYTES`, the RHI-layer mirror). Mirrors
 /// [`RESOLVED_TEMPORAL_SHADOW_BYTES`](crate::shadow_denoise_config::RESOLVED_TEMPORAL_SHADOW_BYTES).
 pub const RESOLVED_TAA_BYTES: usize = core::mem::size_of::<ResolvedTaa>();
 
 impl Default for ResolvedTaa {
-    /// `default_blend = 0.1`, `min_blend = 0.015`, `variance_gamma = 1.0` — the shipped v1
-    /// tuning (a never-run world already carries these, matching a never-armed TAA's inert UBO).
     /// Equals `resolve_taa(&TaaConfig::default())` — the SAME map
     /// [`resolve_taa_policy`](crate::taa_config::resolve_taa_policy) runs every frame (the
     /// single-source-of-truth shape [`ResolvedShadowDenoise::default`](crate::shadow_denoise_config::ResolvedShadowDenoise)
     /// uses), so a never-run policy already carries the resolve of the default config rather
-    /// than an independently-hardcoded literal that could drift from it.
+    /// than an independently-hardcoded literal that could drift from it. Every T2 mode word is
+    /// `0` (the zero-is-shipped-default invariant — see this struct's field docs).
     #[inline]
     fn default() -> Self {
         crate::taa_config::resolve_taa(&crate::taa_config::TaaConfig::default())

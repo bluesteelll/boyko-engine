@@ -296,12 +296,14 @@ pub mod aa_plugin;
 pub mod smaa_luts;
 pub mod ssao_config;
 pub mod ssao_plugin;
-/// TAA rung C1 — the author-facing [`TaaConfig`](taa_config::TaaConfig) tunable surface (the
-/// full knob declaration, clean-architecture-first-time) + the cold
+/// TAA rungs C1 + T2 — the author-facing [`TaaConfig`](taa_config::TaaConfig) tunable surface
+/// (the full knob declaration, clean-architecture-first-time) + the cold
 /// [`resolve_taa_policy`](taa_config::resolve_taa_policy) single-writer that completes the
-/// [`ResolvedTaa`](aa_config::ResolvedTaa) substrate. Only
-/// [`TaaConfig::jitter_scope`](taa_config::TaaConfig::jitter_scope) is wired this rung — see
-/// the module doc.
+/// [`ResolvedTaa`](aa_config::ResolvedTaa) substrate. C1 wired
+/// [`TaaConfig::jitter_scope`](taa_config::TaaConfig::jitter_scope); rung T2 additionally wires
+/// `clamp`/`clamp_space`/`clip`/`blend`/`luma_weight`/`history_filter` (live wave-uniform
+/// shader branches) plus `disocclusion`/`depth_tol` (forwarded to the UBO, still unread — see
+/// the module doc).
 pub mod taa_config;
 /// Anti-aliasing Stage 4 (TAA) — the raster-only sub-pixel jitter substrate: the [`HALTON_8`
 /// table](taa_jitter::HALTON_8), the [`JitterState`](taa_jitter::JitterState) `Resource`

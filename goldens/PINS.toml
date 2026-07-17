@@ -480,6 +480,17 @@ BOYKO_WIN                = "512"
 #
 # These bytes MUST differ from [taa_armed]'s. If the two pins ever agree, the shear is dead.
 #
+# Rung T2 (the resolve-policy knobs) moved these bytes by exactly ONE pixel at 1/255, while
+# [taa_armed] stayed byte-identical through the same change. That asymmetry IS the diagnosis, and
+# it is worth keeping: both legs run the identical shader at the identical `TaaConfig::default()`
+# mode words -- the ONLY thing that differs is the b6 basis, i.e. the VALUES fed to the resolve. So
+# T2's added branches perturbed float evaluation ORDER, and for one pixel's values the result
+# rounded one quantization step differently. A structural defect could not produce 1 px; it would
+# move the frame wholesale. Re-blessed on that measurement, NOT on a visual check -- 1/255 on a
+# single pixel is not something an eye can adjudicate, and pretending otherwise would be theatre.
+# Measured on the software leg (262144 px, delta histogram {1: 1}); the hwrt leg is inferred from
+# the same cause, not separately measured.
+#
 # Rung C2 is baked into these bytes: C1 shipped with the shear leaking into taa_resolve's OWN
 # reprojection (it built `P` from the sheared basis, then reprojected it with an UNJITTERED
 # `mc_prev_view_proj`), so the history lookup wobbled with the Halton phase and progressively
@@ -495,8 +506,8 @@ test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\tmp\taa_armed_basis.bmp"
 width           = 512
 height          = 512
-sha256_software = "bce9c1b52853f6d9a6f95a8bc6bac944b290da99b7c8623775e6e8a10630cc45"
-sha256_hwrt     = "1ca18c7a21fab8a1d0c7cc467f22ad0720285e2253edac25949c08c13622e59c"
+sha256_software = "87559012f1fd9f61faf995428c0b72ce138d31c9966c80a1c5bd3620c99aa36d"
+sha256_hwrt     = "70aefdfb727deeee65c60a804ac9191bdf69390d0b4e4000dc47979d4b4c74fb"
 
 [taa_armed_basis.env]
 BOYKO_DISABLE_VALIDATION = "1"

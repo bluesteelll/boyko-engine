@@ -312,9 +312,10 @@ pub struct GBufferTargets {
     /// RGBA8) avoids per-blend re-quantization of the already-8-bit-post-tonemap `lit` across
     /// many accumulation frames.
     pub(crate) taa_hist: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
-    /// Anti-aliasing Stage 4 (TAA W5): the resolve's OWN tunables UBO ring (16 B
+    /// Anti-aliasing Stage 4 (TAA W5) + rung T2: the resolve's OWN tunables UBO ring (48 B
     /// `HostVisibleCoherent` per FIF slot, zero-seeded, mirrors [`Self::temporal_shadow_ubo`]) —
-    /// `ResolvedTaa`'s `default_blend`/`min_blend`/`variance_gamma`. `None` when TAA is off.
+    /// `ResolvedTaa`'s `default_blend`/`min_blend`/`variance_gamma` plus the T2 mode words.
+    /// `None` when TAA is off.
     pub(crate) taa_ubo: Option<[BoundBuffer; FRAMES_IN_FLIGHT]>,
     /// Anti-aliasing Stage 4 (TAA W5): the resolve's OWN DEDICATED `MotionCam` UBO ring (128 B
     /// `HostVisibleCoherent` per FIF slot, zero-seeded) — SEPARATE from the hwrt mesh-shadow
@@ -1483,7 +1484,8 @@ struct ShadowTemporalSets {
 /// the tunables UBO ring, the DEDICATED `MotionCam` UBO ring, and the 8-binding resolve set ring.
 /// Moved field-by-field into the [`GBufferTargets`] `Option`s at `create` time.
 struct TaaResolveSets {
-    /// The `ResolvedTaa` tunables UBO ring (16 B `HostVisibleCoherent` per FIF slot, zero-seeded).
+    /// The `ResolvedTaa` tunables UBO ring (48 B `HostVisibleCoherent` per FIF slot, zero-seeded;
+    /// rung T2 grew this from 16 B).
     taa_ubo: [BoundBuffer; FRAMES_IN_FLIGHT],
     /// The DEDICATED `MotionCam` UBO ring (128 B `HostVisibleCoherent` per FIF slot, zero-seeded)
     /// — SEPARATE from the hwrt mesh-shadow `motion_cam_ubo` (see `TaaActivation`'s doc).
@@ -5025,9 +5027,9 @@ impl GBufferTargets {
     }
 
     /// Anti-aliasing Stage 4 (TAA W5): builds the temporal-resolve descriptor set + its two OWN
-    /// UBO rings — the `ResolvedTaa` tunables ring (16 B) and the DEDICATED `MotionCam` ring
-    /// (128 B, SEPARATE from the hwrt mesh-shadow `motion_cam_ubo` — see `TaaActivation`'s "why a
-    /// dedicated ring" doc for the ONE-call-per-frame `MotionCamState::advance` rationale).
+    /// UBO rings — the `ResolvedTaa` tunables ring (48 B, rung T2) and the DEDICATED `MotionCam`
+    /// ring (128 B, SEPARATE from the hwrt mesh-shadow `motion_cam_ubo` — see `TaaActivation`'s
+    /// "why a dedicated ring" doc for the ONE-call-per-frame `MotionCamState::advance` rationale).
     /// Mirrors [`Self::build_shadow_temporal_sets`]'s shape (own UBO ring(s) + one set), built
     /// LAST in [`Self::create`] (after `taa_hist`, which it binds) and DEGRADES-TO-`None` on any
     /// failure (leak-safe, opt-in — UNCONDITIONAL here, unlike the hwrt-only temporal builder).
@@ -5045,8 +5047,8 @@ impl GBufferTargets {
             _ => return None,
         };
 
-        // (1) The `ResolvedTaa` tunables UBO ring — 16 B, zero-seeded (the host memcpys each
-        // armed frame). On a slot's failure, drain [0..i).
+        // (1) The `ResolvedTaa` tunables UBO ring — 48 B (rung T2), zero-seeded (the host
+        // memcpys each armed frame). On a slot's failure, drain [0..i).
         let mut taa_ubo_slots: [Option<BoundBuffer>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
         for (i, dst) in taa_ubo_slots.iter_mut().enumerate() {
@@ -5073,9 +5075,11 @@ impl GBufferTargets {
                 }
             };
             if let Some(p) = RhiDevice::buffer_mapped_ptr(ctx, &b) {
-                // SAFETY: `p` is the host-coherent mapping of a freshly-created >= 16-byte UNIFORM
+                // SAFETY: `p` is the host-coherent mapping of a freshly-created >= 48-byte UNIFORM
                 // buffer; writing `TAA_UBO_BYTES` zeroes stays in-bounds; byte `0` is a valid init
-                // for the `f32` tunable lanes (host-overwritten before first read).
+                // for the `f32` tunable lanes AND every T2 mode word (the zero-is-shipped-default
+                // invariant — see `boyko_render::aa_config::ResolvedTaa`'s doc), host-overwritten
+                // before first read regardless.
                 unsafe {
                     core::ptr::write_bytes(p.as_ptr(), 0, crate::present::TAA_UBO_BYTES as usize);
                 }

@@ -1120,16 +1120,16 @@ pub unsafe fn upload_temporal_shadow_ring(
     }
 }
 
-/// Copies the resolved [`ResolvedTaa`] (the Stage-4 TAA temporal-resolve tunables —
-/// `default_blend`/`min_blend`/`variance_gamma`, byte-identical to the resolve's binding-5 UBO
-/// shape, see [`RESOLVED_TAA_BYTES`]) into ONE TAA-tunables UBO ring slot — the per-frame upload
-/// of the TAA resolve path, mirroring [`upload_temporal_shadow_ring`] (a SEPARATE carrier from
-/// every hwrt shadow UBO, NOT `hwrt`-gated: TAA runs on the pure-software leg too).
+/// Copies the resolved [`ResolvedTaa`] (the Stage-4/rung-T2 TAA temporal-resolve tunables —
+/// `default_blend`/`min_blend`/`variance_gamma` plus the eight T2 mode words/scalars,
+/// byte-identical to the resolve's binding-5 UBO shape, see [`RESOLVED_TAA_BYTES`]) into ONE
+/// TAA-tunables UBO ring slot — the per-frame upload of the TAA resolve path, mirroring
+/// [`upload_temporal_shadow_ring`] (a SEPARATE carrier from every hwrt shadow UBO, NOT
+/// `hwrt`-gated: TAA runs on the pure-software leg too).
 ///
 /// Uploaded every TAA-armed frame (the runner gates the CALL on the TAA UBO ring slot existing —
 /// `GBufferFrame::taa_ubo_slot`, the SAME gate that mints it): a boot-seed would go stale the
-/// moment a future policy retunes the blend/variance scalars, and a 16-byte memcpy is cheaper than
-/// a change-gate.
+/// moment a future policy retunes any tunable, and a 48-byte memcpy is cheaper than a change-gate.
 ///
 /// # Panics
 ///
@@ -1150,7 +1150,7 @@ pub unsafe fn upload_taa_ring(token: &FrameWriteToken, ring_slot: &BoundBuffer, 
     let _ = token;
 
     // Hard bound BEFORE the memcpy (review P1 discipline): an undersized slot would make the
-    // 16-byte write out-of-bounds. One compare per frame.
+    // 48-byte write out-of-bounds. One compare per frame.
     assert!(
         ring_slot.size as usize >= RESOLVED_TAA_BYTES,
         "TAA tunables UBO slot too small: {} bytes < the {}-byte ResolvedTaa mirror",
@@ -1160,9 +1160,9 @@ pub unsafe fn upload_taa_ring(token: &FrameWriteToken, ring_slot: &BoundBuffer, 
 
     let mapped = ring_slot.mapped.expect("invariant: the TAA tunables UBO slot is host-visible mapped");
     // SAFETY: `resolved` is a live `#[repr(C)]` POD of exactly `RESOLVED_TAA_BYTES` (const-asserted
-    // at its definition) with no padding holes (4 packed `f32`s), so reading its raw bytes is
-    // defined. `mapped` targets >= `ring_slot.size >= RESOLVED_TAA_BYTES` valid mapped
-    // host-coherent bytes (hard-asserted above) — the write is in-bounds. The borrowed
+    // at its definition) with no padding holes (twelve packed 4-byte `f32`/`u32` scalars), so
+    // reading its raw bytes is defined. `mapped` targets >= `ring_slot.size >= RESOLVED_TAA_BYTES`
+    // valid mapped host-coherent bytes (hard-asserted above) — the write is in-bounds. The borrowed
     // `FrameWriteToken` + the slot-identity contract prove this slot's in-flight fence was waited
     // THIS frame (the previous occupant's resolve finished its UBO read; the sibling frame binds
     // the other slot) — race-free, lock-free. The two regions are distinct allocations (no overlap).

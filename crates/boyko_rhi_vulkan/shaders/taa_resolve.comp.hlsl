@@ -65,6 +65,21 @@
 // continuation scope) — landed compiled + embedded so the binding-layout contract below is
 // pinned before the boot pipeline/descriptor-set wiring lands.
 //
+// # Rung T2 — live policy knobs (`boyko_render::taa_config`)
+//
+// `ClampShape`/`ClampSpace`/`ClipMode`/`BlendMode`/`luma_weight`/`HistoryFilter` are now LIVE,
+// wave-uniform runtime branches read from `cbuffer ResolvedTaa` — the SAME idiom
+// `deferred_pbr.hlsl`'s `shadow_mode` and `shadow_apply.hlsli`'s `csm_pcf_disc` use (the mode
+// word is identical for every pixel in every wave, so the branch costs I-cache, not per-lane
+// divergence; ZERO new `.spv` variants). Every mode word's ZERO value is the shipped v1
+// behaviour — LOAD-BEARING (mirrors `gCsmPcfKernel`'s `Tent13 == 0` discipline in
+// `shadow_apply.hlsli`): a zeroed/never-resolved UBO renders exactly as the rest of this module
+// doc describes, never a different clip/filter/blend arm. `DisocclusionTest`/`depth_tol` are
+// carried in the UBO but UNREAD this rung: a depth-based disocclusion test needs a
+// previous-frame depth binding this resolve does not have (out of scope — see
+// `boyko_render::taa_config::DisocclusionTest`'s doc). `MvSource`/`SharpenMode`/the jitter
+// fields stay their own future rungs (D2/T3, host-side).
+//
 // Compiled offline (hermetic — no SDK at `cargo build` time) with:
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main "-fspv-target-env=vulkan1.3" \
 //       taa_resolve.comp.hlsl -Fo taa_resolve.comp.spv
@@ -88,18 +103,56 @@
 // binding 4 (WRITE): the final AA output `aa_out` (R8G8B8A8_UNORM) — the present-blit's input.
 [[vk::image_format("rgba8")]] RWTexture2D<float4> gAaOut : register(u4);
 
-// binding 5: the TAA tunables UBO — byte-mirrors `boyko_render::taa_state`'s host-written
-// constants (16 B, std140: four f32 = one vec4 slot), owner-retunable each frame (live).
+// binding 5: the TAA tunables UBO — byte-mirrors `boyko_render::aa_config::ResolvedTaa` (48 B,
+// std140: three vec4 slots), owner-retunable each frame (live). Grew 16 -> 48 B at rung T2
+// (`boyko_render::taa_config`) — the first vec4 (`default_blend`/`min_blend`/`variance_gamma`/
+// `_pad`) is UNCHANGED from C1; the trailing two vec4s are the T2 mode words. PINNED to
+// `ResolvedTaa` — the two MUST byte-mirror field-for-field (a mismatch here silently reads
+// garbage tunables, not a compile error).
+//
 // `default_blend` is the feedback weight given to the CURRENT frame on the first accumulated
 // sample after a reset (a low-confidence blend, mostly replace); `min_blend` is the STEADY-STATE
 // floor (a converged/static view trusts history almost entirely); `variance_gamma` scales the
-// clip AABB half-width (× σ); `_pad` keeps the 16-byte std140 stride explicit (unread).
+// clip AABB half-width (× σ); `_pad` keeps the first 16-byte std140 stride explicit (unread).
+//
+// Every T2 mode word's ZERO value is the shipped v1 behaviour (see the module doc's "Rung T2"
+// section). `disocclusion_test`/`depth_tol` are carried but UNREAD this rung — see
+// `boyko_render::taa_config::DisocclusionTest`'s doc.
 cbuffer ResolvedTaa : register(b5) {
     float default_blend;   // feedback weight at confidence == 1 (just after a reset)
     float min_blend;       // steady-state feedback weight floor (confidence → ∞)
     float variance_gamma;  // clip AABB half-width scale (× σ)
     float _pad;
+
+    uint clamp_word;          // ClampShape: 0 Variance (default) / 1 Off / 2 MinMax
+    uint clamp_space_word;    // ClampSpace: 0 Rgb (default) / 1 YCoCg
+    uint clip_word;           // ClipMode: 0 TowardCenter (default) / 1 Clamp
+    uint blend_word;          // BlendMode: 0 ConfidenceAdaptive (default) / 1 Fixed
+
+    uint disable_luma_weight; // 0 = apply the Karis luma weight (default) / 1 = skip it
+    uint history_filter_word; // HistoryFilter: 0 CatmullRom (default) / 1 Bilinear
+    uint disocclusion_test;   // DisocclusionTest word — UNREAD this rung (see cbuffer doc above)
+    float depth_tol;          // UNREAD this rung (paired with disocclusion_test)
 };
+
+// The T2 mode-word constants — MUST byte-mirror `boyko_render::taa_config`'s `#[repr(u32)]`
+// discriminants (each enum's `as_word()` doc states the mapping). Every DEFAULT constant is `0`
+// (see the cbuffer doc above for why that is load-bearing).
+static const uint TAA_CLAMP_VARIANCE = 0u;
+static const uint TAA_CLAMP_OFF = 1u;
+static const uint TAA_CLAMP_MINMAX = 2u;
+
+static const uint TAA_CLAMP_SPACE_RGB = 0u;
+static const uint TAA_CLAMP_SPACE_YCOCG = 1u;
+
+static const uint TAA_CLIP_TOWARD_CENTER = 0u;
+static const uint TAA_CLIP_CLAMP = 1u;
+
+static const uint TAA_BLEND_CONFIDENCE_ADAPTIVE = 0u;
+static const uint TAA_BLEND_FIXED = 1u;
+
+static const uint TAA_HISTORY_FILTER_CATMULL_ROM = 0u;
+static const uint TAA_HISTORY_FILTER_BILINEAR = 1u;
 
 // binding 6: the camera/extent UNIFORM block — byte-identical field layout to the marcher /
 // resolve / SSAO / à-trous / shadow-temporal `Camera` (see `ray_gen.hlsli`'s doc: "Both
@@ -208,6 +261,29 @@ float3 sample_history_catmull_rom(float2 uv, uint w, uint h) {
     return sum / max(wsum, 1e-5);
 }
 
+// Rung T2 (`HistoryFilter::Bilinear`) — a single bilinear-tap history reconstruction: cheaper
+// than `sample_history_catmull_rom` (4 `Load`s vs 16), but blurs faster under repeated
+// accumulation. `Load`-based for the SAME reason as the Catmull-Rom reconstruction (no hardware
+// sampler on the GENERAL-layout history ring — see the module doc). Edge texels clamp (never
+// wrap), matching every other neighborhood tap in this codebase.
+float3 sample_history_bilinear(float2 uv, uint w, uint h) {
+    float2 sp = uv * float2(w, h) - 0.5;
+    float2 ipos = floor(sp);
+    float2 frac = sp - ipos;
+    int2 max_tc = int2((int)w - 1, (int)h - 1);
+    int2 tc00 = clamp(int2(ipos), int2(0, 0), max_tc);
+    int2 tc10 = clamp(int2(ipos) + int2(1, 0), int2(0, 0), max_tc);
+    int2 tc01 = clamp(int2(ipos) + int2(0, 1), int2(0, 0), max_tc);
+    int2 tc11 = clamp(int2(ipos) + int2(1, 1), int2(0, 0), max_tc);
+    float3 c00 = gHistIn.Load(tc00).rgb;
+    float3 c10 = gHistIn.Load(tc10).rgb;
+    float3 c01 = gHistIn.Load(tc01).rgb;
+    float3 c11 = gHistIn.Load(tc11).rgb;
+    float3 c0 = lerp(c00, c10, frac.x);
+    float3 c1 = lerp(c01, c11, frac.x);
+    return lerp(c0, c1, frac.y);
+}
+
 // Clips `color` TOWARD the AABB center `[aabb_min, aabb_max]` (Karis/Lottes' anti-ghosting
 // clip — NOT a per-channel clamp, which would shift hue): if `color` is outside the box, it is
 // pulled back along the ray from the box center THROUGH `color` to the box boundary, preserving
@@ -221,6 +297,26 @@ float3 clip_toward_aabb_center(float3 color, float3 aabb_min, float3 aabb_max) {
     float3 a_unit = abs(v_unit);
     float ma_unit = max(a_unit.x, max(a_unit.y, a_unit.z));
     return (ma_unit > 1.0) ? (p_clip + v_clip / ma_unit) : color;
+}
+
+// Rung T2 (`ClampSpace::YCoCg`) — the Malvar/Salvi decorrelated luma-chroma transform the
+// TAA-literature clip space uses (the shipped v1 clips in raw RGB — see the module doc).
+// Round-trips exactly with `ycocg_to_rgb` below (verified algebraically: `y - cg == 0.5r + 0.5b`
+// and `y + cg == g`, so `tmp +- co` recovers `r`/`b` and `y + cg` recovers `g`).
+float3 rgb_to_ycocg(float3 c) {
+    float y = 0.25 * c.r + 0.5 * c.g + 0.25 * c.b;
+    float co = 0.5 * c.r - 0.5 * c.b;
+    float cg = -0.25 * c.r + 0.5 * c.g - 0.25 * c.b;
+    return float3(y, co, cg);
+}
+
+// The inverse of `rgb_to_ycocg` above.
+float3 ycocg_to_rgb(float3 c) {
+    float tmp = c.x - c.z; // y - cg
+    float g = c.x + c.z;   // y + cg
+    float r = tmp + c.y;   // (y - cg) + co
+    float b = tmp - c.y;   // (y - cg) - co
+    return float3(r, g, b);
 }
 
 // Rec. 709 relative luma — the Karis inverse-tonemap firefly-suppression weight
@@ -318,29 +414,76 @@ void main(uint3 tid : SV_DispatchThreadID) {
         return;
     }
 
-    // --- 3×3 neighborhood moments of the CURRENT `lit` (the variance-clip AABB) -------------
-    float3 mean = float3(0.0, 0.0, 0.0);
-    float3 m2 = float3(0.0, 0.0, 0.0);
-    [unroll]
-    for (int oy = -1; oy <= 1; ++oy) {
+    // --- History reconstruction (rung T2: `HistoryFilter`) -------------------------------------
+    // The DEFAULT arm (`history_filter_word == TAA_HISTORY_FILTER_CATMULL_ROM`) is the shipped
+    // call, VERBATIM, unchanged, in the `else` branch — falls through exactly like
+    // `csm_pcf_disc`'s Tent13.
+    float3 hist_raw;
+    if (history_filter_word == TAA_HISTORY_FILTER_BILINEAR) {
+        hist_raw = sample_history_bilinear(history_uv, w, h);
+    } else {
+        hist_raw = sample_history_catmull_rom(history_uv, w, h);
+    }
+
+    // --- 3×3 neighborhood moments of the CURRENT `lit` + the history clip (rung T2:
+    // `ClampShape`/`ClampSpace`/`ClipMode`) -----------------------------------------------------
+    // The DEFAULT arm (`clamp_word == TAA_CLAMP_VARIANCE`) takes the `else` below: the shipped
+    // `mean`/`m2`/`variance`/`sigma`/`aabb_min`/`aabb_max`/`clip_toward_aabb_center` statements
+    // are VERBATIM, unchanged, in the same order — `nmin`/`nmax` and the `clamp_space_word`/
+    // `clip_word` branches are independent side computations the default arm's used values never
+    // read (RGB space, `TowardCenter` clip, `Variance` AABB, in that order, identical to before
+    // T2).
+    float3 hist_clipped;
+    if (clamp_word == TAA_CLAMP_OFF) {
+        // Off: no neighborhood bound at all — raw history, unclipped.
+        hist_clipped = hist_raw;
+    } else {
+        float3 mean = float3(0.0, 0.0, 0.0);
+        float3 m2 = float3(0.0, 0.0, 0.0);
+        float3 nmin = float3(1e30, 1e30, 1e30);
+        float3 nmax = float3(-1e30, -1e30, -1e30);
         [unroll]
-        for (int ox = -1; ox <= 1; ++ox) {
-            int tx = clamp((int)px + ox, 0, (int)w - 1);
-            int ty = clamp((int)py + oy, 0, (int)h - 1);
-            float3 c = gLit.Load(int3(tx, ty, 0)).rgb;
-            mean += c;
-            m2 += c * c;
+        for (int oy = -1; oy <= 1; ++oy) {
+            [unroll]
+            for (int ox = -1; ox <= 1; ++ox) {
+                int tx = clamp((int)px + ox, 0, (int)w - 1);
+                int ty = clamp((int)py + oy, 0, (int)h - 1);
+                float3 c = gLit.Load(int3(tx, ty, 0)).rgb;
+                if (clamp_space_word == TAA_CLAMP_SPACE_YCOCG) {
+                    c = rgb_to_ycocg(c);
+                }
+                mean += c;
+                m2 += c * c;
+                nmin = min(nmin, c);
+                nmax = max(nmax, c);
+            }
+        }
+        mean /= 9.0;
+        float3 variance = max(m2 / 9.0 - mean * mean, 0.0);
+        float3 sigma = sqrt(variance);
+        float3 aabb_min = mean - variance_gamma * sigma;
+        float3 aabb_max = mean + variance_gamma * sigma;
+        if (clamp_word == TAA_CLAMP_MINMAX) {
+            // MinMax: the tightest possible neighborhood box — no σ scale.
+            aabb_min = nmin;
+            aabb_max = nmax;
+        }
+
+        float3 hist_space = hist_raw;
+        if (clamp_space_word == TAA_CLAMP_SPACE_YCOCG) {
+            hist_space = rgb_to_ycocg(hist_raw);
+        }
+        float3 clipped_space;
+        if (clip_word == TAA_CLIP_CLAMP) {
+            clipped_space = clamp(hist_space, aabb_min, aabb_max);
+        } else {
+            clipped_space = clip_toward_aabb_center(hist_space, aabb_min, aabb_max);
+        }
+        hist_clipped = clipped_space;
+        if (clamp_space_word == TAA_CLAMP_SPACE_YCOCG) {
+            hist_clipped = ycocg_to_rgb(clipped_space);
         }
     }
-    mean /= 9.0;
-    float3 variance = max(m2 / 9.0 - mean * mean, 0.0);
-    float3 sigma = sqrt(variance);
-    float3 aabb_min = mean - variance_gamma * sigma;
-    float3 aabb_max = mean + variance_gamma * sigma;
-
-    // --- History reproject + clip -------------------------------------------------------------
-    float3 hist_raw = sample_history_catmull_rom(history_uv, w, h);
-    float3 hist_clipped = clip_toward_aabb_center(hist_raw, aabb_min, aabb_max);
 
     // Nearest-tap confidence fetch (mirrors shadow_temporal's "bilinear color + nearest
     // metadata" split — blending a frame-count-like quantity would corrupt its meaning).
@@ -352,12 +495,26 @@ void main(uint3 tid : SV_DispatchThreadID) {
     float conf_prev = gHistIn.Load(nearest_tc).a;
     float confidence = min(conf_prev + 1.0, CONFIDENCE_CAP);
 
-    // --- Confidence-adaptive, luma-weighted blend ---------------------------------------------
-    float blend_factor = clamp(1.0 / confidence, min_blend, default_blend);
-    float3 w_cur = cur_lit / (1.0 + luma(cur_lit));
-    float3 w_hist = hist_clipped / (1.0 + luma(hist_clipped));
-    float3 blended_w = lerp(w_hist, w_cur, blend_factor);
-    float3 out_color = blended_w / max(1.0 - luma(blended_w), 1e-4);
+    // --- Confidence-adaptive/fixed, optionally luma-weighted blend (rung T2: `BlendMode`/
+    // `luma_weight`) -------------------------------------------------------------------------
+    // Both DEFAULT arms (`blend_word == TAA_BLEND_CONFIDENCE_ADAPTIVE`, `disable_luma_weight ==
+    // 0`) are the shipped statements, VERBATIM, unchanged, in the `else` branches.
+    float blend_factor;
+    if (blend_word == TAA_BLEND_FIXED) {
+        blend_factor = default_blend;
+    } else {
+        blend_factor = clamp(1.0 / confidence, min_blend, default_blend);
+    }
+
+    float3 out_color;
+    if (disable_luma_weight != 0u) {
+        out_color = lerp(hist_clipped, cur_lit, blend_factor);
+    } else {
+        float3 w_cur = cur_lit / (1.0 + luma(cur_lit));
+        float3 w_hist = hist_clipped / (1.0 + luma(hist_clipped));
+        float3 blended_w = lerp(w_hist, w_cur, blend_factor);
+        out_color = blended_w / max(1.0 - luma(blended_w), 1e-4);
+    }
 
     gHistOut[coord] = float4(out_color, confidence);
     gAaOut[coord] = float4(out_color, 1.0);

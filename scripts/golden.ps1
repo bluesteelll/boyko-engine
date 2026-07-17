@@ -100,8 +100,33 @@ $featArgs = if ($Hwrt) { @('--features', 'hwrt') } else { @() }
 
 Write-Host "[golden] pin=$Pin leg=$leg bmp=$bmp" -ForegroundColor Cyan
 
-# --- (3) explicit env: SET from the pin, CLEAR the software-force toggle ----------------
-Remove-Item Env:BOYKO_FORCE_SOFTWARE -ErrorAction SilentlyContinue
+# --- (3) explicit env: WIPE every stray BOYKO_*, then SET from the pin -------------------
+#
+# The pin's [<pin>.env] block is the WHOLE truth about the pipeline: any BOYKO_* the ambient
+# shell happens to carry and the pin does NOT name is wiped here, not inherited.
+#
+# This used to clear BOYKO_FORCE_SOFTWARE and nothing else, while PINS.toml's header promised
+# "a stray shell env cannot silently change the pipeline". It could, and it did: running
+# `golden.ps1 -Pin taa_armed` (whose env sets BOYKO_AA=taa) and then `-Pin grand_showcase_2mat`
+# in the SAME PowerShell process leaked BOYKO_AA into the second pin -- Set-Item Env: persists
+# for the life of the process -- so an AA-OFF pin rendered with TAA armed and reported a
+# MISMATCH. The trap is that the "fix" for a MISMATCH is -Bless, which would have frozen a
+# TAA-armed frame as an AA-off pin's golden, silently and permanently.
+#
+# Note the failure was invisible to the RHI-level pins (window_present_gbuffer builds its own
+# scene and never reads BOYKO_AA) and only bit the boyko-app ones -- i.e. it presents as ONE
+# arbitrary pin drifting, which reads exactly like a real regression.
+$pinEnvNames = @()
+foreach ($k in $pins.Keys) {
+    $prefix = "$Pin.env."
+    if ($k.StartsWith($prefix)) { $pinEnvNames += $k.Substring($prefix.Length) }
+}
+Get-ChildItem Env: |
+    Where-Object { $_.Name -like 'BOYKO_*' -and ($pinEnvNames -notcontains $_.Name) } |
+    ForEach-Object {
+        Write-Host ("  env WIPED (stray, not named by the pin): {0}={1}" -f $_.Name, $_.Value) -ForegroundColor Yellow
+        Remove-Item -Path ("Env:" + $_.Name) -ErrorAction SilentlyContinue
+    }
 foreach ($k in $pins.Keys) {
     $prefix = "$Pin.env."
     if ($k.StartsWith($prefix)) {

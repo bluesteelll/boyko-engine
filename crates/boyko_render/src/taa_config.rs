@@ -25,10 +25,20 @@
 //! [`TaaConfig::depth_tol`], which has no shipped TAA-side constant — the sibling temporal-
 //! denoise substrate [`ShadowDenoiseConfig::disocclusion_depth_tol`](crate::shadow_denoise_config::ShadowDenoiseConfig::disocclusion_depth_tol)
 //! this shader's own module doc says it is "Modeled on"). Declaring the full surface up front
-//! avoids an interim struct shape a later rung would have to widen; **only
-//! [`TaaConfig::jitter_scope`] is WIRED this rung** — every other field is read by
-//! [`resolve_taa_policy`] (the three fields [`ResolvedTaa`] already carries) or carried inert
-//! (declared, not yet consumed by any pass). Each field's doc states which.
+//! avoids an interim struct shape a later rung would have to widen. Rung C1 wired
+//! [`TaaConfig::jitter_scope`]; **rung T2 (this rung) additionally wires
+//! [`clamp`](TaaConfig::clamp), [`clamp_space`](TaaConfig::clamp_space),
+//! [`clip`](TaaConfig::clip), [`blend`](TaaConfig::blend),
+//! [`luma_weight`](TaaConfig::luma_weight), [`history_filter`](TaaConfig::history_filter),
+//! [`disocclusion`](TaaConfig::disocclusion), and [`depth_tol`](TaaConfig::depth_tol) — every
+//! one of `taa_resolve.comp.hlsl`'s decision points EXCEPT `mv_source` (needs a new texture
+//! binding, rung D2) and `sharpen` (needs an `aa_out` ping-pong, rung T3), which stay inert.
+//! `disocclusion`/`depth_tol` are forwarded into the UBO but stay UNREAD by the shader this
+//! rung too — see [`DisocclusionTest`]'s doc for why (a depth-based test needs a binding this
+//! resolve does not have). Every T2 mode word branches through `taa_resolve.comp.hlsl` via
+//! wave-uniform runtime `if`s (the SAME idiom `deferred_pbr.hlsl`'s `shadow_mode` and
+//! `shadow_apply.hlsli`'s `csm_pcf_disc` use) — NOT a `-D` shader variant, so this rung
+//! compiles to ONE `.spv`. Each field's doc states its wiring status.
 
 use boyko_macros::Resource;
 
@@ -82,81 +92,136 @@ pub enum JitterScope {
     RasterAndBasis,
 }
 
-/// The neighborhood bound shape [`TaaConfig`]'s history clip evaluates against. Only
-/// [`Variance`](Self::Variance) is wired — the shipped `mean ± γ·σ` AABB, Salvi-style
-/// (`taa_resolve.comp.hlsl`'s `aabb_min`/`aabb_max`). Declared for the full knob surface; NOT
-/// read by any resolve this rung.
+/// The neighborhood bound shape [`TaaConfig`]'s history clip evaluates against — WIRED this
+/// rung (T2) via `taa_resolve.comp.hlsl`'s `clamp_word` (a wave-uniform runtime branch, the
+/// SAME idiom `deferred_pbr.hlsl`'s `shadow_mode` uses). `#[repr(u32)]` in DECLARATION order
+/// (NOT alphabetical) so the shipped default lands on word `0` — see [`ClampShape::as_word`]
+/// for why that is load-bearing.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ClampShape {
-    /// No neighborhood bound — raw history, unclipped. Declared, NOT wired this rung.
-    Off,
-    /// The 3×3 neighborhood min/max box. Declared, NOT wired this rung.
-    MinMax,
-    /// `mean ± variance_gamma * sigma` (the shipped shape). The DEFAULT.
+    /// `mean ± variance_gamma * sigma` (the shipped shape, Salvi-style —
+    /// `taa_resolve.comp.hlsl`'s `aabb_min`/`aabb_max`). The DEFAULT — word `0`, so a zeroed
+    /// UBO clips exactly as today.
     #[default]
     Variance,
+    /// No neighborhood bound — raw history, unclipped (`hist_clipped = hist_raw`; the
+    /// neighborhood loop still runs, but its output is unread).
+    Off,
+    /// The 3×3 neighborhood min/max box — the tightest possible clip, no σ scale.
+    MinMax,
 }
 
-/// The color space [`TaaConfig`]'s neighborhood clamp is evaluated in. Only
-/// [`Rgb`](Self::Rgb) is wired — the shipped resolve clips the raw LDR `lit` RGB directly, no
-/// color-space transform (`taa_resolve.comp.hlsl`'s moments loop operates on `.rgb` texels
-/// as-loaded). Declared, NOT wired this rung.
+impl ClampShape {
+    /// The stable mode word `taa_resolve.comp.hlsl`'s `clamp_word` branches on — the
+    /// `#[repr(u32)]` discriminant. `Variance => 0` (the shipped default — LOAD-BEARING: a
+    /// zeroed/never-resolved [`ResolvedTaa`] must clip exactly as today, never `Off`/`MinMax`),
+    /// `Off => 1`, `MinMax => 2`.
+    #[inline]
+    pub const fn as_word(self) -> u32 {
+        self as u32
+    }
+}
+
+/// The color space [`TaaConfig`]'s neighborhood clamp is evaluated in — WIRED this rung (T2)
+/// via `taa_resolve.comp.hlsl`'s `clamp_space_word`. `#[repr(u32)]` already lands the shipped
+/// default at word `0` in declaration order.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ClampSpace {
-    /// Direct RGB (the shipped shape). The DEFAULT.
+    /// Direct RGB (the shipped shape): the resolve clips the raw LDR `lit` RGB directly, no
+    /// color-space transform. The DEFAULT — word `0`.
     #[default]
     Rgb,
-    /// YCoCg (Karis/Salvi's decorrelated luma-chroma space) — declared, NOT wired this rung.
+    /// YCoCg (Karis/Salvi's decorrelated luma-chroma space, the TAA-literature clip space the
+    /// design plan specified — the shipped v1 deviated to `Rgb`, see the module doc): the 3×3
+    /// neighborhood samples and the history sample are transformed via `rgb_to_ycocg` before
+    /// the clip, and the clipped result is transformed back via `ycocg_to_rgb`.
     YCoCg,
 }
 
-/// How [`TaaConfig`]'s out-of-bound history sample is pulled back into the neighborhood. Only
-/// [`TowardCenter`](Self::TowardCenter) is wired — the shipped Karis/Lottes directional clip
-/// (`taa_resolve.comp.hlsl`'s `clip_toward_aabb_center`, preserves hue/saturation rather than
-/// shifting it). Declared, NOT wired this rung.
+impl ClampSpace {
+    /// The stable mode word `taa_resolve.comp.hlsl`'s `clamp_space_word` branches on. `Rgb =>
+    /// 0` (the shipped default), `YCoCg => 1`.
+    #[inline]
+    pub const fn as_word(self) -> u32 {
+        self as u32
+    }
+}
+
+/// How [`TaaConfig`]'s out-of-bound history sample is pulled back into the neighborhood —
+/// WIRED this rung (T2) via `taa_resolve.comp.hlsl`'s `clip_word`. `#[repr(u32)]` in
+/// DECLARATION order so the shipped default lands on word `0`.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ClipMode {
-    /// Per-channel clamp to `[aabb_min, aabb_max]` — can shift hue. Declared, NOT wired.
-    Clamp,
-    /// Pull back along the ray from the AABB center through the color (the shipped shape). The
-    /// DEFAULT.
+    /// Pull back along the ray from the AABB center through the color (the shipped Karis/Lottes
+    /// directional clip, `taa_resolve.comp.hlsl`'s `clip_toward_aabb_center` — preserves
+    /// hue/saturation rather than shifting it). The DEFAULT — word `0`.
     #[default]
     TowardCenter,
+    /// Per-channel clamp to `[aabb_min, aabb_max]` — cheaper (one HLSL intrinsic, no ray
+    /// projection), can shift hue.
+    Clamp,
+}
+
+impl ClipMode {
+    /// The stable mode word `taa_resolve.comp.hlsl`'s `clip_word` branches on. `TowardCenter =>
+    /// 0` (the shipped default), `Clamp => 1`.
+    #[inline]
+    pub const fn as_word(self) -> u32 {
+        self as u32
+    }
 }
 
 /// The temporal feedback STRATEGY [`TaaConfig::default_blend`]/[`TaaConfig::min_blend`]
-/// parameterize. Only [`ConfidenceAdaptive`](Self::ConfidenceAdaptive) is wired — the shipped
-/// `clamp(1 / confidence, min_blend, default_blend)` ramp (`taa_resolve.comp.hlsl`'s
-/// `blend_factor`). Declared, NOT wired this rung — [`resolve_taa_policy`] forwards
-/// `default_blend`/`min_blend` regardless of this field's value.
+/// parameterize — WIRED this rung (T2) via `taa_resolve.comp.hlsl`'s `blend_word`.
+/// [`resolve_taa_policy`] forwards `default_blend`/`min_blend` regardless of this field's
+/// value; the shader picks which one CONSUMES them.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum BlendMode {
     /// `blend_factor = clamp(1 / confidence, min_blend, default_blend)` (the shipped shape). The
-    /// DEFAULT.
+    /// DEFAULT — word `0`.
     #[default]
     ConfidenceAdaptive,
-    /// A fixed feedback weight, ignoring the accumulated-frame confidence counter. Declared, NOT
-    /// wired this rung.
+    /// `blend_factor = default_blend` unconditionally, ignoring the accumulated-frame
+    /// confidence counter — a diagnostic mode (no adaptive settle after a reset; every frame
+    /// blends at the same rate).
     Fixed,
 }
 
-/// The history reconstruction filter [`TaaConfig`] selects. Only
-/// [`CatmullRom`](Self::CatmullRom) is wired — the shipped 16-tap separable bicubic
-/// reconstruction (`taa_resolve.comp.hlsl`'s `sample_history_catmull_rom`). Declared, NOT wired
-/// this rung.
+impl BlendMode {
+    /// The stable mode word `taa_resolve.comp.hlsl`'s `blend_word` branches on.
+    /// `ConfidenceAdaptive => 0` (the shipped default), `Fixed => 1`.
+    #[inline]
+    pub const fn as_word(self) -> u32 {
+        self as u32
+    }
+}
+
+/// The history reconstruction filter [`TaaConfig`] selects — WIRED this rung (T2) via
+/// `taa_resolve.comp.hlsl`'s `history_filter_word`. `#[repr(u32)]` in DECLARATION order so the
+/// shipped default lands on word `0`.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum HistoryFilter {
-    /// A single bilinear tap — cheaper, blurs faster under repeated accumulation. Declared, NOT
-    /// wired this rung.
-    Bilinear,
-    /// The shipped 16-tap separable bicubic Catmull-Rom. The DEFAULT.
+    /// The shipped 16-tap separable bicubic Catmull-Rom reconstruction
+    /// (`taa_resolve.comp.hlsl`'s `sample_history_catmull_rom`). The DEFAULT — word `0`.
     #[default]
     CatmullRom,
+    /// A single bilinear tap (`sample_history_bilinear`, 4 `Load`s + 3 `lerp`s) — cheaper,
+    /// blurs faster under repeated accumulation.
+    Bilinear,
+}
+
+impl HistoryFilter {
+    /// The stable mode word `taa_resolve.comp.hlsl`'s `history_filter_word` branches on.
+    /// `CatmullRom => 0` (the shipped default), `Bilinear => 1`.
+    #[inline]
+    pub const fn as_word(self) -> u32 {
+        self as u32
+    }
 }
 
 /// The motion-vector source [`TaaConfig`]'s resolve reprojects with. Only
@@ -175,20 +240,40 @@ pub enum MvSource {
     PerObject,
 }
 
-/// The history-reset (disocclusion) test [`TaaConfig`] evaluates. Only
-/// [`OffScreenOnly`](Self::OffScreenOnly) is wired — the shipped off-screen/behind-camera test
-/// (`taa_resolve.comp.hlsl`'s `off_screen` check). Declared, NOT wired this rung —
-/// [`TaaConfig::depth_tol`] stays unread while this field is `OffScreenOnly`.
+/// The history-reset (disocclusion) test [`TaaConfig`] evaluates. [`OffScreenOnly`](Self::OffScreenOnly)
+/// is the shipped off-screen/behind-camera test (`taa_resolve.comp.hlsl`'s `off_screen` check)
+/// — the ONLY test the resolve can run today, since it retains no previous-frame depth to
+/// compare against (only the CURRENT frame's `gViewT`; `taa_hist`'s alpha channel carries
+/// confidence, not depth).
+///
+/// **This word is forwarded into [`ResolvedTaa::disocclusion_word`] this rung (T2), but
+/// `taa_resolve.comp.hlsl` does NOT read it.** [`OffScreenAndDepth`](Self::OffScreenAndDepth)
+/// would need a previous-frame depth binding the resolve does not have — adding a new bound
+/// resource is a separate rung's decision (out of scope here, not silently invented). Selecting
+/// [`OffScreenAndDepth`](Self::OffScreenAndDepth) today therefore behaves identically to
+/// [`OffScreenOnly`](Self::OffScreenOnly) — this is DOCUMENTED inertness, not a silent no-op.
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum DisocclusionTest {
-    /// Reset iff the reprojected UV is off-screen or behind the camera (the shipped shape). The
-    /// DEFAULT.
+    /// Reset iff the reprojected UV is off-screen or behind the camera (the shipped shape, the
+    /// ONLY test the resolve runs). The DEFAULT — word `0`.
     #[default]
     OffScreenOnly,
     /// ALSO reset on a reprojected-vs-current depth mismatch beyond [`TaaConfig::depth_tol`] —
-    /// mirrors `shadow_temporal.comp.hlsl`'s `depth_swap` test. Declared, NOT wired this rung.
+    /// mirrors `shadow_temporal.comp.hlsl`'s `depth_swap` test. UNREAD by
+    /// `taa_resolve.comp.hlsl` this rung (see this enum's doc) — carries identically to
+    /// `OffScreenOnly` until a future rung adds the depth binding.
     OffScreenAndDepth,
+}
+
+impl DisocclusionTest {
+    /// The stable mode word [`ResolvedTaa::disocclusion_word`] carries — the `#[repr(u32)]`
+    /// discriminant. `OffScreenOnly => 0` (the shipped default), `OffScreenAndDepth => 1`.
+    /// UNREAD by the shader this rung (see the enum doc).
+    #[inline]
+    pub const fn as_word(self) -> u32 {
+        self as u32
+    }
 }
 
 /// A post-resolve sharpening pass [`TaaConfig`] may select. Only [`None`](Self::None) is wired
@@ -230,14 +315,14 @@ pub struct TaaConfig {
     /// host call site (`boyko_app::runner`). Default [`JitterScope::RasterOnly`] (today's
     /// shipped raster-only jitter).
     pub jitter_scope: JitterScope,
-    /// The neighborhood bound shape — see [`ClampShape`]. Default [`ClampShape::Variance`] (the
-    /// shipped `mean ± γσ` AABB).
+    /// The neighborhood bound shape — see [`ClampShape`]. **WIRED this rung (T2)**. Default
+    /// [`ClampShape::Variance`] (the shipped `mean ± γσ` AABB).
     pub clamp: ClampShape,
-    /// The color space the clamp AABB is computed in — see [`ClampSpace`]. Default
-    /// [`ClampSpace::Rgb`] (the shipped direct-RGB clip).
+    /// The color space the clamp AABB is computed in — see [`ClampSpace`]. **WIRED this rung
+    /// (T2)**. Default [`ClampSpace::Rgb`] (the shipped direct-RGB clip).
     pub clamp_space: ClampSpace,
-    /// How an out-of-bound history sample is pulled back — see [`ClipMode`]. Default
-    /// [`ClipMode::TowardCenter`] (the shipped Karis/Lottes directional clip).
+    /// How an out-of-bound history sample is pulled back — see [`ClipMode`]. **WIRED this rung
+    /// (T2)**. Default [`ClipMode::TowardCenter`] (the shipped Karis/Lottes directional clip).
     pub clip: ClipMode,
     /// The clip AABB half-width scale (`× σ`, Salvi-style). Forwarded into
     /// [`ResolvedTaa::variance_gamma`] by [`resolve_taa_policy`]. Shipped default `1.0`
@@ -250,26 +335,32 @@ pub struct TaaConfig {
     /// [`ResolvedTaa::min_blend`] by [`resolve_taa_policy`]. Shipped default `0.015`.
     pub min_blend: f32,
     /// The blend STRATEGY [`default_blend`](Self::default_blend)/[`min_blend`](Self::min_blend)
-    /// parameterize — see [`BlendMode`]. Default [`BlendMode::ConfidenceAdaptive`] (the shipped
-    /// ramp).
+    /// parameterize — see [`BlendMode`]. **WIRED this rung (T2)**. Default
+    /// [`BlendMode::ConfidenceAdaptive`] (the shipped ramp).
     pub blend: BlendMode,
     /// Whether the blend is Karis inverse-tonemap luma-weighted (`w = 1 / (1 + luma)`,
-    /// suppressing a single bright outlier tap from dominating the average). The shipped resolve
-    /// always applies it. Default `true`.
+    /// suppressing a single bright outlier tap from dominating the average). **WIRED this rung
+    /// (T2)** — forwarded INVERTED into [`ResolvedTaa::disable_luma_weight`] so the
+    /// zero-is-shipped-default invariant holds (the shipped default applies the weight). The
+    /// shipped resolve always applies it. Default `true`.
     pub luma_weight: bool,
-    /// The history reconstruction filter — see [`HistoryFilter`]. Default
-    /// [`HistoryFilter::CatmullRom`] (the shipped 16-tap separable bicubic).
+    /// The history reconstruction filter — see [`HistoryFilter`]. **WIRED this rung (T2)**.
+    /// Default [`HistoryFilter::CatmullRom`] (the shipped 16-tap separable bicubic).
     pub history_filter: HistoryFilter,
     /// The motion-vector source — see [`MvSource`]. Default [`MvSource::CameraOnly`] (the
-    /// shipped C1 v1 scope).
+    /// shipped C1 v1 scope). Out of scope for T2 (needs a new texture binding — rung D2).
     pub mv_source: MvSource,
     /// The history-reset (disocclusion) test — see [`DisocclusionTest`]. Default
-    /// [`DisocclusionTest::OffScreenOnly`] (the shipped off-screen/behind-camera test).
+    /// [`DisocclusionTest::OffScreenOnly`] (the shipped off-screen/behind-camera test). The
+    /// word is forwarded into [`ResolvedTaa::disocclusion_word`] this rung (T2), but the shader
+    /// does NOT read it — see [`DisocclusionTest`]'s doc for why (a depth-based test needs a
+    /// binding this resolve does not have).
     pub disocclusion: DisocclusionTest,
     /// The relative depth-mismatch tolerance a future [`DisocclusionTest::OffScreenAndDepth`]
-    /// would consume. UNREAD while [`disocclusion`](Self::disocclusion) stays `OffScreenOnly`.
-    /// Default `0.02` — TAA's own resolve has no depth-tolerance constant to source from (it
-    /// tests off-screen only); this is sourced instead from
+    /// would consume. Forwarded into [`ResolvedTaa::depth_tol`] this rung (T2), but UNREAD by
+    /// the shader while [`disocclusion`](Self::disocclusion) stays inert (see that field's
+    /// doc). Default `0.02` — TAA's own resolve has no depth-tolerance constant to source from
+    /// (it tests off-screen only); this is sourced instead from
     /// [`ShadowDenoiseConfig::disocclusion_depth_tol`](crate::shadow_denoise_config::ShadowDenoiseConfig::disocclusion_depth_tol)'s
     /// shipped default (`0.02`) — the sibling temporal-denoise substrate
     /// `taa_resolve.comp.hlsl`'s own module doc says this shader is "Modeled on"
@@ -324,11 +415,20 @@ impl TaaConfig {
 
 // ---- the resolve decision (pure — mirrors resolve_shadow_denoise) ---------------------------
 
-/// Maps a [`TaaConfig`] onto the existing [`ResolvedTaa`] UBO carrier — the pure, unit-testable
-/// resolve [`resolve_taa_policy`] wraps. Forwards ONLY the three fields [`ResolvedTaa`] has
+/// Maps a [`TaaConfig`] onto the derived [`ResolvedTaa`] UBO carrier — the pure, unit-testable
+/// resolve [`resolve_taa_policy`] wraps. Forwards the three C1 scalars
 /// ([`variance_gamma`](TaaConfig::variance_gamma), [`default_blend`](TaaConfig::default_blend),
-/// [`min_blend`](TaaConfig::min_blend)); every other [`TaaConfig`] field is host-only or not yet
-/// wired into any UBO (see each field's doc).
+/// [`min_blend`](TaaConfig::min_blend)) plus every T2 knob
+/// ([`clamp`](TaaConfig::clamp), [`clamp_space`](TaaConfig::clamp_space),
+/// [`clip`](TaaConfig::clip), [`blend`](TaaConfig::blend),
+/// [`luma_weight`](TaaConfig::luma_weight), [`history_filter`](TaaConfig::history_filter),
+/// [`disocclusion`](TaaConfig::disocclusion), [`depth_tol`](TaaConfig::depth_tol)); `mv_source`
+/// and `sharpen` stay unforwarded (their own future rungs, D2/T3 — see the module doc).
+///
+/// `luma_weight` is forwarded INVERTED (`disable_luma_weight = !luma_weight`): the shipped
+/// default is `true` (apply the weight), so the UBO word must read `0` at the default to keep
+/// the zero-is-shipped-default invariant every other T2 word holds (see
+/// [`ResolvedTaa::disable_luma_weight`]).
 #[inline]
 pub fn resolve_taa(cfg: &TaaConfig) -> ResolvedTaa {
     ResolvedTaa {
@@ -336,6 +436,14 @@ pub fn resolve_taa(cfg: &TaaConfig) -> ResolvedTaa {
         min_blend: cfg.min_blend,
         variance_gamma: cfg.variance_gamma,
         _pad: 0.0,
+        clamp_word: cfg.clamp.as_word(),
+        clamp_space_word: cfg.clamp_space.as_word(),
+        clip_word: cfg.clip.as_word(),
+        blend_word: cfg.blend.as_word(),
+        disable_luma_weight: u32::from(!cfg.luma_weight),
+        history_filter_word: cfg.history_filter.as_word(),
+        disocclusion_word: cfg.disocclusion.as_word(),
+        depth_tol: cfg.depth_tol,
     }
 }
 
@@ -396,25 +504,101 @@ mod tests {
         assert!(raster_and_basis.basis_shear_enabled());
     }
 
-    /// `resolve_taa` forwards exactly the three live [`ResolvedTaa`] fields, padding zeroed.
+    /// Every T2 mode word's `#[repr(u32)]` discriminant — pinned so the shader's mirrored
+    /// constants (`taa_resolve.comp.hlsl`'s `TAA_CLAMP_*`/`TAA_CLIP_*`/`TAA_BLEND_*`/
+    /// `TAA_HISTORY_FILTER_*`) never drift from the host side.
     #[test]
-    fn resolve_taa_maps_the_three_live_fields() {
+    fn mode_words_are_the_repr_discriminants() {
+        assert_eq!(ClampShape::Variance.as_word(), 0);
+        assert_eq!(ClampShape::Off.as_word(), 1);
+        assert_eq!(ClampShape::MinMax.as_word(), 2);
+        assert_eq!(ClampSpace::Rgb.as_word(), 0);
+        assert_eq!(ClampSpace::YCoCg.as_word(), 1);
+        assert_eq!(ClipMode::TowardCenter.as_word(), 0);
+        assert_eq!(ClipMode::Clamp.as_word(), 1);
+        assert_eq!(BlendMode::ConfidenceAdaptive.as_word(), 0);
+        assert_eq!(BlendMode::Fixed.as_word(), 1);
+        assert_eq!(HistoryFilter::CatmullRom.as_word(), 0);
+        assert_eq!(HistoryFilter::Bilinear.as_word(), 1);
+        assert_eq!(DisocclusionTest::OffScreenOnly.as_word(), 0);
+        assert_eq!(DisocclusionTest::OffScreenAndDepth.as_word(), 1);
+    }
+
+    /// `resolve_taa(&TaaConfig::default())` equals the shipped constants: every T2 mode word is
+    /// `0` — a zeroed/never-resolved [`ResolvedTaa`] UBO must degrade to today's shipped
+    /// behaviour, never a different clip/filter/blend arm (mirrors `CsmPcfKernel::Tent13 == 0`'s
+    /// load-bearing discipline in `csm_config.rs`) — AND every scalar equals the shipped C1
+    /// tuning (`_pad`/`depth_tol` included, so nothing silently drifted).
+    #[test]
+    fn every_default_knob_resolves_to_mode_word_zero() {
+        let resolved = resolve_taa(&TaaConfig::default());
+        assert_eq!(resolved.default_blend, 0.1);
+        assert_eq!(resolved.min_blend, 0.015);
+        assert_eq!(resolved.variance_gamma, 1.0);
+        assert_eq!(resolved._pad, 0.0);
+        assert_eq!(resolved.clamp_word, 0);
+        assert_eq!(resolved.clamp_space_word, 0);
+        assert_eq!(resolved.clip_word, 0);
+        assert_eq!(resolved.blend_word, 0);
+        assert_eq!(
+            resolved.disable_luma_weight, 0,
+            "the shipped default APPLIES the luma weight (inverted encoding)"
+        );
+        assert_eq!(resolved.history_filter_word, 0);
+        assert_eq!(resolved.disocclusion_word, 0);
+        assert_eq!(resolved.depth_tol, 0.02);
+    }
+
+    /// `resolve_taa` forwards every field — the T2 successor of the C1-era three-field-only
+    /// test. `depth_tol`/`disocclusion_word` are forwarded even though the shader does not read
+    /// them yet (see [`DisocclusionTest`]'s doc).
+    #[test]
+    fn resolve_taa_forwards_every_field() {
         let cfg = TaaConfig {
             default_blend: 0.2,
             min_blend: 0.03,
             variance_gamma: 1.5,
+            clamp: ClampShape::MinMax,
+            clamp_space: ClampSpace::YCoCg,
+            clip: ClipMode::Clamp,
+            blend: BlendMode::Fixed,
+            luma_weight: false,
+            history_filter: HistoryFilter::Bilinear,
+            disocclusion: DisocclusionTest::OffScreenAndDepth,
+            depth_tol: 0.05,
             ..TaaConfig::default()
         };
         assert_eq!(
             resolve_taa(&cfg),
-            ResolvedTaa { default_blend: 0.2, min_blend: 0.03, variance_gamma: 1.5, _pad: 0.0 }
+            ResolvedTaa {
+                default_blend: 0.2,
+                min_blend: 0.03,
+                variance_gamma: 1.5,
+                _pad: 0.0,
+                clamp_word: ClampShape::MinMax.as_word(),
+                clamp_space_word: ClampSpace::YCoCg.as_word(),
+                clip_word: ClipMode::Clamp.as_word(),
+                blend_word: BlendMode::Fixed.as_word(),
+                disable_luma_weight: 1,
+                history_filter_word: HistoryFilter::Bilinear.as_word(),
+                disocclusion_word: DisocclusionTest::OffScreenAndDepth.as_word(),
+                depth_tol: 0.05,
+            }
         );
     }
 
     /// The `ResolvedTaa::default` shortcut must equal resolving a default `TaaConfig`, so a
-    /// never-run policy already carries the correct shipped scalars.
+    /// never-run policy already carries the correct shipped scalars and mode words.
     #[test]
     fn default_resolved_matches_resolving_the_default_config() {
         assert_eq!(ResolvedTaa::default(), resolve_taa(&TaaConfig::default()));
+    }
+
+    /// Layout pin (rung T2): the UBO grew 16 -> 48 B (three std140 vec4 slots) — also
+    /// const-asserted at `ResolvedTaa`'s definition (`aa_config.rs`); this is the runtime unit
+    /// test companion.
+    #[test]
+    fn resolved_taa_is_48_bytes() {
+        assert_eq!(core::mem::size_of::<ResolvedTaa>(), 48);
     }
 }
