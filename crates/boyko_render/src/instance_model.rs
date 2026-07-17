@@ -137,12 +137,23 @@ pub fn sync_instance_model_cols(
 /// `StructuredBuffer<InstanceModelCol>` stride, just from the prev-instance ring instead of
 /// the current one.
 ///
-/// # HW-RT-walled
+/// # NOT `hwrt`-walled (un-walled by TAA rung D1 — mirrors [`crate::motion_cam`]'s W3 un-wall)
 ///
-/// `#[cfg(feature = "hwrt")]`: a `not(hwrt)` build never compiles this column, so its
-/// instancing path is TEXTUALLY the pre-Rung-3b code (the same discipline the RT track
-/// keeps end-to-end).
-#[cfg(feature = "hwrt")]
+/// Was `#[cfg(feature = "hwrt")]`-gated when rung 3b introduced it for the shadow-temporal
+/// mesh-MV raster producer. Un-walled (TAA rung D1) so this component + its sync system
+/// ([`sync_prev_instance_model_cols`]) are reachable/testable on BOTH legs — a FUTURE
+/// per-object TAA reprojection consumer needs this column to exist as a type before it can be
+/// wired, exactly as [`crate::motion_cam::MotionCam`] was un-walled ahead of its GPU consumer.
+///
+/// This is a data-layer-only change, and a NARROWER one than `motion_cam`'s: the GPU producer
+/// (`gbuffer_mrt_mv`, the `motion_vec` target, `MotionVecResources` in `boyko_app`) stays
+/// `#[cfg(feature = "hwrt")]`-gated, unchanged, AND — unlike `MotionCam`, whose upload fn
+/// ([`crate::upload_motion_cam_ring`]) was un-walled alongside it — this type's own upload fn
+/// ([`crate::upload_prev_instance_models`]) STAYS `hwrt`-gated: it reads
+/// [`crate::MeshRenderScratch::prev_ring`], a SEPARATE `hwrt`-only wall in `mesh_draw.rs` this
+/// rung does not touch (see the D1 report for why). No plugin adds this column to any archetype
+/// on either leg yet, so the 0%-gate ([`sync_prev_instance_model_cols`]'s own doc) holds
+/// byte-identically on BOTH legs: zero matching archetypes ⇒ zero work, regardless of `hwrt`.
 #[repr(C)]
 #[derive(Component, Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 pub struct PrevInstanceModelCol {
@@ -154,9 +165,7 @@ pub struct PrevInstanceModelCol {
 // The prev-instance ring stride MUST equal the current instance ring stride (48 B): the
 // gbuffer VS indexes both by `base_instance + SV_InstanceID`, so a layout divergence would
 // desynchronise the two rings and reproject to a wrong surface point.
-#[cfg(feature = "hwrt")]
 const _: () = assert!(size_of::<PrevInstanceModelCol>() == INSTANCE_MODEL_COL_BYTES);
-#[cfg(feature = "hwrt")]
 const _: () = assert!(align_of::<PrevInstanceModelCol>() == 4);
 
 /// Copies each visible entity's CURRENT [`InstanceModelCol`] into its
@@ -176,8 +185,8 @@ const _: () = assert!(align_of::<PrevInstanceModelCol>() == 4);
 /// # 0%-gate
 ///
 /// A world with no [`PrevInstanceModelCol`] column yields zero matching archetypes ⇒ zero
-/// work: a scene that never opts into temporal motion vectors pays nothing.
-#[cfg(feature = "hwrt")]
+/// work: a scene that never opts into temporal motion vectors pays nothing. Holds on BOTH
+/// legs (this system is un-walled from `hwrt` — see the type's own doc).
 #[allow(clippy::needless_pass_by_value)]
 pub fn sync_prev_instance_model_cols(
     mut q: Query<(&InstanceModelCol, &mut PrevInstanceModelCol), Enabled<RenderEnabled>>,

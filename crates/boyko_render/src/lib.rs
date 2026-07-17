@@ -197,9 +197,14 @@ pub mod mesh_draw;
 /// ([`MotionCam`](motion_cam::MotionCam) UBO + [`MotionCamState`](motion_cam::MotionCamState)
 /// persist Resource). Un-walled from `#[cfg(feature = "hwrt")]` (TAA W3): the resolve's
 /// camera-only motion-vector reconstruction needs it on BOTH legs (a software TAA build has
-/// no `rayQuery`, so it cannot be `hwrt`-gated). `PrevInstanceModelCol` / mesh-MV stay
-/// `hwrt`-gated (v1.1, per-object mesh motion vectors) — this module carries only the
-/// CAMERA pair, which both the hwrt shadow-temporal denoiser and TAA read.
+/// no `rayQuery`, so it cannot be `hwrt`-gated) — this module carries only the CAMERA pair,
+/// which both the hwrt shadow-temporal denoiser and TAA read. TAA rung D1 additionally
+/// un-walled [`PrevInstanceModelCol`](instance_model::PrevInstanceModelCol) itself (the
+/// per-object PREV-transform component + its sync system) as a pure data-layer reachability
+/// change — see that type's own doc. The mesh-MV GPU producer (`gbuffer_mrt_mv`, `motion_vec`,
+/// `MotionVecResources`, and the `prev_ring`/`upload_prev_instance_models` upload path) stays
+/// `hwrt`-gated (v1.1, per-object mesh motion vectors) — un-walling those is a materially
+/// bigger, cross-crate change this rung deliberately did not attempt (see the D1 report).
 pub mod motion_cam;
 /// HW-RT rung R1 — the dormant unified ray / acceleration-structure backend seam:
 /// the [`RayBackendConfig`](ray_backend::RayBackendConfig) derived carrier +
@@ -412,10 +417,12 @@ pub use instance_model::{
     INSTANCE_MODEL_COL_BYTES, InstanceModelCol, VB_INSTANCE_ROW_BYTES, VbInstanceRow,
     sync_instance_model_cols,
 };
-// HW-RT rung 3b: the previous-frame model-affine sibling + its copy system (temporal motion
-// vectors). `not(hwrt)` builds never compile the column, so its instancing path is textually
-// the pre-Rung-3b code.
-#[cfg(feature = "hwrt")]
+// HW-RT rung 3b / TAA rung D1: the previous-frame model-affine sibling + its copy system
+// (temporal motion vectors). Un-walled from `hwrt` (D1) — see `PrevInstanceModelCol`'s own doc
+// for the rationale (mirrors `mod motion_cam`'s W3 un-wall: pure data layer, no GPU consumer
+// added). The GPU producer (`gbuffer_mrt_mv`, `motion_vec`, `MotionVecResources`) stays
+// `hwrt`-gated, unchanged — `not(hwrt)`'s render output is byte-identical (no plugin adds this
+// column on either leg yet).
 pub use instance_model::{PrevInstanceModelCol, sync_prev_instance_model_cols};
 // HW-RT rung 3b + TAA W3: the camera view-proj carry for motion-vector reprojection.
 // Un-walled from `hwrt` (TAA W3) — see the `mod motion_cam` doc for the rationale.
@@ -505,6 +512,11 @@ pub use upload::{
     upload_sdf_edit_list, upload_shadow_denoise_ring, upload_taa_ring, upload_temporal_shadow_ring,
     upload_vb_instance_rows,
 };
+// HW-RT rung R2a-3 / rung 3b: `upload_mesh_ids` is genuinely `hwrt`-only (feeds the TLAS-instance
+// packer's BLAS-address resolve). `upload_prev_instance_models` STAYS `hwrt`-gated too, despite
+// `PrevInstanceModelCol` itself being un-walled (TAA rung D1) — it reads
+// `MeshRenderScratch::prev_ring`, a SEPARATE `hwrt`-only wall in `mesh_draw.rs` this rung does not
+// touch (see the D1 report).
 #[cfg(feature = "hwrt")]
 pub use upload::{upload_mesh_ids, upload_prev_instance_models};
 // TAA W3: un-walled from `hwrt` — the resolve's camera-only MV reconstruction needs the

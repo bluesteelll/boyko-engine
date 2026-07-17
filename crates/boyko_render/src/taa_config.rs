@@ -260,8 +260,49 @@ pub enum MvSource {
     /// static geometry, and for a fully static scene). The DEFAULT.
     #[default]
     CameraOnly,
-    /// A per-object motion-vector buffer (the `hwrt`-only mesh-shadow MV producer's future
-    /// sibling). Declared, NOT wired this rung.
+    /// A per-object motion-vector buffer. **Declared, and DELIBERATELY NOT WIRED** — rung D2 was
+    /// investigated, costed, and declined. Read this before attempting it again.
+    ///
+    /// # Why it is not merely "unfinished"
+    ///
+    /// Rung 3b already built both MV producers, but they are not equally portable:
+    /// - the MESH producer (`gbuffer_mrt.*` with `-D MOTION_VECTORS=1`, a 4th MRT) is pure raster
+    ///   — no rayQuery, no TLAS — so it *is* portable off `hwrt`;
+    /// - the SDF-pixel producer is a `-D HWRT=1` variant of the hardware rayQuery VIS pass. There
+    ///   is **no software equivalent**; on a `not(hwrt)` build it does not exist.
+    ///
+    /// `taa_resolve.comp.hlsl` binds no G-buffer mask, so it cannot tell a mesh pixel from an SDF
+    /// one. Reading an MV texture at every pixel is therefore correct ONLY if both producers wrote
+    /// every pixel that frame. With just the mesh half, SDF pixels would silently regress from the
+    /// shipped camera-only differential to `Δuv ≡ 0` — **worse than [`CameraOnly`](Self::CameraOnly)**,
+    /// and invisible in a still frame.
+    ///
+    /// Worse, `sdf_mv_active()` additionally requires `RayShadowConfig` — hardware ray-traced mesh
+    /// shadows — to be ARMED. So wiring this would make arming an ANTI-ALIASING mode silently
+    /// activate an unrelated ray-tracing pipeline (an extra MRT attachment plus a VIS-MV compute
+    /// dispatch) for a user who asked for neither RT shadows nor shadow denoise.
+    ///
+    /// # And the defect it would fix was not observed
+    ///
+    /// Per-object MV exists to stop a MOVING mesh from ghosting under camera-only reprojection.
+    /// Measured on the in-motion eval (`taa_jitter_eval.rs`, `BOYKO_TAA_MOTION=object`: a caster
+    /// translating ~7 px/frame across a static camera — the worst case, since the camera-only MV
+    /// is then identically zero): **no ghosting**. The variance clamp rejects the stale history and
+    /// falls back to the current sample, so a moving edge loses temporal AA rather than smearing.
+    /// Owner-confirmed by eye.
+    ///
+    /// So the honest trade is: buy temporal AA on moving edges, pay a cross-feature coupling that
+    /// forces an RT pipeline on. That is the wrong side of the trade for a defect that is not there.
+    /// If a scene ever DOES ghost, revisit — and note the prerequisite found while costing this:
+    /// `upload_prev_instance_models` cannot be un-walled without also porting
+    /// `MeshRenderScratch::prev_ring` and the `hwrt`-forked second `gather_mesh_draws`, which is a
+    /// real refactor of an established per-leg-fork pattern, not a `cfg` removal.
+    ///
+    /// # The convention, recorded so it is not re-derived
+    ///
+    /// The 4th MRT stores `clip_to_uv(prev_clip) − clip_to_uv(cur_clip)` (RG16F) — i.e. exactly the
+    /// `prev_uv − cur_uv` shape rung C2's differential already adds to `pixel_uv`. So the correct
+    /// integration is `history_uv = pixel_uv + gMotionVec.Load(coord).rg`, with **no sign flip**.
     PerObject,
 }
 

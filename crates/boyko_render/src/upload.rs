@@ -653,6 +653,13 @@ pub unsafe fn upload_mesh_ids(
 /// (`prev_instances[base_instance + SV_InstanceID]`) to compute each mesh pixel's per-object
 /// `prev_world`, so its motion vector is `cur_world − prev_world`.
 ///
+/// STILL `feature = "hwrt"`-gated (unlike [`crate::PrevInstanceModelCol`] itself, TAA rung D1):
+/// this fn reads [`MeshRenderScratch::prev_ring`], which is its own SEPARATE
+/// `#[cfg(feature = "hwrt")]` wall in `mesh_draw.rs` (that field, `gather_prev_ring_into`, and the
+/// `hwrt`-only `gather_mesh_draws` variant that fills it are a deeper, un-investigated wall this
+/// rung does not un-wall — see the D1 report). Un-walling THIS fn's signature without also
+/// un-walling `prev_ring` does not compile (`scratch.prev_ring` would not exist on `not(hwrt)`).
+///
 /// Uploaded ONLY when the temporal denoiser is on (the runner gates the CALL on `feature = "hwrt"`
 /// plus `temporal_enabled` plus the `mv` ring's presence — the SAME gate that binds the MV
 /// pipeline). The lane is scattered INDEX-ALIGNED with `scratch.ring` (`prev_ring.len() ==
