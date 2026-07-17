@@ -457,7 +457,7 @@ fn taa_jitter_eval_screenshot_dump() {
 
     // Rung C1's proof-of-life switch. `basis` opts into the b5 camera-basis shear, which is what
     // makes the jitter reach the marcher/resolve/shadow sample position at all. Unset renders the
-    // engine default (`RasterOnly`) rather than a hardcoded value, per the `BOYKO_AA` convention
+    // engine default (`RasterAndBasis`) rather than a hardcoded value, per the `BOYKO_AA` convention
     // above — so the A0 falsification (jitter reaches no SDF shading) and its refutation (it now
     // does) are the SAME binary at two env settings, not two code paths.
     let jitter_scope = match std::env::var("BOYKO_TAA_SCOPE").ok().as_deref() {

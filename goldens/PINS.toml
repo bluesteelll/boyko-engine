@@ -465,6 +465,12 @@ BOYKO_HOST_DUMP          = "D:\tmp\taa_armed.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 BOYKO_AA                 = "taa"
 BOYKO_WIN                = "512"
+# EXPLICIT since `JitterScope::RasterAndBasis` became the default: this pin exists to freeze the
+# RasterOnly opt-OUT path, so it must NAME it. Left implicit it would render the default and
+# collapse onto [taa_armed_basis]'s bytes -- firing this pair's own "if the two pins ever agree,
+# the shear is dead" alarm from the pins' configuration rather than from a regression. A gate that
+# can cry wolf at itself is not a gate.
+BOYKO_TAA_SCOPE          = "raster"
 
 [taa_armed_basis]
 # AA Stage 4 rung T0 (sibling): the same armed-TAA scene through rung C1's OPT-IN b5 camera-basis

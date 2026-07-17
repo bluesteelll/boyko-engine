@@ -8,15 +8,17 @@
 //! of the AA mode. Perturbing it to jitter the SDF marcher would inject a per-frame,
 //! Halton-phase-correlated wobble into all of those UNLESS the perturbation is EXACTLY the
 //! shear [`crate::view::composite_perspective_from_view_sheared`] applies (algebraically
-//! absorbed by `generate_ray`'s own linear NDC formula — see that fn's doc for the derivation),
-//! which is why v1 defaults to raster-only (`TaaConfig::jitter_scope ==
-//! JitterScope::RasterOnly`) rather than jittering the shared basis unconditionally: an
-//! explicit opt-in keeps every consumer's default behaviour byte-unchanged. This module's
-//! [`NdcJitter`] is shared by BOTH the raster mesh push and (when opted in) the b5 shear, so a
-//! world that never sets `jitter_scope = RasterAndBasis` renders exactly as before —
-//! SDF-marched pixels stay temporally stable but un-supersampled.
+//! absorbed by `generate_ray`'s own linear NDC formula — see that fn's doc for the derivation).
+//! v1 shipped raster-only for that reason, and rung C1 then proved the shear is exactly that
+//! absorbed perturbation, so `TaaConfig::jitter_scope` now DEFAULTS to
+//! `JitterScope::RasterAndBasis`: raster-only is the explicit opt-OUT, not the baseline. This
+//! module's [`NdcJitter`] is shared by BOTH the raster mesh push and the b5 shear, so the two
+//! legs sample at one position (invariant I2).
 //!
-//! # The opt-in lift (`JitterScope::RasterAndBasis`, `crate::taa_config`)
+//! Nothing existing moves regardless: the 0%-gate is `AaMode::Off` (still the AA default), and
+//! `jitter_scope` is only ever consulted on a frame that already armed `Taa`.
+//!
+//! # The scope lift (`JitterScope::RasterAndBasis`, `crate::taa_config`)
 //!
 //! Setting `TaaConfig::jitter_scope = JitterScope::RasterAndBasis` makes `boyko_app::runner`
 //! pass this module's `(jx, jy)` into

@@ -77,18 +77,43 @@ pub enum JitterSequence {
 #[repr(u32)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum JitterScope {
-    /// Shipped v1 (the C1 cut — see [`crate::taa_jitter`]'s module doc): ONLY the raster mesh
-    /// vertex push is jittered
+    /// The historical v1 shape (the C1 cut — see [`crate::taa_jitter`]'s module doc): ONLY the
+    /// raster mesh vertex push is jittered
     /// ([`gbuffer_push_from_view_jittered`](crate::gbuffer_push_from_view_jittered)); the b5
-    /// marcher/resolve/SSAO/CSM/froxel-shared camera basis stays UNJITTERED. The DEFAULT — a
-    /// world that never opts in renders byte-identically to today's raster-only jitter.
-    #[default]
+    /// marcher/resolve/SSAO/CSM/froxel-shared camera basis stays UNJITTERED.
+    ///
+    /// **No longer the default** — kept as the explicit opt-OUT. Choose it only to reproduce the
+    /// pre-C1 render, or if the SSCS corner watch-item below ever proves to matter for a scene.
+    /// Be aware of what it costs: with this scope, TAA is a structural NO-OP on every
+    /// SDF-marched pixel (proven bit-exactly — with the mesh leg disabled, Halton phase 0 vs
+    /// phase 4 renders 0 differing pixels out of 810000) and it never reaches the shadow lookup,
+    /// because both reconstruct their sample position from the unjittered basis.
     RasterOnly,
-    /// Rung C1 (this rung): the SAME `(jx, jy)` jitter ALSO shears the b5 camera forward basis,
-    /// so the SDF marcher supersamples too — I2 (shared sub-pixel position) now holds across
-    /// BOTH legs, not just the raster mesh. See `docs/TAA-PLAN.md` Decision 1 for the
-    /// derivation [`composite_perspective_from_view_sheared`](crate::composite_perspective_from_view_sheared)
+    #[default]
+    /// **The DEFAULT.** The SAME `(jx, jy)` jitter ALSO shears the b5 camera forward basis
+    /// (rung C1), so every ray-gen consumer — the SDF marcher, the deferred resolve, SSAO, the
+    /// shadow lookup — samples at the jittered sub-pixel position. Invariant I2 (raster and
+    /// reconstruction share one sample position) then holds across BOTH legs, not just the raster
+    /// mesh. `docs/TAA-PLAN.md` Decision 1 has the derivation
+    /// [`composite_perspective_from_view_sheared`](crate::composite_perspective_from_view_sheared)
     /// implements.
+    ///
+    /// # Why this is the default, and what it costs
+    ///
+    /// This knob only does anything once a world has deliberately armed [`AaMode::Taa`], and
+    /// arming TAA only to have it be a no-op on SDF pixels and shadows is a footgun that already
+    /// cost someone a logged investigation. It also REPAIRS a latent inconsistency: without the
+    /// shear the raster is jittered while the reconstruction is not, so the reconstructed `P`
+    /// sits off-surface by a phase-varying amount.
+    ///
+    /// The honest cost, measured rather than argued: the sheared basis is NOT orthonormal
+    /// (`fwd'·right ≈ 6.4e-4` at 900p/60°, shrinking as `1/resolution`), so every raw
+    /// `dot(rd, cam_forward)` consumer accrues first-order error. Bounded and checked:
+    /// `|fwd'| − 1 < 4e-6` (below f32 noise); the CSM cascade-select boundary wobbles 0.03–0.2%
+    /// of a split, i.e. under 1/100 of the 20% `CSM_OVERLAP_PROPORTION` cross-fade band that is
+    /// already blending there; and the SSCS screen-space round-trip is off by ~0.5 px (the jitter
+    /// itself — `project_to_screen` recovers `ndc + jx`, not `ndc`), which temporal accumulation
+    /// averages. [`RasterOnly`](Self::RasterOnly) is the opt-out if a scene ever proves otherwise.
     RasterAndBasis,
 }
 
@@ -373,16 +398,25 @@ pub struct TaaConfig {
 }
 
 impl Default for TaaConfig {
-    /// Every field defaults to the CURRENTLY SHIPPED behaviour — see each field's doc for its
-    /// source. A world that never customizes [`TaaConfig`] resolves to
-    /// [`ResolvedTaa::default`]'s prior hardcoded values (via [`resolve_taa`]) and never opts
-    /// into the C1 basis shear (`jitter_scope == RasterOnly`).
+    /// Every RESOLVE field defaults to the CURRENTLY SHIPPED behaviour — see each field's doc for
+    /// its source — so a world that never customizes [`TaaConfig`] reproduces
+    /// [`ResolvedTaa::default`]'s prior hardcoded values through [`resolve_taa`].
+    ///
+    /// [`jitter_scope`](TaaConfig::jitter_scope) is the ONE deliberate exception: it defaults to
+    /// [`JitterScope::RasterAndBasis`], NOT to the historical `RasterOnly`. See that variant's doc
+    /// for the reasoning and the measured cost. Note this only takes effect once a world has
+    /// deliberately armed [`AaMode`](crate::AaMode)`::Taa` — the AA default is still `Off`, so no
+    /// existing scene moves.
+    ///
+    /// This impl is the ONLY authority on the field's default: [`JitterScope`]'s own `#[default]`
+    /// attribute is not consulted here, so the two are kept in agreement by hand. (They were not,
+    /// briefly, and the enum attribute alone silently changed nothing.)
     #[inline]
     fn default() -> Self {
         Self {
             jitter: JitterSequence::Halton23,
             jitter_samples: 8,
-            jitter_scope: JitterScope::RasterOnly,
+            jitter_scope: JitterScope::RasterAndBasis,
             clamp: ClampShape::Variance,
             clamp_space: ClampSpace::Rgb,
             clip: ClipMode::TowardCenter,
@@ -473,7 +507,13 @@ mod tests {
         let cfg = TaaConfig::default();
         assert_eq!(cfg.jitter, JitterSequence::Halton23);
         assert_eq!(cfg.jitter_samples, 8);
-        assert_eq!(cfg.jitter_scope, JitterScope::RasterOnly);
+        // The ONE knob that deliberately does NOT default to the historical shape: the b5 basis
+        // shear is opt-OUT, not opt-in. Pinned here precisely because the flip is easy to make
+        // silently ineffective -- `TaaConfig`'s Default is a MANUAL impl, so `JitterScope`'s own
+        // `#[default]` attribute is NOT what this reads, and changing only the attribute (as I
+        // first did) compiles, reads correctly, and changes nothing.
+        assert_eq!(cfg.jitter_scope, JitterScope::RasterAndBasis);
+        assert_eq!(JitterScope::default(), cfg.jitter_scope, "the enum attribute and the manual impl must agree");
         assert_eq!(cfg.clamp, ClampShape::Variance);
         assert_eq!(cfg.clamp_space, ClampSpace::Rgb);
         assert_eq!(cfg.clip, ClipMode::TowardCenter);
@@ -488,9 +528,13 @@ mod tests {
         assert_eq!(cfg.depth_tol, 0.02);
         assert_eq!(cfg.sharpen, SharpenMode::None);
         assert!(
-            !cfg.basis_shear_enabled(),
-            "the default config is the 0%-gate (raster-only jitter, matching today)"
+            cfg.basis_shear_enabled(),
+            "the shear is opt-OUT: a world that arms Taa and sets nothing else gets it"
         );
+        // The 0%-gate is NOT this knob -- it is `AaMode::Off`, which is still the AA default and
+        // is what keeps every existing scene byte-identical. `jitter_scope` cannot render anything
+        // on its own; `basis_shear_enabled()` is only ever consulted on an already-armed frame.
+        assert_eq!(crate::AaConfig::default().mode, crate::AaMode::Off);
     }
 
     /// Capability is structural: `basis_shear_enabled` keys ONLY off `jitter_scope`.
