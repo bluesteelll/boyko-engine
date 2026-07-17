@@ -87,6 +87,7 @@ use boyko_rhi_vulkan::goldens::{
     golden_ssao_attributes, golden_ssao_atrous, golden_tile_bound,
 };
 use boyko_rhi_vulkan::brick_atlas::{BrickAtlas, BrickClipmap};
+use boyko_rhi_vulkan::ddgi::DdgiAtlas;
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::memory::BoundBuffer;
 use boyko_rhi_vulkan::present::{AtrousStepRole, MAX_SSAO_ATROUS_LEVELS, ssao_atrous_step};
@@ -184,6 +185,51 @@ impl CsmResolveDummies {
                 location: MemoryLocation::HostVisibleCoherent,
             })
             .expect("shadow-atlas dummy UBO (zeroed ResolvedShadowAtlas)");
+
+        // Both depth-array dummies must be boot-transitioned UNDEFINED → SHADER_READ_ONLY_OPTIMAL
+        // (mirrors `boyko_app::gpu_scene::csm::CsmSceneResources::seed_boot_layouts`) — the resolve
+        // set statically binds them as `SHADER_READ_ONLY_OPTIMAL` combined-image-sampler
+        // descriptors regardless of the 0%-gate never sampling them, so the validator flags an
+        // un-transitioned `UNDEFINED` depth array at submit otherwise.
+        let mut encoder = device
+            .create_command_encoder()
+            .expect("CSM dummy boot-layout command encoder create");
+        let fence = device.create_fence(false).expect("CSM dummy boot-layout fence create");
+        encoder.begin().expect("CSM dummy boot-layout encoder begin");
+        for (texture, layer_count) in [(&cascade, 4u32), (&atlas, 16u32)] {
+            encoder.image_barrier(&ImageBarrierDesc {
+                texture,
+                src_stage: BarrierStage::TOP_OF_PIPE,
+                dst_stage: BarrierStage::COMPUTE_SHADER,
+                src_access: BarrierAccess::NONE,
+                dst_access: BarrierAccess::SHADER_READ,
+                old_layout: ImageLayout::Undefined,
+                new_layout: ImageLayout::ShaderReadOnlyOptimal,
+                range: ImageSubresourceRange {
+                    aspect: ImageAspect::DEPTH,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count,
+                },
+            });
+        }
+        encoder.end().expect("CSM dummy boot-layout encoder end");
+        device
+            .rhi_queue()
+            .submit(&encoder, &fence)
+            .expect("CSM dummy boot-layout submit");
+        device
+            .wait_fence(&fence, u64::MAX)
+            .expect("CSM dummy boot-layout fence wait");
+        // SAFETY: `encoder` and `fence` were created on `device` above; the encoder's ONLY
+        // submission completed (the fence wait just returned), so no GPU work references either;
+        // each is moved by value ⇒ destroyed exactly once.
+        unsafe {
+            device.destroy_command_encoder(encoder);
+            device.destroy_fence(fence);
+        }
+
         Self { cascade, sampler, ubo, atlas, atlas_sampler, atlas_ubo }
     }
 
@@ -213,6 +259,85 @@ impl CsmResolveDummies {
             device.destroy_buffer(self.ubo);
             device.destroy_sampler(self.sampler);
             device.destroy_texture(self.cascade);
+        }
+    }
+}
+
+/// SDFDDGI I0 + Textured-PBR T6a: the OFF-path DDGI probe-atlas pair + grid UBO (bindings
+/// 16/17/18) + the software-only `gPbr` storage image (binding 19) every resolve set must bind
+/// bound-but-unread. The recompiled `deferred_pbr.comp` STATICALLY references `gDdgiIrr`/
+/// `gDdgiDepth` (combined images @16/@17), the `ResolvedDdgi` UBO (@18), and `gPbr` (a STORAGE
+/// image @19), so EVERY resolve layout MUST declare these four bindings and EVERY resolve set
+/// MUST bind valid descriptors — even when `ddgi_mode == 0` (every test scene), where the
+/// resolve's octahedral probe sample never runs (the 0%-gate; the dummies are never sampled).
+/// Bindings 16/17 use the REAL [`DdgiAtlas`] (not a hand-rolled dummy): `DdgiAtlas::create`
+/// already boot-clears + boot-transitions both atlases to `SHADER_READ_ONLY_OPTIMAL`
+/// internally, so no extra barrier code is needed here for them.
+struct DdgiResolveDummies {
+    atlas: DdgiAtlas,
+    ubo: BoundBuffer,
+    // Textured-PBR T6a: the SOFTWARE-ONLY `gPbr` STORAGE image @19 — a 1x1 `R16G16B16A16_SFLOAT`
+    // dummy (its size never dynamically matters, the flag-gated `.Load` behind it is never
+    // reached on every current test scene).
+    pbr: VulkanTexture,
+}
+
+/// The byte size of the zeroed `ResolvedDdgi` grid UBO (bound at resolve binding 18).
+const DDGI_UBO_BYTES: u64 = 48;
+
+impl DdgiResolveDummies {
+    /// Creates the real DDGI probe atlas (boot-cleared + boot-transitioned internally) + the
+    /// zeroed grid UBO + the 1x1 `gPbr` dummy storage image.
+    fn create(device: &VulkanContext) -> Self {
+        let atlas = DdgiAtlas::create(device).expect("SDFDDGI dummy probe atlas");
+        let ubo = device
+            .create_buffer(&BufferDesc {
+                size: DDGI_UBO_BYTES,
+                usage: BufferUsage::UNIFORM,
+                location: MemoryLocation::HostVisibleCoherent,
+            })
+            .expect("SDFDDGI dummy grid UBO (zeroed ResolvedDdgi)");
+        let pbr = device
+            .create_texture(&TextureDesc {
+                width: 1,
+                height: 1,
+                depth: 1,
+                format: Format::R16G16B16A16Sfloat,
+                dimension: TextureDimension::D2,
+                usage: ImageUsage::STORAGE,
+                array_layers: 1,
+                mip_levels: 1,
+                view_format: None,
+            })
+            .expect("Textured-PBR dummy gPbr storage image (1x1 R16G16B16A16_SFLOAT)");
+        Self { atlas, ubo, pbr }
+    }
+
+    /// The four resolve LAYOUT entries this bundle adds: binding 16 (DDGI irradiance combined
+    /// image+sampler), 17 (DDGI depth combined image+sampler), 18 (the `ResolvedDdgi` uniform
+    /// buffer), 19 (`gPbr` storage image). Appended past [`CsmResolveDummies::layout_entries`]'s
+    /// 16 (bindings 0..=15), giving the full 20-binding resolve interface.
+    fn layout_entries() -> [BindGroupLayoutEntry; 4] {
+        [
+            BindGroupLayoutEntry { binding: 16, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+            BindGroupLayoutEntry { binding: 17, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+            BindGroupLayoutEntry { binding: 18, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+            BindGroupLayoutEntry { binding: 19, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+        ]
+    }
+
+    /// Tears the atlas + UBO + `gPbr` dummy down (reverse creation order).
+    ///
+    /// # Safety
+    /// Each resource was created on `device`, its GPU work completed (the caller fence-waited),
+    /// and each is destroyed exactly once here.
+    unsafe fn destroy(self, device: &VulkanContext) {
+        // SAFETY: per the contract `device` is the live context and nothing references these
+        // resources (the caller fence-waited the last submission before calling this).
+        unsafe {
+            device.destroy_texture(self.pbr);
+            device.destroy_buffer(self.ubo);
+            self.atlas.destroy(device);
         }
     }
 }
@@ -1303,10 +1428,22 @@ fn run_gbuffer_hybrid_m4(
         CsmResolveDummies::layout_entries()[1],
         CsmResolveDummies::layout_entries()[2],
         CsmResolveDummies::layout_entries()[3],
+        // SDFDDGI I0: the probe-irradiance combined image @16 + depth combined image @17 + the
+        // `ResolvedDdgi` grid UBO @18 (bound-but-unread; `ddgi_mode == 0` here). Textured-PBR T6a:
+        // the SOFTWARE-ONLY `gPbr` STORAGE image @19 (bound-but-unread, same 0%-gate). Exact-fill
+        // 20/20 — the recompiled resolve STATICALLY references all four, so the layout MUST
+        // declare them.
+        DdgiResolveDummies::layout_entries()[0],
+        DdgiResolveDummies::layout_entries()[1],
+        DdgiResolveDummies::layout_entries()[2],
+        DdgiResolveDummies::layout_entries()[3],
     ];
     // CSM Increment 1b + Shadow Inc-1-GPU: the OFF-path cascade trio @12/@13 + atlas trio @14/@15
     // (bound-but-unread).
     let csm_dummies = CsmResolveDummies::create(device);
+    // SDFDDGI I0 + Textured-PBR T6a: the OFF-path DDGI atlas pair + grid UBO @16/@17/@18 + the
+    // `gPbr` dummy @19 (bound-but-unread).
+    let ddgi_dummies = DdgiResolveDummies::create(device);
     let resolve_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &resolve_layout_entries })
         .expect("deferred resolve bind-group layout");
@@ -1359,6 +1496,20 @@ fn run_gbuffer_hybrid_m4(
                     sampler: &csm_dummies.atlas_sampler,
                 },
                 BindGroupEntry::UniformBuffer { buffer: &csm_dummies.atlas_ubo },
+                // SDFDDGI I0: the probe-irradiance combined image @16 + depth combined image @17 +
+                // the `ResolvedDdgi` grid UBO @18 (bound-but-unread — `ddgi_mode == 0` here).
+                BindGroupEntry::CombinedImage {
+                    texture: ddgi_dummies.atlas.irradiance(),
+                    sampler: ddgi_dummies.atlas.sampler(),
+                },
+                BindGroupEntry::CombinedImage {
+                    texture: ddgi_dummies.atlas.depth(),
+                    sampler: ddgi_dummies.atlas.sampler(),
+                },
+                BindGroupEntry::UniformBuffer { buffer: &ddgi_dummies.ubo },
+                // Textured-PBR T6a: the SOFTWARE-ONLY `gPbr` STORAGE image @19 (bound-but-unread —
+                // the resolve set hits 20/20, exact-fill).
+                BindGroupEntry::StorageImage { texture: &ddgi_dummies.pbr },
             ],
         })
         .expect("deferred resolve bind group");
@@ -1437,7 +1588,11 @@ fn run_gbuffer_hybrid_m4(
     // M1: bind the 1-element identity instance SSBO at set 0 (bound-but-unread — the
     // `use_model_matrix == 0` push selects the VS's legacy arm, byte-identical pixels).
     encoder.bind_descriptor_set(&instance_bind_group, &gfx);
-    encoder.push_graphics_constants(&gfx, ShaderStage::VERTEX, 0, &ortho_mvp_bytes());
+    // BUG 2 fix: the graphics pipeline layout's push-constant range covers VERTEX|FRAGMENT (the
+    // Shadow Phase 5 Inc-2 POINT depth FS widening), so the push call's stage flags must include
+    // both — a VERTEX-only push leaves the range's FRAGMENT bit undeclared, tripping
+    // VUID-vkCmdPushConstants-offset-01795.
+    encoder.push_graphics_constants(&gfx, ShaderStage::VERTEX | ShaderStage::FRAGMENT, 0, &ortho_mvp_bytes());
     encoder.bind_vertex_buffer(&vertex_buffer, 0, 0);
     encoder.set_viewport(&Viewport {
         x: 0.0,
@@ -1488,10 +1643,11 @@ fn run_gbuffer_hybrid_m4(
         });
     }
 
-    // --- The lit output + the Lighting-L0b gViewT lane + the Render P7 SSAO term: UNDEFINED →
-    // GENERAL (r0 does NOT rasterize into these — they stay wholly marcher/resolve-produced;
-    // `ssao` lives in GENERAL its whole life like `viewt`, bound-but-unread under ssao_mode 0). ---
-    for tex in [&lit, &viewt, &ssao] {
+    // --- The lit output + the Lighting-L0b gViewT lane + the Render P7 SSAO term + the
+    // Textured-PBR T6a `gPbr` dummy: UNDEFINED → GENERAL (r0 does NOT rasterize into these — they
+    // stay wholly marcher/resolve-produced; `ssao`/`gPbr` live in GENERAL their whole life like
+    // `viewt`, bound-but-unread under ssao_mode 0 / ddgi_mode 0). ---
+    for tex in [&lit, &viewt, &ssao, &ddgi_dummies.pbr] {
         encoder.image_barrier(&ImageBarrierDesc {
             texture: tex,
             src_stage: BarrierStage::TOP_OF_PIPE,
@@ -1730,6 +1886,9 @@ fn run_gbuffer_hybrid_m4(
         device.destroy_bind_group_layout(bind_layout);
         // CSM Increment 1b: the OFF-path cascade trio bound at resolve @12/@13.
         csm_dummies.destroy(device);
+        // SDFDDGI I0 + Textured-PBR T6a: the OFF-path DDGI atlas pair + grid UBO + `gPbr` dummy
+        // bound at resolve @16/@17/@18/@19.
+        ddgi_dummies.destroy(device);
         device.destroy_graphics_pipeline(gfx);
         // M1 instance-model resources (bind group → buffer → layout, after the pipeline).
         device.destroy_bind_group(instance_bind_group);
@@ -2132,8 +2291,9 @@ fn run_gbuffer_hybrid_ssao(
         })
         .expect("vocabulary bind group");
 
-    // The 16-binding resolve layout (gSsao @11 = the C1 interface; CSM cascade @12/@13; shadow
-    // atlas @14/@15 — the resolve set hits 16/16, the descriptor cap).
+    // The 20-binding resolve layout (gSsao @11 = the C1 interface; CSM cascade @12/@13; shadow
+    // atlas @14/@15; SDFDDGI probe pair + grid UBO @16/@17/@18; Textured-PBR `gPbr` @19 — the
+    // resolve set hits 20/20, the descriptor cap).
     let resolve_kinds = [
         DescriptorKind::StorageImage, DescriptorKind::StorageImage, DescriptorKind::StorageImage,
         DescriptorKind::StorageImage, DescriptorKind::StorageBuffer, DescriptorKind::UniformBuffer,
@@ -2143,6 +2303,11 @@ fn run_gbuffer_hybrid_ssao(
         DescriptorKind::CombinedImageSampler, DescriptorKind::UniformBuffer,
         // Shadow Inc-1-GPU: the atlas combined map+sampler @14 + the atlas UBO @15.
         DescriptorKind::CombinedImageSampler, DescriptorKind::UniformBuffer,
+        // SDFDDGI I0: the probe-irradiance combined image @16 + depth combined image @17 + the
+        // `ResolvedDdgi` grid UBO @18.
+        DescriptorKind::CombinedImageSampler, DescriptorKind::CombinedImageSampler, DescriptorKind::UniformBuffer,
+        // Textured-PBR T6a: the SOFTWARE-ONLY `gPbr` STORAGE image @19.
+        DescriptorKind::StorageImage,
     ];
     let resolve_layout_entries: Vec<BindGroupLayoutEntry> = resolve_kinds
         .iter()
@@ -2151,6 +2316,9 @@ fn run_gbuffer_hybrid_ssao(
         .collect();
     // CSM Increment 1b: the OFF-path cascade trio bound at resolve @12/@13 (bound-but-unread).
     let csm_dummies = CsmResolveDummies::create(device);
+    // SDFDDGI I0 + Textured-PBR T6a: the OFF-path DDGI atlas pair + grid UBO @16/@17/@18 + the
+    // `gPbr` dummy @19 (bound-but-unread).
+    let ddgi_dummies = DdgiResolveDummies::create(device);
     let resolve_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &resolve_layout_entries })
         .expect("deferred resolve bind-group layout");
@@ -2195,6 +2363,20 @@ fn run_gbuffer_hybrid_ssao(
                     sampler: &csm_dummies.atlas_sampler,
                 },
                 BindGroupEntry::UniformBuffer { buffer: &csm_dummies.atlas_ubo },
+                // SDFDDGI I0: the probe-irradiance combined image @16 + depth combined image @17 +
+                // the `ResolvedDdgi` grid UBO @18 (bound-but-unread — `ddgi_mode == 0` here).
+                BindGroupEntry::CombinedImage {
+                    texture: ddgi_dummies.atlas.irradiance(),
+                    sampler: ddgi_dummies.atlas.sampler(),
+                },
+                BindGroupEntry::CombinedImage {
+                    texture: ddgi_dummies.atlas.depth(),
+                    sampler: ddgi_dummies.atlas.sampler(),
+                },
+                BindGroupEntry::UniformBuffer { buffer: &ddgi_dummies.ubo },
+                // Textured-PBR T6a: the SOFTWARE-ONLY `gPbr` STORAGE image @19 (bound-but-unread —
+                // the resolve set hits 20/20, exact-fill).
+                BindGroupEntry::StorageImage { texture: &ddgi_dummies.pbr },
             ],
         })
         .expect("deferred resolve bind group");
@@ -2383,7 +2565,10 @@ fn run_gbuffer_hybrid_ssao(
     // M1: bind the 1-element identity instance SSBO at set 0 (bound-but-unread — the
     // `use_model_matrix == 0` push selects the VS's legacy arm, byte-identical pixels).
     encoder.bind_descriptor_set(&instance_bind_group, &gfx);
-    encoder.push_graphics_constants(&gfx, ShaderStage::VERTEX, 0, &ortho_mvp_bytes());
+    // BUG 2 fix: the graphics pipeline layout's push-constant range covers VERTEX|FRAGMENT (the
+    // Shadow Phase 5 Inc-2 POINT depth FS widening); a VERTEX-only push trips
+    // VUID-vkCmdPushConstants-offset-01795.
+    encoder.push_graphics_constants(&gfx, ShaderStage::VERTEX | ShaderStage::FRAGMENT, 0, &ortho_mvp_bytes());
     encoder.bind_vertex_buffer(&vertex_buffer, 0, 0);
     encoder.set_viewport(&Viewport { x: 0.0, y: 0.0, width: SDF_IMG_W as f32, height: SDF_IMG_H as f32, min_depth: 0.0, max_depth: 1.0 });
     encoder.set_scissor(&full);
@@ -2412,9 +2597,10 @@ fn run_gbuffer_hybrid_ssao(
             range: ImageSubresourceRange::COLOR,
         });
     }
-    // lit + gViewT + ssao: UNDEFINED → GENERAL (the marcher stores gViewT, the resolve stores lit,
-    // the SSAO pass stores ssao — all in GENERAL).
-    for tex in [&lit, &viewt, &ssao] {
+    // lit + gViewT + ssao + the SDFDDGI/Textured-PBR `gPbr` dummy: UNDEFINED → GENERAL (the
+    // marcher stores gViewT, the resolve stores lit, the SSAO pass stores ssao, `gPbr` is
+    // bound-but-unread — all in GENERAL).
+    for tex in [&lit, &viewt, &ssao, &ddgi_dummies.pbr] {
         encoder.image_barrier(&ImageBarrierDesc {
             texture: tex,
             src_stage: BarrierStage::TOP_OF_PIPE,
@@ -2623,6 +2809,9 @@ fn run_gbuffer_hybrid_ssao(
         device.destroy_bind_group_layout(bind_layout);
         // CSM Increment 1b: the OFF-path cascade trio bound at resolve @12/@13.
         csm_dummies.destroy(device);
+        // SDFDDGI I0 + Textured-PBR T6a: the OFF-path DDGI atlas pair + grid UBO + `gPbr` dummy
+        // bound at resolve @16/@17/@18/@19.
+        ddgi_dummies.destroy(device);
         device.destroy_graphics_pipeline(gfx);
         // M1 instance-model resources (bind group → buffer → layout, after the pipeline).
         device.destroy_bind_group(instance_bind_group);
@@ -5592,10 +5781,21 @@ fn run_gbuffer_hybrid_lit_clustered(
         CsmResolveDummies::layout_entries()[1],
         CsmResolveDummies::layout_entries()[2],
         CsmResolveDummies::layout_entries()[3],
+        // SDFDDGI I0: the probe-irradiance combined image @16 + depth combined image @17 + the
+        // `ResolvedDdgi` grid UBO @18 (bound-but-unread; `ddgi_mode == 0` here). Textured-PBR T6a:
+        // the SOFTWARE-ONLY `gPbr` STORAGE image @19 (bound-but-unread, same 0%-gate). Exact-fill
+        // 20/20.
+        DdgiResolveDummies::layout_entries()[0],
+        DdgiResolveDummies::layout_entries()[1],
+        DdgiResolveDummies::layout_entries()[2],
+        DdgiResolveDummies::layout_entries()[3],
     ];
     // CSM Increment 1b + Shadow Inc-1-GPU: the OFF-path cascade trio @12/@13 + atlas trio @14/@15
     // (bound-but-unread).
     let csm_dummies = CsmResolveDummies::create(device);
+    // SDFDDGI I0 + Textured-PBR T6a: the OFF-path DDGI atlas pair + grid UBO @16/@17/@18 + the
+    // `gPbr` dummy @19 (bound-but-unread).
+    let ddgi_dummies = DdgiResolveDummies::create(device);
     let resolve_layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc { entries: &resolve_layout_entries })
         .expect("deferred resolve bind-group layout");
@@ -5643,6 +5843,20 @@ fn run_gbuffer_hybrid_lit_clustered(
                     sampler: &csm_dummies.atlas_sampler,
                 },
                 BindGroupEntry::UniformBuffer { buffer: &csm_dummies.atlas_ubo },
+                // SDFDDGI I0: the probe-irradiance combined image @16 + depth combined image @17 +
+                // the `ResolvedDdgi` grid UBO @18 (bound-but-unread — `ddgi_mode == 0` here).
+                BindGroupEntry::CombinedImage {
+                    texture: ddgi_dummies.atlas.irradiance(),
+                    sampler: ddgi_dummies.atlas.sampler(),
+                },
+                BindGroupEntry::CombinedImage {
+                    texture: ddgi_dummies.atlas.depth(),
+                    sampler: ddgi_dummies.atlas.sampler(),
+                },
+                BindGroupEntry::UniformBuffer { buffer: &ddgi_dummies.ubo },
+                // Textured-PBR T6a: the SOFTWARE-ONLY `gPbr` STORAGE image @19 (bound-but-unread —
+                // the resolve set hits 20/20, exact-fill).
+                BindGroupEntry::StorageImage { texture: &ddgi_dummies.pbr },
             ],
         })
         .expect("deferred resolve bind group");
@@ -5718,7 +5932,10 @@ fn run_gbuffer_hybrid_lit_clustered(
     // M1: bind the 1-element identity instance SSBO at set 0 (bound-but-unread — the
     // `use_model_matrix == 0` push selects the VS's legacy arm, byte-identical pixels).
     encoder.bind_descriptor_set(&instance_bind_group, &gfx);
-    encoder.push_graphics_constants(&gfx, ShaderStage::VERTEX, 0, &ortho_mvp_bytes());
+    // BUG 2 fix: the graphics pipeline layout's push-constant range covers VERTEX|FRAGMENT (the
+    // Shadow Phase 5 Inc-2 POINT depth FS widening); a VERTEX-only push trips
+    // VUID-vkCmdPushConstants-offset-01795.
+    encoder.push_graphics_constants(&gfx, ShaderStage::VERTEX | ShaderStage::FRAGMENT, 0, &ortho_mvp_bytes());
     encoder.bind_vertex_buffer(&vertex_buffer, 0, 0);
     encoder.set_viewport(&Viewport {
         x: 0.0,
@@ -5759,9 +5976,10 @@ fn run_gbuffer_hybrid_lit_clustered(
         });
     }
 
-    // --- The lit + gViewT + Render P7 SSAO images: UNDEFINED → GENERAL (not rasterized into in
-    // r0; `ssao` lives in GENERAL its whole life, bound-but-unread under ssao_mode 0). ---
-    for tex in [&lit, &viewt, &ssao] {
+    // --- The lit + gViewT + Render P7 SSAO images + the SDFDDGI/Textured-PBR `gPbr` dummy:
+    // UNDEFINED → GENERAL (not rasterized into in r0; `ssao`/`gPbr` live in GENERAL their whole
+    // life, bound-but-unread under ssao_mode 0 / ddgi_mode 0). ---
+    for tex in [&lit, &viewt, &ssao, &ddgi_dummies.pbr] {
         encoder.image_barrier(&ImageBarrierDesc {
             texture: tex,
             src_stage: BarrierStage::TOP_OF_PIPE,
@@ -5999,6 +6217,9 @@ fn run_gbuffer_hybrid_lit_clustered(
         device.destroy_bind_group_layout(bind_layout);
         // CSM Increment 1b: the OFF-path cascade trio bound at resolve @12/@13.
         csm_dummies.destroy(device);
+        // SDFDDGI I0 + Textured-PBR T6a: the OFF-path DDGI atlas pair + grid UBO + `gPbr` dummy
+        // bound at resolve @16/@17/@18/@19.
+        ddgi_dummies.destroy(device);
         device.destroy_graphics_pipeline(gfx);
         // M1 instance-model resources (bind group → buffer → layout, after the pipeline).
         device.destroy_bind_group(instance_bind_group);
