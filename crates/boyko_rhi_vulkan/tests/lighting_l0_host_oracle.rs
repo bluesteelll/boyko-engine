@@ -12,7 +12,7 @@
 //! This file boots NO Vulkan context — it is a pure host-math regression the developer
 //! runs as part of the non-GPU gate (the GPU golden runs separately on the 3060).
 
-use boyko_rhi_vulkan::compute::{PBR_SKY_DIFFUSE};
+use boyko_rhi_vulkan::compute::{pack_rgba, PBR_SKY_DIFFUSE};
 use boyko_rhi_vulkan::goldens::{golden_deferred_resolve, golden_deferred_resolve_table, GoldenLight, GoldenLightHeader, GoldenMaterial, MarcherAttributes};
 
 /// The ray origin passed on the L0a-only path: point/spot lights are absent, so the
@@ -28,6 +28,20 @@ fn degenerate_table(exposure: f32) -> (GoldenLightHeader, Vec<GoldenLight>) {
         GoldenLight::sky(PBR_SKY_DIFFUSE, PBR_SKY_DIFFUSE),
     ];
     (header, lights)
+}
+
+/// A table with NO sky light — a single directional in the L0a block, optionally one punctual.
+/// The mask == 0 background arm then takes its `pack_rgba(base)` pass-through branch (there is no
+/// SKY entry to paint), whatever the exposure or the punctual light: the resolve's
+/// `golden_sky_background(..).unwrap_or_else(|| pack_rgba(base))` returns `None` when the scanned
+/// L0a lights carry no `GOLDEN_LIGHT_KIND_SKY` entry.
+fn no_sky_table(exposure: f32, with_punctual: bool) -> (GoldenLightHeader, Vec<GoldenLight>) {
+    let mut lights = vec![GoldenLight::directional([0.0, 0.0, 1.0], [1.0, 1.0, 1.0], 1.0)];
+    let punctual = if with_punctual { 1 } else { 0 };
+    if with_punctual {
+        lights.push(GoldenLight::point([0.0, 0.0, 1.5], [1.0, 0.9, 0.8], 4000.0, 6.0));
+    }
+    (GoldenLightHeader::new(1, punctual, exposure), lights)
 }
 
 /// A small sweep of synthetic G-buffer attributes covering the SDF-lit branch + the
@@ -144,9 +158,18 @@ fn exposure_above_one_brightens_a_lit_pixel() {
 }
 
 #[test]
-fn mask_zero_passes_base_through_under_any_table() {
-    // The pass-through arm ignores the table entirely (the resolve's 0%-gate).
-    let (header, lights) = degenerate_table(7.0); // exposure irrelevant on this arm
+fn mask_zero_renders_sky_when_present_else_passes_base_through() {
+    // The post-PBR (commit 8e48f7f) contract for the mask == 0 background arm, mirroring
+    // `deferred_pbr.hlsl`'s `if (has_sky) { sky } else { lit = base; }`:
+    //   * NO sky light in the scanned L0a block → pass `base` through UNCHANGED, invariant to
+    //     the directional/punctual lights AND to `header.exposure` (this arm consumes none of
+    //     them — `golden_sky_background` returns `None`, and `pack_rgba(base)` is unscaled).
+    //   * a sky light present → paint the analytic sky (scaled by `header.exposure`), NOT `base`.
+    //
+    // This SUPERSEDES the pre-PBR `mask_zero_passes_base_through_under_any_table`, whose premise
+    // — base pass-through under ANY table — 8e48f7f made false in two ways: a sky table now
+    // paints a sky (ignoring `base`), and `header.exposure` scales it (so it was NOT
+    // table-independent). The genuine, still-true device-free invariant is the CONDITIONAL above.
     let mats = materials();
     let attrs = MarcherAttributes {
         base_rgb: [33, 77, 211],
@@ -158,6 +181,37 @@ fn mask_zero_passes_base_through_under_any_table() {
         view_t: 1.0e30,
     };
     let rd = [0.0, 0.0, -1.0];
-    let got = golden_deferred_resolve_table(attrs, RO_ZERO, rd, &mats, &header, &lights);
-    assert_eq!(got, golden_deferred_resolve(attrs, rd, &mats));
+    // The exact bytes the no-sky arm produces: `pack_rgba(attrs.base_rgb / 255)` — computed the
+    // SAME way the resolve computes its `base`, so this is a byte-identity reference, not a proxy.
+    let base_linear = [
+        attrs.base_rgb[0] as f32 / 255.0,
+        attrs.base_rgb[1] as f32 / 255.0,
+        attrs.base_rgb[2] as f32 / 255.0,
+    ];
+    let base_passthrough = pack_rgba(base_linear);
+
+    // (1) No sky light: `base` passes through unchanged, whatever the exposure or punctual light.
+    for exposure in [1.0_f32, 4.0, 7.0] {
+        for &with_punctual in &[false, true] {
+            let (header, lights) = no_sky_table(exposure, with_punctual);
+            let got = golden_deferred_resolve_table(attrs, RO_ZERO, rd, &mats, &header, &lights);
+            assert_eq!(
+                got, base_passthrough,
+                "mask == 0 with NO sky light must pass base through unchanged \
+                 (exposure={exposure}, punctual={with_punctual}): got 0x{got:08X} \
+                 != 0x{base_passthrough:08X}"
+            );
+        }
+    }
+
+    // (2) A sky light present: the arm PAINTS the sky, so it must differ from the base
+    // pass-through. (The exact sky value's equivalence to the constant path is pinned separately
+    // by `degenerate_table_is_byte_identical_to_the_constant_path`, which also covers mask == 0.)
+    let (header, lights) = degenerate_table(1.0);
+    let sky = golden_deferred_resolve_table(attrs, RO_ZERO, rd, &mats, &header, &lights);
+    assert_ne!(
+        sky, base_passthrough,
+        "a sky light must paint the analytic sky over the mask == 0 arm, not pass base through \
+         (0x{sky:08X})"
+    );
 }
