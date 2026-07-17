@@ -131,7 +131,7 @@ fn banded(current: bool, value: u32, lo: u32, hi: u32) -> bool {
 /// 2. In [`Manual`](crate::light::ClusterSelectMode::Manual) (the default — the 0%-gate):
 ///    leaves `clusters_enabled` untouched (owner-controlled, byte-identical to pre-P1).
 /// 3. In [`Auto`](crate::light::ClusterSelectMode::Auto): applies the
-///    [`CLUSTER_LO`]/[`CLUSTER_HI`] [`banded`] hysteresis to the count and writes the
+///    [`CLUSTER_LO`]/[`CLUSTER_HI`] `banded` hysteresis to the count and writes the
 ///    result to BOTH [`LightStats::cluster_band`] and `clusters_enabled`.
 //
 // `clippy::needless_pass_by_value`: `Query`/`ResMut` are by-value `SystemParam`s

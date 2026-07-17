@@ -275,7 +275,7 @@ impl MeshGeometryTable {
     /// `gMeshMeta[]` row. Returns the slot index (the mesh's `mesh_id`).
     ///
     /// On allocator exhaustion this is an engine invariant violation
-    /// (`debug_assert!`); the release-safe fallback [`exhausted_slot_fallback`] aliases
+    /// (`debug_assert!`); the release-safe fallback `exhausted_slot_fallback` aliases
     /// [`VB_GEOMETRY_RESERVED_SLOT`] (the zero-count degenerate slot) rather than issue
     /// an out-of-range write.
     pub fn register(

@@ -1,5 +1,5 @@
 //! View wiring (S3): the conversion seam from the engine-derived
-//! [`ViewUniform`](boyko_scene::ViewUniform) to the backend-specific view forms.
+//! [`ViewUniform`] to the backend-specific view forms.
 //!
 //! Before S3 each backend hand-fed its own camera: the marcher's
 //! [`CompositePushConstants`] perspective basis (eye + orthonormal basis + FOV)

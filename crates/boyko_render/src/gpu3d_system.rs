@@ -1,9 +1,9 @@
 //! The 3D GPU instance pack system (standard-library Phase S4).
 //!
 //! [`sync_gpu_3d_instances`] packs each visible entity's
-//! [`GlobalTransform`](boyko_scene::GlobalTransform) (the source of truth) plus
-//! its [`MaterialHandle`](boyko_scene::MaterialHandle) into its
-//! [`Gpu3dInstance`](crate::gpu3d_instance::Gpu3dInstance) column. This is the
+//! [`GlobalTransform`] (the source of truth) plus
+//! its [`MaterialHandle`] into its
+//! [`Gpu3dInstance`] column. This is the
 //! EXPLICIT pack step (a transform/write); the zero-copy part is the COLUMN → GPU
 //! upload that the consuming renderer performs via `for_each_chunk` +
 //! `bytemuck::cast_slice` (mirroring the demo's `upload_instances`).
@@ -23,7 +23,7 @@ use crate::gpu3d_instance::Gpu3dInstance;
 ///
 /// The query is filtered on `Enabled<RenderEnabled>`, so a row whose
 /// `RenderEnabled` bit is clear (the path `Visibility::Hidden` takes — see
-/// [`RenderEnabled`](boyko_scene::RenderEnabled)) is skipped branch-free at
+/// [`RenderEnabled`]) is skipped branch-free at
 /// iteration: a Hidden row's `Gpu3dInstance` is NEVER refreshed from a moving
 /// transform. (Whether a Hidden row is also excluded from the *draw* is the
 /// consuming renderer's cull/draw-count policy, out of S4 scope — the column-walk

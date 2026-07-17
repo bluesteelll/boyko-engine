@@ -13,7 +13,7 @@
 //! The raster shaders `#include` nothing, so the literal is DUPLICATED across those two
 //! HLSL files; nothing in the build couples them. [`GBUFFER_T_MAX`] is the host mirror of
 //! the gbuffer fragment's `T_MAX`, and [`assert_gbuffer_marcher_t_max_agree`] (compiled +
-//! exercised by [`t_max_sync_pin_holds`]) FAILS THE TEST if the two host constants ever
+//! exercised by `t_max_sync_pin_holds`) FAILS THE TEST if the two host constants ever
 //! drift — turning a silent HLSL drift into a caught build/test failure.
 //!
 //! # Why this is load-bearing NOW (and was not before M1)

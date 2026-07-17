@@ -11,15 +11,15 @@ use crate::light_reconcile::light_reconcile;
 use crate::light_system::{LightTableGeneration, collect_lights, evict_light, light_seed_state};
 use crate::shadow_atlas::{PunctualResolveSet, PunctualSlotAssignment};
 
-/// Registers [`light_reconcile`](crate::light_reconcile::light_reconcile) BEFORE
-/// [`collect_lights`](crate::light_system::collect_lights), plus the
+/// Registers [`light_reconcile`] BEFORE
+/// [`collect_lights`], plus the
 /// [`LightEnabled`](crate::light::LightEnabled) runtime on/off machinery (the
 /// [`LightSeedState`](crate::light_system::LightSeedState) exclusive seed and the
 /// `on_remove` eviction hooks).
 ///
 /// # Registration-first ordering invariant (hooks)
 ///
-/// The eviction hooks ([`evict_light`](crate::light_system::evict_light)) are registered
+/// The eviction hooks ([`evict_light`]) are registered
 /// as the **FIRST** action of `build`, BEFORE any system registration or resource insert.
 /// `register_component_hooks` panics `AlreadyArchetyped` if the component was EVER placed
 /// in any archetype of any world in the process (the gate is process-global and never

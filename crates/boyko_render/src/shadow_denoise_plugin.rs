@@ -14,7 +14,7 @@ use crate::shadow_denoise_config::{
 /// Registers the shadow-denoise config substrate: inserts [`ShadowDenoiseConfig`] (default
 /// [`None`](crate::shadow_denoise_config::ShadowDenoiseMode::None) — the 0%-gate) and its
 /// derived [`ResolvedShadowDenoise`] companion, and schedules the cold
-/// [`resolve_shadow_denoise_policy`](crate::shadow_denoise_config::resolve_shadow_denoise_policy)
+/// [`resolve_shadow_denoise_policy`]
 /// (the SINGLE writer of `ResolvedShadowDenoise`).
 ///
 /// # Mirror of [`SsaoPlugin`](crate::ssao_plugin::SsaoPlugin)

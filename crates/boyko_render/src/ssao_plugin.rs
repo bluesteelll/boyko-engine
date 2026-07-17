@@ -11,7 +11,7 @@ use crate::ssao_config::{ResolvedSsao, SsaoConfig, resolve_ssao_policy};
 /// Registers the SSAO config substrate: inserts [`SsaoConfig`] (default
 /// [`Off`](crate::ssao_config::SsaoQuality::Off) — the 0%-gate) and its derived
 /// [`ResolvedSsao`] companion, and schedules the cold
-/// [`resolve_ssao_policy`](crate::ssao_config::resolve_ssao_policy) (the SINGLE writer of
+/// [`resolve_ssao_policy`] (the SINGLE writer of
 /// `ResolvedSsao`).
 ///
 /// # Mirror of [`LightingPlugin`](crate::light_plugin::LightingPlugin)

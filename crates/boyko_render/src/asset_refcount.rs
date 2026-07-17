@@ -2,7 +2,8 @@
 //! [`RefcountDeltas`](boyko_scene::RefcountDeltas) (pushed by the
 //! `MeshHandle`/`MaterialHandle` carrier hooks in `boyko_scene::render_caps`)
 //! into the two GPU asset tables (asset-streaming plan F2 §1/§3, gen-checked
-//! as of F5), plus [`validate_asset_refs`] (F5's best-effort staleness net),
+//! as of F5), plus [`validate_asset_refs`](crate::asset_refcount::validate_asset_refs)
+//! (F5's best-effort staleness net),
 //! [`retire_deferred_frees`] (F6's fence-gated device-free drain), and the
 //! [`AssetRefcountPlugin`] that wires the resources + both systems into the
 //! app schedule.
@@ -34,9 +35,8 @@ use crate::texture::OrphanedTextureGpu;
 
 /// The fence-gated retire delay (asset-streaming plan F6 Decision 1): a row
 /// enqueued at submission-epoch `N` is safe to free once the host observes
-/// `epoch >= N + RETIRE_DELAY`. Pinned to
-/// [`FRAMES_IN_FLIGHT`](boyko_rhi_vulkan::swapchain::FRAMES_IN_FLIGHT) — the
-/// exact fence horizon `wait_frame_in_flight` guarantees (see
+/// `epoch >= N + RETIRE_DELAY`. Pinned to [`FRAMES_IN_FLIGHT`] — the exact
+/// fence horizon `wait_frame_in_flight` guarantees (see
 /// [`retire_deferred_frees`]'s doc for the full proof). If the TLAS ever
 /// becomes persistent/compacted across frames, or an async-compute queue with
 /// an independent fence references BLAS/buffers, `RETIRE_DELAY` MUST grow
@@ -57,8 +57,8 @@ pub struct RenderEpoch(pub u64);
 /// Drains [`RefcountDeltas`] and folds each delta into the matching
 /// `Assets<T>` table's refcount (asset-streaming plan F2 §1, gen-checked as of
 /// F5): `+1` calls [`Assets::inc_ref`] and (regardless of its result — see
-/// [`apply_one`]'s doc) re-syncs the carrier's `MeshRefGen`/`MaterialRefGen`
-/// lane via a deferred, generation-checked [`SyncRefGenCommand`] (churn-safe —
+/// `apply_one`'s doc) re-syncs the carrier's `MeshRefGen`/`MaterialRefGen`
+/// lane via a deferred, generation-checked `SyncRefGenCommand` (churn-safe —
 /// see that command's doc for why a plain `Commands::entity(...).insert(...)`
 /// is unsound here); `-1` calls [`Assets::dec_ref`] with the delta's captured
 /// bind-generation. A `dec_ref` that returns a retire ticket is enqueued into

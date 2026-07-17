@@ -4,7 +4,8 @@
 //! This is the Principle-0 heart of M3: the instanced draw is driven by the
 //! [`MeshHandle`](boyko_scene::render_caps::MeshHandle) +
 //! [`InstanceModelCol`](crate::instance_model::InstanceModelCol) of SPAWNED ENTITIES
-//! — read through an ECS [`Query`] — NOT by a test-built buffer. The gather buckets
+//! — read through an ECS [`Query`](boyko_ecs::ecs::core::iters::query::Query) — NOT by
+//! a test-built buffer. The gather buckets
 //! every visible instance by its mesh id into ONE contiguous instance ring (so each
 //! mesh draws ALL its instances in a single `vkCmdDrawIndexed`), and emits a
 //! [`DrawBatch`] per non-empty mesh carrying that bucket's `base_instance` offset
@@ -29,8 +30,9 @@
 //! [`pool_reserve_rows`](boyko_ecs::ecs::constants::pool_reserve_rows) of its element
 //! size — the same VA-reservation-class (address-space-only, lazy-commit) ceiling every
 //! other kernel column uses, so there is no fixed `MAX_MESHES`/instance-count cap in
-//! practice. The scratch is a reused [`Resource`], NOT an ad-hoc buffer (the
-//! [`UiRenderScratch`](crate::ui::UiRenderScratch) precedent, Principle 5).
+//! practice. The scratch is a reused [`Resource`](boyko_macros::Resource), NOT an
+//! ad-hoc buffer (the [`UiRenderScratch`](crate::ui::UiRenderScratch) precedent,
+//! Principle 5).
 //!
 //! # The per-instance mesh-id lane (M3 → HW-RT, TLAS-readiness)
 //!
@@ -78,7 +80,7 @@ use crate::mesh_geometry_table::VB_GEOMETRY_RESERVED_SLOT;
 pub struct DrawBatch {
     /// The mesh this batch draws (`MeshHandle.0`) — the consumer resolves it to GPU
     /// buffers via the world's `Assets<MeshGpu>` table
-    /// ([`MeshAssetsExt`](crate::mesh_assets::MeshAssetsExt)).
+    /// ([`MeshAssetsExt`]).
     pub mesh_id: u32,
     /// The mesh's index count (`vkCmdDrawIndexed`'s `index_count`), copied from the
     /// asset table at gather time so the recorder reads it without a second lookup.
@@ -381,7 +383,7 @@ pub struct MeshRenderScratch {
     /// Multi-paradigm render-path plan, rung R8 (Decision 0): the VB-path instance ring —
     /// `vb_ring[i]` is [`ring`](Self::ring) instance `i`'s affine PLUS its resolved
     /// geometry-table `mesh_id` ([`VbInstanceRow`]), built by
-    /// [`sync_vb_instance_ring`](Self::sync_vb_instance_ring) ONLY when the boot-resolved path
+    /// `sync_vb_instance_ring` ONLY when the boot-resolved path
     /// is `VisibilityBuffer` — a Deferred/Forward boot never calls it, so this lane stays empty
     /// (the zero-cost path-toggle discipline: an unused `ScratchColumn` costs an unbacked VA
     /// reservation, no committed pages). `clear()` + scatter, backing reservation persists.
@@ -921,10 +923,9 @@ impl MeshRenderScratch {
     /// Textured-PBR rung T6c: scatters the per-instance TEXTURED material payload
     /// ([`PerInstanceMaterialTex`]) INDEX-ALIGNED with [`ring`](Self::ring), re-using
     /// the offsets [`gather_mixed_into`](Self::gather_mixed_into) just computed — the
-    /// SAME index-alignment guarantee
-    /// [`gather_prev_ring_into`](Self::gather_prev_ring_into) documents (the SAME
-    /// `offsets`, the SAME per-mesh cursor advance via a PRIVATE cursor lane
-    /// ([`material_tex_cursors`](Self::material_tex_cursors)), the SAME `counts[m] ==
+    /// SAME index-alignment guarantee `gather_prev_ring_into` (feature = "hwrt")
+    /// documents (the SAME `offsets`, the SAME per-mesh cursor advance via a PRIVATE
+    /// cursor lane (`material_tex_cursors`), the SAME `counts[m] ==
     /// 0` skip). Call IMMEDIATELY after `gather_mixed_into` on the SAME frame, with a
     /// factory yielding the SAME `(mesh_id, material_id)` rows — `material_id` is the
     /// row's ALREADY-CLAMPED id, computed the same way [`gather_mesh_draws`]'s closure
@@ -943,7 +944,8 @@ impl MeshRenderScratch {
     ///
     /// Called from [`gather_mesh_draws`] right after the affine gather (mirrors the
     /// HW-RT `gather_prev_ring_into` call-site pattern); the existing `material_ids`
-    /// scatter in [`gather_mixed_into`] is untouched by this method.
+    /// scatter in [`gather_mixed_into`](Self::gather_mixed_into) is untouched by this
+    /// method.
     pub fn gather_material_tex_into<F, J>(
         &mut self,
         materials: &Assets<Material>,
@@ -1029,7 +1031,7 @@ impl MeshRenderScratch {
 }
 
 /// Multi-paradigm render-path plan, rung R8 (Decision 0): the ECS-native SYSTEM wrapper over
-/// [`MeshRenderScratch::sync_vb_instance_ring`] — a `NonSendRes<Assets<MeshGpu>>` + a
+/// `MeshRenderScratch::sync_vb_instance_ring` — a `NonSendRes<Assets<MeshGpu>>` + a
 /// `ResMut<MeshRenderScratch>` are TWO DISJOINT resources (a NonSend asset table and a plain
 /// Resource), so the scheduler's own disjoint-borrow machinery is what makes calling THIS
 /// system sound; a manual `World::resource_mut` + `World::non_send_resource` pair through the
@@ -1095,7 +1097,7 @@ pub fn sync_vb_instance_ring_system(
 /// `Option`, so it never restricts archetype matching — a scene without the column yields
 /// `None` for every row). Immediately after the unified gather the system re-scatters that
 /// prev column INDEX-ALIGNED with the ring via
-/// [`gather_prev_ring_into`](MeshRenderScratch::gather_prev_ring_into) (reusing the SAME
+/// `MeshRenderScratch::gather_prev_ring_into` (reusing the SAME
 /// offsets over the SAME query order — alignment guaranteed by construction). A row without
 /// a prev column falls back to its current affine (camera-only motion). The prev ring is
 /// bound by the gbuffer MV pipeline only when the temporal denoiser is on; otherwise it is

@@ -485,9 +485,9 @@ impl Drop for RhiContext {
     /// owned OUTSIDE the manager, so without this they would leak past Drop).
     ///
     /// Mode split (host plan R2): after this body runs, the
-    /// [`DeviceHandle::Owned`] field drop destroys the device / instance /
+    /// `DeviceHandle::Owned` field drop destroys the device / instance /
     /// loader — byte-for-byte the pre-R2 semantics — while the
-    /// [`DeviceHandle::Shared`] field drop releases only the `&'static`
+    /// `DeviceHandle::Shared` field drop releases only the `&'static`
     /// reference and NEVER touches the device lifecycle (the host ends it with
     /// [`VulkanContext::destroy_singleton`]).
     fn drop(&mut self) {

@@ -43,7 +43,7 @@
 //! (`boyko_app::EnginePlugins`, alongside `sync_csm_light_gate`/`sync_punctual_light_gate`),
 //! not by [`SsaoPlugin`](crate::ssao_plugin::SsaoPlugin) itself — the SAME cross-plugin
 //! registration discipline those two systems document (it bridges this plugin's
-//! [`SsaoConfig`] and `LightingPlugin`'s [`LightingConfig`](crate::light::LightingConfig)).
+//! [`SsaoConfig`] and `LightingPlugin`'s [`LightingConfig`]).
 
 use boyko_macros::Resource;
 
@@ -104,7 +104,7 @@ pub const MAX_SSAO_ATROUS_LEVELS: u32 = 5;
 
 /// The global SSAO config (Render P7-Q2 TASK 3 + the à-trous denoise follow-up) — a
 /// `World`-singleton Resource the owner sets, the SSAO analogue of
-/// [`LightingConfig`](crate::light::LightingConfig). Carries the [`SsaoQuality`] knob
+/// [`LightingConfig`]. Carries the [`SsaoQuality`] knob
 /// (enablement is structural: `quality != Off`) plus the à-trous denoise pass count.
 ///
 /// `#[derive(Resource)]` via [`boyko_macros::Resource`] (the same derive path
@@ -225,7 +225,7 @@ pub fn resolve_ssao(cfg: &SsaoConfig) -> ResolvedSsao {
 /// [`crate::light_policy`]. It is the SINGLE owner of [`ResolvedSsao`] (the one-producer
 /// write discipline) and runs at the gather/setup boundary, scheduled BEFORE the render
 /// point so the fresh selection feeds the SAME frame (the `.before` registration in
-/// [`SsaoPlugin`]).
+/// [`SsaoPlugin`](crate::ssao_plugin::SsaoPlugin)).
 ///
 /// Cold by construction (zero hot-path cost): the per-pixel SSAO cost is ZERO per variant
 /// (Mechanism C — the loop bounds are baked `static const`), and this policy is a single

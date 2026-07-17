@@ -10,7 +10,8 @@ use crate::mesh::Vertex;
 /// pre-A3b `()` placeholder now that a real mesh loader
 /// ([`ObjMeshLoader`](crate::loaders::ObjMeshLoader)) exists.
 ///
-/// Plain owned `Vec`s (`Send + 'static`, satisfying [`Asset::Cpu`]'s bound):
+/// Plain owned `Vec`s (`Send + 'static`, satisfying
+/// [`Asset::Cpu`](boyko_ecs::ecs::core::asset::Asset::Cpu)'s bound):
 /// a loader decodes raw file bytes into this on any thread (a future
 /// threadpool-dispatched decode, rung A5), and the GPU-upload pass
 /// ([`GpuUpload`](crate::gpu_upload::GpuUpload) for [`MeshGpu`](crate::mesh::MeshGpu))

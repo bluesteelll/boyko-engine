@@ -421,7 +421,7 @@ pub const DDGI_MODE_BIT: u32 = 4;
 /// The resolve's output-stage tonemap curve — packed into light-header word 7
 /// bits [`TONEMAP_MODE_SHIFT`..+4) by [`LightHeaderGpu::new`]. `#[repr(u32)]` so
 /// `self as u32` is the wire value. `Aces` = 0 ⇒ zero bits ⇒ word 7 byte-identical
-/// on every default scene (the 0%-gate). All curves are linear-in → linear[0,1]-out;
+/// on every default scene (the 0%-gate). All curves are linear-in → linear-\[0,1\]-out;
 /// the shared manual OETF (`pow(x, 1/2.2)`) is applied after, unchanged.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -638,7 +638,7 @@ pub const CLUSTER_FAR_DEFAULT: f32 = 50.0;
 /// The L1 cluster cull config (Decision 6) — a `World`-singleton resource. Carries the
 /// froxel grid dimensions, the per-froxel / flat-list capacities, and the exp-Z near/far
 /// the slice math derives its scale/bias from. The defaults reproduce the
-/// [`CLUSTER_DIM_*`] / [`MAX_LIGHTS_PER_CLUSTER`] / [`INDEX_LIST_CAP`] constants; a world
+/// `CLUSTER_DIM_*` / [`MAX_LIGHTS_PER_CLUSTER`] / [`INDEX_LIST_CAP`] constants; a world
 /// that never inserts a custom config uses them.
 #[derive(Resource, Clone, Copy, Debug, PartialEq)]
 pub struct ClusterConfig {

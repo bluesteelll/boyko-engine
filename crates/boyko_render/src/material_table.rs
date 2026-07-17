@@ -365,7 +365,7 @@ impl MaterialTable {
     /// # Zero-fill before re-seed (O2)
     ///
     /// The new table/staging buffers are `write_bytes(0)`-cleared BEFORE
-    /// [`seed_rows`](Self::seed_rows) writes the live rows — this covers both the
+    /// `seed_rows` writes the live rows — this covers both the
     /// newly-grown hole `[old_cap, new_cap)` and any freed (`Retiring`/`Vacant`) slot
     /// below `old_cap`, mirroring [`boot_seed`](Self::boot_seed)'s own zero-then-seed
     /// order. `seed_rows` iterates [`Assets::iter`](boyko_ecs::ecs::core::asset::Assets::iter),

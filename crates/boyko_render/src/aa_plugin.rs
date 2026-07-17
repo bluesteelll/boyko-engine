@@ -17,7 +17,7 @@ use crate::taa_state::TaaState;
 
 /// Registers the anti-aliasing config substrate: inserts [`AaConfig`] (default
 /// [`Off`](crate::aa_config::AaMode::Off) — the 0%-gate) and its derived [`ResolvedAa`]
-/// companion, and schedules the cold [`resolve_aa_policy`](crate::aa_config::resolve_aa_policy)
+/// companion, and schedules the cold [`resolve_aa_policy`]
 /// (the SINGLE writer of `ResolvedAa`).
 ///
 /// # Mirror of [`SsaoPlugin`](crate::ssao_plugin::SsaoPlugin)

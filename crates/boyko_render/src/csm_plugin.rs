@@ -11,7 +11,7 @@ use crate::csm_config::{
 
 /// Registers the CSM config substrate: inserts [`CsmConfig`] (default DISABLED —
 /// `cascade_count == 0`, the 0%-gate) and its derived [`ResolvedCsm`] companion, and
-/// schedules the cold [`resolve_csm_cascades`](crate::csm_config::resolve_csm_cascades)
+/// schedules the cold [`resolve_csm_cascades`]
 /// (the SINGLE writer of `ResolvedCsm`).
 ///
 /// # Mirror of [`SsaoPlugin`](crate::ssao_plugin::SsaoPlugin)

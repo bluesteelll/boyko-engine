@@ -149,8 +149,8 @@ pub fn sync_instance_model_cols(
 /// (`gbuffer_mrt_mv`, the `motion_vec` target, `MotionVecResources` in `boyko_app`) stays
 /// `#[cfg(feature = "hwrt")]`-gated, unchanged, AND — unlike `MotionCam`, whose upload fn
 /// ([`crate::upload_motion_cam_ring`]) was un-walled alongside it — this type's own upload fn
-/// ([`crate::upload_prev_instance_models`]) STAYS `hwrt`-gated: it reads
-/// [`crate::MeshRenderScratch::prev_ring`], a SEPARATE `hwrt`-only wall in `mesh_draw.rs` this
+/// (`upload_prev_instance_models`) STAYS `hwrt`-gated: it reads
+/// `MeshRenderScratch::prev_ring`, a SEPARATE `hwrt`-only wall in `mesh_draw.rs` this
 /// rung does not touch (see the D1 report for why). No plugin adds this column to any archetype
 /// on either leg yet, so the 0%-gate ([`sync_prev_instance_model_cols`]'s own doc) holds
 /// byte-identically on BOTH legs: zero matching archetypes ⇒ zero work, regardless of `hwrt`.
@@ -211,7 +211,7 @@ pub fn sync_prev_instance_model_cols(
 ///
 /// # Reachable as of rung R8
 ///
-/// [`crate::mesh_draw::MeshRenderScratch::sync_vb_instance_ring`] builds a ring of these rows
+/// `MeshRenderScratch::sync_vb_instance_ring` builds a ring of these rows
 /// (from the SAME `ring`/`mesh_ids` gather output [`InstanceModelCol`]'s own scatter
 /// populates) on a `VisibilityBuffer`-resolved boot; `boyko_render::upload::
 /// upload_vb_instance_rows` uploads it into `GpuSceneBundles::vb_instance_rings`. Deferred/

@@ -8,7 +8,7 @@ use boyko_ecs::ecs::core::app::{App, Plugin};
 use crate::gpu3d_system::sync_gpu_3d_instances;
 
 /// Registers
-/// [`sync_gpu_3d_instances`](crate::gpu3d_system::sync_gpu_3d_instances) — the
+/// [`sync_gpu_3d_instances`] — the
 /// system that packs each visible entity's `GlobalTransform` into its
 /// `Gpu3dInstance` column for upload.
 ///

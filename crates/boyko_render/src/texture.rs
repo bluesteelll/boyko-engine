@@ -2,15 +2,18 @@
 //! record (textured-PBR campaign rung T2).
 //!
 //! Mirrors [`MeshGpu`](crate::mesh::MeshGpu) / [`mesh_assets`](crate::mesh_assets)'s
-//! shape: [`TextureGpu`] OWNS its RHI [`VulkanTexture`] directly (Principle 0's
+//! shape: [`TextureGpu`] OWNS its RHI
+//! [`VulkanTexture`](boyko_rhi_vulkan::texture::VulkanTexture) directly (Principle 0's
 //! FFI/GPU exception — the same class as a mesh's vertex/index buffers), so
-//! [`Assets<TextureGpu>`] itself IS the GPU-resident table (no separate mirror). The
+//! [`Assets<TextureGpu>`](boyko_ecs::ecs::core::asset::Assets) itself IS the GPU-resident
+//! table (no separate mirror). The
 //! mint/resolve/teardown domain API ([`TextureAssetsExt`]) is attached via an
 //! extension trait, exactly as [`MeshAssetsExt`](crate::mesh_assets::MeshAssetsExt).
 //!
 //! # Live wiring (textured-PBR T6b/T6c/T7)
 //!
-//! [`Assets<TextureGpu>`] / [`BindlessTextureTable`] are registered as `NonSend`
+//! [`Assets<TextureGpu>`](boyko_ecs::ecs::core::asset::Assets) /
+//! [`BindlessTextureTable`] are registered as `NonSend`
 //! resources by `boyko_app::runner` at boot (T6b); the bindless descriptor set is bound
 //! at set 1 by the TEXTURED raster pipeline (T6c, `gbuffer_mrt_tex.{vs,fs}`).
 //! [`TextureAssetsExt::register_texture`] / [`build_texture_gpu`] / [`GpuUpload`] for

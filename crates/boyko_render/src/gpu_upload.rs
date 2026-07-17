@@ -1,4 +1,5 @@
-//! [`GpuUpload`] — the trait a GPU-resident [`Asset`] implements to turn its
+//! [`GpuUpload`] — the trait a GPU-resident
+//! [`Asset`](boyko_ecs::ecs::core::asset::Asset) implements to turn its
 //! decoded CPU intermediate into a resident record, plus the generic
 //! [`upload_assets`] drain that drives it, the concrete [`MeshGpu`] /
 //! [`Material`] / [`TextureGpu`] impls, and the three boot one-shot drains
@@ -21,7 +22,7 @@ use crate::texture::{TextureGpu, build_texture_gpu};
 use crate::texture_data::TextureData;
 
 /// A GPU-resident [`Asset`] that can turn its decoded
-/// [`Asset::Cpu`](boyko_ecs::ecs::core::asset::Asset::Cpu) intermediate into
+/// [`Asset::Cpu`] intermediate into
 /// a resident record on the device.
 ///
 /// `Aux` is the per-asset-type mutable context an upload needs beyond the

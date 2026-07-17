@@ -5,7 +5,8 @@
 //! slot's PREVIOUS OCCUPANT (frame N−2 under `FRAMES_IN_FLIGHT == 2`) unless
 //! the slot's in-flight fence was waited first — the `80bf033` motion-shadow
 //! race class. These upload fns therefore demand a borrowed
-//! [`FrameWriteToken`], mintable ONLY by `Renderer::wait_frame_in_flight`
+//! [`FrameWriteToken`](boyko_rhi_vulkan::swapchain::FrameWriteToken), mintable ONLY by
+//! `Renderer::wait_frame_in_flight`
 //! (or the audited `forge_unfenced` setup hatch): the fence proof is a
 //! compile-time precondition, not a convention. The caller (the `boyko_app`
 //! runner — the "WHEN" side) selects `ring[token.slot()]` and passes that slot
@@ -13,7 +14,8 @@
 //!
 //! # Why these are `unsafe fn` (review P1)
 //!
-//! [`BoundBuffer`]'s fields are public, so SAFE code can construct one whose
+//! [`BoundBuffer`](boyko_rhi_vulkan::memory::BoundBuffer)'s fields are public, so SAFE
+//! code can construct one whose
 //! `mapped` dangles or whose `size` overstates the mapping — a safe fn writing
 //! through it would be unsound by definition. The memory precondition (a live
 //! host-visible mapping of at least `size` bytes) is therefore an explicit
@@ -239,14 +241,14 @@ pub unsafe fn upload_instance_models(
 /// Multi-paradigm render-path plan, rung R8 (Decision 0): uploads the gathered 64-byte
 /// [`VbInstanceRow`](crate::instance_model::VbInstanceRow) VB-path instance ring
 /// ([`MeshRenderScratch::vb_ring`], built by
-/// [`MeshRenderScratch::sync_vb_instance_ring`](crate::mesh_draw::MeshRenderScratch::sync_vb_instance_ring))
+/// `MeshRenderScratch::sync_vb_instance_ring`)
 /// into ONE VB instance-SSBO ring slot — mirrors [`upload_instance_models`] exactly (ONE
 /// contiguous `bytemuck` memcpy, zero staging, zero allocation), against a DEDICATED ring
 /// (distinct from the 48-byte `InstanceModelCol` ring [`upload_instance_models`] targets).
 ///
 /// Called ONLY on a `VisibilityBuffer`-resolved boot (the caller's own gate, `boyko_app::runner`
 /// — this fn is unconditionally correct either way, the SAME "call-site decides" discipline
-/// [`MeshRenderScratch::sync_vb_instance_ring`]'s doc states).
+/// `MeshRenderScratch::sync_vb_instance_ring`'s doc states).
 ///
 /// # Panics
 ///
@@ -1248,7 +1250,7 @@ pub unsafe fn upload_atlas_ring(
 /// Encodes `edits` into the marcher's binding-0 edit-list SSBO (`slot`) — the R7 SDF
 /// instance path's ONE-SHOT boot-static write (host plan R7). Word 0 becomes
 /// `edit_count`, then the packed edit array (see
-/// [`encode_edit_list`](boyko_rhi_vulkan::compute::encode_edit_list)); the pixel region
+/// [`encode_edit_list`]); the pixel region
 /// past the array is left as the boot seed wrote it (the shader owns those words).
 ///
 /// # Why NOT a per-slot ring (unlike the sibling uploads)

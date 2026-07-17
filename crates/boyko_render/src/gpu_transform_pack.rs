@@ -98,8 +98,9 @@ pub fn pack_gpu_transforms(
 /// The pack MUST run AFTER the physics scene-sync tail
 /// (`sync_body_to_transform` — the sole writer of a dynamic root's post-solve
 /// `Transform`) so `curr` captures the integrated pose, and once per fixed substep
-/// (register it in [`CoreSchedule::Fixed`]). The caller chains the edge on the
-/// returned handle:
+/// (register it in
+/// [`CoreSchedule::Fixed`](boyko_ecs::ecs::core::app::app::CoreSchedule::Fixed)). The
+/// caller chains the edge on the returned handle:
 ///
 /// ```ignore
 /// let body_to_transform = builder.add_system(sync_body_to_transform).after(apply).key();

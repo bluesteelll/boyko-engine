@@ -35,7 +35,7 @@
 //! The host-drivable
 //! [`host_upload_frame_from_world`](UiUploadSystem::host_upload_frame_from_world)
 //! seam (#31) gathers the visible nodes from a [`DispatcherToken::world`]
-//! [`WorldView`](boyko_ecs::ecs::core::system::WorldView) (a read-only ECS
+//! [`WorldView`] (a read-only ECS
 //! projection, #30) FIRST, ends that borrow, then delegates to `host_upload_frame`
 //! with only the `!Send` borrows live. `WorldView` (#30) supplies the
 //! column/resource-read HALF of the world access the in-schedule site needs.
@@ -337,7 +337,7 @@ unsafe impl System for UiUploadSystem {
     /// per-frame slot index + in-flight fence (for the write-after-read upload
     /// contract). The column/resource-read HALF is now reachable through
     /// [`DispatcherToken::world`]'s
-    /// [`WorldView`](boyko_ecs::ecs::core::system::WorldView) (#30); the host-drivable
+    /// [`WorldView`] (#30); the host-drivable
     /// [`host_upload_frame_from_world`](Self::host_upload_frame_from_world) (#31)
     /// gathers nodes through it before the `!Send` upload. The one capability still
     /// missing in-schedule is the swapchain `Renderer` slot index + in-flight fence —

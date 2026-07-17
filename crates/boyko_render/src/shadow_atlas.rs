@@ -330,7 +330,7 @@ impl Default for ResolvedShadowAtlas {
 /// correct.
 ///
 /// * [`resolve_shadow_atlas`] joins this set (`.in_set(PunctualResolveSet)`);
-/// * [`collect_lights`] runs `.after_set(PunctualResolveSet)`;
+/// * [`collect_lights`](crate::light_system::collect_lights) runs `.after_set(PunctualResolveSet)`;
 /// * both are registered into `CoreSchedule::Main`, so the edge binds.
 #[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PunctualResolveSet;
@@ -405,7 +405,7 @@ impl PunctualSlotAssignment {
         }
     }
 
-    /// The builder form of [`push`](Self::push) — returns `self` with the `(entity, base)` winner
+    /// The builder form of `push` — returns `self` with the `(entity, base)` winner
     /// appended. The `base` MUST be a real layer (`< M_SLOTS`). Used to assemble an assignment in a
     /// functional style (tests, and any producer building the handoff off-system).
     #[inline]
@@ -515,7 +515,7 @@ pub struct PointShadowInput {
 ///    get [`SLOT_NONE`].
 /// 3. **Bump-allocate** one layer per selected spot (spot = 1 layer); for each selected spot at
 ///    layer `L`, compute the spot's perspective `view_proj` (`look_at` from the apex along the
-///    cone axis, FOV `2·outer`, near [`SPOT_SHADOW_NEAR`], far `range`; column-major) →
+///    cone axis, FOV `2·outer`, near `SPOT_SHADOW_NEAR`, far `range`; column-major) →
 ///    `faces[L]`, and record `out_slots[spot] = L`.
 /// 4. `active_layers = count`, `mode_word = (count > 0) as u32`.
 pub fn resolve_shadow_atlas_spots(
@@ -1057,8 +1057,8 @@ fn publish_assignment(
 /// word-7 punctual bit ([`PUNCTUAL_MODE_BIT`](crate::light::PUNCTUAL_MODE_BIT)) in lock-step with
 /// the depth-pass activation predicate: **a fitted atlas** (`resolved.mode_word == 1`) **AND live
 /// casters** (`casters.batch_count() > 0`). The casters are the SAME
-/// [`CsmCasterScratch`](crate::csm_caster::CsmCasterScratch) the CSM path gathers —
-/// [`ShadowCaster`](crate::shadow_marker::ShadowCaster) meshes cast into BOTH the cascade array
+/// [`CsmCasterScratch`] the CSM path gathers —
+/// [`ShadowCaster`](crate::csm_marker::ShadowCaster) meshes cast into BOTH the cascade array
 /// and the punctual atlas, so one gather feeds both gates.
 ///
 /// # The never-rendered-VALUES invariant (review W3)
@@ -1076,7 +1076,7 @@ fn publish_assignment(
 /// `cfg.punctual_shadows` is written only on an actual flip, so a static frame does zero work and
 /// never dirties the light table.
 ///
-/// # Registration — app-wired (matches [`sync_csm_light_gate`])
+/// # Registration — app-wired (matches [`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate))
 ///
 /// NOT registered by any plugin here: it bridges the shadow-atlas plugin's
 /// [`ResolvedShadowAtlas`] and the lighting plugin's [`LightingConfig`] / [`LightTableDirty`], so

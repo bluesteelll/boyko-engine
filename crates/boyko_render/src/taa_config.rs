@@ -100,7 +100,8 @@ pub enum JitterScope {
     ///
     /// # Why this is the default, and what it costs
     ///
-    /// This knob only does anything once a world has deliberately armed [`AaMode::Taa`], and
+    /// This knob only does anything once a world has deliberately armed
+    /// [`AaMode::Taa`](crate::aa_config::AaMode::Taa), and
     /// arming TAA only to have it be a no-op on SDF pixels and shadows is a footgun that already
     /// cost someone a logged investigation. It also REPAIRS a latent inconsistency: without the
     /// shear the raster is jittered while the reconstruction is not, so the reconstructed `P`

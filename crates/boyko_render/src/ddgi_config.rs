@@ -121,7 +121,8 @@ impl DdgiConfig {
 /// resolve shader's binding-18 `ResolvedDdgi` cbuffer.
 ///
 /// The grid is WORLD-FIXED (Decision D1), so this carrier is CAMERA-INDEPENDENT: unlike
-/// [`ResolvedCsm`] / [`ResolvedShadowAtlas`](crate::shadow_atlas::ResolvedShadowAtlas) it
+/// [`ResolvedCsm`](crate::csm_config::ResolvedCsm) /
+/// [`ResolvedShadowAtlas`](crate::shadow_atlas::ResolvedShadowAtlas) it
 /// needs no per-FIF ring (one buffer, written once per frame, read by every in-flight
 /// frame with no Write-After-Read hazard on a static config — but at I0 it is
 /// bound-but-unread anyway, so even a dynamic config is benign).

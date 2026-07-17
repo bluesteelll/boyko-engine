@@ -30,8 +30,8 @@
 //! [`resolve_csm`] is a PURE function of `(cfg, view, sun_dir, fit)`: PSSM split distances →
 //! per-cascade world-space frustum-slice corners → a rotation-invariant bounding-SPHERE
 //! fit (the anti-shimmer body) → a texel-snapped light view → an orthographic
-//! `view_proj`. The camera read is [`ViewUniform`]; it carries no orthographic
-//! half-extents, so this phase asserts a perspective camera (critic W3).
+//! `view_proj`. The camera read is [`ViewUniform`](boyko_scene::ViewUniform); it carries
+//! no orthographic half-extents, so this phase asserts a perspective camera (critic W3).
 //!
 //! # Caster-aware split-range fit (`docs/CSM-AUTOFIT-PLAN.md`, rung C3; default `CatchAll`)
 //!
@@ -45,7 +45,8 @@
 //! fell into it, and fitting the range costs nothing to fix that.
 //! [`CsmFitMode::Shrink`] / [`CsmFitMode::CatchAll`]
 //! fit the split range to the caster-derived `far_eff` (an anti-shimmer log-quantized,
-//! Schmitt-latched value — see [`grid_value`] / [`latch_cell`]), requiring
+//! Schmitt-latched value — see [`grid_value`](crate::csm_config::grid_value) /
+//! [`latch_cell`](crate::csm_config::latch_cell)), requiring
 //! [`reduce_caster_bounds`](crate::csm_caster::reduce_caster_bounds) to be app-registered
 //! (rung C5); without it every mode renders as `Fixed`. The caster modes ALSO grow the
 //! light eye's sun-axis pull-back ([`CsmFit::caster_aabb`], rung C4) to keep capturing any
@@ -1046,7 +1047,7 @@ pub fn latch_cell(raw: f32, prev_k: i32) -> i32 {
 ///
 /// # Read only when `fit_mode != Fixed` (rung C3)
 ///
-/// [`select_fit`] reads this Resource, but ONLY past the `CsmFitMode::Fixed` 0%-gate — a
+/// `select_fit` reads this Resource, but ONLY past the `CsmFitMode::Fixed` 0%-gate — a
 /// world that never sets `fit_mode` never reads it. [`CsmPlugin`](crate::csm_plugin::CsmPlugin)
 /// inserts [`CsmCasterBounds::EMPTY`] so a bare-`CsmPlugin` world never panics resolving
 /// it, but the fold only runs once the owning app registers
@@ -1121,7 +1122,7 @@ pub struct CsmFitState {
 }
 
 impl CsmFitState {
-    /// Never latched. Defined AS the private [`FIT_UNLATCHED`] sentinel (not a second
+    /// Never latched. Defined AS the private `FIT_UNLATCHED` sentinel (not a second
     /// `i32::MIN` literal), so the two can never drift apart — `latch_cell`'s "fresh latch"
     /// branch and this Resource's "never latched" state are the SAME value by construction.
     pub const UNLATCHED: i32 = FIT_UNLATCHED;
@@ -1138,7 +1139,7 @@ impl CsmFitState {
 /// The already-latched fit decision handed to the PURE [`resolve_csm`]. [`CsmFit::NONE`] ==
 /// "Fixed / unlatched / no usable bounds" == today's fit EXACTLY — `resolve_csm` does not
 /// consult [`CsmConfig::fit_mode`] at all; the caller ([`resolve_csm_cascades`], via
-/// [`select_fit`]) has already decided.
+/// `select_fit`) has already decided.
 ///
 /// # `caster_aabb` — the sun-axis pull-back input (`docs/CSM-AUTOFIT-PLAN.md` D5, rung C4)
 ///
@@ -1279,7 +1280,7 @@ fn select_fit(
 ///
 /// # The caster fit gate (rung C3)
 ///
-/// `bounds`/`state` feed [`select_fit`], which decides — per [`CsmConfig::fit_mode`] — the
+/// `bounds`/`state` feed `select_fit`, which decides — per [`CsmConfig::fit_mode`] — the
 /// [`CsmFit`] handed to [`resolve_csm`]. Under the default [`CsmFitMode::Fixed`],
 /// `select_fit` returns [`CsmFit::NONE`] immediately WITHOUT reading `bounds`/`state`, so a
 /// pinned scene that never sets `fit_mode` is byte-identical to before this rung (D10).

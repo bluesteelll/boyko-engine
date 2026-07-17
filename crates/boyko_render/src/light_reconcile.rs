@@ -1,7 +1,7 @@
 //! Light pose reconciliation (standard-library Phase S4).
 //!
 //! [`light_reconcile`] derives a light's world position / direction from its
-//! [`GlobalTransform`](boyko_scene::GlobalTransform) and writes it into the light
+//! [`GlobalTransform`] and writes it into the light
 //! component — so a parented or animated light tracks its transform. A light
 //! WITHOUT a `GlobalTransform` keeps its self-contained pose (back-compat); the
 //! `collect_lights` table builder is UNCHANGED.

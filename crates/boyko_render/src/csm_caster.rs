@@ -4,7 +4,8 @@
 //! This is the Principle-0 production caster-selection path: the CSM depth pass draws
 //! the casters of SPAWNED ENTITIES — every visible `(MeshHandle, InstanceModelCol)`
 //! that ALSO carries the structural [`ShadowCaster`](crate::csm_marker::ShadowCaster)
-//! marker — read through an ECS [`Query`], NOT a hand-built inline batch. It mirrors
+//! marker — read through an ECS [`Query`](boyko_ecs::ecs::core::iters::query::Query), NOT
+//! a hand-built inline batch. It mirrors
 //! the mesh foundation's main instance gather
 //! ([`gather_mesh_draws`](crate::mesh_draw::gather_mesh_draws)) exactly, with ONE
 //! structural difference: a `With<ShadowCaster>` term on the filter, so a non-caster
@@ -18,7 +19,8 @@
 //! the `With<ShadowCaster>`-filtered query passed as the
 //! re-iteration closure. [`CsmCasterScratch`] is a newtype over
 //! [`MeshRenderScratch`](crate::mesh_draw::MeshRenderScratch) so the caster batches +
-//! ring live in a SEPARATE [`Resource`] from the main gather's (they must not collide:
+//! ring live in a SEPARATE [`Resource`](boyko_macros::Resource) from the main gather's
+//! (they must not collide:
 //! the main pass draws ALL visible meshes, the depth pass draws ONLY casters — a
 //! different bucket set with different `base_instance`s), while sharing the foundation's
 //! cleared-not-reallocated, grow-POW2 discipline (Principle 5) byte-for-byte.
@@ -72,16 +74,16 @@ use crate::mesh_assets::MeshAssetsExt;
 use crate::mesh_draw::{DrawBatch, MeshRenderScratch, PerInstanceMaterial};
 
 /// The reused per-frame shadow-caster gather scratch (CSM Inc 2) — a SEPARATE
-/// [`Resource`] from the main [`MeshRenderScratch`](crate::mesh_draw::MeshRenderScratch)
+/// [`Resource`] from the main [`MeshRenderScratch`]
 /// so the cascade depth-pass caster batches do not collide with the gbuffer pass's
 /// batches.
 ///
-/// A newtype over [`MeshRenderScratch`](crate::mesh_draw::MeshRenderScratch): it REUSES
+/// A newtype over [`MeshRenderScratch`]: it REUSES
 /// the foundation's `gather_mixed_into` core, its per-mesh lanes + instance ring, and its
 /// cleared-not-reallocated grow-POW2 discipline (Principle 5) VERBATIM — only the
 /// resource IDENTITY differs (the ECS keys a `Resource` by type, so the wrapper gives
 /// the caster gather its own slot). The gather is filtered on
-/// [`ShadowCaster`](crate::csm_marker::ShadowCaster), so the batches + ring hold ONLY
+/// [`ShadowCaster`], so the batches + ring hold ONLY
 /// the structural casters.
 #[derive(Resource, Default)]
 pub struct CsmCasterScratch(pub MeshRenderScratch);
@@ -120,7 +122,7 @@ impl CsmCasterScratch {
 
 /// The ECS-native CSM Inc-2 shadow-caster gather SYSTEM: buckets every visible
 /// `(MeshHandle, InstanceModelCol)` entity that ALSO carries
-/// [`ShadowCaster`](crate::csm_marker::ShadowCaster) into per-caster-mesh
+/// [`ShadowCaster`] into per-caster-mesh
 /// [`DrawBatch`]es + the shared caster instance ring, reusing the [`CsmCasterScratch`]
 /// resource (Principle 0 — casters from spawned entities via the query, not an inline
 /// batch).
@@ -325,8 +327,8 @@ pub fn reduce_bounds_into(
 ///
 /// Under the default [`CsmFitMode::Fixed`] the fold never runs: `out` is written to
 /// [`CsmCasterBounds::EMPTY`] and the per-instance abs-matrix walk is skipped entirely —
-/// the same 0-ns default [`CsmConfig`] already guarantees for [`resolve_csm_cascades`]'s
-/// side of the gate.
+/// the same 0-ns default [`CsmConfig`] already guarantees for
+/// [`resolve_csm_cascades`](crate::csm_config::resolve_csm_cascades)'s side of the gate.
 ///
 /// # Registration — unwired-API (matches [`gather_shadow_casters`])
 ///

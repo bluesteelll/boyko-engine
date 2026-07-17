@@ -26,7 +26,7 @@
 //!
 //! [`DdgiUpdateConfig::default`] carries the plan §6 placeholder knobs (`rays = 64`, `subset_n
 //! = 4`, `gi_max_it = 64`), but the update pass is ARMED only when
-//! [`ResolvedDdgi::enabled()`](crate::ddgi_config::ResolvedDdgi::enabled) — the same predicate
+//! [`DdgiConfig::enabled()`](crate::ddgi_config::DdgiConfig::enabled) — the same predicate
 //! driving the LightBuf GI gate. With the default (disabled) [`DdgiConfig`] the host leaves
 //! `scene.ddgi_update = None`, so the pass is never recorded (byte-identical command stream).
 //! The degrade gate ([`DdgiCaps`]) forces DDGI permanently disabled on a device lacking
@@ -96,7 +96,7 @@ pub struct DdgiUpdateUbo {
     /// `probe_world_pos` = `origin.xyz + float3(coord) * origin.w`.
     pub origin: [f32; 4],
     /// `grid_dims.xyz` = the probes per axis as bit-cast `u32` — packed like
-    /// [`ResolvedDdgi`](crate::ddgi_config::ResolvedDdgi)'s dims lanes. The shader reads
+    /// [`ResolvedDdgi`]'s dims lanes. The shader reads
     /// `grid_dims.x/.y/.z` as `uint` (its `probe_coord` decomposition divisors). **`.w` carries the
     /// temporal-hysteresis `α` as a bit-cast `f32`** (SDFDDGI I4 — the shader reads
     /// `asfloat(grid_dims.w)`), NOT a free/pad lane: this transports `α` without disturbing the
@@ -161,7 +161,7 @@ impl DdgiUpdateUbo {
 /// and `subset_n` ride the UBO; `gi_max_it` selects the pre-compiled pipeline variant.
 ///
 /// Enablement is NOT stored here — the update pass is gated on
-/// [`ResolvedDdgi::enabled()`](crate::ddgi_config::ResolvedDdgi::enabled) (the
+/// [`DdgiConfig::enabled()`](crate::ddgi_config::DdgiConfig::enabled) (the
 /// capability-is-structural principle + the SAME predicate driving the LightBuf GI gate). This
 /// config only shapes HOW the enabled pass runs. The defaults are the plan §6 placeholders
 /// (`rays = 64`, `subset_n = 4`, `gi_max_it = 64`); the orchestrator finalizes them from the
@@ -202,7 +202,8 @@ impl Default for DdgiUpdateConfig {
 
 /// The device-storage capability gate (SDFDDGI I2 / plan §3) — a `World`-singleton
 /// `#[derive(Resource)]` the host inserts at device boot from
-/// [`DeviceCaps::ddgi_storage_ok()`](boyko_rhi_vulkan's `DeviceCaps`). When `false`, the device
+/// [`DeviceCaps::ddgi_storage_ok()`](boyko_rhi_vulkan::device::DeviceCaps::ddgi_storage_ok).
+/// When `false`, the device
 /// lacks B10G11R11/RG16F STORAGE, so the atlas was created WITHOUT the storage bit and the
 /// update pass CANNOT write it — [`resolve_ddgi_grid_gated`] then clamps [`ResolvedDdgi`] to
 /// DISABLED regardless of the owner's [`DdgiConfig::ddgi_indirect`]. DDGI is opt-in (unlike the

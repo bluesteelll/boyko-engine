@@ -40,9 +40,9 @@ const GEO_AREA_EPS_SQ: f32 = 1e-12;
 ///    vertex's own `normal` (`T' = normalize(T - N * dot(N, T))`), then derive the
 ///    handedness `w = sign(dot(cross(N, T'), B))`.
 ///
-/// A triangle whose UV area is degenerate (`|det| < `[`DET_EPS`], e.g. a UV-less
+/// A triangle whose UV area is degenerate (`|det| < DET_EPS`, e.g. a UV-less
 /// mesh where every `uv` is `[0.0, 0.0]`) OR whose 3D area is degenerate
-/// (`|edge1 × edge2|² < `[`GEO_AREA_EPS_SQ`], e.g. a UV-sphere pole-fan triangle with
+/// (`|edge1 × edge2|² < GEO_AREA_EPS_SQ`, e.g. a UV-sphere pole-fan triangle with
 /// a zero-length edge) contributes nothing. A vertex that ends up with NO
 /// contribution (every owning triangle degenerate, or an isolated vertex — e.g. a
 /// whole UV-less mesh) falls back to an arbitrary orthonormal tangent derived from

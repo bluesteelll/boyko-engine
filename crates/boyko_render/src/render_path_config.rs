@@ -20,9 +20,9 @@
 //!
 //! # Rung-staged degrades (plan §H)
 //!
-//! Only `Deferred` was implemented as of R1 — [`FORWARD_IMPLEMENTED`] (R4b-b),
-//! [`FORWARD_PLUS_IMPLEMENTED`] (R5), and [`SDF_FORWARD_IMPLEMENTED`] (R-SDFFWD) have since
-//! flipped `true`; [`VB_IMPLEMENTED`] (R8) remains `false`, so a `VisibilityBuffer` request still
+//! Only `Deferred` was implemented as of R1 — `FORWARD_IMPLEMENTED` (R4b-b),
+//! `FORWARD_PLUS_IMPLEMENTED` (R5), and `SDF_FORWARD_IMPLEMENTED` (R-SDFFWD) have since
+//! flipped `true`; `VB_IMPLEMENTED` (R8) remains `false`, so a `VisibilityBuffer` request still
 //! degrades to `Deferred` today (a [`RenderPathDegrade::PathNotYetImplemented`] reason). Each
 //! const flips `true` as its rung lands — no other code in this module changes; the degrade
 //! ladder ([`resolve_render_path`]) and the pure rule set ([`resolve_rules`]) are ALREADY correct
@@ -67,7 +67,7 @@
 //! reachable trigger and was removed (dead code); a `Deferred` request now honors ANY
 //! [`GeometryLegs`] value verbatim, never degrading. The legs-collapse-to-`Mesh` rule below (for
 //! non-Deferred paths, pre-SDF-forward-march) is unaffected — it fires on a DIFFERENT condition
-//! (`path != Deferred`) and stays live until [`SDF_FORWARD_IMPLEMENTED`] lands.
+//! (`path != Deferred`) and stays live until `SDF_FORWARD_IMPLEMENTED` lands.
 //!
 //! # Rev 5 — the single `pre_light_consumers` predicate (MANDATORY)
 //!
@@ -540,40 +540,40 @@ pub enum RenderPathDegrade {
     /// pre-light consumer (SSAO/DDGI/shadow-denoise-spatial/shadow-temporal/SSR/
     /// hwrt-denoise-or-vis) was requested alongside a Forward-family path, which has no
     /// thin-aux producer yet — every one of those consumers is forced OFF for this resolve
-    /// ([`cap_forward_v1_consumers`]). Under `ForwardPlus` this does NOT disable the depth
+    /// (`cap_forward_v1_consumers`). Under `ForwardPlus` this does NOT disable the depth
     /// prepass itself (`needs_depth_prepass` stays `true` unconditionally for that path) — only
     /// the consumer-driven `thin_aux`/split flags.
     ForwardPreLightConsumersNotYetImplemented,
     /// Rung R4b (Forward v1 scope cut; widened to [`RenderPath::ForwardPlus`] at rung R5): TAA
     /// was requested alongside a Forward-family path, which writes no motion vector yet — TAA
-    /// is forced OFF for this resolve ([`cap_forward_v1_consumers`]).
+    /// is forced OFF for this resolve (`cap_forward_v1_consumers`).
     ForwardTaaNotYetImplemented,
     /// [`RenderPath::VisibilityBuffer`] was requested with a non-[`GeometryLegs::Mesh`] leg set
-    /// (`Both`/`Sdf`) before [`VB_SDF_IMPLEMENTED`] landed (rung R10) — collapsed to
+    /// (`Both`/`Sdf`) before `VB_SDF_IMPLEMENTED` landed (rung R10) — collapsed to
     /// [`GeometryLegs::Mesh`]. The VB-scoped sibling of
     /// [`LegsCollapsedToMeshPreSdfForward`](Self::LegsCollapsedToMeshPreSdfForward), needed
-    /// because that OLDER rule reads [`SDF_FORWARD_IMPLEMENTED`] (`true` today), which makes it
+    /// because that OLDER rule reads `SDF_FORWARD_IMPLEMENTED` (`true` today), which makes it
     /// unconditionally dead for every non-Deferred path — including `VisibilityBuffer` — so it
     /// could not gate VB's own SDF leg while that was still unimplemented.
     ///
-    /// As of rung R10 [`VB_SDF_IMPLEMENTED`] is `true`, so THIS rule is now unconditionally dead
+    /// As of rung R10 `VB_SDF_IMPLEMENTED` is `true`, so THIS rule is now unconditionally dead
     /// in production too (like its Forward-family sibling): it is only ever constructed by the
-    /// [`degrade_ladder`] isolation unit test, which threads `vb_sdf_implemented = false`
+    /// `degrade_ladder` isolation unit test, which threads `vb_sdf_implemented = false`
     /// directly. Kept as a live variant so that test — and any future device that must fall back
     /// off the VB SDF path — retains a typed degrade reason.
     LegsCollapsedToMeshPreVbSdf,
     /// Rung R8 (VB v1 scope cut, mirrors [`ForwardPreLightConsumersNotYetImplemented`](Self::ForwardPreLightConsumersNotYetImplemented)):
     /// a pre-light consumer was requested alongside `VisibilityBuffer`, which has no split
     /// (`vb_geo`/`vb_shade`) thin-aux producer yet (only the fused `vb_resolve`) — every one of
-    /// those consumers is forced OFF for this resolve ([`cap_vb_v1_consumers`]).
+    /// those consumers is forced OFF for this resolve (`cap_vb_v1_consumers`).
     VbPreLightConsumersNotYetImplemented,
     /// Rung R8 (VB v1 scope cut, mirrors [`ForwardTaaNotYetImplemented`](Self::ForwardTaaNotYetImplemented)):
     /// TAA was requested alongside `VisibilityBuffer`, which writes no motion vector yet — TAA
-    /// is forced OFF for this resolve ([`cap_vb_v1_consumers`]).
+    /// is forced OFF for this resolve (`cap_vb_v1_consumers`).
     VbTaaNotYetImplemented,
 }
 
-/// A fixed-capacity log of [`RenderPathDegrade`] reasons. [`degrade_ladder`]'s THREE rules fire
+/// A fixed-capacity log of [`RenderPathDegrade`] reasons. `degrade_ladder`'s THREE rules fire
 /// AT MOST ONE per call: `PathNotYetImplemented` XOR `VbDeviceCapMissing` (the latter needs
 /// `path_implemented == true`, which the former's arm never reaches) are the only path-level
 /// rules, and EITHER of them demotes the FINAL path to [`RenderPath::Deferred`] — which is
@@ -583,7 +583,7 @@ pub enum RenderPathDegrade {
 /// per-leg-disable rule — the one case that USED to co-fire with a path-level demotion — was
 /// removed once both `Deferred` legs landed; see this module's doc.)
 ///
-/// Rung R4b added [`cap_forward_v1_consumers`], a FOURTH (independent) rule that COULD co-occur
+/// Rung R4b added `cap_forward_v1_consumers`, a FOURTH (independent) rule that COULD co-occur
 /// with `LegsCollapsedToMeshPreSdfForward` while `SDF_FORWARD_IMPLEMENTED` was still `false`:
 /// `RenderPath::Forward × {Both, Sdf}` with a pre-light consumer AND TAA both requested stacked
 /// THREE reasons in one call (legs-collapse + `ForwardPreLightConsumersNotYetImplemented` +
@@ -642,7 +642,7 @@ impl RenderPathDegradeLog {
 /// it is directly unit-testable against a HYPOTHETICAL fully-landed path (e.g. `ForwardPlus`/
 /// `VisibilityBuffer`, still `false` as of R4b-b) — the Rev-5 MOTION-only `prepass_writes_motion`
 /// rule must be provably correct TODAY for those paths too, not merely once their own rung lands.
-/// `Forward` itself is real as of R4b-b ([`FORWARD_IMPLEMENTED`] `true`), so its own truth table
+/// `Forward` itself is real as of R4b-b (`FORWARD_IMPLEMENTED` `true`), so its own truth table
 /// is exercised through the public [`resolve_render_path`] entry point (this module's tests).
 ///
 /// # The Rev-5 single predicate
@@ -945,15 +945,15 @@ fn cap_vb_v1_consumers(
 /// (`boyko_app::runner`, the `ssaa_armed` precedent) — see this module's doc for why a per-frame
 /// re-resolve is forbidden by design (Decision 1).
 ///
-/// Applies the rung-staged [`degrade_ladder`] against the REQUESTED `(path, legs)` first (using
-/// the real [`FORWARD_IMPLEMENTED`]/[`FORWARD_PLUS_IMPLEMENTED`]/[`VB_IMPLEMENTED`]/
-/// [`SDF_FORWARD_IMPLEMENTED`] consts), then [`cap_forward_v1_consumers`] (rung R4b: forces every
+/// Applies the rung-staged `degrade_ladder` against the REQUESTED `(path, legs)` first (using
+/// the real `FORWARD_IMPLEMENTED`/`FORWARD_PLUS_IMPLEMENTED`/`VB_IMPLEMENTED`/
+/// `SDF_FORWARD_IMPLEMENTED` consts), then `cap_forward_v1_consumers` (rung R4b: forces every
 /// pre-light consumer + TAA off under the FINAL `Forward` path, its own rung-staged gate,
 /// independent of the ladder), then computes every derived field via [`resolve_rules`] against
 /// the FINAL `(path, legs)` and the (possibly capped) consumers — so e.g.
 /// `depth_kind`/`thin_aux`/`shadow`/`needs_depth_prepass` always describe what will ACTUALLY be
-/// recorded, never the owner's un-degraded/un-capped request. [`FORWARD_IMPLEMENTED`] is `true`
-/// as of rung R4b-b, so a `Forward` request now reaches [`cap_forward_v1_consumers`] for real
+/// recorded, never the owner's un-degraded/un-capped request. `FORWARD_IMPLEMENTED` is `true`
+/// as of rung R4b-b, so a `Forward` request now reaches `cap_forward_v1_consumers` for real
 /// (through THIS fn, not only through the module's own direct-pipeline tests) — its scope-cut
 /// behavior (forcing every pre-light consumer + TAA off) is exercised end-to-end here.
 #[inline]

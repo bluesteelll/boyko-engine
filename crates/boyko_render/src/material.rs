@@ -34,7 +34,8 @@
 //! ([`MaterialTable`](crate::material_table::MaterialTable)) uploads. [`MaterialTextures`]
 //! is a CPU-only, POD sidecar of five bindless texture slots (textured-PBR T2's
 //! [`BindlessTextureTable`](crate::bindless::BindlessTextureTable) indices), read by the
-//! per-instance texture gather (T5's dormant [`mesh_draw::PerInstanceMaterialTex`] lane;
+//! per-instance texture gather (T5's dormant
+//! [`PerInstanceMaterialTex`](crate::mesh_draw::PerInstanceMaterialTex) lane;
 //! T6 wires it into a shader pipeline). `Asset`/`AssetBacking`/`HasLoaders` moved from
 //! `MaterialGpu` to `Material` — `Assets<Material>` (not `Assets<MaterialGpu>`) is now the
 //! world-global CPU authority every call site mints/edits.

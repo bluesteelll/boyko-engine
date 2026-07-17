@@ -67,7 +67,7 @@ use crate::gpu_transform3d::{GpuTransform3D, TrsPacked};
 /// `ComponentPool` and is NOT part of any archetype signature, so
 /// enabling/disabling it is O(1) with no archetype migration, no structural
 /// generation bump, and no per-row bytes. The interpolation pair
-/// ([`GpuTransform3D`](crate::GpuTransform3D)) is a DENSE component, and the
+/// ([`GpuTransform3D`]) is a DENSE component, and the
 /// kernel NOW supports an enable-term filter over a dense-include query (the
 /// dense × enable-query feature), so `snap_apply`'s
 /// `Query<(&Transform, &mut GpuTransform3D), Enabled<SnapInterpolation>>` and the

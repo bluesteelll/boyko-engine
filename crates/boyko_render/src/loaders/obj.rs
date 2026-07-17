@@ -22,7 +22,7 @@ const DEFAULT_VERTEX_COLOR: [f32; 4] = [0.8, 0.8, 0.8, 1.0];
 /// `v/vt/vn`, or `v//vn`). `o` / `g` / `usemtl` / `mtllib` / a blank / a `#`
 /// comment / any other unrecognized leading token is skipped, not an error.
 ///
-/// After dedup, [`generate_tangents`](crate::tangent::generate_tangents) runs once
+/// After dedup, [`generate_tangents`] runs once
 /// over the whole mesh (a post-pass — tangent generation needs the full triangle
 /// list). A `.obj` with no `vt` lines leaves every `uv` at `[0.0, 0.0]`, so every
 /// tangent falls back to the arbitrary orthonormal case (harmless — unread
@@ -36,7 +36,7 @@ const DEFAULT_VERTEX_COLOR: [f32; 4] = [0.8, 0.8, 0.8, 1.0];
 /// A face with more than 3 corners is FAN-triangulated: corners `[0, k, k+1]`
 /// for `k` in `1..len-1`. Each unique `(v, vt, vn)` corner triple dedups to
 /// one output [`Vertex`] via an indirect sort on the raw (resolved) indices
-/// (F-obj — no hashing: see [`dedup_corners`]).
+/// (F-obj — no hashing: see `dedup_corners`).
 ///
 /// # Limitations (documented, not bugs)
 ///

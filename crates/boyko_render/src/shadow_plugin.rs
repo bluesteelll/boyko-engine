@@ -11,7 +11,7 @@ use crate::shadow_atlas::{
 
 /// Registers the sparse-shadow config substrate: inserts [`ShadowConfig`] (default DISABLED —
 /// `enabled == false`, the 0%-gate) and its derived [`ResolvedShadowAtlas`] companion, and
-/// schedules the cold [`resolve_shadow_atlas`](crate::shadow_atlas::resolve_shadow_atlas) (the
+/// schedules the cold [`resolve_shadow_atlas`] (the
 /// SINGLE writer of `ResolvedShadowAtlas`).
 ///
 /// # Mirror of [`CsmPlugin`](crate::csm_plugin::CsmPlugin)

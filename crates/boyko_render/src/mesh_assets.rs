@@ -61,7 +61,7 @@
 //! The old `MeshRegistry::blas_generation` was a dedicated `u64` field bumped
 //! once per [`register_mesh`](MeshAssetsExt::register_mesh) call that built a
 //! BLAS. `Assets<T>` has no room for mesh-specific extra state, so
-//! [`blas_generation`](MeshAssetsExt::blas_generation) is derived instead from
+//! `MeshAssetsExt::blas_generation` (feature = "hwrt") is derived instead from
 //! [`Assets::high_water`](boyko_ecs::ecs::core::asset::Assets::high_water) — the
 //! existing O(1) monotonic row-count high-water mark. This stays a correct,
 //! useful metric for a scene that only ever GROWS (an RT device builds a BLAS

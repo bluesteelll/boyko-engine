@@ -165,14 +165,14 @@ impl Default for RayBackendConfig {
 /// The device ray-tier capability the resolve reads — the ray analogue of
 /// [`DdgiCaps`](crate::ddgi_update::DdgiCaps). A `World`-singleton
 /// `#[derive(Resource)]` the host inserts at device boot from
-/// [`DeviceCaps::rt_tier()`](boyko_rhi_vulkan's `DeviceCaps`).
+/// [`DeviceCaps::rt_tier()`](boyko_rhi_vulkan::device::DeviceCaps::rt_tier).
 ///
 /// There is NO world-resident `DeviceCaps` resource to read (the DDGI substrate
-/// derives its own [`DdgiCaps`] mirror the same way), so R1 carries a ray-specific
-/// tier mirror. [`Default`] is [`RtTier::Absent`] (dormant if the host never fills
-/// it — a headless bench or a host that never queries stays in the software path);
-/// the host OVERRIDES it at boot with the real `rt_tier()` query, at the SAME site
-/// [`DdgiCaps`] is filled.
+/// derives its own [`DdgiCaps`](crate::ddgi_update::DdgiCaps) mirror the same way), so R1
+/// carries a ray-specific tier mirror. [`Default`] is [`RtTier::Absent`] (dormant if the
+/// host never fills it — a headless bench or a host that never queries stays in the
+/// software path); the host OVERRIDES it at boot with the real `rt_tier()` query, at the
+/// SAME site [`DdgiCaps`](crate::ddgi_update::DdgiCaps) is filled.
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RayCaps {
     /// The device ray-tracing tier (`DeviceCaps::rt_tier()`). In R1 this is
@@ -281,7 +281,8 @@ pub struct RayResolveSet;
 ///
 /// `AsBuildSet` has NO member and NO consumer in R1. The scheduler interns a set
 /// by value on first reference — `.in_set`/`.before_set`/`.after_set` all call
-/// `set_id_of_value`, exactly how [`DdgiResolveSet`] becomes orderable through its
+/// `set_id_of_value`, exactly how
+/// [`DdgiResolveSet`](crate::ddgi_config::DdgiResolveSet) becomes orderable through its
 /// `.in_set` member. So a R2a consumer's `.after_set(AsBuildSet)` interns it then;
 /// a `configure_set(AsBuildSet)` in R1 would be an inert no-op (a set with no
 /// member and no edges). The derive + the first R2a reference suffices.

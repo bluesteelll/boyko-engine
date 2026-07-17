@@ -5,7 +5,8 @@
 //!
 //! This is the [`GpuUpload`](crate::gpu_upload::GpuUpload)`::Aux` for `TextureGpu` (T2
 //! wires `TextureGpu::upload` to call [`BindlessTextureTable::register`]). LIVE wiring
-//! (textured-PBR T6b/T6c): `boyko_app::runner` registers this as a [`NonSendResource`] at
+//! (textured-PBR T6b/T6c): `boyko_app::runner` registers this as a
+//! [`NonSendResource`](boyko_ecs::ecs::core::resources::resource::NonSendResource) at
 //! boot, the TEXTURED raster pipeline binds its descriptor set at set 1, and its
 //! fence-gated slot recycle ([`BindlessTextureTable::retire_ready_slots`]) is drained
 //! every frame by
@@ -13,7 +14,8 @@
 //!
 //! # Principle 0 — the free-list `Vec<u32>` is allocator-internal, not gameplay data
 //!
-//! [`BindlessSlotAllocator`]'s `free_slots`/`retiring_slots` are `Vec`s of bare
+//! [`BindlessSlotAllocator`](crate::bindless::BindlessSlotAllocator)'s
+//! `free_slots`/`retiring_slots` are `Vec`s of bare
 //! `u32` slot indices — NOT a parallel per-entity/per-texture data store (the
 //! textures themselves live in `Assets<TextureGpu>`, T2, VM-native). This is the
 //! same sanctioned exception as [`RetiredGpuBuffers`](crate::retired_gpu_buffers::RetiredGpuBuffers)'s
@@ -97,7 +99,7 @@ impl BindlessSlotAllocator {
         self.capacity
     }
 
-    /// Pops a free slot (`1..capacity`, never [`RESERVED_SLOT`]), or `None` if the
+    /// Pops a free slot (`1..capacity`, never `RESERVED_SLOT`), or `None` if the
     /// allocator is exhausted (every real slot is either in use or awaiting its
     /// fence horizon in `retiring_slots`).
     #[inline]
@@ -166,9 +168,9 @@ fn exhausted_slot_fallback(capacity: u32) -> u32 {
 ///
 /// 1. **Bounds**: [`BindlessSlotAllocator`] only ever issues `1..capacity`; every
 ///    write is `debug_assert!`-checked `< capacity` in
-///    [`write_bindless_texture`](boyko_rhi_vulkan::bindless::write_bindless_texture).
+///    [`write_bindless_texture`].
 /// 2. **Error texture in every slot**: [`Self::new`] writes
-///    [`ERROR_TEXTURE_RGBA`] into EVERY slot (0 included) before returning, so an
+///    `ERROR_TEXTURE_RGBA` into EVERY slot (0 included) before returning, so an
 ///    unwritten or stale index samples a visibly-wrong magenta texture — never
 ///    UNDEFINED memory.
 /// 3. **Fence-gated recycle (P1-5)**: [`Self::unregister`] does NOT return the
@@ -188,7 +190,7 @@ impl NonSendResource for BindlessTextureTable {}
 impl BindlessTextureTable {
     /// Creates the bindless descriptor set (layout, UPDATE_AFTER_BIND pool, set,
     /// shared sampler), builds the 2x2 magenta error texture, and writes it into
-    /// every slot (including [`RESERVED_SLOT`]) — the load-time, one-shot setup
+    /// every slot (including `RESERVED_SLOT`) — the load-time, one-shot setup
     /// cost (Principle 1: `register`/`unregister` are load-time/rare, not
     /// per-frame; this constructor runs once).
     pub fn new(ctx: &VulkanContext) -> Result<Self, VulkanError> {
@@ -239,13 +241,13 @@ impl BindlessTextureTable {
     }
 
     /// Allocates a slot and writes `image_view` into it, returning the slot index
-    /// (a material's `tex == 0` then means "no texture" — see [`RESERVED_SLOT`]).
+    /// (a material's `tex == 0` then means "no texture" — see `RESERVED_SLOT`).
     ///
     /// On allocator exhaustion (every one of `capacity - 1` real slots in use or
     /// awaiting its fence horizon — practically unreachable at
     /// [`boyko_rhi_vulkan::bindless::BINDLESS_TEXTURE_CAPACITY`]), this is an
     /// engine invariant violation (`debug_assert!`); the release-safe fallback
-    /// [`exhausted_slot_fallback`] logs a warning and aliases [`RESERVED_SLOT`]
+    /// `exhausted_slot_fallback` logs a warning and aliases `RESERVED_SLOT`
     /// (the error texture) rather than issue an out-of-range write.
     pub fn register(&mut self, ctx: &VulkanContext, image_view: VkImageView) -> u32 {
         let slot = self
@@ -299,8 +301,7 @@ impl BindlessTextureTable {
 
     /// Tears down every owned device resource: the error texture, then the
     /// descriptor set (pool → layout → sampler). Waits for the device to go idle
-    /// first (belt-and-braces, mirrors
-    /// [`UiRenderResources::destroy`](crate::ui::resources::UiRenderResources::destroy)) —
+    /// first (belt-and-braces, mirrors `UiRenderResources::destroy`) —
     /// callers that already know no in-flight submission touches this table's set
     /// (T6's future teardown, after its own `wait_idle`) still get a sound
     /// idempotent-cost `wait_idle` here.
@@ -319,7 +320,7 @@ impl BindlessTextureTable {
 /// Builds a `w`x`h` `R8G8B8A8_UNORM` `SAMPLED | TRANSFER_DST` texture, staged-fills
 /// it with `rgba` repeated across every texel, and barriers it to
 /// `ShaderReadOnlyOptimal` — the same single-fenced-submit staged-upload shape as
-/// [`UiRenderResources::create_atlas`](crate::ui::resources)'s `upload_atlas_pixels`,
+/// `UiRenderResources::create_atlas`'s `upload_atlas_pixels`,
 /// generalized to an arbitrary small solid-color fill. Used by
 /// [`BindlessTextureTable::new`] for the 2x2 magenta error texture; exposed `pub`
 /// so the `#[ignore]` bindless integration test can build its own tiny test
