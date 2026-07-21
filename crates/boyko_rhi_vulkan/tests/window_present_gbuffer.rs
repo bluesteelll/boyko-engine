@@ -2418,6 +2418,7 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // AA Stage 4: OFF (the default) — NO TAA resolve pass recorded, `aa_out`/`taa_hist`
         // stay unallocated, byte-identical to the pre-TAA stream (the 0%-gate).
         taa: None,
+        rcas: None,
         // M3: the LEGACY merged draw (no instanced mesh — an EMPTY batch slice) —
         // `record_gbuffer` keeps `vkCmdDraw(vertex_count, 1, 0, 0)`, byte-identical to the
         // pre-M2 stream.
@@ -3434,6 +3435,7 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // AA Stage 4: OFF (the default) — NO TAA resolve pass recorded, `aa_out`/`taa_hist`
         // stay unallocated, byte-identical to the pre-TAA stream (the 0%-gate).
         taa: None,
+        rcas: None,
         // M3: the LEGACY merged draw (no instanced mesh — an EMPTY batch slice) —
         // `record_gbuffer` keeps `vkCmdDraw(vertex_count, 1, 0, 0)`, byte-identical to the
         // pre-M2 stream.
@@ -8371,6 +8373,7 @@ fn run_showcase_body_ddgi(
         // AA Stage 4: OFF (the default) — NO TAA resolve pass recorded, `aa_out`/`taa_hist`
         // stay unallocated, byte-identical to the pre-TAA stream (the 0%-gate).
         taa: None,
+        rcas: None,
         mesh_draw: &mesh_draws,
         csm_cascade_texture: &csm.cascade,
         csm_compare_sampler: &csm.sampler,
@@ -9843,6 +9846,7 @@ fn run_showcase_body(
         // AA Stage 4: OFF (the default) — NO TAA resolve pass recorded, `aa_out`/`taa_hist`
         // stay unallocated, byte-identical to the pre-TAA stream (the 0%-gate).
         taa: None,
+        rcas: None,
         // M3: when the config carried instanced meshes, pass A runs the batch loop — one
         // INSTANCED INDEXED draw per registered mesh, each at its `base_instance` bucket
         // (the `use_model_matrix == 1` arm — `cfg.mvp` set its byte 84). Every legacy scene

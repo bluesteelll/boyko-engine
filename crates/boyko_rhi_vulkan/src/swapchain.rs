@@ -9,9 +9,9 @@ pub use crate::present::{
     AaActivation, BrickActivation, CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT,
     FrameWriteToken, GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES,
     GBufferFrame, GBufferMeshDraw, GBufferScene, GBufferTargets, InterpActivation, PASS_COUNT,
-    PunctualDepthActivation, Renderer, ResolvedRenderPathGpu, SCENE_MVP_BYTES, SampledComposite,
-    Scene, SmaaActivation, SsaaActivation, SsaoActivation, Surface, Swapchain, SwapchainError,
-    TaaActivation, TimedPass, TimestampCollector, UiPass, ViewtFromDepthActivation,
+    PunctualDepthActivation, RcasActivation, Renderer, ResolvedRenderPathGpu, SCENE_MVP_BYTES,
+    SampledComposite, Scene, SmaaActivation, SsaaActivation, SsaoActivation, Surface, Swapchain,
+    SwapchainError, TaaActivation, TimedPass, TimestampCollector, UiPass, ViewtFromDepthActivation,
 };
 #[cfg(feature = "hwrt")]
 pub use crate::present::{ShadowVisActivation, TlasBuildActivation};

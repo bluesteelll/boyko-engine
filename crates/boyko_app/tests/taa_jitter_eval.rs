@@ -160,7 +160,7 @@ use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_macros::{Component, Resource};
 use boyko_render::{
     AaConfig, AaMode, CsmPcfKernel, HALTON_8, JitterScope, JitterState, LightingConfig, RenderEpoch,
-    TaaConfig,
+    SharpenMode, TaaConfig,
 };
 
 /// The sun direction TO the light — mirrors `examples/room.rs` / `csm_fit_eval.rs`.
@@ -466,9 +466,24 @@ fn taa_jitter_eval_screenshot_dump() {
         _ => TaaConfig::default().jitter_scope,
     };
 
+    // Rung T3's post-resolve sharpen knob. `rcas` arms the RCAS ping-pong pass (requires
+    // `BOYKO_AA=taa`); unset renders the engine default (`SharpenMode::None` — no sharpen pass,
+    // the structural 0%-gate), per the `BOYKO_AA` / `BOYKO_TAA_SCOPE` convention above.
+    // `BOYKO_TAA_SHARPNESS=<f32>` overrides the strength (default 0.25).
+    let sharpen = match std::env::var("BOYKO_TAA_SHARPEN").ok().as_deref() {
+        Some("rcas") => SharpenMode::Rcas,
+        Some("none") => SharpenMode::None,
+        _ => TaaConfig::default().sharpen,
+    };
+    let rcas_sharpness: f32 = std::env::var("BOYKO_TAA_SHARPNESS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(TaaConfig::default().rcas_sharpness);
+
     println!(
         "taa_jitter_eval: aa_mode={aa_mode:?} motion_mode={motion_mode:?} forced_phase={forced_phase:?} \
-         jitter_scope={jitter_scope:?} win={win} capture_frame={CAPTURE_FRAME}"
+         jitter_scope={jitter_scope:?} sharpen={sharpen:?} rcas_sharpness={rcas_sharpness} win={win} \
+         capture_frame={CAPTURE_FRAME}"
     );
 
     let mut app = App::new();
@@ -503,7 +518,7 @@ fn taa_jitter_eval_screenshot_dump() {
     app.insert_resource(LightingConfig { csm_shadows: csm_on, ..LightingConfig::default() });
     app.insert_resource(AaConfig { mode: aa_mode });
     // Overwrites `AaPlugin`'s default `TaaConfig` — same AFTER-`add_plugins` idiom as `CsmConfig`.
-    app.insert_resource(TaaConfig { jitter_scope, ..TaaConfig::default() });
+    app.insert_resource(TaaConfig { jitter_scope, sharpen, rcas_sharpness, ..TaaConfig::default() });
     // `BOYKO_EVAL_YAW` (radians) — the shadow-crawl probe; see `EvalMotion::static_yaw`. Default
     // `0.0` reproduces `BASE_EYE` bit-exactly, so an unset var leaves every other dump unmoved.
     let static_yaw: f32 =

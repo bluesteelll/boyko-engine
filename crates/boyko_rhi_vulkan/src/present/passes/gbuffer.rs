@@ -2470,6 +2470,25 @@ impl Renderer<'_> {
             // `create()` under the same `scene.taa` that gates this branch; `taa_pass` was
             // declared this frame under the same gate (the invariant above).
             unsafe { self.record_taa(cmd, targets, taa, taa_pass, scene, fi) };
+
+            // TAA rung T3: the post-resolve RCAS sharpen pass — recorded IMMEDIATELY after
+            // `record_taa` (resolve THEN rcas), still BEFORE `present_sample` below. Gated on
+            // `scene.rcas.is_some()` AND `targets.rcas_set.is_some()` (kept in lockstep by
+            // `GBufferTargets::create`, which itself only arms `taa_resolved`/`rcas_set` when
+            // `scene.rcas.is_some()`, which in turn requires `scene.taa.is_some()` — the SAME
+            // lockstep discipline `scene.taa`/`targets.taa_resolve_set` use above). `None` (the
+            // 0%-gate, `SharpenMode::None`) records nothing here — byte-identical to the
+            // pre-RCAS resolve.
+            if let Some(rcas) = scene.rcas.as_ref()
+                && targets.rcas_set.is_some()
+            {
+                // SAFETY: recording is open; `record_taa` (just above) already wrote
+                // `taa_resolved[fi]`, leaving it in GENERAL; `taa_resolved`/`aa_out`/`rcas_set`
+                // were built by `create()` under the same `scene.rcas` that gates this branch;
+                // `present_extent` sizes both `taa_resolved` and `aa_out` (the SAME extent the
+                // resolve dispatched over).
+                unsafe { self.record_rcas(cmd, targets, rcas, present_extent, scene, fi) };
+            }
         }
 
         // (5c) LIT: GENERAL → SHADER_READ_ONLY_OPTIMAL for the present-blit sample. The

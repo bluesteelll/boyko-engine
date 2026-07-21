@@ -737,6 +737,36 @@ pub struct TaaActivation<'a> {
     pub reset: bool,
 }
 
+/// TAA rung T3: the post-resolve CONTRAST-ADAPTIVE SHARPEN (AMD FidelityFX CAS) pass activation
+/// (`rcas.comp` / [`crate::compute::rcas_spirv`]). `None` = OFF, the 0%-gate: no `taa_resolved`
+/// intermediate image, no `rcas_set`, the resolve writes `aa_out` directly (byte-identical to
+/// the pre-RCAS resolve — see `rcas.comp.hlsl`'s module doc for the full "aa_out ping-pong"
+/// placement rationale). `Some` REQUIRES [`GBufferScene::taa`] to ALSO be `Some` — RCAS is a
+/// pure post-process over the resolve's OWN intermediate output, never a standalone pass
+/// (enforced by a `debug_assert!` in [`GBufferTargets::create`](crate::present::targets::GBufferTargets::create)).
+///
+/// `#[derive(Clone, Copy)]` — a bundle of borrows plus the `sharpness` scalar, mirroring
+/// [`TaaActivation`]'s own shape.
+#[derive(Clone, Copy)]
+pub struct RcasActivation<'a> {
+    /// The RCAS compute pipeline (`rcas.comp` / [`crate::compute::rcas_spirv`]): its layout
+    /// declares [`Self::rcas_layout`] at `set 0` + a 16-byte `RcasPush` (`crate::compute::
+    /// RcasPush`) COMPUTE push range. Built UNCONDITIONALLY at boot (mirroring
+    /// [`TaaActivation::resolve_pipeline`]'s always-built discipline) so the mode can flip at
+    /// runtime.
+    pub rcas_pipeline: &'a ComputePipeline,
+    /// The RCAS compute pipeline's bind-group LAYOUT — the DEDICATED 2-binding shape { `gRcasIn`
+    /// STORAGE @0 (`taa_resolved`, the READ — the resolve's re-pointed intermediate output),
+    /// `gAaOut` STORAGE @1 (`aa_out`, the WRITE — the present-blit's input, unchanged) }.
+    /// [`GBufferTargets`] writes a per-FIF `rcas_set` against it once per extent.
+    pub rcas_layout: &'a VulkanBindGroupLayout,
+    /// The owner-set [`SharpenMode::Rcas`](boyko_render's `SharpenMode::Rcas`) strength in
+    /// `[0, 1]` (`boyko_render::taa_config::TaaConfig::rcas_sharpness`), pushed verbatim as
+    /// `RcasPush::sharpness`. `0` = mild (peak `-1/8`), `1` = strong (peak `-1/5`), per the
+    /// FidelityFX CAS sharpness mapping `rcas.comp.hlsl` implements.
+    pub sharpness: f32,
+}
+
 /// HW-RT rung 3a: the spatial (à-trous) RT soft-shadow DENOISE pass activation threaded into
 /// [`GBufferScene::shadow`] to turn the denoise pipeline ON. Mirrors [`SsaoActivation`]'s
 /// borrow-bundle shape: a `Copy` bundle of caller-owned pipeline/layout borrows plus the
@@ -1547,6 +1577,12 @@ pub struct GBufferScene<'a> {
     /// converged-static-validated, but in-motion quality (ghosting, disocclusion) is owner-gated,
     /// not yet visually blessed.
     pub taa: Option<TaaActivation<'a>>,
+    /// TAA rung T3: the post-resolve RCAS sharpen pass activation. `None` = OFF, the
+    /// 0%-gate — see [`RcasActivation`]'s doc. REQUIRES [`Self::taa`] to also be `Some`
+    /// (`SharpenMode::Rcas` is meaningless without `AaMode::Taa` — RCAS reads the resolve's
+    /// OWN intermediate output); never armed standalone (enforced by a `debug_assert!` in
+    /// [`GBufferTargets::create`](crate::present::targets::GBufferTargets::create)).
+    pub rcas: Option<RcasActivation<'a>>,
     /// Mesh foundation M3: the per-mesh instanced-arm draw BATCH LIST. An EMPTY slice
     /// (every pre-M2 scene) records the LEGACY pass-A draw — `vkCmdDraw(vertex_count, 1,
     /// 0, 0)` over [`Self::vertex_buffer`] binding [`Self::instance_bind_group`] (the

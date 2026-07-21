@@ -332,6 +332,29 @@ pub struct GBufferTargets {
     /// `taa_motion_cam_ubo[fi]`. `None` when TAA is off. The recorder selects
     /// `taa_resolve_set[self.frame_index]`.
     pub(crate) taa_resolve_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// TAA rung T3: the RCAS-intermediate STORAGE image ring `taa_resolved` (`R8G8B8A8_UNORM`
+    /// == [`GBUFFER_FORMAT`], `ImageUsage::STORAGE` only — never `SAMPLED`/`COLOR_ATTACHMENT`:
+    /// this image is NEVER read by a fragment shader nor a render-pass attachment, only ever a
+    /// compute STORAGE read/write). Sized to `aa_extent` (== `aa_out`'s size). `Some` iff
+    /// [`GBufferScene::rcas`] is armed: the TAA resolve's `gAaOut` @4 binding is re-pointed here
+    /// instead of [`Self::aa_out`] (see [`Self::build_taa_resolve_set`]'s call site in
+    /// [`Self::create`]), and [`crate::present::passes::rcas`]'s `gRcasIn` @0 reads it, writing
+    /// the FINAL sharpened result into [`Self::aa_out`] (the "ping" of the ping-pong —
+    /// `rcas.comp.hlsl`'s module doc). No boot-clear needed (unlike [`Self::taa_hist`]): the
+    /// resolve writes every dispatched pixel of `gAaOut` unconditionally each frame, so a fresh
+    /// image's undefined initial contents are never read (mirrors [`Self::aa_out`]'s own
+    /// always-fully-discarded UNDEFINED→GENERAL transition). `None` when RCAS is off (the
+    /// 0%-gate — `SharpenMode::None`, the default) — the resolve writes [`Self::aa_out`]
+    /// directly, byte-identical to the pre-RCAS resolve.
+    pub(crate) taa_resolved: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
+    /// TAA rung T3: the RCAS descriptor set RING (one 2-binding set per in-flight frame),
+    /// written ONCE against
+    /// [`RcasActivation::rcas_layout`](crate::present::scene_types::RcasActivation::rcas_layout).
+    /// Slot `fi` binds `gRcasIn` @0 = [`Self::taa_resolved`]`[fi]` (the READ), `gAaOut` @1 =
+    /// [`Self::aa_out`]`[fi]` (the WRITE — the present-blit's input, unchanged). `None` when
+    /// RCAS is off, or when [`Self::taa_resolved`]/[`Self::aa_out`] failed to allocate. The
+    /// recorder selects `rcas_set[self.frame_index]`.
+    pub(crate) rcas_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Which AA mode ([`AaArm`]) was armed when these targets were built.
     /// [`GBufferTargets::sync_gbuffer`] compares this against `AaArm::from_scene(scene)` and
     /// forces the same fence-safe rebuild an extent change triggers on a mismatch — a live,
@@ -917,7 +940,16 @@ pub(crate) enum AaArm {
     /// [`GBufferTargets::taa_hist`] cross-frame history ring — an arm-state flip into/out of
     /// `Taa` therefore forces the same fence-safe rebuild an extent change triggers, exactly
     /// like every other `AaArm` transition.
-    Taa,
+    Taa {
+        /// TAA rung T3: `scene.rcas.is_some()` — carried as PAYLOAD (not folded into a
+        /// separate `AaArm` variant) for the SAME reason this enum exists at all (its own doc):
+        /// a bare `Taa` variant cannot distinguish `SharpenMode::None` from `SharpenMode::Rcas`,
+        /// so a live Rcas on/off toggle (which allocates/frees [`GBufferTargets::taa_resolved`]/
+        /// `rcas_set`) would NOT trigger `sync_gbuffer`'s fence-safe rebuild without this field —
+        /// exactly the "two different armed sub-states want different resources" bug this enum
+        /// was invented to close (see the enum's own doc).
+        rcas: bool,
+    },
 }
 
 impl AaArm {
@@ -930,7 +962,7 @@ impl AaArm {
         } else if scene.ssaa.is_some() {
             AaArm::Ssaa
         } else if scene.taa.is_some() {
-            AaArm::Taa
+            AaArm::Taa { rcas: scene.rcas.is_some() }
         } else if scene.aa.is_some() {
             AaArm::Fxaa
         } else {
@@ -5026,6 +5058,37 @@ impl GBufferTargets {
         record
     }
 
+    /// TAA rung T3: builds the FIF-ringed `taa_resolved` RCAS-intermediate target, DEGRADING to
+    /// `None` (leak-safe) on any per-slot create failure — mirrors [`Self::build_taa_hist_ring`]'s
+    /// opt-in "recorded-not-fail-fast" policy (UNCONDITIONAL here — RCAS is not hwrt-gated). Built
+    /// ONLY when `scene.rcas.is_some()` (`SharpenMode::None`, the default, never calls this — the
+    /// 0%-gate). No boot-clear (unlike `taa_hist`): the resolve writes every dispatched pixel of
+    /// `gAaOut` unconditionally each frame it runs, so a fresh image's undefined initial contents
+    /// are never read (see [`GBufferTargets::taa_resolved`]'s field doc).
+    fn build_taa_resolved_ring(
+        ctx: &VulkanContext,
+        extent: VkExtent2D,
+    ) -> Option<[VulkanTexture; FRAMES_IN_FLIGHT]> {
+        let mut slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for slot in slots.iter_mut() {
+            match Self::create_gbuffer_image(ctx, extent, ImageUsage::STORAGE) {
+                Ok(t) => *slot = Some(t),
+                Err(_) => {
+                    // SAFETY: each `Some` slot was created on `ctx` just above, is referenced by
+                    // no submission (build phase), and is destroyed exactly once (the `take`).
+                    for s in slots.iter_mut() {
+                        if let Some(t) = s.take() {
+                            unsafe { RhiDevice::destroy_texture(ctx, t) };
+                        }
+                    }
+                    return None;
+                }
+            }
+        }
+        Some(slots.map(|s| s.expect("invariant: every taa_resolved ring slot built above")))
+    }
+
     /// Anti-aliasing Stage 4 (TAA W5): builds the temporal-resolve descriptor set + its two OWN
     /// UBO rings — the `ResolvedTaa` tunables ring (48 B, rung T2) and the DEDICATED `MotionCam`
     /// ring (128 B, SEPARATE from the hwrt mesh-shadow `motion_cam_ubo` — see `TaaActivation`'s
@@ -5034,6 +5097,12 @@ impl GBufferTargets {
     /// LAST in [`Self::create`] (after `taa_hist`, which it binds) and DEGRADES-TO-`None` on any
     /// failure (leak-safe, opt-in — UNCONDITIONAL here, unlike the hwrt-only temporal builder).
     /// `None` when `scene.taa` is absent (the 0%-gate) or `taa_hist`/`aa_out` failed to allocate.
+    ///
+    /// TAA rung T3: `aa_out`'s param name is kept generic — the CALLER ([`Self::create`]) passes
+    /// whichever ring `gAaOut` @4 should bind THIS frame: [`GBufferTargets::taa_resolved`] when
+    /// `scene.rcas.is_some()` (RCAS armed — the resolve's output is an intermediate, re-pointed
+    /// here), else [`GBufferTargets::aa_out`] (the unchanged direct present-blit input). This fn's
+    /// OWN body is untouched by the repoint — it just binds whatever `aa_out` slice it is given.
     fn build_taa_resolve_set(
         ctx: &VulkanContext,
         scene: &GBufferScene<'_>,
@@ -5184,6 +5253,51 @@ impl GBufferTargets {
             set_slots.map(|s| s.expect("invariant: every TAA resolve set slot built"));
 
         Some(TaaResolveSets { taa_ubo, motion_cam_ubo, set })
+    }
+
+    /// TAA rung T3: builds the RCAS descriptor set ring (2 STORAGE-image bindings, no UBO)
+    /// against [`RcasActivation::rcas_layout`] — `gRcasIn` @0 = `taa_resolved[fi]` (the
+    /// resolve's re-pointed intermediate write), `gAaOut` @1 = `aa_out[fi]` (the present-blit's
+    /// input, unchanged). Built LAST (after [`Self::build_taa_resolve_set`], which repoints the
+    /// resolve's OWN `gAaOut` at `taa_resolved` instead) and DEGRADES-TO-`None` on any failure
+    /// (leak-safe, opt-in — mirrors [`Self::build_taa_resolve_set`]'s per-slot drain). `None`
+    /// when `scene.rcas` is absent (the 0%-gate) or `taa_resolved`/`aa_out` failed to allocate.
+    fn build_rcas_set(
+        ctx: &VulkanContext,
+        scene: &GBufferScene<'_>,
+        taa_resolved: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        aa_out: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+    ) -> Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> {
+        let (rcas, resolved, out) = match (scene.rcas.as_ref(), taa_resolved, aa_out) {
+            (Some(r), Some(resolved), Some(out)) => (r, resolved, out),
+            _ => return None,
+        };
+
+        let mut slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for (slot, dst) in slots.iter_mut().enumerate() {
+            let entries = [
+                BindGroupEntry::StorageImage { texture: &resolved[slot] },
+                BindGroupEntry::StorageImage { texture: &out[slot] },
+            ];
+            let desc = BindGroupDesc::<Vulkan> { layout: rcas.rcas_layout, entries: &entries };
+            match RhiDevice::create_bind_group(ctx, &desc) {
+                Ok(g) => *dst = Some(g),
+                Err(_) => {
+                    // SAFETY: the [0..slot) RCAS set slots were created on `ctx`, never
+                    // submitted; destroy each once (reverse acquisition within this ring).
+                    unsafe {
+                        for s in slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                    }
+                    return None;
+                }
+            }
+        }
+        Some(slots.map(|s| s.expect("invariant: every RCAS set slot built above")))
     }
 
     /// HW-RT Rung 3b: builds one FIF-ringed temporal denoise target, DEGRADING to `None` (leak-
@@ -5874,16 +5988,48 @@ impl GBufferTargets {
         let taa_hist: Option<[VulkanTexture; FRAMES_IN_FLIGHT]> =
             if scene.taa.is_some() { Self::build_and_clear_taa_hist(ctx, aa_extent) } else { None };
 
+        // TAA rung T3: `GBufferScene::rcas` is a pure post-process over the resolve's OWN
+        // output — it can never be armed without the resolve itself (`GBufferScene::taa`)
+        // being armed too (the scene-assembly seam, `boyko_app::gpu_scene`, ANDs the two at the
+        // arm site). This debug_assert makes that lockstep explicit at the ONE place every
+        // `GBufferScene` flows through before its targets are built.
+        debug_assert!(
+            scene.rcas.is_none() || scene.taa.is_some(),
+            "invariant: GBufferScene::rcas armed implies GBufferScene::taa armed (RCAS runs \
+             post-TAA-resolve, never standalone)"
+        );
+        // TAA rung T3: the RCAS-intermediate `taa_resolved` ring, built right after `taa_hist`
+        // (both TAA-Stage-4-adjacent) so it exists BEFORE `build_taa_resolve_set` below needs to
+        // pick which ring the resolve's `gAaOut` @4 binds this frame. Gated on `scene.rcas.
+        // is_some()` — `None` (the 0%-gate, `SharpenMode::None`) never calls this.
+        let taa_resolved: Option<[VulkanTexture; FRAMES_IN_FLIGHT]> =
+            if scene.rcas.is_some() { Self::build_taa_resolved_ring(ctx, aa_extent) } else { None };
+
         // Anti-aliasing Stage 4 (TAA W5): the resolve's own tunables + DEDICATED `MotionCam` UBO
         // rings + the 8-binding resolve set. Built LAST (after `taa_hist`/`aa_out`, which it
         // binds) and DEGRADE-TO-NONE (opt-in, no dependents) — like the hwrt temporal sets, it
         // needs no teardown weaving. `None` on the OFF path (TAA off, or `taa_hist`/`aa_out`
         // failed to allocate) ⇒ byte-identical.
+        //
+        // TAA rung T3: `gAaOut` @4 is RE-POINTED at `taa_resolved` instead of `aa_out` whenever
+        // RCAS is armed (`record_rcas` then reads `taa_resolved` and writes the FINAL sharpened
+        // result into `aa_out` itself) — `resolve_gaaout_target` picks the right ring;
+        // `build_taa_resolve_set`'s own body is untouched (its `aa_out` param just binds
+        // whichever slice it is handed). `SharpenMode::None` (`scene.rcas.is_none()`) keeps
+        // `resolve_gaaout_target == aa_out.as_ref()` — byte-identical to the pre-RCAS resolve.
+        let resolve_gaaout_target =
+            if scene.rcas.is_some() { taa_resolved.as_ref() } else { aa_out.as_ref() };
         let (taa_ubo, taa_motion_cam_ubo, taa_resolve_set) =
-            match Self::build_taa_resolve_set(ctx, scene, &lit, &viewt, taa_hist.as_ref(), aa_out.as_ref()) {
+            match Self::build_taa_resolve_set(ctx, scene, &lit, &viewt, taa_hist.as_ref(), resolve_gaaout_target) {
                 Some(sets) => (Some(sets.taa_ubo), Some(sets.motion_cam_ubo), Some(sets.set)),
                 None => (None, None, None),
             };
+
+        // TAA rung T3: the RCAS descriptor set, built LAST (after `taa_resolve_set`, which
+        // repoints the resolve's own `gAaOut`) and DEGRADE-TO-NONE (opt-in, no dependents) — like
+        // the resolve set above, it needs no teardown weaving. `None` on the OFF path (RCAS off,
+        // or `taa_resolved`/`aa_out` failed to allocate) ⇒ byte-identical.
+        let rcas_set = Self::build_rcas_set(ctx, scene, taa_resolved.as_ref(), aa_out.as_ref());
 
         Ok(Self {
             depth,
@@ -5930,6 +6076,8 @@ impl GBufferTargets {
             taa_ubo,
             taa_motion_cam_ubo,
             taa_resolve_set,
+            taa_resolved,
+            rcas_set,
             aa_arm: AaArm::from_scene(scene),
             #[cfg(feature = "hwrt")]
             shadow_vis_resolve_set,
@@ -6080,6 +6228,14 @@ impl GBufferTargets {
         // slots — every slot of every ring (and the single set) is drained. Rung 3a (`hwrt`) adds
         // the two `Option`-guarded shadow-vis image RINGS, drained before ssao (reverse acquisition).
         unsafe {
+            // TAA rung T3: the RCAS descriptor set — acquired LAST (after `taa_resolved`/
+            // `aa_out`/`taa_resolve_set`), so destroyed FIRST here (before everything it reads
+            // from). `Option`-guarded (`None` unless `scene.rcas` was armed).
+            if let Some(s) = self.rcas_set {
+                for g in s {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
             // Anti-aliasing Stage 4 (TAA W5): the resolve set + its two UBO rings — acquired LAST
             // (after `taa_hist`, in `build_taa_resolve_set`), so destroyed FIRST here (before the
             // history ring they bind). `Option`-guarded (`None` on every non-TAA `AaArm`).
@@ -6096,6 +6252,15 @@ impl GBufferTargets {
             if let Some(r) = self.taa_ubo {
                 for b in r {
                     RhiDevice::destroy_buffer(ctx, b);
+                }
+            }
+            // TAA rung T3: the `taa_resolved` RCAS-intermediate ring — acquired AFTER `taa_hist`
+            // but BEFORE the resolve set/UBOs above (which bind it), so destroyed AFTER those
+            // (above) and BEFORE `taa_hist` (below) — reverse acquisition. `Option`-guarded
+            // (`None` unless `scene.rcas` was armed, or its ring failed to allocate).
+            if let Some(r) = self.taa_resolved {
+                for t in r {
+                    RhiDevice::destroy_texture(ctx, t);
                 }
             }
             // Anti-aliasing Stage 4 (TAA W4): the `taa_hist` history ring — the LAST IMAGE
@@ -6576,6 +6741,8 @@ mod tests {
             taa_ubo: None,
             taa_motion_cam_ubo: None,
             taa_resolve_set: None,
+            taa_resolved: None,
+            rcas_set: None,
             aa_arm: AaArm::Off,
             ddgi_update_set: None,
             present_set: bg_ring(),
@@ -6659,6 +6826,8 @@ mod tests {
             taa_ubo: None,
             taa_motion_cam_ubo: None,
             taa_resolve_set: None,
+            taa_resolved: None,
+            rcas_set: None,
             aa_arm: AaArm::Off,
             shadow_vis_resolve_set: shadow_vis_resolve.then(bg_ring),
             shadow_denoised_resolve_set: shadow_denoised_resolve.then(bg_ring),

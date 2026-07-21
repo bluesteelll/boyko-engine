@@ -523,3 +523,39 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 BOYKO_AA                 = "taa"
 BOYKO_TAA_SCOPE          = "basis"
 BOYKO_WIN                = "512"
+
+[taa_rcas]
+# AA Stage 4 rung T3: the ARMED-RCAS gate. Pins the post-resolve contrast-adaptive sharpen
+# (SharpenMode::Rcas) at its shipped default rcas_sharpness = 0.25, over the same armed-TAA scene
+# as [taa_armed_basis] (JitterScope::RasterAndBasis, the shipped default). Until this pin existed
+# the RCAS ping-pong path -- the taa_resolved intermediate, the gAaOut repoint, the record_rcas
+# barriers, the CAS kernel -- carried ZERO regression protection.
+#
+# These bytes MUST differ from [taa_armed_basis]'s: same scene, same jitter, the ONLY variable is
+# the added sharpen pass. If the two ever agree, RCAS is a no-op (the pass silently stopped
+# running). The 0%-gate stays [taa_armed]/[taa_armed_basis]: SharpenMode::None (their config) is
+# byte-UNCHANGED by T3 -- proven by those two pins staying identical across this rung.
+#
+# sha256_hwrt DIVERGES from sha256_software, for the SAME reason [taa_armed] does: under hwrt the
+# directional shadow is a rayQuery mesh trace, not the CSM lookup, so the resolve's lit input --
+# and thus the sharpened output -- genuinely differ. Each leg is pinned on its own -Bless run.
+crate           = "boyko-app"
+test_binary     = "taa_jitter_eval"
+test_name       = "taa_jitter_eval_screenshot_dump"
+bmp             = "D:\tmp\taa_rcas.bmp"
+width           = 512
+height          = 512
+sha256_software = "37839075a34db560f44c1f1a0d51908f60559aa598bbdf1687bb97ec595db593"
+sha256_hwrt     = "08752f67e3239ed441e4f8cd3718a769be2f2208332e5aace80526c79381c948"
+
+[taa_rcas.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\tmp\taa_rcas.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+BOYKO_AA                 = "taa"
+BOYKO_WIN                = "512"
+# Arms SharpenMode::Rcas (requires BOYKO_AA=taa). Scope is left DEFAULT (RasterAndBasis, matching
+# [taa_armed_basis]) and BOYKO_TAA_SHARPNESS is left DEFAULT (0.25) -- this pin freezes the shipped
+# RCAS default, so it NAMES neither and inherits both.
+BOYKO_TAA_SHARPEN        = "rcas"

@@ -3264,6 +3264,58 @@ impl ViewtFromDepthPush {
     }
 }
 
+/// TAA rung T3: the post-resolve RCAS sharpen compute pass's OWN push constant
+/// (`shaders/rcas.comp.hlsl`) — mirrors [`ClusterCullPush`]'s `#[repr(C)]`, 16-byte,
+/// const-asserted-offset shape. Unlike the resolve, RCAS binds no camera UBO (a pure
+/// image-space kernel — see `rcas.comp.hlsl`'s module doc), so the runtime extent rides the
+/// push alongside the owner-set sharpness:
+///
+///   offset  0 : u32  img_w      runtime extent width  (0 => the shader's `IMG_W_DEFAULT`)
+///   offset  4 : u32  img_h      runtime extent height (0 => the shader's `IMG_H_DEFAULT`)
+///   offset  8 : f32  sharpness  `[0, 1]`: 0 = mild (peak `-1/8`), 1 = strong (peak `-1/5`)
+///   offset 12 : u32  _pad       keeps the range a round 16 bytes; unread
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RcasPush {
+    /// Render extent width — the dispatch bounds `idx < img_w * img_h`.
+    pub img_w: u32,
+    /// Render extent height.
+    pub img_h: u32,
+    /// The owner-set [`SharpenMode::Rcas`](boyko_render's `SharpenMode::Rcas`) strength in
+    /// `[0, 1]` (`boyko_render::taa_config::TaaConfig::rcas_sharpness`).
+    pub sharpness: f32,
+    /// Padding to a round 16-byte push range; unread by the shader.
+    pub _pad: u32,
+}
+
+/// Byte size of [`RcasPush`] — the RCAS pipeline's declared COMPUTE push range (16 B).
+pub const RCAS_PUSH_BYTES: u32 = core::mem::size_of::<RcasPush>() as u32;
+
+const _: () = assert!(core::mem::offset_of!(RcasPush, img_w) == 0);
+const _: () = assert!(core::mem::offset_of!(RcasPush, img_h) == 4);
+const _: () = assert!(core::mem::offset_of!(RcasPush, sharpness) == 8);
+const _: () = assert!(core::mem::offset_of!(RcasPush, _pad) == 12);
+const _: () = assert!(RCAS_PUSH_BYTES == 16, "RcasPush must be 16 bytes");
+
+impl RcasPush {
+    /// Builds the push from the runtime extent + the owner-set sharpness.
+    #[inline]
+    pub const fn new(img_w: u32, img_h: u32, sharpness: f32) -> Self {
+        Self { img_w, img_h, sharpness, _pad: 0 }
+    }
+
+    /// Re-views the push constants as their raw 16-byte slice for `push_constants`.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `Self` is `#[repr(C)]` with only `u32` / `f32` fields (all `Copy`, every
+        // offset + the 16-byte total pinned by the const-asserts above, no uninit padding),
+        // so its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern.
+        // The `&self` borrow keeps the struct alive for the slice's lifetime; read-only.
+        unsafe {
+            slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
+        }
+    }
+}
 
 /// The camera the extent-aware golden ([`golden_composite_pixel_ex`]) reconstructs a
 /// ray from. ORTHO is the golden-frozen path; PERSPECTIVE mirrors the shader's

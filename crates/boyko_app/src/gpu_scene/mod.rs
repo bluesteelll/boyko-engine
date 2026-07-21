@@ -33,7 +33,8 @@ use boyko_rhi_vulkan::compute::{
     B5_CAMERA_UBO_BYTES_M4, CAM_MODE_ORTHO, CAM_MODE_PERSPECTIVE, COMPOSITE_PUSH_CONSTANT_BYTES,
     CoarseMode, EDITLIST_BUFFER_WORDS,
     INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS,
-    LOCAL_SIZE_X, M4_LEVEL_PARAMS_BYTES, SDF_FORWARD_MARCH_PUSH_BYTES, TILE_BOUND_BYTES, TILE_SIZE,
+    LOCAL_SIZE_X, M4_LEVEL_PARAMS_BYTES, RCAS_PUSH_BYTES, SDF_FORWARD_MARCH_PUSH_BYTES,
+    TILE_BOUND_BYTES, TILE_SIZE,
     csm_depth_fs_spirv, csm_depth_vs_spirv, deferred_pbr_spirv,
     deferred_pbr_wrap_spirv,
     depth_prepass_fs_spirv, depth_prepass_vs_spirv,
@@ -43,7 +44,7 @@ use boyko_rhi_vulkan::compute::{
     gbuffer_mrt_fs_spirv,
     gbuffer_mrt_pm_fs_spirv, gbuffer_mrt_pm_vs_spirv, gbuffer_mrt_tex_fs_spirv,
     gbuffer_mrt_tex_vs_spirv, gbuffer_mrt_vs_spirv, interp_instances_spirv, punctual_depth_fs_spirv,
-    punctual_depth_vs_spirv, sdf_forward_march_spirv, sdf_forward_march_sdfonly_spirv,
+    punctual_depth_vs_spirv, rcas_spirv, sdf_forward_march_spirv, sdf_forward_march_sdfonly_spirv,
     sdf_gbuffer_composite_spirv, sdf_probe_update_spirv,
     sdf_ssao_spirv_variant, smaa_blend_fs_spirv, smaa_edge_fs_spirv, smaa_weight_fs_spirv,
     SSAO_ATROUS_PUSH_BYTES, ssao_atrous_read8_spirv, ssao_atrous_spirv, ssao_atrous_write8_spirv,
@@ -63,8 +64,8 @@ use boyko_rhi_vulkan::rhi_impl::{
 use boyko_rhi_vulkan::swapchain::{
     AaActivation, CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
     GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene,
-    InterpActivation, PunctualDepthActivation, ResolvedRenderPathGpu, SmaaActivation,
-    SsaaActivation, SsaoActivation, TaaActivation, ViewtFromDepthActivation,
+    InterpActivation, PunctualDepthActivation, RcasActivation, ResolvedRenderPathGpu,
+    SmaaActivation, SsaaActivation, SsaoActivation, TaaActivation, ViewtFromDepthActivation,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::accel::BoundAccelStruct;
@@ -92,7 +93,7 @@ use boyko_render::{
     PER_INSTANCE_MATERIAL_BYTES, PER_INSTANCE_MATERIAL_TEX_BYTES, RESOLVED_CSM_BYTES,
     RESOLVED_DDGI_BYTES, RESOLVED_SHADOW_ATLAS_BYTES, RETIRE_DELAY, ResolvedCsm,
     ResolvedShadowAtlas, RetiredGpuBuffers, SEARCH_TEX_BYTES, SEARCH_TEX_H, SEARCH_TEX_W,
-    SHADOW_DIM, Vertex, ddgi_update_dispatch_groups, fill_fibonacci_ray_table,
+    SHADOW_DIM, SharpenMode, Vertex, ddgi_update_dispatch_groups, fill_fibonacci_ray_table,
     mesh_view_t_norm, pack_ddgi_update_ubo, resolve_ddgi, upload_texture_2d_raw,
 };
 #[cfg(feature = "hwrt")]
@@ -741,6 +742,14 @@ pub(crate) struct GpuSceneBundles {
     /// resolve's `gLit` combined-image-sampler tap — DISTINCT boot object from
     /// [`Self::fxaa_sampler`]/[`Self::smaa_sampler`].
     taa_linear_sampler: VulkanSampler,
+    /// TAA rung T3: the post-resolve RCAS sharpen compute pipeline (`rcas.comp`), built
+    /// UNCONDITIONALLY at boot (like [`Self::taa_resolve_pipeline`]) so the mode can flip at
+    /// runtime. Bound + dispatched by `record_rcas` when `scene.rcas.is_some()`.
+    rcas_pipeline: ComputePipeline,
+    /// TAA rung T3: the DEDICATED 2-binding bind-group LAYOUT [`Self::rcas_pipeline`] declares
+    /// at set 0 — { `gRcasIn` STORAGE @0, `gAaOut` STORAGE @1 }. [`GBufferTargets`] writes a
+    /// per-FIF `rcas_set` against it once per extent.
+    rcas_layout: VulkanBindGroupLayout,
     // ── Render P7-Q2: SSAO (dormant → live) ───────────────────────────────────
     /// Render P7-Q2: the [`SSAO_QUALITY_COUNT`] pre-compiled SSAO quality-variant compute
     /// pipelines (`sdf_ssao_{low,medium,high}.comp`), built unconditionally at boot (like
@@ -2066,6 +2075,37 @@ impl GpuSceneBundles {
         )
         .expect("invariant: TAA resolve compute pipeline create");
 
+        // TAA rung T3: the post-resolve RCAS sharpen compute pipeline + its DEDICATED 2-binding
+        // layout { `gRcasIn` STORAGE @0, `gAaOut` STORAGE @1 } + a 16-byte `RcasPush` COMPUTE
+        // push range. Built UNCONDITIONALLY here (like `taa_resolve_pipeline` above) — RCAS is
+        // NOT hwrt-gated (a pure image-space kernel). Boot-time creation records no command /
+        // samples no OFF pixel — byte-identical to the golden regardless of this pipeline's
+        // existence (`GBufferScene::rcas` stays `None` unless `SharpenMode::Rcas` is selected
+        // AND `AaMode::Taa` is armed).
+        let rcas_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: RCAS bind-group layout create");
+        let rcas_cs = RhiDevice::create_shader_module(device, rcas_spirv())
+            .expect("invariant: RCAS compute shader module create");
+        let rcas_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &rcas_cs,
+                entry: c"main",
+                push_constant_bytes: RCAS_PUSH_BYTES,
+                bind_group_layout: Some(&rcas_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: RCAS compute pipeline create");
+
         // Render P7-Q2: the SSAO compute pass — 3 pre-compiled quality-variant pipelines
         // sharing ONE dedicated 5-binding layout, built UNCONDITIONALLY here (like
         // `fxaa_pipeline`/`ssaa_pipeline`/`taa_resolve_pipeline` above) so the
@@ -2236,6 +2276,7 @@ impl GpuSceneBundles {
             RhiDevice::destroy_shader_module(device, ssao_atrous_interior_cs);
             RhiDevice::destroy_shader_module(device, ssao_atrous_read8_cs);
             RhiDevice::destroy_shader_module(device, taa_resolve_cs);
+            RhiDevice::destroy_shader_module(device, rcas_cs);
             RhiDevice::destroy_shader_module(device, ssao_cs_high);
             RhiDevice::destroy_shader_module(device, ssao_cs_medium);
             RhiDevice::destroy_shader_module(device, ssao_cs_low);
@@ -3209,6 +3250,8 @@ impl GpuSceneBundles {
             taa_resolve_pipeline,
             taa_resolve_layout,
             taa_linear_sampler,
+            rcas_pipeline,
+            rcas_layout,
             ssao_pipelines,
             ssao_layout,
             ssao_atrous_read8_pipeline,
@@ -4035,6 +4078,20 @@ impl GpuSceneBundles {
         // never reads `World` directly. Read ONLY when `aa_mode == AaMode::Taa` arms
         // `TaaActivation::reset` below; ignored (and harmless) otherwise.
         taa_reset: bool,
+        // TAA rung T3: the owner-set post-resolve sharpen mode
+        // (`boyko_render::taa_config::TaaConfig::sharpen`), threaded from `boyko_app::runner`
+        // the SAME way `aa_mode`/`taa_reset` are. `SharpenMode::None` (the default) ⇒
+        // `GBufferScene::rcas == None` (the 0%-gate: no `taa_resolved`, no `rcas_set`, the
+        // resolve writes `aa_out` directly). `SharpenMode::Rcas` arms the RCAS activation below
+        // ONLY when `aa_mode == AaMode::Taa` ALSO holds — RCAS is a pure post-process over the
+        // resolve's OWN output, never standalone (see [`RcasActivation`]'s doc).
+        sharpen: SharpenMode,
+        // TAA rung T3: the owner-set [`SharpenMode::Rcas`] strength in `[0, 1]`
+        // (`boyko_render::taa_config::TaaConfig::rcas_sharpness`), threaded the SAME way
+        // `sharpen` is. Read ONLY when `sharpen == SharpenMode::Rcas` AND `aa_mode ==
+        // AaMode::Taa` arm [`RcasActivation::sharpness`] below; ignored (and harmless)
+        // otherwise.
+        rcas_sharpness: f32,
         // Render P7-Q2: the owner-resolved SSAO quality's variant index
         // ([`boyko_render::ResolvedSsao::variant`]) — `Some(0/1/2)` for Low/Medium/High,
         // `None` for [`boyko_render::SsaoQuality::Off`] (the default). Threaded from
@@ -4401,6 +4458,17 @@ impl GpuSceneBundles {
                 linear_sampler: &self.taa_linear_sampler,
                 reset: taa_reset,
             }),
+            // TAA rung T3: `sharpen == SharpenMode::Rcas` ⇒ `Some` — arms the RCAS activation
+            // against the boot-built pipeline/layout. Guarded ALSO on `aa_mode == AaMode::Taa`
+            // (RCAS is meaningless without the resolve it post-processes): a `SharpenMode::Rcas`
+            // config on any other `aa_mode` degrades to `None` here rather than arming a
+            // standalone pass (`GBufferTargets::create`'s `debug_assert!` would otherwise trip).
+            rcas: (matches!(aa_mode, AaMode::Taa) && matches!(sharpen, SharpenMode::Rcas))
+                .then_some(RcasActivation {
+                    rcas_pipeline: &self.rcas_pipeline,
+                    rcas_layout: &self.rcas_layout,
+                    sharpness: rcas_sharpness,
+                }),
             mesh_draw,
             csm_cascade_texture: &self.csm.cascade,
             csm_compare_sampler: &self.csm.sampler,
@@ -4920,6 +4988,10 @@ impl GpuSceneBundles {
             // before its layout — else a per-renderer boot leaks a pipeline + layout + sampler.
             RhiDevice::destroy_compute_pipeline(ctx, self.taa_resolve_pipeline);
             RhiDevice::destroy_bind_group_layout(ctx, self.taa_resolve_layout);
+            // TAA rung T3: the RCAS compute pipeline + its 2-binding layout, built
+            // UNCONDITIONALLY at boot (like `taa_resolve_pipeline` above). Pipeline before layout.
+            RhiDevice::destroy_compute_pipeline(ctx, self.rcas_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.rcas_layout);
             // Render P7-Q2: the 3 SSAO pipelines share `ssao_layout` — pipelines before the
             // shared layout (reverse creation order), built UNCONDITIONALLY at boot (every
             // config incl. `SsaoQuality::Off`), like fxaa/smaa/ssaa/taa above.

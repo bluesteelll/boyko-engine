@@ -3,6 +3,10 @@
 //! `lit` GENERAL→SHADER_READ_ONLY_OPTIMAL transition — see [`gbuffer`](super::gbuffer)'s
 //! record-site ordering comment and [`TaaActivation`]'s "Compute, not graphics" doc for why
 //! this differs from FXAA/SMAA/SSAA's post-`present_sample` ordering.
+//!
+//! TAA rung T3: when [`super::super::scene_types::GBufferScene::rcas`] is armed, the resolve's
+//! `gAaOut` @4 binding is re-pointed at `taa_resolved` (the RCAS "ping") instead of `aa_out` —
+//! see [`Renderer::record_taa`]'s doc for the barrier consequences.
 
 use core::ptr;
 
@@ -18,30 +22,42 @@ impl Renderer<'_> {
     ///
     /// 1. `record_graph_pass` emits the framegraph's derived barriers for the "taa_resolve" pass
     ///    (`lit`/`viewt`/`taa_hist_read` reads, `taa_hist[fi]` write — all framegraph-tracked).
-    /// 2. A HAND-RECORDED barrier `aa_out[fi]` UNDEFINED → GENERAL (`aa_out` is NOT a
-    ///    framegraph-tracked resource — see [`crate::present::graph_bridge::FRAMEGRAPH_IMAGE_COUNT`]'s
-    ///    doc — mirrors FXAA's own hand-recorded `aa_out` barrier, adapted to a STORAGE-image
-    ///    write instead of a color-attachment write). `UNDEFINED` is valid on EVERY frame (not
-    ///    just the first): the shader writes every dispatched pixel of `gAaOut` unconditionally
-    ///    (both its `reset_now` and normal branches), so the prior contents are always fully
-    ///    discarded, exactly like FXAA's fullscreen-triangle overwrite.
+    /// 2. A HAND-RECORDED barrier on the resolve's OWN write target — `taa_resolved[fi]` when
+    ///    `scene.rcas.is_some()` (RCAS armed), else `aa_out[fi]` — UNDEFINED → GENERAL (neither
+    ///    is a framegraph-tracked resource — see
+    ///    [`crate::present::graph_bridge::FRAMEGRAPH_IMAGE_COUNT`]'s doc — mirrors FXAA's own
+    ///    hand-recorded `aa_out` barrier, adapted to a STORAGE-image write instead of a
+    ///    color-attachment write). `UNDEFINED` is valid on EVERY frame (not just the first): the
+    ///    shader writes every dispatched pixel of `gAaOut` unconditionally (both its `reset_now`
+    ///    and normal branches), so the prior contents are always fully discarded, exactly like
+    ///    FXAA's fullscreen-triangle overwrite.
     /// 3. Bind the resolve pipeline + `taa_resolve_set[fi]` + push the 4-byte `{ uint reset; }`
     ///    constant (`activation.reset`), dispatch `scene.dispatch_group_count_x` groups
-    ///    (`numthreads(64,1,1)`, the same 1D pixel grid the resolve/marcher use).
-    /// 4. A HAND-RECORDED barrier `aa_out[fi]` GENERAL → SHADER_READ_ONLY_OPTIMAL, so the
-    ///    present-blit's sample (pass C, recorded after this call via the repointed
-    ///    `present_set`) sees a valid, ordered read.
+    ///    (`numthreads(64,1,1)`, the same 1D pixel grid the resolve/marcher use). `taa_resolve_set`
+    ///    binds `gAaOut` @4 to WHICHEVER ring this fn's Barrier 2 just transitioned — see
+    ///    [`GBufferTargets::create`]'s `resolve_gaaout_target` repoint.
+    /// 4. `scene.rcas.is_none()` ONLY: a HAND-RECORDED barrier `aa_out[fi]` GENERAL →
+    ///    SHADER_READ_ONLY_OPTIMAL, so the present-blit's sample (pass C, recorded after this
+    ///    call via the repointed `present_set`) sees a valid, ordered read — UNCHANGED from the
+    ///    pre-RCAS resolve (the structural 0%-gate: this whole barrier is skipped, byte-for-byte,
+    ///    when RCAS is off). `scene.rcas.is_some()`: this barrier is SKIPPED here — `record_rcas`
+    ///    (recorded immediately after this call) performs its OWN "Barrier A" instead, a
+    ///    COMPUTE-to-COMPUTE `GENERAL → GENERAL` sync on `taa_resolved[fi]` (not a FRAGMENT-sample
+    ///    transition, since `taa_resolved` is never sampled — only ever read by RCAS's own
+    ///    `gRcasIn` STORAGE binding), then writes the FINAL sharpened result into `aa_out[fi]`
+    ///    itself (its own Barriers B/C).
     ///
     /// # Safety
     ///
     /// `cmd` must be recordable (recording open, within the caller's begin/end bracket);
-    /// `targets.aa_out` / `targets.taa_hist` / `targets.taa_resolve_set` must be `Some` (the
-    /// caller gates on `scene.taa.is_some() && targets.taa_resolve_set.is_some()`, kept in
-    /// lockstep by [`GBufferTargets::create`]); `activation.resolve_pipeline`'s layout matches
-    /// `taa_resolve_set`'s (8 bindings + a 4-byte COMPUTE push range); `fi` is this frame's
-    /// in-flight slot; the "taa_resolve" pass must be declared in [`Renderer::frame_graph`]
-    /// (the caller's `scene.taa.is_some()` gate implies `declare_deferred_graph` declared it —
-    /// see `graph_bridge.rs`).
+    /// `targets.taa_hist` / `targets.taa_resolve_set` must be `Some` (the caller gates on
+    /// `scene.taa.is_some() && targets.taa_resolve_set.is_some()`, kept in lockstep by
+    /// [`GBufferTargets::create`]); `targets.aa_out` must be `Some` always, and
+    /// `targets.taa_resolved` must ADDITIONALLY be `Some` when `scene.rcas.is_some()` (the SAME
+    /// lockstep); `activation.resolve_pipeline`'s layout matches `taa_resolve_set`'s (8 bindings +
+    /// a 4-byte COMPUTE push range); `fi` is this frame's in-flight slot; the "taa_resolve" pass
+    /// must be declared in [`Renderer::frame_graph`] (the caller's `scene.taa.is_some()` gate
+    /// implies `declare_deferred_graph` declared it — see `graph_bridge.rs`).
     pub(crate) unsafe fn record_taa(
         &self,
         cmd: VkCommandBuffer,
@@ -51,10 +67,22 @@ impl Renderer<'_> {
         scene: &GBufferScene<'_>,
         fi: usize,
     ) {
-        let aa = targets
-            .aa_out
-            .as_ref()
-            .expect("invariant: record gate (scene.taa.is_some()) implies aa_out Some");
+        let rcas_armed = scene.rcas.is_some();
+        // TAA rung T3: the resolve's OWN write target this frame — `taa_resolved` (the RCAS
+        // "ping", re-pointed at the resolve set's `gAaOut` @4 by `GBufferTargets::create`) when
+        // RCAS is armed, else `aa_out` (the present-blit's direct input, unchanged). `record_rcas`
+        // (called right after this fn when armed) reads `taa_resolved` and writes the FINAL
+        // sharpened result into `aa_out` itself.
+        let out_ring = if rcas_armed {
+            targets.taa_resolved.as_ref().expect(
+                "invariant: scene.rcas.is_some() implies taa_resolved was built alongside taa_resolve_set",
+            )
+        } else {
+            targets
+                .aa_out
+                .as_ref()
+                .expect("invariant: record gate (scene.taa.is_some()) implies aa_out Some")
+        };
         let set = targets
             .taa_resolve_set
             .as_ref()
@@ -65,7 +93,7 @@ impl Renderer<'_> {
         // G-buffer targets — a safe fn; recording is open per this fn's caller contract.
         self.record_graph_pass(taa_pass, cmd, targets, scene, fi);
 
-        // --- Barrier 1: aa_out[fi] UNDEFINED → GENERAL (the resolve's STORAGE-image write). ---
+        // --- Barrier 1: out_ring[fi] UNDEFINED → GENERAL (the resolve's STORAGE-image write). ---
         let to_general = VkImageMemoryBarrier {
             s_type: VkStructureType::ImageMemoryBarrier,
             p_next: ptr::null(),
@@ -75,14 +103,15 @@ impl Renderer<'_> {
             new_layout: VK_IMAGE_LAYOUT_GENERAL,
             src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
             dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-            image: aa[fi].image,
+            image: out_ring[fi].image,
             subresource_range: COLOR_SUBRESOURCE_RANGE,
         };
-        // SAFETY: recording is open (caller contract); one image barrier on the live `aa[fi]`
-        // texture (built by `create()` when `scene.taa` was armed); TOP_OF_PIPE→COMPUTE_SHADER
-        // with UNDEFINED→GENERAL is the superset-correct pre-dispatch transition (the shader
-        // writes every dispatched pixel unconditionally, so UNDEFINED-discard is always valid,
-        // not just on the first frame); `&to_general` outlives the call.
+        // SAFETY: recording is open (caller contract); one image barrier on the live
+        // `out_ring[fi]` texture (`aa_out` or `taa_resolved`, both built by `create()` when
+        // `scene.taa` was armed); TOP_OF_PIPE→COMPUTE_SHADER with UNDEFINED→GENERAL is the
+        // superset-correct pre-dispatch transition (the shader writes every dispatched pixel
+        // unconditionally, so UNDEFINED-discard is always valid, not just on the first frame);
+        // `&to_general` outlives the call.
         unsafe {
             (self.fns.cmd_pipeline_barrier)(
                 cmd,
@@ -132,36 +161,45 @@ impl Renderer<'_> {
             (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
         }
 
-        // --- Barrier 2: aa_out[fi] GENERAL → SHADER_READ_ONLY_OPTIMAL (the present-blit read). --
-        let to_shader_read = VkImageMemoryBarrier {
-            s_type: VkStructureType::ImageMemoryBarrier,
-            p_next: ptr::null(),
-            src_access_mask: VK_ACCESS_SHADER_WRITE_BIT,
-            dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
-            old_layout: VK_IMAGE_LAYOUT_GENERAL,
-            new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-            dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
-            image: aa[fi].image,
-            subresource_range: COLOR_SUBRESOURCE_RANGE,
-        };
-        // SAFETY: recording is open; COMPUTE_SHADER→FRAGMENT_SHADER with GENERAL→
-        // SHADER_READ_ONLY_OPTIMAL makes this dispatch's write available + visible to pass C's
-        // present-blit sample of `aa_out[fi]` (recorded after this call, via the repointed
-        // `present_set`); `&to_shader_read` outlives the call.
-        unsafe {
-            (self.fns.cmd_pipeline_barrier)(
-                cmd,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                0,
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-                1,
-                (&to_shader_read as *const VkImageMemoryBarrier).cast(),
-            );
+        // --- Barrier 2: aa_out[fi] GENERAL → SHADER_READ_ONLY_OPTIMAL (the present-blit read). ---
+        // SKIPPED when RCAS is armed: `out_ring` is `taa_resolved` there (never sampled by a
+        // fragment shader — only ever a compute STORAGE read), so `record_rcas`'s own "Barrier A"
+        // (a COMPUTE-to-COMPUTE GENERAL→GENERAL sync) takes over the resolve→RCAS hazard instead;
+        // `record_rcas` also performs the present-blit-facing GENERAL→SHADER_READ_ONLY_OPTIMAL
+        // transition itself, but on `aa_out`, not `taa_resolved`. `scene.rcas.is_none()`: this
+        // branch is byte-identical to the pre-RCAS resolve (the structural 0%-gate).
+        if !rcas_armed {
+            let to_shader_read = VkImageMemoryBarrier {
+                s_type: VkStructureType::ImageMemoryBarrier,
+                p_next: ptr::null(),
+                src_access_mask: VK_ACCESS_SHADER_WRITE_BIT,
+                dst_access_mask: VK_ACCESS_SHADER_READ_BIT,
+                old_layout: VK_IMAGE_LAYOUT_GENERAL,
+                new_layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                src_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                dst_queue_family_index: VK_QUEUE_FAMILY_IGNORED,
+                image: out_ring[fi].image,
+                subresource_range: COLOR_SUBRESOURCE_RANGE,
+            };
+            // SAFETY: recording is open; COMPUTE_SHADER→FRAGMENT_SHADER with GENERAL→
+            // SHADER_READ_ONLY_OPTIMAL makes this dispatch's write available + visible to pass
+            // C's present-blit sample of `aa_out[fi]` (`out_ring == aa_out` on this branch,
+            // recorded after this call, via the repointed `present_set`); `&to_shader_read`
+            // outlives the call.
+            unsafe {
+                (self.fns.cmd_pipeline_barrier)(
+                    cmd,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                    0,
+                    0,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    1,
+                    (&to_shader_read as *const VkImageMemoryBarrier).cast(),
+                );
+            }
         }
     }
 }

@@ -50,9 +50,9 @@ pub use gpu_timing::{PASS_COUNT, TimedPass, TimestampCollector};
 pub use scene_types::{
     AaActivation, BrickActivation, CsmDepthActivation, DdgiUpdateActivation,
     GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw,
-    GBufferScene, InterpActivation, PunctualDepthActivation, ResolvedRenderPathGpu, SCENE_MVP_BYTES,
-    SampledComposite, Scene, SmaaActivation, SsaaActivation, SsaoActivation, TaaActivation, UiPass,
-    ViewtFromDepthActivation,
+    GBufferScene, InterpActivation, PunctualDepthActivation, RcasActivation, ResolvedRenderPathGpu,
+    SCENE_MVP_BYTES, SampledComposite, Scene, SmaaActivation, SsaaActivation, SsaoActivation,
+    TaaActivation, UiPass, ViewtFromDepthActivation,
 };
 #[cfg(feature = "hwrt")]
 pub use scene_types::{ShadowVisActivation, TlasBuildActivation};

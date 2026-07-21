@@ -1695,6 +1695,13 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 .try_resource::<ResolvedAa>()
                 .map(|r| r.mode)
                 .unwrap_or_default();
+            // TAA rung T3: read the owner-set RCAS sharpen mode + strength straight off
+            // `TaaConfig` (NOT a `Resolved*` derived carrier — `TaaConfig::rcas_sharpness`'s own
+            // doc: it is host-read at record time, never folded into the `ResolvedTaa` UBO). The
+            // SAME `try_resource` pattern `resolved_aa_mode` uses: a host that omits `AaPlugin`
+            // degrades to `TaaConfig::default()`'s `SharpenMode::None` rather than panicking.
+            // Default/absent `None` ⇒ `scene.rcas == None` ⇒ byte-identical (the 0%-gate).
+            let resolved_taa_config = world.try_resource::<TaaConfig>().copied().unwrap_or_default();
             // Render P7-Q2: read the resolved SSAO selection (`SsaoPlugin`'s
             // `resolve_ssao_policy` is the single writer). The SAME `try_resource` pattern
             // `resolved_aa_mode` uses: a host that omits `SsaoPlugin` degrades to `None`
@@ -1773,6 +1780,8 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 terminator_wrap,
                 aa_mode,
                 taa_reset_flag,
+                resolved_taa_config.sharpen,
+                resolved_taa_config.rcas_sharpness,
                 ssao_variant,
                 ssao_atrous_levels,
                 // Multi-paradigm render-path plan, rung R1: the boot-committed selection

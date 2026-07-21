@@ -10,6 +10,7 @@ mod forward;
 mod fxaa;
 mod gbuffer;
 mod present_blit;
+mod rcas;
 mod scene;
 mod smaa;
 mod ssaa;
