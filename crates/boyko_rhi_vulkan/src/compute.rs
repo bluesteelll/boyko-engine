@@ -494,6 +494,19 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// Anti-aliasing Stage 4 (TAA rung T3) — the post-resolve CONTRAST-ADAPTIVE SHARPEN SPIR-V
+    /// (`shaders/rcas.comp.hlsl`, AMD FidelityFX CAS). The `SharpenMode::Rcas` pass reads the
+    /// resolve's intermediate `taa_resolved` (the ping) and writes `aa_out` (the pong — the
+    /// present-blit's input, unchanged). Bound to its OWN 2-binding layout { @0 `gRcasIn` rgba8
+    /// STORAGE read (the resolved LDR color), @1 `gAaOut` rgba8 STORAGE write } + a 16-byte COMPUTE
+    /// push range `{ uint img_w; uint img_h; float sharpness; uint _pad; }`. NOT recorded on
+    /// `SharpenMode::None` (the default — the resolve writes `aa_out` directly, the structural
+    /// 0%-gate). The const-asserted length is the anti-drift guard.
+    RCAS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/rcas.comp.spv")
+}
+
+embed_spirv! {
     /// The SDFDDGI I3 DDGI resolve-sample GPU-GOLDEN SPIR-V (`shaders/ddgi_probe_gi_resolve.comp.hlsl`).
     /// A standalone compute harness that runs the SAME `ddgi_probe_sample` the deferred resolve runs
     /// (both `#include "ddgi_resolve.hlsli"`) over host-supplied receiver samples and STOREs the
@@ -1375,6 +1388,17 @@ pub fn shadow_temporal_spirv() -> &'static [u32] {
 #[inline]
 pub fn taa_resolve_spirv() -> &'static [u32] {
     TAA_RESOLVE_SPV.as_words()
+}
+
+/// The TAA rung T3 CONTRAST-ADAPTIVE SHARPEN (AMD FidelityFX CAS) compute SPIR-V, for
+/// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module). Bound to its
+/// own 2-binding layout + a 16-byte COMPUTE push range (see [`RCAS_SPV`]'s doc for the full
+/// binding contract). NOT `hwrt`-gated. Bound at boot by `boyko_app::gpu_scene` into the
+/// `rcas_pipeline`, dispatched by `crate::present::passes::rcas::Renderer::record_rcas` when
+/// `GBufferScene`'s `SharpenMode::Rcas` is armed.
+#[inline]
+pub fn rcas_spirv() -> &'static [u32] {
+    RCAS_SPV.as_words()
 }
 
 /// The SDFDDGI I3 DDGI resolve-sample GPU-GOLDEN SPIR-V as a `u32` word stream, ready for

@@ -437,6 +437,12 @@ pub struct TaaConfig {
     /// A post-resolve sharpen pass — see [`SharpenMode`]. Default [`SharpenMode::None`] (the
     /// shipped resolve has no sharpen pass).
     pub sharpen: SharpenMode,
+    /// The [`SharpenMode::Rcas`] strength in `[0, 1]`, forwarded to the RCAS pass as a PUSH
+    /// constant (NOT the `ResolvedTaa` UBO — it is host-read at record time, so it does NOT affect
+    /// the 48-byte UBO byte-mirror). `0` = mild (peak `-1/8`), `1` = strong (peak `-1/5`), per the
+    /// FidelityFX CAS sharpness mapping in `rcas.comp.hlsl`. Inert unless [`sharpen`](Self::sharpen)
+    /// is [`SharpenMode::Rcas`]. Default `0.25` (a mild starting point the owner retunes by eye).
+    pub rcas_sharpness: f32,
 }
 
 impl Default for TaaConfig {
@@ -472,6 +478,7 @@ impl Default for TaaConfig {
             disocclusion: DisocclusionTest::OffScreenOnly,
             depth_tol: 0.02,
             sharpen: SharpenMode::None,
+            rcas_sharpness: 0.25,
         }
     }
 }
@@ -569,6 +576,7 @@ mod tests {
         assert_eq!(cfg.disocclusion, DisocclusionTest::OffScreenOnly);
         assert_eq!(cfg.depth_tol, 0.02);
         assert_eq!(cfg.sharpen, SharpenMode::None);
+        assert_eq!(cfg.rcas_sharpness, 0.25);
         assert!(
             cfg.basis_shear_enabled(),
             "the shear is opt-OUT: a world that arms Taa and sets nothing else gets it"
