@@ -559,7 +559,15 @@ fn render_deferred(device: &VulkanContext) -> Vec<u8> {
         }),
     });
     encoder.bind_graphics_pipeline(&geometry_pipeline);
-    encoder.push_graphics_constants(&geometry_pipeline, ShaderStage::VERTEX, 0, &mvp_bytes());
+    // `build_graphics_pipeline` widens every graphics layout's push range to VERTEX|FRAGMENT
+    // unconditionally (device.rs), so a VERTEX-only push leaves the range's FRAGMENT bit
+    // undeclared, tripping VUID-vkCmdPushConstants-offset-01796.
+    encoder.push_graphics_constants(
+        &geometry_pipeline,
+        ShaderStage::VERTEX | ShaderStage::FRAGMENT,
+        0,
+        &mvp_bytes(),
+    );
     encoder.bind_vertex_buffer(&vertex_buffer, 0, 0);
     encoder.set_viewport(&viewport);
     encoder.set_scissor(&full);

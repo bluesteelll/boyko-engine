@@ -581,7 +581,15 @@ fn run_hybrid(ctx: &VulkanContext, edits: &[SdfEdit]) -> (Vec<u32>, Vec<f32>) {
         }),
     });
     encoder.bind_graphics_pipeline(&gfx);
-    encoder.push_graphics_constants(&gfx, ShaderStage::VERTEX, 0, &ortho_mvp_bytes());
+    // `build_graphics_pipeline` widens every graphics layout's push range to VERTEX|FRAGMENT
+    // unconditionally (device.rs), so a VERTEX-only push leaves the range's FRAGMENT bit
+    // undeclared, tripping VUID-vkCmdPushConstants-offset-01796.
+    encoder.push_graphics_constants(
+        &gfx,
+        ShaderStage::VERTEX | ShaderStage::FRAGMENT,
+        0,
+        &ortho_mvp_bytes(),
+    );
     encoder.bind_vertex_buffer(&vertex_buffer, 0, 0);
     encoder.set_viewport(&Viewport {
         x: 0.0,
