@@ -112,8 +112,10 @@ fn main() {
     // VB v1 caps SSAO / DDGI / TAA OFF (`cap_vb_v1_consumers`) — the fused `vb_resolve` does not
     // consume them yet (the deferred R9 geo/shade split would unlock them); FXAA / SMAA DO run
     // under VB. So the AA DEFAULT is PATH-AWARE: SMAA under VB, TAA (+ RCAS) under deferred/forward.
+    // An EXPLICIT `BOYKO_AA=taa` under VB degrades cleanly to `Off` in `GpuSceneBundles::scene`
+    // (TAA is Deferred-only) — no crash; use `-Path deferred` for TAA + RCAS.
     let is_vb = std::env::var("BOYKO_RENDER_PATH").ok().as_deref() == Some("vb");
-    let mut aa_mode = match std::env::var("BOYKO_AA").ok().as_deref() {
+    let aa_mode = match std::env::var("BOYKO_AA").ok().as_deref() {
         Some("off") => AaMode::Off,
         Some("fxaa") => AaMode::Fxaa,
         Some("smaa") => AaMode::Smaa,
@@ -126,15 +128,6 @@ fn main() {
             }
         }
     };
-    // Arming TAA under VB trips a VB-pass invariant (`aa_out` armed, but the VB cap ran NO AA
-    // dispatch), so downgrade to SMAA rather than crash. Test TAA + RCAS under `-Path deferred`.
-    if is_vb && aa_mode == AaMode::Taa {
-        eprintln!(
-            "[vb_lab] NOTE: VB v1 caps TAA off (cap_vb_v1_consumers) -- using SMAA instead. \
-             Use -Path deferred for TAA + RCAS."
-        );
-        aa_mode = AaMode::Smaa;
-    }
     app.insert_resource(AaConfig { mode: aa_mode });
     let sharpen = match std::env::var("BOYKO_TAA_SHARPEN").ok().as_deref() {
         Some("none") => SharpenMode::None,

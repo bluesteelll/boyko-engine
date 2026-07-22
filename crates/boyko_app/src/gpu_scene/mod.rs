@@ -4179,6 +4179,27 @@ impl GpuSceneBundles {
         // never wired by this production seam yet — so it needs no additional gate here; the
         // async `light_upload` is light-generic, not leg-owned, so it is untouched.)
         let sdf_leg = resolved_render_path.sdf_leg;
+
+        // TAA is a DEFERRED-ONLY anti-aliaser today: `cap_forward_v1_consumers` /
+        // `cap_vb_v1_consumers` force it OFF for Forward / ForwardPlus / VisibilityBuffer (those
+        // paths write no motion vector / have no geo-shade-split producer yet —
+        // `RenderPathDegrade::{ForwardTaaNotYetImplemented, VbTaaNotYetImplemented}`). But the AA
+        // ACTIVATION arming below reads only `aa_mode` (from `AaConfig`), NOT the resolved path —
+        // so an `AaMode::Taa` request on one of those paths would arm `scene.taa` (and thus
+        // `aa_out`) while the VB/forward pass runs NO temporal resolve, leaving `aa_out` armed with
+        // no matching AA dispatch (the VB/forward AA blocks assert exactly that — a debug panic, a
+        // never-written `aa_out` sampled in release). Degrade an unsupported TAA request to `Off`
+        // HERE, at the single point where `aa_mode` feeds every AA activation, so `aa_out` never
+        // arms without a pass. FXAA / SMAA / SSAA are NOT capped and arm as usual; a Deferred TAA
+        // request (`resolved_render_path.path == Deferred`) is byte-UNCHANGED (the `taa_armed` /
+        // `taa_rcas` goldens hold).
+        let aa_mode = if aa_mode == AaMode::Taa
+            && resolved_render_path.path != boyko_render::RenderPath::Deferred
+        {
+            AaMode::Off
+        } else {
+            aa_mode
+        };
         let ddgi_enabled = ddgi_enabled && sdf_leg;
 
         // VB-P2 classification plan, rung P2c (the P1-4 owner-decided selector,
