@@ -572,6 +572,13 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
         "the re-created swapchain extent must match the probe extent (stable surface)"
     );
     assert_eq!(swapchain.extent().height, live.height, "re-created swapchain height stable");
+    println!(
+        "phase-C swapchain: {} images, extent {}x{}, format {}",
+        swapchain.image_count(),
+        swapchain.extent().width,
+        swapchain.extent().height,
+        swapchain.format()
+    );
     let mut renderer =
         Renderer::new(rhi.context(), &surface, &swapchain).expect("renderer (command pool + sync)");
 
@@ -588,6 +595,19 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
         },
     )
     .expect("readback staging buffer");
+    // Sentinel-fill the staging (0xCD) — the anti-stale tripwire. The shared host block
+    // RECYCLES freed ranges: this staging lands where Phase B's scene-upload staging was
+    // freed (shifted by ui_setup's 1088 B of carve-outs), so its INITIAL mapped contents
+    // are the STALE host-authored scene bytes — which once masqueraded as a rendered
+    // frame while the GPU copy had not even executed (the host read raced the readback
+    // frame's fence). The sentinel makes any such unexecuted-copy read unmistakable, and
+    // the post-wait assert below trips on it instead of chasing ghost pixels.
+    {
+        let p = RhiDevice::buffer_mapped_ptr(rhi.context(), &staging).expect("staging mapped");
+        // SAFETY: `p` maps `staging_size` host-coherent bytes; no GPU work references
+        // the staging yet (created just above, first submit is below).
+        unsafe { core::ptr::write_bytes(p.as_ptr(), 0xCD, staging_size as usize) };
+    }
 
     for i in 0..5u32 {
         window.pump_events();
@@ -664,17 +684,39 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
         readback_done,
         "no readback frame presented (swapchain kept recreating) — cannot assert the UI golden"
     );
+    // FENCE THE READBACK before touching the staging: drop the renderer NOW — its Drop
+    // waits the device idle, which completes the readback frame's whole submission
+    // (composite + UI draws + the image→buffer copy). The old code read the staging
+    // right here with only ONE later present having run: that present fence-waited the
+    // SIBLING slot, so frame 3's copy was never waited — under validation pacing the
+    // host reliably read the staging's initial (stale recycled) bytes and the golden
+    // chased a frame that was never there (proven by an all-0xCD sentinel readback).
+    // Correctness by construction beats fence arithmetic: wait-idle, then read.
+    drop(renderer);
     let w = readback_extent.width;
     let h = readback_extent.height;
     let dst = RhiDevice::buffer_mapped_ptr(rhi.context(), &staging).expect("staging mapped");
     let byte_count = (w * h * 4) as usize;
     let mut out = vec![0u8; byte_count];
     // SAFETY: `dst` maps `staging_size` (>= byte_count) host-coherent bytes; the
-    // readback frame's submit completed before this read (the renderer fence-waits the
-    // slot at the start of each later present, and 1 more frame followed frame 3); `out`
-    // is a distinct alloc.
+    // renderer was dropped above (device wait-idle), so the readback frame's copy is
+    // complete + coherent; `out` is a distinct alloc.
     unsafe {
         core::ptr::copy_nonoverlapping(dst.as_ptr(), out.as_mut_ptr(), byte_count);
+    }
+    // The tripwire pairs with the 0xCD sentinel fill at creation: an all-sentinel
+    // readback means the copy never executed before this read (a sync bug in the test
+    // or the present path) — fail HERE with the true cause, not on a pixel mismatch.
+    assert!(
+        out.iter().any(|&b| b != 0xCD),
+        "readback staging still holds the creation sentinel — the image→buffer copy never \
+         executed before the host read (readback-fence sync bug)"
+    );
+    // Diagnostic raw-frame dump (env-gated): the whole readback as raw bytes so an
+    // external histogram can classify a failing frame without single-texel guesswork.
+    if let Some(p) = std::env::var_os("BOYKO_UIRECT_DUMP") {
+        std::fs::write(&p, &out).expect("raw readback dump");
+        println!("uirect raw dump -> {:?} ({}x{})", p, w, h);
     }
     let read = |x: u32, y: u32| -> [u8; 4] {
         let b = texel_base(x, y, w);
@@ -699,10 +741,10 @@ fn ui_rects_render_through_the_swapchain_present_hook_golden() {
     // UI pass LOADED the composited scene, did not clear it.
     assert_readback_close(read(2, 2), SCENE_RGBA, is_bgra, "uncovered texel == BLUE scene (UI pass LoadOp::Load preserved it)");
 
-    // Clean reverse-order teardown. Drop the windowed handles FIRST (the renderer's Drop
-    // waits the device idle, and they hold the `&rhi` borrow), THEN the UI capability
-    // (`destroy_all`, also waits idle), THEN the composite resources, THEN `rhi`.
-    drop(renderer);
+    // Clean reverse-order teardown. The renderer was ALREADY dropped before the readback
+    // read above (the wait-idle that fences the copy); the remaining windowed handles
+    // drop here, THEN the UI capability (`destroy_all`, also waits idle), THEN the
+    // composite resources, THEN `rhi`.
     drop(swapchain);
     drop(surface);
     rhi.destroy_all();
