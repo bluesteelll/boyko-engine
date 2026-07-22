@@ -734,6 +734,17 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // The env-gated frame dump (`BOYKO_HOST_DUMP` — the host's diagnostic /
     // owner-eval channel, see `host_dump`). `None` on the steady path.
     let mut dump = crate::host_dump::HostDump::from_env(host.swapchain.format());
+    // Automated-run frame cap (the `BOYKO_WIN_HIDDEN` companion, and the app-level
+    // twin of `window_present_gbuffer`'s own `BOYKO_WINDOW_FRAMES`): `BOYKO_WINDOW_FRAMES=<n>`
+    // bounds this loop to `n` iterations, then exits cleanly. Without it an
+    // orchestrated run of an `app.run()` scene that forgot `BOYKO_HOST_DUMP` (whose
+    // capture is the usual exit) spins FOREVER — a window that "never closes by
+    // itself", or worse an invisible spinner under `BOYKO_WIN_HIDDEN`. Unset
+    // (every interactive/owner run): unbounded, exactly as before.
+    let max_frames: Option<u64> = std::env::var("BOYKO_WINDOW_FRAMES")
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let mut frames_run: u64 = 0;
     let mut last = Instant::now();
     // SDFDDGI I2 (arm): a monotonically-incrementing frame index feeding the probe-update UBO's
     // round-robin `frame_index` (which subset updates this frame). Wraps at u32::MAX (benign — the
@@ -743,6 +754,15 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // 1. Pump the OS queue; `false` = WM_QUIT (the window closed).
         if !host.window.pump_events() {
             return;
+        }
+
+        // The automated-run frame cap (counted at the loop TOP, so even a
+        // minimized-window pump-only spin terminates). Unset ⇒ `None` ⇒ inert.
+        if let Some(cap) = max_frames {
+            if frames_run >= cap {
+                return;
+            }
+            frames_run += 1;
         }
 
         // Step 1: drain the captured OS input (host plan R6, Decision 1). WITH an
