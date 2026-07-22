@@ -320,11 +320,23 @@ impl Window {
             return Err(WindowError::WindowCreationFailed);
         }
 
-        // SAFETY: `hwnd` is the live window just created; `ShowWindow` +
-        // `UpdateWindow` are idempotent display calls.
-        unsafe {
-            os::ShowWindow(hwnd, os::SW_SHOW);
-            os::UpdateWindow(hwnd);
+        // Automated-run knob: `BOYKO_WIN_HIDDEN` (any value) keeps the window
+        // HIDDEN — never shown, never activated — so orchestrated windowed test
+        // sweeps do not flash or park windows on the desktop while they grind
+        // (e.g. a validation-ON dump test can hold its window open for minutes).
+        // A hidden (NON-minimized) window keeps its non-zero client extent, so
+        // Win32 surface + swapchain creation, rendering, present, and the
+        // host-readback dump all work unchanged — only desktop visibility
+        // differs. Default (unset): show + paint, exactly as before. The knob is
+        // read HERE (the single window constructor) so every windowed test and
+        // the app runner inherit it uniformly with zero per-call-site churn.
+        if std::env::var_os("BOYKO_WIN_HIDDEN").is_none() {
+            // SAFETY: `hwnd` is the live window just created; `ShowWindow` +
+            // `UpdateWindow` are idempotent display calls.
+            unsafe {
+                os::ShowWindow(hwnd, os::SW_SHOW);
+                os::UpdateWindow(hwnd);
+            }
         }
 
         // I6: allocate the captured-input ring on the heap (stable address) and
