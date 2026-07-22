@@ -1013,10 +1013,108 @@ impl Renderer<'_> {
             }
         }
 
+        // === TAA-under-VB: the `vb_viewt` gViewT-producer dispatch — AFTER every `lit`/depth
+        // producer, BEFORE the TAA resolve below that consumes `viewt`. Mirrors
+        // `record_gbuffer`'s own `viewt_from_depth` record site token-for-token, adapted to the
+        // VB plan/sink + the 16-byte reverse-Z push. ===
+        debug_assert_eq!(
+            plan.viewt_from_depth.is_some(),
+            scene.viewt_from_vb_depth.is_some(),
+            "W1: declare/record predicate desync (viewt_from_vb_depth)"
+        );
+        if let Some(vb_viewt_pass) = plan.viewt_from_depth {
+            // SAFETY: recording is open; `record_vb_pass` records the graph's derived
+            // DEPTH_ATTACHMENT→SHADER_READ_ONLY (vb_depth) + UNDEFINED→GENERAL (viewt)
+            // barriers for the "vb_viewt" pass into `cmd`.
+            self.record_vb_pass(vb_viewt_pass, cmd, targets, forward, vb, scene, fi);
+            let activation = scene.viewt_from_vb_depth.as_ref().expect(
+                "invariant: plan.viewt_from_depth.is_some() ⇒ scene.viewt_from_vb_depth.is_some() (W1)",
+            );
+            let push = crate::compute::ViewtFromDepthRzPush::new(
+                present_extent.width,
+                present_extent.height,
+                activation.view_z_a,
+                activation.view_z_b,
+            );
+            let push_bytes = push.as_bytes();
+            let set = &targets.viewt_from_vb_depth_set.as_ref().expect(
+                "invariant: scene.viewt_from_vb_depth.is_some() ⇒ create wrote viewt_from_vb_depth_set",
+            )[fi];
+            let group_x = present_extent.width.div_ceil(8);
+            let group_y = present_extent.height.div_ceil(8);
+            // SAFETY: recording is open; `activation.pipeline` + its layout (declaring
+            // `activation.layout` at set 0 AND the 16-byte COMPUTE push range) are live on this
+            // device (caller contract); `set` binds the now-transitioned reverse-Z depth
+            // (SHADER_READ, by the `record_vb_pass` call above) + `gViewT` (GENERAL) + the
+            // camera-ring slot `fi`; `group_x`/`group_y` cover `present_extent` (the 8×8-tile
+            // ceiling of the SAME extent the depth/gViewT images are sized to);
+            // `&set.descriptor_set` is a single-element local alive for the call; `push_bytes`
+            // is `VIEWT_FROM_DEPTH_RZ_PUSH_BYTES` (16) bytes at offset 0, exactly the declared
+            // push range, and the backing `push` local outlives the call.
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    activation.pipeline.pipeline,
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    activation.pipeline.layout,
+                    0,
+                    1,
+                    &set.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    activation.pipeline.layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    crate::compute::VIEWT_FROM_DEPTH_RZ_PUSH_BYTES,
+                    push_bytes.as_ptr().cast(),
+                );
+                (self.fns.cmd_dispatch)(cmd, group_x, group_y, 1);
+            }
+        }
+
+        // === TAA-under-VB: the temporal-resolve (+ RCAS) — recorded HERE, BEFORE
+        // `present_sample`'s `lit` GENERAL→SHADER_READ_ONLY transition (TAA is a COMPUTE
+        // dispatch whose own graph pass derives that transition out of the `lit` producer — the
+        // OPPOSITE ordering the FXAA/SMAA/SSAA fragment passes below use; `record_gbuffer`'s
+        // TAA block ordering, ported). The pass barriers are emitted through the VB sink
+        // (`record_vb_pass` — VB's OWN ResId table), then the graph-emit-free
+        // `record_taa_body`/`record_rcas` bodies run unchanged (both are path-portable). ===
+        if let Some(taa) = scene.taa.as_ref()
+            && targets.taa_resolve_set.is_some()
+        {
+            let taa_pass = plan
+                .taa_resolve
+                .expect("invariant: scene.taa.is_some() ⇒ the VB taa_resolve pass was declared");
+            self.record_vb_pass(taa_pass, cmd, targets, forward, vb, scene, fi);
+            // SAFETY: recording is open; the taa_resolve pass barriers were just emitted via
+            // the VB sink above (record_taa_body's caller contract); `aa_out`/`taa_hist`/
+            // `taa_resolve_set` were built by `create()` under the same `scene.taa` that gates
+            // this branch.
+            unsafe { self.record_taa_body(cmd, targets, taa, scene, fi) };
+            if let Some(rcas) = scene.rcas.as_ref()
+                && targets.rcas_set.is_some()
+            {
+                // SAFETY: recording is open; `record_taa_body` (just above) already wrote
+                // `taa_resolved[fi]`, leaving it in GENERAL; `taa_resolved`/`aa_out`/`rcas_set`
+                // were built by `create()` under the same `scene.rcas` that gates this branch;
+                // `present_extent` sizes both (the SAME extent the resolve dispatched over).
+                unsafe { self.record_rcas(cmd, targets, rcas, present_extent, scene, fi) };
+            }
+        }
+
         // === Present-blit `lit` into the swapchain — byte-for-byte port of `record_forward`'s
         // own tail. ===
         // SAFETY: recording is open; `record_vb_pass` records the graph's derived
-        // GENERAL→SHADER_READ_ONLY_OPTIMAL barrier for the "present_sample" pass into `cmd`.
+        // GENERAL→SHADER_READ_ONLY_OPTIMAL barrier for the "present_sample" pass into `cmd`
+        // (with TAA armed, the taa_resolve pass above already left `lit` in SHADER_READ_ONLY —
+        // this then derives no further barrier, the deferred precedent).
         self.record_vb_pass(plan.present_sample, cmd, targets, forward, vb, scene, fi);
 
         // Anti-aliasing resolve (VB). When AA is armed, `sync_gbuffer` rewires `present_set` to
@@ -1024,10 +1122,11 @@ impl Renderer<'_> {
         // `record_gbuffer` (Deferred) -- so under VB the resolved `lit` was never anti-aliased into
         // `aa_out`, and the present-blit below sampled a never-written (black) image. Mirror
         // `record_gbuffer`'s AA block verbatim: FXAA/SMAA read `present_extent`; SSAA reads the
-        // BOOT-FIXED `aa_extent` (`present_extent` is 2x under SSAA). TAA cannot occur under VB
-        // (`cap_vb_v1_consumers` forces `scene.taa` off), so the fall-through is a debug-only
-        // invariant guard, never a live path. OFF (`aa_out` is `None`) records nothing -> the
-        // AA-off VB command stream is byte-identical to before this block existed.
+        // BOOT-FIXED `aa_extent` (`present_extent` is 2x under SSAA). TAA (VB × Mesh) was ALREADY
+        // recorded above (before `present_sample` -- the compute-vs-fragment ordering, see that
+        // block's comment), so the fall-through documents it exactly like `record_gbuffer`'s
+        // equivalent else. OFF (`aa_out` is `None`) records nothing -> the AA-off VB command
+        // stream is byte-identical to before this block existed.
         if targets.aa_out.is_some() {
             if let Some(fxaa) = scene.aa.as_ref() {
                 // SAFETY: recording is open; `present_sample` above left `lit` in
@@ -1048,12 +1147,13 @@ impl Renderer<'_> {
                 // `aa_extent` (NOT `present_extent`, which is 2x under SSAA).
                 unsafe { self.record_ssaa(cmd, targets, ssaa, aa_extent, fi) };
             } else {
-                // VB caps TAA off (`cap_vb_v1_consumers`), so an armed `aa_out` with none of
-                // aa/smaa/ssaa matched is an invariant violation (unlike `record_gbuffer`'s
-                // equivalent else, which documents "TAA already ran above").
+                // `aa_out.is_some()` with none of aa/smaa/ssaa matched ⇒ TAA is the reason
+                // (the four arms are mutually exclusive by construction); `record_taa_body`
+                // already ran above (the TAA-under-VB block) — nothing left to do here, the
+                // SAME fall-through `record_gbuffer`'s equivalent else documents.
                 debug_assert!(
-                    false,
-                    "invariant: VB aa_out armed but none of aa/smaa/ssaa matched (taa is capped under VB)"
+                    scene.taa.is_some(),
+                    "invariant: VB aa_out armed but none of aa/smaa/ssaa/taa matched"
                 );
             }
         }

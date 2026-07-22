@@ -208,6 +208,19 @@ pub struct GBufferTargets {
     /// — the SAME per-FIF images the marcher's vocab set / `ssao_set` bind. The recorder selects
     /// `viewt_from_depth_set[self.frame_index]`.
     pub(crate) viewt_from_depth_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// TAA-under-VB: the `viewt_from_depth_rz` descriptor set, written ONCE against
+    /// [`ViewtFromVbDepthActivation::layout`] (3 bindings: SAMPLED depth @0, STORAGE `gViewT` @1,
+    /// UNIFORM camera @2) — `None` unless [`GBufferScene::viewt_from_vb_depth`] is armed
+    /// (`VisibilityBuffer × Mesh` with TAA on). The recorder then skips the pass entirely (the
+    /// 0%-gate, byte-identical command stream under every other leg / with TAA off). NO
+    /// per-frame update.
+    ///
+    /// A RING when `Some` (one per in-flight frame): slot `i` binds
+    /// `forward.depth[i]`/`core.viewt[i]`/`scene.camera_ring[i]` — UNLIKE [`Self::viewt_from_depth_set`],
+    /// which binds `core.depth[i]` (the Deferred custom-linear ring), this binds
+    /// [`ForwardTargets::depth`]'s reverse-Z ring (VB rasterizes into the SAME depth image the
+    /// forward/hwrt legs share). The recorder selects `viewt_from_vb_depth_set[self.frame_index]`.
+    pub(crate) viewt_from_vb_depth_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// The SSAO à-trous denoise chain's interior ping-pong ring RING `ssao_ring_a`
     /// (`R16_UNORM` STORAGE, full-res) — mirrors `shadow_vis`'s per-FIF ringing (the cross-frame
     /// WAR fix, like [`Self::ssao`]). `Option`-guarded: `Some` when the device advertises
@@ -2191,6 +2204,12 @@ struct DeferredSets {
     /// (both need `core.lit[i]` + `vb.vb_id[i]`), so its own error path tears down every prior
     /// set including `vb_set0`.
     vb_set0_tex: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// TAA-under-VB: the `viewt_from_depth_rz` set — `None` unless
+    /// [`GBufferScene::viewt_from_vb_depth`] is armed. Built AFTER `vb_set0_tex` (both need
+    /// `core.viewt[i]`/`forward.depth[i]`, the SAME "needs `core` + `forward`" point `vb_set0`
+    /// itself is built at), so its own error path tears down every prior set including
+    /// `vb_set0_tex`.
+    viewt_from_vb_depth_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     #[cfg(feature = "hwrt")]
     resolve_set_hwrt: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Anti-aliasing Stage 1: the FXAA INPUT set RING, `None` when AA is off ([`Self::build`]'s
@@ -3073,6 +3092,107 @@ impl DeferredSets {
             None
         };
 
+        // TAA-under-VB: the `viewt_from_depth_rz` set RING, written ONCE here when the pass is
+        // wired (SAMPLED reverse-Z depth @0, STORAGE `gViewT` @1 WRITE, UNIFORM camera @2) —
+        // matching `viewt_from_depth_rz.comp`'s set 0. `None` unless
+        // `scene.viewt_from_vb_depth` is armed (`VisibilityBuffer × Mesh` with TAA on); the
+        // recorder then skips the pass entirely (the 0%-gate — byte-identical command stream
+        // everywhere else). Built HERE — after `vb_set0`/`vb_set0_tex`, the SAME
+        // "needs `core` + `forward`" point — because slot `i` binds `forward.depth[i]` (the
+        // reverse-Z ring VB rasterizes into — NOT `core.depth`, the Deferred custom-linear ring
+        // the `viewt_from_depth_set` sibling binds) + `core.viewt[i]` + `scene.camera_ring[i]`
+        // (the SAME slot the TAA resolve's own `generate_ray` reads, so producer `t` and
+        // consumer `P = ro + rd·t` use bitwise-identical rays).
+        let viewt_from_vb_depth_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> =
+            if let Some(activation) = &scene.viewt_from_vb_depth {
+                let fwd_depth = &forward
+                    .as_ref()
+                    .expect(
+                        "invariant: viewt_from_vb_depth arms only under VisibilityBuffer × Mesh \
+                         (TargetsProfile::VbMesh builds ForwardTargets)",
+                    )
+                    .depth;
+                let mut rz_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+                    [const { None }; FRAMES_IN_FLIGHT];
+                let mut failure: Option<crate::error::VulkanError> = None;
+                for (slot, dst) in rz_slots.iter_mut().enumerate() {
+                    let entries = [
+                        BindGroupEntry::SampledImage {
+                            texture: &fwd_depth[slot],
+                            sampler: scene.depth_sampler,
+                        },
+                        BindGroupEntry::StorageImage { texture: &core.viewt[slot] },
+                        BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
+                    ];
+                    let desc =
+                        BindGroupDesc::<Vulkan> { layout: activation.layout, entries: &entries };
+                    match RhiDevice::create_bind_group(ctx, &desc) {
+                        Ok(g) => *dst = Some(g),
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                    }
+                }
+                if let Some(e) = failure {
+                    // SAFETY: the rz slots already built [0..slot) + `vb_set0_tex`/`vb_set0`
+                    // (fully built) + the sdf-forward + present + (optional) ddgi-update/ssao/
+                    // cull + the resolve & vocab rings were created on `ctx`, referenced by no
+                    // submission; each destroyed exactly once (reverse acquisition). The
+                    // optional sets are `Option`-guarded; the images are owned by the caller.
+                    unsafe {
+                        for s in rz_slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vts) = vb_set0_tex {
+                            for g in vts {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vs) = vb_set0 {
+                            for g in vs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(sfs) = sdf_forward_set {
+                            for g in sfs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in present_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        if let Some(du) = ddgi_update_set {
+                            RhiDevice::destroy_bind_group(ctx, du);
+                        }
+                        if let Some(ss) = ssao_set {
+                            for g in ss {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(cs) = cull_set {
+                            for g in cs {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        for g in resolve_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                        for g in vocab_set {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    return Err(SwapchainError::DepthImage(e));
+                }
+                Some(rz_slots.map(|s| {
+                    s.expect("invariant: every viewt_from_vb_depth ring slot built before here")
+                }))
+            } else {
+                None
+            };
+
         // R2a-4b: the HWRT-variant resolve set RING — built ONLY when the scene wires BOTH the
         // 21-binding HWRT resolve layout AND the per-FIF TLAS handles (i.e. under `feature = "hwrt"`
         // + `ctx.ray_query_enabled()` + config HardwareTri). `None` on every software path ⇒ the
@@ -3662,6 +3782,7 @@ impl DeferredSets {
             sdf_forward_set,
             vb_set0,
             vb_set0_tex,
+            viewt_from_vb_depth_set,
             #[cfg(feature = "hwrt")]
             resolve_set_hwrt,
             fxaa_set,
@@ -5901,6 +6022,7 @@ impl GBufferTargets {
             sdf_forward_set,
             vb_set0,
             vb_set0_tex,
+            viewt_from_vb_depth_set,
             #[cfg(feature = "hwrt")]
             resolve_set_hwrt,
             fxaa_set,
@@ -6059,6 +6181,7 @@ impl GBufferTargets {
             cull_set,
             ssao_set,
             viewt_from_depth_set,
+            viewt_from_vb_depth_set,
             ssao_ring_a,
             ssao_ring_b,
             ssao_atrous_read8_set,
@@ -6382,6 +6505,7 @@ impl GBufferTargets {
                 sdf_forward_set: self.sdf_forward_set,
                 vb_set0: self.vb_set0,
                 vb_set0_tex: self.vb_set0_tex,
+                viewt_from_vb_depth_set: self.viewt_from_vb_depth_set,
                 #[cfg(feature = "hwrt")]
                 resolve_set_hwrt: self.resolve_set_hwrt,
                 fxaa_set: self.fxaa_set,

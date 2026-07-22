@@ -72,13 +72,15 @@
 //!
 //! # Deferred-only (explicit, not implicit)
 //!
-//! TAA is implemented for [`boyko_render::RenderPath::Deferred`] only — `Forward`/`ForwardPlus`
-//! force it off via `RenderPathDegrade::ForwardTaaNotYetImplemented`, and `VisibilityBuffer` via
-//! `RenderPathDegrade::VbTaaNotYetImplemented` (`vb.rs`'s `record_vb` asserts TAA is already
-//! forced off by the time it would matter — NOT a black-VB regression, a deliberate scope cut).
-//! This harness never inserts `RenderPathConfig`, so it resolves to the engine default
-//! (`RenderPath::Deferred`, `GeometryLegs::Both`) — the ONLY path this gate can run on, and the
-//! reason it is never selected explicitly here.
+//! TAA is implemented per `ResolvedRenderPath::taa_supported()`: `Deferred` (any legs) and
+//! `VisibilityBuffer × Mesh` (the TAA-under-VB rung — jittered reverse-Z push +
+//! `viewt_from_depth_rz` gViewT producer + the unchanged resolve). `Forward`/`ForwardPlus`
+//! still force it off (`RenderPathDegrade::ForwardTaaNotYetImplemented`), as does any
+//! SDF-carrying VB leg set (`VbTaaNotYetImplemented`, narrowed). This harness never inserts
+//! `RenderPathConfig` ITSELF — but `EnginePlugins` honors the `BOYKO_RENDER_PATH` /
+//! `BOYKO_GEOMETRY_LEGS` dev/test launch env (`boyko_app::plugins`), so the `[vb_taa]` /
+//! `[vb_taa_rcas]` pins drive the SAME dump through `vb`×`mesh`; unset resolves to the engine
+//! default (`RenderPath::Deferred`, `GeometryLegs::Both`).
 //!
 //! `BOYKO_AA` selects ONE of the mutually exclusive [`AaMode`] alternatives (FXAA / SMAA / TAA
 //! are alternatives, not a chain — `GBufferTargets::create`'s exclusivity `debug_assert!`);

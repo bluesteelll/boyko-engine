@@ -1035,12 +1035,19 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // `try_resource` degrades to `Off` on a host that never composes `AaPlugin` (mirrors
         // `resolved_aa_mode`'s later, fuller read for `host.gpu.scene`; SSAA's host-lock does not
         // apply to TAA, so this narrower read is sufficient here).
+        // TAA-under-VB: AND-gated on `ResolvedRenderPath::taa_supported()` — the SINGLE
+        // predicate the resolver cap and `GpuSceneBundles::scene`'s degrade also read, so the
+        // jitter advance, `TaaState`, the MotionCam advance, the taa-UBO uploads AND the C1
+        // basis shear are all path-coherent from this one site. This also silently fixes the
+        // pre-existing Forward+Taa wobble where the shear armed with no accumulator (no pin
+        // ever exercised that combination).
         let taa_armed_now = app
             .world()
             .try_resource::<ResolvedAa>()
             .map(|r| r.mode)
             .unwrap_or_default()
-            == AaMode::Taa;
+            == AaMode::Taa
+            && host.resolved_render_path.taa_supported();
         // Anti-aliasing Stage 4 (TAA W5): the history-reset transition detection — captured
         // BEFORE `advance_jitter` (below) overwrites `JitterState.armed`, so `taa_was_armed` is
         // exactly "was Taa armed LAST frame". `!taa_was_armed` catches a transition INTO `Taa`;
@@ -1567,10 +1574,17 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // matrix instead produces depth values inconsistent with that reverse-Z GREATER
                 // test, failing the depth test for every fragment (zero `vb_id` writes, the
                 // rung-R8 GPU regression: the dumped frame degenerated to the sky-only pin
-                // because `vb_resolve` saw the sentinel-cleared `vb_id` everywhere). Neither
-                // Forward variant nor VB v1 has TAA yet (the resolver's
-                // `ForwardTaaNotYetImplemented`/`VbTaaNotYetImplemented` degrades), so this arm
-                // never jitters.
+                // because `vb_resolve` saw the sentinel-cleared `vb_id` everywhere).
+                //
+                // TAA-under-VB: with `taa_armed_now` (structurally true ONLY where
+                // `ResolvedRenderPath::taa_supported()` holds — Deferred, or VB × Mesh) this
+                // arm now builds the JITTERED reverse-Z push
+                // (`forward_gbuffer_push_from_view_jittered`, rows 0/1 only — the reverse-Z
+                // z-row stays byte-untouched, the R8 hard rule above). `vb_resolve`/`vb_shade`
+                // re-fetch geometry through this SAME push, so raster sampling and geometry
+                // reconstruction stay at the same sub-pixel offset by construction. Under
+                // Forward/Forward+ `taa_armed_now` is structurally false (`taa_supported()`),
+                // so those paths still never jitter.
                 //
                 // TAA W2: the STRUCTURAL OFF-skip — a TAA-off Deferred frame calls the plain
                 // (non-jittered) fn, not `_jittered` with a zero offset (`no *0.0`, per the
@@ -1583,7 +1597,15 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                         | boyko_render::RenderPath::ForwardPlus
                         | boyko_render::RenderPath::VisibilityBuffer
                 ) {
-                    forward_gbuffer_push_from_view(&view, cw, ch, instanced)
+                    if taa_armed_now {
+                        let jitter_state = *world.resource::<JitterState>();
+                        let jitter = ndc_jitter(&jitter_state, cw, ch);
+                        boyko_render::view::forward_gbuffer_push_from_view_jittered(
+                            &view, cw, ch, instanced, jitter,
+                        )
+                    } else {
+                        forward_gbuffer_push_from_view(&view, cw, ch, instanced)
+                    }
                 } else if taa_armed_now {
                     let jitter_state = *world.resource::<JitterState>();
                     let jitter = ndc_jitter(&jitter_state, cw, ch);
@@ -1623,6 +1645,17 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 && host.resolved_render_path.sdf_forward_marched
                 && host.resolved_render_path.mesh_leg
             {
+                boyko_render::view::forward_view_z_coeffs(view.near, view.far)
+            } else {
+                (0.0, 0.0)
+            };
+            // TAA-under-VB: the `viewt_from_depth_rz` push's reverse-Z decode pair — the SAME
+            // `forward_view_z_coeffs` single source as the march pair above, but gated on the
+            // TAA-under-VB arm (VB × Mesh never marches, so the pair above stays `(0.0, 0.0)`
+            // don't-care exactly when this pass needs real coefficients). `taa_armed_now`
+            // already folds `taa_supported()` (VB × Mesh or Deferred; under Deferred the
+            // activation resolves to `None` in `scene()` and the pair is don't-care again).
+            let (vb_viewt_view_z_a, vb_viewt_view_z_b) = if view.fov_y > 0.0 && taa_armed_now {
                 boyko_render::view::forward_view_z_coeffs(view.near, view.far)
             } else {
                 (0.0, 0.0)
@@ -1815,6 +1848,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // used).
                 sdf_forward_view_z_a,
                 sdf_forward_view_z_b,
+                // TAA-under-VB: the `viewt_from_depth_rz` reverse-Z pair, computed above at the
+                // SAME `view.near`/`view.far` site (single-source discipline).
+                vb_viewt_view_z_a,
+                vb_viewt_view_z_b,
                 vb_geometry_set,
                 ctx,
             );

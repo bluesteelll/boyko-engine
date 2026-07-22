@@ -67,6 +67,35 @@ impl Renderer<'_> {
         scene: &GBufferScene<'_>,
         fi: usize,
     ) {
+        // `record_graph_pass` records the "taa_resolve" pass's derived barriers
+        // (lit/viewt/taa_hist_read reads, taa_hist[fi] write) into `cmd` against the live
+        // G-buffer targets — a safe fn; recording is open per this fn's caller contract.
+        self.record_graph_pass(taa_pass, cmd, targets, scene, fi);
+        // SAFETY: forwarded caller contract (recording open, taa targets/sets armed in
+        // lockstep, `fi` this frame's slot); the pass barriers were just emitted above.
+        unsafe { self.record_taa_body(cmd, targets, activation, scene, fi) };
+    }
+
+    /// TAA-under-VB seam: the graph-emit-free resolve body — everything [`Self::record_taa`]
+    /// does AFTER emitting the framegraph barriers. The VB recorder emits its `taa_resolve`
+    /// pass's barriers through its OWN [`VbBarrierSink`](super::super::graph_bridge::VbBarrierSink)
+    /// (`record_vb_pass` — a different ResId table than the deferred sink) and then calls this
+    /// directly; the Deferred path keeps calling [`Self::record_taa`], whose emit + this body
+    /// are byte-identical to the pre-split fn.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Self::record_taa`], PLUS: the frame's `taa_resolve` graph pass
+    /// barriers (lit→SHADER_READ_ONLY, viewt/hist reads, `taa_hist[fi]` write) must have
+    /// ALREADY been emitted into `cmd` by the caller's own sink.
+    pub(crate) unsafe fn record_taa_body(
+        &self,
+        cmd: VkCommandBuffer,
+        targets: &GBufferTargets,
+        activation: &TaaActivation<'_>,
+        scene: &GBufferScene<'_>,
+        fi: usize,
+    ) {
         let rcas_armed = scene.rcas.is_some();
         // TAA rung T3: the resolve's OWN write target this frame — `taa_resolved` (the RCAS
         // "ping", re-pointed at the resolve set's `gAaOut` @4 by `GBufferTargets::create`) when
@@ -87,11 +116,6 @@ impl Renderer<'_> {
             .taa_resolve_set
             .as_ref()
             .expect("invariant: armed scene.taa implies taa_resolve_set was built alongside it");
-
-        // `record_graph_pass` records the "taa_resolve" pass's derived barriers
-        // (lit/viewt/taa_hist_read reads, taa_hist[fi] write) into `cmd` against the live
-        // G-buffer targets — a safe fn; recording is open per this fn's caller contract.
-        self.record_graph_pass(taa_pass, cmd, targets, scene, fi);
 
         // --- Barrier 1: out_ring[fi] UNDEFINED → GENERAL (the resolve's STORAGE-image write). ---
         let to_general = VkImageMemoryBarrier {

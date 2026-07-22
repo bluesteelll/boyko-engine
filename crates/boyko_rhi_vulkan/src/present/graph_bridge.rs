@@ -2707,25 +2707,42 @@ pub(crate) struct VbPassPlan {
     /// `sdf_forward_march` when it ran, else `vb_sky`). The swapchain WSI barriers stay
     /// hand-recorded, exactly like [`ForwardPassPlan::present_sample`].
     pub(crate) present_sample: crate::framegraph::PassId,
+    /// TAA-under-VB: the `vb_viewt` `gViewT`-producer compute pass
+    /// (`viewt_from_depth_rz.comp.hlsl`) — reads `vb_depth` (COMPUTE/SHADER_READ_ONLY, the
+    /// raster barrier-out), first-touch writes `viewt` (UNDEFINED→GENERAL). `Some` iff
+    /// [`GBufferScene::viewt_from_vb_depth`](super::scene_types::GBufferScene::viewt_from_vb_depth)
+    /// is armed (`VisibilityBuffer × Mesh` with TAA on).
+    pub(crate) viewt_from_depth: Option<crate::framegraph::PassId>,
+    /// TAA-under-VB: the TAA history-resolve compute pass — the VB sibling of
+    /// [`GbufferPassPlan::taa_resolve`], identical access list (`lit` CIS SHADER_READ_ONLY +
+    /// `viewt`/`taa_hist_read` GENERAL reads + `taa_hist` GENERAL write; `aa_out`/`taa_resolved`
+    /// hand-recorded in `record_taa`/`record_rcas`). `Some` iff `scene.taa.is_some()`.
+    pub(crate) taa_resolve: Option<crate::framegraph::PassId>,
 }
 
 /// Multi-paradigm render-path plan, rung R8: the [`BarrierSink`](crate::framegraph::BarrierSink)
 /// for VB v1's small, PRIVATE per-frame graph — the SAME "own decoupled ResId space" discipline
 /// [`ForwardBarrierSink`]'s doc explains for the Forward family. Resolves the FIXED local ResId
 /// order [`Renderer::declare_vb_graph`] declares — images `[lit=0, vb_id=1, vb_depth=2,
-/// cascade=3, atlas=4]`, buffers `[light_table=0, vb_instance_ring=1, gclassify=2]` — to the
-/// current frame's physical handles. Lives only for the duration of one `record_pass` call inside
-/// [`Renderer::record_vb`].
+/// cascade=3, atlas=4, viewt=5, taa_hist=6, taa_hist_read=7]` (the TAA-under-VB trio appended
+/// after `atlas` so 0..4 stayed byte-unchanged), buffers `[light_table=0, vb_instance_ring=1,
+/// gclassify=2]` — to the current frame's physical handles. Lives only for the duration of one
+/// `record_pass` call inside [`Renderer::record_vb`].
 pub(crate) struct VbBarrierSink<'a> {
     pub(crate) fns: &'a DeviceFns,
     pub(crate) cmd: VkCommandBuffer,
-    /// `[lit, vb_id, vb_depth, cascade, atlas]` — see this type's doc for the fixed order. `lit`
-    /// is the current frame slot's [`GBufferTargets::lit`] image (C5-reused, the SAME physical
-    /// image every path's `lit` producer writes); `vb_id`/`vb_depth` are the current frame slot's
+    /// `[lit, vb_id, vb_depth, cascade, atlas, viewt, taa_hist, taa_hist_read]` — see this
+    /// type's doc for the fixed order. `lit` is the current frame slot's
+    /// [`GBufferTargets::lit`] image (C5-reused, the SAME physical image every path's `lit`
+    /// producer writes); `vb_id`/`vb_depth` are the current frame slot's
     /// [`VbTargets`](super::targets::VbTargets)/[`ForwardTargets`](super::targets::ForwardTargets)
     /// images (VB reuses `ForwardTargets::depth` verbatim for `vb_depth` — `VbTargets`'s doc);
     /// `cascade`/`atlas` are the SAME single-instance, world-fixed textures every other path's
-    /// shadow chain references.
+    /// shadow chain references. TAA-under-VB appendix: `viewt` = `targets.viewt[fi]` (always
+    /// allocated — VbMesh runs the DeferredFull-shaped body); `taa_hist` = the `[fi]` WRITE
+    /// slot, `taa_hist_read` = the SIBLING `taa_hist[fi ^ 1]` (the ONE non-`[fi]` entry — the
+    /// deferred sink's own C1-fix shape), both `VkImage::NULL`-bound when TAA is off (inert: no
+    /// pass names their ResIds then).
     pub(crate) images: [VkImage; VB_IMAGE_COUNT],
     /// `[light_table, vb_instance_ring, gclassify]`. A pass that does not declare an access on an
     /// unarmed resource never routes a barrier naming it, so an inert `VkBuffer::NULL` there is
@@ -2738,7 +2755,7 @@ pub(crate) struct VbBarrierSink<'a> {
 /// The number of IMAGE resources [`Renderer::declare_vb_graph`] declares — see
 /// [`VbBarrierSink::images`]'s doc for the fixed order. A PRIVATE, per-frame ResId space (mirrors
 /// [`FORWARD_IMAGE_COUNT`]'s own doc — never related to [`FRAMEGRAPH_IMAGE_COUNT`]).
-const VB_IMAGE_COUNT: usize = 5;
+const VB_IMAGE_COUNT: usize = 8;
 
 impl crate::framegraph::BarrierSink for VbBarrierSink<'_> {
     fn image_barriers(&mut self, src_stage: u32, dst_stage: u32, group: &[crate::framegraph::ImgBarrier]) {
@@ -2914,8 +2931,38 @@ impl Renderer<'_> {
             "atlas",
             ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
         );
+        // TAA-under-VB (appended AFTER `atlas` so ResIds 0..4 stay byte-unchanged): `viewt` is a
+        // FRESH `add_image` — when armed, the `vb_viewt` pass is its sole, every-frame first-touch
+        // producer (UNDEFINED→GENERAL write), exactly like the G-buffer ring images. The
+        // `taa_hist`/`taa_hist_read` CROSS-FRAME parity pair copies the deferred declarator's
+        // shapes VERBATIM (frame `fi` WRITES `pool[fi]`, READS `pool[fi^1]`):
+        //   * `taa_hist` (write ResId) — `seeded_readers_at_layout` (WAR: order frame N's write
+        //     after the sibling's still-pipelined read of the same physical image);
+        //   * `taa_hist_read` (read-sibling ResId) — `seeded_writer_at_layout`
+        //     (content-preserving RAW: order + make visible frame N-1's write).
+        // Both seeds are COMPUTE (the TAA resolve is a compute pass — the P1-1 seed-stage rule
+        // above). With TAA off NO pass names these three ResIds ⇒ the graph routes ZERO barriers
+        // on them ⇒ byte-identical (the deferred "declared ahead of its first consumer"
+        // discipline).
+        let viewt = g.add_image("viewt");
+        let taa_hist = g.add_image_seeded(
+            "taa_hist",
+            ResSync::seeded_readers_at_layout(
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+            ),
+        );
+        let taa_hist_read = g.add_image_seeded(
+            "taa_hist_read",
+            ResSync::seeded_writer_at_layout(
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+            ),
+        );
         debug_assert_eq!(
-            atlas.index() + 1,
+            taa_hist_read.index() + 1,
             VB_IMAGE_COUNT,
             "invariant: declare_vb_graph's image declarations must match VB_IMAGE_COUNT"
         );
@@ -3280,9 +3327,75 @@ impl Renderer<'_> {
             None
         };
 
+        // Pass `vb_viewt` (TAA-under-VB) — gated `scene.viewt_from_vb_depth.is_some()`
+        // (`VisibilityBuffer × Mesh` with TAA armed, so `vb_raster` — the `vb_depth` producer —
+        // is structurally present). Reads `vb_depth` at COMPUTE/SHADER_READ_ONLY (the SAME
+        // conditional-read shape `sdf_forward_march`'s HAS_MESH arm declares — the graph derives
+        // the DEPTH_ATTACHMENT→SHADER_READ_ONLY barrier-out of the raster) and first-touch
+        // WRITES `viewt` (UNDEFINED→GENERAL) — the `gViewT` lane the `taa_resolve` pass below
+        // consumes.
+        let vb_viewt = scene.viewt_from_vb_depth.is_some().then(|| {
+            let p = g.add_pass("vb_viewt");
+            g.image_access(
+                vb_depth,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                SubRange::DEPTH,
+            );
+            g.image_access(
+                viewt,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                SubRange::COLOR,
+            );
+            p
+        });
+
+        // Pass `taa_resolve` (TAA-under-VB) — gated `scene.taa.is_some()`, declared AFTER every
+        // `lit` producer and BEFORE `present_sample` (the resolve must see this frame's final
+        // shaded color; `record_vb` records it in this exact order). The access list copies the
+        // DEFERRED declarator's own `taa_resolve` pass verbatim: `lit` @0 is a
+        // COMBINED_IMAGE_SAMPLER (descriptor records SHADER_READ_ONLY_OPTIMAL — the C2 fix), so
+        // this read derives the GENERAL→SHADER_READ_ONLY transition out of `vb_resolve`/
+        // `vb_shade`/`sdf_forward_march`'s GENERAL write (or COLOR_ATTACHMENT→… out of a
+        // sky-only frame) and `present_sample`'s later read finds `lit` already in layout;
+        // `viewt`/`taa_hist_read` are STORAGE reads in GENERAL; `taa_hist` is the STORAGE write.
+        // `aa_out`/`taa_resolved` stay hand-recorded inside `record_taa`/`record_rcas` (not
+        // framegraph-tracked — the deferred precedent).
+        let taa_resolve_pass = scene.taa.is_some().then(|| {
+            let p = g.add_pass("taa_resolve");
+            g.image_access(
+                lit,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                SubRange::COLOR,
+            );
+            for &c in &[viewt, taa_hist_read] {
+                g.image_access(
+                    c,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    SubRange::COLOR,
+                );
+            }
+            g.image_access(
+                taa_hist,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                SubRange::COLOR,
+            );
+            p
+        });
+
         // Pass `present_sample`: `lit` → SHADER_READ_ONLY_OPTIMAL for the present-blit's FRAGMENT
-        // sample (C5, derived from the LAST `lit` producer). The swapchain WSI barriers stay
-        // hand-recorded.
+        // sample (C5, derived from the LAST `lit` producer; with TAA armed the `taa_resolve` read
+        // above already left `lit` in SHADER_READ_ONLY, so this derives no further barrier — the
+        // deferred precedent). The swapchain WSI barriers stay hand-recorded.
         let present_sample = g.add_pass("present_sample");
         g.image_access(
             lit,
@@ -3307,6 +3420,8 @@ impl Renderer<'_> {
             vb_resolve,
             vb_shade,
             sdf_forward_march,
+            viewt_from_depth: vb_viewt,
+            taa_resolve: taa_resolve_pass,
             present_sample,
         });
     }
@@ -3346,6 +3461,12 @@ impl Renderer<'_> {
                 forward.depth[fi].image,
                 scene.csm_cascade_texture.image,
                 scene.shadow_atlas_texture.image,
+                // TAA-under-VB: `viewt` is always allocated (VbMesh runs the DeferredFull-shaped
+                // body); the `taa_hist` parity pair is `Option`-guarded — `NULL` when TAA is off
+                // (inert: no pass names those ResIds then, the deferred sink precedent).
+                targets.viewt[fi].image,
+                targets.taa_hist.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
+                targets.taa_hist.as_ref().map_or(VkImage::NULL, |r| r[fi ^ 1].image),
             ],
             buffers: [
                 scene.light_table.buffer,

@@ -50,9 +50,10 @@ use boyko_rhi_vulkan::compute::{
     SSAO_ATROUS_PUSH_BYTES, ssao_atrous_read8_spirv, ssao_atrous_spirv, ssao_atrous_write8_spirv,
     SSAO_QUALITY_COUNT, SSAO_QUALITY_HIGH, SSAO_QUALITY_LOW, SSAO_QUALITY_MEDIUM,
     ssaa_downsample_fs_spirv, taa_resolve_spirv, tile_grid_extent, VIEWT_FROM_DEPTH_PUSH_BYTES,
+    VIEWT_FROM_DEPTH_RZ_PUSH_BYTES,
     vb_classify_count_spirv, vb_classify_scan_spirv, vb_classify_scatter_spirv,
     vb_raster_fs_spirv, vb_raster_vs_spirv, vb_resolve_spirv, vb_shade_spirv, vb_shade_tex_spirv,
-    viewt_from_depth_spirv,
+    viewt_from_depth_spirv, viewt_from_depth_rz_spirv,
 };
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::ffi::VkDescriptorSet;
@@ -66,6 +67,7 @@ use boyko_rhi_vulkan::swapchain::{
     GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene,
     InterpActivation, PunctualDepthActivation, RcasActivation, ResolvedRenderPathGpu,
     SmaaActivation, SsaaActivation, SsaoActivation, TaaActivation, ViewtFromDepthActivation,
+    ViewtFromVbDepthActivation,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::accel::BoundAccelStruct;
@@ -784,6 +786,21 @@ pub(crate) struct GpuSceneBundles {
     /// `viewt_from_depth_set` against it once per extent when
     /// [`GBufferScene::path_has_viewt_from_depth`] holds.
     viewt_from_depth_layout: VulkanBindGroupLayout,
+    /// TAA-under-VB: the `viewt_from_depth_rz` compute pipeline (`viewt_from_depth_rz.comp.hlsl`
+    /// / [`viewt_from_depth_rz_spirv`]) — the REVERSE-Z sibling of [`Self::viewt_from_depth_pipeline`],
+    /// the `gViewT` producer for `VisibilityBuffer × Mesh`'s TAA seam (see
+    /// [`ViewtFromVbDepthActivation`]'s doc). Built UNCONDITIONALLY at boot — the SAME rationale
+    /// as [`Self::viewt_from_depth_pipeline`] (no device precondition to CREATE;
+    /// [`GBufferScene::viewt_from_vb_depth`] gates whether it is actually dispatched, so a
+    /// non-VB or TAA-off boot pays only this one negligible pipeline object).
+    viewt_from_vb_depth_pipeline: ComputePipeline,
+    /// The DEDICATED 3-binding `viewt_from_depth_rz` bind-group LAYOUT { SAMPLED depth @0,
+    /// STORAGE `gViewT` @1, UNIFORM camera @2 } — matching `viewt_from_depth_rz.comp`'s set 0
+    /// (one more binding than [`Self::viewt_from_depth_layout`]: the reverse-Z ray
+    /// reparameterization needs the camera basis). [`GBufferTargets`] writes a
+    /// `viewt_from_vb_depth_set` against it once per extent when
+    /// [`GBufferScene::viewt_from_vb_depth`] holds.
+    viewt_from_vb_depth_layout: VulkanBindGroupLayout,
     /// The SSAO edge-avoiding à-trous denoise chain: the `level == 0` pipeline variant
     /// (`ssao_atrous_read8.comp` / [`ssao_atrous_read8_spirv`]) — `gAoIn` pinned `r8` (reads the
     /// frozen `gSsao` gather endpoint), `gAoOut` pinned `r16` (writes ring 0). Built UNCONDITIONALLY
@@ -2265,12 +2282,45 @@ impl GpuSceneBundles {
         )
         .expect("invariant: viewt_from_depth compute pipeline create");
 
+        // TAA-under-VB: the `viewt_from_depth_rz` REVERSE-Z sibling — the dedicated 3-binding
+        // layout { SAMPLED depth @0, STORAGE `gViewT` @1, UNIFORM camera @2 } + the 16-byte
+        // `ViewtFromDepthRzPush` COMPUTE push range. Built UNCONDITIONALLY here (like
+        // `viewt_from_depth_pipeline` above — the pipeline itself needs no device precondition to
+        // CREATE); `GBufferScene::viewt_from_vb_depth` gates whether it is actually dispatched, so
+        // a non-VB or TAA-off boot pays only this one negligible pipeline object.
+        let viewt_from_vb_depth_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::SampledImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: viewt_from_depth_rz bind-group layout create");
+        let viewt_from_vb_depth_cs =
+            RhiDevice::create_shader_module(device, viewt_from_depth_rz_spirv())
+                .expect("invariant: viewt_from_depth_rz compute shader module create");
+        let viewt_from_vb_depth_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &viewt_from_vb_depth_cs,
+                entry: c"main",
+                push_constant_bytes: VIEWT_FROM_DEPTH_RZ_PUSH_BYTES,
+                bind_group_layout: Some(&viewt_from_vb_depth_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: viewt_from_depth_rz compute pipeline create");
+
         // The shader modules are consumed by pipeline creation; destroy them now
         // (mirrors the showcase's post-create module teardown).
         // SAFETY: every module was created on `ctx` above and is no longer
         // needed once its pipeline exists; each is destroyed exactly once; no
         // GPU work has been submitted yet.
         unsafe {
+            RhiDevice::destroy_shader_module(device, viewt_from_vb_depth_cs);
             RhiDevice::destroy_shader_module(device, viewt_from_depth_cs);
             RhiDevice::destroy_shader_module(device, ssao_atrous_write8_cs);
             RhiDevice::destroy_shader_module(device, ssao_atrous_interior_cs);
@@ -3260,6 +3310,8 @@ impl GpuSceneBundles {
             ssao_atrous_layout,
             viewt_from_depth_pipeline,
             viewt_from_depth_layout,
+            viewt_from_vb_depth_pipeline,
+            viewt_from_vb_depth_layout,
             csm,
             forward_pipeline,
             forward_sky_pipeline,
@@ -4129,6 +4181,17 @@ impl GpuSceneBundles {
         // `GBufferScene::sdf_forward_view_z_a`'s doc).
         sdf_forward_view_z_a: f32,
         sdf_forward_view_z_b: f32,
+        // TAA-under-VB: the `viewt_from_depth_rz` `gViewT`-producer push's reverse-Z decode
+        // `A`/`B` (`boyko_render::view::forward_view_z_coeffs`) — the SAME formula
+        // `sdf_forward_view_z_a`/`_b` above use, but gated on TAA-under-VB arming instead of the
+        // SDF-forward-march arming (VB×Mesh never marches, so those two would stay `(0.0, 0.0)`
+        // don't-care for the exact frames this pass needs real coefficients). `boyko_app::runner`
+        // computes these at the SAME site it builds `mvp`/`sdf_forward_view_z_a` (the identical
+        // `view.near`/`view.far` single-source discipline); `scene()` itself never touches
+        // `ViewUniform`. Don't-care (`0.0, 0.0`) whenever [`GBufferScene::viewt_from_vb_depth`]
+        // resolves to `None` below.
+        vb_viewt_view_z_a: f32,
+        vb_viewt_view_z_b: f32,
         // Multi-paradigm render-path plan, rung R8: the live Decision-0 geometry table's Set,
         // threaded from `boyko_app::runner`'s World read (`NonSendRes<MeshGeometryTableSlot>`) —
         // `scene()` itself never touches `World` (the SAME "host reads, threads the plain value"
@@ -4180,22 +4243,26 @@ impl GpuSceneBundles {
         // async `light_upload` is light-generic, not leg-owned, so it is untouched.)
         let sdf_leg = resolved_render_path.sdf_leg;
 
-        // TAA is a DEFERRED-ONLY anti-aliaser today: `cap_forward_v1_consumers` /
-        // `cap_vb_v1_consumers` force it OFF for Forward / ForwardPlus / VisibilityBuffer (those
-        // paths write no motion vector / have no geo-shade-split producer yet —
-        // `RenderPathDegrade::{ForwardTaaNotYetImplemented, VbTaaNotYetImplemented}`). But the AA
-        // ACTIVATION arming below reads only `aa_mode` (from `AaConfig`), NOT the resolved path —
-        // so an `AaMode::Taa` request on one of those paths would arm `scene.taa` (and thus
-        // `aa_out`) while the VB/forward pass runs NO temporal resolve, leaving `aa_out` armed with
-        // no matching AA dispatch (the VB/forward AA blocks assert exactly that — a debug panic, a
-        // never-written `aa_out` sampled in release). Degrade an unsupported TAA request to `Off`
-        // HERE, at the single point where `aa_mode` feeds every AA activation, so `aa_out` never
-        // arms without a pass. FXAA / SMAA / SSAA are NOT capped and arm as usual; a Deferred TAA
-        // request (`resolved_render_path.path == Deferred`) is byte-UNCHANGED (the `taa_armed` /
-        // `taa_rcas` goldens hold).
-        let aa_mode = if aa_mode == AaMode::Taa
-            && resolved_render_path.path != boyko_render::RenderPath::Deferred
-        {
+        // TAA supports two producer shapes today: `Deferred` (any legs — the marcher/gbuffer
+        // resolve own `gViewT`) and `VisibilityBuffer × Mesh` (exactly — `viewt_from_depth_rz`
+        // stands in for the missing marcher, see `viewt_from_vb_depth` above/below).
+        // `ResolvedRenderPath::taa_supported()` is the SINGLE predicate every TAA gate reads —
+        // this degrade, the resolver's own `cap_forward_v1_consumers`/`cap_vb_v1_consumers`
+        // narrowing (`RenderPathDegrade::{ForwardTaaNotYetImplemented, VbTaaNotYetImplemented}`),
+        // and `boyko_app::runner`'s `taa_armed_now` arm-state all consume it, so the three can
+        // never disagree (a split-brain half-armed state would mean jitter with no accumulator,
+        // or an armed `aa_out` with no matching dispatch). But the AA ACTIVATION arming below
+        // reads only `aa_mode` (from `AaConfig`), NOT the resolved path — so an `AaMode::Taa`
+        // request on an unsupported combination (VB × Both/Sdf, or Forward/ForwardPlus) would arm
+        // `scene.taa` (and thus `aa_out`) while the recorder runs NO temporal resolve, leaving
+        // `aa_out` armed with no matching AA dispatch (the VB/forward AA blocks assert exactly
+        // that — a debug panic, a never-written `aa_out` sampled in release). Degrade an
+        // unsupported TAA request to `Off` HERE, at the single point where `aa_mode` feeds every
+        // AA activation, so `aa_out` never arms without a pass. FXAA / SMAA / SSAA are NOT capped
+        // and arm as usual; a `taa_supported()` TAA request (Deferred any legs, or VB × Mesh) is
+        // byte-UNCHANGED (the `taa_armed` / `taa_rcas` goldens hold for Deferred; VB × Mesh gains
+        // TAA support here for the first time).
+        let aa_mode = if aa_mode == AaMode::Taa && !resolved_render_path.taa_supported() {
             AaMode::Off
         } else {
             aa_mode
@@ -4347,6 +4414,23 @@ impl GpuSceneBundles {
                 layout: &self.viewt_from_depth_layout,
                 mesh_view_t_norm: mesh_view_t_norm(camera_mode),
             }),
+            // TAA-under-VB: armed exactly when the resolved path/legs support TAA under
+            // `VisibilityBuffer` (`resolved_render_path.taa_supported()`'s VB branch --
+            // `taa_supported()` also covers Deferred, which owns `viewt_from_depth` above
+            // instead, so the `matches!` narrows this arm to VB×Mesh only) AND the
+            // (post-degrade, ALREADY-clamped) `aa_mode` above resolves to `Taa` -- the same two
+            // conditions that gate `GBufferScene::taa` itself, so this pass and the resolve it
+            // feeds can never independently disagree. `None` on every other leg/path/AA
+            // combination (the marcher, the Deferred producer above, or no TAA consumer at all).
+            viewt_from_vb_depth: (resolved_render_path.taa_supported()
+                && matches!(resolved_render_path.path, boyko_render::RenderPath::VisibilityBuffer)
+                && aa_mode == AaMode::Taa)
+                .then(|| ViewtFromVbDepthActivation {
+                    pipeline: &self.viewt_from_vb_depth_pipeline,
+                    layout: &self.viewt_from_vb_depth_layout,
+                    view_z_a: vb_viewt_view_z_a,
+                    view_z_b: vb_viewt_view_z_b,
+                }),
             vocab_layout: &self.vocab_layout,
             edit_list: &self.edit_list,
             camera_ring: &self.camera_ring,
@@ -5033,6 +5117,11 @@ impl GpuSceneBundles {
             // Pipeline before its layout (reverse creation order).
             RhiDevice::destroy_compute_pipeline(ctx, self.viewt_from_depth_pipeline);
             RhiDevice::destroy_bind_group_layout(ctx, self.viewt_from_depth_layout);
+            // TAA-under-VB: the `viewt_from_depth_rz` REVERSE-Z sibling + its 3-binding layout,
+            // built UNCONDITIONALLY at boot (like `viewt_from_depth_pipeline` above). Pipeline
+            // before its layout (reverse creation order).
+            RhiDevice::destroy_compute_pipeline(ctx, self.viewt_from_vb_depth_pipeline);
+            RhiDevice::destroy_bind_group_layout(ctx, self.viewt_from_vb_depth_layout);
             // HW-RT rung R2a-4b: the HWRT resolve pipeline + its 21-binding layout, `Option`-guarded
             // (present only on an RT device under `feature = "hwrt"`). Pipeline before layout.
             #[cfg(feature = "hwrt")]

@@ -556,6 +556,21 @@ embed_spirv! {
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/viewt_from_depth.comp.spv")
 }
 
+embed_spirv! {
+    /// TAA-under-VB (`VisibilityBuffer × Mesh`): the `gViewT` producer for the VB path
+    /// (`shaders/viewt_from_depth_rz.comp.hlsl`) — the REVERSE-Z sibling of
+    /// [`VIEWT_FROM_DEPTH_SPV`] (whose Deferred custom-linear decode cannot be reused). A
+    /// full-screen, 8×8-tiled pass inverting `vb_depth`'s hardware reverse-Z encode
+    /// (`view_z = B / (d − A)`, the proven `sdf_forward_march` HAS_MESH decode) and
+    /// reparameterizing to the marcher ray metric (`t = view_z / dot(cam_forward, rd)`,
+    /// `ray_gen.hlsli` verbatim), so the UNCHANGED TAA resolve reconstructs
+    /// `P = ro + rd·view_t` for VB-rasterized geometry. Bound to its OWN dedicated
+    /// 3-binding layout { SAMPLED depth @0, STORAGE `gViewT` @1, camera UBO @2 — the SAME
+    /// b5 ring slot the TAA resolve reads } + the 16-byte [`ViewtFromDepthRzPush`].
+    VIEWT_FROM_DEPTH_RZ_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/viewt_from_depth_rz.comp.spv")
+}
+
 // The committed Render P7-Q2 SSAO (HBAO-lite, no-trig) quality-VARIANT SPIR-V — one PRE-COMPILED
 // `.spv` per `boyko_shaderdsl::ssao::SSAO_PRESETS` row (Mechanism C: a variant is selected at
 // runtime by binding a different pipeline, NEVER by a dynamic loop bound, so every `[unroll]`
@@ -1452,6 +1467,14 @@ pub fn sdf_tile_cull_spirv() -> &'static [u32] {
 #[inline]
 pub fn viewt_from_depth_spirv() -> &'static [u32] {
     VIEWT_FROM_DEPTH_SPV.as_words()
+}
+
+/// TAA-under-VB: the `viewt_from_depth_rz` gViewT-producer SPIR-V (the reverse-Z sibling for
+/// the `VisibilityBuffer × Mesh` path) as a `u32` word stream. See
+/// [`VIEWT_FROM_DEPTH_RZ_SPV`]'s doc.
+#[inline]
+pub fn viewt_from_depth_rz_spirv() -> &'static [u32] {
+    VIEWT_FROM_DEPTH_RZ_SPV.as_words()
 }
 
 /// The committed CSM Increment-1b Rung-A cascade DEPTH-PASS vertex SPIR-V as a `u32` word
@@ -3258,6 +3281,62 @@ impl ViewtFromDepthPush {
         // offset + the 12-byte total pinned by the const-asserts above, no uninit padding), so
         // its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern. The
         // `&self` borrow keeps the struct alive for the slice's lifetime; read-only.
+        unsafe {
+            slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
+        }
+    }
+}
+
+/// TAA-under-VB: the `viewt_from_depth_rz` compute push constants (mirrors
+/// `viewt_from_depth_rz.comp.hlsl`'s `ViewtFromDepthRzPush`). `#[repr(C)]`, 16 B
+/// (`u32, u32, f32, f32`), offsets pinned by the const-asserts below — the same
+/// discipline as [`ViewtFromDepthPush`], whose Deferred custom-linear `mesh_norm`
+/// this reverse-Z sibling replaces with the `forward_view_z_coeffs(near, far)` pair.
+///
+/// `view_z_a`/`view_z_b` MUST come from `boyko_render::view::forward_view_z_coeffs`
+/// (the single-sourced host mirror of `forward_view_proj_rows`'s reverse-Z encode) —
+/// never re-derived ad hoc at the call site (the `mesh_norm` single-source precedent).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewtFromDepthRzPush {
+    /// The runtime extent width — the dispatch bounds guard (`ceil(img_w/8)` groups may run
+    /// threads past the real extent; the shader discards `tid.x >= img_w`).
+    pub img_w: u32,
+    /// The runtime extent height — same bounds-guard role as [`Self::img_w`].
+    pub img_h: u32,
+    /// `forward_view_z_coeffs(near, far).0` — the reverse-Z encode's `A` in
+    /// `view_z = B / (depth − A)`.
+    pub view_z_a: f32,
+    /// `forward_view_z_coeffs(near, far).1` — the encode's `B`.
+    pub view_z_b: f32,
+}
+
+/// Byte size of [`ViewtFromDepthRzPush`] — the `viewt_from_depth_rz` pipeline's declared
+/// COMPUTE push range (16 B).
+pub const VIEWT_FROM_DEPTH_RZ_PUSH_BYTES: u32 =
+    core::mem::size_of::<ViewtFromDepthRzPush>() as u32;
+
+const _: () = assert!(core::mem::offset_of!(ViewtFromDepthRzPush, img_w) == 0);
+const _: () = assert!(core::mem::offset_of!(ViewtFromDepthRzPush, img_h) == 4);
+const _: () = assert!(core::mem::offset_of!(ViewtFromDepthRzPush, view_z_a) == 8);
+const _: () = assert!(core::mem::offset_of!(ViewtFromDepthRzPush, view_z_b) == 12);
+const _: () =
+    assert!(VIEWT_FROM_DEPTH_RZ_PUSH_BYTES == 16, "ViewtFromDepthRzPush must be 16 bytes");
+
+impl ViewtFromDepthRzPush {
+    /// Builds the push from the runtime extent + the host-precomputed reverse-Z pair.
+    #[inline]
+    pub const fn new(img_w: u32, img_h: u32, view_z_a: f32, view_z_b: f32) -> Self {
+        Self { img_w, img_h, view_z_a, view_z_b }
+    }
+
+    /// Re-views the push constants as their raw 16-byte slice for `push_constants`.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `Self` is `#[repr(C)]` with only `u32` / `f32` fields (all `Copy`, every
+        // offset + the 16-byte total pinned by the const-asserts above, no uninit padding),
+        // so its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern.
+        // The `&self` borrow keeps the struct alive for the slice's lifetime; read-only.
         unsafe {
             slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
         }

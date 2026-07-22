@@ -2401,6 +2401,9 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // `ResolvedRenderPathGpu::default()` (`Deferred × Both`), so the marcher itself is the
         // sole `gViewT` producer — `viewt_from_depth` stays `None` (the 0%-gate).
         viewt_from_depth: None,
+        // TAA-under-VB: this harness never resolves `VisibilityBuffer × Mesh`, so the
+        // `viewt_from_depth_rz` producer stays `None` (the 0%-gate).
+        viewt_from_vb_depth: None,
         // The SSAO à-trous denoise chain's stable boot pipelines/layout — not wired by this
         // harness (it never dispatches à-trous).
         ssao_atrous_read8_pipeline: None,
@@ -3418,6 +3421,9 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // `ResolvedRenderPathGpu::default()` (`Deferred × Both`), so the marcher itself is the
         // sole `gViewT` producer — `viewt_from_depth` stays `None` (the 0%-gate).
         viewt_from_depth: None,
+        // TAA-under-VB: this harness never resolves `VisibilityBuffer × Mesh`, so the
+        // `viewt_from_depth_rz` producer stays `None` (the 0%-gate).
+        viewt_from_vb_depth: None,
         // The SSAO à-trous denoise chain's stable boot pipelines/layout — not wired by this
         // harness (it never dispatches à-trous).
         ssao_atrous_read8_pipeline: None,
@@ -8362,6 +8368,9 @@ fn run_showcase_body_ddgi(
         // is `ResolvedRenderPathGpu::default()` (`Deferred × Both`), so the marcher itself is the
         // sole `gViewT` producer — `viewt_from_depth` stays `None` (the 0%-gate).
         viewt_from_depth: None,
+        // TAA-under-VB: this harness never resolves `VisibilityBuffer × Mesh`, so the
+        // `viewt_from_depth_rz` producer stays `None` (the 0%-gate).
+        viewt_from_vb_depth: None,
         // AA Stage 1: OFF (the default) — NO FXAA pass recorded, present samples `lit`
         // directly, byte-identical to the pre-AA stream (the 0%-gate).
         aa: None,
@@ -9835,6 +9844,9 @@ fn run_showcase_body(
             layout: &viewt_from_depth_layout,
             mesh_view_t_norm: boyko_render::mesh_view_t_norm(cfg.camera.camera_mode),
         }),
+        // TAA-under-VB: this harness only ever resolves `Deferred × {Both,Mesh,Sdf}` (never
+        // `VisibilityBuffer`), so the `viewt_from_depth_rz` producer stays `None` (the 0%-gate).
+        viewt_from_vb_depth: None,
         // AA Stage 1: OFF (the default) — NO FXAA pass recorded, present samples `lit`
         // directly, byte-identical to the pre-AA stream (the 0%-gate).
         aa: None,

@@ -357,15 +357,30 @@ pub fn marcher_view_proj_rows(view: &ViewUniform, width: u32, height: u32) -> [[
 /// [`gbuffer_push_from_view_jittered`]'s doc for why an authored aspect is deliberately not
 /// consulted).
 ///
-/// No jittered sibling yet (unlike [`marcher_view_proj_rows_jittered`]): Forward v1 has no TAA
-/// (the plan's v1 scope cut, [`crate::render_path_config::RenderPathDegrade::ForwardTaaNotYetImplemented`]) —
-/// a future ForwardPlus/TAA-under-Forward rung adds a `forward_view_proj_rows_jittered` sibling
-/// mirroring [`marcher_view_proj_rows_jittered`]'s `jitter.jx * row3` / `jitter.jy * row3` pattern
-/// (still exact post-divide NDC jitter here, since `row3` — the perspective-divide row — is
-/// unchanged from the Deferred construction).
-#[rustfmt::skip]
+/// Delegates to [`forward_view_proj_rows_jittered`] with [`NdcJitter::default`] — an exact
+/// `{0.0, 0.0}` offset, so `row0 += 0.0 * row3[k]` / `row1 += 0.0 * row3[k]` is an additive
+/// zero: byte-identical to the pre-TAA formula (the single-construction-site discipline
+/// [`marcher_view_proj_rows`] established).
 #[inline]
 pub fn forward_view_proj_rows(view: &ViewUniform, width: u32, height: u32) -> [[f32; 4]; 4] {
+    forward_view_proj_rows_jittered(view, width, height, NdcJitter::default())
+}
+
+/// TAA-under-VB: the jittered sibling of [`forward_view_proj_rows`], mirroring
+/// [`marcher_view_proj_rows_jittered`]'s `jitter.jx * row3` / `jitter.jy * row3` pattern —
+/// still EXACT post-divide NDC jitter here, because `row3` (the perspective-divide row) is
+/// byte-identical to the Deferred construction and stays UNCHANGED. Critically, `row2` (the
+/// reverse-Z depth encode) is also byte-UNTOUCHED: perturbing it would corrupt the hardware
+/// `GREATER` depth test and zero every `vb_id` write (the R8 lesson — a wrong z-row renders
+/// nothing, silently).
+#[rustfmt::skip]
+#[inline]
+pub fn forward_view_proj_rows_jittered(
+    view: &ViewUniform,
+    width: u32,
+    height: u32,
+    jitter: NdcJitter,
+) -> [[f32; 4]; 4] {
     debug_assert!(
         view.fov_y > 0.0,
         "invariant: the forward reverse-Z projection is PERSPECTIVE-only (fov_y > 0)"
@@ -403,10 +418,20 @@ pub fn forward_view_proj_rows(view: &ViewUniform, width: u32, height: u32) -> [[
     let row2 = [a * row3[0], a * row3[1], a * row3[2], a * row3[3] + b];
 
     [
-        [sx * rx, sx * ry, sx * rz, sx * tx], // clip.x
-        [sy * ux, sy * uy, sy * uz, sy * ty], // clip.y (marcher y-flip)
-        row2,                                  // clip.z (reverse-Z depth)
-        row3,                                  // clip.w (perspective divide, unchanged)
+        [
+            sx * rx + jitter.jx * row3[0],
+            sx * ry + jitter.jx * row3[1],
+            sx * rz + jitter.jx * row3[2],
+            sx * tx + jitter.jx * row3[3],
+        ], // clip.x, jittered (exact post-divide: row3 — the divide row — is unchanged)
+        [
+            sy * ux + jitter.jy * row3[0],
+            sy * uy + jitter.jy * row3[1],
+            sy * uz + jitter.jy * row3[2],
+            sy * ty + jitter.jy * row3[3],
+        ], // clip.y (marcher y-flip), jittered
+        row2, // clip.z (reverse-Z depth) — byte-UNTOUCHED (the R8 hard rule)
+        row3, // clip.w (perspective divide) — UNCHANGED, so the jitter above is exact
     ]
 }
 
@@ -567,9 +592,9 @@ pub fn gbuffer_push_from_view(
 /// [`GBUFFER_PUSH_BYTES`]), consumed by `forward_opaque.vs.hlsl` (byte-identical push contract
 /// to `gbuffer_mrt.vs.hlsl`'s, per that shader's doc — "ONLY the matrix CONTENT differs").
 ///
-/// No jittered sibling (unlike [`gbuffer_push_from_view_jittered`]): Forward v1 has no TAA (the
-/// resolver's `ForwardTaaNotYetImplemented` degrade forces it off) — a future TAA-under-Forward
-/// rung adds one, mirroring [`forward_view_proj_rows`]'s own "no jittered sibling yet" doc.
+/// Delegates to [`forward_gbuffer_push_from_view_jittered`] with [`NdcJitter::default`] — an
+/// exact `{0.0, 0.0}` offset, byte-identical to the pre-TAA formula (the same
+/// single-construction-site shape [`gbuffer_push_from_view`] uses for the Deferred push).
 ///
 /// PERSPECTIVE-only (delegates to [`forward_view_proj_rows`]'s `fov_y > 0` / `near`/`far`
 /// invariants — debug-asserted there). `boyko_app::runner` selects this fn instead of
@@ -583,8 +608,26 @@ pub fn forward_gbuffer_push_from_view(
     height: u32,
     instanced: bool,
 ) -> [u8; GBUFFER_PUSH_BYTES] {
+    forward_gbuffer_push_from_view_jittered(view, width, height, instanced, NdcJitter::default())
+}
+
+/// TAA-under-VB: the jittered sibling of [`forward_gbuffer_push_from_view`], mirroring
+/// [`gbuffer_push_from_view_jittered`] — the SAME 88-byte push layout, built from
+/// [`forward_view_proj_rows_jittered`] (rows 0/1 carry the exact post-divide NDC jitter; the
+/// reverse-Z `row2` and the divide `row3` stay byte-untouched). `vb_raster.vs` AND
+/// `vb_resolve`/`vb_shade` consume this SAME push (`pc.view_proj`), so the raster's sample
+/// position and the resolve's geometry reconstruction stay at the same sub-pixel offset by
+/// construction — no second injection site exists to drift.
+#[inline]
+pub fn forward_gbuffer_push_from_view_jittered(
+    view: &ViewUniform,
+    width: u32,
+    height: u32,
+    instanced: bool,
+    jitter: NdcJitter,
+) -> [u8; GBUFFER_PUSH_BYTES] {
     let eye = [view.camera_pos.x, view.camera_pos.y, view.camera_pos.z];
-    let pv = forward_view_proj_rows(view, width, height);
+    let pv = forward_view_proj_rows_jittered(view, width, height, jitter);
 
     let mut out = [0u8; GBUFFER_PUSH_BYTES];
     for col in 0..4 {
@@ -701,6 +744,68 @@ mod tests {
             composite_from_view(&view, 64, 64),
             composite_perspective_from_view(&view, 64, 64),
         );
+    }
+
+    /// TAA-under-VB MotionCam validity tripwire: rows 0/1/3 of the MARCHER projection
+    /// ([`marcher_view_proj_rows`], the MotionCam UBO's construction) must equal the FORWARD
+    /// reverse-Z projection's ([`forward_view_proj_rows`], what `vb_raster` rasterizes with) —
+    /// the TAA resolve's reprojection uses only clip x/y/w (`clip_to_uv`), so row-0/1/3
+    /// equality is exactly the condition under which the marcher-convention MotionCam
+    /// matrices are valid for VB-rasterized geometry. If a future edit ever splits these
+    /// constructions, this test fails LOUDLY instead of TAA acquiring a constant per-pixel
+    /// history-uv bias (the months-long-subtle-blur C2 class).
+    #[test]
+    fn marcher_and_forward_projections_agree_on_rows_0_1_3() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let m = marcher_view_proj_rows(&view, 640, 360);
+        let f = forward_view_proj_rows(&view, 640, 360);
+        for row in [0usize, 1, 3] {
+            assert_eq!(
+                m[row], f[row],
+                "marcher vs forward view-proj row {row} diverged — the MotionCam UBO is no \
+                 longer valid for VB TAA reprojection (see forward_view_proj_rows_jittered)"
+            );
+        }
+    }
+
+    /// TAA-under-VB zero-jitter identity: the jittered forward sibling with the exact-zero
+    /// [`NdcJitter::default`] is BYTE-identical to the unjittered formula, for both the raw
+    /// rows and the 88-byte push — the OFF-path byte-identity proof (the same discipline
+    /// [`marcher_view_proj_rows`]'s delegation established for Deferred).
+    #[test]
+    fn forward_jittered_siblings_are_byte_identical_at_zero_jitter() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        assert_eq!(
+            forward_view_proj_rows_jittered(&view, 512, 512, NdcJitter::default()),
+            forward_view_proj_rows(&view, 512, 512),
+        );
+        assert_eq!(
+            forward_gbuffer_push_from_view_jittered(&view, 512, 512, true, NdcJitter::default()),
+            forward_gbuffer_push_from_view(&view, 512, 512, true),
+        );
+    }
+
+    /// TAA-under-VB jitter shape: a non-zero jitter perturbs ONLY rows 0/1 of the forward
+    /// projection — `row2` (the reverse-Z depth encode) and `row3` (the perspective divide)
+    /// stay byte-untouched (the R8 hard rule: a perturbed z-row kills the `GREATER` depth
+    /// test and silently zeroes every `vb_id` write).
+    #[test]
+    fn forward_jitter_leaves_depth_and_divide_rows_untouched() {
+        let (global, projection) = forward_perspective_camera();
+        let view = ViewUniform::from_camera(global, projection);
+        let base = forward_view_proj_rows(&view, 512, 512);
+        let jit = forward_view_proj_rows_jittered(
+            &view,
+            512,
+            512,
+            NdcJitter { jx: 0.25, jy: -0.125 },
+        );
+        assert_ne!(jit[0], base[0], "jx must perturb the clip.x row");
+        assert_ne!(jit[1], base[1], "jy must perturb the clip.y row");
+        assert_eq!(jit[2], base[2], "the reverse-Z depth row must stay byte-untouched (R8)");
+        assert_eq!(jit[3], base[3], "the perspective-divide row must stay byte-untouched");
     }
 
     /// S3: an orthographic camera carries the `fov_y == 0.0` sentinel and routes

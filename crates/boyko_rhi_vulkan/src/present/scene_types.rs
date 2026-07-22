@@ -580,6 +580,54 @@ pub struct ViewtFromDepthActivation<'a> {
     pub mesh_view_t_norm: f32,
 }
 
+/// TAA-under-VB (`VisibilityBuffer × Mesh`): the `gViewT` producer activation threaded into
+/// [`GBufferScene::viewt_from_vb_depth`] to turn the VB path's `viewt_from_depth_rz`
+/// `gViewT`-producer pass ON — the REVERSE-Z sibling of [`ViewtFromDepthActivation`]
+/// (`viewt_from_depth_rz.comp.hlsl` / [`crate::compute::viewt_from_depth_rz_spirv`]). Under
+/// `VisibilityBuffer × Mesh` there is no marcher dispatch and no Deferred custom-linear depth to
+/// decode: `vb_raster` writes a standard HARDWARE reverse-Z depth, so this pass inverts THAT
+/// encode (`view_z = B / (d − A)`, the proven `sdf_forward_march` HAS_MESH decode) and
+/// reparameterizes to the marcher ray metric, giving the UNCHANGED TAA resolve a real `gViewT`
+/// lane to reconstruct `P = ro + rd·view_t` from.
+///
+/// Bound to a DEDICATED 3-binding layout { SAMPLED depth @0, STORAGE `gViewT` @1, UNIFORM camera
+/// @2 } — one more binding than [`ViewtFromDepthActivation::layout`] because the reverse-Z ray
+/// reparameterization needs `cam_forward`/`generate_ray`, unlike the Deferred custom-linear
+/// decode. Pushes the 16-byte [`crate::compute::ViewtFromDepthRzPush`] (`img_w`, `img_h`,
+/// `view_z_a`, `view_z_b`) — the coefficients MUST come from
+/// `boyko_render::view::forward_view_z_coeffs(near, far)`, the single-sourced host mirror of
+/// `forward_view_proj_rows`'s reverse-Z encode (never re-derived ad hoc at the call site).
+///
+/// `None` on [`GBufferScene::viewt_from_vb_depth`] is the OFF path (the DEFAULT — the 0%-gate):
+/// no `viewt_from_vb_depth_set`, no framegraph pass, no dispatch — capability = component
+/// presence, not a runtime flag. `Some` iff the caller resolved `VisibilityBuffer × Mesh` with
+/// TAA armed ([`GBufferScene::taa`] `Some`) — mirrors [`ViewtFromDepthActivation`]'s arming
+/// discipline.
+///
+/// `#[derive(Clone, Copy)]` — a pair of borrows + two scalars the caller flips between frames with
+/// no re-record, mirroring [`ViewtFromDepthActivation`]'s shape.
+#[derive(Clone, Copy)]
+pub struct ViewtFromVbDepthActivation<'a> {
+    /// The `viewt_from_depth_rz` compute pipeline (`viewt_from_depth_rz.comp.hlsl` /
+    /// [`crate::compute::viewt_from_depth_rz_spirv`]): its layout declares [`Self::layout`] at
+    /// `set 0` + the 16-byte [`crate::compute::ViewtFromDepthRzPush`] COMPUTE push range. The
+    /// caller OWNS the pipeline + layout and tears them down; the `'a` lifetime ties this
+    /// activation to those borrows for the frame call — mirrors [`ViewtFromDepthActivation::pipeline`].
+    pub pipeline: &'a ComputePipeline,
+    /// The DEDICATED 3-binding `viewt_from_depth_rz` bind-group LAYOUT { SAMPLED depth @0,
+    /// STORAGE `gViewT` @1, UNIFORM camera @2 } — matching `viewt_from_depth_rz.comp`'s set 0.
+    /// [`GBufferTargets`] writes a `viewt_from_vb_depth_set` against it once per extent (pointing
+    /// at the per-extent reverse-Z `ForwardTargets::depth` + `gViewT` images + the shared camera
+    /// ring), mirroring [`ViewtFromDepthActivation::layout`].
+    pub layout: &'a VulkanBindGroupLayout,
+    /// `boyko_render::view::forward_view_z_coeffs(near, far).0` — the reverse-Z encode's `A` in
+    /// `view_z = B / (d − A)`. See [`crate::compute::ViewtFromDepthRzPush::view_z_a`]'s doc.
+    pub view_z_a: f32,
+    /// `boyko_render::view::forward_view_z_coeffs(near, far).1` — the encode's `B`. See
+    /// [`crate::compute::ViewtFromDepthRzPush::view_z_b`]'s doc.
+    pub view_z_b: f32,
+}
+
 /// Anti-aliasing Stage 1: the FXAA post-process pass activation threaded into
 /// [`GBufferScene::aa`] to turn the AA pass ON. Mirrors [`SsaoActivation`]'s borrow-bundle
 /// shape: a `Copy` pair of caller-owned pipeline/sampler borrows.
@@ -1127,6 +1175,12 @@ pub struct GBufferScene<'a> {
     /// iff the caller resolved `mesh_leg && !sdf_leg` (`GeometryLegs::Mesh`) — see
     /// [`ViewtFromDepthActivation`]'s doc.
     pub viewt_from_depth: Option<ViewtFromDepthActivation<'a>>,
+    /// TAA-under-VB (`VisibilityBuffer × Mesh`): the `viewt_from_depth_rz` `gViewT`-producer
+    /// activation. `None` (the default) ⇒ NO descriptor set (`GBufferTargets` never builds
+    /// `viewt_from_vb_depth_set`), NO framegraph pass, NO dispatch — the 0%-gate, capability =
+    /// component presence (not a runtime flag). `Some` iff the caller resolved
+    /// `VisibilityBuffer × Mesh` with TAA armed — see [`ViewtFromVbDepthActivation`]'s doc.
+    pub viewt_from_vb_depth: Option<ViewtFromVbDepthActivation<'a>>,
     /// The vocabulary bind-group LAYOUT { SSBO @0, sampled depth @1, storage albedo
     /// @2, storage normal @3, storage material @4, UNIFORM camera @5, STORAGE tiles
     /// @6, STORAGE material-table @7, STORAGE `gViewT` @8, STORAGE `PointerGrid` @9,
