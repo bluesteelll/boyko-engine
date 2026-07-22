@@ -191,7 +191,7 @@ impl Renderer<'_> {
                     (self.fns.cmd_push_constants)(
                         cmd,
                         csm.pipeline.layout,
-                        VK_SHADER_STAGE_VERTEX_BIT,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0,
                         csm_push.len() as u32,
                         csm_push.as_ptr().cast(),
@@ -209,7 +209,7 @@ impl Renderer<'_> {
                         (self.fns.cmd_push_constants)(
                             cmd,
                             csm.pipeline.layout,
-                            VK_SHADER_STAGE_VERTEX_BIT,
+                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                             GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
                             4,
                             (&base as *const u32).cast(),
@@ -324,7 +324,7 @@ impl Renderer<'_> {
                         (self.fns.cmd_push_constants)(
                             cmd,
                             face_pipeline.layout,
-                            VK_SHADER_STAGE_VERTEX_BIT,
+                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                             GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
                             4,
                             (&base as *const u32).cast(),
@@ -497,7 +497,7 @@ impl Renderer<'_> {
                 (self.fns.cmd_push_constants)(
                     cmd,
                     vb_raster_pipeline.layout,
-                    VK_SHADER_STAGE_VERTEX_BIT,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                     0,
                     scene.mvp.len() as u32,
                     scene.mvp.as_ptr().cast(),
@@ -509,7 +509,7 @@ impl Renderer<'_> {
                     (self.fns.cmd_push_constants)(
                         cmd,
                         vb_raster_pipeline.layout,
-                        VK_SHADER_STAGE_VERTEX_BIT,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
                         4,
                         (&base as *const u32).cast(),

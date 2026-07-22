@@ -53,7 +53,14 @@ pub unsafe fn record_ui_rects<A: RhiApi>(
 
     enc.bind_graphics_pipeline(pipeline);
     enc.bind_descriptor_set(bind_group, pipeline);
-    enc.push_graphics_constants(pipeline, ShaderStage::VERTEX, 0, plan.ortho.as_bytes());
+    // VUID-vkCmdPushConstants-offset-01796: the graphics layout declares its push range
+    // over VERTEX | FRAGMENT, and the call must name ALL stages of the overlapping range.
+    enc.push_graphics_constants(
+        pipeline,
+        ShaderStage::VERTEX | ShaderStage::FRAGMENT,
+        0,
+        plan.ortho.as_bytes(),
+    );
 
     let viewport = Viewport {
         x: full_area.x as f32,

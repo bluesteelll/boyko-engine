@@ -339,11 +339,12 @@ impl CsmSceneResources {
         // The depth-only pipeline: EMPTY color_formats, D32 depth, FRONT cull (Rung A casts the
         // BACK faces so the receiver's front face is unbiased — the standard shadow-map config),
         // a slope+constant depth bias (the acne fix), the set-0 instance layout + the 88-byte
-        // VERTEX push (the SAME shape the gbuffer raster pipeline declares).
+        // push (the SAME shape the gbuffer raster pipeline declares). POSITION-ONLY input: the
+        // depth VS consumes location 0 alone; declaring the unconsumed normal/color attributes
+        // trips the validation layer's "vertex attribute not consumed" warning (the messenger
+        // oracle counts warnings). The stride still spans the full 40-byte mesh vertex.
         let attributes = [
             VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
-            VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
-            VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
         ];
         let depth_pipeline = RhiDevice::create_graphics_pipeline(
             device,

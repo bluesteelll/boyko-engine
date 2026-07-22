@@ -781,7 +781,7 @@ impl Renderer<'_> {
                 (self.fns.cmd_push_constants)(
                     cmd,
                     raster_pipeline.layout,
-                    VK_SHADER_STAGE_VERTEX_BIT,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                     0,
                     scene.mvp.len() as u32,
                     scene.mvp.as_ptr().cast(),
@@ -814,7 +814,7 @@ impl Renderer<'_> {
                         (self.fns.cmd_push_constants)(
                             cmd,
                             raster_pipeline.layout,
-                            VK_SHADER_STAGE_VERTEX_BIT,
+                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                             GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
                             4,
                             (&base as *const u32).cast(),
@@ -1623,12 +1623,14 @@ impl Renderer<'_> {
 
         // === CSM Increment 1b (Rung A): the cascade DEPTH pass (W5 — a NEW recorder bracket,
         // NOT record_gbuffer's main raster). Recorded ONLY when the scene wires the depth
-        // activation (`scene.csm.is_some()`); otherwise skipped entirely — NO barrier, NO
-        // rendering — so the command stream is byte-identical to the pre-CSM path (the 0%-gate;
-        // the cascade map/sampler/UBO are bound-but-unread). Renders the SAME caster batches
-        // (`scene.mesh_draw` + `scene.instance_bind_group`) from the SUN's POV into cascade
-        // layer 0, so the resolve can `min`-combine the exact hard shadow. RUN BEFORE the
-        // resolve dispatch (5b) so the cascade depth is SHADER_READ-visible to the resolve. ===
+        // activation (`scene.csm.is_some()`); otherwise NO rendering is recorded and the
+        // cascade map/sampler/UBO stay bound-but-unread — the graph's UNCONDITIONAL resolve
+        // read still derives the discard-legal UNDEFINED→SHADER_READ_ONLY transition that
+        // keeps the always-bound descriptor's layout valid (VUID-...-09600; PIXELS stay
+        // byte-identical — the resolve's `csm_mode == 0` gate never samples it). Renders the
+        // SAME caster batches (`scene.mesh_draw` + `scene.instance_bind_group`) from the SUN's
+        // POV into cascade layer 0, so the resolve can `min`-combine the exact hard shadow.
+        // RUN BEFORE the resolve dispatch (5b) so the cascade depth is SHADER_READ-visible. ===
         if let Some(csm) = &scene.csm {
             let cascade = scene.csm_cascade_texture;
             // CSM Increment 3 (Rung B): the number of cascade LAYERS to render — clamped to the
@@ -1636,13 +1638,14 @@ impl Renderer<'_> {
             // the barrier range past the array bounds. `1` reproduces the Rung-A single-cascade path.
             let active = (csm.active_count as usize).clamp(1, MAX_CASCADES) as u32;
             // (CSM-0) Barrier-in: the cascade image UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL (the
-            // depth-write access, DEPTH aspect) over ALL `[0..active)` layers. Each is re-
-            // `UNDEFINED`'d (the prior frame's content is discarded before this frame's depth pass).
-            // The graph derives the layered subresource range internally; the former hand
-            // barriers spanned `[0..active)` explicitly (the Rung-A `DEPTH_SUBRESOURCE_RANGE`
-            // covers only layer 0).
+            // depth-write access, DEPTH aspect) over the FULL `MAX_CASCADES` array — the resolve
+            // samples through a whole-array 2D_ARRAY view, so the `[active..MAX)` tail must ride
+            // the same layout cycle (09600; discard-legal garbage the shader's `active_count`
+            // gate never samples). Each layer is re-`UNDEFINED`'d (the prior frame's content is
+            // discarded before this frame's depth pass); the rendering loop below still touches
+            // only `[0..active)`.
             // The graph's "csm" pass (declaring the cascade layered DEPTH_WRITE over
-            // `depth_layers(active)`) DRIVES this barrier-in, recorded HERE, before the
+            // `depth_layers(MAX_CASCADES)`) DRIVES this barrier-in, recorded HERE, before the
             // cascade depth loop. Its barrier-OUT (→SHADER_READ_ONLY) is derived at the
             // resolve (the cascade reader), so `record_pass(resolve)` emits it — NOT here.
             // SAFETY: recording is open; `record_graph_pass` records the graph's derived
@@ -1758,7 +1761,7 @@ impl Renderer<'_> {
                     (self.fns.cmd_push_constants)(
                         cmd,
                         csm.pipeline.layout,
-                        VK_SHADER_STAGE_VERTEX_BIT,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                         0,
                         csm_push.len() as u32,
                         csm_push.as_ptr().cast(),
@@ -1782,7 +1785,7 @@ impl Renderer<'_> {
                         (self.fns.cmd_push_constants)(
                             cmd,
                             csm.pipeline.layout,
-                            VK_SHADER_STAGE_VERTEX_BIT,
+                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                             GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
                             4,
                             (&base as *const u32).cast(),
@@ -1834,12 +1837,14 @@ impl Renderer<'_> {
 
         // === Shadow Phase 5 Inc-1-GPU: the sparse SPOT atlas DEPTH pass (a NEW recorder bracket,
         // a CLONE of the CSM depth pass above). Recorded ONLY when the scene wires the activation
-        // (`scene.atlas_punctual.is_some()`); otherwise skipped entirely — NO barrier, NO rendering
-        // — so the command stream is byte-identical to the pre-Inc-1 path (the 0%-gate; the atlas
-        // map/sampler/UBO are bound-but-unread). Renders the SAME caster batches (`scene.mesh_draw` +
-        // `scene.instance_bind_group`) from each SPOT's POV into atlas layer `s`, so the resolve can
-        // multiply the exact hard shadow into that spot's contribution. RUN BEFORE the resolve
-        // dispatch (5b) so the atlas depth is SHADER_READ-visible to the resolve. ===
+        // (`scene.atlas_punctual.is_some()`); otherwise NO rendering is recorded and the atlas
+        // map/sampler/UBO stay bound-but-unread — the graph's UNCONDITIONAL resolve read still
+        // derives the discard-legal UNDEFINED→SHADER_READ_ONLY transition that keeps the
+        // always-bound descriptor's layout valid (09600, the CSM-pass mirror above). Renders the
+        // SAME caster batches (`scene.mesh_draw` + `scene.instance_bind_group`) from each SPOT's
+        // POV into atlas layer `s`, so the resolve can multiply the exact hard shadow into that
+        // spot's contribution. RUN BEFORE the resolve dispatch (5b) so the atlas depth is
+        // SHADER_READ-visible to the resolve. ===
         if let Some(atlas_act) = &scene.atlas_punctual {
             let atlas = scene.shadow_atlas_texture;
             // The number of atlas LAYERS to render — clamped to the backend cap so an out-of-range
@@ -1847,12 +1852,13 @@ impl Renderer<'_> {
             // bounds. `1` reproduces the single-spot path.
             let active = (atlas_act.active_layers as usize).clamp(1, MAX_TEXTURE_LAYERS) as u32;
             // Barrier-in: the atlas image UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL (depth-write access,
-            // DEPTH aspect) over ALL `[0..active)` layers. Each is re-`UNDEFINED`'d (the prior frame's
-            // content is discarded before this frame's depth pass). The graph derives the
-            // layered subresource range internally.
+            // DEPTH aspect) over the FULL `MAX_TEXTURE_LAYERS` array — the resolve samples through
+            // a whole-array 2D_ARRAY view, so the `[active..MAX)` tail must ride the same layout
+            // cycle (09600, the CSM barrier-in mirror above). Each layer is re-`UNDEFINED`'d; the
+            // rendering loop below still touches only `[0..active)`.
             // The graph's "atlas_depth" pass (declaring the atlas layered DEPTH_WRITE over
-            // `depth_layers(active)`) DRIVES this barrier-in, recorded HERE, before the
-            // atlas depth loop. Its barrier-OUT (→SHADER_READ_ONLY) is derived at the
+            // `depth_layers(MAX_TEXTURE_LAYERS)`) DRIVES this barrier-in, recorded HERE, before
+            // the atlas depth loop. Its barrier-OUT (→SHADER_READ_ONLY) is derived at the
             // resolve (the atlas reader) — NOT here.
             // SAFETY: recording is open; `record_graph_pass` records the graph's derived
             // UNDEFINED→DEPTH barrier-in for the "atlas_depth" pass into `cmd`.
@@ -2014,14 +2020,16 @@ impl Renderer<'_> {
                         atlas_push[GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize
                             ..GBUFFER_PUSH_BASE_INSTANCE_OFFSET as usize + 4]
                             .copy_from_slice(&base.to_le_bytes());
-                        // The `base_instance` lane (@80) is read only by the VS, so a VERTEX-stage
-                        // push is sufficient (a subset of the layout's `VERTEX | FRAGMENT` range).
+                        // The `base_instance` lane (@80) is read only by the VS, but the push
+                        // MUST still name the layout range's FULL `VERTEX | FRAGMENT` stage set:
+                        // VUID-vkCmdPushConstants-offset-01796 requires the call's stageFlags to
+                        // include ALL stages of every overlapping range — a subset is invalid.
                         // Both pipelines share the SAME layout, so `face_pipeline.layout` is correct
                         // for either face type.
                         (self.fns.cmd_push_constants)(
                             cmd,
                             face_pipeline.layout,
-                            VK_SHADER_STAGE_VERTEX_BIT,
+                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                             GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
                             4,
                             (&base as *const u32).cast(),

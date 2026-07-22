@@ -122,10 +122,13 @@ impl CsmResources {
             .expect("invariant: CSM depth VS module create");
         let depth_fs = RhiDevice::create_shader_module(device, csm_depth_fs_spirv())
             .expect("invariant: CSM depth FS module create");
+        // POSITION-ONLY input for the depth-only pipelines: both depth VSes
+        // (`csm_depth_vs`/`csm_depth_point_vs`) consume location 0 alone, and declaring the
+        // unconsumed normal/color attributes trips the validation layer's
+        // "vertex attribute not consumed" warning (the messenger oracle counts warnings).
+        // The stride still spans the FULL mesh vertex, so the same vertex buffers bind unchanged.
         let attributes = [
             VertexAttribute { location: 0, offset: 0, format: VertexFormat::Float32x3 },
-            VertexAttribute { location: 2, offset: 12, format: VertexFormat::Float32x3 },
-            VertexAttribute { location: 1, offset: 24, format: VertexFormat::Float32x4 },
         ];
         let depth_bias = Some(DepthBias {
             constant_factor: 0.0015,

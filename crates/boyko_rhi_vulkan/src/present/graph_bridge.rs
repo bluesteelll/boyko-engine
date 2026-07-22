@@ -799,7 +799,12 @@ impl Renderer<'_> {
         let depth = g.add_image("depth");
         let viewt = g.add_image("viewt");
         let lit = g.add_image("lit");
-        let ssao = g.add_image("ssao");
+        // `ssao` is ALWAYS-BOUND at resolve @11 (STORAGE, GENERAL) but only WRITTEN when the SSAO
+        // pass runs — seeded like `pbr` (T6a) so the SSAO-off frame's unconditional resolve read
+        // (below) derives a real, discard-legal UNDEFINED→GENERAL first-touch transition instead
+        // of tripping `compile`'s unwritten-transient-read guard. With SSAO on, the SSAO pass's
+        // write is the first touch and the seed is inert — barriers identical to before.
+        let ssao = g.add_image_seeded("ssao", ResSync::undefined());
         let cascade = g.add_image_seeded(
             "cascade",
             ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
@@ -1666,19 +1671,23 @@ impl Renderer<'_> {
             None
         };
 
-        // Pass `csm` (cascade depth) — gated `scene.csm.is_some()`. Layered depth over
-        // `[0..active_count)` cascades, clamped `[1, MAX_CASCADES]` exactly as the hand
-        // site. The barrier-out (→SHADER_READ_ONLY) is placed by the graph at the
-        // resolve's cascade read (a sound-superset re-order; matches build_maximal_frame).
-        let csm = if let Some(csm_act) = &scene.csm {
-            let active = (csm_act.active_count as usize).clamp(1, MAX_CASCADES) as u32;
+        // Pass `csm` (cascade depth) — gated `scene.csm.is_some()`. The write is declared over
+        // the FULL `MAX_CASCADES` array (NOT just `[0..active_count)`): the resolve samples the
+        // cascade map through a 2D_ARRAY view spanning EVERY layer, and
+        // VUID-vkCmdDraw/Dispatch-None-09600 requires every layer of a statically-bound
+        // descriptor to sit in the descriptor's layout — so the `[active..MAX)` tail must ride
+        // the same UNDEFINED→DEPTH_ATTACHMENT→SHADER_READ_ONLY cycle (discard-legal garbage the
+        // shader's `active_count` gate never dynamically samples). The rendering loop still
+        // touches only `[0..active)`. The barrier-out (→SHADER_READ_ONLY) is placed by the graph
+        // at the resolve's cascade read (a sound-superset re-order; matches build_maximal_frame).
+        let csm = if scene.csm.is_some() {
             let p = g.add_pass("csm_depth");
             g.image_access(
                 cascade,
                 FRAG,
                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                SubRange::depth_layers(active),
+                SubRange::depth_layers(MAX_CASCADES as u32),
             );
             Some(p)
         } else {
@@ -1686,17 +1695,15 @@ impl Renderer<'_> {
         };
 
         // Pass `atlas` (spot/point atlas depth) — gated `scene.atlas_punctual.is_some()`.
-        // Layered depth over `[0..active_layers)`, clamped `[1, MAX_TEXTURE_LAYERS]`.
-        let atlas_pass = if let Some(atlas_act) = &scene.atlas_punctual {
-            let active =
-                (atlas_act.active_layers as usize).clamp(1, MAX_TEXTURE_LAYERS) as u32;
+        // Full `MAX_TEXTURE_LAYERS` array for the SAME 09600 whole-view reason as `csm` above.
+        let atlas_pass = if scene.atlas_punctual.is_some() {
             let p = g.add_pass("atlas_depth");
             g.image_access(
                 atlas,
                 FRAG,
                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                SubRange::depth_layers(active),
+                SubRange::depth_layers(MAX_TEXTURE_LAYERS as u32),
             );
             Some(p)
         } else {
@@ -1705,10 +1712,14 @@ impl Renderer<'_> {
 
         // Pass `resolve`: reads albedo/normal/material/viewt/ssao (GENERAL) + the L1
         // buffers + the layered shadow maps (→sampled), writes lit (first-touch
-        // UNDEFINED→GENERAL). The optional reads are declared ONLY when their producer
-        // pass ran, so the graph derives their →sampled / →read barriers exactly when the
-        // hand path does. Declaring them conditionally keeps a resource the frame never
-        // touched (e.g. cascade when CSM is off) out of the compiled barrier set.
+        // UNDEFINED→GENERAL). Buffer reads stay gated on their producer having run (a
+        // buffer descriptor has no layout to keep valid). IMAGE reads of always-bound
+        // descriptors (cascade/atlas — like `pbr` below) are declared UNCONDITIONALLY:
+        // VUID-vkCmdDraw/Dispatch-None-09600 requires a statically-referenced descriptor's
+        // image to sit in the descriptor layout even when the shader's mode gate never
+        // dynamically samples it, so the OFF path derives a discard-legal
+        // UNDEFINED→SHADER_READ_ONLY transition (the T6a `pbr` first-touch pattern; the
+        // `seeded_readers` seed keeps layout UNDEFINED, so the transition is real).
         let resolve = g.add_pass("resolve");
         for &c in &[albedo, normal, material, viewt] {
             g.image_access(
@@ -1735,15 +1746,18 @@ impl Renderer<'_> {
             VK_IMAGE_LAYOUT_GENERAL,
             SubRange::COLOR,
         );
-        if ssao_pass.is_some() {
-            g.image_access(
-                ssao,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_SHADER_READ_BIT,
-                VK_IMAGE_LAYOUT_GENERAL,
-                SubRange::COLOR,
-            );
-        }
+        // UNCONDITIONAL (09600, the T6a `pbr` pattern): `gSsao` @11 is statically referenced by
+        // the resolve `.spv` regardless of `ssao_mode`, so the SSAO-off frame must still leave
+        // the image in GENERAL — the seeded first-touch read derives the discard-legal
+        // UNDEFINED→GENERAL transition; the SSAO-on frame's read is unchanged (the SSAO pass
+        // wrote first, so this derives the same write→read barrier it always did).
+        g.image_access(
+            ssao,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_IMAGE_LAYOUT_GENERAL,
+            SubRange::COLOR,
+        );
         if light_cull.is_some() {
             g.buffer_access(
                 grid,
@@ -1768,33 +1782,24 @@ impl Renderer<'_> {
                 VK_ACCESS_SHADER_READ_BIT,
             );
         }
-        if csm.is_some() {
-            let active =
-                (scene.csm.as_ref().map(|c| c.active_count).unwrap_or(1) as usize)
-                    .clamp(1, MAX_CASCADES) as u32;
-            g.image_access(
-                cascade,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_SHADER_READ_BIT,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                SubRange::depth_layers(active),
-            );
-        }
-        if atlas_pass.is_some() {
-            let active = (scene
-                .atlas_punctual
-                .as_ref()
-                .map(|a| a.active_layers)
-                .unwrap_or(1) as usize)
-                .clamp(1, MAX_TEXTURE_LAYERS) as u32;
-            g.image_access(
-                atlas,
-                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                VK_ACCESS_SHADER_READ_BIT,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                SubRange::depth_layers(active),
-            );
-        }
+        // UNCONDITIONAL + FULL-ARRAY (09600, see the pass comment above): with the depth pass ON
+        // this derives the whole-array DEPTH_ATTACHMENT→SHADER_READ_ONLY barrier-out; with it OFF
+        // (bound-but-unread) it derives the discard-legal UNDEFINED→SHADER_READ_ONLY transition
+        // that keeps the always-bound descriptor's layout valid.
+        g.image_access(
+            cascade,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            SubRange::depth_layers(MAX_CASCADES as u32),
+        );
+        g.image_access(
+            atlas,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            SubRange::depth_layers(MAX_TEXTURE_LAYERS as u32),
+        );
         // SDFDDGI I2: when the update pass ran, the resolve READS the two atlas storage images the
         // update WROTE. Declaring the read here (the atlas READER) is what makes the RDG DERIVE the
         // update-write → resolve-read barrier. The resolve SAMPLES the atlases through a
@@ -2155,36 +2160,34 @@ impl Renderer<'_> {
             None
         };
 
-        // Pass `csm` (cascade depth) — gated `scene.csm.is_some()`. Layered depth over
-        // `[0..active_count)` cascades, clamped `[1, MAX_CASCADES]`, the SAME shape
-        // `declare_deferred_graph`'s `csm` pass declares.
-        let csm = if let Some(csm_act) = &scene.csm {
-            let active = (csm_act.active_count as usize).clamp(1, MAX_CASCADES) as u32;
+        // Pass `csm` (cascade depth) — gated `scene.csm.is_some()`. FULL `MAX_CASCADES` array
+        // (NOT `[0..active_count)`), the SAME 09600 whole-view shape `declare_deferred_graph`'s
+        // `csm` pass declares (see that site's comment for the tail-layer rationale).
+        let csm = if scene.csm.is_some() {
             let p = g.add_pass("csm_depth");
             g.image_access(
                 cascade,
                 FRAG,
                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                SubRange::depth_layers(active),
+                SubRange::depth_layers(MAX_CASCADES as u32),
             );
             Some(p)
         } else {
             None
         };
 
-        // Pass `atlas` (spot/point atlas depth) — gated `scene.atlas_punctual.is_some()`. Layered
-        // depth over `[0..active_layers)`, clamped `[1, MAX_TEXTURE_LAYERS]`, the SAME shape
-        // `declare_deferred_graph`'s `atlas` pass declares.
-        let atlas_pass = if let Some(atlas_act) = &scene.atlas_punctual {
-            let active = (atlas_act.active_layers as usize).clamp(1, MAX_TEXTURE_LAYERS) as u32;
+        // Pass `atlas` (spot/point atlas depth) — gated `scene.atlas_punctual.is_some()`. Full
+        // `MAX_TEXTURE_LAYERS` array, the SAME shape `declare_deferred_graph`'s `atlas` pass
+        // declares.
+        let atlas_pass = if scene.atlas_punctual.is_some() {
             let p = g.add_pass("atlas_depth");
             g.image_access(
                 atlas,
                 FRAG,
                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                SubRange::depth_layers(active),
+                SubRange::depth_layers(MAX_TEXTURE_LAYERS as u32),
             );
             Some(p)
         } else {
@@ -2236,38 +2239,28 @@ impl Renderer<'_> {
             );
         }
         // Code-review P1-1: `cascade`/`atlas` are `Format::D32Sfloat` DEPTH images — the read
-        // MUST declare `SubRange::depth_layers(active)` (DEPTH aspect, the SAME layered range the
+        // MUST declare `SubRange::depth_layers(..)` (DEPTH aspect, the SAME layered range the
         // producer wrote), not `SubRange::COLOR` (a spec violation: the derived
         // DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL transition would carry a COLOR
         // aspect mask, so the DEPTH aspect never actually transitions — broken/undefined shadow
-        // sampling). `active` is recomputed here exactly as the producer computed it (the SAME
-        // clamp `declare_deferred_graph`'s resolve-side reads use for the identical reason).
-        if csm.is_some() {
-            let active = (scene.csm.as_ref().map(|c| c.active_count).unwrap_or(1) as usize)
-                .clamp(1, MAX_CASCADES) as u32;
-            g.image_access(
-                cascade,
-                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                VK_ACCESS_SHADER_READ_BIT,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                SubRange::depth_layers(active),
-            );
-        }
-        if atlas_pass.is_some() {
-            let active = (scene
-                .atlas_punctual
-                .as_ref()
-                .map(|a| a.active_layers)
-                .unwrap_or(1) as usize)
-                .clamp(1, MAX_TEXTURE_LAYERS) as u32;
-            g.image_access(
-                atlas,
-                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                VK_ACCESS_SHADER_READ_BIT,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                SubRange::depth_layers(active),
-            );
-        }
+        // sampling). UNCONDITIONAL + FULL-ARRAY (09600): `forward_opaque.fs` statically
+        // references both maps, so on the OFF path this derives the discard-legal
+        // UNDEFINED→SHADER_READ_ONLY transition that keeps the always-bound Set-1 descriptors'
+        // layout valid (the SAME shape `declare_deferred_graph`'s resolve reads use).
+        g.image_access(
+            cascade,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            SubRange::depth_layers(MAX_CASCADES as u32),
+        );
+        g.image_access(
+            atlas,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_SHADER_READ_BIT,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            SubRange::depth_layers(MAX_TEXTURE_LAYERS as u32),
+        );
         if interp.is_some() {
             g.buffer_access(
                 instance_model_ring,
@@ -2951,33 +2944,32 @@ impl Renderer<'_> {
         };
 
         // Pass `csm` (cascade depth) — gated `scene.csm.is_some()`, declared BEFORE `vb_resolve`
-        // (which samples the cascade inline). Same shape `declare_forward_graph`'s `csm` pass
-        // declares.
-        let csm = if let Some(csm_act) = &scene.csm {
-            let active = (csm_act.active_count as usize).clamp(1, MAX_CASCADES) as u32;
+        // (which samples the cascade inline). FULL `MAX_CASCADES` array, the SAME 09600
+        // whole-view shape `declare_forward_graph`'s `csm` pass declares.
+        let csm = if scene.csm.is_some() {
             let p = g.add_pass("csm_depth");
             g.image_access(
                 cascade,
                 FRAG,
                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                SubRange::depth_layers(active),
+                SubRange::depth_layers(MAX_CASCADES as u32),
             );
             Some(p)
         } else {
             None
         };
 
-        // Pass `atlas` (spot/point atlas depth) — gated `scene.atlas_punctual.is_some()`.
-        let atlas_pass = if let Some(atlas_act) = &scene.atlas_punctual {
-            let active = (atlas_act.active_layers as usize).clamp(1, MAX_TEXTURE_LAYERS) as u32;
+        // Pass `atlas` (spot/point atlas depth) — gated `scene.atlas_punctual.is_some()`. Full
+        // `MAX_TEXTURE_LAYERS` array, the SAME shape the other declarators use.
+        let atlas_pass = if scene.atlas_punctual.is_some() {
             let p = g.add_pass("atlas_depth");
             g.image_access(
                 atlas,
                 FRAG,
                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
                 VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-                SubRange::depth_layers(active),
+                SubRange::depth_layers(MAX_TEXTURE_LAYERS as u32),
             );
             Some(p)
         } else {
@@ -3148,32 +3140,24 @@ impl Renderer<'_> {
                 if light_upload.is_some() {
                     g.buffer_access(light_table, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
                 }
-                if csm.is_some() {
-                    let active = (scene.csm.as_ref().map(|c| c.active_count).unwrap_or(1) as usize)
-                        .clamp(1, MAX_CASCADES) as u32;
-                    g.image_access(
-                        cascade,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_ACCESS_SHADER_READ_BIT,
-                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                        SubRange::depth_layers(active),
-                    );
-                }
-                if atlas_pass.is_some() {
-                    let active = (scene
-                        .atlas_punctual
-                        .as_ref()
-                        .map(|a| a.active_layers)
-                        .unwrap_or(1) as usize)
-                        .clamp(1, MAX_TEXTURE_LAYERS) as u32;
-                    g.image_access(
-                        atlas,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_ACCESS_SHADER_READ_BIT,
-                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                        SubRange::depth_layers(active),
-                    );
-                }
+                // UNCONDITIONAL + FULL-ARRAY (09600): the shader statically references both
+                // always-bound Set-1 shadow maps, so on the OFF path this derives the
+                // discard-legal UNDEFINED→SHADER_READ_ONLY transition that keeps the bound
+                // descriptors' layout valid (the SAME shape every other declarator uses).
+                g.image_access(
+                    cascade,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    SubRange::depth_layers(MAX_CASCADES as u32),
+                );
+                g.image_access(
+                    atlas,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    SubRange::depth_layers(MAX_TEXTURE_LAYERS as u32),
+                );
                 (None, Some(vb_shade))
             } else {
                 // Pass `vb_resolve` (FUSED): reads `vb_id` (COMPUTE,
@@ -3200,32 +3184,24 @@ impl Renderer<'_> {
                 if light_upload.is_some() {
                     g.buffer_access(light_table, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
                 }
-                if csm.is_some() {
-                    let active = (scene.csm.as_ref().map(|c| c.active_count).unwrap_or(1) as usize)
-                        .clamp(1, MAX_CASCADES) as u32;
-                    g.image_access(
-                        cascade,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_ACCESS_SHADER_READ_BIT,
-                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                        SubRange::depth_layers(active),
-                    );
-                }
-                if atlas_pass.is_some() {
-                    let active = (scene
-                        .atlas_punctual
-                        .as_ref()
-                        .map(|a| a.active_layers)
-                        .unwrap_or(1) as usize)
-                        .clamp(1, MAX_TEXTURE_LAYERS) as u32;
-                    g.image_access(
-                        atlas,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_ACCESS_SHADER_READ_BIT,
-                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                        SubRange::depth_layers(active),
-                    );
-                }
+                // UNCONDITIONAL + FULL-ARRAY (09600): the shader statically references both
+                // always-bound Set-1 shadow maps, so on the OFF path this derives the
+                // discard-legal UNDEFINED→SHADER_READ_ONLY transition that keeps the bound
+                // descriptors' layout valid (the SAME shape every other declarator uses).
+                g.image_access(
+                    cascade,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    SubRange::depth_layers(MAX_CASCADES as u32),
+                );
+                g.image_access(
+                    atlas,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    SubRange::depth_layers(MAX_TEXTURE_LAYERS as u32),
+                );
                 (Some(vb_resolve), None)
             };
 
@@ -3280,32 +3256,24 @@ impl Renderer<'_> {
                 if light_upload.is_some() {
                     g.buffer_access(light_table, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
                 }
-                if csm.is_some() {
-                    let active = (scene.csm.as_ref().map(|c| c.active_count).unwrap_or(1) as usize)
-                        .clamp(1, MAX_CASCADES) as u32;
-                    g.image_access(
-                        cascade,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_ACCESS_SHADER_READ_BIT,
-                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                        SubRange::depth_layers(active),
-                    );
-                }
-                if atlas_pass.is_some() {
-                    let active = (scene
-                        .atlas_punctual
-                        .as_ref()
-                        .map(|a| a.active_layers)
-                        .unwrap_or(1) as usize)
-                        .clamp(1, MAX_TEXTURE_LAYERS) as u32;
-                    g.image_access(
-                        atlas,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_ACCESS_SHADER_READ_BIT,
-                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                        SubRange::depth_layers(active),
-                    );
-                }
+                // UNCONDITIONAL + FULL-ARRAY (09600): the shader statically references both
+                // always-bound Set-1 shadow maps, so on the OFF path this derives the
+                // discard-legal UNDEFINED→SHADER_READ_ONLY transition that keeps the bound
+                // descriptors' layout valid (the SAME shape every other declarator uses).
+                g.image_access(
+                    cascade,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    SubRange::depth_layers(MAX_CASCADES as u32),
+                );
+                g.image_access(
+                    atlas,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    SubRange::depth_layers(MAX_TEXTURE_LAYERS as u32),
+                );
             }
             Some(p)
         } else {

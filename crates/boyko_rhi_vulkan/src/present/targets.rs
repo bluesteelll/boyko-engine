@@ -83,11 +83,13 @@ pub struct GBufferTargets {
     /// The Render P7 SSAO term `gSsao` RING (R8_UNORM STORAGE): the per-pixel HBAO-lite
     /// ambient occlusion the (C2) SSAO pass writes and the deferred resolve reads under the
     /// `ssao_mode != 0` gate. Bound as an INPUT on the resolve set (binding 11). ALWAYS
-    /// allocated (the resolve descriptor interface is stable regardless of `ssao_mode`);
-    /// transitioned UNDEFINED→GENERAL with `lit`/`viewt` and kept in GENERAL its whole life.
-    /// No SSAO pass writes it yet (C2 adds that) — with `ssao_mode == 0` the resolve never
-    /// reads it, so its undefined contents are irrelevant (the 0%-gate is the byte-identical
-    /// PIXELS + command stream, which the always-allocate preserves). RINGED (see [`Self::depth`]).
+    /// allocated (the resolve descriptor interface is stable regardless of `ssao_mode`).
+    /// Layout: the frame graph's resolve pass declares an UNCONDITIONAL read (the T6a `pbr`
+    /// first-touch pattern — `declare_deferred_graph`'s seeded `ssao`), so an SSAO-off frame
+    /// still derives a discard-legal UNDEFINED→GENERAL transition that keeps the
+    /// statically-referenced descriptor's layout valid (VUID-vkCmdDispatch-None-09600); the
+    /// resolve never dynamically reads the discarded contents under `ssao_mode == 0`, so the
+    /// PIXELS stay byte-identical. RINGED (see [`Self::depth`]).
     pub(crate) ssao: [VulkanTexture; FRAMES_IN_FLIGHT],
     /// Textured-PBR T6a: the `gPbr` deferred-resolve MRT lane RING (`R16G16B16A16_SFLOAT`
     /// STORAGE|COLOR_ATTACHMENT): `r`=metallic, `g`=roughness, `b`=AO-texture modulation,
