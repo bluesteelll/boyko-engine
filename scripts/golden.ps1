@@ -32,17 +32,31 @@
     Do this ONLY after a visual owner sign-off on the dumped BMP. Without -Bless the script
     only CHECKS and reports PASS/FAIL.
 
+.PARAMETER ValidationOn
+    Validation-audit mode: render the SAME pin with the Vulkan validation layer ACTIVE
+    (the pin's BOYKO_DISABLE_VALIDATION is stripped instead of set) and the window HIDDEN
+    (BOYKO_WIN_HIDDEN=1 -- audits must not park windows on the desktop). The test output is
+    captured and scanned for [vk-validation] lines; ANY message fails the run (exit 3), in
+    addition to the normal byte-identity gate (validation never changes pixels, so the hash
+    must still match). Incompatible with -Bless (never bless from an audit run).
+
 .EXAMPLE
     scripts\golden.ps1                         # check grand_showcase (software leg)
     scripts\golden.ps1 -Hwrt                    # check the hwrt leg
     scripts\golden.ps1 -Bless                   # re-pin after an intentional, verified change
+    scripts\golden.ps1 -Pin vb_mesh -ValidationOn   # validation-layer audit of the same frame
 #>
 [CmdletBinding()]
 param(
     [string]$Pin = 'grand_showcase',
     [switch]$Hwrt,
-    [switch]$Bless
+    [switch]$Bless,
+    [switch]$ValidationOn
 )
+
+if ($ValidationOn -and $Bless) {
+    throw "[golden] -ValidationOn is an AUDIT mode; blessing from it is forbidden (run -Bless separately)."
+}
 
 $ErrorActionPreference = 'Stop'
 
@@ -136,6 +150,15 @@ foreach ($k in $pins.Keys) {
     }
 }
 
+# -ValidationOn overrides (AFTER the pin env is applied): strip the pin's
+# BOYKO_DISABLE_VALIDATION so the layer + messenger oracle are live, and hide the window so
+# the audit never parks a window on the desktop. Everything else stays the pin's truth.
+if ($ValidationOn) {
+    Remove-Item Env:BOYKO_DISABLE_VALIDATION -ErrorAction SilentlyContinue
+    $env:BOYKO_WIN_HIDDEN = '1'
+    Write-Host "  env OVERRIDE (-ValidationOn): BOYKO_DISABLE_VALIDATION stripped, BOYKO_WIN_HIDDEN=1" -ForegroundColor Yellow
+}
+
 # Ensure the dump directory exists (D:\tmp is wiped by a Windows crash -- recreate it).
 $bmpDir = Split-Path -Parent $bmp
 if ($bmpDir -and -not (Test-Path -LiteralPath $bmpDir)) {
@@ -158,9 +181,24 @@ $start = Get-Date
 # --- render (windowed, single-threaded, #[ignore]d) ------------------------------------
 Write-Host "[golden] rendering '$name' ..." -ForegroundColor Cyan
 $runArgs = @('test', '-p', $crate) + $featArgs + @('--test', $bin, $name, '--', '--ignored', '--test-threads=1')
-Invoke-Native -Exe 'cargo' -Args $runArgs
-if ($LASTEXITCODE -ne 0) {
-    throw "[golden] render test '$name' returned non-zero - aborting."
+$valLog = $null
+if ($ValidationOn) {
+    # Capture the FULL merged test output to a log so the [vk-validation] scan below sees
+    # every messenger line (routed through cmd: PS 5.1 wraps native stderr into
+    # NativeCommandError records, which a plain 2>&1 capture would mangle).
+    $valLog = Join-Path $env:TEMP ("golden_valon_{0}_{1}.log" -f $Pin, $leg)
+    if (Test-Path -LiteralPath $valLog) { Remove-Item -LiteralPath $valLog -Force }
+    $cmdLine = 'cargo ' + ($runArgs -join ' ') + ' --nocapture > "' + $valLog + '" 2>&1'
+    Invoke-Native -Exe 'cmd' -Args @('/c', $cmdLine)
+    if ($LASTEXITCODE -ne 0) {
+        if ($valLog -and (Test-Path -LiteralPath $valLog)) { Get-Content -LiteralPath $valLog -Tail 25 | Write-Host }
+        throw "[golden] render test '$name' returned non-zero under -ValidationOn - aborting (log: $valLog)."
+    }
+} else {
+    Invoke-Native -Exe 'cargo' -Args $runArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "[golden] render test '$name' returned non-zero - aborting."
+    }
 }
 
 # --- (4) fresh-artifact guard ----------------------------------------------------------
@@ -170,6 +208,19 @@ if (-not (Test-Path -LiteralPath $bmp)) {
 $mtime = (Get-Item -LiteralPath $bmp).LastWriteTime
 if ($mtime -le $start) {
     throw "[golden] '$bmp' was NOT freshly written (mtime $mtime <= run start $start) - STALE artifact, aborting."
+}
+
+# --- (4b) -ValidationOn: the messenger-line scan ----------------------------------------
+$valCount = 0
+if ($ValidationOn) {
+    $valLines = @(Select-String -LiteralPath $valLog -Pattern '\[vk-validation\]')
+    $valCount = $valLines.Count
+    if ($valCount -gt 0) {
+        Write-Host "[golden] VALIDATION: $valCount [vk-validation] message(s) - log: $valLog" -ForegroundColor Red
+        $valLines | Select-Object -First 10 | ForEach-Object { Write-Host ("    " + $_.Line) -ForegroundColor Red }
+    } else {
+        Write-Host "[golden] VALIDATION: clean (0 messages)." -ForegroundColor Green
+    }
 }
 
 # --- (5) hash + compare / bless --------------------------------------------------------
@@ -210,6 +261,10 @@ if ([string]::IsNullOrWhiteSpace($expected) -or $expected -eq 'PENDING') {
 }
 if ($actual -eq $expected) {
     Write-Host "[golden] PASS - $Pin/$leg byte-identical." -ForegroundColor Green
+    if ($ValidationOn -and $valCount -gt 0) {
+        Write-Host "[golden] ...but the -ValidationOn scan found $valCount message(s) - FAILING the audit." -ForegroundColor Red
+        exit 3
+    }
     exit 0
 } else {
     Write-Host "[golden] FAIL - $Pin/$leg MISMATCH" -ForegroundColor Red
