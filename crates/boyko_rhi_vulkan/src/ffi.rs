@@ -723,7 +723,15 @@ pub const VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT: VkFlags = 0x0000_0001;
 /// valid descriptor. The bindless table still writes the error texture into every
 /// slot at init (a stale/unwritten index is a bug-shaped access, not a
 /// spec-legal one this bit alone would excuse — see `BindlessTextureTable::new`).
-pub const VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT: VkFlags = 0x0000_0002;
+///
+/// VALUE PIN (validation-audit fix): the spec's `VkDescriptorBindingFlagBits` are
+/// `UPDATE_AFTER_BIND = 0x1`, `UPDATE_UNUSED_WHILE_PENDING = 0x2`,
+/// `PARTIALLY_BOUND = 0x4`, `VARIABLE_DESCRIPTOR_COUNT = 0x8`. This constant was
+/// mis-pinned at `0x2` — every "partially bound" layout actually requested
+/// UPDATE_UNUSED_WHILE_PENDING (whose device feature is never enabled — a
+/// validation error) and silently DROPPED partially-bound (making any dynamically
+/// unsampled-yet-unwritten slot spec-UB at draw time).
+pub const VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT: VkFlags = 0x0000_0004;
 /// `VkDescriptorBindingFlagBits::VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT`
 /// — the LAST binding in the layout may be allocated with a descriptor count `<=`
 /// its declared `descriptorCount`, supplied via
@@ -1171,6 +1179,9 @@ pub const VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT: VkFlags = 0x0000_2000;
 
 /// `VkAccessFlagBits` used by the color-attachment present barriers.
 pub const VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT: VkFlags = 0x0000_0100;
+/// `VK_ACCESS_COLOR_ATTACHMENT_READ_BIT` — a `loadOp = LOAD` attachment access (the
+/// composite→UI same-image barrier in `record_present_sampled`).
+pub const VK_ACCESS_COLOR_ATTACHMENT_READ_BIT: VkFlags = 0x0000_0080;
 /// `VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT` (Phase-6 S0 rung 4 depth barrier).
 pub const VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT: VkFlags = 0x0000_0200;
 /// `VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT` (Phase-6 S0 rung 4 depth barrier).

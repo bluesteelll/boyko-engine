@@ -11,7 +11,9 @@
 //! and never touched again):
 //!
 //! * **binding 0** — `SAMPLED_IMAGE`, `descriptorCount = `[`BINDLESS_TEXTURE_CAPACITY`],
-//!   flagged `PARTIALLY_BOUND | UPDATE_AFTER_BIND | VARIABLE_DESCRIPTOR_COUNT`. The
+//!   flagged `PARTIALLY_BOUND | UPDATE_AFTER_BIND` (NOT `VARIABLE_DESCRIPTOR_COUNT` —
+//!   spec-legal only on the LAST binding, and binding 1 sits after this one; the set
+//!   is allocated at the full declared capacity instead). The
 //!   HLSL-visible `Texture2D gTextures[] : register(t0, space1)`.
 //! * **binding 1** — `SAMPLER`, `descriptorCount = 1`, declared with an IMMUTABLE
 //!   sampler (`pImmutableSamplers` points at the one shared `VkSampler` baked in at
@@ -184,9 +186,10 @@ fn create_shared_sampler(ctx: &VulkanContext) -> Result<VkSampler, VulkanError> 
 /// Creates the bindless texture-array descriptor set (T4): the 2-binding
 /// UPDATE_AFTER_BIND-pool layout (binding 0 = the `SAMPLED_IMAGE` runtime array,
 /// binding 1 = the immutable shared sampler), an UPDATE_AFTER_BIND-flagged pool
-/// sized for exactly one set, and the set itself allocated with a
-/// [`VkDescriptorSetVariableDescriptorCountAllocateInfo`] supplying
-/// [`BINDLESS_TEXTURE_CAPACITY`] as binding 0's runtime count.
+/// sized for exactly one set, and the set itself allocated at the layout's
+/// declared full [`BINDLESS_TEXTURE_CAPACITY`] (plain fixed-count allocation —
+/// `VARIABLE_DESCRIPTOR_COUNT` is spec-legal only on the LAST binding, and the
+/// sampler binding sits after the array).
 ///
 /// No slot is written here — every slot (including the reserved slot 0) starts as
 /// an uninitialized `SAMPLED_IMAGE` descriptor; the caller
@@ -230,11 +233,14 @@ pub fn create_bindless_texture_set(ctx: &VulkanContext) -> Result<VulkanBindless
         },
     ];
     // Binding 0 is bindless; binding 1 (the immutable sampler) needs none of the
-    // three flags — a `0` entry is valid (an immutable sampler is never updated).
+    // flags — a `0` entry is valid (an immutable sampler is never updated).
+    // NO `VARIABLE_DESCRIPTOR_COUNT` (validation-audit fix): the spec allows that
+    // flag ONLY on the layout's LAST binding, and binding 1 (the sampler) sits
+    // after the array. It bought nothing anyway — the allocation always supplied
+    // the FULL `BINDLESS_TEXTURE_CAPACITY` as the variable count, which is exactly
+    // what a plain fixed-count allocation of this layout yields.
     let binding_flags: [VkFlags; 2] = [
-        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
-            | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
-            | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT,
+        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT,
         0,
     ];
     let binding_flags_info = VkDescriptorSetLayoutBindingFlagsCreateInfo {
@@ -311,28 +317,21 @@ pub fn create_bindless_texture_set(ctx: &VulkanContext) -> Result<VulkanBindless
         ));
     }
 
-    let variable_count = BINDLESS_TEXTURE_CAPACITY;
-    let variable_count_info = VkDescriptorSetVariableDescriptorCountAllocateInfo {
-        s_type: VkStructureType::DescriptorSetVariableDescriptorCountAllocateInfo,
-        p_next: ptr::null(),
-        descriptor_set_count: 1,
-        p_descriptor_counts: &variable_count,
-    };
+    // Plain fixed-count allocation (validation-audit fix): the layout no longer
+    // carries `VARIABLE_DESCRIPTOR_COUNT` (spec: last-binding-only, and binding 1
+    // sits after the array), so no `VkDescriptorSetVariableDescriptorCountAllocateInfo`
+    // chain — the set is allocated at the layout's declared full
+    // `BINDLESS_TEXTURE_CAPACITY`, byte-for-byte what the removed chain supplied.
     let alloc_info = VkDescriptorSetAllocateInfo {
         s_type: VkStructureType::DescriptorSetAllocateInfo,
-        p_next: (&variable_count_info
-            as *const VkDescriptorSetVariableDescriptorCountAllocateInfo)
-            .cast::<c_void>(),
+        p_next: ptr::null(),
         descriptor_pool: pool,
         descriptor_set_count: 1,
         p_set_layouts: &set_layout,
     };
     let mut set = VkDescriptorSet::NULL;
     // SAFETY: `device` is live; `alloc_info` names the live `pool` + the live
-    // `set_layout` local, and chains `variable_count_info` (alive for this call)
-    // whose `p_descriptor_counts` points at the live `variable_count` local (one
-    // entry, matching `descriptor_set_count == 1`); `&mut set` is a valid
-    // out-pointer for the single set.
+    // `set_layout` local; `&mut set` is a valid out-pointer for the single set.
     let raw = unsafe { (fns.allocate_descriptor_sets)(device, &alloc_info, &mut set) };
     let result = VkResult::from_raw(raw);
     if !result.is_success() {
