@@ -583,6 +583,10 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
         app.world().non_send_resource::<boyko_render::MeshGeometryTableSlot>().0.as_ref()
     {
         host.gpu.build_vb_shade_textured_pipeline(ctx, table.set(), bindless_texture_table);
+        // Rung R9b: the split pair (`vb_geo` + `vb_shade_split{,_tex}`) — needs the SAME
+        // geometry Set-2 layout; the TEXTURED sibling additionally needs the bindless Set-3
+        // (`Some` here — `build_textured_resources` just built it above).
+        host.gpu.build_vb_split_pipelines(ctx, table.set(), Some(bindless_texture_table));
     }
 
     // Asset-system rung A3b: drain any decoded-but-not-yet-uploaded assets BEFORE
@@ -1672,11 +1676,17 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // under Deferred AND under the SDF-carrying VB legs (where the VIEWT-variant
             // marcher owns the gViewT lane and reads the march pair above instead), making the
             // pair don't-care there.
-            let (vb_viewt_view_z_a, vb_viewt_view_z_b) = if view.fov_y > 0.0 && taa_armed_now {
-                boyko_render::view::forward_view_z_coeffs(view.near, view.far)
-            } else {
-                (0.0, 0.0)
-            };
+            // Rung R9b: the split's SSAO arms `vb_viewt` TAA-independently (the pre-tail slot),
+            // so the coefficient pair must be REAL whenever either consumer is armed — the
+            // SAME freeze-clamped `ResolvedSsao` the scene() arming reads.
+            let vb_split_ssao_armed_now = host.resolved_render_path.mesh_geo_shade_split
+                && world.try_resource::<boyko_render::ResolvedSsao>().is_some_and(|r| r.variant.is_some());
+            let (vb_viewt_view_z_a, vb_viewt_view_z_b) =
+                if view.fov_y > 0.0 && (taa_armed_now || vb_split_ssao_armed_now) {
+                    boyko_render::view::forward_view_z_coeffs(view.near, view.far)
+                } else {
+                    (0.0, 0.0)
+                };
             // The lerp alpha (host plan R5): `overstep_fraction()` in [0, 1),
             // sampled in Main AFTER the fixed loop settled (a mid-catch-up read
             // could see overstep >= timestep; the value saturates at

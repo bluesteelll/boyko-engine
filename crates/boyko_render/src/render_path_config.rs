@@ -155,6 +155,16 @@ const VB_SDF_IMPLEMENTED: bool = true;
 /// future path family via [`degrade_ladder`]'s own parameterized `sdf_forward_implemented` arg).
 const SDF_FORWARD_IMPLEMENTED: bool = true;
 
+/// Rung R9b honesty gate: the SDF geo/shade split (R-SDFSPLIT — `sdf_geo`/`sdf_shade` +
+/// the SDF surface cache) has NOT landed. Before R9b this was unreachable through the public
+/// entry point anyway (every pre-light consumer was capped under the non-Deferred paths), but
+/// `ssao_on` now SURVIVES the VB cap on mesh-carrying leg sets, so an un-gated
+/// `sdf_geo_shade_split = sdf_forward_marched && pre_light` would arm a flag whose producer
+/// chain does not exist — a lie any future `ResolvedRenderPathGpu` consumer would trust
+/// (the SAME hazard class the [`FORWARD_IMPLEMENTED`]-family consts exist to prevent). Flip
+/// to `true` when R-SDFSPLIT lands its `sdf_geo`/`sdf_shade` producers.
+const SDF_SPLIT_IMPLEMENTED: bool = false;
+
 // Multi-paradigm render-path plan: `Deferred`'s per-leg disable landed both legs — `Sdf` at rung
 // R3 (`mesh_depth_neutral_clear`), `Mesh` at rung R3b (`viewt_from_depth`, this module's doc).
 // The rung-staged consts that used to gate them (`DEFERRED_SDF_ONLY_IMPLEMENTED` /
@@ -795,7 +805,9 @@ pub fn resolve_rules(
     // plan-doc's literal "VB && pre_light" rule carries a recorded erratum for this).
     let mesh_geo_shade_split =
         matches!(path, RenderPath::VisibilityBuffer) && mesh_leg && pre_light;
-    let sdf_geo_shade_split = sdf_forward_marched && pre_light;
+    // Gated on the R-SDFSPLIT rung const (see [`SDF_SPLIT_IMPLEMENTED`]'s doc): the RULE is
+    // `sdf_forward_marched && pre_light`, but the flag must not arm while no producer exists.
+    let sdf_geo_shade_split = sdf_forward_marched && pre_light && SDF_SPLIT_IMPLEMENTED;
     let sdf_surface_cache = sdf_geo_shade_split;
 
     let vb_geometry_table = matches!(path, RenderPath::VisibilityBuffer)
@@ -1003,14 +1015,17 @@ fn cap_forward_v1_consumers(
     consumers
 }
 
-/// Rung R8: `RenderPath::VisibilityBuffer`'s v1 (fused) declarator has NO split
-/// (`vb_geo`/`vb_shade`) thin-aux producer — only the fused `vb_resolve` compute pass, which
-/// writes `lit` directly and never materializes `thin_normal`/`motion_vec`. Any pre-light
-/// consumer requested alongside `RenderPath::VisibilityBuffer` is forced OFF here —
-/// BEFORE [`resolve_rules`] computes `mesh_geo_shade_split`/`thin_aux` from the (adjusted)
-/// [`RenderPathConsumers`] — so `mesh_geo_shade_split` stays structurally `false` under VB
-/// today (the plan's own R8 gate: "SSAO structurally off under VB this rung"), exactly
-/// mirroring [`cap_forward_v1_consumers`]'s identical scope cut for the Forward family. A
+/// Rung R8 (progressively lifted by the R9 stages): the VB pre-light consumer cap. As of rung
+/// R9b, `ssao_on` PASSES THROUGH on every mesh-carrying leg set — the split pair (`vb_geo`
+/// thin-aux producer + `vb_shade_split` consumer) backs it structurally. Still forced OFF here,
+/// BEFORE [`resolve_rules`] computes `mesh_geo_shade_split`/`thin_aux`:
+/// * EVERY pre-light consumer under `VB && !mesh_leg` (VB×Sdf — no mesh raster to split;
+///   the R-SDFSPLIT boundary, `docs/R9-VB-SPLIT-PLAN.md` §1.3)
+/// * `ddgi_on` (until R9c lands the VB DDGI resources/consumption)
+/// * `shadow_denoise_spatial_on`/`shadow_temporal_on`/`hwrt_denoise_or_vis_on` (until R9d
+///   lands the VB hwrt shadow chain), and `ssr_on` (no SSR exists engine-wide)
+///
+/// Mirrors [`cap_forward_v1_consumers`]'s scope-cut mechanism for the Forward family. A
 /// separate fn (not a widened `cap_forward_v1_consumers`) so the pushed [`RenderPathDegrade`]
 /// variants stay VB-labeled, not misleadingly "Forward"-labeled. (The former TAA half of this
 /// cap was DELETED by the TAA-under-VB rungs — TAA now passes through on every VB leg set;
@@ -1024,6 +1039,7 @@ fn cap_forward_v1_consumers(
 /// `resolve_rules` its inputs" discipline [`cap_forward_v1_consumers`]'s doc explains.
 fn cap_vb_v1_consumers(
     path: RenderPath,
+    legs: GeometryLegs,
     mut consumers: RenderPathConsumers,
     degrades: &mut RenderPathDegradeLog,
 ) -> RenderPathConsumers {
@@ -1031,7 +1047,14 @@ fn cap_vb_v1_consumers(
         return consumers;
     }
 
-    let pre_light_requested = consumers.ssao_on
+    // Rung R9b: `ssao_on` PASSES THROUGH when the mesh leg is present — the split pair
+    // (`vb_geo` thin-aux producer + `vb_shade_split` consumer) exists now, so the resolver's
+    // `mesh_geo_shade_split`/`thin_aux` derivation is structurally backed. Under `VB && !mesh_leg`
+    // (VB×Sdf) EVERY pre-light consumer stays zeroed — there is no mesh raster to split; that
+    // residual is R-SDFSPLIT's boundary, not this rung's (docs/R9-VB-SPLIT-PLAN.md §1.3).
+    // ddgi/shadow-denoise/ssr/hwrt-vis stay capped until their producer chains land (R9c/R9d).
+    let ssao_capped = consumers.ssao_on && !legs.has_mesh();
+    let pre_light_requested = ssao_capped
         || consumers.ddgi_on
         || consumers.shadow_denoise_spatial_on
         || consumers.shadow_temporal_on
@@ -1039,7 +1062,9 @@ fn cap_vb_v1_consumers(
         || consumers.hwrt_denoise_or_vis_on;
     if pre_light_requested {
         degrades.push(RenderPathDegrade::VbPreLightConsumersNotYetImplemented);
-        consumers.ssao_on = false;
+        if ssao_capped {
+            consumers.ssao_on = false;
+        }
         consumers.ddgi_on = false;
         consumers.shadow_denoise_spatial_on = false;
         consumers.shadow_temporal_on = false;
@@ -1097,7 +1122,7 @@ pub fn resolve_render_path(
         VB_SDF_IMPLEMENTED,
     );
     let consumers = cap_forward_v1_consumers(path, consumers, &mut degrades);
-    let consumers = cap_vb_v1_consumers(path, consumers, &mut degrades);
+    let consumers = cap_vb_v1_consumers(path, legs, consumers, &mut degrades);
     (resolve_rules(path, legs, consumers, caps), degrades)
 }
 
@@ -1621,8 +1646,10 @@ mod tests {
 
     #[test]
     fn vb_pre_light_consumer_is_capped_off_with_a_warn() {
+        // Rung R9b: `ssao_on` is NO LONGER in this capped set on a mesh-carrying leg (see
+        // `vb_mesh_ssao_passes_through_and_arms_the_split` below); the rest stay capped until
+        // their producer chains land (ddgi at R9c; denoise/hwrt at R9d).
         for (consumers, label) in [
-            (RenderPathConsumers { ssao_on: true, ..Default::default() }, "ssao"),
             (RenderPathConsumers { ddgi_on: true, ..Default::default() }, "ddgi"),
             (RenderPathConsumers { shadow_denoise_spatial_on: true, ..Default::default() }, "shadow_denoise_spatial"),
             (RenderPathConsumers { shadow_temporal_on: true, ..Default::default() }, "shadow_temporal"),
@@ -1640,6 +1667,38 @@ mod tests {
                 "{label}: exactly one capped-consumer warn"
             );
         }
+    }
+
+    #[test]
+    fn vb_mesh_ssao_passes_through_and_arms_the_split() {
+        // Rung R9b: SSAO survives the cap on every mesh-carrying VB leg set — the resolve is
+        // CLEAN, the split arms, and thin_aux carries NORMAL (the `vb_geo` thin_normal write's
+        // structural backing). This is the public-entry sibling of the resolve_rules-level
+        // `vb_split_requires_the_mesh_leg` row.
+        for legs in [GeometryLegs::Mesh, GeometryLegs::Both] {
+            let consumers = RenderPathConsumers { ssao_on: true, ..Default::default() };
+            let (resolved, degrades) = resolve_vb_v1(legs, consumers);
+            assert_eq!(resolved.path, RenderPath::VisibilityBuffer, "{legs:?}");
+            assert!(degrades.is_clean(), "{legs:?}: VB SSAO resolves clean at R9b");
+            assert!(resolved.mesh_geo_shade_split, "{legs:?}: SSAO is a pre-light consumer -> split");
+            assert!(
+                resolved.thin_aux.contains(ThinAuxMask::NORMAL),
+                "{legs:?}: split implies the thin_normal lane"
+            );
+        }
+    }
+
+    #[test]
+    fn vb_sdf_only_ssao_stays_capped() {
+        // Rung R9b residual: under VB && !mesh_leg there is no raster to split — SSAO stays
+        // zeroed with the standing degrade warn (the R-SDFSPLIT boundary).
+        let consumers = RenderPathConsumers { ssao_on: true, ..Default::default() };
+        let (resolved, degrades) = resolve_vb_v1(GeometryLegs::Sdf, consumers);
+        assert_eq!(resolved.path, RenderPath::VisibilityBuffer);
+        assert!(!resolved.mesh_geo_shade_split);
+        assert_eq!(resolved.thin_aux, ThinAuxMask::NONE);
+        let reasons: Vec<_> = degrades.reasons().collect();
+        assert_eq!(reasons, [RenderPathDegrade::VbPreLightConsumersNotYetImplemented]);
     }
 
     #[test]
@@ -1684,16 +1743,21 @@ mod tests {
     }
 
     #[test]
-    fn vb_pre_light_capped_taa_survives_one_reason() {
-        // VB×Mesh with SSAO+TAA requested: the pre-light cap still fires (fused vb_resolve),
-        // but TAA passes through — exactly ONE reason now.
+    fn vb_mesh_ssao_plus_taa_resolves_clean_with_the_split() {
+        // Rung R9b: VB×Mesh with SSAO+TAA both requested resolves CLEAN — SSAO arms the split
+        // (thin_normal), TAA rides the gViewT lane, and the DUAL viewt-producer config
+        // (`vb_viewt` pre-tail + none — Mesh has no marcher) stays single-producer.
         let consumers = RenderPathConsumers { ssao_on: true, taa_on: true, ..Default::default() };
         let (resolved, degrades) = resolve_vb_v1(GeometryLegs::Mesh, consumers);
         assert_eq!(resolved.path, RenderPath::VisibilityBuffer);
-        assert!(!resolved.mesh_geo_shade_split);
+        assert!(degrades.is_clean(), "SSAO+TAA under VB×Mesh is fully implemented at R9b");
+        assert!(resolved.mesh_geo_shade_split);
         assert!(resolved.taa_supported());
-        let reasons: Vec<_> = degrades.reasons().collect();
-        assert_eq!(reasons, [RenderPathDegrade::VbPreLightConsumersNotYetImplemented]);
+        assert!(resolved.thin_aux.contains(ThinAuxMask::NORMAL));
+        assert!(
+            !resolved.thin_aux.contains(ThinAuxMask::MOTION),
+            "VB TAA still arms no MOTION channel (camera-differential reprojection)"
+        );
     }
 
     #[test]
@@ -1719,26 +1783,27 @@ mod tests {
     }
 
     #[test]
-    fn vb_both_legs_survive_and_taa_outlives_the_pre_light_cap() {
-        // Rung R10: VB x Both no longer collapses its legs (VB_SDF_IMPLEMENTED landed) — the SDF
-        // leg is composited via `sdf_forward_march` after `vb_resolve`. With SSAO+TAA both
-        // requested through the PUBLIC entry point, the legs stay `Both` (`sdf_forward_marched`
-        // arms), the pre-light cap fires alone (fused vb_resolve, no split), and TAA PASSES
-        // THROUGH (the VIEWT-variant marcher is the gViewT producer — the former TAA cap is
-        // deleted; no legs-collapse reason either).
+    fn vb_both_legs_survive_and_ssao_taa_arm_the_mesh_split_only() {
+        // Rung R10 + R9b: VB x Both with SSAO+TAA both requested resolves CLEAN — the legs stay
+        // `Both` (`sdf_forward_marched` arms), SSAO passes the cap on a mesh-carrying leg set
+        // and arms the MESH split, TAA rides the gViewT lane (the dual-producer config:
+        // `vb_viewt` pre-tail for SSAO + the VIEWT marcher as the LAST writer for TAA). The SDF
+        // split does NOT arm — sdf_geo_shade_split is R-SDFSPLIT's rung, and SSAO under VB×Both
+        // is mesh-pixels-only this rung (SDF pixels read the background sentinel).
         let consumers = RenderPathConsumers { ssao_on: true, taa_on: true, ..Default::default() };
         let (resolved, degrades) = resolve_vb_v1(GeometryLegs::Both, consumers);
         assert_eq!(resolved.path, RenderPath::VisibilityBuffer);
         assert_eq!(resolved.legs, GeometryLegs::Both, "Both survives post-R10");
         assert!(resolved.mesh_leg && resolved.sdf_leg);
         assert!(resolved.sdf_forward_marched, "the SDF leg forward-marches under VB post-R10");
-        // SSAO capped off -> `pre_light` false -> the geo/shade split stays off (fused only,
-        // VB v1) for BOTH the mesh and sdf legs.
-        assert!(!resolved.mesh_geo_shade_split);
-        assert!(!resolved.sdf_geo_shade_split);
+        assert!(degrades.is_clean(), "SSAO+TAA under VB×Both resolves clean at R9b");
+        assert!(resolved.mesh_geo_shade_split, "SSAO arms the mesh split");
+        assert!(
+            !resolved.sdf_geo_shade_split,
+            "the SDF split stays down (SDF_SPLIT_IMPLEMENTED gate — R-SDFSPLIT not landed)"
+        );
         assert!(resolved.taa_supported(), "TAA survives the resolve on VB x Both");
-        let reasons: Vec<_> = degrades.reasons().collect();
-        assert_eq!(reasons, [RenderPathDegrade::VbPreLightConsumersNotYetImplemented]);
+        assert!(resolved.thin_aux.contains(ThinAuxMask::NORMAL));
     }
 
     #[test]
@@ -1766,7 +1831,7 @@ mod tests {
                 ..Default::default()
             };
             let mut degrades = RenderPathDegradeLog::default();
-            let out = cap_vb_v1_consumers(path, consumers, &mut degrades);
+            let out = cap_vb_v1_consumers(path, GeometryLegs::Both, consumers, &mut degrades);
             assert_eq!(out, consumers, "{path:?}: consumers must pass through unchanged");
             assert!(degrades.is_clean(), "{path:?}: no cap-related warn");
         }
@@ -1819,15 +1884,18 @@ mod tests {
     }
 
     #[test]
-    fn motion_only_shadow_temporal_arms_vb_split_and_sdf_split() {
+    fn motion_only_shadow_temporal_arms_vb_split_while_sdf_split_stays_gated() {
         let consumers = RenderPathConsumers { shadow_temporal_on: true, ..RenderPathConsumers::default() };
 
         let vb = resolve_rules(RenderPath::VisibilityBuffer, GeometryLegs::Mesh, consumers, caps_ok());
         assert!(vb.mesh_geo_shade_split, "VB must split under a MOTION-only pre-light consumer too");
 
         let sdf = resolve_rules(RenderPath::Forward, GeometryLegs::Sdf, consumers, caps_ok());
-        assert!(sdf.sdf_geo_shade_split);
-        assert!(sdf.sdf_surface_cache);
+        // Rung R9b: the SDF split flag is honesty-gated on `SDF_SPLIT_IMPLEMENTED` (false —
+        // R-SDFSPLIT has no producers yet), so the RULE fires but the flag stays down. Flip
+        // these two asserts when the const flips.
+        assert!(!sdf.sdf_geo_shade_split, "gated on SDF_SPLIT_IMPLEMENTED until R-SDFSPLIT");
+        assert!(!sdf.sdf_surface_cache);
     }
 
     #[test]
@@ -1838,7 +1906,10 @@ mod tests {
         let consumers = RenderPathConsumers { ssao_on: true, ..RenderPathConsumers::default() };
         let resolved = resolve_rules(RenderPath::VisibilityBuffer, GeometryLegs::Sdf, consumers, caps_ok());
         assert!(!resolved.mesh_geo_shade_split, "no mesh leg -> no mesh split");
-        assert!(resolved.sdf_geo_shade_split, "the SDF leg's own split still arms");
+        assert!(
+            !resolved.sdf_geo_shade_split,
+            "the SDF leg's split RULE fires but the flag is gated on SDF_SPLIT_IMPLEMENTED"
+        );
 
         for legs in [GeometryLegs::Mesh, GeometryLegs::Both] {
             let resolved = resolve_rules(RenderPath::VisibilityBuffer, legs, consumers, caps_ok());

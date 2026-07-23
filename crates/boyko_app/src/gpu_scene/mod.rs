@@ -53,8 +53,9 @@ use boyko_rhi_vulkan::compute::{
     ssaa_downsample_fs_spirv, taa_resolve_spirv, tile_grid_extent, VIEWT_FROM_DEPTH_PUSH_BYTES,
     VIEWT_FROM_DEPTH_RZ_PUSH_BYTES,
     vb_classify_count_spirv, vb_classify_scan_spirv, vb_classify_scatter_spirv,
-    vb_raster_fs_spirv, vb_raster_vs_spirv, vb_resolve_spirv, vb_shade_spirv, vb_shade_tex_spirv,
-    viewt_from_depth_spirv, viewt_from_depth_rz_spirv,
+    vb_geo_spirv, vb_raster_fs_spirv, vb_raster_vs_spirv, vb_resolve_spirv,
+    sdf_ssao_vb_spirv, vb_shade_spirv, vb_shade_split_spirv, vb_shade_split_tex_spirv,
+    vb_shade_tex_spirv, viewt_from_depth_spirv, viewt_from_depth_rz_spirv,
 };
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::ffi::VkDescriptorSet;
@@ -767,6 +768,33 @@ pub(crate) struct GpuSceneBundles {
     /// `SsaoQuality` is host-resolved). Mirrors the test harness's
     /// (`window_present_gbuffer.rs`) SSAO boot bundle, widened to all 3 variants.
     ssao_pipelines: [ComputePipeline; SSAO_QUALITY_COUNT],
+    /// Rung R9b: the `-D VB_THIN=1` SSAO gather pipelines (the VB split's gather — reads
+    /// `thin_normal`+`gViewT` instead of `gNormal`/`gMaterial`), indexed like
+    /// [`Self::ssao_pipelines`]. Built UNCONDITIONALLY at boot (same rationale: negligible
+    /// object cost; `GBufferScene::path_vb_ssao` gates dispatch).
+    ssao_vb_pipelines: [ComputePipeline; SSAO_QUALITY_COUNT],
+    /// Rung R9b: the VB gather's DEDICATED dense 4-binding LAYOUT { `thin_normal` @0, `gViewT`
+    /// @1 STORAGE READ, `ssao` @2 STORAGE WRITE, the camera UBO @3 } — `sdf_ssao`'s `VB_THIN`
+    /// table. [`GBufferTargets`] writes a `vb_ssao_set` against it when the split arms.
+    vb_ssao_layout: VulkanBindGroupLayout,
+    /// Rung R9b: `vb_geo`'s Set-1 aux LAYOUT { `thin_normal` STORAGE @0, `motion` STORAGE @1
+    /// (R9d — the software `.spv` never references it, the R2 contract), `MotionCam` UBO @2
+    /// (R9d, ditto) }. Built at boot; the `vb_geo` pipeline itself is deferred-built (needs the
+    /// geometry Set-2 layout).
+    vb_geo_aux_layout: VulkanBindGroupLayout,
+    /// Rung R9b: `vb_shade_split`'s Set-1 LAYOUT (9 bindings; 8 on the software leg): @0-3 =
+    /// `forward_layout1`'s shadow table kinds verbatim, @4 `gSsao` STORAGE, @5/@6 the DDGI
+    /// COMBINED image+sampler pair, @7 `ResolvedDdgi` UBO, @8 cfg(hwrt) `gShadowVis` STORAGE.
+    /// A DISTINCT object — `forward_layout1` stays byte-untouched.
+    vb_split_layout1: VulkanBindGroupLayout,
+    /// Rung R9b: the split pair pipelines — deferred-built by [`Self::build_vb_split_pipelines`]
+    /// (the SAME geometry-Set-2 dependency as [`Self::build_vb_resolve_pipeline`]).
+    vb_geo_pipeline: Option<ComputePipeline>,
+    /// Rung R9b: the split's lit producer (see [`Self::vb_geo_pipeline`]).
+    vb_shade_split_pipeline: Option<ComputePipeline>,
+    /// Rung R9b: the `-D TEXTURED=1` sibling (also needs the bindless Set-3 —
+    /// `build_vb_shade_textured_pipeline`'s own two-dependency reason).
+    vb_shade_split_tex_pipeline: Option<ComputePipeline>,
     /// Render P7-Q2: the DEDICATED 5-binding SSAO bind-group LAYOUT { `gNormal` @0,
     /// `gMaterial` @1, `gViewT` @2 STORAGE images READ, the `ssao` out STORAGE image @3
     /// WRITE, the camera UBO @4 } — matching `sdf_ssao.comp`'s set 0, shared by every
@@ -2196,6 +2224,90 @@ impl GpuSceneBundles {
         // selects directly into this array.
         let ssao_pipelines = [ssao_pipeline_low, ssao_pipeline_medium, ssao_pipeline_high];
 
+        // Rung R9b (docs/R9-VB-SPLIT-PLAN.md §5/§6): the VB split's boot-buildable objects —
+        // the `-D VB_THIN` gather trio + its dense 4-binding layout, `vb_geo`'s Set-1 aux
+        // layout, and `vb_shade_split`'s Set-1 layout. Pipelines that need the geometry Set-2
+        // (`vb_geo`/`vb_shade_split{,_tex}`) are deferred to `build_vb_split_pipelines` (the
+        // `build_vb_resolve_pipeline` two-dependency reason).
+        let vb_ssao_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    // thin_normal @0 (R), gViewT @1 (R), ssao @2 (W), camera UBO @3 — the
+                    // VB_THIN dense table (`sdf_ssao.comp.hlsl`'s own header doc).
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: R9b VB SSAO bind-group layout create");
+        let mut ssao_vb_slots: [Option<ComputePipeline>; SSAO_QUALITY_COUNT] =
+            [const { None }; SSAO_QUALITY_COUNT];
+        for (variant, slot) in ssao_vb_slots.iter_mut().enumerate() {
+            let cs = RhiDevice::create_shader_module(device, sdf_ssao_vb_spirv(variant))
+                .expect("invariant: R9b VB_THIN SSAO compute shader module create");
+            let p = RhiDevice::create_compute_pipeline(
+                device,
+                &ComputePipelineDesc {
+                    module: &cs,
+                    entry: c"main",
+                    // The SAME push block the base gather compiles (one source, the VB_THIN
+                    // define only swaps the binding table).
+                    push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
+                    bind_group_layout: Some(&vb_ssao_layout),
+                    spec_constants: &[],
+                },
+            )
+            .expect("invariant: R9b VB_THIN SSAO compute pipeline create");
+            // SAFETY: the module was created on `device` and consumed by the pipeline create;
+            // destroyed once; no GPU work is in flight yet.
+            unsafe {
+                RhiDevice::destroy_shader_module(device, cs);
+            }
+            *slot = Some(p);
+        }
+        let ssao_vb_pipelines = ssao_vb_slots
+            .map(|s| s.expect("invariant: every VB_THIN SSAO variant pipeline built above"));
+        let vb_geo_aux_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    // thin_normal @0 (W). @1/@2 are the R9d MOTION slots — in the layout now
+                    // (one layout object for both variant generations, the R2 contract; the
+                    // software `vb_geo.comp.spv` never references them).
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: R9b vb_geo aux bind-group layout create");
+        let vb_split_layout1 = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    // @0-3: forward_layout1's shadow-table kinds VERBATIM (a DISTINCT object —
+                    // the Forward family's own layout stays byte-untouched).
+                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                    // @4: gSsao (STORAGE, READ by the split shade under the header ssao_mode gate).
+                    BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                    // @5/@6: the DDGI atlases (COMBINED image+sampler — the deferred t16/s16 idiom).
+                    BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+                    BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+                    // @7: the ResolvedDdgi UBO. (@8 — the `#if HWRT` gShadowVis — joins at rung
+                    // R9d together with the `-D HWRT` shader variant; the R9b `.spv` is compiled
+                    // without the define on BOTH legs, so the entry would be pure dead surface.)
+                    BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                ],
+            },
+        )
+        .expect("invariant: R9b vb_shade_split Set-1 bind-group layout create");
+
         // The SSAO edge-avoiding à-trous denoise chain (RHI DISPATCH WIRING follow-up to the
         // gather above): the shared 4-binding layout { `gAoIn` @0 (R), `gAoOut` @1 (W) STORAGE
         // images, `gViewT` @2 (R) STORAGE image, the camera UNIFORM buffer @3 } — matching
@@ -3349,6 +3461,13 @@ impl GpuSceneBundles {
             rcas_pipeline,
             rcas_layout,
             ssao_pipelines,
+            ssao_vb_pipelines,
+            vb_ssao_layout,
+            vb_geo_aux_layout,
+            vb_split_layout1,
+            vb_geo_pipeline: None,
+            vb_shade_split_pipeline: None,
+            vb_shade_split_tex_pipeline: None,
             ssao_layout,
             ssao_atrous_read8_pipeline,
             ssao_atrous_interior_pipeline,
@@ -3734,6 +3853,91 @@ impl GpuSceneBundles {
         }
 
         self.vb_shade_tex_pipeline = Some(vb_shade_tex_pipeline);
+    }
+
+    /// Rung R9b (docs/R9-VB-SPLIT-PLAN.md §6): builds the split pair — `vb_geo` (3-set: Set 0 =
+    /// [`Self::vb_layout0`], Set 1 = [`Self::vb_geo_aux_layout`], Set 2 = the geometry table)
+    /// and `vb_shade_split` (3-set: Set 1 = [`Self::vb_split_layout1`]) + the `-D TEXTURED=1`
+    /// sibling (4-set, iff `bindless` exists — `build_vb_shade_textured_pipeline`'s own
+    /// two-dependency reason). Deferred past [`Self::boot`] because the Decision-0 geometry
+    /// table's Set-2 layout does not exist at `boot()`'s call site (the SAME reason as
+    /// [`Self::build_vb_resolve_pipeline`]). Called ONCE from `runner.rs`, right after the
+    /// other VB deferred builds.
+    pub(crate) fn build_vb_split_pipelines(
+        &mut self,
+        ctx: &VulkanContext,
+        geometry_set: &boyko_rhi_vulkan::geometry_bindless::VulkanGeometryBindlessSet,
+        bindless: Option<&BindlessTextureTable>,
+    ) {
+        let device = ctx;
+
+        let vb_geo_cs = RhiDevice::create_shader_module(device, vb_geo_spirv())
+            .expect("invariant: R9b vb_geo compute shader module create");
+        let vb_geo_pipeline = ctx
+            .create_compute_pipeline_vb(
+                &ComputePipelineDesc {
+                    module: &vb_geo_cs,
+                    entry: c"main",
+                    // The 64-byte `view_proj` push (`vb_geo.comp.hlsl` — `vb_resolve`'s shape).
+                    push_constant_bytes: 64,
+                    bind_group_layout: Some(&self.vb_layout0),
+                    spec_constants: &[],
+                },
+                self.vb_geo_aux_layout.set_layout(),
+                geometry_set.set_layout(),
+            )
+            .expect("invariant: R9b vb_geo compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_geo_cs);
+        }
+        self.vb_geo_pipeline = Some(vb_geo_pipeline);
+
+        let vb_shade_split_cs = RhiDevice::create_shader_module(device, vb_shade_split_spirv())
+            .expect("invariant: R9b vb_shade_split compute shader module create");
+        let vb_shade_split_pipeline = ctx
+            .create_compute_pipeline_vb(
+                &ComputePipelineDesc {
+                    module: &vb_shade_split_cs,
+                    entry: c"main",
+                    push_constant_bytes: 64,
+                    bind_group_layout: Some(&self.vb_layout0),
+                    spec_constants: &[],
+                },
+                self.vb_split_layout1.set_layout(),
+                geometry_set.set_layout(),
+            )
+            .expect("invariant: R9b vb_shade_split compute pipeline create");
+        // SAFETY: as above.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_shade_split_cs);
+        }
+        self.vb_shade_split_pipeline = Some(vb_shade_split_pipeline);
+
+        if let Some(bindless) = bindless {
+            let cs = RhiDevice::create_shader_module(device, vb_shade_split_tex_spirv())
+                .expect("invariant: R9b vb_shade_split TEXTURED compute shader module create");
+            let p = ctx
+                .create_compute_pipeline_vb_textured(
+                    &ComputePipelineDesc {
+                        module: &cs,
+                        entry: c"main",
+                        push_constant_bytes: 64,
+                        bind_group_layout: Some(&self.vb_layout0),
+                        spec_constants: &[],
+                    },
+                    self.vb_split_layout1.set_layout(),
+                    geometry_set.set_layout(),
+                    bindless.set().set_layout(),
+                )
+                .expect("invariant: R9b vb_shade_split TEXTURED compute pipeline create");
+            // SAFETY: as above.
+            unsafe {
+                RhiDevice::destroy_shader_module(device, cs);
+            }
+            self.vb_shade_split_tex_pipeline = Some(p);
+        }
     }
 
     /// Cheap, allocation-free steady-state check (asset-streaming plan F7 review W1):
@@ -4463,18 +4667,18 @@ impl GpuSceneBundles {
                 layout: &self.viewt_from_depth_layout,
                 mesh_view_t_norm: mesh_view_t_norm(camera_mode),
             }),
-            // TAA-under-VB: armed exactly for the marcher-less `VB × Mesh` config (`mesh_leg &&
-            // !sdf_leg` — the SAME narrowing `viewt_from_depth` above applies under Deferred: on
-            // an SDF-carrying VB leg the `VIEWT`-variant marcher IS the composite and the SOLE
-            // `gViewT` producer, `path_sdf_forward_writes_viewt()`) AND the (post-degrade,
-            // ALREADY-clamped) `aa_mode` above resolves to `Taa` -- the same condition that gates
-            // `GBufferScene::taa` itself, so this pass and the resolve it feeds can never
-            // independently disagree. `None` on every other leg/path/AA combination (the VB
-            // marcher, the Deferred producers above, or no TAA consumer at all).
+            // TAA-under-VB + rung R9b: `vb_viewt` arms for (a) the marcher-less TAA config
+            // (`mesh_leg && !sdf_leg && Taa` — the shipped Track-A arm; on an SDF-carrying TAA
+            // leg the `VIEWT`-variant marcher is the sole producer) OR (b) the split's SSAO
+            // (`mesh_geo_shade_split && ssao armed` — the PRE-TAIL slot: the gather needs the
+            // gViewT lane TAA-independently; under `Both`+SSAO+TAA BOTH producers arm and the
+            // marcher stays the LAST declared writer — `declare_vb_graph`'s revised asserts).
+            // `ssao_armed_now` reads the SAME freeze-clamped `ResolvedSsao` the `scene.ssao`
+            // activation below reads, so the two can never disagree.
             viewt_from_vb_depth: (matches!(resolved_render_path.path, boyko_render::RenderPath::VisibilityBuffer)
                 && mesh_leg
-                && !sdf_leg
-                && aa_mode == AaMode::Taa)
+                && ((!sdf_leg && aa_mode == AaMode::Taa)
+                    || (resolved_render_path.mesh_geo_shade_split && ssao_variant.is_some())))
                 .then_some(ViewtFromVbDepthActivation {
                     pipeline: &self.viewt_from_vb_depth_pipeline,
                     layout: &self.viewt_from_vb_depth_layout,
@@ -4958,6 +5162,16 @@ impl GpuSceneBundles {
             // `vb_set0_tex` once per extent, independent of any SPECIFIC frame's texture usage).
             vb_shade_tex_pipeline: self.vb_shade_tex_pipeline.as_ref(),
             vb_tex_instance_material_ring: self.tex.as_ref().map(|t| &t.tex_instance_material_rings),
+            // Rung R9b: the split pair + VB SSAO gather. The deferred-built pipelines are
+            // `Option`-threaded as-is (`Some` after `build_vb_split_pipelines` ran — the
+            // `vb_resolve_pipeline` shape); the boot layouts/trio are `Some(...)` ALWAYS.
+            vb_geo_pipeline: self.vb_geo_pipeline.as_ref(),
+            vb_shade_split_pipeline: self.vb_shade_split_pipeline.as_ref(),
+            vb_shade_split_tex_pipeline: self.vb_shade_split_tex_pipeline.as_ref(),
+            vb_geo_aux_layout: Some(&self.vb_geo_aux_layout),
+            vb_split_layout1: Some(&self.vb_split_layout1),
+            ssao_vb_pipeline: ssao_variant.map(|v| &self.ssao_vb_pipelines[v]),
+            vb_ssao_layout: Some(&self.vb_ssao_layout),
             // Multi-paradigm render-path plan, rung R1: the plain-POD conversion (see this
             // fn's `resolved_render_path` param doc for why it cannot be a `From` impl).
             resolved_render_path: to_gpu_resolved_render_path(&resolved_render_path),
@@ -5159,6 +5373,24 @@ impl GpuSceneBundles {
             RhiDevice::destroy_compute_pipeline(ctx, ssao_medium);
             RhiDevice::destroy_compute_pipeline(ctx, ssao_high);
             RhiDevice::destroy_bind_group_layout(ctx, self.ssao_layout);
+            // Rung R9b: the VB split objects — deferred-built pipelines (Option-guarded) first,
+            // then the boot gather trio, then the three boot layouts (reverse creation order).
+            if let Some(p) = self.vb_shade_split_tex_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(p) = self.vb_shade_split_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(p) = self.vb_geo_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            let [vb_ssao_low, vb_ssao_medium, vb_ssao_high] = self.ssao_vb_pipelines;
+            RhiDevice::destroy_compute_pipeline(ctx, vb_ssao_low);
+            RhiDevice::destroy_compute_pipeline(ctx, vb_ssao_medium);
+            RhiDevice::destroy_compute_pipeline(ctx, vb_ssao_high);
+            RhiDevice::destroy_bind_group_layout(ctx, self.vb_split_layout1);
+            RhiDevice::destroy_bind_group_layout(ctx, self.vb_geo_aux_layout);
+            RhiDevice::destroy_bind_group_layout(ctx, self.vb_ssao_layout);
             // The SSAO à-trous denoise chain: the 3 role-keyed pipelines share
             // `ssao_atrous_layout` — pipelines before the shared layout (reverse creation order),
             // built UNCONDITIONALLY at boot (every config, like the gather pipelines above).

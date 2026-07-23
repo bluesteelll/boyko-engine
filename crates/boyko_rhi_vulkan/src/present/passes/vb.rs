@@ -527,7 +527,7 @@ impl Renderer<'_> {
             // P1-4) — mirrors `declare_vb_graph`'s matching gate, so a `!vb_use_classified` frame
             // records NONE of these four passes (ZERO classify tax, not merely an unread output as
             // rung P2b left it). `vb_shade` (below) is the sole consumer of `gClassify`. ===
-            if scene.vb_use_classified {
+            if scene.vb_use_classified && scene.path_vb_fused() {
                 // Pass `vb_classify_fill`: two `vkCmdFillBuffer`s zero `counts[MAX]` and sentinel
                 // `group_to_mat[G+MAX]` with `0xFFFFFFFF` (critic P1-1 — decouples correctness from
                 // the scan's per-frame loop bound). Word offsets mirror
@@ -714,7 +714,11 @@ impl Renderer<'_> {
             // `scene.vb_use_classified`, else the fused `vb_resolve` — mutually exclusive by
             // construction, exactly one runs per frame (mirrors `declare_vb_graph`'s matching
             // branch). ===
-            if scene.vb_use_classified {
+            if scene.path_vb_split() {
+                // Rung R9b: the split DISPLACES the fused lit producer — `vb_shade_split`
+                // (recorded in the split arm after this block) is the sole lit producer;
+                // neither `vb_shade` nor `vb_resolve` records (mirrors the declarator).
+            } else if scene.vb_use_classified {
                 // === Pass `vb_shade`: the material-classified shading compute pass (VB-P2
                 // classification plan rung P2c) — re-fetches geometry via the Decision-0 table
                 // (Set 2) for each classify-table pixel, shades, writes `lit` (STORAGE, extending
@@ -923,6 +927,308 @@ impl Renderer<'_> {
             }
         }
 
+        // === Rung R9b: the SPLIT arm — recorded in EXACTLY `declare_vb_graph`'s order:
+        // vb_viewt(pre-tail, iff ssao armed) → vb_geo → ssao gather → à-trous×N →
+        // vb_shade_split. `sdf_forward_march` (below) then extends the split shade's `lit`
+        // write under `Both`, exactly as it extends the fused producer's. ===
+        if scene.path_vb_split() {
+            // (1) The gViewT producer's PRE-TAIL slot (the gather's ray-metric depth source).
+            if scene.ssao.is_some()
+                && let Some(vb_viewt_pass) = plan.viewt_from_depth
+            {
+                self.record_vb_viewt_dispatch(vb_viewt_pass, cmd, targets, forward, vb, scene, present_extent, fi);
+            }
+
+            // (2) Pass `vb_geo` — the thin-aux producer: the first `vb_id` reader under split
+            // (derives COLOR→SHADER_READ_ONLY), writes `thin_normal` (first-touch
+            // UNDEFINED→GENERAL). SAFETY: recording is open; `record_vb_pass` records those
+            // derived barriers for the "vb_geo" pass into `cmd`.
+            let geo_pass = plan
+                .vb_geo
+                .expect("invariant: path_vb_split() => vb_geo pass declared (declare_vb_graph)");
+            self.record_vb_pass(geo_pass, cmd, targets, forward, vb, scene, fi);
+            let vb_geo_pipeline = scene
+                .vb_geo_pipeline
+                .expect("invariant: a split-armed scene carries vb_geo_pipeline (build_vb_split_pipelines ran)");
+            let vb_geometry_set = scene
+                .vb_geometry_set
+                .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_geometry_set");
+            let vb_set0 = targets
+                .vb_set0
+                .as_ref()
+                .expect("invariant: a VisibilityBuffer-resolved scene always builds vb_set0");
+            let vb_geo_aux_set = targets
+                .vb_geo_aux_set
+                .as_ref()
+                .expect("invariant: a split-armed boot builds vb_geo_aux_set (targets tail)");
+            // SAFETY: recording is open; `vb_geo_pipeline` (3-set: Set 0 = `vb_set0[fi]` — the
+            // BASE ring, `vb_geo` samples no textures; Set 1 = `vb_geo_aux_set[fi]`; Set 2 =
+            // the geometry table) belongs to this device; the 64-byte push is `scene.mvp`'s
+            // leading `view_proj` (the `vb_resolve` shape); `dispatch_group_count_x` covers the
+            // pixel count at `numthreads(64,1,1)`.
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vb_geo_pipeline.pipeline);
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    vb_geo_pipeline.layout,
+                    0,
+                    1,
+                    &vb_set0[fi].descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    vb_geo_pipeline.layout,
+                    1,
+                    1,
+                    &vb_geo_aux_set[fi].descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    vb_geo_pipeline.layout,
+                    2,
+                    1,
+                    &vb_geometry_set.set(),
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    vb_geo_pipeline.layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    64,
+                    scene.mvp.as_ptr().cast(),
+                );
+                (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+            }
+
+            // (3) The SSAO gather + à-trous chain (`path_vb_ssao` — the declare-site predicate).
+            if scene.path_vb_ssao() {
+                let ssao_pass = plan
+                    .vb_ssao
+                    .expect("invariant: path_vb_ssao() => the VB ssao pass was declared");
+                // SAFETY: recording is open; `record_vb_pass` records the thin_normal/viewt
+                // store→load + the `ssao` seed-inert first-touch barriers for the "ssao" pass.
+                self.record_vb_pass(ssao_pass, cmd, targets, forward, vb, scene, fi);
+                let gather_pipeline = scene
+                    .ssao_vb_pipeline
+                    .expect("invariant: path_vb_ssao() => scene.ssao_vb_pipeline is Some");
+                let vb_ssao_set = targets
+                    .vb_ssao_set
+                    .as_ref()
+                    .expect("invariant: a split-armed boot builds vb_ssao_set (targets tail)");
+                // SAFETY: recording is open; the VB_THIN gather reads its camera from the UBO
+                // @3, so no push constant is recorded (the deferred gather's own discipline);
+                // `dispatch_group_count_x` covers the pixel count.
+                unsafe {
+                    (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, gather_pipeline.pipeline);
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        gather_pipeline.layout,
+                        0,
+                        1,
+                        &vb_ssao_set[fi].descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+                }
+
+                // The à-trous chain — the deferred record loop MIRRORED (gbuffer.rs's own
+                // block, incl. the graceful set-degrade + the 0-||-2..=MAX contract assert);
+                // the role-keyed SETS are the SAME core-ring sets (core.viewt/ssao/rings are
+                // path-shared), so no VB-specific set plumbing exists here.
+                if let Some(activation) = &scene.ssao
+                    && activation.atrous_levels > 0
+                    && let (
+                        Some(read8_set),
+                        Some(interior_from0_set),
+                        Some(interior_from1_set),
+                        Some(write8_from0_set),
+                        Some(write8_from1_set),
+                    ) = (
+                        targets.ssao_atrous_read8_set.as_ref(),
+                        targets.ssao_atrous_interior_from0_set.as_ref(),
+                        targets.ssao_atrous_interior_from1_set.as_ref(),
+                        targets.ssao_atrous_write8_from0_set.as_ref(),
+                        targets.ssao_atrous_write8_from1_set.as_ref(),
+                    )
+                {
+                    let read8_pipeline = scene
+                        .ssao_atrous_read8_pipeline
+                        .expect("invariant: the SSAO à-trous sets built ⇒ the boot read8 pipeline is Some");
+                    let interior_pipeline = scene.ssao_atrous_interior_pipeline.expect(
+                        "invariant: the SSAO à-trous sets built ⇒ the boot interior pipeline is Some",
+                    );
+                    let write8_pipeline = scene
+                        .ssao_atrous_write8_pipeline
+                        .expect("invariant: the SSAO à-trous sets built ⇒ the boot write8 pipeline is Some");
+                    let atrous_levels =
+                        activation.atrous_levels.min(crate::present::MAX_SSAO_ATROUS_LEVELS);
+                    debug_assert!(
+                        atrous_levels == 0
+                            || (2..=crate::present::MAX_SSAO_ATROUS_LEVELS).contains(&atrous_levels),
+                        "invariant: ssao à-trous levels is 0 or 2..=MAX at the RHI boundary; got {atrous_levels}"
+                    );
+                    for level in 0..atrous_levels {
+                        let atrous_pass = plan.ssao_atrous[level as usize].expect(
+                            "invariant: level < ssao_atrous_levels ⇒ the VB ssao_atrous[level] declared",
+                        );
+                        // SAFETY: recording is open; the "ssao_atrous" pass's derived RAW
+                        // barriers (gather-write→level-0-read, the ring ping-pong, the last
+                        // level's write→shade-read) are recorded via the VB sink.
+                        self.record_vb_pass(atrous_pass, cmd, targets, forward, vb, scene, fi);
+                        let (pipeline, set) =
+                            match crate::present::ssao_atrous_step(level, atrous_levels) {
+                                crate::present::AtrousStepRole::Read8 => {
+                                    (read8_pipeline, &read8_set[self.frame_index])
+                                }
+                                crate::present::AtrousStepRole::Interior { in_ring: 0 } => {
+                                    (interior_pipeline, &interior_from0_set[self.frame_index])
+                                }
+                                crate::present::AtrousStepRole::Interior { .. } => {
+                                    (interior_pipeline, &interior_from1_set[self.frame_index])
+                                }
+                                crate::present::AtrousStepRole::Write8 { in_ring: 0 } => {
+                                    (write8_pipeline, &write8_from0_set[self.frame_index])
+                                }
+                                crate::present::AtrousStepRole::Write8 { .. } => {
+                                    (write8_pipeline, &write8_from1_set[self.frame_index])
+                                }
+                            };
+                        let step: u32 = 1u32 << level;
+                        // SAFETY: recording is open; the selected variant + its shared 4-binding
+                        // layout are live; the 4-byte `{ uint step }` push covers the declared
+                        // COMPUTE range; `dispatch_group_count_x` covers the pixel count.
+                        unsafe {
+                            (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+                            (self.fns.cmd_bind_descriptor_sets)(
+                                cmd,
+                                VK_PIPELINE_BIND_POINT_COMPUTE,
+                                pipeline.layout,
+                                0,
+                                1,
+                                &set.descriptor_set,
+                                0,
+                                ptr::null(),
+                            );
+                            (self.fns.cmd_push_constants)(
+                                cmd,
+                                pipeline.layout,
+                                VK_SHADER_STAGE_COMPUTE_BIT,
+                                0,
+                                4,
+                                (&step as *const u32).cast(),
+                            );
+                            (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+                        }
+                    }
+                }
+            }
+
+            // (4) Pass `vb_shade_split` — the split's lit producer (RE-fetch + shade + the
+            // unconditional gSsao read). Per-frame base/`_tex` pick mirrors the fused
+            // `vb_resolve`/`vb_shade_tex` selection (boot-frozen split, per-frame textures).
+            let shade_pass = plan
+                .vb_shade_split
+                .expect("invariant: path_vb_split() => vb_shade_split pass declared");
+            // SAFETY: recording is open; `record_vb_pass` records the `lit`
+            // COLOR_ATTACHMENT→GENERAL + cascade/atlas + `ssao` GENERAL-read barriers for the
+            // "vb_shade_split" pass into `cmd`.
+            self.record_vb_pass(shade_pass, cmd, targets, forward, vb, scene, fi);
+            let (shade_pipeline, shade_set0) = if scene.vb_tex_active() {
+                (
+                    scene.vb_shade_split_tex_pipeline.expect(
+                        "invariant: vb_tex_active() under split requires vb_shade_split_tex_pipeline",
+                    ),
+                    targets.vb_set0_tex.as_ref().expect(
+                        "invariant: GBufferScene::vb_tex_active() => targets.vb_set0_tex is built",
+                    ),
+                )
+            } else {
+                (
+                    scene.vb_shade_split_pipeline.expect(
+                        "invariant: a split-armed scene carries vb_shade_split_pipeline",
+                    ),
+                    vb_set0,
+                )
+            };
+            let vb_split_set1 = targets
+                .vb_split_set1
+                .as_ref()
+                .expect("invariant: a split-armed boot builds vb_split_set1 (targets tail)");
+            // SAFETY: recording is open; `shade_pipeline` (Set 0 = the base/_tex vb ring, Set 1
+            // = `vb_split_set1[fi]` — the shadow vocab + gSsao + the DDGI combined atlases, Set
+            // 2 = the geometry table, `_tex` adds Set 3 = the bindless table) belongs to this
+            // device; the 64-byte push is the SAME `view_proj`; `dispatch_group_count_x`
+            // covers the pixel count.
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, shade_pipeline.pipeline);
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    shade_pipeline.layout,
+                    0,
+                    1,
+                    &shade_set0[fi].descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    shade_pipeline.layout,
+                    1,
+                    1,
+                    &vb_split_set1[fi].descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    shade_pipeline.layout,
+                    2,
+                    1,
+                    &vb_geometry_set.set(),
+                    0,
+                    ptr::null(),
+                );
+                if scene.vb_tex_active() {
+                    let bindless_set = scene
+                        .bindless_set
+                        .expect("invariant: GBufferScene::vb_tex_active() => scene.bindless_set is Some");
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        shade_pipeline.layout,
+                        3,
+                        1,
+                        &bindless_set,
+                        0,
+                        ptr::null(),
+                    );
+                }
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    shade_pipeline.layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    64,
+                    scene.mvp.as_ptr().cast(),
+                );
+                (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+            }
+        }
+
         // === Pass `sdf_forward_march` — rung R10: the fused SDF march-then-shade COMPUTE pass,
         // the SAME body `record_forward` records (that fn's own doc has the full C5 rationale).
         // Recorded ONLY when `scene.path_has_sdf_forward()` holds. Extends the `lit` write above
@@ -1040,61 +1346,13 @@ impl Renderer<'_> {
             scene.viewt_from_vb_depth.is_some(),
             "W1: declare/record predicate desync (viewt_from_vb_depth)"
         );
-        if let Some(vb_viewt_pass) = plan.viewt_from_depth {
-            // SAFETY: recording is open; `record_vb_pass` records the graph's derived
-            // DEPTH_ATTACHMENT→SHADER_READ_ONLY (vb_depth) + UNDEFINED→GENERAL (viewt)
-            // barriers for the "vb_viewt" pass into `cmd`.
-            self.record_vb_pass(vb_viewt_pass, cmd, targets, forward, vb, scene, fi);
-            let activation = scene.viewt_from_vb_depth.as_ref().expect(
-                "invariant: plan.viewt_from_depth.is_some() ⇒ scene.viewt_from_vb_depth.is_some() (W1)",
-            );
-            let push = crate::compute::ViewtFromDepthRzPush::new(
-                present_extent.width,
-                present_extent.height,
-                activation.view_z_a,
-                activation.view_z_b,
-            );
-            let push_bytes = push.as_bytes();
-            let set = &targets.viewt_from_vb_depth_set.as_ref().expect(
-                "invariant: scene.viewt_from_vb_depth.is_some() ⇒ create wrote viewt_from_vb_depth_set",
-            )[fi];
-            let group_x = present_extent.width.div_ceil(8);
-            let group_y = present_extent.height.div_ceil(8);
-            // SAFETY: recording is open; `activation.pipeline` + its layout (declaring
-            // `activation.layout` at set 0 AND the 16-byte COMPUTE push range) are live on this
-            // device (caller contract); `set` binds the now-transitioned reverse-Z depth
-            // (SHADER_READ, by the `record_vb_pass` call above) + `gViewT` (GENERAL) + the
-            // camera-ring slot `fi`; `group_x`/`group_y` cover `present_extent` (the 8×8-tile
-            // ceiling of the SAME extent the depth/gViewT images are sized to);
-            // `&set.descriptor_set` is a single-element local alive for the call; `push_bytes`
-            // is `VIEWT_FROM_DEPTH_RZ_PUSH_BYTES` (16) bytes at offset 0, exactly the declared
-            // push range, and the backing `push` local outlives the call.
-            unsafe {
-                (self.fns.cmd_bind_pipeline)(
-                    cmd,
-                    VK_PIPELINE_BIND_POINT_COMPUTE,
-                    activation.pipeline.pipeline,
-                );
-                (self.fns.cmd_bind_descriptor_sets)(
-                    cmd,
-                    VK_PIPELINE_BIND_POINT_COMPUTE,
-                    activation.pipeline.layout,
-                    0,
-                    1,
-                    &set.descriptor_set,
-                    0,
-                    ptr::null(),
-                );
-                (self.fns.cmd_push_constants)(
-                    cmd,
-                    activation.pipeline.layout,
-                    VK_SHADER_STAGE_COMPUTE_BIT,
-                    0,
-                    crate::compute::VIEWT_FROM_DEPTH_RZ_PUSH_BYTES,
-                    push_bytes.as_ptr().cast(),
-                );
-                (self.fns.cmd_dispatch)(cmd, group_x, group_y, 1);
-            }
+        // Rung R9b: this is the taa-only LATE slot — with the split's SSAO armed the pass was
+        // recorded PRE-TAIL (inside the split arm above), matching `declare_vb_graph`'s slot
+        // choice (ONE `scene.ssao.is_some()` predicate at both sites).
+        if scene.ssao.is_none()
+            && let Some(vb_viewt_pass) = plan.viewt_from_depth
+        {
+            self.record_vb_viewt_dispatch(vb_viewt_pass, cmd, targets, forward, vb, scene, present_extent, fi);
         }
 
         // === TAA-under-VB: the temporal-resolve (+ RCAS) — recorded HERE, BEFORE
@@ -1400,5 +1658,78 @@ impl Renderer<'_> {
             return Err(SwapchainError::VkError("vkEndCommandBuffer", result));
         }
         Ok(())
+    }
+
+    /// Rung R9b: the `vb_viewt` (viewt_from_depth_rz) pass-barriers + dispatch body, extracted
+    /// so BOTH record slots (the split's SSAO-armed PRE-TAIL slot and the taa-only LATE slot)
+    /// share one implementation — `declare_vb_graph` declares the pass in exactly one position
+    /// per frame (`scene.ssao.is_some()` picks it), and the recorder replays the SAME body at
+    /// the matching site.
+    #[allow(clippy::too_many_arguments)]
+    fn record_vb_viewt_dispatch(
+        &self,
+        vb_viewt_pass: crate::framegraph::PassId,
+        cmd: VkCommandBuffer,
+        targets: &GBufferTargets,
+        forward: &ForwardTargets,
+        vb: &VbTargets,
+        scene: &GBufferScene<'_>,
+        present_extent: VkExtent2D,
+        fi: usize,
+    ) {
+        // SAFETY: recording is open (caller contract); `record_vb_pass` records the graph's
+        // derived DEPTH_ATTACHMENT→SHADER_READ_ONLY (vb_depth) + UNDEFINED→GENERAL (viewt)
+        // barriers for the "vb_viewt" pass into `cmd`.
+        self.record_vb_pass(vb_viewt_pass, cmd, targets, forward, vb, scene, fi);
+        let activation = scene.viewt_from_vb_depth.as_ref().expect(
+            "invariant: plan.viewt_from_depth.is_some() ⇒ scene.viewt_from_vb_depth.is_some() (W1)",
+        );
+        let push = crate::compute::ViewtFromDepthRzPush::new(
+            present_extent.width,
+            present_extent.height,
+            activation.view_z_a,
+            activation.view_z_b,
+        );
+        let push_bytes = push.as_bytes();
+        let set = &targets.viewt_from_vb_depth_set.as_ref().expect(
+            "invariant: scene.viewt_from_vb_depth.is_some() ⇒ create wrote viewt_from_vb_depth_set",
+        )[fi];
+        let group_x = present_extent.width.div_ceil(8);
+        let group_y = present_extent.height.div_ceil(8);
+        // SAFETY: recording is open; `activation.pipeline` + its layout (declaring
+        // `activation.layout` at set 0 AND the 16-byte COMPUTE push range) are live on this
+        // device (caller contract); `set` binds the now-transitioned reverse-Z depth
+        // (SHADER_READ, by the `record_vb_pass` call above) + `gViewT` (GENERAL) + the
+        // camera-ring slot `fi`; `group_x`/`group_y` cover `present_extent` (the 8×8-tile
+        // ceiling of the SAME extent the depth/gViewT images are sized to);
+        // `&set.descriptor_set` is a single-element local alive for the call; `push_bytes`
+        // is `VIEWT_FROM_DEPTH_RZ_PUSH_BYTES` (16) bytes at offset 0, exactly the declared
+        // push range, and the backing `push` local outlives the call.
+        unsafe {
+            (self.fns.cmd_bind_pipeline)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                activation.pipeline.pipeline,
+            );
+            (self.fns.cmd_bind_descriptor_sets)(
+                cmd,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                activation.pipeline.layout,
+                0,
+                1,
+                &set.descriptor_set,
+                0,
+                ptr::null(),
+            );
+            (self.fns.cmd_push_constants)(
+                cmd,
+                activation.pipeline.layout,
+                VK_SHADER_STAGE_COMPUTE_BIT,
+                0,
+                crate::compute::VIEWT_FROM_DEPTH_RZ_PUSH_BYTES,
+                push_bytes.as_ptr().cast(),
+            );
+            (self.fns.cmd_dispatch)(cmd, group_x, group_y, 1);
+        }
     }
 }

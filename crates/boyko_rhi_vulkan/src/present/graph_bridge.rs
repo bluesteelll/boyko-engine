@@ -2700,8 +2700,25 @@ pub(crate) struct VbPassPlan {
     /// Reads `vb_instance_ring` (COMPUTE, the geometry-fetch instance-row lookup — the SAME read
     /// [`Self::vb_resolve`] declares) and `cascade`/`atlas`/`light_table` inline when armed (the
     /// SAME conditional reads [`Self::vb_resolve`] declares — `vb_shade`'s shading tail is
-    /// character-identical, plan D3). `Some` iff `mesh_leg && scene.vb_use_classified`.
+    /// character-identical, plan D3). `Some` iff `mesh_leg && scene.vb_use_classified`
+    /// `&& !path_vb_split()` (rung R9b: the split displaces the classification chain).
     pub(crate) vb_shade: Option<crate::framegraph::PassId>,
+    /// Rung R9b: the split's thin-aux GEOMETRY producer (`vb_geo.comp` — the first `vb_id`
+    /// reader under split, first-touch `thin_normal` writer). `Some` iff
+    /// [`GBufferScene::path_vb_split`](super::scene_types::GBufferScene::path_vb_split).
+    pub(crate) vb_geo: Option<crate::framegraph::PassId>,
+    /// Rung R9b: the VB SSAO gather (`sdf_ssao` `-D VB_THIN` variant — reads
+    /// `thin_normal`+`viewt`, writes `ssao`). `Some` iff
+    /// [`GBufferScene::path_vb_ssao`](super::scene_types::GBufferScene::path_vb_ssao).
+    pub(crate) vb_ssao: Option<crate::framegraph::PassId>,
+    /// Rung R9b: the VB à-trous denoise chain (the DEFERRED `ssao_atrous` role loop mirrored
+    /// verbatim) — `[None; MAX]` unless the gather armed with `atrous_levels >= 2`.
+    pub(crate) ssao_atrous:
+        [Option<crate::framegraph::PassId>; crate::present::MAX_SSAO_ATROUS_LEVELS as usize],
+    /// Rung R9b: the split's `lit` producer (`vb_shade_split.comp` — RE-fetch + shade +
+    /// unconditional gSsao consumption). `Some` iff
+    /// [`GBufferScene::path_vb_split`](super::scene_types::GBufferScene::path_vb_split).
+    pub(crate) vb_shade_split: Option<crate::framegraph::PassId>,
     /// Rung R10: the fused `sdf_forward_march` COMPUTE pass (`shaders/sdf_forward_march.comp.hlsl`,
     /// the SAME pass the Forward family declares — [`ForwardPassPlan::sdf_forward_march`]). `Some`
     /// iff [`GBufferScene::path_has_sdf_forward`](super::scene_types::GBufferScene::path_has_sdf_forward)
@@ -2764,7 +2781,7 @@ pub(crate) struct VbBarrierSink<'a> {
 /// The number of IMAGE resources [`Renderer::declare_vb_graph`] declares — see
 /// [`VbBarrierSink::images`]'s doc for the fixed order. A PRIVATE, per-frame ResId space (mirrors
 /// [`FORWARD_IMAGE_COUNT`]'s own doc — never related to [`FRAMEGRAPH_IMAGE_COUNT`]).
-const VB_IMAGE_COUNT: usize = 8;
+const VB_IMAGE_COUNT: usize = 12;
 
 impl crate::framegraph::BarrierSink for VbBarrierSink<'_> {
     fn image_barriers(&mut self, src_stage: u32, dst_stage: u32, group: &[crate::framegraph::ImgBarrier]) {
@@ -2970,8 +2987,26 @@ impl Renderer<'_> {
                 VK_ACCESS_SHADER_WRITE_BIT,
             ),
         );
+        // Rung R9b (appended AFTER `taa_hist_read` so ResIds 0..7 stay byte-unchanged — the
+        // Track-A append discipline):
+        //   * `thin_normal` — plain `add_image`: `vb_geo` is its sole, every-frame first-touch
+        //     producer under split (UNDEFINED→GENERAL); never read without it.
+        //   * `ssao` — `add_image_seeded(ResSync::undefined())`, the DEFERRED declarator's own
+        //     `ssao` seed VERBATIM and for the same reason: `vb_shade_split`'s gSsao read is
+        //     UNCONDITIONAL under split (the 09600 stable-descriptor discipline), so a
+        //     split-without-SSAO frame (DDGI-only at R9c, Temporal-only at R9d) needs the
+        //     discard-legal UNDEFINED→GENERAL first-touch the seed licenses; with SSAO armed the
+        //     gather's write is the first touch and the seed is inert.
+        //   * `ssao_ring_a`/`ssao_ring_b` — plain `add_image` (the à-trous interior ping-pong;
+        //     never read without the chain).
+        // With the split off NO pass names these four ⇒ zero barriers ⇒ every existing pin
+        // byte-identical by construction.
+        let thin_normal = g.add_image("thin_normal");
+        let ssao_img = g.add_image_seeded("ssao", ResSync::undefined());
+        let ssao_ring_a = g.add_image("ssao_ring_a");
+        let ssao_ring_b = g.add_image("ssao_ring_b");
         debug_assert_eq!(
-            taa_hist_read.index() + 1,
+            ssao_ring_b.index() + 1,
             VB_IMAGE_COUNT,
             "invariant: declare_vb_graph's image declarations must match VB_IMAGE_COUNT"
         );
@@ -3056,6 +3091,11 @@ impl Renderer<'_> {
         // choice, read ONCE here so the classify-chain gate and the `vb_shade`/`vb_resolve`
         // branch below can never disagree (the W1 single-predicate discipline).
         let use_classified = scene.vb_use_classified;
+        // Rung R9b: the split DISPLACES the classification chain and the fused lit producer
+        // (docs/R9-VB-SPLIT-PLAN.md §0) — but SURGICALLY: `vb_raster` stays gated on bare
+        // `mesh_leg` (BOTH arms consume the `vb_id`/`vb_depth` it produces; the split's own
+        // producers/consumer are declared AFTER this block, before `sdf_forward_march`).
+        let split = scene.path_vb_split();
         let (vb_classify_fill, vb_classify_count, vb_classify_scan, vb_classify_scatter, vb_raster, vb_resolve, vb_shade) = if mesh_leg {
             // Pass `vb_raster`: writes `vb_id` (COLOR, first-touch) + `vb_depth` (DEPTH,
             // first-touch, `GREATER`, write ON — Decision 4). Reads `vb_instance_ring` (VERTEX).
@@ -3089,9 +3129,10 @@ impl Renderer<'_> {
             // `count`(RW) -> `scan`(RW) -> `scatter`(RW) auto-chains a conservative whole-buffer
             // barrier between every consecutive pair (P1-3, verified by construction — no manual
             // barrier / split ResId needed). Populates `gclassify` for `vb_shade` (below) to
-            // consume.
+            // consume. Rung R9b: `!split` — the split arm consults neither the classify chain
+            // nor `use_classified` (§0's displacement rule).
             let (vb_classify_fill, vb_classify_count, vb_classify_scan, vb_classify_scatter) =
-                if use_classified {
+                if use_classified && scene.path_vb_fused() {
                     let vb_classify_fill = g.add_pass("vb_classify_fill");
                     g.buffer_access(
                         gclassify,
@@ -3161,8 +3202,11 @@ impl Renderer<'_> {
 
             // The `lit`-producer choice (plan P1-4): `vb_shade` (material-classified, reads
             // `gclassify`) when `use_classified`, else the fused `vb_resolve` — mutually
-            // exclusive by construction, exactly one runs per frame.
-            let (vb_resolve, vb_shade) = if use_classified {
+            // exclusive by construction, exactly one runs per frame. Rung R9b: under `split`
+            // NEITHER runs — `vb_shade_split` (declared after this block) is the lit producer.
+            let (vb_resolve, vb_shade) = if split {
+                (None, None)
+            } else if use_classified {
                 // Pass `vb_shade`: reads `vb_id` (COMPUTE, SHADER_READ_ONLY_OPTIMAL — already
                 // transitioned by `vb_classify_count` above, so this read derives no further
                 // barrier) and `gclassify` (COMPUTE, SHADER_READ ONLY — `vb_shade` never writes
@@ -3274,6 +3318,189 @@ impl Renderer<'_> {
             (None, None, None, None, None, None, None)
         };
 
+        // ---- Rung R9b: the SPLIT arm (docs/R9-VB-SPLIT-PLAN.md §3) — declared between
+        // `vb_raster` (whose `vb_id`/`vb_depth` both split passes consume) and
+        // `sdf_forward_march` (which extends `vb_shade_split`'s `lit` GENERAL write under
+        // `Both`). ---------------------------------------------------------------------------
+        //
+        // `vb_viewt` PRE-TAIL slot: when the split's SSAO is armed, the gViewT producer must
+        // run BEFORE the gather (gViewT is the gather's ray-metric depth source), so the pass
+        // is declared HERE instead of its taa-only LATE slot below — ONE `scene.ssao.is_some()`
+        // predicate picks the slot at both declare and record (the accesses are IDENTICAL in
+        // both slots; only the position differs).
+        let vb_viewt_pre = (scene.viewt_from_vb_depth.is_some() && scene.ssao.is_some()).then(|| {
+            let p = g.add_pass("vb_viewt");
+            g.image_access(
+                vb_depth,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                SubRange::DEPTH,
+            );
+            g.image_access(
+                viewt,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                SubRange::COLOR,
+            );
+            p
+        });
+        let mut ssao_atrous_vb: [Option<crate::framegraph::PassId>;
+            crate::present::MAX_SSAO_ATROUS_LEVELS as usize] =
+            [None; crate::present::MAX_SSAO_ATROUS_LEVELS as usize];
+        let (vb_geo, vb_ssao_pass, vb_shade_split) = if split {
+            // Pass `vb_geo` — the split's thin-aux producer: the FIRST `vb_id` reader under
+            // split (derives the COLOR_ATTACHMENT→SHADER_READ_ONLY transition out of the
+            // raster; every later same-layout read needs none), reads the instance ring for
+            // the Decision-0 geometry fetch, and first-touch writes `thin_normal`
+            // (UNDEFINED→GENERAL) — UNCONDITIONAL under split (`split ⇒ NORMAL`, the R9a
+            // resolver invariant; a split config with no thin-normal consumer does not exist).
+            let vb_geo = g.add_pass("vb_geo");
+            g.image_access(
+                vb_id,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                SubRange::COLOR,
+            );
+            g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+            g.image_access(
+                thin_normal,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                SubRange::COLOR,
+            );
+
+            // The SSAO gather + à-trous chain (`path_vb_ssao` — the O1 predicate `record_vb`
+            // reads too). The gather reads `thin_normal` + `viewt` (GENERAL) and writes `ssao`
+            // (its seed-inert first touch); the à-trous loop mirrors the DEFERRED declarator's
+            // role loop verbatim (Read8/Interior/Write8 over the two interior rings, each level
+            // reading `viewt` for its edge-stops).
+            let vb_ssao_pass = if scene.path_vb_ssao() {
+                let p = g.add_pass("ssao");
+                for &res in &[thin_normal, viewt] {
+                    g.image_access(
+                        res,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        SubRange::COLOR,
+                    );
+                }
+                g.image_access(
+                    ssao_img,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    SubRange::COLOR,
+                );
+
+                let ssao_atrous_levels = scene.ssao.as_ref().map_or(0, |s| s.atrous_levels);
+                debug_assert!(
+                    ssao_atrous_levels == 0
+                        || (2..=crate::present::MAX_SSAO_ATROUS_LEVELS).contains(&ssao_atrous_levels),
+                    "invariant: ssao_atrous_levels is 0 or 2..=MAX (clamped_atrous_levels); got {ssao_atrous_levels}"
+                );
+                for (level, slot) in ssao_atrous_vb
+                    .iter_mut()
+                    .enumerate()
+                    .take(ssao_atrous_levels as usize)
+                {
+                    let level = level as u32;
+                    let rings = [ssao_ring_a, ssao_ring_b];
+                    let (in_res, out_res) =
+                        match crate::present::ssao_atrous_step(level, ssao_atrous_levels) {
+                            crate::present::AtrousStepRole::Read8 => (ssao_img, rings[0]),
+                            crate::present::AtrousStepRole::Interior { in_ring } => {
+                                (rings[in_ring as usize], rings[1 - in_ring as usize])
+                            }
+                            crate::present::AtrousStepRole::Write8 { in_ring } => {
+                                (rings[in_ring as usize], ssao_img)
+                            }
+                        };
+                    let p = g.add_pass("ssao_atrous");
+                    g.image_access(
+                        viewt,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        SubRange::COLOR,
+                    );
+                    g.image_access(
+                        in_res,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        SubRange::COLOR,
+                    );
+                    g.image_access(
+                        out_res,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        SubRange::COLOR,
+                    );
+                    *slot = Some(p);
+                }
+                Some(p)
+            } else {
+                None
+            };
+
+            // Pass `vb_shade_split` — the split's `lit` producer: RE-fetches through `vb_id`
+            // (already SHADER_READ_ONLY via `vb_geo`), extends `vb_sky`'s COLOR write on `lit`
+            // (COLOR_ATTACHMENT→GENERAL, the C5 shape `vb_resolve` declares), reads the
+            // instance ring + the light/shadow vocab exactly as the fused arm does, and reads
+            // `ssao` UNCONDITIONALLY (the 09600 stable-descriptor discipline — backed by the
+            // seed on split-without-SSAO frames and by the always-allocated image).
+            let s = g.add_pass("vb_shade_split");
+            g.image_access(
+                vb_id,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                SubRange::COLOR,
+            );
+            g.image_access(
+                lit,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                SubRange::COLOR,
+            );
+            g.buffer_access(vb_instance_ring, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+            if light_upload.is_some() {
+                g.buffer_access(light_table, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+            }
+            // UNCONDITIONAL + FULL-ARRAY (09600): the SAME shape the fused arm declares.
+            g.image_access(
+                cascade,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                SubRange::depth_layers(MAX_CASCADES as u32),
+            );
+            g.image_access(
+                atlas,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                SubRange::depth_layers(MAX_TEXTURE_LAYERS as u32),
+            );
+            g.image_access(
+                ssao_img,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                SubRange::COLOR,
+            );
+            (Some(vb_geo), vb_ssao_pass, Some(s))
+        } else {
+            (None, None, None)
+        };
+
         // Pass `sdf_forward_march` — rung R10: the fused SDF march-then-shade COMPUTE pass, the
         // SAME pass `declare_forward_graph` declares (that fn's own doc has the full C5 rationale).
         // Gated on `scene.path_has_sdf_forward()` (`== resolved_render_path.sdf_forward_marched`).
@@ -3351,20 +3578,26 @@ impl Renderer<'_> {
             None
         };
 
-        // Pass `vb_viewt` (TAA-under-VB) — gated `scene.viewt_from_vb_depth.is_some()`
-        // (`VisibilityBuffer × Mesh` with TAA armed, so `vb_raster` — the `vb_depth` producer —
-        // is structurally present). Reads `vb_depth` at COMPUTE/SHADER_READ_ONLY (the SAME
-        // conditional-read shape `sdf_forward_march`'s HAS_MESH arm declares — the graph derives
-        // the DEPTH_ATTACHMENT→SHADER_READ_ONLY barrier-out of the raster) and first-touch
-        // WRITES `viewt` (UNDEFINED→GENERAL) — the `gViewT` lane the `taa_resolve` pass below
-        // consumes. On the SDF-carrying leg sets the VIEWT-variant marcher above owns the lane
-        // instead — the two armings are DISJOINT by construction (belt-and-braces asserted).
+        // Pass `vb_viewt`, the taa-only LATE slot — gated `scene.viewt_from_vb_depth.is_some()
+        // && scene.ssao.is_none()` (rung R9b: with the split's SSAO armed the pass moved to the
+        // PRE-TAIL slot above; ONE `ssao.is_some()` predicate picks the slot at both declare
+        // and record). Reads `vb_depth` at COMPUTE/SHADER_READ_ONLY (the SAME conditional-read
+        // shape `sdf_forward_march`'s HAS_MESH arm declares) and first-touch WRITES `viewt`
+        // (UNDEFINED→GENERAL) — the `gViewT` lane the `taa_resolve` pass below consumes.
+        //
+        // Producer disjointness (rung R9b revision of the Track-A assert): dual arming
+        // (`vb_viewt` + the VIEWT-variant marcher) is legal ONLY in the split+SSAO
+        // configuration on an SDF-carrying leg set — `vb_viewt` (pre-tail) feeds the gather
+        // with mesh `t` while the marcher overwrites at composite as the LAST declared gViewT
+        // writer (the declared order derives the WAW barrier); every other configuration keeps
+        // the strict Track-A disjointness.
         debug_assert!(
-            !(scene.viewt_from_vb_depth.is_some() && scene.path_sdf_forward_writes_viewt()),
-            "invariant: vb_viewt (VB×Mesh) and the VIEWT-variant marcher (VB×Both/Sdf) are \
-             mutually exclusive gViewT producers"
+            !(scene.viewt_from_vb_depth.is_some() && scene.path_sdf_forward_writes_viewt())
+                || (scene.ssao.is_some() && scene.resolved_render_path.mesh_geo_shade_split),
+            "invariant: dual gViewT producers (vb_viewt + the VIEWT marcher) are legal only \
+             under the split+SSAO configuration"
         );
-        let vb_viewt = scene.viewt_from_vb_depth.is_some().then(|| {
+        let vb_viewt = (scene.viewt_from_vb_depth.is_some() && scene.ssao.is_none()).then(|| {
             let p = g.add_pass("vb_viewt");
             g.image_access(
                 vb_depth,
@@ -3394,11 +3627,21 @@ impl Renderer<'_> {
         // `viewt`/`taa_hist_read` are STORAGE reads in GENERAL; `taa_hist` is the STORAGE write.
         // `aa_out`/`taa_resolved` stay hand-recorded inside `record_taa`/`record_rcas` (not
         // framegraph-tracked — the deferred precedent).
+        // Rung R9b revision of the Track-A TAA XOR: the strict XOR is KEPT VERBATIM for every
+        // `!ssao` configuration (preserving the shipped VB TAA pins' exact producer schedule);
+        // with the split's SSAO armed it degrades to "at least one producer, and on an
+        // SDF-carrying leg the marcher (the LAST declared writer) is among them".
         debug_assert!(
             scene.taa.is_none()
-                || (scene.viewt_from_vb_depth.is_some() ^ scene.path_sdf_forward_writes_viewt()),
-            "invariant: a TAA-armed VB frame has EXACTLY ONE gViewT producer \
-             (vb_viewt on Mesh, the VIEWT-variant marcher on Both/Sdf)"
+                || if scene.ssao.is_none() {
+                    scene.viewt_from_vb_depth.is_some() ^ scene.path_sdf_forward_writes_viewt()
+                } else {
+                    (scene.viewt_from_vb_depth.is_some() || scene.path_sdf_forward_writes_viewt())
+                        && (!scene.resolved_render_path.sdf_leg
+                            || scene.path_sdf_forward_writes_viewt())
+                },
+            "invariant: a TAA-armed VB frame has a coherent gViewT producer set \
+             (strict XOR without SSAO; at-least-one + marcher-last on SDF legs with SSAO)"
         );
         let taa_resolve_pass = scene.taa.is_some().then(|| {
             let p = g.add_pass("taa_resolve");
@@ -3455,8 +3698,15 @@ impl Renderer<'_> {
             vb_classify_scatter,
             vb_resolve,
             vb_shade,
+            vb_geo,
+            vb_ssao: vb_ssao_pass,
+            ssao_atrous: ssao_atrous_vb,
+            vb_shade_split,
             sdf_forward_march,
-            viewt_from_depth: vb_viewt,
+            // ONE field for BOTH slots — the pass exists in exactly one of them per frame
+            // (`ssao.is_some()` picks pre-tail vs late; the graph itself remembers the declared
+            // position, the recorder just replays it at the matching site).
+            viewt_from_depth: vb_viewt_pre.or(vb_viewt),
             taa_resolve: taa_resolve_pass,
             present_sample,
         });
@@ -3503,6 +3753,14 @@ impl Renderer<'_> {
                 targets.viewt[fi].image,
                 targets.taa_hist.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
                 targets.taa_hist.as_ref().map_or(VkImage::NULL, |r| r[fi ^ 1].image),
+                // Rung R9b (ResIds 8..=11): `thin_normal` is `Option`-guarded (allocated iff the
+                // boot-frozen split armed); `ssao` is ALWAYS allocated (the deferred ring reused);
+                // the à-trous interior rings are `Option`-guarded on the atrous-storage probe.
+                // NULL slots stay inert — with the split off no pass names these ResIds.
+                targets.thin_normal.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
+                targets.ssao[fi].image,
+                targets.ssao_ring_a.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
+                targets.ssao_ring_b.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
             ],
             buffers: [
                 scene.light_table.buffer,

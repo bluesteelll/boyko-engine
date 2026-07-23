@@ -269,6 +269,87 @@ fn ssao_spv_byte_identical() {
     }
 }
 
+/// Re-DXCs `hlsl_name` (relative to the shaders dir) under the EXACT frozen recipe
+/// (`-spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3`, NO `-O`) plus the given `-D`
+/// defines, into a fresh temp `.spv` named by `out_tag` (distinct per variant so parallel
+/// test binaries never collide), and returns the bytes. Never overwrites a committed
+/// artifact. Mirrors [`redxc_to_bytes`] (which stays untouched — every existing call site and
+/// assertion is unaffected) with the `marcher_spv_sync.rs::redxc_with_defines` shape, for the
+/// `-D VB_THIN=1` re-DXC below.
+fn redxc_with_defines(
+    dxc: &PathBuf,
+    dir: &PathBuf,
+    hlsl_name: &str,
+    defines: &[&str],
+    out_tag: &str,
+) -> Vec<u8> {
+    let out_spv = std::env::temp_dir().join(format!("{out_tag}.redxc.spv"));
+    let mut cmd = Command::new(dxc);
+    cmd.current_dir(dir).args(["-spirv", "-T", "cs_6_0", "-E", "main"]);
+    for d in defines {
+        cmd.args(["-D", d]);
+    }
+    cmd.args(["-fspv-target-env=vulkan1.3", hlsl_name, "-Fo"]).arg(&out_spv);
+    let status = cmd.status().expect("invariant: dxc was located and must run");
+    assert!(
+        status.success(),
+        "dxc failed re-compiling {hlsl_name} {defines:?} under the frozen recipe"
+    );
+    let bytes = std::fs::read(&out_spv).expect("invariant: dxc wrote the re-DXC .spv");
+    let _ = std::fs::remove_file(&out_spv); // best-effort tidy
+    bytes
+}
+
+#[test]
+fn ssao_vb_thin_spv_byte_identical() {
+    // R9-VB-SPLIT-PLAN.md §5 (R9b): the `-D VB_THIN=1` SSAO-gather variant for the
+    // VisibilityBuffer geo/shade split. Each `sdf_ssao_vb_<quality>.comp.spv` is compiled from
+    // the SAME per-quality `.hlsl` [`ssao_spv_byte_identical`] already proves is single-sourced
+    // from the base (`variant_hlsl(base, preset)`) — NO separate VB `.hlsl` file exists, only
+    // the additional `-D VB_THIN=1` define. This loop is the byte-identity oracle for the 3 VB
+    // `.spv` blobs: a fresh re-DXC of the committed (non-VB) variant `.hlsl` under `VB_THIN=1`
+    // must equal the committed VB `.spv`. SKIPS (does not fail) when DXC is not on this host,
+    // matching [`ssao_spv_byte_identical`]'s policy.
+    let Some(dxc) = find_dxc() else {
+        eprintln!(
+            "ssao_edsl_sync: dxc not found (no C:/VulkanSDK/.../dxc.exe, no $VULKAN_SDK/Bin, \
+             not on PATH) — SKIPPING the SSAO VB_THIN re-DXC byte-identity check on this host."
+        );
+        return;
+    };
+    let dir = shaders_dir();
+
+    for quality in SsaoQuality::ALL {
+        let hlsl_name = format!("sdf_ssao_{}.comp.hlsl", quality.suffix());
+        let spv_name = format!("sdf_ssao_vb_{}.comp.spv", quality.suffix());
+        let committed_spv_path = dir.join(&spv_name);
+
+        let committed_spv = std::fs::read(&committed_spv_path).unwrap_or_else(|e| {
+            panic!(
+                "missing committed VB SSAO SPIR-V {}: {e}\n\
+                 Compile it with (cwd = crates/boyko_rhi_vulkan/shaders, so the relative \
+                 `#include \"ray_gen.hlsli\"` resolves):\n  \
+                 C:\\VulkanSDK\\1.4.350.0\\Bin\\dxc.exe -spirv -T cs_6_0 -E main -D VB_THIN=1 \
+                 -fspv-target-env=vulkan1.3 {hlsl_name} -Fo {spv_name}\n\
+                 then commit the .spv next to the existing `sdf_ssao_{}.comp.spv`.",
+                committed_spv_path.display(),
+                quality.suffix(),
+            )
+        });
+        let regenerated = redxc_with_defines(&dxc, &dir, &hlsl_name, &["VB_THIN=1"], &spv_name);
+        assert_eq!(
+            regenerated,
+            committed_spv,
+            "{spv_name} BYTE-DRIFTED from a fresh `-D VB_THIN=1` re-DXC of {hlsl_name} — the \
+             committed VB SSAO .spv the engine loads is NOT the single-sourced text. Re-DXC \
+             with `-D VB_THIN=1` under the frozen recipe and re-commit. (regenerated = {} bytes, \
+             committed = {} bytes)",
+            regenerated.len(),
+            committed_spv.len()
+        );
+    }
+}
+
 #[test]
 fn ssao_horizon_step_host_matches_edsl_eval() {
     // Render P7 GROUP B drift gate: the SHIPPED backend (`boyko_rhi_vulkan::compute`) re-derives

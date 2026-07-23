@@ -63,7 +63,7 @@
 // pixel (`mask != 1 || view_t >= 1e30`) reconstructs `Pp = P` so its falloff contributes
 // nothing (the eDSL span carries no per-tap branch).
 //
-// # Resources (dedicated 5-binding SSAO bind-group)
+// # Resources (dedicated 5-binding SSAO bind-group — the base, non-`VB_THIN` build)
 //
 //   binding 0 : RWTexture2D<float4> (STORAGE, rgba8) — gNormal   (READ; oct + material id)
 //   binding 1 : RWTexture2D<float4> (STORAGE, rgba8) — gMaterial (READ; .b = mask)
@@ -73,22 +73,85 @@
 // `gAlbedo` is NOT bound. `[[vk::image_format]]` pins each storage image's OpTypeImage
 // (shaderStorageImageWriteWithoutFormat is OFF).
 //
+// # VB_THIN variant (`-D VB_THIN=1` — R9-VB-SPLIT-PLAN.md §5, the SSAO-gather half of the
+// VisibilityBuffer geo/shade split, R9b)
+//
+// The VB split (`vb_geo`/`vb_shade_split`) has NO material G-buffer (the no-matcache rule):
+// there is no `gMaterial` image to read `.b` from for the background/mask test, and the
+// normal source is `vb_geo`'s thin aux image (`gThinNormal`, oct-encoded in RG, roughness in
+// BA — UNREAD here) instead of the fat `gNormal`. Under this define:
+//   - `gMaterial` is DROPPED ENTIRELY — not declared, no binding reserved for it (a hole in
+//     this shader's own declarations, unlike the `sdf_forward_march.comp.hlsl` HAS_MESH
+//     precedent of reserving an unread slot in a SHARED layout — VB_THIN gets its OWN dense
+//     layout, so there is no shared layout to keep a slot alive in).
+//   - `gNormal` is REPLACED by `gThinNormal` at the SAME slot (binding 0), decoded with the
+//     SAME `oct_decode` (RG-only; the BA roughness lane is not read by this pass).
+//   - The mask test becomes `view_t < SSAO_VIEWT_BG` alone, read off the already-bound
+//     `gViewT` (the `vb_viewt`/marcher background sentinel — mirrors
+//     `viewt_from_depth_rz.comp.hlsl`'s `VIEWT_BG` convention): a background pixel takes the
+//     SAME neutral path the base's `mask != 1` arm takes (a tap reconstructs `Pp = P`; a
+//     non-lit CENTER writes the SAME neutral `1.0` the base writes).
+//   - With the material image gone, the remaining 3 images + Camera RENUMBER into a DENSE
+//     4-binding table — a DIFFERENT bind-group layout host-side (`vb_ssao_layout`), not a
+//     hole in the base's 5-binding one:
+//       binding 0 : RWTexture2D<float4> (STORAGE, rgba8) — gThinNormal (READ; oct RG, roughness BA unread)
+//       binding 1 : RWTexture2D<float>  (STORAGE, r32f)  — gViewT      (READ; surface ray param t)
+//       binding 2 : RWTexture2D<float>  (STORAGE, r8)    — ssao        (WRITE; the AO factor)
+//       binding 3 : cbuffer Camera (UNIFORM)              — the SAME 80-byte extent/camera block
+//   - The march/dither/slice math, the tuning header, and the eDSL-GENERATED
+//     `ssao_horizon_step` span are BYTE-IDENTICAL text either way — the span (and its
+//     surrounding hand-written glue) reads only function-local names (`Pp`, `P`, `n`, `hc`),
+//     never a binding, so the renumbering never touches it.
+//
 // Compiled offline (hermetic — no SDK at `cargo build` time) with:
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 sdf_ssao.comp.hlsl -Fo sdf_ssao.comp.spv
 // The `ssao_edsl_sync` re-DXC byte-identity test pins the committed .spv to this recipe.
+//
+// VB_THIN is compiled per quality preset, from the SAME per-preset `.hlsl` the base variant
+// derivation emits (`sdf_ssao_<quality>.comp.hlsl`, `boyko_shaderdsl::ssao::variant_hlsl`),
+// re-DXC'd with the ADDITIONAL `-D VB_THIN=1`:
+//   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main -D VB_THIN=1 \
+//       -fspv-target-env=vulkan1.3 sdf_ssao_low.comp.hlsl -Fo sdf_ssao_vb_low.comp.spv
+//   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main -D VB_THIN=1 \
+//       -fspv-target-env=vulkan1.3 sdf_ssao_medium.comp.hlsl -Fo sdf_ssao_vb_medium.comp.spv
+//   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main -D VB_THIN=1 \
+//       -fspv-target-env=vulkan1.3 sdf_ssao_high.comp.hlsl -Fo sdf_ssao_vb_high.comp.spv
+// The `ssao_edsl_sync` re-DXC byte-identity loop is extended to these 3 blobs.
 
-// bindings 0..2: the G-buffer lanes READ by the gather (the marcher's store views).
+// bindings 0..2 (base) / 0..1 (VB_THIN): the aux/G-buffer lanes READ by the gather (the
+// vb_geo/marcher store views). VB_THIN drops `gMaterial` and renumbers into the dense
+// 4-binding table — see the VB_THIN header doc above.
+#if VB_THIN
+[[vk::image_format("rgba8")]] RWTexture2D<float4> gThinNormal : register(u0);
+[[vk::image_format("r32f")]]  RWTexture2D<float>  gViewT      : register(u1);
+// binding 2: the SSAO output lane (R8_UNORM STORAGE in GENERAL its whole life).
+[[vk::image_format("r8")]]    RWTexture2D<float>  ssao        : register(u2);
+#else
 [[vk::image_format("rgba8")]] RWTexture2D<float4> gNormal   : register(u0);
 [[vk::image_format("rgba8")]] RWTexture2D<float4> gMaterial : register(u1);
 [[vk::image_format("r32f")]]  RWTexture2D<float>  gViewT    : register(u2);
 // binding 3: the SSAO output lane (R8_UNORM STORAGE in GENERAL its whole life).
 [[vk::image_format("r8")]]    RWTexture2D<float>  ssao      : register(u3);
+#endif
 
-// binding 4: the camera/extent UNIFORM block — byte-identical field layout to the marcher's
-// `Camera` (and the host `CompositePushConstants`). The 80-byte head is all this pass needs
-// (no M4 clip-map tail): the extent (1:1 the marched pixels) + the per-pixel view direction
-// (the shared ray-gen). Offsets pinned host-side by the existing COMPOSITE_PC_* const-asserts.
+// binding 4 (base) / binding 3 (VB_THIN, the dense renumbered table): the camera/extent
+// UNIFORM block — byte-identical field layout to the marcher's `Camera` (and the host
+// `CompositePushConstants`). The 80-byte head is all this pass needs (no M4 clip-map tail):
+// the extent (1:1 the marched pixels) + the per-pixel view direction (the shared ray-gen).
+// Offsets pinned host-side by the existing COMPOSITE_PC_* const-asserts.
+#if VB_THIN
+cbuffer Camera : register(b3) {
+    uint   count;        // total pixel count = img_w * img_h
+    uint   img_w_raw;    // runtime extent width  (0 => IMG_W_DEFAULT)
+    uint   img_h_raw;    // runtime extent height (0 => IMG_H_DEFAULT)
+    uint   camera_mode;  // RAYGEN_CAM_ORTHO | RAYGEN_CAM_PERSPECTIVE
+    float4 cam_eye;      // xyz = eye world pos          (PERSPECTIVE)
+    float4 cam_forward;  // xyz = forward basis, w = tan(fovY/2) (PERSPECTIVE)
+    float4 cam_right;    // xyz = right basis,  w = aspect (W/H)  (PERSPECTIVE)
+    float4 cam_up;       // xyz = up basis                (PERSPECTIVE)
+};
+#else
 cbuffer Camera : register(b4) {
     uint   count;        // total pixel count = img_w * img_h
     uint   img_w_raw;    // runtime extent width  (0 => IMG_W_DEFAULT)
@@ -99,6 +162,7 @@ cbuffer Camera : register(b4) {
     float4 cam_right;    // xyz = right basis,  w = aspect (W/H)  (PERSPECTIVE)
     float4 cam_up;       // xyz = up basis                (PERSPECTIVE)
 };
+#endif
 
 // Shared camera ray-generation (the SAME header the marcher + resolve include — ONE
 // ray-gen, no drift). Takes the camera fields as plain parameters (binding-agnostic).
@@ -271,12 +335,18 @@ void main(uint3 tid : SV_DispatchThreadID) {
     uint py = idx / w;
     int2 coord = int2((int)px, (int)py);
 
-    // Read the center pixel's class from the G-buffer. `mask` is a binary flag in
-    // gMaterial.b (an R8 round-trip maps 1.0 -> ~255/255, so test > 0.5); `view_t` is the
-    // surface ray param (a `1.0e30` sentinel on a non-lit / mesh / background pixel).
+    // Read the center pixel's class. `view_t` is the surface ray param (a `1.0e30` sentinel
+    // on a non-lit / mesh / background pixel). VB_THIN has no material G-buffer, so `view_t`
+    // alone is the mask; the base build additionally gates on `gMaterial.b` (a binary flag —
+    // an R8 round-trip maps 1.0 -> ~255/255, so test > 0.5).
+#if VB_THIN
+    float center_view_t = gViewT.Load(coord);
+    bool center_lit = (center_view_t < SSAO_VIEWT_BG);
+#else
     float center_mask = gMaterial.Load(coord).b;
     float center_view_t = gViewT.Load(coord);
     bool center_lit = (center_mask > 0.5) && (center_view_t < SSAO_VIEWT_BG);
+#endif
 
     // Default AO = 1.0 (no occlusion). A non-lit pixel (background) carries no surface, so
     // it gets the neutral factor and the resolve's `min(class_ao, ssao)` leaves it unchanged.
@@ -288,11 +358,16 @@ void main(uint3 tid : SV_DispatchThreadID) {
         generate_ray(px, py, w, h, camera_mode, cam_eye.xyz, cam_forward, cam_right, cam_up.xyz, ro, rd);
         float3 P = ro + rd * center_view_t;
 
-        // Decode the center surface normal ONCE (gNormal.rg = octahedral). The horizon step
-        // measures each neighbour's ELEVATION ABOVE THE TANGENT PLANE this normal defines — a
-        // flat lit surface (delta perpendicular to N) raises no horizon (AO = 1), a crevice
-        // (neighbours above the tangent) does. CONSTANT across all slices/taps.
+        // Decode the center surface normal ONCE (VB_THIN: `gThinNormal.rg`; base: `gNormal.rg`
+        // — the SAME octahedral decode either way). The horizon step measures each neighbour's
+        // ELEVATION ABOVE THE TANGENT PLANE this normal defines — a flat lit surface (delta
+        // perpendicular to N) raises no horizon (AO = 1), a crevice (neighbours above the
+        // tangent) does. CONSTANT across all slices/taps.
+#if VB_THIN
+        float3 N = oct_decode(gThinNormal.Load(coord).rg);
+#else
         float3 N = oct_decode(gNormal.Load(coord).rg);
+#endif
 
         // The screen-pixel march radius. PERSPECTIVE: a world radius R at view-depth z spans
         // ~ R*(h/2)/(z*tan(fovY/2)) pixels (clamped to a sane band). ORTHO: the view maps the
@@ -365,9 +440,17 @@ void main(uint3 tid : SV_DispatchThreadID) {
                     float3 Pp = P;
                     if (npx >= 0 && npy >= 0 && npx < (int)w && npy < (int)h) {
                         int2 ncoord = int2(npx, npy);
+#if VB_THIN
+                        float nview_t = gViewT.Load(ncoord);
+                        if (nview_t < SSAO_VIEWT_BG) {
+#else
+                        // The base arm keeps the ORIGINAL statement order (gMaterial load FIRST,
+                        // then gViewT) — the no-define compile must stay byte-identical to the
+                        // committed pre-VB_THIN .spv.
                         float nmask = gMaterial.Load(ncoord).b;
                         float nview_t = gViewT.Load(ncoord);
                         if (nmask > 0.5 && nview_t < SSAO_VIEWT_BG) {
+#endif
                             float3 nro;
                             float3 nrd;
                             generate_ray((uint)npx, (uint)npy, w, h, camera_mode, cam_eye.xyz, cam_forward, cam_right, cam_up.xyz, nro, nrd);
@@ -401,9 +484,17 @@ void main(uint3 tid : SV_DispatchThreadID) {
                     float3 Pp = P;
                     if (npx >= 0 && npy >= 0 && npx < (int)w && npy < (int)h) {
                         int2 ncoord = int2(npx, npy);
+#if VB_THIN
+                        float nview_t = gViewT.Load(ncoord);
+                        if (nview_t < SSAO_VIEWT_BG) {
+#else
+                        // The base arm keeps the ORIGINAL statement order (gMaterial load FIRST,
+                        // then gViewT) — the no-define compile must stay byte-identical to the
+                        // committed pre-VB_THIN .spv.
                         float nmask = gMaterial.Load(ncoord).b;
                         float nview_t = gViewT.Load(ncoord);
                         if (nmask > 0.5 && nview_t < SSAO_VIEWT_BG) {
+#endif
                             float3 nro;
                             float3 nrd;
                             generate_ray((uint)npx, (uint)npy, w, h, camera_mode, cam_eye.xyz, cam_forward, cam_right, cam_up.xyz, nro, nrd);

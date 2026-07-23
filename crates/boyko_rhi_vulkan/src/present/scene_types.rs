@@ -2311,6 +2311,42 @@ pub struct GBufferScene<'a> {
     /// on `resolved_render_path.path` (mirrors [`Self::forward_instance_material_ring`]'s own
     /// unconditional-once-built threading).
     pub vb_tex_instance_material_ring: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
+
+    // ---- Rung R9b: the VB geo/shade SPLIT pair + its SSAO gather (docs/R9-VB-SPLIT-PLAN.md) --
+    /// The `vb_geo` thin-aux geometry compute pipeline (`vb_geo.comp.hlsl`): the split's
+    /// producer half — fetch + interp via the Decision-0 geometry table, writing `thin_normal`
+    /// (oct RG + roughness B). Set 0 = [`Self::vb_layout0`] (reused), Set 1 =
+    /// [`Self::vb_geo_aux_layout`], Set 2 = the geometry table. `Some` only after the deferred
+    /// build hook ran (the SAME two-dependency reason as [`Self::vb_shade_pipeline`]).
+    pub vb_geo_pipeline: Option<&'a ComputePipeline>,
+    /// The `vb_shade_split` lit-producer compute pipeline (`vb_shade_split.comp.hlsl`, base
+    /// variant): the split's consumer half — RE-fetch + shade (the `vb_resolve` tail
+    /// character-identical) + `gSsao` Filament combine (+ DDGI/hwrt-vis consumption as their
+    /// rungs land). Set 1 = [`Self::vb_split_layout1`] (NOT `forward_layout1`).
+    pub vb_shade_split_pipeline: Option<&'a ComputePipeline>,
+    /// The `-D TEXTURED=1` sibling of [`Self::vb_shade_split_pipeline`] (Set 3 = the bindless
+    /// table; the per-frame base/_tex choice mirrors the fused `vb_resolve`/`vb_shade_tex`
+    /// selection — boot-frozen split arming, per-frame texture pick).
+    pub vb_shade_split_tex_pipeline: Option<&'a ComputePipeline>,
+    /// The `vb_geo` pass's Set-1 aux LAYOUT: `thin_normal` STORAGE @0 (+ the R9d
+    /// `motion`/`MotionCam` slots, placeholder-bound until then).
+    pub vb_geo_aux_layout: Option<&'a VulkanBindGroupLayout>,
+    /// The `vb_shade_split` pass's Set-1 LAYOUT (9 bindings; 8 on the software leg): @0-3 =
+    /// `forward_layout1`'s shadow table verbatim, @4 `gSsao` STORAGE, @5 `ddgi_irr` COMBINED
+    /// image+sampler, @6 `ddgi_depth` COMBINED, @7 `ResolvedDdgi` UBO, @8 cfg(hwrt)
+    /// `gShadowVis` STORAGE (hwrt-declared only — the software `.spv` never references it, so
+    /// the software layout simply omits the entry, an exact fill). A DISTINCT layout object so
+    /// [`Self::forward_layout1`] (the Forward family + `vb_resolve`) stays byte-untouched.
+    pub vb_split_layout1: Option<&'a VulkanBindGroupLayout>,
+    /// The ACTIVE `-D VB_THIN=1` SSAO gather pipeline (the quality-variant selection happens at
+    /// the `scene()` assembly seam, where the freeze-clamped `ResolvedSsao::variant` index is in
+    /// scope — the recorder just binds it): the VB split's gather reads `thin_normal` + `gViewT`
+    /// (background = the `1e30` sentinel) instead of the Deferred `gNormal`/`gMaterial` pair.
+    /// `Some` exactly when [`Self::ssao`] is armed on a VB boot.
+    pub ssao_vb_pipeline: Option<&'a ComputePipeline>,
+    /// The VB SSAO gather's dedicated 4-binding LAYOUT: `thin_normal` @0, `gViewT` @1,
+    /// `ssao` @2 (write), Camera UBO @3 — the `-D VB_THIN` dense table.
+    pub vb_ssao_layout: Option<&'a VulkanBindGroupLayout>,
 }
 
 impl GBufferScene<'_> {
@@ -2549,6 +2585,40 @@ impl GBufferScene<'_> {
     #[inline]
     pub(crate) fn path_sdf_forward_writes_viewt(&self) -> bool {
         self.path_has_sdf_forward() && self.taa.is_some()
+    }
+
+    /// Rung R9b — the SINGLE source of "this frame runs the VB geo/shade SPLIT pair"
+    /// (`vb_geo` + `vb_shade_split` arm/disarm together), read at BOTH `declare_vb_graph` and
+    /// `record_vb` (the O1 discipline). Boot-frozen: `mesh_geo_shade_split` is resolver-set
+    /// exactly once (Decision 1) and only under VB with the mesh leg present.
+    #[inline]
+    pub(crate) fn path_vb_split(&self) -> bool {
+        self.path_is_vb() && self.resolved_render_path.mesh_geo_shade_split
+    }
+
+    /// Rung R9b — the SINGLE source of "this frame's `lit` producer is the FUSED arm"
+    /// (the classify chain + the `vb_resolve`/`vb_shade` selection; NOT `vb_raster`, which
+    /// both arms consume and which stays gated on bare `mesh_leg`). The split DISPLACES the
+    /// classification chain in v1 (docs/R9-VB-SPLIT-PLAN.md §0): `vb_use_classified` is
+    /// consulted only inside this arm.
+    #[inline]
+    pub(crate) fn path_vb_fused(&self) -> bool {
+        self.path_is_vb()
+            && self.resolved_render_path.mesh_leg
+            && !self.resolved_render_path.mesh_geo_shade_split
+    }
+
+    /// Rung R9b — the SINGLE source of "this frame runs the VB SSAO gather + à-trous chain".
+    /// Anchored to the BOOT-frozen split flag (the resolver sets `mesh_geo_shade_split` only
+    /// under VB), so the gather can only arm when its `thin_normal` producer (`vb_geo`) is
+    /// boot-armed — correct even if the `RenderPathFrozenConsumers` clamp ever regressed.
+    #[inline]
+    pub(crate) fn path_vb_ssao(&self) -> bool {
+        debug_assert!(
+            !self.resolved_render_path.mesh_geo_shade_split || self.path_is_vb(),
+            "invariant: mesh_geo_shade_split is resolver-set only under VisibilityBuffer"
+        );
+        self.resolved_render_path.mesh_geo_shade_split && self.ssao.is_some()
     }
 
     /// Multi-paradigm render-path plan, rung R8 — the SINGLE source of "is this frame's

@@ -2873,6 +2873,42 @@ mod ssao_gather_tests {
         assert_eq!(ao, 1.0, "a non-lit center pixel must return the neutral AO 1.0");
     }
 
+    #[test]
+    fn vb_thin_view_t_only_mask_matches_base_dual_gate() {
+        // R9-VB-SPLIT-PLAN.md §5 (R9b): the VB_THIN shader variant drops `gMaterial` entirely
+        // and gates the background/mask test purely on `view_t >= SSAO_VIEWT_BG` (there is no
+        // material mask byte under the VB split — the no-matcache rule). The real G-buffer
+        // producer always COUPLES `mask == 0 <=> view_t == SSAO_VIEWT_BG` (see `golden_gbuffer`'s
+        // background arm), so the base's dual `mask>0.5 && view_t<BG` gate and VB_THIN's single
+        // `view_t<BG` gate classify every pixel IDENTICALLY on any REAL (coupled) G-buffer. This
+        // locks that substitutability host-side: forcing `mask` to a CONSTANT 1 (removing its
+        // discriminative power entirely — the VB_THIN shape, which carries no mask byte at all)
+        // on both the seam fixture (lit center, background neighbourhood) and the
+        // background-center fixture must NOT change the gather's AO output, since `view_t`
+        // alone still gates every tap either way.
+        for gbuf in [
+            synthetic_gbuffer(|x, y| (x == CX as i32 && y == CY as i32, 1.5)),
+            synthetic_gbuffer(|_x, _y| (false, 0.0)),
+        ] {
+            let ao_base = golden_ssao_attributes(
+                &gbuf, CX, CY, W, H, CompositeCamera::Ortho, &SsaoParams::default(),
+            );
+            let mut gbuf_vb_thin = gbuf;
+            for attrs in &mut gbuf_vb_thin {
+                attrs.mask = 1;
+            }
+            let ao_vb_thin = golden_ssao_attributes(
+                &gbuf_vb_thin, CX, CY, W, H, CompositeCamera::Ortho, &SsaoParams::default(),
+            );
+            assert_eq!(
+                ao_base, ao_vb_thin,
+                "VB_THIN's view_t-only mask gate must reproduce the base's mask&&view_t dual \
+                 gate on a coupled G-buffer (forcing mask=1 changed AO from {ao_base} to \
+                 {ao_vb_thin})"
+            );
+        }
+    }
+
     /// The EXACT per-pixel dither the gather applies (mirror of the `golden_ssao_attributes`
     /// Hilbert+R2 low-discrepancy basis): ONE 64x64 Hilbert index drives two R2 channels — ALPHA1
     /// -> the rotation slot `(r2 * ROT_N) >> 24` over the 64-entry table, ALPHA2 -> the radial

@@ -630,6 +630,29 @@ BOYKO_TAA_SHARPEN        = "rcas"
 BOYKO_RENDER_PATH        = "vb"
 BOYKO_GEOMETRY_LEGS      = "mesh"
 
+[vb_mesh_ssao]
+# Rung R9b (docs/R9-VB-SPLIT-PLAN.md): the VB geo/shade SPLIT golden - the [vb_mesh] five-sphere
+# scene with SsaoConfig::High, so the boot resolver arms mesh_geo_shade_split and the frame runs
+# vb_geo -> ssao(-D VB_THIN, thin_normal + gViewT-sentinel mask) -> a-trous x3 -> vb_shade_split
+# instead of the fused vb_resolve. NOT byte-compared to any deferred SSAO pin (the split's
+# geometric interpolated normal differs from the deferred mapped-normal gather by design).
+# The pin run itself exercises every new declare/record parity debug_assert (dev-profile build).
+# sha256_hwrt EQUALS sha256_software on this scene (each leg blessed on its own run).
+crate           = "boyko-app"
+test_binary     = "vb_mesh_ssao"
+test_name       = "vb_mesh_ssao_screenshot_dump"
+bmp             = "D:\tmp\vb_mesh_ssao.bmp"
+width           = 512
+height          = 512
+sha256_software = "85625a11684d4f2e40ee98510b840647546331b9fa0ba555499faf4109e8144f"
+sha256_hwrt     = "85625a11684d4f2e40ee98510b840647546331b9fa0ba555499faf4109e8144f"
+
+[vb_mesh_ssao.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\tmp\vb_mesh_ssao.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
 [vb_both_taa]
 # TAA-under-VB, the VIEWT rung (VisibilityBuffer x Both): [vb_taa]'s taa_jitter_eval scene
 # (which REALLY contains an SdfEdit::sphere among the mesh cubes - unlike [vb_both]'s empty

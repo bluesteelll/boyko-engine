@@ -232,6 +232,30 @@ pub struct GBufferTargets {
     /// The SSAO à-trous denoise chain's SECOND interior ping-pong ring `ssao_ring_b` — SAME
     /// format/degrade policy as [`Self::ssao_ring_a`] (built together, `None` together).
     pub(crate) ssao_ring_b: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
+    /// Rung R9b (docs/R9-VB-SPLIT-PLAN.md §4): the VB split's `thin_normal` thin-aux RING
+    /// (`R8G8B8A8_UNORM` STORAGE: oct normal RG + material-scalar roughness B — the plan's
+    /// no-matcache contract; NEVER a mesh albedo/material cache). Written by `vb_geo`
+    /// (first-touch UNDEFINED→GENERAL every frame), read by the `-D VB_THIN` SSAO gather.
+    /// `Some` iff the BOOT-frozen `mesh_geo_shade_split` armed (a fused/non-VB boot allocates
+    /// nothing — the 0%-gate). Per-FIF RINGED (the cross-frame-WAR policy, like
+    /// [`Self::viewt`]).
+    pub(crate) thin_normal: Option<[VulkanTexture; FRAMES_IN_FLIGHT]>,
+    /// Rung R9b: `vb_geo`'s Set-1 aux descriptor RING (`thin_normal[i]` @0 W; @1 = the R9d
+    /// motion slot, placeholder-bound to `thin_normal[i]` — same-type inert, the R2 idiom; @2 =
+    /// the R9d MotionCam slot, placeholder-bound to `camera_ring[i]`). `Some` iff the split
+    /// armed AND the `thin_normal` ring allocated.
+    pub(crate) vb_geo_aux_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Rung R9b: the VB `-D VB_THIN` SSAO gather's dense 4-binding descriptor RING
+    /// (`thin_normal[i]` @0, `viewt[i]` @1, `ssao[i]` @2 W, `camera_ring[i]` @3). `Some` iff
+    /// the split armed (covers every split config — the gather itself is `path_vb_ssao`-gated
+    /// at record).
+    pub(crate) vb_ssao_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Rung R9b: `vb_shade_split`'s Set-1 descriptor RING against
+    /// [`GBufferScene::vb_split_layout1`] — @0-3 the shadow vocab (the `ForwardTargets::set1`
+    /// sources verbatim), @4 `ssao[i]`, @5/@6 the DDGI combined atlases, @7 the `ResolvedDdgi`
+    /// UBO (all DDGI entries always bound, sampled only under `ddgi_mode != 0` — the GI-off
+    /// 0%-gate the deferred resolve set establishes). `Some` iff the split armed.
+    pub(crate) vb_split_set1: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// The SSAO à-trous denoise chain's `level == 0` descriptor set RING (`gAoIn` @0 = the frozen
     /// R8 `gSsao[fi]` endpoint, `gAoOut` @1 = `ssao_ring_a[fi]`, `gViewT` @2 = `viewt[fi]`, the
     /// camera UBO @3 = `scene.camera_ring[fi]`), written against
@@ -6160,6 +6184,193 @@ impl GBufferTargets {
         // or `taa_resolved`/`aa_out` failed to allocate) ⇒ byte-identical.
         let rcas_set = Self::build_rcas_set(ctx, scene, taa_resolved.as_ref(), aa_out.as_ref());
 
+        // Rung R9b (docs/R9-VB-SPLIT-PLAN.md §4): the VB split's `thin_normal` ring — built in
+        // the leak-safe DEGRADE-TO-NONE tail (the `taa_hist` discipline: each slot drains on a
+        // partial failure, no teardown weaving) and gated on the BOOT-frozen
+        // `mesh_geo_shade_split` (`None` on every fused/non-VB boot — the 0%-gate). UNLIKE the
+        // opt-in AA rings, an armed split genuinely NEEDS this ring — allocation failure here
+        // (OOM-class: RGBA8 STORAGE support is boot-fail-fast-checked like the G-buffer images)
+        // surfaces at `record_vb`'s `.expect` instead of a silent degrade.
+        let thin_normal: Option<[VulkanTexture; FRAMES_IN_FLIGHT]> =
+            if scene.resolved_render_path.mesh_geo_shade_split {
+                let mut slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
+                    [const { None }; FRAMES_IN_FLIGHT];
+                let mut ok = true;
+                for slot in slots.iter_mut() {
+                    match Self::create_gbuffer_image(ctx, extent, ImageUsage::STORAGE) {
+                        Ok(t) => *slot = Some(t),
+                        Err(_) => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok {
+                    Some(slots.map(|s| {
+                        s.expect("invariant: every thin_normal ring slot built before here")
+                    }))
+                } else {
+                    // SAFETY: the partial slots were created above on `ctx`, referenced by no
+                    // submission; each destroyed exactly once.
+                    unsafe {
+                        for s in slots.iter_mut() {
+                            if let Some(t) = s.take() {
+                                RhiDevice::destroy_texture(ctx, t);
+                            }
+                        }
+                    }
+                    eprintln!(
+                        "boyko_rhi_vulkan: thin_normal ring allocation failed under an armed \
+                         VB split (OOM-class) — record_vb will refuse the frame"
+                    );
+                    None
+                }
+            } else {
+                None
+            };
+
+        // Rung R9b: the three split descriptor rings — leak-safe DEGRADE-TO-NONE tail builders
+        // (any per-slot create failure drains the partial ring and yields `None`; `record_vb`
+        // `.expect`s them under an armed split — the thin_normal discipline above).
+        let vb_geo_aux_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = match (
+            scene.resolved_render_path.mesh_geo_shade_split,
+            thin_normal.as_ref(),
+            scene.vb_geo_aux_layout,
+        ) {
+            (true, Some(tn), Some(layout)) => {
+                let mut slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+                    [const { None }; FRAMES_IN_FLIGHT];
+                let mut ok = true;
+                for (i, dst) in slots.iter_mut().enumerate() {
+                    let entries = [
+                        BindGroupEntry::StorageImage { texture: &tn[i] },
+                        // The R9d motion slot — same-type inert placeholder (the R2 idiom).
+                        BindGroupEntry::StorageImage { texture: &tn[i] },
+                        // The R9d MotionCam slot — layout-compatible UBO placeholder.
+                        BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[i] },
+                    ];
+                    match RhiDevice::create_bind_group(ctx, &BindGroupDesc::<Vulkan> { layout, entries: &entries }) {
+                        Ok(g) => *dst = Some(g),
+                        Err(_) => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok {
+                    Some(slots.map(|s| s.expect("invariant: every vb_geo_aux slot built")))
+                } else {
+                    // SAFETY: partial groups created above on `ctx`, unreferenced; each
+                    // destroyed once.
+                    unsafe {
+                        for s in slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                    }
+                    eprintln!("boyko_rhi_vulkan: vb_geo_aux_set build failed — record_vb will refuse the frame");
+                    None
+                }
+            }
+            _ => None,
+        };
+        let vb_ssao_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = match (
+            scene.resolved_render_path.mesh_geo_shade_split,
+            thin_normal.as_ref(),
+            scene.vb_ssao_layout,
+        ) {
+            (true, Some(tn), Some(layout)) => {
+                let mut slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+                    [const { None }; FRAMES_IN_FLIGHT];
+                let mut ok = true;
+                for (i, dst) in slots.iter_mut().enumerate() {
+                    let entries = [
+                        BindGroupEntry::StorageImage { texture: &tn[i] },
+                        BindGroupEntry::StorageImage { texture: &viewt[i] },
+                        BindGroupEntry::StorageImage { texture: &ssao[i] },
+                        BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[i] },
+                    ];
+                    match RhiDevice::create_bind_group(ctx, &BindGroupDesc::<Vulkan> { layout, entries: &entries }) {
+                        Ok(g) => *dst = Some(g),
+                        Err(_) => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok {
+                    Some(slots.map(|s| s.expect("invariant: every vb_ssao slot built")))
+                } else {
+                    // SAFETY: as above.
+                    unsafe {
+                        for s in slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                    }
+                    eprintln!("boyko_rhi_vulkan: vb_ssao_set build failed — record_vb will refuse the frame");
+                    None
+                }
+            }
+            _ => None,
+        };
+        let vb_split_set1: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> =
+            match (scene.resolved_render_path.mesh_geo_shade_split, scene.vb_split_layout1) {
+                (true, Some(layout)) => {
+                    let mut slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+                        [const { None }; FRAMES_IN_FLIGHT];
+                    let mut ok = true;
+                    for (i, dst) in slots.iter_mut().enumerate() {
+                        let entries = [
+                            BindGroupEntry::CombinedImage {
+                                texture: scene.csm_cascade_texture,
+                                sampler: scene.csm_compare_sampler,
+                            },
+                            BindGroupEntry::UniformBuffer { buffer: &scene.csm_cascade_ring[i] },
+                            BindGroupEntry::CombinedImage {
+                                texture: scene.shadow_atlas_texture,
+                                sampler: scene.shadow_atlas_sampler,
+                            },
+                            BindGroupEntry::UniformBuffer { buffer: scene.shadow_atlas_ubo },
+                            BindGroupEntry::StorageImage { texture: &ssao[i] },
+                            BindGroupEntry::CombinedImage {
+                                texture: scene.ddgi_irr_texture,
+                                sampler: scene.ddgi_irr_sampler,
+                            },
+                            BindGroupEntry::CombinedImage {
+                                texture: scene.ddgi_depth_texture,
+                                sampler: scene.ddgi_depth_sampler,
+                            },
+                            BindGroupEntry::UniformBuffer { buffer: scene.ddgi_grid_ubo },
+                        ];
+                        match RhiDevice::create_bind_group(ctx, &BindGroupDesc::<Vulkan> { layout, entries: &entries }) {
+                            Ok(g) => *dst = Some(g),
+                            Err(_) => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if ok {
+                        Some(slots.map(|s| s.expect("invariant: every vb_split_set1 slot built")))
+                    } else {
+                        // SAFETY: as above.
+                        unsafe {
+                            for s in slots.iter_mut() {
+                                if let Some(g) = s.take() {
+                                    RhiDevice::destroy_bind_group(ctx, g);
+                                }
+                            }
+                        }
+                        eprintln!("boyko_rhi_vulkan: vb_split_set1 build failed — record_vb will refuse the frame");
+                        None
+                    }
+                }
+                _ => None,
+            };
+
         Ok(Self {
             depth,
             albedo,
@@ -6189,6 +6400,10 @@ impl GBufferTargets {
             viewt_from_vb_depth_set,
             ssao_ring_a,
             ssao_ring_b,
+            thin_normal,
+            vb_geo_aux_set,
+            vb_ssao_set,
+            vb_split_set1,
             ssao_atrous_read8_set,
             ssao_atrous_interior_from0_set,
             ssao_atrous_interior_from1_set,
@@ -6495,6 +6710,15 @@ impl GBufferTargets {
                     RhiDevice::destroy_bind_group(ctx, g);
                 }
             }
+            // Rung R9b: the three split descriptor rings (built in the tail — destroyed first).
+            for ring in [self.vb_split_set1, self.vb_ssao_set, self.vb_geo_aux_set]
+                .into_iter()
+                .flatten()
+            {
+                for g in ring {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
             // The deferred descriptor SETS (resolve-hwrt → sdf-forward-march → present →
             // ddgi-update → viewt-from-depth → ssao → cull → resolve → vocab), via the
             // `DeferredSets` bundle's reverse-acquisition teardown — the SAME order +
@@ -6553,6 +6777,13 @@ impl GBufferTargets {
             }
             #[cfg(feature = "hwrt")]
             if let Some(r) = self.shadow_vis {
+                for t in r {
+                    RhiDevice::destroy_texture(ctx, t);
+                }
+            }
+            // Rung R9b: the VB split's thin_normal ring (destroyed with the other
+            // `Option`-guarded aux rings; built in the leak-safe tail — reverse acquisition).
+            if let Some(r) = self.thin_normal {
                 for t in r {
                     RhiDevice::destroy_texture(ctx, t);
                 }
@@ -6856,6 +7087,10 @@ mod tests {
             viewt_from_vb_depth_set: None,
             ssao_ring_a: None,
             ssao_ring_b: None,
+            thin_normal: None,
+            vb_geo_aux_set: None,
+            vb_ssao_set: None,
+            vb_split_set1: None,
             ssao_atrous_read8_set: None,
             ssao_atrous_interior_from0_set: None,
             ssao_atrous_interior_from1_set: None,
@@ -6942,6 +7177,10 @@ mod tests {
             viewt_from_vb_depth_set: None,
             ssao_ring_a: None,
             ssao_ring_b: None,
+            thin_normal: None,
+            vb_geo_aux_set: None,
+            vb_ssao_set: None,
+            vb_split_set1: None,
             ssao_atrous_read8_set: None,
             ssao_atrous_interior_from0_set: None,
             ssao_atrous_interior_from1_set: None,

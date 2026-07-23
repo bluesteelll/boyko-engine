@@ -900,6 +900,57 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// Rung R9b (docs/R9-VB-SPLIT-PLAN.md §5): the `vb_geo` thin-aux geometry compute SPIR-V
+    /// (`shaders/vb_geo.comp.hlsl`, no `-D`): the VB split's producer half — one thread/pixel
+    /// over `vb_id` (sentinel writes nothing), `vb_geom_fetch` re-derive of the interpolated
+    /// GEOMETRIC normal, oct RG + material-scalar roughness B into `thin_normal`. Set 0 =
+    /// `vb_layout0` (reused), Set 1 = `vb_geo_aux_layout`, Set 2 = the geometry table; 64-byte
+    /// `view_proj` push. The `-D MOTION=1` sibling (`vb_geo_mv`) is rung R9d.
+    VB_GEO_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_geo.comp.spv")
+}
+
+embed_spirv! {
+    /// Rung R9b: the `vb_shade_split` lit-producer compute SPIR-V
+    /// (`shaders/vb_shade_split.comp.hlsl`, no `-D`): the split's consumer half — RE-fetch +
+    /// the `vb_resolve`-character-identical shading tail + the gSsao Filament combine (gated by
+    /// the light-header `ssao_mode` word) + DDGI probe injection (header-gated, runtime-off
+    /// until R9c arms the host side) + `#if HWRT` denoised gShadowVis (R9d). Set 1 =
+    /// `vb_split_layout1` (11 bindings — NOT `forward_layout1`).
+    VB_SHADE_SPLIT_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_shade_split.comp.spv")
+}
+
+embed_spirv! {
+    /// Rung R9b: the `-D TEXTURED=1` sibling of [`VB_SHADE_SPLIT_SPV`] (Set 3 = the shared
+    /// bindless texture table — the `vb_shade_tex` idiom).
+    VB_SHADE_SPLIT_TEX_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_shade_split_tex.comp.spv")
+}
+
+embed_spirv! {
+    /// Rung R9b: the `-D VB_THIN=1` SSAO gather, LOW quality
+    /// (`shaders/sdf_ssao_low.comp.hlsl` + the define): reads `thin_normal` (oct RG) +
+    /// `gViewT` (background = the `1e30` sentinel replaces the dropped `gMaterial.b` mask),
+    /// writes `ssao` — the VB split's gather. Dense 4-binding table
+    /// (`thin_normal`@0/`gViewT`@1/`ssao`@2/Camera@3, `vb_ssao_layout`).
+    SDF_SSAO_VB_LOW_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_ssao_vb_low.comp.spv")
+}
+
+embed_spirv! {
+    /// Rung R9b: the `-D VB_THIN=1` SSAO gather, MEDIUM quality — see [`SDF_SSAO_VB_LOW_SPV`].
+    SDF_SSAO_VB_MEDIUM_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_ssao_vb_medium.comp.spv")
+}
+
+embed_spirv! {
+    /// Rung R9b: the `-D VB_THIN=1` SSAO gather, HIGH quality — see [`SDF_SSAO_VB_LOW_SPV`].
+    SDF_SSAO_VB_HIGH_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_ssao_vb_high.comp.spv")
+}
+
+embed_spirv! {
     /// The committed mesh-MRT G-buffer PRODUCER fragment SPIR-V (`shaders/gbuffer_mrt.fs.hlsl`):
     /// writes albedo/normal/material as 3 MRT in the marcher's exact encoding (mask=1) + the
     /// marcher-aligned `SV_Depth` (euclidean under perspective, axial under ortho). Paired with
@@ -1707,6 +1758,36 @@ pub fn sdf_forward_march_viewt_spirv() -> &'static [u32] {
 #[inline]
 pub fn sdf_forward_march_sdfonly_viewt_spirv() -> &'static [u32] {
     SDF_FORWARD_MARCH_SDFONLY_VIEWT_SPV.as_words()
+}
+
+/// Rung R9b: the `vb_geo` thin-aux geometry compute SPIR-V as a `u32` word stream.
+#[inline]
+pub fn vb_geo_spirv() -> &'static [u32] {
+    VB_GEO_SPV.as_words()
+}
+
+/// Rung R9b: the `vb_shade_split` lit-producer compute SPIR-V as a `u32` word stream.
+#[inline]
+pub fn vb_shade_split_spirv() -> &'static [u32] {
+    VB_SHADE_SPLIT_SPV.as_words()
+}
+
+/// Rung R9b: the `-D TEXTURED=1` `vb_shade_split` sibling as a `u32` word stream.
+#[inline]
+pub fn vb_shade_split_tex_spirv() -> &'static [u32] {
+    VB_SHADE_SPLIT_TEX_SPV.as_words()
+}
+
+/// Rung R9b: the `-D VB_THIN=1` SSAO gather variants, indexed by the SSAO quality variant
+/// index (`0` = Low, `1` = Medium, `2` = High — the SAME index `ResolvedSsao::variant`
+/// selects with).
+#[inline]
+pub fn sdf_ssao_vb_spirv(variant: usize) -> &'static [u32] {
+    match variant {
+        0 => SDF_SSAO_VB_LOW_SPV.as_words(),
+        1 => SDF_SSAO_VB_MEDIUM_SPV.as_words(),
+        _ => SDF_SSAO_VB_HIGH_SPV.as_words(),
+    }
 }
 
 /// The Rung-3b MOTION_VECTORS-variant mesh-MRT gbuffer VERTEX SPIR-V as a `u32` word stream.
