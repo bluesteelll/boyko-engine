@@ -21,6 +21,13 @@
 //! physics leaf and NEVER linked by a physics build — the lock-free / no-alloc
 //! hot-path rules do not apply here.
 
+// Whole-module exemption from the hot-path type ban, registered under "Blanket exemptions" in
+// docs/HOT-PATH-EXCEPTIONS.md. Justified by the section above: `feature = "emit"` is OFF by
+// default and the only consumer declares it as a DEV-dependency, so no shipped binary links this
+// arena. Per-site attributes were rejected here — the SSA recorder touches the cell in ~35 places
+// and 35 identical attributes would obscure the single decision they all restate.
+#![allow(clippy::disallowed_types)]
+
 use core::cell::RefCell;
 
 use crate::scalar::FieldScalar;

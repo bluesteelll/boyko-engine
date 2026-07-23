@@ -35,3 +35,6 @@ hwrt = ["boyko-render/hwrt"]
 [dev-dependencies]
 # The zero-alloc gate reads the uploaded instance bytes back via `bytes_of`.
 bytemuck.workspace = true
+
+[lints]
+workspace = true

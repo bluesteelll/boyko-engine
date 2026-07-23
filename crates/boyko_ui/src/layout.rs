@@ -1737,6 +1737,12 @@ impl UiAlign {
 // assert the change-detection / set-if-changed steady state.
 #[cfg(test)]
 mod tests {
+    // Test-harness plumbing only (compiled out of every shipping build): the file-static
+    // `Mutex<()>` serializes tests that read the process-global `RECT_CHANGES` probe
+    // counter, and `Arc<Mutex<…>>` smuggles spawned entities out of the `Send + Sync`
+    // one-shot system closure.
+    #![allow(clippy::disallowed_types)]
+
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 

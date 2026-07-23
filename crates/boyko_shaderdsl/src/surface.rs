@@ -35,7 +35,7 @@
 //!     eval sweep reproduces the host `host_m2_surface_hit` refine CONTROL FLOW (scoped to
 //!     control flow — the cmp-`.spv` is the byte-identity oracle).
 //!   - `<EmitCf>` — the HLSL recorder; the printer
-//!     ([`crate::emit::emit_hlsl_m2_surface_hit_refine`]) walks the STMT IR into the
+//!     (`crate::emit::emit_hlsl_m2_surface_hit_refine`) walks the STMT IR into the
 //!     `[loop]`+tail span (byte-identical to the committed `.comp.spv`, proven by the cmp-`.spv`).
 //!
 //! # The named tuning consts spell as SYMBOLS

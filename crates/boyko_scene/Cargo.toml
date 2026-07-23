@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "boyko-scene"
 version = "0.1.0"
 edition = "2024"
@@ -43,3 +43,6 @@ boyko-threadpool = { path = "../boyko_threadpool" }
 # Property-based test framework (asset-streaming plan F6): the
 # `DeferredFree::drain_ready` fence-gate oracle in `asset_refs.rs`.
 proptest.workspace = true
+
+[lints]
+workspace = true

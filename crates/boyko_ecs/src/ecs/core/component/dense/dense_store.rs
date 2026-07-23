@@ -650,6 +650,10 @@ impl DenseStore {
     /// Full-structure invariant verifier (debug / property-test oracle):
     /// `e2s[s2e[s]] == s` for every live slot, and `!live(s) ⟺ s ∈ free` for
     /// every slot in `[0, len)`. Returns `true` iff the invariant holds.
+    // Test oracle model: the std `HashSet` is the REFERENCE free-list model the
+    // VM-native `DenseStore` (live bitmap + `e2s`/`s2e` tables) is differentially
+    // verified against. Only `tests/dense_d1_*.rs` call this — no engine path does.
+    #[allow(clippy::disallowed_types)]
     pub fn check_invariant(&self) -> bool {
         let len = self.column.count();
         let free: std::collections::HashSet<u32> = self.free.iter().copied().collect();

@@ -11,11 +11,11 @@
 //! type via [`Cf::Scalar`] (so the body is generic over `C: Cf` alone). Instantiated two
 //! ways:
 //!
-//! - [`EvalCf`] (here, always compiled) — REAL host control flow: [`unroll_for`] is a
-//!   real `for`, [`if_`] a real `if`, [`cont`] the loop-continue token. This is the
+//! - [`EvalCf`] (here, always compiled) — REAL host control flow: [`unroll_for`](Cf::unroll_for) is a
+//!   real `for`, [`if_`](Cf::if_) a real `if`, [`cont`](Cf::cont) the loop-continue token. This is the
 //!   CPU oracle the brick-exit eval sweep locks (it is a pure host `for`/`if` ZST; no
 //!   physics-reachable code calls it).
-//! - `EmitCf` ([`crate::emit`], `feature = "emit"`) — each combinator RECORDS a
+//! - `EmitCf` (`crate::emit`, `feature = "emit"`) — each combinator RECORDS a
 //!   statement into the emit STMT IR; the printer walks it into the `[unroll]`/`for`/
 //!   `continue` HLSL. The ENTIRE emit-recorder surface (`EmitCf` + the `Stmt`/`Block`
 //!   IR + the recorder thread-local) is whole-module `#[cfg(feature = "emit")]`-gated,
@@ -26,9 +26,10 @@
 //! A data-dependent `continue` is propagated out of the loop-body closure with the `?`
 //! operator over [`Flow`] (`= core::ops::ControlFlow<LoopOp>`). The body writes
 //! `C::if_(cond, || C::cont())?;`: when `cond` holds, `if_` returns the `cont` token
-//! ([`ControlFlow::Break`]`(`[`LoopOp::Continue`]`)`) and `?` early-returns it from the
-//! FnMut, so any LIVE TAIL mutation AFTER the continue point does NOT run — matching the
-//! host `continue`. [`unroll_for`] maps that `Break(Continue)` to a real `continue`
+//! ([`ControlFlow::Break`](core::ops::ControlFlow::Break)`(`[`LoopOp::Continue`]`)`) and `?`
+//! early-returns it from the FnMut, so any LIVE TAIL mutation AFTER the continue point does
+//! NOT run — matching the host `continue`. [`unroll_for`](Cf::unroll_for) maps that
+//! `Break(Continue)` to a real `continue`
 //! (Eval) / a `Stmt::Continue` (Emit). `core::ops::ControlFlow` is `#[must_use]`,
 //! `no_std`, and its `Try` impl is STABLE for use with `?` (implementing `Try` for a
 //! custom type is nightly; reusing the std type is not), so the Eval path stays stable +
@@ -100,8 +101,8 @@ pub trait Cf {
     /// type or a per-type handle), NOT built now.
     type Var;
 
-    /// The unrolled-loop INDUCTION VARIABLE handle passed to the [`unroll_for`](Self::
-    /// unroll_for) body. `usize` on Eval (the real `for` counter); an emit iv SSA node on
+    /// The unrolled-loop INDUCTION VARIABLE handle passed to the
+    /// [`unroll_for`](Self::unroll_for) body. `usize` on Eval (the real `for` counter); an emit iv SSA node on
     /// `EmitCf` (so [`index`](Self::index) records `vec[a]` against the iv's printed
     /// name). Carried as an associated type so the body's per-axis index spelling is
     /// backend-routed.
@@ -171,7 +172,7 @@ pub trait Cf {
     fn unroll_for<F: FnMut(Self::Iv) -> Flow>(attr: &'static str, n: usize, body: F);
 
     /// A `if cond { body() }` — `body` returns a [`Flow`] (typically a [`Cf::cont`]).
-    /// When `cond` is false, FALLS THROUGH ([`ControlFlow::Continue`]); when true,
+    /// When `cond` is false, FALLS THROUGH ([`ControlFlow::Continue`](core::ops::ControlFlow::Continue)); when true,
     /// returns whatever `body` yields (so a `C::if_(cond, || C::cont())?` early-returns
     /// the continue). Eval evaluates the real `if`; Emit records `Stmt::If`.
     ///
@@ -180,13 +181,14 @@ pub trait Cf {
     /// directly with no separate `Cf::Mask` axis to keep in sync.
     fn if_<F: FnOnce() -> Flow>(cond: <Self::Scalar as FieldScalar>::Mask, body: F) -> Flow;
 
-    /// The loop-CONTINUE token (a [`ControlFlow::Break`]`(`[`LoopOp::Continue`]`)`) —
+    /// The loop-CONTINUE token (a [`ControlFlow::Break`](core::ops::ControlFlow::Break)`(`[`LoopOp::Continue`]`)`) —
     /// `?`-propagated out of the loop body to skip the rest of the iteration.
     fn cont() -> Flow;
 
-    /// The loop-BREAK token (a [`ControlFlow::Break`]`(`[`LoopOp::Break`]`)`) — the Inc-4b
-    /// PRODUCER of the break payload [`unroll_for`](Self::unroll_for)/[`runtime_for`](Self::
-    /// runtime_for) already CONSUME (cf.rs `Break` arms, tested). Mirrors [`cont`](Self::cont):
+    /// The loop-BREAK token (a [`ControlFlow::Break`](core::ops::ControlFlow::Break)`(`[`LoopOp::Break`]`)`)
+    /// — the Inc-4b PRODUCER of the break payload
+    /// [`unroll_for`](Self::unroll_for)/[`runtime_for`](Self::runtime_for) already CONSUME
+    /// (cf.rs `Break` arms, tested). Mirrors [`cont`](Self::cont):
     /// `?`-propagated out of the loop body (typically through [`if_`](Self::if_) as `C::if_(
     /// cond, C::brk)?`) to EXIT the loop. On Eval it returns `Break(LoopOp::Break)` (which
     /// [`runtime_for`](Self::runtime_for) maps to a real `break` then returns
@@ -204,7 +206,7 @@ pub trait Cf {
     // casts, real `||`, a `Cell` out-param); Emit records SSA nodes / statements.
 
     /// The `uint` scalar — `u32` on Eval, the SSA-node handle [`Scalar`](Self::Scalar)
-    /// on Emit (a handle carrying [`crate::emit`]'s `uint` [`EmitTy`] per-node). The
+    /// on Emit (a handle carrying `crate::emit`'s `uint` `EmitTy` per-node). The
     /// brick class + the linear cell index.
     type Uint: Copy;
 
@@ -222,14 +224,15 @@ pub trait Cf {
     /// The `float3` OUT-PARAMETER local state (`cell_min`) — `Cell<[f32; 3]>` on Eval
     /// (interior mutability; the body writes through `&o`), an emit out-param NAME handle
     /// on Emit (its writes print bare `cell_min = ...;`, NOT a `float3 cell_min = ...;`
-    /// decl). Owned (no lifetime), passed by `&` to [`out_vec3_assign`](Self::
-    /// out_vec3_assign) — the SAME `&Self::Var` idiom [`get_var`](Self::get_var) uses.
+    /// decl). Owned (no lifetime), passed by `&` to
+    /// [`out_vec3_assign`](Self::out_vec3_assign) — the SAME `&Self::Var` idiom
+    /// [`get_var`](Self::get_var) uses.
     type OutVec3;
 
     /// The RETURN-VALUE cell (`Cell<u32>` on Eval — the body-local cell the IIFE reads
     /// after an early return; a ZST on Emit, the value travels in the recorded
-    /// `Stmt::Return`). Owned, passed by `&` to [`ret`](Self::ret) / [`if_ret`](Self::
-    /// if_ret).
+    /// `Stmt::Return`). Owned, passed by `&` to [`ret`](Self::ret) /
+    /// [`if_ret`](Self::if_ret).
     type RetCell;
 
     /// A `StructuredBuffer<uint>` PARAMETER (`grid`) — a BORROW of the external grid data
@@ -309,10 +312,10 @@ pub trait Cf {
     // facet ([`uge`](Self::uge) for `ugt`, [`or`](Self::or) for `and2`, [`named_uint`](Self::
     // named_uint)/[`named_lit`](Self::named_lit) for `uint_lit`); ZERO new loop/return machinery.
 
-    /// `a > b` over two [`Uint`](Self::Uint)s, producing a [`Mask`](Self::Mask) — the B1
+    /// `a > b` over two [`Uint`](Self::Uint)s, producing a [`Mask`](FieldScalar::Mask) — the B1
     /// sor-retreat's `it > 0u` iteration guard. The `uint` strict-`>` analogue of
     /// [`uge`](Self::uge) (`a >= b`); a DISTINCT opcode (`OpUGreaterThan`) from a swapped `<`.
-    /// On Eval `a > b` over the host `u32`s; on Emit a [`crate::emit`] `UGt` node printed inline
+    /// On Eval `a > b` over the host `u32`s; on Emit a `crate::emit` `UGt` node printed inline
     /// (`it > 0u`).
     fn ugt(a: Self::Uint, b: Self::Uint) -> <Self::Scalar as FieldScalar>::Mask;
 
@@ -329,8 +332,9 @@ pub trait Cf {
     ) -> <Self::Scalar as FieldScalar>::Mask;
 
     /// A `uint` LITERAL — `x` on both backends as the VALUE, but spelled `<x>u` on Emit (NOT a
-    /// symbol). The B1 sor-retreat's `0u` (a bare literal, not the symbolic [`named_uint`](Self::
-    /// named_uint) constant). On Eval returns `x`; on Emit records a [`crate::emit`] `UintLit`
+    /// symbol). The B1 sor-retreat's `0u` (a bare literal, not the symbolic
+    /// [`named_uint`](Self::named_uint) constant). On Eval returns `x`; on Emit records a
+    /// `crate::emit` `UintLit`
     /// node (printed `<x>u`, already an inline leaf typed `Uint`).
     fn uint_lit(x: u32) -> Self::Uint;
 
@@ -379,9 +383,9 @@ pub trait Cf {
 
     /// The FLOAT RETURN-VALUE cell (`Cell<f32>` on Eval — the body-local cell the
     /// function-scope IIFE reads after an early in-loop return; a ZST on Emit, the value
-    /// travels in the recorded `Stmt::Return`). The float analogue of [`RetCell`](Self::
-    /// RetCell). Owned, passed by `&` to [`ret_f`](Self::ret_f) / [`if_ret_f`](Self::
-    /// if_ret_f).
+    /// travels in the recorded `Stmt::Return`). The float analogue of
+    /// [`RetCell`](Self::RetCell). Owned, passed by `&` to [`ret_f`](Self::ret_f) /
+    /// [`if_ret_f`](Self::if_ret_f).
     type RetCellF;
 
     /// A `float4` PARAMETER (`c`, the cubic coefficients) — `[f32; 4]` on Eval (opaque:
@@ -474,8 +478,8 @@ pub trait Cf {
         body: F,
     ) -> Flow;
 
-    /// `if (cond) { then } else { els }` — the TWO-arm branch (the existing [`if_`](Self::
-    /// if_) is single-arm). `m2_regula_falsi`'s `if (f_lo * f_mid <= 0.0) { hi = mid; f_hi =
+    /// `if (cond) { then } else { els }` — the TWO-arm branch (the existing
+    /// [`if_`](Self::if_) is single-arm). `m2_regula_falsi`'s `if (f_lo * f_mid <= 0.0) { hi = mid; f_hi =
     /// f_mid; } else { lo = mid; f_lo = f_mid; }`. Each arm is a `FnOnce() -> `[`Flow`]
     /// recording its block (here pure `set_var`s, returning `Flow::Continue(())`). Eval runs
     /// the real `if`/`else`; Emit records a `Stmt::IfElse` (push/record/pop each block) and
@@ -517,7 +521,7 @@ pub trait Cf {
 
     /// The BOOL RETURN-VALUE cell (`Cell<bool>` on Eval — the body-local cell the
     /// function-scope IIFE reads after an early in-loop `return true`; a ZST on Emit, the
-    /// `true`/`false` travels in the recorded `Stmt::Return` as a [`Node::BoolLit`]). The bool
+    /// `true`/`false` travels in the recorded `Stmt::Return` as a `Node::BoolLit`). The bool
     /// analogue of [`RetCellF`](Self::RetCellF). Owned, passed by `&` to [`ret_b`](Self::ret_b)
     /// / [`if_hit_ret_b`](Self::if_hit_ret_b).
     type RetCellB;
@@ -525,27 +529,28 @@ pub trait Cf {
     /// The `out float` OUT-PARAMETER local state (`hit_t`) — `Cell<f32>` on Eval (interior
     /// mutability; the body writes through `&o`), an emit out-param NAME handle on Emit (its
     /// writes print bare `hit_t = ...;`, NOT a `float hit_t = ...;` decl). The `float` analogue
-    /// of [`OutVec3`](Self::OutVec3). Owned, passed by `&` to [`out_float_assign`](Self::
-    /// out_float_assign) / [`if_hit_ret_b`](Self::if_hit_ret_b).
+    /// of [`OutVec3`](Self::OutVec3). Owned, passed by `&` to
+    /// [`out_float_assign`](Self::out_float_assign) / [`if_hit_ret_b`](Self::if_hit_ret_b).
     type OutFloat;
 
     /// The BOOL function-return (the bool analogue of [`ret_f`](Self::ret_f)). On Eval deposits
     /// `value` into the [`RetCellB`](Self::RetCellB) and returns [`Break`](LoopOp::Return); on
-    /// Emit records a single `Stmt::Return` carrying a [`Node::BoolLit`] (printed `true`/`false`,
+    /// Emit records a single `Stmt::Return` carrying a `Node::BoolLit` (printed `true`/`false`,
     /// NOT a `uint`). `m2_surface_hit`'s function-tail `return false;`.
     fn ret_b(cell: &Self::RetCellB, value: bool) -> Flow;
 
     /// Assigns the `out float` OUT-PARAMETER (`hit_t = <rhs>;`). Eval `set`s the `Cell<f32>`
     /// through `&o`; Emit records a bare `hit_t = <rhs>;` (NO decl — `hit_t` is an `out`
-    /// parameter, not a local). The `float` analogue of [`out_vec3_assign`](Self::
-    /// out_vec3_assign). `m2_surface_hit`'s in-loop `hit_t = rt;`.
+    /// parameter, not a local). The `float` analogue of
+    /// [`out_vec3_assign`](Self::out_vec3_assign). `m2_surface_hit`'s in-loop `hit_t = rt;`.
     fn out_float_assign(o: &Self::OutFloat, v: Self::Scalar);
 
     /// The COMPOSITE in-loop hit — `if (cond) { hit_t = rt; return true; }`. Records BOTH
     /// statements in ONE [`if_`](Self::if_)-style then-block (NOT the single-statement
     /// [`if_ret_f`](Self::if_ret_f)): the out-float assign (`hit_t = rt;`) THEN the bool return
-    /// (`return true;`), IN ORDER. On Eval this writes `hit_t` BEFORE the [`Break`](LoopOp::
-    /// Return) short-circuits the IIFE, so the oracle reads the FRESH `rt` (not the stale entry
+    /// (`return true;`), IN ORDER. On Eval this writes `hit_t` BEFORE the
+    /// [`Break`](LoopOp::Return) short-circuits the IIFE, so the oracle reads the FRESH `rt`
+    /// (not the stale entry
     /// default); on Emit the then-block is EXACTLY the two committed statements in order. The
     /// `?`-propagated `Break(Return)` forwards through [`runtime_for`](Self::runtime_for) to the
     /// function-scope IIFE (skipping the tail `ret_b(false)`). `m2_surface_hit`'s
@@ -588,8 +593,9 @@ pub trait Cf {
     /// Declares a mutable `bool` local named `name` (init `init`) WITHOUT recording a
     /// declaration — the bool analogue of [`decl_param`](Self::decl_param) (which suppresses a
     /// `float` decl). The re-march's `hit`/`t` are declared by the HAND-WRITTEN preamble
-    /// (`hit = false;`), so [`set_bool_var`](Self::set_bool_var)/[`get_bool_var`](Self::
-    /// get_bool_var) must resolve their names but the span must record NO `Stmt::DeclVar` (a
+    /// (`hit = false;`), so [`set_bool_var`](Self::set_bool_var)/
+    /// [`get_bool_var`](Self::get_bool_var) must resolve their names but the span must record
+    /// NO `Stmt::DeclVar` (a
     /// `bool hit = false;` redecl would diverge the committed text). Distinct from
     /// [`decl_bool_var`](Self::decl_bool_var) (which RECORDS the decl). Eval boxes `init` into a
     /// `Cell<bool>` (identical to [`decl_bool_var`](Self::decl_bool_var) on Eval); Emit seeds a
@@ -609,7 +615,7 @@ pub trait Cf {
 
     /// Assigns a mutable `bool` local to the literal `val` — the bool analogue of
     /// [`set_var`](Self::set_var). Eval `set`s the `Cell<bool>`; Emit records a `Stmt::Assign`
-    /// whose `rhs` is a [`Node::BoolLit`] (`hit = true;`, reusing the proven `Stmt::Assign`
+    /// whose `rhs` is a `Node::BoolLit` (`hit = true;`, reusing the proven `Stmt::Assign`
     /// printer + the bool-literal node). The re-march's in-loop `hit = true;` accept.
     fn set_bool_var(v: &Self::BoolVar, val: bool);
 
@@ -625,8 +631,9 @@ pub trait Cf {
     // call1) discipline — these hooks are the EMIT recorders, `unreachable!` on Eval).
 
     /// The SIGNED-`int` value type the `select_level` return carries — `i32` on Eval (the host
-    /// fixture's level index / the `-1` outside sentinel), the SSA-node handle [`Scalar`](Self::
-    /// Scalar) on Emit (a handle carrying [`crate::emit`]'s `int` [`crate::emit::EmitTy`]). DISTINCT
+    /// fixture's level index / the `-1` outside sentinel), the SSA-node handle
+    /// [`Scalar`](Self::Scalar) on Emit (a handle carrying `crate::emit`'s `int`
+    /// `crate::emit::EmitTy`). DISTINCT
     /// from [`Uint`](Self::Uint) so the return prints a SIGNED literal (`-1`, NOT `4294967295u`) and
     /// an `(int)L` cast.
     type Int: Copy;
@@ -648,14 +655,14 @@ pub trait Cf {
 
     /// A SIGNED-`int` LITERAL — `x` on both backends as the VALUE, but spelled BARE (`-1`, NOT a
     /// `<x>u` unsigned suffix) on Emit. `select_level`'s tail `return -1;`. On Eval returns `x`; on
-    /// Emit records a [`crate::emit`] `IntLit` node (printed `-1`, an inline leaf typed
+    /// Emit records a `crate::emit` `IntLit` node (printed `-1`, an inline leaf typed
     /// [`Int`](Self::Int)). DISTINCT from [`uint_lit`](Self::uint_lit) (which spells `<x>u`).
     fn int_lit_signed(x: i32) -> Self::Int;
 
     /// `(int)<uint>` — the HLSL value-preserving `uint -> int` cast (`select_level`'s `(int)L`). On
     /// Eval `u as i32` (the in-range cast — `L < BRICK_LEVELS = 3` always fits an `i32`); on Emit a
-    /// [`crate::emit`] `IntFromUint` node (printed `(int)L`, an inline leaf typed [`Int`](Self::
-    /// Int)). The ONLY non-literal `int`-typed value surface.
+    /// `crate::emit` `IntFromUint` node (printed `(int)L`, an inline leaf typed
+    /// [`Int`](Self::Int)). The ONLY non-literal `int`-typed value surface.
     fn int_from_uint(u: Self::Uint) -> Self::Int;
 
     /// `all(p >= o)` — a component-wise `float3` `>=` (`p >= o`, a bool3) reduced by the HLSL `all`
@@ -672,8 +679,8 @@ pub trait Cf {
 
     /// Reads a PUSH-CONSTANT `uint` FIELD by its bare text (`pc.brick_levels`) — `select_level`'s
     /// runtime level count, the `[unroll]` loop's early-out guard (`if (L >= pc.brick_levels) break;`).
-    /// On Eval this hook is the EMIT recorder routed around by a threaded closure (the [`call1`](Self::
-    /// call1) discipline), so it is UNREACHED (`unreachable!`); on Emit it records a [`crate::emit`]
+    /// On Eval this hook is the EMIT recorder routed around by a threaded closure (the
+    /// [`call1`](Self::call1) discipline), so it is UNREACHED (`unreachable!`); on Emit it records a `crate::emit`
     /// `PcUint` node printing the bare `field` text. `field` is the LITERAL HLSL text (`"pc.brick_levels"`).
     fn pc_uint(field: &'static str) -> Self::Uint;
 
@@ -681,7 +688,7 @@ pub trait Cf {
     /// (`select_level`'s `m2_levels[L].origin_brick_world.xyz` / `m2_levels[L].dims_atlas_dim.xyz`).
     /// `field` carries the member + swizzle (`"origin_brick_world.xyz"`). The `M4Level` STRUCT LAYOUT
     /// is NOT modeled — only the access text. On Eval this hook is the EMIT recorder routed around by
-    /// a threaded closure (UNREACHED, `unreachable!`); on Emit a [`crate::emit`] `LevelField` node
+    /// a threaded closure (UNREACHED, `unreachable!`); on Emit a `crate::emit` `LevelField` node
     /// printing `m2_levels[<L>].<field>`.
     fn level_field_vec3(l: Self::Iv, field: &'static str) -> Self::Vec3f;
 
@@ -689,7 +696,7 @@ pub trait Cf {
     /// `m2_levels[<L>].<field>` (`select_level`'s `m2_levels[L].origin_brick_world.w`). The scalar
     /// analogue of [`level_field_vec3`](Self::level_field_vec3) (a `.w` swizzle). On Eval this hook
     /// is the EMIT recorder routed around by a threaded closure (UNREACHED, `unreachable!`); on Emit
-    /// a [`crate::emit`] `LevelField` node printing `m2_levels[<L>].<field>` (typed `float`).
+    /// a `crate::emit` `LevelField` node printing `m2_levels[<L>].<field>` (typed `float`).
     fn level_field_scalar(l: Self::Iv, field: &'static str) -> Self::Scalar;
 
     /// `if (cond) { return <int>; }` — the SIGNED-`int` early-return guard (the `int` analogue of
@@ -734,8 +741,8 @@ pub trait Cf {
 
     /// A NAMED LOCAL `int` ARRAY (`int cell[3]`) — an `IntArr` name handle on Emit, an unreachable
     /// ZST on Eval (the body is EMIT-ONLY). Declared by [`decl_array_int`](Self::decl_array_int),
-    /// read/written per-element by [`arr_int_get`](Self::arr_int_get) / [`arr_int_set`](Self::
-    /// arr_int_set) / [`arr_int_add_assign`](Self::arr_int_add_assign).
+    /// read/written per-element by [`arr_int_get`](Self::arr_int_get) /
+    /// [`arr_int_set`](Self::arr_int_set) / [`arr_int_add_assign`](Self::arr_int_add_assign).
     type IntArr: Copy;
 
     /// A NAMED LOCAL `float` ARRAY (`float t_next[3]` / `float s[8]`) — the `float` analogue of
@@ -776,8 +783,8 @@ pub trait Cf {
     /// computes the access-chain TWICE at `-O0`, so it is NOT byte-identical.
     fn arr_int_add_assign(a: Self::IntArr, idx: Self::Uint, v: Self::Int);
     /// `<name>[<idx>] += <v>;` — a `float`-array element COMPOUND-ADD (`t_next[axis] +=
-    /// t_delta[axis];`). Same `+=`-token R1 rationale as [`arr_int_add_assign`](Self::
-    /// arr_int_add_assign).
+    /// t_delta[axis];`). Same `+=`-token R1 rationale as
+    /// [`arr_int_add_assign`](Self::arr_int_add_assign).
     fn arr_float_add_assign(a: Self::FloatArr, idx: Self::Uint, v: Self::Scalar);
 
     // -- Group 2: the generalized call sites ------------------------------------------
@@ -892,7 +899,7 @@ pub trait Cf {
     // splits a 16-bit `uint id` into its low/high bytes (`id & 255u`, `id >> 8u & 255u`) and returns
     // each as a normalized `[0,1]` UNORM in a `float2` (`float2((float)lo / 255.0, (float)hi /
     // 255.0)`). The facets below land the MINIMAL `float2` axis (mirroring the `float3` facets) plus
-    // the two DEAD bitwise nodes' methods ([`crate::emit`]'s `Node::And` / `Node::Shr`, whose printer
+    // the two DEAD bitwise nodes' methods (`crate::emit`'s `Node::And` / `Node::Shr`, whose printer
     // arms already exist). The named `lo`/`hi` `uint` temps reuse [`temp_uint`](Self::temp_uint); the
     // `255u`/`8u` literals reuse [`uint_lit`](Self::uint_lit); the `(float)lo` cast reuses
     // [`float_from_uint`](Self::float_from_uint); the `/ 255.0` divide is the scalar
@@ -900,7 +907,7 @@ pub trait Cf {
 
     /// The `float2` VALUE type the `pack_material_id_ba` return carries — `[f32; 2]` on Eval (the
     /// `[lo/255, hi/255]` pair), the SSA-node handle [`Scalar`](Self::Scalar) on Emit (a
-    /// [`crate::emit::Node::Vec2FromScalars`] typed `float2`). The `float2` analogue of
+    /// `crate::emit::Node::Vec2FromScalars` typed `float2`). The `float2` analogue of
     /// [`Vec3f`](Self::Vec3f). `Copy` (a `[f32; 2]` / a node handle).
     type Vec2f: Copy;
 
@@ -911,14 +918,14 @@ pub trait Cf {
     type RetCellV2;
 
     /// `a & b` over two [`Uint`](Self::Uint)s — the bitwise AND (`id & 255u`). ACTIVATES the
-    /// [`crate::emit::Node::And`] (its `{} & {}` printer arm already exists). On Eval `a & b` over the
+    /// `crate::emit::Node::And` (its `{} & {}` printer arm already exists). On Eval `a & b` over the
     /// host `u32`s; on Emit an `And` node (an UNPARENTHESIZED inline `id & 255u`). SEPARATE from the
     /// logical [`and2`](Self::and2) (which joins two Masks and prints `&&`): this is the bitwise `&`
     /// over two `uint` VALUES, result-typed [`Uint`](Self::Uint).
     fn and_u(a: Self::Uint, b: Self::Uint) -> Self::Uint;
 
     /// `a >> b` over two [`Uint`](Self::Uint)s — the logical right shift (`id >> 8u`). ACTIVATES the
-    /// [`crate::emit::Node::Shr`] (its `{} >> {}` printer arm already exists). On Eval `a >> b` over
+    /// `crate::emit::Node::Shr` (its `{} >> {}` printer arm already exists). On Eval `a >> b` over
     /// the host `u32`s; on Emit a `Shr` node (an UNPARENTHESIZED inline `id >> 8u`). The
     /// `id >> 8u & 255u` precedence is correct UNPARENTHESIZED (`>>` binds tighter than `&`).
     fn shr_u(a: Self::Uint, b: Self::Uint) -> Self::Uint;
@@ -926,7 +933,7 @@ pub trait Cf {
     /// `float2(<x>, <y>)` from TWO already-`float` SCALAR expressions — the `pack_material_id_ba`
     /// return ctor. The `float2` analogue of [`vec3_from_scalars`](Self::vec3_from_scalars) (three
     /// scalars). Asserts both operands `Float`; result [`Vec2f`](Self::Vec2f). On Eval `[x, y]`; on
-    /// Emit a [`crate::emit::Node::Vec2FromScalars`].
+    /// Emit a `crate::emit::Node::Vec2FromScalars`.
     fn vec2_from_scalars(x: Self::Scalar, y: Self::Scalar) -> Self::Vec2f;
 
     /// The `float2` function-return — `return <float2>;` (the `pack_material_id_ba` tail `return
@@ -954,7 +961,7 @@ pub trait Cf {
     /// A MUTABLE `float3` LOCAL holding the SUPPRESSED-DECL parameter `n` (the param reassigned in
     /// place by `n /= ...`). The `float3` analogue of [`decl_param`](Self::decl_param) (the scalar
     /// suppressed-decl carried param): Eval stores the `[f32; 3]` in a [`core::cell::Cell`] (interior
-    /// mutability — the `if` body reads/assigns through `&var`); Emit seeds a [`Var`](crate::emit::Var)
+    /// mutability — the `if` body reads/assigns through `&var`); Emit seeds a `Var`
     /// name entry but records NO `Stmt::DeclVar` (a `float3 n = ...;` redecl would diverge the committed
     /// text — `n` is the HLSL signature parameter). Distinct from [`Var`](Self::Var) (a `float` local)
     /// only in the held type. Owned, passed by `&` to [`get_var_vec3`](Self::get_var_vec3) /
@@ -965,7 +972,7 @@ pub trait Cf {
     /// `float3` analogue of [`decl_param`](Self::decl_param) (which seeds a `float` param). The `init`
     /// is the param's symbolic seed ([`Vec3f`](Self::Vec3f)); Eval boxes its `[f32; 3]` into a `Cell`
     /// (identical to [`decl_param`](Self::decl_param) on Eval — the no-decl distinction is Emit-only),
-    /// Emit seeds a [`Var`](crate::emit::Var) name entry but records NO statement (the SUPPRESSED-DECL
+    /// Emit seeds a `Var` name entry but records NO statement (the SUPPRESSED-DECL
     /// path). Returns the [`Vec3Var`](Self::Vec3Var) handle so the body's `n.x` / `n.xy` reads resolve
     /// the name `n`.
     fn decl_param_vec3(name: &'static str, init: Self::Vec3f) -> Self::Vec3Var;
@@ -981,7 +988,7 @@ pub trait Cf {
     /// A MUTABLE `float2` LOCAL (the `float2 e = n.xy;` declared local, reassigned inside the `if`).
     /// The `float2` analogue of [`Var`](Self::Var) (a `float` local) / [`Vec3Var`](Self::Vec3Var):
     /// Eval stores the `[f32; 2]` in a [`core::cell::Cell`]; Emit records a `Stmt::DeclVar` whose `ty`
-    /// is [`crate::emit::EmitTy::Float2`] (`float2 e = <init>;`). Owned, passed by `&` to
+    /// is `crate::emit::EmitTy::Float2` (`float2 e = <init>;`). Owned, passed by `&` to
     /// [`get_var_vec2`](Self::get_var_vec2) / [`set_var_vec2`](Self::set_var_vec2).
     type Vec2Var;
 
@@ -1000,42 +1007,42 @@ pub trait Cf {
     fn set_var_vec2(v: &Self::Vec2Var, val: Self::Vec2f);
 
     /// `v.xy` — a `float3` → `float2` swizzle (`n.xy`). Eval drops the `.z` lane (`[v[0], v[1]]`); Emit
-    /// records a [`crate::emit::Node::Vec2Swizzle`] printing `<src>.xy`. Result [`Vec2f`](Self::Vec2f).
+    /// records a `crate::emit::Node::Vec2Swizzle` printing `<src>.xy`. Result [`Vec2f`](Self::Vec2f).
     fn vec3_xy(v: Self::Vec3f) -> Self::Vec2f;
 
     /// `v.yx` — a `float2` → `float2` lane SWAP (`e.yx`). Eval swaps (`[v[1], v[0]]`); Emit records a
-    /// [`crate::emit::Node::Vec2Swizzle`] printing `<src>.yx`. Result [`Vec2f`](Self::Vec2f).
+    /// `crate::emit::Node::Vec2Swizzle` printing `<src>.yx`. Result [`Vec2f`](Self::Vec2f).
     fn vec2_yx(v: Self::Vec2f) -> Self::Vec2f;
 
     /// `v.x` — a `float2` → `float` component read (`e.x`). Eval reads lane 0; Emit records a
-    /// [`crate::emit::Node::Vec2Comp`] printing `<src>.x`. Result [`Scalar`](Self::Scalar).
+    /// `crate::emit::Node::Vec2Comp` printing `<src>.x`. Result [`Scalar`](Self::Scalar).
     fn vec2_x(v: Self::Vec2f) -> Self::Scalar;
 
     /// `v.y` — a `float2` → `float` component read (`e.y`). Eval reads lane 1; Emit records a
-    /// [`crate::emit::Node::Vec2Comp`] printing `<src>.y`. Result [`Scalar`](Self::Scalar).
+    /// `crate::emit::Node::Vec2Comp` printing `<src>.y`. Result [`Scalar`](Self::Scalar).
     fn vec2_y(v: Self::Vec2f) -> Self::Scalar;
 
     /// `abs(v)` — a component-wise `float2` absolute value (`abs(e.yx)`). Eval is `[|x|, |y|]`; Emit
-    /// records a [`crate::emit::Node::Vec2Abs`] printing `abs(<v>)`. Result [`Vec2f`](Self::Vec2f).
+    /// records a `crate::emit::Node::Vec2Abs` printing `abs(<v>)`. Result [`Vec2f`](Self::Vec2f).
     fn vec2_abs(v: Self::Vec2f) -> Self::Vec2f;
 
     /// `a * b` — a component-wise `float2` multiply (`(1.0 - abs(e.yx)) * float2(...)`). Eval is `[a0*b0,
-    /// a1*b1]`; Emit records a [`crate::emit::Node::Vec2Mul`] (the `float2` analogue of
+    /// a1*b1]`; Emit records a `crate::emit::Node::Vec2Mul` (the `float2` analogue of
     /// [`vec3_mul_scalar`](Self::vec3_mul_scalar), but BOTH operands `float2`). Result
     /// [`Vec2f`](Self::Vec2f).
     fn vec2_mul(a: Self::Vec2f, b: Self::Vec2f) -> Self::Vec2f;
 
     /// `v * s` — a `float2` times a `float` scalar (`e * 0.5`). Eval is `[v0*s, v1*s]`; Emit records a
-    /// [`crate::emit::Node::Vec2MulScalar`] (the `float2` analogue of
+    /// `crate::emit::Node::Vec2MulScalar` (the `float2` analogue of
     /// [`vec3_mul_scalar`](Self::vec3_mul_scalar)). Result [`Vec2f`](Self::Vec2f).
     fn vec2_mul_scalar(v: Self::Vec2f, s: Self::Scalar) -> Self::Vec2f;
 
     /// `v + s` — a `float2` plus a `float` scalar broadcast (`... + 0.5`). Eval is `[v0+s, v1+s]`; Emit
-    /// records a [`crate::emit::Node::Vec2AddScalar`]. Result [`Vec2f`](Self::Vec2f).
+    /// records a `crate::emit::Node::Vec2AddScalar`. Result [`Vec2f`](Self::Vec2f).
     fn vec2_add_scalar(v: Self::Vec2f, s: Self::Scalar) -> Self::Vec2f;
 
     /// `s - v` — a `float` scalar (broadcast) MINUS a `float2`, scalar on the LEFT (`1.0 - abs(e.yx)`).
-    /// Eval is `[s-v0, s-v1]`; Emit records a [`crate::emit::Node::Vec2RSubScalar`] printing `<s> -
+    /// Eval is `[s-v0, s-v1]`; Emit records a `crate::emit::Node::Vec2RSubScalar` printing `<s> -
     /// <v>` (the scalar-LHS form, DISTINCT from a `float2 - float` which has no committed use here).
     /// Result [`Vec2f`](Self::Vec2f).
     fn vec2_rsub_scalar(s: Self::Scalar, v: Self::Vec2f) -> Self::Vec2f;
@@ -1046,7 +1053,7 @@ pub trait Cf {
     /// regula-falsi root-finder) and [`FieldScalar::select`] (the condition-wrapped `(cond) ? t : e`):
     /// `oct_encode` spells the un-parenthesized form (the comparand `e.x >= 0.0` + the literals
     /// `1.0`/`-1.0` are all leaves, so no precedence wrap is needed). Eval is the eager `if cond { t }
-    /// else { e }` (both arms pure `±1.0` literals); Emit records a [`crate::emit::Node::SelectBare`]
+    /// else { e }` (both arms pure `±1.0` literals); Emit records a `crate::emit::Node::SelectBare`
     /// printing all three parts un-wrapped.
     fn select_bare(
         cond: <Self::Scalar as FieldScalar>::Mask,

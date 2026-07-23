@@ -1,7 +1,7 @@
 //! The brick-atlas `R8_SNORM` decode leaves, authored ONCE generic over
 //! [`FieldScalar`] (A2 — the first INTEGER/bit leaf).
 //!
-//! [`decode_snorm8`] is the inverse of the [`fill_brick`] snorm encode: a stored
+//! [`decode_snorm8`] is the inverse of the `fill_brick` snorm encode: a stored
 //! narrow-band code `q ∈ [-128, 127]` maps onto a world distance. Mirroring the
 //! frozen reference operand-for-operand:
 //! `boyko_sdf_math::brick::decode_snorm8` (the CPU oracle) AND the GPU brick fetch in
@@ -186,7 +186,7 @@ pub fn cubic_eval<S: FieldScalar>(c: &[S; 4], t: S) -> S {
 /// wrong interpolant / drifts the golden — this MUST NOT be "simplified".
 ///
 /// The `Emit` instantiation returns through this `[S; 4]` array; the printer
-/// ([`crate::emit::emit_hlsl_jcgt_cubic_coeffs`]) emits the array as the GPU's
+/// (`crate::emit::emit_hlsl_jcgt_cubic_coeffs`) emits the array as the GPU's
 /// `float4(c0, c1, c2, c3)` construct.
 #[inline]
 pub fn jcgt_cubic_coeffs<S: FieldScalar>(s: &[S; 8], a: [S; 3], b: [S; 3]) -> [S; 4] {

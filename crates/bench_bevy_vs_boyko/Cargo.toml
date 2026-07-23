@@ -86,3 +86,6 @@ harness = false
 # compiles on nightly with the `nightly` feature enabled. Excluded from the
 # stable `--all-targets` build to keep `cargo clippy --workspace` green.
 required-features = ["nightly"]
+
+[lints]
+workspace = true

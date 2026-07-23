@@ -7247,7 +7247,7 @@ impl GBufferFrame {
     /// [`Renderer::render_gbuffer_frame`] has synced [`Self::targets`]. A material-table
     /// grow before targets exist is safe either way (no set references the old buffer
     /// yet, and the first sync binds the new one), but the runner gates the rebind on
-    /// this so [`MaterialTable::rebind_pending`](boyko_render::MaterialTable::rebind_pending)
+    /// this so `MaterialTable::rebind_pending`
     /// is only cleared once a repoint actually happened.
     #[inline]
     pub fn targets_ready(&self) -> bool {
@@ -7350,18 +7350,18 @@ impl GBufferFrame {
     }
 
     /// Anti-aliasing Stage 4 (TAA W5): the fenced TAA tunables UBO ring slot the host memcpys
-    /// [`ResolvedTaa`](boyko_render's `ResolvedTaa`) into each frame (the resolve set binds
+    /// boyko_render's `ResolvedTaa` into each frame (the resolve set binds
     /// `taa_ubo[fi]` @5). Returns `None` when the targets are not yet synced (frame 0) OR TAA is
     /// not armed (the `taa_ubo` ring was never minted) — in both cases the resolve is not
     /// recorded, so the (absent) slot is never read. Per-FIF ringed under the same WAR discipline
-    /// as [`Self::shadow_denoise_ubo_slot`]. NOT `hwrt`-gated.
+    /// as `Self::shadow_denoise_ubo_slot`. NOT `hwrt`-gated.
     #[inline]
     pub fn taa_ubo_slot(&self, slot: usize) -> Option<&BoundBuffer> {
         self.targets.as_ref().and_then(|t| t.taa_ubo.as_ref()).map(|ring| &ring[slot])
     }
 
     /// Anti-aliasing Stage 4 (TAA W5): the fenced DEDICATED `MotionCam` UBO ring slot the host
-    /// memcpys [`MotionCam`](boyko_render's `MotionCam`) into each frame (the resolve set binds
+    /// memcpys boyko_render's `MotionCam` into each frame (the resolve set binds
     /// `taa_motion_cam_ubo[fi]` @7) — SEPARATE from the hwrt mesh-shadow `motion_cam_ubo` (see
     /// `TaaActivation`'s doc). Returns `None` when the targets are not yet synced OR TAA is not
     /// armed. NOT `hwrt`-gated.

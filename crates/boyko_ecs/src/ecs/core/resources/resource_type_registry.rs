@@ -47,11 +47,11 @@
 //! traffic.
 
 use std::any::TypeId;
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use boyko_utils::type_intern::TypeIntern;
 
 use crate::ecs::core::resources::resource::Resource;
 use crate::ecs::core::resources::resource_registry;
+use crate::ecs::core::resources::resource_registry::RESOURCE_SLOT_COUNT;
 use crate::ecs::identifiers::primitives::ResourceId;
 
 /// Process-global registry mapping `TypeId::of::<T>()` to the `ResourceId`
@@ -60,16 +60,22 @@ use crate::ecs::identifiers::primitives::ResourceId;
 /// Replaces the per-impl `static SLOT` pattern, which collapses across
 /// monomorphisations inside a generic `resource_id()` body (see the module
 /// doc-comment for the rust#22991 / rfcs#2130 rationale).
-static REGISTRY: OnceLock<Mutex<HashMap<TypeId, ResourceId>>> = OnceLock::new();
+///
+/// 2026-07 audit: this was a `OnceLock<Mutex<HashMap<TypeId, ResourceId>>>` justified with
+/// "`ResState<T>` caches the id at system init, so no per-frame path locks it". The cache is
+/// real but not exhaustive — the audit traced an UNCONDITIONAL `resource_id_for` call inside
+/// `boyko_app`'s `frame_loop`, so the process-global lock was taken every frame. [`TypeIntern`]
+/// preserves the rust#22991 fix and removes the lock; the hit path is a hash plus one acquire
+/// load.
+static REGISTRY: TypeIntern<TypeId, { RESOURCE_SLOT_COUNT * 2 }> = TypeIntern::new();
 
 /// Returns the process-global [`ResourceId`] for the generic resource `T`,
 /// minting it on first call.
 ///
-/// The get-or-mint is atomic under the registry `Mutex`: the map is probed,
-/// a fresh id minted via [`resource_registry::register_new`] **only if
-/// absent**, inserted, and returned — all inside one lock. Concurrent callers
-/// for the same `T` therefore observe the same id (the second caller blocks on
-/// the lock, then finds the entry the first caller inserted).
+/// The get-or-mint is atomic under [`REGISTRY`]'s cold mint gate: the table is probed
+/// lock-free, and only a first-sight `T` claims the gate, re-probes, and mints via
+/// [`resource_registry::register_new`]. Concurrent callers for the same `T` therefore observe
+/// the same id (the loser of the race re-probes under the gate and finds the winner's entry).
 ///
 /// `register_new::<T>()` does not re-enter `T::resource_id()` — it mints from
 /// the global `NEXT_RESOURCE_ID` counter and stores `ResourceInfo::new_static`
@@ -83,23 +89,34 @@ static REGISTRY: OnceLock<Mutex<HashMap<TypeId, ResourceId>>> = OnceLock::new();
 /// # Panics
 ///
 /// Propagates [`resource_registry::register_new`]'s panics (resource-slab
-/// exhaustion at `RESOURCE_SLOT_COUNT`, or a Component/Resource clash for `T`).
-/// Panics if the registry `Mutex` is poisoned by a previous panicking caller.
+/// exhaustion at [`RESOURCE_SLOT_COUNT`], or a Component/Resource clash for `T`).
+#[inline]
 pub fn resource_id_for<T: Resource>() -> ResourceId {
-    let registry = REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut map = registry
-        .lock()
-        .expect("invariant: resource type registry mutex poisoned");
-    let key = TypeId::of::<T>();
-    if let Some(&id) = map.get(&key) {
-        return id;
-    }
     // `register_new` mints from `NEXT_RESOURCE_ID` and stores
     // `ResourceInfo::new_static::<T>()`; it does not call `T::resource_id()`,
-    // so this is not re-entrant.
-    let id = ResourceId::new(resource_registry::register_new::<T>());
-    map.insert(key, id);
-    id
+    // so this is not re-entrant through the mint gate.
+    let raw = REGISTRY
+        .get_or_mint_with(TypeId::of::<T>(), |_| {
+            resource_registry::register_new::<T>() as u32
+        })
+        .unwrap_or_else(resource_intern_full);
+    ResourceId::new(raw as usize)
+}
+
+/// Terminal panic for a full [`REGISTRY`] table.
+///
+/// Unreachable in practice: the table is sized at `RESOURCE_SLOT_COUNT * 2`, so
+/// [`resource_registry::register_new`]'s own slab-exhaustion panic fires first. Reaching here
+/// means the two caps drifted apart in a later edit.
+#[cold]
+#[inline(never)]
+fn resource_intern_full() -> u32 {
+    panic!(
+        "resource type intern table full: sized at RESOURCE_SLOT_COUNT * 2 = {} but could not \
+         seat another TypeId. The table must stay at least twice the slab cap — see TypeIntern's \
+         load-factor contract.",
+        RESOURCE_SLOT_COUNT * 2
+    );
 }
 
 #[cfg(test)]

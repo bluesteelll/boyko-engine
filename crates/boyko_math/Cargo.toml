@@ -15,3 +15,6 @@ path = "src/lib.rs"
 # `len_sq.sqrt().recip()` for normalize, NO FMA/`mul_add`/`rsqrt`/`rcp`/fast-math
 # anywhere. Adding a dep or a fast-math feature would break that contract.
 [dependencies]
+
+[lints]
+workspace = true

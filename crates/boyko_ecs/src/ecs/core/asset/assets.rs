@@ -1116,6 +1116,12 @@ impl<T: AssetBacking> Drop for Assets<T> {
 
 #[cfg(test)]
 mod tests {
+    // Test oracle model: the std `HashMap`/`HashSet` here are the REFERENCE
+    // implementation the VM-native `Assets<T>` store (ComponentPool column +
+    // slot table) is differentially verified against. Compiled out of every
+    // shipping build.
+    #![allow(clippy::disallowed_types)]
+
     use super::*;
 
     crate::impl_asset_pod_backing!(u64, u32);

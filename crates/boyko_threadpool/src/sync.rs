@@ -49,7 +49,7 @@
 
 #[cfg(loom)]
 #[allow(unused_imports)]
-pub(crate) use loom::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+pub(crate) use loom::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 #[cfg(loom)]
 #[allow(unused_imports)]
 pub(crate) use loom::sync::{Condvar, Mutex};
@@ -59,9 +59,19 @@ pub(crate) use loom::thread::{self, Thread};
 
 #[cfg(not(loom))]
 #[allow(unused_imports)]
-pub(crate) use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+pub(crate) use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+// `Mutex` re-export for the builder's one-shot bootstrap handshake, which parks a worker on a
+// `Condvar` until the pool publishes itself — a genuine blocking wait, not a memo.
+//
+// 2026-07 audit: `ScopeShared`'s panic-payload slot used to be the shim's other user, justified
+// as "cold-path only (panics are rare)". Half of that was true — the WRITE only happens on a
+// panic, but `Scope::drop` read it through an unconditional `lock()` on EVERY scope teardown,
+// and `ScopeShared::new` constructed a fresh `Mutex` per scope. Under the parallel scheduler a
+// scope is created and torn down per system run, so a "panics are rare" lock sat on a
+// per-system-run path. It is now an `AtomicPtr` CAS-once slot: the no-panic path reads null.
 #[cfg(not(loom))]
 #[allow(unused_imports)]
+#[allow(clippy::disallowed_types)]
 pub(crate) use std::sync::{Condvar, Mutex};
 #[cfg(not(loom))]
 #[allow(unused_imports)]

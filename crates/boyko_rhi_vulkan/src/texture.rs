@@ -54,7 +54,7 @@ use crate::memory::select_memory_type;
 
 /// The maximum number of array layers ANY multi-layer depth texture may carry — the fixed inline
 /// capacity of the per-layer render-view set. Sized for the LARGEST consumer: the Shadow Phase 5
-/// Inc-1-GPU spot/point shadow ATLAS ([`boyko_render::shadow_atlas::M_SLOTS`] == 16 layers). The CSM
+/// Inc-1-GPU spot/point shadow ATLAS (`boyko_render::shadow_atlas::M_SLOTS` == 16 layers). The CSM
 /// cascade texture (4 layers ≤ 16) shares this same view set — the unused tail views are `NULL`
 /// (negligible cost). A `desc.array_layers` must be in `1..=MAX_TEXTURE_LAYERS`.
 pub const MAX_TEXTURE_LAYERS: usize = 16;

@@ -311,6 +311,10 @@ pub struct ThreadPool {
     /// that an explicit [`join`](Self::join) and [`Drop`] are
     /// join-exactly-once via `take()`. The `Mutex` is touched only on the
     /// cold teardown path; never on a hot path.
+    // Shutdown plumbing: the only `lock()` sites are `ThreadPool::join` and
+    // `ThreadPool::drop`, both once-per-process teardown. Workers cannot reach
+    // this field at all.
+    #[allow(clippy::disallowed_types)]
     join_handles: std::sync::Mutex<Option<Vec<WorkerJoin>>>,
 }
 
@@ -540,6 +544,11 @@ impl ThreadPoolBuilder {
     /// internally so that the inner state stays alive at least until every
     /// worker exits, but they do NOT hold the handle (so [`ThreadPool::drop`]
     /// runs when the last `Arc<ThreadPool>` is dropped — plan §6).
+    // Pool bootstrap: the `Mutex`es here are the one-shot `Arc<PoolInner>`
+    // publication handshake (dropped once every worker has read it) and the
+    // teardown-only `join_handles` slot. Runs once at engine boot, never
+    // per-frame.
+    #[allow(clippy::disallowed_types)]
     pub fn build(self) -> Arc<ThreadPool> {
         let requested = self.num_threads.unwrap_or_else(default_worker_count);
         let worker_count = requested.clamp(1, MAX_WORKERS);

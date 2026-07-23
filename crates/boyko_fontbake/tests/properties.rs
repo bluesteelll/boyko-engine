@@ -65,16 +65,25 @@ fn arb_baked() -> impl Strategy<Value = BakedFont> {
         (any::<u32>(), any::<i16>()).prop_map(|(key, adjust)| KernPair { key, adjust }),
         0..8,
     );
-    let pixels = prop::collection::vec(any::<u8>(), 0..256);
+    // 2026-07 audit: the atlas dimensions must SATISFY `AtlasImage`'s documented
+    // invariant (`pixels.len() == width * height * 4`, tightly-packed RGBA8, non-zero
+    // extent). The previous generator emitted `width = pixels.len(), height = 1`,
+    // i.e. a payload 4x too small for its own declared extent — it was encoding the
+    // very defect `read_bfont` now rejects (that mismatch reaches
+    // `vkCmdCopyBufferToImage` as an out-of-bounds device read). Generate the extent
+    // first and derive the payload from it, so the fixture models a REAL atlas.
+    let extent = (1u32..8, 1u32..8);
 
-    (meta, glyphs, cmap, kern, pixels).prop_map(|(meta, glyphs, cmap, kern, pixels)| {
-        let len = pixels.len() as u32;
+    (meta, glyphs, cmap, kern, extent).prop_map(|(meta, glyphs, cmap, kern, (width, height))| {
+        let pixels = (0..(width as usize) * (height as usize) * 4)
+            .map(|i| (i % 251) as u8)
+            .collect::<Vec<u8>>();
         BakedFont {
             meta,
             glyphs,
             cmap,
             kern,
-            atlas: AtlasImage { width: len, height: 1, pixels },
+            atlas: AtlasImage { width, height, pixels },
         }
     })
 }

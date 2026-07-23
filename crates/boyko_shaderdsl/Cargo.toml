@@ -51,3 +51,6 @@ required-features = ["emit"]
 name = "emit_probe_gi"
 path = "src/bin/emit_probe_gi.rs"
 required-features = ["emit"]
+
+[lints]
+workspace = true

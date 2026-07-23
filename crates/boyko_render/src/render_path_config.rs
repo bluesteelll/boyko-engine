@@ -315,7 +315,7 @@ pub fn effective_ddgi_enabled(live: bool, frozen: &RenderPathFrozenConsumers) ->
     frozen.ddgi_on
 }
 
-/// THE freeze clamp (rung R9a): returns the [`SsaoConfig`] every per-frame reader must act
+/// THE freeze clamp (rung R9a): returns the [`SsaoConfig`](crate::ssao_config::SsaoConfig) every per-frame reader must act
 /// on — the live one when the freeze is inert (Deferred, or a world that never boot-resolved
 /// a path), the BOOT snapshot when frozen. Warns ONCE (across all readers, via the snapshot's
 /// own latch) on the first observed divergence. Pure and allocation-free.

@@ -134,8 +134,18 @@ pub(crate) fn worker_main(inner: Arc<PoolInner>, worker_id: u32, deque: Worker<T
 ///   policy explicitly: catch the unwind and abort the process. The catch
 ///   frame costs nothing on the hot path beyond a landing pad; the abort path
 ///   is `#[cold]`.
+///
+/// `pub(crate)` because the SAME discipline must cover the dispatcher's
+/// work-stealing join (`Scope::drop` -> `join_workers_until_drained`), which
+/// steals from the very same `injector_global`/sibling deques a worker does and
+/// therefore can pick up a fire-and-forget task. Running one bare there would
+/// let its unwind escape `Drop for Scope` and ABANDON the join — and that join
+/// is the entire justification for the `'scope -> 'static` transmute, so the
+/// caller's frame (and every stack borrow the still-running tasks hold) would be
+/// popped out from under them: a use-after-free reachable from safe code.
+/// 2026-07 audit finding.
 #[inline]
-fn run_task(t: TaskHandle) {
+pub(crate) fn run_task(t: TaskHandle) {
     if catch_unwind(AssertUnwindSafe(|| t.run())).is_err() {
         abort_on_task_panic();
     }

@@ -21,10 +21,10 @@
 //! [`EcsMaster::trigger_global`]: crate::ecs::core::ecs_master::ecs_master::EcsMaster::trigger_global
 
 use std::any::TypeId;
-use std::collections::HashMap;
+use std::hint;
 use std::ptr::NonNull;
-use std::sync::{Mutex, OnceLock};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::ecs::core::component::hooks::deferred_master::DeferredEcsMaster;
 use crate::ecs::core::component::observers::traversal::{PropagationMode, Traversal};
@@ -235,6 +235,21 @@ impl TriggerRegistry {
             .and_then(|l| l.by_trigger.get(tid as usize))
             .is_some_and(|list| !list.is_empty())
     }
+
+    /// `true` iff this world has EVER registered a GLOBAL trigger observer for
+    /// ANY id — the **id-free** half of the 0%-probe.
+    ///
+    /// 2026-07 audit: [`has`](Self::has) needs a [`TriggerId`], and resolving
+    /// one costs a process-wide type intern lookup, so the per-frame edge-fire
+    /// sites must be able to bail out before asking for an id. The lazy
+    /// `Option<Box>` is allocated on the first [`add`](Self::add) and never
+    /// released, making this exactly the same sticky, conservative-`true`
+    /// contract as the entity store's `ever_custom` probe: never `false` while
+    /// a live observer exists.
+    #[inline]
+    pub(crate) fn has_any(&self) -> bool {
+        self.inner.is_some()
+    }
 }
 
 impl Default for TriggerRegistry {
@@ -244,31 +259,89 @@ impl Default for TriggerRegistry {
     }
 }
 
-/// Process-wide intern table mapping each distinct `Trigger` type's [`TypeId`]
-/// to its dense [`TriggerId`].
+/// Cold gate serialising the MINT half of [`static_trigger_id`].
 ///
-/// FIX F2: a function-local `static CACHE: OnceLock<TriggerId>` in the body of a
-/// generic fn is NOT monomorphised per `E` — one shared static backs every
-/// instantiation, so the first trigger type mints id 0 and every other type
-/// returns that same id (the Phase-12.5 "static SLOT in a generic-fn body
-/// collapses across monomorphisations" class). A `TypeId`-keyed intern gives
-/// each distinct `E` a distinct stable id. Cold (registration-only — runs once
-/// per type, never on the trigger hot path), so the `Mutex`/`HashMap` is
-/// acceptable here; it mirrors the Phase-12.5 query-type-id intern.
-static TRIGGER_IDS: OnceLock<Mutex<HashMap<TypeId, TriggerId>>> = OnceLock::new();
+/// The LOOKUP half is fully lock-free — [`scan_trigger_id`] reads the published
+/// prefix of [`TRIGGER_INFO`] with no synchronisation beyond the counter's
+/// `Acquire`. Only a first-sight MISS takes this gate, and only to make the
+/// "scan, then mint" pair atomic: without it two threads could both miss for the
+/// same `E` and mint two distinct ids for one type — FIX F2's collapse in
+/// reverse. It is claimed at most once per distinct trigger type per process and
+/// never on a fire path, so it is not a hot-path lock (Principle 4).
+static TRIGGER_MINT_GATE: AtomicBool = AtomicBool::new(false);
 
-/// Returns the process-stable [`TriggerId`] for `E`, cached per type.
+/// RAII release for [`TRIGGER_MINT_GATE`] — a `Drop` guard rather than a bare
+/// store so a panic inside the mint (the `MAX_TRIGGERS` exhaustion assert)
+/// unwinds through a RELEASED gate. A bare store would leave every later caller
+/// spinning forever, turning a clean panic into a process-wide hang.
+struct MintGate;
+
+impl Drop for MintGate {
+    #[inline]
+    fn drop(&mut self) {
+        TRIGGER_MINT_GATE.store(false, Ordering::Release);
+    }
+}
+
+/// Looks `want` up in the published prefix of [`TRIGGER_INFO`], returning its
+/// dense id, or `None` if this type has never been minted.
 ///
-/// The id is interned by [`TypeId::of::<E>()`] in [`TRIGGER_IDS`], so each
-/// distinct trigger type gets a distinct dense id (mirrors `Event::event_id`'s
-/// per-type stability). The first sight of `E` mints via [`trigger_id_of`];
-/// subsequent calls return the cached id.
+/// Lock-free. [`NEXT_TRIGGER_ID`] is the CLAIM counter, so a slot in `0..n` is
+/// either published (`Some`, and its `OnceLock` release-store happens-before
+/// this read) or mid-mint (`None`) — and a mid-mint slot is by construction one
+/// whose minter still holds [`TRIGGER_MINT_GATE`], so a miss on it is resolved
+/// by the re-scan under the gate. The scan is bounded by the number of trigger
+/// types the process ever registered (typically a handful), not by
+/// [`MAX_TRIGGERS`].
+#[inline]
+fn scan_trigger_id(want: TypeId) -> Option<TriggerId> {
+    let n = NEXT_TRIGGER_ID.load(Ordering::Acquire).min(MAX_TRIGGERS);
+    (0..n)
+        .find(|&i| TRIGGER_INFO[i].get() == Some(&want))
+        .map(|i| i as TriggerId)
+}
+
+/// The `#[cold]` first-sight half of [`static_trigger_id`]: claims the mint
+/// gate, re-scans (another thread may have minted `E` while we spun), and mints
+/// only if still absent.
+#[cold]
+#[inline(never)]
+fn mint_trigger_id<E: Trigger>(want: TypeId) -> TriggerId {
+    while TRIGGER_MINT_GATE
+        .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+        .is_err()
+    {
+        hint::spin_loop();
+    }
+    let _gate = MintGate;
+    scan_trigger_id(want).unwrap_or_else(trigger_id_of::<E>)
+}
+
+/// Returns the process-stable [`TriggerId`] for `E`, interned per type.
+///
+/// Each distinct trigger type gets a distinct dense id (mirrors `Event::event_id`'s
+/// per-type stability). FIX F2: a function-local `static CACHE: OnceLock<TriggerId>`
+/// in the body of a generic fn is NOT monomorphised per `E` — one shared static backs
+/// every instantiation, so the first trigger type mints id 0 and every other type
+/// returns that same id (the Phase-12.5 "static SLOT in a generic-fn body collapses
+/// across monomorphisations" class, rust#22991). The intern is keyed by
+/// [`TypeId::of::<E>()`] instead.
+///
+/// 2026-07 audit: the intern used to be a `OnceLock<Mutex<HashMap<TypeId, TriggerId>>>`
+/// justified as "registration-only, never on the trigger hot path". That was FALSE —
+/// [`fire_on_link`]/[`fire_on_unlink`] resolve the id on EVERY relation link/unlink
+/// inside the per-frame command drain, and they do it BEFORE their 0%-probe, so every
+/// edge mutation paid a global mutex acquire plus a hash lookup. Both halves are fixed:
+/// the callers now take an id-free early-out first, and the intern itself is lock-free
+/// on the hit path — restoring the shape this module's own header documents ("an atomic
+/// counter + per-slot `OnceLock`, process-stable, no `HashMap`, no per-lookup alloc").
+#[inline]
 pub(crate) fn static_trigger_id<E: Trigger>() -> TriggerId {
-    let map = TRIGGER_IDS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = map.lock().expect("invariant: TRIGGER_IDS mutex poisoned");
-    *guard
-        .entry(TypeId::of::<E>())
-        .or_insert_with(trigger_id_of::<E>)
+    let want = TypeId::of::<E>();
+    match scan_trigger_id(want) {
+        Some(id) => id,
+        None => mint_trigger_id::<E>(want),
+    }
 }
 
 /// Fires every GLOBAL custom-trigger observer registered for `tid`

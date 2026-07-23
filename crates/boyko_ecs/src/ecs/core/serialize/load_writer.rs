@@ -732,7 +732,8 @@ pub fn load_dense_store(
 /// sequentially from ONE [`LoadCursor`] over the whole `data` run (each element's
 /// length is self-describing — length-prefixed heap fields + fixed leaf widths),
 /// reconstructing each value into a reused scratch buffer, then BYTE-MOVING it into
-/// a fresh [`DenseStore`] slot via [`DenseStore::insert`].
+/// a fresh [`DenseStore`](crate::ecs::core::component::dense::dense_store::DenseStore) slot via
+/// [`DenseStore::insert`](crate::ecs::core::component::dense::dense_store::DenseStore::insert).
 ///
 /// Saved owning ids are remapped through `map` exactly like [`load_dense_store`].
 ///

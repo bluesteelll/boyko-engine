@@ -35,6 +35,11 @@
 //! A GPU-less / loader-less host, or one without the SDK's validation layer,
 //! makes `VulkanContext::boot` return `Err`; both tests skip gracefully.
 
+// Integration-test binary: the only disallowed type here is the `BOOT_LOCK` `Mutex` that
+// serializes `VkInstance`/`VkDevice` creation across the harness's test threads (the loader
+// races otherwise). Test-harness plumbing, never linked into a shipping build.
+#![allow(clippy::disallowed_types)]
+
 use core::ptr::NonNull;
 use std::sync::Mutex;
 

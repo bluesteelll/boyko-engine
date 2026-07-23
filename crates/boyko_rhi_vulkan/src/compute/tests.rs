@@ -1,3 +1,8 @@
+// Whole file is `#[cfg(test)]` host-oracle modules: the std collections here are REFERENCE
+// models (a `HashSet` used to prove the SSAO dither is decorrelated across pixels), never
+// engine state. Compiled out of every shipping build, so no engine path can reach them.
+#![allow(clippy::disallowed_types)]
+
 #[cfg(test)]
 mod grazing_shadow_tests {
     //! STEP-1 confirmation + STEP-3 regression for the GRAZING-ANGLE SHADOW-ACNE fix.

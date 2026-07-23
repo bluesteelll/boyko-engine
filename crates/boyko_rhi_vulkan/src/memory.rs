@@ -97,7 +97,7 @@ impl HostVisibleBlock {
     /// returned block (plan A1).
     ///
     /// `device_address` (HW-RT rung R2a-2): when `true` the allocation is flagged
-    /// [`VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`] (a [`VkMemoryAllocateFlagsInfo`] chained
+    /// `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT` (a `VkMemoryAllocateFlagsInfo` chained
     /// into `p_next`) so buffers sub-allocated from it can return a device address — the
     /// precondition for an acceleration-structure build input / scratch / backing buffer.
     /// The caller passes `true` ONLY under `hwrt` on a ray-query device; `false` keeps the
@@ -376,7 +376,7 @@ impl DeviceLocalBlock {
     ///
     /// `device_address` (HW-RT rung R2a-2): identical contract to
     /// [`HostVisibleBlock::new`] — `true` flags the allocation
-    /// [`VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT`] (only under `hwrt` on a ray-query device);
+    /// `VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT` (only under `hwrt` on a ray-query device);
     /// `false` keeps `p_next` null (byte-identical).
     pub fn new(
         device: VkDevice,

@@ -53,9 +53,9 @@
 //! init closure) cannot drive the counter past the cap.
 
 use std::any::TypeId;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+
+use boyko_utils::type_intern::TypeIntern;
 
 use crate::ecs::core::iters::query::data::QueryData;
 use crate::ecs::core::iters::query::filter::QueryFilter;
@@ -91,28 +91,23 @@ pub const MAX_QUERY_TYPES: usize = 4096;
 /// Monotonic counter for `QueryTypeId` values minted via [`register_new`].
 ///
 /// `Relaxed` is sufficient: uniqueness across concurrent callers is the
-/// only invariant the counter itself carries. Happens-before for the
-/// minted id is established by the global `Mutex<HashMap<...>>` registry
-/// (the mutex's acquire/release pair sequences readers behind the writer
-/// that inserted the entry).
+/// only invariant the counter itself carries. Happens-before for the minted id is
+/// established by [`REGISTRY`] — the intern publishes each `(key, id)` cell through a
+/// `OnceLock` release-store that every reader's acquire load pairs with.
 static QUERY_NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
 /// Mints a fresh [`QueryTypeId`] from the process-global counter.
 ///
-/// Called from the `(D, F)` blanket impl's global registry insert path
-/// (see the `impl<D, F> QueryTypeKey for (D, F)` body below). The
-/// `Mutex<HashMap<(TypeId, TypeId), QueryTypeId>>` guarantees that each
-/// `(D, F)` pair burns exactly one slot.
+/// Called from the `(D, F)` blanket impl's mint path (see the
+/// `impl<D, F> QueryTypeKey for (D, F)` body below), under [`REGISTRY`]'s mint gate, which
+/// guarantees that each `(D, F)` pair burns exactly one slot.
 ///
-/// # Trade-off (documented in the module doc-comment)
+/// # Cost
 ///
-/// Each `world.query::<D, F>()` call pays one mutex lock + one HashMap
-/// lookup (~20-30 ns amortised). Acceptable because `query()` is a
-/// system-level entry point invoked tens of times per frame, not per
-/// entity. The cost would violate principle 1 ("no HashMap on hot path")
-/// if called per-entity, but it is not — see the module-level rationale
-/// for the rust-lang/rust#22991 / rust-lang/rfcs#2130 constraint that
-/// forced this design.
+/// Zero on the steady-state path: `world.query::<D, F>()` resolves its id from the lock-free
+/// intern (a hash plus one acquire load) and never reaches here after the first sight of a
+/// given `(D, F)`. Until the 2026-07 audit this call sat behind an unconditional global mutex
+/// acquire — see [`REGISTRY`] for what that actually cost.
 ///
 /// # Panics
 ///
@@ -148,13 +143,26 @@ pub fn register_new() -> QueryTypeId {
     QueryTypeId(id)
 }
 
+/// Table size backing [`REGISTRY`] — twice [`MAX_QUERY_TYPES`], the load factor
+/// [`TypeIntern`] documents for short probes.
+const REGISTRY_SLOTS: usize = MAX_QUERY_TYPES * 2;
+
 /// Process-global registry mapping `(TypeId::of::<D>(), TypeId::of::<F>())`
 /// to the assigned [`QueryTypeId`].
 ///
 /// Replaces the per-impl `static SLOT: OnceLock<QueryTypeId>` pattern
 /// (which is unsound inside a generic function body — see the module
 /// doc-comment for the rustc#22991 / rfcs#2130 discussion).
-static REGISTRY: OnceLock<Mutex<HashMap<(TypeId, TypeId), QueryTypeId>>> = OnceLock::new();
+///
+/// 2026-07 audit: this was a `OnceLock<Mutex<HashMap<(TypeId, TypeId), QueryTypeId>>>`
+/// carrying the comment "the PER-FRAME system path never reaches it". Only the SystemParam
+/// half of that was true. The immediate-mode `EcsMaster::query::<D, F>()` escape hatch DOES
+/// run inside the frame, and it took the process-global lock UNCONDITIONALLY on every call —
+/// before any memo could short-circuit it — so the admitted "~20-30 ns … ~50 times per frame"
+/// was in reality one contended global lock per worker thread per query call. [`TypeIntern`]
+/// keeps the rust#22991 fix (a `TypeId` key, because a `static` in a generic body collapses)
+/// and drops the lock: the hit path is a hash plus one acquire load.
+static REGISTRY: TypeIntern<(TypeId, TypeId), REGISTRY_SLOTS> = TypeIntern::new();
 
 /// Static-typed key for a `(D, F)` query shape.
 ///
@@ -179,23 +187,34 @@ where
     D: QueryData + 'static,
     F: QueryFilter + 'static,
 {
+    // Lock-free get-or-mint over the once-per-`(D, F)` intern (rust#22991 forces the
+    // `TypeId` key). A hit is a hash plus one acquire load; only a first-sight `(D, F)`
+    // takes the table's cold mint gate, and `register_new` keeps owning the id dispenser
+    // and its terminal exhaustion panic.
     #[inline]
     fn query_type_id() -> QueryTypeId {
         let key = (TypeId::of::<D>(), TypeId::of::<F>());
-        let registry = REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
-        // The mutex is held only for the lookup + insert; `register_new`
-        // is `#[cold]` and runs at most once per `(D, F)` pair so the
-        // typical lock-hold time is ~10 ns.
-        let mut map = registry
-            .lock()
-            .expect("invariant: query_type_registry mutex poisoned");
-        if let Some(&id) = map.get(&key) {
-            return id;
-        }
-        let id = register_new();
-        map.insert(key, id);
-        id
+        let id = REGISTRY
+            .get_or_mint_with(key, |_| register_new().0 as u32)
+            .unwrap_or_else(query_intern_full);
+        QueryTypeId(id as usize)
     }
+}
+
+/// Terminal panic for a full [`REGISTRY`] table.
+///
+/// Distinct from [`register_new`]'s cap panic: that one fires when the ID DISPENSER is
+/// exhausted, this one when the intern TABLE cannot seat another key. With
+/// `REGISTRY_SLOTS = MAX_QUERY_TYPES * 2` the dispenser is always the first to give out, so
+/// reaching here means the two caps drifted apart in a later edit.
+#[cold]
+#[inline(never)]
+fn query_intern_full() -> u32 {
+    panic!(
+        "query type intern table full: REGISTRY_SLOTS = {REGISTRY_SLOTS} cannot seat another \
+         (D, F) key while MAX_QUERY_TYPES = {MAX_QUERY_TYPES} ids remain mintable. The table \
+         must stay at least twice the id cap — see TypeIntern's load-factor contract."
+    );
 }
 
 /// Test-only escape hatch: forces the next [`register_new`] call to return
@@ -210,6 +229,11 @@ pub(crate) fn set_next_id_for_test(value: usize) {
 
 #[cfg(test)]
 mod tests {
+    // Test-only serialisation of the process-global query-id minter: the `Mutex`
+    // is the harness's exclusion lock (these tests mutate a process-wide counter
+    // and must not overlap), not engine data. Compiled out of every shipping build.
+    #![allow(clippy::disallowed_types)]
+
     use super::*;
 
     use std::mem;

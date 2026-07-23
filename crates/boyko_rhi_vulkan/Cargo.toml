@@ -105,3 +105,6 @@ boyko_rhi_vulkan = { path = ".", features = ["goldens"] }
 # REAL boot resolver (`resolve_render_path`) instead of hand-building a `ResolvedRenderPathGpu`,
 # covering the config -> resolver -> carrier -> frame seam end-to-end.
 boyko-render = { path = "../boyko_render" }
+
+[lints]
+workspace = true

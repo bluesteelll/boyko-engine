@@ -9,7 +9,14 @@
 //! encode/decode glue. Reaches into the core registry (parent module) only for
 //! the shared `MAX_COMPONENTS` bound.
 
+// Registration-time stable-name → id index (`STABLE_NAME_INDEX` below): written
+// once per component type from the derive's `component_id()` closure and read
+// once per file-local type at save/load by `boyko_serialize`. Never on the
+// per-frame spawn/iter/schedule path — the hot 56 B `ComponentLayout` record
+// stays untouched (TRIPWIRE 2), the metadata lives in this cold parallel table.
+#[allow(clippy::disallowed_types)]
 use std::collections::HashMap;
+#[allow(clippy::disallowed_types)]
 use std::sync::{Mutex, OnceLock};
 
 use crate::ecs::core::component::component::Component;
@@ -31,7 +38,7 @@ use super::MAX_COMPONENTS;
 
 /// Serialize one component instance: read the live value at `src`, append
 /// position-independent bytes into `sink` (plan §3.7). A bare
-/// `unsafe fn(*const u8, &mut SaveCursor)` (mirror of [`CloneFn`]) — no
+/// `unsafe fn(*const u8, &mut SaveCursor)` (mirror of [`CloneFn`](super::CloneFn)) — no
 /// `Box<dyn>`, no `Arc<dyn Fn>`. Installed ONLY for the
 /// [`Serializability::SerializeViaFn`] encode path; a
 /// [`Serializability::PlainOldBytes`] component installs `None` and is blitted
@@ -49,7 +56,7 @@ pub type SerializeFn =
 /// Deserialize one component instance from `src` into the UNINITIALIZED `dst`
 /// (one `ptr::write`, no drop of prior contents — plan §3.7). Returns `Err` on a
 /// malformed stream (the caller rolls back; `dst` is left uninit — the W5
-/// partial-row contract, mirroring [`CloneFn`]). Entity fields are written with
+/// partial-row contract, mirroring [`CloneFn`](super::CloneFn)). Entity fields are written with
 /// their SAVED ids; the separate [`LoadMapEntitiesFn`] pass remaps them.
 ///
 /// # Safety (caller-guaranteed at the single load call site, S2)
@@ -83,7 +90,7 @@ pub type LoadMapEntitiesFn = unsafe fn(
 ) -> Result<(), crate::ecs::core::serialize::DecodeError>;
 
 /// Per-component serialization classification (plan §3.7 / C3). STRICTER than the
-/// clone [`Cloneability`]: serialization ingests **untrusted bytes**, so the
+/// clone [`Cloneability`](super::Cloneability): serialization ingests **untrusted bytes**, so the
 /// blittable [`PlainOldBytes`](Serializability::PlainOldBytes) class additionally
 /// requires every field to have an all-bits-valid representation. Drives the
 /// blit-vs-fn-ptr-vs-skip branch on its own.
@@ -113,10 +120,10 @@ pub enum Serializability {
 
 /// Cold per-component serialization metadata (plan §3.7). Lives in the parallel
 /// `SERIALIZE` table, NOT in `ComponentLayout` (keeps TRIPWIRE 2's 56 B).
-/// `Copy + Send + Sync` (fn-ptrs + POD + `&'static str`), like [`CloneInfo`].
+/// `Copy + Send + Sync` (fn-ptrs + POD + `&'static str`), like [`CloneInfo`](super::CloneInfo).
 ///
 /// Per plan O1, the exact size is NOT load-bearing (this is a cold record), so —
-/// unlike [`CloneInfo`]'s asserted 16 B — there is no `const_assert` on this type.
+/// unlike [`CloneInfo`](super::CloneInfo)'s asserted 16 B — there is no `const_assert` on this type.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct SerializeInfo {
@@ -162,7 +169,7 @@ static SERIALIZE: [OnceLock<SerializeInfo>; MAX_COMPONENTS] =
 ///
 /// Cold: read ONLY from the future `boyko_serialize` crate — never on the
 /// per-frame hot path (the 0%-gate). One acquire-load + branch, mirroring
-/// [`get_clone_info`].
+/// [`get_clone_info`](super::get_clone_info).
 #[inline]
 pub fn get_serialize_info(component_id: usize) -> Option<&'static SerializeInfo> {
     debug_assert!(
@@ -182,10 +189,11 @@ pub fn get_serialize_info(component_id: usize) -> Option<&'static SerializeInfo>
 /// [`Component::LAYOUT_FINGERPRINT`]) + methods ([`Component::stable_name`] /
 /// [`Component::serializability_runtime`] / [`Component::serialize_fn`] /
 /// [`Component::deserialize_fn`] / [`Component::map_entities_fn`]) and writes it
-/// once via `OnceLock::set`, mirroring [`install_clone_fn`].
+/// once via `OnceLock::set`, mirroring [`install_clone_fn`](super::install_clone_fn).
 ///
 /// **PUBLIC** (the derive expands into downstream crates where `pub(crate)` is
-/// unreachable — the same rationale as [`install_clone_fn`]). Called from the
+/// unreachable — the same rationale as [`install_clone_fn`](super::install_clone_fn)).
+/// Called from the
 /// derive's `component_id()` closure **UNGATED** (like `install_clone_fn`): the
 /// 0%-gate is preserved because the write is one cold `OnceLock::set` per type per
 /// process, behind the existing `component_id()` `OnceLock`, and never on a
@@ -349,16 +357,21 @@ pub const fn fnv1a_64(bytes: &[u8]) -> u64 {
 /// monomorphization-collapse trap). A `Vec<usize>` (not a `SmallVec`) is the
 /// bucket: `boyko_utils` ships no small-vec, and per-hash candidate counts are
 /// ~1 in practice, so the allocation is negligible on this cold path.
-#[allow(clippy::type_complexity)]
+// Registration-time index (one concrete global, not a generic-fn-body static —
+// the rust#22991 collapse trap); readers ⊆ `boyko_serialize` save/load.
+#[allow(clippy::type_complexity, clippy::disallowed_types)]
 static STABLE_NAME_INDEX: OnceLock<Mutex<HashMap<u64, Vec<usize>>>> = OnceLock::new();
 
 /// Lazily initializes and returns the [`STABLE_NAME_INDEX`] table.
+// Cold accessor for the registration-time index above; not a per-frame path.
+#[allow(clippy::disallowed_types)]
 fn stable_name_index() -> &'static Mutex<HashMap<u64, Vec<usize>>> {
     STABLE_NAME_INDEX.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Registers `C`'s stable name in the `STABLE_NAME_INDEX` (C1). Called from the
-/// derive's `component_id()` closure UNGATED (like [`install_clone_fn`]), once per
+/// derive's `component_id()` closure UNGATED (like [`install_clone_fn`](super::install_clone_fn)),
+/// once per
 /// component per process. COLD — never a frame path.
 ///
 /// The index maps `stable_name_hash → candidate ComponentIds`. A second
@@ -678,12 +691,12 @@ pub trait WireBridge: Sized {
 /// fields into the ref tuple, and write each through `WireRefTuple`. The single
 /// monomorphized free fn the derive installs as the [`SerializeFn`] for a
 /// [`Serializability::SerializeViaFn`] component — no vtable, no `Box<dyn>`, no
-/// clone (mirrors [`clone_via_clone`]'s reach-no-world-state boundary).
+/// clone (mirrors [`clone_via_clone`](super::clone_via_clone)'s reach-no-world-state boundary).
 ///
 /// # W7 — cannot reach world state
 /// Receives ONLY `*const u8` / a `&mut SaveCursor`; it has no world view, so the
 /// user `Wire::wire_write` code it runs cannot create the F2 protected-tag conflict
-/// (same boundary as [`clone_via_clone`]).
+/// (same boundary as [`clone_via_clone`](super::clone_via_clone)).
 ///
 /// # Safety
 ///

@@ -15,6 +15,13 @@
 //!   3. asserts `#name` lowers to `UiName` (the 10th, sigil-sourced) and is NOT
 //!      accepted as a `UiName { .. }` component line.
 
+// Test-harness plumbing only: `Arc<Mutex<…>>` is this repo's established probe for
+// smuggling a spawned `Entity` / a `UiParseReport` out of the `Send + Sync` one-shot
+// system closure, and a file-static `Mutex<()>` serializes tests that arm a process-global
+// (the counting allocator, the watch-poll counters). Not engine code — the whole file is
+// compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 mod p3_common;
 
 use boyko_ecs::ecs::core::component::component::Component;

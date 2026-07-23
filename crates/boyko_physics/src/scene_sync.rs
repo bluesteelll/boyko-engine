@@ -20,7 +20,8 @@
 //! `GlobalTransform` writer, so the full chain is
 //! `Transform → RigidBody → (solve) → RigidBody → Transform → GlobalTransform`
 //! with exactly one writer per datum per window. See the schedule-placement
-//! contract on [`add_scene_sync`](crate::plugin::add_scene_sync).
+//! contract on
+//! [`add_physics_systems_with_scene_sync`](crate::plugin::add_physics_systems_with_scene_sync).
 //!
 //! # Bit-determinism (HARD CONSTRAINT)
 //!
@@ -180,7 +181,8 @@ pub fn sync_body_to_transform(
 /// at its source instead of leaving it as a silent no-sync.
 ///
 /// It is registered alongside the sync systems by
-/// [`add_scene_sync`](crate::plugin::add_scene_sync). In release builds the
+/// [`add_physics_systems_with_scene_sync`](crate::plugin::add_physics_systems_with_scene_sync).
+/// In release builds the
 /// `debug_assert!` compiles out and the loop body is empty, so the system is a
 /// near-free archetype walk (and the scheduler may run it in parallel — it only
 /// READS the cold `RigidBodyMass` column). It allocates nothing.

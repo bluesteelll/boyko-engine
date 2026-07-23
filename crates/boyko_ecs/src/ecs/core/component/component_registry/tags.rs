@@ -9,8 +9,15 @@
 //! `try_register_dynamic` mint, `ComponentLayout::new_dynamic_tag`, and
 //! `set_storage_kind`.
 
+// Setup-time name → `TagId` intern (`TAG_NAMES` below). All dynamic tags share
+// `DynamicTagMarker`'s TypeId, so the mint MUST be name-keyed through one
+// concrete process-global map (a generic-fn-body static would collapse across
+// monomorphisations — rust#22991). Touched at mint/lookup only; queries filter
+// on the resolved `ComponentId` bit, never through this map.
+#[allow(clippy::disallowed_types)]
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+#[allow(clippy::disallowed_types)]
 use std::sync::{Mutex, OnceLock};
 
 use crate::ecs::identifiers::primitives::ComponentId;
@@ -27,7 +34,7 @@ use super::{
 ///
 /// `TagId → ComponentId` is public — [`TagId::component_id`] and the
 /// `From<TagId> for ComponentId` impl — because the id-keyed surfaces a
-/// dynamic tag needs downstream ([`register_hooks_by_id`],
+/// dynamic tag needs downstream ([`register_hooks_by_id`](super::register_hooks_by_id),
 /// `EcsMaster::add_observer`) take [`ComponentId`]. The reverse direction has
 /// NO constructor: a `TagId` is a proof that the id was minted as a size-0
 /// dynamic tag, and only the `TAG_NAMES` mint path can issue one.
@@ -44,7 +51,7 @@ pub struct TagId(pub(crate) ComponentId);
 impl TagId {
     /// Bridges to the shared [`ComponentId`] space (Phase 22 W3) — the
     /// vocabulary of the id-keyed hook/observer surfaces
-    /// ([`register_hooks_by_id`], `EcsMaster::add_observer`).
+    /// ([`register_hooks_by_id`](super::register_hooks_by_id), `EcsMaster::add_observer`).
     #[inline]
     pub const fn component_id(self) -> ComponentId {
         self.0
@@ -143,9 +150,13 @@ pub(crate) fn try_register_enable_tag_by_name(name: &str) -> Option<EnableTagId>
 /// share [`DynamicTagMarker`]'s TypeId — plan O2). Names are leaked once per
 /// successfully minted unique tag (bounded ≤ [`MAX_COMPONENTS`], the #53
 /// bounded-leak precedent).
+// Setup-time, name-keyed tag mint; one concrete global (rust#22991).
+#[allow(clippy::disallowed_types)]
 static TAG_NAMES: OnceLock<Mutex<HashMap<Box<str>, TagId>>> = OnceLock::new();
 
 /// Lazily initializes and returns the [`TAG_NAMES`] intern table.
+// Cold accessor for the setup-time intern table above; not a per-frame path.
+#[allow(clippy::disallowed_types)]
 fn tag_names() -> &'static Mutex<HashMap<Box<str>, TagId>> {
     TAG_NAMES.get_or_init(|| Mutex::new(HashMap::new()))
 }

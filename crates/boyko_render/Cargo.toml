@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "boyko-render"
 version = "0.1.0"
 edition = "2024"
@@ -101,3 +101,6 @@ boyko-ui = { path = "../boyko_ui" }
 # Acyclic + TEST-ONLY: `boyko_render` (dev) -> `boyko-input`; `boyko-input` names no
 # render crate (its deps are ecs/macros/utils/math), so no production cycle is introduced.
 boyko-input = { path = "../boyko_input" }
+
+[lints]
+workspace = true

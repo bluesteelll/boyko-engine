@@ -7,8 +7,8 @@
 //! - `S = f32` — the **Eval** backend: every op is a single `core` f32 instruction, the
 //!   CPU oracle `crates/boyko_rhi_vulkan/tests/vb_bary_edsl_sync.rs` locks against an
 //!   independently-derived reference.
-//! - `S = Emit` — the **HLSL SSA recorder** ([`crate::emit`], `feature = "emit"`); the
-//!   printer ([`crate::emit::emit_hlsl_vb_barycentric`] and siblings) walks the arena into
+//! - `S = Emit` — the **HLSL SSA recorder** (`crate::emit`, `feature = "emit"`); the
+//!   printer (`crate::emit::emit_hlsl_vb_barycentric` and siblings) walks the arena into
 //!   the self-contained HLSL function spans R8 splices into `vb_geom_fetch.hlsli`.
 //!
 //! This rung is PURE MATH + codegen: no rendering, no framegraph, no pipeline wiring (that

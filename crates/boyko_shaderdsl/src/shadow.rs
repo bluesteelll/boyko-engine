@@ -24,7 +24,7 @@
 //!     eval sweep reproduces the host `sdf_soft_shadow` CONTROL FLOW (scoped to control flow —
 //!     the cmp-`.spv` is the byte-identity oracle).
 //!   - `<EmitCf>` — the HLSL recorder; the printer
-//!     ([`crate::emit::emit_hlsl_sdf_soft_shadow`]) walks the STMT IR into the `[loop]`+tail
+//!     (`crate::emit::emit_hlsl_sdf_soft_shadow`) walks the STMT IR into the `[loop]`+tail
 //!     span (byte-identical to the committed `.comp.spv`, proven by the cmp-`.spv`).
 //!
 //! # The named tuning consts spell as SYMBOLS

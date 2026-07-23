@@ -307,6 +307,12 @@ fn out_of_range_corner(token: &str) -> AssetError {
 
 #[cfg(test)]
 mod tests {
+    // Test oracle model: the loader itself is HashMap-free (the corner-key dedup is a sorted
+    // scan — see `dedup_corners`); the `HashSet` here is only the UNORDERED triangle-set
+    // reference the decoded mesh is compared against, so vertex/index ORDER cannot mask a
+    // geometry regression. Compiled out of every shipping build.
+    #![allow(clippy::disallowed_types)]
+
     use std::collections::HashSet;
 
     use super::*;

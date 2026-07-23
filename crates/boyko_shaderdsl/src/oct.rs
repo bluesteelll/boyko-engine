@@ -30,7 +30,7 @@
 //!   `Cell<[f32; 2]>` for `e`). The eval sweep reproduces the committed encode to-bits against a host
 //!   mirror transcribing the committed body verbatim, over BOTH hemispheres (lower `n.z < 0` and upper
 //!   `n.z >= 0`, exercising the `if` both ways) and all four sign quadrants (both sign-ternaries).
-//! - `<EmitCf>` — the HLSL recorder; the printer ([`crate::emit::emit_hlsl_oct_encode`]) walks the
+//! - `<EmitCf>` — the HLSL recorder; the printer (`crate::emit::emit_hlsl_oct_encode`) walks the
 //!   STMT IR into the body span (byte-identical to the committed `.comp.spv`, proven by the cmp-`.spv`).
 //!
 //! # `R1` (the `n /= ...` → `n = n / ...` whole-variable form)
@@ -155,7 +155,7 @@ pub fn oct_encode_body<C: Cf>(n_param: C::Vec3f, ret_out: &C::RetCellV2) -> Flow
 /// This body single-sources it: the I2 update pass weights cached rays against each texel's
 /// decoded direction (`texelDir = oct_decode(texelUV)`), and I3's resolve MUST decode against
 /// this EXACT eDSL-emitted body. The three lanes are returned PRE-`normalize` (the emitter
-/// [`crate::emit::emit_hlsl_oct_decode`] wraps the tail `return normalize(float3(nx, ny, nz));`
+/// `crate::emit::emit_hlsl_oct_decode` wraps the tail `return normalize(float3(nx, ny, nz));`
 /// textually — the `sdf_normal` normalize-as-text precedent, since there is no `Vec3Normalize`
 /// emit node, so no frozen `.spv` can fork).
 ///

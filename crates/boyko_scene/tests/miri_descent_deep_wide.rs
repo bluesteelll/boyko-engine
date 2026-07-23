@@ -27,6 +27,13 @@
 //! while skipping the descent unsafe — there is no non-descent test in this
 //! binary to give a false green.
 
+// Test-harness plumbing only: `Arc<Mutex<…>>` is this repo's established probe for
+// smuggling a spawned `Entity` out of the `Send + Sync` one-shot system closure, and the
+// file-static `Mutex<()>` guards serialize tests that arm a process-global (allocator /
+// propagation counter). Neither is engine code — the whole file is compiled out of every
+// shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::{Arc, Mutex};
 
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;

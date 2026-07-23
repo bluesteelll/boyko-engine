@@ -28,6 +28,14 @@ pub enum GpuColumnError {
     /// UI host driver issues before an upload — GUI P5a). Surfaced so the host driver
     /// can return ONE error type across the fence wait + the ring upload.
     Swapchain(SwapchainError),
+    /// A deserialized asset violated the layout invariant its consumer relies on to
+    /// size a GPU transfer — e.g. a `.bfont` whose `AtlasImage` claims a `w * h`
+    /// extent that does not match `pixels.len()`. 2026-07 audit (CRITICAL): the
+    /// extent drives the `vkCmdCopyBufferToImage` region while the staging buffer is
+    /// sized from the payload, so a mismatch is an out-of-bounds DEVICE read. The
+    /// invariant is enforced at the trust boundary (`read_bfont`) AND re-checked
+    /// here, because a `BakedFont` can also be built in-process.
+    MalformedAsset(&'static str),
 }
 
 impl From<SwapchainError> for GpuColumnError {
@@ -55,6 +63,9 @@ impl core::fmt::Display for GpuColumnError {
                 write!(f, "host-visible staging buffer has no mapped pointer")
             }
             GpuColumnError::Swapchain(e) => write!(f, "swapchain/present error: {e:?}"),
+            GpuColumnError::MalformedAsset(what) => {
+                write!(f, "malformed asset rejected before a GPU transfer: {what}")
+            }
         }
     }
 }

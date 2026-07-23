@@ -8,6 +8,11 @@
 //! module) for `storage_kind` / `is_signature_storage` (dense/signature
 //! predicates) and `get_layout` (cycle-panic diagnostics).
 
+// The `BUILDING` cycle-detection stack below. Reached ONLY after
+// `build_required_plan`'s memoized `REQUIRES_ALL[id].get()` fast path misses, i.e. once per
+// component type per process; every later expansion returns from the lock-free `OnceLock`
+// array without touching this. See docs/HOT-PATH-EXCEPTIONS.md.
+#[allow(clippy::disallowed_types)]
 use std::cell::RefCell;
 use std::sync::OnceLock;
 
@@ -24,7 +29,7 @@ use super::{MAX_COMPONENTS, StorageKind, get_layout, is_signature_storage, stora
 // cold path (`REQUIRES_ALL` memoized DFS) — never on the per-frame hot read path.
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Capture-free constructor for a required component (D2). Mirrors [`DropFn`]:
+/// Capture-free constructor for a required component (D2). Mirrors [`DropFn`](super::DropFn):
 /// a bare `unsafe fn(*mut u8)` that writes one fully-initialized value of the
 /// required component's type into `dst`. F2-immune by construction — it never
 /// sees the world.
@@ -141,6 +146,10 @@ thread_local! {
     /// is a cycle (`build_required_plan` panics with [`RequiredError::Cycle`]).
     /// Thread-local because `build_required_plan` recurses on a single thread;
     /// the memoized result is published process-globally via `OnceLock::set`.
+    /// Cold-path only: `build_required_plan` returns from the memoized
+    /// `REQUIRES_ALL[id]` `OnceLock` BEFORE any guard is pushed, so an expansion
+    /// of an already-planned component never borrows this cell.
+    #[allow(clippy::disallowed_types)]
     static BUILDING: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -195,10 +204,10 @@ impl Drop for BuildingGuard {
 /// Installs `C`'s DIRECT `#[require]` declarations into
 /// `REQUIRES_DIRECT[component_id]` (D1). Builds the entry slice via
 /// [`Component::register_required`] and leaks it once (`&'static`), mirroring
-/// [`install_hooks`]'s write-once discipline.
+/// [`install_hooks`](super::install_hooks)'s write-once discipline.
 ///
 /// Called from the derive-generated `component_id()` ONLY when
-/// `C::HAS_REQUIRES` is true (const-gated, like [`install_hooks`]): a plain
+/// `C::HAS_REQUIRES` is true (const-gated, like [`install_hooks`](super::install_hooks)): a plain
 /// `#[derive(Component)]` leaves the slot UNSET, which reads as "no direct
 /// requires" everywhere downstream — the 0%-gate. The leak is bounded by
 /// `MAX_COMPONENTS` (one slice per requiring component per process).

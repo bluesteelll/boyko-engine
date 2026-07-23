@@ -117,3 +117,6 @@ harness = false
 # time; not a pass/fail gate.
 name = "soft_colored_sp4"
 harness = false
+
+[lints]
+workspace = true

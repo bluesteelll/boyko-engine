@@ -728,7 +728,7 @@ pub struct SsaaActivation<'a> {
 /// recorded. `Some` arms the seam: [`GBufferTargets`] allocates `aa_out` + `taa_hist` + the
 /// resolve's own `taa_ubo`/`taa_motion_cam_ubo` rings + `taa_resolve_set`,
 /// [`GBufferTargets::sync_gbuffer`] treats an arm-state change exactly like an extent change, and
-/// [`crate::present::passes::gbuffer`]'s `record_taa` dispatches [`Self::resolve_pipeline`] at the
+/// `crate::present::passes::gbuffer`'s `record_taa` dispatches [`Self::resolve_pipeline`] at the
 /// resolve→present seam, writing both `taa_hist[fi]` and `aa_out` directly (no dedicated
 /// FXAA/SMAA-style INPUT descriptor set: the resolve set binds `lit`/`viewt`/`taa_hist`/the
 /// tunables + camera + `MotionCam` UBOs itself). Mutually exclusive with [`GBufferScene::aa`] /
@@ -778,7 +778,7 @@ pub struct TaaActivation<'a> {
     /// [`AaActivation::sampler`]/[`SmaaActivation::sampler`].
     pub linear_sampler: &'a VulkanSampler,
     /// `true` ⇒ this frame's resolve must force `blend_factor == 1.0` (full replace, never blend)
-    /// — [`boyko_render::taa_state::TaaState::advance`]'s consumed-this-frame result, threaded
+    /// — `boyko_render::taa_state::TaaState::advance`'s consumed-this-frame result, threaded
     /// from `boyko_app::runner` (the SAME "the runner resolves; the RHI only carries the scalar"
     /// discipline `GBufferScene::terminator_wrap`-shaped fields use). Pushed as the pipeline's
     /// 4-byte `{ uint reset; }` COMPUTE range.
@@ -808,7 +808,7 @@ pub struct RcasActivation<'a> {
     /// `gAaOut` STORAGE @1 (`aa_out`, the WRITE — the present-blit's input, unchanged) }.
     /// [`GBufferTargets`] writes a per-FIF `rcas_set` against it once per extent.
     pub rcas_layout: &'a VulkanBindGroupLayout,
-    /// The owner-set [`SharpenMode::Rcas`](boyko_render's `SharpenMode::Rcas`) strength in
+    /// The owner-set `SharpenMode::Rcas` (boyko_render's) strength in
     /// `[0, 1]` (`boyko_render::taa_config::TaaConfig::rcas_sharpness`), pushed verbatim as
     /// `RcasPush::sharpness`. `0` = mild (peak `-1/8`), `1` = strong (peak `-1/5`), per the
     /// FidelityFX CAS sharpness mapping `rcas.comp.hlsl` implements.
@@ -900,7 +900,7 @@ pub struct ShadowVisActivation<'a> {
 ///
 /// `None` on [`GBufferScene::ddgi_update`] is the OFF path (the DEFAULT — the GI-OFF 0%-gate): the
 /// recorder records NOTHING new (no update descriptor-set write in [`GBufferTargets::create`], no
-/// RDG pass / dispatch / barrier in [`crate::present::passes::gbuffer`]), so the command stream is
+/// RDG pass / dispatch / barrier in `crate::present::passes::gbuffer`), so the command stream is
 /// BYTE-IDENTICAL to the pre-I2 path (the grand_showcase golden). The atlas + ray-table + UBO are
 /// allocated regardless (like the SSAO image), but stay in boot `SHADER_READ_ONLY_OPTIMAL`, unread.
 /// `Some(_)` is populated ONLY when `ResolvedDdgi::enabled()` — the SAME predicate driving the
@@ -1234,7 +1234,7 @@ pub struct GBufferScene<'a> {
     pub edit_list: &'a BoundBuffer,
     /// The camera/extent UNIFORM buffer RING (binding 5), one slot per in-flight frame.
     /// The recorder binds `camera_ring[self.frame_index]` (the slot the upcoming present
-    /// waits on, [`Swapchain::frame_index`]); the host writes that SAME slot before the
+    /// waits on, [`Renderer::frame_index`](crate::present::Renderer::frame_index)); the host writes that SAME slot before the
     /// present, so the sibling in-flight frame reads a DIFFERENT slot — the lock-free
     /// write-after-read fix (no fence stall). For a STATIC scene (offscreen/dump) every
     /// slot is seeded identically and never rewritten, so the output stays byte-identical.
@@ -1249,7 +1249,7 @@ pub struct GBufferScene<'a> {
     /// buffer; [`GBufferTargets`] only borrows it into the vocabulary set.
     pub tiles_buffer: &'a BoundBuffer,
     /// The M1 empty-space-skip `PointerGrid` StorageBuffer (vocab binding 9): the dense
-    /// `dims.0 × dims.1 × dims.2` lattice of [`boyko_sdf_math::brick::BrickClass`] codes
+    /// `dims.0 × dims.1 × dims.2` lattice of [`boyko_sdf_math::BrickClass`] codes
     /// (one `u32` each — the GPU `StructuredBuffer<uint>` element), baked from the ONE edit
     /// authority via [`boyko_sdf_math::brick::build_pointer_grid`] (principle 0 — no parallel
     /// field store) and host-seeded ONCE before the loop, exactly like `edit_list`.
@@ -1561,7 +1561,7 @@ pub struct GBufferScene<'a> {
     /// [`SsaoActivation::atrous_levels`] finds them already built (no resize/rebuild needed).
     /// `Option`-typed for uniformity with `resolve_layout_denoise_hwrt`'s shape (a host that
     /// never wires the boot à-trous pipelines threads `None`, e.g. a minimal test harness that
-    /// exercises only the gather); production ([`crate::present::passes::gbuffer`]'s caller)
+    /// exercises only the gather); production (`crate::present::passes::gbuffer`'s caller)
     /// always threads `Some`.
     pub ssao_atrous_read8_pipeline: Option<&'a ComputePipeline>,
     /// The SSAO à-trous chain's INTERIOR pipeline variant (`ssao_atrous.comp` /
@@ -1625,7 +1625,7 @@ pub struct GBufferScene<'a> {
     /// (`debug_assert!` — see [`SsaaActivation`]'s doc for the same pattern). Native resolution
     /// like `aa`/`smaa` (NOT render-scaled, unlike `ssaa`) — a live per-frame toggle.
     ///
-    /// **v1 motion-quality caveat** (see [`AaMode::Taa`](boyko_render's `AaMode::Taa`)'s doc):
+    /// **v1 motion-quality caveat** (see boyko_render's `AaMode::Taa` doc):
     /// only the raster mesh path is sub-pixel jittered (C1 — SDF-marched pixels stay temporally
     /// stable but un-supersampled); the resolve is landed OFF-byte-identical and
     /// converged-static-validated, but in-motion quality (ghosting, disocclusion) is owner-gated,
@@ -1685,7 +1685,7 @@ pub struct GBufferScene<'a> {
     /// CSM Increment 1b (Rung A): the cascade DEPTH-PASS activation. `None` = the OFF path (the
     /// default, byte-identical command stream): NO depth pass is recorded, the resolve's `csm_mode`
     /// header gate is 0, and the always-bound cascade map/sampler/UBO are bound-but-unread.
-    /// `Some(_)` = the ON path: BEFORE the resolve dispatch the recorder runs [`record_csm_depth`]
+    /// `Some(_)` = the ON path: BEFORE the resolve dispatch the recorder runs `record_csm_depth`
     /// — barriers the cascade image, LOOPS the `[0..active_count)` cascades (Rung B: N), rendering
     /// the SAME caster batches ([`Self::mesh_draw`] + [`Self::instance_bind_group`], build-once-
     /// consume-N-views) into `layer_render_view(c)` with cascade `c`'s `view_proj` pushed, then
@@ -1746,7 +1746,7 @@ pub struct GBufferScene<'a> {
     /// binding-17 combined image+sampler. ALWAYS supplied (bound-but-unread on the OFF path).
     pub ddgi_depth_sampler: &'a VulkanSampler,
     /// SDFDDGI I0: the DDGI grid UBO (host-coherent), a
-    /// [`RESOLVED_DDGI_BYTES`](boyko_render's `RESOLVED_DDGI_BYTES`, 48 B) byte-mirror of
+    /// `RESOLVED_DDGI_BYTES` (boyko_render's, 48 B) byte-mirror of
     /// `boyko_render::ResolvedDdgi` (`origin` + `inv_spacing`/dims + `ddgi_mode_word` + pad). ALWAYS
     /// supplied — a ZEROED UBO on the OFF path (bound-but-unread; `ddgi_mode_word == 0`). The grid is
     /// WORLD-FIXED (Decision D1), so this is a SINGLE buffer, NOT a per-FIF ring (unlike the
@@ -2157,7 +2157,7 @@ pub struct GBufferScene<'a> {
     /// contents are never read (`pc.brick_levels == 0` makes every `m2_levels[...]` access
     /// unreachable). `None` in every test fixture that never resolves a Forward-family path.
     pub brick_levels_ubo: Option<&'a BoundBuffer>,
-    /// The host-precomputed [`boyko_render::view::forward_view_z_coeffs`] `A` coefficient for
+    /// The host-precomputed `boyko_render::view::forward_view_z_coeffs` `A` coefficient for
     /// this frame's reverse-Z decode (`view_z = B / (depth - A)`) — [`SdfForwardMarchPush::
     /// has_mesh`](crate::compute::SdfForwardMarchPush::has_mesh)'s `view_z_a` argument. Don't-care
     /// under every OTHER leg/path (the mesh-less pipeline variant never reads it; a Deferred scene
@@ -2235,7 +2235,7 @@ pub struct GBufferScene<'a> {
     /// The RAW per-FIF `VbInstanceRow` (64 B) SSBO ring — Decision 0's VB-path instance row
     /// (byte-identical leading 48 bytes to `InstanceModelCol`, plus an appended `mesh_id` lane).
     /// A DEDICATED ring, distinct from [`Self::forward_instance_ring`] (`InstanceModelCol`, 48 B)
-    /// — built from [`boyko_render::mesh_draw::MeshRenderScratch::vb_ring`], uploaded ONLY on a
+    /// — built from `boyko_render::mesh_draw::MeshRenderScratch::vb_ring`, uploaded ONLY on a
     /// `VisibilityBuffer`-resolved boot. `None` rationale as [`Self::forward_pipeline`].
     pub vb_instance_ring: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
     /// The Decision-0 bindless per-mesh geometry table's OWN Set (`gMeshVerts[]`/
@@ -2243,7 +2243,7 @@ pub struct GBufferScene<'a> {
     /// threaded down as the raw low-level type (this crate cannot depend on `boyko_render`, which
     /// sits ABOVE it in the dependency graph — the SAME plain-reference boundary crossing
     /// [`Self::resolved_render_path`]'s doc explains for `ResolvedRenderPathGpu`). `Some` only
-    /// when [`ResolvedRenderPath::vb_geometry_table`](boyko_render::render_path_config::ResolvedRenderPath::vb_geometry_table)
+    /// when `ResolvedRenderPath::vb_geometry_table`
     /// is armed (a live `MeshGeometryTable` exists); `None` otherwise (including on a device that
     /// lacks the descriptor-indexing prerequisite — VB itself degrades to `Deferred` at resolve
     /// time in that case, so this field is never read on such a boot).
@@ -2268,7 +2268,7 @@ pub struct GBufferScene<'a> {
     /// VB-P2 classification plan (docs/VB-P2-CLASSIFICATION-PLAN.md), rung P2c (the P1-4
     /// owner-decided selector): `true` iff THIS frame's `lit` producer is the material-classified
     /// `vb_shade` pipeline (classify passes + `vb_shade`) instead of the fused `vb_resolve` — the
-    /// SINGLE source both [`Renderer::declare_vb_graph`](super::graph_bridge::Renderer::declare_vb_graph)
+    /// SINGLE source both `Renderer::declare_vb_graph`
     /// and `Renderer::record_vb` read (the SAME W1 "declare/record parity" discipline every other
     /// per-frame selector in this file follows, e.g. [`Self::mesh_tex_active`]). Computed once per
     /// frame at the `GpuSceneBundles::scene()` assembly seam: `force ||
@@ -2718,7 +2718,7 @@ impl GBufferScene<'_> {
 pub struct CsmDepthActivation<'a> {
     /// The depth-only graphics pipeline (`csm_depth.vs/fs`): EMPTY `color_formats`, `depth_format
     /// = Some(D32Sfloat)`, `cull_mode: Front`, `depth_bias: Some(slope/constant)`, the set-0
-    /// instance SSBO layout. Bound by [`record_csm_depth`].
+    /// instance SSBO layout. Bound by `record_csm_depth`.
     pub pipeline: &'a VulkanGraphicsPipeline,
     /// The 88-byte VERTEX push TEMPLATE for the depth pass: the trailing words (`use_model_matrix
     /// == 1` `@84`; the recorder overwrites the `base_instance` word `@80` per caster batch). The

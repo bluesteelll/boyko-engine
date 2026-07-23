@@ -34,3 +34,6 @@ default = []
 # source (the `core::intrinsics::sqrtf32` intrinsic under `nightly`, else `std`'s
 # `f32::sqrt`) and stays strictly `#![no_std]` in lock-step with this crate.
 nightly = ["boyko_shaderdsl/nightly"]
+
+[lints]
+workspace = true

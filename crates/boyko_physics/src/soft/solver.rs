@@ -50,7 +50,8 @@ pub const REST_SPEED_EPS: f32 = 1e-3;
 ///
 /// `denom = wsum + α̃` collapses toward zero only for a degenerate (coplanar /
 /// fully-pinned) tet whose gradients vanish; projecting then divides by ~zero and
-/// emits a `NaN`. The construction-time [`SoftBodyError::DegenerateTet`] guard
+/// emits a `NaN`. The construction-time
+/// [`SoftBodyError::DegenerateTet`](crate::soft::SoftBodyError::DegenerateTet) guard
 /// rejects coplanar-at-rest tets, so this is the run-time defense for a tet that
 /// collapses DURING the sim. Also the construction coplanarity threshold
 /// (`|V0| >= DENOM_EPS`).

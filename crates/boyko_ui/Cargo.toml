@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "boyko-ui"
 version = "0.1.0"
 edition = "2024"
@@ -43,3 +43,6 @@ boyko-threadpool = { path = "../boyko_threadpool" }
 boyko-macros     = { path = "../boyko_macros" }
 # P2 `ui!` macro compile-fail acceptance tests (snapshot-based).
 trybuild         = "1"
+
+[lints]
+workspace = true

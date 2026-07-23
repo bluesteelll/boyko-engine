@@ -25,7 +25,7 @@
 //! BOTH the verts array (binding 0) AND the indices array (binding 1) variable-count.
 //! [`crate::bindless::VulkanBindlessSet`] sidesteps this (it has exactly one array
 //! binding); this module sidesteps it differently: `descriptorCount` is a FIXED
-//! [`MESH_GEOMETRY_TABLE_CAPACITY`] on every binding (mirroring the texture table's own
+//! [`MESH_GEOMETRY_TABLE_CAPACITY`](crate::geometry_bindless::MESH_GEOMETRY_TABLE_CAPACITY) on every binding (mirroring the texture table's own
 //! documented practice of "this engine always allocates the full capacity" — the
 //! `VARIABLE_DESCRIPTOR_COUNT` flag it sets is unexploited belt-and-braces there too), so
 //! no binding needs the variable-count flag at all; `PARTIALLY_BOUND` alone lets an
@@ -36,7 +36,7 @@
 //!
 //! Building this layout requires the device to have ENABLED
 //! `shaderStorageBufferArrayNonUniformIndexing` +
-//! `descriptorBindingStorageBufferUpdateAfterBind` — [`crate::device::create_device`]
+//! `descriptorBindingStorageBufferUpdateAfterBind` — `crate::device::create_device`
 //! does not request either bit yet (see that function's rung R-VBGEO doc comment): this
 //! rung only builds the CPU-testable machinery + this construction code, since
 //! `ResolvedRenderPath.vb_geometry_table` is structurally `false` for every resolve

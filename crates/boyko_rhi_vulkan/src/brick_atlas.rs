@@ -234,9 +234,9 @@ impl BrickAtlas {
 
     /// Incrementally re-bakes ONLY the dirty cells (M3 — the dynamic-edit fast path).
     ///
-    /// The authority's dirty set ([`m2_dirty_cell_bbox`], the swept old+new union of every edit
+    /// The authority's dirty set ([`m2_dirty_cell_bbox`](crate::compute::m2_dirty_cell_bbox), the swept old+new union of every edit
     /// whose `aabbs[i] != prev_aabb[i]`) is patched into the persistent staging
-    /// ([`rebake_dirty_brick_atlas`]), then ONLY the dirty cell-bounding-box's atlas voxels are
+    /// ([`rebake_dirty_brick_atlas`](crate::compute::rebake_dirty_brick_atlas)), then ONLY the dirty cell-bounding-box's atlas voxels are
     /// uploaded via a SUB-REGION `copy_buffer_to_image` (one `BufferImageCopy` with the box's
     /// `image_offset`/`image_extent`). The un-dirtied tiles keep their prior staging bytes, so the
     /// GPU atlas stays BIT-IDENTICAL to a full [`rebake`](Self::rebake).
@@ -865,7 +865,7 @@ impl BrickClipmap {
     /// the REVEALED slab ∪ the M3-dirty cells in the new box ([`scroll_rebake_set`]) to their TOROIDAL
     /// slots ([`BrickAtlas::scroll_at_level`]), advances the level's origin (`params` + `origin_cell`),
     /// and uploads only the touched slot regions. The empty-skip grid SSBOs are re-seeded only on the
-    /// `gen`-changed [`rebake_all`]; a pure scroll keeps the prior grid (the per-cell classes that
+    /// `gen`-changed [`rebake_all`](BrickClipmap::rebake_all); a pure scroll keeps the prior grid (the per-cell classes that
     /// scrolled in are re-baked into the atlas, but the coarse empty-skip grid is a fixed lattice that
     /// is re-seeded on `gen` change — a scroll does not change `gen`).
     ///
@@ -873,7 +873,7 @@ impl BrickClipmap {
     /// dirty). The caller MUST have drained any prior sampling submit.
     ///
     /// Bit-identity keystone: each level's scrolled staging is byte-for-byte a full
-    /// [`rebake_all`] at the new camera (the tester's `scroll_update == rebake_all` proptest) — the
+    /// [`rebake_all`](BrickClipmap::rebake_all) at the new camera (the tester's `scroll_update == rebake_all` proptest) — the
     /// revealed ∪ dirty cells are re-baked to the slots a full bake would write, and every untouched
     /// slot already holds the bytes the full bake would write for the world cell still occupying it.
     pub fn scroll_update(

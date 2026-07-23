@@ -91,6 +91,7 @@ boyko-engine/
 │   ├── boyko_render/                     # bridge: GPU-resident ECS columns (DeviceLocal pools) + lighting/SDF; names both ECS + RHI
 │   ├── boyko_shaderdsl/                  # in-house Rust shader eDSL: field math authored once → f32 Eval mirror + HLSL Emit (byte-identical .spv)
 │   ├── boyko_fontbake/                   # load-time MTSDF font baker → .bfont (off the render hot path)
+│   ├── boyko_image/                      # in-house PNG decoder (RFC 1950 zlib + RFC 1951 DEFLATE), zero third-party deps
 │   ├── boyko_ui/                         # ECS-native UI (widgets = entities; layout = systems; MSDF text; world-space/diegetic HUD)
 │   │
 │   │   # ── apps / benches ───────────────────────────────────────────
@@ -153,10 +154,12 @@ boyko_rhi         ──→ boyko_utils                          (FFI-free trait
 boyko_rhi_vulkan  ──→ boyko_rhi, boyko_sdf_math            (raw hand-FFI Vulkan; framegraph RDG)
 boyko_shaderdsl   ──→ (leaf: no workspace deps)
 boyko_fontbake    ──→ boyko_math, boyko_threadpool         (load-time tool)
-boyko_render      ──→ boyko_ecs, boyko_macros, boyko_utils,
-                      boyko_rhi, boyko_rhi_vulkan,
-                      boyko_scene, boyko_math, boyko_fontbake
-boyko_ui          ──→ boyko_ecs, boyko_macros, boyko_utils,
+boyko_image       ──→ (leaf: no workspace deps)            (load-time PNG decode)
+boyko_render      ──→ boyko_ecs, boyko_macros,
+                      boyko_rhi, boyko_rhi_vulkan, boyko_sdf_math,
+                      boyko_scene, boyko_math, boyko_fontbake,
+                      boyko_image
+boyko_ui          ──→ boyko_ecs, boyko_macros,
                       boyko_input, boyko_scene, boyko_math, boyko_fontbake
 ```
 

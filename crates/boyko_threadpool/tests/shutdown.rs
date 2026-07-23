@@ -7,6 +7,11 @@
 //! deadlock — a regression (workers leaking / Drop unreachable / double-join)
 //! manifests as a hang or panic here.
 
+// Test-harness observation model: a `Mutex<Vec<usize>>` records which tasks ran
+// so the assertions can inspect the outcome from the test thread. It is scaffolding
+// around the pool, never inside it, and is compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;

@@ -1,0 +1,30 @@
+# Mechanical enforcement of CLAUDE.md's "Forbidden on the hot path" bans (Principles 1/4) and
+# Principle 0's "no parallel data system" rule — landed by the 2026-07 global audit, which first
+# PROVED the rules hold today (a full classification of every production use across 14 crates
+# found ZERO violations: every std-collection site is a once-per-type TypeId mint registry
+# forced by rust#22991, a setup/load-time structure, boot/shutdown plumbing, or a `#[cfg(test)]`
+# oracle model). The lint therefore exists as a TRIPWIRE FOR NEW CODE, not as a cleanup tool.
+#
+# `disallowed_types` is picked up by the EXISTING `cargo clippy --all-targets -- -D warnings`
+# gate — no new CI job. Every legitimate exception carries an explicit, greppable
+# `#[allow(clippy::disallowed_types)]` with a rationale comment, the same self-documenting
+# audit-trail discipline the mandatory `// SAFETY:` comments follow: a reviewer can enumerate
+# every exception with one grep, and a NEW hot-path `HashMap` fails the build until its author
+# either fixes it or justifies it in writing.
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "hot-path ban (CLAUDE.md): index a ComponentId-keyed array / boyko_utils::SparseMap instead. Cold paths (once-per-type registries, load-time, tests) carry #[allow(clippy::disallowed_types)] + a rationale" },
+    { path = "std::collections::HashSet", reason = "hot-path ban: use boyko_utils::BitSet/BitMask. Cold paths carry #[allow(clippy::disallowed_types)] + a rationale" },
+    { path = "std::sync::Mutex", reason = "lock-free discipline (Principle 4): no Mutex on an engine path. Boot/shutdown plumbing and once-per-type mint registries carry #[allow(clippy::disallowed_types)] + a rationale" },
+    { path = "std::sync::RwLock", reason = "lock-free discipline (Principle 4); exceptions carry #[allow(clippy::disallowed_types)] + a rationale" },
+    { path = "std::rc::Rc", reason = "hot-path ban (CLAUDE.md): no refcounted sharing on an engine path; exceptions carry #[allow(clippy::disallowed_types)] + a rationale" },
+    { path = "std::cell::RefCell", reason = "lock-free discipline (Principle 4 names RefCell explicitly): runtime borrow-flag checking on an engine path. Use a split borrow, an index, or UnsafeCell + a documented // SAFETY: invariant" },
+    # Forward tripwires: none of these crates is a dependency today. A path clippy cannot
+    # resolve is silently ignored (verified empirically 2026-07: an unresolvable entry emits
+    # nothing and does not suppress the resolvable ones), so listing them costs zero and closes
+    # the "swap std::sync::Mutex for parking_lot::Mutex to dodge the lint" escape hatch the day
+    # someone adds the dependency.
+    { path = "parking_lot::Mutex", reason = "same lock-free ban as std::sync::Mutex - a faster mutex is still a mutex" },
+    { path = "parking_lot::RwLock", reason = "same lock-free ban as std::sync::RwLock" },
+    { path = "hashbrown::HashMap", reason = "same hot-path ban as std::collections::HashMap - std's HashMap IS hashbrown" },
+    { path = "hashbrown::HashSet", reason = "same hot-path ban as std::collections::HashSet" },
+]

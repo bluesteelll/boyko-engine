@@ -1330,6 +1330,11 @@ pub fn resolve_csm_cascades(
 
 #[cfg(test)]
 mod tests {
+    // Test oracle model: the `HashSet<i32>` below counts the DISTINCT cells in a latch trace's
+    // tail — a reference set used to prove the CSM snap latch alternates over exactly two
+    // cells. Assertion scaffolding, compiled out of every shipping build.
+    #![allow(clippy::disallowed_types)]
+
     use super::*;
 
     use boyko_math::{Affine3A, Vec3, Vec4};

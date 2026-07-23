@@ -95,6 +95,11 @@ pub fn feature_vertex_face(vtx: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    // Test-oracle model: the std `HashSet` is the REFERENCE injectivity checker for the
+    // bit-packed contact-feature ids. Compiled out of every shipping build; narrowphase
+    // itself never builds a set.
+    #![allow(clippy::disallowed_types)]
+
     use super::*;
 
     /// The three feature-id classes are pairwise DISJOINT across their full index

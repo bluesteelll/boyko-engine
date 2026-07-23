@@ -46,7 +46,7 @@
 //! Instantiated two ways (the established control-axis discipline):
 //!   - `<EvalCf>` — the CPU oracle (real `for`/`if`/`break`/`Cell` + the host `field_distance`
 //!     closure threaded as `field`), the unit-test fixture proving unit-sphere hit / sky escape.
-//!   - `<EmitCf>` — the HLSL recorder ([`crate::emit::emit_hlsl_probe_march`]) walking the STMT
+//!   - `<EmitCf>` — the HLSL recorder (`crate::emit::emit_hlsl_probe_march`) walking the STMT
 //!     IR into the `[loop]`+tail span spliced into `sdf_probe_update.comp.hlsl`.
 
 use crate::cf::{Cf, Flow};

@@ -2003,6 +2003,11 @@ pub(crate) fn retag_in_place(world: &mut EcsMaster, entity: Entity, ids: &[Compo
 // ═════════════════════════════════════════════════════════════════════════════
 #[cfg(test)]
 mod step6_enable_migration_tests {
+    // Test oracle model: the std `HashMap`/`HashSet` are the REFERENCE
+    // implementation the enable-migration proptest compares the engine's
+    // archetype/bitset routing against. Compiled out of every shipping build.
+    #![allow(clippy::disallowed_types)]
+
     use std::collections::{HashMap, HashSet};
 
     use proptest::prelude::*;

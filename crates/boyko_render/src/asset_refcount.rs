@@ -670,6 +670,11 @@ pub fn retire_deferred_frees(
 
 #[cfg(test)]
 mod tests {
+    // Test oracle model: the `HashSet<(slot, generation)>` below is the REFERENCE ledger the
+    // VM-native `Assets`/`DeferredFree` slot recycler is differentially verified against
+    // (no-leak / no-double-free / retire-horizon). Compiled out of every shipping build.
+    #![allow(clippy::disallowed_types)]
+
     use super::*;
 
     /// `apply_one` is generic over `AssetBacking`; `Material` (a local,

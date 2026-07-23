@@ -14,6 +14,11 @@
 //! crossing allocations (legitimately excluded from the steady-state guarantee) do not
 //! mask a regression.
 
+// Test harness, not an engine path: the `SERIAL` `Mutex<()>` serializes the three tests because
+// the counting global allocator's counters + ARMED flag are PROCESS-GLOBAL while libtest runs
+// tests on parallel threads. Test-only scaffolding, never linked into a shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 

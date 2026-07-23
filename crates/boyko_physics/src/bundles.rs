@@ -19,7 +19,7 @@
 //! [`DynamicBody`] becomes drawable by inserting a `Gpu3dInstance` and enabling
 //! `RenderEnabled`, and it ACTUALLY SIMULATES only once its `Simulated` bit is
 //! set (Decision 6). Spawn then `commands.entity(e).enable::<Simulated>()`, or
-//! use the [`spawn_dynamic`] helper which does both in one call.
+//! use the [`spawn_dynamic`](crate::bundles::spawn_dynamic) helper which does both in one call.
 
 use boyko_ecs::ecs::core::entity::entity::Entity;
 use boyko_ecs::ecs::core::system::Commands;

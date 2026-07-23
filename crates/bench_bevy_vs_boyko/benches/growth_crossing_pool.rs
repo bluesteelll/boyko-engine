@@ -54,6 +54,12 @@
 //! 208-210 — verified free across every bench/test binary (g7 holds
 //! 152-199; the drop_fn/legacy_query suites hold 200-207).
 
+// Benchmark-harness reporting only: the file-static `Mutex<Vec<…>>` is the spike sink the
+// Criterion routines append to once per measured iteration BATCH and drain in the summary
+// print. It is never inside a timed region and never in engine code -- benches are compiled
+// out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 // Phase X.E: opt-in low-variance allocator for A/B signal extraction.
 // OFF by default (`cargo bench` keeps the production system heap for honest
 // absolutes); `cargo bench --features bench-alloc` swaps in mimalloc. See

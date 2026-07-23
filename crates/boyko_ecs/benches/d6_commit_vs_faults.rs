@@ -72,6 +72,11 @@
 // Phase X.E: opt-in low-variance allocator for A/B signal extraction.
 // OFF by default (`cargo bench` keeps the production system heap for honest
 // absolutes); `cargo bench --features bench-alloc` swaps in mimalloc.
+// Bench-harness model: the std collections / `Arc<Mutex<_>>` here build the
+// reference workload and collect measurements outside the timed region - never
+// engine data. A `benches/` target: compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 #[cfg(feature = "bench-alloc")]
 #[global_allocator]
 static BENCH_ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;

@@ -4,6 +4,11 @@
     //! VALUES and the world-tensor `R₀ · I⁻¹_local · R₀ᵀ` construction that the
     //! gather builds — the values the solver's effective mass depends on.
 
+    // Test-oracle model: the std `HashSet` is the REFERENCE "no color reuses a dynamic
+    // body" checker the constraint-graph coloring is verified against. Compiled out of
+    // every shipping build (`#[cfg(test)] #[path] mod tests` of `resources.rs`).
+    #![allow(clippy::disallowed_types)]
+
     use super::*;
     use crate::components::ColliderShape;
 

@@ -21,7 +21,7 @@
 //! steals.
 
 use core::marker::PhantomData;
-use core::ptr::NonNull;
+use core::ptr::{self, NonNull};
 use std::any::Any;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::time::Duration;
@@ -29,7 +29,7 @@ use std::time::Duration;
 use crossbeam_deque::{Steal, Worker};
 use crossbeam_utils::{Backoff, CachePadded};
 
-use crate::sync::{AtomicUsize, Mutex, Ordering, Thread};
+use crate::sync::{AtomicPtr, AtomicUsize, Ordering, Thread};
 use crate::thread_pool::{PoolInner, TaskHandle};
 use crate::tls;
 use crate::worker::{push_task, unpark_one_idle};
@@ -51,10 +51,19 @@ pub(crate) struct ScopeShared {
     /// completion traffic would false-share with neighbouring atomics.
     pub(crate) pending: CachePadded<AtomicUsize>,
 
-    /// First panic payload observed by a task; consumed by `Scope::Drop`
-    /// and re-raised via `resume_unwind`. Mutex is cold-path only
-    /// (panics are rare).
-    pub(crate) panic_payload: Mutex<Option<Box<dyn Any + Send + 'static>>>,
+    /// First panic payload observed by a task; consumed by `Scope::Drop` and re-raised via
+    /// `resume_unwind`. Null means no task panicked.
+    ///
+    /// A `Box<dyn Any + Send>` is a FAT pointer and cannot live in an atomic, so the payload is
+    /// boxed once more: the cell holds `*mut Box<dyn Any + Send>`, a thin pointer.
+    ///
+    /// 2026-07 audit: this was a `Mutex<Option<Box<dyn Any + Send>>>` documented as "cold-path
+    /// only (panics are rare)". The WRITE is indeed panic-only, but `Scope::drop` read the slot
+    /// through an unconditional `lock()` on every scope teardown and `ScopeShared::new` built a
+    /// fresh `Mutex` per scope — and the parallel scheduler creates a scope per system run. The
+    /// CAS-once slot keeps the same protocol (first panic wins, later payloads are dropped) with
+    /// a null load on the path that does not panic.
+    pub(crate) panic_payload: AtomicPtr<Box<dyn Any + Send + 'static>>,
 
     /// Thread to unpark when `pending` reaches zero. Captured at
     /// `Scope::new` time (typically `std::thread::current()` inside the
@@ -63,13 +72,53 @@ pub(crate) struct ScopeShared {
 }
 
 impl ScopeShared {
+    /// Initialises the panic-payload slot to "no panic" — a null store, no allocation.
     #[inline]
     pub(crate) fn new(waker: Thread) -> Self {
         Self {
             pending: CachePadded::new(AtomicUsize::new(0)),
-            panic_payload: Mutex::new(None),
+            panic_payload: AtomicPtr::new(ptr::null_mut()),
             waker,
         }
+    }
+
+    /// Publishes `payload` as THE panic of this scope, keeping the first one seen.
+    ///
+    /// Called only from the `Err` arm of a task body's `catch_unwind`. A racing second panic
+    /// loses the CAS and drops its own payload, matching the previous `Mutex` protocol
+    /// ("first wins; subsequent payloads dropped") without a lock.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn capture_panic(&self, payload: Box<dyn Any + Send + 'static>) {
+        let raw = Box::into_raw(Box::new(payload));
+        if self
+            .panic_payload
+            .compare_exchange(ptr::null_mut(), raw, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            // SAFETY: `raw` was minted from `Box::into_raw` on the line above and the failed CAS
+            //   means it was never published, so this thread is still its unique owner and no
+            //   other thread can observe it. Reclaiming it here is the "later panics are
+            //   dropped" half of the protocol.
+            drop(unsafe { Box::from_raw(raw) });
+        }
+    }
+
+    /// Takes the captured panic payload, leaving the slot empty.
+    ///
+    /// `Acquire` pairs with [`capture_panic`](Self::capture_panic)'s release half, so the
+    /// payload's contents are visible to the taker.
+    #[inline]
+    pub(crate) fn take_panic(&self) -> Option<Box<dyn Any + Send + 'static>> {
+        let raw = self.panic_payload.swap(ptr::null_mut(), Ordering::Acquire);
+        if raw.is_null() {
+            return None;
+        }
+        // SAFETY: a non-null pointer here was published by exactly one `capture_panic` CAS, and
+        //   the `swap` that produced it atomically removed it from the cell — so this thread is
+        //   now its unique owner. The pointer came from `Box::into_raw(Box::new(..))`, matching
+        //   this `Box::from_raw`.
+        Some(*unsafe { Box::from_raw(raw) })
     }
 
     /// Register one outstanding task. Called by [`Scope::spawn`] before the
@@ -119,6 +168,27 @@ impl ScopeShared {
     #[inline]
     pub(crate) fn is_drained(&self) -> bool {
         self.pending.load(Ordering::Acquire) == 0
+    }
+}
+
+impl Drop for ScopeShared {
+    /// Reclaims an uncollected panic payload.
+    ///
+    /// `Scope::drop` normally hands the payload off via [`take_panic`](ScopeShared::take_panic)
+    /// before freeing the allocation, so this fires only when a `ScopeShared` is dropped without
+    /// that hand-off — the `loom_exports` test wrapper constructs one directly. Without it a
+    /// captured payload would leak; the previous `Mutex<Option<..>>` got this for free from
+    /// `Option`'s drop glue, and dropping to a raw pointer gives up that guarantee unless it is
+    /// restated here.
+    #[inline]
+    fn drop(&mut self) {
+        let raw = *self.panic_payload.get_mut();
+        if !raw.is_null() {
+            // SAFETY: `&mut self` proves exclusive access. A non-null value here was published
+            //   by one `capture_panic` CAS and never taken, so this is its unique owner; the
+            //   pointer came from `Box::into_raw(Box::new(..))`, matching this `Box::from_raw`.
+            drop(unsafe { Box::from_raw(raw) });
+        }
     }
 }
 
@@ -249,15 +319,13 @@ impl<'scope> Scope<'scope> {
             //   call's `pending.fetch_sub` the dispatcher may free the box.
             let shared = unsafe { shared_ptr.as_ref() };
 
-            if let Err(payload) = result
-                && let Ok(mut slot) = shared.panic_payload.lock()
-                && slot.is_none()
-            {
-                *slot = Some(payload);
+            if let Err(payload) = result {
+                shared.capture_panic(payload);
             }
-            // - Multiple panics: first wins; subsequent payloads dropped.
-            // - Mutex poisoned: drop payload; Scope::Drop still completes
-            //   normally via pending hitting zero.
+            // - Multiple panics: first wins; subsequent payloads dropped (the losing CAS in
+            //   `capture_panic` reclaims its own box).
+            // - No poisoning to handle: the slot is an atomic, so a panicking task cannot leave
+            //   it in a degraded state the way a `Mutex` guard could.
 
             // Last action: unpark-then-decrement. After this the worker
             // performs NO further access to the allocation (there is NO
@@ -320,18 +388,15 @@ impl<'scope> Drop for Scope<'scope> {
         // the sole owner.
         //
         // SAFETY: pre-free shared access through the raw pointer. `is_drained`
-        //   is an `Acquire` load and `panic_payload` is a `Mutex` (Sync). The
+        //   is an `Acquire` load and `panic_payload` is an `AtomicPtr` (Sync). The
         //   payload is taken BEFORE the free so that no `*raw` access follows
         //   the deallocation.
         debug_assert!(
             unsafe { (*raw).is_drained() },
             "Scope::Drop returned with pending tasks still in flight"
         );
-        let payload = {
-            let mut slot = unsafe { (*raw).panic_payload.lock() }
-                .expect("invariant: panic_payload mutex never poisoned by us");
-            slot.take()
-        };
+        // No lock on the common path: a scope whose tasks all completed reads a null pointer.
+        let payload = unsafe { (*raw).take_panic() };
 
         // SAFETY (the single free site — Phase 9.2 Candidate U):
         //   - `raw` is the `Box::into_raw` address minted in `Scope::new`.
@@ -400,11 +465,20 @@ unsafe fn join_workers_until_drained(inner: &PoolInner, shared: *const ScopeShar
         }
 
         // 1. If we're on a worker, drain inner-spawn tasks targeted at us.
+        // Every stolen task below runs through `worker::run_task`, NOT a bare
+        // `t.run()` — 2026-07 audit finding. These queues carry BOTH scope-spawned
+        // tasks (self-wrapped in `catch_unwind` at `Scope::spawn`, so the guard is
+        // inert for them) AND fire-and-forget `ThreadPool::spawn` tasks, which are
+        // wrapped NOWHERE. A bare unwind here escapes `Drop for Scope` and abandons
+        // the join that the `'scope -> 'static` transmute below depends on, freeing
+        // the caller's frame while spawned bodies still borrow it (UAF from safe
+        // code). `run_task` applies the same abort-on-fire-and-forget-panic policy
+        // the worker loop already applies to the identical task type.
         if on_worker
             && let Some(t) =
                 drain_one(|| inner.injector_local[local_inj_idx].steal_batch_and_pop(&scratch))
         {
-            t.run();
+            crate::worker::run_task(t);
             drain_scratch(&scratch);
             backoff.reset();
             continue;
@@ -412,7 +486,7 @@ unsafe fn join_workers_until_drained(inner: &PoolInner, shared: *const ScopeShar
 
         // 2. Global injector.
         if let Some(t) = drain_one(|| inner.injector_global.steal_batch_and_pop(&scratch)) {
-            t.run();
+            crate::worker::run_task(t);
             drain_scratch(&scratch);
             backoff.reset();
             continue;
@@ -421,7 +495,7 @@ unsafe fn join_workers_until_drained(inner: &PoolInner, shared: *const ScopeShar
         // 3. Sibling steal — any worker, any deque.
         let stolen = try_steal_any(inner, &scratch);
         if let Some(t) = stolen {
-            t.run();
+            crate::worker::run_task(t);
             drain_scratch(&scratch);
             backoff.reset();
             continue;
@@ -449,7 +523,10 @@ unsafe fn join_workers_until_drained(inner: &PoolInner, shared: *const ScopeShar
 #[inline]
 fn drain_scratch(scratch: &Worker<TaskHandle>) {
     while let Some(t) = scratch.pop() {
-        t.run();
+        // Same abort-guard reason as the steal sites above: a batch stolen from
+        // `injector_global` can contain fire-and-forget tasks, and an unwind out
+        // of here abandons the join (2026-07 audit finding).
+        crate::worker::run_task(t);
     }
 }
 

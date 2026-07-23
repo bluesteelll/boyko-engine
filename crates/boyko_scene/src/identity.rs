@@ -25,7 +25,14 @@
 //! If this ever needs to be consulted per frame, that is a design bug — resolve
 //! the [`NameId`] once at setup and store the result, do not call back here.
 
+// Setup-only `Name` string interner (see the module docs above): the `HashMap` is a
+// once-per-string mint/dedup table and the `Mutex` guards it only while minting at
+// spawn/setup. The per-frame path never reaches here — a `Name` component stores its
+// `NameId` inline, so `Query<&Name>` reads a `u32` by value and calls neither
+// `intern` nor `resolve`.
+#[allow(clippy::disallowed_types)]
 use std::collections::HashMap;
+#[allow(clippy::disallowed_types)]
 use std::sync::{Mutex, OnceLock};
 
 use boyko_macros::Component;
@@ -58,6 +65,8 @@ const _: () = assert!(size_of::<NameId>() == 4 && align_of::<NameId>() == 4);
 /// immortal, so a *copy of the reference* handed out by [`resolve`] is soundly
 /// `'static` and outlives the `Mutex` guard. `map` keys on the same `&'static str`
 /// for O(1) dedup. The index into `strings` IS the `NameId`.
+// Cold once-per-string mint/dedup table; never read on a per-frame path.
+#[allow(clippy::disallowed_types)]
 struct InternerState {
     /// Dedup table: interned string → its id.
     map: HashMap<&'static str, u32>,
@@ -67,8 +76,12 @@ struct InternerState {
 
 /// The process-global interner. Cold setup-only metadata, guarded by a `Mutex`
 /// because it is never on a per-frame path (see the module docs).
+// Process-global mint registry, taken only at spawn/setup time.
+#[allow(clippy::disallowed_types)]
 static INTERNER: OnceLock<Mutex<InternerState>> = OnceLock::new();
 
+// Lazily builds the cold mint registry; one `Mutex`/`HashMap` construction per process.
+#[allow(clippy::disallowed_types)]
 #[inline]
 fn interner() -> &'static Mutex<InternerState> {
     INTERNER.get_or_init(|| {

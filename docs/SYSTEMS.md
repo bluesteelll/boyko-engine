@@ -22,7 +22,8 @@ for cross-crate architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 > work-stealing pool over crossbeam-deque). *Std-lib / sim:* `boyko_math` ·
 > `boyko_scene` · `boyko_sdf_math` · `boyko_physics` · `boyko_input` ·
 > `boyko_serialize`. *Render / UI / shaders:* `boyko_rhi` · `boyko_rhi_vulkan` ·
-> `boyko_render` · `boyko_shaderdsl` · `boyko_fontbake` · `boyko_ui`. *Host /
+> `boyko_render` · `boyko_shaderdsl` · `boyko_fontbake` · `boyko_image` ·
+> `boyko_ui`. *Host /
 > apps / bench:* `boyko_app` (the windowed host — `EnginePlugins`, the
 > device-singleton boot, the token-fenced G-buffer runner + `GpuSceneBundles`,
 > ECS-owned lighting + CSM arming via the D5 light-table generation gate;
@@ -72,6 +73,7 @@ for cross-crate architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 30. [boyko_render](#30-boyko_render-) — GPU-resident columns, lighting, shadows, SDF
 31. [boyko_shaderdsl](#31-boyko_shaderdsl-) — in-house Rust shader eDSL
 32. [boyko_fontbake](#32-boyko_fontbake-) — load-time MTSDF font baker
+32b. [boyko_image](#32b-boyko_image-) — in-house PNG/zlib/DEFLATE decoder (leaf, load-time)
 33. [boyko_ui](#33-boyko_ui-) — ECS-native UI
 
 ---
@@ -2074,6 +2076,21 @@ with a thin POD reader.
 - [atlas.rs](../crates/boyko_fontbake/src/atlas.rs) — skyline atlas packing + `.bfont` serialization.
 
 Depends on `boyko_math` + `boyko_threadpool` only (off the hot path).
+
+## 32b. boyko_image ✅
+
+**Crate:** [crates/boyko_image/](../crates/boyko_image/) — the in-house PNG decoder,
+written from the spec text with **zero third-party dependencies** (`std` only): RFC 1950
+(zlib) + RFC 1951 (DEFLATE) decompression plus the PNG container. A pure-CPU, `Send`
+LEAF crate (no workspace dependencies at all — `boyko_utils`'s decoupled role, mirrored
+for image data); a **load-time** path, never per-frame.
+
+**Scope:** color types 0/2/4/6 (grayscale, RGB, grayscale+alpha, RGBA), bit depths 8 and
+16, all five PNG filter types, non-interlaced. Single entry point: `decode_png`.
+
+**Consumer:** `boyko_render`'s texture loader
+([loaders/png_texture.rs](../crates/boyko_render/src/loaders/png_texture.rs)) — the
+textured-PBR asset path.
 
 ## 33. boyko_ui ✅
 

@@ -27,7 +27,7 @@ use super::MAX_COMPONENTS;
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Clone one component instance: read the live value at `src`, produce a clone at
-/// `dst`. A bare `unsafe fn(*const u8, *mut u8)` (mirror of [`DropFn`]) — no
+/// `dst`. A bare `unsafe fn(*const u8, *mut u8)` (mirror of [`DropFn`](super::DropFn)) — no
 /// `Box<dyn>`, no `Arc<dyn Fn>`. Installed ONLY for [`Cloneability::CloneViaFn`]
 /// components (O2: a [`Cloneability::TriviallyCopyable`] component installs `None`
 /// and is byte-copied whole-column from the pool layout, never through this
@@ -113,7 +113,7 @@ static MAP_ENTITIES: [OnceLock<MapEntitiesFn>; MAX_COMPONENTS] =
 /// clone fn was installed (a non-derived / hand-written impl that never opted in).
 ///
 /// Cold: read ONLY from `core::clone` materialization — never on the per-frame hot
-/// path (the 0%-gate). One acquire-load + branch, mirroring [`get_hooks`].
+/// path (the 0%-gate). One acquire-load + branch, mirroring [`get_hooks`](super::get_hooks).
 #[inline]
 pub fn get_clone_info(component_id: usize) -> Option<&'static CloneInfo> {
     debug_assert!(
@@ -145,10 +145,11 @@ pub fn get_map_entities_fn(component_id: usize) -> Option<MapEntitiesFn> {
 /// Installs `C`'s clone metadata into `CLONE[component_id]` (Feature 3). Builds a
 /// [`CloneInfo`] from the type's compile-time [`Component::CLONE_BEHAVIOR`] +
 /// [`Component::clone_fn`] and writes it once via `OnceLock::set`, mirroring
-/// [`install_hooks`] / [`install_required`].
+/// [`install_hooks`](super::install_hooks) / [`install_required`](super::install_required).
 ///
 /// **PUBLIC** (the derive expands into downstream crates where `pub(crate)` is
-/// unreachable — the same rationale as [`install_storage_kind`]). Called from the
+/// unreachable — the same rationale as [`install_storage_kind`](super::install_storage_kind)).
+/// Called from the
 /// derive's `component_id()` closure **UNGATED** (unlike `install_hooks`): the
 /// 0%-gate is preserved because the write is one cold `OnceLock::set` per type per
 /// process, behind the existing `component_id()` `OnceLock`, and never on a
@@ -196,7 +197,9 @@ pub(crate) fn install_map_entities_fn(component_id: usize, f: MapEntitiesFn) {
 /// **PUBLIC** for the same reason as [`install_clone_fn`]: a `#[derive(Component)]`
 /// for a relationship source expands into a downstream crate where the raw
 /// [`install_map_entities_fn`] setter (`pub(crate)`) is unreachable. This thin
-/// wrapper monomorphizes [`relationship_clone_map_entities`] for `R` and installs it
+/// wrapper monomorphizes
+/// [`relationship_clone_map_entities`](crate::ecs::core::relationship::relationship_clone_map_entities)
+/// for `R` and installs it
 /// through the same write-once setter — so the clone path reads the SAME remap fn
 /// whether the relation is the hand-mirrored `ChildOf` or a derived one. The serialize
 /// (load) direction stays a separate slot (`SerializeInfo::map_entities_fn`), since the

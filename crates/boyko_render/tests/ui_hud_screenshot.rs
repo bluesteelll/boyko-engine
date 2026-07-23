@@ -35,6 +35,11 @@
 //!
 //! Output image: `D:\claude\BoykoEngine\target\screenshots\p6b_hud.bmp`
 
+// Test harness, not an engine path: `Arc<Mutex<..>>` carries the spawned `Entity` out of a
+// one-shot `run_system` closure, and a `Mutex<Option<FnOnce>>` lets a once-only readback
+// closure be called from a `Fn` system. Test-only scaffolding, never linked into a shipping build.
+#![allow(clippy::disallowed_types)]
+
 mod common;
 
 use std::path::{Path, PathBuf};

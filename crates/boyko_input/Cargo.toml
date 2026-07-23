@@ -27,3 +27,6 @@ boyko-macros = { path = "../boyko_macros" }
 # local `features` addition is required here.
 [target.'cfg(windows)'.dependencies]
 windows-sys.workspace = true
+
+[lints]
+workspace = true

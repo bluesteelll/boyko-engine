@@ -372,6 +372,22 @@ impl EcsMaster {
         self.triggers.has(tid) || self.entity_observers.has_any_custom(tid)
     }
 
+    /// `true` iff this world has EVER registered ANY custom-trigger observer —
+    /// the **id-free** 0%-probe, two lazy-`Option` reads and no type intern.
+    ///
+    /// 2026-07 audit: the edge-fire sites below used to resolve
+    /// `trigger_id::<OnLink<R>>()` FIRST and only then consult
+    /// [`has_edge_observer`](Self::has_edge_observer) — so the "cold 0%-probe"
+    /// their docs advertise sat behind a process-wide type-intern lookup paid on
+    /// every relation link/unlink in the per-frame command drain. This probe
+    /// needs no id, so a world that registers no trigger observers (the
+    /// overwhelming majority) now truly pays ~nothing; the id is resolved only
+    /// once it can actually matter.
+    #[inline]
+    pub(crate) fn has_any_trigger_observer(&self) -> bool {
+        self.triggers.has_any() || self.entity_observers.has_any_custom_at_all()
+    }
+
     /// Fires [`OnLink<R>`](crate::ecs::core::relationship::OnLink) on the source
     /// of a freshly-COMMITTED `R` edge, gated behind the cold 0%-probe.
     ///
@@ -383,6 +399,12 @@ impl EcsMaster {
     /// hook bodies only ENQUEUE, never fire).
     #[inline]
     pub(crate) fn fire_on_link<R: Relationship>(&mut self, source: Entity, target: Entity) {
+        // 2026-07 audit: probe BEFORE resolving the id — `trigger_id` interns by
+        // `TypeId` process-wide, and this runs on every committed edge in the
+        // per-frame command drain. An observer-free world reads two `Option`s.
+        if !self.has_any_trigger_observer() {
+            return;
+        }
         let tid = Self::trigger_id::<OnLink<R>>();
         if self.has_edge_observer(tid) {
             self.fire_edge_observer::<OnLink<R>>(tid, source, OnLink::<R>::new(target));
@@ -398,6 +420,10 @@ impl EcsMaster {
     /// collection (the committed-edge test), under `&mut EcsMaster`.
     #[inline]
     pub(crate) fn fire_on_unlink<R: Relationship>(&mut self, source: Entity, target: Entity) {
+        // See `fire_on_link`: the id-free probe keeps the intern off the drain.
+        if !self.has_any_trigger_observer() {
+            return;
+        }
         let tid = Self::trigger_id::<OnUnlink<R>>();
         if self.has_edge_observer(tid) {
             self.fire_edge_observer::<OnUnlink<R>>(tid, source, OnUnlink::<R>::new(target));

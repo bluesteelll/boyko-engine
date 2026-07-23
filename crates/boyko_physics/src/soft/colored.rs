@@ -22,12 +22,12 @@
 //! # The SINGLE leaf kernels (W3-A)
 //!
 //! The projection math is NOT duplicated: this module calls the SAME
-//! [`project_distance`] / [`project_volume`] / [`project_self_pair`] / [`sweep`] /
+//! `project_distance` / `project_volume` / [`project_self_pair`] / [`sweep`] /
 //! [`build_hash`] definitions the serial path uses (widened to `pub(in
 //! crate::soft)`). Duplicating the hardest determinism math is the drift hazard
 //! C1/W3-A avoid. Only the DRIVER passes (predict, sdf-collide, velocity) are
 //! duplicated here (simple `for i in 0..n` SoA loops) so the serial
-//! [`step_body`](crate::soft::solver::step_body) is left LITERALLY untouched (C4).
+//! `step_body` is left LITERALLY untouched (C4).
 
 use boyko_ecs::ecs::core::iters::query::query::Query;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
@@ -599,7 +599,7 @@ unsafe impl Sync for SoftColorPtrs {}
 ///
 /// Early-returns when [`PhysicsConfig::soft_body`] is `false` (the soft 0%-gate).
 /// When [`PhysicsConfig::soft_body_colored`] is `false` it runs the SERIAL
-/// [`step_body`](crate::soft::solver::step_body) per body (byte-identical to
+/// `step_body` per body (byte-identical to
 /// `physics_soft_step` — the SP4 0%-gate); when `true` it runs the colored projection
 /// per body via [`step_body_colored`].
 //
@@ -631,7 +631,7 @@ pub fn physics_soft_step_colored(
 
 /// One full COLORED-PARALLEL XPBD advance of a single soft body (`substeps`
 /// substeps) — the C4 interleaving sibling of
-/// [`step_body`](crate::soft::solver::step_body).
+/// `step_body`.
 ///
 /// Reproduces `step_body`'s EXACT per-substep order inside one `for _ in 0..substeps`
 /// loop: predict → distance(colored) → volume(colored) → self-collision →

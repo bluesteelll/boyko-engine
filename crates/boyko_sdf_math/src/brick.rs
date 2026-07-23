@@ -186,7 +186,7 @@ const _: () = assert!(
 /// The canonical clip-map level count: `BRICK_LEVELS` nested, camera-centered
 /// brick-cache levels (M4). Level `L` reaches `2^L`× farther at `2^L`× coarser
 /// detail. `brick.rs` is the `no_std` soundness authority for the level math; the
-/// GPU side ([`boyko_rhi_vulkan`]'s `compute.rs`) references `brick::BRICK_LEVELS`.
+/// GPU side (`boyko_rhi_vulkan`'s `compute.rs`) references `brick::BRICK_LEVELS`.
 ///
 /// Bumping `N` is a one-line change here — the per-level const-assert block below
 /// is the soundness GATE: it re-proves the conservative-lower-bound predicates at

@@ -18,6 +18,12 @@
 //! 5. confirmed-settled change → read + parse + snapshot + reconcile; on success
 //!    update `(last_mtime, last_size)` and clear `pending`.
 
+// `.ui` hot-reload plumbing only — see `reconcile_in_world`, the sole user: the watch
+// system's per-frame path early-returns before it (throttle / unchanged mtime+size), so
+// the `Mutex` is constructed only on a confirmed file change. It exists solely to satisfy
+// the `Sync` bound of the one-shot system closure and is never contended (the watch
+// system is exclusive and single-threaded).
+#[allow(clippy::disallowed_types)]
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -148,6 +154,9 @@ fn read_signature(path: &str) -> Option<(SystemTime, u64)> {
 /// unsound: the reparent's unlink is a two-stage deferral whose second stage
 /// drains too late (after the cascade has already read the doomed parent's
 /// `Children`).
+// Reached only after a confirmed `.ui` file change (see the `use` above): the
+// `Arc<Mutex<…>>` probes smuggle the phase-1 result out of the `Send + Sync` closure.
+#[allow(clippy::disallowed_types)]
 fn reconcile_in_world(world: &mut EcsMaster, parsed: crate::text::ast::ParsedTree, live: UiTreeView) {
     use boyko_ecs::ecs::core::system::ResMut;
 

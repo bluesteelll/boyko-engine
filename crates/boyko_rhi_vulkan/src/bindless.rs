@@ -10,7 +10,7 @@
 //! / a variable-count allocation — every P1a set is written exactly once at create
 //! and never touched again):
 //!
-//! * **binding 0** — `SAMPLED_IMAGE`, `descriptorCount = `[`BINDLESS_TEXTURE_CAPACITY`],
+//! * **binding 0** — `SAMPLED_IMAGE`, `descriptorCount = `[`BINDLESS_TEXTURE_CAPACITY`](crate::bindless::BINDLESS_TEXTURE_CAPACITY),
 //!   flagged `PARTIALLY_BOUND | UPDATE_AFTER_BIND` (NOT `VARIABLE_DESCRIPTOR_COUNT` —
 //!   spec-legal only on the LAST binding, and binding 1 sits after this one; the set
 //!   is allocated at the full declared capacity instead). The
@@ -19,7 +19,7 @@
 //!   sampler (`pImmutableSamplers` points at the one shared `VkSampler` baked in at
 //!   layout-create time). The HLSL-visible `SamplerState gSampler : register(s0,
 //!   space1)`. Because it is immutable, it is NEVER written via
-//!   `vkUpdateDescriptorSets` — [`write_bindless_texture`] only ever targets
+//!   `vkUpdateDescriptorSets` — [`write_bindless_texture`](crate::bindless::write_bindless_texture) only ever targets
 //!   binding 0.
 //!
 //! A single shared sampler (not a per-texture combined-image-sampler) is the

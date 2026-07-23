@@ -21,3 +21,6 @@ criterion.workspace = true
 [[bench]]
 name = "pob_throughput"
 harness = false
+
+[lints]
+workspace = true

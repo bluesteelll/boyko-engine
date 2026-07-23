@@ -151,6 +151,12 @@ pub(crate) fn set_next_id_for_test(value: usize) {
 
 #[cfg(test)]
 mod tests {
+    // Test-only serialisation of the process-global bundle-id minter: the
+    // `Mutex` is the test harness's exclusion lock (registry tests mutate a
+    // process-wide counter and must not run concurrently), not engine data.
+    // Compiled out of every shipping build.
+    #![allow(clippy::disallowed_types)]
+
     use super::*;
 
     use std::mem;

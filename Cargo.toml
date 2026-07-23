@@ -1,13 +1,41 @@
-﻿[workspace]
+[workspace]
 members = ["crates/boyko_ecs", "crates/boyko_macros", "crates/boyko_utils", "crates/boyko_threadpool", "crates/bench_bevy_vs_boyko", "crates/boyko_demo", "crates/boyko_rhi", "crates/boyko_rhi_vulkan", "crates/boyko_render", "crates/boyko_serialize", "crates/boyko_physics", "crates/boyko_math", "crates/boyko_sdf_math", "crates/boyko_shaderdsl", "crates/boyko_input", "crates/boyko_ui", "crates/boyko_scene", "crates/boyko_fontbake", "crates/boyko_app", "crates/boyko_image"]
 
-# Centralized lints opted into per-crate via `[lints] workspace = true`.
-# Only `boyko_threadpool` opts in today (Phase 9.1). Registers the
-# `cfg(loom)` model-checker flag so native `-D warnings` stays clean on the
-# `#[cfg(loom)]` / `#[cfg(not(loom))]` attributes in `boyko_threadpool::sync`.
+# 2026-07 audit, P0 build-gate finding: this workspace root is ALSO a package
+# (`boyko-engine`, the `src/main.rs` placeholder binary), so Cargo's default package
+# selection at the root is THAT PACKAGE ALONE — a bare `cargo check --all-targets` /
+# `cargo test --all-targets` / `cargo clippy --all-targets -- -D warnings` compiled a
+# `println!` and reported success in ~0.2 s while every engine crate went unchecked.
+# Both CI and local/agent invocations were therefore VACUOUSLY GREEN (measured: the bare
+# form found 0 errors where `--workspace` found 4 real ones). Listing every member as a
+# default member makes the bare form cover the whole workspace, so the vacuity is
+# impossible by construction rather than by everyone remembering `--workspace`.
+default-members = ["crates/boyko_ecs", "crates/boyko_macros", "crates/boyko_utils", "crates/boyko_threadpool", "crates/bench_bevy_vs_boyko", "crates/boyko_demo", "crates/boyko_rhi", "crates/boyko_rhi_vulkan", "crates/boyko_render", "crates/boyko_serialize", "crates/boyko_physics", "crates/boyko_math", "crates/boyko_sdf_math", "crates/boyko_shaderdsl", "crates/boyko_input", "crates/boyko_ui", "crates/boyko_scene", "crates/boyko_fontbake", "crates/boyko_app", "crates/boyko_image", "."]
+
+# Centralized lints opted into per-crate via `[lints] workspace = true`. EVERY member opts in
+# (2026-07 audit — before it, only `boyko_threadpool` did, so a workspace-wide lint policy was
+# not actually workspace-wide). Registers the `cfg(loom)` model-checker flag so native
+# `-D warnings` stays clean on the `#[cfg(loom)]` / `#[cfg(not(loom))]` attributes in
+# `boyko_threadpool::sync`; harmless for the crates that never mention `loom`.
 # `cfg(miri)` is a built-in cfg and must NOT be registered here.
+# `cfg(force_alloc_panic)` was registered in `boyko_ecs`'s own `[lints.rust]` until 2026-07;
+# Cargo forbids combining `[lints] workspace = true` with local `[lints.*]` tables, so the flag
+# is hoisted here. Registering it workspace-wide only declares it EXPECTED — crates that never
+# mention it are unaffected. See docs/PHASE-9-FORCE-ALLOC-PANIC.md.
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(force_alloc_panic)'] }
+
+# The hot-path type ban (CLAUDE.md "Forbidden on the hot path", Principles 1/4) at DENY, not
+# warn. Before this table the ban existed only inside CI's `-- -D warnings`, so a plain local
+# `cargo clippy` reported it as one warning among many and rust-analyzer showed it as a hint.
+# Denying it in the manifest means the editor underlines it red while typing, a local clippy
+# fails, and CI stops being the first place anyone learns about it.
+#
+# Every member opts in with `[lints] workspace = true`. The banned paths themselves live in
+# clippy.toml (`disallowed-types`); the per-site exceptions are enumerated in
+# docs/HOT-PATH-EXCEPTIONS.md and gated by scripts/check_hotpath_exceptions.py.
+[workspace.lints.clippy]
+disallowed_types = "deny"
 
 # Shared third-party version pins (W2 workspace hygiene). Member crates opt in
 # with `<dep>.workspace = true` so a version bump happens in ONE place instead of
@@ -49,3 +77,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+
+[lints]
+workspace = true

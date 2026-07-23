@@ -20,6 +20,11 @@
 //! Run single-threaded with validation: `cargo test -p boyko-render
 //! --test camera_drives_render_gpu --release -- --test-threads=1 --nocapture`.
 
+// Test harness, not an engine path: `Arc<Mutex<Option<Entity>>>` is the established probe that
+// carries the spawned camera `Entity` out of a one-shot `run_system` closure back to the
+// assertions. Test-only scaffolding, never linked into a shipping build.
+#![allow(clippy::disallowed_types)]
+
 mod common;
 
 use core::ptr::NonNull;

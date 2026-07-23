@@ -66,7 +66,7 @@ pub use targets::{GBufferFrame, GBufferTargets};
 /// semaphore still pending another image's present).
 ///
 /// Exported so a host can size its per-frame UBO RING (one slot per in-flight frame)
-/// to match the renderer's round-robin [`Swapchain::frame_index`] — the lock-free
+/// to match the renderer's round-robin [`Renderer::frame_index`] — the lock-free
 /// write-after-read fix: each frame writes `ring[frame_index]` and the GPU binds that
 /// same slot, so the sibling in-flight frame reads a DIFFERENT slot (no overlap).
 pub const FRAMES_IN_FLIGHT: usize = 2;
@@ -84,18 +84,18 @@ pub const MAX_ATROUS_LEVELS: u32 = 5;
 
 /// The SSAO edge-avoiding à-trous denoise chain: the max pass count the recorder can dispatch —
 /// the RHI-layer MIRROR of `boyko_render::ssao_config::MAX_SSAO_ATROUS_LEVELS` (the RHI cannot
-/// depend on `boyko_render`, mirroring [`MAX_ATROUS_LEVELS`]'s duplication rationale). Kept equal
+/// depend on `boyko_render`, mirroring `MAX_ATROUS_LEVELS`'s duplication rationale). Kept equal
 /// (5); a cross-crate integration test asserts the equality. Software (NOT `hwrt`-gated) — unlike
-/// [`MAX_ATROUS_LEVELS`], every leg builds this. [`ssao_atrous_step`]'s 5 ROLE-KEYED
+/// `MAX_ATROUS_LEVELS`, every leg builds this. [`ssao_atrous_step`]'s 5 ROLE-KEYED
 /// pipelines/sets are N-INDEPENDENT, so a level count up to this max is a LIVE per-frame choice
 /// (no rebuild) — see `present::scene_types::SsaoActivation`.
 pub const MAX_SSAO_ATROUS_LEVELS: u32 = 5;
 
 /// The SSAO à-trous chain's C1 role selection for dispatch level `level` of `n` total passes
 /// (`n` in `{0} ∪ {2..=`[`MAX_SSAO_ATROUS_LEVELS`]`}` — `boyko_render::SsaoConfig::clamped_atrous_levels`'s
-/// contract). PURE (no GPU handle): the recorder ([`crate::present::passes::gbuffer`]), the
+/// contract). PURE (no GPU handle): the recorder (`crate::present::passes::gbuffer`), the
 /// descriptor-set builder ([`GBufferTargets::build_ssao_atrous_sets`]), the framegraph declarator
-/// ([`GbufferPassPlan::ssao_atrous`]'s ResId chain), and any headless test harness that dispatches
+/// (`GbufferPassPlan::ssao_atrous`'s ResId chain), and any headless test harness that dispatches
 /// the SAME N-pass chain all call THIS one function for the level→role mapping, so they can never
 /// diverge.
 ///
@@ -132,7 +132,7 @@ pub fn ssao_atrous_step(level: u32, n: u32) -> AtrousStepRole {
 }
 
 /// The role [`ssao_atrous_step`] selects for one SSAO à-trous dispatch level — which of the 5
-/// role-keyed pipeline/descriptor-set pairs ([`present::scene_types::SsaoActivation`]'s
+/// role-keyed pipeline/descriptor-set pairs ([`present::scene_types::SsaoActivation`](SsaoActivation)'s
 /// `atrous_read8_pipeline`/`atrous_interior_pipeline`/`atrous_write8_pipeline` +
 /// [`GBufferTargets`]'s five `ssao_atrous_*_set` rings) the caller binds for that level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,7 +179,7 @@ pub const TEMPORAL_SHADOW_UBO_BYTES: u64 = 16;
 /// the RHI-layer MIRROR of `boyko_render::RESOLVED_TAA_BYTES` (`size_of::<ResolvedTaa>()`,
 /// THREE std140 vec4 slots = 48 B; grew from 16 B at rung T2). The RHI cannot depend on
 /// `boyko_render` (the render crate sits ABOVE it), so the value is duplicated here — mirrors
-/// [`TEMPORAL_SHADOW_UBO_BYTES`]'s pattern, UNCONDITIONAL (TAA is NOT `hwrt`-gated). The RHI
+/// `TEMPORAL_SHADOW_UBO_BYTES`'s pattern, UNCONDITIONAL (TAA is NOT `hwrt`-gated). The RHI
 /// mints the per-FIF `taa_ubo` ring at this size (`default_blend` @0, `min_blend` @4,
 /// `variance_gamma` @8, pad @12, then the T2 mode words `clamp_word`/`clamp_space_word`/
 /// `clip_word`/`blend_word` @16..32, `disable_luma_weight`/`history_filter_word`/

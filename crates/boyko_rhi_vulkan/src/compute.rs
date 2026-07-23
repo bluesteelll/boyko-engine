@@ -9,7 +9,7 @@
 //!   [`transform_add_spirv`]), exposed as `&'static [u32]` so trait callers feed
 //!   them straight into [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module);
 //! - the dispatch `LOCAL_SIZE_X` the shaders declare (`[numthreads(64,1,1)]`);
-//! - the CPU golden ([`golden_write_pattern`] / [`golden_chained`]) the
+//! - the CPU golden (`golden_write_pattern` / `golden_chained`) the
 //!   bit-exact readback diff asserts against;
 //! - [`ComputeError`], the rich compute-path error variant (now folded into the
 //!   unified [`VulkanError`](crate::error::VulkanError) at the trait boundary).
@@ -1311,7 +1311,7 @@ pub fn spec_constant_smoke_spirv() -> &'static [u32] {
 /// The shader reuses the rung-1 compute contract verbatim: binding 0 (set 0) is
 /// one `RWStructuredBuffer<uint>` at COMPUTE + a 4-byte `uint count` push
 /// constant; everything else (camera/sphere/light) is hardcoded in the shader,
-/// mirrored host-side by [`golden_sdf_pixel`].
+/// mirrored host-side by `golden_sdf_pixel`.
 #[inline]
 pub fn sdf_spheretrace_spirv() -> &'static [u32] {
     SDF_SPHERETRACE_SPV.as_words()
@@ -1326,7 +1326,7 @@ pub fn sdf_spheretrace_spirv() -> &'static [u32] {
 /// The edit-list is PACKED as a header region at the front of that single buffer
 /// (no second binding): word 0 = `edit_count`, then the [`MAX_SDF_EDITS`]-entry
 /// [`SdfEdit`] array, then the packed-RGBA pixel output. The host writes the
-/// header via [`encode_edit_list`] and mirrors the fold in [`golden_editlist_pixel`].
+/// header via [`encode_edit_list`] and mirrors the fold in `golden_editlist_pixel`.
 #[inline]
 pub fn sdf_editlist_spirv() -> &'static [u32] {
     SDF_EDITLIST_SPV.as_words()
@@ -1343,7 +1343,7 @@ pub fn sdf_editlist_spirv() -> &'static [u32] {
 /// [`encode_edit_list`], the GPU image→buffer copy writes the rasterized mesh
 /// depth into [`COMPOSITE_DEPTH_BASE_WORDS`], and the shader reads both, bounds the
 /// march by the per-pixel mesh depth, and composites into [`COMPOSITE_PIXEL_BASE_WORDS`].
-/// The fold + lighting are mirrored host-side by [`golden_composite_pixel`].
+/// The fold + lighting are mirrored host-side by `golden_composite_pixel`.
 #[inline]
 pub fn sdf_depth_composite_spirv() -> &'static [u32] {
     SDF_DEPTH_COMPOSITE_SPV.as_words()
@@ -1359,7 +1359,7 @@ pub fn sdf_depth_composite_spirv() -> &'static [u32] {
 /// is a read-only `StructuredBuffer<uint>` (the same packed edit-list header format,
 /// [`encode_edit_list`] / [`EDITLIST_BUFFER_WORDS`]) and binding 1 is a
 /// `RWTexture2D<float4>` it STOREs the marcher color into. The field eval + ray-gen +
-/// lighting are reused VERBATIM from rung 9, so [`golden_editlist_pixel`] predicts the
+/// lighting are reused VERBATIM from rung 9, so `golden_editlist_pixel` predicts the
 /// stored texel within the same `+/-2/255` per-channel tolerance (the float→UNORM store
 /// quantization vs [`pack_rgba`]'s rounding is under one LSB). It proves a storage-image
 /// WRITE through the COMPUTE bind point + the vocabulary set works on the GPU.
@@ -1374,7 +1374,7 @@ pub fn sdf_editlist_storage_image_spirv() -> &'static [u32] {
 ///
 /// The image-based rewrite of the rung-10 [`sdf_depth_composite_spirv`] marcher: the
 /// field eval + ray-gen + lighting are a VERBATIM cut of `sdf_depth_composite.hlsl`, so
-/// [`golden_composite_pixel_ex`] predicts the ALBEDO output within the same `+/-2/255`
+/// `golden_composite_pixel_ex` predicts the ALBEDO output within the same `+/-2/255`
 /// per-channel tolerance. It is bound to the P1b vocabulary set: binding 0 a read-only
 /// `StructuredBuffer<uint>` edit-list, binding 1 a `Texture2D<float>` SAMPLED depth
 /// (the rasterized D32_SFLOAT image, fetched with `.Load`), bindings 2..4 the MRT
@@ -1398,7 +1398,7 @@ pub fn sdf_gbuffer_composite_spirv() -> &'static [u32] {
 /// color `lit = (mask == 1) ? base * vis : base` to a STORAGE image @ binding 2. It is
 /// dispatched 1D over the SAME pixel count as the marcher (the camera UBO @ binding 5
 /// supplies the extent for the 1:1 index → (px, py) mapping). The host mirror is
-/// [`golden_deferred_resolve`], fed by [`golden_marcher_attributes`].
+/// `golden_deferred_resolve`, fed by `golden_marcher_attributes`.
 #[inline]
 pub fn deferred_pbr_spirv() -> &'static [u32] {
     DEFERRED_PBR_SPV.as_words()
@@ -1568,7 +1568,7 @@ pub fn ddgi_probe_gi_resolve_spirv() -> &'static [u32] {
 /// culls the point/spot block (`sqDistPointAABB <= r²`), and atomic-appends survivors into
 /// the index list + writes the `{offset, count}` cell. Dispatched 1D over `CLUSTER_COUNT`
 /// BEFORE the resolve (with a COMPUTE→COMPUTE buffer barrier so the resolve's reads see the
-/// writes). The host mirror is [`golden_cluster_cull`].
+/// writes). The host mirror is `golden_cluster_cull`.
 #[inline]
 pub fn cluster_cull_spirv() -> &'static [u32] {
     CLUSTER_CULL_SPV.as_words()
@@ -1580,7 +1580,7 @@ pub fn cluster_cull_spirv() -> &'static [u32] {
 ///
 /// The coarse pre-pass for the [`sdf_gbuffer_composite_spirv`] marcher: one invocation
 /// per 8×8 tile cone-traces the frozen `field_distance` and emits a [`TileBound`] (the
-/// host mirror is [`golden_tile_bound`]). It is bound to the P4b vocabulary set —
+/// host mirror is `golden_tile_bound`). It is bound to the P4b vocabulary set —
 /// binding 0 a read-only `StructuredBuffer<uint>` edit-list, binding 1 a
 /// `Texture2D<float>` SAMPLED depth, binding 6 a `RWStructuredBuffer<TileBound>` output,
 /// binding 5 the UNIFORM camera block — and dispatched 1D over `tiles_w * tiles_h`
@@ -1679,7 +1679,7 @@ pub fn gbuffer_mrt_fs_spirv() -> &'static [u32] {
 /// Multi-paradigm render-path plan, rung R4b-b: the Forward v1 mesh raster VERTEX SPIR-V as a
 /// `u32` word stream, ready for
 /// [`RhiDevice::create_shader_module`](boyko_rhi::RhiDevice::create_shader_module). Paired with
-/// [`forward_opaque_fs_spirv`] in [`VulkanContext::create_graphics_pipeline_forward`].
+/// [`forward_opaque_fs_spirv`] in [`VulkanContext::create_graphics_pipeline_forward`](crate::device::VulkanContext::create_graphics_pipeline_forward).
 #[inline]
 pub fn forward_opaque_vs_spirv() -> &'static [u32] {
     FORWARD_OPAQUE_VS_SPV.as_words()
@@ -1765,7 +1765,7 @@ pub fn vb_shade_tex_spirv() -> &'static [u32] {
 
 /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS VERTEX
 /// SPIR-V as a `u32` word stream. Paired with [`depth_prepass_fs_spirv`] in
-/// [`VulkanContext::create_graphics_pipeline_forward_prepass`].
+/// [`VulkanContext::create_graphics_pipeline_forward_prepass`](crate::device::VulkanContext::create_graphics_pipeline_forward_prepass).
 #[inline]
 pub fn depth_prepass_vs_spirv() -> &'static [u32] {
     DEPTH_PREPASS_VS_SPV.as_words()
@@ -1781,7 +1781,7 @@ pub fn depth_prepass_fs_spirv() -> &'static [u32] {
 /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the `forward_opaque` FROXEL
 /// FRAGMENT SPIR-V as a `u32` word stream. Paired with [`forward_opaque_vs_spirv`] (the SAME
 /// vertex shader — only the fragment shines through a different `#ifdef FROXEL` compile) in
-/// [`VulkanContext::create_graphics_pipeline_forward_plus`].
+/// [`VulkanContext::create_graphics_pipeline_forward_plus`](crate::device::VulkanContext::create_graphics_pipeline_forward_plus).
 #[inline]
 pub fn forward_opaque_froxel_fs_spirv() -> &'static [u32] {
     FORWARD_OPAQUE_FROXEL_FS_SPV.as_words()
@@ -2034,7 +2034,7 @@ pub fn smaa_blend_fs_spirv() -> &'static [u32] {
 /// `R8_UNORM` `ssao` lane the deferred resolve combines under `ssao_mode != 0`. Dispatched 1D over
 /// the SAME pixel count as the marcher/resolve, BETWEEN the marcher→resolve store-to-load barrier and
 /// the resolve (with a COMPUTE→COMPUTE barrier on `ssao` so the resolve's `gSsao.Load` sees the
-/// store). The host mirror is [`golden_ssao_attributes`].
+/// store). The host mirror is `golden_ssao_attributes`.
 #[inline]
 pub fn sdf_ssao_spirv() -> &'static [u32] {
     sdf_ssao_spirv_variant(SSAO_QUALITY_MEDIUM)
@@ -2047,7 +2047,7 @@ pub fn sdf_ssao_spirv() -> &'static [u32] {
 /// All three variants share the SAME 5-binding SSAO interface (so one bind-group layout drives any
 /// of them); only the BAKED `static const` tap budget (the `[unroll]` loop counts) differs — the
 /// host selects a variant by binding its pipeline (Mechanism C, ZERO per-pixel runtime cost). Feed
-/// the matching `SSAO_PARAMS[q]` row to [`golden_ssao_attributes`] for the bit-comparable host oracle.
+/// the matching `SSAO_PARAMS[q]` row to `golden_ssao_attributes` for the bit-comparable host oracle.
 ///
 /// # Panics
 ///
@@ -2317,7 +2317,7 @@ pub const SSAO_VIEWT_BG: f32 = 1.0e30;
 /// Render P7-Q2 — ONE SSAO quality preset, the host-side mirror of
 /// `boyko_shaderdsl::ssao::SsaoParams` (the lib cannot import the eDSL: `boyko_shaderdsl` is a
 /// DEV-dependency only, so this struct re-states the same five scalars the pre-compiled `.spv`
-/// variants bake). The host AO oracle [`golden_ssao_attributes`] reads these IN PLACE OF the module
+/// variants bake). The host AO oracle `golden_ssao_attributes` reads these IN PLACE OF the module
 /// `SSAO_*` consts, so feeding [`SSAO_PARAMS`]`[q]` reproduces variant `q`'s GPU result bit-for-bit.
 ///
 /// The module `SSAO_RADIUS`/`SSAO_SLICES`/`SSAO_STEPS`/`SSAO_STRENGTH`/`SSAO_EPS` consts remain the
@@ -2482,21 +2482,21 @@ pub const SSAO_ATROUS_W_EPS: f32 = 1.0e-4;
 /// averaged in ONLY when `|residual| <= SSAO_BLUR_DEPTH_TOL` (the plane-fit residual, not the
 /// raw difference); this keeps the filter WITHIN a flat/sloped surface while REJECTING the
 /// mesh↔SDF silhouette. Equals `boyko_shaderdsl::ssao::SSAO_BLUR_DEPTH_TOL`; mirrored bit-for-bit
-/// by [`golden_ssao_atrous`].
+/// by `golden_ssao_atrous`.
 pub const SSAO_BLUR_DEPTH_TOL: f32 = 1.0;
 /// The SSAO à-trous per-pass DEPTH falloff scale (`SSAO_BLUR_DEPTH_SIGMA` in
 /// `ssao_atrous.comp.hlsl`), in linear view-Z units: the per-tap depth weight is
 /// `clamp01(1 - (dz*dz) / (SSAO_BLUR_DEPTH_SIGMA * SSAO_BLUR_DEPTH_SIGMA))`, softening the
 /// depth agreement WITHIN the hard [`SSAO_BLUR_DEPTH_TOL`] gate. Equals
 /// `boyko_shaderdsl::ssao::SSAO_BLUR_DEPTH_SIGMA`; mirrored bit-for-bit by
-/// [`golden_ssao_atrous`].
+/// `golden_ssao_atrous`.
 pub const SSAO_BLUR_DEPTH_SIGMA: f32 = 1.0;
 /// The SSAO à-trous slope-aware depth-gate gradient clamp (`SSAO_BLUR_GRAD_CLAMP` in
 /// `ssao_atrous.comp.hlsl`): each pass predicts a tap's linear-Z from the center's clamped local
 /// gradient (min-magnitude one-sided differences at the fixed ±1 offset) and gates the
 /// SVGF step-scaled RESIDUAL — the band follows a sloped/curved surface instead of truncating
 /// the kernel, while a silhouette/background step (clamped) still rejects. Equals
-/// `boyko_shaderdsl::ssao::SSAO_BLUR_GRAD_CLAMP`; mirrored bit-for-bit by [`golden_ssao_atrous`].
+/// `boyko_shaderdsl::ssao::SSAO_BLUR_GRAD_CLAMP`; mirrored bit-for-bit by `golden_ssao_atrous`.
 pub const SSAO_BLUR_GRAD_CLAMP: f32 = 0.1;
 
 /// The SSAO à-trous push-constant size (`{ uint step; }`, `ssao_atrous.comp.hlsl`'s
@@ -2720,7 +2720,7 @@ pub const MESH_COLOR: [f32; 3] = [0.15, 0.65, 0.25];
 /// raster pass writes a first-class PBR G-buffer (`base = this color`, `n = (0, 0, 1)`,
 /// `mat_id = 0`, `shadow = ao = 1`, `mask = 1`) and the deferred resolve runs FULL
 /// Cook-Torrance on it — exactly like an SDF pixel. The host oracle
-/// [`golden_marcher_attributes`] models that producer with this albedo so the GPU-vs-oracle
+/// `golden_marcher_attributes` models that producer with this albedo so the GPU-vs-oracle
 /// comparison matches mesh pixels too. (The old flat marcher-derived [`MESH_COLOR`] with
 /// `mask = 0` is the pre-P5 behavior; it is retained only for the docs/inline-composite
 /// `golden_composite_pixel_*` oracles that model the marcher's own mesh arm.)
@@ -2802,7 +2802,7 @@ pub const SDF_TRACE_T_MAX: f32 = SDF_T_MAX;
 pub const MESH_DEPTH_T_MAX: f32 = 64.0;
 
 /// The world-space XY a pixel's orthographic ray passes through (the ray origin's
-/// xy), mirroring the camera reconstruction in [`golden_composite_pixel`]. The
+/// xy), mirroring the camera reconstruction in `golden_composite_pixel`. The
 /// rung-10 test uses this to compute, host-side, exactly which pixels a world-XY
 /// quad covers (so the discriminator texels are picked independent of the GPU).
 #[inline]
@@ -3034,7 +3034,7 @@ impl CoarseMode {
 ///   offset  8 : u32   lighting_flags   bit 0 = A1 shadows, bit 1 = A2 AO; 0 = OFF path
 ///   offset 12 : u32   _pad             aligns `light_dir` to offset 16 (a `float3` lands
 ///                                      on a 16-byte boundary under std430)
-///   offset 16 : [f32;3] light_dir      the directional-light direction (un-normalized)
+///   offset 16 : \[f32;3\] light_dir      the directional-light direction (un-normalized)
 ///   offset 28 : f32   _pad2            tail pad to a 32-byte stride
 ///   total: 32 bytes — a subset of the declared 80-byte COMPUTE push range, so the
 ///   pipeline-layout declaration is unchanged.
@@ -3290,12 +3290,12 @@ impl FineMarcherPush {
 ///   offset  4 : u32     extent_h        render extent height
 ///   offset  8 : f32     view_z_a        HAS_MESH reverse-Z decode `A` (don't-care w/o HAS_MESH)
 ///   offset 12 : f32     view_z_b        HAS_MESH reverse-Z decode `B`
-///   offset 16 : [f32;3] light_dir       primary directional light direction (un-normalized)
+///   offset 16 : \[f32;3\] light_dir       primary directional light direction (un-normalized)
 ///   offset 28 : u32     brick_enabled   M1 empty-skip gate; 0 = OFF (this rung's host default)
 ///   offset 32 : u32     brick_trilinear M2 trilinear+cubic gate; 0 = OFF
 ///   offset 36 : u32     brick_levels    M4 clip-map level count; 0 = OFF
 ///
-/// `view_z_a`/`view_z_b` mirror [`boyko_render::view::forward_view_z_from_depth`]'s own `A`/`B`
+/// `view_z_a`/`view_z_b` mirror `boyko_render::view::forward_view_z_from_depth`'s own `A`/`B`
 /// derivation (`A = -near/(far-near)`, `B = near*far/(far-near)`) exactly — the shader's
 /// `view_z = view_z_b / (depth - view_z_a)` is that function's algebraic inverse, ported to HLSL
 /// so the compute pass does not need `near`/`far` themselves.
@@ -3355,7 +3355,7 @@ impl SdfForwardMarchPush {
     }
 
     /// Builds the push for a `HAS_MESH` dispatch: `view_z_a`/`view_z_b` are the reverse-Z decode
-    /// constants [`boyko_render::view::forward_view_z_from_depth`] itself derives from
+    /// constants `boyko_render::view::forward_view_z_from_depth` itself derives from
     /// `near`/`far` (`A = -near/(far-near)`, `B = near*far/(far-near)`) — the caller passes them
     /// precomputed so this pass needs no `near`/`far` fields of its own.
     #[inline]
@@ -3565,7 +3565,7 @@ pub struct RcasPush {
     pub img_w: u32,
     /// Render extent height.
     pub img_h: u32,
-    /// The owner-set [`SharpenMode::Rcas`](boyko_render's `SharpenMode::Rcas`) strength in
+    /// The owner-set `SharpenMode::Rcas` (boyko_render's) strength in
     /// `[0, 1]` (`boyko_render::taa_config::TaaConfig::rcas_sharpness`).
     pub sharpness: f32,
     /// Padding to a round 16-byte push range; unread by the shader.
@@ -3601,7 +3601,7 @@ impl RcasPush {
     }
 }
 
-/// The camera the extent-aware golden ([`golden_composite_pixel_ex`]) reconstructs a
+/// The camera the extent-aware golden (`golden_composite_pixel_ex`) reconstructs a
 /// ray from. ORTHO is the golden-frozen path; PERSPECTIVE mirrors the shader's
 /// additive ray-gen (eye + orthonormal basis + half-FOV tangent + aspect).
 #[derive(Clone, Copy, Debug)]
@@ -3678,7 +3678,7 @@ pub(crate) fn composite_ray(
 
 /// The `(ray_origin, ray_dir)` for pixel `(px, py)` at extent `(img_w, img_h)` under
 /// `camera`, exposing the shared marcher/resolve ray-gen ([`composite_ray`]) so the PBR
-/// MVP-2 resolve golden ([`golden_deferred_resolve`]) can reconstruct the per-pixel view
+/// MVP-2 resolve golden (`golden_deferred_resolve`) can reconstruct the per-pixel view
 /// direction (`V = -rd`) the GPU resolve uses. Bit-identical to the marcher's ray-gen.
 #[inline]
 pub fn composite_pixel_ray(
@@ -3738,7 +3738,7 @@ pub(crate) const BRICK_CLASS_EMPTY_OUTSIDE: u32 = 0;
 /// near-field grid cell edge — the world span a single apron'd `BRICK_ALLOC³` atlas tile covers.
 pub const M2_BRICK_WORLD: f32 = 2.0;
 
-/// The world width of one M2 atlas voxel (the brick scale [`fill_brick`] / [`brick_cubic_hit`] pin).
+/// The world width of one M2 atlas voxel (the brick scale [`fill_brick`] / [`brick_cubic_hit`](boyko_sdf_math::brick::brick_cubic_hit) pin).
 pub const M2_VOXEL_SIZE: f32 = 0.25;
 
 /// The M2 near-field grid edge (cells per axis). A `4³` lattice of [`M2_BRICK_WORLD`]-sized bricks
@@ -4867,7 +4867,7 @@ pub const GOLDEN_LIGHT_KIND_SKY: u32 = 3;
 pub const GOLDEN_LIGHT_HEADER_BASE_WORDS: usize = 16;
 
 
-/// The bit offset of the 5-bit atlas-slot field in [`GoldenLight::dir_kind`]`.w` — mirrors
+/// The bit offset of the 5-bit atlas-slot field in `GoldenLight::dir_kind``.w` — mirrors
 /// `boyko_render::shadow_atlas::ATLAS_SLOT_SHIFT` and the shader's `ATLAS_SLOT_SHIFT`.
 pub const GOLDEN_ATLAS_SLOT_SHIFT: u32 = 17;
 /// The 5-bit mask for the atlas-slot field — mirrors `boyko_render::shadow_atlas::ATLAS_SLOT_MASK`.
@@ -4938,7 +4938,7 @@ pub const PBR_SKY_DIFFUSE: [f32; 3] = [0.10, 0.10, 0.12];
 /// The resolve's analytic specular-IBL sky color (scales EnvBRDFApprox).
 pub const PBR_SKY_SPEC: [f32; 3] = [0.10, 0.10, 0.12];
 /// The "empty field" distance sentinel, mirroring the shader's `FAR` (= 1e9 in
-/// `sdf_field.hlsli`). Used as the argmin seed in [`pick_material_id`] so the host
+/// `sdf_field.hlsli`). Used as the argmin seed in `pick_material_id` so the host
 /// oracle initializes its nearest-surface search identically to the GPU marcher.
 pub const PBR_FAR: f32 = 1.0e9;
 

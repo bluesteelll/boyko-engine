@@ -17,7 +17,7 @@ impl EcsMaster {
     ///
     /// # Errors
     ///
-    /// Forwards errors from [`EventDispatcher::preregister`].
+    /// Forwards errors from [`EventDispatcher::preregister`](crate::ecs::core::events::event_dispatcher::EventDispatcher::preregister).
     #[inline]
     pub fn preregister_event<E: Event>(&mut self, cfg: EventConfig) -> EcsResult<()> {
         self.events.preregister::<E>(cfg)
@@ -31,7 +31,7 @@ impl EcsMaster {
     ///
     /// # Errors
     ///
-    /// Forwards errors from [`EventDispatcher::preregister`].
+    /// Forwards errors from [`EventDispatcher::preregister`](crate::ecs::core::events::event_dispatcher::EventDispatcher::preregister).
     ///
     /// [`preregister_event`]: EcsMaster::preregister_event
     #[inline]
@@ -45,7 +45,7 @@ impl EcsMaster {
     ///
     /// # Errors
     ///
-    /// Forwards errors from [`EventDispatcher::send`].
+    /// Forwards errors from [`EventDispatcher::send`](crate::ecs::core::events::event_dispatcher::EventDispatcher::send).
     #[inline]
     pub fn send_event<E: Event>(&self, thread_index: u32, event: E) -> EcsResult<()> {
         self.events.send::<E>(thread_index, event)

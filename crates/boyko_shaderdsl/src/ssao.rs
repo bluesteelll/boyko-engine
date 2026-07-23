@@ -41,7 +41,7 @@
 //! Instantiated two ways (the established control-axis discipline):
 //!   - `<EvalCf>` — the CPU oracle (`f32` arithmetic + the host `tap` closure), the
 //!     bit-comparable host mirror the golden gather calls.
-//!   - `<EmitCf>` — the HLSL recorder ([`crate::emit::emit_hlsl_ssao`]) walking the STMT
+//!   - `<EmitCf>` — the HLSL recorder (`crate::emit::emit_hlsl_ssao`) walking the STMT
 //!     IR into the GENERATED span spliced into `sdf_ssao.comp.hlsl`.
 
 use crate::cf::{Cf, Flow};
@@ -407,7 +407,7 @@ pub fn ssao_slice_body<C: Cf, T: Fn(C::Iv, bool) -> C::Vec3f>(
 }
 
 /// Folds the `SSAO_SLICES` rotated slices into the final `ao` factor — the top-level
-/// SSAO body the [`crate::emit::emit_hlsl_ssao`] entry traces. Authored over `C`; the
+/// SSAO body the `crate::emit::emit_hlsl_ssao` entry traces. Authored over `C`; the
 /// hand-written shader supplies the center world position `P` (`p`), the center surface
 /// normal `N` (`n`, the elevation reference — CONSTANT across all slices/taps), and the
 /// forward-tap seam (`tap`, indexed by `(slice_iv, step_iv, sign)`).
@@ -709,7 +709,7 @@ pub fn ssao_blur_combine_body<C: Cf>(
     ao_class.min(ssao_blurred)
 }
 
-/// ONE à-trous pass's full filter — the Eval/Track-1 HOST oracle body [`golden_ssao_atrous`]
+/// ONE à-trous pass's full filter — the Eval/Track-1 HOST oracle body `golden_ssao_atrous`
 /// (`boyko_rhi_vulkan`, which cannot import this crate) chains `N` times, and the structural
 /// mirror of `ssao_atrous.comp.hlsl`'s `main()` for ONE dispatch (`step = 1 << level`).
 ///

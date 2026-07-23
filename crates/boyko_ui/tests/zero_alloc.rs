@@ -28,6 +28,13 @@
 //! (b) a non-structural size tweak within high-water, (c) a resize frame at the
 //! same root count (cached root list reused — no per-frame `query_entities`).
 
+// Test-harness plumbing only: `Arc<Mutex<…>>` is this repo's established probe for
+// smuggling a spawned `Entity` / a `UiParseReport` out of the `Send + Sync` one-shot
+// system closure, and a file-static `Mutex<()>` serializes tests that arm a process-global
+// (the counting allocator, the watch-poll counters). Not engine code — the whole file is
+// compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 mod common;
 
 use std::alloc::{GlobalAlloc, Layout, System};

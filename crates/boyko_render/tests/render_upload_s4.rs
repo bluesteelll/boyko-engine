@@ -31,6 +31,11 @@
 //! contract is mirrored here as an independent 24 B / align 4 + per-field-offset
 //! pin that MUST stay equal to `boyko_demo/src/render/instance.rs:69-70`.
 
+// Test harness, not an engine path: `Arc<Mutex<..>>` carries observations (the spawned
+// `Entity` pair, a visit counter) out of one-shot `run_system` / observer closures back to the
+// assertions. Test-only scaffolding, never linked into a shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::{Arc, Mutex};
 
 use boyko_ecs::ecs::core::app::App;

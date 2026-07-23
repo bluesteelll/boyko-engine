@@ -341,6 +341,12 @@ mod tests {
     //! rebuild-each-frame zero, and the order-independence (determinism)
     //! property. Run native and under Miri (zero `unsafe` here).
 
+    // Test-oracle model: the std `HashSet` is the REFERENCE collision detector the
+    // hand-rolled `pack` / `pack_sdf` key packing is differentially verified against.
+    // Compiled out of every shipping build; the solver itself keys into its own
+    // open-addressed VM-native table.
+    #![allow(clippy::disallowed_types)]
+
     use super::*;
 
     #[test]

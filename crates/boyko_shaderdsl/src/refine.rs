@@ -32,7 +32,7 @@
 //!     reproduces the committed B1 accept-refine CONTROL FLOW (scoped to control flow — the
 //!     cmp-`.spv` is the byte-identity oracle).
 //!   - `<EmitCf>` — the HLSL recorder; the printer
-//!     ([`crate::emit::emit_hlsl_b1_accept_refine`]) walks the STMT IR into the `[loop]` span
+//!     (`crate::emit::emit_hlsl_b1_accept_refine`) walks the STMT IR into the `[loop]` span
 //!     (byte-identical to the committed `.comp.spv`, proven by the cmp-`.spv`).
 //!
 //! # The named tuning consts spell as SYMBOLS

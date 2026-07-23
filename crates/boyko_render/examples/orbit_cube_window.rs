@@ -40,6 +40,10 @@
 
 #![cfg(windows)]
 
+// Example binary, not an engine path: `Arc<Mutex<Option<Entity>>>` carries the spawned rig
+// `Entity` out of a one-shot `run_system` closure. Demo scaffolding, not shipped engine code.
+#![allow(clippy::disallowed_types)]
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

@@ -1,5 +1,6 @@
 //! [`AssetBacking`] — the trait an [`Assets<T>`](crate::ecs::core::asset::assets::Assets)
-//! element type implements to obtain a store-owned [`ComponentPool`] layout
+//! element type implements to obtain a store-owned
+//! [`ComponentPool`](crate::ecs::memory::component_pool::ComponentPool) layout
 //! (asset-streaming plan F1).
 //!
 //! # Why a macro, not a blanket impl
@@ -8,14 +9,22 @@
 //! `impl AssetBacking for MeshGpu` (a non-`Pod` resident type) is **E0119** on
 //! stable: coherence cannot prove `MeshGpu: !Pod` (no negative reasoning over
 //! a foreign trait), so the two impls would be seen as potentially
-//! overlapping. [`impl_asset_pod_backing!`] sidesteps this entirely by
+//! overlapping. [`impl_asset_pod_backing!`](crate::impl_asset_pod_backing) sidesteps this entirely by
 //! generating one concrete, non-generic `impl AssetBacking for $t` per
 //! invocation — no blanket impl ever exists, so a later hand-written impl
 //! (e.g. [`MeshGpu`](../../../../../boyko_render/struct.MeshGpu.html)'s
 //! manual-drop-glue impl in `boyko_render`) can never collide with it.
 
 use std::any::TypeId;
+// Once-per-type `TypeId → ComponentId` mint registry (`ASSET_LAYOUTS` below):
+// rust#22991 collapses a `static` declared inside a generic fn body across all
+// monomorphisations, so the memoization MUST be one shared TypeId-keyed map
+// behind one lock. Touched once per concrete asset type at store construction
+// (`Assets::with_reserved` → `T::register_layout()`); the resolved `ComponentId`
+// is then owned by the store's `ComponentPool`, so no per-frame path re-enters.
+#[allow(clippy::disallowed_types)]
 use std::collections::HashMap;
+#[allow(clippy::disallowed_types)]
 use std::sync::{Mutex, OnceLock};
 
 use crate::ecs::core::component::component_registry::{self, ComponentLayout, DropFn};
@@ -25,7 +34,7 @@ use crate::ecs::identifiers::primitives::ComponentId;
 /// table's [`ComponentPool`](crate::ecs::memory::component_pool::ComponentPool)
 /// column.
 ///
-/// Implemented via the [`impl_asset_pod_backing!`] macro for a plain-old-data
+/// Implemented via the [`impl_asset_pod_backing!`](crate::impl_asset_pod_backing) macro for a plain-old-data
 /// type with no device teardown (`NEEDS_TEARDOWN = false`, `drop_fn = None`),
 /// or by hand for a type whose teardown must be threaded through explicitly
 /// (`NEEDS_TEARDOWN = true`, a manual `drop_fn` — e.g. a GPU-resident asset
@@ -33,7 +42,8 @@ use crate::ecs::identifiers::primitives::ComponentId;
 /// `boyko_render`-side impl).
 ///
 /// `register_layout` mints (once per concrete `T`, memoized) the
-/// [`ComponentId`] the store's [`ComponentPool`] is built from — see
+/// [`ComponentId`] the store's
+/// [`ComponentPool`](crate::ecs::memory::component_pool::ComponentPool) is built from — see
 /// [`register_asset_layout`].
 ///
 /// # No `Send + Sync` supertrait bound
@@ -54,7 +64,7 @@ pub trait AssetBacking: Sized + 'static {
     /// through something other than `Self`'s own `Drop` (e.g. a device
     /// buffer). Purely descriptive in F1 (the streaming teardown path that
     /// consults it lands at F6) — a POD type backed by
-    /// [`impl_asset_pod_backing!`] is always `false`.
+    /// [`impl_asset_pod_backing!`](crate::impl_asset_pod_backing) is always `false`.
     const NEEDS_TEARDOWN: bool;
 
     /// Returns the [`ComponentId`] this type's store column is built from,
@@ -71,6 +81,9 @@ pub trait AssetBacking: Sized + 'static {
 /// rust#22991 / rfcs#2130 trap [`resource_id_for`](crate::ecs::core::resources::resource_type_registry::resource_id_for)
 /// documents and works around for generic `Resource`s) — a `TypeId`-keyed map
 /// behind ONE process-global lock is the proven fix, reused verbatim here.
+// Once-per-type mint registry (rust#22991 forces the shared map); store
+// construction only — never a per-frame path.
+#[allow(clippy::disallowed_types)]
 static ASSET_LAYOUTS: OnceLock<Mutex<HashMap<TypeId, ComponentId>>> = OnceLock::new();
 
 /// Mints (once per concrete `T`, memoized) the [`ComponentId`] an
@@ -95,6 +108,10 @@ static ASSET_LAYOUTS: OnceLock<Mutex<HashMap<TypeId, ComponentId>>> = OnceLock::
 /// If the process-global `ComponentId` space
 /// ([`component_registry::MAX_COMPONENTS`]) is exhausted, or if the registry
 /// `Mutex` is poisoned by a previous panicking caller.
+// Once-per-concrete-`T` mint, called from `Assets::with_reserved` at store
+// construction; the minted `ComponentId` is cached in the store, so no
+// per-frame path locks this map.
+#[allow(clippy::disallowed_types)]
 pub fn register_asset_layout<T: 'static>(drop_fn: Option<DropFn>) -> ComponentId {
     let registry = ASSET_LAYOUTS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut map = registry

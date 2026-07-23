@@ -2,8 +2,8 @@
 //! only (Phase 1, plan Waves C+D).
 //!
 //! [`Vulkan`] is the zero-sized [`RhiApi`] marker. [`VulkanContext`] implements
-//! [`RhiDevice`]; a thin [`VulkanQueue`] implements [`RhiQueue`] (plan O1/Q2);
-//! [`VulkanCommandEncoder`] implements [`RhiCommandEncoder`] (the hot recording
+//! [`RhiDevice`](boyko_rhi::RhiDevice); a thin [`VulkanQueue`] implements [`RhiQueue`] (plan O1/Q2);
+//! [`VulkanCommandEncoder`] implements [`RhiCommandEncoder`](boyko_rhi::RhiCommandEncoder) (the hot recording
 //! path). The fixed compute descriptor-set + pipeline layouts that once lived in
 //! the dissolved `ComputeHarness` are now cached on the device ([`ComputeLayouts`],
 //! plan Q1/W2), and the command pool + buffer + descriptor pool + set move onto
@@ -445,7 +445,7 @@ pub struct VulkanShaderModule {
 ///   `owns_layout == true` and the layout is torn down with the pipeline (reverse
 ///   creation order: pipeline → layout) in `destroy_compute_pipeline`.
 ///
-/// `layout` is the target a [`RhiCommandEncoder::bind_descriptor_set_compute`] binds
+/// `layout` is the target a [`RhiCommandEncoder::bind_descriptor_set_compute`](boyko_rhi::RhiCommandEncoder::bind_descriptor_set_compute) binds
 /// the vocabulary set against.
 ///
 /// # Safety
@@ -474,7 +474,7 @@ pub struct ComputePipeline {
 /// push range (rung 2) or one `VERTEX`-stage push range (rung 3's MVP `float4x4`),
 /// created at `create_graphics_pipeline` and torn down with the pipeline (reverse
 /// creation order: pipeline → layout) in `destroy_graphics_pipeline`. The layout is
-/// also the target of [`RhiCommandEncoder::push_graphics_constants`]. Its shader
+/// also the target of [`RhiCommandEncoder::push_graphics_constants`](boyko_rhi::RhiCommandEncoder::push_graphics_constants). Its shader
 /// modules are separate caller-owned [`VulkanShaderModule`]s (the trait splits
 /// module + pipeline creation).
 ///
@@ -590,7 +590,7 @@ pub struct VulkanBindGroup {
 
 /// Rewrites binding `binding` of `bg`'s descriptor set in place to point at `buffer` — a
 /// single `vkUpdateDescriptorSets` storage-buffer write, reusing the SAME device fn pointer
-/// [`VulkanCommandEncoder::bind_storage_buffer`]'s one-time compute-set write uses
+/// [`VulkanCommandEncoder::bind_storage_buffer`](boyko_rhi::RhiCommandEncoder::bind_storage_buffer)'s one-time compute-set write uses
 /// (`update_descriptor_sets`). Asset-streaming plan F7 §5: growing a GPU-mirrored SSBO
 /// repoints every descriptor set that binds it in place, without a `vkDeviceWaitIdle` —
 /// the surgical tool the present-crate rebind orchestration (`GBufferFrame::
@@ -705,8 +705,8 @@ pub struct VulkanFence {
 ///
 /// The originating [`VulkanContext`] MUST still be alive when this pool is read from
 /// or destroyed: each goes through the context's device fn-table. Its queries are
-/// UNDEFINED until reset ([`RhiCommandEncoder::reset_query_pool`]) each frame before
-/// the first [`RhiCommandEncoder::write_timestamp`]. No compile-time `'ctx` tie this
+/// UNDEFINED until reset ([`RhiCommandEncoder::reset_query_pool`](boyko_rhi::RhiCommandEncoder::reset_query_pool)) each frame before
+/// the first [`RhiCommandEncoder::write_timestamp`](boyko_rhi::RhiCommandEncoder::write_timestamp). No compile-time `'ctx` tie this
 /// phase (plan F1; the fence precedent).
 pub struct VulkanQueryPool {
     /// The `VkQueryPool` handle; destroyed by `destroy_query_pool`.
@@ -740,7 +740,7 @@ pub struct VulkanQueue {
     fns: *const DeviceFns,
 }
 
-/// The hot command-recording encoder ([`RhiCommandEncoder`]).
+/// The hot command-recording encoder ([`RhiCommandEncoder`](boyko_rhi::RhiCommandEncoder)).
 ///
 /// Owns its command pool + primary command buffer + descriptor pool + the one
 /// fixed compute descriptor set (allocated ONCE here at

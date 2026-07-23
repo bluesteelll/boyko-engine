@@ -23,6 +23,13 @@
 //! schedule-driven path is proven separately — it aborts under Miri at the pool
 //! int-to-ptr, a documented pool artifact).
 
+// Test-only: `HashSet` is the ORACLE model here — the reference "no color reuses a
+// dynamic body" / injectivity checker the constraint-graph coloring is differentially
+// verified against — and `Arc<Mutex<…>>` is the established probe for smuggling a spawned
+// `Entity` out of the `Send + Sync` one-shot system closure. The solver's own structures
+// stay VM-native; this file is compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::collections::{HashSet, VecDeque};
 
 use boyko_physics::manifold::{BodyIndex, Manifold, SDF_SENTINEL};

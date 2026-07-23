@@ -461,6 +461,23 @@ impl<'a> Reader<'a> {
     fn u16(&mut self) -> Option<u16> {
         Some(u16::from_le_bytes(self.take(2)?.try_into().ok()?))
     }
+    /// Reads a `u32` count and validates it against the bytes ACTUALLY left, so a
+    /// `Vec::with_capacity` driven by it can never be a decompression-bomb-style
+    /// allocation (2026-07 audit, MAJOR): a 30-byte file claiming `0xFFFF_FFFF`
+    /// records of 36 bytes each used to request ~154 GB, which is under
+    /// `isize::MAX` — so instead of the catchable `capacity_overflow` panic it
+    /// reached the allocator, got null, and `handle_alloc_error` ABORTED the
+    /// process, contradicting this reader's own "no panics on malformed input"
+    /// contract. `record_size` is the on-disk size of one record.
+    fn count(&mut self, record_size: usize) -> Option<usize> {
+        let n = self.u32()? as usize;
+        let need = n.checked_mul(record_size)?;
+        let left = self.buf.len().checked_sub(self.pos)?;
+        if need > left {
+            return None;
+        }
+        Some(n)
+    }
 }
 
 /// Serializes a [`BakedFont`] to the in-house `.bfont` binary.
@@ -547,7 +564,11 @@ pub fn read_bfont(bytes: &[u8]) -> Option<BakedFont> {
         kind: AtlasKind::from_u32(r.u32()?)?,
     };
 
-    let glyph_count = r.u32()? as usize;
+    // `count` (not a bare `u32`) bounds each reservation against the bytes left —
+    // see its doc for the allocator-abort this closes. Record sizes mirror the
+    // per-field reads below and are pinned by the `size_of` asserts on the POD
+    // structs at the top of this module.
+    let glyph_count = r.count(36)?;
     let mut glyphs = Vec::with_capacity(glyph_count);
     for _ in 0..glyph_count {
         let advance_em = r.f32()?;
@@ -560,7 +581,7 @@ pub fn read_bfont(bytes: &[u8]) -> Option<BakedFont> {
         });
     }
 
-    let cmap_count = r.u32()? as usize;
+    let cmap_count = r.count(6)?;
     let mut cmap = Vec::with_capacity(cmap_count);
     for _ in 0..cmap_count {
         let codepoint = r.u32()?;
@@ -568,7 +589,7 @@ pub fn read_bfont(bytes: &[u8]) -> Option<BakedFont> {
         cmap.push(MappedCodepoint { codepoint, slot });
     }
 
-    let kern_count = r.u32()? as usize;
+    let kern_count = r.count(6)?;
     let mut kern = Vec::with_capacity(kern_count);
     for _ in 0..kern_count {
         let key = r.u32()?;
@@ -580,6 +601,24 @@ pub fn read_bfont(bytes: &[u8]) -> Option<BakedFont> {
     let height = r.u32()?;
     let px_len = r.u32()? as usize;
     let pixels = r.take(px_len)?.to_vec();
+
+    // 2026-07 audit, CRITICAL: `width`/`height`/`px_len` are three INDEPENDENT
+    // fields of an attacker-controllable file, and [`AtlasImage`]'s documented
+    // invariant ("`pixels` is `width * height * 4` tightly-packed RGBA8") was
+    // enforced NOWHERE on this deserialization path. The consumer
+    // (`boyko_render::ui::resources::upload_atlas_pixels`) sizes its staging
+    // `VkBuffer` from `pixels.len()` but records the `vkCmdCopyBufferToImage`
+    // extent from `width`/`height`, so a file declaring `4096 x 4096` with a
+    // 4-byte payload made the driver read 64 MiB past a 4-byte allocation —
+    // an out-of-bounds DEVICE read whose result is then sampled by the UI
+    // shader. A zero extent (`width == 0`) is likewise illegal for
+    // `VkImageCreateInfo`. Reject both here, at the trust boundary.
+    let expected = (width as u64)
+        .checked_mul(height as u64)
+        .and_then(|wh| wh.checked_mul(4))?;
+    if width == 0 || height == 0 || expected != px_len as u64 {
+        return None;
+    }
 
     Some(BakedFont {
         meta,

@@ -18,6 +18,13 @@
 //! surface (`with_enabled` / `without_enabled` / `for_each_chunk` /
 //! `for_each_chunk_entities` / `par_for_each_chunk`).
 
+// Test oracle model: the std collections / `Arc<Mutex<_>>` / `Rc` in this suite are
+// the REFERENCE implementations and cross-thread observation channels the engine's
+// VM-native structures (ComponentPool columns, BitSet/BitMask, SparseMap, the dense
+// stores) are differentially verified against - never engine data itself.
+// An integration-test target: compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 use boyko_ecs::ecs::core::component::component::Component;
 use boyko_ecs::ecs::core::component::component_registry::EnableTagId;
 use boyko_ecs::ecs::core::iters::query::par_iter::BatchingStrategy;

@@ -366,7 +366,7 @@ pub enum BrickClass {
 
 /// The STORED narrow-band half-width (world units): the per-edit AABB skin in
 /// [`edit_aabb`] AND the brick atlas's `R8_SNORM` snorm scale
-/// ([`crate::brick::BAND_HALF_STORE`]) both use this value.
+/// (`crate::brick::BAND_HALF_STORE`) both use this value.
 ///
 /// An edit influences the COMPOSED field out to roughly its smooth-blend radius
 /// plus the band the brick atlas stores; expanding the AABB by `band_half`
@@ -619,7 +619,7 @@ pub fn v_dot(a: [f32; 3], b: [f32; 3]) -> f32 {
 ///
 /// When `length(a)` is exactly zero — or non-finite — this returns
 /// `[0.0, 0.0, 0.0]` instead of the `0.0 / 0.0 == NaN` the raw division would
-/// produce, mirroring [`boyko_physics::math::Vec3::normalize`]'s zero-guard. The
+/// produce, mirroring `boyko_physics::math::Vec3::normalize`'s zero-guard. The
 /// only such input the field math feeds here is a central-difference gradient
 /// ([`sdf_edit_list_normal`]) at a FIELD CRITICAL POINT (e.g. a query point
 /// coincident with a primitive center under deep penetration, or a

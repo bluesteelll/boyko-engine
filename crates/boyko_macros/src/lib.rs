@@ -388,7 +388,7 @@ pub fn system_set_macro(input: TokenStream) -> TokenStream {
 ///   `COUNT <= 256` (the `BitSet256` action cap, plan V8).
 /// * `index(self)` — the dense `0..COUNT` declaration-order index.
 /// * `from_index(i)` — the inverse (`None` for `i >= COUNT`).
-/// * `kind(self)` — the per-variant [`ActionKind`], selected by the optional
+/// * `kind(self)` — the per-variant `ActionKind`, selected by the optional
 ///   `#[actionlike(Button|Axis1D|Axis2D)]` field attribute (default `Button`).
 /// * `name(self)` — the variant's identifier as a `&'static str`.
 ///
@@ -440,7 +440,7 @@ pub fn actionlike_macro(input: TokenStream) -> TokenStream {
 ///
 /// The macro expands to a block expression that runs against a `Commands`
 /// binding in scope (default name `cmds`; override with `commands: <ident>;` as
-/// the first clause). It evaluates to the root [`Entity`] — or, for several
+/// the first clause). It evaluates to the root `Entity` — or, for several
 /// top-level nodes, a tuple of root `Entity`s.
 ///
 /// # Grammar
@@ -459,7 +459,7 @@ pub fn actionlike_macro(input: TokenStream) -> TokenStream {
 /// Each node lowers to `cmds.spawn(<base>)` plus chained `.insert(<literal>)` for
 /// every remaining component, then one standalone `cmds.entity(parent).add_child(child)`
 /// per link. A node whose component set contains BOTH `UiLayout` and `ComputedRect`
-/// spawns the canonical [`UiNodeBundle`] (hitting the Phase-8.5 static archetype
+/// spawns the canonical `UiNodeBundle` (hitting the Phase-8.5 static archetype
 /// cache); otherwise it spawns the `UiLayout` literal and injects
 /// `ComputedRect::default()`. A node without any `UiLayout` literal is a compile
 /// error.

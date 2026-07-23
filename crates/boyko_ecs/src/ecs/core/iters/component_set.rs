@@ -1,6 +1,7 @@
 use std::any::TypeId;
-use std::collections::HashMap;
-use std::sync::{OnceLock, RwLock};
+use std::sync::OnceLock;
+
+use boyko_utils::type_intern::TypeIntern;
 
 use crate::ecs::core::component::component::Component;
 use crate::ecs::identifiers::primitives::ComponentId;
@@ -18,52 +19,55 @@ const MAX_COMPONENTS: usize = 512;
 static SINGLE_COMPONENT_CACHE: [OnceLock<&'static [ComponentId]>; MAX_COMPONENTS] =
     [const { OnceLock::new() }; MAX_COMPONENTS];
 
-/// Cache for tuple `ComponentSet` impls (arity 2-8).
+/// Hard cap on distinct tuple `ComponentSet` types per process.
 ///
-/// Rust does NOT create per-monomorphization statics for generic fn bodies;
-/// a `static` inside `impl<A, B> Trait for (A, B)` is shared across all
-/// `(A, B)` instantiations. So we cache by `TypeId::of::<Self>()` — each
-/// distinct tuple type gets one cached slice, leaked once via `Box::leak`.
+/// Bounded by the app's distinct arity-2..8 query shapes (tens to low hundreds in practice).
+const MAX_TUPLE_SETS: usize = 256;
+
+/// Dense-index intern for tuple `ComponentSet` impls (arity 2-8).
 ///
-/// Concurrency model:
-/// - Cold path (Query/QueryState construction): RwLock read-fast-path, falls
-///   back to write lock + double-check on miss. Acceptable: query construction
-///   happens at setup, not per frame.
-/// - Hot path (`QueryState::iter`): does NOT touch this cache.
+/// Rust does NOT create per-monomorphization statics for generic fn bodies; a `static` inside
+/// `impl<A, B> Trait for (A, B)` is shared across all `(A, B)` instantiations (rust#22991), so
+/// the per-type cache must be keyed on `TypeId::of::<Self>()`.
 ///
-/// Memory: bounded by distinct tuple types in the app (~tens to ~hundreds).
-/// One `Box::leak` per distinct type => a few KB lifetime total.
-static TUPLE_CACHE: OnceLock<RwLock<HashMap<TypeId, &'static [ComponentId]>>> = OnceLock::new();
+/// 2026-07 audit: the key-to-slice map used to be a `OnceLock<RwLock<HashMap<..>>>` whose
+/// documented "cold path … query construction happens at setup" claim did not survive tracing —
+/// `cache.read()` ran on EVERY call, before any memo hit was known, so the memo lookup WAS the
+/// lock (the `trigger.rs` fingerprint). The single-component leg three lines up
+/// ([`SINGLE_COMPONENT_CACHE`]) already had the right shape; the tuple leg now matches it, with
+/// [`TypeIntern`] supplying the dense index that `ComponentId` supplies for the single case.
+static TUPLE_IDS: TypeIntern<TypeId, { MAX_TUPLE_SETS * 2 }> = TypeIntern::new();
+
+/// Leaked per-tuple-type slices, indexed by [`TUPLE_IDS`].
+///
+/// Mirrors [`SINGLE_COMPONENT_CACHE`]: one lock-free `OnceLock` slot per interned type, so a
+/// warm read is an acquire load and the `Box::leak` happens at most once per type.
+static TUPLE_SLICES: [OnceLock<&'static [ComponentId]>; MAX_TUPLE_SETS] =
+    [const { OnceLock::new() }; MAX_TUPLE_SETS];
 
 /// Retrieve or initialize the cached `&'static [ComponentId]` for type `T`.
 ///
-/// `init` is called at most once per `T`; subsequent calls return the same
-/// pointer with no allocation. Uses a read-lock fast path and falls back to
-/// a write-lock with double-check on miss.
+/// `init` is called at most once per `T`; subsequent calls return the same pointer with no
+/// allocation and no lock — a hash plus two acquire loads.
 #[inline]
 fn tuple_cache_get_or_init<T: 'static>(
     init: impl FnOnce() -> Vec<ComponentId>,
 ) -> &'static [ComponentId] {
-    let cache = TUPLE_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
-    let type_id = TypeId::of::<T>();
+    let idx = TUPLE_IDS
+        .get_or_mint(TypeId::of::<T>())
+        .unwrap_or_else(tuple_intern_full) as usize;
+    TUPLE_SLICES[idx].get_or_init(|| Box::leak(init().into_boxed_slice()))
+}
 
-    // Fast path: read lock, hopefully cached already.
-    {
-        let guard = cache.read().expect("invariant: TUPLE_CACHE RwLock is not poisoned");
-        if let Some(&slice) = guard.get(&type_id) {
-            return slice;
-        }
-    }
-
-    // Slow path: write lock + double-check (another thread may have inserted
-    // between the read-lock drop and the write-lock acquire).
-    let mut guard = cache.write().expect("invariant: TUPLE_CACHE RwLock is not poisoned");
-    if let Some(&slice) = guard.get(&type_id) {
-        return slice;
-    }
-    let leaked: &'static [ComponentId] = Box::leak(init().into_boxed_slice());
-    guard.insert(type_id, leaked);
-    leaked
+/// Terminal panic for a full [`TUPLE_IDS`] table.
+#[cold]
+#[inline(never)]
+fn tuple_intern_full() -> u32 {
+    panic!(
+        "tuple ComponentSet intern full: more than MAX_TUPLE_SETS = {MAX_TUPLE_SETS} distinct \
+         arity-2..8 component-set types registered. Raise MAX_TUPLE_SETS (and TUPLE_IDS with it, \
+         which must stay at twice the cap) or consolidate query shapes."
+    );
 }
 
 /// Trait for type-safe component queries.

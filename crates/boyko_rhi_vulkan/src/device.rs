@@ -24,6 +24,10 @@
 //! `vkDestroyInstance` → `FreeLibrary`) so a dropped context leaves no leaked
 //! Vulkan objects or DLL references.
 
+// `RefCell` here is the borrow gate on the two lazy sub-allocator blocks below — a
+// `!Send + !Sync` device context handing out `&mut` from `&self`. See
+// docs/HOT-PATH-EXCEPTIONS.md (class `alloc-guarded`).
+#[allow(clippy::disallowed_types)]
 use core::cell::{OnceCell, RefCell};
 use core::ffi::{CStr, c_char, c_void};
 use core::mem;
@@ -281,7 +285,7 @@ pub struct DeviceCaps {
     pub rg16_unorm_storage_ok: bool,
     /// The SSAO à-trous denoise chain: whether `R16_UNORM` supports `STORAGE_IMAGE` under
     /// OPTIMAL tiling (the interior ping-pong ring's format — 16-bit avoids the cumulative
-    /// 8-bit rounding of a multi-level filter, mirroring [`rg16_unorm_storage_ok`](Self::rg16_unorm_storage_ok)'s
+    /// 8-bit rounding of a multi-level filter, mirroring `rg16_unorm_storage_ok`'s
     /// rationale one channel narrower). RECORDED ONLY (NO boot fail-fast): the SSAO à-trous
     /// denoise is software (NOT `hwrt`-gated, unlike the shadow-visibility denoiser) — a device
     /// missing it degrades to the raw (un-denoised) `sdf_ssao` gather, never a boot failure.
@@ -336,7 +340,7 @@ pub struct DeviceCaps {
     /// SSAA W2: `VkPhysicalDeviceLimits::maxImageDimension2D` — the device's max 2D image
     /// extent per axis. The boot arming probe requires `native * SSAA_SCALE <=` this on
     /// BOTH axes before committing the 2× `composite_extent`; on failure SSAA degrades to
-    /// `Off` (never a panic). RECORDED ONLY here — read via [`WindowHost::boot`]
+    /// `Off` (never a panic). RECORDED ONLY here — read via `WindowHost::boot`
     /// (`boyko_app`), which this crate does not depend on.
     pub max_image_dimension_2d: u32,
     /// SSAA W2: the largest `DEVICE_LOCAL` heap size (bytes) reported by
@@ -359,7 +363,7 @@ impl DeviceCaps {
     /// (SDF brick-atlas campaign M2): `R8_SNORM` when the GPU supports linear filtering on
     /// it (the dense quantized path), else the `R16_SFLOAT` D8 fallback (half-float, no
     /// quantization — the `EPSILON_Q` store bias is harmless there). Both the CPU baker and
-    /// the GPU decode handle either format. Returned as the agnostic [`Format`] the
+    /// the GPU decode handle either format. Returned as the agnostic [`Format`](boyko_rhi::Format) the
     /// `create_texture` path maps to a `VkFormat`.
     #[inline]
     pub const fn atlas_format(&self) -> boyko_rhi::Format {
@@ -399,7 +403,7 @@ impl DeviceCaps {
     /// The SSAO à-trous denoise chain: whether `R16_UNORM` supports `STORAGE_IMAGE` under
     /// OPTIMAL tiling — the precondition for the interior ping-pong ring's WRITEs. When `false`,
     /// the ring is not allocated and the resolve reads the raw (un-denoised) `sdf_ssao` gather —
-    /// graceful degradation (software, mirrors [`Self::shadow_denoise_storage_ok`]'s pattern one
+    /// graceful degradation (software, mirrors `Self::shadow_denoise_storage_ok`'s pattern one
     /// channel narrower, but NOT `hwrt`-gated).
     #[inline]
     pub const fn ssao_atrous_storage_ok(&self) -> bool {
@@ -660,6 +664,7 @@ pub struct VulkanContext {
     /// the boxed fn-table is freed, so the pointer is live for every block use.
     /// The `RefCell` provides the `&mut` the sub-allocator needs from `&self`
     /// calls (single-threaded, `!Sync`).
+    #[allow(clippy::disallowed_types)]
     host_block: OnceCell<RefCell<HostVisibleBlock>>,
     /// The single shared device-local (VRAM) block every
     /// [`RhiDevice::create_buffer`](boyko_rhi::RhiDevice::create_buffer) with
@@ -667,6 +672,7 @@ pub struct VulkanContext {
     /// sub-allocates from (the Phase-5 `GpuColumn` seam), created lazily on first
     /// use. Never mapped (plan D3/MF-8). Caches the same plan-A1 `*const DeviceFns`
     /// and is torn down in `Drop` BEFORE `vkDestroyDevice` + the boxed fn-table.
+    #[allow(clippy::disallowed_types)]
     device_block: OnceCell<RefCell<DeviceLocalBlock>>,
     /// HW-RT rung R2a-1: the resolved `VK_KHR_acceleration_structure` command table,
     /// `Some` ONLY when the RT extensions were enabled at device create (mirroring
@@ -1344,6 +1350,7 @@ impl VulkanContext {
     /// [`RhiDevice::create_buffer`](boyko_rhi::RhiDevice::create_buffer) sub-allocates
     /// from it. Returns a [`VulkanError`](crate::error::VulkanError) if the block
     /// allocation fails.
+    #[allow(clippy::disallowed_types)]
     pub(crate) fn host_block(
         &self,
     ) -> Result<&RefCell<HostVisibleBlock>, crate::error::VulkanError> {
@@ -1380,6 +1387,7 @@ impl VulkanContext {
     /// [`MemoryLocation::DeviceLocal`](boyko_rhi::MemoryLocation::DeviceLocal)
     /// sub-allocates from it. The block is never mapped. Returns a
     /// [`VulkanError`](crate::error::VulkanError) if the block allocation fails.
+    #[allow(clippy::disallowed_types)]
     pub(crate) fn device_block(
         &self,
     ) -> Result<&RefCell<DeviceLocalBlock>, crate::error::VulkanError> {
@@ -3397,6 +3405,11 @@ const RT_ENABLE_DEFAULT: bool = false;
 
 #[cfg(test)]
 mod tests {
+    // Test-harness serialization only: the `Mutex` below guards PROCESS-GLOBAL state
+    // (`std::env::set_var` vs. a real device boot) between two `#[test]` fns on the harness's
+    // own threads. It is not engine state and is compiled out of every shipping build.
+    #![allow(clippy::disallowed_types)]
+
     use std::sync::Mutex;
 
     use super::{InstanceConfig, VulkanContext, validation_requested};

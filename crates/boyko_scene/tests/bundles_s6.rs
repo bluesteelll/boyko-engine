@@ -5,9 +5,11 @@
 //! crate dependency):
 //!
 //! * EXACT component set — each scene bundle (`SpatialBundle` / `StaticProp` /
-//!   `CameraRig`) spawns precisely its declared columns, no more and no less. The
-//!   "no more" half walks all `MAX_COMPONENTS` ids and asserts membership is the
-//!   characteristic function of the bundle's canonical `component_ids()`.
+//!   `CameraRig`) spawns precisely its declared columns PLUS the transitive `#[require]`
+//!   closure those columns pull in, and nothing else. The "no more" half walks all
+//!   `MAX_COMPONENTS` ids. The closure is spelled out per test rather than derived: the
+//!   kernel's `get_required_plan` is `pub(crate)`, and naming the expected carriers keeps
+//!   the test able to FAIL when a new `#[require]` edge appears unannounced.
 //! * WARM-PATH cache — a repeated bundle spawn hits the Phase-8.5 per-impl static
 //!   bundle cache: `bundle_archetype_id_for` is idempotent and the world's
 //!   archetype count does NOT grow per spawn (no per-spawn archetype rebuild).
@@ -20,6 +22,13 @@
 //!
 //! The cross-crate physics / render bundle gates (DynamicBody fall + Gpu3dInstance
 //! pack, and the light-object bundles) live in their own crates' S6 suites.
+
+// Test-harness plumbing only: `Arc<Mutex<…>>` is this repo's established probe for
+// smuggling a spawned `Entity` out of the `Send + Sync` one-shot system closure, and the
+// file-static `Mutex<()>` guards serialize tests that arm a process-global (allocator /
+// propagation counter). Neither is engine code — the whole file is compiled out of every
+// shipping build.
+#![allow(clippy::disallowed_types)]
 
 use std::sync::{Arc, Mutex};
 
@@ -37,7 +46,9 @@ use boyko_math::Vec3;
 use boyko_scene::bundles::{CameraRig, SpatialBundle, StaticProp};
 use boyko_scene::camera::{Camera, Projection};
 use boyko_scene::identity::{self, Name, NameId};
-use boyko_scene::render_caps::{MaterialHandle, MeshHandle, Visibility};
+use boyko_scene::render_caps::{
+    MaterialHandle, MaterialRefGen, MeshHandle, MeshRefGen, Visibility,
+};
 use boyko_scene::transform::{GlobalTransform, Transform};
 
 /// The kernel's component-id ceiling (mirror of `component_registry::MAX_COMPONENTS`,
@@ -115,7 +126,7 @@ fn spatial_bundle_spawns_exactly_its_three_components() {
 }
 
 #[test]
-fn static_prop_spawns_exactly_its_five_components() {
+fn static_prop_spawns_its_declared_set_plus_required_closure() {
     let mut world = EcsMaster::new();
     let sink: Arc<Mutex<Option<Entity>>> = Arc::new(Mutex::new(None));
     let probe = Arc::clone(&sink);
@@ -139,6 +150,15 @@ fn static_prop_spawns_exactly_its_five_components() {
         MeshHandle::component_id(),
         MaterialHandle::component_id(),
         Visibility::component_id(),
+        // The `#[require]` closure, NOT bundle fields: `MeshHandle` declares
+        // `#[require(Transform, GlobalTransform, MeshRefGen)]` and `MaterialHandle`
+        // `#[require(MaterialRefGen)]` (asset-streaming F5 generation carriers), so any
+        // bundle naming those handles legitimately materialises two extra columns. This
+        // suite predates those attributes and went red the moment the 2026-07 audit fixed
+        // the vacuously-green CI and it actually ran again. The closure is spelled out so
+        // the check still FAILS on a new unannounced `#[require]` edge.
+        MeshRefGen::component_id(),
+        MaterialRefGen::component_id(),
     ];
     assert_exact_component_set(&world, e, &expected, "StaticProp");
     assert_eq!(StaticProp::component_ids().len(), 5, "StaticProp is arity 5");
@@ -267,18 +287,25 @@ fn as_bytes<T>(value: &T) -> &[u8] {
 /// Manually spawns a StaticProp-equivalent entity into a hand-built archetype with
 /// the SAME component set, returning (archetype_id, entity).
 fn manual_static_prop(world: &mut EcsMaster) -> (ArchetypeId, Entity) {
+    // Must include the `#[require]` closure the bundle path materialises, or the two
+    // archetypes differ by two columns and the 0%-gate compares unlike things.
     let arch = world.create_archetype(&[
         Transform::component_id(),
         GlobalTransform::component_id(),
         MeshHandle::component_id(),
         MaterialHandle::component_id(),
         Visibility::component_id(),
+        MeshRefGen::component_id(),
+        MaterialRefGen::component_id(),
     ]);
     let t = Transform::IDENTITY;
     let g = GlobalTransform::default();
     let mh = MeshHandle(42);
     let mat = MaterialHandle(9);
     let vis = Visibility::Visible;
+    // What the require-ctors would write: both carriers default to GEN_UNSYNCED.
+    let mesh_gen = MeshRefGen::default();
+    let mat_gen = MaterialRefGen::default();
     let e = world
         .create_entity(
             arch,
@@ -288,9 +315,11 @@ fn manual_static_prop(world: &mut EcsMaster) -> (ArchetypeId, Entity) {
                 (MeshHandle::component_id(), as_bytes(&mh)),
                 (MaterialHandle::component_id(), as_bytes(&mat)),
                 (Visibility::component_id(), as_bytes(&vis)),
+                (MeshRefGen::component_id(), as_bytes(&mesh_gen)),
+                (MaterialRefGen::component_id(), as_bytes(&mat_gen)),
             ],
         )
-        .expect("manual StaticProp archetype accepts its five columns");
+        .expect("manual StaticProp archetype accepts its seven columns");
     (arch, e)
 }
 
@@ -345,6 +374,15 @@ fn bundle_spawn_lands_in_same_archetype_as_manual_insert() {
         MeshHandle::component_id(),
         MaterialHandle::component_id(),
         Visibility::component_id(),
+        // The `#[require]` closure, NOT bundle fields: `MeshHandle` declares
+        // `#[require(Transform, GlobalTransform, MeshRefGen)]` and `MaterialHandle`
+        // `#[require(MaterialRefGen)]` (asset-streaming F5 generation carriers), so any
+        // bundle naming those handles legitimately materialises two extra columns. This
+        // suite predates those attributes and went red the moment the 2026-07 audit fixed
+        // the vacuously-green CI and it actually ran again. The closure is spelled out so
+        // the check still FAILS on a new unannounced `#[require]` edge.
+        MeshRefGen::component_id(),
+        MaterialRefGen::component_id(),
     ];
     assert_exact_component_set(&world, bundle_e, &expected, "StaticProp (bundle)");
     assert_exact_component_set(&world, manual_e, &expected, "StaticProp (manual)");

@@ -16,7 +16,7 @@
 //! ([`Cloneability::CloneViaFn`]) or a layout-driven memcpy
 //! ([`Cloneability::TriviallyCopyable`]), exactly as the live clone path does, so it
 //! is correct for all `Clone` components by construction. It also reuses
-//! [`deep::link_child`] (Children rebuild) and [`deep::remap_clone_child_of`]
+//! `deep::link_child` (Children rebuild) and `deep::remap_clone_child_of`
 //! (ChildOf remap) VERBATIM rather than re-implementing them (Principle 0).
 //!
 //! # Cold capture-time structure (NOT a parallel hot-path data system)

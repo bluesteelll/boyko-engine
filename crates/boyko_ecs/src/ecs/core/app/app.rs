@@ -872,6 +872,11 @@ fn config_after_finish_panic(method: &'static str) -> ! {
 #[cfg(test)]
 #[cfg(not(miri))] // constructs a real ThreadPool — same gate as tests/app_plugin.rs
 mod tests {
+    // Test-only harness: `Rc`/`RefCell` are the single-threaded observation
+    // channel the assertions read plugin/schedule side effects through — the
+    // reference model, never engine data. Compiled out of every shipping build.
+    #![allow(clippy::disallowed_types)]
+
     use super::*;
 
     /// One-variant state type for the post-finish routing panic test.

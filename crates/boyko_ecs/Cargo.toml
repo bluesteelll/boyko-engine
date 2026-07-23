@@ -214,8 +214,6 @@ harness = false
 name = "relation_join"
 harness = false
 
-[lints.rust]
-# Phase 9 Wave 7 Step 24: opt-in stronger ALLOC1 check via
-# `RUSTFLAGS="--cfg force_alloc_panic"`. See
-# docs/PHASE-9-FORCE-ALLOC-PANIC.md.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(force_alloc_panic)', 'cfg(loom)'] }
+
+[lints]
+workspace = true

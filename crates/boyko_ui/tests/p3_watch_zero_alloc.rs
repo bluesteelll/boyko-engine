@@ -19,6 +19,13 @@
 //! — proving the tree-read path (which allocates a `query_entities` `Vec` + a
 //! `UiTreeView` + the parse) is gated out of the no-change path.
 
+// Test-harness plumbing only: `Arc<Mutex<…>>` is this repo's established probe for
+// smuggling a spawned `Entity` / a `UiParseReport` out of the `Send + Sync` one-shot
+// system closure, and a file-static `Mutex<()>` serializes tests that arm a process-global
+// (the counting allocator, the watch-poll counters). Not engine code — the whole file is
+// compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 mod p3_common;
 
 use std::alloc::{GlobalAlloc, Layout, System};

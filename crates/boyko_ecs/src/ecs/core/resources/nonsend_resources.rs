@@ -38,11 +38,10 @@
 
 use std::alloc::Layout;
 use std::any::TypeId;
-use std::collections::HashMap;
 use std::mem::MaybeUninit;
-use std::sync::{Mutex, OnceLock};
 
 use boyko_utils::bit_mask::bit_set_256::BitSet256;
+use boyko_utils::type_intern::TypeIntern;
 
 use crate::ecs::core::resources::nonsend_resource_registry::{
     self, NON_SEND_RESOURCE_SLOT_COUNT, NonSendDropFn,
@@ -374,33 +373,45 @@ impl NonSendResources {
 
 /// Mints (once) and returns the [`NonSendResourceId`] for `R`.
 ///
-/// `NonSendResource` is a bare marker trait with no `resource_id()` method, so
-/// the per-type id cache is interned through a process-global `TypeId`-keyed
-/// map of leaked `OnceLock`s ([`type_keyed_slot`]). A generic-fn-local
-/// `static` would collapse across monomorphisations (the Phase 12.5 `static
-/// SLOT` bug), so the map keyed on `TypeId::of::<R>()` is the correct
-/// per-`R` discriminator. The map is touched only on the cold registration
-/// path (`NonSendRes::init_state` / `NonSendResources::insert`), never on a
-/// hot loop.
+/// `NonSendResource` is a bare marker trait with no `resource_id()` method, so the per-type id
+/// is interned by [`TypeId`] in [`NONSEND_IDS`]. A generic-fn-local `static` would collapse
+/// across monomorphisations (the Phase 12.5 `static SLOT` bug, rust#22991), aliasing two
+/// distinct `!Send` resource types onto one slab slot.
+///
+/// 2026-07 audit: the intern was a `OnceLock<Mutex<HashMap<TypeId, &'static OnceLock<..>>>>`
+/// documented as "touched only on the cold registration path … never on a hot loop". The audit
+/// traced the callers and found the opposite — the MEMO ITSELF was the locked map, so every
+/// call paid a global mutex acquire before the leaked `OnceLock` could short-circuit anything,
+/// and `NonSendResources::get_mut_ptr` is documented in `boyko_app`'s runner as the
+/// "every frame, cheap" leg. The table now resolves lock-free and the leaked-`OnceLock`
+/// indirection is gone with it: one hash plus one acquire load yields the id directly.
 #[inline]
 pub(crate) fn nonsend_id<R: NonSendResource>() -> NonSendResourceId {
-    *type_keyed_slot::<R>()
-        .get_or_init(|| NonSendResourceId(nonsend_resource_registry::register_new::<R>()))
+    let raw = NONSEND_IDS
+        .get_or_mint_with(TypeId::of::<R>(), |_| {
+            nonsend_resource_registry::register_new::<R>() as u32
+        })
+        .unwrap_or_else(nonsend_intern_full);
+    NonSendResourceId(raw as usize)
 }
 
-/// Process-global, `TypeId`-keyed map of `TypeId → &'static OnceLock<id>`.
+/// Process-global `TypeId → NonSendResourceId` intern.
 ///
-/// One leaked `OnceLock<NonSendResourceId>` per distinct `R`, so two distinct
-/// types never share an id slot. The `Mutex` guards only the cold insert into
-/// the map; once a slot exists, [`nonsend_id`] reads it through `OnceLock`.
-fn type_keyed_slot<R: 'static>() -> &'static OnceLock<NonSendResourceId> {
-    static MAP: OnceLock<Mutex<HashMap<TypeId, &'static OnceLock<NonSendResourceId>>>> =
-        OnceLock::new();
-    let map = MAP.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut guard = map.lock().expect("invariant: nonsend id map mutex not poisoned");
-    guard
-        .entry(TypeId::of::<R>())
-        .or_insert_with(|| Box::leak(Box::new(OnceLock::new())))
+/// Sized at twice [`NON_SEND_RESOURCE_SLOT_COUNT`] for the load factor [`TypeIntern`]
+/// documents, so the registry's own slab-exhaustion panic is always the one that fires.
+static NONSEND_IDS: TypeIntern<TypeId, { NON_SEND_RESOURCE_SLOT_COUNT * 2 }> = TypeIntern::new();
+
+/// Terminal panic for a full [`NONSEND_IDS`] table — unreachable unless the table size and
+/// [`NON_SEND_RESOURCE_SLOT_COUNT`] drift apart in a later edit.
+#[cold]
+#[inline(never)]
+fn nonsend_intern_full() -> u32 {
+    panic!(
+        "non-send resource intern table full: sized at NON_SEND_RESOURCE_SLOT_COUNT * 2 = {} \
+         but could not seat another TypeId. The table must stay at least twice the slab cap — \
+         see TypeIntern's load-factor contract.",
+        NON_SEND_RESOURCE_SLOT_COUNT * 2
+    );
 }
 
 impl Default for NonSendResources {

@@ -40,7 +40,9 @@ use boyko_threadpool::ThreadPool;
 use crate::constants::{CUBIC_NEWTON_ITERS, CUBIC_NEWTON_SEEDS};
 use crate::extract::Segment;
 use crate::msdf::color::{ColoredEdge, ColoredOutline};
-use crate::msdf::{FieldLayout, GlyphField, field_layout, map_distance, texel_center};
+use crate::msdf::{
+    FieldLayout, GlyphField, MAX_FIELD_DIM, field_layout, map_distance, texel_center,
+};
 
 /// The msdfgen-style selection key for one edge at one query point: the **true**
 /// signed distance (clamped to the segment) plus an orthogonality tie-break, and
@@ -403,7 +405,15 @@ pub fn generate_distance_field(colored: &ColoredOutline, pool: Option<&Arc<Threa
     let layout = field_layout(colored);
     let w = layout.width;
     let h = layout.height;
-    let mut texels = vec![0.0_f32; (w * h * 4) as usize];
+    // Widened to u64 before multiplying: `field_layout`'s clamp already makes the `u32` product
+    // safe, but this is the allocation the 2026-07 audit found wrapping, so the arithmetic states
+    // its own safety instead of depending on a constant three modules away staying small.
+    debug_assert!(
+        w <= MAX_FIELD_DIM && h <= MAX_FIELD_DIM,
+        "field_layout must clamp both dimensions to MAX_FIELD_DIM"
+    );
+    let texel_count = (w as u64) * (h as u64) * 4;
+    let mut texels = vec![0.0_f32; texel_count as usize];
 
     match pool {
         Some(pool) => {

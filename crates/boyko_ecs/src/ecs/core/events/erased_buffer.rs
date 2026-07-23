@@ -8,7 +8,9 @@
 //! identical. This module holds that single logic as [`ErasedKindBuffer<K>`],
 //! parameterised by a zero-sized [`BufferKind`] marker.
 //!
-//! The public per-channel names — [`ParametersBuffer`] and [`ParticipantBuffer`]
+//! The public per-channel names —
+//! [`ParametersBuffer`](crate::ecs::core::events::parameters::parameters_buffer::ParametersBuffer) and
+//! [`ParticipantBuffer`](crate::ecs::core::events::participants::participants_buffer::ParticipantBuffer)
 //! — are preserved as type aliases so existing paths keep compiling without any
 //! change to the `#[event]` macro.
 

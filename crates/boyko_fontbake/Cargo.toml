@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "boyko-fontbake"
 version = "0.1.0"
 edition = "2024"
@@ -31,3 +31,6 @@ criterion.workspace = true
 [[bench]]
 name = "bake"
 harness = false
+
+[lints]
+workspace = true

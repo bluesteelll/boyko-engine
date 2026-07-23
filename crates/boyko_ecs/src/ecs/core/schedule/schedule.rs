@@ -1476,6 +1476,11 @@ unsafe impl<'a> Send for SpawnPointers<'a> {}
 
 #[cfg(test)]
 mod tests {
+    // Test-only observation channel: `Arc<Mutex<Vec<u8>>>` is the execution-order
+    // log the scheduler assertions read back from worker threads — harness state,
+    // never engine data. Compiled out of every shipping build.
+    #![allow(clippy::disallowed_types)]
+
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};

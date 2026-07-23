@@ -51,6 +51,11 @@
 //!
 //! Output image: `D:\claude\BoykoEngine\target\screenshots\s35_orbit.bmp`
 
+// Test harness, not an engine path: `Arc<Mutex<Option<Entity>>>` is the established probe that
+// carries the spawned rig `Entity` out of a one-shot `run_system` closure back to the
+// assertions. Test-only scaffolding, never linked into a shipping build.
+#![allow(clippy::disallowed_types)]
+
 mod common;
 
 use std::path::{Path, PathBuf};

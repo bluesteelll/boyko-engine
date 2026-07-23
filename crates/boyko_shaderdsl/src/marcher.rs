@@ -54,7 +54,7 @@
 //!     control flow (the `t >= t_mesh` break setting `exhausted = false;`) is reproduced; SPAN B's
 //!     `d = sdf(p)` threads the host field.
 //!   - `<EmitCf>` — the HLSL recorder; the printers
-//!     ([`crate::emit::emit_hlsl_b1_marcher_mesh_p`] / [`crate::emit::emit_hlsl_b1_marcher_fold_d`])
+//!     (`crate::emit::emit_hlsl_b1_marcher_mesh_p` / `crate::emit::emit_hlsl_b1_marcher_fold_d`)
 //!     walk the STMT IR into the spliced spans (byte-identical to the committed `.comp.spv`, proven
 //!     by the cmp-`.spv`).
 

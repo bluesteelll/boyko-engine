@@ -1,0 +1,12 @@
+{
+  // Make rust-analyzer run clippy instead of plain `cargo check`, so the hot-path type ban
+  // (clippy.toml `disallowed-types`, denied via `[workspace.lints.clippy]`) underlines a
+  // `HashMap`/`Mutex`/`RefCell` RED IN THE EDITOR as it is typed. Without this, rust-analyzer
+  // only runs `cargo check`, clippy-only lints never surface, and the first time anyone learns
+  // about the ban is CI — which is exactly how the 2026-07 audit found 43 accumulated
+  // exceptions and one genuine per-frame violation.
+  "rust-analyzer.check.command": "clippy",
+  // Tests and benches carry their own (legitimate) exceptions; linting them here keeps the
+  // editor's verdict identical to CI's `--all-targets` rather than a laxer subset.
+  "rust-analyzer.check.allTargets": true
+}

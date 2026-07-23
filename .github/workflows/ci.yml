@@ -11,7 +11,32 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+# 2026-07 audit, P0 build-gate finding: EVERY job below used to run a bare
+# `cargo <cmd> --all-targets`. This workspace root is ALSO a package (`boyko-engine`,
+# the `src/main.rs` placeholder binary), so Cargo's default selection at the root was
+# THAT PACKAGE ALONE — the jobs compiled a `println!` in ~0.2 s and reported success
+# while every engine crate went unchecked. The root cause is fixed in `Cargo.toml`
+# (`default-members` now lists every member), and each job below ALSO says
+# `--workspace` explicitly so the intent survives a future manifest edit.
+#
+# The `boyko_demo` / `bench_bevy_vs_boyko` exclusions mirror `docs.yml`'s own
+# proven-on-this-runner set (eframe/wgpu and bevy are heavy third-party trees, not
+# engine surface); `bench-compile` deliberately KEEPS `bench_bevy_vs_boyko` — compiling
+# that crate's benches is the whole point of that job.
 jobs:
+  # The suppression half of the hot-path type ban. `clippy.toml` + the denied
+  # `[workspace.lints.clippy] disallowed_types` stop a NEW `HashMap`/`Mutex`/`RefCell` from
+  # compiling, but clippy cannot police its own `#[allow]`s — and an `#[allow]` on a `mod`
+  # silences the ban for a whole subtree invisibly (measured 2026-07). This job forbids blanket
+  # suppression in production code and requires every remaining exception to carry a row in
+  # docs/HOT-PATH-EXCEPTIONS.md with a frequency class from a closed vocabulary of cold classes.
+  hot-path-exceptions:
+    name: hot-path exception registry
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/check_hotpath_exceptions.py
+
   check:
     name: cargo check
     runs-on: ubuntu-latest
@@ -19,7 +44,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --all-targets
+      - run: cargo check --workspace --all-targets --exclude boyko_demo --exclude bench-bevy-vs-boyko
 
   test:
     name: cargo test (${{ matrix.profile }})
@@ -34,9 +59,9 @@ jobs:
       - name: cargo test (${{ matrix.profile }})
         run: |
           if [ "${{ matrix.profile }}" = "release" ]; then
-            cargo test --all-targets --release
+            cargo test --workspace --all-targets --release --exclude boyko_demo --exclude bench-bevy-vs-boyko
           else
-            cargo test --all-targets
+            cargo test --workspace --all-targets --exclude boyko_demo --exclude bench-bevy-vs-boyko
           fi
 
   clippy:
@@ -51,7 +76,7 @@ jobs:
       - name: cargo clippy
         # Phase 5a cleared boyko_utils (13 warnings); Phase 5d cleared boyko_ecs
         # (~43 warnings). Workspace is now clean: no || true workaround needed.
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --exclude boyko_demo --exclude bench-bevy-vs-boyko -- -D warnings
 
   bench-compile:
     name: cargo bench --no-run
@@ -60,7 +85,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo bench --no-run
+      - run: cargo bench --workspace --no-run --exclude boyko_demo
 
   force-alloc-panic:
     name: cargo test --release (force_alloc_panic)
@@ -75,7 +100,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all-targets --release
+      - run: cargo test --workspace --all-targets --release --exclude boyko_demo --exclude bench-bevy-vs-boyko
 
   miri:
     name: Miri
@@ -99,5 +124,15 @@ jobs:
         run: cargo +nightly miri test --package boyko-ecs --test event_attribute
       - name: cargo miri test (drop_fn — known clean)
         run: cargo +nightly miri test --package boyko-ecs --test drop_fn
-      - name: cargo miri test (full sweep)
-        run: cargo +nightly miri test --all-targets
+      # 2026-07 audit: this step's `--all-targets` was the vacuous root-package form (it
+      # interpreted nothing). Miri CANNOT execute FFI calls, so a literal workspace sweep
+      # would fault the instant it reached `boyko_rhi_vulkan`'s raw `vk*` calls (and the
+      # crates that depend on it) — the sweep is therefore scoped EXPLICITLY to the
+      # pure-compute crates, which is what it could ever have meaningfully covered.
+      # The FFI/GPU side is covered instead by `cargo careful` + the validation-layer
+      # golden runs (docs/AUDIT-2026-07-PLAN.md's tool matrix).
+      - name: cargo miri test (pure-compute sweep)
+        run: |
+          cargo +nightly miri test --all-targets \
+            -p boyko-ecs -p boyko-utils -p boyko-threadpool -p boyko-serialize \
+            -p boyko-math -p boyko_sdf_math -p boyko_image

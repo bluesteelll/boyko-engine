@@ -8,6 +8,13 @@
 //! The compile-fail half of the D7 contract (double derive, `!Send` without
 //! `no_bundle`) lives in the trybuild suite (`tests/bundle_compile_fail/`).
 
+// Test oracle model: the std collections / `Arc<Mutex<_>>` / `Rc` in this suite are
+// the REFERENCE implementations and cross-thread observation channels the engine's
+// VM-native structures (ComponentPool columns, BitSet/BitMask, SparseMap, the dense
+// stores) are differentially verified against - never engine data itself.
+// An integration-test target: compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 

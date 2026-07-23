@@ -456,12 +456,25 @@ impl UiRenderResources {
         let w = font.atlas.width;
         let h = font.atlas.height;
         let pixels = &font.atlas.pixels;
-        debug_assert!(w > 0 && h > 0, "invariant: atlas extent is non-zero");
-        debug_assert_eq!(
-            pixels.len(),
-            (w as usize) * (h as usize) * 4,
-            "invariant: MTSDF atlas is tightly-packed RGBA8 (w*h*4 bytes)"
-        );
+        // 2026-07 audit (CRITICAL): this was a `debug_assert` pair — compiled OUT of
+        // release, where it mattered. `w`/`h` drive the `vkCmdCopyBufferToImage`
+        // extent below while the staging buffer is sized from `pixels.len()`, so a
+        // `BakedFont` whose fields disagree makes the DRIVER read past the staging
+        // allocation (e.g. 4096x4096 declared, 4 bytes supplied ⇒ a 64 MiB
+        // out-of-bounds device read whose result the UI shader then samples), and a
+        // zero extent is illegal for `VkImageCreateInfo`. `read_bfont` now rejects
+        // both at the file boundary; this is the in-process second line of defence,
+        // and it must be a REAL check, not an assertion.
+        if w == 0 || h == 0 {
+            return Err(GpuColumnError::MalformedAsset(
+                "MTSDF atlas extent is zero (VkImageCreateInfo requires w > 0 && h > 0)",
+            ));
+        }
+        if (w as u64) * (h as u64) * 4 != pixels.len() as u64 {
+            return Err(GpuColumnError::MalformedAsset(
+                "MTSDF atlas is not tightly-packed RGBA8 (pixels.len() != w * h * 4)",
+            ));
+        }
 
         // The SAMPLED atlas image.
         let texture = device.create_texture(&TextureDesc {

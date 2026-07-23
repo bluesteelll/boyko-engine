@@ -184,6 +184,8 @@ impl UiBindingPlugin {
 /// permanent) and [`get_bind_accessor`](boyko_ecs::ecs::core::component::component_registry::get_bind_accessor)
 /// returns `None` for `C` (so `ui_bind_apply` skips every `C`-sourced widget) —
 /// the entire `.ui`-dynamic data-bind path for `C` is unreachable.
+///
+/// [`BindAccessor`]: boyko_ecs::ecs::core::component::component_registry::BindAccessor
 pub fn register_bindable<C: Bindable>(app: &mut App) {
     C::register_bind_accessor();
     let id = <C as boyko_ecs::ecs::core::component::component::Component>::component_id();

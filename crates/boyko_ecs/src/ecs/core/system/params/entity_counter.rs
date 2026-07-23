@@ -210,6 +210,11 @@ impl<'s> EntityCounter<'s> {
 
 #[cfg(test)]
 mod tests {
+    // Test-only harness state (shared counters / observation channels behind a
+    // std lock); the reference model the param's atomic behaviour is checked
+    // against. Compiled out of every shipping build.
+    #![allow(clippy::disallowed_types)]
+
     use super::*;
     use core::sync::atomic::AtomicUsize;
 

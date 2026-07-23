@@ -27,6 +27,13 @@
 //! are tag-only (`spawn_empty`), so the archetype universe is bounded by
 //! 2^TAGS + 1.
 
+// Test oracle model: the std collections / `Arc<Mutex<_>>` / `Rc` in this suite are
+// the REFERENCE implementations and cross-thread observation channels the engine's
+// VM-native structures (ComponentPool columns, BitSet/BitMask, SparseMap, the dense
+// stores) are differentially verified against - never engine data itself.
+// An integration-test target: compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 

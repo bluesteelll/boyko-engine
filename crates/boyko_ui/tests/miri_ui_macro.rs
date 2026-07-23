@@ -24,6 +24,13 @@
 //! Tree Borrows; the flag isolates the TB (UB) signal, matching the established
 //! config of the sibling Miri suites (`miri_layout`, `miri_phase19`, …).
 
+// Test-harness plumbing only: `Arc<Mutex<…>>` is this repo's established probe for
+// smuggling a spawned `Entity` / a `UiParseReport` out of the `Send + Sync` one-shot
+// system closure, and a file-static `Mutex<()>` serializes tests that arm a process-global
+// (the counting allocator, the watch-poll counters). Not engine code — the whole file is
+// compiled out of every shipping build.
+#![allow(clippy::disallowed_types)]
+
 use std::sync::{Arc, Mutex};
 
 use boyko_ecs::ecs::core::ecs_master::ecs_master::EcsMaster;

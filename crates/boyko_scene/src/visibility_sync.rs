@@ -39,7 +39,8 @@
 //! # Why a custom by-id command (deviation from `EntityCommands::enable`)
 //!
 //! `EntityCommands::enable::<T>()` / `disable::<T>()` (and the underlying
-//! `EnableTagCommand`) are keyed by a full [`Entity`] (id + generation) — the
+//! `EnableTagCommand`) are keyed by a full
+//! [`Entity`](boyko_ecs::ecs::core::entity::entity::Entity) (id + generation) — the
 //! apply-time `live_inland` resolve rejects a generation mismatch. A read-only
 //! query only exposes per-row [`EntityId`]s
 //! ([`Query::iter_entities`](boyko_ecs::ecs::core::iters::query::Query::iter_entities)

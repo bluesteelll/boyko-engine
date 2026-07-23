@@ -23,6 +23,16 @@
 //!
 //! [`ScheduleBuilder::build`]: ScheduleBuilder::build
 
+// App-setup schedule construction: every `HashMap` in this module belongs to the
+// builder's own scratch state (set interning, set membership / parent / name /
+// condition tables) or to a `build`-time graph pass (`flatten_set_membership`,
+// `expand_set_edges`). All of it is consumed by `ScheduleBuilder::build` and
+// lowered into the flat, id-indexed tables the `Schedule` executor runs on — it
+// runs before the first frame and never again. Module-scoped rather than ~30
+// scattered attributes because the whole file has this one temperature (the
+// trailing `#[cfg(test)] mod tests` drives the same build-time API).
+#![allow(clippy::disallowed_types)]
+
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::Arc;

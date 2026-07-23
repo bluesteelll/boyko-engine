@@ -201,7 +201,8 @@ impl Default for TransformPropagationScratch {
 /// # Change detection (F2)
 ///
 /// Every `GlobalTransform` write goes through [`set_global_if_changed`]
-/// ([`Mut::set_if_neq`]), which bumps the row's `changed_tick` ONLY on a real
+/// ([`Mut::set_if_neq`](boyko_ecs::ecs::core::iters::query::Mut::set_if_neq)),
+/// which bumps the row's `changed_tick` ONLY on a real
 /// change — so downstream `Changed<GlobalTransform>` consumers (camera, GPU
 /// upload, lights) observe a propagated move, while an unchanged recompose stays
 /// tick-silent (0%-overhead preserved).
