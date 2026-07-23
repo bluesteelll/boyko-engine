@@ -3,11 +3,12 @@
 //! This crate is the bridge between the graphics-pure ECS core ([`boyko_ecs`])
 //! and the backend-agnostic RHI ([`boyko_rhi`] / [`boyko_rhi_vulkan`]). It is the
 //! ONLY crate that may name both surfaces — the dependency fan-out is `boyko_render`
-//! depending DIRECTLY on `boyko_ecs` + `boyko_rhi` + `boyko_rhi_vulkan` +
-//! `boyko_utils` (and `boyko_rhi` itself depends only on `boyko_utils`, NOT on
+//! depending DIRECTLY on `boyko_ecs` + `boyko_rhi` + `boyko_rhi_vulkan`
+//! (and `boyko_rhi` itself depends only on `boyko_utils`, NOT on
 //! `boyko_ecs`), with NO cycle, so the orphan-rule impls (`RhiContext:
 //! NonSendResource`) and the graphics-aware types ([`GpuColumnManager`],
-//! [`GpuColumnMeta`]) live here, never in `boyko_ecs`.
+//! [`GpuColumnMeta`]) live here, never in `boyko_ecs`. (The former direct
+//! `boyko_utils` dependency was never used and was removed by the 2026-07 audit.)
 //!
 //! # Wave B scope
 //!

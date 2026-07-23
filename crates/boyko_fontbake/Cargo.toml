@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "boyko-fontbake"
 version = "0.1.0"
 edition = "2024"
@@ -18,7 +18,7 @@ boyko-threadpool = { path = "../boyko_threadpool" }
 # (owner-approved, locked). ttf-parser is `#![forbid(unsafe_code)]`,
 # zero-dependency, zero-alloc, and handles glyf + CFF/CFF2. The engine code
 # depends on the `FontFace` TRAIT, never on this crate directly.
-ttf-parser = "0.21"
+ttf-parser = "0.25"
 
 [dev-dependencies]
 # Property-based tests for the MSDF/atlas math + serialization round-trip
