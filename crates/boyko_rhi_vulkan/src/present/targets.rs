@@ -256,6 +256,29 @@ pub struct GBufferTargets {
     /// UBO (all DDGI entries always bound, sampled only under `ddgi_mode != 0` — the GI-off
     /// 0%-gate the deferred resolve set establishes). `Some` iff the split armed.
     pub(crate) vb_split_set1: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Rung R9d: the VB split's dedicated shadow-vis gather descriptor set RING, written against
+    /// [`GBufferScene::vb_shadow_vis_layout`] (7 bindings: `thin_normal[i]` @0, `viewt[i]` @1,
+    /// `light_table` @2, the camera UBO @3, the TLAS `AccelerationStructure` @4
+    /// (`scene.resolve_tlas_hwrt[i]`), the `ResolvedRayShadow` UBO @5 (`scene.ray_shadow_ubo[i]`),
+    /// `shadow_vis[i]` @6 (WRITE)). `Some` iff the split armed AND the boot hwrt gate built
+    /// [`GBufferScene::vb_shadow_vis_pipeline`] AND every bound resource exists.
+    #[cfg(feature = "hwrt")]
+    pub(crate) vb_shadow_vis_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// Rung R9d: the VB split's per-level à-trous denoise descriptor sets — `sets[level][fi]`,
+    /// mirroring [`Self::shadow_atrous_sets`] but binding `thin_normal[fi]` at the `gNormal` slot
+    /// and the SPLIT's own `viewt[fi]` (reusing the SAME [`GBufferScene::atrous_layout_denoise_hwrt`]
+    /// layout object the deferred chain shares — a stable, per-path-agnostic bind-group shape).
+    /// `Some` iff the split armed AND the deferred boot à-trous pipeline/layout + the
+    /// `shadow_vis`/`shadow_vis2` rings exist.
+    #[cfg(feature = "hwrt")]
+    pub(crate) vb_shadow_atrous_sets:
+        Option<[[VulkanBindGroup; FRAMES_IN_FLIGHT]; crate::present::MAX_ATROUS_LEVELS as usize]>,
+    /// Rung R9d: the VB split's temporal reproject descriptor set RING, mirroring
+    /// [`Self::shadow_temporal_set`] but binding `viewt[fi]` at the `gViewT` slot (reusing the
+    /// SAME [`GBufferScene::temporal_layout`] layout object). `Some` iff the split armed AND the
+    /// deferred boot temporal pipeline/layout + every ringed input exist.
+    #[cfg(feature = "hwrt")]
+    pub(crate) vb_shadow_temporal_set: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// The SSAO à-trous denoise chain's `level == 0` descriptor set RING (`gAoIn` @0 = the frozen
     /// R8 `gSsao[fi]` endpoint, `gAoOut` @1 = `ssao_ring_a[fi]`, `gViewT` @2 = `viewt[fi]`, the
     /// camera UBO @3 = `scene.camera_ring[fi]`), written against
@@ -4763,6 +4786,216 @@ impl GBufferTargets {
         Some(ShadowTemporalSets { ubo, temporal, denoised })
     }
 
+    /// Rung R9d: builds the VB split's dedicated shadow-vis gather descriptor set RING — see
+    /// [`Self::vb_shadow_vis_set`]'s doc for the 7-binding shape. DECOUPLED from the per-frame
+    /// split/shadow activation (the "build on stable boot signals, not the per-frame gate" lesson
+    /// [`Self::build_shadow_denoise_sets`]'s doc explains): gates on the BOOT-frozen split flag +
+    /// `scene.shadow_denoise_enabled` (the config-requested spatial/temporal denoise) +
+    /// [`GBufferScene::vb_shadow_vis_layout`] (`Some` iff the boot hwrt gate built the pipeline),
+    /// and every bound resource. Returns `None` on the OFF path (byte-identical); degrades to
+    /// `None` (draining its own partials) on any `create_bind_group` failure — opt-in, no
+    /// dependents: `record_vb` GRACEFULLY skips the hwrt shadow chain that frame when it finds
+    /// `None` (the deferred `record_gbuffer`'s own `if let (Some(sh), Some(vis_ring), ...)`
+    /// precedent), never a panic.
+    #[cfg(feature = "hwrt")]
+    fn build_vb_shadow_vis_set(
+        ctx: &VulkanContext,
+        scene: &GBufferScene<'_>,
+        thin_normal: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        viewt: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        shadow_vis: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+    ) -> Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> {
+        let (layout, tn, sv, tlas) = match (
+            scene.resolved_render_path.mesh_geo_shade_split && scene.shadow_denoise_enabled,
+            scene.vb_shadow_vis_layout,
+            thin_normal,
+            shadow_vis,
+            scene.resolve_tlas_hwrt,
+        ) {
+            (true, Some(l), Some(tn), Some(sv), Some(t)) => (l, tn, sv, t),
+            _ => return None,
+        };
+
+        let mut slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for (i, dst) in slots.iter_mut().enumerate() {
+            let entries = [
+                BindGroupEntry::StorageImage { texture: &tn[i] },
+                BindGroupEntry::StorageImage { texture: &viewt[i] },
+                BindGroupEntry::StorageBuffer { buffer: scene.light_table },
+                BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[i] },
+                BindGroupEntry::AccelerationStructure { accel: tlas[i] },
+                BindGroupEntry::UniformBuffer { buffer: &scene.ray_shadow_ubo[i] },
+                BindGroupEntry::StorageImage { texture: &sv[i] },
+            ];
+            let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
+            match RhiDevice::create_bind_group(ctx, &desc) {
+                Ok(g) => *dst = Some(g),
+                Err(_) => {
+                    // SAFETY: the [0..i) slots were created on `ctx`, never submitted; destroy
+                    // each once.
+                    unsafe {
+                        for s in slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                    }
+                    eprintln!(
+                        "boyko_rhi_vulkan: vb_shadow_vis_set build failed — record_vb will skip the VB hwrt shadow chain this frame"
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(slots.map(|s| s.expect("invariant: every vb_shadow_vis slot built")))
+    }
+
+    /// Rung R9d: builds the VB split's per-level à-trous denoise descriptor sets — mirrors
+    /// [`Self::build_shadow_denoise_sets`]'s à-trous loop (part 4) but binds `thin_normal[fi]`
+    /// at the `gNormal` slot and the split's OWN `viewt[fi]`, REUSING the SAME stable
+    /// `scene.atrous_layout_denoise_hwrt` layout object + `shadow_denoise_ubo` ring the deferred
+    /// chain builds (a stable, per-path-agnostic bind-group shape — the UBO/layout are boot
+    /// artifacts, not path-scoped). Gates + degrades exactly like
+    /// [`Self::build_vb_shadow_vis_set`].
+    #[cfg(feature = "hwrt")]
+    fn build_vb_shadow_atrous_sets(
+        ctx: &VulkanContext,
+        scene: &GBufferScene<'_>,
+        thin_normal: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        viewt: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        shadow_vis: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        shadow_vis2: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        ubo: Option<&[BoundBuffer; FRAMES_IN_FLIGHT]>,
+    ) -> Option<[[VulkanBindGroup; FRAMES_IN_FLIGHT]; crate::present::MAX_ATROUS_LEVELS as usize]> {
+        let (layout, tn, vis_ring, vis2_ring, ubo) = match (
+            scene.resolved_render_path.mesh_geo_shade_split && scene.shadow_denoise_enabled,
+            scene.atrous_layout_denoise_hwrt,
+            thin_normal,
+            shadow_vis,
+            shadow_vis2,
+            ubo,
+        ) {
+            (true, Some(l), Some(tn), Some(v), Some(v2), Some(u)) => (l, tn, v, v2, u),
+            _ => return None,
+        };
+
+        let mut atrous_opt: [[Option<VulkanBindGroup>; FRAMES_IN_FLIGHT];
+            crate::present::MAX_ATROUS_LEVELS as usize] =
+            core::array::from_fn(|_| [const { None }; FRAMES_IN_FLIGHT]);
+        for level in 0..crate::present::MAX_ATROUS_LEVELS as usize {
+            let (in_ring, out_ring) =
+                if level % 2 == 0 { (vis_ring, vis2_ring) } else { (vis2_ring, vis_ring) };
+            for slot in 0..FRAMES_IN_FLIGHT {
+                let entries = [
+                    BindGroupEntry::StorageImage { texture: &in_ring[slot] },
+                    BindGroupEntry::StorageImage { texture: &out_ring[slot] },
+                    BindGroupEntry::StorageImage { texture: &tn[slot] },
+                    BindGroupEntry::StorageImage { texture: &viewt[slot] },
+                    BindGroupEntry::UniformBuffer { buffer: &ubo[slot] },
+                    BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
+                ];
+                let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
+                match RhiDevice::create_bind_group(ctx, &desc) {
+                    Ok(g) => atrous_opt[level][slot] = Some(g),
+                    Err(_) => {
+                        // SAFETY: every set built so far (prior levels + this level's [0..slot))
+                        // was created on `ctx`, never submitted; destroy each once.
+                        unsafe {
+                            for lvl in atrous_opt.iter_mut() {
+                                for s in lvl.iter_mut() {
+                                    if let Some(g) = s.take() {
+                                        RhiDevice::destroy_bind_group(ctx, g);
+                                    }
+                                }
+                            }
+                        }
+                        eprintln!(
+                            "boyko_rhi_vulkan: vb_shadow_atrous_sets build failed — record_vb will skip the VB hwrt shadow chain this frame"
+                        );
+                        return None;
+                    }
+                }
+            }
+        }
+        Some(atrous_opt.map(|lvl| lvl.map(|s| s.expect("invariant: every vb_shadow_atrous slot built"))))
+    }
+
+    /// Rung R9d: builds the VB split's temporal reproject descriptor set RING — mirrors
+    /// [`Self::build_shadow_temporal_sets`]'s temporal-set half (part 2) but binds `viewt[fi]`
+    /// at the `gViewT` slot, REUSING the SAME stable `scene.temporal_layout` layout object +
+    /// `temporal_shadow_ubo` ring the deferred chain builds. Gates + degrades exactly like
+    /// [`Self::build_vb_shadow_vis_set`], with the ADDITIONAL `scene.temporal_enabled` gate
+    /// (mirrors [`Self::build_shadow_temporal_sets`]'s own gate).
+    #[cfg(feature = "hwrt")]
+    #[allow(clippy::too_many_arguments)]
+    fn build_vb_shadow_temporal_set(
+        ctx: &VulkanContext,
+        scene: &GBufferScene<'_>,
+        viewt: &[VulkanTexture; FRAMES_IN_FLIGHT],
+        shadow_vis: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        shadow_vis2: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        motion_vec: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        shadow_temporal_hist: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        temporal_out: Option<&[VulkanTexture; FRAMES_IN_FLIGHT]>,
+        ubo: Option<&[BoundBuffer; FRAMES_IN_FLIGHT]>,
+    ) -> Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> {
+        let (layout, vis_ring, vis2_ring, mvec, hist, tout, ubo) = match (
+            scene.resolved_render_path.mesh_geo_shade_split
+                && scene.shadow_denoise_enabled
+                && scene.temporal_enabled,
+            scene.temporal_layout,
+            shadow_vis,
+            shadow_vis2,
+            motion_vec,
+            shadow_temporal_hist,
+            temporal_out,
+            ubo,
+        ) {
+            (true, Some(l), Some(v), Some(v2), Some(mv), Some(h), Some(to), Some(u)) => {
+                (l, v, v2, mv, h, to, u)
+            }
+            _ => return None,
+        };
+        let final_ring = if scene.shadow_denoise_final_is_vis2 { vis2_ring } else { vis_ring };
+
+        let mut slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+            [const { None }; FRAMES_IN_FLIGHT];
+        for (slot, dst) in slots.iter_mut().enumerate() {
+            let prev = FRAMES_IN_FLIGHT - 1 - slot;
+            let entries = [
+                BindGroupEntry::StorageImage { texture: &final_ring[slot] },
+                BindGroupEntry::StorageImage { texture: &mvec[slot] },
+                BindGroupEntry::StorageImage { texture: &viewt[slot] },
+                BindGroupEntry::StorageImage { texture: &hist[prev] },
+                BindGroupEntry::StorageImage { texture: &hist[slot] },
+                BindGroupEntry::StorageImage { texture: &tout[slot] },
+                BindGroupEntry::UniformBuffer { buffer: &ubo[slot] },
+                BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
+            ];
+            let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
+            match RhiDevice::create_bind_group(ctx, &desc) {
+                Ok(g) => *dst = Some(g),
+                Err(_) => {
+                    // SAFETY: the [0..slot) sets were created on `ctx`, never submitted; destroy
+                    // each once.
+                    unsafe {
+                        for s in slots.iter_mut() {
+                            if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                    }
+                    eprintln!(
+                        "boyko_rhi_vulkan: vb_shadow_temporal_set build failed — record_vb will skip the VB temporal reproject this frame"
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(slots.map(|s| s.expect("invariant: every vb_shadow_temporal slot built")))
+    }
+
     /// Creates a 2D `R8G8B8A8_UNORM` storage image at `extent` with `usage`. A small
     /// helper shared by the albedo/normal/material allocations in [`Self::create`].
     fn create_gbuffer_image(
@@ -6242,12 +6475,32 @@ impl GBufferTargets {
                     [const { None }; FRAMES_IN_FLIGHT];
                 let mut ok = true;
                 for (i, dst) in slots.iter_mut().enumerate() {
+                    // Rung R9d: bind the REAL `motion_vec`/`MotionCam` sources when the device
+                    // stably carries them (RT + storage — device capability, independent of
+                    // whether temporal is the currently-configured mode: a harmless "just in
+                    // case" real bind, mirroring every other stably-built-but-maybe-unarmed set
+                    // in this file); otherwise the R9b same-type inert placeholder.
+                    #[cfg(feature = "hwrt")]
+                    let (motion_entry, motion_cam_entry) =
+                        match (motion_vec.as_ref(), scene.motion_cam_ubo_ring) {
+                            (Some(mv), Some(mc)) => (
+                                BindGroupEntry::StorageImage { texture: &mv[i] },
+                                BindGroupEntry::UniformBuffer { buffer: &mc[i] },
+                            ),
+                            _ => (
+                                BindGroupEntry::StorageImage { texture: &tn[i] },
+                                BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[i] },
+                            ),
+                        };
+                    #[cfg(not(feature = "hwrt"))]
+                    let (motion_entry, motion_cam_entry) = (
+                        BindGroupEntry::StorageImage { texture: &tn[i] },
+                        BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[i] },
+                    );
                     let entries = [
                         BindGroupEntry::StorageImage { texture: &tn[i] },
-                        // The R9d motion slot — same-type inert placeholder (the R2 idiom).
-                        BindGroupEntry::StorageImage { texture: &tn[i] },
-                        // The R9d MotionCam slot — layout-compatible UBO placeholder.
-                        BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[i] },
+                        motion_entry,
+                        motion_cam_entry,
                     ];
                     match RhiDevice::create_bind_group(ctx, &BindGroupDesc::<Vulkan> { layout, entries: &entries }) {
                         Ok(g) => *dst = Some(g),
@@ -6323,7 +6576,7 @@ impl GBufferTargets {
                         [const { None }; FRAMES_IN_FLIGHT];
                     let mut ok = true;
                     for (i, dst) in slots.iter_mut().enumerate() {
-                        let entries = [
+                        let base = [
                             BindGroupEntry::CombinedImage {
                                 texture: scene.csm_cascade_texture,
                                 sampler: scene.csm_compare_sampler,
@@ -6345,6 +6598,45 @@ impl GBufferTargets {
                             },
                             BindGroupEntry::UniformBuffer { buffer: scene.ddgi_grid_ubo },
                         ];
+                        // Rung R9d: the hwrt-only @8 `gShadowVis` entry — the layout's 9th
+                        // binding exists whenever `feature = "hwrt"`, so the SET must always
+                        // fill it, even on a frame where the hwrt shade variant is never bound
+                        // (the software `vb_shade_split_pipeline` never statically references
+                        // this slot). The STABLE-signal selection `build_shadow_temporal_sets`'s
+                        // own DENOISED-temporal set uses (`scene.shadow_denoise_enabled`/
+                        // `scene.temporal_enabled`/`scene.shadow_denoise_final_is_vis2` — NOT
+                        // `temporal_out.is_some()` alone: `shadow_vis`/`temporal_out` are
+                        // allocated TOGETHER on the SAME device probe, so an allocation-only
+                        // check would always prefer `temporal_out` even under Spatial-only
+                        // config). Falls all the way to `ssao[i]` as a never-selected placeholder
+                        // when the denoise config is off entirely (same-set-already-bound image —
+                        // harmless, mirrors the R9b `vb_geo_aux_set` placeholder-binding idiom).
+                        #[cfg(feature = "hwrt")]
+                        let entries: [BindGroupEntry<'_, Vulkan>; 9] = {
+                            let final_ring = if scene.shadow_denoise_final_is_vis2 {
+                                shadow_vis2.as_ref()
+                            } else {
+                                shadow_vis.as_ref()
+                            };
+                            let ninth = if scene.shadow_denoise_enabled
+                                && scene.temporal_enabled
+                                && let Some(t) = temporal_out.as_ref()
+                            {
+                                BindGroupEntry::StorageImage { texture: &t[i] }
+                            } else if scene.shadow_denoise_enabled
+                                && let Some(r) = final_ring
+                            {
+                                BindGroupEntry::StorageImage { texture: &r[i] }
+                            } else {
+                                BindGroupEntry::StorageImage { texture: &ssao[i] }
+                            };
+                            let mut chained = base.into_iter().chain(core::iter::once(ninth));
+                            core::array::from_fn(|_| {
+                                chained.next().expect("invariant: exactly 9 entries")
+                            })
+                        };
+                        #[cfg(not(feature = "hwrt"))]
+                        let entries = base;
                         match RhiDevice::create_bind_group(ctx, &BindGroupDesc::<Vulkan> { layout, entries: &entries }) {
                             Ok(g) => *dst = Some(g),
                             Err(_) => {
@@ -6370,6 +6662,43 @@ impl GBufferTargets {
                 }
                 _ => None,
             };
+
+        // Rung R9d: the VB hardware shadow chain's own descriptor sets — built in the leak-safe
+        // tail (after every other VB split set) and DEGRADE-TO-NONE on any internal failure
+        // (opt-in, no dependents: `record_vb` GRACEFULLY skips the hwrt shadow chain that frame
+        // when it finds `None`, the deferred `record_gbuffer`'s own precedent — UNLIKE
+        // `vb_geo_aux_set`/`vb_ssao_set`/`vb_split_set1`, which are the split's own mandatory
+        // core and `.expect()`-panic if missing).
+        #[cfg(feature = "hwrt")]
+        let vb_shadow_vis_set = Self::build_vb_shadow_vis_set(
+            ctx,
+            scene,
+            thin_normal.as_ref(),
+            &viewt,
+            shadow_vis.as_ref(),
+        );
+        #[cfg(feature = "hwrt")]
+        let vb_shadow_atrous_sets = Self::build_vb_shadow_atrous_sets(
+            ctx,
+            scene,
+            thin_normal.as_ref(),
+            &viewt,
+            shadow_vis.as_ref(),
+            shadow_vis2.as_ref(),
+            shadow_denoise_ubo.as_ref(),
+        );
+        #[cfg(feature = "hwrt")]
+        let vb_shadow_temporal_set = Self::build_vb_shadow_temporal_set(
+            ctx,
+            scene,
+            &viewt,
+            shadow_vis.as_ref(),
+            shadow_vis2.as_ref(),
+            motion_vec.as_ref(),
+            shadow_temporal_hist.as_ref(),
+            temporal_out.as_ref(),
+            temporal_shadow_ubo.as_ref(),
+        );
 
         Ok(Self {
             depth,
@@ -6404,6 +6733,12 @@ impl GBufferTargets {
             vb_geo_aux_set,
             vb_ssao_set,
             vb_split_set1,
+            #[cfg(feature = "hwrt")]
+            vb_shadow_vis_set,
+            #[cfg(feature = "hwrt")]
+            vb_shadow_atrous_sets,
+            #[cfg(feature = "hwrt")]
+            vb_shadow_temporal_set,
             ssao_atrous_read8_set,
             ssao_atrous_interior_from0_set,
             ssao_atrous_interior_from1_set,
@@ -6706,6 +7041,28 @@ impl GBufferTargets {
                 }
             }
             if let Some(s) = self.ssao_atrous_read8_set {
+                for g in s {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            // Rung R9d: the VB hardware shadow chain's own descriptor sets — LAST-acquired (after
+            // `vb_split_set1`), so destroyed FIRST here.
+            #[cfg(feature = "hwrt")]
+            if let Some(s) = self.vb_shadow_temporal_set {
+                for g in s {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            #[cfg(feature = "hwrt")]
+            if let Some(sets) = self.vb_shadow_atrous_sets {
+                for lvl in sets {
+                    for g in lvl {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                }
+            }
+            #[cfg(feature = "hwrt")]
+            if let Some(s) = self.vb_shadow_vis_set {
                 for g in s {
                     RhiDevice::destroy_bind_group(ctx, g);
                 }
@@ -7091,6 +7448,12 @@ mod tests {
             vb_geo_aux_set: None,
             vb_ssao_set: None,
             vb_split_set1: None,
+            #[cfg(feature = "hwrt")]
+            vb_shadow_vis_set: None,
+            #[cfg(feature = "hwrt")]
+            vb_shadow_atrous_sets: None,
+            #[cfg(feature = "hwrt")]
+            vb_shadow_temporal_set: None,
             ssao_atrous_read8_set: None,
             ssao_atrous_interior_from0_set: None,
             ssao_atrous_interior_from1_set: None,
@@ -7181,6 +7544,12 @@ mod tests {
             vb_geo_aux_set: None,
             vb_ssao_set: None,
             vb_split_set1: None,
+            #[cfg(feature = "hwrt")]
+            vb_shadow_vis_set: None,
+            #[cfg(feature = "hwrt")]
+            vb_shadow_atrous_sets: None,
+            #[cfg(feature = "hwrt")]
+            vb_shadow_temporal_set: None,
             ssao_atrous_read8_set: None,
             ssao_atrous_interior_from0_set: None,
             ssao_atrous_interior_from1_set: None,

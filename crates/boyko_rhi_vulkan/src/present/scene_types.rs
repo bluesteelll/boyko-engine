@@ -2347,6 +2347,42 @@ pub struct GBufferScene<'a> {
     /// The VB SSAO gather's dedicated 4-binding LAYOUT: `thin_normal` @0, `gViewT` @1,
     /// `ssao` @2 (write), Camera UBO @3 — the `-D VB_THIN` dense table.
     pub vb_ssao_layout: Option<&'a VulkanBindGroupLayout>,
+
+    // ---- Rung R9d: the VB hardware shadow chain (docs/R9-VB-SPLIT-PLAN.md §6) --------------
+    /// The VB split's DEDICATED hardware shadow-vis gather pipeline (`vb_shadow_vis.comp` /
+    /// [`crate::compute::vb_shadow_vis_spirv`]) — the split's own standalone sibling of
+    /// [`ShadowVisActivation::vis_pipeline`] (that one re-runs the FUSED deferred resolve's
+    /// front-matter against the fat G-buffer; this one has no gbuffer to read, so it traces
+    /// against `thin_normal`/`gViewT` instead). `Some` after `GpuSceneBundles::boot`'s hwrt gate
+    /// (`ctx.ray_query_enabled()` + the shadow-denoise storage probe) built it; `None` on a
+    /// software / non-RT device.
+    #[cfg(feature = "hwrt")]
+    pub vb_shadow_vis_pipeline: Option<&'a ComputePipeline>,
+    /// The 7-binding bind-group LAYOUT [`Self::vb_shadow_vis_pipeline`] declares at set 0
+    /// (`thin_normal` STORAGE read @0, `gViewT` STORAGE read @1, `LightTable` STORAGE read @2,
+    /// the camera UBO @3, the TLAS `AccelerationStructure` @4, the `ResolvedRayShadow` UBO @5,
+    /// `gShadowVis` STORAGE write @6). `Some` iff [`Self::vb_shadow_vis_pipeline`] is `Some`.
+    #[cfg(feature = "hwrt")]
+    pub vb_shadow_vis_layout: Option<&'a VulkanBindGroupLayout>,
+    /// The `-D MOTION=1` sibling of [`Self::vb_geo_pipeline`] (`vb_geo_mv.comp` /
+    /// [`crate::compute::vb_geo_mv_spirv`]) — selected instead of it when
+    /// [`Self::vb_geo_mv_active`] holds this frame. `Some` after the deferred build hook ran on
+    /// an RT + storage device (the SAME two-dependency reason [`Self::vb_geo_pipeline`] is
+    /// `Option`).
+    #[cfg(feature = "hwrt")]
+    pub vb_geo_mv_pipeline: Option<&'a ComputePipeline>,
+    /// The `-D HWRT=1` sibling of [`Self::vb_shade_split_pipeline`]
+    /// (`vb_shade_split.comp.hlsl -D HWRT=1` / [`crate::compute::vb_shade_split_hwrt_spirv`]) —
+    /// reads the denoised/undenoised `gShadowVis` (`vb_split_layout1`'s hwrt @8 entry) instead of
+    /// the software shadow term. Selected instead of [`Self::vb_shade_split_pipeline`] only when
+    /// [`Self::path_vb_hwrt_shadow`] holds.
+    #[cfg(feature = "hwrt")]
+    pub vb_shade_split_hwrt_pipeline: Option<&'a ComputePipeline>,
+    /// The `-D TEXTURED=1 -D HWRT=1` sibling of [`Self::vb_shade_split_tex_pipeline`]
+    /// (/ [`crate::compute::vb_shade_split_tex_hwrt_spirv`]) — the textured-PBR counterpart of
+    /// [`Self::vb_shade_split_hwrt_pipeline`].
+    #[cfg(feature = "hwrt")]
+    pub vb_shade_split_tex_hwrt_pipeline: Option<&'a ComputePipeline>,
 }
 
 impl GBufferScene<'_> {
@@ -2631,6 +2667,29 @@ impl GBufferScene<'_> {
         self.path_is_vb()
             && self.resolved_render_path.mesh_geo_shade_split
             && self.ddgi_update.is_some()
+    }
+
+    /// Rung R9d — the SINGLE source of "this frame runs the VB hardware shadow chain" (TLAS
+    /// pack/build + `shadow_vis` + à-trous + temporal), read at BOTH `declare_vb_graph` and
+    /// `record_vb` (the O1 discipline). Requires the split to be armed (the hwrt vis gather's
+    /// normal source IS `thin_normal`, the split's OWN thin-aux producer) AND the boot-armed
+    /// shadow activation to exist — `self.shadow` is the SAME `Option<ShadowVisActivation>`
+    /// field Deferred's own hwrt shadow chain shares (a single carrier for both paths).
+    #[cfg(feature = "hwrt")]
+    #[inline]
+    pub(crate) fn path_vb_hwrt_shadow(&self) -> bool {
+        self.path_vb_split() && self.shadow.is_some()
+    }
+
+    /// Rung R9d — the SINGLE source of "this frame's `vb_geo` dispatch writes the `motion_vec`
+    /// lane" decision, read at BOTH `declare_vb_graph` (the `vb_geo` access list's conditional
+    /// `motion_vec` write) and `record_vb` (the `vb_geo_mv_pipeline` selection) — mirrors
+    /// [`Self::sdf_mv_active`]'s deferred sibling (the W1 discipline). True iff the hwrt shadow
+    /// chain runs this frame AND its temporal stage is armed.
+    #[cfg(feature = "hwrt")]
+    #[inline]
+    pub(crate) fn vb_geo_mv_active(&self) -> bool {
+        self.path_vb_hwrt_shadow() && self.temporal_active()
     }
 
     /// Multi-paradigm render-path plan, rung R8 — the SINGLE source of "is this frame's

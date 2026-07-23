@@ -23,6 +23,8 @@
 
 use core::ptr;
 
+#[cfg(feature = "hwrt")]
+use crate::compute::LOCAL_SIZE_X;
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
 use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS};
@@ -62,7 +64,9 @@ impl Renderer<'_> {
     /// [`record_gbuffer`](super::gbuffer)'s doc states, restricted to VB's own images/sets).
     /// `extent` is the swapchain extent and governs ONLY the present-blit's clear render-area and
     /// the readback region; a `Some(readback)` buffer is host-visible and ≥ the swapchain image's
-    /// (`extent`-sized) byte size.
+    /// (`extent`-sized) byte size. Rung R9d: `accel_fns` is the AS command table for the split's
+    /// own per-frame TLAS build (`Some` only on an RT device) — the SAME contract
+    /// [`record_gbuffer`](super::gbuffer)'s own `accel_fns` param documents.
     #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn record_vb(
         &self,
@@ -78,6 +82,7 @@ impl Renderer<'_> {
         forward: &ForwardTargets,
         vb: &VbTargets,
         readback: Option<&BoundBuffer>,
+        #[cfg(feature = "hwrt")] accel_fns: Option<&crate::accel::AccelFns>,
     ) -> Result<(), SwapchainError> {
         let begin = VkCommandBufferBeginInfo {
             s_type: VkStructureType::CommandBufferBeginInfo,
@@ -947,6 +952,21 @@ impl Renderer<'_> {
                 .vb_geo
                 .expect("invariant: path_vb_split() => vb_geo pass declared (declare_vb_graph)");
             self.record_vb_pass(geo_pass, cmd, targets, forward, vb, scene, fi);
+            // Rung R9d: select the `-D MOTION=1` sibling when the hwrt shadow chain's temporal
+            // stage is armed this frame (`vb_geo_mv_active()` — the O1 single predicate
+            // `declare_vb_graph`'s conditional `motion_vec` write also reads), else the base
+            // pipeline (byte-identical to R9b).
+            #[cfg(feature = "hwrt")]
+            let vb_geo_pipeline = if scene.vb_geo_mv_active() {
+                scene.vb_geo_mv_pipeline.expect(
+                    "invariant: vb_geo_mv_active() ⇒ scene.vb_geo_mv_pipeline is Some (build_vb_split_pipelines ran on an RT device)",
+                )
+            } else {
+                scene
+                    .vb_geo_pipeline
+                    .expect("invariant: a split-armed scene carries vb_geo_pipeline (build_vb_split_pipelines ran)")
+            };
+            #[cfg(not(feature = "hwrt"))]
             let vb_geo_pipeline = scene
                 .vb_geo_pipeline
                 .expect("invariant: a split-armed scene carries vb_geo_pipeline (build_vb_split_pipelines ran)");
@@ -1134,6 +1154,224 @@ impl Renderer<'_> {
                 }
             }
 
+            // (3.6, rung R9d) The VB split's hardware shadow chain — TLAS pack/build + the RT
+            // soft-shadow VIS pre-pass + the `levels` à-trous passes + the temporal reproject.
+            // Recorded in the SAME order `declare_vb_graph` declares them (after the SSAO/
+            // à-trous chain, before `ddgi_update`). Reuses the DEFERRED chain's shared pipeline
+            // objects (`scene.shadow`'s own `atrous_pipeline`/`temporal_pipeline` — one pipeline
+            // object, many per-path callers) against the split's OWN dedicated sets
+            // (`thin_normal`/`viewt` instead of the fat `gNormal`/`gViewT`). The tlas pack/build
+            // body is `record_gbuffer`'s own port, adapted to `record_vb_pass` for barriers.
+            #[cfg(feature = "hwrt")]
+            if let (Some(t), Some(fns)) = (scene.tlas.as_ref(), accel_fns) {
+                let pack_pass =
+                    plan.tlas_pack.expect("invariant: scene.tlas.is_some() ⇒ tlas_pack declared");
+                let build_pass =
+                    plan.tlas_build.expect("invariant: scene.tlas.is_some() ⇒ tlas_build declared");
+                // SAFETY: recording is open; `record_vb_pass` records the "tlas_pack" pass's
+                // derived input barriers into `cmd` against the live scene buffers.
+                self.record_vb_pass(pack_pass, cmd, targets, forward, vb, scene, fi);
+                let groups = t.count.div_ceil(LOCAL_SIZE_X);
+                let push = t.count.to_le_bytes();
+                // SAFETY: recording is open; the packer pipeline + its layout are live on this
+                // device (caller contract); `t.bind_group` binds this frame slot's pack inputs;
+                // `groups` covers `t.count` at the 64-wide group; `&t.bind_group.descriptor_set`
+                // is a single-element local alive for the call; the push is exactly
+                // `BUILD_TLAS_INSTANCES_PUSH_BYTES` (4) at offset 0 and `push` outlives the call.
+                unsafe {
+                    (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, t.pipeline.pipeline);
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        t.pipeline.layout,
+                        0,
+                        1,
+                        &t.bind_group.descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_push_constants)(
+                        cmd,
+                        t.pipeline.layout,
+                        VK_SHADER_STAGE_COMPUTE_BIT,
+                        0,
+                        crate::compute::BUILD_TLAS_INSTANCES_PUSH_BYTES,
+                        push.as_ptr().cast(),
+                    );
+                    (self.fns.cmd_dispatch)(cmd, groups, 1, 1);
+                }
+                // SAFETY: recording is open; `record_vb_pass` records the "tlas_build" pass's
+                // derived pack-WRITE → build-READ barrier on `tlas_instances`.
+                self.record_vb_pass(build_pass, cmd, targets, forward, vb, scene, fi);
+                let entry = boyko_rhi::AsBuildEntry {
+                    kind: boyko_rhi::AsKind::Tlas,
+                    geometry: boyko_rhi::AsGeometryDesc {
+                        vertex_data: t.instance_array_addr,
+                        index_data: 0,
+                        vertex_stride: 0,
+                        max_vertex: 0,
+                        primitive_count: t.count,
+                        index_type: boyko_rhi::AsIndexType::Uint32,
+                    },
+                    scratch_address: t.scratch_addr,
+                };
+                // SAFETY: recording is open; `fns` is the live device's AS table (resolved from
+                // the RT `ctx`); `entry`'s `vertex_data` (the pack-written instance array) +
+                // `scratch_address` + `t.dest.handle` are live, correctly-flagged resources; the
+                // pack→build barrier just recorded orders the instance-array write before this
+                // build's read; `entry`/`dest` are 1-element slices that outlive the call.
+                unsafe {
+                    crate::accel::cmd_build_acceleration_structures(
+                        fns,
+                        cmd,
+                        core::slice::from_ref(&entry),
+                        &[t.dest],
+                    );
+                }
+                // SAFETY: recording is open; `self.fns` is the live device's core command table.
+                // The barrier touches no resource beyond the execution/memory dependency
+                // (AS_BUILD stage → COMPUTE_SHADER stage).
+                unsafe {
+                    crate::accel::cmd_acceleration_structure_barrier(self.fns, cmd);
+                }
+            }
+
+            #[cfg(feature = "hwrt")]
+            if let (Some(sh), Some(vis_set), Some(atrous_sets)) = (
+                scene.shadow.as_ref(),
+                targets.vb_shadow_vis_set.as_ref(),
+                targets.vb_shadow_atrous_sets.as_ref(),
+            ) {
+                let vis_pipeline = scene.vb_shadow_vis_pipeline.expect(
+                    "invariant: scene.shadow.is_some() under the split ⇒ vb_shadow_vis_pipeline is Some",
+                );
+                let vis_pass = plan
+                    .shadow_vis
+                    .expect("invariant: scene.shadow.is_some() ⇒ shadow_vis pass declared");
+                // SAFETY: recording is open; `record_vb_pass` records the graph's derived input
+                // barriers for the "shadow_vis" pass into `cmd`.
+                self.record_vb_pass(vis_pass, cmd, targets, forward, vb, scene, fi);
+                // SAFETY: recording is open; `vis_pipeline` + its 7-binding layout are live on
+                // this device (caller contract); `vis_set[fi]` binds `thin_normal`/`viewt` +
+                // `LightTable` + the camera UBO + the TLAS + the `ResolvedRayShadow` UBO +
+                // `gShadowVis` (the write target); `dispatch_group_count_x` covers the pixel
+                // count; the pipeline's declared 4-byte push is bound-but-unread (no push
+                // recorded, mirroring the deferred VIS pass).
+                unsafe {
+                    (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vis_pipeline.pipeline);
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        vis_pipeline.layout,
+                        0,
+                        1,
+                        &vis_set[fi].descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+                }
+
+                let atrous_levels =
+                    (sh.atrous_levels as usize).min(crate::present::MAX_ATROUS_LEVELS as usize);
+                debug_assert!(
+                    atrous_sets.len() >= atrous_levels,
+                    "invariant: the VB à-trous set array must hold at least `atrous_levels` levels"
+                );
+                debug_assert_eq!(
+                    sh.final_is_vis2,
+                    atrous_levels % 2 == 1,
+                    "invariant: the VB denoised/temporal bind ring must match the last à-trous parity"
+                );
+                for (level, level_ring) in atrous_sets.iter().enumerate().take(atrous_levels) {
+                    let atrous_pass = plan.shadow_atrous[level].expect(
+                        "invariant: level < scene.shadow.atrous_levels ⇒ the VB shadow_atrous[level] declared",
+                    );
+                    let step: u32 = 1u32 << level;
+                    // SAFETY: recording is open; `record_vb_pass` records the "shadow_atrous"
+                    // pass's derived RAW barriers on the ping-pong pair into `cmd`.
+                    self.record_vb_pass(atrous_pass, cmd, targets, forward, vb, scene, fi);
+                    let atrous_set = &level_ring[self.frame_index];
+                    // SAFETY: recording is open; the SHARED à-trous pipeline + its 6-binding
+                    // layout (the deferred boot object) are live on this device; `atrous_set`
+                    // binds `gVisIn`/`gVisOut` (the ping-pong pair) + `thin_normal`/`viewt` + the
+                    // `ResolvedShadowDenoise` UBO + the camera UBO; the 4-byte `{ uint step }`
+                    // push covers the pipeline's declared COMPUTE range; `dispatch_group_count_x`
+                    // covers the pixel count.
+                    unsafe {
+                        (self.fns.cmd_bind_pipeline)(
+                            cmd,
+                            VK_PIPELINE_BIND_POINT_COMPUTE,
+                            sh.atrous_pipeline.pipeline,
+                        );
+                        (self.fns.cmd_bind_descriptor_sets)(
+                            cmd,
+                            VK_PIPELINE_BIND_POINT_COMPUTE,
+                            sh.atrous_pipeline.layout,
+                            0,
+                            1,
+                            &atrous_set.descriptor_set,
+                            0,
+                            ptr::null(),
+                        );
+                        (self.fns.cmd_push_constants)(
+                            cmd,
+                            sh.atrous_pipeline.layout,
+                            VK_SHADER_STAGE_COMPUTE_BIT,
+                            0,
+                            4,
+                            (&step as *const u32).cast(),
+                        );
+                        (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+                    }
+                }
+            }
+
+            #[cfg(feature = "hwrt")]
+            if scene.path_vb_hwrt_shadow()
+                && scene.temporal_active()
+                && let Some(temporal_sets) = targets.vb_shadow_temporal_set.as_ref()
+            {
+                let sh = scene
+                    .shadow
+                    .as_ref()
+                    .expect("invariant: temporal_active() implies scene.shadow.is_some()");
+                let temporal_pipeline = sh.temporal_pipeline.expect(
+                    "invariant: temporal_active() + the VB temporal set built implies the temporal pipeline",
+                );
+                let temporal_pass = plan.shadow_temporal.expect(
+                    "invariant: scene.temporal_active() under the split ⇒ shadow_temporal pass declared",
+                );
+                // SAFETY: recording is open; `record_vb_pass` records the "shadow_temporal"
+                // pass's derived input/RAW barriers into `cmd`.
+                self.record_vb_pass(temporal_pass, cmd, targets, forward, vb, scene, fi);
+                let temporal_set = &temporal_sets[self.frame_index];
+                // SAFETY: recording is open; the SHARED temporal pipeline + its 8-binding layout
+                // (the deferred boot object) are live on this device; `temporal_set` binds
+                // gVisIn/gMotionVec/gViewT/gHistIn/gHistOut/gTemporalOut + the
+                // ResolvedTemporalShadow UBO + the camera UBO for `frame_index`;
+                // `dispatch_group_count_x` covers the pixel count; the pipeline's declared 4-byte
+                // COMPUTE range is bound-but-unread (no push recorded).
+                unsafe {
+                    (self.fns.cmd_bind_pipeline)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        temporal_pipeline.pipeline,
+                    );
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        temporal_pipeline.layout,
+                        0,
+                        1,
+                        &temporal_set.descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+                }
+            }
+
             // (3.5, rung R9c) Pass `ddgi_update` — the probe update under VB (reachable only
             // VB×Both, `path_vb_ddgi()`): the DEFERRED record body mirrored (the single
             // non-ringed 7-binding set; the shader reads all params from the b6 UBO — no push).
@@ -1186,6 +1424,47 @@ impl Renderer<'_> {
             // COLOR_ATTACHMENT→GENERAL + cascade/atlas + `ssao` GENERAL-read barriers for the
             // "vb_shade_split" pass into `cmd`.
             self.record_vb_pass(shade_pass, cmd, targets, forward, vb, scene, fi);
+            // Rung R9d: extend the base/`_tex` pick to the 2×2 matrix — the `-D HWRT=1` variants
+            // when the hwrt shadow chain is armed (`path_vb_hwrt_shadow()`, the SAME predicate
+            // the declare-site's conditional denoised-vis read uses), else the software pair
+            // exactly as shipped.
+            #[cfg(feature = "hwrt")]
+            let (shade_pipeline, shade_set0) = if scene.path_vb_hwrt_shadow() {
+                if scene.vb_tex_active() {
+                    (
+                        scene.vb_shade_split_tex_hwrt_pipeline.expect(
+                            "invariant: vb_tex_active() + path_vb_hwrt_shadow() requires vb_shade_split_tex_hwrt_pipeline",
+                        ),
+                        targets.vb_set0_tex.as_ref().expect(
+                            "invariant: GBufferScene::vb_tex_active() => targets.vb_set0_tex is built",
+                        ),
+                    )
+                } else {
+                    (
+                        scene.vb_shade_split_hwrt_pipeline.expect(
+                            "invariant: path_vb_hwrt_shadow() requires vb_shade_split_hwrt_pipeline",
+                        ),
+                        vb_set0,
+                    )
+                }
+            } else if scene.vb_tex_active() {
+                (
+                    scene.vb_shade_split_tex_pipeline.expect(
+                        "invariant: vb_tex_active() under split requires vb_shade_split_tex_pipeline",
+                    ),
+                    targets.vb_set0_tex.as_ref().expect(
+                        "invariant: GBufferScene::vb_tex_active() => targets.vb_set0_tex is built",
+                    ),
+                )
+            } else {
+                (
+                    scene.vb_shade_split_pipeline.expect(
+                        "invariant: a split-armed scene carries vb_shade_split_pipeline",
+                    ),
+                    vb_set0,
+                )
+            };
+            #[cfg(not(feature = "hwrt"))]
             let (shade_pipeline, shade_set0) = if scene.vb_tex_active() {
                 (
                     scene.vb_shade_split_tex_pipeline.expect(

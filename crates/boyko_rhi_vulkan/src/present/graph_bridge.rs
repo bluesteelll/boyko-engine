@@ -2724,6 +2724,29 @@ pub(crate) struct VbPassPlan {
     /// `Some` iff
     /// [`GBufferScene::path_vb_split`](super::scene_types::GBufferScene::path_vb_split).
     pub(crate) vb_shade_split: Option<crate::framegraph::PassId>,
+    /// HW-RT rung R9d: the TLAS-instance PACK compute pre-pass (`scene.tlas.is_some()`) — the VB
+    /// sibling of [`GbufferPassPlan::tlas_pack`], declared inside the split arm (VB's TLAS
+    /// exists only to feed this chain).
+    #[cfg(feature = "hwrt")]
+    pub(crate) tlas_pack: Option<crate::framegraph::PassId>,
+    /// HW-RT rung R9d: the per-frame TLAS BUILD pass — the VB sibling of
+    /// [`GbufferPassPlan::tlas_build`].
+    #[cfg(feature = "hwrt")]
+    pub(crate) tlas_build: Option<crate::framegraph::PassId>,
+    /// HW-RT rung R9d: the RT soft-shadow VIS pre-pass (`GBufferScene::path_vb_hwrt_shadow()`)
+    /// — the VB sibling of [`GbufferPassPlan::shadow_vis`], reading `thin_normal`/`viewt`
+    /// instead of the fat `gNormal`/`gViewT`.
+    #[cfg(feature = "hwrt")]
+    pub(crate) shadow_vis: Option<crate::framegraph::PassId>,
+    /// HW-RT rung R9d: the per-level à-trous denoise passes — the VB sibling of
+    /// [`GbufferPassPlan::shadow_atrous`].
+    #[cfg(feature = "hwrt")]
+    pub(crate) shadow_atrous:
+        [Option<crate::framegraph::PassId>; crate::present::MAX_ATROUS_LEVELS as usize],
+    /// HW-RT rung R9d: the temporal reproject+accumulate pass — the VB sibling of
+    /// [`GbufferPassPlan::shadow_temporal`].
+    #[cfg(feature = "hwrt")]
+    pub(crate) shadow_temporal: Option<crate::framegraph::PassId>,
     /// Rung R10: the fused `sdf_forward_march` COMPUTE pass (`shaders/sdf_forward_march.comp.hlsl`,
     /// the SAME pass the Forward family declares — [`ForwardPassPlan::sdf_forward_march`]). `Some`
     /// iff [`GBufferScene::path_has_sdf_forward`](super::scene_types::GBufferScene::path_has_sdf_forward)
@@ -2773,21 +2796,40 @@ pub(crate) struct VbBarrierSink<'a> {
     /// allocated — VbMesh runs the DeferredFull-shaped body); `taa_hist` = the `[fi]` WRITE
     /// slot, `taa_hist_read` = the SIBLING `taa_hist[fi ^ 1]` (the ONE non-`[fi]` entry — the
     /// deferred sink's own C1-fix shape), both `VkImage::NULL`-bound when TAA is off (inert: no
-    /// pass names their ResIds then).
+    /// pass names their ResIds then). Rung R9b/c append `[thin_normal, ssao, ssao_ring_a,
+    /// ssao_ring_b, ddgi_irr, ddgi_depth]` (ResIds 8..13); rung R9d appends the SAME hwrt
+    /// `[shadow_vis, shadow_vis2, motion_vec, shadow_temporal_hist, temporal_out,
+    /// shadow_temporal_hist_read]` tail the deferred sink's own [`FRAMEGRAPH_IMAGE_COUNT`] doc
+    /// documents (ResIds 14..19) — same NULL-when-ungated rule.
     pub(crate) images: [VkImage; VB_IMAGE_COUNT],
-    /// `[light_table, vb_instance_ring, gclassify, ddgi_classification, ddgi_ray_table]`. A
-    /// pass that does not declare an access on an unarmed resource never routes a barrier
-    /// naming it, so an inert `VkBuffer::NULL` there is harmless (the SAME "ungated slot may
-    /// hold NULL" rule [`ForwardBarrierSink`] documents).
+    /// `[light_table, vb_instance_ring, gclassify, ddgi_classification, ddgi_ray_table]` (+ rung
+    /// R9d's `tlas_instances` under `hwrt`). A pass that does not declare an access on an unarmed
+    /// resource never routes a barrier naming it, so an inert `VkBuffer::NULL` there is harmless
+    /// (the SAME "ungated slot may hold NULL" rule [`ForwardBarrierSink`] documents).
     /// `gclassify` — VB-P2 classification plan rung P2b: the current frame slot's
     /// [`VbClassifyTargets::gclassify`](super::targets::VbClassifyTargets::gclassify) buffer.
-    /// The two DDGI buffers (rung R9c) are the deferred sink's own single-instance sources.
+    /// The two DDGI buffers (rung R9c) are the deferred sink's own single-instance sources; the
+    /// rung R9d `tlas_instances` source mirrors [`GbufferBarrierSink`]'s own
+    /// `scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer)`.
+    #[cfg(not(feature = "hwrt"))]
     pub(crate) buffers: [VkBuffer; 5],
+    /// See the `not(hwrt)` variant's doc: `hwrt` grows this by one (`tlas_instances` at index 5).
+    #[cfg(feature = "hwrt")]
+    pub(crate) buffers: [VkBuffer; 6],
 }
 
 /// The number of IMAGE resources [`Renderer::declare_vb_graph`] declares — see
 /// [`VbBarrierSink::images`]'s doc for the fixed order. A PRIVATE, per-frame ResId space (mirrors
 /// [`FORWARD_IMAGE_COUNT`]'s own doc — never related to [`FRAMEGRAPH_IMAGE_COUNT`]).
+///
+/// Rung R9d: under `hwrt` the array grows by SIX — the same `shadow_vis`/`shadow_vis2`/
+/// `motion_vec`/`shadow_temporal_hist`/`temporal_out`/`shadow_temporal_hist_read` tail the
+/// deferred declarator appends after `ddgi_depth` ([`FRAMEGRAPH_IMAGE_COUNT`]'s own doc) — VB
+/// appends the SAME six after ITS OWN `ddgi_depth` (ResId 13), landing at 14..19.
+#[cfg(feature = "hwrt")]
+const VB_IMAGE_COUNT: usize = 20;
+/// See the `hwrt` variant's doc: a `not(hwrt)` build keeps the count at 14 (byte-unchanged).
+#[cfg(not(feature = "hwrt"))]
 const VB_IMAGE_COUNT: usize = 14;
 
 impl crate::framegraph::BarrierSink for VbBarrierSink<'_> {
@@ -3032,8 +3074,49 @@ impl Renderer<'_> {
                 VK_ACCESS_SHADER_READ_BIT,
             ),
         );
+        #[cfg(not(feature = "hwrt"))]
         debug_assert_eq!(
             ddgi_depth.index() + 1,
+            VB_IMAGE_COUNT,
+            "invariant: declare_vb_graph's image declarations must match VB_IMAGE_COUNT"
+        );
+
+        // Rung R9d (ResIds 14..19): the VB hardware shadow chain's own image tail, appended AFTER
+        // `ddgi_depth` in the SAME DEFERRED order/seeds — see `declare_deferred_graph`'s own
+        // `shadow_vis`/`shadow_vis2`/`motion_vec`/`shadow_temporal_hist`/`temporal_out`/
+        // `shadow_temporal_hist_read` declarations (this module's doc) for the full seed
+        // rationale; VB reuses the identical shapes verbatim against its OWN local ResId space.
+        // NO pass names these ResIds unless `path_vb_hwrt_shadow()` arms this frame, so the OFF
+        // path (every current pin) routes ZERO barriers here — byte-identical.
+        #[cfg(feature = "hwrt")]
+        let shadow_vis = g.add_image("shadow_vis"); // ResId 14
+        #[cfg(feature = "hwrt")]
+        let shadow_vis2 = g.add_image("shadow_vis2"); // ResId 15
+        #[cfg(feature = "hwrt")]
+        let motion_vec = g.add_image("motion_vec"); // ResId 16
+        #[cfg(feature = "hwrt")]
+        let shadow_temporal_hist = g.add_image_seeded(
+            "shadow_temporal_hist",
+            ResSync::seeded_readers_at_layout(
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+            ),
+        ); // ResId 17
+        #[cfg(feature = "hwrt")]
+        let temporal_out = g.add_image("temporal_out"); // ResId 18
+        #[cfg(feature = "hwrt")]
+        let shadow_temporal_hist_read = g.add_image_seeded(
+            "shadow_temporal_hist_read",
+            ResSync::seeded_writer_at_layout(
+                VK_IMAGE_LAYOUT_GENERAL,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+            ),
+        ); // ResId 19
+        #[cfg(feature = "hwrt")]
+        debug_assert_eq!(
+            shadow_temporal_hist_read.index() + 1,
             VB_IMAGE_COUNT,
             "invariant: declare_vb_graph's image declarations must match VB_IMAGE_COUNT"
         );
@@ -3061,6 +3144,11 @@ impl Renderer<'_> {
             "ddgi_ray_table",
             ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
         );
+        // Rung R9d (buffer ResId 5): the compute-written `VkAccelerationStructureInstanceKHR[]`
+        // array the VB hwrt shadow chain's TLAS pack/build passes touch — the DEFERRED
+        // declarator's `tlas_instances` shape verbatim (frame-private, undefined seed).
+        #[cfg(feature = "hwrt")]
+        let tlas_instances = g.add_buffer("tlas_instances");
 
         // Pass `light_upload` (async light-table re-upload) — the SAME gate
         // `declare_forward_graph`'s own `light_upload` pass uses.
@@ -3387,7 +3475,7 @@ impl Renderer<'_> {
         let mut ssao_atrous_vb: [Option<crate::framegraph::PassId>;
             crate::present::MAX_SSAO_ATROUS_LEVELS as usize] =
             [None; crate::present::MAX_SSAO_ATROUS_LEVELS as usize];
-        let (vb_geo, vb_ssao_pass, vb_ddgi_update_pass, vb_shade_split) = if split {
+        let (vb_geo, vb_ssao_pass) = if split {
             // Pass `vb_geo` — the split's thin-aux producer: the FIRST `vb_id` reader under
             // split (derives the COLOR_ATTACHMENT→SHADER_READ_ONLY transition out of the
             // raster; every later same-layout read needs none), reads the instance ring for
@@ -3410,6 +3498,22 @@ impl Renderer<'_> {
                 VK_IMAGE_LAYOUT_GENERAL,
                 SubRange::COLOR,
             );
+            // Rung R9d: when the hwrt shadow chain's MV variant is selected this frame
+            // (`vb_geo_mv_active()` — the O1 single predicate `record_vb`'s pipeline pick reads
+            // too), `vb_geo` ALSO writes each mesh pixel's camera-only motion vector `Δuv` to
+            // `motion_vec` (STORAGE, GENERAL, first touch). OFF (temporal off / non-storage /
+            // non-hwrt) ⇒ no access ⇒ the graph routes ZERO barriers on `motion_vec` for this
+            // pass ⇒ byte-identical.
+            #[cfg(feature = "hwrt")]
+            if scene.vb_geo_mv_active() {
+                g.image_access(
+                    motion_vec,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    SubRange::COLOR,
+                );
+            }
 
             // The SSAO gather + à-trous chain (`path_vb_ssao` — the O1 predicate `record_vb`
             // reads too). The gather reads `thin_normal` + `viewt` (GENERAL) and writes `ssao`
@@ -3487,6 +3591,161 @@ impl Renderer<'_> {
                 None
             };
 
+            (Some(vb_geo), vb_ssao_pass)
+        } else {
+            (None, None)
+        };
+
+        // Rung R9d: the VB hardware shadow chain (docs/R9-VB-SPLIT-PLAN.md §6) — TLAS pack/build
+        // + the RT soft-shadow VIS pre-pass + the `levels` à-trous passes + the temporal
+        // reproject, declared AFTER the SSAO/à-trous section and BEFORE the R9c `ddgi_update`
+        // pass (below), mirroring the DEFERRED declarator's own pack/build + VIS/à-trous/temporal
+        // shapes (this module's doc) but reading the split's OWN thin-aux lanes
+        // (`thin_normal`/`viewt`) instead of the fat `gNormal` G-buffer. `tlas_pack`/`tlas_build`
+        // are gated on `scene.tlas.is_some()` alone (independent of the vis chain, mirroring the
+        // deferred declarator) — under VB the TLAS exists only to feed this chain, so in practice
+        // it is armed only when `split` also holds. `vb_final_vis_res` is used below by
+        // `vb_shade_split`'s conditional denoised-vis read.
+        #[cfg(feature = "hwrt")]
+        let (vb_tlas_pack, vb_tlas_build) = if split && scene.tlas.is_some() {
+            // Pass `tlas_pack`: writes the `tlas_instances` array (COMPUTE/SHADER_WRITE). VB v1
+            // has no interp pass (`VbPassPlan`'s doc) — the instance ring is host-CPU-scattered
+            // into host-coherent memory, so (mirroring the deferred declarator's own interp-off
+            // shape) the pack declares ONLY its `tlas_instances` write.
+            let pack = g.add_pass("tlas_pack");
+            g.buffer_access(
+                tlas_instances,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+            );
+            // Pass `tlas_build`: reads the `tlas_instances` array at the AS-build stage — the
+            // graph derives the pack(SHADER_WRITE) → build(AS_BUILD/SHADER_READ) barrier. The
+            // build writes the AS into the UNTRACKED backing/scratch (invisible to the graph).
+            let build = g.add_pass("tlas_build");
+            g.buffer_access(
+                tlas_instances,
+                VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                VK_ACCESS_SHADER_READ_BIT,
+            );
+            (Some(pack), Some(build))
+        } else {
+            (None, None)
+        };
+        #[cfg(feature = "hwrt")]
+        let (vb_shadow_vis_pass, vb_shadow_atrous_passes, vb_final_vis_res, vb_shadow_temporal_pass) =
+            if split
+                && let Some(sh) = scene.shadow.as_ref()
+        {
+            // Pass `shadow_vis`: reads `thin_normal`/`viewt` (GENERAL, the split's own thin-aux
+            // lanes) + the tlas buffer (COMPUTE read), writes `shadow_vis` (GENERAL, first
+            // touch).
+            let vis = g.add_pass("shadow_vis");
+            for &c in &[thin_normal, viewt] {
+                g.image_access(
+                    c,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    SubRange::COLOR,
+                );
+            }
+            g.buffer_access(
+                tlas_instances,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+            );
+            g.image_access(
+                shadow_vis,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_GENERAL,
+                SubRange::COLOR,
+            );
+
+            // The `atrous_levels` à-trous passes (ping-pong) — the deferred declarator's role
+            // loop verbatim, reading `thin_normal`/`viewt` instead of `gNormal`/`gViewT`.
+            let atrous_levels =
+                (sh.atrous_levels as usize).min(crate::present::MAX_ATROUS_LEVELS as usize);
+            let mut atrous: [Option<crate::framegraph::PassId>;
+                crate::present::MAX_ATROUS_LEVELS as usize] =
+                [None; crate::present::MAX_ATROUS_LEVELS as usize];
+            for (i, slot) in atrous.iter_mut().enumerate().take(atrous_levels) {
+                let (in_res, out_res) = if i % 2 == 0 {
+                    (shadow_vis, shadow_vis2)
+                } else {
+                    (shadow_vis2, shadow_vis)
+                };
+                let p = g.add_pass("shadow_atrous");
+                for &c in &[thin_normal, viewt] {
+                    g.image_access(
+                        c,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        SubRange::COLOR,
+                    );
+                }
+                g.image_access(
+                    in_res,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    SubRange::COLOR,
+                );
+                g.image_access(
+                    out_res,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    SubRange::COLOR,
+                );
+                *slot = Some(p);
+            }
+            let final_res = if atrous_levels % 2 == 1 { shadow_vis2 } else { shadow_vis };
+
+            // The temporal reproject+accumulate pass, declared AFTER the à-trous chain when the
+            // author's mode is temporal (`sh.temporal`) — the deferred declarator's shape
+            // verbatim, reading the split's `viewt` lane instead of the fat `gViewT`.
+            let temporal = if sh.temporal {
+                let p = g.add_pass("shadow_temporal");
+                for &c in &[final_res, motion_vec, viewt, shadow_temporal_hist_read] {
+                    g.image_access(
+                        c,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        SubRange::COLOR,
+                    );
+                }
+                for &w in &[shadow_temporal_hist, temporal_out] {
+                    g.image_access(
+                        w,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        SubRange::COLOR,
+                    );
+                }
+                Some(p)
+            } else {
+                None
+            };
+            (Some(vis), atrous, final_res, temporal)
+        } else {
+            (
+                None,
+                [None; crate::present::MAX_ATROUS_LEVELS as usize],
+                shadow_vis,
+                None,
+            )
+        };
+        #[cfg(feature = "hwrt")]
+        debug_assert!(
+            vb_tlas_build.is_none_or(|b| vb_shadow_vis_pass.is_none_or(|v| b.index() < v.index())),
+            "invariant: tlas_build must be declared before shadow_vis when both are armed"
+        );
+
+        let (vb_ddgi_update_pass, vb_shade_split) = if split {
             // Rung R9c: pass `ddgi_update` — declared between the SSAO chain and the split
             // shade (the §3 order), gated on `path_vb_ddgi()` (reachable only VB×Both — the
             // activation carries the `sdf_leg` AND). The access list is the DEFERRED
@@ -3587,9 +3846,25 @@ impl Renderer<'_> {
                     );
                 }
             }
-            (Some(vb_geo), vb_ssao_pass, vb_ddgi_update, Some(s))
+            // Rung R9d: when the hwrt shadow chain is armed this frame
+            // (`path_vb_hwrt_shadow()`), `vb_shade_split` ALSO reads the FINAL denoised/
+            // undenoised visibility (GENERAL, COMPUTE) — `temporal_out` when the temporal stage
+            // ran, else the à-trous-parity final ring — deriving the last-write → shade-read
+            // barrier (mirrors the deferred DENOISED resolve's own conditional read).
+            #[cfg(feature = "hwrt")]
+            if scene.path_vb_hwrt_shadow() {
+                let vis_read = if scene.temporal_active() { temporal_out } else { vb_final_vis_res };
+                g.image_access(
+                    vis_read,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    SubRange::COLOR,
+                );
+            }
+            (vb_ddgi_update, Some(s))
         } else {
-            (None, None, None, None)
+            (None, None)
         };
 
         // Pass `sdf_forward_march` — rung R10: the fused SDF march-then-shade COMPUTE pass, the
@@ -3775,6 +4050,16 @@ impl Renderer<'_> {
             SubRange::COLOR,
         );
 
+        // Rung R9d structural order guard (mirrors the `tlas_build < shadow_vis` assert above):
+        // `vb_geo` (the `thin_normal` producer) must be declared before `shadow_temporal` (a
+        // `thin_normal`-adjacent consumer via the à-trous chain it follows) whenever both are
+        // armed — a ladder inversion here would derive barriers in the wrong order.
+        #[cfg(feature = "hwrt")]
+        debug_assert!(
+            vb_geo.is_none_or(|geo| vb_shadow_temporal_pass.is_none_or(|t| geo.index() < t.index())),
+            "invariant: vb_geo must be declared before shadow_temporal when both are armed"
+        );
+
         g.compile();
 
         self.vb_pass_plan = Some(VbPassPlan {
@@ -3794,6 +4079,16 @@ impl Renderer<'_> {
             ssao_atrous: ssao_atrous_vb,
             ddgi_update: vb_ddgi_update_pass,
             vb_shade_split,
+            #[cfg(feature = "hwrt")]
+            tlas_pack: vb_tlas_pack,
+            #[cfg(feature = "hwrt")]
+            tlas_build: vb_tlas_build,
+            #[cfg(feature = "hwrt")]
+            shadow_vis: vb_shadow_vis_pass,
+            #[cfg(feature = "hwrt")]
+            shadow_atrous: vb_shadow_atrous_passes,
+            #[cfg(feature = "hwrt")]
+            shadow_temporal: vb_shadow_temporal_pass,
             sdf_forward_march,
             // ONE field for BOTH slots — the pass exists in exactly one of them per frame
             // (`ssao.is_some()` picks pre-tail vs late; the graph itself remembers the declared
@@ -3857,7 +4152,27 @@ impl Renderer<'_> {
                 // allocated (the GI-off frames name their ResIds with NOTHING ⇒ inert).
                 scene.ddgi_irr_texture.image,
                 scene.ddgi_depth_texture.image,
+                // Rung R9d (ResIds 14..19): the VB hardware shadow chain's own image tail —
+                // the SAME `GBufferTargets` rings the deferred path shares (`Option`-guarded on
+                // the device's `RG16`/`RG16F`/`RGBA16` storage probe). NULL slots stay inert —
+                // with the chain off no pass names these ResIds.
+                #[cfg(feature = "hwrt")]
+                targets.shadow_vis.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
+                #[cfg(feature = "hwrt")]
+                targets.shadow_vis2.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
+                #[cfg(feature = "hwrt")]
+                targets.motion_vec.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
+                #[cfg(feature = "hwrt")]
+                targets.shadow_temporal_hist.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
+                #[cfg(feature = "hwrt")]
+                targets.temporal_out.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
+                // ResId 19 `shadow_temporal_hist_read` — the CROSS-FRAME READ image = the
+                // SIBLING parity slot `hist[fi ^ 1]` (the deferred sink's own C1-fix rule — see
+                // [`Renderer::record_graph_pass`]'s doc for why `[fi]` here would be a bug).
+                #[cfg(feature = "hwrt")]
+                targets.shadow_temporal_hist.as_ref().map_or(VkImage::NULL, |r| r[fi ^ 1].image),
             ],
+            #[cfg(not(feature = "hwrt"))]
             buffers: [
                 scene.light_table.buffer,
                 scene
@@ -3875,6 +4190,26 @@ impl Renderer<'_> {
                 // (the deferred sink's own sources — placeholder-backed on GI-off boots).
                 scene.ddgi_classification.buffer,
                 scene.ddgi_ray_table.buffer,
+            ],
+            // Rung R9d (buffer ResId 5): `tlas_instances` — mirrors [`GbufferBarrierSink`]'s own
+            // `scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer)` source.
+            #[cfg(feature = "hwrt")]
+            buffers: [
+                scene.light_table.buffer,
+                scene
+                    .vb_instance_ring
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_instance_ring")
+                    [fi]
+                    .buffer,
+                targets
+                    .vb_classify
+                    .as_ref()
+                    .expect("invariant: a VisibilityBuffer-resolved scene always carries targets.vb_classify")
+                    .gclassify[fi]
+                    .buffer,
+                scene.ddgi_classification.buffer,
+                scene.ddgi_ray_table.buffer,
+                scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer),
             ],
         };
         self.frame_graph.record_pass(pass, &mut sink);

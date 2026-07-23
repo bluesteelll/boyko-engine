@@ -122,8 +122,11 @@
 //       -fspv-target-env=vulkan1.3 vb_shade_split.comp.hlsl -Fo vb_shade_split.comp.spv
 //   (TEXTURED variant: add `-D TEXTURED=1 -Fo vb_shade_split_tex.comp.spv`)
 //   (R9d HWRT variant, NOT YET WIRED at the pipeline-build level this rung -- the `#if HWRT`
-//   declarations above are authored now so the descriptor-set layout is ready): add
-//   `-T cs_6_5 -D HWRT=1 -Fo vb_shade_split_hwrt.comp.spv`
+//   declarations above are authored now so the descriptor-set layout is ready. A plain `.Load`
+//   + min-combine, no `rayQuery`, so the SAME `cs_6_0` target as the base compile suffices):
+//   add `-T cs_6_0 -D HWRT=1 -Fo vb_shade_split_hwrt.comp.spv`
+//   (HWRT + TEXTURED combo, same rationale): add
+//   `-T cs_6_0 -D TEXTURED=1 -D HWRT=1 -Fo vb_shade_split_tex_hwrt.comp.spv`
 // Validated with:
 //   C:\VulkanSDK\1.4.350.0\Bin\spirv-val.exe vb_shade_split.comp.spv
 //   C:\VulkanSDK\1.4.350.0\Bin\spirv-val.exe vb_shade_split_tex.comp.spv

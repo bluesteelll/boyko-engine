@@ -2301,6 +2301,18 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         vb_split_layout1: None,
         ssao_vb_pipeline: None,
         vb_ssao_layout: None,
+        // Rung R9d: `None` — this harness never resolves the VB hardware shadow chain (same
+        // "Option lets a non-armed fixture say so honestly" rationale as the VB fields above).
+        #[cfg(feature = "hwrt")]
+        vb_shadow_vis_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shadow_vis_layout: None,
+        #[cfg(feature = "hwrt")]
+        vb_geo_mv_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shade_split_hwrt_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shade_split_tex_hwrt_pipeline: None,
         brick_levels_ubo: None,
         sdf_forward_view_z_a: 0.0,
         sdf_forward_view_z_b: 0.0,
@@ -3341,6 +3353,18 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         vb_split_layout1: None,
         ssao_vb_pipeline: None,
         vb_ssao_layout: None,
+        // Rung R9d: `None` — this harness never resolves the VB hardware shadow chain (same
+        // "Option lets a non-armed fixture say so honestly" rationale as the VB fields above).
+        #[cfg(feature = "hwrt")]
+        vb_shadow_vis_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shadow_vis_layout: None,
+        #[cfg(feature = "hwrt")]
+        vb_geo_mv_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shade_split_hwrt_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shade_split_tex_hwrt_pipeline: None,
         brick_levels_ubo: None,
         sdf_forward_view_z_a: 0.0,
         sdf_forward_view_z_b: 0.0,
@@ -8305,6 +8329,18 @@ fn run_showcase_body_ddgi(
         vb_split_layout1: None,
         ssao_vb_pipeline: None,
         vb_ssao_layout: None,
+        // Rung R9d: `None` — this harness never resolves the VB hardware shadow chain (same
+        // "Option lets a non-armed fixture say so honestly" rationale as the VB fields above).
+        #[cfg(feature = "hwrt")]
+        vb_shadow_vis_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shadow_vis_layout: None,
+        #[cfg(feature = "hwrt")]
+        vb_geo_mv_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shade_split_hwrt_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shade_split_tex_hwrt_pipeline: None,
         brick_levels_ubo: None,
         sdf_forward_view_z_a: 0.0,
         sdf_forward_view_z_b: 0.0,
@@ -9764,6 +9800,18 @@ fn run_showcase_body(
         vb_split_layout1: None,
         ssao_vb_pipeline: None,
         vb_ssao_layout: None,
+        // Rung R9d: `None` — this harness never resolves the VB hardware shadow chain (same
+        // "Option lets a non-armed fixture say so honestly" rationale as the VB fields above).
+        #[cfg(feature = "hwrt")]
+        vb_shadow_vis_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shadow_vis_layout: None,
+        #[cfg(feature = "hwrt")]
+        vb_geo_mv_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shade_split_hwrt_pipeline: None,
+        #[cfg(feature = "hwrt")]
+        vb_shade_split_tex_hwrt_pipeline: None,
         brick_levels_ubo: None,
         sdf_forward_view_z_a: 0.0,
         sdf_forward_view_z_b: 0.0,

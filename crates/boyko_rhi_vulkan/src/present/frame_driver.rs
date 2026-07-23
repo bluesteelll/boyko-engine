@@ -904,6 +904,11 @@ impl<'ctx> Renderer<'ctx> {
                             fwd,
                             vb,
                             readback,
+                            // Rung R9d: the AS command table (for the VB split's own per-frame
+                            // TLAS build), the SAME resolve `record_gbuffer`'s own call uses
+                            // below.
+                            #[cfg(feature = "hwrt")]
+                            ctx.accel_fns_opt(),
                         )
                     } else if scene.path_is_forward() {
                         let fwd = targets.forward.as_ref().expect(

@@ -1056,8 +1056,19 @@ fn cap_forward_v1_consumers(
 ///   the R-SDFSPLIT boundary, `docs/R9-VB-SPLIT-PLAN.md` §1.3)
 /// * `ddgi_on` on every leg set EXCEPT `Both` (rung R9c: consumption lives in the mesh split
 ///   shade and the probes are SDF-marched, so both legs must be present)
-/// * `shadow_denoise_spatial_on`/`shadow_temporal_on`/`hwrt_denoise_or_vis_on` (until R9d
-///   lands the VB hwrt shadow chain), and `ssr_on` (no SSR exists engine-wide)
+/// * `ssr_on` — ALWAYS capped (no SSR exists engine-wide, no rung lifts this)
+///
+/// As of rung R9d, `shadow_denoise_spatial_on`/`shadow_temporal_on`/`hwrt_denoise_or_vis_on`
+/// have their OWN narrower rule instead of an unconditional zero (see the fn body): the hwrt
+/// shadow chain (TLAS pack/build + `shadow_vis` + à-trous + temporal, all `feature = "hwrt"`)
+/// is now the SOLE producer for either denoise stage under VB, and it exists ONLY when the mesh
+/// leg is present (it traces MESH casters only, mirroring Deferred's own mesh-only hwrt shadow
+/// producers) — so `shadow_denoise_spatial_on`/`shadow_temporal_on` PASS THROUGH only when
+/// `legs.has_mesh() && hwrt_denoise_or_vis_on` (the hwrt carrier itself must be present; a
+/// software `ShadowDenoiseConfig` with no ray-query carrier has NO producer under the split arm
+/// — `vb_shade_split` wires no soft-march/CSM/atlas fallback — and stays capped). Independently,
+/// `hwrt_denoise_or_vis_on` itself PASSES THROUGH whenever `legs.has_mesh()` (it is its own
+/// carrier, gating [`ShadowSources::HWRT_VIS`] regardless of whether a denoise stage rides it).
 ///
 /// Mirrors [`cap_forward_v1_consumers`]'s scope-cut mechanism for the Forward family. A
 /// separate fn (not a widened `cap_forward_v1_consumers`) so the pushed [`RenderPathDegrade`]
@@ -1086,19 +1097,29 @@ fn cap_vb_v1_consumers(
     // `mesh_geo_shade_split`/`thin_aux` derivation is structurally backed. Under `VB && !mesh_leg`
     // (VB×Sdf) EVERY pre-light consumer stays zeroed — there is no mesh raster to split; that
     // residual is R-SDFSPLIT's boundary, not this rung's (docs/R9-VB-SPLIT-PLAN.md §1.3).
-    // ddgi/shadow-denoise/ssr/hwrt-vis stay capped until their producer chains land (R9c/R9d).
     let ssao_capped = consumers.ssao_on && !legs.has_mesh();
     // Rung R9c: `ddgi_on` passes through on VB×Both ONLY — consumption lives in the mesh split
     // shade (`vb_shade_split`'s probe sample) and the probes themselves are SDF-marched
     // (`gpu_scene` ANDs the per-frame arming with `sdf_leg`), so a mesh-less or SDF-less leg
     // set keeps it zeroed.
     let ddgi_capped = consumers.ddgi_on && !(legs.has_mesh() && legs.has_sdf());
+    // Rung R9d: the hwrt shadow chain is the SOLE producer for either denoise stage under VB,
+    // and it exists ONLY on a mesh-carrying leg set with the hwrt carrier itself armed — a
+    // software-only `ShadowDenoiseConfig` (no ray-query) has no producer under the split arm
+    // and stays capped (see this fn's doc for the full rationale).
+    let spatial_capped =
+        consumers.shadow_denoise_spatial_on && !(legs.has_mesh() && consumers.hwrt_denoise_or_vis_on);
+    let temporal_capped =
+        consumers.shadow_temporal_on && !(legs.has_mesh() && consumers.hwrt_denoise_or_vis_on);
+    // `hwrt_denoise_or_vis_on` is its own carrier — it survives whenever the mesh leg is
+    // present, independent of whether a denoise stage rides it.
+    let hwrt_vis_capped = consumers.hwrt_denoise_or_vis_on && !legs.has_mesh();
     let pre_light_requested = ssao_capped
         || ddgi_capped
-        || consumers.shadow_denoise_spatial_on
-        || consumers.shadow_temporal_on
+        || spatial_capped
+        || temporal_capped
         || consumers.ssr_on
-        || consumers.hwrt_denoise_or_vis_on;
+        || hwrt_vis_capped;
     if pre_light_requested {
         degrades.push(RenderPathDegrade::VbPreLightConsumersNotYetImplemented);
         if ssao_capped {
@@ -1107,10 +1128,16 @@ fn cap_vb_v1_consumers(
         if ddgi_capped {
             consumers.ddgi_on = false;
         }
-        consumers.shadow_denoise_spatial_on = false;
-        consumers.shadow_temporal_on = false;
+        if spatial_capped {
+            consumers.shadow_denoise_spatial_on = false;
+        }
+        if temporal_capped {
+            consumers.shadow_temporal_on = false;
+        }
+        if hwrt_vis_capped {
+            consumers.hwrt_denoise_or_vis_on = false;
+        }
         consumers.ssr_on = false;
-        consumers.hwrt_denoise_or_vis_on = false;
     }
 
     // TAA-under-VB: the cap is REMOVED — TAA passes through on every VB leg set. VB×Mesh uses
@@ -1688,14 +1715,17 @@ mod tests {
     #[test]
     fn vb_pre_light_consumer_is_capped_off_with_a_warn() {
         // Rung R9b: `ssao_on` is NO LONGER in this capped set on a mesh-carrying leg (see
-        // `vb_mesh_ssao_passes_through_and_arms_the_split` below); the rest stay capped until
-        // their producer chains land (ddgi at R9c; denoise/hwrt at R9d).
+        // `vb_mesh_ssao_passes_through_and_arms_the_split` below). Rung R9d: `shadow_denoise_spatial_on`/
+        // `shadow_temporal_on` stay capped here ONLY because the hwrt carrier
+        // (`hwrt_denoise_or_vis_on`) is ABSENT in each row — a software-only `ShadowDenoiseConfig`
+        // has no producer under the VB split arm (see `vb_mesh_software_temporal_stays_capped` and
+        // `cap_vb_v1_consumers`'s doc). `ddgi`/`ssr` stay capped unconditionally on this leg set
+        // (ddgi needs `Both`; ssr has no producer anywhere).
         for (consumers, label) in [
             (RenderPathConsumers { ddgi_on: true, ..Default::default() }, "ddgi"),
-            (RenderPathConsumers { shadow_denoise_spatial_on: true, ..Default::default() }, "shadow_denoise_spatial"),
-            (RenderPathConsumers { shadow_temporal_on: true, ..Default::default() }, "shadow_temporal"),
+            (RenderPathConsumers { shadow_denoise_spatial_on: true, ..Default::default() }, "shadow_denoise_spatial_no_carrier"),
+            (RenderPathConsumers { shadow_temporal_on: true, ..Default::default() }, "shadow_temporal_no_carrier"),
             (RenderPathConsumers { ssr_on: true, ..Default::default() }, "ssr"),
-            (RenderPathConsumers { hwrt_denoise_or_vis_on: true, ..Default::default() }, "hwrt_denoise_or_vis"),
         ] {
             let (resolved, degrades) = resolve_vb_v1(GeometryLegs::Mesh, consumers);
             assert_eq!(resolved.path, RenderPath::VisibilityBuffer, "{label}: path itself does not degrade");
@@ -1708,6 +1738,57 @@ mod tests {
                 "{label}: exactly one capped-consumer warn"
             );
         }
+
+        // Rung R9d row pair: `shadow_temporal_on` + the hwrt carrier (`hwrt_denoise_or_vis_on`)
+        // together PASS THROUGH on the SAME `GeometryLegs::Mesh` leg set the rows above capped —
+        // the ONLY difference is the carrier's presence. See `cap_vb_v1_consumers`'s doc and
+        // `vb_mesh_temporal_with_hwrt_carrier_arms_split_normal_motion` for the full assertion.
+        let hwrt_pair = RenderPathConsumers {
+            shadow_temporal_on: true,
+            hwrt_denoise_or_vis_on: true,
+            ..Default::default()
+        };
+        let (resolved, degrades) = resolve_vb_v1(GeometryLegs::Mesh, hwrt_pair);
+        assert!(degrades.is_clean(), "temporal+hwrt_vis with the carrier present resolves clean");
+        assert!(resolved.mesh_geo_shade_split, "the pair arms the split");
+    }
+
+    #[test]
+    fn vb_mesh_temporal_with_hwrt_carrier_arms_split_normal_motion() {
+        // Rung R9d: `shadow_temporal_on` + `hwrt_denoise_or_vis_on` together resolve CLEAN under
+        // VB×Mesh — the hwrt shadow chain (TLAS + `shadow_vis` + à-trous + temporal) is the
+        // producer, `shadow_temporal_on` is a pre-light consumer (arms the split), and
+        // `hwrt_denoise_or_vis_on` joins the NORMAL union on non-Deferred paths (the vis pass's
+        // cone-trace origin reads `thin_normal`) while `shadow_temporal_on` itself arms MOTION.
+        let consumers = RenderPathConsumers {
+            shadow_temporal_on: true,
+            hwrt_denoise_or_vis_on: true,
+            ..Default::default()
+        };
+        let (resolved, degrades) = resolve_vb_v1(GeometryLegs::Mesh, consumers);
+        assert_eq!(resolved.path, RenderPath::VisibilityBuffer);
+        assert!(degrades.is_clean(), "temporal+hwrt_vis under VB×Mesh resolves clean at R9d");
+        assert!(resolved.mesh_geo_shade_split, "shadow_temporal is a pre-light consumer -> split");
+        assert_eq!(
+            resolved.thin_aux,
+            ThinAuxMask::NORMAL.insert(ThinAuxMask::MOTION),
+            "the vis pass's normal read + the temporal reproject's motion read both arm"
+        );
+        assert!(resolved.shadow.contains(ShadowSources::HWRT_VIS), "the hwrt carrier arms HWRT_VIS");
+    }
+
+    #[test]
+    fn vb_mesh_software_temporal_stays_capped() {
+        // Rung R9d: WITHOUT the hwrt carrier, `shadow_temporal_on` alone under VB×Mesh has no
+        // producer under the split arm (`vb_shade_split` wires no soft-march/CSM/atlas fallback)
+        // and stays capped — one warn, no split.
+        let consumers = RenderPathConsumers { shadow_temporal_on: true, ..Default::default() };
+        let (resolved, degrades) = resolve_vb_v1(GeometryLegs::Mesh, consumers);
+        assert_eq!(resolved.path, RenderPath::VisibilityBuffer);
+        assert!(!resolved.mesh_geo_shade_split, "no hwrt carrier -> no producer -> stays capped");
+        assert_eq!(resolved.thin_aux, ThinAuxMask::NONE);
+        let reasons: Vec<_> = degrades.reasons().collect();
+        assert_eq!(reasons, [RenderPathDegrade::VbPreLightConsumersNotYetImplemented], "one warn");
     }
 
     #[test]
@@ -2015,8 +2096,10 @@ mod tests {
         // thin-aux path — NOT the plan's original "MOTION-only" label (plan-doc erratum: the
         // vis gather that temporal filters is itself a thin_normal consumer there). NOTE:
         // `shadow_temporal_on` WITHOUT `hwrt_denoise_or_vis_on` (a software-leg
-        // ShadowDenoiseConfig) still arms MOTION alone at THIS layer — the VB cap keeps that
-        // config zeroed until rung R9d decides its software story.
+        // ShadowDenoiseConfig) still arms MOTION alone at THIS layer (`resolve_rules` has no
+        // knowledge of the carrier requirement) — rung R9d's `cap_vb_v1_consumers` is what keeps
+        // that software-only config capped before it ever reaches this fn (see
+        // `vb_mesh_software_temporal_stays_capped`).
         let consumers = RenderPathConsumers {
             shadow_temporal_on: true,
             hwrt_denoise_or_vis_on: true,

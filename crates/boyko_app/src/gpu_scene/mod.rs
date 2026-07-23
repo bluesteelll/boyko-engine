@@ -82,7 +82,8 @@ use boyko_rhi_vulkan::compute::{
     BUILD_TLAS_INSTANCES_PUSH_BYTES, build_tlas_instances_spirv, deferred_pbr_denoised_spirv,
     deferred_pbr_hwrt_spirv, deferred_pbr_vis_mv_spirv, deferred_pbr_vis_spirv,
     gbuffer_mrt_mv_fs_spirv, gbuffer_mrt_mv_vs_spirv, gbuffer_mrt_mvpm_fs_spirv,
-    gbuffer_mrt_mvpm_vs_spirv, shadow_atrous_spirv, shadow_temporal_spirv,
+    gbuffer_mrt_mvpm_vs_spirv, shadow_atrous_spirv, shadow_temporal_spirv, vb_geo_mv_spirv,
+    vb_shade_split_hwrt_spirv, vb_shade_split_tex_hwrt_spirv, vb_shadow_vis_spirv,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::swapchain::{ShadowVisActivation, TlasBuildActivation};
@@ -661,6 +662,15 @@ pub(crate) struct GpuSceneBundles {
     /// temporal (kept `None`/`Spatial` ⇒ unbound ⇒ byte-identical).
     #[cfg(feature = "hwrt")]
     shadow_temporal_pipeline: Option<(ComputePipeline, VulkanBindGroupLayout)>,
+    /// Rung R9d: the VB split's DEDICATED shadow-vis gather compute pipeline (`vb_shadow_vis.comp`),
+    /// plus its 7-binding layout { `thin_normal` @0, `gViewT` @1 STORAGE images, `LightTable` @2
+    /// STORAGE buffer, the camera UBO @3, the TLAS `AccelerationStructure` @4, the
+    /// `ResolvedRayShadow` UBO @5 (reuses [`Self::ray_shadow_ubo`]), `gShadowVis` @6 (W) }. Built
+    /// at boot under the SAME `ray_query_enabled` gate as [`Self::shadow_denoise_pipelines`]'s own
+    /// VIS pipeline; `None` otherwise. Bound instead of the deferred VIS pipeline only when
+    /// `GBufferScene::path_vb_hwrt_shadow()`.
+    #[cfg(feature = "hwrt")]
+    vb_shadow_vis_pipeline: Option<(ComputePipeline, VulkanBindGroupLayout)>,
     /// HW-RT rung 1b: the HWRT soft-shadow-params UBO RING (one host-coherent slot per in-flight
     /// frame, [`RAY_SHADOW_UBO_BYTES`] each, zero-seeded). Slot `i` is bound into slot `i`'s HWRT
     /// resolve set at binding 20 (the tunable cone/tmax/tmin/bias) — each in-flight frame reads its
@@ -795,6 +805,21 @@ pub(crate) struct GpuSceneBundles {
     /// Rung R9b: the `-D TEXTURED=1` sibling (also needs the bindless Set-3 —
     /// `build_vb_shade_textured_pipeline`'s own two-dependency reason).
     vb_shade_split_tex_pipeline: Option<ComputePipeline>,
+    /// Rung R9d: the `-D MOTION=1` sibling of [`Self::vb_geo_pipeline`] (`vb_geo_mv.comp.hlsl`) —
+    /// deferred-built by [`Self::build_vb_split_pipelines`] under the SAME geometry-Set-2
+    /// dependency, gated ADDITIONALLY on `ctx.ray_query_enabled()` (an RT-only variant). `None`
+    /// on a non-RT device.
+    #[cfg(feature = "hwrt")]
+    vb_geo_mv_pipeline: Option<ComputePipeline>,
+    /// Rung R9d: the `-D HWRT=1` sibling of [`Self::vb_shade_split_pipeline`]. Same deferred-build
+    /// and `ray_query_enabled` gate as [`Self::vb_geo_mv_pipeline`].
+    #[cfg(feature = "hwrt")]
+    vb_shade_split_hwrt_pipeline: Option<ComputePipeline>,
+    /// Rung R9d: the `-D TEXTURED=1 -D HWRT=1` sibling of [`Self::vb_shade_split_tex_pipeline`].
+    /// Same deferred-build and `ray_query_enabled` gate as [`Self::vb_geo_mv_pipeline`], PLUS the
+    /// bindless Set-3 dependency (built only when `bindless` is `Some`).
+    #[cfg(feature = "hwrt")]
+    vb_shade_split_tex_hwrt_pipeline: Option<ComputePipeline>,
     /// Render P7-Q2: the DEDICATED 5-binding SSAO bind-group LAYOUT { `gNormal` @0,
     /// `gMaterial` @1, `gViewT` @2 STORAGE images READ, the `ssao` out STORAGE image @3
     /// WRITE, the camera UBO @4 } — matching `sdf_ssao.comp`'s set 0, shared by every
@@ -1789,6 +1814,57 @@ impl GpuSceneBundles {
                 (temporal_pipeline, temporal_layout)
             });
 
+        // ── Rung R9d: the VB split's DEDICATED shadow-vis gather pipeline + its 7-binding
+        // layout { `thin_normal` @0, `gViewT` @1 STORAGE images, `LightTable` @2 STORAGE buffer,
+        // the camera UBO @3, the TLAS `AccelerationStructure` @4, the `ResolvedRayShadow` UBO
+        // @5 (reuses the SAME `ray_shadow_ubo` ring below), `gShadowVis` @6 (W) }. Same
+        // `ray_query_enabled` gate as the deferred VIS pipeline (`shadow_denoise_pipelines`'s
+        // own `vis_pipeline`, above) — this is the split's own standalone sibling: it has no
+        // fat G-buffer to re-run the resolve front-matter against, so it traces against the
+        // split's `thin_normal`/`gViewT` lanes directly.
+        #[cfg(feature = "hwrt")]
+        let vb_shadow_vis_pipeline: Option<(ComputePipeline, VulkanBindGroupLayout)> =
+            ctx.ray_query_enabled().then(|| {
+                let layout = RhiDevice::create_bind_group_layout(
+                    device,
+                    &BindGroupLayoutDesc {
+                        entries: &[
+                            BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::AccelerationStructure, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+                            BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+                        ],
+                    },
+                )
+                .expect("invariant: R9d vb_shadow_vis bind-group layout create");
+                // The SAME `SHADOW_RAY_COUNT` spec-const (id 0) the deferred VIS pipeline bakes,
+                // so `mesh_vis` is bit-identical across both producers.
+                let ray_count = RayShadowConfig::default().ray_count.max(1);
+                let cs = RhiDevice::create_shader_module(device, vb_shadow_vis_spirv())
+                    .expect("invariant: R9d vb_shadow_vis compute shader module create");
+                let pipeline = RhiDevice::create_compute_pipeline(
+                    device,
+                    &ComputePipelineDesc {
+                        module: &cs,
+                        entry: c"main",
+                        // The shader reads no push; the RHI rejects a 0-byte compute range, so
+                        // declare the minimum 4-byte range (bound-but-unread — the temporal
+                        // reproject pipeline's own precedent, above).
+                        push_constant_bytes: 4,
+                        bind_group_layout: Some(&layout),
+                        spec_constants: &[SpecConstant { id: 0, value: ray_count }],
+                    },
+                )
+                .expect("invariant: R9d vb_shadow_vis compute pipeline create");
+                // SAFETY: the module was created on `device` and is consumed by the pipeline
+                // create; destroy it once; no GPU work is in flight yet.
+                unsafe { RhiDevice::destroy_shader_module(device, cs) };
+                (pipeline, layout)
+            });
+
         // Rung 1b: the HWRT soft-shadow-params UBO ring — minted ONLY on an RT device
         // (`ray_query_enabled`), the SAME gate that builds `resolve_pipeline_hwrt`. `None` on the
         // software path (the resolve set has no binding 20 there). Zero-seeded (the runner memcpys
@@ -2284,27 +2360,41 @@ impl GpuSceneBundles {
             },
         )
         .expect("invariant: R9b vb_geo aux bind-group layout create");
+        // Rung R9d: the @8 `gShadowVis` STORAGE slot joins the layout together with the
+        // `-D HWRT` `vb_shade_split` shader variant that references it — the R9b `.spv` is
+        // compiled without the define on BOTH legs, so a `not(hwrt)` build's entry would be pure
+        // dead surface (the layout stays EXACT-FILL at 8 there).
+        let vb_split_layout1_base: [BindGroupLayoutEntry; 8] = [
+            // @0-3: forward_layout1's shadow-table kinds VERBATIM (a DISTINCT object —
+            // the Forward family's own layout stays byte-untouched).
+            BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+            BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+            BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+            BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+            // @4: gSsao (STORAGE, READ by the split shade under the header ssao_mode gate).
+            BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
+            // @5/@6: the DDGI atlases (COMBINED image+sampler — the deferred t16/s16 idiom).
+            BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+            BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
+            // @7: the ResolvedDdgi UBO.
+            BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
+        ];
+        #[cfg(not(feature = "hwrt"))]
+        let vb_split_layout1_entries = vb_split_layout1_base;
+        #[cfg(feature = "hwrt")]
+        let vb_split_layout1_entries: [BindGroupLayoutEntry; 9] = {
+            let ninth = BindGroupLayoutEntry {
+                binding: 8,
+                count: 1,
+                kind: DescriptorKind::StorageImage,
+                stage: ShaderStage::COMPUTE,
+            };
+            let mut chained = vb_split_layout1_base.into_iter().chain(core::iter::once(ninth));
+            core::array::from_fn(|_| chained.next().expect("invariant: exactly 9 entries"))
+        };
         let vb_split_layout1 = RhiDevice::create_bind_group_layout(
             device,
-            &BindGroupLayoutDesc {
-                entries: &[
-                    // @0-3: forward_layout1's shadow-table kinds VERBATIM (a DISTINCT object —
-                    // the Forward family's own layout stays byte-untouched).
-                    BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
-                    BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
-                    BindGroupLayoutEntry { binding: 2, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
-                    BindGroupLayoutEntry { binding: 3, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
-                    // @4: gSsao (STORAGE, READ by the split shade under the header ssao_mode gate).
-                    BindGroupLayoutEntry { binding: 4, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
-                    // @5/@6: the DDGI atlases (COMBINED image+sampler — the deferred t16/s16 idiom).
-                    BindGroupLayoutEntry { binding: 5, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
-                    BindGroupLayoutEntry { binding: 6, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
-                    // @7: the ResolvedDdgi UBO. (@8 — the `#if HWRT` gShadowVis — joins at rung
-                    // R9d together with the `-D HWRT` shader variant; the R9b `.spv` is compiled
-                    // without the define on BOTH legs, so the entry would be pure dead surface.)
-                    BindGroupLayoutEntry { binding: 7, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
-                ],
-            },
+            &BindGroupLayoutDesc { entries: &vb_split_layout1_entries },
         )
         .expect("invariant: R9b vb_shade_split Set-1 bind-group layout create");
 
@@ -3436,6 +3526,8 @@ impl GpuSceneBundles {
             #[cfg(feature = "hwrt")]
             shadow_temporal_pipeline,
             #[cfg(feature = "hwrt")]
+            vb_shadow_vis_pipeline,
+            #[cfg(feature = "hwrt")]
             ray_shadow_ubo,
             light_table,
             light_staging,
@@ -3468,6 +3560,12 @@ impl GpuSceneBundles {
             vb_geo_pipeline: None,
             vb_shade_split_pipeline: None,
             vb_shade_split_tex_pipeline: None,
+            #[cfg(feature = "hwrt")]
+            vb_geo_mv_pipeline: None,
+            #[cfg(feature = "hwrt")]
+            vb_shade_split_hwrt_pipeline: None,
+            #[cfg(feature = "hwrt")]
+            vb_shade_split_tex_hwrt_pipeline: None,
             ssao_layout,
             ssao_atrous_read8_pipeline,
             ssao_atrous_interior_pipeline,
@@ -3937,6 +4035,79 @@ impl GpuSceneBundles {
                 RhiDevice::destroy_shader_module(device, cs);
             }
             self.vb_shade_split_tex_pipeline = Some(p);
+        }
+
+        // Rung R9d: the hwrt shadow-chain siblings — same 3-set (4-set for the TEXTURED variant)
+        // creates as their software siblings above, gated ADDITIONALLY on `ctx.ray_query_enabled()`
+        // (an RT-only variant that reads the denoised/undenoised `gShadowVis`).
+        #[cfg(feature = "hwrt")]
+        if ctx.ray_query_enabled() {
+            let vb_geo_mv_cs = RhiDevice::create_shader_module(device, vb_geo_mv_spirv())
+                .expect("invariant: R9d vb_geo_mv compute shader module create");
+            let vb_geo_mv_pipeline = ctx
+                .create_compute_pipeline_vb(
+                    &ComputePipelineDesc {
+                        module: &vb_geo_mv_cs,
+                        entry: c"main",
+                        push_constant_bytes: 64,
+                        bind_group_layout: Some(&self.vb_layout0),
+                        spec_constants: &[],
+                    },
+                    self.vb_geo_aux_layout.set_layout(),
+                    geometry_set.set_layout(),
+                )
+                .expect("invariant: R9d vb_geo_mv compute pipeline create");
+            // SAFETY: as above.
+            unsafe {
+                RhiDevice::destroy_shader_module(device, vb_geo_mv_cs);
+            }
+            self.vb_geo_mv_pipeline = Some(vb_geo_mv_pipeline);
+
+            let vb_shade_split_hwrt_cs =
+                RhiDevice::create_shader_module(device, vb_shade_split_hwrt_spirv())
+                    .expect("invariant: R9d vb_shade_split HWRT compute shader module create");
+            let vb_shade_split_hwrt_pipeline = ctx
+                .create_compute_pipeline_vb(
+                    &ComputePipelineDesc {
+                        module: &vb_shade_split_hwrt_cs,
+                        entry: c"main",
+                        push_constant_bytes: 64,
+                        bind_group_layout: Some(&self.vb_layout0),
+                        spec_constants: &[],
+                    },
+                    self.vb_split_layout1.set_layout(),
+                    geometry_set.set_layout(),
+                )
+                .expect("invariant: R9d vb_shade_split HWRT compute pipeline create");
+            // SAFETY: as above.
+            unsafe {
+                RhiDevice::destroy_shader_module(device, vb_shade_split_hwrt_cs);
+            }
+            self.vb_shade_split_hwrt_pipeline = Some(vb_shade_split_hwrt_pipeline);
+
+            if let Some(bindless) = bindless {
+                let cs = RhiDevice::create_shader_module(device, vb_shade_split_tex_hwrt_spirv())
+                    .expect("invariant: R9d vb_shade_split TEXTURED HWRT compute shader module create");
+                let p = ctx
+                    .create_compute_pipeline_vb_textured(
+                        &ComputePipelineDesc {
+                            module: &cs,
+                            entry: c"main",
+                            push_constant_bytes: 64,
+                            bind_group_layout: Some(&self.vb_layout0),
+                            spec_constants: &[],
+                        },
+                        self.vb_split_layout1.set_layout(),
+                        geometry_set.set_layout(),
+                        bindless.set().set_layout(),
+                    )
+                    .expect("invariant: R9d vb_shade_split TEXTURED HWRT compute pipeline create");
+                // SAFETY: as above.
+                unsafe {
+                    RhiDevice::destroy_shader_module(device, cs);
+                }
+                self.vb_shade_split_tex_hwrt_pipeline = Some(p);
+            }
         }
     }
 
@@ -5172,6 +5343,21 @@ impl GpuSceneBundles {
             vb_split_layout1: Some(&self.vb_split_layout1),
             ssao_vb_pipeline: ssao_variant.map(|v| &self.ssao_vb_pipelines[v]),
             vb_ssao_layout: Some(&self.vb_ssao_layout),
+            // Rung R9d: the VB hardware shadow chain. The boot-built pipeline/layout are
+            // `Option`-threaded as-is (`Some` only on an RT device); `vb_geo_mv_pipeline`/
+            // `vb_shade_split_hwrt_pipeline`/`vb_shade_split_tex_hwrt_pipeline` are `Option`-
+            // threaded like `vb_geo_pipeline`/`vb_shade_split_pipeline`/`vb_shade_split_tex_pipeline`
+            // above (`Some` after `build_vb_split_pipelines` ran on an RT device).
+            #[cfg(feature = "hwrt")]
+            vb_shadow_vis_pipeline: self.vb_shadow_vis_pipeline.as_ref().map(|(p, _)| p),
+            #[cfg(feature = "hwrt")]
+            vb_shadow_vis_layout: self.vb_shadow_vis_pipeline.as_ref().map(|(_, l)| l),
+            #[cfg(feature = "hwrt")]
+            vb_geo_mv_pipeline: self.vb_geo_mv_pipeline.as_ref(),
+            #[cfg(feature = "hwrt")]
+            vb_shade_split_hwrt_pipeline: self.vb_shade_split_hwrt_pipeline.as_ref(),
+            #[cfg(feature = "hwrt")]
+            vb_shade_split_tex_hwrt_pipeline: self.vb_shade_split_tex_hwrt_pipeline.as_ref(),
             // Multi-paradigm render-path plan, rung R1: the plain-POD conversion (see this
             // fn's `resolved_render_path` param doc for why it cannot be a `From` impl).
             resolved_render_path: to_gpu_resolved_render_path(&resolved_render_path),
@@ -5384,6 +5570,20 @@ impl GpuSceneBundles {
             if let Some(p) = self.vb_geo_pipeline {
                 RhiDevice::destroy_compute_pipeline(ctx, p);
             }
+            // Rung R9d: the hwrt shadow-chain split siblings — `Option`-guarded (present only on
+            // an RT device), destroyed in the SAME reverse-creation order as their software twins.
+            #[cfg(feature = "hwrt")]
+            if let Some(p) = self.vb_shade_split_tex_hwrt_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            #[cfg(feature = "hwrt")]
+            if let Some(p) = self.vb_shade_split_hwrt_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            #[cfg(feature = "hwrt")]
+            if let Some(p) = self.vb_geo_mv_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
             let [vb_ssao_low, vb_ssao_medium, vb_ssao_high] = self.ssao_vb_pipelines;
             RhiDevice::destroy_compute_pipeline(ctx, vb_ssao_low);
             RhiDevice::destroy_compute_pipeline(ctx, vb_ssao_medium);
@@ -5433,6 +5633,13 @@ impl GpuSceneBundles {
             // `Option`-guarded (present only on an RT device). Pipeline before layout.
             #[cfg(feature = "hwrt")]
             if let Some((pipeline, layout)) = self.shadow_temporal_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, pipeline);
+                RhiDevice::destroy_bind_group_layout(ctx, layout);
+            }
+            // Rung R9d: the VB split's dedicated shadow-vis gather pipeline + its 7-binding
+            // layout, `Option`-guarded (present only on an RT device). Pipeline before layout.
+            #[cfg(feature = "hwrt")]
+            if let Some((pipeline, layout)) = self.vb_shadow_vis_pipeline {
                 RhiDevice::destroy_compute_pipeline(ctx, pipeline);
                 RhiDevice::destroy_bind_group_layout(ctx, layout);
             }

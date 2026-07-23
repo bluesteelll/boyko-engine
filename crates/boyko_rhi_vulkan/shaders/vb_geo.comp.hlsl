@@ -78,13 +78,15 @@
 //                                                                      split config)
 //     u1 (register u9) : RWTexture2D<float2> (rg16f) gMotion          `#if MOTION` ONLY -- the
 //                                                                      R9d `vb_geo_mv` variant
-//                                                                      (`-D MOTION=1`); declared
-//                                                                      but NOT written this rung
-//                                                                      (no `main()` body yet)
+//                                                                      (`-D MOTION=1`); WRITTEN
+//                                                                      once per non-sentinel
+//                                                                      pixel (camera-reprojected
+//                                                                      Delta-uv, this file's
+//                                                                      `main()` body)
 //     b2 (register b10): cbuffer MotionCam                            `#if MOTION` ONLY -- the
 //                                                                      R9d prev/curr unjittered
-//                                                                      camera pair; declared but
-//                                                                      unread this rung
+//                                                                      camera pair; READ by the
+//                                                                      motion-vector write below
 //   Set 2 (geometry, UNCHANGED) -- `vb_geom_fetch.hlsli`'s own `gMeshVerts[]`/`gMeshIndices[]`/
 //   `gMeshMeta`.
 //
@@ -104,9 +106,9 @@
 // Compiled offline (hermetic build -- no SDK at `cargo build` time) with:
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 vb_geo.comp.hlsl -Fo vb_geo.comp.spv
-//   (R9d MOTION variant, NOT YET WIRED -- the `#if MOTION` declarations above are authored now
-//   so the R9d descriptor-set layout lands alongside the base one, but `main()` carries no
-//   motion-write body yet): add `-D MOTION=1 -Fo vb_geo_mv.comp.spv`
+//   (R9d MOTION variant, `vb_geo_mv` -- camera-reprojected static-geometry motion vectors; no
+//   `rayQuery`, so the SAME `cs_6_0` target as the base compile suffices): add
+//   `-T cs_6_0 -D MOTION=1 -Fo vb_geo_mv.comp.spv`
 // Validated with:
 //   C:\VulkanSDK\1.4.350.0\Bin\spirv-val.exe vb_geo.comp.spv
 
@@ -166,18 +168,25 @@ Texture2D<uint2> gVbId : register(t5);
 [[vk::binding(0, 1)]] [[vk::image_format("rgba8")]] RWTexture2D<float4> gThinNormal : register(u8);
 
 #if MOTION
-// R9d (`vb_geo_mv`, `-D MOTION=1`): the per-pixel camera-reprojected motion vector. Declared
-// now so the R9d descriptor-set layout is authored alongside the base one; NOT written by
-// `main()` this rung (no motion-write body exists yet -- see this file's header doc).
+// R9d (`vb_geo_mv`, `-D MOTION=1`): the per-pixel camera-reprojected motion vector, WRITTEN by
+// `main()` below (once per non-sentinel pixel).
 [[vk::binding(1, 1)]] [[vk::image_format("rg16f")]] RWTexture2D<float2> gMotion : register(u9);
 
-// R9d: the previous/current unjittered marcher-aligned view_proj pair the motion write will
-// reproject against (camera-only, static-geometry motion -- the SDF leg's C6 semantics).
-// Declared but unread this rung.
+// R9d: the previous/current unjittered marcher-aligned view_proj pair the motion write
+// reprojects against (camera-only, static-geometry motion -- the SDF leg's C6 semantics).
 [[vk::binding(2, 1)]] cbuffer MotionCam : register(b10) {
     float4x4 mv_cur_view_proj;
     float4x4 mv_prev_view_proj;
 };
+
+// Marcher-aligned clip -> [0,1]^2 screen UV -- spliced VERBATIM from `deferred_pbr.hlsl`'s own
+// `mv_clip_to_uv` (~430-432). The projection (`marcher_view_proj_rows`) bakes the y-flip into
+// clip.y, so this is the plain NDC remap (NO extra negation) -- IDENTICAL to the gbuffer MV
+// variant's `clip_to_uv`, so the mesh (raster) and VB (here) motion vectors land in ONE
+// consistent UV space across the r1 ownership seam.
+float2 mv_clip_to_uv(float4 clip) {
+    return (clip.xy / clip.w) * 0.5 + 0.5;
+}
 #endif
 
 // Octahedral-encode a unit normal into [0,1]^2 -- the SAME fold `gNormal`'s RG channels use
@@ -231,6 +240,19 @@ void main(uint3 tid : SV_DispatchThreadID) {
     VbGeomFetchResult geo = vb_geom_fetch(id.instance_id, id.raw_prim_id, pixel_xy, pc.view_proj, extent);
 
     float3 n = normalize(geo.world_normal);
+
+#if MOTION
+    // R9d (`vb_geo_mv`): the per-pixel camera-reprojected motion vector, Delta-uv = prev - cur
+    // (`shadow_temporal.comp.hlsl`'s documented "uv_prev - uv_cur" convention). Camera-only,
+    // static-geometry motion (the SDF leg's C6 semantics; per-instance previous-transform
+    // motion is a later rung). `geo.world_pos` is already reconstructed by the fetch above --
+    // read directly here rather than introducing a new shared local, so the no-define compile's
+    // existing statements stay byte-identical (the R9b hoisted-load lesson). Sentinel pixels
+    // already returned above `vb_geom_fetch`, so every pixel reaching this point is real.
+    gMotion[uint2(px, py)] =
+          mv_clip_to_uv(mul(mv_prev_view_proj, float4(geo.world_pos, 1.0)))
+        - mv_clip_to_uv(mul(mv_cur_view_proj, float4(geo.world_pos, 1.0)));
+#endif
 
     PerInstanceMaterial pm = instance_materials[id.instance_id];
     MaterialGpu m = Materials[pm.id];

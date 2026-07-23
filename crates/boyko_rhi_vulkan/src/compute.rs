@@ -929,6 +929,61 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// Rung R9d (docs/R9-VB-SPLIT-PLAN.md §6): the VB split's DEDICATED hardware shadow-vis
+    /// gather SPIR-V (`shaders/vb_shadow_vis.comp.hlsl`, no `-D`) — the split's own standalone
+    /// sibling of [`DEFERRED_PBR_VIS_SPV`] (that one is FUSED into `deferred_pbr.hlsl`'s
+    /// `SHADOW_STAGE=1` arm, reading the fat gbuffer; this one has no gbuffer to read). Traces
+    /// the SAME `SHADOW_RAY_COUNT` Vogel-disk cone against the `tlas_instances`-built TLAS, but
+    /// its per-pixel normal/depth come from `thin_normal`/`gViewT` (the VB split's own thin-aux
+    /// lanes) instead of a fat G-buffer MRT, and it writes `gShadowVis[px,py] = RG(mesh_vis,
+    /// validity)`. Bound to its OWN 7-binding layout { @0 `thin_normal` read, @1 `gViewT` read,
+    /// @2 `LightTable` read, @3 the shared 80-byte Camera UBO, @4 the TLAS
+    /// `ACCELERATION_STRUCTURE_KHR`, @5 `ResolvedRayShadow` UBO, @6 `gShadowVis` write }. Gated
+    /// behind `feature = "hwrt"` + `ctx.ray_query_enabled()`, dispatched only when
+    /// `GBufferScene::path_vb_hwrt_shadow()`.
+    #[cfg(feature = "hwrt")]
+    VB_SHADOW_VIS_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_shadow_vis.comp.spv")
+}
+
+embed_spirv! {
+    /// Rung R9d: the `-D MOTION=1` sibling of [`VB_GEO_SPV`] (`shaders/vb_geo_mv.comp.hlsl`) —
+    /// selected instead of the base `vb_geo` when the VB hwrt shadow chain's temporal denoise
+    /// stage is armed (`GBufferScene::vb_geo_mv_active()`). Identical `vb_geo` re-fetch +
+    /// `thin_normal` write, plus a per-pixel CAMERA-ONLY motion vector `Δuv` written to
+    /// `motion_vec` (rg16, `vb_geo_aux_set`'s @1) reprojected through a `MotionCam` UBO
+    /// (the same set's @2, replacing the R9b placeholder camera-ring binding when armed) — the
+    /// SAME reproject-through-`MotionCam` idiom [`DEFERRED_PBR_VIS_MV_SPV`] uses for the
+    /// mesh-less SDF leg. Set 0/2 unchanged from `vb_geo`; only Set 1 (`vb_geo_aux_layout`)
+    /// gains the two new bindings' targets.
+    #[cfg(feature = "hwrt")]
+    VB_GEO_MV_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_geo_mv.comp.spv")
+}
+
+embed_spirv! {
+    /// Rung R9d: the `-D HWRT=1` sibling of [`VB_SHADE_SPLIT_SPV`]
+    /// (`shaders/vb_shade_split.comp.hlsl` compiled with `-D HWRT=1`) — reads the FINAL
+    /// denoised/undenoised `gShadowVis` (bound at `vb_split_set1`'s entry @8: `temporal_out`
+    /// when the temporal stage is armed, else the à-trous-parity final ring, else raw
+    /// `shadow_vis`) and combines it into the mesh-shadow term exactly as
+    /// [`DEFERRED_PBR_DENOISED_SPV`] does for the fused deferred resolve. Selected instead of
+    /// [`VB_SHADE_SPLIT_SPV`] only when `GBufferScene::path_vb_hwrt_shadow()`.
+    #[cfg(feature = "hwrt")]
+    VB_SHADE_SPLIT_HWRT_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_shade_split_hwrt.comp.spv")
+}
+
+embed_spirv! {
+    /// Rung R9d: the `-D TEXTURED=1 -D HWRT=1` sibling of [`VB_SHADE_SPLIT_TEX_SPV`] — the
+    /// textured-PBR counterpart of [`VB_SHADE_SPLIT_HWRT_SPV`] (Set 3 = the shared bindless
+    /// texture table).
+    #[cfg(feature = "hwrt")]
+    VB_SHADE_SPLIT_TEX_HWRT_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_shade_split_tex_hwrt.comp.spv")
+}
+
+embed_spirv! {
     /// Rung R9b: the `-D VB_THIN=1` SSAO gather, LOW quality
     /// (`shaders/sdf_ssao_low.comp.hlsl` + the define): reads `thin_normal` (oct RG) +
     /// `gViewT` (background = the `1e30` sentinel replaces the dropped `gMaterial.b` mask),
@@ -1776,6 +1831,38 @@ pub fn vb_shade_split_spirv() -> &'static [u32] {
 #[inline]
 pub fn vb_shade_split_tex_spirv() -> &'static [u32] {
     VB_SHADE_SPLIT_TEX_SPV.as_words()
+}
+
+/// Rung R9d: the VB split's dedicated hardware shadow-vis gather SPIR-V as a `u32` word stream.
+/// See [`VB_SHADOW_VIS_SPV`] for the binding layout.
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn vb_shadow_vis_spirv() -> &'static [u32] {
+    VB_SHADOW_VIS_SPV.as_words()
+}
+
+/// Rung R9d: the `-D MOTION=1` `vb_geo` sibling as a `u32` word stream. See [`VB_GEO_MV_SPV`]
+/// for the added `motion_vec`/`MotionCam` bindings.
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn vb_geo_mv_spirv() -> &'static [u32] {
+    VB_GEO_MV_SPV.as_words()
+}
+
+/// Rung R9d: the `-D HWRT=1` `vb_shade_split` sibling as a `u32` word stream — reads the denoised
+/// `gShadowVis` instead of a software shadow term. See [`VB_SHADE_SPLIT_HWRT_SPV`].
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn vb_shade_split_hwrt_spirv() -> &'static [u32] {
+    VB_SHADE_SPLIT_HWRT_SPV.as_words()
+}
+
+/// Rung R9d: the `-D TEXTURED=1 -D HWRT=1` `vb_shade_split` sibling as a `u32` word stream. See
+/// [`VB_SHADE_SPLIT_TEX_HWRT_SPV`].
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn vb_shade_split_tex_hwrt_spirv() -> &'static [u32] {
+    VB_SHADE_SPLIT_TEX_HWRT_SPV.as_words()
 }
 
 /// Rung R9b: the `-D VB_THIN=1` SSAO gather variants, indexed by the SSAO quality variant
