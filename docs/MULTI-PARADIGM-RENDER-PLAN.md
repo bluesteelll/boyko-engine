@@ -615,3 +615,25 @@ Resolved critique tags referenced throughout: C1 (geometry table), W1 (SDF split
 W2 (ShadowSources), W3 (descriptor budget), W4 (motion ordering), O1 (single
 predicate), O2 (mask routing / jitter-consistent reconstruction), O3 (BDA
 rejected), VB1 (SV_PrimitiveID), P2-a..P2-d.
+
+---
+
+## Errata (rung R9a, 2026-07-23 — recorded against the frozen Rev-5 text; the resolver code is the authority)
+
+1. **`mesh_geo_shade_split` requires `mesh_leg`.** The Rev-5 formula (§ "resolver formula" and §D:383/386)
+   spells `mesh_geo_shade_split = VB && pre_light`; the shipped rule is
+   `VB && mesh_leg && pre_light` — the split separates the MESH raster's geometry fetch from its shade, and
+   under `GeometryLegs::Sdf` there is no `vb_raster`/`vb_id` to split (the R-SDFFWD "mesh_leg gates the
+   prepass" precedent). `resolve_rules`'s doc carries the same note; truth-table row
+   `vb_split_requires_the_mesh_leg`.
+
+2. **The "Temporal-only (MOTION-only arming)" label (R9 rung row, Rev-5 changelog §P1) is NORMAL|MOTION on
+   non-Deferred paths.** The hardware `shadow_vis` gather that the temporal denoiser filters READS a
+   per-pixel normal; under Deferred that is the fat `gNormal` lane (no thin-aux arming — Deferred rows
+   unchanged), but on a thin-aux path (Forward prepass / VB split) its normal source IS `thin_normal`, so
+   `hwrt_denoise_or_vis_on` joins the NORMAL union there (`resolve_rules`, rung R9a). The §D ownership-table
+   row "`thin_normal` … present when `thin_aux.NORMAL`" is unchanged and now COVERS the temporal-only
+   config; `mesh_geo_shade_split ⇒ NORMAL` holds for every hwrt-armed split config by construction.
+   (A software-leg `shadow_temporal_on` without `hwrt_denoise_or_vis_on` still arms MOTION alone at the
+   `resolve_rules` layer; the VB consumer cap keeps that config zeroed until rung R9d decides its software
+   story — see `docs/R9-VB-SPLIT-PLAN.md`.)

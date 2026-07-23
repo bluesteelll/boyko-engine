@@ -470,6 +470,21 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // seam's source of truth, but the World Resource must ALSO be genuinely authoritative
     // for any ECS-side reader.
     app.world_mut().insert_resource(resolved_render_path);
+    // Rung R9a (plan P2-d): OVERWRITE `SsaoPlugin`'s inert default boot-freeze snapshot with
+    // the REAL one — the SAME post-boot override discipline as `resolved_render_path` above.
+    // Under a non-Deferred resolved path the pre-light consumer set is boot-committed; the
+    // snapshot lets every per-frame `SsaoConfig` reader clamp to the boot truth (warn-once)
+    // instead of drifting from the boot-shaped framegraph. Snapshot taken from the SAME
+    // Resource the `render_path_consumers` assembly above read.
+    let boot_ssao_cfg = app
+        .world()
+        .try_resource::<boyko_render::SsaoConfig>()
+        .copied()
+        .unwrap_or_default();
+    app.world_mut().insert_resource(boyko_render::RenderPathFrozenConsumers::new(
+        boot_ssao_cfg,
+        !matches!(resolved_render_path.path, boyko_render::RenderPath::Deferred),
+    ));
 
     // Multi-paradigm render-path plan, rung R-VBGEO (Decision 0 / Rev-5 streaming
     // invariant): commit `vb_geometry_table` onto `ctx` and construct the (always

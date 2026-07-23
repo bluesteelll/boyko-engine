@@ -234,8 +234,15 @@ pub fn resolve_ssao(cfg: &SsaoConfig) -> ResolvedSsao {
 // `clippy::needless_pass_by_value`: `Res`/`ResMut` are by-value `SystemParam`s read/
 // written through reborrows — the same false-positive `select_lighting_cull` carries.
 #[allow(clippy::needless_pass_by_value)]
-pub fn resolve_ssao_policy(cfg: Res<SsaoConfig>, mut resolved: ResMut<ResolvedSsao>) {
-    *resolved = resolve_ssao(&cfg);
+pub fn resolve_ssao_policy(
+    cfg: Res<SsaoConfig>,
+    frozen: Res<crate::render_path_config::RenderPathFrozenConsumers>,
+    mut resolved: ResMut<ResolvedSsao>,
+) {
+    // Rung R9a: route through the boot-freeze clamp — under a non-Deferred path the boot
+    // snapshot wins (warn-once), so `ResolvedSsao` (and every downstream arming derived from
+    // it) can never drift from the boot-shaped framegraph. Inert under Deferred.
+    *resolved = resolve_ssao(crate::render_path_config::effective_ssao_config(&cfg, &frozen));
 }
 
 // ---- the light-header gate bridge (mirrors `sync_ddgi_light_gate`) -------------------
@@ -264,10 +271,14 @@ pub fn resolve_ssao_policy(cfg: Res<SsaoConfig>, mut resolved: ResMut<ResolvedSs
 #[allow(clippy::needless_pass_by_value)]
 pub fn sync_ssao_light_gate(
     ssao: Res<SsaoConfig>,
+    frozen: Res<crate::render_path_config::RenderPathFrozenConsumers>,
     mut cfg: ResMut<LightingConfig>,
     mut dirty: ResMut<LightTableDirty>,
 ) {
-    let on = ssao.enabled();
+    // Rung R9a: the SAME boot-freeze clamp `resolve_ssao_policy` applies — the header word and
+    // the gather arming read ONE effective config by construction (no ordering constraint
+    // between the two systems is needed; the warn-once latch lives on the snapshot).
+    let on = crate::render_path_config::effective_ssao_config(&ssao, &frozen).enabled();
     // Value gate BEFORE the `DerefMut`: flip-only write, flip-only table dirtying.
     if cfg.ssao_mode != on {
         cfg.ssao_mode = on;

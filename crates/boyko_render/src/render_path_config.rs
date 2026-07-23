@@ -228,6 +228,74 @@ impl GeometryLegs {
     }
 }
 
+// ---- RenderPathFrozenConsumers (the boot-freeze snapshot — rung R9a, plan P2-d) --------
+
+/// The boot-frozen pre-light consumer snapshot. Under a NON-Deferred resolved path the
+/// pre-light consumer set commits at [`resolve_render_path`] (the framegraph/targets shape is
+/// boot-locked, Decision 1), so a runtime flip of the corresponding config Resource must be a
+/// warn-once NO-OP — otherwise the per-frame derivations (`ResolvedSsao`, the light-header
+/// `ssao_mode` word) drift from the boot-shaped graph: the header would tell the shade to
+/// COMBINE an SSAO term whose gather pass was never armed, folding seeded-UNDEFINED garbage
+/// into the ambient term (visible corruption with ZERO validation errors, since the layout is
+/// legal). ONE clamp helper — [`effective_ssao_config`] — applied by EVERY per-frame reader of
+/// [`SsaoConfig`](crate::ssao_config::SsaoConfig) keeps all readers in lock-step with the boot
+/// truth by construction (one truth, N readers; no reader-ordering constraint needed).
+///
+/// Under Deferred the freeze is INERT (`non_deferred == false`): live consumer toggles stay
+/// free there — the fat G-buffer materializes every aux lane regardless of the consumer set.
+///
+/// Inserted as an inert [`Default`] by `SsaoPlugin` (this kernel has no `Option<Res<R>>`
+/// SystemParam — the insert-default-then-boot-override discipline `ResolvedRenderPath`'s own
+/// World Resource uses), then OVERWRITTEN once by the boot resolver's caller
+/// (`boyko_app::runner`) with the real snapshot. Grows one field per consumer as the R9
+/// stages land (SSAO at R9a/R9b; DDGI at R9c; shadow-denoise at R9d).
+#[derive(Resource, Debug, Default)]
+pub struct RenderPathFrozenConsumers {
+    /// The boot-time [`SsaoConfig`](crate::ssao_config::SsaoConfig) snapshot — the FULL config
+    /// (quality + à-trous levels), not just the consumer bit, so the frozen arming keeps the
+    /// boot quality/levels too.
+    pub ssao: crate::ssao_config::SsaoConfig,
+    /// Whether the freeze is active (`resolved_render_path.path != Deferred`). The inert
+    /// default is `false`.
+    pub non_deferred: bool,
+    /// Warn-once latch (interior mutability: every reader holds a shared `Res` borrow).
+    warned_ssao: core::sync::atomic::AtomicBool,
+}
+
+impl RenderPathFrozenConsumers {
+    /// The real boot snapshot — built by the boot resolver's caller right after
+    /// [`resolve_render_path`], from the SAME config Resources the boot
+    /// [`RenderPathConsumers`] was assembled from.
+    #[inline]
+    pub fn new(ssao: crate::ssao_config::SsaoConfig, non_deferred: bool) -> Self {
+        Self { ssao, non_deferred, warned_ssao: core::sync::atomic::AtomicBool::new(false) }
+    }
+}
+
+/// THE freeze clamp (rung R9a): returns the [`SsaoConfig`] every per-frame reader must act
+/// on — the live one when the freeze is inert (Deferred, or a world that never boot-resolved
+/// a path), the BOOT snapshot when frozen. Warns ONCE (across all readers, via the snapshot's
+/// own latch) on the first observed divergence. Pure and allocation-free.
+#[inline]
+pub fn effective_ssao_config<'a>(
+    cfg: &'a crate::ssao_config::SsaoConfig,
+    frozen: &'a RenderPathFrozenConsumers,
+) -> &'a crate::ssao_config::SsaoConfig {
+    if !frozen.non_deferred {
+        return cfg;
+    }
+    if (cfg.quality != frozen.ssao.quality || cfg.atrous_levels != frozen.ssao.atrous_levels)
+        && !frozen.warned_ssao.swap(true, core::sync::atomic::Ordering::Relaxed)
+    {
+        eprintln!(
+            "boyko_render: SsaoConfig changed at runtime, but the pre-light consumer set is \
+             FROZEN under a non-Deferred render path — the boot value stays in effect \
+             (set the config before boot to change it)"
+        );
+    }
+    &frozen.ssao
+}
+
 // ---- RenderPathConfig (the owner-set Resource — mirrors AaConfig/SsaoConfig) ----------
 
 /// The global render-path config — a `World`-singleton Resource the owner sets, structural (no
@@ -720,7 +788,13 @@ pub fn resolve_rules(
     let prepass_writes_motion = needs_depth_prepass && consumers.shadow_temporal_on;
 
     let sdf_forward_marched = sdf_leg && !matches!(path, RenderPath::Deferred);
-    let mesh_geo_shade_split = matches!(path, RenderPath::VisibilityBuffer) && pre_light;
+    // Rung R9a: `mesh_leg` gates the VB split too (the R-SDFFWD "mesh_leg gates the prepass"
+    // precedent above): the split's ENTIRE purpose is separating the MESH raster's geometry
+    // fetch from its shade — under `GeometryLegs::Sdf` there is no `vb_raster`/`vb_id` to
+    // split, so a mesh-less pre-light config must not arm `vb_geo`/`vb_shade_split` (the
+    // plan-doc's literal "VB && pre_light" rule carries a recorded erratum for this).
+    let mesh_geo_shade_split =
+        matches!(path, RenderPath::VisibilityBuffer) && mesh_leg && pre_light;
     let sdf_geo_shade_split = sdf_forward_marched && pre_light;
     let sdf_surface_cache = sdf_geo_shade_split;
 
@@ -732,7 +806,20 @@ pub fn resolve_rules(
         if matches!(path, RenderPath::Deferred) { DepthKind::CustomLinear } else { DepthKind::HardwareReverseZ };
 
     let mut thin_aux = ThinAuxMask::NONE;
-    if consumers.ssao_on || consumers.ddgi_on || consumers.shadow_denoise_spatial_on || consumers.ssr_on {
+    // Rung R9a: `hwrt_denoise_or_vis_on` joins the NORMAL union on NON-Deferred paths — the
+    // hardware `shadow_vis` gather READS a per-pixel normal for its cone-trace origin/bias.
+    // Under Deferred it reads the fat `gNormal` G-buffer lane (no thin-aux image involved —
+    // arming unchanged there, the Deferred truth-table rows and pins hold), but on a thin-aux
+    // path (VB split / Forward prepass) its normal source IS `thin_normal`, so the vis pass
+    // is a NORMAL consumer there. Consequence (recorded as a plan-doc erratum): the Rev-5
+    // "Temporal-only (MOTION-only arming)" config arms `NORMAL|MOTION` on non-Deferred paths,
+    // which also makes `mesh_geo_shade_split ⇒ NORMAL` hold for every hwrt-armed split config.
+    if consumers.ssao_on
+        || consumers.ddgi_on
+        || consumers.shadow_denoise_spatial_on
+        || consumers.ssr_on
+        || (consumers.hwrt_denoise_or_vis_on && !matches!(path, RenderPath::Deferred))
+    {
         thin_aux = thin_aux.insert(ThinAuxMask::NORMAL);
     }
     // TAA arms the MOTION channel ONLY under Deferred (whose raster/marcher own a motion
@@ -1741,6 +1828,128 @@ mod tests {
         let sdf = resolve_rules(RenderPath::Forward, GeometryLegs::Sdf, consumers, caps_ok());
         assert!(sdf.sdf_geo_shade_split);
         assert!(sdf.sdf_surface_cache);
+    }
+
+    #[test]
+    fn vb_split_requires_the_mesh_leg() {
+        // Rung R9a: the VB split separates the MESH raster's geometry fetch from its shade —
+        // under GeometryLegs::Sdf there is no vb_raster/vb_id to split, so a mesh-less
+        // pre-light config must not arm it (the SDF leg's own split is sdf_geo_shade_split).
+        let consumers = RenderPathConsumers { ssao_on: true, ..RenderPathConsumers::default() };
+        let resolved = resolve_rules(RenderPath::VisibilityBuffer, GeometryLegs::Sdf, consumers, caps_ok());
+        assert!(!resolved.mesh_geo_shade_split, "no mesh leg -> no mesh split");
+        assert!(resolved.sdf_geo_shade_split, "the SDF leg's own split still arms");
+
+        for legs in [GeometryLegs::Mesh, GeometryLegs::Both] {
+            let resolved = resolve_rules(RenderPath::VisibilityBuffer, legs, consumers, caps_ok());
+            assert!(resolved.mesh_geo_shade_split, "{legs:?}: mesh leg present -> split arms");
+        }
+    }
+
+    #[test]
+    fn hwrt_vis_arms_thin_normal_only_off_deferred() {
+        // Rung R9a: the hardware shadow_vis gather reads a per-pixel normal. Under Deferred
+        // that is the fat gNormal G-buffer lane (no thin-aux involvement — arming unchanged);
+        // on a thin-aux path (Forward prepass / VB split) its normal source IS thin_normal,
+        // so hwrt_denoise_or_vis_on joins the NORMAL union there.
+        let consumers =
+            RenderPathConsumers { hwrt_denoise_or_vis_on: true, ..RenderPathConsumers::default() };
+
+        let deferred = resolve_rules(RenderPath::Deferred, GeometryLegs::Both, consumers, caps_ok());
+        assert!(
+            !deferred.thin_aux.contains(ThinAuxMask::NORMAL),
+            "Deferred: the vis pass reads gNormal, not thin_normal — NORMAL stays un-armed"
+        );
+
+        for path in [RenderPath::Forward, RenderPath::ForwardPlus, RenderPath::VisibilityBuffer] {
+            let resolved = resolve_rules(path, GeometryLegs::Mesh, consumers, caps_ok());
+            assert!(
+                resolved.thin_aux.contains(ThinAuxMask::NORMAL),
+                "{path:?}: the vis pass is a NORMAL (thin_normal) consumer on thin-aux paths"
+            );
+        }
+    }
+
+    #[test]
+    fn temporal_plus_hwrt_arms_normal_and_motion_under_vb() {
+        // Rung R9a (the revised Rev-5 row): the hardware "Temporal-only" config
+        // (shadow_temporal_on + its hwrt_denoise_or_vis_on carrier) arms NORMAL|MOTION on a
+        // thin-aux path — NOT the plan's original "MOTION-only" label (plan-doc erratum: the
+        // vis gather that temporal filters is itself a thin_normal consumer there). NOTE:
+        // `shadow_temporal_on` WITHOUT `hwrt_denoise_or_vis_on` (a software-leg
+        // ShadowDenoiseConfig) still arms MOTION alone at THIS layer — the VB cap keeps that
+        // config zeroed until rung R9d decides its software story.
+        let consumers = RenderPathConsumers {
+            shadow_temporal_on: true,
+            hwrt_denoise_or_vis_on: true,
+            ..RenderPathConsumers::default()
+        };
+        let resolved =
+            resolve_rules(RenderPath::VisibilityBuffer, GeometryLegs::Mesh, consumers, caps_ok());
+        assert!(resolved.mesh_geo_shade_split, "temporal is a pre-light consumer -> split");
+        assert!(resolved.thin_aux.contains(ThinAuxMask::NORMAL), "vis gather -> thin_normal");
+        assert!(resolved.thin_aux.contains(ThinAuxMask::MOTION), "temporal -> motion pre-tail");
+    }
+
+    // ---- the R9a boot-freeze clamp (RenderPathFrozenConsumers) ---------------------------
+
+    #[test]
+    fn effective_ssao_config_is_passthrough_when_inert() {
+        // The inert default (Deferred, or a world that never boot-resolved): the live config
+        // wins — runtime toggles stay free.
+        let frozen = RenderPathFrozenConsumers::default();
+        let live = crate::ssao_config::SsaoConfig {
+            quality: crate::ssao_config::SsaoQuality::High,
+            atrous_levels: 2,
+        };
+        let eff = effective_ssao_config(&live, &frozen);
+        assert_eq!(eff.quality, live.quality);
+        assert_eq!(eff.atrous_levels, live.atrous_levels);
+    }
+
+    #[test]
+    fn effective_ssao_config_clamps_to_the_boot_snapshot_when_frozen() {
+        // Frozen (non-Deferred boot): the BOOT snapshot wins regardless of the live value —
+        // both directions (boot-on/runtime-off and boot-off/runtime-on).
+        let boot = crate::ssao_config::SsaoConfig {
+            quality: crate::ssao_config::SsaoQuality::High,
+            atrous_levels: 3,
+        };
+        let frozen = RenderPathFrozenConsumers::new(boot, true);
+        let runtime_off = crate::ssao_config::SsaoConfig {
+            quality: crate::ssao_config::SsaoQuality::Off,
+            atrous_levels: 3,
+        };
+        let eff = effective_ssao_config(&runtime_off, &frozen);
+        assert_eq!(eff.quality, boot.quality, "boot-on / runtime-off: boot stays in effect");
+
+        let frozen_off =
+            RenderPathFrozenConsumers::new(crate::ssao_config::SsaoConfig::default(), true);
+        let runtime_on = boot;
+        let eff = effective_ssao_config(&runtime_on, &frozen_off);
+        assert_eq!(
+            eff.quality,
+            crate::ssao_config::SsaoQuality::Off,
+            "boot-off / runtime-on: the gather stays disarmed AND the header word stays 0 \
+             (both readers share this one clamp)"
+        );
+    }
+
+    #[test]
+    fn effective_ssao_config_warns_exactly_once() {
+        // The warn latch flips on the FIRST divergence and stays flipped (one warn across all
+        // readers — the latch lives on the shared snapshot).
+        let frozen =
+            RenderPathFrozenConsumers::new(crate::ssao_config::SsaoConfig::default(), true);
+        let live = crate::ssao_config::SsaoConfig {
+            quality: crate::ssao_config::SsaoQuality::Low,
+            atrous_levels: 0,
+        };
+        assert!(!frozen.warned_ssao.load(core::sync::atomic::Ordering::Relaxed));
+        let _ = effective_ssao_config(&live, &frozen);
+        assert!(frozen.warned_ssao.load(core::sync::atomic::Ordering::Relaxed), "first divergence latches");
+        let _ = effective_ssao_config(&live, &frozen);
+        assert!(frozen.warned_ssao.load(core::sync::atomic::Ordering::Relaxed), "stays latched");
     }
 
     #[test]

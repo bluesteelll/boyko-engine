@@ -388,8 +388,9 @@ pub use shadow_denoise_config::{
 pub use shadow_denoise_plugin::ShadowDenoisePlugin;
 pub use render_path_config::{
     DepthKind, GeometryLegs, RenderPath, RenderPathConfig, RenderPathConsumers,
-    RenderPathDegrade, RenderPathDegradeLog, RenderPathDeviceCaps, ResolvedRenderPath,
-    ShadowSources, ThinAuxMask, resolve_render_path, resolve_rules,
+    RenderPathDegrade, RenderPathDegradeLog, RenderPathDeviceCaps, RenderPathFrozenConsumers,
+    ResolvedRenderPath, ShadowSources, ThinAuxMask, effective_ssao_config, resolve_render_path,
+    resolve_rules,
 };
 pub use render_path_plugin::RenderPathPlugin;
 // HW-RT rung R1: re-export `RtTier` (defined in `boyko_rhi_vulkan::device`) since the

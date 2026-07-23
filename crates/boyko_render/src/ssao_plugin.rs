@@ -45,6 +45,12 @@ impl Plugin for SsaoPlugin {
         // so the world is correct even before the first policy run.
         app.insert_resource(SsaoConfig::default());
         app.insert_resource(ResolvedSsao::default());
+        // Rung R9a: the inert boot-freeze snapshot (this kernel has no `Option<Res<R>>`
+        // SystemParam, so the systems' `Res<RenderPathFrozenConsumers>` param needs a value in
+        // EVERY world composing this plugin). `non_deferred == false` ⇒ the clamp is a no-op;
+        // `boyko_app::runner` OVERWRITES it at boot with the real snapshot (the
+        // `ResolvedRenderPath` insert-default-then-boot-override precedent).
+        app.insert_resource(crate::render_path_config::RenderPathFrozenConsumers::default());
 
         app.add_systems_cfg(|b| {
             b.add_system(resolve_ssao_policy);
