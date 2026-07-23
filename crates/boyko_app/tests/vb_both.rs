@@ -160,3 +160,25 @@ fn vb_both_screenshot_dump() {
     app.insert_resource(RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Both });
     app.run();
 }
+
+/// **Rung R9c: the VB×Both + DDGI eval dump** (owner-facing eval + the `-ValidationOn`-class
+/// coverage vehicle, NOT a byte pin — the probe update is a round-robin accumulator, and this
+/// scene's SDF edit-list is empty, so the GI term is a near-uniform probe-miss ambient; its
+/// value is exercising the FULL R9c chain on real hardware: `ddgi_on` survives the cap on
+/// `Both`, the split arms, `ddgi_update` runs under the VB graph (seeded SRO→GENERAL layered
+/// transitions), and `vb_shade_split` samples the atlases through its conditional reads).
+///
+/// `#[ignore]`: needs a real windowed GPU device.
+#[test]
+#[ignore = "needs a real windowed GPU device; the orchestrator runs it on the GPU for the R9c DDGI-under-VB validation/eval dump"]
+fn vb_both_ddgi_screenshot_dump() {
+    let mut app = App::new();
+    let plugins = EnginePlugins::window("boyko_engine vb both ddgi", 512, 512);
+    app.add_plugins(plugins);
+    app.add_startup_system(setup);
+    app.insert_resource(RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Both });
+    // Rung R9c: DDGI ON — the boot resolver sees `ddgi_on = true` on a Both leg set and
+    // commits the split (then frozen by `RenderPathFrozenConsumers`).
+    app.insert_resource(boyko_render::DdgiConfig { ddgi_indirect: true, ..Default::default() });
+    app.run();
+}

@@ -265,11 +265,17 @@ pub struct RenderPathFrozenConsumers {
     /// (quality + à-trous levels), not just the consumer bit, so the frozen arming keeps the
     /// boot quality/levels too.
     pub ssao: crate::ssao_config::SsaoConfig,
+    /// Rung R9c: the boot-time DDGI consumer bit (`DdgiConfig::enabled()` at boot). The frozen
+    /// arming needs only the BIT — every other DDGI knob is owner-locked at the activation
+    /// site, not a per-frame consumer toggle.
+    pub ddgi_on: bool,
     /// Whether the freeze is active (`resolved_render_path.path != Deferred`). The inert
     /// default is `false`.
     pub non_deferred: bool,
     /// Warn-once latch (interior mutability: every reader holds a shared `Res` borrow).
     warned_ssao: core::sync::atomic::AtomicBool,
+    /// Rung R9c: the DDGI warn-once latch (the SAME discipline as `warned_ssao`).
+    warned_ddgi: core::sync::atomic::AtomicBool,
 }
 
 impl RenderPathFrozenConsumers {
@@ -277,9 +283,36 @@ impl RenderPathFrozenConsumers {
     /// [`resolve_render_path`], from the SAME config Resources the boot
     /// [`RenderPathConsumers`] was assembled from.
     #[inline]
-    pub fn new(ssao: crate::ssao_config::SsaoConfig, non_deferred: bool) -> Self {
-        Self { ssao, non_deferred, warned_ssao: core::sync::atomic::AtomicBool::new(false) }
+    pub fn new(ssao: crate::ssao_config::SsaoConfig, ddgi_on: bool, non_deferred: bool) -> Self {
+        Self {
+            ssao,
+            ddgi_on,
+            non_deferred,
+            warned_ssao: core::sync::atomic::AtomicBool::new(false),
+            warned_ddgi: core::sync::atomic::AtomicBool::new(false),
+        }
     }
+}
+
+/// Rung R9c: the DDGI half of the freeze clamp — returns the effective "DDGI enabled" bit
+/// every per-frame reader must act on (the live one when the freeze is inert, the BOOT bit
+/// when frozen; warn-once on the first observed divergence). The SAME one-truth/N-readers
+/// contract as [`effective_ssao_config`].
+#[inline]
+pub fn effective_ddgi_enabled(live: bool, frozen: &RenderPathFrozenConsumers) -> bool {
+    if !frozen.non_deferred {
+        return live;
+    }
+    if live != frozen.ddgi_on
+        && !frozen.warned_ddgi.swap(true, core::sync::atomic::Ordering::Relaxed)
+    {
+        eprintln!(
+            "boyko_render: DdgiConfig changed at runtime, but the pre-light consumer set is \
+             FROZEN under a non-Deferred render path — the boot value stays in effect \
+             (set the config before boot to change it)"
+        );
+    }
+    frozen.ddgi_on
 }
 
 /// THE freeze clamp (rung R9a): returns the [`SsaoConfig`] every per-frame reader must act
@@ -1021,7 +1054,8 @@ fn cap_forward_v1_consumers(
 /// BEFORE [`resolve_rules`] computes `mesh_geo_shade_split`/`thin_aux`:
 /// * EVERY pre-light consumer under `VB && !mesh_leg` (VB×Sdf — no mesh raster to split;
 ///   the R-SDFSPLIT boundary, `docs/R9-VB-SPLIT-PLAN.md` §1.3)
-/// * `ddgi_on` (until R9c lands the VB DDGI resources/consumption)
+/// * `ddgi_on` on every leg set EXCEPT `Both` (rung R9c: consumption lives in the mesh split
+///   shade and the probes are SDF-marched, so both legs must be present)
 /// * `shadow_denoise_spatial_on`/`shadow_temporal_on`/`hwrt_denoise_or_vis_on` (until R9d
 ///   lands the VB hwrt shadow chain), and `ssr_on` (no SSR exists engine-wide)
 ///
@@ -1054,8 +1088,13 @@ fn cap_vb_v1_consumers(
     // residual is R-SDFSPLIT's boundary, not this rung's (docs/R9-VB-SPLIT-PLAN.md §1.3).
     // ddgi/shadow-denoise/ssr/hwrt-vis stay capped until their producer chains land (R9c/R9d).
     let ssao_capped = consumers.ssao_on && !legs.has_mesh();
+    // Rung R9c: `ddgi_on` passes through on VB×Both ONLY — consumption lives in the mesh split
+    // shade (`vb_shade_split`'s probe sample) and the probes themselves are SDF-marched
+    // (`gpu_scene` ANDs the per-frame arming with `sdf_leg`), so a mesh-less or SDF-less leg
+    // set keeps it zeroed.
+    let ddgi_capped = consumers.ddgi_on && !(legs.has_mesh() && legs.has_sdf());
     let pre_light_requested = ssao_capped
-        || consumers.ddgi_on
+        || ddgi_capped
         || consumers.shadow_denoise_spatial_on
         || consumers.shadow_temporal_on
         || consumers.ssr_on
@@ -1065,7 +1104,9 @@ fn cap_vb_v1_consumers(
         if ssao_capped {
             consumers.ssao_on = false;
         }
-        consumers.ddgi_on = false;
+        if ddgi_capped {
+            consumers.ddgi_on = false;
+        }
         consumers.shadow_denoise_spatial_on = false;
         consumers.shadow_temporal_on = false;
         consumers.ssr_on = false;
@@ -1689,6 +1730,32 @@ mod tests {
     }
 
     #[test]
+    fn vb_both_ddgi_passes_through_and_arms_the_split() {
+        // Rung R9c: DDGI survives the cap ONLY on VB×Both (the split shade samples the probes
+        // for mesh pixels; the probes are SDF-marched) — Mesh/Sdf leg sets keep it zeroed.
+        let consumers = RenderPathConsumers { ddgi_on: true, ..Default::default() };
+        let (resolved, degrades) = resolve_vb_v1(GeometryLegs::Both, consumers);
+        assert_eq!(resolved.path, RenderPath::VisibilityBuffer);
+        assert!(degrades.is_clean(), "VB×Both DDGI resolves clean at R9c");
+        assert!(resolved.mesh_geo_shade_split, "DDGI is a pre-light consumer -> split");
+        assert!(resolved.thin_aux.contains(ThinAuxMask::NORMAL));
+
+        for legs in [GeometryLegs::Mesh, GeometryLegs::Sdf] {
+            let (resolved, degrades) = resolve_vb_v1(legs, consumers);
+            assert!(
+                !resolved.mesh_geo_shade_split,
+                "{legs:?}: DDGI alone must not arm the split off VB×Both"
+            );
+            let reasons: Vec<_> = degrades.reasons().collect();
+            assert_eq!(
+                reasons,
+                [RenderPathDegrade::VbPreLightConsumersNotYetImplemented],
+                "{legs:?}: DDGI stays capped with the standing warn"
+            );
+        }
+    }
+
+    #[test]
     fn vb_sdf_only_ssao_stays_capped() {
         // Rung R9b residual: under VB && !mesh_leg there is no raster to split — SSAO stays
         // zeroed with the standing degrade warn (the R-SDFSPLIT boundary).
@@ -1986,7 +2053,7 @@ mod tests {
             quality: crate::ssao_config::SsaoQuality::High,
             atrous_levels: 3,
         };
-        let frozen = RenderPathFrozenConsumers::new(boot, true);
+        let frozen = RenderPathFrozenConsumers::new(boot, false, true);
         let runtime_off = crate::ssao_config::SsaoConfig {
             quality: crate::ssao_config::SsaoQuality::Off,
             atrous_levels: 3,
@@ -1995,7 +2062,7 @@ mod tests {
         assert_eq!(eff.quality, boot.quality, "boot-on / runtime-off: boot stays in effect");
 
         let frozen_off =
-            RenderPathFrozenConsumers::new(crate::ssao_config::SsaoConfig::default(), true);
+            RenderPathFrozenConsumers::new(crate::ssao_config::SsaoConfig::default(), false, true);
         let runtime_on = boot;
         let eff = effective_ssao_config(&runtime_on, &frozen_off);
         assert_eq!(
@@ -2011,7 +2078,7 @@ mod tests {
         // The warn latch flips on the FIRST divergence and stays flipped (one warn across all
         // readers — the latch lives on the shared snapshot).
         let frozen =
-            RenderPathFrozenConsumers::new(crate::ssao_config::SsaoConfig::default(), true);
+            RenderPathFrozenConsumers::new(crate::ssao_config::SsaoConfig::default(), false, true);
         let live = crate::ssao_config::SsaoConfig {
             quality: crate::ssao_config::SsaoQuality::Low,
             atrous_levels: 0,

@@ -2715,8 +2715,13 @@ pub(crate) struct VbPassPlan {
     /// verbatim) — `[None; MAX]` unless the gather armed with `atrous_levels >= 2`.
     pub(crate) ssao_atrous:
         [Option<crate::framegraph::PassId>; crate::present::MAX_SSAO_ATROUS_LEVELS as usize],
+    /// Rung R9c: the DDGI probe-update pass under VB (the deferred `ddgi_update` mirrored).
+    /// `Some` iff [`GBufferScene::path_vb_ddgi`](super::scene_types::GBufferScene::path_vb_ddgi)
+    /// — reachable only on `VB × Both`.
+    pub(crate) ddgi_update: Option<crate::framegraph::PassId>,
     /// Rung R9b: the split's `lit` producer (`vb_shade_split.comp` — RE-fetch + shade +
-    /// unconditional gSsao consumption). `Some` iff
+    /// unconditional gSsao consumption; rung R9c adds the CONDITIONAL DDGI atlas reads).
+    /// `Some` iff
     /// [`GBufferScene::path_vb_split`](super::scene_types::GBufferScene::path_vb_split).
     pub(crate) vb_shade_split: Option<crate::framegraph::PassId>,
     /// Rung R10: the fused `sdf_forward_march` COMPUTE pass (`shaders/sdf_forward_march.comp.hlsl`,
@@ -2770,18 +2775,20 @@ pub(crate) struct VbBarrierSink<'a> {
     /// deferred sink's own C1-fix shape), both `VkImage::NULL`-bound when TAA is off (inert: no
     /// pass names their ResIds then).
     pub(crate) images: [VkImage; VB_IMAGE_COUNT],
-    /// `[light_table, vb_instance_ring, gclassify]`. A pass that does not declare an access on an
-    /// unarmed resource never routes a barrier naming it, so an inert `VkBuffer::NULL` there is
-    /// harmless (the SAME "ungated slot may hold NULL" rule [`ForwardBarrierSink`] documents).
+    /// `[light_table, vb_instance_ring, gclassify, ddgi_classification, ddgi_ray_table]`. A
+    /// pass that does not declare an access on an unarmed resource never routes a barrier
+    /// naming it, so an inert `VkBuffer::NULL` there is harmless (the SAME "ungated slot may
+    /// hold NULL" rule [`ForwardBarrierSink`] documents).
     /// `gclassify` — VB-P2 classification plan rung P2b: the current frame slot's
     /// [`VbClassifyTargets::gclassify`](super::targets::VbClassifyTargets::gclassify) buffer.
-    pub(crate) buffers: [VkBuffer; 3],
+    /// The two DDGI buffers (rung R9c) are the deferred sink's own single-instance sources.
+    pub(crate) buffers: [VkBuffer; 5],
 }
 
 /// The number of IMAGE resources [`Renderer::declare_vb_graph`] declares — see
 /// [`VbBarrierSink::images`]'s doc for the fixed order. A PRIVATE, per-frame ResId space (mirrors
 /// [`FORWARD_IMAGE_COUNT`]'s own doc — never related to [`FRAMEGRAPH_IMAGE_COUNT`]).
-const VB_IMAGE_COUNT: usize = 12;
+const VB_IMAGE_COUNT: usize = 14;
 
 impl crate::framegraph::BarrierSink for VbBarrierSink<'_> {
     fn image_barriers(&mut self, src_stage: u32, dst_stage: u32, group: &[crate::framegraph::ImgBarrier]) {
@@ -3005,8 +3012,28 @@ impl Renderer<'_> {
         let ssao_img = g.add_image_seeded("ssao", ResSync::undefined());
         let ssao_ring_a = g.add_image("ssao_ring_a");
         let ssao_ring_b = g.add_image("ssao_ring_b");
+        // Rung R9c (ResIds 12/13): the DDGI probe atlases — the DEFERRED declarator's seeds
+        // VERBATIM (persistent round-robin accumulators living in SHADER_READ_ONLY_OPTIMAL
+        // between updates; a CONTENT-PRESERVING SRO→GENERAL transition — an UNDEFINED oldLayout
+        // would license discarding the un-updated tiles).
+        let ddgi_irr = g.add_image_seeded(
+            "ddgi_irr",
+            ResSync::seeded_readers_at_layout(
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+            ),
+        );
+        let ddgi_depth = g.add_image_seeded(
+            "ddgi_depth",
+            ResSync::seeded_readers_at_layout(
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+            ),
+        );
         debug_assert_eq!(
-            ssao_ring_b.index() + 1,
+            ddgi_depth.index() + 1,
             VB_IMAGE_COUNT,
             "invariant: declare_vb_graph's image declarations must match VB_IMAGE_COUNT"
         );
@@ -3023,6 +3050,17 @@ impl Renderer<'_> {
         );
         let vb_instance_ring = g.add_buffer("vb_instance_ring");
         let gclassify = g.add_buffer("gclassify");
+        // Rung R9c (buffer ResIds 3/4): the DDGI classification + Fibonacci ray table — the
+        // DEFERRED declarator's WAR seeds verbatim (single device-local instances; a cross-frame
+        // re-touch orders after the sibling frame's still-pipelined update reads).
+        let ddgi_classification = g.add_buffer_seeded(
+            "ddgi_classification",
+            ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+        );
+        let ddgi_ray_table = g.add_buffer_seeded(
+            "ddgi_ray_table",
+            ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+        );
 
         // Pass `light_upload` (async light-table re-upload) — the SAME gate
         // `declare_forward_graph`'s own `light_upload` pass uses.
@@ -3349,7 +3387,7 @@ impl Renderer<'_> {
         let mut ssao_atrous_vb: [Option<crate::framegraph::PassId>;
             crate::present::MAX_SSAO_ATROUS_LEVELS as usize] =
             [None; crate::present::MAX_SSAO_ATROUS_LEVELS as usize];
-        let (vb_geo, vb_ssao_pass, vb_shade_split) = if split {
+        let (vb_geo, vb_ssao_pass, vb_ddgi_update_pass, vb_shade_split) = if split {
             // Pass `vb_geo` — the split's thin-aux producer: the FIRST `vb_id` reader under
             // split (derives the COLOR_ATTACHMENT→SHADER_READ_ONLY transition out of the
             // raster; every later same-layout read needs none), reads the instance ring for
@@ -3449,6 +3487,43 @@ impl Renderer<'_> {
                 None
             };
 
+            // Rung R9c: pass `ddgi_update` — declared between the SSAO chain and the split
+            // shade (the §3 order), gated on `path_vb_ddgi()` (reachable only VB×Both — the
+            // activation carries the `sdf_leg` AND). The access list is the DEFERRED
+            // declarator's verbatim: light_table/ray-table reads, classification RW, and the
+            // two atlas layered STORAGE writes (whose content-preserving SRO→GENERAL
+            // transitions the seeds license).
+            let vb_ddgi_update = if scene.path_vb_ddgi() {
+                let p = g.add_pass("ddgi_update");
+                g.buffer_access(
+                    light_table,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                );
+                g.buffer_access(
+                    ddgi_ray_table,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT,
+                );
+                g.buffer_access(
+                    ddgi_classification,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                );
+                for &img in &[ddgi_irr, ddgi_depth] {
+                    g.image_access(
+                        img,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_IMAGE_LAYOUT_GENERAL,
+                        SubRange::color_layers(crate::ddgi::DDGI_ATLAS_LAYERS),
+                    );
+                }
+                Some(p)
+            } else {
+                None
+            };
+
             // Pass `vb_shade_split` — the split's `lit` producer: RE-fetches through `vb_id`
             // (already SHADER_READ_ONLY via `vb_geo`), extends `vb_sky`'s COLOR write on `lit`
             // (COLOR_ATTACHMENT→GENERAL, the C5 shape `vb_resolve` declares), reads the
@@ -3496,9 +3571,25 @@ impl Renderer<'_> {
                 VK_IMAGE_LAYOUT_GENERAL,
                 SubRange::COLOR,
             );
-            (Some(vb_geo), vb_ssao_pass, Some(s))
+            // Rung R9c: the CONDITIONAL DDGI atlas reads — declared iff the update armed (the
+            // deferred resolve's own `ddgi_update.is_some()`-gated shape), deriving the
+            // update-write → shade-read GENERAL→SHADER_READ_ONLY layered barriers; a DDGI-off
+            // frame declares nothing here (the seeded ResIds are then named by NOTHING ⇒ zero
+            // barriers ⇒ the GI-off byte-id discipline).
+            if vb_ddgi_update.is_some() {
+                for &img in &[ddgi_irr, ddgi_depth] {
+                    g.image_access(
+                        img,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        SubRange::color_layers(crate::ddgi::DDGI_ATLAS_LAYERS),
+                    );
+                }
+            }
+            (Some(vb_geo), vb_ssao_pass, vb_ddgi_update, Some(s))
         } else {
-            (None, None, None)
+            (None, None, None, None)
         };
 
         // Pass `sdf_forward_march` — rung R10: the fused SDF march-then-shade COMPUTE pass, the
@@ -3701,6 +3792,7 @@ impl Renderer<'_> {
             vb_geo,
             vb_ssao: vb_ssao_pass,
             ssao_atrous: ssao_atrous_vb,
+            ddgi_update: vb_ddgi_update_pass,
             vb_shade_split,
             sdf_forward_march,
             // ONE field for BOTH slots — the pass exists in exactly one of them per frame
@@ -3761,6 +3853,10 @@ impl Renderer<'_> {
                 targets.ssao[fi].image,
                 targets.ssao_ring_a.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
                 targets.ssao_ring_b.as_ref().map_or(VkImage::NULL, |r| r[fi].image),
+                // Rung R9c (ResIds 12/13): the DDGI probe atlases — single-instance, always
+                // allocated (the GI-off frames name their ResIds with NOTHING ⇒ inert).
+                scene.ddgi_irr_texture.image,
+                scene.ddgi_depth_texture.image,
             ],
             buffers: [
                 scene.light_table.buffer,
@@ -3775,6 +3871,10 @@ impl Renderer<'_> {
                     .expect("invariant: a VisibilityBuffer-resolved scene always carries targets.vb_classify")
                     .gclassify[fi]
                     .buffer,
+                // Rung R9c (buffer ResIds 3/4): the DDGI classification + Fibonacci ray table
+                // (the deferred sink's own sources — placeholder-backed on GI-off boots).
+                scene.ddgi_classification.buffer,
+                scene.ddgi_ray_table.buffer,
             ],
         };
         self.frame_graph.record_pass(pass, &mut sink);

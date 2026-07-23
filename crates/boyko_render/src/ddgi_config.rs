@@ -272,10 +272,13 @@ pub fn resolve_ddgi_grid(cfg: Res<DdgiConfig>, mut out: ResMut<ResolvedDdgi>) {
 #[allow(clippy::needless_pass_by_value)]
 pub fn sync_ddgi_light_gate(
     ddgi: Res<DdgiConfig>,
+    frozen: Res<crate::render_path_config::RenderPathFrozenConsumers>,
     mut cfg: ResMut<LightingConfig>,
     mut dirty: ResMut<LightTableDirty>,
 ) {
-    let on = ddgi.enabled();
+    // Rung R9c: the SAME boot-freeze clamp the runner's per-frame `ddgi_enabled` applies —
+    // the header word and the update-pass arming read ONE effective bit by construction.
+    let on = crate::render_path_config::effective_ddgi_enabled(ddgi.enabled(), &frozen);
     // Value gate BEFORE the `DerefMut`: flip-only write, flip-only table dirtying.
     if cfg.ddgi_indirect != on {
         cfg.ddgi_indirect = on;

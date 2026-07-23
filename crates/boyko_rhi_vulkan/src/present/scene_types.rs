@@ -2621,6 +2621,18 @@ impl GBufferScene<'_> {
         self.resolved_render_path.mesh_geo_shade_split && self.ssao.is_some()
     }
 
+    /// Rung R9c — the SINGLE source of "this frame runs the DDGI probe update + the split
+    /// shade's probe sampling under VB" (read at BOTH `declare_vb_graph` and `record_vb`).
+    /// Anchored to the boot-frozen split; the `ddgi_update` activation itself already carries
+    /// the `sdf_leg` AND from `gpu_scene` (probes are SDF-marched), so this is reachable only
+    /// on `VB × Both`.
+    #[inline]
+    pub(crate) fn path_vb_ddgi(&self) -> bool {
+        self.path_is_vb()
+            && self.resolved_render_path.mesh_geo_shade_split
+            && self.ddgi_update.is_some()
+    }
+
     /// Multi-paradigm render-path plan, rung R8 — the SINGLE source of "is this frame's
     /// declarator/recorder the `VisibilityBuffer` path" decision, so `declare_frame_graph`'s
     /// dispatch and `render_gbuffer_frame`'s record-site dispatch (`record_vb` vs

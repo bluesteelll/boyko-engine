@@ -481,8 +481,16 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
         .try_resource::<boyko_render::SsaoConfig>()
         .copied()
         .unwrap_or_default();
+    // Rung R9c: the DDGI CONFIG bit joins the snapshot (the caps fold —
+    // `ddgi_storage_ok()` — stays live in the frame loop; only the owner-config half
+    // freezes, mirroring `render_path_consumers.ddgi_on`'s own assembly above).
+    let boot_ddgi_on = app
+        .world()
+        .try_resource::<boyko_render::DdgiConfig>()
+        .is_some_and(|c| c.enabled());
     app.world_mut().insert_resource(boyko_render::RenderPathFrozenConsumers::new(
         boot_ssao_cfg,
+        boot_ddgi_on,
         !matches!(resolved_render_path.path, boyko_render::RenderPath::Deferred),
     ));
 
@@ -1701,10 +1709,17 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // clamp to OFF). Absent (the default host that never composes `DdgiPlugin`), GI is OFF →
             // `ddgi_update = None`, the byte-identical 0%-gate. Even when ON the render stays
             // byte-identical this rung (I3 wires the resolve sample; the atlas is written-but-unread).
-            let ddgi_enabled = ctx.device_caps().ddgi_storage_ok()
-                && world
-                    .try_resource::<boyko_render::DdgiConfig>()
-                    .is_some_and(|cfg| cfg.enabled());
+            // Rung R9c: the CONFIG half routes through the boot-freeze clamp (warn-once no-op
+            // under a non-Deferred path — the SAME `effective_ssao_config` discipline); the
+            // device-caps fold stays live.
+            let ddgi_cfg_on = world
+                .try_resource::<boyko_render::DdgiConfig>()
+                .is_some_and(|cfg| cfg.enabled());
+            let ddgi_cfg_on = match world.try_resource::<boyko_render::RenderPathFrozenConsumers>() {
+                Some(f) => boyko_render::effective_ddgi_enabled(ddgi_cfg_on, f),
+                None => ddgi_cfg_on,
+            };
+            let ddgi_enabled = ctx.device_caps().ddgi_storage_ok() && ddgi_cfg_on;
             // HW-RT rung R2a-3: TLAS arming — hwrt + an RT device + a non-empty gather. On an RT
             // device, first sync the frame-invariant BLAS-address table (a no-op unless the mesh
             // asset table's `install_epoch` advanced — asset-streaming plan F6: gated on install,

@@ -56,6 +56,13 @@ impl Plugin for DdgiPlugin {
         // plan §3). A device lacking B10G11R11/RG16F storage then clamps the resolve to DISABLED.
         app.insert_resource(DdgiUpdateConfig::default());
         app.insert_resource(DdgiCaps::default());
+        // Rung R9c: the inert boot-freeze snapshot — `sync_ddgi_light_gate` now takes
+        // `Res<RenderPathFrozenConsumers>` (no `Option<Res>` SystemParam exists), so every
+        // world composing this plugin needs a value; `boyko_app::runner` overwrites it at boot
+        // (the SsaoPlugin/`ResolvedRenderPath` insert-default-then-boot-override precedent;
+        // double-insert with SsaoPlugin is harmless — both are the same inert default and the
+        // boot override runs after all plugins).
+        app.insert_resource(crate::render_path_config::RenderPathFrozenConsumers::default());
 
         // `resolve_ddgi_grid_gated` joins `DdgiResolveSet` — the by-name ordering seam a consumer
         // pins BEFORE (via `.after_set(DdgiResolveSet)`). Set-to-set ordering is

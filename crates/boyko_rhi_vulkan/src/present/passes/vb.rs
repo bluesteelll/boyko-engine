@@ -1134,8 +1134,50 @@ impl Renderer<'_> {
                 }
             }
 
+            // (3.5, rung R9c) Pass `ddgi_update` — the probe update under VB (reachable only
+            // VB×Both, `path_vb_ddgi()`): the DEFERRED record body mirrored (the single
+            // non-ringed 7-binding set; the shader reads all params from the b6 UBO — no push).
+            if scene.path_vb_ddgi() {
+                let activation = scene
+                    .ddgi_update
+                    .as_ref()
+                    .expect("invariant: path_vb_ddgi() ⇒ scene.ddgi_update.is_some()");
+                let ddgi_update_set = targets
+                    .ddgi_update_set
+                    .as_ref()
+                    .expect("invariant: scene.ddgi_update is Some ⇒ GBufferTargets wrote ddgi_update_set");
+                let ddgi_pass = plan
+                    .ddgi_update
+                    .expect("invariant: path_vb_ddgi() ⇒ the VB ddgi_update pass was declared");
+                // SAFETY: recording is open; `record_vb_pass` records the derived light/ray/
+                // classification reads + the content-preserving SRO→GENERAL atlas transitions.
+                self.record_vb_pass(ddgi_pass, cmd, targets, forward, vb, scene, fi);
+                // SAFETY: recording is open; the update pipeline + its 7-binding layout are
+                // live (caller contract); `dispatch_group_count_x` is the activation's own
+                // probe-subset block count; no push (the b6 UBO carries every param).
+                unsafe {
+                    (self.fns.cmd_bind_pipeline)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        activation.pipeline.pipeline,
+                    );
+                    (self.fns.cmd_bind_descriptor_sets)(
+                        cmd,
+                        VK_PIPELINE_BIND_POINT_COMPUTE,
+                        activation.pipeline.layout,
+                        0,
+                        1,
+                        &ddgi_update_set.descriptor_set,
+                        0,
+                        ptr::null(),
+                    );
+                    (self.fns.cmd_dispatch)(cmd, activation.dispatch_group_count_x, 1, 1);
+                }
+            }
+
             // (4) Pass `vb_shade_split` — the split's lit producer (RE-fetch + shade + the
-            // unconditional gSsao read). Per-frame base/`_tex` pick mirrors the fused
+            // unconditional gSsao read + the rung-R9c header-gated DDGI probe sample). Per-frame
+            // base/`_tex` pick mirrors the fused
             // `vb_resolve`/`vb_shade_tex` selection (boot-frozen split, per-frame textures).
             let shade_pass = plan
                 .vb_shade_split
