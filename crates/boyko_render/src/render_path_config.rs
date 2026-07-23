@@ -524,6 +524,15 @@ pub struct ResolvedRenderPath {
     /// The armed shadow-visibility source set (Decision 7). FROZEN at boot under non-Deferred
     /// paths, same P2-d rationale.
     pub shadow: ShadowSources,
+    /// VB-P1a ("dark infra"): `consumers.clusters_wanted && path == VisibilityBuffer` — the
+    /// SINGLE boot-frozen arm bit gating the ENTIRE froxel light-cull machinery (the app-side
+    /// cluster build, the VB `_froxel` pipeline selection, AND the `light_cull` graph pass) —
+    /// VB-ONLY this rung (`ForwardPlus`/`Deferred` keep their own, unrelated `cluster_cull`
+    /// scaffolding untouched). Hardcoded `false` today (`RenderPathConsumers::clusters_wanted`'s
+    /// own doc) — nothing is built/declared/recorded while it is off, so every existing golden
+    /// stays byte-identical (the 0%-gate). A later rung (VB-P1b) flips `clusters_wanted` from
+    /// [`LightingConfig`](crate::light::LightingConfig).
+    pub froxel_light_cull: bool,
 }
 
 // P2-d note: "frozen at boot" here means [`resolve_render_path`] is never RE-CALLED after
@@ -616,6 +625,13 @@ pub struct RenderPathConsumers {
     /// (Decision 7's restoration target), so the caller threads `true` until a dedicated config
     /// lands.
     pub sdf_shadows_wanted: bool,
+    /// VB-P1a ("dark infra"): whether the owner wants the VisibilityBuffer froxel light-cull
+    /// machinery armed (`ResolvedRenderPath::froxel_light_cull`'s single boot-frozen gate).
+    /// Hardcoded `false` at the `boyko_app::runner` boot call site this rung — no
+    /// `LightingConfig`-sourced toggle is wired yet (a later rung, VB-P1b, reads
+    /// `LightingConfig` here); the caller threads a literal `false` until then, mirroring
+    /// [`Self::ssr_on`]'s own "no config yet" precedent.
+    pub clusters_wanted: bool,
 }
 
 // ---- RenderPathDeviceCaps (the resolver's device-capability input) --------------------
@@ -893,6 +909,10 @@ pub fn resolve_rules(
         shadow = shadow.insert(ShadowSources::HWRT_VIS);
     }
 
+    // VB-P1a ("dark infra"): VB-ONLY this rung — `ForwardPlus`/`Deferred` keep their own,
+    // unrelated `cluster_cull` scaffolding untouched (see this field's own doc).
+    let froxel_light_cull = consumers.clusters_wanted && matches!(path, RenderPath::VisibilityBuffer);
+
     ResolvedRenderPath {
         path,
         legs,
@@ -908,6 +928,7 @@ pub fn resolve_rules(
         depth_kind,
         thin_aux,
         shadow,
+        froxel_light_cull,
     }
 }
 
@@ -2327,6 +2348,37 @@ mod tests {
 
         let deferred = resolve_rules(RenderPath::Deferred, GeometryLegs::Both, RenderPathConsumers::default(), caps_ok());
         assert!(!deferred.vb_geometry_table);
+    }
+
+    /// VB-P1a ("dark infra"): `froxel_light_cull` is the SINGLE boot-frozen arm bit gating the
+    /// entire froxel light-cull machinery — this pins the rung's whole scoping claim, VB-ONLY:
+    /// armed iff `consumers.clusters_wanted && path == VisibilityBuffer`, never for
+    /// `ForwardPlus`/`Deferred`/`Forward` (which keep their own, unrelated `cluster_cull`
+    /// scaffolding) even when `clusters_wanted` is `true`, and never when `clusters_wanted`
+    /// itself is `false` (the production default — `boyko_app::runner` hardcodes it today).
+    #[test]
+    fn froxel_light_cull_is_vb_only() {
+        let wanted = RenderPathConsumers { clusters_wanted: true, ..Default::default() };
+
+        let vb = resolve_rules(RenderPath::VisibilityBuffer, GeometryLegs::Mesh, wanted, caps_ok());
+        assert!(vb.froxel_light_cull, "VisibilityBuffer + clusters_wanted -> armed");
+
+        for path in [RenderPath::ForwardPlus, RenderPath::Deferred, RenderPath::Forward] {
+            let resolved = resolve_rules(path, GeometryLegs::Mesh, wanted, caps_ok());
+            assert!(
+                !resolved.froxel_light_cull,
+                "{path:?}: froxel_light_cull is VB-ONLY, even with clusters_wanted"
+            );
+        }
+
+        // The default (`clusters_wanted == false`) never arms, even under VisibilityBuffer.
+        let default_vb = resolve_rules(
+            RenderPath::VisibilityBuffer,
+            GeometryLegs::Mesh,
+            RenderPathConsumers::default(),
+            caps_ok(),
+        );
+        assert!(!default_vb.froxel_light_cull, "clusters_wanted defaults to false -> never armed");
     }
 
     #[test]

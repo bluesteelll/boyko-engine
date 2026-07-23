@@ -2631,6 +2631,15 @@ pub(crate) struct VbPassPlan {
     /// The async light-table re-upload (`scene.light_dirty && scene.light_upload_bytes > 0`) —
     /// the SAME gate [`ForwardPassPlan::light_upload`] uses.
     pub(crate) light_upload: Option<crate::framegraph::PassId>,
+    /// VB-P1a ("dark infra"): the L1 clustered froxel light-cull pass — the SAME "4-buffers-Some"
+    /// gate [`ForwardPassPlan::light_cull`] uses (`scene.cluster_cull`/`cluster_grid`/
+    /// `light_index`/`light_index_alloc` all `Some`), hardcoded OFF this rung
+    /// (`ResolvedRenderPath::froxel_light_cull`'s doc) so this is ALWAYS `None` in production.
+    /// Resets `light_index_alloc` (transfer), reads the light table, writes
+    /// `cluster_grid`/`light_index`. Declared BEFORE `csm`/`atlas`/`vb_resolve`/`vb_shade` (which
+    /// read the cull's writes) — the SAME declaration-order-parity discipline every pass in this
+    /// plan follows.
+    pub(crate) light_cull: Option<crate::framegraph::PassId>,
     /// The CSM cascade depth pass (`scene.csm.is_some()`) — declared BEFORE `vb_resolve` (which
     /// samples the cascade inline via `shadow_apply.hlsli`), the SAME dependency order
     /// [`ForwardPassPlan::csm`] observes.
@@ -2810,12 +2819,18 @@ pub(crate) struct VbBarrierSink<'a> {
     /// [`VbClassifyTargets::gclassify`](super::targets::VbClassifyTargets::gclassify) buffer.
     /// The two DDGI buffers (rung R9c) are the deferred sink's own single-instance sources; the
     /// rung R9d `tlas_instances` source mirrors [`GbufferBarrierSink`]'s own
-    /// `scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer)`.
+    /// `scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer)`. VB-P1a ("dark infra"):
+    /// `cluster_grid`/`light_index`/`light_index_alloc` — the L1 froxel trio, falling back to
+    /// the light-table placeholder when unarmed (`scene.cluster_grid`/`light_index`/
+    /// `light_index_alloc` are `None` — hardcoded today), the SAME bound-but-unread idiom
+    /// [`ForwardBarrierSink`]'s own trio uses; a `light_cull.is_none()` frame never routes a
+    /// barrier naming these ResIds anyway, so the placeholder is inert.
     #[cfg(not(feature = "hwrt"))]
-    pub(crate) buffers: [VkBuffer; 5],
-    /// See the `not(hwrt)` variant's doc: `hwrt` grows this by one (`tlas_instances` at index 5).
+    pub(crate) buffers: [VkBuffer; 8],
+    /// See the `not(hwrt)` variant's doc: `hwrt` grows this by one (`tlas_instances` at index 5,
+    /// the VB-P1a trio shifts to 6/7/8).
     #[cfg(feature = "hwrt")]
-    pub(crate) buffers: [VkBuffer; 6],
+    pub(crate) buffers: [VkBuffer; 9],
 }
 
 /// The number of IMAGE resources [`Renderer::declare_vb_graph`] declares — see
@@ -3149,12 +3164,61 @@ impl Renderer<'_> {
         // declarator's `tlas_instances` shape verbatim (frame-private, undefined seed).
         #[cfg(feature = "hwrt")]
         let tlas_instances = g.add_buffer("tlas_instances");
+        // VB-P1a ("dark infra"): the L1 froxel buffers — `add_buffer` (undefined), the SAME
+        // frame-private shape `vb_instance_ring`/`gclassify` use (single device-local instances
+        // the cull WRITES fresh every armed frame; unarmed today, so no pass ever names these
+        // ResIds — the 0%-gate).
+        let cluster_grid = g.add_buffer("cluster_grid");
+        let light_index = g.add_buffer("light_index");
+        let light_index_alloc = g.add_buffer("light_index_alloc");
 
         // Pass `light_upload` (async light-table re-upload) — the SAME gate
         // `declare_forward_graph`'s own `light_upload` pass uses.
         let light_upload = if scene.light_dirty && scene.light_upload_bytes > 0 {
             let p = g.add_pass("light_upload");
             g.buffer_access(light_table, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+            Some(p)
+        } else {
+            None
+        };
+
+        // Pass `light_cull` (L1 clustered froxel cull) — VB-P1a ("dark infra"). Gated EXACTLY as
+        // `declare_forward_graph`'s own `light_cull` pass (the "4-buffers-Some" predicate: the
+        // cull pipeline AND all three cluster buffers are `Some`) — VB-ONLY, no separate path
+        // check needed (this declarator IS the VB one). Hardcoded OFF this rung
+        // (`ResolvedRenderPath::froxel_light_cull`'s doc), so `scene.cluster_cull` is ALWAYS
+        // `None` in production ⇒ this is ALWAYS `None` ⇒ zero declared accesses ⇒ byte-identical.
+        // Resets `light_index_alloc` (transfer), reads the light table, writes
+        // `cluster_grid`/`light_index` — byte-for-byte the SAME access shape
+        // `ForwardPassPlan::light_cull`'s declaration site uses.
+        let light_cull = if scene.cluster_cull.is_some()
+            && scene.cluster_grid.is_some()
+            && scene.light_index.is_some()
+            && scene.light_index_alloc.is_some()
+        {
+            const RW: u32 = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+            let p = g.add_pass("light_cull");
+            g.buffer_access(
+                light_index_alloc,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+            );
+            g.buffer_access(light_index_alloc, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, RW);
+            g.buffer_access(
+                light_table,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+            );
+            g.buffer_access(
+                cluster_grid,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+            );
+            g.buffer_access(
+                light_index,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+            );
             Some(p)
         } else {
             None
@@ -3384,6 +3448,24 @@ impl Renderer<'_> {
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                     SubRange::depth_layers(MAX_TEXTURE_LAYERS as u32),
                 );
+                // VB-P1a ("dark infra"): the froxel `ClusterGrid`/`LightIndexList` reads the
+                // `vb_shade_froxel.comp.hlsl` variant performs every frame, gated on
+                // `light_cull.is_some()` — the SAME "only need the barrier when a write happened
+                // THIS frame" discipline `light_upload`'s read gate above uses. COMPUTE→COMPUTE
+                // (NOT `declare_forward_graph`'s own COMPUTE→FRAGMENT — `vb_shade` is a compute
+                // pass, not a raster fragment shader).
+                if light_cull.is_some() {
+                    g.buffer_access(
+                        cluster_grid,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                    );
+                    g.buffer_access(
+                        light_index,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                    );
+                }
                 (None, Some(vb_shade))
             } else {
                 // Pass `vb_resolve` (FUSED): reads `vb_id` (COMPUTE,
@@ -3428,6 +3510,21 @@ impl Renderer<'_> {
                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                     SubRange::depth_layers(MAX_TEXTURE_LAYERS as u32),
                 );
+                // VB-P1a ("dark infra"): the froxel `ClusterGrid`/`LightIndexList` reads the
+                // `vb_resolve_froxel.comp.hlsl` variant performs every frame — see the `vb_shade`
+                // arm's own comment (identical gate + rationale).
+                if light_cull.is_some() {
+                    g.buffer_access(
+                        cluster_grid,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                    );
+                    g.buffer_access(
+                        light_index,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_READ_BIT,
+                    );
+                }
                 (Some(vb_resolve), None)
             };
 
@@ -4064,6 +4161,7 @@ impl Renderer<'_> {
 
         self.vb_pass_plan = Some(VbPassPlan {
             light_upload,
+            light_cull,
             csm,
             atlas: atlas_pass,
             vb_sky,
@@ -4190,6 +4288,11 @@ impl Renderer<'_> {
                 // (the deferred sink's own sources — placeholder-backed on GI-off boots).
                 scene.ddgi_classification.buffer,
                 scene.ddgi_ray_table.buffer,
+                // VB-P1a ("dark infra"): the L1 froxel trio — the light-table placeholder when
+                // unarmed (hardcoded today).
+                scene.cluster_grid.map_or(scene.light_table.buffer, |b| b.buffer),
+                scene.light_index.map_or(scene.light_table.buffer, |b| b.buffer),
+                scene.light_index_alloc.map_or(scene.light_table.buffer, |b| b.buffer),
             ],
             // Rung R9d (buffer ResId 5): `tlas_instances` — mirrors [`GbufferBarrierSink`]'s own
             // `scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer)` source.
@@ -4210,6 +4313,11 @@ impl Renderer<'_> {
                 scene.ddgi_classification.buffer,
                 scene.ddgi_ray_table.buffer,
                 scene.tlas.map_or(VkBuffer::NULL, |t| t.instance_array.buffer),
+                // VB-P1a ("dark infra"): the L1 froxel trio — see the `not(hwrt)` variant's own
+                // comment.
+                scene.cluster_grid.map_or(scene.light_table.buffer, |b| b.buffer),
+                scene.light_index.map_or(scene.light_table.buffer, |b| b.buffer),
+                scene.light_index_alloc.map_or(scene.light_table.buffer, |b| b.buffer),
             ],
         };
         self.frame_graph.record_pass(pass, &mut sink);

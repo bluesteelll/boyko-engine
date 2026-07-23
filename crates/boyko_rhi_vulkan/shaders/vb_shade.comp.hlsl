@@ -178,6 +178,22 @@ static const float3 LIGHT_UP = float3(0.0, 1.0, 0.0);
 #include "pbr_lighting.hlsli"
 #include "light_table.hlsli"
 
+// Multi-paradigm render-path plan, rung VB-P1a ("dark infra" -- the arm bit is hardcoded OFF at
+// this rung, so this whole block compiles into the `-D FROXEL` variant only and is unreachable in
+// production until VB-P1b flips `ResolvedRenderPath::froxel_light_cull` on): the froxel
+// cluster-grid pair, Set 0 bindings 8/9 -- compiled in ONLY for the `-D FROXEL` variant
+// (`vb_shade_froxel.comp.spv`); the base (non-FROXEL, this file's default) compile never
+// declares them, so its Set 0 stays byte-identical at 8 bindings and `vb_shade.comp.spv` stays
+// byte-identical to its pre-VB-P1a build. Byte-identical shape to `forward_opaque.fs.hlsl`'s own
+// `ClusterGrid`/`LightIndexList` (bindings 5/6 there) and `deferred_pbr.hlsl`'s (bindings 8/9
+// there) -- the L1 cluster-cull pass (`cluster_cull.hlsl`) writes both, reused verbatim; the
+// lookup helpers (`load_cluster_params`/`cluster_xy_tile`/`cluster_z_slice`/
+// `cluster_linear_index`) are `light_table.hlsli`'s shared L1 helpers, already `#include`d above.
+#ifdef FROXEL
+[[vk::binding(8, 0)]] StructuredBuffer<uint2> ClusterGrid;     // {ps_offset, ps_count} per froxel
+[[vk::binding(9, 0)]] StructuredBuffer<uint>  LightIndexList;  // flat surviving-index slices
+#endif
+
 // --- Set 1 (shadow): a VERBATIM copy of `vb_resolve.comp.hlsl`'s own Set-1 block, so the SAME
 // physical descriptor set (`ForwardTargets::set1`) binds to both.
 
@@ -474,9 +490,39 @@ void main(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID) {
         }
     }
 
-    // L0b: the point/spot block. ALL-LIGHTS flat scan, TOKEN-FOR-TOKEN clone of
-    // `forward_opaque.fs.hlsl`'s own non-FROXEL arm.
+    // L0b: the point/spot block. #ifdef FROXEL (rung VB-P1a): the froxel-culled cluster walk,
+    // gated on the header's `clusters_enabled` bit (`use_clusters`) -- an armed frame maps this
+    // pixel to its froxel and walks ONLY the survivors `cluster_cull.hlsl` wrote into
+    // `ClusterGrid`/`LightIndexList` (the SAME lookup `forward_opaque.fs.hlsl`'s own FROXEL arm
+    // performs); an unarmed frame (or the base, non-FROXEL compile) falls back to the IDENTICAL
+    // flat `[l0a_count, light_count)` scan, TOKEN-FOR-TOKEN the SAME clone of
+    // `forward_opaque.fs.hlsl`'s own non-FROXEL arm this file always ran. The loop BODY (range
+    // test, falloff, spot cone, punctual atlas shadow, BSDF accumulate) is UNCHANGED between the
+    // two arms -- only the index-list SOURCE differs, so a `-D FROXEL=1` recompile cannot
+    // perturb the flat-walk lighting math, and the base (non-FROXEL) compile is byte-for-byte
+    // unperturbed.
+#ifdef FROXEL
+    float view_z = dot(cam_forward.xyz, P - cam_eye.xyz);
+    ClusterParams cp = load_cluster_params(LightBuf);
+    bool use_clusters = cp.clusters_enabled != 0u;
+    uint ps_count;   // number of point/spot lights to walk
+    uint ps_offset;  // base into LightIndexList (clusters) or the flat block
+    if (use_clusters) {
+        uint2 tile = cluster_xy_tile(px, py, w, h, cp);
+        uint zsl = cluster_z_slice(view_z, cp);
+        uint cluster = cluster_linear_index(tile.x, tile.y, zsl, cp.dim_x, cp.dim_z);
+        uint2 cell = ClusterGrid[cluster];
+        ps_offset = cell.x;  // offset into LightIndexList
+        ps_count = cell.y;   // count of indices in this froxel's slice
+    } else {
+        ps_offset = H.l0a_count;                  // flat block base
+        ps_count = H.light_count - H.l0a_count;    // flat block length
+    }
+    for (uint jj = 0u; jj < ps_count; ++jj) {
+        uint j = use_clusters ? LightIndexList[ps_offset + jj] : (ps_offset + jj);
+#else
     for (uint j = H.l0a_count; j < H.light_count; ++j) {
+#endif
         LightElem L = load_light(LightBuf, j);
         float3 toL = L.pos - P;
         float d2 = dot(toL, toL);

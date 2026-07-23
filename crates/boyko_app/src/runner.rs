@@ -448,6 +448,10 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
         // No owner-facing SDF-shadow toggle exists yet — mirrors Deferred's current
         // unconditional non-hwrt SDF soft shadow (see `RenderPathConsumers::sdf_shadows_wanted`'s doc).
         sdf_shadows_wanted: true,
+        // VB-P1a ("dark infra"): hardcoded OFF — no `LightingConfig`-sourced toggle is wired yet
+        // (see `RenderPathConsumers::clusters_wanted`'s doc). A later rung (VB-P1b) reads the
+        // real config here; until then `froxel_light_cull` resolves to `false` on every boot.
+        clusters_wanted: false,
     };
     let render_path_caps = boyko_render::RenderPathDeviceCaps::new(
         ctx.device_caps().storage_buffer_array_non_uniform_indexing_ok,
@@ -595,6 +599,21 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
         // geometry Set-2 layout; the TEXTURED sibling additionally needs the bindless Set-3
         // (`Some` here — `build_textured_resources` just built it above).
         host.gpu.build_vb_split_pipelines(ctx, table.set(), Some(bindless_texture_table));
+        // VB-P1a ("dark infra"): the ENTIRE froxel light-cull machinery, gated behind the single
+        // boot-frozen arm bit `ResolvedRenderPath::froxel_light_cull` — hardcoded `false` this
+        // rung (`RenderPathConsumers::clusters_wanted`'s own doc), so this call NEVER runs in
+        // production: `host.gpu.cluster_cull_pipeline`/`cluster_grid`/`light_index`/
+        // `light_index_alloc`/`vb_layout0_froxel` all stay `None`, every existing golden stays
+        // byte-identical. Needs the SAME geometry Set-2 layout + bindless Set-3 the TEXTURED
+        // pipeline above just proved exist.
+        if resolved_render_path.froxel_light_cull {
+            host.gpu.build_froxel_light_cull(
+                ctx,
+                table.set(),
+                bindless_texture_table,
+                boyko_render::ClusterConfig::default(),
+            );
+        }
     }
 
     // Asset-system rung A3b: drain any decoded-but-not-yet-uploaded assets BEFORE

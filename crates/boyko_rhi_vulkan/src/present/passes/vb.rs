@@ -30,7 +30,9 @@ use crate::memory::BoundBuffer;
 use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS};
 
 use super::super::frame_driver::Renderer;
-use super::super::scene_types::{GBUFFER_PUSH_BASE_INSTANCE_OFFSET, GBufferScene};
+use super::super::scene_types::{
+    CLUSTER_CULL_PUSH_BYTES, GBUFFER_PUSH_BASE_INSTANCE_OFFSET, GBufferScene, LIGHT_CULL_LOCAL_SIZE_X,
+};
 use super::super::targets::{ForwardTargets, GBufferTargets, VB_CLASSIFY_MAX_MATERIAL_ROWS, VbTargets};
 use super::super::{COLOR_SUBRESOURCE_RANGE, SwapchainError};
 
@@ -120,6 +122,71 @@ impl Renderer<'_> {
             unsafe {
                 (self.fns.cmd_copy_buffer)(cmd, scene.light_staging.buffer, scene.light_table.buffer, 1, &region);
             }
+        }
+
+        // === VB-P1a ("dark infra"): the L1 clustered froxel light-cull pass — byte-for-byte
+        // port of `record_forward`'s own `light_cull` block. Recorded ONLY when
+        // `scene.cluster_cull.is_some()` (hardcoded OFF this rung, so this block NEVER records
+        // in production) AND the scene wires the cull set (the SAME "4-buffers-Some" gate
+        // `declare_vb_graph` uses). ===
+        if let (Some(cull_pipeline), Some(cull_set), Some(_grid), Some(_index), Some(alloc)) = (
+            scene.cluster_cull,
+            targets.cull_set.as_ref().map(|s| &s[fi]),
+            scene.cluster_grid,
+            scene.light_index,
+            scene.light_index_alloc,
+        ) {
+            // (L1-0) Reset the global slice-allocation counter to 0 (a transfer fill), then
+            // order the fill before the cull's atomic reads/writes (TRANSFER→COMPUTE). See
+            // `record_forward`'s own L1-0 comment for the full rationale.
+            // SAFETY: recording is open; `alloc` is a live device-local STORAGE buffer (≥ 4 B,
+            // the single u32 counter); `cmd_fill_buffer` zero-fills it (Vulkan 1.0 core). The
+            // FILL is GPU work (not a barrier), so it runs unconditionally — only the following
+            // barrier is graph-driven.
+            unsafe {
+                (self.fns.cmd_fill_buffer)(cmd, alloc.buffer, 0, VK_WHOLE_SIZE, 0);
+            }
+            let light_cull = plan
+                .light_cull
+                .expect("invariant: cull wired ⇒ light_cull pass declared");
+            // SAFETY: recording is open; `record_vb_pass` records the graph's derived
+            // TRANSFER→COMPUTE barrier for the "light_cull" pass into `cmd`, ordering the fill's
+            // TRANSFER write before the cull's COMPUTE atomics on the GPU timeline.
+            self.record_vb_pass(light_cull, cmd, targets, forward, vb, scene, fi);
+
+            // (L1-1) Bind the cull pipeline + the cull set (written ONCE at sync_gbuffer), push
+            // the 16-byte ClusterCullPush, dispatch over CLUSTER_COUNT froxels.
+            let cull_groups = scene.cluster_count.div_ceil(LIGHT_CULL_LOCAL_SIZE_X);
+            // SAFETY: recording is open; the cull pipeline + its layout (declaring `cull_layout`
+            // at set 0 + the 16-byte COMPUTE push range) are live on this device (caller
+            // contract); the cull set binds the camera UBO + light table + the cluster buffers;
+            // `cull_groups` covers `cluster_count` froxels at the 64-wide group; the push bytes
+            // are exactly `CLUSTER_CULL_PUSH_BYTES` (16) at offset 0; `&cull_set.descriptor_set`
+            // is a single-element local alive for the call (first_set 0, count 1).
+            unsafe {
+                (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cull_pipeline.pipeline);
+                (self.fns.cmd_bind_descriptor_sets)(
+                    cmd,
+                    VK_PIPELINE_BIND_POINT_COMPUTE,
+                    cull_pipeline.layout,
+                    0,
+                    1,
+                    &cull_set.descriptor_set,
+                    0,
+                    ptr::null(),
+                );
+                (self.fns.cmd_push_constants)(
+                    cmd,
+                    cull_pipeline.layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    CLUSTER_CULL_PUSH_BYTES,
+                    scene.cluster_cull_push.as_ptr().cast(),
+                );
+                (self.fns.cmd_dispatch)(cmd, cull_groups, 1, 1);
+            }
+            // (L1-2) The cull's ClusterGrid + LightIndexList writes are made available + visible
+            // to `vb_resolve`/`vb_shade`'s reads by the graph: derived at the reader — NOT here.
         }
 
         // === CSM cascade DEPTH pass — byte-for-byte port of `record_forward`'s own `csm` block.
@@ -753,7 +820,16 @@ impl Renderer<'_> {
                 // base classified pipeline/set otherwise. Mutually exclusive by construction
                 // (`vb_tex_active` implies `vb_use_classified`, since it feeds that selector's
                 // OR-in at the `GpuSceneBundles::scene()` assembly seam).
+                //
+                // VB-P1a ("dark infra") scope cut: the froxel selector below applies ONLY to the
+                // NON-TEXTURED arm — a `vb_set0_tex_froxel` (the TEXTURED+FROXEL combined Set-0)
+                // is not built this rung, so a textured frame stays on the base `vb_shade_tex`
+                // pipeline regardless of `scene.cluster_cull`. Inert today: the arm bit is
+                // hardcoded OFF (`ResolvedRenderPath::froxel_light_cull`'s doc), so
+                // `scene.cluster_cull` is ALWAYS `None` on every current boot, textured or not.
+                // A later rung (P1b) closes this gap if/when TEXTURED+FROXEL must co-occur.
                 let textured = scene.vb_tex_active();
+                let froxel = scene.cluster_cull.is_some();
                 let (vb_shade_pipeline, vb_shade_set0) = if textured {
                     (
                         scene.vb_shade_tex_pipeline.expect(
@@ -761,6 +837,15 @@ impl Renderer<'_> {
                         ),
                         targets.vb_set0_tex.as_ref().expect(
                             "invariant: GBufferScene::vb_tex_active() => targets.vb_set0_tex is built",
+                        ),
+                    )
+                } else if froxel {
+                    (
+                        scene.vb_shade_froxel_pipeline.expect(
+                            "invariant: scene.cluster_cull.is_some() => scene.vb_shade_froxel_pipeline is Some",
+                        ),
+                        targets.vb_set0_froxel.as_ref().expect(
+                            "invariant: scene.cluster_cull.is_some() => targets.vb_set0_froxel is built",
                         ),
                     )
                 } else {
@@ -872,15 +957,37 @@ impl Renderer<'_> {
                     fi,
                 );
 
-                let vb_resolve_pipeline = scene
-                    .vb_resolve_pipeline
-                    .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_resolve_pipeline");
+                // VB-P1a ("dark infra"): select the FROXEL-variant pipeline + its OWN WIDER
+                // Set-0 (`vb_set0_froxel`, 10 bindings) when the arm is built
+                // (`scene.cluster_cull.is_some()` — hardcoded OFF this rung, so this is ALWAYS
+                // the base arm in production today), else the base `vb_resolve_pipeline` +
+                // `vb_set0` — mutually exclusive by construction (mirrors `vb_shade`'s own
+                // `textured` selector immediately above).
+                let froxel = scene.cluster_cull.is_some();
+                let (vb_resolve_pipeline, vb_resolve_set0) = if froxel {
+                    (
+                        scene.vb_resolve_froxel_pipeline.expect(
+                            "invariant: scene.cluster_cull.is_some() => scene.vb_resolve_froxel_pipeline is Some",
+                        ),
+                        targets.vb_set0_froxel.as_ref().expect(
+                            "invariant: scene.cluster_cull.is_some() => targets.vb_set0_froxel is built",
+                        ),
+                    )
+                } else {
+                    (
+                        scene.vb_resolve_pipeline.expect(
+                            "invariant: a VisibilityBuffer-resolved scene always carries vb_resolve_pipeline",
+                        ),
+                        vb_set0,
+                    )
+                };
                 let vb_geometry_set = scene
                     .vb_geometry_set
                     .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_geometry_set");
                 // SAFETY: recording is open; `vb_resolve_pipeline` (the 3-set compute pipeline: Set 0 =
-                // `vb_set0[fi]`, Set 1 = `forward.set1[fi]` — the Forward-family shadow set REUSED
-                // VERBATIM, Set 2 = `vb_geometry_set` — the Decision-0 geometry table, bound directly,
+                // `vb_resolve_set0[fi]` (`vb_set0[fi]` or, when `froxel`, `vb_set0_froxel[fi]`), Set 1 =
+                // `forward.set1[fi]` — the Forward-family shadow set REUSED VERBATIM, Set 2 =
+                // `vb_geometry_set` — the Decision-0 geometry table, bound directly,
                 // no ring) belongs to this device (caller contract); `scene.mvp` is the SAME 88-byte
                 // push whose leading 64 bytes are the `view_proj` matrix `vb_resolve.comp.hlsl`'s
                 // push constant reads (the SAME matrix `vb_raster.vs.hlsl` used, `GBUFFER_PUSH_BYTES`
@@ -895,7 +1002,7 @@ impl Renderer<'_> {
                         vb_resolve_pipeline.layout,
                         0,
                         1,
-                        &vb_set0[fi].descriptor_set,
+                        &vb_resolve_set0[fi].descriptor_set,
                         0,
                         ptr::null(),
                     );

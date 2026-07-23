@@ -31,10 +31,11 @@ use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
 use boyko_rhi_vulkan::ddgi::DdgiAtlas;
 use boyko_rhi_vulkan::compute::{
     B5_CAMERA_UBO_BYTES_M4, CAM_MODE_ORTHO, CAM_MODE_PERSPECTIVE, COMPOSITE_PUSH_CONSTANT_BYTES,
-    CoarseMode, EDITLIST_BUFFER_WORDS,
+    CLUSTER_CULL_PUSH_BYTES, ClusterCullPush, CoarseMode, EDITLIST_BUFFER_WORDS,
     INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS,
     LOCAL_SIZE_X, M4_LEVEL_PARAMS_BYTES, RCAS_PUSH_BYTES, SDF_FORWARD_MARCH_PUSH_BYTES,
     TILE_BOUND_BYTES, TILE_SIZE,
+    cluster_cull_spirv,
     csm_depth_fs_spirv, csm_depth_vs_spirv, deferred_pbr_spirv,
     deferred_pbr_wrap_spirv,
     depth_prepass_fs_spirv, depth_prepass_vs_spirv,
@@ -53,9 +54,9 @@ use boyko_rhi_vulkan::compute::{
     ssaa_downsample_fs_spirv, taa_resolve_spirv, tile_grid_extent, VIEWT_FROM_DEPTH_PUSH_BYTES,
     VIEWT_FROM_DEPTH_RZ_PUSH_BYTES,
     vb_classify_count_spirv, vb_classify_scan_spirv, vb_classify_scatter_spirv,
-    vb_geo_spirv, vb_raster_fs_spirv, vb_raster_vs_spirv, vb_resolve_spirv,
-    sdf_ssao_vb_spirv, vb_shade_spirv, vb_shade_split_spirv, vb_shade_split_tex_spirv,
-    vb_shade_tex_spirv, viewt_from_depth_spirv, viewt_from_depth_rz_spirv,
+    vb_geo_spirv, vb_raster_fs_spirv, vb_raster_vs_spirv, vb_resolve_spirv, vb_resolve_froxel_spirv,
+    sdf_ssao_vb_spirv, vb_shade_spirv, vb_shade_froxel_spirv, vb_shade_split_spirv, vb_shade_split_tex_spirv,
+    vb_shade_tex_spirv, vb_shade_tex_froxel_spirv, viewt_from_depth_spirv, viewt_from_depth_rz_spirv,
 };
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::ffi::VkDescriptorSet;
@@ -91,7 +92,8 @@ use boyko_rhi_vulkan::texture::VulkanTexture;
 use boyko_sdf_math::SdfEdit;
 
 use boyko_render::{
-    AREA_TEX_BYTES, AREA_TEX_H, AREA_TEX_W, AaMode, BindlessTextureTable, DDGI_UPDATE_UBO_BYTES,
+    AREA_TEX_BYTES, AREA_TEX_H, AREA_TEX_W, AaMode, BindlessTextureTable, ClusterConfig,
+    DDGI_UPDATE_UBO_BYTES,
     DdgiConfig, DdgiUpdateConfig, DdgiUpdateUbo, GI_MAX_RAYS, GPU_LIGHT_BYTES, GPU_LIGHT_WORDS,
     GPU_TRANSFORM3D_BYTES, GpuLight, LIGHT_HEADER_BASE_WORDS, LIGHT_HEADER_BYTES, LightHeaderGpu,
     LightingConfig, M_SLOTS, MAX_LIGHTS, MaterialTable, MESH_VERTEX_STRIDE,
@@ -337,6 +339,7 @@ fn to_gpu_resolved_render_path(r: &boyko_render::ResolvedRenderPath) -> Resolved
         depth_kind: r.depth_kind as u32,
         thin_aux: r.thin_aux.bits(),
         shadow: r.shadow.bits(),
+        froxel_light_cull: r.froxel_light_cull,
     }
 }
 
@@ -1030,6 +1033,52 @@ pub(crate) struct GpuSceneBundles {
     /// VisibilityBuffer` (an `Option<[BoundBuffer; FRAMES_IN_FLIGHT]>`, mirroring
     /// `vb_resolve_pipeline`'s own `Option` shape) is a follow-up, not done this rung.
     pub(crate) vb_instance_rings: [BoundBuffer; FRAMES_IN_FLIGHT],
+
+    // ── VB-P1a ("dark infra"): the froxel light-cull machinery — built LAZILY by
+    // [`Self::build_froxel_light_cull`], gated entirely on `ResolvedRenderPath::froxel_light_cull`
+    // at the `boyko_app::runner` call site. Hardcoded OFF this rung — that fn is NEVER called in
+    // production, so every field below stays `None`/zeroed on every current boot (the 0%-gate).
+    // See that fn's doc for the full build. ──────────────────────────────────────────────────
+    /// The L1 clustered froxel light-cull compute pipeline (`cluster_cull.comp.hlsl`) — a 1-set
+    /// pipeline built against [`Self::cull_layout`]. `None` unless the froxel arm is built.
+    cluster_cull_pipeline: Option<ComputePipeline>,
+    /// The cull bind-group LAYOUT { camera UBO @0, light table SSBO @1, `ClusterGrid` SSBO @2,
+    /// `LightIndexList` SSBO @3, `LightIndexAlloc` SSBO @4 } — matching `cluster_cull.hlsl`'s own
+    /// set 0. `None` unless [`Self::cluster_cull_pipeline`] is `Some`.
+    cull_layout: Option<VulkanBindGroupLayout>,
+    /// The L1 per-froxel `ClusterCell`/`{offset,count}` grid SSBO (`DEVICE_LOCAL`, STORAGE,
+    /// Principle 0 — a VM-native `BoundBuffer`, never `std::Vec`), sized `cluster_count * 8 B`.
+    /// `None` unless the froxel arm is built.
+    cluster_grid: Option<BoundBuffer>,
+    /// The L1 flat light-index list SSBO (`DEVICE_LOCAL`, STORAGE), sized `index_list_cap * 4 B`.
+    /// `None` unless the froxel arm is built.
+    light_index: Option<BoundBuffer>,
+    /// The L1 global slice-allocation counter SSBO (one `u32`, `DEVICE_LOCAL`, STORAGE). `None`
+    /// unless the froxel arm is built.
+    light_index_alloc: Option<BoundBuffer>,
+    /// The [`ClusterCullPush`] the cull dispatch pushes (exp-Z near/far + the caps) — meaningless
+    /// while [`Self::cluster_cull_pipeline`] is `None` (never read then).
+    cluster_cull_push: ClusterCullPush,
+    /// The L1 froxel count (`dim_x * dim_y * dim_z`) the cull's 1D dispatch covers — meaningless
+    /// while [`Self::cluster_cull_pipeline`] is `None`.
+    cluster_count: u32,
+    /// The froxel-only Set-0 bind-group LAYOUT — 10 bindings: [`Self::vb_layout0`]'s own 0..7
+    /// PLUS `ClusterGrid` @8 + `LightIndexList` @9 — a DISTINCT layout OBJECT from `vb_layout0`
+    /// (never widened in place, so `vb_layout0` stays byte-identical). `None` unless the froxel
+    /// arm is built.
+    vb_layout0_froxel: Option<VulkanBindGroupLayout>,
+    /// The `vb_resolve` FROXEL-variant compute pipeline (`vb_resolve.comp.hlsl`, `-D FROXEL=1`)
+    /// — the SAME 3-set shape as [`Self::vb_resolve_pipeline`], built against
+    /// [`Self::vb_layout0_froxel`]. `None` unless the froxel arm is built.
+    vb_resolve_froxel_pipeline: Option<ComputePipeline>,
+    /// The `vb_shade` FROXEL-variant compute pipeline (`vb_shade.comp.hlsl`, `-D FROXEL=1`) — the
+    /// SAME 3-set shape as [`Self::vb_shade_pipeline`], built against
+    /// [`Self::vb_layout0_froxel`]. `None` unless the froxel arm is built.
+    vb_shade_froxel_pipeline: Option<ComputePipeline>,
+    /// The `vb_shade` TEXTURED+FROXEL-variant compute pipeline (`vb_shade.comp.hlsl`, `-D
+    /// TEXTURED=1 -D FROXEL=1`) — the SAME 4-set shape as [`Self::vb_shade_tex_pipeline`], built
+    /// against [`Self::vb_layout0_froxel`]. `None` unless the froxel arm is built.
+    vb_shade_tex_froxel_pipeline: Option<ComputePipeline>,
 }
 
 /// Textured-PBR T6c: the TEXTURED gbuffer producer pipeline resources — see
@@ -3603,6 +3652,19 @@ impl GpuSceneBundles {
             // — see that fn's doc.
             vb_shade_tex_pipeline: None,
             vb_instance_rings,
+            // VB-P1a ("dark infra"): built LAZILY by `Self::build_froxel_light_cull`, gated on
+            // the arm bit (hardcoded OFF this rung) — see that fn's doc.
+            cluster_cull_pipeline: None,
+            cull_layout: None,
+            cluster_grid: None,
+            light_index: None,
+            light_index_alloc: None,
+            cluster_cull_push: ClusterCullPush::new(0.0, 0.0, 0, 0),
+            cluster_count: 0,
+            vb_layout0_froxel: None,
+            vb_resolve_froxel_pipeline: None,
+            vb_shade_froxel_pipeline: None,
+            vb_shade_tex_froxel_pipeline: None,
         }
     }
 
@@ -4109,6 +4171,289 @@ impl GpuSceneBundles {
                 self.vb_shade_split_tex_hwrt_pipeline = Some(p);
             }
         }
+    }
+
+    /// VB-P1a ("dark infra"): builds the ENTIRE froxel light-cull machinery — the L1
+    /// `cluster_cull` compute pipeline + its OWN Set-0 layout, the `ClusterGrid`/
+    /// `LightIndexList`/`LightIndexAlloc` device-local buffers (Principle 0 — VM-native
+    /// [`BoundBuffer`]s, never a `std::Vec`/`HashMap` side store), the froxel-only
+    /// `vb_layout0_froxel` Set-0 layout (`vb_layout0`'s own 0..7 PLUS `ClusterGrid` @8 +
+    /// `LightIndexList` @9 — a DISTINCT layout OBJECT, `vb_layout0` itself stays UNCHANGED), and
+    /// the three `_froxel` VB shading pipelines (`vb_resolve_froxel`/`vb_shade_froxel`/
+    /// `vb_shade_tex_froxel`, mirroring [`Self::build_vb_resolve_pipeline`]/
+    /// [`Self::build_vb_classify_pipelines`]/[`Self::build_vb_shade_textured_pipeline`]'s own
+    /// pipeline shapes, built against THIS wider layout instead of `vb_layout0`).
+    ///
+    /// GATED entirely behind `ResolvedRenderPath::froxel_light_cull` at the `boyko_app::runner`
+    /// call site — hardcoded OFF this rung, so this fn is NEVER called in production: every
+    /// field it would populate stays `None`/zeroed, [`Self::scene`] threads that through
+    /// unchanged, and every existing golden stays byte-identical (the 0%-gate). Mirrors
+    /// [`Self::build_vb_shade_textured_pipeline`]'s two-dependency deferred-build shape: called
+    /// ONCE from `runner.rs`, after `MeshGeometryTable::new` AND the bindless texture table both
+    /// exist, iff the arm bit is armed.
+    ///
+    /// `cluster_config` sizes the buffers/push (`ClusterConfig::default()` at every current call
+    /// site — no owner-facing override is wired yet).
+    ///
+    /// # Panics
+    /// Panics (`expect("invariant: ...")`) on any RHI create failure — mirrors every other VB
+    /// pipeline builder's contract (a device OOM at scene-boot time is a setup failure).
+    pub(crate) fn build_froxel_light_cull(
+        &mut self,
+        ctx: &VulkanContext,
+        geometry_set: &boyko_rhi_vulkan::geometry_bindless::VulkanGeometryBindlessSet,
+        bindless: &BindlessTextureTable,
+        cluster_config: ClusterConfig,
+    ) {
+        let device = ctx;
+
+        // --- The L1 cluster-cull compute pipeline + its OWN Set-0 layout ({ camera UBO @0,
+        // light table SSBO @1, ClusterGrid SSBO @2, LightIndexList SSBO @3, LightIndexAlloc SSBO
+        // @4 } — matching `cluster_cull.hlsl`'s own binding table, the SAME shape the L1
+        // host-oracle test harness (`sdf_gbuffer_hybrid.rs`) builds by hand). A DEDICATED
+        // layout, unrelated to `vb_layout0`/`vb_layout0_froxel` — the cull pass is its OWN 1-set
+        // pipeline. ---
+        let cull_layout = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::UniformBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 4,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: L1 cull Set-0 bind-group layout create");
+
+        let cull_cs = RhiDevice::create_shader_module(device, cluster_cull_spirv())
+            .expect("invariant: L1 cluster-cull compute shader module create");
+        let cluster_cull_pipeline = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &cull_cs,
+                entry: c"main",
+                push_constant_bytes: CLUSTER_CULL_PUSH_BYTES,
+                bind_group_layout: Some(&cull_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: L1 cluster-cull compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, cull_cs);
+        }
+
+        // --- The L1 cluster buffers (Principle 0: VM-native `BoundBuffer`s, DEVICE_LOCAL —
+        // never a std::Vec/HashMap side store). Sized from `cluster_config`, mirroring
+        // `sdf_gbuffer_hybrid.rs`'s own host-oracle buffer sizing. ---
+        let cluster_count = cluster_config.cluster_count();
+        let cluster_grid = ctx
+            .create_buffer(&BufferDesc {
+                size: (cluster_count as u64) * 8, // uint2 {offset, count} per froxel
+                usage: BufferUsage::STORAGE,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: L1 ClusterGrid storage buffer create");
+        let light_index = ctx
+            .create_buffer(&BufferDesc {
+                size: (cluster_config.index_list_cap as u64) * 4,
+                usage: BufferUsage::STORAGE,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: L1 LightIndexList storage buffer create");
+        let light_index_alloc = ctx
+            .create_buffer(&BufferDesc {
+                size: 4,
+                usage: BufferUsage::STORAGE,
+                location: MemoryLocation::DeviceLocal,
+            })
+            .expect("invariant: L1 LightIndexAlloc storage buffer create");
+
+        self.cluster_cull_push = ClusterCullPush::new(
+            cluster_config.z_near,
+            cluster_config.z_far,
+            cluster_config.max_lights_per_cluster,
+            cluster_config.index_list_cap,
+        );
+        self.cluster_count = cluster_count;
+        self.cluster_cull_pipeline = Some(cluster_cull_pipeline);
+        self.cull_layout = Some(cull_layout);
+        self.cluster_grid = Some(cluster_grid);
+        self.light_index = Some(light_index);
+        self.light_index_alloc = Some(light_index_alloc);
+
+        // --- `vb_layout0_froxel` — a NEW 10-binding Set-0 layout: `vb_layout0`'s own 0..7 PLUS
+        // `ClusterGrid` @8 + `LightIndexList` @9. Do NOT touch `vb_layout0` itself (byte-identity
+        // of the base 8-binding descriptor-set shape). ---
+        let vb_layout0_froxel = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc {
+                entries: &[
+                    BindGroupLayoutEntry {
+                        binding: 0,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::VERTEX | ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 1,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        count: 1,
+                        kind: DescriptorKind::UniformBuffer,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 3,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 4,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 5,
+                        count: 1,
+                        kind: DescriptorKind::SampledImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 6,
+                        count: 1,
+                        kind: DescriptorKind::StorageImage,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 7,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 8,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    BindGroupLayoutEntry {
+                        binding: 9,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                ],
+            },
+        )
+        .expect("invariant: VB froxel Set-0 bind-group layout create");
+
+        // `vb_resolve_froxel` — the SAME 3-set shape `build_vb_resolve_pipeline` builds, against
+        // the wider `vb_layout0_froxel`.
+        let vb_resolve_froxel_cs = RhiDevice::create_shader_module(device, vb_resolve_froxel_spirv())
+            .expect("invariant: VB resolve FROXEL compute shader module create");
+        let vb_resolve_froxel_pipeline = ctx
+            .create_compute_pipeline_vb(
+                &ComputePipelineDesc {
+                    module: &vb_resolve_froxel_cs,
+                    entry: c"main",
+                    push_constant_bytes: 64,
+                    bind_group_layout: Some(&vb_layout0_froxel),
+                    spec_constants: &[],
+                },
+                self.forward_layout1.set_layout(),
+                geometry_set.set_layout(),
+            )
+            .expect("invariant: VB resolve FROXEL compute pipeline create");
+        // SAFETY: the module was created on `device` and is consumed by the pipeline create;
+        // destroyed once; no GPU work is in flight yet.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_resolve_froxel_cs);
+        }
+
+        // `vb_shade_froxel` — the SAME 3-set shape `build_vb_classify_pipelines`'s own
+        // `vb_shade` build uses, against the wider `vb_layout0_froxel`.
+        let vb_shade_froxel_cs = RhiDevice::create_shader_module(device, vb_shade_froxel_spirv())
+            .expect("invariant: VB shade FROXEL compute shader module create");
+        let vb_shade_froxel_pipeline = ctx
+            .create_compute_pipeline_vb(
+                &ComputePipelineDesc {
+                    module: &vb_shade_froxel_cs,
+                    entry: c"main",
+                    push_constant_bytes: 64,
+                    bind_group_layout: Some(&vb_layout0_froxel),
+                    spec_constants: &[],
+                },
+                self.forward_layout1.set_layout(),
+                geometry_set.set_layout(),
+            )
+            .expect("invariant: VB shade FROXEL compute pipeline create");
+        // SAFETY: as above.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_shade_froxel_cs);
+        }
+
+        // `vb_shade_tex_froxel` — the SAME 4-set shape `build_vb_shade_textured_pipeline` uses,
+        // against the wider `vb_layout0_froxel`.
+        let vb_shade_tex_froxel_cs = RhiDevice::create_shader_module(device, vb_shade_tex_froxel_spirv())
+            .expect("invariant: VB shade TEXTURED+FROXEL compute shader module create");
+        let vb_shade_tex_froxel_pipeline = ctx
+            .create_compute_pipeline_vb_textured(
+                &ComputePipelineDesc {
+                    module: &vb_shade_tex_froxel_cs,
+                    entry: c"main",
+                    push_constant_bytes: 64,
+                    bind_group_layout: Some(&vb_layout0_froxel),
+                    spec_constants: &[],
+                },
+                self.forward_layout1.set_layout(),
+                geometry_set.set_layout(),
+                bindless.set().set_layout(),
+            )
+            .expect("invariant: VB shade TEXTURED+FROXEL compute pipeline create");
+        // SAFETY: as above.
+        unsafe {
+            RhiDevice::destroy_shader_module(device, vb_shade_tex_froxel_cs);
+        }
+
+        self.vb_layout0_froxel = Some(vb_layout0_froxel);
+        self.vb_resolve_froxel_pipeline = Some(vb_resolve_froxel_pipeline);
+        self.vb_shade_froxel_pipeline = Some(vb_shade_froxel_pipeline);
+        self.vb_shade_tex_froxel_pipeline = Some(vb_shade_tex_froxel_pipeline);
     }
 
     /// Cheap, allocation-free steady-state check (asset-streaming plan F7 review W1):
@@ -4821,6 +5166,34 @@ impl GpuSceneBundles {
                 }
             });
 
+        // VB-P1a ("dark infra"): the L1 cluster-cull activation — `Some` only when
+        // `Self::build_froxel_light_cull` ran (gated on `ResolvedRenderPath::froxel_light_cull`,
+        // hardcoded OFF this rung, so this `.zip` chain is ALWAYS `None` in production today —
+        // the 0%-gate). Threading via the SAME `Option::zip` idiom `shadow` above uses keeps this
+        // a single expression rather than five independent `.as_ref()` calls that could disagree.
+        let cluster_cull_bits = self
+            .cluster_cull_pipeline
+            .as_ref()
+            .zip(self.cull_layout.as_ref())
+            .zip(self.cluster_grid.as_ref())
+            .zip(self.light_index.as_ref())
+            .zip(self.light_index_alloc.as_ref())
+            .map(|((((pipeline, layout), grid), index), alloc)| (pipeline, layout, grid, index, alloc));
+        let (cluster_cull, cull_layout, cluster_grid, light_index, light_index_alloc) =
+            match cluster_cull_bits {
+                Some((pipeline, layout, grid, index, alloc)) => {
+                    (Some(pipeline), Some(layout), Some(grid), Some(index), Some(alloc))
+                }
+                None => (None, None, None, None, None),
+            };
+        // The 16-byte `ClusterCullPush` bytes — meaningless (never read by the recorder) while
+        // `cluster_cull` is `None`, so a zeroed push is the honest value then.
+        let mut cluster_cull_push = [0u8; CLUSTER_CULL_PUSH_BYTES as usize];
+        if cluster_cull.is_some() {
+            cluster_cull_push.copy_from_slice(self.cluster_cull_push.as_bytes());
+        }
+        let cluster_count = if cluster_cull.is_some() { self.cluster_count } else { 0 };
+
         GBufferScene {
             raster_pipeline: &self.raster_pipeline,
             vertex_buffer: &self.vertex_buffer,
@@ -4883,13 +5256,13 @@ impl GpuSceneBundles {
             light_staging: &self.light_staging[slot],
             light_upload_bytes: light_upload.unwrap_or(0),
             light_dirty: light_upload.is_some(),
-            cluster_cull: None,
-            cull_layout: None,
-            cluster_grid: None,
-            light_index: None,
-            light_index_alloc: None,
-            cluster_cull_push: [0u8; 16],
-            cluster_count: 0,
+            cluster_cull,
+            cull_layout,
+            cluster_grid,
+            light_index,
+            light_index_alloc,
+            cluster_cull_push,
+            cluster_count,
             // Render terminator-softening: swap in the wrap-variant pipeline when armed (the
             // `terminator_wrap` param doc above); both pipelines share `resolve_layout` (the
             // variant adds no descriptor), so no other field here changes.
@@ -5332,6 +5705,12 @@ impl GpuSceneBundles {
             // `any_textured_material`: `GBufferTargets` needs the ring reference to build
             // `vb_set0_tex` once per extent, independent of any SPECIFIC frame's texture usage).
             vb_shade_tex_pipeline: self.vb_shade_tex_pipeline.as_ref(),
+            // VB-P1a ("dark infra"): `Some` only after `Self::build_froxel_light_cull` ran
+            // (hardcoded OFF this rung) — see that fn's doc.
+            vb_layout0_froxel: self.vb_layout0_froxel.as_ref(),
+            vb_resolve_froxel_pipeline: self.vb_resolve_froxel_pipeline.as_ref(),
+            vb_shade_froxel_pipeline: self.vb_shade_froxel_pipeline.as_ref(),
+            vb_shade_tex_froxel_pipeline: self.vb_shade_tex_froxel_pipeline.as_ref(),
             vb_tex_instance_material_ring: self.tex.as_ref().map(|t| &t.tex_instance_material_rings),
             // Rung R9b: the split pair + VB SSAO gather. The deferred-built pipelines are
             // `Option`-threaded as-is (`Some` after `build_vb_split_pipelines` ran — the
@@ -5860,5 +6239,6 @@ mod tests {
         assert_eq!(gpu.depth_kind, resolved.depth_kind as u32);
         assert_eq!(gpu.thin_aux, resolved.thin_aux.bits());
         assert_eq!(gpu.shadow, resolved.shadow.bits());
+        assert_eq!(gpu.froxel_light_cull, resolved.froxel_light_cull);
     }
 }

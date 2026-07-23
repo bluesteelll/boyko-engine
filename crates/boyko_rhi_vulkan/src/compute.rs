@@ -818,6 +818,42 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// VB-P1a ("dark infra"): the `vb_resolve` FROXEL-variant resolve compute SPIR-V
+    /// (`shaders/vb_resolve.comp.hlsl`, `-D FROXEL=1`) — [`VB_RESOLVE_SPV`]'s SAME source with the
+    /// `#ifdef FROXEL` seam active: the point/spot loop walks the pixel's froxel slice via
+    /// `ClusterGrid`/`LightIndexList` (Set 0 bindings 8/9, froxel-compile-only) instead of the flat
+    /// `[l0a_count, light_count)` scan, gated at runtime on the header's `clusters_enabled` bit —
+    /// the SAME `use_clusters` fallback `forward_opaque_froxel.fs.hlsl` establishes. The base
+    /// (non-FROXEL) compile's tokens are byte-for-byte unperturbed by the `#else` arm, so
+    /// [`VB_RESOLVE_SPV`] stays byte-identical to its pre-VB-P1a build. UNBUILT this rung — the
+    /// arm bit (`ResolvedRenderPath::froxel_light_cull`) is hardcoded OFF, so nothing loads this
+    /// module; committed + byte-gated (`vb_froxel_spv_sync.rs`) ahead of the rung that arms it.
+    VB_RESOLVE_FROXEL_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_resolve_froxel.comp.spv")
+}
+
+embed_spirv! {
+    /// VB-P1a ("dark infra"): the `vb_shade` FROXEL-variant shading compute SPIR-V
+    /// (`shaders/vb_shade.comp.hlsl`, `-D FROXEL=1`) — [`VB_SHADE_SPV`]'s SAME source with the
+    /// SAME `#ifdef FROXEL` seam [`VB_RESOLVE_FROXEL_SPV`] documents (the shading tail is
+    /// character-identical to `vb_resolve.comp.hlsl`'s own, plan D3, so the froxel seam is too).
+    /// UNBUILT this rung — see [`VB_RESOLVE_FROXEL_SPV`]'s doc.
+    VB_SHADE_FROXEL_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_shade_froxel.comp.spv")
+}
+
+embed_spirv! {
+    /// VB-P1a ("dark infra"): the `vb_shade` TEXTURED+FROXEL-variant shading compute SPIR-V
+    /// (`shaders/vb_shade.comp.hlsl`, `-D TEXTURED=1 -D FROXEL=1`) — [`VB_SHADE_TEX_SPV`]'s SAME
+    /// source with the SAME `#ifdef FROXEL` seam, both defines active simultaneously (TEXTURED
+    /// selects the material-eval arm at Set 3; FROXEL selects the point/spot index source — the
+    /// two `#ifdef`s are independent, non-overlapping spans). UNBUILT this rung — see
+    /// [`VB_RESOLVE_FROXEL_SPV`]'s doc.
+    VB_SHADE_TEX_FROXEL_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/vb_shade_tex_froxel.comp.spv")
+}
+
+embed_spirv! {
     /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS vertex
     /// SPIR-V (`shaders/depth_prepass.vs.hlsl`) — a position-only subset of
     /// [`FORWARD_OPAQUE_VS_SPV`] (same instance SSBO + push shape, no normal/mat_id export).
@@ -1761,6 +1797,27 @@ pub fn vb_shade_spirv() -> &'static [u32] {
 #[inline]
 pub fn vb_shade_tex_spirv() -> &'static [u32] {
     VB_SHADE_TEX_SPV.as_words()
+}
+
+/// VB-P1a ("dark infra"): the `vb_resolve` FROXEL-variant resolve compute SPIR-V as a `u32` word
+/// stream. UNBUILT this rung — see [`VB_RESOLVE_FROXEL_SPV`]'s doc.
+#[inline]
+pub fn vb_resolve_froxel_spirv() -> &'static [u32] {
+    VB_RESOLVE_FROXEL_SPV.as_words()
+}
+
+/// VB-P1a ("dark infra"): the `vb_shade` FROXEL-variant shading compute SPIR-V as a `u32` word
+/// stream. UNBUILT this rung — see [`VB_RESOLVE_FROXEL_SPV`]'s doc.
+#[inline]
+pub fn vb_shade_froxel_spirv() -> &'static [u32] {
+    VB_SHADE_FROXEL_SPV.as_words()
+}
+
+/// VB-P1a ("dark infra"): the `vb_shade` TEXTURED+FROXEL-variant shading compute SPIR-V as a
+/// `u32` word stream. UNBUILT this rung — see [`VB_RESOLVE_FROXEL_SPV`]'s doc.
+#[inline]
+pub fn vb_shade_tex_froxel_spirv() -> &'static [u32] {
+    VB_SHADE_TEX_FROXEL_SPV.as_words()
 }
 
 /// Multi-paradigm render-path plan, rung R5 (ForwardPlus): the depth-only PRE-PASS VERTEX

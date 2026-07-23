@@ -2339,6 +2339,12 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // Textured-PBR rung TV0: unread by this harness (never resolves VB, the same rationale
         // as the VB fields above).
         vb_shade_tex_pipeline: None,
+        // VB-P1a ("dark infra"): unread by this harness (never resolves VB, the same rationale
+        // as the VB fields above) — `None` since the froxel arm is never built.
+        vb_layout0_froxel: None,
+        vb_resolve_froxel_pipeline: None,
+        vb_shade_froxel_pipeline: None,
+        vb_shade_tex_froxel_pipeline: None,
         vb_tex_instance_material_ring: None,
         tiles_buffer: &tiles_buffer,
         // Brick bindings 9..=14: the ACTIVATED clip-map's REAL per-level resources. Level 0's grid +
@@ -3391,6 +3397,12 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // Textured-PBR rung TV0: unread by this harness (never resolves VB, the same rationale
         // as the VB fields above).
         vb_shade_tex_pipeline: None,
+        // VB-P1a ("dark infra"): unread by this harness (never resolves VB, the same rationale
+        // as the VB fields above) — `None` since the froxel arm is never built.
+        vb_layout0_froxel: None,
+        vb_resolve_froxel_pipeline: None,
+        vb_shade_froxel_pipeline: None,
+        vb_shade_tex_froxel_pipeline: None,
         vb_tex_instance_material_ring: None,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
@@ -5858,6 +5870,7 @@ fn resolved_render_path_gpu_from(r: &boyko_render::ResolvedRenderPath) -> Resolv
         depth_kind: r.depth_kind as u32,
         thin_aux: r.thin_aux.bits(),
         shadow: r.shadow.bits(),
+        froxel_light_cull: r.froxel_light_cull,
     }
 }
 
@@ -8367,6 +8380,12 @@ fn run_showcase_body_ddgi(
         // Textured-PBR rung TV0: unread by this harness (never resolves VB, the same rationale
         // as the VB fields above).
         vb_shade_tex_pipeline: None,
+        // VB-P1a ("dark infra"): unread by this harness (never resolves VB, the same rationale
+        // as the VB fields above) — `None` since the froxel arm is never built.
+        vb_layout0_froxel: None,
+        vb_resolve_froxel_pipeline: None,
+        vb_shade_froxel_pipeline: None,
+        vb_shade_tex_froxel_pipeline: None,
         vb_tex_instance_material_ring: None,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),
@@ -9838,6 +9857,12 @@ fn run_showcase_body(
         // Textured-PBR rung TV0: unread by this harness (never resolves VB, the same rationale
         // as the VB fields above).
         vb_shade_tex_pipeline: None,
+        // VB-P1a ("dark infra"): unread by this harness (never resolves VB, the same rationale
+        // as the VB fields above) — `None` since the froxel arm is never built.
+        vb_layout0_froxel: None,
+        vb_resolve_froxel_pipeline: None,
+        vb_shade_froxel_pipeline: None,
+        vb_shade_tex_froxel_pipeline: None,
         vb_tex_instance_material_ring: None,
         tiles_buffer: &tiles_buffer,
         pointer_grid: clipmap.grid_buffer(0),

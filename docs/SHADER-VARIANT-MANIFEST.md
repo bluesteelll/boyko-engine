@@ -71,6 +71,41 @@ Reachability note: the VIEWT rows dispatch only under an SDF-carrying `Visibilit
 with TAA armed (`path_sdf_forward_writes_viewt()`); the Forward family never arms them (no AA seam —
 tripwired by a `debug_assert` in `declare_forward_graph`).
 
+## `vb_resolve.comp.hlsl` / `vb_shade.comp.hlsl` — the VisibilityBuffer shading family (compute)
+
+Two sources, each its own `{TEXTURED} x {FROXEL}` matrix against a shared VB-only Set-0 layout
+(`vb_layout0` — 8 bindings — for the base/TEXTURED rows, `vb_layout0_froxel` — 10 bindings,
+`vb_layout0`'s own 0..7 plus `ClusterGrid`@8/`LightIndexList`@9 — for the FROXEL rows; Set 1 = the
+Forward-family shadow set verbatim, Set 2 = the Decision-0 geometry table). `vb_resolve.comp.hlsl`
+is the FUSED resolve (unpacks `vb_id`, re-fetches geometry, shades, writes `lit`);
+`vb_shade.comp.hlsl` is its material-classified sibling (VB-P2 classification plan) — the shading
+tail is character-identical between the two sources by construction (plan D3), so the `FROXEL` seam
+is spliced identically into both. `TEXTURED` selects the bindless-material Set 3 eval (`vb_shade.comp.hlsl`
+only — `vb_resolve.comp.hlsl` has no TEXTURED variant); `FROXEL` (VB-P1a, "dark infra") selects the
+froxel-culled point/spot walk (`ClusterGrid`/`LightIndexList`) over the flat `[l0a_count,
+light_count)` scan, gated at RUNTIME on the header's `clusters_enabled` bit (`use_clusters`) so an
+unarmed frame on a FROXEL-compiled `.spv` still falls back to the identical flat walk. The base
+(non-FROXEL) compile's tokens are byte-for-byte unperturbed by the `#else` arm — verified by re-DXC
+(`vb_froxel_spv_sync.rs`).
+
+| Source | Variant | `TEXTURED` | `FROXEL` | `.spv` | dxc `-T` | Interface delta vs base |
+|---|---|---|---|---|---|---|
+| `vb_resolve.comp.hlsl` | base | — | — | `vb_resolve.comp.spv` | `cs_6_0` | none (the flat all-lights scan). |
+| `vb_resolve.comp.hlsl` | froxel | — | `1` | `vb_resolve_froxel.comp.spv` | `cs_6_0` | `+ StructuredBuffer<uint2> ClusterGrid` @8, `+ StructuredBuffer<uint> LightIndexList` @9 (Set 0 widens to `vb_layout0_froxel`); point/spot loop walks the froxel slice when `use_clusters`, else the base flat scan. |
+| `vb_shade.comp.hlsl` | base | — | — | `vb_shade.comp.spv` | `cs_6_0` | none — the classify-table pixel-selection prologue only (plan D3), otherwise character-identical to `vb_resolve.comp.hlsl`'s own base row. |
+| `vb_shade.comp.hlsl` | textured | `1` | — | `vb_shade_tex.comp.spv` | `cs_6_0` | + `PerInstanceMaterialTex` ring @1 (48 B, replaces the base 32 B `PerInstanceMaterial`) + Set 3 bindless texture-array table (`gTextures[]`@0, `gTexSampler`@1) — the TV0 material-eval splice. |
+| `vb_shade.comp.hlsl` | froxel | — | `1` | `vb_shade_froxel.comp.spv` | `cs_6_0` | same delta as `vb_resolve.comp.hlsl`'s own froxel row. |
+| `vb_shade.comp.hlsl` | textured + froxel | `1` | `1` | `vb_shade_tex_froxel.comp.spv` | `cs_6_0` | both deltas above, combined — the two `#ifdef`s are independent, non-overlapping spans (TEXTURED touches binding 1 + Set 3; FROXEL touches bindings 8/9). |
+
+Reachability note: every `FROXEL` row is UNBUILT-but-armable this rung — VB-P1a ("dark infra")
+lands the machinery with `ResolvedRenderPath::froxel_light_cull` hardcoded OFF
+(`boyko_app::runner`'s boot call site), so `GpuSceneBundles::build_froxel_light_cull` never runs in
+production and no FROXEL pipeline is ever bound; a later rung (VB-P1b) reads a real
+`LightingConfig`-sourced toggle to arm it. The `textured + froxel` row's host-side descriptor SET
+(`vb_set0_tex_froxel`, the TEXTURED ring + `ClusterGrid`/`LightIndexList` combined) is not built
+this rung either — a documented scope cut (`present/passes/vb.rs`'s own comment) for VB-P1b to
+close if TEXTURED and FROXEL must co-occur.
+
 ## Shadow-denoise compute (separate shaders, not `-D` variants of the resolve)
 
 These are distinct `.hlsl`, listed here for the temporal/spatial pipeline picture, not because they are

@@ -1103,6 +1103,10 @@ pub struct ResolvedRenderPathGpu {
     pub thin_aux: u32,
     /// `ShadowSources::bits()`.
     pub shadow: u32,
+    /// VB-P1a ("dark infra"): `ResolvedRenderPath::froxel_light_cull`. Hardcoded `false` today
+    /// (see that field's own doc) — dead-but-threaded, the SAME R1 status this whole struct
+    /// carries for its other fields.
+    pub froxel_light_cull: bool,
 }
 
 /// Code review P2-5: the `RenderPath::VisibilityBuffer` discriminant
@@ -1131,6 +1135,7 @@ impl Default for ResolvedRenderPathGpu {
             depth_kind: 0,
             thin_aux: 0,
             shadow: 0,
+            froxel_light_cull: false,
         }
     }
 }
@@ -2311,6 +2316,34 @@ pub struct GBufferScene<'a> {
     /// on `resolved_render_path.path` (mirrors [`Self::forward_instance_material_ring`]'s own
     /// unconditional-once-built threading).
     pub vb_tex_instance_material_ring: Option<&'a [BoundBuffer; FRAMES_IN_FLIGHT]>,
+
+    // ---- VB-P1a ("dark infra"): the froxel light-cull machinery, gated on the single boot-frozen
+    // arm bit `ResolvedRenderPath::froxel_light_cull` (hardcoded OFF this rung — every field below
+    // stays `None` in production, so nothing is built/selected/recorded). See
+    // `GpuSceneBundles::build_froxel_light_cull`'s doc for the app-side build this feeds. -------
+    /// The froxel-only Set-0 bind-group LAYOUT — 10 bindings: [`Self::vb_layout0`]'s own 0..7
+    /// PLUS `ClusterGrid` @8 (COMPUTE, STORAGE_BUFFER) + `LightIndexList` @9 (COMPUTE,
+    /// STORAGE_BUFFER) — matching `vb_resolve.comp.hlsl`'s/`vb_shade.comp.hlsl`'s own `-D FROXEL`
+    /// binding table doc. A DISTINCT layout OBJECT from [`Self::vb_layout0`] (Vulkan pipeline
+    /// layouts are structurally compared; a 10-binding layout is never compatible with an
+    /// 8-binding one), never a second Set — the froxel VB pipelines are built against THIS
+    /// object, `vb_layout0` itself stays UNCHANGED (8 bindings, byte-identical descriptor-set
+    /// shape). `None` unless `ResolvedRenderPath::froxel_light_cull`'s gate is armed.
+    pub vb_layout0_froxel: Option<&'a VulkanBindGroupLayout>,
+    /// The `vb_resolve` FROXEL-variant compute pipeline (`vb_resolve.comp.hlsl`, `-D FROXEL=1`) —
+    /// the SAME 3-Vulkan-set shape as [`Self::vb_resolve_pipeline`] (Set 0 =
+    /// [`Self::vb_layout0_froxel`], Set 1 = [`Self::forward_layout1`], Set 2 =
+    /// [`Self::vb_geometry_set`]'s layout), built against the WIDER Set-0 layout. `None` unless
+    /// the froxel arm is built.
+    pub vb_resolve_froxel_pipeline: Option<&'a ComputePipeline>,
+    /// The `vb_shade` FROXEL-variant compute pipeline (`vb_shade.comp.hlsl`, `-D FROXEL=1`) — the
+    /// SAME 3-Vulkan-set shape as [`Self::vb_shade_pipeline`], built against
+    /// [`Self::vb_layout0_froxel`]. `None` unless the froxel arm is built.
+    pub vb_shade_froxel_pipeline: Option<&'a ComputePipeline>,
+    /// The `vb_shade` TEXTURED+FROXEL-variant compute pipeline (`vb_shade.comp.hlsl`, `-D
+    /// TEXTURED=1 -D FROXEL=1`) — the SAME 4-Vulkan-set shape as [`Self::vb_shade_tex_pipeline`],
+    /// built against [`Self::vb_layout0_froxel`]. `None` unless the froxel arm is built.
+    pub vb_shade_tex_froxel_pipeline: Option<&'a ComputePipeline>,
 
     // ---- Rung R9b: the VB geo/shade SPLIT pair + its SSAO gather (docs/R9-VB-SPLIT-PLAN.md) --
     /// The `vb_geo` thin-aux geometry compute pipeline (`vb_geo.comp.hlsl`): the split's
