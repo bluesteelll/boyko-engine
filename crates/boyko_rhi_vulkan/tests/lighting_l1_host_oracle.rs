@@ -152,6 +152,57 @@ fn cull_directional_and_sky_are_global_never_in_a_froxel() {
 }
 
 #[test]
+fn cull_keeps_a_shadow_flagged_and_an_atlas_slotted_punctual() {
+    // HOST-ORACLE mask invariant (CPU-only — does NOT exercise the GPU `cluster_cull.hlsl`).
+    // `golden_cluster_cull` culls by `GoldenLight::kind()`, which masks off bit 16
+    // (`casts_sdf_shadow`) and bits 17..21 (the atlas slot) before the POINT/SPOT comparison —
+    // this pins that a shadow-flagged point and an atlas-slotted spot are therefore treated as
+    // their BASE kind and survive the cull, landing in the froxel whose world AABB contains
+    // them, EXACTLY the masking VB-P1-0 added to `cluster_cull.hlsl` (`light_kind()`, mirrored
+    // 1:1 here). The GPU shader's masked-kind byte content is separately pinned by
+    // `cluster_cull_spv_sync.rs`; the end-to-end "flagged lights survive on hardware" proof is
+    // VB-P1b's `vb_mesh_froxel` equality golden.
+    let c = cfg();
+    let header = GoldenLightHeader::new_clustered(0, 2, 1.0, &c);
+    let lights = vec![
+        GoldenLight::point([0.0, 0.0, 0.0], [1.0, 1.0, 1.0], 100.0, 3.0).with_sdf_shadow(),
+        GoldenLight::spot([0.2, 0.2, 0.5], [0.0, 0.0, 1.0], [1.0, 1.0, 0.5], 3000.0, 3.0, 20.0, 35.0)
+            .with_atlas_slot(4),
+    ];
+    assert!(lights[0].casts_sdf_shadow(), "index 0 must carry the P6 R1 shadow flag (bit 16)");
+    assert_eq!(lights[1].atlas_slot(), 4, "index 1 must carry a real atlas slot (bits 17..21)");
+    assert!(lights[1].casts_sdf_shadow(), "a real atlas slot also sets the shadow flag (bit 16)");
+
+    let grid = golden_cluster_cull(SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, &c, &header, &lights);
+    assert_eq!(grid.len(), c.cluster_count() as usize);
+
+    let mut shadow_flagged_point_seen = 0u32;
+    let mut atlas_slotted_spot_seen = 0u32;
+    for cell in &grid {
+        for &i in cell {
+            if i == 0 {
+                shadow_flagged_point_seen += 1;
+            }
+            if i == 1 {
+                atlas_slotted_spot_seen += 1;
+            }
+        }
+    }
+    assert!(
+        shadow_flagged_point_seen > 0,
+        "the shadow-flagged point must SURVIVE the host-oracle cull: `GoldenLight::kind()` masks \
+         off bit 16 before the LIGHT_KIND_POINT comparison, so the flag never perturbs the kind \
+         classification"
+    );
+    assert!(
+        atlas_slotted_spot_seen > 0,
+        "the atlas-slotted spot must SURVIVE the host-oracle cull: `GoldenLight::kind()` masks \
+         off bits 17..21 before the LIGHT_KIND_SPOT comparison, so the slot never perturbs the \
+         kind classification"
+    );
+}
+
+#[test]
 fn clustered_resolve_off_is_byte_identical_to_brute_force() {
     // The L1 0%-gate: a header with clusters DISABLED makes `golden_deferred_resolve_clustered`
     // delegate to the brute-force table resolve — byte-identical to L0b for every pixel.

@@ -4645,10 +4645,12 @@ fn count_lit_table_outliers(
 // directional keeps the marcher's `gMaterial.r`; every EXTRA flagged caster (point/spot via
 // the flat table on this NON-CLUSTERED path, plus extra directionals) marches the field.
 //
-// CONSTRAINT (documented): the frozen GPU `cluster_cull.hlsl` compares the RAW `e.kind`, so a
-// shadow-flagged punctual is DROPPED by the GPU clustered cull until a follow-up rung. The R1
-// multi-light GPU golden therefore drives the NON-CLUSTERED resolve (`clusters_enabled ==
-// false`, i.e. a non-clustered `GoldenLightHeader`) — the same flat-table path
+// SCOPE (documented): since VB-P1-0, `cluster_cull.hlsl` masks the kind word via
+// `light_kind()`, so a shadow-flagged / atlas-slotted punctual SURVIVES the GPU clustered cull
+// like any other point/spot light (see `light_table.hlsli::light_kind`). The R1 multi-light GPU
+// golden still drives the NON-CLUSTERED resolve (`clusters_enabled == false`, i.e. a
+// non-clustered `GoldenLightHeader`) — a deliberate FIXTURE CHOICE isolating the flat-table
+// shadow-march path from L1 clustering, not a cull-drop workaround — the same flat-table path
 // `l0b_point_and_spot_match_the_table_oracle` exercises.
 //
 // The HOST oracle is `golden_deferred_resolve_table_shadowed` (the `shadow_mode != 0` mirror),
@@ -4955,12 +4957,39 @@ fn p6_r1_oracle_produces_shadowed_pixels() {
     assert_eq!(header.shadow_mode(), 1, "the R1 fixture must set shadow_mode == 1");
     assert_eq!(
         header.cluster_params, [0.0, 0.0, 0.0, 0.0],
-        "the R1 fixture MUST be NON-CLUSTERED (cluster_params == 0 ⇒ clusters_enabled == false): \
-         the frozen cluster_cull drops shadow-flagged punctuals"
+        "the R1 fixture is NON-CLUSTERED by harness design (this GPU golden drives the flat-table \
+         resolve, `run_gbuffer_hybrid_lit_table`, which never dispatches `cluster_cull.hlsl`) — \
+         NOT a cull-drop workaround"
     );
     assert!(
         lights.iter().skip(1).all(|l| l.casts_sdf_shadow()),
         "both extra punctual casters must be flagged casts_sdf_shadow"
+    );
+    // HOST-ORACLE mask invariant (CPU-only — does NOT exercise the GPU `cluster_cull.hlsl`, since
+    // this harness never dispatches it; see the assertion above). `golden_cluster_cull` culls by
+    // `GoldenLight::kind()`, which masks off bit 16 (`casts_sdf_shadow`) before the POINT/SPOT
+    // comparison, so these two flagged casters are classified by their BASE kind and survive —
+    // the SAME masking VB-P1-0 added to the GPU shader (`light_kind()`, mirrored 1:1 here). The
+    // GPU shader's masked-kind byte content is separately pinned by `cluster_cull_spv_sync.rs`;
+    // the end-to-end "flagged lights survive on hardware" proof is VB-P1b's `vb_mesh_froxel`
+    // equality golden.
+    let cull_cfg = l1_cluster_config();
+    let cull_header = GoldenLightHeader::new_clustered(1, 2, 1.0, &cull_cfg);
+    let grid = golden_cluster_cull(SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, &cull_cfg, &cull_header, &lights);
+    let mut caster_a_seen = false;
+    let mut caster_b_seen = false;
+    for cell in &grid {
+        if cell.contains(&1) {
+            caster_a_seen = true;
+        }
+        if cell.contains(&2) {
+            caster_b_seen = true;
+        }
+    }
+    assert!(
+        caster_a_seen && caster_b_seen,
+        "both shadow-flagged point casters (table indices 1, 2) must SURVIVE the host-oracle \
+         cull: `GoldenLight::kind()` masks the shadow flag off before the kind comparison"
     );
 
     let (shadowed_px, sdf_lit_px) =

@@ -265,9 +265,9 @@ LightElem load_light(StructuredBuffer<uint> LightBuf, uint i) {
 }
 
 // P6 R1: the kind enum with the flag bits masked off — use this for every `kind ==`
-// comparison (the resolve does; the cull keeps the raw `e.kind`, unaffected since a
-// shadow-flagged point's `kind != LIGHT_KIND_POINT` correctly skips the cull until the
-// follow-up rung masks it there too).
+// comparison. The resolve uses it, and (since VB-P1-0) `cluster_cull.hlsl` does too: a
+// shadow-flagged / atlas-slotted point/spot is classified by its BASE kind and survives the
+// cull like any other point/spot light (see `cluster_cull.hlsl`'s `main`).
 uint light_kind(LightElem e) {
     return e.kind & LIGHT_KIND_MASK;
 }

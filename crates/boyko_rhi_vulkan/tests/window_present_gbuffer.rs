@@ -9862,8 +9862,8 @@ fn run_showcase_body(
         light_staging: &light_staging,
         light_upload_bytes: light_table_bytes,
         light_dirty: false,
-        // L1 cluster cull OFF (NON-CLUSTERED): the frozen `cluster_cull.hlsl` drops a
-        // shadow-flagged punctual, so the multi-light SDF-shadow path runs on the flat-table
+        // L1 cluster cull OFF (NON-CLUSTERED): a deliberate harness choice, not a cull-drop
+        // workaround — this showcase runs the multi-light SDF-shadow path on the flat-table
         // (non-clustered) resolve — exactly `p6_r1_multi_light_sdf_shadows_match_oracle`'s path.
         cluster_cull: None,
         cull_layout: None,

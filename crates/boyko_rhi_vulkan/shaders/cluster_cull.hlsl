@@ -160,7 +160,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
     uint nlocal = 0u;
     for (uint i = hd.l0a_count; i < hd.light_count; ++i) {
         LightElem L = load_light(LightBuf, i);
-        if (L.kind != LIGHT_KIND_POINT && L.kind != LIGHT_KIND_SPOT) {
+        uint k = light_kind(L); // mask off the bit-16 shadow flag + bits-17..21 atlas slot (light_table.hlsli)
+        if (k != LIGHT_KIND_POINT && k != LIGHT_KIND_SPOT) {
             continue;
         }
         float r = L.range;

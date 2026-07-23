@@ -3754,13 +3754,13 @@ pub fn golden_deferred_resolve_clustered(
 /// rule + ranged march + dominant-N cap + NoL skip as [`golden_deferred_resolve_table_shadowed`]).
 /// When clusters are OFF (or a non-lit pixel) this DELEGATES to the flat shadowed table oracle.
 ///
-/// # Limitation (the cull does NOT mask the flag in R1)
-/// `golden_cluster_cull` (frozen) compares the RAW `li.kind()` — wait, the host `kind()` now
-/// masks the flag, so the HOST cull correctly includes a shadow-flagged point. The GPU
-/// `cluster_cull.hlsl` compares the raw `e.kind` (unmasked), so a shadow-flagged punctual is
-/// dropped by the GPU cull until a follow-up masks it there too. R1's multi-light shadow GPU
-/// golden therefore uses the NON-clustered path; this clustered oracle exists for parity
-/// (casting DIRECTIONALS + non-casting clustered punctual lights match).
+/// # VB-P1-0: the host + GPU cull now agree
+/// `golden_cluster_cull` masks via `GoldenLight::kind()`, and (since VB-P1-0) `cluster_cull.hlsl`
+/// masks via `light_kind()` too, so a shadow-flagged / atlas-slotted punctual SURVIVES both culls
+/// identically. R1's multi-light shadow GPU golden still exercises the NON-clustered path (a
+/// harness-structure choice — its runner never dispatches `cluster_cull.hlsl`, not a cull-drop
+/// workaround); this clustered oracle exists for parity (casting DIRECTIONALS + non-casting
+/// clustered punctual lights match).
 #[allow(clippy::too_many_arguments)]
 pub fn golden_deferred_resolve_clustered_shadowed<F: Fn([f32; 3]) -> f32>(
     attrs: MarcherAttributes,
