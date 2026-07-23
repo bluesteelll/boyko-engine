@@ -2291,6 +2291,8 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // semantically-wrong placeholder).
         sdf_forward_march_pipeline: None,
         sdf_forward_march_sdfonly_pipeline: None,
+        sdf_forward_march_viewt_pipeline: None,
+        sdf_forward_march_sdfonly_viewt_pipeline: None,
         sdf_forward_march_layout: None,
         brick_levels_ubo: None,
         sdf_forward_view_z_a: 0.0,
@@ -3322,6 +3324,8 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // semantically-wrong placeholder).
         sdf_forward_march_pipeline: None,
         sdf_forward_march_sdfonly_pipeline: None,
+        sdf_forward_march_viewt_pipeline: None,
+        sdf_forward_march_sdfonly_viewt_pipeline: None,
         sdf_forward_march_layout: None,
         brick_levels_ubo: None,
         sdf_forward_view_z_a: 0.0,
@@ -8277,6 +8281,8 @@ fn run_showcase_body_ddgi(
         // semantically-wrong placeholder).
         sdf_forward_march_pipeline: None,
         sdf_forward_march_sdfonly_pipeline: None,
+        sdf_forward_march_viewt_pipeline: None,
+        sdf_forward_march_sdfonly_viewt_pipeline: None,
         sdf_forward_march_layout: None,
         brick_levels_ubo: None,
         sdf_forward_view_z_a: 0.0,
@@ -9727,6 +9733,8 @@ fn run_showcase_body(
         // semantically-wrong placeholder).
         sdf_forward_march_pipeline: None,
         sdf_forward_march_sdfonly_pipeline: None,
+        sdf_forward_march_viewt_pipeline: None,
+        sdf_forward_march_sdfonly_viewt_pipeline: None,
         sdf_forward_march_layout: None,
         brick_levels_ubo: None,
         sdf_forward_view_z_a: 0.0,

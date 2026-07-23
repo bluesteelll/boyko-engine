@@ -629,3 +629,66 @@ BOYKO_TAA_SCOPE          = "raster"
 BOYKO_TAA_SHARPEN        = "rcas"
 BOYKO_RENDER_PATH        = "vb"
 BOYKO_GEOMETRY_LEGS      = "mesh"
+
+[vb_both_taa]
+# TAA-under-VB, the VIEWT rung (VisibilityBuffer x Both): [vb_taa]'s taa_jitter_eval scene
+# (which REALLY contains an SdfEdit::sphere among the mesh cubes - unlike [vb_both]'s empty
+# edit-list) driven through vb x both. The chain this pin freezes: the jittered reverse-Z
+# push rasterized by vb_raster, then the HAS_MESH+VIEWT sdf_forward_march variant as the SOLE
+# gViewT producer (marched t on SDF-owned pixels, the decoded t_mesh on mesh pixels, the
+# 1.0e30 sentinel on background - vb_viewt is structurally OFF here, its arming is
+# mesh-and-not-sdf), and the UNCHANGED taa_resolve accumulating over the composited lit.
+#
+# These bytes MUST differ from [vb_both]'s AA-off frame family (dead-chain alarm) AND from
+# [vb_taa] (the SDF sphere is marched here but absent under legs=mesh - if they agree the
+# marcher leg went dead). sha256_hwrt EQUALS sha256_software on this scene (each leg blessed
+# on its own run - the [vb_taa] precedent).
+crate           = "boyko-app"
+test_binary     = "taa_jitter_eval"
+test_name       = "taa_jitter_eval_screenshot_dump"
+bmp             = "D:\tmp\vb_both_taa.bmp"
+width           = 512
+height          = 512
+sha256_software = "61dc2630b15a08712f95be5983a6bd75ffbf03650266857ed62c10cb03b81230"
+sha256_hwrt     = "61dc2630b15a08712f95be5983a6bd75ffbf03650266857ed62c10cb03b81230"
+
+[vb_both_taa.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\tmp\vb_both_taa.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+BOYKO_AA                 = "taa"
+BOYKO_WIN                = "512"
+BOYKO_TAA_SCOPE          = "raster"
+BOYKO_RENDER_PATH        = "vb"
+BOYKO_GEOMETRY_LEGS      = "both"
+
+[vb_sdf_taa]
+# TAA-under-VB, the VIEWT rung (VisibilityBuffer x Sdf, mesh-less): the taa_jitter_eval scene
+# under legs=sdf - no raster, vb_sky + the SDFONLY+VIEWT sdf_forward_march variant are the
+# sole producers (gViewT = marched t on the sphere, 1.0e30 everywhere else; the jittered push
+# is built but consumed by no raster - SDF pixels are reprojection-stabilized, not
+# supersampled, the SAME C1-cut semantics Deferred x Sdf TAA ships with today).
+#
+# These bytes MUST differ from the SAME scene/legs with BOYKO_AA unset (dead-chain alarm -
+# verified at bless time against a fresh AA-off render, not a stored pin). sha256_hwrt EQUALS
+# sha256_software on this scene (each leg blessed on its own run - the [vb_taa] precedent).
+crate           = "boyko-app"
+test_binary     = "taa_jitter_eval"
+test_name       = "taa_jitter_eval_screenshot_dump"
+bmp             = "D:\tmp\vb_sdf_taa.bmp"
+width           = 512
+height          = 512
+sha256_software = "00da67699d2d4615e5d7fd9196ab4671db044915463a0b4dce6f9531a50373de"
+sha256_hwrt     = "00da67699d2d4615e5d7fd9196ab4671db044915463a0b4dce6f9531a50373de"
+
+[vb_sdf_taa.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\tmp\vb_sdf_taa.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+BOYKO_AA                 = "taa"
+BOYKO_WIN                = "512"
+BOYKO_TAA_SCOPE          = "raster"
+BOYKO_RENDER_PATH        = "vb"
+BOYKO_GEOMETRY_LEGS      = "sdf"

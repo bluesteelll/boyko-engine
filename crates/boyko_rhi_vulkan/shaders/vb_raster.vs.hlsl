@@ -13,8 +13,10 @@
 //      VS-only system value with no guaranteed FS-side read, so the id is threaded flat instead
 //      of recomputed in the fragment stage from a bare push + a nonexistent FS `SV_InstanceID`).
 //
-// NO jitter this rung (TAA is capped off under VB v1 — `RenderPathDegrade::VbTaaNotYetImplemented`
-// — so there is no supersampled history to align against yet).
+// NO jitter IN THIS SHADER at any rung: the TAA-under-VB rungs jitter the HOST-side push
+// (`boyko_render::view::forward_view_proj_rows_jittered` perturbs the `view_proj` rows 0/1 when
+// TAA is armed; the reverse-Z depth row stays byte-untouched), so this VS is jitter-agnostic —
+// it multiplies whatever `pc.view_proj` arrives, jittered or not.
 //
 // The PUSH CONSTANT layout is byte-identical to `forward_opaque.vs.hlsl`'s / `depth_prepass.vs.hlsl`'s
 // 88-byte `{ float4x4 view_proj; float4 cam_eye; uint base_instance; uint use_model_matrix }`

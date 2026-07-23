@@ -45,6 +45,7 @@ use boyko_rhi_vulkan::compute::{
     gbuffer_mrt_pm_fs_spirv, gbuffer_mrt_pm_vs_spirv, gbuffer_mrt_tex_fs_spirv,
     gbuffer_mrt_tex_vs_spirv, gbuffer_mrt_vs_spirv, interp_instances_spirv, punctual_depth_fs_spirv,
     punctual_depth_vs_spirv, rcas_spirv, sdf_forward_march_spirv, sdf_forward_march_sdfonly_spirv,
+    sdf_forward_march_sdfonly_viewt_spirv, sdf_forward_march_viewt_spirv,
     sdf_gbuffer_composite_spirv, sdf_probe_update_spirv,
     sdf_ssao_spirv_variant, smaa_blend_fs_spirv, smaa_edge_fs_spirv, smaa_weight_fs_spirv,
     SSAO_ATROUS_PUSH_BYTES, ssao_atrous_read8_spirv, ssao_atrous_spirv, ssao_atrous_write8_spirv,
@@ -882,7 +883,13 @@ pub(crate) struct GpuSceneBundles {
     /// [`Self::sdf_forward_march_layout`] (the code-review-fixed "one layout object per pipeline
     /// family" discipline `forward_layout0` already establishes).
     sdf_forward_march_sdfonly_pipeline: ComputePipeline,
-    /// The `sdf_forward_march` pass's dedicated 13-binding Set-0 bind-group LAYOUT — see
+    /// TAA-under-VB: the `sdf_forward_march` `HAS_MESH + VIEWT` compute pipeline (`-D HAS_MESH=1
+    /// -D VIEWT=1`) — [`Self::sdf_forward_march_pipeline`] plus the `gViewT` binding-13 write.
+    /// Selected at record when the scene's `path_sdf_forward_writes_viewt()` predicate holds.
+    sdf_forward_march_viewt_pipeline: ComputePipeline,
+    /// TAA-under-VB: the `sdf_forward_march` mesh-less `VIEWT` compute pipeline (`-D VIEWT=1`).
+    sdf_forward_march_sdfonly_viewt_pipeline: ComputePipeline,
+    /// The `sdf_forward_march` pass's dedicated 14-binding Set-0 bind-group LAYOUT — see
     /// `boyko_rhi_vulkan::present::scene_types::GBufferScene::sdf_forward_march_layout`'s doc for
     /// the full binding table this fn's `boot` construction site mirrors.
     sdf_forward_march_layout: VulkanBindGroupLayout,
@@ -2644,15 +2651,18 @@ impl GpuSceneBundles {
             RhiDevice::destroy_shader_module(device, forward_plus_vs);
         }
 
-        // ── Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march` pass's Set-0
-        // vocabulary bind-group LAYOUT (13 bindings, matching the shader's own binding table doc
-        // — `shaders/sdf_forward_march.comp.hlsl`'s header) + its TWO compute pipeline variants.
+        // ── Multi-paradigm render-path plan, rung R-SDFFWD (+ the TAA-under-VB `VIEWT` rung):
+        // the `sdf_forward_march` pass's Set-0 vocabulary bind-group LAYOUT (14 bindings,
+        // matching the shader's own binding table doc — `shaders/sdf_forward_march.comp.hlsl`'s
+        // header) + its FOUR `{HAS_MESH} x {VIEWT}` compute pipeline variants.
         // Built UNCONDITIONALLY at boot (the Forward v1 trio's own "cheap, no per-frame cost
         // either way" precedent — `ResolvedRenderPath` does not reach `boot()`'s call site); only
-        // a Forward-family-resolved boot with the SDF leg present ever RECORDS the pass. BOTH
+        // a Forward-family-resolved boot with the SDF leg present ever RECORDS the pass. ALL
         // pipeline variants are built against this ONE layout object (the code-review-fixed "one
         // layout per pipeline family" discipline `forward_layout0` already establishes) at Set 0,
-        // + `forward_layout1` at Set 1 (the shadow set, REUSED VERBATIM — no separate layout).
+        // + `forward_layout1` at Set 1 (the shadow set, REUSED VERBATIM — no separate layout):
+        // @12 is HAS_MESH-referenced only and @13 VIEWT-referenced only, bound-but-unread by the
+        // other variants (the R2 contract).
         let sdf_forward_march_layout = RhiDevice::create_bind_group_layout(
             device,
             &BindGroupLayoutDesc {
@@ -2681,9 +2691,12 @@ impl GpuSceneBundles {
                     BindGroupLayoutEntry { binding: 10, count: 1, kind: DescriptorKind::CombinedImageSampler, stage: ShaderStage::COMPUTE },
                     // b11: BrickLevels UBO (M4Level clip-map geometry, don't-care while brick_levels==0).
                     BindGroupLayoutEntry { binding: 11, count: 1, kind: DescriptorKind::UniformBuffer, stage: ShaderStage::COMPUTE },
-                    // t12: gForwardDepth SAMPLED (declared for BOTH pipeline variants — the R2
+                    // t12: gForwardDepth SAMPLED (declared for ALL pipeline variants — the R2
                     // bound-but-unread contract; the mesh-less SPIR-V never statically references it).
                     BindGroupLayoutEntry { binding: 12, count: 1, kind: DescriptorKind::SampledImage, stage: ShaderStage::COMPUTE },
+                    // u13: gViewT STORAGE (TAA-under-VB; VIEWT-variant-referenced only — the
+                    // no-VIEWT SPIR-V never statically references it, the SAME R2 contract).
+                    BindGroupLayoutEntry { binding: 13, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
                 ],
             },
         )
@@ -2717,9 +2730,42 @@ impl GpuSceneBundles {
                 forward_layout1.set_layout(),
             )
             .expect("invariant: sdf_forward_march mesh-less compute pipeline create");
-        // SAFETY: both modules were created on `device` and are consumed by their respective
+        // TAA-under-VB: the two `VIEWT` gViewT-producing siblings (same layout, same push).
+        let sdf_forward_march_viewt_cs =
+            RhiDevice::create_shader_module(device, sdf_forward_march_viewt_spirv())
+                .expect("invariant: sdf_forward_march HAS_MESH+VIEWT compute shader module create");
+        let sdf_forward_march_viewt_pipeline = ctx
+            .create_compute_pipeline_forward(
+                &ComputePipelineDesc {
+                    module: &sdf_forward_march_viewt_cs,
+                    entry: c"main",
+                    push_constant_bytes: SDF_FORWARD_MARCH_PUSH_BYTES,
+                    bind_group_layout: Some(&sdf_forward_march_layout),
+                    spec_constants: &[],
+                },
+                forward_layout1.set_layout(),
+            )
+            .expect("invariant: sdf_forward_march HAS_MESH+VIEWT compute pipeline create");
+        let sdf_forward_march_sdfonly_viewt_cs =
+            RhiDevice::create_shader_module(device, sdf_forward_march_sdfonly_viewt_spirv())
+                .expect("invariant: sdf_forward_march mesh-less VIEWT compute shader module create");
+        let sdf_forward_march_sdfonly_viewt_pipeline = ctx
+            .create_compute_pipeline_forward(
+                &ComputePipelineDesc {
+                    module: &sdf_forward_march_sdfonly_viewt_cs,
+                    entry: c"main",
+                    push_constant_bytes: SDF_FORWARD_MARCH_PUSH_BYTES,
+                    bind_group_layout: Some(&sdf_forward_march_layout),
+                    spec_constants: &[],
+                },
+                forward_layout1.set_layout(),
+            )
+            .expect("invariant: sdf_forward_march mesh-less VIEWT compute pipeline create");
+        // SAFETY: all four modules were created on `device` and are consumed by their respective
         // pipeline create calls above; each is destroyed once; no GPU work is in flight yet.
         unsafe {
+            RhiDevice::destroy_shader_module(device, sdf_forward_march_sdfonly_viewt_cs);
+            RhiDevice::destroy_shader_module(device, sdf_forward_march_viewt_cs);
             RhiDevice::destroy_shader_module(device, sdf_forward_march_sdfonly_cs);
             RhiDevice::destroy_shader_module(device, sdf_forward_march_cs);
         }
@@ -3321,6 +3367,8 @@ impl GpuSceneBundles {
             forward_plus_pipeline,
             sdf_forward_march_pipeline,
             sdf_forward_march_sdfonly_pipeline,
+            sdf_forward_march_viewt_pipeline,
+            sdf_forward_march_sdfonly_viewt_pipeline,
             sdf_forward_march_layout,
             dispatch_group_count_x,
             vb_layout0,
@@ -4243,25 +4291,26 @@ impl GpuSceneBundles {
         // async `light_upload` is light-generic, not leg-owned, so it is untouched.)
         let sdf_leg = resolved_render_path.sdf_leg;
 
-        // TAA supports two producer shapes today: `Deferred` (any legs — the marcher/gbuffer
-        // resolve own `gViewT`) and `VisibilityBuffer × Mesh` (exactly — `viewt_from_depth_rz`
-        // stands in for the missing marcher, see `viewt_from_vb_depth` above/below).
+        // TAA supports two path families today: `Deferred` (any legs — the marcher/gbuffer
+        // resolve own `gViewT`) and `VisibilityBuffer` (any legs — `viewt_from_depth_rz` on the
+        // marcher-less Mesh config, the VIEWT-variant `sdf_forward_march` composite on the
+        // SDF-carrying legs; see `viewt_from_vb_depth` above/below).
         // `ResolvedRenderPath::taa_supported()` is the SINGLE predicate every TAA gate reads —
-        // this degrade, the resolver's own `cap_forward_v1_consumers`/`cap_vb_v1_consumers`
-        // narrowing (`RenderPathDegrade::{ForwardTaaNotYetImplemented, VbTaaNotYetImplemented}`),
-        // and `boyko_app::runner`'s `taa_armed_now` arm-state all consume it, so the three can
+        // this degrade, the resolver's own `cap_forward_v1_consumers` narrowing
+        // (`RenderPathDegrade::ForwardTaaNotYetImplemented`), and `boyko_app::runner`'s
+        // `taa_armed_now` arm-state all consume it, so the three can
         // never disagree (a split-brain half-armed state would mean jitter with no accumulator,
         // or an armed `aa_out` with no matching dispatch). But the AA ACTIVATION arming below
         // reads only `aa_mode` (from `AaConfig`), NOT the resolved path — so an `AaMode::Taa`
-        // request on an unsupported combination (VB × Both/Sdf, or Forward/ForwardPlus) would arm
+        // request on an unsupported combination (Forward/ForwardPlus) would arm
         // `scene.taa` (and thus `aa_out`) while the recorder runs NO temporal resolve, leaving
         // `aa_out` armed with no matching AA dispatch (the VB/forward AA blocks assert exactly
         // that — a debug panic, a never-written `aa_out` sampled in release). Degrade an
         // unsupported TAA request to `Off` HERE, at the single point where `aa_mode` feeds every
         // AA activation, so `aa_out` never arms without a pass. FXAA / SMAA / SSAA are NOT capped
-        // and arm as usual; a `taa_supported()` TAA request (Deferred any legs, or VB × Mesh) is
-        // byte-UNCHANGED (the `taa_armed` / `taa_rcas` goldens hold for Deferred; VB × Mesh gains
-        // TAA support here for the first time).
+        // and arm as usual; a `taa_supported()` TAA request (Deferred or VB, any legs) is
+        // byte-UNCHANGED (the `taa_armed` / `taa_rcas` / `vb_taa` goldens hold; the SDF-carrying
+        // VB legs gain TAA support at the VIEWT rung).
         let aa_mode = if aa_mode == AaMode::Taa && !resolved_render_path.taa_supported() {
             AaMode::Off
         } else {
@@ -4414,18 +4463,19 @@ impl GpuSceneBundles {
                 layout: &self.viewt_from_depth_layout,
                 mesh_view_t_norm: mesh_view_t_norm(camera_mode),
             }),
-            // TAA-under-VB: armed exactly when the resolved path/legs support TAA under
-            // `VisibilityBuffer` (`resolved_render_path.taa_supported()`'s VB branch --
-            // `taa_supported()` also covers Deferred, which owns `viewt_from_depth` above
-            // instead, so the `matches!` narrows this arm to VB×Mesh only) AND the
-            // (post-degrade, ALREADY-clamped) `aa_mode` above resolves to `Taa` -- the same two
-            // conditions that gate `GBufferScene::taa` itself, so this pass and the resolve it
-            // feeds can never independently disagree. `None` on every other leg/path/AA
-            // combination (the marcher, the Deferred producer above, or no TAA consumer at all).
-            viewt_from_vb_depth: (resolved_render_path.taa_supported()
-                && matches!(resolved_render_path.path, boyko_render::RenderPath::VisibilityBuffer)
+            // TAA-under-VB: armed exactly for the marcher-less `VB × Mesh` config (`mesh_leg &&
+            // !sdf_leg` — the SAME narrowing `viewt_from_depth` above applies under Deferred: on
+            // an SDF-carrying VB leg the `VIEWT`-variant marcher IS the composite and the SOLE
+            // `gViewT` producer, `path_sdf_forward_writes_viewt()`) AND the (post-degrade,
+            // ALREADY-clamped) `aa_mode` above resolves to `Taa` -- the same condition that gates
+            // `GBufferScene::taa` itself, so this pass and the resolve it feeds can never
+            // independently disagree. `None` on every other leg/path/AA combination (the VB
+            // marcher, the Deferred producers above, or no TAA consumer at all).
+            viewt_from_vb_depth: (matches!(resolved_render_path.path, boyko_render::RenderPath::VisibilityBuffer)
+                && mesh_leg
+                && !sdf_leg
                 && aa_mode == AaMode::Taa)
-                .then(|| ViewtFromVbDepthActivation {
+                .then_some(ViewtFromVbDepthActivation {
                     pipeline: &self.viewt_from_vb_depth_pipeline,
                     layout: &self.viewt_from_vb_depth_layout,
                     view_z_a: vb_viewt_view_z_a,
@@ -4865,6 +4915,8 @@ impl GpuSceneBundles {
             // holds.
             sdf_forward_march_pipeline: Some(&self.sdf_forward_march_pipeline),
             sdf_forward_march_sdfonly_pipeline: Some(&self.sdf_forward_march_sdfonly_pipeline),
+            sdf_forward_march_viewt_pipeline: Some(&self.sdf_forward_march_viewt_pipeline),
+            sdf_forward_march_sdfonly_viewt_pipeline: Some(&self.sdf_forward_march_sdfonly_viewt_pipeline),
             sdf_forward_march_layout: Some(&self.sdf_forward_march_layout),
             brick_levels_ubo: Some(&self.brick_levels_ubo),
             sdf_forward_view_z_a,
@@ -5067,6 +5119,8 @@ impl GpuSceneBundles {
             // being destroyed before `forward_plus_pipeline`, above, already establishes).
             RhiDevice::destroy_compute_pipeline(ctx, self.sdf_forward_march_pipeline);
             RhiDevice::destroy_compute_pipeline(ctx, self.sdf_forward_march_sdfonly_pipeline);
+            RhiDevice::destroy_compute_pipeline(ctx, self.sdf_forward_march_viewt_pipeline);
+            RhiDevice::destroy_compute_pipeline(ctx, self.sdf_forward_march_sdfonly_viewt_pipeline);
             RhiDevice::destroy_bind_group_layout(ctx, self.sdf_forward_march_layout);
             RhiDevice::destroy_graphics_pipeline(ctx, self.present_pipeline);
             RhiDevice::destroy_graphics_pipeline(ctx, self.fxaa_pipeline);

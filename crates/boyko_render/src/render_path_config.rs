@@ -424,26 +424,26 @@ pub struct ResolvedRenderPath {
 // gate is simply "resolved once, never re-derived," which [`resolve_render_path`] already is.
 
 impl ResolvedRenderPath {
-    /// TAA support matrix — the SINGLE predicate every TAA gate consumes (the resolver's
-    /// [`cap_vb_v1_consumers`] narrowing, `GpuSceneBundles::scene`'s `AaMode::Taa` degrade,
-    /// and `boyko_app::runner`'s `taa_armed_now` arm-state all read THIS method, so the four
-    /// gates can never disagree — a split-brain half-armed state means jitter with no
-    /// accumulator, or an armed `aa_out` with no matching dispatch):
+    /// TAA support matrix — the SINGLE predicate every TAA gate consumes
+    /// (`GpuSceneBundles::scene`'s `AaMode::Taa` degrade and `boyko_app::runner`'s
+    /// `taa_armed_now` arm-state both read THIS method, so the gates can never disagree — a
+    /// split-brain half-armed state means jitter with no accumulator, or an armed `aa_out`
+    /// with no matching dispatch):
     ///
     /// * `Deferred` (any legs) — the original TAA home: jittered raster push + marcher-owned
     ///   `gViewT` + the resolve's camera-differential reprojection.
-    /// * `VisibilityBuffer × Mesh` (exactly) — the jittered reverse-Z push
-    ///   (`forward_view_proj_rows_jittered`) + `viewt_from_depth_rz` producing `gViewT` from
-    ///   `vb_depth`; the unchanged `taa_resolve` accumulates. VB×Both/Sdf stays unsupported:
-    ///   `sdf_forward_march` writes `lit` but not `viewt`, so SDF-owned pixels would
-    ///   reproject with mesh/background `t` (ghosting) until the marcher composite gains a
-    ///   gViewT write.
+    /// * `VisibilityBuffer` (any legs) — the jittered reverse-Z push
+    ///   (`forward_view_proj_rows_jittered`) + the per-leg `gViewT` producer split that
+    ///   mirrors Deferred's own: `viewt_from_depth_rz` covers the marcher-less `VB × Mesh`
+    ///   config, and on the SDF-carrying legs (`Both`/`Sdf`) the `VIEWT`-variant
+    ///   `sdf_forward_march` IS the composite and the SOLE producer (SDF-owned `t`,
+    ///   mesh-owned `t_mesh`, background sentinel — the `sdf_gbuffer_composite` u8
+    ///   discipline); the unchanged `taa_resolve` accumulates.
     /// * `Forward`/`ForwardPlus` — unsupported (no AA seam exists in that recorder at all;
     ///   its own future rung).
     #[inline]
     pub fn taa_supported(&self) -> bool {
-        matches!(self.path, RenderPath::Deferred)
-            || (matches!(self.path, RenderPath::VisibilityBuffer) && self.mesh_leg && !self.sdf_leg)
+        matches!(self.path, RenderPath::Deferred | RenderPath::VisibilityBuffer)
     }
 }
 
@@ -591,10 +591,11 @@ pub enum RenderPathDegrade {
     /// (`vb_geo`/`vb_shade`) thin-aux producer yet (only the fused `vb_resolve`) — every one of
     /// those consumers is forced OFF for this resolve (`cap_vb_v1_consumers`).
     VbPreLightConsumersNotYetImplemented,
-    /// Rung R8 (VB v1 scope cut, mirrors [`ForwardTaaNotYetImplemented`](Self::ForwardTaaNotYetImplemented)):
-    /// TAA was requested alongside `VisibilityBuffer`, which writes no motion vector yet — TAA
-    /// is forced OFF for this resolve (`cap_vb_v1_consumers`).
-    VbTaaNotYetImplemented,
+    // (The former `VbTaaNotYetImplemented` variant was DELETED by the TAA-under-VB rungs: first
+    // narrowed to the SDF-carrying legs when VB×Mesh TAA landed, then removed outright once the
+    // `VIEWT`-variant `sdf_forward_march` became the gViewT producer for `Both`/`Sdf` — TAA now
+    // passes through `cap_vb_v1_consumers` uncapped on every VB leg set, and a variant no rule
+    // can construct would be dead API surface.)
 }
 
 /// A fixed-capacity log of [`RenderPathDegrade`] reasons. `degrade_ladder`'s THREE rules fire
@@ -735,9 +736,10 @@ pub fn resolve_rules(
         thin_aux = thin_aux.insert(ThinAuxMask::NORMAL);
     }
     // TAA arms the MOTION channel ONLY under Deferred (whose raster/marcher own a motion
-    // producer story). VB×Mesh TAA reconstructs reprojection camera-differentially from the
-    // depth-derived gViewT lane — arming a producer-less MOTION channel there would declare
-    // an aux image nothing writes (the bound-but-UNDEFINED 09600 class).
+    // producer story). VB TAA (every leg set) reconstructs reprojection camera-differentially
+    // from the gViewT lane (`viewt_from_depth_rz` on Mesh, the VIEWT-variant marcher composite
+    // on Both/Sdf) — arming a producer-less MOTION channel there would declare an aux image
+    // nothing writes (the bound-but-UNDEFINED 09600 class).
     if (consumers.taa_on && matches!(path, RenderPath::Deferred)) || consumers.shadow_temporal_on {
         thin_aux = thin_aux.insert(ThinAuxMask::MOTION);
     }
@@ -917,13 +919,15 @@ fn cap_forward_v1_consumers(
 /// Rung R8: `RenderPath::VisibilityBuffer`'s v1 (fused) declarator has NO split
 /// (`vb_geo`/`vb_shade`) thin-aux producer — only the fused `vb_resolve` compute pass, which
 /// writes `lit` directly and never materializes `thin_normal`/`motion_vec`. Any pre-light
-/// consumer OR TAA requested alongside `RenderPath::VisibilityBuffer` is forced OFF here —
+/// consumer requested alongside `RenderPath::VisibilityBuffer` is forced OFF here —
 /// BEFORE [`resolve_rules`] computes `mesh_geo_shade_split`/`thin_aux` from the (adjusted)
 /// [`RenderPathConsumers`] — so `mesh_geo_shade_split` stays structurally `false` under VB
 /// today (the plan's own R8 gate: "SSAO structurally off under VB this rung"), exactly
 /// mirroring [`cap_forward_v1_consumers`]'s identical scope cut for the Forward family. A
 /// separate fn (not a widened `cap_forward_v1_consumers`) so the pushed [`RenderPathDegrade`]
-/// variants stay VB-labeled, not misleadingly "Forward"-labeled.
+/// variants stay VB-labeled, not misleadingly "Forward"-labeled. (The former TAA half of this
+/// cap was DELETED by the TAA-under-VB rungs — TAA now passes through on every VB leg set;
+/// see [`ResolvedRenderPath::taa_supported`]'s matrix doc.)
 ///
 /// A no-op (returns `consumers` unchanged, pushes nothing) for every OTHER `path`.
 ///
@@ -933,7 +937,6 @@ fn cap_forward_v1_consumers(
 /// `resolve_rules` its inputs" discipline [`cap_forward_v1_consumers`]'s doc explains.
 fn cap_vb_v1_consumers(
     path: RenderPath,
-    legs: GeometryLegs,
     mut consumers: RenderPathConsumers,
     degrades: &mut RenderPathDegradeLog,
 ) -> RenderPathConsumers {
@@ -957,16 +960,11 @@ fn cap_vb_v1_consumers(
         consumers.hwrt_denoise_or_vis_on = false;
     }
 
-    // TAA-under-VB: NARROWED to the SDF-carrying legs only. VB×Mesh TAA is implemented —
-    // `vb_raster` rasterizes the jittered reverse-Z push (`forward_view_proj_rows_jittered`),
-    // `viewt_from_depth_rz` produces the gViewT lane from `vb_depth`, and the unchanged
-    // `taa_resolve` accumulates. Under VB×Both/Sdf, `sdf_forward_march` writes `lit` but not
-    // `viewt` — SDF-owned pixels would reproject with mesh/background `t` (ghosting) — so TAA
-    // stays capped there until the marcher composite gains a gViewT write.
-    if consumers.taa_on && legs.has_sdf() {
-        degrades.push(RenderPathDegrade::VbTaaNotYetImplemented);
-        consumers.taa_on = false;
-    }
+    // TAA-under-VB: the cap is REMOVED — TAA passes through on every VB leg set. VB×Mesh uses
+    // the `viewt_from_depth_rz` gViewT producer; the SDF-carrying legs (`Both`/`Sdf`) dispatch
+    // the `VIEWT`-variant `sdf_forward_march`, whose composite writes the gViewT lane itself
+    // (SDF-owned `t`, mesh-owned `t_mesh`, background sentinel — see
+    // [`ResolvedRenderPath::taa_supported`]'s matrix doc).
 
     consumers
 }
@@ -1012,7 +1010,7 @@ pub fn resolve_render_path(
         VB_SDF_IMPLEMENTED,
     );
     let consumers = cap_forward_v1_consumers(path, consumers, &mut degrades);
-    let consumers = cap_vb_v1_consumers(path, legs, consumers, &mut degrades);
+    let consumers = cap_vb_v1_consumers(path, consumers, &mut degrades);
     (resolve_rules(path, legs, consumers, caps), degrades)
 }
 
@@ -1575,19 +1573,26 @@ mod tests {
     }
 
     #[test]
-    fn vb_sdf_legs_taa_still_capped_with_a_warn() {
-        // The narrowed cap: any SDF-carrying leg set keeps TAA off (sdf_forward_march writes
-        // lit but not viewt — SDF pixels would reproject with mesh/background t).
+    fn vb_sdf_legs_taa_passes_through_uncapped() {
+        // TAA-under-VB (the VIEWT rung): the SDF-carrying leg sets now resolve CLEAN with TAA
+        // requested — the `VIEWT`-variant `sdf_forward_march` composite is the gViewT producer
+        // (SDF-owned `t`, mesh-owned `t_mesh`, background sentinel), so the former
+        // `VbTaaNotYetImplemented` cap is gone. MOTION stays un-armed (VB TAA reprojects
+        // camera-differentially from the gViewT lane; MOTION is Deferred-only).
         for legs in [GeometryLegs::Both, GeometryLegs::Sdf] {
             let consumers = RenderPathConsumers { taa_on: true, ..Default::default() };
             let (resolved, degrades) = resolve_vb_v1(legs, consumers);
             assert_eq!(resolved.path, RenderPath::VisibilityBuffer);
+            assert!(degrades.is_clean(), "{legs:?}: VB TAA resolves clean on every leg set");
             assert!(
-                !resolved.taa_supported(),
-                "{legs:?}: the predicate must refuse TAA under an SDF-carrying VB leg set"
+                resolved.taa_supported(),
+                "{legs:?}: the single predicate accepts TAA under every VB leg set"
             );
-            let reasons: Vec<_> = degrades.reasons().collect();
-            assert_eq!(reasons, [RenderPathDegrade::VbTaaNotYetImplemented], "{legs:?}");
+            assert_eq!(
+                resolved.thin_aux,
+                ThinAuxMask::NONE,
+                "{legs:?}: VB TAA must NOT arm a producer-less MOTION channel"
+            );
         }
     }
 
@@ -1607,13 +1612,14 @@ mod tests {
     #[test]
     fn taa_supported_matrix() {
         // The single-predicate truth table (every TAA gate reads taa_supported()).
-        let rows: [(RenderPath, GeometryLegs, bool); 6] = [
+        let rows: [(RenderPath, GeometryLegs, bool); 7] = [
             (RenderPath::Deferred, GeometryLegs::Both, true),
             (RenderPath::Deferred, GeometryLegs::Mesh, true),
             (RenderPath::VisibilityBuffer, GeometryLegs::Mesh, true),
-            (RenderPath::VisibilityBuffer, GeometryLegs::Both, false),
-            (RenderPath::VisibilityBuffer, GeometryLegs::Sdf, false),
+            (RenderPath::VisibilityBuffer, GeometryLegs::Both, true),
+            (RenderPath::VisibilityBuffer, GeometryLegs::Sdf, true),
             (RenderPath::Forward, GeometryLegs::Mesh, false),
+            (RenderPath::ForwardPlus, GeometryLegs::Both, false),
         ];
         for (path, legs, want) in rows {
             let resolved = resolve_rules(path, legs, RenderPathConsumers::default(), caps_ok());
@@ -1626,12 +1632,13 @@ mod tests {
     }
 
     #[test]
-    fn vb_both_legs_survive_and_both_consumer_caps_stack_two_reasons() {
+    fn vb_both_legs_survive_and_taa_outlives_the_pre_light_cap() {
         // Rung R10: VB x Both no longer collapses its legs (VB_SDF_IMPLEMENTED landed) — the SDF
         // leg is composited via `sdf_forward_march` after `vb_resolve`. With SSAO+TAA both
         // requested through the PUBLIC entry point, the legs stay `Both` (`sdf_forward_marched`
-        // arms), and both VB-v1 consumer caps still fire (TAA stays capped under an
-        // SDF-carrying leg set — the narrowed TAA-under-VB cap; no legs-collapse reason).
+        // arms), the pre-light cap fires alone (fused vb_resolve, no split), and TAA PASSES
+        // THROUGH (the VIEWT-variant marcher is the gViewT producer — the former TAA cap is
+        // deleted; no legs-collapse reason either).
         let consumers = RenderPathConsumers { ssao_on: true, taa_on: true, ..Default::default() };
         let (resolved, degrades) = resolve_vb_v1(GeometryLegs::Both, consumers);
         assert_eq!(resolved.path, RenderPath::VisibilityBuffer);
@@ -1642,14 +1649,9 @@ mod tests {
         // VB v1) for BOTH the mesh and sdf legs.
         assert!(!resolved.mesh_geo_shade_split);
         assert!(!resolved.sdf_geo_shade_split);
+        assert!(resolved.taa_supported(), "TAA survives the resolve on VB x Both");
         let reasons: Vec<_> = degrades.reasons().collect();
-        assert_eq!(
-            reasons,
-            [
-                RenderPathDegrade::VbPreLightConsumersNotYetImplemented,
-                RenderPathDegrade::VbTaaNotYetImplemented,
-            ]
-        );
+        assert_eq!(reasons, [RenderPathDegrade::VbPreLightConsumersNotYetImplemented]);
     }
 
     #[test]
@@ -1677,7 +1679,7 @@ mod tests {
                 ..Default::default()
             };
             let mut degrades = RenderPathDegradeLog::default();
-            let out = cap_vb_v1_consumers(path, GeometryLegs::Both, consumers, &mut degrades);
+            let out = cap_vb_v1_consumers(path, consumers, &mut degrades);
             assert_eq!(out, consumers, "{path:?}: consumers must pass through unchanged");
             assert!(degrades.is_clean(), "{path:?}: no cap-related warn");
         }

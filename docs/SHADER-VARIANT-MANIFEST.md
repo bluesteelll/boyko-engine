@@ -52,6 +52,25 @@ via one `-D`; `motion + material` needs both) — the host selects among them by
 pipeline per frame (never a dynamic branch), gated on `mesh_mvpm_active()` checked BEFORE
 `mesh_mv_active()`/`mesh_pm_active()` at the recorder's selection site (priority mvpm > mv > pm > base).
 
+## `sdf_forward_march.comp.hlsl` — the Forward/VB fused SDF march+shade (compute)
+
+One source `shaders/sdf_forward_march.comp.hlsl`; the `{HAS_MESH} x {VIEWT}` matrix, all four built
+against ONE shared 14-binding Set-0 layout (+ Set 1 = the Forward shadow set verbatim): `t12`
+(`gForwardDepth`) is HAS_MESH-referenced only and `u13` (`gViewT`) VIEWT-referenced only — each
+bound-but-unread by the other variants (the R2 contract). Recorder selection: `mesh_leg` x
+`GBufferScene::path_sdf_forward_writes_viewt()` (never a dynamic branch).
+
+| Variant | `HAS_MESH` | `VIEWT` | `.spv` | dxc `-T` | Interface delta vs base |
+|---|---|---|---|---|---|
+| mesh-bounded | `1` | — | `sdf_forward_march.comp.spv` | `cs_6_0` | samples `gForwardDepth` @12 (march bounded at `t_mesh`; `sdf_owns = hit && t < t_mesh`). |
+| mesh-less | — | — | `sdf_forward_march_sdfonly.comp.spv` | `cs_6_0` | no depth reference (`sdf_owns = hit`). |
+| mesh-bounded + viewt | `1` | `1` | `sdf_forward_march_viewt.comp.spv` | `cs_6_0` | + `RWTexture2D<float>` `gViewT` @13 (r32f) — the TAA-under-VB gViewT producer: exactly-once per pixel (SDF `t` / mesh `t_mesh` / `1.0e30` background). |
+| mesh-less + viewt | — | `1` | `sdf_forward_march_sdfonly_viewt.comp.spv` | `cs_6_0` | the depth-less sibling (SDF `t` / `1.0e30`). |
+
+Reachability note: the VIEWT rows dispatch only under an SDF-carrying `VisibilityBuffer` leg set
+with TAA armed (`path_sdf_forward_writes_viewt()`); the Forward family never arms them (no AA seam —
+tripwired by a `debug_assert` in `declare_forward_graph`).
+
 ## Shadow-denoise compute (separate shaders, not `-D` variants of the resolve)
 
 These are distinct `.hlsl`, listed here for the temporal/spatial pipeline picture, not because they are

@@ -2315,6 +2315,15 @@ impl Renderer<'_> {
         // barrier the recorder never needs). No buffer/vocab-resource accesses are declared here
         // (the SDF field/material/brick buffers are boot-seeded/untracked, the SAME precedent the
         // deferred `marcher` pass's own declaration establishes — this file's `marcher` pass doc).
+        //
+        // TAA-under-VB tripwire: the Forward family has NO AA seam, so the VIEWT-variant marcher
+        // (whose `viewt` write only `declare_vb_graph` declares) must never arm here — a future
+        // Forward-TAA rung must extend THIS declarator with the `viewt` access first.
+        debug_assert!(
+            !scene.path_sdf_forward_writes_viewt(),
+            "invariant: path_sdf_forward_writes_viewt() under a Forward-family declarator — \
+             the Forward graph declares no viewt write for the marcher"
+        );
         let sdf_forward_march = if scene.path_has_sdf_forward() {
             let p = g.add_pass("sdf_forward_march");
             g.image_access(
@@ -3282,6 +3291,12 @@ impl Renderer<'_> {
         // COMPUTE reads; this later same-queue read inherits that (no extra barrier needed), so
         // re-declaring would be redundant — matching how the Forward path's own `sdf_forward_march`
         // relies on `forward_opaque`'s prior reads.
+        //
+        // TAA-under-VB: when `scene.path_sdf_forward_writes_viewt()` (the O1 single predicate the
+        // record site's VIEWT-variant pipeline selection reads too), the marcher composite ALSO
+        // first-touch writes `viewt` (UNDEFINED→GENERAL) — on an SDF-carrying leg set it is the
+        // SOLE gViewT producer (`vb_viewt` below is mesh-only; the two armings are disjoint by
+        // construction), feeding the `taa_resolve` pass's GENERAL read.
         let sdf_forward_march = if scene.path_has_sdf_forward() {
             let p = g.add_pass("sdf_forward_march");
             g.image_access(
@@ -3291,6 +3306,15 @@ impl Renderer<'_> {
                 VK_IMAGE_LAYOUT_GENERAL,
                 SubRange::COLOR,
             );
+            if scene.path_sdf_forward_writes_viewt() {
+                g.image_access(
+                    viewt,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_IMAGE_LAYOUT_GENERAL,
+                    SubRange::COLOR,
+                );
+            }
             if mesh_leg {
                 g.image_access(
                     vb_depth,
@@ -3333,7 +3357,13 @@ impl Renderer<'_> {
         // conditional-read shape `sdf_forward_march`'s HAS_MESH arm declares — the graph derives
         // the DEPTH_ATTACHMENT→SHADER_READ_ONLY barrier-out of the raster) and first-touch
         // WRITES `viewt` (UNDEFINED→GENERAL) — the `gViewT` lane the `taa_resolve` pass below
-        // consumes.
+        // consumes. On the SDF-carrying leg sets the VIEWT-variant marcher above owns the lane
+        // instead — the two armings are DISJOINT by construction (belt-and-braces asserted).
+        debug_assert!(
+            !(scene.viewt_from_vb_depth.is_some() && scene.path_sdf_forward_writes_viewt()),
+            "invariant: vb_viewt (VB×Mesh) and the VIEWT-variant marcher (VB×Both/Sdf) are \
+             mutually exclusive gViewT producers"
+        );
         let vb_viewt = scene.viewt_from_vb_depth.is_some().then(|| {
             let p = g.add_pass("vb_viewt");
             g.image_access(
@@ -3364,6 +3394,12 @@ impl Renderer<'_> {
         // `viewt`/`taa_hist_read` are STORAGE reads in GENERAL; `taa_hist` is the STORAGE write.
         // `aa_out`/`taa_resolved` stay hand-recorded inside `record_taa`/`record_rcas` (not
         // framegraph-tracked — the deferred precedent).
+        debug_assert!(
+            scene.taa.is_none()
+                || (scene.viewt_from_vb_depth.is_some() ^ scene.path_sdf_forward_writes_viewt()),
+            "invariant: a TAA-armed VB frame has EXACTLY ONE gViewT producer \
+             (vb_viewt on Mesh, the VIEWT-variant marcher on Both/Sdf)"
+        );
         let taa_resolve_pass = scene.taa.is_some().then(|| {
             let p = g.add_pass("taa_resolve");
             g.image_access(

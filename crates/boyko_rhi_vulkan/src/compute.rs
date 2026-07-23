@@ -877,6 +877,29 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// TAA-under-VB (the `VB x Both`/`VB x Sdf` rung): the SDF forward-march compute SPIR-V,
+    /// `HAS_MESH + VIEWT` variant (`shaders/sdf_forward_march.comp.hlsl` compiled with
+    /// `-D HAS_MESH=1 -D VIEWT=1`). Identical to [`SDF_FORWARD_MARCH_SPV`] plus the `gViewT`
+    /// binding-13 write (r32f `core.viewt`): on a TAA-armed SDF-carrying VisibilityBuffer leg
+    /// the marcher IS the composite and the SOLE gViewT producer — every in-bounds pixel is
+    /// written exactly once (SDF-owned `t`, mesh-owned `t_mesh`, background `1.0e30`), the
+    /// `sdf_gbuffer_composite.hlsl` u8 discipline. Dispatched under `VB x Both` when
+    /// `GBufferScene::path_sdf_forward_writes_viewt()`.
+    SDF_FORWARD_MARCH_VIEWT_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_forward_march_viewt.comp.spv")
+}
+
+embed_spirv! {
+    /// TAA-under-VB: the SDF forward-march compute SPIR-V, mesh-less `VIEWT` variant
+    /// (`shaders/sdf_forward_march.comp.hlsl` compiled with `-D VIEWT=1` only). Identical to
+    /// [`SDF_FORWARD_MARCH_SDFONLY_SPV`] plus the `gViewT` binding-13 write (mesh-less: every
+    /// pixel stores the marched `t` or the `1.0e30` background sentinel). Dispatched under
+    /// `VB x Sdf` when `GBufferScene::path_sdf_forward_writes_viewt()`.
+    SDF_FORWARD_MARCH_SDFONLY_VIEWT_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_forward_march_sdfonly_viewt.comp.spv")
+}
+
+embed_spirv! {
     /// The committed mesh-MRT G-buffer PRODUCER fragment SPIR-V (`shaders/gbuffer_mrt.fs.hlsl`):
     /// writes albedo/normal/material as 3 MRT in the marcher's exact encoding (mask=1) + the
     /// marcher-aligned `SV_Depth` (euclidean under perspective, axial under ortho). Paired with
@@ -1670,6 +1693,20 @@ pub fn sdf_forward_march_spirv() -> &'static [u32] {
 #[inline]
 pub fn sdf_forward_march_sdfonly_spirv() -> &'static [u32] {
     SDF_FORWARD_MARCH_SDFONLY_SPV.as_words()
+}
+
+/// TAA-under-VB: the SDF forward-march `HAS_MESH + VIEWT` compute SPIR-V as a `u32` word
+/// stream (the gViewT-producing sibling of [`sdf_forward_march_spirv`]).
+#[inline]
+pub fn sdf_forward_march_viewt_spirv() -> &'static [u32] {
+    SDF_FORWARD_MARCH_VIEWT_SPV.as_words()
+}
+
+/// TAA-under-VB: the SDF forward-march mesh-less `VIEWT` compute SPIR-V as a `u32` word
+/// stream (the gViewT-producing sibling of [`sdf_forward_march_sdfonly_spirv`]).
+#[inline]
+pub fn sdf_forward_march_sdfonly_viewt_spirv() -> &'static [u32] {
+    SDF_FORWARD_MARCH_SDFONLY_VIEWT_SPV.as_words()
 }
 
 /// The Rung-3b MOTION_VECTORS-variant mesh-MRT gbuffer VERTEX SPIR-V as a `u32` word stream.

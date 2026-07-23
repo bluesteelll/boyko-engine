@@ -928,7 +928,8 @@ impl Renderer<'_> {
         // Recorded ONLY when `scene.path_has_sdf_forward()` holds. Extends the `lit` write above
         // (`vb_resolve`'s GENERAL store under `Both`, or `vb_sky`'s COLOR write under `Sdf`) and
         // marches THIS frame's `lit` pixels the raster/sky did not already paint (a miss writes
-        // nothing — the sky/mesh color stands, the pass's own doc). ===
+        // nothing to `lit` — the sky/mesh color stands, the pass's own doc; the TAA-armed VIEWT
+        // variants additionally write the `gViewT` lane for EVERY pixel, exactly once). ===
         if scene.path_has_sdf_forward() {
             let sdf_forward_pass = plan
                 .sdf_forward_march
@@ -939,13 +940,23 @@ impl Renderer<'_> {
             // `!mesh_leg`) for the "sdf_forward_march" pass into `cmd`.
             self.record_vb_pass(sdf_forward_pass, cmd, targets, forward, vb, scene, fi);
 
-            // Decision 4's ownership gate: the `HAS_MESH` variant needs the reverse-Z decode
+            // Decision 4's ownership gate: the `HAS_MESH` variants need the reverse-Z decode
             // `A`/`B` (`scene.sdf_forward_view_z_a`/`_b`) to bound the march at the mesh surface;
-            // the mesh-less variant never reads them (`SdfForwardMarchPush::sdf_only`'s doc).
+            // the mesh-less variants never read them (`SdfForwardMarchPush::sdf_only`'s doc).
+            // TAA-under-VB: `writes_viewt` (the SAME O1 predicate `declare_vb_graph` read to
+            // declare this pass's conditional `viewt` write) selects the `VIEWT` gViewT-producing
+            // sibling — same layout, same push, plus the binding-13 store.
+            let writes_viewt = scene.path_sdf_forward_writes_viewt();
             let (pipeline, push) = if scene.resolved_render_path.mesh_leg {
-                let p = scene.sdf_forward_march_pipeline.expect(
-                    "invariant: scene.path_has_sdf_forward() requires scene.sdf_forward_march_pipeline",
-                );
+                let p = if writes_viewt {
+                    scene.sdf_forward_march_viewt_pipeline.expect(
+                        "invariant: path_sdf_forward_writes_viewt() requires scene.sdf_forward_march_viewt_pipeline",
+                    )
+                } else {
+                    scene.sdf_forward_march_pipeline.expect(
+                        "invariant: scene.path_has_sdf_forward() requires scene.sdf_forward_march_pipeline",
+                    )
+                };
                 let push = crate::compute::SdfForwardMarchPush::has_mesh(
                     present_extent.width,
                     present_extent.height,
@@ -955,9 +966,15 @@ impl Renderer<'_> {
                 );
                 (p, push)
             } else {
-                let p = scene.sdf_forward_march_sdfonly_pipeline.expect(
-                    "invariant: scene.path_has_sdf_forward() requires scene.sdf_forward_march_sdfonly_pipeline",
-                );
+                let p = if writes_viewt {
+                    scene.sdf_forward_march_sdfonly_viewt_pipeline.expect(
+                        "invariant: path_sdf_forward_writes_viewt() requires scene.sdf_forward_march_sdfonly_viewt_pipeline",
+                    )
+                } else {
+                    scene.sdf_forward_march_sdfonly_pipeline.expect(
+                        "invariant: scene.path_has_sdf_forward() requires scene.sdf_forward_march_sdfonly_pipeline",
+                    )
+                };
                 let push = crate::compute::SdfForwardMarchPush::sdf_only(
                     present_extent.width,
                     present_extent.height,
@@ -970,8 +987,9 @@ impl Renderer<'_> {
                 .as_ref()
                 .expect("invariant: scene.path_has_sdf_forward() => targets.sdf_forward_set is built");
             let push_bytes = push.as_bytes();
-            // SAFETY: recording is open; `pipeline` (the `HAS_MESH` or mesh-less compute variant,
-            // selected by `mesh_leg`) + its 2-set layout (Set 0 = `sdf_forward_set[fi]`, the SAME
+            // SAFETY: recording is open; `pipeline` (one of the four `{HAS_MESH} x {VIEWT}`
+            // compute variants, selected by `mesh_leg` x `writes_viewt`) + its 2-set layout
+            // (Set 0 = `sdf_forward_set[fi]`, the SAME
             // path-independent vocab ring the Forward family binds — it references `forward.depth`,
             // which VB reuses as `vb_depth`; Set 1 = `forward.set1[fi]`, the Forward-family shadow
             // set REUSED VERBATIM, the same one `vb_resolve` binds) belong to this device (caller

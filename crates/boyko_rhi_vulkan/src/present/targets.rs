@@ -2786,7 +2786,11 @@ impl DeferredSets {
         // `BrickAtlas` @5/6, `PointerGrid1`/`BrickAtlas1` @7/8, `PointerGrid2`/`BrickAtlas2`
         // @9/10, `BrickLevels` UBO @11, `gForwardDepth` SAMPLED @12 (paired with
         // `scene.depth_sampler` as a harmless bound-but-ignored placeholder — the shader's
-        // unfiltered `.Load`, the SAME idiom `vocab_set`'s own `gDepth`@1 binding uses).
+        // unfiltered `.Load`, the SAME idiom `vocab_set`'s own `gDepth`@1 binding uses),
+        // `gViewT` STORAGE @13 (`core.viewt[i]` — TAA-under-VB: written only by the `VIEWT`
+        // pipeline variants; the no-`VIEWT` SPIR-V never statically references the slot, the
+        // R2 bound-but-unread contract @12 already establishes; `core.viewt` is ALWAYS
+        // allocated, so the entry is valid under every profile that builds this set).
         // `forward.depth[i]` is ALWAYS valid here regardless of `mesh_leg`:
         // `path_has_sdf_forward()` implies `TargetsProfile::ForwardMesh` OR (rung R10)
         // `TargetsProfile::VbMesh` — `create()` builds `ForwardTargets` under BOTH (targets.rs's
@@ -2833,6 +2837,7 @@ impl DeferredSets {
                         texture: &forward_depth.depth[slot],
                         sampler: scene.depth_sampler,
                     },
+                    BindGroupEntry::StorageImage { texture: &core.viewt[slot] },
                 ];
                 let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
                 match RhiDevice::create_bind_group(ctx, &desc) {
@@ -6848,6 +6853,7 @@ mod tests {
             cull_set: None,
             ssao_set: None,
             viewt_from_depth_set: None,
+            viewt_from_vb_depth_set: None,
             ssao_ring_a: None,
             ssao_ring_b: None,
             ssao_atrous_read8_set: None,
@@ -6933,6 +6939,7 @@ mod tests {
             cull_set: None,
             ssao_set: None,
             viewt_from_depth_set: None,
+            viewt_from_vb_depth_set: None,
             ssao_ring_a: None,
             ssao_ring_b: None,
             ssao_atrous_read8_set: None,

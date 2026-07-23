@@ -70,16 +70,18 @@
 //! CSM is armed (`CsmConfig` + `LightingConfig::csm_shadows`) because the shadow lookup
 //! (`csm_visibility`, fact 2) is the specific consumer this harness falsifies against.
 //!
-//! # Deferred-only (explicit, not implicit)
+//! # Path support (explicit, not implicit)
 //!
 //! TAA is implemented per `ResolvedRenderPath::taa_supported()`: `Deferred` (any legs) and
-//! `VisibilityBuffer × Mesh` (the TAA-under-VB rung — jittered reverse-Z push +
-//! `viewt_from_depth_rz` gViewT producer + the unchanged resolve). `Forward`/`ForwardPlus`
-//! still force it off (`RenderPathDegrade::ForwardTaaNotYetImplemented`), as does any
-//! SDF-carrying VB leg set (`VbTaaNotYetImplemented`, narrowed). This harness never inserts
+//! `VisibilityBuffer` (any legs — the TAA-under-VB rungs: jittered reverse-Z push + the
+//! per-leg gViewT producer split, `viewt_from_depth_rz` on Mesh / the VIEWT-variant
+//! `sdf_forward_march` composite on Both/Sdf + the unchanged resolve). `Forward`/`ForwardPlus`
+//! still force it off (`RenderPathDegrade::ForwardTaaNotYetImplemented` — no AA seam in that
+//! recorder at all). This harness never inserts
 //! `RenderPathConfig` ITSELF — but `EnginePlugins` honors the `BOYKO_RENDER_PATH` /
 //! `BOYKO_GEOMETRY_LEGS` dev/test launch env (`boyko_app::plugins`), so the `[vb_taa]` /
-//! `[vb_taa_rcas]` pins drive the SAME dump through `vb`×`mesh`; unset resolves to the engine
+//! `[vb_taa_rcas]` / `[vb_both_taa]` / `[vb_sdf_taa]` pins drive the SAME dump through the
+//! `vb` leg matrix; unset resolves to the engine
 //! default (`RenderPath::Deferred`, `GeometryLegs::Both`).
 //!
 //! `BOYKO_AA` selects ONE of the mutually exclusive [`AaMode`] alternatives (FXAA / SMAA / TAA

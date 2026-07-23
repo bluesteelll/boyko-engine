@@ -448,7 +448,8 @@ fn sdf_soft_shadow_ranged_matches_edsl_emit() {
     // shadow caster. A hand-edit of the committed function fails CI here. The body is
     // statement-for-statement identical to `sdf_soft_shadow` EXCEPT the escape break spells
     // the PARAMETER `t_max` (B3 — option a, so the marcher's frozen `sdf_gbuffer_composite.
-    // comp.spv` cannot move; `marcher_spv_byte_frozen` is the gate for that). The resolve
+    // comp.spv` cannot move; `marcher_spv_sync.rs::sdf_gbuffer_composite_spv_byte_identical`
+    // is the re-DXC gate for that). The resolve
     // re-DXCs to `deferred_pbr.comp.spv`; the host shadow march mirror is
     // `host_soft_shadow_ranged` (compute.rs), consumer-side (±2/255).
     let generated = boyko_shaderdsl::emit::emit_hlsl_sdf_soft_shadow_ranged().replace("\r\n", "\n");

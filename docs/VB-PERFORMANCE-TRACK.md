@@ -46,8 +46,10 @@ The path (R7 → R-VBGEO → R8 → R10), grounded in the source:
   lookup** (`vb_resolve.comp.hlsl:280` "ALL-LIGHTS — no cluster/froxel lookup, VB v1 is fused-only,
   mirrors plain Forward's own base compile").
 - **Resolver flags** — `mesh_geo_shade_split == false` (fused, `render_path_config.rs:397`);
-  `cap_vb_v1_consumers` forces SSAO/DDGI/denoise/TAA **OFF** under VB
-  (`VbPreLightConsumersNotYetImplemented` / `VbTaaNotYetImplemented`, `render_path_config.rs:569,573`).
+  `cap_vb_v1_consumers` forces SSAO/DDGI/denoise **OFF** under VB
+  (`VbPreLightConsumersNotYetImplemented`). TAA is NO LONGER capped (the TAA-under-VB rungs:
+  VB×Mesh via `viewt_from_depth_rz`, the SDF-carrying legs via the `VIEWT`-variant
+  `sdf_forward_march` gViewT composite; the former `VbTaaNotYetImplemented` variant is deleted).
 
 ---
 

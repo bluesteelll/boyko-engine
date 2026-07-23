@@ -1577,7 +1577,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 // because `vb_resolve` saw the sentinel-cleared `vb_id` everywhere).
                 //
                 // TAA-under-VB: with `taa_armed_now` (structurally true ONLY where
-                // `ResolvedRenderPath::taa_supported()` holds — Deferred, or VB × Mesh) this
+                // `ResolvedRenderPath::taa_supported()` holds — Deferred or VB, any legs) this
                 // arm now builds the JITTERED reverse-Z push
                 // (`forward_gbuffer_push_from_view_jittered`, rows 0/1 only — the reverse-Z
                 // z-row stays byte-untouched, the R8 hard rule above). `vb_resolve`/`vb_shade`
@@ -1653,8 +1653,10 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // `forward_view_z_coeffs` single source as the march pair above, but gated on the
             // TAA-under-VB arm (VB × Mesh never marches, so the pair above stays `(0.0, 0.0)`
             // don't-care exactly when this pass needs real coefficients). `taa_armed_now`
-            // already folds `taa_supported()` (VB × Mesh or Deferred; under Deferred the
-            // activation resolves to `None` in `scene()` and the pair is don't-care again).
+            // already folds `taa_supported()`; the activation resolves to `None` in `scene()`
+            // under Deferred AND under the SDF-carrying VB legs (where the VIEWT-variant
+            // marcher owns the gViewT lane and reads the march pair above instead), making the
+            // pair don't-care there.
             let (vb_viewt_view_z_a, vb_viewt_view_z_b) = if view.fov_y > 0.0 && taa_armed_now {
                 boyko_render::view::forward_view_z_coeffs(view.near, view.far)
             } else {

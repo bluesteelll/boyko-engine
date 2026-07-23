@@ -260,8 +260,9 @@ fn vb_mesh_tex_screenshot_dump() {
 /// the post-process / supersample AA mode selected by `BOYKO_AA` (`fxaa` → [`AaMode::Fxaa`],
 /// `smaa` → [`AaMode::Smaa`], `ssaa` → [`AaMode::Ssaa`] + `EnginePlugins::with_ssaa_scale(2)`,
 /// else [`AaMode::Off`]) at a `BOYKO_WIN`² window (default `640`). Its purpose is to answer
-/// whether the AA resolve chain applies under VB: TAA is capped off under VB
-/// (`cap_vb_v1_consumers`'s `VbTaaNotYetImplemented`), but FXAA/SMAA/SSAA are NOT in that cap, so
+/// whether the AA resolve chain applies under VB: at this harness's writing TAA was still capped
+/// off under VB (that cap has since been DELETED — TAA now runs on every VB leg set, the
+/// `[vb_taa]`/`[vb_both_taa]` pins), but FXAA/SMAA/SSAA were never in the cap, so
 /// this dump reveals whether they actually run on the VB `lit` output.
 ///
 /// `BOYKO_PATH=deferred` renders the identical scene through `RenderPath::Deferred` instead — the

@@ -49,9 +49,11 @@
 // `forward_opaque.fs.hlsl`'s own "no baked AO term, no SSAO consumer" v1 scope cut — see this
 // rung's report for the rationale).
 //
-// # HAS_MESH ownership gate (Decision 4's consumer half)
+// # HAS_MESH ownership gate (Decision 4's consumer half) and the VIEWT producer matrix
 //
-// Compiled TWICE from this ONE source (mirrors `forward_opaque.fs.hlsl`'s FROXEL idiom):
+// Compiled FOUR times from this ONE source — the `{HAS_MESH} x {VIEWT}` variant matrix
+// (mirrors `forward_opaque.fs.hlsl`'s FROXEL idiom; the two no-`VIEWT` compiles are the
+// original pair, byte-identical across this rung):
 //   * `-D HAS_MESH=1` -> `sdf_forward_march.comp.spv`: the raster mesh leg is present. Samples
 //     the Forward reverse-Z `forward_depth` image, inverts it to a view-space `view_z_mesh` via
 //     `boyko_render::view::forward_view_z_from_depth`'s EXACT algebraic inverse (`view_z = B /
@@ -68,6 +70,18 @@
 // A miss (`!sdf_owns`) writes NOTHING to `gLit` — the sky/mesh color `forward_opaque.fs.hlsl`
 // already painted this frame stands (the SAME "misses write nothing" contract the deferred
 // marcher's own G-buffer ownership gate documents).
+//   * `-D VIEWT=1` (x either mesh define) -> `sdf_forward_march_viewt.comp.spv` /
+//     `sdf_forward_march_sdfonly_viewt.comp.spv`: the TAA-under-VB gViewT PRODUCER variants.
+//     On a TAA-armed SDF-carrying VisibilityBuffer leg (`VB x Both` / `VB x Sdf`) this marcher
+//     IS the composite and therefore the SOLE `gViewT` producer — the standalone
+//     `viewt_from_depth_rz.comp.hlsl` pass covers only the `VB x Mesh` (marcher-less) config,
+//     exactly as `viewt_from_depth.comp.hlsl` covers only `Deferred x Mesh` while
+//     `sdf_gbuffer_composite.hlsl` owns the lane on every SDF-carrying Deferred leg. The gViewT
+//     write discipline is that deferred marcher's own (its u8 precedent): EVERY in-bounds pixel
+//     written EXACTLY ONCE — SDF-owned pixels store the marched ray parameter `t`, mesh-owned
+//     pixels the decoded `t_mesh`, background the `1.0e30` sentinel. The no-`VIEWT` variants
+//     compile the write out entirely (their SPIR-V never references binding 13), so the
+//     TAA-off render paths keep a zero-cost marcher — the 0%-gate.
 //
 // # Bindings (Set 0, own dedicated vocabulary — NOT the deferred marcher's `vocab_layout`: this
 // # pass writes `gLit` directly, needs no G-buffer attribute images, and shares the light
@@ -89,6 +103,8 @@
 //   b11 : cbuffer BrickLevels                                `M4Level m2_levels[BRICK_LEVELS]`
 //                                                             (don't-care while `brick_levels==0`)
 //   t12 : Texture2D<float>  gForwardDepth  (HAS_MESH-declared only) Forward reverse-Z depth
+//   u13 : RWTexture2D<float> (r32f)         gViewT        (VIEWT-declared only) the TAA
+//                                                          ray-parameter lane (`core.viewt`)
 //
 // Set 1 (shadow) is a VERBATIM copy of `forward_opaque.fs.hlsl`'s own Set-1 block (CSM cascades +
 // punctual atlas), so the SAME physical descriptor set (`ForwardTargets::set1`) binds to BOTH
@@ -114,14 +130,21 @@
 // (mirrors how M1/M2/M4 themselves landed OFF-by-default in the deferred marcher first, then a
 // later rung flipped the host gate).
 //
-// Compiled offline (hermetic build — no SDK at `cargo build` time) TWICE from this ONE source:
+// Compiled offline (hermetic build — no SDK at `cargo build` time) FOUR times from this ONE
+// source (the `{HAS_MESH} x {VIEWT}` matrix):
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main -D HAS_MESH=1 \
 //       -fspv-target-env=vulkan1.3 sdf_forward_march.comp.hlsl -Fo sdf_forward_march.comp.spv
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 sdf_forward_march.comp.hlsl -Fo sdf_forward_march_sdfonly.comp.spv
+//   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main -D HAS_MESH=1 -D VIEWT=1 \
+//       -fspv-target-env=vulkan1.3 sdf_forward_march.comp.hlsl -Fo sdf_forward_march_viewt.comp.spv
+//   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main -D VIEWT=1 \
+//       -fspv-target-env=vulkan1.3 sdf_forward_march.comp.hlsl -Fo sdf_forward_march_sdfonly_viewt.comp.spv
 // Validated with:
 //   C:\VulkanSDK\1.4.350.0\Bin\spirv-val.exe sdf_forward_march.comp.spv
 //   C:\VulkanSDK\1.4.350.0\Bin\spirv-val.exe sdf_forward_march_sdfonly.comp.spv
+//   C:\VulkanSDK\1.4.350.0\Bin\spirv-val.exe sdf_forward_march_viewt.comp.spv
+//   C:\VulkanSDK\1.4.350.0\Bin\spirv-val.exe sdf_forward_march_sdfonly_viewt.comp.spv
 
 StructuredBuffer<uint> Buf : register(t0); // binding 0: edit-list header (READ-ONLY)
 
@@ -220,6 +243,22 @@ StructuredBuffer<uint> PointerGrid2 : register(t9);
 // consumed). Declared ONLY in the HAS_MESH variant; the SDFONLY variant's layout still reserves
 // the slot (bound-but-unread, the R2 contract), just never references it in SPIR-V.
 Texture2D<float> gForwardDepth : register(t12);
+#endif
+
+#if VIEWT
+// binding 13: the TAA `gViewT` ray-parameter lane (`core.viewt[fi]`, STORAGE, r32f). Declared
+// ONLY in the VIEWT variants — see this file's header doc for the producer matrix (on a
+// TAA-armed SDF-carrying VB leg this marcher is the composite and the SOLE gViewT producer,
+// the `sdf_gbuffer_composite.hlsl` u8 precedent). The no-VIEWT variants' shared layout still
+// reserves the slot (bound-but-unread, the SAME R2 contract binding 12 establishes).
+// `[[vk::image_format]]` pins the `OpTypeImage` format (`shaderStorageImageWriteWithoutFormat`
+// is OFF at device creation).
+[[vk::image_format("r32f")]] RWTexture2D<float> gViewT : register(u13);
+
+// The background sentinel (mirrors `viewt_from_depth_rz.comp.hlsl` / the deferred marcher's
+// own `1.0e30`): background pixels reproject the point-at-infinity `(rd, 0)` inside the TAA
+// resolve.
+static const float VIEWT_BG = 1.0e30;
 #endif
 
 // The 40-byte push constant — see this file's header doc for the field table.
@@ -948,6 +987,18 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // Misses / mesh-occluded pixels write NOTHING — the sky/mesh color `forward_opaque`
         // already painted this frame stands (the deferred marcher's own ownership-gate
         // contract, mirrored here).
+#if VIEWT
+        // ... except the gViewT lane, written for EVERY in-bounds pixel (the exactly-once
+        // discipline): the decoded mesh `t_mesh` when a rasterized surface owns the pixel,
+        // else the background sentinel. Reverse-Z occupancy: the depth CLEAR is 0.0 ("nothing
+        // drawn" under GREATER), so any `depth_mesh > 0.0` is a real mesh surface —
+        // `viewt_from_depth_rz.comp.hlsl`'s own `has_mesh` test.
+#if HAS_MESH
+        gViewT[uint2(px, py)] = (depth_mesh > 0.0) ? t_mesh : VIEWT_BG;
+#else
+        gViewT[uint2(px, py)] = VIEWT_BG;
+#endif
+#endif
         return;
     }
 
@@ -1077,4 +1128,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
     lit = tonemap_select(lit, load_tonemap_mode(LightBuf));
     lit = pow(lit, OETF_GAMMA_EXP);
     gLit[uint2(px, py)] = float4(clamp(lit, 0.0, 1.0), 1.0);
+#if VIEWT
+    // The SDF-owned half of the exactly-once gViewT discipline: the marched ray parameter `t`
+    // (the SAME euclidean metric the `t_mesh` decode above converts into — the TAA resolve
+    // reconstructs `P = ro + rd * t` on bitwise-identical `ray_gen.hlsli` rays).
+    gViewT[uint2(px, py)] = t;
+#endif
 }

@@ -2120,11 +2120,27 @@ pub struct GBufferScene<'a> {
     /// exactly `GeometryLegs::Sdf` (`!resolved_render_path.mesh_leg`). See
     /// [`Self::sdf_forward_march_pipeline`]'s doc for the shared-layout discipline.
     pub sdf_forward_march_sdfonly_pipeline: Option<&'a ComputePipeline>,
-    /// The `sdf_forward_march` pass's dedicated Set-0 bind-group LAYOUT (13 bindings: edit-list
+    /// TAA-under-VB: the `sdf_forward_march` `HAS_MESH + VIEWT` compute pipeline
+    /// ([`crate::compute::sdf_forward_march_viewt_spirv`]) — [`Self::sdf_forward_march_pipeline`]
+    /// plus the `gViewT` binding-13 write (the marcher IS the composite and the SOLE gViewT
+    /// producer on a TAA-armed SDF-carrying VB leg — the `sdf_gbuffer_composite.hlsl` u8
+    /// precedent). Selected when [`Self::path_sdf_forward_writes_viewt`] holds AND
+    /// `resolved_render_path.mesh_leg`; built against the SAME
+    /// [`Self::sdf_forward_march_layout`].
+    pub sdf_forward_march_viewt_pipeline: Option<&'a ComputePipeline>,
+    /// TAA-under-VB: the `sdf_forward_march` mesh-less `VIEWT` compute pipeline
+    /// ([`crate::compute::sdf_forward_march_sdfonly_viewt_spirv`]) —
+    /// [`Self::sdf_forward_march_sdfonly_pipeline`] plus the `gViewT` binding-13 write. Selected
+    /// when [`Self::path_sdf_forward_writes_viewt`] holds AND `!resolved_render_path.mesh_leg`.
+    pub sdf_forward_march_sdfonly_viewt_pipeline: Option<&'a ComputePipeline>,
+    /// The `sdf_forward_march` pass's dedicated Set-0 bind-group LAYOUT (14 bindings: edit-list
     /// `Buf` @0, `LightBuf` @1, `Materials` @2, `Camera` UBO @3, `gLit` STORAGE @4,
     /// `PointerGrid`/`BrickAtlas` @5/6, `PointerGrid1`/`BrickAtlas1` @7/8, `PointerGrid2`/
-    /// `BrickAtlas2` @9/10, `BrickLevels` UBO @11, `gForwardDepth` SAMPLED @12 — the shader's own
-    /// binding table doc). [`GBufferTargets`] writes an `sdf_forward_set` against it (Set 0) once
+    /// `BrickAtlas2` @9/10, `BrickLevels` UBO @11, `gForwardDepth` SAMPLED @12, `gViewT` STORAGE
+    /// @13 — the shader's own binding table doc; @12 is HAS_MESH-referenced only and @13
+    /// VIEWT-referenced only, both bound-but-unread by the other variants, the R2 contract, which
+    /// is why ONE layout object serves all FOUR `{HAS_MESH} x {VIEWT}` pipelines).
+    /// [`GBufferTargets`] writes an `sdf_forward_set` against it (Set 0) once
     /// per extent when [`Self::path_has_sdf_forward`] holds; Set 1 is
     /// [`Self::forward_layout1`] (the Forward-family shadow set, reused VERBATIM — this pass's
     /// own Set-1 binding table is a byte-for-byte copy of `forward_opaque.fs.hlsl`'s).
@@ -2518,6 +2534,21 @@ impl GBufferScene<'_> {
     #[inline]
     pub(crate) fn path_has_sdf_forward(&self) -> bool {
         self.resolved_render_path.sdf_forward_marched
+    }
+
+    /// TAA-under-VB — the SINGLE source of "does this frame's `sdf_forward_march` dispatch write
+    /// the `gViewT` lane" decision, read at BOTH `declare_vb_graph` (the pass's conditional
+    /// `viewt` GENERAL-write access) and `record_vb` (the `VIEWT`-variant pipeline selection) —
+    /// the O1 single-predicate rule ([`Self::path_has_sdf_forward`]'s own discipline). True
+    /// exactly when the marcher runs AND the TAA resolve is armed this frame: on an SDF-carrying
+    /// VB leg the marcher IS the composite and the SOLE gViewT producer (`viewt_from_vb_depth`
+    /// covers only the marcher-less `VB x Mesh` config — the two arming predicates are disjoint
+    /// by construction, mirroring the Deferred `viewt_from_depth` / `sdf_gbuffer_composite`
+    /// split). With TAA off nothing reads `viewt`, so the no-`VIEWT` marcher variants keep the
+    /// lane untouched (the 0%-gate).
+    #[inline]
+    pub(crate) fn path_sdf_forward_writes_viewt(&self) -> bool {
+        self.path_has_sdf_forward() && self.taa.is_some()
     }
 
     /// Multi-paradigm render-path plan, rung R8 — the SINGLE source of "is this frame's
