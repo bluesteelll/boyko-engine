@@ -264,6 +264,15 @@ fn build_kern(face: &dyn FontFace, prepared: &[PreparedGlyph], _upem: u16) -> Ve
     kern
 }
 
+/// Hard ceiling on either atlas dimension, in texels.
+///
+/// A power of two so `next_power_of_two()` on a height already under the cap cannot exceed it.
+/// At this ceiling the RGBA8 atlas is 8192 x 8192 x 4 = 256 MiB — already far past any real
+/// font — and, decisively, `atlas_w * atlas_h * 4` then fits `u32` with three bits to spare, so
+/// the blit's index arithmetic cannot wrap. Without it, ~1000 glyphs at the field cap drove
+/// `atlas_w` to 32768 and `max_h` to 262144, whose product overflows `u32`.
+const MAX_ATLAS_DIM: u32 = 8192;
+
 /// Packs the prepared fields into one atlas and assembles the [`BakedFont`].
 fn pack_and_build(
     prepared: &[PreparedGlyph],
@@ -280,9 +289,11 @@ fn pack_and_build(
         .map(|f| ((f.width + pad) as u64) * ((f.height + pad) as u64))
         .sum();
     let side = ((total_area as f64).sqrt().ceil() as u32 + pad).next_power_of_two();
-    let atlas_w = side.max(64);
-    // Height grows; cap generously, packer raises the skyline.
-    let max_h = atlas_w * 8;
+    let atlas_w = side.clamp(64, MAX_ATLAS_DIM);
+    // Height grows; cap generously, packer raises the skyline. Clamped to MAX_ATLAS_DIM so the
+    // `atlas_w * atlas_h * 4` blit arithmetic below is bounded BY CONSTRUCTION rather than by
+    // an assumption about how big a font can be.
+    let max_h = (atlas_w * 8).min(MAX_ATLAS_DIM);
 
     // Pack tallest-first for density.
     let mut order: Vec<usize> = (0..prepared.len()).filter(|&i| prepared[i].field.is_some()).collect();
@@ -301,9 +312,18 @@ fn pack_and_build(
         let f = prepared[i].field.as_ref().expect("invariant: filtered to Some");
         let w = f.width + pad;
         let h = f.height + pad;
-        let (x, y) = skyline
-            .find(w, h, max_h)
-            .unwrap_or((0, used_h)); // fallback append (max_h is generous)
+        // 2026-07 audit: the fallback used to append at `used_h` UNCONDITIONALLY, with the
+        // comment "max_h is generous" — an assumption, not a guarantee. A font the packer
+        // could not fit therefore grew the atlas past its own cap, and `atlas_w * atlas_h * 4`
+        // is u32 arithmetic that wraps to a short allocation while the blit below still
+        // indexes the full extent. The append now respects the cap; a glyph that genuinely
+        // does not fit is left unplaced, which the metrics builder renders as a zero-area
+        // quad with its advance intact (the same shape a space already gets).
+        let (x, y) = match skyline.find(w, h, max_h) {
+            Some(pos) => pos,
+            None if used_h.saturating_add(h) <= max_h => (0, used_h),
+            None => continue,
+        };
         skyline.place(x, w, y + h);
         // Place the field at (x + pad/2, y + pad/2)-ish; keep pad on the low
         // side so the high-side padding is covered by the next rect's spacing.
@@ -311,10 +331,16 @@ fn pack_and_build(
         used_h = used_h.max(y + h);
     }
 
+    // `used_h <= max_h <= MAX_ATLAS_DIM`, and `MAX_ATLAS_DIM` is a power of two, so rounding up
+    // cannot exceed the cap.
     let atlas_h = used_h.max(1).next_power_of_two();
+    debug_assert!(atlas_h <= MAX_ATLAS_DIM, "atlas height must stay within MAX_ATLAS_DIM");
 
-    // Blit fields into the RGBA8 atlas.
-    let mut pixels = vec![0u8; (atlas_w * atlas_h * 4) as usize];
+    // Blit fields into the RGBA8 atlas. Sized in u64: the product is provably below
+    // `MAX_ATLAS_DIM^2 * 4` = 256 MiB, but this is the allocation the audit found relying on
+    // u32 arithmetic that could wrap, so it states its own safety.
+    let pixel_bytes = (atlas_w as u64) * (atlas_h as u64) * 4;
+    let mut pixels = vec![0u8; pixel_bytes as usize];
     for (i, pg) in prepared.iter().enumerate() {
         let (Some(f), Some((px, py))) = (pg.field.as_ref(), placement[i]) else {
             continue;

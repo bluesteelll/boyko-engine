@@ -202,14 +202,15 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // `stage_flags` the entry's `ShaderStage` bits (identity cast, also asserted).
         // The bindings are a fixed-capacity inline array — zero heap allocation.
         let count = desc.entries.len();
-        debug_assert!(
-            (1..=MAX_BIND_GROUP_BINDINGS).contains(&count),
-            "invariant: bind-group-layout entry count must be in 1..=MAX_BIND_GROUP_BINDINGS"
-        );
-        // Release-safe: clamp to the inline capacity (and a floor of 1) so the count
-        // handed to the driver never exceeds the initialized slots even if a
-        // (debug-asserted) out-of-range count slipped through a release build.
-        let count = count.clamp(1, MAX_BIND_GROUP_BINDINGS);
+        // 2026-07 audit: this used to `clamp(1, CAP)`, which turned an EMPTY entry slice into
+        // `count == 1` and then panicked at `desc.entries[0]` below — from a safe `pub fn`. A
+        // clamp cannot invent a slot that does not exist. An out-of-range count is a caller
+        // error, rejected here before any Vulkan object is created (no leak, no panic).
+        if !(1..=MAX_BIND_GROUP_BINDINGS).contains(&count) {
+            return Err(VulkanError::Unsupported(
+                "bind-group-layout entry count must be in 1..=MAX_BIND_GROUP_BINDINGS",
+            ));
+        }
         // Review M2: every declared binding must fit the inline-array capacity so the
         // retained `(binding, kind)` pairs (read at `create_bind_group` to target each
         // write) stay addressable. Debug-only; the contiguous-0..N convention every
@@ -322,10 +323,15 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // allocated once, and `vkUpdateDescriptorSets` writes the whole set ONCE at
         // create — there is NO per-frame rewrite.
         let count = desc.entries.len();
-        debug_assert!(
-            (1..=MAX_BIND_GROUP_BINDINGS).contains(&count),
-            "invariant: bind-group entry count must be in 1..=MAX_BIND_GROUP_BINDINGS"
-        );
+        // 2026-07 audit: same clamp-then-panic bug as `create_bind_group_layout`, but WORSE
+        // here — the panic on `desc.entries[i]` fires AFTER `vkCreateDescriptorPool` (below),
+        // and a raw `VkDescriptorPool` has no RAII, so the unwind leaked it. Reject an
+        // out-of-range count before the pool exists.
+        if !(1..=MAX_BIND_GROUP_BINDINGS).contains(&count) {
+            return Err(VulkanError::Unsupported(
+                "bind-group entry count must be in 1..=MAX_BIND_GROUP_BINDINGS",
+            ));
+        }
         // Review M1: the group's arity must equal the layout's declared entry count —
         // one descriptor write per layout binding, no more, no fewer. (The doc on
         // `BindGroupDesc` promises this check; it is now real because the layout
@@ -334,7 +340,6 @@ impl RhiDevice<Vulkan> for VulkanContext {
             count == desc.layout.entry_count,
             "P1a: BindGroupDesc.entries.len() must equal the layout's entry count"
         );
-        let count = count.clamp(1, MAX_BIND_GROUP_BINDINGS);
 
         // --- Per-kind descriptor histogram → pool sizes (one entry per kind that
         //     actually appears, so the pool is sized exactly). The kinds map onto fixed

@@ -29,6 +29,97 @@ use crate::error::VulkanError;
 use crate::memory::BoundBuffer;
 use crate::rhi_impl::VulkanQueue;
 
+// ═════════════════════════════════════════════════════════════════════════════
+// Error-path RAII (2026-07 audit)
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Both builders allocate a backing buffer, create an acceleration structure over it, then
+// allocate scratch — and every step after the first can fail with `?`. Before this, each of
+// those five early returns dropped the handles on the floor: a `VkBuffer` plus its
+// suballocation, and on the later paths a `VkAccelerationStructureKHR` too. A device-lost or
+// out-of-memory retry loop would therefore bleed VRAM until the device died for a second,
+// unrelated reason.
+//
+// The guards below make cleanup structural rather than something five `?` sites must each
+// remember. Drop order is reverse declaration order, which is exactly the module's lifetime
+// contract: declare `backing` first and its `accel` second, and the AS is destroyed BEFORE
+// the buffer it lives in.
+
+/// Destroys a [`BoundBuffer`] on scope exit unless [`take`](BufferGuard::take) claims it.
+struct BufferGuard<'a> {
+    ctx: &'a VulkanContext,
+    buf: Option<BoundBuffer>,
+}
+
+impl<'a> BufferGuard<'a> {
+    #[inline]
+    fn new(ctx: &'a VulkanContext, buf: BoundBuffer) -> Self {
+        Self { ctx, buf: Some(buf) }
+    }
+
+    /// The guarded buffer, still guarded.
+    #[inline]
+    fn get(&self) -> &BoundBuffer {
+        self.buf.as_ref().expect("invariant: BufferGuard is occupied until `take`")
+    }
+
+    /// Hands ownership back to the caller; the guard becomes inert.
+    #[inline]
+    fn take(mut self) -> BoundBuffer {
+        self.buf.take().expect("invariant: BufferGuard is taken at most once")
+    }
+}
+
+impl Drop for BufferGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(buf) = self.buf.take() {
+            // SAFETY: the guard owned `buf` (created by `create_addr_buffer` on this same
+            // `ctx`), so this is its single destruction. It runs only on an error path, i.e.
+            // before any build was submitted for it, so no GPU work can still reference it —
+            // except the scratch buffer, whose success path `take`s it out of the guard and
+            // frees it explicitly after the build fence has signalled.
+            unsafe { self.ctx.destroy_buffer(buf) };
+        }
+    }
+}
+
+/// Destroys a [`BoundAccelStruct`] on scope exit unless [`take`](AccelGuard::take) claims it.
+struct AccelGuard<'a> {
+    ctx: &'a VulkanContext,
+    accel: Option<BoundAccelStruct>,
+}
+
+impl<'a> AccelGuard<'a> {
+    #[inline]
+    fn new(ctx: &'a VulkanContext, accel: BoundAccelStruct) -> Self {
+        Self { ctx, accel: Some(accel) }
+    }
+
+    /// The guarded acceleration structure, still guarded.
+    #[inline]
+    fn get(&self) -> &BoundAccelStruct {
+        self.accel.as_ref().expect("invariant: AccelGuard is occupied until `take`")
+    }
+
+    /// Hands ownership back to the caller; the guard becomes inert.
+    #[inline]
+    fn take(mut self) -> BoundAccelStruct {
+        self.accel.take().expect("invariant: AccelGuard is taken at most once")
+    }
+}
+
+impl Drop for AccelGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(accel) = self.accel.take() {
+            // SAFETY: the guard owned `accel` (created by `ctx.create_accel`), so this is its
+            // single destruction, and it runs only on an error path — before the build was
+            // submitted, so no in-flight command buffer references it. The backing buffer
+            // outlives this call: its guard is declared FIRST and therefore drops LAST.
+            unsafe { self.ctx.destroy_accel(accel) };
+        }
+    }
+}
+
 /// Rounds `x` up to the next multiple of `align` (which MUST be a power of two —
 /// `as_scratch_align` is, e.g. 128 on Ampere). `align == 0` is treated as 1 (no rounding).
 #[inline]
@@ -150,28 +241,38 @@ pub fn create_persistent_tlas(
     // The TLAS backing + scratch are GPU-ONLY (the build writes/reads them, never the CPU) →
     // DEVICE-LOCAL VRAM. The device-local block carries the DEVICE_ADDRESS alloc flag under hwrt,
     // so the scratch device address still resolves.
-    let backing = create_addr_buffer(
+    // Backing first, AS second: drop order frees the AS before the buffer it lives in, which is
+    // what `destroy_persistent_tlas` does on the success path too.
+    let backing = BufferGuard::new(ctx, create_addr_buffer(
         ctx,
         sizes.as_size,
         BufferUsage::ACCEL_STRUCTURE_STORAGE | BufferUsage::SHADER_DEVICE_ADDRESS,
         MemoryLocation::DeviceLocal,
-    )?;
-    let accel = ctx.create_accel(AsKind::Tlas, backing.buffer, sizes.as_size)?;
+    )?);
+    let accel = AccelGuard::new(
+        ctx,
+        ctx.create_accel(AsKind::Tlas, backing.get().buffer, sizes.as_size)?,
+    );
 
     let align = ctx.as_scratch_align().max(1);
-    let scratch = create_addr_buffer(
+    let scratch = BufferGuard::new(ctx, create_addr_buffer(
         ctx,
         sizes.build_scratch + align,
         BufferUsage::STORAGE | BufferUsage::SHADER_DEVICE_ADDRESS,
         MemoryLocation::DeviceLocal,
-    )?;
-    let scratch_base = ctx.buffer_device_address(scratch.buffer)?;
+    )?);
+    let scratch_base = ctx.buffer_device_address(scratch.get().buffer)?;
     if scratch_base == 0 {
         return Err(VulkanError::Unsupported("persistent TLAS scratch buffer has a zero device address"));
     }
     let scratch_addr = round_up(scratch_base, align);
 
-    Ok(PersistentTlas { accel, backing, scratch, scratch_addr })
+    Ok(PersistentTlas {
+        accel: accel.take(),
+        backing: backing.take(),
+        scratch: scratch.take(),
+        scratch_addr,
+    })
 }
 
 /// Destroys a [`PersistentTlas`]: the AS FIRST, then its backing + scratch buffers (HW-RT rung
@@ -293,43 +394,49 @@ pub fn build_blas(
     // The AS backing buffer + the AS created over it. Both backing + scratch are GPU-ONLY
     // (written/read by the build, never CPU-touched) → DEVICE-LOCAL VRAM; the device-local block
     // carries the DEVICE_ADDRESS alloc flag under hwrt, so the scratch device address resolves.
-    let backing = create_addr_buffer(
+    // Guarded in declaration order so the AS (declared second) is destroyed BEFORE its
+    // backing buffer (declared first) on every error path below — the module's lifetime
+    // contract, enforced by drop order instead of by five `?` sites remembering it.
+    let backing = BufferGuard::new(ctx, create_addr_buffer(
         ctx,
         sizes.as_size,
         BufferUsage::ACCEL_STRUCTURE_STORAGE | BufferUsage::SHADER_DEVICE_ADDRESS,
         MemoryLocation::DeviceLocal,
-    )?;
-    let accel = ctx.create_accel(AsKind::Blas, backing.buffer, sizes.as_size)?;
+    )?);
+    let accel = AccelGuard::new(
+        ctx,
+        ctx.create_accel(AsKind::Blas, backing.get().buffer, sizes.as_size)?,
+    );
 
     // The scratch buffer: over-allocate by `align` so the aligned scratch address still has
     // `build_scratch` bytes past it (the scratch address MUST satisfy `as_scratch_align`, NOT
     // the buffer's memreq alignment — research-confirmed).
     let align = ctx.as_scratch_align().max(1);
-    let scratch = create_addr_buffer(
+    let scratch = BufferGuard::new(ctx, create_addr_buffer(
         ctx,
         sizes.build_scratch + align,
         BufferUsage::STORAGE | BufferUsage::SHADER_DEVICE_ADDRESS,
         MemoryLocation::DeviceLocal,
-    )?;
-    let scratch_base = ctx.buffer_device_address(scratch.buffer)?;
+    )?);
+    let scratch_base = ctx.buffer_device_address(scratch.get().buffer)?;
     if scratch_base == 0 {
         return Err(VulkanError::Unsupported("BLAS scratch buffer has a zero device address"));
     }
     let scratch_addr = round_up(scratch_base, align);
 
     let entry = AsBuildEntry { kind: AsKind::Blas, geometry: geom, scratch_address: scratch_addr };
-    record_build(ctx, queue, &entry, &accel)?;
+    record_build(ctx, queue, &entry, accel.get())?;
 
     // The scratch is done (the build fence signaled); free it.
     // SAFETY: `scratch` was created by `create_addr_buffer` on `ctx`'s device-local block and
     // is destroyed exactly once here; the build fence completed, so the GPU no longer reads it.
-    unsafe { ctx.destroy_buffer(scratch) };
+    unsafe { ctx.destroy_buffer(scratch.take()) };
 
-    let device_address = ctx.accel_device_address(&accel)?;
+    let device_address = ctx.accel_device_address(accel.get())?;
     if device_address == 0 {
         return Err(VulkanError::Unsupported("built BLAS reports a zero device address"));
     }
-    Ok(BuiltBlas { accel, backing, device_address })
+    Ok(BuiltBlas { accel: accel.take(), backing: backing.take(), device_address })
 }
 
 /// Builds a top-level acceleration structure over one instance per BLAS device address (HW-RT
@@ -364,13 +471,15 @@ pub fn build_tlas(
     // CPU-touched AS buffer (the host memcpys the `pack_instance` output into it below), so it
     // MUST stay HOST-VISIBLE COHERENT (device-local memory is not mappable).
     let instance_bytes = core::mem::size_of_val(instances.as_slice()) as u64;
-    let instance_buffer = create_addr_buffer(
+    // Guarded from creation: every `?` below this point used to leak it outright.
+    let instance_buffer = BufferGuard::new(ctx, create_addr_buffer(
         ctx,
         instance_bytes,
         BufferUsage::ACCEL_BUILD_INPUT | BufferUsage::SHADER_DEVICE_ADDRESS,
         MemoryLocation::HostVisibleCoherent,
-    )?;
+    )?);
     let dst = instance_buffer
+        .get()
         .mapped
         .ok_or(VulkanError::Unsupported("TLAS instance buffer is not host-mapped"))?;
     // SAFETY: `dst` points to `instance_bytes` mapped host-coherent bytes (the shared host
@@ -390,7 +499,7 @@ pub fn build_tlas(
         );
     }
 
-    let instance_addr = ctx.buffer_device_address(instance_buffer.buffer)?;
+    let instance_addr = ctx.buffer_device_address(instance_buffer.get().buffer)?;
     if instance_addr == 0 {
         return Err(VulkanError::Unsupported("TLAS instance buffer has a zero device address"));
     }
@@ -409,39 +518,48 @@ pub fn build_tlas(
     // The TLAS backing + scratch are GPU-ONLY → DEVICE-LOCAL VRAM (the CPU-packed instance array
     // above is the only host-visible AS buffer). The device-local block carries the DEVICE_ADDRESS
     // alloc flag under hwrt, so the scratch device address resolves.
-    let backing = create_addr_buffer(
+    // Backing first, AS second: drop order then frees the AS before the buffer it lives in.
+    let backing = BufferGuard::new(ctx, create_addr_buffer(
         ctx,
         sizes.as_size,
         BufferUsage::ACCEL_STRUCTURE_STORAGE | BufferUsage::SHADER_DEVICE_ADDRESS,
         MemoryLocation::DeviceLocal,
-    )?;
-    let accel = ctx.create_accel(AsKind::Tlas, backing.buffer, sizes.as_size)?;
+    )?);
+    let accel = AccelGuard::new(
+        ctx,
+        ctx.create_accel(AsKind::Tlas, backing.get().buffer, sizes.as_size)?,
+    );
 
     let align = ctx.as_scratch_align().max(1);
-    let scratch = create_addr_buffer(
+    let scratch = BufferGuard::new(ctx, create_addr_buffer(
         ctx,
         sizes.build_scratch + align,
         BufferUsage::STORAGE | BufferUsage::SHADER_DEVICE_ADDRESS,
         MemoryLocation::DeviceLocal,
-    )?;
-    let scratch_base = ctx.buffer_device_address(scratch.buffer)?;
+    )?);
+    let scratch_base = ctx.buffer_device_address(scratch.get().buffer)?;
     if scratch_base == 0 {
         return Err(VulkanError::Unsupported("TLAS scratch buffer has a zero device address"));
     }
     let scratch_addr = round_up(scratch_base, align);
 
     let entry = AsBuildEntry { kind: AsKind::Tlas, geometry: geom, scratch_address: scratch_addr };
-    record_build(ctx, queue, &entry, &accel)?;
+    record_build(ctx, queue, &entry, accel.get())?;
 
     // SAFETY: as in `build_blas` — the build fence completed, so the GPU no longer reads the
     // scratch; `scratch` is destroyed exactly once here.
-    unsafe { ctx.destroy_buffer(scratch) };
+    unsafe { ctx.destroy_buffer(scratch.take()) };
 
-    let device_address = ctx.accel_device_address(&accel)?;
+    let device_address = ctx.accel_device_address(accel.get())?;
     if device_address == 0 {
         return Err(VulkanError::Unsupported("built TLAS reports a zero device address"));
     }
-    Ok(BuiltTlas { accel, backing, instance_buffer, device_address })
+    Ok(BuiltTlas {
+        accel: accel.take(),
+        backing: backing.take(),
+        instance_buffer: instance_buffer.take(),
+        device_address,
+    })
 }
 
 /// Destroys a [`BuiltBlas`]: the AS FIRST, then its backing buffer (HW-RT rung R2a-2).

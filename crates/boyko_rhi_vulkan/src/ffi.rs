@@ -1380,35 +1380,48 @@ const _: () = assert!(LIMITS_OFF_TIMESTAMP_PERIOD + 4 <= 504);
 
 impl VkPhysicalDeviceLimitsBlob {
     /// Reads the `u32` field at `offset` bytes into the opaque limits blob. The
-    /// `LIMITS_OFF_*` constants above name the documented spec offsets; a bad offset is a
-    /// programming error, guarded here with a `debug_assert` (the read stays in-bounds
-    /// because every `LIMITS_OFF_*` const-asserts `offset + 4 <= 504`).
+    /// `LIMITS_OFF_*` constants above name the documented spec offsets.
+    ///
+    /// 2026-07 audit: this was a SAFE `pub fn` performing an unchecked raw read at a
+    /// caller-supplied offset, with only a `debug_assert` in front of it — and a
+    /// `debug_assert` is absent from the release build, which is the build that matters.
+    /// A safe function must be sound for EVERY input it accepts, so `read_u32(10_000)`
+    /// from safe code was an out-of-bounds read. It is now a checked slice index: the
+    /// `unsafe` block is gone entirely, and the bounds check is free — the blob is read a
+    /// handful of times at device boot, never per frame.
+    ///
+    /// # Panics
+    ///
+    /// If `offset + 4` exceeds the 504-byte blob. Every `LIMITS_OFF_*` const-asserts that
+    /// it does not, so reaching the panic means a hand-written offset, i.e. a bug.
     #[inline]
     pub fn read_u32(&self, offset: usize) -> u32 {
-        debug_assert!(offset + 4 <= self.0.len(), "invariant: limits field read within the blob");
-        // SAFETY: `offset + 4 <= 504` (the `LIMITS_OFF_*` const-asserts + the debug-assert), so the
-        // 4-byte read is in-bounds of the blob. The bytes were written by the driver through the
-        // `vkGetPhysicalDeviceProperties` out-pointer (a valid `u32` at the spec-fixed offset). The
-        // driver writes native-endian, and this target is little-endian x86_64.
-        let bytes: [u8; 4] = unsafe { *(self.0.as_ptr().add(offset) as *const [u8; 4]) };
-        u32::from_ne_bytes(bytes)
+        // The driver writes native-endian through the `vkGetPhysicalDeviceProperties`
+        // out-pointer; this target is little-endian x86_64.
+        u32::from_ne_bytes(self.field_bytes(offset))
     }
 
     /// Reads the `f32` field at `offset` bytes into the opaque limits blob (HW-RT rung
     /// R0: `timestampPeriod` at [`LIMITS_OFF_TIMESTAMP_PERIOD`]). The companion of
-    /// [`Self::read_u32`]; a bad offset is a programming error, guarded here with a
-    /// `debug_assert` (the read stays in-bounds because `LIMITS_OFF_TIMESTAMP_PERIOD`
-    /// const-asserts `offset + 4 <= 504`).
+    /// [`Self::read_u32`] — see it for why this is a checked read.
+    ///
+    /// # Panics
+    ///
+    /// If `offset + 4` exceeds the 504-byte blob.
     #[inline]
     pub fn read_f32(&self, offset: usize) -> f32 {
-        debug_assert!(offset + 4 <= self.0.len(), "invariant: limits field read within the blob");
-        // SAFETY: `offset + 4 <= 504` (the caller's `LIMITS_OFF_*` const-asserts + the
-        // debug-assert), so the 4-byte read is in-bounds of the blob. The bytes were
-        // written by the driver through the `vkGetPhysicalDeviceProperties` out-pointer (a
-        // valid `float` at the spec-fixed offset). The driver writes native-endian, and
-        // this target is little-endian x86_64.
-        let bytes: [u8; 4] = unsafe { *(self.0.as_ptr().add(offset) as *const [u8; 4]) };
-        f32::from_ne_bytes(bytes)
+        f32::from_ne_bytes(self.field_bytes(offset))
+    }
+
+    /// The shared checked 4-byte window both readers slice out of the blob.
+    ///
+    /// `try_into` on a `&[u8]` of the right length is a compile-time-sized copy — the same
+    /// codegen the old raw read produced, with the index check the old version omitted.
+    #[inline]
+    fn field_bytes(&self, offset: usize) -> [u8; 4] {
+        self.0[offset..offset + 4]
+            .try_into()
+            .expect("invariant: a 4-byte window slices to a [u8; 4]")
     }
 }
 

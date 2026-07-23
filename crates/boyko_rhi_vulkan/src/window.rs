@@ -732,18 +732,27 @@ unsafe fn read_raw_mouse_delta(hrawinput: *mut c_void) -> Option<(i32, i32)> {
     if n == u32::MAX || n == 0 {
         return None;
     }
-    // SAFETY: `GetRawInputData` returned a non-error byte count, so it fully
-    // initialized the `RAWINPUTHEADER` + the device-specific arm. We read the
-    // header (always present) and, for a mouse, its relative-motion fields.
-    let raw = unsafe { raw.assume_init() };
-    if raw.header.dwType != os::RIM_TYPEMOUSE {
+    // 2026-07 audit: this used to `raw.assume_init()` the WHOLE `RAWINPUT` by value.
+    // `GetRawInputData` writes only `n` bytes — the header plus the device-specific arm —
+    // and for a mouse that arm is SMALLER than the union (whose size is dictated by the
+    // larger HID/keyboard arms), so the tail stays uninitialized. `assume_init()` on the
+    // full struct asserts EVERY byte is initialized, which the OS never promised. We instead
+    // project to each field through the `MaybeUninit` pointer and read only the bytes that
+    // were actually written.
+    let base = raw.as_ptr();
+    // SAFETY: `GetRawInputData` returned a non-error count, so the `RAWINPUTHEADER` (the
+    // first member, always present regardless of device type) is fully initialized. The
+    // projection stays inside the single `RAWINPUT` allocation; `read()` copies only the
+    // header's bytes, never the still-uninitialized union tail.
+    let header = unsafe { core::ptr::addr_of!((*base).header).read() };
+    if header.dwType != os::RIM_TYPEMOUSE {
         return None;
     }
-    // SAFETY: `RAWINPUT::data` is a C union (windows-sys `RAWINPUT_0`); the mouse
-    // arm is the active member because `dwType == RIM_TYPEMOUSE` was just checked.
-    // `GetRawInputData` initialized that arm, so reading `lLastX`/`lLastY` is a
-    // read of valid, initialized bytes of the correct union variant.
-    let mouse = unsafe { raw.data.mouse };
+    // SAFETY: `dwType == RIM_TYPEMOUSE` proves the OS wrote the `RAWMOUSE` arm of the
+    // `RAWINPUT_0` union, so those bytes are initialized. Projecting to `data.mouse` and
+    // `read()`-ing it copies exactly that arm — never asserting init for the other, larger
+    // union members the driver did not touch.
+    let mouse = unsafe { core::ptr::addr_of!((*base).data.mouse).read() };
     Some((mouse.lLastX, mouse.lLastY))
 }
 
