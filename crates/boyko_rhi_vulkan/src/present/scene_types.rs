@@ -18,7 +18,7 @@ use crate::rhi_impl::{
 };
 use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS, VulkanTexture};
 
-use super::gpu_timing::TimestampCollector;
+use super::gpu_timing::{TimestampCollector, VbTimestampCollector};
 use super::{FRAMES_IN_FLIGHT, SwapchainError};
 
 // Doc-link scope: types referenced only from doc-comments in this module (the render
@@ -1814,6 +1814,18 @@ pub struct GBufferScene<'a> {
     /// feature (a feature would risk the timed build diverging from the shipped pipeline the
     /// calibration must measure).
     pub gpu_timing: Option<&'a TimestampCollector>,
+    /// VB-P1d: the optional VisibilityBuffer froxel light-cull GPU-timestamp bench collector.
+    /// `None` on EVERY golden/host/interactive frame (the DEFAULT — the SAME capability-as-
+    /// presence discipline [`Self::gpu_timing`] uses) ⇒ the recorder emits ZERO reset/write
+    /// commands around the `record_vb` cull/shade dispatches, so the recorded command stream is
+    /// BYTE-IDENTICAL to the pre-VB-P1d path. `Some(tc)` (the offline VB-P1d froxel cull/shade
+    /// cost bench, `boyko_app::runner`'s `BOYKO_VB_BENCH`-gated collector) brackets the L1
+    /// clustered light-cull dispatch and the `vb_shade`/`vb_resolve` lit-producer dispatch (the
+    /// `record_vb`-only sibling of [`Self::gpu_timing`]'s four G-buffer software-ray passes) so
+    /// the bench reports per-pass GPU wall-clock. A separate collector TYPE from
+    /// [`Self::gpu_timing`] (not a shared enlarged `PASS_COUNT`) — see
+    /// [`super::gpu_timing::VbTimestampCollector`]'s own doc for why.
+    pub vb_gpu_timing: Option<&'a VbTimestampCollector>,
     /// HW-RT rung R2a-3: the optional GPU-resident per-frame TLAS pack + build activation. `None`
     /// on EVERY golden/host frame (the DEFAULT — capability-as-presence) ⇒ NO pack dispatch, NO
     /// build, NO barrier, so the recorded command stream is BYTE-IDENTICAL to the pre-R2a-3 path

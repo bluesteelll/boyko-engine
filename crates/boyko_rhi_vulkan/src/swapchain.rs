@@ -11,8 +11,8 @@ pub use crate::present::{
     GBufferFrame, GBufferMeshDraw, GBufferScene, GBufferTargets, InterpActivation, PASS_COUNT,
     PunctualDepthActivation, RcasActivation, Renderer, ResolvedRenderPathGpu, SCENE_MVP_BYTES,
     SampledComposite, Scene, SmaaActivation, SsaaActivation, SsaoActivation, Surface, Swapchain,
-    SwapchainError, TaaActivation, TimedPass, TimestampCollector, UiPass, ViewtFromDepthActivation,
-    ViewtFromVbDepthActivation,
+    SwapchainError, TaaActivation, TimedPass, TimestampCollector, UiPass, VB_PASS_COUNT,
+    VbTimedPass, VbTimestampCollector, ViewtFromDepthActivation, ViewtFromVbDepthActivation,
 };
 #[cfg(feature = "hwrt")]
 pub use crate::present::{ShadowVisActivation, TlasBuildActivation};

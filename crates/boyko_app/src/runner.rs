@@ -56,6 +56,8 @@ use boyko_render::{
     upload_temporal_shadow_ring,
 };
 #[cfg(windows)]
+use boyko_rhi::RhiDevice;
+#[cfg(windows)]
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 #[cfg(windows)]
 use boyko_rhi_vulkan::ffi::VkExtent2D;
@@ -97,6 +99,17 @@ pub(crate) struct WindowDesc {
 /// The frame clear color — a dark neutral (the empty-gather / background tone).
 #[cfg(windows)]
 const CLEAR_COLOR: [f32; 4] = [0.05, 0.07, 0.10, 1.0];
+
+/// VB-P1d: the default number of TIMED frames the froxel cull/shade bench collects (past
+/// warm-up) when `BOYKO_VB_BENCH_FRAMES` is unset. Mirrors
+/// `window_present_gbuffer`'s own `GPU_PASS_COST_FRAMES` R0 harness order of magnitude.
+#[cfg(windows)]
+const VB_BENCH_DEFAULT_FRAMES: u32 = 220;
+
+/// VB-P1d: the warm-up frames discarded from the front of the bench sample window (shader
+/// compile + GPU clock ramp) — mirrors `window_present_gbuffer`'s own `GPU_PASS_COST_WARMUP`.
+#[cfg(windows)]
+const VB_BENCH_WARMUP: usize = 20;
 
 /// Asset-system rung A1: the boot preallocation budget for
 /// [`Assets::<Material>::with_reserved`] — the host does not know a game's material
@@ -810,6 +823,63 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     // round-robin `frame_index` (which subset updates this frame). Wraps at u32::MAX (benign — the
     // subset phase is `frame_index % subset_n`).
     let mut frame_index: u32 = 0;
+
+    // VB-P1d: the froxel cull/shade GPU-timestamp bench. Armed ONLY when `BOYKO_VB_BENCH` was
+    // read at `GpuSceneBundles::boot` time AND the device supports timestamps
+    // (`GpuSceneBundles::vb_bench_armed`'s own doc) — `false` on EVERY non-bench run, so every
+    // line gated on `vb_bench` below is dead code there and this loop stays byte-identical to
+    // the pre-VB-P1d path.
+    let vb_bench = host.gpu.vb_bench_armed();
+    // The bench's own TIMED-frame budget — decoupled from `BOYKO_WINDOW_FRAMES` (kept free for
+    // its existing automated-run-cap role). `BOYKO_VB_BENCH_LIGHTS` is read here ONLY as a print
+    // label — the bench scene's own setup system reads the SAME env independently to spawn the
+    // lights (`vb_p1d_cull_shade_bench.rs`), so there is one source of truth for "how many".
+    let vb_bench_frames: u32 = if vb_bench {
+        std::env::var("BOYKO_VB_BENCH_FRAMES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(VB_BENCH_DEFAULT_FRAMES)
+            .max(1)
+    } else {
+        0
+    };
+    let vb_bench_lights: u32 =
+        std::env::var("BOYKO_VB_BENCH_LIGHTS").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    // Preallocated ONCE at their final capacity (Principle 5) — the bench never reallocates
+    // once the loop starts.
+    let mut vb_bench_cull_ns: Vec<f64> = Vec::with_capacity(vb_bench_frames as usize);
+    let mut vb_bench_shade_ns: Vec<f64> = Vec::with_capacity(vb_bench_frames as usize);
+    let mut vb_bench_seen: u32 = 0;
+    if vb_bench {
+        // `record_vb`'s VB-P1d brackets write the VbShade pair ONLY on a mesh-leg frame (the
+        // `vb_shade`/`vb_resolve` branch, gated on `scene.resolved_render_path.mesh_leg` —
+        // `vb.rs`'s own doc); an SDF-only VB leg would never write it, and the
+        // `VK_QUERY_RESULT_WAIT_BIT` readback (`GpuSceneBundles::read_vb_bench_ns`) would then
+        // block forever. Fail loudly here instead of hanging on the first bench frame.
+        assert!(
+            host.resolved_render_path.mesh_leg,
+            "invariant: VB-P1d bench requires a mesh-leg render path (else the VbShade \
+             timestamp pair is never written and the WAIT_BIT readback hangs)"
+        );
+        // The lit-producer choice under VisibilityBuffer is THREE-way, not two (`vb.rs`'s own
+        // VB-P1d doc on `record_vb`'s producer selection): a split-armed frame
+        // (`vb_shade_split`, DISPLACING both `vb_shade` and `vb_resolve`) leaves the VbShade
+        // pair reset-but-never-written, hanging the WAIT_BIT readback below exactly like an
+        // SDF-only leg would. The split arms ONLY under a pre-light consumer (SSAO/DDGI/SSR/
+        // shadow-denoise/Temporal — `resolve_rules`, `render_path_config.rs:854-855`), so the
+        // bench is fused/classified-only by construction: its scene must never arm one.
+        // `mesh_geo_shade_split` alone is equivalent to the recorder's own `path_vb_split()`
+        // predicate (resolver-set ONLY under `VisibilityBuffer` — `vb.rs`'s
+        // `debug_assert!(!mesh_geo_shade_split || path_is_vb())` pins this), so checking this
+        // one field is sufficient without needing `RenderPath` in scope here.
+        assert!(
+            !host.resolved_render_path.mesh_geo_shade_split,
+            "invariant: VB-P1d bench does not support the VB split lit-producer \
+             (vb_shade_split); the bench scene must not arm a pre-light consumer \
+             (SSAO/DDGI/SSR/shadow-denoise/Temporal)"
+        );
+    }
+
     loop {
         // 1. Pump the OS queue; `false` = WM_QUIT (the window closed).
         if !host.window.pump_events() {
@@ -1989,6 +2059,32 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             }
         }
 
+        // VB-P1d: accumulate this frame's (cull_ns, shade_ns) bench pair — read ONLY on a
+        // frame that actually presented (a resize-skip records no new `record_vb` work this
+        // iteration). GATED on `vb_bench`; dead code on every non-bench run.
+        if vb_bench && presented_ok {
+            // Offline discipline (mirrors `window_present_gbuffer`'s own R0 harness): wait the
+            // device idle so this frame's timestamp writes are complete + readable before the
+            // slot is reused two frames on.
+            ctx.wait_idle().expect("invariant: VB-P1d bench wait_idle");
+            if let Some((cull_ns, shade_ns)) = host.gpu.read_vb_bench_ns(ctx, s) {
+                vb_bench_seen += 1;
+                if vb_bench_seen as usize > VB_BENCH_WARMUP {
+                    vb_bench_cull_ns.push(cull_ns);
+                    vb_bench_shade_ns.push(shade_ns);
+                }
+            }
+            if vb_bench_cull_ns.len() >= vb_bench_frames as usize {
+                print_vb_bench_summary(
+                    host.resolved_render_path.froxel_light_cull,
+                    vb_bench_lights,
+                    &vb_bench_cull_ns,
+                    &vb_bench_shade_ns,
+                );
+                return;
+            }
+        }
+
         // Diagnostic dump (cold): advance settle → request → drain; once the
         // drained readback is host-readable, print the frame-stream state the
         // GPU actually consumed beside the image, write it, and exit the loop.
@@ -2024,6 +2120,61 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // SDFDDGI I2 (arm): advance the round-robin frame index (wraps benignly at u32::MAX).
         frame_index = frame_index.wrapping_add(1);
     }
+}
+
+/// VB-P1d: the arithmetic mean of `samples` (ns) — average over N frames so the reported
+/// number reflects steady-state cost, not single-frame noise (`samples` must be non-empty).
+#[cfg(windows)]
+fn vb_bench_mean_ns(samples: &[f64]) -> f64 {
+    debug_assert!(!samples.is_empty(), "invariant: vb_bench_mean_ns needs at least one sample");
+    samples.iter().sum::<f64>() / samples.len() as f64
+}
+
+/// VB-P1d: prints this run's froxel cull/shade bench summary.
+///
+/// `froxel_light_cull` (`ResolvedRenderPath`'s own boot-frozen decision — resolved ONCE,
+/// never re-derived per frame) means a SINGLE process can only ever measure ONE leg (flat or
+/// froxel) of a given `N_ps`: the froxel arm's GPU pipelines simply do not exist on a
+/// flat-boot process, so there is no in-process way to toggle it mid-run. The orchestrator
+/// runs this bench TWICE per `N_ps` (`BOYKO_VB_FROXEL_FORCE_OFF` unset, then set — the SAME
+/// knob `vb_mesh_froxel.rs` uses) and combines the two printed lines to read the break-even
+/// (`froxel_total_ns` crossing below `flat_shade_ns`).
+///
+/// O4 (measurement methodology, mirrors the R0 harness's own NOTE): each of `cull_ns`/
+/// `shade_ns` is a `TOP_OF_PIPE`/`BOTTOM_OF_PIPE` bracket around a NON-ADJACENT pass pair, so
+/// the reported number is GPU wall-clock INCLUSIVE of pipeline drain and any overlap with
+/// neighboring work, not isolated kernel time — and `froxel_total_ns` sums two INDEPENDENTLY
+/// measured brackets, not one continuous span. Fine for a break-even comparison against
+/// `flat_shade_ns` (both sides carry the same bracket bias), but not a claim of isolated
+/// per-pass cost.
+///
+/// `#[cold]`/`#[inline(never)]`: a once-per-process diagnostic print, never on the hot path.
+#[cfg(windows)]
+#[cold]
+#[inline(never)]
+fn print_vb_bench_summary(froxel_light_cull: bool, n_ps: u32, cull_ns: &[f64], shade_ns: &[f64]) {
+    debug_assert_eq!(cull_ns.len(), shade_ns.len(), "invariant: one (cull,shade) pair per frame");
+    let shade_mean = vb_bench_mean_ns(shade_ns);
+    if froxel_light_cull {
+        let cull_mean = vb_bench_mean_ns(cull_ns);
+        let total_mean = cull_ns.iter().zip(shade_ns).map(|(c, s)| c + s).sum::<f64>() / cull_ns.len() as f64;
+        println!(
+            "VB-P1d N_ps={n_ps} config=froxel froxel_cull_ns={cull_mean:.1} \
+             froxel_shade_ns={shade_mean:.1} froxel_total_ns={total_mean:.1} (kept {} frames)",
+            cull_ns.len()
+        );
+    } else {
+        println!(
+            "VB-P1d N_ps={n_ps} config=flat flat_shade_ns={shade_mean:.1} (kept {} frames)",
+            shade_ns.len()
+        );
+    }
+    println!(
+        "  NOTE: TOP/BOTTOM brackets each pass's wall-clock (inclusive of pipeline drain + \
+         overlap with neighboring work), not isolated kernel time; froxel_total_ns sums two \
+         independently-measured brackets. Fine for the CLUSTER_HI break-even comparison, not \
+         an isolated-cost claim (mirrors the R0 GPU-pass-cost harness's own methodology note)."
+    );
 }
 
 /// One-shot frame-stream diagnostics printed beside the dump image — the

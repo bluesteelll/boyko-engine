@@ -2496,6 +2496,8 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         interp: None,
         // HW-RT rung R0: GPU timing OFF (byte-identical command stream).
         gpu_timing: None,
+        // VB-P1d: this harness never resolves `VisibilityBuffer` (byte-identical command stream).
+        vb_gpu_timing: None,
         // HW-RT rung R2a-3: the per-frame TLAS pack + build OFF (byte-identical command stream).
         #[cfg(feature = "hwrt")]
         tlas: None,
@@ -3541,6 +3543,8 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         interp: None,
         // HW-RT rung R0: GPU timing OFF (byte-identical command stream).
         gpu_timing: None,
+        // VB-P1d: this harness never resolves `VisibilityBuffer` (byte-identical command stream).
+        vb_gpu_timing: None,
         // HW-RT rung R2a-3: the per-frame TLAS pack + build OFF (byte-identical command stream).
         #[cfg(feature = "hwrt")]
         tlas: None,
@@ -8520,6 +8524,8 @@ fn run_showcase_body_ddgi(
         // `engine_grand_showcase_512_gpu_pass_cost` timing test, which brackets the four
         // software-ray passes on this real combined frame.
         gpu_timing,
+        // VB-P1d: this harness never resolves `VisibilityBuffer` (byte-identical command stream).
+        vb_gpu_timing: None,
         // HW-RT rung R2a-3: the per-frame TLAS pack + build OFF (byte-identical command stream).
         #[cfg(feature = "hwrt")]
         tlas: None,
@@ -10040,6 +10046,8 @@ fn run_showcase_body(
         interp: None,
         // HW-RT rung R0: GPU timing OFF (the golden/interactive showcase; byte-identical).
         gpu_timing: None,
+        // VB-P1d: this harness never resolves `VisibilityBuffer` (byte-identical command stream).
+        vb_gpu_timing: None,
         // HW-RT rung R2a-3: the per-frame TLAS pack + build OFF (byte-identical command stream).
         #[cfg(feature = "hwrt")]
         tlas: None,

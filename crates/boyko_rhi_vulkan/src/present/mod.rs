@@ -46,7 +46,7 @@ mod swapchain;
 mod targets;
 
 pub use frame_driver::{FrameWriteToken, Renderer};
-pub use gpu_timing::{PASS_COUNT, TimedPass, TimestampCollector};
+pub use gpu_timing::{PASS_COUNT, TimedPass, TimestampCollector, VB_PASS_COUNT, VbTimedPass, VbTimestampCollector};
 pub use scene_types::{
     AaActivation, BrickActivation, CsmDepthActivation, DdgiUpdateActivation,
     GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw,

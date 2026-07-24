@@ -30,6 +30,7 @@ use crate::memory::BoundBuffer;
 use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS};
 
 use super::super::frame_driver::Renderer;
+use super::super::gpu_timing::VbTimedPass;
 use super::super::scene_types::{
     CLUSTER_CULL_PUSH_BYTES, GBUFFER_PUSH_BASE_INSTANCE_OFFSET, GBufferScene, LIGHT_CULL_LOCAL_SIZE_X,
 };
@@ -102,6 +103,18 @@ impl Renderer<'_> {
 
         let fi = self.frame_index;
 
+        // VB-P1d: reset ALL `2 * VB_PASS_COUNT` bench queries at the frame top — OUTSIDE any
+        // render / dynamic-rendering scope (recording is open but no `begin_rendering` has run
+        // yet), before the frame's first `write_timestamp`. GATED on `scene.vb_gpu_timing`:
+        // `None` (every golden/host/interactive frame) records NOTHING, so the command stream
+        // is byte-identical. A TIMESTAMP query is undefined until reset.
+        if let Some(tc) = scene.vb_gpu_timing {
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the reset is
+            // recorded before any `begin_rendering` (outside a render pass, per
+            // `VUID-vkCmdResetQueryPool-renderpass`); `fi` is this present's in-flight slot.
+            unsafe { tc.reset_frame(self.fns, cmd, fi) };
+        }
+
         let plan = self.vb_pass_plan.as_ref().expect("invariant: declare_frame_graph ran before record_vb");
 
         let vertex_offset: VkDeviceSize = 0;
@@ -124,6 +137,18 @@ impl Renderer<'_> {
             }
         }
 
+        // VB-P1d: open the LightCull bracket BEFORE the cull's `if let` gate, so it is written
+        // EVERY bench-armed frame REGARDLESS of whether the froxel arm itself is boot-built
+        // (`scene.cluster_cull.is_none()` on a flat-leg bench boot ⇒ a near-zero-width bracket
+        // with no GPU work between begin/end) — the `VK_QUERY_RESULT_WAIT_BIT` readback
+        // (`GpuSceneBundles::read_vb_bench_ns`) never blocks on an unwritten query this way,
+        // whichever leg (flat vs froxel) this boot resolved. GATED — `None` records nothing.
+        if let Some(tc) = scene.vb_gpu_timing {
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+            // reset at the frame top; this write is outside any rendering scope; `fi` is this
+            // present's in-flight slot.
+            unsafe { tc.write_begin(self.fns, cmd, fi, VbTimedPass::LightCull) };
+        }
         // === VB-P1a ("dark infra"): the L1 clustered froxel light-cull pass — byte-for-byte
         // port of `record_forward`'s own `light_cull` block. Recorded ONLY when
         // `scene.cluster_cull.is_some()` (hardcoded OFF this rung, so this block NEVER records
@@ -187,6 +212,11 @@ impl Renderer<'_> {
             }
             // (L1-2) The cull's ClusterGrid + LightIndexList writes are made available + visible
             // to `vb_resolve`/`vb_shade`'s reads by the graph: derived at the reader — NOT here.
+        }
+        // VB-P1d: close the LightCull bracket. GATED.
+        if let Some(tc) = scene.vb_gpu_timing {
+            // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
+            unsafe { tc.write_end(self.fns, cmd, fi, VbTimedPass::LightCull) };
         }
 
         // === CSM cascade DEPTH pass — byte-for-byte port of `record_forward`'s own `csm` block.
@@ -782,15 +812,33 @@ impl Renderer<'_> {
                 }
             }
 
-            // === The `lit`-producer choice (plan P1-4): `vb_shade` (material-classified) when
-            // `scene.vb_use_classified`, else the fused `vb_resolve` — mutually exclusive by
-            // construction, exactly one runs per frame (mirrors `declare_vb_graph`'s matching
-            // branch). ===
+            // === The `lit`-producer choice (plan P1-4) is THREE-way, not two: the split
+            // `vb_shade_split` (below, when `scene.path_vb_split()`) DISPLACES both of the
+            // other two — `vb_shade` (material-classified, when `scene.vb_use_classified`) and
+            // the fused `vb_resolve` are mutually exclusive WITH EACH OTHER (exactly one of
+            // THIS PAIR runs whenever `!scene.path_vb_split()`), but NEITHER runs on a split
+            // frame — mirrors `declare_vb_graph`'s matching branch.
+            //
+            // VB-P1d: this three-way split is why the bench's `VbTimedPass::VbShade` bracket
+            // is recorded in ONLY the classified/fused arms (below), never the split arm — the
+            // bench is fused/classified-only by design (`boyko_app::runner`'s VB-P1d block
+            // asserts `!scene.resolved_render_path.mesh_geo_shade_split` before ever reading a
+            // bench pool, precisely because a split frame would reset-but-never-write the
+            // VbShade pair and hang the `VK_QUERY_RESULT_WAIT_BIT` readback). ===
             if scene.path_vb_split() {
                 // Rung R9b: the split DISPLACES the fused lit producer — `vb_shade_split`
                 // (recorded in the split arm after this block) is the sole lit producer;
                 // neither `vb_shade` nor `vb_resolve` records (mirrors the declarator).
             } else if scene.vb_use_classified {
+                // VB-P1d: open the VbShade bracket — this branch is the classified lit
+                // producer, mutually exclusive with the fused `vb_resolve` branch below (exactly
+                // one of the two ever records per frame), so the SAME `VbTimedPass::VbShade`
+                // pair is written by whichever runs. GATED.
+                if let Some(tc) = scene.vb_gpu_timing {
+                    // SAFETY: recording is open; `self.fns` is the live device fn-table; the
+                    // pool was reset at the frame top; `fi` is this present's in-flight slot.
+                    unsafe { tc.write_begin(self.fns, cmd, fi, VbTimedPass::VbShade) };
+                }
                 // === Pass `vb_shade`: the material-classified shading compute pass (VB-P2
                 // classification plan rung P2c) — re-fetches geometry via the Decision-0 table
                 // (Set 2) for each classify-table pixel, shades, writes `lit` (STORAGE, extending
@@ -945,7 +993,19 @@ impl Renderer<'_> {
                         1,
                     );
                 }
+                // VB-P1d: close the VbShade bracket. GATED.
+                if let Some(tc) = scene.vb_gpu_timing {
+                    // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
+                    unsafe { tc.write_end(self.fns, cmd, fi, VbTimedPass::VbShade) };
+                }
             } else {
+                // VB-P1d: open the VbShade bracket — the fused lit producer, mutually exclusive
+                // with the classified branch above (see that branch's own VB-P1d comment). GATED.
+                if let Some(tc) = scene.vb_gpu_timing {
+                    // SAFETY: recording is open; `self.fns` is the live device fn-table; the
+                    // pool was reset at the frame top; `fi` is this present's in-flight slot.
+                    unsafe { tc.write_begin(self.fns, cmd, fi, VbTimedPass::VbShade) };
+                }
                 // === Pass `vb_resolve`: the FUSED resolve compute pass (Decision 5) — reads `vb_id`,
                 // re-fetches geometry via the Decision-0 table (Set 2), shades, writes `lit` (STORAGE,
                 // extending `vb_sky`'s COLOR write, C5). ===
@@ -1043,6 +1103,11 @@ impl Renderer<'_> {
                         scene.mvp.as_ptr().cast(),
                     );
                     (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+                }
+                // VB-P1d: close the VbShade bracket. GATED.
+                if let Some(tc) = scene.vb_gpu_timing {
+                    // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
+                    unsafe { tc.write_end(self.fns, cmd, fi, VbTimedPass::VbShade) };
                 }
             }
         }

@@ -21,8 +21,8 @@ use boyko_rhi::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry, BufferDesc,
     BufferUsage, CompareOp, ComputePipelineDesc, CullMode, DepthBias, Format,
     GraphicsPipelineDesc, ImageAspect, ImageBarrierDesc, ImageLayout, ImageSubresourceRange,
-    ImageUsage, MemoryLocation, MipMode, PrimitiveTopology, RhiCommandEncoder, RhiDevice,
-    RhiQueue, SamplerDesc, ShaderStage, TextureDesc, TextureDimension, VertexAttribute,
+    ImageUsage, MemoryLocation, MipMode, PrimitiveTopology, QueryPoolDesc, RhiCommandEncoder,
+    RhiDevice, RhiQueue, SamplerDesc, ShaderStage, TextureDesc, TextureDimension, VertexAttribute,
     VertexBufferLayout, VertexFormat,
 };
 #[cfg(feature = "hwrt")]
@@ -63,14 +63,14 @@ use boyko_rhi_vulkan::ffi::VkDescriptorSet;
 use boyko_rhi_vulkan::memory::BoundBuffer;
 use boyko_rhi_vulkan::rhi_impl::{
     ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline,
-    VulkanSampler, VulkanShaderModule, rebind_storage_buffer,
+    VulkanQueryPool, VulkanSampler, VulkanShaderModule, rebind_storage_buffer,
 };
 use boyko_rhi_vulkan::swapchain::{
     AaActivation, CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
     GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene,
     InterpActivation, PunctualDepthActivation, RcasActivation, ResolvedRenderPathGpu,
-    SmaaActivation, SsaaActivation, SsaoActivation, TaaActivation, ViewtFromDepthActivation,
-    ViewtFromVbDepthActivation,
+    SmaaActivation, SsaaActivation, SsaoActivation, TaaActivation, VB_PASS_COUNT, VbTimedPass,
+    VbTimestampCollector, ViewtFromDepthActivation, ViewtFromVbDepthActivation,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::accel::BoundAccelStruct;
@@ -1081,6 +1081,14 @@ pub(crate) struct GpuSceneBundles {
     /// TEXTURED=1 -D FROXEL=1`) — the SAME 4-set shape as [`Self::vb_shade_tex_pipeline`], built
     /// against [`Self::vb_layout0_froxel`]. `None` unless the froxel arm is built.
     vb_shade_tex_froxel_pipeline: Option<ComputePipeline>,
+    /// VB-P1d: the froxel cull/shade GPU-timestamp bench collector — a per-FIF ring of
+    /// `2 * VB_PASS_COUNT`-query TIMESTAMP pools. Built at [`Self::boot`] ONLY when the
+    /// `BOYKO_VB_BENCH` env is set AND the device supports timestamps
+    /// (`VulkanContext::device_caps().timestamps_usable()`); `None` on every other boot (every
+    /// golden/host/interactive run — the DEFAULT), so [`Self::scene`] threads `vb_gpu_timing:
+    /// None` into every `GBufferScene` and the `record_vb` command stream stays
+    /// byte-identical. See [`Self::vb_bench_armed`] / [`Self::read_vb_bench_ns`].
+    vb_bench: Option<VbTimestampCollector>,
 }
 
 /// Textured-PBR T6c: the TEXTURED gbuffer producer pipeline resources — see
@@ -3536,6 +3544,32 @@ impl GpuSceneBundles {
             "invariant: dispatch grid covers composite pixel count at any SSAA scale"
         );
 
+        // VB-P1d: the froxel cull/shade GPU-timestamp bench collector — armed ONLY when
+        // `BOYKO_VB_BENCH` (presence-gate; any value) is set AND the device supports
+        // timestamps. Unset (every golden/host/interactive boot, the DEFAULT) ⇒ `None` ⇒
+        // `Self::scene` threads `vb_gpu_timing: None` ⇒ the `record_vb` command stream is
+        // byte-identical to the pre-VB-P1d path. This is the SOLE env read this fn performs
+        // (every other input is a plain fn parameter, `boot`'s own doc's discipline) — kept
+        // isolated to this one bench-only capability so the rest of `boot` stays untouched.
+        let vb_bench_requested = std::env::var("BOYKO_VB_BENCH").is_ok();
+        let vb_bench_timestamps_usable = ctx.device_caps().timestamps_usable();
+        // O2: a requested-but-declined bench is otherwise SILENT — `vb_bench` stays `None`,
+        // `vb_bench_armed()` reads `false`, and the runner's whole bench loop never arms, never
+        // prints, never returns (the windowed test just runs indefinitely). Diagnose it loudly
+        // here, the ONE place that knows both halves of the gate.
+        if vb_bench_requested && !vb_bench_timestamps_usable {
+            eprintln!(
+                "VB-P1d bench: BOYKO_VB_BENCH set but device timestamps are unusable — bench disabled."
+            );
+        }
+        let vb_bench = (vb_bench_requested && vb_bench_timestamps_usable).then(|| {
+            let pools: [VulkanQueryPool; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+                RhiDevice::create_query_pool(ctx, &QueryPoolDesc { count: 2 * VB_PASS_COUNT })
+                    .expect("invariant: VB-P1d bench query-pool create")
+            });
+            VbTimestampCollector::new(pools)
+        });
+
         Self {
             raster_pipeline,
             instance_layout,
@@ -3667,6 +3701,7 @@ impl GpuSceneBundles {
             vb_resolve_froxel_pipeline: None,
             vb_shade_froxel_pipeline: None,
             vb_shade_tex_froxel_pipeline: None,
+            vb_bench,
         }
     }
 
@@ -5513,6 +5548,11 @@ impl GpuSceneBundles {
             // identical command stream — the offline `software_ray_baseline_cost` harness is
             // the only `Some` caller).
             gpu_timing: None,
+            // VB-P1d: the froxel cull/shade bench collector, armed ONLY when `BOYKO_VB_BENCH`
+            // was read at `Self::boot` time AND the device supports timestamps
+            // (`Self::vb_bench_armed`'s own doc) — `None` on every other boot (every golden/
+            // host/interactive run), so the recorded command stream stays byte-identical.
+            vb_gpu_timing: self.vb_bench.as_ref(),
             // HW-RT rung R2a-3: the GPU-resident per-frame TLAS pack + build activation, armed
             // above from `tlas_enabled` + `self.tlas`. `None` on every non-RT / OFF frame (the
             // byte-identical path — the TLAS is built + barriered but never traced this rung).
@@ -5860,6 +5900,50 @@ impl GpuSceneBundles {
         &self.edit_list
     }
 
+    /// VB-P1d: `true` iff the froxel cull/shade GPU-timestamp bench collector was armed at
+    /// [`Self::boot`] (`BOYKO_VB_BENCH` set AND the device supports timestamps). The runner
+    /// reads this ONCE, before the frame loop starts, to decide whether to drive the bench
+    /// accumulation + summary print (see `boyko_app::runner`'s VB-P1d block) — `false` on
+    /// every non-bench run, so that whole block is dead code there.
+    #[inline]
+    pub(crate) fn vb_bench_armed(&self) -> bool {
+        self.vb_bench.is_some()
+    }
+
+    /// VB-P1d: reads back frame `fi`'s bench pair — `(cull_ns, shade_ns)`, masked +
+    /// period-scaled by `RhiDevice::read_query_pool_ns` — from the armed bench collector.
+    /// `None` iff [`Self::vb_bench_armed`] is `false` (the collector was never created; the
+    /// runner never calls this then).
+    ///
+    /// Both queries are unconditionally written every bench-armed frame — PROVIDED the caller
+    /// upholds the bench's fused/classified-only precondition (`boyko_app::runner`'s VB-P1d
+    /// block asserts it before ever calling this): `VbTimedPass::LightCull` runs even when the
+    /// froxel arm itself is not boot-built (reporting near-zero ns); `VbTimedPass::VbShade`
+    /// brackets whichever of `vb_shade` (classified)/`vb_resolve` (fused) this frame's
+    /// `mesh_leg` + `vb_use_classified` select — mutually exclusive, always exactly one, ON A
+    /// NON-SPLIT FRAME. The VB split lit-producer (`vb_shade_split`, armed by
+    /// `resolved_render_path.mesh_geo_shade_split` — a pre-light consumer: SSAO/DDGI/SSR/
+    /// shadow-denoise/Temporal under `VisibilityBuffer`) is UNBRACKETED and OUT OF SCOPE for
+    /// this bench (`vb.rs`'s own VB-P1d doc on its three-way producer choice); a split frame
+    /// would reset-but-never-write the VbShade pair, hanging the `VK_QUERY_RESULT_WAIT_BIT`
+    /// readback below — this is why the caller MUST assert `!mesh_geo_shade_split` first.
+    ///
+    /// # Panics
+    /// Panics (`expect("invariant: ...")`) if the readback fails — a bench-only diagnostic
+    /// path (never reached on the shipped default), so a query-pool read failure here is a
+    /// setup/driver bug, not a recoverable per-frame condition.
+    pub(crate) fn read_vb_bench_ns(&self, ctx: &VulkanContext, fi: usize) -> Option<(f64, f64)> {
+        let collector = self.vb_bench.as_ref()?;
+        let mut scratch = [0u64; (2 * VB_PASS_COUNT) as usize];
+        let mut out_ns = [0.0f64; VB_PASS_COUNT as usize];
+        RhiDevice::read_query_pool_ns(ctx, collector.pool(fi), VB_PASS_COUNT, &mut scratch, &mut out_ns)
+            .expect("invariant: VB-P1d bench query-pool readback");
+        Some((
+            out_ns[VbTimedPass::LightCull.slot() as usize],
+            out_ns[VbTimedPass::VbShade.slot() as usize],
+        ))
+    }
+
     /// Tears every bundle down in reverse dependency order — the showcase
     /// teardown list, minus the resources R3 does not create (staging,
     /// per-mesh instanced buffers). Render P7-Q2's SSAO pipelines/layout ARE
@@ -6000,6 +6084,14 @@ impl GpuSceneBundles {
             }
             if let Some(layout) = self.cull_layout {
                 RhiDevice::destroy_bind_group_layout(ctx, layout);
+            }
+            // VB-P1d: the froxel cull/shade bench query pools, `Option`-guarded (built only
+            // under `BOYKO_VB_BENCH` + a timestamp-capable device — every other boot leaves
+            // this `None`, a no-op here).
+            if let Some(collector) = self.vb_bench {
+                for pool in collector.into_pools() {
+                    RhiDevice::destroy_query_pool(ctx, pool);
+                }
             }
             let [vb_ssao_low, vb_ssao_medium, vb_ssao_high] = self.ssao_vb_pipelines;
             RhiDevice::destroy_compute_pipeline(ctx, vb_ssao_low);

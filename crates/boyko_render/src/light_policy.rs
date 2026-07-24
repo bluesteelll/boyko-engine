@@ -37,26 +37,41 @@ use boyko_ecs::ecs::core::system::ResMut;
 
 use crate::light::{ClusterSelectMode, LightEnabled, LightingConfig, PointLight, SpotLight};
 
-// ---- provisional banded thresholds (P10 calibrates these) ----------------------------
+// ---- banded thresholds (VB-P1d measured; see docs/VB-PERFORMANCE-TRACK.md) -----------
 
 /// Banded LOW edge: in [`Auto`](crate::light::ClusterSelectMode::Auto) mode the cluster
 /// path switches OFF when the live point/spot light count drops to `<= CLUSTER_LO`.
 ///
-/// `[ESTIMATE:needs-calibration]` — UNMEASURED. The clustered (L1) cull amortizes its
-/// grid build + per-froxel VRAM only across MANY overlapping point/spot lights; below a
-/// handful it is pure overhead vs the flat L0b loop (Part 3.2). This is a sane engineering
-/// band, NOT a measured crossover; **P10 (offline criterion calibration) replaces it with
-/// a `[MEASURED]` break-even** (`docs/ARCHITECTURE-HYBRID-PERF.md` Part 5, P10 is a HARD
-/// dependency of P1).
-pub const CLUSTER_LO: u32 = 4;
+/// `[MEASURED]` (VB-P1d, RTX 3060, `crates/boyko_app/tests/vb_p1d_cull_shade_bench.rs`): the
+/// froxel light-cull is O(clusters × lights) (`cluster_cull.hlsl` dispatches one thread per
+/// froxel, each linearly scanning every light) and DOMINATES `froxel_total_ns` — it only
+/// beats the flat all-lights scan above ~100 point/spot lights (measured break-even ≈ 103,
+/// linearly interpolated between the N_ps=64 and N_ps=128 samples below). At 8 lights
+/// clustering is ~43% SLOWER than flat. `CLUSTER_LO = 64` disarms where the flat scan clearly
+/// wins (flat 95877 ns vs froxel 102720 ns at N_ps=64, +7% flat's favor). A future cull
+/// optimization (the `uint local[256]` per-thread spill in `cluster_cull.hlsl`) would lower
+/// this break-even and could tighten the band.
+///
+/// Measured `froxel_total_ns = cull_ns + shade_ns` vs `flat_shade_ns`, averaged over 100 timed
+/// frames per config (froxel_shade stays ~25-30k ns regardless of N_ps — the clustering
+/// payoff; flat_shade and froxel_cull both grow ~linearly with N_ps):
+/// - N_ps=8:   flat 32799 | froxel 46816 (cull 19741 + shade 27075) — flat wins (+43%)
+/// - N_ps=32:  flat 60815 | froxel 71999 (cull 42253 + shade 29747) — flat wins
+/// - N_ps=64:  flat 95877 | froxel 102720 (cull 72748 + shade 29973) — flat wins (+7%)
+/// - N_ps=128: flat 167322 | froxel 163039 (cull 134920 + shade 28119) — froxel wins (-2.6%)
+/// - N_ps=256: flat 315044 | froxel 277662 (cull 252154 + shade 25508) — froxel wins (-12%)
+/// - N_ps=512: flat 592015 | froxel 523370 (cull 498067 + shade 25303) — froxel wins (-12%)
+pub const CLUSTER_LO: u32 = 64;
 
 /// Banded HIGH edge: in [`Auto`](crate::light::ClusterSelectMode::Auto) mode the cluster
 /// path switches ON when the live point/spot light count rises to `>= CLUSTER_HI`.
 ///
-/// `[ESTIMATE:needs-calibration]` — UNMEASURED (see [`CLUSTER_LO`]). `CLUSTER_LO < CLUSTER_HI`
-/// is the hysteresis gap that prevents boundary thrash; both consts are provisional and
-/// **gated on P10** for their calibrated values.
-pub const CLUSTER_HI: u32 = 8;
+/// `[MEASURED]` (VB-P1d, see [`CLUSTER_LO`]'s own doc for the full data table + provenance).
+/// `CLUSTER_HI = 128` arms with margin above the measured ≈103 break-even (froxel already
+/// wins by ~2.6% at N_ps=128, widening to -12% by N_ps=256/512). `CLUSTER_LO < CLUSTER_HI`
+/// is the hysteresis gap that prevents boundary thrash; the band `[64, 128]` straddles the
+/// break-even on both sides where each leg's advantage is unambiguous in the data above.
+pub const CLUSTER_HI: u32 = 128;
 
 const _: () = assert!(CLUSTER_LO < CLUSTER_HI, "hysteresis: the OFF edge must sit below the ON edge");
 
