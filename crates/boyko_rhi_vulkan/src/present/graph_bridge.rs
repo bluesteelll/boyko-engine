@@ -3164,13 +3164,30 @@ impl Renderer<'_> {
         // declarator's `tlas_instances` shape verbatim (frame-private, undefined seed).
         #[cfg(feature = "hwrt")]
         let tlas_instances = g.add_buffer("tlas_instances");
-        // VB-P1a ("dark infra"): the L1 froxel buffers — `add_buffer` (undefined), the SAME
-        // frame-private shape `vb_instance_ring`/`gclassify` use (single device-local instances
-        // the cull WRITES fresh every armed frame; unarmed today, so no pass ever names these
-        // ResIds — the 0%-gate).
-        let cluster_grid = g.add_buffer("cluster_grid");
-        let light_index = g.add_buffer("light_index");
-        let light_index_alloc = g.add_buffer("light_index_alloc");
+        // VB-P1a/P1b: the L1 froxel cull trio. These are NOT frame-private — they are SINGLE
+        // device-local instances shared across frames in flight (no per-FIF ring; only the
+        // descriptor set is per-FIF), exactly like the `grid`/`index`/`alloc` trio
+        // `declare_deferred_graph` and `declare_forward_graph` declare. VB-P1a could declare them
+        // undefined because the arm was hardcoded OFF (no pass named them); VB-P1b ARMED the cull,
+        // so they must carry the same cross-frame seeds their siblings do, or a dirty-frame re-cull
+        // races the sibling in-flight frame's still-pipelined read (the engine's cross-frame WAR
+        // fingerprint). `cluster_grid`/`light_index` end their frame consumed by
+        // `vb_resolve`/`vb_shade`'s COMPUTE read (VB's reader stage — Deferred's, not Forward's
+        // FRAGMENT); `light_index_alloc` ends on the cull's atomic WRITES with no draining read
+        // (writer seed). Declaration ORDER is unchanged (grid, index, alloc) so the
+        // `VbBarrierSink` ResId slots are untouched.
+        let cluster_grid = g.add_buffer_seeded(
+            "cluster_grid",
+            ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+        );
+        let light_index = g.add_buffer_seeded(
+            "light_index",
+            ResSync::seeded_readers(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT),
+        );
+        let light_index_alloc = g.add_buffer_seeded(
+            "light_index_alloc",
+            ResSync::seeded_writer(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT),
+        );
 
         // Pass `light_upload` (async light-table re-upload) — the SAME gate
         // `declare_forward_graph`'s own `light_upload` pass uses.
