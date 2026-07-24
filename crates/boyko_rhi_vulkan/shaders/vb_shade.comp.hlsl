@@ -178,13 +178,16 @@ static const float3 LIGHT_UP = float3(0.0, 1.0, 0.0);
 #include "pbr_lighting.hlsli"
 #include "light_table.hlsli"
 
-// Multi-paradigm render-path plan, rung VB-P1a ("dark infra" -- the arm bit is hardcoded OFF at
-// this rung, so this whole block compiles into the `-D FROXEL` variant only and is unreachable in
-// production until VB-P1b flips `ResolvedRenderPath::froxel_light_cull` on): the froxel
-// cluster-grid pair, Set 0 bindings 8/9 -- compiled in ONLY for the `-D FROXEL` variant
-// (`vb_shade_froxel.comp.spv`); the base (non-FROXEL, this file's default) compile never
+// Multi-paradigm render-path plan, rungs VB-P1a (the seam) + VB-P1b (armed) + VB-P1c (this
+// classified variant): the froxel cluster-grid pair, Set 0 bindings 8/9 -- compiled in ONLY for
+// the `-D FROXEL` variant (`vb_shade_froxel.comp.spv`, and `vb_shade_tex_froxel.comp.spv` with
+// `-D TEXTURED=1`); the base (non-FROXEL, this file's default) compile never
 // declares them, so its Set 0 stays byte-identical at 8 bindings and `vb_shade.comp.spv` stays
-// byte-identical to its pre-VB-P1a build. Byte-identical shape to `forward_opaque.fs.hlsl`'s own
+// byte-identical to its pre-VB-P1a build. The arm is LIVE in production since VB-P1b: the host
+// selects this variant's pipeline + the 10-binding `vb_layout0_froxel` whenever
+// `ResolvedRenderPath::froxel_light_cull` resolves true (the VB path AND
+// `LightingConfig::clusters_enabled`, which DEFAULTS OFF -- an owner opt-in, NOT a structural
+// disable, so this block is reachable code). Byte-identical shape to `forward_opaque.fs.hlsl`'s own
 // `ClusterGrid`/`LightIndexList` (bindings 5/6 there) and `deferred_pbr.hlsl`'s (bindings 8/9
 // there) -- the L1 cluster-cull pass (`cluster_cull.hlsl`) writes both, reused verbatim; the
 // lookup helpers (`load_cluster_params`/`cluster_xy_tile`/`cluster_z_slice`/

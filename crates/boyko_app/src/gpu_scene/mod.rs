@@ -3688,8 +3688,9 @@ impl GpuSceneBundles {
             // — see that fn's doc.
             vb_shade_tex_pipeline: None,
             vb_instance_rings,
-            // VB-P1a ("dark infra"): built LAZILY by `Self::build_froxel_light_cull`, gated on
-            // the arm bit (hardcoded OFF this rung) — see that fn's doc.
+            // VB-P1a/P1b: built LAZILY by `Self::build_froxel_light_cull`, gated on the arm bit
+            // `ResolvedRenderPath::froxel_light_cull` (VB path AND `LightingConfig::
+            // clusters_enabled`, default OFF — an owner opt-in) — see that fn's doc.
             cluster_cull_pipeline: None,
             cull_layout: None,
             cluster_grid: None,
@@ -5205,10 +5206,12 @@ impl GpuSceneBundles {
                 }
             });
 
-        // VB-P1a ("dark infra"): the L1 cluster-cull activation — `Some` only when
+        // VB-P1a/P1b: the L1 cluster-cull activation — `Some` only when
         // `Self::build_froxel_light_cull` ran (gated on `ResolvedRenderPath::froxel_light_cull`,
-        // hardcoded OFF this rung, so this `.zip` chain is ALWAYS `None` in production today —
-        // the 0%-gate). Threading via the SAME `Option::zip` idiom `shadow` above uses keeps this
+        // which resolves true on the VB path when the owner sets `LightingConfig::
+        // clusters_enabled`; it DEFAULTS off, so this `.zip` chain is `None` for a scene that
+        // never opts in — the 0%-gate — and `Some` for one that does).
+        // Threading via the SAME `Option::zip` idiom `shadow` above uses keeps this
         // a single expression rather than five independent `.as_ref()` calls that could disagree.
         let cluster_cull_bits = self
             .cluster_cull_pipeline
@@ -5749,8 +5752,8 @@ impl GpuSceneBundles {
             // `any_textured_material`: `GBufferTargets` needs the ring reference to build
             // `vb_set0_tex` once per extent, independent of any SPECIFIC frame's texture usage).
             vb_shade_tex_pipeline: self.vb_shade_tex_pipeline.as_ref(),
-            // VB-P1a ("dark infra"): `Some` only after `Self::build_froxel_light_cull` ran
-            // (hardcoded OFF this rung) — see that fn's doc.
+            // VB-P1a/P1b: `Some` only after `Self::build_froxel_light_cull` ran (gated on the
+            // owner-opt-in arm bit, default OFF) — see that fn's doc.
             vb_layout0_froxel: self.vb_layout0_froxel.as_ref(),
             vb_resolve_froxel_pipeline: self.vb_resolve_froxel_pipeline.as_ref(),
             vb_shade_froxel_pipeline: self.vb_shade_froxel_pipeline.as_ref(),
