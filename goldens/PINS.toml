@@ -653,6 +653,45 @@ BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\tmp\vb_mesh_ssao.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 
+[vb_mesh_froxel]
+# Rung VB-P1b (docs/VB-PERFORMANCE-TRACK.md's VB-P1): the FUSED vb_resolve FROXEL light-cull
+# EQUALITY golden. The [vb_mesh] five-sphere scene plus 14 point/spot lights (2 of them
+# CastsPunctualShadow-flagged -- VB-P1-0's regression target: the cull must mask a light's
+# kind word, bit 16 casts_sdf_shadow + bits 17..21 the atlas slot, before the POINT/SPOT test,
+# or a shadow-flagged/atlas-slotted light silently vanishes under clustering), all comfortably
+# below MAX_LIGHTS_PER_CLUSTER (256) and INDEX_LIST_CAP (16384). See
+# crates/boyko_app/tests/vb_mesh_froxel.rs.
+#
+# THE EQUALITY CONTRACT: this pin's hash MUST equal the SAME scene rendered with
+# BOYKO_VB_FROXEL_FORCE_OFF set (LightingConfig::clusters_enabled forced false -- the flat
+# baseline leg). Below the caps, vb_resolve.comp.hlsl's FROXEL and flat arms visit the exact
+# same point/spot lights in the exact same ascending table-index order with the exact same
+# per-light range re-test -- the loop BODY is token-for-token identical between the two arms,
+# only the index-list SOURCE differs -- so the two renders are BYTE-IDENTICAL, not merely
+# visually close (the SAME O3 shared-frame-oracle equality [vb_both]/[vb_sdf_only] already
+# use against [vb_mesh], applied to the froxel arm). A byte MISMATCH here means either the
+# cull dropped/duplicated a light (re-introducing VB-P1-0) or the header's cluster_params lane
+# (sync_cluster_light_gate, VB-P1b-0) disagrees with the flat path's light-table.
+#
+# UNBLESSED (sha256_* == "PENDING"): the orchestrator renders BOTH legs (unset and
+# BOYKO_VB_FROXEL_FORCE_OFF=1) on a real windowed GPU device, confirms the two dumps are
+# byte-identical, then blesses BOTH sha256_software/sha256_hwrt to that ONE shared hash via
+# `scripts\golden.ps1 -Pin vb_mesh_froxel -Bless` (and `-Hwrt -Bless`).
+crate           = "boyko-app"
+test_binary     = "vb_mesh_froxel"
+test_name       = "vb_mesh_froxel_screenshot_dump"
+bmp             = "D:\tmp\vb_mesh_froxel.bmp"
+width           = 512
+height          = 512
+sha256_software = "fb220ff30f16658e8efa165db2c822263253274a17006c5ecf66ad19414d86ba"
+sha256_hwrt     = "fb220ff30f16658e8efa165db2c822263253274a17006c5ecf66ad19414d86ba"
+
+[vb_mesh_froxel.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\tmp\vb_mesh_froxel.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
 [vb_both_taa]
 # TAA-under-VB, the VIEWT rung (VisibilityBuffer x Both): [vb_taa]'s taa_jitter_eval scene
 # (which REALLY contains an SdfEdit::sphere among the mesh cubes - unlike [vb_both]'s empty

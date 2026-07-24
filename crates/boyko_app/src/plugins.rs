@@ -19,11 +19,12 @@ use boyko_render::instance_model::sync_prev_instance_model_cols;
 use boyko_render::MotionCamState;
 use boyko_render::light_system::LightTableStaging;
 use boyko_render::{
-    AssetRefcountPlugin, CsmCasterScratch, CsmFitSet, CsmPlugin, CsmResolveSet, LightingConfig,
-    LightingPlugin, MeshRenderScratch, RayPlugin, Render3dPlugin, RenderPathPlugin, SdfPlugin,
-    ShadowAtlasPlugin, ShadowDenoisePlugin, SsaoPlugin, add_gpu_transform_pack,
-    gather_mesh_draws, gather_shadow_casters, reduce_caster_bounds, snap_apply,
-    sync_csm_light_gate, sync_punctual_light_gate, sync_ssao_light_gate,
+    AssetRefcountPlugin, ClusterConfig, CsmCasterScratch, CsmFitSet, CsmPlugin, CsmResolveSet,
+    LightCollectSet, LightingConfig, LightingPlugin, MeshRenderScratch, RayPlugin, Render3dPlugin,
+    RenderPathPlugin, SdfPlugin, ShadowAtlasPlugin, ShadowDenoisePlugin, SsaoPlugin,
+    add_gpu_transform_pack, gather_mesh_draws, gather_shadow_casters, reduce_caster_bounds,
+    snap_apply, sync_cluster_light_gate, sync_csm_light_gate, sync_punctual_light_gate,
+    sync_ssao_light_gate,
 };
 use boyko_scene::{CameraPlugin, FixedSet};
 
@@ -183,6 +184,15 @@ impl Plugin for EnginePlugins {
         // `ssao_mode` header gate stays 0), so composing it unconditionally is safe.
         app.insert_resource(LightTableStaging::default());
         app.insert_resource(LightingConfig::default());
+        // VB-P1b-0: `ClusterConfig` is seeded HERE (mirrors `LightingConfig` immediately
+        // above), not by `LightingPlugin`/any render-path plugin — it bridges the L1
+        // froxel-cull grid/near/far parameters into the light-header pack via the
+        // `sync_cluster_light_gate` bridge below, the SAME "composing app seeds it"
+        // precedent `LightingConfig` itself follows. Default `16x9x24` dims / `0.1..50.0`
+        // near/far (`ClusterConfig::default()`) — inert until a scene ALSO sets
+        // `LightingConfig::clusters_enabled = true` (the 0%-gate: the sync gate zeros the
+        // header's cluster lane whenever that bit is off, regardless of these dims).
+        app.insert_resource(ClusterConfig::default());
         app.add_plugin(LightingPlugin);
         app.add_plugin(SsaoPlugin);
         app.add_plugin(CsmPlugin);
@@ -332,6 +342,26 @@ impl Plugin for EnginePlugins {
             // reads `SsaoConfig` directly (no `ResolvedSsao`/caster dependency — mirrors
             // `sync_ddgi_light_gate`'s shape), so it carries no ordering edge here.
             b.add_system(sync_ssao_light_gate);
+            // VB-P1b-0: the L1 cluster header-gate bridge — reads `ClusterConfig` directly (no
+            // caster/resolved-carrier dependency, the SAME "no edge" shape `sync_ssao_light_gate`
+            // above carries for ITS OWN inputs). `ClusterConfig` is seeded by THIS fn (mirrors
+            // `LightingConfig` itself), so this bridge belongs alongside the other
+            // `sync_*_light_gate`s in this SAME closure rather than inside `LightingPlugin`/any
+            // render-path plugin.
+            //
+            // UNLIKE the sibling gates, this one DOES carry an explicit `.before_set` edge
+            // (code-review C1): `sync_csm_light_gate`/`sync_ssao_light_gate` feed the fold with
+            // only a SCALAR HEADER BIT, so a one-frame-stale read is merely a wrong bit (benign,
+            // self-correcting). This gate feeds a GPU BUFFER INDEX (`cluster_packed_dims`): on the
+            // very first frame `clusters_enabled` goes `true`, an unordered fold could pack
+            // `clusters_enabled=1` with STALE/ZERO dims (this gate hasn't run yet that frame), and
+            // the froxel resolve's `cluster_z_slice`/`cluster_linear_index` would then underflow to
+            // an out-of-bounds `ClusterGrid` index — real GPU UB with `robust_buffer_access`
+            // disabled (`device.rs`). `.before_set(LightCollectSet)` is the SAME cross-plugin
+            // by-name seam `resolve_shadow_atlas`/`PunctualResolveSet` uses (`collect_lights`'s
+            // `SystemKey` is a closure-local in `LightingPlugin::build`, invisible here) — see
+            // `LightCollectSet`'s own doc.
+            b.add_system(sync_cluster_light_gate).before_set(LightCollectSet);
             // The unified gather runs after BOTH the affine pack and the snap
             // collapse (snap-before-gather is load-bearing — the gather reads the
             // collapsed pair).

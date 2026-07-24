@@ -8,7 +8,9 @@ use boyko_ecs::ecs::core::app::{App, Plugin};
 use crate::light::{DirectionalLight, LightTableDirty, PointLight, SkyLight, SpotLight};
 use crate::light_policy::{LightStats, select_lighting_cull};
 use crate::light_reconcile::light_reconcile;
-use crate::light_system::{LightTableGeneration, collect_lights, evict_light, light_seed_state};
+use crate::light_system::{
+    LightCollectSet, LightTableGeneration, collect_lights, evict_light, light_seed_state,
+};
 use crate::shadow_atlas::{PunctualResolveSet, PunctualSlotAssignment};
 
 /// Registers [`light_reconcile`] BEFORE
@@ -107,7 +109,14 @@ impl Plugin for LightingPlugin {
             // `ShadowAtlasPlugin` is added after this plugin) and cross-schedule-safe (both land in
             // `CoreSchedule::Main`), so the assignment is never one frame stale — correct on a
             // moving camera, where the priority ranking can reorder which light wins base 0.
-            let collect = b.add_system(collect_lights).after_set(PunctualResolveSet).key();
+            //
+            // `.in_set(LightCollectSet)` (VB-P1b-0 C1) makes this fold visible to a cross-plugin
+            // `.before_set(LightCollectSet)` edge — `sync_cluster_light_gate` (composing-app-wired,
+            // `boyko_app::plugins`) needs one so the header's cluster lane can never carry
+            // `clusters_enabled=1` with stale/zero dims (an out-of-bounds `ClusterGrid` index on
+            // the GPU — see `LightCollectSet`'s own doc).
+            let collect =
+                b.add_system(collect_lights).after_set(PunctualResolveSet).in_set(LightCollectSet).key();
             b.add_system(light_reconcile).before(collect);
             b.add_system(select_lighting_cull).before(collect);
             let mut seed_state = light_seed_state();

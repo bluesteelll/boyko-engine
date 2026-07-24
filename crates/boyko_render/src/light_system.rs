@@ -29,7 +29,7 @@ use boyko_ecs::ecs::core::system::into_system::IntoSystem;
 use boyko_ecs::ecs::core::system::system::System;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_ecs::ecs::identifiers::primitives::EntityId;
-use boyko_macros::Resource;
+use boyko_macros::{Resource, SystemSet};
 
 use crate::light::{
     DirectionalLight, GpuLight, LightEnabled, LightHeaderGpu, LightTableDirty, LightingConfig,
@@ -384,6 +384,34 @@ fn write_pod<T: Copy>(dst: &mut [u8], off: usize, value: &T) {
         core::ptr::copy_nonoverlapping(src, dst.as_mut_ptr().add(off), size);
     }
 }
+
+/// The `Main`-schedule ordering seam that makes [`collect_lights`] visible to a
+/// cross-plugin `.before_set(LightCollectSet)` edge — the light-table-FOLD analogue of
+/// [`PunctualResolveSet`](crate::shadow_atlas::PunctualResolveSet) (which lets a
+/// DIFFERENT plugin publish BEFORE the fold reads it).
+///
+/// # Why a named set, not add-order
+///
+/// `collect_lights` is registered inside [`LightingPlugin`](crate::light_plugin::LightingPlugin)'s
+/// OWN builder closure (`light_plugin.rs`), so its `SystemKey` is a closure-local variable —
+/// invisible to any OTHER plugin's registration site. A writer that feeds the fold from a
+/// different plugin (or, like [`sync_cluster_light_gate`](crate::light::sync_cluster_light_gate),
+/// from the composing app) cannot express `.before(collect_lights)` directly; it targets THIS
+/// set instead, exactly as `resolve_shadow_atlas` targets `PunctualResolveSet`.
+///
+/// # Why this edge is load-bearing for the cluster lane (VB-P1b-0 C1)
+///
+/// Unlike the CSM/punctual/SSAO `sync_*_light_gate`s (whose worst case under a stale-by-one-frame
+/// header is a wrong SCALAR BIT — benign), [`sync_cluster_light_gate`](crate::light::sync_cluster_light_gate)
+/// feeds a GPU BUFFER INDEX: on the very first frame `clusters_enabled` goes `true`, an unordered
+/// fold could pack `clusters_enabled=1` together with `dims=0` (the gate hasn't run yet), and the
+/// froxel resolve's `cluster_z_slice`/`cluster_linear_index` (`light_table.hlsli`) would then
+/// underflow to a huge, out-of-bounds `ClusterGrid` index — real GPU UB with
+/// `robust_buffer_access` disabled. `sync_cluster_light_gate` joins THIS set with
+/// `.before_set(LightCollectSet)` so the header always carries valid dims the SAME frame the
+/// enabled bit goes hot.
+#[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LightCollectSet;
 
 /// The L0 collection system (Decision 4) — `Changed`-gated.
 ///

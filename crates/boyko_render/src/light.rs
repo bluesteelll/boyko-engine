@@ -22,6 +22,7 @@
 
 use core::f32::consts::PI;
 
+use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_macros::{Component, Resource};
 use boyko_scene::{GlobalTransform, Transform};
 
@@ -463,6 +464,11 @@ pub const TERMINATOR_SOFT_MASK: u32 = 0xFF;
 ///   [`sky_spec`](Self::sky_spec).
 /// - **Cluster policy** (L1 froxel cull gate): [`clusters_enabled`](Self::clusters_enabled),
 ///   [`cluster_select`](Self::cluster_select).
+/// - **Derived cluster geometry** (owner-set only in a harness that holds the lock-step
+///   contract; the production writer is
+///   [`sync_cluster_light_gate`](crate::light::sync_cluster_light_gate)):
+///   [`cluster_z_scale`](Self::cluster_z_scale), [`cluster_z_bias`](Self::cluster_z_bias),
+///   [`cluster_packed_dims`](Self::cluster_packed_dims).
 /// - **Derived gates** (owner-set only in a harness that holds their lock-step
 ///   contract; production writers are the named sync systems, see each field's own
 ///   doc): [`csm_shadows`](Self::csm_shadows), [`punctual_shadows`](Self::punctual_shadows),
@@ -486,6 +492,45 @@ pub struct LightingConfig {
     /// Who owns `clusters_enabled` (P1). DEFAULT [`ClusterSelectMode::Manual`] → the
     /// gate stays owner-controlled and the policy is a no-op (the 0%-gate).
     pub cluster_select: ClusterSelectMode,
+    /// The L1 exp-Z slice scale ([`ClusterConfig::z_scale`]), packed into light-header
+    /// `cluster_params[0]` by [`LightHeaderGpu::new`]. DEFAULT `0.0` (the byte-identical
+    /// 0%-gate — matches `LightHeaderGpu::new`'s pre-VB-P1b-0 hardcoded zero lane).
+    ///
+    /// # Single-writer / lock-step contract (VB-P1b-0, scoped by W1)
+    ///
+    /// DERIVED state, not owner state: its single production writer is
+    /// [`sync_cluster_light_gate`], which keeps this lane in lock-step with the LIVE
+    /// [`ClusterConfig`] the owner authored. **The invariant is "non-zero IFF the VB froxel
+    /// cull is boot-armed"** — gated on
+    /// [`ResolvedRenderPath::froxel_light_cull`](crate::render_path_config::ResolvedRenderPath::froxel_light_cull)
+    /// (`clusters_enabled && path == VisibilityBuffer`, resolved ONCE at boot), NOT on
+    /// [`Self::clusters_enabled`] alone: this lane is consumed by the VB `#ifdef FROXEL`
+    /// resolve (`vb_resolve.comp.hlsl`/`vb_shade.comp.hlsl`), AND ALSO — unconditionally in
+    /// `deferred_pbr.hlsl`, and at runtime in ForwardPlus's `forward_opaque_froxel.fs.hlsl` —
+    /// by the non-VB resolves, whose `ClusterGrid`/`LightIndexList` bindings fall back to the
+    /// light-table buffer as a placeholder whenever the real L1 cull buffers are not built
+    /// (true on every current Deferred/ForwardPlus boot). Gating on `froxel_light_cull` keeps
+    /// this lane's dims at `0` on every non-VB-armed path — the SAME pre-campaign state
+    /// (`LightHeaderGpu::new` hardcoded it to zero) — so a `clusters_enabled == true` world
+    /// under Deferred/ForwardPlus (an owner mistake, or `ClusterSelectMode::Auto` banding) is
+    /// STILL byte-identical to before this campaign, never a new OOB surface. Set this
+    /// manually only in a harness holding the SAME lock-step (the shadow/CSM/DDGI gates' own
+    /// discipline).
+    pub cluster_z_scale: f32,
+    /// The L1 exp-Z slice bias ([`ClusterConfig::z_bias`]), packed into light-header
+    /// `cluster_params[1]`. Same single-writer contract as [`Self::cluster_z_scale`]
+    /// (including the `froxel_light_cull`-scoped armed condition). DEFAULT `0.0` (the
+    /// 0%-gate).
+    pub cluster_z_bias: f32,
+    /// The L1 froxel grid dims, packed (`dim_x | dim_y<<8 | dim_z<<16`,
+    /// [`ClusterConfig::packed_dims`]) into light-header `cluster_params[2]`. Same
+    /// single-writer contract as [`Self::cluster_z_scale`] (including the
+    /// `froxel_light_cull`-scoped armed condition). DEFAULT `0` (the 0%-gate — a zero-dims
+    /// header reads as `dim_x == dim_y == dim_z == 0`; the VB `#ifdef FROXEL` resolve treats
+    /// this as unarmed by construction — see `LightHeaderGpu::new`'s doc — and a non-VB
+    /// resolve reading it while `clusters_enabled` happens to be `true` sees the SAME
+    /// zero-dims state it always has, pre-campaign).
+    pub cluster_packed_dims: u32,
     /// The resolve's CSM sample gate — packed into light-header word 7 bit
     /// [`CSM_MODE_BIT`] by [`LightHeaderGpu::new`]. DEFAULT `false` (word 7 stays 0.0 —
     /// the byte-identical 0%-gate).
@@ -574,6 +619,9 @@ impl Default for LightingConfig {
             sky_spec: [0.10, 0.10, 0.12],
             clusters_enabled: false,
             cluster_select: ClusterSelectMode::Manual,
+            cluster_z_scale: 0.0,
+            cluster_z_bias: 0.0,
+            cluster_packed_dims: 0,
             csm_shadows: false,
             punctual_shadows: false,
             ddgi_indirect: false,
@@ -718,6 +766,87 @@ impl ClusterConfig {
             "invariant: cluster dims must each fit in 8 bits for the header pack"
         );
         self.dim_x | (self.dim_y << 8) | (self.dim_z << 16)
+    }
+}
+
+/// Bridges the [`ClusterConfig`] grid/near/far parameters and the [`LightingConfig`] header
+/// gate — the cluster analogue of
+/// [`sync_ssao_light_gate`](crate::ssao_config::sync_ssao_light_gate) (a single cold config
+/// Resource read directly, no caster dependency — unlike
+/// [`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate)/
+/// [`sync_punctual_light_gate`](crate::shadow_atlas::sync_punctual_light_gate), which also
+/// gate on a live caster count). It is the SOLE production writer of
+/// [`LightingConfig::cluster_z_scale`]/[`LightingConfig::cluster_z_bias`]/
+/// [`LightingConfig::cluster_packed_dims`], keeping the header's L1 cluster lane
+/// ([`LightHeaderGpu::pack_cluster_params`]) in lock-step with the LIVE `ClusterConfig` the
+/// owner authored. Without this gate, `LightHeaderGpu::new`'s unconditional read of those
+/// three fields would pack whatever `LightingConfig` happened to carry from the last
+/// `ClusterConfig` edit — stale the moment the owner changes the grid/near/far without also
+/// touching a light (the SAME staleness class the CSM/DDGI/punctual/SSAO gates close for
+/// their own header bits).
+///
+/// # The armed condition is VB-froxel-boot-scoped, NOT `clusters_enabled` alone (W1 fix)
+///
+/// The dims/scale/bias are packed real ONLY when
+/// [`ResolvedRenderPath::froxel_light_cull`](crate::render_path_config::ResolvedRenderPath::froxel_light_cull)
+/// is `true` — the SAME boot-frozen bit [`boyko_app::gpu_scene::GpuSceneBundles::build_froxel_light_cull`]
+/// gates on (`clusters_enabled && path == VisibilityBuffer`, resolved ONCE at boot, never
+/// re-derived) — NOT on the live [`LightingConfig::clusters_enabled`] alone. This matters because
+/// `deferred_pbr.hlsl` (unconditionally) and `forward_opaque_froxel.fs.hlsl` (ForwardPlus's
+/// production shader) ALSO read this header lane, but their app-side `ClusterGrid`/
+/// `LightIndexList` bindings fall back to `scene.light_table` as a placeholder whenever the real
+/// L1 cull buffers are not built (`targets.rs`) — true on every current Deferred/ForwardPlus
+/// boot. Gating on `froxel_light_cull` (which is `false` for every non-VB path, and for a VB
+/// path whose `clusters_enabled` was `false` at BOOT, by construction) keeps this lane's dims
+/// at `0` on every path OTHER than a genuinely VB-froxel-armed one — exactly the pre-campaign
+/// state (`LightHeaderGpu::new` hardcoded the lane to all-zero) for Deferred/ForwardPlus, so
+/// VB-P1b-0 introduces ZERO new reachability for that pre-existing cross-path hazard. A
+/// dedicated cross-path shader-guard hardening (mirroring the VB `#ifdef FROXEL` seam's
+/// `dim_x*dim_y*dim_z != 0` check) is tracked as a separate rung, not this one.
+///
+/// [`LightingConfig::clusters_enabled`] itself is NOT written here (it stays owner/
+/// [`ClusterSelectMode::Auto`]-policy-set, `select_lighting_cull`'s own concern) — this gate
+/// only derives the GEOMETRY the enabled bit's cluster path needs, zeroing it whenever the VB
+/// froxel cull is not boot-armed (mirrors [`Self::z_scale`](ClusterConfig::z_scale)'s own
+/// degenerate-config `0.0` fallback, so an armed-but-degenerate `ClusterConfig` never crashes,
+/// only culls nothing).
+///
+/// # Value-gated write
+///
+/// Written only on an actual change (any of the three derived scalars differs), so a static
+/// frame does zero work and never dirties the light table (mirrors the sibling gates' value-
+/// gate discipline).
+///
+/// # Registration — app-wired (matches `sync_ssao_light_gate` / `sync_ddgi_light_gate`)
+///
+/// NOT registered by [`LightingPlugin`](crate::light_plugin::LightingPlugin): `ClusterConfig`
+/// is seeded by the composing app (mirrors `LightingConfig` itself — see
+/// `boyko_app::plugins::EnginePlugins::build`), so this lives alongside the other
+/// `sync_*_light_gate` bridges in that SAME builder closure. UNLIKE the sibling gates it DOES
+/// carry an explicit `.before_set(LightCollectSet)` edge (VB-P1b-0 C1 — this gate feeds a GPU
+/// buffer INDEX, not merely a scalar bit, so a one-frame-stale header would be genuine GPU UB
+/// rather than a benign wrong bit).
+#[allow(clippy::needless_pass_by_value)]
+pub fn sync_cluster_light_gate(
+    cluster: Res<ClusterConfig>,
+    resolved_path: Res<crate::render_path_config::ResolvedRenderPath>,
+    mut cfg: ResMut<LightingConfig>,
+    mut dirty: ResMut<LightTableDirty>,
+) {
+    let (z_scale, z_bias, packed_dims) = if resolved_path.froxel_light_cull {
+        (cluster.z_scale(), cluster.z_bias(), cluster.packed_dims())
+    } else {
+        (0.0, 0.0, 0)
+    };
+    // Value gate BEFORE the `DerefMut`: flip-only write, flip-only table dirtying.
+    let changed = cfg.cluster_z_scale != z_scale
+        || cfg.cluster_z_bias != z_bias
+        || cfg.cluster_packed_dims != packed_dims;
+    if changed {
+        cfg.cluster_z_scale = z_scale;
+        cfg.cluster_z_bias = z_bias;
+        cfg.cluster_packed_dims = packed_dims;
+        dirty.0 = true;
     }
 }
 
@@ -933,8 +1062,12 @@ impl LightHeaderGpu {
     /// (directionals + sky) and `point_spot_count` is the L0b block, so the array is
     /// laid out `[no-P front block || point/spot]` and
     /// `light_count = l0a_count + point_spot_count`. `exposure` + `sky_*` come from
-    /// `cfg`. The L1 `cluster_params` are zero in L0 (`clusters_enabled` reflects `cfg`,
-    /// but the dims stay 0 until L1 mints the grid). Word 7 (`sky_diffuse.w`) carries
+    /// `cfg`. The L1 `cluster_params` lane is read verbatim from `cfg`'s derived
+    /// [`LightingConfig::cluster_z_scale`]/[`cluster_z_bias`](LightingConfig::cluster_z_bias)/
+    /// [`cluster_packed_dims`](LightingConfig::cluster_packed_dims) — single-writer
+    /// [`sync_cluster_light_gate`] keeps those `0.0`/`0.0`/`0` while
+    /// [`LightingConfig::clusters_enabled`] is `false` (the 0%-gate), so a world that never
+    /// arms clustering reproduces the pre-VB-P1b-0 all-zero lane exactly. Word 7 (`sky_diffuse.w`) carries
     /// the shadow-gate bits ([`LightingConfig::shadow_gate_word`] — CSM bit
     /// [`CSM_MODE_BIT`]; 0 for a default config, the 0%-gate) ORed with the tonemap
     /// sub-field ([`LightingConfig::tonemap_bits`] — bits [`TONEMAP_MODE_SHIFT`]..+4)
@@ -973,27 +1106,48 @@ impl LightHeaderGpu {
                 // keeps this lane `0.0`, byte-identical to every pre-P7-Q2 golden.
                 f32::from_bits(u32::from(cfg.ssao_mode)),
             ],
-            // L0: clusters off (dims zero); `clusters_enabled` is reported for the resolve
-            // gate but the L1 grid is not minted until the L1 rung.
+            // VB-P1b-0: the cluster lane is no longer hardcoded zero — `cfg.cluster_z_scale`/
+            // `cluster_z_bias`/`cluster_packed_dims` are DERIVED fields `sync_cluster_light_gate`
+            // (the single production writer) keeps at `0.0`/`0.0`/`0` while `clusters_enabled`
+            // is `false`, so this read is byte-identical to the old hardcoded-zero lane for
+            // every world that never arms clustering (the 0%-gate).
             cluster_params: [
-                0.0,
-                0.0,
-                0.0,
+                cfg.cluster_z_scale,
+                cfg.cluster_z_bias,
+                f32::from_bits(cfg.cluster_packed_dims),
                 f32::from_bits(u32::from(cfg.clusters_enabled)),
             ],
         }
     }
 
-    /// Builds the L1 header: identical to [`Self::new`] but the `cluster_params` lane carries
-    /// the exp-Z froxel-lookup factors instead of zeros. Lane 3 is
-    /// `[z_scale, z_bias, bitcast(packed_dims), bitcast(clusters_enabled)]` (Decision 6):
+    /// Packs `cluster`'s exp-Z slice scale/bias + froxel grid dims into this header's
+    /// `cluster_params` lanes 0..2, UNCONDITIONALLY — the caller gates on
+    /// [`LightingConfig::clusters_enabled`] beforehand (lane 3, the enabled bit, is left
+    /// untouched here; [`Self::new`]/[`Self::new_clustered`] already set it from `cfg`).
+    ///
+    /// `[z_scale, z_bias, bitcast(packed_dims)]` (Decision 6):
     /// - `z_scale` / `z_bias` — the affine exp-Z slice map `slice = ln(view_z) * z_scale +
     ///   z_bias` the resolve applies (the cull builds froxel AABBs from the same near/far);
     /// - `packed_dims` — `dim_x | dim_y<<8 | dim_z<<16` (the resolve unpacks to map a pixel
-    ///   to its `(x, y)` tile + clamp the slice);
-    /// - `clusters_enabled` — `1` gates the resolve onto the cluster path, `0` ⇒ the flat
-    ///   L0b loop (the L1 0%-gate). When `cfg.clusters_enabled` is `false` the lane stays all
-    ///   zero (byte-identical to [`Self::new`]'s L0 header — the 0%-gate anchor).
+    ///   to its `(x, y)` tile + clamp the slice).
+    ///
+    /// This is the SINGLE fn both [`Self::new_clustered`] (the test/host-oracle direct
+    /// constructor) and the production [`sync_cluster_light_gate`] derive their packed
+    /// values from — via [`ClusterConfig::z_scale`]/[`ClusterConfig::z_bias`]/
+    /// [`ClusterConfig::packed_dims`] — so the two paths can never disagree bit-for-bit.
+    #[inline]
+    pub fn pack_cluster_params(&mut self, cluster: &ClusterConfig) {
+        self.cluster_params[0] = cluster.z_scale();
+        self.cluster_params[1] = cluster.z_bias();
+        self.cluster_params[2] = f32::from_bits(cluster.packed_dims());
+    }
+
+    /// Builds the L1 header: identical to [`Self::new`] but the `cluster_params` lane 0..2
+    /// carries `cluster`'s REAL exp-Z froxel-lookup factors ([`Self::pack_cluster_params`])
+    /// instead of whatever `cfg` happened to carry — a direct, one-shot constructor for
+    /// tests/host oracles that do not want to pre-populate `cfg`'s derived cluster fields.
+    /// When `cfg.clusters_enabled` is `false` the lane stays exactly what [`Self::new`]
+    /// produced (byte-identical to the 0%-gate anchor).
     #[inline]
     pub fn new_clustered(
         l0a_count: u32,
@@ -1003,12 +1157,7 @@ impl LightHeaderGpu {
     ) -> Self {
         let mut header = Self::new(l0a_count, point_spot_count, cfg);
         if cfg.clusters_enabled {
-            header.cluster_params = [
-                cluster.z_scale(),
-                cluster.z_bias(),
-                f32::from_bits(cluster.packed_dims()),
-                f32::from_bits(1),
-            ];
+            header.pack_cluster_params(cluster);
         }
         header
     }
@@ -1477,6 +1626,153 @@ mod tests {
         assert_eq!(d & 0xFF, CLUSTER_DIM_X);
         assert_eq!((d >> 8) & 0xFF, CLUSTER_DIM_Y);
         assert_eq!((d >> 16) & 0xFF, CLUSTER_DIM_Z);
+    }
+
+    /// VB-P1b-0 bit-exactness: the PRODUCTION path (`sync_cluster_light_gate` writing
+    /// `LightingConfig`'s derived cluster fields, then `LightHeaderGpu::new` reading them)
+    /// MUST produce the identical `cluster_params` lane the direct, test/oracle
+    /// `LightHeaderGpu::new_clustered` constructor produces for the SAME `ClusterConfig` — the
+    /// load-bearing invariant the cull (`cluster_cull.hlsl`) and the resolve
+    /// (`vb_resolve.comp.hlsl`) both rely on to build valid, in-range froxel indices.
+    #[test]
+    fn sync_cluster_light_gate_matches_new_clustered_bit_for_bit() {
+        use boyko_ecs::ecs::core::app::App;
+
+        use crate::render_path_config::{
+            GeometryLegs, RenderPath, RenderPathConfig, RenderPathConsumers, RenderPathDeviceCaps,
+            resolve_render_path,
+        };
+
+        let cluster = ClusterConfig::default();
+        // The REAL boot resolve of a VisibilityBuffer scene that wants clusters — the SAME
+        // production entry point `boyko_app::runner` calls, not a hand-built literal (W1 fix,
+        // code review): `sync_cluster_light_gate` now gates on `froxel_light_cull`, not
+        // `clusters_enabled` alone, so the test must arm the SAME resolved carrier.
+        let (resolved_path, _) = resolve_render_path(
+            &RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Mesh },
+            RenderPathConsumers { clusters_wanted: true, ..Default::default() },
+            RenderPathDeviceCaps::new(true),
+        );
+        assert!(
+            resolved_path.froxel_light_cull,
+            "test setup invariant: VisibilityBuffer + clusters_wanted must arm froxel_light_cull"
+        );
+
+        let mut app = App::new();
+        app.insert_resource(cluster);
+        app.insert_resource(resolved_path);
+        app.insert_resource(LightingConfig { clusters_enabled: true, ..LightingConfig::default() });
+        app.insert_resource(LightTableDirty(false));
+        app.world_mut().run_system(sync_cluster_light_gate);
+
+        let synced_cfg = *app.world().resource::<LightingConfig>();
+        let got = LightHeaderGpu::new(2, 1, &synced_cfg);
+
+        let direct_cfg = LightingConfig { clusters_enabled: true, ..LightingConfig::default() };
+        let want = LightHeaderGpu::new_clustered(2, 1, &direct_cfg, &cluster);
+        // Full-header equality (O3, code review): pins that the `new_clustered` ->
+        // `pack_cluster_params` refactor (and `sync_cluster_light_gate`'s production path)
+        // perturbs NOTHING outside the cluster lane — not just that lane in isolation.
+        assert_eq!(
+            got, want,
+            "sync_cluster_light_gate's packed header must equal new_clustered's bit-for-bit"
+        );
+
+        // Non-zero dims when VB-froxel-armed: `cluster_z_slice`/`cluster_linear_index`
+        // (light_table.hlsli) underflow to an out-of-range index when any dim is 0 — this is
+        // the exact regression VB-P1b-0 fixes (pre-fix, `LightHeaderGpu::new` always packed
+        // all-zero dims here).
+        let d = synced_cfg.cluster_packed_dims;
+        assert_ne!(d & 0xFF, 0, "dim_x must be nonzero when froxel_light_cull is armed");
+        assert_ne!((d >> 8) & 0xFF, 0, "dim_y must be nonzero when froxel_light_cull is armed");
+        assert_ne!((d >> 16) & 0xFF, 0, "dim_z must be nonzero when froxel_light_cull is armed");
+        assert_ne!(synced_cfg.cluster_z_scale, 0.0, "z_scale must be nonzero when froxel_light_cull is armed");
+    }
+
+    /// The 0%-gate half of the VB-P1b-0 contract: `sync_cluster_light_gate` must zero the
+    /// header's cluster lane regardless of what `ClusterConfig` carries, whenever
+    /// `froxel_light_cull` is unarmed (here: the never-resolved default carrier, `clusters_enabled
+    /// == false`) — a non-default `ClusterConfig` alone must never leak its geometry into the
+    /// header of an unarmed scene.
+    #[test]
+    fn sync_cluster_light_gate_zeroes_the_lane_when_disabled() {
+        use boyko_ecs::ecs::core::app::App;
+
+        use crate::render_path_config::ResolvedRenderPath;
+
+        // A deliberately NON-default grid, to prove the gate does not merely happen to zero
+        // the default — it actively zeroes REGARDLESS of `ClusterConfig`'s contents.
+        let cluster = ClusterConfig { dim_x: 8, dim_y: 4, dim_z: 12, ..ClusterConfig::default() };
+        let mut app = App::new();
+        app.insert_resource(cluster);
+        // `ResolvedRenderPath::default()` == Deferred + Both, no consumers armed —
+        // `froxel_light_cull == false` by construction.
+        app.insert_resource(ResolvedRenderPath::default());
+        app.insert_resource(LightingConfig::default()); // clusters_enabled == false
+        app.insert_resource(LightTableDirty(false));
+        app.world_mut().run_system(sync_cluster_light_gate);
+
+        let synced_cfg = *app.world().resource::<LightingConfig>();
+        assert_eq!(synced_cfg.cluster_z_scale, 0.0);
+        assert_eq!(synced_cfg.cluster_z_bias, 0.0);
+        assert_eq!(synced_cfg.cluster_packed_dims, 0);
+
+        let h = LightHeaderGpu::new(2, 1, &synced_cfg);
+        assert_eq!(h.cluster_params, [0.0, 0.0, 0.0, 0.0], "unarmed header stays the 0%-gate anchor");
+    }
+
+    /// The W1 regression guard (code review): a NON-VB path whose `LightingConfig::clusters_enabled`
+    /// is (mistakenly, or via `ClusterSelectMode::Auto` banding) `true` must STILL leave the
+    /// header's cluster dims at `0` — `sync_cluster_light_gate` gates the armed write on
+    /// `ResolvedRenderPath::froxel_light_cull`, which is `false` for every `RenderPath` other
+    /// than `VisibilityBuffer`, REGARDLESS of `clusters_enabled`. Without this, `deferred_pbr.hlsl`
+    /// (which reads this lane unconditionally) and ForwardPlus's `forward_opaque_froxel.fs.hlsl`
+    /// would compute a valid-looking-but-WRONG cluster index into their `ClusterGrid`/
+    /// `LightIndexList` bindings, which fall back to the light-table buffer as a placeholder on
+    /// every current Deferred/ForwardPlus boot (a separate, tracked hardening rung — this test
+    /// only pins that VB-P1b-0 does not make that pre-existing hazard MORE reachable).
+    #[test]
+    fn sync_cluster_light_gate_zeroes_the_lane_on_a_non_vb_path_even_when_clusters_enabled() {
+        use boyko_ecs::ecs::core::app::App;
+
+        use crate::render_path_config::{
+            GeometryLegs, RenderPath, RenderPathConfig, RenderPathConsumers, RenderPathDeviceCaps,
+            resolve_render_path,
+        };
+
+        let cluster = ClusterConfig::default();
+        // A Deferred scene that ALSO wants clusters (an owner mistake, or what Auto-banding
+        // would produce with no RenderPath awareness) — `froxel_light_cull` is VB-only by
+        // construction, so it stays `false` here regardless of `clusters_wanted`.
+        let (resolved_path, _) = resolve_render_path(
+            &RenderPathConfig { path: RenderPath::Deferred, legs: GeometryLegs::Both },
+            RenderPathConsumers { clusters_wanted: true, ..Default::default() },
+            RenderPathDeviceCaps::new(true),
+        );
+        assert!(
+            !resolved_path.froxel_light_cull,
+            "test setup invariant: Deferred must never arm froxel_light_cull, even with clusters_wanted"
+        );
+
+        let mut app = App::new();
+        app.insert_resource(cluster);
+        app.insert_resource(resolved_path);
+        app.insert_resource(LightingConfig { clusters_enabled: true, ..LightingConfig::default() });
+        app.insert_resource(LightTableDirty(false));
+        app.world_mut().run_system(sync_cluster_light_gate);
+
+        let synced_cfg = *app.world().resource::<LightingConfig>();
+        assert_eq!(synced_cfg.cluster_z_scale, 0.0, "non-VB path: z_scale must stay 0 despite clusters_enabled");
+        assert_eq!(synced_cfg.cluster_z_bias, 0.0, "non-VB path: z_bias must stay 0 despite clusters_enabled");
+        assert_eq!(
+            synced_cfg.cluster_packed_dims, 0,
+            "non-VB path: dims must stay 0 despite clusters_enabled"
+        );
+
+        // Word 15 (`clusters_enabled`) is STILL packed verbatim by `LightHeaderGpu::new` (that
+        // bit is not this gate's concern) — the dims-only scoping is what this test pins.
+        let h = LightHeaderGpu::new(2, 1, &synced_cfg);
+        assert_eq!(h.cluster_params, [0.0, 0.0, 0.0, f32::from_bits(1)]);
     }
 
     #[test]

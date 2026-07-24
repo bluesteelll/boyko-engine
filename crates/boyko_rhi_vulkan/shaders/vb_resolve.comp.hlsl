@@ -338,7 +338,16 @@ void main(uint3 tid : SV_DispatchThreadID) {
 #ifdef FROXEL
     float view_z = dot(cam_forward.xyz, P - cam_eye.xyz);
     ClusterParams cp = load_cluster_params(LightBuf);
-    bool use_clusters = cp.clusters_enabled != 0u;
+    // Defense-in-depth (VB-P1b-0 C1): also require non-zero dims, mirroring
+    // `cluster_cull.hlsl`'s own `cluster_count = dim_x*dim_y*dim_z` guard. Without this, a
+    // header that ever carries `clusters_enabled=1` with stale/zero dims (e.g. a one-frame
+    // fold/sync-gate race) would let `cluster_z_slice`/`cluster_linear_index`
+    // (light_table.hlsli) underflow to a huge index -- an out-of-bounds `ClusterGrid` read
+    // with `robust_buffer_access` disabled. A zero-dims header now falls back to the in-bounds
+    // flat walk instead. Inert on every armed, correctly-packed frame (dims are always nonzero
+    // together with the enabled bit once `sync_cluster_light_gate` has run), so ON==OFF
+    // equality is unaffected.
+    bool use_clusters = (cp.clusters_enabled != 0u) && (cp.dim_x * cp.dim_y * cp.dim_z != 0u);
     uint ps_count;   // number of point/spot lights to walk
     uint ps_offset;  // base into LightIndexList (clusters) or the flat block
     if (use_clusters) {

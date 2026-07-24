@@ -1034,11 +1034,13 @@ pub(crate) struct GpuSceneBundles {
     /// `vb_resolve_pipeline`'s own `Option` shape) is a follow-up, not done this rung.
     pub(crate) vb_instance_rings: [BoundBuffer; FRAMES_IN_FLIGHT],
 
-    // ── VB-P1a ("dark infra"): the froxel light-cull machinery — built LAZILY by
+    // ── VB-P1b: the froxel light-cull machinery — built LAZILY by
     // [`Self::build_froxel_light_cull`], gated entirely on `ResolvedRenderPath::froxel_light_cull`
-    // at the `boyko_app::runner` call site. Hardcoded OFF this rung — that fn is NEVER called in
-    // production, so every field below stays `None`/zeroed on every current boot (the 0%-gate).
-    // See that fn's doc for the full build. ──────────────────────────────────────────────────
+    // at the `boyko_app::runner` call site. That gate is armed iff the booted scene's
+    // `LightingConfig::clusters_enabled` is `true` UNDER `RenderPath::VisibilityBuffer` — every
+    // field below stays `None`/zeroed on every other boot (unarmed scenes, and every non-VB path,
+    // are byte-identical to VB-P1a's 0%-gate). See that fn's doc for the full build.
+    // ──────────────────────────────────────────────────
     /// The L1 clustered froxel light-cull compute pipeline (`cluster_cull.comp.hlsl`) — a 1-set
     /// pipeline built against [`Self::cull_layout`]. `None` unless the froxel arm is built.
     cluster_cull_pipeline: Option<ComputePipeline>,
@@ -4173,7 +4175,7 @@ impl GpuSceneBundles {
         }
     }
 
-    /// VB-P1a ("dark infra"): builds the ENTIRE froxel light-cull machinery — the L1
+    /// VB-P1a/P1b: builds the ENTIRE froxel light-cull machinery — the L1
     /// `cluster_cull` compute pipeline + its OWN Set-0 layout, the `ClusterGrid`/
     /// `LightIndexList`/`LightIndexAlloc` device-local buffers (Principle 0 — VM-native
     /// [`BoundBuffer`]s, never a `std::Vec`/`HashMap` side store), the froxel-only
@@ -4185,12 +4187,14 @@ impl GpuSceneBundles {
     /// pipeline shapes, built against THIS wider layout instead of `vb_layout0`).
     ///
     /// GATED entirely behind `ResolvedRenderPath::froxel_light_cull` at the `boyko_app::runner`
-    /// call site — hardcoded OFF this rung, so this fn is NEVER called in production: every
-    /// field it would populate stays `None`/zeroed, [`Self::scene`] threads that through
-    /// unchanged, and every existing golden stays byte-identical (the 0%-gate). Mirrors
-    /// [`Self::build_vb_shade_textured_pipeline`]'s two-dependency deferred-build shape: called
-    /// ONCE from `runner.rs`, after `MeshGeometryTable::new` AND the bindless texture table both
-    /// exist, iff the arm bit is armed.
+    /// call site — armed (VB-P1b) iff the booted scene's `LightingConfig::clusters_enabled` is
+    /// `true` under `RenderPath::VisibilityBuffer`; every other boot (unarmed scenes, and every
+    /// non-VB path) never calls this fn, so every field it would populate stays `None`/zeroed,
+    /// [`Self::scene`] threads that through unchanged, and every existing (unarmed) golden stays
+    /// byte-identical (the 0%-gate). Mirrors [`Self::build_vb_shade_textured_pipeline`]'s
+    /// two-dependency deferred-build shape: called ONCE from `runner.rs`, after
+    /// `MeshGeometryTable::new` AND the bindless texture table both exist, iff the arm bit is
+    /// armed.
     ///
     /// `cluster_config` sizes the buffers/push (`ClusterConfig::default()` at every current call
     /// site — no owner-facing override is wired yet).
@@ -5962,6 +5966,40 @@ impl GpuSceneBundles {
             #[cfg(feature = "hwrt")]
             if let Some(p) = self.vb_geo_mv_pipeline {
                 RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            // Rung VB-P1b (W5): the froxel light-cull machinery `build_froxel_light_cull` built —
+            // `Option`-guarded (allocated only when `ResolvedRenderPath::froxel_light_cull` armed
+            // at boot; every field stays `None` on an unarmed boot, so this whole block is a
+            // no-op there). Torn down in reverse acquisition order (that fn's own build order):
+            // the three `vb_layout0_froxel`-built compute pipelines, then that shared layout, then
+            // the cluster buffers (alloc counter, index list, grid), then the cull pipeline + its
+            // own dedicated 1-set layout.
+            if let Some(p) = self.vb_shade_tex_froxel_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(p) = self.vb_shade_froxel_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(p) = self.vb_resolve_froxel_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(layout) = self.vb_layout0_froxel {
+                RhiDevice::destroy_bind_group_layout(ctx, layout);
+            }
+            if let Some(buf) = self.light_index_alloc {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            if let Some(buf) = self.light_index {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            if let Some(buf) = self.cluster_grid {
+                RhiDevice::destroy_buffer(ctx, buf);
+            }
+            if let Some(p) = self.cluster_cull_pipeline {
+                RhiDevice::destroy_compute_pipeline(ctx, p);
+            }
+            if let Some(layout) = self.cull_layout {
+                RhiDevice::destroy_bind_group_layout(ctx, layout);
             }
             let [vb_ssao_low, vb_ssao_medium, vb_ssao_high] = self.ssao_vb_pipelines;
             RhiDevice::destroy_compute_pipeline(ctx, vb_ssao_low);

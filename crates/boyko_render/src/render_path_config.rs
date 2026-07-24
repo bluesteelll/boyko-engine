@@ -524,14 +524,14 @@ pub struct ResolvedRenderPath {
     /// The armed shadow-visibility source set (Decision 7). FROZEN at boot under non-Deferred
     /// paths, same P2-d rationale.
     pub shadow: ShadowSources,
-    /// VB-P1a ("dark infra"): `consumers.clusters_wanted && path == VisibilityBuffer` — the
-    /// SINGLE boot-frozen arm bit gating the ENTIRE froxel light-cull machinery (the app-side
-    /// cluster build, the VB `_froxel` pipeline selection, AND the `light_cull` graph pass) —
-    /// VB-ONLY this rung (`ForwardPlus`/`Deferred` keep their own, unrelated `cluster_cull`
-    /// scaffolding untouched). Hardcoded `false` today (`RenderPathConsumers::clusters_wanted`'s
-    /// own doc) — nothing is built/declared/recorded while it is off, so every existing golden
-    /// stays byte-identical (the 0%-gate). A later rung (VB-P1b) flips `clusters_wanted` from
-    /// [`LightingConfig`](crate::light::LightingConfig).
+    /// `consumers.clusters_wanted && path == VisibilityBuffer` — the SINGLE boot-frozen arm bit
+    /// gating the ENTIRE froxel light-cull machinery (the app-side cluster build, the VB
+    /// `_froxel` pipeline selection, AND the `light_cull` graph pass) — VB-ONLY
+    /// (`ForwardPlus`/`Deferred` keep their own, unrelated `cluster_cull` scaffolding untouched).
+    /// `clusters_wanted` (VB-P1b) reads the booted scene's
+    /// [`LightingConfig::clusters_enabled`](crate::light::LightingConfig::clusters_enabled),
+    /// DEFAULT `false` — an unarmed scene (every scene that never opts in) builds/declares/
+    /// records nothing here, so every pre-VB-P1b golden stays byte-identical (the 0%-gate).
     pub froxel_light_cull: bool,
 }
 
@@ -625,12 +625,11 @@ pub struct RenderPathConsumers {
     /// (Decision 7's restoration target), so the caller threads `true` until a dedicated config
     /// lands.
     pub sdf_shadows_wanted: bool,
-    /// VB-P1a ("dark infra"): whether the owner wants the VisibilityBuffer froxel light-cull
-    /// machinery armed (`ResolvedRenderPath::froxel_light_cull`'s single boot-frozen gate).
-    /// Hardcoded `false` at the `boyko_app::runner` boot call site this rung — no
-    /// `LightingConfig`-sourced toggle is wired yet (a later rung, VB-P1b, reads
-    /// `LightingConfig` here); the caller threads a literal `false` until then, mirroring
-    /// [`Self::ssr_on`]'s own "no config yet" precedent.
+    /// Whether the owner wants the VisibilityBuffer froxel light-cull machinery armed
+    /// (`ResolvedRenderPath::froxel_light_cull`'s single boot-frozen gate). VB-P1b: the
+    /// `boyko_app::runner` boot call site threads this from the booted scene's
+    /// [`LightingConfig::clusters_enabled`](crate::light::LightingConfig::clusters_enabled),
+    /// DEFAULT `false` (the 0%-gate — every scene that never sets it stays unarmed).
     pub clusters_wanted: bool,
 }
 
@@ -2350,12 +2349,13 @@ mod tests {
         assert!(!deferred.vb_geometry_table);
     }
 
-    /// VB-P1a ("dark infra"): `froxel_light_cull` is the SINGLE boot-frozen arm bit gating the
-    /// entire froxel light-cull machinery — this pins the rung's whole scoping claim, VB-ONLY:
-    /// armed iff `consumers.clusters_wanted && path == VisibilityBuffer`, never for
+    /// `froxel_light_cull` is the SINGLE boot-frozen arm bit gating the entire froxel light-cull
+    /// machinery — this pins the whole scoping claim, VB-ONLY: armed iff
+    /// `consumers.clusters_wanted && path == VisibilityBuffer`, never for
     /// `ForwardPlus`/`Deferred`/`Forward` (which keep their own, unrelated `cluster_cull`
     /// scaffolding) even when `clusters_wanted` is `true`, and never when `clusters_wanted`
-    /// itself is `false` (the production default — `boyko_app::runner` hardcodes it today).
+    /// itself is `false` (the production default — `LightingConfig::clusters_enabled` defaults
+    /// to `false`, so `boyko_app::runner` threads `false` for every scene that never opts in).
     #[test]
     fn froxel_light_cull_is_vb_only() {
         let wanted = RenderPathConsumers { clusters_wanted: true, ..Default::default() };

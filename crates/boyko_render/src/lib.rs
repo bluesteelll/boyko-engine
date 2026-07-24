@@ -447,13 +447,14 @@ pub use light::{
     LightEnabled, LightHeaderGpu, LightTableDirty, LightingConfig, MAX_LIGHTS,
     MAX_LIGHTS_PER_CLUSTER, PUNCTUAL_MODE_BIT, PointLight, SPOT_COS_OUTER_MAX, SkyLight, SpotLight,
     TERMINATOR_SOFT_MASK, TERMINATOR_SOFT_SHIFT, TONEMAP_MODE_MASK, TONEMAP_MODE_SHIFT, Tonemapper,
-    cluster_index,
+    cluster_index, sync_cluster_light_gate,
 };
 pub use light_policy::{CLUSTER_HI, CLUSTER_LO, LightStats, select_lighting_cull};
 pub use light_system::{
-    GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightSeedState, LightTableGeneration,
-    LightTableStaging, SetLightEnabledById, collect_lights, evict_light, fold_light_table,
-    fold_light_table_slotted, light_seed_state, set_light_enabled_now, write_light_table,
+    GPU_LIGHT_BYTES, LIGHT_HEADER_BYTES, LightChanged, LightCollectSet, LightSeedState,
+    LightTableGeneration, LightTableStaging, SetLightEnabledById, collect_lights, evict_light,
+    fold_light_table, fold_light_table_slotted, light_seed_state, set_light_enabled_now,
+    write_light_table,
 };
 pub use gbuffer_depth::{GBUFFER_T_MAX, assert_gbuffer_marcher_t_max_agree, mesh_view_t_norm};
 pub use loaders::{ObjMeshLoader, PngTextureLoader, RonMaterialLoader};
