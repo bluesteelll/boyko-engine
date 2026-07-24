@@ -821,46 +821,54 @@ impl Renderer<'_> {
                 // (`vb_tex_active` implies `vb_use_classified`, since it feeds that selector's
                 // OR-in at the `GpuSceneBundles::scene()` assembly seam).
                 //
-                // VB-P1a ("dark infra") scope cut: the froxel selector below applies ONLY to the
-                // NON-TEXTURED arm — a `vb_set0_tex_froxel` (the TEXTURED+FROXEL combined Set-0)
-                // is not built this rung, so a textured frame stays on the base `vb_shade_tex`
-                // pipeline regardless of `scene.cluster_cull`. Inert today: the arm bit is
+                // VB-P1c closes the VB-P1a scope cut: `textured`/`froxel` are INDEPENDENT axes
+                // (`vb_tex_active` never reads `cluster_cull`), so all four combinations select
+                // their own pipeline + Set-0 — `vb_set0_tex_froxel` (the TEXTURED+FROXEL combined
+                // Set-0) exists exactly for the `(true, true)` cell. Inert today: the arm bit is
                 // hardcoded OFF (`ResolvedRenderPath::froxel_light_cull`'s doc), so
-                // `scene.cluster_cull` is ALWAYS `None` on every current boot, textured or not.
-                // A later rung (P1b) closes this gap if/when TEXTURED+FROXEL must co-occur.
+                // `scene.cluster_cull` is ALWAYS `None` on every current boot, textured or not —
+                // this frame's `(true, false)`/`(false, false)` cells are the only ones reachable
+                // in production.
                 let textured = scene.vb_tex_active();
                 let froxel = scene.cluster_cull.is_some();
-                let (vb_shade_pipeline, vb_shade_set0) = if textured {
-                    (
+                let (vb_shade_pipeline, vb_shade_set0) = match (textured, froxel) {
+                    (true, true) => (
+                        scene.vb_shade_tex_froxel_pipeline.expect(
+                            "invariant: vb_tex_active() && cluster_cull.is_some() => scene.vb_shade_tex_froxel_pipeline is Some",
+                        ),
+                        targets.vb_set0_tex_froxel.as_ref().expect(
+                            "invariant: vb_tex_active() && cluster_cull.is_some() => targets.vb_set0_tex_froxel is built",
+                        ),
+                    ),
+                    (true, false) => (
                         scene.vb_shade_tex_pipeline.expect(
                             "invariant: GBufferScene::vb_tex_active() => scene.vb_shade_tex_pipeline is Some",
                         ),
                         targets.vb_set0_tex.as_ref().expect(
                             "invariant: GBufferScene::vb_tex_active() => targets.vb_set0_tex is built",
                         ),
-                    )
-                } else if froxel {
-                    (
+                    ),
+                    (false, true) => (
                         scene.vb_shade_froxel_pipeline.expect(
                             "invariant: scene.cluster_cull.is_some() => scene.vb_shade_froxel_pipeline is Some",
                         ),
                         targets.vb_set0_froxel.as_ref().expect(
                             "invariant: scene.cluster_cull.is_some() => targets.vb_set0_froxel is built",
                         ),
-                    )
-                } else {
-                    (
+                    ),
+                    (false, false) => (
                         scene.vb_shade_pipeline.expect(
                             "invariant: a VisibilityBuffer-resolved scene always carries vb_shade_pipeline",
                         ),
                         vb_set0,
-                    )
+                    ),
                 };
                 let vb_geometry_set = scene
                     .vb_geometry_set
                     .expect("invariant: a VisibilityBuffer-resolved scene always carries vb_geometry_set");
                 // SAFETY: recording is open; `vb_shade_pipeline` (the compute pipeline: Set 0 =
-                // `vb_shade_set0[fi]` (`vb_set0[fi]` or, when `textured`, `vb_set0_tex[fi]`), Set 1 =
+                // `vb_shade_set0[fi]` (`vb_set0[fi]`, or `vb_set0_tex[fi]`/`vb_set0_froxel[fi]`/
+                // `vb_set0_tex_froxel[fi]` per the `(textured, froxel)` match above), Set 1 =
                 // `forward.set1[fi]` — the Forward-family shadow set REUSED VERBATIM, Set 2 =
                 // `vb_geometry_set` — the Decision-0 geometry table, bound directly, no ring, the
                 // SAME triple `vb_resolve_pipeline` binds — PLUS, when `textured`, a 4th Set 3 =

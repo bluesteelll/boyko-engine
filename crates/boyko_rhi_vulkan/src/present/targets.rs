@@ -557,6 +557,23 @@ pub struct GBufferTargets {
     /// `vb_set0_froxel[self.frame_index]` in place of `vb_set0`/`vb_set0_tex` when the froxel arm
     /// is armed.
     pub(crate) vb_set0_froxel: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// VB-P1c: the TEXTURED+FROXEL-variant Set-0 vocabulary descriptor set RING — a DISTINCT
+    /// descriptor SET instance from [`Self::vb_set0_froxel`] against the SAME
+    /// [`GBufferScene::vb_layout0_froxel`] layout object (binding 1 points at
+    /// [`GBufferScene::vb_tex_instance_material_ring`]'s wider `PerInstanceMaterialTex` ring
+    /// instead of [`GBufferScene::forward_instance_material_ring`]; every other entry is
+    /// IDENTICAL to [`Self::vb_set0_froxel`]'s own — mirrors the `vb_set0`/`vb_set0_tex` pairing,
+    /// R5's "one shared layout, a distinct set" rule). `Some` iff
+    /// [`GBufferScene::vb_layout0_froxel`] AND [`GBufferScene::cluster_grid`] AND
+    /// [`GBufferScene::light_index`] (the froxel arm — hardcoded OFF today) AND
+    /// [`GBufferScene::vb_tex_instance_material_ring`] AND
+    /// [`GBufferScene::vb_shade_tex_froxel_pipeline`] (the TEXTURED resources + the
+    /// TEXTURED+FROXEL `vb_shade` pipeline) are all `Some` — `None` on every current boot (the
+    /// 0%-gate). Built right after [`Self::vb_set0_froxel`] (needs the SAME inputs plus the tex
+    /// ring). The recorder selects `vb_set0_tex_froxel[self.frame_index]` in place of
+    /// `vb_set0_froxel`/`vb_set0_tex`/`vb_set0` when BOTH [`GBufferScene::vb_tex_active`] AND the
+    /// froxel arm hold this frame.
+    pub(crate) vb_set0_tex_froxel: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// Multi-paradigm render-path plan, rung R4b-b — the Forward v1 mesh path's OWN depth image
     /// ring + descriptor sets ([`ForwardTargets`]). `Some` iff `profile ==
     /// `[`TargetsProfile::ForwardMesh`]` (built at [`Self::create`]'s TOP, before the unconditional
@@ -2267,6 +2284,11 @@ struct DeferredSets {
     /// `core.lit[i]` + `vb.vb_id[i]` + the cluster buffers), so its own error path tears down
     /// every prior set including `vb_set0_tex`.
     vb_set0_froxel: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
+    /// VB-P1c: the TEXTURED+FROXEL-variant Set-0 vocabulary set — `None` unless the froxel arm
+    /// AND the TEXTURED resources both exist (see [`GBufferTargets::vb_set0_tex_froxel`]'s doc).
+    /// Built immediately after `vb_set0_froxel` (both need the SAME inputs plus the tex ring),
+    /// so its own error path tears down every prior set including `vb_set0_froxel`.
+    vb_set0_tex_froxel: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]>,
     /// TAA-under-VB: the `viewt_from_depth_rz` set — `None` unless
     /// [`GBufferScene::viewt_from_vb_depth`] is armed. Built AFTER `vb_set0_tex` (both need
     /// `core.viewt[i]`/`forward.depth[i]`, the SAME "needs `core` + `forward`" point `vb_set0`
@@ -3274,6 +3296,132 @@ impl DeferredSets {
             None
         };
 
+        // VB-P1c: the TEXTURED+FROXEL-variant Set-0 vocabulary RING — a DISTINCT descriptor SET
+        // instance against the SAME [`GBufferScene::vb_layout0_froxel`] layout object as
+        // `vb_set0_froxel` (binding 1 points at `scene.vb_tex_instance_material_ring` instead of
+        // `scene.forward_instance_material_ring`; every other entry is IDENTICAL to
+        // `vb_set0_froxel`'s own — mirrors the `vb_set0`/`vb_set0_tex` pairing). Built immediately
+        // after `vb_set0_froxel` (both need `core.lit`/`vb.vb_id` + the cluster buffers). `None`
+        // unless the froxel arm is built AND the TEXTURED resources + the TEXTURED+FROXEL
+        // `vb_shade` pipeline both exist (`scene.vb_layout0_froxel`/`scene.cluster_grid`/
+        // `scene.light_index`/`scene.vb_tex_instance_material_ring`/
+        // `scene.vb_shade_tex_froxel_pipeline` all `Some` — hardcoded OFF today,
+        // `ResolvedRenderPath::froxel_light_cull`'s doc, so this is ALWAYS `None` in production
+        // this rung).
+        let vb_set0_tex_froxel: Option<[VulkanBindGroup; FRAMES_IN_FLIGHT]> = if let (
+            Some(layout),
+            Some(grid),
+            Some(index),
+            Some(tex_material_ring),
+            Some(_),
+        ) = (
+            scene.vb_layout0_froxel,
+            scene.cluster_grid,
+            scene.light_index,
+            scene.vb_tex_instance_material_ring,
+            scene.vb_shade_tex_froxel_pipeline,
+        ) {
+            let vb_instance_ring = scene
+                .vb_instance_ring
+                .expect("invariant: vb_layout0_froxel armed implies scene.vb_instance_ring");
+            let vb_id_ring = &vb
+                .expect("invariant: vb_layout0_froxel armed implies TargetsProfile::VbMesh (vb is Some)")
+                .vb_id;
+            let gclassify_ring = &vb_classify
+                .expect("invariant: vb_layout0_froxel armed implies TargetsProfile::VbMesh (vb_classify is Some)")
+                .gclassify;
+            let mut vb_tex_froxel_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
+                [const { None }; FRAMES_IN_FLIGHT];
+            let mut failure: Option<crate::error::VulkanError> = None;
+            for (slot, dst) in vb_tex_froxel_slots.iter_mut().enumerate() {
+                let entries = [
+                    BindGroupEntry::StorageBuffer { buffer: &vb_instance_ring[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: &tex_material_ring[slot] },
+                    BindGroupEntry::UniformBuffer { buffer: &scene.camera_ring[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: scene.light_table },
+                    BindGroupEntry::StorageBuffer { buffer: scene.material_table },
+                    BindGroupEntry::SampledImage {
+                        texture: &vb_id_ring[slot],
+                        sampler: scene.depth_sampler,
+                    },
+                    BindGroupEntry::StorageImage { texture: &core.lit[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: &gclassify_ring[slot] },
+                    BindGroupEntry::StorageBuffer { buffer: grid },
+                    BindGroupEntry::StorageBuffer { buffer: index },
+                ];
+                let desc = BindGroupDesc::<Vulkan> { layout, entries: &entries };
+                match RhiDevice::create_bind_group(ctx, &desc) {
+                    Ok(g) => *dst = Some(g),
+                    Err(e) => {
+                        failure = Some(e);
+                        break;
+                    }
+                }
+            }
+            if let Some(e) = failure {
+                // SAFETY: the vb-tex-froxel slots already built [0..slot) + `vb_set0_froxel`/
+                // `vb_set0_tex`/`vb_set0` (fully built) + the sdf-forward + present + (optional)
+                // ddgi-update/ssao/cull + the resolve & vocab rings were created on `ctx`,
+                // referenced by no submission; each destroyed exactly once (reverse acquisition).
+                // The optional sets are `Option`-guarded; the images are owned by the caller.
+                unsafe {
+                    for s in vb_tex_froxel_slots.iter_mut() {
+                        if let Some(g) = s.take() {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    if let Some(vf) = vb_set0_froxel {
+                        for g in vf {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    if let Some(vt) = vb_set0_tex {
+                        for g in vt {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    if let Some(vs) = vb_set0 {
+                        for g in vs {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    if let Some(sfs) = sdf_forward_set {
+                        for g in sfs {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    for g in present_set {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                    if let Some(du) = ddgi_update_set {
+                        RhiDevice::destroy_bind_group(ctx, du);
+                    }
+                    if let Some(ss) = ssao_set {
+                        for g in ss {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    if let Some(cs) = cull_set {
+                        for g in cs {
+                            RhiDevice::destroy_bind_group(ctx, g);
+                        }
+                    }
+                    for g in resolve_set {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                    for g in vocab_set {
+                        RhiDevice::destroy_bind_group(ctx, g);
+                    }
+                }
+                return Err(SwapchainError::DepthImage(e));
+            }
+            Some(vb_tex_froxel_slots.map(|s| {
+                s.expect("invariant: every vb-tex-froxel Set-0 ring slot built before reaching here")
+            }))
+        } else {
+            None
+        };
+
         // TAA-under-VB: the `viewt_from_depth_rz` set RING, written ONCE here when the pass is
         // wired (SAMPLED reverse-Z depth @0, STORAGE `gViewT` @1 WRITE, UNIFORM camera @2) —
         // matching `viewt_from_depth_rz.comp`'s set 0. `None` unless
@@ -3317,15 +3465,20 @@ impl DeferredSets {
                     }
                 }
                 if let Some(e) = failure {
-                    // SAFETY: the rz slots already built [0..slot) + `vb_set0_froxel`/
-                    // `vb_set0_tex`/`vb_set0` (fully built) + the sdf-forward + present +
-                    // (optional) ddgi-update/ssao/cull + the resolve & vocab rings were created
-                    // on `ctx`, referenced by no submission; each destroyed exactly once (reverse
-                    // acquisition). The optional sets are `Option`-guarded; the images are owned
-                    // by the caller.
+                    // SAFETY: the rz slots already built [0..slot) + `vb_set0_tex_froxel`/
+                    // `vb_set0_froxel`/`vb_set0_tex`/`vb_set0` (fully built) + the sdf-forward +
+                    // present + (optional) ddgi-update/ssao/cull + the resolve & vocab rings were
+                    // created on `ctx`, referenced by no submission; each destroyed exactly once
+                    // (reverse acquisition). The optional sets are `Option`-guarded; the images
+                    // are owned by the caller.
                     unsafe {
                         for s in rz_slots.iter_mut() {
                             if let Some(g) = s.take() {
+                                RhiDevice::destroy_bind_group(ctx, g);
+                            }
+                        }
+                        if let Some(vtf) = vb_set0_tex_froxel {
+                            for g in vtf {
                                 RhiDevice::destroy_bind_group(ctx, g);
                             }
                         }
@@ -3971,6 +4124,7 @@ impl DeferredSets {
             vb_set0,
             vb_set0_tex,
             vb_set0_froxel,
+            vb_set0_tex_froxel,
             viewt_from_vb_depth_set,
             #[cfg(feature = "hwrt")]
             resolve_set_hwrt,
@@ -4033,6 +4187,14 @@ impl DeferredSets {
             #[cfg(feature = "hwrt")]
             if let Some(hs) = self.resolve_set_hwrt {
                 for g in hs {
+                    RhiDevice::destroy_bind_group(ctx, g);
+                }
+            }
+            // VB-P1c: the TEXTURED+FROXEL-variant Set-0 vocabulary set, `Option`-guarded (present
+            // only when the froxel arm AND the TEXTURED resources both exist — hardcoded OFF
+            // today). Built AFTER `vb_set0_froxel` (so destroyed BEFORE it, reverse acquisition).
+            if let Some(vtf) = self.vb_set0_tex_froxel {
+                for g in vtf {
                     RhiDevice::destroy_bind_group(ctx, g);
                 }
             }
@@ -6430,6 +6592,7 @@ impl GBufferTargets {
             vb_set0,
             vb_set0_tex,
             vb_set0_froxel,
+            vb_set0_tex_froxel,
             viewt_from_vb_depth_set,
             #[cfg(feature = "hwrt")]
             resolve_set_hwrt,
@@ -6927,6 +7090,7 @@ impl GBufferTargets {
             vb_set0,
             vb_set0_tex,
             vb_set0_froxel,
+            vb_set0_tex_froxel,
             forward,
             vb,
             vb_classify,
@@ -7239,6 +7403,7 @@ impl GBufferTargets {
                 vb_set0: self.vb_set0,
                 vb_set0_tex: self.vb_set0_tex,
                 vb_set0_froxel: self.vb_set0_froxel,
+                vb_set0_tex_froxel: self.vb_set0_tex_froxel,
                 viewt_from_vb_depth_set: self.viewt_from_vb_depth_set,
                 #[cfg(feature = "hwrt")]
                 resolve_set_hwrt: self.resolve_set_hwrt,
@@ -7628,6 +7793,7 @@ mod tests {
             vb_set0: None,
             vb_set0_tex: None,
             vb_set0_froxel: None,
+            vb_set0_tex_froxel: None,
             forward: None,
             vb: None,
             vb_classify: None,
@@ -7733,6 +7899,7 @@ mod tests {
             vb_set0: None,
             vb_set0_tex: None,
             vb_set0_froxel: None,
+            vb_set0_tex_froxel: None,
             forward: None,
             vb: None,
             vb_classify: None,
