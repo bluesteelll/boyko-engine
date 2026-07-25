@@ -49,6 +49,24 @@ pub const CLUSTER_DIM_Z: u32 = 24;
 pub const CLUSTER_COUNT: u32 = CLUSTER_DIM_X * CLUSTER_DIM_Y * CLUSTER_DIM_Z;
 /// Hard cap on the GPU light table (one `MAX_LIGHTS * 48 B` SSBO ≈ 48 KiB, L2-resident).
 pub const MAX_LIGHTS: u32 = 1024;
+
+/// VB-P1e H2 (design D6): the hierarchical cull's groupshared coarse mask, `HIER_MASK_WORDS`
+/// 32-bit words (`cluster_cull.hlsl`'s `#define HIER_MASK_WORDS 32u`), one bit per light-table
+/// row relative to `l0a_count`.
+pub const HIER_MASK_WORDS: u32 = 32;
+
+/// D6's load-bearing EQUALITY (not `<=`): the hier mask must cover the light table's point/spot
+/// capacity EXACTLY, because D7's single clamp `ps_n <= HIER_MASK_WORDS * 32` bounds BOTH the
+/// groupshared mask WRITE and the device table READ. Under `<=` (say a wider `MAX_LIGHTS` against
+/// the same 32 mask words) `ps_room` would exceed the table's row count and that one clamp would
+/// no longer bound the device read. A future `MAX_LIGHTS` change is therefore a compile error
+/// here, forcing a shader edit (widen `HIER_MASK_WORDS`) and a `.spv` re-bake — the intended price
+/// of one clamp covering two bounds (`docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` D6).
+const _: () = assert!(
+    MAX_LIGHTS == HIER_MASK_WORDS * 32,
+    "invariant: the hier mask covers the table EXACTLY — one clamp bounds both the groupshared \
+     write and the device read"
+);
 /// L1 per-froxel light-index cap (clamp-and-drop above this — Decision 6 / Algorithm D).
 pub const MAX_LIGHTS_PER_CLUSTER: u32 = 256;
 /// L1 flat light-index-list capacity (the `light_index` SSBO length, in `u32`s). The cull

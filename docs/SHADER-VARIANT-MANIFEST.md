@@ -133,6 +133,28 @@ The bind-group LAYOUT is IDENTICAL across all three (4 bindings: `gAoIn`/`gAoOut
 `dxc -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 -D SSAO_ATROUS_READ_R8=1 ssao_atrous.comp.hlsl
 -Fo ssao_atrous_read8.comp.spv`.
 
+## `cluster_cull.hlsl` — the Lighting-L1 clustered froxel light cull (compute)
+
+One source `shaders/cluster_cull.hlsl`; VB-P1e rung H2 ("dark infra") grew an `#ifdef HIER`
+seam: the hierarchical two-level cull (groupshared coarse AABB reduction + coarse-cull +
+groupshared bitmask + fine walk over only the set bits — see
+[docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md](VB-P1E-HIERARCHICAL-CULL-PLAN.md) section 4),
+compiled in only under `-D HIER=1`. The base (no `-D`) arm is the flat one-thread-per-froxel
+scan, UNCHANGED token-for-token by construction — the seam is physically inert on that
+compile (H2 gate (b), re-DXC-verified).
+
+| Variant | `HIER` | `.spv` | numthreads | Interface delta vs base |
+|---|---|---|---|---|
+| base (flat) | — | `cluster_cull.comp.spv` | `[64,1,1]` | none. |
+| hierarchical | `1` | `cluster_cull_hier.comp.spv` | `[256,1,1]` | + 6 `groupshared` arrays (coarse AABB reduction + bitmask, 6 276 B) + a 2-word push tail (`ClusterCullPush` widens 16 B → 24 B: `cluster_dims_packed`, `cluster_capacity` — boot-snapshot dims/capacity, D11). Same cull-set bindings (camera UBO @0, light table @1, ClusterGrid @2, LightIndexList @3, LightIndexAlloc @4) — no binding added or removed. |
+
+Reachability note: the HIER pipeline is **built but never selected** this rung — no pipeline
+object is created, and no host record site's dispatch is armed to choose it (that is H3/H4).
+Every golden pin stays byte-identical for the trivial reason that the module is never loaded.
+The output-set equality between the two arms is a `[P1]`-class **theorem** (plan section 5),
+not a spec-constant collapse — a `-D` variant here changes the entry point's `numthreads` and
+groupshared declarations, which a specialization constant cannot do.
+
 ## Why these stay N `.spv` (do NOT try to spec-const-collapse)
 
 A specialization constant is resolved at *pipeline-create* and can only change a **value** (a loop bound,

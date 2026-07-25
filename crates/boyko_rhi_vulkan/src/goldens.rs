@@ -3609,19 +3609,25 @@ pub fn golden_cluster_cull(
 }
 
 /// Host mirror of the HIER shader's group width (VB-P1e design §4,
-/// `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md`) — `[numthreads(256,1,1)]` under `-D HIER=1`. **This is
-/// rung H1's pure-arithmetic host mirror of the literal only; rung H2 has not been written yet.**
-/// `cluster_cull.hlsl` carries no `-D HIER=1` block and no `HIER_TPG` token today. Once H2 lands
-/// the shader, it will carry a matching GPU-side pin (`#if (HIER_TPG) != 256u` → `#error`) that
-/// must agree with this literal.
+/// `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md`) — `[numthreads(HIER_TPG, 1, 1)]` under `-D HIER=1`
+/// (`cluster_cull.hlsl:176`, `#define HIER_TPG 256u`, `cluster_cull.hlsl:147`). Rung H2 shipped the
+/// GPU-side pin: `cluster_cull.hlsl`'s `#if (HIER_TPG) != 256u` → `#error` (`cluster_cull.hlsl:157`)
+/// keeps the shader's own literal from silently drifting off this value, and
+/// `cluster_cull_hier_dis_gate.rs`'s gate (h) independently pins the emitted
+/// `OpExecutionMode %main LocalSize 256 1 1` on the committed `.spv` itself, since neither the
+/// `#error` guard nor the source-level `numthreads`/`HIER_TPG` tie protects a stale or
+/// hand-crafted artifact.
 pub const HIER_GROUP_THREADS: u32 = 256;
 
-/// Host mirror of `HIER_MASK_WORDS` (VB-P1e design D6): `MAX_LIGHTS / 32`. **This is rung H1's
-/// host-only literal; no GPU-side pin exists yet.** `boyko_render::light.rs:51`
-/// (`pub const MAX_LIGHTS: u32 = 1024`) carries no cross-check today — the vulkan crate cannot
-/// depend on `boyko_render` (see [`GoldenClusterConfig`]'s own doc comment), so this is a
-/// separately mirrored literal, not a shared constant. Rung H2 is expected to add the compile-time
-/// pin `MAX_LIGHTS == HIER_MASK_WORDS * 32` at that call site.
+/// Host mirror of `HIER_MASK_WORDS` (VB-P1e design D6): `MAX_LIGHTS / 32`
+/// (`cluster_cull.hlsl:148`, `#define HIER_MASK_WORDS 32u`). `boyko_render::light.rs:51`
+/// (`pub const MAX_LIGHTS: u32 = 1024`) carries no cross-check with THIS mirror today — the vulkan
+/// crate cannot depend on `boyko_render` (see [`GoldenClusterConfig`]'s own doc comment), so this
+/// stays a separately mirrored literal, not a shared constant. Rung H2 shipped the equivalent
+/// compile-time pin on the `boyko_render` side instead: `boyko_render::light.rs:65-69`
+/// (`const _: () = assert!(MAX_LIGHTS == HIER_MASK_WORDS * 32, ..)`, against `light.rs`'s own
+/// `HIER_MASK_WORDS` at `light.rs:56`) enforces the equality D6 requires at the one call site that
+/// CAN see both constants.
 pub const HIER_MASK_WORDS: u32 = 32;
 
 /// Host mirror of `HIER_MASK_BITS` (`HIER_MASK_WORDS * 32`) — equal to `MAX_LIGHTS` (1024) by

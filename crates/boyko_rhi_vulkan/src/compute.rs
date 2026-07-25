@@ -531,6 +531,21 @@ embed_spirv! {
 }
 
 embed_spirv! {
+    /// VB-P1e rung H2 ("dark infra"): the `-D HIER=1` hierarchical variant of the Lighting-L1
+    /// cluster cull (`shaders/cluster_cull.hlsl`, same source as [`CLUSTER_CULL_SPV`]). One
+    /// 256-lane workgroup per z-slice block (instead of one 64-wide group per `CLUSTER_COUNT`
+    /// chunk): the group first reduces its own froxels' AABBs into a group box in groupshared
+    /// memory, coarse-culls the point/spot table against THAT once, records survivors as a
+    /// groupshared bitmask, then re-runs the identical per-froxel fine test over only the
+    /// mask's set bits. Same cull-set bindings as the base variant, plus a 24-byte
+    /// `ClusterCullHierPush` (the base 16-byte `ClusterCullPush` widened by two boot-snapshot
+    /// words — see `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` D11). Built but **never selected**
+    /// this rung — no pipeline is created and nothing arms it (H3/H4).
+    CLUSTER_CULL_HIER_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/cluster_cull_hier.comp.spv")
+}
+
+embed_spirv! {
     /// The committed Render P4b coarse-cull / tile pre-trace SPIR-V
     /// (`shaders/sdf_tile_cull.hlsl`). A 1/8-res CONSERVATIVE cone-trace: one invocation
     /// per 8×8 fine-pixel tile emits a [`TileBound`] the fine marcher reads to early-out
@@ -1609,6 +1624,13 @@ pub fn ddgi_probe_gi_resolve_spirv() -> &'static [u32] {
 #[inline]
 pub fn cluster_cull_spirv() -> &'static [u32] {
     CLUSTER_CULL_SPV.as_words()
+}
+
+/// VB-P1e rung H2: the `-D HIER=1` hierarchical cluster-cull SPIR-V as a `u32` word stream. See
+/// [`CLUSTER_CULL_HIER_SPV`]'s doc. Built but never bound to a pipeline this rung — dark infra.
+#[inline]
+pub fn cluster_cull_hier_spirv() -> &'static [u32] {
+    CLUSTER_CULL_HIER_SPV.as_words()
 }
 
 /// The committed Render P4b coarse-cull / tile pre-trace SPIR-V as a `u32` word

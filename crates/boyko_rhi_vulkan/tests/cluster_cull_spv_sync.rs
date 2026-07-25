@@ -1,14 +1,20 @@
 //! Cluster-cull `.spv` byte-identity gate — the re-DXC oracle for `cluster_cull.hlsl`.
 //!
-//! `cluster_cull.hlsl` is a single-variant compute shader (no `-D` defines), compiled offline
-//! with the FROZEN recipe pinned in its own header comment. Nothing else proved the committed
-//! `cluster_cull.comp.spv` BYTE-MATCHES that source under the frozen recipe — a stale or
-//! hand-tweaked blob would ship undetected until a GPU frame-golden run. This test clones the
-//! `redxc_to_bytes` idiom `marcher_spv_sync.rs` uses for the SDF marcher family, scoped to the
-//! Lighting L1 froxel cull.
+//! `cluster_cull.hlsl` grew an `#ifdef HIER` seam at rung VB-P1e H2 ("dark infra"): the
+//! hierarchical two-level cull, compiled in only under `-D HIER=1`. This test clones the
+//! `redxc_with_defines` multi-variant idiom `vb_froxel_spv_sync.rs:52-69` uses for the VB froxel
+//! family, scoped to the two `cluster_cull.hlsl` variants:
+//!
+//! * `cluster_cull.comp.spv` (`cluster_cull.hlsl`, no `-D` — the base arm, gate (b): the seam
+//!   must be physically inert on this compile, so it stays byte-identical to its pre-H2 build).
+//! * `cluster_cull_hier.comp.spv` (`cluster_cull.hlsl`, `-D HIER=1` — the new variant, gate (a)).
+//!
+//! The arm bit is never armed this rung (no pipeline is created, nothing selects the HIER
+//! module) — but both committed `.spv` must still byte-match their source under the frozen
+//! recipe, exactly like every other variant family in this crate.
 //!
 //! SKIPS (with an eprintln) when no `dxc` resolves on the host — the byte gate is only as
-//! hermetic as the pinned VulkanSDK 1.4.350.0 toolchain that produced the committed artifact; a
+//! hermetic as the pinned VulkanSDK 1.4.350.0 toolchain that produced the committed artifacts; a
 //! DIFFERENT dxc version failing this test means "wrong toolchain", not "drifted shader" (the
 //! committed recipe header pins the exact version).
 //!
@@ -24,13 +30,9 @@
 //! an empty or shrunken selection is RED at the source instead of silently satisfying a later
 //! rung's "for all decorated X" quantifier.
 //!
-//! What it does NOT do, and what therefore **remains H2's obligation**: it cannot observe that
-//! e5's instruction-window selector or e6's producer-scoped selector each pick a NON-EMPTY set,
-//! and it says nothing at all about the HIER module. The errata requires e5 and e6 to
-//! **pre-register their own non-empty selection counts under BOTH compile options**. Do not read
-//! this pin as permission to skip that — the campaign's named failure mode is a gate that cannot
-//! go red, and a comment claiming a P0 is closed is exactly what causes the next rung to skip the
-//! check that would have caught it.
+//! What it does NOT do: it says nothing about the HIER module. `cluster_cull_hier_dis_gate.rs`
+//! (H2 gate (e)) discharges that half, pre-registering e5's and e6's own non-empty selection
+//! counts under BOTH compile options and demonstrating each can go RED.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -64,20 +66,40 @@ fn find_dxc() -> Option<PathBuf> {
 
 /// Re-DXCs `hlsl_name` (relative to the shaders dir) under the EXACT frozen recipe pinned in
 /// `cluster_cull.hlsl`'s own header comment (`-spirv -T cs_6_0 -E main
-/// -fspv-target-env=vulkan1.3`, no `-D`, no `-O`), into a fresh temp `.spv`, and returns the
-/// bytes. Never overwrites a committed artifact.
-fn redxc_to_bytes(dxc: &PathBuf, dir: &PathBuf, hlsl_name: &str, out_tag: &str) -> Vec<u8> {
+/// -fspv-target-env=vulkan1.3`, no `-O`) plus the given `-D` defines, into a fresh temp `.spv`
+/// named by `out_tag` (distinct per variant so parallel test binaries never collide), and
+/// returns the bytes. Never overwrites a committed artifact. Mirrors
+/// `vb_froxel_spv_sync.rs:56-69`'s `redxc_with_defines`.
+fn redxc_with_defines(dxc: &PathBuf, dir: &PathBuf, hlsl_name: &str, defines: &[&str], out_tag: &str) -> Vec<u8> {
     let out_spv = std::env::temp_dir().join(format!("{out_tag}.redxc.spv"));
-    let status = Command::new(dxc)
-        .current_dir(dir)
-        .args(["-spirv", "-T", "cs_6_0", "-E", "main", "-fspv-target-env=vulkan1.3", hlsl_name, "-Fo"])
-        .arg(&out_spv)
-        .status()
-        .expect("invariant: dxc was located and must run");
-    assert!(status.success(), "dxc failed re-compiling {hlsl_name} under the frozen recipe");
+    let mut cmd = Command::new(dxc);
+    cmd.current_dir(dir).args(["-spirv", "-T", "cs_6_0", "-E", "main"]);
+    for d in defines {
+        cmd.args(["-D", d]);
+    }
+    cmd.args(["-fspv-target-env=vulkan1.3", hlsl_name, "-Fo"]).arg(&out_spv);
+    let status = cmd.status().expect("invariant: dxc was located and must run");
+    assert!(status.success(), "dxc failed re-compiling {hlsl_name} {defines:?} under the frozen recipe");
     let bytes = std::fs::read(&out_spv).expect("invariant: dxc wrote the re-DXC .spv");
     let _ = std::fs::remove_file(&out_spv); // best-effort tidy
     bytes
+}
+
+/// One committed artifact must byte-equal its own re-DXC. Mirrors `vb_froxel_spv_sync.rs:72-86`.
+fn assert_spv_byte_identical(dxc: &PathBuf, dir: &PathBuf, hlsl_name: &str, defines: &[&str], spv_name: &str) {
+    let committed_path = dir.join(spv_name);
+    let committed = std::fs::read(&committed_path)
+        .unwrap_or_else(|e| panic!("missing committed {}: {e}", committed_path.display()));
+    let fresh = redxc_with_defines(dxc, dir, hlsl_name, defines, spv_name);
+    assert!(
+        committed == fresh,
+        "{spv_name} ({} bytes committed, {} bytes fresh) is NOT the re-DXC of {hlsl_name} \
+         {defines:?} under the frozen recipe — either the committed .spv is stale (re-run the \
+         recipe in the shader's header and commit it) or the host dxc is not the pinned \
+         VulkanSDK 1.4.350.0 toolchain.",
+        committed.len(),
+        fresh.len(),
+    );
 }
 
 /// Locates `spirv-dis`: first the pinned Vulkan-SDK path (beside the pinned `dxc.exe`), then
@@ -169,31 +191,38 @@ fn census(dis: &str) -> SpvCensus {
     c
 }
 
+/// H2 gate (a): the new `-D HIER=1` variant byte-equals its own re-DXC under the frozen recipe.
 #[test]
-fn cluster_cull_spv_byte_identical() {
+fn cluster_cull_hier_variant_spv_byte_identical() {
     let Some(dxc) = find_dxc() else {
         eprintln!(
             "cluster_cull_spv_sync: dxc not found (no C:/VulkanSDK/.../dxc.exe, no \
-             $VULKAN_SDK/Bin, not on PATH) — SKIPPING the cluster-cull re-DXC byte-identity \
-             check on this host."
+             $VULKAN_SDK/Bin, not on PATH) — SKIPPING the cluster-cull-hier re-DXC \
+             byte-identity check on this host."
         );
         return;
     };
     let dir = shaders_dir();
-    let committed_path = dir.join("cluster_cull.comp.spv");
-    let committed = std::fs::read(&committed_path)
-        .unwrap_or_else(|e| panic!("missing committed {}: {e}", committed_path.display()));
-    let fresh = redxc_to_bytes(&dxc, &dir, "cluster_cull.hlsl", "cluster_cull.comp");
-    assert!(
-        committed == fresh,
-        "cluster_cull.comp.spv ({} bytes committed, {} bytes fresh) is NOT the re-DXC of \
-         cluster_cull.hlsl under the frozen recipe (`dxc.exe -spirv -T cs_6_0 -E main \
-         -fspv-target-env=vulkan1.3`) — either the committed .spv is stale (re-run the recipe \
-         in the shader's header and commit the fresh bytes) or the host dxc is not the pinned \
-         VulkanSDK 1.4.350.0 toolchain.",
-        committed.len(),
-        fresh.len(),
-    );
+    assert_spv_byte_identical(&dxc, &dir, "cluster_cull.hlsl", &["HIER=1"], "cluster_cull_hier.comp.spv");
+}
+
+/// H2 gate (b): the BASE (no `-D`) compile stays byte-identical to the H1.6-re-pinned blob —
+/// the `#ifdef HIER` seam (the new push-tail members + the new arm of `main`) must be
+/// physically inert on this compile. **Re-measured at this rung, not inherited**: the push
+/// struct's HIER-only tail widened by a second word since the last time this inertness was
+/// probed, so a stale measurement would not cover the artifact being committed here.
+#[test]
+fn cluster_cull_base_variant_spv_unperturbed_by_the_hier_seam() {
+    let Some(dxc) = find_dxc() else {
+        eprintln!(
+            "cluster_cull_spv_sync: dxc not found (no C:/VulkanSDK/.../dxc.exe, no \
+             $VULKAN_SDK/Bin, not on PATH) — SKIPPING the cluster-cull base-variant \
+             byte-identity check on this host."
+        );
+        return;
+    };
+    let dir = shaders_dir();
+    assert_spv_byte_identical(&dxc, &dir, "cluster_cull.hlsl", &[], "cluster_cull.comp.spv");
 }
 
 /// H1.6 census pin (D10, section 8.8 gate (a)): the committed `cluster_cull.comp.spv` carries
