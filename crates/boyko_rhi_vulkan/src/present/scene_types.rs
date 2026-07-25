@@ -1399,13 +1399,24 @@ pub struct GBufferScene<'a> {
     /// staging→`light_table` copy + barrier; `false` records NOTHING (idle frame → zero
     /// cost, byte-identical command stream — the rung L0-r0 0%-gate).
     pub light_dirty: bool,
-    /// The Lighting-L1 clustered froxel light-cull compute pipeline (`cluster_cull.comp`):
-    /// its layout declares the cull bind-group LAYOUT at `set 0` + a 16-byte
-    /// [`crate::compute::ClusterCullPush`] COMPUTE push range. `None` ⇒ L1 is not wired (the
-    /// L0b-only build) and the cull pass + its barriers are skipped entirely (the resolve's
-    /// `clusters_enabled` header gate then loops the flat table — the L1 OFF path). When
-    /// `Some`, the recorder dispatches it (over [`Self::cluster_count`] froxels) BEFORE the
-    /// resolve, with a COMPUTE→COMPUTE buffer barrier so the resolve reads see the cull writes.
+    /// The Lighting-L1 clustered froxel light-cull compute pipeline: ONE pipeline per boot,
+    /// built from EITHER `cluster_cull.comp` (the base arm) OR `cluster_cull_hier.comp` (the
+    /// VB-P1e hierarchical arm). Its layout declares the cull bind-group LAYOUT at `set 0` plus
+    /// a COMPUTE push range whose SIZE FOLLOWS THE ARM: 16 bytes
+    /// ([`crate::compute::ClusterCullPush`]) for the base arm, 24
+    /// ([`crate::compute::ClusterCullHierPush`], the base four words plus the D11 boot-snapshot
+    /// `cluster_dims_packed` + `cluster_capacity`) for the hierarchical one.
+    /// [`Self::cluster_cull_hier`] is `Some` IFF this field holds the hierarchical pipeline, and
+    /// it carries the matching push image and group count — the two MUST be read together, since
+    /// pushing 16 bytes into a 24-byte layout would leave the hierarchical arm's write bound
+    /// undefined.
+    ///
+    /// `None` ⇒ L1 is not wired (the L0b-only build) and the cull pass + its barriers are skipped
+    /// entirely (the resolve's `clusters_enabled` header gate then loops the flat table — the L1
+    /// OFF path). When `Some`, the recorder dispatches it BEFORE the resolve, with a
+    /// COMPUTE→COMPUTE buffer barrier so the resolve reads see the cull writes. The base arm
+    /// dispatches over [`Self::cluster_count`] froxels at 64 lanes; the hierarchical arm uses
+    /// [`Self::cluster_cull_hier`]'s own group count at 256 lanes.
     pub cluster_cull: Option<&'a ComputePipeline>,
     /// The cull bind-group LAYOUT { camera UBO @0, light table SSBO @1, `ClusterGrid` SSBO
     /// @2, `LightIndexList` SSBO @3, `LightIndexAlloc` SSBO @4 } — matching `cluster_cull.hlsl`'s

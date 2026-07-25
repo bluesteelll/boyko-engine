@@ -17,8 +17,8 @@ use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS};
 use super::super::frame_driver::Renderer;
 use super::super::gpu_timing::TimedPass;
 use super::super::scene_types::{
-    CLUSTER_CULL_PUSH_BYTES, GBUFFER_MARCHER_PUSH_BYTES, GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
-    GBufferScene, LIGHT_CULL_LOCAL_SIZE_X,
+    CLUSTER_CULL_HIER_PUSH_BYTES, CLUSTER_CULL_PUSH_BYTES, GBUFFER_MARCHER_PUSH_BYTES,
+    GBUFFER_PUSH_BASE_INSTANCE_OFFSET, GBufferScene, LIGHT_CULL_LOCAL_SIZE_X,
 };
 use super::super::targets::GBufferTargets;
 use super::super::{COLOR_SUBRESOURCE_RANGE, SwapchainError};
@@ -1553,22 +1553,6 @@ impl Renderer<'_> {
             scene.light_index,
             scene.light_index_alloc,
         ) {
-            // VB-P1e H4 (P1-3, adversarial review): this Deferred record path's push/dispatch
-            // below is FIXED to the base 16-byte/64-wide arm — it never reads
-            // `scene.cluster_cull_hier`. That is sound today only because the HIER arm is armed
-            // exclusively under `RenderPath::VisibilityBuffer`
-            // (`ResolvedRenderPath::froxel_light_cull`, `boyko_render::render_path_config`), so
-            // `scene.cluster_cull` can never carry the HIER pipeline while THIS (Deferred)
-            // record path is selected. Nothing in the type system enforces that; this
-            // debug_assert makes the coupling structural instead of merely a reachability
-            // argument — zero cost in release, and it fires if a future rung (H5) ever re-points
-            // `cluster_cull_hier` at Deferred without also updating the push/dispatch below.
-            debug_assert!(
-                scene.cluster_cull_hier.is_none(),
-                "invariant: record_gbuffer's L1 cull block assumes the base 16-byte/64-wide arm; \
-                 `cluster_cull_hier` must stay None on the Deferred path until a rung wires the \
-                 HIER arm's push/dispatch here"
-            );
             // (L1-0) Reset the global slice-allocation counter to 0 (a transfer fill), then
             // order the fill before the cull's atomic reads/writes (TRANSFER→COMPUTE).
             // SAFETY: recording is open; `alloc` is a live device-local STORAGE buffer (≥ 4 B,
@@ -1594,15 +1578,63 @@ impl Renderer<'_> {
                 .expect("invariant: cull wired ⇒ light_cull pass declared");
             self.record_graph_pass(light_cull, cmd, targets, scene, fi);
 
-            // (L1-1) Bind the cull pipeline + the cull set (written ONCE at sync_gbuffer),
-            // push the 16-byte ClusterCullPush, dispatch over CLUSTER_COUNT froxels.
-            let cull_groups = scene.cluster_count.div_ceil(LIGHT_CULL_LOCAL_SIZE_X);
+            // (L1-1) Bind the cull pipeline + the cull set (written ONCE at sync_gbuffer), push
+            // this arm's own push image, dispatch this arm's own group count (VB-P1e H5, the
+            // SAME `match` `vb.rs` uses per D11/H4): base = `cluster_count` froxels at the
+            // 64-wide group + the 16-byte `ClusterCullPush`; hier = `h.groups` groups of 256 +
+            // the 24-byte `ClusterCullHierPush`. `scene.cluster_cull_hier` selects BOTH halves
+            // together, so the group count can never be paired with the other arm's push range.
+            //
+            // On every current Deferred boot this `match` always takes the `None` arm:
+            // `GpuSceneBundles::build_froxel_light_cull` is the only writer of both
+            // `scene.cluster_cull` and `scene.cluster_cull_hier`, and it is gated on
+            // `ResolvedRenderPath::froxel_light_cull`, which resolves VB-only
+            // (`consumers.clusters_wanted && matches!(path, RenderPath::VisibilityBuffer)`,
+            // `boyko_render::render_path_config.rs:913`) — so `scene.cluster_cull` itself stays
+            // `None` on a Deferred boot and this whole `if let` block does not execute. This
+            // rung does not migrate a live path; it makes the record site CAPABLE of carrying a
+            // hierarchical dispatch record, removing the interim `debug_assert`'s latent trap (a
+            // future Deferred froxel-cull wiring landing without a matching push/dispatch update
+            // here) ahead of that wiring existing.
+            let (cull_groups, push_ptr, push_len) = match scene.cluster_cull_hier.as_ref() {
+                Some(h) => (h.groups, h.push.as_ptr(), CLUSTER_CULL_HIER_PUSH_BYTES),
+                None => (
+                    scene.cluster_count.div_ceil(LIGHT_CULL_LOCAL_SIZE_X),
+                    scene.cluster_cull_push.as_ptr(),
+                    CLUSTER_CULL_PUSH_BYTES,
+                ),
+            };
             // SAFETY: recording is open; the cull pipeline + its layout (declaring `cull_layout`
-            // at set 0 + the 16-byte COMPUTE push range) are live on this device (caller
-            // contract); the cull set binds the camera UBO + light table + the cluster buffers;
-            // `cull_groups` covers `cluster_count` froxels at the 64-wide group; the push bytes
-            // are exactly `CLUSTER_CULL_PUSH_BYTES` (16) at offset 0; `&cull_set.descriptor_set`
-            // is a single-element local alive for the call (first_set 0, count 1).
+            // at set 0 + a COMPUTE push range sized for the SAME arm) are live on this device
+            // (caller contract); the cull set binds the camera UBO + light table + the cluster
+            // buffers; the dispatch size and the push image are the SAME `Option` arm (base:
+            // `cluster_count` froxels at the 64-wide group + the 16-byte `ClusterCullPush`;
+            // hier: `h.groups` groups of 256 + the 24-byte `ClusterCullHierPush`), so the group
+            // count can never be paired with the other arm's push range.
+            //
+            // The two arms' `ClusterGrid[fi]` write bounds are DIFFERENT quantities (P0-1,
+            // adversarial review — the two must not be conflated). HIER: `cluster_cull.hlsl`'s
+            // `#ifdef HIER` branch guards on `fi < pc.cluster_capacity`, a pushed BOOT-snapshot
+            // word minted by `build_froxel_light_cull` from the SAME `ClusterConfig::
+            // cluster_count()` binding the `ClusterGrid` buffer itself was allocated from
+            // (`gpu_scene/mod.rs`) — a live edit to the `ClusterConfig` Resource cannot move
+            // this arm's own write bound, by construction (D11). BASE: the `#else` branch
+            // carries NO `cluster_capacity` push word at all — its push is 16 B / 4 words
+            // (`z_near`, `z_far`, `max_lights_per_cluster`, `index_list_cap` only); it guards on
+            // `fi >= cluster_count` where `cluster_count` comes from `load_cluster_params
+            // (LightBuf)` — the LIVE light-table header, re-read every dispatch — so the base
+            // arm's write bound is whatever `sync_cluster_light_gate` (`light.rs:875`) last
+            // wrote there, NOT the capacity `ClusterGrid` was sized from. This is the
+            // PRE-EXISTING VB-P1k skew: the base arm's shader token stream and dispatch shape
+            // are UNCHANGED by this rung (D11), so this `match` neither introduces nor closes
+            // that exposure — it merely routes to whichever arm's shader enforces its own bound
+            // the way it always did.
+            // SCOPE: this bounds THIS dispatch's writes only, and only in the sense above (HIER:
+            // boot-fixed; BASE: live-header, unclosed VB-P1k). The `ClusterGrid` *readers*
+            // (vb_resolve/vb_shade/deferred_pbr/forward_opaque) also index with the live dims
+            // and carry the SAME pre-existing skew exposure tracked as VB-P1k.
+            // `&cull_set.descriptor_set` is a single-element local alive for the call
+            // (first_set 0, count 1).
             unsafe {
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
@@ -1624,8 +1656,8 @@ impl Renderer<'_> {
                     cull_pipeline.layout,
                     VK_SHADER_STAGE_COMPUTE_BIT,
                     0,
-                    CLUSTER_CULL_PUSH_BYTES,
-                    scene.cluster_cull_push.as_ptr().cast(),
+                    push_len,
+                    push_ptr.cast(),
                 );
                 (self.fns.cmd_dispatch)(cmd, cull_groups, 1, 1);
             }
