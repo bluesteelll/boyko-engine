@@ -4975,7 +4975,7 @@ fn p6_r1_oracle_produces_shadowed_pixels() {
     // equality golden.
     let cull_cfg = l1_cluster_config();
     let cull_header = GoldenLightHeader::new_clustered(1, 2, 1.0, &cull_cfg);
-    let grid = golden_cluster_cull(SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, &cull_cfg, &cull_header, &lights);
+    let grid = golden_cluster_cull(SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, &cull_cfg, &cull_header, &lights, None);
     let mut caster_a_seen = false;
     let mut caster_b_seen = false;
     for cell in &grid {
@@ -6390,7 +6390,7 @@ fn l1_clustered_resolve_matches_the_brute_force_image() {
 
     // The host cull grid — the bit-exact reference for the GPU cull (no overflow on this scene,
     // so GPU occupancy == host occupancy and the resolve sees the same per-froxel light set).
-    let grid = golden_cluster_cull(SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, &cfg, &header, &lights);
+    let grid = golden_cluster_cull(SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, &cfg, &header, &lights, None);
 
     for (name, edits) in p4b_scenes() {
         let (lit, _grid_bytes, _index_bytes, viewt_px, normal_oct) =
@@ -6452,7 +6452,7 @@ fn l1_known_light_lands_in_the_expected_clusters() {
     // The host cull occupancy — the bit-exact reference. The SDF scene does not affect the cull
     // (it is purely geometric on the light table + camera), so any scene drives the cull pass;
     // use the crater fixture.
-    let host_grid = golden_cluster_cull(SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, &cfg, &header, &lights);
+    let host_grid = golden_cluster_cull(SDF_IMG_W, SDF_IMG_H, CompositeCamera::Ortho, &cfg, &header, &lights, None);
     let cluster_count = cfg.cluster_count() as usize;
     assert_eq!(host_grid.len(), cluster_count);
 

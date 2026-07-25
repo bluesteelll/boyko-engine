@@ -3497,6 +3497,45 @@ pub(crate) fn golden_sq_dist_point_aabb(c: [f32; 3], aabb_min: [f32; 3], aabb_ma
     s
 }
 
+/// Builds one froxel's world-space AABB from its screen-tile corners at the slice's near/far
+/// view-z (mirrors `cluster_cull.hlsl`'s phase-0 unprojection — the SAME `composite_ray` the
+/// resolve uses). Shared verbatim by [`golden_cluster_cull`] and [`golden_cluster_cull_hier`]
+/// so the two host mirrors' phase 0 is bit-identical BY CONSTRUCTION rather than by
+/// re-derivation — exactly the property the hierarchical design's D2 relies on (the coarse AABB
+/// is a reduction over values already computed here, never a second geometric computation).
+pub fn golden_froxel_aabb(
+    x: u32,
+    y: u32,
+    z: u32,
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    cfg: &GoldenClusterConfig,
+) -> ([f32; 3], [f32; 3]) {
+    // The tile's inclusive corner pixels (mirror the cull's px0/py0/px1/py1).
+    let px0 = (x * img_w) / cfg.dim_x;
+    let py0 = (y * img_h) / cfg.dim_y;
+    let px1 = (((x + 1) * img_w) / cfg.dim_x).saturating_sub(1).max(px0);
+    let py1 = (((y + 1) * img_h) / cfg.dim_y).saturating_sub(1).max(py0);
+    let corners = [(px0, py0), (px1, py0), (px0, py1), (px1, py1)];
+    let vz_near = golden_slice_view_z(z, cfg);
+    let vz_far = golden_slice_view_z(z + 1, cfg);
+    let mut aabb_min = [1.0e30_f32; 3];
+    let mut aabb_max = [-1.0e30_f32; 3];
+    for &(cx, cy) in &corners {
+        let (ro, rd) = composite_ray(cx, cy, img_w, img_h, camera);
+        for &vz in &[vz_near, vz_far] {
+            let t = golden_view_z_to_t(vz, rd, camera);
+            let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
+            for i in 0..3 {
+                aabb_min[i] = aabb_min[i].min(p[i]);
+                aabb_max[i] = aabb_max[i].max(p[i]);
+            }
+        }
+    }
+    (aabb_min, aabb_max)
+}
+
 /// The host clustered froxel light cull (mirrors `cluster_cull.hlsl`). For each froxel it
 /// builds the WORLD-space AABB from the screen-tile corners at the slice's near/far view-z
 /// (the SAME `composite_ray` the resolve uses) and records the surviving POINT/SPOT light
@@ -3507,6 +3546,17 @@ pub(crate) fn golden_sq_dist_point_aabb(c: [f32; 3], aabb_min: [f32; 3], aabb_ma
 /// The cull is geometric + deterministic; the resolve's per-froxel sum is order-stable
 /// (table order), so a froxel whose set contains every in-range light reproduces the
 /// brute-force resolve bit-for-bit.
+///
+/// `inject_nan_froxel`, when `Some(fi)`, overwrites froxel `fi`'s own AABB to an all-NaN box
+/// (bit pattern [`GOLDEN_QUIET_NAN_BITS`], matching HLSL's `asfloat(0x7FC00000u)`) immediately
+/// after phase 0 — the "base module" leg of H3 mutation (vii)'s two-sided, three-implementation
+/// fault injection (plan §8.3 "Mutation (vii) in full", §8.10 item 5: "mirrored in the HIER
+/// module, the base module AND the host mirror"). Mirrors [`golden_cluster_cull_hier`]'s own
+/// `inject_nan_froxel` parameter so the SAME poisoned froxel can be compared between the flat
+/// oracle and the hierarchical mirror's mitigated arm (§5 Case B's corollary: froxel `fi`'s own
+/// fine test computes the identical all-NaN `sq_dist` in both, so an equally-poisoned flat arm is
+/// required for the comparison to mean anything). `None` performs no injection — every existing
+/// call site.
 pub fn golden_cluster_cull(
     img_w: u32,
     img_h: u32,
@@ -3514,36 +3564,24 @@ pub fn golden_cluster_cull(
     cfg: &GoldenClusterConfig,
     header: &GoldenLightHeader,
     lights: &[GoldenLight],
+    inject_nan_froxel: Option<u32>,
 ) -> Vec<Vec<u32>> {
     let count = cfg.cluster_count() as usize;
     let mut grid: Vec<Vec<u32>> = vec![Vec::new(); count];
     let l0a = header.l0a_count();
     let total = header.light_count();
+    let nan = f32::from_bits(GOLDEN_QUIET_NAN_BITS);
     for y in 0..cfg.dim_y {
         for x in 0..cfg.dim_x {
-            // The tile's inclusive corner pixels (mirror the cull's px0/py0/px1/py1).
-            let px0 = (x * img_w) / cfg.dim_x;
-            let py0 = (y * img_h) / cfg.dim_y;
-            let px1 = (((x + 1) * img_w) / cfg.dim_x).saturating_sub(1).max(px0);
-            let py1 = (((y + 1) * img_h) / cfg.dim_y).saturating_sub(1).max(py0);
-            let corners = [(px0, py0), (px1, py0), (px0, py1), (px1, py1)];
             for z in 0..cfg.dim_z {
-                let vz_near = golden_slice_view_z(z, cfg);
-                let vz_far = golden_slice_view_z(z + 1, cfg);
-                let mut aabb_min = [1.0e30_f32; 3];
-                let mut aabb_max = [-1.0e30_f32; 3];
-                for &(cx, cy) in &corners {
-                    let (ro, rd) = composite_ray(cx, cy, img_w, img_h, camera);
-                    for &vz in &[vz_near, vz_far] {
-                        let t = golden_view_z_to_t(vz, rd, camera);
-                        let p = [ro[0] + rd[0] * t, ro[1] + rd[1] * t, ro[2] + rd[2] * t];
-                        for i in 0..3 {
-                            aabb_min[i] = aabb_min[i].min(p[i]);
-                            aabb_max[i] = aabb_max[i].max(p[i]);
-                        }
-                    }
+                let fi = golden_cluster_index(x, y, z, cfg.dim_x, cfg.dim_z);
+                let (mut aabb_min, mut aabb_max) =
+                    golden_froxel_aabb(x, y, z, img_w, img_h, camera, cfg);
+                if inject_nan_froxel == Some(fi) {
+                    aabb_min = [nan; 3];
+                    aabb_max = [nan; 3];
                 }
-                let cell = &mut grid[golden_cluster_index(x, y, z, cfg.dim_x, cfg.dim_z) as usize];
+                let cell = &mut grid[fi as usize];
                 for i in l0a..total {
                     let li = &lights[i as usize];
                     let kind = li.kind();
@@ -3562,6 +3600,287 @@ pub fn golden_cluster_cull(
         }
     }
     grid
+}
+
+/// Host mirror of the HIER shader's group width (VB-P1e design §4,
+/// `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md`) — `[numthreads(256,1,1)]` under `-D HIER=1`. **This is
+/// rung H1's pure-arithmetic host mirror of the literal only; rung H2 has not been written yet.**
+/// `cluster_cull.hlsl` carries no `-D HIER=1` block and no `HIER_TPG` token today. Once H2 lands
+/// the shader, it will carry a matching GPU-side pin (`#if (HIER_TPG) != 256u` → `#error`) that
+/// must agree with this literal.
+pub const HIER_GROUP_THREADS: u32 = 256;
+
+/// Host mirror of `HIER_MASK_WORDS` (VB-P1e design D6): `MAX_LIGHTS / 32`. **This is rung H1's
+/// host-only literal; no GPU-side pin exists yet.** `boyko_render::light.rs:51`
+/// (`pub const MAX_LIGHTS: u32 = 1024`) carries no cross-check today — the vulkan crate cannot
+/// depend on `boyko_render` (see [`GoldenClusterConfig`]'s own doc comment), so this is a
+/// separately mirrored literal, not a shared constant. Rung H2 is expected to add the compile-time
+/// pin `MAX_LIGHTS == HIER_MASK_WORDS * 32` at that call site.
+pub const HIER_MASK_WORDS: u32 = 32;
+
+/// Host mirror of `HIER_MASK_BITS` (`HIER_MASK_WORDS * 32`) — equal to `MAX_LIGHTS` (1024) by
+/// D6's pinned equality, and the bound D7's `ps_room` clamp is derived from.
+pub const HIER_MASK_BITS: u32 = HIER_MASK_WORDS * 32;
+
+/// `gps` — HIER groups per z-slice (D3): `max(1, ceil(dim_x * dim_y / HIER_GROUP_THREADS))`.
+/// The host mirror of the shader's `uint gps = max(1u, (bdx*bdy+255u)/256u)`, in the SAME
+/// arithmetic form D11's `ClusterConfig::hier_group_count` uses — checkable by eye against the
+/// shader, not merely equivalent to it (Rev 5 P2-4).
+// The `+ HIER_GROUP_THREADS - 1) / HIER_GROUP_THREADS` form is `div_ceil` written out, kept
+// deliberately: D11's own Rev 5 P2-4 fix rejects `.div_ceil()` here — its const-stability is "a
+// separate question this plan should not depend on" — and the written-out form is the shader's
+// `(bdx*bdy+255u)/256u` TOKEN-FOR-TOKEN, which is the whole point (a reviewer checks it by eye
+// against the HLSL, not by trusting an equivalence proof).
+#[allow(clippy::manual_div_ceil)]
+#[inline]
+pub const fn golden_hier_groups_per_slice(dim_x: u32, dim_y: u32) -> u32 {
+    let gps = (dim_x * dim_y + HIER_GROUP_THREADS - 1) / HIER_GROUP_THREADS;
+    if gps == 0 { 1 } else { gps }
+}
+
+/// Pure-arithmetic replica of the HIER shader's thread-to-froxel map for one `(group_id, lane)`
+/// pair — D3's `gps`/`slice`/`s`/`x`/`y`/`z`/`fi` plus D8's three-term `valid` predicate.
+/// Returns `(x, y, z, fi, valid)`.
+///
+/// **Scope (H1 assertion 7, §8.6).** This is a Rust RE-IMPLEMENTATION of the shader's walk, not
+/// a pin on the HLSL — if the shader and this mirror drift, only H3 (device) sees it. It exists
+/// so degenerate/non-64-aligned dims matrices (`16x9x23`, `1x1x1`, `0x0x0`, `255x255x255`) can be
+/// swept with no camera, no lights and no GPU.
+// The `if dim_x != 0 { .. } else { 0 }` guards are the shader's own D8-obligation ternaries
+// (`x = (bdx != 0u) ? (s % bdx) : 0u;`, `y = (bdx != 0u) ? (s / bdx) : 0u;`) written out
+// token-for-token rather than as `checked_div`/`checked_rem` — a reviewer checks this function
+// against the HLSL by eye (§8.6 assertion 7's own stated scope), and a `checked_*` idiom would
+// break that direct correspondence.
+#[allow(clippy::manual_checked_ops)]
+#[inline]
+pub fn golden_hier_thread_map(
+    group_id: u32,
+    lane: u32,
+    dim_x: u32,
+    dim_y: u32,
+    dim_z: u32,
+    capacity: u32,
+) -> (u32, u32, u32, u32, bool) {
+    let gps = golden_hier_groups_per_slice(dim_x, dim_y);
+    let slice = group_id / gps;
+    let s = (group_id % gps) * HIER_GROUP_THREADS + lane;
+    let x = if dim_x != 0 { s % dim_x } else { 0 };
+    let y = if dim_x != 0 { s / dim_x } else { 0 };
+    let z = slice;
+    let fi = golden_cluster_index(x, y, z, dim_x, dim_z);
+    let valid = s < dim_x * dim_y && slice < dim_z && fi < capacity;
+    (x, y, z, fi, valid)
+}
+
+/// Aggregate pair-count diagnostics [`golden_cluster_cull_hier`] returns alongside its
+/// per-froxel index grid — the raw numerator H1's selectivity gate
+/// (`pairs_hier() as f64 / (capacity * ps_n) as f64 <= 1.0/8.0`, §8.6 assertion 5) is computed
+/// from.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HierCullStats {
+    /// Groups dispatched (`gps * dim_z`, D3).
+    pub groups: u32,
+    /// The point/spot scan range after D7's clamp: `min(ps_total, ps_room)`. Group-uniform —
+    /// evaluated once from the header, identical for every group in the dispatch.
+    pub ps_n: u32,
+    /// Total `valid` `(group, lane)` pairs across the whole dispatch — the count H1 assertion
+    /// 2's second clause pins against `capacity` (§8.2(B1): totality + this count together
+    /// derive device exactly-once).
+    pub valid_lanes: u32,
+    /// Coarse (froxel-GROUP, light) pair tests — phase 4. Exactly `groups * ps_n`, since `ps_n`
+    /// is group-uniform and phase 4 tests it once per group (D7).
+    pub pairs_coarse: u64,
+    /// Fine (froxel, light) pair tests — phase 5. Summed over every VALID froxel's own
+    /// coarse-accepted candidate count (the group's coarse-mask population, shared by every
+    /// froxel of that group — D8 review item 6).
+    pub pairs_fine: u64,
+    /// Per-group coarse-accept count (phase 4's popcount of the group's coarse mask), indexed by
+    /// `group_id` in `[0, groups)` — deliverable 8 (plan §8.6, Rev 6). This is a PRECONDITION
+    /// SOURCE, not a diagnostic: H3 mutation (vii)'s rig requirement needs "group 0's coarse box
+    /// rejects >= 1 punctual light" (`group_coarse_accept[0] < ps_n`) asserted from the
+    /// `inject_nan_froxel: None` run *before* the arm comparison is evaluated, so a vacuous run
+    /// (the coarse box already accepts everything) is reported as invalid rather than a pass
+    /// (plan §8.3 "Mutation (vii) in full", §8.10 item 5b). Not a new gate: `pairs_fine` is
+    /// already the sum of these counts over valid froxels, so assertion 5's selectivity number is
+    /// unchanged — this only exposes the per-group decomposition already computed.
+    pub group_coarse_accept: Vec<u32>,
+}
+
+impl HierCullStats {
+    /// Total (coarse + fine) pair tests the hierarchical arm performs — the selectivity gate's
+    /// numerator.
+    #[inline]
+    pub const fn pairs_hier(&self) -> u64 {
+        self.pairs_coarse + self.pairs_fine
+    }
+}
+
+/// The IEEE-754 quiet-NaN bit pattern matching HLSL's `asfloat(0x7FC00000u)` literal — used by
+/// [`golden_cluster_cull_hier`]'s `inject_nan_froxel` poison (§8.3 "Mutation (vii) in full":
+/// "NOT `0.0/0.0`, which is a constant expression a compiler may fold or reject").
+const GOLDEN_QUIET_NAN_BITS: u32 = 0x7FC0_0000;
+
+/// The host mirror of the `-D HIER=1` block-decomposed cull (VB-P1e design; §4/§5/D2/D3/D7/D8/D9,
+/// `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` §8.6 rung H1). Builds the SAME per-froxel AABB as
+/// [`golden_cluster_cull`] (phase 0, shared via [`golden_froxel_aabb`] so the two host mirrors
+/// cannot drift from each other), partitions froxels into [`HIER_GROUP_THREADS`]-lane groups per
+/// D3's `gps`/`slice`/`s` map ([`golden_hier_thread_map`] — the FULL form, not the degenerate
+/// `slice = gid; s = lane` collapse the default 16x9x24 grid happens to reduce to), folds each
+/// group's lanes into ONE coarse AABB — the componentwise min/max of the lanes' OWN
+/// already-computed (and already-substituted) AABBs, never a recomputation from block geometry
+/// (D2) — tests the point/spot light table against that coarse box once per group (phase 4), and
+/// re-walks only the coarse-accepted candidates, ASCENDING (table order), with the
+/// token-identical fine test for every valid froxel (phase 5).
+///
+/// D8's two-constant substitution, applied per lane before the fold:
+/// - `!valid` (no froxel): the min/max IDENTITY `(+1e30, -1e30)` — contributes nothing to the
+///   fold, so padding lanes never widen the coarse box;
+/// - `valid && !finite` (some component of the lane's own AABB has `abs > 1e30` — true for NaN
+///   and for `+-inf`, since an ordered compare is false for both): the ABSORBING
+///   `(-f32::MAX, +f32::MAX)` — forces the coarse box to the universe, so the WHOLE group
+///   degrades to exactly the flat arm's walk (§5 Case B). **`f32::MAX`, not `1e30`** — the Rev 5
+///   fix; `1e30` is the finiteness THRESHOLD classifying the lane, a different constant serving a
+///   different purpose, and is never the value a poisoned lane stores;
+/// - `valid && finite`: the lane's own AABB, unmodified.
+///
+/// `inject_nan_froxel`, when `Some(fi)`, overwrites froxel `fi`'s OWN (pre-substitution) AABB to
+/// an all-NaN box on all six components (bit pattern [`GOLDEN_QUIET_NAN_BITS`], matching HLSL's
+/// `asfloat(0x7FC00000u)`) immediately after phase 0 — the host leg of mutation (vii)'s
+/// two-sided, three-implementation fault injection (§8.3 "Mutation (vii) in full": mirrored
+/// identically in the HIER module, the base module and this host mirror). `None` performs no
+/// injection — every existing call site.
+///
+/// Returns the per-froxel index grid — same shape and ordering contract as
+/// [`golden_cluster_cull`] (flat-indexed by [`golden_cluster_index`], ascending table order,
+/// clamped to `cfg.max_lights_per_cluster`) — alongside [`HierCullStats`] for the selectivity
+/// gate. `header`/`cfg` describe a BOOT-sourced dispatch with no boot/live skew (D11's skew class
+/// is H3's concern, on device; this mirror always uses `cfg.cluster_count()` as the write-bound
+/// `capacity`, matching a well-formed, non-skewed frame).
+pub fn golden_cluster_cull_hier(
+    img_w: u32,
+    img_h: u32,
+    camera: CompositeCamera,
+    cfg: &GoldenClusterConfig,
+    header: &GoldenLightHeader,
+    lights: &[GoldenLight],
+    inject_nan_froxel: Option<u32>,
+) -> (Vec<Vec<u32>>, HierCullStats) {
+    let capacity = cfg.cluster_count();
+    let mut grid: Vec<Vec<u32>> = vec![Vec::new(); capacity as usize];
+
+    let ps_begin = header.l0a_count();
+    let ps_room = HIER_MASK_BITS.saturating_sub(ps_begin);
+    let ps_total = header.light_count().saturating_sub(ps_begin);
+    let ps_n = ps_total.min(ps_room);
+
+    let gps = golden_hier_groups_per_slice(cfg.dim_x, cfg.dim_y);
+    let groups = gps * cfg.dim_z;
+    let mut stats = HierCullStats {
+        groups,
+        ps_n,
+        valid_lanes: 0,
+        pairs_coarse: u64::from(groups) * u64::from(ps_n),
+        pairs_fine: 0,
+        group_coarse_accept: Vec::with_capacity(groups as usize),
+    };
+
+    let nan = f32::from_bits(GOLDEN_QUIET_NAN_BITS);
+    let mut own_min = [[0.0_f32; 3]; HIER_GROUP_THREADS as usize];
+    let mut own_max = [[0.0_f32; 3]; HIER_GROUP_THREADS as usize];
+    let mut lane_valid = [false; HIER_GROUP_THREADS as usize];
+    let mut lane_fi = [0_u32; HIER_GROUP_THREADS as usize];
+    let mut coarse_mask = [false; HIER_MASK_BITS as usize];
+
+    for group_id in 0..groups {
+        // Phase 0/1: every lane's own AABB (or the injected poison), then D8's substitution,
+        // folded in place into the group's coarse box — fold order is irrelevant (D2/D9).
+        let mut coarse_min = [1.0e30_f32; 3];
+        let mut coarse_max = [-1.0e30_f32; 3];
+        for lane in 0..HIER_GROUP_THREADS {
+            let (x, y, z, fi, valid) =
+                golden_hier_thread_map(group_id, lane, cfg.dim_x, cfg.dim_y, cfg.dim_z, capacity);
+            let li = lane as usize;
+            lane_valid[li] = valid;
+            lane_fi[li] = fi;
+
+            let (store_min, store_max) = if valid {
+                stats.valid_lanes += 1;
+                let (mut amin, mut amax) = golden_froxel_aabb(x, y, z, img_w, img_h, camera, cfg);
+                if inject_nan_froxel == Some(fi) {
+                    amin = [nan; 3];
+                    amax = [nan; 3];
+                }
+                own_min[li] = amin;
+                own_max[li] = amax;
+                let finite = amin.iter().chain(amax.iter()).all(|c| c.abs() <= 1.0e30);
+                if finite { (amin, amax) } else { ([-f32::MAX; 3], [f32::MAX; 3]) }
+            } else {
+                ([1.0e30_f32; 3], [-1.0e30_f32; 3])
+            };
+
+            for i in 0..3 {
+                coarse_min[i] = coarse_min[i].min(store_min[i]);
+                coarse_max[i] = coarse_max[i].max(store_max[i]);
+            }
+        }
+
+        // Phase 4: the coarse scan is group-uniform, so it runs once per group, not once per
+        // lane (striping across 256 lanes is a parallelism detail with no effect on the result).
+        let ps_n_usize = ps_n as usize;
+        for slot in coarse_mask.iter_mut().take(ps_n_usize) {
+            *slot = false;
+        }
+        let mut e_coarse = 0_u64;
+        for j in 0..ps_n {
+            let i = ps_begin + j;
+            let lgt = &lights[i as usize];
+            let kind = lgt.kind();
+            if kind != GOLDEN_LIGHT_KIND_POINT && kind != GOLDEN_LIGHT_KIND_SPOT {
+                continue;
+            }
+            let pos = [lgt.pos_range[0], lgt.pos_range[1], lgt.pos_range[2]];
+            let r = lgt.pos_range[3];
+            if golden_sq_dist_point_aabb(pos, coarse_min, coarse_max) <= r * r {
+                coarse_mask[j as usize] = true;
+                e_coarse += 1;
+            }
+        }
+        debug_assert!(e_coarse <= u64::from(ps_n), "invariant: e_coarse cannot exceed ps_n");
+        stats.group_coarse_accept.push(e_coarse as u32);
+
+        // Phase 5/6: every VALID lane walks the SAME coarse mask, ascending, against its own
+        // (pre-substitution) AABB — table order, identical to the flat arm's range.
+        let mut valid_count = 0_u64;
+        for lane in 0..HIER_GROUP_THREADS {
+            let li = lane as usize;
+            if !lane_valid[li] {
+                continue;
+            }
+            valid_count += 1;
+            let cell = &mut grid[lane_fi[li] as usize];
+            for j in 0..ps_n {
+                if !coarse_mask[j as usize] {
+                    continue;
+                }
+                let i = ps_begin + j;
+                let lgt = &lights[i as usize];
+                let kind = lgt.kind();
+                if kind != GOLDEN_LIGHT_KIND_POINT && kind != GOLDEN_LIGHT_KIND_SPOT {
+                    continue;
+                }
+                let pos = [lgt.pos_range[0], lgt.pos_range[1], lgt.pos_range[2]];
+                let r = lgt.pos_range[3];
+                if golden_sq_dist_point_aabb(pos, own_min[li], own_max[li]) <= r * r
+                    && (cell.len() as u32) < cfg.max_lights_per_cluster
+                {
+                    cell.push(i);
+                }
+            }
+        }
+        stats.pairs_fine += valid_count * e_coarse;
+    }
+
+    (grid, stats)
 }
 
 /// The CPU mirror of the L1 CLUSTERED `deferred_pbr` resolve. Identical to
@@ -4808,5 +5127,35 @@ mod tests {
                 golden_deferred_resolve_with_pbr(attrs, RD, &mats, None)
             );
         }
+    }
+
+    /// W4 (VB-P1e H1 code review, plan §5 Case B / §8.3 "Mutation (vii) in full"): pins that
+    /// Rust's `f32::max` reproduces GLSL.std.450 `NMax`'s non-NaN-preferring semantics EXACTLY
+    /// for the all-NaN AABB the exactness proof's Case B depends on — "Rust's `f32::max` returns
+    /// the non-NaN operand exactly as `NMax` does" was previously a plan-text review item, not a
+    /// pin. Every axis of `sq_dist_point_aabb` computes `(min - c).max(c - max).max(0.0)`: with
+    /// `min == max == NaN`, both `min - c` and `c - max` are NaN, `NaN.max(NaN)` returns NaN (no
+    /// non-NaN operand exists), and `NaN.max(0.0)` returns the non-NaN operand `0.0` — so every
+    /// axis contributes exactly `0.0`, and `F(d) == 0.0` for ANY finite center, matching `NMax`'s
+    /// device semantics bit-for-bit (`golden_cluster_cull_hier`'s mitigated-arm equality claim,
+    /// and this crate's `hier_cull_mutation_vii_host_leg_mitigated_arm_matches_flat`, rest on
+    /// this holding).
+    #[test]
+    fn sq_dist_point_aabb_all_nan_aabb_matches_the_nmax_semantics_case_b_needs() {
+        let nan = f32::from_bits(GOLDEN_QUIET_NAN_BITS); // asfloat(0x7FC00000u) -- the shader's bit pattern.
+        assert_eq!(
+            golden_sq_dist_point_aabb([1.5, -2.25, 100.0], [nan; 3], [nan; 3]),
+            0.0,
+            "an all-NaN AABB must give sq_dist == 0.0 for this finite center (§5 Case B's \
+             absorbing element) -- if this pin moves, Rust's f32::max no longer agrees with NMax \
+             and the mitigated-arm equality claim is unsound"
+        );
+        // A second, very different finite center: Case B claims this for EVERY finite center,
+        // not merely a convenient one.
+        assert_eq!(
+            golden_sq_dist_point_aabb([-1.0e6, 0.0, 42.5], [nan; 3], [nan; 3]),
+            0.0,
+            "an all-NaN AABB must give sq_dist == 0.0 for ANY finite center, not just one sample"
+        );
     }
 }
