@@ -44,8 +44,22 @@
 //! BOYKO_DISABLE_VALIDATION=1 BOYKO_VB_BENCH=1 BOYKO_VB_BENCH_LIGHTS=64 BOYKO_VB_FROXEL_FORCE_OFF=1 \
 //!   cargo test -p boyko-app --test vb_p1d_cull_shade_bench -- --ignored --nocapture --test-threads=1
 //! ```
-//! prints one `VB-P1d N_ps=64 config=froxel froxel_cull_ns=.. froxel_shade_ns=.. froxel_total_ns=..`
-//! line and one `VB-P1d N_ps=64 config=flat flat_shade_ns=..` line respectively.
+//! prints one `VB-P1d N_ps=64 config=froxel cull_reset_ns=.. cull_dispatch_ns=..
+//! froxel_cull_ns=.. froxel_shade_ns=.. froxel_total_ns=..` line and one
+//! `VB-P1d N_ps=64 config=flat flat_shade_ns=..` line respectively. (VB-P1e's rung H0 split the
+//! cull bracket in two; `froxel_cull_ns` is now the sum of the first two fields.)
+//!
+//! ⚠️ **This bench does NOT reproduce across sessions above `N_ps` ≈ 128.** Re-measured on the
+//! same RTX 3060 against the table committed at `e7a4767` (the provenance doc-comment on
+//! `boyko_render::light_policy::CLUSTER_LO`): `N_ps` ≤ 128 reproduces within ~6%, `N_ps=256` is
+//! +21%, and `N_ps=512` is **+125% on the flat leg** / +55% on the froxel leg. Run-to-run spread
+//! at `N_ps=512` is ~21% (1.29 / 1.33 / 1.57 ms across three runs), while `BOYKO_VB_BENCH_FRAMES`
+//! 40 vs 220 differ by 0.13% — so the pass is stable WITHIN a run and unstable ACROSS runs (GPU
+//! power/clock state is the leading suspect; not identified). Consequences: a single-sample
+//! threshold comparison at high `N_ps` is not decidable on this harness — repeat runs and state a
+//! variance band — and `CLUSTER_LO`/`CLUSTER_HI` derive from exactly the rows that do not
+//! reproduce (they stay conservative, since the divergence favours clustering more, but they are
+//! not supported at the precision the table claims).
 
 #![cfg(windows)]
 

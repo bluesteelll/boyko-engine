@@ -61,6 +61,19 @@ use crate::light::{ClusterSelectMode, LightEnabled, LightingConfig, PointLight, 
 /// - N_ps=128: flat 167322 | froxel 163039 (cull 134920 + shade 28119) — froxel wins (-2.6%)
 /// - N_ps=256: flat 315044 | froxel 277662 (cull 252154 + shade 25508) — froxel wins (-12%)
 /// - N_ps=512: flat 592015 | froxel 523370 (cull 498067 + shade 25303) — froxel wins (-12%)
+///
+/// ⚠️ `[REPRODUCIBILITY CAVEAT]` (added at VB-P1e rung H0, 2026-07-25). A re-measurement on the
+/// SAME RTX 3060 reproduces the `N_ps` ≤ 128 rows within ~6%, but **not** the high rows that
+/// straddle this band: `N_ps=256` came out +21% and `N_ps=512` **+125% on the flat leg** / +55%
+/// on the froxel leg, with a ~21% run-to-run spread at `N_ps=512` (the pass is stable WITHIN a
+/// run — `BOYKO_VB_BENCH_FRAMES` 40 vs 220 differ by 0.13% — and unstable ACROSS runs; GPU
+/// power/clock state is the leading suspect, not confirmed). In the re-measured data the
+/// break-even is NON-MONOTONIC exactly inside `[LO, HI]` (froxel ties at 64, loses ~9% at 128,
+/// then wins 13% at 256 and 39% at 512), i.e. noise-dominated where these two constants sit.
+/// The divergence favours clustering MORE than the table above does, so `LO`/`HI` remain
+/// CONSERVATIVE rather than wrong — but they are not supported at the precision the table
+/// implies, and re-tuning them needs a repeated-run protocol with a stated variance band, not
+/// another single sweep. Tracked as VB-P1f in `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md`.
 pub const CLUSTER_LO: u32 = 64;
 
 /// Banded HIGH edge: in [`Auto`](crate::light::ClusterSelectMode::Auto) mode the cluster

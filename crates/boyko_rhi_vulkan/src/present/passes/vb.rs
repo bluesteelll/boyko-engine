@@ -137,24 +137,34 @@ impl Renderer<'_> {
             }
         }
 
-        // VB-P1d: open the LightCull bracket BEFORE the cull's `if let` gate, so it is written
-        // EVERY bench-armed frame REGARDLESS of whether the froxel arm itself is boot-built
-        // (`scene.cluster_cull.is_none()` on a flat-leg bench boot ⇒ a near-zero-width bracket
-        // with no GPU work between begin/end) — the `VK_QUERY_RESULT_WAIT_BIT` readback
-        // (`GpuSceneBundles::read_vb_bench_ns`) never blocks on an unwritten query this way,
-        // whichever leg (flat vs froxel) this boot resolved. GATED — `None` records nothing.
+        // VB-P1e H0: open the CullReset bracket BEFORE the cull's `if let` gate, so it is
+        // written EVERY bench-armed frame REGARDLESS of whether the froxel arm itself is
+        // boot-built (`scene.cluster_cull.is_none()` on a flat-leg bench boot ⇒ a near-zero-
+        // width bracket with no GPU work between begin/end) — the `VK_QUERY_RESULT_WAIT_BIT`
+        // readback (`GpuSceneBundles::read_vb_bench_ns`) never blocks on an unwritten query this
+        // way, whichever leg (flat vs froxel) this boot resolved. GATED — `None` records
+        // nothing. This splits VB-P1d's single `LightCull` bracket into `CullReset` (the
+        // alloc-counter fill + its graph-derived TRANSFER→COMPUTE barrier) and `CullDispatch`
+        // (the dispatch alone, below), so §1.2's "~13.9 us fixed cost is fill+barrier"
+        // hypothesis can be attributed instead of assumed (VB-P1E-HIERARCHICAL-CULL-PLAN.md
+        // §8.5, H0). Each of the two new brackets duplicates the cull-wired gate check below
+        // rather than sharing one `if let` across both: the HANG WARNING requires BOTH pairs'
+        // begin/end to sit outside their OWN gate, exactly as this bracket already did for
+        // `LightCull` — a single gate shared between `CullReset`'s end and `CullDispatch`'s
+        // begin would leave both unwritten on a flat-leg boot and deadlock the
+        // `VK_QUERY_RESULT_WAIT_BIT` readback.
         if let Some(tc) = scene.vb_gpu_timing {
             // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
             // reset at the frame top; this write is outside any rendering scope; `fi` is this
             // present's in-flight slot.
-            unsafe { tc.write_begin(self.fns, cmd, fi, VbTimedPass::LightCull) };
+            unsafe { tc.write_begin(self.fns, cmd, fi, VbTimedPass::CullReset) };
         }
-        // === VB-P1a ("dark infra"): the L1 clustered froxel light-cull pass — byte-for-byte
-        // port of `record_forward`'s own `light_cull` block. Recorded ONLY when
+        // === VB-P1a ("dark infra"): the L1 clustered froxel light-cull RESET — byte-for-byte
+        // port of `record_forward`'s own `light_cull` fill+barrier. Recorded ONLY when
         // `scene.cluster_cull.is_some()` (hardcoded OFF this rung, so this block NEVER records
         // in production) AND the scene wires the cull set (the SAME "4-buffers-Some" gate
         // `declare_vb_graph` uses). ===
-        if let (Some(cull_pipeline), Some(cull_set), Some(_grid), Some(_index), Some(alloc)) = (
+        if let (Some(_cull_pipeline), Some(_cull_set), Some(_grid), Some(_index), Some(alloc)) = (
             scene.cluster_cull,
             targets.cull_set.as_ref().map(|s| &s[fi]),
             scene.cluster_grid,
@@ -178,7 +188,28 @@ impl Renderer<'_> {
             // TRANSFER→COMPUTE barrier for the "light_cull" pass into `cmd`, ordering the fill's
             // TRANSFER write before the cull's COMPUTE atomics on the GPU timeline.
             self.record_vb_pass(light_cull, cmd, targets, forward, vb, scene, fi);
+        }
+        // VB-P1e H0: close the CullReset bracket. GATED.
+        if let Some(tc) = scene.vb_gpu_timing {
+            // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
+            unsafe { tc.write_end(self.fns, cmd, fi, VbTimedPass::CullReset) };
+        }
 
+        // VB-P1e H0: open the CullDispatch bracket — same unconditional-write shape as
+        // `CullReset` above, and for the same hang-avoidance reason.
+        if let Some(tc) = scene.vb_gpu_timing {
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+            // reset at the frame top; this write is outside any rendering scope; `fi` is this
+            // present's in-flight slot.
+            unsafe { tc.write_begin(self.fns, cmd, fi, VbTimedPass::CullDispatch) };
+        }
+        if let (Some(cull_pipeline), Some(cull_set), Some(_grid), Some(_index), Some(_alloc)) = (
+            scene.cluster_cull,
+            targets.cull_set.as_ref().map(|s| &s[fi]),
+            scene.cluster_grid,
+            scene.light_index,
+            scene.light_index_alloc,
+        ) {
             // (L1-1) Bind the cull pipeline + the cull set (written ONCE at sync_gbuffer), push
             // the 16-byte ClusterCullPush, dispatch over CLUSTER_COUNT froxels.
             let cull_groups = scene.cluster_count.div_ceil(LIGHT_CULL_LOCAL_SIZE_X);
@@ -213,10 +244,10 @@ impl Renderer<'_> {
             // (L1-2) The cull's ClusterGrid + LightIndexList writes are made available + visible
             // to `vb_resolve`/`vb_shade`'s reads by the graph: derived at the reader — NOT here.
         }
-        // VB-P1d: close the LightCull bracket. GATED.
+        // VB-P1e H0: close the CullDispatch bracket. GATED.
         if let Some(tc) = scene.vb_gpu_timing {
             // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
-            unsafe { tc.write_end(self.fns, cmd, fi, VbTimedPass::LightCull) };
+            unsafe { tc.write_end(self.fns, cmd, fi, VbTimedPass::CullDispatch) };
         }
 
         // === CSM cascade DEPTH pass — byte-for-byte port of `record_forward`'s own `csm` block.

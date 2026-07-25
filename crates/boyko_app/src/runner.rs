@@ -846,8 +846,11 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     let vb_bench_lights: u32 =
         std::env::var("BOYKO_VB_BENCH_LIGHTS").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
     // Preallocated ONCE at their final capacity (Principle 5) — the bench never reallocates
-    // once the loop starts.
-    let mut vb_bench_cull_ns: Vec<f64> = Vec::with_capacity(vb_bench_frames as usize);
+    // once the loop starts. VB-P1e H0 split the single `cull_ns` sample into
+    // `cull_reset_ns`/`cull_dispatch_ns` (the `CullReset`/`CullDispatch` bracket pair) so the
+    // fixed-cost hypothesis in `VB-P1E-HIERARCHICAL-CULL-PLAN.md` §1.2 can be attributed.
+    let mut vb_bench_cull_reset_ns: Vec<f64> = Vec::with_capacity(vb_bench_frames as usize);
+    let mut vb_bench_cull_dispatch_ns: Vec<f64> = Vec::with_capacity(vb_bench_frames as usize);
     let mut vb_bench_shade_ns: Vec<f64> = Vec::with_capacity(vb_bench_frames as usize);
     let mut vb_bench_seen: u32 = 0;
     if vb_bench {
@@ -2059,26 +2062,29 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             }
         }
 
-        // VB-P1d: accumulate this frame's (cull_ns, shade_ns) bench pair — read ONLY on a
-        // frame that actually presented (a resize-skip records no new `record_vb` work this
-        // iteration). GATED on `vb_bench`; dead code on every non-bench run.
+        // VB-P1e H0: accumulate this frame's (cull_reset_ns, cull_dispatch_ns, shade_ns) bench
+        // triple — read ONLY on a frame that actually presented (a resize-skip records no new
+        // `record_vb` work this iteration). GATED on `vb_bench`; dead code on every non-bench
+        // run.
         if vb_bench && presented_ok {
             // Offline discipline (mirrors `window_present_gbuffer`'s own R0 harness): wait the
             // device idle so this frame's timestamp writes are complete + readable before the
             // slot is reused two frames on.
             ctx.wait_idle().expect("invariant: VB-P1d bench wait_idle");
-            if let Some((cull_ns, shade_ns)) = host.gpu.read_vb_bench_ns(ctx, s) {
+            if let Some((cull_reset_ns, cull_dispatch_ns, shade_ns)) = host.gpu.read_vb_bench_ns(ctx, s) {
                 vb_bench_seen += 1;
                 if vb_bench_seen as usize > VB_BENCH_WARMUP {
-                    vb_bench_cull_ns.push(cull_ns);
+                    vb_bench_cull_reset_ns.push(cull_reset_ns);
+                    vb_bench_cull_dispatch_ns.push(cull_dispatch_ns);
                     vb_bench_shade_ns.push(shade_ns);
                 }
             }
-            if vb_bench_cull_ns.len() >= vb_bench_frames as usize {
+            if vb_bench_cull_reset_ns.len() >= vb_bench_frames as usize {
                 print_vb_bench_summary(
                     host.resolved_render_path.froxel_light_cull,
                     vb_bench_lights,
-                    &vb_bench_cull_ns,
+                    &vb_bench_cull_reset_ns,
+                    &vb_bench_cull_dispatch_ns,
                     &vb_bench_shade_ns,
                 );
                 return;
@@ -2130,7 +2136,7 @@ fn vb_bench_mean_ns(samples: &[f64]) -> f64 {
     samples.iter().sum::<f64>() / samples.len() as f64
 }
 
-/// VB-P1d: prints this run's froxel cull/shade bench summary.
+/// VB-P1d/VB-P1e: prints this run's froxel cull/shade bench summary.
 ///
 /// `froxel_light_cull` (`ResolvedRenderPath`'s own boot-frozen decision — resolved ONCE,
 /// never re-derived per frame) means a SINGLE process can only ever measure ONE leg (flat or
@@ -2140,28 +2146,73 @@ fn vb_bench_mean_ns(samples: &[f64]) -> f64 {
 /// knob `vb_mesh_froxel.rs` uses) and combines the two printed lines to read the break-even
 /// (`froxel_total_ns` crossing below `flat_shade_ns`).
 ///
-/// O4 (measurement methodology, mirrors the R0 harness's own NOTE): each of `cull_ns`/
-/// `shade_ns` is a `TOP_OF_PIPE`/`BOTTOM_OF_PIPE` bracket around a NON-ADJACENT pass pair, so
-/// the reported number is GPU wall-clock INCLUSIVE of pipeline drain and any overlap with
-/// neighboring work, not isolated kernel time — and `froxel_total_ns` sums two INDEPENDENTLY
-/// measured brackets, not one continuous span. Fine for a break-even comparison against
-/// `flat_shade_ns` (both sides carry the same bracket bias), but not a claim of isolated
-/// per-pass cost.
+/// VB-P1e H0 split the single `LightCull` bracket into `cull_reset_ns` (the alloc-counter fill
+/// plus its TRANSFER→COMPUTE barrier) and `cull_dispatch_ns` (the dispatch alone) — see
+/// `VB-P1E-HIERARCHICAL-CULL-PLAN.md` §8.5. `froxel_cull_ns` is their sum, printed alongside
+/// the two components so the fixed-cost hypothesis in §1.2 could be attributed rather than
+/// assumed.
+///
+/// **The measurement REFUTED that hypothesis** (RTX 3060, release, 220 timed frames). §1.2 had
+/// attributed the cull's ~13.9 us `N`-independent fixed cost to "fill + pipeline barrier +
+/// dispatch ramp". Measured `cull_reset_ns` is **553-795 ns at EVERY `N_ps`** — flat in `N`, as
+/// a one-`u32` fill must be, and ~23x smaller than the hypothesis. The fixed cost is therefore
+/// DISPATCH-INTRINSIC (launch ramp / occupancy), not fill or barrier. Consequence for the plan:
+/// its VB-P1g follow-up — delete the `cmd_fill_buffer` + TRANSFER→COMPUTE barrier to recover the
+/// fixed cost — is worth at most ~0.6 us, not ~14 us. §7.1's break-even floor is unchanged (the
+/// cost is still there); only the route named to attack it was wrong.
+///
+/// Corollary about this split's own known defect: `CullDispatch`'s begin is a `TOP_OF_PIPE`
+/// write recorded after a `dstStage = COMPUTE` barrier that does not order it, so the sum can
+/// over-count by at most `cull_reset_ns`. Sized against the ASSUMED 13.9 us that would have been
+/// ~70% at `N_ps=8`; against the MEASURED 0.6 us it is ~3%, i.e. below this bench's own
+/// run-to-run spread. Worth fixing for correctness, not worth gating on.
+///
+/// O4 (measurement methodology, mirrors the R0 harness's own NOTE): each of `cull_reset_ns`/
+/// `cull_dispatch_ns`/`shade_ns` is a `TOP_OF_PIPE`/`BOTTOM_OF_PIPE` bracket around a
+/// NON-ADJACENT pass pair, so the reported number is GPU wall-clock INCLUSIVE of pipeline
+/// drain and any overlap with neighboring work, not isolated kernel time — and
+/// `froxel_total_ns` sums three INDEPENDENTLY measured brackets, not one continuous span. Fine
+/// for a break-even comparison against `flat_shade_ns` (both sides carry the same bracket
+/// bias), but not a claim of isolated per-pass cost.
 ///
 /// `#[cold]`/`#[inline(never)]`: a once-per-process diagnostic print, never on the hot path.
 #[cfg(windows)]
 #[cold]
 #[inline(never)]
-fn print_vb_bench_summary(froxel_light_cull: bool, n_ps: u32, cull_ns: &[f64], shade_ns: &[f64]) {
-    debug_assert_eq!(cull_ns.len(), shade_ns.len(), "invariant: one (cull,shade) pair per frame");
+fn print_vb_bench_summary(
+    froxel_light_cull: bool,
+    n_ps: u32,
+    cull_reset_ns: &[f64],
+    cull_dispatch_ns: &[f64],
+    shade_ns: &[f64],
+) {
+    debug_assert_eq!(
+        cull_reset_ns.len(),
+        shade_ns.len(),
+        "invariant: one (cull_reset, cull_dispatch, shade) triple per frame"
+    );
+    debug_assert_eq!(
+        cull_dispatch_ns.len(),
+        shade_ns.len(),
+        "invariant: one (cull_reset, cull_dispatch, shade) triple per frame"
+    );
     let shade_mean = vb_bench_mean_ns(shade_ns);
     if froxel_light_cull {
-        let cull_mean = vb_bench_mean_ns(cull_ns);
-        let total_mean = cull_ns.iter().zip(shade_ns).map(|(c, s)| c + s).sum::<f64>() / cull_ns.len() as f64;
+        let cull_reset_mean = vb_bench_mean_ns(cull_reset_ns);
+        let cull_dispatch_mean = vb_bench_mean_ns(cull_dispatch_ns);
+        let cull_mean = cull_reset_mean + cull_dispatch_mean;
+        let total_mean = cull_reset_ns
+            .iter()
+            .zip(cull_dispatch_ns)
+            .zip(shade_ns)
+            .map(|((r, d), s)| r + d + s)
+            .sum::<f64>()
+            / cull_reset_ns.len() as f64;
         println!(
-            "VB-P1d N_ps={n_ps} config=froxel froxel_cull_ns={cull_mean:.1} \
+            "VB-P1d N_ps={n_ps} config=froxel cull_reset_ns={cull_reset_mean:.1} \
+             cull_dispatch_ns={cull_dispatch_mean:.1} froxel_cull_ns={cull_mean:.1} \
              froxel_shade_ns={shade_mean:.1} froxel_total_ns={total_mean:.1} (kept {} frames)",
-            cull_ns.len()
+            cull_reset_ns.len()
         );
     } else {
         println!(
@@ -2171,7 +2222,7 @@ fn print_vb_bench_summary(froxel_light_cull: bool, n_ps: u32, cull_ns: &[f64], s
     }
     println!(
         "  NOTE: TOP/BOTTOM brackets each pass's wall-clock (inclusive of pipeline drain + \
-         overlap with neighboring work), not isolated kernel time; froxel_total_ns sums two \
+         overlap with neighboring work), not isolated kernel time; froxel_total_ns sums three \
          independently-measured brackets. Fine for the CLUSTER_HI break-even comparison, not \
          an isolated-cost claim (mirrors the R0 GPU-pass-cost harness's own methodology note)."
     );

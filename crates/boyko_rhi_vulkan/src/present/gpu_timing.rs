@@ -187,30 +187,36 @@ impl TimestampCollector {
 // [`TimestampCollector`]'s own offline harness (`engine_grand_showcase_512_gpu_pass_cost`)
 // reads ALL `PASS_COUNT` (begin,end) pairs with `VK_QUERY_RESULT_WAIT_BIT`, which BLOCKS
 // FOREVER on any pair its recorder never wrote this frame (see [`TimestampCollector::write`]'s
-// own precondition doc). Widening the shared `PASS_COUNT`/`TimedPass` to also cover the two VB
-// passes would make that EXISTING harness request 6 pairs while `record_gbuffer` writes only
-// 4 — an instant deadlock. A dedicated `VbTimestampCollector`/`VbTimedPass`/`VB_PASS_COUNT`
-// keeps the two rungs' query-pool sizing independent.
+// own precondition doc). Widening the shared `PASS_COUNT`/`TimedPass` to also cover the VB
+// passes would make that EXISTING harness request extra pairs while `record_gbuffer` writes
+// only `PASS_COUNT` of them — an instant deadlock. A dedicated
+// `VbTimestampCollector`/`VbTimedPass`/`VB_PASS_COUNT` keeps the two rungs' query-pool sizing
+// independent — VB-P1e H0 grew `VB_PASS_COUNT` 2 → 3 without touching `PASS_COUNT` at all.
 
-/// The two `record_vb` dispatches the VB-P1d bench brackets, in query-pair-slot order (the
-/// begin query for pass `p` is `2 * p`, its end query `2 * p + 1`).
+/// The three `record_vb` dispatches the VB-P1d/VB-P1e bench brackets, in query-pair-slot order
+/// (the begin query for pass `p` is `2 * p`, its end query `2 * p + 1`).
 ///
 /// `#[repr(u32)]` so the discriminant IS the pair slot index — mirrors [`TimedPass`]'s own
 /// shape.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VbTimedPass {
-    /// The L1 clustered froxel light-cull dispatch (`cluster_cull.comp.hlsl`). Bracketed
-    /// UNCONDITIONALLY whenever the bench collector is armed — even on a frame where the
-    /// froxel arm itself is not boot-built (`scene.cluster_cull.is_none()`), so this pair is
-    /// ALWAYS written (near-zero ns then) and the readback never blocks on an unwritten query
-    /// regardless of which leg (flat vs froxel) this boot resolved.
-    LightCull = 0,
+    /// VB-P1e H0: the light-cull's alloc-counter `cmd_fill_buffer` plus its graph-derived
+    /// TRANSFER→COMPUTE barrier — the FIRST HALF of what VB-P1d bracketed as one `LightCull`
+    /// pair. Bracketed UNCONDITIONALLY whenever the bench collector is armed — even on a frame
+    /// where the froxel arm itself is not boot-built (`scene.cluster_cull.is_none()`), so this
+    /// pair is ALWAYS written (near-zero ns then) and the readback never blocks on an unwritten
+    /// query regardless of which leg (flat vs froxel) this boot resolved. Exists to attribute
+    /// §1.2's ~13.9 us fixed cull cost (fill+barrier vs dispatch ramp) instead of assuming it.
+    CullReset = 0,
+    /// VB-P1e H0: the cull dispatch itself (`cluster_cull.comp.hlsl`) — the SECOND HALF of
+    /// VB-P1d's `LightCull` pair. Same unconditional-write shape as [`Self::CullReset`].
+    CullDispatch = 1,
     /// The `record_vb` lit-producer dispatch — `vb_shade` (material-classified) OR
     /// `vb_resolve` (fused), whichever this frame's `scene.vb_use_classified` selects
     /// (mutually exclusive by construction, `vb.rs`'s own doc) — bracketed identically in
     /// both branches so exactly one begin/end pair is written per frame.
-    VbShade = 1,
+    VbShade = 2,
 }
 
 impl VbTimedPass {
@@ -221,9 +227,9 @@ impl VbTimedPass {
     }
 }
 
-/// The number of bracketed VB-P1d passes (`LightCull`, `VbShade`). Each needs a begin+end
-/// query, so a pool holds `2 * VB_PASS_COUNT` queries.
-pub const VB_PASS_COUNT: u32 = 2;
+/// The number of bracketed VB-P1d/VB-P1e passes (`CullReset`, `CullDispatch`, `VbShade`). Each
+/// needs a begin+end query, so a pool holds `2 * VB_PASS_COUNT` queries.
+pub const VB_PASS_COUNT: u32 = 3;
 
 /// A per-frame-in-flight ring of TIMESTAMP query pools bracketing the VB-P1d froxel
 /// cull/shade cost bench — the `record_vb` sibling of [`TimestampCollector`].

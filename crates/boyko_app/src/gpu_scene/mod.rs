@@ -5913,36 +5913,47 @@ impl GpuSceneBundles {
         self.vb_bench.is_some()
     }
 
-    /// VB-P1d: reads back frame `fi`'s bench pair — `(cull_ns, shade_ns)`, masked +
-    /// period-scaled by `RhiDevice::read_query_pool_ns` — from the armed bench collector.
-    /// `None` iff [`Self::vb_bench_armed`] is `false` (the collector was never created; the
-    /// runner never calls this then).
+    /// VB-P1e H0: reads back frame `fi`'s bench triple — `(cull_reset_ns, cull_dispatch_ns,
+    /// shade_ns)`, masked + period-scaled by `RhiDevice::read_query_pool_ns` — from the armed
+    /// bench collector. `None` iff [`Self::vb_bench_armed`] is `false` (the collector was never
+    /// created; the runner never calls this then). `cull_reset_ns + cull_dispatch_ns` is
+    /// REPORTED as `froxel_cull_ns` in place of VB-P1d's original single bracket (VB-P1e's H0
+    /// split it into `VbTimedPass::CullReset`/`CullDispatch` so the fixed-cost hypothesis in
+    /// `VB-P1E-HIERARCHICAL-CULL-PLAN.md` §1.2 could be attributed instead of assumed).
     ///
-    /// Both queries are unconditionally written every bench-armed frame — PROVIDED the caller
-    /// upholds the bench's fused/classified-only precondition (`boyko_app::runner`'s VB-P1d
-    /// block asserts it before ever calling this): `VbTimedPass::LightCull` runs even when the
-    /// froxel arm itself is not boot-built (reporting near-zero ns); `VbTimedPass::VbShade`
-    /// brackets whichever of `vb_shade` (classified)/`vb_resolve` (fused) this frame's
-    /// `mesh_leg` + `vb_use_classified` select — mutually exclusive, always exactly one, ON A
-    /// NON-SPLIT FRAME. The VB split lit-producer (`vb_shade_split`, armed by
-    /// `resolved_render_path.mesh_geo_shade_split` — a pre-light consumer: SSAO/DDGI/SSR/
-    /// shadow-denoise/Temporal under `VisibilityBuffer`) is UNBRACKETED and OUT OF SCOPE for
-    /// this bench (`vb.rs`'s own VB-P1d doc on its three-way producer choice); a split frame
-    /// would reset-but-never-write the VbShade pair, hanging the `VK_QUERY_RESULT_WAIT_BIT`
-    /// readback below — this is why the caller MUST assert `!mesh_geo_shade_split` first.
+    /// The sum is NOT claimed to reproduce the pre-split bracket exactly: `CullDispatch`'s begin
+    /// is a `TOP_OF_PIPE` write recorded after a `dstStage = COMPUTE` barrier, which does not
+    /// order it, so the sum may double-count up to `cull_reset_ns`. That was measured and is
+    /// SMALL — see [`crate::runner`]'s bench-print doc for the numbers and why it no longer
+    /// gates anything.
+    ///
+    /// All three queries are unconditionally written every bench-armed frame — PROVIDED the
+    /// caller upholds the bench's fused/classified-only precondition (`boyko_app::runner`'s
+    /// VB-P1d block asserts it before ever calling this): `VbTimedPass::CullReset`/
+    /// `CullDispatch` run even when the froxel arm itself is not boot-built (reporting
+    /// near-zero ns); `VbTimedPass::VbShade` brackets whichever of `vb_shade`
+    /// (classified)/`vb_resolve` (fused) this frame's `mesh_leg` + `vb_use_classified` select —
+    /// mutually exclusive, always exactly one, ON A NON-SPLIT FRAME. The VB split lit-producer
+    /// (`vb_shade_split`, armed by `resolved_render_path.mesh_geo_shade_split` — a pre-light
+    /// consumer: SSAO/DDGI/SSR/shadow-denoise/Temporal under `VisibilityBuffer`) is UNBRACKETED
+    /// and OUT OF SCOPE for this bench (`vb.rs`'s own VB-P1d doc on its three-way producer
+    /// choice); a split frame would reset-but-never-write the VbShade pair, hanging the
+    /// `VK_QUERY_RESULT_WAIT_BIT` readback below — this is why the caller MUST assert
+    /// `!mesh_geo_shade_split` first.
     ///
     /// # Panics
     /// Panics (`expect("invariant: ...")`) if the readback fails — a bench-only diagnostic
     /// path (never reached on the shipped default), so a query-pool read failure here is a
     /// setup/driver bug, not a recoverable per-frame condition.
-    pub(crate) fn read_vb_bench_ns(&self, ctx: &VulkanContext, fi: usize) -> Option<(f64, f64)> {
+    pub(crate) fn read_vb_bench_ns(&self, ctx: &VulkanContext, fi: usize) -> Option<(f64, f64, f64)> {
         let collector = self.vb_bench.as_ref()?;
         let mut scratch = [0u64; (2 * VB_PASS_COUNT) as usize];
         let mut out_ns = [0.0f64; VB_PASS_COUNT as usize];
         RhiDevice::read_query_pool_ns(ctx, collector.pool(fi), VB_PASS_COUNT, &mut scratch, &mut out_ns)
             .expect("invariant: VB-P1d bench query-pool readback");
         Some((
-            out_ns[VbTimedPass::LightCull.slot() as usize],
+            out_ns[VbTimedPass::CullReset.slot() as usize],
+            out_ns[VbTimedPass::CullDispatch.slot() as usize],
             out_ns[VbTimedPass::VbShade.slot() as usize],
         ))
     }
