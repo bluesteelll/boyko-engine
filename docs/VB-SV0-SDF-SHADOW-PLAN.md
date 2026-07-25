@@ -1,80 +1,52 @@
 # VB-SV0 — SDF soft-shadow + contact-AO on mesh, inlined into the VB lit-producer tails
 
-**Status:** DESIGN, Rev 1 — **NOT APPROVED. DO NOT IMPLEMENT.** Stage 2 of the "finish VB
-completely" campaign (Stage 1 = VB-P1 clustered cull, COMPLETE; Stage 3 = VB-P4 GPU-driven raster,
-out of scope). The architecture-critic returned **CHANGES REQUESTED (3 × P0, 5 × P1)**; a Rev 2 must
-land and pass re-review first. The three blockers are recorded below because two of them refute
-claims made *in this document*, and a reader must not act on those claims.
+**Status:** DESIGN, **Rev 2** — NOT YET APPROVED. Stage 2 of the "finish VB completely" campaign
+(Stage 1 = VB-P1 clustered cull, COMPLETE; Stage 3 = VB-P4 GPU-driven raster, out of scope).
+Rev 1 drew **CHANGES REQUESTED (3 P0, 5 P1, 3 P2)**. Rev 2 answers all eleven. Two of the three P0s
+refuted claims Rev 1 made about itself; both are **withdrawn**, not defended.
 
-**P0-1 — the OFF-path proof instrument is not constructible at the site SV0 lands.** §3.3's rung-S0
-dataflow gate assumes a phi at the `gLit` store whose predecessor edge means "SV0 not taken". There
-is none: the `vis` combine sits inside the `l0a_count` loop nested in an `if`, and the store's
-operand is the loop-exit value of a loop-carried accumulator. Worse, the specified hash makes an
-`OpPhi` a function of *both* incoming values, so everything downstream of the SV0 merge hashes
-differently **by construction** whether or not the OFF path is arithmetically identical. Recovering
-"the OFF path's value" needs a path-projected program slice, not a Merkle hash per result id — a
-materially harder analysis than the ~200 LOC this plan budgets, and one that would also fire on
-benign restructuring, i.e. an over-strict gate that gets weakened until it is vacuous. Since §3.2
-makes the runtime-gate-over-`-D` decision *conditional on S0 passing*, the entire variant-matrix
-decision rests on an instrument whose feasibility was never demonstrated. Rev 2 must either
-re-specify the proof as something constructible (a build-time kill-switch compile byte-compared
-against the frozen module is real, red-capable and `dxc`-only), or take `-D` and pay the +10 as an
-owner call **now**.
+**This document states no measured number in prose.** Every fact that could drift is a named test,
+and the test name is the citation. Numbers that appear are either *structural bounds* (derived from
+a loop's own form) or explicit `MEASURE` placeholders a rung fills in **code**. Golden hashes are
+never written here — gates read them from `goldens/PINS.toml`. Rev 1's 735-line budget is a
+deliberate constraint inherited from `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md`, whose own status
+block diagnoses that hand-copied numbers in prose caused every revision to introduce defects at the
+lines it edited.
 
-**P0-2 — this document's headline sub-LSB hazard does not exist.** §3.3/§8-R2 claim that making
-`ao_final` a phi turns `spec_ao`'s `x - 1.0 + 1.0` into a non-foldable expression and moves the OFF
-path by 1 ULP. Refuted analytically and confirmed numerically (0 mismatches over a 30-point sweep of
-the reachable `NoV` × `roughness` domain): `NoV ≥ 1e-4` and `roughness ∈ [0.045, 1]` force
-`pow(NoV+1, exp2(-16r-1)) ≥ 1`, the subtraction is Sterbenz-exact on `[1,2]`, and **both forms
-produce bit-identical `1.0`**. Independently, on the 4 TEXTURED lit producers `ao_final` is
-*already* a runtime value (`vb_shade.comp.hlsl:450`), so the proposed "duplicated recompute" is a
-no-op there. The plan's own binding rule is that every named mutation be demonstrated rather than
-argued; its headline hazard was argued and did not survive checking. Rev 2 must withdraw it, and
-rung S2's decisive mutation with it.
+---
 
-**P0-3 — the arming gate covers 2 of 10 shipping lit-producer `.spv`.** §1.1 claims rung S4 closes
-the split-tail hole "structurally". It gives an *executing* gate only to `vb_resolve.comp.spv` and
-`vb_shade_split.comp.spv`; the other eight — including the **entire classified tail**, which is the
-production lit producer for textured VB frames — get only a `.contains()` text pin. A text pin
-proves the source is present, not that it executes correctly: a wrong mode decode, a wrong bias
-site or a wrong combine operand passes it green. This is the campaign's own named defect class one
-level down — at-least-once coverage where exactly-once-per-variant is required, the same shape as
-the earlier finding where an at-least-once check let a 2688-cell out-of-bounds write pass green.
+## Changelog Rev 1 → Rev 2
 
-**One finding this document got right, and it is the most valuable thing in it.** Every VB golden
-scene boot-seeds an **empty** SDF edit list — `goldens/PINS.toml` states `count == 0` for both
-`vb_both` and `vb_sdf_only`, and `vb_both`'s hash *equals* `vb_mesh`'s precisely because the march
-finds nothing. Arming SV0 against today's fixtures would therefore produce a **vacuously green**
-gate. Rung S1 (a new non-empty fixture, gated on "must differ from `vb_mesh`'s hash") is a genuine
-prerequisite and no arming rung may precede it. Caught before a line of code was written.
-
-**This document is deliberately short.** `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` reached ~3000
-lines across six revisions and its own status block diagnoses why: every revision introduced
-defects at exactly the lines it edited, because measured numbers were hand-copied into prose.
-This plan therefore states **no measured number in prose**. Every fact that could drift is a
-named test, and the test name is the citation. Where a number appears it is either a *structural
-bound* (derived from a loop's own form, not from a run) or an explicit `MEASURE` placeholder
-that a rung fills in **code**, never here.
+| # | Change | Cause |
+|---|---|---|
+| C1 | **WITHDRAWN**: the SPIR-V Merkle-hash dataflow-equivalence instrument (Rev 1 §3.3, rung S0, ~200 LOC). Replaced by §3.3's two-instrument pair, both built from helpers that already exist. | P0-1 |
+| C2 | **WITHDRAWN**: the `spec_ao` sub-LSB hazard, the duplicated-recompute construction, S2's second "decisive" mutation, and risk R2 as written. No replacement hazard is invented. | P0-2 |
+| C3 | S4's arming gate re-specified: its **selection is all 10 shipping lit-producer variants**, each with an executing assertion; the demonstrated red mutations partition by source. 2 of the 10 are shown *structurally* OFF-path and get a CPU truth-table proof instead. | P0-3 |
+| C4 | S1's gate now asserts **fixture adequacy for the SV0 term** via a CPU-side host `Eval` oracle, not "the frame differs". | P1-1 |
+| C5 | **CORRECTED**: `sdf_ao` is **not** eDSL-generated. §4.1 replaced by a shared `sdf_shadow_leaves.hlsli` that cuts the copy count from 4 to 2 and pins the survivor. | P1-2 |
+| C6 | The arming predicate **consumes** `ResolvedRenderPath::shadow`; the stale `render_path_config.rs:727` citation is dropped. The `!hwrt` term's visual consequence is named in §1.2 and §10. | P1-3 |
+| C7 | S4(i)'s "any difference is a bug" is now scoped to a precisely stated claim. C2 removes the second `spec_ao` site that made Rev 1's version a coin-flip. | P1-4 |
+| C8 | No golden hash literal appears in this document. §5.3 records the `PINS.toml` self-contradiction as a **blocking precondition on S1** rather than inheriting it. | P1-5 |
+| C9 | §4.3 "five sources" → **four** (verified). §2.3 states the `register(t0)` space-0 check and its near-miss. §2.4's citation corrected and R11's tripwire re-sited out of `debug_assert!`. | P2-1/2/3 |
+| C10 | New §10 answers the critic's four open questions with verified evidence. | — |
 
 ---
 
 ## 0. What the stale row said, and what is now known
 
-`docs/RENDER-PARITY-PLAN.md:351` specifies SV0 as: *"reuse `sdf_mesh_shadow.comp` under VB …
-one `gSdfMeshShadow` binding added to vb Set 0 (O1: no 5th set)"*. It predates all of Stage 1.
-Three of its premises are resolved:
+`docs/RENDER-PARITY-PLAN.md:351` specifies SV0 as: *"reuse `sdf_mesh_shadow.comp` under VB … one
+`gSdfMeshShadow` binding added to vb Set 0 (O1: no 5th set)"*. It predates all of Stage 1.
 
 | Premise | Status |
 |---|---|
-| "reuse `sdf_mesh_shadow.comp`" | **FALSE.** A repo-wide grep for `sdf_mesh_shadow` matches exactly one file: `docs/RENDER-PARITY-PLAN.md` itself. SF0 was never implemented. There is no pass to reuse. |
-| "one binding added to vb Set 0" | **TRUE, and the slot is 10** — see §2. Slot 8 is *not* universally free. |
-| "a dedicated producer pass" | **REJECTED by measurement** (campaign record: +5–12% for zero visual gain). Inline. |
+| "reuse `sdf_mesh_shadow.comp`" | **FALSE.** `sdf_mesh_shadow` greps to **doc files only** (`docs/RENDER-PARITY-PLAN.md`, this plan). SF0 was never implemented; there is no pass to reuse and no `ResolvedRenderPath::sdf_mesh_shadow` field. |
+| "one binding added to vb Set 0" | **TRUE, and the slot is 10** — §2. Slot 8 is *not* universally free. |
+| "a dedicated producer pass" | **REJECTED by measurement** (campaign record: cost for zero visual gain). Inline. |
 
 The surviving prior art is the **Deferred** path, which already ships this exact visual:
-`crates/boyko_rhi_vulkan/shaders/sdf_gbuffer_composite.hlsl:1853-1885` — the `!own_pixel`
-raster-owned arm writing `gMaterial.RG = (mesh_shadow, mesh_ao)`, computed at `:1876-1878`
-(`sdf_soft_shadow(P_mesh + N_mesh * SHADOW_NORMAL_BIAS, N_mesh, light)`) and `:1881`
-(`sdf_ao(P_mesh, N_mesh)`). SV0 is the port of those two lines into the VB tails.
+`sdf_gbuffer_composite.hlsl:1853-1885` — the `!own_pixel` raster-owned arm writing
+`gMaterial.RG = (mesh_shadow, mesh_ao)`, computed at `:1876-1878` and `:1881`. SV0 is the port of
+those two lines into the VB tails.
 
 ---
 
@@ -82,46 +54,51 @@ raster-owned arm writing `gMaterial.RG = (mesh_shadow, mesh_ao)`, computed at `:
 
 ### 1.1 What SV0 IS
 
-Two per-pixel terms, evaluated **inline** in the VB lit-producer tails, for pixels the VB
-rasterizer covered (`instance_id != VB_ID_SENTINEL`, `vb_resolve.comp.hlsl:241`):
+Two per-pixel terms, evaluated **inline** in the VB lit-producer tails, for pixels the VB rasterizer
+covered (`instance_id != VB_ID_SENTINEL`, `vb_resolve.comp.hlsl:241`):
 
-* **SDF soft-shadow on mesh** — the SDF field casts a clean analytic penumbra onto raster mesh
-  surfaces. Applied by `min`-combine into the **primary directional light's** `vis`, at the same
-  site the tail already `min`-combines `csm_visibility` (`vb_resolve.comp.hlsl:308-315`).
-* **Contact-AO** — the 5-tap field-deficit AO (`sdf_gbuffer_composite.hlsl:532-540`) applied by
-  `min`-combine into `ao_final` (`vb_resolve.comp.hlsl:288`), i.e. the *diffuse* ambient
-  occlusion, matching the Deferred/Filament decoupling. `spec_ao` follows from `ao_final` by the
-  existing formula (`:289`) — see the §4.5 hazard.
+* **SDF soft-shadow on mesh** — `min`-combined into the **primary directional light's** `vis`, at
+  the site the tail already `min`-combines `csm_visibility` (`vb_resolve.comp.hlsl:308-315`;
+  `vb_shade.comp.hlsl:475-482`; the split tail's own equivalent).
+* **Contact-AO** — the 5-tap field-deficit AO `min`-combined into `ao_final`
+  (`vb_resolve.comp.hlsl:288`, `vb_shade.comp.hlsl:450/452`, `vb_shade_split.comp.hlsl:453/455`),
+  i.e. the *diffuse* ambient occlusion. `spec_ao` follows by the existing formula.
 
-Both terms land in **all three** lit-producer tails: `vb_resolve.comp.hlsl` (fused),
-`vb_shade.comp.hlsl` (classified), `vb_shade_split.comp.hlsl` (R9 geo/shade split). Landing in
-two of three would leave the split path silently producing wrong shadows — §6's rung **S4**
-closes that structurally, with a demonstrated red mutation, rather than by review discipline.
+Both terms land in **all three** lit-producer sources: `vb_resolve.comp.hlsl` (fused),
+`vb_shade.comp.hlsl` (classified), `vb_shade_split.comp.hlsl` (R9 geo/shade split) — §6's rung
+**S4** closes that structurally across all 10 shipping `.spv`.
+
+**The AO routing matches Deferred exactly**, verified: `deferred_pbr.hlsl:797` reads the marcher's
+mesh-AO lane (`material_texel.g`), `:948` seeds `ao_final` from it, and `:977` derives `spec_ao`
+from that `ao_final` by the identical expression. Deferred therefore *does* propagate mesh AO into
+specular ambient, so §1.3's equivalence claim is structural, not aspirational.
 
 ### 1.2 What SV0 is NOT
 
-* **Not a new pass, target, framegraph `ResId`, or barrier.** `field_distance` is pure-analytic
-  over one SSBO (`sdf_field.hlsli:203-217`, gateway at `:246`). Its include contract requires
+* **Not a new pass, target, framegraph `ResId`, or barrier.** `field_distance` is pure-analytic over
+  one SSBO (`sdf_field.hlsli:203-217`, gateway at `:246`). Its include contract requires
   `StructuredBuffer<uint> Buf : register(t0)` in scope before the `#include`
-  (`deferred_pbr.hlsl:153-161`). Inlining costs +1 SSBO binding and a control-flow gate.
-* **Not multi-caster.** The P6 R1 per-light flagged-caster march
-  (`light_table.hlsli:56` `LIGHT_FLAG_CASTS_SHADOW`, cap `MAX_SDF_SHADOW_CASTERS_PER_PIXEL = 4`
-  at `deferred_pbr.hlsl:479`) is **out of scope**. SV0 marches **exactly once per covered
-  pixel**, for the primary directional only — matching the Deferred mesh arm, which uses the
-  single `pc.light_dir` (`sdf_gbuffer_composite.hlsl:1868`). This keeps the per-pixel field-eval
-  bound at §4.4's figure regardless of light count.
-* **Not mesh-SDF (MDF).** `sdf_soft_shadow_mesh` (the `pc.mesh_sdf_enabled` arm at
-  `sdf_gbuffer_composite.hlsl:1876`) is not ported. SV0 marches the analytic edit-list field only.
-* **Not correct under non-uniform instance scale.** See §4.2.
-* **Not byte-comparable to Deferred.** `goldens/PINS.toml:288-291` already records that VB's
-  analytic barycentric interpolation is a genuinely different floating-point path from hardware
-  raster interpolation. VB-vs-Deferred parity is **visual** (owner-eval), never a byte gate.
+  (`deferred_pbr.hlsl:153-161`). Cost: +1 SSBO binding and a control-flow gate.
+* **Not multi-caster.** The P6 R1 per-light flagged-caster march (cap
+  `MAX_SDF_SHADOW_CASTERS_PER_PIXEL = 4`, `deferred_pbr.hlsl:479`) is out of scope. SV0 marches
+  **exactly once per covered pixel**, for the primary directional only — matching the Deferred mesh
+  arm's single `pc.light_dir` (`sdf_gbuffer_composite.hlsl:1868`).
+* **Not mesh-SDF (MDF).** The `pc.mesh_sdf_enabled` arm is not ported.
+* **Not correct under non-uniform instance scale.** §4.2.
+* **Not armed under HWRT — and that is a visual gap, named here.** SV0 consumes
+  `ShadowSources::SDF_SOFT_MARCH`, whose shipped predicate carries `!consumers.hwrt_denoise_or_vis_on`
+  (`render_path_config.rs:904`). On `VB × Both × HWRT` the SDF field therefore casts **no** shadow on
+  mesh, because HWRT traces only the mesh TLAS and SDF bodies are not in it. SV0 neither introduces
+  nor fixes this; §10 Q3 records it as an unlisted follow-up made explicit.
+* **Not byte-comparable to Deferred.** `goldens/PINS.toml:288-291` records that VB's analytic
+  barycentric interpolation is a genuinely different FP path from hardware raster interpolation.
+  VB-vs-Deferred parity is **visual** (owner-eval), never a byte gate.
 
 ### 1.3 Visual goal
 
-On a VB×Both scene with a non-empty SDF edit list, an SDF body casts a soft, noise-free shadow
-onto raster mesh surfaces, and mesh surfaces darken in the SDF geometry's ambient-occluded
-crevices — visually equivalent to what `Deferred × Both` already produces on the same scene.
+On a VB×Both scene with a non-empty SDF edit list, an SDF body casts a soft, noise-free shadow onto
+raster mesh surfaces, and mesh surfaces darken in the SDF geometry's ambient-occluded crevices —
+visually equivalent to what `Deferred × Both` already produces on the same scene.
 
 ---
 
@@ -131,72 +108,62 @@ crevices — visually equivalent to what `Deferred × Both` already produces on 
 
 ### 2.1 Why not a 5th set
 
-The TEXTURED VB variant already consumes four descriptor sets (0 core / 1 shadow / 2 geometry
-table / 3 bindless textures — `vb_shade_split.comp.hlsl:70-108`,
-`vb_geom_fetch.hlsli:20-34`, `vb_shade.comp.hlsl:163`). Vulkan's guaranteed
-`maxBoundDescriptorSets` floor is exactly 4. A 5th set is unavailable, full stop.
+The TEXTURED VB variant already consumes four descriptor sets (0 core / 1 shadow / 2 geometry table
+/ 3 bindless textures — `vb_shade_split.comp.hlsl:70-108`, `vb_geom_fetch.hlsli:20-34`,
+`vb_shade.comp.hlsl:167`). Vulkan's guaranteed `maxBoundDescriptorSets` floor is exactly 4.
 
 ### 2.2 Why slot 10 and not slot 8
 
-VB Set 0 today:
+VB Set 0 today: 0 `gVbInstances` · 1 `instance_materials{,_tex}` · 2 `Camera` · 3 `LightBuf` ·
+4 `Materials` · 5 `gVbId` · 6 `gLit` · 7 `gClassify` · **8, 9 `ClusterGrid`/`LightIndexList` —
+`#ifdef FROXEL` ONLY** (`vb_resolve.comp.hlsl:151-154`).
 
-| slot | contents | declared in |
-|---|---|---|
-| 0 | `gVbInstances` | `vb_geom_fetch.hlsli:51` |
-| 1 | `instance_materials` / `instance_materials_tex` | `vb_resolve.comp.hlsl:95`, `vb_shade_split.comp.hlsl:154/163` |
-| 2 | `Camera` UBO | `vb_resolve.comp.hlsl:99` |
-| 3 | `LightBuf` | `vb_resolve.comp.hlsl:111` |
-| 4 | `Materials` | `vb_resolve.comp.hlsl:119` |
-| 5 | `gVbId` | `vb_resolve.comp.hlsl:123` |
-| 6 | `gLit` | `vb_resolve.comp.hlsl:127` |
-| 7 | `gClassify` | `gpu_scene/mod.rs:3450-3455` |
-| 8, 9 | `ClusterGrid`, `LightIndexList` — **`#ifdef FROXEL` ONLY** | `vb_resolve.comp.hlsl:151-154` |
+Two host layout objects exist: `vb_layout0` (8 entries,
+`crates/boyko_app/src/gpu_scene/mod.rs:3395-3459`) and `vb_layout0_froxel` (10 entries, `:4425-4492`).
+**Slot 8 is free only in scenes that never arm the froxel cull** — using it would be a silent,
+scene-config-dependent collision that no validation layer reports (validation is off on this box;
+`robustBufferAccess` is off). **Slot 10 is free in both.**
 
-Two host layout objects exist: `vb_layout0` (8 entries, `gpu_scene/mod.rs:3395-3459`) and
-`vb_layout0_froxel` (10 entries, `:4425-4492`). **Slot 8 is free only in scenes that never arm
-the froxel cull** — using it would be a silent, scene-config-dependent collision that no
-validation layer reports (validation is off on this box; `robustBufferAccess` is off).
-**Slot 10 is free in both.**
+### 2.3 The precedent — and the register check Rev 1 skipped
 
-### 2.3 The precedent
+`deferred_pbr.hlsl:161` already declares `[[vk::binding(10)]] StructuredBuffer<uint> Buf : register(t0);`.
+The comment at `:153-160` states the precedent precisely: *"the resolve's `t0` SRV register is free
+(it uses t4/t6/t8/t9), and Vulkan binding 10 is free"* — i.e. it verifies **both** the HLSL register
+and the Vulkan binding. Rev 1 paraphrased this as "the register is pinned, the binding is free" and
+never performed the register half for the VB tails.
 
-`crates/boyko_rhi_vulkan/shaders/deferred_pbr.hlsl:161` already declares
-
-```hlsl
-[[vk::binding(10)]] StructuredBuffer<uint> Buf : register(t0);
-```
-
-for precisely this purpose, and `:153-160` explains why it did not reuse `t0`'s Vulkan slot: the
-`sdf_field.hlsli` include contract pins the HLSL *register* to `t0`, while the Vulkan *binding*
-is free to be anything. SV0 copies that construction verbatim, including the "strict
-FIELD-CONSUMER: calls `field_distance` read-only, never edits" contract.
+**Performed now, and it is a near-miss.** `register(t0)` **space 0** is free in all three tails:
+`vb_resolve.comp.hlsl` uses t5/u6/t12/s12/t14/s14 only; `vb_shade.comp.hlsl` and
+`vb_shade_split.comp.hlsl` declare `gTextures[] : register(t0, space3)` (`:167` / `:204`) — an
+**unbounded** SRV array at t0, but in **space 3**, so no collision with a space-0 `t0`. A collision
+would be a hard `dxc` error surfacing only at S2; S2's gate (e) catches it, but the check belongs
+here.
 
 ### 2.4 Host changes
 
 Binding numbers need not be contiguous; only the *entry count* is capped
-(`rhi_impl/mod.rs:93`, `MAX_BIND_GROUP_BINDINGS = 24`). `vb_layout0` goes 8 → 9 entries
-(`{0..7, 10}`), `vb_layout0_froxel` 10 → 11 (`{0..9, 10}`). Both far under the cap.
-
-Four Set-0 descriptor **set** instances must gain the entry, all binding the same buffer:
-
-| set | build site |
-|---|---|
-| `vb_set0` | `present/targets.rs:2995-3079` (entry array at `:3012-3024`) |
-| `vb_set0_tex` | `present/targets.rs:3090` |
-| `vb_set0_froxel` | `present/targets.rs:3193` |
-| `vb_set0_tex_froxel` | `present/targets.rs:3311` |
+(`crates/boyko_rhi_vulkan/src/rhi_impl/mod.rs:93`, `MAX_BIND_GROUP_BINDINGS = 24`). `vb_layout0`
+goes 8 → 9 (`{0..7, 10}`), `vb_layout0_froxel` 10 → 11. Four Set-0 descriptor **set** instances gain
+the entry, all binding the same buffer: `vb_set0` (`crates/boyko_rhi_vulkan/src/present/targets.rs:2995-3079`,
+entry array `:3012-3024`), `vb_set0_tex` (`:3090`), `vb_set0_froxel` (`:3193`),
+`vb_set0_tex_froxel` (`:3311`).
 
 The bound resource is `BindGroupEntry::StorageBuffer { buffer: scene.edit_list }` — the identical
-expression the deferred/marcher sets already use at `present/targets.rs:1402`, `:2378`, `:2745`,
-`:2903`. `scene.edit_list` is a plain (non-`Option`) field, so it is valid on **every** VB boot
-including `legs: Mesh`, where the edit list is the empty boot seed. No new upload, no new
-barrier: the edit list is a **one-shot boot-static write** performed before the first
-`render_gbuffer_frame` (`boyko_app/src/runner.rs:1136-1141`), and SV0 adds only a second
-COMPUTE reader ordered after it.
+expression the deferred/marcher sets use at `targets.rs:1402`, `:2378`, `:2745`, `:2903`.
+`scene.edit_list` is a plain (non-`Option`) field, valid on **every** VB boot including `legs: Mesh`.
 
-> **Invariant to encode, not assume:** if a future rung makes the edit list per-frame dirty, the
-> VB tails need a barrier they do not have today. Rung S2 lands
-> `debug_assert!(!staging.is_dirty_after_boot())` at the upload site so that change fails loudly.
+**No new upload, no new barrier — with the citation corrected.** The edit list is a one-shot
+boot-static write. `crates/boyko_app/src/runner.rs:1136-1149` is the *comment* describing it; the
+write itself is `:1182-1197`, **inside the frame loop**, gated by `staging.is_dirty()` and followed
+by `mark_uploaded()`.
+
+> **R11 tripwire, re-sited (P2-3).** Rev 1 put a `debug_assert!` at the upload site. That site is in
+> the frame loop and `debug_assert!` compiles out in release — and the goldens run release, so it
+> could not fire where it matters (the existing `#[cfg(debug_assertions)]` block at `:1162-1181` has
+> the same limitation). Rev 2 moves the invariant into **test code**, which is profile-independent:
+> rung S1's fixture test drives the real runner for ≥2 frames and asserts
+> `SdfEditStaging::is_dirty()` is **false** after frame 1 and stays false. A future rung that makes
+> the edit list per-frame dirty reds that test regardless of build profile.
 
 ---
 
@@ -204,29 +171,17 @@ COMPUTE reader ordered after it.
 
 ### 3.1 A 2-bit field in light-header word 7, bits 5..6
 
-Word 7 (`sky_diffuse.w`) is the campaign's established gate word. The authoritative bit budget
-is `crates/boyko_render/src/light.rs:386-408`; the shader decoders are
-`light_table.hlsli:77-180`.
+Word 7 (`sky_diffuse.w`) is the campaign's established gate word; the authoritative bit budget is
+`crates/boyko_render/src/light.rs:386-409`, the shader decoders `light_table.hlsli:77-180`.
+Bits 0..4 are `shadow_mode`/`contact_shadow_mode`/`csm_mode`/`punctual_shadow_mode`/`ddgi_mode`;
+8..11 tonemap; 12..19 terminator softening. `light.rs:406` and `light_table.hlsli:154` both state
+**bits 5..7 free**; SV0 claims 5..6 and leaves 7.
 
-| bits | owner |
-|---|---|
-| 0 | `shadow_mode` (`light_table.hlsli:77`) |
-| 1 | `contact_shadow_mode` (`:91`) |
-| 2 | `csm_mode` (`:109`) |
-| 3 | `punctual_shadow_mode` (`:128`) |
-| 4 | `ddgi_mode` (`:145`) |
-| **5..6** | **`vb_sdf_mesh_mode` — SV0** |
-| 7 | free |
-| 8..11 | tonemap (`:163`) |
-| 12..19 | terminator softening (`:179`) |
-| 20..31 | free |
-
-`light.rs:406` states bits 5..7 are free; SV0 claims 5..6 and leaves 7. The two bits are
-independent flags, mirroring Deferred's `pc.lighting_flags` pair
-(`sdf_gbuffer_composite.hlsl:1865/1869/1880`) one-for-one:
+*Checked, because it is absent from that budget:* `load_ssao_mode` reads **`LightBuf[11]`**
+(`light_table.hlsli:218-220`), a different header word entirely — it does not contend for word 7.
 
 ```hlsl
-// light_table.hlsli (additive; no existing decoder perturbed — each masks only its own bits)
+// light_table.hlsli (additive; each decoder masks only its own bits)
 static const uint VB_SDF_MESH_OFF        = 0u;
 static const uint VB_SDF_MESH_SHADOW_BIT = 1u; // bit 5
 static const uint VB_SDF_MESH_AO_BIT     = 2u; // bit 6
@@ -235,136 +190,156 @@ uint load_vb_sdf_mesh_mode(StructuredBuffer<uint> LightBuf) { return (LightBuf[7
 
 Host side, `boyko_render::light`: `VB_SDF_MESH_MODE_SHIFT: u32 = 5`, `VB_SDF_MESH_MODE_MASK: u32 = 3`,
 two `LightingConfig` bools packed by the existing `shadow_gate_word`, plus a bit-position
-`debug_assert_eq!` at the single writer — the exact idiom `ddgi_config.rs:288-289` uses.
+`debug_assert_eq!` at the single writer — the idiom `ddgi_config.rs:288-289` uses.
 
 ### 3.2 Why a runtime gate and not `-D` — the arithmetic
 
-**Shipping VB lit-producer `.spv` today: 10.** (`crates/boyko_rhi_vulkan/shaders/`, embeds at
-`compute.rs:811-1037`, manifest rows at `docs/SHADER-VARIANT-MANIFEST.md:91-107`.)
-
-| # | `.spv` | source | `-D` |
-|---|---|---|---|
-| 1 | `vb_resolve.comp.spv` | `vb_resolve.comp.hlsl` | — |
-| 2 | `vb_resolve_froxel.comp.spv` | `vb_resolve.comp.hlsl` | `FROXEL=1` |
-| 3 | `vb_shade.comp.spv` | `vb_shade.comp.hlsl` | — |
-| 4 | `vb_shade_tex.comp.spv` | `vb_shade.comp.hlsl` | `TEXTURED=1` |
-| 5 | `vb_shade_froxel.comp.spv` | `vb_shade.comp.hlsl` | `FROXEL=1` |
-| 6 | `vb_shade_tex_froxel.comp.spv` | `vb_shade.comp.hlsl` | `TEXTURED=1 FROXEL=1` |
-| 7 | `vb_shade_split.comp.spv` | `vb_shade_split.comp.hlsl` | — |
-| 8 | `vb_shade_split_tex.comp.spv` | `vb_shade_split.comp.hlsl` | `TEXTURED=1` |
-| 9 | `vb_shade_split_hwrt.comp.spv` | `vb_shade_split.comp.hlsl` | `HWRT=1` |
-| 10 | `vb_shade_split_tex_hwrt.comp.spv` | `vb_shade_split.comp.hlsl` | `TEXTURED=1 HWRT=1` |
+**Shipping VB lit-producer `.spv` today: 10** (`crates/boyko_rhi_vulkan/shaders/`, embeds at
+`compute.rs:811-1037`, manifest `docs/SHADER-VARIANT-MANIFEST.md:91-107`):
+`vb_resolve{,_froxel}` (2, from `vb_resolve.comp.hlsl`) · `vb_shade{,_tex,_froxel,_tex_froxel}`
+(4, from `vb_shade.comp.hlsl`) · `vb_shade_split{,_tex,_hwrt,_tex_hwrt}` (4, from
+`vb_shade_split.comp.hlsl`).
 
 | | `-D SV0=1` | runtime gate (chosen) |
 |---|---|---|
-| new `.spv` | **+10** (10 → 20) | **0** |
-| new manifest rows | +10 | 0 (10 rows get an updated recipe note) |
-| new `embed_spirv!` consts + accessors | +10 + 10 | 0 |
-| new pipeline objects + selector arms | +10 | 0 |
+| new `.spv` / manifest rows / embeds+accessors / pipelines+selector arms | **+10 / +10 / +20 / +10** | **0 / 0 / 0 / 0** |
 | existing `.spv` re-pinned | 0 | 10, once |
-| re-DXC gate invocations | ×2 | unchanged |
 | **orthogonal axes in the VB matrix** | **4** (tex × froxel × hwrt × sv0) | **3** |
-| OFF-path byte-identity | free, by preprocessor | **must be proven** (§3.3) |
+| OFF-path inertness | free, by preprocessor | **must be proven** (§3.3) |
 
-The decisive term is the last row but one. The matrix is **multiplicative**: the split tail
-already ships 4 `.spv` from two axes; a fourth axis makes the *next* feature cost 40 variants,
-not 20. `-D` buys byte-identity once and taxes every future VB tail feature forever. The runtime
-gate buys a permanent axis-count freeze and pays a one-time cost: building the instrument that
-proves OFF-path inertness — an instrument that is then reusable by every future runtime-gated
-feature. **Decision: runtime gate, conditional on rung S0 passing.** If S0 fails, the design
-falls back to `-D` and the +10 becomes an owner VALUES call (§7).
+The decisive term is the axis count. The matrix is **multiplicative**: the split tail already ships
+4 `.spv` from two axes; a fourth axis makes the *next* VB tail feature cost 40 variants, not 20.
+`-D` buys inertness once and taxes every future VB tail feature forever. **Decision: runtime gate,
+conditional on rung S0's harness proving red-capable.** If S0's sensitivity sub-assertion fails, the
+design falls back to `-D` and the +10 becomes an owner VALUES call (§7 clause 1).
 
-### 3.3 How OFF-path byte-identity is PROVEN
+### 3.3 How OFF-path inertness is proven — two instruments, both constructible
 
-**A golden image pin is necessary and NOT sufficient.** The VB goldens are 8-bit sRGB sha256
-pins (`goldens/PINS.toml:302-305`). An 8-bit hash cannot see a sub-LSB change in the pre-
-quantisation radiance. A gate that cannot go red for the failure it exists to catch is worse
-than no gate — this campaign shipped that mistake three times.
+**What Rev 1 proposed, and why it is withdrawn (P0-1).** Rev 1's gate assumed a phi at the `gLit`
+store whose predecessor edge means "SV0 not taken". There is none. The `vis` combine is inside
+`for (uint i = 0u; i < H.l0a_count; ++i)` (`vb_resolve.comp.hlsl:301`) nested in
+`if (!primary_dir_seen)` (`:309`); the same shape holds at `vb_shade.comp.hlsl:468/476`. `ao_final`'s
+combine sits *before* that loop (`:288`) with its consumers *inside* it (`:321`, `:325`). And the
+store's operand is the loop-carried accumulator `lit_direct` (`vb_shade.comp.hlsl:582`).
+Independently, a Merkle hash makes an `OpPhi` a function of **both** incoming values, so every value
+downstream of an SV0 merge hashes differently **by construction**. Recovering the OFF value needs a
+path-projected program slice, not a per-result-id hash — materially beyond the budgeted cost, and it
+would also fire on benign restructuring (CSE hoisted across the branch), i.e. an over-strict gate
+that gets weakened until vacuous. **Withdrawn in full.**
 
-**And the hazard is real and concrete, not hypothetical.** `vb_resolve.comp.hlsl:288-289`:
+**G1 — the kill-switch compile (static, `dxc`-only, red-capable).** Every SV0 span in every touched
+source is wrapped in `#ifndef VB_SV0_KILL … #endif`. The gate compiles each of the 10 rows under its
+own frozen `-D` set **plus** `-D VB_SV0_KILL=1` into a temp dir — **never committed**, so zero new
+manifest rows, zero embeds, zero pipelines — and compares the sha256 against the **pre-SV0 committed
+bytes**, pinned as 10 literals in the test at S2 under the "MEASURED — do not edit these literals to
+make a failing run pass" discipline. Anyone can re-derive them: `git show <S2^>:<path> | sha256`.
 
-```hlsl
-float ao_final = 1.0;                                                       // :288  a LITERAL
-float spec_ao  = saturate(pow(NoV + ao_final, exp2(-16.0*roughness - 1.0)) - 1.0 + ao_final); // :289
-```
+* **Built from helpers that already exist**: `redxc_with_defines`
+  (`crates/boyko_rhi_vulkan/tests/cluster_cull_spv_sync.rs:73-86` — writes to `temp_dir`, *"Never
+  overwrites a committed artifact"*) and `assert_spv_byte_identical` (`:89-103`).
+* **Proves:** nothing outside the SV0 guards changed, and the guards are complete.
+* **Red mutation:** move one SV0 statement outside a guard → the kill compile differs → red.
+* **What G1 does NOT prove, stated plainly:** that the *shipped* module's `sv0_mode == 0` execution
+  is bit-identical to frozen. DXC optimises the SV0-bearing module as a whole (the frozen recipe
+  passes no `-O`; DXC defaults to `-O3`). G1 alone would be the same class of error Rev 1 made — a
+  gate that cannot go red for the failure it exists to catch, in a new costume.
 
-Today DXC (`-O3` by default; the frozen recipe passes no `-O`) sees `ao_final` as the constant
-`1.0` and may fold `… - 1.0 + 1.0`. Turning `ao_final` into an `OpPhi` destroys that fold, and
-`(y - 1.0) + 1.0 != y` in general for finite floats. **That is a 1-ULP move on the OFF path that
-the image hash cannot see.** The three tails all carry this shape.
+**G2 — the executing OFF-path golden, with a DEMONSTRATED sensitivity control.** With SV0 compiled
+in and `sv0_mode = 0`, every OFF-configuration golden must be byte-identical to its `PINS.toml` pin.
+The objection to an 8-bit hash is that it is sub-LSB blind. Rev 2 does not argue past that — it
+**tests** it:
 
-**Construction (mandatory):** every SV0 write is paired with a *duplicated recompute* of every
-downstream value that today folds against the pre-SV0 literal, so the OFF path keeps the literal:
+* An **uncommitted** `-D VB_SV0_ULP_PROBE=1` compile perturbs the final `lit` by exactly one ULP
+  immediately before the `gLit` store. Rendering the same fixture with it must produce a
+  **different** hash.
+* **RED if the hashes are equal.** Then G2 is blind at this frame size, OFF-path inertness has no
+  executing proof, and the stage escalates to §7 clause 1.
+* Why the control is expected to fire is *structural*, and is exactly what the control tests rather
+  than assumes: the probe perturbs every covered pixel, and the covered-channel count of a full
+  frame is large, so at least one 8-bit code crossing a quantisation boundary is the overwhelmingly
+  likely outcome. No number for that is stated here.
 
-```hlsl
-float ao_final = 1.0;
-float spec_ao  = saturate(pow(NoV + ao_final, exp2(-16.0*roughness - 1.0)) - 1.0 + ao_final);
-if ((sv0_mode & VB_SDF_MESH_AO_BIT) != 0u) {
-    ao_final = min(ao_final, sdf_ao(P, n));                                  // NMin: NaN -> keeps ao_final
-    spec_ao  = saturate(pow(NoV + ao_final, exp2(-16.0*roughness - 1.0)) - 1.0 + ao_final);
-}
-```
+**G1 ∧ G2 is the gate.** G1 bounds the *textual* blast radius; G2 executes the real pipeline and has
+a demonstrated red. Neither is claimed to be a proof of universal bit-identity, and §8-R2 records the
+residual honestly.
 
-`vis` needs no such treatment — it is already a runtime value at `vb_resolve.comp.hlsl:308-313`.
+### 3.4 The withdrawn hazard (P0-2)
 
-**Gate (the decisive one): a CPU-only SPIR-V dataflow-equivalence instrument** — rung S0. For a
-committed `.spv`, parse the word stream, and for every result id compute a Merkle hash over
-`(opcode, type, literal operands, hashes of operand ids in positional order)`. Two modules are
-*dataflow-equivalent at a store site* iff the hash of the stored value agrees. For SV0's OFF
-path: the new module's `gLit` store operand is an `OpPhi`; the gate asserts **the hash of that
-phi's incoming value from the SV0-not-taken predecessor equals the frozen predecessor module's
-`gLit` store-value hash.**
+Rev 1's headline claim — that making `ao_final` a phi de-folds `spec_ao`'s `x - 1.0 + 1.0` and moves
+the OFF path by 1 ULP — **does not survive checking, and is withdrawn**, along with the duplicated-
+recompute construction it motivated and S2's "decisive" second mutation. Three independent grounds:
 
-Why this is decisive where the image hash is not:
-* It compares **instructions and constants**, not pixels — a 1-ULP arithmetic change is a
-  different dataflow graph and is therefore visible.
-* It is robust to SSA renumbering and basic-block reordering (only structure is hashed).
-* Reassociation (`a*(b*c)` → `(a*b)*c`) changes the tree shape, so it is caught — which a plain
-  opcode multiset would miss.
-* It reads **committed `.spv` bytes**, so it needs no external tool and **can never silently
-  skip** — unlike the re-DXC gates, which skip when `dxc` is absent
-  (`cluster_cull_spv_sync.rs:197-205`).
+1. **Analytic + numeric.** `NoV = max(dot(n,v), 1e-4)` (`vb_resolve.comp.hlsl:258`) and
+   `roughness = clamp(m.mrr.y, 0.045, 1.0)` (`:262`) force `pow(NoV + 1, exp2(-16r - 1)) ≥ 1`; the
+   subtraction is Sterbenz-exact on `[1,2]`; both forms produce bit-identical `1.0`. A sweep over
+   the reachable domain found zero mismatches.
+2. **The construction already ships.** `vb_shade_split.comp.hlsl:457-461` performs
+   `ao_final = min(ao_final, ssao_blurred)` inside a **runtime** `if (ssao_mode != SSAO_MODE_OFF)`,
+   feeding the identical `spec_ao` at `:462`, in **all four** split `.spv`. Deferred does the same
+   (`deferred_pbr.hlsl:948/966/977`). The shape Rev 1 called a novel hazard is blessed production
+   code with green goldens.
+3. **It is a no-op on the TEXTURED producers regardless** — `ao_final` is already a runtime value
+   there (`vb_shade.comp.hlsl:450`, `vb_shade_split.comp.hlsl:453`).
 
-**S0's own red mutation is DEMONSTRATED, not argued** — see §6.
+Counting exactly: of the 10 producers, only **4** carry `ao_final` as a compile-time literal at all
+(`vb_resolve{,_froxel}`, `vb_shade{,_froxel}`); the other 6 are already runtime.
+
+**No replacement hazard is invented.** Rev 2's binding rule is that a named hazard must be
+demonstrated; none is currently demonstrable, so §3.3's instruments stand as generic inertness
+gates, not as remedies for a specific defect.
 
 ---
 
 ## 4. The march
 
-### 4.1 Reuse, verbatim, of the eDSL-generated leaves
+### 4.1 The leaves — one shared header, not three copies (P1-2)
 
-Both leaves are already machine-generated and sync-pinned; SV0 authors **no new field math**.
+**Correction of fact.** Rev 1 claimed both leaves are eDSL-generated. Only one is:
 
-* **Shadow:** `sdf_soft_shadow_ranged` (`deferred_pbr.hlsl:514-532`), generated by
-  `boyko_shaderdsl::emit::emit_hlsl_sdf_soft_shadow_ranged()`, pinned by
-  `sdf_soft_shadow_ranged_matches_edsl_emit` in
-  `crates/boyko_rhi_vulkan/tests/sdf_field_edsl_sync.rs`. Loop+tail only; the `NoL` early-out
-  lives in the caller. SV0 passes `t_max = T_MAX` (the directional bound,
-  `deferred_pbr.hlsl:467`).
-* **AO:** `sdf_ao` (`sdf_gbuffer_composite.hlsl:532-540`), 5 `[unroll]`ed taps against
-  `AO_STEP`/`AO_FALLOFF`/`AO_STRENGTH` (`:488-490`).
-* **Constants** (`deferred_pbr.hlsl:466-474`): `EPS`, `T_MAX`, `MAX_IT`, `SHADOW_K`,
-  `SHADOW_MINT`, `SHADOW_MINT_STEP`, `SHADOW_HIT_EPS`, `SHADOW_NDOTL_EPS`,
-  `SHADOW_NORMAL_BIAS`. `GRAD_H` and `FIELD_LIPSCHITZ_L` come from `sdf_field.hlsli:42` / `:287`.
+| leaf | generated? | evidence |
+|---|---|---|
+| `sdf_soft_shadow_ranged` | **YES** | `// === GENERATED sdf_soft_shadow_ranged BEGIN/END ===` at `deferred_pbr.hlsl:514`/`:532`; generator `emit_hlsl_sdf_soft_shadow_ranged` (`boyko_shaderdsl/src/emit/shaders.rs:903`); pin `sdf_soft_shadow_ranged_matches_edsl_emit` (`tests/sdf_field_edsl_sync.rs:443`). |
+| `sdf_ao` | **NO** | `sdf_gbuffer_composite.hlsl:532-541` carries **no** sentinels (unlike `sdf_soft_shadow` directly above at `:502`/`:525`); there is **no** `emit_hlsl_sdf_ao` anywhere in `crates/boyko_shaderdsl/`; `sdf_field_edsl_sync.rs` has no `sdf_ao` test. |
 
-`SHADOW_NORMAL_BIAS`'s value is **pinned by a test, not by this prose**: rung S3's
-`sv0_consts_match_deferred_and_marcher` asserts the SV0 copy equals both the marcher's
-(used at `sdf_gbuffer_composite.hlsl:1877-1878`) and `deferred_pbr.hlsl:474`'s.
+**Consequence, absorbed rather than papered over.** Naively, SV0 would create three hand-authored
+copies of `sdf_ao` with no generator to re-emit from, plus three more of
+`sdf_soft_shadow_ranged` — which lives in `deferred_pbr.hlsl:514-532`, **not** a shared `.hlsli`.
+Six copies, and S3's "extend the eDSL sync test" mechanism does not exist for the AO half. That is a
+live tension with CLAUDE.md's "HLSL the eDSL owns is generated, never hand-edited" — `sdf_ao` is
+HLSL the eDSL does **not** own, and Rev 2 does not pretend otherwise.
 
-Rung S3 extends `sdf_field_edsl_sync.rs` so the generated spans **and** the const block are
-`.contains()`-pinned in all three tails plus the `Buf @ t0` precondition — the O3 discipline
-`docs/RENDER-PARITY-PLAN.md:383-384` already specifies for SF0.
+**Decision: a new shared `crates/boyko_rhi_vulkan/shaders/sdf_shadow_leaves.hlsli`** carrying
+`sdf_soft_shadow_ranged` (moved verbatim from `deferred_pbr.hlsl:506-532`, sentinels included),
+`sdf_ao` (copied from `sdf_gbuffer_composite.hlsl:528-541`), and the AO consts (`AO_STEP`,
+`AO_FALLOFF`, `AO_STRENGTH` — `sdf_gbuffer_composite.hlsl:488-490`). Include contract, documented in
+its header: `field_distance` plus `MAX_IT`/`SHADOW_K`/`SHADOW_MINT`/`SHADOW_MINT_STEP`/
+`SHADOW_HIT_EPS`/`FIELD_LIPSCHITZ_L` must be in scope before the `#include`.
+
+* `deferred_pbr.hlsl` replaces its `:506-532` span with the `#include` at the same point. Moving
+  text into an include preprocesses to the same token stream, so **every `deferred_pbr` `.spv` stays
+  byte-identical** — and that is S2 gate (c), a red-capable check, not a hope.
+* The three VB tails `#include` it after `sdf_field.hlsli`.
+* `sdf_soft_shadow_ranged_matches_edsl_emit` re-targets the new header (a one-line path change in
+  the test). The generator stays the single source for the shadow leaf.
+* **`sdf_gbuffer_composite.hlsl` is NOT touched.** Its `sdf_ao` remains the second (and last) copy.
+  Rationale: the marcher is the frozen-`.spv` blast radius this campaign explicitly protects, and
+  collapsing 2 copies → 1 does not justify re-DXC'ing every marcher variant. The pair is pinned
+  mechanically by **`sdf_ao_body_matches_shared_header`** (S3), a cross-file textual-identity test
+  whose red condition is "the two bodies diverged" — a different, weaker mechanism than an eDSL
+  re-emit pin, and labelled as such.
+
+Net: `sdf_ao` copies 4 → **2**, both pinned; `sdf_soft_shadow_ranged` copies 4 → **1**, generator-
+pinned. Shadow consts (`deferred_pbr.hlsl:466-474`, including `SHADOW_NORMAL_BIAS` at `:474`) are
+pinned by S3's `sv0_consts_match_deferred_and_marcher`, never by this prose.
 
 ### 4.2 Shadow-origin bias from the GEOMETRIC face normal
 
-`vb_geom_fetch` already has the three world-space triangle vertices in registers
+`vb_geom_fetch` already holds the three world-space triangle vertices in registers
 (`vb_geom_fetch.hlsli:536-538`), so the geometric face normal costs one `cross` + one `normalize`
 and **no extra memory traffic**:
 
 ```hlsl
-float3 e1 = world_p1 - world_p0;
-float3 e2 = world_p2 - world_p0;
-float3 fn = cross(e1, e2);
+float3 fn = cross(world_p1 - world_p0, world_p2 - world_p0);
 float  l2 = dot(fn, fn);
 // Degenerate-triangle guard: fall back to the interpolated normal rather than normalize(0) -> NaN.
 float3 face_n = (l2 > FACE_N_EPS2) ? (fn * rsqrt(l2)) : normalize(result.world_normal);
@@ -372,32 +347,28 @@ float3 face_n = (l2 > FACE_N_EPS2) ? (fn * rsqrt(l2)) : normalize(result.world_n
 result.face_normal = (dot(face_n, result.world_normal) < 0.0) ? -face_n : face_n;
 ```
 
-**Why geometric, not interpolated.** `cross(p1-p0, p2-p0)` is computed from *actual world
-positions*, so it is the true plane normal under **any** affine instance transform. The
-interpolated normal is `mul(m3, n)` with the plain linear 3×3 and **no inverse-transpose
-correction** — `vb_geom_fetch.hlsli:539-542` documents this as a known limitation, correct only
-for uniform scale. Using the geometric normal for the origin lift also removes the classic
-silhouette acne where the interpolated normal diverges from the facet.
+**Why geometric.** `cross(p1-p0, p2-p0)` is computed from *actual world positions*, so it is the true
+plane normal under **any** affine instance transform. The interpolated normal is `mul(m3, n)` with
+the plain linear 3×3 and **no inverse-transpose correction** — `vb_geom_fetch.hlsli:539-542`
+documents this as a known limitation, correct only for uniform scale. Using the geometric normal for
+the origin lift also removes the classic silhouette acne.
 
-**Stated plainly: SV0's correctness is scoped to uniform instance scale.** The *bias direction*
-is robust; the *shading* normal that drives `NoL`, the BRDF, and the AO ray direction is still
-the plain-`m3` interpolated one, inheriting `vb_geom_fetch`'s limitation verbatim. Fixing that
-is the inverse-transpose rung `vb_geom_fetch.hlsli:539-542` already defers, and SV0 does not
-attempt it.
+**Stated plainly: SV0's correctness is scoped to uniform instance scale.** The *bias direction* is
+robust; the *shading* normal that drives `NoL`, the BRDF, and the AO ray direction is still the
+plain-`m3` one, inheriting the limitation verbatim. Fixing that is the inverse-transpose rung
+`vb_geom_fetch.hlsli:539-542` already defers.
 
-**Deviation from Deferred, acknowledged:** the Deferred mesh arm lifts along the *shading*
-normal (`sdf_gbuffer_composite.hlsl:1877`). SV0's term is therefore not bit-comparable to
-Deferred's even in principle — which is already true for unrelated reasons (§1.2), so nothing
-is lost.
-
-**AO uses the shading normal**, verbatim per Deferred (`:1881`), and takes **no bias**: the taps
-start at `h = AO_STEP` (`:536`), already off-surface.
+**Deviation from Deferred, acknowledged:** the Deferred mesh arm lifts along the *shading* normal
+(`sdf_gbuffer_composite.hlsl:1877`). SV0's term is therefore not bit-comparable to Deferred's even in
+principle — already true for unrelated reasons (§1.2). **AO uses the shading normal**, verbatim per
+Deferred (`:1881`), and takes **no bias**: taps start at `h = AO_STEP` (`:536`), already off-surface.
 
 ### 4.3 The `#ifdef VB_SV0` source-guard — and what it buys
 
-`vb_geom_fetch.hlsli` is included by **five** sources: the three tails plus
-`vb_geo.comp.hlsl:118` (which ships `vb_geo.comp.spv` and `vb_geo_mv.comp.spv`). `vb_geo` does
-not need a face normal. The new field and its computation therefore sit behind
+`vb_geom_fetch.hlsli` is included by **four** sources (verified by grep, P2-1): `vb_geo.comp.hlsl:118`,
+`vb_resolve.comp.hlsl:85`, `vb_shade.comp.hlsl:90`, `vb_shade_split.comp.hlsl:137`.
+(`vb_shadow_vis.comp.hlsl` does **not** include it. Rev 1 said five.) `vb_geo` ships
+`vb_geo.comp.spv` and `vb_geo_mv.comp.spv` and does not need a face normal, so:
 
 ```hlsl
 #ifdef VB_SV0
@@ -406,267 +377,340 @@ not need a face normal. The new field and its computation therefore sit behind
 ```
 
 where `VB_SV0` is a **source-level `#define` written by each of the three tails before the
-`#include`** — never a `-D` on the dxc command line, so it creates **zero** new compile
-variants. `vb_geo.comp.hlsl` does not define it and therefore preprocesses **character-identical**
-to today, keeping `vb_geo.comp.spv` / `vb_geo_mv.comp.spv` **byte-identical by construction**.
-This is exactly the frozen-base discipline `deferred_pbr.hlsl:74-79` documents for
-`TERMINATOR_WRAP`. It is also a gate that can go red: delete the guard and those two `.spv`
-change bytes (rung S2 gate (b)).
+`#include`** — never a `-D` on the dxc command line, so it creates **zero** new compile variants.
+`vb_geo.comp.hlsl` does not define it and therefore preprocesses **character-identical** to today,
+keeping its two `.spv` **byte-identical by construction**. This is the frozen-base discipline
+`deferred_pbr.hlsl:74-79` documents for `TERMINATOR_WRAP`, and it is a gate that can go red: delete
+the guard and those two `.spv` change bytes (S2 gate (b)).
 
 ### 4.4 Termination, bounds, and why no device hang is possible
 
-The march is `[loop] for (uint i = 0u; i < MAX_IT; ++i)` (`deferred_pbr.hlsl:518-529`) — a hard
-iteration cap. Beyond that, `t` is **strictly increasing by at least `SHADOW_MINT_STEP`** every
-iteration, because the advance is `t + max(d / FIELD_LIPSCHITZ_L, SHADOW_MINT_STEP)` (`:525`):
+The march is `[loop] for (uint i = 0u; i < MAX_IT; ++i)` (`deferred_pbr.hlsl:519`) with
+`MAX_IT = 128u` (`:468`) — a hard cap on **every** path. Beyond that, `t` strictly increases by at
+least `SHADOW_MINT_STEP` every iteration, because the advance is
+`t + max(d / FIELD_LIPSCHITZ_L, SHADOW_MINT_STEP)` (`:525`):
 
 * `d` negative (inside the field) → `max` returns `SHADOW_MINT_STEP`.
 * `d` huge (empty field, `FAR = 1.0e9`, `sdf_field.hlsli:41`) → `t` overshoots `t_max` → `break`.
-* **`d` NaN** → HLSL `max` lowers to `GLSL.std.450 NMax`, which returns the **non-NaN** operand
-  → `SHADOW_MINT_STEP`. The march still advances and still terminates. The campaign's NMin/NMax
-  lesson is load-bearing here rather than a hazard.
+* **`d` NaN** → HLSL `max` lowers to `GLSL.std.450 NMax`, which returns the **non-NaN** operand →
+  `SHADOW_MINT_STEP`. The march still advances and still terminates.
 
-**Structural bounds per covered mesh pixel** (derived from the loop form, not measured):
-`≤ MAX_IT` field evaluations for the shadow (`deferred_pbr.hlsl:468`) plus exactly 5 for AO
-(`sdf_gbuffer_composite.hlsl:535`), and **exactly one march per pixel** regardless of light
-count (§1.2). Each `field_distance` walks `min(Buf[0], MAX_SDF_EDITS)` edits
-(`sdf_field.hlsli:204`) — already clamped, so SV0 introduces **no new indexing and no new
-out-of-range surface**. That matters because this engine has `robustBufferAccess` OFF and no
-GPU-assisted validation: an out-of-range access is real UB nothing reports.
+**Structural bounds per covered mesh pixel** (from the loop form, not measured): `≤ MAX_IT` field
+evaluations for the shadow plus exactly 5 for AO (`sdf_gbuffer_composite.hlsl:535`), and **exactly
+one march per pixel** regardless of light count (§1.2). Each `field_distance` walks
+`min(Buf[0], MAX_SDF_EDITS)` edits (`sdf_field.hlsli:204`) — **already clamped**, so SV0 introduces
+**no new indexing and no new out-of-range surface**. That matters because `robustBufferAccess` is OFF
+and there is no GPU-assisted validation: an out-of-range access is real UB nothing reports.
 
-**Empty-edit-list behaviour (exact, not approximate).** With `Buf[0] == 0` the loop at
-`sdf_field.hlsli:206-215` never executes and `acc` stays `FAR`. Then:
-`res = min(1.0, SHADOW_K*FAR/t) = 1.0`; the first `t` advance overshoots `T_MAX`; the leaf
-returns `clamp(1.0, 0, 1) = 1.0` after **one** iteration. AO: every tap deficit is
-`(h − FAR)`, so `1 − AO_STRENGTH*occ` saturates to exactly `1.0`. Both terms are **exactly
+**Empty-edit-list behaviour (exact).** With `Buf[0] == 0` the loop at `sdf_field.hlsli:206-215` never
+executes and `acc` stays `FAR`. Then `res = min(1.0, SHADOW_K*FAR/t) = 1.0`; the first `t` advance
+overshoots `T_MAX`; the leaf returns `clamp(1.0, 0, 1) = 1.0` after **one** iteration. AO: every tap
+deficit is `(h − FAR)`, so `1 − AO_STRENGTH*occ` saturates to exactly `1.0`. Both terms are **exactly
 `1.0`**, and `min(x, 1.0)` is the bit-exact identity for every finite non-NaN `x`.
-**Consequence, and it is a trap:** arming SV0 on any empty-edit-list scene is byte-identical —
-which makes such a scene a *vacuous* arming gate. §5.1 and rung S1 exist because of this.
+**Consequence, and it is a trap:** arming SV0 on any empty-edit-list scene is byte-identical — which
+makes such a scene a *vacuous* arming gate. Rung S1 exists because of this.
 
 ### 4.5 Falloff, and the combine
 
-The penumbra falloff is Quilez basic soft-shadow: `res = min(res, SHADOW_K * d / t)`
-(`deferred_pbr.hlsl:521`), `SHADOW_K = 8.0` (`:469`). No sqrt, no cone — deliberately, to keep
-the FP-parity surface minimal against the host oracle (`sdf_gbuffer_composite.hlsl:492-497`).
-
-Both terms combine by `min`:
+Quilez basic soft-shadow: `res = min(res, SHADOW_K * d / t)` (`deferred_pbr.hlsl:521`),
+`SHADOW_K = 8.0` (`:469`). No sqrt, no cone — deliberately, to keep the FP-parity surface minimal
+against the host oracle. Both terms combine by `min`:
 
 ```hlsl
-vis      = min(vis,      sv0_shadow);   // at the primary-directional site, vb_resolve.comp.hlsl:308-315
-ao_final = min(ao_final, sv0_ao);       // before spec_ao, with the §3.3 duplicated recompute
+vis      = min(vis,      sv0_shadow);   // at the primary-directional site
+ao_final = min(ao_final, sv0_ao);       // before spec_ao — the SAME shape vb_shade_split.comp.hlsl:460 already ships
 ```
 
-`min` on floats is exact (no rounding) and commutative/associative for non-NaN, so SV0's combine
-is **order-independent** with respect to the existing CSM combine (`:313`) and the split tail's
-HWRT denoised-visibility combine (`vb_shade_split.comp.hlsl:51-54`). Under NaN, `NMin` returns
-the non-NaN operand — so a degenerate term **cannot** poison the pixel; it degrades to "no SV0
-contribution". That is the correct failure direction and is asserted in rung S3.
+`min` on floats is exact and commutative/associative for non-NaN, so SV0's combine is
+**order-independent** with respect to the existing CSM combine, the SSAO combine
+(`vb_shade_split.comp.hlsl:460`), and the split tail's HWRT denoised-visibility combine (`:51-54`).
+Under NaN, `NMin` returns the non-NaN operand — a degenerate term **cannot** poison the pixel; it
+degrades to "no SV0 contribution". That is the correct failure direction and is asserted in S3.
 
 ---
 
-## 5. Variant matrix and byte gates
+## 5. Variant matrix and gates
 
 ### 5.1 `.spv` created: ZERO. `.spv` perturbed: exactly 10.
 
-The ten rows of §3.2's table are re-DXC'd and re-pinned **once**, at rung S2, with **no change to
-their `-D` combinations** and **no new manifest rows** — each existing row in
-`docs/SHADER-VARIANT-MANIFEST.md:93-98` (and the split rows) gains one sentence noting the SV0
-binding-10 interface delta. `vb_geo.comp.spv` and `vb_geo_mv.comp.spv` are **byte-identical**
-(§4.3), and that is itself a gate.
+The 10 rows are re-DXC'd and re-pinned **once**, at S2, with **no change to their `-D` combinations**
+and **no new manifest rows** — each existing row in `docs/SHADER-VARIANT-MANIFEST.md:91-107` gains
+one sentence noting the SV0 binding-10 interface delta. `vb_geo.comp.spv`, `vb_geo_mv.comp.spv`, and
+every `deferred_pbr` `.spv` are **byte-identical**, and each of those is itself a gate.
 
-Interface delta for all ten: `+ StructuredBuffer<uint> Buf @10 (register t0)`. Set 0 widens to 9
-entries (`vb_layout0`) or 11 (`vb_layout0_froxel`).
+Interface delta for all ten: `+ StructuredBuffer<uint> Buf @10 (register t0, space 0)`. Set 0 widens
+to 9 entries (`vb_layout0`) or 11 (`vb_layout0_froxel`).
 
-### 5.2 Byte gates
+### 5.2 Gates and their skip behaviour
 
 | gate | mechanism | can it skip? |
 |---|---|---|
-| `vb_sv0_off_path_dataflow_equivalence` | S0's Merkle-hash instrument over committed `.spv` | **No** — reads bytes only |
-| `vb_geo_spv_unperturbed` | `assert_spv_byte_identical` (`cluster_cull_spv_sync.rs:89-103`) on `vb_geo`, `vb_geo_mv` | yes, if `dxc` absent |
-| `vb_sv0_spv_sync` | `redxc_with_defines` (`cluster_cull_spv_sync.rs:73-87`) over all 10 rows, extending `vb_froxel_spv_sync.rs` | yes, if `dxc` absent |
-| `spirv-val` clean | pinned SDK `spirv-val`, all 10 | yes |
+| G1 `vb_sv0_kill_switch_byte_identity` | `redxc_with_defines` + sha256 vs 10 pinned pre-SV0 hashes | yes, if `dxc` absent |
+| G2 `vb_sv0_off_path_golden` + its ULP-probe control | executing render vs `PINS.toml` | probe compile needs `dxc`; the golden half does not |
+| `vb_geo_spv_unperturbed`, `deferred_pbr_spv_unperturbed` | `assert_spv_byte_identical` (`cluster_cull_spv_sync.rs:89-103`) | yes, if `dxc` absent |
+| `vb_sv0_spv_sync` (all 10 rows) | extends `tests/vb_froxel_spv_sync.rs` | yes, if `dxc` absent |
+| `spirv-val` clean, all 10 | pinned SDK `spirv-val` | yes |
 | image goldens | `goldens/PINS.toml` sha256 | no |
 
-The skippable gates are **necessary but not sufficient** — hence the first row, which cannot skip.
+Rev 1 claimed one gate "can never skip". That claim went with the withdrawn instrument: **every
+static gate here needs `dxc`** (`cluster_cull_spv_sync.rs:196-204` is the skip shape). Mitigation is
+procedural and already used by this campaign: **a rung is not commit-eligible until its `dxc`-
+dependent gate has been *run* and its output pasted into the commit message.** A gate proven only on
+a box that skipped it is not a gate.
+
+### 5.3 The `PINS.toml` contradiction — a blocking precondition, not an inheritance (P1-5)
+
+`goldens/PINS.toml:293-297` states the `[vb_mesh]` `sha256_*` values are *"UNBLESSED placeholders —
+NOT real hashes"*, while `PINS.toml:15` establishes `"PENDING"` as the unblessed sentinel (the
+`[vb_mesh]` values are not `"PENDING"`), and `[vb_both]:326-328` treats the same value as live
+(*"the orchestrator VERIFIES the equality"*). **This document cannot resolve which is true from the
+file alone, and does not guess.**
+
+Two consequences, both binding:
+1. **No SV0 gate duplicates the literal.** Every gate reads the pin through
+   `scripts\golden.ps1 -Pin <name>` / its `Read-Pins` reader. A hand-copied hash is exactly the
+   failure mode `PINS.toml:1-5` was created to end.
+2. **Rung S1 carries a precondition:** the `[vb_mesh]` comment block is reconciled before any SV0
+   gate depends on it — either the stale paragraph is deleted because the value was blessed, or the
+   value is reset to `PENDING` and re-blessed under the standard flow. S1 is not commit-eligible
+   until one of the two has happened.
 
 ---
 
 ## 6. Rungs
 
-Ladder shape: **cheap CPU-only falsifier → fixture → cost falsifier → dark infra → device oracle
-→ arm → measure.** Each rung is independently committable, has **one** gate, and names the
-mutation that turns it red. *A mutation that is only argued does not count; the rung's commit
-message records the mutated run's output.*
+Ladder: **cheap harness falsifier → fixture → cost falsifier → dark infra → device oracle → arm →
+measure.** Each rung is independently committable, has **one** gate, and names the mutation that
+turns it red. *A mutation that is only argued does not count; the commit message records the mutated
+run's output.*
 
----
+### S0 — the OFF-path harness (CPU + `dxc`, no shader edit)
 
-### S0 — the OFF-path instrument (CPU only, no GPU, no shader edit)
+**Lands:** `crates/boyko_rhi_vulkan/tests/vb_sv0_offpath.rs`, wiring the **existing**
+`redxc_with_defines` / `assert_spv_byte_identical` / `find_dxc` helpers. No new SPIR-V parser, no
+production code. ~80 LOC.
 
-**Lands:** `crates/boyko_rhi_vulkan/tests/spv_dataflow.rs` — a test-only SPIR-V word-stream
-parser producing, per entry point, a Merkle hash per result id and a hash for each store site.
-No production code. ~200 LOC.
+**Gate — the harness is validated BEFORE it is believed:**
+1. **reproduction:** each of the 10 rows re-DXC'd under its frozen recipe is byte-identical to its
+   committed `.spv`.
+2. **sensitivity:** copy one tail to a temp dir, change **one float literal** in a region SV0 will
+   never touch (e.g. `vb_resolve.comp.hlsl:258`'s `1e-4`), re-DXC, assert the bytes **differ**.
 
-**Gate — the instrument is validated BEFORE it is believed** (three sub-assertions):
+**RED if:** (2) reports equal, or (1) fails for any row (the frozen recipe no longer reproduces —
+that is a pre-existing defect this rung surfaces before SV0 builds on it). On (2) failing, the
+runtime-gate decision loses G1 and the rung **escalates**: `-D SV0=1` as an owner VALUES call, or
+abort (§7).
 
-1. **self-match:** `hash(vb_resolve.comp.spv) == hash(vb_resolve.comp.spv)`.
-2. **must-differ:** `hash(vb_shade.comp.spv) != hash(vb_shade_froxel.comp.spv)`.
-3. **sensitivity:** copy `vb_resolve.comp.hlsl` to a temp dir, change **one float literal** in a
-   region SV0 will never touch (e.g. the `1e-4` at `:258`), re-DXC under the frozen recipe, and
-   assert the store-site hash **differs**.
-
-**RED if:** (3) reports equal. Then the instrument is blind to exactly the class of change SV0
-must exclude, the runtime-gate decision loses its proof, and the rung **escalates**: fall back to
-`-D SV0=1` (+10 `.spv`, §3.2) as an owner VALUES call, or abort (§7).
-
-**Skip policy:** (1) and (2) read committed bytes and **never skip**. (3) needs `dxc`; it skips
-only when `dxc` is absent, and the rung is not commit-eligible until (3) has been *run* and its
-output pasted into the commit message. A gate proven only on a box that skipped it is not a gate.
-
----
+**Skip policy:** needs `dxc`; not commit-eligible until run with output pasted into the commit
+message.
 
 ### S1 — the fixture (host test only, no shader edit) — **BLOCKING**
 
-**The problem this rung exists for.** Every current VB golden has an **empty** SDF edit list:
-`goldens/PINS.toml:322` (`vb_both`: *"This scene's SDF edit-list is boot-seeded EMPTY
-(count == 0)"*) and `:355` (`vb_sdf_only`, same). By §4.4 the SV0 term on such a scene is exactly
-`1.0` and byte-identity is *vacuous*. Arming against today's fixtures would produce a green gate
-quantified over an empty selection — the campaign's #1 named defect, verbatim.
+**Why it exists.** Every current VB golden has an **empty** SDF edit list: `PINS.toml:322`
+(`vb_both`: *"boot-seeded EMPTY (count == 0)"*) and `:355` (`vb_sdf_only`, same). By §4.4 the SV0
+term on such a scene is exactly `1.0` and byte-identity is *vacuous*. Arming against today's fixtures
+would produce a green gate quantified over an empty selection — the campaign's #1 named defect.
 
 **Lands:** `crates/boyko_app/tests/vb_both_sdf.rs` — a clone of `vb_both.rs` with SDF primitives
-actually spawned (the edit list is gathered by `collect_sdf_edits`,
-`boyko_app/src/runner.rs:589`), positioned so at least one SDF body occludes the five-sphere
-scene's key light and sits near a mesh surface. Plus a `[vb_both_sdf]` block in
-`goldens/PINS.toml` (unblessed placeholder until owner sign-off).
+actually spawned (edit list gathered by `collect_sdf_edits`, `boyko_app/src/runner.rs:589`),
+positioned so at least one SDF body occludes the five-sphere scene's key light and sits near a mesh
+surface. Plus a `[vb_both_sdf]` block in `goldens/PINS.toml` seeded `PENDING`.
 
-**Gate:** the rendered frame is **NOT** byte-identical to `vb_mesh`'s
-`f4719cbf13da5badb7a659d572d1817bbc45db683e5f0311f9bed8c933913ea1`
-(`goldens/PINS.toml:304`), *and* the host reports `edit_count > 0`.
+**Gate — fixture ADEQUACY FOR SV0, not "the frame differs" (P1-1).** Under `VB × Both` a non-empty
+edit list makes `sdf_forward_march` composite SDF-owned pixels into `gLit` *independently of SV0*, so
+"the frame differs from the `[vb_mesh]` pin" goes green the moment any SDF body is visible — including
+one casting on nothing. The gate is therefore a **CPU-side check against the host `boyko_shaderdsl`
+`Eval` oracle** over the fixture's camera + edit list, with no GPU:
 
-**RED if:** the frame equals `f4719cbf` (the SDF leg contributes nothing → the fixture is
-vacuous), or `edit_count == 0`. **Mutation:** remove the SDF spawns → both assertions fail.
-This is the control that proves the input reaches the thing under test — the lesson that a knob
-which silently does nothing yields a perfectly flat curve.
+1. `edit_count > 0`;
+2. **≥ `SV0_MIN_SHADOWED_PIXELS` covered mesh pixels** `P` (raster-covered per the fixture's own
+   camera and mesh set) satisfying **both** (a) front-facing to the key light,
+   `dot(N, L) > SHADOW_NDOTL_EPS` — otherwise `sdf_soft_shadow` returns `0.0` at its early-out
+   (`sdf_gbuffer_composite.hlsl:499-501`) for a reason unrelated to the field; and (b) the ray from
+   `P + face_N * SHADOW_NORMAL_BIAS` along `L` reaching a field distance below `SHADOW_HIT_EPS`
+   within `T_MAX`, i.e. the leaf would return `< 1.0`;
+3. the ≥2-frame `SdfEditStaging::is_dirty()` assertion from §2.4's re-sited R11 tripwire.
 
----
+**RED if:** (1) or (3) fails, or (2)'s count falls below the floor. **Mutation:** remove the SDF
+spawns → (1) and (2) both fail. This is the control that proves the input reaches the thing under
+test.
+
+**Precondition:** §5.3's `PINS.toml` reconciliation.
 
 ### S1.5 — the cost falsifier (measurement, zero new shader code) — can kill the stage
 
-**Lands:** a bench in `crates/boyko_app/tests/` that runs the **shipped Deferred** path on S1's
-scene and performs an **interleaved paired A/B** of `pc.lighting_flags` with
-`SHADOWS|AO` set vs cleared — i.e. exactly the `sdf_gbuffer_composite.hlsl:1865` gate around the
-term SV0 will inline. Protocol, non-negotiable (the VB-P1d lesson): interleaved pairs, warmup
-discarded, ≥30 pairs, report the **median paired delta** and the run-to-run spread across **3
-sessions**. Sequential before/after measured a +9% phantom "regression" on this hardware that was
-entirely session drift.
+**Lands:** a bench in `crates/boyko_app/tests/` running the **shipped Deferred** path on S1's scene,
+performing an **interleaved paired A/B** of `pc.lighting_flags` with `SHADOWS|AO` set vs cleared —
+exactly the `sdf_gbuffer_composite.hlsl:1865` gate around the term SV0 will inline. Protocol,
+non-negotiable (the VB-P1d lesson): interleaved pairs, warmup discarded, ≥30 pairs, **median paired
+delta** + run-to-run spread across **3 sessions**. Sequential before/after measured a phantom
+regression on this hardware that was entirely session drift.
 
-**Gate:** the measurement is **reproducible** — relative spread of the median across the 3
-sessions ≤ 10%. The number itself is recorded as `SV0_DEFERRED_TERM_REFERENCE` in the test as a
-literal, under the "MEASURED — do not edit these literals to make a failing run pass" discipline.
+**Gate:** relative spread of the median across the 3 sessions ≤ 10%. The value is recorded as
+`SV0_DEFERRED_TERM_REFERENCE` in the test, under the "MEASURED — do not edit these literals to make
+a failing run pass" discipline.
 
-**RED if:** the spread exceeds 10% (the instrument is not trustworthy at this scale, and §7's
-ABORT clause cannot be adjudicated — escalate before writing any shader). **Mutation:** point the
-A/B at two *identical* configurations → the median paired delta must fall to ~0; if it does not,
-the harness is measuring drift, not the term.
+**RED if:** the spread exceeds 10% — the instrument is not trustworthy at this scale and §7's ABORT
+clause cannot be adjudicated. **Mutation:** point the A/B at two *identical* configurations → the
+median paired delta must fall to ~0; if it does not, the harness measures drift, not the term.
 
-*Why this can kill the stage before a line of shader is written:* it measures the exact term, on
-the exact fixture, using only shipped code. Under VB every covered pixel is a mesh pixel, so
-SV0's coverage is a superset of Deferred's `!own_pixel` arm; if the term is already expensive
-there, it will be worse here.
-
----
+*Why this can kill the stage before a line of shader is written:* it measures the exact term, on the
+exact fixture, using only shipped code. Under VB every covered pixel is a mesh pixel, so SV0's
+coverage is a superset of Deferred's `!own_pixel` arm.
 
 ### S2 — dark infra (SV0 compiled in, host writes mode 0)
 
 **Lands:**
-1. `vb_geom_fetch.hlsli`: `#ifdef VB_SV0` `face_normal` field + computation (§4.2, §4.3).
-2. All three tails: `#define VB_SV0` before the include; `[[vk::binding(10)]] Buf : register(t0)`;
-   `#include "sdf_field.hlsli"` **after** `Buf`; the const block; the two generated leaf spans;
-   `load_vb_sdf_mesh_mode` hoisted once per pixel; the guarded block with §3.3's duplicated
-   `spec_ao` recompute.
-3. `light_table.hlsli`: `load_vb_sdf_mesh_mode` + the two bit constants.
-4. `boyko_render::light`: `VB_SDF_MESH_MODE_SHIFT/_MASK`, two `LightingConfig` fields (default
+1. New `shaders/sdf_shadow_leaves.hlsli` (§4.1); `deferred_pbr.hlsl:506-532` replaced by the include.
+2. `vb_geom_fetch.hlsli`: `#ifdef VB_SV0` `face_normal` field + computation (§4.2, §4.3).
+3. All three tails: `#define VB_SV0` before the include; `[[vk::binding(10)]] Buf : register(t0)`;
+   `#include "sdf_field.hlsli"` **after** `Buf`, then `sdf_shadow_leaves.hlsli`; the shadow const
+   block; `load_vb_sdf_mesh_mode` hoisted once per pixel; the guarded block, every SV0 span wrapped
+   in `#ifndef VB_SV0_KILL` and the ULP probe in `#ifdef VB_SV0_ULP_PROBE`.
+4. `light_table.hlsli`: `load_vb_sdf_mesh_mode` + the two bit constants.
+5. `boyko_render::light`: `VB_SDF_MESH_MODE_SHIFT/_MASK`, two `LightingConfig` fields (default
    **false**), packing in `shadow_gate_word`, bit-position `debug_assert_eq!`.
-5. `gpu_scene/mod.rs:3395` and `:4425`: binding 10 entries.
-6. `present/targets.rs:2995 / 3090 / 3193 / 3311`: `scene.edit_list` at slot 10.
-7. Re-DXC + re-pin all 10 `.spv`; manifest notes.
+6. `crates/boyko_app/src/gpu_scene/mod.rs:3395` and `:4425`: binding-10 entries.
+7. `crates/boyko_rhi_vulkan/src/present/targets.rs:2995 / 3090 / 3193 / 3311`: `scene.edit_list` at
+   slot 10.
+8. Re-DXC + re-pin all 10 `.spv`; manifest notes; the 10 pre-SV0 sha256 literals for G1.
 
-**Gate (one, with four indivisible parts):**
-(a) S0's instrument reports OFF-path dataflow equivalence for **all 10** re-pinned `.spv` against
-their frozen predecessors; (b) `vb_geo.comp.spv` and `vb_geo_mv.comp.spv` **byte-identical**;
-(c) every VB image golden byte-identical; (d) `spirv-val` clean on all 10.
+**Gate (one, six indivisible parts):**
+(a) **G1** kill-switch byte-identity for all 10 rows against the pinned pre-SV0 hashes;
+(b) `vb_geo.comp.spv` / `vb_geo_mv.comp.spv` byte-identical;
+(c) every `deferred_pbr` `.spv` byte-identical (the §4.1 header move);
+(d) every VB image golden byte-identical with `sv0_mode = 0`;
+(e) `spirv-val` clean on all 10;
+(f) **G2's ULP-probe control demonstrated RED** — the probe compile's render differs from the pin.
 
-**RED if / mutations (both DEMONSTRATED):**
-* (a): delete the `if ((sv0_mode & …) != 0u)` guard so the block always runs → dataflow hash
-  differs → red. Additionally: **omit the §3.3 duplicated `spec_ao` recompute** → the OFF-path
-  `spec_ao` becomes a phi-fed expression → hash differs → red. *This second mutation is the one
-  that matters: it is the failure the image golden in (c) would have passed.*
+**RED if / mutations (DEMONSTRATED):**
+* (a): move one SV0 statement outside its `#ifndef VB_SV0_KILL` guard → G1 red.
 * (b): delete `#ifdef VB_SV0` from `vb_geom_fetch.hlsli` → `vb_geo.comp.spv` bytes change → red.
-
----
+* (c): place the `#include` at a different point in `deferred_pbr.hlsl` than the moved span occupied
+  → `deferred_pbr` `.spv` bytes change → red.
+* (f) is itself the demonstration that (d) is not a blind gate.
 
 ### S3 — the device oracle (still mode 0 in production)
 
-**Lands:** three verification layers, no production behaviour change.
+**Lands:** four verification layers, no production behaviour change.
 
-1. **Span pins** — extend `crates/boyko_rhi_vulkan/tests/sdf_field_edsl_sync.rs`: the
-   `sdf_soft_shadow_ranged` and `sdf_ao` spans, the const block, and the `Buf @ t0` precondition
+1. **Span pins** — extend `tests/sdf_field_edsl_sync.rs`: `sdf_soft_shadow_ranged_matches_edsl_emit`
+   re-targets `sdf_shadow_leaves.hlsli`; the header + the const block + the `Buf @ t0` precondition
    are `.contains()`-asserted in **all three** tails.
-2. **Leaf bit-exactness on device** — the leaf probe (the `field_probe_gate` /
-   `cpu_gpu_sdf_agreement.rs` family) evaluates the leaves over a ≥4096-sample `(P, N, L)`
-   fixture and compares **bit-exactly** to the host `boyko_shaderdsl` `Eval` backend
-   (`sdf_field.hlsli:219-231` documents the shared-source relationship). Pure SSBO math, no
-   sampler → demand exact `f32::to_bits()` equality, not a ULP tolerance.
-3. **Host unit tests for the face normal** — under a non-uniform-scale affine, `face_normal`
-   equals the analytic plane normal; under uniform scale it agrees in sign with the interpolated
-   normal; a degenerate (zero-area) triangle returns the interpolated fallback, never NaN.
+2. **`sdf_ao_body_matches_shared_header`** — cross-file textual identity between
+   `sdf_gbuffer_composite.hlsl:532-541` and the shared header's copy. Weaker than an eDSL re-emit
+   pin (there is no generator, §4.1) and labelled as such; its red condition is "the two bodies
+   diverged".
+3. **Leaf bit-exactness on device** — the leaf probe (`cpu_gpu_sdf_agreement.rs` family) evaluates
+   both leaves over a ≥4096-sample `(P, N, L)` fixture and compares **bit-exactly** to the host
+   `boyko_shaderdsl` `Eval` backend. Pure SSBO math, no sampler → demand exact `f32::to_bits()`
+   equality, not a ULP tolerance.
+4. **Host unit tests for the face normal** — under a non-uniform-scale affine, `face_normal` equals
+   the analytic plane normal; under uniform scale it agrees in sign with the interpolated normal; a
+   degenerate (zero-area) triangle returns the interpolated fallback, never NaN. Plus the §4.5 NaN
+   assertion: a NaN term degrades to "no contribution".
 
-**Gate:** all three green.
-
-**RED if / mutations:** (1) change one token in **one** tail's generated span → that tail's pin
-fails (this is what makes "all three tails" mechanical rather than aspirational). (2) perturb one
-host const in the `Eval` backend → bit-exactness fails. (3) reverse the `cross` operand order
-without the orientation fix → the sign test fails.
-
----
+**RED if / mutations:** (1) change one token in **one** tail's asserted span → that tail's pin fails.
+(2) perturb the marcher's `sdf_ao` body → the cross-file pin fails. (3) perturb one host const in the
+`Eval` backend → bit-exactness fails. (4) reverse the `cross` operand order without the orientation
+fix → the sign test fails.
 
 ### S4 — arm
 
-**Lands:** the host resolver sets bits 5..6 when
-`path_is_vb() && sdf_leg && mesh_leg && sdf_shadows_wanted && !hwrt` — mirroring
-`SDF_SOFT_MARCH`'s existing predicate shape (`render_path_config.rs:727` per
-`docs/RENDER-PARITY-PLAN.md:413-414`). Owner-facing toggle via `LightingConfig`.
+**Lands:** the host resolver sets word-7 bits 5..6 by **consuming the already-resolved bit** —
+not by mirroring its derivation (P1-3):
 
-**Gate — the arming control PAIR (both halves required; either alone is worthless):**
-* **(i) no spurious perturbation:** with SV0 armed, `vb_mesh` (empty edit list) is **byte-
-  identical** to `f4719cbf`. By §4.4 the term is analytically exactly `1.0`, so any difference is
-  a bug — not a tolerance.
-* **(ii) the input reached:** with SV0 armed, `vb_both_sdf` (S1's fixture) **differs** from its
-  own mode-0 render, in a pixel count within `[1%, 60%]` of covered mesh pixels.
-* **(iii) the split tail is covered:** (ii) re-run with `path_vb_split()` forced on.
+```rust
+// The bit is resolved ONCE at render_path_config.rs:904 as
+//   sdf_leg && consumers.sdf_shadows_wanted && !consumers.hwrt_denoise_or_vis_on
+// and stored in ResolvedRenderPath::shadow (:526). SV0 READS it; it does not re-derive it.
+let sv0 = resolved.path_is_vb()
+    && resolved.shadow.contains(ShadowSources::SDF_SOFT_MARCH)
+    && mesh_leg;
+```
+
+*(Rev 1 cited `render_path_config.rs:727` for the predicate; that line is a doc comment on
+`RenderPathDegrade`'s reason log. Rev 1 inherited the number from `docs/RENDER-PARITY-PLAN.md:413`
+without opening the file. `ResolvedRenderPath::sdf_mesh_shadow` — which the critique pointed to —
+**does not exist**: `RENDER-PARITY-PLAN.md:236/:324` are proposed code for the never-implemented SF0,
+and `sdf_mesh_shadow` greps to doc files only. The field to consume is `shadow`.)*
+
+*Checked, because it would have made the whole rung dead: `cap_vb_v1_consumers`
+(`render_path_config.rs:1105-1170`) does **not** cap `sdf_shadows_wanted`, so `SDF_SOFT_MARCH`
+survives under VB×Both.*
+
+Owner-facing toggle via `LightingConfig`.
+
+**Gate — the arming control, quantified over ALL 10 shipping variants (P0-3).** Rev 1 gave an
+executing gate to 2 of 10 and a `.contains()` text pin to the rest; a text pin proves the source is
+present, not that it executes — a wrong `sv0_mode` decode, a wrong bias site or a wrong combine
+operand passes it green. That is the campaign's own defect class one level down.
+
+Verified host reachability of each variant (`present/passes/vb.rs:883-1003` — the lit-producer choice
+is **three-way**: `path_vb_split()` displaces both others; otherwise `vb_use_classified` selects
+`vb_shade*`, else `vb_resolve*`; within `vb_shade*` the `(textured, froxel)` match at `:950-980`
+picks the row):
+
+| # | `.spv` | armed by | SV0-armable? |
+|---|---|---|---|
+| 1 | `vb_resolve` | default VB×Both, flat materials | yes |
+| 2 | `vb_resolve_froxel` | + `clusters_wanted` | yes |
+| 3 | `vb_shade` | `BOYKO_VB_FORCE_CLASSIFIED=1` | yes |
+| 4 | `vb_shade_tex` | a textured material (auto — `vb_use_classified = force \|\| vb_tex_active`) | yes |
+| 5 | `vb_shade_froxel` | force-classified + `clusters_wanted` | yes |
+| 6 | `vb_shade_tex_froxel` | textured + `clusters_wanted` | yes |
+| 7 | `vb_shade_split` | `ssao_on` (arms `mesh_geo_shade_split`, `render_path_config.rs:854`) | yes |
+| 8 | `vb_shade_split_tex` | `ssao_on` + textured | yes |
+| 9 | `vb_shade_split_hwrt` | `ssao_on` + `hwrt_denoise_or_vis_on` | **NO — structurally** |
+| 10 | `vb_shade_split_tex_hwrt` | as 9, + textured | **NO — structurally** |
+
+Rows 9–10 are **not** a coverage gap: `SDF_SOFT_MARCH` requires `!consumers.hwrt_denoise_or_vis_on`
+(`:904`), which is exactly the condition those pipelines require to be **true**. SV0 can never be
+armed while they are bound. They therefore get the OFF-path gate (G1/G2) plus a **CPU resolver
+truth-table test**, `sv0_never_arms_under_hwrt`, extending the family at `:2283-2301` — a stronger
+instrument than any text pin, and it needs no GPU.
+
+*The reachability channel for rows 3/5 is not invented here:* `BOYKO_VB_FORCE_CLASSIFIED` already
+exists and `present/scene_types.rs:2336-2338` documents it as *"the orchestrator's channel to
+exercise `vb_shade` on real hardware"*.
+
+**The gate, per variant:**
+* **(i) no spurious perturbation** — with SV0 compiled in and `sv0_mode = 0`, every OFF-configuration
+  golden is byte-identical to its `PINS.toml` pin. **Scope of the claim (P1-4):** the assertion is
+  that the *shipped, SV0-compiled* module executing `sv0_mode == 0` produces the same 8-bit frame as
+  the frozen module. It is **not** a claim of universal FP identity — C2 removed the second `spec_ao`
+  site that would have made it one, so no independently-compiled duplicate exists in Rev 2. The
+  claim's sensitivity is the demonstrated ULP probe (S2 gate (f)), not an assumption.
+* **(ii) the input reached, per armable variant** — for each of rows 1–8, with that variant's knobs
+  set and SV0 armed, `vb_both_sdf` **differs** from its own `sv0_mode = 0` render, in a changed-pixel
+  count within `[1%, 60%]` of covered mesh pixels.
+* **(iii) rows 9–10** — `sv0_never_arms_under_hwrt` green.
 * **(iv)** owner visual eval on the dumped BMP before any hash is blessed.
 
-*(ii)/(iii) are used only to assert "the term reached", never to judge quality — image statistics
-lie about render quality; the correctness verdict comes from S3's oracle and (iv).*
+*(ii) is used only to assert "the term reached", never to judge quality — image statistics lie about
+render quality; the correctness verdict comes from S3's oracle and (iv).*
 
-**RED if / mutations (DEMONSTRATED):**
-* Force `sv0_mode = 0` host-side → (ii)'s changed-pixel count falls to 0 → red. *(Without (ii),
-  (i) alone would pass trivially — that is the vacuous-gate shape this pair exists to defeat.)*
-* **Revert only `vb_shade_split.comp.hlsl`'s SV0 block** → (iii) goes red while (ii) stays green.
-  This is the structural closure of the three-tails P0 hole: the split path cannot be silently
-  left out, because a gate exists that only the split can turn red.
-
----
+**RED if / mutations (DEMONSTRATED).** The SV0 span is common to a source's variants by construction
+(it sits outside every `-D` guard), so the *mutation* partition is by source — three mutations
+covering the ten rows, each reddening **exactly** its own rows:
+* Revert only `vb_resolve.comp.hlsl`'s SV0 block → rows 1–2 red, 3–8 green.
+* Revert only `vb_shade.comp.hlsl`'s → rows 3–6 red, others green.
+* Revert only `vb_shade_split.comp.hlsl`'s → rows 7–8 red, others green. *(This is the structural
+  closure of the three-tails hole: the split path cannot be silently left out.)*
+* Force `sv0_mode = 0` host-side → every row's (ii) count falls to 0.
 
 ### S5 — measure
 
-**Lands:** an interleaved paired A/B of the VB lit-producer dispatch, SV0 armed vs `sv0_mode = 0`,
-on `vb_both_sdf`, at 512×512, same protocol as S1.5 (≥30 pairs, warmup discarded, 3 sessions,
-median paired delta + spread). Results pinned as literals in the test.
+**Lands:** an interleaved paired A/B of the VB lit-producer dispatch, SV0 armed vs `sv0_mode = 0`, on
+`vb_both_sdf`, at 512×512, same protocol as S1.5 (≥30 pairs, warmup discarded, 3 sessions, median
+paired delta + spread). Results pinned as literals in the test. Run on **row 1** (fused) and **row 7**
+(split) — the two structurally different tails.
 
-**Gate:** the measurement is reproducible (spread ≤ 10%) **and** adjudicated against §7.
+**Gate:** reproducible (spread ≤ 10%) **and** adjudicated against §7.
 
-**RED if:** the spread exceeds 10% — the number is not decidable at this scale and the ABORT
-clause cannot be evaluated (the VB-P1d precedent: a single-sample ≤5% gate on a bench with 21%
-run-to-run spread is not decidable, and shipping one manufactures confidence).
+**RED if:** the spread exceeds 10% — the number is not decidable at this scale (the VB-P1d precedent:
+a single-sample ≤5% gate on a bench with 21% run-to-run spread is not decidable, and shipping one
+manufactures confidence).
 
 ---
 
@@ -674,22 +718,25 @@ run-to-run spread is not decidable, and shipping one manufactures confidence).
 
 The stage is **reverted** — not softened, not re-scoped mid-flight — if any of:
 
-1. **S0's instrument is blind** (S0 sub-assertion 3 reports equal) **and** the owner declines the
-   `-D` fallback's +10 `.spv`. Without either, OFF-path inertness is unprovable and the 10
-   re-pins ship on faith.
-2. **S1's fixture cannot be made non-vacuous** — i.e. no VB×Both configuration produces a frame
-   differing from `f4719cbf` with a non-empty edit list. Then there is no scene in which SV0 can
-   be observed, and every downstream gate is vacuous by construction.
-3. **Cost.** S5's median paired delta exceeds **2×** S1.5's measured `SV0_DEFERRED_TERM_REFERENCE`
-   on the same fixture. The threshold is expressed against a **measured sibling that already
-   ships this visual at an accepted cost**, not against a predicted number — the campaign's
-   refuted-cost-model lesson. If the ratio lands in `[1×, 2×]`, it ships with the number recorded;
-   above 2×, revert.
-4. **S4 (i) cannot be made byte-identical.** A non-identical `vb_mesh` under an analytically-`1.0`
-   term means the OFF/degenerate path is not inert, and no amount of re-blessing fixes that.
+1. **The OFF-path proof fails to exist.** S0's sensitivity sub-assertion reports equal (G1 is blind),
+   **or** S2 gate (f)'s ULP probe fails to red (G2 is blind) — **and** the owner declines the `-D`
+   fallback's +10 `.spv`. Without one of them, OFF-path inertness is unprovable and 10 re-pins ship
+   on faith.
+2. **S1's fixture cannot be made adequate** — no `VB × Both` configuration yields
+   `SV0_MIN_SHADOWED_PIXELS` pixels satisfying S1's oracle predicate with a non-empty edit list. Then
+   there is no scene in which SV0 can be observed and every downstream gate is vacuous by
+   construction.
+3. **Cost.** S5's median paired delta exceeds **2×** S1.5's measured `SV0_DEFERRED_TERM_REFERENCE` on
+   the same fixture. The threshold is a ratio to a **measured sibling that already ships this visual
+   at an accepted cost**, not a predicted number — the campaign's refuted-cost-model lesson. In
+   `[1×, 2×]` it ships with the number recorded; above 2×, revert.
+4. **S4 (i) cannot be made byte-identical.** With the ULP probe having demonstrated the gate is not
+   blind, a persistent difference on an analytically-`1.0` term means the OFF path is not inert, and
+   no amount of re-blessing fixes that.
 
 Revert granularity: every rung is independently committable, so an abort at S5 reverts S2–S4 and
-keeps S0 (the instrument is reusable) and S1 (the fixture is a real coverage gain regardless).
+keeps S0 (the harness is reusable by every future runtime-gated shader feature) and S1 (the fixture
+is a real coverage gain regardless).
 
 ---
 
@@ -699,82 +746,154 @@ Named first are the ones this campaign has actually hit.
 
 | # | Risk | Precedent | Mitigation |
 |---|---|---|---|
-| R1 | **Vacuously-green gate** — assertion quantified over an empty selection. | Hit 3× in Stage 1. **Live here:** every VB golden has `edit_count == 0` (`PINS.toml:322`, `:355`). | S1 is blocking; S4's gate is a *pair* where one half proves the input arrived. |
-| R2 | **Sub-LSB drift invisible to the golden.** | Named concretely at `vb_resolve.comp.hlsl:288-289`. | S0's dataflow instrument + §3.3's duplicated `spec_ao` recompute; S2's second mutation targets exactly this. |
+| R1 | **Vacuously-green gate** — assertion quantified over an empty selection. | Hit 3× in Stage 1. **Live here:** every VB golden has `edit_count == 0` (`PINS.toml:322`, `:355`). | S1 is blocking and its gate is an `Eval`-oracle adequacy check, not "the frame differs"; S4(ii) is quantified over **all 8** armable variants. |
+| R2 | **OFF-path drift invisible to an 8-bit golden.** | Generic; Rev 1's specific instance was **refuted** (§3.4) and no replacement is invented. | G1 bounds the textual blast radius; G2 executes with a **demonstrated** 1-ULP red. **Residual, stated:** neither is a universal proof; a perturbation smaller than G2's demonstrated sensitivity would pass. |
 | R3 | **Cost model instead of measurement.** | The refuted `a + b*(froxels*N)` model. | No predicted number in any gate. S1.5 and S5 are measurements; §7's threshold is a ratio to a measured sibling. |
-| R4 | **Session drift read as a regression.** | +9% phantom on this hardware. | Interleaved paired A/B, warmup discarded, 3 sessions, spread reported — enforced in S1.5 and S5. |
-| R5 | **Instrument that silently does nothing.** | The flat-curve knob. | S0 validates itself against a deliberately mutated recompile before it is trusted; S1.5's harness has its own null-mutation check. |
-| R6 | **Silent OOB with `robustBufferAccess` OFF.** | No layer reports it. | SV0 adds **no** new indexing — `Buf[0]` is already clamped by `min(Buf[0], MAX_SDF_EDITS)` (`sdf_field.hlsli:204`). Binding 10 is always a valid descriptor (`scene.edit_list` is non-`Option`). |
-| R7 | **`NMin`/`NMax` NaN semantics.** | HLSL `min`/`max` → `NMin`/`NMax`, returning the non-NaN operand. | Exploited deliberately twice: it guarantees march termination (§4.4) and makes a degenerate term degrade to "no contribution" rather than poison the pixel (§4.5). Asserted in S3. |
-| R8 | **Two call sites of one function optimised independently** (no `-O` in the frozen recipe; DXC defaults to `-O3`). | Stage 1 record. | SV0 has exactly **one** call site per leaf per tail. The `spec_ao` duplication in §3.3 creates a second site *by design*, and S0's per-store-site hashing compares the OFF path's site specifically. |
-| R9 | **The split tail silently omitted.** | The P0-class hole this design closes. | S4 gate (iii) + its demonstrated revert-only-the-split mutation; S3's per-tail span pins. |
-| R10 | **Non-uniform scale.** | `vb_geom_fetch.hlsli:539-542`. | Out of scope and stated plainly (§4.2). The bias is robust; the shading normal is not. |
-| R11 | **Edit list becomes per-frame dirty** → a missing barrier under VB. | — | §2.4's `debug_assert!` at the upload site fails loudly on the change that would introduce it. |
-| R12 | **`dxc`-dependent gates skip.** | `cluster_cull_spv_sync.rs:197-205`. | The one decisive gate (S0) reads committed bytes and cannot skip. Skippable gates are labelled necessary-but-not-sufficient in §5.2, and S0(3)'s output is pasted into the rung's commit message. |
+| R4 | **Session drift read as a regression.** | The phantom regression on this hardware. | Interleaved paired A/B, warmup discarded, 3 sessions, spread reported — enforced in S1.5 and S5. |
+| R5 | **Instrument that silently does nothing.** | The flat-curve knob. | S0 validates the harness against a deliberately mutated recompile before it is trusted; S1.5 has its own null-mutation control; S2(f) is G2's own control. |
+| R6 | **Silent OOB with `robustBufferAccess` OFF.** | No layer reports it. | SV0 adds **no** new indexing — `Buf[0]` is already clamped by `min(Buf[0], MAX_SDF_EDITS)` (`sdf_field.hlsli:204`). Binding 10 is always a valid descriptor (`scene.edit_list` is non-`Option`). `MAX_IT = 128u` caps every march path including NaN (§4.4), so no device hang is possible. |
+| R7 | **`NMin`/`NMax` NaN semantics.** | HLSL `min`/`max` → `NMin`/`NMax`, returning the non-NaN operand. | Exploited deliberately twice: guarantees march termination (§4.4) and makes a degenerate term degrade to "no contribution" rather than poison the pixel (§4.5). Asserted in S3(4). |
+| R8 | **`sdf_ao` has no generator** — hand-authored HLSL the eDSL does not own, a live tension with CLAUDE.md's shader rule. | — | §4.1 cuts copies 4 → 2 via the shared header and pins the survivor pair with `sdf_ao_body_matches_shared_header`. The tension is **not** resolved and is stated, not hidden; writing a generator would perturb the frozen marcher `.spv` and is out of scope. |
+| R9 | **A tail silently omitted.** | The P0-class hole this design closes. | S4's selection is all 10 variants with per-variant executing assertions; the three demonstrated revert-one-source mutations each red exactly their own rows. |
+| R10 | **Non-uniform scale.** | `vb_geom_fetch.hlsli:539-542`. | Out of scope, stated plainly (§4.2). The bias is robust; the shading normal is not. |
+| R11 | **Edit list becomes per-frame dirty** → a missing barrier under VB. | — | Re-sited out of `debug_assert!` (compiled out in release, where goldens run) into **test code**: S1's ≥2-frame `is_dirty()` assertion (§2.4). |
+| R12 | **`dxc`-dependent gates skip.** | `cluster_cull_spv_sync.rs:196-204`. | §5.2 states honestly that **every** static gate needs `dxc` — Rev 1's "one gate can never skip" went with the withdrawn instrument. Procedural mitigation: no rung is commit-eligible until its `dxc` gate has been run and its output pasted into the commit message. |
+| R13 | **`deferred_pbr` perturbed by the §4.1 header move.** | New this revision. | S2 gate (c): every `deferred_pbr` `.spv` byte-identical, with a demonstrated red (misplace the `#include`). |
 
 ---
 
 ## 9. Appendix — verified file:line anchors
 
-Every line below was opened while writing this plan.
+Every line below was opened while writing **this revision**. Anchors Rev 1 asserted but did not
+survive checking are marked **[Rev 1 WRONG]**.
 
-**Field / leaves:** `sdf_field.hlsli:41` (`FAR = 1.0e9`), `:42` (`GRAD_H = 0.0005`), `:203-217`
-(`sdf`, edit-count clamp at `:204`), `:246` (`field_distance` gateway), `:256-287` (lower-bound
-invariant; `FIELD_LIPSCHITZ_L` at `:287`) · `sdf_gbuffer_composite.hlsl:488-490` (AO consts),
-`:498-526` (`sdf_soft_shadow`), `:532-540` (`sdf_ao`), `:1853-1885` (the Deferred mesh arm),
-`:1876-1878` (shadow), `:1881` (AO).
+**Field / leaves:** `sdf_field.hlsli:41` (`FAR = 1.0e9`), `:203-217` (`sdf`, edit-count clamp at
+`:204`), `:246` (`field_distance` gateway) · `sdf_gbuffer_composite.hlsl:488-490` (AO consts),
+`:498-526` (`sdf_soft_shadow`; generated span `:502`/`:525`), **`:532-541` (`sdf_ao` — hand-written,
+NO sentinels)** [Rev 1 WRONG: claimed eDSL-generated, and gave `:532-540`], `:1853-1885` (Deferred
+mesh arm), `:1876-1878` (shadow), `:1881` (AO).
 
-**Binding precedent:** `deferred_pbr.hlsl:153-161` (binding 10 + include contract; the decl at
-`:161`), `:444-447` (`#include` after `Buf`), `:466-474` (consts; `SHADOW_NORMAL_BIAS` at `:474`),
-`:479` (caster cap), `:506-532` (generated `sdf_soft_shadow_ranged`; `MAX_IT` loop `:519`,
-advance `:525`, `t_max` break `:526`), `:74-79` (frozen-base `#ifdef` discipline).
+**Binding precedent:** `deferred_pbr.hlsl:153-160` (the precedent text — it verifies **both** `t0`
+free *and* binding 10 free), `:161` (the decl), `:466-474` (shadow consts; `SHADOW_NORMAL_BIAS` at
+`:474`), `:479` (caster cap), `:506-532` (generated `sdf_soft_shadow_ranged`; `MAX_IT` loop `:519`,
+advance `:525`, `t_max` break `:526`), `:74-79` (frozen-base `#ifdef` discipline) · AO routing:
+`:797` (`ao = material_texel.g`), `:948` (`ao_final = ao`), `:966` (SSAO combine), `:977` (`spec_ao`).
 
-**VB tails:** `vb_resolve.comp.hlsl:40-70` (bindings doc), `:84-85` (includes), `:95/99/111/119/123/127`
-(bindings 1..6), `:151-154` (`#ifdef FROXEL` 8/9), `:192` (`shadow_apply.hlsli`), `:241` (sentinel),
-`:249-252` (`geo`/`n`/`P`), `:288-289` (`ao_final`/`spec_ao` — the R2 hazard), `:297` / `:308-315`
-(the primary-directional `vis` site) · `vb_shade.comp.hlsl:50/68/87/90/163` · `vb_shade_split.comp.hlsl:51-55`
-(HWRT denoised combine), `:68-108` (4-set bindings), `:120-133` (dxc recipe), `:136-137` (includes) ·
-`vb_geo.comp.hlsl:118` (`#include "vb_geom_fetch.hlsli"`).
+**VB tails:** `vb_resolve.comp.hlsl:85` (geom-fetch include), `:123/127` (t5/u6), `:151-154`
+(`#ifdef FROXEL` 8/9), `:167-168`, `:183-184` (Set-1 t12/t14), `:241` (sentinel), `:258` (`NoV`),
+`:262` (`roughness` clamp), `:288-289` (`ao_final`/`spec_ao`), `:301` (the `l0a_count` loop),
+`:308-315` (the primary-directional `vis` site), `:309` (`!primary_dir_seen`), `:321`/`:325`
+(in-loop `spec_ao`/`ao_final` consumers) · `vb_shade.comp.hlsl:90` (include), `:167` (`gTextures[] :
+register(t0, space3)`), `:450`/`:452` (TEXTURED/base `ao_final`), `:454` (`spec_ao`), `:468/475-482`
+(loop + `vis` site), `:582` (the `gLit` store — a loop-carried accumulator) ·
+`vb_shade_split.comp.hlsl:137` (include), `:204` (`gTextures[]` at t0 space3), `:453/455` (`ao_final`
+seed), **`:457-461` (`ao_final = min(ao_final, ssao_blurred)` inside a RUNTIME `if` — the shipping
+counter-example to Rev 1's R2)**, `:462` (`spec_ao`), `:51-54` (HWRT denoised combine) ·
+`vb_geo.comp.hlsl:118` (include).
 
-**Geometry fetch:** `vb_geom_fetch.hlsli:20-34` (Set-numbering deviation), `:44-51`
-(`VbInstanceRow`, binding 0/0), `:478-494` (`VbGeomFetchResult`), `:516` (signature), `:533-538`
-(`m3`, world positions), `:539-545` (**the plain-`m3` normal limitation**).
+**Geometry fetch:** `vb_geom_fetch.hlsli:20-34` (Set-numbering deviation), `:533-538` (`m3`, world
+positions), `:539-542` (**the plain-`m3` normal limitation**).
 
-**Header word 7:** `light_table.hlsli:55-56`, `:77-79`, `:91-93`, `:109-111`, `:128-130`,
-`:145-147`, `:149-165` ("Bits 5..7 stay free" at `:154`), `:179-180` ·
-`boyko_render/src/light.rs:386-408` (bit budget; "5..7 (free)" at `:406`), `:420` `CSM_MODE_BIT` ·
-`ddgi_config.rs:288-289` (the single-writer `debug_assert_eq!` idiom).
+**Header word 7:** `light_table.hlsli:77/91/109/128/145` (bit decoders 0..4), `:154` ("Bits 5..7 stay
+free"), **`:218-220` (`load_ssao_mode` reads `LightBuf[11]` — NOT word 7)** ·
+`boyko_render/src/light.rs:386-409` (bit budget; "5..7 (free)" at `:406`) · `ddgi_config.rs:288-289`
+(single-writer `debug_assert_eq!` idiom).
 
-**Host layouts / sets:** `gpu_scene/mod.rs:3395-3459` (`vb_layout0`, 8 entries; `gClassify` at
-`:3450-3455`), `:4425-4492` (`vb_layout0_froxel`, 10 entries), `:4096-4212` (split pipelines
-against `vb_layout0`) · `present/targets.rs:2995-3079` (`vb_set0`; entries `:3012-3024`), `:3090`,
-`:3193`, `:3311`, `:1402` (`scene.edit_list` precedent) · `rhi_impl/mod.rs:93`
-(`MAX_BIND_GROUP_BINDINGS = 24`) · `boyko_app/src/runner.rs:589`, `:1136-1141` (one-shot
-edit-list upload).
+**Resolver:** `render_path_config.rs:447` (`SDF_SOFT_MARCH` declared), `:487` (`ResolvedRenderPath`),
+`:508` (`mesh_geo_shade_split`), `:526` (`pub shadow: ShadowSources` — **the field to consume**),
+`:854` (`mesh_geo_shade_split` derivation), **`:904-905` (the real `SDF_SOFT_MARCH` predicate:
+`sdf_leg && consumers.sdf_shadows_wanted && !consumers.hwrt_denoise_or_vis_on`)**, `:907-908`
+(`HWRT_VIS`), `:1105-1170` (`cap_vb_v1_consumers` — does **not** cap `sdf_shadows_wanted`),
+`:2283-2301` (the `SDF_SOFT_MARCH` truth-table family) · **[Rev 1 WRONG] `:727` is a doc comment on
+`RenderPathDegradeLog`, not a predicate.**
 
-**Variants / gates:** `compute.rs:811-1037` (the 10 embeds) ·
-`docs/SHADER-VARIANT-MANIFEST.md:91-107` (the VB table; "`vb_resolve.comp.hlsl` has no TEXTURED
-variant" at `:84`) · `tests/cluster_cull_spv_sync.rs:73-87` (`redxc_with_defines`), `:89-103`
-(`assert_spv_byte_identical`), `:105` (`spirv-dis` lookup), `:197-205` (the skip path) ·
-`tests/vb_froxel_spv_sync.rs`, `tests/sdf_field_edsl_sync.rs`.
+**Producer selection:** `crates/boyko_rhi_vulkan/src/present/passes/vb.rs:883-900` (the THREE-way
+lit-producer choice), `:950-980` (the `(textured, froxel)` pipeline match), `:767-778` (classify
+count dispatch) · `present/scene_types.rs:2329-2350` (`vb_use_classified = force ||
+vb_tex_active_this_frame`; `BOYKO_VB_FORCE_CLASSIFIED` at `:2336`), `:2538-2543` (`vb_tex_active`),
+`:2715-2722` (`path_vb_split`).
 
-**Goldens:** `goldens/PINS.toml:273-311` (`vb_mesh`; hash `f4719cbf…` at `:304`), `:313-343`
-(`vb_both`; **empty edit list at `:322`**), `:345-377` (`vb_sdf_only`; **empty at `:355`**),
-`:288-291` (VB≠Forward FP-path note), `:379-421` (`vb_mesh_tex`).
+**Host layouts / sets / upload:** `crates/boyko_app/src/gpu_scene/mod.rs:3395-3459` (`vb_layout0`, 8
+entries), `:4425-4492` (`vb_layout0_froxel`, 10 entries), `:3906-3920` (VB-P2 classify pipeline
+build) · `crates/boyko_rhi_vulkan/src/present/targets.rs:2995-3079`, `:3090`, `:3193`, `:3311`,
+`:1402` · `rhi_impl/mod.rs:93` (`MAX_BIND_GROUP_BINDINGS = 24`) · `boyko_app/src/runner.rs:589`
+(`collect_sdf_edits`), **`:1182-1197` (the actual one-shot upload, inside the frame loop)** ·
+**[Rev 1 WRONG] `:1136-1141` is the comment, not the upload.**
 
-**Stale row:** `docs/RENDER-PARITY-PLAN.md:351` (SV0), `:366` (Contact-AO "out of scope — charted
-follow-up"; SV0 closes it for VB), `:383-384` (the O3 sync-pin discipline), `:404-406`, `:413-414`.
+**Generators / gates:** `boyko_shaderdsl/src/emit/shaders.rs:903` (`emit_hlsl_sdf_soft_shadow_ranged`);
+**no `emit_hlsl_sdf_ao` exists** · `tests/sdf_field_edsl_sync.rs:404` (`sdf_soft_shadow_matches_edsl_emit`),
+`:443` (`sdf_soft_shadow_ranged_matches_edsl_emit`); **no `sdf_ao` test** ·
+`tests/cluster_cull_spv_sync.rs:73-86` (`redxc_with_defines`, temp-dir output, never overwrites a
+committed artifact), `:89-103` (`assert_spv_byte_identical`), `:196-204` (the skip path) ·
+`tests/vb_froxel_spv_sync.rs`.
+
+**Goldens:** `goldens/PINS.toml:15` (the `"PENDING"` sentinel), `:273-311` (`[vb_mesh]`; the
+**stale-or-live** "NOT real hashes" paragraph at `:293-297`), `:288-291` (VB≠Forward FP-path note),
+`:313-343` (`[vb_both]`; **empty edit list at `:322`**; `:326-328` treats the hash as live),
+`:345-377` (`[vb_sdf_only]`; **empty at `:355`**).
+
+**Manifest / stale row:** `docs/SHADER-VARIANT-MANIFEST.md:84` ("`vb_resolve.comp.hlsl` has no
+TEXTURED variant"), `:91-107` (the VB table) · `docs/RENDER-PARITY-PLAN.md:236`/`:324` (**proposed**
+SF0 code — `sdf_mesh_shadow` exists in no `.rs`), `:351` (the SV0 row), `:383-384` (the O3 sync-pin
+discipline).
 
 ---
 
-## 10. Open questions (VALUES/SCOPE — owner)
+## 10. Answers to the critic's four open questions
+
+**Q1 — If S0 is not constructible, where does the OFF-path proof go? Was the uncommitted third
+compile considered before inventing the Merkle hash?**
+It was not, and that was the error. Rev 2 adopts it as **G1** (§3.3), built from `redxc_with_defines`
+and `assert_spv_byte_identical`, which already exist — S0 shrinks from a ~200 LOC SPIR-V parser to
+~80 LOC of wiring. **But G1 alone is not sufficient**, and adopting only it would repeat Rev 1's
+mistake in a new costume: it proves the *textual* OFF path is untouched, not that the shipped
+module's `sv0_mode == 0` execution is bit-identical, because DXC optimises the SV0-bearing module as
+a whole. Rev 2 therefore pairs it with **G2**, the executing golden gate, whose sub-LSB sensitivity
+is *demonstrated* by an uncommitted 1-ULP probe compile (S2 gate (f)) rather than argued. `-D`
+remains the §7 clause 1 fallback if either instrument fails to red.
+
+**Q2 — Does the Deferred resolve propagate `gMaterial.G` into `spec_ao`, or only diffuse ambient?**
+**Into `spec_ao`.** Verified: `deferred_pbr.hlsl:797` `float ao = material_texel.g;` (the marcher's
+mesh-AO lane), `:948` `float ao_final = ao;`, `:977`
+`float spec_ao = saturate(pow(NoV + ao_final, exp2(-16.0*roughness - 1.0)) - 1.0 + ao_final);`.
+SV0's routing (AO → `ao_final` → `spec_ao`, §1.1) is therefore an exact structural match, and
+S4(iv)'s owner eval compares like with like. No change to §1.3 is needed.
+
+**Q3 — `VB × Both × HWRT`: is "SDF bodies cast no shadow on mesh" intentional, or an unlisted
+follow-up?**
+It is **inherited, not introduced** — and Rev 2 lists it. The `!consumers.hwrt_denoise_or_vis_on`
+term at `render_path_config.rs:904` is shipped behaviour that SV0 *consumes* rather than re-derives
+(P1-3). SV0 makes the gap visible under VB where it was previously moot (VB had no SDF-on-mesh
+shadow at all). §1.2 now names it explicitly. Closing it means putting SDF bodies into the mesh TLAS
+— out of scope for SV0, and now a **named follow-up** rather than an unlisted regression. Rows 9–10
+of S4's table make the exclusion mechanical: `sv0_never_arms_under_hwrt` is a CPU test that reds if
+a future rung ever lets the two co-occur without the TLAS work.
+
+**Q4 — `vb_resolve.comp.hlsl` has no TEXTURED variant. Which tail does the shipping textured
+configuration actually use?**
+**`vb_shade_tex.comp.spv`, automatically.** `present/scene_types.rs:2329-2350`:
+`vb_use_classified = force || vb_tex_active_this_frame`, and `vb.rs:896-900` makes the choice
+three-way — so under VB a textured material *forces* the classified tail; `vb_resolve` never runs
+textured. If a pre-light consumer (`ssao_on`, `ddgi_on`, `shadow_temporal_on`, or the hwrt carrier)
+arms `mesh_geo_shade_split` (`render_path_config.rs:854`), the split displaces it and the producer is
+`vb_shade_split_tex.comp.spv` instead. Consequence for the design: the fused tail S4's row 1
+exercises is **not** the one a textured production scene runs, which is exactly why S4's selection is
+all 10 variants rather than the two Rev 1 gated, and why S5 measures **both** row 1 and row 7.
+
+---
+
+## 11. Open questions (VALUES/SCOPE — owner)
 
 1. **Default state.** Ship SV0 default-OFF (opt-in via `LightingConfig`) or default-ON when
-   `path_is_vb() && sdf_leg && mesh_leg`? Deferred's equivalent is push-constant-flag driven.
+   `path_is_vb() && resolved.shadow.contains(SDF_SOFT_MARCH) && mesh_leg`?
    *Recommendation: default-OFF through S4, flip after S5's number is known.*
-2. **`-D` fallback authorisation.** If S0 sub-assertion 3 fails, is +10 `.spv` acceptable, or is
-   that an abort? (§7 clause 1.)
-3. **S1 fixture composition.** The new `vb_both_sdf` scene needs SDF bodies placed to produce a
-   visible shadow on the five spheres. Owner may prefer reusing `grand_showcase`'s SDF
-   arrangement rather than a purpose-built one.
-
+2. **`-D` fallback authorisation.** If G1 or G2 fails to red (§7 clause 1), is +10 `.spv` acceptable,
+   or is that an abort?
+3. **S1 fixture composition.** The `vb_both_sdf` scene needs SDF bodies placed to satisfy S1's oracle
+   predicate against the five spheres. Owner may prefer reusing `grand_showcase`'s SDF arrangement
+   rather than a purpose-built one.
+4. **`PINS.toml` reconciliation** (§5.3). Was `[vb_mesh]`'s hash ever blessed? If yes, the
+   "NOT real hashes" paragraph at `:293-297` is stale and should be deleted; if no, the values should
+   be reset to `PENDING`. This is a **precondition on S1**, and only the owner knows which.
+5. **HWRT follow-up.** Should "SDF bodies in the mesh TLAS" (closing §10 Q3's gap) be scheduled, or
+   is `VB × Both × HWRT` accepted as SDF-shadow-free indefinitely?
