@@ -33,6 +33,27 @@
 //!   `LightingConfig::clusters_enabled = false` — the flat baseline leg. Unset (the default)
 //!   arms clustering — the froxel leg. Mirrors [`vb_mesh_froxel.rs`](vb_mesh_froxel.rs)'s own
 //!   knob exactly.
+//! - `BOYKO_VB_BENCH_GRID=<dim_x>x<dim_y>x<dim_z>` (e.g. `32x18x24`) — overrides
+//!   [`ClusterConfig`]'s froxel-grid dimensions for this ONE boot (VB-P1e H1.5,
+//!   `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` §8.7 — the dispatch-shape transfer probe for §1.2's
+//!   `13939 ns + 0.2736 ns/pair` fit, which was calibrated on a single shape). **Unset ⇒
+//!   `ClusterConfig::default()`, untouched** — byte-identical to every prior run of this test, so
+//!   existing goldens and the committed provenance table stay valid. Set, this file builds
+//!   `ClusterConfig { dim_x, dim_y, dim_z, ..Default::default() }` exactly ONCE, before
+//!   `app.insert_resource` / `app.run()` — never mutated after boot, so D11's boot-snapshot
+//!   hazard (the dispatch size and the `ClusterGrid` buffer are boot-time snapshots; the
+//!   light-table header tracks the LIVE config) is not exercised. §8.7 sweeps four grids at
+//!   fixed `N_ps = 512`: `8x9x24` (1728 froxels), `16x9x24` (3456, the anchor the §1.2 rate was
+//!   fit on), `16x9x48` (6912) and `32x18x24` (13824) — plus `32x16x24` (E2's dims) is reachable
+//!   here too, run through this same BASE pipeline before the hierarchical arm exists, so if the
+//!   base arm is green at those `gps >= 2` dims the config plumbing is proven independently of
+//!   the later hierarchical mapping. Every set grid also raises `index_list_cap` to
+//!   `cluster_count() * max_lights_per_cluster` — a proven upper bound on the flat list's total
+//!   write volume (`cluster_cull.hlsl`'s O2 clamp caps every froxel's LOCAL list at
+//!   `max_lights_per_cluster` before the single flush, so the GLOBAL sum can never exceed
+//!   `cluster_count() * max_lights_per_cluster` regardless of `N_ps` or the light placement) —
+//!   so the swept grids can never hit the O2 clamp-and-drop that would otherwise silently
+//!   corrupt the cull-cost measurement (§8.7's own note).
 //!
 //! Windowed-test conventions (mirrors `vb_mesh_froxel.rs`): `#[ignore]` (needs a real windowed
 //! GPU device), run with `BOYKO_DISABLE_VALIDATION=1` and `--test-threads=1`.
@@ -48,6 +69,51 @@
 //! froxel_cull_ns=.. froxel_shade_ns=.. froxel_total_ns=..` line and one
 //! `VB-P1d N_ps=64 config=flat flat_shade_ns=..` line respectively. (VB-P1e's rung H0 split the
 //! cull bracket in two; `froxel_cull_ns` is now the sum of the first two fields.)
+//!
+//! Invoke (H1.5's dispatch-shape sweep, one grid, `N_ps = 512` — `BOYKO_VB_FROXEL_FORCE_OFF`
+//! stays UNSET: §8.7 measures `froxel_cull_ns`, which the cull dispatch only emits on the
+//! froxel/clustered leg):
+//! ```text
+//! BOYKO_DISABLE_VALIDATION=1 BOYKO_VB_BENCH=1 BOYKO_VB_BENCH_LIGHTS=512 \
+//!   BOYKO_VB_BENCH_GRID=32x18x24 \
+//!   cargo test -p boyko-app --test vb_p1d_cull_shade_bench -- --ignored --nocapture --test-threads=1
+//! ```
+//! the orchestrator repeats this for each of the four swept grids (plus `32x16x24`) — see §8.7.
+//!
+//! # ⚠️ H1.5 RESULT — the `0.2736 ns/pair` cost model is REFUTED IN FORM (gate §8.7: RED)
+//!
+//! Measured on an RTX 3060 with this knob, froxel (clustered) leg, 220 timed frames. `froxel_cull_ns`
+//! is **independent of the froxel count** over a **108x** range, and depends on `N_ps` alone:
+//!
+//! | `N_ps` | 128 froxels (`4x4x8`) | 13 824 froxels (`32x18x24`) | ratio |
+//! |---|---|---|---|
+//! | 8   | 15 796  | 17 456  | 1.11 |
+//! | 64  | 64 280  | 65 602  | 1.02 |
+//! | 128 | 119 738 | 121 784 | 1.02 |
+//! | 512 | 723 350 | 729 472 | **1.01** |
+//!
+//! The implied marginal rate is `(729 472 - 723 350) / ((13 824 - 128) * 512)` = **0.0009 ns/pair**,
+//! against §8.7's gate band of `[0.2052, 0.3420]` — **235x below it**. So
+//! `cull_ns = a + b * (froxels * N)` (`docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` §1.2) is the wrong SHAPE:
+//! the cost is `f(N)`, not `f(froxels * N)`.
+//!
+//! **The instrument was validated before the result was believed**, because a grid knob that silently
+//! did nothing would produce exactly this flatness. Two controls: a malformed knob value panics (the
+//! parse path is live), and `froxel_shade_ns` tracks the grid exactly as physics demands — fatter
+//! froxels admit more lights per pixel — over a **6.5x** range: `2x2x2` (8 froxels) 211 624 ns,
+//! `4x4x8` 80 263, `16x9x24` 32 722, `32x18x48` (27 648) 33 271. The grid reaches the shader and the
+//! cull genuinely produced different per-froxel sets at each point.
+//!
+//! **Why**: every thread marches in lockstep through the SAME light array, so the loop is a dependent
+//! chain fed by broadcast loads. Extra workgroups add threads that walk the same chain in parallel;
+//! they do not shorten it. Wall clock is therefore `chain length x per-iteration latency`, and the
+//! chain length is `N`.
+//!
+//! **What this means for VB-P1e** (recorded here rather than in the plan, whose prose is frozen): the
+//! hierarchical arm's win is NOT "fewer (froxel, light) pair tests" but "a shorter per-thread chain" —
+//! from `N` to `ceil(N/256)` coarse iterations plus `E_coarse` fine ones. At `N_ps = 512` that is
+//! `512` -> about `2 + 40 = 42`, i.e. roughly **12x**, against the pair-count model's 38x. The
+//! direction and a large magnitude survive; the arithmetic in §7 does not. H4 measures the real thing.
 //!
 //! ⚠️ **This bench does NOT reproduce across sessions above `N_ps` ≈ 128.** Re-measured on the
 //! same RTX 3060 against the table committed at `e7a4767` (the provenance doc-comment on
@@ -268,16 +334,19 @@ fn setup(
     });
 }
 
-/// **The VB-P1d froxel cull/shade GPU-timestamp bench (one leg, one `N_ps`, per process).**
-/// This file's own module doc covers the env knobs + why two runs are needed per `N_ps`.
+/// **The VB-P1d froxel cull/shade GPU-timestamp bench (one leg, one `N_ps`, one grid, per
+/// process).** This file's own module doc covers the env knobs + why two runs are needed per
+/// `N_ps`, and (VB-P1e H1.5) how `BOYKO_VB_BENCH_GRID` sweeps the froxel-grid dimensions.
 ///
 /// `#[ignore]`: needs a real windowed GPU device. Run with `BOYKO_DISABLE_VALIDATION=1`,
-/// `BOYKO_VB_BENCH=1`, `BOYKO_VB_BENCH_LIGHTS=<n>`, optionally `BOYKO_VB_FROXEL_FORCE_OFF`;
-/// the orchestrator sweeps `N_ps ∈ {8, 64, 256, 1024}` × `{froxel, flat}`.
+/// `BOYKO_VB_BENCH=1`, `BOYKO_VB_BENCH_LIGHTS=<n>`, optionally `BOYKO_VB_FROXEL_FORCE_OFF` and/or
+/// `BOYKO_VB_BENCH_GRID=<dim_x>x<dim_y>x<dim_z>`; the orchestrator sweeps `N_ps ∈ {8, 64, 256,
+/// 1024}` × `{froxel, flat}`, and separately (H1.5) the four grids at fixed `N_ps = 512`.
 #[test]
 #[ignore = "needs a real windowed GPU device; BOYKO_VB_BENCH=1 BOYKO_VB_BENCH_LIGHTS=<n> \
-            [BOYKO_VB_FROXEL_FORCE_OFF=1] BOYKO_DISABLE_VALIDATION=1 -- --ignored --nocapture \
-            --test-threads=1; the orchestrator sweeps N_ps and both legs"]
+            [BOYKO_VB_FROXEL_FORCE_OFF=1] [BOYKO_VB_BENCH_GRID=<x>x<y>x<z>] \
+            BOYKO_DISABLE_VALIDATION=1 -- --ignored --nocapture --test-threads=1; the \
+            orchestrator sweeps N_ps, both legs, and (H1.5) the froxel grid"]
 fn vb_p1d_cull_shade_bench() {
     let mut app = App::new();
     let plugins = EnginePlugins::window("boyko_engine vb-p1d cull/shade bench", 512, 512);
@@ -289,6 +358,49 @@ fn vb_p1d_cull_shade_bench() {
     // env-toggle convention `vb_mesh_froxel.rs` uses.
     let clusters_enabled = std::env::var("BOYKO_VB_FROXEL_FORCE_OFF").is_err();
     app.insert_resource(LightingConfig { clusters_enabled, ..LightingConfig::default() });
-    app.insert_resource(ClusterConfig::default());
+    // The froxel-grid knob (this file's module doc, VB-P1e H1.5 / plan §8.7): unset reproduces
+    // today's dispatch exactly. Built ONCE, here, before `app.run()` — never mutated after boot
+    // (D11's boot-snapshot hazard).
+    app.insert_resource(swept_cluster_config());
     app.run();
+}
+
+/// Builds this run's [`ClusterConfig`] from `BOYKO_VB_BENCH_GRID` (this file's module doc, VB-P1e
+/// H1.5 / plan §8.7). Unset ⇒ [`ClusterConfig::default()`] verbatim — byte-identical to every
+/// prior run of this test. Set ⇒ the swept `dim_x`/`dim_y`/`dim_z`, with `index_list_cap` raised
+/// to `cluster_count() * max_lights_per_cluster`: an exact upper bound on the flat index list's
+/// total write volume, since `cluster_cull.hlsl`'s O2 clamp caps every froxel's LOCAL list at
+/// `max_lights_per_cluster` before the single flush that adds it to the GLOBAL list — so this
+/// bound holds regardless of `N_ps` or the light placement, and the swept grids can never hit
+/// the clamp-and-drop that would otherwise silently corrupt the cull-cost measurement.
+fn swept_cluster_config() -> ClusterConfig {
+    let Ok(spec) = std::env::var("BOYKO_VB_BENCH_GRID") else {
+        return ClusterConfig::default();
+    };
+    let (dim_x, dim_y, dim_z) = parse_grid_spec(&spec);
+    let base = ClusterConfig::default();
+    let index_list_cap = dim_x * dim_y * dim_z * base.max_lights_per_cluster;
+    ClusterConfig { dim_x, dim_y, dim_z, index_list_cap, ..base }
+}
+
+/// Parses `BOYKO_VB_BENCH_GRID`'s `<dim_x>x<dim_y>x<dim_z>` grammar (e.g. `"32x18x24"`). Panics
+/// loudly on a malformed knob (missing/extra field, non-numeric, or zero dimension) — a bench
+/// operator's typo must fail immediately, not silently fall back to the default grid and
+/// misattribute the measurement to the wrong dispatch shape.
+fn parse_grid_spec(spec: &str) -> (u32, u32, u32) {
+    const MSG: &str =
+        "invariant: BOYKO_VB_BENCH_GRID must be `<dim_x>x<dim_y>x<dim_z>` of u32s, e.g. `32x18x24`";
+    let mut fields = spec.split('x');
+    let dim_x: u32 = fields.next().and_then(|s| s.parse().ok()).expect(MSG);
+    let dim_y: u32 = fields.next().and_then(|s| s.parse().ok()).expect(MSG);
+    let dim_z: u32 = fields.next().and_then(|s| s.parse().ok()).expect(MSG);
+    assert!(
+        fields.next().is_none(),
+        "invariant: BOYKO_VB_BENCH_GRID must have exactly three `x`-separated fields, got `{spec}`"
+    );
+    assert!(
+        dim_x > 0 && dim_y > 0 && dim_z > 0,
+        "invariant: BOYKO_VB_BENCH_GRID dimensions must be non-zero, got `{spec}`"
+    );
+    (dim_x, dim_y, dim_z)
 }
