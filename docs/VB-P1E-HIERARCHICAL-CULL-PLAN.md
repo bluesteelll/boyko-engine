@@ -1,28 +1,134 @@
-# VB-P1e — hierarchical froxel light cull (implementation plan, Rev 5)
+# VB-P1e — hierarchical froxel light cull (implementation plan, Rev 6)
 
-**Status:** DESIGN, Rev 5 — **NOT APPROVED. DO NOT IMPLEMENT. No reviewer has seen Rev 5**, so it
-carries no approval of any kind.
+**Status:** DESIGN, Rev 6 — **DESIGN SURFACE APPROVED; PROSE FROZEN.** Rev 6 was reviewed after this
+block was written; see the ERRATA + PROSE FREEZE section at the end of this status block for the
+outcome, the corrections, and the one open P0 (which is discharged in code, not here). **Rev 7 will
+not be written.** Implementation proceeds rung by rung: H1 → H1.6 → H2 → H3 → H4, each against its own
+gate; **no rung is authorized by this document alone** — H1.6 in particular re-pins a committed `.spv`
+and carries a zero golden-move budget.
 
-Rev 4 was reviewed by three independent adversarial lenses and consolidated to **0 × P0, 6 × P1** and
-a P2 list. One lens — the **out-of-bounds/UB lens, the class that already shipped a real GPU-UB bug in
-this campaign (VB-P1b C1)** — returned **APPROVED outright**, after splicing §4's HIER arm into the
-real `cluster_cull.hlsl`, compiling it under the frozen recipe, and reproducing every row of §8.3's
-simulation exactly.
+Rev 5 was reviewed and came back **0 × P0, 5 × P1, 6 × P2**. **Rev 6 fixes exactly those eleven and
+changes nothing else.**
 
-**Rev 5 is a bounded edit pass, not a revision of the design.** It fixes exactly those six P1s plus
-ten P2s and changes nothing else. §4, §5 Steps 0–2, §D3, §D7, §D8–§D11, §8.2's guard-tail derivation
-and §7's model were independently re-derived and reproduced by two lenses and are **not reopened** —
-except at the three points a P1 names by line: §4/§D8's absorbing *constant*, §5 Case B's one algebra
-step, and §8.2's fourth honest limit.
+**The remaining defect source is the EDIT PROCESS, not the design — and that is what bounds this
+revision.** Every revision so far has introduced new P1s **at precisely the lines it edited**: Rev 5
+fixed six P1s and created four new ones, all four inside the six paragraphs it touched, none anywhere
+else. Rev 6 therefore changes **only** what a finding names by line, and rewrites no paragraph a
+finding does not name. The load-bearing surface — §4's thread map, §5 Steps 0–2, D7's bound, D8's
+constants and the `NoContraction` construction — survived **two independent re-derivations and a real
+DXC compile** this round with **zero** findings, and is **not reopened**.
 
-### Rev 5 changelog
+**What is now measured rather than modelled (and one of the two cuts against the design):**
+
+* **§10 ABORT clause 1 does NOT fire.** H1's selectivity minimum on a gated config is **7.27x** against
+  the **4x** kill line (`hier_cull_abort_clause_1_does_not_fire`,
+  `crates/boyko_rhi_vulkan/tests/lighting_l1_host_oracle.rs`).
+* **The honest caveat, stated at the top rather than buried in §7.** On the denser **in-frustum** rig
+  the shipping bench config (M2) sits at **7.27x / 7.45x / 7.41x** at `N` in {128, 512, 1022} — i.e.
+  **below the 8x** of this plan's own design gate. That gate (§8.6 assertion 5, `pairs_hier/pairs_flat
+  <= 1/8`) is **scoped to the bench Kronecker rig**, where M2 measures 20.30x/38.60x and passes, so
+  nothing is failing a gate — but the denser rig would **not** clear 8x if the gate were applied to it,
+  and the predicted win is correspondingly **about 6.3x, not 15.8x** (§7, Rev 6 note). Nothing is
+  loosened to accommodate that: §2's `<= 250 000 ns` still clears with 3.2x margin on that rig.
+* **Neither rig is a true dense-scene sample.** Both draw from the *same* collinear point set — the
+  in-frustum rig calls the identical `light_position` formula (`lighting_l1_host_oracle.rs:134`) via
+  `push_point_spot_lights` (`:159`) and differs **only** in pinning the placement-volume scale
+  (`:193`). It fixes §1.4's **volume-growth** defect and **not** its **collinearity** defect.
+
+---
+
+### ERRATA + PROSE FREEZE (appended after Rev 6 was reviewed — this is the last prose revision)
+
+Rev 6 came back **0 × P0** on the design and ~4 × P1, and **every one of those P1s sits at a line Rev 6
+itself edited**, in the prose↔measurement synchronization layer. That is the fifth consecutive
+occurrence of the pattern named at the top of this block, and it triggers the hard stop that was set
+before Rev 6 was written.
+
+**DECISION: the design surface is approved and the prose is FROZEN. Rev 7 will not be written.** The
+residual precision moves out of prose and into code, where the compiler and the runtime are the oracle
+instead of a reviewer's eye. Concretely: §7's table is pinned as literals in
+`crates/boyko_rhi_vulkan/tests/lighting_l1_host_oracle.rs` under the same "MEASURED values — do not
+edit these literals to make a failing run pass" discipline the occupancy table already uses, so a
+drift becomes a **test failure** rather than a review finding. The `NMax(NaN,NaN)` question, the
+e5/e6 selection counts and mutation (vii)'s observable-effect assertion likewise become runtime
+assertions. Corrections below are recorded here as errata; the sections they correct are NOT rewritten.
+
+**Errata (measured; each verified twice independently):**
+
+1. **`N = 64` is present and measured.** §7 and the Rev 6 changelog state that `HIER_MATRIX_N` "dropped
+   `N = 64`" and that §7's break-even is "unsupported pending an N=64 row". Both are stale — the row
+   was restored and measured in the same session. §7's `N = 64` cell reads "not measured"; it is
+   measured: coarse 1536, fine 20 304, hier 21 840.
+2. **§7's `N = 128` row is off by one in both measured columns.** It prints fine **18 719** / hier
+   **21 791**; the measured values are **18 720 / 21 792**. (`N = 8` and `N = 512` are exact.)
+3. **Two new samples close the break-even.** `N = 16`: coarse 384, fine 6768, hier 7152. `N = 20`:
+   coarse 480, fine 8208, hier 8688. Against §7's own constants the froxel arm loses by ~0.72 µs at
+   `N = 16` and wins by ~3.3 µs at `N = 20`, so the crossing is **N ≈ 16.7** — comfortably inside §2's
+   `<= 40` gate, and no longer an interpolation.
+4. **`N = 1022` hier is 78 528, not 78 530.**
+5. **§8.10 item 5b's requirement (b) prose does not describe what makes it work.** Its measured value
+   on the `inject_nan_froxel = None` mirror is `group_coarse_accept[0] == 0` — group 0's coarse box
+   rejects **all** 128 lights, and `< ps_n` admits that fully-degenerate cell. Mutation (vii) stays
+   detectable (coarse 0 against a flat cell holding all 128 ⇒ RED), but for a different reason than
+   "rejects ≥ 1" states.
+
+**One open P0 against this document, to be discharged in code rather than prose:** §8.9's structural
+checks **e5** and **e6** select by "a `NoContraction`-decorated `OpFAdd`" / "`NoContraction`-decorated
+`OpFSub` only". The committed base module has **`NoContraction` = 0** (measured), so both selectors
+select the empty set and both quantifications are **vacuously true** — they would go green on an
+arbitrarily divergent module. Since e5/e6 are exactly the detectors D4's byte-identity premise rests
+on under `-O3` independent inlining, each must additionally **pre-register a non-empty selection
+count** (e5: exactly 2 windows; e6: exactly 2 decorated `OpFSub`; an empty selection is RED). This
+applies under either compile option, not just the one that re-pins the base.
+
+**Rung status at the freeze.** H0 shipped (`0597531`). HP shipped (`34258c2`). H1 is implemented and
+green. **H2 was correctly NOT built**: the developer stopped and escalated because D5/§8.1/§8.9 make
+**H1.6** — the single re-pin of the base `.spv` to the `NoContraction` construction, census
+**12 616 B / 7 `NoContraction` / 8 `OpDot`** against the repo's current **12 392 B / 0 / 9** — a real,
+unmet prerequisite. That escalation is **sustained**: H1.6 runs as its own rung against §8.8's gate
+(zero golden-move budget, 3-run-before/3-run-after perf gate), and must **not** be folded into H2,
+because a zero-move budget and a perf gate are precisely what get waved through when bundled.
+
+### Rev 6 changelog
+
+| # | Sev | What was wrong in Rev 5 | What Rev 6 does |
+|---|---|---|---|
+| 1 | P1 | §8.10 item 3 pre-registered mutation (v)'s RED evidence against **assertions 1 and 2** — the detector labels **A1/A2** misread as table rows. Assertion 1 is `alloc_total < index_list_cap`, a precondition (v) **cannot** falsify, so a reviewer discharges `[P0-B]` off assertion 2 while **assertion 6 — the guard tail, the detector that exists because of the Rev 3 P0 — goes unchecked** | The numbers become **assertion 5** (138 in-range sentinel cells) and **assertion 6** (138 cleared guard-tail cells) at §8.10 item 3, §9 `[P0-B]` and this changelog's Rev 5 row 4. A **CONTROL ARM** is pre-registered: the BASE arm on that config clears **16** tail cells by itself (boot-sourced `ceil(3312/64) = 52` groups = 3328 threads, `passes/vb.rs:215`, against its live-dims guard at `cluster_cull.hlsl:109-114`), so an assertion-6 firing **16** times means the mutation did nothing |
+| 2 | P1 | The per-arm readback protocol named **two** buffers and forbade "any assertion reading a buffer both arms wrote" — which makes assertions **3** and **8** unimplementable, since both arms write `LightIndexList`. Assertion **8** was in **no** evaluation class at all. Result: false RED on a correct pair (the 64- and 256-wide dispatches claim different `InterlockedAdd` offsets, `cluster_cull.hlsl:183`) and false GREEN on detector (C), `[P0-4b']`'s sole discharge | **Three** buffers are named; `LightIndexList` is read back **per arm**, after that arm's dispatch and before the next arm's; assertion 8 joins the **per-arm** class; the rule is restated executably: *every assertion is evaluated on readbacks captured after exactly one arm's dispatch, and no assertion may mix one arm's `ClusterGrid` offsets with the other arm's `LightIndexList`* (§8.2(A), §8.10) |
+| 3 | P1 | Mutation (vii)'s rig precondition failed in **all three** of its readings: **unsatisfiable** (with the injection mitigated, group 0 rejects **zero**, so every GREEN run reports INVALID), **insufficient** (at `N = 512` the per-froxel clamp at `cluster_cull.hlsl:170` lets both arms emit the identical 256-index prefix, so the RED arm passes and "rig-independence needs only rejects >= 1" is false), and it **cited a quantity that does not exist** (H1 exposes `groups`/`ps_n`/`valid_lanes`/`pairs_coarse`/`pairs_fine`, no per-group coarse-accept count) | The (vii) run is **pinned at `N = 128`** (`ps_n < MAX_LIGHTS_PER_CLUSTER = 256`, `light.rs:53`), which makes "coarse rejects >= 1 ⇒ assertion 2 RED" a **theorem**; the precondition's source is the **`inject_nan_froxel = None`** mirror, and its conservatism is *derived* (the un-injected box contains the unmitigated box, so §5 Step 2's monotonicity carries the implication one way only); the **injection point** is pinned **after phase 0's AABB build, before phase 1's finiteness test**; **§8.6 gains deliverable 8**, the per-group coarse-accept count |
+| 4 | P1 | §5 Case B's step "`F(d) = 0 <= r·r` **for every `r`**" is **false for a reachable input**: at `r·r = NaN` the **ordered** `OpFOrdLessThanEqual` makes `0.0 <= NaN` FALSE and the coarse test **rejects**. `L.range` is unvalidated (`light.rs:884-885`, `:1008`, `:1012`) and the repo already ships a non-finite `.w` in that lane (`:994`). §5.2's "exactly three named premises" under-counted, since Premise F named only `L.pos` | The step is scoped to "every `r` whose `r·r` is not NaN" plus the NaN case written out — **both levels reject, so the implication holds DIRECTLY rather than vacuously and byte-identity is preserved** (the flat arm emits nothing for that light either). The Corollary is amended; **Premise F is widened** to `L.pos` finite **AND** `L.range` not NaN, with the premise count restated as a conjunction. **A proof-text defect, not an algorithm defect** — no constant, branch or gate moves |
+| 5 | P1 | §7's fine column was labelled "the number H1 replaces with a measurement", but §8.7's re-derivation and §10 ABORT clause 2 both **execute** the literal `32 300`. H1 measured: `N=8` → **3 648**, `N=128` → **21 791** (plan **2.63x LOW**), `N=512` → **45 840** (plan **1.42x LOW**). §7's break-even (`N ~ 17–19`) interpolates between `N = 8` and `N = 64`, but `HIER_MATRIX_N` **dropped `N = 64`** and has **no sample in 16–20** | §7's table carries the **measured** fine/hier columns (with Rev 4's model kept beside them so the sign of the error stays visible); ABORT clause 2 and §8.7's recipe execute **45 840**; the break-even interpolation is declared **unsupported pending an `N = 64` and a 16–20 sample**. The corrected numbers **still clear §2** — `13 939 + 0.2736 x 45 840 = 26.5 us` (kronecker), `78.9 us` (in-frustum) against the `250 000 ns` gate — **and no gate is loosened** |
+| P2-1 | P2 | §8.3 asserted `NMax(NMax(NaN,NaN),0) = 0` as fact where §5.1 calls the both-NaN case **undefined**; H3 assertion 4's (vii) row rides on it | Closed by a **one-dispatch device probe** (one froxel, one light, all-NaN AABB, assert `sq_dist == 0.0`), per this plan's own measured-not-argued standard. Failure direction is false-RED, i.e. safe |
+| P2-2 | P2 | §5.1's fold enumeration still listed **two** stored values; Rev 5 added a **third** (`±FLT_MAX`) in the same pass | The enumeration lists all three. `FLT_MAX` is finite, so the conclusion is untouched |
+| P2-3 | P2 | §9's `[P0-4b]` chain printed `== MAX_LIGHTS` on a groupshared-**WRITE** bound row, where `MAX_LIGHTS` carries the device **READ** bound | Trimmed to `HIER_MASK_WORDS*32 == 1024`, with `MAX_LIGHTS`'s role (D6's equality pin) named separately |
+| P2-4 | P2 | §8.3's saturation check said froxel 168 "claims `N` indices" three lines above "clamped by 256" | `min(N, max_lights_per_cluster)`, with the pinned `N = 128` case spelled out |
+| P2-5 | P2 | Rev 5's P2-3 insertion landed **inside** the HLSL code fence, between `load_light_header` and `ps_begin` | Moved out verbatim, below the fence |
+| P2-6 | P2 | Rev 5's changelog row 2 cites "§5 `:1592-1595`", which is **§4 prose** in the file it shipped in — a Rev-4-relative, unlabelled line citation | Re-cited by **section and construct** rather than by line number, which is also why Rev 6 adds no new doc-internal line citations |
+
+---
+
+*Rev 5's own header text, retained verbatim — it carries the Rev 4 review provenance:*
+
+> Rev 4 was reviewed by three independent adversarial lenses and consolidated to **0 × P0, 6 × P1** and
+> a P2 list. One lens — the **out-of-bounds/UB lens, the class that already shipped a real GPU-UB bug in
+> this campaign (VB-P1b C1)** — returned **APPROVED outright**, after splicing §4's HIER arm into the
+> real `cluster_cull.hlsl`, compiling it under the frozen recipe, and reproducing every row of §8.3's
+> simulation exactly.
+>
+> **Rev 5 is a bounded edit pass, not a revision of the design.** It fixes exactly those six P1s plus
+> ten P2s and changes nothing else. §4, §5 Steps 0–2, §D3, §D7, §D8–§D11, §8.2's guard-tail derivation
+> and §7's model were independently re-derived and reproduced by two lenses and are **not reopened** —
+> except at the three points a P1 names by line: §4/§D8's absorbing *constant*, §5 Case B's one algebra
+> step, and §8.2's fourth honest limit.
+
+### Rev 5 changelog (retained; two rows corrected inline by Rev 6)
 
 | # | Sev | What was wrong in Rev 4 | What Rev 5 does |
 |---|---|---|---|
 | 1 | P1 | §8.3's mutation **(vii)** was broken in **both** arms: its detector (H3 assertions 2/3) is an **arm-vs-arm** comparison but the injection was one-sided, so the GREEN arm cannot be green regardless of the mitigation; `lane == 7` names **disjoint froxel sets** in a 64-wide and a 256-wide module; and the stated RED mechanism does not follow (`coarse_min.x` is the min over 144 froxels and froxel `x=0` supplies it, and with only `aabb_min.x` poisoned `d` still rejects on y/z/+x) | (vii) is re-specified on a **froxel-identity** predicate (`fi == 168u`), poisons **all six** AABB components, and is **mirrored in the HIER module, the base module and the host mirror**. The GREEN/RED derivation is written out and is **rig-independent**, with an explicit rig requirement in (ii)/(iii)'s form (§8.3, §8.10 item 5) |
-| 2 | P1 | The absorbing constant `±1e30` **inverts enclosure for any finite light centre with `\|c_j\| > 1e30`** — the coarse level rejects (`c_j − 1e30 > 0` ⇒ `F = inf`) while the poisoned lane's own all-NaN fine test gives `F = 0` and accepts. §5 `:1592-1595`, §5's "unconditional", and D4 clause (c)'s deletion all rest on that step | The absorbing element becomes **`±FLT_MAX`** (§4, §D8, §5 Case B), which still absorbs against the `±1e30` identity and holds for **every** finite centre. The `1e30` **finiteness threshold** is a different constant with a different job and is **deliberately left alone** — §5 says so explicitly so a later reader does not "unify" them. The one surviving premise — the light centre must be finite — is named (**Premise F**, §5.2) instead of being left implicit |
+| 2 | P1 | The absorbing constant `±1e30` **inverts enclosure for any finite light centre with `\|c_j\| > 1e30`** — the coarse level rejects (`c_j − 1e30 > 0` ⇒ `F = inf`) while the poisoned lane's own all-NaN fine test gives `F = 0` and accepts. ~~§5 `:1592-1595`~~ **[Rev 6 P2-6: the correct citation is §5 Step 3's *Case B* bullet and its Rev 5 note — `:1592-1595` was Rev-4-relative and unlabelled, and lands in §4 prose in the file Rev 5 shipped]**, §5's "unconditional", and D4 clause (c)'s deletion all rest on that step | The absorbing element becomes **`±FLT_MAX`** (§4, §D8, §5 Case B), which still absorbs against the `±1e30` identity and holds for **every** finite centre. The `1e30` **finiteness threshold** is a different constant with a different job and is **deliberately left alone** — §5 says so explicitly so a later reader does not "unify" them. The one surviving premise — the light centre must be finite — is named (**Premise F**, §5.2) instead of being left implicit |
 | 3 | P1 | §9's `[P0-4b]` row claimed mutation (iv) can make `(j>>5)` exceed 31. Arithmetically impossible: (iv) loops `j < HIER_MASK_BITS == 32*32 == 1024`, so `j>>5 ≤ 31` — in range for `gs_mask[32]`. The plan proves this itself at D7 `:843-845` and routes (iv) to detector (C) at both `:2046` and D7 | The row answers **NO**, and names what carries the bound instead: `ps_n ≤ ps_room ≤ HIER_MASK_BITS == MAX_LIGHTS == HIER_MASK_WORDS*32`, with `MAX_LIGHTS = 1024` pinned at `crates/boyko_render/src/light.rs:51`, carried by D6's equality assert plus H2(f)'s `#error`. Precedent for a **NO** in that column already exists in four other rows |
-| 4 | P1 | H3 assertion 10 forbids post-boot `ClusterConfig` edits, but mutation (v) **requires** boot 16×9×23 with live 16×9×24, and the RED-if blankets all ten assertions on every mutation run — so the (v) run aborts at the precondition and `[P0-B]`'s only discharge had **no executable gate** | An explicit **`allow_skew` driver flag** scopes assertion 10 to the equality/totality runs; the (v) run records assertion 1's 138 gaps and assertion 2's 138 cleared tail cells **individually** (§8.10 item 3, §9 `[P0-B]`) |
+| 4 | P1 | H3 assertion 10 forbids post-boot `ClusterConfig` edits, but mutation (v) **requires** boot 16×9×23 with live 16×9×24, and the RED-if blankets all ten assertions on every mutation run — so the (v) run aborts at the precondition and `[P0-B]`'s only discharge had **no executable gate** | An explicit **`allow_skew` driver flag** scopes assertion 10 to the equality/totality runs; the (v) run records ~~assertion 1's~~ **assertion 5's** 138 gaps and ~~assertion 2's~~ **assertion 6's** 138 cleared tail cells **individually** (§8.10 item 3, §9 `[P0-B]`) — **[Rev 6 P1: Rev 5 wrote "assertion 1 / assertion 2", reading the detector labels A1/A2 as table rows; assertion 1 is a precondition (v) cannot falsify, so that wording left assertion 6 unchecked]** |
 | 5 | P1 | §8.2(A)'s pre-fill was bound to the **allocation**, but the matrix is **arm-vs-arm** — two dispatches per config sharing one buffer. Mutation (vi) at E2 then leaves 6144 in-range cells holding the *base* arm's correct result (assertions 2/3/4/5 all false-GREEN), and `alloc_total == capacity` false-REDs on whichever arm runs second | A **fourth honest limit**: the driver re-fills/zeroes **immediately before each arm's dispatch** and reads back **before** the next fill; per-arm assertions are evaluated on that arm's own readback, comparison assertions on two separately captured readbacks, and **no assertion may read a buffer both arms wrote** (§8.2(A), §8.10) |
 | 6 | P1 | H0's deliverable "print the device's SM count from `VkPhysicalDeviceProperties`" is unimplementable — core `VkPhysicalDeviceProperties` exposes no SM count (it needs `VK_NV_shader_sm_builtins::shaderSMCount`, which this device never enables), and `grep -rniE "sm_count\|shaderSMCount\|multiprocessor\|SHADER_SM_BUILTINS" crates/` returns **zero** hits | The bullet is **deleted**; §D3's 28 SMs is relabelled an **owner-stated device fact** everywhere it appears (§D3, §7.0), and the occupancy prose no longer reads as if it were measured |
 | P2-1 | P2 | Three §7/§D3 numbers do not reproduce — all **conservative** (they make the design look worse) and no gate consumes them | `≈ 51 µs` / `≈ 50 µs` → **31.6 µs** (a 15.8× win, not 10×); break-even at the 2×-pessimistic rate `≈ 25–30` → **19**; `q = 1.295563` → **1.2955587** (and `q²`, `q³` with it). The corrections move the prediction **in the design's favour**, which is a reason for more caution, not less: no gate is loosened |
@@ -900,16 +1006,22 @@ header words):
 
 LightHeader hd = load_light_header(LightBuf);
 
-*(The third guard is new in Rev 5 (P2). `HIER_TPG` was the one `#define` with no `#error` behind it,
-yet D9's fold hardcodes both `16` and `256u` and §4 phase 1's `if (lane < HIER_MASK_WORDS)` init
-assumes `HIER_TPG >= HIER_MASK_WORDS`; a silent `HIER_TPG` edit would leave the fold reading
-uninitialised slots. Two lines, and H2(f) already has the mechanism to test it — the same scratch-copy
-rewrite-and-expect-a-compile-failure it runs for `HIER_MASK_WORDS`.)*
 uint ps_begin = hd.l0a_count;
 uint ps_room  = (ps_begin < HIER_MASK_BITS) ? (HIER_MASK_BITS - ps_begin) : 0u;
 uint ps_total = (hd.light_count > ps_begin) ? (hd.light_count - ps_begin) : 0u;
 uint ps_n     = min(ps_total, ps_room);
 ```
+
+*(**Rev 6 P2-5 — placement fix, no content change.** The paragraph below is Rev 5's P2-3 note. Rev 5
+spliced it **inside** this fenced HLSL block, between `load_light_header` and `ps_begin`, where it is
+not a comment in any language: an implementer copying the fence gets five lines of prose in the middle
+of the shader. It is moved out verbatim.)*
+
+*(The third guard is new in Rev 5 (P2). `HIER_TPG` was the one `#define` with no `#error` behind it,
+yet D9's fold hardcodes both `16` and `256u` and §4 phase 1's `if (lane < HIER_MASK_WORDS)` init
+assumes `HIER_TPG >= HIER_MASK_WORDS`; a silent `HIER_TPG` edit would leave the fold reading
+uninitialised slots. Two lines, and H2(f) already has the mechanism to test it — the same scratch-copy
+rewrite-and-expect-a-compile-failure it runs for `HIER_MASK_WORDS`.)*
 
 Both branches are uint-underflow-proof by construction. For **any** 32-bit header bytes whatsoever:
 
@@ -1650,9 +1762,13 @@ no rounding: the result is one of the inputs. Measured (M2/M5) — and this is t
 wrong — HLSL `min`/`max` lower here to **`GLSL.std.450 NMin`/`NMax`** (`NMin` 8, `NMax` 18), **not**
 `FMin`/`FMax` (both 0), in the committed module and in every `precise` variant.
 
-Because §4 phase 1 stores only `±1e30` sentinels or a lane's own **finite** AABB, **every value
-entering the fold is finite**, so `NMin`/`NMax` are the exact componentwise extremum with no appeal
-to their NaN clauses at all. Hence, componentwise and exactly, `MIN_j <= stored_min_{i,j}` and
+Because §4 phase 1 stores one of exactly **three** values — the `!valid` identity `(+1e30, −1e30)`,
+the non-finite lane's absorbing `(−FLT_MAX, +FLT_MAX)`, or a lane's own **finite** AABB — **every
+value entering the fold is finite**, so `NMin`/`NMax` are the exact componentwise extremum with no
+appeal to their NaN clauses at all. *(Rev 6 P2-2: Rev 5 introduced the `±FLT_MAX` store in the same
+pass that fixed this proof but left the enumeration here at two values. `FLT_MAX` is finite, so the
+conclusion is unchanged; the enumeration was simply incomplete inside the proof it belongs to. All
+three are read off the phase-1 HLSL at §4 — `store_min`/`store_max`'s three branches.)* Hence, componentwise and exactly, `MIN_j <= stored_min_{i,j}` and
 `MAX_j >= stored_max_{i,j}` for every lane `i` and axis `j`. Fold order is irrelevant: `min`/`max`
 are exactly associative and commutative, so D9's radix-16 shape is as sound as any tree, and D2's
 corollary already covers it. (Sign-of-zero: when a component holds both `+0.0` and `−0.0` the
@@ -1684,9 +1800,27 @@ two `OpFSub` included, which is why Rev 4 moved `precise` onto `d`.
   `(−FLT_MAX, +FLT_MAX)`, so `MIN_j = −FLT_MAX` and `MAX_j = +FLT_MAX` on every axis. For any
   **finite** light centre `c` we have `−FLT_MAX <= c_j <= FLT_MAX` by definition of `FLT_MAX`, hence
   `−FLT_MAX − c_j <= 0` (or `−inf` on overflow, still `<= 0`) and `c_j − FLT_MAX <= 0`, so
-  `d_j = NMax(NMax(−FLT_MAX − c_j, c_j − FLT_MAX), 0) = 0` and `F(d) = 0 <= r·r` for every `r`. **The
-  coarse test accepts every punctual light with `j < ps_n`, so its hypothesis is never satisfied and
-  the implication holds vacuously.**
+  `d_j = NMax(NMax(−FLT_MAX − c_j, c_j − FLT_MAX), 0) = 0` and `F(d) = 0 <= r·r` for every `r` **whose
+  `r·r` is not NaN**. **The coarse test accepts every such punctual light with `j < ps_n`, so its
+  hypothesis is never satisfied and the implication holds vacuously.**
+
+  > **Rev 6 P1 fix — the `for every r` was false for a REACHABLE input, and the conclusion survives
+  > anyway.** The cull compare is the **ordered** `OpFOrdLessThanEqual` (measured: the committed module
+  > carries exactly one, and §5.1's M11 census distinguishes it from the `%v3bool` finiteness compares
+  > by result type), so `0.0 <= NaN` is **FALSE** and at `r·r = NaN` the coarse test **rejects**.
+  > `L.range` is not validated anywhere on the host path: `PointLight::new` stores the caller's `range`
+  > verbatim (`crates/boyko_render/src/light.rs:884-885`) and `GpuLight::from_point` copies it into
+  > `pos_range[3]` unchanged (`:1008`, `:1012`), and the repository already ships a **non-finite** `.w`
+  > in that same lane — `f32::INFINITY` for directional lights (`:994`, pinned by the unit test at
+  > `:1448`). *(That directional row never reaches the compare — the cull `continue`s on kind,
+  > `shaders/cluster_cull.hlsl:163-165` — so it is evidence that the lane is unvalidated, not that a NaN
+  > range reaches the compare today. `r = inf` is harmless: `r·r = inf` and `0.0 <= inf` is true.)*
+  >
+  > **What changes: nothing but the proof text.** At `r·r = NaN` the **fine** test rejects for the same
+  > reason (same ordered compare, same NaN), so coarse-rejects ⇒ fine-rejects holds **directly** rather
+  > than vacuously, and D4's byte-identity holds because the flat arm emits nothing for that light
+  > either. This is a proof-text defect, not an algorithm defect: no constant, no branch and no gate
+  > moves. The premise it adds is recorded as the widened **Premise F** (§5.2), not as a scope clause.
 
   > **Rev 5 P1 fix — this exact step was WRONG in Rev 4, and three other claims rested on it.** Rev 4
   > wrote the absorbing element as `(−1e30, +1e30)` and asserted `d_j = 0` "for any finite light centre
@@ -1721,8 +1855,10 @@ Well-defined, no NaN, no UB. A fully-invalid group cannot occur by construction:
 `gps·bdz` groups with `gps = ceil(bdx·bdy/256)`, so every group's `s` range starts below `bdx·bdy`.
 
 **Corollary (this is what makes D4 clause (c) deletable).** In Case B the coarse mask ends up
-containing **every** punctual index `j < ps_n`, so the fine walk visits exactly the flat arm's index
-range, in ascending order, applying the token-identical predicate and clamp. Every froxel in that
+containing every punctual index `j < ps_n` **whose `r·r` is not NaN** — and a `r·r = NaN` light is
+absent from the flat arm's emission too, for the same ordered compare (Rev 6 P1) — so the fine walk
+visits exactly the flat arm's **emitted** index range, in ascending order, applying the token-identical
+predicate and clamp. Every froxel in that
 group therefore emits **exactly the flat arm's sequence** — including the non-finite froxel itself,
 whose own fine test computes the same `sq_dist` from the same NaN AABB in both arms. Byte-identity is
 preserved, not excused.
@@ -1813,8 +1949,9 @@ predicted 15.9 microseconds at `N=8`. **H4 gate (e) measures it**; the plan does
 * **It does not need** a dilation constant, an epsilon, or an assumption that two *sites* compile
   identically. (They need not — they need only be `F`.)
 * **It does not need** a finiteness scope clause any more. Case B carries it.
-* **It does need exactly three named premises. Two are discharged in the artifact; the third is named
-  and explicitly NOT discharged:**
+* **It does need exactly three named premises — one of which is a CONJUNCTION of two conditions on the
+  light row (Rev 6 P1). Two are discharged in the artifact; the third is named and explicitly NOT
+  discharged:**
 
   > **Premise P.** *Every arithmetic node in `sq_dist_point_aabb` is a correctly-rounded,
   > `NoContraction`-decorated SPIR-V op, and the two `NMax` nodes return an operand bit-exactly.*
@@ -1834,7 +1971,18 @@ predicted 15.9 microseconds at `N=8`. **H4 gate (e) measures it**; the plan does
   > **Discharged by §4 phase 3** (every lane folds the same 16 slots), gated by D8 review item 6 and
   > by H3 mutation (ii), which replaces the fold with lane 0's value and must go RED.
 
-  > **Premise F (NEW in Rev 5).** *Every punctual light's centre `L.pos` is finite.*
+  > **Premise F (NEW in Rev 5; WIDENED in Rev 6).** *Every punctual light's centre `L.pos` is finite
+  > **and** its `L.range` is not NaN.*
+  >
+  > **Rev 6 P1 — why the second conjunct is here.** Rev 5 named only `L.pos`, and §5 Case B's algebra
+  > then read "`F(d) = 0 <= r·r` for every `r`", which is false at `r·r = NaN` under the **ordered**
+  > compare. The two conjuncts are the same kind of fact (an unvalidated light-table lane —
+  > `light.rs:884-885` / `:1008` / `:1012`) and cost the same closure, so they are one premise rather
+  > than a fourth. They differ in consequence, and the difference is stated rather than smoothed: a
+  > non-finite **centre** breaks Case B's enclosure and **costs D4's byte-identity**; a NaN **range**
+  > does **not** — both levels reject it, so the arms still agree (§5 Case B's Rev 6 note). Premise F
+  > is therefore load-bearing only in its `L.pos` half; the `L.range` half is named so the proof text
+  > is true as written.
   >
   > **NOT discharged.** No host path validates light-position finiteness today, and Rev 5 does not add
   > one — a repo-wide claim to the contrary would be exactly the kind of unbacked assertion this
@@ -1912,21 +2060,49 @@ pairs_hier(N) = 24·N                       (coarse, phase 4)
               + sum over froxels of E_coarse(parent)   (fine, phase 5)
 ```
 
-| `N` | flat pairs | coarse | fine (est.) | hier pairs | ratio | model cull hier | measured cull flat |
-|---|---|---|---|---|---|---|---|
-| 8   | 27 648    | 192    | approx 6 900  | approx 7 100  | 3.9x | approx 15.9 us | 19.7 us |
-| 64  | 221 184   | 1 536  | approx 5 000  | approx 6 500  | 34x  | approx 15.7 us | 72.7 us |
-| 128 | 442 368   | 3 072  | approx 5 200  | approx 8 300  | 53x  | approx 16.2 us | 134.9 us |
-| 512 | 1 769 472 | 12 288 | approx 20 000 | approx 32 300 | 55x  | approx 22.7 us | 498.1 us |
+**Rev 6: the fine and hier columns are now MEASURED, not modelled** (H1, config **M2** — 16x9x24
+PERSPECTIVE, the VB-P1d bench camera, capacity 3456, 24 groups — on the bench **Kronecker** rig
+`lights_for`, `crates/boyko_rhi_vulkan/tests/lighting_l1_host_oracle.rs:177`). `fine = hier − coarse`;
+`hier` is `HierCullStats::pairs_hier()` (`crates/boyko_rhi_vulkan/src/goldens.rs:3680`); `ratio` is the
+selectivity the H1 test prints. Rev 4's modelled figures are kept in the last column so the size and
+the SIGN of the model error stay visible:
 
-`froxel_total_hier(N) = 26 500 + 13 939 + 0.2736·pairs_hier(N)` gives break-even against
-`flat_shade(N) = 23 922 + 1 109.6·N` at **`N ~ 17`**, not Rev 2's 16: from this table's own fine
-column, at `N=16` flat still wins (41 676 vs 42 358) and at `N=17` hier wins (42 355 vs 42 785). It
-is necessarily **above** §7.1's floor. At a 2x-pessimistic marginal rate (`0.5472 ns/pair`) the
-break-even is **`N = 19`**, from this table's own fine column: interpolating gives
-`pairs_hier(18) ~ 6 993` (hier 44 265 vs flat 43 895 — flat wins) and `pairs_hier(19) ~ 6 983`
-(hier 44 260 vs flat 45 004 — hier wins). The conclusion is robust to a 2x model error: at
-`0.5472 ns/pair` the `N=512` cull is `13 939 + 0.5472 x 32 300 = about 31.6 us`, a **15.8x** win.
+| `N` | flat pairs | coarse | **fine (measured)** | **hier (measured)** | ratio | model cull hier | measured cull flat | Rev 4 modelled hier |
+|---|---|---|---|---|---|---|---|---|
+| 8    | 27 648    | 192    | **3 456**  | **3 648**  | 7.58x  | approx 14.9 us | 19.7 us  | approx 7 100 (**1.95x HIGH**) |
+| 64   | 221 184   | 1 536  | **not measured** | **not measured** | — | — | 72.7 us | approx 6 500 |
+| 128  | 442 368   | 3 072  | **18 719** | **21 791** | 20.30x | approx 19.9 us | 134.9 us | approx 8 300 (**2.63x LOW**) |
+| 512  | 1 769 472 | 12 288 | **33 552** | **45 840** | 38.60x | approx 26.5 us | 498.1 us | approx 32 300 (**1.42x LOW**) |
+| 1022 | 3 532 032 | 24 528 | **approx 54 000** | **approx 78 528** | 44.98x | approx 35.4 us | — | — |
+
+*Provenance and its one limit.* The three exact rows reproduce the selectivity the shipped H1 test
+prints to six decimals (`3648/27648 = 0.131944`, `21791/442368 = 0.049262`, `45840/1769472 = 0.025906`
+— the printed table's M2 rows). The `N=1022` row is **not exact**: the test prints the ratio, not the
+count, and `0.022233` pins `hier` only to `78 526–78 529`, so it is written `approx`. *(Rev 6 records,
+and does not silently apply, that the count handed to this revision for that row — `78 530` — does not
+reconcile with the printed selectivity; it would print `0.022234`.)* **One-line follow-up, in the same
+form as Rev 5's P2-7:** H1's selectivity `eprintln!` should also print `stats.pairs_coarse` /
+`stats.pairs_fine`, so this table is reproducible from the artifact rather than from a derivation. Rev
+6 does not edit that test.
+
+`froxel_total_hier(N) = 26 500 + 13 939 + 0.2736·pairs_hier(N)` against
+`flat_shade(N) = 23 922 + 1 109.6·N` gave break-even `N ~ 17` (and `N = 19` at the 2x-pessimistic
+`0.5472 ns/pair`) **by interpolating this table's fine column between `N = 8` and `N = 64`**.
+**Rev 6: that interpolation is now UNSUPPORTED and no number replaces it.** H1's matrix is
+`[0, 8, 128, 512, 1022]` (`lighting_l1_host_oracle.rs:346`) — it **dropped `N = 64` and has no sample
+anywhere in 16–20**, which is exactly the interval the estimate lives in and exactly where the model
+error is largest and **changes sign** (model `1.95x` HIGH at `N=8`, `2.63x` LOW at `N=128`). What can
+honestly be said without a new measurement: the measured `N=8` point is **lower** than Rev 4 modelled
+it (3 648 vs approx 7 100). **Rev 6 deliberately does not turn that into a direction for the crossing**
+— the crossing sits at `N ~ 17`, between the only two measured points, and the model error reverses
+sign across exactly that interval, so a one-sided extrapolation from `N=8` would be the same move this
+document keeps catching. **Recovering a break-even number requires an `N = 64` row and at least one
+sample in 16–20 in `HIER_MATRIX_N`** — a test-data edit, not a design change. Until then §2's `<= 40`
+**measured** break-even gate stands unchanged and H4 remains its only arbiter; no gate is loosened on
+the strength of an interpolation that no longer has endpoints.
+
+The `N=512` conclusion is robust to a 2x model error on the *measured* count: at `0.5472 ns/pair` the
+cull is `13 939 + 0.5472 x 45 840 = about 39.0 us` against a measured flat `498.1 us`.
 
 > **Rev 5 arithmetic correction, and which way it cuts (P2).** Rev 4 printed `about 51 us` / `10x`
 > here and `25–30` for the pessimistic break-even. Neither recomputes from its own inputs, and both
@@ -1935,11 +2111,36 @@ break-even is **`N = 19`**, from this table's own fine column: interpolating giv
 > **no gate consumes these numbers.** §2's ship gate stays `<= 250 000 ns` and `<= 40` measured
 > break-even, §10's ABORT clauses are unchanged, and H4 remains the only arbiter.
 
-**Fine-column derivation (the number H1 replaces with a measurement).** From §1.4's collinearity
-result, the in-frustum lights at `N=512` are the roughly 14 % of the rig lying at view-depth
-8.7–14.4, i.e. z-slices 17–19 of 24. Those three groups therefore carry about 40 candidates each over
-their 144 froxels (3 x 144 x 40 = 17 280); the remaining 21 groups carry about 0–2 (about 3 000). H1
-computes this exactly, per config, on the CPU.
+> **Rev 6 — the measurement arrived, and it cuts the OTHER way at `N >= 128`. Every gate still
+> clears, and none is loosened (P1).** Rev 4/Rev 5's model was **2.63x low** at `N=128` and **1.42x
+> low** at `N=512` — the design is *less* selective than its own model claimed, not more. Against §2's
+> `<= 250 000 ns` ship gate, on §1.2's rate:
+> * **Kronecker (bench) rig:** `13 939 + 0.2736 x 45 840 = 26.5 us` — 9.4x inside the gate.
+> * **Dense in-frustum rig:** selectivity `7.45x` at `N=512` (H1, M2) ⇒ `pairs_hier ~ 237 500` ⇒
+>   `13 939 + 0.2736 x 237 500 = 78.9 us` — still 3.2x inside the gate.
+>
+> **The honest predicted win is therefore `498.1 / 78.9 = about 6.3x`, not 15.8x.** The flat arm's
+> cost is rig-independent (it tests `capacity x N` pairs wherever the lights sit), so the measured
+> `498.1 us` transfers across rigs; only the hierarchical arm's cost is rig-sensitive. §2's thresholds,
+> §10's ABORT clauses and H4's arbiter role are unchanged — a smaller predicted win is a reason to
+> keep every gate exactly where it is.
+>
+> **Where the modelled `32 300` deliberately still stands, and why (so no later reader "finishes the
+> job").** Two places keep it: **§7.0's Reading A** — that number is a **pre-registration**, and §7.0
+> exists precisely so H4 cannot be retro-fitted, so rewriting it after the measurement would destroy
+> the artifact's only function; and **§D3's `TPG` comparison table**, where the same modelled figure
+> appears on **both** compared rows, so the comparison it serves is unaffected by the model error. The
+> two places that **execute** the number — §8.7's re-derivation recipe and §10 ABORT clause 2 — are
+> corrected to the measured **45 840**. Pre-registrations are frozen; operative literals are measured.
+
+**Fine-column derivation — SUPERSEDED by measurement (Rev 6), kept because the size of the miss is the
+point.** The paragraph below modelled `N=512` fine at `17 280 + 3 000 = about 20 000`; H1 measured
+**33 552**, i.e. the concentration argument under-counted by 1.7x. It is retained, unedited, as the
+record of what the model said before it was falsifiable — not as a live derivation. *(From §1.4's
+collinearity result, the in-frustum lights at `N=512` are the roughly 14 % of the rig lying at
+view-depth 8.7–14.4, i.e. z-slices 17–19 of 24. Those three groups therefore carry about 40 candidates
+each over their 144 froxels (3 x 144 x 40 = 17 280); the remaining 21 groups carry about 0–2 (about
+3 000). H1 computes this exactly, per config, on the CPU.)*
 
 ### 7.0 What this table is a bound on — pre-registered, so H4 cannot be retro-fitted
 
@@ -2107,10 +2308,31 @@ revision exists to fix:**
      because `LightIndexAlloc` accumulated both arms' claims.
 
    **Protocol, therefore:** the driver **re-fills `ClusterGrid` with the sentinel and re-zeroes
-   `LightIndexAlloc` immediately before each arm's dispatch**, and **reads both back before the next
-   fill**. Per-arm assertions (1, 5, 6, 7) are evaluated on that arm's own readback; comparison
-   assertions (2, 3, 4) compare the **two separately captured** readbacks. The general rule, stated so
-   it survives future configs: **no assertion may read a buffer that both arms wrote.**
+   `LightIndexAlloc` immediately before each arm's dispatch**, and reads back **all THREE** buffers —
+   `ClusterGrid`, `LightIndexAlloc` **and `LightIndexList`** — after that arm's dispatch and **before
+   the next arm's dispatch**. Per-arm assertions (1, 5, 6, 7, 8) are evaluated on that arm's own
+   readback; comparison assertions (2, 3, 4) compare the **two separately captured** readbacks.
+
+   > **Rev 6 P1 fix — the enumeration omitted `LightIndexList`, and Rev 5's general rule forbade the
+   > assertions that read it.** Rev 5 named two buffers here and wrote the rule as "**no assertion may
+   > read a buffer that both arms wrote**". Both arms write `LightIndexList` under every protocol, so
+   > that rule makes assertion 3 (per-froxel index **sequence** equality — `[P0-3]`'s whole content) and
+   > assertion 8 (detector (C), the sole discharge of `[P0-4b']`) *unimplementable as written*, and an
+   > implementer who follows the two-buffer enumeration instead reads `LightIndexList` **once, at the
+   > end**. That is a live wrong-answer machine in both directions:
+   > * **false RED on a correct pair.** The two arms hand each froxel **different** slice offsets: the
+   >   offset comes from one global `InterlockedAdd` (`shaders/cluster_cull.hlsl:183`) and the 64-wide
+   >   flat dispatch and the 256-wide hierarchical dispatch claim in different orders. Arm A's
+   >   `ClusterGrid` offsets indexed into an arm-B-overwritten `LightIndexList` read **another froxel's
+   >   slice**, and assertion 3 fails on a byte-identical pair.
+   > * **false GREEN on detector (C).** Assertion 8 scans the *surviving* list. Scanned once at the end,
+   >   it inspects only the second arm's writes over the second arm's allocation — the mutated arm's
+   >   out-of-range indices can be gone.
+   >
+   > **The rule is restated in the form that is actually executable:** *every assertion is evaluated on
+   > readbacks captured after **exactly one** arm's dispatch, and **no assertion may mix one arm's
+   > `ClusterGrid` offsets with the other arm's `LightIndexList`.*** Comparison assertions compare two
+   > such single-arm captures; they never compare a buffer to itself across arms.
 
 #### (B) The permutation probe — exactly-once, on device, with **no shader change**
 
@@ -2269,6 +2491,18 @@ GREEN arm, could not go RED for the stated reason, and did not name the same fro
   both modules **and** in the host mirror (Rust's `f32::max` returns the non-NaN operand exactly as
   `NMax` does — that agreement is load-bearing and is a review item for H1's implementer). ⇒ **GREEN**,
   on all of assertions 2, 3 and 4.
+
+  > **Rev 6 P2-1 — `NMax(NMax(NaN, NaN), 0) = 0` is asserted here as a fact, but §5.1 says the
+  > both-NaN case is UNDEFINED. Close it by measuring, not by arguing.** §5.1's reading is the safe
+  > one: whatever the inner `NMax` returns, the outer has the non-NaN operand `0.0`, so the *outer*
+  > result is `0.0` — but "the outer `NMax` returns the non-NaN operand" is itself the spec clause
+  > whose both-NaN branch is undefined *if the inner result is NaN*, and this plan's own standard is
+  > measured-not-argued. **Gate:** H3's driver runs **one extra single-dispatch config** — one froxel,
+  > one light, `aabb_min = aabb_max = asfloat(0x7FC00000u).xxx`, no hierarchy — and asserts the emitted
+  > `sq_dist` is exactly `0.0` on this device. It costs one dispatch and it is the only thing H3
+  > assertion 4's (vii) row rests on. **Failure direction is safe** (if the device returned NaN the
+  > compare rejects, (vii)'s GREEN arm goes red, and the design is not wrong — the *pre-registration*
+  > is), which is why this is a P2 and not a blocker.
 * **Unmitigated** (the finiteness predicate deleted). Froxel 168's NaN is **dropped from the fold** by
   `NMin`/`NMax`, so the coarse box is the extremum over the other 143 froxels and the mask is the
   **coarse-accepted subset**. Froxel 168's all-NaN fine test still accepts everything it visits — but it
@@ -2278,20 +2512,54 @@ GREEN arm, could not go RED for the stated reason, and did not name the same fro
   coarse level rejects at least one punctual light for group 0.
 * **Rig-independence — this is why the form is better, and it is stated rather than assumed.** The
   RED condition is a property of the *coarse level's selectivity*, not of where any light sits: it
-  needs only "group 0's coarse box rejects >= 1 punctual light", which H1's own selectivity gate
-  (`pairs_hier / pairs_flat <= 1/8`) guarantees globally. Rev 4's form, by contrast, needed an
-  off-screen-left light arrangement it never specified.
-* **Rig requirement (in the same form mutations (ii) and (iii) already carry).** The (vii) run must use
-  a config in which **group 0's coarse box rejects at least one punctual light**, and the driver
-  asserts that from H1's per-group coarse-accept count **before** evaluating the arm comparison — so a
-  vacuous RED arm (coarse rejects nothing ⇒ HIER == BASE ⇒ green) is reported as an invalid run, not as
-  a pass. On the bench rig at `N >= 64` slice 0 is a thin near-plane slab and rejects nearly every
-  light, so the requirement is satisfied with margin; it is asserted rather than assumed.
-* **Saturation check:** froxel 168 alone claims `N` indices in the mitigated arm. At `N = 512` on the
-  bench rig the total is `~2 597 + 512 = ~3 109` against `INDEX_LIST_CAP = 16 384`, so §6's
-  `alloc_total < index_list_cap` precondition (assertion 1) still holds and the run is non-saturating.
-  Froxel 168's own count is clamped by `max_lights_per_cluster = 256`, identically in all three
-  implementations.
+  needs only "group 0's coarse box rejects >= 1 punctual light" **plus `ps_n < max_lights_per_cluster`
+  (Rev 6 P1 — the second condition is not optional; see below)**, and the first is what H1's own
+  selectivity gate (`pairs_hier / pairs_flat <= 1/8`) guarantees globally. Rev 4's form, by contrast,
+  needed an off-screen-left light arrangement it never specified.
+* **Rig requirement (in the same form mutations (ii) and (iii) already carry), Rev 6 — all three parts
+  are now stated, because each of Rev 5's readings failed.** The (vii) run must satisfy:
+  1. **`ps_n < max_lights_per_cluster`. Pin the (vii) run at `N = 128`** (`max_lights_per_cluster` is
+     `MAX_LIGHTS_PER_CLUSTER = 256`, `crates/boyko_render/src/light.rs:53`). *Why this is a
+     requirement and not a preference:* both arms carry the same per-froxel clamp
+     `if (nlocal < pc.max_lights_per_cluster && nlocal < 256u)`
+     (`shaders/cluster_cull.hlsl:170`). Froxel 168 accepts **everything it visits** in both arms, so
+     the base arm emits `min(ps_n, 256)` indices and the unmitigated hier arm emits `min(|S|, 256)`
+     where `S` is the coarse-accepted set. At `ps_n = 512`, if `|S| >= 256` **and** the punctual
+     prefix `P[0..256)` lies inside `S`, both arms emit the **identical 256-index prefix** —
+     assertions 2 *and* 3 go **GREEN** while "coarse rejects >= 1" is perfectly true. The RED arm can
+     then pass. At `ps_n = 128 < 256` no clamp is reachable, so `|S| < ps_n` forces different counts
+     and **"coarse rejects >= 1 ⇒ assertion 2 RED" is a theorem**, which is exactly what
+     rig-independence claims.
+  2. **The precondition's source is the `inject_nan_froxel = None` mirror.** Measured *with* the
+     injection and *with* the mitigation, group 0's coarse box is the universe and rejects **zero**
+     lights — so read literally, Rev 5's precondition made every correct GREEN run report INVALID.
+     The count is taken from H1 run on the same config with `inject_nan_froxel: None`. *This is sound
+     in the conservative direction, and that is a derivation rather than a hope:* the un-injected box
+     is the extremum over all 144 lanes, the unmitigated arm's box is the extremum over the 143
+     non-poisoned lanes (the NaN lane is dropped by `NMin`/`NMax`, §5.1), so the unmitigated box is
+     **contained in** the un-injected box; by §5 Step 2's monotonicity a contained box rejects at
+     least as much. "The None mirror rejects >= 1" therefore **implies** "the RED arm's box rejects
+     >= 1", never the reverse.
+  3. **The count itself must exist.** It does not today — §8.6's H1 deliverables define seven outputs
+     and `HierCullStats` (`crates/boyko_rhi_vulkan/src/goldens.rs:3657`) exposes exactly `groups`,
+     `ps_n`, `valid_lanes`, `pairs_coarse`, `pairs_fine`. **Rev 6 adds a per-group coarse-accept count
+     to §8.6** (deliverable 8); this bullet is its only consumer.
+
+  On the bench rig at `N >= 64` slice 0 is a thin near-plane slab and rejects nearly every light, so
+  part 1's requirement is satisfied with margin; it is asserted rather than assumed.
+* **Injection point (Rev 6 — unstated in Rev 5, and only one placement works).** The poison is written
+  **after phase 0's AABB build and BEFORE phase 1's finiteness test** (`bool finite = all(abs(aabb_min)
+  <= 1.0e30) && ...`, §4's phase-1 HLSL). Placed *after* the finiteness test, the lane is classified
+  `finite` from its pre-poison AABB, never stores the absorbing `±FLT_MAX`, and the mitigation **never
+  engages** — the GREEN arm then goes red for a reason that has nothing to do with what (vii) tests.
+  The same ordering applies in all three implementations (HIER module, base module, host mirror).
+* **Saturation check:** froxel 168 alone claims `min(N, max_lights_per_cluster)` indices in the
+  mitigated arm — `min(N, 256)`, which at the pinned `N = 128` is **128** (Rev 6 P2-4: Rev 5's "claims
+  `N` indices" contradicted its own next sentence). At `N = 512` the total would be
+  `~2 597 + 256 = ~2 853`, and at `N = 128` it is smaller still, against `INDEX_LIST_CAP = 16 384`, so
+  §6's `alloc_total < index_list_cap` precondition (assertion 1) holds with two orders of margin and
+  the run is non-saturating. Froxel 168's own count is clamped by `max_lights_per_cluster = 256`
+  identically in all three implementations — which is precisely why part 1 above pins `ps_n` below it.
 
 **Deleted assertions, recorded rather than dropped:**
 
@@ -2430,6 +2698,17 @@ revision is about.
      permutation property on each. Pure arithmetic, no GPU.
      **Explicit scope limit (P2):** this is a **Rust re-implementation of the shader's walk, not a pin
      on the HLSL.** If the shader and the mirror drift, only H3 sees it. Rev 3's §9 implied otherwise.
+  8. **Per-group coarse-accept count (NEW in Rev 6 — it is a PRECONDITION SOURCE, not a diagnostic).**
+     `HierCullStats` gains a per-group count of coarse-accepted punctual lights (population of the
+     group's coarse mask), alongside the existing `groups` / `ps_n` / `valid_lanes` / `pairs_coarse` /
+     `pairs_fine` (`crates/boyko_rhi_vulkan/src/goldens.rs:3657`). *Why it is a deliverable:* §8.10's
+     mutation (vii) protocol requires the driver to assert "group 0's coarse box rejects at least one
+     punctual light" **before** evaluating the arm comparison, and Rev 5 cited that count as if H1
+     already produced it — it does not, so the precondition had no source. The count is read from the
+     **`inject_nan_froxel: None`** run of the config (§8.3, mutation (vii), rig requirement part 2).
+     *It is not a new gate:* `pairs_fine` is already the sum of these counts over valid froxels, so
+     assertion 5's selectivity number is unchanged and this deliverable only exposes the per-group
+     decomposition H1 already computes.
 * **Matrix (six grid configs — Rev 2's two were both `gps = 1` and could not test D3 at all):**
 
   | entry | dims | `dim_x·dim_y` | `gps` | `G` | what it alone catches |
@@ -2502,7 +2781,9 @@ revision is about.
   2 defined neither).** A latency floor is exactly the RED condition above. On it: refit
   `cull_ns = a + b·(froxels·N)` over the four measured grids, take `b_hi` as the largest per-point
   implied rate, and re-evaluate §7's `N=512` prediction as `a + b_hi x pairs_hier(512)` with
-  `pairs_hier(512) = 32 300`. That re-derived number is what §10 ABORT 2 compares against 250 000 ns.
+  **`pairs_hier(512) = 45 840`** — H1's **measured** count on config M2 / the bench Kronecker rig,
+  **not** Rev 4's modelled `32 300` (Rev 6 P1: the literal was stale by 1.42x, and it is executed here
+  and at §10 ABORT clause 2). That re-derived number is what §10 ABORT 2 compares against 250 000 ns.
   The refit and the re-derived number are recorded **in this document** before H2 is committed.
 * **What it can no longer be claimed to prove:** it bounds *thread-count* scaling on a **balanced**
   dispatch. It says nothing about barrier cost, idle lanes or hot-group serialization; those are
@@ -2627,10 +2908,14 @@ revision is about.
   hardening):
   * `ClusterGrid` is allocated at **`capacity + G`** cells and **pre-filled with `0xFFFFFFFF`
     immediately before EACH arm's dispatch**, with `LightIndexAlloc` re-zeroed at the same point and
-    both buffers read back **before** the next fill (§8.2(A) limit 4 — Rev 5 P1). **The buffers are
-    NOT shared across the two arms of a config**: a shared `ClusterGrid` lets mutation (vi) at E2
-    false-GREEN on the base arm's leftover cells, and a shared `LightIndexAlloc` false-REDs
-    `alloc_total == capacity` on whichever arm runs second;
+    **all THREE buffers — `ClusterGrid`, `LightIndexAlloc` and `LightIndexList` — read back after that
+    arm's dispatch and before the NEXT ARM'S dispatch** (§8.2(A) limit 4 — Rev 5 P1, corrected in
+    Rev 6). **The buffers are NOT shared across the two arms of a config**: a shared `ClusterGrid` lets
+    mutation (vi) at E2 false-GREEN on the base arm's leftover cells, a shared `LightIndexAlloc`
+    false-REDs `alloc_total == capacity` on whichever arm runs second, and a `LightIndexList` read only
+    once at the end **false-REDs assertion 3 on a byte-identical pair** (the two dispatch widths claim
+    different `InterlockedAdd` offsets, `shaders/cluster_cull.hlsl:183`, so arm A's offsets index arm
+    B's list) **and false-GREENs assertion 8**, which is `[P0-4b']`'s only discharge;
   * the light table is allocated at **`MAX_LIGHTS + 1024`** rows with every row `>= light_count`
     filled with the **poison light** (`POINT`, at the camera eye, `range = 1e6`);
   * the **permutation probe** (§8.2(B2)) runs as its own configuration at **M1/M2 and at E3** — E3
@@ -2645,10 +2930,13 @@ revision is about.
   the flat arm.
 * **Asserts, per config (same matrix as H1, plus both arms on-device).** Each row names the mutation
   that turns it red; every write-set mutation was simulated in §8.3. **Evaluation discipline (Rev 5
-  P1):** assertions **1, 5, 6, 7 and 10** are **per arm**, evaluated on that arm's own readback taken
-  after that arm's dispatch and before the next pre-fill; assertions **2, 3, 4** compare the **two
-  separately captured** readbacks; assertion **9** is structural. **No assertion may read a buffer
-  that both arms wrote** (§8.2(A) limit 4).
+  P1, completed in Rev 6):** assertions **1, 5, 6, 7, 8 and 10** are **per arm**, evaluated on that
+  arm's own readback taken after that arm's dispatch and before the next pre-fill; assertions
+  **2, 3, 4** compare the **two separately captured** readbacks; assertion **9** is structural. **Every
+  one of the ten is now classified — Rev 5 left assertion 8 in no class at all, which is how an
+  implementer ends up scanning `LightIndexList` once at the end.** The rule: *every assertion is
+  evaluated on readbacks captured after **exactly one** arm's dispatch, and **no assertion may mix one
+  arm's `ClusterGrid` offsets with the other arm's `LightIndexList`*** (§8.2(A) limit 4).
 
   | # | assertion | turned RED by |
   |---|---|---|
@@ -2677,11 +2965,39 @@ revision is about.
      **It must therefore run with `allow_skew = true` (Rev 5 P1 fix).** Rev 4 made assertion 10 fire on
      "a config that edits `ClusterConfig` after boot" while the RED-if blanketed all ten assertions on
      every mutation run — so the (v) run aborted at its own precondition and never reached assertions
-     1/2, leaving `[P0-B]`'s only discharge with **no executable gate**. With `allow_skew = true`,
+     **5/6**, leaving `[P0-B]`'s only discharge with **no executable gate**. With `allow_skew = true`,
      assertion 10 is skipped for this run **and this run only**, and the reviewer records the two
-     expected failures **individually**: assertion 1's **138 gaps** and assertion 2's **138 cleared
-     tail cells**. Recording them separately matters — a single "the run failed" is satisfied by either
-     detector alone, and §8.3 pre-registers **both**.
+     expected failures **individually**: **assertion 5** (TOTALITY / detector A1) — **138 in-range
+     cells still holding the `0xFFFFFFFF` sentinel** — and **assertion 6** (GUARD-TAIL / detector A2) —
+     **138 cleared tail cells**. Recording them separately matters — a single "the run failed" is
+     satisfied by either detector alone, and §8.3 pre-registers **both**.
+
+     > **Rev 6 P1 fix — Rev 5 pre-registered this RED evidence against the WRONG assertion numbers.**
+     > Rev 5 wrote "assertion 1's 138 gaps and assertion 2's 138 cleared tail cells" here, at §9
+     > `[P0-B]` and in its own changelog, having read the detector labels **A1/A2** as table rows
+     > **1/2**. The table says otherwise two screens up: the 138 gaps belong to **assertion 5** and the
+     > 138 tail cells to **assertion 6**. The consequence is not cosmetic. **Assertion 1 is
+     > `alloc_total < index_list_cap`** — a *precondition that is supposed to pass*, and mutation (v)
+     > changes no lane's `nlocal`, so it is **unfallible on this run**: a reviewer following Rev 5
+     > literally discharges `[P0-B]` off assertion 2 while **assertion 6 — the guard tail, the detector
+     > that exists BECAUSE of the Rev 3 P0 — is never checked at all.**
+     >
+     > **CONTROL ARM (pre-registered, Rev 6).** On this config the **BASE** arm also clears tail cells,
+     > and the number is **16**, not 138. Its dispatch is boot-sourced exactly as the shipped record
+     > sites compute it — `scene.cluster_count.div_ceil(LIGHT_CULL_LOCAL_SIZE_X)`,
+     > `crates/boyko_rhi_vulkan/src/present/passes/vb.rs:215`, with `LIGHT_CULL_LOCAL_SIZE_X = 64`
+     > (`src/present/scene_types.rs:415`) — so boot `16x9x23 = 3312` gives
+     > `ceil(3312/64) = 52` groups = **3328 threads**, while the base module's own guard is
+     > `if (fi >= cluster_count) return;` over **LIVE** dims (`shaders/cluster_cull.hlsl:109-114`,
+     > `3456`) and so admits every one of them. Threads `3312..3327` write **16** cells past the
+     > boot-sized capacity, into the guard tail. **The count is 16 whether or not (v) is mirrored into
+     > the base module**: at `3328 < 3456` that guard never fires, so deleting it changes nothing.
+     > **This is not the mutation** — it is the base arm's
+     > pre-existing live-dims read of its own bound, which is exactly the state D11 exists to prevent
+     > on the hier side. **Therefore: an assertion-6 that fires 16 times is the CONTROL, and means the
+     > mutation did nothing.** The (v) discharge requires the HIER arm at **138 / 138**; `16 / 0`
+     > (16 tail cells, 0 gaps) is the base arm's signature and must not be recorded as `[P0-B]`'s
+     > discharge.
   4. **Map mutations and bound deletions must not be combined in one run** — the combination can drive
      `fi` past `capacity + G`, which is real UB in the test process rather than a detected fault
      (§8.2 limit 2).
@@ -2689,9 +3005,22 @@ revision is about.
      be RED). A one-sided run does not test the mitigation. **The injection is `fi == 168u`, all six
      AABB components, mirrored in the HIER module, the base module AND the host mirror** — Rev 4's
      one-arm `lane == 7` single-component form could not go green in the GREEN arm, and named different
-     froxels in the two modules (§8.3, "Mutation (vii) in full"). **Rig requirement:** group 0's coarse
-     box must reject at least one punctual light, asserted from H1's per-group coarse-accept count
-     **before** the arm comparison is evaluated, so a vacuous RED arm is reported as an invalid run.
+     froxels in the two modules (§8.3, "Mutation (vii) in full"). **Rig requirement — three parts, all
+     mandatory (Rev 6 P1; Rev 5's one-line form was unsatisfiable, insufficient AND cited a quantity
+     that does not exist — see §8.3's rig-requirement bullet for the derivations):**
+     * **(a) the run is pinned at `N = 128`**, i.e. `ps_n < max_lights_per_cluster = 256`
+       (`crates/boyko_render/src/light.rs:53`). At `N = 512` the per-froxel clamp
+       (`shaders/cluster_cull.hlsl:170`) can make both arms emit the identical 256-index prefix, and
+       the RED arm passes while "coarse rejects >= 1" holds;
+     * **(b) group 0's coarse box must reject at least one punctual light**, asserted **before** the
+       arm comparison is evaluated, so a vacuous RED arm is reported as an invalid run — read from
+       H1's **new deliverable 8** (per-group coarse-accept count, §8.6) on the **`inject_nan_froxel =
+       None`** run of this config. Measured with the injection *and* the mitigation the count is the
+       full punctual set (the coarse box is the universe), which would make every correct GREEN run
+       report INVALID;
+     * **(c) the poison is written after phase 0's AABB build and BEFORE phase 1's finiteness test.**
+       After it, the lane classifies `finite`, the absorbing store never happens, and the GREEN arm
+       reds for a reason unrelated to the mitigation.
   6. **(iv)** must run on a config with `light_count < ps_begin + HIER_MASK_BITS` — i.e. **NOT** H1's
      mask-capacity-boundary config (`l0a_count == 0`, `point_spot_count == MAX_LIGHTS == 1024`). There
      `ps_n == HIER_MASK_BITS`, so the mutated loop `j < HIER_MASK_BITS` is **identical to the correct
@@ -2773,10 +3102,10 @@ or it says **NO** and explains what carries the property instead.
 | `[P0-4a]` totality | Groupshared mask re-initialised **every dispatch** by lanes 0..31 unconditionally — no cross-frame state. `ClusterGrid` totality by the `0xFFFFFFFF` pre-fill, **stated as at-least-once** | D1, H3.5 | **yes** — mutation (vi) at E2/E3/E4 (6144 / 384 / 12288 unwritten cells, simulated) |
 | **`[P0-4a']` exactly-once (NEW)** | Not implied by totality. Derived from H3.5 + H3.6 + H1.2's `V == capacity` (§8.2 B1), and separately measured by the **permutation probe** H3.7 | §8.2(B), H1.2, H3.5–7 | **yes** — any duplicate in-range write loses an `InterlockedAdd` offset, breaking the permutation |
 | **`[P0-4a''] `out-of-range WRITE (NEW — this was P0-1)** | **Guard tail**: `ClusterGrid` allocated at `capacity + G`, `G = (256·gps − dim_x·dim_y)·dim_z`, all pre-filled, tail asserted intact. `G` is *exactly* the invalid-lane image, so the detector is tight, not heuristic | §8.2(A), H3.6 | **yes — mutation (i): 2 688 tail cells cleared, simulated (M10).** Under Rev 3 this same mutation left **every** assertion green. **Requires `G > 0`** — protocol §8.10 |
-| `[P0-4b]` range clamp (groupshared WRITE) | **One clamp `ps_n`** bounds the coarse groupshared write; `j < ps_n <= HIER_MASK_BITS` in the same basic block, no device value in the derivation (D7) | shader (D7) | **NO — the bound is STRUCTURAL, not mutation-detectable (Rev 5 P1 fix).** Rev 4 answered "yes — mutation (iv)'s producer half makes `(j>>5)` exceed 31". **Arithmetically impossible:** (iv) loops `j < HIER_MASK_BITS`, and `HIER_MASK_BITS = HIER_MASK_WORDS * 32 = 32 * 32 = 1024`, so `j>>5 <= 31` — in range for `gs_mask[32]`. This document **proves that itself** in D7 ("`j < ps_n <= ps_room <= HIER_MASK_BITS` implies `(j>>5) <= 31`") and correctly routes (iv) to **detector (C)** in two other places, including `[P0-4b']` immediately below. What carries the property instead: `ps_n <= ps_room <= HIER_MASK_BITS == MAX_LIGHTS == HIER_MASK_WORDS*32`, with `MAX_LIGHTS = 1024` pinned at `crates/boyko_render/src/light.rs:51`, D6's `const _: () = assert!(MAX_LIGHTS == HIER_MASK_WORDS * 32)` **equality** pin, and H2(f)'s mechanical `#error` compile-failure test. A **NO** here follows the precedent of the four other NO rows in this column: the honest answer to "can it fail?" is sometimes "no, and here is what makes it unreachable" |
+| `[P0-4b]` range clamp (groupshared WRITE) | **One clamp `ps_n`** bounds the coarse groupshared write; `j < ps_n <= HIER_MASK_BITS` in the same basic block, no device value in the derivation (D7) | shader (D7) | **NO — the bound is STRUCTURAL, not mutation-detectable (Rev 5 P1 fix).** Rev 4 answered "yes — mutation (iv)'s producer half makes `(j>>5)` exceed 31". **Arithmetically impossible:** (iv) loops `j < HIER_MASK_BITS`, and `HIER_MASK_BITS = HIER_MASK_WORDS * 32 = 32 * 32 = 1024`, so `j>>5 <= 31` — in range for `gs_mask[32]`. This document **proves that itself** in D7 ("`j < ps_n <= ps_room <= HIER_MASK_BITS` implies `(j>>5) <= 31`") and correctly routes (iv) to **detector (C)** in two other places, including `[P0-4b']` immediately below. What carries the property instead: `ps_n <= ps_room <= HIER_MASK_BITS == HIER_MASK_WORDS*32 == 1024`, with D6's `const _: () = assert!(MAX_LIGHTS == HIER_MASK_WORDS * 32)` **equality** pin (`MAX_LIGHTS = 1024`, `crates/boyko_render/src/light.rs:51`) and H2(f)'s mechanical `#error` compile-failure test. *(Rev 6 P2-3: the chain printed `== MAX_LIGHTS` inline on a **groupshared-WRITE** bound row. `MAX_LIGHTS` carries the device-side **READ** bound — the light table's row capacity — and appears here only because D6 pins the two numbers equal. Trimmed so a later reader does not take the device quantity to be load-bearing for a groupshared index.)* A **NO** here follows the precedent of the four other NO rows in this column: the honest answer to "can it fail?" is sometimes "no, and here is what makes it unreachable" |
 | **`[P0-4b']` out-of-range light READ** | **Poison tail**: the light table is allocated with rows beyond `light_count`, filled with an always-accepted light; H3.8 asserts no emitted index reaches them. Converts UB into a detectable value | §8.2(C), D7, H3.8 | **yes** — mutation (iv). *(Rev 3's mutation here could not reach an out-of-range read at all)* |
 | **`[P0-A]` same-expression premise** | **Discharged, not disclaimed:** D10 makes `sq_dist_point_aabb` a written-out `precise` sum of correctly-rounded, `NoContraction`-decorated ops, so both call sites evaluate one function `F` (§5 Step 0), with a per-node audit table covering **every** node the monotonicity chain traverses — the two `OpFSub` included (Rev 4's placement change). H2(e) is a **tripwire** — explicitly *not* the proof, because DXC emits zero `Fma` | §5 + D10 + H1.6 + H2(e) | **yes** — e1/e2 fire if `dot()` returns or `precise` is dropped; **e2's exactness** also fires on an argument *expression* (M6); e6's producer assertion covers what an id-normalised window cannot; H1.6 catches the ULP fallout |
-| **`[P0-B]` total bound** | `valid = (s < bdx·bdy) && (slice < bdz) && (fi < pc.cluster_capacity)`, with `cluster_capacity` **pushed** from the same `cluster_count()` binding that sizes the buffer (D11, Rev 4). Dispatch size, allocation and write bound are three evaluations of one u32 — now *literally*, not modulo an 8-bit repack governed by a `debug_assert!` | D3/D11 + H1.7 + H3.5/6/10 | **yes, but only as a PAIR** — mutation (v) re-specified (138 OOB + 138 gaps, simulated). **Deleting `slice < bdz` alone, or `fi < capacity` alone, is INERT** (simulated) — §D3 says so, and this row no longer claims otherwise. **Rev 5 P1: that pair now has an executable gate.** Under Rev 4's protocol the (v) run aborted at assertion 10 (which fires on exactly the boot-16x9x23/live-16x9x24 skew (v) *requires*, and the RED-if blanketed all ten assertions on every mutation run), so this discharge had **no run that could reach assertions 1/2**. §8.10 item 3 now scopes assertion 10 behind an `allow_skew` driver flag and requires the reviewer to record assertion 1's **138 gaps** and assertion 2's **138 cleared tail cells** *individually* |
+| **`[P0-B]` total bound** | `valid = (s < bdx·bdy) && (slice < bdz) && (fi < pc.cluster_capacity)`, with `cluster_capacity` **pushed** from the same `cluster_count()` binding that sizes the buffer (D11, Rev 4). Dispatch size, allocation and write bound are three evaluations of one u32 — now *literally*, not modulo an 8-bit repack governed by a `debug_assert!` | D3/D11 + H1.7 + H3.5/6/10 | **yes, but only as a PAIR** — mutation (v) re-specified (138 OOB + 138 gaps, simulated). **Deleting `slice < bdz` alone, or `fi < capacity` alone, is INERT** (simulated) — §D3 says so, and this row no longer claims otherwise. **Rev 5 P1: that pair now has an executable gate.** Under Rev 4's protocol the (v) run aborted at assertion 10 (which fires on exactly the boot-16x9x23/live-16x9x24 skew (v) *requires*, and the RED-if blanketed all ten assertions on every mutation run), so this discharge had **no run that could reach assertions 5/6**. §8.10 item 3 now scopes assertion 10 behind an `allow_skew` driver flag and requires the reviewer to record **assertion 5**'s (TOTALITY / detector A1) **138 in-range sentinel cells** and **assertion 6**'s (GUARD-TAIL / detector A2) **138 cleared tail cells** *individually*. **Rev 6 P1:** Rev 5 wrote these as "assertion 1 / assertion 2" — the detector labels A1/A2 misread as table rows — which routes the discharge through assertion 1 (`alloc_total < index_list_cap`, a precondition (v) cannot falsify) and leaves **assertion 6 unchecked**. Rev 6 also pre-registers the **CONTROL**: the BASE arm on this config clears **16** tail cells by itself (boot-sourced 3328 threads vs its live-dims guard, §8.10 item 3), so an assertion-6 firing 16 times means the mutation did nothing |
 | `[P1]` FP margin | **Deleted, not bounded**: D2 makes enclosure a monotonicity theorem (§5) with no epsilon | §5 + D8 + H1 | **yes** — mutation (ii) (lane-0 fold) on the adversarial rig, whose target froxel must not be lane 0's |
 | **`[P1-D]` non-finite AABBs** | **Absorbing-element substitution `±FLT_MAX`** (D8, §5 Case B; **Rev 5 corrects Rev 4's `±1e30`**, which inverted enclosure for a finite centre with `\|c\| > 1e30`): a non-finite `valid` lane forces the coarse box to the universe, degrading the group to *exactly* the flat walk. D4 clause (c) is **deleted** as a result — in the **AABB's** finiteness only; the surviving condition on the **light centre** is named as Premise F (§5.2) rather than left implicit | §5, D8, H3 (vii) | **yes, two-sided** — mutation (vii), **re-specified in Rev 5** (`fi == 168u`, all six components, mirrored in HIER + base + host mirror), must be GREEN with the substitution and RED without. Rev 4's one-arm `lane == 7` form could not go green in the GREEN arm and named different froxels in the two modules. *(Rev 3's identity-element mitigation was a no-op in the mixed case and inverted the all-NaN case; withdrawn)* |
 | `[P1-3]` cap saturation | §1.3's measured table (pinned at **HP**) + the exact `alloc_total <= cap` detector asserted as a precondition of every equality run | §6, HP, H1.3, H3.1 | **yes** — set `index_list_cap = 1`; the equality test aborts loudly instead of comparing clamped results |
@@ -2815,8 +3144,11 @@ or it says **NO** and explains what carries the property instead.
 2. **H1.5**: **a latency floor is found — defined as any of the four measured grid points implying a
    rate outside `[0.2052, 0.3420] ns/pair` (±25 % of 0.2736)** — **and** the re-derivation specified
    in §8.7 (refit over the four grids, take the largest per-point rate `b_hi`, evaluate
-   `a + b_hi x 32 300`) exceeds §2's 250 000 ns threshold. *(Still no shader written.)* *(Rev 3's
-   clause 2 defined neither "a latency floor is found" nor the re-derivation.)*
+   **`a + b_hi x 45 840`**) exceeds §2's 250 000 ns threshold. *(Still no shader written.)* *(Rev 3's
+   clause 2 defined neither "a latency floor is found" nor the re-derivation. **Rev 6 P1:** the literal
+   was `32 300`, Rev 4's MODEL; H1 measured `45 840`. The clause executes the measured count — with the
+   stale literal it under-states the re-derived cost by 1.42x, i.e. it fails to abort in exactly the
+   band where aborting is the point.)*
 3. **H3**: any per-froxel index sequence differs between arms in a non-saturating, non-skewed
    configuration; **or** any of the memory-safety assertions 5–8 fails on the unmutated shader.
 4. **H4**: `froxel_cull_ns` at `N_ps=512` above 250 000 (below a 2x win), **or** any of
