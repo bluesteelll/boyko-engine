@@ -414,6 +414,31 @@ pub(crate) const CLUSTER_CULL_PUSH_BYTES: u32 = crate::compute::CLUSTER_CULL_PUS
 /// group count is `ceil(cluster_count / LIGHT_CULL_LOCAL_SIZE_X)`.
 pub(crate) const LIGHT_CULL_LOCAL_SIZE_X: u32 = 64;
 
+/// VB-P1e D11: the hierarchical cull pipeline's COMPUTE push range size (24 B
+/// [`crate::compute::ClusterCullHierPush`]). Re-exported so [`ClusterCullHierDispatch::push`]
+/// can size its inline byte array without depending on `compute` at the field-decl site.
+pub(crate) const CLUSTER_CULL_HIER_PUSH_BYTES: u32 = crate::compute::CLUSTER_CULL_HIER_PUSH_BYTES;
+
+/// VB-P1e D11/H4: the hierarchical cull's per-frame dispatch record — `Some` IFF
+/// [`GBufferScene::cluster_cull`] holds the `-D HIER=1` pipeline instead of the base 64-wide
+/// arm (`GpuSceneBundles::build_froxel_light_cull` builds exactly ONE of the two pipelines per
+/// boot and stores it there; this struct is metadata about WHICH one, never a second pipeline
+/// slot — Principle 0: one derived accessor + one activation struct, no side store).
+///
+/// `groups` is the host-derived 256-wide dispatch count
+/// (`boyko_render::ClusterConfig::hier_group_count` — a dev-only back-edge dependency, not
+/// doc-linkable from this crate); `push` is the 24-byte
+/// [`crate::compute::ClusterCullHierPush`] bytes (the base push fields plus D11's BOOT
+/// snapshot: the packed dims + the full-precision `cluster_count()`). `#[repr(C)]`-free — this
+/// is a host-side record, not a device buffer layout.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClusterCullHierDispatch {
+    /// The 256-wide dispatch group count (`ceil(dim_x * dim_y / 256) * dim_z`).
+    pub groups: u32,
+    /// The 24-byte [`crate::compute::ClusterCullHierPush`] bytes this dispatch pushes.
+    pub push: [u8; CLUSTER_CULL_HIER_PUSH_BYTES as usize],
+}
+
 /// The runtime brick-cache activation the windowed/offscreen G-buffer present applies to the
 /// marcher's [`FineMarcherPush`] (the SDF brick-atlas campaign — empty-skip + trilinear/cubic
 /// surface cache + clip-map LOD). `None` on [`GBufferScene::brick`] is the OFF path: the recorder
@@ -1409,6 +1434,14 @@ pub struct GBufferScene<'a> {
     /// The L1 froxel count (`dim_x * dim_y * dim_z`, default 3456) — the cull's 1D dispatch
     /// thread count (`ceil(cluster_count / LOCAL_SIZE_X)` groups). Ignored when L1 is off.
     pub cluster_count: u32,
+    /// VB-P1e D11/H4: `Some` IFF [`Self::cluster_cull`] holds the `-D HIER=1` pipeline instead
+    /// of the base arm — the record site then dispatches [`ClusterCullHierDispatch::groups`]
+    /// groups of 256 and pushes [`ClusterCullHierDispatch::push`] (24 B) INSTEAD of
+    /// [`Self::cluster_count`]/[`Self::cluster_cull_push`] (which stay populated but unused by
+    /// the record site in that case). `None` (the default, every pre-H4 boot and every boot
+    /// that does not opt into the hierarchical arm) ⇒ the base arm records exactly as before —
+    /// byte-identical command stream.
+    pub cluster_cull_hier: Option<ClusterCullHierDispatch>,
     /// The deferred PBR RESOLVE compute pipeline (`deferred_pbr.comp`): its layout declares
     /// `resolve_layout` at `set 0`. Reads the marcher's gAlbedo + gNormal + gMaterial
     /// (STORAGE, GENERAL) + the material SSBO + the camera UBO, runs Cook-Torrance, and

@@ -31,11 +31,12 @@ use boyko_rhi_vulkan::brick_atlas::BrickClipmap;
 use boyko_rhi_vulkan::ddgi::DdgiAtlas;
 use boyko_rhi_vulkan::compute::{
     B5_CAMERA_UBO_BYTES_M4, CAM_MODE_ORTHO, CAM_MODE_PERSPECTIVE, COMPOSITE_PUSH_CONSTANT_BYTES,
-    CLUSTER_CULL_PUSH_BYTES, ClusterCullPush, CoarseMode, EDITLIST_BUFFER_WORDS,
+    CLUSTER_CULL_HIER_PUSH_BYTES, CLUSTER_CULL_PUSH_BYTES, ClusterCullHierPush, ClusterCullPush,
+    CoarseMode, EDITLIST_BUFFER_WORDS,
     INTERP_INSTANCES_PUSH_BYTES, LIGHTING_FLAG_AO, LIGHTING_FLAG_SHADOWS,
     LOCAL_SIZE_X, M4_LEVEL_PARAMS_BYTES, RCAS_PUSH_BYTES, SDF_FORWARD_MARCH_PUSH_BYTES,
     TILE_BOUND_BYTES, TILE_SIZE,
-    cluster_cull_spirv,
+    cluster_cull_hier_spirv, cluster_cull_spirv,
     csm_depth_fs_spirv, csm_depth_vs_spirv, deferred_pbr_spirv,
     deferred_pbr_wrap_spirv,
     depth_prepass_fs_spirv, depth_prepass_vs_spirv,
@@ -66,11 +67,12 @@ use boyko_rhi_vulkan::rhi_impl::{
     VulkanQueryPool, VulkanSampler, VulkanShaderModule, rebind_storage_buffer,
 };
 use boyko_rhi_vulkan::swapchain::{
-    AaActivation, CsmDepthActivation, DdgiUpdateActivation, FRAMES_IN_FLIGHT, FrameWriteToken,
-    GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw, GBufferScene,
-    InterpActivation, PunctualDepthActivation, RcasActivation, ResolvedRenderPathGpu,
-    SmaaActivation, SsaaActivation, SsaoActivation, TaaActivation, VB_PASS_COUNT, VbTimedPass,
-    VbTimestampCollector, ViewtFromDepthActivation, ViewtFromVbDepthActivation,
+    AaActivation, ClusterCullHierDispatch, CsmDepthActivation, DdgiUpdateActivation,
+    FRAMES_IN_FLIGHT, FrameWriteToken, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES,
+    GBufferMeshDraw, GBufferScene, InterpActivation, PunctualDepthActivation, RcasActivation,
+    ResolvedRenderPathGpu, SmaaActivation, SsaaActivation, SsaoActivation, TaaActivation,
+    VB_PASS_COUNT, VbTimedPass, VbTimestampCollector, ViewtFromDepthActivation,
+    ViewtFromVbDepthActivation,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::accel::BoundAccelStruct;
@@ -1064,6 +1066,17 @@ pub(crate) struct GpuSceneBundles {
     /// The L1 froxel count (`dim_x * dim_y * dim_z`) the cull's 1D dispatch covers — meaningless
     /// while [`Self::cluster_cull_pipeline`] is `None`.
     cluster_count: u32,
+    /// VB-P1e D11/H4: `Some` IFF [`Self::cluster_cull_pipeline`] holds the `-D HIER=1` variant
+    /// instead of the base 64-wide arm — the group count + the 24-byte push bytes
+    /// [`Self::scene`] threads into [`GBufferScene::cluster_cull_hier`]. `None` (the default)
+    /// keeps every record site on the base arm, byte-identical to every pre-H4 boot.
+    cluster_cull_hier: Option<ClusterCullHierDispatch>,
+    /// VB-P1e D11: the BOOT-frozen `ClusterConfig::packed_dims()` snapshot
+    /// [`Self::build_froxel_light_cull`] sized every L1 buffer from — meaningless while
+    /// [`Self::cluster_cull_pipeline`] is `None`. The per-frame runner compares this against the
+    /// LIVE `ClusterConfig` Resource (`runner.rs`'s debug-only boot/live dims assert) to catch an
+    /// owner system stomping the Resource after boot; release builds do not pay for it.
+    cluster_boot_packed_dims: u32,
     /// The froxel-only Set-0 bind-group LAYOUT — 10 bindings: [`Self::vb_layout0`]'s own 0..7
     /// PLUS `ClusterGrid` @8 + `LightIndexList` @9 — a DISTINCT layout OBJECT from `vb_layout0`
     /// (never widened in place, so `vb_layout0` stays byte-identical). `None` unless the froxel
@@ -3698,6 +3711,8 @@ impl GpuSceneBundles {
             light_index_alloc: None,
             cluster_cull_push: ClusterCullPush::new(0.0, 0.0, 0, 0),
             cluster_count: 0,
+            cluster_cull_hier: None,
+            cluster_boot_packed_dims: 0,
             vb_layout0_froxel: None,
             vb_resolve_froxel_pipeline: None,
             vb_shade_froxel_pipeline: None,
@@ -4235,15 +4250,26 @@ impl GpuSceneBundles {
     /// `cluster_config` sizes the buffers/push (`ClusterConfig::default()` at every current call
     /// site — no owner-facing override is wired yet).
     ///
+    /// VB-P1e D11/H4: `hier_cull` selects WHICH of the two cull arms is built — `false` (the
+    /// production default; `boyko_app::runner`'s `BOYKO_VB_HIER_CULL` selection is unset on
+    /// every golden/production boot) builds the base 64-wide `cluster_cull_spirv()` arm exactly
+    /// as before; `true` builds the `-D HIER=1` 256-wide `cluster_cull_hier_spirv()` arm this
+    /// rung arms (H3 proved on hardware that the two arms emit the same per-froxel sets in the
+    /// same order). Exactly ONE pipeline is ever built per boot — [`Self::cluster_cull_pipeline`]
+    /// holds whichever arm was selected, and [`Self::cluster_cull_hier`] records WHICH one.
+    ///
     /// # Panics
     /// Panics (`expect("invariant: ...")`) on any RHI create failure — mirrors every other VB
-    /// pipeline builder's contract (a device OOM at scene-boot time is a setup failure).
+    /// pipeline builder's contract (a device OOM at scene-boot time is a setup failure). Also
+    /// panics (a release `assert!`, D11) if any of `cluster_config`'s grid dims exceeds 8 bits —
+    /// the header pack this fn feeds the HIER push is lossy past that contract.
     pub(crate) fn build_froxel_light_cull(
         &mut self,
         ctx: &VulkanContext,
         geometry_set: &boyko_rhi_vulkan::geometry_bindless::VulkanGeometryBindlessSet,
         bindless: &BindlessTextureTable,
         cluster_config: ClusterConfig,
+        hier_cull: bool,
     ) {
         let device = ctx;
 
@@ -4252,7 +4278,8 @@ impl GpuSceneBundles {
         // @4 } — matching `cluster_cull.hlsl`'s own binding table, the SAME shape the L1
         // host-oracle test harness (`sdf_gbuffer_hybrid.rs`) builds by hand). A DEDICATED
         // layout, unrelated to `vb_layout0`/`vb_layout0_froxel` — the cull pass is its OWN 1-set
-        // pipeline. ---
+        // pipeline. Shared by BOTH arms (VB-P1e D11): the `-D HIER=1` shader widens only the
+        // PUSH range, not the descriptor bindings. ---
         let cull_layout = RhiDevice::create_bind_group_layout(
             device,
             &BindGroupLayoutDesc {
@@ -4292,14 +4319,22 @@ impl GpuSceneBundles {
         )
         .expect("invariant: L1 cull Set-0 bind-group layout create");
 
-        let cull_cs = RhiDevice::create_shader_module(device, cluster_cull_spirv())
+        // VB-P1e H4: select the arm's own SPIR-V + push-constant range. `hier_cull` is a
+        // boot-frozen choice — the SAME pipeline slot below holds whichever arm was selected,
+        // never both at once.
+        let (cull_module_words, cull_push_constant_bytes): (&'static [u32], u32) = if hier_cull {
+            (cluster_cull_hier_spirv(), CLUSTER_CULL_HIER_PUSH_BYTES)
+        } else {
+            (cluster_cull_spirv(), CLUSTER_CULL_PUSH_BYTES)
+        };
+        let cull_cs = RhiDevice::create_shader_module(device, cull_module_words)
             .expect("invariant: L1 cluster-cull compute shader module create");
         let cluster_cull_pipeline = RhiDevice::create_compute_pipeline(
             device,
             &ComputePipelineDesc {
                 module: &cull_cs,
                 entry: c"main",
-                push_constant_bytes: CLUSTER_CULL_PUSH_BYTES,
+                push_constant_bytes: cull_push_constant_bytes,
                 bind_group_layout: Some(&cull_layout),
                 spec_constants: &[],
             },
@@ -4337,6 +4372,21 @@ impl GpuSceneBundles {
             })
             .expect("invariant: L1 LightIndexAlloc storage buffer create");
 
+        // VB-P1e D11: the `<= 255`-per-dim contract that keeps `ClusterConfig::packed_dims()`'s
+        // mapping lossless is a `debug_assert!` only inside that method
+        // (`crates/boyko_render/src/light.rs`) — the OR it guards has no masking, so an
+        // out-of-contract dim would silently corrupt the packed word this fn feeds the HIER push
+        // below. Promoted to a release `assert!` HERE: a boot-time, once-per-process check on a
+        // setup path (Principle 1 is not engaged), the cheapest point that keeps the MAPPING
+        // honest even in a release build where `packed_dims`'s own debug_assert compiles out.
+        assert!(
+            cluster_config.dim_x <= 0xFF && cluster_config.dim_y <= 0xFF && cluster_config.dim_z <= 0xFF,
+            "invariant: cluster dims must each fit in 8 bits for the header pack (dim_x={}, dim_y={}, dim_z={})",
+            cluster_config.dim_x,
+            cluster_config.dim_y,
+            cluster_config.dim_z,
+        );
+
         self.cluster_cull_push = ClusterCullPush::new(
             cluster_config.z_near,
             cluster_config.z_far,
@@ -4344,6 +4394,25 @@ impl GpuSceneBundles {
             cluster_config.index_list_cap,
         );
         self.cluster_count = cluster_count;
+        let boot_packed_dims = cluster_config.packed_dims();
+        self.cluster_boot_packed_dims = boot_packed_dims;
+        // VB-P1e D11/H4: `Some` iff the pipeline just built above is the HIER arm — the group
+        // count + the 24-byte push bytes [`Self::scene`] threads into
+        // `GBufferScene::cluster_cull_hier`, which the record site (`vb.rs`) dispatches INSTEAD
+        // of `cluster_count`/`cluster_cull_push` when `Some`.
+        self.cluster_cull_hier = hier_cull.then(|| {
+            let push = ClusterCullHierPush::new(
+                cluster_config.z_near,
+                cluster_config.z_far,
+                cluster_config.max_lights_per_cluster,
+                cluster_config.index_list_cap,
+                boot_packed_dims,
+                cluster_count,
+            );
+            let mut push_bytes = [0u8; CLUSTER_CULL_HIER_PUSH_BYTES as usize];
+            push_bytes.copy_from_slice(push.as_bytes());
+            ClusterCullHierDispatch { groups: cluster_config.hier_group_count(), push: push_bytes }
+        });
         self.cluster_cull_pipeline = Some(cluster_cull_pipeline);
         self.cull_layout = Some(cull_layout);
         self.cluster_grid = Some(cluster_grid);
@@ -5305,6 +5374,7 @@ impl GpuSceneBundles {
             light_index_alloc,
             cluster_cull_push,
             cluster_count,
+            cluster_cull_hier: self.cluster_cull_hier,
             // Render terminator-softening: swap in the wrap-variant pipeline when armed (the
             // `terminator_wrap` param doc above); both pipelines share `resolve_layout` (the
             // variant adds no descriptor), so no other field here changes.
@@ -5901,6 +5971,34 @@ impl GpuSceneBundles {
     #[inline]
     pub(crate) fn edit_list(&self) -> &BoundBuffer {
         &self.edit_list
+    }
+
+    /// VB-P1e D11: the BOOT-frozen `ClusterConfig::packed_dims()` snapshot
+    /// [`Self::build_froxel_light_cull`] sized every L1 buffer from — `0` (meaningless) while
+    /// [`Self::cluster_cull_pipeline`] is `None`. `boyko_app::runner`'s per-frame debug-only
+    /// assert compares this against the LIVE `ClusterConfig` Resource to catch an owner system
+    /// stomping the Resource after boot (a frame-level tripwire, not a fix — VB-P1k tracks the
+    /// underlying `ClusterGrid`-reader skew this cannot close).
+    #[inline]
+    pub(crate) fn cluster_boot_packed_dims(&self) -> u32 {
+        self.cluster_boot_packed_dims
+    }
+
+    /// `true` iff [`Self::build_froxel_light_cull`] actually ran and populated
+    /// [`Self::cluster_boot_packed_dims`] — the SAME `#[inline] fn ... .is_some()` idiom
+    /// [`Self::vb_bench_armed`] uses. `boyko_app::runner`'s per-frame boot/live dims
+    /// `debug_assert_eq!` must gate on THIS, not on `ResolvedRenderPath::froxel_light_cull`
+    /// alone (P1-2, adversarial review): `froxel_light_cull` is strictly WIDER than the
+    /// condition that actually built the snapshot (`build_froxel_light_cull` additionally
+    /// requires a live `MeshGeometryTableSlot`, which `froxel_light_cull` does not — see
+    /// `render_path_config.rs`'s `vb_geometry_table`/`froxel_light_cull` fields), so a shipped
+    /// `VisibilityBuffer` + `GeometryLegs::Sdf` boot (or any boot where
+    /// `MeshGeometryTable::new` degrades to `None`) would otherwise compare a live non-zero
+    /// `ClusterConfig` against a snapshot that was never written (`0`), panicking every frame
+    /// in a debug build.
+    #[inline]
+    pub(crate) fn cluster_cull_armed(&self) -> bool {
+        self.cluster_cull_pipeline.is_some()
     }
 
     /// VB-P1d: `true` iff the froxel cull/shade GPU-timestamp bench collector was armed at

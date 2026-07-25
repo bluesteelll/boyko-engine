@@ -48,7 +48,7 @@ mod targets;
 pub use frame_driver::{FrameWriteToken, Renderer};
 pub use gpu_timing::{PASS_COUNT, TimedPass, TimestampCollector, VB_PASS_COUNT, VbTimedPass, VbTimestampCollector};
 pub use scene_types::{
-    AaActivation, BrickActivation, CsmDepthActivation, DdgiUpdateActivation,
+    AaActivation, BrickActivation, ClusterCullHierDispatch, CsmDepthActivation, DdgiUpdateActivation,
     GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES, GBufferMeshDraw,
     GBufferScene, InterpActivation, PunctualDepthActivation, RcasActivation, ResolvedRenderPathGpu,
     SCENE_MVP_BYTES, SampledComposite, Scene, SmaaActivation, SsaaActivation, SsaoActivation,

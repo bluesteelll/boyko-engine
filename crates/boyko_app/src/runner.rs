@@ -639,7 +639,42 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
                 .try_resource::<boyko_render::ClusterConfig>()
                 .copied()
                 .unwrap_or_default();
-            host.gpu.build_froxel_light_cull(ctx, table.set(), bindless_texture_table, cluster_config);
+            // VB-P1e H4: the hierarchical cull ARM selection — a BOOT-TIME-ONLY env toggle (read
+            // once, here; no per-frame cost). This is an A/B ARM SELECTOR, not a force-off
+            // switch (P1-1, adversarial review): its only sanctioned protocol is an interleaved
+            // paired sweep, whose natural operator spelling is `=0`/`=1` — so it parses the
+            // VALUE (`parse_hier_cull_env`'s `"0"`/`"1"` grammar), unlike
+            // `BOYKO_VB_FROXEL_FORCE_OFF`'s "presence is the trigger" convention
+            // (`vb_p1d_cull_shade_bench.rs`'s doc), which that knob can afford because it has
+            // only one meaningful "on" state. Unset (the default, every golden/production boot)
+            // selects the BASE 64-wide arm — byte-identical to every pre-H4 boot. `=1` selects
+            // the `-D HIER=1` 256-wide arm this rung arms (H3 proved on hardware that the two
+            // arms emit the same per-froxel sets in the same order); `=0` selects the base arm
+            // explicitly (so an A/B sweep's `=0` leg cannot be mistaken for `=1` and silently
+            // compare the hierarchical arm against itself — this campaign's recurring
+            // reproducibility failure class). Any other value panics loudly rather than
+            // guessing.
+            let hier_cull = match std::env::var("BOYKO_VB_HIER_CULL") {
+                Ok(v) => parse_hier_cull_env(&v),
+                Err(std::env::VarError::NotPresent) => false,
+                Err(std::env::VarError::NotUnicode(v)) => panic!(
+                    "invariant: BOYKO_VB_HIER_CULL must be `0` or `1` (valid UTF-8), got {v:?}"
+                ),
+            };
+            // Self-identifying boot log (P1-1): every bench/host log names the arm actually
+            // selected, so a mis-set knob is visible after the fact rather than reading as a
+            // silent "no win, no regression" from an accidental self-comparison.
+            eprintln!(
+                "boyko_app: VB-P1e froxel cull arm = {} (BOYKO_VB_HIER_CULL)",
+                if hier_cull { "HIER (-D HIER=1, 256-wide)" } else { "BASE (64-wide, default)" }
+            );
+            host.gpu.build_froxel_light_cull(
+                ctx,
+                table.set(),
+                bindless_texture_table,
+                cluster_config,
+                hier_cull,
+            );
         }
     }
 
@@ -744,6 +779,24 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
 pub(crate) fn run_windowed(_app: &mut App, _desc: WindowDesc) -> AppExit {
     eprintln!("boyko_app: windowing is not supported on this platform - exiting");
     AppExit(true)
+}
+
+/// Parses `BOYKO_VB_HIER_CULL`'s `"0"`/`"1"` grammar (VB-P1e H4, P1-1 adversarial review):
+/// this knob is an A/B ARM SELECTOR, not a force-off switch, so it must read the VALUE, not
+/// merely the env var's presence — an operator's natural `=0` spelling under the old
+/// "presence is the trigger" convention would silently select the hierarchical arm, comparing
+/// it against itself in a paired sweep. Any spelling other than the two accepted digits panics
+/// loudly rather than guessing, mirroring `vb_p1d_cull_shade_bench.rs`'s own `parse_grid_spec`
+/// discipline.
+#[cfg(windows)]
+fn parse_hier_cull_env(spec: &str) -> bool {
+    match spec {
+        "0" => false,
+        "1" => true,
+        other => panic!(
+            "invariant: BOYKO_VB_HIER_CULL must be `0` (base arm) or `1` (hierarchical arm), got `{other}`"
+        ),
+    }
 }
 
 /// The OS→ECS input bridge (host plan R6, Decision 1): translate one drained
@@ -1951,6 +2004,31 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 .0
                 .as_ref()
                 .map(boyko_render::MeshGeometryTable::set);
+            // VB-P1e D11: `ClusterConfig` dims are a BOOT commitment — `build_froxel_light_cull`
+            // sized every L1 buffer (and, on the HIER arm, the pushed `cluster_dims_packed`) from
+            // the dims read at boot; a live edit to the `ClusterConfig` Resource behind this
+            // dispatch's back cannot move the cull's OWN writes (D11), but the `ClusterGrid`
+            // *consumers* (`vb_resolve`/`vb_shade`/`deferred_pbr`/`forward_opaque`) still index
+            // with the LIVE header dims (VB-P1k, pre-existing, not closed here) — so a boot/live
+            // skew is a frame-level safety gap this assert cannot fix, only catch. The cheapest
+            // tripwire against an owner system stomping the Resource after boot; release builds
+            // do not pay for it.
+            //
+            // Gated on `host.gpu.cluster_cull_armed()`, NOT `resolved_render_path.froxel_light_cull`
+            // (P1-2, adversarial review): `froxel_light_cull` is strictly WIDER than the
+            // condition that actually WROTE `cluster_boot_packed_dims` — `build_froxel_light_cull`
+            // additionally requires a live `MeshGeometryTableSlot` (`runner.rs`'s own boot call
+            // site), which `froxel_light_cull` does not. A `VisibilityBuffer` + `GeometryLegs::Sdf`
+            // boot (a shipped golden matrix cell) or any boot where `MeshGeometryTable::new`
+            // degrades to `None` would otherwise leave the snapshot at its zeroed default while
+            // the live `ClusterConfig` Resource is non-zero, panicking this assert every frame.
+            if host.gpu.cluster_cull_armed() {
+                debug_assert_eq!(
+                    world.try_resource::<boyko_render::ClusterConfig>().map(|c| c.packed_dims()),
+                    Some(host.gpu.cluster_boot_packed_dims()),
+                    "invariant: ClusterConfig dims are a boot commitment (cull buffers are boot-sized)"
+                );
+            }
             let scene = host.gpu.scene(
                 mvp,
                 s,

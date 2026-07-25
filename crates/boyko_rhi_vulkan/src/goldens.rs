@@ -5170,4 +5170,104 @@ mod tests {
             "an all-NaN AABB must give sq_dist == 0.0 for ANY finite center, not just one sample"
         );
     }
+
+    // ========================================================================================
+    // P1-4 (VB-P1e H4, adversarial review): the production hierarchical-cull dispatch-shape
+    // parity pin. `boyko_render::ClusterConfig::hier_group_count`/`hier_group_threads` (the
+    // formula `GpuSceneBundles::build_froxel_light_cull` actually feeds `cmd_dispatch`) is a
+    // THIRD independent copy of `cluster_cull.hlsl`'s own `gps` alongside this module's
+    // `golden_hier_groups_per_slice`/`HIER_GROUP_THREADS` (H3's device-proven mirror) — nothing
+    // previously asserted the two agree. `use boyko_render::ClusterConfig` is scoped to THIS
+    // `#[cfg(test)]` module deliberately (not the `goldens` module above, which also compiles
+    // under `feature = "goldens"` for external dependents): `boyko-render` is a dev-dependency
+    // BACK-EDGE of this crate (`Cargo.toml`'s own comment on that entry), live only when
+    // `boyko_rhi_vulkan` itself is under test.
+    // ========================================================================================
+    use boyko_render::ClusterConfig;
+
+    /// One grid config in the parity matrix, dims-only (group-count parity does not depend on
+    /// the camera or the light rig).
+    struct ParityCase {
+        dim_x: u32,
+        dim_y: u32,
+        dim_z: u32,
+        label: &'static str,
+    }
+
+    /// The SAME grid matrix H3's device oracle sweeps
+    /// (`lighting_l1_host_oracle.rs`'s `hier_matrix_cases`, M1/M2 collapsed to one entry since
+    /// both share dims `16x9x24` and group-count parity is camera-independent): `gps=1`
+    /// (M1/M2, the shipped default), `gps=1`-from-above (E1, `dim_x*dim_y == 256` exactly),
+    /// `gps=2`-exact (E2), `gps=2`-ragged (E3, the guard-tail config), `gps=3`-exact (E4).
+    fn well_formed_matrix() -> [ParityCase; 5] {
+        [
+            ParityCase { dim_x: 16, dim_y: 9, dim_z: 24, label: "M1/M2 16x9x24 gps=1" },
+            ParityCase { dim_x: 16, dim_y: 16, dim_z: 24, label: "E1 16x16x24 gps=1-from-above" },
+            ParityCase { dim_x: 32, dim_y: 16, dim_z: 24, label: "E2 32x16x24 gps=2-exact" },
+            ParityCase { dim_x: 16, dim_y: 17, dim_z: 24, label: "E3 16x17x24 gps=2-ragged" },
+            ParityCase { dim_x: 32, dim_y: 24, dim_z: 24, label: "E4 32x24x24 gps=3-exact" },
+        ]
+    }
+
+    /// P1-4: pins [`ClusterConfig::hier_group_threads`]/[`ClusterConfig::hier_group_count`] —
+    /// the PRODUCTION dispatch shape — against [`HIER_GROUP_THREADS`]/
+    /// [`golden_hier_groups_per_slice`] — H3's own device-proven oracle — over the exact grid
+    /// matrix H3 sweeps. If this ever fails, H3's on-hardware proof no longer covers the shape
+    /// production actually dispatches.
+    #[test]
+    fn production_hier_dispatch_shape_matches_h3_device_oracle() {
+        assert_eq!(
+            ClusterConfig::hier_group_threads(),
+            HIER_GROUP_THREADS,
+            "invariant: the production workgroup width must equal H3's device-proven width"
+        );
+        for case in well_formed_matrix() {
+            let cfg = ClusterConfig {
+                dim_x: case.dim_x,
+                dim_y: case.dim_y,
+                dim_z: case.dim_z,
+                ..ClusterConfig::default()
+            };
+            let golden_groups = golden_hier_groups_per_slice(case.dim_x, case.dim_y) * case.dim_z;
+            assert_eq!(
+                cfg.hier_group_count(),
+                golden_groups,
+                "{}: production hier_group_count() diverges from H3's \
+                 golden_hier_groups_per_slice() * dim_z",
+                case.label,
+            );
+        }
+    }
+
+    /// P1-4 follow-up: the degenerate `dim_x * dim_y == 0` case is a KNOWN, DOCUMENTED,
+    /// INTENTIONAL divergence, not a bug — see [`ClusterConfig::hier_group_count`]'s own doc
+    /// (D11/Rev 5 P2). Production dispatches ZERO groups (`cluster_count() == 0` means there is
+    /// nothing to cull — every `ClusterGrid` write would be out of bounds anyway, so skipping
+    /// the dispatch entirely is strictly safer than dispatching phantom work); the golden
+    /// mirrors the SHADER's own `max(1, gps)` totality clamp (a D8 obligation for the shader's
+    /// per-group math, independent of whether any lane's work is `valid`). This test PINS the
+    /// divergence explicitly (STOP AND REPORT territory, per the adversarial review) so a
+    /// future change that makes one side match the other is a deliberate, reviewed decision,
+    /// not an accidental drift this suite would otherwise miss.
+    #[test]
+    fn degenerate_zero_dim_diverges_from_the_shader_totality_clamp_by_design() {
+        let cfg = ClusterConfig { dim_x: 0, dim_y: 9, dim_z: 24, ..ClusterConfig::default() };
+        let golden_groups = golden_hier_groups_per_slice(cfg.dim_x, cfg.dim_y) * cfg.dim_z;
+        assert_eq!(
+            cfg.hier_group_count(),
+            0,
+            "invariant: production dispatches zero groups when cluster_count() == 0"
+        );
+        assert_eq!(
+            golden_groups, cfg.dim_z,
+            "invariant: the golden's max(1, gps) clamp yields dim_z phantom groups"
+        );
+        assert_ne!(
+            cfg.hier_group_count(),
+            golden_groups,
+            "P1-4: the degenerate-dims divergence is intentional (see \
+             ClusterConfig::hier_group_count's own doc) -- if this now holds, the clamp \
+             behavior changed and this pin must be re-reviewed, not deleted"
+        );
+    }
 }

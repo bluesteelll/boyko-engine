@@ -2385,6 +2385,7 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         light_index_alloc: None,
         cluster_cull_push: [0u8; 16],
         cluster_count: 0,
+        cluster_cull_hier: None,
         resolve_pipeline: &resolve_pipeline,
         resolve_layout: &resolve_layout,
         #[cfg(feature = "hwrt")]
@@ -3432,6 +3433,7 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         light_index_alloc: None,
         cluster_cull_push: [0u8; 16],
         cluster_count: 0,
+        cluster_cull_hier: None,
         resolve_pipeline: &resolve_pipeline,
         resolve_layout: &resolve_layout,
         #[cfg(feature = "hwrt")]
@@ -8418,6 +8420,7 @@ fn run_showcase_body_ddgi(
         light_index_alloc: None,
         cluster_cull_push: [0u8; 16],
         cluster_count: 0,
+        cluster_cull_hier: None,
         resolve_pipeline: &resolve_pipeline,
         resolve_layout: &resolve_layout,
         #[cfg(feature = "hwrt")]
@@ -9903,6 +9906,7 @@ fn run_showcase_body(
         light_index_alloc: None,
         cluster_cull_push: [0u8; 16],
         cluster_count: 0,
+        cluster_cull_hier: None,
         resolve_pipeline: &resolve_pipeline,
         resolve_layout: &resolve_layout,
         #[cfg(feature = "hwrt")]

@@ -54,6 +54,24 @@
 //!   `cluster_count() * max_lights_per_cluster` regardless of `N_ps` or the light placement) —
 //!   so the swept grids can never hit the O2 clamp-and-drop that would otherwise silently
 //!   corrupt the cull-cost measurement (§8.7's own note).
+//! - `BOYKO_VB_BENCH_RIG=kronecker|r3|infrustum` (VB-P1e H4, `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md`
+//!   §1.4/§8.11) — selects this run's procedural light-placement rig. **Unset ⇒ `kronecker`**
+//!   ([`light_position`], untouched), so every existing measurement and the committed
+//!   provenance table (`boyko_render::light_policy`) stay reproducible verbatim. `r3` selects
+//!   [`r3_light_position`] — the plastic-constant 3-D Kronecker sequence `alpha = (1/p, 1/p^2,
+//!   1/p^3)`, `p = 1.220744084605760` (the real root of `x^4 = x + 1`) — genuinely 3-D
+//!   equidistributed, unlike `kronecker`'s golden-ratio powers: `g + g^2 == 1` and
+//!   `g - g^2 == g^3` collapse EVERY light in that rig onto one of two straight 3-D segments
+//!   (§1.4, numerically verified: 0 violations / 1024), which is maximally favourable to a
+//!   group-level reject and would flatter the hierarchy's win if measured alone. `infrustum`
+//!   selects [`infrustum_light_position`] — stratified INSIDE the view frustum (screen `(u, v)`
+//!   crossed with depth `d` in `[3, 12]`, mapped through the camera basis), so density RISES
+//!   with `N` instead of leaking out of frustum the way `kronecker`'s cube-root volume growth
+//!   does (§1.3: 514 → 55 non-empty froxels as `N` grows). It shares NO generator with
+//!   `light_position`/`r3_light_position` (a prior in-frustum attempt reused `light_position`'s
+//!   own formula and therefore fixed only the volume-growth defect, not the collinearity one).
+//!   Composable with `BOYKO_VB_BENCH_GRID`/`BOYKO_VB_BENCH_LIGHTS` — the rig only changes WHERE
+//!   the `N_ps` lights are placed, not how many, nor the froxel grid they are culled against.
 //!
 //! Windowed-test conventions (mirrors `vb_mesh_froxel.rs`): `#[ignore]` (needs a real windowed
 //! GPU device), run with `BOYKO_DISABLE_VALIDATION=1` and `--test-threads=1`.
@@ -79,6 +97,17 @@
 //!   cargo test -p boyko-app --test vb_p1d_cull_shade_bench -- --ignored --nocapture --test-threads=1
 //! ```
 //! the orchestrator repeats this for each of the four swept grids (plus `32x16x24`) — see §8.7.
+//!
+//! Invoke (VB-P1e H4's rig sweep, one rig, `N_ps = 512`, froxel leg, BASE arm — `BOYKO_VB_HIER_CULL`
+//! stays UNSET):
+//! ```text
+//! BOYKO_DISABLE_VALIDATION=1 BOYKO_VB_BENCH=1 BOYKO_VB_BENCH_LIGHTS=512 BOYKO_VB_BENCH_RIG=r3 \
+//!   cargo test -p boyko-app --test vb_p1d_cull_shade_bench -- --ignored --nocapture --test-threads=1
+//! ```
+//! the orchestrator repeats this for `BOYKO_VB_BENCH_RIG=infrustum` and for the unset (`kronecker`)
+//! default, at every swept `N_ps`; each of the three rig runs is then repeated with
+//! `BOYKO_VB_HIER_CULL=1` added (selects the `-D HIER=1` arm this rung arms in
+//! `boyko_app::runner`) to fill in §2's numeric table on the HIER arm.
 //!
 //! # ⚠️ H1.5 RESULT — the `0.2736 ns/pair` cost model is REFUTED IN FORM (gate §8.7: RED)
 //!
@@ -223,6 +252,98 @@ fn light_range(i: u32) -> f32 {
     1.2 + ((f64::from(i) * 0.142_857).fract() as f32) * 0.8
 }
 
+/// VB-P1e H4 (module doc, `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` §1.4/§8.11): which procedural
+/// light-placement rig `BOYKO_VB_BENCH_RIG` selects.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BenchRig {
+    /// The original golden-ratio-power rig ([`light_position`]) — the DEFAULT, kept byte-for-byte
+    /// so every prior measurement and the committed provenance table stay reproducible verbatim.
+    Kronecker,
+    /// The plastic-constant 3-D Kronecker sequence ([`r3_light_position`]).
+    R3,
+    /// Stratified inside the view frustum ([`infrustum_light_position`]).
+    Infrustum,
+}
+
+/// Parses `BOYKO_VB_BENCH_RIG` (this file's module doc). Unset ⇒ [`BenchRig::Kronecker`] —
+/// byte-identical to every prior run of this test. Panics loudly on an unrecognized value (the
+/// SAME "a bench operator's typo must fail immediately" discipline [`parse_grid_spec`] uses).
+fn bench_rig() -> BenchRig {
+    match std::env::var("BOYKO_VB_BENCH_RIG").ok().as_deref() {
+        None => BenchRig::Kronecker,
+        Some("kronecker") => BenchRig::Kronecker,
+        Some("r3") => BenchRig::R3,
+        Some("infrustum") => BenchRig::Infrustum,
+        Some(other) => panic!(
+            "invariant: BOYKO_VB_BENCH_RIG must be one of kronecker|r3|infrustum, got `{other}`"
+        ),
+    }
+}
+
+/// VB-P1e H4 rig `r3` (`docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` §8.11): the plastic-constant 3-D
+/// Kronecker sequence — genuinely 3-D equidistributed, unlike [`light_position`]'s golden-ratio
+/// powers (§1.4: `g + g^2 == 1` and `g - g^2 == g^3` collapse every light in that rig onto one of
+/// two straight 3-D segments). `p` is the plastic constant, the real root of `x^4 = x + 1`;
+/// `alpha = (1/p, 1/p^2, 1/p^3)` carries no such algebraic relation among its three components,
+/// so the three axes cannot collapse onto each other the way `light_position`'s can. Otherwise
+/// byte-for-byte the SAME volume/placement shape as [`light_position`] (`scale`/`half_x`/`y_min`/
+/// `y_span`/`z_min`/`z_span`) — this rig isolates ONLY the "genuinely 3-D" variable, holding the
+/// frustum-leak behavior fixed so the two defects (§1.4) are not conflated in one measurement.
+fn r3_light_position(i: u32, n: u32) -> [f32; 3] {
+    /// The plastic constant `p`, the real root of `x^4 = x + 1`.
+    const P: f64 = 1.220_744_084_605_76;
+    const P_INV: f64 = 1.0 / P;
+
+    let scale = (f64::from(n) / f64::from(DEFAULT_N_PS)).max(1.0).cbrt() as f32;
+    let half_x = 4.5 * scale;
+    let y_min = 0.3;
+    let y_span = 3.3 * scale;
+    let z_min = -2.0 * scale;
+    let z_span = 6.0 * scale;
+
+    let t = f64::from(i);
+    let fx = (t * P_INV).fract() as f32;
+    let fy = (t * P_INV * P_INV).fract() as f32;
+    let fz = (t * P_INV * P_INV * P_INV).fract() as f32;
+    [(fx * 2.0 - 1.0) * half_x, y_min + fy * y_span, z_min + fz * z_span]
+}
+
+/// VB-P1e H4 rig `infrustum` (`docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` §1.4/§8.11): stratified
+/// INSIDE the view frustum — screen `(u, v)` crossed with depth `d` in `[3, 12]`, mapped through
+/// the camera basis — so density RISES with `N` instead of leaking out of frustum the way
+/// [`light_position`]'s cube-root volume growth does (§1.3: 514 → 55 non-empty froxels as `N`
+/// grows). Shares NO generator with [`light_position`]/[`r3_light_position`] — a prior in-frustum
+/// attempt reused `light_position`'s own multipliers and therefore fixed only the volume-growth
+/// defect, not the collinearity one; this rig's `(u, v)` come from an independent
+/// sqrt(2)/sqrt(3) Kronecker sequence. The camera basis (`EYE`/`TARGET`/`WORLD_UP` below) is
+/// duplicated from this file's own [`setup`] `CameraRig` pose, since lights are spawned before
+/// the camera entity exists.
+fn infrustum_light_position(i: u32, n: u32) -> [f32; 3] {
+    const EYE: Vec3 = Vec3::new(0.0, 1.1, 7.8);
+    const TARGET: Vec3 = Vec3::new(0.0, 0.55, 0.0);
+    const WORLD_UP: Vec3 = Vec3::new(0.0, 1.0, 0.0);
+    const FOV_Y: f32 = 52.0 * core::f32::consts::PI / 180.0;
+    const ASPECT: f32 = 1.0;
+    /// The near/far depth band (view-space, along the camera's forward axis) the rig samples
+    /// within — comfortably inside the `CameraRig`'s own `[0.1, 100.0]` clip range.
+    const D_MIN: f32 = 3.0;
+    const D_SPAN: f32 = 9.0;
+
+    let forward = (TARGET - EYE).normalize();
+    let right = forward.cross(WORLD_UP).normalize();
+    let up = right.cross(forward);
+
+    let t = f64::from(i);
+    let u = (t * 0.414_213_562_373_095).fract() as f32; // frac(i * (sqrt(2) - 1))
+    let v = (t * 0.732_050_807_568_877).fract() as f32; // frac(i * (sqrt(3) - 1))
+    let d = D_MIN + (f64::from(i) / f64::from(n.max(1))) as f32 * D_SPAN;
+
+    let half_h = d * (FOV_Y * 0.5).tan();
+    let half_w = half_h * ASPECT;
+    let pos = EYE + forward * d + right * ((u * 2.0 - 1.0) * half_w) + up * ((v * 2.0 - 1.0) * half_h);
+    [pos.x, pos.y, pos.z]
+}
+
 /// Verbatim copy of `vb_mesh_froxel.rs::setup`'s five-sphere geometry + sun + sky, PLUS a
 /// PROCEDURALLY-generated `N_ps`-light rig (`BOYKO_VB_BENCH_LIGHTS`, default [`DEFAULT_N_PS`])
 /// in place of that file's fixed 14-row table — every 4th light (`i % 4 == 3`) is a spot,
@@ -285,9 +406,14 @@ fn setup(
         n_ps < boyko_render::MAX_LIGHTS,
         "invariant: N_ps must stay below MAX_LIGHTS (the point/spot table capacity)"
     );
+    let rig = bench_rig();
     let aim = Vec3::new(0.0, 0.6, 0.0);
     for i in 0..n_ps {
-        let pos = light_position(i, n_ps);
+        let pos = match rig {
+            BenchRig::Kronecker => light_position(i, n_ps),
+            BenchRig::R3 => r3_light_position(i, n_ps),
+            BenchRig::Infrustum => infrustum_light_position(i, n_ps),
+        };
         let color = PALETTE[(i as usize) % PALETTE.len()];
         let range = light_range(i);
         let power = 65.0;

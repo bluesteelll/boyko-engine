@@ -747,6 +747,33 @@ impl ClusterConfig {
         self.dim_x * self.dim_y * self.dim_z
     }
 
+    /// VB-P1e D11: the hierarchical cull's workgroup width — the host mirror of
+    /// `cluster_cull.hlsl`'s `#define HIER_TPG 256u`. A `const fn` rather than the
+    /// [`HIER_MASK_WORDS`]-style bare constant because it is paired 1:1 with
+    /// [`Self::hier_group_count`] at every call site (D9's radix-16 fold hardcodes this exact
+    /// width — see the shader's own `#error HIER_TPG != 256` guard).
+    #[inline]
+    pub const fn hier_group_threads() -> u32 {
+        256
+    }
+
+    /// VB-P1e D11: the hierarchical cull's 1D dispatch group count — one 256-wide group per
+    /// `ceil(dim_x * dim_y / 256)` screen block, repeated per `dim_z` slice
+    /// (`ceil(dim_x * dim_y / 256) * dim_z`) — the same value as the shader's own
+    /// `gps = (bdx * bdy + 255u) / 256u`. Rev 5 P2 wrote the host mirror as `(dim_x * dim_y +
+    /// 255) / 256` (the shader's own token-for-token form) rather than `.div_ceil()`, whose
+    /// const-stability the plan did not want to depend on; on this toolchain (`rustc 1.95`)
+    /// `u32::div_ceil` IS `const fn`, and `clippy::manual_div_ceil` (`-D warnings`) rejects the
+    /// hand-written form, so this fn uses `.div_ceil(256)` — arithmetically identical, `const
+    /// fn`-compatible here, and the clippy-mandated spelling. The shader's extra `max(1u, …)`
+    /// has no host counterpart on purpose — with `dim_x * dim_y == 0` this host dispatches ZERO
+    /// groups, so the shader's guard is unreachable from here (D8 obligation 3 keeps it for the
+    /// shader's own totality proof).
+    #[inline]
+    pub const fn hier_group_count(&self) -> u32 {
+        (self.dim_x * self.dim_y).div_ceil(256) * self.dim_z
+    }
+
     /// The exp-Z slice scale: `dim_z / ln(far / near)`. The resolve maps a view-space depth
     /// `view_z` to its froxel slice via `slice = ln(view_z / near) * z_scale` (Decision 6) —
     /// the inverse of `view_z = near * (far/near)^(slice/dim_z)`. The cull pass builds froxel

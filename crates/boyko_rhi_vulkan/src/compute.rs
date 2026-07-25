@@ -538,9 +538,11 @@ embed_spirv! {
     /// memory, coarse-culls the point/spot table against THAT once, records survivors as a
     /// groupshared bitmask, then re-runs the identical per-froxel fine test over only the
     /// mask's set bits. Same cull-set bindings as the base variant, plus a 24-byte
-    /// `ClusterCullHierPush` (the base 16-byte `ClusterCullPush` widened by two boot-snapshot
-    /// words — see `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` D11). Built but **never selected**
-    /// this rung — no pipeline is created and nothing arms it (H3/H4).
+    /// [`ClusterCullHierPush`] (the base 16-byte `ClusterCullPush` widened by two boot-snapshot
+    /// words — see `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` D11). VB-P1e H4 arms this pipeline
+    /// on the VisibilityBuffer path behind the boot-time `BOYKO_VB_HIER_CULL` env selection
+    /// (`boyko_app::runner`); unset (the default, every golden/production boot) keeps the base
+    /// arm selected — byte-identical to every pre-H4 boot.
     CLUSTER_CULL_HIER_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/cluster_cull_hier.comp.spv")
 }
@@ -1627,7 +1629,8 @@ pub fn cluster_cull_spirv() -> &'static [u32] {
 }
 
 /// VB-P1e rung H2: the `-D HIER=1` hierarchical cluster-cull SPIR-V as a `u32` word stream. See
-/// [`CLUSTER_CULL_HIER_SPV`]'s doc. Built but never bound to a pipeline this rung — dark infra.
+/// [`CLUSTER_CULL_HIER_SPV`]'s doc. Armed on the VB path by H4 (`boyko_app::gpu_scene::
+/// GpuSceneBundles::build_froxel_light_cull`) behind the `BOYKO_VB_HIER_CULL` boot selection.
 #[inline]
 pub fn cluster_cull_hier_spirv() -> &'static [u32] {
     CLUSTER_CULL_HIER_SPV.as_words()
@@ -3511,6 +3514,83 @@ impl ClusterCullPush {
         // offset + the 16-byte total pinned by the const-asserts above, no uninit padding),
         // so its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern.
         // The `&self` borrow keeps the struct alive for the slice's lifetime; read-only.
+        unsafe {
+            slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
+        }
+    }
+}
+
+/// VB-P1e D11: the hierarchical cull pipeline's COMPUTE push constants — the base
+/// [`ClusterCullPush`] (16 B: `z_near`, `z_far`, `max_lights_per_cluster`, `index_list_cap`)
+/// widened by two BOOT-snapshot words the `-D HIER=1` shader reads instead of re-deriving its
+/// dims/write-bound from the LIVE light-table header (`cluster_cull.hlsl`'s `#ifdef HIER` push
+/// tail). Mirrors `cluster_cull_hier_equiv.rs`'s own test-local copy (H3), now the production
+/// mirror H4 arms — the two are structurally identical (same fields, same offsets).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClusterCullHierPush {
+    /// Exp-Z near plane (slice 0 view-z) — mirrors [`ClusterCullPush::z_near`].
+    pub z_near: f32,
+    /// Exp-Z far plane (slice `dim_z` view-z) — mirrors [`ClusterCullPush::z_far`].
+    pub z_far: f32,
+    /// Per-froxel light-index cap (O2 clamp-and-drop) — mirrors
+    /// [`ClusterCullPush::max_lights_per_cluster`].
+    pub max_lights_per_cluster: u32,
+    /// Flat light-index-list capacity in `u32`s — mirrors [`ClusterCullPush::index_list_cap`].
+    pub index_list_cap: u32,
+    /// BOOT snapshot: `dim_x | dim_y<<8 | dim_z<<16` (the MAPPING the coarse-group thread map
+    /// derives its `(x, y, z)` from) — never the live header's dims lane.
+    pub cluster_dims_packed: u32,
+    /// BOOT `ClusterConfig::cluster_count()` in FULL precision (the WRITE BOUND every
+    /// `ClusterGrid[fi]` write clamps against) — the same binding that sized the buffer.
+    pub cluster_capacity: u32,
+}
+
+/// Byte size of [`ClusterCullHierPush`] — the hierarchical cull pipeline's declared COMPUTE
+/// push range (24 B).
+pub const CLUSTER_CULL_HIER_PUSH_BYTES: u32 = core::mem::size_of::<ClusterCullHierPush>() as u32;
+
+const _: () = assert!(core::mem::offset_of!(ClusterCullHierPush, z_near) == 0);
+const _: () = assert!(core::mem::offset_of!(ClusterCullHierPush, z_far) == 4);
+const _: () = assert!(core::mem::offset_of!(ClusterCullHierPush, max_lights_per_cluster) == 8);
+const _: () = assert!(core::mem::offset_of!(ClusterCullHierPush, index_list_cap) == 12);
+const _: () = assert!(core::mem::offset_of!(ClusterCullHierPush, cluster_dims_packed) == 16);
+const _: () = assert!(core::mem::offset_of!(ClusterCullHierPush, cluster_capacity) == 20);
+const _: () =
+    assert!(CLUSTER_CULL_HIER_PUSH_BYTES == 24, "ClusterCullHierPush must be 24 bytes");
+const _: () = assert!(CLUSTER_CULL_HIER_PUSH_BYTES <= COMPOSITE_PUSH_CONSTANT_BYTES);
+
+impl ClusterCullHierPush {
+    /// Builds the hierarchical-arm push from the base cull parameters + D11's boot snapshot
+    /// (`cluster_dims_packed`, `cluster_capacity` — both minted from the SAME
+    /// `ClusterConfig`/`cluster_count()` binding that sizes the `ClusterGrid` buffer, never
+    /// re-read from the live light-table header).
+    #[inline]
+    pub const fn new(
+        z_near: f32,
+        z_far: f32,
+        max_lights_per_cluster: u32,
+        index_list_cap: u32,
+        cluster_dims_packed: u32,
+        cluster_capacity: u32,
+    ) -> Self {
+        Self {
+            z_near,
+            z_far,
+            max_lights_per_cluster,
+            index_list_cap,
+            cluster_dims_packed,
+            cluster_capacity,
+        }
+    }
+
+    /// Re-views the push constants as their raw 24-byte slice for `push_constants`.
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        // SAFETY: `Self` is `#[repr(C)]` with only `f32`/`u32` fields (all `Copy`), every
+        // offset and the 24-byte total pinned by the const-asserts above (no uninit padding),
+        // so its `size_of` bytes are a fully-initialized, alignment-valid POD bit pattern. The
+        // `&self` borrow keeps the struct alive for the slice's lifetime; the slice is read-only.
         unsafe {
             slice::from_raw_parts((self as *const Self).cast::<u8>(), core::mem::size_of::<Self>())
         }

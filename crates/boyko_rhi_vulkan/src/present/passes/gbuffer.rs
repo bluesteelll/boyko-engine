@@ -1553,6 +1553,22 @@ impl Renderer<'_> {
             scene.light_index,
             scene.light_index_alloc,
         ) {
+            // VB-P1e H4 (P1-3, adversarial review): this Deferred record path's push/dispatch
+            // below is FIXED to the base 16-byte/64-wide arm — it never reads
+            // `scene.cluster_cull_hier`. That is sound today only because the HIER arm is armed
+            // exclusively under `RenderPath::VisibilityBuffer`
+            // (`ResolvedRenderPath::froxel_light_cull`, `boyko_render::render_path_config`), so
+            // `scene.cluster_cull` can never carry the HIER pipeline while THIS (Deferred)
+            // record path is selected. Nothing in the type system enforces that; this
+            // debug_assert makes the coupling structural instead of merely a reachability
+            // argument — zero cost in release, and it fires if a future rung (H5) ever re-points
+            // `cluster_cull_hier` at Deferred without also updating the push/dispatch below.
+            debug_assert!(
+                scene.cluster_cull_hier.is_none(),
+                "invariant: record_gbuffer's L1 cull block assumes the base 16-byte/64-wide arm; \
+                 `cluster_cull_hier` must stay None on the Deferred path until a rung wires the \
+                 HIER arm's push/dispatch here"
+            );
             // (L1-0) Reset the global slice-allocation counter to 0 (a transfer fill), then
             // order the fill before the cull's atomic reads/writes (TRANSFER→COMPUTE).
             // SAFETY: recording is open; `alloc` is a live device-local STORAGE buffer (≥ 4 B,

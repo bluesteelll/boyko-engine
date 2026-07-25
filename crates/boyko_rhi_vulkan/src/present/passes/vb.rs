@@ -32,7 +32,8 @@ use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS};
 use super::super::frame_driver::Renderer;
 use super::super::gpu_timing::VbTimedPass;
 use super::super::scene_types::{
-    CLUSTER_CULL_PUSH_BYTES, GBUFFER_PUSH_BASE_INSTANCE_OFFSET, GBufferScene, LIGHT_CULL_LOCAL_SIZE_X,
+    CLUSTER_CULL_HIER_PUSH_BYTES, CLUSTER_CULL_PUSH_BYTES, GBUFFER_PUSH_BASE_INSTANCE_OFFSET,
+    GBufferScene, LIGHT_CULL_LOCAL_SIZE_X,
 };
 use super::super::targets::{ForwardTargets, GBufferTargets, VB_CLASSIFY_MAX_MATERIAL_ROWS, VbTargets};
 use super::super::{COLOR_SUBRESOURCE_RANGE, SwapchainError};
@@ -211,14 +212,50 @@ impl Renderer<'_> {
             scene.light_index_alloc,
         ) {
             // (L1-1) Bind the cull pipeline + the cull set (written ONCE at sync_gbuffer), push
-            // the 16-byte ClusterCullPush, dispatch over CLUSTER_COUNT froxels.
-            let cull_groups = scene.cluster_count.div_ceil(LIGHT_CULL_LOCAL_SIZE_X);
+            // this arm's own push image, dispatch this arm's own group count (VB-P1e D11/H4):
+            // base = `cluster_count` froxels at the 64-wide group + the 16-byte
+            // `ClusterCullPush`; hier = `h.groups` groups of 256 + the 24-byte
+            // `ClusterCullHierPush`. `scene.cluster_cull_hier` selects BOTH halves together, so
+            // the group count can never be paired with the other arm's push range.
+            let (cull_groups, push_ptr, push_len) = match scene.cluster_cull_hier.as_ref() {
+                Some(h) => (h.groups, h.push.as_ptr(), CLUSTER_CULL_HIER_PUSH_BYTES),
+                None => (
+                    scene.cluster_count.div_ceil(LIGHT_CULL_LOCAL_SIZE_X),
+                    scene.cluster_cull_push.as_ptr(),
+                    CLUSTER_CULL_PUSH_BYTES,
+                ),
+            };
             // SAFETY: recording is open; the cull pipeline + its layout (declaring `cull_layout`
-            // at set 0 + the 16-byte COMPUTE push range) are live on this device (caller
-            // contract); the cull set binds the camera UBO + light table + the cluster buffers;
-            // `cull_groups` covers `cluster_count` froxels at the 64-wide group; the push bytes
-            // are exactly `CLUSTER_CULL_PUSH_BYTES` (16) at offset 0; `&cull_set.descriptor_set`
-            // is a single-element local alive for the call (first_set 0, count 1).
+            // at set 0 + a COMPUTE push range sized for the SAME arm) are live on this device
+            // (caller contract); the cull set binds the camera UBO + light table + the cluster
+            // buffers; the dispatch size and the push image are the SAME `Option` arm (base:
+            // `cluster_count` froxels at the 64-wide group + the 16-byte `ClusterCullPush`;
+            // hier: `h.groups` groups of 256 + the 24-byte `ClusterCullHierPush`), so the group
+            // count can never be paired with the other arm's push range.
+            //
+            // The two arms' `ClusterGrid[fi]` write bounds are DIFFERENT quantities (P0-1,
+            // adversarial review — the two must not be conflated). HIER: `cluster_cull.hlsl`'s
+            // `#ifdef HIER` branch guards on `fi < pc.cluster_capacity`, a pushed BOOT-snapshot
+            // word minted by `build_froxel_light_cull` from the SAME `ClusterConfig::
+            // cluster_count()` binding the `ClusterGrid` buffer itself was allocated from
+            // (`gpu_scene/mod.rs`) — a live edit to the `ClusterConfig` Resource cannot move
+            // this arm's own write bound, by construction (D11). BASE: the `#else` branch
+            // carries NO `cluster_capacity` push word at all — its push is 16 B / 4 words
+            // (`z_near`, `z_far`, `max_lights_per_cluster`, `index_list_cap` only); it guards on
+            // `fi >= cluster_count` where `cluster_count` comes from `load_cluster_params
+            // (LightBuf)` — the LIVE light-table header, re-read every dispatch — so the base
+            // arm's write bound is whatever `sync_cluster_light_gate` (`light.rs:875`) last
+            // wrote there, NOT the capacity `ClusterGrid` was sized from. This is the
+            // PRE-EXISTING VB-P1k skew: the base arm's shader token stream and dispatch shape
+            // are UNCHANGED by this rung (D11), so this `match` neither introduces nor closes
+            // that exposure — it merely routes to whichever arm's shader enforces its own bound
+            // the way it always did.
+            // SCOPE: this bounds THIS dispatch's writes only, and only in the sense above (HIER:
+            // boot-fixed; BASE: live-header, unclosed VB-P1k). The `ClusterGrid` *readers*
+            // (vb_resolve/vb_shade/deferred_pbr/forward_opaque) also index with the live dims
+            // and carry the SAME pre-existing skew exposure tracked as VB-P1k.
+            // `&cull_set.descriptor_set` is a single-element local alive for the call
+            // (first_set 0, count 1).
             unsafe {
                 (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cull_pipeline.pipeline);
                 (self.fns.cmd_bind_descriptor_sets)(
@@ -236,8 +273,8 @@ impl Renderer<'_> {
                     cull_pipeline.layout,
                     VK_SHADER_STAGE_COMPUTE_BIT,
                     0,
-                    CLUSTER_CULL_PUSH_BYTES,
-                    scene.cluster_cull_push.as_ptr().cast(),
+                    push_len,
+                    push_ptr.cast(),
                 );
                 (self.fns.cmd_dispatch)(cmd, cull_groups, 1, 1);
             }
