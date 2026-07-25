@@ -3486,7 +3486,13 @@ pub(crate) fn golden_slice_view_z(k: u32, cfg: &GoldenClusterConfig) -> f32 {
 }
 
 /// Squared distance from a point to an AABB (0 inside) — mirrors the shader's
-/// `sq_dist_point_aabb` (the canonical clustered-cull sphere-vs-AABB test).
+/// `sq_dist_point_aabb` (the canonical clustered-cull sphere-vs-AABB test). Since H1.6
+/// (`docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` D10) the shader computes this exact sum through
+/// explicit, `NoContraction`-decorated `OpFSub`/`OpFMul`/`OpFAdd` rather than `dot()`, in the
+/// identical `((dx^2+dy^2)+dz^2)` association this loop accumulates — Rust `f32` never fuses
+/// `a*b+c` by default, so the two sides are now bit-exact BY CONSTRUCTION, not by accident of a
+/// particular driver's `OpDot` lowering (the same argument `shaders/ddgi_resolve.hlsli:136-141`
+/// already carries for DDGI).
 #[inline]
 pub(crate) fn golden_sq_dist_point_aabb(c: [f32; 3], aabb_min: [f32; 3], aabb_max: [f32; 3]) -> f32 {
     let mut s = 0.0_f32;

@@ -98,10 +98,26 @@ void expand_aabb(inout float3 aabb_min, inout float3 aabb_max, float3 ro, float3
 }
 
 // Squared distance from a point to an AABB (0 inside). The canonical clustered-cull test:
-// a sphere (center, r) intersects the AABB iff this <= r².
+// a sphere (center, r) intersects the AABB iff this <= r^2.
+//
+// The sum is WRITTEN OUT and `precise`, not `dot()`, on purpose. Vulkan specifies OpFAdd /
+// OpFSub / OpFMul as "Correctly rounded" (one legal fp32 result), but specifies OpDot only as
+// "inherited from a formula", and the same appendix permits that formula to "be transformed
+// using the mathematical associativity, commutativity, and distributivity of the operators
+// involved". Two OpDot instructions in one module may therefore be lowered to different
+// summation orders (or to different FMA-contracted forms) by the driver -- and DXC emits no
+// Fma at all, so contraction is decided BELOW the .spv, where no byte- or disassembly-gate can
+// see it. VB-P1e's coarse->fine enclosure proof needs the two call sites to evaluate the SAME
+// function of their operands; correctly-rounded ops plus NoContraction (what `precise` emits)
+// deliver exactly that, unconditionally. `precise` is on BOTH `d` and `sd` so that every node
+// the monotonicity chain of the proof traverses -- the two OpFSub included -- is decorated;
+// see docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md section 5 step 2. It also makes the GPU match the
+// host oracle `golden_sq_dist_point_aabb` (goldens.rs:3491), which accumulates `s += d*d` in
+// the identical ((dx^2+dy^2)+dz^2) order and never fuses.
 float sq_dist_point_aabb(float3 c, float3 aabb_min, float3 aabb_max) {
-    float3 d = max(max(aabb_min - c, c - aabb_max), 0.0.xxx);
-    return dot(d, d);
+    precise float3 d  = max(max(aabb_min - c, c - aabb_max), 0.0.xxx);
+    precise float  sd = d.x * d.x + d.y * d.y + d.z * d.z;
+    return sd;
 }
 
 [numthreads(64, 1, 1)]

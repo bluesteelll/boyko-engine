@@ -5185,7 +5185,10 @@ fn p6_r1_single_point_light_gets_sdf_shadow() {
 // These run on the 3060 (the GPU-tester); they `boot_render_or_skip` when no device is
 // present. They drive the production cull pass + the clustered resolve and compare to the
 // HOST oracle (`golden_cluster_cull` + `golden_deferred_resolve_clustered`, the bit-exact
-// source of truth — the CPU companion is `tests/lighting_l1_host_oracle.rs`).
+// source of truth — the CPU companion is `tests/lighting_l1_host_oracle.rs`). Since H1.6
+// (`docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` D10) the cull distance's bit-exactness against the
+// host is STRUCTURAL — both sides compute the identical `((dx^2+dy^2)+dz^2)` sum through
+// correctly-rounded, non-fused ops — rather than an accident of one driver's `OpDot` lowering.
 //
 //   1. `l1_clustered_resolve_matches_the_brute_force_image` — the load-bearing test: it
 //      dispatches the GPU `cluster_cull` pass to populate the real `ClusterGrid` +
@@ -6290,7 +6293,8 @@ fn run_gbuffer_hybrid_lit_clustered(
 /// Diffs the whole GPU LIT readback (run through the FULL clustered path) against the host
 /// `golden_deferred_resolve_clustered` per texel, within ±2/255. The host oracle is fed the
 /// host cull `grid` (`golden_cluster_cull`, which is bit-exact to what the GPU cull writes for
-/// these no-overflow scenes).
+/// these no-overflow scenes — structurally so since H1.6, `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md`
+/// D10: both sides sum `((dx^2+dy^2)+dz^2)` through correctly-rounded, non-fused ops).
 ///
 /// **Resolve isolation.** The host `golden_marcher_attributes` re-derives the surface depth +
 /// normal via an INDEPENDENT CPU march; that marcher's GPU-vs-CPU FP gap (~0.002 in `view_t`,
