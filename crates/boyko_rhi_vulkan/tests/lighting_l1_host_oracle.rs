@@ -12,6 +12,14 @@
 //!   brute-force `golden_deferred_resolve_table` for a multi-light scene (the cull is exact
 //!   for the test lights), and the L1-OFF header path is byte-identical to L0b.
 //!
+//! It also carries the provenance of `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` §1.3's published
+//! occupancy table (VB-P1e rung HP): `cluster_cull_occupancy_profile_matches_the_published_table`
+//! and `cluster_cull_rejection_ratio_at_n512_matches_the_headline_claim` drive the same
+//! `golden_cluster_cull` oracle above with the VB-P1d bench camera / light rig
+//! (`crates/boyko_app/tests/vb_p1d_cull_shade_bench.rs`) to pin the measured froxel occupancy
+//! the hierarchical-cull design (§2 onward) is built on, replacing a session-ephemeral scratch
+//! probe that was never committed to the repository.
+//!
 //! This file boots NO Vulkan context — it is the non-GPU gate the developer runs (the GPU
 //! golden runs separately on the 3060).
 
@@ -52,6 +60,131 @@ fn lit_attrs(view_t: f32) -> MarcherAttributes {
         mask: 1,
         view_t,
     }
+}
+
+/// The bench's square render target (`vb_p1d_cull_shade_bench.rs`'s own `CameraRig`, aspect 1.0).
+const IMG: u32 = 512;
+
+/// `boyko_render::light::INDEX_LIST_CAP`. The vulkan crate cannot depend on `boyko_render`
+/// (see [`GoldenClusterConfig`]'s own doc comment), so this mirrors the constant rather than
+/// importing it.
+const INDEX_LIST_CAP: u32 = 16384;
+
+/// The bench rig's own `DEFAULT_N_PS` (`vb_p1d_cull_shade_bench.rs:68`) — [`light_position`]'s
+/// volume-scale factor is relative to this fixed baseline, not to the swept `n_ps`.
+const BENCH_DEFAULT_N_PS: u32 = 14;
+
+/// The published §1.3 table, pinned exactly: `(n_ps, total_indices, non_empty_froxels,
+/// max_per_froxel)`. These are MEASURED values, not derived — a mismatch means the host oracle
+/// or the bench rig changed since the table was published, which is exactly what this test
+/// exists to catch. Do not edit these literals to make a failing run pass.
+const PUBLISHED_TABLE: [(u32, usize, usize, usize); 8] = [
+    (8, 789, 514, 3),
+    (14, 1239, 543, 5),
+    (32, 1916, 557, 10),
+    (64, 2063, 364, 15),
+    (128, 1654, 143, 24),
+    (256, 2072, 115, 40),
+    (512, 2597, 85, 64),
+    (1024, 2709, 55, 109),
+];
+
+/// `ClusterConfig::default()` mirrored as a [`GoldenClusterConfig`]: 16x9x24 = 3456 froxels,
+/// `MAX_LIGHTS_PER_CLUSTER` 256, `z_near` 0.1, `z_far` 50.0. Distinct from this file's own
+/// [`cfg`] (ortho-tuned, `z_near` 0.25 / `z_far` 4.0): this fixture is the VB-P1d bench's
+/// PERSPECTIVE scene and must not be merged with the resolve fixtures above.
+fn vb_p1d_bench_cluster_cfg() -> GoldenClusterConfig {
+    GoldenClusterConfig {
+        dim_x: 16,
+        dim_y: 9,
+        dim_z: 24,
+        max_lights_per_cluster: 256,
+        z_near: 0.1,
+        z_far: 50.0,
+    }
+}
+
+fn norm(v: [f32; 3]) -> [f32; 3] {
+    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    [v[0] / l, v[1] / l, v[2] / l]
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+}
+
+/// The VB-P1d bench camera (`vb_p1d_cull_shade_bench.rs:235-254`): eye `(0, 1.1, 7.8)` looking
+/// at `(0, 0.55, 0)`, `fov_y` 52 degrees, aspect 1.0.
+fn camera() -> CompositeCamera {
+    let eye = [0.0, 1.1, 7.8];
+    let fwd = norm([0.0 - eye[0], 0.55 - eye[1], 0.0 - eye[2]]);
+    let right = norm(cross(fwd, [0.0, 1.0, 0.0]));
+    let up = cross(right, fwd);
+    CompositeCamera::Perspective {
+        eye,
+        forward: fwd,
+        right,
+        up,
+        tan_half_fov: (52.0_f32 * core::f32::consts::PI / 180.0 / 2.0).tan(),
+        aspect: 1.0,
+    }
+}
+
+/// Verbatim mirror of `vb_p1d_cull_shade_bench.rs::light_position` (`:124-137`).
+fn light_position(i: u32, n: u32) -> [f32; 3] {
+    let scale = (f64::from(n) / f64::from(BENCH_DEFAULT_N_PS)).max(1.0).cbrt() as f32;
+    let half_x = 4.5 * scale;
+    let y_min = 0.3;
+    let y_span = 3.3 * scale;
+    let z_min = -2.0 * scale;
+    let z_span = 6.0 * scale;
+
+    let t = f64::from(i);
+    let fx = (t * 0.618_033_988_75).fract() as f32;
+    let fy = (t * 0.381_966_011_25).fract() as f32;
+    let fz = (t * 0.236_067_977_5).fract() as f32;
+    [(fx * 2.0 - 1.0) * half_x, y_min + fy * y_span, z_min + fz * z_span]
+}
+
+/// Verbatim mirror of `vb_p1d_cull_shade_bench.rs::light_range` (`:142-144`).
+fn light_range(i: u32) -> f32 {
+    1.2 + ((f64::from(i) * 0.142_857).fract() as f32) * 0.8
+}
+
+/// Builds the bench's light table for `n_ps` point/spot lights: 2 global `l0a` lights (a
+/// directional + a sky, matching `setup`'s own sun + sky count — [`golden_cluster_cull`] never
+/// inspects `l0a`-indexed lights, so only their COUNT matters here, not their values), followed
+/// by `n_ps` point/spot lights placed by [`light_position`]/[`light_range`], every 4th
+/// (`i % 4 == 3`) a spot aimed straight down, the rest points.
+fn lights_for(n_ps: u32) -> Vec<GoldenLight> {
+    let mut lights = vec![
+        GoldenLight::directional([-0.35, -0.85, -0.4], [1.0, 0.96, 0.9], 4.0),
+        GoldenLight::directional([0.0, -1.0, 0.0], [0.38, 0.44, 0.55], 0.0),
+    ];
+    for i in 0..n_ps {
+        let p = light_position(i, n_ps);
+        let r = light_range(i);
+        if i % 4 == 3 {
+            lights.push(GoldenLight::spot(p, [0.0, -1.0, 0.0], [1.0, 1.0, 1.0], 65.0, r, 15.0, 30.0));
+        } else {
+            lights.push(GoldenLight::point(p, [1.0, 1.0, 1.0], 65.0, r));
+        }
+    }
+    lights
+}
+
+/// Runs the host cull oracle for `n_ps` point/spot lights at the VB-P1d bench rig / fixture
+/// above, returning `(total_indices, non_empty_froxels, max_per_froxel)`.
+fn occupancy_at(n_ps: u32) -> (usize, usize, usize) {
+    let c = vb_p1d_bench_cluster_cfg();
+    let cam = camera();
+    let lights = lights_for(n_ps);
+    let header = GoldenLightHeader::new(2, n_ps, 1.0);
+    let grid = golden_cluster_cull(IMG, IMG, cam, &c, &header, &lights);
+    let total: usize = grid.iter().map(Vec::len).sum();
+    let non_empty = grid.iter().filter(|cell| !cell.is_empty()).count();
+    let max_per_froxel = grid.iter().map(Vec::len).max().unwrap_or(0);
+    (total, non_empty, max_per_froxel)
 }
 
 #[test]
@@ -321,4 +454,68 @@ fn pixel_maps_to_a_unique_froxel_and_the_cull_set_is_a_superset_of_in_range() {
             }
         }
     }
+}
+
+/// Pins §1.3's occupancy table exactly, and re-asserts the cap non-saturation property §6's
+/// byte-identity discharge depends on.
+#[test]
+fn cluster_cull_occupancy_profile_matches_the_published_table() {
+    let c = vb_p1d_bench_cluster_cfg();
+    assert_eq!(
+        c.cluster_count(),
+        3456,
+        "invariant: the ClusterConfig::default() mirror must stay 16x9x24 — every literal below \
+         was measured against exactly this froxel count"
+    );
+
+    for &(n_ps, expected_total, expected_non_empty, expected_max) in &PUBLISHED_TABLE {
+        let (total, non_empty, max_per_froxel) = occupancy_at(n_ps);
+
+        assert_eq!(
+            (total, non_empty, max_per_froxel),
+            (expected_total, expected_non_empty, expected_max),
+            "N_ps={n_ps}: occupancy drifted from docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md §1.3's \
+             published table (total_indices/non_empty_froxels/max_per_froxel) — either the host \
+             oracle (`golden_cluster_cull`) or the bench rig (camera / `light_position` / \
+             `light_range`) changed since the table was measured. Do not adjust these literals to \
+             match a new run; §6/§7/§10 of the plan are anchored on the published numbers"
+        );
+
+        assert!(
+            total < INDEX_LIST_CAP as usize,
+            "N_ps={n_ps}: total_indices ({total}) must stay under INDEX_LIST_CAP \
+             ({INDEX_LIST_CAP}) — the plan's byte-identity argument for the hierarchical arm \
+             depends on this: once the flat cull's global InterlockedAdd saturates the cap, claim \
+             order decides which froxel loses its tail, and the flat/hierarchical arms are no \
+             longer comparable byte-for-byte"
+        );
+        assert!(
+            max_per_froxel < c.max_lights_per_cluster as usize,
+            "N_ps={n_ps}: max_per_froxel ({max_per_froxel}) must stay under \
+             max_lights_per_cluster ({}) — the O2 per-froxel clamp-and-drop must never trigger on \
+             this rig, or the two arms diverge for the same claim-order reason as the \
+             INDEX_LIST_CAP check above",
+            c.max_lights_per_cluster
+        );
+    }
+}
+
+/// Pins §1.3's headline claim: at `N_ps=512` the cull is dominated by rejection work — under
+/// 0.2 % of the `froxel_count * N_ps` pair tests actually succeed.
+#[test]
+fn cluster_cull_rejection_ratio_at_n512_matches_the_headline_claim() {
+    let c = vb_p1d_bench_cluster_cfg();
+    let n_ps = 512_u32;
+    let (total, _non_empty, _max_per_froxel) = occupancy_at(n_ps);
+
+    let pair_tests = u64::from(c.cluster_count()) * u64::from(n_ps);
+    let accept_ratio = total as f64 / pair_tests as f64;
+
+    assert!(
+        accept_ratio < 0.002,
+        "§1.3's headline claim: at N_ps=512 the cull performs {pair_tests} froxel x light pair \
+         tests and only {total} succeed (accept_ratio={accept_ratio:.5}, must be < 0.2%) — the \
+         pass is meant to be >99.8% pure rejection work, which is the entire justification for a \
+         hierarchical level that rejects whole blocks of froxels against whole ranges of lights"
+    );
 }
