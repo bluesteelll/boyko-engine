@@ -103,11 +103,9 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 # as normal (mesh instances exist to build an acceleration structure from), unlike the sdf-only
 # sibling pin above.
 #
-# UNBLESSED placeholders -- the sha256_* values below are NOT real hashes. Re-render on a real
-# windowed GPU device (engine_deferred_mesh_only_512_screenshot_dump, #[ignore]) and re-bless via
-# `scripts\golden.ps1 -Pin deferred_mesh_only -Bless` (and `-Hwrt -Bless`) AFTER the owner's
-# visual sign-off on the freshly-dumped BMP, per this repo's golden discipline (do NOT hand-edit
-# these values otherwise).
+# BLESSED at introduction (commit edbf3f0, "Deferred mesh-only leg -- SDF leg fully off
+# (R3b)"): the sha256_* values below are the real bless output, not placeholders -- this
+# file's only mechanically-checked unblessed sentinel is the literal "PENDING".
 crate           = "boyko_rhi_vulkan"
 test_binary     = "window_present_gbuffer"
 test_name       = "engine_deferred_mesh_only_512_screenshot_dump"
@@ -144,11 +142,9 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 # background instead of a flat clear color, confirmed on real GPU (owner-verified render: five
 # spheres, correct materials/highlights, all 6 Deferred pins byte-identical).
 #
-# UNBLESSED placeholders -- the sha256_* values below are NOT real hashes. Re-render on a real
-# windowed GPU device (forward_mesh_screenshot_dump, #[ignore]) and re-bless via
-# `scripts\golden.ps1 -Pin forward_mesh -Bless` (and `-Hwrt -Bless`) AFTER the owner's visual
-# sign-off on the freshly-dumped BMP, per this repo's golden discipline (do NOT hand-edit these
-# values otherwise).
+# BLESSED at introduction (commit 85bc912, "Forward render path live end-to-end (R4b-b)"):
+# the sha256_* values below are the real bless output, not placeholders -- this file's only
+# mechanically-checked unblessed sentinel is the literal "PENDING".
 crate           = "boyko-app"
 test_binary     = "forward_mesh"
 test_name       = "forward_mesh_screenshot_dump"
@@ -182,11 +178,9 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 # uses) -- pixel output is expected to be pixel-identical (or ULP-level FP-reorder-only) to
 # [forward_mesh]'s f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad.
 #
-# UNBLESSED placeholders -- the sha256_* values below are NOT real hashes. Re-render on a real
-# windowed GPU device (forwardplus_mesh_screenshot_dump, #[ignore]) and re-bless via
-# `scripts\golden.ps1 -Pin forwardplus_mesh -Bless` (and `-Hwrt -Bless`) AFTER the owner's visual
-# sign-off on the freshly-dumped BMP, per this repo's golden discipline (do NOT hand-edit these
-# values otherwise).
+# BLESSED at introduction (commit caae029, "ForwardPlus (clustered forward) render path
+# (R5)"): the sha256_* values below are the real bless output, not placeholders -- this
+# file's only mechanically-checked unblessed sentinel is the literal "PENDING".
 crate           = "boyko-app"
 test_binary     = "forwardplus_mesh"
 test_name       = "forwardplus_mesh_screenshot_dump"
@@ -217,11 +211,9 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 # color stands untouched. EXPECTED byte-identical to [forward_mesh]'s
 # f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad.
 #
-# UNBLESSED placeholders -- the sha256_* values below are NOT real hashes. Re-render on a real
-# windowed GPU device (forward_both_screenshot_dump, #[ignore]) and re-bless via
-# `scripts\golden.ps1 -Pin forward_both -Bless` (and `-Hwrt -Bless`) AFTER the owner's visual
-# sign-off on the freshly-dumped BMP, per this repo's golden discipline (do NOT hand-edit these
-# values otherwise).
+# BLESSED at introduction (commit 237c41b, "SDF forward-march wired end-to-end (R-SDFFWD
+# part 2)"): the sha256_* values below are the real bless output, not placeholders -- this
+# file's only mechanically-checked unblessed sentinel is the literal "PENDING".
 crate           = "boyko-app"
 test_binary     = "forward_both"
 test_name       = "forward_both_screenshot_dump"
@@ -250,11 +242,9 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 # NOTHING to gLit, so the frame is expected to be forward_sky.{vs,fs}.hlsl's analytic sky/ground
 # gradient + sun disc ONLY (sky-only, no geometry drawn over it).
 #
-# UNBLESSED placeholders -- the sha256_* values below are NOT real hashes. Re-render on a real
-# windowed GPU device (sdf_forward_only_screenshot_dump, #[ignore]) and re-bless via
-# `scripts\golden.ps1 -Pin sdf_forward_only -Bless` (and `-Hwrt -Bless`) AFTER the owner's visual
-# sign-off on the freshly-dumped BMP, per this repo's golden discipline (do NOT hand-edit these
-# values otherwise).
+# BLESSED at introduction (commit 237c41b, "SDF forward-march wired end-to-end (R-SDFFWD
+# part 2)"): the sha256_* values below are the real bless output, not placeholders -- this
+# file's only mechanically-checked unblessed sentinel is the literal "PENDING".
 crate           = "boyko-app"
 test_binary     = "sdf_forward_only"
 test_name       = "sdf_forward_only_screenshot_dump"
@@ -290,11 +280,9 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 # than the rasterizer's own hardware interpolation the other paths rely on; the orchestrator
 # compares the dumped BMP visually against those goldens (same geometry/lighting/materials).
 #
-# UNBLESSED placeholders -- the sha256_* values below are NOT real hashes. Re-render on a real
-# windowed GPU device (vb_mesh_screenshot_dump, #[ignore]) and re-bless via
-# `scripts\golden.ps1 -Pin vb_mesh -Bless` (and `-Hwrt -Bless`) AFTER the owner's visual sign-off
-# on the freshly-dumped BMP, per this repo's golden discipline (do NOT hand-edit these values
-# otherwise).
+# BLESSED at introduction (commit 4453778, "Visibility Buffer path live end-to-end (R8)"):
+# the sha256_* values below are the real bless output, not placeholders -- this file's only
+# mechanically-checked unblessed sentinel is the literal "PENDING".
 crate           = "boyko-app"
 test_binary     = "vb_mesh"
 test_name       = "vb_mesh_screenshot_dump"
@@ -673,10 +661,10 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 # cull dropped/duplicated a light (re-introducing VB-P1-0) or the header's cluster_params lane
 # (sync_cluster_light_gate, VB-P1b-0) disagrees with the flat path's light-table.
 #
-# UNBLESSED (sha256_* == "PENDING"): the orchestrator renders BOTH legs (unset and
-# BOYKO_VB_FROXEL_FORCE_OFF=1) on a real windowed GPU device, confirms the two dumps are
-# byte-identical, then blesses BOTH sha256_software/sha256_hwrt to that ONE shared hash via
-# `scripts\golden.ps1 -Pin vb_mesh_froxel -Bless` (and `-Hwrt -Bless`).
+# BLESSED at rung VB-P1b (commit d60d95b): both legs were rendered on a real windowed GPU
+# device, confirmed byte-identical to each other, and blessed to that ONE shared hash. The
+# sha256_* values below are the real bless output -- this file's only mechanically-checked
+# unblessed sentinel is the literal "PENDING", which they are not.
 crate           = "boyko-app"
 test_binary     = "vb_mesh_froxel"
 test_name       = "vb_mesh_froxel_screenshot_dump"
@@ -715,10 +703,10 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 # (re-introducing VB-P1-0 under the TEXTURED arm) or the (textured, froxel) pipeline/Set-0
 # selector (passes/vb.rs) picked the wrong pipeline.
 #
-# UNBLESSED (sha256_* == "PENDING"): the orchestrator renders BOTH legs (unset and
-# BOYKO_VB_FROXEL_FORCE_OFF=1) on a real windowed GPU device, confirms the two dumps are
-# byte-identical, then blesses BOTH sha256_software/sha256_hwrt to that ONE shared hash via
-# `scripts\golden.ps1 -Pin vb_mesh_tex_froxel -Bless` (and `-Hwrt -Bless`).
+# BLESSED at rung VB-P1c (commit b2b1240): both legs were rendered on a real windowed GPU
+# device, confirmed byte-identical to each other, and blessed to that ONE shared hash. The
+# sha256_* values below are the real bless output -- this file's only mechanically-checked
+# unblessed sentinel is the literal "PENDING", which they are not.
 crate           = "boyko-app"
 test_binary     = "vb_mesh_tex_froxel"
 test_name       = "vb_mesh_tex_froxel_screenshot_dump"
