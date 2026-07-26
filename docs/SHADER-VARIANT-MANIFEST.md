@@ -50,6 +50,14 @@ family for the VB-SV0 gate that must prove all six unperturbed
 (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §5.4); all six were re-DXC'd byte-identical against the committed
 artifacts at that time.*
 
+*Byte gate (added at rung VB-P1k): all six rows — and both `forward_opaque.fs.hlsl` rows below —
+are now re-DXC'd and byte-compared by `crates/boyko_rhi_vulkan/tests/cluster_grid_read_bound.rs`.
+Until that rung these two families had **no `*_spv_sync` test at all**, so a stale artifact was a
+silent failure rather than a loud one. Four of the six rows moved at VB-P1k (the `use_clusters`
+capacity bound); `deferred_pbr_hwrt_vis` and `deferred_pbr_hwrt_vis_mv` did not, because
+`SHADOW_STAGE=1` returns before lighting and DXC dead-strips the whole cluster block — the same
+reason their `OpArrayLength` census row is 0.*
+
 ## `gbuffer_mrt.{vs,fs}.hlsl` — the mesh G-buffer raster
 
 | Variant | `MV` | `MAT` | `.spv` | Interface delta |

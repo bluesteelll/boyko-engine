@@ -406,10 +406,14 @@ fn write_pod<T: Copy>(dst: &mut [u8], off: usize, value: &T) {
 /// feeds a GPU BUFFER INDEX: on the very first frame `clusters_enabled` goes `true`, an unordered
 /// fold could pack `clusters_enabled=1` together with `dims=0` (the gate hasn't run yet), and the
 /// froxel resolve's `cluster_z_slice`/`cluster_linear_index` (`light_table.hlsli`) would then
-/// underflow to a huge, out-of-bounds `ClusterGrid` index — real GPU UB with
-/// `robust_buffer_access` disabled. `sync_cluster_light_gate` joins THIS set with
-/// `.before_set(LightCollectSet)` so the header always carries valid dims the SAME frame the
-/// enabled bit goes hot.
+/// underflow to a huge, out-of-bounds `ClusterGrid` index. That WAS real GPU UB with
+/// `robust_buffer_access` disabled; as of VB-P1k all four `ClusterGrid` readers
+/// (`vb_resolve`/`vb_shade`/`deferred_pbr`/`forward_opaque`) reject a zero-dims — or
+/// over-capacity — header and fall back to the in-bounds flat light scan, so what survives is a
+/// one-frame LIGHTING artefact rather than a device fault. This edge is therefore a CORRECTNESS
+/// edge now, not the only line against UB, and it stays for that reason.
+/// `sync_cluster_light_gate` joins THIS set with `.before_set(LightCollectSet)` so the header
+/// always carries valid dims the SAME frame the enabled bit goes hot.
 #[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct LightCollectSet;
 

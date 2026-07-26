@@ -356,8 +356,12 @@ impl Plugin for EnginePlugins {
             // very first frame `clusters_enabled` goes `true`, an unordered fold could pack
             // `clusters_enabled=1` with STALE/ZERO dims (this gate hasn't run yet that frame), and
             // the froxel resolve's `cluster_z_slice`/`cluster_linear_index` would then underflow to
-            // an out-of-bounds `ClusterGrid` index — real GPU UB with `robust_buffer_access`
-            // disabled (`device.rs`). `.before_set(LightCollectSet)` is the SAME cross-plugin
+            // an out-of-bounds `ClusterGrid` index. That WAS real GPU UB with
+            // `robust_buffer_access` disabled (`device.rs`); as of VB-P1k all four `ClusterGrid`
+            // readers reject a zero-dims (or over-capacity) header and fall back to the in-bounds
+            // flat light scan, so the residue is a one-frame LIGHTING artefact rather than a
+            // device fault — this edge is now a correctness edge, not the only line against UB,
+            // and it stays for that reason. `.before_set(LightCollectSet)` is the SAME cross-plugin
             // by-name seam `resolve_shadow_atlas`/`PunctualResolveSet` uses (`collect_lights`'s
             // `SystemKey` is a closure-local in `LightingPlugin::build`, invisible here) — see
             // `LightCollectSet`'s own doc.

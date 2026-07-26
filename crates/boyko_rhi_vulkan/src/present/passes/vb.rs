@@ -234,26 +234,28 @@ impl Renderer<'_> {
             // count can never be paired with the other arm's push range.
             //
             // The two arms' `ClusterGrid[fi]` write bounds are DIFFERENT quantities (P0-1,
-            // adversarial review — the two must not be conflated). HIER: `cluster_cull.hlsl`'s
-            // `#ifdef HIER` branch guards on `fi < pc.cluster_capacity`, a pushed BOOT-snapshot
-            // word minted by `build_froxel_light_cull` from the SAME `ClusterConfig::
-            // cluster_count()` binding the `ClusterGrid` buffer itself was allocated from
-            // (`gpu_scene/mod.rs`) — a live edit to the `ClusterConfig` Resource cannot move
-            // this arm's own write bound, by construction (D11). BASE: the `#else` branch
-            // carries NO `cluster_capacity` push word at all — its push is 16 B / 4 words
-            // (`z_near`, `z_far`, `max_lights_per_cluster`, `index_list_cap` only); it guards on
-            // `fi >= cluster_count` where `cluster_count` comes from `load_cluster_params
-            // (LightBuf)` — the LIVE light-table header, re-read every dispatch — so the base
-            // arm's write bound is whatever `sync_cluster_light_gate` (`light.rs:875`) last
-            // wrote there, NOT the capacity `ClusterGrid` was sized from. This is the
-            // PRE-EXISTING VB-P1k skew: the base arm's shader token stream and dispatch shape
-            // are UNCHANGED by this rung (D11), so this `match` neither introduces nor closes
-            // that exposure — it merely routes to whichever arm's shader enforces its own bound
-            // the way it always did.
-            // SCOPE: this bounds THIS dispatch's writes only, and only in the sense above (HIER:
-            // boot-fixed; BASE: live-header, unclosed VB-P1k). The `ClusterGrid` *readers*
-            // (vb_resolve/vb_shade/deferred_pbr/forward_opaque) also index with the live dims
-            // and carry the SAME pre-existing skew exposure tracked as VB-P1k.
+            // adversarial review — the two must not be conflated), but as of VB-P1j both are
+            // hard-bounded by the ALLOCATION, so neither can write past the end of `ClusterGrid`
+            // under any boot/live `ClusterConfig` skew. HIER: `cluster_cull.hlsl`'s `#ifdef HIER`
+            // branch guards on `fi < pc.cluster_capacity`, a pushed BOOT-snapshot word minted by
+            // `build_froxel_light_cull` from the SAME `ClusterConfig::cluster_count()` binding
+            // the `ClusterGrid` buffer itself was allocated from (`gpu_scene/mod.rs`) — a live
+            // edit to the `ClusterConfig` Resource cannot move this arm's own write bound, by
+            // construction (D11). BASE: the `#else` branch still carries NO `cluster_capacity`
+            // push word (its push stays 16 B / 4 words — `z_near`, `z_far`,
+            // `max_lights_per_cluster`, `index_list_cap`; VB-P1j deliberately did NOT widen it);
+            // it clamps `cluster_count` by `ClusterGrid.GetDimensions()` instead, i.e. by the
+            // bound DESCRIPTOR's own element count (SPIR-V `OpArrayLength`). That is the
+            // allocation itself rather than a host-side mirror of it, so this arm's bound cannot
+            // drift from the buffer even if a push word or a boot snapshot were wrong. Before
+            // VB-P1j it bounded only on the LIVE header's `dim_x*dim_y*dim_z`, reaching
+            // `min(64*ceil(boot_cc/64), live_cc)` — measured at 16 cells / 128 B past the end
+            // for boot 16x9x23 vs live 16x9x24.
+            // SCOPE: this bounds THIS dispatch's writes only. The `ClusterGrid` *readers*
+            // (vb_resolve/vb_shade/deferred_pbr/forward_opaque) are a separate contract, closed
+            // by VB-P1k in the same commit: each disarms its cluster walk (falling back to the
+            // in-bounds flat light scan) unless the live grid fits that same `GetDimensions()`
+            // bound.
             // `&cull_set.descriptor_set` is a single-element local alive for the call
             // (first_set 0, count 1).
             unsafe {

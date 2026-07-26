@@ -1223,8 +1223,43 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // (ORTHO). The linearization (`cluster_linear_index`) + the slice/tile maps are the
         // shared `light_table.hlsli` helpers — byte-identical to the cull WRITE (a mismatch
         // would silently map to the wrong cluster).
+        //
+        // Two DEFENCE terms beyond the enabled bit, bringing this site to the same three-term
+        // form `vb_resolve.comp.hlsl`/`vb_shade.comp.hlsl` carry (it had NEITHER of them until
+        // now, and it is reachable on EVERY Deferred boot, unlike the `#ifdef FROXEL` VB sites):
+        //
+        //   * non-zero dims (VB-P1b-0 C1). `cluster_z_slice` clamps to `(int)dim_z - 1`, which
+        //     for `dim_z == 0` is `-1` and returns `0xFFFFFFFF`; `cluster_linear_index` then
+        //     yields `0xFFFFFFFF` and `ClusterGrid[cluster]` reads gigabytes past the end. A
+        //     zero-dims header is exactly what `sync_cluster_light_gate` publishes on every
+        //     non-VB-froxel boot -- including this shader's own Deferred path -- so the enabled
+        //     bit alone was never a sufficient guard here.
+        //   * CAPACITY (VB-P1k). `cluster_linear_index` is < dim_x*dim_y*dim_z by construction,
+        //     so the LIVE header's dims are the only bound this read would otherwise have --
+        //     while `ClusterGrid` was SIZED at boot from `ClusterConfig::cluster_count()` and is
+        //     never re-allocated, and `sync_cluster_light_gate` republishes the LIVE dims every
+        //     frame. A post-boot `ClusterConfig` edit that GROWS the grid therefore makes this
+        //     read leave the allocation, silently (`robustBufferAccess` is OFF, no GPU-assisted
+        //     validation). `GetDimensions` reports the BOUND DESCRIPTOR's own element count
+        //     (SPIR-V `OpArrayLength`) -- the allocation itself, not a host-side mirror of it --
+        //     so this term disarms the cluster walk for exactly the frames whose live grid does
+        //     not fit the buffer, falling back to the in-bounds flat scan (which is also the
+        //     CORRECT lighting for such a frame; clamping the index would silently shade against
+        //     the wrong froxel).
+        //
+        // Both terms are inert on every armed, correctly-packed frame (dims nonzero together
+        // with the enabled bit, and `cluster_count == grid_capacity` when boot dims == live
+        // dims -- every shipping configuration), so ON==OFF equality is unaffected. On a
+        // Deferred/ForwardPlus boot with no L1 cull built, `ClusterGrid` is bound to the light
+        // table as a placeholder (`targets.rs`); `GetDimensions` then reports THAT buffer's
+        // element count, which is still a true bound on the bound descriptor -- and the dims
+        // term has already disarmed the walk there anyway.
         ClusterParams cp = load_cluster_params(LightBuf);
-        bool use_clusters = cp.clusters_enabled != 0u;
+        uint grid_capacity, grid_stride;
+        ClusterGrid.GetDimensions(grid_capacity, grid_stride);
+        uint cluster_count = cp.dim_x * cp.dim_y * cp.dim_z;
+        bool use_clusters = (cp.clusters_enabled != 0u) && (cluster_count != 0u)
+                         && (cluster_count <= grid_capacity);
         uint ps_count;       // number of point/spot lights to walk
         uint ps_offset;      // base into LightIndexList (clusters) or the flat block
         if (use_clusters) {

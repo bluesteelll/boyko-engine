@@ -3183,13 +3183,25 @@ over.
   corollary. **Concrete precondition, verified:** the RHI sets `subgroup_size_control: VK_FALSE`
   (`device.rs:2584`) and queries `subgroupSize` nowhere, so VB-P1i must first add the device-feature
   query.
-* **VB-P1j — give the BASE arm the same capacity bound.** Its total bound is
+* **VB-P1j — give the BASE arm the same capacity bound. CLOSED.** Its total bound was
   `min(64·ceil(boot_cc/64), live_cc)`, which exceeds `boot_cc` when `boot_cc % 64 != 0` **and** the
   live dims grow: measured **16 cells (128 B) past the end of `ClusterGrid`** at boot 16x9x23 / live
   16x9x24. Two owner actions required (vs one for D3-as-written), bounded by 63 cells (vs unbounded).
-  It needs its own base `.spv` re-pin, which is why it is not folded into H1.6. **Note the shared
-  root with VB-P1k:** both are the base path trusting live dims against a boot-sized buffer, one on
-  the write side and one on the read side.
+  It needed its own base `.spv` re-pin, which is why it was not folded into H1.6. **Note the shared
+  root with VB-P1k:** both were the base path trusting live dims against a boot-sized buffer, one on
+  the write side and one on the read side — and both are closed in the SAME commit, by the same
+  mechanism.
+  **Closure (not by the push route this bullet assumed).** The base arm's push range is
+  *unchanged* (still 16 B / 4 words); instead `cluster_cull.hlsl`'s `#else` prologue clamps
+  `cluster_count` by `ClusterGrid.GetDimensions()` — SPIR-V `OpArrayLength` on the bound
+  descriptor, i.e. the ALLOCATION itself rather than a host-side mirror of it. This is strictly
+  stronger than the pushed boot capacity D11 gives the HIER arm (a push word can be wrong; the
+  array length cannot), and it costs no host change, no pipeline-layout change and no dispatch-site
+  change — two instructions (`OpArrayLength` + `OpUMin`) once per thread, outside the light loop.
+  The `min` is arithmetically inert whenever boot dims == live dims, so cull output — and every
+  golden pinned on it — is unchanged. Gates: `tests/cluster_grid_write_bound.rs` (skew sweep +
+  the executed pre-fix mutation, which reproduces the 16-cell overrun) and
+  `cluster_cull_spv_sync.rs`'s `op_array_length` census on the committed module.
 * **VB-P1k — bound the `ClusterGrid` READ against the boot capacity. RE-FILED IN REV 4 AS A SAFETY
   FOLLOW-UP, not an "Owner/VALUES call".** Rev 3 filed it as a behaviour preference ("decide whether a
   detected boot/live skew should disarm the cull in release") on the strength of the claim that "the
@@ -3205,6 +3217,22 @@ over.
   it is a memory-safety item, not a preference. Scope when it is taken: push the boot capacity to the
   consumers (or clamp the computed `cluster` against it) rather than only disarming the cull; the
   disarm question is then genuinely a VALUES call on top of a closed hole.
+  **CLOSED, by neither of the two routes this bullet named.** Pushing the boot capacity to four
+  shader families (14 committed variants, four pipeline layouts, three host push structs) was
+  rejected as disproportionate; clamping the computed `cluster` was rejected because it keeps the
+  walk armed against a grid that does not exist, so the pixel shades from the WRONG froxel,
+  silently. What shipped: each of the four consumers reads `ClusterGrid.GetDimensions()` (SPIR-V
+  `OpArrayLength` — the allocation itself, no new interface anywhere) and extends `use_clusters` to
+  the three-term `clusters_enabled != 0 && cluster_count != 0 && cluster_count <= grid_capacity`. A
+  skewed frame falls back to the flat light scan, which is both in-bounds and the CORRECT lighting
+  for that frame, so the disarm-vs-clamp VALUES call is answered by the cheaper and more correct
+  option rather than deferred. The same commit gives `deferred_pbr.hlsl` and
+  `forward_opaque.fs.hlsl` the older non-zero-dims term (VB-P1b-0 C1) that they had never carried —
+  the sharper of the two holes, since a zero-`dim_z` header (what `sync_cluster_light_gate`
+  publishes on every non-VB-froxel boot, i.e. on exactly those two shaders' own production paths)
+  makes `cluster_z_slice` return `0xFFFFFFFF`. Gate: `tests/cluster_grid_read_bound.rs`, which also
+  closes a gap found while enumerating the family — the `deferred_pbr` (6 rows) and
+  `forward_opaque.fs` (2 rows) families had **no `*_spv_sync` byte-identity test at all**.
 * **A `safe_normalize` in `ray_gen.hlsli`** — the true root fix for the device NaN of §5's first
   source. Deliberately **not** smuggled into VB-P1e: `ray_gen.hlsli` is included by the marcher and
   the deferred PBR resolve, so the change re-DXCs and moves every dependent committed `.spv` and its

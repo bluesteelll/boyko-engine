@@ -5,8 +5,11 @@
 //! `redxc_with_defines` multi-variant idiom `vb_froxel_spv_sync.rs:52-69` uses for the VB froxel
 //! family, scoped to the two `cluster_cull.hlsl` variants:
 //!
-//! * `cluster_cull.comp.spv` (`cluster_cull.hlsl`, no `-D` — the base arm, gate (b): the seam
-//!   must be physically inert on this compile, so it stays byte-identical to its pre-H2 build).
+//! * `cluster_cull.comp.spv` (`cluster_cull.hlsl`, no `-D` — the base arm, gate (b): the `#ifdef
+//!   HIER` seam must be physically inert on this compile. It was byte-identical to its pre-H2
+//!   build until rung VB-P1j, which deliberately RE-PINNED this artifact by adding the base
+//!   arm's `ClusterGrid.GetDimensions()` write bound; the seam's inertness is still what this
+//!   gate proves — the blob it proves it against simply moved once, on purpose).
 //! * `cluster_cull_hier.comp.spv` (`cluster_cull.hlsl`, `-D HIER=1` — the new variant, gate (a)).
 //!
 //! The arm bit is never armed this rung (no pipeline is created, nothing selects the HIER
@@ -154,6 +157,11 @@ struct SpvCensus {
     f_min: usize,
     f_max: usize,
     op_control_barrier: usize,
+    /// VB-P1j: the emitted `ClusterGrid.GetDimensions()` — the base arm's WRITE bound. This is
+    /// the ARTIFACT-level half of the fix's pin (the other half,
+    /// `tests/cluster_grid_write_bound.rs`, sweeps a Rust mirror of the prologue and cannot see
+    /// the real module). Dropping the clamp from the HLSL collapses this to 0, which is RED.
+    op_array_length: usize,
 }
 
 /// Counts the census tokens in a `spirv-dis` disassembly. `GLSL.std.450` ext-inst calls
@@ -171,6 +179,7 @@ fn census(dis: &str) -> SpvCensus {
         f_min: 0,
         f_max: 0,
         op_control_barrier: 0,
+        op_array_length: 0,
     };
     for line in dis.lines() {
         for tok in line.split_whitespace() {
@@ -184,6 +193,7 @@ fn census(dis: &str) -> SpvCensus {
                 "FMin" => c.f_min += 1,
                 "FMax" => c.f_max += 1,
                 "OpControlBarrier" => c.op_control_barrier += 1,
+                "OpArrayLength" => c.op_array_length += 1,
                 _ => {}
             }
         }
@@ -206,11 +216,16 @@ fn cluster_cull_hier_variant_spv_byte_identical() {
     assert_spv_byte_identical(&dxc, &dir, "cluster_cull.hlsl", &["HIER=1"], "cluster_cull_hier.comp.spv");
 }
 
-/// H2 gate (b): the BASE (no `-D`) compile stays byte-identical to the H1.6-re-pinned blob —
-/// the `#ifdef HIER` seam (the new push-tail members + the new arm of `main`) must be
+/// H2 gate (b): the BASE (no `-D`) compile stays byte-identical to the committed blob — the
+/// `#ifdef HIER` seam (the HIER-only push-tail members + the new arm of `main`) must be
 /// physically inert on this compile. **Re-measured at this rung, not inherited**: the push
 /// struct's HIER-only tail widened by a second word since the last time this inertness was
 /// probed, so a stale measurement would not cover the artifact being committed here.
+///
+/// The blob itself was re-pinned once, at rung VB-P1j, when the base arm gained its
+/// `ClusterGrid.GetDimensions()` write bound (`cluster_cull.hlsl`'s `#else` prologue). That
+/// edit is INSIDE the base arm and leaves `cluster_cull_hier.comp.spv` byte-identical — verified
+/// by the sibling test above, which is the direction this gate does not cover.
 #[test]
 fn cluster_cull_base_variant_spv_unperturbed_by_the_hier_seam() {
     let Some(dxc) = find_dxc() else {
@@ -265,6 +280,9 @@ fn cluster_cull_spv_census_pinned() {
         f_min: 0,
         f_max: 0,
         op_control_barrier: 0,
+        // VB-P1j: exactly ONE `ClusterGrid.GetDimensions()` — the capacity clamp on the base
+        // arm's write bound. MEASURED on the artifact this rung commits.
+        op_array_length: 1,
     };
     assert_eq!(
         actual, expected,
@@ -287,5 +305,18 @@ fn cluster_cull_spv_census_pinned() {
         "invariant: NoContraction must be non-zero on the H1.6-re-pinned base module — a zero \
          count means a later `NoContraction`-scoped structural selector (H2's e5/e6) would \
          select the empty set and vacuously pass on an arbitrarily divergent module"
+    );
+
+    // VB-P1j, stated separately from the aggregate equality so a failure names the SAFETY
+    // property rather than "the census drifted": the base arm's `ClusterGrid[fi]` write must be
+    // bounded by the buffer's own element count. Deleting the `GetDimensions` clamp from
+    // `cluster_cull.hlsl` restores an out-of-bounds device write that NOTHING else in this
+    // repository detects — `robustBufferAccess` is off and no GPU-assisted validation runs.
+    assert_eq!(
+        actual.op_array_length, 1,
+        "invariant: the base cull arm must carry exactly one `OpArrayLength` on `ClusterGrid` \
+         (VB-P1j's capacity clamp). Got {}. A count of 0 means the write bound fell back to the \
+         LIVE header dims against a BOOT-sized allocation.",
+        actual.op_array_length
     );
 }

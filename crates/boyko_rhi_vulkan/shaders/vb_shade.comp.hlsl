@@ -517,7 +517,26 @@ void main(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID) {
     // together with the enabled bit once `sync_cluster_light_gate` has run), so ON==OFF
     // equality is unaffected. This seam compiles into BOTH `vb_shade_froxel.comp.spv` and
     // `vb_shade_tex_froxel.comp.spv` (the same source, `-D TEXTURED=1` for the latter).
-    bool use_clusters = (cp.clusters_enabled != 0u) && (cp.dim_x * cp.dim_y * cp.dim_z != 0u);
+    //
+    // VB-P1k (the CAPACITY term): non-zero dims are not enough. `cluster_linear_index` is
+    // < dim_x*dim_y*dim_z by construction, so the LIVE header's dims are the only bound this
+    // read would otherwise have -- while `ClusterGrid` was SIZED at boot from
+    // `ClusterConfig::cluster_count()` and is never re-allocated. `sync_cluster_light_gate`
+    // republishes the LIVE `ClusterConfig` dims into the header every frame, so a post-boot
+    // `ClusterConfig` edit that GROWS the grid makes this read leave the allocation --
+    // silently, `robustBufferAccess` being OFF with no GPU-assisted validation. `GetDimensions`
+    // reports the BOUND DESCRIPTOR's own element count (SPIR-V `OpArrayLength`), i.e. the
+    // allocation itself rather than a host-side mirror of it, so the third term disarms the
+    // cluster walk for exactly the frames whose live grid does not fit the buffer and falls
+    // back to the in-bounds flat scan -- which is also the CORRECT lighting for such a frame,
+    // whereas clamping the index would silently shade against the wrong froxel. Inert whenever
+    // boot dims == live dims (every shipping configuration: `cluster_count == grid_capacity`,
+    // so the term reads `n <= n`), so ON==OFF equality is again unaffected.
+    uint grid_capacity, grid_stride;
+    ClusterGrid.GetDimensions(grid_capacity, grid_stride);
+    uint cluster_count = cp.dim_x * cp.dim_y * cp.dim_z;
+    bool use_clusters = (cp.clusters_enabled != 0u) && (cluster_count != 0u)
+                     && (cluster_count <= grid_capacity);
     uint ps_count;   // number of point/spot lights to walk
     uint ps_offset;  // base into LightIndexList (clusters) or the flat block
     if (use_clusters) {

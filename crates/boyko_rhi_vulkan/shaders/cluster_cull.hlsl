@@ -26,11 +26,16 @@
 // the flat one-thread-per-froxel scan with a two-level, gather-side hierarchical cull — a
 // 256-lane workgroup first reduces its own froxels' AABBs into a group box (in groupshared
 // memory), tests the light table against THAT once, records survivors as a groupshared
-// bitmask, then re-runs today's exact per-froxel test over only the mask's set bits. The base
-// (no `-D`) arm is UNCHANGED token-for-token; nothing in this engine selects the HIER
-// pipeline yet (built but never bound — H3/H4 arm it). See
+// bitmask, then re-runs today's exact per-froxel test over only the mask's set bits. Nothing
+// in this engine selects the HIER pipeline by default (H3/H4 arm it behind an env knob). See
 // docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md section 4 for the full derivation and D1-D11 for the
 // design decisions the shape below encodes.
+//
+// VB-P1j (this rung): the BASE arm's `ClusterGrid[fi]` WRITE is now bounded by the buffer's own
+// element count, not only by the live header's dims — see the base arm's own prologue below for
+// the derivation. Both arms are therefore hard-bounded by the allocation; they get there by
+// DIFFERENT routes (HIER: D11's pushed boot capacity; base: `GetDimensions`), which is stated
+// where each one lives.
 //
 // Compiled offline (hermetic build) with:
 //   dxc.exe -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 cluster_cull.hlsl \
@@ -382,9 +387,39 @@ void main(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint lane : S
         ClusterGrid[fi] = uint2(offset, write_count);
     }
 #else
-    // ==== base arm (UNCHANGED, token-for-token) ============================================
+    // ==== base arm =========================================================================
+    // The froxel geometry, the light test and the claim/scatter tail below are token-for-token
+    // what they have always been (D4's byte-identity claim is about phase 5's inner test and
+    // phase 6's tail, both untouched). The ONE thing VB-P1j changes is the write bound in this
+    // prologue.
     ClusterParams cp = load_cluster_params(LightBuf);
-    uint cluster_count = cp.dim_x * cp.dim_y * cp.dim_z;
+
+    // VB-P1j — the WRITE bound. `ClusterGrid` is SIZED once, at boot, from
+    // `ClusterConfig::cluster_count()` (`gpu_scene/mod.rs`'s `build_froxel_light_cull`), and is
+    // never re-allocated. `cp.dim_*` come from the LIVE light-table header, which
+    // `sync_cluster_light_gate` (`light.rs`) republishes from the LIVE `ClusterConfig` Resource
+    // every frame. A post-boot `ClusterConfig` edit therefore moves the live dims out from under
+    // a buffer that keeps its boot size, and the host still dispatches the BOOT froxel count
+    // rounded up to this arm's 64-wide group. Bounding only on `dim_x*dim_y*dim_z` let this arm
+    // write `min(64*ceil(boot_cc/64), live_cc)` cells into a `boot_cc`-cell buffer — measured at
+    // 16 cells / 128 bytes past the end for boot 16x9x23 vs live 16x9x24, silent because
+    // `robustBufferAccess` is OFF and no GPU-assisted validation runs.
+    //
+    // `GetDimensions` reports the BOUND DESCRIPTOR's own element count (SPIR-V `OpArrayLength`
+    // on the runtime array) — the allocation itself, not a host-side mirror of it — so this
+    // bound cannot drift from the buffer even if a push word or a boot snapshot were wrong. That
+    // is why this arm does NOT take the HIER arm's route (D11's pushed `cluster_capacity`); the
+    // two are provably equal on every correct boot, and the asymmetry is deliberate: the pushed
+    // word buys the HIER arm a group-uniform `capacity` its thread map already needed, while
+    // this arm needs no new push word, no new pipeline-layout range and no host change at all.
+    //
+    // Cost: two instructions (`OpArrayLength` + `OpUMin`) once per thread, outside the light
+    // loop. Output: IDENTICAL whenever boot dims == live dims (every shipping configuration),
+    // because `grid_capacity == cluster_count` makes the `min` a no-op — that is what keeps
+    // every existing golden byte-identical.
+    uint grid_capacity, grid_stride;
+    ClusterGrid.GetDimensions(grid_capacity, grid_stride);
+    uint cluster_count = min(cp.dim_x * cp.dim_y * cp.dim_z, grid_capacity);
     uint fi = tid.x;
     if (fi >= cluster_count) {
         return;

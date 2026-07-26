@@ -3684,6 +3684,57 @@ pub fn golden_hier_thread_map(
     (x, y, z, fi, valid)
 }
 
+/// Host mirror of the BASE cull arm's group width — `cluster_cull.hlsl`'s `[numthreads(64,1,1)]`
+/// on the no-`-D` compile, and the divisor every dispatch site uses
+/// (`scene.cluster_count.div_ceil(LIGHT_CULL_LOCAL_SIZE_X)` in `passes/{vb,gbuffer,forward}.rs`).
+/// Mirrors [`HIER_GROUP_THREADS`]'s role for the `-D HIER=1` arm.
+pub const BASE_GROUP_THREADS: u32 = 64;
+
+/// Pure-arithmetic replica of the BASE cull arm's thread-to-froxel map for one dispatch thread
+/// — `cluster_cull.hlsl`'s `#else` prologue: the VB-P1j capacity-clamped `cluster_count`, the
+/// `fi >= cluster_count` early return, and the `(x, y, z)` delinearization behind it. Returns
+/// `(x, y, z, fi, valid)`, the SAME shape [`golden_hier_thread_map`] returns for the other arm.
+///
+/// `capacity` is `ClusterGrid`'s own element count — the buffer's BOOT size, which the shader
+/// reads back with `GetDimensions` (SPIR-V `OpArrayLength`) rather than from any push word.
+/// `dim_x`/`dim_y`/`dim_z` are the LIVE light-table header's dims, which
+/// `sync_cluster_light_gate` republishes every frame from the LIVE `ClusterConfig` and which a
+/// post-boot edit can therefore move away from `capacity`. The VB-P1j clamp is exactly the `min`
+/// below: without it, `valid` holds for `fi` up to `live_cc - 1`, which exceeds `capacity - 1`
+/// whenever the live dims grow — the out-of-bounds device write this mirror exists to pin.
+///
+/// **Scope (mirrors [`golden_hier_thread_map`]'s own stated scope).** This is a Rust
+/// RE-IMPLEMENTATION of the shader's prologue, not a pin on the HLSL: if the shader and this
+/// mirror drift, only a device run sees it. The artifact-level pin that the clamp is PRESENT in
+/// the committed `.spv` is `cluster_cull_spv_sync.rs`'s census (`op_array_length`), which counts
+/// the emitted `OpArrayLength` on the real module.
+// The delinearization is written out in the shader's own `% dim_z` / `/ dim_z` / `% dim_x` /
+// `/ dim_x` form rather than via a helper, for the same reason `golden_hier_thread_map` writes
+// its ternaries out: a reviewer checks this function against the HLSL by eye.
+#[inline]
+pub fn golden_base_thread_map(
+    tid: u32,
+    dim_x: u32,
+    dim_y: u32,
+    dim_z: u32,
+    capacity: u32,
+) -> (u32, u32, u32, u32, bool) {
+    // `uint cluster_count = min(cp.dim_x * cp.dim_y * cp.dim_z, grid_capacity);`
+    let cluster_count = (dim_x * dim_y * dim_z).min(capacity);
+    let fi = tid;
+    if fi >= cluster_count {
+        // `if (fi >= cluster_count) { return; }` — nothing below the early return executes, so
+        // the delinearization (which divides by `dim_z`/`dim_x`) is never reached on a
+        // degenerate all-zero-dims header either.
+        return (0, 0, 0, fi, false);
+    }
+    let z = fi % dim_z;
+    let xy = fi / dim_z;
+    let x = xy % dim_x;
+    let y = xy / dim_x;
+    (x, y, z, fi, true)
+}
+
 /// Aggregate pair-count diagnostics [`golden_cluster_cull_hier`] returns alongside its
 /// per-froxel index grid — the raw numerator H1's selectivity gate
 /// (`pairs_hier() as f64 / (capacity * ps_n) as f64 <= 1.0/8.0`, §8.6 assertion 5) is computed
