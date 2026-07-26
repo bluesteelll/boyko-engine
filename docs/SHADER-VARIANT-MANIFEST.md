@@ -26,17 +26,29 @@ One source `shaders/deferred_pbr.hlsl`; the host selects a variant by **binding 
 never a dynamic branch. All share the base 0..11 binding block (G-buffer STORAGE images, material SSBO,
 camera UBO, light table, cluster grid, SDF edit-list, SSAO). The deltas:
 
-| Variant | `SHADOW_STAGE` | `HWRT` | `MV` | `.spv` | dxc `-T` | Interface delta vs base (0..11) |
-|---|---|---|---|---|---|---|
-| RESOLVE_INLINE (software) | — | — | — | `deferred_pbr.comp.spv` | `cs_6_0` | none — software SDF `sdf_soft_shadow_ranged`; +CSM `gCsm`/`gCsmCmp` @12/13/14 + punctual atlas + (bound-unread) DDGI @16/17/18. |
-| RESOLVE_INLINE (hardware) | — | `1` | — | `deferred_pbr_hwrt.comp.spv` | `cs_6_5` | `+RaytracingAccelerationStructure gTlas` @19 + `OpCapability RayQueryKHR`; the `#if HWRT` Vogel-disk cone trace (`SHADOW_RAY_COUNT` spec-const) replaces the software march. |
-| VIS | `1` | `1` | — | `deferred_pbr_hwrt_vis.comp.spv` | `cs_6_5` | hwrt layout **+ `RWTexture2D<float2> gShadowVis`** @21 (**write** `RG(mesh_vis, validity)`); lighting stripped (writes vis, not lit). The à-trous/temporal pre-pass. |
-| DENOISED | `2` | `1` | — | `deferred_pbr_hwrt_denoised.comp.spv` | `cs_6_5` | same 22-binding VIS/DENOISED layout, but `gShadowVis` @21 is **read** (`mesh_vis = gShadowVis.Load().r`, the final denoised output) and combined `vis = min(vis, mesh_vis)`. Declares NO acceleration structure. |
-| VIS + motion | `1` | `1` | `1` | `deferred_pbr_hwrt_vis_mv.comp.spv` | `cs_6_5` | VIS layout **+ `MotionCam` UBO** @22 **+ `RWTexture2D<float2> gMotionVec`** (`rg16f`, SIGNED) @23 — writes clip-space Δuv for the temporal reproject. |
+| Variant | `SHADOW_STAGE` | `HWRT` | `MV` | `TW` | `.spv` | dxc `-T` | Interface delta vs base (0..11) |
+|---|---|---|---|---|---|---|---|
+| RESOLVE_INLINE (software) | — | — | — | — | `deferred_pbr.comp.spv` | `cs_6_0` | none — software SDF `sdf_soft_shadow_ranged`; +CSM `gCsm`/`gCsmCmp` @12/13/14 + punctual atlas + (bound-unread) DDGI @16/17/18. |
+| TERMINATOR_WRAP (software) | — | — | — | `1` | `deferred_pbr_wrap.comp.spv` | `cs_6_0` | **none — the interface is identical to the base row**, which is why it reuses the same `resolve_layout` (`gpu_scene/mod.rs:1654-1656`). The delta is arithmetic: `nol_wrapped` (`deferred_pbr.hlsl:587`) replaces the raw `NoL` at BOTH direct-diffuse accumulation sites — the directional one at `:1140` and the punctual one at `:1353` — specular keeping the physical clamp at each. Frozen-base discipline — with the flag undefined the source preprocesses **character-identical** to the pre-feature file, so the base row's `.spv` is untouched by construction. |
+| RESOLVE_INLINE (hardware) | — | `1` | — | — | `deferred_pbr_hwrt.comp.spv` | `cs_6_5` | `+RaytracingAccelerationStructure gTlas` @19 + `OpCapability RayQueryKHR`; the `#if HWRT` Vogel-disk cone trace (`SHADOW_RAY_COUNT` spec-const) replaces the software march. |
+| VIS | `1` | `1` | — | — | `deferred_pbr_hwrt_vis.comp.spv` | `cs_6_5` | hwrt layout **+ `RWTexture2D<float2> gShadowVis`** @21 (**write** `RG(mesh_vis, validity)`); lighting stripped (writes vis, not lit). The à-trous/temporal pre-pass. |
+| DENOISED | `2` | `1` | — | — | `deferred_pbr_hwrt_denoised.comp.spv` | `cs_6_5` | same 22-binding VIS/DENOISED layout, but `gShadowVis` @21 is **read** (`mesh_vis = gShadowVis.Load().r`, the final denoised output) and combined `vis = min(vis, mesh_vis)`. Declares NO acceleration structure. |
+| VIS + motion | `1` | `1` | `1` | — | `deferred_pbr_hwrt_vis_mv.comp.spv` | `cs_6_5` | VIS layout **+ `MotionCam` UBO** @22 **+ `RWTexture2D<float2> gMotionVec`** (`rg16f`, SIGNED) @23 — writes clip-space Δuv for the temporal reproject. |
 
-Reachability note: `SHADOW_STAGE ∈ {VIS, DENOISED}` and `MOTION_VECTORS=1` are only reachable **with**
-`HWRT=1` (the spatial/temporal shadow-vis denoise pipeline is built on the hardware mesh-shadow trace);
-there is no software VIS/DENOISED/MV `.spv`.
+`TW` = `TERMINATOR_WRAP`. Reachability note: `SHADOW_STAGE ∈ {VIS, DENOISED}` and `MOTION_VECTORS=1`
+are only reachable **with** `HWRT=1` (the spatial/temporal shadow-vis denoise pipeline is built on the
+hardware mesh-shadow trace); there is no software VIS/DENOISED/MV `.spv`. `TERMINATOR_WRAP` is
+**software-resolve-only** and mutually exclusive with `HWRT` by scope decision — the combination is
+never compiled and never selected (`deferred_pbr.hlsl:76-79`). The wrap variant is built
+**unconditionally** (its accessor `compute.rs:1470` carries no `#[cfg(feature = "hwrt")]`, unlike the
+four HWRT ones) and the host binds it only when `LightingConfig::terminator_softening > 0`; the
+variant itself is the opt-in, so the wrap arm carries no runtime `if`.
+
+*Provenance of this row: it was **missing** until 2026-07-26 — the variant has shipped since its own
+introduction, so this table has been incomplete for that whole time. Found while enumerating the
+family for the VB-SV0 gate that must prove all six unperturbed
+(`docs/VB-SV0-SDF-SHADOW-PLAN.md` §5.4); all six were re-DXC'd byte-identical against the committed
+artifacts at that time.*
 
 ## `gbuffer_mrt.{vs,fs}.hlsl` — the mesh G-buffer raster
 
