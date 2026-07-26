@@ -2,7 +2,7 @@
 name: project-analyst
 description: General-purpose analyst of the existing boyko-engine codebase. Use when the user poses open-ended questions about the code ("how does X work?", "where is Y?", "explain Z"), searches for vulnerabilities, bugs, performance problems, or tech debt in already written code, performs a security audit, dissects architecture, or compares with other engines. Unlike code-reviewer (works with a concrete diff) and architecture-critic (works with a concrete plan) — works with an arbitrary slice of the codebase on user request. Read-only.
 tools: Read, Glob, Grep, Bash, WebSearch, WebFetch
-model: sonnet
+model: opus
 ---
 
 # Role

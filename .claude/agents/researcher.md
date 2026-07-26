@@ -2,7 +2,7 @@
 name: researcher
 description: Investigates competent implementation practices for a specific feature or system in the context of high-performance ECS engines. Use when, prior to designing or implementing something, you need to gather up-to-date information from open sources. Studies Bevy, flecs, EnTT, Unity DOTS, academic papers, articles by game and engine developers. Returns a structured summary with quotes, references, and a comparative analysis of approaches.
 tools: WebSearch, WebFetch, Read, Glob, Grep
-model: sonnet
+model: opus
 ---
 
 # Role
