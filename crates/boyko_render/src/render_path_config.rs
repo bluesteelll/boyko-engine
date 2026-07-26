@@ -565,6 +565,33 @@ impl ResolvedRenderPath {
     pub fn taa_supported(&self) -> bool {
         matches!(self.path, RenderPath::Deferred | RenderPath::VisibilityBuffer)
     }
+
+    /// Whether this path's recorder contains a post-process AA seam **at all** — i.e. whether
+    /// anything will ever write `aa_out` on this path.
+    ///
+    /// This is the predicate the FXAA / SMAA / SSAA / TAA *activation* must consult, and it is
+    /// deliberately **separate from [`Self::taa_supported`] even though the two currently select
+    /// the same paths**. They answer different questions and are free to diverge: `taa_supported`
+    /// asks whether the temporal machinery exists (jitter push, history, `gViewT` producer),
+    /// while this asks the strictly weaker question of whether the recorder has an AA block to
+    /// hand `aa_out` to. A future Forward AA seam would flip this one first and `taa_supported`
+    /// later — collapsing them into one predicate today would silently re-arm TAA at that moment.
+    ///
+    /// The distinction matters because `targets.rs` arms `aa_out` on
+    /// `scene.aa || scene.smaa || scene.ssaa || scene.taa` with **no path term**, and the present
+    /// blit repoints every slot at `aa_out` whenever it is `Some`. So on a path whose recorder
+    /// writes nothing, an armed `aa_out` is presented **uninitialised** — the exact failure the
+    /// `AaMode::Taa` degrade was written to prevent, which until now was prevented for TAA only
+    /// while FXAA / SMAA / SSAA armed as usual.
+    ///
+    /// * `Deferred` — `passes/gbuffer.rs` records all four.
+    /// * `VisibilityBuffer` — `passes/vb.rs` records all four.
+    /// * `Forward`/`ForwardPlus` — `passes/forward.rs` records **none**, and
+    ///   `graph_bridge.rs::declare_forward_graph` declares no AA pass either.
+    #[inline]
+    pub fn post_process_aa_supported(&self) -> bool {
+        matches!(self.path, RenderPath::Deferred | RenderPath::VisibilityBuffer)
+    }
 }
 
 impl Default for ResolvedRenderPath {
@@ -1947,6 +1974,67 @@ mod tests {
                 want,
                 "taa_supported({path:?}, {legs:?}) must be {want}"
             );
+        }
+    }
+
+    /// The post-process AA seam's truth table, and the reason it is a SEPARATE test from
+    /// [`taa_supported_matrix`] even though the two predicates currently agree on every row.
+    ///
+    /// The defect this guards: `targets.rs` arms `aa_out` on
+    /// `scene.aa || scene.smaa || scene.ssaa || scene.taa` with **no path term**, and the present
+    /// blit repoints every slot at `aa_out` whenever it is `Some`. `passes/forward.rs` contains
+    /// **zero** AA sites and `declare_forward_graph` declares no AA pass, so before this predicate
+    /// existed an `AaMode::Fxaa`/`Smaa`/`Ssaa` request on Forward/ForwardPlus presented an image
+    /// **nothing had written**. Only `AaMode::Taa` was degraded, and the comment at the degrade
+    /// site said so outright — the hole was documented, not closed.
+    ///
+    /// Keeping the two tables apart is what lets a future Forward AA seam flip this predicate
+    /// without silently re-arming TAA on a path that still has no temporal machinery.
+    #[test]
+    fn post_process_aa_supported_matrix() {
+        let rows: [(RenderPath, GeometryLegs, bool); 7] = [
+            (RenderPath::Deferred, GeometryLegs::Both, true),
+            (RenderPath::Deferred, GeometryLegs::Mesh, true),
+            (RenderPath::VisibilityBuffer, GeometryLegs::Mesh, true),
+            (RenderPath::VisibilityBuffer, GeometryLegs::Both, true),
+            (RenderPath::VisibilityBuffer, GeometryLegs::Sdf, true),
+            (RenderPath::Forward, GeometryLegs::Mesh, false),
+            (RenderPath::ForwardPlus, GeometryLegs::Both, false),
+        ];
+        for (path, legs, want) in rows {
+            let resolved = resolve_rules(path, legs, RenderPathConsumers::default(), caps_ok());
+            assert_eq!(
+                resolved.post_process_aa_supported(),
+                want,
+                "post_process_aa_supported({path:?}, {legs:?}) must be {want} — a true here on a \
+                 recorder with no AA block means `aa_out` arms with nothing to write it"
+            );
+        }
+    }
+
+    /// A path that cannot run a temporal resolve must not claim a post-process AA seam either.
+    ///
+    /// This is the implication that actually protects the invariant, and it is the one direction
+    /// that can never be safely violated: TAA is recorded *inside* the same AA block as FXAA and
+    /// SMAA, so `taa_supported() && !post_process_aa_supported()` would mean a temporal resolve
+    /// scheduled into a recorder that has nowhere to put it. The converse is fine and is the
+    /// expected shape of a future Forward AA seam.
+    #[test]
+    fn taa_support_implies_a_post_process_aa_seam() {
+        for path in [
+            RenderPath::Deferred,
+            RenderPath::VisibilityBuffer,
+            RenderPath::Forward,
+            RenderPath::ForwardPlus,
+        ] {
+            for legs in [GeometryLegs::Mesh, GeometryLegs::Both, GeometryLegs::Sdf] {
+                let resolved = resolve_rules(path, legs, RenderPathConsumers::default(), caps_ok());
+                assert!(
+                    !resolved.taa_supported() || resolved.post_process_aa_supported(),
+                    "{path:?}/{legs:?} claims TAA support without a post-process AA seam — the \
+                     temporal resolve is recorded inside that seam, so this cannot hold"
+                );
+            }
         }
     }
 

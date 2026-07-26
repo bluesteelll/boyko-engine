@@ -5145,6 +5145,27 @@ impl GpuSceneBundles {
         } else {
             aa_mode
         };
+        // ...and the SAME hole existed for the other three modes, which the comment above admitted
+        // ("FXAA / SMAA / SSAA are NOT capped and arm as usual") without closing. `targets.rs`
+        // arms `aa_out` on `scene.aa || scene.smaa || scene.ssaa || scene.taa` with NO path term,
+        // and the present blit repoints every slot at `aa_out` whenever it is `Some` — so on
+        // Forward/ForwardPlus, whose recorder holds no AA block at all (`passes/forward.rs` has
+        // zero AA sites, and `declare_forward_graph` declares no AA pass), an FXAA/SMAA/SSAA
+        // request presented a NEVER-WRITTEN image. Same defect, same single choke point, three
+        // modes wider.
+        //
+        // Kept as a SECOND, wider degrade rather than folded into the one above, and the ordering
+        // is deliberate: the two predicates select the same paths today but answer different
+        // questions (see `post_process_aa_supported`'s doc). Collapsing them would mean a future
+        // Forward AA seam — which flips `post_process_aa_supported` first and `taa_supported`
+        // later — silently re-arms TAA on a path with no temporal machinery. Two narrow gates that
+        // can diverge beat one wide gate that cannot.
+        let aa_mode = if aa_mode != AaMode::Off && !resolved_render_path.post_process_aa_supported()
+        {
+            AaMode::Off
+        } else {
+            aa_mode
+        };
         let ddgi_enabled = ddgi_enabled && sdf_leg;
 
         // VB-P2 classification plan, rung P2c (the P1-4 owner-decided selector,
