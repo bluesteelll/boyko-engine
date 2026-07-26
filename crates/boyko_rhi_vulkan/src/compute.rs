@@ -3496,7 +3496,45 @@ const _: () = assert!(core::mem::offset_of!(ClusterCullPush, index_list_cap) == 
 const _: () = assert!(CLUSTER_CULL_PUSH_BYTES == 16, "ClusterCullPush must be 16 bytes");
 
 impl ClusterCullPush {
+    /// The PRE-ARM placeholder: an all-zero push, held by a `GBufferScene` whose froxel cull
+    /// has not been built yet (`GpuSceneBundles::build_froxel_light_cull` overwrites it with a
+    /// real one when the arm bit is set).
+    ///
+    /// It deliberately BYPASSES [`Self::new`]'s exp-Z validation, and that is the honest
+    /// spelling rather than a loophole: `z_near == z_far == 0` is not a cull configuration at
+    /// all, it is the "no cull exists" sentinel, and it is never pushed — the record site
+    /// dispatches nothing while `cluster_cull_pipeline` is `None`. Routing it through `new`
+    /// would have forced that constructor's check to accept the one degenerate range it most
+    /// needs to reject.
+    pub const UNARMED: Self =
+        Self { z_near: 0.0, z_far: 0.0, max_lights_per_cluster: 0, index_list_cap: 0 };
+
     /// Builds the cull push from the exp-Z near/far + the caps.
+    ///
+    /// # Panics
+    ///
+    /// Asserts `z_far > z_near > 0` **in every build profile**. Until this rung the only such
+    /// check was a `debug_assert!` in a DIFFERENT function ([`ClusterConfig::z_scale`], which
+    /// the push path never calls), i.e. it vanished in release — which is where the goldens and
+    /// production run.
+    ///
+    /// **What an unvalidated range did.** `cluster_cull.hlsl`'s slice bound is
+    /// `slice_view_z(k) = z_near * pow(z_far / z_near, k / dim_z)`. At `z_near == 0` that is
+    /// `0 * pow(+inf, k/dim_z)`, i.e. `0 * 1 == 0` at `k == 0` but `0 * inf == NaN` for every
+    /// `k > 0`; the NaN flows into `view_z_to_t` and then into `expand_aabb`, whose `min`/`max`
+    /// are GLSL.std.450 `NMin`/`NMax` and therefore DISCARD it — so the far corners silently
+    /// vanish from the froxel AABB and every slice collapses onto its near plane. With
+    /// `z_far <= z_near` the exp-Z ratio is `<= 1` and the slices run backwards, so the AABB a
+    /// froxel builds is not the volume the resolve's `cluster_z_slice` inverts back to. Both
+    /// are silent wrong-lighting, not crashes — exactly the failure shape a release-visible
+    /// check exists to convert into a loud one.
+    ///
+    /// This is a BOOT-path constructor (once per `build_froxel_light_cull`, never per frame:
+    /// the per-frame record site re-pushes the stored bytes), so the assert is off the hot path
+    /// and Principle 1 is not engaged. The panic is by design — a `ClusterConfig` with a
+    /// degenerate exp-Z range is an authoring error that cannot be rendered correctly, and the
+    /// same function already promotes the `packed_dims` 8-bit contract to a release `assert!`
+    /// at its own arm site for the same reason.
     #[inline]
     pub const fn new(
         z_near: f32,
@@ -3504,6 +3542,11 @@ impl ClusterCullPush {
         max_lights_per_cluster: u32,
         index_list_cap: u32,
     ) -> Self {
+        assert!(
+            z_near > 0.0 && z_far > z_near,
+            "invariant: cluster exp-Z range must satisfy z_far > z_near > 0 (see \
+             ClusterCullPush::new — a degenerate range makes slice_view_z NaN or non-monotonic)"
+        );
         Self { z_near, z_far, max_lights_per_cluster, index_list_cap }
     }
 
@@ -3565,6 +3608,14 @@ impl ClusterCullHierPush {
     /// (`cluster_dims_packed`, `cluster_capacity` — both minted from the SAME
     /// `ClusterConfig`/`cluster_count()` binding that sizes the `ClusterGrid` buffer, never
     /// re-read from the live light-table header).
+    ///
+    /// # Panics
+    ///
+    /// Asserts the SAME release-visible `z_far > z_near > 0` contract as
+    /// [`ClusterCullPush::new`] — the hierarchical arm runs the identical `slice_view_z` in its
+    /// phase-0 AABB build, so it inherits the identical failure. It has no `UNARMED` sibling
+    /// because it is only ever constructed inside the `hier_cull` arm branch, never as a
+    /// placeholder.
     #[inline]
     pub const fn new(
         z_near: f32,
@@ -3574,6 +3625,11 @@ impl ClusterCullHierPush {
         cluster_dims_packed: u32,
         cluster_capacity: u32,
     ) -> Self {
+        assert!(
+            z_near > 0.0 && z_far > z_near,
+            "invariant: cluster exp-Z range must satisfy z_far > z_near > 0 (see \
+             ClusterCullPush::new — a degenerate range makes slice_view_z NaN or non-monotonic)"
+        );
         Self {
             z_near,
             z_far,

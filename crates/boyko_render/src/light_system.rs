@@ -242,6 +242,15 @@ pub fn fold_light_table<'a>(
 /// [`resolve_shadow_atlas`](crate::shadow_atlas::resolve_shadow_atlas) publishes; the caller
 /// ([`collect_lights`]) resolves it per row via `PunctualSlotAssignment::base_for` before the fold.
 ///
+/// # Punctual validity gate (release-safe)
+///
+/// Every point/spot row is checked by [`punctual_row_is_cullable`] BEFORE it is written; a row
+/// that fails is DROPPED (not written, not counted) and the first drop logs once. This is the
+/// second release-visible gate on this path, and it exists for the same reason as the
+/// `written == MAX_LIGHTS` one: the value it rejects would otherwise reach a consumer that
+/// cannot defend itself. See that predicate's doc for what a non-finite centre does to the
+/// clustered cull.
+///
 /// Caller guarantees `dst` is sized for the worst case (`Default` does this). The iterators are
 /// walked exactly once each, in table order (directionals → sky → point → spot).
 pub fn fold_light_table_slotted<'a>(
@@ -282,6 +291,10 @@ pub fn fold_light_table_slotted<'a>(
         if written == MAX_LIGHTS {
             return finish_folded_overflow(dst, l0a_count, point_spot_count, off, cfg);
         }
+        if !punctual_row_is_cullable(p.position, p.range) {
+            report_dropped_non_finite_light();
+            continue;
+        }
         write_pod(dst, off, &slot_pack(GpuLight::from_point(p), base));
         off += GPU_LIGHT_BYTES;
         written += 1;
@@ -290,6 +303,10 @@ pub fn fold_light_table_slotted<'a>(
     for (base, s) in spots {
         if written == MAX_LIGHTS {
             return finish_folded_overflow(dst, l0a_count, point_spot_count, off, cfg);
+        }
+        if !punctual_row_is_cullable(s.position, s.range) {
+            report_dropped_non_finite_light();
+            continue;
         }
         write_pod(dst, off, &slot_pack(GpuLight::from_spot(s), base));
         off += GPU_LIGHT_BYTES;
@@ -302,6 +319,87 @@ pub fn fold_light_table_slotted<'a>(
     );
 
     finish_folded(dst, l0a_count, point_spot_count, off, cfg)
+}
+
+/// `true` iff a punctual light's cull sphere is a well-defined one: a FINITE centre and a
+/// non-NaN radius. The gate [`fold_light_table_slotted`] drops a point/spot row on.
+///
+/// # What a non-finite row did before this gate (traced into the cull)
+///
+/// `cluster_cull.hlsl`'s `sq_dist_point_aabb` is `d = max(max(aabb_min - c, c - aabb_max), 0)`
+/// then `sd = d·d`, and DXC lowers those `max`es to GLSL.std.450 **`NMax`** — measured on the
+/// committed module, which carries 18 `NMax` / 8 `NMin` and **zero** `FMax`/`FMin`. `NMax`
+/// returns the NON-NaN operand when exactly one operand is NaN, so:
+///
+/// * **NaN centre.** Both inner operands on that axis are NaN; whatever the (spec-undefined)
+///   both-NaN inner result is, the outer `NMax(·, 0.0)` has a non-NaN operand and yields `0.0`.
+///   The axis drops out of the distance entirely. With all three components NaN, `sd == 0.0`,
+///   so `sd <= r·r` holds for **every** light/froxel pair and the row is appended to **every
+///   froxel**. At the default 16×9×24 grid that is 3456 `LightIndexList` entries for ONE bad
+///   light — 21 % of `INDEX_LIST_CAP` — and they compete for the O2 clamp-and-drop caps, so a
+///   single NaN-positioned light does not merely mis-light: it **evicts correct lights**.
+///   Downstream the shading loop then computes `l = L.pos - P` = NaN on every pixel it reaches.
+/// * **±inf centre.** `aabb_min - inf = -inf` and `inf - aabb_max = +inf`, so `NMax` gives
+///   `+inf`, `sd = +inf`, and the ordered `sd <= r·r` is false — the row is rejected
+///   everywhere. Cheap in the index list, but it is exactly the case that costs the
+///   hierarchical arm its byte-identity with the flat arm (plan §5.2 Premise F, Case B).
+/// * **NaN radius.** `sd <= NaN` is false at both levels, so the arms still agree and the cull
+///   drops it — but the FLAT (non-clustered) shading paths still read the row and fold a NaN
+///   attenuation into the pixel.
+///
+/// Both centre cases apply identically to the base and hierarchical arms; neither is a memory-
+/// safety issue (`ps_n` bounds every read and `fi < capacity` every write, and neither involves
+/// the centre). This predicate is the closure of that premise, discharged where the plan filed
+/// it: on the host, one gate, before the row is ever written.
+///
+/// # Policy: reject-and-skip, not clamp, not panic
+///
+/// **Not clamp** — there is no meaningful clamp of a NaN centre. Substituting the origin
+/// teleports the light into the middle of the scene and INVENTS lighting the author never
+/// wrote; a missing light is a visible, debuggable absence, an invented one is not.
+/// **Not panic** — this is live, per-frame, gameplay-authored ECS data (one bad
+/// `GlobalTransform`, one divide-by-zero in a gameplay curve), not a build-time configuration
+/// invariant. Killing the process on a transient data glitch is not a policy this path takes
+/// anywhere else; the SAME function already answers its other release-visible gate — the
+/// `MAX_LIGHTS` overflow — with drop-and-log-once, and this matches it exactly.
+///
+/// # Cost
+///
+/// Four ordered compares per point/spot row (`is_finite` / `is_nan` each lower to a single
+/// compare), on a path that already writes 48 bytes per row, and the branch resolves the same
+/// way on every row of every well-formed frame — so it is perfectly predicted. Directional and
+/// sky rows are NOT checked: they carry no cull centre (`LightElem::pos` is the sky's ground
+/// colour on a sky row), so there is nothing here to validate.
+///
+/// An INFINITE radius is deliberately accepted: `r·r = +inf` is a totally-ordered comparand,
+/// both cull levels agree on it, and "a light that reaches everywhere" is a coherent (if
+/// unwise) authoring choice — unlike a NaN, it is not a broken value.
+#[inline]
+fn punctual_row_is_cullable(position: [f32; 3], range: f32) -> bool {
+    position[0].is_finite()
+        && position[1].is_finite()
+        && position[2].is_finite()
+        && !range.is_nan()
+}
+
+/// Logs the first dropped non-finite punctual light and nothing thereafter.
+///
+/// `#[cold]` + `#[inline(never)]` for the same reason as [`finish_folded_overflow`]: only the
+/// four compares of [`punctual_row_is_cullable`] stay on the hot fold's straight-line code.
+#[cold]
+#[inline(never)]
+fn report_dropped_non_finite_light() {
+    use core::sync::atomic::{AtomicBool, Ordering};
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    // Relaxed: a best-effort one-shot log guard, not a synchronization edge — a rare
+    // double-log under a race is harmless and no data is published through this flag.
+    if !LOGGED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "boyko_render: dropped a point/spot light with a non-finite position (or a NaN \
+             range) from the GPU light table; a NaN centre would otherwise be culled INTO \
+             every froxel"
+        );
+    }
 }
 
 /// Packs a resolved atlas `base` into a punctual [`GpuLight`]'s kind word, but ONLY when `base` is
@@ -1145,5 +1243,162 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- The punctual validity gate (plan §5.2 Premise F closure) ---------------------
+
+    /// Reads a table row's `pos_range.xyz` (words 4..6 of the row) back out of the bytes.
+    fn row_pos(bytes: &[u8], elem: usize) -> [f32; 3] {
+        let base_word = LIGHT_HEADER_WORDS + elem * (GPU_LIGHT_BYTES / 4) + 4;
+        let mut out = [0.0f32; 3];
+        for (i, o) in out.iter_mut().enumerate() {
+            let off = (base_word + i) * 4;
+            *o = f32::from_ne_bytes(bytes[off..off + 4].try_into().unwrap());
+        }
+        out
+    }
+
+    /// A finite point light at `x` on the X axis.
+    fn point_at_x(x: f32) -> PointLight {
+        PointLight::new([x, 0.0, 0.0], [1.0, 1.0, 1.0], 300.0, 9.0)
+    }
+
+    /// **The RED-mutation gate.** Remove the `punctual_row_is_cullable` guard from
+    /// [`fold_light_table_slotted`] and this test fails on `point_spot_count == 3` and on a
+    /// NaN in row 1's position — the very row that, uploaded, is culled INTO every froxel.
+    #[test]
+    fn a_nan_positioned_point_is_dropped_and_the_finite_rows_close_up() {
+        let good_a = point_at_x(1.0);
+        let bad = PointLight::new([f32::NAN, 0.0, 0.0], [1.0, 1.0, 1.0], 300.0, 9.0);
+        let good_b = point_at_x(3.0);
+
+        let mut scratch = vec![0u8; LIGHT_HEADER_BYTES + 8 * GPU_LIGHT_BYTES];
+        let used = write_light_table(
+            &mut scratch,
+            &[],
+            &[],
+            &[good_a, bad, good_b],
+            &[],
+            &LightingConfig::default(),
+        );
+
+        assert_eq!(
+            used,
+            LIGHT_HEADER_BYTES + 2 * GPU_LIGHT_BYTES,
+            "the NaN row must not occupy a table slot"
+        );
+        let h = read_header(&scratch);
+        assert_eq!(h.light_count(), 2);
+        assert_eq!(h.point_spot_count(), 2);
+        // The survivors CLOSE UP — the table has no hole where the dropped row was, so the
+        // per-froxel index lists the cull emits still address contiguous rows.
+        assert_eq!(row_pos(&scratch, 0)[0], 1.0);
+        assert_eq!(row_pos(&scratch, 1)[0], 3.0);
+    }
+
+    /// The other three rejected shapes, one per row: a `+inf` component, a `-inf` component,
+    /// and a NaN radius — on both punctual kinds.
+    #[test]
+    fn infinite_positions_and_a_nan_range_are_dropped_on_both_punctual_kinds() {
+        let cfg = LightingConfig::default();
+        let keep_pt = point_at_x(1.0);
+        let keep_sp =
+            SpotLight::new([2.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0; 3], 200.0, 8.0, 20.0, 30.0);
+
+        let bad_points = [
+            PointLight::new([f32::INFINITY, 0.0, 0.0], [1.0; 3], 300.0, 9.0),
+            PointLight::new([0.0, f32::NEG_INFINITY, 0.0], [1.0; 3], 300.0, 9.0),
+            PointLight::new([0.0, 0.0, 0.0], [1.0; 3], 300.0, f32::NAN),
+        ];
+        let bad_spots = [
+            SpotLight::new(
+                [0.0, 0.0, f32::INFINITY],
+                [0.0, 0.0, 1.0],
+                [1.0; 3],
+                200.0,
+                8.0,
+                20.0,
+                30.0,
+            ),
+            SpotLight::new([f32::NAN; 3], [0.0, 0.0, 1.0], [1.0; 3], 200.0, 8.0, 20.0, 30.0),
+        ];
+
+        for bad in &bad_points {
+            let mut scratch = vec![0u8; LIGHT_HEADER_BYTES + 8 * GPU_LIGHT_BYTES];
+            let used =
+                write_light_table(&mut scratch, &[], &[], &[keep_pt, *bad], &[keep_sp], &cfg);
+            assert_eq!(
+                used,
+                LIGHT_HEADER_BYTES + 2 * GPU_LIGHT_BYTES,
+                "point row {bad:?} must be rejected"
+            );
+            assert_eq!(read_header(&scratch).point_spot_count(), 2);
+        }
+        for bad in &bad_spots {
+            let mut scratch = vec![0u8; LIGHT_HEADER_BYTES + 8 * GPU_LIGHT_BYTES];
+            let used =
+                write_light_table(&mut scratch, &[], &[], &[keep_pt], &[keep_sp, *bad], &cfg);
+            assert_eq!(
+                used,
+                LIGHT_HEADER_BYTES + 2 * GPU_LIGHT_BYTES,
+                "spot row {bad:?} must be rejected"
+            );
+            assert_eq!(read_header(&scratch).point_spot_count(), 2);
+        }
+    }
+
+    /// Golden neutrality, stated as a property rather than asserted in prose: the gate is
+    /// INERT on every well-formed row, including the awkward-but-valid ones (a zero radius, an
+    /// INFINITE radius, coordinates at the f32 extremes, a light exactly at the origin). If
+    /// this ever reddens, some real scene just lost a light and a golden is about to move.
+    #[test]
+    fn the_validity_gate_is_inert_on_every_well_formed_row() {
+        let valid_positions = [
+            [0.0, 0.0, 0.0],
+            [-1.5, 2.25, 1e-30],
+            [f32::MAX, -f32::MAX, 0.0],
+            [f32::MIN_POSITIVE, 0.0, -0.0],
+        ];
+        // `+inf` range is deliberately ACCEPTED — a totally-ordered comparand both cull levels
+        // agree on, i.e. a coherent authoring choice, unlike a NaN.
+        let valid_ranges = [0.0f32, 1e-6, 9.0, f32::MAX, f32::INFINITY];
+
+        for pos in valid_positions {
+            for range in valid_ranges {
+                assert!(
+                    punctual_row_is_cullable(pos, range),
+                    "well-formed row (pos {pos:?}, range {range}) must NOT be dropped"
+                );
+            }
+        }
+    }
+
+    /// Keeps the gate above from being vacuous: the predicate really does reject, so a green
+    /// inertness sweep means "nothing valid is rejected", not "nothing is ever rejected".
+    #[test]
+    fn the_validity_gate_is_not_vacuous() {
+        assert!(!punctual_row_is_cullable([f32::NAN, 0.0, 0.0], 1.0));
+        assert!(!punctual_row_is_cullable([0.0, f32::INFINITY, 0.0], 1.0));
+        assert!(!punctual_row_is_cullable([0.0, 0.0, f32::NEG_INFINITY], 1.0));
+        assert!(!punctual_row_is_cullable([0.0, 0.0, 0.0], f32::NAN));
+    }
+
+    /// A dropped row must not consume the `MAX_LIGHTS` budget either — the two release-visible
+    /// gates compose, they do not shadow each other.
+    #[test]
+    fn a_dropped_row_does_not_spend_the_max_lights_budget() {
+        let cfg = LightingConfig::default();
+        let bad = PointLight::new([f32::NAN; 3], [1.0; 3], 300.0, 9.0);
+        let mut points = vec![bad];
+        points.extend((0..MAX_LIGHTS).map(|i| point_at_x(i as f32)));
+
+        let mut scratch =
+            vec![0u8; LIGHT_HEADER_BYTES + (MAX_LIGHTS as usize + 2) * GPU_LIGHT_BYTES];
+        let used = write_light_table(&mut scratch, &[], &[], &points, &[], &cfg);
+
+        // The bad row is skipped WITHOUT advancing `written`, so all MAX_LIGHTS valid lights fit.
+        assert_eq!(used, LIGHT_HEADER_BYTES + MAX_LIGHTS as usize * GPU_LIGHT_BYTES);
+        assert_eq!(read_header(&scratch).point_spot_count(), MAX_LIGHTS);
+        assert_eq!(row_pos(&scratch, 0)[0], 0.0, "the first survivor is the first VALID light");
     }
 }

@@ -3239,6 +3239,41 @@ over.
   byte pin. **Weight increased in Rev 4:** §5's on-device handling is now an *absorbing-element
   degradation to the flat walk*, i.e. it makes the output correct but silently costs the whole group
   its hierarchy. Closing the source is therefore a performance fix as well as a hygiene one.
+  **NOT TAKEN — Rev 4's weight increase is WITHDRAWN, refuted by measurement; the source is closed
+  on the host instead (see the `ViewUniform::from_camera` item above).** Three findings, in order
+  of how much they change the item:
+  1. **The absorbing-element chain does not exist.** A NaN `rd` never reaches the `finite`
+     classifier: it is consumed one step earlier by `expand_aabb`'s `min`/`max`, which are
+     GLSL.std.450 `NMin`/`NMax` — the very ops §5.1(2) already reasons about, and the disassembly of
+     the committed module shows the AABB accumulating through a chain of exactly 8 `NMin` / 8 `NMax`
+     seeded by the `(+1e30, -1e30)` constants, with **zero** `FMin`/`FMax` anywhere. Those DISCARD
+     the NaN operand, so a poisoned lane keeps its "nothing yet" initializer, `all(abs(v) <= 1.0e30)`
+     is **true** for it, and the lane stores its (inverted) box on the NORMAL row. The absorbing
+     element is never selected, no group loses its hierarchy, and there is no performance cliff from
+     this source. Reproduced host-side by
+     `compute::tests::…::nan_slice_view_z_is_silently_swallowed_by_the_min_max_chain` (Rust's
+     `f32::min`/`max` carry the same IEEE `minNum`/`maxNum` NaN-dropping semantics, which is also
+     why `golden_froxel_aabb` mirrors the shader here without a special case).
+     *What actually happens* is a correctness failure shared EQUALLY by both arms — the inverted
+     sentinel box gives `sd = 1e60·3 → +inf`, so every point/spot light is rejected in every froxel
+     and clustered punctual lighting goes dark. D4's byte-identity is untouched.
+  2. **The blast radius is 12 sources / 27 committed `.spv`, not two.** `ray_gen.hlsli` is
+     `#include`d by `cluster_cull.hlsl` (**directly** — `generate_ray` is called in BOTH the flat
+     and the hierarchical froxel-AABB build), `deferred_pbr.hlsl` (6 rows), `sdf_forward_march`
+     (4), `sdf_gbuffer_composite`, `forward_sky.fs`, `sdf_ssao_{low,medium,high}` (×2 with
+     `VB_THIN`), `shadow_atrous`, `ssao_atrous` (3), `taa_resolve`, `vb_shadow_vis` and
+     `viewt_from_depth_rz`. All 27 were re-DXC'd byte-identical under their frozen recipes as the
+     baseline for this rung, so the table is validated — and it prices the item honestly.
+  3. **It is a coordinated host+shader change, not a shader one-liner.** `composite_ray`
+     (`compute.rs`) deliberately mirrors HLSL `normalize` with raw `sqrt`+divide and **no** zero
+     guard, precisely "so this host reference predicts the GPU bit-for-bit on valid cameras. A
+     degenerate (zero) `dir` yields a non-finite ray on BOTH host and shader." Guarding only the
+     shader breaks that contract by construction. Whoever takes this must decide the host oracle's
+     behaviour in the same commit.
+  **When it would still be worth taking:** as defence in depth against the *other*, still-unclosed
+  producers of a degenerate `dir` — a non-finite `tan(fovY/2)` or `aspect` reaching the camera
+  block, neither of which is validated anywhere today. That is its own rung, with the 27-artifact
+  re-pin, a device-oracle gate, and the `composite_ray` decision above; it is NOT this item.
 * **Host-side finiteness validation of `LightElem::pos` — the closure for §5.2's Premise F (new in
   Rev 5).** §5 Case B's enclosure argument needs the light *centre* to be finite; with a `±inf`
   component the coarse level rejects while a non-finite-AABB lane's own fine test accepts, so D4's
@@ -3248,6 +3283,33 @@ over.
   reject or clamp non-finite positions in `fold_light_table_slotted` beside the existing saturating
   `written == MAX_LIGHTS` gate, where it costs one compare on a host path that already touches every
   row. Until then, **H3's rigs must not contain a non-finite light centre** (§8.10).
+  **CLOSED — by the reject-and-skip route, and the consequence it closes is bigger than this
+  bullet stated.** `punctual_row_is_cullable` (`light_system.rs`) gates every point/spot row on
+  "centre finite AND radius not NaN" and a failing row is DROPPED — not written, not counted, no
+  hole left in the table — with a `#[cold] #[inline(never)]` one-shot log, i.e. verbatim the
+  policy the SAME function already applies to its `MAX_LIGHTS` overflow. Cost: four ordered
+  compares per punctual row, none on directional/sky (they carry no cull centre), the branch
+  resolving the same way on every row of every well-formed frame.
+  *Clamp was rejected* — there is no meaningful clamp of a NaN centre, and substituting the
+  origin INVENTS lighting the author never wrote (a missing light is debuggable; an invented one
+  is not). *Panic was rejected* — this is live, per-frame, gameplay-authored ECS data, not a
+  build-time configuration invariant.
+  **What a NaN centre actually did, traced.** `sq_dist_point_aabb`'s `max`es lower to
+  GLSL.std.450 `NMax` (measured on the committed module: 18 `NMax` / 8 `NMin`, **zero**
+  `FMax`/`FMin`), and `NMax(·, 0.0)` returns `0.0` when its other operand is NaN — so `d`
+  collapses to `0` on the poisoned axes, `sd == 0` with all three poisoned, and the row is
+  appended to **every froxel**. At the default 16×9×24 grid that is 3456 `LightIndexList`
+  entries — **21 % of `INDEX_LIST_CAP`** — for ONE bad light, competing for the O2 caps, so it
+  does not merely mis-light: it **evicts correct lights**. A `±inf` centre instead gives
+  `sd = +inf` and is rejected everywhere; that is the shape Premise F's Case B names.
+  Gates (`light_system.rs` tests, all four executed RED against a defanged predicate):
+  `a_nan_positioned_point_is_dropped_and_the_finite_rows_close_up`,
+  `infinite_positions_and_a_nan_range_are_dropped_on_both_punctual_kinds`,
+  `a_dropped_row_does_not_spend_the_max_lights_budget`, `the_validity_gate_is_not_vacuous`, plus
+  the golden-neutrality sweep `the_validity_gate_is_inert_on_every_well_formed_row` (which pins
+  that an INFINITE radius stays accepted — a totally-ordered comparand both levels agree on, so
+  a coherent authoring choice unlike a NaN). **§8.10's constraint on H3's rigs is now
+  structural** rather than a discipline note: a non-finite centre can no longer reach the table.
 * **A non-degenerate basis fallback in `ViewUniform::from_camera`** (mirroring the identity fallback
   it already gives `view` at `camera.rs:331-336`: fall back to the canonical right/up/forward when
   any of the three normalizes to ZERO), plus **release-visible `z_near > 0 && z_far > z_near`
@@ -3255,6 +3317,41 @@ over.
   `debug_assert!` in a different function (`ClusterConfig::z_scale`, `light.rs:738-743`). Defence in
   depth for §5's two NaN sources; neither replaces the on-device handling, which closes the *class*
   regardless of source.
+  **BOTH CLOSED. Zero `.spv` perturbed** (all 27 `ray_gen.hlsli` dependents re-DXC'd byte-identical
+  before and after).
+  * **Basis fallback: SHIPPED, all-or-nothing.** `ViewUniform::basis_axis_is_usable` is
+    `axis.length_squared() > 0.0`, which is false for `Vec3::ZERO` **and** for the all-NaN vector
+    `Vec3::normalize` returns on a non-finite input (every ordered compare against NaN is false),
+    i.e. one compare classifies all three shapes `normalize` can produce. The substitution is
+    **all-or-nothing, not per-axis** — this bullet's wording, and it is load-bearing: a mixed
+    triple is not guaranteed to be a basis (a real `right` of `(0,0,-1)` beside the canonical
+    forward is rank-deficient, so `dir` can still vanish). Golden-neutral by construction: for any
+    camera with three usable axes the branch is not taken and the published bytes are bit-identical
+    (pinned by `a_well_formed_camera_basis_is_bit_identical_to_the_raw_normalize`, which compares
+    `to_bits`, not epsilon). Gates in `crates/boyko_scene/tests/gates_camera_degenerate_basis.rs`;
+    the detector `the_degenerate_camera_no_longer_feeds_ray_gen_a_nan` runs a bit-faithful mirror of
+    `ray_gen.hlsli`'s PERSPECTIVE branch (raw `sqrt`+divide, **no** guard — the same spelling
+    `composite_ray` uses) over the published basis and asserts `rd` is finite; with the fallback
+    removed it was executed and reports `[NaN, NaN, NaN]` at the CENTER pixel, for both the fully
+    singular and the rank-2 (`diag(1,1,0)`) transform. `the_ray_gen_mirror_really_does_nan_on_a_zeroed_basis`
+    keeps that detector from being vacuous.
+  * **Push validation: SHIPPED, but NOT at the site this bullet named.** Putting a rejecting check
+    inside `ClusterCullPush::new` as written would fire at **boot on every process**: `new(0.0, 0.0,
+    0, 0)` was constructed in production as the pre-arm placeholder (`gpu_scene/mod.rs:3712`). The
+    check IS in `new` — `assert!(z_near > 0.0 && z_far > z_near)`, release-visible, `const fn`-clean,
+    and mirrored in `ClusterCullHierPush::new` which runs the identical `slice_view_z` — and the
+    placeholder is spelled honestly as a new `ClusterCullPush::UNARMED` associated const that
+    bypasses it, because an all-zero push is not a cull configuration but the "no cull exists"
+    sentinel. This is a boot-path constructor (once per `build_froxel_light_cull`; the per-frame
+    record site re-pushes the stored bytes), so Principle 1 is not engaged.
+    **Why the check cannot be left to the device, pinned as a runtime fact rather than prose:**
+    `nan_slice_view_z_is_silently_swallowed_by_the_min_max_chain` (`compute/tests.rs`) shows that
+    at `z_near == 0`, `slice_view_z(0)` is finite (`0 * pow(inf, 0)`) while every `k > 0` is NaN
+    (`0 * inf`) — and that the NaN is then **discarded** by the AABB's `NMin`/`NMax` chain, leaving
+    the accumulator at its finite `(+1e30, -1e30)` initializer. The far corners vanish, every slice
+    collapses onto its near plane, and **no device-side finiteness predicate can see the fault**.
+    Six `#[should_panic]` gates (zero / negative / inverted / collapsed / NaN bound / the HIER
+    push) were executed RED against a defanged assert.
 * **A live `alloc_total` HUD counter** so saturation is visible in ordinary runs. Rev 2 listed this
   as a one-liner; it is not, and the recipe is written out here so it is not re-attempted cheaply:
   * a **new** graph pass `cull_alloc_readback`, declared immediately after `light_cull`, gated on the

@@ -292,6 +292,41 @@ impl ViewUniform {
         far: 0.0,
     };
 
+    /// `true` iff a NORMALIZED basis axis is usable as a camera axis, i.e. finite
+    /// and non-zero. The single predicate [`Self::from_camera`]'s degenerate-basis
+    /// fallback branches on.
+    ///
+    /// # Why the published basis must never carry a zero or NaN axis
+    ///
+    /// [`Vec3::normalize`] returns exactly one of three shapes: [`Vec3::ZERO`]
+    /// (its `len_sq <= f32::MIN_POSITIVE` guard), an all-NaN vector (a non-finite
+    /// or overflowing input makes `inv_len` `0` or NaN, and `inf * 0` / `NaN * x`
+    /// poison every lane), or a finite non-zero unit vector. `len_sq > 0.0` is
+    /// false for the first two — `0.0 > 0.0` is false and every ordered compare
+    /// against NaN is false — and true for the third, so this one compare
+    /// classifies all three cases.
+    ///
+    /// The zero shape is the dangerous one BECAUSE it is finite: it survives every
+    /// host finiteness assertion and is uploaded verbatim into the shared camera
+    /// block, where `shaders/ray_gen.hlsli`'s perspective ray-gen computes
+    /// `dir = forward + right * sx + up * sy` — exactly `(0,0,0)` for a zeroed
+    /// basis — and then `normalize(dir)`, which is `0/0`: UNDEFINED per
+    /// GLSL.std.450 and NaN on real drivers. That `rd` is consumed by every
+    /// `ray_gen.hlsli` includer (the marcher, the deferred/VB resolves, SSAO, the
+    /// à-trous passes, TAA, and `cluster_cull.hlsl`'s froxel-AABB build), so a
+    /// single degenerate camera transform poisons the whole frame's ray-gen. This
+    /// predicate closes that at the source, on the host, where it costs three
+    /// compares once per camera per frame instead of a per-pixel guard in twelve
+    /// shader translation units.
+    ///
+    /// Golden-neutral: for any camera whose linear part yields three usable axes —
+    /// every valid camera — the branch is not taken and the published bytes are
+    /// bit-identical to the pre-fallback ones.
+    #[inline]
+    fn basis_axis_is_usable(axis: Vec3) -> bool {
+        axis.length_squared() > 0.0
+    }
+
     /// Derives the view from a camera's world pose ([`GlobalTransform`] →
     /// [`Affine3A`]) and its [`Projection`].
     ///
@@ -308,9 +343,21 @@ impl ViewUniform {
     /// Pure / alloc-free / FMA-free (delegates to the math vocabulary). Returns
     /// the identity-rotation, eye-at-`translation` fallback view if the camera's
     /// linear part is singular (a non-invertible / degenerate transform).
+    ///
+    /// # Degenerate-basis fallback
+    ///
+    /// The three basis lanes get the same treatment `view` already had: a linear
+    /// part that cannot produce a usable axis falls back to the canonical
+    /// `right (1,0,0) / up (0,1,0) / forward (0,0,−1)` triple — see
+    /// [`Self::basis_axis_is_usable`] for why an unusable axis must not be
+    /// uploaded, and why the substitution is all-or-nothing.
     #[inline]
     pub fn from_camera(global: Affine3A, projection: Projection) -> Self {
         // Local camera axes (column convention): right +X, up +Y, forward −Z.
+        // These double as the CANONICAL WORLD fallback triple below: they are the
+        // same three vectors [`Self::IDENTITY`] carries, so a degenerate camera
+        // publishes exactly the identity view's basis — matching the identity
+        // `view` fallback a singular `global.inverse()` already takes.
         const LOCAL_RIGHT: Vec3 = Vec3::new(1.0, 0.0, 0.0);
         const LOCAL_UP: Vec3 = Vec3::new(0.0, 1.0, 0.0);
         const LOCAL_FORWARD: Vec3 = Vec3::new(0.0, 0.0, -1.0);
@@ -325,6 +372,21 @@ impl ViewUniform {
         let cam_right = linear.mul_vec(LOCAL_RIGHT).normalize();
         let cam_up = linear.mul_vec(LOCAL_UP).normalize();
         let cam_forward = linear.mul_vec(LOCAL_FORWARD).normalize();
+
+        // ALL-OR-NOTHING, not per-axis: a mixed triple (two real axes plus one
+        // canonical substitute) is not guaranteed to be a BASIS at all — a camera
+        // whose real `right` happens to be (0,0,−1) paired with the canonical
+        // forward (0,0,−1) is rank-deficient, so `dir` can still vanish. Falling
+        // back to the whole canonical triple is the only substitution that keeps
+        // the published basis orthonormal.
+        let (cam_right, cam_up, cam_forward) = if Self::basis_axis_is_usable(cam_right)
+            && Self::basis_axis_is_usable(cam_up)
+            && Self::basis_axis_is_usable(cam_forward)
+        {
+            (cam_right, cam_up, cam_forward)
+        } else {
+            (LOCAL_RIGHT, LOCAL_UP, LOCAL_FORWARD)
+        };
 
         let proj = projection.to_mat4();
         // `view = global⁻¹`. The affine inverse handles the general rigid +

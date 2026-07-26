@@ -3150,3 +3150,118 @@ mod ssao_atrous_tests {
         assert_eq!(out, ssao, "levels == 0 must return the raw gather byte-identical");
     }
 }
+
+#[cfg(test)]
+mod cluster_cull_push_validity_tests {
+    //! VB-P1e §11 closure: the exp-Z range the cull push carries is validated in EVERY build
+    //! profile, at the constructor, not by a `debug_assert!` in a different function.
+    //!
+    //! # What the rejected values do on device
+    //!
+    //! `cluster_cull.hlsl`'s `slice_view_z(k) = z_near * pow(z_far / z_near, k / dim_z)`.
+    //! At `z_near == 0` the ratio is `+inf`, so `k == 0` gives `0 * pow(inf, 0) == 0` but every
+    //! `k > 0` gives `0 * inf == NaN`. That NaN reaches `expand_aabb`, whose `min`/`max` are
+    //! GLSL.std.450 `NMin`/`NMax` (measured: the committed module carries 8 `NMin` / 18 `NMax`
+    //! and ZERO `FMin`/`FMax`) — and those DISCARD a NaN operand, so the far corners silently
+    //! drop out of the froxel AABB instead of poisoning it. The failure is therefore invisible:
+    //! every slice collapses onto its near plane and the cull quietly under-reports lights.
+    //! [`nan_slice_view_z_is_silently_swallowed_by_the_min_max_chain`] pins that mechanism, so
+    //! the reason this check has to live at the HOST is recorded as a runtime fact rather than
+    //! a comment.
+
+    use crate::compute::{ClusterCullHierPush, ClusterCullPush};
+
+    /// The shipping default (`ClusterConfig::default`) and the VB-P1d bench config both pass.
+    #[test]
+    fn a_well_formed_exp_z_range_constructs() {
+        let p = ClusterCullPush::new(0.1, 50.0, 256, 16384);
+        assert_eq!(p.z_near, 0.1);
+        assert_eq!(p.z_far, 50.0);
+        let h = ClusterCullHierPush::new(0.25, 4.0, 256, 16384, 0x18_09_10, 3456);
+        assert_eq!(h.z_near, 0.25);
+        assert_eq!(h.cluster_capacity, 3456);
+    }
+
+    /// The pre-arm placeholder is still constructible — it is the one degenerate range the
+    /// engine legitimately holds, and it must not route through the validating constructor.
+    #[test]
+    fn the_unarmed_placeholder_bypasses_the_check() {
+        assert_eq!(ClusterCullPush::UNARMED.z_near, 0.0);
+        assert_eq!(ClusterCullPush::UNARMED.z_far, 0.0);
+        assert_eq!(ClusterCullPush::UNARMED.max_lights_per_cluster, 0);
+        assert_eq!(ClusterCullPush::UNARMED.index_list_cap, 0);
+    }
+
+    // ---- The RED-mutation gates: delete the `assert!` from `new` and each of these stops
+    //      panicking, so each one goes RED. ----
+
+    #[test]
+    #[should_panic(expected = "invariant: cluster exp-Z range")]
+    fn a_zero_z_near_is_rejected() {
+        let _ = ClusterCullPush::new(0.0, 50.0, 256, 16384);
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: cluster exp-Z range")]
+    fn a_negative_z_near_is_rejected() {
+        let _ = ClusterCullPush::new(-0.1, 50.0, 256, 16384);
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: cluster exp-Z range")]
+    fn an_inverted_range_is_rejected() {
+        let _ = ClusterCullPush::new(50.0, 0.1, 256, 16384);
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: cluster exp-Z range")]
+    fn a_collapsed_range_is_rejected() {
+        let _ = ClusterCullPush::new(0.1, 0.1, 256, 16384);
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: cluster exp-Z range")]
+    fn a_nan_bound_is_rejected() {
+        // Every ordered compare against NaN is false, so `z_near > 0.0` already rejects it —
+        // pinned so a future rewrite of the predicate cannot lose the NaN case by accident.
+        let _ = ClusterCullPush::new(f32::NAN, 50.0, 256, 16384);
+    }
+
+    #[test]
+    #[should_panic(expected = "invariant: cluster exp-Z range")]
+    fn the_hierarchical_push_carries_the_same_check() {
+        let _ = ClusterCullHierPush::new(0.0, 50.0, 256, 16384, 0x18_09_10, 3456);
+    }
+
+    /// Why the check cannot be left to the shader: the NaN a `z_near == 0` slice bound
+    /// produces is SWALLOWED by the AABB's `min`/`max` chain rather than propagating, so the
+    /// device has no observable to fail on. This reproduces that swallowing with Rust's
+    /// `f32::min`/`f32::max`, which have the same IEEE `minNum`/`maxNum` NaN-dropping
+    /// semantics as GLSL.std.450 `NMin`/`NMax` (and are what the host mirror
+    /// `golden_froxel_aabb` already relies on).
+    #[test]
+    fn nan_slice_view_z_is_silently_swallowed_by_the_min_max_chain() {
+        let z_near = 0.0f32;
+        let z_far = 50.0f32;
+        let dim_z = 24.0f32;
+
+        // k == 0 is finite (0 * pow(inf, 0) == 0), every k > 0 is NaN (0 * inf).
+        let vz0 = z_near * (z_far / z_near).powf(0.0 / dim_z);
+        let vz1 = z_near * (z_far / z_near).powf(1.0 / dim_z);
+        assert!(vz0.is_finite(), "slice 0 stays finite: {vz0}");
+        assert!(vz1.is_nan(), "every slice past 0 is NaN under z_near == 0: {vz1}");
+
+        // The AABB accumulator: the `(+1e30, -1e30)` "nothing yet" initializer, expanded with
+        // a NaN point exactly as `expand_aabb` does.
+        let mut aabb_min = 1.0e30f32;
+        let mut aabb_max = -1.0e30f32;
+        aabb_min = aabb_min.min(vz1);
+        aabb_max = aabb_max.max(vz1);
+        assert_eq!(aabb_min, 1.0e30, "the NaN was DROPPED, not propagated");
+        assert_eq!(aabb_max, -1.0e30, "the NaN was DROPPED, not propagated");
+        assert!(
+            aabb_min.is_finite() && aabb_max.is_finite(),
+            "and the result is FINITE, so no device-side finiteness predicate can see the fault"
+        );
+    }
+}

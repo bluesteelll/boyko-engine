@@ -3709,7 +3709,7 @@ impl GpuSceneBundles {
             cluster_grid: None,
             light_index: None,
             light_index_alloc: None,
-            cluster_cull_push: ClusterCullPush::new(0.0, 0.0, 0, 0),
+            cluster_cull_push: ClusterCullPush::UNARMED,
             cluster_count: 0,
             cluster_cull_hier: None,
             cluster_boot_packed_dims: 0,
