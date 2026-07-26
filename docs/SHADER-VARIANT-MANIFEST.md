@@ -186,6 +186,39 @@ but can never be armed while they are bound. As of rung S2 that exclusion rests 
 predicate alone; the CPU truth-table test `sv0_never_arms_under_hwrt` that will make it mechanical
 rather than argued is scheduled for rung S4 and DOES NOT EXIST YET.
 
+## `vb_geo.comp.hlsl` — the R9 thin-aux geometry pre-pass (compute)
+
+One source, ONE axis. Paired 1:1 with `vb_shade_split.comp.hlsl` above: the split producer's geometry
+half, dispatched when `path_vb_split()` resolves. It re-fetches the covered triangle through
+`vb_geom_fetch.hlsli` and writes the thin aux targets the pre-light consumers read.
+
+| Variant | `MOTION` | `.spv` | dxc `-T` | Delta |
+|---|---|---|---|---|
+| base | — | `vb_geo.comp.spv` | `cs_6_0` | the thin-aux write (`gThinNormal` + depth-derived view-space data) that SSAO / DDGI / the shadow-temporal reproject consume. |
+| motion (R9d) | `1` | `vb_geo_mv.comp.spv` | `cs_6_0` | **+ the per-pixel camera-reprojected motion vector** for static geometry. No `rayQuery`, so the SAME `cs_6_0` target as base suffices — unlike the `deferred_pbr` HWRT rows, this axis does not move the profile. |
+
+*Provenance: this section was **missing** until 2026-07-26. `vb_geo` has shipped since rung R9 with a
+real `-D` axis and no row — the same standing-rule violation `deferred_pbr_wrap` carried until
+`a4824a8`. Found while enumerating the SV0 blast radius at rung S2, which re-DXCs both rows as its
+gate (b′) and must therefore prove them **unperturbed**: SV0's `#ifdef VB_SV0` seam in
+`vb_geom_fetch.hlsli` is compiled only by the three lit-producer tails, never by `vb_geo`, so both
+artifacts are byte-identical by construction — and that is a gate, not a hope, because `dxc -P` of
+`vb_geo.comp.hlsl` with and without the guard must differ.*
+
+## Deliberately ABSENT from this manifest: `vb_raster.{vs,fs}.hlsl`
+
+Recorded so the next audit does not re-derive it. `vb_raster.vs.hlsl` → `vb_raster.vs.spv` (`vs_6_0`)
+and `vb_raster.fs.hlsl` → `vb_raster.fs.spv` (`ps_6_0`) each compile to exactly ONE artifact and
+contain **zero** preprocessor conditionals — `grep -c '#ifdef\|#if '` returns 0 on both. This file is
+the registry of sources that compile to **N `.spv` via `-D`**; a single-artifact source has no
+variant axis to document, so listing it would be padding rather than coverage.
+
+That is worth stating rather than leaving implicit, because the id-encoding seam lives in exactly
+these two files (`vb_raster.vs.hlsl` exports the flat instance id, `vb_raster.fs.hlsl` writes
+`uint2(instance, SV_PrimitiveID)`). A future virtual-geometry rung re-encoding that pair to
+`(instance, meshlet, local_tri)` would give them a real axis for the first time — at which point they
+earn a section here, and every VB golden re-blesses with them.
+
 ## Shadow-denoise compute (separate shaders, not `-D` variants of the resolve)
 
 These are distinct `.hlsl`, listed here for the temporal/spatial pipeline picture, not because they are
