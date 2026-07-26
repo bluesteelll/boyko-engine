@@ -326,3 +326,143 @@ impl VbTimestampCollector {
         unsafe { (fns.cmd_write_timestamp)(cmd, vk_stage, pool.pool, index) };
     }
 }
+
+// === VB-SV0 rung S1.5 — the DEFERRED marcher GPU-timestamp bench collector. ===
+//
+// A THIRD dedicated collector, for the same reason [`VbTimestampCollector`] is a second one
+// (see its block comment): every `read_query_pool_ns` reader asks for ALL of its collector's
+// (begin,end) pairs with `VK_QUERY_RESULT_WAIT_BIT`, which BLOCKS FOREVER on a pair its
+// recorder never wrote this frame. `VbTimedPass`'s three pairs are written by `record_vb`,
+// which a **Deferred** frame never runs; `TimedPass`'s four are written by passes S1.5's
+// fixture does not arm (DDGI / CSM / punctual). Widening either would deadlock the other
+// rung's harness on the very first frame. A one-pass collector with its own pool sizing keeps
+// all three independent — the pattern this file already commits to.
+
+/// The single `record_gbuffer` dispatch the VB-SV0 S1.5 bench brackets.
+///
+/// `#[repr(u32)]` so the discriminant IS the pair slot index — mirrors [`TimedPass`]'s and
+/// [`VbTimedPass`]'s shape.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sv0TimedPass {
+    /// The Deferred fine-marcher dispatch (`sdf_gbuffer_composite.hlsl`) — the pass that
+    /// carries BOTH `pc.lighting_flags`-gated arms S1.5 performs its interleaved paired A/B
+    /// over: the `own_pixel` SDF-hit arm and the `!own_pixel` raster-owned arm that writes
+    /// `gMaterial.RG = (mesh_shadow, mesh_ao)`.
+    ///
+    /// Bracketed inside the recorder's `if let Some(marcher_pass)` arm, i.e. on exactly the
+    /// frames the dispatch is recorded. A render path that does not dispatch the marcher
+    /// (`!scene.path_has_marcher()`) therefore leaves this pair UNWRITTEN, which would hang the
+    /// `WAIT`-bit readback — the caller must only arm this collector on a marcher-carrying path
+    /// (`boyko_app::runner`'s S1.5 block asserts it before reading).
+    Marcher = 0,
+}
+
+impl Sv0TimedPass {
+    /// The pair slot index — the begin query is `2 * slot`, the end query `2 * slot + 1`.
+    #[inline]
+    pub const fn slot(self) -> u32 {
+        self as u32
+    }
+}
+
+/// The number of bracketed VB-SV0 S1.5 passes ([`Sv0TimedPass::Marcher`]). Each needs a
+/// begin+end query, so a pool holds `2 * SV0_PASS_COUNT` queries.
+pub const SV0_PASS_COUNT: u32 = 1;
+
+/// A per-frame-in-flight ring of TIMESTAMP query pools bracketing the Deferred fine-marcher
+/// dispatch (VB-SV0 rung S1.5) — the `record_gbuffer` marcher sibling of
+/// [`VbTimestampCollector`].
+///
+/// Threaded onto the scene as `Option<&Sv0TimestampCollector>`
+/// ([`crate::present::scene_types::GBufferScene::sv0_gpu_timing`]): `None` on every
+/// golden/host/interactive frame emits ZERO reset/write commands, so the recorded command
+/// stream is BYTE-IDENTICAL to the pre-S1.5 path.
+pub struct Sv0TimestampCollector {
+    /// One `2 * SV0_PASS_COUNT`-query TIMESTAMP pool per in-flight frame, indexed by `fi`.
+    pools: [VulkanQueryPool; FRAMES_IN_FLIGHT],
+}
+
+impl Sv0TimestampCollector {
+    /// Builds a collector from the per-frame pools (each created with `2 * SV0_PASS_COUNT`
+    /// queries). The caller owns the pools' lifetime — created via
+    /// `RhiDevice::create_query_pool` and destroyed via `RhiDevice::destroy_query_pool` after
+    /// `wait_idle`.
+    #[inline]
+    pub fn new(pools: [VulkanQueryPool; FRAMES_IN_FLIGHT]) -> Self {
+        Self { pools }
+    }
+
+    /// This frame's query pool (indexed by the renderer's frame-in-flight slot `fi`). The
+    /// caller reads it after the frame's GPU work completes via `RhiDevice::read_query_pool_ns`.
+    #[inline]
+    pub fn pool(&self, fi: usize) -> &VulkanQueryPool {
+        debug_assert!(fi < FRAMES_IN_FLIGHT, "invariant: fi must be a valid frame-in-flight slot");
+        &self.pools[fi]
+    }
+
+    /// Consumes the collector, yielding its owned per-frame pools back to the caller for
+    /// destruction (`RhiDevice::destroy_query_pool`).
+    #[inline]
+    pub fn into_pools(self) -> [VulkanQueryPool; FRAMES_IN_FLIGHT] {
+        self.pools
+    }
+
+    /// Resets ALL `2 * SV0_PASS_COUNT` queries of frame `fi`'s pool. MUST be recorded at the
+    /// frame top, OUTSIDE any render / dynamic-rendering scope
+    /// (`VUID-vkCmdResetQueryPool-renderpass`) — a TIMESTAMP query is undefined until reset.
+    ///
+    /// # Safety
+    /// `cmd` must be recordable (recording open) and `fns` must be the live device fn-table;
+    /// the reset MUST NOT be inside a render pass. Records `vkCmdResetQueryPool`.
+    #[inline]
+    pub unsafe fn reset_frame(&self, fns: &DeviceFns, cmd: VkCommandBuffer, fi: usize) {
+        let pool = self.pool(fi);
+        // SAFETY: `cmd` is recordable + outside any rendering scope (caller contract); `fns` is
+        // the live device fn-table; `pool.pool` is a live TIMESTAMP pool with `pool.count ==
+        // 2 * SV0_PASS_COUNT` queries, so `[0..2*SV0_PASS_COUNT)` is exactly in bounds.
+        unsafe { (fns.cmd_reset_query_pool)(cmd, pool.pool, 0, 2 * SV0_PASS_COUNT) };
+    }
+
+    /// Writes the BEGIN timestamp (`TopOfPipe`) for `pass` into frame `fi`'s pool (query
+    /// `2 * pass.slot()`). Records it before the pass's first command.
+    ///
+    /// # Safety
+    /// `cmd` must be recordable and `fns` the live device fn-table; the pool's queries were
+    /// reset this frame ([`Self::reset_frame`]). Records `vkCmdWriteTimestamp` at
+    /// `TOP_OF_PIPE`.
+    #[inline]
+    pub unsafe fn write_begin(&self, fns: &DeviceFns, cmd: VkCommandBuffer, fi: usize, pass: Sv0TimedPass) {
+        // SAFETY: caller contract (recordable `cmd`, live `fns`, pool reset this frame).
+        unsafe { self.write(fns, cmd, fi, TimestampStage::TopOfPipe, 2 * pass.slot()) };
+    }
+
+    /// Writes the END timestamp (`BottomOfPipe`) for `pass` into frame `fi`'s pool (query
+    /// `2 * pass.slot() + 1`). Records it after the pass's last command.
+    ///
+    /// # Safety
+    /// `cmd` must be recordable and `fns` the live device fn-table; the pool's queries were
+    /// reset this frame ([`Self::reset_frame`]). Records `vkCmdWriteTimestamp` at
+    /// `BOTTOM_OF_PIPE`.
+    #[inline]
+    pub unsafe fn write_end(&self, fns: &DeviceFns, cmd: VkCommandBuffer, fi: usize, pass: Sv0TimedPass) {
+        // SAFETY: caller contract (recordable `cmd`, live `fns`, pool reset this frame).
+        unsafe { self.write(fns, cmd, fi, TimestampStage::BottomOfPipe, 2 * pass.slot() + 1) };
+    }
+
+    /// The shared `vkCmdWriteTimestamp` helper: writes query `index` of frame `fi`'s pool at
+    /// `stage`.
+    ///
+    /// # Safety
+    /// See [`Self::write_begin`] / [`Self::write_end`].
+    #[inline]
+    unsafe fn write(&self, fns: &DeviceFns, cmd: VkCommandBuffer, fi: usize, stage: TimestampStage, index: u32) {
+        let pool = self.pool(fi);
+        debug_assert!(index < pool.count, "invariant: timestamp index must be in the pool");
+        let vk_stage = stage.as_i32() as u32;
+        // SAFETY: `cmd` is recordable (caller contract); `fns` is the live device fn-table;
+        // `pool.pool` is a live TIMESTAMP pool; `index < pool.count` (asserted) and was reset
+        // this frame; `vk_stage` is a single valid pipeline-stage bit (TOP/BOTTOM).
+        unsafe { (fns.cmd_write_timestamp)(cmd, vk_stage, pool.pool, index) };
+    }
+}

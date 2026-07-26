@@ -302,6 +302,15 @@ pub struct DeviceCaps {
     /// subtracting). `0` means the family does not support timestamps → the harness
     /// skips (see [`Self::timestamps_usable`]).
     pub timestamp_valid_bits: u32,
+    /// VB-SV0 rung S1.5: `VkPhysicalDeviceLimits::timestampComputeAndGraphics` — whether ALL
+    /// graphics+compute queue families are guaranteed to support timestamps.
+    ///
+    /// RECORDED ONLY. It deliberately does NOT participate in [`Self::timestamps_usable`]: the
+    /// authoritative per-queue answer is [`Self::timestamp_valid_bits`] on the family actually
+    /// chosen, and `false` here merely means the guarantee is per-family rather than blanket. It
+    /// is read so a timing harness reporting its own resolution can state which guarantee its
+    /// numbers rest on instead of implying the stronger one.
+    pub timestamp_compute_and_graphics: bool,
     /// HW-RT rung R1: whether hardware ray query is ENABLED on this device (the
     /// `VK_KHR_ray_query` extension requested + its feature turned on). The
     /// field's contract is "ENABLED", not "present": R1 requests NO RT extension
@@ -1014,6 +1023,12 @@ impl VulkanContext {
         let device_props = query_device_properties(&instance_fns, physical_device);
         device_caps.timestamp_period = device_props.limits.read_f32(LIMITS_OFF_TIMESTAMP_PERIOD);
         device_caps.timestamp_valid_bits = timestamp_valid_bits;
+        // VB-SV0 rung S1.5: `timestampComputeAndGraphics` is a `VkBool32` (0/1) one 4-byte
+        // scalar before `timestampPeriod` in the same limits blob. RECORDED ONLY — it does not
+        // gate anything (`timestamps_usable()` is unchanged); a timing harness prints it so its
+        // resolution claim names the guarantee it rests on.
+        device_caps.timestamp_compute_and_graphics =
+            device_props.limits.read_u32(LIMITS_OFF_TIMESTAMP_COMPUTE_AND_GRAPHICS) != 0;
         // HW-RT rung R1: copy the real GPU identity from the physical-device properties
         // (`vendor_id`/`device_id`/`driver_version` are typed `u32` at the TOP of
         // `VkPhysicalDeviceProperties`, NOT in the opaque limits blob — plain field copies,
@@ -3147,6 +3162,9 @@ fn query_device_caps(fns: &InstanceFns, physical_device: VkPhysicalDevice) -> De
         // the two inputs `query_device_caps` does not itself read.
         timestamp_period: 0.0,
         timestamp_valid_bits: 0,
+        // VB-SV0 rung S1.5: same placeholder discipline — the boot site reads it from the
+        // limits blob alongside `timestampPeriod`.
+        timestamp_compute_and_graphics: false,
         // HW-RT rung R1: `ray_query`/`ray_reorder` stay `false` — R1 requests NO RT
         // extension, so there is nothing to enable (the dormancy anchor; `rt_tier()`
         // then returns `Absent` for every device). The `vendor_id`/`device_id`/
@@ -3674,6 +3692,7 @@ mod tests {
             r16_unorm_storage_ok: true,
             timestamp_period: 1.0,
             timestamp_valid_bits: 64,
+            timestamp_compute_and_graphics: true,
             ray_query,
             ray_reorder,
             vendor_id: 0,

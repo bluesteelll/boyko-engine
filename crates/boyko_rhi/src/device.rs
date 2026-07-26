@@ -652,6 +652,9 @@ pub trait RhiDevice<A: RhiApi> {
     /// available, after the caller's `wait_fence`). `scratch` is the caller-owned raw-u64
     /// staging (length `>= 2 * pair_count`); `out_ns` receives `pair_count` values.
     ///
+    /// `scratch` is CLOBBERED — its contents after the call are unspecified staging, not the raw
+    /// timestamps. Read the results from `out_ns`.
+    ///
     /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; the Vulkan
     /// backend overrides it (`vkGetQueryPoolResults`).
     #[cold]
@@ -664,6 +667,44 @@ pub trait RhiDevice<A: RhiApi> {
         _out_ns: &mut [f64],
     ) -> Result<(), Self::Error> {
         Err(RhiError::unsupported("read_query_pool_ns").into())
+    }
+
+    /// [`Self::read_query_pool_ns`]'s UNSCALED sibling: the same host-wait + read + mask, but
+    /// returning each pair's raw **tick** count instead of nanoseconds — `out_ticks[i]` =
+    /// `((t_end & mask).wrapping_sub(t_begin & mask) & mask)`, with NO `timestampPeriod`
+    /// multiply.
+    ///
+    /// # Why a caller would want ticks
+    ///
+    /// A GPU timestamp counter is a lattice: it advances in steps of some hardware granularity
+    /// `G >= 1` tick, so every measurable duration is a multiple of `G`. `G` is NOT reported by
+    /// any Vulkan limit — `timestampPeriod` is the ns-per-tick SCALE, not the STEP — so the only
+    /// way to learn it is to observe that every raw delta shares a common factor. That
+    /// observation must be made on the INTEGER ticks: recovering ticks by dividing a `f64`
+    /// nanosecond value back by the period would run the measurement through the very scale
+    /// factor being characterised, and a float round-trip cannot evidence an integer lattice.
+    ///
+    /// A bench that reports a statistic near the lattice step needs `G` to state its own
+    /// resolution honestly (VB-SV0 rung S1.5 — see
+    /// `crates/boyko_app/tests/sv0_deferred_term_bench.rs`).
+    ///
+    /// Same contract as [`Self::read_query_pool_ns`] otherwise: `WAIT_BIT` semantics (the caller
+    /// MUST only read WRITTEN `(begin, end)` pairs or this blocks forever), `scratch` is the
+    /// caller-owned raw staging of length `>= 2 * pair_count` and is CLOBBERED, `out_ticks`
+    /// receives `pair_count` values.
+    ///
+    /// The default body is `#[cold] #[inline(never)]` and errors `Unsupported`; the Vulkan
+    /// backend overrides it (`vkGetQueryPoolResults`).
+    #[cold]
+    #[inline(never)]
+    fn read_query_pool_ticks(
+        &self,
+        _pool: &A::QueryPool,
+        _pair_count: u32,
+        _scratch: &mut [u64],
+        _out_ticks: &mut [u64],
+    ) -> Result<(), Self::Error> {
+        Err(RhiError::unsupported("read_query_pool_ticks").into())
     }
 
     // ===== HW-RT ACCELERATION-STRUCTURE SEAM (rung R2a-1; default bodies keep Mock + ABI) =====

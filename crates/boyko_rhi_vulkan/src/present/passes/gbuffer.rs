@@ -15,7 +15,7 @@ use crate::memory::BoundBuffer;
 use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS};
 
 use super::super::frame_driver::Renderer;
-use super::super::gpu_timing::TimedPass;
+use super::super::gpu_timing::{Sv0TimedPass, TimedPass};
 use super::super::scene_types::{
     CLUSTER_CULL_HIER_PUSH_BYTES, CLUSTER_CULL_PUSH_BYTES, GBUFFER_MARCHER_PUSH_BYTES,
     GBUFFER_PUSH_BASE_INSTANCE_OFFSET, GBufferScene, LIGHT_CULL_LOCAL_SIZE_X,
@@ -153,6 +153,17 @@ impl Renderer<'_> {
         // on `scene.gpu_timing`: `None` (every golden/host frame) records NOTHING, so the
         // command stream is byte-identical. A TIMESTAMP query is undefined until reset.
         if let Some(tc) = scene.gpu_timing {
+            // SAFETY: recording is open; `self.fns` is the live device fn-table; the reset is
+            // recorded before any `begin_rendering` (outside a render pass, per
+            // `VUID-vkCmdResetQueryPool-renderpass`); `fi` is this present's in-flight slot.
+            unsafe { tc.reset_frame(self.fns, cmd, fi) };
+        }
+
+        // VB-SV0 rung S1.5: the SAME frame-top reset for the marcher bench collector, under its
+        // own `None`-by-default gate (`scene.sv0_gpu_timing`), so an unarmed frame records
+        // NOTHING and the command stream stays byte-identical. Independent of the R0 collector
+        // above: the two own different pools and are armed by different harnesses.
+        if let Some(tc) = scene.sv0_gpu_timing {
             // SAFETY: recording is open; `self.fns` is the live device fn-table; the reset is
             // recorded before any `begin_rendering` (outside a render pass, per
             // `VUID-vkCmdResetQueryPool-renderpass`); `fi` is this present's in-flight slot.
@@ -1214,6 +1225,16 @@ impl Renderer<'_> {
         );
         if let Some(marcher_pass) = marcher_plan {
             self.record_graph_pass(marcher_pass, cmd, targets, scene, fi);
+            // VB-SV0 rung S1.5: bracket the marcher dispatch itself. The BEGIN is written AFTER
+            // `record_graph_pass` so the bracket excludes the graph's derived input barriers —
+            // those are identical on both A/B phases (`lighting_flags` is a push constant, not a
+            // resource), so including them would only add un-cancelled noise to the paired delta.
+            if let Some(tc) = scene.sv0_gpu_timing {
+                // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool's
+                // queries were reset at this frame's top (the `sv0_gpu_timing` reset above runs
+                // under the same `Some` gate, so an armed frame is always reset first).
+                unsafe { tc.write_begin(self.fns, cmd, fi, Sv0TimedPass::Marcher) };
+            }
             unsafe {
                 (self.fns.cmd_bind_pipeline)(
                     cmd,
@@ -1239,6 +1260,14 @@ impl Renderer<'_> {
                     marcher_push_bytes.as_ptr().cast(),
                 );
                 (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+            }
+            // VB-SV0 rung S1.5: close the marcher bracket (`BOTTOM_OF_PIPE`, so it waits on the
+            // dispatch this pair exists to time).
+            if let Some(tc) = scene.sv0_gpu_timing {
+                // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool's
+                // queries were reset at this frame's top, and the matching BEGIN was written just
+                // above under the identical `Some` gate.
+                unsafe { tc.write_end(self.fns, cmd, fi, Sv0TimedPass::Marcher) };
             }
         }
 

@@ -70,9 +70,9 @@ use boyko_rhi_vulkan::swapchain::{
     AaActivation, ClusterCullHierDispatch, CsmDepthActivation, DdgiUpdateActivation,
     FRAMES_IN_FLIGHT, FrameWriteToken, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES,
     GBufferMeshDraw, GBufferScene, InterpActivation, PunctualDepthActivation, RcasActivation,
-    ResolvedRenderPathGpu, SmaaActivation, SsaaActivation, SsaoActivation, TaaActivation,
-    VB_PASS_COUNT, VbTimedPass, VbTimestampCollector, ViewtFromDepthActivation,
-    ViewtFromVbDepthActivation,
+    ResolvedRenderPathGpu, SV0_PASS_COUNT, SmaaActivation, SsaaActivation, SsaoActivation,
+    Sv0TimedPass, Sv0TimestampCollector, TaaActivation, VB_PASS_COUNT, VbTimedPass,
+    VbTimestampCollector, ViewtFromDepthActivation, ViewtFromVbDepthActivation,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::accel::BoundAccelStruct;
@@ -1102,6 +1102,13 @@ pub(crate) struct GpuSceneBundles {
     /// None` into every `GBufferScene` and the `record_vb` command stream stays
     /// byte-identical. See [`Self::vb_bench_armed`] / [`Self::read_vb_bench_ns`].
     vb_bench: Option<VbTimestampCollector>,
+    /// VB-SV0 rung S1.5: the DEFERRED fine-marcher GPU-timestamp bench collector — a per-FIF
+    /// ring of `2 * SV0_PASS_COUNT`-query TIMESTAMP pools. Built at [`Self::boot`] ONLY when the
+    /// `BOYKO_SV0_BENCH` env is set AND the device supports timestamps; `None` on every other
+    /// boot (every golden/host/interactive run — the DEFAULT), so [`Self::scene`] threads
+    /// `sv0_gpu_timing: None` into every `GBufferScene` and the `record_gbuffer` command stream
+    /// stays byte-identical. See [`Self::sv0_bench_armed`] / [`Self::read_sv0_marcher_ticks`].
+    sv0_bench: Option<Sv0TimestampCollector>,
 }
 
 /// Textured-PBR T6c: the TEXTURED gbuffer producer pipeline resources — see
@@ -3583,6 +3590,27 @@ impl GpuSceneBundles {
             VbTimestampCollector::new(pools)
         });
 
+        // VB-SV0 rung S1.5: the Deferred marcher bench collector — the SAME presence-gate +
+        // device-cap shape as `vb_bench` above, on its own env knob so the two benches can never
+        // arm each other by accident. Unset (every golden/host/interactive boot, the DEFAULT) ⇒
+        // `None` ⇒ `Self::scene` threads `sv0_gpu_timing: None` ⇒ byte-identical stream.
+        let sv0_bench_requested = std::env::var("BOYKO_SV0_BENCH").is_ok();
+        // Same O2 reasoning as the VB-P1d gate: a requested-but-declined bench would otherwise be
+        // silent (the windowed test just runs forever with no print), so say so here — the one
+        // place that knows both halves of the gate.
+        if sv0_bench_requested && !vb_bench_timestamps_usable {
+            eprintln!(
+                "VB-SV0 S1.5 bench: BOYKO_SV0_BENCH set but device timestamps are unusable — bench disabled."
+            );
+        }
+        let sv0_bench = (sv0_bench_requested && vb_bench_timestamps_usable).then(|| {
+            let pools: [VulkanQueryPool; FRAMES_IN_FLIGHT] = core::array::from_fn(|_| {
+                RhiDevice::create_query_pool(ctx, &QueryPoolDesc { count: 2 * SV0_PASS_COUNT })
+                    .expect("invariant: VB-SV0 S1.5 bench query-pool create")
+            });
+            Sv0TimestampCollector::new(pools)
+        });
+
         Self {
             raster_pipeline,
             instance_layout,
@@ -3718,6 +3746,7 @@ impl GpuSceneBundles {
             vb_shade_froxel_pipeline: None,
             vb_shade_tex_froxel_pipeline: None,
             vb_bench,
+            sv0_bench,
         }
     }
 
@@ -5080,6 +5109,16 @@ impl GpuSceneBundles {
         // `VisibilityBuffer`-resolved boot with the device-cap armed
         // (`resolved_render_path.vb_geometry_table`); `None` otherwise.
         vb_geometry_set: Option<&'a boyko_rhi_vulkan::geometry_bindless::VulkanGeometryBindlessSet>,
+        // VB-SV0 rung S1.5: THIS frame's `FineMarcherPush::lighting_flags`, when the S1.5 bench
+        // is driving an interleaved paired A/B over it. `None` (every non-bench frame — the
+        // DEFAULT) keeps the shipped `LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO` literal, so the
+        // pushed bytes are byte-identical to the pre-S1.5 path. `Some(f)` stamps `f` verbatim:
+        // the bench alternates `SHADOWS|AO` (the ARMED phase) with `0` (the CLEARED phase), which
+        // is exactly the `sdf_gbuffer_composite.hlsl:1865` / `:1805` gate around the shadow + AO
+        // marches SV0 proposes to inline. A per-frame PUSH CONSTANT, not a descriptor and not a
+        // pipeline key — flipping it needs no re-record and no pipeline rebuild, which is what
+        // makes the two phases of a pair comparable (see `GBufferScene::lighting_flags`).
+        sv0_bench_lighting_flags: Option<u32>,
         device: &VulkanContext,
     ) -> GBufferScene<'a> {
         debug_assert!(
@@ -5433,7 +5472,10 @@ impl GpuSceneBundles {
             brick: None,
             coarse: None,
             coarse_mode: CoarseMode::EmptySkipOnly,
-            lighting_flags: LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO,
+            // VB-SV0 rung S1.5: the bench's per-frame A/B value when it is driving, else the
+            // shipped literal (the `None` default — byte-identical push bytes).
+            lighting_flags: sv0_bench_lighting_flags
+                .unwrap_or(LIGHTING_FLAG_SHADOWS | LIGHTING_FLAG_AO),
             light_dir: self.light_dir,
             // Render P7-Q2: `ssao_variant.is_some()` (the owner-resolved `SsaoQuality != Off`)
             // ⇒ `Some` — arms the SSAO compute activation against the selected pre-compiled
@@ -5651,6 +5693,11 @@ impl GpuSceneBundles {
             // (`Self::vb_bench_armed`'s own doc) — `None` on every other boot (every golden/
             // host/interactive run), so the recorded command stream stays byte-identical.
             vb_gpu_timing: self.vb_bench.as_ref(),
+            // VB-SV0 rung S1.5: the Deferred marcher bench collector, armed ONLY when
+            // `BOYKO_SV0_BENCH` was read at `Self::boot` time AND the device supports timestamps
+            // (`Self::sv0_bench_armed`'s own doc) — `None` on every other boot, so the recorded
+            // command stream stays byte-identical.
+            sv0_gpu_timing: self.sv0_bench.as_ref(),
             // HW-RT rung R2a-3: the GPU-resident per-frame TLAS pack + build activation, armed
             // above from `tlas_enabled` + `self.tlas`. `None` on every non-RT / OFF frame (the
             // byte-identical path — the TLAS is built + barriered but never traced this rung).
@@ -6064,6 +6111,55 @@ impl GpuSceneBundles {
     /// `VK_QUERY_RESULT_WAIT_BIT` readback below — this is why the caller MUST assert
     /// `!mesh_geo_shade_split` first.
     ///
+    /// VB-SV0 rung S1.5: `true` iff the Deferred marcher bench collector was armed at
+    /// [`Self::boot`] (`BOYKO_SV0_BENCH` set AND the device supports timestamps). The runner
+    /// reads this ONCE, before the frame loop starts, to decide whether to drive the paired A/B
+    /// + summary print — `false` on every non-bench run, so that whole block is dead code there.
+    #[inline]
+    pub(crate) fn sv0_bench_armed(&self) -> bool {
+        self.sv0_bench.is_some()
+    }
+
+    /// VB-SV0 rung S1.5: reads back frame `fi`'s Deferred marcher dispatch cost in RAW TIMESTAMP
+    /// TICKS from the armed bench collector. `None` iff [`Self::sv0_bench_armed`] is `false` (the
+    /// collector was never created; the runner never calls this then).
+    ///
+    /// # Why ticks and not nanoseconds
+    ///
+    /// The GPU timestamp counter advances on a LATTICE — a hardware granularity of `G >= 1` tick
+    /// that no Vulkan limit reports (`timestampPeriod` is the ns-per-tick SCALE, not the STEP).
+    /// S1.5 must state its own resolution, so the runner recovers `G` empirically as the GCD of
+    /// the raw per-frame tick counts. That is an INTEGER property: reading nanoseconds here and
+    /// dividing the period back out would launder the measurement through the very scale factor
+    /// under examination, and a float round-trip is not evidence of an integer lattice. The
+    /// runner multiplies by `timestamp_period` itself, once, at the report boundary.
+    ///
+    /// The single [`Sv0TimedPass::Marcher`] pair is written on exactly the frames the recorder
+    /// dispatches the marcher, so the caller MUST hold the marcher-carrying-path precondition
+    /// (`boyko_app::runner`'s S1.5 block asserts `RenderPath::Deferred` + a marching leg before
+    /// ever calling this) — otherwise the `VK_QUERY_RESULT_WAIT_BIT` readback below waits on a
+    /// query this frame never wrote and hangs, the same hazard `read_vb_bench_ns` documents for
+    /// the VB split producer.
+    ///
+    /// # Panics
+    /// Panics (`expect("invariant: ...")`) if the readback fails — a bench-only diagnostic path
+    /// (never reached on the shipped default), so a query-pool read failure here is a
+    /// setup/driver bug, not a recoverable per-frame condition.
+    pub(crate) fn read_sv0_marcher_ticks(&self, ctx: &VulkanContext, fi: usize) -> Option<u64> {
+        let collector = self.sv0_bench.as_ref()?;
+        let mut scratch = [0u64; (2 * SV0_PASS_COUNT) as usize];
+        let mut out_ticks = [0u64; SV0_PASS_COUNT as usize];
+        RhiDevice::read_query_pool_ticks(
+            ctx,
+            collector.pool(fi),
+            SV0_PASS_COUNT,
+            &mut scratch,
+            &mut out_ticks,
+        )
+        .expect("invariant: VB-SV0 S1.5 bench query-pool readback");
+        Some(out_ticks[Sv0TimedPass::Marcher.slot() as usize])
+    }
+
     /// # Panics
     /// Panics (`expect("invariant: ...")`) if the readback fails — a bench-only diagnostic
     /// path (never reached on the shipped default), so a query-pool read failure here is a
@@ -6226,6 +6322,14 @@ impl GpuSceneBundles {
             // under `BOYKO_VB_BENCH` + a timestamp-capable device — every other boot leaves
             // this `None`, a no-op here).
             if let Some(collector) = self.vb_bench {
+                for pool in collector.into_pools() {
+                    RhiDevice::destroy_query_pool(ctx, pool);
+                }
+            }
+            // VB-SV0 rung S1.5: the Deferred marcher bench query pools, `Option`-guarded exactly
+            // like `vb_bench` above (built only under `BOYKO_SV0_BENCH` + a timestamp-capable
+            // device — every other boot leaves this `None`, a no-op here).
+            if let Some(collector) = self.sv0_bench {
                 for pool in collector.into_pools() {
                     RhiDevice::destroy_query_pool(ctx, pool);
                 }

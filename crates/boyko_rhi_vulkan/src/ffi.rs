@@ -1375,8 +1375,24 @@ const _: () = assert!(LIMITS_OFF_MAX_BOUND_DESCRIPTOR_SETS + 4 <= 504);
 /// bogus measurement.
 pub const LIMITS_OFF_TIMESTAMP_PERIOD: usize = 424;
 
+/// Offset of `timestampComputeAndGraphics` (`VkBool32`) within `VkPhysicalDeviceLimits` — the
+/// field immediately PRECEDING [`LIMITS_OFF_TIMESTAMP_PERIOD`] in the spec-fixed order the
+/// comment above already walks (`…, maxSampleMaskWords (u32)`,
+/// `timestampComputeAndGraphics (VkBool32) @420`, `timestampPeriod (float) @424`).
+///
+/// VB-SV0 rung S1.5: read so a timing harness can state whether the GRAPHICS+COMPUTE queue
+/// families are all guaranteed to support timestamps (`VK_TRUE`), rather than relying solely on
+/// the chosen family's `timestampValidBits`. A `VK_FALSE` device is not a failure — the per-family
+/// `timestampValidBits` check already gates usability — but a bench that reports its own
+/// resolution should report which of the two guarantees it is standing on. RECORDED ONLY: nothing
+/// branches on it (see [`crate::device::DeviceCaps::timestamps_usable`], unchanged).
+pub const LIMITS_OFF_TIMESTAMP_COMPUTE_AND_GRAPHICS: usize = 420;
+
 // The `f32` read at 424 must lie inside the blob (424..428 <= 504).
 const _: () = assert!(LIMITS_OFF_TIMESTAMP_PERIOD + 4 <= 504);
+// The `VkBool32` read at 420 must lie inside the blob, and must sit exactly one 4-byte scalar
+// before the period — a drift in either constant breaks this pairing at compile time.
+const _: () = assert!(LIMITS_OFF_TIMESTAMP_COMPUTE_AND_GRAPHICS + 4 == LIMITS_OFF_TIMESTAMP_PERIOD);
 
 impl VkPhysicalDeviceLimitsBlob {
     /// Reads the `u32` field at `offset` bytes into the opaque limits blob. The

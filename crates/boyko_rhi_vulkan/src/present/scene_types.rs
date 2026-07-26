@@ -18,7 +18,7 @@ use crate::rhi_impl::{
 };
 use crate::texture::{MAX_CASCADES, MAX_TEXTURE_LAYERS, VulkanTexture};
 
-use super::gpu_timing::{TimestampCollector, VbTimestampCollector};
+use super::gpu_timing::{Sv0TimestampCollector, TimestampCollector, VbTimestampCollector};
 use super::{FRAMES_IN_FLIGHT, SwapchainError};
 
 // Doc-link scope: types referenced only from doc-comments in this module (the render
@@ -1870,6 +1870,18 @@ pub struct GBufferScene<'a> {
     /// [`Self::gpu_timing`] (not a shared enlarged `PASS_COUNT`) — see
     /// [`super::gpu_timing::VbTimestampCollector`]'s own doc for why.
     pub vb_gpu_timing: Option<&'a VbTimestampCollector>,
+    /// VB-SV0 rung S1.5: the optional DEFERRED fine-marcher GPU-timestamp bench collector.
+    /// `None` on EVERY golden/host/interactive frame (the DEFAULT — the SAME capability-as-
+    /// presence discipline [`Self::gpu_timing`] uses) ⇒ the recorder emits ZERO reset/write
+    /// commands around the marcher dispatch, so the recorded command stream is BYTE-IDENTICAL to
+    /// the pre-S1.5 path. `Some(tc)` (`boyko_app::runner`'s `BOYKO_SV0_BENCH`-gated collector)
+    /// brackets the `sdf_gbuffer_composite.hlsl` dispatch — the pass that carries both
+    /// `pc.lighting_flags`-gated shadow/AO arms S1.5 measures by interleaved paired A/B.
+    ///
+    /// A THIRD collector TYPE rather than a widened [`Self::gpu_timing`] / [`Self::vb_gpu_timing`]
+    /// — see [`super::gpu_timing::Sv0TimestampCollector`]'s own doc for the deadlock that forces
+    /// independent pool sizing.
+    pub sv0_gpu_timing: Option<&'a Sv0TimestampCollector>,
     /// HW-RT rung R2a-3: the optional GPU-resident per-frame TLAS pack + build activation. `None`
     /// on EVERY golden/host frame (the DEFAULT — capability-as-presence) ⇒ NO pack dispatch, NO
     /// build, NO barrier, so the recorded command stream is BYTE-IDENTICAL to the pre-R2a-3 path

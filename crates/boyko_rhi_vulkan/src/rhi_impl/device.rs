@@ -1003,61 +1003,33 @@ impl RhiDevice<Vulkan> for VulkanContext {
         scratch: &mut [u64],
         out_ns: &mut [f64],
     ) -> Result<(), VulkanError> {
-        let query_count = pair_count * 2;
-        debug_assert!(
-            query_count <= pool.count,
-            "invariant: 2 * pair_count must fit the pool's query count"
-        );
-        debug_assert!(
-            scratch.len() >= query_count as usize,
-            "invariant: scratch must hold 2 * pair_count raw timestamps"
-        );
         debug_assert!(
             out_ns.len() >= pair_count as usize,
             "invariant: out_ns must hold pair_count ns values"
         );
-
-        // SAFETY: `device` is live; `pool.pool` is a live TIMESTAMP pool whose `[0..query_count)`
-        // queries were reset + written this frame (caller contract, after `wait_fence`);
-        // `scratch.as_mut_ptr()` names `query_count` `u64` slots (asserted above) — `data_size`
-        // is exactly that many bytes and `stride` is 8 (one `u64` per query). `64_BIT | WAIT_BIT`
-        // reads each result as a 64-bit value, blocking until it is available. NULL is not passed.
-        let raw = unsafe {
-            (self.device_fns().get_query_pool_results)(
-                self.device(),
-                pool.pool,
-                0,
-                query_count,
-                (query_count as usize) * 8,
-                scratch.as_mut_ptr().cast::<c_void>(),
-                8,
-                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT,
-            )
-        };
-        let result = VkResult::from_raw(raw);
-        // `WAIT_BIT` makes the call return ONLY once every requested query is available, so the sole
-        // success code here is `VK_SUCCESS`; the positive non-error `VK_NOT_READY`/`VK_INCOMPLETE`
-        // (which `is_success()` would also accept, meaning an unwritten/partial query) cannot occur.
-        // Callers MUST read only WRITTEN (begin,end) pairs — an unwritten query would block this call
-        // forever and never reach here (the timing harnesses enforce this: the isolated smoke reads 1
-        // pair; the combined harness asserts all four passes active). So `is_success()` here is
-        // unambiguously a fully-available result.
-        if !result.is_success() {
-            return Err(VulkanError::Vk("vkGetQueryPoolResults", result));
-        }
-
-        // Mask each raw timestamp to the queue family's valid bits BEFORE subtracting (high
-        // bits above the valid width are hardware garbage), then × `timestampPeriod`. The
-        // `wrapping_sub` + post-subtraction mask handles a counter wrap across the pair.
-        let caps = self.device_caps();
-        let mask = caps.timestamp_mask();
-        let period = caps.timestamp_period as f64;
+        self.fetch_query_pair_ticks(pool, pair_count, scratch)?;
+        // × `timestampPeriod`. The tick deltas themselves (masking + wrap handling) are the
+        // shared helper's business; this method is only the ns SCALE.
+        let period = self.device_caps().timestamp_period as f64;
         for i in 0..pair_count as usize {
-            let begin = scratch[2 * i] & mask;
-            let end = scratch[2 * i + 1] & mask;
-            let ticks = end.wrapping_sub(begin) & mask;
-            out_ns[i] = ticks as f64 * period;
+            out_ns[i] = scratch[i] as f64 * period;
         }
+        Ok(())
+    }
+
+    fn read_query_pool_ticks(
+        &self,
+        pool: &VulkanQueryPool,
+        pair_count: u32,
+        scratch: &mut [u64],
+        out_ticks: &mut [u64],
+    ) -> Result<(), VulkanError> {
+        debug_assert!(
+            out_ticks.len() >= pair_count as usize,
+            "invariant: out_ticks must hold pair_count tick values"
+        );
+        self.fetch_query_pair_ticks(pool, pair_count, scratch)?;
+        out_ticks[..pair_count as usize].copy_from_slice(&scratch[..pair_count as usize]);
         Ok(())
     }
 
@@ -1153,6 +1125,80 @@ impl RhiDevice<Vulkan> for VulkanContext {
 }
 
 impl VulkanContext {
+    /// The shared body of [`RhiDevice::read_query_pool_ns`] and
+    /// [`RhiDevice::read_query_pool_ticks`]: host-waits + reads `2 * pair_count` raw timestamps
+    /// from `pool` and COMPACTS them in place into `scratch[0..pair_count]` as masked tick
+    /// deltas. The two public readers differ only in what they do with those integers (scale to
+    /// ns, or copy out), so the `vkGetQueryPoolResults` FFI call and the mask/wrap arithmetic
+    /// exist exactly once.
+    ///
+    /// # Why the in-place compaction is sound
+    ///
+    /// Pair `i` reads `scratch[2i]`/`scratch[2i+1]` and writes `scratch[i]`. Since `i <= 2i` for
+    /// every `i >= 0` and the loop runs in ASCENDING `i`, slot `i` was already consumed at step
+    /// `floor(i/2) <= i` before this step overwrites it. No input is destroyed before it is read,
+    /// so the caller needs no second buffer.
+    ///
+    /// # Panics
+    ///
+    /// `debug_assert`s that `2 * pair_count` fits both `pool.count` and `scratch`.
+    fn fetch_query_pair_ticks(
+        &self,
+        pool: &VulkanQueryPool,
+        pair_count: u32,
+        scratch: &mut [u64],
+    ) -> Result<(), VulkanError> {
+        let query_count = pair_count * 2;
+        debug_assert!(
+            query_count <= pool.count,
+            "invariant: 2 * pair_count must fit the pool's query count"
+        );
+        debug_assert!(
+            scratch.len() >= query_count as usize,
+            "invariant: scratch must hold 2 * pair_count raw timestamps"
+        );
+
+        // SAFETY: `device` is live; `pool.pool` is a live TIMESTAMP pool whose `[0..query_count)`
+        // queries were reset + written this frame (caller contract, after `wait_fence`);
+        // `scratch.as_mut_ptr()` names `query_count` `u64` slots (asserted above) — `data_size`
+        // is exactly that many bytes and `stride` is 8 (one `u64` per query). `64_BIT | WAIT_BIT`
+        // reads each result as a 64-bit value, blocking until it is available. NULL is not passed.
+        let raw = unsafe {
+            (self.device_fns().get_query_pool_results)(
+                self.device(),
+                pool.pool,
+                0,
+                query_count,
+                (query_count as usize) * 8,
+                scratch.as_mut_ptr().cast::<c_void>(),
+                8,
+                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT,
+            )
+        };
+        let result = VkResult::from_raw(raw);
+        // `WAIT_BIT` makes the call return ONLY once every requested query is available, so the sole
+        // success code here is `VK_SUCCESS`; the positive non-error `VK_NOT_READY`/`VK_INCOMPLETE`
+        // (which `is_success()` would also accept, meaning an unwritten/partial query) cannot occur.
+        // Callers MUST read only WRITTEN (begin,end) pairs — an unwritten query would block this call
+        // forever and never reach here (the timing harnesses enforce this: the isolated smoke reads 1
+        // pair; the combined harness asserts all four passes active). So `is_success()` here is
+        // unambiguously a fully-available result.
+        if !result.is_success() {
+            return Err(VulkanError::Vk("vkGetQueryPoolResults", result));
+        }
+
+        // Mask each raw timestamp to the queue family's valid bits BEFORE subtracting (high
+        // bits above the valid width are hardware garbage). The `wrapping_sub` + post-subtraction
+        // mask handles a counter wrap across the pair.
+        let mask = self.device_caps().timestamp_mask();
+        for i in 0..pair_count as usize {
+            let begin = scratch[2 * i] & mask;
+            let end = scratch[2 * i + 1] & mask;
+            scratch[i] = end.wrapping_sub(begin) & mask;
+        }
+        Ok(())
+    }
+
     /// The shared graphics-pipeline builder (textured-PBR T6c, plan Decision D5): builds the
     /// `VkPipelineLayout` from `desc.bind_group_layout` at set 0 plus, when `set1` is `Some`,
     /// a SECOND raw `VkDescriptorSetLayout` at set 1 (FRAGMENT-visible — the caller passes

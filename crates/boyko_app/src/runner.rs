@@ -111,6 +111,51 @@ const VB_BENCH_DEFAULT_FRAMES: u32 = 220;
 #[cfg(windows)]
 const VB_BENCH_WARMUP: usize = 20;
 
+/// VB-SV0 rung S1.5: the number of frames in one **ABBA quadruple** — the counterbalanced unit
+/// the Deferred-marcher cost bench measures in.
+///
+/// The A/B phase is a function of the frame's position `k` in this cycle: `k % 4 ∈ {0, 3}` is
+/// ARMED, `{1, 2}` is CLEARED. See the S1.5 block in [`frame_loop`] for why the unit is a
+/// quadruple and not a pair.
+#[cfg(windows)]
+const SV0_QUAD_FRAMES: u64 = 4;
+
+/// VB-SV0 rung S1.5: the default number of completed ABBA QUADRUPLES the Deferred-marcher cost
+/// bench collects (past warm-up) when `BOYKO_SV0_BENCH_QUADS` is unset.
+///
+/// `docs/VB-SV0-SDF-SHADOW-PLAN.md` §6 S1.5 fixes the protocol floor at **>= 30 pairs**; one
+/// quadruple contains TWO paired deltas, so this default is 400 pairs — far above the floor. The
+/// floor itself is asserted in the bench's own test
+/// (`crates/boyko_app/tests/sv0_deferred_term_bench.rs`) rather than here: a runner default is a
+/// convenience, not a gate.
+///
+/// # Why 200 and not the plan's 40
+///
+/// The statistic is a MEDIAN over the quadruples, whose sampling standard error falls as
+/// `1.253 · σ / sqrt(n)`. The first armed sessions reported a per-pair `p10..p90` band of roughly
+/// 12 µs on a ~6 µs signal, i.e. `σ ≈ 4.8 µs`: at `n = 40` the session median carried an SE near
+/// 15% of the signal — LARGER than the 10% cross-session spread gate it is read against, so a
+/// passing spread was as much luck as evidence. Counterbalancing halves the per-unit variance
+/// (each quadruple statistic is the mean of two deltas), and `n = 200` takes another factor of
+/// `sqrt(5)`, putting the SE near 3%. 800 frames at this fixture's frame cost is a few seconds —
+/// the cheapest available precision, and it changes NOTHING about what is measured.
+#[cfg(windows)]
+const SV0_BENCH_DEFAULT_QUADS: u32 = 200;
+
+/// VB-SV0 rung S1.5: the warm-up FRAMES discarded from the front of the paired sample stream
+/// (shader compile + GPU clock ramp), before any quadruple is formed. The same order of magnitude
+/// as [`VB_BENCH_WARMUP`], and a MULTIPLE OF [`SV0_QUAD_FRAMES`] so discarding it cannot itself
+/// rotate the ABBA cycle — the quadruple assembly below keys on the absolute phase counter and
+/// would survive a non-multiple (it would simply drop one partial quadruple), but a warm-up that
+/// silently changes which arm leads is the kind of asymmetry a counterbalanced protocol exists to
+/// exclude.
+#[cfg(windows)]
+const SV0_BENCH_WARMUP: usize = 20;
+
+// The warm-up must not straddle the ABBA cycle (see [`SV0_BENCH_WARMUP`]).
+#[cfg(windows)]
+const _: () = assert!((SV0_BENCH_WARMUP as u64).is_multiple_of(SV0_QUAD_FRAMES));
+
 /// Asset-system rung A1: the boot preallocation budget for
 /// [`Assets::<Material>::with_reserved`] — the host does not know a game's material
 /// count generically, so this is a practical setup-time default (Principle 5: reserve
@@ -959,6 +1004,157 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         );
     }
 
+    // === VB-SV0 rung S1.5 — the Deferred SDF shadow/AO term cost falsifier. ===
+    //
+    // A COUNTERBALANCED (ABBA) INTERLEAVED A/B of `FineMarcherPush::lighting_flags` on the
+    // SHIPPED Deferred path: frames push `SHADOWS|AO` (ARMED) and `0` (CLEARED) in the cycle
+    // A,B,B,A — exactly the `sdf_gbuffer_composite.hlsl:1805` / `:1865` gate around the two
+    // marches SV0 proposes to inline into the VB lit-producer tails. Zero new shader code; the
+    // ONLY per-frame difference between the two phases is one push-constant word.
+    //
+    // # Why ABBA and not ABAB — the null control refuted ABAB, on this hardware
+    //
+    // The first armed sessions ran a strict ABAB alternation. Its null control (both phases
+    // pushing the ARMED word, so the true difference is exactly zero) reported a median paired
+    // delta of -2048 ns against a ~6144 ns armed signal: a THIRD of the signal, consistently
+    // NEGATIVE, with the whole p10..p90 band shifted below zero. That is not noise — it is a
+    // constant ORDERING bias, and ABAB cannot remove it. Model a sample at cycle position `k`:
+    //
+    //     m_k = mu + tau * armed(k) + gamma(fi(k)) + beta * k + eps_k
+    //
+    // where `tau` is the term under measurement, `gamma` is a per-frame-in-flight-slot offset,
+    // `beta` a local position/drift slope, `eps` zero-mean noise. Under ABAB every delta is
+    //
+    //     m_k - m_{k+1} = tau + (gamma_f - gamma_{1-f}) - beta
+    //
+    // i.e. the SAME contamination, with the SAME sign, in every single pair — a median over
+    // 40 of them removes exactly none of it.
+    //
+    // `gamma` is not hypothetical here. `FRAMES_IN_FLIGHT == 2`, so under ABAB the A/B phase is
+    // PERFECTLY ALIASED with the frame-in-flight slot: ARMED always lands on `fi = 0` and
+    // CLEARED always on `fi = 1` — a different query pool, a different descriptor/UBO ring slot,
+    // a different staging region, forever. The A/B was confounded with the ring by construction.
+    //
+    // The ABBA quadruple removes both. Over positions `k..k+3` with phases A,B,B,A and (on a
+    // 2-deep ring) slots f, 1-f, f, 1-f:
+    //
+    //     d1 = m_k     - m_{k+1} = tau + (gamma_f - gamma_{1-f}) - beta
+    //     d2 = m_{k+3} - m_{k+2} = tau - (gamma_f - gamma_{1-f}) + beta
+    //     DELTA = (d1 + d2) / 2 = tau                    <- both contaminations cancel exactly
+    //     BIAS  = (d1 - d2) / 2 = (gamma_f - gamma_{1-f}) - beta
+    //
+    // `DELTA` is the rung's statistic; `BIAS` is precisely the quantity ABAB was adding to every
+    // delta, so it is REPORTED rather than merely cancelled (a design that quietly averages a
+    // bias away leaves no way to tell whether the bias was stable enough for the averaging to be
+    // sound). Each phase now gets one sample on each ring slot per quadruple, so the alias is
+    // BROKEN, not averaged — and that holds whatever `fi` the quadruple happens to start on.
+    //
+    // What ABBA does NOT remove: a position effect with non-zero SECOND difference. For a purely
+    // quadratic `c * k^2` the residual is `2c`. That is exactly what the null control bounds — it
+    // is the reason the null control survives the redesign rather than being retired by it.
+    //
+    // The within-quadruple mean of two paired deltas is NOT the "difference of means" the
+    // protocol excludes: both terms are already PAIRED differences of adjacent frames, and their
+    // mean is the algebra above, not an average of two arms measured apart. The session statistic
+    // stays a MEDIAN, over quadruples.
+    //
+    // Protocol (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §6 S1.5, non-negotiable — the VB-P1d lesson):
+    // interleaved (never all-A then all-B), warm-up discarded, >= 30 pairs, the statistic is the
+    // MEDIAN PAIRED DELTA (not a difference of means), repeated across 3 sessions with the
+    // cross-session spread reported. Sequential before/after measured a phantom regression on
+    // this hardware that was entirely session drift.
+    //
+    // Armed ONLY when `BOYKO_SV0_BENCH` was read at `GpuSceneBundles::boot` time AND the device
+    // supports timestamps — `false` on EVERY non-bench run, so every line gated on `sv0_bench`
+    // below is dead code there and this loop stays byte-identical to the pre-S1.5 path.
+    let sv0_bench = host.gpu.sv0_bench_armed();
+    let sv0_bench_quads: u32 = if sv0_bench {
+        std::env::var("BOYKO_SV0_BENCH_QUADS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(SV0_BENCH_DEFAULT_QUADS)
+            .max(1)
+    } else {
+        0
+    };
+    // The NULL CONTROL (§6 S1.5's own mutation, and §7 clause 5's numeric criterion): point the
+    // A/B at two IDENTICAL configurations. Both phases then push the ARMED flags, so the true
+    // per-quadruple difference is exactly zero and whatever `median_delta_ns` reports is
+    // RESIDUAL, not the term. Under ABBA that residual no longer includes the constant ordering
+    // bias (the algebra above cancels it), so the null now bounds what is LEFT: the second-order
+    // position effect plus sampling noise. The reported median must fall below a pre-registered
+    // fraction of the armed run's median — the fraction is pre-registered in the bench test, not
+    // here, because a threshold that lives beside the code it judges invites being edited until
+    // the run passes.
+    let sv0_bench_null = std::env::var("BOYKO_SV0_BENCH_NULL").is_ok();
+    // The device's ns-per-tick scale, read ONCE. Applied at the report boundary only: the samples
+    // below are RAW TICKS, because the empirical timestamp lattice this bench must report is an
+    // integer property of the counter (see `read_sv0_marcher_ticks`).
+    let sv0_timestamp_period = ctx.device_caps().timestamp_period as f64;
+    // `(phase_counter, marcher_ticks)` per kept frame, preallocated ONCE at its final capacity
+    // (Principle 5): four frames per quadruple, plus slack for one partial quadruple.
+    let mut sv0_samples: Vec<(u64, u64)> =
+        Vec::with_capacity(SV0_QUAD_FRAMES as usize * (sv0_bench_quads as usize + 1));
+    // The per-quadruple term estimates `(d1 + d2) / 2`, in ns — one per completed quadruple.
+    let mut sv0_deltas: Vec<f64> = Vec::with_capacity(sv0_bench_quads as usize);
+    // The per-quadruple ordering-bias estimates `(d1 - d2) / 2`, in ns — the contamination ABAB
+    // would have added to every delta. Reported, never subtracted from anything.
+    let mut sv0_biases: Vec<f64> = Vec::with_capacity(sv0_bench_quads as usize);
+    // Counts EVERY frame that reached the `scene()` call, presented or not, so the ABBA position
+    // is decided BEFORE the frame's fate is known and a dropped frame cannot silently rotate the
+    // cycle. The quadruple assembly below requires four samples whose stored counters are
+    // CONSECUTIVE and start on a cycle boundary, so any gap orphans a whole quadruple rather than
+    // mis-signing a later one — the ABBA analogue of the pair-level phase tagging, and the
+    // stricter rule the four-position cycle needs (a phase tag alone cannot distinguish position
+    // 0 from position 3, since both are ARMED).
+    let mut sv0_phase_counter: u64 = 0;
+    let mut sv0_seen: u32 = 0;
+    if sv0_bench {
+        // The two benches are mutually exclusive by construction, and the failure mode of running
+        // them together is a HANG, not a wrong number: the VB-P1d block's own readback waits on
+        // `record_vb`'s three timestamp pairs, which a Deferred frame — the only kind this bench
+        // permits — never writes. Its `mesh_leg` / `!mesh_geo_shade_split` preconditions are both
+        // satisfied on `Deferred × Both`, so they do NOT catch this; say it here explicitly.
+        assert!(
+            !vb_bench,
+            "invariant: BOYKO_VB_BENCH and BOYKO_SV0_BENCH are mutually exclusive (the VB-P1d \
+             readback waits on record_vb timestamp pairs a Deferred frame never writes)"
+        );
+        // The `Sv0TimedPass::Marcher` pair is written inside `record_gbuffer`'s
+        // `if let Some(marcher_pass)` arm, i.e. only on a Deferred-family frame that actually
+        // dispatches the marcher (`GBufferScene::path_has_marcher() == sdf_leg`). On any other
+        // resolved path the pair is reset-but-never-written and the `VK_QUERY_RESULT_WAIT_BIT`
+        // readback would block forever. Fail loudly here instead of hanging on the first frame —
+        // the same precondition shape the VB-P1d block above uses.
+        assert!(
+            matches!(host.resolved_render_path.path, boyko_render::RenderPath::Deferred),
+            "invariant: VB-SV0 S1.5 bench requires RenderPath::Deferred (only record_gbuffer \
+             brackets the marcher dispatch; every other path leaves the pair unwritten and the \
+             WAIT_BIT readback hangs)"
+        );
+        assert!(
+            host.resolved_render_path.sdf_leg,
+            "invariant: VB-SV0 S1.5 bench requires an SDF leg (GeometryLegs::Both or Sdf) — \
+             without it the marcher is never dispatched, the term under measurement never runs, \
+             and the WAIT_BIT readback hangs on an unwritten timestamp pair"
+        );
+        // `BOYKO_WINDOW_FRAMES` caps the loop for orchestrated runs, and this bench needs
+        // warm-up + 4 frames per quadruple — 820 at the default budget. A cap below that would
+        // end the session with NO summary line at all, which reads as "the bench printed
+        // nothing" rather than as "the operator truncated it". Say which it is, here, before any
+        // frame runs.
+        let needed = SV0_BENCH_WARMUP as u64 + SV0_QUAD_FRAMES * sv0_bench_quads as u64;
+        if let Some(cap) = max_frames {
+            assert!(
+                cap >= needed,
+                "invariant: BOYKO_WINDOW_FRAMES={cap} is below the {needed} frames the VB-SV0 \
+                 S1.5 bench needs ({SV0_BENCH_WARMUP} warm-up + {SV0_QUAD_FRAMES} x \
+                 {sv0_bench_quads} quadruples). Raise the cap, unset it, or lower \
+                 BOYKO_SV0_BENCH_QUADS — a truncated session prints no summary at all"
+            );
+        }
+    }
+
     loop {
         // 1. Pump the OS queue; `false` = WM_QUIT (the window closed).
         if !host.window.pump_events() {
@@ -1353,6 +1549,29 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         if host.resolved_render_path.path == boyko_render::RenderPath::VisibilityBuffer {
             app.world_mut().run_system(boyko_render::sync_vb_instance_ring_system);
         }
+
+        // VB-SV0 rung S1.5: THIS frame's ABBA position and the phase it implies. Position
+        // `counter % 4`: 0 ⇒ ARMED, 1 ⇒ CLEARED, 2 ⇒ CLEARED, 3 ⇒ ARMED. Decided HERE, before the
+        // frame is recorded and before its present outcome is known, so a dropped frame cannot
+        // silently rotate the cycle — the counter advances on schedule and the gap shows up as a
+        // missing sample, which the quadruple assembly at the frame tail then rejects.
+        // Under the null control both phases push the ARMED value: the two "configurations" are
+        // then identical and whatever the harness reports is its own residual, not the term.
+        // Hoisted OUT of the `presented` block below because the accumulation at the frame tail
+        // must tag the sample with the counter it was actually recorded under.
+        // `None` on every non-bench frame keeps `scene()`'s shipped `lighting_flags` literal.
+        let sv0_quad_position = sv0_phase_counter % SV0_QUAD_FRAMES;
+        let sv0_armed_phase = matches!(sv0_quad_position, 0 | 3);
+        let sv0_bench_lighting_flags = sv0_bench.then_some(
+            if sv0_armed_phase || sv0_bench_null {
+                boyko_rhi_vulkan::compute::LIGHTING_FLAG_SHADOWS
+                    | boyko_rhi_vulkan::compute::LIGHTING_FLAG_AO
+            } else {
+                0
+            },
+        );
+        let sv0_sample_counter = sv0_phase_counter;
+        sv0_phase_counter = sv0_phase_counter.wrapping_add(1);
 
         let mut draws = host.draw_scratch.take();
         let presented = {
@@ -2102,6 +2321,7 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 vb_viewt_view_z_a,
                 vb_viewt_view_z_b,
                 vb_geometry_set,
+                sv0_bench_lighting_flags,
                 ctx,
             );
 
@@ -2187,6 +2407,56 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                     &vb_bench_cull_reset_ns,
                     &vb_bench_cull_dispatch_ns,
                     &vb_bench_shade_ns,
+                );
+                return;
+            }
+        }
+
+        // VB-SV0 rung S1.5: accumulate this frame's marcher-dispatch cost in RAW TICKS, tagged
+        // with the ABBA cycle counter it was recorded under — read ONLY on a frame that actually
+        // presented (a resize-skip records no marcher dispatch this iteration). GATED on
+        // `sv0_bench`; dead code on every non-bench run.
+        if sv0_bench && presented_ok {
+            // Offline discipline (mirrors the VB-P1d block above and `window_present_gbuffer`'s
+            // own R0 harness): wait the device idle so this frame's timestamp writes are complete
+            // + readable before the slot is reused two frames on.
+            ctx.wait_idle().expect("invariant: VB-SV0 S1.5 bench wait_idle");
+            if let Some(marcher_ticks) = host.gpu.read_sv0_marcher_ticks(ctx, s) {
+                sv0_seen += 1;
+                if sv0_seen as usize > SV0_BENCH_WARMUP {
+                    sv0_samples.push((sv0_sample_counter, marcher_ticks));
+                    // Close an ABBA quadruple only when the last four stored samples carry
+                    // CONSECUTIVE counters starting on a cycle boundary. Keying on the absolute
+                    // counter — not on index parity, and not on the phase tag alone — is what
+                    // makes a dropped frame cost one whole orphaned quadruple instead of
+                    // mis-signing a later one: a phase tag cannot tell position 0 from position 3
+                    // (both ARMED), so under ABBA the position, not the phase, is the identity a
+                    // drop-robust assembly has to check.
+                    let n = sv0_samples.len();
+                    if n >= SV0_QUAD_FRAMES as usize {
+                        let quad = [
+                            sv0_samples[n - 4],
+                            sv0_samples[n - 3],
+                            sv0_samples[n - 2],
+                            sv0_samples[n - 1],
+                        ];
+                        if let Some((delta, bias)) =
+                            sv0_quadruple_stats(quad, sv0_timestamp_period)
+                        {
+                            sv0_deltas.push(delta);
+                            sv0_biases.push(bias);
+                        }
+                    }
+                }
+            }
+            if sv0_deltas.len() >= sv0_bench_quads as usize {
+                print_sv0_bench_summary(
+                    sv0_bench_null,
+                    host.composite_extent,
+                    ctx.device_caps(),
+                    &sv0_samples,
+                    &mut sv0_deltas,
+                    &mut sv0_biases,
                 );
                 return;
             }
@@ -2326,6 +2596,263 @@ fn print_vb_bench_summary(
          overlap with neighboring work), not isolated kernel time; froxel_total_ns sums three \
          independently-measured brackets. Fine for the CLUSTER_HI break-even comparison, not \
          an isolated-cost claim (mirrors the R0 GPU-pass-cost harness's own methodology note)."
+    );
+}
+
+/// VB-SV0 rung S1.5: the MEDIAN of `samples` (ns).
+///
+/// The median — not the mean — is the rung's statistic by construction
+/// (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §6 S1.5: "the statistic is the **median paired delta**, not
+/// a difference of means"). A single scheduling hiccup on this hardware moves a mean by more than
+/// the whole term being measured; it moves a 200-sample median by nothing.
+///
+/// Sorts a COPY (`sort_unstable_by` on a scratch `Vec`) rather than the caller's slice, so the
+/// caller's sample order — which is what makes the quadruple assembly auditable — survives the
+/// call. Even lengths average the two central order statistics.
+///
+/// # Panics
+///
+/// Panics on an empty slice: every call site has already checked it reached its quadruple budget,
+/// so an empty sample set here is a harness bug, not a runtime condition.
+#[cfg(windows)]
+fn sv0_median_ns(samples: &[f64]) -> f64 {
+    assert!(!samples.is_empty(), "invariant: sv0_median_ns needs at least one sample");
+    let mut sorted: Vec<f64> = samples.to_vec();
+    // `f64` is only `PartialOrd`; the samples are GPU timestamp deltas, which are finite and
+    // non-NaN by construction (integer ticks scaled by a finite period), so `partial_cmp` cannot
+    // return `None` here — but say so rather than `unwrap()`.
+    sorted.sort_unstable_by(|a, b| {
+        a.partial_cmp(b).expect("invariant: GPU timestamp deltas are finite, never NaN")
+    });
+    let n = sorted.len();
+    if n % 2 == 1 { sorted[n / 2] } else { 0.5 * (sorted[n / 2 - 1] + sorted[n / 2]) }
+}
+
+/// VB-SV0 rung S1.5: the ABBA quadruple statistic — `Some((delta_ns, bias_ns))` for four samples
+/// that really do form one complete counterbalanced cycle, `None` otherwise.
+///
+/// `quad` is the four most recent `(phase_counter, marcher_ticks)` samples in stream order.
+///
+/// # The validity check, and why it is by COUNTER rather than by phase
+///
+/// A quadruple is accepted only when the four counters are CONSECUTIVE and the first sits on a
+/// cycle boundary. That is stricter than checking the ARMED/CLEARED tags, and it has to be: the
+/// cycle is A,B,B,A, so positions 0 and 3 are indistinguishable by phase. A frame that produced no
+/// reading leaves a gap in the counters, and rejecting the whole quadruple is what keeps that drop
+/// from silently becoming a mis-signed statistic — the counterbalance's algebra assumes the four
+/// samples are the four positions, in order.
+///
+/// # The algebra
+///
+/// With `d1 = m0 − m1` and `d2 = m3 − m2` (both ARMED − CLEARED over ADJACENT frames):
+///
+/// ```text
+/// delta = (d1 + d2) / 2   the term; a constant ordering offset and the frame-in-flight-slot
+///                         offset enter d1 and d2 with OPPOSITE signs, so they cancel exactly
+/// bias  = (d1 - d2) / 2   that cancelled contamination itself, in the sign convention a strict
+///                         ABAB alternation would have ADDED to every one of its deltas
+/// ```
+///
+/// See the S1.5 block in [`frame_loop`] for the full model and for what survives the cancellation
+/// (any position effect with a non-zero second difference).
+#[cfg(windows)]
+fn sv0_quadruple_stats(quad: [(u64, u64); 4], period_ns: f64) -> Option<(f64, f64)> {
+    let [(c0, t0), (c1, t1), (c2, t2), (c3, t3)] = quad;
+    let contiguous = c1 == c0 + 1 && c2 == c0 + 2 && c3 == c0 + 3;
+    if !contiguous || !c0.is_multiple_of(SV0_QUAD_FRAMES) {
+        return None;
+    }
+    // Scaled to ns exactly here, at the single report boundary — the samples are raw ticks so the
+    // instrument's integer lattice stays measurable upstream of this point.
+    let d1 = (t0 as f64 - t1 as f64) * period_ns;
+    let d2 = (t3 as f64 - t2 as f64) * period_ns;
+    Some((0.5 * (d1 + d2), 0.5 * (d1 - d2)))
+}
+
+/// The 10th/90th order statistics of `values`, which this SORTS in place.
+///
+/// The band matters as much as the median: a `p10..p90` straddling zero means the session did not
+/// resolve its effect at all, whatever the median says — information a median alone hides.
+///
+/// # Panics
+///
+/// Panics on an empty slice (same reasoning as [`sv0_median_ns`]).
+#[cfg(windows)]
+fn sv0_p10_p90_ns(values: &mut [f64]) -> (f64, f64) {
+    assert!(!values.is_empty(), "invariant: sv0_p10_p90_ns needs at least one sample");
+    values.sort_unstable_by(|a, b| {
+        a.partial_cmp(b).expect("invariant: GPU timestamp deltas are finite, never NaN")
+    });
+    let n = values.len();
+    let p10 = values[((n as f64 * 0.10) as usize).min(n - 1)];
+    let p90 = values[((n as f64 * 0.90) as usize).min(n - 1)];
+    (p10, p90)
+}
+
+/// VB-SV0 rung S1.5: the greatest common divisor of the raw tick counts in `samples`, ignoring
+/// zeros.
+///
+/// Recovers the GPU timestamp counter's hardware granularity `G` — the step its lattice actually
+/// advances in. Vulkan reports the ns-per-tick SCALE (`timestampPeriod`) but NOT this STEP, so the
+/// only way to learn `G` is to observe that every measured duration is a multiple of it. Over
+/// hundreds of independently-varying durations the GCD converges on `G`; an UNQUANTISED counter
+/// (every 1-tick step reachable) yields 1, which is the correct answer rather than a failure.
+///
+/// Zeros are skipped rather than folded: `gcd(0, x) == x` is the identity, so a zero-length sample
+/// would silently contribute nothing anyway — skipping says so.
+#[cfg(windows)]
+fn sv0_tick_gcd(samples: &[(u64, u64)]) -> u64 {
+    fn gcd(mut a: u64, mut b: u64) -> u64 {
+        while b != 0 {
+            let t = a % b;
+            a = b;
+            b = t;
+        }
+        a
+    }
+    samples.iter().map(|(_, ticks)| *ticks).filter(|t| *t != 0).fold(0u64, gcd)
+}
+
+/// VB-SV0 rung S1.5: prints this session's COUNTERBALANCED (ABBA) A/B summary — the ONE line the
+/// orchestrator transcribes into `crates/boyko_app/tests/sv0_deferred_term_bench.rs`, plus the
+/// instrument's own resolution self-report.
+///
+/// # What the numbers are
+///
+/// * `median_delta_ns` — **the rung's statistic.** The median over completed ABBA quadruples of
+///   `(d1 + d2) / 2`, where `d1 = m0 − m1` and `d2 = m3 − m2` are the two ARMED−CLEARED
+///   differences of ADJACENT frames inside one A,B,B,A quadruple. The algebra in [`frame_loop`]'s
+///   S1.5 block shows this cancels a constant ordering bias AND the frame-in-flight-slot offset
+///   exactly. The Deferred cost of the SDF soft-shadow + contact-AO term, on shipped code.
+/// * `median_order_bias_ns` — **the bias the cancellation removed**, estimated per quadruple as
+///   `(d1 − d2) / 2` and reported so a reader can judge whether cancelling it was sound rather
+///   than take it on faith. Its sign convention is the contamination a strict ABAB run ADDS to
+///   every delta, so it is directly comparable to the superseded design's null control (which
+///   measured −2048 ns on this hardware). `p10_bias_ns`/`p90_bias_ns` give its spread: a band far
+///   wider than the median means the effect is not the STABLE offset the cancellation argument
+///   assumes, and the counterbalance is then merely harmless rather than load-bearing.
+/// * `median_armed_ns` / `median_cleared_ns` — the two arms' own medians, printed so a reader can
+///   see the delta's scale against the dispatch it sits inside. Their DIFFERENCE is deliberately
+///   NOT the reported statistic (it is a difference of medians, which the protocol excludes).
+/// * `p10_delta_ns` / `p90_delta_ns` — the 10th/90th order statistics of the per-quadruple term
+///   estimates.
+/// * `quads` — completed quadruples, i.e. the statistic's sample size. Each contains TWO paired
+///   deltas, so the plan's ">= 30 pairs" floor is cleared at 15; the bench test applies the floor
+///   at the QUADRUPLE level, which is strictly stronger.
+/// * `samples` — kept frames. `quads * 4` of them formed a quadruple; the shortfall is frames
+///   whose cycle neighbours produced no reading, so a session that quietly lost much of its stream
+///   cannot read as clean.
+/// * `extent` — the ACTUAL composite extent the marcher ran at. The marcher's cost is per-pixel,
+///   so a run whose window the OS clamped would otherwise report a number for a resolution nobody
+///   chose.
+///
+/// # The instrument's own resolution — the `RESOLUTION:` line
+///
+/// A GPU timestamp counter advances on a LATTICE, and no Vulkan limit reports its step.
+/// `timestamp_period_ns` is the ns-per-tick SCALE (`VkPhysicalDeviceLimits::timestampPeriod`);
+/// `tick_gcd` is the empirically-recovered STEP (see [`sv0_tick_gcd`]). Their product `quantum_ns`
+/// is the smallest difference this instrument can express, and every `d1`/`d2` is a multiple of it.
+///
+/// `median_lattice_ns` is the lattice the REPORTED median lands on: `quantum_ns / 2`, because each
+/// quadruple statistic is a half-sum of two multiples of the quantum — halved again to
+/// `quantum_ns / 4` when the quadruple count is even and the median averages two order statistics.
+/// It is the smallest non-zero difference two sessions' medians can show, i.e. the floor beneath
+/// which a cross-session "spread" is quantisation rather than drift. The bench test reads it for
+/// exactly that purpose; it is reported here so the reading cannot be invented after the fact.
+///
+/// `timestamp_valid_bits` and `timestamp_compute_and_graphics` are printed alongside so the
+/// resolution claim names the device guarantees it rests on.
+///
+/// # `mode=null`
+///
+/// The null control (`BOYKO_SV0_BENCH_NULL`): both phases pushed the ARMED flags, so the true
+/// per-quadruple difference is exactly zero and `median_delta_ns` is pure residual. Under ABBA
+/// that residual excludes the constant ordering bias by construction, so what it bounds is the
+/// SECOND-order position effect the counterbalance cannot reach, plus sampling noise. §7 clause 5
+/// requires it be compared NUMERICALLY against a pre-registered fraction of the armed run's
+/// median, never eyeballed as "~0". `median_order_bias_ns` stays meaningful under `null` — the
+/// position effect does not depend on the A/B word — so a null run also re-measures the bias.
+///
+/// `#[cold]`/`#[inline(never)]`: a once-per-process diagnostic print, never on the hot path.
+#[cfg(windows)]
+#[cold]
+#[inline(never)]
+fn print_sv0_bench_summary(
+    null_control: bool,
+    composite_extent: (u32, u32),
+    caps: boyko_rhi_vulkan::device::DeviceCaps,
+    samples: &[(u64, u64)],
+    deltas: &mut [f64],
+    biases: &mut [f64],
+) {
+    let period = caps.timestamp_period as f64;
+    // The two arms' own medians, in ns. The phase is recovered from the stored ABBA counter —
+    // positions 0 and 3 ARMED, 1 and 2 CLEARED — so these agree with the quadruple assembly by
+    // construction rather than through a second, independently-maintained tag.
+    let arm_ns = |armed: bool| -> Vec<f64> {
+        samples
+            .iter()
+            .filter(|(c, _)| matches!(c % SV0_QUAD_FRAMES, 0 | 3) == armed)
+            .map(|(_, ticks)| *ticks as f64 * period)
+            .collect()
+    };
+    let median_armed = sv0_median_ns(&arm_ns(true));
+    let median_cleared = sv0_median_ns(&arm_ns(false));
+    let median_delta = sv0_median_ns(deltas);
+    let median_bias = sv0_median_ns(biases);
+    // The bands. Sorted IN PLACE because both slices are owned by the caller's loop and are never
+    // read again after this print (the harness returns immediately), so the copy `sv0_median_ns`
+    // makes for its own use is the only one needed for order-independence.
+    let (p10, p90) = sv0_p10_p90_ns(deltas);
+    let (p10_bias, p90_bias) = sv0_p10_p90_ns(biases);
+
+    // The empirical lattice: `tick_gcd` over hundreds of varying durations IS the counter's step,
+    // and scaling it by the period gives the smallest difference the reported numbers can express.
+    let tick_gcd = sv0_tick_gcd(samples);
+    let quantum_ns = tick_gcd as f64 * period;
+    // Report the FINER (harder to satisfy) lattice — a coarser floor would make the spread gate
+    // downstream more generous than the evidence warrants.
+    let median_lattice_ns =
+        if deltas.len().is_multiple_of(2) { quantum_ns * 0.25 } else { quantum_ns * 0.5 };
+
+    let mode = if null_control { "null" } else { "armed" };
+    println!(
+        "VB-SV0-S1.5 mode={mode} quads={} samples={} extent={}x{} \
+         median_delta_ns={median_delta:.1} median_order_bias_ns={median_bias:.1} \
+         median_armed_ns={median_armed:.1} median_cleared_ns={median_cleared:.1} \
+         p10_delta_ns={p10:.1} p90_delta_ns={p90:.1} \
+         p10_bias_ns={p10_bias:.1} p90_bias_ns={p90_bias:.1}",
+        deltas.len(),
+        samples.len(),
+        composite_extent.0,
+        composite_extent.1
+    );
+    println!(
+        "VB-SV0-S1.5 RESOLUTION: timestamp_period_ns={period} tick_gcd={tick_gcd} \
+         quantum_ns={quantum_ns:.1} median_lattice_ns={median_lattice_ns:.1} \
+         timestamp_valid_bits={} timestamp_compute_and_graphics={}",
+        caps.timestamp_valid_bits, caps.timestamp_compute_and_graphics
+    );
+    println!(
+        "  NOTE: the A/B is COUNTERBALANCED (A,B,B,A), not alternating. Each quadruple's statistic \
+         is (d1 + d2)/2 over its two adjacent-frame ARMED-CLEARED differences, which cancels a \
+         constant ordering bias AND the frame-in-flight-slot offset a strict ABAB run aliases the \
+         phase against (FRAMES_IN_FLIGHT == 2). median_order_bias_ns IS that cancelled quantity, \
+         reported rather than hidden. Second-order position effects survive the cancellation; the \
+         null control is what bounds them."
+    );
+    println!(
+        "  NOTE: TOP/BOTTOM brackets the Deferred marcher dispatch's wall-clock (inclusive of \
+         pipeline drain + overlap with neighboring work), not isolated kernel time. The PAIRED \
+         differences are what cancel that bracket bias, which is why the median of the paired \
+         statistic — not the difference of the two arms' medians — is the rung's statistic."
+    );
+    println!(
+        "  NOTE: `pc.lighting_flags` gates TWO arms of sdf_gbuffer_composite.hlsl — the \
+         `!own_pixel` raster-owned arm (:1865, the one SV0 mirrors) AND the `own_pixel` SDF-hit \
+         arm (:1805). This delta therefore covers BOTH, i.e. it OVER-states the `!own_pixel` term \
+         by the SDF-owned pixels' share. See sv0_deferred_term_bench.rs's module doc + its \
+         confound-bound test for the measured pixel ratio."
     );
 }
 
@@ -2731,5 +3258,141 @@ mod tests {
             0,
             "a warm ingest+drain must not allocate"
         );
+    }
+}
+
+/// VB-SV0 rung S1.5 — unit tests for the counterbalanced statistic itself.
+///
+/// The rung's central claim is ALGEBRAIC: an ABBA quadruple's `(d1 + d2)/2` cancels a constant
+/// ordering offset and a linear position drift exactly, while `(d1 − d2)/2` recovers them. That
+/// claim was previously only asserted in prose, and prose is what let the ABAB revision ship a
+/// harness whose null control measured a third of its own signal. These tests drive
+/// [`sv0_quadruple_stats`] over SYNTHETIC samples built from the model in [`frame_loop`]'s S1.5
+/// block, so the algebra is checked on the CPU with no GPU, no window, and no timing.
+///
+/// `#[cfg(windows)]` mirrors the functions under test (the S1.5 harness is windowed-only).
+#[cfg(all(test, windows))]
+mod sv0_stats_tests {
+    use super::*;
+
+    /// The synthetic sample model: `m_k = mu + tau*armed(k) + gamma(k%2) + beta*k`, in TICKS,
+    /// with the ABBA phase `armed(k) = k%4 in {0,3}` and a 2-deep frame-in-flight ring whose slot
+    /// is `k%2` (matching `FRAMES_IN_FLIGHT == 2`).
+    ///
+    /// Integers throughout, so the assertions below can be exact rather than epsilon-fenced —
+    /// which is the point: the cancellation is meant to be algebraic, not approximate.
+    fn model(k: u64, mu: i64, tau: i64, gamma_odd_slot: i64, beta: i64) -> (u64, u64) {
+        let armed = matches!(k % SV0_QUAD_FRAMES, 0 | 3);
+        let slot_term = if k % 2 == 1 { gamma_odd_slot } else { 0 };
+        let v = mu + if armed { tau } else { 0 } + slot_term + beta * k as i64;
+        assert!(v >= 0, "the synthetic model must stay non-negative to fit a tick count");
+        (k, v as u64)
+    }
+
+    fn quad(start: u64, mu: i64, tau: i64, gamma: i64, beta: i64) -> [(u64, u64); 4] {
+        [
+            model(start, mu, tau, gamma, beta),
+            model(start + 1, mu, tau, gamma, beta),
+            model(start + 2, mu, tau, gamma, beta),
+            model(start + 3, mu, tau, gamma, beta),
+        ]
+    }
+
+    /// With NO contamination the quadruple recovers the term and reports zero bias — the baseline
+    /// the two tests below are read against.
+    #[test]
+    fn abba_recovers_the_term_when_nothing_contaminates_it() {
+        let (delta, bias) = sv0_quadruple_stats(quad(0, 10_000, 6_000, 0, 0), 1.0)
+            .expect("a well-formed quadruple");
+        assert_eq!(delta, 6_000.0, "the term must come back exactly");
+        assert_eq!(bias, 0.0, "with no ordering effect the bias estimate must be zero");
+    }
+
+    /// **The refutation, made mechanical.** A frame-in-flight-slot offset plus a linear drift is
+    /// exactly what the ABAB revision's null control detected as a −2048 ns constant. Here the
+    /// quadruple statistic returns the term UNCHANGED while the bias estimate returns the
+    /// contamination — and, for contrast, the naive ABAB delta `m0 − m1` does not.
+    #[test]
+    fn abba_cancels_the_slot_offset_and_the_linear_drift_abab_does_not() {
+        let (mu, tau, gamma, beta) = (10_000, 6_000, 700, 40);
+        let q = quad(0, mu, tau, gamma, beta);
+        let (delta, bias) = sv0_quadruple_stats(q, 1.0).expect("a well-formed quadruple");
+        assert_eq!(delta, tau as f64, "the counterbalance must return the term unchanged");
+        // d1 carries (-gamma - beta), d2 carries (+gamma + beta); the bias estimator is their
+        // half-difference, i.e. what a strict alternation would have added to every delta.
+        assert_eq!(
+            bias,
+            -(gamma + beta) as f64,
+            "the bias estimate must recover the contamination the cancellation removed"
+        );
+        // What the superseded design would have reported for the same samples: the term PLUS the
+        // contamination, in every pair, with the same sign.
+        let abab_delta = q[0].1 as f64 - q[1].1 as f64;
+        assert_eq!(abab_delta, (tau - gamma - beta) as f64);
+        assert_ne!(abab_delta, tau as f64, "ABAB is biased on exactly these samples");
+    }
+
+    /// The documented LIMIT: a position effect with a non-zero second difference survives. For a
+    /// quadratic `c·k²` the residual is `2c` — stated in the module doc as the reason the null
+    /// control is not retired by the counterbalance, and pinned here so that reason stays true.
+    #[test]
+    fn abba_leaves_a_quadratic_position_effect_as_two_c() {
+        let c = 3i64;
+        let samples: [(u64, u64); 4] =
+            core::array::from_fn(|i| (i as u64, (10_000 + c * (i as i64) * (i as i64)) as u64));
+        let (delta, _) = sv0_quadruple_stats(samples, 1.0).expect("a well-formed quadruple");
+        assert_eq!(
+            delta,
+            2.0 * c as f64,
+            "a purely quadratic position effect leaves 2c — this is what the null control bounds"
+        );
+    }
+
+    /// A dropped frame must ORPHAN the quadruple, never mis-sign it. Both failure shapes are
+    /// checked: a gap in the counters, and four contiguous samples that do not start on a cycle
+    /// boundary (which would pair position 1 against position 2 — a CLEARED-CLEARED difference
+    /// wearing the sign of a term).
+    #[test]
+    fn a_dropped_frame_orphans_the_quadruple_rather_than_mis_signing_it() {
+        let (mu, tau) = (10_000, 6_000);
+        // Counters 0,1,2,4 — frame 3 produced no reading, so 4 slid into its place.
+        let gap = [
+            model(0, mu, tau, 0, 0),
+            model(1, mu, tau, 0, 0),
+            model(2, mu, tau, 0, 0),
+            model(4, mu, tau, 0, 0),
+        ];
+        assert!(sv0_quadruple_stats(gap, 1.0).is_none(), "a counter gap must be rejected");
+
+        // Contiguous, but starting at position 1: B,B,A,A. Its `d1` would be a CLEARED−CLEARED
+        // difference and its `d2` an ARMED−ARMED one, i.e. a statistic with no term in it at all.
+        let misaligned = quad(1, mu, tau, 0, 0);
+        assert!(
+            sv0_quadruple_stats(misaligned, 1.0).is_none(),
+            "four contiguous samples that do not start on a cycle boundary must be rejected"
+        );
+    }
+
+    /// The empirical lattice recovery: [`sv0_tick_gcd`] returns the counter's step, ignores
+    /// zero-length samples, and answers 1 for an unquantised stream (which is the correct answer,
+    /// not a failure to detect anything).
+    #[test]
+    fn tick_gcd_recovers_the_lattice_step() {
+        let quantised: Vec<(u64, u64)> =
+            [1024u64, 3072, 12288, 0, 5120].iter().map(|t| (0u64, *t)).collect();
+        assert_eq!(sv0_tick_gcd(&quantised), 1024, "the GCD of the tick deltas IS the step");
+        let unquantised: Vec<(u64, u64)> =
+            [1001u64, 1002, 1003].iter().map(|t| (0u64, *t)).collect();
+        assert_eq!(sv0_tick_gcd(&unquantised), 1, "an unquantised counter must report 1");
+        assert_eq!(sv0_tick_gcd(&[(0, 0)]), 0, "an all-zero stream has no recoverable step");
+    }
+
+    /// The median averages the two central order statistics on an even count — which is exactly
+    /// why the reported median lands on a HALF lattice step, the arithmetic the resolution report
+    /// depends on.
+    #[test]
+    fn median_of_an_even_count_averages_the_two_central_values() {
+        assert_eq!(sv0_median_ns(&[1024.0, 2048.0, 3072.0, 4096.0]), 2560.0);
+        assert_eq!(sv0_median_ns(&[1024.0, 2048.0, 3072.0]), 2048.0);
     }
 }
