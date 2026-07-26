@@ -278,11 +278,23 @@ fn main() {
     // clone of `sdf_soft_shadow` whose escape break spells the RUNTIME parameter `t_max`
     // instead of the frozen `T_MAX` symbol (B3 — option a). UNLIKE the marcher's
     // `sdf_soft_shadow` (a span spliced inside a hand-written function), this is a COMPLETE
-    // function consumed ONLY by the deferred RESOLVE (`deferred_pbr.hlsl`): the resolve's
-    // per-light loop calls `sdf_soft_shadow_ranged(P, n, L, t_max)` for each extra shadow
-    // caster. The marcher's `sdf_soft_shadow` emit is UNTOUCHED, so its frozen `.comp.spv`
-    // cannot move. Generated from `boyko_shaderdsl::shadow::sdf_soft_shadow_ranged_body` over
-    // the `Emit` + `EmitCf` backends.
+    // function. Generated from `boyko_shaderdsl::shadow::sdf_soft_shadow_ranged_body` over the
+    // `Emit` + `EmitCf` backends. The marcher's `sdf_soft_shadow` emit is UNTOUCHED, so its frozen
+    // `.comp.spv` cannot move.
+    //
+    // SPLICE TARGET — `crates/boyko_rhi_vulkan/shaders/sdf_shadow_leaves.hlsli`, between its
+    // `// === GENERATED sdf_soft_shadow_ranged BEGIN/END ===` sentinels. This is the ONE
+    // hand-placed definition; VB-SV0 rung S2 moved it there out of `deferred_pbr.hlsl`
+    // (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §4.1) because the three VB lit-producer tails needed the
+    // same leaf. The pointer matters because CLAUDE.md's law is "extend the eDSL, re-emit,
+    // re-splice": splicing into `deferred_pbr.hlsl` would now create a SECOND, forkable copy
+    // (`sdf_field_edsl_sync.rs` asserts that file has none).
+    //
+    // CONSUMER SET (all four `#include` the header, so one re-emit re-pins SIXTEEN `.spv`): the
+    // deferred RESOLVE `deferred_pbr.hlsl` — six rows, whose per-light loop calls
+    // `sdf_soft_shadow_ranged(P, n, L, t_max)` for each extra shadow caster — plus
+    // `vb_resolve.comp.hlsl` / `vb_shade.comp.hlsl` / `vb_shade_split.comp.hlsl`, ten rows between
+    // them, whose primary directional calls it once per covered pixel.
     println!();
     print!("{}", boyko_shaderdsl::emit::emit_hlsl_sdf_soft_shadow_ranged());
     // The Render P7 GROUP A SSAO horizon-step span (HBAO-lite, no-trig): ONE forward

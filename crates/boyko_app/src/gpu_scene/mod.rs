@@ -3460,6 +3460,26 @@ impl GpuSceneBundles {
                         kind: DescriptorKind::StorageBuffer,
                         stage: ShaderStage::COMPUTE,
                     },
+                    // VB-SV0 (docs/VB-SV0-SDF-SHADOW-PLAN.md §2), rung S2 ("dark infra"): the SDF
+                    // edit-list SSBO at slot 10 — `Buf`, the analytic `field_distance` source the
+                    // three VB lit-producer tails now declare. Added to this ONE shared layout
+                    // object BEFORE any VB pipeline is built (the SAME R5 reason `gClassify` @7
+                    // was: a set built against a structurally-identical-but-DISTINCT layout object
+                    // is silently incompatible), so `vb_raster`/`vb_sky`/`vb_resolve`/`vb_shade*`
+                    // all rebuild against the 9-binding layout and the ones whose SPIR-V never
+                    // declares a `binding(10, 0)` simply carry it bound-but-unread.
+                    //
+                    // Slot 10 and not 8: 8/9 are `ClusterGrid`/`LightIndexList` in the WIDER
+                    // `vb_layout0_froxel`, so 8 is free only in scenes that never arm the froxel
+                    // cull — a silent, scene-config-dependent collision. 10 is free in both, and
+                    // using the SAME slot in both layouts is what lets ONE `Buf` declaration in
+                    // the shared tail source serve the froxel and non-froxel pipelines alike.
+                    BindGroupLayoutEntry {
+                        binding: 10,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
                 ],
             },
         )
@@ -4515,6 +4535,20 @@ impl GpuSceneBundles {
                     },
                     BindGroupLayoutEntry {
                         binding: 9,
+                        count: 1,
+                        kind: DescriptorKind::StorageBuffer,
+                        stage: ShaderStage::COMPUTE,
+                    },
+                    // VB-SV0 (docs/VB-SV0-SDF-SHADOW-PLAN.md §2), rung S2 ("dark infra"): the SDF
+                    // edit-list SSBO at slot 10 — the SAME entry `vb_layout0` gains, at the SAME
+                    // slot, so ONE `Buf` declaration in the shared tail sources binds correctly
+                    // against either layout. Slot 10 rather than 8 precisely because 8/9 are the
+                    // froxel pair right above: reusing 8 would be a collision visible only in
+                    // scenes that arm the cull, and no validation layer on this box reports it.
+                    // Binding numbers need not be contiguous — only the ENTRY COUNT is capped
+                    // (`MAX_BIND_GROUP_BINDINGS = 24`), so 10 entries -> 11 is well inside it.
+                    BindGroupLayoutEntry {
+                        binding: 10,
                         count: 1,
                         kind: DescriptorKind::StorageBuffer,
                         stage: ShaderStage::COMPUTE,

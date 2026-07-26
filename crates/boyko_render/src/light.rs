@@ -403,7 +403,10 @@ pub enum ClusterSelectMode {
 //   2        csm_mode                this file: CSM_MODE_BIT / LightingConfig::csm_shadows
 //   3        punctual_shadow_mode    this file: PUNCTUAL_MODE_BIT / LightingConfig::punctual_shadows
 //   4        ddgi_mode               this file: DDGI_MODE_BIT / LightingConfig::ddgi_indirect
-//   5..7     (free)                  —
+//   5..6     vb_sdf_mesh (SV0)       this file: VB_SDF_MESH_MODE_SHIFT/_MASK /
+//                                     LightingConfig::vb_sdf_mesh_shadow (bit 5) +
+//                                     ::vb_sdf_mesh_ao (bit 6) — two INDEPENDENT terms
+//   7        (free)                  —
 //   8..11    tonemap operator        this file: TONEMAP_MODE_SHIFT/_MASK / LightingConfig::tonemapper
 //   12..19   terminator softening    this file: TERMINATOR_SOFT_SHIFT/_MASK / LightingConfig::terminator_softening
 //   20..31   (free)                  —
@@ -436,6 +439,40 @@ pub const PUNCTUAL_MODE_BIT: u32 = 3;
 /// [`sync_ddgi_light_gate`](crate::ddgi_config::sync_ddgi_light_gate). DEFAULT `false` on
 /// every pre-SDFDDGI scene ⇒ word 7 bit 4 stays 0, the byte-identical 0%-gate.
 pub const DDGI_MODE_BIT: u32 = 4;
+
+/// Word-7 sub-field for VB-SV0's SDF-on-mesh gate: bits 5..6 (2 bits). Bit 5 arms the SDF
+/// soft shadow, bit 6 the 5-tap contact AO, and they arm INDEPENDENTLY — SV0 is two terms,
+/// not one, and giving them separate bits is what lets each half's arming gate be shown to
+/// move pixels ON ITS OWN instead of hiding behind the other. Above the shadow/GI gate bits
+/// (0..4) and below the tonemap sub-field (8..11); bit 7 stays free. Mirrors the shader's
+/// `load_vb_sdf_mesh_mode` (`light_table.hlsli`: `(LightBuf[7] >> 5) & 3`). `0` on every
+/// pre-SV0 scene ⇒ both gated blocks are structurally skipped ⇒ byte-identical (the 0%-gate).
+pub const VB_SDF_MESH_MODE_SHIFT: u32 = 5;
+/// The 2-bit mask for the VB-SV0 sub-field (bits [`VB_SDF_MESH_MODE_SHIFT`]..+2).
+pub const VB_SDF_MESH_MODE_MASK: u32 = 0x3;
+/// Bit 5 within the [`VB_SDF_MESH_MODE_SHIFT`] sub-field — the SDF soft shadow on mesh.
+/// Mirrors the shader's `VB_SDF_MESH_SHADOW_BIT`.
+pub const VB_SDF_MESH_SHADOW_BIT: u32 = 1;
+/// Bit 6 within the [`VB_SDF_MESH_MODE_SHIFT`] sub-field — the 5-tap contact AO on mesh.
+/// Mirrors the shader's `VB_SDF_MESH_AO_BIT`.
+pub const VB_SDF_MESH_AO_BIT: u32 = 2;
+
+// The bit-position pin, at COMPILE time rather than in a `debug_assert!`. The idiom
+// `ddgi_config.rs:288-289` uses puts the pin at the single production writer, but SV0's writer
+// is rung S4's resolver and does not exist yet — and a `debug_assert!` would in any case be
+// compiled out of the release profile the goldens run under (the same trap the plan's R11
+// tripwire had to be re-sited out of). A `const` assertion holds in every profile and needs no
+// writer to exist. It reds the moment either the sub-field or a neighbour is moved onto it.
+const _: () = assert!(
+    VB_SDF_MESH_MODE_SHIFT == 5 && VB_SDF_MESH_MODE_MASK == 0x3,
+    "invariant: the VB-SV0 header gate is word-7 bits 5..6"
+);
+const _: () = assert!(
+    VB_SDF_MESH_MODE_SHIFT > DDGI_MODE_BIT
+        && VB_SDF_MESH_MODE_SHIFT + 2 <= TONEMAP_MODE_SHIFT,
+    "invariant: the VB-SV0 sub-field must sit strictly between the DDGI gate bit and the \
+     tonemap sub-field, with no overlap on either side"
+);
 
 /// The resolve's output-stage tonemap curve — packed into light-header word 7
 /// bits [`TONEMAP_MODE_SHIFT`..+4) by [`LightHeaderGpu::new`]. `#[repr(u32)]` so
@@ -613,6 +650,33 @@ pub struct LightingConfig {
     /// [`sync_ddgi_light_gate`](crate::ddgi_config::sync_ddgi_light_gate)'s bridge shape (a
     /// single cold config Resource, no caster dependency).
     pub ssao_mode: bool,
+    /// VB-SV0: the VB lit-producer tails' SDF soft-shadow-on-mesh gate — packed into
+    /// light-header word 7 bit `VB_SDF_MESH_MODE_SHIFT + 0` (bit 5) by
+    /// [`shadow_gate_word`](Self::shadow_gate_word). DEFAULT `false` (bit 5 stays 0 — the
+    /// byte-identical 0%-gate, INDEPENDENT of every other gate including its own AO sibling).
+    ///
+    /// # Why this is a SEPARATE field from [`vb_sdf_mesh_ao`](Self::vb_sdf_mesh_ao)
+    ///
+    /// SV0 is two terms — a shadow and a contact AO — and every gate written against it as one
+    /// feature was satisfiable by the shadow half alone, which is how a structurally-dead AO
+    /// term could have shipped green. Two bits means each half can be armed on its own, and an
+    /// arming gate can require each half to move pixels on its own.
+    ///
+    /// # Single-writer / lock-step contract
+    ///
+    /// Like the shadow/GI gates this is DERIVED state. Rung S2 ships SV0 DARK: nothing writes
+    /// this field, so it is `false` on every configuration and the compiled-in shader blocks are
+    /// never entered. Rung S4 lands the single production writer, which CONSUMES the
+    /// already-resolved `ResolvedRenderPath::shadow`'s `SDF_SOFT_MARCH` bit rather than
+    /// re-deriving the predicate.
+    pub vb_sdf_mesh_shadow: bool,
+    /// VB-SV0: the VB lit-producer tails' SDF contact-AO-on-mesh gate — packed into light-header
+    /// word 7 bit `VB_SDF_MESH_MODE_SHIFT + 1` (bit 6) by
+    /// [`shadow_gate_word`](Self::shadow_gate_word). DEFAULT `false` (bit 6 stays 0 — the
+    /// byte-identical 0%-gate, INDEPENDENT of every other gate including its own shadow
+    /// sibling). See [`vb_sdf_mesh_shadow`](Self::vb_sdf_mesh_shadow) for why the two terms get
+    /// separate bits and for the single-writer contract they share.
+    pub vb_sdf_mesh_ao: bool,
     /// The resolve's output-stage tonemap curve — packed into light-header word 7 bits
     /// [`TONEMAP_MODE_SHIFT`..+4) by [`Self::tonemap_bits`]. DEFAULT [`Tonemapper::Aces`]
     /// (word 7 bits 8..11 stay 0 — the byte-identical 0%-gate).
@@ -644,6 +708,8 @@ impl Default for LightingConfig {
             punctual_shadows: false,
             ddgi_indirect: false,
             ssao_mode: false,
+            vb_sdf_mesh_shadow: false,
+            vb_sdf_mesh_ao: false,
             tonemapper: Tonemapper::Aces,
             terminator_softening: 0.0,
         }
@@ -652,14 +718,20 @@ impl Default for LightingConfig {
 
 impl LightingConfig {
     /// Packs the header's word-7 shadow/GI-gate bits from this config: the CSM bit
-    /// ([`CSM_MODE_BIT`]), the punctual bit ([`PUNCTUAL_MODE_BIT`]), and the DDGI bit
-    /// ([`DDGI_MODE_BIT`]), each independent. A default config returns 0 (word 7 == 0.0 —
-    /// the 0%-gate anchor every pre-R4/pre-punctual/pre-SDFDDGI golden pins).
+    /// ([`CSM_MODE_BIT`]), the punctual bit ([`PUNCTUAL_MODE_BIT`]), the DDGI bit
+    /// ([`DDGI_MODE_BIT`]), and VB-SV0's 2-bit sub-field ([`VB_SDF_MESH_MODE_SHIFT`]), each
+    /// independent. A default config returns 0 (word 7 == 0.0 — the 0%-gate anchor every
+    /// pre-R4/pre-punctual/pre-SDFDDGI/pre-SV0 golden pins).
     #[inline]
     pub const fn shadow_gate_word(&self) -> u32 {
+        // VB-SV0's two bits are OR-ed as one sub-field so the shift/mask pair stays the single
+        // place the bit positions are spelled — the shader decodes with the same `>> 5 & 3`.
+        let sv0 = ((self.vb_sdf_mesh_shadow as u32) * VB_SDF_MESH_SHADOW_BIT)
+            | ((self.vb_sdf_mesh_ao as u32) * VB_SDF_MESH_AO_BIT);
         ((self.csm_shadows as u32) << CSM_MODE_BIT)
             | ((self.punctual_shadows as u32) << PUNCTUAL_MODE_BIT)
             | ((self.ddgi_indirect as u32) << DDGI_MODE_BIT)
+            | ((sv0 & VB_SDF_MESH_MODE_MASK) << VB_SDF_MESH_MODE_SHIFT)
     }
 
     /// Word-7 tonemap sub-field bits (0 for [`Tonemapper::Aces`] ⇒ the 0%-gate).
@@ -1376,6 +1448,70 @@ mod tests {
         assert_eq!(
             both.shadow_gate_word(),
             (1 << CSM_MODE_BIT) | (1 << PUNCTUAL_MODE_BIT) | (1 << DDGI_MODE_BIT)
+        );
+    }
+
+    /// VB-SV0's two terms occupy word-7 bits 5 and 6 and are independently armable — of each
+    /// other and of every neighbouring sub-field. The independence of the two SV0 bits FROM EACH
+    /// OTHER is the load-bearing half: SV0 is two terms, and a packing that armed both from one
+    /// flag would make every downstream per-term gate satisfiable by the shadow half alone.
+    #[test]
+    fn vb_sv0_gate_bits_are_independent() {
+        // Default: SV0 contributes nothing — the 0%-gate rung S2 ships under.
+        let base = LightingConfig::default();
+        assert!(!base.vb_sdf_mesh_shadow);
+        assert!(!base.vb_sdf_mesh_ao);
+        assert_eq!(base.shadow_gate_word(), 0);
+
+        // Shadow alone: bit 5 only.
+        let sh = LightingConfig { vb_sdf_mesh_shadow: true, ..LightingConfig::default() };
+        assert_eq!(sh.shadow_gate_word(), 1 << 5);
+        assert_eq!(
+            (sh.shadow_gate_word() >> VB_SDF_MESH_MODE_SHIFT) & VB_SDF_MESH_MODE_MASK,
+            VB_SDF_MESH_SHADOW_BIT,
+            "the shader decodes `(word >> 5) & 3` and must see the shadow bit alone"
+        );
+
+        // AO alone: bit 6 only. NOT the same assertion as the shadow case wearing another name.
+        let ao = LightingConfig { vb_sdf_mesh_ao: true, ..LightingConfig::default() };
+        assert_eq!(ao.shadow_gate_word(), 1 << 6);
+        assert_eq!(
+            (ao.shadow_gate_word() >> VB_SDF_MESH_MODE_SHIFT) & VB_SDF_MESH_MODE_MASK,
+            VB_SDF_MESH_AO_BIT,
+            "the shader decodes `(word >> 5) & 3` and must see the AO bit alone"
+        );
+        assert_eq!(sh.shadow_gate_word() & ao.shadow_gate_word(), 0, "the two SV0 bits must not overlap");
+
+        // Both: the two bits OR together into the full sub-field.
+        let both = LightingConfig {
+            vb_sdf_mesh_shadow: true,
+            vb_sdf_mesh_ao: true,
+            ..LightingConfig::default()
+        };
+        assert_eq!(
+            (both.shadow_gate_word() >> VB_SDF_MESH_MODE_SHIFT) & VB_SDF_MESH_MODE_MASK,
+            VB_SDF_MESH_SHADOW_BIT | VB_SDF_MESH_AO_BIT
+        );
+
+        // Neither SV0 bit touches a neighbouring sub-field, and no neighbour touches SV0's.
+        let sv0_mask = VB_SDF_MESH_MODE_MASK << VB_SDF_MESH_MODE_SHIFT;
+        let neighbours = (1 << CSM_MODE_BIT) | (1 << PUNCTUAL_MODE_BIT) | (1 << DDGI_MODE_BIT);
+        assert_eq!(both.shadow_gate_word() & neighbours, 0, "SV0 must not touch bits 2..4");
+        let all_neighbours = LightingConfig {
+            csm_shadows: true,
+            punctual_shadows: true,
+            ddgi_indirect: true,
+            tonemapper: Tonemapper::ReinhardJodie,
+            terminator_softening: 1.0,
+            ..LightingConfig::default()
+        };
+        let neighbour_word = all_neighbours.shadow_gate_word()
+            | all_neighbours.tonemap_bits()
+            | all_neighbours.terminator_bits();
+        assert_eq!(
+            neighbour_word & sv0_mask,
+            0,
+            "no neighbouring sub-field may write into word-7 bits 5..6"
         );
     }
 

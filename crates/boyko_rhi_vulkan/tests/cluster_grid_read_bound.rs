@@ -35,6 +35,29 @@
 //!    from exactly the ones that cannot. Deleting the capacity term from any of the four sources
 //!    drops that artifact's `OpArrayLength` count to 0, which is RED here.
 //!
+//! # Also serving as VB-SV0's gate (c) — extended in doc only
+//!
+//! `docs/VB-SV0-SDF-SHADOW-PLAN.md` rung S2 moves `sdf_soft_shadow_ranged` out of
+//! `deferred_pbr.hlsl` into the shared `sdf_shadow_leaves.hlsli` (which also carries `sdf_ao` and
+//! the three A2 AO consts, neither of which `deferred_pbr.hlsl` references), replacing the span
+//! with an `#include` at the point it occupied. Gate (c) of that rung is *"all six `deferred_pbr`
+//! `.spv` byte-identical"*, and [`deferred_and_forward_families_spv_byte_identical`] below ALREADY
+//! IS that gate — the plan's D3 note that `redxc_with_defines` would need a new `profile`
+//! parameter was discharged by VB-P1k, which is when [`Variant::profile`] was introduced. Nothing
+//! is added here; a second copy of the same six rows in an SV0-named file would be duplication,
+//! not coverage.
+//!
+//! **What that gate CAN and CANNOT go red for — measured, not reasoned.** The plan named
+//! *"place the `#include` at a different point than the moved span occupied"* as gate (c)'s red
+//! mutation. Executed, that leaves all six `.spv` **byte-identical**: DXC's SPIR-V backend does
+//! not preserve the source position of a definition whose dependencies are unchanged. The
+//! mutation that does fire is a CORRUPTED moved span — perturbing one token of
+//! `sdf_soft_shadow_ranged` inside the shared header reddens 4 of the 6 rows. The two that stay
+//! green are exactly `deferred_pbr_hwrt_vis` and `deferred_pbr_hwrt_vis_mv`, whose
+//! `SHADOW_STAGE=1` arm returns before lighting and dead-strips the leaf entirely — the same
+//! structural blindness their `array_lengths: 0` expectation in [`OWNED_VARIANTS`] already
+//! records, arrived at independently.
+//!
 //! SKIPS (with an eprintln) when no `dxc` / `spirv-dis` resolves — the byte gate is only as
 //! hermetic as the pinned VulkanSDK 1.4.350.0 toolchain that produced the committed artifacts;
 //! a DIFFERENT dxc version failing this test means "wrong toolchain", not "drifted shader".

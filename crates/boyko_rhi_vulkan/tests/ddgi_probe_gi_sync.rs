@@ -5,10 +5,19 @@
 //! they live here rather than in `boyko_shaderdsl/tests/emit_probe_gi.rs`:
 //!
 //! 1. `sdf_soft_shadow_ranged_copy_matches_resolve` — the `sdf_soft_shadow_ranged` function the
-//!    probe-update shader COPIES from the committed `deferred_pbr.hlsl` must stay token-identical
-//!    (indentation-normalized) to it (plan §1.1). A drift means the GI shadow march diverged from
-//!    the resolve's — the exact silent-fork the copy discipline guards. (The compiled byte-identity
-//!    is gated separately; this is the source-level behavioral guard — see the extractor's doc.)
+//!    probe-update shader COPIES must stay token-identical (indentation-normalized) to the one the
+//!    resolve consumes (plan §1.1). A drift means the GI shadow march diverged from the resolve's
+//!    — the exact silent-fork the copy discipline guards. (The compiled byte-identity is gated
+//!    separately; this is the source-level behavioral guard — see the extractor's doc.)
+//!
+//!    **VB-SV0 rung S2 re-targeted this from `deferred_pbr.hlsl` to `sdf_shadow_leaves.hlsli`**
+//!    (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §4.1). SV0 needs the same leaf in the three VB
+//!    lit-producer tails, so the function MOVED verbatim out of `deferred_pbr.hlsl` into a shared
+//!    header, which `deferred_pbr.hlsl` now `#include`s at the point the span occupied. The pin's
+//!    MEANING is unchanged — what it asserts is that the probe-update copy equals the resolve's,
+//!    and that is independent of which file the resolve's copy is spelled in. What changed is
+//!    only where the extractor looks; leaving it pointed at `deferred_pbr.hlsl` would panic on the
+//!    missing signature, which is precisely the red this rung had to clear.
 //! 2. `oct_decode_edsl_matches_host` — the new eDSL `oct_decode_body::<EvalCf>` (after the
 //!    `normalize` tail the emitter prints textually) must equal the I0b host mirror
 //!    `goldens::oct_decode` to floating tolerance over the whole `[0,1]²` domain (plan §6 gate 4,
@@ -78,27 +87,31 @@ fn extract_soft_shadow_ranged(hlsl: &str, which: &str) -> String {
 
 #[test]
 fn sdf_soft_shadow_ranged_copy_matches_resolve() {
-    // The probe-update shader COPIES `sdf_soft_shadow_ranged` from `deferred_pbr.hlsl`. Extract both
-    // function bodies and assert token-equality (indentation-normalized, see the extractor): a drift
-    // means the GI shadow march no longer matches the resolve's, the silent-fork the plan §1.1 copy
-    // discipline guards. (A-1: ONE `sdf_probe_update.comp.hlsl`, `GI_MAX_IT` now a spec-const.)
-    let resolve = std::fs::read_to_string(shaders_dir().join("deferred_pbr.hlsl"))
-        .expect("invariant: shaders/deferred_pbr.hlsl must exist next to this crate");
+    // The probe-update shader COPIES `sdf_soft_shadow_ranged` from the shared leaf header (VB-SV0
+    // S2 moved it there out of `deferred_pbr.hlsl`; the generator constant
+    // `emit_probe_gi.rs::SDF_SOFT_SHADOW_RANGED_COPY` is deliberately NOT re-pointed, so the probe
+    // shader and its frozen `.spv` do not move). Extract both function bodies and assert
+    // token-equality (indentation-normalized, see the extractor): a drift means the GI shadow
+    // march no longer matches the resolve's, the silent-fork the plan §1.1 copy discipline guards.
+    // (A-1: ONE `sdf_probe_update.comp.hlsl`, `GI_MAX_IT` now a spec-const.)
+    let resolve = std::fs::read_to_string(shaders_dir().join("sdf_shadow_leaves.hlsli"))
+        .expect("invariant: shaders/sdf_shadow_leaves.hlsli must exist next to this crate");
     let update = std::fs::read_to_string(shaders_dir().join("sdf_probe_update.comp.hlsl"))
         .expect(
             "invariant: shaders/sdf_probe_update.comp.hlsl must exist (run `cargo run -p \
              boyko_shaderdsl --features emit --bin emit_probe_gi`)",
         );
 
-    let resolve_fn = extract_soft_shadow_ranged(&resolve, "deferred_pbr.hlsl");
+    let resolve_fn = extract_soft_shadow_ranged(&resolve, "sdf_shadow_leaves.hlsli");
     let update_fn = extract_soft_shadow_ranged(&update, "sdf_probe_update.comp.hlsl");
 
     assert_eq!(
         update_fn, resolve_fn,
         "the probe-update shader's copied `sdf_soft_shadow_ranged` DRIFTED from the committed \
-         `deferred_pbr.hlsl` function it was copied from (indentation-normalized token compare). \
-         The GI shadow march must stay behaviorally identical to the resolve's. Re-copy the \
-         function into `emit_probe_gi`'s `SDF_SOFT_SHADOW_RANGED_COPY` and re-run the emitter + re-DXC."
+         `sdf_shadow_leaves.hlsli` function it was copied from (indentation-normalized token \
+         compare). The GI shadow march must stay behaviorally identical to the resolve's. Re-copy \
+         the function into `emit_probe_gi`'s `SDF_SOFT_SHADOW_RANGED_COPY` and re-run the emitter \
+         + re-DXC."
     );
 }
 

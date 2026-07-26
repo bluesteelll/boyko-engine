@@ -94,8 +94,9 @@ tripwired by a `debug_assert` in `declare_forward_graph`).
 ## `vb_resolve.comp.hlsl` / `vb_shade.comp.hlsl` — the VisibilityBuffer shading family (compute)
 
 Two sources, each its own `{TEXTURED} x {FROXEL}` matrix against a shared VB-only Set-0 layout
-(`vb_layout0` — 8 bindings — for the base/TEXTURED rows, `vb_layout0_froxel` — 10 bindings,
-`vb_layout0`'s own 0..7 plus `ClusterGrid`@8/`LightIndexList`@9 — for the FROXEL rows; Set 1 = the
+(`vb_layout0` — 9 bindings since VB-SV0 — for the base/TEXTURED rows, `vb_layout0_froxel` — 11
+bindings, `vb_layout0`'s own 0..7 plus `ClusterGrid`@8/`LightIndexList`@9 — for the FROXEL rows,
+both carrying the SV0 edit-list `Buf`@10; Set 1 = the
 Forward-family shadow set verbatim, Set 2 = the Decision-0 geometry table). `vb_resolve.comp.hlsl`
 is the FUSED resolve (unpacks `vb_id`, re-fetches geometry, shades, writes `lit`);
 `vb_shade.comp.hlsl` is its material-classified sibling (VB-P2 classification plan) — the shading
@@ -107,6 +108,37 @@ light_count)` scan, gated at RUNTIME on the header's `clusters_enabled` bit (`us
 unarmed frame on a FROXEL-compiled `.spv` still falls back to the identical flat walk. The base
 (non-FROXEL) compile's tokens are byte-for-byte unperturbed by the `#else` arm — verified by re-DXC
 (`vb_froxel_spv_sync.rs`).
+
+**VB-SV0 interface delta, common to EVERY row in this family and in the split family below**
+(`docs/VB-SV0-SDF-SHADOW-PLAN.md`, rung S2 "dark infra"): `+ StructuredBuffer<uint> Buf` @10
+(`register(t0)`, space 0) — the SDF edit-list SSBO, the analytic `field_distance` source for the
+inlined SDF soft-shadow + contact-AO terms. It sits OUTSIDE every `-D` guard, so it is present in
+all ten rows and creates **no new variant**: the terms are gated at RUNTIME on light-header word 7
+bits 5..6 (`load_vb_sdf_mesh_mode`), which the host writes as 0 through rung S2, and the geometry
+the shadow-origin lift needs — the covered triangle's three world positions, `tri_p0`/`tri_p1`/
+`tri_p2` — is armed by a SOURCE-level `#define VB_SV0` rather than a command-line `-D`.
+
+The lift's `cross`/`dot`/`rsqrt`/orientation-flip chain is NOT in the geometry fetch: it lives in
+`vb_geom_fetch.hlsli`'s `vb_sv0_face_normal` leaf, which each tail calls from INSIDE its
+`sv0_mode & VB_SDF_MESH_SHADOW_BIT` gate, so an SV0-dark frame pays nothing for it beyond one
+wave-uniform header read. That placement is a GATE, not a convention:
+`vb_sv0_kill_switch.rs::vb_sv0_face_normal_chain_is_gated_not_straight_line` disassembles each of
+the ten committed artifacts and requires the chain's basic block to be reached only under a
+predicate derived from the runtime mode. It exists because nothing else in the rung can see a dark
+cost — the image golden is blind to cost by construction, and the kill-switch digest compares a
+compile in which the SV0 spans do not exist.
+
+Per-row byte growth vs the pre-SV0 artifact is **+10 124 B**, uniform across all ten (e.g.
+`vb_resolve.comp.spv` 47 824 → 57 952). Nearly all of it is the inlined march + AO behind the
+runtime `if` — that is what "compiled in" means — plus 148 B for the face-normal guard's finiteness
+test. `OpLoopMerge` goes 3 → 7 in the fused rows and 6 → 10 in the split rows and does NOT come back
+down, for the same reason: the loops are present in the module, just unreachable while the mode is 0.
+A later rung that widens these numbers has to say why.
+
+All ten `.spv` were re-DXC'd and re-pinned ONCE at S2; `vb_geo.comp.spv` / `vb_geo_mv.comp.spv` and
+all six `deferred_pbr` rows are byte-identical across that change and each of those is itself a gate
+(`vb_sv0_kill_switch.rs`,
+`cluster_grid_read_bound.rs::deferred_and_forward_families_spv_byte_identical`).
 
 | Source | Variant | `TEXTURED` | `FROXEL` | `.spv` | dxc `-T` | Interface delta vs base |
 |---|---|---|---|---|---|---|
@@ -125,6 +157,34 @@ production and no FROXEL pipeline is ever bound; a later rung (VB-P1b) reads a r
 (`vb_set0_tex_froxel`, the TEXTURED ring + `ClusterGrid`/`LightIndexList` combined) is not built
 this rung either — a documented scope cut (`present/passes/vb.rs`'s own comment) for VB-P1b to
 close if TEXTURED and FROXEL must co-occur.
+
+## `vb_shade_split.comp.hlsl` — the R9 geo/shade-split lit producer (compute)
+
+One source, a `{TEXTURED} x {HWRT}` matrix — the third VB lit producer, paired 1:1 with
+`vb_geo.comp.hlsl`'s thin-aux geometry pass and selected instead of the fused
+`vb_resolve`/`vb_shade` pair whenever `path_vb_split()` resolves (a pre-light consumer — SSAO,
+DDGI, shadow-temporal, or the HWRT carrier — arms `mesh_geo_shade_split`). Set 0 is `vb_layout0`
+verbatim; Set 1 is a DISTINCT 11-binding `vb_split_layout1` (the Forward shadow table @0-3 plus
+`gSsao`@4, the DDGI atlas @5-9 and `gShadowVis`@10).
+
+*Recorded rather than silently fixed:* these four rows had **no manifest entry at all** before
+VB-SV0 S2 added this section — the same standing-rule gap `deferred_pbr_wrap.comp.spv` had until
+`a4824a8`. They are added here because S2 re-pins all four and the SV0 interface delta has to be
+documented somewhere. `vb_geo.comp.spv` / `vb_geo_mv.comp.spv` and `vb_raster.{vs,fs}.spv` are
+STILL unlisted; SV0 does not perturb them, so closing that gap belongs in its own commit.
+
+| Variant | `TEXTURED` | `HWRT` | `.spv` | dxc `-T` | Interface delta vs base |
+|---|---|---|---|---|---|
+| base | — | — | `vb_shade_split.comp.spv` | `cs_6_0` | none (the flat all-lights scan; SSAO/DDGI read at their runtime gates). |
+| textured | `1` | — | `vb_shade_split_tex.comp.spv` | `cs_6_0` | + `PerInstanceMaterialTex` ring @1 (48 B) + Set 3 bindless texture-array table (`gTextures[]`@0, `gTexSampler`@1) — the same TV0 splice `vb_shade.comp.hlsl` carries. |
+| hwrt | — | `1` | `vb_shade_split_hwrt.comp.spv` | `cs_6_0` | the denoised mesh-shadow visibility `gShadowVis` (Set 1 @10) REPLACES the CSM sample for the primary directional; no ray is traced here (the `shadow_vis` producer pass owns the TLAS), so `cs_6_0` still suffices. |
+| textured + hwrt | `1` | `1` | `vb_shade_split_tex_hwrt.comp.spv` | `cs_6_0` | both deltas above — the two `#ifdef`s are independent, non-overlapping spans. |
+
+Reachability note: the two `HWRT` rows require `hwrt_denoise_or_vis_on`, which is exactly the
+condition `ShadowSources::SDF_SOFT_MARCH` requires to be FALSE — so VB-SV0 is compiled into them
+but can never be armed while they are bound. As of rung S2 that exclusion rests on the resolver
+predicate alone; the CPU truth-table test `sv0_never_arms_under_hwrt` that will make it mechanical
+rather than argued is scheduled for rung S4 and DOES NOT EXIST YET.
 
 ## Shadow-denoise compute (separate shaders, not `-D` variants of the resolve)
 

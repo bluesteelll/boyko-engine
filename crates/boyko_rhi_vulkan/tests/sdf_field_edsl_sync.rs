@@ -452,21 +452,51 @@ fn sdf_soft_shadow_ranged_matches_edsl_emit() {
     // is the re-DXC gate for that). The resolve
     // re-DXCs to `deferred_pbr.comp.spv`; the host shadow march mirror is
     // `host_soft_shadow_ranged` (compute.rs), consumer-side (±2/255).
+    //
+    // VB-SV0 rung S2 RE-TARGETED this from `deferred_pbr.hlsl` to the shared
+    // `sdf_shadow_leaves.hlsli` (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §4.1): the three VB
+    // lit-producer tails need the same leaf, so it MOVED verbatim (sentinels included) into a
+    // shared header that `deferred_pbr.hlsl` now `#include`s at the point the span occupied. The
+    // pin's meaning is unchanged — it still asserts the shipped body IS the generator's output;
+    // only the file it reads moved. The consumer set is now `deferred_pbr.hlsl` (six rows) +
+    // `vb_resolve.comp.hlsl` + `vb_shade.comp.hlsl` + `vb_shade_split.comp.hlsl` (ten rows between
+    // them), so a hand-edit here would re-pin SIXTEEN `.spv` at once rather than one — the same
+    // count the failure message below spells out.
     let generated = boyko_shaderdsl::emit::emit_hlsl_sdf_soft_shadow_ranged().replace("\r\n", "\n");
 
-    let shader_path = concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/deferred_pbr.hlsl");
+    let shader_path = concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_shadow_leaves.hlsli");
     let shader = std::fs::read_to_string(shader_path)
-        .expect("invariant: shaders/deferred_pbr.hlsl must exist next to this crate")
+        .expect("invariant: shaders/sdf_shadow_leaves.hlsli must exist next to this crate")
         .replace("\r\n", "\n");
 
     assert!(
         shader.contains(&generated),
-        "deferred_pbr.hlsl `sdf_soft_shadow_ranged` DRIFTED from boyko_shaderdsl::emit — the \
-         committed function no longer matches the generator. Re-run `cargo run -p boyko_shaderdsl \
-         --features emit --bin emit_field` and re-splice the sdf_soft_shadow_ranged function \
-         between the GENERATED sdf_soft_shadow_ranged sentinels, then re-DXC deferred_pbr.comp.spv \
-         (bump DEFERRED_PBR_SPV in compute.rs to the new size).\n\
+        "sdf_shadow_leaves.hlsli `sdf_soft_shadow_ranged` DRIFTED from boyko_shaderdsl::emit — \
+         the committed function no longer matches the generator. Re-run `cargo run -p \
+         boyko_shaderdsl --features emit --bin emit_field` and re-splice the \
+         sdf_soft_shadow_ranged function between the GENERATED sdf_soft_shadow_ranged sentinels, \
+         then re-DXC EVERY consumer: the six `deferred_pbr*.comp.spv` rows AND the ten VB \
+         lit-producer rows.\n\
          --- expected (eDSL-generated) ---\n{generated}"
+    );
+
+    // The shared header is now the ONLY hand-placed definition: `deferred_pbr.hlsl` must consume
+    // it through the include rather than carrying a second, forkable copy. Without this, the
+    // move could be silently undone by pasting the function back and the pin above would still
+    // pass on the header's untouched copy.
+    let resolve = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/deferred_pbr.hlsl"))
+        .expect("invariant: shaders/deferred_pbr.hlsl must exist next to this crate")
+        .replace("\r\n", "\n");
+    assert!(
+        resolve.contains("#include \"sdf_shadow_leaves.hlsli\""),
+        "deferred_pbr.hlsl must CONSUME `sdf_soft_shadow_ranged` through \
+         `#include \"sdf_shadow_leaves.hlsli\"` (VB-SV0 §4.1), not carry its own copy"
+    );
+    assert!(
+        !resolve.contains("float sdf_soft_shadow_ranged(float3 p, float3 n, float3 L, float t_max) {"),
+        "deferred_pbr.hlsl carries a SECOND definition of `sdf_soft_shadow_ranged` — the VB-SV0 \
+         §4.1 move exists to cut the copy count, and a re-introduced local copy would fork \
+         silently from the shared header every consumer else reads"
     );
 }
 
