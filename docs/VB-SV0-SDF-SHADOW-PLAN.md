@@ -1,10 +1,18 @@
 # VB-SV0 — SDF soft-shadow + contact-AO on mesh, inlined into the VB lit-producer tails
 
-**Status:** DESIGN, **Rev 4** — NOT YET APPROVED. Stage 2 of the "finish VB completely" campaign
+**Status:** DESIGN, **Rev 5** — NOT YET APPROVED. Stage 2 of the "finish VB completely" campaign
 (Stage 1 = VB-P1 clustered cull, COMPLETE; Stage 3 = VB-P4 GPU-driven raster, out of scope).
 Rev 1 drew **3 P0**; Rev 2 answered them and drew **3 new P0**; Rev 3 closed those by experiment
-and drew **4 more** (3 from review, 1 promoted from P2 when a run settled it). Rev 4 answers all
-four.
+and drew **4 more** (3 from review, 1 promoted from P2 when a run settled it); Rev 4 answered those
+four and **introduced one of its own**, which the S1 code review caught before the rung shipped.
+
+**Rev 5 is a correction, not an advance, and the correction is embarrassing in an instructive way.**
+Rev 4 withdrew a false `i.e.` from the shadow predicate — and then, in the contact-AO gate it added
+in the same revision, wrote the same class of `i.e.` about the AO leaf. That one was worse: the
+shadow slip erred toward false RED (it undercounted), the AO slip erred toward false **GREEN**. See
+§6 S1 gate (3). The lesson is not "check the glosses"; it is that **a predicate stated in prose
+beside a leaf is not the leaf** — the gate must call the shipped body, which is exactly what S1's
+shadow half already does and what its AO half now does too.
 
 **The pattern in that sequence is the point, and it is not converging by accident.** Every
 revision's P0s have been the same defect wearing a new costume: *a gate that cannot go red for the
@@ -65,6 +73,15 @@ drift a gate, but it is fenced and dated so a later reader can tell it apart fro
 | E5 | Bookkeeping the review caught, all verified: **S0 is COMPLETE @`189d063`** (§3.2's runtime-vs-`-D` decision is discharged, §7 clause 1's G1 disjunct is settled, §12 Q2 narrows to G2); **D6/§5.4's manifest gap is DISCHARGED @`a4824a8`**; §5.3's "every gate reads the pin" is scoped to **image** goldens (G1's 10 `.spv` literals are deliberate and disciplined); C8 carries a superseded-by-D5 marker. | review P2 |
 | E6 | Red mutations added for the two gate parts that shipped without one (S2(e) `spirv-val`, S4(iii) the hwrt truth-table) — under this plan's own rule an undemonstrated gate part is not yet a gate, and (iii) is the ONLY mechanical instrument covering rows 9–10. §7 gains **clause 5** so S1.5/S5 reddening on instrument spread has a defined outcome instead of the dangling state S1.5's own text conceded. | review P1 |
 | E7 | S1's oracle gloss corrected: the ray-hit predicate is **sufficient, not equivalent** to "the leaf returns < 1.0" — the Quilez accumulator darkens well before the hard-hit early-out — so it undercounts and can reject an adequate fixture. §3.4 ground 1's undated sweep is downgraded to rest on the analytic Sterbenz argument, which stands alone. | review P2 |
+
+## Changelog Rev 4 → Rev 5
+
+| # | Change | Cause |
+|---|---|---|
+| F1 | **S1 gate (3)'s AO predicate was FALSE-GREEN and is replaced by the shipped accumulation.** Rev 4 wrote "some tap returns `d < h`, i.e. `sdf_ao` is not saturated". The leaf darkens iff `occ = Σ(hᵢ−dᵢ)·AO_FALLOFFⁱ > 0`; negative taps cancel positive ones, so the two are not equivalent. Measured: the leaf darkens for gap `< 0.5795`, the withdrawn predicate fired to `< 1.0` — the whole band between was counted undarkened. The gate now calls the shipped body, as the shadow half already did. | S1 review C1 |
+| F2 | **The floors are re-derived from S4(ii)'s band** instead of from Rev 4's unsatisfiable "fixed before the fixture is authored" rule, which both implementers correctly reported cannot hold when authoring requires measuring. Purpose preserved: a downstream requirement, not an observed count. | S1 review / implementer reports |
+| F3 | Recorded so the wrong number does not outlive the right correction: the review's own impact estimate used the **ray–sphere** gap, which is undefined past `asin(r_s/D)`, while `field_distance` is the **SDF** and stays finite. True darkened cap at the shipped placement is **31.8°**, not ~19.5°. The predicate fix stands; its sizing did not. | orchestrator re-derivation |
+| F4 | S1's Lands gains the structural binding the review found missing: the SDF body must be **inseparable** from the scene the oracle measures, or the plan's own first mutation ("remove the spawns → gates 1/2/3 fail") does not red. | S1 review C2 |
 
 ---
 
@@ -779,9 +796,40 @@ one casting on nothing. The gate is therefore a **CPU-side check against the hos
    green — but it can reject an adequate fixture under §7 clause 2, or push the fixture toward hard
    contact shadows when §1.3's visual goal is penumbra. Read the floor with that in mind;
 3. **≥ `SV0_MIN_AO_PIXELS` covered mesh pixels with a non-trivial contact-AO term — NEW in Rev 4,
-   and it is the P0 this rung existed to prevent and did not (P0-E1).** The predicate: some tap at
-   `h ∈ {AO_STEP … 5·AO_STEP}` along the **shading** normal returns a field distance `< h`, i.e.
-   `sdf_ao` is not saturated at its far-field value. Same host `Eval` oracle, same fixture, no GPU;
+   and it is the P0 this rung existed to prevent and did not (P0-E1).** The predicate is
+   **`sdf_ao(P, N) < 1.0` computed with the shipped accumulation**, on the same host `Eval` oracle,
+   same fixture, no GPU.
+
+   ⚠️ **Rev 5 correction — Rev 4 wrote this predicate wrong, in exactly the way Rev 4 had just
+   withdrawn for the shadow half one item above.** Rev 4 said *"some tap … returns a field distance
+   `< h`, i.e. `sdf_ao` is not saturated"*. That `i.e.` is **false**, and false in the
+   **false-GREEN** direction — the one that matters. The leaf
+   (`sdf_gbuffer_composite.hlsl:532-541`) is
+   `occ = Σᵢ (hᵢ − dᵢ)·AO_FALLOFFⁱ`, `return clamp(1 − AO_STRENGTH·occ, 0, 1)`; it darkens iff
+   `occ > 0`, and taps with `dᵢ > hᵢ` contribute **negative** terms that cancel positive ones. So
+   "some tap has `d < h`" does **not** imply the leaf darkens anything. Measured on-axis with
+   surface-to-surface gap `g` (so `dᵢ = g − hᵢ`): `Σ AO_FALLOFFⁱ = 4.298162` and
+   `2·Σ hᵢ·AO_FALLOFFⁱ = 2.490811`, hence `occ > 0 ⟺ g < 0.5795`, while the withdrawn predicate
+   fires out to `g < 2·5·AO_STEP = 1.0`. Every pixel in `0.58 < g < 1.0` would have been counted
+   **without being darkened at all**, inflating the very number the floor is compared against.
+   Caught by the S1 code review before the rung shipped.
+
+   *A second-order correction, recorded because the wrong number is more dangerous than the wrong
+   predicate:* the review estimated the true darkened set by mapping `g < 0.5795` through the
+   **ray–sphere** gap `g(θ) = D·cosθ − r_m − √(r_s² − D²sin²θ)`, which is defined only while the
+   normal ray actually hits the body (`θ < asin(r_s/D)`). But `field_distance` is the **SDF** — the
+   distance to the nearest surface point — and stays finite past that angle. Using
+   `dᵢ = ‖P + N·hᵢ − C‖ − r_s`, the darkened cap at the shipped placement is **31.8°**, not the
+   ~19.5° the ray formula gives. The predicate correction stands; its impact estimate did not;
+
+   **The floors are derived from S4(ii), not from this scene (Rev 5).** Both S1 implementers
+   correctly reported that Rev 4's rule — *fixed before the fixture is authored, never lowered* —
+   is unsatisfiable in that ordering, since authoring the fixture requires measuring it. The rule's
+   *purpose* (no floor fitted to an observed count) is preserved by deriving the floors from a
+   **downstream** requirement instead: S4(ii) accepts a changed-pixel count in `[1%, 60%]` of
+   covered mesh pixels, so a fixture that cannot clear S4's lower band is useless, and each S1 floor
+   is **2× that lower band**. The observed counts are recorded beside each floor, explicitly
+   labelled as an observation that is **not** the basis for the number;
 4. the ≥2-frame `SdfEditStaging::is_dirty()` assertion from §2.4's re-sited R11 tripwire.
 
 **Why (3) had to exist.** SV0 ships **two independently gated terms** — §3.1 gives them separate
@@ -797,9 +845,17 @@ the mesh surface while keeping it between the mesh and the key light → (3) dro
 (2) survives.** The second is the one that proves the two counts are not the same assertion wearing
 two names.
 
-**Both floors are fixed BEFORE the fixture is authored and are never lowered** — the same
-"MEASURED — do not edit these literals to make a failing run pass" discipline S1.5 and S5 carry.
-A floor chosen after seeing the scene is a floor tuned to pass.
+**The first mutation only reds if the body is STRUCTURALLY inseparable from the measured scene
+(Rev 5, review C2).** The fixtures and the oracle must build the scene through **one** shared entry
+point that spawns the mesh row, the SDF body, the sun and the camera together, parameterised only by
+what genuinely differs between the two fixtures. If a fixture can drop its own `spawn_sdf_body` call
+while the oracle keeps spawning one in a reconstructed harness, every gate stays green while the pin
+renders the boot-seeded **empty** edit list — precisely the vacuity this rung exists to close, and
+undetectable by any assertion listed above.
+
+**Neither floor is derived from this scene's measurements** — see the derivation in gate (3). The
+"MEASURED — do not edit these literals to make a failing run pass" discipline still applies to both:
+a floor may be *raised* on new evidence, never lowered to rescue a failing run.
 
 **The coverage oracle is named, because Rev 3 left it unnamed and unlanded.** Both counts need
 CPU-side raster coverage, and nothing in the tree computes it (`goldens.rs`'s host mirrors take a
