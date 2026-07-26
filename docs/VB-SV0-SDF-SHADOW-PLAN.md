@@ -1,11 +1,18 @@
 # VB-SV0 — SDF soft-shadow + contact-AO on mesh, inlined into the VB lit-producer tails
 
-**Status:** DESIGN, **Rev 3** — NOT YET APPROVED. Stage 2 of the "finish VB completely" campaign
+**Status:** DESIGN, **Rev 4** — NOT YET APPROVED. Stage 2 of the "finish VB completely" campaign
 (Stage 1 = VB-P1 clustered cull, COMPLETE; Stage 3 = VB-P4 GPU-driven raster, out of scope).
-Rev 1 drew **CHANGES REQUESTED (3 P0, 5 P1, 3 P2)**; Rev 2 answered all eleven and drew **3 new
-P0**. Rev 3 closes all three **by experiment rather than by argument** — §3.4 (the OFF-path
-codegen hazard), §5.2/S2 (the `deferred_pbr` variant enumeration) and S1/S4 (the textured fixture)
-are each now backed by a run whose commands and outputs are recorded in §11.
+Rev 1 drew **3 P0**; Rev 2 answered them and drew **3 new P0**; Rev 3 closed those by experiment
+and drew **4 more** (3 from review, 1 promoted from P2 when a run settled it). Rev 4 answers all
+four.
+
+**The pattern in that sequence is the point, and it is not converging by accident.** Every
+revision's P0s have been the same defect wearing a new costume: *a gate that cannot go red for the
+failure it exists to catch.* Rev 4 found it in three fresh places at once — no gate could red for a
+dead contact-AO term (§6 S1/S4), S2 gate (b)'s named mutation is **dead-code-eliminated** and can
+never red (§11.4, measured), and S3's device oracle is not constructible as written (§6 S3). The
+count is not evidence the design is bad; it is evidence the *review* is finally aimed at the right
+thing. A revision that finds none of these is the one to distrust.
 
 **This document states no measured number in prose — with one fenced exception, added in Rev 3.**
 Every fact that could drift is a named test, and the test name is the citation. Numbers that appear
@@ -31,7 +38,7 @@ drift a gate, but it is fenced and dated so a later reader can tell it apart fro
 | C5 | **CORRECTED**: `sdf_ao` is **not** eDSL-generated. §4.1 replaced by a shared `sdf_shadow_leaves.hlsli` that cuts the copy count from 4 to 2 and pins the survivor. | P1-2 |
 | C6 | The arming predicate **consumes** `ResolvedRenderPath::shadow`; the stale `render_path_config.rs:727` citation is dropped. The `!hwrt` term's visual consequence is named in §1.2 and §10. | P1-3 |
 | C7 | S4(i)'s "any difference is a bug" is now scoped to a precisely stated claim. C2 removes the second `spec_ao` site that made Rev 1's version a coin-flip. | P1-4 |
-| C8 | No golden hash literal appears in this document. §5.3 records the `PINS.toml` self-contradiction as a **blocking precondition on S1** rather than inheriting it. | P1-5 |
+| C8 | No golden hash literal appears in this document. §5.3 records the `PINS.toml` self-contradiction as a **blocking precondition on S1** rather than inheriting it. ***SUPERSEDED by D5** — the precondition is discharged and deleted; read §5.3 as it now stands.* | P1-5 |
 | C9 | §4.3 "five sources" → **four** (verified). §2.3 states the `register(t0)` space-0 check and its near-miss. §2.4's citation corrected and R11's tripwire re-sited out of `debug_assert!`. | P2-1/2/3 |
 | C10 | New §10 answers the critic's four open questions with verified evidence. | — |
 
@@ -46,6 +53,18 @@ drift a gate, but it is fenced and dated so a later reader can tell it apart fro
 | D5 | §5.3's **blocking precondition on S1 is DELETED**. It described a `PINS.toml` self-contradiction that no longer exists: `d93e425` reconciled eight pin blocks, and `goldens/PINS.toml:283-285` now states the `[vb_mesh]` values are the real bless output. §5.3's other consequence (no gate duplicates a hash literal) stands. | P0-A review |
 | D6 | Recorded, not fixed here: `deferred_pbr_wrap.comp.spv` ships and is built unconditionally (`gpu_scene/mod.rs:1654-1656`) but has **no row** in `docs/SHADER-VARIANT-MANIFEST.md` — a standing-rule violation predating SV0, fixed in its own commit so this stage does not absorb it. | P0-C |
 | D7 | Two structural blind spots recorded that no earlier revision named: metals have `diffuse_color` **exactly** 0, so `diff_ambient * ao_final` is identically zero for 2 of `[vb_mesh]`'s 5 spheres; and `float ao_final = 1.0;` has **5** sites in `crates/boyko_rhi_vulkan/shaders/`, of which SV0 scopes 3. | P0-A review |
+
+## Changelog Rev 3 → Rev 4
+
+| # | Change | Cause |
+|---|---|---|
+| E1 | **SV0 is TWO terms and every gate was satisfied by ONE.** §3.1 gives shadow and contact-AO separate bits, so they can be armed apart — yet S1's adequacy oracle quantified only over the shadow predicate and S4(ii) never named the mode value. A contact-AO term wired to the wrong lane, min-combined with the wrong operand, or structurally `1.0` passed S1, S2, S3, S4 and S5. S1 gains `SV0_MIN_AO_PIXELS`; S4(ii) splits into per-term (ii-a)/(ii-b) with per-term red mutations. | P0-E1 |
+| E2 | **§4.1's copy arithmetic was wrong and its header move breaks a test it never named.** `sdf_soft_shadow_ranged` has **two** shipping HLSL definitions, not one — the second is `sdf_probe_update.comp.hlsl:160`, generated from a verbatim string constant. `ddgi_probe_gi_sync.rs`'s `sdf_soft_shadow_ranged_copy_matches_resolve` extracts the function **out of `deferred_pbr.hlsl` by signature search and panics if absent** — which is exactly what the include move causes. Counts restated 5 → 2; the test is re-targeted, not broken; the generator constant is deliberately **not** re-pointed so §5.1's "`.spv` perturbed: exactly 10" survives. | P0-E2 |
+| E3 | **S3 layer 3 was not constructible on either axis.** "On device" — the cited `cpu_gpu_sdf_agreement.rs` family is **GPU-FREE by design** and no on-device leaf probe is ever dispatched. "Both leaves" — `boyko_shaderdsl` has **no `sdf_ao` body** (consistent with §4.1's own finding, and R8 forecloses writing one). Split by leaf: the shadow leaf keeps host bit-exactness against an oracle that exists; the AO leaf gets a pre-registered tolerance with its reason written down, and is **labelled the weaker instrument**. | P0-E3 |
+| E4 | **S2 gate (b)'s red mutation is DEAD — measured (§11.4).** An unread `float3 face_normal` member plus its `normalize(cross(…))` is fully eliminated by DXC: both `vb_geo.comp.spv` and `vb_geo_mv.comp.spv` come out **byte-identical**. Rev 3 asserted this mutation as demonstrated; it was analysis, the same error §3.4.1 had to withdraw. Replaced by a preprocessor-level check that is red-capable by construction. | P0-E4 (was P2) |
+| E5 | Bookkeeping the review caught, all verified: **S0 is COMPLETE @`189d063`** (§3.2's runtime-vs-`-D` decision is discharged, §7 clause 1's G1 disjunct is settled, §12 Q2 narrows to G2); **D6/§5.4's manifest gap is DISCHARGED @`a4824a8`**; §5.3's "every gate reads the pin" is scoped to **image** goldens (G1's 10 `.spv` literals are deliberate and disciplined); C8 carries a superseded-by-D5 marker. | review P2 |
+| E6 | Red mutations added for the two gate parts that shipped without one (S2(e) `spirv-val`, S4(iii) the hwrt truth-table) — under this plan's own rule an undemonstrated gate part is not yet a gate, and (iii) is the ONLY mechanical instrument covering rows 9–10. §7 gains **clause 5** so S1.5/S5 reddening on instrument spread has a defined outcome instead of the dangling state S1.5's own text conceded. | review P1 |
+| E7 | S1's oracle gloss corrected: the ray-hit predicate is **sufficient, not equivalent** to "the leaf returns < 1.0" — the Quilez accumulator darkens well before the hard-hit early-out — so it undercounts and can reject an adequate fixture. §3.4 ground 1's undated sweep is downgraded to rest on the analytic Sterbenz argument, which stands alone. | review P2 |
 
 ---
 
@@ -226,9 +245,12 @@ two `LightingConfig` bools packed by the existing `shadow_gate_word`, plus a bit
 
 The decisive term is the axis count. The matrix is **multiplicative**: the split tail already ships
 4 `.spv` from two axes; a fourth axis makes the *next* VB tail feature cost 40 variants, not 20.
-`-D` buys inertness once and taxes every future VB tail feature forever. **Decision: runtime gate,
-conditional on rung S0's harness proving red-capable.** If S0's sensitivity sub-assertion fails, the
-design falls back to `-D` and the +10 becomes an owner VALUES call (§7 clause 1).
+`-D` buys inertness once and taxes every future VB tail feature forever. **Decision: runtime gate —
+and as of Rev 4 the condition is DISCHARGED, not pending.** S0 shipped at `189d063` with both gates
+green: all ten rows reproduce byte-identically, and the sensitivity control **fired** (47824 vs
+47840 bytes, distinct fingerprints, from a single float literal in an untouched region). So the
+`-D` fallback is no longer a live branch of this decision; it survives only as §7 clause 1's abort
+route if G2 — the half S0 does not cover — comes back blind.
 
 ### 3.3 How OFF-path inertness is proven — two instruments, both constructible
 
@@ -301,8 +323,11 @@ recompute construction it motivated and S2's "decisive" second mutation. Three i
 
 1. **Analytic + numeric.** `NoV = max(dot(n,v), 1e-4)` (`vb_resolve.comp.hlsl:258`) and
    `roughness = clamp(m.mrr.y, 0.045, 1.0)` (`:262`) force `pow(NoV + 1, exp2(-16r - 1)) ≥ 1`; the
-   subtraction is Sterbenz-exact on `[1,2]`; both forms produce bit-identical `1.0`. A sweep over
-   the reachable domain found zero mismatches.
+   subtraction is Sterbenz-exact on `[1,2]`; both forms produce bit-identical `1.0`. *(Rev 2 also
+   cited "a sweep over the reachable domain found zero mismatches". **Rev 4 drops that clause**: it
+   is an undated measurement with no test name and no §11 row — the one number in this document that
+   could not be traced to a rung, a test or a record, and §3.4.1 promotes this ground to
+   load-bearing. The analytic argument stands on its own and needs no sweep.)*
 2. **The construction already ships.** `vb_shade_split.comp.hlsl:457-461` performs
    `ao_final = min(ao_final, ssao_blurred)` inside a **runtime** `if (ssao_mode != SSAO_MODE_OFF)`,
    feeding the identical `spec_ao` at `:462`, in **all four** split `.spv`. Deferred does the same
@@ -404,8 +429,21 @@ its header: `field_distance` plus `MAX_IT`/`SHADOW_K`/`SHADOW_MINT`/`SHADOW_MINT
   text into an include preprocesses to the same token stream, so **every `deferred_pbr` `.spv` stays
   byte-identical** — and that is S2 gate (c), a red-capable check, not a hope.
 * The three VB tails `#include` it after `sdf_field.hlsli`.
-* `sdf_soft_shadow_ranged_matches_edsl_emit` re-targets the new header (a one-line path change in
-  the test). The generator stays the single source for the shadow leaf.
+* **TWO tests re-target, not one (P0-E2).** Rev 3 named only
+  `sdf_soft_shadow_ranged_matches_edsl_emit`. `ddgi_probe_gi_sync.rs`'s
+  **`sdf_soft_shadow_ranged_copy_matches_resolve`** (`:79-103`) also reads `deferred_pbr.hlsl` and
+  pulls the function out of it by signature search through an extractor that
+  **`panic!`s when the signature is absent** (`:44-49`). Moving the span into an include is exactly
+  that condition, so this rung **breaks a shipping test inside the very span it moves** — and no
+  earlier revision mentioned the file at all. Both tests re-target the shared header; the pin's
+  meaning is preserved exactly, since what it asserts (the probe-update copy equals the resolve's)
+  is unchanged by where the resolve's copy lives. `sdf_soft_shadow_ranged_copy_matches_resolve`
+  green is an S2 gate part, asserted rather than assumed.
+* **The generator constant is deliberately NOT re-pointed.** `SDF_SOFT_SHADOW_RANGED_COPY`
+  (`boyko_shaderdsl/src/bin/emit_probe_gi.rs:554-563`, whose own doc defers an `.hlsli` dedup to
+  "I3") keeps emitting `sdf_probe_update.comp.hlsl:160` verbatim. Re-pointing it would move that
+  shader and its `.spv`, widening §5.1's "`.spv` perturbed: **exactly 10**" — a scope change this
+  stage does not take. The dedup stays I3's.
 * **`sdf_gbuffer_composite.hlsl` is NOT touched.** Its `sdf_ao` remains the second (and last) copy.
   Rationale: the marcher is the frozen-`.spv` blast radius this campaign explicitly protects, and
   collapsing 2 copies → 1 does not justify re-DXC'ing every marcher variant. The pair is pinned
@@ -413,9 +451,19 @@ its header: `field_distance` plus `MAX_IT`/`SHADOW_K`/`SHADOW_MINT`/`SHADOW_MINT
   whose red condition is "the two bodies diverged" — a different, weaker mechanism than an eDSL
   re-emit pin, and labelled as such.
 
-Net: `sdf_ao` copies 4 → **2**, both pinned; `sdf_soft_shadow_ranged` copies 4 → **1**, generator-
-pinned. Shadow consts (`deferred_pbr.hlsl:466-474`, including `SHADOW_NORMAL_BIAS` at `:474`) are
-pinned by S3's `sv0_consts_match_deferred_and_marcher`, never by this prose.
+**Net, corrected in Rev 4 — the earlier arithmetic was wrong in its baseline (P0-E2).**
+`sdf_soft_shadow_ranged` has **two** shipping HLSL definitions today, not one:
+`deferred_pbr.hlsl:515` and `sdf_probe_update.comp.hlsl:160`. So the naive post-SV0 count is **5**,
+not 4, and the post-move count is **2**, not 1 — the generated probe copy survives by the decision
+above. `sdf_ao` copies **4 → 2**, both pinned, unchanged.
+
+Shadow consts (`deferred_pbr.hlsl:466-474`, including `SHADOW_NORMAL_BIAS` at `:474`) are pinned by
+`sv0_consts_match_deferred_and_marcher`. **Rev 4 promotes that test into S3's enumerated layers and
+widens its selection to the three AO consts**, because Rev 3 left a hole: layer 2 pins the `sdf_ao`
+**body**, while the term's entire numeric behaviour lives in `AO_STEP`/`AO_FALLOFF`/`AO_STRENGTH`
+declared **outside** it (`sdf_gbuffer_composite.hlsl:488-490`), duplicated into the shared header,
+with the marcher deliberately untouched. Change one in one file and the bodies stay byte-identical
+while the two copies compute different things — the gate green for exactly the divergence it names.
 
 ### 4.2 Shadow-origin bias from the GEOMETRIC face normal
 
@@ -465,8 +513,27 @@ where `VB_SV0` is a **source-level `#define` written by each of the three tails 
 `#include`** — never a `-D` on the dxc command line, so it creates **zero** new compile variants.
 `vb_geo.comp.hlsl` does not define it and therefore preprocesses **character-identical** to today,
 keeping its two `.spv` **byte-identical by construction**. This is the frozen-base discipline
-`deferred_pbr.hlsl:74-79` documents for `TERMINATOR_WRAP`, and it is a gate that can go red: delete
-the guard and those two `.spv` change bytes (S2 gate (b)).
+`deferred_pbr.hlsl:74-79` documents for `TERMINATOR_WRAP`.
+
+**Rev 3 added "and it is a gate that can go red: delete the guard and those two `.spv` change
+bytes". That is FALSE, and §11.4 measured it (P0-E4).** With the guard deleted — an unread
+`float3 face_normal` member plus its `normalize(cross(…))` — DXC eliminates the member and every
+instruction feeding it, and `vb_geo.comp.spv` / `vb_geo_mv.comp.spv` come out **byte-identical**
+(15888 B / 17864 B, both matching the committed artifacts). Nothing reads the field in that shader,
+`-O3` is the default, and SROA + DCE of a wholly-unused local-struct member is routine. The claim
+was stated as analysis and analysis was again the wrong instrument — the identical error §3.4.1 had
+to withdraw, one section away.
+
+Note the asymmetry, because it decides the fix. The *protective* half is **strengthened**, not
+weakened: `vb_geo`'s `.spv` is byte-identical whether or not the guard is there, so the guard costs
+that shader nothing and the byte-identity claim is now proven twice over. What is gone is
+**falsifiability** — a gate whose only red is unreachable is not a gate.
+
+**S2 gate (b) is therefore respecified at the level where the guard is actually observable:** the
+check is a **preprocessor** comparison, `dxc -P vb_geo.comp.hlsl` with and without the guard, whose
+outputs must **differ**. Red by construction, since the guard is a preprocessor construct and this
+compares preprocessor output. The `.spv` byte-identity assertion stays as a separate, protective
+gate part — true, useful, and now honestly labelled as one that cannot fail for this mutation.
 
 ### 4.4 Termination, bounds, and why no device hang is possible
 
@@ -555,9 +622,15 @@ eight affected blocks; `goldens/PINS.toml:283-285` now states the values are *"t
 output, not placeholders"* and names the blessing commit. `grep -n UNBLESSED goldens/PINS.toml`
 returns one hit — `:15`, the generic `"PENDING"` sentinel rule. Nothing blocks S1.
 
-The other consequence was never contingent on that and stands: **no SV0 gate duplicates a hash
-literal.** Every gate reads the pin through `scripts\golden.ps1 -Pin <name>` / its `Read-Pins`
-reader. A hand-copied hash is exactly the failure mode `PINS.toml:1-5` was created to end.
+The other consequence stands, **scoped correctly in Rev 4**: no SV0 gate duplicates an **image-
+golden** hash literal — every one reads the pin through `scripts\golden.ps1 -Pin <name>` / its
+`Read-Pins` reader, because a hand-copied image hash is the failure mode `PINS.toml:1-5` was created
+to end. Rev 3 wrote that as a universal over *every* gate, which is false: G1 pins **10 `.spv`
+sha256 literals in the test** (§3.3), and the three `.spv`-comparison gates are not `PINS.toml`
+consumers at all — there is no `PINS.toml` for `.spv`. Those literals are deliberate, carry the
+"MEASURED — do not edit these literals to make a failing run pass" discipline, and are re-derivable
+by anyone via `git show <S2^>:<path> | sha256`. The defect was the unqualified universal, not the
+design.
 
 ### 5.4 The `deferred_pbr` family is SIX rows, and four of them are `cs_6_5` (P0-C)
 
@@ -595,10 +668,13 @@ the profile is **replaced**, not appended. §11.2 settles that reading by runnin
 3. **The `hwrt` cargo feature is irrelevant to this gate.** It reads committed **files** and
    compares sha256; it never touches an embed, so it runs on a default-feature build.
 
-**Recorded, and fixed in its own commit rather than absorbed here:** `deferred_pbr_wrap.comp.spv`
-is built unconditionally (`gpu_scene/mod.rs:1654-1656`, and its accessor at `compute.rs:1470`
-carries no `#[cfg(feature = "hwrt")]`, unlike the four HWRT ones) yet has **no row** in
-`docs/SHADER-VARIANT-MANIFEST.md`. `CLAUDE.md` requires one per variant. It predates SV0.
+**Recorded, and fixed in its own commit rather than absorbed here — DISCHARGED @`a4824a8`.**
+`deferred_pbr_wrap.comp.spv` is built unconditionally (`gpu_scene/mod.rs:1654-1656`, and its
+accessor at `compute.rs:1470` carries no `#[cfg(feature = "hwrt")]`, unlike the four HWRT ones) yet
+had **no row** in `docs/SHADER-VARIANT-MANIFEST.md`, which `CLAUDE.md` requires per variant. It
+predates SV0. The manifest now carries all six rows and they match the table above exactly — an
+independent corroboration of this enumeration, since the two were derived from the same frozen
+recipe but written separately.
 
 ---
 
@@ -609,7 +685,13 @@ measure.** Each rung is independently committable, has **one** gate, and names t
 turns it red. *A mutation that is only argued does not count; the commit message records the mutated
 run's output.*
 
-### S0 — the OFF-path harness (CPU + `dxc`, no shader edit)
+### S0 — the OFF-path harness (CPU + `dxc`, no shader edit) — ✅ **COMPLETE @`189d063`**
+
+**Outcome, measured:** both gates green. All ten rows re-DXC byte-identically, and the sensitivity
+control **fired** — `vb_resolve.comp.hlsl:258`'s `1e-4` → `2e-4` gives 47824 B / `fnv1a_64
+0xcfdc60ff4ea57052` committed vs 47840 B / `0x99e860db9dd753e2` mutant. A re-DXC byte comparison is
+therefore **not blind** for these modules, which is what §3.2's runtime-gate decision rested on. The
+harness stays a standing regression gate; it can no longer newly fail the *design*.
 
 **Lands:** `crates/boyko_rhi_vulkan/tests/vb_sv0_offpath.rs`, wiring the **existing**
 `redxc_with_defines` / `assert_spv_byte_identical` / `find_dxc` helpers. No new SPIR-V parser, no
@@ -689,12 +771,43 @@ one casting on nothing. The gate is therefore a **CPU-side check against the hos
    `dot(N, L) > SHADOW_NDOTL_EPS` — otherwise `sdf_soft_shadow` returns `0.0` at its early-out
    (`sdf_gbuffer_composite.hlsl:499-501`) for a reason unrelated to the field; and (b) the ray from
    `P + face_N * SHADOW_NORMAL_BIAS` along `L` reaching a field distance below `SHADOW_HIT_EPS`
-   within `T_MAX`, i.e. the leaf would return `< 1.0`;
-3. the ≥2-frame `SdfEditStaging::is_dirty()` assertion from §2.4's re-sited R11 tripwire.
+   within `T_MAX`. **(b) is SUFFICIENT, not equivalent, and Rev 3's "i.e. the leaf would return
+   `< 1.0`" gloss is withdrawn (Rev 4):** the Quilez accumulator drops below 1.0 as soon as
+   `SHADOW_K * d / t < 1` at **any** step, whereas `d < SHADOW_HIT_EPS` is the hard-hit early-out
+   returning `0.0` (`sdf_gbuffer_composite.hlsl:498-526`). So this counts fully-occluded pixels and
+   **undercounts** the pixels the term actually darkens. It errs safe — false red, never false
+   green — but it can reject an adequate fixture under §7 clause 2, or push the fixture toward hard
+   contact shadows when §1.3's visual goal is penumbra. Read the floor with that in mind;
+3. **≥ `SV0_MIN_AO_PIXELS` covered mesh pixels with a non-trivial contact-AO term — NEW in Rev 4,
+   and it is the P0 this rung existed to prevent and did not (P0-E1).** The predicate: some tap at
+   `h ∈ {AO_STEP … 5·AO_STEP}` along the **shading** normal returns a field distance `< h`, i.e.
+   `sdf_ao` is not saturated at its far-field value. Same host `Eval` oracle, same fixture, no GPU;
+4. the ≥2-frame `SdfEditStaging::is_dirty()` assertion from §2.4's re-sited R11 tripwire.
 
-**RED if:** (1) or (3) fails, or (2)'s count falls below the floor. **Mutation:** remove the SDF
-spawns → (1) and (2) both fail. This is the control that proves the input reaches the thing under
-test.
+**Why (3) had to exist.** SV0 ships **two independently gated terms** — §3.1 gives them separate
+bits (5 shadow, 6 AO) precisely so they can be armed apart. Every gate in Rev 3 was satisfied by the
+**shadow half alone**: this oracle quantified only over the shadow predicate, and the fixture
+requirement "sits near a mesh surface" was **prose, not a gate**. §4.4 already documents that the AO
+term saturates to exactly `1.0` when the field is far — the identical vacuity trap this rung exists
+to prevent for the shadow half, left wide open for the other half.
+
+**RED if:** (1) or (4) fails, or (2)'s or (3)'s count falls below its floor. **Mutations, and they
+must be independent:** remove the SDF spawns → (1), (2), (3) all fail; **move the SDF body far from
+the mesh surface while keeping it between the mesh and the key light → (3) drops below floor while
+(2) survives.** The second is the one that proves the two counts are not the same assertion wearing
+two names.
+
+**Both floors are fixed BEFORE the fixture is authored and are never lowered** — the same
+"MEASURED — do not edit these literals to make a failing run pass" discipline S1.5 and S5 carry.
+A floor chosen after seeing the scene is a floor tuned to pass.
+
+**The coverage oracle is named, because Rev 3 left it unnamed and unlanded.** Both counts need
+CPU-side raster coverage, and nothing in the tree computes it (`goldens.rs`'s host mirrors take a
+mesh depth buffer as an *input*). S1 therefore **lands** it: the fixture's own `uv_sphere()`
+triangles projected with the fixture's camera and rasterized on the CPU — small, exact, and it
+reuses the scene's own geometry rather than approximating it. An analytic-sphere coverage
+approximation is acceptable **only** if labelled as such with the floors set clear of the silhouette
+error; it is not the default.
 
 **Precondition:** none. Rev 2's `PINS.toml` precondition is discharged — §5.3.
 
@@ -743,11 +856,21 @@ coverage is a superset of Deferred's `!own_pixel` arm.
     its feasibility are §5.4, and all six were re-DXC'd green before this gate was written (§11.2);
 (d) every VB image golden byte-identical with `sv0_mode = 0`;
 (e) `spirv-val` clean on all 10;
-(f) **G2's ULP-probe control demonstrated RED** — the probe compile's render differs from the pin.
+(f) **G2's ULP-probe control demonstrated RED** — the probe compile's render differs from the pin;
+(g) **`sdf_soft_shadow_ranged_copy_matches_resolve` green** (§4.1, P0-E2) — the test whose extractor
+    `panic!`s when `deferred_pbr.hlsl` stops containing the signature, i.e. the one this rung's
+    header move breaks unless it is re-targeted in the same commit.
 
 **RED if / mutations (DEMONSTRATED):**
 * (a): move one SV0 statement outside its `#ifndef VB_SV0_KILL` guard → G1 red.
-* (b): delete `#ifdef VB_SV0` from `vb_geom_fetch.hlsli` → `vb_geo.comp.spv` bytes change → red.
+* (b): **respecified in Rev 4 — the old mutation is DEAD, measured (§11.4).** `dxc -P` of
+  `vb_geo.comp.hlsl` with and without the `#ifdef VB_SV0` guard must **differ**; red by
+  construction. The `.spv` byte-identity half stays as a protective assertion that, for this
+  mutation, provably cannot fail.
+* (e): declare `Buf` at a binding already occupied in `vb_layout0_froxel` → `spirv-val` red. *(Rev 3
+  gave (e) no mutation; under this ladder's own rule an undemonstrated gate part is not yet a gate.)*
+* (g): perform the §4.1 header move **without** re-targeting the extractor → the test panics → red.
+  This one reddens by default, which is the point: it fails unless the rung does the work.
 * (c): place the `#include` at a different point in `deferred_pbr.hlsl` than the moved span occupied
   → `deferred_pbr` `.spv` bytes change → red.
 * (f) is itself the demonstration that (d) is not a blind gate.
@@ -763,19 +886,55 @@ coverage is a superset of Deferred's `!own_pixel` arm.
    `sdf_gbuffer_composite.hlsl:532-541` and the shared header's copy. Weaker than an eDSL re-emit
    pin (there is no generator, §4.1) and labelled as such; its red condition is "the two bodies
    diverged".
-3. **Leaf bit-exactness on device** — the leaf probe (`cpu_gpu_sdf_agreement.rs` family) evaluates
-   both leaves over a ≥4096-sample `(P, N, L)` fixture and compares **bit-exactly** to the host
-   `boyko_shaderdsl` `Eval` backend. Pure SSBO math, no sampler → demand exact `f32::to_bits()`
-   equality, not a ULP tolerance.
+3. **Leaf agreement — SPLIT BY LEAF, and HOST, not device (P0-E3).** Rev 3 specified "leaf
+   bit-exactness **on device** … evaluates **both leaves** … demand exact `f32::to_bits()`
+   equality". Neither half is constructible, and this is the stage's only numerical correctness
+   instrument, so an implementer would have blocked at S3 or silently degraded it unlabelled.
+
+   *Why "on device" is wrong:* the cited family is **GPU-free by design** —
+   `cpu_gpu_sdf_agreement.rs:30-33` states *"This file is GPU-FREE (no `VulkanContext::boot`) …
+   It therefore runs even on a GPU-less host."* It never executes HLSL. And no on-device leaf probe
+   exists to borrow: `sdf_field_probe.comp.spv` is never dispatched — `field_probe_gate.rs`
+   disassembles the committed file against a frozen baseline, nothing more. Building one means a new
+   `.spv` plus a manifest row, contradicting §5.1's **zero-new-`.spv`** invariant that §3.2's whole
+   runtime-gate-vs-`-D` arithmetic rests on. Not worth trading that away for this.
+
+   *Why "both leaves" is wrong:* there is **no `sdf_ao` body in `boyko_shaderdsl`** — the only two
+   occurrences in that crate are prose (`refine.rs:8`, `ssao.rs:69`), exactly consistent with §4.1's
+   own finding that `sdf_ao` is not eDSL-generated, and R8 forecloses writing a generator.
+   `sdf_soft_shadow_ranged_body` **does** exist (`shadow.rs:174`).
+
+   **3a — the shadow leaf, unchanged in strength.** `sdf_soft_shadow_ranged` evaluated over a
+   ≥4096-sample `(P, N, L)` fixture against `sdf_soft_shadow_ranged_body::<Eval>` on the **host**,
+   **bit-exact `f32::to_bits()` equality**. Pure SSBO math, no sampler, an oracle that exists.
+
+   **3b — the AO leaf, and it is the WEAKER instrument, labelled.** The only host AO model is
+   `goldens::host_ao`, whose own doc concedes it *mirrors the shader within ±3/255* — and the gap is
+   structural, not a bug to fix: the host computes `AO_FALLOFF.powi(i)` where the HLSL computes
+   `pow(AO_FALLOFF, (float)i)` (`sdf_gbuffer_composite.hlsl:538`), and `pow` is a
+   platform-dependent transcendental, so bit-exactness against it is **unreachable**, not merely
+   untested. 3b is therefore agreement at a **pre-registered ULP tolerance**, fixed before the run
+   and never widened to make a failing run pass, with that reason written into the test so nobody
+   discovers it later and quietly relaxes it. The AO half's strongest correctness evidence remains
+   S4(iv), and §8's risk table says so rather than implying parity with 3a.
 4. **Host unit tests for the face normal** — under a non-uniform-scale affine, `face_normal` equals
    the analytic plane normal; under uniform scale it agrees in sign with the interpolated normal; a
    degenerate (zero-area) triangle returns the interpolated fallback, never NaN. Plus the §4.5 NaN
    assertion: a NaN term degrades to "no contribution".
+5. **`sv0_consts_match_deferred_and_marcher` — promoted to a layer in Rev 4, and widened.** §4.1
+   pointed at this test as the const pin but scoped it to the *shadow* consts and named it in no
+   rung's Lands, so nothing actually landed it. It now covers the shadow consts **and** the three AO
+   consts `AO_STEP`/`AO_FALLOFF`/`AO_STRENGTH`, which layer 2 structurally cannot see: layer 2 pins
+   the `sdf_ao` **body**, the consts are declared outside it
+   (`sdf_gbuffer_composite.hlsl:488-490`), and §4.1 duplicates them into the shared header while
+   leaving the marcher untouched.
 
 **RED if / mutations:** (1) change one token in **one** tail's asserted span → that tail's pin fails.
-(2) perturb the marcher's `sdf_ao` body → the cross-file pin fails. (3) perturb one host const in the
-`Eval` backend → bit-exactness fails. (4) reverse the `cross` operand order without the orientation
-fix → the sign test fails.
+(2) perturb the marcher's `sdf_ao` body → the cross-file pin fails. (3a) perturb one host const in
+the `Eval` backend → the shadow leaf's bit-exactness fails. (3b) perturb the AO tap count → the AO
+leaf exceeds its pre-registered tolerance. (4) reverse the `cross` operand order without the
+orientation fix → the sign test fails. **(5) change `AO_FALLOFF` in the marcher only → layer 5 red
+while layer 2 stays green** — that pairing is the whole reason layer 5 exists.
 
 ### S4 — arm
 
@@ -843,13 +1002,26 @@ exercise `vb_shade` on real hardware"*.
   the frozen module. It is **not** a claim of universal FP identity — C2 removed the second `spec_ao`
   site that would have made it one, so no independently-compiled duplicate exists in Rev 2. The
   claim's sensitivity is the demonstrated ULP probe (S2 gate (f)), not an assumption.
-* **(ii) the input reached, per armable variant** — for each of rows 1–8, with that variant's knobs
-  set and SV0 armed, the fixture **differs** from its own `sv0_mode = 0` render, in a changed-pixel
-  count within `[1%, 60%]` of covered mesh pixels. **Which fixture, per row (P0-B):** rows 1, 2, 3,
-  5, 7 use `vb_both_sdf`; rows **4, 6, 8** use `vb_both_sdf_tex`, because a textured row cannot be
-  selected at all without a `MATERIAL_FLAG_TEXTURED` material in the scene, and the shipping
-  textured pins are `legs: Mesh`, where SV0 is structurally unarmable. Rev 2 named this gate for all
-  8 rows without a fixture that could carry 3 of them; S1 now lands both.
+* **(ii) the input reached, per armable variant AND PER TERM.** Rev 3 wrote one assertion with
+  "SV0 armed" and **never named the mode value** — so `sv0_mode = 3` passed on the shadow term
+  alone, and a contact-AO term wired to the wrong lane, min-combined with the wrong operand, or
+  structurally `1.0` went green through S1, S2, S3, S4 and S5, leaving only the owner's eye
+  (iv) between it and shipping. The 2-bit field already exists; Rev 4 simply uses it (P0-E1):
+  * **(ii-a) shadow only** — mode = `VB_SDF_MESH_SHADOW_BIT`, AO bit clear.
+  * **(ii-b) contact-AO only** — mode = `VB_SDF_MESH_AO_BIT`, shadow bit clear.
+
+  For each of rows 1–8, **each** of (ii-a) and (ii-b) must **on its own** differ from that row's
+  `sv0_mode = 0` render, in a changed-pixel count within `[1%, 60%]` of covered mesh pixels.
+  Neither may lean on the other. **Which fixture, per row (P0-B):** rows 1, 2, 3, 5, 7 use
+  `vb_both_sdf`; rows **4, 6, 8** use `vb_both_sdf_tex`, because a textured row cannot be selected
+  at all without a `MATERIAL_FLAG_TEXTURED` material in the scene, and the shipping textured pins
+  are `legs: Mesh`, where SV0 is structurally unarmable. Rev 2 named this gate for all 8 rows
+  without a fixture that could carry 3 of them; S1 now lands both.
+
+  **The changed-pixel instrument is landed by S1, not assumed.** No `changed_pixels`/percent-of-
+  coverage comparator exists in `crates/` or `scripts/` today, and this gate needs one that also
+  knows the covered-pixel denominator — which is exactly the CPU coverage oracle S1 lands. One
+  instrument, two consumers.
 * **(iii) rows 9–10** — `sv0_never_arms_under_hwrt` green.
 * **(iv)** owner visual eval on the dumped BMP before any hash is blessed.
 
@@ -864,6 +1036,16 @@ covering the ten rows, each reddening **exactly** its own rows:
 * Revert only `vb_shade_split.comp.hlsl`'s → rows 7–8 red, others green. *(This is the structural
   closure of the three-tails hole: the split path cannot be silently left out.)*
 * Force `sv0_mode = 0` host-side → every row's (ii) count falls to 0.
+* **Per-term, added in Rev 4** — the three source reverts above partition by *file*, so all four of
+  Rev 3's mutations red the shadow and AO halves together and none isolates a term. Two more, each
+  reddening **exactly one** sub-gate: delete the `min` into `vis` → every row's **(ii-a)** falls to
+  0 while **(ii-b)** survives; delete the `min` into `ao_final` → the converse. Without this pair,
+  (ii-a)/(ii-b) are two names for one assertion.
+* **(iii)'s own red, added in Rev 4** — Rev 3 gave (iii) no mutation at all, and it is the **only**
+  mechanical instrument covering rows 9–10, the two variants the plan removes from executing
+  coverage on a structural argument. Delete the `!consumers.hwrt_denoise_or_vis_on` term from
+  `render_path_config.rs:904` → `sv0_never_arms_under_hwrt` red. Cheap, and until it is run the
+  structural argument is unguarded.
 
 ### S5 — measure
 
@@ -884,10 +1066,10 @@ manufactures confidence).
 
 The stage is **reverted** — not softened, not re-scoped mid-flight — if any of:
 
-1. **The OFF-path proof fails to exist.** S0's sensitivity sub-assertion reports equal (G1 is blind),
-   **or** S2 gate (f)'s ULP probe fails to red (G2 is blind) — **and** the owner declines the `-D`
-   fallback's +10 `.spv`. Without one of them, OFF-path inertness is unprovable and 10 re-pins ship
-   on faith.
+1. **The OFF-path proof fails to exist.** **The G1 half is SETTLED** — S0 shipped green at `189d063`
+   with its sensitivity control demonstrated (see S0), so this clause reduces to: S2 gate (f)'s ULP
+   probe fails to red (G2 is blind) **and** the owner declines the `-D` fallback's +10 `.spv`.
+   Without it, OFF-path inertness has no executing proof and 10 re-pins ship on faith.
 2. **S1's fixture cannot be made adequate** — no `VB × Both` configuration yields
    `SV0_MIN_SHADOWED_PIXELS` pixels satisfying S1's oracle predicate with a non-empty edit list. Then
    there is no scene in which SV0 can be observed and every downstream gate is vacuous by
@@ -903,9 +1085,21 @@ The stage is **reverted** — not softened, not re-scoped mid-flight — if any 
    reassuring, and clause 1 fires first. Rev 3 removed the assumption that the probe *would* fire
    (§3.3), so this clause no longer inherits one.
 
+5. **The cost instrument is not reproducible** — S1.5's or S5's cross-session spread exceeds 10%.
+   Added in Rev 4 because Rev 3 left it dangling: S1.5 is advertised as able to kill the stage, its
+   own RED text concedes that *"§7's ABORT clause cannot be adjudicated"*, and no clause covered it.
+   The exposure is not hypothetical — the campaign's own record is a 21% run-to-run spread on this
+   box, and unlike §11.2/§11.4 no feasibility run was made for the paired protocol on this fixture.
+   **Outcome is an owner VALUES call**: revert, or ship unmeasured with the spread recorded and
+   clause 3 (the 2× ratio) explicitly waived — clause 3 divides two numbers that an irreproducible
+   instrument makes incommensurable, so it cannot silently stand. S1.5's null control also gets a
+   numeric criterion: `|median paired delta|` on two *identical* configurations must be ≤ a
+   pre-registered fraction of the armed delta, not "~0".
+
 Revert granularity: every rung is independently committable, so an abort at S5 reverts S2–S4 and
-keeps S0 (the harness is reusable by every future runtime-gated shader feature) and S1 (the fixture
-is a real coverage gain regardless).
+keeps S0 (COMPLETE, and the harness is reusable by every future runtime-gated shader feature) and
+S1 (the fixture, the coverage oracle and the changed-pixel comparator are a real gain regardless —
+S4(ii) and any future VB visual feature need all three).
 
 ---
 
@@ -922,12 +1116,14 @@ Named first are the ones this campaign has actually hit.
 | R5 | **Instrument that silently does nothing.** | The flat-curve knob. | S0 validates the harness against a deliberately mutated recompile before it is trusted; S1.5 has its own null-mutation control; S2(f) is G2's own control. |
 | R6 | **Silent OOB with `robustBufferAccess` OFF.** | No layer reports it. | SV0 adds **no** new indexing — `Buf[0]` is already clamped by `min(Buf[0], MAX_SDF_EDITS)` (`sdf_field.hlsli:204`). Binding 10 is always a valid descriptor (`scene.edit_list` is non-`Option`). `MAX_IT = 128u` caps every march path including NaN (§4.4), so no device hang is possible. |
 | R7 | **`NMin`/`NMax` NaN semantics.** | HLSL `min`/`max` → `NMin`/`NMax`, returning the non-NaN operand. | Exploited deliberately twice: guarantees march termination (§4.4) and makes a degenerate term degrade to "no contribution" rather than poison the pixel (§4.5). Asserted in S3(4). |
-| R8 | **`sdf_ao` has no generator** — hand-authored HLSL the eDSL does not own, a live tension with CLAUDE.md's shader rule. | — | §4.1 cuts copies 4 → 2 via the shared header and pins the survivor pair with `sdf_ao_body_matches_shared_header`. The tension is **not** resolved and is stated, not hidden; writing a generator would perturb the frozen marcher `.spv` and is out of scope. |
+| R8 | **`sdf_ao` has no generator** — hand-authored HLSL the eDSL does not own, a live tension with CLAUDE.md's shader rule. **Rev 4: the consequence runs deeper than the copy count** — it also means the AO leaf has **no host `Eval` oracle**, so S3(3b) is a tolerance check where the shadow leaf gets bit-exactness. | — | §4.1 cuts copies 4 → 2 via the shared header and pins the survivor pair with `sdf_ao_body_matches_shared_header`, plus §4.1's promoted const pin (layer 5) for the three AO consts the body pin structurally cannot see. The tension is **not** resolved and is stated, not hidden; writing a generator would perturb the frozen marcher `.spv` and is out of scope. The asymmetry between 3a and 3b is labelled at the point of use, so nobody reads "S3's oracle" as one uniform instrument. |
 | R9 | **A tail silently omitted.** | The P0-class hole this design closes. | S4's selection is all 10 variants with per-variant executing assertions; the three demonstrated revert-one-source mutations each red exactly their own rows. |
 | R10 | **Non-uniform scale.** | `vb_geom_fetch.hlsli:539-542`. | Out of scope, stated plainly (§4.2). The bias is robust; the shading normal is not. |
 | R11 | **Edit list becomes per-frame dirty** → a missing barrier under VB. | — | Re-sited out of `debug_assert!` (compiled out in release, where goldens run) into **test code**: S1's ≥2-frame `is_dirty()` assertion (§2.4). |
 | R12 | **`dxc`-dependent gates skip.** | `cluster_cull_spv_sync.rs:196-204`. | §5.2 states honestly that **every** static gate needs `dxc` — Rev 1's "one gate can never skip" went with the withdrawn instrument. Procedural mitigation: no rung is commit-eligible until its `dxc` gate has been run and its output pasted into the commit message. |
 | R13 | **`deferred_pbr` perturbed by the §4.1 header move.** | New in Rev 2. | S2 gate (c): **all six** `.spv` byte-identical (§5.4 enumerates; §11.2 already ran them green), with a demonstrated red (misplace the `#include`). |
+| R15 | **Half a feature ships dead.** SV0 is TWO independently-bit-gated terms, and every Rev 3 gate was satisfied by the shadow half alone. | Found in review of Rev 3; §4.4 documents that the AO term saturates to exactly `1.0` when the field is far, i.e. the same vacuity trap S1 exists to prevent for the shadow half. | S1 gate (3)'s independent `SV0_MIN_AO_PIXELS` count with its own mutation, and S4(ii)'s split into per-term (ii-a)/(ii-b), each required to move pixels **alone**, with the two `min`-deletion mutations. Generalised lesson: *a gate quantified over a feature with N independently-armable terms must have N assertions, not one.* |
+| R16 | **A red mutation that the optimiser deletes.** Gate (b)'s named mutation was DCE'd — measured, §11.4. | Third occurrence of the campaign's signature defect inside this one plan (Rev 1's Merkle instrument, Rev 3's gate (b), and R15 above). | Respecify the gate at the level where the construct is *observable* — a preprocessor guard is checked with `dxc -P`, not with `.spv` bytes. Standing rule: before asserting a mutation reddens a compiled artifact, ask whether the compiler can see the mutation at all. |
 | R14 | **A shader-swap experiment measures its own previous iteration.** | Hit in §11.1: five different `.spv` produced one hash because `Copy-Item` carries the source mtime and cargo skipped the relink. | Any rung that swaps a `.spv` must stamp the destination's mtime **and assert the test binary was rebuilt**. This is the project's known false-fresh failure reaching a new surface; it is silent, and it fabricates agreement rather than disagreement — the direction that gets believed. |
 
 ---
@@ -1072,7 +1268,7 @@ all 10 variants rather than the two Rev 1 gated, and why S5 measures **both** ro
 
 ---
 
-## 11. Rev 3 experiment record — dated, and NOTHING READS THESE NUMBERS
+## 11. Experiment record (Rev 3 §§11.1–11.3, Rev 4 §11.4) — dated, and NOTHING READS THESE NUMBERS
 
 Fenced exception to this document's no-measured-numbers-in-prose rule (see the status block). These
 are the runs that closed Rev 2's three P0s. They are **evidence for design decisions, not gate
@@ -1148,6 +1344,29 @@ when it fails.
 Not a run but a source audit, recorded here because Rev 2 asserted the opposite: the
 textured × `Both` × non-empty-SDF combination needs **no new host plumbing**. Anchors are in S1.
 
+### 11.4 The S2 gate-(b) DCE probe (closes P0-E4, §4.3)
+
+**Question.** Rev 3 asserted that deleting the `#ifdef VB_SV0` guard would change
+`vb_geo.comp.spv`'s bytes, making gate (b) red-capable. `vb_geo` never reads `face_normal`, DXC
+defaults to `-O3`, and the frozen recipe passes no `-O` override — so the assertion was a codegen
+claim stated as analysis, the same shape §3.4.1 had to withdraw.
+
+**Method.** Scratch copy of the shader tree; add to `VbGeomFetchResult` an **unguarded**
+`float3 face_normal` plus `result.face_normal = normalize(cross(world_p1 - world_p0,
+world_p2 - world_p0));` at the result-construction site; re-DXC `vb_geo.comp.hlsl` under the frozen
+recipe, base and `-D MOTION=1`.
+
+**Result — both byte-identical to the committed artifacts:**
+
+| `.spv` | probe | committed |
+|---|---|---|
+| `vb_geo.comp.spv` | 15888 B | **identical** |
+| `vb_geo_mv.comp.spv` | 17864 B | **identical** |
+
+DXC eliminates the member and every instruction feeding it. **Gate (b)'s named mutation cannot go
+red.** The protective claim is strengthened — `vb_geo` provably pays nothing for SV0 with or without
+the guard — but the gate needed respecifying at the preprocessor level, which §4.3 now does.
+
 ---
 
 ## 12. Open questions (VALUES/SCOPE — owner)
@@ -1155,11 +1374,15 @@ textured × `Both` × non-empty-SDF combination needs **no new host plumbing**. 
 1. **Default state.** Ship SV0 default-OFF (opt-in via `LightingConfig`) or default-ON when
    `path_is_vb() && resolved.shadow.contains(SDF_SOFT_MARCH) && mesh_leg`?
    *Recommendation: default-OFF through S4, flip after S5's number is known.*
-2. **`-D` fallback authorisation.** If G1 or G2 fails to red (§7 clause 1), is +10 `.spv` acceptable,
-   or is that an abort?
+2. **`-D` fallback authorisation.** If **G2** fails to red (§7 clause 1), is +10 `.spv` acceptable,
+   or is that an abort? *(Narrowed in Rev 4 — G1's half is settled by S0 @`189d063`.)*
 3. **S1 fixture composition.** The `vb_both_sdf` / `vb_both_sdf_tex` scenes need SDF bodies placed to
    satisfy S1's oracle predicate against the five spheres. Owner may prefer reusing
    `grand_showcase`'s or `taa_jitter_eval`'s SDF arrangement rather than a purpose-built one.
+   **Rev 4 adds a constraint that narrows the choice:** the scene must satisfy **two** independent
+   predicates — occluding the key light (S1 gate 2) *and* placing a body within
+   `5·AO_STEP` of a mesh surface (S1 gate 3) — and a mutation must exist that breaks the second
+   while leaving the first intact. A reused arrangement is fine only if it admits that separation.
 4. **HWRT follow-up.** Should "SDF bodies in the mesh TLAS" (closing §10 Q3's gap) be scheduled, or
    is `VB × Both × HWRT` accepted as SDF-shadow-free indefinitely?
 5. **Sub-gate-resolution drift** (§3.4.1, §11.1). SV0's OFF path is provably inert *at the measured
@@ -1168,5 +1391,12 @@ textured × `Both` × non-empty-SDF combination needs **no new host plumbing**. 
    would mean building an FP oracle that reads `gLit` as `f32` rather than as an 8-bit dump, and
    that is a rung of its own, not a line in S2?
 
+6. **The AO half's correctness standard** (§6 S3(3b), R8). The shadow leaf gets host bit-exactness;
+   the AO leaf cannot — `pow` is a platform-dependent transcendental and there is no eDSL body to
+   generate one from. Accept a pre-registered ULP tolerance plus S4(iv) as the AO half's standard,
+   or is a stronger instrument wanted? The only stronger one is an eDSL `sdf_ao` generator, which
+   R8 rules out this stage because it would perturb the frozen marcher `.spv`.
+
 *Rev 2's question 4 (`PINS.toml` reconciliation) is **withdrawn** — discharged by `d93e425`, see
-§5.3.*
+§5.3. Rev 3's question 2 (the `-D` fallback) narrows to **G2 only**: S0 shipped green at `189d063`,
+so G1's half of that question is answered by measurement.*
