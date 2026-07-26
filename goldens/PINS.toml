@@ -330,6 +330,90 @@ BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\tmp\vb_both.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 
+[vb_both_sdf]
+# VB-SV0 plan, rung S1 (docs/VB-SV0-SDF-SHADOW-PLAN.md): the VisibilityBuffer x Both golden with a
+# NON-EMPTY SDF edit list. See crates/boyko_app/tests/vb_both_sdf.rs; the scene itself lives in the
+# shared crates/boyko_app/tests/sv0_scene/mod.rs so the S1 CPU oracle measures what this pin
+# renders.
+#
+# Scene: [vb_both]'s five-sphere grand_showcase_2mat row verbatim (same mesh generation, same five
+# materials, same sun/sky, same camera) PLUS one SDF sphere (radius 0.45) placed 1.32 along the
+# unit sun direction from the CENTRE sphere's centre -- a surface-to-surface gap of 0.25.
+# path = VisibilityBuffer, legs = Both, AA off, 512x512.
+#
+# WHY it exists: every other VB pin ([vb_both] and [vb_sdf_only] both say so in their own comments)
+# is boot-seeded with count == 0 SDF edits, which makes SV0's shadow AND contact-AO terms exactly
+# 1.0 -- so a byte-identity gate over those pins is VACUOUS. This pin is the non-empty selection.
+# collect_sdf_edits gathers count == 1 here.
+#
+# NOT byte-comparable to [vb_mesh] / [vb_both]: with a non-empty edit list, sdf_forward_march
+# composites the SDF body's own pixels into gLit independently of SV0, so the frame differs by
+# construction. That difference proves nothing on its own -- S1's actual gate is the CPU coverage
+# oracle over this scene, not a frame diff.
+#
+# UNBLESSED: sha256_* are the literal PENDING sentinel. The orchestrator renders on a real windowed
+# GPU device and blesses via `scripts\golden.ps1 -Pin vb_both_sdf -Bless` (and `-Hwrt -Bless`)
+# AFTER the owner's visual sign-off. Do NOT invent hashes.
+crate           = "boyko-app"
+test_binary     = "vb_both_sdf"
+test_name       = "vb_both_sdf_screenshot_dump"
+bmp             = "D:\\tmp\\vb_both_sdf.bmp"
+width           = 512
+height          = 512
+sha256_software = "88522c5aaf5564a7c5257d102fd5ce2d1f75a6d528d8fc17c90ff438b5dc8fc1"
+sha256_hwrt     = "PENDING"
+
+[vb_both_sdf.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_both_sdf.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
+[vb_both_sdf_tex]
+# VB-SV0 plan, rung S1: the TEXTURED half of the S1 fixture pair -- [vb_both_sdf]'s scene with a
+# real textured material, so the material-classified vb_shade_tex row is the one carrying the
+# SV0-affected pixels. See crates/boyko_app/tests/vb_both_sdf_tex.rs.
+#
+# Scene: identical to [vb_both_sdf] (SAME shared sv0_scene row / sun / sky / camera / SDF body),
+# with the flat-colour materials replaced by ONE Material::with_textures material
+# (crates/boyko_app/assets/pbr_fixtures/synth_bumps, the committed oracle set) shared across four
+# instances. path = VisibilityBuffer, legs = Both, AA off, 512x512.
+#
+# WHY it exists: three of the SV0 gate rows are TEXTURED rows, and they were unconstructible --
+# the shipping textured pins ([vb_mesh_tex], [vb_mesh_tex_froxel]) are legs = Mesh, where SV0 is
+# structurally unarmable, and nothing in the tree was textured AND legs = Both AND carrying a
+# non-empty SDF edit list at the same time.
+#
+# ONE deliberate delta from vb_mesh_tex.rs's material row: the untextured contrast sphere is the
+# LAST index here, not the middle one. The middle sphere is the SDF body's anchor and therefore the
+# only sphere carrying shadowed / contact-AO pixels; leaving it untextured would route every
+# SV0-affected pixel through the plain vb_shade row and leave vb_shade_tex arming nothing -- a
+# textured fixture whose textured half is vacuous. Both classified rows stay populated either way.
+#
+# Textured-ness is entirely in-test (no RenderPathConfig field, no env knob): MATERIAL_FLAG_TEXTURED
+# OR-reduces over the mesh draws into vb_tex_active, which auto-selects the classified pipeline.
+# BOYKO_PBR_TEXTURE_DIR overrides the compiled-in synth_bumps folder; the pin is blessed on the
+# default folder, and the dump run prints the resolved bindless slots (0 = fallback) so a silent
+# fall back to the fallback texel cannot masquerade as a textured render.
+#
+# UNBLESSED: sha256_* are the literal PENDING sentinel. The orchestrator renders on a real windowed
+# GPU device and blesses via `scripts\golden.ps1 -Pin vb_both_sdf_tex -Bless` (and `-Hwrt -Bless`)
+# AFTER the owner's visual sign-off. Do NOT invent hashes.
+crate           = "boyko-app"
+test_binary     = "vb_both_sdf_tex"
+test_name       = "vb_both_sdf_tex_screenshot_dump"
+bmp             = "D:\\tmp\\vb_both_sdf_tex.bmp"
+width           = 512
+height          = 512
+sha256_software = "2f4de3909240bc737c8a696fa7a5e4cf161f1d320559a1f0b933362df9133970"
+sha256_hwrt     = "PENDING"
+
+[vb_both_sdf_tex.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\vb_both_sdf_tex.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
+
 [vb_sdf_only]
 # Multi-paradigm render-path plan, rung R10: VisibilityBuffer x Sdf (mesh-less) -- the FIRST scene
 # exercising GeometryLegs::Sdf under the VisibilityBuffer path. No mesh entities are spawned
