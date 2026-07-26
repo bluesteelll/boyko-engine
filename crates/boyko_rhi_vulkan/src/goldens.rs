@@ -105,7 +105,12 @@ pub(crate) fn host_soft_shadow<F: Fn([f32; 3]) -> f32>(
 /// march range: the light DISTANCE for a punctual caster, `SDF_T_MAX` for an extra
 /// directional) instead of the hardcoded `SDF_T_MAX`. The multi-light shadow term is
 /// consumer-side (±2/255), not bit-exact. `field` is the FROZEN field gateway.
-pub(crate) fn host_soft_shadow_ranged<F: Fn([f32; 3]) -> f32>(
+///
+/// `pub` rather than `pub(crate)` because VB-SV0 rung S3 layer 3a
+/// (`tests/vb_sv0_leaf_oracle.rs`) diffs this mirror against the eDSL body that GENERATES the
+/// shipped HLSL, and an integration test is a separate crate. The whole module is already
+/// `#[cfg(any(test, feature = "goldens"))]`, so this widens no shipping surface.
+pub fn host_soft_shadow_ranged<F: Fn([f32; 3]) -> f32>(
     p: [f32; 3],
     n: [f32; 3],
     l: [f32; 3],
@@ -136,7 +141,11 @@ pub(crate) fn host_soft_shadow_ranged<F: Fn([f32; 3]) -> f32>(
 /// surface normal `n` from `p`, accumulating the `(h - d)` field-deficit weighted by
 /// `AO_FALLOFF^i`, and returning an occlusion factor in `[0, 1]` (1 = unoccluded).
 /// Mirrors the shader within ±3/255. `field` is the FROZEN field gateway.
-pub(crate) fn host_ao<F: Fn([f32; 3]) -> f32>(p: [f32; 3], n: [f32; 3], field: &F) -> f32 {
+///
+/// `pub` for the same reason as [`host_soft_shadow_ranged`]: VB-SV0 rung S3 layer 3b
+/// (`tests/vb_sv0_leaf_oracle.rs`) is an integration test, i.e. a separate crate. The module is
+/// `#[cfg(any(test, feature = "goldens"))]`, so no shipping build gains anything.
+pub fn host_ao<F: Fn([f32; 3]) -> f32>(p: [f32; 3], n: [f32; 3], field: &F) -> f32 {
     let mut occ = 0.0_f32;
     for i in 1..=5u32 {
         let h = (i as f32) * AO_STEP;

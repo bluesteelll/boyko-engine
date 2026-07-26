@@ -71,11 +71,17 @@ pub const SHADOW_HIT_EPS: f32 = 2.0 * 0.001;
 /// SYMBOLICALLY (`FIELD_LIPSCHITZ_L`).
 ///
 /// The literal is the COMMITTED shader's `1.41421356` VERBATIM (the single-source discipline
-/// the other GPU-shape consts use, e.g. `M2_REGULA_DENOM_EPS`), NOT
-/// `core::f32::consts::SQRT_2` — the Eval value must spell the committed GPU literal so the
-/// Eval control-flow oracle mirrors the shader's march on each sample. `SQRT_2`'s f32 is a
-/// DIFFERENT bit pattern, so the lints (which suggest it / its lower precision) are
-/// deliberately suppressed.
+/// the other GPU-shape consts use, e.g. `M2_REGULA_DENOM_EPS`) rather than
+/// `core::f32::consts::SQRT_2` — the Eval value must SPELL the committed GPU literal so a reader
+/// diffing this file against `sdf_field.hlsli` sees one token, not two spellings of one number.
+///
+/// ⚠️ The reason is provenance, NOT arithmetic. An earlier revision of this doc claimed
+/// "`SQRT_2`'s f32 is a DIFFERENT bit pattern"; it is not — MEASURED, `1.41421356f32` and
+/// `core::f32::consts::SQRT_2` are both `0x3fb504f3`, so substituting one for the other would
+/// change no result of this oracle. In a module whose whole subject is bit-exactness a wrong
+/// bit-pattern claim is the kind of thing a later reader builds on, so it is corrected here
+/// instead of deleted. The lints (`approx_constant` suggests `SQRT_2`; `excessive_precision`
+/// notes the extra digits) are suppressed because the spelling is deliberate.
 #[allow(clippy::approx_constant, clippy::excessive_precision)]
 pub const FIELD_LIPSCHITZ_L: f32 = 1.41421356;
 

@@ -500,6 +500,244 @@ fn sdf_soft_shadow_ranged_matches_edsl_emit() {
     );
 }
 
+/// VB-SV0 rung S3 LAYER 1 — the INCLUDE-CONTRACT precondition pin, in EVERY consumer of the
+/// shared header, DERIVED from the shader directory rather than listed here.
+///
+/// # Why this is its OWN test and not the tail of `sdf_soft_shadow_ranged_matches_edsl_emit`
+///
+/// It was written there first, and two things argue against leaving it: a failure would report
+/// under a name that says "the generator drifted", which is not what broke; and the assertions
+/// above it would MASK it — a red on the generator pin means these tails are never examined at
+/// all, so two independent defects would surface one at a time. Layers are supposed to fail
+/// independently.
+///
+/// # Why the selection is DERIVED and not spelled out
+///
+/// The first version of this pin quantified over the three VB tails only, and that was a hole
+/// with a name: `deferred_pbr.hlsl` is the FOURTH consumer (rung S2's §4.1 move put the leaf
+/// there), it is subject to the identical ordering contract, and a `deferred_pbr.hlsl` that
+/// violated it would fail to COMPILE while passing this entire CPU suite. A hard-coded list is
+/// also how the gate goes stale in the other direction: the fifth consumer is added, nobody
+/// remembers this file, and the new one is silently uncovered. So the set is read off the
+/// shipped tree — every `.hlsl`/`.hlsli` that carries the `#include` is checked — and
+/// [`SHADOW_LEAVES_MIN_CONSUMERS`] only asserts that the four known ones did not vanish.
+#[test]
+fn sv0_shadow_leaf_consumers_satisfy_include_contract() {
+    //
+    // The assertions above prove the shared header's body IS the generator's output. They say
+    // NOTHING about whether a consumer can legally include it. `sdf_shadow_leaves.hlsli` opens
+    // with an explicit INCLUDE CONTRACT: `field_distance` (which itself needs
+    // `StructuredBuffer<uint> Buf : register(t0)` declared FIRST) plus the five-name shadow
+    // tuning block must all be in scope BEFORE the `#include`. HLSL has no module system, so
+    // that contract is enforced by nothing but textual ordering — delete the const block from
+    // one consumer and the failure is a DXC error in a file the author was not editing, which is
+    // exactly the class of breakage a text pin should catch at `cargo test` time instead.
+    //
+    // ORDER is asserted, not merely presence. A `.contains()` for each token would pass on a
+    // consumer that declared its consts AFTER the include, which does not compile. Comparing
+    // byte offsets is what actually encodes "in scope BEFORE", the words the contract uses.
+    let consumers = sv0_shadow_leaf_consumers();
+    let found: Vec<&str> = consumers.iter().map(|(name, _)| name.as_str()).collect();
+
+    for required in SHADOW_LEAVES_MIN_CONSUMERS {
+        assert!(
+            found.contains(&required),
+            "{required} no longer contains `{SHADOW_LEAVES_INCLUDE}` (VB-SV0 §4.1). The three VB \
+             lit-producer tails plus the deferred resolve are the whole reason the shared header \
+             exists, and a consumer that dropped the include either forked its own copy or \
+             silently lost the SV0 term. Derived consumer set: {found:?}"
+        );
+    }
+
+    for (name, src) in &consumers {
+        let include_at = src
+            .find(SHADOW_LEAVES_INCLUDE)
+            .expect("invariant: the selection is BY this substring");
+
+        // The `Buf @ t0` precondition. `sdf_field.hlsli` declares no binding of its own; every
+        // consumer must have bound the edit-list SSBO first or `field_distance` cannot compile.
+        //
+        // Comment lines are EXCLUDED, and that is not defensive tidiness: `deferred_pbr.hlsl:156`
+        // quotes this exact token inside the prose above the declaration, so a bare
+        // `src.find(BUF_T0_DECL)` returns the COMMENT's offset — five lines before the real
+        // `[[vk::binding(10)]]` at `:161`. The ordering assertion below would then be comparing a
+        // comment's position against the include's, and a tree that moved the DECLARATION after
+        // the include (which does not compile) would pass. Found by mutating this file's binding
+        // number and reading the red, which pointed at the comment.
+        let (buf_at, decl_line) = find_decl_line(src, BUF_T0_DECL).unwrap_or_else(|| {
+            panic!(
+                "{name} must declare `{BUF_T0_DECL}` — `sdf_field.hlsli`'s own include \
+                 contract requires `Buf` in scope FIRST, and `sdf_shadow_leaves.hlsli` reaches \
+                 the field only through `field_distance`. (Mentions inside `//` comments do not \
+                 count; this looks for the DECLARATION.)"
+            )
+        });
+        assert!(
+            buf_at < include_at,
+            "{name} declares `Buf @ t0` at byte {buf_at}, AFTER the \
+             `{SHADOW_LEAVES_INCLUDE}` at byte {include_at}. The include contract says the \
+             precondition must be in scope BEFORE the include; this ordering does not compile"
+        );
+
+        // SV0's binding decision (plan §2.2) put that SSBO at Set-0 slot 10. The `register(t0)`
+        // token above carries the HLSL register but NOT the Vulkan binding, so the binding is
+        // asserted separately, on the SAME line, accepting BOTH shipped spellings: the VB tails
+        // write `[[vk::binding(10, 0)]]` and `deferred_pbr.hlsl:161` writes `[[vk::binding(10)]]`
+        // (set 0 by default). Only the SLOT is pinned; the set is left to those two spellings.
+        assert!(
+            decl_line.contains("[[vk::binding(10)]]")
+                || decl_line.contains("[[vk::binding(10, 0)]]"),
+            "{name} declares `Buf` at a Vulkan binding other than Set-0 slot 10 — the line is \
+             `{decl_line}`. SV0's §2.2 binding decision is slot 10 in set 0, and all ten \
+             perturbed `.spv` rows carry that interface delta"
+        );
+
+        // The const block. These five names are quoted verbatim from the header's own contract;
+        // `GRAD_H` / `FIELD_LIPSCHITZ_L` are excluded deliberately because they arrive through
+        // `sdf_field.hlsli` rather than the consumer's own tuning block.
+        //
+        // Matched on the DECLARATION, not on the bare spaced token this pin first used. A
+        // `find(" SHADOW_K ")` is satisfied by the word inside a comment, so deleting the
+        // declaration while any earlier prose mentioning it survived would leave the gate GREEN —
+        // a false green that happens to be unreachable today only because no such comment exists
+        // above the block in any consumer. That is luck, not a gate.
+        for const_name in SHADOW_LEAVES_REQUIRED_CONSTS {
+            let decl_at = find_static_const_decl(src, const_name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{name} does not declare `{const_name}`, which \
+                         `sdf_shadow_leaves.hlsli`'s INCLUDE CONTRACT requires in scope before \
+                         the `#include`. Each VB tail's tuning block is a VERBATIM mirror of \
+                         `deferred_pbr.hlsl`'s (plan §4.2); `sv0_consts_match_deferred_and_marcher` \
+                         pins the VALUES, this pins their PRESENCE"
+                    )
+                });
+            assert!(
+                decl_at < include_at,
+                "{name} declares `{const_name}` at byte {decl_at}, AFTER the \
+                 `{SHADOW_LEAVES_INCLUDE}` at byte {include_at} — the include contract requires \
+                 it in scope BEFORE the include"
+            );
+        }
+    }
+
+    eprintln!(
+        "S3 layer 1: include contract satisfied by {} DERIVED consumers of \
+         sdf_shadow_leaves.hlsli: {found:?}",
+        consumers.len()
+    );
+}
+
+/// The `#include` line every SV0 consumer reaches the shared leaves through (VB-SV0 §4.1).
+const SHADOW_LEAVES_INCLUDE: &str = "#include \"sdf_shadow_leaves.hlsli\"";
+
+/// The edit-list SSBO declaration `sdf_field.hlsli`'s own include contract requires in scope
+/// before it is included.
+///
+/// This token carries the HLSL REGISTER (`t0`) only — it deliberately contains no Vulkan binding
+/// number, because the four consumers spell the attribute two different ways
+/// (`[[vk::binding(10, 0)]]` in the VB tails, `[[vk::binding(10)]]` in `deferred_pbr.hlsl:161`).
+/// SV0's Set-0 slot-10 decision (plan §2.2) is asserted separately by the caller, against the
+/// same declaration LINE, accepting both spellings.
+const BUF_T0_DECL: &str = "StructuredBuffer<uint> Buf : register(t0)";
+
+/// The five names `sdf_shadow_leaves.hlsli`'s INCLUDE CONTRACT names verbatim. `GRAD_H` and
+/// `FIELD_LIPSCHITZ_L` are NOT here: the contract sources those from `sdf_field.hlsli`, not from
+/// the consumer's own tuning block.
+const SHADOW_LEAVES_REQUIRED_CONSTS: [&str; 5] = [
+    "MAX_IT",
+    "SHADOW_K",
+    "SHADOW_MINT",
+    "SHADOW_MINT_STEP",
+    "SHADOW_HIT_EPS",
+];
+
+/// The first NON-COMMENT line containing `token`, as `(byte offset of the line, the line)`.
+///
+/// The `//`-prefix skip is the whole point: HLSL headers in this tree quote their own declarations
+/// in the prose above them, so a plain `str::find` locates the documentation rather than the code
+/// and any position-based reasoning built on it is wrong by however far the comment sits from the
+/// declaration.
+fn find_decl_line<'a>(src: &'a str, token: &str) -> Option<(usize, &'a str)> {
+    let mut offset = 0usize;
+    for line in src.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        if !trimmed.trim_start().starts_with("//") && trimmed.contains(token) {
+            return Some((offset, trimmed));
+        }
+        offset += line.len();
+    }
+    None
+}
+
+/// The byte offset of the `static const <type> NAME = ...;` line declaring `name`, or `None`.
+///
+/// Declaration-anchored on purpose: the LHS must be exactly two whitespace-separated tokens (the
+/// type and the name) before the `=`, so a mention of `name` inside a comment or an expression
+/// cannot stand in for the declaration. The offset is the start of the LINE, which is what the
+/// caller's `decl_at < include_at` ordering comparison wants.
+fn find_static_const_decl(src: &str, name: &str) -> Option<usize> {
+    const PREFIX: &str = "static const ";
+    let mut offset = 0usize;
+    for line in src.split_inclusive('\n') {
+        if let Some(after) = line.trim_start().strip_prefix(PREFIX)
+            && let Some(eq) = after.find('=')
+        {
+            let mut lhs = after[..eq].split_whitespace();
+            if let (Some(_ty), Some(decl_name), None) = (lhs.next(), lhs.next(), lhs.next())
+                && decl_name == name
+            {
+                return Some(offset);
+            }
+        }
+        offset += line.len();
+    }
+    None
+}
+
+/// The consumers of `sdf_shadow_leaves.hlsli` that must NEVER stop consuming it: the three VB
+/// lit-producer tails SV0 compiles into (plan §4.3 — `vb_geo` is deliberately not one of them, and
+/// `vb_shadow_vis` does not include the geometry fetch at all) plus the deferred resolve, which
+/// is where the leaf lived before §4.1 moved it into the shared header.
+///
+/// This is a MINIMUM, not the selection: [`sv0_shadow_leaf_consumers`] derives the actual set from
+/// the shipped tree so a fifth consumer is covered the day it appears. This list exists only so
+/// that a consumer LOSING the include reds instead of shrinking the gate silently.
+const SHADOW_LEAVES_MIN_CONSUMERS: [&str; 4] = [
+    "deferred_pbr.hlsl",
+    "vb_resolve.comp.hlsl",
+    "vb_shade.comp.hlsl",
+    "vb_shade_split.comp.hlsl",
+];
+
+/// Every committed shader that consumes `sdf_shadow_leaves.hlsli`, DERIVED by scanning the crate's
+/// shader directory for the `#include`.
+///
+/// Returned as `(name, source)` pairs sorted by name, with CRLF normalized so a caller's byte
+/// offsets mean the same thing on either line-ending convention.
+fn sv0_shadow_leaf_consumers() -> Vec<(String, String)> {
+    let dir = format!("{}/shaders", env!("CARGO_MANIFEST_DIR"));
+    let entries = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("invariant: {dir} must exist next to this crate: {e}"));
+
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry.expect("invariant: the shader directory must be readable");
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !(name.ends_with(".hlsl") || name.ends_with(".hlsli")) {
+            continue;
+        }
+        let src = std::fs::read_to_string(entry.path())
+            .unwrap_or_else(|e| panic!("invariant: shaders/{name} must be readable: {e}"))
+            .replace("\r\n", "\n");
+        if src.contains(SHADOW_LEAVES_INCLUDE) {
+            out.push((name, src));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 #[test]
 fn m2_surface_hit_refine_matches_edsl_emit() {
     // The m2_surface_hit REFINE LOOP+TAIL span (Inc 4b.2 — the production analytic-residual

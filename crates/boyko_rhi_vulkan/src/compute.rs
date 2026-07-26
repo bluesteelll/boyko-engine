@@ -2871,6 +2871,18 @@ pub const SDF_VIEW_HALF_EXTENT: f32 = SDF_HALF_EXTENT;
 /// `worldZ = CAM_Z - T_MAX` to stored depth `1.0`).
 pub const SDF_TRACE_T_MAX: f32 = SDF_T_MAX;
 
+/// The march step budget every host SDF marcher in this module runs — `sdf_soft_shadow`'s
+/// `[loop]` trip count. Public mirror of the private `SDF_MAX_IT`, in the same shape as
+/// [`SDF_TRACE_T_MAX`] above.
+///
+/// It is `pub` because VB-SV0 rung S3 layer 5 (`tests/vb_sv0_leaf_oracle.rs`) PINS it against the
+/// shipped shaders' `MAX_IT`, and an integration test is a separate crate. Before that pin the
+/// constant was executed by `goldens::host_soft_shadow_ranged` — the mirror side of layer 3a's
+/// bit-exactness — while being held by nothing: MEASURED, doubling it to `256` left all ten S3
+/// tests green, because the layer-3a fixture's rays terminate by occluder hit or by `t > t_max`
+/// and never by exhausting the budget, so the truncation point is not observable in the result.
+pub const SDF_TRACE_MAX_IT: u32 = SDF_MAX_IT;
+
 /// The PERSPECTIVE mesh-depth normalizer (`gbuffer_mrt.fs` encodes `md =
 /// length(eye_rel) / MESH_DEPTH_T_MAX`; the marcher decodes `t_mesh = md *
 /// MESH_DEPTH_T_MAX` on the CAM_PERSPECTIVE arm). DECOUPLED from the marcher's
