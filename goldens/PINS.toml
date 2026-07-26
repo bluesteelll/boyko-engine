@@ -658,7 +658,7 @@ test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\tmp\vb_taa.bmp"
 width           = 512
 height          = 512
-sha256_software = "6eaca7457c5a8f7c73e446fcf545cef7d0c46ae2b81a1c9115f68cdaba897185"
+sha256_software = "c4d3f81704b6b871643b3460a0517a27f3b39154f16321d4c0c779f59e1e0a7f"
 sha256_hwrt     = "6eaca7457c5a8f7c73e446fcf545cef7d0c46ae2b81a1c9115f68cdaba897185"
 
 [vb_taa.env]
@@ -687,7 +687,7 @@ test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\tmp\vb_taa_rcas.bmp"
 width           = 512
 height          = 512
-sha256_software = "b695fe80d73534779693a208bc3d346e9a1314bedbe9cc1d1a0adae1b5a69518"
+sha256_software = "01e06ef87093910957a5393a2f9f530b0b25c4b338ff69fa7202e56a8378df16"
 sha256_hwrt     = "b695fe80d73534779693a208bc3d346e9a1314bedbe9cc1d1a0adae1b5a69518"
 
 [vb_taa_rcas.env]
@@ -825,7 +825,7 @@ test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\tmp\vb_both_taa.bmp"
 width           = 512
 height          = 512
-sha256_software = "61dc2630b15a08712f95be5983a6bd75ffbf03650266857ed62c10cb03b81230"
+sha256_software = "5285d35b5ddfccdff142eac5edf4d2ae0a10ef6aa3867a4d2ebc4b4073e9287a"
 sha256_hwrt     = "61dc2630b15a08712f95be5983a6bd75ffbf03650266857ed62c10cb03b81230"
 
 [vb_both_taa.env]

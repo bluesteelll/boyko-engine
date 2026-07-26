@@ -1,5 +1,13 @@
 # VB-SV0 — SDF soft-shadow + contact-AO on mesh, inlined into the VB lit-producer tails
 
+**Status:** DESIGN, **Rev 6** — NOT YET APPROVED. **S0, S1, S1.5 and S2 have SHIPPED against it**
+(`189d063`, `9b53365`, `9dffe39`, `c878b3f`); Rev 6 folds back the three plan-rooted defects those
+rungs exposed — §4.2's unscoped face normal (an S2 P0: the dark path paid for a feature that is
+off), §4.5's inverted NaN claim (a NaN comes out **black**, not inert), and §7 clause 4's
+inability to distinguish the residual it had already bounded from a real OFF-path defect.
+
+*(Rev 5 header retained below for the revision trail.)*
+
 **Status:** DESIGN, **Rev 5** — NOT YET APPROVED. Stage 2 of the "finish VB completely" campaign
 (Stage 1 = VB-P1 clustered cull, COMPLETE; Stage 3 = VB-P4 GPU-driven raster, out of scope).
 Rev 1 drew **3 P0**; Rev 2 answered them and drew **3 new P0**; Rev 3 closed those by experiment
@@ -486,16 +494,48 @@ while the two copies compute different things — the gate green for exactly the
 
 `vb_geom_fetch` already holds the three world-space triangle vertices in registers
 (`vb_geom_fetch.hlsli:536-538`), so the geometric face normal costs one `cross` + one `normalize`
-and **no extra memory traffic**:
+and **no extra memory traffic**.
+
+⚠️ **Rev 6 — SCOPE CORRECTION, and it is this section's wording that caused an S2 P0.** Rev 5 said
+"compute it in the fetch" and never said *when*. Taken literally, the computation lands in the
+fetch's straight-line result construction guarded only by the source-level `#ifdef VB_SV0`, which
+all three tails always define — so **every covered VB pixel pays a `cross`, a `dot`, an `rsqrt`,
+two branches and a conditional negate for a feature that is OFF.** That is exactly what S2's first
+implementation did, and the review caught it in the committed SPIR-V. Measured before the fix:
+`vb_resolve.comp.spv` 47824 → 57828 B, `OpLoopMerge` 3 → 7, the chain sitting in the entry-reachable
+block 83 disassembly lines *before* the mode was even loaded. **No gate could see it** — gate (d) is
+image byte-identity, blind to cost by construction, and S1.5/S5 both measure the ARMED path.
+
+**Binding rule, therefore:** the *fetch* may only carry the three triangle positions — register
+copies of values it already holds, so genuinely zero new ALU and zero new traffic — and the
+**arithmetic runs inside the tails' armed branch**:
 
 ```hlsl
-float3 fn = cross(world_p1 - world_p0, world_p2 - world_p0);
+// in the fetch, under #ifdef VB_SV0: three copies, nothing computed
+result.tri_p0 = world_p0;  result.tri_p1 = world_p1;  result.tri_p2 = world_p2;
+
+// in each tail, INSIDE `if ((sv0_mode & VB_SDF_MESH_SHADOW_BIT) != 0u)`:
+float3 fn = cross(geo.tri_p1 - geo.tri_p0, geo.tri_p2 - geo.tri_p0);
 float  l2 = dot(fn, fn);
-// Degenerate-triangle guard: fall back to the interpolated normal rather than normalize(0) -> NaN.
-float3 face_n = (l2 > FACE_N_EPS2) ? (fn * rsqrt(l2)) : normalize(result.world_normal);
+// Degenerate guard — see below: it must test FINITENESS, not just a floor.
+float3 face_n = (isfinite(l2) && l2 > FACE_N_EPS2) ? (fn * rsqrt(l2)) : normalize(geo.world_normal);
 // Winding-independent orientation: agree with the shading normal.
-result.face_normal = (dot(face_n, result.world_normal) < 0.0) ? -face_n : face_n;
+return (dot(face_n, geo.world_normal) < 0.0) ? -face_n : face_n;
 ```
+
+**The guard tests finiteness, not only a floor, and the direction is counter-intuitive.** Rev 5
+reasoned about `l2 == 0` only (`rsqrt(0) = +inf`, `fn * inf = NaN`, so fall back). The complementary
+case inverts which branch is dangerous: for a non-finite world position `l2` is `+inf`,
+`+inf > FACE_N_EPS2` is **true**, `rsqrt(+inf)` is `0`, and `fn * 0` is `inf * 0` = **NaN** — so the
+*taken* branch produces the NaN, not the fallback. (`l2 == NaN` is already safe: `NaN > eps` is
+false.) A finiteness test in front covers all three shapes at once.
+
+**A gate enforces the scoping, because a comment cannot.** `vb_sv0_face_normal_chain_is_gated_not_
+straight_line` disassembles each committed producer, locates the chain unambiguously (the `Cross`
+whose result feeds a self-`dot`), and walks its block's predicate backward to the mode read over
+**data *and* control** edges — data alone is insufficient, because DXC lowers `a && b` into
+short-circuit control flow and the combining `OpPhi` depends on the SV0 bit only through the control
+edge. Its red is measured, not argued.
 
 **Why geometric.** `cross(p1-p0, p2-p0)` is computed from *actual world positions*, so it is the true
 plane normal under **any** affine instance transform. The interpolated normal is `mul(m3, n)` with
@@ -593,8 +633,28 @@ ao_final = min(ao_final, sv0_ao);       // before spec_ao — the SAME shape vb_
 `min` on floats is exact and commutative/associative for non-NaN, so SV0's combine is
 **order-independent** with respect to the existing CSM combine, the SSAO combine
 (`vb_shade_split.comp.hlsl:460`), and the split tail's HWRT denoised-visibility combine (`:51-54`).
-Under NaN, `NMin` returns the non-NaN operand — a degenerate term **cannot** poison the pixel; it
-degrades to "no SV0 contribution". That is the correct failure direction and is asserted in S3.
+⚠️ **Rev 6 — THE NaN CLAIM HERE IS WRONG, AND IT INVERTS IN THE DANGEROUS DIRECTION.** Rev 5 said:
+*"Under NaN, `NMin` returns the non-NaN operand — a degenerate term cannot poison the pixel; it
+degrades to 'no SV0 contribution'."* The premise about `NMin` is true and the conclusion still does
+not follow, because **the leaf never returns NaN in the first place.** Its tail is
+`clamp(res, 0.0, 1.0)`, which lowers to `NMin(NMax(NaN, 0), 1)` = **0** — i.e. **fully shadowed**.
+So a NaN march origin does not contribute nothing; it turns the pixel **black**. The combine's
+`min` then propagates that 0 faithfully, exactly as it should.
+
+Consequences, all binding:
+* §4.2's degenerate guard is what actually delivers the "no contribution" property, not the
+  combine — which is why Rev 6 widened it to a finiteness test.
+* **S3 layer 4's NaN assertion fails as written** and must be restated before it is authored: the
+  correct assertion is that a degenerate triangle takes the *fallback* and never reaches the leaf,
+  **not** that a NaN term is inert once it does.
+* R7's row is corrected in §8: `NMin`/`NMax` are exploited once (march termination, §4.4), not
+  twice.
+
+**This is the third time this campaign has found a NaN claim that inverts under `NMin`/`NMax`** —
+the VB-P1e hierarchy claim, `ray_gen`'s absorbing element, and now this. The pattern is worth
+naming: `NMin`/`NMax` make NaN *disappear*, so reasoning that treats NaN as propagating is wrong,
+and reasoning that treats "NaN disappears" as "the term is skipped" is **also** wrong — it silently
+selects the other operand, which at a `clamp` floor is the most extreme value in range.
 
 ---
 
@@ -1134,12 +1194,42 @@ The stage is **reverted** — not softened, not re-scoped mid-flight — if any 
    the same fixture. The threshold is a ratio to a **measured sibling that already ships this visual
    at an accepted cost**, not a predicted number — the campaign's refuted-cost-model lesson. In
    `[1×, 2×]` it ships with the number recorded; above 2×, revert.
-4. **S4 (i) cannot be made byte-identical.** A persistent difference on an analytically-`1.0` term
-   means the OFF path is not inert, and no amount of re-blessing fixes that. **Read this clause
-   together with clause 1, and in that order** — it has force only once S2(f) has shown the gate can
-   go red. If the probe comes back BLIND, a byte-identical result here is uninformative rather than
-   reassuring, and clause 1 fires first. Rev 3 removed the assumption that the probe *would* fire
-   (§3.3), so this clause no longer inherits one.
+4. **S4 (i) cannot be made byte-identical — RESTATED IN REV 6, BECAUSE S2 MEASURED IT.** Rev 5's
+   wording was *"a persistent difference on an analytically-`1.0` term means the OFF path is not
+   inert, and no amount of re-blessing fixes that."* Read literally that fires on S2's result, and
+   it should not, because it conflates two magnitudes the plan itself had already distinguished.
+
+   **What S2 measured.** With SV0 compiled in and `sv0_mode == 0`, 21 of 24 pins are byte-identical
+   and three move: `vb_taa`, `vb_taa_rcas`, `vb_both_taa` — every VB×TAA pin with a mesh leg, while
+   every VB pin without TAA holds and `vb_sdf_taa` holds. Isolated by substitution: installing the
+   **pre-SV0 `.spv`** under the **S2 host code** reproduces `vb_taa`'s pin exactly, so the host half
+   is inert and the module is what moves the frame. Quantified by diffing the two dumps:
+   **one pixel of 262144, differing by one 8-bit code of 255.**
+
+   That is the ≤1-ULP residual §3.4.1 named, bounded and accepted as unobservable — now observed,
+   at the smallest magnitude the format can express. It is arithmetically consistent with §11.1: a
+   1-ULP step near 1.0 is ~1.2e-7 against an 8-bit quantisation step of 3.9e-3, so across 786432
+   channels the expected number of boundary crossings is order-24, and one is the same order on the
+   low side. It is **not** the discontinuous amplification a TAA neighbourhood clamp would produce
+   — that moves many pixels, not one.
+
+   **The clause therefore separates two cases, and only one of them is an abort:**
+   * **ABORT** — a difference whose changed-pixel count or per-channel magnitude exceeds the
+     boundary-crossing budget above. That is a real OFF-path defect, and no re-blessing fixes it.
+   * **NOT an abort** — a difference at or below that budget. It is the documented residual
+     arriving, not a new fault, and the correct response is to re-bless **with the count and
+     magnitude recorded in the commit**, so a later widening is visible as a widening.
+
+   **Rev 6 takes the second branch for S2's result, and the reasoning is a cost comparison rather
+   than a preference.** The alternative is §7 clause 1's `-D` fallback, which makes the OFF path a
+   separate module that is byte-identical *by construction*. Its price is not the +10 `.spv` — it
+   is §3.2's arithmetic: the variant matrix is **multiplicative**, so a fourth axis makes the *next*
+   VB tail feature cost 40 variants instead of 20, permanently and compoundingly. Paying that
+   forever to prevent a one-pixel one-code difference no observer can see is the wrong trade, and
+   §12 Q5 asked exactly this question. **Read this clause together with clause 1, and in that
+   order** — it has force only once S2(f) has shown the gate can go red; if the probe comes back
+   BLIND, a byte-identical result here is uninformative rather than reassuring, and clause 1 fires
+   first.
 
 5. **The cost instrument is not reproducible** — S1.5's or S5's cross-session spread exceeds 10%.
    Added in Rev 4 because Rev 3 left it dangling: S1.5 is advertised as able to kill the stage, its
@@ -1171,7 +1261,7 @@ Named first are the ones this campaign has actually hit.
 | R4 | **Session drift read as a regression.** | The phantom regression on this hardware. | Interleaved paired A/B, warmup discarded, 3 sessions, spread reported — enforced in S1.5 and S5. |
 | R5 | **Instrument that silently does nothing.** | The flat-curve knob. | S0 validates the harness against a deliberately mutated recompile before it is trusted; S1.5 has its own null-mutation control; S2(f) is G2's own control. |
 | R6 | **Silent OOB with `robustBufferAccess` OFF.** | No layer reports it. | SV0 adds **no** new indexing — `Buf[0]` is already clamped by `min(Buf[0], MAX_SDF_EDITS)` (`sdf_field.hlsli:204`). Binding 10 is always a valid descriptor (`scene.edit_list` is non-`Option`). `MAX_IT = 128u` caps every march path including NaN (§4.4), so no device hang is possible. |
-| R7 | **`NMin`/`NMax` NaN semantics.** | HLSL `min`/`max` → `NMin`/`NMax`, returning the non-NaN operand. | Exploited deliberately twice: guarantees march termination (§4.4) and makes a degenerate term degrade to "no contribution" rather than poison the pixel (§4.5). Asserted in S3(4). |
+| R7 | **`NMin`/`NMax` NaN semantics — and the trap of reasoning ABOUT them.** | HLSL `min`/`max` → `NMin`/`NMax`, which return the non-NaN operand. **Rev 6: this campaign has now had a NaN claim invert under these three times** (VB-P1e's hierarchy, `ray_gen`'s "absorbing element", §4.5's "no contribution"). | Exploited deliberately **once**: march termination (§4.4). §4.5's second claim is **WITHDRAWN** — the leaf's `clamp` tail makes a NaN come out as `0` (fully shadowed, a BLACK pixel), not as an inert term. The property is delivered by §4.2's finiteness guard instead, and S3(4)'s assertion is restated to match. Standing rule: `NMin`/`NMax` make NaN *vanish*, so "NaN propagates" is wrong **and** "NaN is skipped" is wrong — the other operand is silently selected, which at a clamp floor is the most extreme value in range. |
 | R8 | **`sdf_ao` has no generator** — hand-authored HLSL the eDSL does not own, a live tension with CLAUDE.md's shader rule. **Rev 4: the consequence runs deeper than the copy count** — it also means the AO leaf has **no host `Eval` oracle**, so S3(3b) is a tolerance check where the shadow leaf gets bit-exactness. | — | §4.1 cuts copies 4 → 2 via the shared header and pins the survivor pair with `sdf_ao_body_matches_shared_header`, plus §4.1's promoted const pin (layer 5) for the three AO consts the body pin structurally cannot see. The tension is **not** resolved and is stated, not hidden; writing a generator would perturb the frozen marcher `.spv` and is out of scope. The asymmetry between 3a and 3b is labelled at the point of use, so nobody reads "S3's oracle" as one uniform instrument. |
 | R9 | **A tail silently omitted.** | The P0-class hole this design closes. | S4's selection is all 10 variants with per-variant executing assertions; the three demonstrated revert-one-source mutations each red exactly their own rows. |
 | R10 | **Non-uniform scale.** | `vb_geom_fetch.hlsli:539-542`. | Out of scope, stated plainly (§4.2). The bias is robust; the shading normal is not. |
