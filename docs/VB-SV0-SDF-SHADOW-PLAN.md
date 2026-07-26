@@ -1,5 +1,24 @@
 # VB-SV0 — SDF soft-shadow + contact-AO on mesh, inlined into the VB lit-producer tails
 
+**Status:** DESIGN, **Rev 7** — NOT YET APPROVED. **S0, S1, S1.5, S2 and S3 have SHIPPED against it**
+(`189d063`, `9b53365`, `9dffe39`, `c878b3f`, `24612e8`). Rev 7 folds back what S3 measured:
+
+* **§4.5's Rev 6 correction was itself wrong, one leaf over.** I wrote that a NaN march origin
+  blackens the pixel via the shadow leaf's `clamp`. Measured: the shadow accumulator **cannot become
+  NaN** — `min`/`max` launder it twice — so that leaf returns `1.0`, fully **lit**, and host and
+  device **agree**. The property holds on the **AO** leaf, where the accumulation is a plain add.
+  The binding conclusion is unchanged; the demonstration moves.
+* **§6 S3's layer-3b tolerance is respecified as ABSOLUTE, not ULP**, because the leaf ends in a
+  cancellation: a bounded *relative* error becomes an unbounded ULP count as the term saturates, so
+  a ULP threshold would be set by whichever darkest sample the fixture happened to contain — a
+  property of the fixture, not of the leaf.
+* **§6 S3's stated reason for that tolerance is corrected.** Rev 6 said host `powi` vs HLSL `pow`
+  makes bit-exactness unreachable. Measured over 4096 samples: **0 ULP** — Rust's `powi` and `powf`
+  agree bit-for-bit here. The unreachable comparison is host vs the **device's** `pow`, which no
+  host test performs, so the bound is a *portability margin* rather than a measured gap.
+
+*(Rev 6 header retained below for the revision trail.)*
+
 **Status:** DESIGN, **Rev 6** — NOT YET APPROVED. **S0, S1, S1.5 and S2 have SHIPPED against it**
 (`189d063`, `9b53365`, `9dffe39`, `c878b3f`); Rev 6 folds back the three plan-rooted defects those
 rungs exposed — §4.2's unscoped face normal (an S2 P0: the dark path paid for a feature that is
@@ -633,6 +652,32 @@ ao_final = min(ao_final, sv0_ao);       // before spec_ao — the SAME shape vb_
 `min` on floats is exact and commutative/associative for non-NaN, so SV0's combine is
 **order-independent** with respect to the existing CSM combine, the SSAO combine
 (`vb_shade_split.comp.hlsl:460`), and the split tail's HWRT denoised-visibility combine (`:51-54`).
+⚠️⚠️ **Rev 7 — REV 6's CORRECTION BELOW IS ITSELF WRONG, ONE LEAF OVER. S3 measured both.** Rev 6
+concluded "a NaN march origin turns the pixel **black**" and attributed it to the **shadow** leaf.
+Measured, on both leaves, under the shipped `NMin`/`NMax` lowering:
+
+| leaf | host (Rust) | shipped lowering | agree? |
+|---|---|---|---|
+| shadow (`sdf_soft_shadow_ranged`) | `1.0` | `1.0` | **yes — and it is fully LIT, not black** |
+| AO (`sdf_ao`) | `NaN` | **`0.0` (BLACK)** | **no — they invert** |
+
+**The shadow accumulator cannot become NaN at all.** `res = min(res, SHADOW_K*d/t)` drops a NaN `d`
+under both `f32::min` and `NMin`, and `t += max(d/L, SHADOW_MINT_STEP)` drops it again — so its
+`clamp` tail never sees one and it returns `1.0`. The black-pixel property holds on the **AO** leaf,
+where `occ += (h − d)·AO_FALLOFFⁱ` is a plain addition with nothing to launder the NaN, so it
+reaches `clamp(1 − AO_STRENGTH·occ, 0, 1)` and the two hosts invert.
+
+**Rev 6's binding conclusion survives unchanged** — §4.2's finiteness guard is the only load-bearing
+protection, and S3 layer 4's assertion is the restated one. Only the *demonstration* moves, to the
+leaf where the property actually holds; the shipped test is named for both halves
+(`nan_is_inert_in_the_shadow_leaf_but_turns_the_ao_leaf_black`) precisely so the distinction cannot
+be lost again.
+
+**Read the rest of this box as the Rev 6 text it is** — its reasoning about `clamp` lowering is
+correct, it simply pointed at the wrong leaf. Keeping it visible rather than rewriting it is
+deliberate: this is now the **fourth** NaN claim this campaign has had to correct under
+`NMin`/`NMax`, and the revision trail is the evidence for R7's standing rule.
+
 ⚠️ **Rev 6 — THE NaN CLAIM HERE IS WRONG, AND IT INVERTS IN THE DANGEROUS DIRECTION.** Rev 5 said:
 *"Under NaN, `NMin` returns the non-NaN operand — a degenerate term cannot poison the pixel; it
 degrades to 'no SV0 contribution'."* The premise about `NMin` is true and the conclusion still does
@@ -1261,7 +1306,7 @@ Named first are the ones this campaign has actually hit.
 | R4 | **Session drift read as a regression.** | The phantom regression on this hardware. | Interleaved paired A/B, warmup discarded, 3 sessions, spread reported — enforced in S1.5 and S5. |
 | R5 | **Instrument that silently does nothing.** | The flat-curve knob. | S0 validates the harness against a deliberately mutated recompile before it is trusted; S1.5 has its own null-mutation control; S2(f) is G2's own control. |
 | R6 | **Silent OOB with `robustBufferAccess` OFF.** | No layer reports it. | SV0 adds **no** new indexing — `Buf[0]` is already clamped by `min(Buf[0], MAX_SDF_EDITS)` (`sdf_field.hlsli:204`). Binding 10 is always a valid descriptor (`scene.edit_list` is non-`Option`). `MAX_IT = 128u` caps every march path including NaN (§4.4), so no device hang is possible. |
-| R7 | **`NMin`/`NMax` NaN semantics — and the trap of reasoning ABOUT them.** | HLSL `min`/`max` → `NMin`/`NMax`, which return the non-NaN operand. **Rev 6: this campaign has now had a NaN claim invert under these three times** (VB-P1e's hierarchy, `ray_gen`'s "absorbing element", §4.5's "no contribution"). | Exploited deliberately **once**: march termination (§4.4). §4.5's second claim is **WITHDRAWN** — the leaf's `clamp` tail makes a NaN come out as `0` (fully shadowed, a BLACK pixel), not as an inert term. The property is delivered by §4.2's finiteness guard instead, and S3(4)'s assertion is restated to match. Standing rule: `NMin`/`NMax` make NaN *vanish*, so "NaN propagates" is wrong **and** "NaN is skipped" is wrong — the other operand is silently selected, which at a clamp floor is the most extreme value in range. |
+| R7 | **`NMin`/`NMax` NaN semantics — and the trap of reasoning ABOUT them.** | HLSL `min`/`max` → `NMin`/`NMax`, which return the non-NaN operand. **Rev 7: FOUR corrections now** — VB-P1e's hierarchy, `ray_gen`'s "absorbing element", §4.5's "no contribution" (Rev 6), and **Rev 6's own replacement, which named the wrong leaf** (Rev 7). Three of the four were written by someone who had just read the rule. **Standing procedure, not just a standing rule: do not reason about a NaN path — EVALUATE both hosts and print the pair.** S3's `nan_is_inert_in_the_shadow_leaf_but_turns_the_ao_leaf_black` is the shape; it settled in one run what four revisions of prose got wrong. | Exploited deliberately **once**: march termination (§4.4). §4.5's second claim is **WITHDRAWN** — the leaf's `clamp` tail makes a NaN come out as `0` (fully shadowed, a BLACK pixel), not as an inert term. The property is delivered by §4.2's finiteness guard instead, and S3(4)'s assertion is restated to match. Standing rule: `NMin`/`NMax` make NaN *vanish*, so "NaN propagates" is wrong **and** "NaN is skipped" is wrong — the other operand is silently selected, which at a clamp floor is the most extreme value in range. |
 | R8 | **`sdf_ao` has no generator** — hand-authored HLSL the eDSL does not own, a live tension with CLAUDE.md's shader rule. **Rev 4: the consequence runs deeper than the copy count** — it also means the AO leaf has **no host `Eval` oracle**, so S3(3b) is a tolerance check where the shadow leaf gets bit-exactness. | — | §4.1 cuts copies 4 → 2 via the shared header and pins the survivor pair with `sdf_ao_body_matches_shared_header`, plus §4.1's promoted const pin (layer 5) for the three AO consts the body pin structurally cannot see. The tension is **not** resolved and is stated, not hidden; writing a generator would perturb the frozen marcher `.spv` and is out of scope. The asymmetry between 3a and 3b is labelled at the point of use, so nobody reads "S3's oracle" as one uniform instrument. |
 | R9 | **A tail silently omitted.** | The P0-class hole this design closes. | S4's selection is all 10 variants with per-variant executing assertions; the three demonstrated revert-one-source mutations each red exactly their own rows. |
 | R10 | **Non-uniform scale.** | `vb_geom_fetch.hlsli:539-542`. | Out of scope, stated plainly (§4.2). The bias is robust; the shading normal is not. |
