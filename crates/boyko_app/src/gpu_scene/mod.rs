@@ -4250,13 +4250,17 @@ impl GpuSceneBundles {
     /// `cluster_config` sizes the buffers/push (`ClusterConfig::default()` at every current call
     /// site — no owner-facing override is wired yet).
     ///
-    /// VB-P1e D11/H4: `hier_cull` selects WHICH of the two cull arms is built — `false` (the
-    /// production default; `boyko_app::runner`'s `BOYKO_VB_HIER_CULL` selection is unset on
-    /// every golden/production boot) builds the base 64-wide `cluster_cull_spirv()` arm exactly
-    /// as before; `true` builds the `-D HIER=1` 256-wide `cluster_cull_hier_spirv()` arm this
-    /// rung arms (H3 proved on hardware that the two arms emit the same per-froxel sets in the
-    /// same order). Exactly ONE pipeline is ever built per boot — [`Self::cluster_cull_pipeline`]
-    /// holds whichever arm was selected, and [`Self::cluster_cull_hier`] records WHICH one.
+    /// VB-P1e D11/H4: `hier_cull` selects WHICH of the two cull arms is built. `true` — **the
+    /// production default since the arm-default flip**, and what `boyko_app::runner` selects when
+    /// `BOYKO_VB_HIER_CULL` is unset — builds the `-D HIER=1` 256-wide
+    /// `cluster_cull_hier_spirv()` arm; `false` builds the base 64-wide `cluster_cull_spirv()`
+    /// arm, kept selectable as the opt-out and as the equality oracle's permanent reference.
+    /// H3 proved on hardware that the two arms emit the same per-froxel sets in the same order,
+    /// and H5 proved the frame is byte-identical through the whole pipeline, so the flip is a
+    /// pure performance change (22.5× on the cull at N=512, and 1.4× FASTER even at N=8 — there
+    /// is no low-N penalty to trade against). Exactly ONE pipeline is ever built per boot —
+    /// [`Self::cluster_cull_pipeline`] holds whichever arm was selected, and
+    /// [`Self::cluster_cull_hier`] records WHICH one.
     ///
     /// # Panics
     /// Panics (`expect("invariant: ...")`) on any RHI create failure — mirrors every other VB

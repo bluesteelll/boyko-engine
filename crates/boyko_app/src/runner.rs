@@ -654,9 +654,28 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
             // compare the hierarchical arm against itself — this campaign's recurring
             // reproducibility failure class). Any other value panics loudly rather than
             // guessing.
+            // VB-P1e follow-up: the DEFAULT is now the hierarchical arm. Decided by numbers, per
+            // this project's standing rule that performance decides a render fork — not deferred
+            // to the owner, because nothing about it is a values call:
+            //
+            // * H4 measured the cull at N=512 at **22.5x** the base arm (paired protocol, 6
+            //   consecutive pairs at -95.6% with 0.03pp spread), 26.2x on the collinearity-fixed
+            //   rig, and 9.3x on the dense in-frustum rig — the honest lower bound.
+            // * There is no low-N penalty to trade against it: at N=8 the hierarchical arm is
+            //   **1.4x FASTER** than the base one, which is the outcome the design feared and did
+            //   not get.
+            // * Byte-identity is proven end to end, not merely in the cull's buffers: H3's device
+            //   oracle showed both arms emit the same per-froxel sets in the same order, and H5
+            //   re-rendered `vb_mesh_froxel` with the arm on to `fb220ff3...` — the base arm's own
+            //   pin, through the whole pipeline to the final frame.
+            //
+            // What is NOT decided here, and stays the owner's: **retiring** the base arm. It
+            // remains fully built, selectable, and the equality oracle's permanent reference —
+            // which is also why the knob keeps both directions rather than becoming a
+            // hierarchical-only switch.
             let hier_cull = match std::env::var("BOYKO_VB_HIER_CULL") {
                 Ok(v) => parse_hier_cull_env(&v),
-                Err(std::env::VarError::NotPresent) => false,
+                Err(std::env::VarError::NotPresent) => true,
                 Err(std::env::VarError::NotUnicode(v)) => panic!(
                     "invariant: BOYKO_VB_HIER_CULL must be `0` or `1` (valid UTF-8), got {v:?}"
                 ),
@@ -666,7 +685,11 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
             // silent "no win, no regression" from an accidental self-comparison.
             eprintln!(
                 "boyko_app: VB-P1e froxel cull arm = {} (BOYKO_VB_HIER_CULL)",
-                if hier_cull { "HIER (-D HIER=1, 256-wide)" } else { "BASE (64-wide, default)" }
+                if hier_cull {
+                    "HIER (-D HIER=1, 256-wide, default)"
+                } else {
+                    "BASE (64-wide, opt-out)"
+                }
             );
             host.gpu.build_froxel_light_cull(
                 ctx,
