@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 5** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 6** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -32,7 +32,35 @@ adversarial pass that produced every correction below.
 | Denominators written down | **HOLDS** — verified against the sibling exactly |
 | §12 anchors re-derived | **HELD FOR §12 ONLY** — the body kept the stale ones, including the `:334`→`:344` anchor §12 itself called the most expensive of the set. Fixed at Rev 4 |
 
-**Rev 5 closes the remainder of that review** — the items Rev 4 acknowledged but did not land:
+**Rev 6 — the fifth consecutive revision told it overclaimed, and the score is the point.** Rev 5
+claimed eight fixes: **two held, two partial, four did not**, plus five fresh defects. The three
+that blocked approval were all this campaign own signature family.
+
+* **R0f-prime gate (b) PASSED FOR ITS OWN NAMED RED MUTATION.** With m = measured median, c = claim,
+  s = spread, Rev 5 gate s*m < |m - c| is **symmetric**: it passes for a target already beaten
+  *and* for one absurdly far away, reding only in a narrow band around the status quo. Its stated
+  mutation — *set the claim below the measured floor* — works out to s*m < m(1-s), i.e.
+  s < 0.5, **true for every s <= 0.25 the ceiling permits.** Rev 6 gate is two-sided: the claim
+  must be an **improvement** *and* a **resolvable** one, and both mutations were re-derived until
+  they fire.
+* **The P0 ordering rule named ONE rung for TWO instruments.** In absolute mode the floor is
+  measured at R0f-prime, two rungs after R0e, with the claim already filled and visible — so
+  blocking R0e constrained nothing on the branch section 11 calls expected. Now attached per mode.
+* **K1 firing instrument could not be built where the plan put it, and would have been inert
+  anyway.** A fragment shader cannot count frustum/backface survivors — they never reach it — and a
+  survivor count includes every occluded triangle: ~2.5 M against ~2.07 M covered pixels, so it
+  could never fire, exactly like submitted/covered before it. **R0 is now REFUTATION-ONLY for
+  K1.** Naming a rung that cannot be built is worse than naming none.
+
+Two more worth recording for *where* they sat: r0e_min_quads = 200 was presented as the sibling
+SV0_BENCH_MIN_QUADS, which is **30** — 200 is SV0_S1_5_SESSION_QUADS, a **measured**
+transcription. A measurement laundered as a pre-registered floor, frozen, **inside the section added
+to fix authored-constants-called-measured.** And section 3.2 stale-comment warning was itself stale:
+zero sites assert VB_IMPLEMENTED == false today, because 792d992 fixed all **19** this session.
+A warning about stale documentation went stale the ordinary way — the world was fixed and the
+warning was not re-derived.
+
+**Rev 5 closed the earlier remainder** — the items Rev 4 acknowledged but did not land:
 
 * **P0-5, gate (b) of R0f′ — a dimension error shipped twice.** `absolute_floor_source` is a
   *relative fraction*; Rev 4 compared it to a *millisecond target* and called it *"a genuine
@@ -251,7 +279,7 @@ raster-path decision, not independent of it.** R0 records this and touches none 
 ### 3.1 What imports geometry today
 
 **Exactly one mesh loader exists.** `MeshGpu::LOADERS` is a single-entry compile-time table
-(`mesh.rs:237`) holding `ObjMeshLoader`, whose `EXTENSIONS` is `&["obj"]` (`loaders/obj.rs:60`). It
+(`mesh.rs:238`) holding `ObjMeshLoader`, whose `EXTENSIONS` is `&["obj"]` (`loaders/obj.rs:60`). It
 decodes to `MeshData { vertices: Vec<Vertex>, indices: Vec<u32> }` and runs `generate_tangents` once
 over the whole mesh (`:94-96`). **There is no `.obj` file anywhere in the tree** — the loader has
 never been pointed at a committed asset.
@@ -263,18 +291,18 @@ The importer's *only* obligation is to produce a `MeshData`. Everything downstre
 | Seam | Contract | Anchor |
 |---|---|---|
 | `Vertex` | `#[repr(C)]`, **64 B** (static-asserted), `position`@0 / `normal`@12 / `color`@24 / `uv`@40 / `tangent`@48 | `mesh.rs:81-104` |
-| Index width | `Uint16` iff unique-vertex count ≤ `U16_INDEX_VERTEX_LIMIT`, else `Uint32`; the shader reads the width from `gMeshMeta[].index_width` | `mesh.rs:124`, `mesh_assets.rs:259-263` |
-| Device upload | `build_mesh_gpu(ctx, &vertices, &indices, geometry_table)` | `mesh_assets.rs:238-243` |
-| VB geometry slot | claimed **iff** a live table is threaded; otherwise the record carries `VB_GEOMETRY_RESERVED_SLOT` (`0`) | `mesh.rs:169`, `mesh_geometry_table.rs:66` |
+| Index width | `Uint16` iff unique-vertex count ≤ `U16_INDEX_VERTEX_LIMIT`, else `Uint32`; the shader reads the width from `gMeshMeta[].index_width` | `mesh.rs:124`, `mesh_assets.rs:273` |
+| Device upload | `build_mesh_gpu(ctx, &vertices, &indices, geometry_table)` | `mesh_assets.rs:252` |
+| VB geometry slot | claimed **iff** a live table is threaded; otherwise the record carries `VB_GEOMETRY_RESERVED_SLOT` (`0`) | `mesh.rs:170`, `mesh_geometry_table.rs:66` |
 | `gMeshMeta[]` row | `{index_width, vertex_count, index_count}` padded to 16 B; `tri_count = index_count / 3` | `mesh_geometry_table.rs:82-93`, `:116-118` |
-| Table capacity | `MESH_GEOMETRY_TABLE_CAPACITY = 4096` slots | `geometry_bindless.rs:61` |
+| Table capacity | `MESH_GEOMETRY_TABLE_CAPACITY = 4096` slots | `geometry_bindless.rs:62` |
 
 **The streamed path already threads the table.** `impl GpuUpload for MeshGpu` sets
 `type Aux = MeshGeometryTableSlot` and calls `build_mesh_gpu(ctx, &cpu.vertices, &cpu.indices,
-aux.0.as_mut())` (`gpu_upload.rs:50`, `:59`). So a **loader-decoded** mesh claims a real slot and is
+aux.0.as_mut())` (`gpu_upload.rs:51`, `:59`). So a **loader-decoded** mesh claims a real slot and is
 VB-visible. The **host-authored** primitives pass `None` at their own call site
-(`mesh_assets.rs:529`), and the explicit VB sibling is `MeshAssetsVbExt::register_mesh_vb`
-(`mesh_assets.rs:619-631`, `:647`), which every VB fixture uses.
+(`mesh_assets.rs:547`), and the explicit VB sibling is `MeshAssetsVbExt::register_mesh_vb`
+(`mesh_assets.rs:641`, `:647`), which every VB fixture uses.
 
 > ⚠️ **CORRECTED at Rev 4 — Rev 1 through Rev 3 all stopped one function too early, and the error
 > propagated into R0b's headline red mutation (§8).** Passing `None` is **not** the end of the
@@ -291,15 +319,24 @@ VB-visible. The **host-authored** primitives pass `None` at their own call site
 > the stale comments do not merely under-describe the arming, they describe a `None` path whose
 > consequences the code no longer has.
 
-> ⚠️ **A stale-documentation trap that will mislead the importer's author.**
-> `const VB_IMPLEMENTED: bool = true;` (`render_path_config.rs:128`), and the table resolves as
-> `path == VisibilityBuffer && mesh_leg && caps.storage_buffer_array_non_uniform_indexing`
-> (`:888-890`). But **at least six doc comments still assert it is `false`** —
-> `mesh_assets.rs:230` and `:290`, `runner.rs:572` and `:575`, `lib.rs:185`,
-> `mesh_geometry_table.rs:400`, `geometry_bindless.rs:43`, `device.rs:704`, and
-> `render_path_config.rs:25` itself. An author reading `build_mesh_gpu`'s doc concludes the
-> geometry table is never armed. R0b's second red mutation (§8) exists to catch exactly the class
-> of bug that belief produces.
+> ⚠️ **WITHDRAWN at Rev 6 — the trap this block described has been FIXED, and the block outlived
+> the fact.** Rev 1–Rev 5 warned that *"at least six doc comments still assert it is `false`"* and
+> enumerated nine anchors. **Zero of them do today:** `grep -rn VB_IMPLEMENTED crates/ --include=*.rs
+> | grep -ci false` returns **0**, and `const VB_IMPLEMENTED: bool = true;` is at
+> `render_path_config.rs:130`. The rot was cleared at `792d992`, which found **19** stale sites
+> across 12 files — not the six or nine this block claimed — and rewrote every one.
+>
+> **The block is kept, struck through, rather than deleted, because it is a specimen.** A warning
+> about stale documentation went stale itself, and it did so in the ordinary way: the world was
+> fixed and the warning was not re-derived. That is the same mechanism the warning was about, one
+> level up, and it is why §12's blanket *"every line was verified"* claim keeps turning out false.
+> **A document that describes a hazard must be re-checked when the hazard is addressed — the fix
+> and the warning are not automatically committed together.**
+>
+> What survives, and what R0b's second mutation is now sourced from, is the *narrower* property
+> §3.2 states above: `backfill_vb_geometry_slots` is a **boot one-shot**, so a mesh registered
+> **after** boot keeps `VB_GEOMETRY_RESERVED_SLOT`. That is real, verified, and produces a mutation
+> that actually reds.
 
 ### 3.3 The format decision — decided here, with reasons, not escalated
 
@@ -324,7 +361,7 @@ VB-visible. The **host-authored** primitives pass `None` at their own call site
 ### 3.4 The residency hazard, named because nothing else names it
 
 `build_mesh_gpu` creates **both** buffers as `MemoryLocation::HostVisibleCoherent`
-(`mesh_assets.rs:295-305` for the vertex buffer; the index buffer follows). Every mesh in this
+(`mesh_assets.rs:320` for the vertex buffer; the index buffer follows). Every mesh in this
 engine lives in host-visible memory, seeded once and read-only thereafter (`mesh.rs:129`). At 64 B
 per vertex a multi-million-triangle corpus mesh is a large host-visible allocation, and on a
 discrete GPU without resizable BAR that heap is small. **R0b's gate includes "the corpus's largest
@@ -406,7 +443,7 @@ statistic, and nothing reads the visibility buffer back to the host. `vb_id` is 
 `copy_image_to_buffer` already exists in the RHI (`boyko_rhi/src/encoder.rs:115`; impl at
 `rhi_impl/encoder.rs:1031`). The census is armed by an env knob and threaded as an `Option`, so an
 unarmed frame records **zero** extra commands — the exact discipline
-`Option<&VbTimestampCollector>` documents (`gpu_timing.rs:238-243`) and the reason the golden
+`Option<&VbTimestampCollector>` documents (`gpu_timing.rs:247`) and the reason the golden
 command stream stays byte-identical.
 
 ### 5.4 The statistic — a bracket, because the obvious one is capped at 1
@@ -647,9 +684,9 @@ that R0's harness must be built to avoid:
 
 1. counterbalance (ABBA), and **report** the order-bias residual with its own band;
 2. carry a **null control** — two identical configurations — with a **pre-registered** maximum, as
-   `SV0_NULL_CONTROL_MAX_FRACTION` (`:312`) does, fixed before the run and never widened;
+   `SV0_NULL_CONTROL_MAX_FRACTION` (`:378`) does, fixed before the run and never widened;
 3. **measure** the counter quantum by tick GCD and report it alongside `timestampPeriod`
-   (`:359`, `:368`, `:377`);
+   (`:94-96` the RESOLUTION field list, `:448`/`:463` the transcribed bounds, `:751-772` the consistency check);
 4. state the **resolvable delta with confidence intervals**, and make the effective spread gate
    `max(stated gate, measured median lattice / |median|)` — **but only where the lattice term is
    licensed by evidence.** ⚠️ Rev 3 transferred the `max()` and dropped the guard, which turned a
@@ -820,7 +857,7 @@ again;
 the census's modal bucket is the analytic bucket;
 (c) the census's covered-pixel total agrees with `sv0_oracle::rasterize`'s `covered_count` **on that
 same procedural fixture, at 512²**, within a **pre-registered** tolerance fixed before the run —
-scoped to the fixture because the oracle takes one mesh and translation-only instances (§5.5) and
+scoped to the fixture because the oracle takes one mesh and translation-only instances (§5.7) and
 cannot reach the corpus at any resolution;
 (d) the ladder is driven from `[census].resolution_ladder` in the **thresholds** file, whose sha256
 the test re-asserts, the census produces one row per rung, **and the readback's own dimensions equal
@@ -858,8 +895,19 @@ discipline.
 separate processes** under `[census].cross_run_gate` — **the sha256 of the readback itself**;
 (b) `D_est`, the convergence check, the histogram and both report-only statistics are produced at
 **every** ladder rung, so the resolution-dependence is on the page rather than in the choice of one
-row; (c) the histogram's **two-bucket shift** holds across each adjacent rung pair (§5.5) — the
-scaling law every conclusion rests on, checked three times rather than assumed once.
+row; (c) the histogram's modal bucket moves between adjacent rungs by the **per-pair `log2` of the
+actual area ratio**, within `[k1_instrument].histogram_shift_tolerance_buckets`, with the residual
+reported — over the **two** non-excluded pairs (1080p→1440p, 1440p→2160p), rung 0 being excluded as
+a different frustum (§5.7).
+
+> ⚠️ **Rev 6 fixed this clause, and it is worth naming why it survived Rev 5.** §5.7 replaced the
+> two-bucket constant and explained at length that it was *red by construction* — and R0d, **the
+> rung that implements it**, still said *"the two-bucket shift … checked three times"* with a
+> cross-reference to §5.5. So the frozen file and the rung disagreed about the decision rule: an
+> implementer coding from §8 builds the gate that cannot go green; one coding from the TOML builds
+> a different gate. That is Rev 2's inverted `all_three_below` string exactly, and it shows that
+> **rewriting the explanation is not rewriting the gate.** "Three times" was also wrong once rung 0
+> was excluded — two pairs, not three.
 
 *The gate is that the instrument produced a reproducible number — **not** that the number is
 favourable.* K1 is adjudicated in §9, deliberately, so that an unfavourable result cannot be
@@ -896,7 +944,10 @@ changing `vb_id`:
   pin is byte-identical, and (a) must red. This is the mutation that proves the gate reads `vb_id`
   and not the image;
 * drop the ladder to its decision row only → (b) reds;
-* scale the fixture so triangles cross a bucket boundary at one rung only → (c) reds.
+* (c)'s mutation must run **on the corpus**, since that is what R0d renders — R0c owns the
+  procedural fixture, and Rev 5's version of this mutation named the fixture, which R0d never
+  touches. The corpus mutation: **substitute one ladder rung's histogram with another rung's** →
+  the per-pair `log2` residual for both affected pairs exceeds tolerance → (c) reds.
 
 ### R0e — the decidability statement — **K3's test**
 
@@ -905,9 +956,23 @@ the written-pair bitmask of §7; a counterbalanced ABBA harness over the corpus 
 control; `crates/boyko_app/tests/vg_r0_decidability.rs`, all session numbers transcribed as
 literals.
 
-**Blocked until the claim exists.** R0e's test asserts `claim.mode` and its mode's delta field are
-**not `PENDING`** before it measures anything, and fails if they are. That ordering *is* the P0's
-fix (§0.1): the number the floor will be compared against must predate the floor.
+**Blocked until the claim exists, and R0e PINS it.** R0e's test asserts `claim.mode` and its mode's
+delta field are **not `PENDING`** before it measures anything, and fails if they are.
+
+**R0e additionally transcribes the filled claim value as a MEASURED-discipline literal alongside the
+floor**, in the same commit — `[ordering].claim_pinned_into_r0e_literals`. ⚠️ Rev 5 asserted that
+boolean as `true` while §8 listed no such literal and **§8 R0f said the ONE gate reads the claim
+"from a file"** — so the post-fill edit window §0.1 identified stayed wide open in the rung specs
+while a data file claimed it closed. R0f now asserts the file still equals R0e's pinned literal;
+a claim edited between the two rungs reds.
+
+⚠️ **And the block attaches per mode, which Rev 5 got wrong.** `[ordering]` named R0e for both
+instruments — but in `absolute` mode §8 R0f′ states plainly that R0e's paired-delta floor is
+unusable and R0f′ needs its own. The floor the claim is compared against is then measured **two
+rungs later**, with the claim already filled and visible. Blocking R0e constrained nothing there.
+`claim_blocks_rung_absolute = "R0f_prime"` — **the rule attaches to whichever rung measures the
+floor for that mode**, which is the campaign's single P0 and had been unguarded on the branch §11
+calls expected.
 
 **Gate (one, three parts), every fraction AND ITS DENOMINATOR read from
 [`VG-CAMPAIGN-THRESHOLDS.toml`](VG-CAMPAIGN-THRESHOLDS.toml) rather than minted here:**
@@ -1077,7 +1142,29 @@ The rung is **reverted or the campaign re-scoped** — not softened mid-flight �
    > way" was one conjunct and a weaker consequence of it — and the real decisive statistic was the
    > modal bucket, whose cross-rung derivation this ladder cannot support (§5.7).
 
-   When K1 fires, cluster LOD has no mechanism of action on
+   > ⚠️ **Rev 6: R0 CANNOT FIRE K1, and that is now a stated scope boundary rather than a rung
+   > nobody wrote.** Rev 5 named the firing instrument as a *"frustum + backface survivor counter"*
+   > in `vb_raster.fs.hlsl`, *"scoped as its own rung"* — and §8 contains no such rung. It is wrong
+   > twice, the second fatally:
+   > **(a) wrong stage** — a fragment shader runs only for fragments that survived rasterisation
+   > and, with early-Z, the depth test, i.e. approximately the *visible* set that `vb_id` already
+   > caps; frustum- and backface-culled triangles never reach it, and §2 of this very plan records
+   > that the per-primitive lane *"is not independently reachable"* without a mesh shader, one draw
+   > per meshlet, or a software rasteriser.
+   > **(b) probably inert regardless** — apply §5.4's own killing argument to the replacement:
+   > survivors include every *occluded* in-frustum front-facing triangle, and depth complexity on a
+   > multi-million-triangle corpus is where the count lives. A 5 M-triangle asset in frame gives
+   > ~2.5 M survivors against ~2.07 M covered pixels at 1080p, so `survivors/covered < 1.0` cannot
+   > hold **whatever the visible triangle size is**. That is `submitted/covered`'s self-satisfaction
+   > with a 2–4× constant knocked off — the same defect, one instrument later.
+   >
+   > So `[k1].k1_fire_at_r0 = false`. **R0's claim is that it can REFUTE K1 cheaply and soundly**,
+   > which is a real and sufficient deliverable. Firing needs an upper bound on *visible* density
+   > whose firing condition is demonstrably **not** precluded by R0b's own high-poly corpus gate —
+   > an unsolved design problem, recorded as unsolved, and out of R0's scope until someone solves
+   > it. Naming a rung that cannot be built is worse than naming none.
+
+   When K1 fires — which R0 cannot do — cluster LOD has no mechanism of action on
    this content — at **full detail**, i.e. at the ceiling any LOD scheme could ever see — and **the
    campaign is refuted as stated**. The disposition is the owner's: change the target content class
    (and re-run R0b–R0d against it), or stop. It is explicitly *not* "generate a denser corpus" —
@@ -1124,15 +1211,15 @@ The rung is **reverted or the campaign re-scoped** — not softened mid-flight �
 | R2 | **A procedural corpus makes K1 untestable.** | New, and it is why §4.2 rejects the cheapest corpus option. | The corpus is fetched real content; procedural geometry is confined to R0c's sensitivity control. |
 | R3 | **The harness measures its own resolution, or its A/B rides the ring.** | MEASURED in the sibling rung, both of them: a "spread" that was one median lattice step, and an ABAB phase perfectly aliased with `FRAMES_IN_FLIGHT == 2`. | §7 clauses 1, 3–4: ABBA with the residual reported; the quantum measured by tick GCD and the spread gate read against it. |
 | R4 | **`WAIT_BIT` readback hangs instead of failing.** | `gpu_timing.rs:344` documents the deadlock; three separate collectors exist because of it. | R0e's written-pair bitmask, asserted before the read. |
-| R5 | **Stale doc sends the importer down the `None` path.** | Verified: ≥6 comments still claim `VB_IMPLEMENTED == false` while `render_path_config.rs:128` says `true`. | R0b's second red mutation targets exactly this; fixing the comments is a separate one-line commit, deliberately not absorbed here. |
-| R6 | **Host-visible residency ceiling.** | `mesh_assets.rs:295-305`: every mesh buffer is `HostVisibleCoherent`. | R0b gate (d); the device-local + staging path is a named follow-up, not R0 work. |
+| R5 | **Stale doc sends the importer down the `None` path.** | Verified: ≥6 comments still claim `VB_IMPLEMENTED == false` while `render_path_config.rs:130` says `true`. | R0b's second red mutation targets exactly this; fixing the comments is a separate one-line commit, deliberately not absorbed here. |
+| R6 | **Host-visible residency ceiling.** | `mesh_assets.rs:320`: every mesh buffer is `HostVisibleCoherent`. | R0b gate (d); the device-local + staging path is a named follow-up, not R0 work. |
 | R7 | **The `vb_id` usage widening perturbs a golden.** | New. | R0c gate (a) over every VB pin, with a demonstrated red (record the copy unconditionally). |
 | R8 | **UE5 capture measures a different scene than our census.** | New — the two engines must load the same bytes. | §4.3: an asset that cannot be imported by both is not corpus material; R0a(c) pins the resolution across both. |
 | R9 | **Disk exhaustion masquerading as a build failure.** | This project's record: `target/` has filled this disk and surfaced as linker errors. | §11 records the measured headroom; R0a's record carries free-disk as a required field, and R0a's negative branch **re-reads** it at test time. |
-| R10 | **The claim is set to meet the floor.** The cheapest way to close the ONE gate is to write the number on the right after seeing the left. | The P0 of Rev 1 — **and of Rev 2, which answered it with a hash around the string `PENDING`.** | §0.1: the claim blocks **R0e**, the rung that measures the floor. Ordering, not hashing — it does not depend on anyone noticing an edit. |
-| R11 | **A statistic that cannot exceed its own threshold.** `visible_tri_per_covered_pixel ≤ 1` by construction, and K1 was phrased against ~1. | Found in Rev 1 by inspection; **Rev 2's replacement was inert for a different reason** — `submitted/covered < 1.0` is precluded by R0b's own high-poly corpus gate. | §5.5's ladder-convergence estimator: uncapped, tight, and self-validating, with a *not adjudicated* branch when the ladder has not converged. |
+| R10 | **The claim is set to meet the floor.** The cheapest way to close the ONE gate is to write the number on the right after seeing the left. | The P0 of Rev 1; of Rev 2, answered with a hash around the string `PENDING`; and of Rev 3–Rev 5, answered with an ordering rule that **named one rung for two instruments**. | §0.1 **plus** `[ordering]`: the claim blocks whichever rung measures the floor **for that mode**, R0e pins the filled value into its MEASURED literals, and R0f asserts the file still equals the pin. ⚠️ Rev 3–Rev 5 claimed here that this *"does not depend on anyone noticing an edit"* — **retracted**; ordering constrains commits, not knowledge, and party separation is what carries the weight. |
+| R11 | **A statistic that cannot exceed its own threshold.** | Rev 1: `visible_tri_per_covered_pixel ≤ 1` by construction. Rev 2: `submitted/covered < 1.0` precluded by R0b's corpus gate. **Rev 3–Rev 5: `D_est` capped at exactly 4.0 and a *lower* bound firing a kill.** Three instruments, one defect. | §5.6's directional split — `D_est` may only **refute** K1 — plus `[k1].k1_fire_at_r0 = false`, because the proposed firing instrument is both mis-sited (a fragment shader cannot see frustum/backface survivors) and **probably inert for the same reason Rev 2's was** (~2.5 M survivors vs ~2.07 M covered pixels). ⚠️ Rev 4's entry here called the estimator *"uncapped"*. |
 | R12 | **The census resolution silently decides K1.** Density scales as 1/resolution². | New in Rev 2 and the one fix that survived review. | Frozen ladder + frozen decision resolution; the curve is reported at every rung; **and the achieved extent is asserted**, because OS clamping is already a recorded hazard here at 512². |
-| R13 | **The most likely branch has no gate.** §11 measures no UE5 on this box. | New. | R0a's negative is re-derived over a **non-authored** search space (fixed volumes + the launcher manifest); R0f′ closes the inequality with its own absolute instrument. |
+| R13 | **The most likely branch has no gate.** §11 measures no UE5 on this box. | New — and it kept re-appearing: through Rev 5 the absolute branch had the ordering rule attached to the wrong rung **and** a gate (b) that passed for its own named red mutation. | R0a's negative is re-derived over **bounded documented authorities** (launcher manifest + the registry hives recording launcher *and* source builds), with residual blindness recorded. ⚠️ Rev 4's *"enumerate fixed volumes"* is **retracted** — a recursive walk of two ~240 GB volumes inside a `cargo test`, with false positives from any stray binary. R0f′'s gate is now two-sided (§8 R0f′). |
 | R14 | **A frozen file whose schedule requires it to change.** A tripwire that fires routinely carries no signal, and a routine re-record can launder a threshold edit. | **Measured in Rev 2 by inspection:** its recorded hash was *guaranteed* to break at the `corpus.arrangement` fill, before the first rung that asserted it. | The split: thresholds hashed and never edited; claim unhashed and gated by the `PENDING` sentinel. |
 | R15 | **A harness asked for a quantity its algebra removes.** | **Measured:** ABBA recovers `τ` by cancelling `μ`, `γ` and `β` — exactly what an absolute reading needs. Rev 2's R0f′ assumed otherwise. | `[absolute_mode]`: its own instrument, its own pre-registered ceiling, and the honest statement that absolute mode is ~2.5× weaker. |
 | R16 | **A literal transferred without its denominator.** | **Measured in Rev 2:** the sibling's 0.10 null-control gate moved from *armed delta* to *absolute pass median*, a ~20× weakening under which the precedent's own red event would have passed. | Denominators written down next to every fraction in `[decidability]`. |
@@ -1199,7 +1286,7 @@ assert), `:124` (`U16_INDEX_VERTEX_LIMIT`), `:137-186` (`MeshGpu`), `:169` (`geo
 `crates/boyko_render/src/mesh_assets.rs:238-243` (`build_mesh_gpu` signature), `:259-263` (index
 width), `:290` (**stale** `VB_IMPLEMENTED == false` comment), `:295-305`
 (`MemoryLocation::HostVisibleCoherent`), `:529` (`register_mesh` passes `None`), `:619-631`
-(`MeshAssetsVbExt`), `:647` (`register_mesh_vb` impl) ·
+(`MeshAssetsVbExt`), `:647` (`register_mesh_vb` trait decl; impl at `:669`) ·
 `crates/boyko_render/src/gpu_upload.rs:41-61` (`GpuUpload for MeshGpu`; `type Aux =
 MeshGeometryTableSlot` at `:50`; **the threaded call at `:59`**).
 
@@ -1211,7 +1298,7 @@ MeshGeometryTableSlot` at `:50`; **the threaded call at `:59`**).
 
 **Path resolution:** `crates/boyko_render/src/render_path_config.rs:25` (**stale** module-doc
 sentence), **`:128` (`const VB_IMPLEMENTED: bool = true;`)**, `:517` (`vb_geometry_table` field),
-`:888-890` (the predicate).
+`:890-892` (the predicate).
 
 **Encode / decode:** `crates/boyko_rhi_vulkan/shaders/vb_geom_fetch.hlsli:516`
 (`vb_geom_fetch` signature), **`:521` (`uint local_tri = raw_prim_id % tri_count;`)** ·

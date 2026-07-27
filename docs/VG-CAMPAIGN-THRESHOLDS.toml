@@ -22,9 +22,21 @@
 # Nothing in this file was tuned against a measurement: it is authored before the ingest path, the
 # census instrument, the census run, the harness and the reference capture exist.
 
-schema_version = 2
-frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 3"
+schema_version = 3
+frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 6"
 frozen_date = "2026-07-27"
+
+# THE EDIT DISCIPLINE, stated because Rev 4 and Rev 5 both edited this file in place while its
+# header said "never edited" and the plan's amendment table read "No amendment yet."
+#
+# The freeze BEGINS when R0a records this file's sha256. R0a has not run and no code exists, so
+# every edit so far is AUTHORING, not amendment -- legitimate, but it must be visible, which is
+# what schema_version and frozen_at_revision are for. Both were stale through Rev 4 and Rev 5.
+#
+# After R0a records the hash: no in-place edits. A change is a new plan revision plus a dated entry
+# in the plan's section 11.1, and the recorded hash is updated in the same commit, deliberately.
+freeze_begins_at = "R0a records the sha256"
+pre_r0a_edits_are_authoring_not_amendment = true
 
 # ---------------------------------------------------------------------------------------------
 # [census] — the resolution ladder. Frozen because density scales as 1/resolution^2, which makes
@@ -168,7 +180,14 @@ ladder_convergence_margin = 0.05
 # If the ladder has not converged, K1 is not adjudicated and the campaign is neither refuted nor
 # confirmed by density. The disposition is to extend the ladder upward (a new plan revision), NOT
 # to adjudicate on an underestimate.
-on_not_converged = "k1_not_adjudicated"
+# REV 6 CORRECTION -- Rev 5 made this unconditional and it contradicted the plan's own section 5.6.
+# Non-convergence means visible_tris is still RISING, i.e. D_est UNDERSTATES. An understatement
+# already at or above 1.0 still proves density >= 1. Convergence is a precondition for FIRING,
+# never for REFUTING -- and since Rev 6 makes K1 refutation-only at R0 (see [k1]), the unconditional
+# form would have blocked the ONLY outcome R0 can produce. That is a frozen file vetoing its own
+# plan's decisive case, which is the doc-rot class this campaign spent a session repairing.
+on_not_converged_refute_direction = "still_valid"   # D_est >= 1.0 refutes K1 regardless
+on_not_converged_fire_direction = "k1_not_adjudicated"
 
 # ---------------------------------------------------------------------------------------------
 # [k1] — the "no content, no mechanism" kill. Two conjuncts, BOTH pointing the same way.
@@ -223,8 +242,30 @@ k1_decision_rule = "cheap_census_may_only_REFUTE: d_est >= d_est_min => K1 dead;
 # for the same reason everything else in this file is: so it cannot be chosen by whoever measures
 # against it. Same value, because 1.0 IS the definition of the regime — but now applied to a
 # statistic that can soundly sit below it.
-k1_fire_requires = "upper_bound_survivor_count"
-k1_fire_rule = "survivor_tris_per_covered_pixel < 1.0 at decision_resolution"
+# REV 6 -- K1 IS REFUTATION-ONLY AT R0, and this is a scope decision, not a deferral.
+#
+# Rev 5 named a "frustum+backface survivor counter in vb_raster.fs.hlsl" as the firing instrument.
+# It is wrong twice, and the second reason is fatal to the idea rather than to the site:
+#
+#   (a) WRONG STAGE. A fragment shader runs for fragments that survived rasterisation and (with
+#       early-Z) the depth test -- i.e. approximately the VISIBLE set, the very quantity vb_id
+#       already caps. Frustum- and backface-culled triangles never reach it. And the plan's own
+#       section 2 records that the per-primitive lane "is not independently reachable" without a
+#       mesh shader, one draw per meshlet, or a software rasteriser.
+#
+#   (b) PROBABLY INERT ANYWAY. Apply section 5.4's own killing argument to the replacement:
+#       survivors include every OCCLUDED in-frustum front-facing triangle, and depth complexity on
+#       a multi-million-triangle corpus is exactly where the count lives. A 5M-triangle asset in
+#       frame yields ~2.5M survivors against ~2.07M covered pixels at 1080p, so
+#       survivors/covered < 1.0 cannot hold -- K1 could not fire whatever the visible triangle
+#       size. That is `submitted/covered`'s self-satisfaction again with a 2-4x constant removed.
+#
+# So R0 does not fire K1. It can REFUTE it, cheaply and soundly, and that is R0's whole claim.
+# Firing requires an upper bound on VISIBLE density whose firing condition is shown NOT to be
+# precluded by R0b's own high-poly corpus gate -- a design problem, not a scheduling one, and out
+# of R0's scope until someone solves it.
+k1_fire_at_r0 = false
+k1_fire_instrument_status = "UNSOLVED -- needs an upper bound not precluded by R0b's corpus gate"
 
 # The modal-bucket conjunct is RETIRED from the decision. It is redundant against D_est, its
 # cross-rung derivation is unsupported by this ladder, and its direction was inverted in Rev 3.
@@ -331,8 +372,31 @@ absolute_floor_ms_rule = "absolute_session_spread * measured_chain_median_ms"
 # a target.
 absolute_distance_ms_rule = "abs(measured_chain_median_ms - claim.absolute_chain_ms)"
 
-# The gate. Both sides milliseconds, and it is about whether we can SEE the gap we intend to close.
-absolute_gate_rule = "absolute_floor_ms < absolute_distance_ms"
+# REV 6 CORRECTION -- Rev 5's gate `absolute_floor_ms < absolute_distance_ms` was SYMMETRIC, and
+# its own named red mutation PASSED. With m = measured chain median, c = claim, s = spread:
+#
+#   c > m (target ALREADY BEATEN)      => distance = c-m, gate passes whenever c > m(1+s).
+#                                         Rev 5's prose asserted "a target already passed now reds".
+#                                         False outside a +/- s*m band.
+#   c < s*m (Rev 5's OWN red mutation) => distance = m-c > m(1-s), floor = s*m, so the gate is
+#                                         s*m < m(1-s)  <=>  s < 0.5, TRUE for every s <= 0.25 the
+#                                         ceiling permits. THE MUTATION PASSES.
+#
+# A gate that cannot go red for its own named mutation is this campaign's #1 defect family,
+# committed in the clause rewritten to eliminate it, on the branch section 11 calls expected.
+#
+# The fix is that the gate is TWO-SIDED, because the claim must be both an IMPROVEMENT and a
+# RESOLVABLE one. Rev 5 encoded only the second half and then described the first in prose.
+absolute_gate_rule = "claim.absolute_chain_ms < measured_chain_median_ms  AND  absolute_floor_ms < absolute_distance_ms"
+
+# Red mutations that ACTUALLY fire, re-derived rather than re-worded:
+#   set c > m                       -> the first conjunct reds (nothing to close; the campaign's
+#                                      premise on this branch is already satisfied)
+#   set c inside (m - s*m, m)       -> the second reds (the gap is inside our own resolution)
+# Note what is deliberately NOT red: an absurdly AMBITIOUS target (c -> 0) passes, and that is
+# correct. This gate adjudicates DECIDABILITY, not achievability -- a 1000x claim is trivially
+# resolvable, and whether it is sane is section 13 Q1's business, not the instrument's.
+absolute_gate_red_mutations = ["c_greater_than_m", "c_within_floor_of_m"]
 
 # ---------------------------------------------------------------------------------------------
 # [scope] — what the claim is ABOUT. Rev 2 compared a per-pass floor to a frame-total claim with
@@ -369,7 +433,16 @@ require_pass_correspondence_map_at = "R0a"
 [ordering]
 # The claim must be answered before the rung that MEASURES the floor, not before the rung that
 # compares. Duplicated here from the claim file's [gating] so that deleting it there reds the hash.
-claim_blocks_rung = "R0e"
+# REV 6 CORRECTION -- Rev 5 named ONE rung for TWO instruments, which left the P0 vacuous on the
+# branch section 11 measures as expected. In nanite_relative mode R0e measures the floor, so
+# blocking R0e is the mechanism. In ABSOLUTE mode the plan states plainly that R0e's paired-delta
+# floor is unusable and R0f' "needs its own instrument" -- so the floor the claim is compared
+# against is measured TWO RUNGS LATER, with the claim already filled and visible in the tree.
+# Blocking R0e constrains nothing about the number R0f' will produce.
+#
+# The rule attaches to THE RUNG THAT MEASURES THE FLOOR FOR THAT MODE.
+claim_blocks_rung_nanite_relative = "R0e"
+claim_blocks_rung_absolute = "R0f_prime"
 
 # The stronger half, adopted from sv0_deferred_term_bench.rs's NAN-as-UNMEASURED sentinel ("so a
 # forgotten transcription cannot produce a passing gate"): the harness refuses to EMIT the floor
@@ -402,7 +475,14 @@ r0c_oracle_coverage_tolerance = 0.02
 # (SV0_BENCH_MIN_PAIRS / SV0_BENCH_MIN_QUADS) — reused rather than minted, same as [decidability].
 r0e_ci_max_fraction = 0.10
 r0e_min_pairs = 30
-r0e_min_quads = 200
+# REV 6 CORRECTION. Rev 5 froze this as 200 and attributed it to the sibling's SV0_BENCH_MIN_QUADS.
+# That constant is `SV0_BENCH_MIN_QUADS: usize = SV0_BENCH_MIN_PAIRS` = **30**. 200 is
+# SV0_S1_5_SESSION_QUADS -- the transcribed OBSERVED quad count, under the sibling's "MEASURED
+# values -- do not edit these literals" banner. So Rev 5 took a measurement, called it a
+# pre-registered protocol floor, attributed it to a constant carrying a different value, and froze
+# it -- inside the very section added to fix "three authored constants called measured", with the
+# error running the other way. Corrected to the sibling's actual floor.
+r0e_min_quads = 30
 
 # ---------------------------------------------------------------------------------------------
 # [hash_assertion] — REV 5. Where this file's sha256 is actually checked.

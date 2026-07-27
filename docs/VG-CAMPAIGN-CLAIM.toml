@@ -21,10 +21,19 @@
 #   the rung that measures the floor — not R0f, the rung that compares them. R0e's test refuses to
 #   run while the field it will be compared against is still PENDING.
 #
-# That is the whole mechanism, and it is stronger than a hash because it does not depend on anyone
-# noticing an edit: the number that could be tuned to fit the floor simply has to exist before the
-# floor does. The commit that fills this file necessarily precedes the commit that carries R0e's
-# MEASURED literals, and the history records it.
+# RETRACTED AT REV 6 -- this file said the mechanism "is stronger than a hash because it does not
+# depend on anyone noticing an edit". The plan's section 0.1 retracted that at Rev 4 and this
+# header kept asserting it for two revisions, which is the doc-rot class the campaign is about.
+#
+# The truth: ordering constrains COMMITS, not KNOWLEDGE. The floor is observed by running an
+# #[ignore]d bench and reading its stdout; the claim blocks the ASSERTION, which runs later on
+# transcribed literals. Run dirty, read the floor, `git checkout .`, fill to fit -- commit order
+# preserved, knowledge order not.
+#
+# What actually carries the weight is PARTY SEPARATION (section 13 Q1 is an owner call and the
+# owner does not run the harness), plus two mechanisms in the hashed thresholds file: the harness
+# withholding the floor while the claim is PENDING, and R0e pinning the filled value into its own
+# MEASURED literals so R0f cannot compare against a file that moved afterwards.
 #
 # THIS FILE IS NOT HASHED, DELIBERATELY.
 # Its fields are REQUIRED to change exactly once, from PENDING to a value. Hashing a file whose
@@ -113,3 +122,22 @@ r0f_blocked_by = [
     "quality.nanite_max_pixels_per_edge (nanite_relative mode only)",
     "claim.nanite_relative_per_pass_regression_max (nanite_relative mode only)",
 ]
+
+# REV 6 -- this row was MISSING through Rev 5, although [quality]'s own comment said arbiter blocks
+# R0f'. The machine-readable gating table had no entry for the branch section 11 measures as the
+# EXPECTED one, which is the same structural omission D3 named, in the table meant to prevent it.
+r0f_prime_blocked_by = [
+    "claim.mode",
+    "claim.absolute_chain_ms",
+    "quality.arbiter",
+    "corpus.arrangement",
+]
+
+# REV 6 -- the ordering rule is DUPLICATED into the hashed docs/VG-CAMPAIGN-THRESHOLDS.toml
+# ([ordering].claim_blocks_rung_*). That file names the RUNG; this file names the FIELDS. Deleting
+# a field from a *_blocked_by row above leaves the hashed rung name perfectly satisfied and the
+# hash green -- so the two MUST be asserted equivalent by the rung that reads them, or the
+# duplication is decoration. Whoever implements the gating check asserts both directions:
+# every rung named on the hashed side has a non-empty row here, and every row here names a rung
+# the hashed side knows.
+gating_must_agree_with_hashed_ordering = true
