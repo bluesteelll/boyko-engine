@@ -88,8 +88,10 @@
 //! `boyko_app::runner` reads [`RenderPathConfig`] + the consumer configs via `world.try_resource`
 //! (graceful default), calls [`resolve_render_path`] ONCE at boot, stores the
 //! [`ResolvedRenderPath`] on the host struct beside `ssaa_armed`, and threads the plain value into
-//! `GpuSceneBundles::scene()` → a field on `GBufferScene` — DEAD-BUT-THREADED at R1 (nothing reads
-//! it downstream yet; R2 wires the declarator dispatch).
+//! `GpuSceneBundles::scene()` → a field on `GBufferScene`, where R2's per-path declarator
+//! dispatch reads it. (This paragraph said "DEAD-BUT-THREADED at R1 — nothing reads it downstream
+//! yet" for several rungs after R2 landed.) The [`ResolvedRenderPath`] **Resource** is a separate
+//! question, and there the R1 answer still holds — see that type's own doc.
 
 use boyko_macros::Resource;
 
@@ -468,6 +470,39 @@ impl ShadowSources {
     pub const fn bits(self) -> u32 {
         self.0
     }
+
+    /// Decision 7's structural exclusion: [`Self::SDF_SOFT_MARCH`] and [`Self::HWRT_VIS`] are
+    /// never armed together. [`resolve_rules`] gates the former on
+    /// `!consumers.hwrt_denoise_or_vis_on` and the latter on that SAME flag being true, so one
+    /// boolean decides both with opposite polarity — the exclusion is a property of the
+    /// resolver, not of any caller.
+    ///
+    /// Named rather than left implicit in those two `if`s because it is LOAD-BEARING at a site
+    /// that cannot see the resolver: the two `-D HWRT=1` `vb_shade_split` variants
+    /// (docs/SHADER-VARIANT-MANIFEST.md) are SELECTED on `hwrt_denoise_or_vis_on`, so the
+    /// exclusion is what keeps the shipped variant matrix complete with respect to this field's
+    /// arm space. Break it and the resolver records a shadow-source combination no shipped row
+    /// expresses — an arm that binds cleanly, raises no validation message, and is silently
+    /// ignored.
+    ///
+    /// Not to be misread as a defect in those two rows: `vb_shade_split.comp.hlsl` carries no
+    /// `sdf_soft_shadow` arm in ANY of its four variants — `vis` starts at `1.0` and min-combines
+    /// `gShadowVis` under `#if HWRT` or `csm_visibility` otherwise. So **MESH pixels under VB**
+    /// receive no SDF-cast shadow: a v1 scope cut, deliberate, and unchanged by this exclusion.
+    ///
+    /// ⚠️ Two narrower statements replace two wider ones that were false. `deferred_pbr.hlsl` is
+    /// NOT "the only shader in the tree that implements that march" — four shaders define one
+    /// (`sdf_forward_march.comp.hlsl:297`, `sdf_gbuffer_composite.hlsl:498` and `:591`,
+    /// `sdf_probe_update.comp.hlsl:160` alongside `deferred_pbr.hlsl:515`), and the repo even
+    /// carries `sdf_soft_shadow_ranged_copy_matches_resolve` to pin one of those copies. Nor does
+    /// "a VB frame never combines an SDF-march source" hold: a VB×Both / VB×Sdf frame records the
+    /// same `sdf_forward_march` compute pass the Forward family uses, and that pass marches its
+    /// own soft shadow for the primary directional. The scope cut is about MESH pixels, not about
+    /// the frame.
+    #[inline]
+    pub const fn hwrt_vis_excludes_sdf_soft_march(self) -> bool {
+        !(self.contains(Self::SDF_SOFT_MARCH) && self.contains(Self::HWRT_VIS))
+    }
 }
 
 // ---- ResolvedRenderPath (the boot-committed carrier — plan §A) ------------------------
@@ -525,6 +560,33 @@ pub struct ResolvedRenderPath {
     pub thin_aux: ThinAuxMask,
     /// The armed shadow-visibility source set (Decision 7). FROZEN at boot under non-Deferred
     /// paths, same P2-d rationale.
+    ///
+    /// # What this field is, and what it is NOT
+    ///
+    /// A RECORDED boot decision that is CHECKED, not a dispatch input. No pass selects itself
+    /// from these bits, and wiring one to do so would change behaviour rather than centralise
+    /// it: each bit is a boot predicate over *config* (`CSM` ⇐ `CsmConfig::enabled()`,
+    /// `PUNCTUAL_ATLAS` ⇐ `ShadowConfig::enabled()`), while the corresponding per-frame gate is
+    /// strictly STRONGER — `boyko_app`'s `csm_armed` additionally requires a fitted sun AND live
+    /// caster batches, `punctual_armed` a fitted atlas AND the same, and the hwrt chain a
+    /// `HardwareTri` backend AND a non-empty TLAS. A config-enabled CSM in a frame with no
+    /// casters sets this bit and runs no cascade pass; that is correct, not a divergence.
+    ///
+    /// So the sound relation is CONTAINMENT — the bit is a necessary condition of every
+    /// per-frame arm, never a sufficient one — and that is what the checks assert:
+    ///
+    /// * `csm_config`'s `a_live_csm_mode_word_implies_the_boot_shadow_source_bit` and
+    ///   `shadow_atlas`'s `a_live_atlas_mode_word_implies_the_boot_shadow_source_bit` pin
+    ///   `pass gate ⇒ bit` for `CSM` / `PUNCTUAL_ATLAS`, driving the REAL `resolve_csm` /
+    ///   `resolve_shadow_atlas_spots` rather than a restatement of them.
+    /// * [`ShadowSources::hwrt_vis_excludes_sdf_soft_march`] and its sweep
+    ///   (`sdf_soft_march_and_hwrt_vis_stay_exclusive_over_the_whole_input_space`) pin the
+    ///   `SDF_SOFT_MARCH` ⊥ `HWRT_VIS` exclusion that the `vb_shade_split_*hwrt` shader variants
+    ///   depend on for their reachability (docs/SHADER-VARIANT-MANIFEST.md).
+    ///
+    /// The `SDF_SOFT_MARCH` bit is additionally read through the GPU mirror at the
+    /// `vb_shade_split_*hwrt` pipeline-selection site, by a `debug_assert!` — the ONE place a
+    /// bit of this field is load-bearing, and as an assertion only.
     pub shadow: ShadowSources,
     /// `consumers.clusters_wanted && path == VisibilityBuffer` — the SINGLE boot-frozen arm bit
     /// gating the ENTIRE froxel light-cull machinery (the app-side cluster build, the VB
@@ -936,6 +998,17 @@ pub fn resolve_rules(
     if consumers.hwrt_denoise_or_vis_on {
         shadow = shadow.insert(ShadowSources::HWRT_VIS);
     }
+    // Decision 7's exclusion, asserted at the ONE site that can violate it: the two `if`s above
+    // read the SAME `hwrt_denoise_or_vis_on` with opposite polarity, so any future edit that
+    // splits them (a per-path carve-out, a second hwrt flag) breaks the exclusion HERE and
+    // nowhere else. Debug-only per the project's hot-path convention; the property is also
+    // pinned unconditionally by
+    // `sdf_soft_march_and_hwrt_vis_stay_exclusive_over_the_whole_input_space`, so a release-mode
+    // test run is not blind to it.
+    debug_assert!(
+        shadow.hwrt_vis_excludes_sdf_soft_march(),
+        "invariant (Decision 7): SDF_SOFT_MARCH and HWRT_VIS are mutually exclusive, got {shadow:?}"
+    );
 
     // VB-P1a ("dark infra"): VB-ONLY this rung — `ForwardPlus`/`Deferred` keep their own,
     // unrelated `cluster_cull` scaffolding untouched (see this field's own doc).
@@ -2391,6 +2464,121 @@ mod tests {
         let with_hwrt = resolve_rules(RenderPath::Deferred, GeometryLegs::Sdf, hwrt, caps_ok());
         assert!(!with_hwrt.shadow.contains(ShadowSources::SDF_SOFT_MARCH));
         assert!(with_hwrt.shadow.contains(ShadowSources::HWRT_VIS));
+    }
+
+    /// Every `RenderPathConsumers` bool, so the sweep below stays exhaustive by CONSTRUCTION:
+    /// adding a field to that struct without adding it here leaves the sweep silently narrower
+    /// than it claims. The setters are listed in declaration order.
+    const CONSUMER_SETTERS: [fn(&mut RenderPathConsumers); 11] = [
+        |c| c.ssao_on = true,
+        |c| c.ddgi_on = true,
+        |c| c.shadow_denoise_spatial_on = true,
+        |c| c.shadow_temporal_on = true,
+        |c| c.ssr_on = true,
+        |c| c.taa_on = true,
+        |c| c.csm_on = true,
+        |c| c.punctual_shadows_on = true,
+        |c| c.hwrt_denoise_or_vis_on = true,
+        |c| c.sdf_shadows_wanted = true,
+        |c| c.clusters_wanted = true,
+    ];
+
+    /// Builds the consumer snapshot whose set bits are `mask`'s (bit `i` ⇒ `CONSUMER_SETTERS[i]`).
+    fn consumers_from_mask(mask: u32) -> RenderPathConsumers {
+        let mut c = RenderPathConsumers::default();
+        for (i, set) in CONSUMER_SETTERS.iter().enumerate() {
+            if mask & (1 << i) != 0 {
+                set(&mut c);
+            }
+        }
+        c
+    }
+
+    /// docs/SHADER-VARIANT-MANIFEST.md's `vb_shade_split_*hwrt` reachability note: the two
+    /// `-D HWRT=1` rows require `hwrt_denoise_or_vis_on`, which is exactly what
+    /// `ShadowSources::SDF_SOFT_MARCH` requires FALSE — so no SDF-march-sourced shadow term can
+    /// ever be armed while they are bound.
+    ///
+    /// The exclusion was previously pinned only by
+    /// `sdf_soft_march_needs_the_sdf_leg_and_is_wanted_and_no_hwrt`'s SINGLE
+    /// `Deferred × Sdf` point. MEASURED gap (this is why the sweep exists, not a hypothetical):
+    /// gating the exclusion on `matches!(path, RenderPath::Deferred)` — which arms BOTH bits
+    /// under `VisibilityBuffer`, the ONLY path that ever binds `vb_shade_split_hwrt` — passed
+    /// all 384 `boyko-render` tests before this test was added.
+    ///
+    /// Swept over BOTH entry points: `resolve_rules` (the raw rule) and `resolve_render_path`
+    /// (the real boot entry, whose degrade ladder + `cap_forward_v1_consumers` /
+    /// `cap_vb_v1_consumers` rewrite `hwrt_denoise_or_vis_on` before the rule sees it — a cap
+    /// that cleared the flag for `HWRT_VIS` but not for `SDF_SOFT_MARCH` would arm both).
+    #[test]
+    fn sdf_soft_march_and_hwrt_vis_stay_exclusive_over_the_whole_input_space() {
+        let mut rule_rows = 0u32;
+        let mut boot_rows = 0u32;
+        for path in [
+            RenderPath::Deferred,
+            RenderPath::Forward,
+            RenderPath::ForwardPlus,
+            RenderPath::VisibilityBuffer,
+        ] {
+            for legs in [GeometryLegs::Both, GeometryLegs::Mesh, GeometryLegs::Sdf] {
+                for caps in [caps_ok(), RenderPathDeviceCaps::default()] {
+                    for mask in 0..(1u32 << CONSUMER_SETTERS.len()) {
+                        let consumers = consumers_from_mask(mask);
+
+                        let resolved = resolve_rules(path, legs, consumers, caps);
+                        assert!(
+                            resolved.shadow.hwrt_vis_excludes_sdf_soft_march(),
+                            "resolve_rules({path:?}, {legs:?}, mask={mask:#013b}, caps={caps:?}) \
+                             armed both SDF_SOFT_MARCH and HWRT_VIS: {:?}",
+                            resolved.shadow
+                        );
+                        rule_rows += 1;
+
+                        let cfg = RenderPathConfig { path, legs };
+                        let (booted, _) = resolve_render_path(&cfg, consumers, caps);
+                        assert!(
+                            booted.shadow.hwrt_vis_excludes_sdf_soft_march(),
+                            "resolve_render_path({path:?}, {legs:?}, mask={mask:#013b}, \
+                             caps={caps:?}) armed both SDF_SOFT_MARCH and HWRT_VIS: {:?}",
+                            booted.shadow
+                        );
+                        boot_rows += 1;
+                    }
+                }
+            }
+        }
+        // A census, so a sweep silently reduced to nothing (an emptied `CONSUMER_SETTERS`, a
+        // narrowed range) fails instead of passing vacuously: 4 paths x 3 leg sets x 2 cap sets
+        // x 2^11 masks. The `11` is spelled as a LITERAL rather than `CONSUMER_SETTERS.len()` on
+        // purpose — deriving it from the array would make the census self-fulfilling and blind
+        // to exactly the shrinkage it exists to catch. Adding a 12th consumer therefore fails
+        // this line by design: update it in the same edit that extends the array.
+        assert_eq!(rule_rows, 4 * 3 * 2 * (1 << 11));
+        assert_eq!(boot_rows, rule_rows);
+    }
+
+    /// The exclusion holds because ONE boolean drives both bits with opposite polarity — pinned
+    /// positively so the sweep above cannot pass by arming NEITHER bit everywhere (a resolver
+    /// that stopped setting `SDF_SOFT_MARCH` at all would satisfy an exclusion-only property).
+    #[test]
+    fn the_exclusion_is_a_split_not_a_mutual_suppression() {
+        let base = RenderPathConsumers { sdf_shadows_wanted: true, ..Default::default() };
+        for path in [RenderPath::Deferred, RenderPath::VisibilityBuffer] {
+            let software = resolve_rules(path, GeometryLegs::Both, base, caps_ok());
+            assert!(
+                software.shadow.contains(ShadowSources::SDF_SOFT_MARCH)
+                    && !software.shadow.contains(ShadowSources::HWRT_VIS),
+                "{path:?}: no hwrt carrier => the SDF soft march is the shadow source"
+            );
+
+            let hwrt = RenderPathConsumers { hwrt_denoise_or_vis_on: true, ..base };
+            let traced = resolve_rules(path, GeometryLegs::Both, hwrt, caps_ok());
+            assert!(
+                traced.shadow.contains(ShadowSources::HWRT_VIS)
+                    && !traced.shadow.contains(ShadowSources::SDF_SOFT_MARCH),
+                "{path:?}: the hwrt carrier DISPLACES the SDF soft march"
+            );
+        }
     }
 
     #[test]

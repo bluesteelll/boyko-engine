@@ -245,8 +245,13 @@ impl Plugin for EnginePlugins {
         // `ResolvedRenderPath`. UNLIKE `AaPlugin`/`SsaoPlugin` above it registers NO per-frame
         // system (Decision 1 — path/legs are a ONE-TIME boot commitment, never re-derived per
         // frame); `boyko_app::runner` calls `resolve_render_path` directly at boot and overrides
-        // this plugin's default, the SAME `DdgiCaps`/`RayCaps` override precedent. R1 is
-        // dead-but-threaded: nothing downstream reads the resolved carrier yet.
+        // this plugin's default, the SAME `DdgiCaps`/`RayCaps` override precedent.
+        //
+        // What IS still without a reader is this Resource specifically: no system anywhere takes
+        // `Res<ResolvedRenderPath>`. The carrier itself is read downstream (the runner threads it
+        // host-side into the RHI, which dispatches its declarator on it) — a distinction this
+        // comment used to collapse into a flat "nothing downstream reads the resolved carrier
+        // yet", which stopped being true at R2.
         app.add_plugin(RenderPathPlugin);
 
         // Dev/test launch seam: `BOYKO_RENDER_PATH` / `BOYKO_GEOMETRY_LEGS` override the

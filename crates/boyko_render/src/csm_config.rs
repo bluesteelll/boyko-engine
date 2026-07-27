@@ -1389,6 +1389,70 @@ mod tests {
         a * minor(1, 2, 3) - b * minor(0, 2, 3) + c * minor(0, 1, 3) - d * minor(0, 1, 2)
     }
 
+    /// `ShadowSources::CSM` is a boot record of "cascades MAY be sampled", derived from
+    /// `CsmConfig::enabled()`. The frame loop's own gate is strictly stronger — `boyko_app`'s
+    /// `csm_armed = resolve_csm(..).csm_mode_word == 1 && casters.batch_count() > 0`, the same
+    /// predicate [`sync_csm_light_gate`](crate::csm_caster::sync_csm_light_gate) drives the
+    /// light-header bit with — so the two are NOT equal and must not be wired together (a
+    /// config-enabled CSM with zero caster batches records the bit but runs no cascade pass).
+    ///
+    /// What must hold is the CONTAINMENT: the frame gate can never arm cascades the boot bit did
+    /// not record, i.e. `csm_mode_word == 1 ⇒ ShadowSources::CSM`. Both sides read the same
+    /// `CsmConfig`, so this is checkable without a device — and it is the only relation between
+    /// the bit and the pass that a test can state truthfully. Unchecked, `resolve_csm` could
+    /// start returning a live mode word for a config the resolver recorded as shadow-less and
+    /// the divergence would be silent.
+    #[test]
+    fn a_live_csm_mode_word_implies_the_boot_shadow_source_bit() {
+        use crate::render_path_config::{
+            GeometryLegs, RenderPath, RenderPathConsumers, RenderPathDeviceCaps, ShadowSources,
+            resolve_rules,
+        };
+
+        let view = perspective_view(Vec3::new(0.0, 2.0, 0.0), 0.0, 0.0);
+        // Spans both sides of `enabled()` (`cascade_count > 0 && shadow_distance > 0.0`),
+        // including the two one-legged-off cases that make it false.
+        let cfgs = [
+            CsmConfig::default(),
+            enabled_cfg(),
+            CsmConfig { cascade_count: 0, ..enabled_cfg() },
+            CsmConfig { shadow_distance: 0.0, ..enabled_cfg() },
+            CsmConfig { cascade_count: 1, ..enabled_cfg() },
+        ];
+
+        let mut live_rows = 0u32;
+        for cfg in &cfgs {
+            let resolved = resolve_csm(cfg, &view, [0.3, -1.0, 0.2], CsmFit::NONE);
+            // The boot bit's OWN source predicate, threaded exactly as `boyko_app::runner`
+            // threads it (`csm_on: CsmConfig::enabled()`).
+            let consumers = RenderPathConsumers { csm_on: cfg.enabled(), ..Default::default() };
+            let booted = resolve_rules(
+                RenderPath::Deferred,
+                GeometryLegs::Mesh,
+                consumers,
+                RenderPathDeviceCaps::new(true),
+            );
+
+            if resolved.csm_mode_word == 1 {
+                live_rows += 1;
+                assert!(
+                    booted.shadow.contains(ShadowSources::CSM),
+                    "a live csm_mode_word with no ShadowSources::CSM bit: {cfg:?}"
+                );
+            }
+            // The converse is deliberately NOT asserted: the bit is a superset, and a scene may
+            // record it while a given frame's gate stays shut.
+            assert_eq!(
+                booted.shadow.contains(ShadowSources::CSM),
+                cfg.enabled(),
+                "the CSM bit must track CsmConfig::enabled() exactly: {cfg:?}"
+            );
+        }
+        // Census: a fixture list that stopped producing ANY live mode word would satisfy the
+        // implication vacuously.
+        assert!(live_rows >= 2, "expected >= 2 enabled fixtures, got {live_rows}");
+    }
+
     #[test]
     fn disabled_config_is_the_all_zero_zero_gate() {
         let view = perspective_view(Vec3::new(0.0, 2.0, 0.0), 0.0, 0.0);

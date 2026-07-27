@@ -5079,8 +5079,10 @@ impl GpuSceneBundles {
         // plain-POD [`ResolvedRenderPathGpu`] (`boyko_render` → `boyko_rhi_vulkan` dependency
         // direction — this crate cannot see `boyko_rhi_vulkan` types the other way around, so
         // the conversion cannot live as a `From` impl in either crate; a free fn here is the
-        // only orphan-rule-clean seam). DEAD-BUT-THREADED: nothing reads `GBufferScene::
-        // resolved_render_path` yet (R2 wires the declarator dispatch).
+        // only orphan-rule-clean seam). `GBufferScene::resolved_render_path` IS read: R2 wired
+        // the declarator dispatch onto it, and this comment went on claiming otherwise. See
+        // `ResolvedRenderPathGpu`'s own doc for the per-field census of which copies have
+        // readers and which do not.
         resolved_render_path: boyko_render::ResolvedRenderPath,
         // Multi-paradigm render-path plan, rung R-SDFFWD: the host-precomputed
         // `boyko_render::view::forward_view_z_coeffs(view.near, view.far)` reverse-Z decode pair
@@ -6611,5 +6613,23 @@ mod tests {
         assert_eq!(gpu.thin_aux, resolved.thin_aux.bits());
         assert_eq!(gpu.shadow, resolved.shadow.bits());
         assert_eq!(gpu.froxel_light_cull, resolved.froxel_light_cull);
+    }
+
+    /// `boyko_rhi_vulkan` cannot depend on `boyko_render` (the dependency runs the other way —
+    /// that is why `ResolvedRenderPathGpu` exists at all), so its `vb_shade_split_*hwrt`
+    /// selection-site check has to RESTATE the shadow bit it reads. This crate depends on both,
+    /// so it is the only place the restatement can be pinned against the owning definition.
+    ///
+    /// Without this pin the RHI-side const would be a second, unchecked copy of a value only
+    /// `boyko_render` can change: renumbering `ShadowSources` would leave the selection-site
+    /// `debug_assert!` reading the WRONG bit and still passing — an assertion that reports
+    /// "checked" while checking nothing.
+    #[test]
+    fn shadow_source_sdf_soft_march_bit_matches_boyko_render() {
+        assert_eq!(
+            boyko_rhi_vulkan::present::SHADOW_SOURCE_SDF_SOFT_MARCH,
+            boyko_render::ShadowSources::SDF_SOFT_MARCH.bits(),
+            "the RHI-side SDF_SOFT_MARCH restatement drifted from boyko_render's definition"
+        );
     }
 }

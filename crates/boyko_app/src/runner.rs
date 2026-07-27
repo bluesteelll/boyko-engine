@@ -480,8 +480,10 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // knob). `world.try_resource` degrades every missing config Resource to its structural
     // "off" default (a host that composes a SUBSET of `EnginePlugins`'s plugins never
     // panics here) — the SAME graceful pattern `ddgi_enabled`/`terminator_wrap` use inside
-    // the frame loop. R1 is dead-but-threaded: `host.resolved_render_path` is written below
-    // but nothing downstream reads it yet (R2 wires the declarator dispatch).
+    // the frame loop. `host.resolved_render_path` is written below and IS read downstream —
+    // this comment said "nothing reads it yet (R2 wires the declarator dispatch)" long after R2
+    // wired exactly that: `boyko_rhi_vulkan`'s `declare_frame_graph` selects the per-path
+    // declarator by matching on the threaded carrier's `path`.
     let render_path_cfg = app
         .world()
         .try_resource::<boyko_render::RenderPathConfig>()
@@ -2323,8 +2325,19 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
                 ssao_atrous_levels,
                 // Multi-paradigm render-path plan, rung R1: the boot-committed selection
                 // (Decision 1 — a HOST field, never a per-frame `World` read, mirroring
-                // `host.ssaa_armed`'s threading). Dead-but-threaded: `scene()` converts it
-                // into the plain-POD `ResolvedRenderPathGpu` and nothing downstream reads it.
+                // `host.ssaa_armed`'s threading). `scene()` converts it into the plain-POD
+                // `ResolvedRenderPathGpu`.
+                //
+                // No longer dead-but-threaded (this comment claimed that through rung R8): the
+                // mirror's `path` / `mesh_leg` / `sdf_leg` / `sdf_forward_marched` /
+                // `needs_depth_prepass` / `mesh_geo_shade_split` fields drive the declarator and
+                // recorder dispatch in `boyko_rhi_vulkan::present`. `shadow` is read by ONE
+                // assertion (`record_vb`'s `vb_shade_split_*hwrt` exclusion check) and by nothing
+                // that selects a pass — see `ResolvedRenderPathGpu::shadow`'s own doc for why
+                // that is deliberate. The remaining mirror fields have no reader at all,
+                // `vb_geometry_table` / `froxel_light_cull` included: those two ARE read, but off
+                // THIS value above (the pre-conversion `boyko_render` carrier), never off the
+                // mirror — each reaches the RHI by its own boot route.
                 host.resolved_render_path,
                 // Multi-paradigm render-path plan, rung R-SDFFWD: the `sdf_forward_march`
                 // `HAS_MESH` push's reverse-Z decode A/B, computed above at the SAME site `mvp`

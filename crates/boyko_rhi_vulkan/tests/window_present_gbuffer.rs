@@ -2556,9 +2556,11 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         raster_pipeline_tex: None,
         tex_bind_group: None,
         bindless_set: None,
-        // Multi-paradigm render-path plan, rung R1: dead-but-threaded — this harness has no
-        // ECS `ResolvedRenderPath` to convert, so it carries the byte-identity default
-        // (Deferred + Both, every derived flag off).
+        // Multi-paradigm render-path plan: this harness has no ECS `ResolvedRenderPath` to
+        // convert, so it carries the byte-identity default (Deferred + Both, every derived flag
+        // off). NOT inert — the label "dead-but-threaded" that stood here stopped being true at
+        // R2: the declarator dispatch matches on this value's `path`, so the default is exactly
+        // what keeps these fixtures on the Deferred declarator they were pinned against.
         resolved_render_path: ResolvedRenderPathGpu::default(),
     };
 
@@ -3606,9 +3608,11 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         raster_pipeline_tex: None,
         tex_bind_group: None,
         bindless_set: None,
-        // Multi-paradigm render-path plan, rung R1: dead-but-threaded — this harness has no
-        // ECS `ResolvedRenderPath` to convert, so it carries the byte-identity default
-        // (Deferred + Both, every derived flag off).
+        // Multi-paradigm render-path plan: this harness has no ECS `ResolvedRenderPath` to
+        // convert, so it carries the byte-identity default (Deferred + Both, every derived flag
+        // off). NOT inert — the label "dead-but-threaded" that stood here stopped being true at
+        // R2: the declarator dispatch matches on this value's `path`, so the default is exactly
+        // what keeps these fixtures on the Deferred declarator they were pinned against.
         resolved_render_path: ResolvedRenderPathGpu::default(),
     };
 
@@ -8590,9 +8594,11 @@ fn run_showcase_body_ddgi(
         raster_pipeline_tex: None,
         tex_bind_group: None,
         bindless_set: None,
-        // Multi-paradigm render-path plan, rung R1: dead-but-threaded — this harness has no
-        // ECS `ResolvedRenderPath` to convert, so it carries the byte-identity default
-        // (Deferred + Both, every derived flag off).
+        // Multi-paradigm render-path plan: this harness has no ECS `ResolvedRenderPath` to
+        // convert, so it carries the byte-identity default (Deferred + Both, every derived flag
+        // off). NOT inert — the label "dead-but-threaded" that stood here stopped being true at
+        // R2: the declarator dispatch matches on this value's `path`, so the default is exactly
+        // what keeps these fixtures on the Deferred declarator they were pinned against.
         resolved_render_path: ResolvedRenderPathGpu::default(),
     };
 

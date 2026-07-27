@@ -1706,6 +1706,32 @@ impl Renderer<'_> {
             // exactly as shipped.
             #[cfg(feature = "hwrt")]
             let (shade_pipeline, shade_set0) = if scene.path_vb_hwrt_shadow() {
+                // docs/SHADER-VARIANT-MANIFEST.md's `vb_shade_split_*hwrt` reachability note,
+                // made mechanical AT the selection site (it previously rested on the boot
+                // resolver's predicate alone).
+                //
+                // What this guards is variant-matrix COMPLETENESS, not a defect in these two
+                // rows: `vb_shade_split.comp.hlsl` has no `sdf_soft_shadow` arm in ANY of its
+                // four variants, so MESH pixels under VB receive no SDF-cast shadow whichever row
+                // is bound — a v1 scope cut, deliberate. Scoped to mesh pixels on purpose: a
+                // VB×Both / VB×Sdf frame records the same `sdf_forward_march` compute pass the
+                // Forward family uses, and that pass DOES march a soft shadow for the SDF leg's
+                // own pixels, so "a VB frame never combines an SDF-march source" is false. The
+                // invariant
+                // is that the resolver must never RECORD a combination the shipped rows cannot
+                // express: `SDF_SOFT_MARCH` armed alongside `HWRT_VIS` would be a shadow source
+                // that binds cleanly, raises no validation message, and is silently ignored.
+                // The resolver guarantees it today
+                // (`ShadowSources::hwrt_vis_excludes_sdf_soft_march`); this catches a carrier
+                // that reached the recorder from anywhere else — a hand-built `GBufferScene`
+                // fixture, or a future per-frame re-resolve.
+                debug_assert!(
+                    !scene.shadow_has_sdf_soft_march(),
+                    "invariant (Decision 7): the vb_shade_split HWRT variants have no SDF-march \
+                     arm, so SDF_SOFT_MARCH must not be armed while they are bound (shadow bits \
+                     {:#06b})",
+                    scene.resolved_render_path.shadow
+                );
                 if scene.vb_tex_active() {
                     (
                         scene.vb_shade_split_tex_hwrt_pipeline.expect(

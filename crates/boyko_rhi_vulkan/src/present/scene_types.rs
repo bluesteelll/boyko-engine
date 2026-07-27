@@ -1087,15 +1087,40 @@ pub struct TlasBuildActivation<'a> {
 /// reason `AaMode`/`ResolvedSsao` never appear on [`GBufferScene`] directly.
 /// `boyko_app::gpu_scene::GpuSceneBundles::scene` converts at the frame-assembly seam (the
 /// `aa_mode: AaMode` parameter → `matches!`-derived `Option<AaActivation>` fields precedent),
-/// except this carrier has no RHI resources to select yet (R1 wires nothing downstream), so the
-/// conversion here is a plain field-by-field copy into primitive/enum-discriminant form.
+/// so the conversion here is a plain field-by-field copy into primitive/enum-discriminant form.
+/// `#[repr(C)]`, `Copy` — mirrors `ResolvedRenderPath`'s own shape.
 ///
-/// # R1 status — DEAD-BUT-THREADED
+/// # Which fields have readers
 ///
-/// Nothing in this crate reads this field yet (R2 wires the per-path declarator dispatch). Its
-/// presence is a zero-behavior-change plumbing rung: threading the boot-committed render-path
-/// selection down to the frame-assembly seam before any consumer exists, so R2 only ADDS reads,
-/// never a new write site. `#[repr(C)]`, `Copy` — mirrors `ResolvedRenderPath`'s own shape.
+/// This carrier landed at rung R1 as a whole-struct DEAD-BUT-THREADED plumbing rung, and its doc
+/// said "nothing in this crate reads this field yet" long after that stopped being true. Per
+/// field, as of the shipped VB path:
+///
+/// * **Dispatch inputs** — `path`, `mesh_leg`, `sdf_leg`, `sdf_forward_marched`,
+///   `needs_depth_prepass`, `mesh_geo_shade_split` select the declarator/recorder shape (the
+///   `path_*` predicates below are their single readers, per the O1 rule).
+/// * **Checked, not dispatched** — `shadow`. Read at exactly one site, and by an ASSERTION:
+///   `GBufferScene::shadow_has_sdf_soft_march` (an unlinked code span — the method is
+///   `#[cfg(feature = "hwrt")]`, so a default-feature rustdoc build cannot resolve a link to it)
+///   backs `record_vb`'s `vb_shade_split_*hwrt`
+///   exclusion check. It deliberately selects nothing. The bits are a BOOT record of which
+///   shadow sources a scene may use, and every per-frame arming gate is strictly stronger than
+///   the corresponding bit — `csm_armed` additionally needs live caster batches, the hwrt chain
+///   additionally needs a non-empty TLAS — so substituting a bit for a gate would arm shadow
+///   work on frames the passes deliberately skip. The bits record a NECESSARY condition; only as
+///   such are they sound to read.
+/// * **No reader at all** — `legs`, `prepass_writes_motion`, `sdf_geo_shade_split`,
+///   `sdf_surface_cache`, `depth_kind`, `thin_aux`, `vb_geometry_table`, `froxel_light_cull`.
+///
+/// The last two are worth spelling out, because the DECISIONS they carry are very much live and
+/// it would be easy to conclude the copies here are what carries them. They are not.
+/// `boyko_app::runner` reads `vb_geometry_table` / `froxel_light_cull` off its OWN
+/// `boyko_render::ResolvedRenderPath` — the value BEFORE this conversion — and each reaches this
+/// crate by a different route: `vb_geometry_table` through `VulkanContext::
+/// set_vb_geometry_table_armed` (a boot-once `OnceCell` on the device), the froxel arm through
+/// `cluster_cull_armed()`. Nothing in this crate reads either field of THIS struct. Wiring a
+/// reader to one of them would not be a cleanup: it would be a second, unsynchronised arming
+/// source for machinery that already has exactly one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct ResolvedRenderPathGpu {
@@ -1128,9 +1153,9 @@ pub struct ResolvedRenderPathGpu {
     pub thin_aux: u32,
     /// `ShadowSources::bits()`.
     pub shadow: u32,
-    /// VB-P1a ("dark infra"): `ResolvedRenderPath::froxel_light_cull`. Hardcoded `false` today
-    /// (see that field's own doc) — dead-but-threaded, the SAME R1 status this whole struct
-    /// carries for its other fields.
+    /// `ResolvedRenderPath::froxel_light_cull`. NOT hardcoded — the resolver derives it
+    /// (`consumers.clusters_wanted && path == VisibilityBuffer`), and VB-P1b's opt-in scenes arm
+    /// it. This COPY has no reader; see the struct doc for the route the arm actually takes.
     pub froxel_light_cull: bool,
 }
 
@@ -1139,6 +1164,17 @@ pub struct ResolvedRenderPathGpu {
 /// [`GBufferScene::path_is_vb`]'s comparison site — mirrors [`ResolvedRenderPathGpu::path`]'s
 /// own doc table.
 pub(crate) const RENDER_PATH_VISIBILITY_BUFFER: u32 = 3;
+
+/// `boyko_render::ShadowSources::SDF_SOFT_MARCH`'s bit, named here for the same reason
+/// `RENDER_PATH_VISIBILITY_BUFFER` above is: this crate cannot depend on `boyko_render` (the
+/// dependency runs the other way — that is WHY [`ResolvedRenderPathGpu`] exists), so the bit
+/// value has to be restated to be read at all.
+///
+/// `pub` rather than `pub(crate)` so the restatement is PINNED against the owning definition
+/// instead of drifting from it: `boyko_app` depends on both crates and asserts the two agree
+/// (`shadow_source_sdf_soft_march_bit_matches_boyko_render`). Without that pin this const would
+/// be a second, unchecked copy of a value only the other crate can change.
+pub const SHADOW_SOURCE_SDF_SOFT_MARCH: u32 = 1 << 2;
 
 impl Default for ResolvedRenderPathGpu {
     /// `Deferred + Both`, every derived flag off, `depth_kind = CustomLinear` — the byte-identity
@@ -2810,6 +2846,25 @@ impl GBufferScene<'_> {
     #[inline]
     pub(crate) fn path_vb_hwrt_shadow(&self) -> bool {
         self.path_vb_split() && self.shadow.is_some()
+    }
+
+    /// Whether the boot resolver armed an SDF soft-march shadow source
+    /// (`boyko_render::ShadowSources::SDF_SOFT_MARCH`) for this scene.
+    ///
+    /// The FIRST reader of `ResolvedRenderPathGpu::shadow` outside the POD copy itself. The bits
+    /// remain a RECORDED boot decision, not a dispatch input — nothing selects a pass from them,
+    /// because the per-frame arming gates are strictly stronger than the boot bits (a
+    /// config-enabled CSM with zero caster batches does not run a cascade pass). What this
+    /// accessor exists for is the one place a boot bit is a NECESSARY condition of a shipped
+    /// shader variant's reachability: see its use at the `vb_shade_split_*hwrt` selection site.
+    ///
+    /// `#[cfg(feature = "hwrt")]` because that site is the ONLY caller — the exclusion it guards
+    /// is between an SDF-march source and the hwrt visibility term, which cannot exist in a
+    /// build with no hwrt chain.
+    #[cfg(feature = "hwrt")]
+    #[inline]
+    pub(crate) fn shadow_has_sdf_soft_march(&self) -> bool {
+        self.resolved_render_path.shadow & SHADOW_SOURCE_SDF_SOFT_MARCH != 0
     }
 
     /// Rung R9d — the SINGLE source of "this frame's `vb_geo` dispatch writes the `motion_vec`

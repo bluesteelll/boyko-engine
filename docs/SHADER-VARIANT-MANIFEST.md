@@ -224,8 +224,49 @@ the rows themselves ship regardless of it.*
 
 Reachability note: the two `HWRT` rows require `hwrt_denoise_or_vis_on`, which is exactly the
 condition `ShadowSources::SDF_SOFT_MARCH` requires to be FALSE — so no SDF-march-sourced shadow
-term can ever be armed while they are bound. That exclusion rests on the boot resolver's predicate
-alone and has no mechanical check at the site where the pipeline is selected.
+term can ever be armed while they are bound. What that buys is variant-matrix COMPLETENESS: the
+`HWRT` rows are selected on `hwrt_denoise_or_vis_on`, so the exclusion is what keeps the four rows
+above able to express every combination the resolver can arm. Break it and the resolver records a
+shadow source no shipped row implements — an arm that binds cleanly, raises no validation message,
+and is silently ignored.
+
+⚠️ Do NOT read this as "the `HWRT` rows are missing an SDF-march arm the base rows have".
+`vb_shade_split.comp.hlsl` has no `sdf_soft_shadow` arm in ANY of its four variants — `vis` starts
+at `1.0` and min-combines CSM (`#else`) or `gShadowVis` (`#if HWRT`). Mesh pixels therefore never
+receive an SDF-cast shadow under VB; that is a v1 scope cut, deliberate, and untouched by this
+exclusion.
+
+⚠️ An earlier revision of this block added *"and `deferred_pbr.hlsl` is the only shader in the tree
+that implements that march at all"* — **false**, and fortified with a ⚠️ telling the next reader not
+to re-derive it. Four shaders define such a march: `sdf_forward_march.comp.hlsl:297`,
+`sdf_gbuffer_composite.hlsl:498` (plus `sdf_soft_shadow_mesh` at `:591`),
+`sdf_probe_update.comp.hlsl:160`, and `deferred_pbr.hlsl:515`. The SDF leg's own pixels DO get an
+SDF-cast shadow under VB, from `sdf_forward_march`; only mesh pixels do not. A ⚠️ is a request not
+to re-check, so putting one around an unverified claim is worse than leaving the claim bare.
+
+The exclusion is now checked in three places (it previously rested on the boot resolver's
+predicate alone, with no check at the selection site):
+
+* `ShadowSources::hwrt_vis_excludes_sdf_soft_march()` names the property, and `resolve_rules`
+  `debug_assert!`s it at the one site that can violate it — the two `if`s that read the same
+  `hwrt_denoise_or_vis_on` with opposite polarity.
+* `sdf_soft_march_and_hwrt_vis_stay_exclusive_over_the_whole_input_space` sweeps 4 paths × 3 leg
+  sets × 2 cap sets × 2^11 consumer masks through BOTH `resolve_rules` and `resolve_render_path`,
+  asserting the property directly (so a release-mode run, where the `debug_assert!` is compiled
+  out, is not blind to it). Its companion
+  `the_exclusion_is_a_split_not_a_mutual_suppression` pins that the exclusion is a SPLIT — one of
+  the two bits is always armed — so the sweep cannot pass by arming neither.
+* `record_vb`'s `path_vb_hwrt_shadow()` arm `debug_assert!`s that the carrier reaching the
+  recorder has no `SDF_SOFT_MARCH` bit, reading `ResolvedRenderPathGpu::shadow` through
+  `GBufferScene::shadow_has_sdf_soft_march()`. This is the check AT the selection site.
+
+Two limits, recorded so the next audit does not overstate the coverage. The selection-site check
+is `debug_assert!` (the project's hot-path convention) and is `#[cfg(feature = "hwrt")]`, so it is
+compiled only in a debug `--features hwrt` build; and no headless test reaches it, since recording
+needs a device. The resolver sweep is the part that runs on every `cargo test`. The
+`SHADOW_SOURCE_SDF_SOFT_MARCH` const the selection site reads is a restatement
+(`boyko_rhi_vulkan` cannot depend on `boyko_render`), pinned against the owning definition by
+`boyko_app`'s `shadow_source_sdf_soft_march_bit_matches_boyko_render`.
 
 ## `vb_geo.comp.hlsl` — the R9 thin-aux geometry pre-pass (compute)
 

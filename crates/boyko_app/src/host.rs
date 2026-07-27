@@ -119,7 +119,9 @@ pub(crate) struct WindowHost {
     /// per-frame `World` read). Seeded to [`ResolvedRenderPath::default`] here (`Deferred +
     /// Both`, the byte-identity anchor) so the field is never observed uninitialized between
     /// [`Self::boot`] returning and the runner's boot-lock write. Threaded into
-    /// `GpuSceneBundles::scene()` every frame; DEAD-BUT-THREADED at R1 (nothing reads it yet).
+    /// `GpuSceneBundles::scene()` every frame, where it becomes the plain-POD
+    /// `ResolvedRenderPathGpu` the RHI dispatches its per-path declarator on. (This doc read
+    /// "DEAD-BUT-THREADED at R1 (nothing reads it yet)" for as long as that was false.)
     pub(crate) resolved_render_path: ResolvedRenderPath,
     /// Per-in-flight-slot record of the `LightTableGeneration` whose staged
     /// bytes were last written into that slot's light staging (host plan D5/R4).

@@ -1249,6 +1249,63 @@ mod tests {
         assert_eq!(SLOT_NONE, 0x1F);
     }
 
+    /// The punctual sibling of `csm_config`'s
+    /// `a_live_csm_mode_word_implies_the_boot_shadow_source_bit` — see that test for the full
+    /// rationale. `ShadowSources::PUNCTUAL_ATLAS` records `ShadowConfig::enabled()` at boot; the
+    /// frame gate is strictly stronger (`boyko_app`'s
+    /// `punctual_armed = resolve_shadow_atlas(..).mode_word == 1 && casters.batch_count() > 0`,
+    /// the predicate [`sync_punctual_light_gate`] drives), so only the containment
+    /// `mode_word == 1 ⇒ PUNCTUAL_ATLAS` can be stated truthfully.
+    ///
+    /// Note the extra asymmetry this side carries: `mode_word` is ALSO `0` for an enabled config
+    /// with no eligible spots, so the bit is a strict superset here even before the caster
+    /// count is consulted — which is precisely why wiring the bit into the gate would change
+    /// behaviour rather than merely centralise it.
+    #[test]
+    fn a_live_atlas_mode_word_implies_the_boot_shadow_source_bit() {
+        use crate::render_path_config::{
+            GeometryLegs, RenderPath, RenderPathConsumers, RenderPathDeviceCaps, ShadowSources,
+            resolve_rules,
+        };
+
+        let spots = [spot(1.0), spot(2.0)];
+        let mut live_rows = 0u32;
+        for (cfg, inputs) in [
+            (ShadowConfig::default(), &spots[..]),
+            (enabled_cfg(), &spots[..]),
+            // Enabled but with no eligible source: `mode_word` stays 0 while the bit is SET.
+            (enabled_cfg(), &[][..]),
+        ] {
+            let mut slots = [SLOT_NONE; 2];
+            let resolved =
+                resolve_shadow_atlas_spots(&cfg, inputs, &mut slots[..inputs.len()]);
+            // The boot bit's OWN source predicate, threaded exactly as `boyko_app::runner`
+            // threads it (`punctual_shadows_on: ShadowConfig::enabled()`).
+            let consumers =
+                RenderPathConsumers { punctual_shadows_on: cfg.enabled(), ..Default::default() };
+            let booted = resolve_rules(
+                RenderPath::Deferred,
+                GeometryLegs::Mesh,
+                consumers,
+                RenderPathDeviceCaps::new(true),
+            );
+
+            if resolved.mode_word == 1 {
+                live_rows += 1;
+                assert!(
+                    booted.shadow.contains(ShadowSources::PUNCTUAL_ATLAS),
+                    "a live atlas mode_word with no ShadowSources::PUNCTUAL_ATLAS bit: {cfg:?}"
+                );
+            }
+            assert_eq!(
+                booted.shadow.contains(ShadowSources::PUNCTUAL_ATLAS),
+                cfg.enabled(),
+                "the PUNCTUAL_ATLAS bit must track ShadowConfig::enabled() exactly: {cfg:?}"
+            );
+        }
+        assert_eq!(live_rows, 1, "exactly one fixture should fit a live atlas");
+    }
+
     #[test]
     fn disabled_or_empty_is_the_zero_gate() {
         // Disabled config.
