@@ -447,7 +447,8 @@ pub use light::{
     LightEnabled, LightHeaderGpu, LightTableDirty, LightingConfig, MAX_LIGHTS,
     MAX_LIGHTS_PER_CLUSTER, PUNCTUAL_MODE_BIT, PointLight, SPOT_COS_OUTER_MAX, SkyLight, SpotLight,
     TERMINATOR_SOFT_MASK, TERMINATOR_SOFT_SHIFT, TONEMAP_MODE_MASK, TONEMAP_MODE_SHIFT, Tonemapper,
-    cluster_index, sync_cluster_light_gate,
+    VB_SDF_MESH_AO_BIT, VB_SDF_MESH_MODE_MASK, VB_SDF_MESH_MODE_SHIFT, VB_SDF_MESH_SHADOW_BIT,
+    cluster_index, sync_cluster_light_gate, sync_sv0_light_gate,
 };
 pub use light_policy::{CLUSTER_HI, CLUSTER_LO, LightStats, select_lighting_cull};
 pub use light_system::{

@@ -42,6 +42,7 @@
 use boyko_app::prelude::*;
 use boyko_render::generate_tangents;
 use boyko_render::mesh::Vertex;
+use boyko_render::{LightingConfig, SsaoConfig, SsaoQuality};
 
 /// The sun direction TO the light — byte-identical to `vb_both.rs`'s / `vb_mesh.rs`'s /
 /// `grand_showcase_2mat.rs`'s literal.
@@ -160,6 +161,95 @@ pub const CAMERA_FAR: f32 = 100.0;
 /// Square dump extent in pixels — both fixtures dump 512×512, and the S1 oracle's pixel counts are
 /// quantified over exactly this raster.
 pub const DUMP_EXTENT: u32 = 512;
+
+// ===========================================================================================
+// The rung-S4 arming knobs (env-driven, DEFAULT OFF)
+// ===========================================================================================
+//
+// Rung S4's gate (ii) needs, for each of the eight SV0-armable variant rows, THREE renders of
+// the same scene: `sv0_mode = 0`, shadow-bit-only, and AO-bit-only. That is 24 dumps across two
+// fixtures. Driving them from env vars rather than from 24 committed fixtures is what keeps the
+// scene single-sourced (the whole point of this module) — the alternative is 24 near-copies that
+// can silently drift apart, which is the defect [`spawn_scene`]'s doc already argues against.
+//
+// EVERY knob below defaults to OFF/absent, so a plain `cargo test` run of either fixture — and
+// `scripts\golden.ps1`, which WIPES any `BOYKO_*` its pin does not name — renders exactly the
+// configuration `[vb_both_sdf]` / `[vb_both_sdf_tex]` were blessed under.
+
+/// Selects the SV0 gate mode the fixture REQUESTS: `0` (off, the default), `1` (shadow bit only,
+/// gate ii-a), `2` (contact-AO bit only, gate ii-b), `3` (both).
+///
+/// A REQUEST, not a guarantee: `sync_sv0_light_gate` clamps it against the boot's resolved
+/// capability and prints a diagnostic when it cannot honour it.
+pub const SV0_MODE_ENV: &str = "BOYKO_SV0_MODE";
+/// Set to `1` to arm the froxel light cull (`LightingConfig::clusters_enabled`), which selects
+/// the `_froxel` lit-producer rows (2, 5, 6).
+///
+/// Read at BOOT (`boyko_app::runner`'s `clusters_wanted` probe), which is why this has to reach
+/// the world through an `insert_resource` before `App::run` rather than through a startup system.
+pub const SV0_FROXEL_ENV: &str = "BOYKO_SV0_FROXEL";
+/// Set to `1` to arm SSAO, which arms `mesh_geo_shade_split` and therefore selects the SPLIT
+/// lit-producer rows (7, 8). Also boot-read, same reason as [`SV0_FROXEL_ENV`].
+pub const SV0_SSAO_ENV: &str = "BOYKO_SV0_SSAO";
+
+/// The SSAO quality the split rows boot with when [`SV0_SSAO_ENV`] is set — `High`, matching
+/// `vb_mesh_ssao.rs`'s own shipped fixture so the split tail is exercised in its blessed shape.
+const SV0_SSAO_QUALITY: SsaoQuality = SsaoQuality::High;
+/// The à-trous level count paired with [`SV0_SSAO_QUALITY`] — again `vb_mesh_ssao.rs`'s value.
+const SV0_SSAO_ATROUS_LEVELS: u32 = 3;
+
+/// Reads an env var as a boolean knob: present and exactly `"1"` is on, everything else is off.
+///
+/// Deliberately strict rather than "any non-empty value": a stale `BOYKO_SV0_FROXEL=0` left in a
+/// shell would otherwise arm the froxel rows and silently move every count in this campaign.
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| v == "1")
+}
+
+/// The SV0 gate mode this run requests, from [`SV0_MODE_ENV`] — `0` when unset.
+///
+/// # Panics
+///
+/// Panics on a value outside `0..=3`. A typo'd mode must not silently degrade to `0`: that
+/// renders the UNARMED image under an "armed" filename, and the gate that compares them would
+/// then report a changed-pixel count of zero and read it as "the term is dead".
+pub fn sv0_mode_from_env() -> u32 {
+    let Ok(raw) = std::env::var(SV0_MODE_ENV) else { return 0 };
+    let mode: u32 = raw
+        .parse()
+        .unwrap_or_else(|_| panic!("invariant: {SV0_MODE_ENV} must be 0..=3, got {raw:?}"));
+    assert!(mode <= 3, "invariant: {SV0_MODE_ENV} must be 0..=3, got {mode}");
+    mode
+}
+
+/// The [`LightingConfig`] a fixture inserts AFTER `add_plugins`: `LightingConfig::default()` with
+/// this run's SV0 request and froxel arming applied.
+///
+/// With no env set this is bit-identical to the `LightingConfig::default()` that
+/// `EnginePlugins::build` already seeded, so inserting it unconditionally cannot move a blessed
+/// pin — which is why the fixtures do exactly that rather than branching.
+pub fn lighting_config_from_env() -> LightingConfig {
+    let mode = sv0_mode_from_env();
+    LightingConfig {
+        clusters_enabled: env_flag(SV0_FROXEL_ENV),
+        // Bit 0 of the mode is the shadow term, bit 1 the contact AO — the SAME lane assignment
+        // `boyko_render::light`'s `VB_SDF_MESH_SHADOW_BIT`/`VB_SDF_MESH_AO_BIT` and the shader's
+        // `load_vb_sdf_mesh_mode` decode use, so `BOYKO_SV0_MODE` IS the shader's `sv0_mode`.
+        vb_sdf_mesh_shadow: (mode & boyko_render::VB_SDF_MESH_SHADOW_BIT) != 0,
+        vb_sdf_mesh_ao: (mode & boyko_render::VB_SDF_MESH_AO_BIT) != 0,
+        ..LightingConfig::default()
+    }
+}
+
+/// The [`SsaoConfig`] the split rows boot with, or `None` when [`SV0_SSAO_ENV`] is unset.
+///
+/// `None` means the fixture inserts NOTHING — not `SsaoConfig::default()` — because the boot
+/// probe is `try_resource::<SsaoConfig>().is_some_and(|c| c.enabled())` and an absent Resource is
+/// the shipped 0%-gate state every blessed VB pin was rendered under.
+pub fn ssao_config_from_env() -> Option<SsaoConfig> {
+    env_flag(SV0_SSAO_ENV)
+        .then_some(SsaoConfig { quality: SV0_SSAO_QUALITY, atrous_levels: SV0_SSAO_ATROUS_LEVELS })
+}
 
 /// [`SUN_DIR`] normalised — the direction the shader actually shades and marches with
 /// (`l = normalize(L.dir)`), and the axis the SDF body is placed on.
@@ -338,6 +428,59 @@ fn spawn_sun_and_sky(commands: &mut Commands) {
 /// same gathered list, so both counts fall to zero.
 pub fn spawn_sdf_body(commands: &mut Commands) {
     commands.spawn(SdfPrimitive(sdf_body_edit()));
+}
+
+// ===========================================================================================
+// The GPU-free gather harness — shared by the S1 adequacy gate and the S4 arming matrix
+// ===========================================================================================
+
+/// The mesh handle the GPU-free harness hands [`spawn_scene`].
+///
+/// `MeshHandle` is a plain dense index into `Assets<MeshGpu>`; spawning `MeshBundle`s that name a
+/// non-existent slot is inert in an app with no render plugin (nothing walks the table, and
+/// `MeshHandle`'s refcount hook no-ops when `RefcountDeltas` is absent). The row is spawned anyway
+/// because the point of this harness is to drive the SHARED entry point, not a subset of it.
+const ORACLE_MESH_HANDLE: MeshHandle = MeshHandle(0);
+
+/// The material row the GPU-free harness hands [`spawn_scene`] — all default, since no material is
+/// registered and none is read.
+const ORACLE_MATERIALS_ROW: [Option<u16>; MESH_ROW_COUNT] = [None; MESH_ROW_COUNT];
+
+/// Spawns the WHOLE fixture scene through the shared entry point — the startup system the GPU-free
+/// gather harness drives, and the reason a body dropped from [`spawn_scene`] reds the CPU gates
+/// instead of only the GPU dumps.
+fn spawn_scene_system(mut commands: Commands) {
+    spawn_scene(&mut commands, ORACLE_MESH_HANDLE, &ORACLE_MATERIALS_ROW);
+}
+
+/// Builds the GPU-free gather harness: `SdfPlugin` (which only inserts the staging resource), the
+/// fixtures' own shared scene spawn, and the runner's explicit post-`finish()` gather.
+///
+/// This reproduces `boyko_app/src/runner.rs:589`'s ordering exactly — `collect_sdf_edits` is run
+/// ONCE by hand after `finish()` has drained every startup system, which is the order-proof site
+/// the host chose precisely so a plugin-registered startup gather could not race the user's later
+/// `add_startup_system(setup)`.
+///
+/// Lives HERE rather than in one of the two test binaries that need it: both the S1 adequacy gate
+/// and the S4 arming matrix quantify their pixel counts over the GATHERED edit list, and a second
+/// copy of this construction is exactly the silently-divergent duplicate [`spawn_scene`]'s own doc
+/// (review C2) argues against.
+pub fn gathered_app() -> App {
+    let mut app = App::new();
+    app.add_plugins(boyko_render::SdfPlugin);
+    app.add_startup_system(spawn_scene_system);
+    app.finish();
+    app.world_mut().run_system(boyko_render::collect_sdf_edits);
+    app
+}
+
+/// The SDF edit list AS THE RENDERED SCENE PRODUCES IT — [`gathered_app`]'s staging output.
+///
+/// Every pixel count in this campaign is quantified over THIS list, never over a locally
+/// reconstructed one, so deleting the body from [`spawn_scene`] empties them all together.
+pub fn gathered_edits() -> Vec<SdfEdit> {
+    let app = gathered_app();
+    app.world().resource::<boyko_render::SdfEditStaging>().edits().to_vec()
 }
 
 /// The camera pose the dumps and the S1 oracle share.

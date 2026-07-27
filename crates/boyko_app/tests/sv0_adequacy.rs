@@ -264,26 +264,6 @@ fn sv0_oracle_raster_is_sound_on_the_fixture_scene() {
 // Gate 1 — the edit list is non-empty
 // ===========================================================================================
 
-/// The mesh handle the GPU-free harness hands [`sv0_scene::spawn_scene`].
-///
-/// `MeshHandle` is a plain dense index into `Assets<MeshGpu>`; spawning `MeshBundle`s that name a
-/// non-existent slot is inert in an app with no render plugin (nothing walks the table, and
-/// `MeshHandle`'s refcount hook no-ops when `RefcountDeltas` is absent). The row is spawned anyway
-/// because the point of this harness is to drive the SHARED entry point, not a subset of it.
-const ORACLE_MESH_HANDLE: MeshHandle = MeshHandle(0);
-
-/// The material row the GPU-free harness hands [`sv0_scene::spawn_scene`] — all default, since no
-/// material is registered and none is read.
-const ORACLE_MATERIALS_ROW: [Option<u16>; sv0_scene::MESH_ROW_COUNT] =
-    [None; sv0_scene::MESH_ROW_COUNT];
-
-/// Spawns the WHOLE fixture scene through the shared entry point — the startup system the GPU-free
-/// gather harness drives, and the reason a body dropped from [`sv0_scene::spawn_scene`] reds this
-/// binary instead of only the GPU dumps.
-fn spawn_scene_system(mut commands: Commands) {
-    sv0_scene::spawn_scene(&mut commands, ORACLE_MESH_HANDLE, &ORACLE_MATERIALS_ROW);
-}
-
 /// Spawns ONLY the SDF occluder — for the real-runner staging tripwire, which asserts a property of
 /// `SdfEditStaging` and needs no mesh, no material and no camera.
 ///
@@ -294,20 +274,11 @@ fn spawn_body_only(mut commands: Commands) {
     sv0_scene::spawn_sdf_body(&mut commands);
 }
 
-/// Builds the GPU-free gather harness: `SdfPlugin` (which only inserts the staging resource), the
-/// fixtures' own shared scene spawn, and the runner's explicit post-`finish()` gather.
-///
-/// This reproduces `boyko_app/src/runner.rs:589`'s ordering exactly — `collect_sdf_edits` is run
-/// ONCE by hand after `finish()` has drained every startup system, which is the order-proof site
-/// the host chose precisely so a plugin-registered startup gather could not race the user's later
-/// `add_startup_system(setup)`.
+/// The GPU-free gather harness — [`sv0_scene::gathered_app`], which is where it moved at rung S4
+/// so the S4 arming matrix measures the SAME gathered edit list these gates do (review C2's seam,
+/// applied to the second consumer). The construction is unchanged.
 fn gathered_app() -> App {
-    let mut app = App::new();
-    app.add_plugins(SdfPlugin);
-    app.add_startup_system(spawn_scene_system);
-    app.finish();
-    app.world_mut().run_system(collect_sdf_edits);
-    app
+    sv0_scene::gathered_app()
 }
 
 /// **Gate 1.** `collect_sdf_edits` finds the fixtures' occluder, so the rendered edit list is

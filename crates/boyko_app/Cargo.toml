@@ -42,6 +42,12 @@ bytemuck.workspace = true
 # production `boyko_app` path names the eDSL. `default-features = false` keeps the `emit`
 # (std/codegen) half off — only the f32 Eval path is linked.
 boyko_shaderdsl = { path = "../boyko_shaderdsl", default-features = false }
+# VB-SV0 rung S4 (code-review P1-b): the arming matrix's (ii-b) budget is measured through the
+# shader's `min(ao_final, sdf_ao)` chain, whose pre-existing floor on the TEXTURED rows is the
+# fixture's own AO map. `sv0_arm_matrix.rs` decodes that committed PNG with the engine's own
+# decoder and pins it, so the "no texture attenuation" claim is a measurement rather than an
+# assumption. Test-only: no production `boyko_app` path decodes an image.
+boyko_image = { path = "../boyko_image" }
 
 [lints]
 workspace = true

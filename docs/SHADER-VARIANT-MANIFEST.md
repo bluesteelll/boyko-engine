@@ -182,9 +182,15 @@ STILL unlisted; SV0 does not perturb them, so closing that gap belongs in its ow
 
 Reachability note: the two `HWRT` rows require `hwrt_denoise_or_vis_on`, which is exactly the
 condition `ShadowSources::SDF_SOFT_MARCH` requires to be FALSE — so VB-SV0 is compiled into them
-but can never be armed while they are bound. As of rung S2 that exclusion rests on the resolver
-predicate alone; the CPU truth-table test `sv0_never_arms_under_hwrt` that will make it mechanical
-rather than argued is scheduled for rung S4 and DOES NOT EXIST YET.
+but can never be armed while they are bound. As of rung **S4** that exclusion is MECHANICAL, not
+argued: `boyko_render::render_path_config::tests::sv0_never_arms_under_hwrt` runs the truth table
+through both `resolve_rules` and the production `resolve_render_path`, and its red mutation
+(delete the `&& !consumers.hwrt_denoise_or_vis_on` term from `resolve_rules`' `SDF_SOFT_MARCH`
+arming) was demonstrated at that rung. The runtime half is
+`boyko_render::light::sync_sv0_light_gate`, which clamps the owner's request to
+`ResolvedRenderPath::vb_sdf_mesh_armable()` and can therefore only ever CLEAR a bit; these two
+rows are additionally covered by `record_vb`'s `note_vb_lit_producer` line, which names the bound
+producer in the run log.
 
 ## `vb_geo.comp.hlsl` — the R9 thin-aux geometry pre-pass (compute)
 

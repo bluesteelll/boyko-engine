@@ -93,5 +93,17 @@ fn vb_both_sdf_screenshot_dump() {
     // Requested AFTER `add_plugins` (which installs `RenderPathPlugin`'s `Deferred` default) so
     // this owner override wins — `vb_both.rs`'s own post-plugins insert, verbatim.
     app.insert_resource(RenderPathConfig { path: RenderPath::VisibilityBuffer, legs: GeometryLegs::Both });
+    // Rung S4's arming knobs, all DEFAULT OFF (`sv0_scene`'s knob block). With no `BOYKO_SV0_*`
+    // set this `LightingConfig` is bit-identical to the one `EnginePlugins` already seeded, so
+    // the blessed `[vb_both_sdf]` pin is untouched; `golden.ps1` additionally WIPES any BOYKO_*
+    // its pin does not name, so a stray shell knob cannot reach a pin run either.
+    //
+    // Inserted BEFORE `run()` rather than set from a startup system because the boot resolver
+    // reads `clusters_enabled` (and `SsaoConfig`) to commit `froxel_light_cull` /
+    // `mesh_geo_shade_split` — a startup system would run after that commitment.
+    app.insert_resource(sv0_scene::lighting_config_from_env());
+    if let Some(ssao) = sv0_scene::ssao_config_from_env() {
+        app.insert_resource(ssao);
+    }
     app.run();
 }
