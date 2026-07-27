@@ -18,8 +18,33 @@ piece of functionality lives, start here, then go to
 > (hooks + observers), Phase 19 (parent-child hierarchies on the hook
 > substrate), Phase 21 (multi-world hardening), and Phase 22 (tags: static
 > ZST + dynamic runtime, the empty archetype). Each phase's authoritative
-> record is its `docs/PHASE-*-RESULTS.md`. Line numbers below are verified
-> against the current source; if one drifts, the file path is still correct.
+> record is its `docs/PHASE-*-RESULTS.md`.
+
+> **Anchors are partly gated, and the boundary is stated because it moved four
+> times.** `tests/internal_docs_anchors.rs` runs under the ordinary
+> `cargo test --workspace` and checks **exactly two notations**: the suffix form
+> `file.rs:N` (including `(:N)`) and the bare `(N)` member line. For those: the
+> path must exist, line N must still hold a definition, and where a line's
+> backticked symbols pair one-to-one with its numbers, line N must also name the
+> symbol it stands beside. An anchor written `:N~` / `(N~)` deliberately points
+> at a non-definition — a struct field, an enforcement site, a module-doc
+> invariant — and waives **both** the shape and the identity check, keeping only
+> the in-file bounds check.
+>
+> **NOT read by the gate:** line numbers spelled `line N` or `(line N)`. Nine
+> such sites exist across these documents. That form is invisible — changing one
+> to `(line 99999)` leaves the suite green and does not even move the anchor
+> count. Write new citations in the `:N` form.
+>
+> **Binding rule, stated exactly because getting it wrong is what caused the
+> worst rot found here:** an anchor binds to the nearest resolvable file-shaped
+> path mention since the last heading — a **File:** header, **but also any inline
+> markdown link or bare `crates/...` mention.** So an inline file link dropped
+> into a member table silently rebinds every row after it, and a table whose
+> members live in several files needs its header split.
+>
+> Do not read this box as a freshness guarantee for the whole document. It states
+> which notations are machine-checked; a number in any other form is unverified.
 
 > **Crate layout (19 members).** *Kernel:* `boyko_ecs` (core) · `boyko_macros`
 > (derives) · `boyko_utils` (collections) · `boyko_threadpool` (Chase-Lev
@@ -125,34 +150,97 @@ The world object. Owns the entity manager, archetype manager (whose pools own
 their backing reservations), resources, event dispatcher, change-detection
 tick, the deferred-hook queue, and the per-`(D,F)` query/bundle caches.
 
-**File:** [core/ecs_master/ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs)
+The type is declared once and its inherent `impl` blocks are split one file per
+API surface under
+[core/ecs_master/](../crates/boyko_ecs/src/ecs/core/ecs_master/) — the
+refactoring campaign turned the god-file into a directory. A member's line
+number therefore means nothing without the file that declares it, so each table
+below is read against the **File:** line directly above it, and that is the
+binding the anchor gate checks.
+
+**File:** [core/ecs_master/ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs) — the struct, construction, the typed query entry, teardown.
 
 | What you want to do | Method (line) |
 |---------------------|---------------|
-| Construct an ECS instance | `EcsMaster::new()` (375) / `with_capacity(entity_cap, arch_cap)` (413) |
-| Create an archetype | `create_archetype(&[ComponentId])` (484) / `get_or_create_archetype(...)` (491) |
-| Spawn (raw byte API) | `create_entity(arch_id, &[(ComponentId, &[u8])]) -> EcsResult<Entity>` (524) |
-| Spawn (typed, 1–2 comps) | `spawn_one::<A>(arch, a)` (901) / `spawn_two::<A, B>(arch, a, b)` (937) |
-| Spawn many (typed bundle) | `spawn_batch::<B, I>(iter) -> EcsResult<Vec<Entity>>` (2553) |
-| Spawn with ZERO components (Phase 22) | `spawn_empty() -> Entity` (1012) — lazy empty archetype via `get_or_create_archetype(&[])` |
-| Dynamic tags (Phase 22; in [tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/tag_api.rs)) | `try_register_tag(name)` (47) / `register_tag(name)` (65) / `tag_by_name` (76) / `has_tag` (89, O(1)) / `add_tag` (125) / `remove_tag` (195) |
-| Delete an entity | `delete_entity(entity) -> bool` (1055) |
-| Read a component (raw) | `get_component_raw(entity, id)` (1186) |
-| Mutate a component (change-tracked) | `get_component_mut::<T>(entity) -> Option<Mut<'_, T>>` (1363) |
-| Write a component (raw bytes) | `set_component_raw(entity, id, &[u8])` (1282) |
-| Check entity / component presence | `has_entity` (1429) / `has_component` (1447) |
-| Counts | `entity_count` (1484) / `archetype_count` (1490) |
-| Iterate entities (cold inspection) | `iter_entities()` (1502) — O(capacity) fast-store scan |
-| Query entity IDs by components | `query_entities(&[ComponentId]) -> Vec<Entity>` (1507) — allocates; prefer the typed `Query` |
-| Direct typed query (no SystemParam) | `query::<D, F>() -> QueryView<'_, D, F>` (2632) |
-| Run a closure as a system once | `run_system::<F, M, Out>(system) -> Out` (1795) |
-| Run a pre-built cached `System` | `run_cached_system::<S>(&mut system) -> S::Out` (1827) |
-| Resources | `insert_resource::<R>` (1945) / `resource::<R>() -> &R` (2128) (+ `_mut`) |
-| Hooks (runtime) | `register_component_hooks::<C>() -> ComponentHooksBuilder` (2004) |
-| Observers | `observe_on_{add,insert,replace,remove}::<C>(runner)` (2053/2061/2071/2080), `add_observer` (2092), `remove_observer` (2109) |
-| States (direct) | `insert_state` (2213) / `init_state` (2231) / `state::<S>()` (2242) / `set_next_state` (2265) |
-| Events (direct) | `send_event::<E>(thread_index, event)` (1684) / `update_events()` (1702) |
-| Drop everything | `clear()` (2772) |
+| Construct an ECS instance | `EcsMaster::new()` (426) / `with_capacity(entity_cap, arch_cap)` (473) |
+| Direct typed query (no SystemParam) | `query::<D, F>() -> QueryView<'_, D, F>` (825) |
+| Drop everything | `clear()` (1026) |
+| Spawn many (typed bundle) | `spawn_batch::<B, I>(iter) -> EcsResult<Vec<Entity>>` (1079) |
+
+**File:** [core/ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs) — archetypes, spawn, despawn.
+
+| What you want to do | Method (line) |
+|---------------------|---------------|
+| Create an archetype | `create_archetype(&[ComponentId])` (48) / `get_or_create_archetype(...)` (55) |
+| Spawn (raw byte API) | `create_entity(arch_id, &[(ComponentId, &[u8])]) -> EcsResult<Entity>` (137) |
+| Spawn (typed, 1–2 comps) | `spawn_one::<A>(arch, a)` (582) / `spawn_two::<A, B>(arch, a, b)` (618) |
+| Spawn with ZERO components (Phase 22) | `spawn_empty() -> Entity` (667) — the empty archetype is created lazily on first use |
+| Delete an entity | `delete_entity(entity) -> bool` (798) |
+
+**File:** [core/ecs_master/component_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/component_api.rs) — per-entity component access.
+
+| What you want to do | Method (line) |
+|---------------------|---------------|
+| Read a component (raw) | `get_component_raw(entity, id)` (176) |
+| Write a component (raw bytes) | `set_component_raw(entity, id, &[u8])` (444) |
+| Mutate a component (change-tracked) | `get_component_mut::<T>(entity) -> Option<Mut<'_, T>>` (553) |
+| Check component presence | `has_component(entity, id)` (673) |
+
+**File:** [core/ecs_master/entity_query_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_query_api.rs) — cold inspection of the entity set.
+
+| What you want to do | Method (line) |
+|---------------------|---------------|
+| Check entity presence | `has_entity(entity)` (17) |
+| Counts | `entity_count()` (69) / `archetype_count()` (75) |
+| Iterate entities (cold inspection) | `iter_entities()` (87) — O(capacity) fast-store scan |
+| Query entity IDs by components | `query_entities(&[ComponentId]) -> Vec<Entity>` (92) — allocates; prefer the typed query DSL |
+
+**File:** [core/ecs_master/tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/tag_api.rs) — dynamic (runtime-named) tags, Phase 22.
+
+| What you want to do | Method (line) |
+|---------------------|---------------|
+| Mint a tag id | `try_register_tag(name)` (47) / `register_tag(name)` (65) |
+| Look one up | `tag_by_name(name)` (76) / `has_tag(entity, tag)` (89) — one signature bit test |
+| Toggle one | `add_tag(entity, tag)` (130) / `remove_tag(entity, tag)` (200) |
+
+**File:** [core/ecs_master/system_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/system_api.rs) — one-shot system runners.
+
+| What you want to do | Method (line) |
+|---------------------|---------------|
+| Run a closure as a system once | `run_system::<F, M, Out>(system) -> Out` (111) |
+| Run a pre-built cached system | `run_cached_system::<S>(&mut system) -> S::Out` (142) |
+
+**File:** [core/ecs_master/resource_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/resource_api.rs) — world-global singletons.
+
+| What you want to do | Method (line) |
+|---------------------|---------------|
+| Resources | `insert_resource::<R>` (21) / `resource::<R>() -> &R` (52) / `resource_mut::<R>() -> &mut R` (76) |
+
+**File:** [core/ecs_master/observer_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/observer_api.rs) — hooks and observers (Phases 14a / 14b).
+
+| What you want to do | Method (line) |
+|---------------------|---------------|
+| Hooks (runtime) | `register_component_hooks::<C>() -> ComponentHooksBuilder` (91) |
+| Observers (typed) | `observe_on_add::<C>(runner)` (143) / `observe_on_insert` (151) / `observe_on_replace` (161) / `observe_on_remove` (170) |
+| Observers (type-erased) | `add_observer(kind, cid, runner)` (182) / `remove_observer(id)` (199) |
+
+**File:** [core/ecs_master/state_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/state_api.rs) — direct state access (Phase 17).
+
+| What you want to do | Method (line) |
+|---------------------|---------------|
+| States (direct) | `insert_state` (33) / `init_state` (51) / `state::<S>()` (62) / `set_next_state` (85) |
+
+**File:** [core/ecs_master/event_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/event_api.rs) — direct event send and frame swap.
+
+| What you want to do | Method (line) |
+|---------------------|---------------|
+| Events (direct) | `send_event::<E>(thread_index, event)` (50) / `update_events()` (68) |
+
+The remaining surfaces live in sibling files of the same directory and are
+documented at their own sections:
+[bundle_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/bundle_api.rs),
+[enable_tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs),
+[relationship_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/relationship_api.rs).
 
 Spawn / fallible paths return `EcsResult<T>` — see
 [core/error.rs](../crates/boyko_ecs/src/ecs/error.rs) for the
@@ -173,12 +261,12 @@ at the crate root: `boyko_ecs::{App, Plugin, Plugins, AppExit}`.
 
 | What you want to do | Where | Method (line) |
 |---------------------|-------|---------------|
-| Construct an app | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `App::new()` (80) / `with_threads(n)` (87) / `with_pool(Arc<ThreadPool>)` (93) |
-| Add a plugin / plugin tuple | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_plugin::<P>` (224); `add_plugins((A, B, ..))` via the sealed `Plugins` trait ([plugins.rs](../crates/boyko_ecs/src/ecs/core/app/plugins.rs), 1..=12 + nesting) |
-| Insert a resource / state | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `insert_resource` (117) / `init_state` (123) / `insert_state` (136) |
-| Add systems (ordered) | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_systems_cfg(\|b: &mut ScheduleBuilder\| …)` (162) — full Phase-15/16/17 chaining |
-| Add a system (unordered) | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_systems(system)` (180) |
-| Add a one-shot startup system | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_startup_system(system)` (199) — runs once before the loop |
+| Construct an app | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `App::new()` (196) / `with_threads(n)` (203) / `with_pool(Arc<ThreadPool>)` (209) |
+| Add a plugin / plugin tuple | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_plugin::<P>` (545); `add_plugins((A, B, ..))` via the sealed `Plugins` trait ([plugins.rs](../crates/boyko_ecs/src/ecs/core/app/plugins.rs), 1..=12 + nesting) |
+| Insert a resource / state | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `insert_resource` (256) / `init_state` (268) / `insert_state` (284) |
+| Add systems (ordered) | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_systems_cfg(\|b: &mut ScheduleBuilder\| …)` (313) — full Phase-15/16/17 chaining |
+| Add a system (unordered) | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_systems(system)` (334) |
+| Add a one-shot startup system | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `add_startup_system(system)` (503) — runs once before the loop |
 | Run the loop | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `run() -> AppExit` (dispatches to an installed runner first, else loops until `AppExit(true)`), `run_n(frames)`, `update()` (self-clocked via `Instant`) |
 | Hand the loop to a host (windowed runner) | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `set_runner(Box<dyn FnOnce(&mut App) -> AppExit>)` — `run()` hands control to it BEFORE `finish()`; the runner owns `finish()`, the `AppExit` policy, and teardown (APP-HOST-PLAN rung R1) |
 | Run one frame with an external clock | [app.rs](../crates/boyko_ecs/src/ecs/core/app/app.rs) ✅ | `update_with_delta(raw)` — the Phase-20 frame driver (① Time → ② check-ticks → ③ event swap → ④ fixed loop → ⑤ Main); `run_n_with_delta(frames, delta)` — the deterministic loop for tests/benches |
@@ -224,7 +312,7 @@ Still DEFERRED: SubApps, `PluginGroup`/`DefaultPlugins`,
 |---------------------|-------|-----|
 | Construct an Entity literal | [core/entity/entity.rs](../crates/boyko_ecs/src/ecs/core/entity/entity.rs) ✅ | `Entity::new(id, generation)` / `with_id(id)` |
 | Compare entities (id + generation) | [core/entity/entity.rs](../crates/boyko_ecs/src/ecs/core/entity/entity.rs) ✅ | `e1 == e2` — compares BOTH fields (load-bearing ABA defence) |
-| Allocate an entity (recycle if available) | [core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) ✅ | `EntityMaster::allocate_entity()` (102) — recycles from `free_entity_ids`, else `fetch_add` on the atomic |
+| Allocate an entity (recycle if available) | [core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) ✅ | `EntityMaster::allocate_entity()` (124) — recycles from `free_entity_ids`, else `fetch_add` on the atomic |
 | Register into the fast store | [core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) ✅ | `register_entity_with_ptr(entity, *mut Archetype, row)` / `register_batch(...)` |
 | Validate an entity (gen-checked) | [core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) ✅ | `is_entity_valid(entity)` / `get_entity(id)` |
 | Deallocate (bumps generation) | [core/entity/entity_master.rs](../crates/boyko_ecs/src/ecs/core/entity/entity_master.rs) ✅ | `deallocate_entity(entity) -> bool` (decrements `live_count` on success only) |
@@ -286,15 +374,15 @@ lazy). Public-book pages: `book/src/concepts/tags.md`,
 | Mint a dynamic tag by name | [ecs_master/tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/tag_api.rs):47/:65 ✅ | `try_register_tag(name) -> Option<TagId>` (None = 512 budget exhausted) / `register_tag(name)` (panicking sugar); NAME-keyed idempotent, process-global, cold |
 | Resolve a name | [tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/tag_api.rs):76 ✅ | `tag_by_name(name)` — never mints; the name is the stable key (ids are process-unstable) |
 | The handle + id bridge | [component_registry/tags.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/tags.rs):49 ✅ | `TagId` (**deviation: lives in the registry, NOT the planned `identifiers/tag_id.rs`** — mint-protocol locality + constructor privacy); one-way `component_id()` (:56) / `From<TagId> for ComponentId` (:61) |
-| The mint protocol | [component_registry/tags.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/tags.rs) + [mod.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs) ✅ | `TAG_NAMES` intern (`tags.rs`:155) → `try_register_tag_by_name` (`tags.rs`:182) → `try_register_dynamic` (`mod.rs`:965, bounded CAS, None at ceiling; slot-occupied ⇒ `#[cold]` panic `mod.rs`:996 — O2); sentinel `DynamicTagMarker` TypeId (`mod.rs`:201); `ComponentLayout::new_dynamic_tag` (`mod.rs`:171), `is_zst` (`mod.rs`:157) |
-| Attach / detach / check (direct) | [tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/tag_api.rs):125/:195/:89 ✅ | `add_tag` (present = in-place replace semantics) / `remove_tag` (absent = no-op; last component → EMPTY archetype) / `has_tag` (O(1) signature bit test) |
-| Attach / detach (deferred) | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs):170/:184 ✅ | `.add_tag(tag)` / `.remove_tag(tag)` → [tag_commands.rs](../crates/boyko_ecs/src/ecs/core/commands/tag_commands.rs):38/:54 |
+| The mint protocol | [component_registry/tags.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/tags.rs) + [mod.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs) ✅ | `TAG_NAMES` intern ([tags.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/tags.rs):155) → `try_register_tag_by_name` ([tags.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/tags.rs):182) → `try_register_dynamic` ([mod.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs):965, bounded CAS, None at ceiling; slot-occupied ⇒ `#[cold]` panic :996 — O2); sentinel `DynamicTagMarker` TypeId (:201); `ComponentLayout::new_dynamic_tag` (:171), `is_zst` (:157) |
+| Attach / detach / check (direct) | [tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/tag_api.rs):130/:200/:89 ✅ | `add_tag` (present = in-place replace semantics) / `remove_tag` (absent = no-op; last component → EMPTY archetype) / `has_tag` (O(1) signature bit test) |
+| Attach / detach (deferred) | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs):182/:196 ✅ | `.add_tag(tag)` / `.remove_tag(tag)` → [tag_commands.rs](../crates/boyko_ecs/src/ecs/core/commands/tag_commands.rs):38/:54 |
 | Query by dynamic tag | [query/tag_terms.rs](../crates/boyko_ecs/src/ecs/core/iters/query/tag_terms.rs) ✅ | `with_tag`/`without_tag` on `Query` + `QueryView`; ≤ `MAX_DYN_TAG_TERMS = 8`; archetype-granularity (zero per-row); see [SYSTEMS.md §8.6](SYSTEMS.md) for the `_pre_terms` funnel |
 | Hooks on a dynamic tag | [component_registry/mod.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs):885 ✅ | `register_hooks_by_id(tag.component_id(), hooks)` — **mint → register hooks → first attach** (H1: `Err(AlreadyArchetyped)` after) |
 | Observers on a dynamic tag | [ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs) ✅ | the existing `add_observer(kind, tag.component_id(), runner)` — no gate (dynamic bit walk) |
-| The dynamic migration paths | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):694/:769/:836/:1098/:1335 ✅ | `merged_archetype_id_dyn` / `without_ids_archetype_id` (`kept.is_empty()` → EMPTY — O3) / `migrate_entity_attach_ids` / `migrate_entity_detach_ids` / `retag_in_place` — allocation-free, fire hooks+observers (ledger rows 8–10) |
-| Empty entities | [ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):1012, [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):182 ✅ | `EcsMaster::spawn_empty` / `Commands::spawn_empty` (via `EmptyBundle`, [self_bundle.rs](../crates/boyko_ecs/src/ecs/core/bundle/self_bundle.rs):135); empty signature matches only zero-required-component queries |
-| ZST pool internals | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs), [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):72/:77 ✅ | tick-only layout, dangling SIMD-aligned base, `grow_rows_zst`; VA: 128 MiB reserve per tag pool per hosting archetype (2 MiB cfg fallback), zero resident until commit — see [SYSTEMS.md §2.3](SYSTEMS.md) |
+| The dynamic migration paths | [commands/migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):1230/:1305/:1372/:1658/:1922 ✅ | `merged_archetype_id_dyn` / `without_ids_archetype_id` (`kept.is_empty()` → EMPTY — O3) / `migrate_entity_attach_ids` / `migrate_entity_detach_ids` / `retag_in_place` — allocation-free, fire hooks+observers (ledger rows 8–10) |
+| Empty entities | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):667, [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):184 ✅ | `EcsMaster::spawn_empty` / `Commands::spawn_empty` (via `EmptyBundle`, [self_bundle.rs](../crates/boyko_ecs/src/ecs/core/bundle/self_bundle.rs):135); empty signature matches only zero-required-component queries |
+| ZST pool internals | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs), [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):85/:90 ✅ | tick-only layout, dangling SIMD-aligned base, `grow_rows_zst`; VA: 128 MiB reserve per tag pool per hosting archetype (2 MiB cfg fallback), zero resident until commit — see [SYSTEMS.md §2.3](SYSTEMS.md) |
 
 Ceilings (all loud): 512 shared ComponentIds, `MAX_ARCHETYPES = 1024`
 (N tags → up to 2^N hosting archetypes — the fragmentation ceiling; churn
@@ -321,15 +409,15 @@ invariants: [SYSTEMS.md §3.8](SYSTEMS.md).
 
 | What you want to do | Where | How |
 |---------------------|-------|-----|
-| Define a static enable tag | derive ✅ | `#[component(storage = "bitset")] struct Stunned;` — must be a ZST (a fielded bitset tag is a compile error: no pool to hold data); emits `const STORAGE_IS_BITSET = true` + an `install_storage_kind::<Self>` call; suppresses the single-component Bundle ([boyko_macros/src/lib.rs](../crates/boyko_macros/src/lib.rs):107/:120/:301/:319) |
+| Define a static enable tag | derive ✅ | `#[component(storage = "bitset")] struct Stunned;` — must be a ZST (a fielded bitset tag is a compile error: no pool to hold data); emits `const STORAGE_IS_BITSET = true` + an `install_storage_kind::<Self>` call; suppresses the single-component Bundle ([boyko_macros/src/component.rs](../crates/boyko_macros/src/component.rs):71~/:84~/:178~/:315~) |
 | Mint a dynamic enable tag by name | [ecs_master/enable_tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs):60/:72 ✅ | `register_enable_tag(name) -> EnableTagId` (panicking) / `try_register_enable_tag(name) -> Option<EnableTagId>`; NAME-keyed, classifies the id `StorageKind::Bitset`, cold |
 | Toggle (typed) | [enable_tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs):87/:95/:104 ✅ | `enable::<T>(entity)` / `disable::<T>(entity)` / `is_enabled::<T>(entity)` — dead/stale entity = silent no-op |
 | Toggle (dynamic) | [enable_tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs):113/:119/:126 ✅ | `enable_id` / `disable_id` / `is_enabled_id` (take `EnableTagId`) |
-| Toggle (deferred, in a system) | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs):209/:226/:235 ✅ | `commands.entity(e).enable::<T>()` / `.disable::<T>()` / `.enable_id(tag)` → [enable_tag_commands.rs](../crates/boyko_ecs/src/ecs/core/commands/enable_tag_commands.rs):45 `EnableTagCommand` (POD `{entity, tag, value}`) |
+| Toggle (deferred, in a system) | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs):220/:236/:249 ✅ | `commands.entity(e).enable::<T>()` / `.disable::<T>()` / `.enable_id(tag)` → [enable_tag_commands.rs](../crates/boyko_ecs/src/ecs/core/commands/enable_tag_commands.rs):45 `EnableTagCommand` (POD `{entity, tag, value}`) |
 | The id handle + bridge | [component_registry/tags.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/tags.rs):93 ✅ | `EnableTagId` (`#[repr(transparent)]` over `ComponentId`, proof-of-mint); one-way `component_id()` (:99) / `From<EnableTagId> for ComponentId` (:104) |
 | The storage-kind classifier | [component_registry/mod.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs):323 ✅ | `enum StorageKind { Table = 0, Bitset = 1, Dense = 2 }`; cold parallel `STORAGE_KIND: [AtomicU8; 512]` (:373), `storage_kind(id)` (:388), write-once `set_storage_kind` (:433), `install_storage_kind::<C>` (:729), `try_register_enable_tag_by_name` ([tags.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/tags.rs):134) |
 | Typed query filter | [query/filter_enable.rs](../crates/boyko_ecs/src/ecs/core/iters/query/filter_enable.rs) ✅ | `Enabled<T>` / `Disabled<T>` — non-archetypal per-row `QueryFilter` (NULL column reads as disabled); rejects `Or<…>` and `for_each_chunk` at the bound |
-| Dynamic query terms | [query/enable_terms.rs](../crates/boyko_ecs/src/ecs/core/iters/query/enable_terms.rs) ✅ | `with_enabled(EnableTagId)` / `without_enabled(EnableTagId)` on `Query` ([query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):139/:154) AND `QueryView` ([query_view.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs):247/:262); `EnableTerms` (per-view, ≤ `MAX_ENABLE_TERMS = 8`, [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):294); per-row runtime gate (loop-invariant `is_empty()`, bench-flat 0%-gate) |
+| Dynamic query terms | [query/enable_terms.rs](../crates/boyko_ecs/src/ecs/core/iters/query/enable_terms.rs) ✅ | `with_enabled(EnableTagId)` / `without_enabled(EnableTagId)` on `Query` ([query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):170/:185) AND `QueryView` ([query_view.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs):283/:298); `EnableTerms` (per-view, ≤ `MAX_ENABLE_TERMS = 8`, [constants.rs](../crates/boyko_ecs/src/ecs/constants.rs):397); per-row runtime gate (loop-invariant `is_empty()`, bench-flat 0%-gate) |
 | The cull oracle | [component/enable/enable_presence.rs](../crates/boyko_ecs/src/ecs/core/component/enable/enable_presence.rs) ✅ | `EnablePresence` — per-world per-tag archetype bitset; O(1) `contains` + lock-free `epoch`; the bounded candidate snapshot for the D7 global scan (`snapshot_present`) |
 | The bit storage | [component/enable/enable_store.rs](../crates/boyko_ecs/src/ecs/core/component/enable/enable_store.rs) ✅ | `EnableStore` (per-archetype, inline-4 `SmallList4`) → `EnableColumn` (lazily-paged) → `EnablePage` (512 B = `[AtomicU64; 64]`, 4096 rows); read-first `swap_remove_bit` |
 
@@ -351,8 +439,8 @@ plan's named test ranges.
 | What you want to do | Where | How |
 |---------------------|-------|-----|
 | Define a bundle | [boyko_macros/src/lib.rs](../crates/boyko_macros/src/lib.rs) ✅ | `#[derive(Bundle)] struct SpawnBundle { pos: Position, vel: Velocity }` |
-| The bundle trait | [bundle/bundle.rs](../crates/boyko_ecs/src/ecs/core/bundle/bundle.rs):183 ✅ | `trait Bundle: BundleSealed + Send + Sync + Unpin + 'static` — `component_ids()`, `for_each_component_bytes(FnMut)` |
-| Per-bundle-type ID | [bundle/bundle_type_registry.rs](../crates/boyko_ecs/src/ecs/core/bundle/bundle_type_registry.rs) ✅ | `BundleTypeId` (lazy); `MAX_BUNDLE_TYPES = 1024` (84) |
+| The bundle trait | [bundle/bundle.rs](../crates/boyko_ecs/src/ecs/core/bundle/bundle.rs):417 ✅ | `trait Bundle: BundleSealed + Send + Sync + Unpin + 'static` — `component_ids()`, `for_each_component_bytes(FnMut)` |
+| Per-bundle-type ID | [bundle/bundle_type_registry.rs](../crates/boyko_ecs/src/ecs/core/bundle/bundle_type_registry.rs) ✅ | `BundleTypeId` (73, lazy mint) / `MAX_BUNDLE_TYPES` (84) = 1024 |
 | Cached `(BundleType → ArchetypeId, columns)` | [bundle/bundle_column_cache.rs](../crates/boyko_ecs/src/ecs/core/bundle/bundle_column_cache.rs) ✅ | `BundleColumnCache` (Phase 8.5/12.5; sub-ns warm lookups, lazy via `OnceLock`) |
 
 Tuple bundles were intentionally dropped (Phase 8.5) — named `#[derive(Bundle)]`
@@ -360,7 +448,7 @@ structs only, so the column cache has a stable per-type address. See
 [PHASE-8.5-STATIC-BUNDLE-CACHE-PLAN.md](archive/PHASE-8.5-STATIC-BUNDLE-CACHE-PLAN.md).
 
 Phase 22 additions: `MAX_BUNDLE_ARITY` raised **8 → 16**
-([migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):55
+([migration_helpers.rs](../crates/boyko_ecs/src/ecs/core/commands/migration_helpers.rs):58
 + the derive, lock-step); every `#[derive(Component)]` type is now ALSO a
 single-component bundle (opt-out `#[component(no_bundle)]`; deriving both
 `Component` and `Bundle` is a duplicate-impl error without it); the in-crate
@@ -382,15 +470,17 @@ see `mod.rs` for the re-export surface.
 
 | What you want | Where | Type / method |
 |---------------|-------|---------------|
-| The query SystemParam | [query/query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):53 ✅ | `Query<'w, 's, D, F = ()>` |
-| Per-row iteration | [query/iter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/iter.rs) ✅ | `for x in &q` / `for x in &mut q`; `QueryIter` (83) / `QueryIterMut` (306) |
-| Data leaves | [query/data.rs](../crates/boyko_ecs/src/ecs/core/iters/query/data.rs) ✅ | `&T`, `&mut T`, `Ref<T>` (629), `Mut<T>` (901), tuples 1..=12 |
-| Read-only marker | [query/data.rs](../crates/boyko_ecs/src/ecs/core/iters/query/data.rs):253 ✅ | `ReadOnlyQueryData` (gates `&q` IntoIterator) |
-| Filters | [query/filter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/filter.rs) ✅ | `With<C>` (300), `Without<C>` (402), `Added<C>` (521), `Changed<C>` (741), `Or<F>` (925), tuples |
-| Direct-API query (no SystemParam) | [query/query_view.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs):68 ✅ | `QueryView<'w, D, F>` via `EcsMaster::query::<D, F>()` |
-| Per-`(D,F)` archetype-match cache | [query/state.rs](../crates/boyko_ecs/src/ecs/core/iters/query/state.rs):45 ✅ | `QueryDataState<D, F>` (wraps the Phase-5c `QueryState`) |
+| The query SystemParam | [query/query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):62 ✅ | `Query<'w, 's, D, F = ()>` |
+| Per-row iteration | [query/iter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/iter.rs) ✅ | `for x in &q` / `for x in &mut q`; `QueryIter` (95) / `QueryIterMut` (410) |
+| Data leaves | [query/data.rs](../crates/boyko_ecs/src/ecs/core/iters/query/data.rs) ✅ | `&T`, `&mut T`, `Ref<T>` ([data/ref_.rs](../crates/boyko_ecs/src/ecs/core/iters/query/data/ref_.rs):25), `Mut<T>` ([data/mut_.rs](../crates/boyko_ecs/src/ecs/core/iters/query/data/mut_.rs):30), tuples 1..=12 |
+| Read-only marker | [query/data.rs](../crates/boyko_ecs/src/ecs/core/iters/query/data.rs):428 ✅ | `ReadOnlyQueryData` (gates `&q` IntoIterator) |
+| Filters | [query/filter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/filter.rs) ✅ | `With<C>` (513), `Without<C>` (693), `Added<C>` (863), `Changed<C>` (1253), `Or<F>` (1535), tuples |
+| Direct-API query (no SystemParam) | [query/query_view.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs):83 ✅ | `QueryView<'w, D, F>` via `EcsMaster::query::<D, F>()` |
+| Per-`(D,F)` archetype-match cache | [query/state.rs](../crates/boyko_ecs/src/ecs/core/iters/query/state.rs):47 ✅ | `QueryDataState<D, F>` (wraps the Phase-5c `QueryState`) |
 | Per-`(D,F)` type interning | [query/query_type_registry.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_type_registry.rs) ✅ | `QueryTypeId` / `QueryTypeKey`; `MAX_QUERY_TYPES = 1024` (4096 with `big_query_table`) |
-| Dynamic-tag terms (Phase 22) | [query/tag_terms.rs](../crates/boyko_ecs/src/ecs/core/iters/query/tag_terms.rs) ✅ | `with_tag(TagId)` / `without_tag(TagId)` on `Query` ([query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs):97/:107) AND `QueryView` ([query_view.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs):200/:210); `TagTerms` (44, stack-only, per-view) + `archetype_passes_tag_terms` (115); `MAX_DYN_TAG_TERMS = 8` (35, loud panic past it); honored by EVERY driver via the `_pre_terms` funnel ([SYSTEMS.md §8.6](SYSTEMS.md)) |
+| Dynamic-tag term carrier (Phase 22) | [query/tag_terms.rs](../crates/boyko_ecs/src/ecs/core/iters/query/tag_terms.rs) ✅ | `TagTerms` (51, stack-only, per-view) / `archetype_passes_tag_terms` (150) / `MAX_DYN_TAG_TERMS` (42, hard cap 8, loud panic past it) |
+| Apply tag terms to a `Query` | [query/query.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query.rs) ✅ | `with_tag(TagId)` (138) / `without_tag(TagId)` (148) |
+| Apply tag terms to a `QueryView` | [query/query_view.rs](../crates/boyko_ecs/src/ecs/core/iters/query/query_view.rs) ✅ | `with_tag(TagId)` (249) / `without_tag(TagId)` (259) — every driver funnels the terms through the shared _pre_terms entry point (§8.6) |
 
 The archetype-yielding low-level seam under the typed DSL is
 [`QueryState`](../crates/boyko_ecs/src/ecs/core/iters/query_state.rs) —
@@ -405,9 +495,9 @@ wrapper (`iter_one`/`iter_two`) is **gone**; all code uses `Query<D, F>` or
 |------|-------|--------|
 | Sequential per-archetype columnar slice | [query/chunk_iter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/chunk_iter.rs) ✅ | `Query::for_each_chunk(\|slice\| …)` (also on `QueryView`) — flecs-style batched API (Phase X.A) |
 | Parallel per-archetype-subrange | [query/par_chunk.rs](../crates/boyko_ecs/src/ecs/core/iters/query/par_chunk.rs) ✅ | `Query::par_for_each_chunk(\|slice\| …, BatchingStrategy)` |
-| Parallel per-row | [query/par_iter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs) ✅ | `Query::par_iter()` / `par_iter_mut()` → `ParQuery` (136) / `ParQueryMut` (185); `MIN_ARCHETYPE_FOR_PARALLEL` (Phase 9) |
+| Parallel per-row | [query/par_iter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/par_iter.rs) ✅ | `Query::par_iter()` / `par_iter_mut()` → `ParQuery` (138) / `ParQueryMut` (206); `MIN_ARCHETYPE_FOR_PARALLEL` (73) = 1024 rows, Phase 9 |
 | Chunked-data bound | [query/chunked_data.rs](../crates/boyko_ecs/src/ecs/core/iters/query/chunked_data.rs):72 ✅ | `ChunkedQueryData` (`&T`/`&mut T`/`()` + tuples) — `Changed`/`Added`/`Ref`/`Mut` deliberately excluded |
-| Archetypal-filter bound | [query/filter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/filter.rs):1681 ✅ | `ArchetypalQueryFilter` (`With`/`Without`/`Or`/tuples) |
+| Archetypal-filter bound | [query/filter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/filter.rs):2512 ✅ | `ArchetypalQueryFilter` (`With`/`Without`/`Or`/tuples) |
 
 `for_each_chunk` lands a credible multi-component SIMD win (boyko 1.28–1.34×
 Bevy, native-SIMD) — see [PHASE-X.A-RESULTS.md](archive/PHASE-X.A-RESULTS.md).
@@ -451,15 +541,15 @@ returns. No `Box<dyn Command>`, no per-command alloc (Phases 8d/11).
 
 | What you want | Where | Method (line) |
 |---------------|-------|---------------|
-| The SystemParam | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):95 ✅ | `Commands<'s>` |
-| Spawn (chainable) | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):162 ✅ | `commands.spawn(bundle) -> EntityCommands` → `.insert(extra).id()` |
-| Despawn | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):198 ✅ | `commands.despawn(entity)` |
-| Address an existing entity | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):175 ✅ | `commands.entity(entity) -> EntityCommands` |
-| Spawn many | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):246 ✅ | `commands.spawn_batch(iter)` |
-| Spawn empty (Phase 22) | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):182 ✅ | `commands.spawn_empty() -> EntityCommands` (= `spawn(EmptyBundle)`, warm path hits the static bundle cache) |
-| Add / remove a dynamic tag (Phase 22) | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs):170/:184 ✅ | `.add_tag(TagId)` / `.remove_tag(TagId)` → `AddTagCommand`/`RemoveTagCommand` ([commands/tag_commands.rs](../crates/boyko_ecs/src/ecs/core/commands/tag_commands.rs):38/:54, POD id payload) |
-| Custom command | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):123 ✅ | `commands.add::<C: Command>(cmd)` |
-| The chainable handle | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs):73 ✅ | `EntityCommands<'a, 's>` — `.insert(..)`, `.remove::<C>()`, `.despawn()`, `.id()` |
+| The SystemParam | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):97 ✅ | `Commands<'s>` |
+| Spawn (chainable) | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):164 ✅ | `commands.spawn(bundle) -> EntityCommands` → `.insert(extra).id()` |
+| Despawn | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):251 ✅ | `commands.despawn(entity)` |
+| Address an existing entity | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):228 ✅ | `commands.entity(entity) -> EntityCommands` |
+| Spawn many | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):313 ✅ | `commands.spawn_batch(iter)` |
+| Spawn empty (Phase 22) | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):184 ✅ | `commands.spawn_empty() -> EntityCommands` (= `spawn(EmptyBundle)`, warm path hits the static bundle cache) |
+| Add / remove a dynamic tag (Phase 22) | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs):182/:196 ✅ | `.add_tag(TagId)` / `.remove_tag(TagId)` → `AddTagCommand`/`RemoveTagCommand` ([commands/tag_commands.rs](../crates/boyko_ecs/src/ecs/core/commands/tag_commands.rs):38/:54, POD id payload) |
+| Custom command | [params/commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/commands.rs):125 ✅ | `commands.add::<C: Command>(cmd)` |
+| The chainable handle | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs):80 ✅ | `EntityCommands<'a, 's>` — `.insert(..)`, `.remove::<C>()`, `.despawn()`, `.id()` |
 | The queue + cmd structs | [commands/](../crates/boyko_ecs/src/ecs/core/commands/) ✅ | `CommandQueue` (CursorSync RAII panic-recovery), `SpawnAtCommand` / `InsertCommand` / `RemoveCommand` / `DespawnCommand` / `SpawnBatchCommand` / `SendEventCommand`; entity-id reservation via `EntityCounter` ([params/entity_counter.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_counter.rs):75) |
 
 ---
@@ -475,7 +565,7 @@ barrier.
 
 | What you want | Where | Method (line) |
 |---------------|-------|---------------|
-| Build a schedule | [schedule/schedule_builder.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs) ✅ | `ScheduleBuilder::new(Arc<ThreadPool>)` (138); `add_system(system) -> SystemConfig` (165); `build(&mut world) -> Schedule` (307) / `try_build(...)` (330, diagnostics) |
+| Build a schedule | [schedule/schedule_builder.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs) ✅ | `ScheduleBuilder::new(Arc<ThreadPool>)` (149); `add_system(system) -> SystemConfig` (176); `build(&mut world) -> Schedule` (323) / `try_build(...)` (349, diagnostics) |
 | Run a frame | [schedule/schedule.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule.rs):? ✅ | `Schedule::run(&mut world)` — bumps tick, runs state pass, dispatches |
 | Conflict bitsets + DAG | [schedule/conflict_graph.rs](../crates/boyko_ecs/src/ecs/core/schedule/conflict_graph.rs) ✅ | `ConflictGraph` |
 | Per-frame scratch | [schedule/executor_scratch.rs](../crates/boyko_ecs/src/ecs/core/schedule/executor_scratch.rs) ✅ | `ExecutorScratch` (`pred_remaining`, `running`, `completed`, out-of-line completion channel — Phase 9.3c) |
@@ -493,9 +583,9 @@ See [PHASE-9.2-RESULTS.md](archive/PHASE-9.2-RESULTS.md), [PHASE-9.3c-RESULTS.md
 | What | Where | Method |
 |------|-------|--------|
 | Order one system | [schedule/system_config.rs](../crates/boyko_ecs/src/ecs/core/schedule/system_config.rs) ✅ | `.before(set)` / `.after(set)` / `.in_set(set)` (value-based) |
-| Configure a set | [schedule/schedule_builder.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs):205 ✅ | `configure_set(set) -> ConfigureSet` (`.before`/`.after`/`.in_set` + hierarchy) |
+| Configure a set | [schedule/schedule_builder.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs):216 ✅ | `configure_set(set) -> ConfigureSet` (`.before`/`.after`/`.in_set` + hierarchy) |
 | Set ids / derive | [schedule/system_set.rs](../crates/boyko_ecs/src/ecs/core/schedule/system_set.rs) ✅ | `SystemSetId` (interned from `(TypeId, discriminant)`); `#[derive(SystemSet)]` on fieldless enums |
-| Build diagnostics | [schedule/schedule_builder.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs):330 ✅ | `try_build()` → `ScheduleBuildError` (`OrderingCycle` B9001, `SetHierarchyCycle` B9002, …) |
+| Build diagnostics | [schedule/schedule_builder.rs](../crates/boyko_ecs/src/ecs/core/schedule/schedule_builder.rs):349 ✅ | `try_build()` → `ScheduleBuildError` (`OrderingCycle` B9001, `SetHierarchyCycle` B9002, …) |
 | Topo / Tarjan plumbing | [schedule/ordering.rs](../crates/boyko_ecs/src/ecs/core/schedule/ordering.rs) ✅ | `OrderingEdge` / `SystemKey` (Phase 9 scaffold completed in Phase 15) |
 
 See [PHASE-15-RESULTS.md](archive/PHASE-15-RESULTS.md).
@@ -548,11 +638,11 @@ and zero allocation ("0% when unused").
 | What you want to do | Where | How |
 |---------------------|-------|-----|
 | **Hooks** — ONE write-once callback per component *type* | [core/component/hooks/](../crates/boyko_ecs/src/ecs/core/component/hooks/) ✅ | `#[component(on_add = path, …)]` derive XOR runtime `EcsMaster::register_component_hooks::<C>()` (Phase 14a — [PHASE-14-RESULTS.md](archive/PHASE-14-RESULTS.md)) |
-| **Observers** — `add`/`remove`-able LIST per `(kind, component)` | [core/component/observers/mod.rs](../crates/boyko_ecs/src/ecs/core/component/observers/mod.rs):136 ✅ | `EcsMaster::observe_on_{add,insert,replace,remove}::<C>(runner)` (Phase 14b) |
-| Register an observer by `ComponentId` | [core/ecs_master/ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):2104 ✅ | `add_observer(kind, cid, runner) -> ObserverId` |
-| Remove an observer | [core/ecs_master/ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):2121 ✅ | `remove_observer(id) -> bool` (recomputes archetype bits on last-of-kind removal) |
-| The observer runner / context | [core/component/observers/mod.rs](../crates/boyko_ecs/src/ecs/core/component/observers/mod.rs):75 ✅ | `ObserverFn = unsafe fn(DeferredEcsMaster<'_>, ObserverContext)`; mutate only via the view's deferred `commands()` |
-| The 4 cold dispatch fns | [core/component/observers/dispatch.rs](../crates/boyko_ecs/src/ecs/core/component/observers/dispatch.rs):115 ✅ | `fire_on_{add,insert,replace,remove}_observers` (`#[cold] #[inline(never)]`, wired at **10** fire sites — Phase 22 added the 3 tag-migration sites; full ledger in [SYSTEMS.md §3.6](SYSTEMS.md)) |
+| **Observers** — `add`/`remove`-able LIST per `(kind, component)` | [core/component/observers/mod.rs](../crates/boyko_ecs/src/ecs/core/component/observers/mod.rs):189 ✅ | `EcsMaster::observe_on_{add,insert,replace,remove}::<C>(runner)` (Phase 14b) |
+| Register an observer by `ComponentId` | [ecs_master/observer_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/observer_api.rs):182 ✅ | `add_observer(kind, cid, runner) -> ObserverId` |
+| Remove an observer | [ecs_master/observer_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/observer_api.rs):199 ✅ | `remove_observer(id) -> bool` (recomputes archetype bits on last-of-kind removal) |
+| The observer runner / context | [core/component/observers/mod.rs](../crates/boyko_ecs/src/ecs/core/component/observers/mod.rs):98 ✅ | `ObserverFn = unsafe fn(DeferredEcsMaster<'_>, ObserverContext)`; mutate only via the view's deferred `commands()` |
+| The 4 cold dispatch fns | [core/component/observers/dispatch.rs](../crates/boyko_ecs/src/ecs/core/component/observers/dispatch.rs):115~ ✅ | `fire_on_{add,insert,replace,remove}_observers` (`#[cold] #[inline(never)]`, wired at **10** fire sites — Phase 22 added the 3 tag-migration sites; full ledger in [SYSTEMS.md §3.6](SYSTEMS.md)) |
 | Register hooks by id (no Rust type — dynamic tags) | [core/component/component_registry/mod.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs):885 ✅ | `register_hooks_by_id(ComponentId, ComponentHooks) -> Result<(), HooksError>` — H1 gate: `Err(AlreadyArchetyped)` after the id's first attach; **contract: mint → register hooks → first attach** (Phase 22 D8) |
 
 A **hook** is a single fn-ptr in the process-global `HOOKS` table (staleness-
@@ -581,8 +671,8 @@ audited `migrate_entity_insert`).
 | Add a child / children | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs) ✅ | `commands.entity(parent).add_child(c)` / `.add_children(&[..])`; `Commands::add_child(p, c)` |
 | Set / clear parent | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs) ✅ | `.set_parent(p)` / `.remove_parent()` |
 | Remove specific / all children | [params/entity_commands.rs](../crates/boyko_ecs/src/ecs/core/system/params/entity_commands.rs) ✅ | `.remove_children(&[..])` (listed only) / `.clear_children()` (all) |
-| Despawn keeping children | [ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):1142 ✅ | `despawn_without_children(e)` — opt out of the default recursive cascade |
-| Recursive despawn (default) | [ecs_master.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/ecs_master.rs):1119 ✅ | `delete_entity(e)` / `commands.despawn(e)` cascades to all descendants |
+| Despawn keeping children | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):821 ✅ | `despawn_without_children(e)` — opt out of the default recursive cascade |
+| Recursive despawn (default) | [ecs_master/entity_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/entity_api.rs):798 ✅ | `delete_entity(e)` / `commands.despawn(e)` cascades to all descendants |
 
 `Children` consistency is at the deferred-hook-queue drain (same-frame apply
 window). Guards: self-ref + dangling-parent are reactively rejected (the bad
@@ -611,9 +701,9 @@ Bevy-style per-row tick storage (Phase 10).
 | What you want | Where | How |
 |---------------|-------|-----|
 | The tick type | [change_detection/tick.rs](../crates/boyko_ecs/src/ecs/core/change_detection/tick.rs) ✅ | `Tick(u32)` — `is_newer_than`; `MAX_CHANGE_AGE` / `CHECK_TICK_THRESHOLD` |
-| Per-row tick storage | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs):83 ✅ | `ComponentPool::{added_ticks, changed_ticks}: Box<[UnsafeCell<Tick>]>` |
-| Filter on added/changed | [query/filter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/filter.rs) ✅ | `Added<C>` (521) / `Changed<C>` (741) |
-| Read with change info | [query/data.rs](../crates/boyko_ecs/src/ecs/core/iters/query/data.rs) ✅ | `Ref<T>` (629, immutable + flags), `Mut<T>` (901, deref-guard bumps the tick) |
+| Per-row tick storage | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs):147 ✅ | `ComponentPool::{added_ticks, changed_ticks}: Box<[UnsafeCell<Tick>]>` |
+| Filter on added/changed | [query/filter.rs](../crates/boyko_ecs/src/ecs/core/iters/query/filter.rs) ✅ | `Added<C>` (863) / `Changed<C>` (1253) |
+| Read with change info | [query/data/ref_.rs](../crates/boyko_ecs/src/ecs/core/iters/query/data/ref_.rs) ✅ | `Ref<T>` (25, immutable + flags) / `Mut<T>` ([data/mut_.rs](../crates/boyko_ecs/src/ecs/core/iters/query/data/mut_.rs):30, deref-guard bumps the tick) |
 | Frame bump + wraparound scan | [change_detection/check_ticks.rs](../crates/boyko_ecs/src/ecs/core/change_detection/check_ticks.rs) ✅ | `run_check_ticks_scan`; `EcsMaster::change_tick: AtomicU32` bumped per `Schedule::run` |
 
 0% measurable overhead on queries that use no change detection. See
@@ -639,7 +729,7 @@ these docs said "no dispatcher" — that is now stale; the dispatcher exists.
 | The dispatcher | [events/event_dispatcher.rs](../crates/boyko_ecs/src/ecs/core/events/event_dispatcher.rs) ✅ | `EventDispatcher` — `send_event::<E>` (274), `send::<E>(thread_index, ..)` (292), `update_events()` (436, frame swap) |
 | The double-buffer | [events/event_buffer.rs](../crates/boyko_ecs/src/ecs/core/events/event_buffer.rs) ✅ | `EventBuffer<E>` — split cache-line lanes (Phase 12 false-sharing fix) |
 | Config / capacity | [events/event_config.rs](../crates/boyko_ecs/src/ecs/core/events/event_config.rs) ✅ | `EventConfig`; `MAX_EVENT_THREADS = 64`, `MAX_EVENT_CAPACITY = 16384` ([constants.rs](../crates/boyko_ecs/src/ecs/constants.rs)) |
-| Registry / metadata | [events/event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs) ✅ | lazy `event_id()`; `MAX_EVENTS = 256` (51) |
+| Registry / metadata | [events/event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs) ✅ | `MAX_EVENTS` (51) = 256; `register_event` (159) / `register_event_new` (109) mint the lazy per-type id |
 | Participants / parameters | [events/participants/](../crates/boyko_ecs/src/ecs/core/events/participants/), [events/parameters/](../crates/boyko_ecs/src/ecs/core/events/parameters/) ✅ | `Participants` / `Parameters` traits + TypeId-guarded buffers (Q-019) |
 
 Events sit OUTSIDE the conflict graph (Option A) — parallel writers of the same
@@ -660,10 +750,10 @@ for `insert_resource` / `resource`.
 
 | What | Where | Method |
 |------|-------|--------|
-| The archetype | [core/archetype/archetype.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype.rs):122 ✅ | `Archetype` — inline `columns: [Column; 512]` at offset 0 (Phase 7 fast read path), `entity_ids`, `flags`, `signature` |
-| Hot column entry | [core/archetype/archetype.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype.rs):28 ✅ | `Column { ptr: *mut u8, stride: u32 }` (16 B; `is_null()` ⇔ absent) |
-| Remove outcome | [core/archetype/archetype.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype.rs):85 ✅ | `enum RemoveOutcome { Last, Swapped { moved_entity }, PoolFailure }` (C-006) |
-| The manager | [core/archetype/archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs):19 ✅ | `ArchetypeMaster` — owns the `ObserverRegistry` (71); dual gen counters |
+| The archetype | [core/archetype/archetype.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype.rs):127 ✅ | `Archetype` — inline `columns: [Column; 512]` at offset 0 (Phase 7 fast read path), `entity_ids`, `flags`, `signature` |
+| Hot column entry | [core/archetype/archetype.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype.rs):32 ✅ | `Column { ptr: *mut u8, stride: u32 }` (16 B; `is_null()` ⇔ absent) |
+| Remove outcome | [core/archetype/archetype.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype.rs):89 ✅ | `enum RemoveOutcome { Last, Swapped { moved_entity }, PoolFailure }` (C-006) |
+| The manager | [core/archetype/archetype_master.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_master.rs):18 ✅ | `ArchetypeMaster` — owns the `ObserverRegistry` (65~, the field); dual gen counters |
 | Slab storage | [core/archetype/archetype_bundle.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_bundle.rs) ✅ | `ArchetypeBundle` (stable-address slab + sparse id map) |
 | Signature | [core/archetype/archetype_signature.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_signature.rs) ✅ | `ArchetypeSignature { mask, block_summary, section_summary }` |
 | Discovery (registry) | [core/archetype/archetype_registry.rs](../crates/boyko_ecs/src/ecs/core/archetype/archetype_registry.rs) ✅ | `find_archetypes_with_components` / `find_matching_archetypes` / `find_with_filter` (+ `_into(out)` variants) |
@@ -689,7 +779,7 @@ fix (Phase 5c). `MAX_ARCHETYPES = 1024`.
 | Overwrite a slot | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `set_component(idx, &[u8])` (runs `drop_fn` on the old value) |
 | Remove (swap with last) | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `swap_remove(idx)` / `pop()` (run `drop_fn`) |
 | Address row `i`'s bytes | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs):? ✅ | private `row_ptr(i)` = `buffer.as_ptr().add(i * stride)` (Phase X.B removed the `Vec<Unit>` cache) |
-| Live-row count | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs):49 ✅ | the `len` field / `count()` |
+| Live-row count | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs):161~ ✅ | the `len` field / `count()` |
 | Dense base pointer | [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs) ✅ | `buffer_ptr()` — SIMD-aligned (`SIMD_BUFFER_ALIGN = 32`, Phase X.A) |
 
 Type erasure: the pool stores raw bytes + the `Layout` from the

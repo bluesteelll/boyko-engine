@@ -6,6 +6,32 @@
 > per-subsystem catalog see [SYSTEMS.md](SYSTEMS.md); for the "where is X?"
 > lookup see [FEATURE_MAP.md](FEATURE_MAP.md).
 
+> **Anchors are partly gated, and the boundary is stated because it moved four
+> times.** `tests/internal_docs_anchors.rs` runs under the ordinary
+> `cargo test --workspace` and checks **exactly two notations**: the suffix form
+> `file.rs:N` (including `(:N)`) and the bare `(N)` member line. For those: the
+> path must exist, line N must still hold a definition, and where a line's
+> backticked symbols pair one-to-one with its numbers, line N must also name the
+> symbol it stands beside. An anchor written `:N~` / `(N~)` deliberately points
+> at a non-definition — a struct field, an enforcement site, a module-doc
+> invariant — and waives **both** the shape and the identity check, keeping only
+> the in-file bounds check.
+>
+> **NOT read by the gate:** line numbers spelled `line N` or `(line N)`. Nine
+> such sites exist across these documents. That form is invisible — changing one
+> to `(line 99999)` leaves the suite green and does not even move the anchor
+> count. Write new citations in the `:N` form.
+>
+> **Binding rule, stated exactly because getting it wrong is what caused the
+> worst rot found here:** an anchor binds to the nearest resolvable file-shaped
+> path mention since the last heading — a **File:** header, **but also any inline
+> markdown link or bare `crates/...` mention.** So an inline file link dropped
+> into a member table silently rebinds every row after it, and a table whose
+> members live in several files needs its header split.
+>
+> Do not read this box as a freshness guarantee for the whole document. It states
+> which notations are machine-checked; a number in any other form is unverified.
+
 ## Goals and non-goals
 
 **Goals:**
@@ -367,7 +393,7 @@ outright. See [PHASE-XI-RESULTS.md](archive/PHASE-XI-RESULTS.md) +
 
 ### 5. Global `ComponentRegistry` / `EventRegistry` / `ResourceRegistry` (lazy IDs)
 
-**Where:** [component/component_registry.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry.rs),
+**Where:** [component/component_registry/](../crates/boyko_ecs/src/ecs/core/component/component_registry/),
 [events/event_registry.rs](../crates/boyko_ecs/src/ecs/core/events/event_registry.rs),
 [resources/resource_registry.rs](../crates/boyko_ecs/src/ecs/core/resources/resource_registry.rs)
 
@@ -483,9 +509,11 @@ Layered on the above without disturbing the hot path:
 
 ### 13. Tags share the ComponentId space; storage is tick-only (Phase 22)
 
-**Where:** [component_registry.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry.rs)
-(`TagId` :214, mint protocol :496-609 — the planned `identifiers/tag_id.rs`
-was NOT created, a recorded deviation),
+**Where:** [component_registry/tags.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/tags.rs)
+(`TagId` :49, name-keyed mint :182-207 — the planned `identifiers/tag_id.rs`
+was NOT created, a recorded deviation) over
+[component_registry/mod.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs)
+(the id mint itself, `try_register_dynamic` :965),
 [ecs_master/tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/tag_api.rs),
 [memory/component_pool.rs](../crates/boyko_ecs/src/ecs/memory/component_pool.rs),
 [query/tag_terms.rs](../crates/boyko_ecs/src/ecs/core/iters/query/tag_terms.rs),
@@ -525,8 +553,10 @@ archetype (2 MiB cfg fallback) — zero resident until commit.
 **Where:** [component/enable/](../crates/boyko_ecs/src/ecs/core/component/enable/)
 (`enable_store.rs` = `EnablePage`/`EnableColumn`/`EnableStore`, `enable_presence.rs`
 = the `EnablePresence` cull oracle),
-[component_registry.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry.rs)
-(`StorageKind` + `STORAGE_KIND` table + `EnableTagId`),
+[component_registry/mod.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/mod.rs)
+(`StorageKind` :323 + the `STORAGE_KIND` table :373) and
+[component_registry/tags.rs](../crates/boyko_ecs/src/ecs/core/component/component_registry/tags.rs)
+(`EnableTagId` :93),
 [ecs_master/enable_tag_api.rs](../crates/boyko_ecs/src/ecs/core/ecs_master/enable_tag_api.rs),
 [query/filter_enable.rs](../crates/boyko_ecs/src/ecs/core/iters/query/filter_enable.rs)
 + [query/enable_terms.rs](../crates/boyko_ecs/src/ecs/core/iters/query/enable_terms.rs).
