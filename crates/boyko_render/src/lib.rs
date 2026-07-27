@@ -182,8 +182,9 @@ pub mod mesh_assets;
 /// Set-3 device object + the `gMeshMeta[]` backing buffer + the reused
 /// [`BindlessSlotAllocator`](bindless::BindlessSlotAllocator), plus the
 /// [`MeshGeometryTableSlot`](mesh_geometry_table::MeshGeometryTableSlot) always-present
-/// `Option` wrapper resource. Structurally unreachable until `VB_IMPLEMENTED` lands
-/// (see the module doc) — R-VBGEO ships the data layer only.
+/// `Option` wrapper resource. Live as of rung R8 (`VB_IMPLEMENTED == true`): armed on a
+/// `VisibilityBuffer × Mesh` boot whose device carries the descriptor-indexing
+/// prerequisite, `None` on every other boot — see the module doc.
 pub mod mesh_geometry_table;
 /// Asset-system rung A3b — [`MeshData`](mesh_data::MeshData): the `Send`-safe
 /// CPU intermediate [`ObjMeshLoader`](loaders::ObjMeshLoader) decodes into,

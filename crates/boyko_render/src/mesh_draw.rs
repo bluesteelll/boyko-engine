@@ -470,12 +470,16 @@ impl MeshRenderScratch {
     /// own gate, not this fn's (mirrors every other path-conditional producer in this codebase:
     /// the CALL SITE decides whether to run, this fn is unconditionally correct either way).
     ///
-    /// A mesh registered via the plain [`MeshAssetsExt`](crate::mesh_assets::MeshAssetsExt)
-    /// methods (not the VB-aware [`MeshAssetsVbExt`](crate::mesh_assets::MeshAssetsVbExt)
-    /// siblings) never claimed a geometry-table slot, so its resolved `geometry_slot` reads
-    /// [`VB_GEOMETRY_RESERVED_SLOT`](crate::mesh_geometry_table::VB_GEOMETRY_RESERVED_SLOT) here
-    /// — the degenerate (zero-triangle) slot, which the compute fetch's own `tri_count` clamp
-    /// makes safe (never a GPU-undefined `%0`), not a silently wrong geometry read.
+    /// Under a VB boot every mesh present at boot carries a real slot: the streamed loader path
+    /// and [`MeshAssetsVbExt`](crate::mesh_assets::MeshAssetsVbExt) claim one at registration,
+    /// and `backfill_vb_geometry_slots` claims one for the plain
+    /// [`MeshAssetsExt`](crate::mesh_assets::MeshAssetsExt) registrations right afterwards. A
+    /// mesh that missed all three — registered through the plain methods AFTER boot — resolves
+    /// to [`VB_GEOMETRY_RESERVED_SLOT`](crate::mesh_geometry_table::VB_GEOMETRY_RESERVED_SLOT)
+    /// here: the degenerate (zero-triangle) slot, which the compute fetch's own `tri_count`
+    /// clamp makes SAFE (never a GPU-undefined `%0`) but which draws nothing — such a mesh is
+    /// invisible to the VB renderer, and the fix is at registration (`register_mesh_vb`), not
+    /// here.
     fn sync_vb_instance_ring(&mut self, mesh_assets: &Assets<MeshGpu>) {
         let ring_slice = self.ring.as_read_slice();
         let mesh_ids_slice = self.mesh_ids.as_read_slice();

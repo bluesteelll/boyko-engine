@@ -24,10 +24,10 @@
 //!
 //! # Geometry-table slot claim (rung R8 register_mesh gap, closed)
 //!
-//! [`MeshAssetsExt::register_mesh`](boyko_render::MeshAssetsExt::register_mesh) never claims a
-//! Decision-0 geometry-table slot (that fn's own doc — a host-authored mesh's `geometry_slot`
-//! stays [`VB_GEOMETRY_RESERVED_SLOT`](boyko_render::mesh_geometry_table::VB_GEOMETRY_RESERVED_SLOT)
-//! forever). This test uses the VB-aware sibling
+//! [`MeshAssetsExt::register_mesh`](boyko_render::MeshAssetsExt::register_mesh) does not claim a
+//! Decision-0 geometry-table slot AT REGISTRATION (that fn's own doc) — it leaves
+//! [`VB_GEOMETRY_RESERVED_SLOT`](boyko_render::mesh_geometry_table::VB_GEOMETRY_RESERVED_SLOT)
+//! for `backfill_vb_geometry_slots` to replace later in boot. This test uses the VB-aware sibling
 //! [`MeshAssetsVbExt::register_mesh_vb`](boyko_render::MeshAssetsVbExt::register_mesh_vb)
 //! instead, threading `NonSendResMut<MeshGeometryTableSlot>` — the World resource
 //! `boyko_app::runner` constructs (`Some`-armed) BEFORE `app.finish()` drains this startup

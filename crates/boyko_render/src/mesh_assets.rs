@@ -223,14 +223,28 @@ fn local_aabb(vertices: &[Vertex]) -> ([f32; 3], [f32; 3]) {
 /// STORAGE-usage-bit decision itself ([`mesh_buffer_usage`]) reads
 /// `ctx.vb_geometry_table_armed()` — a flag threaded via `ctx` (already a parameter at
 /// EVERY registration call site), so it applies UNIVERSALLY regardless of whether this
-/// call passes a table. Host-authored primitives (`register_mesh`/`cube`/`plane`) pass
-/// `None` this rung: threading `Option<&mut MeshGeometryTable>` through THEIR public
-/// signatures would touch every one of their ~20 call sites across `boyko_app`
-/// (showcases/tests/examples), well beyond this rung's "data layer only" scope —
-/// `VB_IMPLEMENTED == false` keeps `vb_geometry_table_armed()` `false` on every boot
-/// today regardless, so this is a documented, currently-inert scope cut, not a
-/// correctness gap; a later rung that actually needs host-authored meshes IN the VB
-/// geometry table can widen `register_mesh`'s signature then.
+/// call passes a table.
+///
+/// `VB_IMPLEMENTED` is `true` (rung R8), so on a `VisibilityBuffer × Mesh` boot whose
+/// device carries `storage_buffer_array_non_uniform_indexing` the flag and the table are
+/// BOTH live — this parameter is a real arming channel, not dead plumbing. Who threads a
+/// table:
+///
+/// - The STREAMED loader path — [`GpuUpload for MeshGpu`](crate::gpu_upload::GpuUpload)
+///   (`type Aux = MeshGeometryTableSlot`) passes `aux.0.as_mut()`, so a loader-decoded mesh
+///   claims a slot at upload.
+/// - [`MeshAssetsVbExt::register_mesh_vb`]/`cube_vb`/`plane_vb` — the explicit VB siblings.
+/// - Host-authored `register_mesh`/`cube`/`plane` ([`MeshAssetsExt`]) still pass `None`:
+///   threading `Option<&mut MeshGeometryTable>` through THEIR public signatures would touch
+///   every one of their ~20 call sites across `boyko_app` (showcases/tests/examples), well
+///   beyond the R-VBGEO rung's "data layer only" scope. That is no longer a VB-visibility
+///   gap: the boot one-shot
+///   [`backfill_vb_geometry_slots`](crate::gpu_upload::backfill_vb_geometry_slots)
+///   (`boyko_app::runner`, right after the `upload_mesh_assets` drain) claims a slot for
+///   every still-reserved mesh under a VB boot. A mesh registered through the plain path
+///   AFTER boot misses that back-fill, keeps [`VB_GEOMETRY_RESERVED_SLOT`], and is invisible
+///   to the VB renderer (`vb_resolve` fetches the zero-count degenerate slot 0 and draws
+///   nothing) — use `register_mesh_vb` for post-boot registration.
 ///
 /// # Panics
 /// Same contract as [`MeshAssetsExt::register_mesh`]: a buffer create / map
@@ -286,11 +300,13 @@ pub fn build_mesh_gpu(
     // STORAGE_BUFFER usage bit is ONLY added when the boot-committed
     // `vb_geometry_table` flag is armed (read through `ctx`, the channel already
     // present at every registration call site) — otherwise `vb_bits == BufferUsage::NONE`
-    // and the usage is EXACTLY today's `VERTEX`/`INDEX`-only (byte-identical
-    // registration). `VB_IMPLEMENTED == false` keeps this flag `false` on every boot
-    // today (see `mesh_geometry_table`'s module doc), so `vb_bits` is always `NONE` in
-    // practice — this is the pure fn `mesh_buffer_usage` proves, unit-tested without a
-    // device.
+    // and the usage is EXACTLY the pre-VB `VERTEX`/`INDEX`-only (byte-identical
+    // registration on Deferred/Forward/ForwardPlus). Read from `ctx`, NOT from the
+    // `geometry_table` parameter: the STORAGE bit must land on EVERY mesh a VB boot
+    // registers, including the host-authored ones that thread no table — otherwise
+    // `backfill_vb_geometry_slots` would later bind buffers the driver never made
+    // storage-capable. This is the pure fn `mesh_buffer_usage` proves, unit-tested
+    // without a device.
     let vb_bits = mesh_buffer_usage(ctx.vb_geometry_table_armed());
     let vertex_usage = BufferUsage::VERTEX | as_bits | vb_bits;
     let index_usage = BufferUsage::INDEX | as_bits | vb_bits;
@@ -421,9 +437,9 @@ pub fn build_mesh_gpu(
     // (`GpuUpload for MeshGpu::upload` only ever passes `Some` when the SAME
     // `ctx.vb_geometry_table_armed()` is `true` — see that impl's doc), so a mesh's
     // buffers and its geometry-table registration are never inconsistent in practice.
-    // `register_mesh`/`cube`/`plane` always pass `None` this rung (documented scope
-    // cut above), so `geometry_slot` stays `VB_GEOMETRY_RESERVED_SLOT` for every
-    // host-authored mesh today.
+    // `register_mesh`/`cube`/`plane` pass `None` (documented scope cut above), so a
+    // host-authored mesh LEAVES THIS FN at `VB_GEOMETRY_RESERVED_SLOT` — the boot
+    // one-shot `backfill_vb_geometry_slots` re-stamps it afterwards on a VB boot.
     let geometry_slot = match geometry_table {
         Some(table) if ctx.vb_geometry_table_armed() => table.register(
             ctx,
@@ -524,8 +540,10 @@ impl MeshAssetsExt for Assets<MeshGpu> {
         vertices: &[Vertex],
         indices: &[u32],
     ) -> MeshHandle {
-        // `None`: host-authored registration does not thread the VB geometry table
-        // this rung — see `build_mesh_gpu`'s doc for the scope cut.
+        // `None`: host-authored registration does not thread the VB geometry table (the
+        // ~20-call-site scope cut in `build_mesh_gpu`'s doc). Under a VB boot the slot is
+        // back-filled at boot (`backfill_vb_geometry_slots`); a POST-boot caller that needs
+        // a slot must use `MeshAssetsVbExt::register_mesh_vb` instead.
         let mesh = build_mesh_gpu(ctx, vertices, indices, None);
         MeshHandle(self.add(mesh).index())
     }
@@ -602,9 +620,13 @@ impl MeshAssetsExt for Assets<MeshGpu> {
 /// register_mesh geometry-table-slot gap [`build_mesh_gpu`]'s own doc flags: `register_mesh`/
 /// `cube`/`plane` ([`MeshAssetsExt`]) always thread `None` for [`build_mesh_gpu`]'s
 /// `geometry_table` parameter, so a host-authored mesh (spawned directly by app/test code, not
-/// streamed through [`GpuUpload`](crate::gpu_upload::GpuUpload)) never claims a VB
-/// geometry-table slot — its `geometry_slot` stays [`VB_GEOMETRY_RESERVED_SLOT`] forever, which
-/// would make it unresolvable through `gMeshVerts[]`/`gMeshIndices[]` under a VB-resolved boot.
+/// streamed through [`GpuUpload`](crate::gpu_upload::GpuUpload)) leaves registration at
+/// [`VB_GEOMETRY_RESERVED_SLOT`] — unresolvable through `gMeshVerts[]`/`gMeshIndices[]` under a
+/// VB-resolved boot. These siblings claim the slot AT registration; the later
+/// [`backfill_vb_geometry_slots`](crate::gpu_upload::backfill_vb_geometry_slots) boot one-shot
+/// is the safety net for every scene that does not call them, and skips a mesh that already
+/// holds a real slot. Only a mesh registered AFTER boot has no back-fill left to rescue it —
+/// there, these siblings are the only route to a VB-visible mesh.
 ///
 /// A SEPARATE extension trait (not a widened [`MeshAssetsExt`]) so this rung's fix stays
 /// ADDITIVE: widening `register_mesh`'s own signature would force a `None`/`Option` argument

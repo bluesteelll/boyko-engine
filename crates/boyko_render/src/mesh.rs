@@ -157,15 +157,16 @@ pub struct MeshGpu {
     pub blas: Option<boyko_rhi_vulkan::accel_build::BuiltBlas>,
     /// Multi-paradigm render-path plan, rung R-VBGEO (Decision 0): this mesh's slot in
     /// the bindless [`MeshGeometryTable`](crate::mesh_geometry_table::MeshGeometryTable)
-    /// — the `mesh_id` a future VB instance gather (R8/R9) reads to key
+    /// — the `mesh_id` the VB instance gather (R8/R9) reads to key
     /// `gMeshVerts[]`/`gMeshIndices[]`/`gMeshMeta[]`. Mirrors how a texture's bindless
     /// slot lives on [`MaterialTextures`](crate::material::MaterialTextures) at the
     /// owning asset record, not in a separate handle→slot side table.
     /// [`VB_GEOMETRY_RESERVED_SLOT`](crate::mesh_geometry_table::VB_GEOMETRY_RESERVED_SLOT)
-    /// (`0`) when the table is absent (every boot today — see that module's doc) or the
-    /// mesh was registered through a call site that does not thread the table (rung
-    /// R-VBGEO's host-authored `cube`/`plane`/`register_mesh` scope cut — see
-    /// `build_mesh_gpu`'s doc).
+    /// (`0`) when the table is absent (every non-VB boot, or a VB boot whose device lacks
+    /// the descriptor-indexing prerequisite) — and, TRANSIENTLY, for a host-authored
+    /// `cube`/`plane`/`register_mesh` mesh between registration and the boot back-fill
+    /// (`backfill_vb_geometry_slots`), which is the only writer of this field outside
+    /// [`build_mesh_gpu`](crate::mesh_assets::build_mesh_gpu).
     pub geometry_slot: u32,
     /// CSM auto-fit plan, rung C0: this mesh's model-space AABB minimum, folded over
     /// `vertices[].position` (mesh.rs:85). Durable per-mesh data ON THE RECORD — the same

@@ -26,9 +26,10 @@ use crate::texture_data::TextureData;
 /// a resident record on the device.
 ///
 /// `Aux` is the per-asset-type mutable context an upload needs beyond the
-/// device itself (e.g. a bindless-slot allocator, a staging-ring cursor) —
-/// left an associated type so a future asset type (texture) can carry one;
-/// both current implementors ([`MeshGpu`], [`Material`]) need none (`()`).
+/// device itself — an associated type because the implementors genuinely differ:
+/// [`MeshGpu`] threads the VB [`MeshGeometryTableSlot`], [`TextureGpu`] threads the
+/// [`BindlessTextureTable`], and only [`Material`] (a pure host-side identity upload)
+/// needs none (`()`).
 pub trait GpuUpload: Asset {
     /// Extra per-asset-type mutable state [`upload`](Self::upload) needs
     /// beyond the device context.

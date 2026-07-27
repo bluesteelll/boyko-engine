@@ -57,7 +57,7 @@ use crate::bindless::BindlessSlotAllocator;
 /// The reserved "no geometry-table slot" / degenerate-mesh slot —
 /// [`MeshGeometryTable::register`] never issues it (mirrors
 /// [`BindlessSlotAllocator`]'s own slot-0 reservation). A [`MeshGpu`](crate::mesh::MeshGpu)
-/// registered while the table is absent (every boot today) carries
+/// registered while the table is absent (every non-VB boot) carries
 /// `geometry_slot == VB_GEOMETRY_RESERVED_SLOT`. Slot 0's `gMeshMeta` row is left
 /// ALL-ZERO (`index_width == vertex_count == index_count == 0` — the "zero-count meta"
 /// degenerate choice): a future shader that accidentally dynamically indexes it hits
@@ -156,8 +156,9 @@ fn exhausted_slot_fallback(capacity: u32) -> u32 {
 
 /// The bindless per-mesh geometry table (Decision 0 / rung R-VBGEO): owns the VB-only
 /// Set-3 device descriptor set, the `gMeshMeta[]` backing buffer, and the fence-gated
-/// slot allocator. See the module doc for why this is structurally unreachable today
-/// and where `mesh_id` (the slot this type hands out) is stored.
+/// slot allocator. Constructed only on a VB boot that armed
+/// `ResolvedRenderPath.vb_geometry_table` — see the module doc for that gate and for where
+/// `mesh_id` (the slot this type hands out) is stored.
 ///
 /// # Device-UAF safety — the SAME three structural guards as `BindlessTextureTable`
 ///
@@ -261,8 +262,10 @@ impl MeshGeometryTable {
         self.alloc.capacity()
     }
 
-    /// The owned Set-3 descriptor set — bound at set 3 by the VB compute passes (R8;
-    /// nothing binds it yet this rung — P2-c).
+    /// The owned descriptor set. Bound at set index **2** by the VB compute passes
+    /// (`boyko_rhi_vulkan::present::passes::vb` — `vb_resolve`/`vb_shade`), threaded to them as
+    /// `GBufferScene::vb_geometry_set`; "Set-3" elsewhere in this module is the design-time name
+    /// from Decision 0, not the shipped binding index.
     #[inline]
     pub fn set(&self) -> &VulkanGeometryBindlessSet {
         &self.set
@@ -396,10 +399,11 @@ impl MeshGeometryTable {
 
 /// Always-present `NonSendResource` wrapper around an optional live
 /// [`MeshGeometryTable`] (Rev-5 streaming invariant): `None` when
-/// `ResolvedRenderPath.vb_geometry_table` is `false` — every boot today, since
-/// `VB_IMPLEMENTED == false` keeps the flag structurally unreachable — `Some` only
-/// when the boot seam (`boyko_app::runner`, right after `resolve_render_path`, before
-/// `app.finish()` / the `upload_mesh_assets` boot drain) constructs and arms it.
+/// `ResolvedRenderPath.vb_geometry_table` is `false` (every non-VB boot, or a VB boot whose
+/// device lacks the descriptor-indexing prerequisite), `Some` when the boot seam
+/// (`boyko_app::runner`, right after `resolve_render_path`, before `app.finish()` / the
+/// `upload_mesh_assets` boot drain) constructs and arms it — which `VB_IMPLEMENTED == true`
+/// (rung R8) makes a genuinely reachable outcome.
 ///
 /// Threaded as [`MeshGpu`](crate::mesh::MeshGpu)'s
 /// [`GpuUpload::Aux`](crate::gpu_upload::GpuUpload::Aux) so the STREAMED mesh-upload

@@ -699,10 +699,11 @@ pub struct VulkanContext {
     /// `OnceCell` (not a plain field) because `VulkanContext` is fully constructed at
     /// `boot()`/`boot_singleton()` time, BEFORE the render-path resolve exists — the SAME
     /// "settable once after construction, read many times, single-threaded" shape
-    /// [`Self::compute_layouts`] already uses. Read via [`Self::vb_geometry_table_armed`]
-    /// (defaults to `false` if never set — every current boot leaves it unset, since
-    /// `VB_IMPLEMENTED == false` in `boyko_render::render_path_config` keeps
-    /// `vb_geometry_table` false for every resolve today). `ctx: &VulkanContext` is
+    /// [`Self::compute_layouts`] already uses. Read via [`Self::vb_geometry_table_armed`],
+    /// which defaults to `false` if never set — the case for a context booted outside the
+    /// `boyko_app::runner` seam (RHI-level tests), NOT for a VB boot: `VB_IMPLEMENTED` is
+    /// `true` in `boyko_render::render_path_config`, so a `VisibilityBuffer x Mesh` resolve
+    /// on a capable device sets this `true`. `ctx: &VulkanContext` is
     /// already the channel present at EVERY mesh-registration call site
     /// (`build_mesh_gpu`/`register_mesh`/`cube`/`plane`/the streamed `GpuUpload` path), so
     /// this is a zero-signature-change way to thread the flag universally (mirrors

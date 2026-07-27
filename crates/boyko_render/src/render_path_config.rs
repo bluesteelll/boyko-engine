@@ -20,14 +20,16 @@
 //!
 //! # Rung-staged degrades (plan §H)
 //!
-//! Only `Deferred` was implemented as of R1 — `FORWARD_IMPLEMENTED` (R4b-b),
-//! `FORWARD_PLUS_IMPLEMENTED` (R5), and `SDF_FORWARD_IMPLEMENTED` (R-SDFFWD) have since
-//! flipped `true`; `VB_IMPLEMENTED` (R8) remains `false`, so a `VisibilityBuffer` request still
-//! degrades to `Deferred` today (a [`RenderPathDegrade::PathNotYetImplemented`] reason). Each
-//! const flips `true` as its rung lands — no other code in this module changes; the degrade
-//! ladder ([`resolve_render_path`]) and the pure rule set ([`resolve_rules`]) are ALREADY correct
-//! for the fully-landed plan, tested directly against the rule (not gated behind the rung consts)
-//! so they are live today, not dead until later rungs.
+//! Only `Deferred` was implemented as of R1; every path const has since flipped `true` —
+//! `FORWARD_IMPLEMENTED` (R4b-b), `FORWARD_PLUS_IMPLEMENTED` (R5), `SDF_FORWARD_IMPLEMENTED`
+//! (R-SDFFWD), `VB_IMPLEMENTED` (R8), `VB_SDF_IMPLEMENTED` (R10). ALL FOUR `RenderPath` variants
+//! therefore resolve for real: [`RenderPathDegrade::PathNotYetImplemented`] has no production
+//! trigger left, and the only path-level degrade still reachable is the VB device-cap rule
+//! ([`RenderPathDegrade::VbDeviceCapMissing`]). `SDF_SPLIT_IMPLEMENTED` is the one const still
+//! `false` — it gates a derived FLAG, not a path. Each const flips `true` as its rung lands — no
+//! other code in this module changes; the degrade ladder ([`resolve_render_path`]) and the pure
+//! rule set ([`resolve_rules`]) are ALREADY correct for the fully-landed plan, tested directly
+//! against the rule (not gated behind the rung consts) so they stayed live throughout.
 //!
 //! Rung R2 added a single combined `DEFERRED_LEG_DISABLE_IMPLEMENTED` guard (`false`); rung R3
 //! split it into a per-leg pair (mesh-only / sdf-only) — the SAME "rung-staged const per landed
@@ -965,8 +967,9 @@ pub fn resolve_rules(
 /// "test the rule directly" discipline [`resolve_rules`] uses for the Rev-5 predicate.
 /// [`resolve_render_path`] is the ONLY caller that threads the real
 /// [`FORWARD_IMPLEMENTED`]/[`FORWARD_PLUS_IMPLEMENTED`]/[`VB_IMPLEMENTED`]/
-/// [`SDF_FORWARD_IMPLEMENTED`] consts; a test can thread `true` early to exercise e.g. the VB
-/// device-cap degrade in isolation, before `VB_IMPLEMENTED` itself lands.
+/// [`SDF_FORWARD_IMPLEMENTED`] consts. Every one of those is `true` today, so rule (1) below is
+/// production-dead; parameterizing it anyway is what keeps the rule itself testable — a test
+/// threads `false` to exercise a demotion the shipped consts can no longer produce.
 ///
 /// Order: (1) an unimplemented path collapses to `Deferred`; (2) a `VisibilityBuffer` path that
 /// survived (1) but whose device lacks the geometry-table cap ALSO collapses to `Deferred`; (3) a
@@ -1371,8 +1374,8 @@ mod tests {
         assert!(!resolved.mesh_leg && resolved.sdf_leg);
     }
 
-    // ---- VB-without-cap degrade (tested directly against the ladder, not gated on ------
-    // ---- VB_IMPLEMENTED still being false today) ---------------------------------------
+    // ---- VB-without-cap degrade (tested directly against the ladder, so the rule stays ----
+    // ---- pinned independently of what `VB_IMPLEMENTED` happens to be) ---------------------
 
     #[test]
     fn vb_without_device_cap_degrades_to_deferred() {

@@ -32,16 +32,17 @@
 //! unwritten slot exist without being a valid-descriptor requirement, as long as no
 //! shader invocation dynamically indexes it.
 //!
-//! # Device-create gap (documented, not closed here)
+//! # Device-create prerequisite (closed at rung R8)
 //!
 //! Building this layout requires the device to have ENABLED
 //! `shaderStorageBufferArrayNonUniformIndexing` +
-//! `descriptorBindingStorageBufferUpdateAfterBind` — `crate::device::create_device`
-//! does not request either bit yet (see that function's rung R-VBGEO doc comment): this
-//! rung only builds the CPU-testable machinery + this construction code, since
-//! `ResolvedRenderPath.vb_geometry_table` is structurally `false` for every resolve
-//! until `VB_IMPLEMENTED` lands (a later rung). Whichever rung constructs a LIVE
-//! [`MeshGeometryTable`](crate) must close that gap first.
+//! `descriptorBindingStorageBufferUpdateAfterBind`. `crate::device::create_device` now
+//! requests BOTH, gated on `enable_vb_geometry_table` — which the caller sets only after
+//! `query_device_caps` confirmed the CONJUNCTION of the two
+//! (`DeviceCaps::storage_buffer_array_non_uniform_indexing_ok`), since requesting an
+//! unsupported feature bit fails `vkCreateDevice` outright. A device that lacks either bit
+//! therefore boots normally and degrades `VisibilityBuffer` to `Deferred` at resolve time
+//! (`RenderPathDegrade::VbDeviceCapMissing`) rather than failing device create.
 
 use core::ffi::c_void;
 use core::ptr;
@@ -94,15 +95,19 @@ impl VulkanGeometryBindlessSet {
         self.capacity
     }
 
-    /// The raw `VkDescriptorSet` — bound at Set 3 by the VB compute passes (R8;
-    /// nothing binds it yet this rung — P2-c).
+    /// The raw `VkDescriptorSet` — bound at set index **2** by the VB compute passes
+    /// (`crate::present::passes::vb` — `vb_resolve`/`vb_shade`), live since rung R8. The
+    /// "Set 3" naming elsewhere in this module is Decision 0's design-time name, not the
+    /// shipped binding index.
     #[inline]
     pub fn set(&self) -> VkDescriptorSet {
         self.set
     }
 
-    /// The raw `VkDescriptorSetLayout` — passed to the VB pipeline-layout builder
-    /// (R8) as its 4th (Set 3) set layout.
+    /// The raw `VkDescriptorSetLayout` — passed to
+    /// [`VulkanContext::create_compute_pipeline_vb`](crate::device::VulkanContext) as the
+    /// LAST of its three set layouts (Set 0 = `vb_layout0`, Set 1 = `forward_layout1`,
+    /// Set 2 = this).
     #[inline]
     pub fn set_layout(&self) -> VkDescriptorSetLayout {
         self.set_layout
