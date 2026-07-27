@@ -222,13 +222,49 @@ fn the_freeze_is_sensitive_to_a_single_changed_threshold_digit() {
     let bytes = normalised_bytes();
     let text = String::from_utf8(bytes.clone()).expect("the frozen file is UTF-8");
 
-    let needle = "d_est_min = 1.0";
-    assert!(
-        text.contains(needle),
-        "invariant: {needle:?} must appear verbatim in the frozen file for this control to be \
-         meaningful — if K1's threshold was renamed, re-derive this test rather than deleting it"
+    // ⚠️ Anchored to the KEY LINE, not to the first textual match, and that distinction is the
+    // whole control. The first version of this test used
+    // `text.replacen("d_est_min = 1.0", "d_est_min = 2.0", 1)` — and that string occurs TWICE in
+    // the frozen file: once inside a comment discussing where the threshold sits relative to the
+    // instrument's ceiling, and once as the live key. `replacen` took the comment. The control
+    // passed, proving only that a comment byte is hashed, which this test's own doc calls proving
+    // the wrong thing; and the invariant guard below was satisfied by the comment too, so deleting
+    // `[k1].d_est_min` outright would have left this green and silent. Found by an adversarial
+    // review of the revision that shipped it, and confirmed by one `grep -c`.
+    // `split_inclusive` keeps each line's terminator, so reassembly is byte-exact and the only
+    // difference between `mutated` and `text` is the one digit. A `lines().join("\n")` would drop
+    // the trailing newline and change the digest all by itself — which would make the assertion
+    // below pass without the mutation doing anything, the same vacuity one layer down.
+    let is_key_line = |l: &str| {
+        let t = l.trim_start();
+        !t.starts_with('#') && t.starts_with("d_est_min") && t.contains('=')
+    };
+    let key_line_count = text.split_inclusive('\n').filter(|l| is_key_line(l)).count();
+    assert_eq!(
+        key_line_count, 1,
+        "invariant: exactly one non-comment line must assign `d_est_min` for this control to be \
+         meaningful — found {key_line_count}. If K1's threshold was renamed or moved, re-derive \
+         this test rather than deleting it."
     );
-    let mutated = text.replacen(needle, "d_est_min = 2.0", 1);
+    let mut mutated = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        if is_key_line(line) {
+            mutated.push_str(&line.replace("1.0", "2.0"));
+        } else {
+            mutated.push_str(line);
+        }
+    }
+    assert_ne!(
+        mutated, text,
+        "invariant: the mutation must actually change the text — otherwise everything below \
+         compares a file to itself"
+    );
+    assert_eq!(
+        mutated.len(),
+        text.len(),
+        "invariant: the mutation is one digit for one digit, so the length must be unchanged — a \
+         length change means reassembly altered something other than the threshold"
+    );
 
     assert_ne!(
         sha256_hex(mutated.as_bytes()),
