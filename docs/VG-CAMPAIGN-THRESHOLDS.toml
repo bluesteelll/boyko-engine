@@ -105,7 +105,60 @@ cross_run_spread_fallback = 0.05
 # adjudicated. That is the plan's own SS9 clause 4 discipline (the instrument is blind, not the
 # effect absent) applied before the fact instead of after it.
 # ---------------------------------------------------------------------------------------------
+#
+# REV 4 CORRECTION — the Rev 3 text above calls D_est uncapped and treats it as fit to FIRE K1.
+# Both are false, one line of arithmetic each:
+#
+#   CEILING. visible_tris(R) counts distinct pairs in a readback holding ONE pair per texel, so
+#   visible_tris(2160p) <= 3840*2160. At a common covered fraction,
+#   D_est <= (3840*2160)/(1920*1080) = 4.0 EXACTLY. That is Rev 1's construction defect with the
+#   ceiling raised from 1 to 4 by this ladder's own area ratio. d_est_min = 1.0 therefore sits at a
+#   quarter of the instrument's ceiling — a fine place for a threshold, reached by accident.
+#
+#   DIRECTION. Sub-pixel triangles that win no sample are absent from visible_tris, so
+#   D_est <= true density: a LOWER bound. Rev 3 fired a campaign-refuting kill on it. A lower bound
+#   cannot refute. It can only CONFIRM.
+#
+# The asymmetry that follows is good news, not a dead end:
+#   D_est >= 1.0  PROVES density >= 1 tri/pixel  =>  K1 DEAD, and the cheap census (usage bit +
+#                 Option-threaded copy, zero new .spv, zero re-bless) closed the question.
+#   D_est <  1.0  is indistinguishable from "the instrument hit its ceiling" seen from below.
+#                 Refuting the premise needs an UPPER bound; every vb_id statistic is capped by
+#                 one-winner-per-texel, so it must come from OUTSIDE vb_id — a counter of triangles
+#                 surviving frustum+backface in the raster path. That edits vb_raster.fs.hlsl and
+#                 moves the blast radius the census was designed to avoid, so it is a SEPARATE and
+#                 CONDITIONAL rung with its own re-bless budget.
+#
 [k1_instrument]
+# Bound direction and ceiling as DATA, so no later rung re-derives them from prose.
+# ceiling = (top ladder rung pixels) / (decision resolution pixels).
+d_est_bound_direction = "lower"
+d_est_ceiling = 4.0
+d_est_may_fire_k1 = false
+d_est_may_refute_k1 = true
+
+# Non-degeneracy precondition — ABSENT in Rev 3 and required. On a sentinel-only readback
+# visible_tris = 0 at both top rungs: the convergence check reads 0 <= 0 (CONVERGED) and
+# D_est = 0 < 1.0, so K1 fires on an empty frame. covered_pixels == 0 is an explicit failure,
+# never a division.
+min_covered_pixels = 1024
+min_visible_tris = 1024
+
+# The histogram scaling law. Rev 3 froze "exactly two buckets between adjacent rungs" and that gate
+# was RED BY CONSTRUCTION — two buckets is 4x area (2x linear) and this ladder has no such step:
+# 512^2->1080p = 7.910x (2.98 buckets), 1080p->1440p = 1.778x (0.83), 1440p->2160p = 2.250x (1.17).
+# Modal-bucket indices are integers over powers of two, so 0.83 is not even expressible as a shift.
+# The check is now the per-pair log2 of the ACTUAL area ratio, within a tolerance, with the residual
+# reported rather than an integer asserted.
+histogram_shift_rule = "per_pair_log2_area_ratio"
+histogram_shift_tolerance_buckets = 0.35
+
+# Rung 1 is EXCLUDED from the scaling check: 512^2 is 1:1 while the other three are 16:9, so the
+# projection is a DIFFERENT FRUSTUM, not a rescaling — the visible triangle set differs and the
+# "area scales with pixel count" premise does not hold across 512^2 -> 1080p at all. Rung 1 keeps
+# its one job: the CPU-oracle cross-check.
+histogram_shift_excludes_rungs = [0]
+
 # The relative gap between the top two ladder rungs' visible_tris below which the count is
 # treated as converged. 0.05: a 5% residual on a curve that is flattening, chosen for the same
 # reason the sibling harness's spread gate is 0.10 — tight enough to mean something, loose enough

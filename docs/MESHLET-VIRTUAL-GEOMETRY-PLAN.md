@@ -1,16 +1,36 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 3** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 4** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
 
 **Revision history, kept because the errors are the useful part.** Rev 1 carried one open P0 and
 three defects of one family — *a gate that cannot go red for the failure it exists to catch*.
-Rev 2 attacked all four; an adversarial review of Rev 2 found that **only one was actually
-closed**, and that two of Rev 2's own fixes had introduced fresh instances of the same family.
-Rev 3 is the result. The score is recorded rather than smoothed over, because "I fixed it" was
-wrong three times out of four and the mechanism that caught that is the one worth keeping.
+Rev 2 attacked all four and closed **one**. Rev 3 attacked them again: of ten things it claimed to
+fix, **four held, two were partial, four did not**, and it introduced three fresh defects of the
+same family — including a gate-widening hole in the clause it labelled non-negotiable. Rev 4 is the
+result.
+
+**The pattern is now the most reliable finding in this document, so it is stated rather than
+buried:** three consecutive revisions each claimed to close the P0 and each failed differently —
+Rev 1 left the right-hand side undefined, Rev 2 wrapped a sha256 around the string `PENDING`, Rev 3
+ordered the artifacts in a way that constrains *commits* but not *knowledge*. **An author's account
+of their own fix has been wrong more often than right here**, which is the entire argument for the
+adversarial pass that produced every correction below.
+
+| Rev 3 claim | Verdict at Rev 4 |
+|---|---|
+| P0 fixed by ordering (claim blocks R0e) | **DOES NOT HOLD** — see §0.1's retraction |
+| D1 fixed by the ladder-convergence estimator | **DOES NOT HOLD** — `D_est` is capped at exactly 4.0 and is a *lower* bound firing a kill. §5.5 |
+| D2 + `assert_achieved_extent` | **HOLDS** — the strongest thing in the document |
+| R0a branch-specific field lists | **HOLDS** |
+| Non-authored install search | **PARTIAL** — bounded authorities, not a volume walk |
+| R0f′ gets its own absolute instrument | **PARTIAL** — the admission is right, gate (b) still compares a resolution to a level |
+| Two-file split | **PARTIAL** — nothing forbids editing the claim *after* the fill |
+| Claim scope named (`bracketed_vb_pass_chain`) | **HOLDS** — best reasoning in the plan |
+| Denominators written down | **HOLDS** — verified against the sibling exactly |
+| §12 anchors re-derived | **HELD FOR §12 ONLY** — the body kept the stale ones, including the `:334`→`:344` anchor §12 itself called the most expensive of the set. Fixed at Rev 4 |
 
 | # | Rev 1 defect | Rev 2 attempt | Rev 3 |
 |---|---|---|---|
@@ -98,8 +118,31 @@ routine event, any re-record can carry a simultaneous edit to a K1 threshold wit
   claim.absolute_chain_ms"]`. R0e's test refuses to run while the value it will be compared against
   is still `PENDING`, using the sentinel discipline `goldens/PINS.toml:15` already defines (a
   `PENDING` pin makes the checker **exit 2** rather than pass).
-* This does not depend on anyone noticing an edit. The commit that fills the claim necessarily
-  precedes the commit carrying R0e's MEASURED literals, and the history records it.
+* ⚠️ **RETRACTED at Rev 4.** Rev 3 wrote here: *"This does not depend on anyone noticing an edit."*
+  **It does.** The ordering rule constrains **commits, not knowledge.** R0e is an `#[ignore]`d
+  windowed GPU bench in the sibling's shape; the floor is *observed* by running the harness and
+  reading its stdout, while the claim blocks the *assertion*, which runs later on transcribed
+  literals. Nothing prevents: run the harness in a dirty tree → read the floor → `git checkout .` →
+  fill the claim to fit → commit → re-run and transcribe. Commit order is preserved; knowledge order
+  is not. Against a peek-then-fill author the mechanism is **weaker than nothing**, because it
+  manufactures the appearance of a guarantee. Rev 4 states the limit instead of asserting it away.
+* **What actually carries the weight is party separation, and the plan should have said so.** §13 Q1
+  is an owner VALUES call, and the owner is **not** the party who runs the harness. The ordering
+  rule is a *record* of pre-registration, not an enforcement of it. A mechanism honestly described
+  as partial is worth more than one described as complete — that is the whole lesson of the three
+  failed attempts above.
+* **A stronger mechanism exists in this repo and Rev 4 adopts it: gate the instrument's OUTPUT, not
+  the comparison.** `sv0_deferred_term_bench.rs:410-413` uses `f64::NAN` as the UNMEASURED sentinel
+  *"so a forgotten transcription cannot produce a passing gate."* The analogue: **the R0e harness
+  refuses to emit the floor at all while the claim is `PENDING`.** That constrains knowledge rather
+  than commit order, which is the property the P0 actually needs.
+* ⚠️ **Second Rev 3 hole, also open: nothing forbids editing the claim AFTER the fill.** R0e asserts
+  only `!= "PENDING"`; R0f reads the file from disk at R0f time. So `fill 0.05` → R0e green → floor
+  measures 0.12 → `edit to 0.30` → R0e *still* green (still not `PENDING`) → R0f closes. Rev 2's
+  hash covered this window and Rev 3 removed it without replacement. **The correct axis is phase,
+  not file:** the claim is mutable until filled and immutable forever after. Rev 4's fix is that
+  R0e's own MEASURED-literal commit **pins the filled claim value alongside the floor**, so R0f
+  compares against something frozen in the same act as the measurement rather than against a file.
 * **The claim file is deliberately not hashed.** Its fields are *required* to change exactly once.
   Hashing a file whose schedule requires it to change is what destroyed Rev 2's tripwire.
 * **The thresholds that must never change are hashed, in their own file.**
@@ -161,9 +204,9 @@ shapes every rung after it and because the ladder's R2b exists purely to pay it 
 * **Eight sources total touch the encoding.** They compile to **sixteen** committed `.spv`
   (`vb_raster.{vs,fs}`, `vb_geo{,_mv}`, `vb_classify_{count,scatter}`, `vb_resolve{,_froxel}`,
   `vb_shade{,_tex,_froxel,_tex_froxel}`, `vb_shade_split{,_tex,_hwrt,_tex_hwrt}`).
-* **Only ten of the sixteen have a re-DXC byte-identity gate** — `vb_sv0_offpath.rs:121-130`
-  enumerates exactly those ten. `vb_raster.vs`, `vb_raster.fs`, `vb_geo`, `vb_geo_mv`,
-  `vb_classify_count`, `vb_classify_scatter` would drift **silently**.
+* **Only ten of the sixteen have a re-DXC byte-identity gate** — `vb_lit_producer_spv_sync.rs`'s
+  `VB_LIT_PRODUCER_ROWS` enumerates exactly those ten. `vb_raster.vs`, `vb_raster.fs`, `vb_geo`,
+  `vb_geo_mv`, `vb_classify_count`, `vb_classify_scatter` would drift **silently**.
 
 **The decode side is genuinely one line** — `vb_geom_fetch.hlsli:521` is exactly
 `uint local_tri = raw_prim_id % tri_count;`. The **encode** side is not independently reachable: the
@@ -199,9 +242,24 @@ The importer's *only* obligation is to produce a `MeshData`. Everything downstre
 **The streamed path already threads the table.** `impl GpuUpload for MeshGpu` sets
 `type Aux = MeshGeometryTableSlot` and calls `build_mesh_gpu(ctx, &cpu.vertices, &cpu.indices,
 aux.0.as_mut())` (`gpu_upload.rs:50`, `:59`). So a **loader-decoded** mesh claims a real slot and is
-VB-visible. The **host-authored** primitives do not: `register_mesh`/`cube`/`plane` pass `None`
-(`mesh_assets.rs:529`) — the explicit VB sibling is `MeshAssetsVbExt::register_mesh_vb`
+VB-visible. The **host-authored** primitives pass `None` at their own call site
+(`mesh_assets.rs:529`), and the explicit VB sibling is `MeshAssetsVbExt::register_mesh_vb`
 (`mesh_assets.rs:619-631`, `:647`), which every VB fixture uses.
+
+> ⚠️ **CORRECTED at Rev 4 — Rev 1 through Rev 3 all stopped one function too early, and the error
+> propagated into R0b's headline red mutation (§8).** Passing `None` is **not** the end of the
+> story: `backfill_vb_geometry_slots` runs at boot (`runner.rs:787`, after `upload_mesh_assets` and
+> after `finish()`) and claims a slot for **every** still-reserved mesh under a VB boot — by design,
+> so that *any* scene's meshes are re-fetchable by `vb_resolve` rather than only the ones an author
+> remembered to route through `register_mesh_vb`. **A host-authored mesh registered during startup
+> IS VB-visible.** The real hole is narrower and is the one R0b must target: the back-fill is a
+> **boot one-shot**, so a mesh registered *after* boot keeps `VB_GEOMETRY_RESERVED_SLOT` with
+> nothing to rescue it. No scene does that today, which is exactly why nothing catches it.
+>
+> This was found by an implementer refuting a premise I had written into its brief — the eleventh
+> such refutation this campaign. It is also why the ⚠️ block below is dangerous in a *second* way:
+> the stale comments do not merely under-describe the arming, they describe a `None` path whose
+> consequences the code no longer has.
 
 > ⚠️ **A stale-documentation trap that will mislead the importer's author.**
 > `const VB_IMPLEMENTED: bool = true;` (`render_path_config.rs:128`), and the table resolves as
@@ -290,7 +348,7 @@ clone. §11 records the measured sizes that make this decisive.
   instance_count }` (`mesh_draw.rs:80-98`) is gathered per frame; `index_count / 3 *
   instance_count` is the submitted-triangle count with no new plumbing.
 * **Per-pass GPU time, partially.** `VbTimedPass` (`gpu_timing.rs:203`) brackets **three** passes:
-  `CullReset` (`:211`), `CullDispatch` (`:214`), `VbShade` (`:219`); `VB_PASS_COUNT = 3` (`:232`).
+  `CullReset` (`:211`), `CullDispatch` (`:214`), `VbShade` (`:229`); `VB_PASS_COUNT = 3` (`:242`).
   **The VB raster pass, the `vb_geo` pass and the classify chain are NOT bracketed.** A per-pass
   table comparable to a Nanite capture therefore requires extending this enum — R0e.
 * **A CPU coverage rasterizer.** `crates/boyko_app/tests/sv0_oracle/mod.rs` ships `rasterize`
@@ -323,7 +381,7 @@ command stream stays byte-identical.
 
 ### 5.4 The statistic — a bracket, because the obvious one is capped at 1
 
-**Rev 1's defect, stated plainly.** `vb_id` is an `R32G32_UINT` image (`targets.rs:865`) — **one
+**Rev 1's defect, stated plainly.** `vb_id` is an `R32G32_UINT` image (`targets.rs:866`) — **one
 `(instance_id, raw_prim_id)` pair per pixel**. So `distinct (instance_id, local_tri) pairs ÷
 covered pixels` is **≤ 1 by construction**, saturating exactly when every covered pixel carries its
 own triangle. It cannot distinguish *"we have just reached one triangle per pixel"* from *"we are
@@ -370,24 +428,97 @@ at 2160p covers 1 px at 1080p. Therefore
 * so measuring at the **top** rung reveals precisely the sub-pixel population the decision
   resolution hides — which is the population this campaign exists to serve.
 
-The uncapped density estimate at the decision resolution is then
+The density estimate at the decision resolution is then
 
 > **`D_est = visible_tris(top rung) ÷ covered_pixels(decision_resolution)`**
 
-— **unbounded** above, unlike (1), and **tight**, unlike (2).
+— **tight**, unlike (2). ⚠️ **Rev 3 called it "unbounded above" and that was false in two ways at
+once. Both were caught by arithmetic on this page, and both matter to the kill's soundness.**
 
-**And it validates itself, which is the part that matters.** The ladder gives four points on a
-convergence curve. If the top two rungs still differ by more than
-`[k1_instrument].ladder_convergence_margin = 0.05`, then `visible_tris` has **not** converged,
-`D_est` is an underestimate of unknown size, and the census reports **"density not resolved"** —
-**K1 is not adjudicated at all.** That is §9 clause 4's discipline (*the instrument is blind, not
-the effect absent*) applied **before** the fact instead of after it. The disposition is to extend
-the ladder upward in a new revision, never to adjudicate on a known underestimate.
+**Its ceiling is exactly 4.0.** `visible_tris(R)` counts distinct pairs in a readback holding one
+pair per texel, so `visible_tris(2160p) ≤ 3840·2160`. At a common covered fraction φ,
 
-The histogram's power-of-two shift is the same relation and is independently checkable: between
-adjacent ladder rungs the modal bucket must move by exactly **two** buckets. Four rungs give three
-such checks, and a curve that fails them is a curve whose scaling assumption is broken — reported,
-not averaged.
+```
+D_est ≤ (3840·2160) / (1920·1080) = 4.0     exactly
+```
+
+This is Rev 1's construction defect with the ceiling raised from 1 to 4 by the ladder's own area
+ratio — *"it cannot distinguish 'we have just reached one triangle per pixel' from 'we are ten times
+past it'"*, which is §5.4's indictment of statistic (1), applying verbatim. **The estimator's
+dynamic range is a consequence of a ladder frozen for an unrelated reason (D2), and nothing in
+Rev 3 recorded that.** `[k1].d_est_min = 1.0` therefore sits at **one quarter of the instrument's
+ceiling**, which is where a threshold should sit — but by accident, not by design.
+
+**It is a LOWER bound, and Rev 3 fired a kill on it.** Sub-pixel triangles that win no sample are
+absent from `visible_tris`, so `D_est ≤` true density. Rev 2's `submitted/covered` was an **upper**
+bound: sound for firing `< 1.0`, but inert. **Rev 3 traded soundness for tightness and did not
+notice the trade.** `K1 fires iff D_est < 1.0` refutes the campaign on evidence that cannot
+support refutation — the true density may be arbitrarily higher.
+
+### 5.6 The asymmetry this forces — and why it is good news, not a dead end
+
+A lower bound cannot refute the premise. It can **prove** it:
+
+> **`D_est ≥ 1.0` at the decision resolution proves density is genuinely ≥ 1 triangle/pixel.**
+> K1 is **dead**, the mechanism exists, and no further instrument is needed.
+
+So the census as designed — usage bit, `Option`-threaded copy, zero new `.spv`, zero manifest rows —
+can **close the question in the favourable direction at its current cost**. That is the cheap
+outcome and it is the one worth attempting first.
+
+**Refuting the premise costs more, and the plan must say so rather than pretend otherwise.** Any
+statistic derived from `vb_id` is capped by one-winner-per-texel, so a sound upper bound **must**
+come from outside it. The tight one available is a **counter of triangles surviving frustum +
+backface**, incremented in the raster path under the census arm. That is not free: it edits
+`vb_raster.fs.hlsl`, which moves the very blast radius §5.3 chose option (a) to keep at zero
+(16 `.spv`, 6 of them ungated — §2).
+
+**The ladder therefore splits, and the expensive half is conditional:**
+
+| Outcome of the cheap census | Next |
+|---|---|
+| `D_est ≥ 1.0` | **K1 dead.** No counter, no shader edit, no re-bless. Done. |
+| `D_est < 1.0` **and** the ladder converged | Genuinely sparse *or* instrument-limited — indistinguishable from below. **The counter is required**; it is scoped as its own rung with its own re-bless budget (§13 Q4). |
+| Ladder not converged | `[k1_instrument].on_not_converged` — **K1 not adjudicated**, §9 clause 4. |
+
+**This front-loads the cheap decisive case and makes the expensive one explicitly optional**, which
+is what Rev 3's single-path design hid.
+
+### 5.7 The scaling law — the frozen ladder does not satisfy it
+
+Rev 3's R0d gate (c) asserted the histogram's modal bucket moves by **exactly two buckets** between
+adjacent rungs. Two buckets is 4× area, i.e. **2× linear**. The frozen ladder contains no such
+step:
+
+| pair | area ratio | buckets |
+|---|---|---|
+| 512² → 1080p | 7.910 | **2.98** |
+| 1080p → 1440p | 1.778 | **0.83** |
+| 1440p → 2160p | 2.250 | **1.17** |
+
+**The gate was red by construction** — the mirror of the family this campaign hunts: a gate that
+cannot go *green*. Modal-bucket indices are integers over powers of two, so 0.83 and 1.17 are not
+even expressible as a shift. Rev 4 replaces the constant with the **per-pair `log2` of the actual
+area ratio**, checked within a stated tolerance, and reports the residual rather than asserting an
+integer.
+
+**And rung 1 is excluded from the scaling check entirely.** 512² is **1:1** while the other three
+are **16:9**, so the projection is a *different frustum*, not a rescaling — the visible triangle set
+differs, and §5.5's premise (*"a triangle's screen-space area scales exactly with pixel count"*)
+does not hold across 512²→1080p at all. Rung 1 keeps its one job: the CPU-oracle cross-check.
+
+**Three further limits on the scaling law, stated because R0c must design around them:** sample
+lattices between rungs are **not nested** (a sliver holding one coarse centre and no fine centre
+*disappears* at higher resolution, so `visible_tris(R)` is not strictly monotone); depth-test
+tie-breaking can flip a triangle from visible to invisible as resolution rises; and covered-pixel
+count is area **+ O(perimeter)**, so the shift is asymptotic for large triangles and wrong exactly
+in the micro-polygon regime the census is about.
+
+**Non-degeneracy precondition, absent in Rev 3 and required.** On a sentinel-only readback
+`visible_tris = 0` at both top rungs, the convergence check reads `0 ≤ 0` → *converged*, and
+`D_est = 0 < 1.0` → conjunct 1 holds. K1 fires on an empty frame. R0c/R0d therefore assert a
+minimum non-sentinel covered-pixel count and a non-zero `visible_tris` before any of this is
+evaluated, and `covered_pixels == 0` is an explicit failure, not a division.
 
 **Resolution — D2's fix, kept.** The census runs `[census].resolution_ladder` and reports a
 **curve**. K1 is adjudicated at `[census].decision_resolution` = 1080p **alone**, frozen: 2160p
@@ -490,13 +621,25 @@ that R0's harness must be built to avoid:
 3. **measure** the counter quantum by tick GCD and report it alongside `timestampPeriod`
    (`:359`, `:368`, `:377`);
 4. state the **resolvable delta with confidence intervals**, and make the effective spread gate
-   `max(stated gate, measured median lattice / |median|)` (`:286-295`);
+   `max(stated gate, measured median lattice / |median|)` — **but only where the lattice term is
+   licensed by evidence.** ⚠️ Rev 3 transferred the `max()` and dropped the guard, which turned a
+   non-negotiable clause into a gate a homogeneous sample could widen to rescue a failing run —
+   this campaign's own #1 named defect, introduced in the clause written against it. The sibling
+   does **not** grant the widening by default: `sv0_deferred_term_bench.rs:805-807` reads
+   `if may_widen { SV0_SESSION_SPREAD_MAX.max(lattice_floor) } else { SV0_SESSION_SPREAD_MAX }`,
+   where `may_widen` requires at least `SV0_LATTICE_MIN_DISTINCT_TICKS = 7` (`:399`) distinct
+   observed tick values (`:680-681`), *"licensed by EVIDENCE … rather than granted by default"*
+   (`:798`). A **separate, non-waivable** test asserts `lattice_floor <= SV0_SESSION_SPREAD_MAX`
+   unconditionally, *"so it can never silently widen the gate"*. R0e lands **all three** — the
+   `max()`, the distinct-tick evidence floor, and the non-waivable assertion — or none of them.
+   This is R16 (*a literal transferred without its denominator*) one level up: **a gate transferred
+   without its precondition**;
 5. discard warmup, run ≥3 separate processes, and pin every session's transcribed number as a test
    literal under the MEASURED discipline.
 
 **One trap the R0e implementer will otherwise hit.** Every `read_query_pool_ns` reader requests all
 of its collector's `(begin,end)` pairs with `VK_QUERY_RESULT_WAIT_BIT`, which **blocks forever** on a
-pair its recorder never wrote that frame — `gpu_timing.rs:334` states this, and it is why three
+pair its recorder never wrote that frame — `gpu_timing.rs:344` states this, and it is why three
 separate collectors exist rather than one widened `PASS_COUNT`. Extending `VbTimedPass` to cover
 raster/geo/classify means **every added pair must be written unconditionally on every armed frame**.
 R0e therefore also lands a **written-pair bitmask asserted before the read**, so a conditional
@@ -581,10 +724,21 @@ failure (§3.4).
 
 **RED if / mutations (DEMONSTRATED):**
 * flip one byte of a pinned hash in `CORPUS.toml` → (a) reds;
-* **register the same mesh through host-authored `register_mesh` instead of the streamed path →
-  slot is `0` → (c) reds.** This is the rung's most important mutation: it is exactly the bug the
-  stale `VB_IMPLEMENTED == false` comments (§3.2) will induce, and without it (c) is satisfied by
-  any code path that happens to work.
+* ⚠️ **RETRACTED at Rev 4 — this mutation was DEAD, and it was the one Rev 1–Rev 3 each called the
+  rung's most important.** It read: *"register the same mesh through host-authored `register_mesh`
+  instead of the streamed path → slot is `0` → (c) reds."* It does **not** red.
+  `backfill_vb_geometry_slots` (`crates/boyko_render/src/gpu_upload.rs`, run at
+  `crates/boyko_app/src/runner.rs:787`, after `upload_mesh_assets` and after `finish()`) claims a
+  slot for **every** still-reserved mesh under a VB boot — precisely so that any scene's meshes are
+  re-fetchable by `vb_resolve`, not only those routed through `register_mesh_vb`. So the mutated
+  path lands a real slot, gate (c) stays green, and a mutation written against a
+  cannot-go-red defect was itself one. Found by an implementer refuting the premise I briefed.
+* **Replacement mutation, and it targets the hole that actually exists:** the back-fill is a **boot
+  one-shot** — its own doc states a mesh registered at *runtime* under VB would need it re-run, and
+  no scene does that today. So: **register a mesh through `register_mesh` AFTER boot completes →
+  its slot stays `VB_GEOMETRY_RESERVED_SLOT` → (c) reds.** Verify the one-shot property against
+  `runner.rs` before relying on it; if a later rung makes the back-fill continuous, this mutation
+  dies too and the gate needs re-deriving rather than re-wording.
 * declare a `TANGENT`-less asset and delete the `generate_tangents` post-pass → (b)/(c) survive but
   the tangent lane is identity; asserted separately so the fallback cannot rot silently.
 
@@ -870,7 +1024,7 @@ The rung is **reverted or the campaign re-scoped** — not softened mid-flight �
 | R1 | **Vacuously-green gate** — an assertion quantified over an empty or self-referential selection. | The campaign's #1 recurring defect; found five times in the sibling plan alone. | Every rung names a mutation and the commit records its output; R0c(b)/(c) are deliberately paired so neither can pass alone. |
 | R2 | **A procedural corpus makes K1 untestable.** | New, and it is why §4.2 rejects the cheapest corpus option. | The corpus is fetched real content; procedural geometry is confined to R0c's sensitivity control. |
 | R3 | **The harness measures its own resolution, or its A/B rides the ring.** | MEASURED in the sibling rung, both of them: a "spread" that was one median lattice step, and an ABAB phase perfectly aliased with `FRAMES_IN_FLIGHT == 2`. | §7 clauses 1, 3–4: ABBA with the residual reported; the quantum measured by tick GCD and the spread gate read against it. |
-| R4 | **`WAIT_BIT` readback hangs instead of failing.** | `gpu_timing.rs:334` documents the deadlock; three separate collectors exist because of it. | R0e's written-pair bitmask, asserted before the read. |
+| R4 | **`WAIT_BIT` readback hangs instead of failing.** | `gpu_timing.rs:344` documents the deadlock; three separate collectors exist because of it. | R0e's written-pair bitmask, asserted before the read. |
 | R5 | **Stale doc sends the importer down the `None` path.** | Verified: ≥6 comments still claim `VB_IMPLEMENTED == false` while `render_path_config.rs:128` says `true`. | R0b's second red mutation targets exactly this; fixing the comments is a separate one-line commit, deliberately not absorbed here. |
 | R6 | **Host-visible residency ceiling.** | `mesh_assets.rs:295-305`: every mesh buffer is `HostVisibleCoherent`. | R0b gate (d); the device-local + staging path is a named follow-up, not R0 work. |
 | R7 | **The `vb_id` usage widening perturbs a golden.** | New. | R0c gate (a) over every VB pin, with a demonstrated red (record the copy unconditionally). |
@@ -967,7 +1121,8 @@ sentence), **`:128` (`const VB_IMPLEMENTED: bool = true;`)**, `:517` (`vb_geomet
 includers: `vb_geo.comp.hlsl:117`/`:118`, `vb_resolve.comp.hlsl:84`/`:85`,
 `vb_shade.comp.hlsl:89`/`:90`, `vb_shade_split.comp.hlsl:136`/`:137`,
 `vb_classify_count.comp.hlsl:29`, `vb_classify_scatter.comp.hlsl:24` ·
-`crates/boyko_rhi_vulkan/tests/vb_sv0_offpath.rs:121-130` (the ten gated rows).
+`crates/boyko_rhi_vulkan/tests/vb_lit_producer_spv_sync.rs`'s `VB_LIT_PRODUCER_ROWS` (the ten
+gated rows).
 
 **Targets / readback:** `crates/boyko_rhi_vulkan/src/present/targets.rs:851-856` (`VbTargets`),
 **`:868` (`COLOR_ATTACHMENT | SAMPLED` — no `TRANSFER_SRC`)** ·
