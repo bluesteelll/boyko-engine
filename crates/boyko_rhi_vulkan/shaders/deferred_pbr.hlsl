@@ -1215,7 +1215,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
         // never consumed). `rd` is unit (the shared ray-gen), so `view_t` is the true world
         // distance and `P = ro + rd * view_t` is the exact marched surface point.
 
-        // L1 cluster lookup (Decision 6): when `clusters_enabled`, map this pixel to its
+        // L1 cluster lookup (Decision 6): when `use_clusters` — the THREE-term gate built below,
+        // NOT the `clusters_enabled` bit alone since VB-P1k — map this pixel to its
         // froxel and loop ONLY the cluster's point/spot indices; else loop the flat
         // `[l0a_count .. light_count)` block (the L0b path — the L1 0%-gate). The froxel z
         // slice uses the SAME view-z the cull used: `view_z = dot(rd, cam_forward.xyz) *
@@ -1238,9 +1239,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
         //     so the LIVE header's dims are the only bound this read would otherwise have --
         //     while `ClusterGrid` was SIZED at boot from `ClusterConfig::cluster_count()` and is
         //     never re-allocated, and `sync_cluster_light_gate` republishes the LIVE dims every
-        //     frame. A post-boot `ClusterConfig` edit that GROWS the grid therefore makes this
-        //     read leave the allocation, silently (`robustBufferAccess` is OFF, no GPU-assisted
-        //     validation). `GetDimensions` reports the BOUND DESCRIPTOR's own element count
+        //     frame. A post-boot `ClusterConfig` edit that GROWS the grid therefore makes such a
+        //     read leave the allocation, silently (`robustBufferAccess` is OFF -- the device is
+        //     created with `samplerAnisotropy` as its only core feature bit -- and no GPU-assisted
+        //     validation runs). `GetDimensions` reports the BOUND DESCRIPTOR's own element count
         //     (SPIR-V `OpArrayLength`) -- the allocation itself, not a host-side mirror of it --
         //     so this term disarms the cluster walk for exactly the frames whose live grid does
         //     not fit the buffer, falling back to the in-bounds flat scan (which is also the
@@ -1249,11 +1251,24 @@ void main(uint3 tid : SV_DispatchThreadID) {
         //
         // Both terms are inert on every armed, correctly-packed frame (dims nonzero together
         // with the enabled bit, and `cluster_count == grid_capacity` when boot dims == live
-        // dims -- every shipping configuration), so ON==OFF equality is unaffected. On a
-        // Deferred/ForwardPlus boot with no L1 cull built, `ClusterGrid` is bound to the light
-        // table as a placeholder (`targets.rs`); `GetDimensions` then reports THAT buffer's
-        // element count, which is still a true bound on the bound descriptor -- and the dims
-        // term has already disarmed the walk there anyway.
+        // dims -- every shipping configuration), so ON==OFF equality is unaffected.
+        //
+        // WHICH term actually decides HERE, boot by boot. This source's resolve set is bound only
+        // inside `Renderer::record_gbuffer`, which `render_gbuffer_frame` records only on a
+        // DEFERRED boot -- and Deferred can never arm `ResolvedRenderPath::froxel_light_cull`
+        // (`clusters_enabled && path == VisibilityBuffer`), so no boot that reaches this code has
+        // an L1 cull built: `ClusterGrid` is ALWAYS the light-table placeholder here
+        // (`targets.rs`), and `GetDimensions` reports THAT buffer's element count -- still a true
+        // bound on the bound descriptor. On the DEFAULT boot the ENABLED BIT takes the flat branch
+        // first, because `LightingConfig::clusters_enabled` defaults to `false` and
+        // `LightHeaderGpu::new` packs it verbatim. A Deferred boot that explicitly sets it `true`
+        // gets past that term and is stopped by the DIMS term, because `sync_cluster_light_gate`
+        // pins the header's dims lane to `0` whenever `froxel_light_cull` is false. The CAPACITY
+        // term therefore never decides a host-booted Deferred frame -- on THIS leaf it is defence
+        // in depth, and the only nonzero-dims headers that reach it today come from a direct-RHI
+        // harness (`GoldenLightHeader::new_clustered`, `tests/sdf_gbuffer_hybrid.rs`). The
+        // grow-past-the-allocation case the term is built for is live on the VB leaves, whose
+        // header does carry real dims.
         ClusterParams cp = load_cluster_params(LightBuf);
         uint grid_capacity, grid_stride;
         ClusterGrid.GetDimensions(grid_capacity, grid_stride);

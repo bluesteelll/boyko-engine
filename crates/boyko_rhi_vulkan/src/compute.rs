@@ -839,8 +839,20 @@ embed_spirv! {
     /// (`shaders/vb_resolve.comp.hlsl`, `-D FROXEL=1`) — [`VB_RESOLVE_SPV`]'s SAME source with the
     /// `#ifdef FROXEL` seam active: the point/spot loop walks the pixel's froxel slice via
     /// `ClusterGrid`/`LightIndexList` (Set 0 bindings 8/9, froxel-compile-only) instead of the flat
-    /// `[l0a_count, light_count)` scan, gated at runtime on the header's `clusters_enabled` bit —
-    /// the SAME `use_clusters` fallback `forward_opaque_froxel.fs.hlsl` establishes. The base
+    /// `[l0a_count, light_count)` scan, gated at runtime by `use_clusters` — THREE terms since
+    /// VB-P1k (`clusters_enabled != 0 && cluster_count != 0 && cluster_count <= grid_capacity`,
+    /// the capacity being `ClusterGrid.GetDimensions(...)`, i.e. the BOUND descriptor's own
+    /// element count via SPIR-V `OpArrayLength`) — the SAME shape and fallback
+    /// `forward_opaque_froxel.fs.hlsl` establishes. The two terms past the enabled bit are an
+    /// out-of-bounds guard, not a style choice: `robustBufferAccess` is OFF in this engine (the
+    /// device is created with `samplerAnisotropy` as its ONLY core feature bit) and no
+    /// GPU-assisted validation runs, so an out-of-range `ClusterGrid` read is real UB that no
+    /// layer reports. UNLIKE the Deferred/ForwardPlus readers, this variant never guards a
+    /// PLACEHOLDER descriptor: `record_vb` binds it only under `scene.cluster_cull.is_some()`,
+    /// and the Set-0 it binds (`GBufferTargets::vb_set0_froxel`) is built only when the REAL
+    /// `cluster_grid`/`light_index` exist — there is no `unwrap_or(light_table)` fallback on this
+    /// path, so an unarmed VB boot binds the BASE compile, which declares no `ClusterGrid` at all.
+    /// The base
     /// (non-FROXEL) compile's tokens are byte-for-byte unperturbed by the `#else` arm, so
     /// [`VB_RESOLVE_SPV`] stays byte-identical to its pre-VB-P1a build. LOADED since VB-P1b, when
     /// the arm bit (`ResolvedRenderPath::froxel_light_cull` — the VB path AND the owner-opt-in

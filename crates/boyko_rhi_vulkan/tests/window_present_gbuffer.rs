@@ -2375,9 +2375,15 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         light_dirty: false,
         // Lighting L1 is OFF for the on-screen demo (no cluster cull wired): the cull
         // pipeline + cluster SSBOs are absent, so the recorder skips the cull pass entirely
-        // and the resolve's `clusters_enabled` header gate (0) loops the flat table — the L1
-        // OFF / 0%-gate. The resolve set's @8/@9 bind the light table as a harmless valid
-        // placeholder (never read on the OFF path; see GBufferTargets::create).
+        // and the resolve loops the flat table — the L1 OFF / 0%-gate. Its `use_clusters` is
+        // THREE terms since VB-P1k (`clusters_enabled != 0 && cluster_count != 0 &&
+        // cluster_count <= grid_capacity`, the capacity read off the BOUND `ClusterGrid`
+        // descriptor with `GetDimensions`); this body uploads `DEGENERATE_LIGHT_TABLE`, whose
+        // `cluster_params` words are all zero, so the ENABLED BIT short-circuits the gate here —
+        // the dims term reads 0 too, but is never the one consulted. The resolve set's @8/@9 bind
+        // the light table as a harmless valid placeholder (never read on the OFF path; see
+        // GBufferTargets::create). The terms past the enabled bit are an out-of-bounds guard, not
+        // style: `robustBufferAccess` is OFF here and no GPU-assisted validation runs.
         cluster_cull: None,
         cull_layout: None,
         cluster_grid: None,

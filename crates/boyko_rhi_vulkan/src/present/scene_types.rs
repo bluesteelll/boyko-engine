@@ -1412,8 +1412,38 @@ pub struct GBufferScene<'a> {
     /// undefined.
     ///
     /// `None` ⇒ L1 is not wired (the L0b-only build) and the cull pass + its barriers are skipped
-    /// entirely (the resolve's `clusters_enabled` header gate then loops the flat table — the L1
-    /// OFF path). When `Some`, the recorder dispatches it BEFORE the resolve, with a
+    /// entirely, so the resolve loops the flat table — the L1 OFF path.
+    ///
+    /// The gate producing that flat walk is `use_clusters`, and it is THREE terms since VB-P1k:
+    /// `clusters_enabled != 0 && cluster_count != 0 && cluster_count <= grid_capacity`, the
+    /// capacity read off the BOUND `ClusterGrid` descriptor with `GetDimensions`. The two terms
+    /// past the enabled bit are an out-of-bounds guard, not a style choice: `robustBufferAccess`
+    /// is OFF in this engine and there is no GPU-assisted validation, so an out-of-range
+    /// `ClusterGrid` read is real UB that no layer reports.
+    ///
+    /// This field being `None` is strictly WIDER than the header's arm bit, and the two are
+    /// resolved in different places — do not infer one from the other:
+    ///
+    /// * the header's dims lane is zeroed by `sync_cluster_light_gate` exactly when
+    ///   `ResolvedRenderPath::froxel_light_cull` is false, and that bit is TWO terms —
+    ///   `LightingConfig::clusters_enabled` AND `path == RenderPath::VisibilityBuffer`
+    ///   (`render_path_config.rs`'s resolver; `runner.rs` threads `clusters_wanted` from
+    ///   `clusters_enabled` alone). **No geometry-leg term enters it**, unlike the sibling
+    ///   `vb_geometry_table`, which does carry `mesh_leg`;
+    /// * this field's sole writer, `GpuSceneBundles::build_froxel_light_cull`, additionally needs
+    ///   a live `MeshGeometryTableSlot` — `runner.rs` nests the call inside `if let Some(table)`.
+    ///   That skew is the one `GpuSceneBundles::cluster_cull_armed`'s doc records.
+    ///
+    /// ⚠️ **Which term decides on a given boot, and whether any `ClusterGrid` reader is bound at
+    /// all, is deliberately NOT enumerated here.** Two attempts to write that boot-by-boot chain
+    /// were each refuted against the code — it spans the path resolver, the runner, the frame
+    /// router, three resolve-pipeline variants (`resolve_pipeline`, its `terminator_wrap`
+    /// substitute, and the hwrt one) and the VB recorder's own `FROXEL` selection, so a comment
+    /// restating it rots faster than it can be verified. Read the resolver and the recorder; the
+    /// authority is `cluster_grid_read_bound.rs`, whose census is closed over the shader roots and
+    /// fails on an unenumerated `ClusterGrid` consumer.
+    ///
+    /// When `Some`, the recorder dispatches it BEFORE the resolve, with a
     /// COMPUTE→COMPUTE buffer barrier so the resolve reads see the cull writes. The base arm
     /// dispatches over [`Self::cluster_count`] froxels at 64 lanes; the hierarchical arm uses
     /// [`Self::cluster_cull_hier`]'s own group count at 256 lanes.

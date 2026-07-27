@@ -17,8 +17,17 @@
 //! R5 developer report), so `light_cull`'s "4-buffers-Some" gate never fires: the froxel FS
 //! variant's `ClusterGrid`/`LightIndexList` bindings are bound-but-unread placeholders
 //! (`scene.light_table`, `ForwardTargets::build`'s doc), and `forward_opaque_froxel.fs.hlsl`'s
-//! runtime `clusters_enabled` header bit reads `0` — the SAME L1 0%-gate the deferred resolve
-//! uses — so the froxel FS takes the IDENTICAL flat-block branch `forward_opaque.fs.hlsl`'s base
+//! runtime `use_clusters` gate is false — the SAME L1 0%-gate the deferred resolve uses. That
+//! gate is THREE terms since VB-P1k (`clusters_enabled != 0 && cluster_count != 0 &&
+//! cluster_count <= grid_capacity`, the capacity read off the BOUND `ClusterGrid` descriptor with
+//! `GetDimensions`). The term that decides HERE is the FIRST one: this scene never overrides
+//! `EnginePlugins`'s `LightingConfig::default()` seed, whose `clusters_enabled` is `false`, and
+//! `LightHeaderGpu::new` packs that bit verbatim — so `use_clusters` short-circuits before the
+//! other two are consulted. (They are not vacuous, only redundant here:
+//! `sync_cluster_light_gate` independently keeps the header's dims lane at `0` on any boot whose
+//! `ResolvedRenderPath::froxel_light_cull` is false, which is every ForwardPlus boot, so a scene
+//! that DID set `clusters_enabled = true` under this path would be stopped by the dims term
+//! instead.) So the froxel FS takes the IDENTICAL flat-block branch `forward_opaque.fs.hlsl`'s base
 //! (non-froxel) compile always takes. The ONLY behavioral difference from `forward_mesh` is
 //! therefore the depth prepass (EARLY-Z zero-overdraw, Decision 4) + the `EQUAL`-depth
 //! `forward_opaque` test — floating-point evaluation ORDER may differ (a `GREATER`+write pass

@@ -1564,9 +1564,27 @@ impl Renderer<'_> {
         }
 
         // === Lighting L1: the clustered froxel light-cull pass (Decision 6). Recorded ONLY
-        // when the scene wires the cull pipeline + cull set; otherwise skipped entirely (the
-        // resolve's `clusters_enabled` header gate then loops the flat table — the L1 OFF /
-        // 0%-gate, byte-identical command stream). The cull reads the camera UBO + light table
+        // when the scene wires the cull pipeline + cull set; otherwise skipped entirely and the
+        // resolve loops the flat table — the L1 OFF / 0%-gate, byte-identical command stream.
+        // The resolve's `use_clusters` is THREE terms since VB-P1k (`clusters_enabled != 0 &&
+        // cluster_count != 0 && cluster_count <= grid_capacity`, the capacity read off the BOUND
+        // `ClusterGrid` descriptor with `GetDimensions`). This fn records the DEFERRED path only
+        // (`render_gbuffer_frame` reaches `record_gbuffer` solely in the `else` arm of its
+        // `path_is_vb()`/`path_is_forward()` three-way), so the boots reachable here are exactly
+        // the Deferred ones — and on those, `ResolvedRenderPath::froxel_light_cull` is `false` by
+        // construction (`clusters_enabled && path == VisibilityBuffer`), which makes
+        // `build_froxel_light_cull` never run and this block always skipped. Which term then takes
+        // the flat branch: on the DEFAULT boot the ENABLED BIT, since
+        // `LightingConfig::clusters_enabled` defaults to `false` and `LightHeaderGpu::new` packs
+        // it verbatim; on a Deferred boot that explicitly sets it `true`, the `cluster_count != 0`
+        // term, since `sync_cluster_light_gate` pins the dims lane to `0` whenever
+        // `froxel_light_cull` is false. The CAPACITY term never decides on a Deferred frame for
+        // that same reason — it is defence in depth (`GBufferScene::cluster_cull`'s doc also
+        // records the wider VB case, where no `ClusterGrid` reader is bound at all). The two
+        // terms past the enabled bit are an out-of-bounds guard, not a style choice:
+        // `robustBufferAccess` is OFF here and no GPU-assisted validation runs, so an
+        // out-of-range `ClusterGrid` read is real UB that no layer reports. The cull reads the
+        // camera UBO + light table
         // (the L0-r0 copy above already ordered the table for COMPUTE reads) and writes the
         // ClusterGrid + LightIndexList; the resolve reads them, so a COMPUTE→COMPUTE buffer
         // barrier orders the cull WRITE before the resolve READ. The cull does NOT depend on

@@ -308,10 +308,15 @@ float4 main(PsIn input) : SV_Target0 {
     // L0b / L1: the point/spot block. Rung R5 (ForwardPlus, `#ifdef FROXEL`): map this pixel to
     // its froxel and walk ONLY the cluster's point/spot indices (`ClusterGrid`/`LightIndexList`,
     // token-for-token the SAME lookup `deferred_pbr.hlsl`'s L1 cluster block performs) instead of
-    // the flat `[l0a_count, light_count)` scan — the `use_clusters` runtime gate (from the SAME
-    // `cp.clusters_enabled` header lane the deferred resolve reads) preserves the L1 0%-gate: a
-    // frame with no cull pass armed falls back to the IDENTICAL flat walk the base (non-FROXEL)
-    // compile always runs. `view_z` is the SAME perspective view-space depth this file's own CSM
+    // the flat `[l0a_count, light_count)` scan — the `use_clusters` runtime gate (THREE terms
+    // since VB-P1k: the SAME `cp.clusters_enabled` header lane the deferred resolve reads, plus
+    // nonzero dims and the descriptor-derived capacity bound, both spelled out below) preserves
+    // the L1 0%-gate: a frame with no cull pass armed falls back to the IDENTICAL flat walk the
+    // base (non-FROXEL) compile always runs. Unlike the deferred/VB leaves this variant IS bound
+    // on the boots it describes (`record_forward` binds the froxel FS on every ForwardPlus frame,
+    // against a Set-0 whose bindings 5/6 fall back to the light table), so the gate really is
+    // evaluated here every frame -- see the per-boot term breakdown under `#ifdef FROXEL` below.
+    // `view_z` is the SAME perspective view-space depth this file's own CSM
     // cascade-select already computes inline (Forward v1 is perspective-only, per
     // `forward_opaque.vs.hlsl`'s doc); `px`/`py`/`w`/`h` come from the rasterized fragment
     // coordinate + the Camera UBO's image dimensions (no compute-shader dispatch coordinate
@@ -333,8 +338,9 @@ float4 main(PsIn input) : SV_Target0 {
     //     the LIVE header's dims are the only bound this read would otherwise have -- while
     //     `ClusterGrid` was SIZED at boot from `ClusterConfig::cluster_count()` and is never
     //     re-allocated, and `sync_cluster_light_gate` republishes the LIVE dims every frame. A
-    //     post-boot `ClusterConfig` edit that GROWS the grid therefore makes this read leave the
-    //     allocation, silently (`robustBufferAccess` is OFF, no GPU-assisted validation).
+    //     post-boot `ClusterConfig` edit that GROWS the grid therefore makes such a read leave the
+    //     allocation, silently (`robustBufferAccess` is OFF -- the device is created with
+    //     `samplerAnisotropy` as its only core feature bit -- and no GPU-assisted validation runs).
     //     `GetDimensions` reports the BOUND DESCRIPTOR's own element count (SPIR-V
     //     `OpArrayLength`) -- the allocation itself, not a host-side mirror of it -- so this term
     //     disarms the cluster walk for exactly the frames whose live grid does not fit the
@@ -345,8 +351,16 @@ float4 main(PsIn input) : SV_Target0 {
     // enabled bit, and `cluster_count == grid_capacity` when boot dims == live dims -- every
     // shipping configuration), so ON==OFF equality is unaffected. Where no L1 cull is built,
     // `ClusterGrid` is bound to the light table as a placeholder (`targets.rs`); `GetDimensions`
-    // then reports THAT buffer's element count, still a true bound on the bound descriptor -- and
-    // the dims term has already disarmed the walk there anyway.
+    // then reports THAT buffer's element count, still a true bound on the bound descriptor.
+    //
+    // WHICH term decides, boot by boot. On the DEFAULT ForwardPlus boot -- every golden, and every
+    // scene that leaves `EnginePlugins`'s `LightingConfig::default()` seed alone -- the ENABLED
+    // BIT takes the flat branch first: `LightingConfig::clusters_enabled` defaults to `false` and
+    // `LightHeaderGpu::new` packs it verbatim. Only a ForwardPlus boot that explicitly sets it
+    // `true` gets past that term, and there the DIMS term decides (per the first bullet above:
+    // `froxel_light_cull` is false on every ForwardPlus boot, so the dims lane is pinned to `0`).
+    // The CAPACITY term consequently never decides a host-booted ForwardPlus frame -- on this leaf
+    // it is defence in depth against a nonzero-dims header this path cannot currently produce.
     ClusterParams cp = load_cluster_params(LightBuf);
     uint grid_capacity, grid_stride;
     ClusterGrid.GetDimensions(grid_capacity, grid_stride);

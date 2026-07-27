@@ -106,8 +106,16 @@ tail is character-identical between the two sources by construction (plan D3), s
 is spliced identically into both. `TEXTURED` selects the bindless-material Set 3 eval (`vb_shade.comp.hlsl`
 only — `vb_resolve.comp.hlsl` has no TEXTURED variant); `FROXEL` (VB-P1a, "dark infra") selects the
 froxel-culled point/spot walk (`ClusterGrid`/`LightIndexList`) over the flat `[l0a_count,
-light_count)` scan, gated at RUNTIME on the header's `clusters_enabled` bit (`use_clusters`) so an
-unarmed frame on a FROXEL-compiled `.spv` still falls back to the identical flat walk. The base
+light_count)` scan, gated at RUNTIME by `use_clusters` so an unarmed frame on a FROXEL-compiled
+`.spv` still falls back to the identical flat walk. Since VB-P1k that gate is THREE terms, uniform
+across all four `ClusterGrid` readers: `clusters_enabled != 0 && cluster_count != 0 &&
+cluster_count <= grid_capacity`, where the capacity comes from `ClusterGrid.GetDimensions(...)` —
+the BOUND descriptor's own element count (SPIR-V `OpArrayLength`), not a host-side mirror of it.
+The two terms past the enabled bit are an out-of-bounds guard, not a style choice:
+`robustBufferAccess` is OFF in this engine and no GPU-assisted validation runs, so an out-of-range
+`ClusterGrid` read is real UB that no layer would report. `cluster_grid_read_bound.rs` pins the
+bound's presence per artifact (`OpArrayLength` census) and closes the consumer set over the
+committed HLSL roots. The base
 (non-FROXEL) compile's tokens are byte-for-byte unperturbed by the `#else` arm — verified by re-DXC
 (`vb_froxel_spv_sync.rs`).
 
@@ -368,6 +376,64 @@ Every golden pin stays byte-identical for the trivial reason that the module is 
 The output-set equality between the two arms is a `[P1]`-class **theorem** (plan section 5),
 not a spec-constant collapse — a `-D` variant here changes the entry point's `numthreads` and
 groupshared declarations, which a specialization constant cannot do.
+
+## Cluster-buffer capacity bounds — census, and one TRACKED OPEN GAP
+
+Two device buffers carry the L1 froxel cull's output: `ClusterGrid` (`uint2 {offset, count}` per
+froxel) and `LightIndexList` (the flat surviving-index slices). Both are sized ONCE at scene boot
+(`boyko_app/src/gpu_scene/mod.rs`, `build_froxel_light_cull`) and never re-allocated, while the
+light-table header they are indexed through is republished from the LIVE `ClusterConfig` every
+frame — so both need a bound that cannot drift from the allocation. `robustBufferAccess` is OFF
+and no GPU-assisted validation runs, which is why a miss here is silent.
+
+`ClusterGrid` has that bound on both sides. **`LightIndexList` does not, and that gap is open.**
+
+| Buffer | Side | Bound | Anchored on |
+|---|---|---|---|
+| `ClusterGrid` | write (`cluster_cull.hlsl` base arm) | `min(dim_x*dim_y*dim_z, GetDimensions())` | **the allocation** (`OpArrayLength`) — VB-P1j |
+| `ClusterGrid` | write (`cluster_cull.hlsl` HIER arm) | `fi < pc.cluster_capacity` | a pushed BOOT snapshot minted from the same `ClusterConfig` binding the buffer was allocated from (D11) |
+| `ClusterGrid` | read (4 consumers) | `use_clusters &&= cluster_count <= GetDimensions()` | **the allocation** (`OpArrayLength`) — VB-P1k |
+| `LightIndexList` | write (both cull arms) | `offset + write_count <= pc.index_list_cap` | a pushed BOOT snapshot (same construction as D11) |
+| `LightIndexList` | read (4 consumers) | *(none local)* — `ps_offset`/`ps_count` are taken from `ClusterGrid[cluster]` verbatim | **nothing in the reading shader** — see below |
+
+### Why the reads are in bounds today
+
+A three-hop chain, no hop of which is local to the reading shader: the reader touches at most
+`cell.x + cell.y - 1`; the cull publishes a cell only after clamping `offset + write_count <=
+pc.index_list_cap`; and the host mints that push word and allocates the buffer from the SAME
+`cluster_config.index_list_cap` in the same function, so the pushed cap equals the allocation's
+element count and is never re-minted. **No reachable out-of-bounds read is claimed.** What is
+claimed is that the reading shader bounds nothing itself: were a `ClusterGrid` cell ever read that
+this cull did not produce, `cell.x`/`cell.y` are arbitrary and the read is bounded by nothing,
+while the `ClusterGrid` read beside it would still be bounded by VB-P1k. The only guard against
+that state today is the header's `cluster_count != 0` term, since `boyko_render::light` publishes
+the dims lane only on a VB-froxel boot — an *enabled-bit* guard, not an allocation one.
+
+### What closing it costs
+
+MEASURED, not estimated. A probe compile of `vb_resolve.comp.hlsl` with the clamp added
+(`LightIndexList.GetDimensions(ilc, ils); ps_count = (ps_offset >= ilc) ? 0u : min(ps_count, ilc -
+ps_offset);`) compiles clean under the frozen recipe and emits the expected second
+`OpArrayLength %uint %LightIndexList 0`, moving that one artifact **49 996 → 50 180 B (+184)**.
+
+* **8 committed reader `.spv` move**: `deferred_pbr{,_wrap,_hwrt,_hwrt_denoised}.comp.spv`,
+  `forward_opaque_froxel.fs.spv`, `vb_resolve_froxel.comp.spv`, `vb_shade{,_tex}_froxel.comp.spv`.
+  (`deferred_pbr_hwrt_vis{,_mv}` do not — `SHADOW_STAGE=1` returns before lighting and DXC
+  dead-strips the block. The cull's own two arms already clamp on the write side.)
+* **All 8 are byte-gated** — five by `tests/cluster_grid_read_bound.rs`, three by
+  `tests/vb_froxel_spv_sync.rs` — so the edit reds those re-DXC gates by construction and needs
+  all eight re-blessed together.
+* **Golden pins**: the clamp is inert on every consistent frame, so the pins are *expected* not to
+  move — but expected is not measured, and confirming it needs fresh GPU runs of `forwardplus_mesh`,
+  `vb_mesh_froxel` and `vb_mesh_tex_froxel`.
+* **Not an eDSL edit**: all four read sites were VERIFIED outside every
+  `// === GENERATED … BEGIN/END ===` region, so this is a legal hand-edit of the HLSL rather than a
+  `boyko_shaderdsl` re-emit.
+
+The gap is pinned executably by `the_light_index_list_capacity_bound_is_a_tracked_open_gap`
+(`tests/cluster_grid_read_bound.rs`), which asserts 0 `OpArrayLength` on `%LightIndexList` across
+all 10 artifacts that reference it. **A rise to 1 is the fix landing, not a regression** — re-bless
+the moved `.spv`, re-run the froxel pins, and re-pin that test.
 
 ## Why these stay N `.spv` (do NOT try to spec-const-collapse)
 

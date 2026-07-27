@@ -154,9 +154,48 @@ pub struct GBufferTargets {
     /// table SSBO @6, the L0b `gViewT` STORAGE image @7, the L1 `ClusterGrid` SSBO @8, the L1
     /// `LightIndexList` SSBO @9, the P6 R1 SDF edit-list `Buf` SSBO @10, the Render P7 SSAO
     /// term `gSsao` STORAGE image @11). When L1 is off the scene's `cluster_grid`/`light_index`
-    /// are `None`, so @8/@9 bind the light table as a harmless valid placeholder (the resolve's
-    /// `clusters_enabled` header gate never reads them on the OFF path). `gSsao` @11 is always
-    /// bound; the resolve reads it only under `ssao_mode != 0` (0 every pre-P7 scene). @12/@13 =
+    /// are `None`, so @8/@9 bind the light table as a harmless valid placeholder.
+    ///
+    /// WHICH BOOTS CAN READ IT AT ALL — the question that comes before "which term gates the
+    /// read". This set is consumed by exactly one shader, `deferred_pbr.comp`, and it is bound at
+    /// exactly two sites (`passes/gbuffer.rs`'s two `targets.resolve_set[self.frame_index]`
+    /// arguments — the software triple and its `not(hwrt)` twin), both inside
+    /// `Renderer::record_gbuffer`. `render_gbuffer_frame` (`present/frame_driver.rs`) reaches
+    /// `record_gbuffer` only in the `else` arm of its `path_is_vb()` / `path_is_forward()`
+    /// three-way — "the three are mutually exclusive per boot". So this set is bound on DEFERRED
+    /// boots and on no other: on a `Forward`/`ForwardPlus`/`VisibilityBuffer` boot it is built and
+    /// written but never bound, and nothing reads @8/@9 there. In particular, a VB boot that armed
+    /// `clusters_enabled` but built no cull binds NO `ClusterGrid` reader anywhere — its
+    /// `vb_set0_froxel` is `None` (that builder demands the REAL `cluster_grid`/`light_index`,
+    /// with no placeholder fallback) and `record_vb` then selects the base, non-`FROXEL`
+    /// `vb_resolve`/`vb_shade`, which declare no `ClusterGrid` at all. See
+    /// [`GBufferScene::cluster_cull`]'s doc for that boot in full.
+    ///
+    /// On the Deferred boots that DO read it, the gate is `deferred_pbr.hlsl`'s `use_clusters` —
+    /// THREE terms since VB-P1k: `clusters_enabled != 0 && cluster_count != 0 && cluster_count <=
+    /// grid_capacity`, the capacity coming from `ClusterGrid.GetDimensions(...)`, i.e. the BOUND
+    /// descriptor's own element count (SPIR-V `OpArrayLength`) rather than a host-side mirror of
+    /// it. Which term actually decides:
+    ///
+    /// * On the DEFAULT boot — every golden, and every scene that leaves `EnginePlugins`'s
+    ///   `LightingConfig::default()` seed alone — `LightingConfig::clusters_enabled` is `false`
+    ///   and `LightHeaderGpu::new` packs it verbatim, so the FIRST term short-circuits: the
+    ///   ENABLED BIT is what takes the flat branch here.
+    /// * Only a Deferred boot that explicitly sets `clusters_enabled = true` gets past that term,
+    ///   and there the DIMS term decides. `ResolvedRenderPath::froxel_light_cull` is
+    ///   `clusters_enabled && path == VisibilityBuffer` (no geometry-leg term), hence `false` on
+    ///   EVERY Deferred boot, and `sync_cluster_light_gate` therefore publishes a dims lane of
+    ///   `0` — the same all-zero lane `LightHeaderGpu::new` hardcoded pre-VB-P1b-0.
+    /// * The CAPACITY term consequently never decides on a host-booted Deferred frame, because
+    ///   the bullet above pins the dims to `0` there. It is defence in depth against a
+    ///   nonzero-dims header reaching this shader; today only a direct-RHI harness builds one
+    ///   (`GoldenLightHeader::new_clustered`, `tests/sdf_gbuffer_hybrid.rs`).
+    ///
+    /// The two terms past the enabled bit are an out-of-bounds guard, not a style choice:
+    /// `robustBufferAccess` is OFF in this engine and no GPU-assisted validation runs, so an
+    /// out-of-range `ClusterGrid` read is real UB that no layer would report.
+    /// `gSsao` @11 is always bound; the resolve reads it only under
+    /// `ssao_mode != 0` (0 every pre-P7 scene). @12/@13 =
     /// the CSM cascade combined-image + UBO; @14/@15 = the punctual shadow-atlas combined-image +
     /// UBO; @16/@17/@18 = the SDFDDGI probe irradiance + depth combined images + the `ResolvedDdgi`
     /// grid UBO (all bound-but-unread when their header gate is 0). Textured-PBR T6a: `gPbr`
@@ -730,9 +769,26 @@ impl ForwardTargets {
         // `None`, e.g. under plain `Forward` or an unarmed `ForwardPlus` boot) — the SAME
         // bound-but-unread placeholder idiom the deferred resolve's OWN `cluster_grid_buf`/
         // `light_index_buf` locals already establish (`GBufferTargets::resolve_software_entries`'s
-        // call site): `forward_opaque_froxel.fs.hlsl` gates every access behind the runtime
-        // `clusters_enabled` header bit (and the BASE `forward_opaque.fs.hlsl` never declares
-        // bindings 5/6 at all), so an unarmed/unread binding is inert either way.
+        // call site): `forward_opaque_froxel.fs.hlsl` gates every access behind the THREE-term
+        // `use_clusters` (VB-P1k) — `clusters_enabled != 0 && cluster_count != 0 && cluster_count
+        // <= grid_capacity`, the capacity read off the BOUND `ClusterGrid` descriptor with
+        // `GetDimensions` — and the BASE `forward_opaque.fs.hlsl` never declares bindings 5/6 at
+        // all, so an unarmed/unread binding is inert either way. UNLIKE the deferred resolve set,
+        // this one IS bound on the boots it describes: `record_forward` runs on `Forward` and
+        // `ForwardPlus` alike, and the ForwardPlus arm binds the froxel FS against it — so the
+        // gate here is genuinely evaluated, and it is worth stating which term decides.
+        // On the DEFAULT ForwardPlus boot (every golden; every scene that leaves `EnginePlugins`'s
+        // `LightingConfig::default()` seed alone) `clusters_enabled` is `false` and
+        // `LightHeaderGpu::new` packs it verbatim, so the FIRST term short-circuits — the ENABLED
+        // BIT is what takes the flat branch. Only a ForwardPlus boot that explicitly sets
+        // `clusters_enabled = true` gets past it, and there the DIMS term decides:
+        // `ResolvedRenderPath::froxel_light_cull` is `clusters_enabled && path ==
+        // VisibilityBuffer`, so it is `false` on every ForwardPlus boot and
+        // `sync_cluster_light_gate` holds the dims lane at `0` (see
+        // `GBufferTargets::resolve_set`'s doc for the same two-case split on the Deferred side).
+        // The two terms past the enabled bit are an out-of-bounds guard, not a style choice:
+        // `robustBufferAccess` is OFF here and no GPU-assisted validation runs, so an
+        // out-of-range read is UB nothing would report.
         let cluster_grid_buf = scene.cluster_grid.unwrap_or(scene.light_table);
         let light_index_buf = scene.light_index.unwrap_or(scene.light_table);
         let mut set0_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
@@ -1393,8 +1449,19 @@ fn resolve_software_entries<'a>(
         BindGroupEntry::StorageBuffer { buffer: scene.light_table },
         // Lighting L0b: the gViewT lane @7 (the resolve READS it under `mask == 1`).
         BindGroupEntry::StorageImage { texture: imgs.viewt },
-        // Lighting L1: the ClusterGrid @8 + LightIndexList @9 (resolve READS the pixel's froxel
-        // slice when `clusters_enabled`); the light-table placeholder when L1 is off.
+        // Lighting L1: the ClusterGrid @8 + LightIndexList @9. The light-table placeholder goes
+        // here when L1 is off. Every set built from these entries — the software `resolve_set`
+        // and the HWRT/shadow-vis resolve-family variants alike — is bound only by
+        // `Renderer::record_gbuffer`, which `render_gbuffer_frame` records only on a DEFERRED
+        // boot, so these two entries are read on Deferred frames and on no others. There the
+        // resolve READS the pixel's froxel slice only under the THREE-term `use_clusters`
+        // (VB-P1k): `clusters_enabled != 0 && cluster_count != 0 && cluster_count <=
+        // grid_capacity`, the capacity read off the BOUND `ClusterGrid` descriptor with
+        // `GetDimensions`. On the default boot the ENABLED BIT short-circuits it; a Deferred boot
+        // that sets `clusters_enabled = true` is stopped by the DIMS term instead (Deferred can
+        // never arm `froxel_light_cull`, so `sync_cluster_light_gate` pins the dims to `0`) — see
+        // `GBufferTargets::resolve_set`'s doc, including why the two terms past the enabled bit
+        // are an out-of-bounds guard rather than a style choice.
         BindGroupEntry::StorageBuffer { buffer: cluster_grid_buf },
         BindGroupEntry::StorageBuffer { buffer: light_index_buf },
         // P6 R1: the SDF edit-list `Buf` @10 (a read-only field CONSUMER; the marcher already
@@ -2460,8 +2527,17 @@ impl DeferredSets {
         // @5, light table SSBO @6 (Lighting L0a), gViewT @7 (Lighting L0b), ClusterGrid @8 +
         // LightIndexList @9 (Lighting L1) — matching `deferred_pbr.comp`'s set 0. When L1 is
         // off the scene's cluster buffers are `None`, so @8/@9 bind the light table as a
-        // harmless VALID placeholder (the resolve's `clusters_enabled` header gate never reads
-        // them on the OFF path — the layout requires a valid descriptor regardless).
+        // harmless VALID placeholder — the layout requires a valid descriptor regardless. These
+        // sets are bound only by `Renderer::record_gbuffer`, i.e. only on a DEFERRED boot; on a
+        // `Forward`/`ForwardPlus`/`VisibilityBuffer` boot they are written and never bound, so
+        // nothing reads @8/@9 there at all. On the Deferred boots that do read them,
+        // `deferred_pbr.hlsl`'s THREE-term `use_clusters` (VB-P1k: `clusters_enabled != 0 &&
+        // cluster_count != 0 && cluster_count <= grid_capacity`, the capacity read off the BOUND
+        // descriptor with `GetDimensions`) keeps them unread on the OFF path: the ENABLED BIT
+        // short-circuits it on the default boot, and the DIMS term stops a boot that explicitly
+        // set `clusters_enabled = true` (Deferred can never arm `froxel_light_cull`, so
+        // `sync_cluster_light_gate` pins the dims to `0`). See `GBufferTargets::resolve_set`'s
+        // doc, which also states why the two extra terms are an out-of-bounds guard, not style.
         //
         // Build FRAMES_IN_FLIGHT identical copies of the resolve set, slot `i` binding
         // `scene.camera_ring[i]` @5 + `scene.csm_cascade_ring[i]` @13 (the lock-free per-frame ring

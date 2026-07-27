@@ -173,10 +173,18 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 # bindings: ClusterGrid/LightIndexList @5/6). This scene arms NO L1 clustered-cull machinery
 # (boyko_app::gpu_scene has never wired GBufferScene::cluster_cull/cluster_grid/light_index/
 # light_index_alloc to Some -- a separate, unlanded L1-app-integration rung, out of R5 scope), so
-# the froxel FS's runtime clusters_enabled bit reads 0 and takes the IDENTICAL flat-block branch
+# the froxel FS's runtime use_clusters gate is false and it takes the IDENTICAL flat-block branch
 # forward_opaque.fs.hlsl's base compile always takes (the SAME L1 0%-gate the deferred resolve
-# uses) -- pixel output is expected to be pixel-identical (or ULP-level FP-reorder-only) to
-# [forward_mesh]'s f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad.
+# uses). That gate is THREE terms since VB-P1k -- clusters_enabled != 0 && cluster_count != 0 &&
+# cluster_count <= grid_capacity, the capacity read off the BOUND ClusterGrid descriptor with
+# GetDimensions -- and the term that decides HERE is the FIRST: this scene never overrides
+# EnginePlugins's LightingConfig::default() seed, whose clusters_enabled is false, and
+# LightHeaderGpu::new packs that bit verbatim, so use_clusters short-circuits before the other two
+# are consulted. (sync_cluster_light_gate independently holds the header's dims lane at 0 on every
+# ForwardPlus boot, so a scene that DID set clusters_enabled = true here would be stopped by the
+# dims term instead.) Pixel output is expected to be pixel-identical (or ULP-level
+# FP-reorder-only) to [forward_mesh]'s
+# f93b5aad9f799626e6d4abf0dd06d8596d7c6f4c6e9a758a3a6d202d22de71ad.
 #
 # BLESSED at introduction (commit caae029, "ForwardPlus (clustered forward) render path
 # (R5)"): the sha256_* values below are the real bless output, not placeholders -- this

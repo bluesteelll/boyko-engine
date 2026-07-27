@@ -1407,8 +1407,19 @@ fn run_gbuffer_hybrid_m4(
         // STATICALLY references @8/@9 on EVERY path (DXC no longer dead-strips them when the
         // cluster branch is off), so the layout MUST declare them or the pipeline create trips
         // VUID-VkComputePipelineCreateInfo-layout-07988. This non-clustered path binds the
-        // light table as a harmless valid placeholder (the resolve's `clusters_enabled` gate
-        // never reads them) — the same pattern the production swapchain resolve uses.
+        // light table as a harmless valid placeholder, never read: the resolve's `use_clusters`
+        // is THREE terms since VB-P1k (`clusters_enabled != 0 && cluster_count != 0 &&
+        // cluster_count <= grid_capacity`, the capacity read off the BOUND `ClusterGrid`
+        // descriptor with `GetDimensions`), and every table this driver is called with carries an
+        // all-zero `cluster_params` lane — either `DEGENERATE_LIGHT_TABLE` or a table packed from
+        // a NON-clustered `GoldenLightHeader::new`, whose `cluster_params` is `[0,0,0,0]` (the
+        // `with_shadow_mode`/`with_ssao_mode` builders touch words 7/11 only). So the ENABLED BIT
+        // is what short-circuits `use_clusters` here; the dims term reads 0 too, but is never the
+        // one consulted. The three `new_clustered` headers in this file go to
+        // `run_gbuffer_hybrid_lit_clustered` (which builds its own resolve layout) or to the
+        // host-oracle cull, never here. The same placeholder pattern the production swapchain
+        // resolve uses. The terms past the enabled bit are an out-of-bounds guard, not style:
+        // `robustBufferAccess` is OFF in this engine and no GPU-assisted validation runs.
         BindGroupLayoutEntry { binding: 8, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 9, count: 1, kind: DescriptorKind::StorageBuffer, stage: ShaderStage::COMPUTE },
         // P6 R1: the SDF edit-list `Buf` SSBO @10 (the resolve's `sdf_soft_shadow_ranged`
@@ -1472,8 +1483,10 @@ fn run_gbuffer_hybrid_m4(
                 // Lighting L0b: the gViewT lane @7 (the resolve READS it under `mask == 1`).
                 BindGroupEntry::StorageImage { texture: &viewt },
                 // Lighting L1 @8/@9: placeholder = the light table (L1 OFF on this path, so the
-                // resolve's `clusters_enabled` gate never reads them; they exist only to satisfy
-                // the recompiled shader's static @8/@9 reference).
+                // resolve's THREE-term `use_clusters` — `clusters_enabled != 0 && cluster_count
+                // != 0 && cluster_count <= grid_capacity` — never reads them; they exist only to
+                // satisfy the recompiled shader's static @8/@9 reference). See the layout
+                // entries above for which terms read 0 here and why the extra ones exist.
                 BindGroupEntry::StorageBuffer { buffer: &light_table },
                 BindGroupEntry::StorageBuffer { buffer: &light_table },
                 // P6 R1: the SDF edit-list `Buf` @10 (the marcher's vocab @0 SSBO).
@@ -5256,8 +5269,14 @@ type ClusteredDriverReadbacks = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<f32>, Vec<[u8; 2
 ///     production `render_gbuffer_frame` cull recording in `swapchain.rs`);
 ///   - binds `ClusterGrid` @8 + `LightIndexList` @9 on the resolve set (the v2 binding fix —
 ///     the recompiled `deferred_pbr.comp` statically references @8/@9 on every path) so the
-///     resolve's `clusters_enabled` gate (carried in the clustered header) loops the per-froxel
-///     index slice instead of the flat table.
+///     resolve's `use_clusters` gate loops the per-froxel index slice instead of the flat table.
+///     That gate is THREE terms since VB-P1k — `clusters_enabled != 0 && cluster_count != 0 &&
+///     cluster_count <= grid_capacity`, the capacity read off the BOUND `ClusterGrid` descriptor
+///     with `GetDimensions` — and this driver satisfies all three: the clustered header carries
+///     the enabled bit and the real nonzero dims, and `ClusterGrid` is allocated at exactly
+///     `cluster_count * 8 B` from the SAME `cfg`, so `cluster_count == grid_capacity`. The two
+///     terms past the enabled bit are an out-of-bounds guard, not a style choice
+///     (`robustBufferAccess` is OFF in this engine, with no GPU-assisted validation).
 ///
 /// `light_table_words` MUST carry a CLUSTERED header (`new_clustered`): the cull reads the
 /// froxel dims from `cluster_params`, and the resolve reads `clusters_enabled` from it. The
@@ -5785,7 +5804,10 @@ fn run_gbuffer_hybrid_lit_clustered(
 
     // --- The RESOLVE layout + pipeline + set. The L1 difference vs the table driver: bindings
     // 8/9 carry the REAL ClusterGrid + LightIndexList (not the light-table placeholder), so the
-    // resolve's `clusters_enabled` gate loops the per-froxel index slice. ---
+    // resolve's `use_clusters` gate loops the per-froxel index slice. All THREE of its terms hold
+    // here (`clusters_enabled != 0 && cluster_count != 0 && cluster_count <= grid_capacity`): the
+    // clustered header carries the bit and the real dims, and `ClusterGrid` is sized at exactly
+    // `cluster_count * 8 B` from the SAME `cfg`, so the capacity term reads `n <= n`. ---
     let resolve_layout_entries = [
         BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
         BindGroupLayoutEntry { binding: 1, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },

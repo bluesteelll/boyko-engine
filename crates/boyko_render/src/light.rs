@@ -845,9 +845,24 @@ impl ClusterConfig {
 /// path whose `clusters_enabled` was `false` at BOOT, by construction) keeps this lane's dims
 /// at `0` on every path OTHER than a genuinely VB-froxel-armed one — exactly the pre-campaign
 /// state (`LightHeaderGpu::new` hardcoded the lane to all-zero) for Deferred/ForwardPlus, so
-/// VB-P1b-0 introduces ZERO new reachability for that pre-existing cross-path hazard. A
-/// dedicated cross-path shader-guard hardening (mirroring the VB `#ifdef FROXEL` seam's
-/// `dim_x*dim_y*dim_z != 0` check) is tracked as a separate rung, not this one.
+/// VB-P1b-0 introduces ZERO new reachability for that pre-existing cross-path hazard. The
+/// cross-path shader-guard hardening this doc once deferred to a later rung LANDED in VB-P1k:
+/// all four `ClusterGrid` readers (`vb_resolve`/`vb_shade`/`deferred_pbr`/`forward_opaque`) now
+/// carry the SAME three-term gate — `clusters_enabled != 0 && cluster_count != 0 &&
+/// cluster_count <= grid_capacity`, the capacity read off the BOUND descriptor via
+/// `ClusterGrid.GetDimensions(...)` (SPIR-V `OpArrayLength`). Note what that means for THIS
+/// gate's interaction with the shaders. On the DEFAULT world — [`LightingConfig::clusters_enabled`]
+/// is `false`, and `boyko_app::EnginePlugins` seeds nothing else — word 15 is `0`, so the shaders'
+/// FIRST term short-circuits and the ENABLED BIT is what takes the flat branch; that covers every
+/// golden and every scene that never opts in. The case this gate exists for is the OTHER one:
+/// because word 15 is packed verbatim by [`LightHeaderGpu::new`] on every path while this gate
+/// holds the dims at `0`, a `clusters_enabled == true` Deferred/ForwardPlus world reaches those
+/// shaders with the bit SET and dims `0` — and there it is the `cluster_count != 0` term, not the
+/// enabled bit, that takes the flat branch. (On a VB boot the two move together, so an unarmed VB
+/// frame does not reach a `ClusterGrid` reader at all — the base, non-`FROXEL` compile has no such
+/// binding.) The extra terms are an out-of-bounds guard, not a style choice:
+/// `robustBufferAccess` is OFF in this engine with no GPU-assisted validation, so an out-of-range
+/// `ClusterGrid` read is real UB that no layer reports.
 ///
 /// [`LightingConfig::clusters_enabled`] itself is NOT written here (it stays owner/
 /// [`ClusterSelectMode::Auto`]-policy-set, `select_lighting_cull`'s own concern) — this gate

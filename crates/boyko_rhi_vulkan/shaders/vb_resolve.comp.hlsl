@@ -327,12 +327,22 @@ void main(uint3 tid : SV_DispatchThreadID) {
     }
 
     // L0b: the point/spot block. #ifdef FROXEL (rung VB-P1a): the froxel-culled cluster walk,
-    // gated on the header's `clusters_enabled` bit (`use_clusters`) -- an armed frame maps this
-    // pixel to its froxel and walks ONLY the survivors `cluster_cull.hlsl` wrote into
+    // gated on `use_clusters` -- the header's `clusters_enabled` bit AND, since VB-P1k, nonzero
+    // dims AND the descriptor-derived capacity bound (all three built below) -- an armed frame
+    // maps this pixel to its froxel and walks ONLY the survivors `cluster_cull.hlsl` wrote into
     // `ClusterGrid`/`LightIndexList` (the SAME lookup `forward_opaque.fs.hlsl`'s own FROXEL arm
     // performs); an unarmed frame (or the base, non-FROXEL compile) falls back to the IDENTICAL
     // flat `[l0a_count, light_count)` scan, TOKEN-FOR-TOKEN the SAME clone of
-    // `forward_opaque.fs.hlsl`'s own non-FROXEL arm this file always ran. The loop BODY (range
+    // `forward_opaque.fs.hlsl`'s own non-FROXEL arm this file always ran. Note WHICH frames those
+    // are on this path: unlike the Deferred/ForwardPlus readers, this compile never guards a
+    // PLACEHOLDER buffer. `record_vb` binds it only under `scene.cluster_cull.is_some()`, and the
+    // Set-0 it binds (`GBufferTargets::vb_set0_froxel`) is built only when the REAL
+    // `cluster_grid`/`light_index` exist -- no `unwrap_or(light_table)` fallback -- so an unarmed
+    // VB boot runs the BASE compile, which declares no `ClusterGrid` at all. The gate's OFF branch
+    // is therefore reached here only when a boot-armed frame later sees `clusters_enabled` go
+    // false at RUNTIME (`ResolvedRenderPath::froxel_light_cull` is boot-frozen, while
+    // `LightHeaderGpu::new` packs the LIVE bit every frame), or when the dims/capacity terms trip.
+    // The loop BODY (range
     // test, falloff, spot cone, punctual atlas shadow, BSDF accumulate) is UNCHANGED between the
     // two arms -- only the index-list SOURCE differs, so a `-D FROXEL=1` recompile cannot
     // perturb the flat-walk lighting math, and the base (non-FROXEL) compile is byte-for-byte
