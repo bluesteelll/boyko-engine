@@ -1,5 +1,28 @@
 # VB-SV0 — SDF soft-shadow + contact-AO on mesh, inlined into the VB lit-producer tails
 
+**Status:** DESIGN, **Rev 9** — NOT APPROVED, and **the stage's disposition is OPEN pending an owner
+decision**. S0–S5 have all shipped (`189d063`, `9b53365`, `9dffe39`, `c878b3f`, `24612e8`,
+`f057d1a`, `35ff3aa`). **S5's measurement fired §7 clause 3** (2.342× on row 1, 2.623× on row 7,
+against a 2× threshold), and the diagnosis the owner asked for **changed what that number means**:
+
+* **The 2.34× contains neither march ALU nor occupancy — both cancel by construction.** S5's two
+  phases run the *identical module* and differ only in one wave-uniform header word, so registers,
+  occupancy and I-cache are common-mode; and both sides march the same field over the same 28362
+  pixels, so the march work divides out. What remains is `E_Def / E_VB` — **the VB tail is a 2.34×
+  worse host for this march than the Deferred marcher is.** §11.5.
+* **§0's "REJECTED by measurement" for a dedicated pass is RETRACTED — it was false.** The pass never
+  existed to be measured, and `RENDER-PARITY-PLAN.md` §3.2 chose the decoupled prepass with a critic
+  agreeing. See §0.
+* **The abort stands on row 1 only.** Row 7 failed its own spread gate (0.3214 vs 0.1), so clause 5
+  says it *cannot be adjudicated* — yet the harness adjudicates it anyway. **Clause 5 must gate
+  clause 3; they currently run independently.** A gate defect, filed here.
+* **The dark-path tax is still unmeasured**, and nothing in the ladder measures it: it cancels in
+  S5 by construction, and S2 was byte-identity, which is blind to cost. Ten shipped VB producers
+  each carry +10128 bytes that no one has timed. The experiment is ready — `-D VB_SV0_KILL=1`
+  reproduces the pre-SV0 artifact byte-for-byte.
+
+*(Rev 8 header retained below for the revision trail.)*
+
 **Status:** DESIGN, **Rev 8** — NOT YET APPROVED. **S0, S1, S1.5, S2, S3 and S4 have SHIPPED
 against it** (`189d063`, `9b53365`, `9dffe39`, `c878b3f`, `24612e8`, `f057d1a`). **S4 is LANDED,
 NOT DISCHARGED** — its gate (ii) 24-cell arm matrix is built and runnable but not yet run, and
@@ -148,7 +171,36 @@ drift a gate, but it is fenced and dated so a later reader can tell it apart fro
 |---|---|
 | "reuse `sdf_mesh_shadow.comp`" | **FALSE.** `sdf_mesh_shadow` greps to **doc files only** (`docs/RENDER-PARITY-PLAN.md`, this plan). SF0 was never implemented; there is no pass to reuse and no `ResolvedRenderPath::sdf_mesh_shadow` field. |
 | "one binding added to vb Set 0" | **TRUE, and the slot is 10** — §2. Slot 8 is *not* universally free. |
-| "a dedicated producer pass" | **REJECTED by measurement** (campaign record: cost for zero visual gain). Inline. |
+| "a dedicated producer pass" | ⚠️ **RETRACTED at Rev 9 — this row was FALSE, and it is the load-bearing premise of the whole stage.** See below. |
+
+⚠️⚠️ **Rev 9 — the row above said "REJECTED by measurement (campaign record: cost for zero visual
+gain)". There was no measurement, and the record says the opposite.** Both halves verified against
+the tree:
+
+* **No measurement was possible.** `sdf_mesh_shadow.comp` has **never existed** — it is absent from
+  `crates/boyko_rhi_vulkan/shaders/`, and `git log --diff-filter=A --all` over that path returns
+  **nothing**: no commit ever added it. A pass that was never built cannot have been measured. The
+  "+5-12% for zero visual gain" figure exists only in session memory.
+* **The record decided the other way, with a critic.** `docs/RENDER-PARITY-PLAN.md` §3.2 reads:
+  *"(A) Inline march in `forward_opaque.fs` / `vb_resolve` — **Rejected**"* — and it rejects inline
+  **specifically under VB** (*"blows VB's set/binding budget (Option A under VB → 5 sets)"*) — while
+  *"(B) Decoupled `sdf_mesh_shadow.comp` prepass — **CHOSEN**, critic-agreed"*, corroborated by UE's
+  `DistanceFieldShadowing.usf` being a separate screen-space pass for the same reason.
+
+**So an estimate was labelled a measurement and used to overturn a critic-agreed decision.** That is
+this campaign's own named defect class, committed by the document that gates against it, and it is
+the premise every later rung was built on.
+
+**In fairness, the conclusion is not thereby wrong.** §3.2's actual grounds against inline were
+overdraw and the descriptor budget. Overdraw does not apply to VB — the lit producer is compute and
+already marches once per pixel — and §2 solved the set-budget problem with slot 10. So inline may
+still be right; what is certain is that the reason given for choosing it was not a reason.
+
+**And S5 now supplies the measurement that never existed, pointing the other way.** §11.5 shows the
+2.34× is neither march ALU nor occupancy — both cancel in a same-module paired A/B — so what clause
+3 measured is `E_Def / E_VB`: **the VB tail is a 2.34× worse host for this march than the Deferred
+marcher is.** A decoupled pass is exactly the intervention that changes the host. The decision is
+the owner's; the plan's stated basis for foreclosing it is withdrawn.
 
 The surviving prior art is the **Deferred** path, which already ships this exact visual:
 `sdf_gbuffer_composite.hlsl:1853-1885` — the `!own_pixel` raster-owned arm writing
