@@ -1,11 +1,32 @@
-//! VB-SV0 rung S0 — the OFF-path harness (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §6 rung S0, §3.3
-//! instrument G1). SV0 is not built yet: this rung answers one question before it is, so the
-//! runtime-vs-`-D` decision (§3.2) does not ride on an unvalidated instrument for three more rungs.
+//! Re-DXC byte-identity gate for the **ten shipping VB lit-producer `.spv`**.
+//!
+//! ⚠️ **THIS FILE OUTLIVED THE STAGE THAT CREATED IT — IT IS NOT DEAD-STAGE CLEANUP.**
+//! It was authored as VB-SV0 rung S0 (`docs/VB-SV0-SDF-SHADOW-PLAN.md` §6), and that stage was
+//! **REVERTED IN FULL at `13f1c9a`** when its own abort clause fired: SV0 will never be built.
+//! The gate survives the revert because the rows it enumerates **ship regardless of it** — the
+//! same reason `docs/SHADER-VARIANT-MANIFEST.md`'s `vb_shade_split` and `vb_geo` sections outlived
+//! that stage. This file was renamed off the dead stage's name (it was `vb_sv0_offpath.rs`, with
+//! `vb_sv0_offpath_*` tests) precisely so a future reader does not delete it while sweeping up
+//! SV0.
+//!
+//! **Deleting it silently un-gates four SHIPPED artifacts, with nothing anywhere turning red.**
+//! `VB_LIT_PRODUCER_ROWS` below is the ONLY byte-wise coverage in the repo for:
+//!
+//! * `vb_shade_split.comp.spv`
+//! * `vb_shade_split_tex.comp.spv`
+//! * `vb_shade_split_hwrt.comp.spv`
+//! * `vb_shade_split_tex_hwrt.comp.spv`
+//!
+//! Nothing else reaches them: `vb_froxel_spv_sync.rs` enumerates only the six `vb_resolve*` /
+//! `vb_shade*` rows, and `cluster_grid_read_bound.rs`'s census list stops at those same six plus
+//! the two `cluster_cull` rows — the four split rows appear in neither, not even as a census
+//! entry. Those six overlapping rows are kept here anyway so the lit-producer family stays
+//! enumerated in one place; the four split rows are the coverage that exists nowhere else.
 //!
 //! **No shader edit, no production code.** This clones the `redxc_with_defines` /
 //! `assert_spv_byte_identical` / `find_dxc` idiom `cluster_cull_spv_sync.rs` and
-//! `vb_froxel_spv_sync.rs` already established, scoped to the **ten shipping VB lit-producer
-//! `.spv`** (`docs/SHADER-VARIANT-MANIFEST.md:91-107`, `compute.rs:811-1037`):
+//! `vb_froxel_spv_sync.rs` already established, scoped to the ten shipping VB lit-producer `.spv`
+//! (`docs/SHADER-VARIANT-MANIFEST.md`, `compute.rs`):
 //!
 //! * `vb_resolve.comp.hlsl` -> `vb_resolve.comp.spv`, `vb_resolve_froxel.comp.spv` (`-D FROXEL=1`).
 //! * `vb_shade.comp.hlsl` -> `vb_shade.comp.spv`, `vb_shade_tex.comp.spv` (`-D TEXTURED=1`),
@@ -19,17 +40,15 @@
 //!
 //! 1. **Reproduction** — each of the ten rows, re-DXC'd under its own frozen recipe
 //!    (`-spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3`, no `-O`), is byte-identical to its
-//!    committed `.spv`. RED here is a PRE-EXISTING defect this rung surfaces (the frozen recipe no
-//!    longer reproduces), not something SV0 introduced.
-//! 2. **Sensitivity — the assertion that validates the instrument.** A scratch copy of
-//!    `vb_resolve.comp.hlsl` has its `:258` `NoV` epsilon (`1e-4`, a region SV0 will never touch —
-//!    the term sits before any light-loop or AO/shadow combine) changed to `2e-4`, re-DXC'd via
-//!    `-I` (never touching the committed source), and the resulting bytes must DIFFER from the
-//!    committed `vb_resolve.comp.spv`. RED here means a re-DXC byte comparison is blind for these
-//!    modules — §3.3's G1 kill-switch could not detect an SV0 guard placed outside its
-//!    `#ifndef VB_SV0_KILL` span, and the runtime-gate design collapses to the `-D` fallback
-//!    (§7 clause 1). Both outcomes are results worth having; this test does not get tuned to force
-//!    a green.
+//!    committed `.spv`. RED means the committed artifact is stale or the host `dxc` is not the
+//!    pinned toolchain — a real build-integrity defect, never expected drift.
+//! 2. **Sensitivity — the assertion that validates the instrument.** A gate that cannot detect a
+//!    change is vacuously green, so gate (1) is only worth its RED if a byte comparison has teeth
+//!    on these modules. A scratch copy of `vb_resolve.comp.hlsl` has its `NoV` epsilon (`1e-4`)
+//!    changed to `2e-4`, re-DXC'd via `-I` (never touching the committed source), and the
+//!    resulting bytes must DIFFER from the committed `vb_resolve.comp.spv`. RED here means a
+//!    re-DXC byte comparison is blind for this family and gate (1) proves nothing — a finding, not
+//!    a test to retune.
 //!
 //! SKIPS (with an eprintln) when no `dxc` resolves on the host, exactly like the precedent files —
 //! a DIFFERENT dxc version failing this test means "wrong toolchain", not "drifted shader".
@@ -68,7 +87,7 @@ fn find_dxc() -> Option<PathBuf> {
 /// (`-spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3`, no `-O`) plus the given `-D` defines,
 /// into a fresh temp `.spv` named by `out_tag` (distinct per variant so parallel test binaries
 /// never collide), and returns the bytes. Never overwrites a committed artifact. Mirrors
-/// `cluster_cull_spv_sync.rs:73-86`.
+/// `cluster_cull_spv_sync.rs`.
 fn redxc_with_defines(dxc: &PathBuf, dir: &PathBuf, hlsl_name: &str, defines: &[&str], out_tag: &str) -> Vec<u8> {
     let out_spv = std::env::temp_dir().join(format!("{out_tag}.redxc.spv"));
     let mut cmd = Command::new(dxc);
@@ -84,7 +103,7 @@ fn redxc_with_defines(dxc: &PathBuf, dir: &PathBuf, hlsl_name: &str, defines: &[
     bytes
 }
 
-/// One committed artifact must byte-equal its own re-DXC. Mirrors `cluster_cull_spv_sync.rs:89-103`.
+/// One committed artifact must byte-equal its own re-DXC. Mirrors `cluster_cull_spv_sync.rs`.
 fn assert_spv_byte_identical(dxc: &PathBuf, dir: &PathBuf, hlsl_name: &str, defines: &[&str], spv_name: &str) {
     let committed_path = dir.join(spv_name);
     let committed = std::fs::read(&committed_path)
@@ -95,14 +114,14 @@ fn assert_spv_byte_identical(dxc: &PathBuf, dir: &PathBuf, hlsl_name: &str, defi
         "{spv_name} ({} bytes committed, {} bytes fresh) is NOT the re-DXC of {hlsl_name} \
          {defines:?} under the frozen recipe — either the committed .spv is stale (re-run the \
          recipe in the shader's header and commit it) or the host dxc is not the pinned \
-         VulkanSDK 1.4.350.0 toolchain. This is a PRE-EXISTING defect S0 surfaces, not one SV0 \
-         introduces.",
+         VulkanSDK 1.4.350.0 toolchain. RED here is a real build-integrity defect, never \
+         expected drift.",
         committed.len(),
         fresh.len(),
     );
 }
 
-/// A compact 64-bit FNV-1a fingerprint, used ONLY to make the S0 sensitivity report human-readable
+/// A compact 64-bit FNV-1a fingerprint, used ONLY to make the sensitivity report human-readable
 /// in `--nocapture` output. Not a security or build-integrity primitive — the actual gate below
 /// compares the full byte vectors, never this hash.
 fn fnv1a_64(bytes: &[u8]) -> u64 {
@@ -115,9 +134,9 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
 }
 
 /// The ten shipping VB lit-producer `.spv`, each `(source, defines, committed .spv name)` — derived
-/// from `docs/SHADER-VARIANT-MANIFEST.md:91-107` and `compute.rs:811-1037`, matching
-/// `docs/VB-SV0-SDF-SHADOW-PLAN.md` §3.2's and S4's own row table.
-const VB_SV0_ROWS: [(&str, &[&str], &str); 10] = [
+/// from `docs/SHADER-VARIANT-MANIFEST.md` and `compute.rs`. The last four rows are the repo's ONLY
+/// byte-wise coverage of the `vb_shade_split` family (see the module note); do not thin this table.
+const VB_LIT_PRODUCER_ROWS: [(&str, &[&str], &str); 10] = [
     ("vb_resolve.comp.hlsl", &[], "vb_resolve.comp.spv"),
     ("vb_resolve.comp.hlsl", &["FROXEL=1"], "vb_resolve_froxel.comp.spv"),
     ("vb_shade.comp.hlsl", &[], "vb_shade.comp.spv"),
@@ -130,42 +149,42 @@ const VB_SV0_ROWS: [(&str, &[&str], &str); 10] = [
     ("vb_shade_split.comp.hlsl", &["TEXTURED=1", "HWRT=1"], "vb_shade_split_tex_hwrt.comp.spv"),
 ];
 
-/// S0 gate (1) — reproduction: every one of the ten shipping VB lit-producer `.spv`, re-DXC'd
-/// under its own frozen recipe, byte-equals its committed artifact. RED for any row means the
-/// frozen recipe no longer reproduces on this host — a pre-existing defect, surfaced before SV0
-/// builds three more rungs on top of it.
+/// Gate (1) — reproduction: every one of the ten shipping VB lit-producer `.spv`, re-DXC'd under
+/// its own frozen recipe, byte-equals its committed artifact. RED for any row means the frozen
+/// recipe no longer reproduces on this host.
 #[test]
-fn vb_sv0_offpath_ten_rows_reproduce_under_frozen_recipe() {
+fn vb_lit_producer_ten_rows_reproduce_under_frozen_recipe() {
     let Some(dxc) = find_dxc() else {
         eprintln!(
-            "vb_sv0_offpath: dxc not found (no C:/VulkanSDK/.../dxc.exe, no $VULKAN_SDK/Bin, not \
-             on PATH) — SKIPPING the S0 reproduction check on this host."
+            "vb_lit_producer_spv_sync: dxc not found (no C:/VulkanSDK/.../dxc.exe, no \
+             $VULKAN_SDK/Bin, not on PATH) — SKIPPING the reproduction check on this host."
         );
         return;
     };
     let dir = shaders_dir();
-    for (hlsl_name, defines, spv_name) in VB_SV0_ROWS {
+    for (hlsl_name, defines, spv_name) in VB_LIT_PRODUCER_ROWS {
         assert_spv_byte_identical(&dxc, &dir, hlsl_name, defines, spv_name);
     }
-    eprintln!("vb_sv0_offpath: all {} rows reproduced byte-identically.", VB_SV0_ROWS.len());
+    eprintln!(
+        "vb_lit_producer_spv_sync: all {} rows reproduced byte-identically.",
+        VB_LIT_PRODUCER_ROWS.len()
+    );
 }
 
-/// S0 gate (2) — the harness sensitivity control (§3.3's validation, before G1 is trusted): a
-/// scratch copy of `vb_resolve.comp.hlsl` has its `:258` `NoV` epsilon (`1e-4` -> `2e-4`, a region
-/// SV0 will never touch — it precedes every light-loop and AO/shadow combine) re-DXC'd via `-I`
-/// (never touching the committed source or the committed `.spv`), and the resulting bytes must
+/// Gate (2) — the harness sensitivity control, which is what makes gate (1)'s green mean anything:
+/// a scratch copy of `vb_resolve.comp.hlsl` has its `NoV` epsilon (`1e-4` -> `2e-4`) re-DXC'd via
+/// `-I` (never touching the committed source or the committed `.spv`), and the resulting bytes must
 /// DIFFER from the committed `vb_resolve.comp.spv`.
 ///
-/// RED here means a re-DXC byte comparison is blind for these modules: §3.3's G1 kill-switch could
-/// not detect an SV0 guard placed outside its `#ifndef VB_SV0_KILL` span, and the runtime-gate
-/// design (§3.2) collapses to the `-D SV0=1` fallback — an owner VALUES call (§7 clause 1), not a
-/// test to retune.
+/// RED here means a re-DXC byte comparison is BLIND for these modules — in which case gate (1)
+/// above is vacuously green and proves nothing about the ten shipped artifacts. That is a finding
+/// to report, not a mutation to retune until it passes.
 #[test]
-fn vb_sv0_offpath_harness_is_sensitive_to_an_untouched_literal() {
+fn vb_lit_producer_redxc_is_sensitive_to_an_untouched_literal() {
     let Some(dxc) = find_dxc() else {
         eprintln!(
-            "vb_sv0_offpath: dxc not found (no C:/VulkanSDK/.../dxc.exe, no $VULKAN_SDK/Bin, not \
-             on PATH) — SKIPPING the S0 sensitivity control on this host."
+            "vb_lit_producer_spv_sync: dxc not found (no C:/VulkanSDK/.../dxc.exe, no \
+             $VULKAN_SDK/Bin, not on PATH) — SKIPPING the sensitivity control on this host."
         );
         return;
     };
@@ -175,16 +194,16 @@ fn vb_sv0_offpath_harness_is_sensitive_to_an_untouched_literal() {
     let needle = "max(dot(n, v), 1e-4)";
     assert!(
         source.contains(needle),
-        "invariant: {needle:?} must appear verbatim in vb_resolve.comp.hlsl (line 258's `NoV` \
-         epsilon) for this mutation to be meaningful — if the expression changed, update this test"
+        "invariant: {needle:?} must appear verbatim in vb_resolve.comp.hlsl (the `NoV` epsilon) \
+         for this mutation to be meaningful — if the expression changed, update this test"
     );
     let mutated = source.replacen(needle, "max(dot(n, v), 2e-4)", 1);
 
-    let scratch_path = std::env::temp_dir().join("vb_sv0_offpath_nov_epsilon_mutant.hlsl");
+    let scratch_path = std::env::temp_dir().join("vb_lit_producer_nov_epsilon_mutant.hlsl");
     std::fs::write(&scratch_path, &mutated).expect("invariant: temp dir is writable");
-    let out_spv = std::env::temp_dir().join("vb_sv0_offpath_nov_epsilon_mutant.spv");
+    let out_spv = std::env::temp_dir().join("vb_lit_producer_nov_epsilon_mutant.spv");
     // `-I <shaders_dir>` lets the mutant (living outside the shaders dir) still resolve its
-    // `#include`s against the real, unmodified headers — the `cluster_cull_hier_dis_gate.rs:539`
+    // `#include`s against the real, unmodified headers — the `cluster_cull_hier_dis_gate.rs`
     // idiom for a scratch-copy compile that must never touch the committed tree.
     let status = Command::new(&dxc)
         .args(["-spirv", "-T", "cs_6_0", "-E", "main", "-fspv-target-env=vulkan1.3", "-I"])
@@ -203,8 +222,8 @@ fn vb_sv0_offpath_harness_is_sensitive_to_an_untouched_literal() {
         .expect("invariant: vb_resolve.comp.spv is the committed artifact");
 
     eprintln!(
-        "vb_sv0_offpath sensitivity control: vb_resolve.comp.hlsl:258 `1e-4` -> `2e-4`; committed \
-         vb_resolve.comp.spv ({} bytes, fnv1a_64={:#018x}) vs mutant re-DXC ({} bytes, \
+        "vb_lit_producer_spv_sync sensitivity control: vb_resolve.comp.hlsl `1e-4` -> `2e-4`; \
+         committed vb_resolve.comp.spv ({} bytes, fnv1a_64={:#018x}) vs mutant re-DXC ({} bytes, \
          fnv1a_64={:#018x})",
         committed.len(),
         fnv1a_64(&committed),
@@ -214,10 +233,9 @@ fn vb_sv0_offpath_harness_is_sensitive_to_an_untouched_literal() {
 
     assert!(
         committed != mutated_bytes,
-        "S0 RED: vb_resolve.comp.hlsl's NoV epsilon 1e-4 -> 2e-4 (a region SV0 never touches) \
-         re-DXC'd to a BYTE-IDENTICAL .spv. A re-DXC byte comparison is therefore BLIND for this \
-         module — §3.3's G1 kill-switch cannot detect an SV0 guard placed outside its \
-         `#ifndef VB_SV0_KILL` span, and the runtime-gate design collapses to the `-D` fallback \
-         (§7 clause 1). This is a real finding — do not tune the mutation to force a green."
+        "RED: vb_resolve.comp.hlsl's NoV epsilon 1e-4 -> 2e-4 re-DXC'd to a BYTE-IDENTICAL .spv. \
+         A re-DXC byte comparison is therefore BLIND for this module, which makes the \
+         ten-row reproduction gate above vacuously green — it would not catch a real edit either. \
+         This is a real finding — do not tune the mutation to force a green."
     );
 }

@@ -34,6 +34,16 @@
 //! 2. **The read bound is present in every artifact that can index `ClusterGrid`**, and absent
 //!    from exactly the ones that cannot. Deleting the capacity term from any of the four sources
 //!    drops that artifact's `OpArrayLength` count to 0, which is RED here.
+//! 3. **The consumer census is CLOSED over the shader roots.** Items 1 and 2 read a
+//!    hand-written table, and a hand-written table cannot notice a shader it was never told
+//!    about: a SIXTH `ClusterGrid` consumer added tomorrow would fail nothing here, ship with no
+//!    capacity bound, and index a boot-sized allocation off a live header — the exact defect the
+//!    other two items exist to catch, arriving through the one door they do not watch.
+//!    [`the_cluster_grid_consumer_census_is_closed`] therefore DERIVES the consumer set by
+//!    walking every committed-HLSL root in the workspace at test time (see [`shader_roots`]:
+//!    `boyko_rhi_vulkan/shaders` AND `boyko_render/shaders`) and asserts it EQUALS the table's
+//!    source set. Today that set is five: the four readers above plus `cluster_cull.hlsl`'s write
+//!    side (VB-P1j), all under this crate's root.
 //!
 //! SKIPS (with an eprintln) when no `dxc` / `spirv-dis` resolves — the byte gate is only as
 //! hermetic as the pinned VulkanSDK 1.4.350.0 toolchain that produced the committed artifacts;
@@ -113,22 +123,27 @@ const OWNED_VARIANTS: &[Variant] = &[
     Variant { hlsl: "forward_opaque.fs.hlsl", profile: "ps_6_0", defines: &["FROXEL=1"], spv: "forward_opaque_froxel.fs.spv", array_lengths: 1 },
 ];
 
-/// The remaining `ClusterGrid`-touching artifacts. Their byte identity is already gated
-/// elsewhere (`vb_froxel_spv_sync.rs`, `cluster_cull_spv_sync.rs`), so only the read/write-bound
-/// census is asserted here — the point being that the census covers EVERY consumer, not just the
-/// two families this file owns.
-const CENSUS_ONLY: &[(&str, usize)] = &[
+/// The remaining `ClusterGrid`-touching artifacts, as `(source, artifact, array_lengths)`. Their
+/// byte identity is already gated elsewhere (`vb_froxel_spv_sync.rs`, `cluster_cull_spv_sync.rs`),
+/// so only the read/write-bound census is asserted here — the point being that the census covers
+/// EVERY consumer, not just the two families this file owns.
+///
+/// The `source` column is not decoration: together with [`OWNED_VARIANTS`]'s `hlsl` it IS the
+/// enumerated consumer table that [`the_cluster_grid_consumer_census_is_closed`] compares against
+/// the shader directory. Adding an artifact row without its true source, or a consumer source
+/// without any artifact row, is RED there.
+const CENSUS_ONLY: &[(&str, &str, usize)] = &[
     // VB: the `#ifdef FROXEL` rows carry the bound; the base rows have no cluster block.
-    ("vb_resolve.comp.spv", 0),
-    ("vb_resolve_froxel.comp.spv", 1),
-    ("vb_shade.comp.spv", 0),
-    ("vb_shade_tex.comp.spv", 0),
-    ("vb_shade_froxel.comp.spv", 1),
-    ("vb_shade_tex_froxel.comp.spv", 1),
+    ("vb_resolve.comp.hlsl", "vb_resolve.comp.spv", 0),
+    ("vb_resolve.comp.hlsl", "vb_resolve_froxel.comp.spv", 1),
+    ("vb_shade.comp.hlsl", "vb_shade.comp.spv", 0),
+    ("vb_shade.comp.hlsl", "vb_shade_tex.comp.spv", 0),
+    ("vb_shade.comp.hlsl", "vb_shade_froxel.comp.spv", 1),
+    ("vb_shade.comp.hlsl", "vb_shade_tex_froxel.comp.spv", 1),
     // The cull's WRITE side (VB-P1j) — the base arm reads the array length; the HIER arm is
     // bounded by D11's pushed boot capacity instead and carries none, deliberately.
-    ("cluster_cull.comp.spv", 1),
-    ("cluster_cull_hier.comp.spv", 0),
+    ("cluster_cull.hlsl", "cluster_cull.comp.spv", 1),
+    ("cluster_cull.hlsl", "cluster_cull_hier.comp.spv", 0),
 ];
 
 /// Re-DXCs one variant under its frozen recipe into a temp `.spv` and returns the bytes. Never
@@ -230,7 +245,7 @@ fn every_cluster_grid_consumer_carries_the_capacity_bound() {
     let rows = OWNED_VARIANTS
         .iter()
         .map(|v| (v.spv, v.array_lengths))
-        .chain(CENSUS_ONLY.iter().copied());
+        .chain(CENSUS_ONLY.iter().map(|(_, spv, n)| (*spv, *n)));
     for (spv, want) in rows {
         let path = dir.join(spv);
         assert!(path.exists(), "missing committed {}", path.display());
@@ -258,12 +273,12 @@ fn the_capacity_bound_census_is_not_vacuous() {
     };
     let dir = shaders_dir();
     let expected_nonzero: usize = OWNED_VARIANTS.iter().filter(|v| v.array_lengths > 0).count()
-        + CENSUS_ONLY.iter().filter(|(_, n)| *n > 0).count();
+        + CENSUS_ONLY.iter().filter(|(_, _, n)| *n > 0).count();
     assert!(expected_nonzero > 0, "the census table itself pins no positive row");
     let observed: usize = OWNED_VARIANTS
         .iter()
         .map(|v| v.spv)
-        .chain(CENSUS_ONLY.iter().map(|(s, _)| *s))
+        .chain(CENSUS_ONLY.iter().map(|(_, spv, _)| *spv))
         .filter(|spv| cluster_grid_array_lengths(&disassemble(&spirv_dis, &dir.join(spv))) > 0)
         .count();
     assert_eq!(
@@ -271,5 +286,384 @@ fn the_capacity_bound_census_is_not_vacuous() {
         "expected {expected_nonzero} artifacts to carry a `ClusterGrid` array-length bound, \
          found {observed} — if this is 0 the census selector is matching nothing (a renamed \
          variable?) and every per-row assertion above is vacuously satisfied."
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The closure: the census is derived from the directory, not just transcribed into it.
+// ---------------------------------------------------------------------------------------------
+
+/// Blanks out `//` line comments and `/* */` block comments, preserving everything else verbatim
+/// (newlines included, so the residue still lines up 1:1 with the source's lines).
+///
+/// Double-quoted string literals are passed through UNSTRIPPED, so a `//` inside `#include "…"`
+/// or `#error "…"` cannot be mistaken for a comment opener and swallow the rest of the line —
+/// over-stripping is the one bug class here that would go QUIET rather than loud.
+///
+/// The shader corpus is NOT a positive control for this routine. An earlier revision of this doc
+/// claimed it was; the claim was MEASURED false. Deleting the string-literal state outright
+/// (`state = S::Str` → `state = S::Code`, i.e. exactly the over-strip described above) leaves
+/// every corpus test in this file GREEN, because no string literal in the five consumers contains
+/// a comment marker for the `S::Str` arm to matter on. What the corpus can still catch is only the
+/// extreme case: each consumer names `ClusterGrid` on several LIVE lines (measured: 4 in
+/// `cluster_cull.hlsl`, 3 in each of the other four — the declaration, the `GetDimensions` call,
+/// and the indexed access), so the discovered set only changes if an over-strip eats EVERY one of
+/// them within the same file. A PARTIAL over-strip is invisible there.
+///
+/// The actual control is the fixture pair below —
+/// [`strip_comments_keeps_identifiers_inside_string_literals`] and
+/// [`strip_comments_drops_commented_out_mentions`] — which drives synthetic inputs through this
+/// routine instead of relying on what today's shaders happen to contain. The mutation above turns
+/// the first of those RED and nothing else in the file.
+fn strip_comments(src: &str) -> String {
+    #[derive(Clone, Copy, PartialEq)]
+    enum S {
+        Code,
+        Line,
+        Block,
+        Str,
+    }
+    let chars: Vec<char> = src.chars().collect();
+    let mut out = String::with_capacity(src.len());
+    let mut state = S::Code;
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        match state {
+            S::Code => {
+                if c == '/' && next == Some('/') {
+                    state = S::Line;
+                    i += 2;
+                } else if c == '/' && next == Some('*') {
+                    state = S::Block;
+                    i += 2;
+                } else {
+                    if c == '"' {
+                        state = S::Str;
+                    }
+                    out.push(c);
+                    i += 1;
+                }
+            }
+            S::Line => {
+                if c == '\n' {
+                    out.push('\n');
+                    state = S::Code;
+                }
+                i += 1;
+            }
+            S::Block => {
+                if c == '*' && next == Some('/') {
+                    // A space, not nothing: `a/*x*/b` must not fuse into the identifier `ab`.
+                    out.push(' ');
+                    state = S::Code;
+                    i += 2;
+                } else {
+                    if c == '\n' {
+                        out.push('\n');
+                    }
+                    i += 1;
+                }
+            }
+            S::Str => {
+                out.push(c);
+                if c == '\\' {
+                    // Escaped char cannot close the literal.
+                    if let Some(n) = next {
+                        out.push(n);
+                        i += 1;
+                    }
+                } else if c == '"' {
+                    state = S::Code;
+                }
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// True when `code` contains `ident` as a WHOLE identifier (neither neighbour is `[A-Za-z0-9_]`),
+/// so a future `ClusterGridDebug` or `OldClusterGrid` cannot false-match.
+fn names_identifier(code: &str, ident: &str) -> bool {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    code.match_indices(ident).any(|(i, _)| {
+        let before_ok = code[..i].chars().next_back().is_none_or(|c| !is_word(c));
+        let after_ok = code[i + ident.len()..].chars().next().is_none_or(|c| !is_word(c));
+        before_ok && after_ok
+    })
+}
+
+/// FIXTURE CONTROL for [`strip_comments`], over-strip direction: a comment marker inside a string
+/// literal is not a comment opener, so live code following it on the same line survives.
+///
+/// This exists because the shader corpus cannot play this role (see [`strip_comments`]'s doc for
+/// the measurement). Mutating `state = S::Str` to `state = S::Code` — deleting string-literal
+/// handling — keeps the whole corpus census GREEN and turns every case below RED, which is the
+/// point: the control has to be sensitive to the bug, not merely adjacent to it.
+///
+/// Runs unconditionally — no `dxc` / `spirv-dis`, so it cannot SKIP the way the artifact gates do.
+#[test]
+fn strip_comments_keeps_identifiers_inside_string_literals() {
+    // `//` inside a literal. Over-strip swallows the rest of the line, taking the identifier.
+    let line_marker = r#"#error "a // b" ClusterGrid"#;
+    assert!(
+        names_identifier(&strip_comments(line_marker), "ClusterGrid"),
+        "a `//` INSIDE a string literal was treated as a comment opener and swallowed the live \
+         identifier after the closing quote. Input {line_marker:?} stripped to {:?}",
+        strip_comments(line_marker)
+    );
+
+    // `/*` inside a literal, never closed. Over-strip here swallows the REST OF THE FILE, not just
+    // the line — the widest blast radius this bug class has, and the quietest.
+    let block_marker = "#error \"a /* b\" ClusterGrid\nStructuredBuffer<uint2> Trailing;\n";
+    let block_stripped = strip_comments(block_marker);
+    assert!(
+        names_identifier(&block_stripped, "ClusterGrid"),
+        "an unterminated `/*` INSIDE a string literal opened a block comment and ate the rest of \
+         the input. Stripped to {block_stripped:?}"
+    );
+    assert!(
+        names_identifier(&block_stripped, "Trailing"),
+        "an unterminated `/*` inside a string literal ate PAST the end of its line — every later \
+         declaration in the file would vanish from discovery. Stripped to {block_stripped:?}"
+    );
+
+    // An escaped quote does not close the literal, so the `//` after it is still inside the string.
+    // This is the only case that exercises the `S::Str` escape branch.
+    let escaped = r#"#error "a \" // b" ClusterGrid"#;
+    assert!(
+        names_identifier(&strip_comments(escaped), "ClusterGrid"),
+        "an ESCAPED quote was treated as closing the literal, so the `//` that follows opened a \
+         comment. Input {escaped:?} stripped to {:?}",
+        strip_comments(escaped)
+    );
+}
+
+/// FIXTURE CONTROL for [`strip_comments`], under-strip direction: a mention that lives only in a
+/// comment must NOT survive, since that is the rule [`discover_cluster_grid_sources`] enrols on.
+/// Also pins the two structural properties the strip's doc claims — 1:1 line correspondence, and
+/// no identifier fusion across a removed block comment.
+#[test]
+fn strip_comments_drops_commented_out_mentions() {
+    for dead in [
+        "// ClusterGrid[fi] = uint2(0, 0);\n",
+        "/* ClusterGrid[fi] = uint2(0, 0); */\n",
+        "uint x = 0; // trailing prose about ClusterGrid\n",
+        "/*\n * ClusterGrid\n */\n",
+    ] {
+        assert!(
+            !names_identifier(&strip_comments(dead), "ClusterGrid"),
+            "a commented-out mention survived stripping and would enrol its file as a consumer \
+             whose artifacts can carry no bound. Input {dead:?} stripped to {:?}",
+            strip_comments(dead)
+        );
+    }
+
+    // The mirror: prose on one line must not suppress a LIVE declaration on the next.
+    let live = "// ClusterGrid is discussed here\nStructuredBuffer<uint2> ClusterGrid;\n";
+    assert!(
+        names_identifier(&strip_comments(live), "ClusterGrid"),
+        "a line comment ate past its own newline: {:?}",
+        strip_comments(live)
+    );
+    assert_eq!(
+        strip_comments(live).lines().count(),
+        live.lines().count(),
+        "the residue no longer lines up 1:1 with the source, so any line-based diagnostic built on \
+         it reports the wrong line"
+    );
+
+    // `a/*x*/b` must not fuse: the fused form would MANUFACTURE the identifier we search for.
+    let fusable = "uint Cluster/*x*/Grid;";
+    assert!(
+        !names_identifier(&strip_comments(fusable), "ClusterGrid"),
+        "a removed block comment fused its neighbours into `ClusterGrid`, inventing a consumer. \
+         Input {fusable:?} stripped to {:?}",
+        strip_comments(fusable)
+    );
+}
+
+/// FIXTURE CONTROL for [`names_identifier`]: whole-identifier matching, both neighbours checked.
+#[test]
+fn names_identifier_matches_whole_identifiers_only() {
+    assert!(names_identifier("StructuredBuffer<uint2> ClusterGrid : register(t8);", "ClusterGrid"));
+    assert!(names_identifier("uint2 cell = ClusterGrid[cluster];", "ClusterGrid"));
+    for near_miss in [
+        "RWStructuredBuffer<uint2> ClusterGridDebug;",
+        "uint x = OldClusterGrid[0];",
+        "gClusterGrid_v2 = 0;",
+    ] {
+        assert!(
+            !names_identifier(near_miss, "ClusterGrid"),
+            "{near_miss:?} false-matched `ClusterGrid`; the census would enrol a file that never \
+             touches the real binding"
+        );
+    }
+}
+
+/// The shader root this file's tables enumerate. [`Variant::hlsl`] and [`CENSUS_ONLY`]'s source
+/// column are BARE file names relative to it, because it is also the directory dxc compiles in.
+const OWNED_SHADER_ROOT: &str = "boyko_rhi_vulkan/shaders";
+
+/// The other committed-HLSL root in the workspace.
+const RENDER_SHADER_ROOT: &str = "boyko_render/shaders";
+
+/// Every committed-HLSL root in the workspace, as `(label, absolute path)`.
+///
+/// TWO roots, not one. [`shaders_dir`] covers only this crate's, but `boyko_render/shaders` holds
+/// committed `.hlsl` + `.spv` of exactly the same kind (`gpu_integrate.hlsl`, `ui_rect.*.hlsl`), so
+/// a `ClusterGrid` consumer authored there would be invisible to a census whose own doc calls
+/// itself CLOSED. Merely DOCUMENTING that boundary was the cheaper option and was rejected: it
+/// leaves the identical hole one directory over, and the hole is the whole reason this test exists.
+/// Walking it costs one extra `read_dir` at test time.
+///
+/// A consumer discovered under any root other than [`OWNED_SHADER_ROOT`] lands in the
+/// "unenumerated" bucket by construction, since the tables cannot name it — that is the intended
+/// outcome: it forces an explicit decision about which crate owns the artifact and its bound,
+/// instead of letting the shader ship uncensused.
+fn shader_roots() -> [(&'static str, PathBuf); 2] {
+    let crates_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("invariant: this crate lives at `<workspace>/crates/boyko_rhi_vulkan`")
+        .to_path_buf();
+    [
+        (OWNED_SHADER_ROOT, shaders_dir()),
+        (RENDER_SHADER_ROOT, crates_dir.join("boyko_render").join("shaders")),
+    ]
+}
+
+/// Walks every root in [`shader_roots`] and returns `(per-root file counts, consumers)` — every
+/// `.hlsl`/`.hlsli` whose LIVE (comment-stripped) text names `ClusterGrid`, as `root-label/file`,
+/// sorted.
+///
+/// # The rule for prose-only mentions
+///
+/// **A mention that survives comment-stripping is a consumer; a mention that does not is not.**
+/// Every one of these sources discusses `ClusterGrid` in its header prose at least as often as it
+/// touches it — `deferred_pbr.hlsl` names it on eight lines, MEASURED as five comment lines and
+/// three live ones (the declaration, the `GetDimensions` call, the single indexed read) — and this
+/// repo has precedent for a file naming a resource *only* to disclaim it (`vb_shadow_vis.comp.hlsl`
+/// mentions `gVbId` solely to say it does NOT read it). Counting prose would enrol every such file
+/// and the census would drown in rows that pin nothing. The same rule intentionally drops
+/// COMMENTED-OUT code: a `// ClusterGrid[fi] = …` compiles to no instruction, so it can carry no
+/// bound and there is nothing for the artifact census to assert about it.
+///
+/// The rule's blind spot is stated rather than papered over: a source that reaches `ClusterGrid`
+/// through an `#include` without naming it would not be discovered. It cannot happen today (no
+/// `.hlsli` under either root names `ClusterGrid`; each of the five declares its own binding), and
+/// if a future refactor moves the declaration into a header, that header becomes the discovered
+/// consumer and every current row goes stale — RED in both directions at once, which is the
+/// correct moment to re-bless the table.
+fn discover_cluster_grid_sources() -> (Vec<(&'static str, usize)>, Vec<String>) {
+    let mut scanned: Vec<(&'static str, usize)> = Vec::new();
+    let mut consumers: Vec<String> = Vec::new();
+    for (label, dir) in shader_roots() {
+        let entries = std::fs::read_dir(&dir).unwrap_or_else(|e| {
+            panic!("cannot enumerate the shader root {label} at {}: {e}", dir.display())
+        });
+        let mut here = 0usize;
+        for entry in entries {
+            let entry = entry.expect("invariant: the shader directory is readable entry by entry");
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !(name.ends_with(".hlsl") || name.ends_with(".hlsli")) {
+                continue;
+            }
+            here += 1;
+            let path = entry.path();
+            let src = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read shader source {}: {e}", path.display()));
+            if names_identifier(&strip_comments(&src), "ClusterGrid") {
+                consumers.push(format!("{label}/{name}"));
+            }
+        }
+        scanned.push((label, here));
+    }
+    consumers.sort();
+    (scanned, consumers)
+}
+
+/// The enumerated consumer set: every distinct source named by [`OWNED_VARIANTS`] or
+/// [`CENSUS_ONLY`], qualified with [`OWNED_SHADER_ROOT`] so it compares against the multi-root
+/// discovery, sorted.
+fn enumerated_cluster_grid_sources() -> Vec<String> {
+    let mut sources: Vec<String> = OWNED_VARIANTS
+        .iter()
+        .map(|v| v.hlsl)
+        .chain(CENSUS_ONLY.iter().map(|(hlsl, _, _)| *hlsl))
+        .map(|name| format!("{OWNED_SHADER_ROOT}/{name}"))
+        .collect();
+    sources.sort_unstable();
+    sources.dedup();
+    sources
+}
+
+/// The census is CLOSED: the `ClusterGrid` consumers DISCOVERED across [`shader_roots`] are
+/// exactly the ones the tables above enumerate.
+///
+/// Without this, the two gates above are open on the side that matters most. They walk a fixed
+/// list, so they can only ever check shaders they were already told about — a sixth consumer added
+/// tomorrow passes every test in this file by being invisible to it, and ships indexing a
+/// boot-sized `ClusterGrid` off live header dims with `robustBufferAccess` OFF. This test is the
+/// only thing in the repository that can see a shader nobody registered.
+#[test]
+fn the_cluster_grid_consumer_census_is_closed() {
+    let (scanned, discovered) = discover_cluster_grid_sources();
+
+    // Anti-vacuity, first, and PER ROOT: a wrong path or a botched extension filter yields an empty
+    // walk, and an empty walk would satisfy every set comparison below by having nothing to
+    // compare. Per root rather than in total, so a broken second root cannot hide behind a healthy
+    // first one — that is the same "invisible to the gate" defect the whole test is against.
+    for (label, count) in &scanned {
+        assert!(
+            *count > 0,
+            "the shader-root walk found ZERO .hlsl/.hlsli files under `{label}` — the discovery is \
+             broken (wrong path or bad extension filter), not the shaders. Every assertion in this \
+             test would otherwise pass over an empty set. Per-root counts: {scanned:?}"
+        );
+    }
+    let total: usize = scanned.iter().map(|(_, n)| *n).sum();
+    assert!(
+        !discovered.is_empty(),
+        "scanned {total} shader sources ({scanned:?}) and found NO live `ClusterGrid` reference in \
+         any of them. Either the identifier was renamed (in which case this whole file's \
+         `%ClusterGrid` SPIR-V selector is dead too and the artifact census is vacuous), or \
+         comment-stripping is eating live code."
+    );
+
+    let enumerated = enumerated_cluster_grid_sources();
+
+    let unenumerated: Vec<&str> = discovered
+        .iter()
+        .map(String::as_str)
+        .filter(|d| !enumerated.iter().any(|e| e == d))
+        .collect();
+    assert!(
+        unenumerated.is_empty(),
+        "UNENUMERATED `ClusterGrid` consumer(s): {unenumerated:?}. These shader sources name \
+         `ClusterGrid` in live code but appear in neither OWNED_VARIANTS nor CENSUS_ONLY, so \
+         nothing in this repository checks that their artifacts carry the VB-P1k capacity bound. \
+         Add one row per committed .spv variant — to OWNED_VARIANTS if this file should also \
+         byte-gate the family, to CENSUS_ONLY if another *_spv_sync test already does — with the \
+         MEASURED `OpArrayLength` count for each (1 where the cluster block survives into the \
+         module, 0 where it is dead-stripped or `#ifdef`-ed out). A consumer under a root OTHER \
+         than `{OWNED_SHADER_ROOT}` cannot be expressed by these tables as they stand (both source \
+         columns are bare names relative to that root, which is also dxc's working directory here) \
+         — it needs a sibling census in the owning crate, and this failure is the forcing \
+         function for that call. Enumerated today: {enumerated:?}"
+    );
+
+    let stale: Vec<&str> = enumerated
+        .iter()
+        .map(String::as_str)
+        .filter(|e| !discovered.iter().any(|d| d == e))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "STALE census row(s): {stale:?}. The tables name these sources, but the shader directory \
+         has no such file with a live `ClusterGrid` reference — the source was renamed, deleted, \
+         or lost its cluster block (in which case its artifact rows pin a bound that no longer \
+         exists). Discovered today: {discovered:?}"
     );
 }

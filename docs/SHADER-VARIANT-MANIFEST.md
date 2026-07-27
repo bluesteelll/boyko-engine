@@ -10,7 +10,10 @@ not archaeology through `compute.rs` doc-paragraphs.
 Contrast with the **spec-constant-collapsible** families (`GI_MAX_IT` — SHIPPED @3c10826) and the
 **perf-justified** ones (SSAO quality — `[unroll]`, kept as 3 files; see the plan). A `-D` variant belongs
 HERE only if it changes the *interface* (adds/removes a binding, a capability, or half the shader) — a
-spec-constant cannot do that.
+spec-constant cannot do that. (That SSAO *quality* axis is a source-text re-emit, not a `-D`, and
+correctly stays out of the tables — but the SAME shader's `VB_THIN` axis IS a `-D` and DOES delete a
+binding, so it has its own section below. Do not read "SSAO quality is excluded" as "the SSAO gather
+has no variant axis".)
 
 ## The three axes
 
@@ -128,14 +131,67 @@ that widens a shipped `.spv` owes a dark-path measurement, not only a byte-ident
 | `vb_shade.comp.hlsl` | froxel | — | `1` | `vb_shade_froxel.comp.spv` | `cs_6_0` | same delta as `vb_resolve.comp.hlsl`'s own froxel row. |
 | `vb_shade.comp.hlsl` | textured + froxel | `1` | `1` | `vb_shade_tex_froxel.comp.spv` | `cs_6_0` | both deltas above, combined — the two `#ifdef`s are independent, non-overlapping spans (TEXTURED touches binding 1 + Set 3; FROXEL touches bindings 8/9). |
 
-Reachability note: every `FROXEL` row is UNBUILT-but-armable this rung — VB-P1a ("dark infra")
-lands the machinery with `ResolvedRenderPath::froxel_light_cull` hardcoded OFF
-(`boyko_app::runner`'s boot call site), so `GpuSceneBundles::build_froxel_light_cull` never runs in
-production and no FROXEL pipeline is ever bound; a later rung (VB-P1b) reads a real
-`LightingConfig`-sourced toggle to arm it. The `textured + froxel` row's host-side descriptor SET
-(`vb_set0_tex_froxel`, the TEXTURED ring + `ClusterGrid`/`LightIndexList` combined) is not built
-this rung either — a documented scope cut (`present/passes/vb.rs`'s own comment) for VB-P1b to
-close if TEXTURED and FROXEL must co-occur.
+Reachability note (**re-derived 2026-07-27 — supersedes BOTH the VB-P1a text and its first
+"correction", which mislocated the hardcode and the date**). The timeline, from the commits:
+
+* **At VB-P1a (`78d0534`, 2026-07-24) the original note was ACCURATE as written.** The hardcode sat
+  exactly where it said — `boyko_app`'s boot call site: `crates/boyko_app/src/runner.rs:454` in that
+  commit is the literal `clusters_wanted: false`, whose own comment named VB-P1b as the rung that
+  would read the real toggle. The RESOLVER was never the hardcoding site: at VB-P1a
+  `render_path_config.rs:914` already carried today's live expression, `consumers.clusters_wanted &&
+  matches!(path, RenderPath::VisibilityBuffer)`. Refuting the note by pointing at `resolve_rules`
+  refutes a claim it never made.
+* **It went STALE at VB-P1b (`d60d95b`, the same day)**, which replaced that literal with the live
+  probe `app.world().try_resource::<LightingConfig>().is_some_and(|c| c.clusters_enabled)`. From
+  that commit onward "never runs in production" was false for any scene that opts in — the note was
+  simply never revisited.
+
+Today: `froxel_light_cull` is a per-boot resolved bit (`consumers.clusters_wanted && path ==
+VisibilityBuffer`, unchanged since VB-P1a; its `froxel_light_cull_is_vb_only` test pins the VB-only
+scoping, and its FIELD doc in `render_path_config.rs` WAS updated at VB-P1b and is current), the
+runner threads `clusters_wanted` from the booted scene's `LightingConfig::clusters_enabled`, and
+`GpuSceneBundles::build_froxel_light_cull` runs under `if resolved_render_path.froxel_light_cull`
+there — creating all three FROXEL pipelines together. The DEFAULT is unarmed (`clusters_enabled`
+defaults `false`), so a scene that never opts in builds, declares and records nothing here and every
+pre-VB-P1b golden stays byte-identical. "Defaults off" is not "never runs".
+
+**Image-pin coverage is TWO rows of three, not "every FROXEL row"** (checked against
+`goldens/PINS.toml`, which contains exactly two FROXEL-bearing pins, both blessed to real hashes on
+the software AND hwrt legs):
+
+| FROXEL row | Blessed image pin |
+|---|---|
+| `vb_resolve_froxel.comp.spv` | `[vb_mesh_froxel]` — VB-P1b (`d60d95b`), `fb220ff3…`, the FUSED arm |
+| `vb_shade_tex_froxel.comp.spv` | `[vb_mesh_tex_froxel]` — VB-P1c (`b2b1240`), `6d7ea00d…`, the CLASSIFIED+TEXTURED arm |
+| `vb_shade_froxel.comp.spv` | **NONE** — no image golden executes it (below) |
+
+Both are EQUALITY pins: the same scene re-rendered with `BOYKO_VB_FROXEL_FORCE_OFF`
+(`clusters_enabled = false`) must hash identically. `vb_shade_froxel` is the classified-but-UNTEXTURED
+cell of the `(textured, froxel)` match, and `vb_use_classified = vb_force_classified ||
+vb_tex_active` (`gpu_scene`) — so reaching it needs clustering armed AND the
+`BOYKO_VB_FORCE_CLASSIFIED` dev override, since a textured armed frame lands in `(true, true)`
+instead. No `PINS.toml` row sets that variable. Its pipeline IS created on every armed boot and its
+match arm IS live, but no blessed pin ever dispatches it; the only gate on those bytes is the re-DXC
+test below.
+
+The `textured + froxel` row's host-side descriptor SET (`vb_set0_tex_froxel`, the TEXTURED ring +
+`ClusterGrid`/`LightIndexList` combined) WAS the VB-P1a scope cut, and **VB-P1c (`b2b1240`) closed
+it**: the set is built in `present/targets.rs` (the `vb_set0_tex_froxel` builder — `Some` iff
+`vb_layout0_froxel` + `cluster_grid` + `light_index` + `vb_tex_instance_material_ring` +
+`vb_shade_tex_froxel_pipeline` are all `Some`), and `present/passes/vb.rs`'s `(textured, froxel)`
+match arm `expect`s BOTH `scene.vb_shade_tex_froxel_pipeline` and `targets.vb_set0_tex_froxel` to
+be `Some` — a mis-resolved boot panics loudly there instead of silently falling back to the
+non-froxel pipeline. ⚠️ The prose at BOTH of those sites is itself VB-P1a-era and never refreshed:
+each still says the arm bit is "hardcoded OFF" and the set "ALWAYS `None` in production this rung",
+and each cites `ResolvedRenderPath::froxel_light_cull`'s doc — which VB-P1b DID update, so the
+comments now contradict their own referent. Trust the `expect`, the field doc and the pins, not the
+prose beside them.
+
+`.spv` byte gate: `crates/boyko_rhi_vulkan/tests/vb_froxel_spv_sync.rs` —
+`vb_froxel_variant_spv_byte_identical` re-DXCs the three FROXEL rows (`vb_resolve_froxel`,
+`vb_shade_froxel`, `vb_shade_tex_froxel`), and `vb_base_variant_spv_unperturbed_by_the_froxel_seam`
+re-DXCs the three base rows to prove the `#else` arm is physically inert. ⚠️ Both tests **SKIP
+rather than fail** when no `dxc` resolves on the host — and `vb_shade_froxel` has nothing else.
 
 ## `vb_shade_split.comp.hlsl` — the R9 geo/shade-split lit producer (compute)
 
@@ -201,6 +257,76 @@ These are distinct `.hlsl`, listed here for the temporal/spatial pipeline pictur
 `shadow_temporal.comp` (reproject + variance-clamp + accumulate against the cross-frame history pool).
 The mode matrix (None / Spatial / Temporal / Both) is a **host** selection of which of these passes run
 between the VIS producer and the DENOISED consumer — see `BOYKO_SHADOW_DENOISE`.
+
+## `sdf_ssao.comp.hlsl` — the screen-space AO gather (compute)
+
+One source `shaders/sdf_ssao.comp.hlsl`, ONE `-D` axis: `VB_THIN` (six `#if VB_THIN` spans). The
+artifact count is 6, and it takes TWO independent multiplications to get there — only the second
+one belongs to this file:
+
+* The **quality** axis is NOT a `-D`. `boyko_shaderdsl::ssao::variant_hlsl` (driven by the
+  `emit_ssao_variants` bin) re-emits the base text with ONLY the `static const SSAO_*` tuning header
+  swapped, producing three committed sources `sdf_ssao_{low,medium,high}.comp.hlsl`. That is the
+  "perf-justified, kept as 3 files" family the intro excludes — the `[unroll]` bounds must be
+  compile-time literals.
+* The **`VB_THIN`** axis IS a `-D`, and it belongs here: it DELETES a binding and renumbers the
+  rest, which no specialization constant can do. Each of the three quality `.hlsl` is DXC'd twice —
+  bare, and with `-D VB_THIN=1` — so 3 sources become 6 `.spv`.
+
+The base `sdf_ssao.comp.spv` was RETIRED at Render P7-Q2: the base `.hlsl` is the single-source
+glue template, not a shipped artifact (the engine loads the per-quality `.spv`), which is why the
+`-Fo sdf_ssao.comp.spv` line still in that file's own header names no committed file.
+
+| Variant | quality `.hlsl` | `VB_THIN` | `.spv` | dxc `-T` | Interface delta vs the base 5-binding table |
+|---|---|---|---|---|---|
+| base, Low | `sdf_ssao_low.comp.hlsl` | — | `sdf_ssao_low.comp.spv` | `cs_6_0` | none — `gNormal`@0 / `gMaterial`@1 / `gViewT`@2 / `ssao`@3 / Camera UBO@4 (`ssao_layout`). 2 slices × 3 steps. |
+| base, Medium | `sdf_ssao_medium.comp.hlsl` | — | `sdf_ssao_medium.comp.spv` | `cs_6_0` | none. 2 × 4; bakes today's shipped module consts, so its `.hlsl` is byte-identical to the base template (the no-op proof). |
+| base, High | `sdf_ssao_high.comp.hlsl` | — | `sdf_ssao_high.comp.spv` | `cs_6_0` | none. 8 × 6. |
+| VB_THIN, Low | `sdf_ssao_low.comp.hlsl` | `1` | `sdf_ssao_vb_low.comp.spv` | `cs_6_0` | `gMaterial` **DROPPED ENTIRELY** (no slot reserved — unlike `sdf_forward_march`'s bound-but-unread precedent, because this variant gets its OWN layout, not a shared one); `gNormal` → `vb_geo`'s `gThinNormal` at the SAME slot 0; the mask test becomes `view_t < SSAO_VIEWT_BG` (`1e30`) off the already-bound `gViewT`. The survivors RENUMBER into a DENSE 4-binding table — `gThinNormal`@0 / `gViewT`@1 / `ssao`@2 / Camera@3 — a DIFFERENT host layout (`vb_ssao_layout`), not a hole in the 5-binding one. |
+| VB_THIN, Medium | `sdf_ssao_medium.comp.hlsl` | `1` | `sdf_ssao_vb_medium.comp.spv` | `cs_6_0` | same delta. |
+| VB_THIN, High | `sdf_ssao_high.comp.hlsl` | `1` | `sdf_ssao_vb_high.comp.spv` | `cs_6_0` | same delta. |
+
+The march/dither/slice math, the tuning header, and the eDSL-GENERATED `ssao_horizon_step` span are
+byte-identical TEXT on both sides of the axis — the span reads only function-local names
+(`Pp`, `P`, `n`, `hc`), never a binding, so the renumbering cannot touch it. Recipe (cwd = the
+shaders dir, so the relative `#include "ray_gen.hlsli"` resolves), frozen `dxc` 1.4.350.0:
+
+```
+dxc -spirv -T cs_6_0 -E main [-D VB_THIN=1] -fspv-target-env=vulkan1.3 \
+    sdf_ssao_<quality>.comp.hlsl -Fo sdf_ssao_[vb_]<quality>.comp.spv
+```
+
+**Gating — every row is byte-gated, not merely described.** All in
+`crates/boyko_rhi_vulkan/tests/ssao_edsl_sync.rs`:
+
+* `ssao_spv_byte_identical` — the three **base** rows. Per quality it asserts three things: the
+  committed variant `.hlsl` equals a fresh `variant_hlsl(base, preset)` re-emit, the committed
+  `.spv` equals a fresh re-DXC of that `.hlsl`, and (Medium only) the variant `.hlsl` equals the
+  base `.hlsl` byte-for-byte.
+* `ssao_vb_thin_spv_byte_identical` — the three **`VB_THIN`** rows: a fresh `-D VB_THIN=1` re-DXC of
+  the SAME committed non-VB quality `.hlsl` must equal the committed VB `.spv`. No separate VB
+  `.hlsl` exists; the define is the entire difference.
+* `ssao_horizon_step_matches_edsl_emit` — the eDSL `.contains` drift gate, iterated over the base
+  template AND all three quality `.hlsl`.
+
+⚠️ Both re-DXC tests **SKIP rather than fail** when `dxc` is absent from the host. A green run on a
+machine without the Vulkan SDK proves nothing about these six blobs.
+
+Reachability note: selection is by binding a different pipeline, never a dynamic branch. The base
+rows go through `compute::sdf_ssao_spirv_variant(q)` against the 5-binding `ssao_layout`; the
+`VB_THIN` rows through `compute::sdf_ssao_vb_spirv(q)` against `vb_ssao_layout`, gated by
+`path_vb_ssao()` (`mesh_geo_shade_split && ssao.is_some()`) — so they are reachable only on the R9
+VB geo/shade split, where there is no material G-buffer to read a mask from. All three `VB_THIN` pipelines are created at boot (a loop
+over `SSAO_QUALITY_COUNT` in `boyko_app::gpu_scene`); `ResolvedSsao::variant` picks one per frame.
+
+**Image-golden coverage is ONE row of six, and that is worth stating.** `[vb_mesh_ssao]` boots
+`SsaoConfig { quality: High, atrous_levels: 3 }`, so it pins `sdf_ssao_vb_high.comp.spv` and only
+that. `vb_mesh_ssao_screenshot_dump` is the ONLY SSAO-arming `test_name` in `PINS.toml`: no pin row
+sets `BOYKO_SSAO`, so `grand_showcase_2mat` (the one pinned scene that reads it) resolves
+`SsaoQuality::Off` under its blessed env (the 0%-gate), and `window_present_gbuffer`'s own six
+`engine_ssao_*` dumps are unpinned. So **no blessed pin ever executes the base gather at all**. The other five rows rest entirely on the re-DXC byte gates
+above plus the host-oracle mirrors (`ssao_horizon_step_host_matches_edsl_eval`,
+`ssao_consts_host_match_edsl`, `ssao_params_table_host_match_edsl`).
 
 ## SSAO à-trous denoise compute — `ssao_atrous.comp.hlsl` (3 format-pin variants)
 

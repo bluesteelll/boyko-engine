@@ -133,7 +133,7 @@ drift a gate, but it is fenced and dated so a later reader can tell it apart fro
 |---|---|---|
 | D1 | §3.4 rewritten: the OFF-path codegen hazard is **refuted by measurement**, and the refutation is stated with its own limits. The stated *mechanism* (DXC folds `diff_ambient * 1.0`) is FALSE — DXC emits the multiply. The residual (a driver contraction **choice**) is quantified against a **measured** golden sensitivity floor. | P0-A |
 | D2 | §3.3's stated *reason* for expecting the ULP probe to fire is **withdrawn**: "structurally the overwhelmingly likely outcome" is not supported, and a 1-ULP perturbation measured on a real term did **not** fire. The probe's *placement* is what saves it — it sits AFTER the OETF, so it is not gamma-attenuated. Rev 2's procedural demand that the control be DEMONSTRATED red is now the only thing carrying that gate, and it is enough. | P0-A |
-| D3 | S2 gate (c) enumerates **all six** `deferred_pbr` `.spv`, not the two a `cs_6_0`-only helper could reach. All six were re-DXC'd and are byte-identical today (§11.2), so the gate is proven implementable before it is written. `redxc_with_defines` gains a **profile** parameter — a `-T` cannot be smuggled through the `defines` slice, which unconditionally `-D`-prefixes every element (`vb_sv0_offpath.rs:76-78`). | P0-C |
+| D3 | S2 gate (c) enumerates **all six** `deferred_pbr` `.spv`, not the two a `cs_6_0`-only helper could reach. All six were re-DXC'd and are byte-identical today (§11.2), so the gate is proven implementable before it is written. `redxc_with_defines` gains a **profile** parameter — a `-T` cannot be smuggled through the `defines` slice, which unconditionally `-D`-prefixes every element (`vb_lit_producer_spv_sync.rs`'s `redxc_with_defines`). | P0-C |
 | D4 | S1 lands **two** fixtures, `vb_both_sdf` and `vb_both_sdf_tex`, making S4(ii) constructible for all 8 armable rows. Rev 2 could not build rows 4/6/8. The textured-ness is entirely in-test and the assets are committed; no host plumbing is added. | P0-B |
 | D5 | §5.3's **blocking precondition on S1 is DELETED**. It described a `PINS.toml` self-contradiction that no longer exists: `d93e425` reconciled eight pin blocks, and `goldens/PINS.toml:283-285` now states the `[vb_mesh]` values are the real bless output. §5.3's other consequence (no gate duplicates a hash literal) stands. | P0-A review |
 | D6 | Recorded, not fixed here: `deferred_pbr_wrap.comp.spv` ships and is built unconditionally (`gpu_scene/mod.rs:1654-1656`) but has **no row** in `docs/SHADER-VARIANT-MANIFEST.md` — a standing-rule violation predating SV0, fixed in its own commit so this stage does not absorb it. | P0-C |
@@ -859,9 +859,9 @@ variant. Gate (c) must therefore quantify over all of them. Rev 2 said "every `d
 without enumerating, and an implementer following the existing helpers would have covered **two**:
 every re-DXC helper in `crates/boyko_rhi_vulkan/tests/` hardcodes `-T cs_6_0`
 (`cluster_cull_spv_sync.rs:76`, `marcher_spv_sync.rs:57`, `ssao_edsl_sync.rs:288`,
-`vb_froxel_spv_sync.rs:59`, `vb_sv0_offpath.rs:75`, `cluster_cull_hier_dis_gate.rs:539`), and the
-profile **cannot** be smuggled through the `defines` slice because every element of it is
-unconditionally `-D`-prefixed (`vb_sv0_offpath.rs:76-78`).
+`vb_froxel_spv_sync.rs:59`, `vb_lit_producer_spv_sync.rs`, `cluster_cull_hier_dis_gate.rs:539`),
+and the profile **cannot** be smuggled through the `defines` slice because every element of it is
+unconditionally `-D`-prefixed (`vb_lit_producer_spv_sync.rs`'s `redxc_with_defines`).
 
 The frozen recipe (`deferred_pbr.hlsl:71-93`) reads *"add `-T cs_6_5 …`"* for the HWRT rows, i.e.
 the profile is **replaced**, not appended. §11.2 settles that reading by running it:
@@ -912,9 +912,17 @@ control **fired** — `vb_resolve.comp.hlsl:258`'s `1e-4` → `2e-4` gives 47824
 therefore **not blind** for these modules, which is what §3.2's runtime-gate decision rested on. The
 harness stays a standing regression gate; it can no longer newly fail the *design*.
 
-**Lands:** `crates/boyko_rhi_vulkan/tests/vb_sv0_offpath.rs`, wiring the **existing**
+**Lands:** `crates/boyko_rhi_vulkan/tests/vb_lit_producer_spv_sync.rs`, wiring the **existing**
 `redxc_with_defines` / `assert_spv_byte_identical` / `find_dxc` helpers. No new SPIR-V parser, no
 production code. ~80 LOC.
+
+⚠️ **This rung's artifact SURVIVED the stage revert and was renamed off it** — it landed as
+`vb_sv0_offpath.rs` and is now `vb_lit_producer_spv_sync.rs`. It is the repo's **only** re-DXC byte
+gate for `vb_shade_split{,_tex,_hwrt,_tex_hwrt}.comp.spv`, which ship regardless of SV0
+(`vb_froxel_spv_sync.rs` covers only the `vb_resolve*`/`vb_shade*` rows). Deleting it as SV0
+cleanup would silently un-gate four shipped artifacts. Same reasoning as
+`docs/SHADER-VARIANT-MANIFEST.md`'s `vb_shade_split` / `vb_geo` sections, which outlived the revert
+for the same reason.
 
 **Gate — the harness is validated BEFORE it is believed:**
 1. **reproduction:** each of the 10 rows re-DXC'd under its frozen recipe is byte-identical to its
@@ -1430,8 +1438,8 @@ the other four literal sites: `vb_shade.comp.hlsl:452`, `vb_shade_split.comp.hls
 `:460`), and out of scope `forward_opaque.fs.hlsl:257`, `sdf_forward_march.comp.hlsl:1040`.
 *Variants (§5.4):* `deferred_pbr.hlsl:71-93` (six frozen recipes) · `compute.rs:1470`
 (`deferred_pbr_wrap_spirv`, **no** `#[cfg(feature = "hwrt")]`) · `gpu_scene/mod.rs:1654-1656`
-(built unconditionally) · `vb_sv0_offpath.rs:75` (`-T cs_6_0` hardcoded), `:76-78` (every `defines`
-element is `-D`-prefixed) · other `cs_6_5` recipes, out of scope:
+(built unconditionally) · `vb_lit_producer_spv_sync.rs`'s `redxc_with_defines` (`-T cs_6_0`
+hardcoded; every `defines` element is `-D`-prefixed) · other `cs_6_5` recipes, out of scope:
 `vb_shadow_vis.comp.hlsl:87`, `hwrt_as_descriptor_smoke.comp.hlsl:18`.
 *Fixture (S1):* `vb_mesh_tex.rs:47-48` (asset path), `:98-99` (the two params), `:156-157`
 (`load_material_folder`), `:167-170` (`with_textures`) · `material.rs:225-233` (the only constructor
