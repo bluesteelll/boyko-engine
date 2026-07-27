@@ -294,9 +294,20 @@ shapes every rung after it and because the ladder's R2b exists purely to pay it 
 * **Eight sources total touch the encoding.** They compile to **sixteen** committed `.spv`
   (`vb_raster.{vs,fs}`, `vb_geo{,_mv}`, `vb_classify_{count,scatter}`, `vb_resolve{,_froxel}`,
   `vb_shade{,_tex,_froxel,_tex_froxel}`, `vb_shade_split{,_tex,_hwrt,_tex_hwrt}`).
-* **Only ten of the sixteen have a re-DXC byte-identity gate** — `vb_lit_producer_spv_sync.rs`'s
-  `VB_LIT_PRODUCER_ROWS` enumerates exactly those ten. `vb_raster.vs`, `vb_raster.fs`, `vb_geo`,
-  `vb_geo_mv`, `vb_classify_count`, `vb_classify_scatter` would drift **silently**.
+* **All sixteen now have a re-DXC byte-identity gate**, across two files whose row tables are exact
+  complements: `vb_lit_producer_spv_sync.rs`'s `VB_LIT_PRODUCER_ROWS` (ten — `vb_resolve{,_froxel}`,
+  `vb_shade{,_tex,_froxel,_tex_froxel}`, `vb_shade_split{,_tex,_hwrt,_tex_hwrt}`) and
+  `vb_raster_geo_classify_spv_sync.rs`'s `VB_RASTER_GEO_CLASSIFY_ROWS` (the other six).
+  ⚠️ **Rev 7 said the six would "drift silently". That was true when written and is not now:** the
+  six-row gate landed at `598f4ff`, which is the byte-neutral rung the research document
+  ([`MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md) §"Blast radius")
+  prescribed *"before touching the encoding"*. That prerequisite is discharged; no rung of this plan
+  needs to carry it.
+  **The coverage is conditional and the condition is not nothing:** both files SKIP, by design, on a
+  host where no `dxc` resolves, because a different `dxc` failing them would mean "wrong toolchain",
+  not "drifted shader". So the sixteen are gated *on a host carrying the pinned VulkanSDK 1.4.350.0*,
+  and a green CI run that skipped proves nothing about them. Any rung that re-encodes `vb_id` must
+  show the gate executing, not merely passing.
 
 **The decode side is genuinely one line** — `vb_geom_fetch.hlsli:521` is exactly
 `uint local_tri = raw_prim_id % tri_count;`. The **encode** side is not independently reachable: the
@@ -570,7 +581,11 @@ statistic derived from `vb_id` is capped by one-winner-per-texel, so a sound upp
 come from outside it. The tight one available is a **counter of triangles surviving frustum +
 backface**, incremented in the raster path under the census arm. That is not free: it edits
 `vb_raster.fs.hlsl`, which moves the very blast radius §5.3 chose option (a) to keep at zero
-(16 `.spv`, 6 of them ungated — §2).
+(16 `.spv`, all sixteen now byte-gated — §2). ⚠️ The gate does not make the edit cheaper; it makes
+the cost **visible**. Editing `vb_raster.fs.hlsl` now reds
+`vb_raster_geo_classify_six_rows_reproduce_under_frozen_recipe` until the `.spv` is re-emitted and
+committed, which is the intended behaviour and is a re-bless step this branch must budget for
+rather than discover.
 
 **The ladder therefore splits, and the expensive half is conditional:**
 
@@ -1353,7 +1368,10 @@ rather than trusting this record:
 * **Content today:** the VB fixtures render five instances of one `uv_sphere(radius, 28 stacks,
   40 slices)` at 512×512 (`sv0_scene/mod.rs:56-69`, `:162`). Twenty-four golden pins exist; two
   carry `sha256_hwrt = "PENDING"`.
-* **Shaders:** 16 committed VB `.spv` are perturbed by a `vb_id` re-encode; 10 have a re-DXC gate.
+* **Shaders:** 16 committed VB `.spv` are perturbed by a `vb_id` re-encode; 10 had a re-DXC gate
+  when this record was probed. **Superseded 2026-07-27 by `598f4ff`: all 16 are gated** (§2). Left
+  visible rather than overwritten, since §11's whole contract is that it is a dated record no gate
+  reads — a fact of the box at a date, not a live number.
 
 ### 11.1 Amendment record
 
@@ -1419,8 +1437,9 @@ sentence), **`:128` (`const VB_IMPLEMENTED: bool = true;`)**, `:517` (`vb_geomet
 includers: `vb_geo.comp.hlsl:117`/`:118`, `vb_resolve.comp.hlsl:84`/`:85`,
 `vb_shade.comp.hlsl:89`/`:90`, `vb_shade_split.comp.hlsl:136`/`:137`,
 `vb_classify_count.comp.hlsl:29`, `vb_classify_scatter.comp.hlsl:24` ·
-`crates/boyko_rhi_vulkan/tests/vb_lit_producer_spv_sync.rs`'s `VB_LIT_PRODUCER_ROWS` (the ten
-gated rows).
+`crates/boyko_rhi_vulkan/tests/vb_lit_producer_spv_sync.rs`'s `VB_LIT_PRODUCER_ROWS` (ten gated
+rows) · `crates/boyko_rhi_vulkan/tests/vb_raster_geo_classify_spv_sync.rs`'s
+`VB_RASTER_GEO_CLASSIFY_ROWS` (the complementary six, landed `598f4ff`).
 
 **Targets / readback:** `crates/boyko_rhi_vulkan/src/present/targets.rs:851-856` (`VbTargets`),
 **`:868` (`COLOR_ATTACHMENT | SAMPLED` — no `TRANSFER_SRC`)** ·
