@@ -212,10 +212,19 @@ pub enum VbTimedPass {
     /// VB-P1e H0: the cull dispatch itself (`cluster_cull.comp.hlsl`) — the SECOND HALF of
     /// VB-P1d's `LightCull` pair. Same unconditional-write shape as [`Self::CullReset`].
     CullDispatch = 1,
-    /// The `record_vb` lit-producer dispatch — `vb_shade` (material-classified) OR
-    /// `vb_resolve` (fused), whichever this frame's `scene.vb_use_classified` selects
-    /// (mutually exclusive by construction, `vb.rs`'s own doc) — bracketed identically in
-    /// both branches so exactly one begin/end pair is written per frame.
+    /// The `record_vb` lit-producer dispatch — whichever of the THREE mutually-exclusive
+    /// producers this frame selects: `vb_shade_split` (when `scene.path_vb_split()`, which
+    /// DISPLACES both others), else `vb_shade` (material-classified, when
+    /// `scene.vb_use_classified`), else the fused `vb_resolve`. Bracketed identically in all
+    /// three branches — same "derived barriers + bind + dispatch" extent — so exactly one
+    /// begin/end pair is written per mesh-leg frame whichever branch runs.
+    ///
+    /// The split arm's bracket was added by **VB-SV0 rung S5**, whose paired A/B measures the
+    /// split tail (`.spv` matrix row 7) alongside the fused one (row 1). Before it, a split
+    /// frame reset-but-never-wrote this pair and the `VK_QUERY_RESULT_WAIT_BIT` readback would
+    /// block forever; that hazard is now closed at the recorder rather than by a caller-side
+    /// precondition. VB-P1d's `!mesh_geo_shade_split` assertion survives as a SCOPE statement
+    /// (its break-even number is defined against the fused/classified tail), not as a hang guard.
     VbShade = 2,
 }
 

@@ -85,19 +85,68 @@
 //! Every number Revision 1 printed was a multiple of 512 ns — and every single-order statistic
 //! (`p10`/`p90`: 1024, 12288, 0, 3072, −7168, 4096) was a multiple of **1024**. Only the medians
 //! showed 512s, which is what an even-count median does when it averages two adjacent order
-//! statistics. So the raw lattice was 1024 ns and the reported median's was 512 ns.
-//!
-//! That reframes Revision 1's "8.3% cross-session spread" entirely: `512 / 6144` is ONE median
-//! lattice step. The gate was not measuring session stability, it was measuring the smallest
-//! non-zero number the instrument can print. A gate that cannot distinguish those two carries no
-//! information.
+//! statistics. So no observed value contradicted a 1024 ns lattice, and the reported median's was
+//! read as 512 ns.
 //!
 //! The lattice is a hardware property no Vulkan limit reports — `timestampPeriod` is the
-//! ns-per-tick SCALE, not the STEP — so this revision MEASURES it: the runner reads raw timestamp
-//! TICKS (never period-scaled floats, which cannot evidence an integer lattice) and takes their
-//! GCD over the whole session, printing `quantum_ns`, `median_lattice_ns`, `timestamp_period_ns`,
+//! ns-per-tick SCALE, not the STEP — so this revision measures what it can of it: the runner reads
+//! raw timestamp TICKS (never period-scaled floats, which cannot evidence an integer lattice) and
+//! takes their GCD over the whole session, printing `tick_gcd`, `distinct_ticks`, `min_tick_gap`,
+//! `tick_span`, `quantum_max_ns`, `median_lattice_max_ns`, `timestamp_period_ns`,
 //! `timestamp_valid_bits` and `timestamp_compute_and_graphics` on its `RESOLUTION:` line. Those
 //! are transcribed below and the spread gate is read against them.
+//!
+//! # ⚠️ CORRECTION — the 1024 ns figure was a BOUND, and a loose one. Two claims below were wrong
+//!
+//! **What this file said before, and what is now known.** The paragraphs above once concluded "the
+//! raw lattice **was** 1024 ns", and a paragraph further down concluded that Revision 1's 8.3%
+//! cross-session spread was "ONE median lattice step … the gate was measuring the smallest non-zero
+//! number the instrument can print". Rung S5 falsified both, and this section is the correction.
+//!
+//! **The mechanism.** A GCD taken over observed durations is `G · gcd(m_1 … m_n)` for
+//! `t_i = m_i · G`. It equals the hardware step `G` only when the observed multipliers are setwise
+//! coprime; otherwise it is a MULTIPLE of `G` and the number itself does not say which. So the
+//! estimator can only ever license `G <= quantum`, and its tightness is a property of THE SAMPLE.
+//!
+//! **The evidence.** S5 ran eight sessions of the same protocol on the same device. Seven reported
+//! `tick_gcd = 1024`; exactly one reported **128**. The odd one out was the first session of a
+//! fresh process set — the one whose durations ranged widest. A fixed-workload dispatch produces
+//! durations clustered on a handful of values; a handful of clustered multipliers routinely share
+//! a factor. The seven agreeing sessions were agreeing about their own homogeneity.
+//!
+//! So the device's step is **at most 128 ns**, possibly less, and 1024 was never a measurement of
+//! it. Note which session supplied the tighter bound: a cold session is invalid evidence about the
+//! TERM and perfectly valid evidence about the INSTRUMENT, because its durations are integer tick
+//! counts on the same counter whatever the clocks were doing.
+//!
+//! **What that does to the two wrong claims.**
+//!
+//! * "The 8.3% spread was one lattice step." **False.** At `quantum <= 128` the reported median's
+//!   lattice is `<= 32 ns`, so Revision 1's 512 ns spread was at least SIXTEEN lattice steps and
+//!   its 6144 ns signal was at least ~48 quanta wide, not six. That spread was REAL session
+//!   variation. The instrument was never the thing being measured there.
+//! * "`256 / 6144 = 4.2%` is the resolution floor this gate sits above." **Loose, in the
+//!   flattering direction.** The true floor is `<= 32 / 6144 = 0.5%`. The gate's VERDICT is
+//!   unchanged either way — 4.2% and 0.5% are both under the 10% protocol tolerance, so the
+//!   lattice term never bound and `effective_max` was 10% in both readings — but a reader who took
+//!   4.2% for the instrument's resolution was told the instrument was eight times blunter than it
+//!   is.
+//!
+//! **The direction of the error, stated plainly.** The instrument is FINER than this file claimed.
+//! That is the safe direction for every number already transcribed here: nothing that passed
+//! should have failed. It is the unsafe direction for INTERPRETATION, because an overstated
+//! quantum is exactly what excuses a real spread as quantisation — which is what the superseded
+//! sentence did.
+//!
+//! **What was changed, and what deliberately was not.** The MEASURED literals below are untouched:
+//! they are what these sessions measured, and a measured literal is re-measured, never adjusted.
+//! [`SV0_S1_5_QUANTUM_MAX_NS`] and [`SV0_S1_5_MEDIAN_LATTICE_MAX_NS`] are the same numbers under
+//! names that say "bound". What changed is (a) the runner now prints the evidence a bound rests on
+//! (`distinct_ticks`, `min_tick_gap`, `tick_span`), (b) these sessions predate that field so
+//! [`SV0_S1_5_QUANTUM_DISTINCT_TICKS`] is `None`, and (c) a bound with no recorded evidence — or
+//! with too little — is NOT ALLOWED TO WIDEN the spread gate (see
+//! [`sv0_s1_5_measurement_meets_its_gates`]). Re-measuring this rung under the corrected harness is
+//! what replaces the literals; until then the coarse bound is inert rather than flattering.
 //!
 //! ## What was done about it, and what was deliberately NOT done
 //!
@@ -105,12 +154,14 @@
 //!
 //! 1. **The counterbalance halves the lattice, twice.** A quadruple statistic is `(d1 + d2)/2` —
 //!    a half-sum of two multiples of the quantum, so it lands on a `quantum/2` lattice; an even
-//!    quadruple count halves that again at the median. At the observed `quantum = 1024 ns` the
-//!    reported median's lattice becomes 256 ns, i.e. `256 / 6144 = 4.2%` of the signal — under the
-//!    10% gate, so the gate can once again bind on something real. This is genuine dithering, not
-//!    an arithmetic trick: the per-pair band spans ~12 quanta, so the two deltas being averaged
-//!    routinely fall on DIFFERENT lattice points. (Were every sample identical it would buy
-//!    nothing, and the measured `tick_gcd` would say so.)
+//!    quadruple count halves that again at the median. At the bound these sessions recorded
+//!    (`quantum <= 1024 ns`) the reported median's lattice is `<= 256 ns`, i.e. `<= 4.2%` of the
+//!    signal — under the 10% gate, so the gate can bind on something real. Under S5's tighter
+//!    `quantum <= 128 ns` it is `<= 0.5%`, so this change bought far more headroom than it was
+//!    credited with; see the CORRECTION section for why the 1024 was a loose bound. This is
+//!    genuine dithering, not an arithmetic trick: the per-pair band spans dozens of quanta, so the
+//!    two deltas being averaged routinely fall on DIFFERENT lattice points. (Were every sample
+//!    identical it would buy nothing, and `distinct_ticks` on the `RESOLUTION:` line would say so.)
 //! 2. **The sample size is raised from 40 to 200.** The median's sampling SE is `1.253·σ/√n`;
 //!    Revision 1's `p10..p90` band implies `σ ≈ 4.8 µs`, so at `n = 40` the session median carried
 //!    an SE near 15% of the signal — larger than the 10% gate it was read against, meaning a
@@ -123,10 +174,10 @@
 //! would measure something S1's adequacy oracle never certified. Worse, §7 clause 3 compares S5's
 //! delta against `2×` this reference, so S5 would have to be moved to the same altered scene or
 //! the comparison is meaningless. The two changes above buy the needed resolution at zero cost to
-//! what the number MEANS, so the scene stays exactly as certified. If the measured lattice turns
-//! out coarser than the 1024 ns inferred above, [`sv0_s1_5_instrument_resolves_its_signal`] goes
-//! RED and says so in those terms — a scene change is then the remedy of last resort, and it must
-//! be applied to S5 in the same breath.
+//! what the number MEANS, so the scene stays exactly as certified. If the measured lattice BOUND
+//! turns out coarser than the 1024 ns inferred above, [`sv0_s1_5_instrument_resolves_its_signal`]
+//! goes RED and says so in those terms — a scene change is then the remedy of last resort, and it
+//! must be applied to S5 in the same breath.
 //!
 //! # ⚠️ The plan's transfer claim is INEXACT, in the false-GREEN direction
 //!
@@ -212,8 +263,10 @@
 //! VB-SV0-S1.5 mode=armed quads=… samples=… extent=…x… median_delta_ns=…
 //!             median_order_bias_ns=… median_armed_ns=… median_cleared_ns=…
 //!             p10_delta_ns=… p90_delta_ns=… p10_bias_ns=… p90_bias_ns=…
-//! VB-SV0-S1.5 RESOLUTION: timestamp_period_ns=… tick_gcd=… quantum_ns=…
-//!             median_lattice_ns=… timestamp_valid_bits=… timestamp_compute_and_graphics=…
+//!             median_delta_first_half_ns=… median_delta_second_half_ns=…
+//! VB-SV0-S1.5 RESOLUTION: timestamp_period_ns=… tick_gcd=… distinct_ticks=…
+//!             min_tick_gap=… tick_span=… quantum_max_ns=… median_lattice_max_ns=…
+//!             timestamp_valid_bits=… timestamp_compute_and_graphics=…
 //! ```
 //!
 //! Transcribe, into the MEASURED block below:
@@ -226,15 +279,28 @@
 //! | null `median_delta_ns` | [`SV0_S1_5_NULL_MEDIAN_DELTA_NS`] |
 //! | null `median_order_bias_ns` | [`SV0_S1_5_NULL_ORDER_BIAS_NS`] |
 //! | `timestamp_period_ns` | [`SV0_S1_5_TIMESTAMP_PERIOD_NS`] |
-//! | `quantum_ns` | [`SV0_S1_5_QUANTUM_NS`] |
-//! | `median_lattice_ns` | [`SV0_S1_5_MEDIAN_LATTICE_NS`] |
+//! | `quantum_max_ns`, POOLED by GCD over all four sessions | [`SV0_S1_5_QUANTUM_MAX_NS`] |
+//! | `median_lattice_max_ns`, recomputed from the pooled bound | [`SV0_S1_5_MEDIAN_LATTICE_MAX_NS`] |
+//! | `distinct_ticks` of the session that supplied the pooled bound | [`SV0_S1_5_QUANTUM_DISTINCT_TICKS`] |
 //! | median of the three armed medians | [`SV0_DEFERRED_TERM_REFERENCE_NS`] |
 //!
+//! ⚠️ **The `RESOLUTION:` line states BOUNDS, so sessions that disagree are not contradicting each
+//! other.** `quantum_max_ns` is `G · gcd(observed multipliers)` — a MULTIPLE of the device's step
+//! whenever the sample is homogeneous. Four sessions therefore yield four upper bounds on ONE
+//! device property, and the strongest statement they jointly support is their **GCD**: not a
+//! majority vote, and not "pick one". Transcribe the pooled value together with the
+//! `distinct_ticks` of the session that produced it, because a bound with no evidence behind it is
+//! refused as a gate-widener downstream. `timestamp_period_ns`, `timestamp_valid_bits` and
+//! `timestamp_compute_and_graphics` ARE flat device properties and must agree exactly; a
+//! disagreement THERE is a real finding.
+//!
 //! Also CHECK, and report rather than transcribe: that `extent` reads `512x512` on every session
-//! (an OS-clamped window would silently measure a different per-pixel workload), and that
-//! `samples` is close to `4 * quads` (a large shortfall means the stream was dropping frames).
-//! The `RESOLUTION:` values must agree across all four sessions — they are device properties, so a
-//! disagreement is itself a finding.
+//! (an OS-clamped window would silently measure a different per-pixel workload); that
+//! `samples` is close to `4 * quads` (a large shortfall means the stream was dropping frames); and
+//! that each session's `median_delta_first_half_ns` and `median_delta_second_half_ns` agree with
+//! each other — they are the in-session ramp discriminator, and halves that disagree mean the
+//! session was still settling while it recorded. Cold starts at the SESSION level are handled the
+//! way rung S5's runbook handles them: with a DISCARDED warm-up session, run first.
 //!
 //! Then run the CPU gates:
 //!
@@ -311,6 +377,27 @@ const SV0_SESSION_SPREAD_MAX: f64 = 0.10;
 /// produced the counterbalanced design. The number is unchanged; the harness moved.
 const SV0_NULL_CONTROL_MAX_FRACTION: f64 = 0.10;
 
+/// **The evidence floor a lattice BOUND must clear before it is allowed to widen the spread gate.**
+///
+/// The `RESOLUTION:` line's `quantum_max_ns` is `G · gcd(m_1 … m_n)` over the `n` DISTINCT observed
+/// durations. Under the generic model — multipliers behaving like independent uniform integers —
+/// `P(gcd(m) = 1) = 1/ζ(n)`, so the chance the bound OVERSTATES the step is `1 − 1/ζ(n)`:
+/// 1.70% at `n = 6`, **0.83% at `n = 7`**, 0.42% at `n = 8`. Seven is the smallest `n` that puts
+/// the overstatement risk under 1%, and that derivation — not any observed count — is where this
+/// number comes from.
+///
+/// Two honesty notes it must be read with. Clustered durations are NOT generic, so this is a floor
+/// on the evidence and never a guarantee; and the bound also divides `min_tick_gap`
+/// deterministically, so a session whose distinct values sit far apart cannot produce a tight bound
+/// however many of them there are. Read both figures off the `RESOLUTION:` line.
+///
+/// What clearing it licenses is narrow and one-directional: ONLY the widening of
+/// [`SV0_SESSION_SPREAD_MAX`] in [`sv0_s1_5_measurement_meets_its_gates`]. A bound that fails it is
+/// still printed, still transcribed, and still read by
+/// [`sv0_s1_5_instrument_resolves_its_signal`] — it simply cannot make the gate more permissive,
+/// which is the only direction a degenerate sample could ever flatter a result.
+const SV0_LATTICE_MIN_DISTINCT_TICKS: usize = 7;
+
 // ===========================================================================================
 // MEASURED values — do not edit these literals to make a failing run pass
 // ===========================================================================================
@@ -358,23 +445,57 @@ const SV0_S1_5_NULL_ORDER_BIAS_NS: f64 = 0.0;
 /// timestamp TICK. The SCALE, not the STEP.
 const SV0_S1_5_TIMESTAMP_PERIOD_NS: f64 = 1.0;
 
-/// The measured `quantum_ns`: the GCD of every raw per-frame tick count the session read, times
-/// [`SV0_S1_5_TIMESTAMP_PERIOD_NS`]. The counter's actual STEP, in nanoseconds — the smallest
-/// difference any single bracket on this device can express.
+/// The measured `quantum_max_ns`: the GCD of every raw per-frame tick count the session read, times
+/// [`SV0_S1_5_TIMESTAMP_PERIOD_NS`]. An **UPPER BOUND** on the counter's step, in nanoseconds —
+/// `quantum <= 1024`, never `quantum == 1024`.
 ///
-/// No Vulkan limit reports it, hence the empirical recovery. Revision 1's printed values imply
-/// 1024 ns on this hardware (every `p10`/`p90` was a multiple of 1024; only the even-count medians
-/// showed 512s); this literal replaces that inference with a measurement.
-const SV0_S1_5_QUANTUM_NS: f64 = 1024.0;
+/// ⚠️ Read the module doc's CORRECTION section before using this number for anything. It is a
+/// MEASURED literal and is left exactly as these sessions produced it, but the interpretation it
+/// once carried ("the counter's actual STEP") was wrong: a GCD over observed durations is a
+/// MULTIPLE of the step whenever the sample is homogeneous, and rung S5 later observed **128 ns**
+/// on the same device. Every session that produced this 1024 saw a fixed-workload dispatch whose
+/// durations clustered on a handful of 1024-multiples.
+///
+/// The name carries the `MAX` so no reader can restore the equality by accident, and
+/// [`SV0_S1_5_QUANTUM_DISTINCT_TICKS`] is what stops the loose bound from widening any gate.
+const SV0_S1_5_QUANTUM_MAX_NS: f64 = 1024.0;
 
-/// The measured `median_lattice_ns`: the lattice the REPORTED session median lands on, which is
-/// `quantum_ns / 2` (each quadruple statistic is a half-sum of two multiples of the quantum) and
-/// `quantum_ns / 4` when the quadruple count is even and the median averages two order statistics.
+/// The measured `median_lattice_max_ns`: an upper bound on the lattice the REPORTED session median
+/// lands on, which is `quantum / 2` (each quadruple statistic is a half-sum of two multiples of the
+/// quantum) and `quantum / 4` when the quadruple count is even and the median averages two order
+/// statistics.
 ///
-/// This is the smallest non-zero difference two sessions' medians can show. A cross-session spread
-/// at or below it is quantisation, not stability — which is exactly the confusion that made
-/// Revision 1's "8.3% spread" unreadable, since `512 / 6144` was one lattice step.
-const SV0_S1_5_MEDIAN_LATTICE_NS: f64 = 256.0;
+/// Bounds the smallest non-zero difference two sessions' medians can show. A cross-session spread
+/// at or below it would be quantisation rather than stability — but see the module doc's CORRECTION
+/// section: at S5's tighter `quantum <= 128` this bound is `<= 32 ns`, so the 512 ns spread these
+/// sessions show is at least sixteen lattice steps of REAL variation, and the "one lattice step"
+/// reading this constant once supported was an artifact of a loose bound.
+const SV0_S1_5_MEDIAN_LATTICE_MAX_NS: f64 = 256.0;
+
+/// How many DISTINCT tick values [`SV0_S1_5_QUANTUM_MAX_NS`] rests on — `None` because these
+/// sessions ran the Rev-6 harness, which did not print `distinct_ticks`.
+///
+/// `None` is not a gap to be filled with a guess. It means "this bound has no recorded evidence",
+/// and [`sv0_s1_5_measurement_meets_its_gates`] treats that exactly like insufficient evidence:
+/// the lattice may not widen the spread gate. That is why the correction needs no re-run to be
+/// SAFE — the loose bound is inert, not flattering. Re-measuring this rung under the corrected
+/// harness is what fills it in, and the module doc's runbook says how.
+const SV0_S1_5_QUANTUM_DISTINCT_TICKS: Option<usize> = None;
+
+/// **Cross-rung evidence about the same device property.** The tightest `quantum_max_ns` rung S5's
+/// eight sessions produced on this machine, in nanoseconds.
+///
+/// Not an S1.5 measurement and deliberately not used as one: it does not replace
+/// [`SV0_S1_5_QUANTUM_MAX_NS`], which stays what these sessions measured. It is recorded here
+/// because it is what falsified this file's earlier equality claim, and
+/// [`sv0_s1_5_lattice_bound_is_a_bound_not_an_equality`] asserts its DIRECTION — a "correction"
+/// that loosened the bound would be the flattering direction and must fail loudly.
+///
+/// The session that produced it was the first of a fresh process set and is discarded as a
+/// measurement of the TERM. It remains valid evidence about the INSTRUMENT: its durations are
+/// integer tick counts on the same counter whatever the clocks were doing, and it is precisely its
+/// wide range that made the tighter bound recoverable.
+const SV0_S5_CROSS_RUNG_QUANTUM_MAX_NS: f64 = 128.0;
 
 /// **`SV0_DEFERRED_TERM_REFERENCE`** (§6 S1.5) — the Deferred cost, in nanoseconds, of the SDF
 /// soft-shadow + contact-AO term on S1's fixture at 512², measured by this bench.
@@ -532,13 +653,33 @@ fn sv0_s1_5_protocol_constants_are_pre_registered() {
 struct Measured {
     /// `timestamp_period_ns` — ns per GPU timestamp tick (the SCALE).
     period_ns: f64,
-    /// `quantum_ns` — the counter's measured STEP, in ns.
-    quantum_ns: f64,
-    /// `median_lattice_ns` — the lattice the reported session median lands on.
-    lattice_ns: f64,
+    /// `quantum_max_ns` — an UPPER BOUND on the counter's step, in ns.
+    quantum_max_ns: f64,
+    /// `median_lattice_max_ns` — an upper bound on the lattice the reported session median lands
+    /// on.
+    lattice_max_ns: f64,
+    /// How many distinct tick values the bound rests on; `None` when the session set did not
+    /// record it.
+    lattice_distinct: Option<usize>,
     /// The MEDIAN of the three session medians — the rung's central value, and what
     /// [`SV0_DEFERRED_TERM_REFERENCE_NS`] must equal.
     central_ns: f64,
+}
+
+impl Measured {
+    /// Whether the transcribed lattice BOUND is allowed to widen the spread gate.
+    ///
+    /// A GCD over a homogeneous sample is a multiple of the true step, and a coarser lattice
+    /// widens `max(protocol, lattice_floor)`. That is the ONE direction in which a degenerate
+    /// sample can flatter a result, so the widening is licensed by evidence rather than granted by
+    /// default: the bound must rest on at least [`SV0_LATTICE_MIN_DISTINCT_TICKS`] distinct tick
+    /// values, and an unrecorded count (`None`) is treated as no evidence at all.
+    ///
+    /// Refusing to widen can only make the gate STRICTER, so a false `false` here costs a re-run,
+    /// never a wrong verdict.
+    fn lattice_may_widen(&self) -> bool {
+        self.lattice_distinct.is_some_and(|n| n >= SV0_LATTICE_MIN_DISTINCT_TICKS)
+    }
 }
 
 /// Every transcribed literal is present; returns them for the gates to read.
@@ -552,8 +693,8 @@ fn measured() -> Measured {
         && SV0_S1_5_NULL_MEDIAN_DELTA_NS.is_finite()
         && SV0_S1_5_NULL_ORDER_BIAS_NS.is_finite()
         && SV0_S1_5_TIMESTAMP_PERIOD_NS.is_finite()
-        && SV0_S1_5_QUANTUM_NS.is_finite()
-        && SV0_S1_5_MEDIAN_LATTICE_NS.is_finite()
+        && SV0_S1_5_QUANTUM_MAX_NS.is_finite()
+        && SV0_S1_5_MEDIAN_LATTICE_MAX_NS.is_finite()
         && SV0_DEFERRED_TERM_REFERENCE_NS.is_finite();
     assert!(
         measured,
@@ -569,10 +710,15 @@ fn measured() -> Measured {
 
     let mut sorted = SV0_S1_5_SESSION_MEDIAN_DELTA_NS;
     sorted.sort_by(|a, b| a.partial_cmp(b).expect("invariant: transcribed medians are finite"));
+    // `SV0_S1_5_QUANTUM_DISTINCT_TICKS` is deliberately absent from the completeness check above:
+    // `None` is a RECORDED state for this rung ("the Rev-6 harness did not print it"), not a
+    // forgotten transcription, and it is already the most conservative possible value — it forbids
+    // the widening outright.
     Measured {
         period_ns: SV0_S1_5_TIMESTAMP_PERIOD_NS,
-        quantum_ns: SV0_S1_5_QUANTUM_NS,
-        lattice_ns: SV0_S1_5_MEDIAN_LATTICE_NS,
+        quantum_max_ns: SV0_S1_5_QUANTUM_MAX_NS,
+        lattice_max_ns: SV0_S1_5_MEDIAN_LATTICE_MAX_NS,
+        lattice_distinct: SV0_S1_5_QUANTUM_DISTINCT_TICKS,
         central_ns: sorted[SV0_BENCH_SESSIONS / 2],
     }
 }
@@ -602,29 +748,29 @@ fn sv0_s1_5_measurement_meets_its_gates() {
     }
 
     // The transcribed RESOLUTION line must be internally consistent, or the lattice the spread
-    // gate is read against is not the one the device reported. `quantum_ns` is an INTEGER number
-    // of ticks (it is a GCD of tick counts) scaled by the period, and `median_lattice_ns` is
-    // `quantum_ns` over 2 or 4. Both are cheap to check and both catch a mis-transcription that
-    // would otherwise quietly move a gate.
+    // gate is read against is not the one the device reported. `quantum_max_ns` is an INTEGER
+    // number of ticks (it is a GCD of tick counts) scaled by the period, and
+    // `median_lattice_max_ns` is `quantum_max_ns` over 2 or 4. Both are cheap to check and both
+    // catch a mis-transcription that would otherwise quietly move a gate.
     assert!(
-        m.period_ns > 0.0 && m.quantum_ns > 0.0,
-        "the transcribed timestamp period ({}) and quantum ({}) must both be positive — a zero \
-         here would make the resolution floor vanish and the spread gate look trustworthy for the \
-         wrong reason",
+        m.period_ns > 0.0 && m.quantum_max_ns > 0.0,
+        "the transcribed timestamp period ({}) and quantum bound ({}) must both be positive — a \
+         zero here would make the resolution floor vanish and the spread gate look trustworthy for \
+         the wrong reason",
         m.period_ns,
-        m.quantum_ns
+        m.quantum_max_ns
     );
-    let tick_gcd = m.quantum_ns / m.period_ns;
+    let tick_gcd = m.quantum_max_ns / m.period_ns;
     assert!(
         (tick_gcd - tick_gcd.round()).abs() <= 1e-6 && tick_gcd.round() >= 1.0,
-        "quantum_ns / timestamp_period_ns = {tick_gcd} is not a whole number of ticks; the \
-         RESOLUTION line was mis-transcribed (the quantum IS a tick GCD times the period)"
+        "quantum_max_ns / timestamp_period_ns = {tick_gcd} is not a whole number of ticks; the \
+         RESOLUTION line was mis-transcribed (the quantum bound IS a tick GCD times the period)"
     );
-    let lattice_ratio = m.quantum_ns / m.lattice_ns;
+    let lattice_ratio = m.quantum_max_ns / m.lattice_max_ns;
     assert!(
         (lattice_ratio - 2.0).abs() <= 1e-6 || (lattice_ratio - 4.0).abs() <= 1e-6,
-        "median_lattice_ns must be quantum_ns / 2 (odd quadruple count) or quantum_ns / 4 (even), \
-         but quantum/lattice = {lattice_ratio}; the RESOLUTION line was mis-transcribed"
+        "median_lattice_max_ns must be quantum_max_ns / 2 (odd quadruple count) or / 4 (even), but \
+         quantum/lattice = {lattice_ratio}; the RESOLUTION line was mis-transcribed"
     );
 
     let central = m.central_ns;
@@ -643,34 +789,49 @@ fn sv0_s1_5_measurement_meets_its_gates() {
 
     // The EFFECTIVE spread gate. A gate finer than the smallest non-zero difference the
     // instrument can print is unreadable: below the lattice, "spread" and "quantisation" are the
-    // same number, which is exactly how Revision 1's 8.3% (one lattice step at the time) passed
-    // while carrying no information. So the gate is the COARSER of the pre-registered 10% and the
-    // measured lattice — and, so this can never be a silent widening,
-    // `sv0_s1_5_instrument_resolves_its_signal` asserts separately that the lattice term does NOT
-    // bind. If it ever does, that test goes red and names the fact; this one does not paper over
-    // it.
+    // same number. So the gate is the COARSER of the pre-registered 10% and the measured lattice —
+    // and, so this can never be a silent widening, `sv0_s1_5_instrument_resolves_its_signal`
+    // asserts separately that the lattice term does NOT bind.
+    //
+    // NEW, from the S5 finding: the lattice is a BOUND whose tightness depends on how varied the
+    // sample happened to be, so a degenerate sample can hand this `max()` a flattering number.
+    // The widening is therefore licensed by EVIDENCE (`Measured::lattice_may_widen`) rather than
+    // granted by default; without it the gate stays at the protocol value, which can only ever be
+    // stricter.
     let mut sorted = SV0_S1_5_SESSION_MEDIAN_DELTA_NS;
     sorted.sort_by(|a, b| a.partial_cmp(b).expect("invariant: transcribed medians are finite"));
     let spread = (sorted[SV0_BENCH_SESSIONS - 1] - sorted[0]) / central;
-    let lattice_floor = m.lattice_ns / central.abs();
-    let effective_max = SV0_SESSION_SPREAD_MAX.max(lattice_floor);
-    let bound_by = if lattice_floor > SV0_SESSION_SPREAD_MAX {
-        "the instrument's measured quantisation lattice"
+    let lattice_floor = m.lattice_max_ns / central.abs();
+    let may_widen = m.lattice_may_widen();
+    let effective_max =
+        if may_widen { SV0_SESSION_SPREAD_MAX.max(lattice_floor) } else { SV0_SESSION_SPREAD_MAX };
+    let bound_by = if !may_widen {
+        "the pre-registered 10% protocol gate (the lattice bound may NOT widen it: it rests on too \
+         few distinct tick values, or on none that were recorded)"
+    } else if lattice_floor > SV0_SESSION_SPREAD_MAX {
+        "the instrument's measured quantisation lattice bound"
     } else {
         "the pre-registered 10% protocol gate"
     };
     println!(
         "VB-SV0-S1.5 gate: spread={spread:.4} effective_max={effective_max:.4} \
-         (protocol={SV0_SESSION_SPREAD_MAX}, lattice_floor={lattice_floor:.4}) bound by {bound_by}"
+         (protocol={SV0_SESSION_SPREAD_MAX}, lattice_floor<={lattice_floor:.4}, \
+         lattice_evidence={:?}, may_widen={may_widen}) bound by {bound_by}",
+        m.lattice_distinct
     );
     assert!(
         spread <= effective_max,
         "S1.5 RED: cross-session spread {spread:.4} exceeds the effective gate {effective_max:.4} \
-         (protocol {SV0_SESSION_SPREAD_MAX}, measured lattice floor {lattice_floor:.4}) over \
-         medians {SV0_S1_5_SESSION_MEDIAN_DELTA_NS:?}. The instrument is not trustworthy at this \
+         (protocol {SV0_SESSION_SPREAD_MAX}, measured lattice floor <= {lattice_floor:.4}, \
+         allowed to widen the gate: {may_widen}) over medians \
+         {SV0_S1_5_SESSION_MEDIAN_DELTA_NS:?}. The instrument is not trustworthy at this \
          scale, so §7's cost clause cannot be adjudicated — this is §7 clause 5's defined \
          outcome (an owner VALUES call: revert, or ship unmeasured with the spread recorded and \
-         clause 3 explicitly waived), NOT a licence to widen the gate"
+         clause 3 explicitly waived), NOT a licence to widen the gate. If may_widen is false, the \
+         lattice term was REFUSED because its bound rests on fewer than \
+         {SV0_LATTICE_MIN_DISTINCT_TICKS} distinct tick values (or on an unrecorded count) — \
+         re-measure with the corrected harness rather than reasoning about what the lattice \
+         'probably' is"
     );
 
     let null_budget = SV0_NULL_CONTROL_MAX_FRACTION * central;
@@ -722,23 +883,122 @@ fn sv0_s1_5_instrument_resolves_its_signal() {
         "the armed median is {central} ns; resolution cannot be judged against a non-positive \
          signal (see sv0_s1_5_measurement_meets_its_gates for what that means)"
     );
-    let lattice_floor = m.lattice_ns / central;
+    let lattice_floor = m.lattice_max_ns / central;
     println!(
-        "VB-SV0-S1.5 resolution: quantum_ns={} median_lattice_ns={} signal_ns={central} \
-         lattice_floor={lattice_floor:.4} vs protocol {SV0_SESSION_SPREAD_MAX}",
-        m.quantum_ns, m.lattice_ns
+        "VB-SV0-S1.5 resolution: quantum<={} ns median_lattice<={} ns signal_ns={central} \
+         lattice_floor<={lattice_floor:.4} vs protocol {SV0_SESSION_SPREAD_MAX} \
+         (evidence: {:?} distinct tick values)",
+        m.quantum_max_ns, m.lattice_max_ns, m.lattice_distinct
     );
     assert!(
         lattice_floor <= SV0_SESSION_SPREAD_MAX,
         "S1.5 RESOLUTION-BOUND: this instrument cannot resolve better than ±{:.1}% at this signal \
-         size ({} ns lattice on a {central} ns term), which is coarser than the \
+         size ({} ns lattice bound on a {central} ns term), which is coarser than the \
          {SV0_SESSION_SPREAD_MAX} protocol gate. The cross-session spread therefore cannot \
          distinguish drift from quantisation, and §7's cost clause cannot be adjudicated on it. \
          This is §7 clause 5's defined outcome — a legitimate result, not a failure to code \
          around. See this test's doc for the three remedies; NONE of them is editing \
-         SV0_SESSION_SPREAD_MAX or SV0_S1_5_MEDIAN_LATTICE_NS",
+         SV0_SESSION_SPREAD_MAX or SV0_S1_5_MEDIAN_LATTICE_MAX_NS. Note the lattice is an UPPER \
+         bound, so a failure here may also mean the bound is merely LOOSE — re-measuring with the \
+         corrected harness, which prints distinct_ticks and min_tick_gap, distinguishes 'the \
+         instrument is blunt' from 'this sample was homogeneous'",
         lattice_floor * 100.0,
-        m.lattice_ns
+        m.lattice_max_ns
+    );
+}
+
+/// **The lattice figure is a BOUND, and this test is where that is stated in code.**
+///
+/// # The claim this file used to make, and why it was wrong
+///
+/// Revisions up to Rev 6 concluded "the counter's real step is 1024 ns", and read Revision 1's
+/// 8.3% cross-session spread as "exactly one half-quantum — the gate measured its own resolution".
+/// Both rest on treating a GCD over observed durations as a measurement of the hardware step. It is
+/// not: for durations `t_i = m_i · G` the GCD returns `G · gcd(m_1 … m_n)`, which equals `G` only
+/// when the observed multipliers are setwise coprime. A fixed-workload dispatch produces durations
+/// clustered on a handful of values, and clustered multipliers routinely share a factor.
+///
+/// Rung S5 supplied the counter-example: eight sessions of the same protocol on the same device,
+/// seven reporting `tick_gcd = 1024` and one — the one whose durations ranged widest — reporting
+/// **128**. So `G <= 128`, this rung's 1024 was a bound eight times looser than necessary, and the
+/// "one half-quantum" reading of the 8.3% spread was wrong: that spread was real session variation
+/// across at least sixteen lattice steps.
+///
+/// # What is asserted here
+///
+/// The DIRECTION of the correction, which is the only way this arithmetic can be wrong and still
+/// look right. A tighter bound makes every downstream gate STRICTER; a "correction" that loosened
+/// it would widen the gate, which is the false-GREEN direction and exactly what a later reader
+/// under pressure would be tempted to write. So the cross-rung figure must be strictly below this
+/// rung's own, and both must be positive.
+///
+/// # What is only reported
+///
+/// The numbers themselves. There is no pass/fail threshold on a device property, and inventing one
+/// would be the fitted-to-the-observation defect this campaign keeps finding one level down.
+#[test]
+fn sv0_s1_5_lattice_bound_is_a_bound_not_an_equality() {
+    let m = measured();
+    println!(
+        "VB-SV0-S1.5 lattice bound: this rung's sessions support quantum <= {} ns (evidence: {:?} \
+         distinct tick values). Rung S5's sessions, on the SAME device, support quantum <= {} ns — \
+         {:.1}x tighter. The earlier 'the counter's real step is 1024 ns' was an artifact of \
+         SAMPLE HOMOGENEITY, not a device measurement.",
+        m.quantum_max_ns,
+        m.lattice_distinct,
+        SV0_S5_CROSS_RUNG_QUANTUM_MAX_NS,
+        m.quantum_max_ns / SV0_S5_CROSS_RUNG_QUANTUM_MAX_NS
+    );
+    // The quadruple count is even on every session of this rung (200), so the reported median
+    // lands on `quantum / 4`; deriving the corrected lattice rather than writing it down keeps it
+    // tied to the one cross-rung literal above.
+    let mut sorted = SV0_S1_5_SESSION_MEDIAN_DELTA_NS;
+    sorted.sort_by(|a, b| a.partial_cmp(b).expect("invariant: transcribed medians are finite"));
+    let peak_to_peak = sorted[SV0_BENCH_SESSIONS - 1] - sorted[0];
+    let corrected_lattice = SV0_S5_CROSS_RUNG_QUANTUM_MAX_NS / 4.0;
+    println!(
+        "  Consequence for this file's own numbers: the median lattice is <= {corrected_lattice} \
+         ns, not {} ns, so the {peak_to_peak} ns peak-to-peak these sessions show is >= {:.0} \
+         lattice steps of REAL variation. The gate's verdict is unchanged (both readings sit under \
+         the {} protocol tolerance, so the lattice term never bound), but 'the spread was \
+         quantisation' is not available as an explanation of it.",
+        m.lattice_max_ns,
+        peak_to_peak / corrected_lattice,
+        SV0_SESSION_SPREAD_MAX
+    );
+
+    // Compile-time: both operands are literals, and a non-positive bound would make every
+    // resolution floor vanish — that must fail the BUILD, not a test run someone can forget to
+    // invoke. Safe as a `const` block precisely because this constant is a recorded observation
+    // and never the UNMEASURED sentinel (a const-block assertion on NaN would break the
+    // workspace, which is why the MEASURED literals are asserted at runtime instead).
+    // Const-eval panics carry no formatting, hence the static text.
+    const {
+        assert!(
+            SV0_S5_CROSS_RUNG_QUANTUM_MAX_NS > 0.0,
+            "the cross-rung quantum bound must be positive; a non-positive one would make every \
+             resolution floor vanish and every gate look trustworthy for the wrong reason"
+        );
+    }
+    assert!(
+        SV0_S5_CROSS_RUNG_QUANTUM_MAX_NS < m.quantum_max_ns,
+        "SV0_S5_CROSS_RUNG_QUANTUM_MAX_NS ({SV0_S5_CROSS_RUNG_QUANTUM_MAX_NS}) is not strictly \
+         below this rung's own bound ({}), so it is not a correction at all. A cross-rung figure \
+         may only ever TIGHTEN a bound: a looser one would widen every gate that reads the lattice, \
+         which is the false-GREEN direction. If a re-measurement genuinely produced a coarser \
+         bound, that belongs in SV0_S1_5_QUANTUM_MAX_NS as a re-measured literal — not here",
+        m.quantum_max_ns
+    );
+    // The bound must divide into whole ticks, exactly like the rung's own — it is the same kind of
+    // number (a tick GCD times the period), and a mis-transcription that broke that would be a
+    // number from a different device or a different scale.
+    let cross_ticks = SV0_S5_CROSS_RUNG_QUANTUM_MAX_NS / m.period_ns;
+    assert!(
+        (cross_ticks - cross_ticks.round()).abs() <= 1e-6 && cross_ticks.round() >= 1.0,
+        "the cross-rung bound is {cross_ticks} ticks at this rung's {} ns period, which is not a \
+         whole number — the two rungs did not read the same counter, or one figure was \
+         mis-transcribed",
+        m.period_ns
     );
 }
 
@@ -774,8 +1034,8 @@ fn sv0_s1_5_order_bias_is_reported() {
     ];
     println!(
         "VB-SV0-S1.5 order bias: armed={:?} null={SV0_S1_5_NULL_ORDER_BIAS_NS} \
-         signal_ns={central} lattice_ns={}",
-        SV0_S1_5_SESSION_ORDER_BIAS_NS, m.lattice_ns
+         signal_ns={central} lattice_ns<={}",
+        SV0_S1_5_SESSION_ORDER_BIAS_NS, m.lattice_max_ns
     );
     for (i, b) in biases.iter().enumerate() {
         println!(
@@ -787,7 +1047,13 @@ fn sv0_s1_5_order_bias_is_reported() {
 
     // Sign agreement is only a claim about the world where every estimate is resolvable; below
     // the lattice it is a claim about rounding.
-    let resolvable = biases.iter().all(|b| b.abs() > m.lattice_ns);
+    //
+    // ⚠️ The lattice is an UPPER bound, so this threshold is CONSERVATIVE in the direction of not
+    // asserting: a loose bound can only suppress the assertion (calling a real sign "rounding"),
+    // never fire it on noise. That weakens the test rather than falsifying it, which is the
+    // acceptable direction here — but it is a second reason the bound's evidence matters, and it
+    // is why `Measured::lattice_may_widen` exists rather than a blanket trust in the number.
+    let resolvable = biases.iter().all(|b| b.abs() > m.lattice_max_ns);
     if resolvable {
         let positive = biases[0] > 0.0;
         assert!(
@@ -799,15 +1065,17 @@ fn sv0_s1_5_order_bias_is_reported() {
              arithmetically harmless, but it is no longer the reason the numbers are trustworthy \
              — say so when reporting, and treat the null control as the only evidence that the \
              design works",
-            m.lattice_ns
+            m.lattice_max_ns
         );
     } else {
         println!(
-            "  NOTE: at least one bias estimate is at or below the {} ns lattice, so sign \
+            "  NOTE: at least one bias estimate is at or below the {} ns lattice BOUND, so sign \
              agreement is not asserted — an unresolvable estimate's sign is rounding, not \
-             evidence. A bias this small also means the counterbalance was not load-bearing on \
-             these runs, which is worth stating rather than assuming.",
-            m.lattice_ns
+             evidence. Because the lattice is an upper bound, a LOOSE one suppresses this \
+             assertion more often than a tight one would; the corrected harness's distinct_ticks \
+             is what says whether that happened. A bias this small also means the counterbalance \
+             was not load-bearing on these runs, which is worth stating rather than assuming.",
+            m.lattice_max_ns
         );
     }
 }

@@ -149,6 +149,22 @@ const SV0_BENCH_DEFAULT_QUADS: u32 = 200;
 /// would survive a non-multiple (it would simply drop one partial quadruple), but a warm-up that
 /// silently changes which arm leads is the kind of asymmetry a counterbalanced protocol exists to
 /// exclude.
+///
+/// ⚠️ **20 → 100 was TRIED at rung S5 and REVERTED — a measured negative result, and it falsifies
+/// the disclosure block's own remedy.** The split row's first two sessions showed half-split
+/// medians of `10752 / 19712` and `10240 / 19456` (a ~2× within-session ramp) which pushed its
+/// cross-session spread to 32% against a 10% gate, so the block's rule fired: *halves that disagree
+/// mean the session was still settling — raise the warm-up.* Raising it 5× moved those ratios from
+/// `0.55 / 0.53` to `0.56 / 0.56` — **no effect at all** — while the fused row, previously
+/// `12800 / 12800 / 12800` with every half agreeing, acquired a `31232` outlier whose halves read
+/// `13824 / 37888`.
+///
+/// So the ramp is **not a settling transient**, and the rule is incomplete: halves can disagree
+/// because of ONGOING drift (GPU clock/power state moving through the run) rather than because the
+/// session had not settled, and no warm-up length fixes that — a longer warm-up simply samples a
+/// different part of the same drift. The constant stays at its measured-adequate value; tuning it
+/// further without evidence is the "raise the threshold until it passes" failure this campaign
+/// gates against.
 #[cfg(windows)]
 const SV0_BENCH_WARMUP: usize = 20;
 
@@ -1155,6 +1171,147 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         }
     }
 
+    // === VB-SV0 rung S5 — the ARMED cost of the shipped SV0 term, in the VB lit-producer tail. ===
+    //
+    // The SAME counterbalanced (ABBA) interleaved protocol as the S1.5 block above — same cycle,
+    // same quadruple statistic, same drop-robust assembly, same raw-tick/lattice discipline — with
+    // ONE structural difference, and it is the reason this is a separate block rather than a
+    // parameter on that one.
+    //
+    // # S1.5 flipped a PUSH CONSTANT; S5 flips a word in a BUFFER the shader reads
+    //
+    // SV0's gate is light-header word 7 bits 5..6 (plan §3.1), not a push constant. So the A/B
+    // cannot be four bytes in the recorded command stream: it is a `LightingConfig` write that
+    // `sync_sv0_light_gate` resolves, `collect_lights` re-packs, `LightTableGeneration` bumps and
+    // `light_upload_due` copies into the fenced slot's table. Three consequences, all measured
+    // rather than assumed away:
+    //
+    // 1. **The dispatch itself is unchanged.** Same `.spv`, same pipeline, same descriptor sets,
+    //    same push, same group count. The two phases differ in the VALUE of one wave-uniform
+    //    header word the tail reads once per pixel (`vb_resolve.comp.hlsl:376`) — which is
+    //    exactly the difference SV0 ships, so this measures the shipped gate and not a proxy.
+    //
+    // 2. **The upload becomes UNIFORM after two frames, and that is load-bearing rather than
+    //    tidy.** The phase changes at cycle positions 0→1 and 2→3, i.e. twice per quadruple; each
+    //    change bumps the generation once and `FRAMES_IN_FLIGHT == 2` makes each bump cost TWO
+    //    per-slot catch-ups. Two bumps × two catch-ups over four frames ⇒ every frame past the
+    //    first uploads. `SV0_BENCH_WARMUP` is 20 frames, so no kept sample straddles the
+    //    transient.
+    //
+    //    Why it MATTERS and not just "the copy is outside the bracket": the copy is, but the
+    //    reader-side TRANSFER→COMPUTE barrier the framegraph derives for it is recorded at the
+    //    lit-producer pass — INSIDE the `VbShade` bracket. An upload cadence that differed between
+    //    the two phases would therefore put a barrier in one arm and not the other, which is a
+    //    difference in the measured span rather than around it. It does not: every kept frame
+    //    uploads, so both arms carry it and the paired difference cancels it exactly.
+    //
+    // 3. **The CPU re-pack is NOT uniform — and the counterbalance is what removes it.**
+    //    `collect_lights` rebuilds only on the two frames the phase actually moved: positions 1
+    //    (CLEARED) and 3 (ARMED). Write the re-pack contamination as `c`. Then
+    //    `d1 = m0 − m1` carries `−c` and `d2 = m3 − m2` carries `+c`, so `(d1 + d2)/2` cancels it
+    //    EXACTLY and `(d1 − d2)/2` reports it. This is the same algebra that removes the
+    //    frame-in-flight-slot offset, applied to a second contamination that only S5 has — and it
+    //    is why a strict ABAB here would have been even more wrong than it was for S1.5.
+    //
+    // # Rows
+    //
+    // Plan §6 S5 measures row 1 (`vb_resolve`, fused) and row 7 (`vb_shade_split`) — the two
+    // structurally different tails. The row is selected by the FIXTURE (`BOYKO_SV0_SSAO=1` arms
+    // the split), not by anything here; the recorder's own `note_vb_lit_producer` line is what
+    // makes the row an observation rather than an assumption, and the bench test transcribes it.
+    //
+    // Armed ONLY when `BOYKO_SV0_S5_BENCH` was read at `GpuSceneBundles::boot` time AND the device
+    // supports timestamps — `false` on EVERY non-bench run, so every line gated on `sv0_s5_bench`
+    // below is dead code there and this loop stays byte-identical to the pre-S5 path.
+    let sv0_s5_bench = host.gpu.sv0_s5_bench_armed();
+    let sv0_s5_quads: u32 = if sv0_s5_bench {
+        std::env::var("BOYKO_SV0_S5_BENCH_QUADS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(SV0_BENCH_DEFAULT_QUADS)
+            .max(1)
+    } else {
+        0
+    };
+    // The NULL CONTROL (§7 clause 5's numeric criterion): both phases request the ARMED mode, so
+    // the two configurations are IDENTICAL and the reported median is pure residual.
+    //
+    // ⚠️ State its limit rather than let a reader assume it has none. With both phases equal the
+    // header never moves, so `collect_lights` never re-packs, `light_upload_due` closes after the
+    // boot catch-up, and the null runs on a stream with NO per-frame upload and NO reader-side
+    // TRANSFER→COMPUTE barrier inside the bracket. Those two things are present in BOTH arms of
+    // the armed run — so they cancel in its paired difference and do not bias the term — but the
+    // null does not exercise them at all. It therefore bounds the second-order position effect on
+    // a strictly QUIETER stream than the one it certifies: a LOWER bound on the armed run's
+    // residual, not a replica of it.
+    let sv0_s5_null = std::env::var("BOYKO_SV0_S5_BENCH_NULL").is_ok();
+    let sv0_s5_period = ctx.device_caps().timestamp_period as f64;
+    // `(phase_counter, lit_producer_ticks)` per kept frame, preallocated ONCE (Principle 5).
+    let mut sv0_s5_samples: Vec<(u64, u64)> =
+        Vec::with_capacity(SV0_QUAD_FRAMES as usize * (sv0_s5_quads as usize + 1));
+    let mut sv0_s5_deltas: Vec<f64> = Vec::with_capacity(sv0_s5_quads as usize);
+    let mut sv0_s5_biases: Vec<f64> = Vec::with_capacity(sv0_s5_quads as usize);
+    let mut sv0_s5_phase_counter: u64 = 0;
+    let mut sv0_s5_seen: u32 = 0;
+    if sv0_s5_bench {
+        // `GpuSceneBundles::boot` already rejects `BOYKO_VB_BENCH` + `BOYKO_SV0_S5_BENCH`
+        // together, and `sv0_s5_bench_armed()`/`vb_bench_armed()` are mutually exclusive by
+        // construction. `BOYKO_SV0_BENCH` (S1.5) is a DIFFERENT collector on a Deferred-only
+        // path, so it cannot silently co-arm either — but its own block asserts against `vb_bench`
+        // and not against this one, so say it here.
+        assert!(
+            !sv0_bench,
+            "invariant: BOYKO_SV0_BENCH (S1.5, Deferred marcher) and BOYKO_SV0_S5_BENCH (S5, VB \
+             lit producer) are mutually exclusive: S1.5 requires RenderPath::Deferred and S5 \
+             requires RenderPath::VisibilityBuffer, so no single boot can satisfy both"
+        );
+        assert!(
+            !vb_bench,
+            "invariant: BOYKO_VB_BENCH and BOYKO_SV0_S5_BENCH share one VbTimestampCollector and \
+             cannot both drive it"
+        );
+        // The `VbTimedPass::VbShade` pair is written by whichever lit producer `record_vb`
+        // selects — including `vb_shade_split` since rung S5 bracketed it. What it still requires
+        // is that SOME lit producer runs: an SDF-only VB leg records none, leaving the pair
+        // reset-but-never-written and hanging the `VK_QUERY_RESULT_WAIT_BIT` readback. Fail
+        // loudly here instead of on the first frame.
+        assert!(
+            matches!(
+                host.resolved_render_path.path,
+                boyko_render::RenderPath::VisibilityBuffer
+            ),
+            "invariant: VB-SV0 S5 bench requires RenderPath::VisibilityBuffer (only record_vb \
+             brackets the VB lit producer; every other path leaves the pair unwritten and the \
+             WAIT_BIT readback hangs)"
+        );
+        assert!(
+            host.resolved_render_path.mesh_leg,
+            "invariant: VB-SV0 S5 bench requires a mesh leg (else no VB lit producer is recorded, \
+             the pair is never written and the WAIT_BIT readback hangs)"
+        );
+        // The A/B is the SV0 gate. On a boot where `sync_sv0_light_gate` cannot honour the
+        // request, BOTH phases resolve to `sv0_mode = 0`, the two configurations are identical,
+        // and the bench would report a NULL CONTROL under the label `mode=armed` — a zero delta
+        // that reads as "SV0 is free". That is the false-GREEN failure this campaign keeps
+        // finding one level down, so it is a boot-time assertion, not a runtime surprise.
+        assert!(
+            host.resolved_render_path.vb_sdf_mesh_armable(),
+            "invariant: VB-SV0 S5 bench requires an SV0-ARMABLE boot (VB x Both with \
+             SDF_SOFT_MARCH and no hwrt denoise/vis) — otherwise sync_sv0_light_gate clamps both \
+             phases to sv0_mode = 0 and the 'armed' run silently measures nothing"
+        );
+        let needed = SV0_BENCH_WARMUP as u64 + SV0_QUAD_FRAMES * sv0_s5_quads as u64;
+        if let Some(cap) = max_frames {
+            assert!(
+                cap >= needed,
+                "invariant: BOYKO_WINDOW_FRAMES={cap} is below the {needed} frames the VB-SV0 S5 \
+                 bench needs ({SV0_BENCH_WARMUP} warm-up + {SV0_QUAD_FRAMES} x {sv0_s5_quads} \
+                 quadruples). Raise the cap, unset it, or lower BOYKO_SV0_S5_BENCH_QUADS — a \
+                 truncated session prints no summary at all"
+            );
+        }
+    }
+
     loop {
         // 1. Pump the OS queue; `false` = WM_QUIT (the window closed).
         if !host.window.pump_events() {
@@ -1213,6 +1370,42 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
         // epoch — read before this frame's own submit, matching the fence-gate
         // proof (`retire_deferred_frees`'s doc).
         *app.world_mut().resource_mut::<RenderEpoch>() = RenderEpoch(host.renderer.submission_epoch());
+
+        // VB-SV0 rung S5: THIS frame's ABBA position and the SV0 request it implies. Position
+        // `counter % 4`: 0 ⇒ ARMED, 1 ⇒ CLEARED, 2 ⇒ CLEARED, 3 ⇒ ARMED — the SAME cycle S1.5
+        // uses, so the two rungs' statistics are the same statistic.
+        //
+        // Written HERE, before `update_with_delta`, because the gate is a LIGHT-TABLE word and the
+        // chain that carries it to the GPU runs inside the ECS frame: `sync_sv0_light_gate`
+        // (`.before_set(LightCollectSet)`) resolves request ∧ capability, `collect_lights` re-packs
+        // on the resulting `LightTableDirty`, and the runner's own `light_upload_due` gate copies
+        // the fenced slot's staging further down. Writing it after `update_with_delta` — where
+        // S1.5's push-constant phase is decided — would land the request one frame late and
+        // MIS-SIGN every delta.
+        //
+        // The counter advances on schedule regardless of the frame's fate (present, resize-skip,
+        // minimized), so a dropped frame leaves a GAP in the stored counters and orphans one whole
+        // quadruple instead of silently rotating the cycle — `sv0_quadruple_stats` rejects it.
+        //
+        // Under the null control both phases request the ARMED mode: the two configurations are
+        // then identical, the header never moves, and whatever the harness reports is its own
+        // residual rather than the term.
+        let sv0_s5_sample_counter = sv0_s5_phase_counter;
+        if sv0_s5_bench {
+            let armed_phase = matches!(sv0_s5_phase_counter % SV0_QUAD_FRAMES, 0 | 3);
+            let request = armed_phase || sv0_s5_null;
+            // Written through the OWNER-request fields, never through the `_armed` pair: those are
+            // `sync_sv0_light_gate`'s own derived state (plan §3.1), and writing them here would
+            // bypass the capability clamp the boot assertion above exists to make meaningful.
+            // Mode 3 (both bits) is the ARMED value because §7 clause 3's reference — S1.5's
+            // `SHADOWS|AO` A/B — is the cost of BOTH terms; a one-bit arm here would compare a
+            // half-feature against a whole one.
+            let cfg = app.world_mut().resource_mut::<boyko_render::LightingConfig>();
+            cfg.vb_sdf_mesh_shadow = request;
+            cfg.vb_sdf_mesh_ao = request;
+        }
+        sv0_s5_phase_counter = sv0_s5_phase_counter.wrapping_add(1);
+
         app.update_with_delta(dt);
 
         // 3. `AppExit` check — after the frame completes, before the present.
@@ -2462,6 +2655,49 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             }
         }
 
+        // VB-SV0 rung S5: accumulate this frame's VB lit-producer dispatch cost in RAW TICKS,
+        // tagged with the ABBA cycle counter it was recorded under — read ONLY on a frame that
+        // actually presented (a resize-skip records no lit-producer dispatch this iteration).
+        // GATED on `sv0_s5_bench`; dead code on every non-bench run. Structurally identical to the
+        // S1.5 block above, deliberately: the two rungs' numbers are compared by §7 clause 3, so
+        // any divergence in how they are ACCUMULATED would show up as a difference in the ratio.
+        if sv0_s5_bench && presented_ok {
+            // Offline discipline (mirrors the two blocks above): wait the device idle so this
+            // frame's timestamp writes are complete + readable before the slot is reused.
+            ctx.wait_idle().expect("invariant: VB-SV0 S5 bench wait_idle");
+            if let Some(lit_ticks) = host.gpu.read_vb_lit_producer_ticks(ctx, s) {
+                sv0_s5_seen += 1;
+                if sv0_s5_seen as usize > SV0_BENCH_WARMUP {
+                    sv0_s5_samples.push((sv0_s5_sample_counter, lit_ticks));
+                    let n = sv0_s5_samples.len();
+                    if n >= SV0_QUAD_FRAMES as usize {
+                        let quad = [
+                            sv0_s5_samples[n - 4],
+                            sv0_s5_samples[n - 3],
+                            sv0_s5_samples[n - 2],
+                            sv0_s5_samples[n - 1],
+                        ];
+                        if let Some((delta, bias)) = sv0_quadruple_stats(quad, sv0_s5_period) {
+                            sv0_s5_deltas.push(delta);
+                            sv0_s5_biases.push(bias);
+                        }
+                    }
+                }
+            }
+            if sv0_s5_deltas.len() >= sv0_s5_quads as usize {
+                print_sv0_s5_bench_summary(
+                    sv0_s5_null,
+                    host.resolved_render_path.mesh_geo_shade_split,
+                    host.composite_extent,
+                    ctx.device_caps(),
+                    &sv0_s5_samples,
+                    &mut sv0_s5_deltas,
+                    &mut sv0_s5_biases,
+                );
+                return;
+            }
+        }
+
         // Diagnostic dump (cold): advance settle → request → drain; once the
         // drained readback is host-readable, print the frame-stream state the
         // GPU actually consumed beside the image, write it, and exit the loop.
@@ -2689,28 +2925,129 @@ fn sv0_p10_p90_ns(values: &mut [f64]) -> (f64, f64) {
     (p10, p90)
 }
 
-/// VB-SV0 rung S1.5: the greatest common divisor of the raw tick counts in `samples`, ignoring
-/// zeros.
-///
-/// Recovers the GPU timestamp counter's hardware granularity `G` — the step its lattice actually
-/// advances in. Vulkan reports the ns-per-tick SCALE (`timestampPeriod`) but NOT this STEP, so the
-/// only way to learn `G` is to observe that every measured duration is a multiple of it. Over
-/// hundreds of independently-varying durations the GCD converges on `G`; an UNQUANTISED counter
-/// (every 1-tick step reachable) yields 1, which is the correct answer rather than a failure.
-///
-/// Zeros are skipped rather than folded: `gcd(0, x) == x` is the identity, so a zero-length sample
-/// would silently contribute nothing anyway — skipping says so.
+/// Euclidean GCD over `u64`, with `gcd(0, x) == x`.
 #[cfg(windows)]
-fn sv0_tick_gcd(samples: &[(u64, u64)]) -> u64 {
-    fn gcd(mut a: u64, mut b: u64) -> u64 {
-        while b != 0 {
-            let t = a % b;
-            a = b;
-            b = t;
-        }
-        a
+fn sv0_gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = a % b;
+        a = b;
+        b = t;
     }
-    samples.iter().map(|(_, ticks)| *ticks).filter(|t| *t != 0).fold(0u64, gcd)
+    a
+}
+
+/// VB-SV0 rungs S1.5/S5: everything one session's raw tick stream can EVIDENCE about the GPU
+/// timestamp counter's lattice step `G` — the bound, and how much the bound rests on.
+///
+/// # Why this is a bound and not a measurement
+///
+/// Vulkan reports the ns-per-tick SCALE (`timestampPeriod`) but NOT the STEP `G` the counter's
+/// lattice advances in, so the only way to learn about `G` is to observe that every measured
+/// duration is a multiple of it. An UNQUANTISED counter (every 1-tick step reachable) yields 1,
+/// which is the correct answer rather than a failure. Zero-length samples are skipped rather than
+/// folded: `gcd(0, x) == x` is the identity, so a zero contributes nothing anyway — skipping says
+/// so.
+///
+/// The GCD returns `G · gcd(m_1 … m_n)` for durations `t_i = m_i · G`. That is `G` only
+/// when the observed multipliers happen to be setwise coprime; otherwise it is a MULTIPLE of `G`,
+/// and nothing in the number itself says which. The honest statement is therefore
+/// `G <= quantum`, and its tightness is a property of the SAMPLE, not of the device.
+///
+/// This distinction is not academic: rung S5's eight sessions reported `tick_gcd = 1024` seven
+/// times and `128` once, and the odd one out was the session whose durations ranged widest. A
+/// fixed-workload dispatch produces durations clustered on a handful of values, and a handful of
+/// clustered multipliers routinely share a factor — so the seven agreeing sessions were agreeing
+/// about their own homogeneity, not about the hardware.
+///
+/// # Why the GCD is taken over the VALUES and not over their pairwise differences
+///
+/// A duration is ALREADY a difference of two reads of one counter, so if the counter only ever
+/// holds multiples of `G` there is no residual offset for a difference to remove. And
+/// `gcd(values)` divides every element, hence every pairwise difference, hence `gcd(differences)`
+/// — the pairwise-difference GCD is always a MULTIPLE of this one, i.e. the WEAKER (coarser)
+/// bound. Since a coarser lattice WIDENS the downstream spread gate, switching to differences
+/// would move the estimator in the flattering direction to buy immunity to an offset this
+/// instrument has no way to acquire.
+///
+/// The one case that inverts it is worth naming: were some fixed non-multiple overhead `c` added
+/// to every bracket, `gcd(c + m·G)` could collapse to 1 while the deltas still lived on `G`. That
+/// is an UNDER-statement of the lattice, which TIGHTENS the gate. So this estimator's failure mode
+/// is the safe one and the alternative's is the flattering one.
+///
+/// # The two evidence figures, and what each licenses
+///
+/// * [`distinct`](TickEvidence::distinct) — how many distinct non-zero tick values the GCD had to
+///   reconcile. Under the generic model (multipliers behaving like independent uniform integers)
+///   `P(gcd = G) = 1/ζ(n)` for `n` distinct values, so the bound is worth trusting only above a
+///   floor derived from that; the callers pre-register one. Clustered durations are NOT generic,
+///   so this is a floor on the evidence, never a guarantee.
+/// * [`min_gap`](TickEvidence::min_gap) — the smallest non-zero gap between two distinct values.
+///   The GCD divides every gap, so `gcd <= min_gap` DETERMINISTICALLY: a session whose distinct
+///   values are all far apart cannot produce a tight bound however many samples it takes. This is
+///   the figure that says, without any probabilistic model, how much room the bound ever had.
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+struct TickEvidence {
+    /// `G <= gcd` — the GCD of the non-zero tick counts, an UPPER BOUND on the counter's step.
+    gcd: u64,
+    /// How many DISTINCT non-zero tick values the bound rests on.
+    distinct: usize,
+    /// The smallest non-zero gap between two distinct observed values (0 when fewer than two
+    /// distinct values exist, i.e. when there is no gap and hence no evidence at all).
+    min_gap: u64,
+    /// `max - min` over the distinct non-zero values — the range the bound was recovered across.
+    span: u64,
+}
+
+/// Computes [`TickEvidence`] over one session's `(cycle_counter, ticks)` stream.
+///
+/// Allocates and sorts: this runs once per process from a `#[cold]` diagnostic print, never on the
+/// hot path, and reading the evidence off a sorted distinct set is what makes `min_gap` and
+/// `distinct` cheap to derive at all.
+#[cfg(windows)]
+fn sv0_tick_evidence(samples: &[(u64, u64)]) -> TickEvidence {
+    let mut ticks: Vec<u64> = samples.iter().map(|(_, t)| *t).filter(|t| *t != 0).collect();
+    ticks.sort_unstable();
+    ticks.dedup();
+
+    let gcd = ticks.iter().copied().fold(0u64, sv0_gcd);
+    let min_gap = ticks.windows(2).map(|w| w[1] - w[0]).min().unwrap_or(0);
+    let span = match (ticks.first(), ticks.last()) {
+        (Some(lo), Some(hi)) => hi - lo,
+        _ => 0,
+    };
+    TickEvidence { gcd, distinct: ticks.len(), min_gap, span }
+}
+
+/// VB-SV0 rungs S1.5/S5: the medians of the FIRST and SECOND halves of `deltas` in ACQUISITION
+/// order — the in-session ramp discriminator.
+///
+/// # Why the harness needs it
+///
+/// S5's first session of a fresh eight-session set reported a median 42x its siblings'. Two
+/// mechanisms produce that and they call for opposite remedies: an IN-SESSION ramp (clock/power
+/// state climbing while the session records) is fixed by a longer in-session warm-up, while a
+/// PROCESS-level cold start is fixed by discarding a whole warm-up SESSION. The two halves'
+/// medians separate them — a ramping session shows `first >> second`, a uniformly-cold session
+/// shows two halves that agree with each other and disagree with its siblings.
+///
+/// The caller must pass `deltas` BEFORE any order statistic sorts it in place; that is why this is
+/// computed at the top of the summary printers rather than beside the p10/p90 band.
+///
+/// # Panics
+///
+/// Panics on an empty slice (same reasoning as [`sv0_median_ns`]). A one-element slice reports the
+/// same value twice, which is the correct degenerate answer rather than a special case.
+#[cfg(windows)]
+fn sv0_half_split_medians(deltas: &[f64]) -> (f64, f64) {
+    assert!(!deltas.is_empty(), "invariant: sv0_half_split_medians needs at least one sample");
+    let mid = deltas.len() / 2;
+    let (first, second) = deltas.split_at(mid);
+    // An odd count puts the extra sample in the SECOND half and leaves the first non-empty for
+    // every length >= 2; at length 1 the split is (empty, one), so both halves read that sample.
+    if first.is_empty() { (sv0_median_ns(second), sv0_median_ns(second)) } else {
+        (sv0_median_ns(first), sv0_median_ns(second))
+    }
 }
 
 /// VB-SV0 rung S1.5: prints this session's COUNTERBALANCED (ABBA) A/B summary — the ONE line the
@@ -2750,18 +3087,33 @@ fn sv0_tick_gcd(samples: &[(u64, u64)]) -> u64 {
 ///
 /// A GPU timestamp counter advances on a LATTICE, and no Vulkan limit reports its step.
 /// `timestamp_period_ns` is the ns-per-tick SCALE (`VkPhysicalDeviceLimits::timestampPeriod`);
-/// `tick_gcd` is the empirically-recovered STEP (see [`sv0_tick_gcd`]). Their product `quantum_ns`
-/// is the smallest difference this instrument can express, and every `d1`/`d2` is a multiple of it.
+/// `tick_gcd` is an empirically-recovered UPPER BOUND on the STEP (see [`TickEvidence`] for why it
+/// is a bound and not an equality). Their product is printed as `quantum_max_ns`, and the claim it
+/// licenses is `quantum <= quantum_max_ns`, nothing stronger.
 ///
-/// `median_lattice_ns` is the lattice the REPORTED median lands on: `quantum_ns / 2`, because each
-/// quadruple statistic is a half-sum of two multiples of the quantum — halved again to
-/// `quantum_ns / 4` when the quadruple count is even and the median averages two order statistics.
-/// It is the smallest non-zero difference two sessions' medians can show, i.e. the floor beneath
-/// which a cross-session "spread" is quantisation rather than drift. The bench test reads it for
-/// exactly that purpose; it is reported here so the reading cannot be invented after the fact.
+/// `distinct_ticks`, `min_tick_gap` and `tick_span` are the EVIDENCE the bound rests on, printed
+/// beside it because the bound's tightness is a property of the sample rather than of the device: a
+/// session whose durations cluster on three values all divisible by 1024 reports 1024 whatever the
+/// hardware does. The bench tests refuse to let a thinly-evidenced bound widen their spread gate.
+///
+/// `median_lattice_max_ns` is the lattice the REPORTED median lands on: `quantum_max_ns / 2`,
+/// because each quadruple statistic is a half-sum of two multiples of the quantum — halved again to
+/// `quantum_max_ns / 4` when the quadruple count is even and the median averages two order
+/// statistics. It is an upper bound on the smallest non-zero difference two sessions' medians can
+/// show, i.e. on the floor beneath which a cross-session "spread" is quantisation rather than
+/// drift. The bench test reads it for exactly that purpose; it is reported here so the reading
+/// cannot be invented after the fact.
 ///
 /// `timestamp_valid_bits` and `timestamp_compute_and_graphics` are printed alongside so the
 /// resolution claim names the device guarantees it rests on.
+///
+/// # The in-session ramp disclosure
+///
+/// `median_delta_first_half_ns` / `median_delta_second_half_ns` split the session's quadruple
+/// statistics at their midpoint IN ACQUISITION ORDER (see [`sv0_half_split_medians`]). Two halves
+/// that disagree say the session was still settling while it recorded; two that agree while the
+/// session disagrees with its siblings say the cold start is at PROCESS level, which no in-session
+/// warm-up can reach.
 ///
 /// # `mode=null`
 ///
@@ -2800,20 +3152,25 @@ fn print_sv0_bench_summary(
     let median_cleared = sv0_median_ns(&arm_ns(false));
     let median_delta = sv0_median_ns(deltas);
     let median_bias = sv0_median_ns(biases);
+    // The ramp disclosure, taken BEFORE any order statistic sorts `deltas` in place — it is the
+    // ACQUISITION order that carries the information.
+    let (median_first_half, median_second_half) = sv0_half_split_medians(deltas);
     // The bands. Sorted IN PLACE because both slices are owned by the caller's loop and are never
     // read again after this print (the harness returns immediately), so the copy `sv0_median_ns`
     // makes for its own use is the only one needed for order-independence.
     let (p10, p90) = sv0_p10_p90_ns(deltas);
     let (p10_bias, p90_bias) = sv0_p10_p90_ns(biases);
 
-    // The empirical lattice: `tick_gcd` over hundreds of varying durations IS the counter's step,
-    // and scaling it by the period gives the smallest difference the reported numbers can express.
-    let tick_gcd = sv0_tick_gcd(samples);
-    let quantum_ns = tick_gcd as f64 * period;
+    // The empirical lattice, as a BOUND: `tick_gcd` is a MULTIPLE of the counter's step, and only
+    // a sample with enough distinct, closely-spaced values pins it down. Printed with the evidence
+    // it rests on so no reader can promote the bound to an equality (which is exactly what the
+    // superseded `quantum_ns=` field invited — see `TickEvidence`).
+    let ev = sv0_tick_evidence(samples);
+    let quantum_max_ns = ev.gcd as f64 * period;
     // Report the FINER (harder to satisfy) lattice — a coarser floor would make the spread gate
     // downstream more generous than the evidence warrants.
-    let median_lattice_ns =
-        if deltas.len().is_multiple_of(2) { quantum_ns * 0.25 } else { quantum_ns * 0.5 };
+    let median_lattice_max_ns =
+        if deltas.len().is_multiple_of(2) { quantum_max_ns * 0.25 } else { quantum_max_ns * 0.5 };
 
     let mode = if null_control { "null" } else { "armed" };
     println!(
@@ -2821,17 +3178,34 @@ fn print_sv0_bench_summary(
          median_delta_ns={median_delta:.1} median_order_bias_ns={median_bias:.1} \
          median_armed_ns={median_armed:.1} median_cleared_ns={median_cleared:.1} \
          p10_delta_ns={p10:.1} p90_delta_ns={p90:.1} \
-         p10_bias_ns={p10_bias:.1} p90_bias_ns={p90_bias:.1}",
+         p10_bias_ns={p10_bias:.1} p90_bias_ns={p90_bias:.1} \
+         median_delta_first_half_ns={median_first_half:.1} \
+         median_delta_second_half_ns={median_second_half:.1}",
         deltas.len(),
         samples.len(),
         composite_extent.0,
         composite_extent.1
     );
     println!(
-        "VB-SV0-S1.5 RESOLUTION: timestamp_period_ns={period} tick_gcd={tick_gcd} \
-         quantum_ns={quantum_ns:.1} median_lattice_ns={median_lattice_ns:.1} \
+        "VB-SV0-S1.5 RESOLUTION: timestamp_period_ns={period:.1} tick_gcd={} \
+         distinct_ticks={} min_tick_gap={} tick_span={} quantum_max_ns={quantum_max_ns:.1} \
+         median_lattice_max_ns={median_lattice_max_ns:.1} \
          timestamp_valid_bits={} timestamp_compute_and_graphics={}",
-        caps.timestamp_valid_bits, caps.timestamp_compute_and_graphics
+        ev.gcd,
+        ev.distinct,
+        ev.min_gap,
+        ev.span,
+        caps.timestamp_valid_bits,
+        caps.timestamp_compute_and_graphics
+    );
+    println!(
+        "  NOTE: the RESOLUTION line states a BOUND — quantum <= {quantum_max_ns:.1} ns, from a \
+         GCD over {} DISTINCT tick values whose closest pair is {} ticks apart. A GCD over observed \
+         durations is a MULTIPLE of the counter's step, so a session whose durations cluster on a \
+         few values reports its own homogeneity, not the hardware. Read distinct_ticks and \
+         min_tick_gap before treating this number as the device's step: the bound can only ever be \
+         as tight as min_tick_gap, and it is trustworthy in proportion to distinct_ticks.",
+        ev.distinct, ev.min_gap
     );
     println!(
         "  NOTE: the A/B is COUNTERBALANCED (A,B,B,A), not alternating. Each quadruple's statistic \
@@ -2853,6 +3227,151 @@ fn print_sv0_bench_summary(
          arm (:1805). This delta therefore covers BOTH, i.e. it OVER-states the `!own_pixel` term \
          by the SDF-owned pixels' share. See sv0_deferred_term_bench.rs's module doc + its \
          confound-bound test for the measured pixel ratio."
+    );
+}
+
+/// VB-SV0 rung S5: prints this session's COUNTERBALANCED (ABBA) A/B summary for the VB
+/// lit-producer dispatch — the ONE line the orchestrator transcribes into
+/// `crates/boyko_app/tests/sv0_vb_term_bench.rs`, plus the instrument's own resolution
+/// self-report.
+///
+/// # What the numbers are
+///
+/// Field-for-field the same statistic as [`print_sv0_bench_summary`]'s (read that doc for the
+/// ABBA algebra, why `median_order_bias_ns` is reported rather than hidden, and why the
+/// `RESOLUTION:` line exists at all). Three things differ, and each is printed rather than
+/// implied:
+///
+/// * `row` — `split` or `fused`, from the boot-resolved `mesh_geo_shade_split`. It is the
+///   discriminator between plan §6 S5's two required rows (7 and 1). It is a HOST-side statement
+///   about which producer the resolver committed to; the recorder's own `note_vb_lit_producer`
+///   line — printed from the BOUND PIPELINE HANDLE, in a `debug_assertions` build — is the
+///   independent observation, and the bench test transcribes THAT.
+/// * `median_armed_ns` / `median_cleared_ns` bracket the WHOLE lit-producer dispatch, of which
+///   the SV0 term is a small part. Their ratio is the honest scale statement: a term worth a few
+///   percent of a dispatch is exactly the regime where a paired protocol is mandatory and a
+///   before/after is worthless.
+/// * `debug_assertions` — the build profile this session ran under. §7 clause 3 divides this
+///   number by S1.5's, and S1.5's runbook is a plain (dev-profile) `cargo test`, so a release
+///   S5 session would compare two numbers taken under different host conditions. The `.spv` are
+///   identical either way and both brackets are GPU wall-clock behind a per-frame `wait_idle`,
+///   so this is a comparability disclosure rather than a proof of contamination — which is
+///   precisely why it is printed and transcribed instead of argued about.
+///
+/// # `mode=null`
+///
+/// Both phases requested the ARMED mode, so the true per-quadruple difference is exactly zero.
+/// Note what that also does HERE and did not for S1.5: with the request constant the light header
+/// never moves, so `collect_lights` never re-packs and `light_upload_due` closes after the boot
+/// catch-up. The null therefore runs on a stream with NO per-frame light upload, i.e. a strictly
+/// quieter one than the armed run — so it is a LOWER bound on the armed run's residual, not an
+/// exact replica of it. Stated here because a null control whose limits are not stated is the
+/// same "green over an empty selection" defect one level down.
+///
+/// `#[cold]`/`#[inline(never)]`: a once-per-process diagnostic print, never on the hot path.
+#[cfg(windows)]
+#[cold]
+#[inline(never)]
+fn print_sv0_s5_bench_summary(
+    null_control: bool,
+    split_row: bool,
+    composite_extent: (u32, u32),
+    caps: boyko_rhi_vulkan::device::DeviceCaps,
+    samples: &[(u64, u64)],
+    deltas: &mut [f64],
+    biases: &mut [f64],
+) {
+    let period = caps.timestamp_period as f64;
+    // The phase is recovered from the stored ABBA counter — positions 0 and 3 ARMED, 1 and 2
+    // CLEARED — so these agree with the quadruple assembly by construction (the same
+    // single-source discipline `print_sv0_bench_summary` uses).
+    let arm_ns = |armed: bool| -> Vec<f64> {
+        samples
+            .iter()
+            .filter(|(c, _)| matches!(c % SV0_QUAD_FRAMES, 0 | 3) == armed)
+            .map(|(_, ticks)| *ticks as f64 * period)
+            .collect()
+    };
+    let median_armed = sv0_median_ns(&arm_ns(true));
+    let median_cleared = sv0_median_ns(&arm_ns(false));
+    let median_delta = sv0_median_ns(deltas);
+    let median_bias = sv0_median_ns(biases);
+    // BEFORE the order statistics sort `deltas` in place — the split is on ACQUISITION order.
+    let (median_first_half, median_second_half) = sv0_half_split_medians(deltas);
+    let (p10, p90) = sv0_p10_p90_ns(deltas);
+    let (p10_bias, p90_bias) = sv0_p10_p90_ns(biases);
+
+    let ev = sv0_tick_evidence(samples);
+    let quantum_max_ns = ev.gcd as f64 * period;
+    // Report the FINER (harder to satisfy) lattice — see `print_sv0_bench_summary`.
+    let median_lattice_max_ns =
+        if deltas.len().is_multiple_of(2) { quantum_max_ns * 0.25 } else { quantum_max_ns * 0.5 };
+
+    let mode = if null_control { "null" } else { "armed" };
+    let row = if split_row { "split" } else { "fused" };
+    println!(
+        "VB-SV0-S5 mode={mode} row={row} quads={} samples={} extent={}x{} \
+         debug_assertions={} median_delta_ns={median_delta:.1} \
+         median_order_bias_ns={median_bias:.1} median_armed_ns={median_armed:.1} \
+         median_cleared_ns={median_cleared:.1} p10_delta_ns={p10:.1} p90_delta_ns={p90:.1} \
+         p10_bias_ns={p10_bias:.1} p90_bias_ns={p90_bias:.1} \
+         median_delta_first_half_ns={median_first_half:.1} \
+         median_delta_second_half_ns={median_second_half:.1}",
+        deltas.len(),
+        samples.len(),
+        composite_extent.0,
+        composite_extent.1,
+        cfg!(debug_assertions)
+    );
+    println!(
+        "VB-SV0-S5 RESOLUTION: timestamp_period_ns={period:.1} tick_gcd={} \
+         distinct_ticks={} min_tick_gap={} tick_span={} quantum_max_ns={quantum_max_ns:.1} \
+         median_lattice_max_ns={median_lattice_max_ns:.1} \
+         timestamp_valid_bits={} timestamp_compute_and_graphics={}",
+        ev.gcd,
+        ev.distinct,
+        ev.min_gap,
+        ev.span,
+        caps.timestamp_valid_bits,
+        caps.timestamp_compute_and_graphics
+    );
+    println!(
+        "  NOTE: the RESOLUTION line states a BOUND — quantum <= {quantum_max_ns:.1} ns, from a \
+         GCD over {} DISTINCT tick values whose closest pair is {} ticks apart. The GCD is a \
+         MULTIPLE of the counter's step, so a homogeneous sample reports its own homogeneity. The \
+         bound is a DEVICE property statement, so the session set's bounds POOL by GCD across all \
+         sessions (including a discarded warm-up one — a cold session is invalid evidence about the \
+         TERM and perfectly valid evidence about the INSTRUMENT); scripts\\sv0_s5_bench.ps1 does \
+         that pooling and prints which session backed the result.",
+        ev.distinct, ev.min_gap
+    );
+    println!(
+        "  NOTE: median_delta_first_half_ns vs median_delta_second_half_ns is the RAMP \
+         discriminator. Halves that disagree = this session was still settling while it recorded \
+         (the remedy is a longer in-session warm-up, SV0_BENCH_WARMUP). Halves that agree while the \
+         SESSION disagrees with its siblings = a process-level cold start no in-session warm-up can \
+         reach (the remedy is the discarded warm-up SESSION the script runs first)."
+    );
+    println!(
+        "  NOTE: the A/B is COUNTERBALANCED (A,B,B,A). SV0's gate is light-header word 7 bits \
+         5..6, NOT a push constant, so the phase moves through LightingConfig -> \
+         sync_sv0_light_gate -> collect_lights -> the per-slot light upload. The re-pack lands on \
+         cycle positions 1 and 3 only, so it enters d1 and d2 with OPPOSITE signs and cancels in \
+         (d1 + d2)/2 exactly as the ring-slot offset does; median_order_bias_ns carries it."
+    );
+    println!(
+        "  NOTE: TOP/BOTTOM brackets the WHOLE lit-producer dispatch's wall-clock (inclusive of \
+         its derived barriers, pipeline drain and overlap), not isolated kernel time, and the SV0 \
+         term is a small part of it. The PAIRED differences are what cancel that bracket bias, \
+         which is why the median of the paired statistic — not the difference of the two arms' \
+         medians — is the rung's statistic."
+    );
+    println!(
+        "  NOTE: this delta is the WHOLE SV0 feature (mode 3: shadow bit 5 AND contact-AO bit 6), \
+         over the SAME fixture and extent S1.5 measured its Deferred sibling on. Plan §7 clause 3 \
+         adjudicates it against 2x SV0_DEFERRED_TERM_REFERENCE, DEFLATED by the confound ratio \
+         sv0_deferred_term_bench.rs's own test measures — see sv0_vb_term_bench.rs for the \
+         arithmetic and for why the comparison is per-FRAME and not per-armed-pixel."
     );
 }
 
@@ -3373,18 +3892,63 @@ mod sv0_stats_tests {
         );
     }
 
-    /// The empirical lattice recovery: [`sv0_tick_gcd`] returns the counter's step, ignores
+    /// The empirical lattice recovery: [`sv0_tick_evidence`] bounds the counter's step, ignores
     /// zero-length samples, and answers 1 for an unquantised stream (which is the correct answer,
     /// not a failure to detect anything).
     #[test]
-    fn tick_gcd_recovers_the_lattice_step() {
+    fn tick_evidence_bounds_the_lattice_step() {
         let quantised: Vec<(u64, u64)> =
             [1024u64, 3072, 12288, 0, 5120].iter().map(|t| (0u64, *t)).collect();
-        assert_eq!(sv0_tick_gcd(&quantised), 1024, "the GCD of the tick deltas IS the step");
+        assert_eq!(sv0_tick_evidence(&quantised).gcd, 1024, "the GCD of the tick counts bounds it");
         let unquantised: Vec<(u64, u64)> =
             [1001u64, 1002, 1003].iter().map(|t| (0u64, *t)).collect();
-        assert_eq!(sv0_tick_gcd(&unquantised), 1, "an unquantised counter must report 1");
-        assert_eq!(sv0_tick_gcd(&[(0, 0)]), 0, "an all-zero stream has no recoverable step");
+        assert_eq!(sv0_tick_evidence(&unquantised).gcd, 1, "an unquantised counter must report 1");
+        assert_eq!(
+            sv0_tick_evidence(&[(0, 0)]).gcd,
+            0,
+            "an all-zero stream has no recoverable step"
+        );
+    }
+
+    /// **The S5 finding, as a regression test.** A homogeneous sample reports a bound that is a
+    /// MULTIPLE of the true step, and the evidence figures are what expose it: the same underlying
+    /// 128-tick lattice reports 1024 from three clustered values and 128 once one off-lattice
+    /// value appears. Neither answer is wrong — the first is a weaker bound — and `distinct` /
+    /// `min_gap` are what let a reader tell them apart.
+    #[test]
+    fn tick_evidence_exposes_a_homogeneous_sample_as_a_weak_bound() {
+        // 12*1024, 13*1024, 14*1024 — every value a multiple of 1024, true step 128.
+        let homogeneous: Vec<(u64, u64)> =
+            [12288u64, 13312, 14336].iter().map(|t| (0u64, *t)).collect();
+        let ev = sv0_tick_evidence(&homogeneous);
+        assert_eq!(ev.gcd, 1024, "three 1024-multiples cannot bound the step below 1024");
+        assert_eq!(ev.distinct, 3, "the bound rests on exactly three distinct values");
+        assert_eq!(ev.min_gap, 1024, "and the GCD divides the closest gap, so it cannot beat it");
+        assert!(ev.gcd <= ev.min_gap, "the GCD divides every gap, so it can never exceed min_gap");
+
+        // One additional value off the 1024 lattice (104*128 + 128 = 13440) collapses the bound.
+        let varied: Vec<(u64, u64)> =
+            [12288u64, 13312, 13440, 14336].iter().map(|t| (0u64, *t)).collect();
+        let ev2 = sv0_tick_evidence(&varied);
+        assert_eq!(ev2.gcd, 128, "one off-lattice value is enough to tighten the bound 8x");
+        assert_eq!(ev2.min_gap, 128, "and it is the closest pair that made that possible");
+        assert_eq!(ev2.span, 2048, "the span is max - min over the distinct values");
+    }
+
+    /// The ramp discriminator splits on ACQUISITION order, not on value — which is the whole point,
+    /// since a session that ramps is one whose EARLY samples are the large ones.
+    #[test]
+    fn half_split_medians_split_on_acquisition_order() {
+        // A ramping session: the first half is 10x the second, in acquisition order.
+        let ramping = [1000.0, 1000.0, 1000.0, 1000.0, 100.0, 100.0, 100.0, 100.0];
+        assert_eq!(sv0_half_split_medians(&ramping), (1000.0, 100.0));
+        // A steady session with the SAME multiset reports two agreeing halves — the discriminator
+        // reads ORDER, so a re-ordering of identical values must change its verdict.
+        let steady = [1000.0, 100.0, 1000.0, 100.0, 1000.0, 100.0, 1000.0, 100.0];
+        assert_eq!(sv0_half_split_medians(&steady), (550.0, 550.0));
+        // Degenerate lengths must not panic: an odd count puts the extra sample in the second half.
+        assert_eq!(sv0_half_split_medians(&[7.0]), (7.0, 7.0));
+        assert_eq!(sv0_half_split_medians(&[1.0, 2.0, 3.0]), (1.0, 2.5));
     }
 
     /// The median averages the two central order statistics on an even count — which is exactly

@@ -1088,15 +1088,25 @@ impl Renderer<'_> {
             // frame — mirrors `declare_vb_graph`'s matching branch.
             //
             // VB-P1d: this three-way split is why the bench's `VbTimedPass::VbShade` bracket
-            // is recorded in ONLY the classified/fused arms (below), never the split arm — the
-            // bench is fused/classified-only by design (`boyko_app::runner`'s VB-P1d block
-            // asserts `!scene.resolved_render_path.mesh_geo_shade_split` before ever reading a
-            // bench pool, precisely because a split frame would reset-but-never-write the
-            // VbShade pair and hang the `VK_QUERY_RESULT_WAIT_BIT` readback). ===
+            // used to be recorded in ONLY the classified/fused arms (below).
+            //
+            // VB-SV0 rung S5 CLOSED that hole: the split arm (further down, at the
+            // `vb_shade_split` dispatch) now carries the SAME `VbTimedPass::VbShade` pair, so the
+            // bracket covers whichever of the THREE lit producers a frame selects and exactly one
+            // begin/end pair is written per mesh-leg frame in every branch. S5 measures the SPLIT
+            // tail (matrix row 7) as one of its two structurally different rows, and a bench that
+            // cannot bracket it could not measure it at all.
+            //
+            // `boyko_app::runner`'s VB-P1d block keeps its `!mesh_geo_shade_split` assertion: it
+            // is no longer a hang guard (the pair IS written on a split frame now) but a SCOPE
+            // statement — VB-P1d's `flat_shade_ns` vs `froxel_total_ns` break-even is defined
+            // against the fused/classified tail, and silently admitting a third producer would
+            // change what its number means. ===
             if scene.path_vb_split() {
                 // Rung R9b: the split DISPLACES the fused lit producer — `vb_shade_split`
                 // (recorded in the split arm after this block) is the sole lit producer;
-                // neither `vb_shade` nor `vb_resolve` records (mirrors the declarator).
+                // neither `vb_shade` nor `vb_resolve` records (mirrors the declarator). Its
+                // `VbTimedPass::VbShade` bracket is recorded THERE, not here.
             } else if scene.vb_use_classified {
                 // VB-P1d: open the VbShade bracket — this branch is the classified lit
                 // producer, mutually exclusive with the fused `vb_resolve` branch below (exactly
@@ -1875,6 +1885,21 @@ impl Renderer<'_> {
             let shade_pass = plan
                 .vb_shade_split
                 .expect("invariant: path_vb_split() => vb_shade_split pass declared");
+            // VB-SV0 rung S5: open the VbShade bracket on the SPLIT lit producer. The three
+            // producer arms are mutually exclusive (the `path_vb_split()` early arm above records
+            // neither of the other two), so exactly ONE begin/end pair of this slot is written per
+            // mesh-leg frame whichever branch runs — which is what keeps the `WAIT_BIT` readback
+            // from blocking and what lets one collector serve all three rows. Opened BEFORE
+            // `record_vb_pass` so the bracket spans the same "derived barriers + bind + dispatch"
+            // extent the classified/fused arms measure; a bracket that started after the barriers
+            // would not be comparable to the other two rows. GATED on `scene.vb_gpu_timing`:
+            // `None` on every golden/host/interactive frame records NOTHING, so the command stream
+            // stays byte-identical to the pre-S5 path.
+            if let Some(tc) = scene.vb_gpu_timing {
+                // SAFETY: recording is open; `self.fns` is the live device fn-table; the pool was
+                // reset at the frame top (`reset_frame`); `fi` is this present's in-flight slot.
+                unsafe { tc.write_begin(self.fns, cmd, fi, VbTimedPass::VbShade) };
+            }
             // SAFETY: recording is open; `record_vb_pass` records the `lit`
             // COLOR_ATTACHMENT→GENERAL + cascade/atlas + `ssao` GENERAL-read barriers for the
             // "vb_shade_split" pass into `cmd`.
@@ -2009,6 +2034,11 @@ impl Renderer<'_> {
                     scene.mvp.as_ptr().cast(),
                 );
                 (self.fns.cmd_dispatch)(cmd, scene.dispatch_group_count_x, 1, 1);
+            }
+            // VB-SV0 rung S5: close the SPLIT lit producer's VbShade bracket. GATED.
+            if let Some(tc) = scene.vb_gpu_timing {
+                // SAFETY: recording is open; the pool was reset this frame; `fi` is this slot.
+                unsafe { tc.write_end(self.fns, cmd, fi, VbTimedPass::VbShade) };
             }
         }
 
