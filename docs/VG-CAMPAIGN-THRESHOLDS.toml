@@ -194,7 +194,42 @@ modal_bucket_pixels_above_which_k1_holds = 16
 # K1 fires iff BOTH conjuncts hold: D_est < d_est_min AND modal bucket >
 # modal_bucket_pixels_above_which_k1_holds. Spelled out as a sentence because Rev 2's terse rule
 # string is what inverted it.
-rule = "k1_fires_iff  d_est < d_est_min  AND  modal_bucket_px > modal_bucket_pixels_above_which_k1_holds"
+#
+# REV 5 CORRECTION — the two-conjunct rule below is REDUNDANT, and the redundancy hid that the
+# cheap census cannot fire K1 at all.
+#
+#   modal_bucket_px > 16 at 1080p  =>  the typical visible triangle covers >= 16 px
+#                                  =>  visible_tris <~ covered_px / 16
+#                                  =>  D_est <~ 0.06, far below d_est_min = 1.0.
+#
+# So conjunct 1 holds AUTOMATICALLY whenever conjunct 2 does. Rev 4 sold this as "two conjuncts,
+# both pointing the same way"; it is one conjunct plus a strictly weaker consequence of it. The
+# decisive statistic was always the modal bucket — which is the statistic whose cross-rung
+# derivation the frozen ladder cannot support (see histogram_shift_rule above).
+#
+# And per [k1_instrument], D_est is a LOWER bound: it cannot refute the premise at all. Neither
+# conjunct can soundly fire this kill. The honest rule is therefore split by DIRECTION:
+#
+rule = "SUPERSEDED_BY_k1_decision_rule_below"
+
+# What the CHEAP census (usage bit + Option-threaded copy, zero new .spv) can decide, soundly:
+#   D_est >= d_est_min  =>  K1 REFUTED. Density is genuinely >= 1 tri/pixel; the mechanism exists.
+# It can decide nothing else. Everything below d_est_min is indistinguishable from the instrument's
+# own ceiling seen from underneath.
+k1_decision_rule = "cheap_census_may_only_REFUTE: d_est >= d_est_min => K1 dead; d_est < d_est_min => UNDECIDED, escalate"
+
+# FIRING K1 requires the upper-bound instrument (the frustum+backface survivor counter), which is a
+# separate conditional rung. Its threshold is pre-registered HERE, before that instrument exists,
+# for the same reason everything else in this file is: so it cannot be chosen by whoever measures
+# against it. Same value, because 1.0 IS the definition of the regime — but now applied to a
+# statistic that can soundly sit below it.
+k1_fire_requires = "upper_bound_survivor_count"
+k1_fire_rule = "survivor_tris_per_covered_pixel < 1.0 at decision_resolution"
+
+# The modal-bucket conjunct is RETIRED from the decision. It is redundant against D_est, its
+# cross-rung derivation is unsupported by this ladder, and its direction was inverted in Rev 3.
+# It stays as a reported statistic.
+modal_bucket_role = "report_only"
 
 # Reported alongside, and deliberately NOT part of the rule: the saturating per-resolution ratio
 # (distinct visible triangles / covered pixels, capped at 1 by construction because vb_id is one
@@ -271,6 +306,34 @@ reference_floor_source = "cross_session_spread_of_reference_capture"
 absolute_session_spread_ceiling = 0.25
 absolute_floor_source = "cross_session_spread_of_absolute_per_pass_medians"
 
+#
+# REV 5 CORRECTION — the two fields above are a RELATIVE fraction, and Rev 3/Rev 4's R0f' gate (b)
+# compared the same named source against a MILLISECOND target. One source cannot be both. Under
+# either reading the gate failed:
+#
+#   read as relative  =>  gate (b) compares a fraction to milliseconds — the exact dimension error
+#                         R0f' was written to fix, one file over;
+#   read as absolute  =>  gate (b) reads "0.28 ms < 5 ms", TRUE for any non-degenerate target. A
+#                         RESOLUTION being smaller than a LEVEL says nothing about whether the
+#                         instrument can tell the target apart from where we stand.
+#
+# That mattered because R0f' closes the ONE gate on the branch section 11 measures as the EXPECTED
+# one. A non-discriminating gate there leaves the likely path with no falsifiability condition —
+# which is the whole defect D3 was raised against, surviving three revisions.
+#
+# The fix is to name the quantity ONCE and make the inequality about a DISTANCE, not a level.
+#
+# The floor in milliseconds: the relative spread applied to the measured chain median.
+absolute_floor_ms_rule = "absolute_session_spread * measured_chain_median_ms"
+
+# The distance the campaign must resolve, in milliseconds: how far the current chain is from the
+# absolute target. A target we are already past, or one sitting inside our own resolution, is not
+# a target.
+absolute_distance_ms_rule = "abs(measured_chain_median_ms - claim.absolute_chain_ms)"
+
+# The gate. Both sides milliseconds, and it is about whether we can SEE the gap we intend to close.
+absolute_gate_rule = "absolute_floor_ms < absolute_distance_ms"
+
 # ---------------------------------------------------------------------------------------------
 # [scope] — what the claim is ABOUT. Rev 2 compared a per-pass floor to a frame-total claim with
 # no composition rule stated anywhere, which made the ONE gate not evaluable.
@@ -293,3 +356,63 @@ chain_floor_rule = "measured_directly_on_chain_total"
 # the answer in hand. R0a therefore records the reference's pass names for its stock scene BEFORE
 # any corpus capture, and R0f asserts the map is total over our bracketed set.
 require_pass_correspondence_map_at = "R0a"
+
+# ---------------------------------------------------------------------------------------------
+# [ordering] — REV 5. The P0's mechanism now lives on the HASHED side.
+#
+# Rev 3/Rev 4 put the ordering rule (`r0e_blocked_by`) only in VG-CAMPAIGN-CLAIM.toml, which is
+# "deliberately not hashed". So the single most decision-bearing rule in the campaign sat on the
+# mutable side, disarmable by deleting one line, while [k1], [scope] and [decidability] were frozen.
+# Answering the question honestly: no, Rev 4 did NOT have every decision-bearing value on the
+# correct side. This is the correction.
+# ---------------------------------------------------------------------------------------------
+[ordering]
+# The claim must be answered before the rung that MEASURES the floor, not before the rung that
+# compares. Duplicated here from the claim file's [gating] so that deleting it there reds the hash.
+claim_blocks_rung = "R0e"
+
+# The stronger half, adopted from sv0_deferred_term_bench.rs's NAN-as-UNMEASURED sentinel ("so a
+# forgotten transcription cannot produce a passing gate"): the harness refuses to EMIT the floor
+# while the claim is PENDING. Ordering constrains commits; this constrains knowledge, which is what
+# the P0 actually needs. Rev 3's claim that ordering alone "does not depend on anyone noticing an
+# edit" is retracted in the plan's section 0.1.
+harness_withholds_floor_while_claim_pending = true
+
+# After the fill, the claim must not move. R0e asserts only `!= PENDING`, and R0f re-reads the file
+# at R0f time, so Rev 4 left a window: fill 0.05 -> R0e green -> floor measures 0.12 -> edit to 0.30
+# -> R0e STILL green -> R0f closes. The claim value is therefore pinned INTO R0e's own
+# MEASURED-literal commit, so R0f compares against something frozen in the same act as the floor.
+claim_pinned_into_r0e_literals = true
+
+# ---------------------------------------------------------------------------------------------
+# [pre_registered] — REV 5. Two thresholds the plan called "pre-registered" while providing no file
+# to register them in. Both were decision-bearing, both would have been set by whoever measured
+# against them, and both landed on NEITHER side of the two-file split — the Rev 1 P0 shape, twice.
+# R0e's named mutation ("halve the sample count -> the CI widens past the pre-registered bound")
+# could not fire against anything at all.
+# ---------------------------------------------------------------------------------------------
+[pre_registered]
+# R0c gate (c): the census's covered-pixel total vs sv0_oracle::rasterize's covered_count on the
+# procedural fixture at 512^2. Not zero: the oracle is a host mirror with its own sample-point rule,
+# so exact agreement would be a coincidence, not a check.
+r0c_oracle_coverage_tolerance = 0.02
+
+# R0e: the confidence interval the resolvable delta must come in under, and the sample-count floors
+# beneath which the interval is not reportable at all. The two floors are the sibling's own
+# (SV0_BENCH_MIN_PAIRS / SV0_BENCH_MIN_QUADS) — reused rather than minted, same as [decidability].
+r0e_ci_max_fraction = 0.10
+r0e_min_pairs = 30
+r0e_min_quads = 200
+
+# ---------------------------------------------------------------------------------------------
+# [hash_assertion] — REV 5. Where this file's sha256 is actually checked.
+#
+# Rev 4 avoided Rev 2's "guaranteed to break" failure and created its mirror image: GUARANTEED NOT
+# TO FIRE. Every rung that was supposed to re-assert the hash (R0b-R0f) is a skipped, #[ignore]d
+# GPU or corpus-dependent test, on a box whose CI never exercises the GPU path. A tripwire wired
+# only into tests that do not run is not a tripwire.
+# ---------------------------------------------------------------------------------------------
+[hash_assertion]
+# At least one assertion must live where `cargo test --workspace` executes it with no GPU, no dxc
+# and no corpus. That test does nothing but re-hash this file against the value R0a recorded.
+must_run_in_plain_workspace_test = true

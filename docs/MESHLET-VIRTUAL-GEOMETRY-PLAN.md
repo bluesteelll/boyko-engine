@@ -1,6 +1,6 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 4** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 5** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
@@ -31,6 +31,36 @@ adversarial pass that produced every correction below.
 | Claim scope named (`bracketed_vb_pass_chain`) | **HOLDS** — best reasoning in the plan |
 | Denominators written down | **HOLDS** — verified against the sibling exactly |
 | §12 anchors re-derived | **HELD FOR §12 ONLY** — the body kept the stale ones, including the `:334`→`:344` anchor §12 itself called the most expensive of the set. Fixed at Rev 4 |
+
+**Rev 5 closes the remainder of that review** — the items Rev 4 acknowledged but did not land:
+
+* **P0-5, gate (b) of R0f′ — a dimension error shipped twice.** `absolute_floor_source` is a
+  *relative fraction*; Rev 4 compared it to a *millisecond target* and called it *"a genuine
+  inequality between two quantities of the same kind"*. Read as a fraction it is the same error
+  Rev 3 made; read as milliseconds it says `0.28 ms < 5 ms`, **true for any non-degenerate
+  target** — a resolution being smaller than a level says nothing about seeing the gap. Rev 5's
+  gate compares the floor to the **distance to be closed**, both in ms. This guarded the branch
+  §11 measures as the *expected* one.
+* **P1-3, K1's redundant conjuncts** — modal bucket > 16 px *implies* `D_est ≲ 0.06`, so conjunct 1
+  never spoke. Retired; the rule is now split by direction (§5.6).
+* **P1-4, two "pre-registered" thresholds with no file to be registered in** — R0c(c)'s oracle
+  tolerance and R0e's CI bound. Both decision-bearing, both on *neither* side of the two-file
+  split. R0e's named mutation could not fire against anything. Now `[pre_registered]`.
+* **P1-5, the ordering rule lived only on the UNHASHED side** — the single most decision-bearing
+  rule in the campaign, disarmable by deleting one line, while `[k1]` and `[scope]` were frozen.
+  Now duplicated into `[ordering]` on the hashed side.
+* **P1-6, R0a's "enumerate fixed volumes"** — a recursive walk of two ~240 GB volumes inside a
+  `cargo test`, with false positives from any stray binary. Replaced by bounded authorities, with
+  the residual blindness recorded rather than claimed away.
+* **P1-7, R0c(e) vs R0d(a)** — as a gate, (e) made a *legitimate finding* red the rung and block the
+  ladder. It now measures and records; R0d is where it becomes a gate, in whichever shape (e)
+  established. And it is measured at the top rung on the corpus, where it can actually fail.
+* **P1-9, three authored constants called "measured"** — laundering pre-registered protocol
+  thresholds as evidence, in the sentence claiming rigour.
+* **The hash's mirror-image failure.** Rev 4 avoided Rev 2's *guaranteed to break* and produced
+  **guaranteed not to fire**: every rung meant to re-assert the thresholds hash is a skipped or
+  `#[ignore]`d GPU/corpus test on a box whose CI never exercises the GPU path. `[hash_assertion]`
+  now requires one plain `cargo test --workspace` assertion.
 
 | # | Rev 1 defect | Rev 2 attempt | Rev 3 |
 |---|---|---|---|
@@ -162,7 +192,7 @@ unblocked by it. `corpus.arrangement` (Q3) blocks R0b and is the only early one.
 
 | # | Kill | Test | Disposition if it fires |
 |---|---|---|---|
-| **K1** | **No content, no mechanism.** The corpus never approaches ~1 triangle/pixel, so cluster LOD has no mechanism of action on our content. | R0d's census, adjudicated against `[k1]`'s **three frozen thresholds** at the frozen decision resolution — conjunctively, and with the deliberately *overstating* bracket. §5.4. | **Campaign refuted.** Not "descope" — the premise is gone. §9 clause 1. |
+| **K1** | **No content, no mechanism.** The corpus never approaches ~1 triangle/pixel, so cluster LOD has no mechanism of action on our content. | **Split by direction at Rev 5, because the cheap census can only settle it one way.** `D_est ≥ 1.0` at the decision resolution **refutes** K1 outright (a lower bound proves density). **Firing** K1 needs the upper-bound survivor counter — a separate, conditional rung. §5.5–§5.7. | **Campaign refuted** only when K1 *fires*. Not "descope" — the premise is gone. §9 clause 1. |
 | **K2** | **No baseline.** The Nanite reference cannot be produced on this box. | R0a's rig probe (before any engine code) — and the negative is **re-derived by the test**, not declared. §8 R0a. | **Scope restatement**, an owner VALUES call: the goal becomes an **absolute** ms/quality target, and the ladder terminates in **R0f′**, which closes the *same* inequality. §13 Q1, §8 R0f′. |
 | **K3** | **Undecidable harness.** The instrument cannot resolve the frozen claim. | R0e's decidability statement, with its null control. | Every future number is arguable. §9 clause 3 — and note this is the failure mode the sibling rung actually hit. |
 
@@ -696,11 +726,26 @@ typing `false`. Rev 2 re-walked a `probed_paths` list — better, but **still au
 record `["D:\\Epic Games"]` (§11 says it is empty) and the assertion is permanently true, while a
 UE5 installed to `C:\Program Files\Epic Games\UE_5.4` fires nothing. So Rev 3:
 
-* the test enumerates **fixed volumes itself** and consults the Epic launcher's own manifest
-  (`C:\ProgramData\Epic\UnrealEngineLauncher\LauncherInstalled.dat`) plus the registry — a search
-  space the record *describes* (`search_method`) but does not *define*;
-* it asserts no `editor_binary_name` is found by that search. A UE5 installed anywhere the launcher
-  knows about reds the stale `false`.
+* the test consults a **bounded, enumerable set of documented authorities**: the Epic launcher's own
+  manifest (`C:\ProgramData\Epic\UnrealEngineLauncher\LauncherInstalled.dat`) **and** the registry
+  hives that record launcher *and* source builds
+  (`HKCU\Software\Epic Games\Unreal Engine\Builds`). A search space the record *describes*
+  (`search_method`) but does not *define*;
+* it asserts no engine is registered by any of those authorities. A UE5 the launcher or the
+  registry knows about reds the stale `false`.
+
+> ⚠️ **Rev 4 said "enumerates fixed volumes itself", and that was the wrong instrument.** It means a
+> recursive walk of `C:` (239 GB) and `D:` (238 GB, holding a **58 GB `target/`** per §11) inside a
+> `cargo test` process: unbounded runtime, permission denials on system directories,
+> junction/reparse-point cycles, OneDrive placeholders, and millions of build-artifact entries.
+> That is not a test. It also produced **false positives** — any stray `UnrealEditor.exe` in an
+> extracted archive or a sample project would red R0a with no usable UE5 present.
+>
+> **The residual blindness is recorded in the rig file rather than claimed away.** The launcher
+> manifest is not reliably pruned on uninstall, and a hand-placed engine outside both authorities
+> is invisible to them. **A search that admits what it cannot see is stronger than one that claims
+> to see everything** — and this rung's whole purpose is that a negative be the machine's, honestly
+> bounded, rather than the author's.
 
 **Free disk is recorded as evidence and is deliberately NOT an assertion.** Rev 2 asserted free
 space below a recorded `required_free_gb`, which fails twice over: the number is author-set (set it
@@ -781,7 +826,17 @@ cannot reach the corpus at any resolution;
 the test re-asserts, the census produces one row per rung, **and the readback's own dimensions equal
 the requested rung** (`[census].assert_achieved_extent`) — a ladder silently truncated, or silently
 clamped by the OS, reds;
-(e) **cross-process `vb_id` identity is MEASURED here, not assumed** — see R0d.
+(e) **cross-process `vb_id` identity is MEASURED and RECORDED here — and deliberately NOT
+asserted.** ⚠️ Rev 4 wrote (e) as a gate, which made it incoherent with R0d: a negative result is
+something the plan explicitly calls *"a real finding about the raster path"* and wants recorded,
+yet asserting identity would **red R0c** and, via §9 clause 4, make the rung not commit-eligible —
+**a legitimate finding blocking the ladder.** So (e) produces a number and writes it into
+`docs/VG-R0-DENSITY-CENSUS.md`; **R0d** is where it becomes a gate, in whichever of the two shapes
+(e) established (see R0d). And (e) is measured **in the regime where it can actually fail** — the
+**top ladder rung on the corpus**, not R0c's 512² procedural fixture: §12's own warning is that
+ties are common *"at 2160p on a multi-million-triangle corpus where near-coplanar sub-pixel
+triangles"* collide, and measuring a hypothesis where it is least likely to fail is the
+vacuous-selection defect wearing a lab coat.
 
 **RED if / mutations (DEMONSTRATED):**
 * (b): subdivide the procedural fixture 4× → the modal bucket must move by **two** buckets. A
@@ -822,8 +877,16 @@ mistaken for a failing rung and quietly re-run until it passes.
 
 **If the readback proves non-deterministic** — e.g. a driver-side raster order that changes which
 triangle wins a coverage tie — that is a **real finding about the raster path**, and it is recorded
-as one. `[census].cross_run_spread_fallback` is adopted only *after* such a finding is entered by
-name and date as a plan amendment (§11). It is not a bound anyone may reach for to make a run pass.
+as one. R0c(e) is what discovers it; **R0d then runs in its second shape**: the finding is entered
+in §11.1 by name and date *first*, and only then does `[census].cross_run_spread_fallback` become
+gate (a). The ladder is not blocked by a true discovery, and the fallback is still unreachable
+without the dated entry — so it remains impossible to reach for it to make a run pass.
+
+⚠️ **`cross_run_spread_fallback` names no statistic, and Rev 5 does not pretend it does.** A hash
+has no spread. If the second shape is ever entered, the amendment must define *spread of what* —
+per-pixel disagreement fraction, or the spread of the derived statistics — because a bound without
+its denominator is R16 again, this time inside the frozen file itself. The value stays `0.05` as a
+placeholder magnitude and is **not usable until that amendment names its quantity.**
 
 **RED if / mutations.** Rev 2's named mutation — *"point two of the three runs at different camera
 paths"* — is **not a gate test**: it changes the test's *input*, and would red any hash of anything.
@@ -871,8 +934,18 @@ caches and a queue, so arithmetic composition would assume an independence they 
 > Both denominators are now written down (`null_control_denominator`, `session_spread_denominator`).
 
 The three literals themselves are not invented for this campaign — they are the ones
-`sv0_deferred_term_bench.rs:350`, `:366`, `:378` already carry, **measured on this exact box**, by
-a rung that had never heard of virtual geometry.
+`sv0_deferred_term_bench.rs:350`, `:366`, `:378` already carry, fixed by a rung that had never
+heard of virtual geometry.
+
+> ⚠️ **Rev 3/Rev 4 called them *"measured on this exact box"*. They are not measurements** — they
+> are **pre-registered protocol thresholds**, and the sibling says so at the constants themselves:
+> `SV0_NULL_CONTROL_MAX_FRACTION` is *"Registered at the same 10% … **Fixed here, before any run**,
+> so it cannot be widened to rescue a failing control"*; `SV0_SESSION_SPREAD_MAX` carries a
+> `const { assert!(… <= 0.10) }` and *"may be TIGHTENED on new evidence, never widened"*;
+> `SV0_BENCH_SESSIONS = 3` is *"The plan's session count."* In a document whose central discipline
+> is the measured/authored distinction — §11's fenced exception exists for exactly this — calling
+> three authored numbers "measured" **launders them as evidence**. That is the category error this
+> campaign exists to prevent, committed in the sentence claiming rigour.
 
 **RED if / mutations (DEMONSTRATED):**
 * revert the harness to strict ABAB → (a) must exceed its budget. This was **measured** on this
@@ -942,13 +1015,29 @@ meaningful (`[corpus].arrangement`, `[quality].arbiter`).
 **Gate (one, three parts):** (a) the measured absolute cross-session spread is at or below
 `[absolute_mode].absolute_session_spread_ceiling` — **derived by measurement here, not adopted**;
 the ceiling is pre-registered at 0.25 from this project's recorded ~21% absolute-cost spread at
-high N, with margin, and R0f′ reds if the measurement exceeds it; (b) `absolute_floor <
-claim.absolute_chain_ms`, both in milliseconds on the bracketed chain at the decision resolution —
-a genuine inequality between two quantities of the same kind, unlike Rev 2's dimensionless fraction
-against "the resolvable fraction of a millisecond target"; (c) the thresholds file's sha256
-re-asserts, and `claim.mode == "absolute"` is consistent with R0a's `achievable = false` — a mode
-set to `nanite_relative` while the rig says unachievable reds, so the two documents cannot disagree
-silently.
+high N, with margin, and R0f′ reds if the measurement exceeds it; (b) the ONE gate, and **Rev 5
+rewrote it because Rev 3 and Rev 4 both shipped it as a dimension error** — see below; (c) the
+thresholds file's sha256 re-asserts, and `claim.mode == "absolute"` is consistent with R0a's
+`achievable = false` — a mode set to `nanite_relative` while the rig says unachievable reds, so the
+two documents cannot disagree silently.
+
+> ⚠️ **Gate (b), twice wrong, and it guarded the *expected* branch.** Rev 3 compared a
+> dimensionless fraction against *"the resolvable fraction of a millisecond target"*. Rev 4 claimed
+> to fix that with *"`absolute_floor < claim.absolute_chain_ms`, both in milliseconds — a genuine
+> inequality between two quantities of the same kind"*. **It is not.**
+> `[absolute_mode].absolute_floor_source` is `cross_session_spread_of_absolute_per_pass_medians` —
+> a **relative fraction**, the same quantity gate (a) compares against a fraction. One source
+> cannot be both. Read as relative, gate (b) is the identical dimension error one file over. Read
+> as milliseconds, it says `0.28 ms < 5 ms` — **true for any non-degenerate target**, because a
+> *resolution* being smaller than a *level* tells you nothing about whether you can see the gap.
+>
+> **Rev 5's gate (b), from `[absolute_mode]`'s three new rules:**
+> `absolute_floor_ms = spread × measured_chain_median_ms` and
+> `absolute_distance_ms = |measured_chain_median_ms − claim.absolute_chain_ms|`, with the gate
+> `absolute_floor_ms < absolute_distance_ms`. Both sides milliseconds, and the inequality is about
+> **the distance we intend to close**, not the level we intend to reach. A target already passed,
+> or one sitting inside our own resolution, now reds — which is the discrimination the branch
+> §11 calls expected has been missing for three revisions.
 
 **Absolute mode is honestly weaker, and saying so is the deliverable.** Its floor is roughly
 2.5× the paired-delta floor, because absolute readings keep every term ABBA was built to remove.
@@ -968,17 +1057,27 @@ is the failure Rev 2 would have shipped silently.
 
 The rung is **reverted or the campaign re-scoped** — not softened mid-flight — if any of:
 
-1. **K1 — no content.** At `[census].decision_resolution`, **both** of `[k1]`'s frozen conjuncts
-   hold: `D_est < 1.0` **and** the modal bucket is **above** 16 pixels. Both point the same way —
-   *large triangles* — which Rev 2's three-conjunct rule did not: its `rule = "all_three_below"`
-   put a `_max` among two `_min`s, so on the canonical no-mechanism scene (a few giant flat quads)
-   two conjuncts held, the third did not, and **K1 failed to fire on the exact scene it was written
-   to catch.** An implementer coding from the frozen TOML would have written `modal < 16` and
-   produced a kill that fires when triangles are *small* — i.e. when the campaign's premise is
-   *confirmed*. The rule is now spelled out as a sentence for that reason.
-   **K1 is not adjudicated at all** if `[k1_instrument]`'s ladder-convergence check fails: `D_est`
-   is then an underestimate of unknown size, and clause 4 governs. Then cluster LOD has no
-   mechanism of action on
+1. **K1 — no content.** `[k1].k1_fire_rule`: the **upper-bound survivor count** per covered pixel is
+   below 1.0 at `[census].decision_resolution`. **Only the upper-bound instrument can fire this
+   kill** — §5.6. The cheap census can *refute* K1 (`D_est ≥ 1.0`) and can never fire it, because
+   `D_est` is a lower bound; anything below the threshold is indistinguishable from the
+   instrument's own ceiling seen from underneath.
+   **K1 is not adjudicated at all** if `[k1_instrument]`'s ladder-convergence check fails, or if
+   the non-degeneracy minimums are not met: `D_est` is then an underestimate of unknown size, and
+   clause 4 governs.
+
+   > ⚠️ **Two dead rules are recorded here rather than deleted, because each looked decisive.**
+   > Rev 2's `rule = "all_three_below"` put a `_max` among two `_min`s, so on the canonical
+   > no-mechanism scene — a few giant flat quads — two conjuncts held, the third did not, and **K1
+   > failed to fire on the exact scene it was written to catch**; an implementer coding from the
+   > TOML would have written `modal < 16` and built a kill that fires when triangles are *small*,
+   > i.e. when the premise is *confirmed*. Rev 4's two-conjunct replacement was **redundant**:
+   > modal bucket > 16 px implies `visible_tris ≲ covered_px/16`, hence `D_est ≲ 0.06 ≪ 1.0`, so
+   > conjunct 1 held automatically whenever conjunct 2 did. "Two conjuncts, both pointing the same
+   > way" was one conjunct and a weaker consequence of it — and the real decisive statistic was the
+   > modal bucket, whose cross-rung derivation this ladder cannot support (§5.7).
+
+   When K1 fires, cluster LOD has no mechanism of action on
    this content — at **full detail**, i.e. at the ceiling any LOD scheme could ever see — and **the
    campaign is refuted as stated**. The disposition is the owner's: change the target content class
    (and re-run R0b–R0d against it), or stop. It is explicitly *not* "generate a denser corpus" —
