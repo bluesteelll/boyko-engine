@@ -146,15 +146,61 @@
 //!
 //! ⚠️ **This bench does NOT reproduce across sessions above `N_ps` ≈ 128.** Re-measured on the
 //! same RTX 3060 against the table committed at `e7a4767` (the provenance doc-comment on
-//! `boyko_render::light_policy::CLUSTER_LO`): `N_ps` ≤ 128 reproduces within ~6%, `N_ps=256` is
-//! +21%, and `N_ps=512` is **+125% on the flat leg** / +55% on the froxel leg. Run-to-run spread
-//! at `N_ps=512` is ~21% (1.29 / 1.33 / 1.57 ms across three runs), while `BOYKO_VB_BENCH_FRAMES`
+//! `boyko_render::light_policy::CLUSTER_LO`): `N_ps` ≤ 128 reproduces within ~6% per leg,
+//! `N_ps=256` is +21% (froxel) / +23% (flat), and `N_ps=512` is **+125% on the flat leg** / +55%
+//! on the froxel leg. Run-to-run spread
+//! at `N_ps=512` is ~21% (1.29 / 1.33 / 1.57 ms over three runs), while `BOYKO_VB_BENCH_FRAMES`
 //! 40 vs 220 differ by 0.13% — so the pass is stable WITHIN a run and unstable ACROSS runs (GPU
-//! power/clock state is the leading suspect; not identified). Consequences: a single-sample
-//! threshold comparison at high `N_ps` is not decidable on this harness — repeat runs and state a
-//! variance band — and `CLUSTER_LO`/`CLUSTER_HI` derive from exactly the rows that do not
-//! reproduce (they stay conservative, since the divergence favours clustering more, but they are
-//! not supported at the precision the table claims).
+//! power/clock state is the leading suspect; not identified). The two sweeps side by side
+//! (`flat_shade_ns` / `froxel_total_ns` in ns; "margin" is froxel's advantage
+//! `(flat - froxel) / flat`, positive ⇒ froxel wins):
+//!
+//! | `N_ps` | flat committed / re-meas | froxel committed / re-meas | margin committed → re-meas |
+//! |---|---|---|---|
+//! | 8   | 32 799 / 30 888     | 46 816 / 44 963   | -42.7% → -45.6% |
+//! | 32  | 60 815 / 57 586     | 71 999 / 67 562   | -18.4% → -17.3% |
+//! | 64  | 95 877 / 96 587     | 102 720 / 96 242  | **-7.1% → +0.4%** |
+//! | 128 | 167 322 / 158 622   | 163 039 / 173 013 | **+2.6% → -9.1%** |
+//! | 256 | 315 044 / 387 133   | 277 662 / 335 179 | +11.9% → +13.4% |
+//! | 512 | 592 015 / 1 330 623 | 523 370 / 810 285 | +11.6% → +39.1% |
+//!
+//! Consequences.
+//!
+//! 1. A single-sample threshold comparison at high `N_ps` is not decidable on this harness —
+//!    repeat runs and state a variance band.
+//! 2. The ≈103 break-even is not supported at the precision that table claims. Its DETERMINING
+//!    rows (`N_ps=64` and `N_ps=128`, the pair it is interpolated
+//!    between) sit on the REPRODUCING side of the split above, and yet BOTH flipped SIGN. They
+//!    flip because a margin is a RATIO of two legs that each hold only to ~6%: at 64 the flat leg
+//!    moved +0.7% and the froxel leg -6.3%, closing a 7.1-point gap into a 0.4% tie; at 128 flat
+//!    moved -5.2% and froxel +6.1%, turning a 2.6% froxel win into a 9.1% loss. Two legs each
+//!    inside ±6% admit ~12.8% of movement in their ratio (1.06/0.94), which covers both margins —
+//!    note that the +7.1% margin at 64 is NOT itself smaller than the ~6% per-leg figure, so it is
+//!    the RATIO band, not the per-leg one, that makes these rows unresolvable.
+//! 3. ⚠️ **The re-measurement does not support `CLUSTER_HI = 128`; "conservative" is the wrong
+//!    word for it.** Four of the six rows do move toward clustering (+1.1 / +7.5 / +1.6 / +27.5
+//!    points at `N_ps` 32 / 64 / 256 / 512), which is where the old "favours clustering MORE, so
+//!    the constants stay conservative" reading came from — but `N_ps=128` is one of the two that
+//!    move the other way (`N_ps=8` is the other, -2.8), and 128 is both the value `HI` takes and
+//!    the row its "froxel already wins by ~2.6%" justification cites. There the margin moves
+//!    **11.6 points AGAINST** clustering, measuring the froxel leg **9.1% SLOWER** at exactly the
+//!    count `HI` arms it. Re-running the committed table's own interpolation (linear in the
+//!    `flat - froxel` ns difference) over the re-measured
+//!    rows moves the durable crossing from ≈103 to **≈156** — bracketed by 128 at `-14 391` ns and
+//!    256 at `+51 954` ns, i.e. ABOVE `HI` rather than below it (on percentage margins the same
+//!    pair gives ≈180). That ≈156 leans on the `N_ps=256` row, which is on the NON-reproducing
+//!    side, so it is NOT a replacement constant — but the finding against `HI` does not need it:
+//!    the reproducing `N_ps=128` row alone contradicts the sign `HI` was armed on.
+//! 4. `CLUSTER_LO = 64` does survive. In the re-measured sweep, AT OR BELOW `N_ps=128` the froxel
+//!    leg is ahead only inside a ~2.6-light-wide window (interpolated crossings at ≈63 and ≈65)
+//!    and only by 345 ns (0.4%) — a blip below anything this harness can resolve — while below
+//!    that window both sweeps agree flat wins by 17-46% (`N_ps` 32 and 8), margins far outside the
+//!    ~12.8% ratio band. So disarming at `<= 64` costs at most that 0.4% at the edge itself and is
+//!    decisively right beneath it. (Froxel does go ahead again above the ≈156 crossing of point 3,
+//!    which is `HI`'s problem, not `LO`'s.)
+//!
+//! Re-tuning `HI` needs a repeated-run protocol with a stated variance band, not another single
+//! sweep (tracked as VB-P1f).
 
 #![cfg(windows)]
 
@@ -220,16 +266,55 @@ const PALETTE: [[f32; 3]; 6] = [
     [1.0, 0.9, 0.6],
 ];
 
-/// Low-discrepancy (golden-ratio Kronecker-sequence) 3D placement for light `i` of `n` —
-/// spreads `N_ps` lights across a volume that grows mildly with `n` (cube-root scaling keeps
-/// the AVERAGE per-froxel light density, and so the per-cluster light count, roughly constant
-/// regardless of `N_ps`), so a 1024-light sweep neither piles every light into the same handful
-/// of clusters (risking `MAX_LIGHTS_PER_CLUSTER`/`INDEX_LIST_CAP` overflow) nor spreads so thin
-/// that most froxels see zero lights (which would defeat the point of a cull-cost sweep).
+/// Golden-ratio Kronecker placement for light `i` of `n` — low-discrepancy along each axis
+/// SEPARATELY but NOT in 3D (see the collinearity paragraph below). It spreads `N_ps` lights
+/// across a placement box whose volume is `178.2 * scale^3` with `scale^3 = max(n / 14, 1)`, so
+/// the NOMINAL lights-per-unit-VOLUME of that box (`n` ÷ box volume) is constant by construction
+/// for `n >= 14`. That is the only density this rig actually holds fixed.
 ///
-/// The three fractional-part multipliers (`g`, `g^2`, `g^3` for the golden ratio conjugate `g`)
-/// are mutually irrational, so the sequence never repeats/aliases across the three axes for any
-/// `i` in `[0, MAX_LIGHTS)`.
+/// ⚠️ **Per-box-volume is not per-FROXEL, and the claim this doc used to make — that the
+/// cube-root scaling "keeps the AVERAGE per-froxel light density, and so the per-cluster light
+/// count, roughly constant regardless of `N_ps`" — is refuted by this rig's own measured
+/// occupancy.** The probe is `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md` §1.3 (a CPU sweep over the
+/// host oracle `golden_cluster_cull`, this file's camera, default `ClusterConfig`
+/// 16x9x24 = 3456 froxels); §1.4 states the refutation. Over `N_ps` 8 → 1024 — a 128x rise in
+/// light count:
+///
+/// - non-empty froxels COLLAPSE 514 → 55 (9.4x fewer) while `max per froxel` CLIMBS 3 → 109
+///   (36x) — the opposite of a constant per-cluster count;
+/// - the average over NON-EMPTY froxels rises 1.5 → 49.3 (32x), and even the average over all
+///   3456 froxels rises 0.23 → 0.78 (3.4x), the emitted index total going only 789 → 2709.
+///
+/// The failure mode the old text claimed to avoid is in fact the measured steady state: 85% of
+/// froxels are already empty at `N_ps=8` and 97.5% are empty at `N_ps=512` (§1.3). The cause is
+/// the collinearity documented below — every light lands on one of two straight segments running
+/// diagonally OUT of the frustum, so growing the box pushes them laterally out of the view cone
+/// instead of filling it.
+///
+/// What the probe DOES confirm is the cap half: `max per froxel` peaks at 109 against
+/// `MAX_LIGHTS_PER_CLUSTER = 256`, and the 2709-index total is 16.5% of `INDEX_LIST_CAP = 16384`
+/// (`boyko_render::light`), across the whole range [`setup`] admits (`n_ps < MAX_LIGHTS = 1024`,
+/// asserted there) — so the O2 clamp-and-drop never fires and never silently corrupts a cull-cost
+/// reading here. The sweep therefore remains valid as a cull-COST sweep — but a REJECTION-
+/// dominated one (99.85% of the `3456 x 512` pair tests fail at `N_ps=512`), i.e. a best case for
+/// any hierarchical group reject. That is why §1.4's consequence 2 requires a second, IN-FRUSTUM
+/// rig to be reported alongside this one — H4's `infrustum`, with `r3` added to separate the
+/// collinearity defect from the volume-growth one (`BOYKO_VB_BENCH_RIG`, module doc).
+///
+/// The three fractional-part multipliers are the golden-ratio conjugate's powers `g`, `g^2`,
+/// `g^3`, and they are NOT mutually independent: `g` is a root of the QUADRATIC `x^2 + x - 1`, so
+/// `{1, g, g^2, g^3}` is necessarily linearly DEPENDENT over the rationals — exactly the property
+/// a 3-D Kronecker sequence must NOT have. The committed literals carry that dependence:
+/// `0.618_033_988_75 + 0.381_966_011_25 == 1.0` exactly in `f64`, and their difference equals the
+/// third literal to within 1 ULP. The three axes are therefore maximally CORRELATED rather than
+/// alias-free — `fy == -fx (mod 1)` and `fz == 2*fx (mod 1)` hold for every `i` in
+/// `[0, MAX_LIGHTS)` (0 violations / 1024, residual <= 2e-13), collapsing every light onto one of
+/// two straight 3-D segments. Each axis taken ALONE is still evenly spread (largest gap only
+/// ~1.2-1.7x the mean gap over 1024 samples), which is why the sweep remains usable at all.
+/// The rig is kept byte-for-byte anyway ([`BenchRig::Kronecker`]) so the committed provenance
+/// table stays reproducible verbatim; `BOYKO_VB_BENCH_RIG=r3` is the genuinely 3-D-equidistributed
+/// replacement, and the module doc (VB-P1e H4 §1.4) explains why this collinearity would flatter
+/// a group-level reject if the hierarchical arm were measured on this rig alone.
 fn light_position(i: u32, n: u32) -> [f32; 3] {
     let scale = (f64::from(n) / f64::from(DEFAULT_N_PS)).max(1.0).cbrt() as f32;
     let half_x = 4.5 * scale;

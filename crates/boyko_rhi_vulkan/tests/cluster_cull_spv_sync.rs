@@ -161,13 +161,22 @@ struct SpvCensus {
     /// the ARTIFACT-level half of the fix's pin (the other half,
     /// `tests/cluster_grid_write_bound.rs`, sweeps a Rust mirror of the prologue and cannot see
     /// the real module). Dropping the clamp from the HLSL collapses this to 0, which is RED.
-    op_array_length: usize,
+    ///
+    /// Counted with the OPERAND scoped to `%ClusterGrid`, matching
+    /// `tests/cluster_grid_read_bound.rs`'s `cluster_grid_array_lengths` — see
+    /// [`the_array_length_census_is_scoped_to_cluster_grid`] for why the bare-opcode form this
+    /// field used to carry could not stay sound.
+    cluster_grid_array_length: usize,
 }
 
 /// Counts the census tokens in a `spirv-dis` disassembly. `GLSL.std.450` ext-inst calls
 /// (`NMin`/`NMax`/`FMin`/`FMax`) appear as a bare operand token on the `OpExtInst` line
 /// (e.g. `%482 = OpExtInst %v3float %1 NMax %481 %60`), so a whitespace-split exact match finds
 /// them without needing to distinguish opcode position from operand position.
+///
+/// `cluster_grid_array_length` is the one field NOT counted by a bare opcode token: it requires
+/// `%ClusterGrid` on the SAME line, so it pins the length of one named buffer rather than "some
+/// length, of something". See [`the_array_length_census_is_scoped_to_cluster_grid`].
 fn census(dis: &str) -> SpvCensus {
     let mut c = SpvCensus {
         op_dot: 0,
@@ -179,11 +188,12 @@ fn census(dis: &str) -> SpvCensus {
         f_min: 0,
         f_max: 0,
         op_control_barrier: 0,
-        op_array_length: 0,
+        cluster_grid_array_length: 0,
     };
     for line in dis.lines() {
-        for tok in line.split_whitespace() {
-            match tok {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        for tok in &toks {
+            match *tok {
                 "OpDot" => c.op_dot += 1,
                 "NoContraction" => c.no_contraction += 1,
                 "OpFOrdLessThanEqual" => c.op_ford_less_than_equal += 1,
@@ -193,9 +203,13 @@ fn census(dis: &str) -> SpvCensus {
                 "FMin" => c.f_min += 1,
                 "FMax" => c.f_max += 1,
                 "OpControlBarrier" => c.op_control_barrier += 1,
-                "OpArrayLength" => c.op_array_length += 1,
                 _ => {}
             }
+        }
+        // Operand-scoped, exactly as `tests/cluster_grid_read_bound.rs` does it: an
+        // `OpArrayLength` whose operand is any OTHER buffer must not stand in for this one.
+        if toks.contains(&"OpArrayLength") && toks.contains(&"%ClusterGrid") {
+            c.cluster_grid_array_length += 1;
         }
     }
     c
@@ -282,7 +296,7 @@ fn cluster_cull_spv_census_pinned() {
         op_control_barrier: 0,
         // VB-P1j: exactly ONE `ClusterGrid.GetDimensions()` — the capacity clamp on the base
         // arm's write bound. MEASURED on the artifact this rung commits.
-        op_array_length: 1,
+        cluster_grid_array_length: 1,
     };
     assert_eq!(
         actual, expected,
@@ -313,10 +327,94 @@ fn cluster_cull_spv_census_pinned() {
     // `cluster_cull.hlsl` restores an out-of-bounds device write that NOTHING else in this
     // repository detects — `robustBufferAccess` is off and no GPU-assisted validation runs.
     assert_eq!(
-        actual.op_array_length, 1,
+        actual.cluster_grid_array_length, 1,
         "invariant: the base cull arm must carry exactly one `OpArrayLength` on `ClusterGrid` \
          (VB-P1j's capacity clamp). Got {}. A count of 0 means the write bound fell back to the \
          LIVE header dims against a BOOT-sized allocation.",
-        actual.op_array_length
+        actual.cluster_grid_array_length
+    );
+}
+
+/// FIXTURE CONTROL for [`census`]'s `cluster_grid_array_length` selector: an `OpArrayLength` is
+/// counted only when `%ClusterGrid` is its operand.
+///
+/// # Why the bare-opcode form it replaces could not stay sound
+///
+/// Until this rung the field counted any bare `OpArrayLength` token anywhere in the module. That
+/// agreed with the intended meaning only because the module happens to emit exactly ONE such
+/// instruction today — not because it holds only one lengthable buffer. MEASURED in
+/// `cluster_cull.comp.spv`'s disassembly: FOUR `StorageBuffer` variables (`LightBuf`,
+/// `ClusterGrid`, `LightIndexList`, `LightIndexAlloc`), each pointing at a struct whose member 0
+/// is a runtime array (`%_runtimearr_uint` / `%_runtimearr_v2uint`), so the `OpArrayLength … 0`
+/// form is legal on any of the four — the module's single length is a fact about today's source,
+/// not a structural guarantee.
+///
+/// A second one is not hypothetical. `docs/SHADER-VARIANT-MANIFEST.md` tracks the open
+/// `LightIndexList` capacity-bound gap; its READER half lands in the four consuming shaders, but
+/// the same "anchor on the allocation, not on a push word" move VB-P1j made for `ClusterGrid`
+/// applies to THIS file's write side too, where `LightIndexList` is currently bounded by the
+/// pushed `pc.index_list_cap` — replacing that with `LightIndexList.GetDimensions()` puts a
+/// second `OpArrayLength` in this very module.
+///
+/// Under the bare count, landing it would take the census to 2 while saying nothing about which
+/// buffer either length belongs to — and DELETING the `ClusterGrid` clamp at the same time would
+/// still read 1 and pass. The scoped form fails that combination.
+///
+/// Runs unconditionally — no `dxc` / `spirv-dis`, so it cannot SKIP the way the artifact gates do.
+#[test]
+fn the_array_length_census_is_scoped_to_cluster_grid() {
+    // The real instruction, verbatim from `spirv-dis cluster_cull.comp.spv`.
+    let on_grid = "         %98 = OpArrayLength %uint %ClusterGrid 0\n";
+    assert_eq!(
+        census(on_grid).cluster_grid_array_length,
+        1,
+        "the selector missed the REAL `ClusterGrid` array length — it is now blind in the \
+         direction it exists to watch, and the census pin is vacuous"
+    );
+
+    // A length taken on a DIFFERENT buffer of the same module must not stand in for it. This is
+    // the exact line the tracked `LightIndexList` bound would add.
+    let on_other = "         %98 = OpArrayLength %uint %LightIndexList 0\n";
+    assert_eq!(
+        census(on_other).cluster_grid_array_length,
+        0,
+        "an `OpArrayLength` on `LightIndexList` was counted as the `ClusterGrid` write bound — a \
+         module that bounds the index list and NOT the grid would satisfy the VB-P1j pin while \
+         shipping the out-of-bounds grid write the pin exists to forbid"
+    );
+
+    // Both together: the count must track the grid alone, not the module's total.
+    let both = format!("{on_other}{on_grid}");
+    assert_eq!(
+        census(&both).cluster_grid_array_length,
+        1,
+        "the selector is counting every array length in the module rather than the grid's"
+    );
+
+    // Whole-token matching, the same near-miss guard `cluster_grid_read_bound.rs` pins for its own
+    // selector: a longer identifier that merely starts with the name is a different variable.
+    for near_miss in [
+        "         %98 = OpArrayLength %uint %ClusterGridDebug 0\n",
+        "         %98 = OpArrayLength %uint %OldClusterGrid 0\n",
+    ] {
+        assert_eq!(
+            census(near_miss).cluster_grid_array_length,
+            0,
+            "{near_miss:?} false-matched `%ClusterGrid`; the pin would be satisfied by a length \
+             taken on a buffer that is not the one being bounded"
+        );
+    }
+
+    // The operand must be on the SAME instruction. `%ClusterGrid` appears on its own `OpVariable`
+    // line, on `OpName`/`OpDecorate` lines and in `OpEntryPoint`'s interface list (MEASURED: 6
+    // such lines in `cluster_cull.comp.spv` besides the `OpArrayLength`), and an `OpArrayLength`
+    // elsewhere in the module must not pair with any of them.
+    let split_across_lines = "%ClusterGrid = OpVariable %_ptr_StorageBuffer_x StorageBuffer\n\
+                                       %98 = OpArrayLength %uint %LightIndexList 0\n";
+    assert_eq!(
+        census(split_across_lines).cluster_grid_array_length,
+        0,
+        "the selector paired an `OpArrayLength` with a `%ClusterGrid` mention on a DIFFERENT \
+         line — the declaration alone would then satisfy the bound pin"
     );
 }

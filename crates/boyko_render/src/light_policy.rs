@@ -63,27 +63,57 @@ use crate::light::{ClusterSelectMode, LightEnabled, LightingConfig, PointLight, 
 /// - N_ps=512: flat 592015 | froxel 523370 (cull 498067 + shade 25303) — froxel wins (-12%)
 ///
 /// ⚠️ `[REPRODUCIBILITY CAVEAT]` (added at VB-P1e rung H0, 2026-07-25). A re-measurement on the
-/// SAME RTX 3060 reproduces the `N_ps` ≤ 128 rows within ~6%, but **not** the high rows that
-/// straddle this band: `N_ps=256` came out +21% and `N_ps=512` **+125% on the flat leg** / +55%
+/// SAME RTX 3060 reproduces the `N_ps` ≤ 128 rows within ~6% PER LEG, but **not** the high rows
+/// sitting ABOVE this band: `N_ps=256` came out +21% (froxel) / +23% (flat) and `N_ps=512`
+/// **+125% on the flat leg** / +55%
 /// on the froxel leg, with a ~21% run-to-run spread at `N_ps=512` (the pass is stable WITHIN a
 /// run — `BOYKO_VB_BENCH_FRAMES` 40 vs 220 differ by 0.13% — and unstable ACROSS runs; GPU
-/// power/clock state is the leading suspect, not confirmed). In the re-measured data the
-/// break-even is NON-MONOTONIC exactly inside `[LO, HI]` (froxel ties at 64, loses ~9% at 128,
-/// then wins 13% at 256 and 39% at 512), i.e. noise-dominated where these two constants sit.
-/// The divergence favours clustering MORE than the table above does, so `LO`/`HI` remain
-/// CONSERVATIVE rather than wrong — but they are not supported at the precision the table
-/// implies, and re-tuning them needs a repeated-run protocol with a stated variance band, not
-/// another single sweep. Tracked as VB-P1f in `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md`.
+/// power/clock state is the leading suspect, not confirmed). Re-measured `flat / froxel_total`
+/// (ns): `30888 / 44963` @8, `57586 / 67562` @32, `96587 / 96242` @64, `158622 / 173013` @128,
+/// `387133 / 335179` @256, `1330623 / 810285` @512 — so froxel's margin moves -42.7→-45.6% @8,
+/// -18.4→-17.3% @32, **-7.1→+0.4% @64**, **+2.6→-9.1% @128**, +11.9→+13.4% @256, +11.6→+39.1%
+/// @512: NON-MONOTONIC exactly inside `[LO, HI]`, with BOTH determining rows flipping SIGN even
+/// though both reproduce. They flip because a margin is a RATIO of two legs each holding only to
+/// ~6%, and two such legs admit ~12.8% of movement in their ratio (1.06/0.94) — which covers the
+/// +7.1% margin at 64 as well as the 2.6% one at 128. (The +7.1% is NOT itself below the ~6%
+/// per-leg figure; it is the RATIO band that makes it unresolvable.)
+///
+/// ⚠️ **The re-measurement does not support [`CLUSTER_HI`].** Four of the six rows DO move toward
+/// clustering (+1.1 / +7.5 / +1.6 / +27.5 points at `N_ps` 32 / 64 / 256 / 512) — the source of
+/// the old "favours clustering MORE, so the constants stay conservative" reading. But `N_ps=128`
+/// is one of the two that move the other way (`N_ps=8` is the other, -2.8), and 128 is both the
+/// value `HI` takes and the row its "froxel already wins by ~2.6%" justification cites: there the
+/// margin moves **11.6 points AGAINST** clustering, measuring the froxel leg **9.1% SLOWER** at
+/// exactly the count `HI` arms it. Re-running the interpolation this doc used for ≈103 (linear in
+/// the `flat - froxel` ns difference) over the re-measured rows moves the durable crossing to
+/// **≈156** — bracketed by 128 at `-14391` ns and 256 at `+51954` ns, i.e. ABOVE `HI` rather than
+/// below it; on percentage margins the same pair gives ≈180. That ≈156 leans on the
+/// NON-reproducing `N_ps=256` row and is NOT a replacement constant, but the finding needs only
+/// the reproducing `N_ps=128` row.
+///
+/// `CLUSTER_LO = 64` does survive: in the re-measured sweep, AT OR BELOW `N_ps=128`, the froxel
+/// leg leads only inside a ~2.6-light-wide window (interpolated crossings at ≈63 and ≈65) and
+/// only by 345 ns (0.4%), while below that window both sweeps agree flat wins by 17-46% (`N_ps`
+/// 32 and 8) — far outside the ~12.8% ratio band. (Froxel leads again above the ≈156 crossing;
+/// that is `HI`'s problem, not `LO`'s.) Re-tuning `HI` needs a repeated-run protocol with a
+/// stated variance band, not another single sweep. Tracked as VB-P1f in
+/// `docs/VB-P1E-HIERARCHICAL-CULL-PLAN.md`.
 pub const CLUSTER_LO: u32 = 64;
 
 /// Banded HIGH edge: in [`Auto`](crate::light::ClusterSelectMode::Auto) mode the cluster
 /// path switches ON when the live point/spot light count rises to `>= CLUSTER_HI`.
 ///
 /// `[MEASURED]` (VB-P1d, see [`CLUSTER_LO`]'s own doc for the full data table + provenance).
-/// `CLUSTER_HI = 128` arms with margin above the measured ≈103 break-even (froxel already
-/// wins by ~2.6% at N_ps=128, widening to -12% by N_ps=256/512). `CLUSTER_LO < CLUSTER_HI`
-/// is the hysteresis gap that prevents boundary thrash; the band `[64, 128]` straddles the
-/// break-even on both sides where each leg's advantage is unambiguous in the data above.
+/// `CLUSTER_HI = 128` arms above the ≈103 break-even measured in THAT table (where froxel wins
+/// by ~2.6% at N_ps=128, widening to ~-12% by N_ps=256/512), and the band `[64, 128]` straddles
+/// that ≈103. `CLUSTER_LO < CLUSTER_HI` is the hysteresis gap that prevents boundary thrash.
+///
+/// ⚠️ **This is the constant the H0 re-measurement contradicts — read [`CLUSTER_LO`]'s
+/// REPRODUCIBILITY CAVEAT before trusting the paragraph above.** The `N_ps=128` row that
+/// determines `HI` reproduced to ~6% per leg and still flipped SIGN (froxel 9.1% SLOWER, not 2.6%
+/// faster), which puts the re-measured crossing ABOVE 128 rather than below it. `HI` stays at 128
+/// because VB-P1e does not re-tune the band (plan §1.4 consequence 3; the re-tune is VB-P1f), NOT
+/// because the re-measurement supports it.
 pub const CLUSTER_HI: u32 = 128;
 
 const _: () = assert!(CLUSTER_LO < CLUSTER_HI, "hysteresis: the OFF edge must sit below the ON edge");

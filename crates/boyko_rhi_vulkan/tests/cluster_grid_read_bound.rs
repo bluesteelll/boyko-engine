@@ -289,6 +289,128 @@ fn the_capacity_bound_census_is_not_vacuous() {
     );
 }
 
+/// Counts `OpArrayLength` instructions whose operand is the `LightIndexList` variable, by the
+/// same whole-token rule [`cluster_grid_array_lengths`] uses.
+fn light_index_list_array_lengths(dis: &str) -> usize {
+    dis.lines()
+        .filter(|line| {
+            let toks: Vec<&str> = line.split_whitespace().collect();
+            toks.contains(&"OpArrayLength") && toks.contains(&"%LightIndexList")
+        })
+        .count()
+}
+
+/// Counts artifacts that reference `LightIndexList` at all, by whole token. Anti-vacuity fuel for
+/// [`the_light_index_list_capacity_bound_is_a_tracked_open_gap`].
+fn references_light_index_list(dis: &str) -> bool {
+    dis.lines()
+        .any(|line| line.split_whitespace().any(|t| t == "%LightIndexList"))
+}
+
+/// **TRACKED OPEN GAP — the other half of the VB-P1j/VB-P1k hazard, deliberately NOT closed.**
+///
+/// `ClusterGrid` reads and writes are bounded by the ALLOCATION (`GetDimensions` →
+/// `OpArrayLength`). `LightIndexList` is bounded by ARITHMETIC instead, and this test pins that
+/// asymmetry at its MEASURED value so it is tracked rather than forgotten.
+///
+/// # Why the reads are in bounds today, and what the bound actually rests on
+///
+/// The consumers read `LightIndexList[ps_offset + jj]` for `jj < ps_count`, taking both from
+/// `ClusterGrid[cluster]`. In-boundedness is a THREE-HOP chain, no hop of which is local to the
+/// reading shader:
+///
+/// 1. Reader: the largest index touched is `cell.x + cell.y - 1`.
+/// 2. Writer (`cluster_cull.hlsl`, BOTH arms): it publishes `ClusterGrid[fi] = (offset,
+///    write_count)` only after `offset >= pc.index_list_cap ⇒ write_count = 0`, else
+///    `write_count = min(nlocal, pc.index_list_cap - offset)`. So `cell.x + cell.y <=
+///    pc.index_list_cap`.
+/// 3. Host (`boyko_app/src/gpu_scene/mod.rs`, `build_froxel_light_cull`): the buffer is created
+///    `size = cluster_config.index_list_cap * 4` and the push word is minted
+///    `ClusterCullPush::new(.., cluster_config.index_list_cap)` — same function, same value, so
+///    the pushed cap EQUALS the allocation's element count at boot and is never re-minted.
+///
+/// Hop 3 is the pushed-boot-snapshot route (the one VB-P1e D11 gives the HIER arm's
+/// `cluster_capacity`), NOT the allocation-anchored route VB-P1j deliberately chose for the base
+/// arm. The chain therefore holds, and **no reachable out-of-bounds read is claimed here** — what
+/// is claimed is that nothing in the READING shader bounds the read. Should a `ClusterGrid` cell
+/// ever be read that this cull did not produce, `cell.x`/`cell.y` are arbitrary and the read is
+/// bounded by nothing at all; the `ClusterGrid` read beside it would still be bounded, by
+/// VB-P1k's capacity term. Today the only guard against that state is the header's dims term
+/// (`cluster_count != 0`), because `boyko_render::light` publishes the dims lane only on a
+/// VB-froxel boot — an `enabled`-bit guard, not an allocation one.
+///
+/// # What closing it costs, and why that is not this unit
+///
+/// A `LightIndexList.GetDimensions()` term in the four consumers' `use_clusters` would move
+/// EIGHT committed reader artifacts (the eight non-zero rows this test measures, minus the cull's
+/// own two). All eight are byte-gated — five by this file's own
+/// [`deferred_and_forward_families_spv_byte_identical`], three by `vb_froxel_spv_sync.rs` — so
+/// the edit reds those gates by construction and needs all eight `.spv` re-blessed together. The
+/// clamp is inert on every consistent frame, so the rendered output is EXPECTED to be
+/// byte-identical and the golden pins are EXPECTED not to move — but "expected" is not
+/// "measured", and confirming it needs fresh GPU runs of the froxel pins (`forwardplus_mesh`,
+/// `vb_mesh_froxel`, `vb_mesh_tex_froxel`). That is owner-gated re-bless bandwidth, so the gap is
+/// tracked here instead of half-closed. See `docs/SHADER-VARIANT-MANIFEST.md`.
+///
+/// The four read sites are hand-authored HLSL — VERIFIED outside every
+/// `// === GENERATED … BEGIN/END ===` region (`deferred_pbr.hlsl`'s two generated blocks are at
+/// `sdf_soft_shadow_ranged` and `ssao_blur_combine`, both far above its read; the other three
+/// sources carry no sentinels at all) — so closing it is a legal hand-edit, not a
+/// `boyko_shaderdsl` re-emit.
+///
+/// **A rise to 1 on any row means the gap was CLOSED.** That is the fix landing, not a
+/// regression: re-bless the moved `.spv`, re-run the froxel golden pins, and update this test to
+/// pin the new count.
+#[test]
+fn the_light_index_list_capacity_bound_is_a_tracked_open_gap() {
+    let Some(spirv_dis) = find_spirv_dis() else {
+        eprintln!(
+            "cluster_grid_read_bound: spirv-dis not found — SKIPPING the LightIndexList \
+             tracked-gap census on this host."
+        );
+        return;
+    };
+    let dir = shaders_dir();
+    // The SAME artifact set the `ClusterGrid` census walks — reused rather than re-tabulated, so
+    // this row inherits `the_cluster_grid_consumer_census_is_closed`'s closure guarantee instead
+    // of adding a second hand table that could silently fall behind it.
+    let artifacts: Vec<&str> = OWNED_VARIANTS
+        .iter()
+        .map(|v| v.spv)
+        .chain(CENSUS_ONLY.iter().map(|(_, spv, _)| *spv))
+        .collect();
+
+    let mut referencing = 0usize;
+    for spv in &artifacts {
+        let path = dir.join(spv);
+        assert!(path.exists(), "missing committed {}", path.display());
+        let dis = disassemble(&spirv_dis, &path);
+        if references_light_index_list(&dis) {
+            referencing += 1;
+        }
+        let got = light_index_list_array_lengths(&dis);
+        assert_eq!(
+            got, 0,
+            "{spv}: expected 0 `OpArrayLength` on `LightIndexList` (the TRACKED OPEN GAP — see \
+             this test's doc), got {got}. If you just added the capacity bound, this is the fix \
+             landing and not a regression: re-bless the moved .spv, re-run the froxel golden pins \
+             (forwardplus_mesh, vb_mesh_froxel, vb_mesh_tex_froxel), and re-pin this expectation."
+        );
+    }
+
+    // Anti-vacuity: if `LightIndexList` were renamed, every count above would be 0 for the wrong
+    // reason and this test would pin nothing. MEASURED on the artifacts committed at this rung.
+    assert_eq!(
+        referencing, 10,
+        "expected 10 committed artifacts to reference `LightIndexList` (8 readers — deferred_pbr \
+         base/wrap/hwrt/hwrt_denoised, forward_opaque_froxel, vb_resolve_froxel, vb_shade_froxel, \
+         vb_shade_tex_froxel — plus the cull's own 2 write arms), found {referencing}. A drop to \
+         0 means the `%LightIndexList` selector is dead (renamed?) and the per-row assertions \
+         above are vacuous; any other change means the variant set moved and this count needs \
+         re-measuring alongside the `ClusterGrid` table."
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // The closure: the census is derived from the directory, not just transcribed into it.
 // ---------------------------------------------------------------------------------------------
