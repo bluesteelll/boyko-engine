@@ -1,5 +1,32 @@
 # VB-SV0 — SDF soft-shadow + contact-AO on mesh, inlined into the VB lit-producer tails
 
+**Status:** DESIGN, **Rev 8** — NOT YET APPROVED. **S0, S1, S1.5, S2, S3 and S4 have SHIPPED
+against it** (`189d063`, `9b53365`, `9dffe39`, `c878b3f`, `24612e8`, `f057d1a`). **S4 is LANDED,
+NOT DISCHARGED** — its gate (ii) 24-cell arm matrix is built and runnable but not yet run, and
+gate (iv)'s owner eval follows it.
+
+Rev 8 folds back what S4 exposed, and the first item is the worst plan defect this stage has
+produced:
+
+* **§6 S4's own arming snippet was a P0.** Read literally it arms SV0 on **four shipped pins**,
+  because `boyko_app/src/runner.rs` hardwires `sdf_shadows_wanted: true` ("No owner-facing
+  SDF-shadow toggle exists yet"), making `sv0 = VB && SDF_SOFT_MARCH && mesh_leg` **true on every
+  `VB × Both` boot**. `[vb_both_taa]` is not vacuous — it spawns a real `SdfEdit::sphere` — so its
+  pixels would have moved and its pin broken. The missing conjunct is this plan's own one-line
+  "Owner-facing toggle via `LightingConfig`", which it never composes with the snippet.
+* **§3.1's field count is FOUR, not two** — request and resolved state are now separate, and the
+  clamp between them is monotone downward. See §3.1.
+* **The snippet calls `resolved.path_is_vb()`, which does not exist on `ResolvedRenderPath`** (it
+  exists on `GBufferScene`, `pub(crate)` in another crate, so it is unreachable rather than merely
+  absent). Same defect class this plan warns about for `sdf_mesh_shadow` one paragraph below where
+  it commits it.
+* **§6 S4's red mutations do not work as written.** The `.spv` are embedded via `include_bytes!`, so
+  editing the HLSL changes nothing at runtime — every "revert one source's SV0 block" mutation
+  requires re-DXC, replacing the committed artifact and rebuilding, with R14's mtime false-fresh
+  trap applying throughout.
+
+*(Rev 7 header retained below for the revision trail.)*
+
 **Status:** DESIGN, **Rev 7** — NOT YET APPROVED. **S0, S1, S1.5, S2 and S3 have SHIPPED against it**
 (`189d063`, `9b53365`, `9dffe39`, `c878b3f`, `24612e8`). Rev 7 folds back what S3 measured:
 
@@ -269,8 +296,26 @@ uint load_vb_sdf_mesh_mode(StructuredBuffer<uint> LightBuf) { return (LightBuf[7
 ```
 
 Host side, `boyko_render::light`: `VB_SDF_MESH_MODE_SHIFT: u32 = 5`, `VB_SDF_MESH_MODE_MASK: u32 = 3`,
-two `LightingConfig` bools packed by the existing `shadow_gate_word`, plus a bit-position
-`debug_assert_eq!` at the single writer — the idiom `ddgi_config.rs:288-289` uses.
+plus a bit-position `debug_assert_eq!` at the single writer — the idiom `ddgi_config.rs:288-289`
+uses.
+
+⚠️ **Rev 8 — the field count is FOUR, not two, and the split is load-bearing rather than
+cosmetic.** Rev 7 said "two `LightingConfig` bools packed by the existing `shadow_gate_word`". S4
+had to separate them: `vb_sdf_mesh_shadow` / `_ao` are the owner's **request**, and
+`vb_sdf_mesh_shadow_armed` / `_ao_armed` are the **resolved** state that `shadow_gate_word` actually
+packs. Two reasons, both found by measurement rather than taste:
+
+* **The clamp must not write back into the request.** `sync_sv0_light_gate` computes
+  `request && vb_sdf_mesh_armable()`; folding that into the request field means a per-frame owner
+  writer re-folds the whole light table every frame — a silent performance cliff rather than a
+  wrong image, which is the kind that survives review.
+* **It aligns SV0 with every sibling gate.** `ssao_mode` already derives from `SsaoConfig` this way;
+  a single conflated field would have made SV0 the one gate that mixes request with resolution.
+
+The clamp is **monotone downward — it can only ever CLEAR a bit** — which is what makes "every
+existing golden stays byte-identical" a structural property of the arming path rather than an
+argument about which fixtures happen to resolve `VB × Both`. That distinction is why §6 S4's own
+snippet was a P0: see there.
 
 ### 3.2 Why a runtime gate and not `-D` — the arithmetic
 
@@ -1003,8 +1048,9 @@ coverage is a superset of Deferred's `!own_pixel` arm.
    block; `load_vb_sdf_mesh_mode` hoisted once per pixel; the guarded block, every SV0 span wrapped
    in `#ifndef VB_SV0_KILL` and the ULP probe in `#ifdef VB_SV0_ULP_PROBE`.
 4. `light_table.hlsli`: `load_vb_sdf_mesh_mode` + the two bit constants.
-5. `boyko_render::light`: `VB_SDF_MESH_MODE_SHIFT/_MASK`, two `LightingConfig` fields (default
-   **false**), packing in `shadow_gate_word`, bit-position `debug_assert_eq!`.
+5. `boyko_render::light`: `VB_SDF_MESH_MODE_SHIFT/_MASK`, **four** `LightingConfig` fields (two
+   request + two resolved, all default **false** — Rev 8, §3.1), packing in `shadow_gate_word` from
+   the **resolved** pair, bit-position `debug_assert_eq!`.
 6. `crates/boyko_app/src/gpu_scene/mod.rs:3395` and `:4425`: binding-10 entries.
 7. `crates/boyko_rhi_vulkan/src/present/targets.rs:2995 / 3090 / 3193 / 3311`: `scene.edit_list` at
    slot 10.
