@@ -165,6 +165,33 @@ const BASELINE_UNREAD_RULES: [&str; 0] = [];
 /// tripwire's own fields, §9 names the three `d_est_*` direction fields.
 const BASELINE_ORPHAN_FIELDS: [&str; 0] = [];
 
+/// The table names the plan is allowed to cite in the bare `table.field` spelling.
+///
+/// ⚠️ **This list is deliberately hand-maintained and deliberately NOT derived from the files under
+/// test, and that is the whole point.** The first attempt at the Rev 9 repair built the set of
+/// citable tables by parsing the frozen files — which is circular: deleting a table's last field
+/// also removes the table from the derived set, so the citation of the deleted field stops being
+/// recognised as a citation and no dangling report appears. The control
+/// [`the_sweep_reports_the_deletion_of_a_rung_blocking_field`] failed on exactly that and is why
+/// this list exists.
+///
+/// Both directions are asserted, so the list cannot rot: every table the frozen files define must
+/// appear here (a new table is noticed), and a table legitimately removed must be struck from this
+/// list in the same commit as its removal — the same ratchet the violation baselines use.
+/// It lists **every** table both frozen files define — no judgement about which ones the plan
+/// happens to cite bracketed today, because that is exactly the kind of incidental fact that goes
+/// stale between revisions.
+const CITABLE_TABLES: [&str; 8] = [
+    "census",
+    "corpus",
+    "gating",
+    "hash_assertion",
+    "k1",
+    "k1_instrument",
+    "k1_outcome",
+    "pre_registered",
+];
+
 /// Lower bound on the fields the parser must recover across both frozen files. A pattern that
 /// stopped matching — a reformatted table header, a key style the regex-free scanner does not
 /// recognise — would otherwise empty every violation set and report a triumphant green.
@@ -277,32 +304,62 @@ fn parse_fields(text: &str) -> Vec<Field> {
 /// Regex-free: scan for `].` and read an identifier on each side. This is the form the plan uses
 /// when it points at a frozen value (`[census].decision_resolution`), and it is the form a gate
 /// pointing at nothing takes.
-fn cited_dotted_fields(plan: &str) -> BTreeSet<String> {
+/// Both spellings, and the second one is the Rev 9 repair.
+///
+/// ⚠️ **This function recognised only `[table].field` until Rev 9, and the omission was
+/// load-bearing.** The plan cites `corpus.arrangement` and `k1_outcome.undecided_disposition` —
+/// the two fields that block a rung — **without** brackets. Neither was ever in the citation set,
+/// so deleting either table from the claim file was undetectable: `defined` would lose the field,
+/// but nothing had cited it, so no dangling citation appeared; and class 3 iterates the fields that
+/// exist, so a deleted field cannot be an orphan either. The gate would have stayed green with
+/// §9's outcome table and `[gating].r1_blocked_by` both naming a field that no longer existed. The
+/// asymmetry was the tell: [`is_cited`] already checked both spellings, so the two-spelling problem
+/// was solved in one class and not the other, and the class-1 control injected only the bracketed
+/// form.
+///
+/// The bare form is accepted **only when the table name is one the frozen files actually define**.
+/// Without that restriction every `file.rs`, `mesh_assets.rs:252` and `self.field` in the prose
+/// becomes a citation of a nonexistent table, and the class fills with noise — which is its own
+/// way of going blind.
+fn cited_dotted_fields(plan: &str, known_tables: &BTreeSet<String>) -> BTreeSet<String> {
     let bytes = plan.as_bytes();
     let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
     let mut out = BTreeSet::new();
-    for i in 0..bytes.len().saturating_sub(1) {
-        if bytes[i] != b']' || bytes[i + 1] != b'.' {
+    for i in 1..bytes.len().saturating_sub(1) {
+        if bytes[i] != b'.' {
             continue;
         }
-        // table: back over the identifier, then require the opening '['.
-        let mut start = i;
-        while start > 0 && ident(bytes[start - 1]) {
-            start -= 1;
-        }
-        if start == 0 || bytes[start - 1] != b'[' || start == i {
-            continue;
-        }
-        let table = &plan[start..i];
-        // field: forward over the identifier after the '.'.
-        let mut end = i + 2;
+        // The table name, in whichever of the two spellings precedes this dot.
+        let table = if bytes[i - 1] == b']' {
+            // `[table].field` — walk back over the name, require the opening bracket.
+            let mut s = i - 1;
+            while s > 0 && ident(bytes[s - 1]) {
+                s -= 1;
+            }
+            if s == 0 || s == i - 1 || bytes[s - 1] != b'[' {
+                continue;
+            }
+            &plan[s..i - 1]
+        } else {
+            // `table.field` — accepted only for a table the frozen files define.
+            let mut s = i;
+            while s > 0 && ident(bytes[s - 1]) {
+                s -= 1;
+            }
+            if s == i || !known_tables.contains(&plan[s..i]) {
+                continue;
+            }
+            &plan[s..i]
+        };
+        // The field name.
+        let mut end = i + 1;
         while end < bytes.len() && ident(bytes[end]) {
             end += 1;
         }
-        if end == i + 2 {
+        if end == i + 1 {
             continue;
         }
-        out.insert(format!("{table}.{}", &plan[i + 2..end]));
+        out.insert(format!("{table}.{}", &plan[i + 1..end]));
     }
     out
 }
@@ -367,7 +424,8 @@ fn sweep(thresholds: &str, claim: &str, plan: &str) -> Report {
         .iter()
         .flat_map(|(_, fields)| fields.iter().map(Field::dotted))
         .collect();
-    for cited in cited_dotted_fields(plan) {
+    let citable: BTreeSet<String> = CITABLE_TABLES.iter().map(|t| (*t).to_string()).collect();
+    for cited in cited_dotted_fields(plan, &citable) {
         if !defined.contains(&cited) {
             report.dangling_citations.insert(cited);
         }
@@ -480,6 +538,26 @@ fn the_plan_is_present_and_is_the_document_the_baseline_was_taken_against() {
         !PROVENANCE_KEYS.is_empty(),
         "the provenance exclusion list is empty — class 3's exclusions must stay enumerated"
     );
+
+    // CITABLE_TABLES is hand-maintained on purpose (see its doc), so it is pinned against the files
+    // in BOTH directions — otherwise it rots into the very thing it exists to avoid.
+    let thresholds = read("docs/VG-CAMPAIGN-THRESHOLDS.toml");
+    let claim = read("docs/VG-CAMPAIGN-CLAIM.toml");
+    let defined_tables: BTreeSet<String> = [thresholds.as_str(), claim.as_str()]
+        .iter()
+        .flat_map(|t| parse_fields(t))
+        .map(|f| f.table)
+        .filter(|t| !t.is_empty())
+        .collect();
+    let listed: BTreeSet<String> = CITABLE_TABLES.iter().map(|t| (*t).to_string()).collect();
+    let unlisted: Vec<&String> = defined_tables.difference(&listed).collect();
+    let stale: Vec<&String> = listed.difference(&defined_tables).collect();
+    assert!(
+        unlisted.is_empty() && stale.is_empty(),
+        "CITABLE_TABLES has drifted from the frozen files.\n  \
+         defined but NOT listed (their bare citations would be invisible): {unlisted:?}\n  \
+         listed but NO LONGER defined (strike them in the same commit as the removal): {stale:?}"
+    );
 }
 
 /// Sensitivity control for class 1. A citation of a field neither file defines must be reported.
@@ -508,6 +586,65 @@ fn the_sweep_reports_an_injected_dangling_citation() {
          makes the baseline comparison above vacuously green for the defect that shipped as \
          `[k1].k1_fire_rule`. This is a finding about the scanner — do not retune the injection \
          until it passes."
+    );
+}
+
+/// Sensitivity control for the Rev 9 repair, and the one that matters most now: **deleting a
+/// rung-blocking field must be detectable.**
+///
+/// This reproduces the exact degenerate substitution an adversarial review of Rev 8 constructed
+/// against the previous version of this file. `k1_outcome.undecided_disposition` blocks R1 — it is
+/// the sentinel that stops an UNDECIDED K1 from being walked past — and the plan cites it
+/// **without brackets**. Under the bracket-only scanner: deleting the table removed it from
+/// `defined`, but it had never entered the citation set, so no dangling citation appeared; class 3
+/// iterates fields that exist, so a deleted field cannot be an orphan; and `fields_parsed` stayed
+/// above its floor. **Green run, with §9's outcome table and `[gating].r1_blocked_by` both naming
+/// a field that no longer existed.**
+///
+/// The deletion is performed on an in-memory copy of the real claim file, so this control tracks
+/// the live document rather than a fixture that can drift away from it.
+#[test]
+fn the_sweep_reports_the_deletion_of_a_rung_blocking_field() {
+    let thresholds = read("docs/VG-CAMPAIGN-THRESHOLDS.toml");
+    let claim = read("docs/VG-CAMPAIGN-CLAIM.toml");
+    let plan = read("docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md");
+
+    assert!(
+        plan.contains("k1_outcome.undecided_disposition"),
+        "invariant: the plan must cite the R1-blocking field for this control to be meaningful"
+    );
+    assert!(
+        !plan.contains("[k1_outcome].undecided_disposition"),
+        "invariant: the citation must be the UNBRACKETED spelling — that is the spelling the \
+         bracket-only scanner was blind to, and the reason this control exists. If the plan is \
+         reformatted to the bracketed form, re-derive this test against another unbracketed \
+         citation rather than deleting it."
+    );
+
+    let clean = sweep(&thresholds, &claim, &plan);
+    assert!(
+        clean.dangling_citations.is_empty(),
+        "invariant: the live documents have no dangling citation, so the one appearing below is \
+         the deletion's doing. got={:?}",
+        clean.dangling_citations
+    );
+
+    // The deletion: drop the assignment line, exactly as removing the table would.
+    let deleted: String = claim
+        .split_inclusive('\n')
+        .filter(|l| !l.trim_start().starts_with("undecided_disposition"))
+        .collect();
+    assert_ne!(deleted, claim, "invariant: the deletion must change the file");
+
+    let dirty = sweep(&thresholds, &deleted, &plan);
+    assert!(
+        dirty
+            .dangling_citations
+            .contains("k1_outcome.undecided_disposition"),
+        "RED: deleting the field that blocks R1 was NOT reported. The sentinel that stops an \
+         UNDECIDED K1 from being walked past can be removed with this gate still green — which is \
+         the state Rev 8 shipped in. dangling={:?}",
+        dirty.dangling_citations
     );
 }
 

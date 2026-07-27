@@ -73,6 +73,15 @@ arrangement = "PENDING"
 #   "fund_upper_bound"      — make the upper-bound instrument its own campaign
 # The route deliberately NOT offered is the one this document forecloses everywhere else: re-run
 # the census until a number comes out favourable.
+#
+# ⚠️ REV 9 -- THE TABLE HEADER BELOW WAS MISSING IN REV 8, and the field was therefore parsed under
+# [corpus]. So the plan cited `k1_outcome.undecided_disposition` while this file defined
+# `corpus.undecided_disposition`: the sentinel that blocks R1 did not resolve, in the revision that
+# added it to close exactly that hole. Two blind spots had to line up for it to ship -- the
+# reachability gate's class 1 recognised only the bracketed `[table].field` spelling and this
+# citation is unbracketed, while class 3 was satisfied because the key existed under SOME table.
+# Widening class 1 found it on the first run.
+[k1_outcome]
 undecided_disposition = "PENDING"
 
 # ---------------------------------------------------------------------------------------------
