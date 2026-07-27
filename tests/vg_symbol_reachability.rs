@@ -181,7 +181,7 @@ const BASELINE_ORPHAN_FIELDS: [&str; 0] = [];
 /// It lists **every** table both frozen files define — no judgement about which ones the plan
 /// happens to cite bracketed today, because that is exactly the kind of incidental fact that goes
 /// stale between revisions.
-const CITABLE_TABLES: [&str; 8] = [
+const CITABLE_TABLES: [&str; 9] = [
     "census",
     "corpus",
     "gating",
@@ -189,6 +189,7 @@ const CITABLE_TABLES: [&str; 8] = [
     "k1",
     "k1_instrument",
     "k1_outcome",
+    "k2_probe",
     "pre_registered",
 ];
 

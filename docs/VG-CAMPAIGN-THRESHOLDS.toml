@@ -31,8 +31,8 @@
 # and Rev 7 -- the third occurrence caught by an adversarial pass rather than by the fields
 # themselves, in the very revision whose slogan was about fixes that do not land. They are updated
 # here in the same act as the edit, which is the whole of their job.
-schema_version = 4
-frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 8"
+schema_version = 5
+frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 9"
 frozen_date = "2026-07-28"
 
 # THE EDIT DISCIPLINE, stated because Rev 4 and Rev 5 both edited this file in place while its
@@ -183,9 +183,26 @@ min_visible_tris = 1024
 # was RED BY CONSTRUCTION — two buckets is 4x area (2x linear) and this ladder has no such step:
 # 512^2->1080p = 7.910x (2.98 buckets), 1080p->1440p = 1.778x (0.83), 1440p->2160p = 2.250x (1.17).
 # Modal-bucket indices are integers over powers of two, so 0.83 is not even expressible as a shift.
-# The check is now the per-pair log2 of the ACTUAL area ratio, within a tolerance, with the residual
-# reported rather than an integer asserted.
-histogram_shift_rule = "per_pair_log2_area_ratio"
+# REV 8 replaced the two-bucket constant with the per-pair log2 of the ACTUAL area ratio and
+# claimed "the residual reported rather than an integer asserted". REV 9: that claim was FALSE of
+# the rule it described, and the rule is no longer a gate.
+#
+# The measured shift is a difference of INTEGER bucket indices. The targets are 0.830075 and
+# 1.169925. A tolerance of 0.35 around each admits exactly one integer -- 1 -- on both pairs, so an
+# integer WAS asserted, wearing a tolerance. Worse, the two targets sum to exactly 2.000
+# (3840/1920 = 2160/1080 = 2), so both splits a correct instrument can produce -- (1,1) and (0,2)
+# -- satisfy the scaling law, and which one occurs is set by the sub-bucket phase of the corpus's
+# modal triangle size: a property of the ASSETS, not of the instrument. And the histogram is
+# left-censored at one covered pixel, so in the micro-polygon regime the census exists to serve
+# every newly visible triangle enters at bucket 0 and pushes the mode the wrong way -- the check
+# would red hardest exactly where the campaign's premise is most strongly confirmed.
+#
+# So it is MEASURED AND RECORDED, never asserted (plan section 8 R0d). The tolerance below is the
+# margin the reported residual is compared against for the reader's benefit; no gate part reads it.
+# Re-arming this requires a statistic that is not re-binned onto the same integer lattice at both
+# rungs -- the log2 ratio of a fixed quantile of covered-pixel counts is the obvious candidate --
+# and that is a new instrument, not a retuned tolerance.
+histogram_shift_rule = "per_pair_log2_area_ratio_REPORTED_NOT_ASSERTED"
 histogram_shift_tolerance_buckets = 0.35
 
 # Rung 1 is EXCLUDED from the scaling check: 512^2 is 1:1 while the other three are 16:9, so the
@@ -249,7 +266,14 @@ d_est_min = 1.0
 #   D_est >= d_est_min  =>  K1 REFUTED. Density is genuinely >= 1 tri/pixel; the mechanism exists.
 # It can decide nothing else. Everything below d_est_min is indistinguishable from the instrument's
 # own ceiling seen from underneath.
-k1_decision_rule = "cheap_census_may_only_REFUTE: d_est >= d_est_min => K1 dead; d_est < d_est_min => UNDECIDED, escalate"
+# REV 9 -- THE NON-DEGENERACY CONJUNCT IS PART OF THE RULE, not a separate precondition, and
+# omitting it gave one input three different dispositions. Substitute covered_pixels(1080p) = 500
+# and visible_tris(2160p) = 600 -- a corpus asset framed small, exactly what the min_* floors exist
+# for. D_est = 1.2 >= d_est_min, so the Rev 8 string said K1 REFUTED (the campaign-favourable
+# direction) on a 500-pixel frame; the plan's outcome table said UNDECIDED; and the rung's own gate
+# said the rung reds. Three codeable texts, three answers, and this string is the one both
+# documents nominate as the only live rule.
+k1_decision_rule = "cheap_census_may_only_REFUTE: (covered_pixels >= min_covered_pixels AND visible_tris >= min_visible_tris) AND d_est >= d_est_min => K1 dead; non-degeneracy unmet OR d_est < d_est_min => UNDECIDED, escalate"
 
 # FIRING K1 requires the upper-bound instrument (the frustum+backface survivor counter), which is a
 # separate conditional rung. Its threshold is pre-registered HERE, before that instrument exists,
@@ -344,6 +368,36 @@ measured_at = "full_detail_no_lod"
 # procedural fixture at 512^2. Not zero: the oracle is a host mirror with its own sample-point rule,
 # so exact agreement would be a coincidence, not a check.
 r0c_oracle_coverage_tolerance = 0.02
+
+# ---------------------------------------------------------------------------------------------
+# [k2_probe] — REV 9. The legal values of the rig record's `reason` field, and which of them the
+# machine re-derives.
+#
+# Rev 8 conditioned R0a's negative-branch re-derivation on `reason == "no_engine_registered"` and
+# enumerated the legal values NOWHERE. That traded Rev 7's cannot-go-green for a cannot-go-red: an
+# author writing any other string switched the only machine check off in the same act as recording
+# the negative, while the surviving assertions (four non-PENDING fields, and a hash of a docs file)
+# carry no information about UE5 at all. The rung's own stated purpose is "that a negative be the
+# machine's, honestly bounded, rather than the author's".
+#
+# Section 6.2 fires K2 if ANY of three prerequisites fails, and exactly one of the three is
+# machine-checkable from this box. So the values are enumerated, the checkable one is named, and
+# the gate asserts the RIGHT thing per value instead of nothing.
+# ---------------------------------------------------------------------------------------------
+[k2_probe]
+# The closed set. A `reason` outside it reds R0a — an unrecognised string is a typo or a new cause
+# that has not been thought through, and both must stop the rung rather than disarm it.
+reason_values = ["no_engine_registered", "insufficient_disk", "no_importable_project", "no_capture_protocol"]
+
+# The one value whose truth the test can establish itself, by consulting the documented authorities
+# (the launcher manifest and the registry hives that record launcher and source builds).
+machine_rederived_reason = "no_engine_registered"
+
+# What the gate asserts for the other three: the authorities DO report an engine. That is not a
+# weaker check, it is the correct one -- those three causes presuppose an install, so a record
+# claiming them while no engine is registered is self-contradictory and must red. Every value in
+# the set is therefore checked against something, and no value switches the branch off.
+non_rederived_reasons_require_engine_present = true
 
 # ---------------------------------------------------------------------------------------------
 # [hash_assertion] — where this file's sha256 is actually checked.

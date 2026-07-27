@@ -1,11 +1,32 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 8** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 9** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
 
-**Rev 8 is a BOUNDING revision, and it is the first one that does not claim to have fixed the ONE
+**Rev 9 discharges the six items that blocked Rev 8, and three of them were Rev 8's own.** Its
+review scored Rev 8 at **0 hold, 3 partial, 1 does not hold** — the sixth consecutive revision told
+it had overclaimed — and the useful part is *which* repair regressed. Of Rev 8's six, the single one
+that **extended** mechanism rather than bounding it (R0a's conditioned `(b′)`) is the single one
+that went backwards, trading Rev 7's cannot-go-green for a cannot-go-red. Every repair that merely
+deleted an apparatus stayed clean. That is the strongest evidence the bounding strategy has, and it
+arrived as a counterexample rather than as an argument.
+
+What Rev 9 fixes: R0d's gate list and mutation list used **(c)** for two different predicates,
+because demoting the histogram check renumbered one and not the other — a renumbering defect
+produced by the bounding act itself; R0a's `(b′)` now asserts something for **every** legal value of
+`reason` (enumerated in `[k2_probe]`) instead of nothing for most of them, and has red mutations in
+both directions; `[k1].k1_decision_rule` gained the non-degeneracy conjunct, without which one input
+had three different dispositions across three codeable texts; R0d's `(a)` mutation was replaced —
+a spawn-order permutation cannot falsify a cross-process **agreement** predicate, since the edit is
+present identically in all three processes; R0b gained gate part `(a0)` so the `[gating]` row that
+blocks it is actually read, and §13 stops claiming in the present indicative that rows nothing reads
+block rungs; and the reachability gate's class 1 now recognises the unbracketed `table.field`
+spelling. That last one found a live defect on its first run: `[k1_outcome]`'s **table header was
+missing**, so Rev 8's new R1 sentinel parsed under `[corpus]` and the citation did not resolve.
+
+**Rev 8 was the BOUNDING revision, and it is the first one that did not claim to have fixed the ONE
 gate.** Rev 7's adversarial review — six disjoint lenses, each required to write every rule as an
 inequality with units, substitute degenerate cases, and re-derive every named red mutation
 arithmetically, then an independent refutation pass over every finding — returned **35 findings, 34
@@ -604,8 +625,8 @@ rather than discover.
 
 | Outcome of the cheap census | Next |
 |---|---|
-| `D_est ≥ 1.0` | **K1 dead.** No counter, no shader edit, no re-bless. Done. |
-| `D_est < 1.0` **and** the ladder converged | Genuinely sparse *or* instrument-limited — indistinguishable from below. **K1 UNDECIDED** — R0 cannot tell this from the instrument's own ceiling seen from below. Owner VALUES call, §13 Q6. The counter is NOT a scheduled rung: §8 contains none, and its design is recorded UNSOLVED. |
+| `D_est ≥ 1.0` **and non-degeneracy met** | **K1 dead.** No counter, no shader edit, no re-bless. Done. ⚠️ The conjunct is not decoration and Rev 8 omitted it here: on a 500-pixel frame with 600 visible triangles `D_est = 1.2`, so without it this row declares the campaign's premise proven from a frame covering 0.02% of the screen. `[k1].k1_decision_rule` carries the conjunct as of Rev 9; this table and §9's outcome table must not diverge from it again. |
+| `D_est < 1.0`, **or** non-degeneracy unmet | Genuinely sparse, instrument-limited, or not adjudicable at all — indistinguishable from below. **K1 UNDECIDED**. Owner VALUES call, §13 Q2, held by `k1_outcome.undecided_disposition`, which blocks R1. The counter is NOT a scheduled rung: §8 contains none, and its design is recorded UNSOLVED. |
 | Ladder not converged | `[k1_instrument].on_not_converged_fire_direction` — **K1 not adjudicated** for the FIRE direction, §9 clause 4. The REFUTE direction is unaffected: non-convergence means `D_est` understates, and an understatement already ≥ 1.0 still proves density ≥ 1 (`on_not_converged_refute_direction = "still_valid"`). |
 
 **This front-loads the cheap decisive case and makes the expensive one explicitly optional**, which
@@ -626,7 +647,11 @@ step:
 **The gate was red by construction** — the mirror of the family this campaign hunts: a gate that
 cannot go *green*. Modal-bucket indices are integers over powers of two, so 0.83 and 1.17 are not
 even expressible as a shift. Rev 4 replaces the constant with the **per-pair `log2` of the actual
-area ratio**, checked within a stated tolerance, and reports the residual rather than asserting an
+area ratio**. ⚠️ **Rev 9: that replacement is REPORTED, not checked** — §8 R0d demotes it, because
+a tolerance of 0.35 around targets of 0.830075 and 1.169925 admits exactly one integer on each pair,
+so an integer was still being asserted, and both splits a correct instrument can produce satisfy the
+scaling law while only one passes. Rev 4 replaced the constant and reports the residual rather than
+asserting an
 integer.
 
 **And rung 1 is excluded from the scaling check entirely.** 512² is **1:1** while the other three
@@ -840,19 +865,36 @@ now §14's: whoever writes a correspondence after seeing both sides writes it wi
 available, and no gate can tell that from an honest one.
 
 **Gate (one) — `achievable = false` branch, three parts:** (a′) the *negative* field set is present
-and not `PENDING` — `reason`, `search_method`, `editor_binary_name`, `probed_at`; (b′) **if and only
-if `reason` is `no_engine_registered`**, the re-derivation below passes; (d) as above, unchanged —
-the thresholds hash is asserted on both branches.
+and not `PENDING` — `reason`, `search_method`, `editor_binary_name`, `probed_at`, with `reason` one
+of `[k2_probe].reason_values`; (b′) the re-derivation below passes **for whichever of those values
+was recorded**: for `[k2_probe].machine_rederived_reason` the documented authorities must report NO
+engine, and for every other value they must report that an engine IS present, per
+`[k2_probe].non_rederived_reasons_require_engine_present`; (d) as above, unchanged — the thresholds
+hash is asserted on both branches.
 
-> ⚠️ **Rev 8 conditions (b′) on the recorded reason, because Rev 7's version could not go green for
-> the most likely cause.** §6.2 defines K2 as firing if **any** of three prerequisites fails — no
-> install, no importable project, no capture protocol — while (b′) asserted flatly that no engine is
-> registered with the documented authorities. A legitimate `achievable = false` caused by disk
-> headroom, with UE5 installed and registered, therefore **red the rung**: the gate could not accept
-> the branch §11 measures as the expected one. It is now the machine-checkable *subset* of K2 that
-> is machine-checked, and §9.1 records that the other two causes are recorded rather than
-> re-derived. Naming the boundary is the fix; pretending the search covers all three was the
-> defect.
+> ⚠️ **Two revisions were wrong here in opposite directions, and Rev 9 is the correction of the
+> correction.** Rev 7's (b′) asserted flatly that no engine is registered — but §6.2 fires K2 if
+> **any** of three prerequisites fails, so a legitimate `achievable = false` caused by disk headroom
+> with UE5 installed **red the rung**: the gate could not go green for the cause §11 measures as
+> most likely. Rev 8 conditioned the check on the recorded `reason` and enumerated the legal values
+> **nowhere** — which traded a cannot-go-green for a **cannot-go-red**. An author writing any string
+> other than `no_engine_registered` switched the only machine check off in the same act as recording
+> the negative, leaving four non-`PENDING` fields (satisfied by any four non-empty strings) and a
+> hash of a docs file (which carries no information about UE5 at all). Of the six repairs Rev 8
+> named, this was the only one that **extended** mechanism rather than bounding it, and it is the
+> only one that regressed.
+>
+> Rev 9's rule asserts something for **every** legal value instead of nothing for most of them. The
+> three non-machine-checkable causes all *presuppose an install*, so a record claiming one of them
+> while the authorities report no engine is self-contradictory and reds. A `reason` outside
+> `[k2_probe].reason_values` also reds: an unrecognised string is a typo or a cause nobody has
+> thought through, and both must stop the rung rather than disarm it.
+>
+> **RED mutation for (b′), which Rev 8's version did not have at all:** record
+> `reason = "insufficient_disk"` on a box where the authorities report no engine → the
+> `non_rederived_reasons_require_engine_present` clause reds. And the converse: record
+> `reason = "no_engine_registered"` while an engine IS registered → the re-derivation reds. Both
+> directions fire, which is what "the negative is the machine's, not the author's" has to mean.
 
 **RED if / mutations (DEMONSTRATED):** edit the recorded GPU string by one character → (b) reds.
 Blank one field of the branch's own set → (a)/(a′) reds. **Edit any threshold in
@@ -899,7 +941,14 @@ falsify is not a gate on UE5 availability. The figure stays in the record, as a 
 `assets/vg_corpus/CORPUS.toml` + the `.gitignore` rule + `fetch_corpus`;
 `crates/boyko_app/tests/vg_corpus_ingest.rs`.
 
-**Gate (one, four parts):** (a) every corpus payload's sha256 matches its manifest pin; (b) each
+**Gate (one, five parts):** (a0) **`corpus.arrangement` is not the `PENDING` sentinel** — the
+owner VALUES call this rung is blocked on (`[gating].r0b_blocked_by`), asserted here because a
+`[gating]` row that no gate part reads blocks nothing. ⚠️ Rev 8 stated in the present indicative
+that "the named rung refuses to run while the field is unanswered" while no rung asserted any row;
+this is the part that makes the sentence true, and it is deliberately (a0) so the existing lettering
+and its mutations are untouched. **RED mutation:** run the rung with the field still `PENDING` → (a0)
+reds, and `golden.ps1`'s exit-2 discipline is the precedent for the sentinel's shape;
+(a) every corpus payload's sha256 matches its manifest pin; (b) each
 `.glb` decodes to a `MeshData` whose triangle count equals the manifest's published count;
 (c) **every corpus mesh this rung registers — by whichever path it registers them** — lands a
 geometry slot `!= VB_GEOMETRY_RESERVED_SLOT` and a `gMeshMeta` row whose `index_width` /
@@ -1091,18 +1140,39 @@ per-pixel disagreement fraction, or the spread of the derived statistics — bec
 its denominator is R16 again, this time inside the frozen file itself. The value stays `0.05` as a
 placeholder magnitude and is **not usable until that amendment names its quantity.**
 
-**RED if / mutations.** Rev 2's named mutation — *"point two of the three runs at different camera
-paths"* — is **not a gate test**: it changes the test's *input*, and would red any hash of anything.
-The mutations that actually probe (a) are ones that leave the shaded golden **identical** while
-changing `vb_id`:
-* **permute the spawn order of two identical instances** → every `instance_id` changes, the shaded
-  pin is byte-identical, and (a) must red. This is the mutation that proves the gate reads `vb_id`
-  and not the image;
-* drop the ladder to its decision row only → (b) reds;
-* (c)'s mutation must run **on the corpus**, since that is what R0d renders — R0c owns the
-  procedural fixture, and Rev 5's version of this mutation named the fixture, which R0d never
-  touches. The corpus mutation: **substitute one ladder rung's histogram with another rung's** →
-  the per-pair `log2` residual for both affected pairs exceeds tolerance → (c) reds.
+**RED if / mutations, re-derived at Rev 9 until each fires against the gate it names.**
+
+⚠️ **Rev 8 left this list describing the PREVIOUS gate lettering, and that is its own defect.**
+Demoting the histogram check renumbered the gate list and not the mutation list, so "(c)" named two
+different predicates 76 lines apart and the demoted assertion was re-armed by the mutation that was
+supposed to probe it. Renumbering is exactly where this campaign's defects land, and the fix for a
+renumbering is to re-derive, not to re-word.
+
+* **(a) — the cross-process agreement gate.** ⚠️ Rev 2's *"point two of the three runs at different
+  camera paths"* is not a gate test: it changes the input and would red any hash of anything. But
+  Rev 5's replacement — *"permute the spawn order of two identical instances"* — **does not fire
+  either, and it survived three revisions.** (a) asserts `H₁ = H₂ = H₃` over three processes of one
+  build. A spawn-order permutation is an edit to committed scene construction, so it is present
+  identically in all three processes: every `Hᵢ` moves to the same new value and the predicate stays
+  **true**. The "shaded pin is byte-identical" justification gives the error away — that is an
+  argument about comparison against a *pin*, which is R0c(a)'s shape, not an agreement predicate's.
+  The mutation that does fire is one that breaks agreement **between** processes: seed the census
+  readback with a per-process value (the PID, or the process start tick) at one texel → `H₁ ≠ H₂` →
+  (a) reds. It is artificial on purpose: agreement gates are falsified by divergence, and nothing an
+  author can write into committed source diverges across processes of one build. That is also the
+  honest reading of what (a) tests — the driver-side nondeterminism `[census].cross_run_gate`'s own
+  comment flags as an untested hypothesis at 2160p.
+* **(b)** — drop the ladder to its decision row only → (b) reds.
+* **(c) — the non-degeneracy precondition.** Render the corpus scene with the camera pulled back far
+  enough that covered pixels at the decision resolution fall below
+  `[k1_instrument].min_covered_pixels`, or point it at empty space so `visible_tris` at the top rung
+  falls below `[k1_instrument].min_visible_tris` → (c) reds. The point of the mutation is that the
+  rung must refuse to adjudicate a frame it cannot adjudicate, rather than dividing by it: on a
+  sentinel-only readback the convergence check reads `0 ≤ 0` (converged) and `D_est = 0`, which is
+  how an empty frame came to satisfy K1's fire condition in an earlier revision.
+* **The histogram residual has no mutation, because it is no longer a gate.** It is produced and
+  written into `docs/VG-R0-DENSITY-CENSUS.md` (see the demotion above). A mutation list entry for it
+  would re-arm exactly what the demotion removed.
 
 ### R0e / R0f / R0f′ — REMOVED AT REV 8, and the removal IS the revision
 
@@ -1454,13 +1524,20 @@ had no field, and Q6 was the disposition of the outcome §9 itself calls the lik
 asserting completeness it does not have is the highest-risk line in a document; the questions are
 now split by whether they block anything.
 
-**Blocking — each has a `PENDING` field and a `[gating]` row, and the named rung refuses to run
-while the field is unanswered.** The rows are `[gating].r0a_blocked_by`, `[gating].r0b_blocked_by`,
-`[gating].r0c_blocked_by`, `[gating].r0d_blocked_by` and `[gating].r1_blocked_by` — five rows for
-five rungs, three of them deliberately empty, so "nothing blocks this rung" is a recorded decision
-rather than a missing entry. ⚠️ Two of the rows this table used to carry were English sentences
-rather than resolvable `table.field` paths, which the `PENDING`-sentinel checker they exist to drive
-cannot resolve; every row is now a list of paths.
+**Blocking — each has a `PENDING` field and a `[gating]` row.** The rows are
+`[gating].r0a_blocked_by`, `[gating].r0b_blocked_by`, `[gating].r0c_blocked_by`,
+`[gating].r0d_blocked_by` and `[gating].r1_blocked_by` — five rows for five rungs, three of them
+deliberately empty, so "nothing blocks this rung" is a recorded decision rather than a missing
+entry. Two of the rows this table used to carry were English sentences rather than resolvable
+`table.field` paths, which the `PENDING`-sentinel checker they exist to drive cannot resolve; every
+row is now a list of paths.
+
+⚠️ **What is and is not mechanical, because Rev 8 asserted the wrong one in the present indicative.**
+Rev 8 wrote that "the named rung refuses to run while the field is unanswered" — and **no gate part
+anywhere read a `[gating]` row**, so the sentence described a mechanism that did not exist. Of the
+two non-empty rows: **R0b's is now asserted** by its own gate part (a0), so that half is true; **R1's
+is not**, because R1 is outside this document and no rung here can assert it. The row is a recorded
+requirement on whoever writes R1, and calling it anything stronger would repeat the defect.
 
 1. **Corpus provenance and licence.** Who selects and licenses the high-poly assets, and is a
    fetched-and-gitignored payload with pinned hashes acceptable as the permanent arrangement?
