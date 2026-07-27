@@ -359,9 +359,14 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 # construction. That difference proves nothing on its own -- S1's actual gate is the CPU coverage
 # oracle over this scene, not a frame diff.
 #
-# UNBLESSED: sha256_* are the literal PENDING sentinel. The orchestrator renders on a real windowed
-# GPU device and blesses via `scripts\golden.ps1 -Pin vb_both_sdf -Bless` (and `-Hwrt -Bless`)
-# AFTER the owner's visual sign-off. Do NOT invent hashes.
+# HALF-BLESSED, and the halves are not interchangeable. This header read "sha256_* are the literal
+# PENDING sentinel" after the software leg had been blessed, which invites the one edit that must
+# never happen here: re-blessing a leg that is already pinned. Only `sha256_hwrt` is PENDING.
+# `golden.ps1` exits 2 on it by design, so any gate quantified over this pin's hwrt leg is
+# vacuous until it is blessed -- do not read a green run as covering it.
+# The orchestrator blesses the remaining leg on a real windowed GPU device via
+# `scripts\golden.ps1 -Pin vb_both_sdf -Hwrt -Bless` AFTER the owner's visual sign-off.
+# Do NOT invent hashes.
 crate           = "boyko-app"
 test_binary     = "vb_both_sdf"
 test_name       = "vb_both_sdf_screenshot_dump"
@@ -404,9 +409,11 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-gnu"
 # default folder, and the dump run prints the resolved bindless slots (0 = fallback) so a silent
 # fall back to the fallback texel cannot masquerade as a textured render.
 #
-# UNBLESSED: sha256_* are the literal PENDING sentinel. The orchestrator renders on a real windowed
-# GPU device and blesses via `scripts\golden.ps1 -Pin vb_both_sdf_tex -Bless` (and `-Hwrt -Bless`)
-# AFTER the owner's visual sign-off. Do NOT invent hashes.
+# HALF-BLESSED, exactly as [vb_both_sdf] above -- see that pin's header for why the distinction
+# matters. Only `sha256_hwrt` is PENDING; the software leg is pinned and must not be re-blessed.
+# The orchestrator blesses the remaining leg via
+# `scripts\golden.ps1 -Pin vb_both_sdf_tex -Hwrt -Bless` AFTER the owner's visual sign-off.
+# Do NOT invent hashes.
 crate           = "boyko-app"
 test_binary     = "vb_both_sdf_tex"
 test_name       = "vb_both_sdf_tex_screenshot_dump"
