@@ -12,9 +12,14 @@
 # So the two halves are split by their update discipline, not by their subject:
 #
 #   * THIS file  — author-set, decision-bearing, frozen at authoring time, **never edited**. Its
-#                  sha256 is recorded once by R0a and re-asserted by R0c/R0d/R0e/R0f. A change here
-#                  is a new plan revision with a dated amendment in the plan's §11, and it reds
-#                  four rungs until the recorded hash is deliberately updated in the same act.
+#                  sha256 is recorded once by R0a and re-asserted by the one test whose only job is
+#                  to re-hash it ([hash_assertion].hash_tripwire_test). A change here is a new plan
+#                  revision with a dated amendment in the plan's §11, and it reds that test until
+#                  the recorded hash is deliberately updated in the same act.
+#                  ⚠️ This line read "re-asserted by R0c/R0d/R0e/R0f ... reds four rungs" through
+#                  Rev 7. All four were GPU- or corpus-dependent tests that do not run here, so the
+#                  count was of rungs that would never fire. Naming one test that does is worth
+#                  more than naming four that do not.
 #   * CLAIM file — owner VALUES calls, PENDING until answered, filled exactly once. Not hashed;
 #                  gated instead by a sentinel rule (a rung that needs a field asserts it is not
 #                  PENDING), which is the discipline goldens/PINS.toml already uses.
@@ -22,9 +27,13 @@
 # Nothing in this file was tuned against a measurement: it is authored before the ingest path, the
 # census instrument, the census run, the harness and the reference capture exist.
 
-schema_version = 3
-frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 6"
-frozen_date = "2026-07-27"
+# ⚠️ These two fields exist so a pre-R0a edit is VISIBLE, and they were stale through Rev 4, Rev 5
+# and Rev 7 -- the third occurrence caught by an adversarial pass rather than by the fields
+# themselves, in the very revision whose slogan was about fixes that do not land. They are updated
+# here in the same act as the edit, which is the whole of their job.
+schema_version = 4
+frozen_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 8"
+frozen_date = "2026-07-28"
 
 # THE EDIT DISCIPLINE, stated because Rev 4 and Rev 5 both edited this file in place while its
 # header said "never edited" and the plan's amendment table read "No amendment yet."
@@ -76,6 +85,20 @@ readback_retention = "stream_and_hash"
 # is itself a finding about the raster path.
 cross_run_gate = "byte_identical"
 cross_run_spread_fallback = 0.05
+
+# How many separate PROCESSES R0d reproduces the census across.
+#
+# REV 8 -- this value used to live in [decidability] as `sessions`, which left with the decidability
+# apparatus. R0d's cross-run gate is a genuine R0 dependency and would have been left citing a
+# deleted field, so the value moves to the table that actually reads it. Same number, and the same
+# provenance: it is the sibling harness's SV0_BENCH_SESSIONS, a pre-registered protocol count fixed
+# by a rung that had never heard of virtual geometry -- reused rather than minted, so it cannot be
+# chosen by whoever measures against it.
+#
+# ⚠️ It is a PROTOCOL constant, not a measurement. The distinction is this campaign's central
+# discipline and Rev 3/Rev 4 broke it here by calling three such constants "measured on this exact
+# box", which launders an authored number as evidence in the sentence claiming rigour.
+cross_run_sessions = 3
 
 # ---------------------------------------------------------------------------------------------
 # [k1_instrument] — how screen-space triangle density is estimated. THIS IS THE PART REV 2 GOT
@@ -204,32 +227,23 @@ on_not_converged_fire_direction = "k1_not_adjudicated"
 # 1.0 IS the definition of the regime cluster LOD exists to serve.
 d_est_min = 1.0
 
-# Conjunct 2. The screen-space triangle-size histogram's modal bucket at the decision resolution,
-# in pixels, powers of two. 16 = a 4x4 footprint; above that, triangles are large and cluster LOD
-# is not the lever. Derived from the top rung's histogram by the exact power-of-two shift the
-# scaling law gives (2 buckets per 2x resolution step), which the ladder's own four points check.
-modal_bucket_pixels_above_which_k1_holds = 16
-
-# K1 fires iff BOTH conjuncts hold: D_est < d_est_min AND modal bucket >
-# modal_bucket_pixels_above_which_k1_holds. Spelled out as a sentence because Rev 2's terse rule
-# string is what inverted it.
+# REV 8 -- CONJUNCT 2 AND THE TWO-CONJUNCT RULE ARE DELETED, not annotated.
 #
-# REV 5 CORRECTION — the two-conjunct rule below is REDUNDANT, and the redundancy hid that the
-# cheap census cannot fire K1 at all.
+# What stood here: `modal_bucket_pixels_above_which_k1_holds = 16`, and a `rule` field whose value
+# had already been reduced to the string "SUPERSEDED_BY_k1_decision_rule_below". Their history is
+# worth exactly one paragraph, because it is three instruments failing the same way.
 #
-#   modal_bucket_px > 16 at 1080p  =>  the typical visible triangle covers >= 16 px
-#                                  =>  visible_tris <~ covered_px / 16
-#                                  =>  D_est <~ 0.06, far below d_est_min = 1.0.
+# Rev 2's `rule = "all_three_below"` put a _max among two _mins, so K1 did not fire on the very
+# scene it was written to catch. Rev 4's two-conjunct replacement was REDUNDANT -- modal > 16 px at
+# 1080p implies visible_tris <~ covered_px/16, hence D_est <~ 0.06 << 1.0, so conjunct 1 held
+# automatically whenever conjunct 2 did. And the modal bucket's cross-rung derivation, cited in the
+# deleted comment as "the exact power-of-two shift the scaling law gives (2 buckets per 2x
+# resolution step), which the ladder's own four points check", is FALSE of this ladder: its
+# adjacent-pair shifts are 2.98, 0.83 and 1.17 buckets, and none of them is 2.
 #
-# So conjunct 1 holds AUTOMATICALLY whenever conjunct 2 does. Rev 4 sold this as "two conjuncts,
-# both pointing the same way"; it is one conjunct plus a strictly weaker consequence of it. The
-# decisive statistic was always the modal bucket — which is the statistic whose cross-rung
-# derivation the frozen ladder cannot support (see histogram_shift_rule above).
-#
-# And per [k1_instrument], D_est is a LOWER bound: it cannot refute the premise at all. Neither
-# conjunct can soundly fire this kill. The honest rule is therefore split by DIRECTION:
-#
-rule = "SUPERSEDED_BY_k1_decision_rule_below"
+# A superseded field left in place with a comment saying so is still a field an implementer greps
+# for and codes from -- the [k1].k1_fire_rule dangling-name lesson pointed the other way round.
+# The live rule is k1_decision_rule below, and it is the only one.
 
 # What the CHEAP census (usage bit + Option-threaded copy, zero new .spv) can decide, soundly:
 #   D_est >= d_est_min  =>  K1 REFUTED. Density is genuinely >= 1 tri/pixel; the mechanism exists.
@@ -286,197 +300,44 @@ report_only = ["visible_tri_per_covered_pixel", "submitted_per_covered_pixel"]
 measured_at = "full_detail_no_lod"
 
 # ---------------------------------------------------------------------------------------------
-# [decidability] — the harness contract. Plan SS7 and SS8 R0e.
+# REV 8 -- THE DECIDABILITY APPARATUS WAS REMOVED FROM THIS FILE, AND THAT REMOVAL IS THE REVISION.
 #
-# The three session constants are the literals crates/boyko_app/tests/sv0_deferred_term_bench.rs
-# already carries at :350, :366 and :378, measured on this exact box. But Rev 2 transferred the
-# literals while silently changing their DENOMINATORS, which weakened the null control by roughly
-# 20x: the sibling gates |null median delta| against the ARMED DELTA (it fired at 33% — -2048 ns
-# against a 6144 ns signal — and that failure is what produced the ABBA redesign), whereas Rev 2
-# gated it against "the smallest per-pass median", an absolute pass cost. A pass costing 100 us
-# would have had a 10 us null budget where the sibling's was 614 ns, and the precedent's own red
-# event would have passed. The denominators are therefore stated explicitly below, not implied.
+# Four tables stood here -- [decidability], [absolute_mode], [scope], [ordering] -- plus three
+# [pre_registered] fields for R0e. Together they froze the ONE gate, the campaign's comparative
+# performance claim, and its pre-registration ordering.
+#
+# They are gone because the gate they froze HAS NO LEFT-HAND SIDE. `our_floor` needs the ARMED
+# PAIRED DELTA as its denominator, and R0's arm is not merely unstated: it is UNCONSTRUCTED. R0
+# lands no meshlet, no cluster and no LOD, so there is nothing to contrast against and no measurand
+# for the floor. Rev 7's adversarial review returned eight blocking P0s and five were downstream of
+# that single over-reach -- pre-registering a comparative claim before the thing being claimed
+# exists.
+#
+# A frozen value with no reader is WORSE than prose: it manufactures the appearance of
+# pre-registration while binding nothing. Measured rather than argued -- tests/vg_symbol_reachability.rs
+# found 32 unbound symbols across this file and the claim file, 20 of them in exactly these four
+# tables. The sharpest specimen is `absolute_effective_floor_rule`, which Rev 7 added to embody its
+# own slogan ("a fix that lands only in the frozen file has not landed") and which `absolute_gate_rule`
+# never names, so the operative floor stayed the superseded one in BOTH documents.
+#
+# NOTHING IS LOST. The specification, the two denominators, the two-sided absolute gate form, the
+# ABBA harness contract and the eight P0s that refuted the previous attempt all move to the plan's
+# section 14, as requirements on whoever freezes them AT THE RUNG THAT LANDS AN ARM. They are
+# cheaper and stronger there: the arm, the denominator and the floor are all defined at one rung.
+#
+# Do not restore these tables here. Re-authoring them at their own rung IS the plan.
 # ---------------------------------------------------------------------------------------------
-[decidability]
-sessions = 3
-
-# Denominator: the ARMED PAIRED DELTA, as in the sibling. Not a pass median.
-null_control_max_fraction = 0.10
-null_control_denominator = "armed_paired_delta"
-
-# Denominator: the PAIRED DELTA across sessions, as in the sibling. Not an absolute pass median.
-#
-# This distinction is load-bearing and measured: this project has recorded ~21% run-to-run spread
-# on ABSOLUTE GPU pass costs at high N (the VB-P1d bench), so a 0.10 gate applied to absolute
-# medians would red for a known instrument property rather than a finding. See
-# [absolute_mode] for the branch that has no choice but to measure absolutes.
-session_spread_max = 0.10
-session_spread_denominator = "paired_delta"
-
-# How the two instruments' floors combine into the joint floor of the ONE gate. "sum", and the
-# reason is stated rather than conventional: quadrature assumes two independent draws from one
-# noise process, and a systematic capture bias between two different engines (different clock
-# discipline, different pass boundaries, a driver-side difference) is not an independent random
-# error. Summing is conservative in the direction that makes our own claim harder to close.
-joint_floor_rule = "sum"
-
-# The reference side is an instrument too. A claim smaller than the REFERENCE's own reproducibility
-# is unfalsifiable no matter how good our side is — a term Rev 1 never had at all.
-reference_floor_source = "cross_session_spread_of_reference_capture"
 
 # ---------------------------------------------------------------------------------------------
-# [absolute_mode] — the K2 branch, which needs a DIFFERENT instrument and does not get to pretend
-# otherwise.
+# [pre_registered] — a threshold that would otherwise be set by whoever measures against it.
 #
-# Rev 2's R0f' claimed "nothing new to measure — the left-hand side is already ours". That is
-# false, and it is the sharpest thing the Rev 2 critique found. The harness SS7 mandates measures
-# PAIRED DIFFERENCES; its entire algebra exists to CANCEL the absolute terms
-# (sv0_deferred_term_bench.rs:34, :58-62 — the per-frame baseline mu, the frame-in-flight-slot
-# offset gamma, and the position drift beta all cancel in (d1+d2)/2). Those are exactly the terms
-# an absolute millisecond target must retain, and this repo has MEASURED them to be large.
-#
-# So absolute mode carries its own floor, measured its own way, and it is expected to be WORSE.
-# Stating that plainly is the point: a weaker instrument honestly reported beats a strong-looking
-# number the harness cannot support.
-# ---------------------------------------------------------------------------------------------
-[absolute_mode]
-# R0f' MUST derive this by measurement, not adopt it. The value below is the pre-registered
-# CEILING the measurement must come in under for absolute mode to be decidable at all; it is set
-# from this project's recorded ~21% absolute-cost spread with margin, and R0f' reds if the measured
-# absolute spread exceeds it.
-absolute_session_spread_ceiling = 0.25
-# REV 7 CORRECTION -- this field said PER-PASS while absolute_floor_ms_rule scales the CHAIN
-# median by it, and [scope].chain_floor_rule forbids exactly that composition ("the passes share
-# occupancy, caches and the same queue"). Two implementers coding from this file built different
-# floors, and the floor is the left-hand side of the ONE gate on the expected branch. One
-# construction, named once, consistent with [scope]:
-absolute_floor_source = "cross_session_spread_of_the_CHAIN_TOTAL_absolute_medians"
-
-# REV 7 -- the lattice floor [decidability] has and this branch did not. Section 7 clause 3 is
-# labelled non-negotiable and the sibling MEASURED the failure it guards: a "spread" that is one
-# counter step carries no information. Without it absolute_gate_rule collapses at s -> 0 to
-# `c < m` -- any improvement however small is "decidable" -- and the error runs in the direction
-# that makes the ONE gate EASIER to close on the branch section 11 calls expected. That is R16
-# again (a gate transferred without its precondition), one branch over.
-absolute_effective_floor_rule = "max(measured_absolute_spread, measured_lattice_ns / |chain_median_ns|) * measured_chain_median_ms"
-absolute_lattice_evidence_required = true   # same SV0_LATTICE_MIN_DISTINCT_TICKS = 7 evidence floor
-
-#
-# REV 5 CORRECTION — the two fields above are a RELATIVE fraction, and Rev 3/Rev 4's R0f' gate (b)
-# compared the same named source against a MILLISECOND target. One source cannot be both. Under
-# either reading the gate failed:
-#
-#   read as relative  =>  gate (b) compares a fraction to milliseconds — the exact dimension error
-#                         R0f' was written to fix, one file over;
-#   read as absolute  =>  gate (b) reads "0.28 ms < 5 ms", TRUE for any non-degenerate target. A
-#                         RESOLUTION being smaller than a LEVEL says nothing about whether the
-#                         instrument can tell the target apart from where we stand.
-#
-# That mattered because R0f' closes the ONE gate on the branch section 11 measures as the EXPECTED
-# one. A non-discriminating gate there leaves the likely path with no falsifiability condition —
-# which is the whole defect D3 was raised against, surviving three revisions.
-#
-# The fix is to name the quantity ONCE and make the inequality about a DISTANCE, not a level.
-#
-# The floor in milliseconds: the relative spread applied to the measured chain median.
-absolute_floor_ms_rule = "absolute_session_spread * measured_chain_median_ms"
-
-# The distance the campaign must resolve, in milliseconds: how far the current chain is from the
-# absolute target. A target we are already past, or one sitting inside our own resolution, is not
-# a target.
-absolute_distance_ms_rule = "abs(measured_chain_median_ms - claim.absolute_chain_ms)"
-
-# REV 6 CORRECTION -- Rev 5's gate `absolute_floor_ms < absolute_distance_ms` was SYMMETRIC, and
-# its own named red mutation PASSED. With m = measured chain median, c = claim, s = spread:
-#
-#   c > m (target ALREADY BEATEN)      => distance = c-m, gate passes whenever c > m(1+s).
-#                                         Rev 5's prose asserted "a target already passed now reds".
-#                                         False outside a +/- s*m band.
-#   c < s*m (Rev 5's OWN red mutation) => distance = m-c > m(1-s), floor = s*m, so the gate is
-#                                         s*m < m(1-s)  <=>  s < 0.5, TRUE for every s <= 0.25 the
-#                                         ceiling permits. THE MUTATION PASSES.
-#
-# A gate that cannot go red for its own named mutation is this campaign's #1 defect family,
-# committed in the clause rewritten to eliminate it, on the branch section 11 calls expected.
-#
-# The fix is that the gate is TWO-SIDED, because the claim must be both an IMPROVEMENT and a
-# RESOLVABLE one. Rev 5 encoded only the second half and then described the first in prose.
-absolute_gate_rule = "claim.absolute_chain_ms < measured_chain_median_ms  AND  absolute_floor_ms < absolute_distance_ms"
-
-# Red mutations that ACTUALLY fire, re-derived rather than re-worded:
-#   set c > m                       -> the first conjunct reds (nothing to close; the campaign's
-#                                      premise on this branch is already satisfied)
-#   set c inside (m - s*m, m)       -> the second reds (the gap is inside our own resolution)
-# Note what is deliberately NOT red: an absurdly AMBITIOUS target (c -> 0) passes, and that is
-# correct. This gate adjudicates DECIDABILITY, not achievability -- a 1000x claim is trivially
-# resolvable, and whether it is sane is section 13 Q1's business, not the instrument's.
-absolute_gate_red_mutations = ["c_greater_than_m", "c_within_floor_of_m"]
-
-# ---------------------------------------------------------------------------------------------
-# [scope] — what the claim is ABOUT. Rev 2 compared a per-pass floor to a frame-total claim with
-# no composition rule stated anywhere, which made the ONE gate not evaluable.
-# ---------------------------------------------------------------------------------------------
-[scope]
-# The claim is about the BRACKETED PASS CHAIN, not a frame. R0e brackets the VB raster, vb_geo,
-# the classify chain, and the three passes VbTimedPass already covers. A frame also contains CSM,
-# SDF, DDGI, post/AA, present and all CPU time, none of which this campaign touches and none of
-# which the harness measures.
-claim_scope = "bracketed_vb_pass_chain"
-
-# How N per-pass floors compose into the chain floor: the chain total's floor is measured directly
-# on the chain total (one bracket spanning the chain), NOT composed arithmetically from the
-# per-pass floors. Composing them would require an independence assumption the passes do not
-# satisfy — they share occupancy, caches and the same queue.
-chain_floor_rule = "measured_directly_on_chain_total"
-
-# The per-pass regression rule needs a correspondence between our pass names and the reference's.
-# It cannot be evaluated without one, and whoever writes it after both tables exist writes it with
-# the answer in hand. R0a therefore records the reference's pass names for its stock scene BEFORE
-# any corpus capture, and R0f asserts the map is total over our bracketed set.
-require_pass_correspondence_map_at = "R0a"
-
-# ---------------------------------------------------------------------------------------------
-# [ordering] — REV 5. The P0's mechanism now lives on the HASHED side.
-#
-# Rev 3/Rev 4 put the ordering rule (`r0e_blocked_by`) only in VG-CAMPAIGN-CLAIM.toml, which is
-# "deliberately not hashed". So the single most decision-bearing rule in the campaign sat on the
-# mutable side, disarmable by deleting one line, while [k1], [scope] and [decidability] were frozen.
-# Answering the question honestly: no, Rev 4 did NOT have every decision-bearing value on the
-# correct side. This is the correction.
-# ---------------------------------------------------------------------------------------------
-[ordering]
-# The claim must be answered before the rung that MEASURES the floor, not before the rung that
-# compares. Duplicated here from the claim file's [gating] so that deleting it there reds the hash.
-# REV 6 CORRECTION -- Rev 5 named ONE rung for TWO instruments, which left the P0 vacuous on the
-# branch section 11 measures as expected. In nanite_relative mode R0e measures the floor, so
-# blocking R0e is the mechanism. In ABSOLUTE mode the plan states plainly that R0e's paired-delta
-# floor is unusable and R0f' "needs its own instrument" -- so the floor the claim is compared
-# against is measured TWO RUNGS LATER, with the claim already filled and visible in the tree.
-# Blocking R0e constrains nothing about the number R0f' will produce.
-#
-# The rule attaches to THE RUNG THAT MEASURES THE FLOOR FOR THAT MODE.
-claim_blocks_rung_nanite_relative = "R0e"
-claim_blocks_rung_absolute = "R0f_prime"
-
-# The stronger half, adopted from sv0_deferred_term_bench.rs's NAN-as-UNMEASURED sentinel ("so a
-# forgotten transcription cannot produce a passing gate"): the harness refuses to EMIT the floor
-# while the claim is PENDING. Ordering constrains commits; this constrains knowledge, which is what
-# the P0 actually needs. Rev 3's claim that ordering alone "does not depend on anyone noticing an
-# edit" is retracted in the plan's section 0.1.
-harness_withholds_floor_while_claim_pending = true
-
-# After the fill, the claim must not move. R0e asserts only `!= PENDING`, and R0f re-reads the file
-# at R0f time, so Rev 4 left a window: fill 0.05 -> R0e green -> floor measures 0.12 -> edit to 0.30
-# -> R0e STILL green -> R0f closes. The claim value is therefore pinned INTO R0e's own
-# MEASURED-literal commit, so R0f compares against something frozen in the same act as the floor.
-claim_pinned_into_r0e_literals = true
-
-# ---------------------------------------------------------------------------------------------
-# [pre_registered] — REV 5. Two thresholds the plan called "pre-registered" while providing no file
-# to register them in. Both were decision-bearing, both would have been set by whoever measured
-# against them, and both landed on NEITHER side of the two-file split — the Rev 1 P0 shape, twice.
-# R0e's named mutation ("halve the sample count -> the CI widens past the pre-registered bound")
-# could not fire against anything at all.
+# REV 5 created this table for two such thresholds. REV 8 keeps the one a surviving rung reads.
+# The three R0e fields (r0e_ci_max_fraction, r0e_min_pairs, r0e_min_quads) left with the
+# decidability apparatus above, and they earned a line of history on the way out: they were the
+# clearest case for the removal. No R0e gate part ever read any of them, so the mutation the plan
+# listed as DEMONSTRATED -- "halve the sample count -> the CI widens past the pre-registered bound
+# -> red" -- still named a right-hand side that did not exist, inside the very table created to end
+# that condition. Freezing a value is not the same act as reading one.
 # ---------------------------------------------------------------------------------------------
 [pre_registered]
 # R0c gate (c): the census's covered-pixel total vs sv0_oracle::rasterize's covered_count on the
@@ -484,29 +345,30 @@ claim_pinned_into_r0e_literals = true
 # so exact agreement would be a coincidence, not a check.
 r0c_oracle_coverage_tolerance = 0.02
 
-# R0e: the confidence interval the resolvable delta must come in under, and the sample-count floors
-# beneath which the interval is not reportable at all. The two floors are the sibling's own
-# (SV0_BENCH_MIN_PAIRS / SV0_BENCH_MIN_QUADS) — reused rather than minted, same as [decidability].
-r0e_ci_max_fraction = 0.10
-r0e_min_pairs = 30
-# REV 6 CORRECTION. Rev 5 froze this as 200 and attributed it to the sibling's SV0_BENCH_MIN_QUADS.
-# That constant is `SV0_BENCH_MIN_QUADS: usize = SV0_BENCH_MIN_PAIRS` = **30**. 200 is
-# SV0_S1_5_SESSION_QUADS -- the transcribed OBSERVED quad count, under the sibling's "MEASURED
-# values -- do not edit these literals" banner. So Rev 5 took a measurement, called it a
-# pre-registered protocol floor, attributed it to a constant carrying a different value, and froze
-# it -- inside the very section added to fix "three authored constants called measured", with the
-# error running the other way. Corrected to the sibling's actual floor.
-r0e_min_quads = 30
-
 # ---------------------------------------------------------------------------------------------
-# [hash_assertion] — REV 5. Where this file's sha256 is actually checked.
+# [hash_assertion] — where this file's sha256 is actually checked.
 #
 # Rev 4 avoided Rev 2's "guaranteed to break" failure and created its mirror image: GUARANTEED NOT
-# TO FIRE. Every rung that was supposed to re-assert the hash (R0b-R0f) is a skipped, #[ignore]d
-# GPU or corpus-dependent test, on a box whose CI never exercises the GPU path. A tripwire wired
-# only into tests that do not run is not a tripwire.
+# TO FIRE. Every rung that was supposed to re-assert the hash was a skipped or #[ignore]d GPU or
+# corpus-dependent test, on a box whose CI never exercises the GPU path. A tripwire wired only into
+# tests that do not run is not a tripwire.
+#
+# REV 6 added the flag below and gave it no rung and no file, so it described an intention nobody
+# implements -- the same defect one level up. REV 8 names the deliverable and the rung that lands
+# it, and the plan's section 8 R0a carries it as a gate part with its own red mutation.
 # ---------------------------------------------------------------------------------------------
 [hash_assertion]
 # At least one assertion must live where `cargo test --workspace` executes it with no GPU, no dxc
 # and no corpus. That test does nothing but re-hash this file against the value R0a recorded.
 must_run_in_plain_workspace_test = true
+
+# The deliverable, landed by R0a. `boyko_render` is in the workspace's `default-members`, so the
+# bare command form reaches it, and `crates/boyko_render/src/smaa_luts.rs` already carries an
+# in-house `sha256_hex` -- no new dependency, no GPU, no dxc, no corpus.
+#
+# The GPU rungs may re-assert the hash opportunistically; none of them IS the mechanism. Stating
+# which rungs re-assert is deliberately NOT done here: the previous attempt named a four-rung set
+# and every member was unreachable in a plain test run, which is how a tripwire came to be
+# described as firing in four places while firing in none.
+hash_tripwire_test = "crates/boyko_render/tests/vg_thresholds_freeze.rs"
+hash_tripwire_landed_by_rung = "R0a"

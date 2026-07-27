@@ -1,9 +1,42 @@
 # VG-R0 — "The Ruler": the measurement rung of the virtual-geometry campaign
 
-**Status:** DESIGN, **Rev 7** — **NOT APPROVED, and no code exists.** This document specifies
+**Status:** DESIGN, **Rev 8** — **NOT APPROVED, and no code exists.** This document specifies
 **only rung R0** of the ladder in [`docs/MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md`](MESHLET-VIRTUAL-GEOMETRY-RESEARCH.md)
 §4. R1–R8 stay as that document leaves them and are out of scope here. The owner's decision to
 build a meshlet / virtual-geometry system is **settled** and is not re-litigated below.
+
+**Rev 8 is a BOUNDING revision, and it is the first one that does not claim to have fixed the ONE
+gate.** Rev 7's adversarial review — six disjoint lenses, each required to write every rule as an
+inequality with units, substitute degenerate cases, and re-derive every named red mutation
+arithmetically, then an independent refutation pass over every finding — returned **35 findings, 34
+surviving, 16 P0, 8 blocking**, and scored Rev 7's own four claims at **1 hold, 2 partial, 1 does
+not hold**. Five consecutive revisions had each been told the same thing.
+
+The finding that ended the repair loop is not a gate defect at all: **the ONE gate's left-hand side
+has no measurand at this rung.** The decidability floor is a resolvable *delta*, the frozen file
+named our side's denominator as the **armed paired delta**, and R0 lands no meshlet, no cluster and
+no LOD — so there is nothing to arm and nothing to measure. Five of the eight blocking P0s were
+downstream of that single over-reach: R0 was pre-registering and adjudicating a comparative
+performance claim before the thing being claimed existed.
+
+So Rev 8 removes the decidability apparatus from R0 rather than repairing it for an eighth time.
+R0e, R0f and R0f′ leave §8; `[decidability]`, `[absolute_mode]`, `[scope]` and `[ordering]` leave
+the frozen file; `[claim]` and `[quality]` leave the claim file. All of it — specification,
+denominators, the two-sided gate form, and the eight P0s each with the arithmetic that refuted it —
+is **§14**, to be frozen at the first rung that lands an arm, where the arm, the denominator and the
+floor are defined together. What remains is an instrument-and-census rung that decides K1 in the
+refute direction, records whether a reference is producible, and **states what it does not decide**
+(§9.1).
+
+One mechanism landed with it, because the defect family finally had a machine-checkable form.
+Rev 7's thesis was that fixes must land in §8 and not only in the frozen file; the review showed
+that to be a proper subset — Rev 7's own new field was orphaned *inside* the frozen file, and the
+file's own staleness fields were stale for the third revision running. The accurate rule is one
+level up: **a rule is landed only when some consumer reads the symbol it defines.**
+[`tests/vg_symbol_reachability.rs`](../tests/vg_symbol_reachability.rs) enforces it over both frozen
+files and this document — dangling citations, definitions no rule reads, and frozen fields the plan
+never names. It reported **32 violations** when written. It reports **0** as of this revision, and
+it is asserted for exact equality, so the count cannot fall silently either.
 
 **Revision history, kept because the errors are the useful part.** Rev 1 carried one open P0 and
 three defects of one family — *a gate that cannot go red for the failure it exists to catch*.
@@ -154,117 +187,92 @@ every revision to introduce defects at the lines it edited.
 
 ---
 
-## 0. What R0 is, and the three ways it kills the campaign
+## 0. What R0 is, and what it decides
 
 **R0 = a high-poly ingest path + a licence-clean corpus + a screen-space triangle-density census +
-a Nanite reference capture + a decidability statement.** No meshlet, no cluster, no DAG, no shader
-that did not exist before.
+a recorded answer to "is a Nanite reference producible on this box".** No meshlet, no cluster, no
+DAG, no shader that did not exist before.
 
-**The ONE gate — restated so that both of its sides can fail:**
+**R0's claim, stated so that it can fail:**
 
-> **`joint_floor < claim`**, both sides scoped to the **bracketed VB pass chain**
-> ([`VG-CAMPAIGN-THRESHOLDS.toml`](VG-CAMPAIGN-THRESHOLDS.toml) `[scope]`), where `joint_floor` is
-> measured by R0e — combined, in `nanite_relative` mode, with the reference capture's own
-> cross-session floor per `[decidability].joint_floor_rule` — and `claim` is the value the owner
-> wrote into [`VG-CAMPAIGN-CLAIM.toml`](VG-CAMPAIGN-CLAIM.toml) **before R0e was allowed to run**,
-> together with the reproducible per-pass cost table (**named GPU, named scene, named resolution,
-> named error target**) the left-hand side is measured against.
+> The census, run over a real high-poly corpus at a frozen resolution ladder, either **refutes K1**
+> — proving screen-space density genuinely reaches ~1 triangle/pixel, so cluster LOD has a
+> mechanism of action on our content — or leaves K1 **undecided**, which is an owner call with a
+> `PENDING` field that blocks R1. R0 also records whether a Nanite reference is producible here at
+> all, and fires K2 if it is not.
 
-### 0.1 The P0's mechanism is ordering, and Rev 2's hash was not it
+That is the whole of it. **R0 evaluates no comparative performance claim**, and Rev 8 is the
+revision that stopped pretending otherwise.
 
-The synthesis' original wording — *"a decidability floor smaller than the delta we intend to
-claim"* — is a two-sided inequality with only one side specified. **"The delta we intend to claim"
-is not a measurement; it is a choice, and left unpinned it is a choice made after seeing the
-floor.** An author who measures a 12% floor and then declares a 15% intended delta has closed the
-gate without moving anything, and no assertion anywhere fires.
+### 0.1 Why the ONE gate is not here any more
 
-**Rev 2's answer was a committed claim file with its sha256 recorded by R0a — and it did not
-work.** Every field on the right-hand side was the literal `PENDING`, and Rev 2's own `[gating]`
-table scheduled the fill for R0f, *after* R0e measures the floor. What was frozen was a schema.
-The named red mutation — *"raise the claim after the freeze → the hash assertion reds"* — was
-undemonstrable, because the first write of a real value is a legitimate, plan-sanctioned edit that
-necessarily comes with re-recording the hash, and **no test can distinguish that edit from the
-cheat.** Worse, `corpus.arrangement` had to be filled to run R0b, so the hash recorded at R0a was
-*guaranteed* to break before the first rung that asserted it — and once "re-record the hash" is a
-routine event, any re-record can carry a simultaneous edit to a K1 threshold with every rung green.
+Rev 1 through Rev 7 put an inequality at the centre of this rung — `joint_floor < claim`, the
+campaign's decidability condition — and five consecutive adversarial reviews found it broken in a
+new way each time. The scores are the record: Rev 2 claimed four fixes and **one** held; Rev 3
+claimed ten and **four** held; Rev 5 claimed eight and **two**; Rev 6 claimed ten and **two**;
+Rev 7 claimed four and **one**.
 
-**Rev 3's mechanism is that the claim must exist before the floor does:**
+**The reason it kept breaking is that its left-hand side has no measurand at this rung.** The floor
+is a *resolvable delta*. A delta needs two configurations to sit between, and the frozen file named
+our side's denominator explicitly: the **armed paired delta**. R0 lands no meshlet, no cluster and
+no LOD, so there is no arm — the quantity the whole apparatus was built to bound cannot be measured
+until the thing being claimed exists. Five of the eight P0s that blocked Rev 7 were downstream of
+that one over-reach.
 
-* The claim fields block **R0e — the rung that measures the floor** — not R0f, the rung that
-  compares them. `r0e_blocked_by = ["claim.mode", "claim.nanite_relative_chain_delta or
-  claim.absolute_chain_ms"]`. R0e's test refuses to run while the value it will be compared against
-  is still `PENDING`, using the sentinel discipline `goldens/PINS.toml:15` already defines (a
-  `PENDING` pin makes the checker **exit 2** rather than pass).
-* ⚠️ **RETRACTED at Rev 4.** Rev 3 wrote here: *"This does not depend on anyone noticing an edit."*
-  **It does.** The ordering rule constrains **commits, not knowledge.** R0e is an `#[ignore]`d
-  windowed GPU bench in the sibling's shape; the floor is *observed* by running the harness and
-  reading its stdout, while the claim blocks the *assertion*, which runs later on transcribed
-  literals. Nothing prevents: run the harness in a dirty tree → read the floor → `git checkout .` →
-  fill the claim to fit → commit → re-run and transcribe. Commit order is preserved; knowledge order
-  is not. Against a peek-then-fill author the mechanism is **weaker than nothing**, because it
-  manufactures the appearance of a guarantee. Rev 4 states the limit instead of asserting it away.
-* **What actually carries the weight is party separation, and the plan should have said so.** §13 Q1
-  is an owner VALUES call, and the owner is **not** the party who runs the harness. The ordering
-  rule is a *record* of pre-registration, not an enforcement of it. A mechanism honestly described
-  as partial is worth more than one described as complete — that is the whole lesson of the three
-  failed attempts above.
-* **A stronger mechanism exists in this repo and Rev 4 adopts it: gate the instrument's OUTPUT, not
-  the comparison.** `sv0_deferred_term_bench.rs:410-413` uses `f64::NAN` as the UNMEASURED sentinel
-  *"so a forgotten transcription cannot produce a passing gate."* The analogue: **the R0e harness
-  refuses to emit the floor at all while the claim is `PENDING`.** That constrains knowledge rather
-  than commit order, which is the property the P0 actually needs.
-* ⚠️ **Second Rev 3 hole, also open: nothing forbids editing the claim AFTER the fill.** R0e asserts
-  only `!= "PENDING"`; R0f reads the file from disk at R0f time. So `fill 0.05` → R0e green → floor
-  measures 0.12 → `edit to 0.30` → R0e *still* green (still not `PENDING`) → R0f closes. Rev 2's
-  hash covered this window and Rev 3 removed it without replacement. **The correct axis is phase,
-  not file:** the claim is mutable until filled and immutable forever after. Rev 4's fix is that
-  R0e's own MEASURED-literal commit **pins the filled claim value alongside the floor**, so R0f
-  compares against something frozen in the same act as the measurement rather than against a file.
-* **The claim file is deliberately not hashed.** Its fields are *required* to change exactly once.
-  Hashing a file whose schedule requires it to change is what destroyed Rev 2's tripwire.
-* **The thresholds that must never change are hashed, in their own file.**
-  [`VG-CAMPAIGN-THRESHOLDS.toml`](VG-CAMPAIGN-THRESHOLDS.toml) carries K1's instrument and rule,
-  the resolution ladder, the harness denominators and the scope rules — all authored before any
-  measurement is reachable. R0a records its sha256.
-  ⚠️ **Rev 7: Rev 6 enumerated R0c/R0d/R0e/R0f as the re-asserting rungs — and Rev 5 had already
-  measured that set to be exactly the wrong one.** Every member is a skipped or `#[ignore]`d
-  GPU/corpus test on a box whose CI never exercises the GPU path. Rev 6 added
-  `[hash_assertion].must_run_in_plain_workspace_test = true` to fix it, then gave it **no rung and
-  no test file**, so the field described an intention nobody implements. Rev 4 avoided Rev 2's
-  *guaranteed to break*; Rev 6 shipped its mirror image, **guaranteed not to fire**.
-  **The tripwire lives in `crates/boyko_render/tests/vg_thresholds_freeze.rs`** — a file whose only
-  job is to re-hash `VG-CAMPAIGN-THRESHOLDS.toml` against the value R0a recorded. No GPU, no `dxc`,
-  no corpus, so it runs under a bare `cargo test --workspace`. R0a lands it; the GPU rungs may
-  re-assert too, but none of them is the mechanism.
-  ⚠️ Standing hazard when checking this: `cargo check --all-targets` at the repo root is
-  **vacuum-green** on this virtual manifest, so "it is in the workspace" is not evidence that it
-  runs — R0a's gate must show the test executing.
-  Because that file has **no** legitimate reason to change, a broken hash there is unambiguous.
-* **Red mutation, now demonstrable on both sides:** raise the floor above the claim → the
-  inequality assertion reds; edit any threshold in the thresholds file → the hash assertion reds in
-  four rungs; run R0e with the claim still `PENDING` → R0e refuses.
+So the apparatus moves to **§14**, to be frozen at the first rung that lands an arm, where the arm,
+the denominator and the floor are all defined at once. It moves *complete*: the specification, the
+two denominators, the two-sided gate form, and the eight P0s each with the arithmetic that refuted
+it. §7's harness contract stays where it is and binds that rung.
 
-**What ordering costs.** R0e cannot run until the owner answers §13 Q1. That is not a schedule
-defect, it is the point — and it costs little, because R0e is rung five of six and R0a–R0d are
-unblocked by it. `corpus.arrangement` (Q3) blocks R0b and is the only early one.
+**What the P0 was, and what actually answers it.** *"The delta we intend to claim"* is not a
+measurement, it is a choice, and left unpinned it is a choice made after seeing the floor. Four
+revisions tried to close that with a mechanism — a sha256 around a file whose every field was the
+literal `PENDING`; then ordering, which constrains **commits, not knowledge** (run the harness
+dirty, read the floor, `git checkout .`, fill to fit); then a per-mode ordering rule; then a pin.
+What carries the weight is **party separation** — the owner answers the VALUES call and does not run
+the harness — and a mechanism honestly described as partial is worth more than one described as
+complete. Rev 8 adds the cheapest possible improvement to that: **do not pre-register a number
+before the rung that measures its counterpart exists.** Pre-registration is not weakened by being
+late here; it is strengthened, because at §14's rung the claim is written against a named measurand
+instead of a placeholder.
 
-**The three kills, each a falsifiable test rather than a worry:**
+### 0.2 The freeze, which R0 does keep
+
+[`VG-CAMPAIGN-THRESHOLDS.toml`](VG-CAMPAIGN-THRESHOLDS.toml) carries the census ladder, K1's
+instrument and decision rule, and R0c's pre-registered tolerance — all authored before any
+measurement is reachable. R0a records its sha256, and the tripwire that re-asserts it is named by the frozen file itself:
+`[hash_assertion].hash_tripwire_test` is `crates/boyko_render/tests/vg_thresholds_freeze.rs` and
+`[hash_assertion].hash_tripwire_landed_by_rung` is R0a. Its only job is to re-hash the file — no
+GPU, no `dxc`, no corpus — which is what `[hash_assertion].must_run_in_plain_workspace_test`
+demands: a bare `cargo test` must execute it.
+
+⚠️ **That siting is the fix for a measured failure, not a preference.** Rev 4 wired the hash
+assertion into four rungs and every one of them was a skipped or `#[ignore]`d GPU/corpus test on a
+box whose CI never exercises the GPU path — a tripwire guaranteed **not to fire**, the mirror image
+of Rev 2's guaranteed **to break**. Rev 6 then added a flag saying the assertion must run in a plain
+workspace test and gave it no rung and no file. And a standing hazard when checking any of this:
+`cargo check --all-targets` at this repo root is vacuum-green on a virtual manifest, so "the test is
+in the workspace" is not evidence it runs — R0a's gate must show it **executing**.
+
+[`VG-CAMPAIGN-CLAIM.toml`](VG-CAMPAIGN-CLAIM.toml) is deliberately **not** hashed: its fields are
+required to change exactly once, and hashing a file whose schedule requires it to change makes
+re-recording the hash routine — at which point the tripwire carries no signal and can launder a
+threshold edit alongside a legitimate fill. It is gated instead by the `PENDING` sentinel discipline
+`goldens/PINS.toml` already defines.
+
+**The two kills R0 can adjudicate, each a falsifiable test rather than a worry:**
 
 | # | Kill | Test | Disposition if it fires |
 |---|---|---|---|
-| **K1** | **No content, no mechanism.** The corpus never approaches ~1 triangle/pixel, so cluster LOD has no mechanism of action on our content. | **Split by direction at Rev 5, because the cheap census can only settle it one way.** `D_est ≥ 1.0` at the decision resolution **refutes** K1 outright (a lower bound proves density). **Firing** K1 is UNREACHABLE at R0 (`[k1].k1_fire_at_r0 = false`): the upper-bound instrument is mis-sited and probably inert, and is recorded UNSOLVED rather than scheduled. §5.6, §9 clause 1. | **Campaign refuted** only when K1 *fires*. Not "descope" — the premise is gone. §9 clause 1. |
-| **K2** | **No baseline.** The Nanite reference cannot be produced on this box. | R0a's rig probe (before any engine code) — and the negative is **re-derived by the test**, not declared. §8 R0a. | **Scope restatement**, an owner VALUES call: the goal becomes an **absolute** ms/quality target, and the ladder terminates in **R0f′**, which closes the *same* inequality. §13 Q1, §8 R0f′. |
-| **K3** | **Undecidable harness.** The instrument cannot resolve the frozen claim. | R0e's decidability statement, with its null control. | Every future number is arguable. §9 clause 3 — and note this is the failure mode the sibling rung actually hit. |
+| **K1** | **No content, no mechanism.** The corpus never approaches ~1 triangle/pixel, so cluster LOD has no mechanism of action on our content. | **Refute-only at R0.** `D_est ≥ [k1].d_est_min` at the decision resolution **refutes** K1 outright (a lower bound proves density). **Firing is UNREACHABLE at R0** (`[k1].k1_fire_at_r0`): the upper-bound instrument is mis-sited and probably inert, and is recorded UNSOLVED rather than scheduled. §5.6, §9 clause 1. | Refuted → the mechanism exists, proceed to R1. Undecided → owner VALUES call, §13 Q2, which blocks R1. |
+| **K2** | **No baseline.** The Nanite reference cannot be produced on this box. | R0a's rig probe, before any engine code — and the negative is **re-derived by the test**, not declared. §8 R0a. | **Scope restatement**, an owner VALUES call: the eventual goal becomes an absolute ms/quality target. R0 records the branch; §14's rung is where a target is set. |
 
-**Falsification-first ordering.** K2 is the cheapest to test — it needs *zero* engine code and one
-operator session — so R0a runs first. K1 needs the corpus and the instrument, so it lands third and
-fourth. K3 needs the corpus (cost scales with density), so it lands fifth.
+**Falsification-first ordering.** K2 is the cheapest to test — *zero* engine code, one operator
+session — so R0a runs first. K1 needs the corpus and the instrument, so it lands third and fourth.
 
-**K2 no longer terminates the ladder, and that is Rev 2's D3 fix.** In Rev 1, `achievable = false`
-left R0f unrunnable and the ONE gate unclosed — on the branch §11 measured as *today's reality*. The
-left-hand side of the inequality is **entirely ours**: R0e measures it with no reference at all.
-Only the right-hand side's provenance changes between modes. So both branches close the same gate,
-and the campaign never proceeds to R1 without a falsifiability condition.
+⚠️ **K3 — the undecidable harness — is not an R0 criterion any more.** It moved to §14 with the
+rungs that tested it. R0 builds no harness and measures no delta, so there is nothing here for K3 to
+be true or false about.
 
 ---
 
@@ -442,7 +450,8 @@ clone. §11 records the measured sizes that make this decisive.
 * **Licence-clean means recorded, not assumed.** The repo carries no `LICENSE` file of its own, so
   the corpus manifest is the only place a licence claim can live. An asset whose licence permits
   redistribution but not the *reference capture* (e.g. loading it into a third-party engine) is
-  unusable for this campaign and must be rejected at manifest-authoring time, not at R0f.
+  unusable for this campaign and must be rejected at manifest-authoring time, not at the rung that
+  eventually compares two engines.
 * **The same bytes feed both engines.** The Nanite reference (§6) imports the identical `.glb`
   files. If an asset cannot be imported by both, it is not corpus material.
 * A `fetch_corpus` script verifies every pinned hash before extraction and refuses on mismatch. The
@@ -460,7 +469,7 @@ clone. §11 records the measured sizes that make this decisive.
 * **Per-pass GPU time, partially.** `VbTimedPass` (`gpu_timing.rs:203`) brackets **three** passes:
   `CullReset` (`:211`), `CullDispatch` (`:214`), `VbShade` (`:229`); `VB_PASS_COUNT = 3` (`:242`).
   **The VB raster pass, the `vb_geo` pass and the classify chain are NOT bracketed.** A per-pass
-  table comparable to a Nanite capture therefore requires extending this enum — R0e.
+  table comparable to a Nanite capture therefore requires extending this enum — §14's rung, not R0.
 * **A CPU coverage rasterizer.** `crates/boyko_app/tests/sv0_oracle/mod.rs` ships `rasterize`
   (`:279`) producing a `Coverage` (`:211`) of `CoveredPixel` (`:193`) with `covered_count`
   (`:253`), plus `changed_covered_pixels` (`:798`). It is perspective-correct and supports
@@ -484,7 +493,11 @@ statistic, and nothing reads the visibility buffer back to the host. `vb_id` is 
 | (c) Reuse the CPU rasterizer alone | zero engine change | Rejected **as the census** — it is a host mirror of the raster, not the shipped VB path, and the whole point of the census is to measure what the engine actually produces. Retained as R0c's cross-check |
 
 `copy_image_to_buffer` already exists in the RHI (`boyko_rhi/src/encoder.rs:115`; impl at
-`rhi_impl/encoder.rs:1031`). The census is armed by an env knob and threaded as an `Option`, so an
+`rhi_impl/encoder.rs:1031`). The readback is `[census].readback_retention` — streamed and hashed,
+never retained: at 3840×2160 × 8 B that is 66.4 MB per censused frame, and §11 records this volume
+at 16 GB free with `target/` at 58 GB, so retention would reproduce this project's standing hazard
+of disk exhaustion surfacing as mingw linker errors.
+The census is armed by an env knob and threaded as an `Option`, so an
 unarmed frame records **zero** extra commands — the exact discipline
 `Option<&VbTimestampCollector>` documents (`gpu_timing.rs:247`) and the reason the golden
 command stream stays byte-identical.
@@ -652,7 +665,8 @@ OS-clamped window would silently measure a different per-pixel workload."* A dis
 above rests on the scaling law those rows are supposed to demonstrate. `[census]
 .assert_achieved_extent` makes the readback's own dimensions the check.
 
-**No error target is needed, and this is why.** The census renders at **full detail** — this engine
+**No error target is needed, and this is why** (`[k1].measured_at` freezes it as
+`"full_detail_no_lod"`). The census renders at **full detail** — this engine
 has no LOD, so there is nothing to hold an error target against. That makes the censused density
 the **ceiling** of the mechanism available to any LOD scheme: a cluster hierarchy can only reduce
 triangles below it. If the ceiling does not reach the regime, no LOD scheme reaches it either.
@@ -678,7 +692,9 @@ comparing one of our passes against a fraction of theirs.
 
 **It is not achievable today, and the reason is concrete.** §11 records the probe: there is **no
 UE5 installation on this machine** (the only Epic-shaped directory is empty), together with the
-measured free space on both volumes. The operator must therefore supply, as a prerequisite to R0f:
+measured free space on both volumes. ⚠️ Rev 8: R0 no longer captures the reference, so the three
+prerequisites below are no longer a prerequisite *to a rung of R0* — they are what R0a RECORDS the
+availability of, and what §14's rung would need. The operator must supply, before any capture:
 
 1. a UE5 install of a named version, with disk headroom for the editor **plus** a project **plus**
    its derived-data cache — and this project's standing hazard is that the Rust `target/` directory
@@ -692,21 +708,23 @@ else": it is a **scope restatement** the owner makes consciously (§13 Q1). The 
 argument for this campaign rests on this rung, which is why it runs first and why R0a's gate is
 mechanical rather than a paragraph.
 
-### 6.3 The reference's own floor — a term Rev 1 never had
+### 6.3 The reference's own floor — moved to §14 at Rev 8
 
-A capture is an instrument too. **A claim smaller than the reference's own reproducibility is
-unfalsifiable no matter how good our side is**, and Rev 1's `joint_floor` named a pair of
-instruments while defining only one. So the reference capture is repeated across
-`[decidability].sessions` separate sessions on the identical scene, camera and settings, and the
-relative peak-to-peak spread of its per-pass medians **is** the reference floor.
+A capture is an instrument too, and **a claim smaller than the reference's own reproducibility is
+unfalsifiable no matter how good our side is** — Rev 1's joint floor named a pair of instruments
+while defining only one. That term, its summation rule and the reason summation beats quadrature
+(a systematic capture bias between two engines is not an independent random draw) are **§14.2's**,
+because they are terms of an inequality R0 no longer evaluates.
 
-The two floors combine by `[decidability].joint_floor_rule = "sum"`, and the reason is stated
-rather than conventional: **quadrature assumes two independent draws from one noise process, and
-these are not that.** A systematic capture bias — a different clock discipline, different pass
-boundaries, a driver-side difference between the two engines — is not an independent random error,
-and adding it in quadrature would understate it. Summing is conservative in the direction that
-makes the campaign's own claim harder to close, which is the correct direction for a gate whose
-purpose is to keep us honest.
+⚠️ One correction travels with them and must not be lost, because Rev 7 shipped it: the reference
+floor was derived from the peak-to-peak spread of **per-pass** medians and then used as a **chain**
+floor — the exact composition the scope rule forbade one table over, inside the same inequality
+whose other half obeyed it. §14.4 P0-3 carries the counterexample. Whoever re-authors this
+discharges it there.
+
+**What R0 keeps of §6 is §6.1 and §6.2 only:** what a reference must contain, and whether it can be
+produced on this box. Recording that answer is R0a's job (§8 R0a) and firing K2 on it is §9
+clause 2's. Capturing the reference is not an R0 rung.
 
 ---
 
@@ -744,19 +762,19 @@ that R0's harness must be built to avoid:
    where `may_widen` requires at least `SV0_LATTICE_MIN_DISTINCT_TICKS = 7` (`:399`) distinct
    observed tick values (`:680-681`), *"licensed by EVIDENCE … rather than granted by default"*
    (`:798`). A **separate, non-waivable** test asserts `lattice_floor <= SV0_SESSION_SPREAD_MAX`
-   unconditionally, *"so it can never silently widen the gate"*. R0e lands **all three** — the
+   unconditionally, *"so it can never silently widen the gate"*. §14's rung lands **all three** — the
    `max()`, the distinct-tick evidence floor, and the non-waivable assertion — or none of them.
    This is R16 (*a literal transferred without its denominator*) one level up: **a gate transferred
    without its precondition**;
 5. discard warmup, run ≥3 separate processes, and pin every session's transcribed number as a test
    literal under the MEASURED discipline.
 
-**One trap the R0e implementer will otherwise hit.** Every `read_query_pool_ns` reader requests all
+**One trap §14's implementer will otherwise hit.** Every `read_query_pool_ns` reader requests all
 of its collector's `(begin,end)` pairs with `VK_QUERY_RESULT_WAIT_BIT`, which **blocks forever** on a
 pair its recorder never wrote that frame — `gpu_timing.rs:344` states this, and it is why three
 separate collectors exist rather than one widened `PASS_COUNT`. Extending `VbTimedPass` to cover
 raster/geo/classify means **every added pair must be written unconditionally on every armed frame**.
-R0e therefore also lands a **written-pair bitmask asserted before the read**, so a conditional
+That rung therefore also lands a **written-pair bitmask asserted before the read**, so a conditional
 bracket fails as a red assertion instead of hanging the test binary — a hang is not a gate.
 
 ---
@@ -764,7 +782,8 @@ bracket fails as a red assertion instead of hanging the test binary — a hang i
 ## 8. Rungs
 
 Ladder: **kill the baseline cheapest → land content → land the instrument → run the census → state
-decidability → close the inequality** (R0f *or* R0f′, whichever branch R0a selected). Each rung is
+decidability**. ⚠️ That last clause used to read "→ state decidability → close the inequality"; both
+of those steps left with R0e/R0f/R0f′ at Rev 8 (§14), so the ladder now ends at the census. Each rung is
 independently committable, has **one** gate, and names the mutation that turns it red. *A mutation
 that is only argued does not count; the commit message records the mutated run's output.*
 
@@ -777,6 +796,29 @@ disk on the install volume, **the sha256 of
 deliberately *not* hashed** — the **pass-correspondence map**, and a per-pass table for **one stock
 UE5 scene** (no corpus needed).
 Plus `crates/boyko_app/tests/vg_r0_reference_rig.rs` reading it.
+
+**And — landed at Rev 8, ahead of the rung — the freeze tripwire itself:**
+`crates/boyko_render/tests/vg_thresholds_freeze.rs`
+(`[hash_assertion].hash_tripwire_test`, `[hash_assertion].hash_tripwire_landed_by_rung`). It does
+nothing but re-hash the thresholds file against a recorded literal: no GPU, no `dxc`, no corpus,
+so a bare `cargo test` executes it, which is what
+`[hash_assertion].must_run_in_plain_workspace_test` demands. It carries its own SHA-256
+known-answer test against the FIPS vectors — a wrong hash implementation is perfectly *stable*, so
+without that the freeze would pass forever while hashing something reproducible by nobody — and its
+own sensitivity control, which retunes K1's `d_est_min` in memory and requires the digest to move.
+⚠️ It normalises `
+` to `
+` before hashing: this repository has `core.autocrlf` behaviour
+active, so a hash over raw bytes would be a hash of the checkout configuration and would red on a
+coworker's machine with nothing changed.
+
+⚠️ **It is landed early ON PURPOSE, and it is a baseline rather than the freeze.**
+`freeze_begins_at` says the campaign freeze starts when R0a records the hash into the rig file, and
+R0a has not run — so an edit to the thresholds is still *authoring*, and updating the literal in the
+same commit is the legitimate response. What exists from today is the property the file's own
+`schema_version` / `frozen_at_revision` fields were supposed to provide and did not: **an edit
+cannot be silent.** Those two went stale through Rev 4, Rev 5 and Rev 7 because nothing checked
+them.
 
 **The record has two shapes, and the gate says which fields each requires.** Rev 2 demanded *"every
 field present and not `PENDING`"* over a list including the UE version string, the capture tool and
@@ -791,13 +833,26 @@ mechanical cross-check, not a transcription; (c) the recorded resolution equals
 `[census].decision_resolution` read from the **thresholds** file, not from a constant this rung
 authors; (d) the recorded `VG-CAMPAIGN-THRESHOLDS.toml` sha256 matches the file re-hashed at test
 time; and the record carries the **pass-correspondence map** — the reference's pass names for its
-stock scene — which `[scope].require_pass_correspondence_map_at` puts *here*, at rung one, rather
-than at R0f where it would be written with both tables already in hand (§8 R0f, P1-10's fix).
+stock scene — recorded *here*, at rung one, rather than at the rung that eventually compares two
+tables, where it would be written with both of them already in hand. That reasoning survives Rev 8's
+re-scope unchanged, which is why R0a still records the map even though the rung that consumes it is
+now §14's: whoever writes a correspondence after seeing both sides writes it with the answer
+available, and no gate can tell that from an honest one.
 
 **Gate (one) — `achievable = false` branch, three parts:** (a′) the *negative* field set is present
-and not `PENDING` — `reason`, `search_method`, `editor_binary_name`, `probed_at`; (b′) the
-re-derivation below passes; (d) as above, unchanged — the thresholds hash is asserted on both
-branches.
+and not `PENDING` — `reason`, `search_method`, `editor_binary_name`, `probed_at`; (b′) **if and only
+if `reason` is `no_engine_registered`**, the re-derivation below passes; (d) as above, unchanged —
+the thresholds hash is asserted on both branches.
+
+> ⚠️ **Rev 8 conditions (b′) on the recorded reason, because Rev 7's version could not go green for
+> the most likely cause.** §6.2 defines K2 as firing if **any** of three prerequisites fails — no
+> install, no importable project, no capture protocol — while (b′) asserted flatly that no engine is
+> registered with the documented authorities. A legitimate `achievable = false` caused by disk
+> headroom, with UE5 installed and registered, therefore **red the rung**: the gate could not accept
+> the branch §11 measures as the expected one. It is now the machine-checkable *subset* of K2 that
+> is machine-checked, and §9.1 records that the other two causes are recorded rather than
+> re-derived. Naming the boundary is the fix; pretending the search covers all three was the
+> defect.
 
 **RED if / mutations (DEMONSTRATED):** edit the recorded GPU string by one character → (b) reds.
 Blank one field of the branch's own set → (a)/(a′) reds. **Edit any threshold in
@@ -846,9 +901,19 @@ falsify is not a gate on UE5 availability. The figure stays in the record, as a 
 
 **Gate (one, four parts):** (a) every corpus payload's sha256 matches its manifest pin; (b) each
 `.glb` decodes to a `MeshData` whose triangle count equals the manifest's published count;
-(c) each mesh, registered through the **streamed** path, lands a geometry slot
-`!= VB_GEOMETRY_RESERVED_SLOT` and a `gMeshMeta` row whose `index_width` / `vertex_count` /
-`index_count` match the decoded mesh; (d) the largest corpus mesh registers without allocation
+(c) **every corpus mesh this rung registers — by whichever path it registers them** — lands a
+geometry slot `!= VB_GEOMETRY_RESERVED_SLOT` and a `gMeshMeta` row whose `index_width` /
+`vertex_count` / `index_count` match the decoded mesh;
+
+> ⚠️ **Rev 8 widens (c)'s quantifier, and the reason is that the rung's own replacement mutation
+> escaped the old one.** (c) read "each mesh, registered through the **streamed** path", while the
+> mutation registers a mesh through `register_mesh` **after boot** — which moves it *out of the
+> quantifier's domain* rather than falsifying the predicate, so the gate would have gone vacuously
+> green on the mutation written to red it. That is the campaign's #1 defect family (an assertion
+> quantified over a selection that excludes the failure) reached from the mutation side instead of
+> the gate side. The hole the mutation targets is real and verified: `backfill_vb_geometry_slots`
+> has no re-arm and exactly one call site, in `boyko_app::runner`'s boot path, so a mesh registered
+> at runtime under VB keeps `VB_GEOMETRY_RESERVED_SLOT` forever. (d) the largest corpus mesh registers without allocation
 failure (§3.4).
 
 **RED if / mutations (DEMONSTRATED):**
@@ -903,9 +968,16 @@ again;
 (b) on a **procedurally generated** fixture whose screen-space triangle size is analytically known,
 the census's modal bucket is the analytic bucket;
 (c) the census's covered-pixel total agrees with `sv0_oracle::rasterize`'s `covered_count` **on that
-same procedural fixture, at 512²**, within a **pre-registered** tolerance fixed before the run —
-scoped to the fixture because the oracle takes one mesh and translation-only instances (§5.7) and
-cannot reach the corpus at any resolution;
+same procedural fixture, at 512²**, within `[pre_registered].r0c_oracle_coverage_tolerance` — read
+from the frozen file **by name**, not minted here, because this is the only gate anywhere that
+validates covered pixels, which is `D_est`'s own denominator, and a tolerance supplied after seeing
+the disagreement is chosen by whoever measures against it. Non-zero deliberately: the oracle is a
+host mirror with its own sample-point rule, so exact agreement would be a coincidence rather than a
+check. Scoped to the fixture because the oracle takes one mesh and translation-only instances (§5.7)
+and cannot reach the corpus at any resolution;
+(c′) the **non-degeneracy precondition** — `[k1_instrument].min_covered_pixels` and
+`[k1_instrument].min_visible_tris` — holds on the censused frame, so a sentinel-only readback fails
+here rather than flowing into R0d as a division by nothing;
 (d) the ladder is driven from `[census].resolution_ladder` in the **thresholds** file, whose sha256
 the test re-asserts, the census produces one row per rung, **and the readback's own dimensions equal
 the requested rung** (`[census].assert_achieved_extent`) — a ladder silently truncated, or silently
@@ -938,14 +1010,50 @@ the frozen resolution ladder**; results written to `docs/VG-R0-DENSITY-CENSUS.md
 curve, and the **decision-bearing** numbers pinned as literals in the test under the MEASURED
 discipline.
 
-**Gate (one, three parts):** (a) the census is **reproduced across `[decidability].sessions` = 3
+**Gate (one, three parts):** (a) the census is **reproduced across `[census].cross_run_sessions`
 separate processes** under `[census].cross_run_gate` — **the sha256 of the readback itself**;
-(b) `D_est`, the convergence check, the histogram and both report-only statistics are produced at
-**every** ladder rung, so the resolution-dependence is on the page rather than in the choice of one
-row; (c) the histogram's modal bucket moves between adjacent rungs by the **per-pair `log2` of the
-actual area ratio**, within `[k1_instrument].histogram_shift_tolerance_buckets`, with the residual
-reported — over the **two** non-excluded pairs (1080p→1440p, 1440p→2160p), rung 0 being excluded as
-a different frustum (§5.7).
+(b) `D_est`, the convergence check, the histogram and both `[k1].report_only` statistics
+(`visible_tri_per_covered_pixel` and `submitted_per_covered_pixel` — the saturating raw reading and
+the cull-efficiency reading, neither of which adjudicates anything, and the modal bucket alongside
+them under `[k1].modal_bucket_role`) are produced at **every** ladder rung, so the
+resolution-dependence is on the page rather than in the choice of one row; (c) the **non-degeneracy precondition** holds at the decision resolution and at the top rung —
+covered pixels at or above `[k1_instrument].min_covered_pixels` and distinct visible triangles at or
+above `[k1_instrument].min_visible_tris` — because `D_est` and the convergence check are both
+divisions and a sentinel-only readback proves nothing in either direction. ⚠️ This precondition was
+stated in §5.7 and frozen in the companion file from Rev 4 onward and appeared in **no gate part of
+either rung that produces the numbers**; Rev 8 lands it here and at R0c.
+
+**Measured and recorded, deliberately NOT a gate part:** the histogram's modal-bucket shift between
+adjacent rungs, against the **per-pair `log2` of the actual area ratio**
+(`[k1_instrument].histogram_shift_rule`), with the residual reported per pair and compared to
+`[k1_instrument].histogram_shift_tolerance_buckets` **as a reported margin, not an assertion** —
+over the **two** non-excluded pairs (1080p→1440p, 1440p→2160p),
+`[k1_instrument].histogram_shift_excludes_rungs` naming rung 0 as a different frustum (§5.7).
+
+> ⚠️ **Rev 8 demotes this from a gate, and the arithmetic is why.** The measured shift is a
+> difference of **integer** bucket indices; the targets are 0.830075 and 1.169925; the tolerance is
+> 0.35. So the rule accepts exactly one integer — 1 — on both pairs, which is an integer assertion
+> wearing a tolerance, in a clause whose own frozen comment says *"the residual reported rather
+> than an integer asserted"*. Worse, the two targets sum to **exactly 2.000** (3840/1920 =
+> 2160/1080 = 2 exactly), so **both** splits a correct instrument can produce — (1,1) and (0,2) —
+> satisfy the scaling law over the retained span, and which one occurs is set by the sub-bucket
+> phase of the corpus's modal triangle size: a property of the assets, not of the instrument.
+> And the histogram is left-censored at one covered pixel, so in the micro-polygon regime the
+> census exists to serve — where §9 itself says `visible_tris` is still climbing steeply between
+> exactly these rungs, every newly visible triangle entering at bucket 0 — the mode is pushed the
+> wrong way. **The gate would red hardest exactly when the campaign's premise is most strongly
+> confirmed.** That is the defect family this campaign hunts, pointing the other way.
+>
+> The disposition is the one §8 R0c(e) already chose and §9 clause 3 already rules on: *a
+> legitimate finding must not red the rung and block the ladder*. The residual is produced,
+> written into `docs/VG-R0-DENSITY-CENSUS.md` and interpreted by a reader; it does not adjudicate.
+> Making it a gate again requires a statistic that is not re-binned onto the same integer lattice
+> at both rungs — the `log2` ratio of a fixed quantile of covered-pixel counts is the obvious
+> candidate — and that is a new instrument, not a retuned tolerance.
+>
+> **The rung-0 exclusion is SOUND and must not be "fixed" along with it:** 512² is 1:1 while the
+> other three rungs are 16:9, so that pair is a different frustum rather than a rescaling, and the
+> premise does not hold across it at all.
 
 > ⚠️ **Rev 6 fixed this clause, and it is worth naming why it survived Rev 5.** §5.7 replaced the
 > two-bucket constant and explained at length that it was *red by construction* — and R0d, **the
@@ -996,196 +1104,27 @@ changing `vb_id`:
   touches. The corpus mutation: **substitute one ladder rung's histogram with another rung's** →
   the per-pair `log2` residual for both affected pairs exceeds tolerance → (c) reds.
 
-### R0e — the decidability statement — **K3's test**
+### R0e / R0f / R0f′ — REMOVED AT REV 8, and the removal IS the revision
 
-**Lands:** `VbTimedPass` extended to bracket the VB raster, `vb_geo` and the classify chain, with
-the written-pair bitmask of §7; a counterbalanced ABBA harness over the corpus scene with a null
-control; `crates/boyko_app/tests/vg_r0_decidability.rs`, all session numbers transcribed as
-literals.
+Three rungs stood here: the decidability statement (K3's test), the Nanite reference capture, and
+the absolute-mode closure. Between them they measured the campaign's decidability floor and closed
+the ONE gate.
 
-**Blocked until the claim exists, and R0e PINS it.** R0e's test asserts `claim.mode` and its mode's
-delta field are **not `PENDING`** before it measures anything, and fails if they are.
+They are gone from R0 because **the ONE gate's left-hand side has no measurand at this rung.** The
+floor is a *resolvable delta*, and a delta needs two configurations to sit between — but R0 lands no
+meshlet, no cluster and no LOD. The frozen `[decidability]` table named our side's denominator
+explicitly, and it was the **armed paired delta**; R0 has no arm. Six revisions of pre-registration
+machinery were guarding a number that cannot be measured until the thing being claimed exists, and
+five of the eight blocking P0s Rev 7's review returned were downstream of that one over-reach.
 
-**R0e additionally transcribes the filled claim value as a MEASURED-discipline literal alongside the
-floor**, in the same commit — `[ordering].claim_pinned_into_r0e_literals`. ⚠️ Rev 5 asserted that
-boolean as `true` while §8 listed no such literal and **§8 R0f said the ONE gate reads the claim
-"from a file"** — so the post-fill edit window §0.1 identified stayed wide open in the rung specs
-while a data file claimed it closed. R0f now asserts the file still equals R0e's pinned literal;
-a claim edited between the two rungs reds.
+Nothing is discarded. The specification, the denominators, the two-sided absolute gate form, and the
+eight P0s — each with the arithmetic that refuted it — are in **§14**, as requirements on whoever
+freezes them at the rung that lands an arm. §7's harness contract stays where it is and binds that
+rung.
 
-⚠️ **And the block attaches per mode, which Rev 5 got wrong.** `[ordering]` named R0e for both
-instruments — but in `absolute` mode §8 R0f′ states plainly that R0e's paired-delta floor is
-unusable and R0f′ needs its own. The floor the claim is compared against is then measured **two
-rungs later**, with the claim already filled and visible. Blocking R0e constrained nothing there.
-`claim_blocks_rung_absolute = "R0f_prime"` — **the rule attaches to whichever rung measures the
-floor for that mode**, which is the campaign's single P0 and had been unguarded on the branch §11
-calls expected.
-
-**Gate (one, three parts), every fraction AND ITS DENOMINATOR read from
-[`VG-CAMPAIGN-THRESHOLDS.toml`](VG-CAMPAIGN-THRESHOLDS.toml) rather than minted here:**
-(a) the null control's `|median paired delta|` is at or below
-`[decidability].null_control_max_fraction` of **the armed paired delta**;
-(b) the reported `median_lattice_ns / |median|` is at or below that fraction for **every** bracketed
-pass — a pass whose cost sits at the lattice is reported as **not resolvable**, by name, rather than
-averaged into a total;
-(c) the cross-session spread of the **paired deltas** over `[decidability].sessions` processes is
-within `max([decidability].session_spread_max, measured lattice / |median|)`;
-(d) the chain total's floor is measured on **one bracket spanning the chain**
-(`[scope].chain_floor_rule`), not composed from the per-pass floors — the passes share occupancy,
-caches and a queue, so arithmetic composition would assume an independence they do not have.
-
-> ⚠️ **The denominators are the gate.** Rev 2 transferred the sibling's three literals while
-> silently changing what they divide. The sibling gates the null control against the **armed
-> delta** — it fired at 33% (−2048 ns against a 6144 ns signal) and *that failure is what produced
-> the ABBA redesign*. Rev 2 gated it against *"the smallest per-pass median"*, an **absolute** cost:
-> a pass costing 100 µs would carry a 10 µs null budget where the sibling's was 614 ns, roughly a
-> 20× weakening, **and the precedent's own red event would have passed.** R0e's first named
-> mutation — revert to strict ABAB — would then not have fired. Same for (c): this project has
-> recorded ~21% run-to-run spread on **absolute** GPU pass costs at high N (the VB-P1d bench), so a
-> 0.10 gate on absolute medians would red for a known instrument property rather than a finding.
-> Both denominators are now written down (`null_control_denominator`, `session_spread_denominator`).
-
-The three literals themselves are not invented for this campaign — they are the ones
-`sv0_deferred_term_bench.rs:350`, `:366`, `:378` already carry, fixed by a rung that had never
-heard of virtual geometry.
-
-> ⚠️ **Rev 3/Rev 4 called them *"measured on this exact box"*. They are not measurements** — they
-> are **pre-registered protocol thresholds**, and the sibling says so at the constants themselves:
-> `SV0_NULL_CONTROL_MAX_FRACTION` is *"Registered at the same 10% … **Fixed here, before any run**,
-> so it cannot be widened to rescue a failing control"*; `SV0_SESSION_SPREAD_MAX` carries a
-> `const { assert!(… <= 0.10) }` and *"may be TIGHTENED on new evidence, never widened"*;
-> `SV0_BENCH_SESSIONS = 3` is *"The plan's session count."* In a document whose central discipline
-> is the measured/authored distinction — §11's fenced exception exists for exactly this — calling
-> three authored numbers "measured" **launders them as evidence**. That is the category error this
-> campaign exists to prevent, committed in the sentence claiming rigour.
-
-**RED if / mutations (DEMONSTRATED):**
-* revert the harness to strict ABAB → (a) must exceed its budget. This was **measured** on this
-  hardware in the sibling rung, so it is a re-demonstration, not a hope;
-* make one added bracket conditional on a branch the fixture never takes → the written-pair
-  bitmask assertion reds (instead of the `WAIT_BIT` readback hanging);
-* halve the sample count → the confidence interval widens past the pre-registered bound → red.
-
-### R0f — the reference capture — **closes the ONE gate** (`nanite_relative` mode)
-
-**Runs only if R0a recorded `achievable = true`.** Otherwise the ladder terminates in R0f′ below.
-
-**Lands:** the corpus imported into the R0a project; per-pass Nanite timings at the pinned error
-target and the pinned resolution, for the **same camera paths**, **repeated across
-`[decidability].sessions` capture sessions** (§6.3), recorded into
-`docs/VG-R0-REFERENCE-RIG.toml`'s table; and the campaign's **decidability statement**: the smallest
-delta this pair of instruments can jointly resolve.
-
-**Gate (one, four parts):** (a) a reproducible per-pass table with named GPU / scene / resolution /
-error target; (b) the reference floor is derived from the cross-session spread of that table, and
-`joint_floor = our_floor + reference_floor` per `[decidability].joint_floor_rule`; (c) the ONE gate
-itself — `joint_floor < claim.nanite_relative_chain_delta`, **both sides scoped to the bracketed VB
-pass chain** (`[scope].claim_scope`), with the claim read from a file that R0e already proved was
-filled before the floor was measured; (d) the **pass-correspondence map** recorded at R0a is
-**total** over our bracketed pass set — without it `nanite_relative_per_pass_regression_max` cannot
-be evaluated at all, and whoever writes the map after both tables exist writes it with the answer in
-hand.
-
-**Scope, stated because Rev 2 got it wrong.** Rev 2 compared a per-pass floor against a field named
-`frame_total_delta` with **no composition rule anywhere**, which made the ONE gate not evaluable.
-R0e measures the VB pass chain: raster, `vb_geo`, classify, and the three passes `VbTimedPass`
-already brackets. A *frame* additionally contains CSM, SDF, DDGI, post/AA, present and all CPU
-time — none of which this campaign touches and none of which the harness measures. The claim is
-about the chain, and the field is now named `nanite_relative_chain_delta`.
-
-**RED if / mutations — one per side, which is the point:**
-* raise the recorded floor above the claim → the inequality assertion reds (Rev 1 had this one);
-* **fill the claim to fit the floor → impossible without reding R0e**, which refuses to run while
-  the field is `PENDING` and whose MEASURED literals are committed after the fill. This is the
-  cheaper cheat, and it is the one Rev 1 and Rev 2 both left open.
-
-That pair is the whole campaign's falsifiability condition, and both halves must be able to fail.
-
-### R0f′ — the absolute-mode closure — **closes the ONE gate when K2 has fired**
-
-**Runs iff R0a recorded `achievable = false` and its negative was re-derived.** This rung exists
-because Rev 1 left the *most likely* branch with no closure at all: no reference, therefore no R0f,
-therefore no falsifiability condition, therefore a campaign that proceeds to R1 on an argument.
-
-> ⚠️ **Rev 2 wrote *"nothing new to measure — the left-hand side is already ours"*, and that was
-> its sharpest error.** The harness §7 mandates measures **paired differences**, and its entire
-> algebra exists to *cancel* the absolute terms: in `m_k = μ + τ·armed(k) + γ(fi(k)) + β·k + ε_k`,
-> the ABBA statistic `(d₁+d₂)/2` recovers `τ` **precisely by eliminating** `μ` (the per-frame
-> baseline), `γ` (the frame-in-flight-slot offset) and `β` (position drift)
-> — `sv0_deferred_term_bench.rs:34`, `:58-62`. Those are exactly the terms an absolute millisecond
-> reading must **retain**, and this repo has measured them to be large (the null control read
-> −2048 ns against a 6144 ns signal — a third of the "signal"). **A floor produced by a design that
-> cancels the absolute terms says nothing about whether an absolute reading is trustworthy.**
-> R0f′ therefore needs its own instrument, and it does not get to pretend otherwise.
-
-**Lands:** an **absolute-time** measurement — per-pass and chain-total *medians*, not deltas —
-across `[decidability].sessions` separate processes, with the cross-session spread of those
-absolute medians reported; plus the inequality assertion in `vg_r0_reference_rig.rs` against
-`claim.absolute_chain_ms`, and the corpus-and-quality context that makes an absolute target
-meaningful (`[corpus].arrangement`, `[quality].arbiter`).
-
-**Gate (one, three parts):** (a) the measured absolute cross-session spread is at or below
-`[absolute_mode].absolute_session_spread_ceiling` — **derived by measurement here, not adopted**;
-the ceiling is pre-registered at 0.25 from this project's recorded ~21% absolute-cost spread at
-high N, with margin, and R0f′ reds if the measurement exceeds it; (b) the ONE gate, and **Rev 5
-rewrote it because Rev 3 and Rev 4 both shipped it as a dimension error** — see below; (c) the
-thresholds file's sha256 re-asserts, and `claim.mode == "absolute"` is consistent with R0a's
-`achievable = false` — a mode set to `nanite_relative` while the rig says unachievable reds, so the
-two documents cannot disagree silently.
-
-> ⚠️ **Gate (b), twice wrong, and it guarded the *expected* branch.** Rev 3 compared a
-> dimensionless fraction against *"the resolvable fraction of a millisecond target"*. Rev 4 claimed
-> to fix that with *"`absolute_floor < claim.absolute_chain_ms`, both in milliseconds — a genuine
-> inequality between two quantities of the same kind"*. **It is not.**
-> `[absolute_mode].absolute_floor_source` is `cross_session_spread_of_absolute_per_pass_medians` —
-> a **relative fraction**, the same quantity gate (a) compares against a fraction. One source
-> cannot be both. Read as relative, gate (b) is the identical dimension error one file over. Read
-> as milliseconds, it says `0.28 ms < 5 ms` — **true for any non-degenerate target**, because a
-> *resolution* being smaller than a *level* tells you nothing about whether you can see the gap.
->
-> **Rev 5's gate (b), from `[absolute_mode]`'s three new rules:**
-> **`claim.absolute_chain_ms < measured_chain_median_ms`  AND  `absolute_floor_ms <
-> absolute_distance_ms`**, where `absolute_floor_ms = spread × measured_chain_median_ms` and
-> `absolute_distance_ms = |measured_chain_median_ms − claim.absolute_chain_ms|`. Under the first
-> conjunct this is `c < m(1−s)`. Both sides milliseconds; the inequality is about **the distance we
-> intend to close**, not the level we intend to reach.
->
-> ⚠️ **Rev 7 wrote the second conjunct's partner into THIS SECTION, and that is the fix.** Rev 6
-> landed the two-sided rule in `[absolute_mode].absolute_gate_rule` and left §8 — the section an
-> implementer codes from — carrying the one-sided version *and the sentence the frozen file
-> explicitly refutes* (*"a target already passed now reds"*: false outside a ±`s·m` band, since
-> `c > m` passes whenever `c > m(1+s)`). Rev 6 diagnoses this exact failure at R0d — **"rewriting
-> the explanation is not rewriting the gate"** — and then committed it one rung over. The governing
-> lesson of Rev 7: **a fix that lands only in the frozen file has not landed.**
-
-**Absolute mode is honestly weaker, and saying so is the deliverable.** Its floor is roughly
-2.5× the paired-delta floor, because absolute readings keep every term ABBA was built to remove.
-A weaker instrument reported plainly beats a strong-looking number the harness cannot support —
-and if (a) reds, the correct reading is that **this box cannot support an absolute claim at all**,
-which is a finding, not a failure.
-
-**RED if / mutations — re-derived at Rev 7 until they fire, not re-worded:**
-* set `mode = "nanite_relative"` while `achievable = false` → (c) reds;
-* set `c > m` (a target already beaten) → **conjunct 1** reds: there is nothing to close;
-* set `c` inside `(m − s·m, m)` → **conjunct 2** reds: the gap is inside our own resolution;
-* reuse R0e's paired-delta floor as `absolute_floor` instead of measuring absolutes → (a) has no
-  measurement to gate and the rung cannot report.
-
-> ⚠️ **The mutation Rev 5 and Rev 6 both named here PROVABLY DOES NOT FIRE, and it shipped three
-> times.** It read *"set `absolute_chain_ms` below the measured floor → (b) reds."* Plug it in:
-> `c < s·m` ⟹ `distance = m − c > m(1−s)` and `floor = s·m`, so the second conjunct asks
-> `s·m < m(1−s)` ⟺ **`s < 0.5`** — true for every `s ≤ 0.25` the ceiling permits. It also passes
-> conjunct 1, since `c < s·m ≤ 0.25m < m`. **Green under both the old gate and the new one.** Kept
-> struck through as a specimen: a red mutation is a claim about arithmetic, and this one was never
-> checked against the arithmetic in three revisions of writing it down.
-
-**Deliberately NOT red: an absurdly ambitious target** (`c → 0`). This gate adjudicates
-**decidability**, not achievability — a 1000× claim is trivially resolvable. ⚠️ But the handoff is
-real and Rev 7 names its cost rather than leaving it implied: the plan sends achievability to §13
-Q1, **and the pre-registration rule requires the owner to set that number before any measurement
-exists.** So the party asked to judge whether a target is sane is, by construction, the one party
-with no measurement. That tension is inherent to pre-registration and is accepted knowingly; it
-applies equally to `nanite_relative_chain_delta`, which likewise carries no sanity band.
+**What R0 keeps of K2:** R0a still records whether the reference is achievable, and §9 clause 2
+still states the disposition. What R0 no longer does is *capture* the reference, or compare anything
+against it.
 
 ---
 
@@ -1193,126 +1132,124 @@ applies equally to `nanite_relative_chain_delta`, which likewise carries no sani
 
 The rung is **reverted or the campaign re-scoped** — not softened mid-flight — if any of:
 
-1. **K1 — no content.** `[k1].k1_fire_rule` (**a field that does not exist — see the Rev 7 note below**): the **upper-bound survivor count** per covered pixel is
-   below 1.0 at `[census].decision_resolution`. **Only the upper-bound instrument can fire this
-   kill** — §5.6. The cheap census can *refute* K1 (`D_est ≥ 1.0`) and can never fire it, because
-   `D_est` is a lower bound; anything below the threshold is indistinguishable from the
-   instrument's own ceiling seen from underneath.
-   ⚠️ **Rev 7 corrects two things in this clause, and the second was blocking the only outcome R0
-   can produce.**
-   * The field named above does **not exist**. `[k1]` carries `rule`, `k1_decision_rule`,
-     `k1_fire_at_r0` and `k1_fire_instrument_status`. The campaign's abort criterion was defined by
-     reference to a nonexistent field — the frozen file's whole purpose is that gates point at it,
-     so a dangling name is a gate pointing at nothing. The live rule is `k1_decision_rule`.
-   * Rev 6 wrote *"K1 is not adjudicated at all if the ladder-convergence check fails"*,
-     **unconditionally**. That contradicts `[k1_instrument].on_not_converged_refute_direction` and
-     is wrong in the direction that matters: non-convergence means `visible_tris` is still rising,
-     so `D_est` **understates** — and an understatement already ≥ 1.0 still proves density ≥ 1.
-     Convergence is a precondition for **firing**, never for **refuting**. Worse, the two are in
-     structural tension: in the micro-polygon regime this campaign exists to serve, `visible_tris`
-     is still climbing steeply between 1440p and 2160p, so `ladder_convergence_margin = 0.05`
-     **cannot** be met — and the unconditional form would therefore rule *the favourable case* out
-     of adjudication precisely when it is true. A frozen file vetoing its own plan's decisive case,
-     which is the shape §9's own Rev 6 note names one rung over.
+1. **K1 — no content.** The live rule is [`VG-CAMPAIGN-THRESHOLDS.toml`](VG-CAMPAIGN-THRESHOLDS.toml)
+   `[k1].k1_decision_rule`.
+   ⚠️ **Through Rev 7 this clause opened by citing a `k1_fire_rule` field that does not exist**, and
+   Rev 7 "fixed" it by annotating the dangling name in place. That is not a repair: the operative
+   sentence still spelled the name an implementer would grep for, and a gate pointing at nothing is
+   the defect the frozen file exists to prevent. Rev 8 deletes it — including from this correction,
+   which is why the dead name is described here rather than quoted in citation form.
+   [`tests/vg_symbol_reachability.rs`](../tests/vg_symbol_reachability.rs) now catches the class
+   mechanically, and it cannot tell a live citation from a historical one, so leaving the spelling
+   in place would have cost a permanent baseline exception for a name nothing should resolve.
 
-   **The rule, per direction:** `D_est ≥ 1.0` **refutes K1 regardless of convergence.** Only the
-   fire direction requires convergence, and R0 cannot fire K1 at all (`k1_fire_at_r0 = false`), so
-   in practice non-convergence leaves R0 with REFUTED-or-UNDECIDED — see the disposition below.
-   Non-degeneracy (`min_covered_pixels`, `min_visible_tris`) is required in **both** directions:
-   a sentinel-only readback proves nothing either way.
+   **The rule, per direction**, and the frozen file states each half as DATA so no later rung
+   re-derives it from prose: `[k1_instrument].d_est_bound_direction` is `"lower"`,
+   `[k1_instrument].d_est_may_refute_k1` is true and `[k1_instrument].d_est_may_fire_k1` is false.
+   ⚠️ Those three fields carried the campaign's single most important correction and, through
+   Rev 7, **were named nowhere in this document** — frozen precisely so prose could not drift from
+   them, and then not read by the prose.
+
+   `D_est ≥ [k1].d_est_min` **refutes K1 regardless of convergence**: non-convergence means
+   `visible_tris` is still rising, so `D_est` *understates*, and an understatement already at or
+   above the threshold still proves density ≥ 1 triangle/pixel. Convergence — the top-two-rung gap
+   coming in under `[k1_instrument].ladder_convergence_margin` — is a precondition for **firing**,
+   never for **refuting** (`[k1_instrument].on_not_converged_refute_direction`,
+   `[k1_instrument].on_not_converged_fire_direction`). Non-degeneracy
+   (`[k1_instrument].min_covered_pixels`, `[k1_instrument].min_visible_tris`) is required in
+   **both** directions: a sentinel-only readback proves nothing either way.
 
    ### K1 has exactly two reachable outcomes at R0, and UNDECIDED is the likely one
 
-   ⚠️ **Rev 6 declared `k1_fire_at_r0 = false` and left `k1_decision_rule`'s `escalate` naming no
-   addressee — no rung, no `[gating]` field, no §13 question.** That is D3's shape relocated: the
-   most likely branch with no disposition. With `d_est_ceiling = 4.0`, a plausible corpus puts
-   `D_est` in the 0.7–1.3 band, so UNDECIDED is not a corner case.
-
    | Outcome | Condition | Disposition |
    |---|---|---|
-   | **K1 REFUTED** | `D_est ≥ 1.0` at the decision resolution, non-degeneracy met | The mechanism exists. The ladder proceeds to R1. This is the cheap decisive case §5.6 front-loads. |
-   | **K1 UNDECIDED** | `D_est < 1.0`, or non-degeneracy unmet | **Owner VALUES call — §13 Q6.** R0 cannot distinguish "genuinely sparse" from "the instrument hit its ceiling seen from below", because firing needs an upper bound R0 has no buildable instrument for. |
-   | **K1 FIRED** | — | **Unreachable at R0.** Requires the unsolved upper-bound instrument. |
+   | **K1 REFUTED** | `D_est ≥ [k1].d_est_min` at `[census].decision_resolution`, non-degeneracy met | The mechanism exists. The ladder proceeds to R1. This is the cheap decisive case §5.6 front-loads, and it is R0's whole claim. |
+   | **K1 UNDECIDED** | `D_est` below the threshold, or non-degeneracy unmet | **Owner VALUES call — §13 Q2**, held by `k1_outcome.undecided_disposition` in [`VG-CAMPAIGN-CLAIM.toml`](VG-CAMPAIGN-CLAIM.toml), which **blocks R1**. R0 cannot distinguish "genuinely sparse" from "the instrument hit its ceiling seen from below", because firing needs an upper bound R0 has no buildable instrument for. |
+   | **K1 FIRED** | — | **Unreachable at R0** (`[k1].k1_fire_at_r0`). Requires the unsolved upper-bound instrument. |
 
-   **On UNDECIDED the ladder does NOT silently proceed.** The owner chooses: accept the campaign's
-   premise unadjudicated and proceed to R1 on that basis, knowing K1 was never tested; change the
-   target content class and re-run R0b–R0d; or fund the upper-bound instrument as its own campaign.
-   The one route foreclosed is the one this document forecloses everywhere else — re-running the
-   census until a number comes out favourable.
+   **On UNDECIDED the ladder does NOT silently proceed.** The owner chooses: accept the premise
+   unadjudicated and proceed to R1 knowing K1 was never tested; change the target content class and
+   re-run R0b–R0d; or fund the upper-bound instrument as its own campaign. The one route foreclosed
+   is the one this document forecloses everywhere else — re-running the census until a number comes
+   out favourable.
 
-   **Consequence for §0, stated rather than left standing:** the headline *"the three ways it kills
-   the campaign"* is now **false as written** — only K2 and K3 can fire at R0. K1 can be refuted or
-   left undecided, never fired.
+   > ⚠️ **Two dead rules are recorded rather than deleted, because each looked decisive.** Rev 2's
+   > `all_three_below` put a `_max` among two `_min`s, so on the canonical no-mechanism scene — a
+   > few giant flat quads — two conjuncts held, the third did not, and **K1 failed to fire on the
+   > exact scene it was written to catch**; an implementer coding from the TOML would have built a
+   > kill that fires when triangles are *small*, i.e. when the premise is *confirmed*. Rev 4's
+   > two-conjunct replacement was **redundant**: a modal bucket above 16 px implies
+   > `visible_tris ≲ covered_px/16`, hence `D_est ≲ 0.06 ≪ 1.0`, so conjunct 1 held automatically
+   > whenever conjunct 2 did. "Two conjuncts, both pointing the same way" was one conjunct and a
+   > weaker consequence of it. Rev 8 deletes both fields from the frozen file rather than leaving
+   > them annotated.
 
-   > ⚠️ **Two dead rules are recorded here rather than deleted, because each looked decisive.**
-   > Rev 2's `rule = "all_three_below"` put a `_max` among two `_min`s, so on the canonical
-   > no-mechanism scene — a few giant flat quads — two conjuncts held, the third did not, and **K1
-   > failed to fire on the exact scene it was written to catch**; an implementer coding from the
-   > TOML would have written `modal < 16` and built a kill that fires when triangles are *small*,
-   > i.e. when the premise is *confirmed*. Rev 4's two-conjunct replacement was **redundant**:
-   > modal bucket > 16 px implies `visible_tris ≲ covered_px/16`, hence `D_est ≲ 0.06 ≪ 1.0`, so
-   > conjunct 1 held automatically whenever conjunct 2 did. "Two conjuncts, both pointing the same
-   > way" was one conjunct and a weaker consequence of it — and the real decisive statistic was the
-   > modal bucket, whose cross-rung derivation this ladder cannot support (§5.7).
+   > ⚠️ **R0 CANNOT FIRE K1, and that is a stated scope boundary rather than a rung nobody wrote.**
+   > Rev 5 named the firing instrument as a frustum+backface survivor counter in `vb_raster.fs.hlsl`
+   > *"scoped as its own rung"* — and §8 contained no such rung. It is wrong twice, the second
+   > fatally: **(a) wrong stage** — a fragment shader runs only for fragments that survived
+   > rasterisation and, with early-Z, the depth test, i.e. approximately the *visible* set that
+   > `vb_id` already caps, and §2 records that the per-primitive lane is not independently reachable
+   > without a mesh shader, one draw per meshlet, or a software rasteriser; **(b) probably inert
+   > regardless** — survivors include every *occluded* in-frustum front-facing triangle, and depth
+   > complexity on a multi-million-triangle corpus is where the count lives, so
+   > `survivors/covered < 1.0` cannot hold whatever the visible triangle size is. That is
+   > `submitted/covered`'s self-satisfaction with a 2–4× constant knocked off.
+   > **Naming a rung that cannot be built is worse than naming none.**
 
-   > ⚠️ **Rev 6: R0 CANNOT FIRE K1, and that is now a stated scope boundary rather than a rung
-   > nobody wrote.** Rev 5 named the firing instrument as a *"frustum + backface survivor counter"*
-   > in `vb_raster.fs.hlsl`, *"scoped as its own rung"* — and §8 contains no such rung. It is wrong
-   > twice, the second fatally:
-   > **(a) wrong stage** — a fragment shader runs only for fragments that survived rasterisation
-   > and, with early-Z, the depth test, i.e. approximately the *visible* set that `vb_id` already
-   > caps; frustum- and backface-culled triangles never reach it, and §2 of this very plan records
-   > that the per-primitive lane *"is not independently reachable"* without a mesh shader, one draw
-   > per meshlet, or a software rasteriser.
-   > **(b) probably inert regardless** — apply §5.4's own killing argument to the replacement:
-   > survivors include every *occluded* in-frustum front-facing triangle, and depth complexity on a
-   > multi-million-triangle corpus is where the count lives. A 5 M-triangle asset in frame gives
-   > ~2.5 M survivors against ~2.07 M covered pixels at 1080p, so `survivors/covered < 1.0` cannot
-   > hold **whatever the visible triangle size is**. That is `submitted/covered`'s self-satisfaction
-   > with a 2–4× constant knocked off — the same defect, one instrument later.
-   >
-   > So `[k1].k1_fire_at_r0 = false`. **R0's claim is that it can REFUTE K1 cheaply and soundly**,
-   > which is a real and sufficient deliverable. Firing needs an upper bound on *visible* density
-   > whose firing condition is demonstrably **not** precluded by R0b's own high-poly corpus gate —
-   > an unsolved design problem, recorded as unsolved, and out of R0's scope until someone solves
-   > it. Naming a rung that cannot be built is worse than naming none.
-
-   When K1 fires — which R0 cannot do — cluster LOD has no mechanism of action on
-   this content — at **full detail**, i.e. at the ceiling any LOD scheme could ever see — and **the
-   campaign is refuted as stated**. The disposition is the owner's: change the target content class
-   (and re-run R0b–R0d against it), or stop. It is explicitly *not* "generate a denser corpus" —
-   §4.2 records why that makes the kill vacuous — and it is explicitly *not* "adjudicate at 2160p
-   instead", which §5.4 forecloses by freezing the decision resolution.
 2. **K2 — no baseline.** R0a records `achievable = false` **and the test re-derives it** (§8 R0a).
-   Then *"faster than Nanite"* is unfalsifiable and the goal is restated as an **absolute**
-   ms-at-quality target. **Owner VALUES call** (§13 Q1) — taken consciously, at rung one.
-   **This is a re-scope, not an abort:** the ladder continues to **R0f′**, which closes the same
-   inequality with `claim.absolute_chain_ms`. Rev 1 treated this branch as terminal, which left the
-   campaign's *most likely* path with no falsifiability condition at all.
-3. **K3 — undecidable harness.** Two distinct outcomes, which Rev 2 conflated under one clause:
-   * **(3a) the instrument misbehaves** — R0e's gate reds (null control over budget, a pass sitting
-     at the lattice, cross-session spread out of band). The ladder does not proceed to R1 until the
-     instrument is fixed. Nothing is learned about the campaign either way.
-   * **(3b) the instrument works and the answer is no** — R0f/R0f′'s inequality reds: the floor is
-     real, measured, and **larger than the claim**. This is research §5's K3 as actually worded
-     (*"if the resolvable delta exceeds the delta we intend to claim, no result from this campaign
-     is defensible"*), and its disposition is different: the instrument is not broken, so fixing it
-     is not the move. The owner either lowers the claim to something this pair of instruments can
-     resolve — which may make the campaign not worth running — or invests in a better instrument.
-     **Owner VALUES call**, and it is the outcome the whole R0 rung exists to surface early.
-4. **The instrument is untrustworthy rather than the result being bad — and this has its own
+   Then *"faster than Nanite"* is not currently falsifiable and the goal is restated as an
+   **absolute** ms-at-quality target — an owner VALUES call, taken consciously at rung one.
+   **This is a re-scope, not an abort.**
+   ⚠️ Rev 8 changes what follows it. Through Rev 7 this clause said "the ladder continues to R0f′,
+   which closes the same inequality"; R0f′ is gone from R0 (§8), so what K2 firing selects is which
+   *mode* §14's rung will eventually freeze, not a rung of R0. R0 records the branch and stops
+   there.
+
+3. **The instrument is untrustworthy rather than the result being bad — and this has its own
    disposition, because it is the case that gets misread.** If R0c's sensitivity control (b) fails
-   while (a) and (c) pass, or R0e's null control fails while the armed medians look tidy, the
-   correct reading is *the instrument is blind*, **not** *the effect is absent*. Outcome: the rung
-   is **not** commit-eligible, no number from it enters any later gate, and the failure is recorded
-   in this document's §11 with its date. The sibling rung's ABAB null control is precisely this
-   case: three armed sessions looked tidy and inside their gate while the control said a third of
-   the "signal" was ordering bias.
-5. **Golden-bless throughput.** Two of the twenty-four pins in `goldens/PINS.toml` still carry
-   `sha256_hwrt = "PENDING"` (`:364`, `:409`) — their software legs are blessed, their hwrt legs are
-   not. R0 moves no pin, so it is unaffected; but the first byte-moving rung of this campaign
-   starts on an incompletely-green corpus, and §13 Q4 puts the bless-bandwidth question to the
-   owner before that rung is scheduled, not after.
+   while (a) and (c) pass, the correct reading is *the instrument is blind*, **not** *the effect is
+   absent*. Outcome: the rung is **not** commit-eligible, no number from it enters any later gate,
+   and the failure is recorded in §11 with its date. The sibling rung's ABAB null control is
+   precisely this case: three armed sessions looked tidy and inside their gate while the control
+   said a third of the "signal" was ordering bias.
+
+4. **Golden-bless throughput.** Two of the pins in `goldens/PINS.toml` carry
+   `sha256_hwrt = "PENDING"` — their software legs are blessed, their hwrt legs are not, and
+   `golden.ps1` exits 2 on a PENDING leg by design, so any gate quantified over one is vacuous until
+   it is blessed. R0 moves no pin, so it is unaffected; but the first byte-moving rung of this
+   campaign starts on an incompletely-green corpus, and §13 Q4 puts the bless-bandwidth question to
+   the owner before that rung is scheduled, not after.
+
+**K3 — the undecidable harness — is no longer an R0 abort criterion.** It moved to §14 with the
+rungs that tested it. R0 builds no harness and measures no delta, so there is nothing at this rung
+for K3 to be true or false about. The criterion returns, unchanged in substance, at the rung that
+lands an arm.
+
+### 9.1 What R0 does not decide — enumerated, because a bounded claim is the whole point of Rev 8
+
+Rev 7's §0 opened with *"the three ways it kills the campaign"* and its own §9 then admitted the
+headline was false as written. Rather than a headline and a retraction, the limits are listed:
+
+* **K1 cannot be FIRED.** Only refuted or left undecided. Firing needs an upper bound on visible
+  density whose firing condition is demonstrably not precluded by R0b's own high-poly corpus gate —
+  an unsolved design problem, recorded as unsolved
+  (`[k1].k1_fire_instrument_status`), and out of R0's scope until someone solves it.
+* **K2's gate covers one of its three causes.** §6.2 defines K2 as firing if *any* of three
+  prerequisites fails — no install, no importable project, no capture protocol — while R0a's
+  negative re-derivation asserts only that no engine is registered with the documented authorities.
+  A legitimate `achievable = false` caused by disk headroom or by the absence of a capture protocol
+  is recorded by the rung and is **not** machine-re-derived. §11 measures disk as the most likely
+  cause, so this is the common case, not the corner.
+* **The census's cross-rung histogram shift is measured, not gated** (§8 R0d). It is not
+  interpretable near the one-pixel censoring floor — the micro-polygon regime the census exists for
+  — so gating on it would red hardest exactly where the campaign's premise is most strongly
+  confirmed.
+* **No comparative claim is evaluated, decided or pre-registered.** There is no ONE gate at R0
+  (§14).
+* **This document's `file.rs:N` anchors are not machine-checked** (§12), and its citations of the
+  two frozen files' field names **are** (`tests/vg_symbol_reachability.rs`). Those are different
+  guarantees and only the second is mechanical.
 
 ---
 
@@ -1323,18 +1260,18 @@ The rung is **reverted or the campaign re-scoped** — not softened mid-flight �
 | R1 | **Vacuously-green gate** — an assertion quantified over an empty or self-referential selection. | The campaign's #1 recurring defect; found five times in the sibling plan alone. | Every rung names a mutation and the commit records its output; R0c(b)/(c) are deliberately paired so neither can pass alone. |
 | R2 | **A procedural corpus makes K1 untestable.** | New, and it is why §4.2 rejects the cheapest corpus option. | The corpus is fetched real content; procedural geometry is confined to R0c's sensitivity control. |
 | R3 | **The harness measures its own resolution, or its A/B rides the ring.** | MEASURED in the sibling rung, both of them: a "spread" that was one median lattice step, and an ABAB phase perfectly aliased with `FRAMES_IN_FLIGHT == 2`. | §7 clauses 1, 3–4: ABBA with the residual reported; the quantum measured by tick GCD and the spread gate read against it. |
-| R4 | **`WAIT_BIT` readback hangs instead of failing.** | `gpu_timing.rs:344` documents the deadlock; three separate collectors exist because of it. | R0e's written-pair bitmask, asserted before the read. |
+| R4 | **`WAIT_BIT` readback hangs instead of failing.** | `gpu_timing.rs:344` documents the deadlock; three separate collectors exist because of it. | §7's written-pair bitmask, asserted before the read — binding on §14's rung, which is the one that brackets passes. Not an R0 risk any more. |
 | R5 | **Stale doc sends the importer down the `None` path.** | Verified: ≥6 comments still claim `VB_IMPLEMENTED == false` while `render_path_config.rs:130` says `true`. | R0b's second red mutation targets exactly this; fixing the comments is a separate one-line commit, deliberately not absorbed here. |
 | R6 | **Host-visible residency ceiling.** | `mesh_assets.rs:320`: every mesh buffer is `HostVisibleCoherent`. | R0b gate (d); the device-local + staging path is a named follow-up, not R0 work. |
 | R7 | **The `vb_id` usage widening perturbs a golden.** | New. | R0c gate (a) over every VB pin, with a demonstrated red (record the copy unconditionally). |
 | R8 | **UE5 capture measures a different scene than our census.** | New — the two engines must load the same bytes. | §4.3: an asset that cannot be imported by both is not corpus material; R0a(c) pins the resolution across both. |
 | R9 | **Disk exhaustion masquerading as a build failure.** | This project's record: `target/` has filled this disk and surfaced as linker errors. | §11 records the measured headroom; R0a's record carries free-disk as a required field, and R0a's negative branch **re-reads** it at test time. |
-| R10 | **The claim is set to meet the floor.** The cheapest way to close the ONE gate is to write the number on the right after seeing the left. | The P0 of Rev 1; of Rev 2, answered with a hash around the string `PENDING`; and of Rev 3–Rev 5, answered with an ordering rule that **named one rung for two instruments**. | §0.1 **plus** `[ordering]`: the claim blocks whichever rung measures the floor **for that mode**, R0e pins the filled value into its MEASURED literals, and R0f asserts the file still equals the pin. ⚠️ Rev 3–Rev 5 claimed here that this *"does not depend on anyone noticing an edit"* — **retracted**; ordering constrains commits, not knowledge, and party separation is what carries the weight. |
+| R10 | **The claim is set to meet the floor.** The cheapest way to close the ONE gate is to write the number on the right after seeing the left. | The P0 of Rev 1; of Rev 2, answered with a hash around the string `PENDING`; and of Rev 3–Rev 5, answered with an ordering rule that **named one rung for two instruments**. | **MOVED TO §14 AT REV 8, unresolved.** There is no claim at R0 to set against a floor, so this risk has no R0 surface — but it is not solved: §14.4 P0-5 carries the worked example showing the post-fill edit window still open on one branch. ⚠️ Rev 3–Rev 5 claimed here that ordering *"does not depend on anyone noticing an edit"* — **retracted**; ordering constrains commits, not knowledge, and party separation is what carries the weight. |
 | R11 | **A statistic that cannot exceed its own threshold.** | Rev 1: `visible_tri_per_covered_pixel ≤ 1` by construction. Rev 2: `submitted/covered < 1.0` precluded by R0b's corpus gate. **Rev 3–Rev 5: `D_est` capped at exactly 4.0 and a *lower* bound firing a kill.** Three instruments, one defect. | §5.6's directional split — `D_est` may only **refute** K1 — plus `[k1].k1_fire_at_r0 = false`, because the proposed firing instrument is both mis-sited (a fragment shader cannot see frustum/backface survivors) and **probably inert for the same reason Rev 2's was** (~2.5 M survivors vs ~2.07 M covered pixels). ⚠️ Rev 4's entry here called the estimator *"uncapped"*. |
 | R12 | **The census resolution silently decides K1.** Density scales as 1/resolution². | New in Rev 2 and the one fix that survived review. | Frozen ladder + frozen decision resolution; the curve is reported at every rung; **and the achieved extent is asserted**, because OS clamping is already a recorded hazard here at 512². |
-| R13 | **The most likely branch has no gate.** §11 measures no UE5 on this box. | New — and it kept re-appearing: through Rev 5 the absolute branch had the ordering rule attached to the wrong rung **and** a gate (b) that passed for its own named red mutation. | R0a's negative is re-derived over **bounded documented authorities** (launcher manifest + the registry hives recording launcher *and* source builds), with residual blindness recorded. ⚠️ Rev 4's *"enumerate fixed volumes"* is **retracted** — a recursive walk of two ~240 GB volumes inside a `cargo test`, with false positives from any stray binary. R0f′'s gate is now two-sided (§8 R0f′). |
+| R13 | **The most likely branch has no gate.** §11 measures no UE5 on this box. | New — and it kept re-appearing: through Rev 5 the absolute branch had the ordering rule attached to the wrong rung **and** a gate (b) that passed for its own named red mutation. | R0a's negative is re-derived over **bounded documented authorities** (launcher manifest + the registry hives recording launcher *and* source builds), with residual blindness recorded. ⚠️ Rev 4's *"enumerate fixed volumes"* is **retracted** — a recursive walk of two ~240 GB volumes inside a `cargo test`, with false positives from any stray binary. ⚠️ **Still only partly mitigated at Rev 8:** §6.2 fires K2 on *any* of three prerequisites and R0a re-derives only the first, so a legitimate negative caused by disk — the cause §11 calls most likely — is recorded rather than machine-checked (§9.1). |
 | R14 | **A frozen file whose schedule requires it to change.** A tripwire that fires routinely carries no signal, and a routine re-record can launder a threshold edit. | **Measured in Rev 2 by inspection:** its recorded hash was *guaranteed* to break at the `corpus.arrangement` fill, before the first rung that asserted it. | The split: thresholds hashed and never edited; claim unhashed and gated by the `PENDING` sentinel. |
-| R15 | **A harness asked for a quantity its algebra removes.** | **Measured:** ABBA recovers `τ` by cancelling `μ`, `γ` and `β` — exactly what an absolute reading needs. Rev 2's R0f′ assumed otherwise. | `[absolute_mode]`: its own instrument, its own pre-registered ceiling, and the honest statement that absolute mode is ~2.5× weaker. |
+| R15 | **A harness asked for a quantity its algebra removes.** | **Measured:** ABBA recovers `τ` by cancelling `μ`, `γ` and `β` — exactly what an absolute reading needs, and Rev 2 assumed otherwise. | **MOVED TO §14 AT REV 8.** R0 measures no delta, so nothing here asks a harness for a quantity its algebra removes. §14.2 carries the requirement that absolute mode gets its own instrument, its own pre-registered ceiling, and the honest statement that it is the weaker one. |
 | R16 | **A literal transferred without its denominator.** | **Measured in Rev 2:** the sibling's 0.10 null-control gate moved from *armed delta* to *absolute pass median*, a ~20× weakening under which the precedent's own red event would have passed. | Denominators written down next to every fraction in `[decidability]`. |
 
 ---
@@ -1362,7 +1299,7 @@ rather than trusting this record:
 * **What this does to K2.** A UE5 editor install plus a project plus its derived-data cache does not
   fit on `D:` today and is uncomfortable on `C:`. K2 firing is not a hypothetical branch of this
   plan — on the measured state of this machine it is the **expected** one, which is exactly why
-  Rev 2 refuses to leave it ungated (§8 R0a, §8 R0f′, §9 clause 2).
+  Rev 2 refuses to leave it ungated (§8 R0a, §9 clause 2).
 * **Repo size:** `.git` 24.6 MB; all tracked assets under `crates/boyko_app/assets/` total 1.07 MB.
   No `.gitattributes` — **Git LFS is not configured**. No `LICENSE` file at the repo root.
 * **Content today:** the VB fixtures render five instances of one `uv_sphere(radius, 28 stacks,
@@ -1459,7 +1396,7 @@ expensive of the set — `:357` (`Sv0TimedPass`, not `:347`), **`:381` (`SV0_PAS
 
 **Harness precedent:** `crates/boyko_app/tests/sv0_deferred_term_bench.rs:20-51` (ABAB refuted by
 its own null control), `:34` and `:58-62` (**the ABBA algebra — the model `m_k = μ + τ·armed + γ(fi)
-+ β·k + ε` and the cancellation that makes absolute readings unavailable**, §8 R0f′), `:83-129`
++ β·k + ε` and the cancellation that makes absolute readings unavailable**, §14.2), `:83-129`
 (the quantisation finding), `:297-299` (**the OS-clamped-extent check**, §5.4), **`:350`
 (`SV0_BENCH_SESSIONS = 3`), `:366` (`SV0_SESSION_SPREAD_MAX = 0.10`), `:378`
 (`SV0_NULL_CONTROL_MAX_FRACTION = 0.10`)** — Rev 2 cited `:284` and `:312` for two of these in one
@@ -1496,7 +1433,7 @@ fixture and cannot reach the corpus at any ladder rung) ·
 (`VB_ID_SENTINEL` marks a pixel the mesh raster leg never covered — the census's denominator is
 mesh-covered pixels, not all pixels) ·
 [`docs/VG-CAMPAIGN-THRESHOLDS.toml`](VG-CAMPAIGN-THRESHOLDS.toml) (hashed, never edited) ·
-[`docs/VG-CAMPAIGN-CLAIM.toml`](VG-CAMPAIGN-CLAIM.toml) (unhashed, `PENDING`-gated, blocks R0e).
+[`docs/VG-CAMPAIGN-CLAIM.toml`](VG-CAMPAIGN-CLAIM.toml) (unhashed, `PENDING`-gated, blocks R0b and R1).
 
 **Corpus convention:** `crates/boyko_app/assets/pbr_fixtures/README.md:1-6` ·
 `.gitignore` (`/assets/materials/*` + the `!README.md` escape) ·
@@ -1509,40 +1446,187 @@ hwrt legs) · `crates/boyko_rhi_vulkan/tests/cluster_cull_spv_sync.rs:196-204` (
 
 Performance and architecture forks are decided with numbers in this project; the format choice
 (§3.3), the census instrument (§5.3), the corpus shape (§4.2), the census resolution ladder and
-K1's thresholds (§5.4) are decided above and are not listed here.
+K1's threshold (§5.4) are decided above and are not listed here.
 
-**Every question below has a field waiting for it in
-[`docs/VG-CAMPAIGN-CLAIM.toml`](VG-CAMPAIGN-CLAIM.toml)**, and that file's `[gating]` table states
-which rung each one blocks. The short version: **Q3 blocks R0b. Q1 blocks R0e — deliberately, and
-that ordering is the P0's whole fix (§0.1).** Q5 blocks only the final rung; nothing blocks R0a,
-R0c or R0d.
+⚠️ **Rev 7 opened this section with "every question below has a field waiting for it in
+[`VG-CAMPAIGN-CLAIM.toml`](VG-CAMPAIGN-CLAIM.toml)", and that universal was false** — Q2, Q4 and Q6
+had no field, and Q6 was the disposition of the outcome §9 itself calls the likely one. A preamble
+asserting completeness it does not have is the highest-risk line in a document; the questions are
+now split by whether they block anything.
 
-**Q1 moved earlier between Rev 2 and Rev 3, and it is the one schedule cost this revision
-knowingly accepts.** Rev 2 let the claim be written at R0f — after the floor was measured — which
-is exactly the defect the claim file was created to fix. Answering Q1 before R0e runs is what makes
-the inequality falsifiable, so the question is now on the critical path at rung five rather than
-rung six. Everything up to and including the census is unblocked by it.
+**Blocking — each has a `PENDING` field and a `[gating]` row, and the named rung refuses to run
+while the field is unanswered.** The rows are `[gating].r0a_blocked_by`, `[gating].r0b_blocked_by`,
+`[gating].r0c_blocked_by`, `[gating].r0d_blocked_by` and `[gating].r1_blocked_by` — five rows for
+five rungs, three of them deliberately empty, so "nothing blocks this rung" is a recorded decision
+rather than a missing entry. ⚠️ Two of the rows this table used to carry were English sentences
+rather than resolvable `table.field` paths, which the `PENDING`-sentinel checker they exist to drive
+cannot resolve; every row is now a list of paths.
 
-1. **If K2 fires, what replaces the goal?** *"Faster than Nanite"* becomes *"N ms at quality Q on
-   corpus C"* — the owner sets N, Q and C. This is the single most consequential question in the
-   document and it must be answered at rung one, not month six.
-2. **Third-party dependency policy for the importer.** §3.3 decides *glTF, in-house*. If the owner
+1. **Corpus provenance and licence.** Who selects and licenses the high-poly assets, and is a
+   fetched-and-gitignored payload with pinned hashes acceptable as the permanent arrangement?
+   → `corpus.arrangement`, **blocks R0b**, which cannot author `CORPUS.toml` without it. This is the
+   only early block in the ladder.
+2. **If K1 comes back UNDECIDED, what happens?** R0 can refute K1 cheaply and soundly and **cannot
+   fire it** — the upper-bound instrument is unsolved, not merely unscheduled (§5.6). So
+   `D_est < [k1].d_est_min` leaves the campaign's premise *untested* rather than refuted, and with
+   `[k1_instrument].d_est_ceiling` at 4.0 a plausible corpus puts the estimate in a band where that
+   is the likely outcome. Proceed to R1 on an unadjudicated premise, change the target content
+   class, or fund the instrument as its own campaign?
+   → `k1_outcome.undecided_disposition`, **blocks R1**. Like every other pre-registration here it
+   must be answered before the number exists; afterwards it is answered by someone who has seen it.
+   ⚠️ This field is **new at Rev 8**. Through Rev 7 this question pointed at a claim file that had
+   no field for it and a `[gating]` table with no row, so the one outcome R0 is most likely to
+   produce had no sentinel and blocked nothing — the enforcement predicate was vacuously true for
+   every input. That is the same structural omission D3 named, in the table built to prevent it.
+
+**Advisory — no field, no gate, and that is deliberate: they shape work but block no rung of R0:**
+
+3. **Third-party dependency policy for the importer.** §3.3 decides *glTF, in-house*. If the owner
    will accept a third-party glTF/JSON crate, the decoder shrinks substantially — but the
    workspace's demonstrated posture is fully in-house (raw-FFI Vulkan, in-house PNG/zlib/DEFLATE).
    The same question recurs, far more sharply, for the offline builder at R4/R5.
-3. **Corpus provenance and licence.** Who selects and licenses the high-poly assets, and is a
-   fetched-and-gitignored payload with pinned hashes acceptable as the permanent arrangement?
-   Without an answer, R0b cannot author `CORPUS.toml`.
 4. **Bless bandwidth.** How many byte-moving rungs per week can the owner actually bless? R0 moves
-   no pin, but two hwrt legs are already `PENDING` (§9 clause 5), and that number caps the width of
+   no pin, but two hwrt legs are already `PENDING` (§9 clause 4), and that number caps the width of
    every rung after R2b.
-6. **If K1 comes back UNDECIDED, what happens?** R0 can refute K1 cheaply and soundly and cannot
-   fire it — the upper-bound instrument is unsolved (§5.6). So `D_est < 1.0` leaves the campaign's
-   premise untested rather than refuted. Proceed to R1 on an unadjudicated premise, change the
-   target content class, or fund the instrument? **This is the second-most consequential question
-   in the document after Q1**, and like Q1 it must be answered before the number exists, not after.
 
-5. **Quality target.** What pixel-error budget counts as "equal quality" — our equivalent of a
-   pinned `MaxPixelsPerEdge` — and is the owner the arbiter by visual eval, or do we bind to a
-   metric? Note the standing lesson that image statistics have already misled this project twice,
-   which argues against a metric.
+**Moved to §14 at Rev 8:** the claim itself (*"if K2 fires, what replaces the goal?"*) and the
+quality target. Both are the right-hand side of an inequality R0 no longer evaluates, and both are
+answered at the rung that lands an arm — where the measurand they are compared against exists. A
+`PENDING` sentinel that blocks no rung is not a gate, which is what those two fields had become.
+
+---
+
+## 14. Deferred — the decidability apparatus and the ONE gate
+
+**Status: SPECIFICATION, not a rung of R0.** Nothing here is frozen, nothing here is gated, and no
+value here is pre-registered. That is the point: Rev 2–Rev 7 froze this apparatus in
+[`VG-CAMPAIGN-THRESHOLDS.toml`](VG-CAMPAIGN-THRESHOLDS.toml) and
+[`VG-CAMPAIGN-CLAIM.toml`](VG-CAMPAIGN-CLAIM.toml) while the rung that would read it did not exist,
+and every revision was told by an adversarial pass that it had overclaimed. **A frozen value with no
+reader is worse than prose** — it manufactures the appearance of pre-registration while binding
+nothing.
+
+### 14.1 When this becomes a rung
+
+**At the first rung that lands an arm** — a meshlet/cluster path that can be switched on and off
+against the shipped VB path. Not before, and the reason is arithmetic rather than scheduling: the
+decidability floor is a *resolvable delta*, the frozen table named our side's denominator as the
+**armed paired delta**, and a delta needs two configurations to sit between. R0 lands no meshlet, no
+cluster and no LOD.
+
+Deferring costs the campaign nothing, because pre-registration is **cheaper and stronger** there: at
+that rung the arm, the denominator and the floor are all defined in one place, so the claim is
+written against a named measurand instead of a placeholder. And the thing that actually carries the
+P0's weight — party separation, since §13's owner calls are not made by whoever runs the harness —
+is unchanged by moving it later.
+
+### 14.2 What must be frozen, and in what shape
+
+* **The claim**, in one of two modes. `nanite_relative` — a fractional speedup on the bracketed pass
+  chain, live only if the reference is achievable. `absolute` — a target in milliseconds for the
+  same chain at the decision resolution, on a named corpus at a named quality target. Both close the
+  same inequality; only the right-hand side's provenance differs, which is why K2 firing does not
+  leave the campaign without a falsifiability condition.
+* **Scope.** The claim is about the **bracketed pass chain**, never a frame: a frame also contains
+  CSM, SDF, DDGI, post/AA, present and all CPU time, none of which this campaign touches and none of
+  which the harness measures. Rev 2 compared a per-pass floor to a `frame_total` claim with no
+  composition rule stated anywhere, which made the gate not evaluable.
+* **Chain-floor composition.** The chain total's floor is measured on **one bracket spanning the
+  chain**, never composed arithmetically from per-pass floors — the passes share occupancy, caches
+  and a queue, so composition assumes an independence they do not have. This rule was sound in the
+  frozen file and violated one table over; see P0-3.
+* **The two denominators, which ARE the gate**, verified against the sibling harness's own
+  arithmetic: the null control is gated against the **armed paired delta** — `sv0_deferred_term_bench.rs`
+  fired at 33%, −2048 ns against a 6144 ns signal, and *that* failure is what produced the ABBA
+  redesign — and the cross-session spread against the **paired delta**. Rev 2 transferred both
+  literals while silently changing what they divide, a ~20× weakening under which the precedent's
+  own red event would have passed. **A literal transferred without its denominator is not the same
+  gate.**
+* **Joint floor.** `our_floor + reference_floor`, summed rather than combined in quadrature, because
+  quadrature assumes two independent draws from one noise process and a systematic capture bias
+  between two engines is not that. Summing is conservative in the direction that makes our own claim
+  harder to close.
+* **The absolute-mode gate, two-sided.** `c < m` **and** `floor < |m − c|` — the claim must be an
+  *improvement* and a *resolvable* one. Rev 5's one-sided form was symmetric and passed for its own
+  named red mutation.
+* **The ordering rule**, attached per mode to **whichever rung measures the floor for that mode**,
+  with the claim pinned into that rung's own MEASURED-literal commit so the comparing rung compares
+  against something frozen in the same act as the measurement.
+
+### 14.3 What §7 already settles, and it is binding here
+
+§7's harness contract — ABBA counterbalancing with the order-bias residual reported, a null control
+with a pre-registered maximum, the counter quantum measured by tick GCD, the `max()` spread gate
+**with** its distinct-tick evidence licence and its non-waivable companion assertion, and the
+written-pair bitmask that turns a `WAIT_BIT` deadlock into a red assertion — is **not deferred**. It
+is the contract this rung is built against, every quotation in it was checked exact by the Rev 7
+review, and it should be re-read before any of §14.2 is frozen.
+
+### 14.4 The eight P0s the previous attempt shipped — requirements, not history
+
+Rev 7's adversarial review (six lenses, each required to write the inequality with units, substitute
+degenerate cases, and re-derive every named red mutation; then an independent refutation pass)
+returned 35 findings, 34 surviving. These eight blocked approval. **Whoever authors this rung
+discharges them explicitly.** They are the cheapest eight lessons available, and every one was found
+by arithmetic rather than by reading.
+
+1. **One floor, one symbol, and the gate names it.** Rev 7 added a lattice-floor rule with a comment
+   stating it existed because *"without it the gate collapses at `s → 0` to `c < m`"*. The gate rule
+   named a different symbol, so the operative floor stayed the superseded spread-only product in
+   **both** documents. Define the floor once; make the gate name what is actually computed.
+2. **§8 and the frozen file must not restate each other.** §8 quoted, in the present tense, a floor
+   source the same revision had deleted. Where a rule exists in both places, one cites and the other
+   defines.
+3. **The reference floor obeys the chain-floor rule too.** §6.3 derived it from the spread of
+   **per-pass** medians and then used it as a chain floor — the exact composition the scope rule
+   forbids, inside the same inequality whose other half obeys it. Constructed counterexample:
+   `A = (1.0, 1.4, 1.0)`, `B = (1.4, 1.0, 1.4)` ms gives per-pass spreads of 0.40/0.40 and a chain
+   spread of 0.00. Also state the aggregation over passes (max? mean?) — "the spread of that table"
+   is not a single number.
+4. **Give the floor a unit and a denominator.** No text in three files assigned one. The reference
+   floor is relative to each reference pass's own median, the claim is relative to our chain total,
+   and a sum of three fractions with three denominators is not an inequality. Express both floors as
+   a fraction of the **same** denominator — the bracketed chain total at the decision resolution —
+   and state the conversion from a paired-delta-relative spread to a chain-relative resolution
+   explicitly.
+5. **The post-fill edit window closes on every branch, not one.** Only the `nanite_relative` rung
+   asserted that the claim file still equals the pinned literal. Worked example on the other branch:
+   pin `c = 4.0`, measure `m = 3.0`, `s = 0.10` → the improvement conjunct reds; edit the unhashed
+   claim to `2.5` → distance `0.50` > floor `0.30` → **green**. The mode-consistency check does not
+   read the claim's numeric value, and the file is deliberately unhashed.
+6. **`max()` ships with its precondition or not at all.** §7 states it: the widening, the
+   distinct-tick evidence floor, and the separate non-waivable assertion — *all three or none*. The
+   rung shipped one. With this box's measured lattice and a 100 ns paired delta the bare form widens
+   a 0.10 spread gate to 2.56; the guarded form reds. Bound the divisor away from zero too — this
+   engine records a timing bracket that is "ALWAYS written (near-zero ns then)".
+7. **Every pre-registered value is read by a gate part.** The `[pre_registered]` table was created so
+   two decision-bearing thresholds had a file to be registered in, and no rung ever read any of them
+   — so the mutation the plan listed as DEMONSTRATED, *"halve the sample count → the CI widens past
+   the pre-registered bound → red"*, still named a right-hand side that did not exist.
+   [`tests/vg_symbol_reachability.rs`](../tests/vg_symbol_reachability.rs) now catches this class
+   mechanically; run it before freezing anything.
+8. **Re-derive every red mutation against the arithmetic, every time.** A mutation that is only
+   argued does not count. The specimen, kept because it shipped in **three** consecutive revisions:
+   *"set the claim below the measured floor → the gate reds"*. Plug it in — `c < s·m` gives
+   `distance = m − c > m(1−s)` and `floor = s·m`, so the gate asks `s·m < m(1−s)` ⟺ **`s < 0.5`**,
+   true for every `s ≤ 0.25` the ceiling permitted, and it passes the improvement conjunct too.
+   Green under both the old gate and the new one, for three revisions, because nobody did the
+   substitution.
+
+### 14.5 The two owner questions that move here
+
+Both are VALUES calls and both must be answered **before** the number they concern exists —
+otherwise they are answered by whoever has already seen it.
+
+* **If K2 fires, what replaces the goal?** *"Faster than Nanite"* becomes *"N ms at quality Q on
+  corpus C"*, and the owner sets N, Q and C. One tension this document accepts knowingly rather than
+  hides: pre-registration asks the party with **no** measurement to judge whether a target is sane.
+  That applies equally to a relative claim, which likewise carries no sanity band.
+* **Quality target.** What pixel-error budget counts as "equal quality" — our equivalent of a pinned
+  `MaxPixelsPerEdge` — and is the owner the arbiter by visual eval, or do we bind to a metric? The
+  standing lesson that image statistics have already misled this project twice argues against a
+  metric.
+
+Neither has a field in [`VG-CAMPAIGN-CLAIM.toml`](VG-CAMPAIGN-CLAIM.toml) any more, deliberately: a
+`PENDING` sentinel that blocks no rung is not a gate, and until this becomes a rung there is no rung
+to block.

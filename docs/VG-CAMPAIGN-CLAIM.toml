@@ -1,143 +1,103 @@
-# VG campaign claim — the RIGHT-HAND SIDE of the ONE gate. Owner VALUES calls only.
+# VG campaign claim — the owner VALUES calls that block a rung of R0. Nothing else.
 #
-# WHY THIS FILE EXISTS.
-# The virtual-geometry campaign's ONE gate is an inequality:
+# WHAT THIS FILE WAS, AND WHY IT IS SMALLER AT REV 8.
+#
+# It was created at Rev 2 as the RIGHT-HAND SIDE of the campaign's ONE gate:
 #
 #     joint decidability floor  <  the delta we intend to claim
 #
-# Rev 1 of docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md defined only the LEFT side. The right side was
-# never written down and would have been set by the same author who measures the left. Its named
-# red mutation could only fire by moving the floor UP; raising the intended delta after seeing the
-# floor fired nothing.
+# Rev 1 defined only the left side, so the right side would have been set by the same author who
+# measures the left — the campaign's P0. Rev 2 answered it with a sha256 around a file whose every
+# field was the literal PENDING. Rev 3 answered it with ordering. Rev 4 retracted Rev 3's claim
+# that ordering "does not depend on anyone noticing an edit" (it constrains COMMITS, not
+# KNOWLEDGE). Rev 5 and Rev 6 each moved the rule to a different rung. Rev 7's adversarial review
+# found the post-fill edit window still wide open on the branch section 11 measures as expected.
 #
-# Rev 2 created this file and thought that closed it. It did not, and the reason is worth keeping:
-# **every field on the right-hand side was the string PENDING, and Rev 2's own [gating] table
-# scheduled it to be filled AFTER R0e measured the floor.** A sha256 was wrapped around a
-# placeholder. The defect was identical to Rev 1's, one level of indirection down.
+# REV 8 STOPS ANSWERING THE QUESTION AND REMOVES IT FROM R0, because the gate it guarded has no
+# left-hand side yet. `our_floor` needs the ARMED PAIRED DELTA as its denominator, and R0's arm is
+# not merely unstated — it is UNCONSTRUCTED. R0 lands no meshlet, no cluster and no LOD, so there
+# is nothing to contrast against. Six revisions of pre-registration machinery were protecting a
+# number that cannot yet be measured.
 #
-# REV 3'S FIX IS ORDERING, NOT HASHING.
+# So [claim] and [quality] are gone, together with the gating rows for R0e/R0f/R0f'. They return —
+# specification, denominators, two-sided gate form and the eight P0s that refuted the last attempt
+# — in the plan's section 14, to be frozen AT THE RUNG THAT LANDS AN ARM, where the arm, the
+# denominator and the floor are all defined at once. Pre-registration is cheaper and stronger
+# there, and it is honest there.
 #
-#   The claim must be answered BEFORE the floor is measured. So the fields below block **R0e** —
-#   the rung that measures the floor — not R0f, the rung that compares them. R0e's test refuses to
-#   run while the field it will be compared against is still PENDING.
+# WHAT REMAINS IS EXACTLY THE OWNER CALLS THAT BLOCK A RUNG R0 ACTUALLY HAS.
 #
-# RETRACTED AT REV 6 -- this file said the mechanism "is stronger than a hash because it does not
-# depend on anyone noticing an edit". The plan's section 0.1 retracted that at Rev 4 and this
-# header kept asserting it for two revisions, which is the doc-rot class the campaign is about.
-#
-# The truth: ordering constrains COMMITS, not KNOWLEDGE. The floor is observed by running an
-# #[ignore]d bench and reading its stdout; the claim blocks the ASSERTION, which runs later on
-# transcribed literals. Run dirty, read the floor, `git checkout .`, fill to fit -- commit order
-# preserved, knowledge order not.
-#
-# What actually carries the weight is PARTY SEPARATION (section 13 Q1 is an owner call and the
-# owner does not run the harness), plus two mechanisms in the hashed thresholds file: the harness
-# withholding the floor while the claim is PENDING, and R0e pinning the filled value into its own
-# MEASURED literals so R0f cannot compare against a file that moved afterwards.
-#
-# THIS FILE IS NOT HASHED, DELIBERATELY.
-# Its fields are REQUIRED to change exactly once, from PENDING to a value. Hashing a file whose
-# schedule requires it to change makes re-recording the hash a routine event, and a tripwire that
-# fires routinely carries no signal — Rev 2 learned this by having its recorded hash guaranteed to
-# break at the `corpus.arrangement` fill, before the first rung that asserted it. The author-frozen
-# thresholds that must NEVER change live in docs/VG-CAMPAIGN-THRESHOLDS.toml, and that file is
-# hashed.
+# THIS FILE IS NOT HASHED, DELIBERATELY. Its fields are REQUIRED to change exactly once, from
+# PENDING to a value. Hashing a file whose schedule requires it to change makes re-recording the
+# hash routine, and a tripwire that fires routinely carries no signal — Rev 2 learned this by
+# having its recorded hash guaranteed to break at the `corpus.arrangement` fill, before the first
+# rung that asserted it. The author-frozen thresholds live in docs/VG-CAMPAIGN-THRESHOLDS.toml and
+# that file is hashed.
 #
 # The gate here is the sentinel rule the repo already uses: goldens/PINS.toml:15 defines that a pin
 # whose hash is the literal PENDING is UNBLESSED and makes the checker EXIT 2 rather than pass.
 # Same discipline: a rung that needs a field below asserts it is not PENDING, and fails if it is.
 
-schema_version = 2
-authored_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 3"
-authored_date = "2026-07-27"
+schema_version = 3
+authored_at_revision = "docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md Rev 8"
+authored_date = "2026-07-28"
 
 # ---------------------------------------------------------------------------------------------
-# [claim] — plan SS13 Q1. BLOCKS R0e.
-#
-# Scope note, and it is load-bearing: the claim is about the BRACKETED VB PASS CHAIN, not a frame
-# (docs/VG-CAMPAIGN-THRESHOLDS.toml [scope]). Rev 2 wrote `frame_total` while the floor was
-# measured on a pass chain, which made the inequality not evaluable — a frame also contains CSM,
-# SDF, DDGI, post/AA, present and all CPU time, none of which this campaign touches.
-# ---------------------------------------------------------------------------------------------
-[claim]
-# "nanite_relative" — the goal stays "faster than Nanite"; requires R0a to record achievable=true.
-# "absolute"        — K2 has fired; the goal is restated as "N ms at quality Q on corpus C".
-# Both modes close the SAME inequality; only the provenance of the right-hand side differs, which
-# is why K2 firing does not leave the campaign without a falsifiability condition.
-mode = "PENDING"
-
-# nanite_relative mode: the fractional speedup on the bracketed VB pass chain that the campaign
-# intends to claim. 0.20 would mean "we intend to claim we are at least 20% faster on that chain".
-# The campaign is only falsifiable if the joint floor is SMALLER than this.
-nanite_relative_chain_delta = "PENDING"
-
-# nanite_relative mode: the per-pass rule. A chain-total claim can hide a pass that got slower.
-# Evaluable only against the pass-correspondence map R0a is required to record
-# (VG-CAMPAIGN-THRESHOLDS.toml [scope].require_pass_correspondence_map_at).
-nanite_relative_per_pass_regression_max = "PENDING"
-
-# absolute mode (K2 branch): the target time in milliseconds for the bracketed chain, at the
-# decision resolution, on the corpus named in [corpus], at the quality target named in [quality].
-# Note that absolute mode is measured by a DIFFERENT and weaker instrument
-# (VG-CAMPAIGN-THRESHOLDS.toml [absolute_mode]) — the paired-delta harness cancels exactly the
-# terms an absolute reading needs.
-absolute_chain_ms = "PENDING"
-
-# ---------------------------------------------------------------------------------------------
-# [quality] — plan SS13 Q5. BLOCKS R0f / R0f'.
-# ---------------------------------------------------------------------------------------------
-[quality]
-# The standing lesson of this project is that image statistics have already misled it twice, which
-# argues for the owner as arbiter rather than a metric. "owner_visual_eval" | "<metric+threshold>".
-arbiter = "PENDING"
-
-# Nanite's error knob, pinned. Its default and its aggressive setting change rendered triangle
-# count by roughly an order of magnitude, so an unpinned comparison is not a comparison.
-# nanite_relative mode only.
-nanite_max_pixels_per_edge = "PENDING"
-
-# ---------------------------------------------------------------------------------------------
-# [corpus] — plan SS13 Q3. BLOCKS R0b.
+# [corpus] — plan §13 Q3. BLOCKS R0b.
 # ---------------------------------------------------------------------------------------------
 [corpus]
 # Whether a fetched-and-gitignored payload with pinned hashes is acceptable as the permanent
-# arrangement, and who selects and licenses the high-poly assets.
+# arrangement, and who selects and licenses the high-poly assets. Without an answer R0b cannot
+# author CORPUS.toml, so this is the one early block in the ladder.
 arrangement = "PENDING"
 
 # ---------------------------------------------------------------------------------------------
-# [gating] — which field blocks which rung. Note R0e, NOT R0f, carries the claim block: that
-# ordering IS the P0's fix.
+# [k1_outcome] — plan §13 Q6. BLOCKS R1.
+#
+# REV 8 -- THIS FIELD IS NEW, AND ITS ABSENCE WAS A REAL HOLE. Section 9's disposition for K1
+# UNDECIDED pointed at §13 Q6; §13's preamble asserted that every question below has a field
+# waiting for it in this file; and Q6 had no field and no gating row. So the ONE outcome R0 is most
+# likely to produce — `D_est < 1.0`, which R0 cannot distinguish from its own instrument ceiling
+# seen from below — had no sentinel and blocked nothing. The enforcement predicate was vacuously
+# true for every input.
+#
+# R0 can REFUTE K1 (`D_est >= [k1].d_est_min` proves density >= 1 tri/pixel) and CANNOT FIRE it:
+# firing needs an upper bound on visible density, and the instrument for that is unsolved, not
+# merely unscheduled ([k1].k1_fire_instrument_status). UNDECIDED is therefore not a corner case.
+#
+# The three dispositions, and the owner picks one BEFORE the number exists — for the same reason
+# every other pre-registration in this campaign is early: after the census runs, this choice is
+# made by someone who has seen the answer.
+#   "proceed_unadjudicated" — accept the premise untested and go to R1 knowing K1 was never tested
+#   "change_content_class"  — pick a different target content class and re-run R0b..R0d against it
+#   "fund_upper_bound"      — make the upper-bound instrument its own campaign
+# The route deliberately NOT offered is the one this document forecloses everywhere else: re-run
+# the census until a number comes out favourable.
+undecided_disposition = "PENDING"
+
+# ---------------------------------------------------------------------------------------------
+# [gating] — which field blocks which rung.
+#
+# REV 8 -- the rows for R0e / R0f / R0f' left with the rungs themselves, and so did
+# `gating_must_agree_with_hashed_ordering`. That flag asserted this table agreed with [ordering] on
+# the hashed side; [ordering] is gone, there is no duplication left to reconcile, and a flag naming
+# an agreement between one table and nothing is exactly the class of field this revision removed.
+# When the decidability apparatus is re-authored at its own rung, its gating rows and any hashed
+# counterpart are authored together — and whoever writes them implements the cross-check, because
+# a duplication nobody asserts is decoration.
+#
+# ⚠️ Two of the rows below were English sentences rather than resolvable field paths, which the
+# PENDING-sentinel checker they exist to drive cannot resolve. Every row here is now a list of
+# plain `table.field` paths; a conditional applies to the whole row or it is a separate row.
 # ---------------------------------------------------------------------------------------------
 [gating]
 r0a_blocked_by = []
 r0b_blocked_by = ["corpus.arrangement"]
 r0c_blocked_by = []
 r0d_blocked_by = []
-r0e_blocked_by = [
-    "claim.mode",
-    "claim.nanite_relative_chain_delta or claim.absolute_chain_ms (per mode)",
-]
-r0f_blocked_by = [
-    "quality.arbiter",
-    "quality.nanite_max_pixels_per_edge (nanite_relative mode only)",
-    "claim.nanite_relative_per_pass_regression_max (nanite_relative mode only)",
-]
 
-# REV 6 -- this row was MISSING through Rev 5, although [quality]'s own comment said arbiter blocks
-# R0f'. The machine-readable gating table had no entry for the branch section 11 measures as the
-# EXPECTED one, which is the same structural omission D3 named, in the table meant to prevent it.
-r0f_prime_blocked_by = [
-    "claim.mode",
-    "claim.absolute_chain_ms",
-    "quality.arbiter",
-    "corpus.arrangement",
-]
-
-# REV 6 -- the ordering rule is DUPLICATED into the hashed docs/VG-CAMPAIGN-THRESHOLDS.toml
-# ([ordering].claim_blocks_rung_*). That file names the RUNG; this file names the FIELDS. Deleting
-# a field from a *_blocked_by row above leaves the hashed rung name perfectly satisfied and the
-# hash green -- so the two MUST be asserted equivalent by the rung that reads them, or the
-# duplication is decoration. Whoever implements the gating check asserts both directions:
-# every rung named on the hashed side has a non-empty row here, and every row here names a rung
-# the hashed side knows.
-gating_must_agree_with_hashed_ordering = true
+# R1 is the first rung after R0 and is out of this document's scope, but the block belongs here:
+# it is what stops an UNDECIDED K1 from being walked past silently. Section 9's disposition table
+# and this row are the same rule stated in two places, and the rung that reads this table asserts
+# they agree.
+r1_blocked_by = ["k1_outcome.undecided_disposition"]

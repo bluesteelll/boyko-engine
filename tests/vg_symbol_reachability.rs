@@ -69,27 +69,42 @@
 //!   facts about the file itself rather than decision rules, so "the plan never cites it" is not a
 //!   defect. The list is short, explicit and asserted non-empty; every other key is in scope.
 //!
-//! # Why a pinned baseline rather than a hard failure
+//! # The baseline, and what it measured
 //!
-//! The sweep reports 32 violations on the tree as of this commit, and every one of them is a
-//! **true positive** — that is the finding, not a reason to weaken the sweep. Failing outright
-//! would make the workspace red for a document that is `NOT APPROVED` and under active revision,
-//! and this repository already ruled on that shape once: a legitimate finding must not red a gate
-//! and block the ladder (the plan's own R0c(e) disposition, "measure and record here, gate at the
-//! next rung").
+//! When this gate was written against Rev 7 it reported **32 violations** — 1 dangling citation,
+//! 2 unread rule definitions, 29 orphan fields — and every one was a true positive. Twenty of the
+//! thirty-two sat in the comparative-claim machinery: the whole `[gating]` table, the whole of
+//! `[pre_registered]` bar one field, and the three `[k1_instrument]` fields carrying the campaign's
+//! single most important correction (`d_est_bound_direction`, `d_est_may_fire_k1`,
+//! `d_est_may_refute_k1` — frozen as data *"so no later rung re-derives them from prose"*, and then
+//! named nowhere in the prose). That distribution is what the owner's re-scope decision was taken
+//! on.
 //!
-//! So the baseline is asserted for **exact equality**, not as a ceiling. A new violation reds it,
-//! and so does a *fixed* one — which is the point. The census cannot drift in either direction
-//! without a deliberate, visible edit in the same commit, and the baseline doubles as the
-//! machine-checked worklist a Rev 8 author edits down. A `<=` assertion would let the count fall
-//! silently and would not distinguish "repaired" from "the scanner stopped seeing it".
+//! **Rev 8 took all three classes to zero**, by removing the apparatus whose symbols nothing could
+//! read at this rung and by making the surviving rungs cite the fields they consume.
+//!
+//! The baselines below are asserted for **exact equality**, not as ceilings. A new violation reds
+//! the gate, and so does a *repaired* one — which is the point: the census cannot drift in either
+//! direction without a deliberate edit in the same commit. A `<=` assertion would let the count
+//! fall silently and could not distinguish "repaired" from "the scanner stopped seeing it". Now
+//! that the baselines are empty, the equality also means the ratchet cannot slip back: any regression
+//! is a new entry.
 //!
 //! # Sensitivity
 //!
-//! Three controls, because a reachability sweep that cannot see an injected break is vacuous and
-//! this file's whole argument is that nothing was watching. Each injects into an **in-memory
-//! copy** — no fixture on disk, no committed document touched — and asserts the specific class
-//! fires. They are what make the baseline's green mean anything.
+//! Five controls, because a reachability sweep that cannot see an injected break is vacuous, and
+//! with every baseline now empty they are the *only* thing standing between a green run and a
+//! scanner that has quietly stopped scanning. Each injects into an **in-memory copy** — no fixture
+//! on disk, no committed document touched — and asserts the specific class fires.
+//!
+//! One of them has already earned its place twice. The class-2 control originally stood on the live
+//! `[absolute_mode]` table; Rev 8 removed that table and the control's own invariant assertion
+//! caught it, so it now drives a synthetic pair instead — a control that breaks every time the
+//! guarded document is restructured is a control that eventually gets deleted rather than
+//! re-derived. And the citation control ([`a_bare_english_word_key_is_not_counted_as_a_citation`])
+//! found a real false negative in this file's first version, then found a second one in its repair:
+//! the plan writes `[table].field` with brackets, so a check for the bare `table.field` matched
+//! nothing.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -111,72 +126,55 @@ const PROVENANCE_KEYS: [&str; 7] = [
     "schema_version",
 ];
 
-/// Class 1 — `[table].field` cited in the plan that no frozen file defines.
+/// Class 1 — `[table].field` cited in the plan that no frozen file defines. **Empty at Rev 8.**
 ///
-/// One entry, and it is the campaign's own abort criterion for K1. §9 clause 1 opens by naming
-/// `[k1].k1_fire_rule` and then annotates it, in place, as *"a field that does not exist"*. Rev 7
-/// caught the danglingness and left the operative sentence naming the dangling field, which is why
-/// a reader-facing annotation is not a repair: the name is still what an implementer would grep
-/// for. `[k1]` carries `rule`, `k1_decision_rule`, `k1_fire_at_r0` and `k1_fire_instrument_status`.
-const BASELINE_DANGLING_CITATIONS: [&str; 1] = ["k1.k1_fire_rule"];
+/// It held one entry, and it was the campaign's own abort criterion for K1: §9 clause 1 opened by
+/// naming `[k1].k1_fire_rule` and then annotated it, in place, as *"a field that does not exist"*.
+/// Rev 7 caught the danglingness and left the operative sentence spelling the dangling name, which
+/// is why a reader-facing annotation is not a repair — the name is still what an implementer greps
+/// for. Rev 8's correction note describes the dead field instead of quoting it in citation form,
+/// which is the honest way to keep the history: this scanner cannot tell a live citation from a
+/// historical one, so leaving the spelling would have cost a permanent exception for a name nothing
+/// should resolve.
+const BASELINE_DANGLING_CITATIONS: [&str; 0] = [];
 
 /// Class 2 — `<sym>_rule` keys whose symbol no other rule reads and whose key the plan never
-/// cites.
+/// cites. **Empty at Rev 8.**
 ///
-/// * `absolute_effective_floor_rule` is the Rev 7 review's blocking P0 B1. Its own comment states
-///   it exists because *"without it absolute_gate_rule collapses at s → 0 to `c < m`"* — and
-///   `absolute_gate_rule` does not name it.
-/// * `histogram_shift_rule` names the per-pair `log2` replacement for the two-bucket constant that
-///   was red by construction. §8 R0d(c) states that rule in prose and cites only the tolerance
-///   field beside it, so the rule key itself has no consumer.
-const BASELINE_UNREAD_RULES: [&str; 2] = [
-    "thresholds:absolute_mode.absolute_effective_floor_rule",
-    "thresholds:k1_instrument.histogram_shift_rule",
-];
+/// It held two. `absolute_effective_floor_rule` was the Rev 7 review's blocking P0: its own comment
+/// stated it existed because *"without it absolute_gate_rule collapses at s → 0 to `c < m`"*, and
+/// `absolute_gate_rule` never named it, so the operative floor stayed the superseded spread-only
+/// product in both documents. It left with `[absolute_mode]`. `histogram_shift_rule` — the per-pair
+/// `log2` replacement for the two-bucket constant that was red by construction — is now cited by
+/// §8 R0d, which is also where that check was demoted from a gate to a recorded residual.
+const BASELINE_UNREAD_RULES: [&str; 0] = [];
 
-/// Class 3 — fields frozen in a companion file that the plan names nowhere.
+/// Class 3 — fields frozen in a companion file that the plan names nowhere. **Empty at Rev 8.**
 ///
-/// The two clusters worth knowing without reading the list: the whole of `[pre_registered]` except
-/// `r0e_min_quads` (the table was created at Rev 5 specifically to give two decision-bearing
-/// thresholds a file to be registered in, and no rung reads any of them — the Rev 7 review's P0
-/// B8), and six of the seven `[gating]` rows, which are the mechanism by which an unanswered owner
-/// VALUES call is supposed to block a rung.
-const BASELINE_ORPHAN_FIELDS: [&str; 29] = [
-    "claim:gating.gating_must_agree_with_hashed_ordering",
-    "claim:gating.r0a_blocked_by",
-    "claim:gating.r0b_blocked_by",
-    "claim:gating.r0c_blocked_by",
-    "claim:gating.r0d_blocked_by",
-    "claim:gating.r0f_blocked_by",
-    "claim:gating.r0f_prime_blocked_by",
-    "claim:quality.nanite_max_pixels_per_edge",
-    "thresholds:absolute_mode.absolute_distance_ms_rule",
-    "thresholds:absolute_mode.absolute_effective_floor_rule",
-    "thresholds:absolute_mode.absolute_floor_ms_rule",
-    "thresholds:absolute_mode.absolute_gate_red_mutations",
-    "thresholds:absolute_mode.absolute_lattice_evidence_required",
-    "thresholds:census.readback_retention",
-    "thresholds:decidability.reference_floor_source",
-    "thresholds:k1.measured_at",
-    "thresholds:k1.modal_bucket_pixels_above_which_k1_holds",
-    "thresholds:k1.modal_bucket_role",
-    "thresholds:k1.report_only",
-    "thresholds:k1_instrument.d_est_bound_direction",
-    "thresholds:k1_instrument.d_est_may_fire_k1",
-    "thresholds:k1_instrument.d_est_may_refute_k1",
-    "thresholds:k1_instrument.histogram_shift_excludes_rungs",
-    "thresholds:k1_instrument.histogram_shift_rule",
-    "thresholds:ordering.claim_blocks_rung_nanite_relative",
-    "thresholds:ordering.harness_withholds_floor_while_claim_pending",
-    "thresholds:pre_registered.r0c_oracle_coverage_tolerance",
-    "thresholds:pre_registered.r0e_ci_max_fraction",
-    "thresholds:pre_registered.r0e_min_pairs",
-];
+/// It held 29. Two clusters carried most of it: the whole of `[pre_registered]` bar one field — a
+/// table created specifically so two decision-bearing thresholds had a file to be registered in,
+/// and no rung ever read any of them — and six of the seven `[gating]` rows, which are the
+/// mechanism by which an unanswered owner VALUES call is supposed to block a rung. Both clusters
+/// were frozen values that decided nothing.
+///
+/// They cleared two ways, and the distinction matters for reading a zero here. Twenty left the
+/// documents with the decidability apparatus, because no rung of R0 could ever have read them. The
+/// other nine were repaired the other way round: the surviving rungs now cite the fields they
+/// actually consume — R0c names its pre-registered oracle tolerance and the non-degeneracy floors,
+/// R0d names the histogram-shift rule and the report-only statistics, §0.2 names the freeze
+/// tripwire's own fields, §9 names the three `d_est_*` direction fields.
+const BASELINE_ORPHAN_FIELDS: [&str; 0] = [];
 
 /// Lower bound on the fields the parser must recover across both frozen files. A pattern that
 /// stopped matching — a reformatted table header, a key style the regex-free scanner does not
 /// recognise — would otherwise empty every violation set and report a triumphant green.
-const MIN_FIELDS_PARSED: usize = 70;
+///
+/// Stood at 70 against 77 parsed fields until Rev 8, which removed the decidability apparatus from
+/// both files and took the count to 44. The floor fired on that edit, which is correct behaviour
+/// and worth recording: this guard cannot tell "the scanner broke" from "the documents legitimately
+/// shrank", so it demands a deliberate update either way. Lowering it is part of the same act as
+/// the removal, never a reaction to a red run.
+const MIN_FIELDS_PARSED: usize = 40;
 
 /// Lower bound on the plan's length in bytes, for the same reason: an empty or moved plan makes
 /// every field an orphan and every citation absent, which is a very different failure from a clean
@@ -309,6 +307,38 @@ fn cited_dotted_fields(plan: &str) -> BTreeSet<String> {
     out
 }
 
+/// Whether the plan cites a field — the dotted `table.key` form always counts; the bare key counts
+/// only when it carries an underscore.
+///
+/// ⚠️ The underscore condition is not fussiness, it closes a measured false-negative class. A bare
+/// `plan.contains(key)` marks a field cited whenever its key happens to be an ordinary English
+/// word, and these files carried several: `[k1].rule`, `[decidability].sessions`, `[claim].mode`,
+/// `[quality].arbiter`. The word "rule" appears dozens of times in the plan's prose, so `[k1].rule`
+/// — a field whose value had already been reduced to the string
+/// `"SUPERSEDED_BY_k1_decision_rule_below"` — was scored as consumed by a document that never named
+/// it. The gate reported a clean bill for the one field most obviously dead.
+///
+/// The residual limitation, stated rather than left to be discovered: an underscored key that is
+/// mentioned in prose *about* the field without being a citation of it still counts as cited. This
+/// class errs toward under-reporting, so a zero here is "no field is provably unread", never "every
+/// field is provably read".
+fn is_cited(plan: &str, key: &str, dotted: &str) -> bool {
+    // BOTH spellings of the dotted form. The plan writes `[census].decision_resolution` — with the
+    // brackets — so a check for the bare `census.decision_resolution` matches nothing, and the
+    // bracketed form is the only one an underscore-free key can ever satisfy. The sensitivity
+    // control below is what surfaced this: the repaired rule passed its negative half and failed
+    // its positive one.
+    if plan.contains(dotted) {
+        return true;
+    }
+    if let Some((table, field)) = dotted.split_once('.')
+        && plan.contains(&format!("[{table}].{field}"))
+    {
+        return true;
+    }
+    key.contains('_') && plan.contains(key)
+}
+
 /// The three violation sets, plus the counts the non-vacuity assertions read.
 #[derive(Debug, Default)]
 struct Report {
@@ -362,7 +392,7 @@ fn sweep(thresholds: &str, claim: &str, plan: &str) -> Report {
             if PROVENANCE_KEYS.contains(&field.key.as_str()) {
                 continue;
             }
-            if !plan.contains(&field.key) && !plan.contains(&dotted) {
+            if !is_cited(plan, &field.key, &dotted) {
                 report.orphan_fields.insert(tagged);
             }
         }
@@ -502,57 +532,89 @@ fn the_sweep_reports_an_injected_orphan_field() {
 }
 
 /// Sensitivity control for class 2, and the one that matters most: it reproduces the exact defect
-/// the Rev 7 review found in Rev 7's own edit.
+/// the Rev 7 review found in Rev 7's own edit — a rule definition orphaned *inside* the frozen
+/// file, where cross-file discipline cannot see it.
 ///
-/// `absolute_gate_rule` consumes `absolute_floor_ms`. Rename the symbol in the consuming rule only
-/// — the shape of every "renamed in one place" edit — and `absolute_floor_ms_rule`'s definition
-/// must become unread. If it does not, class 2 cannot see an orphaned definition inside a frozen
-/// file, which is the failure mode Rev 7 shipped.
+/// Driven from a synthetic pair rather than from live content, deliberately. The first version of
+/// this control stood on `[absolute_mode]`'s real `absolute_floor_ms_rule` / `absolute_gate_rule`
+/// pair, and Rev 8 removed that whole table — the control's own invariant assertion caught it and
+/// failed, which is the behaviour it was written to have. But a control that stops compiling
+/// against the document it guards every time the document is restructured is a control that will
+/// eventually be deleted rather than re-derived. The scanner's behaviour is a property of the
+/// scanner; testing it needs no live table.
 #[test]
 fn the_sweep_reports_a_rule_whose_only_consumer_stops_naming_it() {
-    let thresholds = read("docs/VG-CAMPAIGN-THRESHOLDS.toml");
+    let claim = read("docs/VG-CAMPAIGN-CLAIM.toml");
+    let plan = read("docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md");
+
+    // A definition and its only consumer, in the shape `[absolute_mode]` actually used: a
+    // `<sym>_rule` key defining `<sym>`, and a second rule whose value names `<sym>`.
+    let bound = "[synthetic]\n\
+                 control_floor_rule = \"spread * median\"\n\
+                 control_gate_rule = \"claim < median AND control_floor < distance\"\n";
+    let orphaned = "[synthetic]\n\
+                    control_floor_rule = \"spread * median\"\n\
+                    control_gate_rule = \"claim < median AND renamed_floor < distance\"\n";
+
+    let before = sweep(bound, &claim, &plan);
+    assert!(
+        !before
+            .unread_rules
+            .contains("thresholds:synthetic.control_floor_rule"),
+        "invariant: while `control_gate_rule` names `control_floor`, the definition is READ — that \
+         is what makes the rename below a change. unread={:?}",
+        before.unread_rules
+    );
+
+    let after = sweep(orphaned, &claim, &plan);
+    assert!(
+        after
+            .unread_rules
+            .contains("thresholds:synthetic.control_floor_rule"),
+        "RED: a rule definition left with no consumer inside the same file was NOT reported. Class \
+         2 is blind, and this gate would not have caught `absolute_effective_floor_rule` — the \
+         defect it was written for. unread={:?}",
+        after.unread_rules
+    );
+}
+
+/// Sensitivity control for the citation rule itself, added at Rev 8 because the first version of
+/// this gate had a measured false negative there.
+///
+/// A bare `plan.contains(key)` scores a field as cited whenever its key is an ordinary English
+/// word. `[k1].rule` was the specimen: its value had already been reduced to the string
+/// `"SUPERSEDED_BY_k1_decision_rule_below"`, and the gate reported it consumed because the word
+/// "rule" appears throughout the plan's prose. This asserts the repaired rule both ways — an
+/// underscore-free key is NOT satisfied by a prose word, and IS satisfied by a real dotted
+/// citation.
+#[test]
+fn a_bare_english_word_key_is_not_counted_as_a_citation() {
     let claim = read("docs/VG-CAMPAIGN-CLAIM.toml");
     let plan = read("docs/MESHLET-VIRTUAL-GEOMETRY-PLAN.md");
 
     assert!(
-        thresholds.contains("absolute_floor_ms_rule")
-            && thresholds.contains("absolute_gate_rule"),
-        "invariant: [absolute_mode] must carry both `absolute_floor_ms_rule` (the definition) and \
-         `absolute_gate_rule` (its only consumer) for this control to be meaningful — if the table \
-         was restructured, re-derive this test rather than deleting it"
+        plan.contains("rule"),
+        "invariant: the plan's prose must contain the bare word `rule` for this control to be \
+         meaningful"
     );
 
-    let clean = sweep(&thresholds, &claim, &plan);
+    let word_key = "[synthetic]\nrule = \"superseded\"\n";
     assert!(
-        !clean
-            .unread_rules
-            .contains("thresholds:absolute_mode.absolute_floor_ms_rule"),
-        "invariant: `absolute_floor_ms_rule` is READ today (by `absolute_gate_rule`), which is \
-         what makes the mutation below a change"
+        sweep(word_key, &claim, &plan)
+            .orphan_fields
+            .contains("thresholds:synthetic.rule"),
+        "RED: a key whose name is an ordinary English word was scored as cited by prose. The \
+         orphan class is blind to exactly the field most likely to be dead."
     );
 
-    // The mutation: the consumer stops naming the symbol. Only `absolute_gate_rule`'s own line is
-    // touched, so the definition survives untouched and simply loses its reader.
-    let mutated: String = thresholds
-        .lines()
-        .map(|line| {
-            if line.trim_start().starts_with("absolute_gate_rule") {
-                line.replace("absolute_floor_ms", "absolute_renamed_floor_ms")
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let dirty = sweep(&mutated, &claim, &plan);
-
+    // And the dotted form still counts, so the repair did not simply make underscore-free keys
+    // uncitable — which would trade a false negative for a false positive and be no better.
+    let cited_plan = format!("{plan}\n\nThe gate reads `[synthetic].rule` from the frozen file.\n");
     assert!(
-        dirty
-            .unread_rules
-            .contains("thresholds:absolute_mode.absolute_floor_ms_rule"),
-        "RED: a rule definition left with no consumer inside the frozen file was NOT reported. \
-         Class 2 is blind, and this gate would not have caught \
-         `absolute_effective_floor_rule` — the defect it was written for. unread={:?}",
-        dirty.unread_rules
+        !sweep(word_key, &claim, &cited_plan)
+            .orphan_fields
+            .contains("thresholds:synthetic.rule"),
+        "RED: a field cited in the dotted `[table].field` form was still reported as an orphan — \
+         the citation rule has become unsatisfiable for underscore-free keys"
     );
 }
